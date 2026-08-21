@@ -15,8 +15,8 @@ int main(void) {
     memset(base, 'x', 64);
 
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-        n->spawn(() => [base] {
+        CCNursery n = cc_nursery_create() !> @destroy;
+        n.spawn(() => [base] {
             free(base); /* ERROR */
         });
     }

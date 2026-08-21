@@ -44,9 +44,9 @@ int main(void) {
     cc_atomic_int saw_conn = 0;
 
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        CCNursery n = cc_nursery_create() !> @destroy;
 
-        n->spawn(() => [reader, conn, &saw_conn, &hit] {
+        n.spawn(() => [reader, conn, &saw_conn, &hit] {
             cc_atomic_fetch_add(&saw_conn, conn);
             if (reader != NULL) cc_atomic_fetch_add(&hit, 1);
         });

@@ -84,9 +84,10 @@ mid-slab hole refuses a new capture (`CC_ERR_INVALID_ARG`) until last-live
 root rewind or `cc_arena_reset`. Release of an older-epoch overflow object
 does not block a new checkpoint; restore of that handle refuses if
 `ovf_keep` no longer matches. C twins (`cc_arena_checkpoint` /
-`cc_arena_restore`) stay for `@scratch`. Normative growth, overflow, release, and checkpoint rules
-are in `spec/concurrent-c-spec-complete.md` §5 and
-`spec/draft_alloc_strategy.md`.
+`cc_arena_restore`) stay for `@scratch`. `a.create_nursery()` attaches a
+nursery to `a` (`spec/concurrent-c-spec-complete.md` §8.1.1). Normative
+growth, overflow, release, and checkpoint rules are in
+`spec/concurrent-c-spec-complete.md` §5 and `spec/draft_alloc_strategy.md`.
 
 ## Generic factories and UFCS
 
@@ -1452,7 +1453,7 @@ TCP listen, accept, and connect return Result (`T!>(CCNetError)`, lowered as
 CCResult_CCSocket_CCNetError cc_tcp_connect(const char *addr, size_t addr_len);
 CCResult_CCListener_CCNetError cc_tcp_listen(CCSlice addr);
 CCResult_CCSocket_CCNetError cc_listener_accept(CCListener *listener);
-void cc_listener_serve(CCListener *listener, CCNursery *nursery, CCClosure1 on_conn);
+void cc_listener_serve(CCListener *listener, CCNursery nursery, CCClosure1 on_conn);
 void cc_listener_close(CCListener *listener);
 
 CCIoError cc_net_to_io_error(CCNetError err);
@@ -1476,7 +1477,7 @@ as `cc_file_open`'s path. Connect takes a length-delimited
 `host:port` / IPv4 `address:port` / bracketed IPv6. `cc_listener_serve` accepts
 until the nursery is cancelled (or accept fails) and borrow-invokes `on_conn`
 with `CCSocket *` for the duration of that call — copy or
-`n->spawn(async_fn(...))` before returning; serve owns the closure and drops
+`n.spawn(async_fn(...))` before returning; serve owns the closure and drops
 it when the loop ends. `cc_socket_set_nodelay` is TCP_NODELAY (0 on success,
 -1 on failure). Idiomatic use is unwrap sugar on the greppable `cc_*` names:
 

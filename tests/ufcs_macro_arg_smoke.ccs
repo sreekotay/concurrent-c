@@ -1,5 +1,5 @@
 // Tests UFCS lowering inside macro-argument contexts.
-// Historical bug: AST pass didn't surface `root->wait() == 0` inside
+// Historical bug: AST pass didn't surface `root.wait() == 0` inside
 // `assert(...)` because the macro expansion hid the call from the stub AST.
 // The text fallback must pick it up instead.
 #include <ccc/std/prelude.cch>

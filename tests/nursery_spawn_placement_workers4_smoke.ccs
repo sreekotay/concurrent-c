@@ -81,6 +81,7 @@ static int count_unique_workers(void) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     cc_sched_set_num_workers(NUM_WORKERS);
     int collapsed = 0;
 
@@ -93,11 +94,10 @@ int main(void) {
         cc_atomic_store(&g_collapsed, 0);
         clock_gettime(CLOCK_MONOTONIC, &g_iter_start);
 
-        CCNursery* n = @create(NULL) @detach;
-        if (!n) abort();
+        CCNursery n = @create() !> @detach;
         for (int i = 0; i < NUM_SIBLINGS; i++) {
             int idx = i;
-            (void)cc_nursery_spawn_closure0(n, () => [idx] {
+            n.spawn(() => [idx] {
                 int announced = 0;
                 while (!cc_atomic_load(&g_done)) {
                     /* Continuously republish the worker we are currently

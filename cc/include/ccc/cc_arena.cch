@@ -1065,9 +1065,9 @@ static inline CCSlice cc_slice_concat2(CCSlice left, CCSlice right, CCArena *are
  *      CCFile f;              f.close()       -> cc_file_close(&f)
  *      CCArena* a;            a->remaining()  -> cc_arena_remaining(a)
  *      CCArenaCheckpoint cp;  cp.restore()    -> cc_arena_checkpoint_restore(&cp)
- *      CCArenaPool* p;        p->alloc()      -> cc_arena_pool_alloc(p)
+ *      CCArenaPool* p;        p.alloc()      -> cc_arena_pool_alloc(p)
  *      CCString s;            s.len()         -> cc_string_len(&s)
- *      CCNursery* n;          n->wait()       -> cc_nursery_wait(n)
+ *      CCNursery n;          n.wait()       -> cc_nursery_wait(n)
  *
  *   Shape B — bare CamelCase user types (no implicit prefix):
  *      RedisConn* conn;       conn->retain()  -> redis_conn_retain(conn)
@@ -2473,7 +2473,12 @@ static inline void* cc_arena_pool_iter_next(CCArenaPoolIter* it) {
 
 /* Lifetime-parent modes (spec/draft_lifetime_parents.md, spec/draft_facets.md).
  * `Alloc` / `Parent` restrict what a signature can do with an arena;
- * `Region` is both, for container faces (`as: (Region)field;`). */
+ * `Region` is both, for container faces (`as: (Region)field;`).
+ * Header lowering strips the @typeview rows; the erased typedefs stay so
+ * `@typeview(Alloc) CCArena*` (→ `CCArena_Restrict_Alloc*`) is a real type. */
+typedef CCArena CCArena_Restrict_Alloc;
+typedef CCArena CCArena_Restrict_Parent;
+typedef CCArena CCArena_Restrict_Region;
 @typeview Alloc on CCArena {
     r: alloc, remaining;
 }

@@ -5,19 +5,19 @@
 static int g_value = -1;
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int[~1 >] tx; int[~1 <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
 
     {
-        CCNursery* __cc_nursery35 = @create(NULL) @destroy;
-        if (!__cc_nursery35) abort();
+        CCNursery __cc_nursery35 = @create() !> @destroy;
 
-        __cc_nursery35->spawn(() => [rx] {
+        __cc_nursery35.spawn(() => [rx] {
             int v = -1;
             assert(cc_io_avail(chan_recv(rx, &v)));
             g_value = v;
         });
-        __cc_nursery35->spawn(() => [tx] {
+        __cc_nursery35.spawn(() => [tx] {
             (void)chan_send(tx, 42);
         });
     

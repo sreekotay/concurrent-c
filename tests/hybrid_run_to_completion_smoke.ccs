@@ -11,6 +11,7 @@ static void* add_value(void* arg) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     cc_sched_set_num_workers(4);
     cc_atomic_store(&g_sum, 0);
 
@@ -23,15 +24,14 @@ int main(void) {
     if (cc_atomic_load(&g_sum) != 18) return 11;
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) return 20;
-        if (n->spawnhybrid(() => {
+        CCNursery n = @create() !> @destroy;
+        if (n.spawnhybrid(() => {
                 cc_atomic_fetch_add(&g_sum, 1);
             }) != 0) return 21;
-        if (n->spawnhybrid(() => {
+        if (n.spawnhybrid(() => {
                 cc_atomic_fetch_add(&g_sum, 2);
             }) != 0) return 22;
-        if (n->spawnhybrid(() => {
+        if (n.spawnhybrid(() => {
                 cc_atomic_fetch_add(&g_sum, 3);
             }) != 0) return 23;
     }

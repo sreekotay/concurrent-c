@@ -21,27 +21,17 @@ int main(void) {
     cc_atomic_int total = 0;
 
     {
-        CCNursery* consumer = @create(NULL, () => [&total, rx] {
+        @errhandler(CCError e) cc_error_exit(e);
+        CCNursery consumer = cc_nursery_create() !> @destroy;
+        consumer.spawn(() => [&total, rx] {
             int value = 0;
             while (cc_io_avail(rx.recv(&value))) {
                 cc_atomic_fetch_add(&total, value);
             }
-        }) @destroy;
-        if (!consumer) {
-            printf("channel_handle_closure_ufcs_smoke: FAIL consumer\n");
-            return 1;
-        }
+        });
 
-        CCNursery* producer = @create(consumer) @destroy {
-            tx.close();
-        };
-        if (!producer) {
-            tx.close();
-            printf("channel_handle_closure_ufcs_smoke: FAIL producer\n");
-            return 1;
-        }
-
-        producer->spawn(() => [tx] {
+        CCNursery producer = consumer.create_child() !> @destroy;
+        producer.spawn(() => [tx] {
             for (int i = 1; i <= 3; i++) {
                 if (!cc_io_avail(tx.send(i))) {
                     tx.close();
@@ -49,6 +39,8 @@ int main(void) {
                 }
             }
         });
+        producer.wait();
+        tx.close();
     }
 
     if (cc_atomic_load(&total) != 6) {

@@ -57,6 +57,7 @@ static void client_loop(CCChanTx req_tx, CCChanRx reply_rx) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     cc_atomic_store(&g_errors, 0);
     Req*[~32 N:1 >] req_tx;
     Req*[~32 N:1 <] req_rx;
@@ -71,12 +72,7 @@ int main(void) {
         return 2;
     }
 
-    CCNursery* n = cc_nursery_create(NULL);
-    if (!n) {
-        cc_channel_free(rch);
-        cc_channel_free(reply_ch);
-        return 3;
-    }
+    CCNursery n = cc_nursery_create() !>;
 
     CCChanRx rx_raw = req_rx;
     CCChanTx reply_tx_raw = reply_tx;

@@ -17,6 +17,7 @@ static int env_int_or_default(const char* name, int fallback, int min_value) {
 }
 
 static size_t write_all(CCSocket* sock, const char* data, size_t len) {
+    @errhandler(CCError e) cc_error_exit(e);
     size_t off = 0;
     while (off < len) {
         size_t n = cc_socket_write(sock, data + off, len - off) !>(e) {
@@ -58,6 +59,7 @@ static void handle_client(CCSocket client) {
 }
 
 int main(int argc, char** argv) {
+    @errhandler(CCError e) cc_error_exit(e);
     int port = DEFAULT_PORT;
     if (argc > 1) {
         port = atoi(argv[1]);
@@ -82,11 +84,10 @@ int main(int argc, char** argv) {
 
     CCListener* ln_ptr = &ln;
     {
-        CCNursery* server = @create(NULL) @destroy;
-        if (!server) abort();
-        CCNursery* srv = server;
+        CCNursery server = @create() !> @destroy;
+        CCNursery srv = server;
 
-        server->spawn(() => [ln_ptr, srv] {
+        server.spawn(() => [ln_ptr, srv] {
             while (1) {
                 CCSocket client = cc_listener_accept(ln_ptr) !>(e) {
                     (void)e;
@@ -98,7 +99,7 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 *pclient = client;
-                srv->spawn(() => [pclient] {
+                srv.spawn(() => [pclient] {
                     CCSocket c = *pclient;
                     free(pclient);
                     handle_client(c);

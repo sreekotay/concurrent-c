@@ -7,6 +7,7 @@ static int !>(CCIoError) compute_result(int value) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int !>(CCIoError)[~4 >] tx;
     int !>(CCIoError)[~4 ordered <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
@@ -14,15 +15,13 @@ int main(void) {
     int ok = 1;
 
     {
-        CCNursery* __cc_nursery77 = @create(NULL) @destroy;
-        if (!__cc_nursery77) abort();
+        CCNursery __cc_nursery77 = @create() !> @destroy;
 
         {
-            CCNursery* __cc_nursery78 = @create(NULL) @destroy;
-            if (!__cc_nursery78) abort();
-            (void)__cc_nursery78->close_on(tx);
+            CCNursery __cc_nursery78 = @create() !> @destroy;
+            (void)__cc_nursery78.close_on(tx);
 
-            __cc_nursery78->spawn(() => [tx] {
+            __cc_nursery78.spawn(() => [tx] {
                 cc_channel_send_task(tx, () => compute_result(2));
                 cc_channel_send_task(tx, () => compute_result(-1));
             });

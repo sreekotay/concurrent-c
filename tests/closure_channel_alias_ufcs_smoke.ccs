@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int[~8 >] tx_h;
     int[~8 <] rx_h;
     CCChan* ch = cc_channel_pair(&tx_h, &rx_h);
@@ -13,9 +14,8 @@ int main(void) {
     assert(ch != NULL);
 
     {
-        CCNursery* __cc_nursery38 = @create(NULL) @destroy;
-        if (!__cc_nursery38) abort();
-        (void)__cc_nursery38->close_on(tx_h);
+        CCNursery __cc_nursery38 = @create() !> @destroy;
+        (void)__cc_nursery38.close_on(tx_h);
 
         /* UFCS on typedef aliases inside a spawn; result comes back on a
          * second channel (no T* alias smuggle into the nursery). */
@@ -25,10 +25,10 @@ int main(void) {
         assert(ans != NULL);
         @defer ans.free();
 
-        __cc_nursery38->spawn(() => [tx] {
+        __cc_nursery38.spawn(() => [tx] {
             tx.send(1);
         });
-        __cc_nursery38->spawn(() => [rx, ans_tx] {
+        __cc_nursery38.spawn(() => [rx, ans_tx] {
             int v = 0;
             rx.recv(&v);
             ans_tx.send(v);

@@ -135,6 +135,7 @@ static void u64_receiver(U64Rx rx) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     cc_sched_set_num_workers(4);
 
     {
@@ -143,11 +144,10 @@ int main(void) {
         if (!ch) return 2;
         @defer ch.free();
         {
-            CCNursery* n = @create(NULL) @destroy;
-            if (!n) return 3;
+            CCNursery n = @create() !> @destroy;
             BigTx txr = tx; BigRx rxr = rx;
-            n->spawn(() => [txr] { big_sender_try_send_into(txr); });
-            n->spawn(() => [rxr] { big_receiver(rxr); });
+            n.spawn(() => [txr] { big_sender_try_send_into(txr); });
+            n.spawn(() => [rxr] { big_receiver(rxr); });
         }
     }
     if (cc_atomic_load(&g_errors) != 0) {
@@ -164,11 +164,10 @@ int main(void) {
         if (!ch) return 4;
         @defer ch.free();
         {
-            CCNursery* n = @create(NULL) @destroy;
-            if (!n) return 5;
+            CCNursery n = @create() !> @destroy;
             U64Tx txr = tx; U64Rx rxr = rx;
-            n->spawn(() => [txr] { u64_sender_blocking(txr); });
-            n->spawn(() => [rxr] { u64_receiver(rxr); });
+            n.spawn(() => [txr] { u64_sender_blocking(txr); });
+            n.spawn(() => [rxr] { u64_receiver(rxr); });
         }
     }
     if (cc_atomic_load(&g_errors) != 0) {

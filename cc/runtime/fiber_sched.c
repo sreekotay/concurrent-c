@@ -211,7 +211,7 @@ void cc_fiber_dump_timing(void) {
 
 /* Forward declarations - defined in nursery.c */
 void cc_nursery_dump_timing(void);
-typedef struct CCNursery CCNursery;
+typedef struct CCNurseryHost CCNurseryHost;
 
 /* Forward declarations - defined in sched_v2.c */
 typedef struct fiber_v2 fiber_v2;
@@ -243,8 +243,8 @@ void   sched_v2_fiber_dec_external_wait(fiber_v2* f);
 int    sched_v2_fiber_external_wait_active(fiber_v2* f);
 void   sched_v2_debug_dump_fiber(fiber_v2* f, const char* prefix);
 void   sched_v2_debug_dump_state(const char* prefix);
-bool cc_nursery_is_cancelled(const CCNursery* n);
-CCNursery* cc__runtime_current_nursery(void);
+bool cc_nursery_is_cancelled(const CCNurseryHost* n);
+CCNurseryHost* cc__runtime_current_nursery(void);
 
 void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, const char* file, int line);
 
@@ -938,7 +938,7 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
     return -1;
 }
 
-void cc_fiber_set_spawn_nursery_override(CCNursery* nursery) {
+void cc_fiber_set_spawn_nursery_override(CCNurseryHost* nursery) {
     /* V1 retired: the override was consulted by the V1 spawn router.
      * V2 routes fibers through nurseries directly. Kept as a symbol stub. */
     (void)nursery;
@@ -1053,7 +1053,7 @@ int cc__fiber_suspend_until_ready_or_cancel(_Atomic int* flag, int expected,
                                             const char* reason, const char* file, int line) {
     (void)file; (void)line;
     cc_external_wait_enter();
-    CCNursery* cur_nursery = cc__runtime_current_nursery();
+    CCNurseryHost* cur_nursery = cc__runtime_current_nursery();
     if (sched_v2_in_context()) {
         sched_v2_set_park_reason(reason);
         while (atomic_load_explicit(flag, memory_order_acquire) == expected) {
@@ -1087,7 +1087,7 @@ int cc__fiber_suspend_until_ready_or_cancel_until(_Atomic int* flag, int expecte
     if (!abs_deadline) return cc__fiber_suspend_until_ready_or_cancel(flag, expected, reason, file, line);
 
     cc_external_wait_enter();
-    CCNursery* cur_nursery = cc__runtime_current_nursery();
+    CCNurseryHost* cur_nursery = cc__runtime_current_nursery();
     if (sched_v2_in_context()) {
         fiber_v2* self = sched_v2_current_fiber();
         sched_v2_set_park_reason(reason);

@@ -9,8 +9,8 @@
  *
  *   nursery n:
  *     [accept loop on main's fiber]
- *     per accept: n->spawn(() => handle_client(sock))
- *     if --test:  n->spawn(() => run_test_client())
+ *     per accept: n.spawn(() => handle_client(sock))
+ *     if --test:  n.spawn(() => run_test_client())
  *
  * Accept loop exit conditions:
  *   1. cc_listener_accept returns an error (listener closed, fd gone) —
@@ -122,11 +122,11 @@ int main(int argc, char** argv) {
     println(@string(`listening on ${PORT} (${mode} mode)`, @scratch)) !>;
 
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        CCNursery n = cc_nursery_create() !> @destroy;
 
         /* Test-mode client: sibling task of the handlers. */
         if (test_mode) {
-            n->spawn(() => run_test_client());
+            n.spawn(() => run_test_client());
         }
 
         /* Accept loop on main's fiber. Each accepted socket is handed to a
@@ -138,7 +138,7 @@ int main(int argc, char** argv) {
                 println(@string(`accept stopped: ${e}`, @scratch)) !>;
                 break;
             };
-            n->spawn(() => [sock] { handle_client(sock); });
+            n.spawn(() => [sock] { handle_client(sock); });
         } while (!test_mode);  /* Test mode bails after one connection so CI is deterministic */
     }
     /* nursery @destroy: accept loop exited, every handler (and the test

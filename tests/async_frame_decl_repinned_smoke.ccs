@@ -35,6 +35,7 @@ static bool !>(CCIoError) maybe_io(int x) {
  *     real decl line
  */
 @async int worker(int limit) {
+    @errhandler(CCError e) cc_error_exit(e);
     int i = 0;
     while (i < limit) {
         bool !>(CCIoError) res = maybe_io(i);
@@ -52,9 +53,10 @@ static bool !>(CCIoError) maybe_io(int x) {
 }
 
 int main(void) {
-    CCNursery* n = cc_nursery_create(NULL);
-    (void)n->spawn_async(worker(3));
-    cc_nursery_destroy(n);
+    @errhandler(CCError e) cc_error_exit(e);
+    CCNursery n = cc_nursery_create() !>;
+    (void)n.spawn_async(worker(3));
+    n.destroy();
     printf("async_frame_decl_repinned: OK\n");
     return 0;
 }

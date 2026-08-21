@@ -30,6 +30,7 @@ static void* write_slot(void* envp, intptr_t slot_i, intptr_t arena_i) {
 }
 
 static void* thread_wait(void* arg) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCExclusiveGuard !>(CCError) r;
     (void)arg;
     r = cc_exclusive_acquire_when(g_excl, 1u, pred_ready, NULL);
@@ -41,6 +42,7 @@ static void* thread_wait(void* arg) {
 }
 
 static void* thread_timeout(void* arg) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCDeadline d = cc_deadline_after_ms(40);
     CCDeadline* prev = cc_deadline_push(&d);
     CCExclusiveGuard !>(CCError) r;
@@ -92,8 +94,8 @@ int main(void) {
     g_started = 0;
     g_got = 0;
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-        n->spawn(() => [excl] {
+        CCNursery n = cc_nursery_create() !> @destroy;
+        n.spawn(() => [excl] {
             @errhandler(CCError e) {
                 fprintf(stderr, "FAIL waiter unwrap kind=%d\n", (int)e.kind);
                 return NULL;
@@ -121,8 +123,8 @@ int main(void) {
     g_slot = -1;
     g_runs = 0;
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-        n->spawn(() => [excl] {
+        CCNursery n = cc_nursery_create() !> @destroy;
+        n.spawn(() => [excl] {
             @errhandler(CCError e) {
                 fprintf(stderr, "FAIL into unwrap kind=%d\n", (int)e.kind);
                 return NULL;
@@ -146,8 +148,8 @@ int main(void) {
     g_started = 0;
     g_got = 0;
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-        n->spawn(() => [excl] {
+        CCNursery n = cc_nursery_create() !> @destroy;
+        n.spawn(() => [excl] {
             CCExclusiveGuard !>(CCError) wr;
             g_started = 1;
             wr = excl->acquire_when(1u, pred_never, NULL);
@@ -160,15 +162,15 @@ int main(void) {
         });
         while (!g_started) cc_yield();
         cc_sleep_ms(5);
-        n->cancel();
+        n.cancel();
     }
     if (!g_got) return 8;
 
     /* Fiber deadline: pred never true → TIMEOUT, not holding. */
     g_got = 0;
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-        n->spawn(() => [excl] {
+        CCNursery n = cc_nursery_create() !> @destroy;
+        n.spawn(() => [excl] {
             CCExclusiveGuard !>(CCError) wr;
             @with_deadline(millis(40)) {
                 wr = excl->acquire_when(1u, pred_never, NULL);

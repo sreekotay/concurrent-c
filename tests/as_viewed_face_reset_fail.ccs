@@ -1,0 +1,18 @@
+/* reset is not in Region — viewed face must refuse it. */
+#include <ccc/std/prelude.cch>
+
+typedef struct {
+    CCArena arena;
+} Box;
+
+@typeview on Box {
+    as: (Region)arena;
+};
+
+int main(void) {
+    Box b;
+    CCArena tmp = cc_arena_heap(256) @destroy;
+    b.arena = tmp.detach();
+    b.reset();
+    return 0;
+}

@@ -3,13 +3,13 @@
 #include <stdio.h>
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int x = 0;
     int* p = &x;
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) abort();
-        n->spawn(@unsafe () => [p] {
+        CCNursery n = @create() !> @destroy;
+        n.spawn(@unsafe () => [p] {
             *p = 1;
         });
     }

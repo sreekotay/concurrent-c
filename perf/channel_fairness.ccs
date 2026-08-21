@@ -58,6 +58,7 @@ void print_distribution(const char* label) {
 
 /* Test 1: Large buffer - demonstrates unfairness */
 void run_test_large_buffer(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     for (int i = 0; i < NUM_WORKERS; i++) {
         cc_atomic_store(&g_worker_counts[i], 0);
     }
@@ -67,11 +68,10 @@ void run_test_large_buffer(void) {
     CCChan* ch = cc_channel_pair(&tx, &rx);
     
     {
-        CCNursery* __cc_nursery157 = @create(NULL) @destroy;
-        if (!__cc_nursery157) abort();
+        CCNursery __cc_nursery157 = @create() !> @destroy;
 
         /* Producer sends all items then closes */
-        __cc_nursery157->spawn(() => {
+        __cc_nursery157.spawn(() => {
             for (int i = 0; i < NUM_ITEMS; i++) {
                 Item item = {i};
                 chan_send(tx, item);
@@ -82,7 +82,7 @@ void run_test_large_buffer(void) {
         /* Workers receive until channel closed */
         for (int w = 0; w < NUM_WORKERS; w++) {
             int wid = w;
-            __cc_nursery157->spawn(() => {
+            __cc_nursery157.spawn(() => {
                 Item item;
                 while (cc_io_avail(chan_recv(rx, &item))) {
                     cc_atomic_fetch_add(&g_worker_counts[wid], 1);
@@ -101,6 +101,7 @@ void run_test_large_buffer(void) {
 
 /* Test 2: Small buffer - forces better distribution */
 void run_test_small_buffer(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     for (int i = 0; i < NUM_WORKERS; i++) {
         cc_atomic_store(&g_worker_counts[i], 0);
     }
@@ -110,10 +111,9 @@ void run_test_small_buffer(void) {
     CCChan* ch = cc_channel_pair(&tx, &rx);
     
     {
-        CCNursery* __cc_nursery158 = @create(NULL) @destroy;
-        if (!__cc_nursery158) abort();
+        CCNursery __cc_nursery158 = @create() !> @destroy;
 
-        __cc_nursery158->spawn(() => {
+        __cc_nursery158.spawn(() => {
             for (int i = 0; i < NUM_ITEMS; i++) {
                 Item item = {i};
                 chan_send(tx, item);
@@ -123,7 +123,7 @@ void run_test_small_buffer(void) {
         
         for (int w = 0; w < NUM_WORKERS; w++) {
             int wid = w;
-            __cc_nursery158->spawn(() => {
+            __cc_nursery158.spawn(() => {
                 Item item;
                 while (cc_io_avail(chan_recv(rx, &item))) {
                     cc_atomic_fetch_add(&g_worker_counts[wid], 1);

@@ -102,6 +102,7 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
 }
 
 int compress_file(const char* in_path, const char* out_path, int level) {
+    @errhandler(CCError e) cc_error_exit(e);
     (void)level;
     
     CCFile in_file;
@@ -135,7 +136,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;
 
-    CCNursery* consumer = @create(NULL, () => [out_ptr, res_rx] {
+    CCNursery consumer = @create(NULL, () => [out_ptr, res_rx] {
         CompressedResult* r;
         while (cc_chan_recv(res_rx.raw, &r, sizeof(r)) == 0) {
             if (r) {
@@ -149,8 +150,8 @@ int compress_file(const char* in_path, const char* out_path, int level) {
         return 1;
     }
 
-    CCNursery* producer = @create(consumer, () => [in_ptr, res_tx] {
-        CCNursery* workers = @create(NULL) @detach;
+    CCNursery producer = @create(consumer, () => [in_ptr, res_tx] {
+        CCNursery workers = @create() !> @detach;
         if (!workers) {
             return 0;
         }
@@ -179,7 +180,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             bool is_last = blk->is_last;
 
             // Spawn compression fiber; it sends result to res_tx directly.
-            workers->spawn(() => [blk, res_tx] {
+            workers.spawn(() => [blk, res_tx] {
                 CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
                 cc_arena_free(&blk->arena);
                 CompressedResult* r = cc_is_err(res) ? NULL
@@ -189,7 +190,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
 
             if (is_last) break;
         }
-        (void)workers->wait();
+        (void)workers.wait();
         workers->free();
     }) @destroy {
         chan_close(res_tx);

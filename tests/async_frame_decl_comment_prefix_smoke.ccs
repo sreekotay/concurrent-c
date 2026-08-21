@@ -44,9 +44,10 @@
 }
 
 int main(void) {
-    CCNursery* n = cc_nursery_create(NULL);
-    (void)n->spawn_async(worker(3));
-    cc_nursery_destroy(n);
+    @errhandler(CCError e) cc_error_exit(e);
+    CCNursery n = cc_nursery_create() !>;
+    (void)n.spawn_async(worker(3));
+    n.destroy();
     printf("async_frame_decl_comment_prefix: OK\n");
     return 0;
 }

@@ -9,22 +9,22 @@
 #include <ccc/cc_nursery.cch>
 
 /* @-keyword tokens inside a block comment:
- *   CCNursery* n = @create(NULL) @destroy;
+ *   CCNursery n = @create() !> @destroy;
  *   CCSomething* x = @create(args) @destroy; */
 
 // @-keyword tokens inside line comments:
-// CCNursery* n = @create(NULL) @destroy;
+// CCNursery n = @create() !> @destroy;
 // also @create on its own and @destroy on its own
 
 const char* k_at_doc_create  = "@create";
 const char* k_at_doc_destroy = "@destroy";
-const char* k_at_doc_decl    = "CCNursery* n = @create(NULL) @destroy;";
+const char* k_at_doc_decl    = "CCNursery n = @create() !> @destroy;";
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     if (!k_at_doc_create || !k_at_doc_destroy || !k_at_doc_decl) return 1;
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) return 2;
+        CCNursery n = @create() !> @destroy;
     }
     return 0;
 }

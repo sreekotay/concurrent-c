@@ -26,6 +26,7 @@ void waiter(CCChanRx rx) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     setvbuf(stdout, NULL, _IONBF, 0);
     
     int[~ >] tx_h; int[~ <] rx_h; CCChan* ch = cc_channel_pair(&tx_h, &rx_h);
@@ -40,11 +41,10 @@ int main(void) {
         cc_atomic_store(&g_count, 0);
         
         {
-            CCNursery* __cc_nursery178 = @create(NULL) @destroy;
-            if (!__cc_nursery178) abort();
+            CCNursery __cc_nursery178 = @create() !> @destroy;
 
             for (int i = 0; i < NUM_WAITERS; i++) {
-                __cc_nursery178->spawnhybrid(() => [rx] { waiter(rx); });
+                __cc_nursery178.spawnhybrid(() => [rx] { waiter(rx); });
             }
             
             // Give them time to all block

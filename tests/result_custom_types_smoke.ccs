@@ -49,6 +49,7 @@ size_t !> (CCIoError) create_size_result_typed(void) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     // Test 1: success case with cc_unwrap_as
     MyData !> (MyError) res1 = create_data(1);
     if (cc_is_ok(res1)) {
@@ -97,10 +98,9 @@ int main(void) {
     // (pigz_cc.ccs declares result vars inside spawn, doesn't capture them)
     int spawn_ok = 0;
     {
-        CCNursery* __cc_nursery79 = @create(NULL) @destroy;
-        if (!__cc_nursery79) abort();
+        CCNursery __cc_nursery79 = @create() !> @destroy;
 
-        __cc_nursery79->spawn(@unsafe () => [&spawn_ok] {
+        __cc_nursery79.spawn(@unsafe () => [&spawn_ok] {
             // Result type declared and used inside the spawn closure
             MyData*!>(MyError) res_in_spawn = create_data_ptr(1);
             if (cc_is_ok(res_in_spawn)) {
@@ -123,10 +123,9 @@ int main(void) {
     // Step 5b test: Same thing INSIDE spawn
     int spawn_stdlib = 0;
     {
-        CCNursery* __cc_nursery80 = @create(NULL) @destroy;
-        if (!__cc_nursery80) abort();
+        CCNursery __cc_nursery80 = @create() !> @destroy;
 
-        __cc_nursery80->spawn(@unsafe () => [&spawn_stdlib] {
+        __cc_nursery80.spawn(@unsafe () => [&spawn_stdlib] {
             // Try sigil syntax instead of CCRes macro
             size_t !> (CCIoError) res_stdlib = create_size_result_typed();
             if (cc_is_ok(res_stdlib)) {

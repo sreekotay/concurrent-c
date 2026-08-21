@@ -95,7 +95,7 @@ behavior:
   Deadline-aware park.
 - `wake_primitive done_wake` — thread-context joiners.
 - `cc__fiber* _Atomic join_waiter_fiber` — at most one fiber-context joiner.
-- `CCNursery* saved_nursery`, `admission_nursery` — structured-concurrency
+- `CCNursery saved_nursery`, `admission_nursery` — structured-concurrency
   context captured at spawn; nursery queries follow the fiber, not the OS
   thread.
 - `uint32_t deadlock_suppress_depth`, `external_wait_depth` — detector

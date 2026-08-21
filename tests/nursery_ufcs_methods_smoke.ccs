@@ -3,22 +3,22 @@
 static int g_runs = 0;
 
 int main(void) {
-    CCNursery* n = @create(NULL) @detach;
-    if (!n) return 1;
+    @errhandler(CCError e) cc_error_exit(e);
+    CCNursery n = cc_nursery_create() !>;
 
-    if (n->spawn(() => {
+    if (n.spawn(() => {
         g_runs += 1;
     }) != 0) {
-        n->free();
+        n.free();
         return 2;
     }
 
-    if (n->wait() != 0) {
-        n->free();
+    if (n.wait() != 0) {
+        n.free();
         return 3;
     }
 
-    n->free();
+    n.free();
     if (g_runs != 1) return 4;
     return 0;
 }

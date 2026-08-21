@@ -24,6 +24,7 @@ static size_t !>(CCError) mk_seven(void) {
 
 /* bug 2: Result-typed local named `a` ... */
 static size_t result_local_a(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     size_t !>(CCError) a = mk_seven();
     if (a.is_err()) return 0;
     return a.value();
@@ -37,6 +38,7 @@ static bool arena_init(CCArena* a, size_t root) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCArena ar;
     if (!arena_init(&ar, 1 << 16)) { printf("FAIL: arena init\n"); return 1; }
     RG v;
@@ -44,10 +46,9 @@ int main(void) {
     if (result_local_a() != 7) { printf("FAIL: result local\n"); return 1; }
     {
         /* bug 1: closures force the proto-insertion path */
-        CCNursery* n = cc_nursery_create(NULL);
-        if (!n) { printf("FAIL: nursery\n"); return 1; }
+        CCNursery n = cc_nursery_create() !>;
         int base = 5;
-        n->spawn(() => [base] { (void)base; });
+        n.spawn(() => [base] { (void)base; });
         cc_nursery_wait(n);
         cc_nursery_free(n);
     }

@@ -24,18 +24,19 @@ int main(void) {
     CCStdio io = cc_stdio_create(&a);
 
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        CCArena frame = cc_arena_heap(kilobytes(4)) @destroy;
+        CCNursery n = frame.create_nursery() !>;
 
-        n->spawn(() => [io] {
+        n.spawn(() => [io] {
             @errhandler(CCError e) cc_error_exit(e);
             usleep(100000);
             io.println("Hello from task A! (last)") !>;
         });
-        n->spawn(() => [io] {
+        n.spawn(() => [io] {
             @errhandler(CCError e) cc_error_exit(e);
             io.println("Hello from task B!") !>;
         });
-        n->spawn(() => [io] {
+        n.spawn(() => [io] {
             @errhandler(CCError e) cc_error_exit(e);
             io.println("Hello from task C!") !>(e) {
                 io.println("Task C failed!") !>;

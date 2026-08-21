@@ -27,9 +27,9 @@ int main(void) {
     cc_atomic_int sum = 0;
 
     {
-        CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
+        CCNursery outer = cc_nursery_create() !> @destroy;
 
-        outer->spawn(() => [&sum, rx] {
+        outer.spawn(() => [&sum, rx] {
             @errhandler(CCError e) cc_error_exit(e);
             int v;
             while (cc_io_avail(rx.recv(&v))) {
@@ -39,10 +39,10 @@ int main(void) {
         });
 
         { // inner nursery - parented by outer nursery
-            CCNursery* inner = cc_nursery_create(outer) !> @destroy;
-            (void)inner->close_on(tx);
+            CCNursery inner = outer.create_child() !> @destroy;
+            (void)inner.close_on(tx);
 
-            inner->spawn(() => [tx] {
+            inner.spawn(() => [tx] {
                 @errhandler(CCError e) cc_error_exit(e);
                 for (int i = 1; i <= 3; i++) {
                     tx.send(i) !>;

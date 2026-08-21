@@ -48,9 +48,9 @@ int main(void) {
 
     cc_atomic_int failed = 0;
     {
-        CCNursery* consumer = cc_nursery_create(NULL) !> @destroy;
+        CCNursery consumer = cc_nursery_create() !> @destroy;
 
-        consumer->spawn(() => [results_rx, &failed] {
+        consumer.spawn(() => [results_rx, &failed] {
             @errhandler(CCError e) cc_error_exit(e);
             println("\n[consumer] receiving results in order:") !>;
             int result = 0;
@@ -76,10 +76,10 @@ int main(void) {
         /* Producer in an inner nursery: @destroy closes results_tx once the
          * producer returns, so the consumer sees EOF after draining. */
         {
-            CCNursery* producer = cc_nursery_create(consumer) !> @destroy;
-            (void)producer->close_on(results_tx);
+            CCNursery producer = consumer.create_child() !> @destroy;
+            (void)producer.close_on(results_tx);
 
-            producer->spawn(() => [results_tx] {
+            producer.spawn(() => [results_tx] {
                 @errhandler(CCError e) cc_error_exit(e);
                 for (int i = 1; i <= NUM_ITEMS; i++) {
                     int id = i;

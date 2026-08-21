@@ -3,15 +3,15 @@
 #include <stdio.h>
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int x = 42;
     int result = 0;
     
     {
-        CCNursery* __cc_nursery42 = @create(NULL) @destroy;
-        if (!__cc_nursery42) abort();
+        CCNursery __cc_nursery42 = @create() !> @destroy;
 
         /* Explicit value capture: x is copied into closure */
-        __cc_nursery42->spawn(() => [x] {
+        __cc_nursery42.spawn(() => [x] {
             printf("captured x=%d\n", x);
             /* x is a copy, original is unaffected */
         });

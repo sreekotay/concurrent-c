@@ -28,6 +28,7 @@ cc_atomic_int g_result_count = 0;
 cc_atomic_int g_total_sum = 0;
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     printf("worker_pool_heavy: %d workers, %d jobs\n", NUM_WORKERS, NUM_JOBS);
 
     /* Use unbuffered channels */
@@ -39,11 +40,10 @@ int main(void) {
     CCChan* results_ch = cc_channel_pair(&results_tx, &results_rx);
 
     {
-        CCNursery* __cc_nursery149 = @create(NULL) @destroy;
-        if (!__cc_nursery149) abort();
+        CCNursery __cc_nursery149 = @create() !> @destroy;
 
         /* Results collector - must run in parallel for unbuffered channels */
-        __cc_nursery149->spawn(() => {
+        __cc_nursery149.spawn(() => {
             Result r;
             while (cc_io_avail(chan_recv(results_rx, &r))) {
                 cc_atomic_fetch_add(&g_total_sum, r.result);
@@ -53,12 +53,11 @@ int main(void) {
 
         /* Workers + job feeder */
         {
-            CCNursery* __cc_nursery151 = @create(NULL) @destroy;
-            if (!__cc_nursery151) abort();
-            (void)__cc_nursery151->close_on(results_tx);
+            CCNursery __cc_nursery151 = @create() !> @destroy;
+            (void)__cc_nursery151.close_on(results_tx);
 
             for (int w = 0; w < NUM_WORKERS; w++) {
-                __cc_nursery151->spawn(() => {
+                __cc_nursery151.spawn(() => {
                     Job job;
                     while (cc_io_avail(chan_recv(jobs_rx, &job))) {
                         /* Compute sum 1..n */
@@ -71,11 +70,10 @@ int main(void) {
 
             /* Job feeder */
             {
-                CCNursery* __cc_nursery150 = @create(NULL) @destroy;
-                if (!__cc_nursery150) abort();
-                (void)__cc_nursery150->close_on(jobs_tx);
+                CCNursery __cc_nursery150 = @create() !> @destroy;
+                (void)__cc_nursery150.close_on(jobs_tx);
 
-                __cc_nursery150->spawn(() => {
+                __cc_nursery150.spawn(() => {
                     for (int i = 0; i < NUM_JOBS; i++) {
                         Job j = {.id = i, .n = i + 1};
                         (void)chan_send(jobs_tx, j);

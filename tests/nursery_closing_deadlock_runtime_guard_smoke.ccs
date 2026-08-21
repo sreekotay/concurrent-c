@@ -6,6 +6,7 @@
 static volatile int g_err = 0;
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     // Enable runtime guard: instead of deadlocking, cc_chan_recv returns EDEADLK in the foot-gun case.
     setenv("CC_NURSERY_CLOSING_RUNTIME_GUARD", "1", 1);
 
@@ -15,18 +16,17 @@ int main(void) {
     if (cc_chan_pair_create(3, CC_CHAN_MODE_BLOCK, false, sizeof(int), &ch_tx, &ch_rx) != 0) return 2;
 
     {
-        CCNursery* __cc_nursery67 = @create(NULL) @destroy;
-        if (!__cc_nursery67) abort();
-        (void)__cc_nursery67->close_on(ch_tx);
+        CCNursery __cc_nursery67 = @create() !> @destroy;
+        (void)__cc_nursery67.close_on(ch_tx);
 
-        __cc_nursery67->spawn(() => {
+        __cc_nursery67.spawn(() => {
             for (int i = 1; i <= 3; i++) {
                 (void)chan_send(ch_tx, i);
             }
         });
 
         // This would deadlock without the runtime guard.
-        __cc_nursery67->spawn(() => {
+        __cc_nursery67.spawn(() => {
             int v = 0;
             for (;;) {
                 CCResult_bool_CCIoError res = chan_recv(ch_rx, &v);

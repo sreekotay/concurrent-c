@@ -31,6 +31,7 @@ void consumer(CCChanRx rx) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCChanTx ch_tx;
     CCChanRx ch_rx;
     if (cc_chan_pair_create(1, CC_CHAN_MODE_BLOCK, false, sizeof(int), &ch_tx, &ch_rx) != 0) return 2;
@@ -40,12 +41,11 @@ int main(void) {
 
     // Spec: closing(ch) must close after all children exit (i.e., after joining).
     {
-        CCNursery* __cc_nursery68 = @create(NULL) @destroy;
-        if (!__cc_nursery68) abort();
-        (void)__cc_nursery68->close_on(ch_tx);
+        CCNursery __cc_nursery68 = @create() !> @destroy;
+        (void)__cc_nursery68.close_on(ch_tx);
 
-        __cc_nursery68->spawn(() => { producer(ch_tx); });
-        __cc_nursery68->spawn(() => { consumer(ch_rx); });
+        __cc_nursery68.spawn(() => { producer(ch_tx); });
+        __cc_nursery68.spawn(() => { consumer(ch_rx); });
     
     }
 

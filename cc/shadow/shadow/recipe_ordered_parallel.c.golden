@@ -157,10 +157,10 @@ int main(void) {
         #line 51 "cc/shadow/shadow/recipe_ordered_parallel.ccs"
         CCNursery* consumer;
         {
-            __typeof__(cc_nursery_create(NULL)) __r = cc_nursery_create(NULL);
+            __typeof__(cc_nursery_create()) __r = cc_nursery_create();
             if (__cc_uw_is_err(__r)) {
                 #line 51 "cc/shadow/shadow/recipe_ordered_parallel.ccs"
-                __typeof__(__cc_uw_err_at(__r, "cc_nursery_create(NULL)", "cc/shadow/shadow/recipe_ordered_parallel.ccs", "51")) e = __cc_uw_err_at(__r, "cc_nursery_create(NULL)", "cc/shadow/shadow/recipe_ordered_parallel.ccs", "51");
+                __typeof__(__cc_uw_err_at(__r, "cc_nursery_create()", "cc/shadow/shadow/recipe_ordered_parallel.ccs", "51")) e = __cc_uw_err_at(__r, "cc_nursery_create()", "cc/shadow/shadow/recipe_ordered_parallel.ccs", "51");
                 #line 39 "cc/shadow/shadow/recipe_ordered_parallel.ccs"
                 cc_error_log(e);
                 { __cc_retval = 1; __cc_ret_set = 1; goto __cc_cleanup; }
@@ -178,10 +178,10 @@ int main(void) {
             #line 79 "cc/shadow/shadow/recipe_ordered_parallel.ccs"
             CCNursery* producer;
             {
-                __typeof__(cc_nursery_create(consumer)) __r = cc_nursery_create(consumer);
+                __typeof__(cc_nursery_create_child(consumer)) __r = cc_nursery_create_child(consumer);
                 if (__cc_uw_is_err(__r)) {
                     #line 79 "cc/shadow/shadow/recipe_ordered_parallel.ccs"
-                    __typeof__(__cc_uw_err_at(__r, "cc_nursery_create(consumer)", "cc/shadow/shadow/recipe_ordered_parallel.ccs", "79")) e = __cc_uw_err_at(__r, "cc_nursery_create(consumer)", "cc/shadow/shadow/recipe_ordered_parallel.ccs", "79");
+                    __typeof__(__cc_uw_err_at(__r, "cc_nursery_create_child(consumer)", "cc/shadow/shadow/recipe_ordered_parallel.ccs", "79")) e = __cc_uw_err_at(__r, "cc_nursery_create_child(consumer)", "cc/shadow/shadow/recipe_ordered_parallel.ccs", "79");
                     #line 39 "cc/shadow/shadow/recipe_ordered_parallel.ccs"
                     cc_error_log(e);
                     { __cc_retval = 1; __cc_ret_set = 1; goto __cc_cleanup; }

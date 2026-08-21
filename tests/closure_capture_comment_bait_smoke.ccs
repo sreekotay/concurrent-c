@@ -12,21 +12,21 @@
 #include <stdio.h>
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int[~4 >] tx;
     int[~4 ordered <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
     int ok = 1;
 
     {
-        CCNursery* __cc_nursery_outer = @create(NULL) @destroy;
-        if (!__cc_nursery_outer) abort();
+        CCNursery __cc_nursery_outer = @create() !> @destroy;
 
         {
-            CCNursery* __cc_nursery_inner = @create(NULL) @destroy;
-            if (!__cc_nursery_inner) abort();
-            (void)__cc_nursery_inner->close_on(tx);
+            CCNursery __cc_nursery_inner = @create() !> @destroy;
+            (void)__cc_nursery_inner.close_on(tx);
 
-            CCNursery* producer = @create(NULL, () => [tx] {
+            CCNursery producer = cc_nursery_create() !> @destroy;
+            producer.spawn(() => [tx] {
                 int i = 0;
                 while (i < 1) {
                     intptr_t bait_name = 7;
@@ -37,9 +37,8 @@ int main(void) {
                     i = i + 1;
                 }
                 return NULL;
-            }) @destroy;
-
-            if (!producer) ok = 0;
+            });
+            (void)producer;
         }
     }
 

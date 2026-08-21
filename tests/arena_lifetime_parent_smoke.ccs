@@ -156,14 +156,9 @@ static int test_try_adopt_result(void) {
     return 0;
 }
 
-/* In-TU mode on the stdlib type (header-declared modes await viewed-face
- * support in shadow_lower; see spec/draft_facets.md). */
-@typeview AllocFace on CCArena {
-    r: alloc, remaining;
-}
-
-static void bump(@typeview(AllocFace) CCArena* a) {
-    void* p = a->alloc(16, 8);
+/* Header-pinned Alloc (shadow_lower seeds it — no in-TU redeclaration). */
+static void bump(@typeview(Alloc) CCArena* a) {
+    void* p = a.alloc(16, 8);
     if (p) printf("  alloc face OK\n");
 }
 

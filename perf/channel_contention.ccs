@@ -201,6 +201,7 @@ static void trace_trial_marker(const char* phase, int trial, const char* event, 
 }
 
 static double run_shared_case(const char* phase, int trial, int producers, int consumers) {
+    @errhandler(CCError e) cc_error_exit(e);
     int messages = bench_messages();
     cc_atomic_int producers_left = 0;
     cc_atomic_store(&producers_left, producers);
@@ -216,15 +217,14 @@ static double run_shared_case(const char* phase, int trial, int producers, int c
     trace_trial_marker(phase, trial, "begin", -1.0);
     double start = time_now_ms();
     {
-        CCNursery* nursery = @create(NULL) @destroy;
-        if (!nursery) abort();
+        CCNursery nursery = @create() !> @destroy;
 
         for (int p = 0; p < producers; p++) {
             CCChanTx tx_h = tx;
             cc_atomic_int* producers_left_ptr = &producers_left;
             int producer_id = p;
             int send_count = work_share(messages, p, producers);
-            nursery->spawnhybrid(() => [tx_h, producers_left_ptr, producer_id, send_count] {
+            nursery.spawnhybrid(() => [tx_h, producers_left_ptr, producer_id, send_count] {
                 for (int i = 0; i < send_count; i++) {
                     trace_worker_sample(producer_id, i);
                     tx_h.send((producer_id + 1) ^ (i << 1) ^ (i >> 16));
@@ -239,7 +239,7 @@ static double run_shared_case(const char* phase, int trial, int producers, int c
             CCChanRx rx_h = rx;
             long long* sum_slot = &sums[c];
             int consumer_role = producers + c;
-            nursery->spawnhybrid(() => [rx_h, sum_slot, consumer_role] {
+            nursery.spawnhybrid(() => [rx_h, sum_slot, consumer_role] {
                 int v;
                 int recv_count = 0;
                 long long local_sum = 0;

@@ -42,6 +42,7 @@ void arena_worker(int worker_id) {
 
 /* Test concurrent allocations */
 int test_concurrent_alloc(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     printf("  concurrent_alloc: %d workers x %d allocs\n", NUM_WORKERS, ALLOCS_PER_WORKER);
 
     /* Initialize arena */
@@ -57,12 +58,11 @@ int test_concurrent_alloc(void) {
     cc_atomic_store(&g_bytes_written, 0);
 
     {
-        CCNursery* __cc_nursery107 = @create(NULL) @destroy;
-        if (!__cc_nursery107) abort();
+        CCNursery __cc_nursery107 = @create() !> @destroy;
 
         for (int w = 0; w < NUM_WORKERS; w++) {
             int worker_id = w;
-            __cc_nursery107->spawn(() => {
+            __cc_nursery107.spawn(() => {
                 arena_worker(worker_id);
             });
         }
@@ -88,6 +88,7 @@ int test_concurrent_alloc(void) {
 
 /* Test arena reset under concurrent access */
 int test_reset_during_use(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     printf("  reset_during_use: testing arena reset safety\n");
 
     cc_arena_reset(&g_arena);
@@ -97,13 +98,12 @@ int test_reset_during_use(void) {
     cc_atomic_store(&g_failed_allocs, 0);
 
     {
-        CCNursery* __cc_nursery108 = @create(NULL) @destroy;
-        if (!__cc_nursery108) abort();
+        CCNursery __cc_nursery108 = @create() !> @destroy;
 
         /* Some workers allocate */
         for (int w = 0; w < NUM_WORKERS / 2; w++) {
             int worker_id = w;
-            __cc_nursery108->spawn(() => {
+            __cc_nursery108.spawn(() => {
                 for (int i = 0; i < 50; i++) {
                     void* ptr = cc_arena_alloc(&g_arena, 64, 8);
                     if (ptr) {
@@ -114,7 +114,7 @@ int test_reset_during_use(void) {
         }
 
         /* One worker periodically resets (simulates request boundary) */
-        __cc_nursery108->spawn(() => {
+        __cc_nursery108.spawn(() => {
             for (int i = 0; i < 5; i++) {
                 cc_sleep_ms(1);
                 cc_arena_reset(&g_arena);
@@ -124,7 +124,7 @@ int test_reset_during_use(void) {
         /* More workers allocate */
         for (int w = NUM_WORKERS / 2; w < NUM_WORKERS; w++) {
             int worker_id = w;
-            __cc_nursery108->spawn(() => {
+            __cc_nursery108.spawn(() => {
                 for (int i = 0; i < 50; i++) {
                     void* ptr = cc_arena_alloc(&g_arena, 64, 8);
                     if (ptr) {

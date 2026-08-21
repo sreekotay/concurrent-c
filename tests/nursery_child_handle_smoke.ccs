@@ -17,23 +17,23 @@ static void* cancelled_child_task(void* env) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCClosure0 child = cc_closure0_make(child_task, NULL, NULL);
-    CCNursery* root = cc_nursery_spawn_child_closure0(NULL, child);
-    assert(root != NULL);
-    assert(root->wait() == 0);
-    root->free();
+    CCNursery root = cc_nursery_create() !>;
+    assert(root.spawn(child) == 0);
+    assert(root.wait() == 0);
+    root.free();
     assert(g_child_runs == 1);
 
-    CCNursery* parent = cc_nursery_create(NULL);
-    assert(parent != NULL);
-    parent->cancel();
+    CCNursery parent = cc_nursery_create() !>;
+    parent.cancel();
 
     CCClosure0 cancelled_child = cc_closure0_make(cancelled_child_task, NULL, NULL);
-    CCNursery* child_from_cancelled_parent = cc_nursery_spawn_child_closure0(parent, cancelled_child);
-    assert(child_from_cancelled_parent != NULL);
-    assert(child_from_cancelled_parent->wait() == 0);
-    child_from_cancelled_parent->free();
-    parent->free();
+    CCNursery child_from_cancelled_parent =
+        cc_nursery_spawn_child_closure0(parent, cancelled_child) !>;
+    assert(child_from_cancelled_parent.wait() == 0);
+    child_from_cancelled_parent.free();
+    parent.free();
     assert(g_cancelled_child_runs == 0);
 
     return 0;

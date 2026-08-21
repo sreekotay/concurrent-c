@@ -23,6 +23,7 @@ int !>(CCIoError) compute_result(int x) {
 }
 
 static int test_legacy_form(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCTask[~8 >] tx;
     CCTask[~8 <] rx;
     cc_channel_pair(&tx, &rx);
@@ -31,9 +32,8 @@ static int test_legacy_form(void) {
     int n = sizeof(values) / sizeof(values[0]);
 
     {
-        CCNursery* __cc_n = @create(NULL) @destroy;
-        if (!__cc_n) abort();
-        (void)__cc_n->close_on(tx);
+        CCNursery __cc_n = @create() !> @destroy;
+        (void)__cc_n.close_on(tx);
         for (int i = 0; i < n; i++) {
             intptr_t v = values[i];
             cc_channel_send_task_hybrid(tx, () => [v] compute(v));
@@ -59,6 +59,7 @@ static int test_legacy_form(void) {
 }
 
 static int test_ufcs_method_form(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     intptr_t[~8 >] tx;
     intptr_t[~8 ordered <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
@@ -67,9 +68,8 @@ static int test_ufcs_method_form(void) {
     int n = sizeof(values) / sizeof(values[0]);
 
     {
-        CCNursery* __cc_n = @create(NULL) @destroy;
-        if (!__cc_n) abort();
-        (void)__cc_n->close_on(tx);
+        CCNursery __cc_n = @create() !> @destroy;
+        (void)__cc_n.close_on(tx);
         for (int i = 0; i < n; i++) {
             intptr_t v = values[i];
             tx.send_task_hybrid(() => [v] compute(v));
@@ -94,6 +94,7 @@ static int test_ufcs_method_form(void) {
 }
 
 static int test_rich_payload(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int !>(CCIoError)[~8 >] result_tx;
     int !>(CCIoError)[~8 ordered <] result_rx;
     CCChan* ch = cc_channel_pair(&result_tx, &result_rx);
@@ -104,9 +105,8 @@ static int test_rich_payload(void) {
     int n = sizeof(values) / sizeof(values[0]);
 
     {
-        CCNursery* __cc_n = @create(NULL) @destroy;
-        if (!__cc_n) abort();
-        (void)__cc_n->close_on(result_tx);
+        CCNursery __cc_n = @create() !> @destroy;
+        (void)__cc_n.close_on(result_tx);
         for (int i = 0; i < n; i++) {
             int v = values[i];
             result_tx.send_task_hybrid(() => [v] compute_result(v));

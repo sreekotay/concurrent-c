@@ -123,7 +123,7 @@ static void* cc__closure0_trampoline(void* p) {
     return r;
 }
 
-int cc_nursery_spawn_closure0(CCNursery* n, CCClosure0 c) {
+int cc_nursery_spawn_closure0(CCNurseryHost* n, CCClosure0 c) {
     if (!n || !c.fn) return EINVAL;
     CCClosure0Heap* h = (CCClosure0Heap*)malloc(sizeof(CCClosure0Heap));
     if (!h) return ENOMEM;
@@ -136,19 +136,23 @@ int cc_nursery_spawn_closure0(CCNursery* n, CCClosure0 c) {
 }
 
 /* spawnhybrid is a source-compat alias for spawn now that V2 is the default. */
-int cc_nursery_spawnhybrid_closure0(CCNursery* n, CCClosure0 c) {
+int cc_nursery_spawnhybrid_closure0(CCNurseryHost* n, CCClosure0 c) {
     return cc_nursery_spawn_closure0(n, c);
 }
 
-CCNursery* cc_nursery_spawn_child_closure0(CCNursery* parent, CCClosure0 c) {
-    if (!c.fn) return NULL;
-    CCNursery* child = cc_nursery_create(parent);
-    if (!child) return NULL;
-    if (cc_nursery_spawn_closure0(child, c) != 0) {
-        cc_nursery_free(child);
-        return NULL;
+CCResult_CCNursery_CCError cc_nursery_spawn_child_closure0(CCNursery parent, CCClosure0 c) {
+    CCResult_CCNursery_CCError r;
+    if (!c.fn)
+        return cc_err_CCResult_CCNursery_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "cc_nursery_spawn_child_closure0: null fn"));
+    r = cc_nursery_create_child(parent);
+    if (!r.ok) return r;
+    if (cc_nursery_spawn_closure0(r.u.value.n, c) != 0) {
+        cc_nursery_free(r.u.value.n);
+        return cc_err_CCResult_CCNursery_CCError(
+            CC_ERROR(CC_ERR_INTERNAL, "cc_nursery_spawn_child_closure0: spawn failed"));
     }
-    return child;
+    return r;
 }
 
 typedef struct {
@@ -171,7 +175,7 @@ static void* cc__closure1_trampoline(void* p) {
     return r;
 }
 
-int cc_nursery_spawn_closure1(CCNursery* n, CCClosure1 c, intptr_t arg0) {
+int cc_nursery_spawn_closure1(CCNurseryHost* n, CCClosure1 c, intptr_t arg0) {
     if (!n || !c.fn) return EINVAL;
     CCClosure1Heap* h = (CCClosure1Heap*)malloc(sizeof(CCClosure1Heap));
     if (!h) return ENOMEM;
@@ -184,15 +188,19 @@ int cc_nursery_spawn_closure1(CCNursery* n, CCClosure1 c, intptr_t arg0) {
     return err;
 }
 
-CCNursery* cc_nursery_spawn_child_closure1(CCNursery* parent, CCClosure1 c, intptr_t arg0) {
-    if (!c.fn) return NULL;
-    CCNursery* child = cc_nursery_create(parent);
-    if (!child) return NULL;
-    if (cc_nursery_spawn_closure1(child, c, arg0) != 0) {
-        cc_nursery_free(child);
-        return NULL;
+CCResult_CCNursery_CCError cc_nursery_spawn_child_closure1(CCNursery parent, CCClosure1 c, intptr_t arg0) {
+    CCResult_CCNursery_CCError r;
+    if (!c.fn)
+        return cc_err_CCResult_CCNursery_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "cc_nursery_spawn_child_closure1: null fn"));
+    r = cc_nursery_create_child(parent);
+    if (!r.ok) return r;
+    if (cc_nursery_spawn_closure1(r.u.value.n, c, arg0) != 0) {
+        cc_nursery_free(r.u.value.n);
+        return cc_err_CCResult_CCNursery_CCError(
+            CC_ERROR(CC_ERR_INTERNAL, "cc_nursery_spawn_child_closure1: spawn failed"));
     }
-    return child;
+    return r;
 }
 
 typedef struct {
@@ -217,7 +225,7 @@ static void* cc__closure2_trampoline(void* p) {
     return r;
 }
 
-int cc_nursery_spawn_closure2(CCNursery* n, CCClosure2 c, intptr_t arg0, intptr_t arg1) {
+int cc_nursery_spawn_closure2(CCNurseryHost* n, CCClosure2 c, intptr_t arg0, intptr_t arg1) {
     if (!n || !c.fn) return EINVAL;
     CCClosure2Heap* h = (CCClosure2Heap*)malloc(sizeof(CCClosure2Heap));
     if (!h) return ENOMEM;
@@ -231,15 +239,19 @@ int cc_nursery_spawn_closure2(CCNursery* n, CCClosure2 c, intptr_t arg0, intptr_
     return err;
 }
 
-CCNursery* cc_nursery_spawn_child_closure2(CCNursery* parent, CCClosure2 c, intptr_t arg0, intptr_t arg1) {
-    if (!c.fn) return NULL;
-    CCNursery* child = cc_nursery_create(parent);
-    if (!child) return NULL;
-    if (cc_nursery_spawn_closure2(child, c, arg0, arg1) != 0) {
-        cc_nursery_free(child);
-        return NULL;
+CCResult_CCNursery_CCError cc_nursery_spawn_child_closure2(CCNursery parent, CCClosure2 c, intptr_t arg0, intptr_t arg1) {
+    CCResult_CCNursery_CCError r;
+    if (!c.fn)
+        return cc_err_CCResult_CCNursery_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "cc_nursery_spawn_child_closure2: null fn"));
+    r = cc_nursery_create_child(parent);
+    if (!r.ok) return r;
+    if (cc_nursery_spawn_closure2(r.u.value.n, c, arg0, arg1) != 0) {
+        cc_nursery_free(r.u.value.n);
+        return cc_err_CCResult_CCNursery_CCError(
+            CC_ERROR(CC_ERR_INTERNAL, "cc_nursery_spawn_child_closure2: spawn failed"));
     }
-    return child;
+    return r;
 }
 
 int cc_run_blocking_closure0(CCClosure0 c) {
@@ -268,14 +280,14 @@ CCTask cc_async_closure0_start(CCAsyncClosure0 c) {
     return out;
 }
 
-int cc_nursery_spawn_async_closure0(CCNursery* n, CCAsyncClosure0 c) {
+int cc_nursery_spawn_async_closure0(CCNurseryHost* n, CCAsyncClosure0 c) {
     if (!n || !c.start) return EINVAL;
     /* V2 is the default; use the V2 async-task start so non-fiber tasks get
      * bridged through the V2 scheduler. */
     return cc_nursery_spawn_async(n, cc_async_closure0_start_v2(c));
 }
 
-int cc_nursery_spawnhybrid_async_closure0(CCNursery* n, CCAsyncClosure0 c) {
+int cc_nursery_spawnhybrid_async_closure0(CCNurseryHost* n, CCAsyncClosure0 c) {
     return cc_nursery_spawn_async_closure0(n, c);
 }
 

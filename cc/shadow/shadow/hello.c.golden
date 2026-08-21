@@ -34,10 +34,10 @@ int main(void) {
     #line 9 "cc/shadow/shadow/hello.ccs"
     CCNursery* n;
     {
-        __typeof__(cc_nursery_create(NULL)) __r = cc_nursery_create(NULL);
+        __typeof__(cc_nursery_create()) __r = cc_nursery_create();
         if (__cc_uw_is_err(__r)) {
             #line 9 "cc/shadow/shadow/hello.ccs"
-            __typeof__(__cc_uw_err_at(__r, "cc_nursery_create(NULL)", "cc/shadow/shadow/hello.ccs", "9")) e = __cc_uw_err_at(__r, "cc_nursery_create(NULL)", "cc/shadow/shadow/hello.ccs", "9");
+            __typeof__(__cc_uw_err_at(__r, "cc_nursery_create()", "cc/shadow/shadow/hello.ccs", "9")) e = __cc_uw_err_at(__r, "cc_nursery_create()", "cc/shadow/shadow/hello.ccs", "9");
             cc_error_exit(e);
         }
         n = __cc_uw_value(__r);

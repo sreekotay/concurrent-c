@@ -15,6 +15,7 @@
 cc_atomic_int g_done = 0;
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     cc_sched_set_num_workers(4);
 
     for (int rep = 0; rep < REPEATS; rep++) {
@@ -23,12 +24,11 @@ int main(void) {
         }
 
         {
-            CCNursery* __cc_nursery81 = @create(NULL) @destroy;
-            if (!__cc_nursery81) abort();
+            CCNursery __cc_nursery81 = @create() !> @destroy;
 
             for (int i = 0; i < TASKS_PER_ROUND; i++) {
                 int k = i;
-                __cc_nursery81->spawn(() => [k] {
+                __cc_nursery81.spawn(() => [k] {
                     if ((k % 4) == 0) cc_sleep_ms(1);
                     cc_atomic_fetch_add(&g_done, 1);
                 });

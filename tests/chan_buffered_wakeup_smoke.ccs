@@ -11,6 +11,7 @@
 #define REPEATS    25
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     for (int rep = 0; rep < REPEATS; rep++) {
         if (rep % 1000 == 0) fprintf(stderr, "iter %d/%d\n", rep, REPEATS);
         int[~1 >] tx;
@@ -18,16 +19,15 @@ int main(void) {
         CCChan* ch = cc_channel_pair(&tx, &rx);
 
         {
-            CCNursery* __cc_nursery6 = @create(NULL) @destroy;
-            if (!__cc_nursery6) abort();
-            (void)__cc_nursery6->close_on(tx);
+            CCNursery __cc_nursery6 = @create() !> @destroy;
+            (void)__cc_nursery6.close_on(tx);
 
-            __cc_nursery6->spawn(() => {
+            __cc_nursery6.spawn(() => {
                 for (int i = 0; i < NUM_ITEMS; i++) {
                     tx.send(i);
                 }
             });
-            __cc_nursery6->spawn(() => {
+            __cc_nursery6.spawn(() => {
                 int v;
                 for (int i = 0; i < NUM_ITEMS; i++) {
                     rx.recv(&v);

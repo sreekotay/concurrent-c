@@ -152,16 +152,17 @@ static void worker_zipf(int worker_id, int iters, int spins, int keys) {
 }
 
 static double run_zipf(int workers, int iters, int spins, int keys) {
+    @errhandler(CCError e) cc_error_exit(e);
     memset(g_rows, 0, sizeof(g_rows));
 
     double t0 = time_now_ms();
     {
-        CCNursery* n = cc_nursery_create(NULL)
+        CCNursery n = cc_nursery_create()
             !>(e) { fprintf(stderr, "nursery: %s\n", e.message); abort(); }
             @destroy;
         for (int w = 0; w < workers; w++) {
             int id = w;
-            n->spawn(() => [id, iters, spins, keys] {
+            n.spawn(() => [id, iters, spins, keys] {
                 worker_zipf(id, iters, spins, keys);
             });
         }

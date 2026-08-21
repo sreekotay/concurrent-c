@@ -81,6 +81,7 @@ typedef @typeview Encode on Conn {
 } *ConnEnc;
 
 static bool !>(CCIoError) write_all(CCSocket* sock, char[:] data) {
+    @errhandler(CCError e) cc_error_exit(e);
     size_t off = 0;
     while (off < data.len) {
         size_t n = sock->write(data.ptr + off, data.len - off) !>(e) {
@@ -94,6 +95,7 @@ static bool !>(CCIoError) write_all(CCSocket* sock, char[:] data) {
 }
 
 static bool !>(CCIoError) conn_flush(Conn* c) {
+    @errhandler(CCError e) cc_error_exit(e);
     char[:] data;
     if (!c || !c->arena)
         return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "conn flush: null")));
@@ -193,6 +195,7 @@ static Hold hold_for(char[:] name) {
 
 static bool !>(CCError) exec_incr(CCShard* sh, char[:] key,
                                   ConnEnc conn) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCString* v = sh->get(key);
     int64_t n = 0;
     if (v) {
@@ -361,6 +364,7 @@ static bool !>(CCError) execute(DB* db, Cmd* c,
 }
 
 static bool !>(CCIoError) read_cmd(BufReader::[CCSocket]* br, CCArena* arena, Cmd* out) {
+    @errhandler(CCError e) cc_error_exit(e);
     for (;;) {
         size_t i, start, end;
         memset(out, 0, sizeof(*out));
@@ -423,6 +427,7 @@ static bool !>(CCIoError) read_cmd(BufReader::[CCSocket]* br, CCArena* arena, Cm
 }
 
 static void handle_client(CCSocket client, DB* db) {
+    @errhandler(CCError e) cc_error_exit(e);
     char read_buf[K_READ_BUF];
     char cmd_buf[K_CMD_ARENA];
     char out_slab[K_OUT_BUF];
@@ -493,14 +498,14 @@ int main(int argc, char** argv) {
                     @scratch)) !>;
 
     /* !> @destroy joins (wait-then-free); cancel unparks accept. */
-    CCNursery* server = cc_nursery_create(NULL) !> @destroy;
-    server->cancel_on_signals(SIGINT, SIGTERM) !>;
+    CCNursery server = cc_nursery_create() !> @destroy;
+    server.cancel_on_signals(SIGINT, SIGTERM) !>;
 
-    server->spawn(() => [@safe &db, @safe &ln, server] {
+    server.spawn(() => [@safe &db, @safe &ln, server] {
         ln.serve(server, (CCSocket* accepted) => [@safe &db, server] {
             CCSocket client = *accepted;
             (void)client.set_nodelay(1);
-            server->spawn(() => [@safe &db, client] {
+            server.spawn(() => [@safe &db, client] {
                 handle_client(client, &db);
             });
         });

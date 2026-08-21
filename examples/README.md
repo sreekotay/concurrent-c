@@ -15,7 +15,7 @@ New to Concurrent-C? Work through these in order:
 
 | # | File | Concept | What you'll learn |
 |---|------|---------|-------------------|
-| 1  | `hello.ccs` | First nursery | `cc_nursery_create`, `n->spawn()`, basic structured concurrency |
+| 1  | `hello.ccs` | First nursery | `cc_nursery_create`, `n.spawn()`, basic structured concurrency |
 | 2  | `recipe_result_error_handling.ccs` | Results & `@errhandler` | `?>` : `E → T`; `!>` : `E →` control flow; `(e)` exposes; bare `!>` routes |
 | 3  | `recipe_unwrap_destroy_forms.ccs` | Unwrap shape | Same two ops × modifiers; `@destroy` on successful construction |
 | 4  | `recipe_ufcs_forms.ccs` | UFCS shape | One dispatch rule × spellings (families, bare-name, fallible chains) |

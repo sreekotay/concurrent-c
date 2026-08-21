@@ -100,13 +100,13 @@ Uses locks (mutex + condvar) via yarn.h for synchronization.
 Uses channels and explicit ownership scopes for clean structured concurrency:
 
 ```c
-CCNursery* writer@(NULL, writer_task) @destroy;
-CCNursery* pipeline@(writer) @destroy {
+CCNursery writer@(NULL, writer_task) @destroy;
+CCNursery pipeline@(writer) @destroy {
     results_tx.close();
 };
 
-pipeline->spawn(() => { compress_block(); });
-pipeline->spawn(() => { read_blocks(); });
+pipeline.spawn(() => { compress_block(); });
+pipeline.spawn(() => { read_blocks(); });
 ```
 
 ## CC Patterns Demonstrated
@@ -122,18 +122,18 @@ CCChan* ch = cc_channel_pair(&blocks_tx, &blocks_rx);
 ### 2. Nested Ownership with Explicit Close
 Close channels when producer-owned work finishes:
 ```c
-CCNursery* producer@(consumer) @destroy {
+CCNursery producer@(consumer) @destroy {
     results_tx.close();
 };
 // Producer-owned work runs here.
 // Consumer drains results_rx after close and then exits.
 ```
 
-### 3. Parallel Workers via `n->spawn()`
+### 3. Parallel Workers via `n.spawn()`
 No thread management - structured lifetime:
 ```c
 for (int w = 0; w < num_workers; w++) {
-    workers->spawn(() => [level, blocks_rx, results_tx] {
+    workers.spawn(() => [level, blocks_rx, results_tx] {
         Block blk;
         while (cc_io_avail(blocks_rx.recv(&blk))) {
             Result res = compress_block(&blk, level);

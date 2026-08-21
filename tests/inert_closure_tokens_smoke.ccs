@@ -47,18 +47,18 @@ static void noop(int id) { (void)id; atomic_fetch_add(&g_count, 1); }
 static void plain(void)  { atomic_fetch_add(&g_count, 1); }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     if (!k_doc_nocap || !k_doc_cap || !k_doc_unsafe || !k_doc_trigger) {
         return 1;
     }
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) return 2;
+        CCNursery n = @create() !> @destroy;
 
         /* Real no-capture closure BEFORE the comment-with-=>.  Pre-fix
          * this one was the silent victim (UFCS rewrite ran, closure
          * rewrite did not, host C compiler choked). */
-        n->spawnhybrid(() => { plain(); });
+        n.spawnhybrid(() => { plain(); });
 
         /* Line comment with a => that previously fooled the scanner. */
         // pattern: (cancelled && no_work) => exit
@@ -67,7 +67,7 @@ int main(void) {
          * a for-loop body (the original syscall_kidnap form). */
         for (int i = 0; i < 3; i++) {
             int id = i;
-            n->spawnhybrid(() => [id] { noop(id); });
+            n.spawnhybrid(() => [id] { noop(id); });
         }
     }
 

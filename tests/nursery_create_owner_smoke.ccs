@@ -1,0 +1,20 @@
+/* create_nursery(owner): handle in the parent, walk joins, Region alloc. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        printf("fail create_nursery\n");
+        return 1;
+    }
+    CCArena frame = cc_arena_heap(kilobytes(8)) @destroy;
+    CCNursery n = frame.create_nursery() !>;
+    void* p;
+    p = n.alloc(32, 8);
+    if (!p) {
+        printf("fail n.alloc\n");
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

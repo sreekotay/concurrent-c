@@ -31,6 +31,7 @@ static void peer_send_and_close(int fd) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int fds[2] = {-1, -1};
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
         perror("socketpair");
@@ -38,15 +39,10 @@ int main(void) {
     }
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) {
-            close(fds[0]);
-            close(fds[1]);
-            return 2;
-        }
+        CCNursery n = @create() !> @destroy;
         int peer_fd = fds[1];
         fds[1] = -1;
-        n->spawn(() => [peer_fd] { peer_send_and_close(peer_fd); });
+        n.spawn(() => [peer_fd] { peer_send_and_close(peer_fd); });
 
         CCSocket sock = { .fd = fds[0] };
         fds[0] = -1;

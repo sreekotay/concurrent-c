@@ -45,9 +45,10 @@
 }
 
 int main(void) {
-    CCNursery* n = cc_nursery_create(NULL);
-    (void)n->spawn_async(bad_name(3, 4));
-    cc_nursery_destroy(n);
+    @errhandler(CCError e) cc_error_exit(e);
+    CCNursery n = cc_nursery_create() !>;
+    (void)n.spawn_async(bad_name(3, 4));
+    n.destroy();
     printf("f6_comment: OK\n");
     return 0;
 }

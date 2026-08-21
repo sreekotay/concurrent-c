@@ -13,14 +13,14 @@ int main(void) {
     @errhandler(CCError e) { return 1; }
     g_got = -1;
     {
-        CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
-        outer->spawn(() => [outer] {
+        CCNursery outer = cc_nursery_create() !> @destroy;
+        outer.spawn(() => [outer] {
             CCArena a = cc_arena_heap(4096) @destroy;
             CapBlk* cap = cc_arena_alloc_T(CapBlk, &a);
             if (!cap) return;
             cap->seq = 42;
             cap->arena = a.detach();
-            outer->spawn(() => [cap] {
+            outer.spawn(() => [cap] {
                 g_got = cap->seq;
                 cap->arena.free();
             });

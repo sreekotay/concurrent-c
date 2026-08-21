@@ -20,6 +20,7 @@ cc_atomic_int deepest_reached = 0;
 void* nested_task(void* arg);
 
 void* nested_task(void* arg) {
+    @errhandler(CCError e) cc_error_exit(e);
     int depth = (int)(intptr_t)arg;
     
     if (depth > cc_atomic_load(&deepest_reached)) {
@@ -28,7 +29,7 @@ void* nested_task(void* arg) {
     
     if (depth < DEPTH) {
         /* Create nested nursery */
-        CCNursery* n = cc_nursery_create(NULL);
+        CCNursery n = cc_nursery_create() !>;
         cc_nursery_spawn(n, nested_task, (void*)(intptr_t)(depth + 1));
         cc_nursery_wait(n);
         cc_nursery_free(n);
@@ -38,12 +39,13 @@ void* nested_task(void* arg) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     printf("nested_nursery_deep: depth=%d, iterations=%d\n", DEPTH, ITERATIONS);
     
     for (int iter = 0; iter < ITERATIONS; iter++) {
         cc_atomic_store(&deepest_reached, 0);
         
-        CCNursery* n = cc_nursery_create(NULL);
+        CCNursery n = cc_nursery_create() !>;
         cc_nursery_spawn(n, nested_task, (void*)(intptr_t)1);
         cc_nursery_wait(n);
         cc_nursery_free(n);

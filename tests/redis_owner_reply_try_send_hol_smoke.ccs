@@ -216,6 +216,7 @@ static void fast_client_blocking(HolReqTx req_tx_raw) {
 }
 
 static int run_blocking_hol_demo(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     cc_atomic_store(&g_errors, 0);
     cc_atomic_store(&g_slow_gate_for_fast, 0);
     cc_atomic_store(&g_fast_submitted, 0);
@@ -228,13 +229,12 @@ static int run_blocking_hol_demo(void) {
     @defer req_ch.free();
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) return 11;
+        CCNursery n = @create() !> @destroy;
         HolReqRx req_rx_raw = req_rx;
         HolReqTx req_tx_raw = req_tx;
-        n->spawn(() => [req_rx_raw] { hol_owner_blocking_policy(req_rx_raw); });
-        n->spawn(() => [req_tx_raw] { slow_client_blocking(req_tx_raw); });
-        n->spawn(() => [req_tx_raw] { fast_client_blocking(req_tx_raw); });
+        n.spawn(() => [req_rx_raw] { hol_owner_blocking_policy(req_rx_raw); });
+        n.spawn(() => [req_tx_raw] { slow_client_blocking(req_tx_raw); });
+        n.spawn(() => [req_tx_raw] { fast_client_blocking(req_tx_raw); });
     }
 
     if (cc_atomic_load(&g_errors) != 0) {
@@ -416,6 +416,7 @@ static void fast_client_try_send(HolReqTx req_tx_raw) {
 }
 
 static int run_try_send_non_hol_demo(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     cc_atomic_store(&g_errors, 0);
     cc_atomic_store(&g_slow_prefill_sent, 0);
     cc_atomic_store(&g_fast_reply_received, 0);
@@ -427,13 +428,12 @@ static int run_try_send_non_hol_demo(void) {
     @defer req_ch.free();
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) return 31;
+        CCNursery n = @create() !> @destroy;
         HolReqRx req_rx_raw = req_rx;
         HolReqTx req_tx_raw = req_tx;
-        n->spawn(() => [req_rx_raw] { hol_owner_try_send_policy(req_rx_raw); });
-        n->spawn(() => [req_tx_raw] { slow_client_try_send(req_tx_raw); });
-        n->spawn(() => [req_tx_raw] { fast_client_try_send(req_tx_raw); });
+        n.spawn(() => [req_rx_raw] { hol_owner_try_send_policy(req_rx_raw); });
+        n.spawn(() => [req_tx_raw] { slow_client_try_send(req_tx_raw); });
+        n.spawn(() => [req_tx_raw] { fast_client_try_send(req_tx_raw); });
     }
 
     if (cc_atomic_load(&g_errors) != 0) {

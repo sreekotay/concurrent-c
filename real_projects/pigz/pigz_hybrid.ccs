@@ -151,7 +151,7 @@ int compress_file(const char* in_path, const char* out_path) {
 
     /* Keep the consumer outside the producer scope so results_tx closes when the
      * producer task exits, not later during nursery teardown. */
-    CCNursery* consumer = @create(NULL, () => [out_ptr, results_rx] {
+    CCNursery consumer = @create(NULL, () => [out_ptr, results_rx] {
         CompressedResult* item = NULL;
         long expect_seq = 0;
         while (cc_io_avail(results_rx.recv(&item))) {
@@ -178,14 +178,14 @@ int compress_file(const char* in_path, const char* out_path) {
         return 1;
     }
 
-    CCNursery* producer = @create(consumer) @destroy {
+    CCNursery producer = @create(consumer) @destroy {
         results_tx.close();
     };
     if (!producer) {
         fprintf(stderr, "Failed to create producer nursery\n");
         return 1;
     }
-    producer->spawn(() => [in_ptr, results_tx] {
+    producer.spawn(() => [in_ptr, results_tx] {
         long seq = 0;
         while (true) {
             if (cc_atomic_load(&g_pipeline_error)) break;

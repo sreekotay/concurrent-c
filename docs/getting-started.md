@@ -94,12 +94,13 @@ int main(void) {
     CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
     CCStdio io = cc_stdio_create(&a);
 
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-    n->spawn(() => [io] {
+    CCNursery n = a.create_nursery() !>; // will be destroyed with the arena safely
+    n.spawn(() => [io] {
         @errhandler(CCError e) cc_error_exit(e);
+        cc_sleep_ms(10);  /* still running when main hits return */
         io.println("Hello from task A!") !>;
     });
-    n->spawn(() => [io] {
+    n.spawn(() => [io] {
         @errhandler(CCError e) cc_error_exit(e);
         io.println("Hello from task B!") !>;
     });
@@ -111,7 +112,7 @@ int main(void) {
 ccc run hello.ccs
 ```
 
-Typical output (task order is not fixed):
+Typical output (A sleeps 10 ms, so B usually prints first; arena destroy still waits for A):
 
 ```text
 Hello from task B!
@@ -126,12 +127,15 @@ What that program uses:
 | `T!>(E)` | Fallible value. `?>` : `E → T`. `!>` : `E →` control flow |
 | `@destroy` | Cleanup on **successful declaration construction** (`!> @destroy` = unwrap succeeded, then defer) |
 | `CCArena` / `CCStdio` | Arena **names** the window’s lifetime; growth/overflow is storage policy — prefer **`io.println(…)`** (see [Arenas](#arenas-name-a-lifetime)) |
-| `CCNursery*` | Structured-concurrency scope: `@destroy` waits; `abandon` drops the handle |
-| `n->spawn(() => [io] { … })` | UFCS spawn of a closure; capture `io` by value into the task |
+| `CCNursery` | `a.create_nursery()` — handle lives in `a`; arena `@destroy` waits. `abandon` is only for `cc_nursery_create()` |
+| `n.spawn(() => [io] { … })` | UFCS spawn of a closure; capture `io` by value into the task |
 
-So `CCNursery* n = cc_nursery_create(NULL) !> @destroy;` is `!>` (unwrap or
-route `E`) then `@destroy` (cleanup on that successful construction). Teardown
-runs at the end of `main` here, so both tasks finish before the process exits.
+`CCNursery n = a.create_nursery() !>;` is `!>` (unwrap or route `E`).
+There is no `@destroy` on `n` — the handle is a child of `a`. Arena
+`@destroy` walks attached children first (wait/join), then frees slabs.
+That runs when `main` returns, so both tasks finish (A is still asleep)
+before the process exits. The self-owned form is
+`cc_nursery_create() !> @destroy` (or `abandon`).
 
 A fuller hello (stdio helpers, per-task `@errhandler`, local-then-default
 errors) is in the repo: [examples/hello.ccs](../examples/hello.ccs).
@@ -175,7 +179,7 @@ omitted. Bodyless `@destroy` emits that list without a call-site body. An
 empty chain is a compile error. `.destroy()` is UFCS (`Type_destroy` when
 that function exists), not this list.
 
-Stdlib owners ship registered (`CCNursery*` waits then frees, `CCArena` frees
+Stdlib owners ship registered (`CCNursery` waits then frees, `CCArena` frees
 slabs + overflow, channels, `CCPy`, …). For your own types:
 
 ```c
@@ -213,7 +217,7 @@ Fallible work returns `T!>(E)`. Two operators; three modifiers:
 int a = read() ?> 30;
 int b = read() !>;                         // routes E
 int c = read() !>(e) { /* local */ @err(e); };
-CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+CCNursery n = cc_nursery_create() !> @destroy;
 ```
 
 Tasks do not inherit `@errhandler` — re-bind inside each spawn. More:
@@ -229,7 +233,7 @@ this path. Method and free forms are the same API; Concurrent-C examples
 prefer the method form:
 
 ```c
-n->spawn(() => { … });     // not cc_nursery_spawn(n, …)
+n.spawn(() => { … });     // not cc_nursery_spawn(n, …)
 tx.send(i) !>;             // not cc_chan_send(tx, i)
 io.println("hi") !>;       // not cc_stdio_println(&io, "hi")
 v.push(10);                // == CCVec_int_push(&v, 10)
@@ -385,21 +389,24 @@ worked example (out of tree):
 
 ### Nurseries
 
-Tasks are scoped to an owned `CCNursery*`. `@destroy` waits for everything
-spawned into that nursery (and nested children) before the binding ends:
+Tasks are scoped to a `CCNursery`. Three births:
+`a.create_nursery()` (handle in `a`; arena `@destroy` waits; no `abandon`),
+`parent.create_child()` (cancel/deadline snapshot), and
+`cc_nursery_create()` (self-owned malloc). The last two join with
+`@destroy` or `abandon`:
 
 ```c
 @errhandler(CCError e) cc_error_exit(e);
 {
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-    n->spawn(() => task1());
-    n->spawn(() => task2());
+    CCNursery n = cc_nursery_create() !> @destroy;
+    n.spawn(() => task1());
+    n.spawn(() => task2());
 }
 /* both tasks have finished */
 ```
 
-`@destroy` waits. To consume the handle without joining, register optional
-after-work and abandon (`n->on_last(ctx, finish); n->abandon();`). Last-exit
+To consume a self-owned handle without joining, register optional
+after-work and abandon (`n.on_last(ctx, finish); n.abandon();`). Last-exit
 closes registered channels, runs the hook, and frees the nursery. That is
 not cancel. Spec §8.1.5.
 
@@ -442,19 +449,19 @@ int[~10 <] rx;
 CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
 
 {
-    CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
+    CCNursery outer = cc_nursery_create() !> @destroy;
 
-    outer->spawn(() => [rx] {
+    outer.spawn(() => [rx] {
         int v;
         while (cc_io_avail(rx.recv(&v)))
             printf("got %d\n", v);
     });
 
     {
-        CCNursery* inner = cc_nursery_create(outer) !> @destroy;
-        (void)inner->close_on(tx);
+        CCNursery inner = outer.create_child() !> @destroy;
+        (void)inner.close_on(tx);
 
-        inner->spawn(() => [tx] {
+        inner.spawn(() => [tx] {
             for (int i = 0; i < 5; i++)
                 (void)tx.send(i);
         });
@@ -486,7 +493,7 @@ The wait parks a fiber or an OS thread. An expired deadline is
 ### Async / await
 
 Prefer `@parallel` for independent value joins that finish at a brace.
-Prefer `n->spawn` for sibling work under a nursery (named lifetime, channels,
+Prefer `n.spawn` for sibling work under a nursery (named lifetime, channels,
 cancel). Prefer `@async` / `@await` when one call stack should suspend
 without inventing a nursery just to join. Drive an async stack from sync
 `main` with `@await` (or `cc_block_on` where appropriate).

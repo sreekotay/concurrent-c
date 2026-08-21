@@ -54,6 +54,7 @@ void sender_fiber(int[~ >] tx1, int[~ >] tx2) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     setvbuf(stdout, NULL, _IONBF, 0);
     srand(time(NULL));
 
@@ -71,21 +72,20 @@ int main(void) {
     int[~ <] rx1 = rx1_h; int[~ <] rx2 = rx2_h;
 
     {
-        CCNursery* __cc_nursery129 = @create(NULL) @destroy;
-        if (!__cc_nursery129) abort();
+        CCNursery __cc_nursery129 = @create() !> @destroy;
 
         // 1. Start Selectors
         for (int i = 0; i < NUM_FIBERS; i++) {
             CCChanRx r1 = rx1;
             CCChanRx r2 = rx2;
-            __cc_nursery129->spawn(() => [r1, r2] { selector_fiber(r1, r2); });
+            __cc_nursery129.spawn(() => [r1, r2] { selector_fiber(r1, r2); });
         }
 
         // 2. Start Senders
         for (int i = 0; i < NUM_FIBERS; i++) {
             CCChanTx t1 = tx1;
             CCChanTx t2 = tx2;
-            __cc_nursery129->spawn(() => [t1, t2] { sender_fiber(t1, t2); });
+            __cc_nursery129.spawn(() => [t1, t2] { sender_fiber(t1, t2); });
         }
         
         // 3. Monitor progress with a timeout

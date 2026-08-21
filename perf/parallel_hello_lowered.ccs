@@ -180,6 +180,7 @@ static void* sum_nur_thunk(void* arg) {
 }
 
 static uint32_t sum_nur(uint32_t d, uint32_t i) {
+    @errhandler(CCError e) cc_error_exit(e);
     if (d >= g_depth)
         return i;
     if (d >= g_spawn_until)
@@ -189,9 +190,7 @@ static uint32_t sum_nur(uint32_t d, uint32_t i) {
     uint32_t right = 0;
     ParEnv el;
     ParEnv er;
-    CCNursery* n = cc_nursery_create(NULL);
-    if (!n)
-        abort();
+    CCNursery n = cc_nursery_create() !>;
 
     el.d = d + 1;
     el.i = u24(i * 2);

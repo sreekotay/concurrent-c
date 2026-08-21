@@ -120,6 +120,7 @@ static CompressedResult* !>(CCIoError) compress_slice(CCSlice data, long seq,
 }
 
 static void compress_and_write_i(CompressJob* job, int i) {
+    @errhandler(CCError e) cc_error_exit(e);
     size_t off = (size_t)i * (size_t)BLOCK_SIZE;
     CompressedResult* item = NULL;
     int handed_read = 0;
@@ -182,10 +183,10 @@ static void spawn_compress_all(CompressJob* job, int n) {
     int i;
     PigzTurnstile* ts = job->ts;
 
-    CCNursery* nur = cc_nursery_create(NULL) !> @destroy;
+    CCNursery nur = cc_nursery_create() !> @destroy;
     for (i = 0; i < n; i++) {
         ts->enter(i) !>;
-        nur->spawn(() => [job, i, ts] {
+        nur.spawn(() => [job, i, ts] {
             @errhandler(CCError e) cc_error_exit(e);
             compress_and_write_i(job, i);
             ts->leave() !>;

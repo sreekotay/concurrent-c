@@ -53,6 +53,7 @@ cc_atomic_int g_recv;
 cc_atomic_int g_sum;
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int fails = 0;
     for (int iter = 0; iter < REPEATS; iter++) {
         g_ch0 = cc_channel_pair(&g_tx0, &g_rx0);
@@ -62,24 +63,23 @@ int main(void) {
         cc_atomic_store(&g_sum, 0);
 
         {
-            CCNursery* __n = @create(NULL) @destroy;
-            if (!__n) abort();
+            CCNursery __n = @create() !> @destroy;
 
-            __n->spawn(() => {
+            __n.spawn(() => {
                 for (int i = 0; i < NUM_ITEMS; i++) chan_send(g_tx0, i);
                 chan_close(g_tx0);
             });
-            __n->spawn(() => {
+            __n.spawn(() => {
                 int v;
                 while (cc_io_avail(chan_recv(g_rx0, &v))) chan_send(g_tx1, v+1);
                 chan_close(g_tx1);
             });
-            __n->spawn(() => {
+            __n.spawn(() => {
                 int v;
                 while (cc_io_avail(chan_recv(g_rx1, &v))) chan_send(g_tx2, v+1);
                 chan_close(g_tx2);
             });
-            __n->spawn(() => {
+            __n.spawn(() => {
                 int v;
                 while (cc_io_avail(chan_recv(g_rx2, &v))) {
                     cc_atomic_fetch_add(&g_recv, 1);

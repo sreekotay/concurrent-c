@@ -11,6 +11,7 @@
  * times out waiting for progress.
  */
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int[~ >] done_tx;
     int[~ <] done_rx;
     int[~1 >] progress_tx;
@@ -22,10 +23,9 @@ int main(void) {
     int first_err = 0;
 
     {
-        CCNursery* __cc_nursery58 = @create(NULL) @destroy;
-        if (!__cc_nursery58) abort();
+        CCNursery __cc_nursery58 = @create() !> @destroy;
 
-        __cc_nursery58->spawn(() => {
+        __cc_nursery58.spawn(() => {
             if (cc_io_avail(chan_send(done_tx, 1))) {
                 (void)chan_send(progress_tx, 2);
             }

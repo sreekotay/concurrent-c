@@ -46,13 +46,13 @@ int main(void) {
 
     CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
     CCStdio io = cc_stdio_create(&a);
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+    CCNursery n = cc_nursery_create() !> @destroy;
 
-    n->spawn(() => [io] {
+    n.spawn(() => [io] {
         @errhandler(CCError e) cc_error_exit(e);
         io.println("Hello from task A!") !>;
     });
-    n->spawn(() => [io] {
+    n.spawn(() => [io] {
         @errhandler(CCError e) cc_error_exit(e);
         io.println("Hello from task B!") !>;
     });
@@ -63,7 +63,7 @@ int main(void) {
 | Surface | Examples |
 |---------|----------|
 | Lifecycle | `name@(args) @destroy` / `@detach`, `@defer` / `@defer(err\|ok)` / `@cancel` |
-| Concurrency | `@async` / `@await` / `@blocking` / `@nonblocking`, `n->spawn(...)` |
+| Concurrency | `@async` / `@await` / `@blocking` / `@nonblocking`, `n.spawn(...)` |
 | Results | `@errhandler` / `@err`, unwrap `!>` / `?>`, types `T!>(E)` |
 | Methods | UFCS `value.method(...)` / `ptr->method(...)` |
 | Types | `T[:]`, `T[:!]`, `T[~N 1:N >]`, `Name::[args]` |

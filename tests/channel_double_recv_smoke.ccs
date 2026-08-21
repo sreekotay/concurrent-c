@@ -20,19 +20,19 @@ cc_atomic_int g_received_items[NUM_ITEMS] = {0};
 cc_atomic_int g_duplicates = 0;
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     Item[~BUFFER_SIZE >] tx;
     Item[~BUFFER_SIZE <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
     @defer cc_chan_free(ch);
     
-    CCNursery* n = @create(NULL) @detach;
-    if (!n) abort();
+    CCNursery n = @create() !> @detach;
 
     {
         /* Workers */
         for (int w = 0; w < NUM_WORKERS; w++) {
             int worker_id = w;
-            (void)cc_nursery_spawn_closure0(n, () => [worker_id] {
+            n.spawn(() => [worker_id] {
                 Item item;
                 int count = 0;
                 while (cc_io_avail(chan_recv(rx, &item))) {
@@ -52,7 +52,7 @@ int main(void) {
         }
         
         /* Producer - then close channel */
-        (void)cc_nursery_spawn_closure0(n, () => {
+        n.spawn(() => {
             for (int i = 0; i < NUM_ITEMS; i++) {
                 Item item = { .seq = i, .value = i * 10 };
                 (void)chan_send(tx, item);

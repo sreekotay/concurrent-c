@@ -18,22 +18,22 @@ static void* compute(void* arg) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int chan_cap = 2;
     CCTask[~chan_cap >] tx;
     CCTask[~chan_cap <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
 
     {
-        CCNursery* __cc_nursery91 = @create(NULL) @destroy;
-        if (!__cc_nursery91) abort();
+        CCNursery __cc_nursery91 = @create() !> @destroy;
 
-        __cc_nursery91->spawn(() => [tx] {
+        __cc_nursery91.spawn(() => [tx] {
             CCTask task = cc_fiber_spawn_task(compute, (void*)41);
             (void)chan_send(tx, task);
             chan_close(tx);
         });
 
-        __cc_nursery91->spawn(() => [rx, ch] {
+        __cc_nursery91.spawn(() => [rx, ch] {
             bool write_failed = false;
             (void)ch;
             CCTask task;

@@ -16,6 +16,7 @@ static double time_now_ms(void) {
 
 /* Buffered channel: producer/consumer in separate tasks */
 static void bench_buffered(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int[~1000 >] tx;
     int[~1000 <] rx;
     cc_channel_pair(&tx, &rx);
@@ -23,19 +24,18 @@ static void bench_buffered(void) {
     double start = time_now_ms();
 
     {
-        CCNursery* __cc_nursery167 = @create(NULL) @destroy;
-        if (!__cc_nursery167) abort();
-        (void)__cc_nursery167->close_on(tx);
+        CCNursery __cc_nursery167 = @create() !> @destroy;
+        (void)__cc_nursery167.close_on(tx);
 
         /* Producer */
-        __cc_nursery167->spawn(() => {
+        __cc_nursery167.spawn(() => {
             for (int i = 0; i < ITERATIONS; i++) {
                 tx.send(i);
             }
         });
         
         /* Consumer */
-        __cc_nursery167->spawn(() => {
+        __cc_nursery167.spawn(() => {
             int v;
             for (int i = 0; i < ITERATIONS; i++) {
                 rx.recv(&v);
@@ -52,6 +52,7 @@ static void bench_buffered(void) {
 
 /* Unbuffered channel: rendezvous */
 static void bench_unbuffered(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int[~ >] tx;
     int[~ <] rx;
     cc_channel_pair(&tx, &rx);  /* unbuffered */
@@ -60,17 +61,16 @@ static void bench_unbuffered(void) {
     double start = time_now_ms();
     
     {
-        CCNursery* __cc_nursery168 = @create(NULL) @destroy;
-        if (!__cc_nursery168) abort();
-        (void)__cc_nursery168->close_on(tx);
+        CCNursery __cc_nursery168 = @create() !> @destroy;
+        (void)__cc_nursery168.close_on(tx);
 
-        __cc_nursery168->spawn(() => [iterations] {
+        __cc_nursery168.spawn(() => [iterations] {
             for (int i = 0; i < iterations; i++) {
                 tx.send(i);
             }
         });
         
-        __cc_nursery168->spawn(() => [iterations] {
+        __cc_nursery168.spawn(() => [iterations] {
             int v;
             for (int i = 0; i < iterations; i++) {
                 rx.recv(&v);

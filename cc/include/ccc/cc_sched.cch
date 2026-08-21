@@ -151,7 +151,7 @@ void cc_thread_task_free(struct CCSpawnTask* task);
 int cc_scheduler_stats(CCSchedulerStats* out);
 
 /* @parallel spawn/join. Spawn refuses (INVALID) when in-flight @parallel
- * fibers reach 256 * online processors. n->spawn is uncapped. */
+ * fibers reach 256 * online processors. n.spawn is uncapped. */
 CCTask cc_parallel_spawn(void* (*fn)(void*), void* arg);
 void cc_parallel_join(CCTask t);
 

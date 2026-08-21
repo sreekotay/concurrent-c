@@ -13,8 +13,8 @@ int main(void) {
     Acc acc = { .x = 1 };
     int r = acc.tag();
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-        n->spawn(() => { Bcc acc = { .x = 1 }; (void)acc; });
+        CCNursery n = cc_nursery_create() !> @destroy;
+        n.spawn(() => { Bcc acc = { .x = 1 }; (void)acc; });
     }
     printf("r=%d\n", r);
     return r == 101 ? 0 : 1;

@@ -62,7 +62,9 @@ int main(void) {
     CCChan* ch = cc_channel_pair(&tx, &rx);
 
     {
-        CCNursery* consumer = @create(NULL, () => [rx] {
+        @errhandler(CCError e) cc_error_exit(e);
+        CCNursery consumer = cc_nursery_create() !> @destroy;
+        consumer.spawn(() => [rx] {
             Payload* p = NULL;
             long expect = 0;
             int rc;
@@ -98,13 +100,10 @@ int main(void) {
                 printf("FAIL: got %d items, expected %d\n", got, NUM_ITEMS);
                 cc_atomic_store(&g_failed, 1);
             }
-        }) @destroy;
-        if (!consumer) {
-            printf("FAIL: consumer nursery\n");
-            return 1;
-        }
+        });
 
-        CCNursery* producer = @create(consumer, () => [tx] {
+        CCNursery producer = consumer.create_child() !> @destroy;
+        producer.spawn(() => [tx] {
             for (long i = 0; i < NUM_ITEMS; i++) {
                 if (cc_atomic_load(&g_pipeline_error)) break;
                 Payload* p = (Payload*)malloc(sizeof(Payload));
@@ -127,14 +126,9 @@ int main(void) {
                     break;
                 }
             }
-        }) @destroy {
-            chan_close(tx);
-        };
-        if (!producer) {
-            chan_close(tx);
-            printf("FAIL: producer nursery\n");
-            return 1;
-        }
+        });
+        producer.wait();
+        chan_close(tx);
     }
 
     cc_channel_free(ch);

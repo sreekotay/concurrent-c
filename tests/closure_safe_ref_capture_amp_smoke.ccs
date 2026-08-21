@@ -1,4 +1,5 @@
 /* @safe &x allows passing &x to a mutator; sync is the program's job. */
+#include <ccc/cc_runtime.cch>
 #include <ccc/cc_nursery.cch>
 #include <stdio.h>
 
@@ -7,13 +8,13 @@ static void write_i32(int* p, int v) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int x = 7;
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) abort();
+        CCNursery n = @create() !> @destroy;
 
-        n->spawn(() => [@safe &x] {
+        n.spawn(() => [@safe &x] {
             write_i32(&x, 42);
         });
     }

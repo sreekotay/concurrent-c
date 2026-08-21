@@ -39,12 +39,12 @@ static cc_atomic_int g_sum = 0;
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     cc_atomic_store(&g_sum, 0);
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) return 2;
-        if (n->spawn_async(producer(5)) != 0) return 3;
-        if (n->spawn_async(producer(4)) != 0) return 4;
+        CCNursery n = @create() !> @destroy;
+        if (n.spawn_async(producer(5)) != 0) return 3;
+        if (n.spawn_async(producer(4)) != 0) return 4;
     }
     int sum = cc_atomic_load(&g_sum);
     if (sum != (1+2+3+4+5) + (1+2+3+4)) return 5;

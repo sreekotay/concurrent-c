@@ -248,6 +248,7 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
                                                   size_t cap,
                                                   size_t* out_argc,
                                                   CCError* err) {
+    @errhandler(CCError e) cc_error_exit(e);
     /* Loop so Redis-style no-ops (blank inline `\r\n`, empty multibulk `*0`)
      * are consumed without killing the connection; keep reading until a
      * real command, incomplete frame, or hard error. */
@@ -776,6 +777,7 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
 
 
 static bool write_all(CCSocket* sock, char[:] data) {
+    @errhandler(CCError e) cc_error_exit(e);
     size_t off = 0;
     const int write_deadline_ms = 1000;
     CCDeadline deadline = cc_deadline_after_ms(write_deadline_ms);
@@ -960,6 +962,7 @@ typedef struct OwnerReplyEnv {
 } OwnerReplyEnv;
 
 static void* owner_reply_entry(void* env, intptr_t slot_i, intptr_t arena_i) {
+    @errhandler(CCError e) cc_error_exit(e);
     OwnerReplyEnv* e = (OwnerReplyEnv*)env;
     RedisReply* slot = (RedisReply*)slot_i;
     CCArena* arena = (CCArena*)arena_i;
@@ -1072,6 +1075,7 @@ static void* owner_reply_entry(void* env, intptr_t slot_i, intptr_t arena_i) {
 }
 
 @noblock static RedisPipelineStatus drain_pipeline_window(RedisConn* conn, RedisPipelineWindow* window) {
+    @errhandler(CCError e) cc_error_exit(e);
     if (!window) return REDIS_PIPELINE_REPLY_CLOSED;
     @defer reply_arena_reset(conn);
     while (window->replies_pending > 0) {
@@ -1188,20 +1192,20 @@ int main(int argc, char** argv) {
     fflush(stdout);
 
     {
-        CCNursery* server = cc_nursery_create(NULL) !> @destroy;
+        CCNursery server = cc_nursery_create() !> @destroy;
         /* On cancel, close req_tx so owner_loop's recv returns
          * Ok(false) and the owner exits cleanly. */
-        (void)server->close_on(req_tx);
+        (void)server.close_on(req_tx);
 
-        server->on_shutdown((CCNursery* server) => {
-            server->cancel();
+        server.on_shutdown((CCNursery server) => {
+            server.cancel();
         }) !>;
 
-        server->spawn(() => [ln_ptr, req_tx, req_ch, server] {
+        server.spawn(() => [ln_ptr, req_tx, req_ch, server] {
             uint64_t next_conn_id = 1;
             while (true) {
                 CCSocket client = ln_ptr->accept() !>(e) {
-                    if (!server->is_cancelled()) {
+                    if (!server.is_cancelled()) {
                         fprintf(stderr, "redis_owner accept error: %d\n", (int)e);
                     }
                     break;
@@ -1214,12 +1218,12 @@ int main(int argc, char** argv) {
                 (void)setsockopt(client.fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
                 uint64_t id = next_conn_id++;
-                (void)server->spawn_async(handle_client(client, req_tx, id));
+                (void)server.spawn_async(handle_client(client, req_tx, id));
             }
             cc_channel_close(req_ch);
         });
 
-        (void)server->spawn_async(owner_loop(req_rx));
+        (void)server.spawn_async(owner_loop(req_rx));
     }
 
     return 0;

@@ -51,6 +51,7 @@ static void print_sched_stats(const char* label) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     if (!getenv("CC_DEADLOCK_ABORT")) {
         setenv("CC_DEADLOCK_ABORT", "0", 0);
     }
@@ -78,11 +79,10 @@ int main(void) {
 
     double start = time_now_ms();
     {
-        CCNursery* __cc_nursery169 = @create(NULL) @destroy;
-        if (!__cc_nursery169) abort();
+        CCNursery __cc_nursery169 = @create() !> @destroy;
 
         for (int i = 0; i < tasks; i++) {
-            __cc_nursery169->spawn(() => {
+            __cc_nursery169.spawn(() => {
                 int v = 0;
                 int err = cc_chan_recv(work, &v, sizeof(v));
                 if (err == 0) {
@@ -91,7 +91,7 @@ int main(void) {
             });
         }
         for (int i = 0; i < blocking_tasks; i++) {
-            __cc_nursery169->spawn(() => [blocking_sleep_us] {
+            __cc_nursery169.spawn(() => [blocking_sleep_us] {
                 blocking_sleep(blocking_sleep_us);
                 int v = 1;
                 cc_chan_send(block_done, &v, sizeof(v));

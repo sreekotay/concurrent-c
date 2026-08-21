@@ -43,6 +43,7 @@ static int wait_flag(cc_atomic_int* f, int ms) {
 }
 
 int main(int argc, char** argv) {
+    @errhandler(CCError e) cc_error_exit(e);
     (void)argc;
 #ifdef __APPLE__
     if (!getenv("CC__GMALLOC_CHILD")) {
@@ -59,12 +60,11 @@ int main(int argc, char** argv) {
 #endif
     for (int i = 0; i < 500; i++) {
         cc_atomic_int done = 0;
-        CCNursery* n = cc_nursery_create(NULL);
-        if (!n) return 40;
+        CCNursery n = cc_nursery_create() !>;
         cc_atomic_store(&g_spin, (i % 97) * 29);
-        if (n->spawn(() => { child_spin(); }) != 0) return 41;
-        if (n->on_last(&done, finish_flag) != 0) return 42;
-        n->abandon();
+        if (n.spawn(() => { child_spin(); }) != 0) return 41;
+        if (n.on_last(&done, finish_flag) != 0) return 42;
+        n.abandon();
         if (!wait_flag(&done, 2000)) return 43;
     }
     printf("nursery_abandon_gmalloc_stress_smoke: OK\n");

@@ -34,6 +34,7 @@ static void consumer(CCChanRx rx, int count) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int[~1024 >] tx1_h; int[~1024 <] rx1_h; CCChan* ch1 = cc_channel_pair(&tx1_h, &rx1_h);
     int[~1024 >] tx2_h; int[~1024 <] rx2_h; CCChan* ch2 = cc_channel_pair(&tx2_h, &rx2_h);
     (void)ch1; (void)ch2;
@@ -43,13 +44,12 @@ int main(void) {
     CCChanRx rx2 = rx2_h;
 
     {
-        CCNursery* __cc_nursery18 = @create(NULL) @destroy;
-        if (!__cc_nursery18) abort();
+        CCNursery __cc_nursery18 = @create() !> @destroy;
 
-        __cc_nursery18->spawn(() => [tx1] { producer(tx1, ITERS); });
-        __cc_nursery18->spawn(() => [rx1] { consumer(rx1, ITERS); });
-        __cc_nursery18->spawn(() => [tx2] { producer(tx2, ITERS); });
-        __cc_nursery18->spawn(() => [rx2] { consumer(rx2, ITERS); });
+        __cc_nursery18.spawn(() => [tx1] { producer(tx1, ITERS); });
+        __cc_nursery18.spawn(() => [rx1] { consumer(rx1, ITERS); });
+        __cc_nursery18.spawn(() => [tx2] { producer(tx2, ITERS); });
+        __cc_nursery18.spawn(() => [rx2] { consumer(rx2, ITERS); });
     
     }
 

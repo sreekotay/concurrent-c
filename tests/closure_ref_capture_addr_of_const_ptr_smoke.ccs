@@ -7,13 +7,13 @@ static void read_only_i32(const int* p) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int x = 7;
 
     {
-        CCNursery* __cc_nursery49 = @create(NULL) @destroy;
-        if (!__cc_nursery49) abort();
+        CCNursery __cc_nursery49 = @create() !> @destroy;
 
-        __cc_nursery49->spawn(() => [&x] {
+        __cc_nursery49.spawn(() => [&x] {
             /* Allowed: callee takes const int* */
             read_only_i32(&x);
         });

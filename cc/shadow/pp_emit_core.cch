@@ -3029,6 +3029,7 @@ typedef struct {
     char outer[64];
     char field[64];
     char target[64]; /* field base type, e.g. CCFile */
+    char mode[64];   /* viewed face: as: (Mode)field; empty = full surface */
 } ShadowAsEmbed;
 enum { SHADOW_AS_CAP = 128 };
 static ShadowAsEmbed g_shadow_as[SHADOW_AS_CAP];
@@ -3343,24 +3344,38 @@ static int shadow_restrict_parse_pat(const char** pp, char* out, size_t cap) {
 
 static int shadow_restrict_parse_kind_label(const char** pp, int* out_kind) {
     const char* p;
+    const char* q;
     if (!pp || !out_kind) return 0;
     p = *pp;
     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ';')
         p++;
-    if (p[0] == 'a' && p[1] == 's' && p[2] == ':') {
-        *out_kind = SHADOW_RESTRICT_AS;
-        *pp = p + 3;
-        return 1;
+    /* Token spelling inserts spaces: `as : ( Region ) field`. */
+    if (p[0] == 'a' && p[1] == 's') {
+        q = p + 2;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q == ':') {
+            *out_kind = SHADOW_RESTRICT_AS;
+            *pp = q + 1;
+            return 1;
+        }
     }
-    if ((p[0] == 'r' || p[0] == 'w') && p[1] == ':') {
-        *out_kind = (p[0] == 'r') ? SHADOW_RESTRICT_R : SHADOW_RESTRICT_W;
-        *pp = p + 2;
-        return 1;
+    if (p[0] == 'r' && p[1] == 'w') {
+        q = p + 2;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q == ':') {
+            *out_kind = SHADOW_RESTRICT_RW;
+            *pp = q + 1;
+            return 1;
+        }
     }
-    if (p[0] == 'r' && p[1] == 'w' && p[2] == ':') {
-        *out_kind = SHADOW_RESTRICT_RW;
-        *pp = p + 3;
-        return 1;
+    if (p[0] == 'r' || p[0] == 'w') {
+        q = p + 1;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q == ':') {
+            *out_kind = (p[0] == 'r') ? SHADOW_RESTRICT_R : SHADOW_RESTRICT_W;
+            *pp = q + 1;
+            return 1;
+        }
     }
     return 0;
 }
@@ -3375,6 +3390,8 @@ static int shadow_embed_destroy_append(char* body, size_t* bo, size_t cap,
                                        int skip_pre);
 static void shadow_as_register(const char* outer, const char* field,
                                const char* target);
+static void shadow_as_register_viewed(const char* outer, const char* field,
+                                     const char* target, const char* view);
 static void shadow_as_resolve_transitive(void);
 static void shadow_as_glob_register(const char* pat, const char* field);
 static void shadow_as_materialize_globs_for(const char* outer);
@@ -3386,7 +3403,7 @@ static int shadow_ty_is_glob(const char* s) {
 static int shadow_restrict_parse_body(const char* body, ShadowRestrictEnt* out,
                                      int cap, int* nout, const char* mode,
                                      const char* base, char as_fields[][64],
-                                     int as_cap, int* nas) {
+                                     char as_modes[][64], int as_cap, int* nas) {
     const char* p = body ? body : "";
     int kind = SHADOW_RESTRICT_R;
     int n = 0;
@@ -3407,9 +3424,41 @@ static int shadow_restrict_parse_body(const char* body, ShadowRestrictEnt* out,
             kind = k;
             continue;
         }
-        if (!shadow_restrict_parse_pat(&p, pat, sizeof(pat))) break;
-        /* `as:` faces — field names of Base; not allow-list patterns. */
+        /* `as:` faces — `field` or `(Mode)field`; not allow-list patterns. */
         if (kind == SHADOW_RESTRICT_AS) {
+            char face_mode[64];
+            face_mode[0] = 0;
+            while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+            if (*p == '(') {
+                int mi = 0;
+                p++;
+                while (*p == ' ' || *p == '\t') p++;
+                while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+                       (*p >= '0' && *p <= '9') || *p == '_') {
+                    if (mi + 1 < (int)sizeof(face_mode))
+                        face_mode[mi++] = *p;
+                    p++;
+                }
+                face_mode[mi] = 0;
+                while (*p == ' ' || *p == '\t') p++;
+                if (*p != ')') {
+                    fprintf(stderr,
+                            "error: @typeview %s on %s: expected ')' after "
+                            "as: mode\n",
+                            mode ? mode : "?", base ? base : "?");
+                    g_shadow_restrict_diag = 1;
+                    return 0;
+                }
+                p++;
+                if (!face_mode[0]) {
+                    fprintf(stderr,
+                            "error: @typeview %s on %s: empty as: mode\n",
+                            mode ? mode : "?", base ? base : "?");
+                    g_shadow_restrict_diag = 1;
+                    return 0;
+                }
+            }
+            if (!shadow_restrict_parse_pat(&p, pat, sizeof(pat))) break;
             if (!as_fields || !nas || as_cap <= 0) {
                 fprintf(stderr,
                         "error: @typeview %s on %s: as: faces not supported "
@@ -3436,9 +3485,12 @@ static int shadow_restrict_parse_body(const char* body, ShadowRestrictEnt* out,
                 return 0;
             }
             snprintf(as_fields[na], 64, "%s", pat);
+            if (as_modes)
+                snprintf(as_modes[na], 64, "%s", face_mode);
             na++;
             continue;
         }
+        if (!shadow_restrict_parse_pat(&p, pat, sizeof(pat))) break;
         for (i = 0; i < n; i++) {
             if (strcmp(out[i].pat, pat) == 0) {
                 fprintf(stderr,
@@ -3471,6 +3523,7 @@ static int shadow_restrict_register(const char* base, const char* mode,
     char mangled[128];
     ShadowRestrictEnt seen[SHADOW_RESTRICT_ALLOW_CAP];
     char as_fields[SHADOW_RESTRICT_ALLOW_CAP][64];
+    char as_modes[SHADOW_RESTRICT_ALLOW_CAP][64];
     int nseen = 0;
     int nas = 0;
     int i;
@@ -3483,8 +3536,9 @@ static int shadow_restrict_register(const char* base, const char* mode,
         snprintf(mangled, sizeof(mangled), "%s_Restrict_%s", base, mode);
     else
         snprintf(mangled, sizeof(mangled), "%s", base);
+    memset(as_modes, 0, sizeof(as_modes));
     if (!shadow_restrict_parse_body(body, seen, SHADOW_RESTRICT_ALLOW_CAP,
-                                    &nseen, mlabel, base, as_fields,
+                                    &nseen, mlabel, base, as_fields, as_modes,
                                     SHADOW_RESTRICT_ALLOW_CAP, &nas))
         return 0;
     /* `as:` → same embed table as field `@as` (unique target type per path).
@@ -3528,7 +3582,7 @@ static int shadow_restrict_register(const char* base, const char* mode,
             g_shadow_restrict_diag = 1;
             return 0;
         }
-        shadow_as_register(base, as_fields[i], target);
+        shadow_as_register_viewed(base, as_fields[i], target, as_modes[i]);
     }
     /* as:-only body: faces without locking the base allow-list. */
     if (nseen == 0) {
@@ -3844,6 +3898,16 @@ static void shadow_restrict_register_builtins(void) {
     /* Typed-slice family face — also declared in cc_slice.cch as
      * `@typeview on CCSlice_* { as: base; }` (stripped from host `.h`). */
     shadow_as_glob_register("CCSlice_*", "base");
+    /* Header lowering strips named @typeview on CCArena. Pin after the
+     * table reset so `@typeview(Parent) CCArena*` and viewed faces work
+     * without a live declaration in the consuming TU. */
+    (void)shadow_restrict_register("CCArena", "Alloc",
+                                   "{ r: alloc, remaining; }");
+    (void)shadow_restrict_register("CCArena", "Parent",
+                                   "{ r: adopt, attach, create_*; }");
+    (void)shadow_restrict_register("CCArena", "Region",
+                                   "{ r: alloc, remaining, adopt, attach, "
+                                   "create_*; }");
 }
 
 static void shadow_restrict_register_from_items(AstNode** items, int n) {
@@ -4255,6 +4319,8 @@ static int shadow_ufcs_callee_declared(const char* name);
 static const char* shadow_ufn_unique_for_meth(const char* meth);
 static void shadow_as_register(const char* outer, const char* field,
                                const char* target);
+static void shadow_as_register_viewed(const char* outer, const char* field,
+                                     const char* target, const char* view);
 static void shadow_as_resolve_transitive(void);
 
 /* Family member sets from `##_<member>` in family macros (same rule as
@@ -4572,6 +4638,8 @@ static void shadow_chan_reset(void) {
      * so cc_err(e) / @errhandler still need the unique path without a
      * live typeview in the TU. */
     shadow_as_register("CCIoError", "base", "CCError");
+    /* Opaque nursery: header lowering strips `as: (Region)n`. */
+    shadow_as_register_viewed("CCNursery", "arena", "CCArena", "Region");
     g_shadow_ndhooks = 0;
     g_shadow_nchooks = 0;
     if (g_shadow_ufcs_syms) {
@@ -5864,7 +5932,24 @@ static void shadow_as_register(const char* outer, const char* field,
              field);
     snprintf(g_shadow_as[g_shadow_nas].target, sizeof(g_shadow_as[0].target),
              "%s", target);
+    g_shadow_as[g_shadow_nas].mode[0] = 0;
     g_shadow_nas++;
+}
+
+static void shadow_as_register_viewed(const char* outer, const char* field,
+                                     const char* target, const char* view) {
+    int i;
+    shadow_as_register(outer, field, target);
+    if (!view || !view[0] || g_shadow_nas <= 0) return;
+    for (i = g_shadow_nas - 1; i >= 0; i--) {
+        if (strcmp(g_shadow_as[i].outer, outer) == 0 &&
+            strcmp(g_shadow_as[i].field, field) == 0 &&
+            strcmp(g_shadow_as[i].target, target) == 0) {
+            snprintf(g_shadow_as[i].mode, sizeof(g_shadow_as[i].mode), "%s",
+                     view);
+            return;
+        }
+    }
 }
 
 static void shadow_as_glob_register(const char* pat, const char* field) {

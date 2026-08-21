@@ -1,7 +1,7 @@
 /*
  * Recipe: Closure Capture Semantics
  *
- * Closures in n->spawn(...) capture outer variables. Two modes:
+ * Closures in n.spawn(...) capture outer variables. Two modes:
  *
  *   () => body             — value capture (default): each outer variable
  *                            is copied into the closure; the original is
@@ -26,13 +26,13 @@ int main(void) {
     println("=== value capture ===") !>;
     println(@string(`before: snapshot = ${snapshot}`, @scratch)) !>;
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-        n->spawn(() => {
+        CCNursery n = cc_nursery_create() !> @destroy;
+        n.spawn(() => {
             @errhandler(CCError e) cc_error_exit(e);
             int seen = snapshot;
             println(@string(`  task A sees snapshot = ${seen}`, @scratch)) !>;
         });
-        n->spawn(() => {
+        n.spawn(() => {
             @errhandler(CCError e) cc_error_exit(e);
             int seen = snapshot;
             println(@string(`  task B sees snapshot = ${seen}`, @scratch)) !>;
@@ -48,8 +48,8 @@ int main(void) {
     println("=== reference capture (read-only) ===") !>;
     println(@string(`before: counter = ${counter}`, @scratch)) !>;
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-        n->spawn(() => [&counter] {
+        CCNursery n = cc_nursery_create() !> @destroy;
+        n.spawn(() => [&counter] {
             @errhandler(CCError e) cc_error_exit(e);
             println(@string(`  task C reads counter = ${counter}`, @scratch)) !>;
         });

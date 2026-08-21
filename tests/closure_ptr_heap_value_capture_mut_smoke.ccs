@@ -14,8 +14,8 @@ int main(void) {
     *p = 0;
 
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-        n->spawn(() => [p] {
+        CCNursery n = cc_nursery_create() !> @destroy;
+        n.spawn(() => [p] {
             *p = 42;
         });
     }

@@ -16,7 +16,7 @@ int main(void) {
     int v = boom() !>;              /* diverges */
 
     printf("unreachable %d\n", v);
-    CCNursery* nur = cc_nursery_create(NULL) @destroy;  /* never reached */
+    CCNursery nur = cc_nursery_create() !> @destroy;  /* never reached */
     (void)nur;
     return 0;
 }

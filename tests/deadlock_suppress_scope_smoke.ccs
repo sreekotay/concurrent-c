@@ -24,6 +24,7 @@ enum {
 static int g_mode = MODE_UNSUPPRESSED;
 
 static void child_deadlock_case(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     setenv("CC_WORKERS", "1", 1);
     setenv("CC_DEADLOCK_ABORT", "1", 1);
     /* Short latch: same detector shape, less wall time in the harness. */
@@ -35,10 +36,9 @@ static void child_deadlock_case(void) {
     if (!ch) _exit(20);
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) _exit(21);
+        CCNursery n = @create() !> @destroy;
 
-        n->spawn(() => {
+        n.spawn(() => {
             int v = 0;
             if (g_mode == MODE_SUPPRESSED) {
                 cc_deadlock_suppress_enter();

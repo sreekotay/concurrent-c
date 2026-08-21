@@ -467,14 +467,10 @@ static int cc__pp_builtin_destroy_info(const char* declared_type,
         if (out_pass_address) *out_pass_address = 1;
         return 1;
     }
-    if (saw_nursery && saw_star && !saw_arena && !saw_chan) {
-        /* Nurseries must wait for outstanding tasks before the handle is
-         * freed, so the full lifecycle is wait -> user body -> free.  This
-         * mirrors the hook sequence registered for the `@create(CCNursery)
-         * @destroy { body }` primary path in pass_create.c. */
-        if (out_pre_callee) *out_pre_callee = "cc_nursery_wait";
-        if (out_callee) *out_callee = "cc_nursery_free";
-        if (out_pass_address) *out_pass_address = 0;
+    if (saw_nursery && !saw_star && !saw_arena && !saw_chan) {
+        /* Handle value: destroy peels .n, waits, frees the host. */
+        if (out_callee) *out_callee = "cc_nursery_destroy";
+        if (out_pass_address) *out_pass_address = 1;
         return 1;
     }
     if (saw_chan && saw_star && !saw_nursery && !saw_arena) {

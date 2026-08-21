@@ -45,7 +45,9 @@ int main(void) {
     CCChan* ch = cc_channel_pair(&tx, &rx);
 
     {
-        CCNursery* consumer = @create(NULL, () => [rx] {
+        @errhandler(CCError e) cc_error_exit(e);
+        CCNursery consumer = cc_nursery_create() !> @destroy;
+        consumer.spawn(() => [rx] {
             CCTask task;
             int idx = 1;
             while (cc_io_avail(chan_recv(rx, &task))) {
@@ -72,10 +74,10 @@ int main(void) {
                 printf("FAIL: received %d items, expected %d\n", idx - 1, NUM_ITEMS);
                 atomic_store(&g_failed, 1);
             }
-        }) @destroy;
-        if (!consumer) abort();
+        });
 
-        CCNursery* producer = @create(consumer, () => [tx] {
+        CCNursery producer = consumer.create_child() !> @destroy;
+        producer.spawn(() => [tx] {
             for (int i = 1; i <= NUM_ITEMS; i++) {
                 Item* item = malloc(sizeof(Item));
                 item->id = i;
@@ -83,10 +85,9 @@ int main(void) {
                 CCTask task = cc_thread_spawn(compute, item);
                 (void)chan_send(tx, task);
             }
-        }) @destroy {
-            chan_close(tx);
-        };
-        if (!producer) abort();
+        });
+        producer.wait();
+        chan_close(tx);
     }
 
     cc_chan_free(ch);

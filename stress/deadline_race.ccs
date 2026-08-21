@@ -40,15 +40,15 @@ void racer_work(int racer_id) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     printf("deadline_race: %d racers with varying deadlines\n", NUM_RACERS);
 
     {
-        CCNursery* __cc_nursery119 = @create(NULL) @destroy;
-        if (!__cc_nursery119) abort();
+        CCNursery __cc_nursery119 = @create() !> @destroy;
 
         for (int i = 0; i < NUM_RACERS; i++) {
             int racer_id = i;
-            __cc_nursery119->spawn(() => {
+            __cc_nursery119.spawn(() => {
                 racer_work(racer_id);
             });
         }

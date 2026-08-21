@@ -121,6 +121,7 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
                                                   size_t cap,
                                                   size_t* out_argc,
                                                   CCError* err) {
+    @errhandler(CCError e) cc_error_exit(e);
     while (1) {
         size_t pos = 0;
         RespGCmd c;
@@ -358,6 +359,7 @@ static size_t unique_shards(RedisDb* db, char[:]* keys, size_t nkeys,
  * CCError and become -ERR via enc_fail — they must not share this channel. */
 
 static bool !>(CCIoError) write_all(CCSocket* sock, char[:] data) {
+    @errhandler(CCError e) cc_error_exit(e);
     size_t off = 0;
     const int write_deadline_ms = 1000;
     CCDeadline deadline = cc_deadline_after_ms(write_deadline_ms);
@@ -374,6 +376,7 @@ static bool !>(CCIoError) write_all(CCSocket* sock, char[:] data) {
 }
 
 static bool !>(CCIoError) redis_conn_flush(RedisConn* c) {
+    @errhandler(CCError e) cc_error_exit(e);
     char[:] data;
     if (!c || !c->arena)
         return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "conn flush: null")));
@@ -930,6 +933,7 @@ static void redis_client_drop_log(const char* phase, CCError e) {
 }
 
 static bool redis_conn_write_err_now(RedisConn* conn, CCError e) {
+    @errhandler(CCError e) cc_error_exit(e);
     RedisConnEnc enc = conn;
     const char* msg = e.message ? e.message : "internal error";
     /* Strip leading "ERR " if present — redis_conn_err adds -ERR. */
@@ -1112,14 +1116,14 @@ int main(int argc, char** argv) {
     eprintln(@string(`redis_idiomatic listening on ${addr} shards=${nshards}`,
                      @scratch)) !>;
 
-    CCNursery* server = cc_nursery_create(NULL) !> @destroy;
-    server->cancel_on_signals(SIGINT, SIGTERM) !>;
+    CCNursery server = cc_nursery_create() !> @destroy;
+    server.cancel_on_signals(SIGINT, SIGTERM) !>;
 
-    server->spawn(() => [@safe &db, @safe &ln, @safe &shards, server] {
+    server.spawn(() => [@safe &db, @safe &ln, @safe &shards, server] {
         ln.serve(server, (CCSocket* accepted) => [@safe &db, @safe &shards, server] {
             CCSocket client = *accepted;
             (void)client.set_nodelay(1);
-            server->spawn(() => [@safe &db, @safe &shards, client] {
+            server.spawn(() => [@safe &db, @safe &shards, client] {
                 handle_client(client, &db, &shards);
             });
         });

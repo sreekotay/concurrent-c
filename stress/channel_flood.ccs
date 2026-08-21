@@ -11,6 +11,7 @@
 cc_atomic_int g_received = 0;
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int num_producers = 4;
     int msgs_per = 25;
     int total_msgs = num_producers * msgs_per;
@@ -24,11 +25,10 @@ int main(void) {
            num_producers, msgs_per, total_msgs);
 
     {
-        CCNursery* __cc_nursery114 = @create(NULL) @destroy;
-        if (!__cc_nursery114) abort();
+        CCNursery __cc_nursery114 = @create() !> @destroy;
 
         /* Consumer */
-        __cc_nursery114->spawn(() => {
+        __cc_nursery114.spawn(() => {
             int v;
             while (cc_io_avail(chan_recv(rx, &v))) {
                 cc_atomic_fetch_add(&g_received, 1);
@@ -37,13 +37,12 @@ int main(void) {
 
         /* Producers */
         {
-            CCNursery* __cc_nursery115 = @create(NULL) @destroy;
-            if (!__cc_nursery115) abort();
-            (void)__cc_nursery115->close_on(tx);
+            CCNursery __cc_nursery115 = @create() !> @destroy;
+            (void)__cc_nursery115.close_on(tx);
 
             for (int p = 0; p < num_producers; p++) {
                 int n = msgs_per;  /* Capture local copy */
-                __cc_nursery115->spawn(() => [n] {
+                __cc_nursery115.spawn(() => [n] {
                     for (int i = 0; i < n; i++) {
                         (void)chan_send(tx, i);
                     }

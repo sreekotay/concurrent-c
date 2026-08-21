@@ -114,7 +114,7 @@ static size_t deflate_cap(size_t n) {
 /* Pooled input block at byte offset `off`. */
 static unsigned char* !>(CCError) read_block(int in_fd, CCArenaPool* pool,
                                              size_t off, size_t want) {
-    unsigned char* buf = (unsigned char*)pool->alloc();
+    unsigned char* buf = (unsigned char*)pool.alloc();
     if (!buf)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "block buf");
     ssize_t got = pread(in_fd, buf, want, (off_t)off);
@@ -131,7 +131,7 @@ static CompressedResult* !>(CCError) compress_slice(CCSlice data,
         const unsigned char* dict, size_t dict_len, bool is_last, int chain,
         ZState* zs, CCArenaPool* out_pool) {
     size_t max_out = deflate_cap((size_t)BLOCK_SIZE);
-    CompressedResult* res = (CompressedResult*)out_pool->alloc();
+    CompressedResult* res = (CompressedResult*)out_pool.alloc();
     @defer(err) out_pool->free(res);
     if (!res)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "deflate buf");

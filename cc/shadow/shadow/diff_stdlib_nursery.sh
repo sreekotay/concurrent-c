@@ -115,6 +115,9 @@ cat > "$TMP/use.c" <<'EOF'
 #include "cc_nursery.h"
 int main(void) {
     (void)cc_nursery_create;
+    (void)cc_nursery_create_child;
+    (void)cc_arena_create_nursery;
+    (void)cc_nursery_arena;
     (void)cc_nursery_destroy;
     (void)cc_nursery_wait;
     return 0;

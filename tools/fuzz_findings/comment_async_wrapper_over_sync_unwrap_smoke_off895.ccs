@@ -37,9 +37,9 @@ static void handle_impl(int x) {
 }
 
 int main(void) {
-    CCNursery* n = cc_nursery_create(NULL);
-    (void)n->spawn_async(wrapper(1));
-    (void)n->spawn_async(wrapper(2));
+    CCNursery n = cc_nursery_create() !>;
+    (void)n.spawn_async(wrapper(1));
+    (void)n.spawn_async(wrapper(2));
     cc_nursery_destroy(n);
     printf("async_wrapper_over_sync_unwrap: OK\n");
     return 0;

@@ -32,10 +32,10 @@
 static void plain(void) {}
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) return 1;
-        n->spawnhybrid(() => { plain(); });
+        CCNursery n = @create() !> @destroy;
+        n.spawnhybrid(() => { plain(); });
     }
 
 #line 1000 "fake_header.h"
@@ -50,9 +50,8 @@ int main(void) {
     /* Back in the user TU.  Another real closure here verifies the
      * visitor didn't get confused by the intervening directives. */
     {
-        CCNursery* n2 = @create(NULL) @destroy;
-        if (!n2) return 2;
-        n2->spawnhybrid(() => { plain(); });
+        CCNursery n2 = @create() !> @destroy;
+        n2.spawnhybrid(() => { plain(); });
     }
 
     return 0;

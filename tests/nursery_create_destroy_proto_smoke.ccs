@@ -5,15 +5,16 @@ static int g_destroy_ran = 0;
 
 int main(void) {
     {
-        CCNursery* n = @create(NULL, () => {
-            g_task_ran = 1;
-        }) @destroy {
-            (void)n->wait();
+        @errhandler(CCError e) cc_error_exit(e);
+        CCNursery n = cc_nursery_create() !> @destroy {
+            (void)n.wait();
             if (g_task_ran == 1) {
                 g_destroy_ran = 1;
             }
         };
-        if (!n) return 1;
+        n.spawn(() => {
+            g_task_ran = 1;
+        });
     }
 
     if (g_task_ran != 1) return 2;

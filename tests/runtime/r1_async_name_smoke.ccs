@@ -2,7 +2,7 @@
 //
 // What it exercises
 // -----------------
-// The spawn-site UFCS lowering for `n->spawn_async(<callee>(...))` in
+// The spawn-site UFCS lowering for `n.spawn_async(<callee>(...))` in
 // preprocess.c rewrites to `cc_nursery_spawn_async_named(...)` and
 // appends `, "<callee>", __FILE__, __LINE__` so each new fiber carries
 // its user-facing name + source location.
@@ -69,11 +69,11 @@ static cc_atomic_int g_beta_ok = 0;
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) return 10;
-        if (n->spawn_async(task_alpha()) != 0) return 11;
-        if (n->spawn_async(task_beta()) != 0) return 12;
+        CCNursery n = @create() !> @destroy;
+        if (n.spawn_async(task_alpha()) != 0) return 11;
+        if (n.spawn_async(task_beta()) != 0) return 12;
     }
 
     /* Per-fiber slot was populated by each task; substring-match the

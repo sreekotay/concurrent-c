@@ -12,8 +12,8 @@ int main(void) {
     int* p = &x;
 
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-        n->spawn(() => [p] {
+        CCNursery n = cc_nursery_create() !> @destroy;
+        n.spawn(() => [p] {
             if (*p != 7) abort();
         });
     }

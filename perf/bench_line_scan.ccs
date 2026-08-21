@@ -81,6 +81,7 @@ static int stats_eq(ScanStats a, ScanStats b) {
 
 /* --- slurp: read_all then scan in memory --- */
 static ScanStats scan_slurp(const char* path) {
+    @errhandler(CCError e) cc_error_exit(e);
     ScanStats s = {0};
     CCArena a = cc_arena_heap(megabytes(4));
     @defer cc_arena_free(&a);
@@ -102,6 +103,7 @@ static ScanStats scan_slurp(const char* path) {
 
 /* --- sync pull: read_line, tally, reset scratch (no full-file retain) --- */
 static ScanStats scan_sync(const char* path) {
+    @errhandler(CCError e) cc_error_exit(e);
     ScanStats s = {0};
     CCArena scratch = cc_arena_heap(megabytes(1));
     @defer cc_arena_free(&scratch);
@@ -134,6 +136,7 @@ typedef struct LineMsg {
 
 /* --- channel: producer alloc-and-send LineMsg; single consumer owns totals --- */
 static ScanStats scan_chan(const char* path) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCChanTx tx = {0};
     CCChanRx rx = {0};
     size_t cap = g_chan_cap ? g_chan_cap : 1;
@@ -153,11 +156,10 @@ static ScanStats scan_chan(const char* path) {
     *total = (ScanStats){0};
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) abort();
-        (void)n->close_on(tx);
+        CCNursery n = @create() !> @destroy;
+        (void)n.close_on(tx);
 
-        n->spawn(() => [tx, path] {
+        n.spawn(() => [tx, path] {
             CCFile f;
             if (cc_file_open(&f, cc_slice_cstr((char*)path), "rb") != 0) {
                 fprintf(stderr, "bench_line_scan: open failed: %s\n", path);
@@ -192,7 +194,7 @@ static ScanStats scan_chan(const char* path) {
             tx.close();
         });
 
-        n->spawn(() => [rx, total] {
+        n.spawn(() => [rx, total] {
             LineMsg msg = {0};
             while (cc_io_avail(rx.recv(&msg))) {
                 tally_line(msg.data, total);

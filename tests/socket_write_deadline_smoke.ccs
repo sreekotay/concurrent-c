@@ -41,6 +41,7 @@ static void writer_task(int fd) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     cc_atomic_store(&g_timed_out, 0);
     cc_atomic_store(&g_errors, 0);
 
@@ -54,15 +55,10 @@ int main(void) {
     (void)setsockopt(fds[0], SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) {
-            close(fds[0]);
-            close(fds[1]);
-            return 2;
-        }
+        CCNursery n = @create() !> @destroy;
         int writer_fd = fds[0];
         fds[0] = -1;
-        n->spawn(() => [writer_fd] { writer_task(writer_fd); });
+        n.spawn(() => [writer_fd] { writer_task(writer_fd); });
     }
 
     close(fds[1]);

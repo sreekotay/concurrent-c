@@ -1,15 +1,16 @@
 /* @safe &x still rejects direct mutation of the shared binding. */
 #include <ccc/cc_nursery.cch>
+#include <stdlib.h>
 
 int main(void) {
+    @errhandler(CCError e) { (void)e; abort(); }
     int counter = 0;
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) abort();
+        CCNursery n = @create() !> @destroy;
 
         /* ERROR: mutation of shared reference */
-        n->spawn(() => [@safe &counter] {
+        n.spawn(() => [@safe &counter] {
             counter++;
         });
     }

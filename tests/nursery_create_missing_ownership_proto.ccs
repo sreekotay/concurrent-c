@@ -1,7 +1,7 @@
 #include <ccc/std/prelude.cch>
 
 int main(void) {
-    CCNursery* n = @create(NULL, () => { });
+    CCNursery n = @create();
     (void)n;
     return 0;
 }

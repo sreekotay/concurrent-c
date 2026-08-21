@@ -39,6 +39,7 @@ static void receiver(CCChanRx rx, int count) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     cc_sched_set_num_workers(2);
 
     int[~1024 >] tx1_h; int[~1024 <] rx1_h; CCChan* ch1 = cc_channel_pair(&tx1_h, &rx1_h);
@@ -50,13 +51,12 @@ int main(void) {
     CCChanRx rx2 = rx2_h;
 
     {
-        CCNursery* __cc_nursery17 = @create(NULL) @destroy;
-        if (!__cc_nursery17) abort();
+        CCNursery __cc_nursery17 = @create() !> @destroy;
 
-        __cc_nursery17->spawn(() => [tx1] { sender(tx1, N); });
-        __cc_nursery17->spawn(() => [rx1] { receiver(rx1, N); });
-        __cc_nursery17->spawn(() => [tx2] { sender(tx2, N); });
-        __cc_nursery17->spawn(() => [rx2] { receiver(rx2, N); });
+        __cc_nursery17.spawn(() => [tx1] { sender(tx1, N); });
+        __cc_nursery17.spawn(() => [rx1] { receiver(rx1, N); });
+        __cc_nursery17.spawn(() => [tx2] { sender(tx2, N); });
+        __cc_nursery17.spawn(() => [rx2] { receiver(rx2, N); });
     
     }
 

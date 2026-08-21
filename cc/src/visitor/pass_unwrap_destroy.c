@@ -647,10 +647,10 @@ static int cc__ud_builtin_owned_hooks(const char* s, size_t type_a, size_t type_
         }
         i++;
     }
-    if (saw_nursery && saw_star && !saw_arena && !saw_chan) {
-        *pre_hook = "cc_nursery_wait";
-        *post_hook = "cc_nursery_free";
-        *post_pass_address = 0;
+    if (saw_nursery && !saw_star && !saw_arena && !saw_chan) {
+        *pre_hook = NULL;
+        *post_hook = "cc_nursery_destroy";
+        *post_pass_address = 1;
         return 1;
     }
     if (saw_arena && !saw_nursery && !saw_chan && !saw_slice_unique && !saw_star) {

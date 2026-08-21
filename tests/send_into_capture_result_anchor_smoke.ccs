@@ -15,6 +15,7 @@ typedef struct ReplyHolder {
 } ReplyHolder;
 
 @noblock static inline bool queue_reply(ReplyHolder* holder, RedisReply* reply) {
+    @errhandler(CCError e) cc_error_exit(e);
     bool !>(CCIoError) sent =
         holder->tx.try_send_into(
             (slot, arena) => [reply] {
@@ -27,6 +28,7 @@ typedef struct ReplyHolder {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     TestReplyTx tx;
     RedisReply[~1 1:1 <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
@@ -41,9 +43,8 @@ int main(void) {
     assert(got.kind == REDIS_REPLY_INTEGER);
     assert(got.int_value == 73);
     {
-        CCNursery* n = @create(NULL) @destroy;
-        assert(n != NULL);
-        n->spawn(() => { });
+        CCNursery n = @create() !> @destroy;
+        n.spawn(() => { });
     }
     ch.free();
     return 0;

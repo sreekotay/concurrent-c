@@ -12,11 +12,11 @@ static cc_atomic_int g_rc = 0;
 static cc_atomic_int g_seen_cancelled = 0;
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) return 2;
+        CCNursery n = @create() !> @destroy;
 
-        if (n->spawnhybrid(() => {
+        if (n.spawnhybrid(() => {
                 CCChan* ch = cc_chan_create(1);
                 if (!ch) {
                     cc_atomic_store(&g_rc, -100);

@@ -15,20 +15,39 @@
 #include <ccc/cc_ufcs.h>
 
 
-#line 16 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
-typedef struct CCChan CCChan;
-
 #line 18 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
+typedef struct CCChan CCChan;
+#line 19 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
+typedef struct CCArena CCArena;
+
+#line 21 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
 typedef struct CCNursery CCNursery;
 
-// Create a nursery.  Pass NULL for a top-level nursery; pass a parent to inherit
-// its cancellation flag and deadline (snapshot — no live parent pointer retained).
-// Returns NULL on allocation failure.
-#line 23 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
-CCNursery* cc_nursery_create(CCNursery* parent);
+/* Self-owned nursery (malloc). The abandonable form: no arena record.
+ * Join with wait/free or `@destroy`. Do not pass NULL — there is no parent
+ * argument. Programmer errors abort. Returns NULL only on allocation failure. */
+#line 26 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
+CCNursery* cc_nursery_create(void);
+
+/* Cancel-tree nest: inherit cancel/deadline snapshot from `parent`.
+ * `parent` is required (null aborts). UFCS: `parent->create_child()`.
+ * Malloc handle — join with `@destroy` or wait; `abandon` is allowed. */
+#line 31 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
+CCNursery* cc_nursery_create_child(CCNursery* parent);
+
+/* Lifetime-parent birth. Handle lives in `a`; `a` must be live (null/dead
+ * abort). Walk of `a` joins. `abandon` is refused. UFCS: `a.create_nursery()`
+ * via the generic `cc_arena_` prefix — writing this function installs it. */
+#line 36 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
+CCNursery* cc_arena_create_nursery(CCArena* a);
+
+/* The nursery's lifetime-parent arena (Region face). Host C cannot see
+ * the field on the opaque handle; UFCS peels through this accessor. */
+#line 40 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
+CCArena* cc_nursery_arena(CCNursery* n);
 
 // Cancel all tasks (sets flag; tasks must poll cooperatively).
-#line 26 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
+#line 43 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
 void cc_nursery_cancel(CCNursery* n);
 
 // Cancel the nursery when any of the listed process signals (e.g. SIGINT,

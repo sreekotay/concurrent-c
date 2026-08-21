@@ -19,13 +19,13 @@ static void cleanup_one(void) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     g_cleanup_count = 0;
     g_body_count = 0;
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) return 10;
-        if (n->spawn_async(worker()) != 0) return 11;
+        CCNursery n = @create() !> @destroy;
+        if (n.spawn_async(worker()) != 0) return 11;
     }
 
     if (g_body_count != 2 || g_cleanup_count != 4) {

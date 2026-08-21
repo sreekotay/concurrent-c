@@ -25,7 +25,7 @@ static void plain(void) {}
 #define UNUSED_CLOSURE_CAP(x)       () => [x] { plain(); }
 #define UNUSED_CHAN_TX_BRACKETS     [~4 >]
 #define UNUSED_CHAN_RX_BRACKETS     [~4 <]
-#define UNUSED_NURSERY_INIT         @create(NULL) @destroy
+#define UNUSED_NURSERY_INIT         @create() !> @destroy
 #define UNUSED_DEFER(stmt)          @defer stmt
 #define UNUSED_UNWRAP(expr)         expr !>
 #define UNUSED_RESULT_UNWRAP(expr)  expr ?>
@@ -41,8 +41,9 @@ static void plain(void) {}
  * before any text pass sees it. */
 #if 0
 int main_disabled(void) {
-    CCNursery* n = @create(NULL) @destroy;
-    n->spawnhybrid(() => { plain(); });
+    @errhandler(CCError e) cc_error_exit(e);
+    CCNursery n = @create() !> @destroy;
+    n.spawnhybrid(() => { plain(); });
     int[~4 >] tx;
     int[~4 <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
@@ -60,12 +61,12 @@ int main_disabled(void) {
     }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     /* Real code path — these MUST be rewritten despite the same syntax
      * appearing in #define bodies above. */
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) return 1;
-        n->spawnhybrid(() => { plain(); });
+        CCNursery n = @create() !> @destroy;
+        n.spawnhybrid(() => { plain(); });
     }
     return 0;
 }

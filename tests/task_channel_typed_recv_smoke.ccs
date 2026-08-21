@@ -20,21 +20,21 @@ static void* compute(void* arg) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCTask[~2 >] tx;
     CCTask[~2 <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
 
     {
-        CCNursery* __cc_nursery90 = @create(NULL) @destroy;
-        if (!__cc_nursery90) abort();
+        CCNursery __cc_nursery90 = @create() !> @destroy;
 
-        __cc_nursery90->spawn(() => [tx] {
+        __cc_nursery90.spawn(() => [tx] {
             CCTask task = cc_fiber_spawn_task(compute, (void*)21);
             (void)chan_send(tx, task);
             chan_close(tx);
         });
 
-        __cc_nursery90->spawn(() => [rx] {
+        __cc_nursery90.spawn(() => [rx] {
             CCTask task;
             if (cc_io_avail(cc_channel_recv(rx, &task))) {
                 intptr_t result = cc_block_on_intptr(task);

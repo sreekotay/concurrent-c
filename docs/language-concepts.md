@@ -31,7 +31,7 @@ FILE* f = fopen(path, "r");
 @defer fclose(f);
 
 /* !> unwraps (or routes E); @destroy runs if construction succeeded */
-CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+CCNursery n = cc_nursery_create() !> @destroy;
 ```
 
 Named `@defer` can be `@cancel`led; `@defer(ok)` / `@defer(err)` gate on result returns.
@@ -201,8 +201,8 @@ Same `[…]` family: `T[n]` arrays, `T[~n >]` / `T[~n <]` channels.
 Spawn takes a closure. Captures into a task are copies.
 
 ```c
-n->spawn([x]() => use(x));     // value
-n->spawn([&x]() => { x++; });  // reference
+n.spawn([x]() => use(x));     // value
+n.spawn([&x]() => { x++; });  // reference
 ```
 
 Stack slices cannot be captured. Arena slices only while the arena outlives the join.
@@ -224,8 +224,8 @@ No `T?`. Pick the shape that matches the operation:
 [recipe_parallel.ccs](../examples/recipe_parallel.ccs) · Spec §8.11
 
 `@parallel` is a lexical fork-join. It is not a nursery and it does not
-create a task the program can hold. `n->spawn` names a lifetime that may
-outlive the spawn point (`@destroy` waits that nursery; `n->abandon()`
+create a task the program can hold. `n.spawn` names a lifetime that may
+outlive the spawn point (`@destroy` waits that nursery; `n.abandon()`
 consumes the handle without joining). `@parallel` joins at the closing brace.
 
 | Form | Meaning |

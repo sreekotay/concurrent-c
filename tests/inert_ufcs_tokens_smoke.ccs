@@ -13,25 +13,25 @@
 static void plain(void) {}
 
 /* UFCS-looking tokens inside a block comment:
- *   nursery->spawnhybrid(fn);
- *   nursery->cancel();
- *   nursery->wait(); */
+ *   nursery.spawnhybrid(fn);
+ *   nursery.cancel();
+ *   nursery.wait(); */
 
 // UFCS-looking tokens inside line comments:
-// nursery->spawnhybrid(fn);
-// nursery->cancel();
+// nursery.spawnhybrid(fn);
+// nursery.cancel();
 
-const char* k_ufcs_doc_spawn  = "nursery->spawnhybrid(fn);";
-const char* k_ufcs_doc_cancel = "nursery->cancel();";
-const char* k_ufcs_doc_wait   = "nursery->wait();";
+const char* k_ufcs_doc_spawn  = "nursery.spawnhybrid(fn);";
+const char* k_ufcs_doc_cancel = "nursery.cancel();";
+const char* k_ufcs_doc_wait   = "nursery.wait();";
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     if (!k_ufcs_doc_spawn || !k_ufcs_doc_cancel || !k_ufcs_doc_wait) return 1;
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) return 2;
-        n->spawnhybrid(() => { plain(); });
+        CCNursery n = @create() !> @destroy;
+        n.spawnhybrid(() => { plain(); });
     }
     return 0;
 }

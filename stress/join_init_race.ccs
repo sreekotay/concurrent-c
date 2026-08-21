@@ -35,6 +35,7 @@ void* observer_task(void* arg) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     printf("join_init_race: %d iterations\n", ITERATIONS);
     
     for (int iter = 0; iter < ITERATIONS; iter++) {
@@ -42,7 +43,7 @@ int main(void) {
         cc_atomic_store(&observers_done, 0);
         
         /* Spawn target and NUM_OBSERVERS observers that race to see completion */
-        CCNursery* n = cc_nursery_create(NULL);
+        CCNursery n = cc_nursery_create() !>;
         cc_nursery_spawn(n, target_task, (void*)(intptr_t)iter);
         for (int o = 0; o < NUM_OBSERVERS; o++) {
             cc_nursery_spawn(n, observer_task, NULL);

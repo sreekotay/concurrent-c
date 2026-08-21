@@ -27,12 +27,12 @@
  *
  *   @destroy combinations:
  *     H. `!> @destroy;` bodyless on builtin-owned CCChan*
- *     I. `!>(e) { body } @destroy;` split form on builtin-owned CCNursery*
- *     J. `!> @destroy { user-body };` on builtin-owned CCNursery*
+ *     I. `!>(e) { body } @destroy;` split form on builtin-owned CCNursery 
+ *     J. `!> @destroy { user-body };` on builtin-owned CCNursery 
  *     K. `!> { handler } @destroy { user-body };` on T* (one line)
  *     L. `!>(e) { handler } @destroy { user-body };` on T* (multi-line)
  *
- *   Closures spawned via `nursery->spawn(...)` UFCS:
+ *   Closures spawned via `nursery.spawn(...)` UFCS:
  *     M. `() => [] { ... }`            empty capture
  *     N. `() => [v] { ... }`           single value capture
  *     O. `() => [&ref] { ... }`        single ref capture
@@ -96,15 +96,15 @@ int main(void) {
     (void)h_ch;
     printf("H=ok\n");
 
-    /* I. split `!>(e) {body} @destroy;` on builtin-owned CCNursery*. */
-    CCNursery* i_n = cc_nursery_create(NULL)
+    /* I. split `!>(e) {body} @destroy;` on builtin-owned CCNursery . */
+    CCNursery i_n = cc_nursery_create()
         !>(e) { fprintf(stderr, "i: %s\n", e.message); return 1; }
         @destroy;
     (void)i_n;
     printf("I=ok\n");
 
-    /* J. `!> @destroy { user-body };` (no handler) on CCNursery*. */
-    CCNursery* j_n = cc_nursery_create(NULL) !> @destroy { printf("J-destroy\n"); };
+    /* J. `!> @destroy { user-body };` (no handler) on CCNursery . */
+    CCNursery j_n = cc_nursery_create() !> @destroy { printf("J-destroy\n"); };
     (void)j_n;
     printf("J=ok\n");
 
@@ -137,10 +137,10 @@ int main(void) {
     (void)p_ch;
 
     {
-        CCNursery* consumer = cc_nursery_create(NULL) !> @destroy;
+        CCNursery consumer = cc_nursery_create() !> @destroy;
 
         /* P. mixed capture [&ref, value]. */
-        consumer->spawn(() => [&sum, rx_p] {
+        consumer.spawn(() => [&sum, rx_p] {
             int v;
             while (cc_io_avail(rx_p.recv(&v))) {
                 cc_atomic_fetch_add(&sum, v);
@@ -148,21 +148,21 @@ int main(void) {
         });
 
         {
-            CCNursery* producer = cc_nursery_create(consumer) !> @destroy;
-            (void)producer->close_on(tx_p);
+            CCNursery producer = consumer.create_child() !> @destroy;
+            (void)producer.close_on(tx_p);
 
             /* N. single value capture. */
-            producer->spawn(() => [tx_p] {
+            producer.spawn(() => [tx_p] {
                 for (int x = 1; x <= 3; x++) (void)tx_p.send(x);
             });
 
             /* M. empty capture list. */
-            producer->spawn(() => [] {
+            producer.spawn(() => [] {
                 /* no-op */
             });
 
             /* O. single ref capture. */
-            producer->spawn(() => [&sum] {
+            producer.spawn(() => [&sum] {
                 cc_atomic_fetch_add(&sum, 100);
             });
         }

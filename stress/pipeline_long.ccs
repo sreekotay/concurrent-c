@@ -26,6 +26,7 @@ cc_atomic_int g_output_count = 0;
 cc_atomic_int g_output_sum = 0;
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     printf("pipeline_long: 5 stages, %d items\n", NUM_ITEMS);
 
     g_ch0 = cc_channel_pair(&g_tx0, &g_rx0);
@@ -35,11 +36,10 @@ int main(void) {
     g_ch4 = cc_channel_pair(&g_tx4, &g_rx4);
 
     {
-        CCNursery* __cc_nursery144 = @create(NULL) @destroy;
-        if (!__cc_nursery144) abort();
+        CCNursery __cc_nursery144 = @create() !> @destroy;
 
         /* Producer */
-        __cc_nursery144->spawn(() => {
+        __cc_nursery144.spawn(() => {
             for (int i = 0; i < NUM_ITEMS; i++) {
                 (void)chan_send(g_tx0, i);
             }
@@ -47,7 +47,7 @@ int main(void) {
         });
 
         /* Stage 1 */
-        __cc_nursery144->spawn(() => {
+        __cc_nursery144.spawn(() => {
             int v;
             while (cc_io_avail(chan_recv(g_rx0, &v))) {
                 (void)chan_send(g_tx1, v + 1);
@@ -56,7 +56,7 @@ int main(void) {
         });
 
         /* Stage 2 */
-        __cc_nursery144->spawn(() => {
+        __cc_nursery144.spawn(() => {
             int v;
             while (cc_io_avail(chan_recv(g_rx1, &v))) {
                 (void)chan_send(g_tx2, v + 1);
@@ -65,7 +65,7 @@ int main(void) {
         });
 
         /* Stage 3 */
-        __cc_nursery144->spawn(() => {
+        __cc_nursery144.spawn(() => {
             int v;
             while (cc_io_avail(chan_recv(g_rx2, &v))) {
                 (void)chan_send(g_tx3, v + 1);
@@ -74,7 +74,7 @@ int main(void) {
         });
 
         /* Stage 4 */
-        __cc_nursery144->spawn(() => {
+        __cc_nursery144.spawn(() => {
             int v;
             while (cc_io_avail(chan_recv(g_rx3, &v))) {
                 (void)chan_send(g_tx4, v + 1);
@@ -83,7 +83,7 @@ int main(void) {
         });
 
         /* Consumer */
-        __cc_nursery144->spawn(() => {
+        __cc_nursery144.spawn(() => {
             int v;
             while (cc_io_avail(chan_recv(g_rx4, &v))) {
                 cc_atomic_fetch_add(&g_output_count, 1);

@@ -32,6 +32,7 @@ void* waiter_task(void* arg) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     printf("fiber_multi_joiner_race: %d iterations, %d waiters each\n", ITERATIONS, NUM_WAITERS);
     
     for (int iter = 0; iter < ITERATIONS; iter++) {
@@ -39,7 +40,7 @@ int main(void) {
         cc_atomic_store(&inner_done, 0);
         
         /* Spawn inner task and multiple waiters */
-        CCNursery* n = cc_nursery_create(NULL);
+        CCNursery n = cc_nursery_create() !>;
         cc_nursery_spawn(n, inner_task, (void*)(intptr_t)iter);
         for (int j = 0; j < NUM_WAITERS; j++) {
             cc_nursery_spawn(n, waiter_task, NULL);

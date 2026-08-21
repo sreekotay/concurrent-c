@@ -348,18 +348,19 @@ cc_atomic_size g_conc_bytes = 0;
 
 /* Per-task heap arenas under a nursery — no shared-arena CAS; stress create/free. */
 static int bench_concurrent_nursery_arenas(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     double t0 = now_sec();
     cc_atomic_store(&g_conc_ok, 0);
     cc_atomic_store(&g_conc_fail, 0);
     cc_atomic_store(&g_conc_bytes, 0);
 
     {
-        CCNursery *n = @create(NULL) @destroy;
+        CCNursery *n = @create() !> @destroy;
         if (!n) return fail("nursery create");
         int w;
         for (w = 0; w < CONC_WORKERS; w++) {
             int wid = w;
-            n->spawn(() => {
+            n.spawn(() => {
                 CCArena a = cc_arena_heap(4 * 1024);
                 size_t i;
                 for (i = 0; i < CONC_ALLOCS_EACH; i++) {

@@ -569,6 +569,7 @@ static void shared_worker(int wid) {
 static uint8_t g_shared_buf[32 * 1024 * 1024];
 
 static int bench_shared_concurrent_mixed(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     RssTrack rss;
     double t0;
     int w;
@@ -586,11 +587,11 @@ static int bench_shared_concurrent_mixed(void) {
     t0 = now_sec();
 
     {
-        CCNursery *n = @create(NULL) @destroy;
+        CCNursery *n = @create() !> @destroy;
         if (!n) return fail("nursery");
         for (w = 0; w < CONC_WORKERS; w++) {
             int wid = w;
-            n->spawn(() => {
+            n.spawn(() => {
                 shared_worker(wid);
             });
         }

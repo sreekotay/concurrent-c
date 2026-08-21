@@ -57,7 +57,7 @@ int run(void) {
     printf("qmark_dest=%s\n", qmark_dest);
 
     /* 9. Bodyless `@destroy;` on builtin-owned types */
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+    CCNursery n = cc_nursery_create() !> @destroy;
     (void)n;
 
     int[~1 >] tx;
@@ -68,11 +68,11 @@ int run(void) {
     (void)ch;
 
     /* 10. `!> { ... } @destroy { ... }` on a builtin-owned type (one line) */
-    CCNursery* n2 = cc_nursery_create(NULL) !> { abort(); } @destroy { printf("destroy n2 (user)\n"); };
+    CCNursery n2 = cc_nursery_create() !> { abort(); } @destroy { printf("destroy n2 (user)\n"); };
     (void)n2;
 
     /* 11. Same as 10 but split across lines */
-    CCNursery* n3 = cc_nursery_create(NULL)
+    CCNursery n3 = cc_nursery_create()
         !>(e) {
             fprintf(stderr, "n3: %s\n", e.message);
             return 8;

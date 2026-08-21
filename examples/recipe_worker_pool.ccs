@@ -30,11 +30,11 @@ int main(void) {
     CCChan* done_ch = cc_channel_pair(&done_tx, &done_rx) !> @destroy;
 
     {
-        CCNursery* workers = cc_nursery_create(NULL) !> @destroy;
+        CCNursery workers = cc_nursery_create() !> @destroy;
 
         /* Workers: pull jobs, report each completion on done_tx. */
         for (int w = 0; w < NUM_WORKERS; w++) {
-            workers->spawn(() => [jobs_rx, done_tx] {
+            workers.spawn(() => [jobs_rx, done_tx] {
                 @errhandler(CCError e) cc_error_exit(e);
                 int job;
                 while (cc_io_avail(jobs_rx.recv(&job))) {
@@ -46,10 +46,10 @@ int main(void) {
 
         /* Feeder in an inner nursery: its @destroy closes jobs_tx once feeder returns. */
         {
-            CCNursery* feeder = cc_nursery_create(workers) !> @destroy;
-            (void)feeder->close_on(jobs_tx);
+            CCNursery feeder = workers.create_child() !> @destroy;
+            (void)feeder.close_on(jobs_tx);
 
-            feeder->spawn(() => [jobs_tx] {
+            feeder.spawn(() => [jobs_tx] {
                 @errhandler(CCError e) cc_error_exit(e);
                 for (int j = 1; j <= NUM_JOBS; j++) {
                     jobs_tx.send(j) !>;

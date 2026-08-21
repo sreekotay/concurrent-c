@@ -21,15 +21,15 @@ static void note(int id) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     g_n = 0;
     g_destroy_n = 0;
     cc_atomic_store(&g_parked, 0);
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) return 2;
+        CCNursery n = @create() !> @destroy;
 
-        if (n->spawn(() => [n] {
+        if (n.spawn(() => [n] {
                 /* Register 1, destroy(2), 3 — LIFO exit order: 3, 2, 1. */
                 @defer { note(1); };
                 CCArena a = cc_arena_heap(kilobytes(1)) @destroy {

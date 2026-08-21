@@ -331,10 +331,10 @@ int cc_chan_timed_send_take_slice(CCChan* ch, const CCSliceUnique* slice, const 
 int cc_chan_deadline_send_take_slice(CCChan* ch, const CCSliceUnique* slice, const CCDeadline* deadline);
 
 // Nursery-aware helpers: use nursery deadline/cancel state.
-int cc_chan_nursery_send(CCChan* ch, CCNursery* n, const void* value, size_t value_size);
-int cc_chan_nursery_recv(CCChan* ch, CCNursery* n, void* out_value, size_t value_size);
-int cc_chan_nursery_send_take(CCChan* ch, CCNursery* n, void* ptr);
-int cc_chan_nursery_send_take_slice(CCChan* ch, CCNursery* n, const CCSliceUnique* slice);
+int cc_chan_nursery_send(CCChan* ch, CCNurseryHost* n, const void* value, size_t value_size);
+int cc_chan_nursery_recv(CCChan* ch, CCNurseryHost* n, void* out_value, size_t value_size);
+int cc_chan_nursery_send_take(CCChan* ch, CCNurseryHost* n, void* ptr);
+int cc_chan_nursery_send_take_slice(CCChan* ch, CCNurseryHost* n, const CCSliceUnique* slice);
 
 // Async send/recv using executor; completion signaled on done channel.
 typedef enum {

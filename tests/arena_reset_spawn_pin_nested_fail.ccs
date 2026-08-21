@@ -9,13 +9,13 @@ int main(void) {
     }
 
     CCArena buf = cc_arena_heap(kilobytes(4)) !> @destroy;
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+    CCNursery n = cc_nursery_create() !> @destroy;
 
     {
         char[:] view = cc_arena_alloc_slice_bytes(&buf, 64);
         if (!view.ptr) return 1;
         memset(view.ptr, 'x', view.len);
-        n->spawn(() => [view] {
+        n.spawn(() => [view] {
             (void)view;
         });
     }

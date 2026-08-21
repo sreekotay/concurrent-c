@@ -26,7 +26,7 @@ typedef struct cc_rt_tls_wake_batch {
 } cc_rt_tls_wake_batch;
 
 typedef struct cc_rt_tls {
-    void* current_nursery;   /* CCNursery* */
+    void* current_nursery;   /* CCNurseryHost* */
     void* current_deadline;  /* CCDeadline* */
     int v2_thread_id;
     uint64_t v2_my_generation;

@@ -30,6 +30,7 @@ cc_atomic_int g_received = 0;
  * This is the correct pattern for "loop until close"
  */
 int test_consumer_outside(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     printf("  consumer_outside: %d producers x %d items\n", PRODUCERS, ITEMS_PER_PRODUCER);
     
     cc_atomic_store(&g_sent, 0);
@@ -42,26 +43,25 @@ int test_consumer_outside(void) {
     
     /* Producers inside nursery - channel closed when they all finish */
     {
-        CCNursery* __cc_nursery146 = @create(NULL) @destroy;
-        if (!__cc_nursery146) abort();
-        (void)__cc_nursery146->close_on(tx);
+        CCNursery __cc_nursery146 = @create() !> @destroy;
+        (void)__cc_nursery146.close_on(tx);
 
-        __cc_nursery146->spawn(() => {
+        __cc_nursery146.spawn(() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
                 if (cc_io_avail(chan_send(tx, 0 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
         });
-        __cc_nursery146->spawn(() => {
+        __cc_nursery146.spawn(() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
                 if (cc_io_avail(chan_send(tx, 1 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
         });
-        __cc_nursery146->spawn(() => {
+        __cc_nursery146.spawn(() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
                 if (cc_io_avail(chan_send(tx, 2 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
         });
-        __cc_nursery146->spawn(() => {
+        __cc_nursery146.spawn(() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
                 if (cc_io_avail(chan_send(tx, 3 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }

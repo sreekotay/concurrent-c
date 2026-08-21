@@ -2,7 +2,7 @@
  * `@typehooks on …` for user types.
  *
  * Previously, cc__rewrite_unwrap_destroy_suffix only honored a hardcoded
- * trio (CCNursery*, CCArena, CCChan*) and would reject the bodyless form
+ * trio (CCNursery , CCArena, CCChan*) and would reject the bodyless form
  * on any other type:
  *
  *     error: @destroy: bodyless `@destroy;` requires a registered

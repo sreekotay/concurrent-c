@@ -25,6 +25,7 @@ typedef RedisShapeRequest*[~k_request_chan_cap N:1 >] RedisReqTx;
 typedef RedisShapeRequest*[~k_request_chan_cap N:1 ordered <] RedisReqRx;
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     WorkerTx tx;
     WorkerRx rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
@@ -46,9 +47,8 @@ int main(void) {
     RedisShapeRequest req = { .value = 42 };
     RedisShapeRequest* req_ptr = &req;
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) return 6;
-        n->spawn(() => [req_tx, req_ptr] {
+        CCNursery n = @create() !> @destroy;
+        n.spawn(() => [req_tx, req_ptr] {
             (void)req_tx.send(req_ptr);
         });
         RedisShapeRequest* got = NULL;

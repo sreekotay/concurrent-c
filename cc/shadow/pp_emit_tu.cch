@@ -488,6 +488,10 @@ static int shadow_node_needs_uw(AstNode* n) {
         break;
     case AST_NURSERY_DESTROY:
         return 1;
+    case AST_VAL_DESTROY:
+        /* `T x = create() !> @destroy` — try_assign + as-face generic. */
+        if (strstr(n->c, "!>") || strstr(n->c, "?>")) return 1;
+        break;
     case AST_ERR_SYNTAX:
         return 1;
     default:
@@ -495,6 +499,9 @@ static int shadow_node_needs_uw(AstNode* n) {
     }
     if (strstr(n->a, "?>") || strstr(n->b, "?>") || strstr(n->c, "?>") ||
         strstr(n->d, "?>") || strstr(n->e, "?>"))
+        return 1;
+    if (strstr(n->a, "!>") || strstr(n->b, "!>") || strstr(n->c, "!>") ||
+        strstr(n->d, "!>") || strstr(n->e, "!>"))
         return 1;
     if (strcmp(n->e, "bang") == 0) return 1; /* return expr !> */
     for (k = 0; k < n->nbody; k++)

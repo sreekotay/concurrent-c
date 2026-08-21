@@ -19,11 +19,12 @@ void* quick_task(void* arg) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     printf("join_done_before_wait_smoke: iterations=%d fibers=%d\n", ITERATIONS, FIBERS);
     for (int iter = 0; iter < ITERATIONS; iter++) {
         cc_atomic_store(&completed, 0);
 
-        CCNursery* n = cc_nursery_create(NULL);
+        CCNursery n = cc_nursery_create() !>;
         for (int i = 0; i < FIBERS; i++) {
             cc_nursery_spawn(n, quick_task, (void*)(intptr_t)i);
         }

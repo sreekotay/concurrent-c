@@ -26,20 +26,21 @@ void do_work() {
 }
 
 void imbalanced_producer() {
+    @errhandler(CCError e) cc_error_exit(e);
     // This function runs in a fiber on ONE worker.
     // We use a nursery here to spawn all sub-tasks.
     {
-        CCNursery* __cc_nursery179 = @create(NULL) @destroy;
-        if (!__cc_nursery179) abort();
+        CCNursery __cc_nursery179 = @create() !> @destroy;
 
         for (int i = 0; i < NUM_TASKS; i++) {
-            __cc_nursery179->spawn(() => { do_work(); });
+            __cc_nursery179.spawn(() => { do_work(); });
         }
     
     }
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     setvbuf(stdout, NULL, _IONBF, 0);
     
     printf("=================================================================\n");
@@ -50,11 +51,10 @@ int main(void) {
     cc_atomic_store(&g_completed, 0);
     double start = time_now_ms();
     {
-        CCNursery* __cc_nursery180 = @create(NULL) @destroy;
-        if (!__cc_nursery180) abort();
+        CCNursery __cc_nursery180 = @create() !> @destroy;
 
         for (int i = 0; i < NUM_TASKS; i++) {
-            __cc_nursery180->spawn(() => { do_work(); });
+            __cc_nursery180.spawn(() => { do_work(); });
         }
     
     }
@@ -65,10 +65,9 @@ int main(void) {
     cc_atomic_store(&g_completed, 0);
     start = time_now_ms();
     {
-        CCNursery* __cc_nursery181 = @create(NULL) @destroy;
-        if (!__cc_nursery181) abort();
+        CCNursery __cc_nursery181 = @create() !> @destroy;
 
-        __cc_nursery181->spawn(() => { imbalanced_producer(); });
+        __cc_nursery181.spawn(() => { imbalanced_producer(); });
     
     }
     double imbalanced_ms = time_now_ms() - start;

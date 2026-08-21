@@ -2,31 +2,28 @@
 #include <stdio.h>
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int[~4 >] tx;
     int[~4 ordered <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
     int ok = 1;
 
     {
-        CCNursery* __cc_nursery23 = @create(NULL) @destroy;
-        if (!__cc_nursery23) abort();
+        CCNursery __cc_nursery23 = @create() !> @destroy;
 
         {
-            CCNursery* __cc_nursery24 = @create(NULL) @destroy;
-            if (!__cc_nursery24) abort();
-            (void)__cc_nursery24->close_on(tx);
+            CCNursery __cc_nursery24 = @create() !> @destroy;
+            (void)__cc_nursery24.close_on(tx);
 
-            CCNursery* producer = @create(NULL, () => [tx] {
+            CCNursery producer = cc_nursery_create() !> @destroy;
+            producer.spawn(() => [tx] {
                 int value = 2;
                 tx.send_task(() => [value] {
                     value * 3;
                 });
                 return NULL;
-            }) @destroy;
-
-            if (!producer) {
-                ok = 0;
-            }
+            });
+            (void)producer;
         
         }
     

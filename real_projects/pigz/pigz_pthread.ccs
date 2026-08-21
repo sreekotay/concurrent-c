@@ -173,7 +173,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;
 
-    CCNursery* consumer = @create(NULL, () => [out_ptr, tasks_rx] {
+    CCNursery consumer = @create(NULL, () => [out_ptr, tasks_rx] {
         CompressedResult* r = NULL;
         long expect_seq = 0;
         int rc;
@@ -206,7 +206,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
         return 1;
     }
 
-    CCNursery* producer = @create(consumer, () => [in_ptr, tasks_tx] {
+    CCNursery producer = @create(consumer, () => [in_ptr, tasks_tx] {
         long seq = 0;
         while (true) {
             if (cc_atomic_load(&g_pipeline_error)) break;

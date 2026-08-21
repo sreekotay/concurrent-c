@@ -15,13 +15,13 @@
 cc_atomic_int g_completed_levels = 0;
 
 void torture_nesting(int depth) {
+    @errhandler(CCError e) cc_error_exit(e);
     if (depth >= TORTURE_DEPTH) return;
 
     {
-        CCNursery* __cc_nursery140 = @create(NULL) @destroy;
-        if (!__cc_nursery140) abort();
+        CCNursery __cc_nursery140 = @create() !> @destroy;
 
-        __cc_nursery140->spawn(() => {
+        __cc_nursery140.spawn(() => {
             cc_atomic_fetch_add(&g_completed_levels, 1);
         });
 

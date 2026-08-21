@@ -6,12 +6,12 @@ void worker(int n) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     @defer { int x = 0; (void)x; };
     {
-        CCNursery* __cc_nursery71 = @create(NULL) @destroy;
-        if (!__cc_nursery71) abort();
+        CCNursery __cc_nursery71 = @create() !> @destroy;
 
-        __cc_nursery71->spawn(() => { worker(1); });
+        __cc_nursery71.spawn(() => { worker(1); });
 
     }
     return 0;

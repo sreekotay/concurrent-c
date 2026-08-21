@@ -8,9 +8,9 @@ int main(void) {
     i8[~4 >] tx;
     i8[~4 <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-    (void)n->close_on(tx);
-    n->spawn(() => [tx] {
+    CCNursery n = cc_nursery_create() !> @destroy;
+    (void)n.close_on(tx);
+    n.spawn(() => [tx] {
         @errhandler(CCError e) cc_error_exit(e);
         i8 v = 7;
         tx.send(v) !>;

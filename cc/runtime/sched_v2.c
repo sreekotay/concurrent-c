@@ -208,8 +208,8 @@ struct fiber_v2 {
     wake_primitive done_wake;
     cc__fiber* _Atomic join_waiter_fiber;
     void* current_deadline_scope;
-    CCNursery* saved_nursery;
-    CCNursery* admission_nursery;
+    CCNurseryHost* saved_nursery;
+    CCNurseryHost* admission_nursery;
 
     /* R1 — user-facing async backtrace metadata.
      *
@@ -914,8 +914,8 @@ static __thread fiber_v2* tls_v2_current_fiber = NULL;
  * path. Starts at 1 so that 0 unambiguously means "no fiber running". */
 static __thread uint64_t tls_v2_dispatch_seq = 0;
 #endif
-bool cc_nursery_is_cancelled(const CCNursery* n);
-void cc_nursery_notify_child_done(CCNursery* n);
+bool cc_nursery_is_cancelled(const CCNurseryHost* n);
+void cc_nursery_notify_child_done(CCNurseryHost* n);
 
 /* Mirror of nursery.c's CC_NURSERY_WORKER_FREES gate.  Latched on first
  * read so we never branch on a changing env var in the hot MCO_DEAD
@@ -1406,7 +1406,7 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
          * under parallel suite load (block_on releases t1/t2 into the
          * pool right before three nursery spawns reuse them). */
         int worker_frees = cc_v2_worker_frees_mode();
-        CCNursery* adm = worker_frees ? f->saved_nursery : NULL;
+        CCNurseryHost* adm = worker_frees ? f->saved_nursery : NULL;
         atomic_store_explicit(&f->state, FIBER_V2_DEAD, memory_order_release);
         atomic_store_explicit(&f->done, 1, memory_order_release);
         /* Dekker pair with sched_v2_join waiter: completer stores done then
@@ -1822,7 +1822,7 @@ fiber_v2* sched_v2_current_fiber(void) {
     return tls_v2_current_fiber;
 }
 
-CCNursery* sched_v2_current_nursery(void) {
+CCNurseryHost* sched_v2_current_nursery(void) {
     fiber_v2* f = sched_v2_current_fiber();
     return f ? f->saved_nursery : NULL;
 }
@@ -3179,7 +3179,7 @@ fiber_v2* sched_v2_spawn(void* (*fn)(void*), void* arg) {
     return sched_v2_spawn_in_nursery(fn, arg, NULL);
 }
 
-fiber_v2* sched_v2_spawn_in_nursery(void* (*fn)(void*), void* arg, CCNursery* nursery) {
+fiber_v2* sched_v2_spawn_in_nursery(void* (*fn)(void*), void* arg, CCNurseryHost* nursery) {
     sched_v2_ensure_init();
 
     fiber_v2* f = fiber_v2_alloc();

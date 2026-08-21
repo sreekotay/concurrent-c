@@ -14,8 +14,8 @@ int main(void) {
     memset(view.ptr, 'x', view.len);
 
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-        n->spawn(() => [view] {
+        CCNursery n = cc_nursery_create() !> @destroy;
+        n.spawn(() => [view] {
             (void)view;
         });
         cc_arena_free(&buf); /* ERROR: pin */

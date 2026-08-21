@@ -27,6 +27,7 @@ static void worker(int id) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCArena arena = @create(megabytes(2)) @destroy;
     /* 8 slots → several grows while 16 fibers insert distinct names. */
     g_excl = cc_exclusive_create(&arena, 8);
@@ -35,12 +36,12 @@ int main(void) {
     memset(g_hits, 0, sizeof(g_hits));
 
     {
-        CCNursery* n = cc_nursery_create(NULL)
+        CCNursery n = cc_nursery_create()
             !>(e) { fprintf(stderr, "nursery: %s\n", e.message); abort(); }
             @destroy;
         for (int w = 0; w < WORKERS; w++) {
             int id = w;
-            n->spawn(() => [id] { worker(id); });
+            n.spawn(() => [id] { worker(id); });
         }
     }
 

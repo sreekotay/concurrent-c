@@ -93,7 +93,7 @@ int a = read_config("timeout") ?> 30;
 int b = read_config("timeout") !>;                    // routes E
 int c = read_config("timeout") !>(e) { /* local */ @err(e); };
 int d = read_config("timeout") !>(e) return cc_err(e); // propagate
-CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+CCNursery n = cc_nursery_create() !> @destroy;
 ```
 
 Tasks do not inherit `@errhandler` — re-bind inside each spawn body.
@@ -169,7 +169,7 @@ The chain: registered pre-destroy → `@destroy { body }` → registered destroy
 each **value** field whose type has a hook, last-declared to first
 (transitively). Pointer, array, and function-pointer fields are omitted.
 Bodyless `@destroy` with an empty chain is a **compile error**. Stdlib types
-ship hooks (`CCNursery*`, `CCArena`, channels, …). Register your own:
+ship hooks (`CCNursery`, `CCArena`, channels, …). Register your own:
 
 ```c
 @typehooks on MyRes {
@@ -188,7 +188,7 @@ if (!f) return cc_err(CC_ERR_IO, "fopen failed");
 @defer(ok)  commit(path);         // success path only
 @defer(err) rollback(path);       // error return only
 
-CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+CCNursery n = cc_nursery_create() !> @destroy;
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
 ```
 
@@ -205,7 +205,7 @@ UFCS over the free-function spelling of the same API. `.destroy()` is that
 UFCS path (`Type_destroy`).
 
 ```c
-n->spawn(() => { … });      // cc_nursery_spawn(n, …)
+n.spawn(() => { … });      // cc_nursery_spawn(n, …)
 tx.send(i) !>;
 io.println("hi") !>;
 v.push(10);                 // CCVec_int_push(&v, 10)
@@ -334,22 +334,22 @@ Growth failure poisons the `CCString`; it never truncates.
 ```c
 @errhandler(CCError e) cc_error_exit(e);
 {
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-    n->spawn(() => do_work());
-    n->spawn(() => do_other_work());
+    CCNursery n = cc_nursery_create() !> @destroy;
+    n.spawn(() => do_work());
+    n.spawn(() => do_other_work());
 }
 /* both tasks finished — nursery @destroy waited */
 ```
 
-Nested: `cc_nursery_create(outer)` parents the inner nursery under `outer`.
+Nested: `outer.create_child()` parents the inner nursery under `outer`.
 Independent value joins use `@parallel` (next), not a nursery.
 
 To drop the handle without joining, register optional after-work then abandon
-(pointer is dead; last child frees the nursery):
+(the handle is consumed; last child frees the nursery):
 
 ```c
-n->on_last(q, finish_q);   // optional; not run by wait / @destroy
-n->abandon();              // not cancel; in-flight work runs to completion
+n.on_last(q, finish_q);   // optional; not run by wait / @destroy
+n.abandon();              // not cancel; in-flight work runs to completion
 ```
 
 Use either `@destroy` / `wait` or `on_last` + `abandon`, not both. Spec §8.1.5.
@@ -399,7 +399,7 @@ bool fin = @parallel wait (ts) for (i in 0..n) {
 
 `@serial` is only a direct child of `@parallel { }`. Bare `{ }` is not an
 arm. `for` as a direct child of `@parallel { }` is an error; `for` inside
-`@serial` is ordinary C. `n->spawn` still names a task lifetime.
+`@serial` is ordinary C. `n.spawn` still names a task lifetime.
 
 ---
 
@@ -413,9 +413,9 @@ int[~10 <] rx;
 CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
 
 {
-    CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
+    CCNursery outer = cc_nursery_create() !> @destroy;
 
-    outer->spawn(() => [rx] {
+    outer.spawn(() => [rx] {
         @errhandler(CCError e) cc_error_exit(e);
         int v;
         while (cc_io_avail(rx.recv(&v)))
@@ -423,9 +423,9 @@ CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
     });
 
     {
-        CCNursery* inner = cc_nursery_create(outer) !> @destroy;
-        (void)inner->close_on(tx);          // close tx when inner joins
-        inner->spawn(() => [tx] {
+        CCNursery inner = outer.create_child() !> @destroy;
+        (void)inner.close_on(tx);          // close tx when inner joins
+        inner.spawn(() => [tx] {
             @errhandler(CCError e) cc_error_exit(e);
             for (int i = 0; i < 5; i++)
                 tx.send(i) !>;
@@ -444,9 +444,9 @@ Consumer outside, producer + `close_on` inside. Full recipe:
 Spawn takes a closure. Captures into a task are copies (value) unless `&`.
 
 ```c
-n->spawn(() => { … });                 // no capture list
-n->spawn(() => [x] { use(x); });       // value
-n->spawn(() => [&x] { use(x); });      // reference (still no shared mutation)
+n.spawn(() => { … });                 // no capture list
+n.spawn(() => [x] { use(x); });       // value
+n.spawn(() => [&x] { use(x); });      // reference (still no shared mutation)
 ```
 
 Re-bind `@errhandler` inside the task. Do not capture stack / `@scratch` slices
@@ -493,7 +493,7 @@ ts.leave() !>;
 
 CCTurnstile t@(cap, n_stages, &arena) @destroy;
 t.enter(i) !>;
-t.stage(k)->wait(i);  t.wait(k, i);
+t.stage(k).wait(i);  t.wait(k, i);
 ```
 
 `enter(i)` takes a depth token. Stage `wait`/`pass` create a gate cell on
@@ -637,7 +637,7 @@ if (cc_is_cancelled()) return;
 
 ## Async / await
 
-Prefer `n->spawn` for sibling work. Prefer `@async` / `@await` for one
+Prefer `n.spawn` for sibling work. Prefer `@async` / `@await` for one
 suspendable call stack. Recipe: [recipe_async_await.ccs](../examples/recipe_async_await.ccs).
 
 ```c

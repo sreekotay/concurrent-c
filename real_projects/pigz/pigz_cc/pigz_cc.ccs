@@ -429,6 +429,7 @@ static inline void return_input_arena(CCArena* arena, CCChan* pool) {
 
 /* The actual compression work for one owned block. */
 CompressedResultPtr !>(CCIoError) do_compress_work(Block* blk) {
+    @errhandler(CCError e) cc_error_exit(e);
     z_stream strm;
     z_stream* strm_ptr = NULL;
     if (g.level <= 9) {
@@ -450,6 +451,7 @@ CompressedResultPtr !>(CCIoError) do_compress_work(Block* blk) {
 }
 
 CompressedResult* compress_owned_block(Block* blk) {
+    @errhandler(CCError e) cc_error_exit(e);
     CompressedResultPtr !>(CCIoError) result = do_compress_work(blk);
     return_input_arena(blk->arena, blk->pool);
     if (result.is_err()) return NULL;
@@ -559,8 +561,8 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                 if (g_pipeline_error.load()) break;
             }
         };
-        CCNursery* writer = cc_nursery_create(NULL) !> @destroy;
-        writer->spawn(decomp_writer_task);
+        CCNursery writer = cc_nursery_create() !> @destroy;
+        writer.spawn(decomp_writer_task);
 
         CCClosure0 decomp_inflate_task = () => [compressed_rx, decompressed_tx, compressed_ch, decompressed_ch] {
             @errhandler(CCError e) cc_error_exit(e);
@@ -645,9 +647,9 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                 inflateEnd(&strm);
             }
         };
-        CCNursery* decompressor = cc_nursery_create(writer) !> @destroy;
-        (void)decompressor->close_on(decompressed_tx);
-        decompressor->spawn(decomp_inflate_task);
+        CCNursery decompressor = writer.create_child() !> @destroy;
+        (void)decompressor.close_on(decompressed_tx);
+        decompressor.spawn(decomp_inflate_task);
 
         CCClosure0 decomp_reader_task = () => [in_ptr, compressed_tx, compressed_ch, p_total_in] {
             @errhandler(CCError e) cc_error_exit(e);
@@ -695,9 +697,9 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                 }
             }
         };
-        CCNursery* reader = cc_nursery_create(decompressor) !> @destroy;
-        (void)reader->close_on(compressed_tx);
-        reader->spawn(decomp_reader_task);
+        CCNursery reader = decompressor.create_child() !> @destroy;
+        (void)reader.close_on(compressed_tx);
+        reader.spawn(decomp_reader_task);
     }
 
     if (g.list) {
@@ -1040,8 +1042,8 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
         /* Keep the writer outside the producer scope so results_tx closes when the
          * reader task exits, not later during nursery teardown. */
-        CCNursery* writer = cc_nursery_create(NULL) !> @destroy;
-        writer->spawn(writer_task);
+        CCNursery writer = cc_nursery_create() !> @destroy;
+        writer.spawn(writer_task);
 
         CCClosure0 reader_task = () => [in_ptr, results_tx, arena_pool, block_size] {
             @errhandler(CCError e) cc_error_exit(e);
@@ -1191,9 +1193,9 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
         }
         };
 
-        CCNursery* reader = cc_nursery_create(writer) !> @destroy;
-        (void)reader->close_on(results_tx);
-        reader->spawn(reader_task);
+        CCNursery reader = writer.create_child() !> @destroy;
+        (void)reader.close_on(results_tx);
+        reader.spawn(reader_task);
     }
 
     if (!sync_file_or_fail(&out_file, "failed to sync compressed output")) {

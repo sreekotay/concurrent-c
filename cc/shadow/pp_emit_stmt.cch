@@ -36,6 +36,23 @@ static const char* shadow_chan_handle_ty(AstNode* n) {
     return shadow_chan_ty();
 }
 
+/* Value handle → host pointer for C spawn/wait entry points. */
+static const char* shadow_nursery_host_recv(const char* recv, char* dst,
+                                            size_t cap) {
+    const ShadowBind* b;
+    char base[96];
+    if (!recv || !dst || !cap) return recv ? recv : "";
+    b = shadow_bind_lookup(recv);
+    base[0] = 0;
+    if (b) shadow_bind_base_ty(b, base, sizeof(base));
+    if (strcmp(base, "CCNursery") == 0) {
+        snprintf(dst, cap, "(%s).n", recv);
+        return dst;
+    }
+    snprintf(dst, cap, "%s", recv);
+    return dst;
+}
+
 static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                 const char* indent, int use_cleanup);
 static int shadow_stmt_uses_scratch(AstNode* st);
@@ -2536,7 +2553,7 @@ static int shadow_emit_par_protos(CEmit* out, AstNode** pars, int n) {
                 if (!g_shadow_pw_sh_typed) {
                     if (!cemit_str(out,
                             "typedef struct { CCTurnstile* gate; "
-                            "CCNursery* nur; CCChan* work; } __cc_pw_sh_t;\n"
+                            "CCNurseryHost* nur; CCChan* work; } __cc_pw_sh_t;\n"
                             "typedef struct { int failed; int i; "
                             "CCError err; } __cc_pw_slot_t;\n"
                             "typedef struct { CCChan* work; void* env; "
@@ -4209,14 +4226,20 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
         goto fail;
     if (!cemit_fmt(out, "%s{\n", indent))
         goto fail;
-    if (!cemit_fmt(out, "%sCCNursery* __cc_pw_n_%d = NULL;\n", i1, id))
+    if (!cemit_fmt(out, "%sCCNurseryHost* __cc_pw_n_%d = NULL;\n", i1, id))
         goto fail;
     if (st->f[0]) {
-        if (!cemit_fmt(out, "%sif ((%s)) __cc_pw_n_%d = cc_nursery_create(NULL);\n",
-                       i1, st->f, id))
+        if (!cemit_fmt(out,
+                       "%sif ((%s)) { CCResult_CCNursery_CCError __cc_pw_nr_%d = "
+                       "cc_nursery_create(); "
+                       "if (__cc_pw_nr_%d.ok) __cc_pw_n_%d = __cc_pw_nr_%d.u.value.n; }\n",
+                       i1, st->f, id, id, id, id))
             goto fail;
-    } else if (!cemit_fmt(out, "%s__cc_pw_n_%d = cc_nursery_create(NULL);\n",
-                          i1, id))
+    } else if (!cemit_fmt(out,
+                          "%s{ CCResult_CCNursery_CCError __cc_pw_nr_%d = "
+                          "cc_nursery_create(); "
+                          "if (__cc_pw_nr_%d.ok) __cc_pw_n_%d = __cc_pw_nr_%d.u.value.n; }\n",
+                          i1, id, id, id, id))
         goto fail;
     if (!cemit_fmt(out, "%sif (!__cc_pw_n_%d) {\n", i1, id))
         goto fail;
@@ -5313,14 +5336,18 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                         ? "cc_nursery_spawnhybrid_closure0"
                         : "cc_nursery_spawn_closure0";
                 if (!shadow_caps_call_args(sp->e, args, sizeof(args))) return 0;
-                if (args[0])
-                    snprintf(cond, sizeof(cond),
-                             "%s(%s, cc_closure__N%s_make(%s))%s", nur_spawn,
-                             sp->a, sp->d[0] ? sp->d : "1", args, st->a);
-                else
-                    snprintf(cond, sizeof(cond),
-                             "%s(%s, cc_closure__N%s_make())%s", nur_spawn,
-                             sp->a, sp->d[0] ? sp->d : "1", st->a);
+                {
+                    char nrecv[192];
+                    shadow_nursery_host_recv(sp->a, nrecv, sizeof(nrecv));
+                    if (args[0])
+                        snprintf(cond, sizeof(cond),
+                                 "%s(%s, cc_closure__N%s_make(%s))%s", nur_spawn,
+                                 nrecv, sp->d[0] ? sp->d : "1", args, st->a);
+                    else
+                        snprintf(cond, sizeof(cond),
+                                 "%s(%s, cc_closure__N%s_make())%s", nur_spawn,
+                                 nrecv, sp->d[0] ? sp->d : "1", st->a);
+                }
             }
         } else {
             if (!shadow_emit_cond_text(st, st->a, cond, sizeof(cond), ctx, out))
@@ -5661,6 +5688,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
     case AST_EXPR_STMT: {
         char expr[2048];
         shadow_emit_expr_text(st, st->a, expr, sizeof(expr), NULL);
+        shadow_peel_nursery_host_calls(expr, sizeof(expr));
         if (!shadow_rewrite_bang_exprs(expr, sizeof(expr), ctx)) return 0;
         /* send_task body: bare expr is the packed task result. */
         if (ctx && ctx->send_task_ret) {
@@ -5899,8 +5927,9 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             return 0;
         if (cl) shadow_splice_closure_arg(init, sizeof(init), cl);
         if (has_bang) {
-            /* Result: field unwrap + @errhandler. Plain values (create hook,
-             * cc_adopt): identity — bang is vacuous / null-check folklore. */
+            /* Result: field unwrap + @errhandler. Plain values (infallible
+             * create hook, cc_adopt): identity — bang is vacuous / null-check
+             * folklore. Nursery births are `T !>(E)` — still unwrap. */
             char ty_lhs[160];
             const char* chook = shadow_create_hook_for(st->a);
             int plain = 0;
@@ -5908,7 +5937,9 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 snprintf(ty_lhs, sizeof(ty_lhs), "%s*", st->a);
             else
                 snprintf(ty_lhs, sizeof(ty_lhs), "%s", st->a);
-            if (chook && chook[0] && strstr(init, chook) != NULL) plain = 1;
+            if (chook && chook[0] && strstr(init, chook) != NULL &&
+                strcmp(st->a, "CCNursery") != 0)
+                plain = 1;
             if (strstr(init, "cc_adopt(") != NULL) plain = 1;
             if (plain)
                 return cemit_fmt(out, "%s%s %s = %s;\n", indent, ty_lhs, st->b,
@@ -6652,9 +6683,11 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                       "e", "(__r).u.value");
     }
     case AST_SPAWN_CLOSURE: {
+        char nrecv[192];
+        shadow_nursery_host_recv(st->a, nrecv, sizeof(nrecv));
         if (st->c[0])
             return cemit_fmt(out, "%scc_nursery_spawn_fn(%s, %s);\n",
-                             indent, st->a, st->c);
+                             indent, nrecv, st->c);
         char args[256];
         char i1[80];
         if (!shadow_caps_call_args(st->e, args, sizeof(args))) return 0;
@@ -6696,9 +6729,9 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             if (args[0])
                 return cemit_fmt(out,
                     "%s%s(%s, cc_closure__N%s_make(%s));\n", indent, nur_spawn,
-                    st->a, st->d[0] ? st->d : "1", args);
+                    nrecv, st->d[0] ? st->d : "1", args);
             return cemit_fmt(out, "%s%s(%s, cc_closure__N%s_make());\n", indent,
-                             nur_spawn, st->a, st->d[0] ? st->d : "1");
+                             nur_spawn, nrecv, st->d[0] ? st->d : "1");
         }
     }
     case AST_CALL_NUM: {
@@ -6854,6 +6887,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             shadow_rewrite_slice_lit_call_args(call, sizeof(call));
             shadow_rewrite_as_call_args(call, sizeof(call));
             if (!shadow_rewrite_bang_exprs(call, sizeof(call), ctx)) return 0;
+            shadow_peel_nursery_host_calls(call, sizeof(call));
         }
         if (strcmp(st->d, "bang") == 0)
             return shadow_emit_try_call(out, ctx, indent, call, fn, "e", 1);
@@ -7518,26 +7552,22 @@ static int shadow_emit_one_destroy(AstNode* st, CEmit* out, ShadowCtx* ctx,
     }
     shadow_indent_nest(nested, sizeof(nested), body_ind, 1);
     /* Registered-type hooks first (nursery/chan/arena), then arena-pointer
-     * release beachhead — order matters for CCNursery* … @destroy. */
-    if (is_nur) {
-        snprintf(syn_line, sizeof(syn_line), "%s{\n", body_ind);
-        if (!shadow_emit_pinned_block(out, ctx, st, "", syn_line)) ok = 0;
-        snprintf(syn_line, sizeof(syn_line), "%scc_nursery_wait(%s);\n", nested,
-                 name);
-        if (ok && !shadow_emit_pinned_block(out, ctx, st, "", syn_line)) ok = 0;
-        else if (!bare) {
+     * release beachhead — order matters for CCNursery … @destroy. */
+    if (is_nur && !is_ptr) {
+        /* Value handle: wait + free + null `.n` via cc_nursery_destroy. */
+        if (!bare) {
             for (int k = 0; k < ndbody && ok; k++) {
                 if (!shadow_dbody_is_stmt(dbody[k])) continue;
-                if (!shadow_emit_stmt_ctx(dbody[k], out, ctx, nested, 0)) ok = 0;
+                if (!shadow_emit_stmt_ctx(dbody[k], out, ctx, body_ind, 0))
+                    ok = 0;
             }
             for (int k = 0; k < nbody && ok; k++) {
-                if (!shadow_emit_stmt_ctx(body[k], out, ctx, nested, 0)) ok = 0;
+                if (!shadow_emit_stmt_ctx(body[k], out, ctx, body_ind, 0))
+                    ok = 0;
             }
         }
-        snprintf(syn_line, sizeof(syn_line), "%scc_nursery_free(%s);\n", nested,
-                 name);
-        if (ok && !shadow_emit_pinned_block(out, ctx, st, "", syn_line)) ok = 0;
-        snprintf(syn_line, sizeof(syn_line), "%s}\n", body_ind);
+        snprintf(syn_line, sizeof(syn_line), "%scc_nursery_destroy(&%s);\n",
+                 body_ind, name);
         if (ok && !shadow_emit_pinned_block(out, ctx, st, "", syn_line)) ok = 0;
     } else if (is_chan) {
         if (!bare && (ndbody || nbody)) {

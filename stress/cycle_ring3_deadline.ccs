@@ -23,6 +23,7 @@ static void cycle_actor(CCChanTx tx, CCChanRx rx, int token) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     printf("cycle_ring3_deadline: %d rounds\n", ROUNDS);
     cc_atomic_store(&g_timeouts, 0);
 
@@ -39,12 +40,11 @@ int main(void) {
         CCChan* ch3 = cc_channel_pair(&tx3, &rx3);
 
         {
-            CCNursery* __cc_nursery118 = @create(NULL) @destroy;
-            if (!__cc_nursery118) abort();
+            CCNursery __cc_nursery118 = @create() !> @destroy;
 
-            __cc_nursery118->spawn(() => [tx2, rx1] { cycle_actor(tx2, rx1, 1); });
-            __cc_nursery118->spawn(() => [tx3, rx2] { cycle_actor(tx3, rx2, 2); });
-            __cc_nursery118->spawn(() => [tx1, rx3] { cycle_actor(tx1, rx3, 3); });
+            __cc_nursery118.spawn(() => [tx2, rx1] { cycle_actor(tx2, rx1, 1); });
+            __cc_nursery118.spawn(() => [tx3, rx2] { cycle_actor(tx3, rx2, 2); });
+            __cc_nursery118.spawn(() => [tx1, rx3] { cycle_actor(tx1, rx3, 3); });
         
         }
 

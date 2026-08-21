@@ -25,7 +25,7 @@ trailing-`*` family (`Fam_*`). Same match rule on both forms:
 Write the functions. Then name them on the type. Bodyless `@destroy` and
 `name@(args)` call those functions. Bodyless `@destroy` needs a non-empty
 destroy chain (a hook on the type, or on a value field’s type).
-Stdlib types already ship one (`CCArena`, `CCFile`, `CCNursery*`, …).
+Stdlib types already ship one (`CCArena`, `CCFile`, `CCNursery`, …).
 
 ```c
 #!ccc ccs
@@ -434,13 +434,13 @@ ok
 
 The arena header declares three named modes on `CCArena` — `Alloc`
 (`r: alloc, remaining;`), `Parent` (`r: adopt, attach, create_*;`), and
-`Region` (the union of both) — meant for signatures like
-`@typeview(Parent) CCArena*` (a function that constructs and owns but never
-resets or destroys). **Limitation:** header-declared modes are stripped at
-header lowering and are not visible from a consuming TU — to restrict an
-arena parameter today, declare the mode in your own TU (see
-`tests/arena_lifetime_parent_smoke.ccs`). Viewed faces (`as: (Mode)field`)
-are drafted, not implemented ([draft_facets.md](../spec/draft_facets.md)).
+`Region` (the union of both) — for signatures like
+`@typeview(Parent) CCArena*` (construct and own, never reset or destroy).
+The lowerer pins those modes so they survive header lowering. Viewed
+faces (`as: (Region)field`) retry UFCS through the field under that
+mode's allow-list (`tests/as_viewed_face_smoke.ccs`). A nursery born
+with `owner.create_nursery()` exposes the same Region face
+(`n.alloc(...)`).
 
 ---
 

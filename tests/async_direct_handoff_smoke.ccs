@@ -95,6 +95,7 @@ static int expected_reply_value(int request_id) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     cc_sched_set_num_workers(4);
     cc_atomic_store(&g_errors, 0);
     cc_atomic_store(&g_owner_seen, 0);
@@ -116,10 +117,9 @@ int main(void) {
     CCChanRx reply_rx_raw = reply_rx_h;
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) return 12;
-        if (n->spawn_async(handoff_owner(req_rx_raw, reply_tx_raw)) != 0) return 13;
-        if (n->spawn_async(handoff_client(req_tx_raw, reply_rx_raw)) != 0) return 14;
+        CCNursery n = @create() !> @destroy;
+        if (n.spawn_async(handoff_owner(req_rx_raw, reply_tx_raw)) != 0) return 13;
+        if (n.spawn_async(handoff_client(req_tx_raw, reply_rx_raw)) != 0) return 14;
     }
 
     int expected_total = REQUESTS;

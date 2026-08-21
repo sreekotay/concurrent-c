@@ -27,6 +27,7 @@ const char* g_urls[] = {
 #define NUM_URLS 3
 
 static void fetch_one(int idx, int* status_p, size_t* body_len_p) {
+    @errhandler(CCError e) cc_error_exit(e);
     /* Each task gets a stack arena for the HTTP response body. */
     char buf[32 * 1024];
     {
@@ -58,11 +59,11 @@ int main(void) {
     size_t body_len[NUM_URLS] = {0};
 
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        CCNursery n = cc_nursery_create() !> @destroy;
 
         for (int i = 0; i < NUM_URLS; i++) {
             int idx = i;  /* per-task value */
-            n->spawn(() => [idx, &status, &body_len] {
+            n.spawn(() => [idx, &status, &body_len] {
                 fetch_one(idx, status, body_len);
             });
         }

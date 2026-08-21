@@ -15,7 +15,7 @@
  *   clear    retract both bags under one sorted hold (jobs then done)
  *   destroy  give_back queued jobs (do not run), close jobs,
  *            join: wait in-flight getaddrinfo, give_back leftover done, free q
- *            detach: on_last(finish_q) + workers->abandon() — do not wait
+ *            detach: on_last(finish_q) + workers.abandon() — do not wait
  *
  * getaddrinfo stays blocking. The bags are lists you can retract from.
  * Exclusive acquire_when is the bag wait and await_done (not a channel).
@@ -338,7 +338,7 @@ static void CcThrdq_teardown(CcThrdq *q) {
     }
     w = q->workers;
     if (w)
-        w->wait();
+        w.wait();
     {
         JobBag *done = &q->done;
         done->drain(q);
@@ -383,7 +383,7 @@ static int spawn_worker(CCNursery *n, CcThrdq *q) {
     int rc = -1;
     if (!n)
         return -1;
-    rc = n->spawnhybrid(() => [q] { worker(q); });
+    rc = n.spawnhybrid(() => [q] { worker(q); });
     return rc;
 }
 
@@ -486,7 +486,7 @@ int Curl_thrdq_create(struct curl_thrdq **ptqueue, const char *name,
         }
     }
 
-    q->workers = cc_nursery_create(NULL);
+    q->workers = cc_nursery_create();
     if (!q->workers) {
         q->teardown();
         return CC_CURLE_OUT_OF_MEMORY;
@@ -630,8 +630,8 @@ static void detach_teardown(CcThrdq *q) {
         finish_q(q);
         return;
     }
-    (void)w->on_last(q, finish_q);
-    w->abandon();
+    (void)w.on_last(q, finish_q);
+    w.abandon();
 }
 
 void Curl_thrdq_destroy(struct curl_thrdq *tqueue, bool join) {

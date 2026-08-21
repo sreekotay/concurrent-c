@@ -27,12 +27,12 @@ int main(void) {
     println(@string(`=== Fan-out: spawning ${NUM_TASKS} tasks ===`, @scratch)) !>;
 
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        CCNursery n = cc_nursery_create() !> @destroy;
 
         for (int i = 0; i < NUM_TASKS; i++) {
             int task_id = i;                    /* per-task value */
 
-            n->spawn(() => [task_id] {
+            n.spawn(() => [task_id] {
                 @errhandler(CCError e) cc_error_exit(e);
                 int r = compute(task_id);
                 println(@string(`  task ${task_id}: compute(${task_id}) = ${r}`, @scratch)) !>;

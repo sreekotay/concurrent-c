@@ -21,17 +21,17 @@ static double time_now_ms(void) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     printf("spawn_nursery_direct: measuring nursery spawn throughput (direct calls)\n");
 
     double start = time_now_ms();
 
     for (int batch = 0; batch < ITERATIONS / 1000; batch++) {
         {
-            CCNursery* __cc_nursery175 = @create(NULL) @destroy;
-            if (!__cc_nursery175) abort();
+            CCNursery __cc_nursery175 = @create() !> @destroy;
 
             for (int i = 0; i < 1000; i++) {
-                __cc_nursery175->spawn(() => {
+                __cc_nursery175.spawn(() => {
                     increment_global();
                 });
             }

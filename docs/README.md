@@ -50,9 +50,9 @@ detail:
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-    n->spawn(() => printf("Hello from task A!\n"));
-    n->spawn(() => printf("Hello from task B!\n"));
+    CCNursery n = cc_nursery_create() !> @destroy;
+    n.spawn(() => printf("Hello from task A!\n"));
+    n.spawn(() => printf("Hello from task B!\n"));
     return 0;
 }
 ```

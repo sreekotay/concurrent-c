@@ -64,6 +64,7 @@ void tx_fiber(int[~ >] tx) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("match_lost_wakeup: 1+1 fibers x %d ops (unbuffered, select/1case)\n", OPS);
 
@@ -74,12 +75,11 @@ int main(void) {
     int[~ <] rx = rx_h;
 
     {
-        CCNursery* __nur = @create(NULL) @destroy;
-        if (!__nur) abort();
+        CCNursery __nur = @create() !> @destroy;
         CCChanRx r = rx;
         CCChanTx t = tx;
-        __nur->spawn(() => [r] { rx_fiber(r); });
-        __nur->spawn(() => [t] { tx_fiber(t); });
+        __nur.spawn(() => [r] { rx_fiber(r); });
+        __nur.spawn(() => [t] { tx_fiber(t); });
 
         /* Watchdog: bail early if recv progress stalls.  This is not a
          * perf budget — a healthy run finishes OPS in well under a

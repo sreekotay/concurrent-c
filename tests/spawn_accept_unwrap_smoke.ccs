@@ -22,11 +22,11 @@ int main(void) {
     CCListener* ln_ptr = &ln;
 
     {
-        CCNursery* server = cc_nursery_create(NULL) !> @destroy;
-        server->spawn(() => [ln_ptr, server] {
+        CCNursery server = cc_nursery_create() !> @destroy;
+        server.spawn(() => [ln_ptr, server] {
             while (true) {
                 CCSocket client = cc_listener_accept(ln_ptr) !>(e) {
-                    if (!server->is_cancelled()) {
+                    if (!server.is_cancelled()) {
                         take_net_err(e);
                     }
                     break;
@@ -38,11 +38,11 @@ int main(void) {
     }
 
     {
-        CCNursery* server = cc_nursery_create(NULL) !> @destroy;
-        server->spawn(() => [ln_ptr, server] {
+        CCNursery server = cc_nursery_create() !> @destroy;
+        server.spawn(() => [ln_ptr, server] {
             while (true) {
                 CCSocket client = ln_ptr->accept() !>(e) {
-                    if (!server->is_cancelled()) {
+                    if (!server.is_cancelled()) {
                         take_net_err(e);
                     }
                     break;

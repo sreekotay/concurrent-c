@@ -32,6 +32,7 @@ static void reader_task(int fd) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     cc_atomic_store(&g_timed_out, 0);
     cc_atomic_store(&g_errors, 0);
 
@@ -42,15 +43,10 @@ int main(void) {
     }
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) {
-            close(fds[0]);
-            close(fds[1]);
-            return 2;
-        }
+        CCNursery n = @create() !> @destroy;
         int reader_fd = fds[0];
         fds[0] = -1;
-        n->spawn(() => [reader_fd] { reader_task(reader_fd); });
+        n.spawn(() => [reader_fd] { reader_task(reader_fd); });
     }
     close(fds[1]);
 

@@ -17,16 +17,16 @@ static double time_now_ms(void) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     printf("spawn_simple: measuring simple spawn throughput\n");
 
     double start = time_now_ms();
 
     for (int i = 0; i < ITERATIONS; i++) {
         {
-            CCNursery* __cc_nursery177 = @create(NULL) @destroy;
-            if (!__cc_nursery177) abort();
+            CCNursery __cc_nursery177 = @create() !> @destroy;
 
-                __cc_nursery177->spawn(() => { global_counter++; });
+                __cc_nursery177.spawn(() => { global_counter++; });
         
         }
     }

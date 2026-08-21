@@ -19,7 +19,7 @@ int main(void) {
     int b = mk(-1) ?> /*x*/ (e) 7;
     printf("b=%d\n", b);
 
-    CCNursery* nur = cc_nursery_create(NULL) @destroy;
+    CCNursery nur = cc_nursery_create() !> @destroy;
     int base = 5;
     nur.spawn(() =>/*x*/ [base] { printf("seen=%d\n", base); });
     nur.wait();

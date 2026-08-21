@@ -67,9 +67,9 @@ A viewed face exposes a field through one of its type's named modes:
     r: alloc, remaining, adopt, attach, create_*;
 };
 
-@typeview on CCNursery* {
-    as: (Region)arena;    /* n->alloc(...) retries on the arena face;
-                             n->reset() is ill-formed — not in Region */
+@typeview on CCNursery {
+    as: (Region)n;        /* n.alloc(...) projects Region through the host;
+                             n.reset() is ill-formed — not in Region */
 };
 ```
 
@@ -106,19 +106,20 @@ typedef struct Conn {
   UFCS call (`s->len`, `c->write(...)`).
 - **`w:`** — may store through a field (`c->out = …`, `+=`, `++`, …).
 - **`rw:`** — both use and store.
-- **`as:`** — is-a faces (value embeds only; at most one path per target
-  type). Not an allow-list group. Each pattern is `field` or
-  `(Mode)field`. The plain form exposes the field's full surface. The
-  parenthesized form exposes the field through a named mode of the
-  field's type: UFCS retry through that face consults the mode's
-  allow-list instead of the field type's full surface. Exactly one mode
-  may appear. The name resolves first as a mode declared on the field's
-  type; otherwise it must be a type name denoting a **value** view of the
-  field's type (`Base_Restrict_Mode` or a value alias). A pointer alias
-  is ill-formed in face position — a face names an embedded object. The
-  cast spelling exists only in `as:` patterns; expression-site narrowing
-  stays implicit (§4). Explicit member access through the field
-  (`t.field.name`) is unaffected by the mode.
+- **`as:`** — is-a faces (at most one path per target type). Not an
+  allow-list group. Each pattern is `field` or `(Mode)field`. `as:` is a
+  projection: when the outer misses, retry through this path on that
+  face. The plain form exposes a value embed's full surface. The
+  parenthesized form takes a named mode of the landing — `(Mode)` names
+  the face, not the hop's static type. A pointer field is a hop
+  (`as: (Region)n` on `CCNursery` projects Region through the host; the
+  host is not an arena). Exactly one mode may appear. The name resolves
+  first as a mode declared on the landing type; otherwise it must be a
+  type name denoting a **value** view of that type (`Base_Restrict_Mode`
+  or a value alias). A pointer alias is ill-formed as the landing — the
+  landing is an object. The cast spelling exists only in `as:` patterns;
+  expression-site narrowing stays implicit (§4). Explicit member access
+  through the field (`t.field.name`) is unaffected by the mode.
 - The subject `Base` may be a trailing-`*` type-family glob (`CCSlice_*`),
   same match/score rule as allow-list patterns and `@typehooks`.
   Narrowest matching view wins; equal-score conflicts are ill-formed. Named

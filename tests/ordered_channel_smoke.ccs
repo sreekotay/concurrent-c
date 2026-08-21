@@ -21,6 +21,7 @@ int !>(CCIoError) compute_result(int x) {
  * 1. Legacy: explicit CCTask channel + ordered_recv
  * ----------------------------------------------------------------------- */
 static int test_legacy_ordered_recv(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCTask[~8 >] tx;
     CCTask[~8 <] rx;
     cc_channel_pair(&tx, &rx);
@@ -29,9 +30,8 @@ static int test_legacy_ordered_recv(void) {
     int n = sizeof(values) / sizeof(values[0]);
 
     {
-        CCNursery* __cc_nursery73 = @create(NULL) @destroy;
-        if (!__cc_nursery73) abort();
-        (void)__cc_nursery73->close_on(tx);
+        CCNursery __cc_nursery73 = @create() !> @destroy;
+        (void)__cc_nursery73.close_on(tx);
 
         for (int i = 0; i < n; i++) {
             intptr_t v = values[i];
@@ -63,6 +63,7 @@ static int test_legacy_ordered_recv(void) {
  *         chan_recv auto-awaits and delivers typed result
  * ----------------------------------------------------------------------- */
 static int test_typed_ordered_stmt_form(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     intptr_t[~8 >] tx;
     intptr_t[~8 ordered <] rx;
     cc_channel_pair(&tx, &rx);   /* statement form — ordered flag must be preserved */
@@ -71,9 +72,8 @@ static int test_typed_ordered_stmt_form(void) {
     int n = sizeof(values) / sizeof(values[0]);
 
     {
-        CCNursery* __cc_nursery74 = @create(NULL) @destroy;
-        if (!__cc_nursery74) abort();
-        (void)__cc_nursery74->close_on(tx);
+        CCNursery __cc_nursery74 = @create() !> @destroy;
+        (void)__cc_nursery74.close_on(tx);
 
         for (int i = 0; i < n; i++) {
             intptr_t v = values[i];
@@ -103,6 +103,7 @@ static int test_typed_ordered_stmt_form(void) {
  * 3. New: typed ordered channel, expression-form channel_pair
  * ----------------------------------------------------------------------- */
 static int test_typed_ordered_expr_form(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     intptr_t[~8 >] tx;
     intptr_t[~8 ordered <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);   /* expression form */
@@ -111,9 +112,8 @@ static int test_typed_ordered_expr_form(void) {
     int n = sizeof(values) / sizeof(values[0]);
 
     {
-        CCNursery* __cc_nursery75 = @create(NULL) @destroy;
-        if (!__cc_nursery75) abort();
-        (void)__cc_nursery75->close_on(tx);
+        CCNursery __cc_nursery75 = @create() !> @destroy;
+        (void)__cc_nursery75.close_on(tx);
 
         for (int i = 0; i < n; i++) {
             intptr_t v = values[i];
@@ -143,6 +143,7 @@ static int test_typed_ordered_expr_form(void) {
  * 4. Ordered task channel preserves rich result types without glue helpers
  * ----------------------------------------------------------------------- */
 static int test_ordered_result_payload(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int !>(CCIoError)[~8 >] result_tx;
     int !>(CCIoError)[~8 ordered <] result_rx;
     CCChan* ch = cc_channel_pair(&result_tx, &result_rx);
@@ -153,9 +154,8 @@ static int test_ordered_result_payload(void) {
     int n = sizeof(values) / sizeof(values[0]);
 
     {
-        CCNursery* __cc_nursery76 = @create(NULL) @destroy;
-        if (!__cc_nursery76) abort();
-        (void)__cc_nursery76->close_on(result_tx);
+        CCNursery __cc_nursery76 = @create() !> @destroy;
+        (void)__cc_nursery76.close_on(result_tx);
 
         for (int i = 0; i < n; i++) {
             int v = values[i];

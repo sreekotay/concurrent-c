@@ -70,8 +70,8 @@ type of the receiver expression. Any function registered against a type
 is callable as a method on values of that type.
 
 ```c
-CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-n->spawn(() => printf("hi\n"));   // lowers to cc_nursery_spawn(n, ...)
+CCNursery n = cc_nursery_create() !> @destroy;
+n.spawn(() => printf("hi\n"));
 ```
 
 UFCS is orthogonal to ownership: the same method works on a value, a
@@ -290,7 +290,7 @@ bugs.
 | `@typehooks`   | Lifecycle / UFCS policy on a type                                       | `@typehooks on T { .destroy = …, };`   |
 | `@typeview`    | Faces (`as:`) and allow-lists on a type                                 | `@typeview on T { as: file; };`        |
 | `@scoped`      | Type tied to a lexical scope (cannot escape)                            | `@scoped type Guard::[T];`             |
-| `@unsafe`      | Closure hatch: skip mutation-of-share checks on that spawn              | `n->spawn(@unsafe () => [&x] { x++; });` |
+| `@unsafe`      | Closure hatch: skip mutation-of-share checks on that spawn              | `n.spawn(@unsafe () => [&x] { x++; });` |
 | `@slice`       | Build-time canonical sentinel slice                                     | `char[:0] m = @slice("recv");`         |
 | `@string`      | Templated string: arena `String`, or arena-less bounded `char[:]` (§9.1.2) | `CCString s = @string("hi", &arena);`  |
 | `unsafe`       | (Bare) waive provenance and sendability in a block                      | `unsafe { ptr_cast(); }`               |
@@ -306,7 +306,7 @@ bugs.
 | `@nonblocking fn() { }`         | Mark declaration — async callers skip `run_blocking` at call edges (§8.2)          | `@nonblocking size_t strlen_nb(const char* s) { … }`     |
 | `@latency_sensitive`            | Mark as latency-critical (no dispatch coalescing)        | `@async @latency_sensitive void handle() { }`            |
 | `@scoped type T`                | Type tied to lexical scope (cannot escape)               | `@scoped type Guard::[T];`                               |
-| `CALL() !> @destroy { D };`     | Resource lifetime declaration with error-checked cleanup | `CCNursery* n = cc_nursery_create(NULL) !> @destroy;`    |
+| `CALL() !> @destroy { D };`     | Resource lifetime declaration with error-checked cleanup | `CCNursery n = cc_nursery_create() !> @destroy;`    |
 | `@defer stmt;`                  | Schedule statement to run on scope exit                  | `@defer file.close();`                                   |
 | `@comptime if (cond) { }`       | Compile-time conditional                                 | `@comptime if (FEATURE_X) { }`                           |
 | `@errhandler(E e) stmt` / `{ }` | Block-scoped handler for Result error type `E` (§3.1)    | `@errhandler(CCError e) cc_error_exit(e);` |
@@ -673,7 +673,7 @@ char[:] stack_slice = buf[:];
 @await ch.send(stack_slice);
 
 // Spawned task: ERROR (closure copies slice struct, ptr points to dead stack)
-n->spawn(() => {
+n.spawn(() => {
     use(stack_slice);  // BAD: stack_slice.ptr points to caller's stack frame
 });
 ```
@@ -700,7 +700,7 @@ n->spawn(() => {
 | `CCTaskIntptr`             | Yes                            | Explicit poll/drop ownership                |
 | Channels                 | Yes                            | Thread-safe handles                         |
 | Registered scope-bound synchronization handle | **No**             | Scope-bound                                 |
-| `CCNursery*`             | Yes                            | Handle; children must not outlive it        |
+| `CCNursery`             | Yes                            | Handle; children must not outlive it        |
 | Raw pointers             | Yes                            | But safety is caller's responsibility       |
 
 
@@ -768,18 +768,18 @@ void ok_pattern() {
     CCArena a = cc_arena_heap(kilobytes(64));
     char[:] s = a.alloc_slice_bytes(100);
 
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-    n->spawn(() => {
+    CCNursery n = cc_nursery_create() !> @destroy;
+    n.spawn(() => {
         use(s);  // OK: nursery @destroy joins before arena freed
     });
 }  // arena freed here, after children joined
 
 void bad_pattern() {
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+    CCNursery n = cc_nursery_create() !> @destroy;
     {
         CCArena a = cc_arena_heap(kilobytes(64));
         char[:] s = a.alloc_slice_bytes(100);
-        n->spawn(() => {
+        n.spawn(() => {
             use(s);  // ERROR: arena may be freed before the task runs
         });
     }  // arena freed here
@@ -1649,7 +1649,7 @@ Suspension alone does not impose one cancellation policy. Observation depends
 on the source and operation:
 
 - Nursery cancellation is observed by `cc_cancelled()` /
-  `cc_nursery_is_cancelled()` and by runtime waits that explicitly use the
+  `n.is_cancelled()` and by runtime waits that explicitly use the
   nursery-aware cancel path.
 - A `CCDeadline` is observed by operations passed that deadline or by
   operations that consult `cc_current_deadline()`. Expiry produces that
@@ -2053,9 +2053,9 @@ debug builds may trap via epoch helpers such as `cc_slice_is_from_arena_epoch`.
 ```c
 CCArena a = cc_arena_heap(megabytes(1));
 char[:] s = a.alloc_slice_bytes(100);
-CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+CCNursery n = cc_nursery_create() !> @destroy;
 
-n->spawn(() => {
+n.spawn(() => {
     use(s);  // OK only while a outlives the join
 });
 
@@ -2308,22 +2308,22 @@ thread adapters supplied by a library.
 
 ```c
 int x = 0;
-CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+CCNursery n = cc_nursery_create() !> @destroy;
 
 // Value capture (default): x is copied, immutable in closure
-n->spawn(() => { printf("%d", x); });       // ✅ OK
-n->spawn(() => { x++; });                   // ❌ ERROR: value capture is immutable
+n.spawn(() => { printf("%d", x); });       // ✅ OK
+n.spawn(() => { x++; });                   // ❌ ERROR: value capture is immutable
 
 // Reference capture: explicit sharing with mutation check
-n->spawn(() => [&x] { printf("%d", x); });  // ✅ OK: read-only
-n->spawn(() => [&x] { x++; });              // ❌ ERROR: mutation of shared ref
+n.spawn(() => [&x] { printf("%d", x); });  // ✅ OK: read-only
+n.spawn(() => [&x] { x++; });              // ❌ ERROR: mutation of shared ref
 
 // Shared atomic storage uses the shipped C surface.
 cc_atomic_int counter = 0;
-n->spawn(() => { cc_atomic_fetch_add(&counter, 1); });
+n.spawn(() => { cc_atomic_fetch_add(&counter, 1); });
 
 // Escape hatch: @unsafe bypasses check
-n->spawn(@unsafe () => [&x] { x++; });     // ⚠️ OK: explicit unsafe
+n.spawn(@unsafe () => [&x] { x++; });     // ⚠️ OK: explicit unsafe
 ```
 
 This prevents data races while allowing explicit shared state through safe wrappers.
@@ -2550,7 +2550,7 @@ Notes:
 
 - `cc_channel_pair` initializes both handles to the same underlying channel and returns a pointer to it.
 - `tx` and `rx` are **capability handles** (typed views), not resources. They do not need to be freed.
-- `close(tx)` / `close(rx)` closes the underlying channel. Idiomatically, close is scheduled on nursery teardown: `CCNursery* n = cc_nursery_create(NULL) !> @destroy { tx.close(); };` (§8.1.4).
+- `close(tx)` / `close(rx)` closes the underlying channel. Idiomatically, close is scheduled on nursery teardown: `CCNursery n = cc_nursery_create() !> @destroy { tx.close(); };` (§8.1.4).
 - `cc_channel_free(ch)` frees the channel. Always free the channel, not the handles.
 
 **Ownership idiom:**
@@ -2560,11 +2560,11 @@ int[~10 >] tx;
 int[~10 <] rx;
 CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy { cc_channel_free(ch); };
 
-CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
-outer->spawn(() => consumer(rx));
+CCNursery outer = cc_nursery_create() !> @destroy;
+outer.spawn(() => consumer(rx));
 
-CCNursery* inner = cc_nursery_create(outer) !> @destroy { tx.close(); };
-inner->spawn(() => producer(tx));
+CCNursery inner = outer.create_child() !> @destroy { tx.close(); };
+inner.spawn(() => producer(tx));
 ```
 
 **Error channels:**
@@ -2670,8 +2670,8 @@ CompressedResult*[~16 ordered >] results_tx;
 CompressedResult*[~16 ordered <] results_rx;
 CCChan* ch = cc_channel_pair(&results_tx, &results_rx) !> @destroy { cc_channel_free(ch); };
 
-CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
-outer->spawn(() => {
+CCNursery outer = cc_nursery_create() !> @destroy;
+outer.spawn(() => {
     CompressedResult* r;
     while (cc_io_avail(results_rx.recv(&r))) {
         cc_file_write(out, r->data);
@@ -2680,7 +2680,7 @@ outer->spawn(() => {
 });
 
 // Producer nursery closes results_tx after all workers exit, so the consumer sees EOF.
-CCNursery* inner = cc_nursery_create(outer) !> @destroy { results_tx.close(); };
+CCNursery inner = outer.create_child() !> @destroy { results_tx.close(); };
 while (read_block(&blk)) {
     cc_channel_send_task(results_tx, () => [blk] compress_block(blk));
 }
@@ -3240,9 +3240,9 @@ CCArena[~4 owned {
     .reset = (CCArena a) => cc_arena_reset(&a)
 }] arena_pool;
 
-CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+CCNursery n = cc_nursery_create() !> @destroy;
 // Pool destroyed when enclosing scope ends: .destroy called for each arena
-n->spawn(() => {
+n.spawn(() => {
     CCArena arena;
     arena_pool.recv(&arena);  // Borrow
     void* p = cc_arena_alloc(&arena, 100, 1);
@@ -3347,21 +3347,24 @@ This section specifies:
 
 A **nursery** is a join set with a handle. Every task is a child of some nursery. `wait` and `@destroy` keep the handle until the set is empty. `abandon` consumes the handle; children may still be running. The join set does not outlive the last child: when the last child is dead the runtime closes registered channels, runs `on_last` if one is registered, and frees the nursery.
 
-`CCNursery` is a library type constructed with `cc_nursery_create(NULL)`. The wait path releases it via `@destroy`. The abandon path consumes the handle without joining. The construction-plus-destruction pattern is idiomatic:
+`CCNursery` is a library type. The join form is `a.create_nursery()` (handle in
+the arena; the walk joins). `cc_nursery_create()` is the self-owned malloc form
+(`@destroy` or `abandon`). Nested cancel inheritance is `parent.create_child()`.
+The construction-plus-destruction pattern is idiomatic:
 
 ```c
 {
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy {
+    CCNursery n = cc_nursery_create() !> @destroy {
         // runs after all children have joined
     };
-    n->spawn(() => work1());
-    n->spawn(() => work2());
+    n.spawn(() => work1());
+    n.spawn(() => work2());
 }
 ```
 
 The `@destroy` clause on the declaration schedules nursery teardown (which joins all children) at scope exit. Nothing in the lowered form runs implicitly — `@defer`-shaped lifetime (§5.1) is the normative mechanism.
 
-Ordinary lexical blocks create nested nursery lifetimes; `n->spawn(...)` is
+Ordinary lexical blocks create nested nursery lifetimes; `n.spawn(...)` is
 UFCS on the explicit nursery handle.
 
 **Properties:**
@@ -3369,9 +3372,9 @@ UFCS on the explicit nursery handle.
 - Tasks spawned on `n` are children of `n`.
 - The nursery's `@destroy` waits for all children to complete before returning.
 - Child task handles cannot outlive the nursery's scope (compile-time error if they escape).
-- `cc_nursery_wait(n)` joins every child and returns the first nonzero child
-  error it records; it does not cancel siblings.
-- `n->abandon()` consumes the handle. The caller does not join. The runtime
+- `n.wait()` joins every child and returns the first nonzero child error it
+  records; it does not cancel siblings.
+- `n.abandon()` consumes the handle. The caller does not join. The runtime
   releases the join set after the last child is dead.
 - Peer tasks cannot wait on each other (compile-time error).
 
@@ -3379,22 +3382,27 @@ UFCS on the explicit nursery handle.
 
 #### 8.1.1 Construction
 
-`cc_nursery_create(CCNursery* parent)` returns `CCNursery*!>(CCError)`. Pass `NULL` for a top-level nursery; pass a parent nursery for nested structured concurrency.
+`CCNursery !>(CCError) cc_arena_create_nursery(CCArena* a)` (UFCS
+`a.create_nursery()`) births a nursery into a live arena. A null or dead arena
+aborts. `CCNursery !>(CCError) cc_nursery_create(void)` is the self-owned handle
+(`abandon` is allowed). `CCNursery !>(CCError) cc_nursery_create_child(CCNursery parent)`
+(UFCS `parent.create_child()`) snapshots cancel and deadline from a required
+parent handle; an empty parent (null host) aborts.
 
 ```c
 @errhandler(CCError e) cc_error_exit(e);
 
-CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
-CCNursery* inner = cc_nursery_create(outer) !> @destroy;
+CCArena frame = cc_arena_heap(kilobytes(8)) @destroy;
+CCNursery outer = frame.create_nursery() !>;
+CCNursery inner = outer.create_child() !> @destroy;
 ```
 
 The `!>` operator consumes the result: on success, the value is bound; on error, control transfers to the matching `@errhandler` for that Result `E` (§3.1). The trailing `@destroy` is a `@defer`-shaped destructor (§5.1) that joins children on scope exit.
 
-Nursery cleanup invokes `cc_nursery_wait` as a pre-destroy hook and discards
-its `int` return value. It does not forward a child error to `@errhandler` or
-`!>`. Code that must observe a child error calls `cc_nursery_wait(n)`
-explicitly, checks the returned integer before leaving the scope, and then
-allows the registered cleanup to free the nursery.
+Nursery cleanup waits for children and discards the join integer. It does not
+forward a child error to `@errhandler` or `!>`. Code that must observe a child
+error calls `n.wait()` explicitly, checks the returned integer before leaving
+the scope, and then allows the registered cleanup to free the nursery.
 
 ---
 
@@ -3403,35 +3411,35 @@ allows the registered cleanup to free the nursery.
 Spawn a child task via UFCS on the nursery handle:
 
 ```c
-n->spawn(() => work());                 // lambda expression
-n->spawn(worker_fn);                     // function reference
-n->spawn(() => worker_with_arg(x));      // captured argument
+n.spawn(() => work());                 // lambda expression
+n.spawn(worker_fn);                     // function reference
+n.spawn(() => worker_with_arg(x));      // captured argument
 ```
 
 The compiler enforces the following normative rules:
 
 - **Rule (task handle escape):** A task handle returned by `spawn` may not be stored in a variable that outlives the nursery, returned from the enclosing function, or captured in closures escaping the nursery.
 - **Rule (no peer joins):** A child task may not @await or otherwise join another sibling's completion.
-- **Rule (join the set):** The caller joins the set with `@destroy` or `cc_nursery_wait`. `n->abandon()` consumes the handle and does not join.
+- **Rule (join the set):** The caller joins the set with `@destroy` or `n.wait()`. `n.abandon()` consumes the handle and does not join.
 
 ---
 
 #### 8.1.3 Error Propagation and Cancellation
 
-`cc_nursery_cancel(n)` requests cooperative cancellation for children. Child
-code observes it through `cc_nursery_is_cancelled(n)`, `cc_cancelled()`, or a
+`n.cancel()` requests cooperative cancellation for children. Child
+code observes it through `n.is_cancelled()`, `cc_cancelled()`, or a
 wait that explicitly observes the current nursery. Nursery wait still joins
 every admitted child before teardown returns. A child return value does not
 cancel peers; the spawn wrapper and library API determine how task errors are
 reported.
 
 ```c
-CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-n->spawn(() => ok_task());
-n->spawn(() => failing_task());     // returns cc_err(E)
-int child_err = cc_nursery_wait(n);
+CCNursery n = cc_nursery_create() !> @destroy;
+n.spawn(() => ok_task());
+n.spawn(() => failing_task());     // returns cc_err(E)
+int child_err = n.wait();
 if (child_err != 0) return map_child_error(child_err);
-// The sibling runs to completion unless code explicitly calls cc_nursery_cancel.
+// The sibling runs to completion unless code explicitly calls n.cancel().
 ```
 
 ---
@@ -3444,39 +3452,39 @@ producer channel in that body to signal EOF to a consumer owned by an outer
 nursery:
 
 ```c
-CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
-outer->spawn(() => consumer(rx));
+CCNursery outer = cc_nursery_create() !> @destroy;
+outer.spawn(() => consumer(rx));
 
-CCNursery* producers = cc_nursery_create(outer) !> @destroy { tx.close(); };
-producers->spawn(() => producer(tx));
+CCNursery producers = outer.create_child() !> @destroy { tx.close(); };
+producers.spawn(() => producer(tx));
 ```
 
 The producer nursery joins producers, closes `tx`, and frees itself. The outer
 nursery can then join the consumer after it drains to `ok(false)`.
 
-The pre-destroy hook discards the integer returned by `cc_nursery_wait`; its
-purpose here is ordering, not error forwarding.
+The pre-destroy wait discards its join integer; its purpose here is ordering,
+not error forwarding.
 
 Use nested nurseries to sequence producer-close before consumer-drain:
 
 ```c
-CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
-outer->spawn(() => consumer(rx));
+CCNursery outer = cc_nursery_create() !> @destroy;
+outer.spawn(() => consumer(rx));
 
-CCNursery* inner = cc_nursery_create(outer) !> @destroy { tx.close(); };
-for (int w = 0; w < N; w++) inner->spawn(() => worker(tx));
+CCNursery inner = outer.create_child() !> @destroy { tx.close(); };
+for (int w = 0; w < N; w++) inner.spawn(() => worker(tx));
 // inner's @destroy closes tx after workers exit; consumer drains and
 // outer's @destroy joins the consumer.
 ```
 
-**Registered close form.** `n->close_on(tx)` is UFCS for
+**Registered close form.** `n.close_on(tx)` is UFCS for
 `cc_nursery_add_closing_tx(n, tx)`. It registers `tx` to close after nursery
 wait, or on the `abandon` last-exit path, and before nursery storage is released:
 
 ```c
-CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-n->close_on(tx);                    // equivalent to @destroy { tx.close(); }
-n->spawn(() => producer(tx));
+CCNursery n = cc_nursery_create() !> @destroy;
+n.close_on(tx);                    // equivalent to @destroy { tx.close(); }
+n.spawn(() => producer(tx));
 ```
 
 An explicit `@destroy { tx.close(); }` body and `close_on(tx)` have the same
@@ -3484,7 +3492,7 @@ observable close-after-join placement, but they are distinct lowerings.
 
 `@nursery`, bare `nursery { ... }`, `spawn { ... }`, and `@closing(...)` are
 unsupported spellings and are compile-time errors. Structured concurrency uses
-an explicit `CCNursery*` declaration and UFCS `spawn` / `close_on` /
+an explicit `CCNursery` declaration and UFCS `spawn` / `close_on` /
 `on_last` / `abandon` calls.
 
 If `CC_NURSERY_CLOSING_RUNTIME_GUARD=1`, a receive that would park in the
@@ -3496,18 +3504,18 @@ optional and is independent of the scheduler's general detector (§8.7.1).
 
 #### 8.1.5 Abandon
 
-`n->on_last(ctx, finish)` is UFCS for `cc_nursery_on_last` and registers one
-hook. `n->abandon()` is UFCS for `cc_nursery_abandon` and consumes the
+`n.on_last(ctx, finish)` is UFCS for `cc_nursery_on_last` and registers one
+hook. `n.abandon()` is UFCS for `cc_nursery_abandon` and consumes the
 handle. Extra after-work is `on_last`, registered before `abandon`.
 
 ```c
-n->on_last(q, finish_q);   // optional
-n->abandon();              // always this
+n.on_last(q, finish_q);   // optional
+n.abandon();              // always this
 ```
 
 A program uses either `wait` / `@destroy` or `on_last` + `abandon`. Mixing
 them is a programming error (the runtime aborts). After `abandon` the
-pointer is invalid: no `wait`, `free`, `spawn`, or `close_on`. Spawn after
+handle is invalid: no `wait`, `free`, `spawn`, or `close_on`. Spawn after
 `abandon` fails with `EINVAL`.
 
 When `alive_count` is already zero, last-exit runs on the caller. When
@@ -3534,8 +3542,8 @@ A nursery guarantees:
 - No forgotten-join deadlocks (impossible syntactically) on the `wait` /
   `@destroy` path.
 - No cyclic peer waits (impossible syntactically).
-- First recorded child error returned by an explicit `cc_nursery_wait`.
-- Explicit cooperative cancellation through `cc_nursery_cancel`.
+- First recorded child error returned by an explicit `n.wait()`.
+- Explicit cooperative cancellation through `n.cancel()`.
 - Deterministic channel close ordering (via `@destroy { ch.close(); }`, or `close_on` from C), including on the `abandon` last-exit path.
 
 A nursery does **not** guarantee:
@@ -4097,9 +4105,9 @@ CCChan* work_ch = cc_channel_pair(&work_tx, &work_rx);
     }
 }
 
-CCNursery* n = cc_nursery_create(NULL) !> @destroy { work_tx.close(); };
-n->spawn(() => producer());
-n->spawn(() => consumer());
+CCNursery n = cc_nursery_create() !> @destroy { work_tx.close(); };
+n.spawn(() => producer());
+n.spawn(() => consumer());
 // cc_channel_free(work_ch) is scheduled on the @destroy of the channel pair above.
 ```
 
@@ -4151,9 +4159,9 @@ The language model does not include a combined send/recv channel handle. A progr
 
 Cancellation and deadlines are cooperative and have distinct sources:
 
-- `cc_nursery_cancel(n)` marks a nursery and wakes its children so
+- `n.cancel()` marks a nursery and wakes its children so
   nursery-aware waits can re-check that state.
-- `cc_cancelled()` and `cc_nursery_is_cancelled(n)` poll nursery state.
+- `cc_cancelled()` and `n.is_cancelled()` poll nursery state.
 - `cc_cancel(CCDeadline*)` marks one deadline object.
 - Absolute deadline expiry wakes deadline-aware parks; the operation re-checks
   time and returns its timeout result.
@@ -4229,7 +4237,7 @@ Nursery state and deadline-scope state use different polling APIs. They are not 
 | API | Source | Typical use |
 | --- | --- | --- |
 | `cc_cancelled()` | current nursery | `while (!cc_cancelled()) { … }` |
-| `cc_nursery_is_cancelled(n)` | named nursery | poll a handle |
+| `n.is_cancelled()` | named nursery | poll a handle |
 | `cc_is_cancelled()` | current `@with_deadline` scope | zero-argument language macro → `cc_is_cancelled_current()` |
 | `cc_is_cancelled(const CCDeadline*)` | explicit deadline | C function; the `.c` translation unit `#undef`s the macro |
 
@@ -4253,7 +4261,7 @@ while (!cc_cancelled()) {
 
 No cancellation source forcibly interrupts C code or performs stack unwinding.
 `cc_task_cancel` requests cancellation of a concrete task handle;
-`cc_nursery_cancel` requests cancellation of nursery children. The runtime may
+`n.cancel()` requests cancellation of nursery children. The runtime may
 wake parked work to permit observation, but the operation still determines the
 reported result. Channel cancellation is represented by
 `cc_io_from_errno(ECANCELED)`.
@@ -4358,8 +4366,8 @@ Streaming uses explicit channel parameters:
     int[~10 <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy { cc_channel_free(ch); };
 
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy { tx.close(); };
-    n->spawn(() => produce(100, &tx));
+    CCNursery n = cc_nursery_create() !> @destroy { tx.close(); };
+    n.spawn(() => produce(100, &tx));
     int x;
     while (cc_io_avail(rx.recv(&x))) use(x);
 }
@@ -4403,11 +4411,11 @@ void cc_task_intptr_free(CCTaskIntptr* task);
 intptr_t cc_block_on_intptr(CCTaskIntptr task);
 
 // Nursery cancellation
-void cc_nursery_cancel(CCNursery* n);
-bool cc_nursery_is_cancelled(const CCNursery* n);
+void cc_nursery_cancel(CCNursery n);
+bool cc_nursery_is_cancelled(const CCNursery n);
 bool cc_cancelled(void);  // current nursery
-int cc_nursery_on_last(CCNursery* n, void* ctx, void (*finish)(void*));  // UFCS: n->on_last
-void cc_nursery_abandon(CCNursery* n);  // UFCS: n->abandon — consume handle; last-exit frees
+int cc_nursery_on_last(CCNursery n, void* ctx, void (*finish)(void*));  // UFCS: n.on_last
+void cc_nursery_abandon(CCNursery n);  // UFCS: n.abandon — consume handle; last-exit frees
 
 // Deadline cancellation and polling
 void cc_cancel(CCDeadline* d);
@@ -4902,8 +4910,8 @@ Error handling in `@async` functions and nurseries uses the operators defined in
 
 ```c
 @async int!>(IoError) process(char[:] url) {
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-    n->spawn(() => subtask_a(url));
+    CCNursery n = cc_nursery_create() !> @destroy;
+    n.spawn(() => subtask_a(url));
     int v = (@await subtask_b(url)) !>(e) return cc_err(e);  // cleanup joins; it does not cancel siblings
     return cc_ok(0);
 }
@@ -5193,7 +5201,7 @@ void !>(CCError) cc_exclusive_mutex_acquire_when_into(CCExclusiveMutex* m,
 
 ### 8.11 `@parallel`
 
-`@parallel` names a join of independent work. It is not a nursery and it does not create a task the program can hold. The implementation may run some arms or iterations on other workers, or run all of them on the caller. `n->spawn` does not sequentialize; `@parallel` may.
+`@parallel` names a join of independent work. It is not a nursery and it does not create a task the program can hold. The implementation may run some arms or iterations on other workers, or run all of them on the caller. `n.spawn` does not sequentialize; `@parallel` may.
 
 The form is selected by the tokens after `@parallel`: `{` (always try to spawn), `(` or `seq (` (spawn if the predicate, §8.11.3, §8.11.5), `wait (` (ordered spawn loop over a turnstile; an expression of type `bool !>(CCError)`, §8.11.6), or `for` (bisected range, §8.11.4). Assignment join and `@parallel for` are statements. The wait-for form is a Result expression.
 
@@ -5266,7 +5274,7 @@ Lowering bisects the range: one half is spawned, the other runs on the caller, t
 
 Iterations must not race. Disjoint writes (`img[y * w + x] = …` for distinct `(x, y)`) are the caller's fact. A `goto` whose target is not a label in the same `for` body is ill-formed.
 
-`n->spawn` remains the tool when the program names a task lifetime or an explicit tile size.
+`n.spawn` remains the tool when the program names a task lifetime or an explicit tile size.
 
 #### 8.11.5 `seq` — the named denial
 
@@ -5376,7 +5384,7 @@ Declare the turnstile before the nursery so `@destroy` joins children before the
 ```c
 CCTurnstile t@(cap, n_stages, &arena) @destroy;
 t.enter(i) !>;
-t.stage(k)->wait(i);
+t.stage(k).wait(i);
 t.stage(k)->pass(i);
 t.wait(k, i);
 t.pass(k, i);
@@ -6486,29 +6494,29 @@ For thread/task closures, reference captures (`[&x]`) are checked for mutation:
 
 ```c
 int counter = 0;
-CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+CCNursery n = cc_nursery_create() !> @destroy;
 
 // ✅ OK: read value-captured variable
-n->spawn(() => { printf("%d", counter); });
+n.spawn(() => { printf("%d", counter); });
 
 // ❌ ERROR: cannot modify value-captured variable
-n->spawn(() => { counter++; });
+n.spawn(() => { counter++; });
 // error: cannot modify value-captured variable 'counter'
 // help: use [&counter] for reference capture
 
 // ✅ OK: read-only reference capture
-n->spawn(() => [&counter] { printf("%d", counter); });
+n.spawn(() => [&counter] { printf("%d", counter); });
 
 // ❌ ERROR: mutation of shared reference
-n->spawn(() => [&counter] { counter++; });
+n.spawn(() => [&counter] { counter++; });
 // error: mutation of shared reference 'counter' in spawned task
 // help: use cc_atomic_*, a registered synchronization library, or @unsafe
 
 cc_atomic_int safe_counter = 0;
-n->spawn(() => { cc_atomic_fetch_add(&safe_counter, 1); });
+n.spawn(() => { cc_atomic_fetch_add(&safe_counter, 1); });
 
 // ⚠️ OK: explicit unsafe (you own this race)
-n->spawn(@unsafe () => [&counter] { counter++; });
+n.spawn(@unsafe () => [&counter] { counter++; });
 ```
 
 **Mutation patterns detected:**
@@ -7342,7 +7350,7 @@ This appendix provides comprehensive guidance for C interoperability and unsafe 
 - **Slice provenance tracking:** Slices created in `unsafe` do not have tracked allocation IDs.
 - **Sendability verification:** Non-sendable types may be value-captured in closures within `unsafe`.
 
-Escape / borrow checks remain in force. A stack slice or stack reference that outlives the frame is still a compile error. Mutation of a shared reference capture is waived only by `@unsafe` on that closure (`n->spawn(@unsafe () => [&x] { x++; })`), not by wrapping the spawn in `unsafe {}`.
+Escape / borrow checks remain in force. A stack slice or stack reference that outlives the frame is still a compile error. Mutation of a shared reference capture is waived only by `@unsafe` on that closure (`n.spawn(@unsafe () => [&x] { x++; })`), not by wrapping the spawn in `unsafe {}`.
 
 **Rule (scope):** `unsafe` is lexically scoped. Nested `unsafe` blocks are allowed; rules only apply within the `unsafe` block and do not propagate to function calls unless they are lexically inside the block.
 
@@ -7360,16 +7368,16 @@ unsafe {
 
 // Casting away sendability (value capture). Escape checks still run.
 struct NonSendable { pthread_t tid; };
-CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+CCNursery n = cc_nursery_create() !> @destroy;
 
 unsafe {
     NonSendable ns = get_non_sendable();
-    n->spawn(() => { use(ns); });  // OK: sendability waived; value copy
+    n.spawn(() => { use(ns); });  // OK: sendability waived; value copy
 }
 
 int x = 0;
 unsafe {
-    n->spawn(() => [&x] { x++; });  // ERROR: mutation of shared ref
+    n.spawn(() => [&x] { x++; });  // ERROR: mutation of shared ref
                                     // (use @unsafe on the closure)
 }
 ```
@@ -7715,8 +7723,8 @@ fields where safe.
 ```c
 @async void bad() {
     int x = 42;
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-    n->spawn(() => { use(x); });  // OK: value capture (copy)
+    CCNursery n = cc_nursery_create() !> @destroy;
+    n.spawn(() => { use(x); });  // OK: value capture (copy)
 }
 ```
 
@@ -7725,23 +7733,23 @@ fields where safe.
 ```c
 @async void bad_race() {
     int counter = 0;
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-    n->spawn(() => [&counter] { counter++; });  // ERROR: mutation of shared ref
-    n->spawn(() => [&counter] { counter++; });
+    CCNursery n = cc_nursery_create() !> @destroy;
+    n.spawn(() => [&counter] { counter++; });  // ERROR: mutation of shared ref
+    n.spawn(() => [&counter] { counter++; });
 }
 
 @async void ok_atomic() {
     cc_atomic_int counter = 0;
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-    n->spawn(() => { cc_atomic_fetch_add(&counter, 1); });
-    n->spawn(() => [&counter] { counter++; });
+    CCNursery n = cc_nursery_create() !> @destroy;
+    n.spawn(() => { cc_atomic_fetch_add(&counter, 1); });
+    n.spawn(() => [&counter] { counter++; });
 }
 
 @async void ok_readonly() {
     int config = 42;
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-    n->spawn(() => [&config] { printf("%d", config); });  // OK: read-only
-    n->spawn(() => [&config] { printf("%d", config); });
+    CCNursery n = cc_nursery_create() !> @destroy;
+    n.spawn(() => [&config] { printf("%d", config); });  // OK: read-only
+    n.spawn(() => [&config] { printf("%d", config); });
 }
 ```
 
@@ -8178,7 +8186,7 @@ audit_tx.send(audit) !>(e) return cc_err(e);
 For bidi protocols, the default rule SHOULD be:
 
 - Reader and writer report close/error through an explicit shared shutdown
-  channel or explicit `cc_nursery_cancel`
+  channel or explicit `n.cancel()`
 - Teardown happens exactly once, in one place, and each blocking operation is
   bounded by an API that accepts the current deadline
 
@@ -8213,7 +8221,7 @@ This keeps deadlines precise and prevents “everything is always under a deadli
 | `@noblock`           | Compatibility spelling for `@nonblocking`  | Same as `@nonblocking`      |
 | `@latency_sensitive` | No coalescing allowed                      | Mark request handlers       |
 | `@scoped`            | Cannot escape scope                        | Mark safe cross-thread refs |
-| `spawn`              | UFCS on `CCNursery`                        | `n->spawn(() => { … })`     |
+| `spawn`              | UFCS on `CCNursery`                        | `n.spawn(() => { … })`     |
 | `@defer`             | Defer cleanup                              | Guarantee execution         |
 | `@await`              | Suspend on async                           | Call @async functions       |
 | `CCNursery`          | Structured concurrency                     | Scope with tasks            |

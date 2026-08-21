@@ -20,7 +20,7 @@
 #include <time.h>
 
 typedef struct fiber_v2 fiber_v2;
-typedef struct CCNursery CCNursery;
+typedef struct CCNurseryHost CCNurseryHost;
 
 /* Fiber states */
 enum {
@@ -34,7 +34,7 @@ enum {
 /* Public API */
 void   sched_v2_ensure_init(void);
 fiber_v2* sched_v2_spawn(void* (*fn)(void*), void* arg);
-fiber_v2* sched_v2_spawn_in_nursery(void* (*fn)(void*), void* arg, CCNursery* nursery);
+fiber_v2* sched_v2_spawn_in_nursery(void* (*fn)(void*), void* arg, CCNurseryHost* nursery);
 int    sched_v2_join(fiber_v2* f, void** out_result);
 void   sched_v2_signal(fiber_v2* f);
 void   sched_v2_park(void);
@@ -42,7 +42,7 @@ void   sched_v2_yield(void);
 void   sched_v2_set_park_reason(const char* reason);
 int    sched_v2_in_context(void);
 fiber_v2* sched_v2_current_fiber(void);
-CCNursery* sched_v2_current_nursery(void);
+CCNurseryHost* sched_v2_current_nursery(void);
 void*  sched_v2_current_deadline_scope(void);
 void*  sched_v2_deadline_scope_push(void* d);
 void   sched_v2_deadline_scope_pop(void* prev);

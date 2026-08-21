@@ -61,7 +61,7 @@ int main(void) {
 
     g_pre = g_post = 0;
     {
-        Holder c = @create() @destroy;
+        Holder c = @create() !> @destroy;
         assert(c.tag == 1);
     }
     assert(g_pre == 1);

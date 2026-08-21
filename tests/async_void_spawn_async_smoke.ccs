@@ -1,11 +1,11 @@
 /* Smoke test for bug [2] (docs/known-bugs/redis_idiomatic_async.md):
  *
- * `ns->spawn_async(fn(args))` where `fn` is declared `@async void`
+ * `ns.spawn_async(fn(args))` where `fn` is declared `@async void`
  * used to fail phase-3 reparse with
  *
  *   error: cannot convert 'void' to 'int'
  *
- * because `cc_nursery_spawn_async(CCNursery*, CCTask)` takes `CCTask`
+ * because `cc_nursery_spawn_async(CCNursery , CCTask)` takes `CCTask`
  * (typedef `int` in parser mode) and the untransformed `@async void fn`
  * signature was still literally void at reparse time.
  *
@@ -36,16 +36,16 @@ static cc_atomic_int g_skipped = 0;
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     cc_atomic_store(&g_total, 0);
     cc_atomic_store(&g_skipped, 0);
 
-    CCNursery* ns = cc_nursery_create(NULL);
-    if (!ns) return 1;
-    ns->spawn_async(greet(1));
-    ns->spawn_async(greet(2));
-    ns->spawn_async(early_exit(-1));
-    ns->spawn_async(early_exit(7));
-    cc_nursery_destroy(ns);
+    CCNursery ns = cc_nursery_create() !>;
+    ns.spawn_async(greet(1));
+    ns.spawn_async(greet(2));
+    ns.spawn_async(early_exit(-1));
+    ns.spawn_async(early_exit(7));
+    ns.destroy();
 
     int total = cc_atomic_load(&g_total);
     int skipped = cc_atomic_load(&g_skipped);

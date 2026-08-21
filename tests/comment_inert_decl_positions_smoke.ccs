@@ -16,7 +16,7 @@ static int !> (CCError) s6(int d)/*x*/{ return cc_ok(d); }
 
 /* A comment before the body brace must not hide the function from the
  * closure-declaration insertion point. */
-static void emit_closure(CCNursery* nur, int base) /*x*/{
+static void emit_closure(CCNursery nur, int base) /*x*/{
     nur.spawn(() => [base] { printf("closure=%d\n", base); });
 }
 
@@ -49,7 +49,7 @@ int main(void) {
     v.push(3);
     printf("v=%d\n", *v.get(0));
 
-    CCNursery* nur = cc_nursery_create(NULL) @destroy;
+    CCNursery nur = cc_nursery_create() !> @destroy;
     emit_closure(nur, 5);
     nur.wait();
     return 0;

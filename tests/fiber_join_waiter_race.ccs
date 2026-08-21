@@ -31,6 +31,7 @@ cc_atomic_int completed_depth = 0;
 void* instant_task(void* arg);
 
 void* instant_task(void* arg) {
+    @errhandler(CCError e) cc_error_exit(e);
     int depth = (int)(intptr_t)arg;
     
     /* Track max depth reached */
@@ -40,7 +41,7 @@ void* instant_task(void* arg) {
     
     if (depth < DEPTH) {
         /* Immediately spawn nested nursery - no delay to maximize race window */
-        CCNursery* n = cc_nursery_create(NULL);
+        CCNursery n = cc_nursery_create() !>;
         cc_nursery_spawn(n, instant_task, (void*)(intptr_t)(depth + 1));
         cc_nursery_wait(n);
         cc_nursery_free(n);
@@ -50,6 +51,7 @@ void* instant_task(void* arg) {
 }
 
 int main(int argc, char** argv) {
+    @errhandler(CCError e) cc_error_exit(e);
     /* Force single worker to maximize join race window. */
     setenv("CC_WORKERS", "1", 1);
 
@@ -67,7 +69,7 @@ int main(int argc, char** argv) {
     for (int iter = 0; iter < iterations; iter++) {
         cc_atomic_store(&completed_depth, 0);
         
-        CCNursery* n = cc_nursery_create(NULL);
+        CCNursery n = cc_nursery_create() !>;
         cc_nursery_spawn(n, instant_task, (void*)(intptr_t)1);
         cc_nursery_wait(n);
         cc_nursery_free(n);

@@ -171,9 +171,9 @@ int compress_file(const char* in_path, const char* out_path) {
     CCFile* out_ptr = &out_file;
 
     {
-        CCNursery* consumer = cc_nursery_create(NULL) !> @destroy;
+        CCNursery consumer = cc_nursery_create() !> @destroy;
 
-        consumer->spawn(() => [out_ptr, results_rx] {
+        consumer.spawn(() => [out_ptr, results_rx] {
             @errhandler(CCError e) cc_error_exit(e);
             CompressedResult* item = NULL;
             long expect_seq = 0;
@@ -210,10 +210,10 @@ int compress_file(const char* in_path, const char* out_path) {
         /* Inner producer: close_on auto-closes results_tx when the producer
          * nursery ends, so the consumer sees EOF after draining. */
         {
-            CCNursery* producer = cc_nursery_create(consumer) !> @destroy;
-            (void)producer->close_on(results_tx);
+            CCNursery producer = consumer.create_child() !> @destroy;
+            (void)producer.close_on(results_tx);
 
-            producer->spawn(() => [in_ptr, results_tx] {
+            producer.spawn(() => [in_ptr, results_tx] {
                 long seq = 0;
                 while (true) {
                     if (g_pipeline_error.load()) break;

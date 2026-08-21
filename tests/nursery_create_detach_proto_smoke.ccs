@@ -2,19 +2,19 @@
 
 static int g_detached_task_ran = 0;
 
-static CCNursery* make_detached_nursery(void) {
-    CCNursery* n = @create(NULL, () => {
+static CCNursery make_detached_nursery(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    CCNursery n = cc_nursery_create() !> @detach;
+    n.spawn(() => {
         g_detached_task_ran = 1;
-    }) @detach;
-    if (!n) return NULL;
+    });
     return n;
 }
 
 int main(void) {
-    CCNursery* n = make_detached_nursery();
-    if (!n) return 1;
-    if (n->wait() != 0) return 2;
-    n->free();
+    CCNursery n = make_detached_nursery();
+    if (n.wait() != 0) return 2;
+    n.free();
     if (g_detached_task_ran != 1) return 3;
     return 0;
 }

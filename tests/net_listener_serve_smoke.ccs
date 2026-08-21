@@ -18,9 +18,9 @@ int main(void) {
     @defer ln.close();
 
     {
-        CCNursery* server = cc_nursery_create(NULL) !> @destroy;
+        CCNursery server = cc_nursery_create() !> @destroy;
 
-        server->spawn(() => [@safe &ln, server] {
+        server.spawn(() => [@safe &ln, server] {
             ln.serve(server, (CCSocket* client) => [server] {
                 CCSocket c = *client;
                 char buf[8] = {0};
@@ -29,7 +29,7 @@ int main(void) {
                 if (n >= 2 && buf[0] == 'h' && buf[1] == 'i') g_served = 1;
                 (void)c.write("ok", 2);
                 c.close();
-                server->cancel();
+                server.cancel();
             });
         });
 

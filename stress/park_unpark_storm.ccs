@@ -15,6 +15,7 @@
 cc_atomic_int g_received = 0;
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     setenv("CC_WORKERS", "1", 1);
 
     int total = SENDERS * MSGS_PER_SENDER;
@@ -26,11 +27,10 @@ int main(void) {
     CCChan* ch = cc_channel_pair(&tx, &rx);
 
     {
-        CCNursery* __cc_nursery142 = @create(NULL) @destroy;
-        if (!__cc_nursery142) abort();
+        CCNursery __cc_nursery142 = @create() !> @destroy;
 
         /* Receiver */
-        __cc_nursery142->spawn(() => {
+        __cc_nursery142.spawn(() => {
             int v = 0;
             while (cc_io_avail(chan_recv(rx, &v))) {
                 cc_atomic_fetch_add(&g_received, 1);
@@ -39,13 +39,12 @@ int main(void) {
 
         /* Senders */
         {
-            CCNursery* __cc_nursery143 = @create(NULL) @destroy;
-            if (!__cc_nursery143) abort();
-            (void)__cc_nursery143->close_on(tx);
+            CCNursery __cc_nursery143 = @create() !> @destroy;
+            (void)__cc_nursery143.close_on(tx);
 
             for (int s = 0; s < SENDERS; s++) {
                 int n = MSGS_PER_SENDER;
-                __cc_nursery143->spawn(() => [n] {
+                __cc_nursery143.spawn(() => [n] {
                     for (int i = 0; i < n; i++) {
                         (void)chan_send(tx, i);
                     }

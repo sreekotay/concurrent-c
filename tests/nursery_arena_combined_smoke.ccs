@@ -9,13 +9,13 @@
 #include <stdio.h>
 
 void test_nursery_then_arena(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     printf("test_nursery_then_arena:\n");
     
     {
-        CCNursery* __cc_nursery60 = @create(NULL) @destroy;
-        if (!__cc_nursery60) abort();
+        CCNursery __cc_nursery60 = @create() !> @destroy;
 
-        __cc_nursery60->spawn(() => {
+        __cc_nursery60.spawn(() => {
             printf("  spawned task\n");
         });
     
@@ -35,6 +35,7 @@ void test_nursery_then_arena(void) {
 }
 
 void test_arena_then_nursery(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     printf("test_arena_then_nursery:\n");
     
     {
@@ -48,10 +49,9 @@ void test_arena_then_nursery(void) {
     }
     
     {
-        CCNursery* __cc_nursery61 = @create(NULL) @destroy;
-        if (!__cc_nursery61) abort();
+        CCNursery __cc_nursery61 = @create() !> @destroy;
 
-        __cc_nursery61->spawn(() => {
+        __cc_nursery61.spawn(() => {
             printf("  spawned task\n");
         });
     
@@ -61,6 +61,7 @@ void test_arena_then_nursery(void) {
 }
 
 void test_interleaved(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     printf("test_interleaved:\n");
     
     {
@@ -70,10 +71,9 @@ void test_interleaved(void) {
         printf("  arena a1 active\n");
         
         {
-            CCNursery* __cc_nursery62 = @create(NULL) @destroy;
-            if (!__cc_nursery62) abort();
+            CCNursery __cc_nursery62 = @create() !> @destroy;
 
-            __cc_nursery62->spawn(() => {
+            __cc_nursery62.spawn(() => {
                 printf("  spawned inside arena\n");
             });
         
@@ -84,8 +84,7 @@ void test_interleaved(void) {
     }
     
     {
-        CCNursery* __cc_nursery63 = @create(NULL) @destroy;
-        if (!__cc_nursery63) abort();
+        CCNursery __cc_nursery63 = @create() !> @destroy;
 
         {
             CCArena __cc_arena10 = @create(kilobytes(4)) @destroy;
@@ -95,7 +94,7 @@ void test_interleaved(void) {
         
         }
         
-        __cc_nursery63->spawn(() => {
+        __cc_nursery63.spawn(() => {
             printf("  spawned after arena\n");
         });
     

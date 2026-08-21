@@ -555,9 +555,9 @@ void cc_exclusive_lock_entry_slow(void* entry) {
 }
 
 bool cc_cancelled(void);
-typedef struct CCNursery CCNursery;
-CCNursery* cc__runtime_current_nursery(void);
-bool cc_nursery_is_cancelled(const CCNursery* n);
+typedef struct CCNurseryHost CCNurseryHost;
+CCNurseryHost* cc__runtime_current_nursery(void);
+bool cc_nursery_is_cancelled(const CCNurseryHost* n);
 
 /* Unlink `node` from the condition queue.  Returns 1 if it was still queued. */
 static int cc__exclusive_cond_dequeue(CCExclusiveEntry* e, CCExclusiveWaiter* node) {
@@ -688,7 +688,7 @@ int cc_exclusive_guard_wait_release(CCExclusiveGuard* g) {
         /* cc_cancelled() is true with no nursery — do not treat a bare
          * OS thread as cancelled. */
         {
-            CCNursery* nur = cc__runtime_current_nursery();
+            CCNurseryHost* nur = cc__runtime_current_nursery();
             if ((nur && cc_nursery_is_cancelled(nur)) || (dl && dl->cancelled))
                 return cc__exclusive_cond_leave(e, &node, 0);
         }

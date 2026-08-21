@@ -23,35 +23,33 @@ static int wait_flag(cc_atomic_int* f, int ms) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     {
         cc_atomic_int done = 0;
-        CCNursery* n = cc_nursery_create(NULL);
-        if (!n) return 1;
-        if (n->on_last(&done, finish_flag) != 0) return 2;
-        if (n->on_last(&done, finish_flag) != EINVAL) return 3;
-        n->abandon();
+        CCNursery n = cc_nursery_create() !>;
+        if (n.on_last(&done, finish_flag) != 0) return 2;
+        if (n.on_last(&done, finish_flag) != EINVAL) return 3;
+        n.abandon();
         if (!wait_flag(&done, 1000)) return 4;
     }
 
     {
         cc_atomic_int done = 0;
-        CCNursery* n = cc_nursery_create(NULL);
-        if (!n) return 10;
+        CCNursery n = cc_nursery_create() !>;
         cc_atomic_store(&g_ran, 0);
-        if (n->spawn(() => { cc_atomic_store(&g_ran, 1); }) != 0) return 11;
-        if (n->on_last(&done, finish_flag) != 0) return 12;
-        n->abandon();
+        if (n.spawn(() => { cc_atomic_store(&g_ran, 1); }) != 0) return 11;
+        if (n.on_last(&done, finish_flag) != 0) return 12;
+        n.abandon();
         if (!wait_flag(&done, 2000)) return 13;
         if (cc_atomic_load(&g_ran) != 1) return 14;
     }
 
     {
         cc_atomic_int done = 0;
-        CCNursery* n = cc_nursery_create(NULL);
-        if (!n) return 15;
-        if (n->spawnhybrid(() => { cc_sleep_ms(5); }) != 0) return 16;
-        if (n->on_last(&done, finish_flag) != 0) return 17;
-        n->abandon();
+        CCNursery n = cc_nursery_create() !>;
+        if (n.spawnhybrid(() => { cc_sleep_ms(5); }) != 0) return 16;
+        if (n.on_last(&done, finish_flag) != 0) return 17;
+        n.abandon();
         if (!wait_flag(&done, 2000)) return 18;
     }
 
@@ -62,10 +60,9 @@ int main(void) {
         if (cc_chan_pair_create(1, CC_CHAN_MODE_BLOCK, false, sizeof(int),
                                 &tx, &rx) != 0)
             return 20;
-        CCNursery* n = cc_nursery_create(NULL);
-        if (!n) return 21;
-        if (n->close_on(tx) != 0) return 22;
-        n->abandon();
+        CCNursery n = cc_nursery_create() !>;
+        if (n.close_on(tx) != 0) return 22;
+        n.abandon();
         CCResult_bool_CCIoError tr = chan_try_recv(rx, &tmp);
         if (!(cc_is_ok(tr) && !cc_unwrap(tr))) return 23;
         chan_free(tx);
@@ -79,16 +76,15 @@ int main(void) {
         if (cc_chan_pair_create(0, CC_CHAN_MODE_BLOCK, false, sizeof(int),
                                 &tx, &rx) != 0)
             return 30;
-        CCNursery* n = cc_nursery_create(NULL);
-        if (!n) return 31;
-        if (n->spawn(() => [rx] {
+        CCNursery n = cc_nursery_create() !>;
+        if (n.spawn(() => [rx] {
             int x = 0;
             (void)chan_recv(rx, &x);
         }) != 0)
             return 32;
-        if (n->on_last(&done, finish_flag) != 0) return 33;
-        n->abandon();
-        if (n->spawn(() => {}) != EINVAL) return 34;
+        if (n.on_last(&done, finish_flag) != 0) return 33;
+        n.abandon();
+        if (n.spawn(() => {}) != EINVAL) return 34;
         if (!cc_io_avail(chan_send(tx, v))) return 35;
         if (!wait_flag(&done, 2000)) return 36;
         chan_free(tx);
@@ -98,11 +94,10 @@ int main(void) {
         int i;
         for (i = 0; i < 1000; i++) {
             cc_atomic_int done = 0;
-            CCNursery* n = cc_nursery_create(NULL);
-            if (!n) return 40;
-            if (n->spawn(() => {}) != 0) return 41;
-            if (n->on_last(&done, finish_flag) != 0) return 42;
-            n->abandon();
+            CCNursery n = cc_nursery_create() !>;
+            if (n.spawn(() => {}) != 0) return 41;
+            if (n.on_last(&done, finish_flag) != 0) return 42;
+            n.abandon();
             if (!wait_flag(&done, 2000)) return 43;
         }
     }

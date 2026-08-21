@@ -779,11 +779,11 @@ sketch:
 ```
 @async void main() {
     CCListener ln = cc_tcp_listen(...) !> @destroy;
-    CCNursery* server = cc_nursery_create(NULL) !> @destroy;
+    CCNursery server = cc_nursery_create() !> @destroy;
 
     while (true) {
         CCSocket client = await ln.accept();
-        server->spawn_async(handle_client(client));
+        server.spawn_async(handle_client(client));
     }
 }
 
@@ -997,7 +997,7 @@ the frame struct (same treatment as plain `T x = expr;`).
 
 ## [2] `@async void` plus `spawn_async` call form — type-checks against `int`
 
-`server->spawn_async(fn(args))` reparses the inner call as an
+`server.spawn_async(fn(args))` reparses the inner call as an
 expression whose value feeds `cc_nursery_spawn_async`'s `int` return,
 so `@async void fn(...)` errors at the spawn site with
 ```

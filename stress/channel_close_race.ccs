@@ -64,6 +64,7 @@ static int env_int_or(const char* name, int fallback) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     setvbuf(stdout, NULL, _IONBF, 0);
     srand(time(NULL));
     int num_fibers = env_int_or("CC_STRESS_FIBERS", NUM_FIBERS);
@@ -90,8 +91,7 @@ int main(void) {
         int[~10 >] tx = tx_h; int[~10 <] rx = rx_h;
 
         {
-            CCNursery* __cc_nursery113 = @create(NULL) @destroy;
-            if (!__cc_nursery113) abort();
+            CCNursery __cc_nursery113 = @create() !> @destroy;
 
             // 1. Start the storm
             for (int i = 0; i < num_fibers; i++) {
@@ -99,8 +99,8 @@ int main(void) {
                 CCChanRx r = rx;
                 int sid = i;
                 int rid = i;
-                __cc_nursery113->spawn(() => [t, sid, trace, trace_every] { sender(t, sid, trace, trace_every); });
-                __cc_nursery113->spawn(() => [r, rid, trace, trace_every] { receiver(r, rid, trace, trace_every); });
+                __cc_nursery113.spawn(() => [t, sid, trace, trace_every] { sender(t, sid, trace, trace_every); });
+                __cc_nursery113.spawn(() => [r, rid, trace, trace_every] { receiver(r, rid, trace, trace_every); });
             }
 
             // 2. Close from parent context immediately.

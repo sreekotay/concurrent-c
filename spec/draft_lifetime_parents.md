@@ -1,11 +1,11 @@
 # Lifetime parents
 
-Status: draft. The arena operations (§§2–5: `cc_arena_attach`,
-`cc_arena_adopt`, `create_arena`, `create_pool`) are implemented in
-`cc_arena.cch` (`tests/arena_lifetime_parent_smoke.ccs`). The §6 modes are
-declared in `cc_arena.cch` but stripped at header lowering — usable only when
-declared in the consuming TU. Viewed container faces (`as: (Region)field`,
-§6) and the nursery constructor (§7) are not implemented.
+Status: draft. The arena operations, parent views, viewed faces, and
+`cc_arena_create_nursery` / `create_child` are implemented (`cc_arena.cch`,
+`cc_nursery.cch`; `tests/arena_lifetime_parent_smoke.ccs`,
+`tests/as_viewed_face_smoke.ccs`, `tests/nursery_create_owner_smoke.ccs`).
+The lowerer pins `Alloc` / `Parent` / `Region` on `CCArena` so header
+lowering does not drop them.
 
 ## 1. Notion
 
@@ -133,13 +133,13 @@ A constructor named `create_<thing>(Owner*, ...)` births an object into an
 owner: handle allocated from the owner, initialized, attached, returned as
 a pointer. The prefix is load-bearing: parent views admit `create_*` by
 glob (§6), and UFCS bare-name dispatch gives every such function the
-`owner->create_<thing>(...)` spelling with no further declaration.
+`owner.create_<thing>(...)` spelling with no further declaration.
 Constructors are declared in the product's header:
 
 ```ccs
 CCArena*     create_arena(CCArena* owner, size_t n);              // cc_arena.cch
 CCArenaPool* create_pool(CCArena* owner, size_t elem);            // cc_arena.cch
-CCNursery*   create_nursery(CCArena* owner);                      // cc_nursery.cch
+CCNursery !>(CCError) cc_arena_create_nursery(CCArena* a);     // cc_nursery.cch
 Session*     create_session(CCArena* owner, int fd);              // user code
 ```
 
@@ -171,37 +171,38 @@ or `@detach`, unchanged.
 resets or destroys. `Region` is for container faces: a type that embeds an
 arena exposes it with a viewed face (`as: (Region)field;` — see the type
 views spec), and every parent operation composes through the face:
-`n->alloc(...)`, `n->create_arena(...)`, `n->adopt(&a)`. Allocation
+`n.alloc(...)`, `n.create_arena(...)`, `n.adopt(&a)`. Allocation
 through a container is itself lifetime attachment — bytes placed in the
 arena die with it, with no record.
 
 ## 7. Nursery
 
-`create_nursery(CCArena* owner)` births a nursery into an owner: handle in
-the owner's storage, record attached. The nursery's teardown — one entry
-serving the record fn, the registered destroy hook, and manual destruction
-— is: if dead, return; join all tasks; release. Release destroys the
-nursery's embedded arena, running the walk over everything created through
-the nursery's face, after the join on both the waited and abandoned exit
-paths, and then zeroes the handle rather than freeing it, so the husk
-outlives the owner's record.
+`CCNursery !>(CCError) cc_arena_create_nursery(CCArena* a)` births a nursery into a live owner:
+handle in the owner's storage, record attached. A null or dead arena aborts.
+The nursery's teardown — one entry serving the record fn, the registered
+destroy hook, and manual destruction — is: if dead, return; join all tasks;
+release. Release destroys the nursery's embedded arena, running the walk
+over everything created through the nursery's face, after the join on both
+the waited and abandoned exit paths, and then zeroes the handle rather than
+freeing it, so the husk outlives the owner's record.
 
-`cc_nursery_create()` (no owner) is unchanged: malloc'd handle, freed at
-release; no record ever points at it.
+`cc_nursery_create()` is the self-owned malloc handle, freed at release; no
+record ever points at it. `parent.create_child()` is the cancel-tree nest
+(parent handle required; empty host aborts).
 
 An abandon-capable nursery is self-owned. `abandon` hands the handle to the
 children: the last one to exit frees it at an unpredictable time on a worker
 thread, so no outside owner may hold a destroy record for it — the record
 would fire on freed storage, and the dead-state protocol cannot help when
 the handle's own storage is gone. `abandon` on an owner-attached nursery
-refuses loudly; a nursery that must be abandoned is created with
+aborts; a nursery that must be abandoned is created with
 `cc_nursery_create()`.
 
 The `closing(ch)` list is not a parent record: channels close **after
 wait** — a join signal, not a destroy obligation. It is unchanged.
 
-The nursery's embedded arena field is `arena`, exposed as
-`as: (Region)arena;`.
+The nursery handle projects Region through the host:
+`as: (Region)n;`.
 
 ## 8. Teardown order
 

@@ -18,10 +18,10 @@ int main(void) {
     size_t lens[N] = {0};
 
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        CCNursery n = cc_nursery_create() !> @destroy;
         for (int i = 0; i < N; i++) {
             int idx = i;
-            n->spawn(() => [idx, &slots, &lens] {
+            n.spawn(() => [idx, &slots, &lens] {
                 slots[idx] = (idx + 1) * 10;
                 lens[idx] = (size_t)(idx + 1);
             });

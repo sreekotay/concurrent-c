@@ -58,11 +58,11 @@ static void* noop_task(void* arg) {
 }
 
 static double bench_empty_nursery_once(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     double start = time_now_ms();
     for (int batch = 0; batch < total_batches(); batch++) {
         {
-            CCNursery* __cc_nursery170 = @create(NULL) @destroy;
-            if (!__cc_nursery170) abort();
+            CCNursery __cc_nursery170 = @create() !> @destroy;
 
         
         }
@@ -71,14 +71,14 @@ static double bench_empty_nursery_once(void) {
 }
 
 static double bench_nursery_spawn_once(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     double start = time_now_ms();
     for (int batch = 0; batch < total_batches(); batch++) {
         {
-            CCNursery* __cc_nursery171 = @create(NULL) @destroy;
-            if (!__cc_nursery171) abort();
+            CCNursery __cc_nursery171 = @create() !> @destroy;
 
             for (int i = 0; i < g_batch_size; i++) {
-                __cc_nursery171->spawn(() => {
+                __cc_nursery171.spawn(() => {
                     (void)noop_task(NULL);
                 });
             }
@@ -89,9 +89,10 @@ static double bench_nursery_spawn_once(void) {
 }
 
 static double bench_nursery_api_once(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     double start = time_now_ms();
     for (int batch = 0; batch < total_batches(); batch++) {
-        CCNursery* n = cc_nursery_create(NULL);
+        CCNursery n = cc_nursery_create() !>;
         if (!n) {
             fprintf(stderr, "cc_nursery_create failed\n");
             abort();

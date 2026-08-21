@@ -5,8 +5,8 @@
 
 int main(void) {
     @errhandler(CCError e) { fprintf(stderr, "%s\n", e.message); return 1; }
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-    n->spawn(() => {
+    CCNursery n = cc_nursery_create() !> @destroy;
+    n.spawn(() => {
         int inner = cc_diag_oracle_undeclared(1);   /* line 10 */
         (void)inner;
     });

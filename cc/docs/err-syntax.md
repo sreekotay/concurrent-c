@@ -12,7 +12,7 @@ Normative semantics live in `[spec/concurrent-c-spec-complete.md` §2.2](../../s
 
 | Pass              | Module                                      | Role                                                                                                                                                                                                                                                                                                                                   | Status                |
 | ----------------- | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
-| Unwrap destroy    | `cc/src/visitor/pass_unwrap_destroy.c`, `.h` | Textual pre-pass. Rewrites the success-destructor suffix `EXPR !> … @destroy { body }` / `EXPR ?> … @destroy { body }` into the original statement followed by a synthesized `@defer { body };`. For built-in owned types (`CCNursery*`, `CCArena`) the body is wrapped with the type's pre-/post-destroy hooks so the nursery/arena lifecycle matches `name@(args) @destroy { ... }`. Runs before `pass_result_unwrap` and `pass_defer_syntax` in both `preprocess.c` and `visit_codegen.c`. | **Active**            |
+| Unwrap destroy    | `cc/src/visitor/pass_unwrap_destroy.c`, `.h` | Textual pre-pass. Rewrites the success-destructor suffix `EXPR !> … @destroy { body }` / `EXPR ?> … @destroy { body }` into the original statement followed by a synthesized `@defer { body };`. For built-in owned types (`CCNursery`, `CCArena`) the body is wrapped with the type's pre-/post-destroy hooks so the nursery/arena lifecycle matches `name@(args) @destroy { ... }`. Runs before `pass_result_unwrap` and `pass_defer_syntax` in both `preprocess.c` and `visit_codegen.c`. | **Active**            |
 | Result unwrap     | `cc/src/visitor/pass_result_unwrap.c`, `.h` | Primary. Lowers `?>` (default-value operator, expression-only RHS) and `!>` (error-handler operator, expression- and statement-position) to `cc_is_ok` / `cc_is_err` / `cc_value` / `cc_error`. Implements the `@err(e);` forward inside `!>` bodies, the `@errhandler` divergence check, and the slice-7 unhandled-result diagnostic. | **Active**            |
 | Legacy err syntax | `cc/src/visitor/pass_err_syntax.c`, `.h`    | Existing `@err` / `=<!` / `: default` / `@errhandler` handler dispatch pass. Runs after `pass_result_unwrap` so that any `!>` forms lowered into the legacy `@err` shorthand are still processed. Skips `@err(IDENT);` tokens (followed immediately by `;`), which are structured forwards from the new-surface pass.                  | **Live (phases 1-3)** |
 
@@ -80,23 +80,23 @@ If the host statement is a declaration and the declared type matches a known bui
 
 | Declared type | Pre-hook (before user body) | Post-hook (after user body) |
 | --- | --- | --- |
-| `CCNursery*` (with `*`) | `cc_nursery_wait(name);` | `cc_nursery_free(name);` |
-| `CCArena` (no `*`) | — | `cc_arena_destroy(&name);` |
+| `CCNursery` | — | `cc_nursery_destroy(&name);` |
+| `CCArena` | — | `cc_arena_destroy(&name);` |
 
 The variable name is extracted by walking left from the top-level `=` in the host statement to the preceding identifier. Any other type falls through with no hooks — `@defer { user_body };` only.
 
-Example: `CCNursery* n = cc_nursery_create() !> { abort(); } @destroy { printf("done\n"); };` expands (conceptually) to
+Example: `CCNursery n = cc_nursery_create() !> { abort(); } @destroy { printf("done\n"); };` expands (conceptually) to
 
 ```c
-CCNursery* n = cc_nursery_create() !> { abort(); };
-@defer { cc_nursery_wait(n); printf("done\n"); cc_nursery_free(n); };
+CCNursery n = cc_nursery_create() !> { abort(); };
+@defer { printf("done\n"); cc_nursery_destroy(&n); };
 ```
 
 ### Tests
 
 - `tests/null_unwrap_bang_ok_smoke.ccs` — `!> @destroy` on a plain pointer decl.
 - `tests/null_unwrap_qmark_destroy_smoke.ccs` — `?> @destroy` with a fallback value.
-- `examples/hello.ccs` — `!> @destroy` on a `CCNursery*` declaration, exercising the built-in owned-type path (`cc_nursery_wait` / `cc_nursery_free` wrapping the user body).
+- `examples/hello.ccs` — `!> @destroy` on a `CCNursery` declaration, exercising the built-in owned-type path (`cc_nursery_destroy(&n)` after the user body).
 
 ## Text-rewrite strategy (result-unwrap)
 

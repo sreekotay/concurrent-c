@@ -50,6 +50,7 @@ static void* doubler(void* arg) {
 }
 
 static void* loop_body(void* arg) {
+    @errhandler(CCError e) cc_error_exit(e);
     (void)arg;
     long long join_sum = 0;
     for (int r = 1; r <= ROUNDS; r++) {
@@ -63,10 +64,9 @@ static void* loop_body(void* arg) {
          * (worker-frees) hybrids: pre-fix, a stalled completer for t1/t2
          * could observe the hybrid's nursery and free a live fiber. */
         {
-            CCNursery* n = @create(NULL) @destroy;
-            if (!n) { fprintf(stderr, "FAIL: nursery create\n"); return (void*)1; }
+            CCNursery n = @create() !> @destroy;
             for (int k = 0; k < 3; k++) {
-                if (n->spawnhybrid(() => {
+                if (n.spawnhybrid(() => {
                         cc_atomic_fetch_add(&g_hybrid_sum, 1);
                     }) != 0) {
                     fprintf(stderr, "FAIL: spawnhybrid r=%d k=%d\n", r, k);

@@ -6,7 +6,7 @@
  *
  *   CCTurnstile t@(cap, n_stages, &arena) @destroy;
  *   t.enter(i) !>;
- *   t.stage(k)->wait(i);  …  t.stage(k)->pass(i);
+ *   t.stage(k).wait(i);  …  t.stage(k)->pass(i);
  *   t.wait(k, i);         …  t.pass(k, i);
  *   t.leave() !>;
  *

@@ -74,9 +74,9 @@ int main(void) {
 
     /* Shared name: all workers serialize on counter name=1. */
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        CCNursery n = cc_nursery_create() !> @destroy;
         for (int w = 0; w < NUM_WORKERS; w++) {
-            n->spawn(() => {
+            n.spawn(() => {
                 bump_shared(ITERS);
             });
         }
@@ -84,10 +84,10 @@ int main(void) {
 
     /* Private names: no cross-worker contention. */
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        CCNursery n = cc_nursery_create() !> @destroy;
         for (int w = 0; w < NUM_WORKERS; w++) {
             int id = w;
-            n->spawn(() => [id] {
+            n.spawn(() => [id] {
                 bump_private(id, ITERS);
             });
         }

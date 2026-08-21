@@ -22,6 +22,7 @@ cc_atomic_int g_out_count;
 cc_atomic_int g_out_sum;
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     for (int iter = 0; iter < REPEATS; iter++) {
         g_ch0 = cc_channel_pair(&g_tx0, &g_rx0);
         g_ch1 = cc_channel_pair(&g_tx1, &g_rx1);
@@ -38,17 +39,16 @@ int main(void) {
         cc_atomic_store(&g_out_sum, 0);
 
         {
-            CCNursery* __n = @create(NULL) @destroy;
-            if (!__n) abort();
+            CCNursery __n = @create() !> @destroy;
 
-            __n->spawn(() => {
+            __n.spawn(() => {
                 for (int i = 0; i < NUM_ITEMS; i++) {
                     chan_send(g_tx0, i);
                     cc_atomic_fetch_add(&g_s0, 1);
                 }
                 chan_close(g_tx0);
             });
-            __n->spawn(() => {
+            __n.spawn(() => {
                 int v;
                 while (cc_io_avail(chan_recv(g_rx0, &v))) {
                     cc_atomic_fetch_add(&g_r1, 1);
@@ -57,7 +57,7 @@ int main(void) {
                 }
                 chan_close(g_tx1);
             });
-            __n->spawn(() => {
+            __n.spawn(() => {
                 int v;
                 while (cc_io_avail(chan_recv(g_rx1, &v))) {
                     cc_atomic_fetch_add(&g_r2, 1);
@@ -66,7 +66,7 @@ int main(void) {
                 }
                 chan_close(g_tx2);
             });
-            __n->spawn(() => {
+            __n.spawn(() => {
                 int v;
                 while (cc_io_avail(chan_recv(g_rx2, &v))) {
                     cc_atomic_fetch_add(&g_r3, 1);
@@ -75,7 +75,7 @@ int main(void) {
                 }
                 chan_close(g_tx3);
             });
-            __n->spawn(() => {
+            __n.spawn(() => {
                 int v;
                 while (cc_io_avail(chan_recv(g_rx3, &v))) {
                     cc_atomic_fetch_add(&g_r4, 1);
@@ -84,7 +84,7 @@ int main(void) {
                 }
                 chan_close(g_tx4);
             });
-            __n->spawn(() => {
+            __n.spawn(() => {
                 int v;
                 while (cc_io_avail(chan_recv(g_rx4, &v))) {
                     cc_atomic_fetch_add(&g_r5, 1);

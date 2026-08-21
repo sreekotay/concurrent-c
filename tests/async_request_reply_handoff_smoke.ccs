@@ -101,6 +101,7 @@ static void handoff_client(CCChanTx req_tx, CCChanRx reply_rx) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     cc_sched_set_num_workers(4);
     cc_atomic_store(&g_errors, 0);
     cc_atomic_store(&g_owner_seen, 0);
@@ -122,12 +123,11 @@ int main(void) {
     CCChanRx reply_rx_raw = reply_rx_h;
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) return 12;
-        n->spawn(() => [req_rx_raw, reply_tx_raw] {
+        CCNursery n = @create() !> @destroy;
+        n.spawn(() => [req_rx_raw, reply_tx_raw] {
             handoff_owner(req_rx_raw, reply_tx_raw);
         });
-        n->spawn(() => [req_tx_raw, reply_rx_raw] {
+        n.spawn(() => [req_tx_raw, reply_rx_raw] {
             handoff_client(req_tx_raw, reply_rx_raw);
         });
     }

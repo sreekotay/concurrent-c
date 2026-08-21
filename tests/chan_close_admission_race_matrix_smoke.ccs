@@ -22,6 +22,7 @@ cc_atomic_int g_recv_closed = 0;
 cc_atomic_int g_recv_data = 0;
 
 static void run_case_buffered(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     for (int rep = 0; rep < REPEATS; rep++) {
         if ((rep % 200) == 0) fprintf(stderr, "buffered iter %d/%d\n", rep, REPEATS);
         int[~1 >] tx;
@@ -29,16 +30,15 @@ static void run_case_buffered(void) {
         CCChan* ch = cc_channel_pair(&tx, &rx);
 
         {
-            CCNursery* __cc_nursery7 = @create(NULL) @destroy;
-            if (!__cc_nursery7) abort();
+            CCNursery __cc_nursery7 = @create() !> @destroy;
 
-            __cc_nursery7->spawn(() => [tx] {
+            __cc_nursery7.spawn(() => [tx] {
                 int v = 1;
                 CCDeadline d = cc_deadline_after_ms(40);
                 int rc = cc_chan_deadline_send(tx.raw, &v, sizeof(int), &d);
                 if (!(rc == 0 || rc == EPIPE || rc == ETIMEDOUT)) cc_atomic_fetch_add(&g_errors, 1);
             });
-            __cc_nursery7->spawn(() => [tx] {
+            __cc_nursery7.spawn(() => [tx] {
                 cc_sleep_ms(1);
                 tx.close();
             });
@@ -80,6 +80,7 @@ static void run_case_buffered(void) {
 }
 
 static void run_case_unbuffered(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     for (int rep = 0; rep < REPEATS; rep++) {
         if ((rep % 200) == 0) fprintf(stderr, "unbuffered iter %d/%d\n", rep, REPEATS);
         int[~ >] tx;
@@ -87,16 +88,15 @@ static void run_case_unbuffered(void) {
         CCChan* ch = cc_channel_pair(&tx, &rx);
 
         {
-            CCNursery* __cc_nursery8 = @create(NULL) @destroy;
-            if (!__cc_nursery8) abort();
+            CCNursery __cc_nursery8 = @create() !> @destroy;
 
-            __cc_nursery8->spawn(() => [tx] {
+            __cc_nursery8.spawn(() => [tx] {
                 int v = 3;
                 CCDeadline d = cc_deadline_after_ms(40);
                 int rc = cc_chan_deadline_send(tx.raw, &v, sizeof(int), &d);
                 if (!(rc == 0 || rc == EPIPE || rc == ETIMEDOUT)) cc_atomic_fetch_add(&g_errors, 1);
             });
-            __cc_nursery8->spawn(() => [tx] {
+            __cc_nursery8.spawn(() => [tx] {
                 cc_sleep_ms(1);
                 tx.close();
             });

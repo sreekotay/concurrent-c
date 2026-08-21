@@ -19,6 +19,7 @@ static bool !>(CCIoError) maybe_io(int x) {
 }
 
 @async int worker(int limit) {
+    @errhandler(CCError e) cc_error_exit(e);
     int i = 0;
     while (i < limit) {
         /* Block comment before the result-typed decl: this keeps the
@@ -34,9 +35,10 @@ static bool !>(CCIoError) maybe_io(int x) {
 }
 
 int main(void) {
-    CCNursery* n = cc_nursery_create(NULL);
-    (void)n->spawn_async(worker(2));
-    cc_nursery_destroy(n);
+    @errhandler(CCError e) cc_error_exit(e);
+    CCNursery n = cc_nursery_create() !>;
+    (void)n.spawn_async(worker(2));
+    n.destroy();
     printf("async_frame_result_typed_decl: OK\n");
     return 0;
 }

@@ -3,7 +3,7 @@
  *
  * CC already rejects the *obvious* shared mutation:
  *
- *   n->spawn(() => [&counter] { counter++; });  // compile error
+ *   n.spawn(() => [&counter] { counter++; });  // compile error
  *
  * And even the hole below is not *hidden* sharing: you must list `p` in
  * the capture list. Explicit capture makes the concurrent edge visible
@@ -43,12 +43,12 @@ int main(void) {
     println(@string(`tasks=${N_TASKS} iters/task=${N_ITERS} expected=${expected}`, &arena)) !>;
 
     {
-        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        CCNursery n = cc_nursery_create() !> @destroy;
         for (int t = 0; t < N_TASKS; t++) {
             /* [p] is explicit: this task sees that address.
              * Bug/gap: capturing the pointer is allowed; racing the
              * pointee is not proven away. No @unsafe required. */
-            n->spawn(() => [p] {
+            n.spawn(() => [p] {
                 for (int i = 0; i < N_ITERS; i++)
                     (*p)++;
             });

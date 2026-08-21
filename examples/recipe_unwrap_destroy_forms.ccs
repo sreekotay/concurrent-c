@@ -21,7 +21,7 @@
  *    6. `!> @destroy { ... }` (no handler, defaults to @errhandler)
  *    7. `?>` with a fallback expression
  *    8. `?>` + `@destroy` on one line
- *    9. Bodyless `@destroy;` on a builtin-owned type (CCNursery*, CCChan*)
+ *    9. Bodyless `@destroy;` on a builtin-owned type (CCNursery , CCChan*)
  *   10. `!> { ... } @destroy { ... }` on a builtin-owned type (one line)
  *   11. Same as 10 but split across lines
  */
@@ -82,7 +82,7 @@ int main(void) {
     println(@string(`qmark_dest=${qmark_dest}`, @scratch)) !>;
 
     /* 9. Bodyless `@destroy;` on builtin-owned types (no user cleanup body). */
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+    CCNursery n = cc_nursery_create() !> @destroy;
     (void)n;
 
     int[~1 >] tx;
@@ -94,12 +94,12 @@ int main(void) {
 
     /* 10. Same line: `!>(e) STMT @destroy { body }` with a builtin-
      *     owned type — the auto-free runs AFTER the user body. */
-    CCNursery* n2 = cc_nursery_create(NULL) !>(e) { cc_error_exit(e); } @destroy { println("destroy n2 (user)") !>; };
+    CCNursery n2 = cc_nursery_create() !>(e) { cc_error_exit(e); } @destroy { println("destroy n2 (user)") !>; };
     (void)n2;
 
     /* 11. Split `@destroy` across lines on a builtin-owned type — both the
      *     user body and the auto-free should run. */
-    CCNursery* n3 = cc_nursery_create(NULL)
+    CCNursery n3 = cc_nursery_create()
         !>(e) {
             cc_error_log(e);
             return 8;

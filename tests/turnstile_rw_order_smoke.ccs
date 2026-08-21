@@ -13,6 +13,7 @@ static int g_write_next;
 static int g_fail;
 
 static void worker(CCTurnstileRW* ts, int i) {
+    @errhandler(CCError e) cc_error_exit(e);
     ts->read.wait(i);
     if (g_read_next != i)
         g_fail = 1;
@@ -41,10 +42,10 @@ int main(void) {
     CCTurnstileRW* tsp = &ts;
     int i;
     {
-        CCNursery* nur = cc_nursery_create(NULL) !> @destroy;
+        CCNursery nur = cc_nursery_create() !> @destroy;
         for (i = 0; i < N; i++) {
             ts.enter(i) !>;
-            nur->spawn(() => [i, tsp] {
+            nur.spawn(() => [i, tsp] {
                 @errhandler(CCError e) cc_error_exit(e);
                 worker(tsp, i);
             });

@@ -27,13 +27,13 @@ static void Widget_step(Widget* w) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     Widget w = { .base = 7 };
     Widget* wp = &w;
 
-    CCNursery* nursery = cc_nursery_create(NULL);
-    if (!nursery) return 1;
+    CCNursery nursery = cc_nursery_create() !>;
 
-    cc_nursery_spawn_closure0(nursery, () => [wp] {
+    nursery.spawn(() => [wp] {
         wp->step();
     });
 

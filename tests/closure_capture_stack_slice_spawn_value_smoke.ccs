@@ -17,11 +17,9 @@ int main(void) {
         return NULL;
     };
 
-    CCNursery* n = @create(NULL, c) @detach;
-    if (!n) {
-        free(buf);
-        return 3;
-    }
+    @errhandler(CCError e) cc_error_exit(e);
+    CCNursery n = cc_nursery_create() !> @detach;
+    n.spawn(c);
     (void)cc_nursery_wait(n);
     cc_nursery_free(n);
     free(buf);

@@ -30,19 +30,19 @@ static void handle_conn(CCChanTx ready_tx, int id) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int[~4 >] ready_tx;
     int[~4 <] ready_rx;
     CCChan* ch = cc_channel_pair(&ready_tx, &ready_rx);
     if (!ch) return 1;
 
     {
-        CCNursery* nursery = @create(NULL) @destroy;
-        if (!nursery) { cc_chan_free(ch); return 1; }
+        CCNursery nursery = @create() !> @destroy;
 
         // Outer closure captures `ready_tx` — same name as struct field Conn.ready_tx
-        nursery->spawn(() => [ready_tx, nursery] {
+        nursery.spawn(() => [ready_tx, nursery] {
             // Nested closure also captures `ready_tx`
-            nursery->spawn(() => [ready_tx] {
+            nursery.spawn(() => [ready_tx] {
                 handle_conn(ready_tx, 42);
             });
         });

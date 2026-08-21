@@ -1,1 +1,1 @@
-error: async: `@nursery { ... }` is retired; use `CCNursery* n@(parent) @destroy` and `n->spawn(...)`
+error: async: `@nursery { ... }` is retired; use `frame.create_nursery()` / `parent.create_child()` and `n.spawn(...)`

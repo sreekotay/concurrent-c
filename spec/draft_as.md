@@ -23,7 +23,9 @@ typedef struct CCTempFile {
 
 - The field name is required; an anonymous face is ill-formed. The lowered
   C member is exactly the source name — no synthetic names.
-- The field must be a value embed. A pointer field is ill-formed.
+- A plain `as: field` face is a value embed. A pointer field is
+  ill-formed in the plain form. `(Mode)field` may hop through a pointer
+  (projection; the mode names the landing face).
 - Layout is ordinary field layout: `sizeof(Type)` at the declaration site
   with `Type`'s alignment. No field flattening.
 - At most one face path to any given type from a struct (direct or

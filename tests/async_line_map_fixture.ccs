@@ -79,8 +79,8 @@ static int step_c(int x) { return x * 2; }
 int main(void) {
     @errhandler(CCError e) { (void)e; return 1; }
     g_acc = 0;
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-    n->spawn_async(handle_client(64));
+    CCNursery n = cc_nursery_create() !> @destroy;
+    n.spawn_async(handle_client(64));
     printf("async_line_map_fixture: OK acc=%d\n", g_acc);
     return 0;
 }

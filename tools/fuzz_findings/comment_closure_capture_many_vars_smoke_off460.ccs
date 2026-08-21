@@ -15,11 +15,11 @@ int main(void) {
     int j = 10;
     
     {
-        CCNursery* __cc_nursery33 = @create(NULL) @destroy;
+        CCNursery __cc_nursery33 = @create() !> @destroy;
         if (!__cc_nursery33) abort();
 
         // Capture 10 variables by value
-        __cc_nursery33->spawn(() => [a, b, c, d, /*x*/e, f, g, h, i, j] {
+        __cc_nursery33.spawn(() => [a, b, c, d, /*x*/e, f, g, h, i, j] {
             int sum = a + b + c + d + e + f + g + h + i + j;
             printf("sum = %d\n", sum);  // 1+2+...+10 = 55
         });

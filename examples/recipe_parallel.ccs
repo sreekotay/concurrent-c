@@ -20,7 +20,7 @@
  *       The lowerer bisects the span; a span of length 0 or 1
  *       is an ordinary for.
  *
- * Neither form is a nursery. n->spawn still names a task lifetime.
+ * Neither form is a nursery. n.spawn still names a task lifetime.
  * A for statement as a direct child of @parallel { } is a compile
  * error; for inside @serial is ordinary C. Bare { } is not an arm.
  *

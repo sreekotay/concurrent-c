@@ -8,12 +8,12 @@ static int g_value = 0;
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int ok = 1;
 
     {
-        CCNursery* n = @create(NULL) @destroy;
-        if (!n) abort();
-        if (n->spawnhybrid(() => {
+        CCNursery n = @create() !> @destroy;
+        if (n.spawnhybrid(() => {
                 int v = cc_block_on(int, add1(41));
                 g_value = v;
             }) != 0) {

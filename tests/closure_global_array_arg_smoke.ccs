@@ -30,6 +30,7 @@ static int sum_ids(cc_atomic_int *ids) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     /* Pre-closure indexed use: this is the text the scanner mis-parsed as a
      * declaration of g_macro_dim with type `cc_atomic_store(&`. */
     for (int i = 0; i < ARR_N; i++) {
@@ -37,10 +38,9 @@ int main(void) {
         cc_atomic_store(&g_num_dim[i], 10 * (i + 1));
     }
 
-    CCNursery* n = @create(NULL) @detach;
-    if (!n) abort();
+    CCNursery n = @create() !> @detach;
     int idx = 7;
-    (void)cc_nursery_spawn_closure0(n, () => [idx] {
+    n.spawn(() => [idx] {
         /* Bare global array names as plain call arguments: no capture. */
         int a = sum_ids(g_macro_dim);
         int b = sum_ids(g_num_dim);
