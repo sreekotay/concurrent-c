@@ -1,0 +1,2 @@
+parse_decl_space_in_name_fail.ccs:4:
+expected '(' or ';' after 'ma'

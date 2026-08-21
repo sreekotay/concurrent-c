@@ -59,6 +59,24 @@ static int ends_with(const char* s, const char* suf) {
     return n >= m && strcmp(s + n - m, suf) == 0;
 }
 
+/* Driver wrap path → stamped `#line` file. Never print unit_native / shcc_native. */
+static const char* shadow_user_in(const char* in_path, FileTape* ft, char* buf,
+                                 size_t cap) {
+    if (ft) return tape_diag_file(ft, 0, buf, cap);
+    if (in_path && tape_path_is_cache_wrap(in_path) && buf && cap) {
+        FILE* f = fopen(in_path, "r");
+        char head[2048];
+        size_t n;
+        if (f) {
+            n = fread(head, 1, sizeof(head) - 1, f);
+            fclose(f);
+            head[n] = 0;
+            if (n && tape_lead_line_file(head, n, buf, cap)) return buf;
+        }
+    }
+    return in_path ? in_path : "<input>";
+}
+
 static void pp_free_macros(Pp* pp) {
     for (int i = 0; i < pp->nmacros; i++) free(pp->macros[i].body);
     pp->nmacros = 0;
@@ -483,7 +501,11 @@ int main(int argc, char** argv) {
     stage1_src = NULL; /* owned by tape (or freed on load failure) */
     if (!ft) {
         if (diag_capturing) (void)shadow_diag_cap_end(NULL, NULL);
-        fprintf(stderr, "%s:1:1: error: stage1 load failed\n", in_path);
+        {
+            char ubuf[1024];
+            fprintf(stderr, "%s:1:1: error: stage1 load failed\n",
+                    shadow_user_in(in_path, NULL, ubuf, sizeof(ubuf)));
+        }
         cc_arena_free(&arena);
         return 1;
     }
@@ -494,8 +516,11 @@ int main(int argc, char** argv) {
     Token* tokbuf = (Token*)malloc(sizeof(Token) * (size_t)SHADOW_TOKBUF_INIT);
     if (!tokbuf) {
         if (diag_capturing) (void)shadow_diag_cap_end(NULL, NULL);
-        fprintf(stderr, "%s:1:1: error: stage2 token buffer alloc failed\n",
-                in_path);
+        {
+            char ubuf[1024];
+            fprintf(stderr, "%s:1:1: error: stage2 token buffer alloc failed\n",
+                    shadow_user_in(in_path, ft, ubuf, sizeof(ubuf)));
+        }
         tape_cache_free(&cache);
         cc_arena_free(&arena);
         return 1;
@@ -534,9 +559,11 @@ int main(int argc, char** argv) {
     pp.out_grow = 1;
     if (!pp_run(&pp, ft)) {
         if (diag_capturing) (void)shadow_diag_cap_end(NULL, NULL);
-        if (!pp.err_msg[0])
+        if (!pp.err_msg[0]) {
+            char ubuf[1024];
             fprintf(stderr, "%s:1:1: error: stage2 preprocess failed\n",
-                    in_path);
+                    shadow_user_in(in_path, ft, ubuf, sizeof(ubuf)));
+        }
         pp_free_macros(&pp);
         free(pp.out);
         tape_cache_free(&cache);
@@ -546,8 +573,12 @@ int main(int argc, char** argv) {
     tokbuf = pp.out;
     if (!shadow_rewrite_restricted_type_sugar(tokbuf, &pp.nout)) {
         if (diag_capturing) (void)shadow_diag_cap_end(NULL, NULL);
-        fprintf(stderr, "%s:1:1: error: @typeview type sugar rewrite failed\n",
-                in_path);
+        {
+            char ubuf[1024];
+            fprintf(stderr,
+                    "%s:1:1: error: @typeview type sugar rewrite failed\n",
+                    shadow_user_in(in_path, ft, ubuf, sizeof(ubuf)));
+        }
         pp_free_macros(&pp);
         free(tokbuf);
         tape_cache_free(&cache);
@@ -564,8 +595,11 @@ int main(int argc, char** argv) {
     int n = 0;
     if (!parse_tu(&p, &items, &n)) {
         if (diag_capturing) (void)shadow_diag_cap_end(NULL, NULL);
-        if (!p.err_msg[0])
-            fprintf(stderr, "%s:1:1: error: parse failed\n", in_path);
+        if (!p.err_msg[0]) {
+            char ubuf[1024];
+            fprintf(stderr, "%s:1:1: error: parse failed\n",
+                    shadow_user_in(in_path, ft, ubuf, sizeof(ubuf)));
+        }
         pp_free_macros(&pp);
         free(tokbuf);
         tape_cache_free(&cache);
@@ -586,8 +620,11 @@ int main(int argc, char** argv) {
     if (!shadow_emit(items, n, &cache, &emit, kind, pp.pass_inc, pp.npass_inc,
                      pp.pass_def, pp.npass_def, in_path)) {
         if (diag_capturing) (void)shadow_diag_cap_end(NULL, NULL);
-        if (!shadow_had_user_diag())
-            fprintf(stderr, "%s:1:1: error: emit failed\n", in_path);
+        if (!shadow_had_user_diag()) {
+            char ubuf[1024];
+            fprintf(stderr, "%s:1:1: error: emit failed\n",
+                    shadow_user_in(in_path, ft, ubuf, sizeof(ubuf)));
+        }
         pp_free_macros(&pp);
         free(emit.buf);
         free(tokbuf);
@@ -597,7 +634,11 @@ int main(int argc, char** argv) {
     }
     if (shadow_comptime_splice_emit(&emit.buf, &emit.len, in_path) != 0) {
         if (diag_capturing) (void)shadow_diag_cap_end(NULL, NULL);
-        fprintf(stderr, "%s:1:1: error: comptime splice failed\n", in_path);
+        {
+            char ubuf[1024];
+            fprintf(stderr, "%s:1:1: error: comptime splice failed\n",
+                    shadow_user_in(in_path, ft, ubuf, sizeof(ubuf)));
+        }
         pp_free_macros(&pp);
         free(emit.buf);
         free(tokbuf);
@@ -639,7 +680,11 @@ int main(int argc, char** argv) {
             incs[0] = "out/include";
             incs[1] = "cc/include";
             if (shadow_tcc_compile_exe(emit.buf, exe_path, NULL, incs, 2, rt_dir) != 0) {
-                fprintf(stderr, "%s:1:1: error: libtcc compile failed\n", in_path);
+                {
+                    char ubuf[1024];
+                    fprintf(stderr, "%s:1:1: error: libtcc compile failed\n",
+                            shadow_user_in(in_path, ft, ubuf, sizeof(ubuf)));
+                }
                 rc = 1;
             }
         }

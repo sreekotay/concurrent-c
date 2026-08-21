@@ -1,0 +1,2 @@
+decl_comma_list_missing_comma_fail.ccs:5:
+expected ',' or ';' after declarator

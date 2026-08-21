@@ -1,0 +1,6 @@
+#!ccc ccs
+#include <ccc/cc_runtime.cch>
+
+int ma in(void) {
+    return 0;
+}
