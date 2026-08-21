@@ -7,7 +7,11 @@
 typedef struct {
     volatile int done;
     _Atomic long tag;
+    int *fa, *fb;
+    const char *s, *e;
 } QF;
+
+int *gpa, *gpb;
 
 int main(void) {
     size_t len, mid;
@@ -20,14 +24,17 @@ int main(void) {
     int ic[4] = {0}, id;
     void *vp, *vq;
     uint32_t *ua, *ub;
+    void *names = NULL, *dict = NULL, *ctor = NULL;
     QF qf;
     len=0;mid=0;a=b=c=d=0;kinds[0]=0;nk=0;nk2=0;
     x=0;ys[0]=0;p[0]=0;q[0]=0;
     sk[0]=0;sn=0;ib[0]=0;id=0;
     vp=0;vq=0;ua=0;ub=0;
-    qf.done=0;qf.tag=0;
-    printf("%zu %zu %g %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %ld\n",
+    gpa=0;gpb=0;
+    qf.done=0;qf.tag=0;qf.fa=0;qf.fb=0;qf.s=0;qf.e=0;
+    printf("%zu %zu %g %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %ld %d %d %d %d %d %d\n",
            len,mid,a,kinds[0],nk,nk2,x,ys[0],p[0],q[0],sk[0],sn,ia,ib[0],ic[0],
-           vp==vq,ua==ub,qf.done,(long)qf.tag);
+           vp==vq,ua==ub,qf.done,(long)qf.tag,
+           gpa==gpb,qf.fa==qf.fb,qf.s==qf.e,names==NULL,dict==NULL,ctor==NULL);
     return 0;
 }
