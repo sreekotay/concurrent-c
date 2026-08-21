@@ -36,6 +36,25 @@ extern char **environ;  /* For posix_spawn with inherited environment */
  * Helpers
  * ============================================================================ */
 
+#ifndef _WIN32
+static int cc__set_cloexec(int fd) {
+    int flags = fcntl(fd, F_GETFD);
+    if (flags < 0) return -1;
+    return fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+}
+
+static int cc__pipe_cloexec(int fds[2]) {
+    if (pipe(fds) < 0) return -1;
+    if (cc__set_cloexec(fds[0]) < 0 || cc__set_cloexec(fds[1]) < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        fds[0] = fds[1] = -1;
+        return -1;
+    }
+    return 0;
+}
+#endif
+
 /* Use cc_io_from_errno() from cc_io_error.cch for error conversion. */
 
 static int cc__append_process_output(CCArena* arena, CCSlice* dst, size_t* cap, const void* data, size_t len) {
@@ -83,7 +102,10 @@ static CCResult_CCProcessOutput_CCIoError cc__process_capture_posix(CCArena* are
     int stderr_open = proc->stderr_fd >= 0;
 
     if (stdin_open && input.len == 0) {
-        cc_process_close_stdin(proc);
+        /* fd 0/1/2 are the parent's stdio. Closing them here tears down
+         * an LSP (or any) JSON-RPC wire if spawn left stdin_fd at 0. */
+        if (proc->stdin_fd > 2) cc_process_close_stdin(proc);
+        else proc->stdin_fd = -1;
         stdin_open = 0;
     }
 
@@ -219,18 +241,18 @@ CCResult_CCProcess_CCIoError cc_process_spawn(const CCProcessConfig* config) {
 
     /* Create pipes as needed */
     if (config->pipe_stdin) {
-        if (pipe(stdin_pipe) < 0) {
+        if (cc__pipe_cloexec(stdin_pipe) < 0) {
             return cc_err_CCResult_CCProcess_CCIoError(cc_io_from_errno(errno));
         }
     }
     if (config->pipe_stdout) {
-        if (pipe(stdout_pipe) < 0) {
+        if (cc__pipe_cloexec(stdout_pipe) < 0) {
             if (stdin_pipe[0] >= 0) { close(stdin_pipe[0]); close(stdin_pipe[1]); }
             return cc_err_CCResult_CCProcess_CCIoError(cc_io_from_errno(errno));
         }
     }
     if (config->pipe_stderr && !config->merge_stderr) {
-        if (pipe(stderr_pipe) < 0) {
+        if (cc__pipe_cloexec(stderr_pipe) < 0) {
             if (stdin_pipe[0] >= 0) { close(stdin_pipe[0]); close(stdin_pipe[1]); }
             if (stdout_pipe[0] >= 0) { close(stdout_pipe[0]); close(stdout_pipe[1]); }
             return cc_err_CCResult_CCProcess_CCIoError(cc_io_from_errno(errno));
@@ -769,7 +791,9 @@ CCResult_CCSlice_CCIoError cc_process_read_stderr(CCProcess* proc, CCArena* aren
 }
 
 void cc_process_close_stdin(CCProcess* proc) {
-    if (proc && proc->stdin_fd >= 0) {
+    /* Never close 0/1/2 — a zeroed CCProcess has stdin_fd==0, which is
+     * the parent's stdin (LSP JSON-RPC). */
+    if (proc && proc->stdin_fd > 2) {
 #ifdef _WIN32
         _close(proc->stdin_fd);
 #else
@@ -877,6 +901,43 @@ CCResult_CCSlice_CCIoError cc_process_read_all_stderr(CCProcess* proc, CCArena* 
 
     CCSlice result = {.ptr = total, .len = total_len};
     return cc_ok_CCResult_CCSlice_CCIoError(result);
+}
+
+CCResult_CCProcessOutput_CCIoError cc_process_collect(CCProcess* proc, CCArena* arena) {
+    CCSlice empty = {0};
+    if (!proc || !arena) {
+        return cc_err_CCResult_CCProcessOutput_CCIoError(cc_io_from_errno(EINVAL));
+    }
+#ifndef _WIN32
+    return cc__process_capture_posix(arena, proc, empty);
+#else
+    {
+        CCProcessOutput output = {0};
+        if (proc->stdout_fd >= 0) {
+            CCResult_CCSlice_CCIoError stdout_res = cc_process_read_all(proc, arena);
+            if (cc_is_err(stdout_res)) {
+                return cc_err_CCResult_CCProcessOutput_CCIoError(cc_unwrap_err(stdout_res));
+            }
+            output.stdout_data = cc_unwrap(stdout_res);
+        }
+        if (proc->stderr_fd >= 0) {
+            CCResult_CCSlice_CCIoError stderr_res = cc_process_read_all_stderr(proc, arena);
+            if (cc_is_err(stderr_res)) {
+                return cc_err_CCResult_CCProcessOutput_CCIoError(cc_unwrap_err(stderr_res));
+            }
+            output.stderr_data = cc_unwrap(stderr_res);
+        }
+        {
+            CCResult_CCProcessStatus_CCIoError wait_res = cc_process_wait(proc);
+            if (cc_is_err(wait_res)) {
+                return cc_err_CCResult_CCProcessOutput_CCIoError(cc_unwrap_err(wait_res));
+            }
+            output.status = cc_unwrap(wait_res);
+        }
+        (void)empty;
+        return cc_ok_CCResult_CCProcessOutput_CCIoError(output);
+    }
+#endif
 }
 
 /* ============================================================================

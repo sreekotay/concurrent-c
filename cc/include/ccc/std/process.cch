@@ -231,6 +231,14 @@ CC_DECL_RESULT_SPEC(CCResult_CCProcessOutput_CCIoError, CCProcessOutput, CCIoErr
 #endif
 
 /*
+ * Drain stdout and stderr together (select/poll), then wait.
+ * Use this after spawn() with both pipes captured. Sequential
+ * read_all + read_all_stderr deadlocks when the unread pipe fills;
+ * two fibers doing blocking read() also deadlock (one worker, no park).
+ */
+CCProcessOutput !>(CCIoError) cc_process_collect(CCProcess* proc, CCArena* arena);
+
+/*
  * Run a process using an explicit spawn configuration and capture any piped
  * stdout/stderr streams into the provided arena.
  */
