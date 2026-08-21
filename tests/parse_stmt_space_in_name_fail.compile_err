@@ -1,0 +1,2 @@
+parse_stmt_space_in_name_fail.ccs:5:
+expected '(' or ';' after 'ma'

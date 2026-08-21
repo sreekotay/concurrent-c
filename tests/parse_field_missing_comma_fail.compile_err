@@ -1,0 +1,2 @@
+parse_field_missing_comma_fail.ccs:5:
+expected ',' or ';' in field

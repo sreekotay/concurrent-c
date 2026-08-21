@@ -1,0 +1,8 @@
+#!ccc ccs
+#include <ccc/std/prelude.cch>
+
+struct S {
+    int x y;
+};
+
+int main(void) { return 0; }

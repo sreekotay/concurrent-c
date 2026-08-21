@@ -620,7 +620,7 @@ int main(int argc, char** argv) {
     if (!shadow_emit(items, n, &cache, &emit, kind, pp.pass_inc, pp.npass_inc,
                      pp.pass_def, pp.npass_def, in_path)) {
         if (diag_capturing) (void)shadow_diag_cap_end(NULL, NULL);
-        if (!shadow_had_user_diag()) {
+        if (!shadow_had_user_diag() && !shadow_diag_errors()) {
             char ubuf[1024];
             fprintf(stderr, "%s:1:1: error: emit failed\n",
                     shadow_user_in(in_path, ft, ubuf, sizeof(ubuf)));

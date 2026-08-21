@@ -8,9 +8,13 @@ int main(void) {
     int kinds[16], nk, nk2;
     int x, ys[4];
     int p[2], q[2];
+    static int sk[8], sn;
+    int ia = 1, ib[4];
+    int ic[4] = {0}, id;
     len=0;mid=0;a=b=c=d=0;kinds[0]=0;nk=0;nk2=0;
     x=0;ys[0]=0;p[0]=0;q[0]=0;
-    printf("%zu %zu %g %d %d %d %d %d %d %d\n",
-           len,mid,a,kinds[0],nk,nk2,x,ys[0],p[0],q[0]);
+    sk[0]=0;sn=0;ib[0]=0;id=0;
+    printf("%zu %zu %g %d %d %d %d %d %d %d %d %d %d %d %d\n",
+           len,mid,a,kinds[0],nk,nk2,x,ys[0],p[0],q[0],sk[0],sn,ia,ib[0],ic[0]);
     return 0;
 }

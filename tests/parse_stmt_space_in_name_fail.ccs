@@ -1,0 +1,7 @@
+#!ccc ccs
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    int ma in;
+    return 0;
+}
