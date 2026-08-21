@@ -28,9 +28,20 @@ static const char *desc(void) { return 0; }
 #define async_thrdd_event   NULL
 #endif
 
+/* Same transparent tree inside a struct: `#else` is not a field type. */
+typedef struct IfdefField {
+#ifdef HAVE_WIN_HANDLE
+    void* win_handle;
+#else
+    int posix_pid;
+#endif
+} IfdefField;
+
 int main(void) {
     int x = RESOLVER_ENOMEM;
+    IfdefField f;
     (void)x;
     (void)desc;
-    return 0;
+    f.posix_pid = 0;
+    return f.posix_pid;
 }

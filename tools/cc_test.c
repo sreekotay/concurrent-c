@@ -1195,6 +1195,8 @@ int main(int argc, char** argv) {
                 struct stat st;
                 if (stat(p, &st) != 0) continue;
                 if (S_ISDIR(st.st_mode)) {
+                    /* cparse-dump fixtures, not ccc programs. */
+                    if (strcmp(nm, "cparse") == 0) continue;
                     PUSH_DIR(p);
                     continue;
                 }

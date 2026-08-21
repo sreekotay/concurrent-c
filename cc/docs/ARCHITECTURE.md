@@ -50,7 +50,7 @@ by policy; that is not a second lowering IR.
 | Why this shape | §2 (constraints) + §3 (layers) + §4 (ADRs) |
 | What each source file owns | [cc/shadow/README.md](../../cc/shadow/README.md) Layout |
 | Bootstrap / promote | [bootstrap README](../bootstrap/shadow_lower/README.md) |
-| What's still missing | shadow_lower README **Next gaps** |
+| What's still missing | [Own C parser](../../docs/c-parser.md); shadow_lower README **Next gaps** |
 | `@grammar` / wire SERDES | [`spec/cc_serdes.md`](../../spec/cc_serdes.md) |
 
 ---
@@ -193,12 +193,16 @@ contract (release/debug/flags/target/sysroot/no-runtime/dry-run), ensures
 
 ## 4. ADRs
 
-### ADR-S1: Whitelist AST, not a full C parser
+### ADR-S1: Whitelist AST as beachhead; own C parser next
 
-**Decision:** Parse only what we emit or check.
-**Rejected:** Writing a general C parser "eventually."
-**Why:** Same as legacy C1 upside argument — years of dialect work with no
-CC-specific return. Opaque pass-through covers the C we do not lower.
+**Decision:** The shipping front is still a whitelist AST. The ceiling is
+an owned C parser on this tape — see [`docs/c-parser.md`](../../docs/c-parser.md).
+**Rejected:** Growing `parse_field_simple` / `parse_static_fn` forever;
+reintroducing a TCC ExtParser; treating “opaque C” as a substitute for
+declarators and `#if`.
+**Why:** The whitelist shipped the overlay. It cannot own C grammar
+(`#else` as a type name, mid-declarator `__attribute__`). We still do
+not own a C *compiler* (C1).
 
 ### ADR-S2: Stitch early; never re-expand in emit
 
@@ -240,7 +244,8 @@ visitor / TCC stub-AST front is removed; `--frontend=legacy` /
 
 ## 5. Non-goals
 
-- Full ISO cpp (`##`, function-like macros, rich `#if` evaluation)
+- C23 `#embed` / modules / parsing system headers through this front
+  (classic project-unit cpp is [`docs/c-parser.md`](../../docs/c-parser.md))
 - A general compiler IR or SSA-style mid-end inside `shadow_lower`
 - Porting `cc/src/visitor/pass_*.c` scanners onto the tape
 - Merging legacy Phase-N reparse counts into the native success metric

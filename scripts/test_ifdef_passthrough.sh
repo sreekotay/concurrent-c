@@ -1,5 +1,6 @@
 #!/bin/sh
-# Root-tape `#ifdef` / `#ifndef` emit is a clean copy (not half-evaluated).
+# `#ifdef` / `#ifndef` emit is a clean copy (not half-evaluated), including
+# inside struct field lists.
 #
 # The lowerer must keep the `#ifdef` / `#else` / `#endif` tree and the
 # `#define` / `#include` lines that sit inside it. Choosing a side and
@@ -40,6 +41,9 @@ ares_fn=$(line_of 'ares_probe')
 ifdef_verb=$(line_of '#ifdef CURLVERBOSE')
 ifndef_wake=$(line_of '#ifndef ENABLE_WAKEUP')
 wake_def=$(line_of 'async_thrdd_event')
+ifdef_win=$(line_of '#ifdef HAVE_WIN_HANDLE')
+win_h=$(line_of 'win_handle')
+posix_p=$(line_of 'posix_pid')
 
 [ -n "$ifdef_gai" ] || fail "dropped #ifdef HAVE_GETADDRINFO"
 [ -n "$arm1" ] || fail "dropped true-arm #define"
@@ -53,6 +57,9 @@ wake_def=$(line_of 'async_thrdd_event')
 [ -n "$ifdef_verb" ] || fail "dropped #ifdef CURLVERBOSE"
 [ -n "$ifndef_wake" ] || fail "dropped #ifndef ENABLE_WAKEUP"
 [ -n "$wake_def" ] || fail "dropped ENABLE_WAKEUP #define"
+[ -n "$ifdef_win" ] || fail "dropped #ifdef HAVE_WIN_HANDLE in struct"
+[ -n "$win_h" ] || fail "dropped win_handle field"
+[ -n "$posix_p" ] || fail "dropped posix_pid field"
 
 # Balanced tree: opening #ifdef before its #define, #else, other #define.
 # Hoisting the chosen #define above #ifdef is the half-evaluated bug.
@@ -67,6 +74,8 @@ ord "$arm2" "$endif_one" "#endif precedes else-arm #define"
 ord "$ifdef_net" "$inc_net" "include hoisted out of #ifdef HAVE_NETDB_H"
 ord "$ifdef_ares" "$ares_fn" "ares_probe precedes #ifdef USE_ARES"
 ord "$ifndef_wake" "$wake_def" "async_thrdd_event hoisted out of #ifndef"
+ord "$ifdef_win" "$win_h" "win_handle precedes #ifdef HAVE_WIN_HANDLE"
+ord "$win_h" "$posix_p" "posix_pid precedes win_handle (else arm lost?)"
 
 # Host-cc selects the GETADDRINFO / quiet / no-ares side.
 host_c="$out_dir/host.c"

@@ -1,0 +1,12 @@
+/* C-only file-scope fns: cparse owns them. No __attribute__ required. */
+static int cparse_plain_add(int x, int y) {
+    return x + y;
+}
+
+int cparse_plain_id(int x) {
+    return x;
+}
+
+int main(void) {
+    return (cparse_plain_add(1, 2) + cparse_plain_id(0) == 3) ? 0 : 1;
+}

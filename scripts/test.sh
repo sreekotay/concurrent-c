@@ -196,6 +196,11 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] ifdef passthrough selftest FAILED"
     exit 1
   fi
+  # Step-1 owned C parser: preserve + evaluate on fixtures (not shadow).
+  if ! sh scripts/test_cparse.sh; then
+    echo "[test] cparse step-1 selftest FAILED"
+    exit 1
+  fi
   # Tutorial fences: docs/typehooks-typeviews.md is the source of truth.
   if ! bash scripts/test_doc_fences.sh; then
     echo "[test] doc fence smoke FAILED"

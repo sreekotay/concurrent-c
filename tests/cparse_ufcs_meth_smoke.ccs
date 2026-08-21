@@ -1,0 +1,15 @@
+/* C-only Type_meth must stay on the UFCS table after cparse overlay. */
+typedef struct CparseDoc {
+    int n;
+} CparseDoc;
+
+static void CparseDoc_break_coalesce(CparseDoc* d) {
+    if (d) d->n = 0;
+}
+
+int main(void) {
+    CparseDoc d;
+    d.n = 1;
+    d.break_coalesce();
+    return d.n;
+}

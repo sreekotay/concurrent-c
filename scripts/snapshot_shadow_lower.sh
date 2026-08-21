@@ -145,7 +145,7 @@ if [[ "$SMOKE" -eq 1 ]]; then
   OBJ="$ROOT/out/cc/obj"
   OUT_BIN="$LATEST/shadow_lower"
   for need in "$OBJ/shadow_tcc_compile.o" "$OBJ/libshadow_comptime.a" \
-              "$OBJ/runtime/concurrent_c.o"; do
+              "$OBJ/runtime/concurrent_c.o" "$OBJ/cparse/libcparse.a"; do
     if [[ ! -e "$need" ]]; then
       echo "error: missing $need (make -C cc first)" >&2
       exit 1
@@ -162,6 +162,7 @@ if [[ "$SMOKE" -eq 1 ]]; then
     "$OBJ/shadow_tcc_compile.o" \
     "$OBJ/runtime/concurrent_c.o" \
     "$OBJ/libshadow_comptime.a" \
+    "$OBJ/cparse/libcparse.a" \
     -L"$ROOT/third_party/tcc" -ltcc -lpthread -lm
   "$OUT_BIN" "$ROOT/examples/hello.ccs" -o "$LATEST/hello_smoke.c" --no-cache
   test -s "$LATEST/hello_smoke.c"

@@ -1,0 +1,17 @@
+/* Compound #if / #elif: cparse, not a beachhead case. */
+typedef struct CparseCompIf {
+#if defined(_WIN32) || defined(_WIN64)
+    void* handle;
+#elif defined(__linux__) && !defined(__ANDROID__)
+    int linux_fd;
+#else
+    int posix_pid;
+#endif
+    int stdin_fd;
+} CparseCompIf;
+
+int main(void) {
+    CparseCompIf p;
+    (void)p;
+    return 0;
+}

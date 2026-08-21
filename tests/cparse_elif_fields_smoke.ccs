@@ -1,0 +1,17 @@
+/* C-only `#elif` in a struct: cparse, not parse_field_simple. */
+typedef struct CparseElif {
+#ifdef _WIN32
+    void* handle;
+#elif defined(__linux__)
+    int linux_fd;
+#else
+    int posix_pid;
+#endif
+    int stdin_fd;
+} CparseElif;
+
+int main(void) {
+    CparseElif p;
+    (void)p;
+    return 0;
+}

@@ -384,6 +384,19 @@ $(SHADOW_COMPTIME_LIB): $(SHADOW_COMPTIME_OBJ) $(SHADOW_COMPTIME_ENGINE_OBJS)
 	@rm -f $@
 	ar rcs $@ $^
 
+# Host-C C parser (FileTape-shaped tokens). Linked into shadow_lower.
+CPARSE_LIB := $(OBJDIR)/cparse/libcparse.a
+$(OBJDIR)/cparse/cparse.o: cparse/cparse.c cparse/cparse.h
+	@mkdir -p $(dir $@)
+	$(CC) -O0 -g -Wall -Wextra -std=c11 -c -o $@ $<
+$(OBJDIR)/cparse/expand.o: cparse/expand.c cparse/cparse.h
+	@mkdir -p $(dir $@)
+	$(CC) -O0 -g -Wall -Wextra -std=c11 -c -o $@ $<
+$(CPARSE_LIB): $(OBJDIR)/cparse/cparse.o $(OBJDIR)/cparse/expand.o
+	@mkdir -p $(dir $@)
+	@rm -f $@
+	ar rcs $@ $^
+
 # shadow_lower self-build:
 #   SHADOW_LOWER_SOURCE=bootstrap (default) — host-cc last-good snapshot
 #   SHADOW_LOWER_SOURCE=ccs — re-lower .ccs via existing native shadow_lower
@@ -410,9 +423,11 @@ SHADOW_LOWER_SEED_BIN := $(firstword \
 SHADOW_LOWER_CCS_DEPS := $(SHADOW_LOWER_CCS) $(SHADOW_BUILD_CCH) \
 	$(wildcard ../cc/shadow/pp_*.cch) \
 	$(wildcard ../cc/shadow/shadow_*.cch) \
-	$(wildcard ../cc/shadow/shadow_*.h)
+	$(wildcard ../cc/shadow/shadow_*.h) \
+	$(CPARSE_LIB)
 SHADOW_LOWER_BOOT_DEPS := $(BOOTSTRAP_DIR)/shadow_lower.c \
-	$(wildcard $(BOOTSTRAP_DIR)/include/*.h)
+	$(wildcard $(BOOTSTRAP_DIR)/include/*.h) \
+	$(CPARSE_LIB)
 
 ifeq ($(SHADOW_LOWER_SOURCE),ccs)
 $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COMPTIME_LIB) \
@@ -454,6 +469,7 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COM
 		$(abspath $(SHADOW_TCC_OBJ)) \
 		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \
 		$(abspath $(SHADOW_COMPTIME_LIB)) \
+		$(abspath $(CPARSE_LIB)) \
 		$(LDFLAGS) $(LDLIBS)
 	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
 	@cp $@ $(SHADOW_LOWER_SCRIPT)
@@ -488,6 +504,7 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_BOOT_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_CO
 		$(abspath $(SHADOW_TCC_OBJ)) \
 		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \
 		$(abspath $(SHADOW_COMPTIME_LIB)) \
+		$(abspath $(CPARSE_LIB)) \
 		$(LDFLAGS) $(LDLIBS)
 	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
 	@cp $@ $(SHADOW_LOWER_SCRIPT)
@@ -515,6 +532,7 @@ shadow_lower-pin:
 		$(abspath $(SHADOW_TCC_OBJ)) \
 		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \
 		$(abspath $(SHADOW_COMPTIME_LIB)) \
+		$(abspath $(CPARSE_LIB)) \
 		$(LDFLAGS) $(LDLIBS)
 
 # Dev fallback wrapper (ccc run) — not installed as the primary CLI.

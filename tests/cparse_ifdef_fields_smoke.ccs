@@ -1,0 +1,16 @@
+/* C-only struct fields, including `#ifdef`: cparse, not parse_field_simple. */
+typedef struct CparseIfdef {
+#ifdef _WIN32
+    void* handle;
+    unsigned int pid;
+#else
+    int posix_pid;
+#endif
+    int stdin_fd;
+} CparseIfdef;
+
+int main(void) {
+    CparseIfdef p;
+    (void)p;
+    return 0;
+}

@@ -7,6 +7,6 @@
  *   pp_ast_parse_ext.cch — TU / externals
  */
 #pragma once
-#include "pp_ast_cparse.cch"
-#include "pp_ast_parse_stmt.cch"
-#include "pp_ast_parse_ext.cch"
+#include "pp_ast_cparse.h"
+#include "pp_ast_parse_stmt.h"
+#include "pp_ast_parse_ext.h"

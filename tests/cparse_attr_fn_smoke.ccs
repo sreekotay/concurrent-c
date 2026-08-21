@@ -1,0 +1,8 @@
+/* Mid-declarator GNU attr: cparse owns this shape. */
+static void __attribute__((unused)) cparse_unused_fn(int x) {
+    (void)x;
+}
+
+int main(void) {
+    return 0;
+}
