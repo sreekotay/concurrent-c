@@ -104,4 +104,43 @@ printf '%s\n' "$emit10" | grep -q 'cparse_default_arg' \
 printf '%s\n' "$emit10" | grep -q 'cparse_tv_store' \
     || fail "overlay dropped cparse_tv_store"
 
+emit11="$("$SL" tests/cparse_mixed_fields_smoke.ccs --no-cache)" \
+    || fail "lower cparse_mixed_fields_smoke"
+printf '%s\n' "$emit11" | grep -q '#ifdef _WIN32' \
+    || fail "mixed: dropped #ifdef"
+printf '%s\n' "$emit11" | grep -q 'posix_pid' \
+    || fail "mixed: dropped posix_pid"
+printf '%s\n' "$emit11" | grep -q 'size_t a' || fail "mixed: dropped comma a"
+printf '%s\n' "$emit11" | grep -q 'size_t b' || fail "mixed: dropped comma b"
+if printf '%s\n' "$emit11" | grep -q '!>('; then
+    fail "mixed: reprinted !> as C"
+fi
+if printf '%s\n' "$emit11" | grep -q 'int\[:\]'; then
+    fail "mixed: reprinted int[:] as C"
+fi
+printf '%s\n' "$emit11" | grep -q 'slice_field' || fail "mixed: dropped slice_field"
+printf '%s\n' "$emit11" | grep -q 'res_field' || fail "mixed: dropped res_field"
+printf '%s\n' "$emit11" | grep -q 'CCSlice' \
+    || fail "mixed: slice_field not lowered to CCSlice"
+printf '%s\n' "$emit11" | grep -q 'CCResult' \
+    || fail "mixed: res_field not lowered to CCResult"
+
+# >4096 member tokens: heap CpTok (no silent beachhead / token-cap skip).
+fat="$(mktemp "${TMPDIR:-/tmp}/cparse_fat.XXXXXX.ccs")"
+{
+    echo 'typedef struct CparseFat {'
+    i=0
+    while [ "$i" -lt 2000 ]; do
+        echo "    int f$i;"
+        i=$((i + 1))
+    done
+    echo '} CparseFat;'
+    echo 'int main(void) { return 0; }'
+} >"$fat"
+"$SL" "$fat" --no-cache >/dev/null || {
+    rm -f "$fat"
+    fail "fat field list (>=4096 toks) must lower"
+}
+rm -f "$fat"
+
 echo "[test_cparse_overlay] ok"

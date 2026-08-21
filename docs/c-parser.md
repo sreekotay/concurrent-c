@@ -134,16 +134,17 @@ dead arms. Oracle: token dump equals `cc -E -P -undef` on
 `tests/cparse/macros.c` and `process_fields.c`.
 
 Shadow fills `CpTok` from `FileTape` (`pp_ast_cparse.cch`) and asks
-cparse for C-only struct field lists
-(no `!>` / `@` / `[:]` / `=>` / `[~`, and no `recv.meth(` / `recv->meth(`).
-That shape does not fall back to `parse_field_simple`. Comma
+cparse for every struct member list (`#if`, comma names, nested
+`struct` / `union`). Concurrent-C fields (`!>`, `[:]`, `[~`, generics)
+are taped as spans then re-parsed by the overlay — not flatten-as-C.
+Token and flat buffers are heap-sized; overflow fails loud. Comma
 declarators (`size_t a, b, c`) flatten to one field node per name.
-Nested `struct` / `union` fields are cparse's: flatten keeps
-`start`/`end` when the declarator outgrows `CpFlat.text` (512); emit
-reprints the FileTape span instead of chopping. C-only file-scope
-functions stay on the beachhead: emit reprints FileTape, which drops
-defaults, `@typeview`, string switch, safety, and comptime harvest.
-Concurrent-C fields, result fns, and UFCS bodies stay on the beachhead.
+Nested `struct` / `union` fields: flatten keeps `start`/`end` when the
+declarator outgrows `CpFlat.text` (512); emit reprints the FileTape
+span instead of chopping. C-only file-scope functions stay on the
+beachhead: emit reprints FileTape, which drops defaults, `@typeview`,
+string switch, safety, and comptime harvest. Result fns and UFCS
+bodies stay on the beachhead.
 Link
 `out/cc/obj/cparse/libcparse.a` into `shadow_lower`
 (`make -C cc SHADOW_LOWER_SOURCE=ccs`). Gate:

@@ -1,0 +1,20 @@
+/* Mixed struct: cparse owns #if / comma C fields; overlay rewrites
+ * slice and Result fields (not FileTape-reprint of !> / [:]). */
+#include <ccc/std/prelude.cch>
+
+typedef struct CparseMixed {
+#ifdef _WIN32
+    void* handle;
+#else
+    int posix_pid;
+#endif
+    size_t a, b;
+    int[:] slice_field;
+    int !>(CCIoError) res_field;
+} CparseMixed;
+
+int main(void) {
+    CparseMixed m;
+    (void)m;
+    return 0;
+}
