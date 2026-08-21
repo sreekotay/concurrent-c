@@ -1,6 +1,13 @@
 #!ccc ccs
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
+#include <stdint.h>
+#include <stdatomic.h>
+
+typedef struct {
+    volatile int done;
+    _Atomic long tag;
+} QF;
 
 int main(void) {
     size_t len, mid;
@@ -11,10 +18,16 @@ int main(void) {
     static int sk[8], sn;
     int ia = 1, ib[4];
     int ic[4] = {0}, id;
+    void *vp, *vq;
+    uint32_t *ua, *ub;
+    QF qf;
     len=0;mid=0;a=b=c=d=0;kinds[0]=0;nk=0;nk2=0;
     x=0;ys[0]=0;p[0]=0;q[0]=0;
     sk[0]=0;sn=0;ib[0]=0;id=0;
-    printf("%zu %zu %g %d %d %d %d %d %d %d %d %d %d %d %d\n",
-           len,mid,a,kinds[0],nk,nk2,x,ys[0],p[0],q[0],sk[0],sn,ia,ib[0],ic[0]);
+    vp=0;vq=0;ua=0;ub=0;
+    qf.done=0;qf.tag=0;
+    printf("%zu %zu %g %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %ld\n",
+           len,mid,a,kinds[0],nk,nk2,x,ys[0],p[0],q[0],sk[0],sn,ia,ib[0],ic[0],
+           vp==vq,ua==ub,qf.done,(long)qf.tag);
     return 0;
 }
