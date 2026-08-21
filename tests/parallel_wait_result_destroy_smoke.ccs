@@ -1,0 +1,178 @@
+/*
+ * Result returns must run @destroy. The find_step leak: a wave arena
+ * with @destroy in the block that `return cc_ok(...)`s after
+ * `@parallel wait for` never ran — RETURN_CC was a raw return and
+ * skipped block (and fn) life. `!>` into `@errhandler { return cc_err }`
+ * is the same hole.
+ *
+ * Plain `return 7` already unwinds; this pins `return cc_ok` / `cc_err`.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int g_fn;
+static int g_block;
+
+static void reset_life(void) {
+    g_fn = 0;
+    g_block = 0;
+}
+
+static int expect_life(const char* tag, int want_fn, int want_block) {
+    if (g_fn != want_fn || g_block != want_block) {
+        fprintf(stderr, "FAIL %s fn=%d want=%d block=%d want=%d\n",
+                tag, g_fn, want_fn, g_block, want_block);
+        return 1;
+    }
+    return 0;
+}
+
+/* Fn-scope @destroy + return cc_ok — no wait-for. */
+static int !>(CCError) fn_ok(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy {
+        g_fn++;
+    };
+    (void)a;
+    return cc_ok(1);
+}
+
+/* Block-scope @destroy + return cc_ok — the raw-return hole, no wait-for. */
+static int !>(CCError) block_ok(void) {
+    {
+        CCArena a = cc_arena_heap(kilobytes(4)) @destroy {
+            g_block++;
+        };
+        (void)a;
+        return cc_ok(1);
+    }
+}
+
+/* Fallthrough still runs block life, then return cc_ok outside. */
+static int !>(CCError) block_fallthrough(void) {
+    {
+        CCArena a = cc_arena_heap(kilobytes(4)) @destroy {
+            g_block++;
+        };
+        (void)a;
+    }
+    return cc_ok(1);
+}
+
+#define N 4
+
+static int !>(CCError) boom(int i) {
+    if (i == 1)
+        return cc_err(CC_ERR_INVALID_ARG, "boom");
+    return cc_ok(0);
+}
+
+/* find_step shape: wave @destroy in the block that returns after wait-for. */
+static int !>(CCError) wave_ok(int use_par) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCArena arena = cc_arena_heap(kilobytes(16)) @destroy {
+        g_fn++;
+    };
+    {
+        CCArena wave = cc_arena_heap(kilobytes(4)) @destroy {
+            g_block++;
+        };
+        CCTurnstile ts@(2, 1, &arena) @destroy;
+        if (!ts.excl)
+            return cc_err(CC_ERR_OUT_OF_MEMORY, "ts");
+        int i;
+        @parallel seq (use_par) wait (ts) for (i in 0..N) {
+            @stage (ts, 0, i) { }
+        }
+        (void)wave;
+        return cc_ok(1);
+    }
+}
+
+/* Ticket `!>` re-raises after the brace into return cc_err. */
+static int !>(CCError) wave_err(int use_par) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCArena arena = cc_arena_heap(kilobytes(16)) @destroy {
+        g_fn++;
+    };
+    {
+        CCArena wave = cc_arena_heap(kilobytes(4)) @destroy {
+            g_block++;
+        };
+        CCTurnstile ts@(2, 1, &arena) @destroy;
+        if (!ts.excl)
+            return cc_err(CC_ERR_OUT_OF_MEMORY, "ts");
+        int i;
+        @parallel seq (use_par) wait (ts) for (i in 0..N) {
+            boom(i) !>;
+        }
+        (void)wave;
+        return cc_ok(0);
+    }
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        cc_error_log(e);
+        return 1;
+    }
+
+    reset_life();
+    if (fn_ok() !> != 1)
+        return 1;
+    if (expect_life("fn_ok", 1, 0) != 0)
+        return 1;
+
+    reset_life();
+    if (block_ok() !> != 1)
+        return 1;
+    if (expect_life("block_ok", 0, 1) != 0)
+        return 1;
+
+    reset_life();
+    if (block_fallthrough() !> != 1)
+        return 1;
+    if (expect_life("block_fallthrough", 0, 1) != 0)
+        return 1;
+
+    reset_life();
+    if (wave_ok(0) !> != 1)
+        return 1;
+    if (expect_life("wave_ok seq", 1, 1) != 0)
+        return 1;
+
+    reset_life();
+    if (wave_ok(1) !> != 1)
+        return 1;
+    if (expect_life("wave_ok par", 1, 1) != 0)
+        return 1;
+
+    int saw;
+    reset_life();
+    saw = 0;
+    wave_err(0) !>(e) {
+        (void)e;
+        saw = 1;
+        if (expect_life("wave_err seq", 1, 1) != 0)
+            return 1;
+    };
+    if (!saw) {
+        fprintf(stderr, "FAIL wave_err seq did not raise\n");
+        return 1;
+    }
+
+    reset_life();
+    saw = 0;
+    wave_err(1) !>(e) {
+        (void)e;
+        saw = 1;
+        if (expect_life("wave_err par", 1, 1) != 0)
+            return 1;
+    };
+    if (!saw) {
+        fprintf(stderr, "FAIL wave_err par did not raise\n");
+        return 1;
+    }
+
+    printf("parallel_wait_result_destroy_smoke: OK\n");
+    return 0;
+}
