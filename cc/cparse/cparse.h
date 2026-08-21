@@ -30,7 +30,10 @@ typedef enum {
     CP_STRUCT,
     CP_FUNC,
     CP_DIR,     /* #undef / #pragma / #include / #error / #warning / #line */
-    CP_TYPEDEF  /* `typedef` that is not `typedef struct {` */
+    CP_TYPEDEF, /* `typedef` that is not `typedef struct {` */
+    CP_ENUM,    /* `enum { … };` / `enum Tag { … };` / `enum Tag;` */
+    CP_DATA,    /* file-scope object / C++ `template` blob in a #if arm */
+    CP_STMT     /* C statement in a function body */
 } CpKind;
 
 typedef enum {

@@ -69,4 +69,24 @@ printf '%s\n' "$emit7" | grep -q 'CparseDoc_break_coalesce' \
 printf '%s\n' "$emit7" | grep -q 'CparseDoc_break_coalesce(&d)' \
     || fail "UFCS d.break_coalesce() did not lower (empty method table)"
 
+emit8="$("$SL" tests/cparse_comma_fields_smoke.ccs --no-cache)" \
+    || fail "lower cparse_comma_fields_smoke"
+printf '%s\n' "$emit8" | grep -q 'size_t a' || fail "overlay dropped comma field a"
+printf '%s\n' "$emit8" | grep -q 'size_t b' || fail "overlay dropped comma field b"
+printf '%s\n' "$emit8" | grep -q 'size_t c' || fail "overlay dropped comma field c"
+printf '%s\n' "$emit8" | grep -q 'int \* p' || fail "overlay dropped int *p"
+printf '%s\n' "$emit8" | grep -q 'int q' || fail "overlay dropped int q"
+
+emit9="$("$SL" tests/cparse_nested_fields_smoke.ccs --no-cache)" \
+    || fail "lower cparse_nested_fields_smoke"
+printf '%s\n' "$emit9" | grep -q 'union' || fail "overlay dropped nested union"
+printf '%s\n' "$emit9" | grep -q 'inner_x' || fail "overlay dropped nested struct field"
+if printf '%s\n' "$emit9" | grep -q 'a1 fat'; then
+    fail "overlay chopped fat union into type+name"
+fi
+body9="$(printf '%s\n' "$emit9" | sed -n '/typedef struct CparseNest/,/^} CparseNest;/p')"
+printf '%s\n' "$body9" | grep -q 'a00' || fail "overlay chopped fat union (a00)"
+printf '%s\n' "$body9" | grep -q 'a79' || fail "overlay chopped fat union (a79)"
+printf '%s\n' "$body9" | grep -q 'extra' || fail "overlay dropped extra after nested"
+
 echo "[test_cparse_overlay] ok"

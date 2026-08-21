@@ -1,9 +1,15 @@
-typedef struct UnionField {
-    unsigned long long meta;
+/* Nested struct/union in a C-only struct: cparse owns the member list.
+ * The fat union is >512 bytes so flatten must not chop — emit reprints
+ * the FileTape span. */
+typedef struct CparseNest {
     union {
-        const char* bytes;
+        int bytes;
         int i64;
-    };
+    } u;
+    struct {
+        int inner_x;
+        int inner_y;
+    } nest;
     union {
         long long a00, a01, a02, a03, a04, a05, a06, a07;
         long long a08, a09, a10, a11, a12, a13, a14, a15;
@@ -17,4 +23,16 @@ typedef struct UnionField {
         long long a72, a73, a74, a75, a76, a77, a78, a79;
     } fat;
     int extra;
-} UnionField;
+} CparseNest;
+
+int main(void) {
+    CparseNest x;
+    x.u.bytes = 1;
+    x.nest.inner_x = 2;
+    x.nest.inner_y = 3;
+    x.fat.a00 = 4;
+    x.fat.a63 = 5;
+    x.extra = 6;
+    return (x.u.bytes + x.nest.inner_x + x.nest.inner_y + x.extra == 12) ? 0
+                                                                        : 1;
+}

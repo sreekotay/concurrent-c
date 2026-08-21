@@ -97,6 +97,12 @@ static CpNode *node_new(Parser *ps, CpKind k, int start) {
     return n;
 }
 
+static int ident_eq_i(const Parser *ps, int i, const char *lit);
+static int punct_eq_i(const Parser *ps, int i, const char *lit);
+static int skip_attr_i(const Parser *ps, int i);
+static int parse_define(Parser *ps, CpNode **out);
+static int parse_dir_passthrough(Parser *ps, CpNode **out);
+
 static int kids_push(CpNode ***arr, int *n, CpNode *kid) {
     CpNode **nb = (CpNode **)realloc(*arr, (size_t)(*n + 1) * sizeof(CpNode *));
     if (!nb) return 0;
@@ -464,26 +470,195 @@ static int skip_attr(Parser *ps) {
     return 1;
 }
 
-static int is_c_type_kw(const Parser *ps) {
+static int skip_paren_list(Parser *ps) {
+    int depth;
+    if (!tok_is(ps, CP_TOK_PUNCT, "(")) return fail(ps, "expected '('");
+    depth = 0;
+    do {
+        if (tok_is(ps, CP_TOK_PUNCT, "(")) depth++;
+        else if (tok_is(ps, CP_TOK_PUNCT, ")")) depth--;
+        else if (cur(ps)->kind == CP_TOK_EOF)
+            return fail(ps, "unclosed '('");
+        adv(ps);
+    } while (depth > 0);
+    return 1;
+}
+
+static int skip_result_bang(Parser *ps) {
+    if (!tok_is(ps, CP_TOK_PUNCT, "!>") && !tok_is(ps, CP_TOK_PUNCT, "?>"))
+        return 1;
+    adv(ps);
+    return skip_paren_list(ps);
+}
+
+static int skip_alignas(Parser *ps) {
+    int depth;
+    if (!tok_ident(ps, "alignas") && !tok_ident(ps, "_Alignas")) return 1;
+    adv(ps);
+    if (!tok_is(ps, CP_TOK_PUNCT, "("))
+        return fail(ps, "expected '(' after alignas");
+    depth = 0;
+    do {
+        if (tok_is(ps, CP_TOK_PUNCT, "(")) depth++;
+        else if (tok_is(ps, CP_TOK_PUNCT, ")")) depth--;
+        else if (cur(ps)->kind == CP_TOK_EOF)
+            return fail(ps, "unclosed alignas");
+        adv(ps);
+    } while (depth > 0);
+    return 1;
+}
+
+static int is_type_qual(const Parser *ps) {
     return tok_ident(ps, "const") || tok_ident(ps, "volatile") ||
            tok_ident(ps, "restrict") || tok_ident(ps, "_Atomic") ||
            tok_ident(ps, "unsigned") || tok_ident(ps, "signed") ||
-           tok_ident(ps, "long") || tok_ident(ps, "short") ||
-           tok_ident(ps, "int") || tok_ident(ps, "char") ||
+           tok_ident(ps, "long") || tok_ident(ps, "short");
+}
+
+static int is_type_spec(const Parser *ps) {
+    return tok_ident(ps, "int") || tok_ident(ps, "char") ||
            tok_ident(ps, "void") || tok_ident(ps, "bool") ||
            tok_ident(ps, "_Bool") || tok_ident(ps, "float") ||
-           tok_ident(ps, "double") || tok_ident(ps, "struct") ||
-           tok_ident(ps, "union") || tok_ident(ps, "enum");
+           tok_ident(ps, "double");
+}
+
+static int field_attach_comma_kids(Parser *ps, int lo, int semi, CpNode *parent) {
+    int i, depth = 0;
+    int type_spec = 0, after_sue = 0, n_user = 0;
+    int type_ready = 0;
+    int spec_hi = -1;
+    int nd = 0;
+    int dlo[16], dhi[16];
+    int nms[16], nml[16];
+    int cur_lo = -1, last_nm = -1, last_nml = 0;
+    int commas = 0;
+    Parser tmp;
+    if (!parent || semi <= lo) return 1;
+    tmp = *ps;
+    for (i = lo; i < semi; i++) {
+        tmp.i = i;
+        if (depth == 0 && punct_eq_i(ps, i, ",")) {
+            commas++;
+            if (nd >= 16) return fail(ps, "too many comma field names");
+            if (cur_lo < 0) cur_lo = (last_nm >= 0) ? last_nm : (int)ps->toks[i].offset;
+            dlo[nd] = cur_lo;
+            dhi[nd] = (int)ps->toks[i].offset;
+            nms[nd] = last_nm;
+            nml[nd] = last_nml;
+            nd++;
+            cur_lo = -1;
+            last_nm = -1;
+            last_nml = 0;
+            n_user = 1;
+            continue;
+        }
+        if (punct_eq_i(ps, i, "{") || punct_eq_i(ps, i, "(") ||
+            punct_eq_i(ps, i, "[")) {
+            if (depth == 0 && type_ready && spec_hi < 0) {
+                spec_hi = (int)ps->toks[i].offset;
+                cur_lo = spec_hi;
+            }
+            depth++;
+        } else if ((punct_eq_i(ps, i, "}") || punct_eq_i(ps, i, ")") ||
+                    punct_eq_i(ps, i, "]")) &&
+                   depth > 0)
+            depth--;
+        else if (depth == 0 && ps->toks[i].kind == CP_TOK_IDENT) {
+            if (ident_eq_i(ps, i, "__attribute__")) {
+                i = skip_attr_i(ps, i);
+                if (i > lo) i--;
+                continue;
+            }
+            if (ident_eq_i(ps, i, "alignas") || ident_eq_i(ps, i, "_Alignas")) {
+                i++;
+                if (punct_eq_i(ps, i, "(")) {
+                    int d = 1;
+                    i++;
+                    while (i < semi && d > 0) {
+                        if (punct_eq_i(ps, i, "(")) d++;
+                        else if (punct_eq_i(ps, i, ")")) d--;
+                        i++;
+                    }
+                    i--;
+                }
+                continue;
+            }
+            if (ident_eq_i(ps, i, "struct") || ident_eq_i(ps, i, "union") ||
+                ident_eq_i(ps, i, "enum"))
+                after_sue = 1;
+            else if (ident_eq_i(ps, i, "const") ||
+                     ident_eq_i(ps, i, "volatile") ||
+                     ident_eq_i(ps, i, "restrict") ||
+                     ident_eq_i(ps, i, "_Atomic") ||
+                     ident_eq_i(ps, i, "unsigned") ||
+                     ident_eq_i(ps, i, "signed") || ident_eq_i(ps, i, "long") ||
+                     ident_eq_i(ps, i, "short"))
+                ;
+            else if (ident_eq_i(ps, i, "int") || ident_eq_i(ps, i, "char") ||
+                     ident_eq_i(ps, i, "void") || ident_eq_i(ps, i, "bool") ||
+                     ident_eq_i(ps, i, "_Bool") || ident_eq_i(ps, i, "float") ||
+                     ident_eq_i(ps, i, "double")) {
+                type_spec = 1;
+                type_ready = 1;
+                after_sue = 0;
+            } else if (after_sue) {
+                after_sue = 0;
+                type_ready = 1;
+            } else if (type_spec) {
+                if (spec_hi < 0) {
+                    spec_hi = (int)ps->toks[i].offset;
+                    cur_lo = spec_hi;
+                }
+            } else {
+                n_user++;
+                type_ready = 1;
+                if (n_user >= 2 && spec_hi < 0) {
+                    spec_hi = (int)ps->toks[i].offset;
+                    cur_lo = spec_hi;
+                }
+            }
+            last_nm = (int)ps->toks[i].offset;
+            last_nml = (int)ps->toks[i].len;
+        } else if (depth == 0 && punct_eq_i(ps, i, "*") && type_ready &&
+                   spec_hi < 0) {
+            spec_hi = (int)ps->toks[i].offset;
+            cur_lo = spec_hi;
+        }
+        (void)tmp;
+    }
+    if (cur_lo < 0 && last_nm >= 0) cur_lo = last_nm;
+    if (cur_lo >= 0) {
+        if (nd >= 16) return fail(ps, "too many comma field names");
+        dlo[nd] = cur_lo;
+        dhi[nd] = (int)ps->toks[semi].offset;
+        nms[nd] = last_nm;
+        nml[nd] = last_nml;
+        nd++;
+    }
+    if (commas == 0 || nd < 2) return 1;
+    for (i = 0; i < nd; i++) {
+        CpNode *k = node_new(ps, CP_FIELD, dlo[i]);
+        if (!k) return fail(ps, "oom");
+        k->end = dhi[i];
+        if (nms[i] >= 0 && nml[i] > 0) {
+            k->name = cp_str(ps->out->src + nms[i], nml[i]);
+            if (!k->name) return fail(ps, "oom");
+        }
+        if (!kids_push(&parent->kids, &parent->nkid, k)) return fail(ps, "oom");
+    }
+    return 1;
 }
 
 static int parse_field(Parser *ps, CpNode **out) {
     CpNode *n;
     int start = (int)cur(ps)->offset;
+    int start_i = ps->i;
     char *name = NULL;
     int depth = 0;
-    int saw_builtin = 0;
+    int type_spec = 0;
     int after_sue = 0;
     int n_user = 0;
+    int after_spec_names = 0;
     if (cur(ps)->kind == CP_TOK_EOF || is_hash_bol(ps) ||
         tok_is(ps, CP_TOK_PUNCT, "}"))
         return fail(ps, "expected field");
@@ -491,6 +666,10 @@ static int parse_field(Parser *ps, CpNode **out) {
         if (depth == 0 && (is_hash_bol(ps) || tok_is(ps, CP_TOK_PUNCT, "}")))
             break;
         if (depth == 0 && tok_is(ps, CP_TOK_PUNCT, ";")) break;
+        if (depth == 0 && tok_is(ps, CP_TOK_PUNCT, ",")) {
+            after_spec_names = 0;
+            n_user = 1; /* type already seen; next ident is a name */
+        }
         if (tok_is(ps, CP_TOK_PUNCT, "{") || tok_is(ps, CP_TOK_PUNCT, "(") ||
             tok_is(ps, CP_TOK_PUNCT, "["))
             depth++;
@@ -505,18 +684,36 @@ static int parse_field(Parser *ps, CpNode **out) {
                 }
                 continue;
             }
+            if (tok_ident(ps, "alignas") || tok_ident(ps, "_Alignas")) {
+                if (!skip_alignas(ps)) {
+                    free(name);
+                    return 0;
+                }
+                continue;
+            }
             if (tok_ident(ps, "struct") || tok_ident(ps, "union") ||
                 tok_ident(ps, "enum")) {
-                saw_builtin = 1;
                 after_sue = 1;
-            } else if (is_c_type_kw(ps)) {
-                saw_builtin = 1;
+            } else if (is_type_qual(ps)) {
+                /* `const` / `unsigned` do not complete the type. */
+            } else if (is_type_spec(ps)) {
+                type_spec = 1;
                 after_sue = 0;
             } else if (after_sue) {
                 after_sue = 0; /* tag */
+            } else if (type_spec) {
+                /* `int x y` — one name after a builtin. Prefix idents
+                 * before the builtin (`CCJ_ALIGNAS void *p`) already
+                 * counted in n_user and do not live here. */
+                after_spec_names++;
+                if (after_spec_names > 1) {
+                    free(name);
+                    return fail(ps, "expected ',' or ';' in field");
+                }
             } else {
+                /* `const Type *ti` (2) and `CCJ_ALIGNAS Type name` (3). */
                 n_user++;
-                if (saw_builtin && n_user > 1) {
+                if (n_user > 3) {
                     free(name);
                     return fail(ps, "expected ',' or ';' in field");
                 }
@@ -539,6 +736,7 @@ static int parse_field(Parser *ps, CpNode **out) {
     }
     n->name = name;
     n->end = (int)(cur(ps)->offset + cur(ps)->len);
+    if (!field_attach_comma_kids(ps, start_i, ps->i, n)) return 0;
     adv(ps);
     *out = n;
     return 1;
@@ -587,6 +785,69 @@ static int parse_struct(Parser *ps, CpNode **out) {
     }
     if (!tok_is(ps, CP_TOK_PUNCT, ";"))
         return fail(ps, "expected ';' after typedef struct");
+    n->end = (int)(cur(ps)->offset + cur(ps)->len);
+    adv(ps);
+    *out = n;
+    return 1;
+}
+
+/* File-scope `enum { A = 0, B };` / `enum Tag { … };` / `enum Tag;`.
+ * Enumerator list is a span (exprs may use parens); not field parse. */
+static int parse_enum(Parser *ps, CpNode **out) {
+    int start = (int)cur(ps)->offset;
+    CpNode *n;
+    if (!tok_ident(ps, "enum")) return fail(ps, "expected enum");
+    adv(ps);
+    n = node_new(ps, CP_ENUM, start);
+    if (!n) return fail(ps, "oom");
+    if (cur(ps)->kind == CP_TOK_IDENT) {
+        n->name = spell_dup(ps);
+        if (!n->name) return fail(ps, "oom");
+        adv(ps);
+    }
+    if (tok_is(ps, CP_TOK_PUNCT, "{")) {
+        int depth = 0;
+        if (!n->name && ps->i + 1 < ps->ntoks &&
+            ps->toks[ps->i + 1].kind == CP_TOK_IDENT) {
+            n->name = cp_str(ps->out->src + (int)ps->toks[ps->i + 1].offset,
+                             (int)ps->toks[ps->i + 1].len);
+            if (!n->name) return fail(ps, "oom");
+        }
+        adv(ps); /* { */
+        for (;;) {
+            if (cur(ps)->kind == CP_TOK_EOF)
+                return fail(ps, "unclosed enum");
+            if (depth == 0 && tok_is(ps, CP_TOK_PUNCT, "}")) break;
+            if (tok_is(ps, CP_TOK_PUNCT, "{") || tok_is(ps, CP_TOK_PUNCT, "(") ||
+                tok_is(ps, CP_TOK_PUNCT, "["))
+                depth++;
+            else if ((tok_is(ps, CP_TOK_PUNCT, "}") ||
+                      tok_is(ps, CP_TOK_PUNCT, ")") ||
+                      tok_is(ps, CP_TOK_PUNCT, "]")) &&
+                     depth > 0)
+                depth--;
+            adv(ps);
+        }
+        if (!tok_is(ps, CP_TOK_PUNCT, "}"))
+            return fail(ps, "expected '}' after enum");
+        adv(ps);
+    } else if (!n->name) {
+        return fail(ps, "expected enum tag or '{'");
+    }
+    if (cur(ps)->kind == CP_TOK_IDENT) {
+        adv(ps);
+        while (tok_is(ps, CP_TOK_PUNCT, "[")) {
+            int d = 1;
+            adv(ps);
+            while (d > 0 && cur(ps)->kind != CP_TOK_EOF) {
+                if (tok_is(ps, CP_TOK_PUNCT, "[")) d++;
+                else if (tok_is(ps, CP_TOK_PUNCT, "]")) d--;
+                adv(ps);
+            }
+        }
+    }
+    if (!tok_is(ps, CP_TOK_PUNCT, ";"))
+        return fail(ps, "expected ';' after enum");
     n->end = (int)(cur(ps)->offset + cur(ps)->len);
     adv(ps);
     *out = n;
@@ -665,12 +926,212 @@ static int parse_link_close(Parser *ps, CpNode **out) {
     return 1;
 }
 
+static int punct_eq_i(const Parser *ps, int i, const char *lit);
+static int skip_attr_i(const Parser *ps, int i);
+
+static int parse_stmt(Parser *ps, CpNode **out);
+
+static int parse_stmt_ppif(Parser *ps, CpNode **out) {
+    CpNode *n;
+    DirKind dk;
+    int nest = 0;
+    int start = (int)cur(ps)->offset;
+    int end = start;
+    int line_hi;
+    if (!peek_dir(ps, &dk, NULL, NULL, NULL, &line_hi))
+        return fail(ps, "expected directive");
+    if (dk != DIR_IF && dk != DIR_IFDEF && dk != DIR_IFNDEF)
+        return fail(ps, "expected #if in statement");
+    n = node_new(ps, CP_STMT, start);
+    if (!n) return fail(ps, "oom");
+    n->name = cp_str("ppif", 4);
+    if (!n->name) return fail(ps, "oom");
+    do {
+        if (!peek_dir(ps, &dk, NULL, NULL, NULL, &line_hi))
+            return fail(ps, "unclosed #if in function");
+        if (dk == DIR_IF || dk == DIR_IFDEF || dk == DIR_IFNDEF) nest++;
+        else if (dk == DIR_ENDIF) nest--;
+        end = line_hi;
+        consume_dir_line(ps, line_hi);
+        while (cur(ps)->kind != CP_TOK_EOF &&
+               !peek_dir(ps, &dk, NULL, NULL, NULL, NULL) && nest > 0) {
+            end = (int)(cur(ps)->offset + cur(ps)->len);
+            adv(ps);
+        }
+    } while (nest > 0);
+    n->end = end;
+    *out = n;
+    return 1;
+}
+
+static int parse_block_into(Parser *ps, CpNode *parent);
+
+static int parse_stmt(Parser *ps, CpNode **out) {
+    CpNode *n, *kid;
+    DirKind dk;
+    int start, depth, end;
+    *out = NULL;
+    if (cur(ps)->kind == CP_TOK_EOF) return fail(ps, "expected statement");
+    if (peek_dir(ps, &dk, NULL, NULL, NULL, NULL)) {
+        if (dk == DIR_IF || dk == DIR_IFDEF || dk == DIR_IFNDEF)
+            return parse_stmt_ppif(ps, out);
+        if (dk == DIR_DEFINE) return parse_define(ps, out);
+        return parse_dir_passthrough(ps, out);
+    }
+    if (tok_is(ps, CP_TOK_PUNCT, ";")) {
+        adv(ps);
+        return 1;
+    }
+    if (tok_is(ps, CP_TOK_PUNCT, "{")) {
+        n = node_new(ps, CP_STMT, (int)cur(ps)->offset);
+        if (!n) return fail(ps, "oom");
+        n->name = cp_str("block", 5);
+        if (!n->name) return fail(ps, "oom");
+        if (!parse_block_into(ps, n)) return 0;
+        *out = n;
+        return 1;
+    }
+    start = (int)cur(ps)->offset;
+    if (tok_ident(ps, "if") || tok_ident(ps, "while") || tok_ident(ps, "for") ||
+        tok_ident(ps, "switch")) {
+        const char *kw = tok_ident(ps, "if")
+                             ? "if"
+                             : tok_ident(ps, "while")
+                                   ? "while"
+                                   : tok_ident(ps, "for") ? "for" : "switch";
+        n = node_new(ps, CP_STMT, start);
+        if (!n) return fail(ps, "oom");
+        n->name = cp_str(kw, (int)strlen(kw));
+        if (!n->name) return fail(ps, "oom");
+        adv(ps);
+        if (!skip_paren_list(ps)) return 0;
+        if (!parse_stmt(ps, &kid)) return 0;
+        if (kid && !kids_push(&n->kids, &n->nkid, kid)) return fail(ps, "oom");
+        if (strcmp(kw, "if") == 0 && tok_ident(ps, "else")) {
+            adv(ps);
+            if (!parse_stmt(ps, &kid)) return 0;
+            if (kid && !kids_push(&n->kids, &n->nkid, kid))
+                return fail(ps, "oom");
+        }
+        n->end = (int)(ps->toks[ps->i > 0 ? ps->i - 1 : 0].offset +
+                       ps->toks[ps->i > 0 ? ps->i - 1 : 0].len);
+        *out = n;
+        return 1;
+    }
+    if (tok_ident(ps, "do")) {
+        n = node_new(ps, CP_STMT, start);
+        if (!n) return fail(ps, "oom");
+        n->name = cp_str("do", 2);
+        if (!n->name) return fail(ps, "oom");
+        adv(ps);
+        if (!parse_stmt(ps, &kid)) return 0;
+        if (kid && !kids_push(&n->kids, &n->nkid, kid)) return fail(ps, "oom");
+        if (!tok_ident(ps, "while")) return fail(ps, "expected 'while' after do");
+        adv(ps);
+        if (!skip_paren_list(ps)) return 0;
+        if (!tok_is(ps, CP_TOK_PUNCT, ";"))
+            return fail(ps, "expected ';' after do-while");
+        n->end = (int)(cur(ps)->offset + cur(ps)->len);
+        adv(ps);
+        *out = n;
+        return 1;
+    }
+    /* return / goto / decl / expr / case / default — one stmt to `;`. */
+    n = node_new(ps, CP_STMT, start);
+    if (!n) return fail(ps, "oom");
+    if (cur(ps)->kind == CP_TOK_IDENT) {
+        n->name = spell_dup(ps);
+        if (!n->name) return fail(ps, "oom");
+    } else {
+        n->name = cp_str("stmt", 4);
+        if (!n->name) return fail(ps, "oom");
+    }
+    depth = 0;
+    end = start;
+    while (cur(ps)->kind != CP_TOK_EOF) {
+        if (peek_dir(ps, &dk, NULL, NULL, NULL, &end)) {
+            if (dk == DIR_IF || dk == DIR_IFDEF || dk == DIR_IFNDEF) {
+                int nest = 0;
+                do {
+                    int line_hi = 0;
+                    if (!peek_dir(ps, &dk, NULL, NULL, NULL, &line_hi))
+                        return fail(ps, "unclosed #if in statement");
+                    if (dk == DIR_IF || dk == DIR_IFDEF || dk == DIR_IFNDEF)
+                        nest++;
+                    else if (dk == DIR_ENDIF)
+                        nest--;
+                    consume_dir_line(ps, line_hi);
+                    while (cur(ps)->kind != CP_TOK_EOF &&
+                           !peek_dir(ps, &dk, NULL, NULL, NULL, NULL) &&
+                           nest > 0)
+                        adv(ps);
+                } while (nest > 0);
+            } else {
+                consume_dir_line(ps, end);
+            }
+            continue;
+        }
+        if (depth == 0 && tok_is(ps, CP_TOK_PUNCT, ";")) {
+            end = (int)(cur(ps)->offset + cur(ps)->len);
+            adv(ps);
+            n->end = end;
+            *out = n;
+            return 1;
+        }
+        /* `case X: { … }` / `default: { … }` — block, no trailing `;`. */
+        if (depth == 0 && tok_is(ps, CP_TOK_PUNCT, "{")) {
+            int d = 0;
+            do {
+                if (tok_is(ps, CP_TOK_PUNCT, "{")) d++;
+                else if (tok_is(ps, CP_TOK_PUNCT, "}")) d--;
+                else if (cur(ps)->kind == CP_TOK_EOF)
+                    return fail(ps, "unclosed statement block");
+                end = (int)(cur(ps)->offset + cur(ps)->len);
+                adv(ps);
+            } while (d > 0);
+            if (tok_is(ps, CP_TOK_PUNCT, ";")) {
+                end = (int)(cur(ps)->offset + cur(ps)->len);
+                adv(ps);
+            }
+            n->end = end;
+            *out = n;
+            return 1;
+        }
+        if (tok_is(ps, CP_TOK_PUNCT, "{") || tok_is(ps, CP_TOK_PUNCT, "(") ||
+            tok_is(ps, CP_TOK_PUNCT, "["))
+            depth++;
+        else if (tok_is(ps, CP_TOK_PUNCT, "}") || tok_is(ps, CP_TOK_PUNCT, ")") ||
+                 tok_is(ps, CP_TOK_PUNCT, "]")) {
+            if (depth == 0) return fail(ps, "expected ';' after statement");
+            depth--;
+        }
+        end = (int)(cur(ps)->offset + cur(ps)->len);
+        adv(ps);
+    }
+    return fail(ps, "unterminated statement");
+}
+
+static int parse_block_into(Parser *ps, CpNode *parent) {
+    CpNode *kid;
+    if (!tok_is(ps, CP_TOK_PUNCT, "{")) return fail(ps, "expected '{'");
+    adv(ps);
+    while (cur(ps)->kind != CP_TOK_EOF && !tok_is(ps, CP_TOK_PUNCT, "}")) {
+        if (!parse_stmt(ps, &kid)) return 0;
+        if (kid && !kids_push(&parent->kids, &parent->nkid, kid))
+            return fail(ps, "oom");
+    }
+    if (!tok_is(ps, CP_TOK_PUNCT, "}")) return fail(ps, "unclosed block");
+    parent->end = (int)(cur(ps)->offset + cur(ps)->len);
+    adv(ps);
+    return 1;
+}
+
 static int parse_func(Parser *ps, CpNode **out) {
     CpNode *n;
     int start = (int)cur(ps)->offset;
     int attr_lo = -1, attr_hi = -1;
     char *name = NULL;
-    int depth, body_end = start;
+    int depth;
     if (cur(ps)->kind == CP_TOK_EOF) return fail(ps, "expected declaration");
     for (;;) {
         if (tok_ident(ps, "__attribute__")) {
@@ -679,14 +1140,33 @@ static int parse_func(Parser *ps, CpNode **out) {
             attr_hi = (int)cur(ps)->offset;
             continue;
         }
+        if (tok_is(ps, CP_TOK_PUNCT, "!>") || tok_is(ps, CP_TOK_PUNCT, "?>")) {
+            if (!skip_result_bang(ps)) return 0;
+            continue;
+        }
         if (cur(ps)->kind == CP_TOK_IDENT) {
             int save = ps->i;
             char *cand = spell_dup(ps);
             adv(ps);
             while (tok_is(ps, CP_TOK_PUNCT, "*")) adv(ps);
             if (tok_is(ps, CP_TOK_PUNCT, "(")) {
-                name = cand;
-                break;
+                int k = ps->i;
+                int d = 0;
+                /* `CC_STR_RAW(ty) name(` — first ident+( is a macro type. */
+                do {
+                    if (punct_eq_i(ps, k, "(")) d++;
+                    else if (punct_eq_i(ps, k, ")")) d--;
+                    k++;
+                } while (k < ps->ntoks && d > 0);
+                k = skip_attr_i(ps, k);
+                if (punct_eq_i(ps, k, ";") || punct_eq_i(ps, k, "{")) {
+                    name = cand;
+                    break;
+                }
+                /* Skip the macro invocation; the name comes next. */
+                ps->i = k;
+                free(cand);
+                continue;
             }
             free(cand);
             ps->i = save;
@@ -715,24 +1195,6 @@ static int parse_func(Parser *ps, CpNode **out) {
         if (!skip_attr(ps)) return 0;
         attr_hi = (int)cur(ps)->offset;
     }
-    if (tok_is(ps, CP_TOK_PUNCT, ";")) {
-        body_end = (int)(cur(ps)->offset + cur(ps)->len);
-        adv(ps);
-    } else if (tok_is(ps, CP_TOK_PUNCT, "{")) {
-        depth = 0;
-        do {
-            if (tok_is(ps, CP_TOK_PUNCT, "{")) depth++;
-            else if (tok_is(ps, CP_TOK_PUNCT, "}")) {
-                depth--;
-                body_end = (int)(cur(ps)->offset + cur(ps)->len);
-            } else if (cur(ps)->kind == CP_TOK_EOF)
-                return fail(ps, "unclosed function body");
-            adv(ps);
-        } while (depth > 0);
-    } else {
-        free(name);
-        return fail(ps, "expected '{' or ';' after function params");
-    }
     n = node_new(ps, CP_FUNC, start);
     if (!n) {
         free(name);
@@ -745,7 +1207,14 @@ static int parse_func(Parser *ps, CpNode **out) {
             attr_hi--;
         n->attr = cp_str(ps->out->src + attr_lo, attr_hi - attr_lo);
     }
-    n->end = body_end;
+    if (tok_is(ps, CP_TOK_PUNCT, ";")) {
+        n->end = (int)(cur(ps)->offset + cur(ps)->len);
+        adv(ps);
+    } else if (tok_is(ps, CP_TOK_PUNCT, "{")) {
+        if (!parse_block_into(ps, n)) return 0;
+    } else {
+        return fail(ps, "expected '{' or ';' after function params");
+    }
     *out = n;
     return 1;
 }
@@ -856,6 +1325,288 @@ static int parse_raw_decl(Parser *ps, CpNode **out) {
         adv(ps);
     }
     return fail(ps, "unterminated declaration");
+}
+
+static int ident_eq_i(const Parser *ps, int i, const char *lit) {
+    const CpTok *t;
+    int n;
+    if (i < 0 || i >= ps->ntoks) return 0;
+    t = &ps->toks[i];
+    n = (int)strlen(lit);
+    if (t->kind != CP_TOK_IDENT || (int)t->len != n) return 0;
+    return memcmp(ps->out->src + t->offset, lit, (size_t)n) == 0;
+}
+
+static int punct_eq_i(const Parser *ps, int i, const char *lit) {
+    const CpTok *t;
+    int n;
+    if (i < 0 || i >= ps->ntoks) return 0;
+    t = &ps->toks[i];
+    n = (int)strlen(lit);
+    if (t->kind != CP_TOK_PUNCT || (int)t->len != n) return 0;
+    return memcmp(ps->out->src + t->offset, lit, (size_t)n) == 0;
+}
+
+static int is_decl_kw_i(const Parser *ps, int i) {
+    return ident_eq_i(ps, i, "const") || ident_eq_i(ps, i, "volatile") ||
+           ident_eq_i(ps, i, "restrict") || ident_eq_i(ps, i, "_Atomic") ||
+           ident_eq_i(ps, i, "unsigned") || ident_eq_i(ps, i, "signed") ||
+           ident_eq_i(ps, i, "long") || ident_eq_i(ps, i, "short") ||
+           ident_eq_i(ps, i, "int") || ident_eq_i(ps, i, "char") ||
+           ident_eq_i(ps, i, "void") || ident_eq_i(ps, i, "bool") ||
+           ident_eq_i(ps, i, "_Bool") || ident_eq_i(ps, i, "float") ||
+           ident_eq_i(ps, i, "double") || ident_eq_i(ps, i, "struct") ||
+           ident_eq_i(ps, i, "union") || ident_eq_i(ps, i, "enum") ||
+           ident_eq_i(ps, i, "static") || ident_eq_i(ps, i, "inline") ||
+           ident_eq_i(ps, i, "extern") || ident_eq_i(ps, i, "typedef") ||
+           ident_eq_i(ps, i, "auto") || ident_eq_i(ps, i, "register") ||
+           ident_eq_i(ps, i, "_Thread_local") ||
+           ident_eq_i(ps, i, "thread_local") || ident_eq_i(ps, i, "sizeof") ||
+           ident_eq_i(ps, i, "alignof") || ident_eq_i(ps, i, "_Alignof") ||
+           ident_eq_i(ps, i, "_Alignas") || ident_eq_i(ps, i, "alignas") ||
+           ident_eq_i(ps, i, "__attribute__") || ident_eq_i(ps, i, "_Generic") ||
+           ident_eq_i(ps, i, "typeof") || ident_eq_i(ps, i, "__typeof__") ||
+           ident_eq_i(ps, i, "_Noreturn") || ident_eq_i(ps, i, "constexpr");
+}
+
+static int skip_attr_i(const Parser *ps, int i) {
+    while (ident_eq_i(ps, i, "__attribute__")) {
+        i++;
+        if (punct_eq_i(ps, i, "(")) {
+            int d = 1;
+            i++;
+            while (i < ps->ntoks && d > 0) {
+                if (punct_eq_i(ps, i, "(")) d++;
+                else if (punct_eq_i(ps, i, ")")) d--;
+                i++;
+            }
+        }
+    }
+    return i;
+}
+
+static int tok_is_dir_i(const Parser *ps, int i) {
+    Parser tmp;
+    DirKind dk;
+    if (i < 0 || i >= ps->ntoks) return 0;
+    tmp = *ps;
+    tmp.i = i;
+    return peek_dir(&tmp, &dk, NULL, NULL, NULL, NULL);
+}
+
+/* File-scope `T name(...)` / `T name(...) {`, not `T name[...]` / `T *p`. */
+static int looks_like_func(const Parser *ps) {
+    int i, depth = 0;
+    int saw_eq = 0;
+    for (i = ps->i; i < ps->ntoks; i++) {
+        int j;
+        if (depth == 0 && tok_is_dir_i(ps, i)) return 0;
+        if (depth == 0 && punct_eq_i(ps, i, ";")) return 0;
+        if (depth == 0 && ident_eq_i(ps, i, "template")) return 0;
+        if (depth == 0 && (punct_eq_i(ps, i, "!>") || punct_eq_i(ps, i, "?>"))) {
+            i++;
+            if (punct_eq_i(ps, i, "(")) {
+                int d = 1;
+                i++;
+                while (i < ps->ntoks && d > 0) {
+                    if (punct_eq_i(ps, i, "(")) d++;
+                    else if (punct_eq_i(ps, i, ")")) d--;
+                    i++;
+                }
+            }
+            i--; /* for-loop increments */
+            continue;
+        }
+        if (depth == 0 && punct_eq_i(ps, i, "=")) saw_eq = 1;
+        if (depth == 0 && !saw_eq && ps->toks[i].kind == CP_TOK_IDENT &&
+            !is_decl_kw_i(ps, i)) {
+            j = skip_attr_i(ps, i + 1);
+            if (punct_eq_i(ps, j, "(")) {
+                int d = 1;
+                int k = j + 1;
+                while (k < ps->ntoks && d > 0) {
+                    if (punct_eq_i(ps, k, "(")) d++;
+                    else if (punct_eq_i(ps, k, ")")) d--;
+                    k++;
+                }
+                k = skip_attr_i(ps, k);
+                /* `name(...) ;|{` is a function. `CC_STR_RAW(ty) name(`
+                 * is a macro type — keep scanning. */
+                if (punct_eq_i(ps, k, ";") || punct_eq_i(ps, k, "{"))
+                    return 1;
+            }
+        }
+        if (punct_eq_i(ps, i, "{") || punct_eq_i(ps, i, "(") ||
+            punct_eq_i(ps, i, "["))
+            depth++;
+        else if ((punct_eq_i(ps, i, "}") || punct_eq_i(ps, i, ")") ||
+                  punct_eq_i(ps, i, "]")) &&
+                 depth > 0)
+            depth--;
+    }
+    return 0;
+}
+
+/* File-scope object (`T name[N] = { … };`, `extern T name;`) and the C++
+ * `template<…> … { … }` blobs that sit in `#ifdef __cplusplus` arms. */
+static int span_is_only_attrs(const Parser *ps, int lo, int hi) {
+    int i = lo;
+    if (hi <= lo) return 0;
+    while (i < hi) {
+        if (ident_eq_i(ps, i, "__attribute__")) {
+            i = skip_attr_i(ps, i);
+            continue;
+        }
+        if (ident_eq_i(ps, i, "alignas") || ident_eq_i(ps, i, "_Alignas")) {
+            i++;
+            if (punct_eq_i(ps, i, "(")) {
+                int d = 1;
+                i++;
+                while (i < hi && d > 0) {
+                    if (punct_eq_i(ps, i, "(")) d++;
+                    else if (punct_eq_i(ps, i, ")")) d--;
+                    i++;
+                }
+            }
+            continue;
+        }
+        return 0;
+    }
+    return 1;
+}
+
+static int parse_data(Parser *ps, CpNode **out) {
+    int start = (int)cur(ps)->offset;
+    int start_i = ps->i;
+    int depth = 0;
+    int saw_brace = 0;
+    int prev_rparen = 0;
+    int last_lo = -1, last_n = 0;
+    int end = start;
+    CpNode *n;
+    if (cur(ps)->kind == CP_TOK_EOF) return fail(ps, "expected declaration");
+    while (cur(ps)->kind != CP_TOK_EOF) {
+        DirKind dk;
+        if (depth == 0 && peek_dir(ps, &dk, NULL, NULL, NULL, NULL)) {
+            if (!saw_brace && !span_is_only_attrs(ps, start_i, ps->i) &&
+                !prev_rparen)
+                return fail(ps, "expected ';' after declaration");
+            n = node_new(ps, CP_DATA, start);
+            if (!n) return fail(ps, "oom");
+            n->end = end;
+            if (last_n > 0) {
+                n->name = cp_str(ps->out->src + last_lo, last_n);
+                if (!n->name) return fail(ps, "oom");
+            }
+            *out = n;
+            return 1;
+        }
+        if (depth == 0 && tok_is(ps, CP_TOK_PUNCT, ";")) {
+            n = node_new(ps, CP_DATA, start);
+            if (!n) return fail(ps, "oom");
+            n->end = (int)(cur(ps)->offset + cur(ps)->len);
+            if (last_n > 0) {
+                n->name = cp_str(ps->out->src + last_lo, last_n);
+                if (!n->name) return fail(ps, "oom");
+            }
+            adv(ps);
+            *out = n;
+            return 1;
+        }
+        if (depth == 0 && cur(ps)->kind == CP_TOK_IDENT &&
+            !is_decl_kw_i(ps, ps->i)) {
+            last_lo = (int)cur(ps)->offset;
+            last_n = (int)cur(ps)->len;
+        }
+        if (tok_is(ps, CP_TOK_PUNCT, "{") || tok_is(ps, CP_TOK_PUNCT, "(") ||
+            tok_is(ps, CP_TOK_PUNCT, "[")) {
+            if (tok_is(ps, CP_TOK_PUNCT, "{")) saw_brace = 1;
+            depth++;
+            prev_rparen = 0;
+        } else if ((tok_is(ps, CP_TOK_PUNCT, "}") ||
+                    tok_is(ps, CP_TOK_PUNCT, ")") ||
+                    tok_is(ps, CP_TOK_PUNCT, "]")) &&
+                   depth > 0) {
+            int rp = tok_is(ps, CP_TOK_PUNCT, ")");
+            depth--;
+            prev_rparen = (depth == 0 && rp);
+        } else if (depth == 0) {
+            prev_rparen = 0;
+        }
+        end = (int)(cur(ps)->offset + cur(ps)->len);
+        adv(ps);
+    }
+    if (saw_brace) {
+        n = node_new(ps, CP_DATA, start);
+        if (!n) return fail(ps, "oom");
+        n->end = end;
+        if (last_n > 0) {
+            n->name = cp_str(ps->out->src + last_lo, last_n);
+            if (!n->name) return fail(ps, "oom");
+        }
+        *out = n;
+        return 1;
+    }
+    return fail(ps, "unterminated declaration");
+}
+
+/* `@typeview` / `@typehooks` / `@comptime` / `@grammar` — overlay forms.
+ * Preserve the span; do not parse the body as C. */
+static int parse_at_form(Parser *ps, CpNode **out) {
+    int start = (int)cur(ps)->offset;
+    int depth = 0;
+    int saw_brace = 0;
+    int end = start;
+    CpNode *n;
+    if (!tok_is(ps, CP_TOK_PUNCT, "@")) return fail(ps, "expected '@'");
+    adv(ps);
+    n = node_new(ps, CP_DATA, start);
+    if (!n) return fail(ps, "oom");
+    if (cur(ps)->kind == CP_TOK_IDENT) {
+        n->name = spell_dup(ps);
+        if (!n->name) return fail(ps, "oom");
+        adv(ps);
+    } else {
+        n->name = cp_str("at", 2);
+        if (!n->name) return fail(ps, "oom");
+    }
+    while (cur(ps)->kind != CP_TOK_EOF) {
+        DirKind dk;
+        if (depth == 0 && peek_dir(ps, &dk, NULL, NULL, NULL, NULL)) {
+            if (!saw_brace) return fail(ps, "unterminated @ form");
+            n->end = end;
+            *out = n;
+            return 1;
+        }
+        if (depth == 0 && tok_is(ps, CP_TOK_PUNCT, ";")) {
+            n->end = (int)(cur(ps)->offset + cur(ps)->len);
+            adv(ps);
+            *out = n;
+            return 1;
+        }
+        if (tok_is(ps, CP_TOK_PUNCT, "{") || tok_is(ps, CP_TOK_PUNCT, "(") ||
+            tok_is(ps, CP_TOK_PUNCT, "[")) {
+            if (tok_is(ps, CP_TOK_PUNCT, "{")) saw_brace = 1;
+            depth++;
+        } else if ((tok_is(ps, CP_TOK_PUNCT, "}") ||
+                    tok_is(ps, CP_TOK_PUNCT, ")") ||
+                    tok_is(ps, CP_TOK_PUNCT, "]")) &&
+                   depth > 0)
+            depth--;
+        end = (int)(cur(ps)->offset + cur(ps)->len);
+        adv(ps);
+        if (saw_brace && depth == 0 && !tok_is(ps, CP_TOK_PUNCT, ";")) {
+            n->end = end;
+            *out = n;
+            return 1;
+        }
+    }
+    if (saw_brace) {
+        n->end = end;
+        *out = n;
+        return 1;
+    }
+    return fail(ps, "unterminated @ form");
 }
 
 typedef struct {
@@ -1546,6 +2297,85 @@ static int parse_if_operand(Parser *ps, CpNode *n, int lo, int hi) {
     return 1;
 }
 
+static int mentions_cplusplus(const char *s) {
+    return s && strstr(s, "__cplusplus") != NULL;
+}
+
+/* `__cplusplus` is 0: then-arm of `#ifdef __cplusplus` / `#if __cplusplus`
+ * is C++ source. Keep the bytes for preserve; do not parse them as C. */
+static int if_then_is_cxx(const CpNode *n) {
+    long long v = 0;
+    char err[192];
+    CpTok *toks = NULL;
+    int nt = 0;
+    CpIfOpts opts;
+    if (!n || !n->name) return 0;
+    if (n->if_form == CP_IF_IFDEF) return strcmp(n->name, "__cplusplus") == 0;
+    if (n->if_form == CP_IF_IFNDEF) return 0;
+    if (n->if_form != CP_IF_EXPR || !mentions_cplusplus(n->name)) return 0;
+    if (cparse_lex(n->name, (int)strlen(n->name), &toks, &nt) != 0) {
+        free(toks);
+        return 0;
+    }
+    memset(&opts, 0, sizeof(opts));
+    opts.unknown_call = 1;
+    if (cparse_eval_if_toks_ex(n->name, toks, nt, ifp_no_defs, NULL, &v, err,
+                               (int)sizeof(err), &opts) != 0) {
+        free(toks);
+        return 0;
+    }
+    free(toks);
+    return v == 0;
+}
+
+static int if_else_is_cxx(const CpNode *n) {
+    if (!n || !n->name) return 0;
+    if (n->if_form == CP_IF_IFNDEF) return strcmp(n->name, "__cplusplus") == 0;
+    if (n->if_form == CP_IF_IFDEF) return 0;
+    if (n->if_form == CP_IF_EXPR && mentions_cplusplus(n->name))
+        return !if_then_is_cxx(n);
+    return 0;
+}
+
+static int consume_opaque_arm(Parser *ps, CpNode ***arr, int *n, int arm_lo) {
+    int depth = 0;
+    int arm_hi = arm_lo;
+    CpNode *kid;
+    while (cur(ps)->kind != CP_TOK_EOF) {
+        DirKind dk;
+        int line_lo, line_hi;
+        if (peek_dir(ps, &dk, NULL, NULL, &line_lo, &line_hi)) {
+            if (dk == DIR_IF || dk == DIR_IFDEF || dk == DIR_IFNDEF)
+                depth++;
+            else if (dk == DIR_ENDIF) {
+                if (depth == 0) {
+                    arm_hi = line_lo;
+                    break;
+                }
+                depth--;
+            } else if (dk == DIR_ELSE || dk == DIR_ELIF) {
+                if (depth == 0) {
+                    arm_hi = line_lo;
+                    break;
+                }
+            }
+            arm_hi = line_hi;
+            consume_dir_line(ps, line_hi);
+            continue;
+        }
+        arm_hi = (int)(cur(ps)->offset + cur(ps)->len);
+        adv(ps);
+    }
+    if (arm_hi <= arm_lo) return 1;
+    kid = node_new(ps, CP_DATA, arm_lo);
+    if (!kid) return fail(ps, "oom");
+    kid->end = arm_hi;
+    kid->name = cp_str("cxx", 3);
+    if (!kid->name) return fail(ps, "oom");
+    if (!kids_push(arr, n, kid)) return fail(ps, "oom");
+    return 1;
+}
+
 static int parse_if_ex(Parser *ps, CpNode **out, int in_struct, int as_elif);
 
 static int parse_if(Parser *ps, CpNode **out, int in_struct) {
@@ -1578,7 +2408,12 @@ static int parse_if_ex(Parser *ps, CpNode **out, int in_struct, int as_elif) {
     }
     if (!n->name) return fail(ps, "oom");
     consume_dir_line(ps, line_hi);
-    if (!parse_group(ps, &n->then_kids, &n->nthen, in_struct, 1)) return 0;
+    if (if_then_is_cxx(n)) {
+        if (!consume_opaque_arm(ps, &n->then_kids, &n->nthen, line_hi))
+            return 0;
+    } else if (!parse_group(ps, &n->then_kids, &n->nthen, in_struct, 1)) {
+        return 0;
+    }
     if (peek_dir(ps, &dk, NULL, NULL, &line_lo, &line_hi)) {
         if (dk == DIR_ELIF) {
             CpNode *el = NULL;
@@ -1588,8 +2423,12 @@ static int parse_if_ex(Parser *ps, CpNode **out, int in_struct, int as_elif) {
             n->else_start = line_lo;
             n->else_end = line_hi;
             consume_dir_line(ps, line_hi);
-            if (!parse_group(ps, &n->else_kids, &n->nelse, in_struct, 1))
+            if (if_else_is_cxx(n)) {
+                if (!consume_opaque_arm(ps, &n->else_kids, &n->nelse, line_hi))
+                    return 0;
+            } else if (!parse_group(ps, &n->else_kids, &n->nelse, in_struct, 1)) {
                 return 0;
+            }
         }
     }
     if (!as_elif) {
@@ -1637,6 +2476,8 @@ static int parse_group(Parser *ps, CpNode ***arr, int *n, int in_struct,
             if (!parse_field(ps, &kid)) return 0;
         } else if (tok_ident(ps, "struct") || tok_ident(ps, "union")) {
             if (!parse_struct_tag(ps, &kid)) return 0;
+        } else if (tok_ident(ps, "enum")) {
+            if (!parse_enum(ps, &kid)) return 0;
         } else if (tok_ident(ps, "extern") &&
                    (tok_n_is(ps, 1, CP_TOK_STR, "\"C\"") ||
                     tok_n_is(ps, 1, CP_TOK_STR, "\"C++\"")) &&
@@ -1659,8 +2500,12 @@ static int parse_group(Parser *ps, CpNode ***arr, int *n, int in_struct,
         } else if (tok_is(ps, CP_TOK_PUNCT, ";")) {
             adv(ps);
             continue;
-        } else {
+        } else if (tok_is(ps, CP_TOK_PUNCT, "@")) {
+            if (!parse_at_form(ps, &kid)) return 0;
+        } else if (looks_like_func(ps)) {
             if (!parse_func(ps, &kid)) return 0;
+        } else if (!parse_data(ps, &kid)) {
+            return 0;
         }
         if (kid && !kids_push(arr, n, kid)) return fail(ps, "oom");
     }
@@ -1778,6 +2623,60 @@ static int flat_one(const CpNode *node, const char *src, CpFlat *out, int cap,
             if (!flat_one(node->kids[i], src, out, cap, np)) return 0;
         return 1;
     }
+    if (node->kind == CP_FIELD && node->nkid > 0) {
+        int spec_lo = node->start;
+        int spec_hi = node->kids[0]->start;
+        int overflow = 0;
+        for (i = 0; i < node->nkid; i++) {
+            const CpNode *k = node->kids[i];
+            int sl = (spec_hi > spec_lo) ? spec_hi - spec_lo : 0;
+            int dl = (k->end > k->start) ? k->end - k->start : 0;
+            if (sl + dl >= (int)sizeof(out[0].text)) {
+                overflow = 1;
+                break;
+            }
+        }
+        /* Huge spec (nested union) + comma names cannot be split into
+         * contiguous per-name spans. One raw FileTape field. */
+        if (overflow) {
+            if (*np >= cap) return 0;
+            f = &out[(*np)++];
+            memset(f, 0, sizeof(*f));
+            f->kind = CP_FLAT_FIELD;
+            f->start = node->start;
+            f->end = node->end;
+            if (node->name) snprintf(f->name, sizeof(f->name), "%s", node->name);
+            return 1;
+        }
+        for (i = 0; i < node->nkid; i++) {
+            const CpNode *k = node->kids[i];
+            int tlen;
+            if (*np >= cap) return 0;
+            f = &out[(*np)++];
+            memset(f, 0, sizeof(*f));
+            f->kind = CP_FLAT_FIELD;
+            f->start = k->start;
+            f->end = k->end;
+            if (k->name) snprintf(f->name, sizeof(f->name), "%s", k->name);
+            tlen = 0;
+            if (spec_hi > spec_lo) {
+                int sl = spec_hi - spec_lo;
+                memcpy(f->text, src + spec_lo, (size_t)sl);
+                tlen = sl;
+            }
+            if (k->end > k->start) {
+                int dl = k->end - k->start;
+                memcpy(f->text + tlen, src + k->start, (size_t)dl);
+                tlen += dl;
+            }
+            f->text[tlen] = 0;
+            while (tlen > 0 && (f->text[tlen - 1] == ',' ||
+                                f->text[tlen - 1] == ' ' ||
+                                f->text[tlen - 1] == '\t'))
+                f->text[--tlen] = 0;
+        }
+        return 1;
+    }
     if (node->kind == CP_IF) {
         if (*np >= cap) return 0;
         f = &out[(*np)++];
@@ -1856,7 +2755,11 @@ static int flat_one(const CpNode *node, const char *src, CpFlat *out, int cap,
     hi = node->end;
     while (hi > lo && src[hi - 1] == ';') hi--;
     if (hi < lo) hi = lo;
-    if (hi - lo >= (int)sizeof(f->text)) return 0;
+    /* Overlay reprints FileTape [start,end). Do not chop a nested union. */
+    if (hi - lo >= (int)sizeof(f->text)) {
+        f->text[0] = 0;
+        return 1;
+    }
     memcpy(f->text, src + lo, (size_t)(hi - lo));
     return 1;
 }
@@ -2075,6 +2978,7 @@ int cpenv_define_body(CpEnv *e, const char *name, const char *body) {
     char *dn, *db;
     int i;
     if (!e || !name) return 0;
+    if (strcmp(name, "__cplusplus") == 0) body = "0";
     if (!body) body = "";
     for (i = 0; i < e->n; i++) {
         if (strcmp(e->names[i], name) == 0) {
@@ -2143,6 +3047,8 @@ int cpenv_define(CpEnv *e, const char *name) {
 
 static int env_name_defined(const CpEnv *e, const char *name) {
     if (!name) return 0;
+    /* This engine is C. `__cplusplus` is 0 / not defined even if -D. */
+    if (strcmp(name, "__cplusplus") == 0) return 0;
     if (strcmp(name, "__has_include") == 0 ||
         strcmp(name, "__has_feature") == 0 ||
         strcmp(name, "__has_builtin") == 0)
@@ -2256,6 +3162,8 @@ static int dump_preserve_node(const CpNode *n, Buf *b) {
         return buf_slice(b, n->src, n->start, n->end);
     case CP_FIELD:
         return buf_slice(b, n->src, n->start, n->end);
+    case CP_STMT:
+        return buf_slice(b, n->src, n->start, n->end);
     case CP_FUNC:
         return buf_slice(b, n->src, n->start, n->end);
     case CP_DEFINE:
@@ -2263,6 +3171,10 @@ static int dump_preserve_node(const CpNode *n, Buf *b) {
     case CP_DIR:
         return buf_slice(b, n->src, n->start, n->end);
     case CP_TYPEDEF:
+        return buf_slice(b, n->src, n->start, n->end);
+    case CP_ENUM:
+        return buf_slice(b, n->src, n->start, n->end);
+    case CP_DATA:
         return buf_slice(b, n->src, n->start, n->end);
     case CP_IF:
         if (!buf_slice(b, n->src, n->start, n->end)) return 0;
@@ -2348,6 +3260,18 @@ static int dump_eval_node(const CpNode *n, Buf *b, int indent) {
         if (n->name && !buf_add(b, n->name, -1)) return 0;
         if (!buf_add(b, live, -1)) return 0;
         return buf_add(b, "\n", 1);
+    case CP_ENUM:
+        if (!indent_sp(b, indent)) return 0;
+        if (!buf_add(b, "enum ", -1)) return 0;
+        if (n->name && !buf_add(b, n->name, -1)) return 0;
+        if (!buf_add(b, live, -1)) return 0;
+        return buf_add(b, "\n", 1);
+    case CP_DATA:
+        if (!indent_sp(b, indent)) return 0;
+        if (!buf_add(b, "data ", -1)) return 0;
+        if (n->name && !buf_add(b, n->name, -1)) return 0;
+        if (!buf_add(b, live, -1)) return 0;
+        return buf_add(b, "\n", 1);
     case CP_STRUCT:
         if (!indent_sp(b, indent)) return 0;
         if (!buf_add(b, "struct ", -1)) return 0;
@@ -2358,11 +3282,19 @@ static int dump_eval_node(const CpNode *n, Buf *b, int indent) {
             if (!dump_eval_node(n->kids[i], b, indent + 1)) return 0;
         return 1;
     case CP_FIELD:
+        if (n->nkid > 0) return dump_eval_list(n->kids, n->nkid, b, indent);
         if (!indent_sp(b, indent)) return 0;
         if (!buf_add(b, "field ", -1)) return 0;
         if (n->name && !buf_add(b, n->name, -1)) return 0;
         if (!buf_add(b, live, -1)) return 0;
         return buf_add(b, "\n", 1);
+    case CP_STMT:
+        if (!indent_sp(b, indent)) return 0;
+        if (!buf_add(b, "stmt ", -1)) return 0;
+        if (n->name && !buf_add(b, n->name, -1)) return 0;
+        if (!buf_add(b, live, -1)) return 0;
+        if (!buf_add(b, "\n", 1)) return 0;
+        return dump_eval_list(n->kids, n->nkid, b, indent + 1);
     case CP_FUNC:
         if (!indent_sp(b, indent)) return 0;
         if (!buf_add(b, "func ", -1)) return 0;
@@ -2372,7 +3304,8 @@ static int dump_eval_node(const CpNode *n, Buf *b, int indent) {
             if (!buf_add(b, n->attr, -1)) return 0;
         }
         if (!buf_add(b, live, -1)) return 0;
-        return buf_add(b, "\n", 1);
+        if (!buf_add(b, "\n", 1)) return 0;
+        return dump_eval_list(n->kids, n->nkid, b, indent + 1);
     case CP_IF:
         if (!indent_sp(b, indent)) return 0;
         if (n->is_elif) {

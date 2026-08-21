@@ -211,6 +211,7 @@ printf '%s\n' "$uf" | grep -q 'bytes' || fail "preserve dropped union member byt
 printf '%s\n' "$uf" | grep -q 'extra' || fail "preserve dropped extra after union"
 uff="$("$BIN" --fields tests/cparse/union_field.c)" || fail "fields union_field"
 printf '%s\n' "$uff" | grep -q 'union' || fail "fields missing union declarator"
+printf '%s\n' "$uff" | grep -q 'field fat' || fail "fields missing fat (must not chop >512)"
 printf '%s\n' "$uff" | grep -q 'field extra' || fail "fields missing extra"
 
 # --- compound #if / #elif: || && ! == ---
@@ -336,8 +337,45 @@ printf '%s\n' "$he" | grep -q 'struct UnitFwd live=1' || fail "struct forward sh
 printf '%s\n' "$he" | grep -q 'struct UnitRec live=1' || fail "tagged struct should be live"
 printf '%s\n' "$hp" | grep -q 'extern "C"' || fail "preserve dropped extern \"C\""
 printf '%s\n' "$he" | grep -q 'func header_unit_c live=1' || fail "header_unit_c should be live"
-printf '%s\n' "$he" | grep -q 'dir extern "C" live=0' \
+printf '%s\n' "$he" | grep -q 'data cxx live=0' \
     || fail "extern \"C\" opener is in the dead __cplusplus arm"
+printf '%s\n' "$hp" | grep -q 'enum { UNIT_LEAF' || fail "preserve dropped anonymous enum"
+printf '%s\n' "$hp" | grep -q 'enum UnitKind' || fail "preserve dropped tagged enum"
+printf '%s\n' "$he" | grep -q 'enum UNIT_LEAF live=1' || fail "anonymous enum should be live"
+printf '%s\n' "$he" | grep -q 'enum UnitKind live=1' || fail "tagged enum should be live"
+printf '%s\n' "$hp" | grep -q 'unit_tab\[4\]' || fail "preserve dropped file-scope array"
+printf '%s\n' "$hp" | grep -q 'extern int unit_ext' || fail "preserve dropped extern object"
+printf '%s\n' "$he" | grep -q 'data unit_tab live=1' || fail "file-scope array should be live"
+printf '%s\n' "$he" | grep -q 'data unit_ext live=1' || fail "extern object should be live"
+printf '%s\n' "$hp" | grep -q 'alignas(16) char unit_pad' || fail "preserve dropped alignas field"
+printf '%s\n' "$hp" | grep -q 'template<typename ty>' || fail "preserve dropped C++ template arm"
+printf '%s\n' "$he" | grep -q 'struct UnitAlign live=1' || fail "alignas struct should be live"
+printf '%s\n' "$hp" | grep -q 'const UnitTag \*unit_ptr' || fail "preserve dropped const typedef field"
+printf '%s\n' "$hp" | grep -q 'size_t a, b, c' || fail "preserve dropped comma field names"
+printf '%s\n' "$he" | grep -q 'field a live=1' || fail "comma field a should be live"
+printf '%s\n' "$he" | grep -q 'field b live=1' || fail "comma field b should be live"
+printf '%s\n' "$he" | grep -q 'field c live=1' || fail "comma field c should be live"
+printf '%s\n' "$hp" | grep -q 'union { int unit_u_a' || fail "preserve dropped nested union"
+printf '%s\n' "$he" | grep -q 'field unit_u live=1' || fail "nested union field should be live"
+printf '%s\n' "$he" | grep -q 'struct UnitNest live=1' || fail "nested union struct should be live"
+printf '%s\n' "$he" | grep -q 'stmt return live=1' || fail "header_unit_id should own a return stmt"
+printf '%s\n' "$he" | grep -q 'struct UnitPtr live=1' || fail "const typedef field struct should be live"
+printf '%s\n' "$hp" | grep -q 'CCJ_ALIGNAS UnitTag unit_align_fld' \
+    || fail "preserve dropped prefix-macro field"
+printf '%s\n' "$he" | grep -q 'struct UnitAlignPrefix live=1' \
+    || fail "prefix-macro field struct should be live"
+printf '%s\n' "$hp" | grep -q '!>(int) unit_bang' || fail "preserve dropped !>(int) proto"
+printf '%s\n' "$he" | grep -q 'func unit_bang live=1' || fail "!> proto should be live"
+printf '%s\n' "$hp" | grep -q '@typeview on UnitRec' || fail "preserve dropped @typeview"
+printf '%s\n' "$he" | grep -q 'data typeview live=1' || fail "@typeview should be live"
+printf '%s\n' "$hp" | grep -q 'UNIT_DECL(unit_decl_t)' \
+    || fail "preserve dropped semicolon-less macro invoke"
+printf '%s\n' "$he" | grep -q 'data UNIT_DECL live=1' \
+    || fail "semicolon-less macro invoke should be live"
+printf '%s\n' "$hp" | grep -q '#if __cplusplus >= 202101L' \
+    || fail "preserve dropped mid-expression #if in C++ arm"
+printf '%s\n' "$he" | grep -q 'data cxx live=0' \
+    || fail "C++ arm is a dead opaque span (__cplusplus is 0)"
 
 oracle "" tests/cparse/header_unit.h
 
@@ -403,10 +441,114 @@ printf '%s\n' "$bhp" | grep -q 'cc_build_join_paths' || fail "cc_build_helpers: 
 bhe="$("$BIN" --evaluate "$bh")" || fail "evaluate cc_build_helpers.cch"
 printf '%s\n' "$bhe" | grep -q 'func cc_build_join_paths live=1' \
     || fail "cc_build_helpers: join_paths live"
-printf '%s\n' "$bhe" | grep -q 'dir extern "C" live=0' \
-    || fail "cc_build_helpers: extern \"C\" opener dead without __cplusplus"
-printf '%s\n' "$bhe" | grep -q 'dir extern } live=0' \
-    || fail "cc_build_helpers: linkage close stays in the dead arm"
+printf '%s\n' "$bhe" | grep -q 'data cxx live=0' \
+    || fail "cc_build_helpers: __cplusplus arm is a dead opaque span"
+
+shape=cc/include/ccc/cc_shape.cch
+shp="$("$BIN" --preserve "$shape")" || fail "preserve cc_shape.cch"
+printf '%s\n' "$shp" | grep -q 'enum { CC_SHAPE_LEAF' || fail "cc_shape: dropped enum"
+printf '%s\n' "$shp" | grep -q 'cc_shape_get' || fail "cc_shape: dropped cc_shape_get"
+she="$("$BIN" --evaluate "$shape")" || fail "evaluate cc_shape.cch"
+printf '%s\n' "$she" | grep -q 'enum CC_SHAPE_LEAF live=1' \
+    || fail "cc_shape: anonymous enum should be live"
+printf '%s\n' "$she" | grep -q 'struct CCShapeVal live=1' \
+    || fail "cc_shape: CCShapeVal should be live"
+printf '%s\n' "$she" | grep -q 'func cc_shape_get live=1' \
+    || fail "cc_shape: cc_shape_get should be live"
+
+json=cc/include/ccc/std/json.cch
+jp="$("$BIN" --preserve "$json")" || fail "preserve json.cch"
+printf '%s\n' "$jp" | grep -q 'jesc_tab\[256\]' || fail "json: dropped jesc_tab"
+je="$("$BIN" --evaluate "$json")" || fail "evaluate json.cch"
+printf '%s\n' "$je" | grep -q 'data jesc_tab live=1' || fail "json: jesc_tab should be live"
+printf '%s\n' "$je" | grep -q 'func jstr live=1' || fail "json: jstr should be live"
+
+arena=cc/include/ccc/cc_arena.cch
+arp="$("$BIN" --preserve "$arena")" || fail "preserve cc_arena.cch"
+printf '%s\n' "$arp" | grep -q 'cc_arena_prov_counter' \
+    || fail "cc_arena: dropped extern counter"
+are="$("$BIN" --evaluate "$arena")" || fail "evaluate cc_arena.cch"
+printf '%s\n' "$are" | grep -q 'data cc_arena_prov_counter live=1' \
+    || fail "cc_arena: extern counter should be live"
+printf '%s\n' "$are" | grep -q 'func cc__align_up live=1' \
+    || fail "cc_arena: cc__align_up should be live"
+
+ctr=cc/include/ccc/cc_containers.cch
+ctp="$("$BIN" --preserve "$ctr")" || fail "preserve cc_containers.cch"
+printf '%s\n' "$ctp" | grep -q 'CC_MAKE_LVAL_COPY' || fail "cc_containers: dropped LVAL_COPY"
+printf '%s\n' "$ctp" | grep -q 'template<typename ty>' \
+    || fail "cc_containers: dropped C++ template arm"
+printf '%s\n' "$ctp" | grep -q '#if __cplusplus >= 202101L' \
+    || fail "cc_containers: dropped mid-expression #if in C++ arm"
+cte="$("$BIN" --evaluate "$ctr")" || fail "evaluate cc_containers.cch"
+printf '%s\n' "$cte" | grep -q 'data cxx live=0' \
+    || fail "cc_containers: __cplusplus arm should be dead"
+printf '%s\n' "$cte" | grep -q 'define CC_VEC live=1' \
+    || fail "cc_containers: CC_VEC should be live"
+
+dyn=cc/include/ccc/cc_dyn_vec.cch
+dyp="$("$BIN" --preserve "$dyn")" || fail "preserve cc_dyn_vec.cch"
+printf '%s\n' "$dyp" | grep -q 'const cc_type_info' || fail "cc_dyn_vec: dropped const typedef field"
+dye="$("$BIN" --evaluate "$dyn")" || fail "evaluate cc_dyn_vec.cch"
+printf '%s\n' "$dye" | grep -q 'struct cc_dyn_vec live=1' || fail "cc_dyn_vec: struct should be live"
+
+ioe=cc/include/ccc/cc_io_error.cch
+iop="$("$BIN" --preserve "$ioe")" || fail "preserve cc_io_error.cch"
+printf '%s\n' "$iop" | grep -q '@typeview on CCIoError' || fail "cc_io_error: dropped @typeview"
+printf '%s\n' "$iop" | grep -q 'CC_DECL_RESULT_SPEC' || fail "cc_io_error: dropped CC_DECL"
+ioee="$("$BIN" --evaluate "$ioe")" || fail "evaluate cc_io_error.cch"
+printf '%s\n' "$ioee" | grep -q 'data typeview live=1' || fail "cc_io_error: @typeview should be live"
+
+chan=cc/include/ccc/cc_channel.cch
+cnp="$("$BIN" --preserve "$chan")" || fail "preserve cc_channel.cch"
+printf '%s\n' "$cnp" | grep -q 'bool !>(CCIoError)' || fail "cc_channel: dropped !> proto"
+cne="$("$BIN" --evaluate "$chan")" || fail "evaluate cc_channel.cch"
+printf '%s\n' "$cne" | grep -q 'func cc_chan_result_from_errno live=1' \
+    || fail "cc_channel: !> proto should be live"
+
+smap=cc/include/ccc/std/static_map.cch
+smp="$("$BIN" --preserve "$smap")" || fail "preserve static_map.cch"
+printf '%s\n' "$smp" | grep -q '@comptime void static_map' \
+    || fail "static_map: dropped @comptime"
+sme="$("$BIN" --evaluate "$smap")" || fail "evaluate static_map.cch"
+printf '%s\n' "$sme" | grep -q 'data comptime live=1' \
+    || fail "static_map: @comptime should be live"
+
+# Remaining stdlib .cch files must parse as units (preserve + evaluate).
+for u in \
+    cc/include/ccc/cc_arena_result.cch \
+    cc/include/ccc/cc_exclusive_result.cch \
+    cc/include/ccc/cc_grammar.cch \
+    cc/include/ccc/cc_io_test.cch \
+    cc/include/ccc/cc_nursery.cch \
+    cc/include/ccc/cc_result.cch \
+    cc/include/ccc/cc_select.cch \
+    cc/include/ccc/cc_turnstile.cch \
+    cc/include/ccc/cc_type.cch \
+    cc/include/ccc/std/bufio.cch \
+    cc/include/ccc/std/cli.cch \
+    cc/include/ccc/std/dir.cch \
+    cc/include/ccc/std/exec.cch \
+    cc/include/ccc/std/http.cch \
+    cc/include/ccc/std/io.cch \
+    cc/include/ccc/std/mmap.cch \
+    cc/include/ccc/std/net.cch \
+    cc/include/ccc/std/process.cch \
+    cc/include/ccc/std/slice.cch \
+    cc/include/ccc/std/slice_packed.cch \
+    cc/include/ccc/std/string.cch \
+    cc/include/ccc/script/file.cch \
+    cc/include/ccc/script/js.cch \
+    cc/include/ccc/script/pathx.cch \
+    cc/include/ccc/script/prelude.cch \
+    cc/include/ccc/script/py.cch \
+    cc/include/ccc/script/sh.cch \
+    cc/include/ccc/script/stdio.cch \
+    cc/include/ccc/script/temp.cch
+do
+    "$BIN" --preserve "$u" >/dev/null || fail "preserve $u"
+    "$BIN" --evaluate "$u" >/dev/null || fail "evaluate $u"
+done
 
 # --- overlay flatten of the struct-field span (same API shadow calls) ---
 fl="$("$BIN" --fields tests/cparse/process_fields.c)" || fail "fields process_fields"
@@ -416,6 +558,9 @@ printf '%s\n' "$fl" | grep -q 'ppdir.*#else' || fail "fields missing #else"
 printf '%s\n' "$fl" | grep -q 'field posix_pid' || fail "fields missing posix_pid"
 printf '%s\n' "$fl" | grep -q 'ppdir.*#endif' || fail "fields missing #endif"
 printf '%s\n' "$fl" | grep -q 'field stdin_fd' || fail "fields missing stdin_fd"
+printf '%s\n' "$fl" | grep -q 'field extra_a' || fail "fields missing extra_a"
+printf '%s\n' "$fl" | grep -q 'field extra_b' || fail "fields missing extra_b"
+printf '%s\n' "$fl" | grep -q 'field extra_c' || fail "fields missing extra_c"
 
 if [ -x out/cc/bin/shadow_lower ] &&
    nm -g out/cc/bin/shadow_lower 2>/dev/null | grep -q cparse_flat_fields; then

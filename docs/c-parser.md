@@ -65,9 +65,8 @@ It is not “all of clang’s preprocessor.” Angle `.h` stays passthrough
 | `#embed`, modules, `__VA_OPT__` | Unused in-tree. |
 | `#include_next` | System-header game. |
 | `_Pragma` | One vendor header (`ffc.h`). |
-| Mid-expression / mid-declarator `#if` | Declaration-boundary only (fields, file-scope decls, stmt lists). |
+| Mid-expression / mid-declarator `#if` | Declaration-boundary only (fields, file-scope decls, stmt lists). Inside `#ifdef __cplusplus` it is bytes in the opaque span. |
 | Expanding libc / clang resources | Host `cc` / clangd. |
-| `cc_containers.cch` as day-one | Eventual stress test, not the first merge. |
 
 `#pragma(@parallel)` is overlay, not C cpp.
 
@@ -101,8 +100,10 @@ Standalone host-C library `cc/cparse/` + `out/cc/bin/cparse-dump`.
 The parser consumes a **FileTape-shaped** stream (`IDENT` / `NUM` /
 `STR` / `CHR` / `PUNCT`, `#` is a punct; `#ifdef` is `#` + `ifdef`).
 `cparse_tokens` is the seam shadow will call. Lex + `\`-newline splice
-match stage-1 so we are not a second grammar. No UFCS, no `!>`, no
-emit rewrite. `--expand` runs classic cpp on the token stream.
+match stage-1 so we are not a second grammar. No UFCS rewrite, no emit rewrite. File-scope `T !>(E) name(...)` and
+`@typeview` / `@comptime` / `@typehooks` are taped as C-superset
+nodes so mixed headers are units; overlay still owns their meaning.
+`--expand` runs classic cpp on the token stream.
 
 Fixtures, not whole `process.cch` (that file already has `!>`):
 
@@ -135,14 +136,16 @@ dead arms. Oracle: token dump equals `cc -E -P -undef` on
 Shadow fills `CpTok` from `FileTape` (`pp_ast_cparse.cch`) and asks
 cparse for C-only struct field lists
 (no `!>` / `@` / `[:]` / `=>` / `[~`, and no `recv.meth(` / `recv->meth(`).
-That shape does not fall back to `parse_field_simple`. Nested
-`struct` / `union` fields stay on the beachhead (flatten must not
-chop a large anonymous union). File-scope functions stay on the
-beachhead until cparse owns stmt AST — taping C-looking `main`
-dropped channel `[~`, variant `.arm`, safety walks, and CC
-diagnostics. Concurrent-C fields, result fns, and UFCS bodies
-stay on the beachhead. Link: `out/cc/obj/cparse/libcparse.a`
-into `shadow_lower` (`make -C cc SHADOW_LOWER_SOURCE=ccs`). Gate:
+That shape does not fall back to `parse_field_simple`. Comma
+declarators (`size_t a, b, c`) flatten to one field node per name.
+Nested `struct` / `union` fields are cparse's: flatten keeps
+`start`/`end` when the declarator outgrows `CpFlat.text` (512); emit
+reprints the FileTape span instead of chopping. C-only file-scope
+functions go through cparse (stmt list on `CP_FUNC`); the overlay tapes
+the span for emit and copies the body for safety. Concurrent-C fields,
+result fns, and UFCS bodies stay on the beachhead. Link
+`out/cc/obj/cparse/libcparse.a` into `shadow_lower`
+(`make -C cc SHADOW_LOWER_SOURCE=ccs`). Gate:
 `cparse-dump --fields` and, once the lowerer exports
 `cparse_flat_fields`, `scripts/test_cparse_overlay.sh`.
 
@@ -181,22 +184,31 @@ way `--expand` does, and `#undef` removes them. `#include` is not
 followed (host `cc` sees libc).
 
 Real header units (parse + preserve + evaluate; not host `-E`):
-`cc_compat.cch`, `cc_atomic.cch`, `cc_runtime.cch`,
-`cc_chan_handle.cch`, `cc_build_helpers.cch`. File-scope
+every `cc/include/ccc/*.cch`, `cc/include/ccc/std/*.cch`, and
+`cc/include/ccc/script/*.cch`. File-scope
 prototypes, incomplete `typedef struct Tag Alias;`, tagged
-`struct Tag;` / `struct Tag { … };`, and `extern "C" {` /
-file-scope `}` (often split across `#ifdef __cplusplus`) are
-nodes. Oracle stays on fixtures (`tests/cparse/header_unit.h`).
+`struct Tag;` / `struct Tag { … };`, `enum { … };` / `enum Tag { … };`,
+file-scope objects (`T name[N] = { … };`, `extern T name;`), `alignas`
+on fields, `const Typedef *name` fields, prefix-macro fields
+(`CCJ_ALIGNAS Type name`), semicolon-less file-scope macro invokes
+(`CC_DECL_RESULT_SPEC(...)`), `T !>(E) name(...)`, `@typeview` /
+`@comptime` / `@typehooks` (opaque spans), and `extern "C" {` /
+file-scope `}` (often split across `#ifdef __cplusplus`) are nodes.
+Oracle stays on fixtures (`tests/cparse/header_unit.h`). `__cplusplus`
+is 0 (not defined). `#ifdef __cplusplus` / `#if __cplusplus`
+then-arms are an opaque span: preserve reprints the bytes, evaluate
+marks `data cxx live=0`, C is not parsed. Nested `#if` inside that
+span (mid-expression in a template) is just text. Overlay still owns
+the meaning of `!>` / `@` / UFCS; cparse only tapes the span.
 
 `AST_CAP` is 32768 (shipped in last-good). Snapshot smoke links
 `libcparse.a` the same way `make -C cc` does.
 
 ## After that
 
-1. More C shapes move off the beachhead the same way (delete the
-   matcher when the shape moves). Lower stays until the AST is boring.
-2. Include-chapter `cc/shadow/pp_*.cch` is not a TU; the unit is
+1. Include-chapter `cc/shadow/pp_*.cch` is not a TU; the unit is
    `shadow_lower.ccs` or a header that *is* the unit (`process.cch`).
+   Lower stays until the AST is boring.
 
 ## Non-goals
 

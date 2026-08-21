@@ -11,6 +11,7 @@ typedef struct CCProcess {
     int stdin_fd;
     int stdout_fd;
     int stderr_fd;
+    int extra_a, extra_b, extra_c;
 } CCProcess;
 
 #endif
