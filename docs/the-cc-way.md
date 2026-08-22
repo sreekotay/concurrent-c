@@ -1,7 +1,7 @@
 # How to Use CC-Lang
 
 [README](../README.md) · [Getting Started](getting-started.md) ·
-[Cheatsheet](cheatsheet.md)
+[Cheatsheet](cheatsheet.md) · [Stdlib Design](plans/stdlib_properly_cc_plan.md)
 
 CC asks two questions repeatedly: What is the smallest fact that actually changes what may happen? Where is the narrowest place that fact becomes known? Express and enforce that fact there; do not promote unrelated relationships into ownership, scheduling, revocation, or policy.
 
@@ -21,6 +21,7 @@ CC asks two questions repeatedly: What is the smallest fact that actually change
 
 
 The CC programming mental model:
+- **TUTORIAL=IDIOMATIC=PERFORMANT+PRODUCTON**
 - **Ownership is binary** — Memory is owned, or it is not. Views, borrows, slices, provenance, authority, and lifetime constraints describe non-owner access; they should not be promoted into additional ownership states.
 - **Sharing is not shared ownership** — First look for the actual owner. Introduce transfer only when the application really creates a new independent lifetime.
 - **Materialization at boundaries** — Borrow or view while representation is sufficient; copy, serialize, or promote only when the boundary actually requires it.

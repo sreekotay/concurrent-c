@@ -377,6 +377,7 @@ Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
 | `@parallel { a = f(); b = g(); }` | Independent assignment arms. First on the caller; the rest may spawn. |
 | `@parallel { h1.wait() !>; h2.wait() !>; }` | Expression arms. No assignment: the expression just runs. |
 | `h1.adopt(h2)` | Cancel tree. `h1.cancel()` is child then parent; `h2.cancel()` is child only. |
+| `CCParallel h = @parallel { … } !>;` | `h` is live before the arms. Arms may cancel/adopt/pause `h`. `h.wait()` inside an arm of `h` is an error. |
 | `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; writes exactly one outer name. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. Body always runs. |
 | `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; span 0 or 1 is a plain `for`. |
