@@ -56,6 +56,15 @@ Fuller example (error policy + compose): [examples/hello.ccs](examples/hello.ccs
 - [`npm/cc-python`](npm/cc-python) (`concurrent-c-python`) — Python from Node: in-process zero-copy or isolated N×numpy domains; mode costs in [`benchmarks/modes_bench.js`](npm/cc-python/benchmarks/modes_bench.js)
 - [`pypi/cc-node`](pypi/cc-node) (`concurrent-c-node`) — JavaScript and npm packages from Python, same domain model mirrored
 
+### Real CC Software
+
+| Project | What it is |
+|---------|------------|
+| [cc-python](https://github.com/sreekotay/cc-python) | npm package to run Python in JS - any pip module — zero copy numpy etc, full speed, fully featured |
+| [cc-node](https://github.com/sreekotay/cc-node) | pip package to run Node at full speed in Python, including first-class Jupyter/notebook support |
+| [cctext](https://github.com/sreekotay/cctext) | Open multi-GB text, CSV, code, JSON and navigate and edit in ms. Includes deep-search file explorer (TUI and GUI). Open and edit an 8GB file with <5MB memory usage in under 2ms. |
+| [rlsw-cc](https://github.com/sreekotay/rlsw-cc) | Update to raylib software rendering, running at 1.5x to 2x speed |
+
 ### Real programs, measured
 
 Full bench suite: **[perf/](perf/)**. Dated JS/Python receipts:
