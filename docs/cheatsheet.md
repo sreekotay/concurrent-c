@@ -769,5 +769,12 @@ original `.cch`. A quoted interface `.cch` extracts; nested includes
 become their own `.h` (impl-grade nested faces need a sibling `.ccs`,
 or a direct include from a `.ccs`). `foo.cch` next to `foo.ccs` extracts
 as decls in every other TU. The `#include` stays in source order so
-types declared above it are in scope. `#define FLAG` before that
-include reaches host cpp.
+types declared above it are in scope.
+
+A face is not lowered with the includer's preprocessor. `#define FLAG`
+before `#include "foo.cch"` can appear in this TU's generated C; it does
+**not** decide `#ifdef FLAG` inside `foo.cch` when that file extracts to
+`foo.h`. Do not gate listing helpers or `static` tables that way — those
+objects live in the sibling `.ccs`. A file-scope table or function body
+in a `.cch` two TUs include is two copies (or a harvest blank). Include
+only the faces whose lowered meaning that TU owns.
