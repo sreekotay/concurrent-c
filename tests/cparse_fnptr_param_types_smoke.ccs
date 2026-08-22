@@ -1,0 +1,41 @@
+/* Fn-ptr fields are C declarators. Concurrent-C types in the param
+ * list are the same type-position sugar as in `void f(char[:] x)`. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    double (*measure)(void *ctx, char[:] bytes, int n);
+    int (*on_ints)(int[:] xs);
+    int (*on_uniq)(char[:!] u);
+    int (*on_res)(int!>(CCError) r);
+} Hooks;
+
+static double measure_impl(void *ctx, char[:] bytes, int n) {
+    (void)ctx;
+    return (double)(bytes.len + (size_t)n);
+}
+
+static int on_ints_impl(int[:] xs) {
+    return (int)xs.base.len;
+}
+
+static int on_uniq_impl(char[:!] u) {
+    return (int)u.len;
+}
+
+static int on_res_impl(int!>(CCError) r) {
+    if (!r.ok) return -1;
+    return r.u.value;
+}
+
+int main(void) {
+    Hooks h;
+    CCSlice bytes = cc_slice_from_parts((char*)"abcd", 4, CC_SLICE_ID_UNTRACKED);
+    h.measure = measure_impl;
+    h.on_ints = on_ints_impl;
+    h.on_uniq = on_uniq_impl;
+    h.on_res = on_res_impl;
+    if (h.measure(NULL, bytes, 1) != 5.0) return 1;
+    printf("cparse_fnptr_param_types_smoke ok\n");
+    return 0;
+}

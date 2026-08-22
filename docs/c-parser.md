@@ -137,6 +137,9 @@ Shadow fills `CpTok` from `FileTape` (`pp_ast_cparse.cch`) and asks
 cparse for every struct member list (`#if`, comma names, nested
 `struct` / `union`). Concurrent-C fields (`!>`, `[:]`, `[~`, generics)
 are taped as spans then re-parsed by the overlay — not flatten-as-C.
+A C declarator that only *contains* type-position sugar
+(`double (*f)(char[:] x, int!>(E) r)`) stays a C field; emit rewrites
+those spellings the same way as function parameters.
 Token and flat buffers are heap-sized; overflow fails loud. Comma
 declarators (`size_t a, b, c`) flatten to one field node per name.
 Nested `struct` / `union` fields: flatten keeps `start`/`end` when the
