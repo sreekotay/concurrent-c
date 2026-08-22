@@ -1,0 +1,58 @@
+/*
+ * Dest-live @parallel copies a T* into the env. Taking &p of the
+ * kick-frame slot leaves a dangling T** after return: the worker
+ * then loads garbage (find's memmem arm) or NULL (this plant).
+ *
+ * listing() waits until after kick nulls `b` and returns. By-address
+ * capture sees NULL and writes -1; by-value still sees the heap box.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/stdio.cch>
+#include <stdlib.h>
+
+typedef struct {
+    int x;
+} Box;
+
+static cc_atomic_int g_ready = 0;
+static int g_sink = 0;
+
+static int listing(Box* b) {
+    while (!cc_atomic_load(&g_ready)) {
+    }
+    if (!b) {
+        g_sink = -1;
+        return -1;
+    }
+    g_sink = b->x;
+    return b->x;
+}
+
+static CCParallel start_arm(Box* b) {
+    @errhandler(CCError e) { cc_error_log(e); return cc_parallel_empty(); }
+    int dummy = 0;
+    CCParallel h = @parallel {
+        @serial { dummy = 0; }
+        listing(b);
+    } !>;
+    (void)dummy;
+    b = NULL;
+    return h;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    Box* box = (Box*)malloc(sizeof(Box));
+    if (!box) return 1;
+    box->x = 41;
+    CCParallel h = start_arm(box);
+    cc_atomic_store(&g_ready, 1);
+    h.wait() !>;
+    free(box);
+    if (g_sink != 41) {
+        eprintln(@string(`FAIL ptr cap sink=${g_sink}`, @scratch)) !>;
+        return 1;
+    }
+    println("parallel_ptr_cap_smoke: OK") !>;
+    return 0;
+}

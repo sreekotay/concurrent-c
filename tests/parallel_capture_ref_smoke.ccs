@@ -1,10 +1,11 @@
 /*
- * @parallel captures are by reference (§8.11 Captures): a body or arm
- * reads and writes the frame's object itself, and writes are visible
- * after the join. Under a by-value env copy every check below sees
- * stale zeros: the join's @serial field write, the go-helper RHS, the
- * for-body element writes, and the wait loop-carried locals all land
- * in copies and never reach the frame.
+ * @parallel non-pointer captures are by reference (§8.11 Captures): a
+ * body or arm reads and writes the frame's object itself, and writes
+ * are visible after the join. Pointer names copy the pointer value.
+ * Under a by-value env copy of those non-pointer locals every check
+ * below sees stale zeros: the join's @serial field write, the
+ * go-helper RHS, the for-body element writes, and the wait
+ * loop-carried locals all land in copies and never reach the frame.
  *
  * collide() pins the rewrite rule: a captured local named like a struct
  * member (`x` vs `p->x`) in the same body. The reference rewrite must

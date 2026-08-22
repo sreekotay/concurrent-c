@@ -24,7 +24,9 @@
  * arms: cancel/adopt/pause on `h` compose there. `h.wait()` in an
  * arm of `h` is an error. One unmarked arm with a dest is an error:
  * this dest is never live on the caller. Mark the caller `@serial`,
- * or join with `!>.wait()!>`.
+ * or join with `!>.wait()!>`. Pointer names copy the pointer so a
+ * dest-live return does not leave a dangling slot; other captured
+ * names are the frame object and must outlive `.wait()`.
  *
  * Neither form is a nursery. n.spawn still names a task lifetime.
  * A for statement as a direct child of @parallel { } is a compile

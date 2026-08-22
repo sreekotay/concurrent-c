@@ -231,7 +231,9 @@ Binding starts the arms and does not join. The first arm has finished
 when the construct returns `h`; siblings may still be running. A dest
 bound to one unmarked arm is ill-formed: this dest is never live on
 the caller. Mark that arm `@serial`, or join with `!>.wait()!>`.
-`h.wait()` joins them and publishes their writes. `h.cancelled` is
+`h.wait()` joins them and publishes their writes. Pointer names copy
+the pointer; other captured names are the frame object and must
+outlive `.wait()`. `h.cancelled` is
 atomic. `h.cancel()` is `true` when this call stored live→cancelled.
 Spawned arms do not inherit `@with_deadline`; they poll `h.cancelled`.
 When several arms share one deadline, name it (`as dl`) and use `dl`,
