@@ -19,6 +19,10 @@
  *       The lowerer bisects the span; a span of length 0 or 1
  *       is an ordinary for.
  *
+ * A dest `CCParallel h = @parallel { … } !>;` is live before the
+ * arms: cancel/adopt/pause on `h` compose there. `h.wait()` in an
+ * arm of `h` is an error.
+ *
  * Neither form is a nursery. n.spawn still names a task lifetime.
  * A for statement as a direct child of @parallel { } is a compile
  * error; for inside @serial is ordinary C. Bare { } is not an arm.
@@ -112,6 +116,29 @@ int main(void) {
         if (p + q + r + s != 10)
             return 1;
         println("handles: ok") !>;
+    }
+
+    {
+        int p = 0;
+        int q = 0;
+        CCParallel h = @parallel {
+            @serial {
+                int r = 0;
+                int s = 0;
+                CCParallel c = @parallel {
+                    r = 3;
+                    s = 4;
+                } !>;
+                h.adopt(c) !>;
+                c.wait() !>;
+                p = r + s;
+            }
+            q = 2;
+        } !>;
+        h.wait() !>;
+        if (p + q != 9)
+            return 1;
+        println("live dest: ok") !>;
     }
     return 0;
 }

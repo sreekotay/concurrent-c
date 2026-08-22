@@ -1,0 +1,58 @@
+/*
+ * The dest is a live CCParallel before the arms run.
+ * Arms may adopt/cancel it; .wait() on the same dest is ill-formed.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/stdio.cch>
+
+int main(void) {
+    @errhandler(CCError err) { cc_error_log(err); return 1; }
+
+    {
+        int a = 0;
+        int b = 0;
+        CCParallel h = @parallel {
+            @serial {
+                int tc = 0;
+                int td = 0;
+                CCParallel ch = @parallel {
+                    tc = 3;
+                    td = 4;
+                } !>;
+                h.adopt(ch) !>;
+                ch.wait() !>;
+                a = tc + td;
+            }
+            b = 2;
+        } !>;
+        if (h.nch != 1) {
+            eprintln(@string(`FAIL live adopt nch=${h.nch}`, @scratch)) !>;
+            return 1;
+        }
+        h.wait() !>;
+        if (a + b != 9) {
+            eprintln("FAIL live join") !>;
+            return 1;
+        }
+    }
+
+    {
+        int a = 0;
+        int b = 0;
+        CCParallel h = @parallel {
+            @serial {
+                bool did = h.cancel() !>;
+                a = did ? 1 : 0;
+            }
+            b = 2;
+        } !>;
+        h.wait() !>;
+        if (!h.cancelled || a != 1) {
+            eprintln("FAIL live self-cancel") !>;
+            return 1;
+        }
+    }
+
+    println("parallel_handle_live_smoke: OK") !>;
+    return 0;
+}

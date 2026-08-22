@@ -5265,6 +5265,8 @@ CCParallel h2 = @parallel { c = p(); d = q(); } !>;
 
 `h1.adopt(h2)` links a cancel tree. `h1.cancel()` cancels adopted children (newest first), then `h1`. `h2.cancel()` cancels `h2` only. Adopt is not a move: both handles stay live. Self, cycle, a second parent, a joined parent or child, and a full child list are errors.
 
+A dest bound to the construct (`CCParallel h = @parallel { … } !>;`) is that handle before any arm runs. Arms may `h.cancel()`, `h.adopt(…)`, `h.pause()`, and `h.resume()`. `h.wait()` in an arm of `h` is ill-formed. The first arm is not a task of `h`: cancel from the caller stops spawned siblings; the caller continues.
+
 Compound assignment, indirection, field and subscript destinations, declarations, and other statements are ill-formed as assignment arms. A bare `{ }` as a direct child of `@parallel { }` is ill-formed; braces are C scope, not an arm. A `for` statement as a direct child is ill-formed — the loop is a form of the keyword (§8.11.4).
 
 Lowering is fork-join: the first arm runs on the caller; each remaining arm is spawned and joined before the brace. If spawn fails, that arm runs on the caller. The result is the same either way.

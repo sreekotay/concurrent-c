@@ -1,0 +1,16 @@
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    @errhandler(CCError err) { (void)err; return 1; }
+    int a = 0;
+    int b = 0;
+    CCParallel h = @parallel {
+        @serial {
+            h.wait() !>;
+            a = 1;
+        }
+        b = 2;
+    } !>;
+    (void)h;
+    return 0;
+}
