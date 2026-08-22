@@ -21,7 +21,7 @@ CC asks two questions repeatedly: What is the smallest fact that actually change
 
 
 The CC programming mental model:
-- **TUTORIAL=IDIOMATIC=PERFORMANT+PRODUCTON**
+- **TUTORIAL = IDIOMATIC = PERFORMANT = PRODUCTON** - There is only one path, the critical path.
 - **Ownership is binary** — Memory is owned, or it is not. Views, borrows, slices, provenance, authority, and lifetime constraints describe non-owner access; they should not be promoted into additional ownership states.
 - **Sharing is not shared ownership** — First look for the actual owner. Introduce transfer only when the application really creates a new independent lifetime.
 - **Materialization at boundaries** — Borrow or view while representation is sufficient; copy, serialize, or promote only when the boundary actually requires it.
