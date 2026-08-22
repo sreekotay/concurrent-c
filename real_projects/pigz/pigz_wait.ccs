@@ -14,9 +14,9 @@
  *         one is unobservable. Strip the clause and the serial
  *         program remains.
  *   @stage (ts.read, i) / @stage (ts.write, i)
- *       — ticket-scoped handshakes. enter() already armed i+1 on both;
- *         the block is the work (empty when !chain on read). Pass runs
- *         on every exit, including raises.
+ *       — ticket-scoped handshakes. wait/pass are Results (the wait-for
+ *         unwraps them). A raise fail()s unpassed stages so a successor
+ *         already in wait wakes with err, not ok.
  *
  * Default chains blocks through a 32 KiB tail copy (one gzip stream),
  * matching pigz. The published thing is that value, not a view into

@@ -1,0 +1,96 @@
+/*
+ * Ticket i errors before / inside @stage: a successor already in wait
+ * wakes with err (fail the gate), does not run the block, and the
+ * wait-for re-raises the lowest ticket's error. No hang.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+#define N   8
+#define CAP 2
+#define BAD 3
+
+static void !>(CCError) before(int i) {
+    if (i == BAD)
+        return cc_err(CC_ERR_INVALID_ARG, "pred before stage");
+    return cc_ok();
+}
+
+static void !>(CCError) inside(int i, int* done) {
+    if (i == BAD)
+        return cc_err(CC_ERR_INVALID_ARG, "pred in stage");
+    done[i] = 1;
+    return cc_ok();
+}
+
+static int run_before(int* done) {
+    @errhandler(CCError e) {
+        (void)e;
+        return -1;
+    }
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstile ts@(CAP, 1, &arena) @destroy;
+    if (!ts.excl)
+        return 1;
+    int i;
+    @parallel wait (ts) for (i in 0..N) {
+        before(i) !>;
+        @stage (ts, 0, i) {
+            done[i] = 1;
+        }
+    }
+    return 0;
+}
+
+static int run_inside(int* done) {
+    @errhandler(CCError e) {
+        (void)e;
+        return -1;
+    }
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstile ts@(CAP, 1, &arena) @destroy;
+    if (!ts.excl)
+        return 1;
+    int i;
+    @parallel wait (ts) for (i in 0..N) {
+        @stage (ts, 0, i) {
+            inside(i, done) !>;
+        }
+    }
+    return 0;
+}
+
+static int check(const char* tag, int* done) {
+    int i;
+    /* Drain whoever entered. A lower ticket may never have run. */
+    for (i = BAD; i < N; i++) {
+        if (done[i]) {
+            fprintf(stderr, "FAIL %s ticket %d ran after pred error\n", tag, i);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int main(void) {
+    int done[N];
+    memset(done, 0, sizeof(done));
+    if (run_before(done) != -1) {
+        fprintf(stderr, "FAIL before: error did not re-raise\n");
+        return 1;
+    }
+    if (check("before", done) != 0)
+        return 1;
+
+    memset(done, 0, sizeof(done));
+    if (run_inside(done) != -1) {
+        fprintf(stderr, "FAIL inside: error did not re-raise\n");
+        return 1;
+    }
+    if (check("inside", done) != 0)
+        return 1;
+
+    printf("parallel_wait_stage_pred_err_smoke: OK\n");
+    return 0;
+}

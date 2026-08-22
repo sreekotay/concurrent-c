@@ -267,9 +267,10 @@ typedef enum {
     AST_PARALLEL_FOR,
     /* @serial { stmts } — arm of @parallel { }; a=simple outer dest name */
     AST_SERIAL,
-    /* @stage (gate, args…) { stmts } — gate.wait(args); stmts; gate.pass(args);
-     * with pass guaranteed on the wait-for error path. a=gate receiver text,
-     * b=trailing args text; body=stmts. Top-level of a wait-for body only. */
+    /* @stage (gate, args…) { stmts } — gate.wait(args) !>; stmts;
+     * gate.pass(args) !>; error path fail()s unpassed stages so a parked
+     * wait wakes with err. a=gate receiver text, b=trailing args text;
+     * body=stmts. Top-level of a wait-for body only. */
     AST_STAGE,
     /* name++; — a=name */
     AST_INC,

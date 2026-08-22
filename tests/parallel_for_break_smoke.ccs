@@ -1,0 +1,29 @@
+/*
+ * @parallel for: break stops new iterations; the construct ends;
+ * the function continues.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+#define N   32
+#define CUT 5
+
+int main(void) {
+    int xs[N];
+    int i;
+    int after = 0;
+    for (i = 0; i < N; i++)
+        xs[i] = 0;
+    @parallel for (i in 0..N) {
+        xs[i] = 1;
+        if (i == CUT)
+            break;
+    }
+    after = 1;
+    if (!after || !xs[CUT]) {
+        fprintf(stderr, "FAIL after=%d cut=%d\n", after, xs[CUT]);
+        return 1;
+    }
+    printf("parallel_for_break_smoke: OK\n");
+    return 0;
+}

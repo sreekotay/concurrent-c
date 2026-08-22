@@ -376,7 +376,7 @@ Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
 | `@parallel wait (ts) for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished (§8.11.6). |
 | `cache (zs)` | After `wait`: adopt enclosing scratch; instance identity unobservable. |
 | `@stage (ts.read, i) { … }` | Ticket handshake in a wait-for body; pass on every exit. Not a Result. |
-| `break` / `continue` / `return` | Same as `for`; parallel path drains first. `break` is `ok(false)` and must be bound. `goto` cannot leave the body. |
+| `break` / `continue` / `return` | Same as `for`. Parallel path drains first. `return` is `break` then `return`. Two returns: unspecified which value (drain still happens). Join: `return` joins sibling arms first. Wait-for `break` is `ok(false)` and must be bound. |
 
 ```c
 int a = 0, b = 0;
@@ -405,7 +405,8 @@ bool fin = @parallel wait (ts) for (i in 0..n) {
 
 `@serial` is only a direct child of `@parallel { }`. Bare `{ }` is not an
 arm. `for` as a direct child of `@parallel { }` is an error; `for` inside
-`@serial` is ordinary C. `n.spawn` still names a task lifetime.
+`@serial` is ordinary C. The construct does not wait for a ticket that
+has not returned. `n.spawn` still names a task lifetime.
 
 ---
 
@@ -493,18 +494,19 @@ Depth cap plus ordered stages. Declare the turnstile **before** the nursery.
 ```c
 CCTurnstileRW ts@(cap, &arena) @destroy;
 ts.enter(i) !>;
-ts.read.wait(i);   …  ts.read.pass(i);
-ts.write.wait(i);  …  ts.write.pass(i);
+ts.read.wait(i) !>;   …  ts.read.pass(i) !>;
+ts.write.wait(i) !>;  …  ts.write.pass(i) !>;
 ts.leave() !>;
 
 CCTurnstile t@(cap, n_stages, &arena) @destroy;
 t.enter(i) !>;
-t.stage(k).wait(i);  t.wait(k, i);
+t.stage(k).wait(i) !>;  t.wait(k, i) !>;
 ```
 
-`enter(i)` takes a depth token. Stage `wait`/`pass` create a gate cell on
-first touch (map upsert is the happen-before). A closed depth channel is an
-error, not `Ok(false)`.
+`enter(i)` takes a depth token. Stage `wait`/`pass`/`fail` are
+`void !>(CCError)`: a predecessor that errors `fail`s the gate so a parked
+`wait` wakes with `err`, not `ok`. A closed depth channel is an error, not
+`Ok(false)`.
 Recipe: [recipe_turnstile.ccs](../examples/recipe_turnstile.ccs).
 
 ---

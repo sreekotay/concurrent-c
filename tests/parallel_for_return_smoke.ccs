@@ -1,0 +1,45 @@
+/*
+ * @parallel for: return is break then return — stop new iterations,
+ * join the other half, then return from the function.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+#define N   32
+#define CUT 5
+
+static int g_xs[N];
+
+static int go(void) {
+    int i;
+    @parallel for (i in 0..N) {
+        g_xs[i] = 1;
+        if (i == CUT)
+            return 7;
+    }
+    return 0;
+}
+
+int main(void) {
+    int i, rc, n;
+    for (i = 0; i < N; i++)
+        g_xs[i] = 0;
+    rc = go();
+    if (rc != 7) {
+        fprintf(stderr, "FAIL rc=%d\n", rc);
+        return 1;
+    }
+    if (!g_xs[CUT]) {
+        fprintf(stderr, "FAIL cut ticket did not run\n");
+        return 1;
+    }
+    n = 0;
+    for (i = 0; i < N; i++)
+        n += g_xs[i];
+    if (n < 1) {
+        fprintf(stderr, "FAIL no work\n");
+        return 1;
+    }
+    printf("parallel_for_return_smoke: OK\n");
+    return 0;
+}

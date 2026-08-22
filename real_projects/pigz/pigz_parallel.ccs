@@ -136,7 +136,7 @@ static void compress_and_write_i(CompressJob* job, int i) {
         if (!blk_arena.base) {
             *job->failed = 1;
         } else {
-            ts->read.wait(i);
+            ts->read.wait(i) !>;
             CCSlice data = cc_slice_empty();
             size_t !>(CCIoError) seek_r = job->in->seek((long)off, SEEK_SET);
             if (seek_r.is_err()) {
@@ -147,7 +147,7 @@ static void compress_and_write_i(CompressJob* job, int i) {
                 if (read_r.is_err() || !cc_io_avail(read_r) || data.len != want) {
                     *job->failed = 1;
                 } else {
-                    ts->read.pass(i);
+                    ts->read.pass(i) !>;
                     handed_read = 1;
                     CompressedResult* !>(CCIoError) r =
                         compress_slice(data, (long)i, is_last, job->level);
@@ -163,9 +163,9 @@ static void compress_and_write_i(CompressJob* job, int i) {
     }
 
     if (!handed_read)
-        ts->read.pass(i);
+        ts->read.pass(i) !>;
 
-    ts->write.wait(i);
+    ts->write.wait(i) !>;
     if (item && !*job->failed) {
         size_t !>(CCIoError) wr = job->out->write(item->data);
         if (wr.is_err() || cc_value(wr) != item->data.len)
@@ -174,7 +174,7 @@ static void compress_and_write_i(CompressJob* job, int i) {
     if (item)
         item->arena.free();
 
-    ts->write.pass(i);
+    ts->write.pass(i) !>;
 }
 
 static void spawn_compress_all(CompressJob* job, int n) {

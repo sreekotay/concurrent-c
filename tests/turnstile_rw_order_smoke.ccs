@@ -14,17 +14,17 @@ static int g_fail;
 
 static void worker(CCTurnstileRW* ts, int i) {
     @errhandler(CCError e) cc_error_exit(e);
-    ts->read.wait(i);
+    ts->read.wait(i) !>;
     if (g_read_next != i)
         g_fail = 1;
     g_read_next = i + 1;
-    ts->read.pass(i);
+    ts->read.pass(i) !>;
 
-    ts->write.wait(i);
+    ts->write.wait(i) !>;
     if (g_write_next != i)
         g_fail = 1;
     g_write_next = i + 1;
-    ts->write.pass(i);
+    ts->write.pass(i) !>;
 
     ts->leave() !>;
 }

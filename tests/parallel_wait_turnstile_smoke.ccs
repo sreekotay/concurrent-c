@@ -17,10 +17,10 @@ static int run(CCTurnstile* ts, int use_par, int* order) {
     int i;
     g_next = 0;
     @parallel seq (use_par) wait (ts) for (i in 0..N) {
-        ts.wait(0, i);
+        ts.wait(0, i) !>;
         order[i] = g_next;
         g_next = g_next + 1;
-        ts->pass(0, i);
+        ts->pass(0, i) !>;
     }
     return 0;
 }

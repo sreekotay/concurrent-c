@@ -69,7 +69,8 @@ enum {
     CC_GATE_EMPTY = 0,
     CC_GATE_ARMED = 1,
     CC_GATE_COMPLETED = 2,
-    CC_GATE_UNARMED = 3
+    CC_GATE_UNARMED = 3,
+    CC_GATE_FAILED = 4
 };
 
 #if defined(__TINYC__)
@@ -985,6 +986,10 @@ int cc_exclusive_gate_wait(CCExclusive* excl, uint64_t name) {
     for (;;) {
         CCExclusiveGuard g = cc_exclusive_mutex_acquire(&m);
         uint32_t st = atomic_load_explicit(&e->gate_state, memory_order_relaxed);
+        if (st == CC_GATE_FAILED) {
+            cc__exclusive_gate_touch_done(&m, e, &g);
+            return CC_EXCL_WAIT_FAILED;
+        }
         if (st == CC_GATE_EMPTY) {
             atomic_store_explicit(&e->gate_state, CC_GATE_ARMED,
                                   memory_order_relaxed);
@@ -1007,15 +1012,15 @@ int cc_exclusive_gate_wait(CCExclusive* excl, uint64_t name) {
     }
 }
 
-void cc_exclusive_gate_pass(CCExclusive* excl, uint64_t name) {
+int cc_exclusive_gate_pass(CCExclusive* excl, uint64_t name) {
     CCExclusiveMutex m;
     CCExclusiveEntry* e;
     CCExclusiveGuard g;
     uint32_t st;
-    if (!excl) return;
+    if (!excl) return CC_EXCL_WAIT_INVALID;
     m = cc_exclusive_mutex(excl, name);
     e = (CCExclusiveEntry*)m._entry;
-    if (!e) return;
+    if (!e) return CC_EXCL_WAIT_INVALID;
 
     g = cc_exclusive_mutex_acquire(&m);
     st = atomic_load_explicit(&e->gate_state, memory_order_relaxed);
@@ -1028,6 +1033,29 @@ void cc_exclusive_gate_pass(CCExclusive* excl, uint64_t name) {
         cc_exclusive_guard_broadcast(&g);
     }
     cc__exclusive_gate_touch_done(&m, e, &g);
+    return CC_EXCL_WAIT_OK;
+}
+
+int cc_exclusive_gate_fail(CCExclusive* excl, uint64_t name) {
+    CCExclusiveMutex m;
+    CCExclusiveEntry* e;
+    CCExclusiveGuard g;
+    uint32_t st;
+    if (!excl) return CC_EXCL_WAIT_INVALID;
+    m = cc_exclusive_mutex(excl, name);
+    e = (CCExclusiveEntry*)m._entry;
+    if (!e) return CC_EXCL_WAIT_INVALID;
+
+    g = cc_exclusive_mutex_acquire(&m);
+    st = atomic_load_explicit(&e->gate_state, memory_order_relaxed);
+    if (st == CC_GATE_EMPTY || st == CC_GATE_ARMED) {
+        atomic_store_explicit(&e->gate_state, CC_GATE_FAILED,
+                              memory_order_relaxed);
+        if (st == CC_GATE_ARMED)
+            cc_exclusive_guard_broadcast(&g);
+    }
+    cc__exclusive_gate_touch_done(&m, e, &g);
+    return CC_EXCL_WAIT_OK;
 }
 
 size_t cc_exclusive_live_count(CCExclusive* excl) {

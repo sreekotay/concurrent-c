@@ -1061,8 +1061,9 @@ typedef struct {
      * before leaving — fallthrough still pops via shadow_scratch_cp_pop. */
     int scratch_cp_depth;
     /* Inside a '@parallel wait for' body: 1 = sequential denial path,
-     * 2 = per-ticket run. @stage is only legal when nonzero. Both
-     * modes track per-stage passed flags so `continue` can still pass. */
+     * 2 = per-ticket run. Also 1 while emitting a join @serial arm or
+     * @parallel for iteration that owns @stage. @stage is only legal
+     * when nonzero. */
     int pw_body;
     int pw_id;            /* wait-for helper id (`__cc_pw_done_<id>`) */
     int pw_loop;          /* inner for/while/do depth (continue targets) */
@@ -1071,6 +1072,20 @@ typedef struct {
     int pw_fin;           /* sequential path tracks wait-for break */
     AstNode* pw_stages[16]; /* top-level @stage nodes (seq continue) */
     int pw_nstages;
+    /* Passed-flag prefix. Empty → `__cc_pw_stg_` (wait-for). Join/for
+     * regions use `__cc_stg_<id>_` so they do not collide. */
+    char stg_pfx[32];
+    /* Emitting an `@parallel for` body: return/break write a shared
+     * exit cell, then `return` from the walk (caller does the fn return). */
+    int pf_body;
+    char pf_ex[64];
+    /* Emitting an assignment-join `@serial` arm: return writes a shared
+     * exit cell, then the construct joins siblings and the function
+     * returns. Thunk vs caller chooses `return NULL` vs `goto` join. */
+    int pj_body;
+    int pj_thunk;
+    char pj_ex[64];
+    char pj_join[64];
 } ShadowCtx;
 
 enum { SHADOW_SCRATCH_CP_MAX = 16 };

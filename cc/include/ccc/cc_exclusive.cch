@@ -103,7 +103,8 @@ enum {
     CC_EXCL_WAIT_OK = 0,
     CC_EXCL_WAIT_CANCELLED = 1,
     CC_EXCL_WAIT_INVALID = 2,
-    CC_EXCL_WAIT_TIMEOUT = 3
+    CC_EXCL_WAIT_TIMEOUT = 3,
+    CC_EXCL_WAIT_FAILED = 4
 };
 
 typedef int (*CCExclusivePred)(void* env);
@@ -134,13 +135,15 @@ CCExclusiveMutex cc_exclusive_mutex(CCExclusive* excl, uint64_t name);
  * no waiters; other handles to the same name become invalid. */
 void cc_exclusive_mutex_free(CCExclusiveMutex* m);
 
-/* Gate cell on a named exclusive entry (turnstile wait/pass).
+/* Gate cell on a named exclusive entry (turnstile wait/pass/fail).
  * First touch creates the cell; state records who arrived:
- *   wait: EMPTY→ARMED (park); COMPLETED/UNARMED → return
+ *   wait: EMPTY→ARMED (park); COMPLETED/UNARMED → OK; FAILED → FAILED
  *   pass: EMPTY→UNARMED; ARMED→COMPLETED + broadcast
+ *   fail: EMPTY/ARMED→FAILED; ARMED also broadcasts (waiter wakes with err)
  * Exactly two touchers per name; the second frees the entry. */
 int cc_exclusive_gate_wait(CCExclusive* excl, uint64_t name);
-void cc_exclusive_gate_pass(CCExclusive* excl, uint64_t name);
+int cc_exclusive_gate_pass(CCExclusive* excl, uint64_t name);
+int cc_exclusive_gate_fail(CCExclusive* excl, uint64_t name);
 
 /* Live names in the discovery map (under create_mu). */
 size_t cc_exclusive_live_count(CCExclusive* excl);

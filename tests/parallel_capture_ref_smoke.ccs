@@ -68,9 +68,9 @@ static int collide(CCTurnstile* ts) {
 
     int next = 0;
     @parallel wait (ts) for (i in 0..N) {
-        ts.wait(0, i);
+        ts.wait(0, i) !>;
         next = next + p->x + x;
-        ts->pass(0, i);
+        ts->pass(0, i) !>;
     }
     if (next != N * 10) {
         fprintf(stderr, "FAIL collide wait next=%d\n", next);
@@ -93,10 +93,10 @@ static int run_wait(CCTurnstile* ts) {
     int next = 0; /* loop-carried through the stage: a local, not a global */
     long total = 0;
     @parallel wait (ts) for (i in 0..N) {
-        ts.wait(0, i);
+        ts.wait(0, i) !>;
         total += next;
         next = next + 1;
-        ts->pass(0, i);
+        ts->pass(0, i) !>;
     }
     if (next != N || total != (long)N * (N - 1) / 2) {
         fprintf(stderr, "FAIL wait next=%d total=%ld\n", next, total);

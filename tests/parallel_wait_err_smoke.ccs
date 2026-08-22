@@ -46,14 +46,7 @@ int main(void) {
         fprintf(stderr, "FAIL error did not re-raise\n");
         return 1;
     }
-    /* Tickets below the failing one always ran; the failing one never
-     * completed. Later tickets may or may not have started. */
-    for (i = 0; i < BAD; i++) {
-        if (!done[i]) {
-            fprintf(stderr, "FAIL ticket %d skipped\n", i);
-            return 1;
-        }
-    }
+    /* Drain whoever entered. A lower ticket may never have run. */
     if (done[BAD]) {
         fprintf(stderr, "FAIL failing ticket completed\n");
         return 1;

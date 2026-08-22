@@ -17,11 +17,11 @@ static void worker(CCTurnstile* t, int i) {
     @errhandler(CCError e) cc_error_exit(e);
     int k;
     for (k = 0; k < STAGES; k++) {
-        t.wait(k, i);
+        t.wait(k, i) !>;
         if (g_next[k] != i)
             g_fail = 1;
         g_next[k] = i + 1;
-        t->pass(k, i);
+        t->pass(k, i) !>;
     }
     t->leave() !>;
 }
@@ -31,8 +31,20 @@ static int unarmed_probe(void) {
     CCArena arena = cc_arena_heap(kilobytes(16)) @destroy;
     CCExclusive* excl = cc_exclusive_create(&arena, 8);
     if (!excl) return 1;
-    cc_exclusive_gate_pass(excl, 42);
+    if (cc_exclusive_gate_pass(excl, 42) != CC_EXCL_WAIT_OK) return 1;
     if (cc_exclusive_gate_wait(excl, 42) != CC_EXCL_WAIT_OK) return 1;
+    if (cc_exclusive_live_count(excl) != 0) return 1;
+    excl->destroy();
+    return 0;
+}
+
+/* fail then wait — waiter wakes FAILED, not OK. */
+static int fail_probe(void) {
+    CCArena arena = cc_arena_heap(kilobytes(16)) @destroy;
+    CCExclusive* excl = cc_exclusive_create(&arena, 8);
+    if (!excl) return 1;
+    if (cc_exclusive_gate_fail(excl, 7) != CC_EXCL_WAIT_OK) return 1;
+    if (cc_exclusive_gate_wait(excl, 7) != CC_EXCL_WAIT_FAILED) return 1;
     if (cc_exclusive_live_count(excl) != 0) return 1;
     excl->destroy();
     return 0;
@@ -43,6 +55,10 @@ int main(void) {
 
     if (unarmed_probe() != 0) {
         fprintf(stderr, "FAIL unarmed/reclaim\n");
+        return 1;
+    }
+    if (fail_probe() != 0) {
+        fprintf(stderr, "FAIL fail/wait\n");
         return 1;
     }
 

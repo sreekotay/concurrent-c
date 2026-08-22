@@ -1,0 +1,188 @@
+/*
+ * Adversarial drain: do not wait for a lower ticket that stop/cancel
+ * will never start. That is the in-order hang. Completing is the test.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+#define N  32
+#define LO 3
+#define HI 20
+
+static int for_late(void) {
+    int i;
+    @parallel for (i in 0..N) {
+        if (i == HI)
+            return 20;
+    }
+    return 0;
+}
+
+/* HI may claim first and skip LO. Waiting for LO hangs. */
+static int for_two(void) {
+    int i;
+    @parallel for (i in 0..N) {
+        if (i == LO)
+            return 3;
+        if (i == HI)
+            return 20;
+    }
+    return 0;
+}
+
+/* Return upgrades break. A skipped break ticket is not joined as a return. */
+static int for_ret_brk(void) {
+    int i;
+    @parallel for (i in 0..N) {
+        if (i == LO)
+            break;
+        if (i == HI)
+            return 11;
+    }
+    return 0;
+}
+
+static int nested_for(void) {
+    int i, j;
+    @parallel for (i in 0..8) {
+        @parallel for (j in 0..8) {
+            if (i == 7 && j == 7)
+                return 7;
+        }
+    }
+    return 0;
+}
+
+static int join_two(void) {
+    int a = 0;
+    int b = 0;
+    @parallel {
+        @serial {
+            a = 1;
+            return 1;
+        }
+        @serial {
+            b = 2;
+            return 2;
+        }
+    }
+    (void)a;
+    (void)b;
+    return 0;
+}
+
+static int wait_late(void) {
+    @errhandler(CCError e) {
+        (void)e;
+        return -1;
+    }
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstile ts@(2, 1, &arena) @destroy;
+    if (!ts.excl)
+        return -1;
+    int i;
+    @parallel wait (ts) for (i in 0..8) {
+        @stage (ts, 0, i) {
+        }
+        if (i == 5)
+            return 5;
+    }
+    return 0;
+}
+
+/* Later return + earlier return. Cancel must not wait for a ticket
+ * that never entered. */
+static int wait_two(void) {
+    @errhandler(CCError e) {
+        (void)e;
+        return -1;
+    }
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstile ts@(2, 1, &arena) @destroy;
+    if (!ts.excl)
+        return -1;
+    int i;
+    @parallel wait (ts) for (i in 0..8) {
+        @stage (ts, 0, i) {
+        }
+        if (i == 1)
+            return 1;
+        if (i == 5)
+            return 5;
+    }
+    return 0;
+}
+
+/* Return before @stage: a successor already in wait must wake. */
+static int wait_before_stage(void) {
+    @errhandler(CCError e) {
+        (void)e;
+        return -1;
+    }
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstile ts@(2, 1, &arena) @destroy;
+    if (!ts.excl)
+        return -1;
+    int i;
+    @parallel wait (ts) for (i in 0..8) {
+        if (i == 3)
+            return 4;
+        @stage (ts, 0, i) {
+        }
+    }
+    return 0;
+}
+
+#pragma(@parallel) off
+static int seq_for_ret(void) {
+    int i;
+    @parallel for (i in 0..N) {
+        if (i == 0)
+            return 3;
+        if (i == HI)
+            return 20;
+    }
+    return 0;
+}
+#pragma(@parallel) on
+
+static int bad(const char* tag, int rc, int ok) {
+    if (!ok) {
+        fprintf(stderr, "FAIL %s rc=%d\n", tag, rc);
+        return 1;
+    }
+    return 0;
+}
+
+int main(void) {
+    int rc;
+    rc = for_late();
+    if (bad("for_late", rc, rc == 20))
+        return 1;
+    rc = for_two();
+    if (bad("for_two", rc, rc == 3 || rc == 20))
+        return 1;
+    rc = for_ret_brk();
+    if (bad("for_ret_brk", rc, rc == 0 || rc == 11))
+        return 1;
+    rc = nested_for();
+    if (bad("nested_for", rc, rc == 7))
+        return 1;
+    rc = join_two();
+    if (bad("join_two", rc, rc == 1 || rc == 2))
+        return 1;
+    rc = wait_late();
+    if (bad("wait_late", rc, rc == 5))
+        return 1;
+    rc = wait_two();
+    if (bad("wait_two", rc, rc == 1 || rc == 5))
+        return 1;
+    rc = wait_before_stage();
+    if (bad("wait_before_stage", rc, rc == 4))
+        return 1;
+    rc = seq_for_ret();
+    if (bad("seq_for_ret", rc, rc == 3))
+        return 1;
+    printf("parallel_exit_deadlock_smoke: OK\n");
+    return 0;
+}

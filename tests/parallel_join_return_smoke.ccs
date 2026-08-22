@@ -1,0 +1,97 @@
+/*
+ * Assignment join: return joins spawned siblings, then returns
+ * from the function. Sequential denial is a normal C return.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int g_caller_sib;
+static int g_spawn_first;
+static int g_sib;
+
+static void flag(int* p) {
+    *p = 1;
+}
+
+static int caller_ret(void) {
+    int a = 0;
+    int sib = 0;
+    g_caller_sib = 0;
+    @parallel {
+        @serial {
+            a = 1;
+            return 7;
+        }
+        @serial {
+            flag(&g_caller_sib);
+            sib = 1;
+        }
+    }
+    (void)a;
+    (void)sib;
+    return 0;
+}
+
+static int spawn_ret(void) {
+    int b = 0;
+    int first = 0;
+    g_spawn_first = 0;
+    @parallel {
+        @serial {
+            flag(&g_spawn_first);
+            first = 1;
+        }
+        @serial {
+            b = 2;
+            return 9;
+        }
+    }
+    (void)b;
+    (void)first;
+    return 0;
+}
+
+static int gated(int spawn) {
+    int a = 0;
+    int sib = 0;
+    g_sib = 0;
+    @parallel (spawn) {
+        @serial {
+            a = 1;
+            return spawn ? 4 : 3;
+        }
+        @serial {
+            flag(&g_sib);
+            sib = 1;
+        }
+    }
+    (void)a;
+    (void)sib;
+    return 0;
+}
+
+int main(void) {
+    int rc;
+    rc = caller_ret();
+    if (rc != 7 || !g_caller_sib) {
+        fprintf(stderr, "FAIL caller rc=%d sib=%d\n", rc, g_caller_sib);
+        return 1;
+    }
+    rc = spawn_ret();
+    if (rc != 9 || !g_spawn_first) {
+        fprintf(stderr, "FAIL spawn rc=%d first=%d\n", rc, g_spawn_first);
+        return 1;
+    }
+    rc = gated(0);
+    if (rc != 3 || g_sib) {
+        fprintf(stderr, "FAIL seq rc=%d sib=%d\n", rc, g_sib);
+        return 1;
+    }
+    rc = gated(1);
+    if (rc != 4 || !g_sib) {
+        fprintf(stderr, "FAIL par rc=%d sib=%d\n", rc, g_sib);
+        return 1;
+    }
+    printf("parallel_join_return_smoke: OK\n");
+    return 0;
+}
