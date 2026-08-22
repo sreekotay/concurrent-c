@@ -33,6 +33,7 @@ ccc build run file.ccs -- --arg     # args to the binary
 ccc path/to/tool.shcc [args…]       # .shcc → implicit run (shebang-friendly)
 ccc --emit-c-only file.ccs          # emit C only → out/file.c
 ccc --emit-c-only --no-line a.ccs -o include/generated/a.c
+# host-cc of that .c: -DCC_ENABLE_ASYNC on concurrent_c.c; never -DCC_PARSER_MODE
 ccc portable-install vendor/cccportable
 ccc --cccportable vendor/cccportable --print-cflags   # author snippet
 ccc --cccportable vendor/cccportable --print-libs

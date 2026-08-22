@@ -4,6 +4,16 @@ A portable tree so teammates and CI compile emitted C with host `cc` and never
 invoke `ccc`. It is not a compiler sysroot: no `.cch`, no `shadow_lower`.
 `--sysroot` remains host-cc cross-compile.
 
+Authors need `ccc` first ([install](../README.md#install) /
+[getting started](getting-started.md#install)). Consumers do not.
+
+| Topic | Where |
+|-------|--------|
+| `ccc portable-install` / `--cccportable` / `CCCPORTABLE` | this page; [build spec](../spec/concurrent-c-build.md) |
+| `#pragma(@prelude) off` / `#pragma(@linenumbers) off` | [spec §1.8](../spec/concurrent-c-spec-complete.md#18-file-start-pragmas) |
+| `CC_ENABLE_ASYNC` / `CC_PARSER_MODE` | [Defines](#defines) |
+| Cheatsheet one-liners | [cheatsheet](cheatsheet.md) |
+
 ## Author (has `ccc`)
 
 Copy the snapshot from the **resolved** toolchain (prefix or checkout), not
@@ -30,7 +40,14 @@ ccc --cccportable vendor/cccportable --print-libs
 Do not write `$(ccc --print-cflags)` there — teammates do not have `ccc`.
 
 `--cccportable` does not remap lowerer faces. Using it with emit/compile/link
-is an error. `CCCPORTABLE` is read only by `--print-*`.
+is an error. `CCCPORTABLE` is read only by `--print-*`:
+
+```bash
+CCCPORTABLE=vendor/cccportable ccc --print-cflags
+CCCPORTABLE=vendor/cccportable ccc --print-libs
+```
+
+An explicit `--cccportable DIR` wins over the environment.
 
 A stamp mismatch on install or `--print-*` is the only hard version check.
 Refresh the install and re-emit by hand. Emitted `.c` may carry a
@@ -60,6 +77,20 @@ cc include/generated/myfile.c -Ivendor/cccportable/include \
    -DCC_ENABLE_ASYNC vendor/cccportable/runtime/concurrent_c.c -lpthread -lm
 ```
 
+## Defines
+
+Anyone who host-cc's `--emit-c-only` output (portable snapshot or checkout
+`out/include`) sets these themselves. `ccc` does not put them on the
+emitted `.c`.
+
+| Define | Host-cc of emitted C |
+|--------|----------------------|
+| `CC_ENABLE_ASYNC` | Always, on the `concurrent_c.c` TU only. Same ABI as `ccc`. Not an app-TU flag. |
+| `CC_PARSER_MODE` | Do not set. `ccc` defines it only for parse / reparse / comptime so headers take stub branches TinyCC can swallow. Those `#ifdef`s remain in the lowered `.h` files. Defining it here takes the stubs (`cc_move` becomes a marker, containers stay gated). That looks like a successful compile. |
+
+`--print-libs` already includes `-DCC_ENABLE_ASYNC`. It never prints
+`-DCC_PARSER_MODE`.
+
 ## Independent knobs
 
 | Knob | Role |
@@ -79,3 +110,8 @@ A comptime-only script needs no portable tree:
 ccc --emit-c-only --no-runtime --no-line bare.shcc -o bare.c
 cc -o bare bare.c
 ```
+
+File-start means after the unit header (`#!ccc ccs` / shebang). Other
+operands are ill-formed. `--no-line` on the command line overrides the
+linenumbers pragma. Details:
+[spec §1.8](../spec/concurrent-c-spec-complete.md#18-file-start-pragmas).

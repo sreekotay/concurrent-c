@@ -79,6 +79,10 @@ checkout of the compiler repo unless that directory is cwd.
 > Details: [`vscode/ccs-syntax/README.md`](../vscode/ccs-syntax/README.md).
 > Debug configs: [Debugging](debugging.md).
 
+To hand teammates emitted C they compile with host `cc` only — no `ccc` —
+see [cccportable](cccportable.md) (`portable-install`, `CCCPORTABLE`,
+`#pragma(@prelude) off` / `#pragma(@linenumbers) off`).
+
 ## Your first program
 
 Create `hello.ccs`:

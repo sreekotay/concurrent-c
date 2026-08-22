@@ -44,7 +44,7 @@ The build steps are:
 
 `ccc portable-install DIR` copies lowered `include/ccc/**/*.h` and the rewritten runtime from the resolved toolchain (`g_cc_lowered_include` / `g_cc_runtime_c`) into `DIR`. The lowered include root is a complete host-C tree: every face-tree `*.h` (including `ccc/vendor/ffc.h`) is copied through as a real file. The snapshot is a consumer host-C bundle, not a compiler sysroot (no `.cch`). `DIR` must not exist, be empty, or already contain `CCCPORTABLE.txt`. A stamp mismatch on install or `--print-*` is an error. Re-emit is a human step.
 
-`--print-cflags` and `--print-libs` are author-side helpers. A consumer Makefile does not invoke `ccc`; it hardcodes the vendor paths or a snippet generated once.
+`--print-cflags` and `--print-libs` are author-side helpers. A consumer Makefile does not invoke `ccc`; it hardcodes the vendor paths or a snippet generated once. Host-cc of `--emit-c-only` output must not define `CC_PARSER_MODE`: that define is only for `ccc` parse / reparse / comptime. Headers still contain `#ifdef CC_PARSER_MODE` stubs; defining it on the consumer compile takes those stubs.
 
 For an input stem `NAME`, default single-input paths are:
 

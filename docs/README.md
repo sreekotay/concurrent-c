@@ -3,6 +3,7 @@
 ## Getting Started
 
 - **[Getting Started](getting-started.md)** — Install, first program, [arenas name a lifetime](getting-started.md#arenas-name-a-lifetime), [owned or view](getting-started.md#locality-owned-or-view), concurrency, [`.shcc` scripts](getting-started.md#shcc-scripts), learning path
+- **[cccportable](cccportable.md)** — Consumer host-C snapshot: `portable-install`, `--cccportable` / `CCCPORTABLE`, `#pragma(@prelude)` / `#pragma(@linenumbers)`
 - **[Backwards compatibility](backwards_compatibility.md)** — Unit headers, version pins, bootstrap seeds
 - **[JS / Python interop](js-py-modules.md)** — hosting (`pydemo.shcc`) and native module export
 - **[When to run what](build-when.md)** — Install vs checkout vs stdlib vs lowerer vs ship vs cold smoke

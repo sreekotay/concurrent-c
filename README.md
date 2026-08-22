@@ -39,6 +39,7 @@ Fuller example (error policy + compose): [examples/hello.ccs](examples/hello.ccs
 ### Docs
 
 - [Getting Started](docs/getting-started.md) — install, first program, concurrency
+- [cccportable](docs/cccportable.md) — ship emitted C so teammates compile with host `cc` only (`portable-install`, `CCCPORTABLE`, file-start pragmas)
 - [Language Concepts](docs/language-concepts.md) — defer, results, UFCS, slices/arenas (arena = lifetime; alloc = policy), closures
 - [@typehooks / @typeview](docs/typehooks-typeviews.md) — lifecycle hooks, is-a faces, allow-list views
 - [Cheatsheet](docs/cheatsheet.md)
@@ -136,6 +137,34 @@ ccc run hello.ccs
 ```
 
 Build outputs: `./out` and `./bin` relative to the working directory (`--out-dir` / `--bin-dir`). Never into `$PREFIX`. Override the install tree with `CC_HOME=/opt/ccc` if needed.
+
+### Ship emitted C without `ccc`
+
+Authors who have `ccc` (Homebrew or `cc-install.sh` above) drop a host-C
+snapshot. Teammates and CI compile that tree with host `cc` and never
+invoke the toolchain. It is not `--sysroot`.
+
+```bash
+ccc portable-install vendor/cccportable
+ccc --emit-c-only --no-line myfile.ccs -o include/generated/myfile.c
+ccc --cccportable vendor/cccportable --print-cflags
+ccc --cccportable vendor/cccportable --print-libs
+# same print helpers: CCCPORTABLE=vendor/cccportable ccc --print-cflags
+```
+
+Paste the flags into the consumer Makefile once. Do not write
+`$(ccc --print-cflags)` there.
+
+Independent of the snapshot: `#pragma(@prelude) off` skips the automatic
+prolog; `#pragma(@linenumbers) off` / `--no-line` omit `#line`. A
+comptime-only script can emit with `--no-runtime` and need no portable
+tree.
+
+[cccportable](docs/cccportable.md) — install rules, one `-I`, consumer
+recipe (`-DCC_ENABLE_ASYNC`). Host-cc of `--emit-c-only` output must not
+define `CC_PARSER_MODE` (that is `ccc`'s parse session). Spec:
+[§1.8 file-start pragmas](spec/concurrent-c-spec-complete.md#18-file-start-pragmas),
+[build](spec/concurrent-c-build.md).
 
 ### Hacking on the compiler
 
