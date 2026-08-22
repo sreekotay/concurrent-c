@@ -5,9 +5,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../cccportable.h"
 #include "script_oneliner.h"
 #include "unit_header.h"
 #include "util/text.h"
+
+static int g_script_no_line = 0;
+static int g_script_prelude_off = 0;
+static int g_script_linenumbers_off = 0;
+
+void cc_script_set_no_line(int on) {
+    g_script_no_line = on ? 1 : 0;
+}
 
 int cc_path_is_shcc(const char* path) {
     CCUnitHeader h;
@@ -687,6 +696,7 @@ static int cc__append_prov_marker(CC__OutBuf* ob, int raw_hash_line, int line,
                                   const char* path) {
     char buf[1200];
     int m;
+    if (g_script_no_line || g_script_linenumbers_off) return 0;
     if (!path || !path[0] || line < 1) return 0;
     if (raw_hash_line) {
         m = snprintf(buf, sizeof(buf), "#line %d \"%s\"\n", line, path);
@@ -1260,6 +1270,18 @@ char* cc_script_rewrite_source(const char* path,
                                size_t* out_len) {
     if (!src) return NULL;
 
+    {
+        char perr[192];
+        int po = 0, lo = 0;
+        perr[0] = '\0';
+        if (cc_file_start_pragmas(src, len, &po, &lo, perr, sizeof(perr)) != 0) {
+            fprintf(stderr, "%s: %s\n", path ? path : "<shcc>", perr);
+            return NULL;
+        }
+        g_script_prelude_off = po;
+        g_script_linenumbers_off = lo;
+    }
+
     size_t body_off = cc__script_skip_shebang(src, len);
     const char* body = src + body_off;
     size_t body_len = len - body_off;
@@ -1316,7 +1338,8 @@ char* cc_script_rewrite_source(const char* path,
                     "%s: .shcc with explicit main cannot also have "
                     "top-level statements\n",
                     path ? path : "<shcc>");
-            if (cc__append(&ob, prelude, pre_len) != 0 ||
+            if ((!g_script_prelude_off &&
+                 cc__append(&ob, prelude, pre_len) != 0) ||
                 cc__append(&ob, main_stmt_err, sizeof(main_stmt_err) - 1) != 0 ||
                 cc__append(&ob, body, body_len) != 0) {
                 cc__ob_free(&ob);
@@ -1330,7 +1353,8 @@ char* cc_script_rewrite_source(const char* path,
         /* Explicit main, TU-only extras: prelude + body with file-scope #line. */
         {
             int body_line = cc__src_line_at(src, body_off);
-            if (cc__append(&ob, prelude, pre_len) != 0) {
+            if (!g_script_prelude_off &&
+                cc__append(&ob, prelude, pre_len) != 0) {
                 cc__ob_free(&ob);
                 free(chunks);
                 return NULL;
@@ -1361,7 +1385,8 @@ char* cc_script_rewrite_source(const char* path,
     /* No explicit main: TU chunks (raw #line), then synthetic main with
      * masked CC_LN before each MAIN chunk (raw mid-function #line breaks
      * @create/@destroy type extraction in pass_create). */
-    if (cc__append(&ob, prelude, pre_len) != 0) goto fail_rewrite;
+    if (!g_script_prelude_off && cc__append(&ob, prelude, pre_len) != 0)
+        goto fail_rewrite;
 
     for (ci = 0; ci < nchunks; ci++) {
         int line;
@@ -1397,7 +1422,8 @@ char* cc_script_rewrite_source(const char* path,
             if (cc__append(&ob, body + chunks[ci].a,
                            brace + 1 - chunks[ci].a) != 0)
                 goto fail_rewrite;
-            if (cc__append(&ob, task_eh, sizeof(task_eh) - 1) != 0)
+            if (!g_script_prelude_off &&
+                cc__append(&ob, task_eh, sizeof(task_eh) - 1) != 0)
                 goto fail_rewrite;
             if (body_n &&
                 cc__append(&ob, body + body_a, body_n) != 0)
@@ -1414,7 +1440,7 @@ char* cc_script_rewrite_source(const char* path,
     /* @task dispatch only when the script defines tasks; a zero-task
      * script gets no `argv[1][0] == '@'` preamble (all args flow through). */
     if (cc__append(&ob, main_open, open_len) != 0 ||
-        cc__append(&ob, default_eh, eh_len) != 0 ||
+        (!g_script_prelude_off && cc__append(&ob, default_eh, eh_len) != 0) ||
         (ntasks > 0 && cc__append_task_dispatch(&ob, tasks, ntasks) != 0))
         goto fail_rewrite;
 
@@ -1444,10 +1470,12 @@ char* cc_script_rewrite_source(const char* path,
                 main_buf[o++] = '\n';
             }
             main_buf[o] = '\0';
-            pre = cc_script_oneliner_predecls_for(main_buf, o, 1, "    ",
-                                                  &pre_n);
+            pre = g_script_prelude_off
+                      ? NULL
+                      : cc_script_oneliner_predecls_for(main_buf, o, 1, "    ",
+                                                        &pre_n);
             free(main_buf);
-            if (!pre) goto fail_rewrite;
+            if (!g_script_prelude_off && !pre) goto fail_rewrite;
             if (pre_n && cc__append(&ob, pre, pre_n) != 0) {
                 free(pre);
                 goto fail_rewrite;

@@ -1304,13 +1304,50 @@ static int handle_directive(Pp* pp) {
                                     "#pragma(@parallel) takes 'off' or 'on'");
                         return 0;
                     }
+                } else if (strncmp(q, "(@prelude)", 10) == 0) {
+                    const char* r;
+                    q += 10;
+                    while (*q == ' ' || *q == '\t') q++;
+                    if (strncmp(q, "off", 3) == 0) { state = 2; r = q + 3; }
+                    else r = q;
+                    if (state == 2) {
+                        while (*r == ' ' || *r == '\t') r++;
+                        if (*r) state = -1;
+                    } else {
+                        state = -1;
+                    }
+                    if (state < 0) {
+                        pp_fail_dir(pp, name, "#pragma(@prelude) takes 'off'");
+                        return 0;
+                    }
+                } else if (strncmp(q, "(@linenumbers)", 14) == 0) {
+                    const char* r;
+                    q += 14;
+                    while (*q == ' ' || *q == '\t') q++;
+                    if (strncmp(q, "off", 3) == 0) { state = 3; r = q + 3; }
+                    else r = q;
+                    if (state == 3) {
+                        while (*r == ' ' || *r == '\t') r++;
+                        if (*r) state = -1;
+                    } else {
+                        state = -1;
+                    }
+                    if (state < 0) {
+                        pp_fail_dir(pp, name,
+                                    "#pragma(@linenumbers) takes 'off'");
+                        return 0;
+                    }
                 }
                 if (state >= 0) {
                     Token syn;
+                    char* spell =
+                        state == 1 ? (char*)"__cc_pragma_parallel_off" :
+                        state == 0 ? (char*)"__cc_pragma_parallel_on" :
+                        state == 2 ? (char*)"__cc_pragma_prelude_off" :
+                                     (char*)"__cc_pragma_linenumbers_off";
                     memset(&syn, 0, sizeof(syn));
                     syn.kind = TK_IDENT;
-                    syn.spell.ptr = state ? "__cc_pragma_parallel_off"
-                                          : "__cc_pragma_parallel_on";
+                    syn.spell.ptr = spell;
                     syn.spell.len = strlen(syn.spell.ptr);
                     syn.file_id = name.file_id;
                     syn.offset = name.offset;

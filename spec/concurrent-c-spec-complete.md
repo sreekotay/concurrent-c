@@ -16,6 +16,7 @@ This specification defines:
 - Lowering to C
 - Script entry (`.shcc`) and the script library partner to the stdlib (§9.5)
 - Translation-unit headers (`#!ccc ccs|cch`, OS shebang for scripts) (§1.7)
+- File-start `#pragma(@prelude) off` / `#pragma(@linenumbers) off` (§1.8)
 
 The lowering is part of this specification, not an implementation detail. Two conforming implementations must produce lowerings with identical observable behavior. Implementations may emit or inspect the lowered form via `--emit-c-only` (writes lowered C to `out/<stem>.c`) or `--emit-c-inspect` (writes the merged translation unit).
 
@@ -236,6 +237,31 @@ spliced face are processed the same way. An object-like `#define`
 immediately before a quoted include is present for host cpp when the
 include extracts.
 
+### 1.8 File-start pragmas
+
+After the unit header (§1.7) — the shebang is not program text — a unit may
+begin with:
+
+```
+#pragma(@prelude) off
+#pragma(@linenumbers) off
+```
+
+File-start means after the header and after leading blank lines and comments.
+Any other operand is ill-formed. The directives are consumed by lowering and
+never reach the host compiler.
+
+`#pragma(@prelude) off` injects no automatic prolog: a script unit does not
+receive `<ccc/script/prelude.cch>`, the default `@errhandler`, or token-gated
+`a` / `io` / `in` / `args`. Synthetic `main` still wraps top-level statements.
+Emitted C omits the automatic `<stddef.h>` / `<stdint.h>` / `<stdlib.h>`
+includes. A one-line provenance comment naming the `ccc` version may remain;
+it does not affect compilation.
+
+`#pragma(@linenumbers) off` omits `#line` and `CC_LN` from the emitted C.
+`--no-line` on the `ccc` command line has the same effect and overrides the
+pragma when both are present.
+
 ---
 
 Everything else in this specification is one of:
@@ -320,6 +346,8 @@ bugs.
 | `cache (name, …)`               | Wait-for clause: warm scratch, instance unobservable (§8.11.6) | `wait (ts) cache (zs) for (i in 0..n) { … &zs … }` |
 | `@stage (gate, args…) { stmts }` | Ticket handshake in a wait-for body; pass on all exits. Not a Result (§8.11.6) | `@stage (ts.write, i) { out.write(d) !>; }` |
 | `#pragma(@parallel) off` / `on` | Static denial: `@parallel` lowers sequentially (§8.11.8)  | `#pragma(@parallel) off`                   |
+| `#pragma(@prelude) off` | No automatic prolog (§1.8) | `#pragma(@prelude) off` |
+| `#pragma(@linenumbers) off` | Omit `#line` / `CC_LN` from emit (§1.8) | `#pragma(@linenumbers) off` |
 
 **Call-site annotation forms** (see §8.2 for precedence):
 

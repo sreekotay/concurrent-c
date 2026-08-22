@@ -31,4 +31,7 @@ char* cc_script_rewrite_source(const char* path,
                                size_t len,
                                size_t* out_len);
 
+/* CLI `--no-line` for the next rewrite (suppress #line / CC_LN stamps). */
+void cc_script_set_no_line(int on);
+
 #endif /* CC_SCRIPT_ENTRY_H */

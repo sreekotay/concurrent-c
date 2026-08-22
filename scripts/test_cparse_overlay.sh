@@ -1,7 +1,8 @@
 #!/bin/sh
-# Shadow overlay: FileTape → cparse for C-only struct fields and
-# mid-declarator __attribute__ static fns. Requires a shadow_lower
-# linked with libcparse (iterate, not last-good-only).
+# Shadow overlay: FileTape → cparse for C-only struct fields, mid-declarator
+# __attribute__ static fns, and C-only file-scope fn envelopes (overlay
+# attaches params/body kids; never whole-fn FileTape reprint).
+# Requires a shadow_lower linked with libcparse (iterate, not last-good-only).
 set -eu
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"

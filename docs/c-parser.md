@@ -141,10 +141,17 @@ Token and flat buffers are heap-sized; overflow fails loud. Comma
 declarators (`size_t a, b, c`) flatten to one field node per name.
 Nested `struct` / `union` fields: flatten keeps `start`/`end` when the
 declarator outgrows `CpFlat.text` (512); emit reprints the FileTape
-span instead of chopping. C-only file-scope functions stay on the
-beachhead: emit reprints FileTape, which drops defaults, `@typeview`,
-string switch, safety, and comptime harvest. Result fns and UFCS
-bodies stay on the beachhead.
+span instead of chopping. File-scope functions: cparse confirms the envelope when it can;
+overlay always attaches params/body kids for emit (never whole-fn
+FileTape reprint). Bodies with Concurrent-C tokens (`!>`, `@`, `=>`, …)
+hard-parse like beachhead — cparse stmt spans are C-shaped and must
+not slice overlay chains. Pure-C bodies may use per-stmt spans; a soft
+miss tapes that one stmt only. Envelope match soft-misses to beachhead
+on pure-C shapes cparse still lacks (and on unclosed braces, so
+diagnostics keep the function name). `struct Tag *name(...)` is a
+function, not a tag decl. Result returns, defaults, and `@typeview` /
+safety / comptime stay overlay-owned. Oversized field / `#if` flatten
+text leaves `CpFlat.text` empty and reprints the FileTape span.
 Link
 `out/cc/obj/cparse/libcparse.a` into `shadow_lower`
 (`make -C cc SHADOW_LOWER_SOURCE=ccs`). Gate:

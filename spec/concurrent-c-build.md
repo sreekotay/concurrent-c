@@ -10,6 +10,7 @@ The driver accepts:
 - `ccc run <input> [-- <args...>]`
 - `ccc build [step] [options] [<input> ...]`
 - `ccc clean [--out-dir DIR] [--bin-dir DIR] [--all]`
+- `ccc portable-install DIR`
 
 Unit kind is the first-line header (`#!ccc ccs|cch`, or a `ccc` OS shebang for
 scripts; see the complete spec §1.7). A `.ccs` / `.cch` / `.shcc` suffix is the
@@ -36,7 +37,14 @@ The build steps are:
 - `--link` selects the default emit, compile, and link pipeline.
 - `--emit-c-inspect[=PATH]` requests a best-effort merged translation-unit dump while the selected pipeline still runs.
 - `--print-cflags` prints the required Concurrent-C include flags.
-- `--print-libs` prints the runtime source and linker flags.
+- `--print-libs` prints `-DCC_ENABLE_ASYNC`, the runtime source, `-lpthread`, and `-lm`.
+- `--cccportable DIR` / `CCCPORTABLE` makes `--print-cflags` / `--print-libs` name that consumer tree (one `-I$DIR/include`). It does not remap lowerer faces. Using `--cccportable` with emit, compile, or link is an error.
+- `--no-line` omits `#line` and `CC_LN` from emitted C.
+- `--sysroot PATH` is forwarded to the host C compiler (cross-compile). It is not a Concurrent-C snapshot.
+
+`ccc portable-install DIR` copies lowered `include/ccc/**/*.h` and the rewritten runtime from the resolved toolchain (`g_cc_lowered_include` / `g_cc_runtime_c`) into `DIR`. The tree is a consumer host-C bundle, not a compiler sysroot (no `.cch`). `DIR` must not exist, be empty, or already contain `CCCPORTABLE.txt`. A stamp mismatch on install or `--print-*` is an error. Re-emit is a human step.
+
+`--print-cflags` and `--print-libs` are author-side helpers. A consumer Makefile does not invoke `ccc`; it hardcodes the vendor paths or a snippet generated once.
 
 For an input stem `NAME`, default single-input paths are:
 

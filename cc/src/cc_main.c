@@ -25,6 +25,7 @@
 #include "preprocess/script_oneliner.h"
 #include "preprocess/unit_header.h"
 #include "comptime/const_eval.h"
+#include "cccportable.h"
 
 /* The legacy multipass front (driver.c / driver.h) has been removed; ccc is
  * native-only (shadow_lower). This typedef used to live in driver.h and only
@@ -41,6 +42,7 @@ static int cc__selftest_const_eval(int argc, char** argv);
 static void cc__stem_from_path(const char* path, char* out, size_t cap);
 static int run_build_mode(int argc, char** argv);
 static char* cc__read_all_file(const char* path, size_t* out_len);
+static const char* cc__version_string(void);
 static int cc__write_file_bytes(const char* path, const char* data, size_t len);
 static int cc__mkdir_p(const char* path);
 static int cc__take_unit_flag(int argc, char** argv, int* i,
@@ -63,6 +65,9 @@ static int g_paths_inited = 0;
  * /usr/local, owned by root). Build outputs are always cwd-relative;
  * this flag still selects toolchain layout (includes, runtime, lowerer). */
 static int g_layout_installed = 0;
+static int g_no_line = 0;
+static const char* g_cccportable_dir = NULL;
+static int g_cccportable_cli = 0;
 static char g_repo_root[PATH_MAX];
 static char g_ccc_path[PATH_MAX];
 static char g_ccc_sig_path[PATH_MAX];
@@ -734,6 +739,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  %s build [options] <input> <output>\n", prog);
     fprintf(stderr, "  %s build run [options] <input> [-o out/<stem>] [-- <args...>]\n", prog);
     fprintf(stderr, "  %s clean [--out-dir DIR] [--bin-dir DIR] [--all]\n", prog);
+    fprintf(stderr, "  %s portable-install DIR                    (consumer host-C tree)\n", prog);
     fprintf(stderr, "Modes:\n");
     fprintf(stderr, "  --emit-c-only       Stop after emitting C (output defaults to out/<stem>.c)\n");
     fprintf(stderr, "  --emit-c-inspect[=PATH]  Dump the merged translation unit for inspection\n");
@@ -743,6 +749,8 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --link              Emit C, compile, and link (default; binary defaults to out/<stem>)\n");
     fprintf(stderr, "  --print-cflags      Print compiler flags for Concurrent-C headers\n");
     fprintf(stderr, "  --print-libs        Print linker flags and runtime source for Concurrent-C\n");
+    fprintf(stderr, "  --cccportable DIR   Author-only: --print-cflags/--print-libs use DIR\n");
+    fprintf(stderr, "                      (one -I; not a sysroot; not for emit/lower)\n");
     fprintf(stderr, "Build integration:\n");
     fprintf(stderr, "  -DNAME[=VALUE]      Define comptime const (VALUE defaults to 1, build mode only)\n");
     fprintf(stderr, "  --build-file PATH   Use explicit build.cc path (overrides discovery)\n");
@@ -757,7 +765,8 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --cc-flags FLAGS    Extra compiler flags\n");
     fprintf(stderr, "  --ld-flags FLAGS    Extra linker flags\n");
     fprintf(stderr, "  --target TRIPLE     Forward target triple to C compiler\n");
-    fprintf(stderr, "  --sysroot PATH      Forward sysroot to C compiler\n");
+    fprintf(stderr, "  --sysroot PATH      Forward sysroot to C compiler (host-cc cross)\n");
+    fprintf(stderr, "  --no-line           Omit #line / CC_LN from emitted C\n");
     fprintf(stderr, "  --no-runtime        Do not link runtime (default links bundled runtime)\n");
     fprintf(stderr, "  --keep-c            Do not delete generated C file\n");
     fprintf(stderr, "  --out-dir DIR       Output dir for generated C + objects (default: ./out)\n");
@@ -782,6 +791,64 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --doc TEXT          Summary text for --save (else first program line)\n");
 }
 
+
+/* --no-line / --cccportable in either argv position. 1=consumed, 0=no, -1=err. */
+static int cc__take_vendor_flag(int argc, char** argv, int* i) {
+    int r;
+    if (!argv || !i || *i >= argc) return 0;
+    if (strcmp(argv[*i], "--no-line") == 0) {
+        g_no_line = 1;
+        return 1;
+    }
+    r = cc_take_cccportable_flag(argc, argv, i, &g_cccportable_dir,
+                                 &g_cccportable_cli);
+    return r;
+}
+
+static int cc__emit_is_c(const char* path) {
+    size_t n;
+    if (!path) return 0;
+    n = strlen(path);
+    if (n < 2 || path[n - 2] != '.' || path[n - 1] != 'c') return 0;
+    if (n >= 4 && path[n - 4] == '.' && path[n - 3] == 'c' &&
+        path[n - 2] == 'c')
+        return 0;
+    return 1;
+}
+
+static int cc__finish_emit_c(const char* orig_in, const char* out_path,
+                             int emit_c_only) {
+    char* raw = NULL;
+    size_t n = 0;
+    int po = 0, lo = 0;
+    char perr[192];
+    int no_line;
+    if (!cc__emit_is_c(out_path)) return 0;
+    if (orig_in && orig_in[0]) {
+        raw = cc__read_all_file(orig_in, &n);
+        if (raw) {
+            if (cc_file_start_pragmas(raw, n, &po, &lo, perr, sizeof(perr)) != 0) {
+                fprintf(stderr, "%s: %s\n", orig_in, perr);
+                free(raw);
+                return -1;
+            }
+            free(raw);
+        }
+    }
+    no_line = g_no_line || lo;
+    if (cc_emit_polish_c(out_path, cc__version_string(), po, no_line) != 0) {
+        fprintf(stderr, "cc: cannot polish emitted C %s\n", out_path);
+        return -1;
+    }
+    if (emit_c_only && !no_line &&
+        !cc_path_under_dir(out_path, g_out_root)) {
+        fprintf(stderr,
+                "cc: warning: #line still on for %s (not under out/); "
+                "pass --no-line so vendored C does not embed author paths\n",
+                out_path);
+    }
+    return 0;
+}
 
 static int cc__rm_rf(const char* path) {
     if (!path || !path[0]) return 0;
@@ -3252,6 +3319,7 @@ static int cc__materialize_shcc_for_native(const char* shcc_path, char* out_ccs,
         fprintf(stderr, "cc: cannot read %s\n", shcc_path);
         return -1;
     }
+    cc_script_set_no_line(g_no_line);
     rewritten = cc_script_rewrite_source(shcc_path, raw, raw_len, &rw_len);
     free(raw);
     if (!rewritten) {
@@ -3335,11 +3403,16 @@ static int cc__materialize_strip_header(const char* in_path, CCUnitKind kind,
         snprintf(out_path, cap, "%s", in_path);
         return 0;
     }
-    nline = snprintf(line_dir, sizeof(line_dir), "#line 2 \"%s\"\n", in_path);
-    if (nline < 0 || (size_t)nline >= sizeof(line_dir)) {
-        free(raw);
-        fprintf(stderr, "cc: #line path too long for %s\n", in_path);
-        return -1;
+    if (g_no_line) {
+        nline = 0;
+        line_dir[0] = '\0';
+    } else {
+        nline = snprintf(line_dir, sizeof(line_dir), "#line 2 \"%s\"\n", in_path);
+        if (nline < 0 || (size_t)nline >= sizeof(line_dir)) {
+            free(raw);
+            fprintf(stderr, "cc: #line path too long for %s\n", in_path);
+            return -1;
+        }
     }
     h = 1469598103934665603ULL;
     h = cc__fnv1a64_str(h, in_path);
@@ -3740,6 +3813,9 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
                 WIFEXITED(status) ? WEXITSTATUS(status) : -1);
         return -1;
     }
+    if (cc__finish_emit_c(orig_in[0] ? orig_in : opt->in_path, out_path,
+                          opt->mode == CC_MODE_EMIT_C) != 0)
+        return -1;
     return 0;
 }
 
@@ -4871,6 +4947,11 @@ static int run_build_mode(int argc, char** argv) {
     }
 
     for (int i = argi; i < argc; ++i) {
+        {
+            int vf = cc__take_vendor_flag(argc, argv, &i);
+            if (vf < 0) goto parse_fail;
+            if (vf > 0) continue;
+        }
         if (strcmp(argv[i], "--") == 0) {
             run_argc = argc - (i + 1);
             run_argv = &argv[i + 1];
@@ -5039,6 +5120,13 @@ static int run_build_mode(int argc, char** argv) {
             goto parse_fail;
         }
         pos_args[pos_count++] = argv[i];
+    }
+
+    if (g_cccportable_cli) {
+        fprintf(stderr,
+                "cc: --cccportable only applies to --print-cflags / --print-libs "
+                "(it does not remap lowerer faces)\n");
+        goto parse_fail;
     }
 
     // If both are provided, debug wins (safe default).
@@ -6877,13 +6965,41 @@ int main(int argc, char **argv) {
         usage(argv[0]);
         return 0;
     }
-    if (strcmp(argv[1], "--print-cflags") == 0) {
-        printf("-I%s -I%s\n", g_cc_lowered_include, g_cc_include);
-        return 0;
-    }
-    if (strcmp(argv[1], "--print-libs") == 0) {
-        printf("%s -lpthread\n", g_cc_runtime_c);
-        return 0;
+    {
+        int want_cflags = 0;
+        int want_libs = 0;
+        int i;
+        for (i = 1; i < argc; i++) {
+            int vf = cc__take_vendor_flag(argc, argv, &i);
+            if (vf < 0) return 2;
+            if (vf > 0) continue;
+            if (strcmp(argv[i], "--print-cflags") == 0) want_cflags = 1;
+            else if (strcmp(argv[i], "--print-libs") == 0) want_libs = 1;
+        }
+        if (!g_cccportable_dir) {
+            const char* env = getenv("CCCPORTABLE");
+            if (env && env[0]) g_cccportable_dir = env;
+        }
+        if (want_cflags || want_libs) {
+            char vline[80];
+            char perr[256];
+            snprintf(vline, sizeof(vline), "ccc %s", cc__version_string());
+            if (g_cccportable_dir) {
+                if (cc_portable_check_tree(g_cccportable_dir, vline, perr,
+                                           sizeof(perr)) != 0) {
+                    fprintf(stderr, "cc: %s\n", perr);
+                    return 2;
+                }
+                if (want_cflags) cc_portable_print_cflags(g_cccportable_dir);
+                if (want_libs) cc_portable_print_libs(g_cccportable_dir);
+                return 0;
+            }
+            if (want_cflags)
+                printf("-I%s -I%s\n", g_cc_lowered_include, g_cc_include);
+            if (want_libs)
+                printf("-DCC_ENABLE_ASYNC %s -lpthread -lm\n", g_cc_runtime_c);
+            return 0;
+        }
     }
     /* Version may appear with --frontend=… ahead of it; scan once. */
     if (cc__scan_frontend_flags(argc, argv) != 0) return 2;
@@ -6953,6 +7069,23 @@ int main(int argc, char **argv) {
             fprintf(stderr, "cc: clean failed (best-effort) for out_dir=%s bin_dir=%s\n", g_out_root, g_bin_root);
             return 1;
         }
+        return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "portable-install") == 0) {
+        char vline[80];
+        char perr[256];
+        if (argc < 3 || !argv[2] || !argv[2][0]) {
+            fprintf(stderr, "cc: portable-install requires a directory\n");
+            usage(argv[0]);
+            return 1;
+        }
+        snprintf(vline, sizeof(vline), "ccc %s", cc__version_string());
+        if (cc_portable_install(argv[2], g_cc_lowered_include, g_cc_runtime_c,
+                                g_repo_root, vline, perr, sizeof(perr)) != 0) {
+            fprintf(stderr, "cc: %s\n", perr);
+            return 1;
+        }
+        printf("cccportable %s -> %s\n", cc__version_string(), argv[2]);
         return 0;
     }
     /* Subcommand detection: `build` / `run` as the FIRST POSITIONAL token,
@@ -7241,6 +7374,11 @@ int main(int argc, char **argv) {
 
     for (int i = 1; i < argc; ++i) {
         {
+            int vf = cc__take_vendor_flag(argc, argv, &i);
+            if (vf < 0) return 1;
+            if (vf > 0) continue;
+        }
+        {
             int tf = cc__take_unit_flag(argc, argv, &i, &unit_kind, version_pin,
                                         sizeof(version_pin));
             if (tf < 0) return 1;
@@ -7368,6 +7506,13 @@ int main(int argc, char **argv) {
         // Positional input.
         if (pos_count >= max_pos) { fprintf(stderr, "cc: too many input files (max %d)\n", max_pos); return 1; }
         pos_args[pos_count++] = argv[i];
+    }
+
+    if (g_cccportable_cli) {
+        fprintf(stderr,
+                "cc: --cccportable only applies to --print-cflags / --print-libs "
+                "(it does not remap lowerer faces)\n");
+        return 2;
     }
 
     // If both are provided, debug wins (safe default).

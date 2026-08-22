@@ -796,6 +796,18 @@ static void shadow_result_note_ok_qual(Parser* p, Token at, const char* okty,
 
 /* Ok!>Err or Ok!>(Err) Name ( params ) ;|{ body } */
 static AstNode* parse_result_fn(Parser* p) {
+    if (!shadow_cparse_fn_in_attach) {
+        int cp = shadow_cparse_try_file_fn(p);
+        AstNode* n;
+        if (cp < 0) return NULL;
+        if (cp == 1) {
+            shadow_cparse_fn_in_attach = 1;
+            n = parse_result_fn(p);
+            shadow_cparse_fn_in_attach = 0;
+            (void)shadow_cparse_fn_take_owned();
+            return n;
+        }
+    }
     unsigned decl_attrs = 0;
     int ty0, ty1;
     char okty[96];
@@ -923,12 +935,22 @@ static AstNode* parse_result_fn(Parser* p) {
         parser_fail(p, p_peek(p), "expected ';' or '{' after result function header");
         return NULL;
     }
-    n->kids = &p->kids_storage[p->nkstore];
-    while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
-        AstNode* s = parse_stmt(p);
-        if (!s) return NULL;
-        if (!ast_kids_push(p, s)) return NULL;
-        n->nkids++;
+    {
+        int body0 = p->i;
+        int fn_start = specs0;
+        if (shadow_cparse_fn_in_attach) {
+            if (!shadow_cparse_attach_fn_body(p, n, fn_start, body0))
+                return NULL;
+        } else {
+            n->kids = &p->kids_storage[p->nkstore];
+            while (!tok_eq(p_peek(p), TK_PUNCT, "}") &&
+                   p_peek(p).kind != TK_EOF && !p->err) {
+                AstNode* s = parse_stmt(p);
+                if (!s) return NULL;
+                if (!ast_kids_push(p, s)) return NULL;
+                n->nkids++;
+            }
+        }
     }
     if (!p_accept(p, TK_PUNCT, "}")) {
         parser_fail(p, p_peek(p), "expected '}' to close result function");
@@ -3603,6 +3625,18 @@ static int looks_like_next_fn_decl(Parser* p) {
  * stay AST_STATIC_FN and register for UFCS; otherwise they fall through to
  * opaque tape and `nd->count()` dies as "not declared". */
 static AstNode* parse_static_fn(Parser* p) {
+    if (!shadow_cparse_fn_in_attach) {
+        int cp = shadow_cparse_try_file_fn(p);
+        AstNode* n;
+        if (cp < 0) return NULL;
+        if (cp == 1) {
+            shadow_cparse_fn_in_attach = 1;
+            n = parse_static_fn(p);
+            shadow_cparse_fn_in_attach = 0;
+            (void)shadow_cparse_fn_take_owned();
+            return n;
+        }
+    }
     if (shadow_kw(p_peek(p)) != SHADOW_KW_STATIC) return NULL;
     if (p->i + 4 >= p->n) return NULL;
     int ri0 = p->i + 1;
@@ -3936,7 +3970,7 @@ static AstNode* parse_static_fn(Parser* p) {
                     }
                     j++;
                 }
-                if (has_cc) {
+                if (has_cc && !shadow_cparse_fn_in_attach) {
                     snprintf(msg, sizeof(msg),
                              "could not parse statement in '%s'", fname);
                     p->nn = saved_nn;
@@ -3944,6 +3978,26 @@ static AstNode* parse_static_fn(Parser* p) {
                     p->err = saved_err;
                     parser_fail(p, miss_at, msg);
                     return NULL;
+                }
+                /* cparse envelope: per-stmt overlay attach (never whole-fn
+                 * FileTape). Soft miss tapes one stmt only. */
+                if (shadow_cparse_fn_in_attach) {
+                    p->err = saved_err;
+                    p->nkstore = (int)(n->kids - p->kids_storage);
+                    n->nkids = 0;
+                    if (!shadow_cparse_attach_fn_body(p, n, fn_start, body0)) {
+                        p->nn = saved_nn;
+                        p->nkstore = saved_nk;
+                        return NULL;
+                    }
+                    if (!p_accept(p, TK_PUNCT, "}")) {
+                        p->nn = saved_nn;
+                        p->nkstore = saved_nk;
+                        parser_fail(p, p_peek(p),
+                                    "expected '}' to close function");
+                        return NULL;
+                    }
+                    return n;
                 }
             }
         }
@@ -4474,6 +4528,10 @@ static int parse_parallel_pragma_marker(Parser* p) {
         p->parallel_off = 1;
     else if (tok_eq(t, TK_IDENT, "__cc_pragma_parallel_on"))
         p->parallel_off = 0;
+    else if (tok_eq(t, TK_IDENT, "__cc_pragma_prelude_off"))
+        p->prelude_off = 1;
+    else if (tok_eq(t, TK_IDENT, "__cc_pragma_linenumbers_off"))
+        p->linenumbers_off = 1;
     else
         return 0;
     p_next(p);

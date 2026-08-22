@@ -32,6 +32,11 @@ ccc build run file.ccs              # same, explicit
 ccc build run file.ccs -- --arg     # args to the binary
 ccc path/to/tool.shcc [args…]       # .shcc → implicit run (shebang-friendly)
 ccc --emit-c-only file.ccs          # emit C only → out/file.c
+ccc --emit-c-only --no-line a.ccs -o include/generated/a.c
+ccc portable-install vendor/cccportable
+ccc --cccportable vendor/cccportable --print-cflags   # author snippet
+ccc --cccportable vendor/cccportable --print-libs
+# consumer host-C tree: docs/cccportable.md
 ccc build -O file.ccs               # release (-O2 -DNDEBUG)
 ccc build -g file.ccs               # debug (-O0 -g); default is -O2, asserts kept
 ccc version=0.3 run file.ccs        # pin lowerer from CLI (same form as header)

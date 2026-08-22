@@ -157,6 +157,9 @@ int cparse_flat_fields(const char *src, int len, const CpTok *toks, int ntoks,
 int cparse_match_func(const char *src, int len, const CpTok *toks, int ntoks,
                       char *name, int ncap, int *lbrace_i, char *err,
                       int errcap);
+int cparse_func_stmt_spans(const char *src, int len, const CpTok *toks,
+                             int ntoks, int *starts, int *ends, int cap, int *n,
+                             char *err, int errcap);
 
 /* C11 #if integer expression after macro expansion. Bare leftover
  * idents are 0. `defined` / `__has_*` are not expanded. */

@@ -383,6 +383,8 @@ typedef struct {
     /* `#pragma(@parallel) off` seen (stage2 marker token): @parallel
      * constructs parsed while set lower serially (forced_seq). */
     int parallel_off;
+    int prelude_off;
+    int linenumbers_off;
     int own_storage; /* 1 if nodes/kids/tu were calloc'd by ensure_storage */
 } Parser;
 

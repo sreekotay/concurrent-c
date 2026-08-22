@@ -9,6 +9,9 @@
 
 char* cc_ct_extract_type_decls_prelude(const char* src, size_t n);
 
+static int g_shadow_prelude_off;
+static int g_shadow_no_line;
+
 /* Compiled-factory produce (libshadow_comptime / emit_plan). */
 #ifndef CC_GEN_PRODUCE_OK
 typedef enum CCGenProduceStatus {
@@ -7837,6 +7840,7 @@ static int shadow_emit_ptr_err_at_bind(CEmit* out, ShadowCtx* ctx,
 static int shadow_emit_line(CEmit* out, ShadowCtx* ctx, AstNode* st,
                             const char* indent) {
     if (!out || !ctx) return 1;
+    if (g_shadow_no_line) return 1;
     const char* path = NULL;
     int line = 0;
     if (!shadow_site_loc(ctx->cache, st, &path, &line) || line <= 0) return 1;

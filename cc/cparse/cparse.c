@@ -484,11 +484,26 @@ static int skip_paren_list(Parser *ps) {
     return 1;
 }
 
+/* `Ok!>(Err)` or bare `Ok!>Err` (Concurrent-C Result return). */
 static int skip_result_bang(Parser *ps) {
     if (!tok_is(ps, CP_TOK_PUNCT, "!>") && !tok_is(ps, CP_TOK_PUNCT, "?>"))
         return 1;
     adv(ps);
-    return skip_paren_list(ps);
+    if (tok_is(ps, CP_TOK_PUNCT, "(")) return skip_paren_list(ps);
+    if (cur(ps)->kind == CP_TOK_IDENT) {
+        adv(ps);
+        return 1;
+    }
+    return fail(ps, "expected error type after !>");
+}
+
+/* Overlay attrs: `@name` / `@name(...)` — envelope only; meaning is overlay. */
+static int skip_at_mark(Parser *ps) {
+    if (!tok_is(ps, CP_TOK_PUNCT, "@")) return 1;
+    adv(ps);
+    if (cur(ps)->kind == CP_TOK_IDENT) adv(ps);
+    if (tok_is(ps, CP_TOK_PUNCT, "(")) return skip_paren_list(ps);
+    return 1;
 }
 
 static int skip_alignas(Parser *ps) {
@@ -1149,6 +1164,10 @@ static int parse_func(Parser *ps, CpNode **out) {
             if (!skip_result_bang(ps)) return 0;
             continue;
         }
+        if (tok_is(ps, CP_TOK_PUNCT, "@")) {
+            if (!skip_at_mark(ps)) return 0;
+            continue;
+        }
         if (cur(ps)->kind == CP_TOK_IDENT) {
             int save = ps->i;
             char *cand = spell_dup(ps);
@@ -1418,8 +1437,25 @@ static int looks_like_func(const Parser *ps) {
                     else if (punct_eq_i(ps, i, ")")) d--;
                     i++;
                 }
+            } else if (ps->toks[i].kind == CP_TOK_IDENT) {
+                i++; /* bare Ok!>Err */
             }
             i--; /* for-loop increments */
+            continue;
+        }
+        if (depth == 0 && punct_eq_i(ps, i, "@")) {
+            i++;
+            if (ps->toks[i].kind == CP_TOK_IDENT) i++;
+            if (punct_eq_i(ps, i, "(")) {
+                int d = 1;
+                i++;
+                while (i < ps->ntoks && d > 0) {
+                    if (punct_eq_i(ps, i, "(")) d++;
+                    else if (punct_eq_i(ps, i, ")")) d--;
+                    i++;
+                }
+            }
+            i--;
             continue;
         }
         if (depth == 0 && punct_eq_i(ps, i, "=")) saw_eq = 1;
@@ -2479,7 +2515,9 @@ static int parse_group(Parser *ps, CpNode ***arr, int *n, int in_struct,
             }
         } else if (in_struct) {
             if (!parse_field(ps, &kid)) return 0;
-        } else if (tok_ident(ps, "struct") || tok_ident(ps, "union")) {
+        } else if ((tok_ident(ps, "struct") || tok_ident(ps, "union")) &&
+                   !looks_like_func(ps)) {
+            /* `struct Tag *name(...)` is a function, not a tag decl. */
             if (!parse_struct_tag(ps, &kid)) return 0;
         } else if (tok_ident(ps, "enum")) {
             if (!parse_enum(ps, &kid)) return 0;
@@ -2692,9 +2730,12 @@ static int flat_one(const CpNode *node, const char *src, CpFlat *out, int cap,
         lo = node->start;
         hi = node->end;
         if (hi < lo) hi = lo;
-        if (hi - lo >= (int)sizeof(f->text)) hi = lo + (int)sizeof(f->text) - 1;
-        memcpy(f->text, src + lo, (size_t)(hi - lo));
-        flat_trim(f->text);
+        if (hi - lo >= (int)sizeof(f->text)) {
+            f->text[0] = 0; /* overlay reprints FileTape span */
+        } else {
+            memcpy(f->text, src + lo, (size_t)(hi - lo));
+            flat_trim(f->text);
+        }
         if (node->name) snprintf(f->name, sizeof(f->name), "%s", node->name);
         for (i = 0; i < node->nthen; i++)
             if (!flat_one(node->then_kids[i], src, out, cap, np)) return 0;
@@ -2711,10 +2752,12 @@ static int flat_one(const CpNode *node, const char *src, CpFlat *out, int cap,
             lo = node->else_start;
             hi = node->else_end;
             if (hi > lo) {
-                if (hi - lo >= (int)sizeof(f->text))
-                    hi = lo + (int)sizeof(f->text) - 1;
-                memcpy(f->text, src + lo, (size_t)(hi - lo));
-                flat_trim(f->text);
+                if (hi - lo >= (int)sizeof(f->text)) {
+                    f->text[0] = 0;
+                } else {
+                    memcpy(f->text, src + lo, (size_t)(hi - lo));
+                    flat_trim(f->text);
+                }
             } else {
                 snprintf(f->text, sizeof(f->text), "#else");
             }
@@ -2732,9 +2775,12 @@ static int flat_one(const CpNode *node, const char *src, CpFlat *out, int cap,
         lo = node->endif_start;
         hi = node->endif_end;
         if (hi > lo) {
-            if (hi - lo >= (int)sizeof(f->text)) hi = lo + (int)sizeof(f->text) - 1;
-            memcpy(f->text, src + lo, (size_t)(hi - lo));
-            flat_trim(f->text);
+            if (hi - lo >= (int)sizeof(f->text)) {
+                f->text[0] = 0;
+            } else {
+                memcpy(f->text, src + lo, (size_t)(hi - lo));
+                flat_trim(f->text);
+            }
         } else {
             snprintf(f->text, sizeof(f->text), "#endif");
         }
@@ -2832,6 +2878,46 @@ int cparse_match_func(const char *src, int len, const CpTok *toks, int ntoks,
         if (err && errcap) snprintf(err, (size_t)errcap, "function missing '{'");
         return -1;
     }
+    return 0;
+}
+
+/* Body stmt byte spans for overlay attach (CP_FUNC kids). */
+int cparse_func_stmt_spans(const char *src, int len, const CpTok *toks, int ntoks,
+                           int *starts, int *ends, int cap, int *n, char *err,
+                           int errcap) {
+    CpParse p;
+    CpNode *fn;
+    int i;
+    if (n) *n = 0;
+    memset(&p, 0, sizeof(p));
+    if (cparse_tokens("<fn>", src, len, toks, ntoks, &p) != 0) {
+        if (err && errcap)
+            snprintf(err, (size_t)errcap, "%s",
+                     p.err.msg ? p.err.msg : "cparse fn failed");
+        cparse_free(&p);
+        return -1;
+    }
+    if (!p.root || p.root->nkid != 1 || p.root->kids[0]->kind != CP_FUNC) {
+        if (err && errcap)
+            snprintf(err, (size_t)errcap, "expected one C function");
+        cparse_free(&p);
+        return -1;
+    }
+    fn = p.root->kids[0];
+    for (i = 0; i < fn->nkid; i++) {
+        CpNode *s = fn->kids[i];
+        if (!s || s->kind != CP_STMT) continue;
+        if (!starts || !ends || !n || *n >= cap) {
+            if (err && errcap)
+                snprintf(err, (size_t)errcap, "cparse fn stmt span cap");
+            cparse_free(&p);
+            return -1;
+        }
+        starts[*n] = s->start;
+        ends[*n] = s->end;
+        (*n)++;
+    }
+    cparse_free(&p);
     return 0;
 }
 
