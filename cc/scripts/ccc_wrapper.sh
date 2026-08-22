@@ -7,6 +7,7 @@
 #   cc/bin/ccc             -> this script
 #   cc/bin/.ccc-bin        -> compiled ccc binary
 #   cc/include/**/*.cch    -> source headers
+#   cc/include/**/*.h      -> face-tree host-C (copied through)
 #   cc/runtime/*.{c,h}     -> runtime sources
 #   out/include/**/*.h     -> lowered headers (rewritten by lower_headers)
 #   out/runtime/*.{c,h}    -> rewritten runtime translation units
@@ -69,8 +70,8 @@ LOCK_DIR="$OUT_INCLUDE/.headers_lowered.lock"
 ccc_headers_stale() {
     [ ! -f "$STAMP" ] && return 0
     if [ -d "$CCH_DIR" ]; then
-        hit=$(find "$CCH_DIR" -name '*.cch' -type f -newer "$STAMP" -print -quit 2>/dev/null)
-        [ -n "$hit" ] && { [ "$CCC_LOWER_VERBOSE" = "1" ] && printf 'ccc: stale .cch: %s\n' "$hit" >&2; return 0; }
+        hit=$(find -L "$CCH_DIR" \( -name '*.cch' -o -name '*.h' \) -type f -newer "$STAMP" -print -quit 2>/dev/null)
+        [ -n "$hit" ] && { [ "$CCC_LOWER_VERBOSE" = "1" ] && printf 'ccc: stale header: %s\n' "$hit" >&2; return 0; }
     fi
     if [ -d "$RUNTIME_SRC" ]; then
         hit=$(find "$RUNTIME_SRC" \( -name '*.c' -o -name '*.h' \) -type f -newer "$STAMP" -print -quit 2>/dev/null)

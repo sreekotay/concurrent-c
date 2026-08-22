@@ -139,6 +139,9 @@ trap 'rm -rf "$tmpdir" "$foreign"' EXIT
   "$CCC" portable-install vendor/cccportable
   test -f vendor/cccportable/CCCPORTABLE.txt
   test -f vendor/cccportable/include/ccc/cc_runtime.h
+  test -f vendor/cccportable/include/ccc/vendor/ffc.h
+  test ! -L vendor/cccportable/include/ccc/vendor/ffc.h
+  test -f vendor/cccportable/include/ccc/cc_closure_helper.h
   test -f vendor/cccportable/runtime/concurrent_c.c
   if find vendor/cccportable -name '*.cch' | grep . >/dev/null; then
     echo "portable tree must not contain .cch" >&2
@@ -182,6 +185,8 @@ EOF
   cc -Ivendor/cccportable/include -c include/generated/bare.c -o bare.o
   cc -o bare bare.o
   ./bare
+  cc -Ivendor/cccportable/include -DCC_ENABLE_ASYNC \
+      -c vendor/cccportable/runtime/concurrent_c.c -o concurrent_c.o
   cat >bare.shcc <<'EOF'
 #!/usr/bin/env -S ccc --as=shcc
 #pragma(@prelude) off

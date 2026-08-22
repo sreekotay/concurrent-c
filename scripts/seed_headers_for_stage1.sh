@@ -4,6 +4,8 @@
 # exists yet (true fresh clone / smoke_bootstrap_fresh).
 #
 # Not a substitute for real lowering: stage-1 must re-run over this seed.
+# Face-tree *.h are copied through (symlinks followed) so the seed is a
+# complete host-C include root.
 # Only strips `@as` / legacy `/*@as*/`, `@typeview` / `@restricted` /
 # `@typehooks` blocks, `@destroy` / `@detach`, `CC_GENERIC_FACTORY` /
 # `_EXTEND` blocks, and rewrites `.cch` includes to `.h`.
@@ -309,6 +311,16 @@ for src in in_inc.rglob("*.cch"):
                    encoding="utf-8")
     n_h += 1
 
+n_pass = 0
+for src in in_inc.rglob("*.h"):
+    if not src.is_file():
+        continue
+    rel = src.relative_to(in_inc)
+    dst = out_inc / rel
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_bytes(src.read_bytes())
+    n_pass += 1
+
 n_rt = 0
 if in_rt and out_rt and in_rt.is_dir():
     for src in list(in_rt.glob("*.c")) + list(in_rt.glob("*.h")):
@@ -318,6 +330,6 @@ if in_rt and out_rt and in_rt.is_dir():
                        encoding="utf-8")
         n_rt += 1
 
-print(f"seed_headers_for_stage1: {n_h} headers -> {out_inc}"
+print(f"seed_headers_for_stage1: {n_h} headers + {n_pass} passthrough .h -> {out_inc}"
       + (f"; {n_rt} runtime -> {out_rt}" if n_rt else ""))
 PY

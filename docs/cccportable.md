@@ -14,7 +14,9 @@ ccc portable-install vendor/cccportable
 ```
 
 `DIR` must be missing, empty, or already stamped (`CCCPORTABLE.txt`). Occupied
-unstamped directories are refused.
+unstamped directories are refused. The snapshot includes face-tree host-C
+`*.h` files that lowering copies into `out/include` (notably
+`include/ccc/vendor/ffc.h`). Consumers still use one `-I`.
 
 Generate C with `--no-line` when writing into the foreign tree (`gen.sh`):
 

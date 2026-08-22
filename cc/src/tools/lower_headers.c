@@ -8,7 +8,9 @@
  *
  * Mode 1 (headers): Recursively finds all .cch files in input_dir, transforms
  * CC syntax (T!>(E) -> CCResult_T_E), and writes .h files to output_dir
- * preserving directory structure.
+ * preserving directory structure. Face-tree *.h that are already host C
+ * (ccc/vendor/ffc.h, cc_closure_helper.h, …) are copied through as real
+ * files (symlinks followed) so out/include is a complete one-I host-C root.
  *
  * Mode 2 (--rewrite-includes): Additionally copies .c and .h files from
  * src_dir to dst_dir, rewriting any #include referencing .cch to .h so that
@@ -54,11 +56,15 @@ static int is_cch_file(const char* name) {
     return len > 4 && strcmp(name + len - 4, ".cch") == 0;
 }
 
+static int is_h_file(const char* name) {
+    size_t len = strlen(name);
+    return len > 2 && strcmp(name + len - 2, ".h") == 0;
+}
+
 static int is_c_or_h_file(const char* name) {
     size_t len = strlen(name);
     if (len > 2 && strcmp(name + len - 2, ".c") == 0) return 1;
-    if (len > 2 && strcmp(name + len - 2, ".h") == 0) return 1;
-    return 0;
+    return is_h_file(name);
 }
 
 static const char* path_basename(const char* path) {
@@ -106,6 +112,58 @@ static char* cch_to_h_path(const char* input_dir, const char* output_dir, const 
     }
     
     return out;
+}
+
+/* Same relative path under output_dir (face-tree *.h passthrough). */
+static char* rel_out_path(const char* input_dir, const char* output_dir,
+                          const char* src_path) {
+    const char* rel = src_path;
+    size_t in_len = strlen(input_dir);
+    if (strncmp(src_path, input_dir, in_len) == 0) {
+        rel = src_path + in_len;
+        if (*rel == '/') rel++;
+    }
+    size_t rel_len = strlen(rel);
+    size_t out_dir_len = strlen(output_dir);
+    char* out = malloc(out_dir_len + 1 + rel_len + 1);
+    if (!out) return NULL;
+    sprintf(out, "%s/%s", output_dir, rel);
+    return out;
+}
+
+static int copy_passthrough_h(const char* src_path, const char* dst_path) {
+    FILE* in;
+    FILE* out;
+    char buf[64 * 1024];
+    size_t n;
+    char* h_dir = strdup(dst_path);
+    if (!h_dir) return ENOMEM;
+    char* last_slash = strrchr(h_dir, '/');
+    if (last_slash) {
+        *last_slash = '\0';
+        mkpath(h_dir, 0755);
+    }
+    free(h_dir);
+
+    in = fopen(src_path, "rb");
+    if (!in) return errno ? errno : -1;
+    out = fopen(dst_path, "wb");
+    if (!out) {
+        int e = errno;
+        fclose(in);
+        return e ? e : -1;
+    }
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            fclose(in);
+            fclose(out);
+            return EIO;
+        }
+    }
+    fclose(in);
+    if (fclose(out) != 0) return errno ? errno : -1;
+    printf("  passthrough: %s -> %s\n", src_path, dst_path);
+    return 0;
 }
 
 /* Process a single .cch file: full header lowering */
@@ -165,6 +223,15 @@ static int process_dir(const char* input_dir, const char* output_dir, const char
                 break;
             }
             err = process_file(entry_path, h_path);
+            free(h_path);
+            if (err) break;
+        } else if (S_ISREG(st.st_mode) && is_h_file(entry->d_name)) {
+            char* h_path = rel_out_path(input_dir, output_dir, entry_path);
+            if (!h_path) {
+                err = ENOMEM;
+                break;
+            }
+            err = copy_passthrough_h(entry_path, h_path);
             free(h_path);
             if (err) break;
         }
@@ -336,6 +403,7 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "       %s --ordered <output_dir> <file.cch> [file.cch ...]\n", argv[0]);
         fprintf(stderr, "\nLowers .cch headers to .h files:\n");
         fprintf(stderr, "  - Rewrites T!>(E) -> CCResult_T_E + guarded CC_DECL_RESULT_SPEC\n");
+        fprintf(stderr, "  - Copies face-tree *.h through (follows symlinks)\n");
         fprintf(stderr, "\n--rewrite-includes: copy .c/.h files, rewriting .cch includes to .h\n");
         fprintf(stderr, "--ordered: lower the listed files in this process, in argv order\n");
         return 1;

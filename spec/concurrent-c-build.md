@@ -42,7 +42,7 @@ The build steps are:
 - `--no-line` omits `#line` and `CC_LN` from emitted C.
 - `--sysroot PATH` is forwarded to the host C compiler (cross-compile). It is not a Concurrent-C snapshot.
 
-`ccc portable-install DIR` copies lowered `include/ccc/**/*.h` and the rewritten runtime from the resolved toolchain (`g_cc_lowered_include` / `g_cc_runtime_c`) into `DIR`. The tree is a consumer host-C bundle, not a compiler sysroot (no `.cch`). `DIR` must not exist, be empty, or already contain `CCCPORTABLE.txt`. A stamp mismatch on install or `--print-*` is an error. Re-emit is a human step.
+`ccc portable-install DIR` copies lowered `include/ccc/**/*.h` and the rewritten runtime from the resolved toolchain (`g_cc_lowered_include` / `g_cc_runtime_c`) into `DIR`. The lowered include root is a complete host-C tree: every face-tree `*.h` (including `ccc/vendor/ffc.h`) is copied through as a real file. The snapshot is a consumer host-C bundle, not a compiler sysroot (no `.cch`). `DIR` must not exist, be empty, or already contain `CCCPORTABLE.txt`. A stamp mismatch on install or `--print-*` is an error. Re-emit is a human step.
 
 `--print-cflags` and `--print-libs` are author-side helpers. A consumer Makefile does not invoke `ccc`; it hardcodes the vendor paths or a snippet generated once.
 

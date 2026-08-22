@@ -218,7 +218,7 @@ LOWER_HEADERS_BINARY := $(OUT_BINDIR)/lower_headers
 LOWER_HEADERS1_SRCS := $(filter-out src/preprocess/grammar_cli.c,$(subst src/preprocess/grammar_rules.c,src/preprocess/grammar_stub.c,$(LOWER_HEADERS_SRCS)))
 LOWER_HEADERS1_OBJS := $(LOWER_HEADERS1_SRCS:%.c=$(OBJDIR)/%.o)
 LOWER_HEADERS1_BINARY := $(OUT_BINDIR)/lower_headers_stage1
-LOWER_HEADERS_INPUTS := $(shell find include -name '*.cch' -type f)
+LOWER_HEADERS_INPUTS := $(shell find -L include \( -name '*.cch' -o -name '*.h' \) -type f)
 
 # Lowered headers output directory
 OUT_INCLUDE := ../out/include
@@ -268,7 +268,8 @@ lower-headers: $(LOWER_HEADERS_STAMP)
 # an existing stage-1 binary (survives `make clean`) without relinking it.
 # Crude host-C seed of out/include + out/runtime. Stage-1 comps against this;
 # must not depend on LOWER_HEADERS_STAMP (cold -j recursion).
-$(OUT_RUNTIME)/.seed.stamp: $(LOWER_HEADERS_INPUTS) $(wildcard runtime/*.c runtime/*.h)
+$(OUT_RUNTIME)/.seed.stamp: $(LOWER_HEADERS_INPUTS) $(wildcard ../third_party/ffc/ffc.h) \
+		$(wildcard runtime/*.c runtime/*.h)
 	@mkdir -p $(OUT_INCLUDE) $(OUT_RUNTIME)
 	@echo "seed headers for stage-1 lower_headers..."
 	@bash ../scripts/seed_headers_for_stage1.sh \
@@ -281,7 +282,8 @@ $(OUT_RUNTIME)/.seed.stamp: $(LOWER_HEADERS_INPUTS) $(wildcard runtime/*.c runti
 # stage-1 for engine headers while the stamp recipe also linked it →
 # ETXTBSY ("Text file busy") on the first exec. Stage-1 objs depend on
 # the seed stamp only, so this edge stays acyclic.
-$(LOWER_HEADERS_STAMP): $(LOWER_HEADERS_INPUTS) $(wildcard runtime/*.c runtime/*.h) \
+$(LOWER_HEADERS_STAMP): $(LOWER_HEADERS_INPUTS) $(wildcard ../third_party/ffc/ffc.h) \
+		$(wildcard runtime/*.c runtime/*.h) \
 		$(OUT_RUNTIME)/.seed.stamp $(LOWER_HEADERS1_BINARY)
 	@mkdir -p $(OUT_INCLUDE) $(OUT_RUNTIME)
 	@$(LOWER_HEADERS1_BINARY) include $(OUT_INCLUDE) --rewrite-includes runtime $(OUT_RUNTIME)
