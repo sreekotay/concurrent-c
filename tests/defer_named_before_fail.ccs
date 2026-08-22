@@ -1,6 +1,6 @@
-/* @cancel before the @defer in the same block. */
+/* @cancel_defer before the @defer in the same block. */
 int main(void) {
-    @cancel cleanup;
+    @cancel_defer cleanup;
     @defer cleanup: { int x = 0; (void)x; };
     return 0;
 }

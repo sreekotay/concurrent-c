@@ -1,4 +1,4 @@
-/* Named @defer + @cancel: cancel skips, double-cancel is a no-op, uncancelled runs. */
+/* Named @defer + @cancel_defer: cancel skips, double-cancel is a no-op, uncancelled runs. */
 #include <stdio.h>
 
 int g_ran = 0;
@@ -10,7 +10,7 @@ void mark(void) {
 
 int fn_level_cancel(void) {
     @defer cleanup: mark();
-    @cancel cleanup;
+    @cancel_defer cleanup;
     return 0;
 }
 
@@ -24,7 +24,7 @@ int main(void) {
     g_ran = 0;
     {
         @defer cleanup: mark();
-        @cancel cleanup;
+        @cancel_defer cleanup;
     }
     if (g_ran) {
         printf("ERROR: cancelled block defer ran\n");
@@ -36,8 +36,8 @@ int main(void) {
     g_ran = 0;
     {
         @defer cleanup: mark();
-        @cancel cleanup;
-        @cancel cleanup;
+        @cancel_defer cleanup;
+        @cancel_defer cleanup;
     }
     if (g_ran) {
         printf("ERROR: double-cancel defer ran\n");
@@ -63,7 +63,7 @@ int main(void) {
         {
             @defer keep_first: first = 1;
             @defer drop_second: second = 1;
-            @cancel drop_second;
+            @cancel_defer drop_second;
         }
         if (second) {
             printf("ERROR: cancelled second ran\n");

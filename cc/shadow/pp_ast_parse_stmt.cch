@@ -1477,26 +1477,26 @@ static AstNode* parse_defer(Parser* p) {
     return n;
 }
 
-/* @cancel name; — disarm the live named @defer. Name is required. */
-static AstNode* parse_cancel(Parser* p) {
+/* @cancel_defer name; — disarm the live named @defer. Name is required. */
+static AstNode* parse_cancel_defer(Parser* p) {
     Token name;
     AstNode* n;
     if (!tok_eq(p_peek(p), TK_PUNCT, "@")) return NULL;
     if (p->i + 1 >= p->n || p->toks[p->i + 1].kind != TK_IDENT ||
-        !spell_eq(p->toks[p->i + 1].spell, "cancel"))
+        !spell_eq(p->toks[p->i + 1].spell, "cancel_defer"))
         return NULL;
     p_next(p); /* @ */
-    p_next(p); /* cancel */
+    p_next(p); /* cancel_defer */
     if (p_peek(p).kind != TK_IDENT) {
-        parser_fail(p, p_peek(p), "@cancel requires a name");
+        parser_fail(p, p_peek(p), "@cancel_defer requires a name");
         return NULL;
     }
     name = p_next(p);
-    n = ast_new(p, AST_CANCEL);
+    n = ast_new(p, AST_CANCEL_DEFER);
     if (!n) return NULL;
     slice_to(n->a, sizeof(n->a), name.spell);
     if (!p_accept(p, TK_PUNCT, ";")) {
-        parser_fail(p, p_peek(p), "expected ';' after @cancel");
+        parser_fail(p, p_peek(p), "expected ';' after @cancel_defer");
         return NULL;
     }
     return n;
@@ -4409,7 +4409,7 @@ static AstNode* parse_stmt_inner(Parser* p) {
         if (n || p->err) return n;
         n = parse_defer(p);
         if (n || p->err) return n;
-        n = parse_cancel(p);
+        n = parse_cancel_defer(p);
         if (n || p->err) return n;
         n = parse_with_deadline(p);
         if (n || p->err) return n;

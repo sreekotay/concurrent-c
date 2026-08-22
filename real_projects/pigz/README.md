@@ -21,7 +21,9 @@ make pigz      # Original (requires zlib, pthreads)
 make pigz_cc   # CC version (requires CC compiler + zlib)
 
 # 4. Run benchmark
-./benchmark.sh 200 8 3   # <size_mb> <workers> <runs>
+./bench_defaults.sh              # latest method: 50 MB, 5 rounds, <bin> <file>
+./bench_defaults.sh 50 5 pigz,pigz_wait
+./benchmark.sh 200 8 3           # older: size / pigz -p workers / runs
 
 # 5. Linux i386 (Docker) — pigz.c vs pigz_wait (PIGZ_DICT=1) vs pigz_cc
 ../../scripts/pigz_i386.sh
@@ -40,7 +42,7 @@ make pigz_cc   # CC version (requires CC compiler + zlib)
 - **Generated input**: `testdata/text_<size_mb>mb.bin`
 - **Not checked in**: benchmark inputs are ignored via `.gitignore`
 
-Receipts (checked in):
+Receipts (checked in). Reproduce with `./bench_defaults.sh` (optional `BENCH_OUT=benchmarks/latest.txt`):
 
 - [Latest (defaults, 50 MB)](benchmarks/latest.txt) — same method as the dated receipts below
 - [All versions, defaults only, 50 MB, 2026-08-19 (gate turnstile)](benchmarks/defaults_all_versions_2026_08_19_gate.txt) — `<bin> <file>`, no `-p` / `CC_WORKERS` / `PIGZ_*`; table marks `chain` vs `indep` dict per binary (`pigz_wait` chains by default, `PIGZ_DICT=0` opts out)
@@ -150,7 +152,8 @@ for (int w = 0; w < num_workers; w++) {
 | `setup.sh` | Downloads original pigz source |
 | `download_silesia.sh` | Downloads/extracts Silesia corpus to `testdata/silesia/` |
 | `Makefile` | Builds all versions |
-| `benchmark.sh` | Main benchmark (auto-downloads corpus + prints summary table) |
+| `bench_defaults.sh` | Defaults-only compare (`<bin> <file>`, 50 MB / 5 rounds) — `benchmarks/latest.txt` |
+| `benchmark.sh` | Older benchmark (`size` / `pigz -p` workers / runs) |
 | `bench_go_vs_cc.sh` | Cross-language comparison: CC vs Go vs Zig vs original |
 | `bench_compress_only.sh` | Compression-only timing |
 | `pigz_idiomatic.ccs` | **Idiomatic CC pipeline — read this first** (ordered channel + send_task) |

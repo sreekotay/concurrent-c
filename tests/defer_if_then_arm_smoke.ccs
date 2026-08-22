@@ -29,7 +29,7 @@ static int run(void) {
 
     printf("=== named if (0) + cancel ===\n");
     if (0) @defer dead: named();
-    @cancel dead;
+    @cancel_defer dead;
 
     printf("=== block-scoped if (0) ===\n");
     {

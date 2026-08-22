@@ -1,5 +1,5 @@
-/* @cancel requires a name. */
+/* @cancel_defer requires a name. */
 int main(void) {
-    @cancel;
+    @cancel_defer;
     return 0;
 }

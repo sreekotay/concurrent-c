@@ -1,0 +1,59 @@
+/*
+ * Two CCParallel handles fan-in by waiting them as effect arms.
+ * No extra join primitive: @parallel { h1.wait() !>; h2.wait() !>; }.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/stdio.cch>
+
+static void bump(int* p, int v) {
+    if (p)
+        *p = v;
+}
+
+int main(void) {
+    @errhandler(CCError err) { cc_error_log(err); return 1; }
+
+    int a = 0;
+    int b = 0;
+    int c = 0;
+    int d = 0;
+    CCParallel h1 = @parallel {
+        a = 1;
+        b = 2;
+    } !>;
+    CCParallel h2 = @parallel {
+        c = 3;
+        d = 4;
+    } !>;
+    @parallel {
+        h1.wait() !>;
+        h2.wait() !>;
+    } !>.wait()!>;
+    if (a != 1 || b != 2 || c != 3 || d != 4) {
+        eprintln(@string(`FAIL a=${a} b=${b} c=${c} d=${d}`, @scratch)) !>;
+        return 1;
+    }
+
+    {
+        int x = 0;
+        int y = 0;
+        @parallel {
+            bump(&x, 7);
+            bump(&y, 8);
+        } !>.wait()!>;
+        if (x != 7 || y != 8) {
+            eprintln(@string(`FAIL expr arms x=${x} y=${y}`, @scratch)) !>;
+            return 1;
+        }
+    }
+
+    /* Bind the fan-in, then wait. */
+    CCParallel both = @parallel {
+        h1.wait() !>;
+        h2.wait() !>;
+    } !>;
+    both.wait() !>;
+
+    println("parallel_handle_join_smoke: OK") !>;
+    return 0;
+}

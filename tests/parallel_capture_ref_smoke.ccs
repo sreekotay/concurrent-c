@@ -41,7 +41,7 @@ static int collide(CCTurnstile* ts) {
     @parallel {
         a = p->x + x;
         b = x + 1;
-    }
+    } !>.wait()!>;
     if (a != 10 || b != 2) {
         fprintf(stderr, "FAIL collide join a=%d b=%d\n", a, b);
         return 1;
@@ -50,7 +50,7 @@ static int collide(CCTurnstile* ts) {
     @parallel seq (on) {
         a = p->x - x;
         b = x + 2;
-    }
+    } !>.wait()!>;
     if (a != 8 || b != 3) {
         fprintf(stderr, "FAIL collide gated a=%d b=%d\n", a, b);
         return 1;
@@ -58,7 +58,7 @@ static int collide(CCTurnstile* ts) {
 
     @parallel for (i in 0..N) {
         buf[i] = p->x + x + i;
-    }
+    } !>.wait()!>;
     for (i = 0; i < N; i++) {
         if (buf[i] != 10 + i) {
             fprintf(stderr, "FAIL collide for i=%d got=%d\n", i, buf[i]);
@@ -71,7 +71,7 @@ static int collide(CCTurnstile* ts) {
         ts.wait(0, i) !>;
         next = next + p->x + x;
         ts->pass(0, i) !>;
-    }
+    } !>.wait()!>;
     if (next != N * 10) {
         fprintf(stderr, "FAIL collide wait next=%d\n", next);
         return 1;
@@ -97,7 +97,7 @@ static int run_wait(CCTurnstile* ts) {
         total += next;
         next = next + 1;
         ts->pass(0, i) !>;
-    }
+    } !>.wait()!>;
     if (next != N || total != (long)N * (N - 1) / 2) {
         fprintf(stderr, "FAIL wait next=%d total=%ld\n", next, total);
         return 1;
@@ -122,7 +122,7 @@ int main(void) {
             t = base + acc.scale;
             b = t;
         }
-    }
+    } !>.wait()!>;
     if (a != 42 || b != 44 || acc.scale != 3) {
         fprintf(stderr, "FAIL join a=%d b=%d scale=%d\n", a, b, acc.scale);
         return 1;
@@ -135,7 +135,7 @@ int main(void) {
     @parallel seq (flag) {
         x = acc.scale + base;
         y = add_one(acc.scale);
-    }
+    } !>.wait()!>;
     if (x != 44 || y != 4) {
         fprintf(stderr, "FAIL gated x=%d y=%d\n", x, y);
         return 1;
@@ -148,7 +148,7 @@ int main(void) {
     pacc.scale = 2;
     @parallel for (i in 0..N) {
         pacc.vals[i] = pacc.scale * i;
-    }
+    } !>.wait()!>;
     for (i = 0; i < N; i++) {
         if (pacc.vals[i] != 2 * i) {
             fprintf(stderr, "FAIL for i=%d got=%d\n", i, pacc.vals[i]);

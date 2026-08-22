@@ -16,7 +16,7 @@ static int go(void) {
         g_xs[i] = 1;
         if (i == CUT)
             return 7;
-    }
+    } !>.wait()!>;
     return 0;
 }
 

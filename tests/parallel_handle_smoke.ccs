@@ -1,0 +1,48 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int a = 0;
+    int b = 0;
+    CCParallel h = @parallel {
+        a = 41;
+        b = 1;
+    } !>;
+    h.wait() !>;
+    if (a != 41 || b != 1) {
+        fprintf(stderr, "FAIL init a=%d b=%d\n", a, b);
+        return 1;
+    }
+    h.wait() !>;
+
+    CCParallel h2;
+    h2 = @parallel {
+        a = 3;
+        b = 4;
+    } !>;
+    h2.wait() !>;
+    if (a != 3 || b != 4) {
+        fprintf(stderr, "FAIL assign a=%d b=%d\n", a, b);
+        return 1;
+    }
+
+    CCParallel h3 = @parallel {
+        a = 5;
+        b = 6;
+    } !>;
+    bool cancelled = h3.cancel() !>;
+    h3.wait() !>;
+    if (!cancelled || a != 5 || b != 6) {
+        fprintf(stderr, "FAIL cancel a=%d b=%d cancelled=%d\n", a, b,
+                cancelled ? 1 : 0);
+        return 1;
+    }
+    if (h3.cancel() !>) {
+        fprintf(stderr, "FAIL cancel after wait\n");
+        return 1;
+    }
+
+    printf("parallel_handle_smoke: OK\n");
+    return 0;
+}

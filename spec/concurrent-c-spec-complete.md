@@ -336,7 +336,7 @@ bugs.
 | `@defer stmt;`                  | Schedule statement to run on scope exit                  | `@defer file.close();`                                   |
 | `@comptime if (cond) { }`       | Compile-time conditional                                 | `@comptime if (FEATURE_X) { }`                           |
 | `@errhandler(E e) stmt` / `{ }` | Block-scoped handler for Result error type `E` (§3.1)    | `@errhandler(CCError e) cc_error_exit(e);` |
-| `@parallel { arms }`            | Join independent `name = expr;` or `@serial` arms (§8.11) | `@parallel { a = f(); b = g(); }`          |
+| `@parallel { arms }`            | Join independent `name = expr;`, `expr !>;`, or `@serial` arms (§8.11) | `@parallel { a = f(); b = g(); }`          |
 | `@parallel (pred) { arms }`     | Same join; spawn if `pred`, else run in order (§8.11.3)   | `@parallel (d < k) { a = f(); b = g(); }`  |
 | `@parallel for (i in lo..hi)`   | Independent iterations over a half-open range (§8.11.4)   | `@parallel for (y in 0..h) { row(y); }`    |
 | `@parallel seq (cond) { arms }` | Same join; named sequential denial (§8.11.5)              | `@parallel seq (use_par) { a = f(); b = g(); }` |
@@ -5234,7 +5234,7 @@ void !>(CCError) cc_exclusive_mutex_acquire_when_into(CCExclusiveMutex* m,
 
 ### 8.11 `@parallel`
 
-`@parallel` names a join of independent work. It is not a nursery and it does not create a task the program can hold. The implementation may run some arms or iterations on other workers, or run all of them on the caller. `n.spawn` does not sequentialize; `@parallel` may.
+`@parallel` names a join of independent work. It is not a nursery. The brace form is `CCParallel !>(CCError)`: create can fail; `.wait()` is the join. The implementation may run some arms or iterations on other workers, or run all of them on the caller. `n.spawn` does not sequentialize; `@parallel` may.
 
 The form is selected by the tokens after `@parallel`: `{` (always try to spawn), `(` or `seq (` (spawn if the predicate, §8.11.3, §8.11.5), `wait (` (ordered spawn loop over a turnstile; an expression of type `bool !>(CCError)`, §8.11.6), or `for` (bisected range, §8.11.4). Assignment join and `@parallel for` are statements. The wait-for form is a Result expression.
 
@@ -5250,7 +5250,20 @@ T a, b;
 }
 ```
 
-The block holds two or more arms. An arm is either `name = expr;` where `name` is a simple identifier already in scope, or `@serial { … }` (§8.11.2). After the closing brace, every named write is visible.
+The block holds two or more arms. An arm is `name = expr;` where `name` is a simple identifier already in scope, `@serial { … }` (§8.11.2), or an expression statement with no assignment (no named write; the expression runs). After the closing brace, every named write is visible and every expression arm has completed.
+
+Two handles join by waiting them as effect arms of a new `@parallel`:
+
+```c
+CCParallel h1 = @parallel { a = f(); b = g(); } !>;
+CCParallel h2 = @parallel { c = p(); d = q(); } !>;
+@parallel {
+    h1.wait() !>;
+    h2.wait() !>;
+} !>.wait()!>;
+```
+
+`h1.adopt(h2)` links a cancel tree. `h1.cancel()` cancels adopted children (newest first), then `h1`. `h2.cancel()` cancels `h2` only. Adopt is not a move: both handles stay live. Self, cycle, a second parent, a joined parent or child, and a full child list are errors.
 
 Compound assignment, indirection, field and subscript destinations, declarations, and other statements are ill-formed as assignment arms. A bare `{ }` as a direct child of `@parallel { }` is ill-formed; braces are C scope, not an arm. A `for` statement as a direct child is ill-formed — the loop is a form of the keyword (§8.11.4).
 
@@ -5342,7 +5355,7 @@ An optional `worker (name)` after the range binds `name` as an `int`: the index 
 
 `cache (name, …)` after `wait` names enclosing locals the construct adopts as warm scratch. Each ticket gets exclusive use of an instance of that type whose contents are the initializer (cold) or the state some earlier ticket left (warm). Which instance a ticket gets is unobservable. Sequential paths, including `seq` denial and `#pragma(@parallel) off`, keep the one declared instance — deleting the clause leaves the serial program. A wait-for may instantiate additional copies, up to the turnstile cap; it runs the initializer on each extra and the declaration's `@destroy` on each extra at join. After the construct the declared name holds some instance's state — unspecified which. Slot 0 is the declared instance; extras are not copies of it. `cache` without `wait` is ill-formed. A name is adopted by at most one wait-for. A body-local name, the loop variable, and a `worker` binder are ill-formed in `cache`. A cache name does not appear in an `@stage` block: `@stage` is loop-carried identity; `cache` is unobservable instance identity.
 
-Body statements may raise with `!>`. Errors are stop-starting: the first failure stops new tickets from entering, in-flight iterations finish, and after the brace the error of the lowest failing ticket re-raises into the innermost `@errhandler` for `CCError`, or into an attached `!>(e) { … }` on the construct. A handler must be in scope on both schedules unless that attached tail is present. A failed `enter` takes no token and joins the same way. `wait` and `pass` are `void !>(CCError)`: a handshake failure is a ticket error and runs that same handler. Because an entered successor is parked in `wait(i+1)` until ticket `i` discharges the stage, an entered ticket must discharge every `@stage` on every path. A success exit `pass`es unpassed stages (waiter wakes `ok`). An error exit `fail`s them: the gate becomes FAILED and a parked `wait` wakes as `err(CANCELLED)`. Ticket `i` errors before or inside a stage; ticket `i+1` already in `wait` does not hang — it wakes with that error, skips the block, `fail`s its own remaining stages, and `leave`s. Join still prefers the lowest failing ticket, so the predecessor's body error wins over the successor's cancelled wait. `@defer` and `@errhandler` at the top level of the body are ill-formed; the structural form of the discharge is `@stage`.
+Body statements may raise with `!>`. Errors are stop-starting: a failure stops new tickets from entering, in-flight iterations finish, and after the brace a ticket error re-raises into the innermost `@errhandler` for `CCError`, or into an attached `!>(e) { … }` on the construct. A handler must be in scope on both schedules unless that attached tail is present. A failed `enter` takes no token and joins the same way. `wait` and `pass` are `void !>(CCError)`: a handshake failure is a ticket error and runs that same handler. Because an entered successor is parked in `wait(i+1)` until ticket `i` discharges the stage, an entered ticket must discharge every `@stage` on every path. A success exit `pass`es unpassed stages (waiter wakes `ok`). An error exit `fail`s them: the gate becomes FAILED and a parked `wait` wakes as `err(CANCELLED)`. Ticket `i` errors before or inside a stage; ticket `i+1` already in `wait` does not hang — it wakes with that error, skips the block, `fail`s its own remaining stages, and `leave`s. The predecessor's body error and the successor's cancelled wait are both ticket errors; which one re-raises is not specified. `@defer` and `@errhandler` at the top level of the body are ill-formed; the structural form of the discharge is `@stage`.
 
 `@stage (gate, args…) { … }` is a statement inside a wait-for body, not a Result: it unwraps `gate.wait(args…) !>;`, the block, `gate.pass(args…) !>;`. `gate` is spelled as the receiver the calls apply to — `ts.read`, `ts.write`, a `CCTurnstile` with the stage index in `args` (`@stage (t, k, i)`), or a pointer to either. Each `@stage` is a ticket-scoped handshake on a named gate cell: whichever of `wait` or `pass`/`fail` touches the cell first creates it (ARMED, UNARMED, or FAILED); the other completes the handshake. A successor may therefore `wait` before this ticket reaches the block. Work inside the block may be empty or guarded (`if (chain) { … }`); the handshake still happens. The `@stage` itself is a top-level statement of the wait-for body — nested in `if`, a loop, or another `@stage` is ill-formed. Inside the block the ticket is ordered and exclusive for that stage — loop-carried state reads as it does in the sequential loop. `@stage` outside a wait-for body is ill-formed. A raise inside the block exits the ticket; the error-path `fail` still happens.
 

@@ -1,0 +1,160 @@
+/*
+ * Same prepare/join/hold/commit pair as the smoke, under overlapping
+ * shard holds. Workers contend; cells must match committed deltas.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/stdio.cch>
+#include <ccc/cc_atomic.cch>
+#include <string.h>
+
+#define SHARDS 8
+#define WORKERS 8
+#define ROUNDS 80
+
+typedef struct Prep {
+    int ready;
+    int val;
+} Prep;
+
+typedef struct Store {
+    int cell[SHARDS];
+    cc_atomic_int expected;
+    cc_atomic_int reverts;
+    cc_atomic_int ok;
+    CCShardDomain rel;
+} Store;
+
+static Prep !>(CCError) prepare_side(int id, int boom) {
+    Prep p;
+    p.ready = 0;
+    p.val = 0;
+    if (id == boom)
+        return cc_err(CC_ERR_INVALID_ARG, "prepare");
+    p.ready = 1;
+    p.val = 1 + (id % 9);
+    return cc_ok(p);
+}
+
+static void unprepare(Store* st, Prep* p) {
+    if (!p || !p->ready)
+        return;
+    p->ready = 0;
+    p->val = 0;
+    if (st)
+        cc_atomic_fetch_add(&st->reverts, 1);
+}
+
+static void !>(CCError) commit_pair(Store* st, Prep pa, int sa, Prep pb, int sb) {
+    if (!st)
+        return cc_err(CC_ERR_INVALID_ARG, "commit");
+    st->cell[sa] += pa.val;
+    st->cell[sb] += pb.val;
+    cc_atomic_fetch_add(&st->expected, pa.val + pb.val);
+    return cc_ok();
+}
+
+static void !>(CCError) run_pair(Store* st, int ia, int ib, int boom) {
+    Prep pa;
+    Prep pb;
+    uint64_t names[2];
+    int sa;
+    int sb;
+
+    pa.ready = 0;
+    pa.val = 0;
+    pb.ready = 0;
+    pb.val = 0;
+
+    @defer(err) {
+        unprepare(st, &pa);
+        unprepare(st, &pb);
+    }
+    @errhandler(CCError err) {
+        return cc_err(err);
+    }
+
+    @parallel {
+        @serial {
+            Prep ta = prepare_side(ia, boom) !>;
+            pa = ta;
+        }
+        @serial {
+            Prep tb = prepare_side(ib, boom) !>;
+            pb = tb;
+        }
+    } !>.wait()!>;
+
+    if (!pa.ready || !pb.ready)
+        return cc_err(CC_ERR_INVALID_ARG, "prepare incomplete");
+
+    sa = ia & (SHARDS - 1);
+    sb = ib & (SHARDS - 1);
+    names[0] = (uint64_t)sa;
+    names[1] = (uint64_t)sb;
+    {
+        CCShardHold h = st->rel.hold_sorted(names, 2);
+        @defer h.release();
+        if (!h.held())
+            return cc_err(CC_ERR_INVALID_ARG, "hold");
+        commit_pair(st, pa, sa, pb, sb) !>;
+    }
+    cc_atomic_fetch_add(&st->ok, 1);
+    return cc_ok();
+}
+
+static void worker(Store* st, int wid) {
+    int r;
+    for (r = 0; r < ROUNDS; r++) {
+        int ia = wid * 17 + r * 3;
+        int ib = wid * 13 + r * 5 + 1;
+        int boom = ((r + wid) % 11 == 0) ? ia : -1;
+        run_pair(st, ia, ib, boom) !>(e) { (void)e; };
+    }
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCExclusive* excl = cc_exclusive_create(&arena, 0);
+    Store st;
+    int i;
+    int sum;
+    int expect;
+
+    if (!excl)
+        return 1;
+    @defer excl->destroy();
+    memset(&st, 0, sizeof(st));
+    st.rel = cc_shard_domain(excl, cc_shard_mask_make(SHARDS));
+
+    {
+        CCNursery n = cc_nursery_create() !> @destroy;
+        Store* stp = &st;
+        for (i = 0; i < WORKERS; i++) {
+            int wid = i;
+            n.spawn(() => [wid, stp] {
+                worker(stp, wid);
+            });
+        }
+    }
+
+    sum = 0;
+    for (i = 0; i < SHARDS; i++)
+        sum += st.cell[i];
+    expect = cc_atomic_load(&st.expected);
+    {
+        int ok = cc_atomic_load(&st.ok);
+        int reverts = cc_atomic_load(&st.reverts);
+        if (sum != expect) {
+            eprintln(@string(`FAIL sum=${sum} expected=${expect} ok=${ok} reverts=${reverts}`, @scratch)) !>;
+            return 1;
+        }
+        if (ok + reverts < WORKERS) {
+            eprintln(@string(`FAIL no work ok=${ok} reverts=${reverts}`, @scratch)) !>;
+            return 1;
+        }
+        println(@string(`parallel_prepare_commit_stress_smoke: OK ok=${ok} reverts=${reverts} sum=${sum}`, @scratch)) !>;
+    }
+    return 0;
+}

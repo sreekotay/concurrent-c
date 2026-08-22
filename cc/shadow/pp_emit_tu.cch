@@ -1015,6 +1015,16 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                                                 "int64_t", "CCError"))
                         return 0;
                 }
+                /* Header `void !>(CCError)` (wait, adopt, turnstile, …).
+                 * Without this arm, __cc_uw_is_err hits the pointer default:
+                 * bool ok is one byte, padding is not zeroed, so both Ok and
+                 * Err look like non-NULL words and `!>` / `!>(e)` miss the
+                 * error. */
+                {
+                    if (!shadow_seen_result_add(seen_ok, seen_err, &nseen,
+                                                "void", "CCError"))
+                        return 0;
+                }
                 /* cc_command_status / process APIs → CCResult_int_CCIoError.
                  * Without this arm, __cc_uw_is_err hits the pointer default and
                  * spawn failures silently look like success (script bang). */
@@ -3034,7 +3044,7 @@ ginst_emit_pass:
         case AST_STMT_UNWRAP:
         case AST_RESULT_LOCAL:
         case AST_DEFER:
-        case AST_CANCEL:
+        case AST_CANCEL_DEFER:
         case AST_VOID_CAST:
         case AST_STATIC_ARR:
         case AST_VAL_DESTROY:

@@ -302,7 +302,7 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
 
         if (buf) in_pool.free(buf);
         out_pool.free(r);
-    }
+    } !>.wait()!>;
 
     if (chain) {
         unsigned char t[8];

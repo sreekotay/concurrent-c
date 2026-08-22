@@ -39,7 +39,7 @@ static int run_before(int* done) {
         @stage (ts, 0, i) {
             done[i] = 1;
         }
-    }
+    } !>.wait()!>;
     return 0;
 }
 
@@ -57,7 +57,7 @@ static int run_inside(int* done) {
         @stage (ts, 0, i) {
             inside(i, done) !>;
         }
-    }
+    } !>.wait()!>;
     return 0;
 }
 

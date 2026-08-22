@@ -26,7 +26,7 @@ static int caller_ret(void) {
             flag(&g_caller_sib);
             sib = 1;
         }
-    }
+    } !>.wait()!>;
     (void)a;
     (void)sib;
     return 0;
@@ -45,7 +45,7 @@ static int spawn_ret(void) {
             b = 2;
             return 9;
         }
-    }
+    } !>.wait()!>;
     (void)b;
     (void)first;
     return 0;
@@ -64,7 +64,7 @@ static int gated(int spawn) {
             flag(&g_sib);
             sib = 1;
         }
-    }
+    } !>.wait()!>;
     (void)a;
     (void)sib;
     return 0;

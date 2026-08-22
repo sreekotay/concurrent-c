@@ -20,7 +20,7 @@ static int run(int use_par, int* xs) {
         @stage (ts, 0, i) {
             xs[i] = i + 1;
         }
-    }
+    } !>.wait()!>;
     return 0;
 }
 

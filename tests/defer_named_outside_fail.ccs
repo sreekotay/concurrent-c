@@ -1,8 +1,8 @@
-/* @cancel outside the block that declared the name. */
+/* @cancel_defer outside the block that declared the name. */
 int main(void) {
     {
         @defer cleanup: { int x = 0; (void)x; };
     }
-    @cancel cleanup;
+    @cancel_defer cleanup;
     return 0;
 }

@@ -62,7 +62,7 @@ int main(void) {
 
 | Surface | Examples |
 |---------|----------|
-| Lifecycle | `name@(args) @destroy` / `@detach`, `@defer` / `@defer(err\|ok)` / `@cancel` |
+| Lifecycle | `name@(args) @destroy` / `@detach`, `@defer` / `@defer(err\|ok)` / `@cancel_defer` |
 | Concurrency | `@async` / `@await` / `@blocking` / `@nonblocking`, `n.spawn(...)` |
 | Results | `@errhandler` / `@err`, unwrap `!>` / `?>`, types `T!>(E)` |
 | Methods | UFCS `value.method(...)` / `ptr->method(...)` |

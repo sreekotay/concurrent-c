@@ -1,0 +1,149 @@
+/*
+ * Recipe: prepare A+B, join, hold, commit
+ *
+ * Two parallel prepares. The join is `@parallel` `.wait()`. Who finished
+ * is the prepared value (`ready`), not the construct error. The relation
+ * hold is only around commit. Revert whoever finished.
+ *
+ *   @defer(err) { revert finished; }
+ *   @parallel {
+ *     @serial { Prep ta = prepare_a() !>; pa = ta; }
+ *     @serial { Prep tb = prepare_b() !>; pb = tb; }
+ *   } !>.wait()!>;
+ *   if (!pa.ready || !pb.ready) return cc_err(...);
+ *   h = rel.hold_sorted(names, n);   // n = |names|, not a punch count
+ *   commit(pa, pb) !>;               // under h
+ *
+ * No gate_punch. No turnstile. One excl.gate_pass(pub) only if a waiter
+ * is parked on a different name — not this recipe.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/stdio.cch>
+#include <string.h>
+
+typedef struct Prep {
+    int ready;
+    int val;
+} Prep;
+
+typedef struct Store {
+    int cell[8];
+    CCShardDomain rel;
+} Store;
+
+static Prep !>(CCError) prepare_side(int id, int boom) {
+    Prep p;
+    p.ready = 0;
+    p.val = 0;
+    if (id == boom)
+        return cc_err(CC_ERR_INVALID_ARG, "prepare");
+    p.ready = 1;
+    p.val = id * 10;
+    return cc_ok(p);
+}
+
+static void unprepare(Prep* p) {
+    if (!p || !p->ready)
+        return;
+    p->ready = 0;
+    p->val = 0;
+}
+
+static void !>(CCError) commit_pair(Store* st, Prep pa, int sa, Prep pb,
+                                   int sb) {
+    if (!st)
+        return cc_err(CC_ERR_INVALID_ARG, "commit");
+    st->cell[sa] += pa.val;
+    st->cell[sb] += pb.val;
+    return cc_ok();
+}
+
+static void !>(CCError) run_pair(Store* st, int ia, int ib, int boom) {
+    Prep pa;
+    Prep pb;
+    uint64_t names[2];
+    int sa;
+    int sb;
+
+    pa.ready = 0;
+    pa.val = 0;
+    pb.ready = 0;
+    pb.val = 0;
+
+    @defer(err) {
+        unprepare(&pa);
+        unprepare(&pb);
+    }
+    @errhandler(CCError err) {
+        return cc_err(err);
+    }
+
+    @parallel {
+        @serial {
+            Prep ta = prepare_side(ia, boom) !>;
+            pa = ta;
+        }
+        @serial {
+            Prep tb = prepare_side(ib, boom) !>;
+            pb = tb;
+        }
+    } !>.wait()!>;
+
+    if (!pa.ready || !pb.ready)
+        return cc_err(CC_ERR_INVALID_ARG, "prepare incomplete");
+
+    sa = ia & 7;
+    sb = ib & 7;
+    names[0] = (uint64_t)sa;
+    names[1] = (uint64_t)sb;
+    {
+        CCShardHold h = st->rel.hold_sorted(names, 2);
+        @defer h.release();
+        if (!h.held())
+            return cc_err(CC_ERR_INVALID_ARG, "hold");
+        commit_pair(st, pa, sa, pb, sb) !>;
+    }
+    return cc_ok();
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCExclusive* excl = cc_exclusive_create(&arena, 0);
+    Store st;
+    int hit;
+
+    if (!excl)
+        return 1;
+    @defer excl->destroy();
+    memset(&st, 0, sizeof(st));
+    st.rel = cc_shard_domain(excl, cc_shard_mask_make(8));
+
+    run_pair(&st, 1, 2, -1) !>;
+    hit = 0;
+    run_pair(&st, 3, 4, 3) !>(e) {
+        (void)e;
+        hit = 1;
+    };
+    if (!hit) {
+        eprintln("FAIL boom A should error") !>;
+        return 1;
+    }
+    hit = 0;
+    run_pair(&st, 5, 6, 6) !>(e) {
+        (void)e;
+        hit = 1;
+    };
+    if (!hit) {
+        eprintln("FAIL boom B should error") !>;
+        return 1;
+    }
+
+    if (st.cell[1] != 10 || st.cell[2] != 20) {
+        eprintln(@string(`FAIL cells 1=${st.cell[1]} 2=${st.cell[2]}`, @scratch)) !>;
+        return 1;
+    }
+    println("prepare-commit: join, hold, commit; revert on prepare fail") !>;
+    return 0;
+}

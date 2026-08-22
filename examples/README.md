@@ -27,9 +27,10 @@ New to Concurrent-C? Work through these in order:
 | 9  | `recipe_timeout.ccs` | Cancellation | deadlines, cooperative exit |
 | 10 | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
 | 11 | `recipe_ordered_parallel.ccs` | Ordered fan-out | `send_task` + ordered recv, FIFO without reorder buffer |
-| 11a | `recipe_parallel.ccs` | `@parallel` | assignment join, `@serial` arms, `@parallel (pred)`, `@parallel for` |
+| 11a | `recipe_parallel.ccs` | `@parallel` | assignment join, `@serial` arms, handle fan-in, `@parallel (pred)`, `@parallel for` |
 | 12 | `recipe_exclusive_named.ccs` | Named exclusivity | `CCExclusive`, resolve-once mutex, `acquire_when`, short guard CS |
 | 12a | `recipe_turnstile.ccs` | Pipeline turnstile | `CCTurnstileRW`: depth cap + ordered read/write stages |
+| 12b | `recipe_prepare_commit.ccs` | Prepare / join / hold / commit | Parallel prepares; `.wait()` is the join; hold only around commit; revert who finished |
 | 13 | `recipe_arena_scope.ccs` | Memory | Arena names a lifetime; `@scratch` dies; keep by passing the arena last |
 | 14 | `recipe_owned_view.ccs` | Locality | Owned or view; constructors assume dead; failure is unchanged; faces at the use site |
 | 15 | `recipe_long_lived_store.ccs` | Provenance | Anchoring request-lifetime views in a long-lived arena |
@@ -53,6 +54,7 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_worker_pool.ccs` | Worker pool | N workers, shared queue |
 | `recipe_exclusive_named.ccs` | Named exclusive | Domain + `mutex(name)` once + `acquire_when` + guard unlock |
 | `recipe_turnstile.ccs` | Pipeline turnstile | Depth cap + `read`/`write` wait/pass; index form `stage(k)` |
+| `recipe_prepare_commit.ccs` | Prepare + commit | `@parallel` join, `hold_sorted`, revert finished sides |
 | `recipe_arena_scope.ccs` | Scoped memory | Named lifetime; keep a product by passing the arena last |
 | `recipe_owned_view.ccs` | Owned or view | Construct / destroy / reopen; epochs as fields; Measure cannot `replace` |
 | `recipe_long_lived_store.ccs` | Long-lived store | Explicit provenance movement into an arena-owned store |
@@ -63,7 +65,7 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_ufcs_forms.ccs` | UFCS matrix | One rule × spellings, including bare-name and fallible chains |
 | `recipe_user_generics.ccs` | User generics | `CC_GENERIC_FACTORY` — same `Name::[args]` rule as Vec/Map |
 | `recipe_ordered_parallel.ccs` | Ordered fan-out | `send_task` + ordered recv, FIFO await |
-| `recipe_parallel.ccs` | `@parallel` | Value join; `@serial` arms; `@parallel (pred)` spawn gate; `@parallel for` over `lo..hi` |
+| `recipe_parallel.ccs` | `@parallel` | Value join; `@serial` arms; handle `.wait()` fan-in; `@parallel (pred)`; `@parallel for` |
 
 ### Python interop (one boundary, two doors)
 

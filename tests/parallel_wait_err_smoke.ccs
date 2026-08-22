@@ -2,8 +2,8 @@
  * @parallel wait for — stop-starting error posture. The first failing
  * ticket cancels further entries, in-flight iterations finish (leave()
  * still runs, so the turnstile stays balanced), and the error re-raises
- * after the brace into the enclosing @errhandler. Lowest failing ticket
- * wins, so the caught error is deterministic.
+ * after the brace into the enclosing @errhandler. Which ticket error
+ * re-raises is not specified (a cancelled wait is also a ticket error).
  */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
@@ -26,7 +26,7 @@ static int run(CCTurnstile* ts, int* done) {
     int i;
     @parallel wait (ts) for (i in 0..N) {
         work(i, done) !>;
-    }
+    } !>.wait()!>;
     return 0;
 }
 

@@ -21,7 +21,7 @@ static int run(CCTurnstile* ts, int use_par, int* order) {
         order[i] = g_next;
         g_next = g_next + 1;
         ts->pass(0, i) !>;
-    }
+    } !>.wait()!>;
     return 0;
 }
 

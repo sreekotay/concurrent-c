@@ -9,6 +9,6 @@ int main(void) {
             b = 2;
         }
         b = 3;
-    }
+    } !>.wait()!>;
     return a + b;
 }

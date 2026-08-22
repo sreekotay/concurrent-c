@@ -9,6 +9,6 @@ int main(void) {
     @parallel wait (ts) {
         a = 1;
         b = 2;
-    }
+    } !>.wait()!>;
     return a + b;
 }

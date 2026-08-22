@@ -21,7 +21,7 @@ static int go(int use_par, int* xs) {
         }
         if (i == CUT)
             return 7;
-    }
+    } !>.wait()!>;
     return 0;
 }
 

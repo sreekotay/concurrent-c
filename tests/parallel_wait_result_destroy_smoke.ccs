@@ -82,7 +82,7 @@ static int !>(CCError) wave_ok(int use_par) {
         int i;
         @parallel seq (use_par) wait (ts) for (i in 0..N) {
             @stage (ts, 0, i) { }
-        }
+        } !>.wait()!>;
         (void)wave;
         return cc_ok(1);
     }
@@ -104,7 +104,7 @@ static int !>(CCError) wave_err(int use_par) {
         int i;
         @parallel seq (use_par) wait (ts) for (i in 0..N) {
             boom(i) !>;
-        }
+        } !>.wait()!>;
         (void)wave;
         return cc_ok(0);
     }

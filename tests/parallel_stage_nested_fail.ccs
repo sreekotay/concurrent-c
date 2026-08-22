@@ -12,6 +12,6 @@ int main(void) {
                 (void)i;
             }
         }
-    }
+    } !>.wait()!>;
     return 0;
 }

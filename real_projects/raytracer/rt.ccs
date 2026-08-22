@@ -512,7 +512,7 @@ int main(void) {
     } else {
         @parallel for (y in 0..h) {
             render_row(job, y);
-        }
+        } !>.wait()!>;
     }
     t1 = now_ms();
 

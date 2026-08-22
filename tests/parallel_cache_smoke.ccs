@@ -37,7 +37,7 @@ static int run_par(void) {
         s.hits++;
         cc_atomic_fetch_add(&g_hits, 1);
         s.live = 0;
-    }
+    } !>.wait()!>;
     (void)s.hits;
     return 0;
 }
@@ -55,7 +55,7 @@ static int run_seq(void) {
     int i;
     @parallel seq (0) wait (ts) cache (s) for (i in 0..N) {
         s.hits++;
-    }
+    } !>.wait()!>;
     if (s.hits != N) {
         fprintf(stderr, "FAIL seq hits=%d want=%d\n", s.hits, N);
         return 1;

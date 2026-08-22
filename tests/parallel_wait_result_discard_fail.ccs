@@ -8,6 +8,6 @@ int main(void) {
     @parallel wait (ts) for (i in 0..4) {
         if (i == 2)
             break;
-    }
+    } !>.wait()!>;
     return 0;
 }

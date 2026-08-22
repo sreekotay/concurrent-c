@@ -368,12 +368,15 @@ Use either `@destroy` / `wait` or `on_last` + `abandon`, not both. Spec §8.1.5.
 
 ## `@parallel`
 
-Lexical fork-join — not a nursery, no task handle. Spec §8.11.
+Lexical fork-join — not a nursery. `@parallel { … }` is `CCParallel !>(CCError)`.
+`.wait()` joins. Spec §8.11.
 Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
 
 | Form | Meaning |
 |------|---------|
 | `@parallel { a = f(); b = g(); }` | Independent assignment arms. First on the caller; the rest may spawn. |
+| `@parallel { h1.wait() !>; h2.wait() !>; }` | Expression arms. No assignment: the expression just runs. |
+| `h1.adopt(h2)` | Cancel tree. `h1.cancel()` is child then parent; `h2.cancel()` is child only. |
 | `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; writes exactly one outer name. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. Body always runs. |
 | `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; span 0 or 1 is a plain `for`. |
@@ -387,7 +390,14 @@ int a = 0, b = 0;
 @parallel {                    // always try to spawn
     a = f();
     b = g();
-}
+} !>.wait()!>;
+
+CCParallel h1 = @parallel { a = f(); b = g(); } !>;
+CCParallel h2 = @parallel { c = p(); d = q(); } !>;
+@parallel {
+    h1.wait() !>;
+    h2.wait() !>;
+} !>.wait()!>;
 
 @parallel (d < k) {            // spawn if pred; else run in order
     @serial {
@@ -689,6 +699,7 @@ ccc examples/js/jsdemo.shcc         # CC→JS (guest; Node owns env)
 | Fan-out / captures | [recipe_fanout_capture.ccs](../examples/recipe_fanout_capture.ccs) |
 | Ordered parallel | [recipe_ordered_parallel.ccs](../examples/recipe_ordered_parallel.ccs) |
 | `@parallel` / `@serial` | [recipe_parallel.ccs](../examples/recipe_parallel.ccs) |
+| Prepare A+B / hold / commit | [recipe_prepare_commit.ccs](../examples/recipe_prepare_commit.ccs) |
 | Channel pipeline | [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs) |
 
 ---

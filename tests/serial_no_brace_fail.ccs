@@ -6,6 +6,6 @@ int main(void) {
     @parallel {
         @serial a = 1;
         b = 2;
-    }
+    } !>.wait()!>;
     return a + b;
 }

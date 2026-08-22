@@ -18,7 +18,7 @@ int main(void) {
         xs[i] = 1;
         if (i == CUT)
             break;
-    }
+    } !>.wait()!>;
     after = 1;
     if (!after || !xs[CUT]) {
         fprintf(stderr, "FAIL after=%d cut=%d\n", after, xs[CUT]);

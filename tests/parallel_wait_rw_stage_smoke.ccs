@@ -27,7 +27,7 @@ static int run_rw(int use_par) {
         @stage (ts.write, i) {
             xs[i] = (int)big[i] + 1;
         }
-    }
+    } !>.wait()!>;
     for (i = 0; i < N; i++) {
         if (xs[i] != i + 1) {
             fprintf(stderr, "FAIL use_par=%d i=%d xs=%d\n", use_par, i, xs[i]);

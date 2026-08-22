@@ -1,5 +1,5 @@
-/* @cancel of a name that was never declared. */
+/* @cancel_defer of a name that was never declared. */
 int main(void) {
-    @cancel missing;
+    @cancel_defer missing;
     return 0;
 }

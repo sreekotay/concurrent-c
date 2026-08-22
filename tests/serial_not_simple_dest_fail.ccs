@@ -10,6 +10,6 @@ int main(void) {
             arr[0] = 1;
         }
         b = 2;
-    }
+    } !>.wait()!>;
     return arr[0] + b;
 }

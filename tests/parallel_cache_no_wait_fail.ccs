@@ -5,6 +5,6 @@ int main(void) {
     int i;
     @parallel cache (s) for (i in 0..4) {
         s++;
-    }
+    } !>.wait()!>;
     return s;
 }

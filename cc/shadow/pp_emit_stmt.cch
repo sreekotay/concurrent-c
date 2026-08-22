@@ -1760,7 +1760,10 @@ static void shadow_collect_binds_node(AstNode* st) {
             flags |= SHADOW_BIND_ATOMIC;
         if (strncmp(bind_ty, "CCSlice_", 8) == 0)
             shadow_slice_need(bind_ty + 8);
-        shadow_collect_bind_one(st->b, bind_ty, flags);
+        /* Assignment unwrap dest (`name = @parallel … !>`) is a name only —
+         * do not clobber the real typed decl's bind. */
+        if (bind_ty[0])
+            shadow_collect_bind_one(st->b, bind_ty, flags);
         shadow_note_local_decl(st);
     } else if (st->kind == AST_RAW_LINE) {
         shadow_slice_note_raw(st->a);
@@ -2889,8 +2892,17 @@ static int shadow_par_emit_serial_thunk(int id, int pj_id, const char* lhs_ty,
         return 0;
     if (!shadow_par_emit_cap_spills(h, "    ", "e", names, tys, ncaps))
         return 0;
-    if (!shadow_par_emit_serial_via(arm, &t, ctx, "    ", dest, lhs_ty,
-                                    "__cc_par_out", use_cleanup)) {
+    if (!dest || !dest[0]) {
+        if (!cemit_str(&t, "    (void)__cc_par_out;\n")) {
+            free(t.buf);
+            return 0;
+        }
+        if (!shadow_par_emit_serial_stmts(arm, &t, ctx, "    ", use_cleanup)) {
+            free(t.buf);
+            return 0;
+        }
+    } else if (!shadow_par_emit_serial_via(arm, &t, ctx, "    ", dest, lhs_ty,
+                                           "__cc_par_out", use_cleanup)) {
         free(t.buf);
         return 0;
     }
@@ -2918,6 +2930,10 @@ static int shadow_par_go_collect(AstNode* st, char lhs[][128],
         const ShadowBind* b;
         if (!arm) return 0;
         shadow_par_trim(arm->a, lhs[a], 128);
+        if (!lhs[a][0]) {
+            snprintf(lhs_ty[a], 96, "int");
+            continue;
+        }
         b = shadow_bind_lookup(lhs[a]);
         if (!b || !b->ty[0]) return 0;
         snprintf(lhs_ty[a], 96, "%s", b->ty);
@@ -3125,6 +3141,19 @@ static int shadow_pj_emit_cell(CEmit* out, const char* pad, int id,
     return 1;
 }
 
+/* Join-claimed Result return must set __cc_ret_err so @defer(err) /
+ * @defer(ok) see the same flag as `return cc_err` / `return cc_ok`. */
+static const char* shadow_claimed_ret_err(ShadowCtx* ctx) {
+    const char* rty;
+    if (!ctx || !ctx->defer_cleanup) return NULL;
+    rty = ctx->rname;
+    if (!rty || strncmp(rty, "CCResult_", 9) != 0) {
+        rty = ctx->soft_ret_ty;
+        if (!rty || strncmp(rty, "CCResult_", 9) != 0) return NULL;
+    }
+    return "__cc_ret_err = !__cc_retval.ok; ";
+}
+
 static int shadow_pj_emit_after(CEmit* out, ShadowCtx* ctx, const char* indent,
                                 int id, AstNode* st) {
     const char* rty = shadow_soft_rty(ctx);
@@ -3141,7 +3170,8 @@ static int shadow_pj_emit_after(CEmit* out, ShadowCtx* ctx, const char* indent,
     if (pr < 0) {
         if (rty && ctx && (ctx->goto_cleanup || ctx->defer_cleanup ||
                            ctx->defer_depth > 0)) {
-            if (!shadow_emit_soft_goto_cleanup(out, ctx, indent, rvname, NULL,
+            if (!shadow_emit_soft_goto_cleanup(out, ctx, indent, rvname,
+                                               shadow_claimed_ret_err(ctx),
                                                st ? st->tok_off : 0))
                 return 0;
         } else if (rty) {
@@ -3157,13 +3187,15 @@ static int shadow_emit_par_spawn_body(
     CEmit* dest, const char* bi, int n, int base, char lhs[][128],
     char lhs_ty[][96], char rhs[][2048], int ncaps[],
     char cap_names[][SHADOW_PAR_CAP_MAX][64],
-    char cap_tys[][SHADOW_PAR_CAP_MAX][160], int via_outs, AstNode* st,
-    ShadowCtx* ctx, int use_cleanup, char grefs[][64], int ngrefs) {
+    char cap_tys[][SHADOW_PAR_CAP_MAX][160], int     via_outs, AstNode* st,
+    ShadowCtx* ctx, int use_cleanup, char grefs[][64], int ngrefs,
+    const char* hdest) {
     int a;
     for (a = 1; a < n; a++) {
         int id = base + a - 1;
         char dot[48];
-        if (!cemit_fmt(dest, "%sstruct {\n", bi)) return 0;
+        int heap = (hdest && hdest[0]);
+        if (!cemit_fmt(dest, "%sstruct __cc_par_e_%d_s {\n", bi, id)) return 0;
         {
             char pad[96];
             snprintf(pad, sizeof(pad), "%s    ", bi);
@@ -3174,25 +3206,49 @@ static int shadow_emit_par_spawn_body(
         if (!cemit_fmt(dest,
                        "%s    %s* out;\n"
                        "%s    __cc_pj_ex_%d_t *__cc_pj_ex;\n"
-                       "%s} __cc_par_e_%d;\n",
-                       bi, lhs_ty[a], bi, base, bi, id))
+                       "%s};\n",
+                       bi, lhs_ty[a], bi, base, bi))
             return 0;
+        if (heap) {
+            if (!cemit_fmt(dest,
+                    "%sstruct __cc_par_e_%d_s __cc_par_stk_%d;\n"
+                    "%sstruct __cc_par_e_%d_s *__cc_par_e_%d = "
+                    "(struct __cc_par_e_%d_s*)malloc("
+                    "sizeof(struct __cc_par_e_%d_s));\n"
+                    "%sif (!__cc_par_e_%d) __cc_par_e_%d = &__cc_par_stk_%d;\n",
+                    bi, id, id, bi, id, id, id, id, bi, id, id, id))
+                return 0;
+            snprintf(dot, sizeof(dot), "__cc_par_e_%d->", id);
+        } else if (!cemit_fmt(dest,
+                       "%sstruct __cc_par_e_%d_s __cc_par_e_%d;\n",
+                       bi, id, id))
+            return 0;
+        if (!heap)
+            snprintf(dot, sizeof(dot), "__cc_par_e_%d.", id);
         if (!cemit_fmt(dest, "%sCCTask __cc_par_t_%d;\n", bi, id)) return 0;
-        snprintf(dot, sizeof(dot), "__cc_par_e_%d.", id);
         if (!shadow_par_emit_cap_pack(dest, bi, dot, cap_names[a], ncaps[a],
                                       via_outs))
             return 0;
         if (via_outs) {
-            if (!cemit_fmt(dest, "%s__cc_par_e_%d.out = __cc_par_o_%d;\n", bi,
-                           id, a))
+            if (!cemit_fmt(dest, "%s%sout = __cc_par_o_%d;\n", bi, dot, a))
                 return 0;
-        } else if (!cemit_fmt(dest, "%s__cc_par_e_%d.out = &(%s);\n", bi, id,
-                              lhs[a]))
+        } else if (!lhs[a][0]) {
+            if (!cemit_fmt(dest,
+                           "%sint __cc_par_sink_%d = 0;\n"
+                           "%s%sout = &__cc_par_sink_%d;\n",
+                           bi, id, bi, dot, id))
+                return 0;
+        } else if (!cemit_fmt(dest, "%s%sout = &(%s);\n", bi, dot, lhs[a]))
             return 0;
-        if (!cemit_fmt(dest, "%s__cc_par_e_%d.__cc_pj_ex = __cc_pj_ex;\n", bi,
-                       id))
+        if (!cemit_fmt(dest, "%s%s__cc_pj_ex = __cc_pj_ex;\n", bi, dot))
             return 0;
-        if (!cemit_fmt(dest,
+        if (heap) {
+            if (!cemit_fmt(dest,
+                    "%s__cc_par_t_%d = cc_parallel_spawn(__cc_par_thunk_%d, "
+                    "__cc_par_e_%d);\n",
+                    bi, id, id, id))
+                return 0;
+        } else if (!cemit_fmt(dest,
                 "%s__cc_par_t_%d = cc_parallel_spawn(__cc_par_thunk_%d, "
                 "&__cc_par_e_%d);\n",
                 bi, id, id, id))
@@ -3209,10 +3265,16 @@ static int shadow_emit_par_spawn_body(
                 /* Inside the go helper: refs are `__cc_ref_x` params, so the
                  * arm text goes through the reference rewrite. */
                 CEmit t = {0};
-                if (!shadow_par_emit_serial_via(st->body[0], &t, ctx, bi,
-                                                lhs[0], lhs_ty[0],
-                                                "__cc_par_o_0",
-                                                use_cleanup)) {
+                int ok;
+                if (!lhs[0][0])
+                    ok = shadow_par_emit_serial_stmts(st->body[0], &t, ctx, bi,
+                                                      use_cleanup);
+                else
+                    ok = shadow_par_emit_serial_via(st->body[0], &t, ctx, bi,
+                                                    lhs[0], lhs_ty[0],
+                                                    "__cc_par_o_0",
+                                                    use_cleanup);
+                if (!ok) {
                     shadow_pj_restore(ctx, pb, pt, pex, pjn);
                     free(t.buf);
                     return 0;
@@ -3252,6 +3314,57 @@ static int shadow_emit_par_spawn_body(
         if (!cemit_fmt(dest, "%s%s: ;\n", bi, join))
             return 0;
     }
+    if (hdest && hdest[0]) {
+        if (!cemit_fmt(dest,
+                       "%sif (cc_atomic_load(&__cc_pj_ex->xk) == 2) {\n",
+                       bi))
+            return 0;
+        for (a = n - 1; a >= 1; a--) {
+            int id = base + a - 1;
+            if (!cemit_fmt(dest,
+                    "%s    if (__cc_par_t_%d.kind == CC_TASK_KIND_INVALID)\n"
+                    "%s        (void)__cc_par_thunk_%d(__cc_par_e_%d);\n"
+                    "%s    else\n"
+                    "%s        cc_parallel_join(__cc_par_t_%d);\n"
+                    "%s    if (__cc_par_e_%d != &__cc_par_stk_%d)\n"
+                    "%s        free(__cc_par_e_%d);\n",
+                    bi, id, bi, id, id, bi, bi, id, bi, id, id, bi, id))
+                return 0;
+        }
+        if (!cemit_fmt(dest,
+                       "%s    %s = cc_parallel_empty();\n"
+                       "%s    %s.joined = 1;\n"
+                       "%s} else {\n"
+                       "%s    %s = cc_parallel_empty();\n",
+                       bi, hdest, bi, hdest, bi, bi, hdest))
+            return 0;
+        for (a = 1; a < n; a++) {
+            int id = base + a - 1;
+            if (!cemit_fmt(dest,
+                    "%s    if (__cc_par_t_%d.kind == CC_TASK_KIND_INVALID ||\n"
+                    "%s        __cc_par_e_%d == &__cc_par_stk_%d) {\n"
+                    "%s        if (__cc_par_t_%d.kind == CC_TASK_KIND_INVALID)\n"
+                    "%s            (void)__cc_par_thunk_%d(__cc_par_e_%d);\n"
+                    "%s        else\n"
+                    "%s            cc_parallel_join(__cc_par_t_%d);\n"
+                    "%s        if (__cc_par_e_%d != &__cc_par_stk_%d)\n"
+                    "%s            free(__cc_par_e_%d);\n"
+                    "%s    } else if (%s.nt < CC_PARALLEL_TASK_MAX) {\n"
+                    "%s        %s.tasks[%s.nt] = __cc_par_t_%d;\n"
+                    "%s        %s.envs[%s.nt] = __cc_par_e_%d;\n"
+                    "%s        %s.nt++;\n"
+                    "%s    } else {\n"
+                    "%s        cc_parallel_join(__cc_par_t_%d);\n"
+                    "%s        free(__cc_par_e_%d);\n"
+                    "%s    }\n",
+                    bi, id, bi, id, id, bi, id, bi, id, id, bi, bi, id,
+                    bi, id, id, bi, id, bi, hdest, bi, hdest, hdest, id,
+                    bi, hdest, hdest, id, bi, hdest, bi, bi, id, bi, id,
+                    bi))
+                return 0;
+        }
+        return cemit_fmt(dest, "%s}\n", bi);
+    }
     for (a = n - 1; a >= 1; a--) {
         int id = base + a - 1;
         if (!cemit_fmt(dest,
@@ -3264,6 +3377,9 @@ static int shadow_emit_par_spawn_body(
     }
     return 1;
 }
+
+static int shadow_pw_emit_dest_decl(CEmit* out, const char* indent,
+                                    const char* dest, const char* dty);
 
 static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                 const char* indent, int use_cleanup) {
@@ -3278,6 +3394,7 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
     char lhs[32][128];
     char lhs_ty[32][96];
     char rhs[32][2048];
+    const char* hdest = NULL;
 
     if (n < 2 || n > 32) {
         fprintf(stderr, "error: @parallel arm count %d not supported\n", n);
@@ -3286,6 +3403,26 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
     }
     shadow_indent_nest(i1, sizeof(i1), indent, 1);
     shadow_indent_nest(i2, sizeof(i2), i1, 1);
+    if (!st->par_wake) {
+        hdest = shadow_par_handle_dest(st);
+        if (!hdest) {
+            fprintf(stderr,
+                    "error: unconsumed Result\n");
+            out->err = 1;
+            return 0;
+        }
+        {
+            const char* hdty = NULL;
+            int hk;
+            for (hk = 0; hk < st->ndbody; hk++) {
+                AstNode* d = st->dbody[hk];
+                if (d && d->kind == AST_VAR_DECL && d->b[0] && d->a[0])
+                    hdty = d->a;
+            }
+            if (!shadow_pw_emit_dest_decl(out, indent, hdest, hdty))
+                return 0;
+        }
+    }
     if (!st->forced_seq) {
         CEmit* h = &g_shadow_par_helpers;
         if (!shadow_pj_emit_typedef(h, "", base, shadow_soft_rty(ctx)))
@@ -3297,14 +3434,19 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
         int k;
         int serial = arm && arm->kind == AST_SERIAL;
         shadow_par_trim(arm->a, lhs[a], sizeof(lhs[a]));
-        b = shadow_bind_lookup(lhs[a]);
-        if (!b || !b->ty[0]) {
-            fprintf(stderr, "error: @parallel target '%s' has no known type\n",
-                    lhs[a]);
-            out->err = 1;
-            return 0;
+        if (!lhs[a][0]) {
+            snprintf(lhs_ty[a], sizeof(lhs_ty[a]), "int");
+        } else {
+            b = shadow_bind_lookup(lhs[a]);
+            if (!b || !b->ty[0]) {
+                fprintf(stderr,
+                        "error: @parallel target '%s' has no known type\n",
+                        lhs[a]);
+                out->err = 1;
+                return 0;
+            }
+            snprintf(lhs_ty[a], sizeof(lhs_ty[a]), "%s", b->ty);
         }
-        snprintf(lhs_ty[a], sizeof(lhs_ty[a]), "%s", b->ty);
         rhs[a][0] = 0;
         if (!serial && !shadow_par_rewrite_rhs(arm, rhs[a], sizeof(rhs[a])))
             return 0;
@@ -3391,6 +3533,12 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
             } else if (!cemit_fmt(out, "%s%s = %s;\n", i1, lhs[a], rhs[a]))
                 return 0;
         }
+        if (hdest && hdest[0] &&
+            !cemit_fmt(out,
+                       "%s%s = cc_parallel_empty();\n"
+                       "%s%s.joined = 1;\n",
+                       i1, hdest, i1, hdest))
+            return 0;
         return cemit_fmt(out, "%s}\n", indent);
     }
     if (!cemit_fmt(out, "%s{\n", indent)) return 0;
@@ -3413,7 +3561,14 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
             } else if (!cemit_fmt(out, "%s%s = %s;\n", i2, lhs[a], rhs[a]))
                 return 0;
         }
-        if (shadow_par_go_collect(st, glhs, glty, &nlhs, gnames, gtys, &ng) &&
+        if (hdest && hdest[0] &&
+            !cemit_fmt(out,
+                       "%s%s = cc_parallel_empty();\n"
+                       "%s%s.joined = 1;\n",
+                       i2, hdest, i2, hdest))
+            return 0;
+        if (!hdest &&
+            shadow_par_go_collect(st, glhs, glty, &nlhs, gnames, gtys, &ng) &&
             shadow_par_go_fmt_params(params, sizeof(params), glhs, glty, nlhs,
                                      gnames, gtys, ng)) {
             CEmit* h = &g_shadow_par_helpers;
@@ -3428,12 +3583,22 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
             if (!shadow_emit_par_spawn_body(h, "    ", n, base, lhs, lhs_ty,
                                             rhs, ncaps, cap_names, cap_tys, 1,
                                             st, ctx, use_cleanup, grefs,
-                                            ngrefs))
+                                            ngrefs, NULL))
                 return 0;
             if (!cemit_str(h, "}\n")) return 0;
             args[0] = 0;
             for (a = 0; a < n; a++) {
-                int r = snprintf(args + ao, sizeof(args) - ao, "%s&(%s)",
+                if (!lhs[a][0] &&
+                    !cemit_fmt(out, "%sint __cc_par_go_sink_%d = 0;\n", i2, a))
+                    return 0;
+            }
+            for (a = 0; a < n; a++) {
+                int r;
+                if (!lhs[a][0])
+                    r = snprintf(args + ao, sizeof(args) - ao,
+                                 "%s&__cc_par_go_sink_%d", a ? ", " : "", a);
+                else
+                    r = snprintf(args + ao, sizeof(args) - ao, "%s&(%s)",
                                  a ? ", " : "", lhs[a]);
                 if (r < 0 || (size_t)r >= sizeof(args) - ao) return 0;
                 ao += (size_t)r;
@@ -3458,7 +3623,7 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
             if (!cemit_fmt(out, "%s} else {\n", i1)) return 0;
             if (!shadow_emit_par_spawn_body(out, i2, n, base, lhs, lhs_ty, rhs,
                                             ncaps, cap_names, cap_tys, 0, st,
-                                            ctx, use_cleanup, NULL, 0))
+                                            ctx, use_cleanup, NULL, 0, hdest))
                 return 0;
             if (!cemit_fmt(out, "%s}\n", i1)) return 0;
         }
@@ -3467,7 +3632,7 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
     }
     if (!shadow_emit_par_spawn_body(out, i1, n, base, lhs, lhs_ty, rhs, ncaps,
                                     cap_names, cap_tys, 0, st, ctx,
-                                    use_cleanup, NULL, 0))
+                                    use_cleanup, NULL, 0, hdest))
         return 0;
     if (!shadow_pj_emit_after(out, ctx, i1, base, st)) return 0;
     return cemit_fmt(out, "%s}\n", indent);
@@ -4351,6 +4516,13 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
     shadow_indent_nest(i5, sizeof(i5), i4, 1);
     shadow_par_trim(st->b, lo, sizeof(lo));
     shadow_par_trim(st->c, hi, sizeof(hi));
+    if (!st->par_wake) {
+        fprintf(stderr,
+                "error: '@parallel wait for' must be joined with "
+                "'!>.wait()!>'\n");
+        out->err = 1;
+        return 0;
+    }
     if (!lo[0] || !hi[0] || !st->a[0]) {
         fprintf(stderr, "error: malformed @parallel wait for\n");
         out->err = 1;
@@ -5014,7 +5186,8 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
         snprintf(rvname, sizeof(rvname), "__cc_pw_rv_%d", id);
         if (ctx->goto_cleanup || ctx->defer_cleanup ||
             (ctx->defer_depth > 0)) {
-            if (!shadow_emit_soft_goto_cleanup(out, ctx, i4, rvname, NULL,
+            if (!shadow_emit_soft_goto_cleanup(out, ctx, i4, rvname,
+                                               shadow_claimed_ret_err(ctx),
                                                st->tok_off))
                 return 0;
         } else if (!cemit_fmt(out, "%sreturn __cc_pw_rv_%d;\n", i4, id))
@@ -5057,6 +5230,12 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
     if (st->e[0])
         return shadow_emit_parallel_wait_for(st, out, ctx, indent,
                                              use_cleanup);
+    if (!st->par_wake) {
+        fprintf(stderr,
+                "error: '@parallel for' must be joined with '!>.wait()!>'\n");
+        out->err = 1;
+        return 0;
+    }
     shadow_indent_nest(i1, sizeof(i1), indent, 1);
     shadow_par_trim(st->b, lo, sizeof(lo));
     shadow_par_trim(st->c, hi, sizeof(hi));
@@ -5333,7 +5512,8 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
         if (pr < 0) {
             if (rty && ctx && (ctx->goto_cleanup || ctx->defer_cleanup ||
                                ctx->defer_depth > 0)) {
-                if (!shadow_emit_soft_goto_cleanup(out, ctx, i1, rvname, NULL,
+                if (!shadow_emit_soft_goto_cleanup(out, ctx, i1, rvname,
+                                                   shadow_claimed_ret_err(ctx),
                                                    st->tok_off))
                     return 0;
             } else if (rty) {
@@ -6202,7 +6382,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         return cemit_fmt(out, "%s%s %s%s = %s;\n", indent, rname, st->a,
                          st->e[0] ? st->e : "", init);
     }
-    case AST_CANCEL:
+    case AST_CANCEL_DEFER:
         return shadow_emit_cancel(st, out, ctx, indent);
     case AST_VOID_CAST: {
         char expr[288];

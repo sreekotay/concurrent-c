@@ -1,0 +1,172 @@
+/*
+ * prepare A+B in @parallel, join, hold_sorted, commit.
+ * Who finished is Prep.ready. Revert whoever finished. No gate_punch.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/stdio.cch>
+#include <string.h>
+
+typedef struct Prep {
+    int ready;
+    int val;
+} Prep;
+
+typedef struct Store {
+    int cell[8];
+    int reverts;
+    CCShardDomain rel;
+} Store;
+
+static Prep !>(CCError) prepare_side(int id, int boom) {
+    Prep p;
+    p.ready = 0;
+    p.val = 0;
+    if (id == boom)
+        return cc_err(CC_ERR_INVALID_ARG, "prepare");
+    p.ready = 1;
+    p.val = id * 10;
+    return cc_ok(p);
+}
+
+static void unprepare(Store* st, Prep* p) {
+    if (!p || !p->ready)
+        return;
+    p->ready = 0;
+    p->val = 0;
+    if (st)
+        st->reverts++;
+}
+
+static void !>(CCError) commit_pair(Store* st, Prep pa, int sa, Prep pb, int sb,
+                                   int fail_commit) {
+    if (!st)
+        return cc_err(CC_ERR_INVALID_ARG, "commit");
+    if (fail_commit)
+        return cc_err(CC_ERR_IO, "commit");
+    st->cell[sa] += pa.val;
+    st->cell[sb] += pb.val;
+    return cc_ok();
+}
+
+static void !>(CCError) run_pair(Store* st, int ia, int ib, int boom,
+                                int fail_commit) {
+    Prep pa;
+    Prep pb;
+    uint64_t names[2];
+    int sa;
+    int sb;
+
+    pa.ready = 0;
+    pa.val = 0;
+    pb.ready = 0;
+    pb.val = 0;
+
+    @defer(err) {
+        unprepare(st, &pa);
+        unprepare(st, &pb);
+    }
+    @errhandler(CCError err) {
+        return cc_err(err);
+    }
+
+    @parallel {
+        @serial {
+            Prep ta = prepare_side(ia, boom) !>;
+            pa = ta;
+        }
+        @serial {
+            Prep tb = prepare_side(ib, boom) !>;
+            pb = tb;
+        }
+    } !>.wait()!>;
+
+    if (!pa.ready || !pb.ready)
+        return cc_err(CC_ERR_INVALID_ARG, "prepare incomplete");
+
+    sa = ia & 7;
+    sb = ib & 7;
+    names[0] = (uint64_t)sa;
+    names[1] = (uint64_t)sb;
+    {
+        CCShardHold h = st->rel.hold_sorted(names, 2);
+        @defer h.release();
+        if (!h.held())
+            return cc_err(CC_ERR_INVALID_ARG, "hold");
+        commit_pair(st, pa, sa, pb, sb, fail_commit) !>;
+    }
+    return cc_ok();
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCExclusive* excl = cc_exclusive_create(&arena, 0);
+    Store st;
+
+    if (!excl)
+        return 1;
+    @defer excl->destroy();
+    memset(&st, 0, sizeof(st));
+    st.rel = cc_shard_domain(excl, cc_shard_mask_make(8));
+
+    run_pair(&st, 1, 2, -1, 0) !>(e) {
+        eprintln(@string(`FAIL ok pair: ${e.message}`, @scratch)) !>;
+        return 1;
+    };
+    if (st.cell[1] != 10 || st.cell[2] != 20 || st.reverts != 0) {
+        eprintln(@string(`FAIL after ok cells 1=${st.cell[1]} 2=${st.cell[2]} reverts=${st.reverts}`, @scratch)) !>;
+        return 1;
+    }
+
+    {
+        int hit = 0;
+        run_pair(&st, 3, 4, 3, 0) !>(e) {
+            (void)e;
+            hit = 1;
+        };
+        if (!hit) {
+            eprintln("FAIL boom A should revert B") !>;
+            return 1;
+        }
+    }
+    if (st.cell[3] != 0 || st.cell[4] != 0 || st.reverts != 1) {
+        eprintln(@string(`FAIL boom A cells 3=${st.cell[3]} 4=${st.cell[4]} reverts=${st.reverts}`, @scratch)) !>;
+        return 1;
+    }
+
+    {
+        int hit = 0;
+        run_pair(&st, 5, 6, 6, 0) !>(e) {
+            (void)e;
+            hit = 1;
+        };
+        if (!hit) {
+            eprintln("FAIL boom B should revert A") !>;
+            return 1;
+        }
+    }
+    if (st.cell[5] != 0 || st.cell[6] != 0 || st.reverts != 2) {
+        eprintln(@string(`FAIL boom B cells 5=${st.cell[5]} 6=${st.cell[6]} reverts=${st.reverts}`, @scratch)) !>;
+        return 1;
+    }
+
+    {
+        int hit = 0;
+        run_pair(&st, 1, 2, -1, 1) !>(e) {
+            (void)e;
+            hit = 1;
+        };
+        if (!hit) {
+            eprintln("FAIL commit err should revert both") !>;
+            return 1;
+        }
+    }
+    if (st.cell[1] != 10 || st.cell[2] != 20 || st.reverts != 4) {
+        eprintln(@string(`FAIL commit err cells 1=${st.cell[1]} 2=${st.cell[2]} reverts=${st.reverts}`, @scratch)) !>;
+        return 1;
+    }
+
+    println("parallel_prepare_commit_smoke: OK") !>;
+    return 0;
+}

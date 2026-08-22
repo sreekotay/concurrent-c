@@ -14,7 +14,7 @@ static int for_late(void) {
     @parallel for (i in 0..N) {
         if (i == HI)
             return 20;
-    }
+    } !>.wait()!>;
     return 0;
 }
 
@@ -26,7 +26,7 @@ static int for_two(void) {
             return 3;
         if (i == HI)
             return 20;
-    }
+    } !>.wait()!>;
     return 0;
 }
 
@@ -38,7 +38,7 @@ static int for_ret_brk(void) {
             break;
         if (i == HI)
             return 11;
-    }
+    } !>.wait()!>;
     return 0;
 }
 
@@ -48,8 +48,8 @@ static int nested_for(void) {
         @parallel for (j in 0..8) {
             if (i == 7 && j == 7)
                 return 7;
-        }
-    }
+        } !>.wait()!>;
+    } !>.wait()!>;
     return 0;
 }
 
@@ -65,7 +65,7 @@ static int join_two(void) {
             b = 2;
             return 2;
         }
-    }
+    } !>.wait()!>;
     (void)a;
     (void)b;
     return 0;
@@ -86,7 +86,7 @@ static int wait_late(void) {
         }
         if (i == 5)
             return 5;
-    }
+    } !>.wait()!>;
     return 0;
 }
 
@@ -109,7 +109,7 @@ static int wait_two(void) {
             return 1;
         if (i == 5)
             return 5;
-    }
+    } !>.wait()!>;
     return 0;
 }
 
@@ -129,7 +129,7 @@ static int wait_before_stage(void) {
             return 4;
         @stage (ts, 0, i) {
         }
-    }
+    } !>.wait()!>;
     return 0;
 }
 
@@ -141,7 +141,7 @@ static int seq_for_ret(void) {
             return 3;
         if (i == HI)
             return 20;
-    }
+    } !>.wait()!>;
     return 0;
 }
 #pragma(@parallel) on

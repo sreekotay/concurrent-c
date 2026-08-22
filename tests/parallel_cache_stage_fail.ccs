@@ -10,6 +10,6 @@ int main(void) {
         @stage (ts, 0, i) {
             s++;
         }
-    }
+    } !>.wait()!>;
     return s;
 }

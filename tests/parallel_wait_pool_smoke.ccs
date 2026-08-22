@@ -57,7 +57,7 @@ static int run_pool(CCTurnstile* ts) {
         meet_cap();
         cc_atomic_fetch_add(&g_done, 1);
         cc_atomic_fetch_sub(&g_live, 1);
-    }
+    } !>.wait()!>;
     if (cc_atomic_load(&g_timed_out)) {
         fprintf(stderr, "FAIL pool barrier timed out (one runner?)\n");
         return 1;
@@ -82,7 +82,7 @@ static int run_seq(CCTurnstile* ts) {
         bump_peak();
         cc_atomic_fetch_add(&g_done, 1);
         cc_atomic_fetch_sub(&g_live, 1);
-    }
+    } !>.wait()!>;
     int peak = cc_atomic_load(&g_peak);
     int done = cc_atomic_load(&g_done);
     if (peak != 1 || done != N) {

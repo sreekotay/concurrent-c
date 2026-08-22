@@ -8,6 +8,6 @@ int main(void) {
     @parallel wait (ts) cache (s) for (i in 0..4) {
         int s = 0;
         s++;
-    }
+    } !>.wait()!>;
     return 0;
 }

@@ -30,7 +30,7 @@ int main(void) {
     @parallel seq (pred_true()) {
         a = 41;
         b = a + 1;
-    }
+    } !>.wait()!>;
     if (a != 41 || b != 42) {
         fprintf(stderr, "FAIL join a=%d b=%d\n", a, b);
         return 1;
@@ -50,7 +50,7 @@ int main(void) {
             order_ok = 0;
         last = i;
         sum += i;
-    }
+    } !>.wait()!>;
     if (!order_ok || sum != N * (N - 1) / 2) {
         fprintf(stderr, "FAIL for order_ok=%d sum=%d\n", order_ok, sum);
         return 1;
@@ -73,7 +73,7 @@ int main(void) {
         @stage (ts, 0, i) {
             hits++;
         }
-    }
+    } !>.wait()!>;
     if (!order_ok || wsum != 0 || hits != N) {
         fprintf(stderr, "FAIL wait order_ok=%d wsum=%d hits=%d\n", order_ok,
                 wsum, hits);
@@ -88,7 +88,7 @@ int main(void) {
     @parallel {
         x = 1;
         y = 2;
-    }
+    } !>.wait()!>;
     if (x != 1 || y != 2) {
         fprintf(stderr, "FAIL restored join x=%d y=%d\n", x, y);
         return 1;

@@ -6,6 +6,6 @@ int main(void) {
         @serial {
             a = 1;
         }
-    }
+    } !>.wait()!>;
     return a;
 }

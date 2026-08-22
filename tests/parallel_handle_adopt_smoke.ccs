@@ -1,0 +1,124 @@
+/*
+ * h1.adopt(h2): cancel tree. Parent cancel walks child then self.
+ * Child cancel does not cancel the parent.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/stdio.cch>
+
+int main(void) {
+    @errhandler(CCError err) { cc_error_log(err); return 1; }
+
+    {
+        int a = 0;
+        int b = 0;
+        int c = 0;
+        int d = 0;
+        CCParallel h1 = @parallel {
+            a = 1;
+            b = 2;
+        } !>;
+        CCParallel h2 = @parallel {
+            c = 3;
+            d = 4;
+        } !>;
+        h1.adopt(h2) !>;
+        if (h1.cancel() !>) {
+            /* child then parent */
+        } else {
+            eprintln("FAIL parent cancel should hit the tree") !>;
+            return 1;
+        }
+        if (!h2.cancelled || !h1.cancelled) {
+            eprintln(@string(`FAIL parent cancel flags h1=${h1.cancelled} h2=${h2.cancelled}`, @scratch)) !>;
+            return 1;
+        }
+        if (h1.cancel() !>) {
+            eprintln("FAIL second parent cancel") !>;
+            return 1;
+        }
+        h1.wait() !>;
+        h2.wait() !>;
+        if (a + b + c + d != 10) {
+            eprintln("FAIL parent-cancel tree still joins") !>;
+            return 1;
+        }
+    }
+
+    {
+        int a = 0;
+        int b = 0;
+        int c = 0;
+        int d = 0;
+        CCParallel h1 = @parallel {
+            a = 1;
+            b = 2;
+        } !>;
+        CCParallel h2 = @parallel {
+            c = 3;
+            d = 4;
+        } !>;
+        h1.adopt(h2) !>;
+        if (!h2.cancel() !>) {
+            eprintln("FAIL child cancel") !>;
+            return 1;
+        }
+        if (!h2.cancelled || h1.cancelled) {
+            eprintln(@string(`FAIL child-only h1=${h1.cancelled} h2=${h2.cancelled}`, @scratch)) !>;
+            return 1;
+        }
+        h1.wait() !>;
+        h2.wait() !>;
+    }
+
+    {
+        int a = 0;
+        int b = 0;
+        CCParallel h1 = @parallel {
+            a = 1;
+            b = 2;
+        } !>;
+        {
+            int hit = 0;
+            h1.adopt(h1) !>(e) {
+                (void)e;
+                hit = 1;
+            };
+            if (!hit) {
+                eprintln("FAIL self adopt") !>;
+                return 1;
+            }
+        }
+        {
+            int c = 0;
+            int d = 0;
+            int hit = 0;
+            CCParallel h2 = @parallel {
+                c = 3;
+                d = 4;
+            } !>;
+            h1.adopt(h2) !>;
+            h1.adopt(h2) !>(e) {
+                (void)e;
+                hit = 1;
+            };
+            if (!hit) {
+                eprintln("FAIL second adopt") !>;
+                return 1;
+            }
+            hit = 0;
+            h2.adopt(h1) !>(e) {
+                (void)e;
+                hit = 1;
+            };
+            if (!hit) {
+                eprintln("FAIL cycle adopt") !>;
+                return 1;
+            }
+            h1.wait() !>;
+            h2.wait() !>;
+        }
+    }
+
+    println("parallel_handle_adopt_smoke: OK") !>;
+    return 0;
+}

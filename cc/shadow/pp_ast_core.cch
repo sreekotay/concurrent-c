@@ -221,8 +221,8 @@ typedef enum {
     AST_RESULT_LOCAL,
     /* @defer[(ok|err)] [name:] stmt — a=name|"", c=""|"ok"|"err", body=stmts. */
     AST_DEFER,
-    /* @cancel name; — a=name (disarm the live named @defer). */
-    AST_CANCEL,
+    /* @cancel_defer name; — a=name (disarm the live named @defer). */
+    AST_CANCEL_DEFER,
     /* Type* name = call !>|?> … [@destroy]; a=type b=name c=call d=mode e=bind/default
      * mode: bang_nobind|bang_block|bang_eh|qmark[+_D|_Dbare]
      * body=handler; dbody=destroy body (if _D) — not kids_storage (fn mid-append) */
@@ -257,14 +257,16 @@ typedef enum {
     /* @with_deadline(expr) [as name] { stmts } — a=expr b=bind|"" */
     AST_WITH_DEADLINE,
     /* @parallel [seq (cond)] { name = expr; | @serial {…}; … } — body=arms
-     * (≥2). e=seq condition / legacy predicate or "" (always try to spawn) */
+     * (≥2). e=seq condition / legacy predicate or "" (always try to spawn).
+     * The construct is CCParallel !>(CCError). `!>` is ordinary unwrap;
+     * the Ok is the promise. `.wait()` is UFCS (par_wake = join here). */
     AST_PARALLEL,
     /* @parallel for (name in lo..hi) { stmts } — a=name b=lo c=hi; body=stmts.
      * @parallel [seq (cond)] wait (gate) [cache (names)] for … [worker (w)]
      * — e=gate name, f=seq cond, h=cache name CSV, g=worker binder;
      * e empty is the bisect walk form.
-     * Wait-for is bool !>(CCError): dbody AST_VAR_DECL b=dest (a=ty if
-     * a fresh local), optional AST_ERRHANDLER for !>(e){…}. */
+     * The construct is CCParallel !>(CCError). `.wait()` is bool !>(CCError)
+     * on the wait-for form (dbody dest / !>(e){…} attach to that wake). */
     AST_PARALLEL_FOR,
     /* @serial { stmts } — arm of @parallel { }; a=simple outer dest name */
     AST_SERIAL,
@@ -335,6 +337,8 @@ struct AstNode {
     /* Parsed under `#pragma(@parallel) off`: lower to the sequential
      * denial path only — no thunks, no envs, no scheduler. */
     int forced_seq;
+    /* 1 = `!>.wait()!>` on this construct (join here). 0 = handle only. */
+    int par_wake;
     /* Attachment roles (never mix):
      *   kids  — open parent lists (fn/struct members still being filled)
      *   body  — nested stmt lists (block / if / loop / bang bodies)
@@ -1215,6 +1219,10 @@ static AstNode* parse_switch_stmt(Parser* p);
 static AstNode* parse_at_stmt(Parser* p);
 static AstNode* parse_with_deadline(Parser* p);
 static AstNode* parse_parallel(Parser* p);
+static AstNode* parse_parallel_head(Parser* p);
+static AstNode* parse_parallel_finish(Parser* p, AstNode* n);
+static AstNode* parse_parallel_unwrap_rhs(Parser* p, const char* dest,
+                                         const char* ty);
 static AstNode* parse_parallel_result_init(Parser* p);
 static AstNode* parse_parallel_result_assign(Parser* p);
 static AstNode* parse_stage(Parser* p);

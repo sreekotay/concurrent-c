@@ -7,6 +7,6 @@ int main(void) {
     int i;
     @parallel wait (ts) cache (nope) for (i in 0..4) {
         (void)i;
-    }
+    } !>.wait()!>;
     return 0;
 }

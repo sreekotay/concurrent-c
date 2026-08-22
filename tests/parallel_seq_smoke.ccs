@@ -13,7 +13,7 @@ static int gated(int spawn) {
     @parallel seq (spawn) {
         a = 10;
         b = 20;
-    }
+    } !>.wait()!>;
     return a + b;
 }
 

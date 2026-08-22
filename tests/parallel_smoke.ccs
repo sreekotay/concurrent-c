@@ -23,7 +23,7 @@ static uint32_t sum_par(uint32_t d, uint32_t i) {
     @parallel {
         left  = sum_par(d + 1, u24(i * 2));
         right = sum_par(d + 1, u24(i * 2 + 1));
-    }
+    } !>.wait()!>;
     return u24(left + right);
 }
 
@@ -35,7 +35,7 @@ static int three_arm(int x) {
         a = x + 1;
         b = x + 2;
         c = x + 3;
-    }
+    } !>.wait()!>;
     return a + b + c;
 }
 

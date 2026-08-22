@@ -1,1 +1,1 @@
-@cancel 'cleanup': no named @defer in scope
+@cancel_defer 'cleanup': no named @defer in scope

@@ -24,7 +24,7 @@ static uint32_t sum_cut(uint32_t d, uint32_t i) {
     @parallel (d < CUT) {
         left  = sum_cut(d + 1, u24(i * 2));
         right = sum_cut(d + 1, u24(i * 2 + 1));
-    }
+    } !>.wait()!>;
     return u24(left + right);
 }
 
@@ -34,7 +34,7 @@ static int gated(int spawn) {
     @parallel (spawn) {
         a = 10;
         b = 20;
-    }
+    } !>.wait()!>;
     return a + b;
 }
 

@@ -346,7 +346,7 @@
       "patterns": [
         {
           "name": "keyword.control.concurrent-c",
-          "match": "\\B@(errhandler|with_deadline|with_shield|latency_sensitive|nonblocking|blocking|noblock|grammar|variant|create|destroy|detach|defer|async|await|cancel|scoped|nursery|arena|unsafe|atomic|match|lock|link|emit|string|slice|comptime|err|for|parallel|serial)\\b"
+          "match": "\\B@(errhandler|with_deadline|with_shield|latency_sensitive|nonblocking|blocking|noblock|grammar|variant|create|destroy|detach|defer|async|await|cancel_defer|scoped|nursery|arena|unsafe|atomic|match|lock|link|emit|string|slice|comptime|err|for|parallel|serial)\\b"
         },
         {
           "name": "entity.name.label.concurrent-c",
@@ -389,7 +389,7 @@
     "cc_keywords": {
       "patterns": [
         { "name": "keyword.control.concurrent-c", "match": "\\b(await|try|catch|unsafe|comptime)\\b" },
-        { "name": "keyword.control.concurrent-c", "match": "\\bcancel\\b" },
+        { "name": "keyword.control.concurrent-c", "match": "\\bcancel_defer\\b" },
         { "name": "keyword.control.concurrent-c", "match": "\\bwith_deadline\\b" },
         { "name": "keyword.control.concurrent-c", "match": "\\btimeout\\b(?=\\s*\\()" }
       ]
