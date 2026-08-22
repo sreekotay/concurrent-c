@@ -2340,6 +2340,170 @@ static uint64_t cc__fold_cc_depends(uint64_t h, const char* in_path) {
     return h;
 }
 
+/* `#include`d `.cch` files are lowered into the TU. The emit key used to
+ * hash only the `.ccs` and `#pragma cc_depends`, so editing a header reused
+ * stale C. Host `.d` files then rebuilt `.o` from that C against the new
+ * header — clang blamed the `.cch` line for a call that was not there. */
+#define CC_CCH_INC_CAP 256
+
+typedef struct {
+    char seen[CC_CCH_INC_CAP][PATH_MAX];
+    int n;
+    const char* flags;
+} CCCchFold;
+
+static int cc__path_is_cch(const char* p) {
+    size_t n = p ? strlen(p) : 0;
+    return n >= 4 && strcmp(p + (n - 4), ".cch") == 0;
+}
+
+static int cc__cch_seen(const CCCchFold* st, const char* path) {
+    int i;
+    if (!st || !path) return 0;
+    for (i = 0; i < st->n; i++) {
+        if (strcmp(st->seen[i], path) == 0) return 1;
+    }
+    return 0;
+}
+
+static void cc__cch_note(CCCchFold* st, const char* path) {
+    if (!st || !path || !path[0] || st->n >= CC_CCH_INC_CAP) return;
+    snprintf(st->seen[st->n], PATH_MAX, "%s", path);
+    st->n++;
+}
+
+static int cc__try_cch_file(const char* dir, const char* rel, char* out,
+                            size_t cap) {
+    char cand[PATH_MAX];
+    if (!rel || !rel[0] || !out || cap < 2) return 0;
+    if (rel[0] == '/') {
+        snprintf(cand, sizeof(cand), "%s", rel);
+    } else if (dir && dir[0]) {
+        cc__join_path(dir, rel, cand, sizeof(cand));
+    } else {
+        snprintf(cand, sizeof(cand), "%s", rel);
+    }
+    if (access(cand, R_OK) != 0) return 0;
+    if (realpath(cand, out) == NULL)
+        snprintf(out, cap, "%s", cand);
+    return 1;
+}
+
+static int cc__resolve_cch_include(const char* from_file, const char* rel,
+                                   int quoted, const char* flags, char* out,
+                                   size_t cap) {
+    char dir[PATH_MAX];
+    const char* p;
+    cc__dir_of_path(from_file, dir, sizeof(dir));
+    if (quoted && cc__try_cch_file(dir, rel, out, cap)) return 1;
+    p = flags ? flags : "";
+    while (*p) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (p[0] == '-' && p[1] == 'I') {
+            const char* s = p + 2;
+            char inc[PATH_MAX];
+            size_t n = 0;
+            if (*s == ' ' || *s == '\t') {
+                s++;
+                while (*s == ' ' || *s == '\t') s++;
+            }
+            while (*s && *s != ' ' && *s != '\t' && n + 1 < sizeof(inc))
+                inc[n++] = *s++;
+            inc[n] = 0;
+            if (n && cc__try_cch_file(inc, rel, out, cap)) return 1;
+            p = s;
+            continue;
+        }
+        while (*p && *p != ' ' && *p != '\t') p++;
+    }
+    if (g_cc_include[0] && cc__try_cch_file(g_cc_include, rel, out, cap))
+        return 1;
+    if (g_cc_lowered_include[0] &&
+        cc__try_cch_file(g_cc_lowered_include, rel, out, cap))
+        return 1;
+    return 0;
+}
+
+static uint64_t cc__fold_cch_includes_rec(uint64_t h, const char* path,
+                                          CCCchFold* st) {
+    FILE* f;
+    long sz;
+    char* src;
+    size_t rd, i;
+    if (!path || !path[0] || !st) return h;
+    f = fopen(path, "rb");
+    if (!f) return h;
+    fseek(f, 0, SEEK_END);
+    sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 64 * 1024 * 1024) {
+        fclose(f);
+        return h;
+    }
+    src = (char*)malloc((size_t)sz + 1);
+    if (!src) {
+        fclose(f);
+        return h;
+    }
+    rd = fread(src, 1, (size_t)sz, f);
+    fclose(f);
+    src[rd] = '\0';
+    i = 0;
+    while (i < rd) {
+        size_t p = i;
+        int quoted = 0;
+        char rel[PATH_MAX];
+        size_t o = 0;
+        char abs[PATH_MAX];
+        char q;
+        while (p < rd && (src[p] == ' ' || src[p] == '\t')) p++;
+        if (p < rd && src[p] == '#') {
+            p++;
+            while (p < rd && (src[p] == ' ' || src[p] == '\t')) p++;
+            if (cc__pp_kw_at(src, rd, p, "include")) {
+                p += 7;
+                while (p < rd && (src[p] == ' ' || src[p] == '\t')) p++;
+                if (p < rd && (src[p] == '"' || src[p] == '<')) {
+                    quoted = (src[p] == '"');
+                    q = quoted ? '"' : '>';
+                    p++;
+                    while (p < rd && src[p] != q && o + 1 < sizeof(rel))
+                        rel[o++] = src[p++];
+                    rel[o] = '\0';
+                    if (cc__path_is_cch(rel) &&
+                        cc__resolve_cch_include(path, rel, quoted, st->flags,
+                                                abs, sizeof(abs)) &&
+                        !cc__cch_seen(st, abs)) {
+                        cc__cch_note(st, abs);
+                        h = cc__fnv1a64_str(h, "\x03" "cch:");
+                        h = cc__fnv1a64_str(h, abs);
+                        h = cc__fold_file_content(h, abs);
+                        h = cc__fold_cch_includes_rec(h, abs, st);
+                    }
+                }
+            }
+        }
+        while (i < rd && src[i] != '\n') i++;
+        if (i < rd) i++;
+    }
+    free(src);
+    return h;
+}
+
+static uint64_t cc__fold_cch_includes(uint64_t h, const char* in_path,
+                                      const char* cc_flags) {
+    CCCchFold st;
+    char abs[PATH_MAX];
+    memset(&st, 0, sizeof(st));
+    st.flags = cc_flags;
+    if (!in_path || !in_path[0]) return h;
+    if (realpath(in_path, abs) != NULL)
+        cc__cch_note(&st, abs);
+    else
+        cc__cch_note(&st, in_path);
+    return cc__fold_cch_includes_rec(h, in_path, &st);
+}
+
 static int cc__copy_file(const char* src, const char* dst) {
     if (!src || !dst || !src[0] || !dst[0]) return -1;
     FILE* in = fopen(src, "rb");
@@ -2802,6 +2966,7 @@ static int cc__build_one_target_objs(int idx,
                     }
                 }
                 h = cc__fold_cc_depends(h, src_abs);
+                h = cc__fold_cch_includes(h, src_abs, t_cc_flags);
                 emit_key = h;
                 uint64_t prev = 0;
                 if (file_exists(c_out) && cc__read_u64_file(meta_path, &prev) == 0 && prev == emit_key) {
@@ -4016,6 +4181,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         /* Declared comptime build deps (`#pragma cc_depends("...")`): fold each
          * dependency's content so editing a comptime-read file re-triggers emit. */
         h = cc__fold_cc_depends(h, opt->in_path);
+        h = cc__fold_cch_includes(h, opt->in_path, opt->cc_flags);
         emit_key = h;
 
         uint64_t prev = 0;
@@ -6037,6 +6203,7 @@ static int run_build_mode(int argc, char** argv) {
                     h = cc__fnv1a64_i64(h, bindings[bi].value);
                 }
                 h = cc__fold_cc_depends(h, inputs[i]);
+                h = cc__fold_cch_includes(h, inputs[i], cc_flags);
                 emit_key = h;
 
                 uint64_t prev = 0;

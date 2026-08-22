@@ -211,6 +211,11 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] tape line index cache selftest FAILED"
     exit 1
   fi
+  # Included .cch edits must bust the lowered-C cache (not only host .d → .o).
+  if ! sh scripts/test_emit_cch_include_cache.sh; then
+    echo "[test] emit .cch include cache selftest FAILED"
+    exit 1
+  fi
   # Full SERDES goldens/recipes: scripts/test_shadow.sh (not this gate).
 
   if [ "$quick" = 0 ]; then
