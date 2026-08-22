@@ -1,0 +1,30 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int g;
+
+static void bump(void) {
+    g = 7;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int a = 0;
+    @parallel {
+        a = 41;
+    } !>.wait()!>;
+    if (a != 41) {
+        fprintf(stderr, "FAIL assign a=%d\n", a);
+        return 1;
+    }
+    g = 0;
+    @parallel {
+        bump();
+    } !>.wait()!>;
+    if (g != 7) {
+        fprintf(stderr, "FAIL expr g=%d\n", g);
+        return 1;
+    }
+    printf("parallel_one_arm_wait_smoke: OK\n");
+    return 0;
+}

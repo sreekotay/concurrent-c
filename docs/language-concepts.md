@@ -196,7 +196,7 @@ Same `[…]` family: `T[n]` arrays, `T[~n >]` / `T[~n <]` channels.
 
 ## 5. Closures carry captures
 
-[recipe_explicit_capture.ccs](../examples/recipe_explicit_capture.ccs) · [recipe_fanout_capture.ccs](../examples/recipe_fanout_capture.ccs)
+[recipe_explicit_capture.ccs](../examples/recipe_explicit_capture.ccs)
 
 Spawn takes a closure. Captures into a task are copies.
 
@@ -221,16 +221,28 @@ No `T?`. Pick the shape that matches the operation:
 
 ## 7. `@parallel` joins independent work
 
-[recipe_parallel.ccs](../examples/recipe_parallel.ccs) · Spec §8.11
+[recipe_parallel.ccs](../examples/recipe_parallel.ccs) · [recipe_fanout_capture.ccs](../examples/recipe_fanout_capture.ccs) · Spec §8.11
 
-`@parallel` is a lexical fork-join. It is not a nursery and it does not
-create a task the program can hold. `n.spawn` names a lifetime that may
-outlive the spawn point (`@destroy` waits that nursery; `n.abandon()`
-consumes the handle without joining). `@parallel` joins at the closing brace.
+`@parallel` is a lexical fork-join. It is not a nursery. The brace and
+`for` forms are `CCParallel !>(CCError)`: create can fail; `.wait()` is
+the join. A dest is live before the arms. Bare `@parallel { }` is an
+unconsumed Result — bind (`CCParallel h = … !>;`) or `!>.wait()!>;`.
+Binding starts the arms and does not join. The first arm has finished
+when the construct returns `h`; siblings may still be running. A dest
+bound to one unmarked arm is ill-formed: this dest is never live on
+the caller. Mark that arm `@serial`, or join with `!>.wait()!>`.
+`h.wait()` joins them and publishes their writes. `h.cancelled` is
+atomic. `h.cancel()` is `true` when this call stored live→cancelled.
+Spawned arms do not inherit `@with_deadline`; they poll `h.cancelled`.
+When several arms share one deadline, name it (`as dl`) and use `dl`,
+or write `@with_deadline(dl)` to make that object current.
+`n.spawn` names a lifetime that may outlive the spawn point (`@destroy`
+waits that nursery; `n.abandon()` consumes the handle without joining).
 
 | Form | Meaning |
 |------|---------|
 | `@parallel { a = f(); b = g(); }` | Independent assignment arms. First on the caller; the rest may spawn. |
+| `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. `h.wait()` joins. Arms may cancel/adopt/pause `h`. `h.wait()` inside an arm of `h` is an error. |
 | `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; writes exactly one outer name. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. The body always runs. |
 | `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; a span of 0 or 1 is a plain `for`. `return` is `break` then `return` from the function after the join. |
@@ -244,11 +256,11 @@ int a = 0, b = 0;
         a = t;
     }
     b = g();
-}
+} !>.wait()!>;
 
 @parallel for (y in 0..h) {
     row(y);
-}
+} !>.wait()!>;
 ```
 
 `@serial` is legal only as a direct child of `@parallel { }`. A bare `{ }`

@@ -1,30 +1,46 @@
 /*
- * Recipe: Deadlines with @with_deadline
+ * Recipe: Deadlines and cancel
  *
- * @with_deadline(duration) { ... } establishes a deadline for the block.
- * Every suspension point (await, cancellation-aware op) inside the scope
- * observes the deadline cooperatively.
- *
- * Two forms:
+ * `@with_deadline(duration)` makes a clock current for the block.
+ * Poll it. `cc_sleep_ms` waits out its argument; it does not wake
+ * on cancel or expiry.
  *
  *   @with_deadline(d) { ... }
- *       Sets an ambient deadline. Tasks use cancellation-aware ops (or
- *       cc_deadline_expired(cc_current_deadline())) to exit gracefully.
+ *       Ambient clock. Poll `cc_deadline_expired(cc_current_deadline())`
+ *       or `cc_is_cancelled()` (that deadline).
  *
  *   @with_deadline(d) as dl { ... }
- *       Same, but binds CCDeadline* dl for direct inspection in the block
- *       (remaining time, explicit expiry checks, logging, etc.).
+ *       Same clock, bound as `CCDeadline* dl`. Capture `dl` into
+ *       arms that share D. `@with_deadline(dl)` makes that object
+ *       current on this arm — it does not mint a clock.
+ *
+ *   CCParallel h = @parallel { … } !>;
+ *       A dest is live before the arms. Binding starts work; it does
+ *       not join. The first arm has finished when this returns `h`.
+ *       `h.wait()` joins siblings and makes their writes (`ticks`)
+ *       and the first arm's writes (`saw`) visible. `h.cancelled` is
+ *       atomic: siblings may poll it while the first arm stores the
+ *       cancel. `h.cancel()` is `bool !>(CCIoError)`: `true` if this
+ *       call performed the live→cancelled transition; `false` if
+ *       already cancelled or joined.
+ *
+ *       The first arm runs on the caller and sees `@with_deadline`.
+ *       Spawned arms do not inherit that clock. They poll
+ *       `h.cancelled` — not `cc_is_cancelled()` (deadline) and not
+ *       `cc_cancelled()` (nursery). `@parallel` is not a nursery.
+ *       When both arms are bounded by D, name `dl` and use it
+ *       (form 4). Do not pack D into a request context.
  *
  * Duration helpers: seconds(n), millis(n) (see cc_sched.cch).
  */
-#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
 #include <stdlib.h>
 #include <ccc/script/stdio.cch>
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
-    /* --- form 1: ambient deadline, polled via cc_current_deadline() --- */
+    /* --- form 1: ambient deadline --- */
     int work_done = 0;
     @with_deadline(millis(50)) {
         while (!cc_deadline_expired(cc_current_deadline())) {
@@ -34,7 +50,7 @@ int main(void) {
     }
     println(@string(`form 1: ${work_done} iterations before deadline`, @scratch)) !>;
 
-    /* --- form 2: `as dl` binds a handle for inspection --- */
+    /* --- form 2: `as dl` binds the clock --- */
     int checkpoints = 0;
     @with_deadline(millis(50)) as dl {
         while (!cc_deadline_expired(dl)) {
@@ -44,10 +60,63 @@ int main(void) {
     }
     println(@string(`form 2: ${checkpoints} checkpoints against handle`, @scratch)) !>;
 
-    /* Both forms exit cleanly when the deadline expires; the scope's
-     * pushed deadline is popped automatically on block exit. */
+    /* --- form 3: clock expires → cancel spawned siblings --- */
+    int ticks = 0;
+    int saw = 0;
+    int handle_cancelled = 0;
+    @with_deadline(millis(50)) {
+        CCParallel h = @parallel {
+            @serial {
+                while (!cc_deadline_expired(cc_current_deadline()))
+                    cc_sleep_ms(10);
+                bool did = h.cancel() !>;
+                saw = did ? 1 : 0;
+            }
+            @serial {
+                int n = 0;
+                while (!h.cancelled) {
+                    n++;
+                    cc_sleep_ms(10);
+                }
+                ticks = n;
+            }
+        } !>;
+        h.wait() !>;
+        handle_cancelled = h.cancelled;
+    }
+    println(@string(`form 3: ${ticks} sibling ticks; cancel=${saw}`, @scratch)) !>;
+
+    /* --- form 4: both arms share D; name it --- */
+    int a_ticks = 0;
+    int b_ticks = 0;
+    @with_deadline(millis(50)) as dl {
+        CCParallel h = @parallel {
+            @serial {
+                int n = 0;
+                while (!cc_deadline_expired(dl)) {
+                    n++;
+                    cc_sleep_ms(10);
+                }
+                a_ticks = n;
+            }
+            @serial {
+                int n = 0;
+                @with_deadline(dl) {
+                    while (!cc_deadline_expired(cc_current_deadline())) {
+                        n++;
+                        cc_sleep_ms(10);
+                    }
+                }
+                b_ticks = n;
+            }
+        } !>;
+        h.wait() !>;
+    }
+    println(@string(`form 4: a=${a_ticks} b=${b_ticks} (named dl)`, @scratch)) !>;
 
     int ok = (work_done  >= 1 && work_done  <= 10)
-          && (checkpoints >= 1 && checkpoints <= 10);
+          && (checkpoints >= 1 && checkpoints <= 10)
+          && (saw == 1 && handle_cancelled && ticks >= 1 && ticks <= 20)
+          && (a_ticks >= 1 && a_ticks <= 20 && b_ticks >= 1 && b_ticks <= 20);
     return ok ? 0 : 1;
 }

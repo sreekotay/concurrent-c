@@ -301,10 +301,10 @@ bugs.
 | `@errhandler`  | Block-scoped handler for `!>;` / `@err`, selected by Result error type  | `@errhandler(CCError e) cc_error_exit(e);` |
 | `@err`         | Forward current error to the matching `@errhandler` for that `E`        | `@err(e);`                             |
 | `@with_deadline` | Apply deadline to a block                                             | `@with_deadline(seconds(5)) { … }`     |
-| `@parallel`      | Join independent assignment arms, or walk an index range              | `@parallel { a = f(); b = g(); }`      |
-| `@parallel (pred)` | Same join; spawn if `pred`, otherwise run the arms in order         | `@parallel (d < k) { a = f(); b = g(); }` |
-| `@parallel for`  | Independent iterations over a half-open integer range                 | `@parallel for (i in 0..n) { … }`      |
-| `@parallel seq (cond)` | Same join; `seq` names the denial: run the arms in order         | `@parallel seq (use_par) { a = f(); b = g(); }` |
+| `@parallel`      | Join independent assignment arms, or walk an index range              | `@parallel { a = f(); b = g(); } !>.wait()!>;` |
+| `@parallel (pred)` | Same join; spawn if `pred`, otherwise run the arms in order         | `@parallel (d < k) { a = f(); b = g(); } !>.wait()!>;` |
+| `@parallel for`  | Independent iterations over a half-open integer range                 | `@parallel for (i in 0..n) { … } !>.wait()!>;` |
+| `@parallel seq (cond)` | Same join; `seq` names the denial: run the arms in order         | `@parallel seq (use_par) { a = f(); b = g(); } !>.wait()!>;` |
 | `@parallel wait (ts) for` | Ordered spawn loop over a turnstile; `bool !>(CCError)` | `bool fin = @parallel wait (ts) for (i in 0..n) { step(i) !>; } !>;` |
 | `@serial`        | Multi-statement arm of `@parallel { }`; assigns one outer name        | `@serial { int t = f(); a = t; }`      |
 | `@destroy`     | Attach cleanup to a result-unwrap                                       | `FILE* f = open() !> @destroy;`         |
@@ -336,10 +336,10 @@ bugs.
 | `@defer stmt;`                  | Schedule statement to run on scope exit                  | `@defer file.close();`                                   |
 | `@comptime if (cond) { }`       | Compile-time conditional                                 | `@comptime if (FEATURE_X) { }`                           |
 | `@errhandler(E e) stmt` / `{ }` | Block-scoped handler for Result error type `E` (§3.1)    | `@errhandler(CCError e) cc_error_exit(e);` |
-| `@parallel { arms }`            | Join independent `name = expr;`, `expr !>;`, or `@serial` arms (§8.11) | `@parallel { a = f(); b = g(); }`          |
-| `@parallel (pred) { arms }`     | Same join; spawn if `pred`, else run in order (§8.11.3)   | `@parallel (d < k) { a = f(); b = g(); }`  |
-| `@parallel for (i in lo..hi)`   | Independent iterations over a half-open range (§8.11.4)   | `@parallel for (y in 0..h) { row(y); }`    |
-| `@parallel seq (cond) { arms }` | Same join; named sequential denial (§8.11.5)              | `@parallel seq (use_par) { a = f(); b = g(); }` |
+| `@parallel { arms }`            | `CCParallel !>(CCError)` join of `name = expr;`, `expr !>;`, or `@serial` arms (§8.11) | `@parallel { a = f(); b = g(); } !>.wait()!>;` |
+| `@parallel (pred) { arms }`     | Same join; spawn if `pred`, else run in order (§8.11.3)   | `@parallel (d < k) { a = f(); b = g(); } !>.wait()!>;` |
+| `@parallel for (i in lo..hi)`   | Independent iterations over a half-open range (§8.11.4)   | `@parallel for (y in 0..h) { row(y); } !>.wait()!>;` |
+| `@parallel seq (cond) { arms }` | Same join; named sequential denial (§8.11.5)              | `@parallel seq (use_par) { a = f(); b = g(); } !>.wait()!>;` |
 | `@parallel [seq (cond)] wait (ts) for` | Ordered spawn loop over a turnstile; `bool !>(CCError)` (§8.11.6) | `bool fin = @parallel wait (ts) for (i in 0..n) { step(i) !>; } !>;` |
 | `@serial { stmts }`             | Multi-statement arm of `@parallel { }` (§8.11.2)          | `@serial { int t = f(); a = t; }`          |
 | `worker (w)`                    | Wait-for binder: the runner slot index (§8.11.6)          | `wait (ts) for (i in 0..n) worker (w) { z[w]… }` |
@@ -405,11 +405,11 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cl
 
 | Form | Purpose | Example |
 | ---- | ------- | ------- |
-| `@parallel { a = …; b = …; }` | Join independent assignments. Always tries to spawn. | `@parallel { left = f(); right = g(); }` |
-| `@parallel { @serial { … } … }` | Same join; an arm may be ordinary C that writes one outer name. | `@parallel { @serial { int t = f(); a = t; } b = g(); }` |
-| `@parallel (pred) { a = …; b = …; }` | Same arms. Spawn if `pred`; otherwise serial. | `@parallel (d < k) { left = f(); right = g(); }` |
-| `@parallel for (i in lo..hi) { }` | Independent iterations over a half-open integer range. Bisects; may sequentialize. | `@parallel for (y in 0..h) { row(y); }` |
-| `@parallel seq (cond) { a = …; b = …; }` | Same arms; `seq` names the denial: run in order when `cond` is false. | `@parallel seq (use_par) { left = f(); right = g(); }` |
+| `@parallel { a = …; b = …; }` | `CCParallel !>(CCError)` join. Always tries to spawn. | `@parallel { left = f(); right = g(); } !>.wait()!>;` |
+| `@parallel { @serial { … } … }` | Same join; an arm may be ordinary C that writes one outer name. | `@parallel { @serial { int t = f(); a = t; } b = g(); } !>.wait()!>;` |
+| `@parallel (pred) { a = …; b = …; }` | Same arms. Spawn if `pred`; otherwise serial. | `@parallel (d < k) { left = f(); right = g(); } !>.wait()!>;` |
+| `@parallel for (i in lo..hi) { }` | Independent iterations over a half-open integer range. Bisects; may sequentialize. | `@parallel for (y in 0..h) { row(y); } !>.wait()!>;` |
+| `@parallel seq (cond) { a = …; b = …; }` | Same arms; `seq` names the denial: run in order when `cond` is false. | `@parallel seq (use_par) { left = f(); right = g(); } !>.wait()!>;` |
 | `@parallel [seq (cond)] wait (ts) for (i in lo..hi) { }` | Ordered spawn loop: `bool !>(CCError)`; `enter(i)` in loop order on the caller, depth-capped, `leave()` after each body. | `bool fin = @parallel wait (ts) for (i in 0..n) { step(i) !>; } !>;` |
 
 
@@ -420,6 +420,7 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cl
 | --------------------------------- | -------------------------------------------------------- | --------------------------------------------------------------- |
 | `@with_deadline(ms) { }`           | Make a relative deadline current for operations that consult it. | `@with_deadline(seconds(5)) { cc_chan_match_select(..., cc_current_deadline()); }` |
 | `@with_deadline(ms) as handle { }` | Same, with the active `CCDeadline*` bound inside the block. | `@with_deadline(seconds(5)) as dl { if (cc_deadline_expired(dl)) break; }` |
+| `@with_deadline(dl) { }`           | Push an existing `CCDeadline*`. No new clock. | `@with_deadline(dl) { recv() !>; }` |
 
 
 ### Library Functions
@@ -3357,7 +3358,7 @@ return;
 
 ## 8. Concurrency
 
-Concurrent-C provides structured concurrency through nurseries (`CCNursery`, §8.1) and a lexical fork-join (`@parallel`, §8.11). A nursery is a scope-bound handle that manages task spawning, joining, and explicit cooperative cancellation. `@parallel` joins independent arms or iterations at a brace; the wait-for form is `bool !>(CCError)`. It does not create a task the program can hold. For the rare case where OS-level thread control is required, low-level APIs exist but should not be used in typical application code.
+Concurrent-C provides structured concurrency through nurseries (`CCNursery`, §8.1) and a lexical fork-join (`@parallel`, §8.11). A nursery is a scope-bound handle that manages task spawning, joining, and explicit cooperative cancellation. The brace and `for` forms of `@parallel` are `CCParallel !>(CCError)`: create can fail; `.wait()` is the join. The wait-for form is `bool !>(CCError)`. `@parallel` is not a nursery. For the rare case where OS-level thread control is required, low-level APIs exist but should not be used in typical application code.
 
 This section specifies:
 
@@ -3371,7 +3372,7 @@ This section specifies:
 - **§8.8 Blocking, Stalling, and Execution Contexts** — execution model for blocking operations, stalling classification, and cancellation guarantees
 - **§8.9 Error handling in async and nurseries** — composition of result unwrap operators (`?>`, `!>`, `@err`, `@errhandler`) defined in §3.1 with async functions and nursery teardown
 - **§8.10 Named exclusive sections (`CCExclusive`)** — arena-backed, name-keyed mutual exclusion for short critical sections; `acquire_when` gates entry on a predicate
-- **§8.11 `@parallel`** — value join of independent assignments or `@serial` arms (§8.11.2), optional spawn predicate, `@parallel for` over a half-open index range, and `@parallel wait for` as `bool !>(CCError)` (§8.11.6)
+- **§8.11 `@parallel`** — `CCParallel !>(CCError)` join of independent assignments or `@serial` arms (§8.11.2), live dest / `.wait()` / `.cancel()` / `.adopt()`, optional spawn predicate, `@parallel for` over a half-open index range, and `@parallel wait for` as `bool !>(CCError)` (§8.11.6)
 - **§8.12 Ordered pipeline turnstile (`CCTurnstile`)** — depth cap plus sequenced stages; stage wait/pass use create-on-first-touch gate cells
 
 ---
@@ -4356,9 +4357,14 @@ void cc_cancel(CCDeadline* d);
 
 - `@with_deadline(ms) { ... }` constructs a deadline relative to the current
   clock with `cc_deadline_after_ms(ms)`, pushes it while the block executes,
-  and restores the previous deadline on every exit.
-- `@with_deadline(ms) as handle { ... }` binds a `CCDeadline*` to that active
-  deadline for explicit inspection inside the block.
+  and restores the previous deadline on every exit. `ms` is a duration in
+  milliseconds (`seconds`, `millis`, `micros`).
+- `@with_deadline(dl) { ... }` when `dl` is a `CCDeadline*` pushes that
+  object. It does not allocate a clock. The same `dl` may be named in
+  several arms or re-pushed so operations that consult
+  `cc_current_deadline()` see it.
+- `@with_deadline(x) as handle { ... }` binds a `CCDeadline*` to whichever
+  object that block pushed.
 - Expiry is observed only by operations that accept or consult that deadline.
 - `cc_cancel(&d)` and clock expiry make the same `CCDeadline` object expired;
   neither action cancels an unrelated nursery.
@@ -5236,9 +5242,9 @@ void !>(CCError) cc_exclusive_mutex_acquire_when_into(CCExclusiveMutex* m,
 
 `@parallel` names a join of independent work. It is not a nursery. The brace form is `CCParallel !>(CCError)`: create can fail; `.wait()` is the join. The implementation may run some arms or iterations on other workers, or run all of them on the caller. `n.spawn` does not sequentialize; `@parallel` may.
 
-The form is selected by the tokens after `@parallel`: `{` (always try to spawn), `(` or `seq (` (spawn if the predicate, §8.11.3, §8.11.5), `wait (` (ordered spawn loop over a turnstile; an expression of type `bool !>(CCError)`, §8.11.6), or `for` (bisected range, §8.11.4). Assignment join and `@parallel for` are statements. The wait-for form is a Result expression.
+The form is selected by the tokens after `@parallel`: `{` (always try to spawn), `(` or `seq (` (spawn if the predicate, §8.11.3, §8.11.5), `wait (` (ordered spawn loop over a turnstile; an expression of type `bool !>(CCError)`, §8.11.6), or `for` (bisected range, §8.11.4). Assignment join and `@parallel for` are `CCParallel !>(CCError)`. A statement consumes the Result and waits (`!>.wait()!>;`) or binds the handle (`CCParallel h = … !>;`). A bare construct is an unconsumed Result. The wait-for form is `bool !>(CCError)`.
 
-**Captures.** A body or arm may use locals of the enclosing frame. Such names are captured by reference: the lowering takes each captured local's address, and every use inside the body denotes the frame's object itself. There is one object — a write through a capture is visible to the frame after the brace and to concurrently running arms or iterations, subject to the construct's independence and ordering rules. No copy is made, and no capture outlives its frame: the join completes before the construct yields. The loop index of a `for` form is a per-iteration value, not a capture. These rules are distinct from closure-literal capture lists (§2.2), which copy by value because a closure may escape its frame.
+**Captures.** A body or arm may use locals of the enclosing frame. Such names are captured by reference: the lowering takes each captured local's address, and every use inside the body denotes the frame's object itself. There is one object — a write through a capture is visible to the frame after `.wait()` and to concurrently running arms or iterations, subject to the construct's independence and ordering rules. No copy is made, and no capture outlives its frame: `.wait()` completes the join; captured objects must outlive that wait. The loop index of a `for` form is a per-iteration value, not a capture. These rules are distinct from closure-literal capture lists (§2.2), which copy by value because a closure may escape its frame.
 
 #### 8.11.1 Assignment join
 
@@ -5247,10 +5253,10 @@ T a, b;
 @parallel {
     a = f();
     b = g();
-}
+} !>.wait()!>;
 ```
 
-The block holds two or more arms. An arm is `name = expr;` where `name` is a simple identifier already in scope, `@serial { … }` (§8.11.2), or an expression statement with no assignment (no named write; the expression runs). After the closing brace, every named write is visible and every expression arm has completed.
+The block holds one or more arms. An arm is `name = expr;` where `name` is a simple identifier already in scope, `@serial { … }` (§8.11.2), or an expression statement with no assignment (no named write; the expression runs). After `.wait()`, every named write is visible and every expression arm has completed.
 
 Two handles join by waiting them as effect arms of a new `@parallel`:
 
@@ -5265,15 +5271,23 @@ CCParallel h2 = @parallel { c = p(); d = q(); } !>;
 
 `h1.adopt(h2)` links a cancel tree. `h1.cancel()` cancels adopted children (newest first), then `h1`. `h2.cancel()` cancels `h2` only. Adopt is not a move: both handles stay live. Self, cycle, a second parent, a joined parent or child, and a full child list are errors.
 
-A dest bound to the construct (`CCParallel h = @parallel { … } !>;`) is that handle before any arm runs. Arms may `h.cancel()`, `h.adopt(…)`, `h.pause()`, and `h.resume()`. `h.wait()` in an arm of `h` is ill-formed. The first arm is not a task of `h`: cancel from the caller stops spawned siblings; the caller continues.
+A dest bound to the construct (`CCParallel h = @parallel { … } !>;`) is that handle before any arm runs. Binding starts the arms and does not join. The first arm has finished on the caller when the construct returns `h`. Remaining arms may still be running. `h.wait()` joins them and synchronizes-with every arm: after it returns, those arms' writes to captured objects are visible. `@parallel { … } !>.wait()!>;` waits before the statement completes. A dest bound to a one-arm `@parallel` whose arm is not `@serial` is ill-formed: this dest is never live on the caller. `@parallel { work(); } !>.wait()!>;` is well-formed. `CCParallel h = @parallel { @serial { a = t; } } !>;` marks the caller strand. Reading another arm's destinations before `.wait()` returns is undefined. Arms may `h.cancel()`, `h.adopt(…)`, `h.pause()`, and `h.resume()`. `h.wait()` in an arm of `h` is ill-formed. The first arm is not a task of `h`: cancel from the caller stops spawned siblings; the caller continues.
+
+`h.cancelled` is an atomic flag. A concurrent load with `h.cancel()` is defined. After `h.wait()`, a load of `h.cancelled` is visible to the waiter.
+
+`h.cancel()` is `bool !>(CCIoError)`. `ok(true)` means this call performed the live→cancelled transition on this handle or an adopted descendant. `ok(false)` means the tree was already cancelled or already joined. The first `ok(true)` is the transition; a later call is `ok(false)`. `h.pause()` / `h.resume()` are the same Result shape: `ok(true)` is this call's transition; `ok(false)` is already in that state or already joined.
+
+UFCS is the surface: `h.wait()` is `cc_parallel_wait(h)`, and the same for `cancel` / `pause` / `resume`. A void host unwraps in place (`h.wait() !>(e) { (void)e; };`). That lowers. A `void !>(CCError)` wrapper is a seam for `return h.wait()` plus an `@errhandler` that maps `CCIoError` to `cc_ok()` — not a second protocol. When the host is void, the wrapper is unnecessary; kick/drop may cancel and wait a dest that already ended (`wait` of a joined dest is `ok`; `cancel` / `pause` / `resume` of a joined dest are `ok(false)`).
+
+Spawned arms do not inherit the caller's current deadline scope. The first arm runs on the caller and sees `@with_deadline` / `cc_current_deadline()`. A spawned arm polls `h.cancelled` for this construct's cancel. `cc_is_cancelled()` and `cc_deadline_expired(cc_current_deadline())` in a spawned arm do not observe the caller's clock. When several arms share one deadline `D`, name it (`@with_deadline(...) as dl`) and use `dl` in those arms, or write `@with_deadline(dl)` to make `D` current there. That is a stated fact, not a context object.
 
 Compound assignment, indirection, field and subscript destinations, declarations, and other statements are ill-formed as assignment arms. A bare `{ }` as a direct child of `@parallel { }` is ill-formed; braces are C scope, not an arm. A `for` statement as a direct child is ill-formed — the loop is a form of the keyword (§8.11.4).
 
-Lowering is fork-join: the first arm runs on the caller; each remaining arm is spawned and joined before the brace. If spawn fails, that arm runs on the caller. The result is the same either way.
+Lowering is fork-join: the dest exists before any arm runs; the first arm runs on the caller; each remaining arm is spawned and attached to the dest. `.wait()` joins. If spawn fails, that arm runs on the caller. The result is the same either way.
 
 A `return` in any arm joins every spawned sibling, then returns from the function. The construct does not wait for a later or earlier arm that has not returned — including an arm that never will (an external hang). If two arms both `return`, which value is taken is not specified. On the sequential denial (`seq` false, or `#pragma(@parallel) off`) it is a normal C `return`: later arms do not run.
 
-Arms must not race. Sharing a location across arms, or reading another arm's destination, is undefined.
+Arms must not race. Sharing a location across arms, or reading another arm's destination, is undefined. The dest's `cancelled` flag is the exception: a sibling may load it while `cancel()` stores.
 
 #### 8.11.2 `@serial`
 
@@ -5285,7 +5299,7 @@ T a, b;
         a = t;
     }
     b = g();
-}
+} !>.wait()!>;
 ```
 
 `@serial { … }` is an arm of `@parallel { }`. Its body is ordinary C. It assigns exactly one simple outer name already in scope. Locals, `if`, `for`, and inner `{ }` are C scope inside the arm. After the join, that outer write is visible the same way an assignment arm's write is.
@@ -5301,7 +5315,7 @@ T left, right;
 @parallel (d < k) {
     left  = f();
     right = g();
-}
+} !>.wait()!>;
 ```
 
 `@parallel (pred) { … }` is the same join as §8.11.1, including `@serial` arms. When `pred` is true, lowering matches §8.11.1. When `pred` is false, the arms run in order on the caller and spawn is not attempted. The body always executes; `pred` chooses scheduling, not presence. There is no `else`. An empty predicate is ill-formed. `@parallel (pred) for` is ill-formed.
@@ -5313,7 +5327,7 @@ Independence is unchanged: reading another arm's destination is undefined on bot
 ```c
 @parallel for (i in lo..hi) {
     work(i);
-}
+} !>.wait()!>;
 ```
 
 `lo..hi` is a half-open integer range. `i` is an `int` bound in the body for each iteration in `[lo, hi)`. The body is ordinary statements. A C `for (;;)` head is ill-formed; the `in` spelling matches `@comptime for`.
@@ -5334,7 +5348,7 @@ Iterations must not race. Disjoint writes (`img[y * w + x] = …` for distinct `
 @parallel seq (use_par) {
     left  = f();
     right = g();
-}
+} !>.wait()!>;
 ```
 
 `@parallel seq (cond) { … }` is the gated assignment join of §8.11.3 with the denial written out: when `cond` is true the join tries to spawn; when false the arms run in order on the caller. `seq` names what happens when parallelism is not granted — the same body runs sequentially. Because `cond` is an ordinary runtime expression, one body carries two schedules: differential testing and adaptive dispatch flip a flag, not the code. `@parallel seq (cond) for` without `wait` is ill-formed; the `for` denial spelling is §8.11.6.
@@ -5369,7 +5383,7 @@ A wait-for whose body can so `break` cannot discard the bool: `bool fin = @paral
 
 #### 8.11.7 Grain and limits
 
-An assignment or `@serial` arm after the first is spawned as a fiber and joined before the brace. `@parallel for` spawns one half of a span at each bisection; a span of length 0 or 1 is a sequential `for`. In-flight `@parallel` fibers are capped at 256 times the number of online processors; further arms and leftover spans run on the caller. That ceiling is an allocation bound, not a grain. The construct does not estimate how much work an arm contains. A caller who knows a cutoff writes it on the join (`@parallel (d < k) { … }`) so the same arms run in parallel above the cut and in order below it.
+An assignment or `@serial` arm after the first is spawned as a fiber and attached to the dest; `.wait()` joins. `@parallel for` spawns one half of a span at each bisection; a span of length 0 or 1 is a sequential `for`. In-flight `@parallel` fibers are capped at 256 times the number of online processors; further arms and leftover spans run on the caller. That ceiling is an allocation bound, not a grain. The construct does not estimate how much work an arm contains. A caller who knows a cutoff writes it on the join (`@parallel (d < k) { … }`) so the same arms run in parallel above the cut and in order below it.
 
 The range bounds of `@parallel for` are converted to `int`. A span whose length does not fit in `int` is outside this form.
 
@@ -5411,7 +5425,7 @@ bang_tail     ::= '!>' ';'
                |  '!>' '(' ident ')' stmt
                |  '!>' '(' ident ')' '{' stmt* '}' ';'?
 
-parallel_join ::= '{' parallel_arm parallel_arm+ '}'
+parallel_join ::= '{' parallel_arm+ '}'
 
 parallel_arm  ::= ident '=' expr ';'
                |  serial_arm

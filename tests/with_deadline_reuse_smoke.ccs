@@ -1,0 +1,30 @@
+/*
+ * @with_deadline(dl) pushes the existing clock. Spawned work does not
+ * inherit; it names dl.
+ */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    CCDeadline* caller = NULL;
+    CCDeadline* spawned = NULL;
+    @with_deadline(millis(200)) as dl {
+        CCParallel h = @parallel {
+            caller = cc_current_deadline();
+            @serial {
+                CCDeadline* t = NULL;
+                @with_deadline(dl) {
+                    t = cc_current_deadline();
+                }
+                spawned = t;
+            }
+        } !>;
+        h.wait() !>;
+        if (caller != dl || spawned != dl)
+            return 1;
+        if (cc_deadline_expired(dl))
+            return 1;
+    }
+    return 0;
+}

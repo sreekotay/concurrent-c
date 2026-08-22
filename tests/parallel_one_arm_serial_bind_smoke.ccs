@@ -1,0 +1,19 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int a = 0;
+    CCParallel h = @parallel {
+        @serial {
+            a = 41;
+        }
+    } !>;
+    h.wait() !>;
+    if (a != 41) {
+        fprintf(stderr, "FAIL a=%d\n", a);
+        return 1;
+    }
+    printf("parallel_one_arm_serial_bind_smoke: OK\n");
+    return 0;
+}

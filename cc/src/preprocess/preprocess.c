@@ -921,11 +921,12 @@ static char* cc__canonicalize_with_deadline_syntax(const char* src, size_t n) {
 }
 
 /* Lower canonical `with_deadline(expr) { ... }` into:
-     { CCDeadline __cc_dlN = cc_deadline_after_ms((uint64_t)(expr));
-       CCDeadline* __cc_prevN = cc_deadline_push(&__cc_dlN);
+     { CCDeadline __cc_dlN;
+       CCDeadline* __cc_useN = cc_deadline_scope(&__cc_dlN, (expr));
+       CCDeadline* __cc_prevN = cc_deadline_push(__cc_useN);
        @defer cc_deadline_pop(__cc_prevN);
        { ... } }
-
+   `expr` is milliseconds or an existing CCDeadline*.
    This is phase-3 lowering: canonical CC no longer contains the `@` alias,
    but host-facing parsing still needs the scope expanded into runtime
    scaffolding. */
@@ -1065,22 +1066,23 @@ static char* cc__lower_with_deadline_syntax(const char* src, size_t n) {
             char hdr[768];
             if (as_ident) {
                 snprintf(hdr, sizeof(hdr),
-                         "{ CCDeadline __cc_dl%lu = cc_deadline_after_ms((uint64_t)(%.*s)); "
-                         "CCDeadline* %.*s = &__cc_dl%lu; "
+                         "{ CCDeadline __cc_dl%lu; "
+                         "CCDeadline* %.*s = cc_deadline_scope(&__cc_dl%lu, (%.*s)); "
                          "CCDeadline* __cc_prev%lu = cc_deadline_push(%.*s); "
                          "@defer cc_deadline_pop(__cc_prev%lu); ",
                          counter,
-                         (int)(expr_r - expr_l), src + expr_l,
                          (int)as_ident_len, as_ident, counter,
+                         (int)(expr_r - expr_l), src + expr_l,
                          counter,
                          (int)as_ident_len, as_ident,
                          counter);
             } else {
                 snprintf(hdr, sizeof(hdr),
-                         "{ CCDeadline __cc_dl%lu = cc_deadline_after_ms((uint64_t)(%.*s)); "
-                         "CCDeadline* __cc_prev%lu = cc_deadline_push(&__cc_dl%lu); "
+                         "{ CCDeadline __cc_dl%lu; "
+                         "CCDeadline* __cc_use%lu = cc_deadline_scope(&__cc_dl%lu, (%.*s)); "
+                         "CCDeadline* __cc_prev%lu = cc_deadline_push(__cc_use%lu); "
                          "@defer cc_deadline_pop(__cc_prev%lu); ",
-                         counter,
+                         counter, counter, counter,
                          (int)(expr_r - expr_l), src + expr_l,
                          counter, counter, counter);
             }

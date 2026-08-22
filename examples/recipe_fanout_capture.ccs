@@ -1,15 +1,13 @@
 /*
- * Recipe: Fan-Out with Per-Task Capture
+ * Recipe: Independent fan-out
  *
- * When spawning tasks in a loop, capture each task's inputs by value.
- * Avoid reference-capturing the changing loop variable, because tasks
- * may run after the loop has advanced.
- *
- * Correct idiom: choose the per-task value first, then list it in the
- * closure capture list.
+ * Independent iterations are `@parallel for`. The index is the
+ * per-iteration value; writes go to disjoint slots. `n.spawn` in a C
+ * for-loop still needs a per-task copy of the loop variable — see
+ * recipe_explicit_capture.ccs.
  */
 
-#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
 #include <stdlib.h>
 #include <ccc/script/stdio.cch>
 
@@ -24,26 +22,17 @@ static int compute(int x) {
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
-    println(@string(`=== Fan-out: spawning ${NUM_TASKS} tasks ===`, @scratch)) !>;
+    println(@string(`=== Fan-out: ${NUM_TASKS} independent iterations ===`, @scratch)) !>;
 
-    {
-        CCNursery n = cc_nursery_create() !> @destroy;
-
-        for (int i = 0; i < NUM_TASKS; i++) {
-            int task_id = i;                    /* per-task value */
-
-            n.spawn(() => [task_id] {
-                @errhandler(CCError e) cc_error_exit(e);
-                int r = compute(task_id);
-                println(@string(`  task ${task_id}: compute(${task_id}) = ${r}`, @scratch)) !>;
-                results[task_id] = r;           /* disjoint write, no race */
-            });
-        }
-    }
+    int k;
+    @parallel for (k in 0..NUM_TASKS) {
+        results[k] = compute(k);
+    } !>.wait()!>;
 
     println("\n=== Results ===") !>;
     int sum = 0;
-    for (int i = 0; i < NUM_TASKS; i++) {
+    int i;
+    for (i = 0; i < NUM_TASKS; i++) {
         println(@string(`  results[${i}] = ${results[i]}`, @scratch)) !>;
         sum += results[i];
     }

@@ -20,11 +20,11 @@ New to Concurrent-C? Work through these in order:
 | 3  | `recipe_unwrap_destroy_forms.ccs` | Unwrap shape | Same two ops × modifiers; `@destroy` on successful construction |
 | 4  | `recipe_ufcs_forms.ccs` | UFCS shape | One dispatch rule × spellings (families, bare-name, fallible chains) |
 | 4a | `recipe_user_generics.ccs` | Generics | `Name::[args]` + `CC_GENERIC_FACTORY` — same rule as Vec/Map |
-| 5  | `recipe_fanout_capture.ccs` | Multiple tasks | Spawning N tasks, fresh per-iteration captures |
+| 5  | `recipe_fanout_capture.ccs` | Independent fan-out | `@parallel for`; the index is the per-iteration value |
 | 6  | `recipe_explicit_capture.ccs` | Capture semantics | Value vs reference capture, mutation rules |
 | 7  | `recipe_channel_pipeline.ccs` | Communication | Channels, owned close, producer/consumer |
 | 8  | `recipe_async_await.ccs` | Async/Await | `@async` call stacks vs `spawn`, `@await`, composition |
-| 9  | `recipe_timeout.ccs` | Cancellation | deadlines, cooperative exit |
+| 9  | `recipe_timeout.ccs` | Deadlines & cancel | `@with_deadline`; live dest `h.cancel()`; siblings poll `h.cancelled` |
 | 10 | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
 | 11 | `recipe_ordered_parallel.ccs` | Ordered fan-out | `send_task` + ordered recv, FIFO without reorder buffer |
 | 11a | `recipe_parallel.ccs` | `@parallel` | assignment join, `@serial` arms, handle fan-in, `@parallel (pred)`, `@parallel for` |
@@ -47,7 +47,7 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 
 | File | Pattern | Key Concept |
 |------|---------|-------------|
-| `recipe_fanout_capture.ccs` | Fan-out | N tasks with captured data |
+| `recipe_fanout_capture.ccs` | Fan-out | `@parallel for`; disjoint slots; spawn-loop copy is `recipe_explicit_capture` |
 | `recipe_explicit_capture.ccs` | Capture semantics | Value vs reference capture |
 | `recipe_channel_pipeline.ccs` | Producer/consumer | Nested ownership + channel close |
 | `recipe_async_await.ccs` | Async/Await | `@async`, `@await`, `cc_block_on` |
@@ -59,7 +59,7 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_owned_view.ccs` | Owned or view | Construct / destroy / reopen; epochs as fields; Measure cannot `replace` |
 | `recipe_long_lived_store.ccs` | Long-lived store | Explicit provenance movement into an arena-owned store |
 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` on scope exit |
-| `recipe_timeout.ccs` | Deadline | Cooperative cancellation |
+| `recipe_timeout.ccs` | Deadline | Ambient / bound clock; `h.cancel()` stops siblings via `h.cancelled` |
 | `recipe_result_error_handling.ccs` | Results | `?>` : `E → T`; `!>` : `E →` control flow; `(e)` / bare `!>` |
 | `recipe_unwrap_destroy_forms.ccs` | Unwrap matrix | Two ops × modifiers; `@destroy` on successful construction |
 | `recipe_ufcs_forms.ccs` | UFCS matrix | One rule × spellings, including bare-name and fallible chains |
@@ -121,7 +121,7 @@ scanner still accepts raw controls. Full ladder:
 | File | Demonstrates |
 |------|--------------|
 | `recipe_tcp_echo.ccs` | TCP sockets, listen/accept/read/write |
-| `recipe_http_get.ccs` | Parallel HTTP requests with explicit nursery handles |
+| `recipe_http_get.ccs` | Parallel HTTP requests with `@parallel for` |
 
 HTTP examples require libcurl (system curl on macOS) and `-DCC_ENABLE_HTTP=1`. The
 source already declares `@link("curl")`, so linking is automatic:

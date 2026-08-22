@@ -182,6 +182,33 @@ static inline uint64_t seconds(uint64_t s) { return s * 1000; }
 static inline uint64_t millis(uint64_t ms) { return ms; }
 static inline uint64_t micros(uint64_t us) { return us / 1000; }  /* truncates to ms */
 
+/* `@with_deadline(x)`: duration (ms) fills `slot`; an existing CCDeadline*
+ * is that object. Spawned work names `dl` and, if it needs the clock
+ * current, writes `@with_deadline(dl)` — it does not inherit. */
+static inline CCDeadline* cc_deadline_scope_ms(CCDeadline* slot, uint64_t ms) {
+    if (!slot)
+        return NULL;
+    *slot = cc_deadline_after_ms(ms);
+    return slot;
+}
+
+static inline CCDeadline* cc_deadline_scope_ptr(CCDeadline* slot, CCDeadline* d) {
+    (void)slot;
+    return d;
+}
+
+static inline CCDeadline* cc_deadline_scope_cptr(CCDeadline* slot,
+                                                const CCDeadline* d) {
+    (void)slot;
+    return (CCDeadline*)(uintptr_t)d;
+}
+
+#define cc_deadline_scope(slot, x)                                             \
+    (_Generic((x),                                                             \
+        CCDeadline *: cc_deadline_scope_ptr,                                   \
+        const CCDeadline *: cc_deadline_scope_cptr,                            \
+        default: cc_deadline_scope_ms)((slot), (x)))
+
 // Thread-local "current deadline" scope (used by `with_deadline(...) {}` lowering).
 // These are runtime helpers; the language-level `cc_cancel()`/`cc_is_cancelled()` are provided
 // as macros in cc_runtime.cch to avoid colliding with the existing cc_cancel(CCDeadline*) API.

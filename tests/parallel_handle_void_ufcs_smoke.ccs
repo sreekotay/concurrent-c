@@ -1,0 +1,47 @@
+/*
+ * Statement-position UFCS !> is legal in a void host. Kick/drop can
+ * cancel+wait a dest that already ended. No Result wrapper required.
+ */
+#include <ccc/std/prelude.cch>
+
+typedef struct Work {
+    CCParallel h;
+    int live;
+} Work;
+
+static void walk_stop(Work* wk) {
+    if (!wk || !wk->live)
+        return;
+    wk->h.cancel() !>(e) { (void)e; };
+    wk->h.wait() !>(e) { (void)e; };
+    wk->live = 0;
+}
+
+static void pause_it(Work* wk) {
+    if (!wk || !wk->live)
+        return;
+    wk->h.pause() !>(e) { (void)e; };
+}
+
+static void resume_it(Work* wk) {
+    if (!wk || !wk->live || !wk->h.paused)
+        return;
+    wk->h.resume() !>(e) { (void)e; };
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int a = 0;
+    int b = 0;
+    Work wk;
+    wk.live = 1;
+    wk.h = @parallel {
+        a = 1;
+        b = 2;
+    } !>;
+    pause_it(&wk);
+    resume_it(&wk);
+    walk_stop(&wk);
+    walk_stop(&wk);
+    return (a + b == 3) ? 0 : 1;
+}

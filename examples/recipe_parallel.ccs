@@ -3,11 +3,12 @@
  *
  * Forms, selected by the token after @parallel:
  *
- *   @parallel { a = f(); b = g(); }
+ *   @parallel { a = f(); b = g(); } !>.wait()!>;
  *       Value join. Arms are independent assignments, an
  *       expression with no dest (it just runs), or @serial { … }
  *       that writes one outer name. The first arm runs on
- *       the caller; each remaining arm is spawned and joined.
+ *       the caller; each remaining arm is spawned. `.wait()`
+ *       joins. Binding without `.wait()` leaves siblings in flight.
  *
  *   @parallel (d < k) { a = f(); b = g(); }
  *       Same arms. Spawn if the predicate is true; otherwise run
@@ -21,7 +22,9 @@
  *
  * A dest `CCParallel h = @parallel { … } !>;` is live before the
  * arms: cancel/adopt/pause on `h` compose there. `h.wait()` in an
- * arm of `h` is an error.
+ * arm of `h` is an error. One unmarked arm with a dest is an error:
+ * this dest is never live on the caller. Mark the caller `@serial`,
+ * or join with `!>.wait()!>`.
  *
  * Neither form is a nursery. n.spawn still names a task lifetime.
  * A for statement as a direct child of @parallel { } is a compile

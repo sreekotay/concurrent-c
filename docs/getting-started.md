@@ -419,8 +419,12 @@ not cancel. Spec §8.1.5.
 
 ### `@parallel`
 
-Independent work that joins at a brace — no nursery, no task handle.
-`@serial` is a multi-statement arm that writes one outer name.
+Independent work. The brace and `for` forms are `CCParallel !>(CCError)`.
+`.wait()` joins. Binding the handle starts the arms and does not join.
+Not a nursery: `n.spawn` names a lifetime. A dest is live before the
+arms. A dest bound to one unmarked arm is ill-formed — mark the caller
+`@serial`, or join with `!>.wait()!>`. `@serial` is a multi-statement
+arm that writes one outer name.
 
 ```c
 int a = 0, b = 0;
@@ -430,11 +434,11 @@ int a = 0, b = 0;
         a = t;
     }
     b = g();
-}
+} !>.wait()!>;
 
 @parallel for (y in 0..h) {
     row(y);
-}
+} !>.wait()!>;
 ```
 
 `@parallel (pred) { … }` runs the same arms; spawn only if `pred` is true.
@@ -501,7 +505,7 @@ The wait parks a fiber or an OS thread. An expired deadline is
 
 ### Async / await
 
-Prefer `@parallel` for independent value joins that finish at a brace.
+Prefer `@parallel` for independent value joins (`.wait()` or a bound handle).
 Prefer `n.spawn` for sibling work under a nursery (named lifetime, channels,
 cancel). Prefer `@async` / `@await` when one call stack should suspend
 without inventing a nursery just to join. Drive an async stack from sync

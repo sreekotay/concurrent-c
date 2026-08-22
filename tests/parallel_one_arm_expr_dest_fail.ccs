@@ -1,10 +1,11 @@
 #include <ccc/std/prelude.cch>
 
+static void work(void) {}
+
 int main(void) {
     @errhandler(CCError err) { (void)err; return 1; }
-    int a = 0;
     CCParallel h = @parallel {
-        a = 1;
+        work();
     } !>;
     (void)h;
     return 0;

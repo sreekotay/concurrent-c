@@ -377,7 +377,11 @@ Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
 | `@parallel { a = f(); b = g(); }` | Independent assignment arms. First on the caller; the rest may spawn. |
 | `@parallel { h1.wait() !>; h2.wait() !>; }` | Expression arms. No assignment: the expression just runs. |
 | `h1.adopt(h2)` | Cancel tree. `h1.cancel()` is child then parent; `h2.cancel()` is child only. |
-| `CCParallel h = @parallel { … } !>;` | `h` is live before the arms. Arms may cancel/adopt/pause `h`. `h.wait()` inside an arm of `h` is an error. |
+| `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. First arm has finished; siblings may still run. `h.wait()` joins and publishes their writes. One unmarked arm is ill-formed: this dest is never live on the caller. Mark the caller `@serial`, or join with `!>.wait()!>`. |
+| `h.cancel()` | `bool !>(CCIoError)`. `true` = this call stored live→cancelled on `h` or an adopted child. |
+| `h.pause()` / `h.resume()` | `bool !>(CCIoError)`. `true` = this call's transition. |
+| `h.cancelled` | Atomic flag. Safe to poll from a sibling while `cancel()` stores. Visible after `h.wait()`. |
+| void host | `h.wait() !>(e) { (void)e; };` — UFCS `!>` lowers in void. No Result wrapper. |
 | `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; writes exactly one outer name. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. Body always runs. |
 | `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; span 0 or 1 is a plain `for`. |
@@ -406,11 +410,11 @@ CCParallel h2 = @parallel { c = p(); d = q(); } !>;
         a = t;                 // exactly one outer name
     }
     b = g();
-}
+} !>.wait()!>;
 
 @parallel for (i in 0..n) {    // half-open; bisects
     work(i);
-}
+} !>.wait()!>;
 
 bool fin = @parallel wait (ts) for (i in 0..n) {
     @stage (ts, 0, i) { work(i); }
@@ -641,19 +645,44 @@ at the use site.
 
 ## Timeouts & cancellation
 
+Recipe: [recipe_timeout.ccs](../examples/recipe_timeout.ccs).
+`cc_sleep_ms` waits out its argument; poll the clock or the handle.
+
 ```c
 @with_deadline(millis(50)) {
     while (!cc_deadline_expired(cc_current_deadline())) {
         do_work();
-        cc_sleep_ms(10);                 // cancellation-aware
+        cc_sleep_ms(10);
     }
 }
 
-@with_deadline(millis(50)) as dl {       // bind handle
+@with_deadline(millis(50)) as dl {       // bind the clock
     while (!cc_deadline_expired(dl)) { … }
 }
 
-if (cc_is_cancelled()) return;
+@with_deadline(dl) {                      // same object, now current here
+    recv() !>;                           // sees D; does not mint a clock
+}
+
+if (cc_is_cancelled()) return;           // that deadline, not a nursery
+
+CCParallel h = @parallel {
+    @serial {
+        while (!cc_deadline_expired(cc_current_deadline()))
+            cc_sleep_ms(10);
+        bool did = h.cancel() !>;        // true = this call did the transition
+        saw = did ? 1 : 0;
+    }
+    @serial {
+        int n = 0;
+        while (!h.cancelled) {           // atomic; spawned arms do not see the clock
+            n++;
+            work();
+        }
+        ticks = n;
+    }
+} !>;
+h.wait() !>;                             // required: bind does not join
 ```
 
 ---
@@ -697,7 +726,7 @@ ccc examples/js/jsdemo.shcc         # CC→JS (guest; Node owns env)
 |---------|--------|
 | Owned or view / reopen | [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs) |
 | Worker pool | [recipe_worker_pool.ccs](../examples/recipe_worker_pool.ccs) |
-| Fan-out / captures | [recipe_fanout_capture.ccs](../examples/recipe_fanout_capture.ccs) |
+| Fan-out / `@parallel for` | [recipe_fanout_capture.ccs](../examples/recipe_fanout_capture.ccs) |
 | Ordered parallel | [recipe_ordered_parallel.ccs](../examples/recipe_ordered_parallel.ccs) |
 | `@parallel` / `@serial` | [recipe_parallel.ccs](../examples/recipe_parallel.ccs) |
 | Prepare A+B / hold / commit | [recipe_prepare_commit.ccs](../examples/recipe_prepare_commit.ccs) |
