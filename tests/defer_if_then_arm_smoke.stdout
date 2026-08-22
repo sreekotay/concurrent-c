@@ -1,0 +1,6 @@
+after0
+after1
+inblock
+take
+else
+All if-then @defer tests passed!

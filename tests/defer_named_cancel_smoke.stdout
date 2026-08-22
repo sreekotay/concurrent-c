@@ -1,0 +1,7 @@
+block cancel ok
+double cancel ok
+named run ok
+selective cancel ok
+fn cancel ok
+fn run ok
+All named defer tests passed!

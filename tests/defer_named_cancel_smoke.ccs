@@ -1,0 +1,99 @@
+/* Named @defer + @cancel: cancel skips, double-cancel is a no-op, uncancelled runs. */
+#include <stdio.h>
+
+int g_ran = 0;
+
+void mark(void) {
+    g_ran = 1;
+    printf("ran\n");
+}
+
+int fn_level_cancel(void) {
+    @defer cleanup: mark();
+    @cancel cleanup;
+    return 0;
+}
+
+int fn_level_runs(void) {
+    @defer cleanup: mark();
+    return 0;
+}
+
+int main(void) {
+    printf("=== cancel skips ===\n");
+    g_ran = 0;
+    {
+        @defer cleanup: mark();
+        @cancel cleanup;
+    }
+    if (g_ran) {
+        printf("ERROR: cancelled block defer ran\n");
+        return 1;
+    }
+    printf("block cancel ok\n");
+
+    printf("=== double cancel ===\n");
+    g_ran = 0;
+    {
+        @defer cleanup: mark();
+        @cancel cleanup;
+        @cancel cleanup;
+    }
+    if (g_ran) {
+        printf("ERROR: double-cancel defer ran\n");
+        return 1;
+    }
+    printf("double cancel ok\n");
+
+    printf("=== named runs ===\n");
+    g_ran = 0;
+    {
+        @defer cleanup: mark();
+    }
+    if (!g_ran) {
+        printf("ERROR: named defer did not run\n");
+        return 1;
+    }
+    printf("named run ok\n");
+
+    printf("=== selective cancel ===\n");
+    {
+        int first = 0;
+        int second = 0;
+        {
+            @defer keep_first: first = 1;
+            @defer drop_second: second = 1;
+            @cancel drop_second;
+        }
+        if (second) {
+            printf("ERROR: cancelled second ran\n");
+            return 1;
+        }
+        if (!first) {
+            printf("ERROR: first did not run\n");
+            return 1;
+        }
+    }
+    printf("selective cancel ok\n");
+
+    printf("=== fn-level cancel ===\n");
+    g_ran = 0;
+    fn_level_cancel();
+    if (g_ran) {
+        printf("ERROR: cancelled fn defer ran\n");
+        return 1;
+    }
+    printf("fn cancel ok\n");
+
+    printf("=== fn-level runs ===\n");
+    g_ran = 0;
+    fn_level_runs();
+    if (!g_ran) {
+        printf("ERROR: fn named defer did not run\n");
+        return 1;
+    }
+    printf("fn run ok\n");
+
+    printf("All named defer tests passed!\n");
+    return 0;
+}

@@ -2125,7 +2125,12 @@ optional scratch restores, optional nested scope life, then `goto` the function
 cleanup epilogue. Each function-scope cleanup site stamps a high-water mark at
 its declaration; the epilogue runs site `i` only when the mark shows that site
 was reached. Block/loop scopes use an analogous per-scope mark so break /
-continue / soft-return do not name unreached locals.
+continue / soft-return do not name unreached locals. A braceless
+`if` / `else` whose statement is `@defer` registers on the enclosing block
+with a per-site reach flag (a later taken `@defer` must not enable a skipped
+earlier arm). The `@defer` lowers to a C statement so the controlling `if`
+does not attach to the next line. A loop body's `@defer` stays on that loop
+scope.
 
 **Conformance.** In any function with registered function-scope cleanup, every
 `return` lowers to the soft-goto form that reaches the cleanup epilogue. Every
@@ -2205,7 +2210,7 @@ After a successful detach:
 @cancel cleanup;  // defer will not run
 ```
 
-**Rule:** `@cancel name;` prevents the named defer from running. It is a compile error to `@cancel` a defer that has already run or been cancelled.
+**Rule:** `@cancel name;` prevents the named defer from running. A second `@cancel` of the same live name is a no-op. It is a compile error to `@cancel` an unknown name, or to `@cancel` a name before its `@defer` or outside the name's block. `@cancel` requires a name.
 
 **Rule:** The name introduced by `@defer name:` is scoped to the enclosing block, like a local variable declared at the `@defer` statement. Referencing it (including `@cancel`) before the `@defer` statement or outside the block is a compile error.
 

@@ -1,0 +1,5 @@
+/* @cancel of a name that was never declared. */
+int main(void) {
+    @cancel missing;
+    return 0;
+}

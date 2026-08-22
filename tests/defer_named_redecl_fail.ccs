@@ -1,0 +1,6 @@
+/* Two @defer with the same name in one block. */
+int main(void) {
+    @defer cleanup: { int x = 0; (void)x; };
+    @defer cleanup: { int y = 0; (void)y; };
+    return 0;
+}

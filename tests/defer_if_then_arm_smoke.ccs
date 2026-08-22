@@ -1,0 +1,66 @@
+/* Braceless `if (c) @defer …` registers on the enclosing block and must
+ * be a real then-arm (a no-op steal of the next statement is a miss). */
+#include <stdio.h>
+
+static int g_skip;
+static int g_take;
+static int g_els;
+static int g_named;
+static int g_block;
+
+static void skip(void) { g_skip = 1; printf("skip\n"); }
+static void take(void) { g_take = 1; printf("take\n"); }
+static void els(void) { g_els = 1; printf("else\n"); }
+static void named(void) { g_named = 1; printf("named\n"); }
+static void blk(void) { g_block = 1; printf("block\n"); }
+
+static int run(void) {
+    printf("=== if (0) does not steal next ===\n");
+    if (0) @defer skip();
+    printf("after0\n");
+
+    printf("=== if (1) registers ===\n");
+    if (1) @defer take();
+    printf("after1\n");
+
+    printf("=== else arm ===\n");
+    if (0) (void)0;
+    else @defer els();
+
+    printf("=== named if (0) + cancel ===\n");
+    if (0) @defer dead: named();
+    @cancel dead;
+
+    printf("=== block-scoped if (0) ===\n");
+    {
+        if (0) @defer blk();
+        printf("inblock\n");
+    }
+    if (g_block) {
+        printf("ERROR: block if (0) defer ran\n");
+        return 1;
+    }
+    return 0;
+}
+
+int main(void) {
+    if (run()) return 1;
+    if (g_skip) {
+        printf("ERROR: if (0) defer ran\n");
+        return 1;
+    }
+    if (!g_take) {
+        printf("ERROR: if (1) defer did not run\n");
+        return 1;
+    }
+    if (!g_els) {
+        printf("ERROR: else defer did not run\n");
+        return 1;
+    }
+    if (g_named) {
+        printf("ERROR: cancelled named if (0) defer ran\n");
+        return 1;
+    }
+    printf("All if-then @defer tests passed!\n");
+    return 0;
+}
