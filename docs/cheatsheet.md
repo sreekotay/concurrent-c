@@ -167,8 +167,8 @@ sugar on the binding. After `!>`, that means the unwrap succeeded.
 | Form | Meaning |
 |------|---------|
 | `@defer stmt;` | Always run on scope exit (LIFO) |
-| `@defer name: stmt;` | Same, cancellable with `@cancel name;` (idempotent) |
-| `@cancel name;` | Disarm that named defer; unknown / wrong-block name is a compile error |
+| `@defer name: stmt;` | Same, cancellable with `@cancel_defer name;` (idempotent) |
+| `@cancel_defer name;` | Disarm that named defer; unknown / wrong-block name is a compile error |
 | `@defer(ok) stmt;` | Only on success exit (`return cc_ok(…)` / normal return) |
 | `@defer(err) stmt;` | Only on error exit (`return cc_err(…)`) |
 | `T x = … @destroy { … };` | Explicit defer body on the binding, then the type’s destroy chain |

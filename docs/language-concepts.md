@@ -34,7 +34,7 @@ FILE* f = fopen(path, "r");
 CCNursery n = cc_nursery_create() !> @destroy;
 ```
 
-Named `@defer` can be `@cancel`led; `@defer(ok)` / `@defer(err)` gate on result returns.
+Named `@defer` can be disarmed with `@cancel_defer`; `@defer(ok)` / `@defer(err)` gate on result returns.
 Registration is visible in source; discharge sites (soft-return epilogue,
 cancelled-resume, never-entered `env_drop`) are defined by the spec emit.
 

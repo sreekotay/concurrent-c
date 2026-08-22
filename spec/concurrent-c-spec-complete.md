@@ -140,7 +140,7 @@ point. The compiler lowers `@async` to an explicit frame and poll function.
 function with `@await f(...)` at the top level or `cc_block_on(f(...))`.
 
 **Sigil policy:** every CC-introduced keyword carries a leading `@`
-(`@async`, `@await`, `@defer`, `@cancel`, `@errhandler`,
+(`@async`, `@await`, `@defer`, `@cancel_defer`, `@errhandler`,
 `@destroy`, `@with_deadline`, `@parallel`, `@serial`, `@comptime`, `@blocking`,
 `@nonblocking`, `@for`, `@typehooks`, `@typeview`). Bare forms are
 reserved for plain C identifiers — `match`, `await`, `async`, `defer`,
@@ -297,7 +297,7 @@ bugs.
 | `@defer`       | Schedule cleanup on scope exit                                          | `@defer file.close();`                 |
 | `@defer(err)`  | Cleanup only on error return                                            | `@defer(err) free(ptr);`               |
 | `@defer(ok)`   | Cleanup only on success return                                          | `@defer(ok) commit();`                 |
-| `@cancel`      | Cancel a named `@defer` before it runs                                  | `@cancel cleanup;`                     |
+| `@cancel_defer` | Disarm a named `@defer` before it runs                                 | `@cancel_defer cleanup;`               |
 | `@errhandler`  | Block-scoped handler for `!>;` / `@err`, selected by Result error type  | `@errhandler(CCError e) cc_error_exit(e);` |
 | `@err`         | Forward current error to the matching `@errhandler` for that `E`        | `@err(e);`                             |
 | `@with_deadline` | Apply deadline to a block                                             | `@with_deadline(seconds(5)) { … }`     |
@@ -839,7 +839,7 @@ Concurrent-C extends C syntax with new operators and keywords in specific contex
 **Keyword sigil policy (normative):** Every CC-introduced keyword
 carries a leading `@` sigil at the lexer level. The set includes
 (non-exhaustive): `@async`, `@await`, `@blocking`, `@noblock`,
-`@match` (reserved and rejected), `@defer`, `@defer(err)`, `@defer(ok)`, `@cancel`,
+`@match` (reserved and rejected), `@defer`, `@defer(err)`, `@defer(ok)`, `@cancel_defer`,
 `@errhandler`, `@err`, `@destroy`, `@with_deadline`, `@parallel`, `@serial`, `@comptime`,
 `@for`, `@latency_sensitive`, `@scoped`, `@unsafe`, `@slice`, `@string`,
 `@typehooks`, `@typeview`.
@@ -2207,25 +2207,25 @@ After a successful detach:
 @defer cleanup: cc_arena_free(&scratch);
 
 // ... later, if ownership is transferred ...
-@cancel cleanup;  // defer will not run
+@cancel_defer cleanup;  // defer will not run
 ```
 
-**Rule:** `@cancel name;` prevents the named defer from running. A second `@cancel` of the same live name is a no-op. It is a compile error to `@cancel` an unknown name, or to `@cancel` a name before its `@defer` or outside the name's block. `@cancel` requires a name.
+**Rule:** `@cancel_defer name;` prevents the named defer from running. A second `@cancel_defer` of the same live name is a no-op. It is a compile error to `@cancel_defer` an unknown name, or to `@cancel_defer` a name before its `@defer` or outside the name's block. `@cancel_defer` requires a name.
 
-**Rule:** The name introduced by `@defer name:` is scoped to the enclosing block, like a local variable declared at the `@defer` statement. Referencing it (including `@cancel`) before the `@defer` statement or outside the block is a compile error.
+**Rule:** The name introduced by `@defer name:` is scoped to the enclosing block, like a local variable declared at the `@defer` statement. Referencing it (including `@cancel_defer`) before the `@defer` statement or outside the block is a compile error.
 
 **Lowering (implementation sketch, not surface syntax):**
 
 ```c
 // @defer cleanup: STMT;
 // ...
-// @cancel cleanup;
+// @cancel_defer cleanup;
 
 // lowers to:
 bool __cleanup_active = true;
 @defer { if (__cleanup_active) { STMT; } }
 ...
-__cleanup_active = false;  // @cancel cleanup;
+__cleanup_active = false;  // @cancel_defer cleanup;
 ```
 
 **Note:** Lowering is conceptual; the backend may implement defers via a hidden stack of cleanup actions, not via nested `@defer` syntax.
@@ -2241,7 +2241,7 @@ void!>(DbError) transfer(Db* db, Account from, Account to, int amount) {
     db.debit(from, amount) !>(e) return cc_err(e);
     db.credit(to, amount) !>(e) return cc_err(e);
     
-    @cancel rollback;  // success: don't rollback
+    @cancel_defer rollback;  // success: don't rollback
     db.commit() !>(e) return cc_err(e);
 }
 
