@@ -1,5 +1,8 @@
 # Getting Started with Concurrent-C
 
+[README](../README.md) · [The CC Way](the-cc-way.md) ·
+[Cheatsheet](cheatsheet.md)
+
 Concurrent-C is a **strict C11-superset**: you write `.ccs` (or `.cch`
 headers, or `.shcc` scripts — [below](#shcc-scripts)), the `ccc` driver lowers
 it to plain C (with `#line` sourcemaps), and your **host C compiler** builds the

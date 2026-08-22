@@ -3,6 +3,7 @@
 - Spec register: text under `spec/` never contains metanarration — no "RATIFIED"/"superseded"/"earlier drafts", dates or change markers, or design-review archaeology; write minimal, clear, complete, present-tense normative prose (status banners like "draft — not implemented" are allowed). Git history holds the reasoning.
 
 - Prefer UFCS at call sites (`db.maps.count()`, `hold.release()`, `sh->get(k)`) over free-function snake names (`cc_shard_map_count(&db.maps)`, …). See `.cursor/rules/prefer-ufcs.mdc`.
+- How to use the language (ownership, arenas, results, locality): [`docs/the-cc-way.md`](docs/the-cc-way.md).
 
 - No silent degradation. A path that gives up must not be indistinguishable from a path that had nothing to do. Returning `NULL`/`0`/unchanged input to mean "couldn't" is only safe when the caller can tell that apart from "no work needed" — otherwise say so, at the position that caused it. Four instances so far, each found by accident and each expensive: an FFI symbol declared with the wrong return ABI degraded into a polite "unsupported"; local header lowering does nothing at all outside the repo root; one unbalanced `@comptime` block makes the header stripper skip every block in the file; the parse session quietly runs at a different C version than the host, so headers take branches the real compile never sees. A fallback is a good place to hide a bug precisely because it looks like success.
 

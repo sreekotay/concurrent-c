@@ -1,7 +1,9 @@
 # Concurrent-C Cheatsheet
 
-Quick reference. Tutorial: [getting-started.md](getting-started.md) ·
-concepts: [language-concepts.md](language-concepts.md) · recipes:
+[README](../README.md) · [Getting Started](getting-started.md) ·
+[The CC Way](the-cc-way.md)
+
+Quick reference. Concepts: [language-concepts.md](language-concepts.md) · recipes:
 [examples/README.md](../examples/README.md#learning-path-recommended-order) ·
 spec: [spec/](../spec/).
 
