@@ -64,8 +64,8 @@ Fuller example (error policy + compose): [examples/hello.ccs](examples/hello.ccs
 
 | Project | What it is |
 |---------|------------|
-| [cc-python](https://github.com/sreekotay/cc-python) | npm package to run Python in JS - any pip module — zero copy numpy etc, full speed, fully featured |
-| [cc-node](https://github.com/sreekotay/cc-node) | pip package to run Node at full speed in Python, including first-class Jupyter/notebook support |
+| [cc-python](https://www.npmjs.com/package/concurrent-c-python) | npm package to run Python in JS - any pip module — zero copy numpy etc, full speed, fully featured |
+| [cc-node](https://pypi.org/project/concurrent-c-node/) | pip package to run Node at full speed in Python, including first-class Jupyter/notebook support |
 | [cctext](https://github.com/sreekotay/cctext) | Open multi-GB text, CSV, code, JSON and navigate and edit in ms. Includes deep-search file explorer (TUI and GUI). Open and edit an 8GB file with <5MB memory usage in under 2ms. |
 | [rlsw-cc](https://github.com/sreekotay/rlsw-cc) | Update to raylib software rendering, running at 1.5x to 2x speed |
 
