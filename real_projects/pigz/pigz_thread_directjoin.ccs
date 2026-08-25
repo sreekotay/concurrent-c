@@ -113,7 +113,9 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
         cc_atomic_fetch_add(&g_bytes_out, pos);
         cc_atomic_fetch_add(&g_blocks_done, 1);
 
-        res->arena = cc_arena_detach(res_arena);
+        res->arena = cc_arena_detach(res_arena) !>(e) {
+            return cc_err(cc_io_error(CC_IO_OTHER));
+        };
         return cc_ok(res);
     }
 }

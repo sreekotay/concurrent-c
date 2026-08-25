@@ -240,7 +240,7 @@ void !>(CCError) compress_file(const char* in_path, const char* out_path) {
     /* Turnstile before nursery (inside spawn) so join completes before channel free. */
     CCArena ts_arena = cc_arena_heap(megabytes(2)) @destroy;
     PigzTurnstile ts@(cap, &ts_arena) @destroy;
-    if (!ts.core.excl)
+    if (!cc_exclusive_is_live(ts.core.excl))
         return cc_err(CC_ERR_OUT_OF_MEMORY, "cc_turnstile_create failed");
 
     int failed = 0;

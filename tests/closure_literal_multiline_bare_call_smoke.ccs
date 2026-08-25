@@ -25,7 +25,7 @@ int main(void) {
     CCArena ar = cc_arena_create(1 << 16);
     if (!ar.valid()) { printf("FAIL: arena\n"); return 1; }
     BCG parsed;
-    if (!BCG_parse("*42\r\n", 5, &ar, &parsed) || parsed.v != 42) {
+    if (!BCG_parse("*42\r\n", 5, ar, &parsed) || parsed.v != 42) {
         printf("FAIL: parse\n");
         return 1;
     }

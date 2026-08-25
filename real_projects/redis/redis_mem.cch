@@ -277,7 +277,7 @@ static void redis_mem_report(const RedisDb* db, const char* tag) {
 /* Print each bump slab's capacity for `a`, newest (current root) first, then each
  * older extent via ->prev.  Matches cc_arena_slab_chain_bytes (sum of these). */
 static void redis_db_fprint_arena_slab_chain_detail(const char* tag, const char* pool, const CCArena* a) {
-    const CCArena* cur = a;
+    const CCArenaHost* cur = a ? a->a : NULL;
     fprintf(stderr, "redis_idiomatic: mem[%s] arena_%s_slab_sizes_B (root_first", tag ? tag : "db", pool);
     while (cur && cur->base) {
         fprintf(stderr, " %zu", cur->capacity);

@@ -3,7 +3,7 @@
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts@(2, 1, &arena) @destroy;
+    CCTurnstile ts@(2, 1, arena) @destroy;
     int a = 0;
     int b = 0;
     @parallel wait (ts) {

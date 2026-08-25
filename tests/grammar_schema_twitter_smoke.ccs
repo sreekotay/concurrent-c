@@ -97,25 +97,25 @@ int main(void) {
             "{\"x\":[{\"deep\":null}],\"id\":42,\"text\":\"a\\nb\","
             "\"user\":{\"verified\":true,\"screen_name\":\"z\\u00e9\"}}";
         Tweet t;
-        if (!Tweet_parse(src, strlen(src), &arena, &t)) { printf("FAIL: tweet parse\n"); return 1; }
+        if (!Tweet_parse(src, strlen(src), arena, &t)) { printf("FAIL: tweet parse\n"); return 1; }
         if (t.id != 42) { printf("FAIL: id %lld\n", t.id); return 1; }
         if (t.text.len != 3 || memcmp(t.text.ptr, "a\nb", 3) != 0) { printf("FAIL: text\n"); return 1; }
         if (!cc_slice_is_unique(t.text)) { printf("FAIL: escaped text should materialize\n"); return 1; }
         if (t.user_name.len != 3 || memcmp(t.user_name.ptr, "z\xc3\xa9", 3) != 0) { printf("FAIL: user\n"); return 1; }
         Tweet z;
-        if (!Tweet_parse("{}", 2, &arena, &z)) { printf("FAIL: empty parse\n"); return 1; }
+        if (!Tweet_parse("{}", 2, arena, &z)) { printf("FAIL: empty parse\n"); return 1; }
         if (z.id != 0 || z.text.len != 0 || z.user_name.len != 0) { printf("FAIL: empty not zeroed\n"); return 1; }
         /* escaped key must NOT dispatch (raw compare) — value skipped */
         Tweet e2;
-        if (!Tweet_parse("{\"i\\u0064\":5}", 13, &arena, &e2) || e2.id != 0) { printf("FAIL: escaped key\n"); return 1; }
+        if (!Tweet_parse("{\"i\\u0064\":5}", 13, arena, &e2) || e2.id != 0) { printf("FAIL: escaped key\n"); return 1; }
         /* malformed */
-        if (Tweet_parse("{\"id\":}", 7, &arena, &e2)) { printf("FAIL: malformed accepted\n"); return 1; }
-        if (Tweet_parse("{} junk", 7, &arena, &e2)) { printf("FAIL: trailing junk accepted\n"); return 1; }
+        if (Tweet_parse("{\"id\":}", 7, arena, &e2)) { printf("FAIL: malformed accepted\n"); return 1; }
+        if (Tweet_parse("{} junk", 7, arena, &e2)) { printf("FAIL: trailing junk accepted\n"); return 1; }
         /* composed (narrowed) and directive-built schemas must agree */
         {
             const char* s2 = "{ \"x\" : 1 , \"id\" : 7 , \"user\" : { \"screen_name\" : \"ab\" } }";
             Tweet a; TweetM b;
-            if (!Tweet_parse(s2, strlen(s2), &arena, &a) || !TweetM_parse(s2, strlen(s2), &arena, &b)) {
+            if (!Tweet_parse(s2, strlen(s2), arena, &a) || !TweetM_parse(s2, strlen(s2), arena, &b)) {
                 printf("FAIL: composed/manual parse\n"); return 1;
             }
             if (a.id != b.id || a.id != 7 ||
@@ -168,7 +168,7 @@ int main(void) {
         if (Tweet_write(&t, buf, w - 1) != 0) { printf("FAIL: overflow accepted\n"); return 1; }
         /* round-trip: escapes decode back to the original bytes */
         Tweet rt;
-        if (!Tweet_parse(want, strlen(want), &arena, &rt) ||
+        if (!Tweet_parse(want, strlen(want), arena, &rt) ||
             rt.id != -7 || rt.text.len != 6 || memcmp(rt.text.ptr, "a\nb\"c\\", 6) != 0 ||
             rt.user_name.len != 3 || memcmp(rt.user_name.ptr, "z\xc3\xa9", 3) != 0) {
             printf("FAIL: write round-trip\n"); return 1;
@@ -187,7 +187,7 @@ int main(void) {
         fclose(f);
 
         Feed feed;
-        if (!Feed_parse(buf, rd, &arena, &feed)) { printf("FAIL: feed parse\n"); return 1; }
+        if (!Feed_parse(buf, rd, arena, &feed)) { printf("FAIL: feed parse\n"); return 1; }
         if (feed.statuses_n == 0) { printf("FAIL: no statuses\n"); return 1; }
 
         /* reflection over items: the array field by name */
@@ -212,7 +212,7 @@ int main(void) {
 
         Agg da = {0};
         {
-            JsonNode* root = Json_parse(buf, rd, &arena);
+            JsonNode* root = Json_parse(buf, rd, arena);
             if (!root) { printf("FAIL: dom parse\n"); return 1; }
             JsonNode* top = JsonNode_first(root);
             JsonNode* statuses = obj_get(top, "statuses");
@@ -243,11 +243,11 @@ int main(void) {
          * the canonical encoder emits raw, so fewer reparsed strings need to
          * materialize — that's a property of canonical form, not data loss.) */
         {
-            CCString fs = cc_format(Feed, &feed, &arena);
+            CCString fs = cc_format(Feed, &feed, arena);
             CCSlice fv = cc_string_as_slice(&fs);
             if (fv.len == 0) { printf("FAIL: feed format\n"); return 1; }
             Feed rt;
-            if (!Feed_parse((const char*)fv.ptr, fv.len, &arena, &rt)) {
+            if (!Feed_parse((const char*)fv.ptr, fv.len, arena, &rt)) {
                 printf("FAIL: feed reparse\n"); return 1;
             }
             Agg ra = {0};

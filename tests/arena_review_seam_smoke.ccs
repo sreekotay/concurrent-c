@@ -1,0 +1,177 @@
+/* Seams from the arena review: locked tip, restore LIFO / children / floor,
+ * last-release vs loans, REGION_OWNED detach after grow, epoch range. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+static int fail(int code, const char *msg) {
+    printf("FAIL: %s\n", msg);
+    return code;
+}
+
+int main(void) {
+    @errhandler(CCError e) { (void)e; return fail(9, "unwrap"); }
+    /* Grow a heap arena, then detach — REGION_OWNED survives grow. */
+    {
+        CCArena a = cc_arena_heap(64);
+        void *p;
+        CCArena taken;
+        int i;
+        if (!cc_arena_is_live(a)) return fail(1, "heap");
+        for (i = 0; i < 8; i++) {
+            p = cc_arena_alloc(&a, 32, 8);
+            if (!p) return fail(1, "grow alloc");
+        }
+        taken = a.detach() !>;
+        if (!cc_arena_is_live(taken)) return fail(1, "detach after grow");
+        if (cc_arena_is_live(a)) return fail(1, "source dead");
+        cc_arena_destroy(&taken);
+    }
+
+    /* Last-release with an armed checkpoint must not rewind. */
+    {
+        CCArena a = cc_arena_heap(kilobytes(1));
+        void *p;
+        CCArenaCheckpoint cp;
+        if (!cc_arena_is_live(a)) return fail(2, "heap");
+        p = cc_arena_alloc(&a, 16, 8);
+        if (!p) return fail(2, "alloc");
+        cp = cc_arena_checkpoint(a.a);
+        if (!cp.arena) return fail(2, "checkpoint");
+        if (!cc_arena_release(a.a, p)) return fail(2, "release");
+        if ((a.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE) == 0)
+            return fail(2, "loan must punch hole");
+        if (cc_arena_restore(cp)) return fail(2, "restore after hole");
+        cc_arena_destroy(&a);
+    }
+
+    /* Restore refuses while attach records exist; LIFO nested checkpoints. */
+    {
+        CCArena parent = cc_arena_heap(kilobytes(2));
+        CCArenaCheckpoint a_cp;
+        CCArenaCheckpoint b_cp;
+        CCArena child;
+        CCSlice pre;
+        void *p;
+        if (!cc_arena_is_live(parent)) return fail(3, "parent");
+        p = cc_arena_alloc(&parent, 8, 8);
+        if (!p) return fail(3, "pre");
+        pre = parent.slice(p, 8);
+        a_cp = cc_arena_checkpoint(parent.a);
+        if (!a_cp.arena) return fail(3, "cp A");
+        if (!cc_slice_is_from_arena_epoch(pre, parent.a))
+            return fail(3, "pre-checkpoint slice still live");
+        p = cc_arena_alloc(&parent, 8, 8);
+        if (!p) return fail(3, "mid");
+        b_cp = cc_arena_checkpoint(parent.a);
+        if (!b_cp.arena) return fail(3, "cp B");
+        if (cc_arena_restore(a_cp)) return fail(3, "non-LIFO A");
+        if (!cc_arena_restore(b_cp)) return fail(3, "LIFO B");
+        if (!cc_arena_restore(a_cp)) return fail(3, "A after B");
+        child = parent.create_arena(64) !>;
+        if (!cc_arena_is_live(child)) return fail(3, "child");
+        {
+            CCArenaCheckpoint after = cc_arena_checkpoint(parent.a);
+            if (after.arena) return fail(3, "cp with children must be unarmed");
+        }
+        cc_arena_destroy(&parent);
+    }
+
+    /* Abandon consumes the top loan without rewind; non-top refuses. */
+    {
+        CCArena a = cc_arena_heap(kilobytes(1));
+        CCArenaCheckpoint outer;
+        CCArenaCheckpoint inner;
+        void *keep;
+        void *drop;
+        if (!cc_arena_is_live(a)) return fail(4, "heap");
+        keep = cc_arena_alloc(&a, 16, 8);
+        if (!keep) return fail(4, "keep");
+        outer = cc_arena_checkpoint(a.a);
+        if (!outer.arena) return fail(4, "outer");
+        drop = cc_arena_alloc(&a, 16, 8);
+        if (!drop) return fail(4, "drop");
+        inner = cc_arena_checkpoint(a.a);
+        if (!inner.arena) return fail(4, "inner");
+        if (outer.abandon()) return fail(4, "non-top abandon");
+        if (!inner.abandon()) return fail(4, "top abandon");
+        if (inner.arena) return fail(4, "abandoned handle not nulled");
+        if (!cc_arena_restore(outer))
+            return fail(4, "outer restore after inner abandon");
+        (void)drop;
+        cc_arena_destroy(&a);
+    }
+
+    /* Heap child destroy tombstones the owner record (no UAF on owner free). */
+    {
+        CCArena owner = cc_arena_heap(kilobytes(1));
+        CCArena kid;
+        if (!cc_arena_is_live(owner)) return fail(5, "owner");
+        kid = owner.create_arena(0) !>;
+        if (!cc_arena_is_live(kid)) return fail(5, "kid");
+        cc_arena_destroy(&kid);
+        cc_arena_destroy(&owner);
+    }
+
+    /* Top-of-stack @destroy after a hole abandons the loan so detach works. */
+    {
+        CCArena a = cc_arena_heap(kilobytes(1));
+        CCArena taken;
+        void *p;
+        if (!cc_arena_is_live(a)) return fail(6, "heap");
+        p = cc_arena_alloc(&a, 16, 8);
+        if (!p) return fail(6, "alloc");
+        {
+            CCArenaCheckpoint cp = cc_arena_checkpoint(a.a);
+            if (!cp.arena) return fail(6, "cp");
+            if (!cc_arena_release(a.a, p)) return fail(6, "release");
+            cc_arena_checkpoint_destroy(&cp);
+        }
+        taken = a.detach() !>;
+        if (!cc_arena_is_live(taken)) return fail(6, "detach after destroy-abandon");
+        cc_arena_destroy(&taken);
+    }
+
+    /* Abandon after a loan-punched hole, then last-live root release with
+     * no extents clears NON_REWINDABLE so a later checkpoint can arm. */
+    {
+        CCArena a = cc_arena_heap(kilobytes(1));
+        CCArenaCheckpoint armed;
+        void *p;
+        void *q;
+        if (!cc_arena_is_live(a)) return fail(8, "heap");
+        p = cc_arena_alloc(&a, 16, 8);
+        if (!p) return fail(8, "alloc");
+        {
+            CCArenaCheckpoint cp = cc_arena_checkpoint(a.a);
+            if (!cp.arena) return fail(8, "cp");
+            if (!cc_arena_release(a.a, p)) return fail(8, "release in loan");
+            if ((a.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE) == 0)
+                return fail(8, "loan last-live punches hole");
+            cc_arena_checkpoint_destroy(&cp);
+        }
+        if (a.a->cp_loans != 0) return fail(8, "loan drained");
+        if ((a.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE) == 0)
+            return fail(8, "flag stays until full rewind");
+        q = cc_arena_alloc(&a, 16, 8);
+        if (!q) return fail(8, "alloc after abandon");
+        if (!cc_arena_release(a.a, q)) return fail(8, "full rewind release");
+        if (a.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE)
+            return fail(8, "no-extent last-live must clear hole");
+        armed = cc_arena_checkpoint(a.a);
+        if (!armed.arena) return fail(8, "checkpoint after recover");
+        cc_arena_checkpoint_destroy(&armed);
+        cc_arena_destroy(&a);
+    }
+
+    /* Overlay refuses an unaligned caller region. */
+    {
+        _Alignas(CCArenaHost) uint8_t raw[CC_ARENA_REGION_BYTES(64) + 8];
+        CCArena dead = cc_arena_wrap_region(raw + 1, CC_ARENA_REGION_BYTES(64),
+                                            CC_ARENA_FIXED);
+        if (cc_arena_is_live(dead)) return fail(7, "unaligned overlay");
+    }
+
+    printf("arena_review_seam_smoke: ok\n");
+    return 0;
+}

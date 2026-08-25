@@ -41,7 +41,7 @@ int main(void) {
     /* detach_arena moves a heap-owned L1. A stack L1 would dangle. */
     CCArena heap = cc_arena_heap(1024);
     CCArenaPool p_heap;
-    cc_arena_pool_init(&p_heap, &heap, sizeof(struct Point));
+    cc_arena_pool_init(&p_heap, heap, sizeof(struct Point));
     if (!p_heap.alloc()) {
         printf("FAIL: heap pool alloc\n");
         return 1;

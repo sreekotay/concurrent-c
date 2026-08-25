@@ -12,7 +12,7 @@
  * as_list::[T] for a whole sequence; failures carry the exception
  * class and the Python traceback.
  *
- *    1. Open           cc_py_new(false, &arena) !> @destroy
+ *    1. Open           cc_py_new(false, arena) !> @destroy
  *    2. Source text    py.exec(...) / py.eval(...)
  *    3. Modules        py.import("statistics")
  *    4. Calls          st.mean(xs)        — the method IS the attribute
@@ -40,7 +40,7 @@ int main(void) {
      *    question — probe it to degrade gracefully, and `!>` on the
      *    constructor then means a real failure. */
     if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
-    CCPy py = cc_py_new(false, &arena) !> @destroy;
+    CCPy py = cc_py_new(false, arena) !> @destroy;
 
     /* 2. Source text goes straight in. exec and eval share `__main__`,
      *    so what one defines the next can use. */
@@ -49,7 +49,7 @@ int main(void) {
             return [x * k for x in xs]
         def pad(n, width=2, fill=' '):
             return str(n).rjust(width, fill)
-        `, &arena).as_slice()) !>;
+        `, arena).as_slice()) !>;
 
     CCPyObj scaled = py.eval(@slice("scale([1.5, 2.5, 3.0], 2)")) !> @destroy;
 
@@ -84,7 +84,7 @@ int main(void) {
     py.exec(@string(`
         def boom():
             return 1 / 0
-        `, &arena).as_slice()) !>;
+        `, arena).as_slice()) !>;
 
     CCPyObj bad = py.eval(@slice("boom()")) !>(e) {
         printf("caught %.*s\n", (int)e.type_name.len, (const char*)e.type_name.ptr);

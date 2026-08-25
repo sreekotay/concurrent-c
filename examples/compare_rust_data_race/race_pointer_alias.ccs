@@ -40,7 +40,7 @@ int main(void) {
 
     println("=== CC: pointer alias race (compiles; wrong answer) ===") !>;
     int expected = N_TASKS * N_ITERS;
-    println(@string(`tasks=${N_TASKS} iters/task=${N_ITERS} expected=${expected}`, &arena)) !>;
+    println(@string(`tasks=${N_TASKS} iters/task=${N_ITERS} expected=${expected}`, arena)) !>;
 
     {
         CCNursery n = cc_nursery_create() !> @destroy;
@@ -58,7 +58,7 @@ int main(void) {
     const char* verdict = counter == expected
         ? "(lucky serialize — re-run)"
         : "(data race: lost updates)";
-    println(@string(`counter=${counter} expected=${expected} ${verdict}`, &arena)) !>;
+    println(@string(`counter=${counter} expected=${expected} ${verdict}`, arena)) !>;
 
     /*
      * Idiomatic CC: don't share the cell — pass work on a channel, or

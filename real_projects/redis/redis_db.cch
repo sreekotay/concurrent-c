@@ -226,8 +226,8 @@ static void db_release_value(RedisDb* db, CCString* value) {
     if (value->heap_data()) {
         CCStringHeapHeader* header = cc__string_heap_header(value);
         db_mem_stats_note_value_release(value->cap());
-        /* Malloc-backed heap string (header->arena == NULL). */
-        if (header && !header->arena) {
+        /* Malloc-backed heap string (header->arena is dead). */
+        if (header && !cc_arena_is_live(header->arena)) {
             free(header);
             *value = (CCString){0};
             return;

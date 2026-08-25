@@ -16,7 +16,7 @@
 
 /* Emit forward decl + trampoline for one reflected method.
  * `prefix` is "x" (py_expose) or "m" (py_module). */
-static int cc__py_emit_method_tramp(CCString *s, CCArena *arena, const char *T,
+static int cc__py_emit_method_tramp(CCString *s, CCArena arena, const char *T,
                                     const char *nm, const char *mb,
                                     const char *pr, const char *pr_abi,
                                     const char *ar, const char *rt,
@@ -237,5 +237,7 @@ static int cc__py_emit_method_tramp(CCString *s, CCArena *arena, const char *T,
     return 0;
 }
 
+#define cc__py_emit_method_tramp(s, a, ...) \
+    (cc__py_emit_method_tramp)((s), CC__ARENA_HANDLE(a), __VA_ARGS__)
 
 #endif /* CC_PY_EXPORT_EMIT_CCH */

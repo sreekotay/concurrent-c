@@ -8,8 +8,8 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     if (!arena.base) return 1;
 
-    SliceIntMap *ints = SliceIntMap_init(&arena);
-    SlicePtrMap *ptrs = SlicePtrMap_init(&arena);
+    SliceIntMap *ints = SliceIntMap_init(arena);
+    SlicePtrMap *ptrs = SlicePtrMap_init(arena);
     if (!ints || !ptrs) return 2;
 
     CCSlice alpha = CC_SLICE_LIT("alpha");

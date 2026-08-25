@@ -110,7 +110,7 @@ static int expect_golden(const char* src_name, ShadowEmitKind kind,
     CCArena arena = cc_arena_create(1 << 20);
     TapeCache cache = {0};
     CEmit emit = {0};
-    if (!lower_file(&cache, &arena, src_name, kind, &emit)) {
+    if (!lower_file(&cache, arena, src_name, kind, &emit)) {
         tape_cache_free(&cache);
         cc_arena_free(&arena);
         return 0;
@@ -164,7 +164,7 @@ static int test_ccs_to_c_hostcc(void) {
     CCArena arena = cc_arena_create(1 << 20);
     TapeCache cache = {0};
     CEmit emit = {0};
-    if (!lower_file(&cache, &arena, "mini.ccs", SHADOW_EMIT_C, &emit)) return 0;
+    if (!lower_file(&cache, arena, "mini.ccs", SHADOW_EMIT_C, &emit)) return 0;
     const char* tmp = "out/c_pp_shadow_mini.c";
     const char* obj = "out/c_pp_shadow_mini.o";
     FILE* f = fopen(tmp, "wb");
@@ -189,7 +189,7 @@ static int test_cch_to_h_hostcc(void) {
     CCArena arena = cc_arena_create(1 << 20);
     TapeCache cache = {0};
     CEmit emit = {0};
-    if (!lower_file(&cache, &arena, "mini.cch", SHADOW_EMIT_H, &emit)) return 0;
+    if (!lower_file(&cache, arena, "mini.cch", SHADOW_EMIT_H, &emit)) return 0;
     const char* hpath = "out/c_pp_shadow_mini.h";
     const char* cpath = "out/c_pp_shadow_mini_use.c";
     const char* obj = "out/c_pp_shadow_mini_use.o";
@@ -230,7 +230,7 @@ static int test_diag_line(void) {
         fputs("float x;\n", f);
         fclose(f);
     }
-    FileTape* ft = tape_cache_load(&cache, path, &arena);
+    FileTape* ft = tape_cache_load(&cache, path, arena);
     if (!ft) { printf("FAIL: load bad_token\n"); return 0; }
     Token tokbuf[256];
     Pp pp = {0};
@@ -280,7 +280,7 @@ static int expect_safety_fail(const char* name, const char* needle) {
         return 0;
     }
     close(err_fd);
-    failed = !lower_file(&cache, &arena, name, SHADOW_EMIT_C, &emit);
+    failed = !lower_file(&cache, arena, name, SHADOW_EMIT_C, &emit);
     fflush(stderr);
     dup2(saved_fd, 2);
     close(saved_fd);
@@ -308,7 +308,7 @@ static int expect_safety_pass(const char* name) {
     CCArena arena = cc_arena_create(1 << 20);
     TapeCache cache = {0};
     CEmit emit = {0};
-    int ok = lower_file(&cache, &arena, name, SHADOW_EMIT_C, &emit);
+    int ok = lower_file(&cache, arena, name, SHADOW_EMIT_C, &emit);
     free(emit.buf);
     tape_cache_free(&cache);
     cc_arena_free(&arena);
@@ -376,7 +376,7 @@ static int test_cap_stage2(void) {
         fputs("int main(void) { return 0; }\n", f);
         fclose(f);
     }
-    ft = tape_cache_load(&cache, path, &arena);
+    ft = tape_cache_load(&cache, path, arena);
     if (!ft) {
         printf("FAIL: load cap_stage2\n");
         return 0;
@@ -428,7 +428,7 @@ static int test_cap_body(void) {
         fputs("}\nreturn 0;\n}\n", f);
         fclose(f);
     }
-    ft = tape_cache_load(&cache, path, &arena);
+    ft = tape_cache_load(&cache, path, arena);
     if (!ft) {
         printf("FAIL: load cap_body\n");
         return 0;
@@ -484,7 +484,7 @@ static int test_cap_field(void) {
         fprintf(f, "int main(void) { return %s; }\n", long_id);
         fclose(f);
     }
-    ft = tape_cache_load(&cache, path, &arena);
+    ft = tape_cache_load(&cache, path, arena);
     if (!ft) {
         printf("FAIL: load cap_field\n");
         return 0;
@@ -525,7 +525,7 @@ static int test_include_tape_reuse(void) {
     CCArena arena = cc_arena_create(1 << 20);
     TapeCache cache = {0};
     CEmit emit = {0};
-    if (!lower_file(&cache, &arena, "with_include.cch", SHADOW_EMIT_H, &emit)) {
+    if (!lower_file(&cache, arena, "with_include.cch", SHADOW_EMIT_H, &emit)) {
         tape_cache_free(&cache);
         cc_arena_free(&arena);
         return 0;
@@ -554,7 +554,7 @@ static int test_line_provenance(void) {
     CCArena arena = cc_arena_create(1 << 20);
     TapeCache cache = {0};
     CEmit emit = {0};
-    if (!lower_file(&cache, &arena, "hello.ccs", SHADOW_EMIT_C, &emit)) {
+    if (!lower_file(&cache, arena, "hello.ccs", SHADOW_EMIT_C, &emit)) {
         tape_cache_free(&cache);
         cc_arena_free(&arena);
         return 0;
@@ -578,7 +578,7 @@ static int test_line_provenance(void) {
 int main(void) {
     CCArena gate = cc_arena_create(4096);
     (void)PpTok_match(";", 1);
-    (void)PpTok_collect(";", 1, &gate, shadow_keep_nop, NULL);
+    (void)PpTok_collect(";", 1, gate, shadow_keep_nop, NULL);
     /* TU-surface demand: emit PpStmt entries before the umbrella's headers
      * call them (grammar emission keys on .ccs call sites). */
     (void)PpStmt_match("break;", 6);

@@ -23,7 +23,7 @@ int main(void) {
         return 1;
     }
     CCArena a = @create(megabytes(1)) @destroy;
-    CCExclusive excl = cc_exclusive_create(&a, 0) !> @destroy;
+    CCExclusive excl = cc_exclusive_create(a, 0) !> @destroy;
     (void)handle_client;
     (void)excl;
     return 0;

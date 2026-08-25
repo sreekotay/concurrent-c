@@ -17,7 +17,8 @@ static void mark_arena_pre_destroy(CCArena* arena) {
 }
 
 @typehooks on CCArena {
-    .create = cc_type_create_overloads("cc_arena_create", "cc_arena_fixed_buffer"),
+    .create = cc_type_create_overloads("cc_arena_create",
+                                      CC_TYPE_CREATE_DECL("cc_arena_bind_buffer")),
     .destroy = cc_type_destroy_hooks("mark_arena_pre_destroy", "cc_arena_destroy"),
     .ufcs = (recv_type, method, mode, argv, arg_types, arena) => {
     (void)recv_type;
@@ -40,7 +41,7 @@ int main(void) {
         };
         if (!cc_arena_is_live(arena)) return 1;
         if (arena.avail() == 0) return 2;
-        if (!cc_arena_alloc_T_count(char, &arena, 16)) return 3;
+        if (!cc_arena_alloc_T_count(char, arena, 16)) return 3;
     }
 
     if (g_destroyed != 1) return 4;
@@ -48,10 +49,10 @@ int main(void) {
     if (g_pre_before_body != 1) return 8;
 
     {
-        char backing[CC_ARENA_REGION_BYTES(64)];
+        char backing[64];
         CCArena arena = @create(backing, sizeof(backing)) @detach;
         if (!cc_arena_is_live(arena)) return 5;
-        if (arena.avail() != 64) return 6;
+        if (arena.avail() != sizeof(backing)) return 6;
         cc_arena_destroy(&arena);
     }
 

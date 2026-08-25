@@ -6,7 +6,7 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     
     /* Test CCVec::[int] - primitive type */
-    CCVec::[int] nums = cc_vec_new::[int](&arena);
+    CCVec::[int] nums = cc_vec_new::[int](arena);
     nums.push(42);
     nums.push(100);
     

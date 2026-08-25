@@ -587,8 +587,7 @@ static int bench_shared_concurrent_mixed(void) {
     t0 = now_sec();
 
     {
-        CCNursery *n = @create() !> @destroy;
-        if (!n) return fail("nursery");
+        CCNursery n = @create() !> @destroy;
         for (w = 0; w < CONC_WORKERS; w++) {
             int wid = w;
             n.spawn(() => {

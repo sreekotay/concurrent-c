@@ -5,24 +5,32 @@
 int main(void) {
     // User-provided stack buffer
     char buffer[1024];
-    
+
     {
-        CCArena __cc_arena4 = @create(buffer, sizeof(buffer)) @destroy;
-        if (!cc_arena_is_live(__cc_arena4)) abort();
-        CCArena* arena = &__cc_arena4;
-        // Allocate from the arena using type-safe macro
-        int* x = cc_arena_alloc_T(int, arena);
+        /* Stdlib 2-arg face: frame host, whole buffer is L1. last-good
+         * `@create(buf, cap)` still lowers to malloc-host folklore. */
+        cc_arena_bind_buffer(bound, buffer, sizeof(buffer));
+        if (!cc_arena_is_live(bound)) abort();
+        assert((bound.a->_flags & CC_ARENA_FLAG_HOST_OWNED) == 0);
+        int* x = cc_arena_alloc_T(int, &bound);
         assert(x != NULL);
         *x = 42;
         assert(*x == 42);
-        
-        // Verify the pointer is within our buffer
         assert((char*)x >= buffer);
         assert((char*)x < buffer + sizeof(buffer));
-        
-        printf("arena_user_buffer_smoke: allocated at offset %ld\n", 
+        printf("arena_user_buffer_smoke: allocated at offset %ld\n",
                (long)((char*)x - buffer));
-    
+        cc_arena_destroy(&bound);
+    }
+
+    {
+        CCArena created = @create(buffer, sizeof(buffer)) @destroy;
+        if (!cc_arena_is_live(created)) abort();
+        int* x = cc_arena_alloc_T(int, &created);
+        assert(x != NULL);
+        *x = 42;
+        assert((char*)x >= buffer);
+        assert((char*)x < buffer + sizeof(buffer));
     }
     
     printf("arena_user_buffer_smoke: OK\n");

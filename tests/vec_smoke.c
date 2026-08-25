@@ -7,7 +7,7 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     if (!arena.base) return 1;
 
-    IntVec v = IntVec_init(&arena, 2);
+    IntVec v = IntVec_init(arena, 2);
     if (IntVec_push(&v, 10) != 0) return 2;
     if (IntVec_push(&v, 20) != 0) return 3;
     if (IntVec_push(&v, 30) != 0) return 4;

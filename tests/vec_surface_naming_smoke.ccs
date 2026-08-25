@@ -11,7 +11,7 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(64));
     if (!cc_arena_is_live(arena)) return 1;
 
-    Vec::[int] v = vec_new::[int](&arena);
+    Vec::[int] v = vec_new::[int](arena);
     if (v.push(10) != 0) return 2;
     if (v.push(20) != 0) return 3;
 
@@ -20,7 +20,7 @@ int main(void) {
     if (alias.len() != 2 || *alias.get(1) != 20) return 4;
 
     /* Struct element through the canonical spelling. */
-    Vec::[Pt] pv = vec_new::[Pt](&arena);
+    Vec::[Pt] pv = vec_new::[Pt](arena);
     {
         Pt p = {1.5, 2.5};
         if (pv.push(p) != 0) return 5;

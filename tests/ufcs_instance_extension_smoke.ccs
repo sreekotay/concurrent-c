@@ -13,7 +13,7 @@ static double cc_slice_double_sum(CCSlice_double *s) {
 }
 int main(void) {
     CCArena arena = cc_arena_create(1 << 14);
-    CCVec::[double] v = cc_vec_new::[double](&arena);
+    CCVec::[double] v = cc_vec_new::[double](arena);
     v.push(1.0); v.push(2.0); v.push(6.0);
     assert(v.median3() == 3.0);
     CCSlice_double s = v.as_slice();

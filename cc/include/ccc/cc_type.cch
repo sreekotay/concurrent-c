@@ -328,6 +328,11 @@ static inline CCTypeCreateHook cc_type_create_overloads(const char* callee1, con
     return hook;
 }
 
+/* Mark a create callee as declaration-form: the lowerer emits
+ * `callee(name, args);` (macro may declare sibling storage) instead of
+ * `T name = callee(args);`. String-literal only — concatenates to "decl:…". */
+#define CC_TYPE_CREATE_DECL(callee) "decl:" callee
+
 static inline CCTypeCreateHook cc_type_create_hook(CCTypeCreateHandler callable) {
     CCTypeCreateHook hook = {0};
     hook.callable = (const void*)callable;

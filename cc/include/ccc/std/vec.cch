@@ -47,7 +47,8 @@
 #undef __CC_VEC_INIT
 #endif
 #define __CC_VEC(T) CCVec_##T
-#define __CC_VEC_INIT(T, arena) CCVec_##T##_init((arena), CC_VEC_INITIAL_CAP)
+#define __CC_VEC_INIT(T, arena) \
+    CCVec_##T##_init(CC__ARENA_HANDLE(arena), CC_VEC_INITIAL_CAP)
 
 /* Legacy generic fallback retained for parser-only stubs that have not yet
  * been converted to concrete registry-backed Vec declarations. */
@@ -149,7 +150,7 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
         size_t len;                                                               \
     } Name;                                                                       \
                                                                                   \
-    static inline Name Name##_init(CCArena *arena, size_t initial_cap) {          \
+    static inline Name Name##_init(CCArena arena, size_t initial_cap) {          \
         Name v = {NULL, 0};                                                       \
         if (cc_vec_init((CCVec *)&v, arena, sizeof(T), _Alignof(T),                \
                         initial_cap > 0 ? initial_cap : CC_VEC_INITIAL_CAP)        \
@@ -249,17 +250,19 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
 #ifndef CC_VEC_CHAR_DEFINED
 #define CC_VEC_CHAR_DEFINED 1
 CC_VEC_DECL_ARENA(char, CCVec_char)
-static inline CCVec_char CCVec_char_new(CCArena* __a) {
+static inline CCVec_char cc__CCVec_char_new(CCArena __a) {
     return CCVec_char_init(__a, 0);
 }
+#define CCVec_char_new(ar) cc__CCVec_char_new(CC__ARENA_HANDLE(ar))
 #endif
 
 #ifndef CC_VEC_SIZE_T_DEFINED
 #define CC_VEC_SIZE_T_DEFINED 1
 CC_VEC_DECL_ARENA(size_t, CCVec_size_t)
-static inline CCVec_size_t CCVec_size_t_new(CCArena* __a) {
+static inline CCVec_size_t cc__CCVec_size_t_new(CCArena __a) {
     return CCVec_size_t_init(__a, 0);
 }
+#define CCVec_size_t_new(ar) cc__CCVec_size_t_new(CC__ARENA_HANDLE(ar))
 #endif
 
 /* Iteration helper */
@@ -377,9 +380,10 @@ static inline ${mangled}_chk ${mangled}_chk_new(void *a) {
 }
 #else
 ${decl}
-static inline ${mangled} ${mangled}_new(CCArena* __a) {
+static inline ${mangled} cc__${mangled}_new(CCArena __a) {
     return ${mangled}_init(__a, 0);
 }
+#define ${mangled}_new(ar) cc__${mangled}_new(CC__ARENA_HANDLE(ar))
 
 /* cc_type_info for ${mangled} (serdes) */
 static const cc_type_info __cc_ti_${mangled} = {

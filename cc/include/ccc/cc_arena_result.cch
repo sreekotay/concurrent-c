@@ -28,8 +28,8 @@ static inline CCArena cc__arena_val_from_p(CCArena *p) {
     return *p;
 }
 #define CC__ARENA_VAL(x) _Generic((x), \
-    CCArena: cc__arena_val_from_h, \
-    CCArena *: cc__arena_val_from_p \
+    struct CCArena: cc__arena_val_from_h, \
+    struct CCArena *: cc__arena_val_from_p \
 )(x)
 
 static inline CCArenaCheckpoint cc__cp_val_from_h(CCArenaCheckpoint c) { return c; }
@@ -43,7 +43,7 @@ static inline CCArenaCheckpoint cc__cp_val_from_p(CCArenaCheckpoint *p) {
 )(x)
 
 static inline CCArenaCheckpoint !>(CCError) cc__arena_try_checkpoint_h(CCArena arena) {
-    CCArenaCheckpoint cp = cc_arena_checkpoint(cc__arena_req(arena, "cc_arena_checkpoint: dead"));
+    CCArenaCheckpoint cp = cc_arena_checkpoint(cc_arena_host(arena));
     if (!cp.arena) {
         return cc_err(CC_ERR_INVALID_ARG, "cc_arena_checkpoint: refused");
     }

@@ -43,7 +43,7 @@ int main(void) {
         return 6;
     }
 
-    read_back = cc_file_read_all(&reader, &arena);
+    read_back = cc_file_read_all(&reader, arena);
     if (cc_is_err(read_back)) {
         cc_arena_free(&arena);
         cc_file_close(&reader);

@@ -2236,8 +2236,8 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                 snprintf(stack_name, sizeof(stack_name), "__cc_et_as_%d", rewrite_count);
                 if (has_anchor) {
                     /* Self-contained: stack arena, build, splice (cc_emit_raw
-                       copies), then free.  arena_name is a CCArena* alias so the
-                       shared body rewriter sees a pointer in both forms. */
+                       copies), then free.  arena_name is a CCArena* alias so
+                       TinyCC _Generic peels (it does not match a handle value). */
                     cc__sb_append_fmt_local(&out, &out_len, &out_cap,
                                             "({ cc_arena_stack(%s, %d); CCArena* %s = &%s; "
                                             "CCString %s = cc_string_new(); ",

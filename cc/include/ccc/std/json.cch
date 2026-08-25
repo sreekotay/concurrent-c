@@ -52,7 +52,7 @@ static int jstr__utf8(char* dst, size_t* o, unsigned cp) {
     return 1;
 }
 
-static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
+static int jstr(const char* p, size_t n, CCSlice* out, CCArena arena) {
     char* dst = (char*)cc_arena_alloc_local(arena, n ? n : 1, 1);
     if (!dst) return 0;
     size_t o = 0;

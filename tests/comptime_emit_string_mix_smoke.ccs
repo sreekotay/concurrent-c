@@ -19,10 +19,10 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(32)) @destroy;
     if (Mix_em_a != 0 || Mix_em_b != 1) return 1;
 
-    CCString s0 = @string(`don't field-0=${0}`, &arena);
-    CCString s1 = @string(`don't field-1=${1}`, &arena);
-    if (!strstr(cc_string_cstr(&s0, &arena), "don't")) return 2;
-    if (!strstr(cc_string_cstr(&s1, &arena), "1")) return 3;
+    CCString s0 = @string(`don't field-0=${0}`, arena);
+    CCString s1 = @string(`don't field-1=${1}`, arena);
+    if (!strstr(cc_string_cstr(&s0, arena), "don't")) return 2;
+    if (!strstr(cc_string_cstr(&s1, arena), "1")) return 3;
 
     printf("comptime_emit_string_mix_smoke a=%d b=%d\n",
            (int)Mix_em_a, (int)Mix_em_b);

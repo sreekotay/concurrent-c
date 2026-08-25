@@ -6,7 +6,7 @@
 #include <ccc/std/task.cch>
 #include <stdio.h>
 
-static void diag_fprintln(CCString* line, CCArena* scratch) {
+static void diag_fprintln(CCString* line, CCArena scratch) {
     const char* p = cc_string_cstr(line, scratch);
     if (p) fprintf(stderr, "%s\n", p);
 }
@@ -17,8 +17,8 @@ static void diag_fprintln(CCString* line, CCArena* scratch) {
     @nonblocking {
         CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
         CCString line =
-            @string(`async_create_string_nonblocking_smoke: ${count}`, &scratch);
-        diag_fprintln(&line, &scratch);
+            @string(`async_create_string_nonblocking_smoke: ${count}`, scratch);
+        diag_fprintln(&line, scratch);
     }
     return 0;
 }

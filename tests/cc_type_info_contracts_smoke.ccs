@@ -47,7 +47,7 @@ int main(void) {
      * are the registry/accessor/flag contracts. */
     CCArena arena = cc_arena_heap(kilobytes(8));
     if (!cc_arena_is_live(arena)) { printf("FAIL arena\n"); return 1; }
-    CCVec::[Point2] v = cc_vec_new::[Point2](&arena);
+    CCVec::[Point2] v = cc_vec_new::[Point2](arena);
     Point2 p = { 11, 22 };
     v.push(p);
 

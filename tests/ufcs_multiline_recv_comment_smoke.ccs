@@ -5,7 +5,7 @@
  * not fall through to a host "no member" that hides UFCS. */
 int main(void) {
     CCArena a = cc_arena_heap(kilobytes(32)) @destroy;
-    Vec::[int] v = vec_new::[int](&a);
+    Vec::[int] v = vec_new::[int](a);
     v /*
        break across lines; don't desync
     */ .push(11);

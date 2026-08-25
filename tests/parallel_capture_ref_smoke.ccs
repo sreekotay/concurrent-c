@@ -159,9 +159,9 @@ int main(void) {
 
     /* wait for: loop-carried counter and sum in captured locals. */
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts@(CAP, 1, &arena) @destroy;
-    CCTurnstile ts2@(CAP, 1, &arena) @destroy;
-    if (!ts.excl || !ts2.excl)
+    CCTurnstile ts@(CAP, 1, arena) @destroy;
+    CCTurnstile ts2@(CAP, 1, arena) @destroy;
+    if (!cc_exclusive_is_live(ts.excl) || !cc_exclusive_is_live(ts2.excl))
         return 1;
     if (run_wait(&ts) != 0)
         return 1;

@@ -126,7 +126,8 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
         size_t pos = 0;
         RespGCmd c;
         bool !>(CCError) tr = RespGCmd_try_read((const char*)(r->data + r->start),
-                                                r->end - r->start, &pos, NULL, &c);
+                                                r->end - r->start, &pos,
+                                                cc_arena_handle(NULL), &c);
         if (tr.is_err()) {
             if (tr.error().kind == CC_ERR_WOULD_BLOCK) return RESP_PARSE_INCOMPLETE;
             *err = tr.error();
@@ -1102,7 +1103,7 @@ int main(int argc, char** argv) {
 
     CCArena excl_arena = cc_arena_heap(kilobytes(64));
     @defer excl_arena.destroy();
-    CCExclusive excl = cc_exclusive_create(&excl_arena, mask.count * 2u) !> @destroy;
+    CCExclusive excl = cc_exclusive_create(excl_arena, mask.count * 2u) !> @destroy;
     CCShardDomain shards = cc_shard_domain(excl, mask);
 
     size_t nshards = db.shard_count;

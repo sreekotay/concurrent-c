@@ -17,7 +17,7 @@ int main(void) {
 
     if (!cc_py_available()) { puts("py_as_slice_materialize_smoke: SKIP (no libpython)"); return 0; }
     CCPy py = cc_py_new(false, &a) !>;
-    if (py.arena != &a) return 2;
+    if (cc_arena_host(py.arena) != cc_arena_host(a)) return 2;
 
     CCPyObj sys = py.import("sys") !> @destroy;
     if (sys.home != &py) return 3;
@@ -30,13 +30,13 @@ int main(void) {
 
     void *ptr = vs.ptr;
     size_t len = vs.len;
-    vs.materialize_in(&a) !>;
+    vs.materialize_in(a) !>;
     if (vs.ptr != ptr || vs.len != len) return 7;
 
     CCSlice alt = ver.as_slice_into(&other) !>;
-    if (!cc_slice_is_from_arena_epoch(alt, &other)) return 8;
+    if (!cc_slice_is_from_arena_epoch(alt, other)) return 8;
     void *alt_ptr = alt.ptr;
-    alt.materialize_in(&other) !>;
+    alt.materialize_in(other) !>;
     if (alt.ptr != alt_ptr) return 9;
     if (alt.len != len || memcmp(alt.ptr, ptr, len) != 0) return 10;
 

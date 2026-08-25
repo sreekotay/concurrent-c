@@ -2,7 +2,7 @@
 #include <ccc/std/prelude.cch>
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(64));
-    Vec::[int] v = vec_new::[int](&arena);
+    Vec::[int] v = vec_new::[int](arena);
     v.push::[int](1);
     return 0;
 }

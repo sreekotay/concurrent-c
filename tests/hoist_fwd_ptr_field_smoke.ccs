@@ -44,7 +44,7 @@ int main(void) {
     peer.tag = 1;
     if (!peer.hit || peer.hit->at != 3) return 3;
 
-    nodes = vec_new::[RtxNode](&a);
+    nodes = vec_new::[RtxNode](a);
     if (nodes.push(node) != 0) return 4;
     if (nodes.len() != 1 || !nodes.get_ptr(0) || nodes.get_ptr(0)->v != 7)
         return 5;

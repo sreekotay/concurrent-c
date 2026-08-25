@@ -9,7 +9,7 @@ int main(void) {
         };
         if (!cc_arena_is_live(arena)) return 1;
         if (arena.avail() == 0) return 2;
-        if (!cc_arena_alloc_T_count(char, &arena, 16)) return 3;
+        if (!cc_arena_alloc_T_count(char, arena, 16)) return 3;
     }
 
     if (g_destroyed != 1) return 4;

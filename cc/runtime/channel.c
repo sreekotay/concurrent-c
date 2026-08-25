@@ -12,6 +12,10 @@
  */
 
 #include <ccc/cc_channel.cch>
+#undef cc_chan_send_into
+#undef cc_chan_try_send_into
+#undef cc_channel_raw_send_into
+#undef cc_channel_raw_try_send_into
 
 /* liblfds is an OPTIONAL backend. The native ring queue (use_ring_queue) is
  * the primary lock-free path; liblfds is only a fallback when ring storage
@@ -2932,14 +2936,14 @@ static int cc__chan_try_enqueue_lockfree_impl(CCChan* ch, const void* value) {
     return ok ? 0 : EAGAIN;
 }
 
-static inline void cc__chan_build_into(CCClosure2 builder, void* slot, CCArena* arena) {
-    (void)cc_closure2_call(builder, (intptr_t)slot, (intptr_t)arena);
+static inline void cc__chan_build_into(CCClosure2 builder, void* slot, CCArena arena) {
+    (void)cc_closure2_call(builder, (intptr_t)slot, (intptr_t)&arena);
 }
 
 /* `*built` is set when the builder ran (cc_closure2_call consumes the
  * closure: it drops the environment after invoking).  Callers that see
  * `!*built` on a failure path own the drop. */
-static int cc__queue_enqueue_into_value(CCChan* ch, CCClosure2 builder, CCArena* arena, int* built) {
+static int cc__queue_enqueue_into_value(CCChan* ch, CCClosure2 builder, CCArena arena, int* built) {
     if (ch->use_ring_queue) {
         if (ch->topology == CC_CHAN_TOPO_1_1) {
             size_t tail = atomic_load_explicit(&ch->ring_tail, memory_order_relaxed);
@@ -3009,7 +3013,7 @@ static int cc__queue_enqueue_into_value(CCChan* ch, CCClosure2 builder, CCArena*
 #endif
 }
 
-static int cc__chan_try_enqueue_into_lockfree_impl(CCChan* ch, CCClosure2 builder, CCArena* arena, int* built) {
+static int cc__chan_try_enqueue_into_lockfree_impl(CCChan* ch, CCClosure2 builder, CCArena arena, int* built) {
     if (!ch->use_lockfree || ch->cap == 0 || !ch->buf) return EAGAIN;
     if (!ch->use_ring_queue && ch->elem_size > sizeof(void*)) return EAGAIN;
 
@@ -4028,7 +4032,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
 }
 
 static int cc__chan_try_send_into_impl(CCChan* ch, CCClosure2 builder, size_t value_size,
-                                        CCArena* arena, int* built) {
+                                        CCArena arena, int* built) {
     if (!ch || !builder.fn || value_size == 0) return EINVAL;
     if (ch->is_owned || ch->is_ordered) return EINVAL;
 
@@ -4160,14 +4164,14 @@ static int cc__chan_try_send_into_impl(CCChan* ch, CCClosure2 builder, size_t va
  * dropped without running when admission fails.  cc_closure2_call drops the
  * environment after invoking, so only the not-built failure paths drop
  * here. */
-int cc_chan_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena) {
+int cc_chan_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena arena) {
     int built = 0;
     int rc = cc__chan_try_send_into_impl(ch, builder, value_size, arena, &built);
     if (!built) cc_closure2_drop(builder);
     return rc;
 }
 
-int cc_chan_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena) {
+int cc_chan_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena arena) {
     int built = 0;
     int rc = cc__chan_try_send_into_impl(ch, builder, value_size, arena, &built);
     if (rc != EAGAIN || built) {

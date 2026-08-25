@@ -5,7 +5,7 @@
  * (name↔`(` gaps are covered by ufcs_comment_gate_smoke; recv↔`.` is not.) */
 int main(void) {
     CCArena a = cc_arena_heap(kilobytes(32)) @destroy;
-    Vec::[int] v = vec_new::[int](&a);
+    Vec::[int] v = vec_new::[int](a);
     v /*gap*/ .push(7);
     v /* don't */ .push(8);
     v /* `tick` prose */ .push(9);

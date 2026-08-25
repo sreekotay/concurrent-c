@@ -14,8 +14,8 @@ static cc_atomic_int g_hits;
 static int run(int use_par, int* xs) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts@(4, 1, &arena) @destroy;
-    if (!ts.excl)
+    CCTurnstile ts@(4, 1, arena) @destroy;
+    if (!cc_exclusive_is_live(ts.excl))
         return 1;
     int i;
     bool fin = @parallel seq (use_par) wait (ts) for (i in 0..N) {

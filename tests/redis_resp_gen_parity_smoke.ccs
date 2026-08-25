@@ -174,7 +174,7 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
                                                   size_t cap,
                                                   size_t* out_argc,
                                                   CCError* err,
-                                                  CCArena* arena) {
+                                                  CCArena arena) {
     size_t pos = 0;
     GCmd c;
     bool !>(CCError) rr = GCmd_try_read((const char*)(r->data + r->start),
@@ -222,7 +222,7 @@ static unsigned long ev_hash(char[:]* args, size_t argc) {
 
 /* drive one reader over the stream at a fixed chunk size; log events */
 static int drive(const char* stream, size_t slen, size_t chunk, int use_gen,
-                 CCArena* arena, Ev* evs, int max_evs) {
+                 CCArena arena, Ev* evs, int max_evs) {
     static char buf[4096];
     RespReader r = rr_init(buf, sizeof buf);
     int nev = 0;
@@ -260,7 +260,7 @@ static int drive(const char* stream, size_t slen, size_t chunk, int use_gen,
     }
 }
 
-static int parity(const char* name, const char* stream, size_t slen, CCArena* arena) {
+static int parity(const char* name, const char* stream, size_t slen, CCArena arena) {
     static Ev a[128], b[128];
     size_t chunks[] = { 1, 2, 3, 5, 7, 16, 64, 4096 };
     for (size_t ci = 0; ci < sizeof chunks / sizeof chunks[0]; ci++) {
@@ -293,7 +293,7 @@ int main(void) {
             "*2\r\n$3\r\nGET\r\n$5\r\nmykey\r\n"
             "*1\r\n$4\r\nPING\r\n"
             "*4\r\n$4\r\nMSET\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n";
-        if (!parity("pipeline", s, strlen(s), &arena)) return 1;
+        if (!parity("pipeline", s, strlen(s), arena)) return 1;
     }
     /* inline commands mixed with framed */
     {
@@ -301,7 +301,7 @@ int main(void) {
             "PING\r\n"
             "*2\r\n$4\r\nECHO\r\n$2\r\nhi\r\n"
             "SET inlinekey inlineval\r\n";
-        if (!parity("inline-mix", s, strlen(s), &arena)) return 1;
+        if (!parity("inline-mix", s, strlen(s), arena)) return 1;
     }
     /* binary payload: embedded CR/LF and NUL inside a bulk */
     {
@@ -309,22 +309,22 @@ int main(void) {
         memcpy(s + n, "*2\r\n$3\r\nSET\r\n$8\r\n", 18); n += 18;
         memcpy(s + n, "a\r\nb\0c\r\n", 8); n += 8;
         memcpy(s + n, "\r\n", 2); n += 2;
-        if (!parity("binary", s, n, &arena)) return 1;
+        if (!parity("binary", s, n, arena)) return 1;
     }
     /* malformed: both must ERROR at the same event */
     {
         const char* s = "*1\r\n$4\r\nPING\r\n*2\r\n$3\r\nGE!\r\n$1x\r\n";
-        if (!parity("malformed", s, strlen(s), &arena)) return 1;
+        if (!parity("malformed", s, strlen(s), arena)) return 1;
     }
     /* over-cap: argc 5 against cap 4 — both protocol errors */
     {
         const char* s = "*5\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n";
-        if (!parity("over-cap", s, strlen(s), &arena)) return 1;
+        if (!parity("over-cap", s, strlen(s), arena)) return 1;
     }
     /* truncated tail: stream ends mid-frame — both end INCOMPLETE, no error */
     {
         const char* s = "*1\r\n$4\r\nPING\r\n*2\r\n$3\r\nGET\r\n$5\r\nmyk";
-        if (!parity("truncated-tail", s, strlen(s), &arena)) return 1;
+        if (!parity("truncated-tail", s, strlen(s), arena)) return 1;
     }
 
     cc_arena_free(&arena);

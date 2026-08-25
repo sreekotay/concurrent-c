@@ -3,7 +3,7 @@
 /* Same loudness pin for plain vec UFCS across a comment before `.`. */
 int main(void) {
     CCArena a = cc_arena_heap(kilobytes(16)) @destroy;
-    Vec::[int] v = vec_new::[int](&a);
+    Vec::[int] v = vec_new::[int](a);
     v /*gap*/ .no_such_method(1);
     return 0;
 }

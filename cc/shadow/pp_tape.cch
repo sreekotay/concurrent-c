@@ -551,7 +551,8 @@ static FileTape* tape_cache_load_bytes(TapeCache* c, const char* path,
     }
 
     TokBuild b = {.toks = ft->toks, .n = 0, .cap = TOK_BUILD_CAP, .building = ft};
-    if (!PpTok_collect(ft->bytes, ft->len, arena, tok_build_push, &b)) {
+    if (!PpTok_collect(ft->bytes, ft->len, CC__ARENA_HANDLE(arena),
+                       tok_build_push, &b)) {
         fprintf(stderr,
                 "error: tokenize failed for '%s' (often arena exhaustion)\n",
                 path ? path : "<null>");

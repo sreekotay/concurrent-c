@@ -57,7 +57,7 @@ int main(void) {
         @defer f.close();
         fbr.init(&f, fbuf, sizeof(fbuf));
         {
-            CCResult_CCSlice_CCIoError or = fbr.read_line_dup(&a);
+            CCResult_CCSlice_CCIoError or = fbr.read_line_dup(a);
             CCSlice owned;
             if (cc_is_err(or)) return 8;
             owned = cc_value(or);

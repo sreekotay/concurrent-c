@@ -16,10 +16,10 @@
 #include <ccc/std/io.cch>
 
 /* Read entire file at path into arena. Arena is last. */
-static inline CCSlice !>(CCError) cc_file_read_path(CCSlice path, CCArena *arena) {
+static inline CCSlice !>(CCError) cc_file_read_path(CCSlice path, CCArena arena) {
     CCFile file;
     CCSlice !>(CCIoError) r;
-    if (!path.ptr || !arena) {
+    if (!path.ptr || !cc_arena_is_live(arena)) {
         return cc_err(CC_ERR_INVALID_ARG, "cc_file_read_path: bad args");
     }
     if (cc_file_open(&file, path, "rb") != 0) {
@@ -54,10 +54,10 @@ static inline size_t !>(CCError) cc_file_write_path(CCSlice path, CCSlice data) 
     return cc_ok(cc_value(r));
 }
 
-static inline bool !>(CCError) cc_file_copy(CCSlice src, CCSlice dst, CCArena *arena) {
+static inline bool !>(CCError) cc_file_copy(CCSlice src, CCSlice dst, CCArena arena) {
     CCSlice !>(CCError) rr;
     size_t !>(CCError) wr;
-    if (!arena || !src.ptr || !dst.ptr) {
+    if (!cc_arena_is_live(arena) || !src.ptr || !dst.ptr) {
         return cc_err(CC_ERR_INVALID_ARG, "cc_file_copy: bad args");
     }
     rr = cc_file_read_path(src, arena);
@@ -71,10 +71,10 @@ static inline bool !>(CCError) cc_file_copy(CCSlice src, CCSlice dst, CCArena *a
     return cc_ok(true);
 }
 
-static inline size_t !>(CCError) cc_script_print_file(CCSlice path, CCArena *arena) {
+static inline size_t !>(CCError) cc_script_print_file(CCSlice path, CCArena arena) {
     CCSlice !>(CCError) rr;
     size_t !>(CCIoError) wr;
-    if (!arena || !path.ptr) {
+    if (!cc_arena_is_live(arena) || !path.ptr) {
         return cc_err(CC_ERR_INVALID_ARG, "cc_script_print_file: bad args");
     }
     rr = cc_file_read_path(path, arena);
@@ -86,5 +86,12 @@ static inline size_t !>(CCError) cc_script_print_file(CCSlice path, CCArena *are
     }
     return cc_ok(cc_value(wr));
 }
+
+#define cc_file_read_path(path, a) \
+    (cc_file_read_path)((path), CC__ARENA_HANDLE(a))
+#define cc_file_copy(src, dst, a) \
+    (cc_file_copy)((src), (dst), CC__ARENA_HANDLE(a))
+#define cc_script_print_file(path, a) \
+    (cc_script_print_file)((path), CC__ARENA_HANDLE(a))
 
 #endif /* CC_SCRIPT_FILE_H */

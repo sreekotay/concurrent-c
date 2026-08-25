@@ -6,7 +6,7 @@
 /* Overflow ownership is stamped in the block header: foreign / wrong-arena
  * overflow release and realloc are refused instead of calling free/realloc. */
 int main(void) {
-    uint8_t buf[CC_ARENA_REGION_BYTES(64)];
+    _Alignas(CCArenaHost) uint8_t buf[CC_ARENA_REGION_BYTES(64)];
     CCArena a = cc_arena_create_buffer(buf, sizeof(buf), CC_ARENA_FIXED);
     if (!a.base) return 1;
     if (!cc_arena_set_heap_overflow(&a, true)) return 2;

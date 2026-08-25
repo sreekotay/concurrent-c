@@ -20,18 +20,18 @@ int main(void) {
     CCArena arena = cc_arena_create(1 << 16);
 
     /* inline string: fits the SSO buffer, cap == 8 */
-    CCString small = cc_string_from("hi", &arena);
+    CCString small = cc_string_from("hi", arena);
     Cell a = { .str = small };
     if (a.kind != Cell_str) { printf("inline str decoded wrong\n"); return 1; }
     CCString as = a.str ?> cc_string_new();
-    if (strcmp(cc_string_cstr(&as, &arena), "hi") != 0) return 2;
+    if (strcmp(cc_string_cstr(&as, arena), "hi") != 0) return 2;
 
     /* heap string: too long for SSO, cap is a real allocation size */
-    CCString big = cc_string_from("the quick brown fox jumps over the lazy dog", &arena);
+    CCString big = cc_string_from("the quick brown fox jumps over the lazy dog", arena);
     Cell b = { .str = big };
     if (b.kind != Cell_str) { printf("heap str decoded wrong\n"); return 3; }
     CCString bs = b.str ?> cc_string_new();
-    if (strcmp(cc_string_cstr(&bs, &arena), "the quick brown fox jumps over the lazy dog") != 0) return 4;
+    if (strcmp(cc_string_cstr(&bs, arena), "the quick brown fox jumps over the lazy dog") != 0) return 4;
 
     /* num arm: stamps the cap sentinel, decodes as num */
     Cell c = { .num = -123456789 };
@@ -40,7 +40,7 @@ int main(void) {
     if (got != -123456789) return 6;
 
     /* transition num -> str -> num all decode correctly in place */
-    c = { .str = cc_string_from("x", &arena) };
+    c = { .str = cc_string_from("x", arena) };
     if (c.kind != Cell_str) return 7;
     c = { .num = 999 };
     if (c.kind != Cell_num || (c.num ?> 0) != 999) return 8;

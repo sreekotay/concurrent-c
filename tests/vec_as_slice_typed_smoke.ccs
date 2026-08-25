@@ -14,7 +14,7 @@ static size_t take_erased(CCSlice view) { return view.len; }
 int main(void) {
     CCArena arena = cc_arena_create(1 << 16);
 
-    CCVec::[double] v = cc_vec_new::[double](&arena);
+    CCVec::[double] v = cc_vec_new::[double](arena);
     v.push(1.5);
     v.push(2.5);
     v.push(42.0);
@@ -38,7 +38,7 @@ int main(void) {
     /* Struct element: no slice spec, as_slice stays erased with
      * element-count len. */
     {
-        CCVec::[Pt] pv = cc_vec_new::[Pt](&arena);
+        CCVec::[Pt] pv = cc_vec_new::[Pt](arena);
         Pt p = {1, 2};
         pv.push(p);
         CCSlice es = pv.as_slice();

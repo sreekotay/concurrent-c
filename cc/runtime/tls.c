@@ -13,6 +13,14 @@
 #include <ccc/std/tls.cch>
 #include <ccc/std/net.cch>
 
+#undef cc_tls_connect
+#undef cc_tls_connect_addr
+#undef cc_tls_accept
+#undef cc_tls_read
+#undef cc_tls_load_cert_chain
+#undef cc_tls_load_private_key
+#undef cc_tls_load_trust_anchors
+
 /* BearSSL includes */
 #ifdef CC_HAS_BEARSSL
 #include <bearssl.h>
@@ -53,7 +61,7 @@ static int br_low_write(void* ctx, const unsigned char* buf, size_t len) {
 
 CCTlsConn cc_tls_connect(CCSocket sock, CCTlsClientConfig cfg,
                           void* iobuf, size_t iobuf_len,
-                          CCArena* info_arena, CCNetError* out_err) {
+                          CCArena info_arena, CCNetError* out_err) {
     CCTlsConn conn = {0};
     *out_err = CC_NET_OK;
 
@@ -119,7 +127,7 @@ CCTlsConn cc_tls_connect(CCSocket sock, CCTlsClientConfig cfg,
 
 CCTlsConn cc_tls_connect_addr(const char* addr, size_t addr_len,
                                CCTlsClientConfig cfg,
-                               CCArena* conn_arena, CCNetError* out_err) {
+                               CCArena conn_arena, CCNetError* out_err) {
     CCTlsConn conn = {0};
     *out_err = CC_NET_OK;
 
@@ -154,7 +162,7 @@ CCTlsConn cc_tls_connect_addr(const char* addr, size_t addr_len,
 
 CCTlsConn cc_tls_accept(CCSocket sock, CCTlsServerConfig cfg,
                          void* iobuf, size_t iobuf_len,
-                         CCArena* info_arena, CCNetError* out_err) {
+                         CCArena info_arena, CCNetError* out_err) {
     CCTlsConn conn = {0};
     *out_err = CC_NET_OK;
 
@@ -183,7 +191,7 @@ CCTlsConn cc_tls_accept(CCSocket sock, CCTlsServerConfig cfg,
  * TLS I/O
  * ============================================================================ */
 
-CCSlice cc_tls_read(CCTlsConn* conn, CCArena* arena, size_t max_bytes, CCNetError* out_err) {
+CCSlice cc_tls_read(CCTlsConn* conn, CCArena arena, size_t max_bytes, CCNetError* out_err) {
     CCSlice result = {0};
     *out_err = CC_NET_OK;
 
@@ -298,7 +306,7 @@ const CCTlsInfo* cc_tls_info(const CCTlsConn* conn) {
  * Certificate Loading (stubs)
  * ============================================================================ */
 
-CCTlsCertChain* cc_tls_load_cert_chain(CCArena* arena, const char* path, size_t path_len, CCNetError* out_err) {
+CCTlsCertChain* cc_tls_load_cert_chain(CCArena arena, const char* path, size_t path_len, CCNetError* out_err) {
     /* TODO: Implement PEM parsing */
     (void)arena;
     (void)path;
@@ -307,7 +315,7 @@ CCTlsCertChain* cc_tls_load_cert_chain(CCArena* arena, const char* path, size_t 
     return NULL;
 }
 
-CCTlsPrivateKey* cc_tls_load_private_key(CCArena* arena, const char* path, size_t path_len, CCNetError* out_err) {
+CCTlsPrivateKey* cc_tls_load_private_key(CCArena arena, const char* path, size_t path_len, CCNetError* out_err) {
     /* TODO: Implement PEM parsing */
     (void)arena;
     (void)path;
@@ -316,7 +324,7 @@ CCTlsPrivateKey* cc_tls_load_private_key(CCArena* arena, const char* path, size_
     return NULL;
 }
 
-CCTlsTrustAnchors* cc_tls_load_trust_anchors(CCArena* arena, const char* path, size_t path_len, CCNetError* out_err) {
+CCTlsTrustAnchors* cc_tls_load_trust_anchors(CCArena arena, const char* path, size_t path_len, CCNetError* out_err) {
     /* TODO: Implement PEM parsing for CA certs */
     (void)arena;
     (void)path;

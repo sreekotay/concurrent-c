@@ -116,7 +116,7 @@ static ScanStats scan_sync(const char* path) {
 
     for (;;) {
         CCSlice line = cc_slice_empty();
-        bool !>(CCIoError) got = cc_file_read_line_into(&f, &scratch, &line);
+        bool !>(CCIoError) got = cc_file_read_line_into(&f, scratch, &line);
         if (cc_is_err(got)) {
             fprintf(stderr, "bench_line_scan: read_line failed\n");
             abort();

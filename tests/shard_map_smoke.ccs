@@ -9,7 +9,7 @@ int main(void) {
         return 1;
     }
     CCArena excl_arena = @create(kilobytes(64)) @destroy;
-    CCExclusive excl = cc_exclusive_create(&excl_arena, 0) !> @destroy;
+    CCExclusive excl = cc_exclusive_create(excl_arena, 0) !> @destroy;
     CCShardMask mask = cc_shard_mask_make(4);
     CCShardMap maps = {0};
     CCShard* sh;
@@ -45,7 +45,7 @@ int main(void) {
     hold.release();
     if (hold.held()) return 12;
 
-    if (!sh->get_into(CC_SLICE_LIT("a"), &scratch, &owned)) return 13;
+    if (!sh->get_into(CC_SLICE_LIT("a"), scratch, &owned)) return 13;
     if (cc_string_failed(&owned)) return 14;
     {
         CCSlice s = owned.as_slice();

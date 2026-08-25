@@ -33,8 +33,8 @@ static int run(CCTurnstile* ts, int* done) {
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts@(2, 1, &arena) @destroy;
-    if (!ts.excl)
+    CCTurnstile ts@(2, 1, arena) @destroy;
+    if (!cc_exclusive_is_live(ts.excl))
         return 1;
 
     int done[N];

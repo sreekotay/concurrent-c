@@ -7,7 +7,7 @@ int main(void) {
     CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
     Map::[int, /* bait, not a sep, */ CCVec::[int]] m =
         map_new::[int, CCVec::[int]](&a);
-    CCVec::[int] inner = cc_vec_new::[int](&a);
+    CCVec::[int] inner = cc_vec_new::[int](a);
     inner.push(9);
     m->insert(1, inner);
     CCVec::[int] *got = m->get_ptr(1);

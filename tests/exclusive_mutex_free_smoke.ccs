@@ -12,7 +12,7 @@ int main(void) {
         return 1;
     }
     CCArena arena = @create(kilobytes(64)) @destroy;
-    CCExclusive excl = cc_exclusive_create(&arena, 8) !> @destroy;
+    CCExclusive excl = cc_exclusive_create(arena, 8) !> @destroy;
 
     CCExclusiveMutex a = excl.mutex(1);
     CCExclusiveMutex b = excl.mutex(2);

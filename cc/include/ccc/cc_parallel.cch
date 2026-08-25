@@ -182,7 +182,7 @@ static inline CCSlice cc_parallel_lower_c(CCSlice recv_type,
                                           CCSlice mode,
                                           CCSliceArray argv,
                                           CCSliceArray arg_types,
-                                          CCArena* arena) {
+                                          CCArena *arena) {
     (void)recv_type;
     (void)mode;
     (void)argv;

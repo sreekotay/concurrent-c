@@ -12,7 +12,7 @@ int main(void) {
         return 1;
     }
     CCArena arena = @create(kilobytes(64)) @destroy;
-    CCExclusive excl = cc_exclusive_create(&arena, 0) !> @destroy;
+    CCExclusive excl = cc_exclusive_create(arena, 0) !> @destroy;
     CCShardMask shards;
     CCExclusiveGuard gs[8];
     size_t n;

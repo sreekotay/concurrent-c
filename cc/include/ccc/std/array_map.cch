@@ -33,9 +33,10 @@
 #undef __CC_ARRAY_MAP_INIT_COUNT
 #endif
 #define __CC_ARRAY_MAP(K, V) ArrayMap_##K##_##V
-#define __CC_ARRAY_MAP_INIT(K, V, arena) ArrayMap_##K##_##V##_init((arena))
+#define __CC_ARRAY_MAP_INIT(K, V, arena) \
+    ArrayMap_##K##_##V##_init(CC__ARENA_HANDLE(arena))
 #define __CC_ARRAY_MAP_INIT_COUNT(K, V, arena, count) \
-    ArrayMap_##K##_##V##_init_count((arena), (count))
+    ArrayMap_##K##_##V##_init_count(CC__ARENA_HANDLE(arena), (count))
 
 enum {
     CC_ARRAY_MAP_EMPTY = 0u,
@@ -94,7 +95,7 @@ typedef struct CCArrayMapKind {
 } CCArrayMapKind;
 
 typedef struct CCArrayMapCore {
-    CCArena *arena;
+    CCArena arena;
     uint32_t *buckets; /* 0 empty, UINT32_MAX tomb, else dense_index+1 */
     void *dense;
     size_t len;
@@ -117,7 +118,7 @@ static inline int cc_array_map_core_reserve_dense(CCArrayMapCore *m,
                                                   size_t need) {
     size_t new_cap;
     void *p;
-    if (!m || !m->arena) return -1;
+    if (!m || !cc_arena_is_live(m->arena)) return -1;
     if (need <= m->dense_cap) return 0;
     new_cap = m->dense_cap ? m->dense_cap : 8u;
     while (new_cap < need) {
@@ -141,7 +142,7 @@ static inline int cc_array_map_core_reserve_dense(CCArrayMapCore *m,
 static inline int cc_array_map_core_rehash(CCArrayMapCore *m,
                                            const CCArrayMapKind *k,
                                            size_t new_bucket_cap) {
-    if (!m || !m->arena || new_bucket_cap < CC_ARRAY_MAP_MIN_BUCKETS) return -1;
+    if (!m || !cc_arena_is_live(m->arena) || new_bucket_cap < CC_ARRAY_MAP_MIN_BUCKETS) return -1;
     if (new_bucket_cap & (new_bucket_cap - 1u)) return -1;
     for (;;) {
         uint32_t *nb;
@@ -339,17 +340,17 @@ static inline void cc_array_map_core_clear(CCArrayMapCore *m) {
 }
 
 static inline void cc_array_map_core_destroy(CCArrayMapCore *m) {
-    if (!m || !m->arena) return;
+    if (!m || !cc_arena_is_live(m->arena)) return;
     if (m->buckets) (void)cc_arena_release(m->arena, m->buckets);
     if (m->dense) (void)cc_arena_release(m->arena, m->dense);
     (void)cc_arena_release(m->arena, m);
 }
 
-static inline CCArrayMapCore *cc_array_map_core_init(CCArena *arena,
+static inline CCArrayMapCore *cc_array_map_core_init(CCArena arena,
                                                      size_t self_size,
                                                      size_t self_align) {
     CCArrayMapCore *m;
-    if (!arena) return NULL;
+    if (!cc_arena_is_live(arena)) return NULL;
     m = (CCArrayMapCore *)cc_arena_alloc(arena, self_size, self_align);
     if (!m) return NULL;
     m->arena = arena;
@@ -362,7 +363,7 @@ static inline CCArrayMapCore *cc_array_map_core_init(CCArena *arena,
     return m;
 }
 
-static inline CCArrayMapCore *cc_array_map_core_init_count(CCArena *arena,
+static inline CCArrayMapCore *cc_array_map_core_init_count(CCArena arena,
                                                            size_t self_size,
                                                            size_t self_align,
                                                            const CCArrayMapKind *k,
@@ -391,7 +392,7 @@ static inline CCArrayMapCore *cc_array_map_core_init_count(CCArena *arena,
     } Name##Slot;                                                                     \
                                                                                       \
     typedef struct Name {                                                             \
-        CCArena *arena;                                                               \
+        CCArena arena;                                                               \
         uint32_t *buckets; /* 0 empty, UINT32_MAX tomb, else dense_index+1 */        \
         Name##Slot *dense;                                                            \
         size_t len;                                                                   \
@@ -427,11 +428,11 @@ static inline CCArrayMapCore *cc_array_map_core_init_count(CCArena *arena,
                m->dense_cap * sizeof(Name##Slot);                                     \
     }                                                                                 \
                                                                                       \
-    static inline Name *Name##_init(CCArena *arena) {                                 \
+    static inline Name *Name##_init(CCArena arena) {                                 \
         return (Name *)cc_array_map_core_init(arena, sizeof(Name), _Alignof(Name));   \
     }                                                                                 \
                                                                                       \
-    static inline Name *Name##_init_count(CCArena *arena, size_t count) {             \
+    static inline Name *Name##_init_count(CCArena arena, size_t count) {             \
         return (Name *)cc_array_map_core_init_count(arena, sizeof(Name),              \
                                                     _Alignof(Name), Name##__kind(),   \
                                                     count);                           \
@@ -597,15 +598,18 @@ static inline ${mangled}_chk* ${mangled}_chk_p(void *a) {
 #else
 ${fwd}
 CC_ARRAY_MAP_DECL(${k}, ${v}, ${mangled}, ${hash}, ${eq})
-static inline ${mangled}* ${newfn}(CCArena* __a) {
+static inline ${mangled}* cc__${newfn}(CCArena __a) {
     return ${mangled}_init(__a);
 }
-static inline ${mangled}* ${mangled}_new(CCArena* __a) {
+#define ${newfn}(ar) cc__${newfn}(CC__ARENA_HANDLE(ar))
+static inline ${mangled}* cc__${mangled}_new(CCArena __a) {
     return ${mangled}_init(__a);
 }
-static inline ${mangled}* ${newcfn}(CCArena* __a, size_t __n) {
+#define ${mangled}_new(ar) cc__${mangled}_new(CC__ARENA_HANDLE(ar))
+static inline ${mangled}* cc__${newcfn}(CCArena __a, size_t __n) {
     return ${mangled}_init_count(__a, __n);
 }
+#define ${newcfn}(ar, n) cc__${newcfn}(CC__ARENA_HANDLE(ar), (n))
 #endif
 `, arena);
 }

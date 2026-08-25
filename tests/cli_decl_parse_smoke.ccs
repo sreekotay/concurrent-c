@@ -91,7 +91,7 @@ static int check(const char *tag, const char *src, const char **want, int nwant)
         printf("FAIL: %s match\n", tag);
         return 1;
     }
-    if (!CliSyntax.collect(src, n, &arena, on_keep, &k)) {
+    if (!CliSyntax.collect(src, n, arena, on_keep, &k)) {
         printf("FAIL: %s collect\n", tag);
         return 1;
     }

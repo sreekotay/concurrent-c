@@ -95,8 +95,8 @@ int main(void) {
     run_unpacked(&arena, &ubuf);
     int udrops = g_drops;
 
-    const char* ps = cc_string_cstr(&pbuf, &arena);
-    const char* us = cc_string_cstr(&ubuf, &arena);
+    const char* ps = cc_string_cstr(&pbuf, arena);
+    const char* us = cc_string_cstr(&ubuf, arena);
     printf("packed:   %s\n", ps);
     printf("unpacked: %s\n", us);
     if (strcmp(ps, us) != 0) { printf("PARITY MISMATCH\n"); return 1; }

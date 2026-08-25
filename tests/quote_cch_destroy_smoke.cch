@@ -10,9 +10,9 @@
 enum { QUOTE_CCH_SCRATCH = 256 };
 
 static int quote_cch_scratch_sum(int a, int b) {
-    uint8_t buf[QUOTE_CCH_SCRATCH];
+    _Alignas(CCArenaHost) uint8_t buf[QUOTE_CCH_SCRATCH];
     CCArena scratch = cc_arena_create_buffer(buf, sizeof(buf), CC_ARENA_GROWABLE) @destroy;
-    int* p = cc_arena_alloc_T(int, &scratch);
+    int* p = cc_arena_alloc_T(int, scratch);
     if (!p) return -1;
     *p = a + b;
     return *p;

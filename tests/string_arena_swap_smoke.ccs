@@ -12,13 +12,13 @@ int main(void) {
 
     CCString s = cc_string_new();
     /* Promote off the inline buffer into `first`. */
-    if (!cc_string_push_cstr(&s, "hello-arena-swap-seed", &first)) return 2;
+    if (!cc_string_push_cstr(&s, "hello-arena-swap-seed", first)) return 2;
     if (cc_string_is_inline(&s)) return 3;
-    if (cc_string_arena(&s) != &first) return 4;
+    if (cc_string_arena(&s).a != first.a) return 4;
 
     /* Grow again with `second` — arena swap: ownership moves. */
-    if (!cc_string_push_cstr(&s, "-and-more-bytes-for-growth", &second)) return 5;
-    if (cc_string_arena(&s) != &second) return 6;
+    if (!cc_string_push_cstr(&s, "-and-more-bytes-for-growth", second)) return 5;
+    if (cc_string_arena(&s).a != second.a) return 6;
     if (cc_string_provenance(&s) != second.a->provenance) return 7;
 
     CCSlice view = s.as_slice();
@@ -27,7 +27,7 @@ int main(void) {
         return 9;
 
     /* Release through stored owner; passed arena is ignored when header owns. */
-    cc_string_release(&s, &other);
+    cc_string_release(&s, other);
 
     /* Wrong-arena release: refuse (overflow ownership is always tracked). */
     {

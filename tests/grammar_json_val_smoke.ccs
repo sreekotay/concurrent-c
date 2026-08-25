@@ -43,7 +43,7 @@ static int slice_is(CCSlice s, const char* want) {
     return s.len == l && s.ptr && memcmp(s.ptr, want, l) == 0;
 }
 
-static int parse_text(const char* src, JsonText* out, CCArena* arena) {
+static int parse_text(const char* src, JsonText* out, CCArena arena) {
     return JsonText_parse(src, strlen(src), arena, out);
 }
 
@@ -51,7 +51,7 @@ int main(void) {
     CCArena arena = cc_arena_create(8 << 20);
     JsonText t;
 
-    if (!parse_text("{}", &t, &arena) || !t.v) {
+    if (!parse_text("{}", &t, arena) || !t.v) {
         printf("FAIL: empty object\n"); return 1;
     }
     {
@@ -62,7 +62,7 @@ int main(void) {
         }
     }
 
-    if (!parse_text("[]", &t, &arena) || !t.v) {
+    if (!parse_text("[]", &t, arena) || !t.v) {
         printf("FAIL: empty array\n"); return 1;
     }
     {
@@ -73,7 +73,7 @@ int main(void) {
         }
     }
 
-    if (!parse_text("\"x\"", &t, &arena) || !t.v) {
+    if (!parse_text("\"x\"", &t, arena) || !t.v) {
         printf("FAIL: string\n"); return 1;
     }
     {
@@ -84,7 +84,7 @@ int main(void) {
         }
     }
 
-    if (!parse_text("1", &t, &arena) || !t.v) {
+    if (!parse_text("1", &t, arena) || !t.v) {
         printf("FAIL: number\n"); return 1;
     }
     {
@@ -95,21 +95,21 @@ int main(void) {
         }
     }
 
-    if (!parse_text("true", &t, &arena) || !t.v || t.v->kind != JsonVal_jtrue) {
+    if (!parse_text("true", &t, arena) || !t.v || t.v->kind != JsonVal_jtrue) {
         printf("FAIL: true\n"); return 1;
     }
-    if (!parse_text("false", &t, &arena) || !t.v || t.v->kind != JsonVal_jfalse) {
+    if (!parse_text("false", &t, arena) || !t.v || t.v->kind != JsonVal_jfalse) {
         printf("FAIL: false\n"); return 1;
     }
-    if (!parse_text("null", &t, &arena) || !t.v || t.v->kind != JsonVal_jnull) {
+    if (!parse_text("null", &t, arena) || !t.v || t.v->kind != JsonVal_jnull) {
         printf("FAIL: null\n"); return 1;
     }
-    if (!parse_text("  42  ", &t, &arena) || !t.v || t.v->kind != JsonVal_number) {
+    if (!parse_text("  42  ", &t, arena) || !t.v || t.v->kind != JsonVal_number) {
         printf("FAIL: padded number\n"); return 1;
     }
 
     {
-        if (!parse_text("{\"a\":1}", &t, &arena) || !t.v) {
+        if (!parse_text("{\"a\":1}", &t, arena) || !t.v) {
             printf("FAIL: object parse\n"); return 1;
         }
         JsonVal v = *t.v;
@@ -127,7 +127,7 @@ int main(void) {
     }
 
     {
-        if (!parse_text("[true,null,{}]", &t, &arena) || !t.v) {
+        if (!parse_text("[true,null,{}]", &t, arena) || !t.v) {
             printf("FAIL: array parse\n"); return 1;
         }
         JsonVal v = *t.v;
@@ -143,7 +143,7 @@ int main(void) {
     {
         const char tab[] = { '"', 'a', '\t', 'b', '"' };
         JsonText bad;
-        if (JsonText_parse(tab, sizeof(tab), &arena, &bad)) {
+        if (JsonText_parse(tab, sizeof(tab), arena, &bad)) {
             printf("FAIL: unescaped tab accepted\n"); return 1;
         }
         size_t fp = cc_fail_pos();
@@ -154,8 +154,8 @@ int main(void) {
         if (cc_fail_pos() < 2) { printf("FAIL: match fail_pos\n"); return 1; }
     }
 
-    if (parse_text("1.", &t, &arena)) { printf("FAIL: 1. accepted\n"); return 1; }
-    if (parse_text("", &t, &arena)) { printf("FAIL: empty accepted\n"); return 1; }
+    if (parse_text("1.", &t, arena)) { printf("FAIL: 1. accepted\n"); return 1; }
+    if (parse_text("", &t, arena)) { printf("FAIL: empty accepted\n"); return 1; }
 
     {
         FILE* f = fopen("examples/serdes/json/twitter.json", "rb");
@@ -167,7 +167,7 @@ int main(void) {
             size_t rd = fread(buf, 1, (size_t)n, f);
             fclose(f);
             JsonText tw;
-            if (!JsonText_parse(buf, rd, &arena, &tw) || !tw.v ||
+            if (!JsonText_parse(buf, rd, arena, &tw) || !tw.v ||
                 tw.v->kind != JsonVal_object) {
                 printf("FAIL: twitter JsonText\n");
                 free(buf);

@@ -12,7 +12,7 @@ int main(void) {
     int *p;
     if (!cc_arena_is_live(arena)) return 1;
     if (Vec_len(0) != 0) return 2;
-    v = vec_new::[int](&arena);
+    v = vec_new::[int](arena);
     if (v.push(10) != 0) return 3;
     if (v.push(20) != 0) return 4;
     if (v.len() != 2) return 5;

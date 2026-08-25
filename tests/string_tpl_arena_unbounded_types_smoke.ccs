@@ -12,31 +12,31 @@ int main(void) {
 
     /* slice (the original fail oracle's type) */
     char[:] name = @slice("ada");
-    CCString s1 = @string(`name=${name}`, &arena);
+    CCString s1 = @string(`name=${name}`, arena);
     char[:0] v1 = s1.as_slice();
     assert(v1.eq_cstr("name=ada"));
 
     /* CCString */
-    CCString inner = @string(`i=${42}`, &arena);
-    CCString s2 = @string(`in=${inner}`, &arena);
+    CCString inner = @string(`i=${42}`, arena);
+    CCString s2 = @string(`in=${inner}`, arena);
     char[:0] v2 = s2.as_slice();
     assert(v2.eq_cstr("in=i=42"));
 
     /* double and float */
     double d = 1.5;
     float f = 0.25f;
-    CCString s3 = @string(`d=${d} f=${f}`, &arena);
+    CCString s3 = @string(`d=${d} f=${f}`, arena);
     char[:0] v3 = s3.as_slice();
     assert(v3.eq_cstr("d=1.5 f=0.25"));
 
     /* const char* (C string pointer) */
     const char* who = "lovelace";
-    CCString s4 = @string(`w=${who}`, &arena);
+    CCString s4 = @string(`w=${who}`, arena);
     char[:0] v4 = s4.as_slice();
     assert(v4.eq_cstr("w=lovelace"));
 
     /* all four in one template */
-    CCString all = @string(`${name}|${inner}|${d}|${who}`, &arena);
+    CCString all = @string(`${name}|${inner}|${d}|${who}`, arena);
     char[:0] va = all.as_slice();
     assert(va.eq_cstr("ada|i=42|1.5|lovelace"));
 

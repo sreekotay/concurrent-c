@@ -1,2 +1,0 @@
-cc_arena_detach: refuses a stack or caller-owned L1 (would dangle)
-cc_arena_checkpoint: slab hole; refuse (a keep-set object may have been released)

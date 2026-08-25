@@ -52,27 +52,27 @@ int main(void) {
     /* each variant parses; read via protected arm projection */
     {
         Reply r;
-        if (!Reply_parse("+OK\r\n", 5, &arena, &r) || r.kind != Reply_simple) {
+        if (!Reply_parse("+OK\r\n", 5, arena, &r) || r.kind != Reply_simple) {
             printf("FAIL: simple\n"); return 1; }
         if (r.kind == .simple) {
             if (!slice_is(r.simple.s.hdr(), "OK")) { printf("FAIL: simple payload\n"); return 1; }
         }
-        if (!Reply_parse("-ERR bad key\r\n", 14, &arena, &r) || r.kind != Reply_error) {
+        if (!Reply_parse("-ERR bad key\r\n", 14, arena, &r) || r.kind != Reply_error) {
             printf("FAIL: error\n"); return 1; }
         if (r.kind == .error) {
             if (!slice_is(r.error.msg.hdr(), "ERR bad key")) { printf("FAIL: error payload\n"); return 1; }
         }
-        if (!Reply_parse(":1234\r\n", 7, &arena, &r) || r.kind != Reply_integer) {
+        if (!Reply_parse(":1234\r\n", 7, arena, &r) || r.kind != Reply_integer) {
             printf("FAIL: integer\n"); return 1; }
         if (r.kind == .integer) {
             if (r.integer.v != 1234) { printf("FAIL: integer payload\n"); return 1; }
         }
-        if (!Reply_parse(":-42\r\n", 6, &arena, &r) || r.kind != Reply_integer) {
+        if (!Reply_parse(":-42\r\n", 6, arena, &r) || r.kind != Reply_integer) {
             printf("FAIL: negative integer\n"); return 1; }
         if (r.kind == .integer) {
             if (r.integer.v != -42) { printf("FAIL: negative payload\n"); return 1; }
         }
-        if (!Reply_parse("$5\r\nhello\r\n", 11, &arena, &r) || r.kind != Reply_bulk) {
+        if (!Reply_parse("$5\r\nhello\r\n", 11, arena, &r) || r.kind != Reply_bulk) {
             printf("FAIL: bulk\n"); return 1; }
         if (r.kind == .bulk) {
             if (r.bulk.len != 5 || !slice_is(r.bulk.data, "hello")) {
@@ -84,7 +84,7 @@ int main(void) {
     {
         const char* src = "*3\r\n:1\r\n$2\r\nab\r\n*2\r\n+A\r\n-B\r\n";
         Reply r;
-        if (!Reply_parse(src, strlen(src), &arena, &r) || r.kind != Reply_array) {
+        if (!Reply_parse(src, strlen(src), arena, &r) || r.kind != Reply_array) {
             printf("FAIL: array parse\n"); return 1; }
         if (r.kind == .array) {
             if (r.array.items_n != 3) { printf("FAIL: array count\n"); return 1; }
@@ -111,14 +111,14 @@ int main(void) {
     {
         size_t pos = 0;
         Reply r;
-        bool !>(CCError) t = Reply_try_read("?x\r\n", 4, &pos, &arena, &r);
+        bool !>(CCError) t = Reply_try_read("?x\r\n", 4, &pos, arena, &r);
         if (!t.is_err() || t.error().kind != CC_ERR_PARSE) { printf("FAIL: bad dispatch\n"); return 1; }
         pos = 0;
-        t = Reply_try_read("$10\r\nhel", 8, &pos, &arena, &r);
+        t = Reply_try_read("$10\r\nhel", 8, &pos, arena, &r);
         if (!t.is_err() || t.error().kind != CC_ERR_WOULD_BLOCK || pos != 0) {
             printf("FAIL: truncated bulk\n"); return 1; }
         pos = 0;
-        t = Reply_try_read("*2\r\n:1\r\n", 8, &pos, &arena, &r);
+        t = Reply_try_read("*2\r\n:1\r\n", 8, &pos, arena, &r);
         if (!t.is_err() || t.error().kind != CC_ERR_WOULD_BLOCK) {
             printf("FAIL: truncated array\n"); return 1; }
     }
@@ -129,36 +129,36 @@ int main(void) {
         for (int i = 0; i < 200; i++) { memcpy(bomb + n, "*1\r\n", 4); n += 4; }
         memcpy(bomb + n, ":1\r\n", 4); n += 4;
         Reply r;
-        if (Reply_parse(bomb, n, &arena, &r)) { printf("FAIL: depth bomb accepted\n"); return 1; }
+        if (Reply_parse(bomb, n, arena, &r)) { printf("FAIL: depth bomb accepted\n"); return 1; }
     }
 
     /* int bind: signed 64-bit range; overflow is PARSE, not wrap */
     {
         Reply r;
         const char* mx = ":9223372036854775807\r\n";
-        if (!Reply_parse(mx, strlen(mx), &arena, &r) || r.kind != Reply_integer) {
+        if (!Reply_parse(mx, strlen(mx), arena, &r) || r.kind != Reply_integer) {
             printf("FAIL: LLONG_MAX\n"); return 1; }
         if (r.kind == .integer) {
             if (r.integer.v != 9223372036854775807LL) { printf("FAIL: LLONG_MAX val\n"); return 1; }
         }
         const char* mn = ":-9223372036854775808\r\n";
-        if (!Reply_parse(mn, strlen(mn), &arena, &r) || r.kind != Reply_integer) {
+        if (!Reply_parse(mn, strlen(mn), arena, &r) || r.kind != Reply_integer) {
             printf("FAIL: LLONG_MIN\n"); return 1; }
         if (r.kind == .integer) {
             if (r.integer.v != (-9223372036854775807LL - 1)) { printf("FAIL: LLONG_MIN val\n"); return 1; }
         }
         const char* over = ":9223372036854775808\r\n";
-        if (Reply_parse(over, strlen(over), &arena, &r)) {
+        if (Reply_parse(over, strlen(over), arena, &r)) {
             printf("FAIL: LLONG_MAX+1 accepted\n"); return 1; }
         const char* under = ":-9223372036854775809\r\n";
-        if (Reply_parse(under, strlen(under), &arena, &r)) {
+        if (Reply_parse(under, strlen(under), arena, &r)) {
             printf("FAIL: LLONG_MIN-1 accepted\n"); return 1; }
         const char* wrap = ":99999999999999999999\r\n";
-        if (Reply_parse(wrap, strlen(wrap), &arena, &r)) {
+        if (Reply_parse(wrap, strlen(wrap), arena, &r)) {
             printf("FAIL: 20-nines wrap\n"); return 1; }
         const char* bulk = "$99999999999999999999\r\nx";
         size_t pos = 0;
-        bool !>(CCError) t = Reply_try_read(bulk, strlen(bulk), &pos, &arena, &r);
+        bool !>(CCError) t = Reply_try_read(bulk, strlen(bulk), &pos, arena, &r);
         if (!t.is_err() || t.error().kind != CC_ERR_PARSE || pos != 0) {
             printf("FAIL: overflow bulk not PARSE\n"); return 1; }
     }
@@ -166,12 +166,12 @@ int main(void) {
     /* DEFAULT arm: framed dispatches on '*', anything else is inline */
     {
         Cmd c;
-        if (!Cmd_parse("*3\r\n", 4, &arena, &c) || c.kind != Cmd_framed) {
+        if (!Cmd_parse("*3\r\n", 4, arena, &c) || c.kind != Cmd_framed) {
             printf("FAIL: framed\n"); return 1; }
         if (c.kind == .framed) {
             if (c.framed.argc != 3) { printf("FAIL: framed argc\n"); return 1; }
         }
-        if (!Cmd_parse("PING\r\n", 6, &arena, &c) || c.kind != Cmd_plain) {
+        if (!Cmd_parse("PING\r\n", 6, arena, &c) || c.kind != Cmd_plain) {
             printf("FAIL: inline\n"); return 1; }
         if (c.kind == .plain) {
             if (!slice_is(c.plain.text.hdr(), "PING")) { printf("FAIL: inline text\n"); return 1; }

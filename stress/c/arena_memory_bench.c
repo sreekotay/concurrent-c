@@ -205,7 +205,7 @@ int main(void) {
     printf("arena_memory_bench(c): tip=%zux%zu bulk=%zu ovf=%zu block_max=%d\n",
            tip_rounds, tip_steps, bulk_n, ovf_n, block_max);
 
-    if (bump_init(&a, tip_root, block_max) != 0) return 1;
+    if (bump_init(a, tip_root, block_max) != 0) return 1;
     t0 = now_ms();
     for (r = 0; r < tip_rounds; r++) {
         p = NULL;
@@ -225,7 +225,7 @@ int main(void) {
     tip_ms = now_ms() - t0;
 
     /* bulk_ms / ovf_ms are full ownership: allocate + reclaim. */
-    if (bump_init(&a, bulk_root, block_max) != 0) return 3;
+    if (bump_init(a, bulk_root, block_max) != 0) return 3;
     t0 = now_ms();
     for (i = 0; i < bulk_n; i++) {
         size_t n = bulk_size(i);
@@ -244,7 +244,7 @@ int main(void) {
     bump_free(&a);
     bulk_ms = now_ms() - t0;
 
-    if (bump_init(&a, ovf_root, block_max) != 0) return 5;
+    if (bump_init(a, ovf_root, block_max) != 0) return 5;
     t0 = now_ms();
     for (i = 0; i < ovf_n; i++) {
         size_t n = 24 + (i * 17) % 512;

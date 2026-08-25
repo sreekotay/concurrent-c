@@ -19,7 +19,7 @@ int main(void) {
     if (Soft_match("y", 1)) { printf("FAIL: Soft bad accepted\n"); return 1; }
 
     CCArena arena = cc_arena_create(1 << 16);
-    SoftNode* root = Soft_parse("x", 1, &arena);
+    SoftNode* root = Soft_parse("x", 1, arena);
     if (!root) { printf("FAIL: Soft parse soft-miss\n"); return 1; }
 
     if (KindOnly_match("abc", 3)) {

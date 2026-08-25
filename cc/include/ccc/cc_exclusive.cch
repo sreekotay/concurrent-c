@@ -2,8 +2,8 @@
  * Named exclusive sections (v1).
  *
  *   CCArena arena@(kilobytes(128)) @destroy;
- *   CCExclusive excl = cc_exclusive_create(&arena, 0) !> @destroy;  // default map (64)
- *   // or: excl = cc_exclusive_create(&arena, 256) !>;              // hint → pow2
+ *   CCExclusive excl = cc_exclusive_create(arena, 0) !> @destroy;  // default map (64)
+ *   // or: excl = cc_exclusive_create(arena, 256) !>;              // hint → pow2
  *   // UFCS: arena.create_exclusive(0) !>
  *   CCExclusiveMutex m = excl.mutex(name);  // resolve once
  *   CCExclusiveGuard g = m.acquire();
@@ -23,9 +23,9 @@
  * names, release.  No guards escape the call:
  *
  *   Reply r;
- *   bool ran = excl.acquire_into(name, &r, &arena, builder);
- *   bool ran = excl.acquire_sorted_into(names, count, &r, &arena, builder);
- *   bool ran = excl.acquire_range_into(0, shard_count, &r, &arena, builder);
+ *   bool ran = excl.acquire_into(name, &r, arena, builder);
+ *   bool ran = excl.acquire_sorted_into(names, count, &r, arena, builder);
+ *   bool ran = excl.acquire_range_into(0, shard_count, &r, arena, builder);
  *
  * Conditioned acquire (`cc_exclusive_result.cch`): park inside the primitive
  * until pred is true under the name. Caller is not holding on entry.
@@ -33,7 +33,7 @@
  * hold after making pred true:
  *
  *   CCExclusiveGuard g = excl.acquire_when(name, pred, env) !> @destroy;
- *   excl.acquire_when_into(name, pred, env, &r, &arena, builder) !>;
+ *   excl.acquire_when_into(name, pred, env, &r, arena, builder) !>;
  *   g.signal();   // or g.broadcast(); still holding
  *
  * Hash-shard geometry partner (pow2 count; compose with exclusive names
@@ -151,11 +151,12 @@ typedef struct CCExclusiveGuard {
  * arena-allocated on first resolve.  OOM / null arena is an error (no dummy).
  * `initial_cap` is a map capacity hint (rounded up to a power of two);
  * 0 selects the default (64).  The map grows on demand.
- * CCS: `CCExclusive excl = cc_exclusive_create(&arena, 0) !> @destroy;`
+ * CCS: `CCExclusive excl = cc_exclusive_create(arena, 0) !> @destroy;`
  * UFCS: `arena.create_exclusive(0) !>` (`cc_arena_create_exclusive`). */
-CCResult_CCExclusive_CCError cc_exclusive_create(CCArena* arena, size_t initial_cap);
-CCResult_CCExclusive_CCError cc_arena_create_exclusive(CCArena* arena,
-                                                       size_t initial_cap);
+CCResult_CCExclusive_CCError cc_exclusive_create(CCArena arena, size_t initial_cap);
+/* UFCS `arena.create_exclusive(n)` emits this name with `&arena`; peel. */
+#define cc_exclusive_create(a, n) (cc_exclusive_create)(CC__ARENA_HANDLE(a), n)
+#define cc_arena_create_exclusive(a, n) cc_exclusive_create(a, n)
 /* Tears down the create mutex and releases discovery-map tables; mutex
  * entry storage remains until the arena is freed. */
 void cc_exclusive_destroy(CCExclusive* excl);
@@ -321,7 +322,7 @@ static inline size_t cc_exclusive_acquire_range(CCExclusiveHost* excl,
  * copies of the result; it may be NULL when the builder does not allocate. */
 
 static inline bool cc_exclusive_acquire_into(CCExclusiveHost* excl, uint64_t name,
-                                             void* slot, CCArena* arena,
+                                             void* slot, CCArena arena,
                                              CCClosure2 builder) {
     CCExclusiveGuard g;
     if (!excl) {
@@ -329,7 +330,7 @@ static inline bool cc_exclusive_acquire_into(CCExclusiveHost* excl, uint64_t nam
         return false;
     }
     g = cc_exclusive_acquire(excl, name);
-    cc_closure2_call(builder, (intptr_t)slot, (intptr_t)arena);
+    cc_closure2_call(builder, (intptr_t)slot, (intptr_t)&arena);
     cc_exclusive_guard_release(&g);
     return true;
 }
@@ -339,7 +340,7 @@ static inline bool cc_exclusive_acquire_into(CCExclusiveHost* excl, uint64_t nam
 static inline bool cc_exclusive_acquire_sorted_into(CCExclusiveHost* excl,
                                                     const uint64_t* names,
                                                     size_t count,
-                                                    void* slot, CCArena* arena,
+                                                    void* slot, CCArena arena,
                                                     CCClosure2 builder) {
     CCExclusiveGuard gs[CC_EXCLUSIVE_ACQUIRE_MULTI_MAX];
     size_t n = 0;
@@ -355,7 +356,7 @@ static inline bool cc_exclusive_acquire_sorted_into(CCExclusiveHost* excl,
             return false;
         }
     }
-    cc_closure2_call(builder, (intptr_t)slot, (intptr_t)arena);
+    cc_closure2_call(builder, (intptr_t)slot, (intptr_t)&arena);
     cc_exclusive_guards_release(gs, n);
     return true;
 }
@@ -364,7 +365,7 @@ static inline bool cc_exclusive_acquire_sorted_into(CCExclusiveHost* excl,
  * names held; hi < lo is rejected (builder does not run). */
 static inline bool cc_exclusive_acquire_range_into(CCExclusiveHost* excl,
                                                    uint64_t lo, uint64_t hi,
-                                                   void* slot, CCArena* arena,
+                                                   void* slot, CCArena arena,
                                                    CCClosure2 builder) {
     CCExclusiveGuard gs[CC_EXCLUSIVE_ACQUIRE_MULTI_MAX];
     size_t n = 0;
@@ -380,10 +381,20 @@ static inline bool cc_exclusive_acquire_range_into(CCExclusiveHost* excl,
             return false;
         }
     }
-    cc_closure2_call(builder, (intptr_t)slot, (intptr_t)arena);
+    cc_closure2_call(builder, (intptr_t)slot, (intptr_t)&arena);
     cc_exclusive_guards_release(gs, n);
     return true;
 }
+
+#define cc_exclusive_acquire_into(excl, name, slot, a, b) \
+    (cc_exclusive_acquire_into)((excl), (name), (slot), \
+                                CC__ARENA_HANDLE_OR_NULL(a), (b))
+#define cc_exclusive_acquire_sorted_into(excl, names, count, slot, a, b) \
+    (cc_exclusive_acquire_sorted_into)((excl), (names), (count), (slot), \
+                                       CC__ARENA_HANDLE_OR_NULL(a), (b))
+#define cc_exclusive_acquire_range_into(excl, lo, hi, slot, a, b) \
+    (cc_exclusive_acquire_range_into)((excl), (lo), (hi), (slot), \
+                                      CC__ARENA_HANDLE_OR_NULL(a), (b))
 
 /* ---- Hash-shard geometry (compose with exclusive names 0..count-1) ---- */
 

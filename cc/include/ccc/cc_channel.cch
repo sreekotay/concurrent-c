@@ -274,7 +274,9 @@ void cc_chan_free(CCChan* ch);
 
 // Blocking send/recv. Returns 0 on success or an errno-style error.
 int cc_chan_send(CCChan* ch, const void* value, size_t value_size);
-int cc_chan_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena);
+int cc_chan_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena arena);
+#define cc_chan_send_into(ch, b, sz, a) \
+    (cc_chan_send_into)((ch), (b), (sz), CC__ARENA_HANDLE_OR_NULL(a))
 int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size);
 size_t cc_chan_elem_size(const CCChan* ch);
 
@@ -283,7 +285,9 @@ size_t cc_chan_elem_size(const CCChan* ch);
 
 // Non-blocking: return EAGAIN if would block.
 int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size);
-int cc_chan_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena);
+int cc_chan_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena arena);
+#define cc_chan_try_send_into(ch, b, sz, a) \
+    (cc_chan_try_send_into)((ch), (b), (sz), CC__ARENA_HANDLE_OR_NULL(a))
 int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size);
 void cc_chan_set_recv_signal(CCChan* ch, CCSocketSignal* sig);
 
@@ -438,18 +442,22 @@ static inline void cc_channel_raw_free(CCChan* ch) { cc_chan_free(ch); }
 static inline int cc_channel_raw_send(CCChan* ch, const void* value, size_t value_size) {
     return cc_chan_send(ch, value, value_size);
 }
-static inline int cc_channel_raw_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena) {
+static inline int cc_channel_raw_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena arena) {
     return cc_chan_send_into(ch, builder, value_size, arena);
 }
+#define cc_channel_raw_send_into(ch, b, sz, a) \
+    (cc_channel_raw_send_into)((ch), (b), (sz), CC__ARENA_HANDLE_OR_NULL(a))
 static inline int cc_channel_raw_recv(CCChan* ch, void* out_value, size_t value_size) {
     return cc_chan_recv(ch, out_value, value_size);
 }
 static inline int cc_channel_raw_try_send(CCChan* ch, const void* value, size_t value_size) {
     return cc_chan_try_send(ch, value, value_size);
 }
-static inline int cc_channel_raw_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena) {
+static inline int cc_channel_raw_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena arena) {
     return cc_chan_try_send_into(ch, builder, value_size, arena);
 }
+#define cc_channel_raw_try_send_into(ch, b, sz, a) \
+    (cc_channel_raw_try_send_into)((ch), (b), (sz), CC__ARENA_HANDLE_OR_NULL(a))
 static inline int cc_channel_raw_try_recv(CCChan* ch, void* out_value, size_t value_size) {
     return cc_chan_try_recv(ch, out_value, value_size);
 }
@@ -515,15 +523,42 @@ static inline bool !>(CCIoError) cc__channel_send_take_typed(CCChanTx tx, void* 
 /* send_into / try_send_into: dispatch on the first argument's type, not
  * arity.  Closure builders often contain capture-list commas (`[a, b]`)
  * that are not parenthesis-protected; arity macros mis-count those as
- * extra arguments.  `_Generic` + `(first, __VA_ARGS__)` keeps the builder
- * intact because `__VA_ARGS__` re-joins the remaining preprocessor args. */
+ * extra arguments.  `_Generic` selects a *macro call* (not a function
+ * designator) so the last arena arg can be peeled — a later
+ * `#define typed_call(...)` never fires when `_Generic` yields the
+ * function name.  DROP_LAST / LAST rejoin a split builder and peel
+ * NULL / handle* / handle. */
+#define CC__CH_ARG_N(_1, _2, _3, _4, _5, _6, _7, _8, N, ...) N
+#define CC__CH_NARG(...) CC__CH_ARG_N(__VA_ARGS__, 8, 7, 6, 5, 4, 3, 2, 1, 0)
+#define CC__CH_LAST(...) CC__CH_LAST_N(CC__CH_NARG(__VA_ARGS__), __VA_ARGS__)
+#define CC__CH_LAST_N(n, ...) CC__CH_LAST_N_(n, __VA_ARGS__)
+#define CC__CH_LAST_N_(n, ...) CC__CH_LAST_##n(__VA_ARGS__)
+#define CC__CH_LAST_1(a) a
+#define CC__CH_LAST_2(a, b) b
+#define CC__CH_LAST_3(a, b, c) c
+#define CC__CH_LAST_4(a, b, c, d) d
+#define CC__CH_LAST_5(a, b, c, d, e) e
+#define CC__CH_LAST_6(a, b, c, d, e, f) f
+#define CC__CH_LAST_7(a, b, c, d, e, f, g) g
+#define CC__CH_LAST_8(a, b, c, d, e, f, g, h) h
+#define CC__CH_DROP_LAST(...) CC__CH_DROP_LAST_N(CC__CH_NARG(__VA_ARGS__), __VA_ARGS__)
+#define CC__CH_DROP_LAST_N(n, ...) CC__CH_DROP_LAST_N_(n, __VA_ARGS__)
+#define CC__CH_DROP_LAST_N_(n, ...) CC__CH_DROP_LAST_##n(__VA_ARGS__)
+#define CC__CH_DROP_LAST_1(a)
+#define CC__CH_DROP_LAST_2(a, b) a
+#define CC__CH_DROP_LAST_3(a, b, c) a, b
+#define CC__CH_DROP_LAST_4(a, b, c, d) a, b, c
+#define CC__CH_DROP_LAST_5(a, b, c, d, e) a, b, c, d
+#define CC__CH_DROP_LAST_6(a, b, c, d, e, f) a, b, c, d, e
+#define CC__CH_DROP_LAST_7(a, b, c, d, e, f, g) a, b, c, d, e, f
+#define CC__CH_DROP_LAST_8(a, b, c, d, e, f, g, h) a, b, c, d, e, f, g
 static inline int cc_channel_send_into_raw_call(CCChan* ch, CCClosure2 builder,
-                                               size_t value_size, CCArena* arena) {
+                                               size_t value_size, CCArena arena) {
     return cc_channel_raw_send_into(ch, builder, value_size, arena);
 }
 static inline bool !>(CCIoError) cc_channel_send_into_typed_call(CCChanTx tx,
                                                                      CCClosure2 builder,
-                                                                     CCArena* arena) {
+                                                                     CCArena arena) {
     return cc_chan_result_with(tx.raw,
                                cc_channel_raw_send_into(tx.raw, builder,
                                                         cc_chan_elem_size(tx.raw), arena),
@@ -533,15 +568,16 @@ static inline bool !>(CCIoError) cc_channel_send_into_typed_call(CCChanTx tx,
     _Generic((a), \
         CCChan *: cc_channel_send_into_raw_call, \
         default: cc_channel_send_into_typed_call \
-    )((a), __VA_ARGS__)
+    )((a), CC__CH_DROP_LAST(__VA_ARGS__), \
+      CC__ARENA_HANDLE_OR_NULL(CC__CH_LAST(__VA_ARGS__)))
 
 static inline int cc_channel_try_send_into_raw_call(CCChan* ch, CCClosure2 builder,
-                                                   size_t value_size, CCArena* arena) {
+                                                   size_t value_size, CCArena arena) {
     return cc_channel_raw_try_send_into(ch, builder, value_size, arena);
 }
 static inline bool !>(CCIoError) cc_channel_try_send_into_typed_call(CCChanTx tx,
                                                                          CCClosure2 builder,
-                                                                         CCArena* arena) {
+                                                                         CCArena arena) {
     return cc_chan_result_with(tx.raw,
                                cc_channel_raw_try_send_into(tx.raw, builder,
                                                             cc_chan_elem_size(tx.raw), arena),
@@ -551,7 +587,8 @@ static inline bool !>(CCIoError) cc_channel_try_send_into_typed_call(CCChanTx tx
     _Generic((a), \
         CCChan *: cc_channel_try_send_into_raw_call, \
         default: cc_channel_try_send_into_typed_call \
-    )((a), __VA_ARGS__)
+    )((a), CC__CH_DROP_LAST(__VA_ARGS__), \
+      CC__ARENA_HANDLE_OR_NULL(CC__CH_LAST(__VA_ARGS__)))
 
 #define cc_channel_try_recv_typed(rx, out_ptr) (cc_chan_result_with((rx).raw, cc_channel_raw_try_recv((rx).raw, (out_ptr), sizeof(*(out_ptr))), /*is_recv=*/true))
 #define cc_channel_try_recv_raw3(ch, out_value, value_size) cc_channel_raw_try_recv((ch), (out_value), (value_size))

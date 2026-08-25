@@ -5,6 +5,10 @@
  */
 
 #include <ccc/std/dir.cch>
+#undef cc_dir_open
+#undef cc_dir_next
+#undef cc_dir_cwd
+#undef cc_glob
 
 #include <errno.h>
 #include <stdio.h>
@@ -30,7 +34,7 @@
  * ============================================================================ */
 
 struct CCDirIter {
-    CCArena* arena;
+    CCArena arena;
 #ifdef _WIN32
     HANDLE handle;
     WIN32_FIND_DATAA find_data;
@@ -56,9 +60,9 @@ static const char *cc__dir_path_cstr(CCSlice path) {
  * Directory Iteration
  * ============================================================================ */
 
-CCResult_CCDirIterptr_CCIoError cc_dir_open(CCArena* arena, CCSlice path_sl) {
+CCResult_CCDirIterptr_CCIoError cc_dir_open(CCArena arena, CCSlice path_sl) {
     const char* path = cc__dir_path_cstr(path_sl);
-    if (!arena || !path) {
+    if (!cc_arena_is_live(arena) || !path) {
         return cc_err_CCResult_CCDirIterptr_CCIoError(cc_io_from_errno(EINVAL));
     }
 
@@ -100,10 +104,10 @@ CCResult_CCDirIterptr_CCIoError cc_dir_open(CCArena* arena, CCSlice path_sl) {
     return cc_ok_CCResult_CCDirIterptr_CCIoError(iter);
 }
 
-CCResult_CCDirEntry_CCIoError cc_dir_next(CCDirIter* iter, CCArena* arena) {
+CCResult_CCDirEntry_CCIoError cc_dir_next(CCDirIter* iter, CCArena arena) {
     CCDirEntry entry = {0};
 
-    if (!iter || !arena) {
+    if (!iter || !cc_arena_is_live(arena)) {
         return cc_err_CCResult_CCDirEntry_CCIoError(cc_io_from_errno(EINVAL));
     }
 
@@ -347,9 +351,9 @@ CCResult_bool_CCIoError cc_file_remove(CCSlice path_sl) {
 #endif
 }
 
-CCSlice cc_dir_cwd(CCArena* arena) {
+CCSlice cc_dir_cwd(CCArena arena) {
     CCSlice result = {0};
-    if (!arena) return result;
+    if (!cc_arena_is_live(arena)) return result;
 
     char buf[4096];
 #ifdef _WIN32
@@ -445,7 +449,7 @@ static int cc__dir_is_eof(CCIoError e) {
 }
 
 /* 0 on success; -1 and *err set on failure. */
-static int glob_add(CCGlobBuilder* b, CCArena* arena, const char* path, size_t len,
+static int glob_add(CCGlobBuilder* b, CCArena arena, const char* path, size_t len,
                     CCIoError* err) {
     if (b->arr.len >= b->capacity) {
         size_t new_cap = b->capacity ? b->capacity * 2 : 16;
@@ -474,11 +478,11 @@ static int glob_add(CCGlobBuilder* b, CCArena* arena, const char* path, size_t l
     return 0;
 }
 
-static int glob_recurse(CCArena* arena, CCGlobBuilder* b,
+static int glob_recurse(CCArena arena, CCGlobBuilder* b,
                         const char* dir, const char* pattern, int recursive,
                         CCIoError* err);
 
-static int glob_dir(CCArena* arena, CCGlobBuilder* b,
+static int glob_dir(CCArena arena, CCGlobBuilder* b,
                     const char* dir, const char* pattern, int recursive,
                     CCIoError* err) {
     CCResult_CCDirIterptr_CCIoError iter_res = cc_dir_open(arena, cc_slice_cstr(dir));
@@ -538,7 +542,7 @@ static int glob_dir(CCArena* arena, CCGlobBuilder* b,
     return 0;
 }
 
-static int glob_recurse(CCArena* arena, CCGlobBuilder* b,
+static int glob_recurse(CCArena arena, CCGlobBuilder* b,
                         const char* dir, const char* pattern, int recursive,
                         CCIoError* err) {
     if (glob_dir(arena, b, dir, pattern, recursive, err) != 0) return -1;
@@ -589,11 +593,11 @@ static int glob_recurse(CCArena* arena, CCGlobBuilder* b,
     return 0;
 }
 
-CCResult_CCSliceArray_CCIoError cc_glob(CCSlice pattern_sl, CCArena* arena) {
+CCResult_CCSliceArray_CCIoError cc_glob(CCSlice pattern_sl, CCArena arena) {
     CCGlobBuilder b = {{0}, 0};
     CCIoError err;
     const char* pattern = cc__dir_path_cstr(pattern_sl);
-    if (!arena || !pattern) {
+    if (!cc_arena_is_live(arena) || !pattern) {
         return cc_err_CCResult_CCSliceArray_CCIoError(cc_io_from_errno(EINVAL));
     }
 

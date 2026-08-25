@@ -15,7 +15,7 @@ typedef struct CCVec {
 } CCVec;
 
 typedef struct CCVecHeader {
-    CCArena *arena;
+    CCArena arena;
     size_t cap;
     uint64_t provenance;
 } CCVecHeader;
@@ -44,9 +44,9 @@ static inline size_t cc_vec_cap(const CCVec *v) {
     return h ? h->cap : 0;
 }
 
-static inline CCArena *cc_vec_arena(const CCVec *v) {
+static inline CCArena cc_vec_arena(const CCVec *v) {
     CCVecHeader *h = cc__vec_header(v);
-    return h ? h->arena : NULL;
+    return h ? h->arena : cc_arena_handle(NULL);
 }
 
 #ifdef CC_PARSER_MODE
@@ -70,7 +70,7 @@ static inline void cc_vec_apply_slice(CCVec *v, CCSlice slice) {
 }
 
 static inline int cc_vec_init(CCVec *v,
-                              CCArena *arena,
+                              CCArena arena,
                               size_t elem_size,
                               size_t elem_align,
                               size_t initial_cap) {
@@ -80,7 +80,7 @@ static inline int cc_vec_init(CCVec *v,
     if (!v) return -1;
     v->len = 0;
     v->data = NULL;
-    return arena ? 0 : -1;
+    return cc_arena_is_live(arena) ? 0 : -1;
 }
 
 static inline int cc_vec_reserve(CCVec *v,
@@ -155,7 +155,7 @@ static inline void cc_vec_apply_slice(CCVec *v, CCSlice slice) {
 }
 
 static inline int cc_vec_init(CCVec *v,
-                              CCArena *arena,
+                              CCArena arena,
                               size_t elem_size,
                               size_t elem_align,
                               size_t initial_cap) {
@@ -165,7 +165,7 @@ static inline int cc_vec_init(CCVec *v,
     if (!v) return -1;
     v->len = 0;
     v->data = NULL;
-    if (!arena) return -1;
+    if (!cc_arena_is_live(arena)) return -1;
 
     cap = initial_cap > 0 ? initial_cap : 8;
     (void)elem_align;
@@ -185,12 +185,12 @@ static inline int cc_vec_reserve(CCVec *v,
                                  size_t elem_align,
                                  size_t need) {
     CCVecHeader *h;
-    CCArena *arena;
+    CCArena arena;
     size_t old_total;
     size_t new_total;
     if (!v) return -1;
     h = cc__vec_header(v);
-    if (!h || !h->arena) return -1;
+    if (!h || !cc_arena_is_live(h->arena)) return -1;
     if (need <= h->cap) return 0;
 
     arena = h->arena;
@@ -254,5 +254,8 @@ static inline void cc_vec_clear(CCVec *v) {
 }
 
 #endif
+
+#define cc_vec_init(v, a, es, ea, cap) \
+    (cc_vec_init)((v), CC__ARENA_HANDLE(a), (es), (ea), (cap))
 
 #endif /* CC_VEC_H */

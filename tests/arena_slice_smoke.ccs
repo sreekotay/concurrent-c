@@ -5,7 +5,7 @@
 
 int main(void) {
     {
-        CCSlice empty = cc_arena_slice(NULL, (void*)"x", 1);
+        CCSlice empty = cc_arena_slice((CCArenaHost *)0, (void*)"x", 1);
         if (!cc_slice_is_empty(&empty)) return 1;
     }
     {
@@ -25,13 +25,13 @@ int main(void) {
     CCSlice view = arena.slice(p, 10);
     if (!view.ptr || view.len != 10) return 6;
     if (cc_slice_is_untracked(view)) return 7;
-    if (!cc_slice_is_from_arena_epoch(view, &arena)) return 8;
+    if (!cc_slice_is_from_arena_epoch(view, arena)) return 8;
     if (memcmp(view.ptr, "view-arena", 10) != 0) return 9;
 
     uint64_t old_id = cc_slice_alloc_id(view.id);
     cc_arena_reset(&arena);
     CCSlice stale = cc_slice_from_parts(p, 10, cc_slice_make_id(old_id, false, false, false));
-    if (cc_slice_is_from_arena_epoch(stale, &arena)) return 10;
+    if (cc_slice_is_from_arena_epoch(stale, arena)) return 10;
 
     cc_arena_free(&arena);
     printf("arena_slice_smoke: ok\n");

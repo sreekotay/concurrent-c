@@ -30,8 +30,8 @@ static int run_before(int* done) {
         return -1;
     }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts@(CAP, 1, &arena) @destroy;
-    if (!ts.excl)
+    CCTurnstile ts@(CAP, 1, arena) @destroy;
+    if (!cc_exclusive_is_live(ts.excl))
         return 1;
     int i;
     @parallel wait (ts) for (i in 0..N) {
@@ -49,8 +49,8 @@ static int run_inside(int* done) {
         return -1;
     }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts@(CAP, 1, &arena) @destroy;
-    if (!ts.excl)
+    CCTurnstile ts@(CAP, 1, arena) @destroy;
+    if (!cc_exclusive_is_live(ts.excl))
         return 1;
     int i;
     @parallel wait (ts) for (i in 0..N) {

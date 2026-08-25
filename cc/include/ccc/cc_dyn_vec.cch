@@ -40,7 +40,7 @@ typedef struct cc_dyn_vec {
 /* Initialize `v` to an empty type-erased vec backed by `arena`.
  * Both `arena` and `ti` must be non-NULL.  Returns 0 on success,
  * -1 on bad args or allocation failure. */
-int   cc_dyn_vec_init   (cc_dyn_vec* v, CCArena* arena,
+int   cc_dyn_vec_init   (cc_dyn_vec* v, CCArena arena,
                          const cc_type_info* ti, size_t initial_cap);
 
 /* Number of live elements. */
@@ -76,5 +76,8 @@ void   cc_dyn_vec_clear (cc_dyn_vec* v);
  * subsequent ops behave as if uninitialized.  Future-proofing
  * for non-arena backends. */
 void   cc_dyn_vec_free  (cc_dyn_vec* v);
+
+#define cc_dyn_vec_init(v, a, ti, cap) \
+    (cc_dyn_vec_init)((v), CC__ARENA_HANDLE(a), (ti), (cap))
 
 #endif /* CC_DYN_VEC_H */

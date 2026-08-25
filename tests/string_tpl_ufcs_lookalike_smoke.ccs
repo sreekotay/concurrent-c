@@ -6,7 +6,7 @@
  * the only real call is xs.push(1). */
 int main(void) {
     CCArena a = cc_arena_heap(kilobytes(32)) @destroy;
-    Vec::[int] xs = vec_new::[int](&a);
+    Vec::[int] xs = vec_new::[int](a);
     const char *doc = "xs.push(99); don't invent";
     CCString s = @string(`xs.push(99) don't`, &a);
     xs.push(1);

@@ -107,7 +107,7 @@ static int shadow_mode_destroy_bare(const char* mode) {
 
 /* Extracted to pp_emit_unwrap.cch / pp_emit_spawn.cch */
 static int shadow_resolve_at_create(char* expr, size_t cap, const char* ty,
-                                    int is_ptr, int with_closure);
+                                    int is_ptr, int with_closure, int* out_decl);
 static int shadow_is_expr_closure(AstNode* kid);
 static AstNode* shadow_expr_closure_kid(AstNode* st);
 static int shadow_closure_arity(AstNode* cl);
@@ -6759,9 +6759,22 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         /* Same as AST_PTR_INIT: channel_pair → create_named before UFCS peel. */
         if (!shadow_emit_channel_pair_expr(init, sizeof(init), raw))
             shadow_emit_expr_text(st, raw, init, sizeof(init), formal);
-        if (!shadow_resolve_at_create(init, sizeof(init), st->a, is_ptr,
-                                      cl != NULL))
-            return 0;
+        {
+            int create_decl = 0;
+            if (!shadow_resolve_at_create(init, sizeof(init), st->a, is_ptr,
+                                          cl != NULL, &create_decl))
+                return 0;
+            if (create_decl) {
+                if (!st->b[0] || is_ptr) {
+                    fprintf(stderr,
+                            "error: type: decl-form @create needs a value binder\n");
+                    return 0;
+                }
+                if (!shadow_create_insert_binder(init, sizeof(init), st->b))
+                    return 0;
+                return cemit_fmt(out, "%s%s;\n", indent, init);
+            }
+        }
         if (cl) shadow_splice_closure_arg(init, sizeof(init), cl);
         if (has_bang) {
             /* Result: field unwrap + @errhandler. Plain values (infallible
@@ -6952,11 +6965,25 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             if (!shadow_emit_channel_pair_expr(expr, sizeof(expr), raw))
                 shadow_emit_expr_text(st, raw, expr, sizeof(expr), formal);
             if (!shadow_rewrite_bang_exprs(expr, sizeof(expr), ctx)) return 0;
-            if (!shadow_resolve_at_create(expr, sizeof(expr), ty,
-                                          st->d[0] == '*',
-                                          cl != NULL &&
-                                              strcmp(cl->b, "create") == 0))
-                return 0;
+            {
+                int create_decl = 0;
+                if (!shadow_resolve_at_create(expr, sizeof(expr), ty,
+                                              st->d[0] == '*',
+                                              cl != NULL &&
+                                                  strcmp(cl->b, "create") == 0,
+                                              &create_decl))
+                    return 0;
+                if (create_decl) {
+                    if (!st->b[0] || st->d[0]) {
+                        fprintf(stderr,
+                                "error: type: decl-form @create needs a value binder\n");
+                        return 0;
+                    }
+                    if (!shadow_create_insert_binder(expr, sizeof(expr), st->b))
+                        return 0;
+                    return cemit_fmt(out, "%s%s;\n", indent, expr);
+                }
+            }
         }
         if (ty && strncmp(ty, "CCResult_", 9) == 0)
             shadow_rewrite_result_ctors(expr, sizeof(expr), ty);
@@ -7799,7 +7826,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             return cemit_fmt(out,
                 "%stypedef struct %s { int test; } %s;\n"
                 "%sstatic inline int %s_parse_args(int argc, char** argv, "
-                "CCArena* __a, %s* __o) {\n"
+                "CCArena __a, %s* __o) {\n"
                 "%s    (void)__a;\n"
                 "%s    if (!__o) return 0;\n"
                 "%s    __o->test = 0;\n"
@@ -8465,7 +8492,8 @@ static int shadow_emit_one_destroy(AstNode* st, CEmit* out, ShadowCtx* ctx,
         init[0] = 0;
         if (st->c[0]) {
             shadow_emit_expr_text(st, st->c, init, sizeof(init), elem);
-            if (!shadow_resolve_at_create(init, sizeof(init), ty, is_ptr, 0))
+            if (!shadow_resolve_at_create(init, sizeof(init), ty, is_ptr, 0,
+                                          NULL))
                 ok = 0;
         }
         if (!bare) {

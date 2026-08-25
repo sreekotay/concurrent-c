@@ -7,7 +7,7 @@ int main(void) {
     CCArena a = cc_arena_heap(kilobytes(1)) @destroy;
     assert(cc_arena_is_live(a));
 
-    CCString s = cc_string_from_slice(&a, @slice("hello"));
+    CCString s = cc_string_from_slice(a, @slice("hello"));
     CCString* p = &s;
 
     char[:] v = p->as_slice();

@@ -2006,8 +2006,11 @@ overflow pointer is undefined behavior, same as a pre-reset slab pointer.
 
 First non-last-live slab release marks the arena non-rewindable
 (`CC_ARENA_FLAG_NON_REWINDABLE`). Releasing the last live alloc on the root slab
-rewinds the tip to zero and clears that flag — a slab hole only; it does not
-absolve a punctured overflow keep-set. Overflow allocation does not itself
+rewinds the tip to zero when no checkpoint loan is outstanding; if the arena
+also has no extents (`prev == NULL`), it clears that flag. A still-outstanding
+loan sets the flag and leaves the tip. An extent chain can still hold a hole,
+so the flag stays when `prev` is non-NULL. Last-live root rewind is a slab
+hole only; it does not absolve a punctured overflow keep-set. Overflow allocation does not itself
 disable rewind: each overflow object records the arena provenance epoch at mint,
 and restore drains overflow whose epoch does not match the checkpoint.
 Releasing overflow does not set `NON_REWINDABLE`. A checkpoint stores the live
@@ -2038,13 +2041,21 @@ post-checkpoint allocations become stale; prior ones remain valid. Checkpoints
 do not change ownership rules.
 
 A checkpoint is a consumed loan: bind with `@destroy` (restores) or call
-restore. `cc_arena_try_checkpoint` / `cc_arena_try_restore` are the Result
+restore. Nested checkpoints restore LIFO — only the latest armed loan
+rewinds. Destroy or abandon the inner handle first; a refused restore
+does not drop the loan, and `@destroy` then nulls the handle so the loan
+stays until free/reset. `cp.abandon()` consumes the top loan without
+rewind. Capture returns an unarmed handle while attach records are linked, so a
+parent does not mint a loan restore cannot discharge. Restore also
+refuses while any lifetime-parent attach records exist (records live in
+the arena; reset/free still walk them).
+`cc_arena_try_checkpoint` / `cc_arena_try_restore` are the Result
 surface; `cc_arena_checkpoint` / `cc_arena_restore` are C twins for `@scratch`
 and existing C. While the arena has a slab hole (`NON_REWINDABLE`),
 `cc_arena_checkpoint` returns a null handle (`checkpoint.arena == NULL`) and
 emits a diagnostic on every refused capture; `try_checkpoint` returns
 `CC_ERR_INVALID_ARG`. `cc_arena_restore` returns false and does not mutate on a
-null handle, a slab hole, a punctured overflow keep-set, or a checkpoint that
+null handle, a slab hole, attached children, a non-top loan, a punctured overflow keep-set, or a checkpoint that
 would advance the tip (stale nested restore); each refusal emits a diagnostic.
 Dropping a handle without consume leaves an outstanding loan (diagnostic on
 free/reset/detach) and does not block a later capture.
@@ -2078,6 +2089,8 @@ epoch-ending ops while a pin is live are ill-formed when statically visible.
 Statically visible conflicts (live lexical borrow, nursery capture) are
 compile errors. Otherwise, violation is undefined behavior in release builds;
 debug builds may trap via epoch helpers such as `cc_slice_is_from_arena_epoch`.
+That helper is an epoch-range check on a process-wide counter, not an
+arena-identity test; the caller already holds the slice/arena pairing.
 
 ```c
 CCArena a = cc_arena_heap(megabytes(1));
@@ -4984,16 +4997,17 @@ Each `CCExclusive` is its own name space: the same `uint64_t` name in one domain
 
 #### 8.10.1 Construction and storage
 
-Construction allocates the section header and discovery map from a caller-supplied `CCArena*`. Mutex entries are allocated from an arena pool on that same arena on first resolve.
+Construction allocates the section header and discovery map from a caller-supplied `CCArena` (handle by value). Mutex entries are allocated from an arena pool on that same arena on first resolve. The section stores a copy of the handle, not a pointer to the caller's binding.
 
 ```c
 CCArena arena@(kilobytes(128)) @destroy;
-CCExclusive* excl = cc_exclusive_create(&arena, 0);     // default map (64)
-// or: excl = cc_exclusive_create(&arena, 256);         // initial map hint
+CCExclusive excl = cc_exclusive_create(arena, 0) !>;     // default map (64)
+// or: excl = cc_exclusive_create(arena, 256) !>;         // initial map hint
+// UFCS: arena.create_exclusive(0) !>
 ```
 
 - `cc_exclusive_create(arena, initial_cap)` rounds `initial_cap` up to the next power of two (minimum 2). `initial_cap == 0` selects the default capacity (64).
-- Returns `NULL` when `arena` is `NULL` or allocation fails.
+- A dead handle or allocation failure is `CC_ERR_INVALID_ARG` / `CC_ERR_OUT_OF_MEMORY`.
 
 The discovery map is an open-addressing table keyed by `uint64_t` name. It grows under an internal create mutex when load is high (approximately 75% full): capacity doubles, live entries are rehashed, and the prior table is retired. The live map pointer is `_Atomic`: grow release-stores the new table after rehash, and lock-free lookups acquire-load that pointer before probing buckets. Retired tables are released with `cc_arena_release` at `cc_exclusive_destroy`, not at grow time, so lookups never observe a freed table.
 
@@ -5002,12 +5016,12 @@ The discovery map is an open-addressing table keyed by `uint64_t` name. It grows
 Resolve a name once and reuse the handle:
 
 ```c
-CCExclusiveMutex m = excl->mutex(name);   // UFCS: cc_exclusive_mutex(excl, name)
+CCExclusiveMutex m = excl.mutex(name);   // UFCS: cc_exclusive_mutex(excl.e, name)
 ```
 
 `cc_exclusive_mutex` returns a `CCExclusiveMutex` carrying the section pointer, the name, and a cached runtime entry pointer. The first resolve for a name allocates a 64-byte-aligned entry (one cache line per entry, for false-share isolation) from the section's arena pool and inserts it into the discovery map. Subsequent resolves of the same name in the same domain return the same entry.
 
-For hot loops, resolve once outside the loop rather than calling `excl->acquire(name)` each iteration (which resolves on every call).
+For hot loops, resolve once outside the loop rather than calling `excl.acquire(name)` each iteration (which resolves on every call).
 
 #### 8.10.3 Acquire and release
 
@@ -5022,16 +5036,16 @@ g.release();                      // UFCS: cc_exclusive_guard_release(&g)
 By-name acquire is also available:
 
 ```c
-CCExclusiveGuard g = excl->acquire(name);  // UFCS: cc_exclusive_acquire(excl, name)
+CCExclusiveGuard g = excl.acquire(name);  // UFCS: cc_exclusive_acquire(excl.e, name)
 ```
 
 Multi-name acquire is deadlock-safe: names are always taken in ascending order.
 
 ```c
 CCExclusiveGuard gs[8];
-size_t n = excl->acquire_sorted(names, count, gs, 8);
+size_t n = excl.acquire_sorted(names, count, gs, 8);
   // UFCS: cc_exclusive_acquire_sorted(excl, names, count, gs, 8)
-size_t n = excl->acquire_range(0, shard_count, gs, 8);  /* [lo, hi) */
+size_t n = excl.acquire_range(0, shard_count, gs, 8);  /* [lo, hi) */
   // UFCS: cc_exclusive_acquire_range(excl, 0, shard_count, gs, 8)
 cc_exclusive_guards_release(gs, n);
 ```
@@ -5047,13 +5061,13 @@ exclusive twin of `send_into` (§7.4): admit the name set, run
 
 ```c
 Reply r;
-bool ran = excl->acquire_into(name, &r, &arena,
+bool ran = excl.acquire_into(name, &r, &arena,
     (Reply* slot, CCArena* a) => [req] {
         *slot = compute(req, a);   /* own the result before returning */
         return NULL;
     });
-bool ran = excl->acquire_sorted_into(names, count, &r, &arena, builder);
-bool ran = excl->acquire_range_into(lo, hi, &r, &arena, builder);  /* [lo, hi) */
+bool ran = excl.acquire_sorted_into(names, count, &r, &arena, builder);
+bool ran = excl.acquire_range_into(lo, hi, &r, &arena, builder);  /* [lo, hi) */
 ```
 
 The builder is an ordinary `CCClosure2`; builder closure literals lower as
@@ -5083,15 +5097,15 @@ An acquire blocks until the caller owns the named entry. Uncontended acquire is 
 `acquire_when` is acquire gated on a predicate. The caller does not hold the name on entry. The implementation acquires, evaluates `pred` under the hold, and either returns holding or enqueues as a condition waiter, releases, and parks. On success the guard is held and `pred` was true under that hold.
 
 ```c
-CCExclusiveGuard g = excl->acquire_when(name, pred, env) !> @destroy;
+CCExclusiveGuard g = excl.acquire_when(name, pred, env) !> @destroy;
 m.acquire_when(pred, env) !>;
-excl->acquire_when_into(name, pred, env, &slot, &arena, builder) !>;
+excl.acquire_when_into(name, pred, env, &slot, &arena, builder) !>;
 ```
 
 `pred` is `int (*)(void* env)` (nonzero = true). It runs only while the name is held and must not suspend. Wake means retry, not “still true.” Anyone who makes `pred` become true signals that name **while still holding**:
 
 ```c
-CCExclusiveGuard h = excl->acquire(name);
+CCExclusiveGuard h = excl.acquire(name);
 /* mutate so pred may be true */
 h.signal();     /* one waiter */
 h.broadcast();  /* every waiter */
@@ -5140,7 +5154,7 @@ Explicit free removes the name from the discovery map (leaving a tombstone for p
 #### 8.10.6 Destroy and arena lifetime
 
 ```c
-excl->destroy();   // UFCS: cc_exclusive_destroy(excl)
+excl.destroy();   // UFCS: cc_exclusive_destroy(excl)
 ```
 
 Destroy tears down the internal create mutex and releases discovery-map tables (current and retired) via `cc_arena_release`. Pooled mutex entry storage remains allocated until the caller's arena is freed or reset.
@@ -5168,7 +5182,7 @@ In fiber context, contended waiters park on the scheduler after a bounded spin. 
 **Runtime API (normative):**
 
 ```c
-CCExclusive* cc_exclusive_create(CCArena* arena, size_t initial_cap);
+CCExclusive cc_exclusive_create(CCArena arena, size_t initial_cap); /* Result */
 void cc_exclusive_destroy(CCExclusive* excl);
 
 CCExclusiveMutex cc_exclusive_mutex(CCExclusive* excl, uint64_t name);
@@ -5218,16 +5232,16 @@ void !>(CCError) cc_exclusive_mutex_acquire_when_into(CCExclusiveMutex* m,
 
 **UFCS surface (normative):**
 
-- `excl->mutex(name)` — resolve
-- `excl->acquire(name)` — resolve and acquire
-- `excl->acquire_sorted(names, count, out, out_cap)` — unique ascending multi-acquire
-- `excl->acquire_range(lo, hi, out, out_cap)` — contiguous ascending multi-acquire
-- `excl->acquire_into(name, slot, arena, builder)` — admitted builder, one name
-- `excl->acquire_sorted_into(names, count, slot, arena, builder)` — admitted builder, name set
-- `excl->acquire_range_into(lo, hi, slot, arena, builder)` — admitted builder, name range
-- `excl->acquire_when(name, pred, env)` — acquire when `pred` is true under the name
-- `excl->acquire_when_into(name, pred, env, slot, arena, builder)` — same, admitted builder
-- `excl->destroy()` — tear down section
+- `excl.mutex(name)` — resolve
+- `excl.acquire(name)` — resolve and acquire
+- `excl.acquire_sorted(names, count, out, out_cap)` — unique ascending multi-acquire
+- `excl.acquire_range(lo, hi, out, out_cap)` — contiguous ascending multi-acquire
+- `excl.acquire_into(name, slot, arena, builder)` — admitted builder, one name
+- `excl.acquire_sorted_into(names, count, slot, arena, builder)` — admitted builder, name set
+- `excl.acquire_range_into(lo, hi, slot, arena, builder)` — admitted builder, name range
+- `excl.acquire_when(name, pred, env)` — acquire when `pred` is true under the name
+- `excl.acquire_when_into(name, pred, env, slot, arena, builder)` — same, admitted builder
+- `excl.destroy()` — tear down section
 - `m.acquire()` — acquire resolved mutex
 - `m.acquire_when(pred, env)` / `m.acquire_when_into(pred, env, slot, arena, builder)`
 - `m.free()` — explicit reclaim
@@ -5658,6 +5672,7 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 - The current implementation supports at most two explicit `@(args)` arguments, including callable create hooks.
 - `cc_type_create_call("callee")` registers the one-argument form.
 - `cc_type_create_overloads("callee1", "callee2")` registers one- and two-argument forms on the same `.create` hook.
+- `CC_TYPE_CREATE_DECL("callee")` marks a create overload as declaration-form: lowering emits `callee(name, args);` instead of `T name = callee(args);`. It is only valid on a value binder.
 - `cc_type_create_hook(handler)` registers a callable create hook; it receives `type_name`, `argv`, `arg_types`, and `arena`, and must return the lowered callee name as a slice.
 - `cc_type_destroy_call("callee")` registers the destroy phase only.
 - `cc_type_pre_destroy_call("callee")` registers the pre-destroy phase only; it runs before any call-site `@destroy { ... }` body.
@@ -6791,7 +6806,7 @@ Standard collection types are defined in the **Standard Library Specification** 
 - `**Map::[K,V]`** — arena-backed inline open-addressing map (`<std/map.cch>`)
 - `**ArrayMap::[K,V]`** — arena-backed index + dense rows (`<std/array_map.cch>`)
 
-These types are generic, use UFCS methods, and require a `CCArena*` at
+These types are generic, use UFCS methods, and require a `CCArena` at
 construction. See the stdlib spec for full API reference, rules, and examples.
 
 **Quick reference:**
@@ -7874,7 +7889,7 @@ On alloc failure in current block:
 
 **Reset:** Drain overflow, walk `prev` chain to the original root, free intermediate buffers and extent structs, restore root state, set offset = 0, advance provenance.
 
-**Checkpoint/Restore:** A checkpoint is a consumed loan. Capture records `{arena, offset, live_allocs, ovf_keep, block_idx, provenance}`, increments `cp_loans`, and starts a fresh provenance epoch, sealing the active overflow chunk. Restore consumes the loan and refuses (no mutate) if the arena has a slab hole, if live overflow in the saved epoch no longer matches `ovf_keep`, or if the checkpoint would advance the tip. Otherwise, if `checkpoint.block_idx < arena->block_idx`, it unwinds L2 newer than the checkpoint, restoring L1/L2 to the target block, then restores the checkpoint's offset, live count, and provenance epoch and drains Main whose header epoch does not match. While a slab hole is live, `cc_arena_checkpoint` returns a null handle; `try_checkpoint` returns `CC_ERR_INVALID_ARG`.
+**Checkpoint/Restore:** A checkpoint is a consumed loan. Capture records `{arena, offset, live_allocs, ovf_keep, block_idx, provenance, loan_seq}`, increments `cp_loans` / `cp_seq`, and starts a fresh provenance epoch, sealing the active overflow chunk. Restore is LIFO (`loan_seq == cp_seq`): it consumes the top loan and refuses (no mutate, loan stays) if the arena has a slab hole, attached children, a non-top loan, if live overflow in the saved epoch no longer matches `ovf_keep`, or if the checkpoint would advance the tip. `cc_arena_checkpoint_abandon` consumes the top loan without rewind. Otherwise, if `checkpoint.block_idx < arena->block_idx`, it unwinds L2 newer than the checkpoint, restoring L1/L2 to the target block, then restores the checkpoint's offset, live count, and provenance epoch and drains Main whose header epoch does not match. While a slab hole is live or attach records are linked, `cc_arena_checkpoint` returns a null handle; `try_checkpoint` returns `CC_ERR_INVALID_ARG`. Lifetime parents and restore do not mix: any linked attach record refuses restore; reset/free still walk children.
 
 **Per-request pattern:**
 

@@ -15,7 +15,7 @@ Map(int, int, IntMap, hash_i32, eq_i32);
 typedef CCArena (*ArenaFactory)(void);
 
 static CCArena make_fixed_root_arena(void) {
-    static uint8_t buffer[8192];
+    static _Alignas(CCArenaHost) uint8_t buffer[8192];
     return cc_arena_create_buffer(buffer, sizeof(buffer), CC_ARENA_FIXED);
 }
 
@@ -70,7 +70,7 @@ static void test_direct_release(ArenaFactory make_arena) {
 static void test_vec_release_on_growth(ArenaFactory make_arena) {
     CCArena arena = make_arena();
 
-    IntVec v = IntVec_init(&arena, 2);
+    IntVec v = IntVec_init(arena, 2);
     assert(v.data != NULL);
     assert(cc_atomic_load(&arena.a->live_allocs) == 1);
 
@@ -93,11 +93,11 @@ static void test_string_release_on_growth(ArenaFactory make_arena) {
     CCString s = cc_string_new();
     assert(cc_atomic_load(&arena.a->live_allocs) == 0);
 
-    assert(cc_string_push(&s, "ab", &arena) != NULL);
-    assert(cc_string_push(&s, "cdefghijklmnop", &arena) != NULL); /* forces growth */
+    assert(cc_string_push(&s, "ab", arena) != NULL);
+    assert(cc_string_push(&s, "cdefghijklmnop", arena) != NULL); /* forces growth */
 
     assert(cc_string_data(&s) != NULL);
-    assert(strcmp(cc_string_cstr(&s, &arena), "abcdefghijklmnop") == 0);
+    assert(strcmp(cc_string_cstr(&s, arena), "abcdefghijklmnop") == 0);
     /* Tip-in-place realloc may keep the same pointer; live count stays 1. */
     assert(cc_atomic_load(&arena.a->live_allocs) == 1);
 
@@ -107,7 +107,7 @@ static void test_string_release_on_growth(ArenaFactory make_arena) {
 static void test_map_release_on_resize_and_destroy(ArenaFactory make_arena) {
     CCArena arena = make_arena();
 
-    IntMap *m = IntMap_init(&arena);
+    IntMap *m = IntMap_init(arena);
     assert(m != NULL);
     assert(cc_atomic_load(&arena.a->live_allocs) == 1); /* map handle */
 

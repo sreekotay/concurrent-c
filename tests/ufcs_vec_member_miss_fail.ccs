@@ -1,7 +1,7 @@
 #include <ccc/std/prelude.cch>
 int main(void) {
     CCArena arena = cc_arena_create(1 << 12);
-    CCVec::[double] v = cc_vec_new::[double](&arena);
+    CCVec::[double] v = cc_vec_new::[double](arena);
     v.push(1.0);
     return (int)v.nosuch();
 }

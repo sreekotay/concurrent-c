@@ -25,10 +25,10 @@
  */
 static inline int !>(CCError) cc_sh_run(CCSlice program,
                                             CCSlice arg,
-                                            CCArena *arena) {
+                                            CCArena arena) {
     CCCommand cmd;
     int !>(CCIoError) st;
-    if (!program.ptr || !arena) {
+    if (!program.ptr || !cc_arena_is_live(arena)) {
         return cc_err(CC_ERR_INVALID_ARG, "cc_sh_run: bad args");
     }
     cmd = cc_command(arena, program);
@@ -80,15 +80,15 @@ static inline int cc_script_task_exe(int argc, char **argv, const char *rel_exe)
     }
     a = cc_arena_create(megabytes(1));
     root_r = cc_script_repo_root(
-        argv && argv[0] ? cc_slice_cstr(argv[0]) : cc_slice_empty(), &a);
+        argv && argv[0] ? cc_slice_cstr(argv[0]) : cc_slice_empty(), a);
     if (cc_is_err(root_r)) {
         fprintf(stderr, "shcc: %s\n", cc_error(root_r).message);
         cc_arena_destroy(&a);
         return 1;
     }
     root = cc_value(root_r);
-    exe = cc_script_path_join(root, cc_slice_cstr(rel_exe), &a);
-    cmd = cc_command(&a, exe);
+    exe = cc_script_path_join(root, cc_slice_cstr(rel_exe), a);
+    cmd = cc_command(a, exe);
     (void)cc_command_cwd(&cmd, root);
     (void)cc_command_inherit_stdio(&cmd);
     cc__script_forward_args(&cmd, argc, argv);
@@ -99,10 +99,10 @@ static inline int cc_script_task_exe(int argc, char **argv, const char *rel_exe)
 
 /* Repo-relative path with '/' → '__' and ".shcc" stripped (avoids bin/
  * basename collisions across directories). NUL-terminated slice. */
-static inline CCSlice cc__script_shcc_stem(const char *rel_tool, CCArena *arena) {
+static inline CCSlice cc__script_shcc_stem(const char *rel_tool, CCArena arena) {
     size_t n, i, o, cap;
     CCSlice out;
-    if (!rel_tool || !arena) return cc_slice_empty();
+    if (!rel_tool || !cc_arena_is_live(arena)) return cc_slice_empty();
     while (rel_tool[0] == '.' && rel_tool[1] == '/') rel_tool += 2;
     n = strlen(rel_tool);
     if (n >= 5 && memcmp(rel_tool + n - 5, ".shcc", 5) == 0) n -= 5;
@@ -136,24 +136,24 @@ static inline int cc_script_task_shcc(int argc, char **argv, const char *rel_too
     }
     a = cc_arena_create(megabytes(1));
     root_r = cc_script_repo_root(
-        argv && argv[0] ? cc_slice_cstr(argv[0]) : cc_slice_empty(), &a);
+        argv && argv[0] ? cc_slice_cstr(argv[0]) : cc_slice_empty(), a);
     if (cc_is_err(root_r)) {
         fprintf(stderr, "shcc: %s\n", cc_error(root_r).message);
         cc_arena_destroy(&a);
         return 1;
     }
     root = cc_value(root_r);
-    stem = cc__script_shcc_stem(rel_tool, &a);
+    stem = cc__script_shcc_stem(rel_tool, a);
     if (!stem.ptr || stem.len == 0) {
         fprintf(stderr, "shcc: cc_script_task_shcc: bad stem for %s\n", rel_tool);
         cc_arena_destroy(&a);
         return 1;
     }
-    bin_rel = cc_script_path_join(CC_SLICE_LIT("bin"), stem, &a);
-    bin = cc_script_path_join(root, bin_rel, &a);
-    ccc = cc_script_path_join(root, CC_SLICE_LIT("cc/bin/ccc"), &a);
+    bin_rel = cc_script_path_join(CC_SLICE_LIT("bin"), stem, a);
+    bin = cc_script_path_join(root, bin_rel, a);
+    ccc = cc_script_path_join(root, CC_SLICE_LIT("cc/bin/ccc"), a);
 
-    build = cc_command(&a, ccc);
+    build = cc_command(a, ccc);
     (void)cc_command_cwd(&build, root);
     (void)cc_command_inherit_stdio(&build);
     (void)cc_command_arg(&build, "build");
@@ -167,7 +167,7 @@ static inline int cc_script_task_shcc(int argc, char **argv, const char *rel_too
         return rc;
     }
 
-    run = cc_command(&a, bin);
+    run = cc_command(a, bin);
     (void)cc_command_cwd(&run, root);
     (void)cc_command_inherit_stdio(&run);
     cc__script_forward_args(&run, argc, argv);
@@ -177,10 +177,10 @@ static inline int cc_script_task_shcc(int argc, char **argv, const char *rel_too
 }
 
 /* Project root for make.shcc: repo walk, else cwd. */
-static inline int cc__script_project_root(CCArena *a, CCSlice *out) {
+static inline int cc__script_project_root(CCArena a, CCSlice *out) {
     CCSlice !>(CCError) root_r;
     char cwd[PATH_MAX];
-    if (!a || !out) return 1;
+    if (!cc_arena_is_live(a) || !out) return 1;
     root_r = cc_script_repo_root(cc_slice_empty(), a);
     if (!cc_is_err(root_r)) {
         *out = cc_value(root_r);
@@ -200,11 +200,11 @@ static inline int cc__script_is_ws(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
-static inline int cc__script_dup_range(CCArena *a, CCSlice s,
+static inline int cc__script_dup_range(CCArena a, CCSlice s,
                                        size_t start, size_t end, CCSlice *out) {
     size_t n = end - start;
     CCSlice d;
-    if (!a || !out || !s.ptr || end < start || end > s.len) return 1;
+    if (!cc_arena_is_live(a) || !out || !s.ptr || end < start || end > s.len) return 1;
     d = cc_arena_alloc_slice_bytes(a, n + 1);
     if (!d.ptr) return 1;
     if (n) memcpy(d.ptr, (const char *)s.ptr + start, n);
@@ -215,10 +215,10 @@ static inline int cc__script_dup_range(CCArena *a, CCSlice s,
 }
 
 /* 0 = word, 1 = error (unclosed quote / OOM), 2 = end. */
-static inline int cc__script_next_word(CCSlice s, size_t *i, CCArena *a, CCSlice *word) {
+static inline int cc__script_next_word(CCSlice s, size_t *i, CCArena a, CCSlice *word) {
     size_t n, p, start;
     char q;
-    if (!i || !a || !word) return 1;
+    if (!i || !cc_arena_is_live(a) || !word) return 1;
     n = s.len;
     p = *i;
     while (p < n && cc__script_is_ws(s.ptr[p])) p++;
@@ -245,11 +245,11 @@ static inline int cc__script_next_word(CCSlice s, size_t *i, CCArena *a, CCSlice
 }
 
 /* first_is_program: first word becomes cmd's program; else all words are args. */
-static inline int cc__script_apply_line(CCCommand *cmd, CCSlice line, CCArena *a,
+static inline int cc__script_apply_line(CCCommand *cmd, CCSlice line, CCArena a,
                                         int first_is_program, const char **prog_out) {
     size_t i = 0;
     int first = 1;
-    if (!cmd || !a) return 1;
+    if (!cmd || !cc_arena_is_live(a)) return 1;
     for (;;) {
         CCSlice w;
         int st = cc__script_next_word(line, &i, a, &w);
@@ -279,12 +279,12 @@ static inline int cc_script_sh(CCString cmdline) {
     int rc;
     line = cc_string_as_slice(&cmdline);
     a = cc_arena_create(megabytes(1));
-    if (cc__script_project_root(&a, &root) != 0) {
+    if (cc__script_project_root(a, &root) != 0) {
         fprintf(stderr, "shcc: cc_script_sh: no project root\n");
         cc_arena_destroy(&a);
         return 1;
     }
-    if (cc__script_apply_line(&cmd, line, &a, 1, &prog) != 0) {
+    if (cc__script_apply_line(&cmd, line, a, 1, &prog) != 0) {
         fprintf(stderr, "shcc: cc_script_sh: empty or unclosed quote\n");
         cc_arena_destroy(&a);
         return 1;
@@ -301,7 +301,7 @@ static inline int cc_script_sh(CCString cmdline) {
  * Non-zero exit, spawn failure, or a bad line is Err.
  * `cc_script_sh_read(cmd)` is this with the function `@scratch` arena.
  */
-static inline CCString !>(CCError) cc_script_sh_read_at(CCString cmdline, CCArena *arena) {
+static inline CCString !>(CCError) cc_script_sh_read_at(CCString cmdline, CCArena arena) {
     CCArena a;
     CCSlice root, line, s;
     CCCommand cmd;
@@ -310,21 +310,21 @@ static inline CCString !>(CCError) cc_script_sh_read_at(CCString cmdline, CCAren
     const char *prog = "sh";
     size_t n;
     CCString out;
-    if (!arena) {
+    if (!cc_arena_is_live(arena)) {
         return cc_err(CC_ERR_INVALID_ARG, "cc_script_sh_read_at: no arena");
     }
     line = cc_string_as_slice(&cmdline);
     a = cc_arena_create(megabytes(1));
-    if (cc__script_project_root(&a, &root) != 0) {
+    if (cc__script_project_root(a, &root) != 0) {
         cc_arena_destroy(&a);
         return cc_err(CC_ERR_NOT_FOUND, "cc_script_sh_read_at: no project root");
     }
-    if (cc__script_apply_line(&cmd, line, &a, 1, &prog) != 0) {
+    if (cc__script_apply_line(&cmd, line, a, 1, &prog) != 0) {
         cc_arena_destroy(&a);
         return cc_err(CC_ERR_INVALID_ARG, "cc_script_sh_read_at: empty or unclosed quote");
     }
     (void)cc_command_cwd(&cmd, root);
-    out_r = cc_command_output(&cmd, &a);
+    out_r = cc_command_output(&cmd, a);
     if (cc_is_err(out_r)) {
         CCError e = CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_error(out_r)));
         cc_arena_destroy(&a);
@@ -361,26 +361,26 @@ static inline int cc_script_ccc(CCString args) {
     int rc;
     line = cc_string_as_slice(&args);
     a = cc_arena_create(megabytes(1));
-    if (cc__script_project_root(&a, &root) != 0) {
+    if (cc__script_project_root(a, &root) != 0) {
         fprintf(stderr, "shcc: cc_script_ccc: no project root\n");
         cc_arena_destroy(&a);
         return 1;
     }
     ccc = getenv("CCC");
     if (!ccc || !ccc[0]) {
-        local = cc_script_path_join(root, CC_SLICE_LIT("cc/bin/ccc"), &a);
+        local = cc_script_path_join(root, CC_SLICE_LIT("cc/bin/ccc"), a);
         ccc = cc_script_path_exists(local) ? (const char *)local.ptr : "ccc";
     }
-    out = cc_script_path_join(root, CC_SLICE_LIT("out"), &a);
-    bin = cc_script_path_join(root, CC_SLICE_LIT("bin"), &a);
-    cmd = cc_command(&a, cc_slice_cstr(ccc));
+    out = cc_script_path_join(root, CC_SLICE_LIT("out"), a);
+    bin = cc_script_path_join(root, CC_SLICE_LIT("bin"), a);
+    cmd = cc_command(a, cc_slice_cstr(ccc));
     (void)cc_command_cwd(&cmd, root);
     (void)cc_command_inherit_stdio(&cmd);
     (void)cc_command_arg(&cmd, "--out-dir");
     (void)cc_command_arg_slice(&cmd, out);
     (void)cc_command_arg(&cmd, "--bin-dir");
     (void)cc_command_arg_slice(&cmd, bin);
-    if (cc__script_apply_line(&cmd, line, &a, 0, NULL) != 0) {
+    if (cc__script_apply_line(&cmd, line, a, 0, NULL) != 0) {
         fprintf(stderr, "shcc: cc_script_ccc: unclosed quote\n");
         cc_arena_destroy(&a);
         return 1;
@@ -389,5 +389,16 @@ static inline int cc_script_ccc(CCString args) {
     cc_arena_destroy(&a);
     return rc;
 }
+
+#define cc_sh_run(program, arg, a) \
+    (cc_sh_run)((program), (arg), CC__ARENA_HANDLE(a))
+#define cc__script_shcc_stem(rel, a) \
+    (cc__script_shcc_stem)((rel), CC__ARENA_HANDLE(a))
+#define cc__script_project_root(a, out) \
+    (cc__script_project_root)(CC__ARENA_HANDLE(a), (out))
+#define cc__script_apply_line(cmd, line, a, first, prog) \
+    (cc__script_apply_line)((cmd), (line), CC__ARENA_HANDLE(a), (first), (prog))
+#define cc_script_sh_read_at(cmd, a) \
+    (cc_script_sh_read_at)((cmd), CC__ARENA_HANDLE(a))
 
 #endif /* CC_SCRIPT_SH_H */

@@ -81,7 +81,9 @@ rewindable after overflow allocation: `a.try_checkpoint() !>` /
 `cp.try_restore() !>` (or `@destroy` on the handle). Restore rewinds the
 slab prefix and drains overflow minted in a later provenance epoch. A
 mid-slab hole refuses a new capture (`CC_ERR_INVALID_ARG`) until last-live
-root rewind or `cc_arena_reset`. Release of an older-epoch overflow object
+root rewind or `cc_arena_reset`. Nested checkpoints restore LIFO;
+`cp.abandon()` consumes the top loan without rewind. Restore refuses
+while attach records exist. Release of an older-epoch overflow object
 does not block a new checkpoint; restore of that handle refuses if
 `ovf_keep` no longer matches. C twins (`cc_arena_checkpoint` /
 `cc_arena_restore`) stay for `@scratch`. `a.create_nursery()` attaches a

@@ -428,8 +428,21 @@ SHADOW_LOWER_CCS_DEPS := $(SHADOW_LOWER_CCS) $(SHADOW_BUILD_CCH) \
 	$(wildcard ../cc/shadow/shadow_*.cch) \
 	$(wildcard ../cc/shadow/shadow_*.h) \
 	$(CPARSE_LIB)
+# last-good still spells Map/Vec init as `Foo_init(&handle)`. Stdlib init
+# now takes CCArena by value; rewrite only the copied include tree.
+SHADOW_BOOT_INC := $(OBJDIR)/shadow_boot_inc
+$(SHADOW_BOOT_INC)/.stamp: $(wildcard $(BOOTSTRAP_DIR)/include/*.h)
+	@mkdir -p $(SHADOW_BOOT_INC)
+	@for f in $(BOOTSTRAP_DIR)/include/*.h; do \
+		b=$$(basename "$$f"); \
+		sed 's/\([A-Za-z_][A-Za-z0-9_]*_init\)(\&g_shadow_meta_ar/\1(g_shadow_meta_ar/g' \
+			"$$f" > "$(SHADOW_BOOT_INC)/$$b"; \
+	done
+	@touch $@
+
 SHADOW_LOWER_BOOT_DEPS := $(BOOTSTRAP_DIR)/shadow_lower.c \
 	$(wildcard $(BOOTSTRAP_DIR)/include/*.h) \
+	$(SHADOW_BOOT_INC)/.stamp \
 	$(CPARSE_LIB)
 
 ifeq ($(SHADOW_LOWER_SOURCE),ccs)
@@ -502,7 +515,7 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_BOOT_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_CO
 	fi
 	# arena_state/FFC live only in concurrent_c.o (see SHADOW_COMPTIME_ENGINE_OBJS).
 	$(CC) $(CFLAGS) -o $@ $(BOOTSTRAP_DIR)/shadow_lower.c \
-		-I$(BOOTSTRAP_DIR)/include -Iinclude -I../out/include \
+		-I$(SHADOW_BOOT_INC) -I$(BOOTSTRAP_DIR)/include -Iinclude -I../out/include \
 		-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
 		$(abspath $(SHADOW_TCC_OBJ)) \
 		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \

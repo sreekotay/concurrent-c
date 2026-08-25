@@ -20,7 +20,7 @@ int main(void) {
     CCArena arena = cc_arena_create(1 << 20);
     const char* s = "{\"x\":-1.5,\"y\":2.25e1}";
     Point p;
-    if (!Point_parse(s, strlen(s), &arena, &p)) {
+    if (!Point_parse(s, strlen(s), arena, &p)) {
         fprintf(stderr, "Point_parse failed\n");
         return 1;
     }
@@ -30,7 +30,7 @@ int main(void) {
     }
     CCArena ar2 = cc_arena_create(1 << 20);
     const char* n = "-1.5";
-    NumNode* tape = Num_parse(n, strlen(n), &ar2);
+    NumNode* tape = Num_parse(n, strlen(n), ar2);
     if (!tape) {
         fprintf(stderr, "Num_parse failed\n");
         return 1;

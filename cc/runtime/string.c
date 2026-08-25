@@ -2,9 +2,24 @@
 #include <ccc/cc_slice.cch>
 #include <ccc/std/string.cch>
 
+#undef cc_string_push_buffer
+#undef cc_string_push_slice
+#undef cc_string_push_cstr
+#undef cc_string_push_char
+#undef cc_string_push_int
+#undef cc_string_push_uint
+#undef cc_string_cstr
+#undef cc_string_from_slice
+#undef cc_string_with_capacity
+#undef cc_string_reserve
+#undef cc_string_release
+#undef cc_slice_clone
+#undef cc_string_materialize_in
+#undef CCString_materialize_in
+
 #include <string.h>
 
-CCString cc_string_with_capacity(CCArena *arena, size_t cap) {
+CCString cc_string_with_capacity(CCArena arena, size_t cap) {
     CCString s = cc_string_new();
     if (cap > CC_STRING_INLINE_CAP) {
         (void)cc_string_reserve(&s, cap, arena); /* failure poisons s */
@@ -12,13 +27,13 @@ CCString cc_string_with_capacity(CCArena *arena, size_t cap) {
     return s;
 }
 
-CCString cc_string_from_slice(CCArena *arena, CCSlice slice) {
+CCString cc_string_from_slice(CCArena arena, CCSlice slice) {
     CCString s = cc_string_new();
     (void)cc_string_push(&s, slice, arena); /* failure poisons s */
     return s;
 }
 
-CCString* cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len, CCArena *arena) {
+CCString* cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len, CCArena arena) {
     char *dst;
     size_t new_len;
     if (!str || cc_string_failed(str)) return NULL;
@@ -34,7 +49,7 @@ CCString* cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len,
     return str;
 }
 
-CCString* cc_string_push_slice(CCString *str, CCSlice data, CCArena *arena) {
+CCString* cc_string_push_slice(CCString *str, CCSlice data, CCArena arena) {
     if (data.len > UINT32_MAX) return NULL;
     return cc_string_push_buffer(str, (const char *)data.ptr, (uint32_t)data.len, arena);
 }
@@ -59,7 +74,7 @@ CCSlice cc_string_as_slice(const CCString *str) {
         cc_slice_make_id(cc_string_provenance(str), false, false, false));
 }
 
-const char *cc_string_cstr(CCString *str, CCArena *arena) {
+const char *cc_string_cstr(CCString *str, CCArena arena) {
     char *data;
     if (!str || cc_string_failed(str)) return NULL;
     if (str->len + 1 > str->cap) {

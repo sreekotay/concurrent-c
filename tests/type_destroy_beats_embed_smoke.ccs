@@ -24,7 +24,7 @@ static void Box_destroy(Box *b) {
 };
 
 int main(void) {
-    uint8_t buf[256];
+    _Alignas(CCArenaHost) uint8_t buf[256];
     {
         Box b = {0};
         b.a = cc_arena_create_buffer(buf, sizeof(buf), CC_ARENA_DEFAULT_BLOCK_MAX);

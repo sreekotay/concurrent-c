@@ -6,6 +6,17 @@
 
 #include <ccc/std/process.cch>
 
+#undef cc_process_read
+#undef cc_process_read_stderr
+#undef cc_process_read_all
+#undef cc_process_read_all_stderr
+#undef cc_process_collect
+#undef cc_process_run_config
+#undef cc_process_run_with_input
+#undef cc_process_run
+#undef cc_process_run_shell
+#undef cc_env_get
+
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -57,10 +68,10 @@ static int cc__pipe_cloexec(int fds[2]) {
 
 /* Use cc_io_from_errno() from cc_io_error.cch for error conversion. */
 
-static int cc__append_process_output(CCArena* arena, CCSlice* dst, size_t* cap, const void* data, size_t len) {
+static int cc__append_process_output(CCArena arena, CCSlice* dst, size_t* cap, const void* data, size_t len) {
     char* buf;
     size_t next_cap;
-    if (!arena || !dst || !cap) return -1;
+    if (!cc_arena_is_live(arena) || !dst || !cap) return -1;
     if (len == 0) return 0;
 
     if (!dst->ptr) {
@@ -90,7 +101,7 @@ static int cc__append_process_output(CCArena* arena, CCSlice* dst, size_t* cap, 
 }
 
 #ifndef _WIN32
-static CCResult_CCProcessOutput_CCIoError cc__process_capture_posix(CCArena* arena,
+static CCResult_CCProcessOutput_CCIoError cc__process_capture_posix(CCArena arena,
                                                                     CCProcess* proc,
                                                                     CCSlice input) {
     CCProcessOutput output = {0};
@@ -728,10 +739,10 @@ CCResult_size_t_CCIoError cc_process_write(CCProcess* proc, CCSlice data) {
 #endif
 }
 
-CCResult_CCSlice_CCIoError cc_process_read(CCProcess* proc, CCArena* arena, size_t max_bytes) {
+CCResult_CCSlice_CCIoError cc_process_read(CCProcess* proc, CCArena arena, size_t max_bytes) {
     CCSlice result = {0};
 
-    if (!proc || proc->stdout_fd < 0 || !arena) {
+    if (!proc || proc->stdout_fd < 0 || !cc_arena_is_live(arena)) {
         return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(EINVAL));
     }
 
@@ -759,10 +770,10 @@ CCResult_CCSlice_CCIoError cc_process_read(CCProcess* proc, CCArena* arena, size
     return cc_ok_CCResult_CCSlice_CCIoError(result);
 }
 
-CCResult_CCSlice_CCIoError cc_process_read_stderr(CCProcess* proc, CCArena* arena, size_t max_bytes) {
+CCResult_CCSlice_CCIoError cc_process_read_stderr(CCProcess* proc, CCArena arena, size_t max_bytes) {
     CCSlice result = {0};
 
-    if (!proc || proc->stderr_fd < 0 || !arena) {
+    if (!proc || proc->stderr_fd < 0 || !cc_arena_is_live(arena)) {
         return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(EINVAL));
     }
 
@@ -803,8 +814,8 @@ void cc_process_close_stdin(CCProcess* proc) {
     }
 }
 
-CCResult_CCSlice_CCIoError cc_process_read_all(CCProcess* proc, CCArena* arena) {
-    if (!proc || proc->stdout_fd < 0 || !arena) {
+CCResult_CCSlice_CCIoError cc_process_read_all(CCProcess* proc, CCArena arena) {
+    if (!proc || proc->stdout_fd < 0 || !cc_arena_is_live(arena)) {
         return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(EINVAL));
     }
 
@@ -854,8 +865,8 @@ CCResult_CCSlice_CCIoError cc_process_read_all(CCProcess* proc, CCArena* arena) 
     return cc_ok_CCResult_CCSlice_CCIoError(result);
 }
 
-CCResult_CCSlice_CCIoError cc_process_read_all_stderr(CCProcess* proc, CCArena* arena) {
-    if (!proc || proc->stderr_fd < 0 || !arena) {
+CCResult_CCSlice_CCIoError cc_process_read_all_stderr(CCProcess* proc, CCArena arena) {
+    if (!proc || proc->stderr_fd < 0 || !cc_arena_is_live(arena)) {
         return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(EINVAL));
     }
 
@@ -903,9 +914,9 @@ CCResult_CCSlice_CCIoError cc_process_read_all_stderr(CCProcess* proc, CCArena* 
     return cc_ok_CCResult_CCSlice_CCIoError(result);
 }
 
-CCResult_CCProcessOutput_CCIoError cc_process_collect(CCProcess* proc, CCArena* arena) {
+CCResult_CCProcessOutput_CCIoError cc_process_collect(CCProcess* proc, CCArena arena) {
     CCSlice empty = {0};
-    if (!proc || !arena) {
+    if (!proc || !cc_arena_is_live(arena)) {
         return cc_err_CCResult_CCProcessOutput_CCIoError(cc_io_from_errno(EINVAL));
     }
 #ifndef _WIN32
@@ -983,19 +994,19 @@ CCResult_CCProcess_CCIoError cc_process_spawn_shell(const char* command) {
  * Convenience: Run and Capture
  * ============================================================================ */
 
-CCResult_CCProcessOutput_CCIoError cc_process_run_config(CCArena* arena, const CCProcessConfig* config) {
+CCResult_CCProcessOutput_CCIoError cc_process_run_config(CCArena arena, const CCProcessConfig* config) {
     CCSlice empty = {0};
     return cc_process_run_with_input(arena, config, empty);
 }
 
-CCResult_CCProcessOutput_CCIoError cc_process_run_with_input(CCArena* arena,
+CCResult_CCProcessOutput_CCIoError cc_process_run_with_input(CCArena arena,
                                                              const CCProcessConfig* config,
                                                              CCSlice input) {
     CCProcessConfig run_cfg;
     CCResult_CCProcess_CCIoError spawn_res;
     CCProcess proc;
 
-    if (!arena || !config || !config->program || !config->args) {
+    if (!cc_arena_is_live(arena) || !config || !config->program || !config->args) {
         return cc_err_CCResult_CCProcessOutput_CCIoError(cc_io_from_errno(EINVAL));
     }
 
@@ -1071,7 +1082,7 @@ CCResult_CCProcessOutput_CCIoError cc_process_run_with_input(CCArena* arena,
 #endif
 }
 
-CCResult_CCProcessOutput_CCIoError cc_process_run(CCArena* arena, const char* program, const char** args) {
+CCResult_CCProcessOutput_CCIoError cc_process_run(CCArena arena, const char* program, const char** args) {
     CCProcessConfig config = {
         .program = program,
         .args = args,
@@ -1081,7 +1092,7 @@ CCResult_CCProcessOutput_CCIoError cc_process_run(CCArena* arena, const char* pr
     return cc_process_run_config(arena, &config);
 }
 
-CCResult_CCProcessOutput_CCIoError cc_process_run_shell(CCArena* arena, const char* command) {
+CCResult_CCProcessOutput_CCIoError cc_process_run_shell(CCArena arena, const char* command) {
 #ifdef _WIN32
     const char* args[] = {"cmd", "/c", command, NULL};
     return cc_process_run(arena, "cmd", args);
@@ -1095,9 +1106,9 @@ CCResult_CCProcessOutput_CCIoError cc_process_run_shell(CCArena* arena, const ch
  * Environment
  * ============================================================================ */
 
-CCSlice cc_env_get(CCArena* arena, const char* name) {
+CCSlice cc_env_get(CCArena arena, const char* name) {
     CCSlice result = {0};
-    if (!arena || !name) return result;
+    if (!cc_arena_is_live(arena) || !name) return result;
 
     const char* value = getenv(name);
     if (!value) return result;

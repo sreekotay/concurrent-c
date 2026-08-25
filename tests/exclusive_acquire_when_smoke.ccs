@@ -63,7 +63,7 @@ int main(void) {
         return 20;
     }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCExclusive excl = cc_exclusive_create(&arena, 0) !> @destroy;
+    CCExclusive excl = cc_exclusive_create(arena, 0) !> @destroy;
     CCExclusiveMutex m;
     CCExclusiveGuard g;
     m = excl.mutex(1);

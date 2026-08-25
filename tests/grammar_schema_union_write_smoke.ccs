@@ -94,7 +94,7 @@ int main(void) {
     {
         const char* src = "*3\r\n:1\r\n$2\r\nab\r\n*2\r\n+A\r\n-B\r\n";
         Reply r;
-        if (!Reply_parse(src, strlen(src), &arena, &r)) { printf("FAIL: rt parse\n"); return 1; }
+        if (!Reply_parse(src, strlen(src), arena, &r)) { printf("FAIL: rt parse\n"); return 1; }
         w = Reply_write(&r, buf, sizeof buf);
         if (w != strlen(src) || memcmp(buf, src, w) != 0) {
             printf("FAIL: round-trip (%zu bytes)\n", w); return 1; }
@@ -119,11 +119,11 @@ int main(void) {
         size_t need = cc_measure(Reply, &r);
         if (need != w) { printf("FAIL: cc_measure %zu != write %zu\n", need, w); return 1; }
         if (r.measure() != need) { printf("FAIL: ufcs measure\n"); return 1; }
-        CCString fs = cc_format(Reply, &r, &arena);
+        CCString fs = cc_format(Reply, &r, arena);
         CCSlice fv = cc_string_as_slice(&fs);
         if (fv.len != strlen(src) || memcmp(fv.ptr, src, fv.len) != 0) {
             printf("FAIL: cc_format bytes\n"); return 1; }
-        CCString us = r.to_str(&arena);
+        CCString us = r.to_str(arena);
         CCSlice uv = cc_string_as_slice(&us);
         if (uv.len != fv.len || memcmp(uv.ptr, fv.ptr, uv.len) != 0) {
             printf("FAIL: ufcs to_str\n"); return 1; }
@@ -136,7 +136,7 @@ int main(void) {
             printf("FAIL: bad kind accepted\n"); return 1; }
         if (cc_measure(Reply, &r) != 0) {
             printf("FAIL: bad kind measured\n"); return 1; }
-        CCString bs = cc_format(Reply, &r, &arena);
+        CCString bs = cc_format(Reply, &r, arena);
         if (cc_string_as_slice(&bs).len != 0) {
             printf("FAIL: bad kind formatted\n"); return 1; }
     }

@@ -705,7 +705,7 @@ static int cc__invoke_one_factory(const void* fn, const char* name, const char* 
             return 0;
         }
         if (cc_string_len(def) > 0 &&
-            !cc_string_push_buffer(def, "\n", 1u, out_ar)) {
+            !cc_string_push_buffer(def, "\n", 1u, *out_ar)) {
             fprintf(stderr,
                     "error: compiled generic factory '%s' output string OOM\n",
                     who);
@@ -713,7 +713,7 @@ static int cc__invoke_one_factory(const void* fn, const char* name, const char* 
             return 0;
         }
         if (!cc_string_push_buffer(def, (const char*)result.ptr,
-                                   (uint32_t)result.len, out_ar)) {
+                                   (uint32_t)result.len, *out_ar)) {
             fprintf(stderr,
                     "error: compiled generic factory '%s' output string OOM\n",
                     who);
@@ -762,7 +762,7 @@ int cc_emit_plan_invoke_generic_factory(const char* name, const char* mangled,
     if (cc_string_failed(&def)) return 0;
     /* Assembled factory text is host C; lower Result sugar here (not at
      * @emit literal-piece time — ${} can split mid-signature). */
-    cstr = cc_string_cstr(&def, out_ar);
+    cstr = cc_string_cstr(&def, *out_ar);
     if (!cstr) {
         /* Empty is only reachable if base returned empty — already failed. */
         char* empty = (char*)cc_arena_alloc(out_ar, 1, 1);

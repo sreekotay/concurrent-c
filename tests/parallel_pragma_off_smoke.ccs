@@ -58,8 +58,8 @@ int main(void) {
 
     /* wait-for: plain loop; worker binds 0; stages degrade to no-ops. */
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts@(4, 1, &arena) @destroy;
-    if (!ts.excl)
+    CCTurnstile ts@(4, 1, arena) @destroy;
+    if (!cc_exclusive_is_live(ts.excl))
         return 1;
     int hits = 0;
     int wsum = 0;

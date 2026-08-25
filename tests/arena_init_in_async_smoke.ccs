@@ -6,7 +6,7 @@
 
 @async int f(void) {
     int x = @await noop(3);
-    char buf[CC_ARENA_REGION_BYTES(256)];
+    _Alignas(CCArenaHost) char buf[CC_ARENA_REGION_BYTES(256)];
     int out = 0;
     CCArena arena_storage = cc_arena_wrap_region(buf, sizeof(buf),
                                                 CC_ARENA_FIXED);

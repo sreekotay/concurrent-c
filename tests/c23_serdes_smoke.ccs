@@ -48,7 +48,7 @@ int main(void) {
 
     CCArena a = cc_arena_create(1 << 16);
     g_keeps = 0;
-    if (!C23Tok_collect(num, strlen(num), &a, on_keep, 0) || g_keeps != 5) {
+    if (!C23Tok_collect(num, strlen(num), a, on_keep, 0) || g_keeps != 5) {
         printf("FAIL: tok collect keeps=%d\n", g_keeps);
         return 1;
     }

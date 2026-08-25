@@ -474,7 +474,7 @@ int main(int argc, char** argv) {
     CCShardMask mask = cc_shard_mask_auto((size_t)K_MAX_SHARDS);
 
     CCArena excl_arena = @create(kilobytes(64)) @destroy;
-    CCExclusive excl = cc_exclusive_create(&excl_arena, mask.count * 2u) !> @destroy;
+    CCExclusive excl = cc_exclusive_create(excl_arena, mask.count * 2u) !> @destroy;
 
     if (!db_init(&db, excl, mask)) {
         eprintln("redis_async_sketch: db_init failed") !>;

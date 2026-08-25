@@ -4,7 +4,7 @@
 #include <stdio.h>
 
 int main(void) {
-    uint8_t frame[CC_ARENA_REGION_BYTES(64)];
+    _Alignas(CCArenaHost) uint8_t frame[CC_ARENA_REGION_BYTES(64)];
     {
         cc_arena_buf(s, frame, sizeof frame);
         void* p;

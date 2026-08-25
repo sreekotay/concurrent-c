@@ -50,10 +50,10 @@ int main(void) {
     /* parse nil / data */
     {
         Bulk b;
-        if (!Bulk_parse("$-1\r\n", 5, &arena, &b) || b.kind != Bulk_nil || b.len != -1) {
+        if (!Bulk_parse("$-1\r\n", 5, arena, &b) || b.kind != Bulk_nil || b.len != -1) {
             printf("FAIL: parse nil\n"); return 1;
         }
-        if (!Bulk_parse("$2\r\nhi\r\n", 8, &arena, &b) || b.kind != Bulk_data ||
+        if (!Bulk_parse("$2\r\nhi\r\n", 8, arena, &b) || b.kind != Bulk_data ||
             b.len != 2) {
             printf("FAIL: parse data\n"); return 1;
         }
@@ -62,7 +62,7 @@ int main(void) {
                 printf("FAIL: parse data payload\n"); return 1;
             }
         }
-        if (Bulk_parse("$-2\r\n", 5, &arena, &b)) {
+        if (Bulk_parse("$-2\r\n", 5, arena, &b)) {
             printf("FAIL: parse other negative should reject\n"); return 1;
         }
     }

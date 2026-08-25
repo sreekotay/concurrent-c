@@ -12,7 +12,7 @@
 /* decode: strip '%' markers; REJECT any span containing 'x' (validation).
  * Only invoked when the dirty flag saw a '%' branch — clean spans borrow. */
 static int g_codec_calls = 0;
-static int vc(const char* p, size_t n, CCSlice* out, CCArena* arena) {
+static int vc(const char* p, size_t n, CCSlice* out, CCArena arena) {
     g_codec_calls++;
     if (memchr(p, 'x', n)) return 0;
     char* dst = (char*)cc_arena_alloc_local(arena, n ? n : 1, 1);
@@ -69,7 +69,7 @@ int main(void) {
     {
         Env e = {0};
         g_codec_calls = 0;
-        if (!V_collect("(abc)", 5, &arena, cb, &e)) { printf("FAIL: clean collect\n"); return 1; }
+        if (!V_collect("(abc)", 5, arena, cb, &e)) { printf("FAIL: clean collect\n"); return 1; }
         if (g_codec_calls != 0) { printf("FAIL: codec ran on clean span\n"); return 1; }
         if (e.calls != 1 || cc_slice_is_unique(e.last)) { printf("FAIL: clean should borrow\n"); return 1; }
         if (e.last.len != 3 || memcmp(e.last.ptr, "abc", 3) != 0) { printf("FAIL: clean bytes\n"); return 1; }
@@ -78,7 +78,7 @@ int main(void) {
     {
         Env e = {0};
         g_codec_calls = 0;
-        if (!V_collect("(a%bc)", 6, &arena, cb, &e)) { printf("FAIL: dirty collect\n"); return 1; }
+        if (!V_collect("(a%bc)", 6, arena, cb, &e)) { printf("FAIL: dirty collect\n"); return 1; }
         if (g_codec_calls != 1) { printf("FAIL: codec calls=%d\n", g_codec_calls); return 1; }
         if (!cc_slice_is_unique(e.last) || e.last.len != 3 ||
             memcmp(e.last.ptr, "abc", 3) != 0) { printf("FAIL: decoded bytes\n"); return 1; }
@@ -86,8 +86,8 @@ int main(void) {
     /* CODEC FAILURE: parse -> NULL, collect -> 0, callbacks never fired */
     {
         Env e = {0};
-        if (V_parse("(a%xb)", 6, &arena) != 0) { printf("FAIL: codec-fail parse accepted\n"); return 1; }
-        if (V_collect("(a%xb)", 6, &arena, cb, &e)) { printf("FAIL: codec-fail collect accepted\n"); return 1; }
+        if (V_parse("(a%xb)", 6, arena) != 0) { printf("FAIL: codec-fail parse accepted\n"); return 1; }
+        if (V_collect("(a%xb)", 6, arena, cb, &e)) { printf("FAIL: codec-fail collect accepted\n"); return 1; }
         if (e.calls != 0) { printf("FAIL: callbacks fired on failed parse\n"); return 1; }
     }
     /* multi-byte literal truncated at end of input: rejected, no overread */
@@ -99,19 +99,19 @@ int main(void) {
     if (HexA_match("B", 1)) { printf("FAIL: HexA B\n"); return 1; }
     {
         HexS hs;
-        if (!HexS_parse("B", 1, &arena, &hs)) { printf("FAIL: HexS B\n"); return 1; }
-        if (HexS_parse("A", 1, &arena, &hs)) { printf("FAIL: HexS A\n"); return 1; }
+        if (!HexS_parse("B", 1, arena, &hs)) { printf("FAIL: HexS B\n"); return 1; }
+        if (HexS_parse("A", 1, arena, &hs)) { printf("FAIL: HexS A\n"); return 1; }
     }
 
     /* int bind: negative values */
     {
         Neg n;
-        if (!Neg_parse("-42", 3, &arena, &n) || n.v != -42) { printf("FAIL: negative int\n"); return 1; }
-        if (!Neg_parse("7", 1, &arena, &n) || n.v != 7) { printf("FAIL: positive int\n"); return 1; }
+        if (!Neg_parse("-42", 3, arena, &n) || n.v != -42) { printf("FAIL: negative int\n"); return 1; }
+        if (!Neg_parse("7", 1, arena, &n) || n.v != 7) { printf("FAIL: positive int\n"); return 1; }
     }
     /* Reader on empty input: clean EOF, not an error */
     {
-        NegReader r = cc_reader(Neg, "", 0, &arena);
+        NegReader r = cc_reader(Neg, "", 0, arena);
         Neg n;
         if (cc_next(Neg, &r, &n)) { printf("FAIL: next on empty\n"); return 1; }
         if (!cc_at_end(Neg, &r)) { printf("FAIL: empty not at_end\n"); return 1; }

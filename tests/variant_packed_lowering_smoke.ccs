@@ -33,7 +33,7 @@ int main(void) {
     if (n != 42) return 2;
 
     CCArena arena = cc_arena_create(4096);
-    PackedRV s = { .str = cc_string_from("hi", &arena) };
+    PackedRV s = { .str = cc_string_from("hi", arena) };
     if (s.kind != PackedRV_str) return 3;
 
     int seen = 0;

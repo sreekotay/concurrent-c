@@ -10,7 +10,7 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     
     Container c;
-    c.items = cc_vec_new::[int](&arena);
+    c.items = cc_vec_new::[int](arena);
     
     /* Value receiver on a struct field should lower with &field. */
     c.items.push(10);

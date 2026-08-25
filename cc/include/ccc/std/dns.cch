@@ -18,13 +18,7 @@
  * DNS Resolution
  * ============================================================================ */
 
-/* Resolve hostname to IP addresses.
- * Returns slice of CCIpAddr allocated in arena.
- * Empty slice (len=0) means no addresses found. */
-CCSlice cc_dns_lookup(CCArena* arena, const char* hostname, size_t hostname_len, CCNetError* out_err);
-
-/* Async DNS lookup */
-/* @async CCSlice cc_dns_lookup_async(CCArena* arena, const char* hostname, size_t hostname_len, CCNetError* out_err); */
+/* `cc_dns_lookup` is declared in net.cch (same signature). */
 
 /* Resolve with specific address family preference */
 typedef enum CCDnsFamily {
@@ -33,7 +27,7 @@ typedef enum CCDnsFamily {
     CC_DNS_IPV6 = 6,    /* Prefer/filter IPv6 */
 } CCDnsFamily;
 
-CCSlice cc_dns_lookup_family(CCArena* arena, const char* hostname, size_t hostname_len,
+CCSlice cc_dns_lookup_family(CCArena arena, const char* hostname, size_t hostname_len,
                               CCDnsFamily family, CCNetError* out_err);
 
 /* ============================================================================
@@ -41,6 +35,11 @@ CCSlice cc_dns_lookup_family(CCArena* arena, const char* hostname, size_t hostna
  * ============================================================================ */
 
 /* Reverse lookup: IP address to hostname */
-CCSlice cc_dns_reverse(CCArena* arena, const CCIpAddr* addr, CCNetError* out_err);
+CCSlice cc_dns_reverse(CCArena arena, const CCIpAddr* addr, CCNetError* out_err);
+
+#define cc_dns_lookup_family(a, host, n, fam, err) \
+    (cc_dns_lookup_family)(CC__ARENA_HANDLE(a), (host), (n), (fam), (err))
+#define cc_dns_reverse(a, addr, err) \
+    (cc_dns_reverse)(CC__ARENA_HANDLE(a), (addr), (err))
 
 #endif /* CC_STD_DNS_H */

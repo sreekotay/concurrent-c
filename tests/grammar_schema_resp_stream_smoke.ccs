@@ -55,7 +55,7 @@ int main(void) {
         for (size_t n = 0; n < full; n++) {
             size_t pos = 0;
             RespCmd c;
-            bool !>(CCError) r = RespCmd_try_read(src, n, &pos, &arena, &c);
+            bool !>(CCError) r = RespCmd_try_read(src, n, &pos, arena, &c);
             if (n == 0) {
                 if (r.is_err() || r.value() != false) { printf("FAIL: empty not Ok(false)\n"); return 1; }
                 continue;
@@ -67,12 +67,12 @@ int main(void) {
         }
         size_t pos = 0;
         RespCmd c;
-        bool !>(CCError) r = cc_try_read(RespCmd, src, full, &pos, &arena, &c);
+        bool !>(CCError) r = cc_try_read(RespCmd, src, full, &pos, arena, &c);
         if (r.is_err() || r.value() != true) { printf("FAIL: full frame\n"); return 1; }
         if (pos != full || c.args_n != 2 || !arg_is(&c.args[0], "SET") || !arg_is(&c.args[1], "k")) {
             printf("FAIL: parsed frame\n"); return 1;
         }
-        r = cc_try_read(RespCmd, src, full, &pos, &arena, &c);
+        r = cc_try_read(RespCmd, src, full, &pos, arena, &c);
         if (r.is_err() || r.value() != false) { printf("FAIL: drained not Ok(false)\n"); return 1; }
     }
 
@@ -86,7 +86,7 @@ int main(void) {
         long cmds = 0, args = 0;
         for (;;) {
             RespCmd c;
-            bool !>(CCError) r = RespCmd_try_read(pipe, n, &pos, &arena, &c);
+            bool !>(CCError) r = RespCmd_try_read(pipe, n, &pos, arena, &c);
             if (r.is_err()) { printf("FAIL: pipeline err\n"); return 1; }
             if (!r.value()) break;
             cmds++; args += (long)c.args_n;
@@ -98,13 +98,13 @@ int main(void) {
     {
         size_t pos = 0;
         RespCmd c;
-        bool !>(CCError) r = RespCmd_try_read("@2\r\n", 4, &pos, &arena, &c);
+        bool !>(CCError) r = RespCmd_try_read("@2\r\n", 4, &pos, arena, &c);
         if (!r.is_err() || r.error().kind != CC_ERR_PARSE) { printf("FAIL: bad lead\n"); return 1; }
         pos = 0;
-        r = RespCmd_try_read("*1\r\n$1\r\nab\r\n", 12, &pos, &arena, &c);
+        r = RespCmd_try_read("*1\r\n$1\r\nab\r\n", 12, &pos, arena, &c);
         if (!r.is_err() || r.error().kind != CC_ERR_PARSE) { printf("FAIL: long data\n"); return 1; }
         pos = 0;
-        r = RespCmd_try_read("*-1\r\n", 5, &pos, &arena, &c);
+        r = RespCmd_try_read("*-1\r\n", 5, &pos, arena, &c);
         if (!r.is_err() || r.error().kind != CC_ERR_PARSE) { printf("FAIL: negative count\n"); return 1; }
     }
 
@@ -114,7 +114,7 @@ int main(void) {
         const char* src = "*5\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n";
         size_t pos = 0;
         RespCmd c;
-        bool !>(CCError) r = RespCmd_try_read(src, strlen(src), &pos, &arena, &c);
+        bool !>(CCError) r = RespCmd_try_read(src, strlen(src), &pos, arena, &c);
         if (!r.is_err() || r.error().kind != CC_ERR_PARSE) { printf("FAIL: over-cap\n"); return 1; }
     }
 
@@ -122,7 +122,7 @@ int main(void) {
     {
         const char* src = "*1\r\n$4\r\nPING\r\n";
         RespCmd c;
-        if (!RespCmd_parse(src, strlen(src), &arena, &c) || c.args_n != 1 ||
+        if (!RespCmd_parse(src, strlen(src), arena, &c) || c.args_n != 1 ||
             !arg_is(&c.args[0], "PING")) { printf("FAIL: bool parse\n"); return 1; }
         /* write side over the inline array: round-trip */
         char buf[64];

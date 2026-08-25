@@ -15,13 +15,13 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     if (!cc_arena_is_live(arena)) return 1;
 
-    CCVec_int v = CCVec_int_init(&arena, 8);
+    CCVec_int v = CCVec_int_init(arena, 8);
     if (CCVec_int_push(&v, 11) != 0) return 2;
     if (CCVec_int_push(&v, 22) != 0) return 3;
     int* got = CCVec_int_get(&v, 1);
     if (!got || *got != 22) return 4;
 
-    Map_int_int* m = Map_int_int_init(&arena);
+    Map_int_int* m = Map_int_int_init(arena);
     if (!m) return 5;
     if (Map_int_int_insert(m, 7, 70) != 0) return 6;
     int* mv = Map_int_int_get(m, 7);

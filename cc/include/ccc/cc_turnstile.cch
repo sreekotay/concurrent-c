@@ -159,11 +159,11 @@ static inline void cc_turnstile_destroy(CCTurnstile* t) {
 
 /* slots[0..n_stages) must be contiguous CCTurnstileStage storage. */
 static inline int cc_turnstile_init(CCTurnstile* t, int cap, int n_stages,
-                                   CCArena* arena, CCTurnstileStage* slots) {
+                                   CCArena arena, CCTurnstileStage* slots) {
     int k;
     int tok = 1;
 
-    if (!t || !arena || !slots || cap < 1 || n_stages < 1)
+    if (!t || !cc_arena_is_live(arena) || !slots || cap < 1 || n_stages < 1)
         return -1;
     memset(t, 0, sizeof(*t));
     t->cap = cap;
@@ -196,12 +196,12 @@ static inline int cc_turnstile_init(CCTurnstile* t, int cap, int n_stages,
 }
 
 static inline CCTurnstile cc_turnstile_create(int cap, int n_stages,
-                                             CCArena* arena) {
+                                             CCArena arena) {
     CCTurnstile t;
     CCTurnstileStage* slots;
 
     memset(&t, 0, sizeof(t));
-    if (!arena || cap < 1 || n_stages < 1)
+    if (!cc_arena_is_live(arena) || cap < 1 || n_stages < 1)
         return t;
     slots = cc_arena_alloc_T_count(CCTurnstileStage, arena, (size_t)n_stages);
     if (!slots)
@@ -212,6 +212,11 @@ static inline CCTurnstile cc_turnstile_create(int cap, int n_stages,
     }
     return t;
 }
+
+#define cc_turnstile_init(t, cap, n, a, slots) \
+    (cc_turnstile_init)((t), (cap), (n), CC__ARENA_HANDLE(a), (slots))
+#define cc_turnstile_create(cap, n, a) \
+    (cc_turnstile_create)((cap), (n), CC__ARENA_HANDLE(a))
 
 static inline bool !>(CCIoError) cc_turnstile_enter(CCTurnstile* t, int i) {
     int tok = 0;
@@ -252,7 +257,7 @@ _Static_assert(offsetof(CCTurnstileRW, write) ==
                    offsetof(CCTurnstileRW, read) + sizeof(CCTurnstileStage),
                "CCTurnstileRW read/write must be contiguous stages");
 
-static inline CCTurnstileRW cc_turnstile_rw_create(int cap, CCArena* arena) {
+static inline CCTurnstileRW cc_turnstile_rw_create(int cap, CCArena arena) {
     CCTurnstileRW w;
     memset(&w, 0, sizeof(w));
     if (cc_turnstile_init(&w.core, cap, 2, arena, &w.read) != 0) {
@@ -261,6 +266,8 @@ static inline CCTurnstileRW cc_turnstile_rw_create(int cap, CCArena* arena) {
     }
     return w;
 }
+#define cc_turnstile_rw_create(cap, a) \
+    (cc_turnstile_rw_create)((cap), CC__ARENA_HANDLE(a))
 
 static inline void cc_turnstile_rw_destroy(CCTurnstileRW* w) {
     if (!w)

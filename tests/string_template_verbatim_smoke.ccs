@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static CCSlice shout_policy(CCArena *arena, CCSlice tag, CCSlice value) {
+static CCSlice shout_policy(CCArena arena, CCSlice tag, CCSlice value) {
     (void)tag;
     CCString out = cc_string_new();
     out.append("<", arena);

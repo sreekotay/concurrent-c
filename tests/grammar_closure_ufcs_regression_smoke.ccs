@@ -42,7 +42,7 @@ int main(void) {
     CCArena ar;
     if (!arena_init(&ar, 1 << 16)) { printf("FAIL: arena init\n"); return 1; }
     RG v;
-    if (!RG_parse("*42\r\n", 5, &ar, &v) || v.v != 42) { printf("FAIL: parse\n"); return 1; }
+    if (!RG_parse("*42\r\n", 5, ar, &v) || v.v != 42) { printf("FAIL: parse\n"); return 1; }
     if (result_local_a() != 7) { printf("FAIL: result local\n"); return 1; }
     {
         /* bug 1: closures force the proto-insertion path */

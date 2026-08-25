@@ -272,7 +272,7 @@ static int shadow_runtime_libdir(char* dst, size_t cap) {
 int main(int argc, char** argv) {
     CCArena gate = cc_arena_create(4096);
     (void)PpTok_match(";", 1);
-    (void)PpTok_collect(";", 1, &gate, shadow_keep_nop, NULL);
+    (void)PpTok_collect(";", 1, gate, shadow_keep_nop, NULL);
     /* Statement whitelist grammar gate (Phase 2). */
     if (!PpStmt_match("break;", 6) || !PpStmt_match("continue;", 9) ||
         !PpStmt_match("goto L;", 7) || !PpStmt_match("L:", 2)) {
@@ -283,12 +283,12 @@ int main(int argc, char** argv) {
         fprintf(stderr, "error: PpStmt raw_line selfcheck failed\n");
         return 1;
     }
-    if (PpStmt_parse("@@@", 3, &gate)) {
+    if (PpStmt_parse("@@@", 3, gate)) {
         fprintf(stderr, "error: PpStmt accepted non-statement\n");
         return 1;
     }
     cc_arena_reset(&gate);
-    (void)PpStmt_collect("break;", 6, &gate, shadow_keep_nop, NULL);
+    (void)PpStmt_collect("break;", 6, gate, shadow_keep_nop, NULL);
     cc_arena_free(&gate);
 
     /* Typed emit-template schema check — fails the self-build, not user TUs. */

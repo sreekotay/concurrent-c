@@ -4,7 +4,7 @@
 #include <stdio.h>
 
 #define scratch_arena(name, n) \
-    uint8_t name##_buf[CC_ARENA_REGION_BYTES(n)]; \
+    _Alignas(CCArenaHost) uint8_t name##_buf[CC_ARENA_REGION_BYTES(n)]; \
     CCArena name = cc_arena_create_buffer(name##_buf, sizeof(name##_buf), CC_ARENA_DEFAULT_BLOCK_MAX) @destroy
 
 int main(void) {

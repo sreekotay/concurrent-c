@@ -12,7 +12,7 @@ int main(void) {
     if (!arena.valid()) return 1;
 
     CCSlice src = CC_SLICE_LIT("hello");
-    CCResult_CCSlice_CCError cloned_res = cc_slice_clone_into(&src, &arena);
+    CCResult_CCSlice_CCError cloned_res = cc_slice_clone_into(&src, arena);
     if (cloned_res.is_err()) return 2;
     CCSlice cloned = CCResult_CCSlice_CCError_value(cloned_res);
     if (cloned.len != 5 || memcmp(cloned.ptr, "hello", 5) != 0) return 3;

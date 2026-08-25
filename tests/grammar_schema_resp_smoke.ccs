@@ -48,7 +48,7 @@ int main(void) {
     {
         const char* src = "*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$5\r\nhello\r\n";
         RespCmd c;
-        if (!RespCmd_parse(src, strlen(src), &arena, &c)) { printf("FAIL: set parse\n"); return 1; }
+        if (!RespCmd_parse(src, strlen(src), arena, &c)) { printf("FAIL: set parse\n"); return 1; }
         if (c.argc != 3 || c.args_n != 3) { printf("FAIL: argc\n"); return 1; }
         if (!arg_is(&c.args[0], "SET") || !arg_is(&c.args[1], "mykey") || !arg_is(&c.args[2], "hello")) {
             printf("FAIL: args\n"); return 1;
@@ -66,7 +66,7 @@ int main(void) {
         memcpy(src + n, "a\r\nb\0c\r\n", 8); n += 8;   /* 8 payload bytes */
         memcpy(src + n, "\r\n", 2); n += 2;
         RespCmd c;
-        if (!RespCmd_parse(src, n, &arena, &c)) { printf("FAIL: binary parse\n"); return 1; }
+        if (!RespCmd_parse(src, n, arena, &c)) { printf("FAIL: binary parse\n"); return 1; }
         if (c.args[0].len != 8 || c.args[0].data.len != 8 ||
             memcmp(c.args[0].data.ptr, "a\r\nb\0c\r\n", 8) != 0) {
             printf("FAIL: binary payload\n"); return 1;
@@ -76,22 +76,22 @@ int main(void) {
     {
         RespCmd c;
         const char* e1 = "*1\r\n$0\r\n\r\n";
-        if (!RespCmd_parse(e1, strlen(e1), &arena, &c) || c.args[0].data.len != 0) {
+        if (!RespCmd_parse(e1, strlen(e1), arena, &c) || c.args[0].data.len != 0) {
             printf("FAIL: empty bulk\n"); return 1;
         }
         const char* e2 = "*0\r\n";
-        if (!RespCmd_parse(e2, strlen(e2), &arena, &c) || c.argc != 0 || c.args_n != 0) {
+        if (!RespCmd_parse(e2, strlen(e2), arena, &c) || c.argc != 0 || c.args_n != 0) {
             printf("FAIL: empty array\n"); return 1;
         }
     }
     /* negatives: truncation, length overrun, negative count, bad framing */
     {
         RespCmd c;
-        if (RespCmd_parse("*2\r\n$3\r\nGET\r\n", 13, &arena, &c)) { printf("FAIL: truncated accepted\n"); return 1; }
-        if (RespCmd_parse("*1\r\n$5\r\nab\r\n", 12, &arena, &c)) { printf("FAIL: overrun accepted\n"); return 1; }
-        if (RespCmd_parse("*-1\r\n", 5, &arena, &c)) { printf("FAIL: negative count accepted\n"); return 1; }
-        if (RespCmd_parse("*1\n$1\na\n", 8, &arena, &c)) { printf("FAIL: bad CRLF accepted\n"); return 1; }
-        if (RespCmd_parse("*1\r\n$1\r\nab\r\n", 12, &arena, &c)) { printf("FAIL: long data accepted\n"); return 1; }
+        if (RespCmd_parse("*2\r\n$3\r\nGET\r\n", 13, arena, &c)) { printf("FAIL: truncated accepted\n"); return 1; }
+        if (RespCmd_parse("*1\r\n$5\r\nab\r\n", 12, arena, &c)) { printf("FAIL: overrun accepted\n"); return 1; }
+        if (RespCmd_parse("*-1\r\n", 5, arena, &c)) { printf("FAIL: negative count accepted\n"); return 1; }
+        if (RespCmd_parse("*1\n$1\na\n", 8, arena, &c)) { printf("FAIL: bad CRLF accepted\n"); return 1; }
+        if (RespCmd_parse("*1\r\n$1\r\nab\r\n", 12, arena, &c)) { printf("FAIL: long data accepted\n"); return 1; }
     }
     /* pipeline: incremental _read, one command per call */
     {
@@ -103,7 +103,7 @@ int main(void) {
         long cmds = 0, args = 0;
         while (pos < n) {
             RespCmd c;
-            if (!RespCmd_read(pipe, n, &pos, &arena, &c)) { printf("FAIL: pipeline read\n"); return 1; }
+            if (!RespCmd_read(pipe, n, &pos, arena, &c)) { printf("FAIL: pipeline read\n"); return 1; }
             cmds++; args += (long)c.args_n;
         }
         if (pos != n || cmds != 3 || args != 6) {
@@ -118,7 +118,7 @@ int main(void) {
         const char* src = "*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$5\r\nhello\r\n";
         RespCmd c;
         char buf[128];
-        if (!RespCmd_parse(src, strlen(src), &arena, &c)) { printf("FAIL: rt parse\n"); return 1; }
+        if (!RespCmd_parse(src, strlen(src), arena, &c)) { printf("FAIL: rt parse\n"); return 1; }
         /* round-trip: parse -> write reproduces the wire bytes exactly */
         size_t w = cc_write(RespCmd, &c, buf, sizeof buf);
         if (w != strlen(src) || memcmp(buf, src, w) != 0) {
@@ -152,18 +152,18 @@ int main(void) {
 
         /* CCString face: cc_format / UFCS to_str / @string template slots */
         {
-            CCString fs = cc_format(RespCmd, &c, &arena);
+            CCString fs = cc_format(RespCmd, &c, arena);
             CCSlice fv = cc_string_as_slice(&fs);
             if (fv.len != strlen(src) || memcmp(fv.ptr, src, fv.len) != 0) {
                 printf("FAIL: cc_format bytes\n"); return 1;
             }
-            CCString us = c.to_str(&arena);
+            CCString us = c.to_str(arena);
             CCSlice uv = cc_string_as_slice(&us);
             if (uv.len != fv.len || memcmp(uv.ptr, fv.ptr, uv.len) != 0) {
                 printf("FAIL: ufcs to_str\n"); return 1;
             }
             /* schema values drop into the language's string templates */
-            CCString ts = @string(`pipe> ${c.to_str(&arena)}`, &arena);
+            CCString ts = @string(`pipe> ${c.to_str(arena)}`, arena);
             CCSlice tv = cc_string_as_slice(&ts);
             if (tv.len != 6 + fv.len || memcmp(tv.ptr, "pipe> ", 6) != 0 ||
                 memcmp((const char*)tv.ptr + 6, src, fv.len) != 0) {

@@ -218,7 +218,7 @@ static inline bool cc__cli_apply_value(void *base,
                                        size_t nfields,
                                        const CCCliField *spec,
                                        CCSlice value,
-                                       CCArena *arena,
+                                       CCArena arena,
                                        int *exit_code) {
     const CCCliField *target = spec;
     CCSlice use = value;
@@ -261,7 +261,7 @@ static inline bool cc__cli_apply_value(void *base,
         size_t *len = (size_t *)((char *)base + target->off_len);
         CCSlice *next;
         size_t cap = *len + 1;
-        if (!arena) {
+        if (!cc_arena_is_live(arena)) {
             fprintf(stderr, "Out of memory while parsing arguments\n");
             if (exit_code) *exit_code = 1;
             return false;
@@ -293,7 +293,7 @@ static inline bool cc__cli_parse_long(void *base,
                                       char **argv,
                                       int *index,
                                       CCSlice arg,
-                                      CCArena *arena,
+                                      CCArena arena,
                                       int *exit_code) {
     const CCCliField *spec;
     CCSlice name;
@@ -335,7 +335,7 @@ static inline bool cc__cli_parse_short(void *base,
                                        char **argv,
                                        int *index,
                                        CCSlice arg,
-                                       CCArena *arena,
+                                       CCArena arena,
                                        int *exit_code) {
     CCSlice tail = CCSlice_sub(&arg, 1, arg.len);
     const CCCliField *numeric = cc__cli_find_numeric_short(fields, nfields, tail);
@@ -394,7 +394,7 @@ static inline CCCliFillResult cc_cli_fill(const CCCliField *fields,
                                           size_t nfields,
                                           int argc,
                                           char **argv,
-                                          CCArena *arena,
+                                          CCArena arena,
                                           void *out) {
     CCCliFillResult r;
     bool stop = false;
@@ -617,7 +617,7 @@ cc_cli_prepare_fields(const CCCliField *fields,
                       size_t nfields,
                       int argc,
                       char **argv,
-                      CCArena *arena,
+                      CCArena arena,
                       void *out,
                       FILE *usage_out) {
     CCCliFillResult r;
@@ -666,5 +666,11 @@ cc_cli_prepare_fields(const CCCliField *fields,
     cc_emit_cstr(CC_EMIT_AFTER_PRELUDE, gen);
     free(gen);
 }
+
+#define cc_cli_fill(fields, nfields, argc, argv, a, out) \
+    (cc_cli_fill)((fields), (nfields), (argc), (argv), CC__ARENA_HANDLE(a), (out))
+#define cc_cli_prepare_fields(fields, nfields, argc, argv, a, out, u) \
+    (cc_cli_prepare_fields)((fields), (nfields), (argc), (argv), \
+                            CC__ARENA_HANDLE(a), (out), (u))
 
 #endif /* CC_STD_CLI_H */

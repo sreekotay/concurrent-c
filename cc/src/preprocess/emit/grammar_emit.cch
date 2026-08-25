@@ -154,7 +154,7 @@ static inline CCString cc_gr_tape_substrate_text(CCArena* a, const char* n, int 
     union { const char* bytes; } u; } ${n}Node;
 struct CCShapeB; struct CCShapeVal;
 typedef struct { ${n}Node* tape; size_t total, cap;
-    size_t bstack[512]; size_t bdepth; CCArena* arena;
+    size_t bstack[512]; size_t bdepth; CCArena arena;
     const char** mat_ptr; size_t* mat_len; unsigned char* mat_cow;
     /* shaped-DOM hook (armed by _dom; NULL for plain parse):
      * completed containers hand their value up this stack —
@@ -799,13 +799,13 @@ static inline CCString cc_gr_lvec_fill_text(CCArena* a, int k, const char* T, co
 
 static inline CCString cc_gr_new_fill_proto_text(CCArena* a, const char* T) {
     return @string(`static ${T}* ${T}__new_fill(const unsigned char* s, size_t n, size_t* io,
-    CCArena* arena, int* cc_inc, int cc_depth);
+    CCArena arena, int* cc_inc, int cc_depth);
 `, a);
 }
 
 static inline CCString cc_gr_new_fill_def_text(CCArena* a, const char* T) {
     return @string(`static __attribute__((unused)) ${T}* ${T}__new_fill(const unsigned char* s, size_t n, size_t* io,
-    CCArena* arena, int* cc_inc, int cc_depth) {
+    CCArena arena, int* cc_inc, int cc_depth) {
     ${T}* q = (${T}*)cc_arena_alloc_local(arena, sizeof(${T}), _Alignof(${T}));
     if (!q) return 0;
     memset(q, 0, sizeof(*q));
@@ -1392,7 +1392,7 @@ static inline CCString cc_gr_fill_head_text(CCArena* a, const char* n,
      * always_inline recursion. */
     const char* al = force_inline ? " __attribute__((always_inline))" : "";
     return @string(`static inline${al} int ${n}__fill(const unsigned char* s, size_t n, size_t* io,
-        CCArena* arena, ${n}* out, int* cc_inc, int cc_depth) {
+        CCArena arena, ${n}* out, int* cc_inc, int cc_depth) {
     (void)cc_inc;
     if (cc_depth > ${n}__nest_max) return 0;
     size_t p = *io;
@@ -1416,7 +1416,7 @@ ${fail}: __attribute__((unused));
 }
 
 static inline CCString cc_gr_parse_fn_text(CCArena* a, const char* n) {
-    return @string(`static int ${n}_parse(const char* s0, size_t n, CCArena* arena, ${n}* out) {
+    return @string(`static int ${n}_parse(const char* s0, size_t n, CCArena arena, ${n}* out) {
     const unsigned char* s = (const unsigned char*)s0;
     size_t p = 0;
     cc_grammar_fail_reset();
@@ -1439,7 +1439,7 @@ static inline CCString cc_gr_measure_fn_text(CCArena* a, const char* n) {
 
 /* CCString face: measure once, allocate exactly, write unchecked */
 static inline CCString cc_gr_tostr_fn_text(CCArena* a, const char* n) {
-    return @string(`static __attribute__((unused)) CCString ${n}_to_str(const ${n}* v, CCArena* arena) {
+    return @string(`static __attribute__((unused)) CCString ${n}_to_str(const ${n}* v, CCArena arena) {
     CCString s = cc_string_new();
     size_t need = ${n}__wmeasure(v);
     char* buf = (char*)cc_arena_alloc_local(arena, need ? need : 1, 1);
@@ -1921,7 +1921,7 @@ static inline CCString cc_gr_entry_pure_def_text(CCArena* a, const char* n, int 
 
 /* parse entry: tape ctx setup, entry dispatch, root span back-patch */
 static inline CCString cc_gr_parse_entry_head_text(CCArena* a, const char* n) {
-    return @string(`static ${n}Node* ${n}_parse(const char* s, size_t n, CCArena* arena) {
+    return @string(`static ${n}Node* ${n}_parse(const char* s, size_t n, CCArena arena) {
     ${n}__ctx c0;
     size_t p = 0;
     cc_grammar_fail_reset();
@@ -1990,7 +1990,7 @@ static inline CCString cc_gr_parse_entry_tail_text(CCArena* a) {
 }
 
 static inline CCString cc_gr_collect_fn_text(CCArena* a, const char* n) {
-    return @string(`static int ${n}_collect(const char* s, size_t n, CCArena* arena,
+    return @string(`static int ${n}_collect(const char* s, size_t n, CCArena arena,
         int (*cb)(void* env, int id, CCSlice v), void* env) {
     ${n}Node* tape = ${n}_parse(s, n, arena);
     if (!tape) return 0;
@@ -2136,7 +2136,7 @@ static inline CCString cc_gr_shape_end_fn_text(CCArena* a, const char* n, int nr
 
 static inline CCString cc_gr_dom_entry_text(CCArena* a, const char* n) {
     return @string(`static __attribute__((unused)) int ${n}_dom(const char* s0, size_t n,
-        CCShapeReg* reg, CCArena* arena, CCShapeVal* out) {
+        CCShapeReg* reg, CCArena arena, CCShapeVal* out) {
     const unsigned char* s = (const unsigned char*)s0;
     ${n}__ctx c0;
     size_t p = 0;
@@ -2203,7 +2203,7 @@ static inline CCString cc_gr_match_entry_text(CCArena* a, const char* n) {
  * grammar seam). */
 static inline CCString cc_gr_stream_face_text(CCArena* a, const char* n) {
     return @string(`static bool !>(CCError) ${n}_try_read(const char* s0, size_t n,
-        size_t* pos, CCArena* arena, ${n}* out) {
+        size_t* pos, CCArena arena, ${n}* out) {
     size_t p = *pos;
     int cc_i0 = 0;
     if (p >= n) return cc_ok(false);   /* clean end at frame boundary */
@@ -2214,14 +2214,14 @@ static inline CCString cc_gr_stream_face_text(CCArena* a, const char* n) {
     if (cc_i0) return cc_err(CC_ERROR(CC_ERR_WOULD_BLOCK, "${n}: incomplete frame"));
     return cc_err(CC_ERROR(CC_ERR_PARSE, "${n}: malformed input"));
 }
-static int ${n}_read(const char* s0, size_t n, size_t* pos, CCArena* arena, ${n}* out) {
+static int ${n}_read(const char* s0, size_t n, size_t* pos, CCArena arena, ${n}* out) {
     int cc_i0 = 0;
     return ${n}__fill((const unsigned char*)s0, n, pos, arena, out, &cc_i0, 0);
 }
 typedef struct ${n}Reader {
-    const char* s; size_t n; size_t pos; CCArena* arena;
+    const char* s; size_t n; size_t pos; CCArena arena;
 } ${n}Reader;
-static ${n}Reader ${n}_reader(const char* s, size_t n, CCArena* arena) {
+static ${n}Reader ${n}_reader(const char* s, size_t n, CCArena arena) {
     ${n}Reader r; r.s = s; r.n = n; r.pos = 0; r.arena = arena; return r;
 }
 static int ${n}Reader_next(${n}Reader* r, ${n}* out) {

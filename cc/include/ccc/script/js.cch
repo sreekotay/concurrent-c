@@ -114,7 +114,7 @@ typedef void *CCJsExports;
  * later calls into the same environment, released by `@destroy`. */
 typedef struct CCJs {
     int ready;
-    CCArena *arena; /* error text + default extract backing */
+    CCArena arena; /* error text + default extract backing */
     void *env;
 } CCJs;
 
@@ -483,7 +483,7 @@ typedef struct CC__JsMark {
 
 /* Scratch arena for the next `cc__js_err` copy; NULL keeps the static
  * buffer.  Bound at public entries from the handle's arena. */
-static CC_JS_THREAD_LOCAL CCArena *cc__js_err_arena;
+static CC_JS_THREAD_LOCAL CCArena cc__js_err_arena;
 
 static inline CC__JsMark cc__js_mark(void) {
     CC__JsMark m;
@@ -1674,7 +1674,7 @@ static int cc__js_bind(void *env, void **argv, size_t argc, int want,
 static CCSlice cc__js_text_into_err_arena(void *env, void *s) {
     size_t len = 0, got = 0;
     char *dst;
-    if (!s || !cc__js_err_arena) return cc_slice_empty();
+    if (!s || !cc_arena_is_live(cc__js_err_arena)) return cc_slice_empty();
     if (cc__js.GetValueStringUtf8(env, s, NULL, 0, &len) != 0)
         return cc_slice_empty();
     dst = (char *)cc_arena_alloc(cc__js_err_arena, len + 1, 1);
@@ -1746,7 +1746,7 @@ static CCJsError cc__js_err(void *env, const char *ctx) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf), "js: %s failed", ctx);
 have_msg:
     msg_src = cc__js_errbuf;
-    if (cc__js_err_arena) {
+    if (cc_arena_is_live(cc__js_err_arena)) {
         size_t n = strlen(msg_src);
         char *dst = (char *)cc_arena_alloc(cc__js_err_arena, n + 1, 1);
         if (dst) {
@@ -2078,7 +2078,7 @@ static inline int cc__js_elem_store(void *env, void *res, int esz, int isf,
 }
 
 static CCSlice !>(CCJsError) cc__js_val_map_raw(CCJsVal *fobj,
-                                                     CCArena *arena, int esz,
+                                                     CCArena arena, int esz,
                                                      int isf, int argc,
                                                      const CCJsArg *argv) {
     void *env;
@@ -2088,7 +2088,7 @@ static CCSlice !>(CCJsError) cc__js_val_map_raw(CCJsVal *fobj,
     CCSlice out;
     int c;
     cc__js_errbuf[0] = 0;
-    if (!fobj || !fobj->env || !arena || argc < 1 || argc > 8) {
+    if (!fobj || !fobj->env || !cc_arena_is_live(arena) || argc < 1 || argc > 8) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: map: needs a callable, an arena, and 1..8 columns");
         return cc_err(cc__js_err(NULL, "map"));
@@ -2187,7 +2187,7 @@ CC_DECL_RESULT_SPEC(CCResult_CCSlice_int_CCJsError, CCSlice_int, CCJsError)
 #endif
 
 static inline CCSlice_double !>(CCJsError) cc__js_val_map_CCSlice_double(
-        CCJsVal *fobj, CCArena *arena, int esz, int isf, int argc,
+        CCJsVal *fobj, CCArena arena, int esz, int isf, int argc,
         const CCJsArg *argv) {
     CCSlice !>(CCJsError) r =
         cc__js_val_map_raw(fobj, arena, esz, isf, argc, argv);
@@ -2199,7 +2199,7 @@ static inline CCSlice_double !>(CCJsError) cc__js_val_map_CCSlice_double(
 }
 
 static inline CCSlice_float !>(CCJsError) cc__js_val_map_CCSlice_float(
-        CCJsVal *fobj, CCArena *arena, int esz, int isf, int argc,
+        CCJsVal *fobj, CCArena arena, int esz, int isf, int argc,
         const CCJsArg *argv) {
     CCSlice !>(CCJsError) r =
         cc__js_val_map_raw(fobj, arena, esz, isf, argc, argv);
@@ -2211,7 +2211,7 @@ static inline CCSlice_float !>(CCJsError) cc__js_val_map_CCSlice_float(
 }
 
 static inline CCSlice_int64_t !>(CCJsError) cc__js_val_map_CCSlice_int64_t(
-        CCJsVal *fobj, CCArena *arena, int esz, int isf, int argc,
+        CCJsVal *fobj, CCArena arena, int esz, int isf, int argc,
         const CCJsArg *argv) {
     CCSlice !>(CCJsError) r =
         cc__js_val_map_raw(fobj, arena, esz, isf, argc, argv);
@@ -2223,7 +2223,7 @@ static inline CCSlice_int64_t !>(CCJsError) cc__js_val_map_CCSlice_int64_t(
 }
 
 static inline CCSlice_long_long !>(CCJsError) cc__js_val_map_CCSlice_long_long(
-        CCJsVal *fobj, CCArena *arena, int esz, int isf, int argc,
+        CCJsVal *fobj, CCArena arena, int esz, int isf, int argc,
         const CCJsArg *argv) {
     CCSlice !>(CCJsError) r =
         cc__js_val_map_raw(fobj, arena, esz, isf, argc, argv);
@@ -2235,7 +2235,7 @@ static inline CCSlice_long_long !>(CCJsError) cc__js_val_map_CCSlice_long_long(
 }
 
 static inline CCSlice_int !>(CCJsError) cc__js_val_map_CCSlice_int(
-        CCJsVal *fobj, CCArena *arena, int esz, int isf, int argc,
+        CCJsVal *fobj, CCArena arena, int esz, int isf, int argc,
         const CCJsArg *argv) {
     CCSlice !>(CCJsError) r =
         cc__js_val_map_raw(fobj, arena, esz, isf, argc, argv);
@@ -2275,7 +2275,7 @@ static inline CCSlice_int !>(CCJsError) cc__js_val_map_CCSlice_int(
  * type a `cc_js_val_map(...) !>` call site (same trick as the Python
  * twin); the symbol is never defined — the macro intercepts every call. */
 CCSlice !>(CCJsError) cc_js_val_map(void *never_defined, ...);
-#define cc_js_val_map(T, obj, arena, ...)     cc__js_val_map_raw((obj), (arena), (int)sizeof(T),         _Generic((T)0, float: 1, double: 1, default: 0),         CC__JS_NARG(__VA_ARGS__),         (const CCJsArg[]){             CC__JS_MAPCAT(CC__JS_MAPA, CC__JS_NARG(__VA_ARGS__))(__VA_ARGS__) })
+#define cc_js_val_map(T, obj, arena, ...)     cc__js_val_map_raw((obj), CC__ARENA_HANDLE(arena), (int)sizeof(T),         _Generic((T)0, float: 1, double: 1, default: 0),         CC__JS_NARG(__VA_ARGS__),         (const CCJsArg[]){             CC__JS_MAPCAT(CC__JS_MAPA, CC__JS_NARG(__VA_ARGS__))(__VA_ARGS__) })
 
 /* Destination-typed variants: `.ufcs_sink` resolution composes
  * `cc_js_val_callm_<mangled dest>` at `T v = obj.method(args…)` sites.
@@ -2430,12 +2430,12 @@ static inline int64_t !>(CCJsError) cc_js_val_as_i64(CCJsVal *obj) {
 
 /* String(value), copied into `arena`, NUL-terminated. */
 static inline CCSlice !>(CCJsError) cc_js_val_as_slice_into(
-        CCJsVal *obj, CCArena *arena) {
+        CCJsVal *obj, CCArena arena) {
     void *s = NULL;
     size_t len = 0, got = 0;
     CCSlice out;
     cc__js_errbuf[0] = 0;
-    if (!obj || !obj->env || !arena) {
+    if (!obj || !obj->env || !cc_arena_is_live(arena)) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: as_slice needs a value and an arena");
         return cc_err(
@@ -2461,7 +2461,7 @@ static inline CCSlice !>(CCJsError) cc_js_val_as_slice_into(
 }
 
 static inline CCSlice !>(CCJsError) cc_js_val_as_slice(CCJsVal *obj,
-                                                            CCArena *arena) {
+                                                            CCArena arena) {
     return cc_js_val_as_slice_into(obj, arena);
 }
 
@@ -2502,7 +2502,7 @@ static inline void cc_js_close(CCJs *js) {
     /* Guest mode: the host owns the environment; closing forgets it. */
     if (!js) return;
     js->ready = 0;
-    js->arena = NULL;
+    js->arena = cc_arena_handle(NULL);
     js->env = NULL;
 }
 
@@ -2510,7 +2510,7 @@ static inline CCJsVal !>(CCJsError) cc_js_global(CCJs *js) {
     void *g = NULL;
     CCJsVal out;
     cc__js_errbuf[0] = 0;
-    cc__js_err_arena = js ? js->arena : NULL;
+    cc__js_err_arena = js ? js->arena : cc_arena_handle(NULL);
     if (!js || !js->ready || cc__js.GetGlobal(js->env, &g) != 0)
         return cc_err(
             cc__js_err(js ? js->env : NULL, "global"));
@@ -2533,7 +2533,7 @@ static inline CCJsVal !>(CCJsError) cc__js_eval(CCJs *js, CCSlice src) {
     void *script = NULL, *r = NULL;
     CCJsVal out;
     cc__js_errbuf[0] = 0;
-    cc__js_err_arena = js ? js->arena : NULL;
+    cc__js_err_arena = js ? js->arena : cc_arena_handle(NULL);
     if (!js || !js->ready)
         return cc_err(cc__js_err(NULL, "eval"));
     if (cc__js.CreateStringUtf8(js->env, src.ptr ? (const char *)src.ptr : "",
@@ -2622,7 +2622,7 @@ static CCJsVal !>(CCJsError) cc__js_host_callm_n(CCJs *js,
                                                       int argc,
                                                       const CCJsArg *argv) {
     cc__js_errbuf[0] = 0;
-    cc__js_err_arena = js ? js->arena : NULL;
+    cc__js_err_arena = js ? js->arena : cc_arena_handle(NULL);
     if (!js || !js->ready) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: %s: handle not ready", method ? method : "?");
@@ -2938,11 +2938,11 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
                     cc_reflect_param_name(pr, k, pnm, sizeof(pnm));
                     if (inj_ptr[k]) {
                         cc_string_push_slice(&s, @emit(`
-                CCJs cc__jsh_${pnm}__ = { 1, (CCArena *)0, env__ };
+                CCJs cc__jsh_${pnm}__ = { 1, {0}, env__ };
                 CCJs *${pnm} = &cc__jsh_${pnm}__;`, arena), arena);
                     } else {
                         cc_string_push_slice(&s, @emit(`
-                CCJs ${pnm} = { 1, (CCArena *)0, env__ };`, arena), arena);
+                CCJs ${pnm} = { 1, {0}, env__ };`, arena), arena);
                     }
                 }
             }
@@ -3696,7 +3696,7 @@ static int cc__js_host_build(char *shim_so, size_t so_cap, char *probe_node,
  * close (nothing can reopen). */
 typedef struct CCJsHost {
     int open;       /* this handle owns the process host */
-    CCArena *arena; /* error text + closure scratch */
+    CCArena arena; /* error text + closure scratch */
 } CCJsHost;
 
 #ifndef CCResult_CCJsHost_CCJsError_DEFINED
@@ -3720,7 +3720,7 @@ static CCJsHost !>(CCJsError) cc__js_host_errh(void) {
     return e;
 }
 
-static inline CCJsHost !>(CCJsError) cc_js_host_new(CCArena *arena) {
+static inline CCJsHost !>(CCJsError) cc_js_host_new(CCArena arena) {
     char shim_so[448], probe_node[448], why[380];
     void *h;
     CCJsHost out;
@@ -3791,7 +3791,7 @@ static inline CCJsHost !>(CCJsError) cc_js_host_new(CCArena *arena) {
 typedef struct CC__JsHostThunk {
     void (*fn)(CCJs *js, void *ctx);
     void *ctx;
-    CCArena *arena;
+    CCArena arena;
 } CC__JsHostThunk;
 
 static void cc__js_host_tramp(void *env, void *data) {
@@ -3807,7 +3807,7 @@ static inline void !>(CCJsError)
 cc_js_host_run(CCJsHost *host, void (*fn)(CCJs *js, void *ctx), void *ctx) {
     CC__JsHostThunk t;
     cc__js_errbuf[0] = 0;
-    cc__js_err_arena = host ? host->arena : NULL;
+    cc__js_err_arena = host ? host->arena : cc_arena_handle(NULL);
     if (!host || !host->open || !cc__js_hostd) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: run: host is closed (cc_js_host_new first)");
@@ -4216,7 +4216,7 @@ typedef struct CCJsDom {
     int fd;          /* isolated: socketpair to the child; -1 when closed */
     long long pid;   /* isolated: the node child */
     int crashed;     /* isolated: EOF mid-conversation, the child died */
-    CCArena *arena;  /* error text + materialized values */
+    CCArena arena;  /* error text + materialized values */
     long long next_id;
     long long next_cb; /* isolated: next {$f:fid}; slots live until close */
     CC__JsDomCb *cbs;
@@ -4488,13 +4488,13 @@ static int cc__js_dom_b64_dec6(unsigned char c) {
     return -1;
 }
 
-static int cc__js_dom_b64_decode(CCArena *a, const char *src, size_t n,
+static int cc__js_dom_b64_decode(CCArena a, const char *src, size_t n,
                                  CCSlice *out) {
     size_t cap, len = 0, i = 0;
     char *dst;
     out->ptr = NULL;
     out->len = 0;
-    if (!a) return -1;
+    if (!cc_arena_is_live(a)) return -1;
     while (n > 0 && (src[n - 1] == '\n' || src[n - 1] == '\r' ||
                      src[n - 1] == ' ' || src[n - 1] == '\t'))
         n--;
@@ -4646,12 +4646,12 @@ static const char *cc__js_dom_scan_val(const char *p, const char *end) {
     return p;
 }
 
-static CCSlice cc__js_dom_copy(CCArena *a, const char *p, size_t n) {
+static CCSlice cc__js_dom_copy(CCArena a, const char *p, size_t n) {
     CCSlice s;
     char *dst;
     s.ptr = NULL;
     s.len = 0;
-    if (!a) return s;
+    if (!cc_arena_is_live(a)) return s;
     dst = (char *)cc_arena_alloc(a, n + 1, 1);
     if (!dst) return s;
     memcpy(dst, p, n);
@@ -4662,12 +4662,12 @@ static CCSlice cc__js_dom_copy(CCArena *a, const char *p, size_t n) {
 }
 
 /* Decode a scanned JSON string (quotes included) into the arena. */
-static int cc__js_dom_unescape(CCArena *a, const char *p, const char *end,
+static int cc__js_dom_unescape(CCArena a, const char *p, const char *end,
                                CCSlice *out) {
     char *dst;
     size_t n = 0;
     const char *q;
-    if (!a || p >= end || *p != '"') return -1;
+    if (!cc_arena_is_live(a) || p >= end || *p != '"') return -1;
     /* Decoded text never exceeds the escaped span. */
     dst = (char *)cc_arena_alloc(a, (size_t)(end - p) + 1, 1);
     if (!dst) return -1;
@@ -4747,7 +4747,7 @@ static int cc__js_dom_unescape(CCArena *a, const char *p, const char *end,
 }
 
 /* Classify one JSON value span into the resp's value slots. */
-static int cc__js_dom_classify(CCArena *a, const char *p, const char *end,
+static int cc__js_dom_classify(CCArena a, const char *p, const char *end,
                                CC__JsIsoResp *r) {
     p = cc__js_dom_ws(p, end);
     if (p >= end) return -1;
@@ -4791,7 +4791,7 @@ static int cc__js_dom_classify(CCArena *a, const char *p, const char *end,
     }
 }
 
-static int cc__js_dom_parse(CCArena *a, const char *line, size_t len,
+static int cc__js_dom_parse(CCArena a, const char *line, size_t len,
                             CC__JsIsoResp *r) {
     const char *p = line, *end = line + len;
     memset(r, 0, sizeof(*r));
@@ -5640,7 +5640,7 @@ static int cc__js_dom_h_mat(CCJsDom *d, void *env, void *v, CCJsDomVal *out) {
         size_t len = 0, got = 0;
         char *dst;
         if (cc__js.GetValueStringUtf8(env, v, NULL, 0, &len) != 0) return -1;
-        dst = d->arena ? (char *)cc_arena_alloc(d->arena, len + 1, 1) : NULL;
+        dst = cc_arena_is_live(d->arena) ? (char *)cc_arena_alloc(d->arena, len + 1, 1) : NULL;
         if (!dst) return -1;
         if (cc__js.GetValueStringUtf8(env, v, dst, len + 1, &got) != 0)
             return -1;
@@ -5880,7 +5880,7 @@ static inline void cc_js_dom_val_release(CCJsDomVal *v) {
 
 /* ---- the domain ---- */
 
-static inline CCResult_CCJsDom_CCJsError cc_js_dom_new_exe(CCArena *arena, const char *node_exe) {
+static inline CCResult_CCJsDom_CCJsError cc_js_dom_new_exe(CCArena arena, const char *node_exe) {
     char broker[448], dir[384];
     int sv[2] = {-1, -1};
     long long pid;
@@ -5984,7 +5984,7 @@ static inline CCResult_CCJsDom_CCJsError cc_js_dom_new_exe(CCArena *arena, const
     return cc_ok_CCResult_CCJsDom_CCJsError(d);
 }
 
-static inline CCResult_CCJsDom_CCJsError cc_js_dom_new(CCArena *arena) {
+static inline CCResult_CCJsDom_CCJsError cc_js_dom_new(CCArena arena) {
     return cc_js_dom_new_exe(arena, NULL);
 }
 
@@ -6000,7 +6000,7 @@ static inline CCResult_CCJsDom_CCJsError cc_js_dom_new(CCArena *arena) {
  * (wire latency, N domains, crash isolation).  `cc_js_new_exe(true, exe, &a)` names
  * a node executable for an isolated domain; the hosted tier embeds
  * libnode, so an executable there is refused rather than ignored. */
-static inline CCResult_CCJsDom_CCJsError cc_js_new_exe(_Bool isolated, const char *node_exe, CCArena *arena) {
+static inline CCResult_CCJsDom_CCJsError cc_js_new_exe(_Bool isolated, const char *node_exe, CCArena arena) {
     CCJsDom d;
     CCResult_CCJsHost_CCJsError h;
     CCResult_CCJsDom_CCJsError e;
@@ -6030,7 +6030,7 @@ static inline CCResult_CCJsDom_CCJsError cc_js_new_exe(_Bool isolated, const cha
     return cc_ok_CCResult_CCJsDom_CCJsError(d);
 }
 
-static inline CCResult_CCJsDom_CCJsError cc_js_new(_Bool isolated, CCArena *arena) {
+static inline CCResult_CCJsDom_CCJsError cc_js_new(_Bool isolated, CCArena arena) {
     return cc_js_new_exe(isolated, NULL, arena);
 }
 
@@ -6125,7 +6125,7 @@ cc__js_dom_op1(CCJsDom *d, const char *op, const char *field,
     long long id;
     int rc;
     cc__js_errbuf[0] = 0;
-    cc__js_err_arena = d ? d->arena : NULL;
+    cc__js_err_arena = d ? d->arena : cc_arena_handle(NULL);
     if (!cc__js_dom_alive(d, label)) return cc__js_dom_errv(label);
     id = d->next_id++;
     cc__js_dom_bputs(&req, "{\"id\":");
@@ -6221,7 +6221,7 @@ static inline CCResult_int64_t_CCJsError cc_js_dom_stats(CCJsDom *d) {
     long long id;
     int rc;
     cc__js_errbuf[0] = 0;
-    cc__js_err_arena = d ? d->arena : NULL;
+    cc__js_err_arena = d ? d->arena : cc_arena_handle(NULL);
     if (d && d->tier == CC__JS_DOM_HOSTED) {
         if (!d->host.open) {
             snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
@@ -6253,7 +6253,7 @@ static inline CCResult_CCJsDomVal_CCJsError cc_js_dom_val_get(CCJsDomVal *v, con
     long long id;
     int rc;
     cc__js_errbuf[0] = 0;
-    cc__js_err_arena = v && v->dom ? v->dom->arena : NULL;
+    cc__js_err_arena = v && v->dom ? v->dom->arena : cc_arena_handle(NULL);
     if (!v || v->kind != CC__JS_DOM_K_HANDLE) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: get: value is not a remote handle (it crossed by "
@@ -6286,9 +6286,9 @@ static inline CCResult_CCJsDomVal_CCJsError cc_js_dom_val_get(CCJsDomVal *v, con
         cc__js_dom_val_from(v->dom, &resp));
 }
 
-static inline CCResult_CCSlice_CCJsError cc_js_dom_val_as_slice(CCJsDomVal *v, CCArena *arena) {
+static inline CCResult_CCSlice_CCJsError cc_js_dom_val_as_slice(CCJsDomVal *v, CCArena arena) {
     cc__js_errbuf[0] = 0;
-    cc__js_err_arena = arena ? arena : (v && v->dom ? v->dom->arena : NULL);
+    cc__js_err_arena = cc_arena_is_live(arena) ? arena : (v && v->dom ? v->dom->arena : cc_arena_handle(NULL));
     if (!v) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf), "js: as_slice: no value");
         return cc_err_CCResult_CCSlice_CCJsError(cc__js_err(NULL, "as_slice"));
@@ -6336,7 +6336,7 @@ static inline CCResult_CCSlice_CCJsError cc_js_dom_val_as_slice(CCJsDomVal *v, C
 
 static inline CCResult_double_CCJsError cc_js_dom_val_as_f64(CCJsDomVal *v) {
     cc__js_errbuf[0] = 0;
-    cc__js_err_arena = v && v->dom ? v->dom->arena : NULL;
+    cc__js_err_arena = v && v->dom ? v->dom->arena : cc_arena_handle(NULL);
     if (v && v->kind == CC__JS_DOM_K_NUM)
         return cc_ok_CCResult_double_CCJsError(v->num);
     if (v && v->kind == CC__JS_DOM_K_BOOL)
@@ -6348,7 +6348,7 @@ static inline CCResult_double_CCJsError cc_js_dom_val_as_f64(CCJsDomVal *v) {
 
 static inline CCResult_int64_t_CCJsError cc_js_dom_val_as_i64(CCJsDomVal *v) {
     cc__js_errbuf[0] = 0;
-    cc__js_err_arena = v && v->dom ? v->dom->arena : NULL;
+    cc__js_err_arena = v && v->dom ? v->dom->arena : cc_arena_handle(NULL);
     if (v && v->kind == CC__JS_DOM_K_NUM && v->num_is_int)
         return cc_ok_CCResult_int64_t_CCJsError((int64_t)v->inum);
     if (v && v->kind == CC__JS_DOM_K_BOOL)
@@ -6366,7 +6366,7 @@ cc_js_dom_val_ta_info(CCJsDomVal *v) {
     size_t esz;
     memset(&info, 0, sizeof(info));
     cc__js_errbuf[0] = 0;
-    cc__js_err_arena = v && v->dom ? v->dom->arena : NULL;
+    cc__js_err_arena = v && v->dom ? v->dom->arena : cc_arena_handle(NULL);
     if (!v || v->kind != CC__JS_DOM_K_TA) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: ta_info: value is not a typed array");
@@ -6510,7 +6510,7 @@ cc__js_dom_callm_n(CCJsDomVal *obj, const char *method, int argc,
     long long id;
     int i, rc, nkw = 0, npos = 0;
     cc__js_errbuf[0] = 0;
-    cc__js_err_arena = obj && obj->dom ? obj->dom->arena : NULL;
+    cc__js_err_arena = obj && obj->dom ? obj->dom->arena : cc_arena_handle(NULL);
     if (!obj || argc < 0 || argc > CC__JS_MAX_CALL_ARGS) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: %.60s: bad receiver or too many arguments",
@@ -6793,5 +6793,26 @@ static inline CCJsArg cc__js_dom_arg_val(CCJsDomVal v) {
     .ufcs_sink = cc_type_dynamic_call("cc_js_dom_val_callm", "CC_JS_DOM_ARG"),
 };
 
+
+#define cc_js_host_new(a) (cc_js_host_new)(CC__ARENA_HANDLE(a))
+#define cc_js_dom_new(a) (cc_js_dom_new)(CC__ARENA_HANDLE(a))
+#define cc_js_dom_new_exe(a, exe) (cc_js_dom_new_exe)(CC__ARENA_HANDLE(a), (exe))
+#define cc_js_new(isolated, a) (cc_js_new)((isolated), CC__ARENA_HANDLE(a))
+#define cc_js_new_exe(isolated, exe, a) \
+    (cc_js_new_exe)((isolated), (exe), CC__ARENA_HANDLE(a))
+#define cc_js_dom_val_as_slice(v, a) \
+    (cc_js_dom_val_as_slice)((v), CC__ARENA_HANDLE(a))
+#define cc__js_val_map_raw(f, a, ...) \
+    (cc__js_val_map_raw)((f), CC__ARENA_HANDLE(a), __VA_ARGS__)
+#define cc__js_val_map_CCSlice_double(f, a, ...) \
+    (cc__js_val_map_CCSlice_double)((f), CC__ARENA_HANDLE(a), __VA_ARGS__)
+#define cc__js_val_map_CCSlice_float(f, a, ...) \
+    (cc__js_val_map_CCSlice_float)((f), CC__ARENA_HANDLE(a), __VA_ARGS__)
+#define cc__js_val_map_CCSlice_int64_t(f, a, ...) \
+    (cc__js_val_map_CCSlice_int64_t)((f), CC__ARENA_HANDLE(a), __VA_ARGS__)
+#define cc__js_val_map_CCSlice_long_long(f, a, ...) \
+    (cc__js_val_map_CCSlice_long_long)((f), CC__ARENA_HANDLE(a), __VA_ARGS__)
+#define cc__js_val_map_CCSlice_int(f, a, ...) \
+    (cc__js_val_map_CCSlice_int)((f), CC__ARENA_HANDLE(a), __VA_ARGS__)
 
 #endif /* CC_SCRIPT_JS_H */

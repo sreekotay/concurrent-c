@@ -37,7 +37,7 @@ static int cb(void* env, int id, CCSlice v) {
 static int run(const char* src, int want_ok, int want_keeps, const char* want_last) {
     CCArena a = cc_arena_create(1 << 20);
     Env e = {0};
-    int ok = Duo_collect(src, strlen(src), &a, cb, &e);
+    int ok = Duo_collect(src, strlen(src), a, cb, &e);
     if (ok != want_ok) { printf("FAIL: %s ok=%d want %d\n", src, ok, want_ok); return 0; }
     if (ok && e.keeps != want_keeps) {
         printf("FAIL: %s keeps=%d want %d (unwind leaked or lost a node)\n", src, e.keeps, want_keeps);
@@ -65,7 +65,7 @@ int main(void) {
     {
         CCArena a = cc_arena_create(1 << 20);
         Env e = {0};
-        if (!Loose_collect("1,,2", 4, &a, cb, &e) || e.keeps != 3) {
+        if (!Loose_collect("1,,2", 4, a, cb, &e) || e.keeps != 3) {
             printf("FAIL: loose keeps=%d want 3\n", e.keeps);
             pass = 0;
         }

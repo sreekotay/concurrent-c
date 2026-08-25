@@ -75,7 +75,7 @@ int main(void) {
     /* the arena form is untouched: same template with an arena yields CCString */
     {
         CCArena arena = @create(kilobytes(1)) @destroy;
-        CCString owned = @string(`v=${v}!`, &arena);
+        CCString owned = @string(`v=${v}!`, arena);
         char[:0] view = owned.as_slice();
         assert(view.eq_cstr("v=42!"));
     }

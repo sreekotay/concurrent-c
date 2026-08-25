@@ -99,15 +99,15 @@ CC_DECL_RESULT_SPEC(CCResult_CCHttpResponse_CCHttpErrorInfo, CCHttpResponse, CCH
  * ============================================================================ */
 
 /* Simple GET request. Response/error message slices use `arena`. */
-CCHttpResponse !>(CCHttpErrorInfo) cc_http_get(CCArena* arena, const char* url, size_t url_len);
+CCHttpResponse !>(CCHttpErrorInfo) cc_http_get(CCArena arena, const char* url, size_t url_len);
 
 /* Simple POST request. Response/error message slices use `arena`. */
-CCHttpResponse !>(CCHttpErrorInfo) cc_http_post(CCArena* arena, const char* url, size_t url_len,
+CCHttpResponse !>(CCHttpErrorInfo) cc_http_post(CCArena arena, const char* url, size_t url_len,
                             const char* body, size_t body_len);
 
 /* Async variants */
-/* @async CCHttpResponse !>(CCHttpErrorInfo) cc_http_get_async(CCArena* arena, const char* url, size_t url_len); */
-/* @async CCHttpResponse !>(CCHttpErrorInfo) cc_http_post_async(CCArena* arena, const char* url, size_t url_len,
+/* @async CCHttpResponse !>(CCHttpErrorInfo) cc_http_get_async(CCArena arena, const char* url, size_t url_len); */
+/* @async CCHttpResponse !>(CCHttpErrorInfo) cc_http_post_async(CCArena arena, const char* url, size_t url_len,
                                             const char* body, size_t body_len); */
 
 /* ============================================================================
@@ -129,15 +129,15 @@ static inline CCHttpClient cc_http_client_default(void) {
 }
 
 /* Request methods */
-CCHttpResponse !>(CCHttpErrorInfo) cc_http_client_get(CCHttpClient* client, CCArena* arena,
+CCHttpResponse !>(CCHttpErrorInfo) cc_http_client_get(CCHttpClient* client, CCArena arena,
                                    const char* url, size_t url_len);
 
-CCHttpResponse !>(CCHttpErrorInfo) cc_http_client_post(CCHttpClient* client, CCArena* arena,
+CCHttpResponse !>(CCHttpErrorInfo) cc_http_client_post(CCHttpClient* client, CCArena arena,
                                     const char* url, size_t url_len,
                                     const char* body, size_t body_len);
 
 /* Full request control */
-CCHttpResponse !>(CCHttpErrorInfo) cc_http_client_request(CCHttpClient* client, CCArena* arena,
+CCHttpResponse !>(CCHttpErrorInfo) cc_http_client_request(CCHttpClient* client, CCArena arena,
                                         CCHttpRequest req);
 
 /* Async variants */
@@ -174,5 +174,15 @@ CCParsedUrl !>(CCHttpError) cc_url_parse(const char* url, size_t url_len);
 /* Path from cc/include/ccc/std/ to cc/runtime/ is ../../../../cc/runtime/ */
 #include "../../../../cc/runtime/http.c"
 #endif
+
+#define cc_http_get(a, url, n) (cc_http_get)(CC__ARENA_HANDLE(a), (url), (n))
+#define cc_http_post(a, url, n, body, bn) \
+    (cc_http_post)(CC__ARENA_HANDLE(a), (url), (n), (body), (bn))
+#define cc_http_client_get(c, a, url, n) \
+    (cc_http_client_get)((c), CC__ARENA_HANDLE(a), (url), (n))
+#define cc_http_client_post(c, a, url, n, body, bn) \
+    (cc_http_client_post)((c), CC__ARENA_HANDLE(a), (url), (n), (body), (bn))
+#define cc_http_client_request(c, a, req) \
+    (cc_http_client_request)((c), CC__ARENA_HANDLE(a), (req))
 
 #endif /* CC_STD_HTTP_H */

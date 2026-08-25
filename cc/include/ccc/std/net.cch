@@ -178,7 +178,7 @@ void cc_listener_close(CCListener* ln);
  * ============================================================================ */
 
 /* Read up to max_bytes into arena; payload in *out. */
-bool !>(CCIoError) cc_socket_read(CCSocket* sock, CCArena* arena, size_t max_bytes, CCSlice* out);
+bool !>(CCIoError) cc_socket_read(CCSocket* sock, CCArena arena, size_t max_bytes, CCSlice* out);
 
 /* Read up to max_bytes into caller buffer; byte count in *out. */
 bool !>(CCIoError) cc_socket_read_into(CCSocket* sock, char* buf, size_t max_bytes, size_t* out);
@@ -231,8 +231,8 @@ void cc_socket_close(CCSocket* sock);
 int cc_socket_set_nodelay(CCSocket* sock, int on);
 
 /* Address info */
-CCSlice cc_socket_peer_addr(CCSocket* sock, CCArena* arena, CCNetError* out_err);
-CCSlice cc_socket_local_addr(CCSocket* sock, CCArena* arena, CCNetError* out_err);
+CCSlice cc_socket_peer_addr(CCSocket* sock, CCArena arena, CCNetError* out_err);
+CCSlice cc_socket_local_addr(CCSocket* sock, CCArena arena, CCNetError* out_err);
 
 /* Socket-bound readiness signaling. */
 void cc_socket_create_signal(CCSocket* sock, CCSocketSignal* out_sig);
@@ -255,7 +255,7 @@ size_t cc_udp_send_to(CCUdpSocket* sock, const char* data, size_t len,
                       const char* addr, size_t addr_len, CCNetError* out_err);
 
 /* Receive with sender address */
-CCUdpPacket cc_udp_recv_from(CCUdpSocket* sock, CCArena* arena, size_t max_bytes, CCNetError* out_err);
+CCUdpPacket cc_udp_recv_from(CCUdpSocket* sock, CCArena arena, size_t max_bytes, CCNetError* out_err);
 
 /* Close UDP socket */
 void cc_udp_close(CCUdpSocket* sock);
@@ -265,16 +265,29 @@ void cc_udp_close(CCUdpSocket* sock);
  * ============================================================================ */
 
 /* Resolve hostname to IP addresses. Returns slice of CCIpAddr. */
-CCSlice cc_dns_lookup(CCArena* arena, const char* hostname, size_t hostname_len, CCNetError* out_err);
+CCSlice cc_dns_lookup(CCArena arena, const char* hostname, size_t hostname_len, CCNetError* out_err);
 
 /* Async DNS lookup */
-/* @async CCSlice cc_dns_lookup_async(CCArena* arena, const char* hostname, size_t hostname_len, CCNetError* out_err); */
+/* @async CCSlice cc_dns_lookup_async(CCArena arena, const char* hostname, size_t hostname_len, CCNetError* out_err); */
 
 /* Format IP address as string */
-CCSlice cc_ip_addr_to_string(CCIpAddr* addr, CCArena* arena);
+CCSlice cc_ip_addr_to_string(CCIpAddr* addr, CCArena arena);
 
 /* Parse string to IP address */
 CCIpAddr cc_ip_parse(const char* s, size_t len, CCNetError* out_err);
+
+#define cc_socket_read(sock, a, n, out) \
+    (cc_socket_read)((sock), CC__ARENA_HANDLE(a), (n), (out))
+#define cc_socket_peer_addr(sock, a, err) \
+    (cc_socket_peer_addr)((sock), CC__ARENA_HANDLE(a), (err))
+#define cc_socket_local_addr(sock, a, err) \
+    (cc_socket_local_addr)((sock), CC__ARENA_HANDLE(a), (err))
+#define cc_udp_recv_from(sock, a, n, err) \
+    (cc_udp_recv_from)((sock), CC__ARENA_HANDLE(a), (n), (err))
+#define cc_dns_lookup(a, host, n, err) \
+    (cc_dns_lookup)(CC__ARENA_HANDLE(a), (host), (n), (err))
+#define cc_ip_addr_to_string(addr, a) \
+    (cc_ip_addr_to_string)((addr), CC__ARENA_HANDLE(a))
 
 /* CCSocket / CCListener UFCS use the shared generic snake_case helper:
    smart-lowering CCSocket -> cc_socket_*, CCListener -> cc_listener_*,

@@ -408,7 +408,9 @@ CompressedResultPtr !>(CCIoError) compress_block(z_stream* strm, Block* blk, CCS
         g_blocks_done.fetch_add(1);
 
         // Transfer arena ownership: detach empties res_arena, so block cleanup is no-op
-        res->arena = res_arena->detach();
+        res->arena = res_arena->detach() !>(e) {
+            return cc_err(cc_io_error(CC_IO_OTHER));
+        };
         
         return cc_ok(res);
     }
@@ -417,7 +419,7 @@ CompressedResultPtr !>(CCIoError) compress_block(z_stream* strm, Block* blk, CCS
 /* Return input arena to pool (or free if no pool). */
 static inline void return_input_arena(CCArena* arena, CCChan* pool) {
     if (!arena) return;
-    if (pool && cc_channel_send(pool, &arena, sizeof(arena)) == 0) {
+    if (pool && cc_channel_send(pool, arena, sizeof(arena)) == 0) {
         return;
     }
     destroy_input_arena(arena);
@@ -1429,7 +1431,7 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, cut_short);
     signal(SIGTERM, cut_short);
     {
-        bool go = cc_prepare_args(PigzOpts, argc, argv, &cli_arena, &opts, stderr) !>(e) {
+        bool go = cc_prepare_args(PigzOpts, argc, argv, cli_arena, &opts, stderr) !>(e) {
             (void)e;
             return 2;
         };

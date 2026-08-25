@@ -106,10 +106,10 @@ static int run_seq(CCTurnstile* ts) {
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts_ok@(CAP, 1, &arena) @destroy;
-    CCTurnstile ts_err@(CAP, 1, &arena) @destroy;
-    CCTurnstile ts_seq@(CAP, 1, &arena) @destroy;
-    if (!ts_ok.excl || !ts_err.excl || !ts_seq.excl)
+    CCTurnstile ts_ok@(CAP, 1, arena) @destroy;
+    CCTurnstile ts_err@(CAP, 1, arena) @destroy;
+    CCTurnstile ts_seq@(CAP, 1, arena) @destroy;
+    if (!cc_exclusive_is_live(ts_ok.excl) || !cc_exclusive_is_live(ts_err.excl) || !cc_exclusive_is_live(ts_seq.excl))
         return 1;
     if (run_ok(&ts_ok) != 0 || run_err(&ts_err) != 0 || run_seq(&ts_seq) != 0)
         return 1;

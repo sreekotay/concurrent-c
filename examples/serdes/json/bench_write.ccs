@@ -79,7 +79,7 @@ int main(int argc, char** argv) {
 
     CCArena arena = cc_arena_create(64 << 20);
     Feed feed;
-    if (!Feed_parse(buf, rd, &arena, &feed)) {
+    if (!Feed_parse(buf, rd, arena, &feed)) {
         println("write: corpus is not a Feed — skipped") !>;
         return 0;
     }
@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
     /* sanity: reparse round-trip */
     {
         Feed rt;
-        if (!Feed_parse(out, w, &arena, &rt) || rt.statuses_n != feed.statuses_n) {
+        if (!Feed_parse(out, w, arena, &rt) || rt.statuses_n != feed.statuses_n) {
             eprintln("roundtrip FAIL") !>; return 1;
         }
     }

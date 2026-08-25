@@ -15,7 +15,7 @@ CC_MAP_DECL_UFCS(SmokeMap);
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
-    SmokeMap* map = SmokeMap_init(&arena);
+    SmokeMap* map = SmokeMap_init(arena);
     if (!map) return 1;
 
     if (map->insert(7, 42) != 0) return 2;

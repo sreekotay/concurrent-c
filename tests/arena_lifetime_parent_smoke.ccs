@@ -112,12 +112,12 @@ static int test_reset_walks_contents(void) {
 }
 
 static int test_pool_on_parent(void) {
+    @errhandler(CCError e) { (void)e; return fail(6, "create_pool"); }
     CCArena owner = cc_arena_heap(1024) @destroy;
     CCArenaPool* p;
     void* e;
     if (!cc_arena_is_live(owner)) return fail(6, "ctor");
-    p = owner.create_pool(32);
-    if (!p) return fail(6, "create_pool");
+    p = owner.create_pool(32) !>;
     e = cc_arena_pool_alloc(p);
     if (!e) return fail(6, "pool alloc");
     cc_arena_pool_free(p, e);

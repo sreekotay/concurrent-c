@@ -23,12 +23,12 @@ int main(void) {
 
     uint64_t old_alloc_id = 0;
     {
-        CCSlice cloned = cc_slice_clone(&arena, untracked);
+        CCSlice cloned = cc_slice_clone(arena, untracked);
         if (!cloned.ptr || cc_slice_is_untracked(cloned)) {
             fprintf(stderr, "expected cloned slice to carry arena provenance\n");
             return 4;
         }
-        if (!cc_slice_is_from_arena_epoch(cloned, &arena)) {
+        if (!cc_slice_is_from_arena_epoch(cloned, arena)) {
             fprintf(stderr, "expected cloned slice to match current arena epoch\n");
             return 5;
         }
@@ -39,7 +39,7 @@ int main(void) {
     /* Stale header reconstructed only to probe epoch bits — borrow scope ended above. */
     {
         CCSlice stale = cc_slice_from_parts((void*)"x", 1, cc_slice_make_id(old_alloc_id, false, false, false));
-        if (cc_slice_is_from_arena_epoch(stale, &arena)) {
+        if (cc_slice_is_from_arena_epoch(stale, arena)) {
             fprintf(stderr, "expected reset to invalidate old arena epoch\n");
             return 6;
         }
@@ -47,26 +47,26 @@ int main(void) {
 
     CCSlice left = CC_SLICE_LIT("foo");
     CCSlice right = CC_SLICE_LIT("bar");
-    CCSlice joined = cc_slice_concat2(left, right, &arena);
-    if (!joined.ptr || !cc_slice_is_from_arena_epoch(joined, &arena)) {
+    CCSlice joined = cc_slice_concat2(left, right, arena);
+    if (!joined.ptr || !cc_slice_is_from_arena_epoch(joined, arena)) {
         fprintf(stderr, "expected concat slice to carry arena provenance\n");
         return 7;
     }
 
     CCSlice path = cc_path_join(&arena, CC_SLICE_LIT("/tmp"), CC_SLICE_LIT("file"));
-    if (!path.ptr || !cc_slice_is_from_arena_epoch(path, &arena)) {
+    if (!path.ptr || !cc_slice_is_from_arena_epoch(path, arena)) {
         fprintf(stderr, "expected path join to carry arena provenance\n");
         return 8;
     }
 
     CCSlice dir = cc_path_dirname(&arena, path);
-    if (!dir.ptr || !cc_slice_is_from_arena_epoch(dir, &arena)) {
+    if (!dir.ptr || !cc_slice_is_from_arena_epoch(dir, arena)) {
         fprintf(stderr, "expected dirname allocation to carry arena provenance\n");
         return 9;
     }
 
     CCSlice base = cc_path_basename(&arena, path);
-    if (!base.ptr || !cc_slice_is_from_arena_epoch(base, &arena)) {
+    if (!base.ptr || !cc_slice_is_from_arena_epoch(base, arena)) {
         fprintf(stderr, "expected basename allocation to carry arena provenance\n");
         return 10;
     }

@@ -31,8 +31,8 @@ static int64_t unpacked_len(UMV* v) {
 
 int main(void) {
     CCArena arena = cc_arena_create(4096);
-    PMV p = { .str = cc_string_from("hello", &arena) };
-    UMV u = { .str = cc_string_from("hello", &arena) };
+    PMV p = { .str = cc_string_from("hello", arena) };
+    UMV u = { .str = cc_string_from("hello", arena) };
     int64_t pl = packed_len(&p);
     int64_t ul = unpacked_len(&u);
     printf("packed_len=%lld unpacked_len=%lld\n", (long long)pl, (long long)ul);

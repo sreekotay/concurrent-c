@@ -194,15 +194,16 @@ static void shadow_ufcs_sync_hooks_from_syms(const char* probe_text) {
         if (cc_symbols_lookup_type_create_call(g_shadow_ufcs_syms, ty, 1,
                                                &create) == 0 &&
             create && create[0])
-            shadow_create_hook_register(ty, create);
-        else if (cc_symbols_lookup_type_create_call(g_shadow_ufcs_syms, ty, 2,
-                                                    &create) == 0 &&
-                 create && create[0])
-            shadow_create_hook_register(ty, create);
-        else if (cc_symbols_lookup_type_create_call(g_shadow_ufcs_syms, ty, 0,
-                                                    &create) == 0 &&
-                 create && create[0])
-            shadow_create_hook_register(ty, create);
+            shadow_create_hook_register_arity(ty, 1, create);
+        if (cc_symbols_lookup_type_create_call(g_shadow_ufcs_syms, ty, 2,
+                                               &create) == 0 &&
+            create && create[0])
+            shadow_create_hook_register_arity(ty, 2, create);
+        if (!shadow_create_hook_for_arity(ty, 1) &&
+            cc_symbols_lookup_type_create_call(g_shadow_ufcs_syms, ty, 0,
+                                               &create) == 0 &&
+            create && create[0])
+            shadow_create_hook_register_arity(ty, 1, create);
         (void)cc_symbols_lookup_type_pre_destroy_call(g_shadow_ufcs_syms, ty,
                                                       &pre);
         (void)cc_symbols_lookup_type_destroy_call(g_shadow_ufcs_syms, ty,

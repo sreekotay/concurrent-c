@@ -630,6 +630,36 @@ static int cc__parse_string_literal_reg(const char* src, size_t n, size_t* io_po
     return cc_parse_c_string_literal(src, n, io_pos, out, out_sz);
 }
 
+/* Create-callee arg: `"foo"` or `CC_TYPE_CREATE_DECL("foo")` → `decl:foo`. */
+static int cc__parse_create_callee_reg(const char* src, size_t n, size_t* io_pos,
+                                      char* out, size_t out_sz) {
+    size_t p;
+    size_t lpar = 0, rpar = 0;
+    char inner[240];
+    if (!src || !io_pos || !out || !out_sz) return 0;
+    p = cc__skip_ws_reg(src, n, *io_pos);
+    if (cc__parse_string_literal_reg(src, n, &p, out, out_sz)) {
+        *io_pos = p;
+        return 1;
+    }
+    if (!cc__match_kw_reg(src, n, p, "CC_TYPE_CREATE_DECL")) return 0;
+    p += strlen("CC_TYPE_CREATE_DECL");
+    p = cc__skip_ws_reg(src, n, p);
+    if (p >= n || src[p] != '(') return 0;
+    lpar = p;
+    if (!cc__find_matching_reg(src, n, lpar, '(', ')', &rpar)) return 0;
+    p = cc__skip_ws_reg(src, rpar, lpar + 1);
+    if (!cc__parse_string_literal_reg(src, rpar, &p, inner, sizeof(inner))) return 0;
+    p = cc__skip_ws_reg(src, rpar, p);
+    if (p != rpar) return 0;
+    if (strncmp(inner, "decl:", 5) == 0)
+        snprintf(out, out_sz, "%s", inner);
+    else
+        snprintf(out, out_sz, "decl:%s", inner);
+    *io_pos = rpar + 1;
+    return 1;
+}
+
 static int cc__parse_helper_call_1(const char* src,
                                    size_t n,
                                    size_t* io_pos,
@@ -674,6 +704,34 @@ static int cc__parse_helper_call_2(const char* src,
     if (p >= rpar || src[p] != ',') return 0;
     p = cc__skip_ws_reg(src, rpar, p + 1);
     if (!cc__parse_string_literal_reg(src, rpar, &p, out_b, out_b_sz)) return 0;
+    p = cc__skip_ws_reg(src, rpar, p);
+    if (p != rpar) return 0;
+    *io_pos = rpar + 1;
+    return 1;
+}
+
+static int cc__parse_helper_call_2_create(const char* src,
+                                         size_t n,
+                                         size_t* io_pos,
+                                         const char* helper,
+                                         char* out_a,
+                                         size_t out_a_sz,
+                                         char* out_b,
+                                         size_t out_b_sz) {
+    size_t p = cc__skip_ws_reg(src, n, *io_pos);
+    size_t lpar = 0, rpar = 0;
+    if (!cc__match_kw_reg(src, n, p, helper)) return 0;
+    p += strlen(helper);
+    p = cc__skip_ws_reg(src, n, p);
+    if (p >= n || src[p] != '(') return 0;
+    lpar = p;
+    if (!cc__find_matching_reg(src, n, lpar, '(', ')', &rpar)) return 0;
+    p = cc__skip_ws_reg(src, rpar, lpar + 1);
+    if (!cc__parse_create_callee_reg(src, rpar, &p, out_a, out_a_sz)) return 0;
+    p = cc__skip_ws_reg(src, rpar, p);
+    if (p >= rpar || src[p] != ',') return 0;
+    p = cc__skip_ws_reg(src, rpar, p + 1);
+    if (!cc__parse_create_callee_reg(src, rpar, &p, out_b, out_b_sz)) return 0;
     p = cc__skip_ws_reg(src, rpar, p);
     if (p != rpar) return 0;
     *io_pos = rpar + 1;
@@ -899,7 +957,7 @@ static int cc__parse_type_hooks_object(CCSymbolTable* t,
             while (expr_s < expr_e && isspace((unsigned char)src[expr_s])) expr_s++;
             while (expr_e > expr_s && isspace((unsigned char)src[expr_e - 1])) expr_e--;
             parse_pos = expr_s;
-            if (cc__parse_helper_call_2(src, expr_e, &parse_pos, "cc_type_create_overloads",
+            if (cc__parse_helper_call_2_create(src, expr_e, &parse_pos, "cc_type_create_overloads",
                                         create_callee, sizeof(create_callee),
                                         create_callee2, sizeof(create_callee2)) &&
                 parse_pos == expr_e) {

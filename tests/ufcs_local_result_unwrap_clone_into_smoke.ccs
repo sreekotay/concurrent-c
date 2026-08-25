@@ -2,22 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static CCSliceHdr !>(CCError) CCSliceHdr_clone_into(CCSliceHdr* src, CCArena* arena) {
-    if (!src || !arena) return cc_err(CC_ERR_INVALID_ARG, "clone_into without arena");
-    if (src->len == 0) {
-        CCSliceHdr empty = {0};
-        return cc_ok(empty);
-    }
-
-    void* stable = cc_arena_alloc(arena, src->len, _Alignof(char));
-    if (!stable) return cc_err(CC_ERR_OUT_OF_MEMORY, "clone slice hdr");
-
-    memcpy(stable, src->ptr, src->len);
-    CCSliceHdr out = { .ptr = stable, .len = src->len };
-    return cc_ok(out);
-}
-
-static bool !>(CCError) check_split_decl_unwrap(CCSlice key, CCArena* arena) {
+static bool !>(CCError) check_split_decl_unwrap(CCSlice key, CCArena arena) {
     CCSliceHdr source = key.hdr();
     CCSliceHdr !>(CCError) stable_res = source.clone_into(arena);
     if (stable_res.is_err()) return cc_err(stable_res.error());
@@ -28,7 +13,7 @@ static bool !>(CCError) check_split_decl_unwrap(CCSlice key, CCArena* arena) {
     return cc_ok(true);
 }
 
-static bool !>(CCError) check_chained_decl_unwrap(CCSlice key, CCArena* arena) {
+static bool !>(CCError) check_chained_decl_unwrap(CCSlice key, CCArena arena) {
     CCSliceHdr source = key.hdr();
     CCSliceHdr !>(CCError) stable_res = source.clone_into(arena);
     if (stable_res.is_err()) return cc_err(stable_res.error());
@@ -50,13 +35,13 @@ int main(void) {
 
     CCSlice key = CC_SLICE_LIT("local-ufcs");
     CCSliceHdr source = key.hdr();
-    CCSliceHdr !>(CCError) direct = source.clone_into(&arena);
+    CCSliceHdr !>(CCError) direct = source.clone_into(arena);
     if (cc_is_err(direct)) return 3;
     if (CCResult_CCSliceHdr_CCError_unwrap(direct).len != key.len) return 4;
 
-    bool !>(CCError) split = check_split_decl_unwrap(key, &arena);
+    bool !>(CCError) split = check_split_decl_unwrap(key, arena);
     if (cc_is_err(split)) return 5;
-    bool !>(CCError) chained = check_chained_decl_unwrap(key, &arena);
+    bool !>(CCError) chained = check_chained_decl_unwrap(key, arena);
     if (cc_is_err(chained)) return 6;
 
     printf("ok len=%zu\n", key.len);

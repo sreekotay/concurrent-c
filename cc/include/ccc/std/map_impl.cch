@@ -28,7 +28,7 @@
 
 #define CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)                               \
     typedef struct Name {                                                            \
-        CCArena *arena;                                                              \
+        CCArena arena;                                                              \
         void *impl;                                                                  \
     } Name;                                                                          \
                                                                                      \
@@ -49,9 +49,9 @@
         return EQ_FN(*(K *)lhs, *(K *)rhs);                                          \
     }                                                                                \
                                                                                      \
-    static inline Name *Name##_init(CCArena *arena) {                                \
+    static inline Name *Name##_init(CCArena arena) {                                \
         Name *h;                                                                     \
-        if (!arena) return NULL;                                                     \
+        if (!cc_arena_is_live(arena)) return NULL;                                   \
         h = (Name *)cc_arena_alloc(arena, sizeof(Name), _Alignof(Name));             \
         if (!h) return NULL;                                                         \
         h->arena = arena;                                                            \
@@ -59,7 +59,7 @@
         return h;                                                                    \
     }                                                                                \
                                                                                      \
-    static inline Name *Name##_init_count(CCArena *arena, size_t count) {            \
+    static inline Name *Name##_init_count(CCArena arena, size_t count) {            \
         Name *h = Name##_init(arena);                                                \
         ccj_allocing_fn_result_ty result;                                            \
         if (!h) return NULL;                                                         \
@@ -72,7 +72,7 @@
             CC_DEFAULT_LOAD,                                                         \
             cc__containers_realloc,                                                  \
             cc__containers_free,                                                     \
-            h->arena                                                                  \
+            (void *)(h->arena.a)                                                      \
         );                                                                           \
         if (!result.other_ptr) {                                                     \
             (void)cc_arena_release(arena, h);                                        \
@@ -91,7 +91,7 @@
             NULL,                                                                    \
             NULL,                                                                    \
             cc__containers_free,                                                     \
-            h->arena                                                                  \
+            (void *)(h->arena.a)                                                      \
         );                                                                           \
         (void)cc_arena_release(h->arena, h);                                         \
     }                                                                                \
@@ -113,7 +113,7 @@
             NULL,                                                                    \
             cc__containers_realloc,                                                  \
             cc__containers_free,                                                     \
-            h->arena                                                                  \
+            (void *)(h->arena.a)                                                      \
         );                                                                           \
         if (!result.other_ptr) return -1;                                            \
         h->impl = result.new_cntr;                                                   \
@@ -149,7 +149,7 @@
             NULL,                                                                    \
             cc__containers_realloc,                                                  \
             cc__containers_free,                                                     \
-            h->arena                                                                  \
+            (void *)(h->arena.a)                                                      \
         );                                                                           \
         if (!result.other_ptr) {                                                     \
             if (ret) *ret = -1;                                                      \
@@ -193,7 +193,7 @@
             NULL,                                                                    \
             NULL,                                                                    \
             cc__containers_free,                                                     \
-            h->arena                                                                  \
+            (void *)(h->arena.a)                                                      \
         ) != NULL;                                                                   \
     }                                                                                \
                                                                                      \
@@ -218,7 +218,7 @@
             NULL,                                                                    \
             NULL,                                                                    \
             cc__containers_free,                                                     \
-            h->arena                                                                  \
+            (void *)(h->arena.a)                                                      \
         );                                                                           \
     }
 

@@ -77,7 +77,16 @@ complete spec), so the epilogue meets the husk.
 A parent holds a list of records `{object, destroy fn}`. Record nodes are
 allocated from the parent itself and are never freed individually; an
 unlinked record is a tombstone, compacted opportunistically during later
-attaches. List mutation is serialized by the arena's meta lock.
+attaches. List mutation is serialized by the arena's meta lock. A child
+stores `lifetime_parent` beside `self_rec` and takes that lock before
+writing `obj` (tombstone, re-home). The teardown walk claims each `obj`
+under the same lock, then runs destroy unlocked. There is no lock order
+beyond the parent list under that parent: teardown never holds two parent
+locks; a child's free tombstones after the parent steal has dropped the
+lock. Steal does not clear each child's `lifetime_parent` / `self_rec` —
+the child's free still tombstones the stolen node while the parent host
+is alive. Generic `cc_arena_attach` does not pin `self_rec`; arena hosts
+use `cc__arena_attach_host` so detach/free can tombstone.
 
 Destroying a parent first **walks** its records, newest first (LIFO),
 before the arena releases overflow or slabs — child handles may live in
@@ -88,6 +97,11 @@ The walk runs exactly once per parent destruction and clears the list.
 are contents, and contents die at reset — their handles live in the slabs
 being rewound, exactly like every unhooked allocation. The arena stays
 live and may attach again afterward.
+
+Checkpoint restore refuses while any attach record is linked. Lifetime
+parents and restore do not mix: attach-then-restore and
+checkpoint-then-attach both refuse until the children are gone. Reset
+and free still walk children.
 
 Records are hints; the object's own live/dead state is authoritative.
 
@@ -122,10 +136,12 @@ constructors and never move.
 int cc_arena_attach(CCArena* parent, void* obj, void (*destroy)(void*));
 ```
 
-The primitive under adopt and the `create_*` constructors: appends a
-record. The caller supplies the destroy fn — for user types, the function
-registered as the type's destroy hook. Fails, nonzero with a report, on a
-dead or mid-walk parent.
+The primitive for non-arena objects: appends a record. It does not pin
+`self_rec`; an arena child uses `cc__arena_attach_host` (via
+`create_arena` / adopt) so detach and free can tombstone. The caller
+supplies the destroy fn — for user types, the function registered as the
+type's destroy hook. Fails, nonzero with a report, on a dead or mid-walk
+parent.
 
 ### `create_*` constructors
 
@@ -138,7 +154,7 @@ Constructors are declared in the product's header:
 
 ```ccs
 CCArena !>(CCError) create_arena(CCArena owner, size_t n);         // cc_arena.cch
-CCArenaPool* create_pool(CCArena owner, size_t elem);              // cc_arena.cch
+CCArenaPool* !>(CCError) create_pool(CCArena owner, size_t elem);  // cc_arena.cch
 CCNursery !>(CCError) cc_arena_create_nursery(CCArena* a);     // cc_nursery.cch
 Session*     create_session(CCArena owner, int fd);                // user code
 ```

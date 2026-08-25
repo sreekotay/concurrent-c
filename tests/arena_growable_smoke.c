@@ -142,7 +142,7 @@ int main(void) {
 
     // --- Test 5: Fixed arena (block_max=1) never grows ---
     {
-        uint8_t buf[CC_ARENA_REGION_BYTES(192)];
+        _Alignas(CCArenaHost) uint8_t buf[CC_ARENA_REGION_BYTES(192)];
         CCArena a = cc_arena_wrap_region(buf, sizeof(buf), CC_ARENA_FIXED);
         if (a.a->block_max != 1) { printf("FAIL: buffer should be fixed\n"); return 5; }
 
@@ -159,7 +159,7 @@ int main(void) {
 
     // --- Test 6: Stack (user) first block, overflow to heap ---
     {
-        uint8_t buf[CC_ARENA_REGION_BYTES(64)];
+        _Alignas(CCArenaHost) uint8_t buf[CC_ARENA_REGION_BYTES(64)];
         CCArena a;
         if (cc_arena_init_region(buf, sizeof(buf), CC_ARENA_FIXED) != 0) {
             printf("FAIL: buffer init\n");
@@ -209,7 +209,7 @@ int main(void) {
 
     // --- Test 7: release resets current block and heap-overflow setter is explicit ---
     {
-        uint8_t buf[CC_ARENA_REGION_BYTES(256)];
+        _Alignas(CCArenaHost) uint8_t buf[CC_ARENA_REGION_BYTES(256)];
         CCArena a;
         if (cc_arena_init_region(buf, sizeof(buf), CC_ARENA_FIXED) != 0) {
             printf("FAIL: release test init\n");

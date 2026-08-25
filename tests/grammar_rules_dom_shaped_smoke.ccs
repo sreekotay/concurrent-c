@@ -9,7 +9,7 @@
 #include <ccc/std/prelude.cch>
 
 /* keep/decode: dirty spans only — no memchr re-scan. */
-static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
+static int jstr(const char* p, size_t n, CCSlice* out, CCArena arena) {
     char* dst = (char*)cc_arena_alloc_local(arena, n ? n : 1, 1);
     if (!dst) return 0;
     size_t o = 0;
@@ -51,7 +51,7 @@ static int slice_is(const CCShapeVal* v, const char* want) {
 int main(void) {
     CCArena shp = cc_arena_create(16 << 20);   /* persistent: shapes */
     CCArena rec = cc_arena_create(16 << 20);   /* per-parse: records */
-    CCShapeReg* reg = cc_shape_reg_create(&shp);
+    CCShapeReg* reg = cc_shape_reg_create(shp);
     if (!reg) { printf("FAIL: reg\n"); return 1; }
 
     /* objects, arrays, nesting, escapes, key addressing */
@@ -60,7 +60,7 @@ int main(void) {
             "{\"id\":42,\"text\":\"a\\nb\",\"tags\":[\"x\",\"y\"],"
             "\"user\":{\"name\":\"z\",\"ok\":true}}";
         CCShapeVal v;
-        if (!cc_dom(Json, src, strlen(src), reg, &rec, &v)) { printf("FAIL: dom parse\n"); return 1; }
+        if (!cc_dom(Json, src, strlen(src), reg, rec, &v)) { printf("FAIL: dom parse\n"); return 1; }
         if (cc_shape_kind(&v) != CC_SHAPE_OBJ || cc_shape_len(&v) != 4) {
             printf("FAIL: root obj\n"); return 1;
         }
@@ -79,7 +79,7 @@ int main(void) {
         /* registry persistence: same wire shape on parse #2 = zero new shapes */
         uint32_t before = reg->nshapes;
         cc_arena_reset(&rec);
-        if (!Json_dom(src, strlen(src), reg, &rec, &v)) { printf("FAIL: reparse\n"); return 1; }
+        if (!Json_dom(src, strlen(src), reg, rec, &v)) { printf("FAIL: reparse\n"); return 1; }
         if (reg->nshapes != before) { printf("FAIL: shapes not reused\n"); return 1; }
         if (!slice_is(cc_shape_get(&v, "id"), "42")) { printf("FAIL: reparse id\n"); return 1; }
     }
@@ -95,8 +95,8 @@ int main(void) {
             CCArena big = cc_arena_create(64 << 20);
             cc_arena_reset(&rec);
             CCShapeVal sv;
-            if (!Json_dom(buf, rd, reg, &big, &sv)) { printf("FAIL: corpus dom\n"); return 1; }
-            JsonNode* root = Json_parse(buf, rd, &big);
+            if (!Json_dom(buf, rd, reg, big, &sv)) { printf("FAIL: corpus dom\n"); return 1; }
+            JsonNode* root = Json_parse(buf, rd, big);
             if (!root) { printf("FAIL: corpus tape\n"); return 1; }
 
             /* every tweet: id/text/user.screen_name must agree byte-for-byte */
@@ -174,7 +174,7 @@ int main(void) {
         uint32_t before = reg->nshapes;
         cc_arena_reset(&rec);
         CCShapeVal v;
-        if (!Json_dom(mj, mn, reg, &rec, &v)) { printf("FAIL: map parse\n"); return 1; }
+        if (!Json_dom(mj, mn, reg, rec, &v)) { printf("FAIL: map parse\n"); return 1; }
         if (reg->dict_objs < 1) { printf("FAIL: map did not dict\n"); return 1; }
         if (reg->nshapes - before > CC_SHAPE_DICT_DEPTH + 2) { printf("FAIL: shape explosion\n"); return 1; }
         CCShapeVal* u = cc_shape_get(&v, "u150");

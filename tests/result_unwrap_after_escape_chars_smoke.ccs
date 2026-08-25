@@ -20,7 +20,7 @@ int main(void) {
     CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
     const char* raw = "{ \"a\" : 1,\t\"b\" : \"x y\" }\n";
     CCSlice in = cc_slice_from_buffer((void*)raw, strlen(raw));
-    CCVec::[char] out = cc_vec_new::[char](&a);
+    CCVec::[char] out = cc_vec_new::[char](a);
     bool instr = false;
     bool esc = false;
     for (size_t i = 0; i < in.len; i++) {

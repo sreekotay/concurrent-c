@@ -8,7 +8,7 @@
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(1)) @destroy;
     @errhandler(CCError e) {
-        eprintln(@string(`fatal: ${e.message}`, &arena)) !>;
+        eprintln(@string(`fatal: ${e.message}`, arena)) !>;
         return 1;
     }
     println("ok") !>;

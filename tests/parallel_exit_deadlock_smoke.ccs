@@ -77,8 +77,8 @@ static int wait_late(void) {
         return -1;
     }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts@(2, 1, &arena) @destroy;
-    if (!ts.excl)
+    CCTurnstile ts@(2, 1, arena) @destroy;
+    if (!cc_exclusive_is_live(ts.excl))
         return -1;
     int i;
     @parallel wait (ts) for (i in 0..8) {
@@ -98,8 +98,8 @@ static int wait_two(void) {
         return -1;
     }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts@(2, 1, &arena) @destroy;
-    if (!ts.excl)
+    CCTurnstile ts@(2, 1, arena) @destroy;
+    if (!cc_exclusive_is_live(ts.excl))
         return -1;
     int i;
     @parallel wait (ts) for (i in 0..8) {
@@ -120,8 +120,8 @@ static int wait_before_stage(void) {
         return -1;
     }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts@(2, 1, &arena) @destroy;
-    if (!ts.excl)
+    CCTurnstile ts@(2, 1, arena) @destroy;
+    if (!cc_exclusive_is_live(ts.excl))
         return -1;
     int i;
     @parallel wait (ts) for (i in 0..8) {

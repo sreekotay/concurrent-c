@@ -108,7 +108,7 @@ static CompressedResult* compress_block(Block* blk, int level) {
     g_bytes_out.fetch_add((int64_t)pos);
     g_blocks_done.fetch_add(1);
 
-    res->arena = res_arena->detach();
+    res->arena = res_arena->detach() !>(e) { (void)e; return NULL; };
     return res;
 }
 

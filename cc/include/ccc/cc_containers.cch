@@ -29,8 +29,8 @@ static inline size_t cc__containers_alloc_total(size_t size_bytes, size_t align)
     return sizeof(CCContainersAllocHeader) + align - 1 + size_bytes;
 }
 
-static inline void *cc__containers_alloc_payload(CCArena *arena, size_t size_bytes, size_t align) {
-    if (!arena || size_bytes == 0) return NULL;
+static inline void *cc__containers_alloc_payload(CCArena arena, size_t size_bytes, size_t align) {
+    if (!cc_arena_is_live(arena) || size_bytes == 0) return NULL;
     if (align < _Alignof(CCContainersAllocHeader)) align = _Alignof(CCContainersAllocHeader);
 
     {
@@ -46,7 +46,7 @@ static inline void *cc__containers_alloc_payload(CCArena *arena, size_t size_byt
         header = (CCContainersAllocHeader *)(aligned - sizeof(CCContainersAllocHeader));
         header->size_bytes = size_bytes;
         header->raw_alloc = raw;
-        header->provenance = arena ? CC__ARENA_HOST(arena)->provenance : 0;
+        header->provenance = cc_arena_is_live(arena) ? CC__ARENA_HOST(arena)->provenance : 0;
         return (void *)aligned;
     }
 }
@@ -62,16 +62,16 @@ static inline uint64_t cc__containers_payload_provenance(void *ptr) {
     return header->provenance;
 }
 
-static inline void cc__containers_release_payload(CCArena *arena, void *ptr) {
+static inline void cc__containers_release_payload(CCArena arena, void *ptr) {
     CCContainersAllocHeader *header;
-    if (!arena || !ptr) return;
+    if (!cc_arena_is_live(arena) || !ptr) return;
     header = cc__containers_payload_header(ptr);
     if (header->raw_alloc) (void)cc_arena_release(arena, header->raw_alloc);
 }
 
 static inline void *cc__containers_realloc(void *ctx, void *ptr, size_t size_bytes) {
-    CCArena *arena = (CCArena *)ctx;
-    if (!arena) {
+    CCArena arena = cc_arena_handle((CCArenaHost *)ctx);
+    if (!cc_arena_is_live(arena)) {
         if (size_bytes == 0) {
             free(ptr);
             return NULL;
@@ -114,15 +114,15 @@ static inline void *cc__containers_realloc(void *ctx, void *ptr, size_t size_byt
         old_header = (CCContainersAllocHeader *)(aligned - sizeof(CCContainersAllocHeader));
         old_header->size_bytes = size_bytes;
         old_header->raw_alloc = raw;
-        old_header->provenance = arena ? CC__ARENA_HOST(arena)->provenance : 0;
+        old_header->provenance = CC__ARENA_HOST(arena)->provenance;
         return (void *)aligned;
     }
 }
 
 static inline void cc__containers_free(void *ctx, void *ptr) {
-    CCArena *arena = (CCArena *)ctx;
+    CCArena arena = cc_arena_handle((CCArenaHost *)ctx);
     if (!ptr) return;
-    if (!arena) {
+    if (!cc_arena_is_live(arena)) {
         free(ptr);
         return;
     }

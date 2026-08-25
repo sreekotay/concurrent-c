@@ -43,7 +43,7 @@ typedef struct FakeReq {
 #define BIG_N    400  /* > SLOT_CAP - sizeof(FakeReq) - small_n */
 
 int main(void) {
-    uint8_t slot[SLOT_CAP];
+    _Alignas(CCArenaHost) uint8_t slot[SLOT_CAP];
     memset(slot, 0xAB, sizeof(slot));  /* sentinel so we can check it later */
     uint8_t *slot_start = slot;
 

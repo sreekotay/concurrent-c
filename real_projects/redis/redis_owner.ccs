@@ -256,7 +256,8 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
         size_t pos = 0;
         RespGCmd c;
         bool !>(CCError) tr = RespGCmd_try_read((const char*)(r->data + r->start),
-                                                r->end - r->start, &pos, NULL, &c);
+                                                r->end - r->start, &pos,
+                                                cc_arena_handle(NULL), &c);
         if (tr.is_err()) {
             if (tr.error().kind == CC_ERR_WOULD_BLOCK) return RESP_PARSE_INCOMPLETE;
             *err = tr.error();
@@ -982,7 +983,7 @@ static void* owner_reply_entry(void* env, intptr_t slot_i, intptr_t arena_i) {
         char scratch_buf[256];
         @nonblocking {
             CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
-            CCString line = @string("redis_owner: db_init failed (out of memory?)", &scratch);
+            CCString line = @string("redis_owner: db_init failed (out of memory?)", scratch);
             redis_diag_fprintln(&line, &scratch);
         }
         return 1;
@@ -1151,7 +1152,7 @@ int main(int argc, char** argv) {
         char scratch_buf[256];
         CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
         const char* msg = e.message ? e.message : "unknown error";
-        CCString line = @string(`fatal: ${msg}`, &scratch);
+        CCString line = @string(`fatal: ${msg}`, scratch);
         redis_diag_fprintln(&line, &scratch);
         return 1;
     }
@@ -1163,7 +1164,7 @@ int main(int argc, char** argv) {
         if (end == argv[1] || (end && *end != 0) || parsed <= 0 || parsed > 65535) {
             char scratch_buf[256];
             CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
-            CCString line = @string(`invalid port: ${argv[1]}`, &scratch);
+            CCString line = @string(`invalid port: ${argv[1]}`, scratch);
             redis_diag_fprintln(&line, &scratch);
             return 1;
         }
@@ -1176,7 +1177,7 @@ int main(int argc, char** argv) {
     CCListener ln = cc_tcp_listen(cc_slice_cstr(addr)) !>(e) {
         char scratch_buf[256];
         CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
-        CCString line = @string(`listen error: ${(int)e}`, &scratch);
+        CCString line = @string(`listen error: ${(int)e}`, scratch);
         redis_diag_fprintln(&line, &scratch);
         return 1;
     };
@@ -1197,11 +1198,9 @@ int main(int argc, char** argv) {
          * Ok(false) and the owner exits cleanly. */
         (void)server.close_on(req_tx);
 
-        server.on_shutdown((CCNursery server) => {
-            server.cancel();
-        }) !>;
+        server.cancel_on_shutdown() !>;
 
-        server.spawn(() => [ln_ptr, req_tx, req_ch, server] {
+        server.spawn(() => [ln_ptr, req_tx, req_ch, &server] {
             uint64_t next_conn_id = 1;
             while (true) {
                 CCSocket client = ln_ptr->accept() !>(e) {

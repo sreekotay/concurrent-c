@@ -29,6 +29,7 @@
  */
 
 #include <ccc/cc_exclusive.cch>
+#undef cc_exclusive_create
 #include <ccc/cc_sched.cch>
 
 #include "fiber_internal.h"
@@ -126,7 +127,7 @@ typedef struct CCExclusiveMap {
 } CCExclusiveMap;
 
 struct CCExclusiveHost {
-    CCArena* arena;
+    CCArena arena;
     pthread_mutex_t create_mu;
     /* Lock-free lookups acquire-load this pointer. Grow (under create_mu)
      * release-stores the new table after rehash; the prior table is retired
@@ -287,7 +288,7 @@ static size_t cc__exclusive_slot_cap(size_t cap, uint64_t name) {
     return (size_t)(name * 11400714819323198485ull) & (cap - 1);
 }
 
-static CCExclusiveMap* cc__exclusive_map_alloc(CCArena* arena, size_t cap) {
+static CCExclusiveMap* cc__exclusive_map_alloc(CCArena arena, size_t cap) {
     size_t bytes = sizeof(CCExclusiveMap) + cap * sizeof(CCExclusiveBucket);
     CCExclusiveMap* m = (CCExclusiveMap*)cc_arena_alloc(
         arena, bytes, _Alignof(CCExclusiveMap));
@@ -916,11 +917,11 @@ static CCResult_CCExclusive_CCError cc__exclusive_wrap_err(CCErrorKind k,
     return r;
 }
 
-CCResult_CCExclusive_CCError cc_exclusive_create(CCArena* arena,
+CCResult_CCExclusive_CCError cc_exclusive_create(CCArena arena,
                                                 size_t initial_cap) {
     CCExclusiveHost* excl;
     CCExclusiveMap* map;
-    if (!arena)
+    if (!cc_arena_is_live(arena))
         return cc__exclusive_wrap_err(CC_ERR_INVALID_ARG,
                                      "cc_exclusive_create: null arena");
 
@@ -955,10 +956,6 @@ CCResult_CCExclusive_CCError cc_exclusive_create(CCArena* arena,
     return cc__exclusive_wrap_ok(excl);
 }
 
-CCResult_CCExclusive_CCError cc_arena_create_exclusive(CCArena* arena,
-                                                       size_t initial_cap) {
-    return cc_exclusive_create(arena, initial_cap);
-}
 
 void cc_exclusive_destroy(CCExclusive* excl) {
     CCExclusiveHost* h;

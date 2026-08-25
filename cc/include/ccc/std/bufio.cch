@@ -34,14 +34,16 @@ static inline void ${mangled}_init(${mangled} *r, ${arg(0)} *src, char *buf, siz
     memset(r, 0, sizeof(*r));
     r->src = src; r->buf = buf; r->cap = cap;
 }
-static inline int ${mangled}_init_arena(${mangled} *r, ${arg(0)} *src, CCArena *a, size_t cap) {
+static inline int ${mangled}_init_arena(${mangled} *r, ${arg(0)} *src, CCArena a, size_t cap) {
     char *buf;
-    if (!r || !src || !a || !cap) return -1;
+    if (!r || !src || !cc_arena_is_live(a) || !cap) return -1;
     buf = (char *)cc_arena_alloc(a, cap, 1);
     if (!buf) return -1;
     ${mangled}_init(r, src, buf, cap);
     return 0;
 }
+#define ${mangled}_init_arena(r, src, a, cap) \
+    (${mangled}_init_arena)((r), (src), CC__ARENA_HANDLE(a), (cap))
 static inline size_t ${mangled}_buffered(const ${mangled} *r) {
     return (!r || r->end < r->pos) ? 0 : (r->end - r->pos);
 }
@@ -110,9 +112,9 @@ static inline CCSlice !>(CCIoError) ${mangled}_read_line(${mangled} *r) {
 
 CC_GENERIC_FACTORY_EXTEND(BufReader, 1) {
     return @emit(`
-static inline CCSlice !>(CCIoError) ${mangled}_read_line_dup(${mangled} *r, CCArena *a) {
+static inline CCSlice !>(CCIoError) ${mangled}_read_line_dup(${mangled} *r, CCArena a) {
     CCSlice !>(CCIoError) lr; CCSlice view; CCString line;
-    if (!r || !a) return cc_err(cc_io_from_errno(EINVAL));
+    if (!r || !cc_arena_is_live(a)) return cc_err(cc_io_from_errno(EINVAL));
     lr = ${mangled}_read_line(r);
     if (cc_is_err(lr)) return lr;
     view = cc_value(lr);
@@ -122,6 +124,8 @@ static inline CCSlice !>(CCIoError) ${mangled}_read_line_dup(${mangled} *r, CCAr
         return cc_err(cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
     return cc_ok(cc_string_as_slice(&line));
 }
+#define ${mangled}_read_line_dup(r, a) \
+    (${mangled}_read_line_dup)((r), CC__ARENA_HANDLE(a))
 `, arena);
 }
 

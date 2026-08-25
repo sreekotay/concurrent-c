@@ -226,7 +226,7 @@ int main(void) {
     zipf_init(g_zipf_cum, keys, g_zipf_s);
 
     CCArena excl_arena = @create(kilobytes(128)) @destroy;
-    g_excl = cc_exclusive_create(&excl_arena, 0) !>;
+    g_excl = cc_exclusive_create(excl_arena, 0) !>;
     @defer cc_exclusive_destroy(&g_excl);
 
     printf("exclusive_named_lock lang=cc\n");

@@ -59,7 +59,7 @@ typedef struct CCTlsConn {
     void* iobuf;        /* I/O buffer (~33KB for bidirectional) */
     size_t iobuf_len;
     CCSocket underlying;
-    CCArena* info_arena; /* Owns TlsInfo strings */
+    CCArena info_arena; /* Owns TlsInfo strings */
     uint8_t flags;       /* Client/server, closed, etc. */
 } CCTlsConn;
 
@@ -82,13 +82,13 @@ typedef struct CCTlsInfo {
 
 CCTlsConn cc_tls_connect(CCSocket sock, CCTlsClientConfig cfg,
                           void* iobuf, size_t iobuf_len,
-                          CCArena* info_arena, CCNetError* out_err);
+                          CCArena info_arena, CCNetError* out_err);
 
 /* Convenience: TCP connect + TLS handshake in one call.
  * Allocates iobuf from arena. */
 CCTlsConn cc_tls_connect_addr(const char* addr, size_t addr_len,
                                CCTlsClientConfig cfg,
-                               CCArena* conn_arena, CCNetError* out_err);
+                               CCArena conn_arena, CCNetError* out_err);
 
 /* Async variants */
 /* @async CCTlsConn cc_tls_connect_async(...); */
@@ -101,7 +101,7 @@ CCTlsConn cc_tls_connect_addr(const char* addr, size_t addr_len,
 /* Wrap accepted socket in TLS (server-side handshake) */
 CCTlsConn cc_tls_accept(CCSocket sock, CCTlsServerConfig cfg,
                          void* iobuf, size_t iobuf_len,
-                         CCArena* info_arena, CCNetError* out_err);
+                         CCArena info_arena, CCNetError* out_err);
 
 /* Async variant */
 /* @async CCTlsConn cc_tls_accept_async(...); */
@@ -111,10 +111,10 @@ CCTlsConn cc_tls_accept(CCSocket sock, CCTlsServerConfig cfg,
  * ============================================================================ */
 
 /* Read decrypted data into arena */
-CCSlice cc_tls_read(CCTlsConn* conn, CCArena* arena, size_t max_bytes, CCNetError* out_err);
+CCSlice cc_tls_read(CCTlsConn* conn, CCArena arena, size_t max_bytes, CCNetError* out_err);
 
 /* Async read */
-/* @async CCSlice cc_tls_read_async(CCTlsConn* conn, CCArena* arena, size_t max_bytes, CCNetError* out_err); */
+/* @async CCSlice cc_tls_read_async(CCTlsConn* conn, CCArena arena, size_t max_bytes, CCNetError* out_err); */
 
 /* Write data (encrypted automatically) */
 size_t cc_tls_write(CCTlsConn* conn, const char* data, size_t len, CCNetError* out_err);
@@ -138,14 +138,29 @@ const CCTlsInfo* cc_tls_info(const CCTlsConn* conn);
 /* Load certificate chain from PEM file.
  * Returns opaque handle for use in config. */
 typedef struct CCTlsCertChain CCTlsCertChain;
-CCTlsCertChain* cc_tls_load_cert_chain(CCArena* arena, const char* path, size_t path_len, CCNetError* out_err);
+CCTlsCertChain* cc_tls_load_cert_chain(CCArena arena, const char* path, size_t path_len, CCNetError* out_err);
 
 /* Load private key from PEM file */
 typedef struct CCTlsPrivateKey CCTlsPrivateKey;
-CCTlsPrivateKey* cc_tls_load_private_key(CCArena* arena, const char* path, size_t path_len, CCNetError* out_err);
+CCTlsPrivateKey* cc_tls_load_private_key(CCArena arena, const char* path, size_t path_len, CCNetError* out_err);
 
 /* Load trust anchors (CA certs) from PEM file */
 typedef struct CCTlsTrustAnchors CCTlsTrustAnchors;
-CCTlsTrustAnchors* cc_tls_load_trust_anchors(CCArena* arena, const char* path, size_t path_len, CCNetError* out_err);
+CCTlsTrustAnchors* cc_tls_load_trust_anchors(CCArena arena, const char* path, size_t path_len, CCNetError* out_err);
+
+#define cc_tls_connect(sock, cfg, buf, n, a, err) \
+    (cc_tls_connect)((sock), (cfg), (buf), (n), CC__ARENA_HANDLE(a), (err))
+#define cc_tls_connect_addr(addr, n, cfg, a, err) \
+    (cc_tls_connect_addr)((addr), (n), (cfg), CC__ARENA_HANDLE(a), (err))
+#define cc_tls_accept(sock, cfg, buf, n, a, err) \
+    (cc_tls_accept)((sock), (cfg), (buf), (n), CC__ARENA_HANDLE(a), (err))
+#define cc_tls_read(conn, a, n, err) \
+    (cc_tls_read)((conn), CC__ARENA_HANDLE(a), (n), (err))
+#define cc_tls_load_cert_chain(a, path, n, err) \
+    (cc_tls_load_cert_chain)(CC__ARENA_HANDLE(a), (path), (n), (err))
+#define cc_tls_load_private_key(a, path, n, err) \
+    (cc_tls_load_private_key)(CC__ARENA_HANDLE(a), (path), (n), (err))
+#define cc_tls_load_trust_anchors(a, path, n, err) \
+    (cc_tls_load_trust_anchors)(CC__ARENA_HANDLE(a), (path), (n), (err))
 
 #endif /* CC_STD_TLS_H */

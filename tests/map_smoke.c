@@ -14,7 +14,7 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     if (!arena.base) return 1;
 
-    IntMap *m = IntMap_init(&arena);
+    IntMap *m = IntMap_init(arena);
     if (!m) return 2;
     
     int k1 = 1, v1 = 42;

@@ -3180,7 +3180,8 @@ static int g_shadow_ndhooks;
 /* Registered create from cc_type_create_call (for @create()). */
 typedef struct {
     char ty[64];
-    char hook[96];
+    char hook1[96];
+    char hook2[96];
 } ShadowCreateHook;
 enum { SHADOW_CHOOK_CAP = 128 };
 static ShadowCreateHook g_shadow_chooks[SHADOW_CHOOK_CAP];
@@ -4104,14 +4105,14 @@ static void shadow_meta_ar_ensure(void) {
         g_shadow_meta_ar_live = 1;
     }
     if (!g_shadow_ufns) {
-        g_shadow_ufns = ShadowUfcsFnMap_init(&g_shadow_meta_ar);
+        g_shadow_ufns = ShadowUfcsFnMap_init(g_shadow_meta_ar);
         if (!g_shadow_ufns) {
             fprintf(stderr, "error: UFCS callable map init failed\n");
             g_shadow_ufcs_miss = 1;
         }
     }
     if (!g_shadow_fnparams) {
-        g_shadow_fnparams = ShadowFnParamMap_init(&g_shadow_meta_ar);
+        g_shadow_fnparams = ShadowFnParamMap_init(g_shadow_meta_ar);
         if (!g_shadow_fnparams) {
             fprintf(stderr, "error: fn param map init failed\n");
             g_shadow_fnparam_oom = 1;
@@ -4227,7 +4228,7 @@ static int shadow_fields_ensure(void) {
     shadow_meta_ar_ensure();
     if (!g_shadow_meta_ar_live) return 0;
     if (!g_shadow_fields_live) {
-        g_shadow_fields = ShadowFieldVec_init(&g_shadow_meta_ar, 8);
+        g_shadow_fields = ShadowFieldVec_init(g_shadow_meta_ar, 8);
         g_shadow_fields_live = 1;
     }
     return 1;
@@ -4905,14 +4906,14 @@ static const char* shadow_destroy_hook_for(const char* ty) {
     return (h && h->hook[0]) ? h->hook : NULL;
 }
 
-static const char* shadow_create_hook_match(const char* ty) {
+static const ShadowCreateHook* shadow_create_hook_entry(const char* ty) {
     int i;
     int best = -1;
     size_t best_score = 0;
     if (!ty || !ty[0]) return NULL;
     for (i = 0; i < g_shadow_nchooks; i++) {
         if (strcmp(g_shadow_chooks[i].ty, ty) == 0)
-            return g_shadow_chooks[i].hook;
+            return &g_shadow_chooks[i];
     }
     for (i = 0; i < g_shadow_nchooks; i++) {
         size_t score;
@@ -4926,36 +4927,51 @@ static const char* shadow_create_hook_match(const char* ty) {
         }
     }
     if (best < 0) return NULL;
-    return g_shadow_chooks[best].hook;
+    return &g_shadow_chooks[best];
 }
 
-static void shadow_create_hook_register(const char* ty, const char* hook) {
+static const char* shadow_create_hook_pick(const ShadowCreateHook* e, int arity) {
+    if (!e) return NULL;
+    if (arity >= 2 && e->hook2[0]) return e->hook2;
+    if (e->hook1[0]) return e->hook1;
+    if (e->hook2[0]) return e->hook2;
+    return NULL;
+}
+
+static void shadow_create_hook_register_arity(const char* ty, int arity,
+                                             const char* hook) {
     int i;
+    ShadowCreateHook* e;
+    char* dest;
     if (!ty || !ty[0] || !hook || !hook[0]) return;
+    dest = NULL;
+    for (i = 0; i < g_shadow_nchooks; i++) {
+        if (strcmp(g_shadow_chooks[i].ty, ty) == 0) {
+            e = &g_shadow_chooks[i];
+            dest = (arity >= 2) ? e->hook2 : e->hook1;
+            snprintf(dest, sizeof(e->hook1), "%s", hook);
+            return;
+        }
+    }
     if (g_shadow_nchooks >= SHADOW_CHOOK_CAP) {
         shadow_table_full("create_hooks", SHADOW_CHOOK_CAP, ty);
         return;
     }
-    for (i = 0; i < g_shadow_nchooks; i++) {
-        if (strcmp(g_shadow_chooks[i].ty, ty) == 0) {
-            snprintf(g_shadow_chooks[i].hook, sizeof(g_shadow_chooks[0].hook),
-                     "%s", hook);
-            return;
-        }
-    }
-    snprintf(g_shadow_chooks[g_shadow_nchooks].ty,
-             sizeof(g_shadow_chooks[0].ty), "%s", ty);
-    snprintf(g_shadow_chooks[g_shadow_nchooks].hook,
-             sizeof(g_shadow_chooks[0].hook), "%s", hook);
+    e = &g_shadow_chooks[g_shadow_nchooks];
+    memset(e, 0, sizeof(*e));
+    snprintf(e->ty, sizeof(e->ty), "%s", ty);
+    dest = (arity >= 2) ? e->hook2 : e->hook1;
+    snprintf(dest, sizeof(e->hook1), "%s", hook);
     g_shadow_nchooks++;
 }
 
-static const char* shadow_create_hook_for(const char* ty) {
+static const char* shadow_create_hook_for_arity(const char* ty, int arity) {
     int guard = 0;
     const char* cur = ty;
     if (!ty || !ty[0]) return NULL;
     while (guard++ < 8) {
-        const char* hook = shadow_create_hook_match(cur);
+        const ShadowCreateHook* e = shadow_create_hook_entry(cur);
+        const char* hook = shadow_create_hook_pick(e, arity);
         const char* next;
         if (hook && hook[0]) {
             if (!shadow_hook_is_suffix(hook)) return hook;
@@ -4968,6 +4984,10 @@ static const char* shadow_create_hook_for(const char* ty) {
         cur = next;
     }
     return NULL;
+}
+
+static const char* shadow_create_hook_for(const char* ty) {
+    return shadow_create_hook_for_arity(ty, 1);
 }
 
 static void shadow_niche_register(const char* ty, unsigned size, unsigned align,

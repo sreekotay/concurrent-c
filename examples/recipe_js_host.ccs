@@ -11,7 +11,7 @@
  * headers (Debian/Ubuntu: `apt install libnode-dev`) and caches it;
  * after that, opening a hosted Node costs ~200ms and zero IPC.
  *
- * The handle owns the runtime — `cc_js_host_new(&a) !> @destroy`, the
+ * The handle owns the runtime — `cc_js_host_new(a) !> @destroy`, the
  * same lifetime rule as `cc_py_new`.  A Node-API environment belongs to
  * its event-loop thread, so the door is `host.run(fn, ctx)`: the
  * closure runs ON that thread with a live `CCJs`, where the whole guest
@@ -67,7 +67,7 @@ int main(void) {
 
     CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
-    CCJsHost host = cc_js_host_new(&a) !> @destroy;
+    CCJsHost host = cc_js_host_new(a) !> @destroy;
     host.run(main_js, NULL) !>;
     host.run(main_js, NULL) !>; /* hits = 2: same live Node */
     return 0;

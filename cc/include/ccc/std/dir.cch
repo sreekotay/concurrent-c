@@ -64,14 +64,14 @@ CC_DECL_RESULT_SPEC(CCResult_CCSliceArray_CCIoError, CCSliceArray, CCIoError)
  * Returns iterator that must be closed with cc_dir_close().
  * Path can be relative or absolute.
  */
-CCDirIter* !>(CCIoError) cc_dir_open(CCArena* arena, CCSlice path);
+CCDirIter* !>(CCIoError) cc_dir_open(CCArena arena, CCSlice path);
 
 /*
  * Read next directory entry.
  * Returns entry with name allocated in arena.
  * Returns error with CC_IO_EOF when no more entries.
  */
-CCDirEntry !>(CCIoError) cc_dir_next(CCDirIter* iter, CCArena* arena);
+CCDirEntry !>(CCIoError) cc_dir_next(CCDirIter* iter, CCArena arena);
 
 /*
  * Close directory iterator.
@@ -125,7 +125,7 @@ bool !>(CCIoError) cc_file_remove(CCSlice path);
  * Get current working directory.
  * Allocates a NUL-terminated CCSlice in arena.
  */
-CCSlice cc_dir_cwd(CCArena* arena);
+CCSlice cc_dir_cwd(CCArena arena);
 
 /*
  * Change current working directory.
@@ -141,12 +141,17 @@ bool !>(CCIoError) cc_dir_chdir(CCSlice path);
  * On success: arena-backed CCSliceArray of NUL-terminated path borrows
  * (char[:0] / CCSlice); empty array means no matches.
  * On failure: CCIoError (bad args, I/O, or OOM) — not an empty array. */
-CCSliceArray !>(CCIoError) cc_glob(CCSlice pattern, CCArena* arena);
+CCSliceArray !>(CCIoError) cc_glob(CCSlice pattern, CCArena arena);
 
 /*
  * Check if filename matches glob pattern (no directory traversal).
  * Supports: * (any chars), ? (single char)
  */
 bool cc_glob_match(CCSlice pattern, CCSlice name);
+
+#define cc_dir_open(a, path) (cc_dir_open)(CC__ARENA_HANDLE(a), (path))
+#define cc_dir_next(it, a) (cc_dir_next)((it), CC__ARENA_HANDLE(a))
+#define cc_dir_cwd(a) (cc_dir_cwd)(CC__ARENA_HANDLE(a))
+#define cc_glob(pattern, a) (cc_glob)((pattern), CC__ARENA_HANDLE(a))
 
 #endif /* CC_STD_DIR_H */

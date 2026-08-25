@@ -3,7 +3,7 @@
 #include <stdio.h>
 
 int main(void) {
-    uint8_t buf[CC_ARENA_REGION_BYTES(128)];
+    _Alignas(CCArenaHost) uint8_t buf[CC_ARENA_REGION_BYTES(128)];
     CCArena a = cc_arena_create_buffer(buf, sizeof(buf), CC_ARENA_FIXED);
     void *spill;
     if (!a.base) {

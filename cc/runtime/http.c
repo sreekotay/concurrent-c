@@ -24,7 +24,7 @@
  * ============================================================================ */
 
 typedef struct {
-    CCArena* arena;
+    CCArena arena;
     char* data;
     size_t len;
     size_t cap;
@@ -65,7 +65,7 @@ static size_t cc__http_write_cb(char* ptr, size_t size, size_t nmemb, void* user
 
 /* Header callback to capture headers */
 typedef struct {
-    CCArena* arena;
+    CCArena arena;
     char* data;
     size_t len;
     size_t cap;
@@ -122,7 +122,7 @@ static CCHttpErrorInfo cc__http_errinfo(CCHttpError code) {
  * ============================================================================ */
 
 static CCResult_CCHttpResponse_CCHttpErrorInfo cc__http_request(
-        CCArena* arena,
+        CCArena arena,
         const char* method,
         const char* url, size_t url_len,
         const char* body, size_t body_len,
@@ -245,11 +245,11 @@ static CCResult_CCHttpResponse_CCHttpErrorInfo cc__http_request(
  * Public API: Simple functions
  * ============================================================================ */
 
-CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_get(CCArena* arena, const char* url, size_t url_len) {
+CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_get(CCArena arena, const char* url, size_t url_len) {
     return cc__http_request(arena, "GET", url, url_len, NULL, 0, NULL);
 }
 
-CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_post(CCArena* arena, const char* url, size_t url_len,
+CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_post(CCArena arena, const char* url, size_t url_len,
                              const char* body, size_t body_len) {
     return cc__http_request(arena, "POST", url, url_len, body, body_len, NULL);
 }
@@ -262,20 +262,20 @@ CCHttpClient cc_http_client_new(CCHttpClientConfig config) {
     return (CCHttpClient){ .config = config };
 }
 
-CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_client_get(CCHttpClient* client, CCArena* arena,
+CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_client_get(CCHttpClient* client, CCArena arena,
                                    const char* url, size_t url_len) {
     return cc__http_request(arena, "GET", url, url_len, NULL, 0,
                             client ? &client->config : NULL);
 }
 
-CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_client_post(CCHttpClient* client, CCArena* arena,
+CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_client_post(CCHttpClient* client, CCArena arena,
                                     const char* url, size_t url_len,
                                     const char* body, size_t body_len) {
     return cc__http_request(arena, "POST", url, url_len, body, body_len,
                             client ? &client->config : NULL);
 }
 
-CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_client_request(CCHttpClient* client, CCArena* arena,
+CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_client_request(CCHttpClient* client, CCArena arena,
                                         CCHttpRequest req) {
     /* Null-terminate method */
     char method[16] = "GET";

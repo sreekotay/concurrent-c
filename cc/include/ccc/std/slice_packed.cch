@@ -183,7 +183,7 @@ static inline int CCSlicePacked_is_durable(const CCSlicePacked *r) {
 /* Copy `src` into a durable handle.  len <= INLINE_MAX stays inline (no arena).
  * Larger payloads allocate [u32 len][bytes] in `arena` (SDS-style).
  * Slice-first for UFCS: `src.to_packed(arena)`. */
-static inline CCSlicePacked !>(CCError) cc_slice_to_packed(CCSlice *src, CCArena *arena) {
+static inline CCSlicePacked !>(CCError) cc_slice_to_packed(CCSlice *src, CCArena arena) {
     CCSlice s;
     CCSlicePacked r;
     char *block;
@@ -206,7 +206,7 @@ static inline CCSlicePacked !>(CCError) cc_slice_to_packed(CCSlice *src, CCArena
         return cc_ok(
             cc__slice_packed_pack_inline((const char *)s.ptr, (uint32_t)s.len));
     }
-    if (!arena) {
+    if (!cc_arena_is_live(arena)) {
         return cc_err(CC_ERR_INVALID_ARG, "CCSlicePacked heap form needs arena");
     }
     if (!s.ptr) {
@@ -231,18 +231,18 @@ static inline CCSlicePacked !>(CCError) cc_slice_to_packed(CCSlice *src, CCArena
     return cc_ok(r);
 }
 
-static inline CCSlicePacked !>(CCError) CCSlice_to_packed(CCSlice *src, CCArena *arena) {
+static inline CCSlicePacked !>(CCError) CCSlice_to_packed(CCSlice *src, CCArena arena) {
     return cc_slice_to_packed(src, arena);
 }
 
 /* Release heap-form payload into `arena` (no-op for inline / empty / view).
  * Heap block starts at `data - sizeof(u32)`; requires an arena that can
  * release individual allocs (heap-overflow or last-live slab reclaim). */
-static inline void cc_slice_packed_release(CCArena *arena, CCSlicePacked *r) {
+static inline void cc_slice_packed_release(CCArena arena, CCSlicePacked *r) {
     char *data;
     char *block;
     if (!r) return;
-    if (!arena || cc_slice_packed_is_empty(r) || cc_slice_packed_is_inline(r) ||
+    if (!cc_arena_is_live(arena) || cc_slice_packed_is_empty(r) || cc_slice_packed_is_inline(r) ||
         cc_slice_packed_is_view(r)) {
         r->w = 0;
         return;
@@ -314,5 +314,12 @@ static inline int cc_map_eq_slice_packed(CCSlicePacked a, CCSlicePacked b) {
     if (la == 0) return 1;
     return pa && pb && memcmp(pa, pb, (size_t)la) == 0;
 }
+
+#define cc_slice_to_packed(src, a) \
+    (cc_slice_to_packed)((src), CC__ARENA_HANDLE(a))
+#define CCSlice_to_packed(src, a) \
+    (CCSlice_to_packed)((src), CC__ARENA_HANDLE(a))
+#define cc_slice_packed_release(a, r) \
+    (cc_slice_packed_release)(CC__ARENA_HANDLE_OR_NULL(a), (r))
 
 #endif /* CC_STD_SLICE_PACKED_H */

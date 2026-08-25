@@ -18,7 +18,7 @@ static int clone_owned_string(CCString* out, CCArena* out_arena, CCSlice src) {
     CCArena arena = cc_arena_heap(arena_size) @destroy;
     if (!cc_arena_is_live(arena)) return -1;
 
-    CCString s = cc_string_from_slice(&arena, src);
+    CCString s = cc_string_from_slice(arena, src);
     if (src.len > 0 && cc_string_len(&s) != src.len) return -2;
 
     *out = s;

@@ -37,9 +37,9 @@ static int wait_poll(int fd, short events, const CCDeadline* d) {
     return 0;
 }
 
-static int backend_read_all(void* ctx, CCFile *file, CCArena *arena, CCSlice* out, CCAsyncHandle* h, const CCDeadline* d) {
+static int backend_read_all(void* ctx, CCFile *file, CCArena arena, CCSlice* out, CCAsyncHandle* h, const CCDeadline* d) {
     (void)ctx;
-    if (!file || !file->handle || !arena || !out || !h) return EINVAL;
+    if (!file || !file->handle || !cc_arena_is_live(arena) || !out || !h) return EINVAL;
     int fd = fileno(file->handle);
     if (fd < 0) return EBADF;
     int nb = set_nonblock(fd); if (nb != 0) return nb;
@@ -67,9 +67,9 @@ static int backend_read_all(void* ctx, CCFile *file, CCArena *arena, CCSlice* ou
 }
 
 /* EOF is signalled by writing an empty slice (len == 0) — no separate option tag. */
-static int backend_read(void* ctx, CCFile *file, CCArena *arena, size_t n, CCSlice* out, CCAsyncHandle* h, const CCDeadline* d) {
+static int backend_read(void* ctx, CCFile *file, CCArena arena, size_t n, CCSlice* out, CCAsyncHandle* h, const CCDeadline* d) {
     (void)ctx;
-    if (!file || !file->handle || !arena || !out || !h) return EINVAL;
+    if (!file || !file->handle || !cc_arena_is_live(arena) || !out || !h) return EINVAL;
     int fd = fileno(file->handle); if (fd < 0) return EBADF;
     int nb = set_nonblock(fd); if (nb != 0) return nb;
     void* buf = cc_arena_alloc(arena, n, 1);
@@ -96,9 +96,9 @@ static int backend_read(void* ctx, CCFile *file, CCArena *arena, size_t n, CCSli
     return 0;
 }
 
-static int backend_read_line(void* ctx, CCFile *file, CCArena *arena, CCSlice* out, CCAsyncHandle* h, const CCDeadline* d) {
+static int backend_read_line(void* ctx, CCFile *file, CCArena arena, CCSlice* out, CCAsyncHandle* h, const CCDeadline* d) {
     (void)ctx;
-    if (!file || !file->handle || !arena || !out || !h) return EINVAL;
+    if (!file || !file->handle || !cc_arena_is_live(arena) || !out || !h) return EINVAL;
     int fd = fileno(file->handle); if (fd < 0) return EBADF;
     int nb = set_nonblock(fd); if (nb != 0) return nb;
     size_t cap = 256;

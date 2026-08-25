@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static CCSlice demo_policy(CCArena *arena, CCSlice tag, CCSlice value) {
+static CCSlice demo_policy(CCArena arena, CCSlice tag, CCSlice value) {
     if (CCSlice_is_empty(&tag)) return value;
     CCString out = cc_string_new();
     out.append("[", arena);

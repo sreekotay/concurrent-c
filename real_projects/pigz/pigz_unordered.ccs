@@ -96,7 +96,9 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
         cc_atomic_fetch_add(&g_bytes_out, pos);
         cc_atomic_fetch_add(&g_blocks_done, 1);
 
-        res->arena = cc_arena_detach(res_arena);
+        res->arena = cc_arena_detach(res_arena) !>(e) {
+            return cc_err(cc_io_error(CC_IO_OTHER));
+        };
         return cc_ok(res);
     }
 }
@@ -136,7 +138,8 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;
 
-    CCNursery consumer = @create(NULL, () => [out_ptr, res_rx] {
+    CCNursery consumer = @create() !> @destroy;
+    consumer.spawn(() => [out_ptr, res_rx] {
         CompressedResult* r;
         while (cc_chan_recv(res_rx.raw, &r, sizeof(r)) == 0) {
             if (r) {
@@ -144,17 +147,13 @@ int compress_file(const char* in_path, const char* out_path, int level) {
                 cc_arena_free(&r->arena);
             }
         }
-    }) @destroy;
-    if (!consumer) {
-        fprintf(stderr, "Failed to create consumer nursery\n");
-        return 1;
-    }
+    });
 
-    CCNursery producer = @create(consumer, () => [in_ptr, res_tx] {
-        CCNursery workers = @create() !> @detach;
-        if (!workers) {
-            return 0;
-        }
+    CCNursery producer = @create(consumer) !> @destroy {
+        chan_close(res_tx);
+    };
+    producer.spawn(() => [in_ptr, res_tx] {
+        CCNursery workers = @create() !> @destroy;
 
         long seq = 0;
         while (true) {
@@ -191,15 +190,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             if (is_last) break;
         }
         (void)workers.wait();
-        workers->free();
-    }) @destroy {
-        chan_close(res_tx);
-    };
-    if (!producer) {
-        chan_close(res_tx);
-        fprintf(stderr, "Failed to create producer nursery\n");
-        return 1;
-    }
+    });
 
     cc_file_sync(&out_file);
     return 0;

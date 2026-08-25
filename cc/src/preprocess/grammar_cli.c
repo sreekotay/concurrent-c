@@ -758,7 +758,7 @@ static char *cc__cli_grammar_emit(const char *name,
 
     if (!cli_buf_printf(&buf,
                         "static inline int %s_parse_args(int argc, char **argv, "
-                        "CCArena *arena, %s *out) {\n"
+                        "CCArena arena, %s *out) {\n"
                         "    CCCliFillResult r;\n"
                         "    if (!out) return 0;\n"
                         "    memset(out, 0, sizeof(*out));\n"
@@ -772,7 +772,7 @@ static char *cc__cli_grammar_emit(const char *name,
                         "%s__cli_fields, %s__cli_field_count);\n"
                         "}\n"
                         "static inline CCResult_bool_CCError %s_prepare(\n"
-                        "        int argc, char **argv, CCArena *arena, %s *out, "
+                        "        int argc, char **argv, CCArena arena, %s *out, "
                         "FILE *usage_out) {\n"
                         "    if (!out) {\n"
                         "        return cc_err_CCResult_bool_CCError(\n"

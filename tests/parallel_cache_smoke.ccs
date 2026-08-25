@@ -22,8 +22,8 @@ static cc_atomic_int g_hits;
 static int run_par(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts@(CAP, 1, &arena) @destroy;
-    if (!ts.excl)
+    CCTurnstile ts@(CAP, 1, arena) @destroy;
+    if (!cc_exclusive_is_live(ts.excl))
         return 1;
     Slot s = {0} @destroy {
         cc_atomic_fetch_add(&g_destroyed, 1);
@@ -45,8 +45,8 @@ static int run_par(void) {
 static int run_seq(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts@(CAP, 1, &arena) @destroy;
-    if (!ts.excl)
+    CCTurnstile ts@(CAP, 1, arena) @destroy;
+    if (!cc_exclusive_is_live(ts.excl))
         return 1;
     int before = cc_atomic_load(&g_destroyed);
     Slot s = {0} @destroy {

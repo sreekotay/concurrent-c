@@ -12,7 +12,7 @@
  * (COMPTIME_CAPABILITY_MODEL.md §7b). */
 @comptime {
     CCArena a = cc_arena_create(4096);
-    CCMapII *m = CCMapII_init(&a);
+    CCMapII *m = CCMapII_init(a);
     for (int i = 1; i <= 6; i++)
         CCMapII_insert(m, i, i * i);
 

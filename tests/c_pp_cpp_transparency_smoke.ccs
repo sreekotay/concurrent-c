@@ -18,7 +18,7 @@ static int cpp_t_keep_nop(void* env, int id, CCSlice v) {
 static void cpp_t_demand_grammars(void) {
     CCArena gate = cc_arena_create(4096);
     (void)PpTok_match(";", 1);
-    (void)PpTok_collect(";", 1, &gate, cpp_t_keep_nop, NULL);
+    (void)PpTok_collect(";", 1, gate, cpp_t_keep_nop, NULL);
     (void)PpStmt_match("break;", 6);
     cc_arena_free(&gate);
 }
@@ -47,8 +47,7 @@ int main(void) {
 
     if (!owned) { printf("FAIL: oom\n"); return 1; }
     memcpy(owned, src, strlen(src) + 1);
-    ft = tape_cache_load_bytes(&cache, "<cpp-transparency>", owned, strlen(src),
-                               &arena);
+    ft = tape_cache_load_bytes(&cache, "<cpp-transparency>", owned, strlen(src), arena);
     if (!ft) { printf("FAIL: tape\n"); return 1; }
 
     pp.cache = &cache;
@@ -132,8 +131,7 @@ int main(void) {
 
         if (!owned2) { printf("FAIL: oom ifdef\n"); return 1; }
         memcpy(owned2, src2, strlen(src2) + 1);
-        ft2 = tape_cache_load_bytes(&cache, "<cpp-ifdef>", owned2, strlen(src2),
-                                    &arena);
+        ft2 = tape_cache_load_bytes(&cache, "<cpp-ifdef>", owned2, strlen(src2), arena);
         if (!ft2) { printf("FAIL: tape ifdef\n"); return 1; }
         pp2.cache = &cache;
         pp2.arena = &arena;

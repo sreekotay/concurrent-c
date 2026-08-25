@@ -18,7 +18,7 @@ static int test_attached_and_equals_forms(void) {
     char *argv[] = { "prog", "-p4", "--suffix=.zz", "input.ccs" };
     CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
     SmokeOpts opts = {0};
-    if (!cc_parse_args(SmokeOpts, 4, argv, &arena, &opts)) return 1;
+    if (!cc_parse_args(SmokeOpts, 4, argv, arena, &opts)) return 1;
     if (!opts.processes_present || opts.processes != 4) return 2;
     {
         char[:0] suf = opts.suffix;
@@ -34,7 +34,7 @@ static int test_defaults(void) {
     char *argv[] = { "prog" };
     CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
     SmokeOpts opts = {0};
-    if (!cc_parse_args(SmokeOpts, 1, argv, &arena, &opts)) return 50;
+    if (!cc_parse_args(SmokeOpts, 1, argv, arena, &opts)) return 50;
     if (opts.processes_present || opts.processes != 2) return 51;
     {
         char[:0] suf = opts.suffix;
@@ -48,7 +48,7 @@ static int test_next_arg_and_double_dash(void) {
     char *argv[] = { "prog", "--processes", "7", "--", "-literal" };
     CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
     SmokeOpts opts = {0};
-    if (!cc_parse_args(SmokeOpts, 5, argv, &arena, &opts)) return 7;
+    if (!cc_parse_args(SmokeOpts, 5, argv, arena, &opts)) return 7;
     if (!opts.processes_present || opts.processes != 7) return 8;
     if (opts.file_len != 1) return 9;
     if (!CCSlice_eq_cstr(&opts.file[0], "-literal")) return 10;
@@ -59,7 +59,7 @@ static int test_aliases_and_clusters(void) {
     char *argv[] = { "prog", "-vh", "--fast", "-11" };
     CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
     SmokeOpts opts = {0};
-    if (!cc_parse_args(SmokeOpts, 4, argv, &arena, &opts)) return 12;
+    if (!cc_parse_args(SmokeOpts, 4, argv, arena, &opts)) return 12;
     if (!opts.help || opts.verbose != 1) return 13;
     if (!opts.level_present || opts.level != 11) return 14;
     return 0;
@@ -69,7 +69,7 @@ static int test_fast_sets_level(void) {
     char *argv[] = { "prog", "--fast" };
     CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
     SmokeOpts opts = {0};
-    if (!cc_parse_args(SmokeOpts, 2, argv, &arena, &opts)) return 15;
+    if (!cc_parse_args(SmokeOpts, 2, argv, arena, &opts)) return 15;
     if (!opts.level_present || opts.level != 1) return 16;
     return 0;
 }
@@ -79,10 +79,10 @@ static int test_digit_range_and_best(void) {
     char *argv_best[] = { "prog", "--best" };
     CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
     SmokeOpts opts = {0};
-    if (!cc_parse_args(SmokeOpts, 2, argv7, &arena, &opts)) return 60;
+    if (!cc_parse_args(SmokeOpts, 2, argv7, arena, &opts)) return 60;
     if (!opts.level_present || opts.level != 7) return 61;
     opts = (SmokeOpts){0};
-    if (!cc_parse_args(SmokeOpts, 2, argv_best, &arena, &opts)) return 62;
+    if (!cc_parse_args(SmokeOpts, 2, argv_best, arena, &opts)) return 62;
     if (!opts.level_present || opts.level != 9) return 63;
     return 0;
 }
@@ -93,7 +93,7 @@ static int test_overlay_helpers(void) {
     SmokeOpts opts = {0};
     int64_t level = 6;
     char *sufx = ".gz";
-    if (!cc_parse_args(SmokeOpts, 5, argv, &arena, &opts)) return 70;
+    if (!cc_parse_args(SmokeOpts, 5, argv, arena, &opts)) return 70;
     cc_cli_overlay_i64(&level, &opts, level);
     cc_cli_overlay_cstr(&sufx, &opts, suffix);
     if (level != 3) return 71;
@@ -107,11 +107,11 @@ static int test_missing_and_space_only_values(void) {
     char *argv_missing[] = { "prog", "--suffix", "--help" };
     CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
     SmokeOpts opts = {0};
-    if (cc_parse_args(SmokeOpts, 2, argv_bad_suffix, &arena, &opts)) return 17;
+    if (cc_parse_args(SmokeOpts, 2, argv_bad_suffix, arena, &opts)) return 17;
     opts = (SmokeOpts){0};
-    if (cc_parse_args(SmokeOpts, 2, argv_bad_comment, &arena, &opts)) return 18;
+    if (cc_parse_args(SmokeOpts, 2, argv_bad_comment, arena, &opts)) return 18;
     opts = (SmokeOpts){0};
-    if (cc_parse_args(SmokeOpts, 3, argv_missing, &arena, &opts)) return 19;
+    if (cc_parse_args(SmokeOpts, 3, argv_missing, arena, &opts)) return 19;
     return 0;
 }
 
@@ -119,7 +119,7 @@ static int test_help_parse(void) {
     char *argv[] = { "prog", "--help" };
     CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
     SmokeOpts opts = {0};
-    if (!cc_parse_args(SmokeOpts, 2, argv, &arena, &opts)) return 20;
+    if (!cc_parse_args(SmokeOpts, 2, argv, arena, &opts)) return 20;
     if (!opts.help) return 21;
     return 0;
 }
@@ -132,16 +132,16 @@ static int test_prepare_result(void) {
     char *argv_bad[] = { "prog", "--nosuch" };
     CCResult_bool_CCError r;
 
-    r = cc_prepare_args(SmokeOpts, 2, argv_ok, &arena, &opts, stderr);
+    r = cc_prepare_args(SmokeOpts, 2, argv_ok, arena, &opts, stderr);
     if (cc_is_err(r) || !cc_value(r)) return 40;
     if (!opts.processes_present || opts.processes != 4) return 41;
 
     opts = (SmokeOpts){0};
-    r = cc_prepare_args(SmokeOpts, 2, argv_help, &arena, &opts, stderr);
+    r = cc_prepare_args(SmokeOpts, 2, argv_help, arena, &opts, stderr);
     if (cc_is_err(r) || cc_value(r)) return 42; /* Ok(false) */
 
     opts = (SmokeOpts){0};
-    r = cc_prepare_args(SmokeOpts, 2, argv_bad, &arena, &opts, stderr);
+    r = cc_prepare_args(SmokeOpts, 2, argv_bad, arena, &opts, stderr);
     if (!cc_is_err(r)) return 43;
     return 0;
 }

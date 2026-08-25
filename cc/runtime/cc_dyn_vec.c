@@ -13,10 +13,11 @@
 #include <string.h>
 
 #include <ccc/cc_dyn_vec.cch>
+#undef cc_dyn_vec_init
 
-int cc_dyn_vec_init(cc_dyn_vec* v, CCArena* arena,
+int cc_dyn_vec_init(cc_dyn_vec* v, CCArena arena,
                     const cc_type_info* ti, size_t initial_cap) {
-    if (!v || !arena || !ti) return -1;
+    if (!v || !cc_arena_is_live(arena) || !ti) return -1;
     v->ti = ti;
     return cc_vec_init(&v->base, arena, ti->size, ti->align, initial_cap);
 }

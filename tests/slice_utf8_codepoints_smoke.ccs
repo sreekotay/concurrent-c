@@ -24,19 +24,19 @@ int main(void) {
     /* Free-function spelling (object first, arena last). */
     {
         char[:] s = @slice("hi");
-        CCResult_CCSlice_uint32_t_CCError r = cc_slice_utf8_codepoints(&s, &arena);
+        CCResult_CCSlice_uint32_t_CCError r = cc_slice_utf8_codepoints(&s, arena);
         assert(r.is_ok());
         uint32_t[:] cps = r.value();
         assert(cps.base.len == 2);
         assert(cps.at(0) == (uint32_t)'h');
         assert(cps.at(1) == (uint32_t)'i');
-        assert(cc_slice_is_from_arena_epoch(cps.base, &arena));
+        assert(cc_slice_is_from_arena_epoch(cps.base, arena));
     }
 
     /* UFCS family wrapper. */
     {
         char[:] s = @slice("z");
-        CCResult_CCSlice_uint32_t_CCError r = CCSlice_utf8_codepoints(&s, &arena);
+        CCResult_CCSlice_uint32_t_CCError r = CCSlice_utf8_codepoints(&s, arena);
         assert(r.is_ok());
         uint32_t[:] cps = r.value();
         assert(cps.base.len == 1);
@@ -142,13 +142,13 @@ int main(void) {
     /* Missing arena / null non-empty pointer. */
     {
         char[:] s = @slice("x");
-        CCResult_CCSlice_uint32_t_CCError r = s.utf8_codepoints(NULL);
+        CCResult_CCSlice_uint32_t_CCError r = s.utf8_codepoints(cc_arena_handle(NULL));
         assert(r.is_err());
         assert(r.error().kind == CC_ERR_INVALID_ARG);
     }
     {
         char[:] s = cc_slice_from_buffer(NULL, 1);
-        CCResult_CCSlice_uint32_t_CCError r = cc_slice_utf8_codepoints(&s, &arena);
+        CCResult_CCSlice_uint32_t_CCError r = cc_slice_utf8_codepoints(&s, arena);
         assert(r.is_err());
         assert(r.error().kind == CC_ERR_INVALID_ARG);
     }

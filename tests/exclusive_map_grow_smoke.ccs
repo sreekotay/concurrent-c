@@ -15,7 +15,7 @@ int main(void) {
     }
     CCArena arena = @create(megabytes(1)) @destroy;
     /* Sized hint 100 → 128; still grows through 1500 names. */
-    CCExclusive excl = cc_exclusive_create(&arena, 100) !> @destroy;
+    CCExclusive excl = cc_exclusive_create(arena, 100) !> @destroy;
 
     int64_t sum = 0;
     for (int i = 1; i <= NAMES; i++) {

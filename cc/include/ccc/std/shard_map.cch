@@ -62,9 +62,9 @@ static inline bool cc_shard_init_count(CCShard* m, size_t buckets) {
     m->arena = cc_arena_malloc(CC_SHARD_MAP_ARENA_ROOT);
     if (!cc_arena_valid(&m->arena)) return false;
     if (buckets == 0)
-        m->data = CCShardMapTable_init(&m->arena);
+        m->data = CCShardMapTable_init(m->arena);
     else
-        m->data = CCShardMapTable_init_count(&m->arena, buckets);
+        m->data = CCShardMapTable_init_count(m->arena, buckets);
     return m->data != NULL;
 }
 
@@ -101,12 +101,12 @@ static inline bool cc_shard_contains(CCShard* m, CCSlice key) {
     return cc_shard_get(m, key) != NULL;
 }
 
-static inline bool cc_shard_get_into(CCShard* m, CCSlice key, CCArena* arena,
+static inline bool cc_shard_get_into(CCShard* m, CCSlice key, CCArena arena,
                                     CCString* out) {
     CCString* v;
     if (!out) return false;
     memset(out, 0, sizeof(*out));
-    if (!arena) return false;
+    if (!cc_arena_is_live(arena)) return false;
     v = cc_shard_get(m, key);
     if (!v) return false;
     *out = cc_string_from_slice(arena, cc_string_as_slice(v));
@@ -125,24 +125,24 @@ static inline bool cc_shard_put(CCShard* m, CCSlice key, CCSlice val) {
     pk = cc_slice_packed_borrow_slice(&view, key);
     h = cc_map_hash_slice_packed(pk);
     cur = CCShardMapTable_get_ptr_h(m->data, pk, h);
-    owned = cc_string_from_slice(&m->arena, val);
+    owned = cc_string_from_slice(m->arena, val);
     if (cc_string_failed(&owned)) return false;
 
     if (cur) {
-        cc_string_release(cur, &m->arena);
+        cc_string_release(cur, m->arena);
         *cur = owned;
         return true;
     }
 
-    packed = cc_slice_to_packed(&key, &m->arena);
+    packed = cc_slice_to_packed(&key, m->arena);
     if (!cc_is_ok(packed)) {
-        cc_string_release(&owned, &m->arena);
+        cc_string_release(&owned, m->arena);
         return false;
     }
     durable = packed.u.value;
     if (CCShardMapTable_insert(m->data, durable, owned) != 0) {
-        cc_string_release(&owned, &m->arena);
-        cc_slice_packed_release(&m->arena, &durable);
+        cc_string_release(&owned, m->arena);
+        cc_slice_packed_release(m->arena, &durable);
         return false;
     }
     return true;
@@ -161,9 +161,9 @@ static inline bool cc_shard_delete(CCShard* m, CCSlice key) {
     if (di == SIZE_MAX) return false;
     v = CCShardMapTable_at_ptr(m->data, di);
     doomed = *CCShardMapTable_key_ptr(m->data, di);
-    if (v) cc_string_release(v, &m->arena);
+    if (v) cc_string_release(v, m->arena);
     if (!CCShardMapTable_del_at(m->data, di, bucket)) return false;
-    cc_slice_packed_release(&m->arena, &doomed);
+    cc_slice_packed_release(m->arena, &doomed);
     return true;
 }
 
@@ -285,5 +285,8 @@ static inline CCShardHold cc_shard_map_hold_all(CCShardMap* m) {
     }
     return cc_shard_domain_hold_all(&m->domain);
 }
+
+#define cc_shard_get_into(m, key, a, out) \
+    (cc_shard_get_into)((m), (key), CC__ARENA_HANDLE(a), (out))
 
 #endif /* CC_STD_SHARD_MAP_H */

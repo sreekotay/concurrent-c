@@ -3,12 +3,20 @@
 #include <errno.h>
 #include <string.h>
 
+#undef cc_command_new
+#undef cc_command_run
+#undef cc_command_output
+#undef cc_command_output_with_input
+#undef cc_command_capture
+
 static int cc_command_push_raw(CCCommand *cmd, CCSlice arg) {
     size_t old_len;
     size_t offset;
     char *storage;
 
-    if (!cmd || !cmd->arena || !cc_vec_arena((const CCVec *)&cmd->offsets)) return -1;
+    if (!cmd || !cc_arena_is_live(cmd->arena)
+            || !cc_arena_is_live(cc_vec_arena((const CCVec *)&cmd->offsets)))
+        return -1;
 
     old_len = cmd->storage.len;
     offset = old_len;
@@ -30,13 +38,14 @@ static int cc_command_push_raw(CCCommand *cmd, CCSlice arg) {
     return 0;
 }
 
-CCCommand cc_command_new(CCArena *arena, CCSlice program) {
+CCCommand cc_command_new(CCArena arena, CCSlice program) {
     CCCommand cmd = {0};
     cmd.arena = arena;
     cmd.storage = cc_string_new();
     cmd.offsets = CCVec_size_t_init(arena, 0);
 
-    if (!arena || !cc_vec_arena((const CCVec *)&cmd.offsets)) {
+    if (!cc_arena_is_live(arena)
+            || !cc_arena_is_live(cc_vec_arena((const CCVec *)&cmd.offsets))) {
         CCCommand empty = {0};
         return empty;
     }
@@ -149,7 +158,7 @@ const char **cc_command_argv(CCCommand *cmd) {
     size_t i;
     const char *storage;
 
-    if (!cmd || !cmd->arena || !cmd->offsets.data) return NULL;
+    if (!cmd || !cc_arena_is_live(cmd->arena) || !cmd->offsets.data) return NULL;
     storage = cc_string_data_const(&cmd->storage);
     if (!storage) return NULL;
 
@@ -185,14 +194,14 @@ __CC_RESULT(CCProcess, CCIoError) cc_command_spawn(CCCommand *cmd) {
     return cc_process_spawn(&cfg);
 }
 
-__CC_RESULT(CCProcessOutput, CCIoError) cc_command_run(CCCommand *cmd, CCArena *arena) {
+__CC_RESULT(CCProcessOutput, CCIoError) cc_command_run(CCCommand *cmd, CCArena arena) {
     return cc_command_output(cmd, arena);
 }
 
-__CC_RESULT(CCProcessOutput, CCIoError) cc_command_output_with_input(CCCommand *cmd, CCArena *arena, CCSlice input) {
+__CC_RESULT(CCProcessOutput, CCIoError) cc_command_output_with_input(CCCommand *cmd, CCArena arena, CCSlice input) {
     CCProcessConfig cfg = cc_command_process_config(cmd);
     CCSlice stdin_data = input;
-    if (!arena || !cfg.program || !cfg.args) {
+    if (!cc_arena_is_live(arena) || !cfg.program || !cfg.args) {
         return cc_err_CCResult_CCProcessOutput_CCIoError(cc_io_from_errno(EINVAL));
     }
 
@@ -211,7 +220,7 @@ __CC_RESULT(CCProcessOutput, CCIoError) cc_command_output_with_input(CCCommand *
     return cc_process_run_with_input(arena, &cfg, stdin_data);
 }
 
-__CC_RESULT(CCProcessOutput, CCIoError) cc_command_output(CCCommand *cmd, CCArena *arena) {
+__CC_RESULT(CCProcessOutput, CCIoError) cc_command_output(CCCommand *cmd, CCArena arena) {
     CCSlice empty = {0};
     return cc_command_output_with_input(cmd, arena, empty);
 }

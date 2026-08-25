@@ -485,13 +485,13 @@ past the frame; arena slices pin the arena until join.
 Short critical sections on a `uint64_t` name. Do not `@await` under the hold.
 
 ```c
-CCExclusive* excl = cc_exclusive_create(&arena, 0);
-CCExclusiveGuard g = excl->acquire(name);
+CCExclusive excl = cc_exclusive_create(arena, 0) !> @destroy;
+CCExclusiveGuard g = excl.acquire(name);
 … mutate …
 g.release();
 
 /* Park until pred is true *under* the name. Not a condvar-on-held-guard. */
-CCExclusiveGuard w = excl->acquire_when(name, pred, env) !> @destroy;
+CCExclusiveGuard w = excl.acquire_when(name, pred, env) !> @destroy;
 /* held; pred was observed true while held */
 ```
 
@@ -574,7 +574,7 @@ CCArena owner = cc_arena_heap(kilobytes(4)) @destroy;
 owner.attach(obj, obj_down);               // destroy record; fires at free/reset
 CCArena child = owner.create_arena(512) !>; // L1 carved from owner: storage-bound
 CCArena kid   = owner.create_arena(0) !>;   // heap-backed: movable
-CCArenaPool* p = owner.create_pool(32);     // pool on owner; no explicit destroy
+CCArenaPool* p = owner.create_pool(32) !>;  // pool on owner; no explicit destroy
 
 CCArena tmp = cc_arena_heap(256) @destroy;
 CCArena tmp2 = cc_arena_heap(256) @destroy;

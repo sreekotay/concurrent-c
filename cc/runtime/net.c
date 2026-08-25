@@ -8,6 +8,13 @@
 #include <ccc/std/net.cch>
 #include <ccc/cc_channel.cch>
 
+#undef cc_socket_read
+#undef cc_socket_peer_addr
+#undef cc_socket_local_addr
+#undef cc_udp_recv_from
+#undef cc_dns_lookup
+#undef cc_ip_addr_to_string
+
 #include <errno.h>
 #include <poll.h>
 #include <pthread.h>
@@ -470,9 +477,9 @@ CCResult_bool_CCIoError cc_socket_try_read_into(CCSocket* sock,
     return cc_err_CCResult_bool_CCIoError(errno_to_io_error(errno));
 }
 
-CCResult_bool_CCIoError cc_socket_read(CCSocket* sock, CCArena* arena, size_t max_bytes, CCSlice* out) {
+CCResult_bool_CCIoError cc_socket_read(CCSocket* sock, CCArena arena, size_t max_bytes, CCSlice* out) {
     if (out) *out = (CCSlice){0};
-    if (!sock || !arena || !out) {
+    if (!sock || !cc_arena_is_live(arena) || !out) {
         return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
     if (max_bytes == 0) {
@@ -573,7 +580,7 @@ void cc_socket_close(CCSocket* sock) {
     }
 }
 
-CCSlice cc_socket_peer_addr(CCSocket* sock, CCArena* arena, CCNetError* out_err) {
+CCSlice cc_socket_peer_addr(CCSocket* sock, CCArena arena, CCNetError* out_err) {
     CCSlice result = {0};
     *out_err = CC_NET_OK;
 
@@ -613,7 +620,7 @@ CCSlice cc_socket_peer_addr(CCSocket* sock, CCArena* arena, CCNetError* out_err)
     return result;
 }
 
-CCSlice cc_socket_local_addr(CCSocket* sock, CCArena* arena, CCNetError* out_err) {
+CCSlice cc_socket_local_addr(CCSocket* sock, CCArena arena, CCNetError* out_err) {
     CCSlice result = {0};
     *out_err = CC_NET_OK;
 
@@ -702,7 +709,7 @@ size_t cc_udp_send_to(CCUdpSocket* sock, const char* data, size_t len,
     return (size_t)n;
 }
 
-CCUdpPacket cc_udp_recv_from(CCUdpSocket* sock, CCArena* arena, size_t max_bytes, CCNetError* out_err) {
+CCUdpPacket cc_udp_recv_from(CCUdpSocket* sock, CCArena arena, size_t max_bytes, CCNetError* out_err) {
     CCUdpPacket pkt = {0};
     *out_err = CC_NET_OK;
 
@@ -759,7 +766,7 @@ void cc_udp_close(CCUdpSocket* sock) {
  * DNS
  * ============================================================================ */
 
-CCSlice cc_dns_lookup(CCArena* arena, const char* hostname, size_t hostname_len, CCNetError* out_err) {
+CCSlice cc_dns_lookup(CCArena arena, const char* hostname, size_t hostname_len, CCNetError* out_err) {
     CCSlice result = {0};
     *out_err = CC_NET_OK;
 
@@ -828,7 +835,7 @@ CCSlice cc_dns_lookup(CCArena* arena, const char* hostname, size_t hostname_len,
     return result;
 }
 
-CCSlice cc_ip_addr_to_string(CCIpAddr* addr, CCArena* arena) {
+CCSlice cc_ip_addr_to_string(CCIpAddr* addr, CCArena arena) {
     CCSlice result = {0};
 
     char buf[64];

@@ -85,7 +85,7 @@ int main(void) {
         return 0;
     }
 
-    CCResult_CCJsHost_CCJsError mk = cc_js_host_new(&a);
+    CCResult_CCJsHost_CCJsError mk = cc_js_host_new(a);
     if (!mk.ok) {
         printf("new failed: %s\n", mk.u.error.base.message);
         return 1;
@@ -95,7 +95,7 @@ int main(void) {
 
     /* Node embeds once per process: a second live handle is refused,
      * naming the constraint. */
-    CCResult_CCJsHost_CCJsError second = cc_js_host_new(&a);
+    CCResult_CCJsHost_CCJsError second = cc_js_host_new(a);
     printf("second_new_refused %s\n",
            !second.ok && strstr(second.u.error.base.message, "already hosts")
                ? "true" : "false");
@@ -112,7 +112,7 @@ int main(void) {
     cc_js_host_close(&host);
     CCResult_void_CCJsError after = cc_js_host_run(&host, rung_state, NULL);
     printf("run_after_close_refused %s\n", !after.ok ? "true" : "false");
-    CCResult_CCJsHost_CCJsError again = cc_js_host_new(&a);
+    CCResult_CCJsHost_CCJsError again = cc_js_host_new(a);
     printf("new_after_close_refused %s\n", !again.ok ? "true" : "false");
 
     /* Reaching this return proves teardown released the loop thread. */

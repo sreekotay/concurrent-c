@@ -104,7 +104,9 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
         cc_atomic_fetch_add(&g_bytes_out, pos);
         cc_atomic_fetch_add(&g_blocks_done, 1);
 
-        res->arena = cc_arena_detach(res_arena);
+        res->arena = cc_arena_detach(res_arena) !>(e) {
+            return cc_err(cc_io_error(CC_IO_OTHER));
+        };
         return cc_ok(res);
     }
 }
@@ -179,6 +181,7 @@ static void print_stats(const char* label) {
 }
 
 int compress_file(const char* in_path, const char* out_path, int level) {
+    @errhandler(CCError e) { return cc_err_log(e); }
     cc_atomic_store(&g_pipeline_error, 0);
     cc_atomic_store(&g_queue_wait_ns, 0);
     cc_atomic_store(&g_compress_ns, 0);
@@ -206,7 +209,8 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;
 
-    CCNursery consumer = @create(NULL, () => [out_ptr, tasks_rx] {
+    CCNursery consumer = @create() !> @destroy;
+    consumer.spawn(() => [out_ptr, tasks_rx] {
         void* result;
         while (ordered_recv(tasks_rx, &result) == 1) {
             CompressedResult* r = (CompressedResult*)result;
@@ -218,14 +222,13 @@ int compress_file(const char* in_path, const char* out_path, int level) {
                 cc_arena_free(&r->arena);
             }
         }
-    }) @destroy;
-    if (!consumer) {
-        fprintf(stderr, "Failed to create consumer nursery\n");
-        return 1;
-    }
+    });
 
     int comp_level = level;
-    CCNursery producer = @create(consumer, () => [in_ptr, tasks_tx, comp_level] {
+    CCNursery producer = @create(consumer) !> @destroy {
+        chan_close(tasks_tx);
+    };
+    producer.spawn(() => [in_ptr, tasks_tx, comp_level] {
         long seq = 0;
         while (true) {
             CCArena blk_arena = cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
@@ -261,14 +264,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             
             if (is_last) break;
         }
-    }) @destroy {
-        chan_close(tasks_tx);
-    };
-    if (!producer) {
-        chan_close(tasks_tx);
-        fprintf(stderr, "Failed to create producer nursery\n");
-        return 1;
-    }
+    });
 
     cc_file_sync(&out_file);
     if (cc_atomic_load(&g_pipeline_error)) return 1;

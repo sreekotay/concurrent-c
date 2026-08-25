@@ -76,7 +76,7 @@ struct CCShape {
     const char* last_key;
     CCShapeDesc* lookup;                 /* key->slot; built at finalization */
     uint32_t lookup_cap;
-    CCArena* ar;
+    CCArena ar;
 };
 
 typedef struct { const char* key; uint32_t klen, hash; CCShapeVal v; } CCShapeDEnt;
@@ -89,7 +89,7 @@ typedef struct { uint32_t n, cap; CCShapeDEnt ents[]; } CCShapeDict;
 #define CC_SHAPE_DICT_WIDTH 32
 
 typedef struct {
-    CCArena* ar;                         /* persistent: shapes, keys, lookups */
+    CCArena ar;                         /* persistent: shapes, keys, lookups */
     CCShape root, dict;
     struct { uint64_t h; CCShape* to; } ttab[CC_SHAPE_MAX * 2];
     uint32_t nshapes;
@@ -102,7 +102,7 @@ static inline uint32_t cc_shape__hash(const char* k, size_t n) {
     return h ? h : 1u;
 }
 
-static inline CCShapeReg* cc_shape_reg_create(CCArena* persistent) {
+static inline CCShapeReg* cc_shape_reg_create(CCArena persistent) {
     CCShapeReg* r = (CCShapeReg*)cc_arena_alloc_local(persistent, sizeof(CCShapeReg), 16);
     if (!r) return 0;
     memset(r, 0, sizeof *r);
@@ -174,11 +174,11 @@ static inline CCShape* cc_shape__advance(CCShapeReg* r, CCShape* s,
  * ONCE, straight into its slot. No scratch stack, no copy-out. */
 typedef struct CCShapeB {
     CCShapeReg* rg;
-    CCArena* rec;
+    CCArena rec;
     char* rb; size_t rb_left;            /* record slab: 1 arena hit / ~8KB */
 } CCShapeB;
 
-static inline void cc_shape_build(CCShapeB* b, CCShapeReg* rg, CCArena* rec) {
+static inline void cc_shape_build(CCShapeB* b, CCShapeReg* rg, CCArena rec) {
     b->rg = rg; b->rec = rec; b->rb = 0; b->rb_left = 0;
 }
 
@@ -354,5 +354,8 @@ static inline CCSlice cc_shape_slice(const CCShapeVal* v) {
                                   : cc_slice_make_id(2ULL, false, false, true);
     return cc_slice_from_parts((void*)v->u.bytes, l, id);
 }
+
+#define cc_shape_reg_create(a) (cc_shape_reg_create)(CC__ARENA_HANDLE(a))
+#define cc_shape_build(b, rg, a) (cc_shape_build)((b), (rg), CC__ARENA_HANDLE(a))
 
 #endif /* CCC_CC_SHAPE_CCH */

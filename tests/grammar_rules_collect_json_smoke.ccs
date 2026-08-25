@@ -30,7 +30,7 @@ static int count_cb(void* env, int id, CCSlice v) {
     return 0;
 }
 
-static long file_collect(const char* path, CCArena* a, Counts* c) {
+static long file_collect(const char* path, CCArena a, Counts* c) {
     FILE* f = fopen(path, "rb");
     if (!f) return -1;
     fseek(f, 0, SEEK_END);
@@ -52,7 +52,7 @@ int main(void) {
     {
         Counts c = {0};
         const char* src = "\"hello\"";
-        if (!Json_collect(src, strlen(src), &arena, count_cb, &c)) { printf("FAIL: clean parse\n"); return 1; }
+        if (!Json_collect(src, strlen(src), arena, count_cb, &c)) { printf("FAIL: clean parse\n"); return 1; }
         if (c.borrowed != 1 || c.materialized != 0) { printf("FAIL: clean not borrowed\n"); return 1; }
         if (c.last_str.len != 5 || memcmp(c.last_str.ptr, "hello", 5) != 0) { printf("FAIL: clean bytes\n"); return 1; }
     }
@@ -60,7 +60,7 @@ int main(void) {
     {
         Counts c = {0};
         const char* src = "\"a\\nb \\u00e9\"";
-        if (!Json_collect(src, strlen(src), &arena, count_cb, &c)) { printf("FAIL: esc parse\n"); return 1; }
+        if (!Json_collect(src, strlen(src), arena, count_cb, &c)) { printf("FAIL: esc parse\n"); return 1; }
         if (c.materialized != 1 || c.borrowed != 0) { printf("FAIL: esc not materialized\n"); return 1; }
         const char want[] = "a\nb \xc3\xa9";
         if (c.last_str.len != sizeof(want) - 1 || memcmp(c.last_str.ptr, want, sizeof(want) - 1) != 0) {
@@ -72,7 +72,7 @@ int main(void) {
     {
         Counts c = {0};
         const char* src = "\"\\uD83D\\uDE00\"";
-        if (!Json_collect(src, strlen(src), &arena, count_cb, &c)) { printf("FAIL: pair parse\n"); return 1; }
+        if (!Json_collect(src, strlen(src), arena, count_cb, &c)) { printf("FAIL: pair parse\n"); return 1; }
         if (c.materialized != 1) { printf("FAIL: pair not materialized\n"); return 1; }
         const char want[] = "\xf0\x9f\x98\x80";
         if (c.last_str.len != sizeof(want) - 1 || memcmp(c.last_str.ptr, want, sizeof(want) - 1) != 0) {
@@ -80,17 +80,17 @@ int main(void) {
             return 1;
         }
         Counts h = {0};
-        if (Json_collect("\"\\uD83D\"", 8, &arena, count_cb, &h)) {
+        if (Json_collect("\"\\uD83D\"", 8, arena, count_cb, &h)) {
             printf("FAIL: lone high accepted\n"); return 1; }
         Counts l = {0};
-        if (Json_collect("\"\\uDE00\"", 8, &arena, count_cb, &l)) {
+        if (Json_collect("\"\\uDE00\"", 8, arena, count_cb, &l)) {
             printf("FAIL: lone low accepted\n"); return 1; }
     }
     /* corpora: reproduce the golden parser's exact borrow/materialize split */
     {
         Counts t = {0};
         cc_arena_reset(&arena);
-        long ok = file_collect("examples/serdes/json/twitter.json", &arena, &t);
+        long ok = file_collect("examples/serdes/json/twitter.json", arena, &t);
         if (ok == 0) { printf("FAIL: twitter rejected\n"); return 1; }
         if (ok == 1 && (t.borrowed != 17787 || t.materialized != 312)) {
             printf("FAIL: twitter cow split %ld/%ld != 17787/312 (golden)\n",
@@ -99,7 +99,7 @@ int main(void) {
         }
         Counts m = {0};
         cc_arena_reset(&arena);
-        ok = file_collect("examples/serdes/json/numbers.json", &arena, &m);
+        ok = file_collect("examples/serdes/json/numbers.json", arena, &m);
         if (ok == 0) { printf("FAIL: numbers rejected\n"); return 1; }
         if (ok == 1 && m.numbers != 30000) { printf("FAIL: numbers %ld != 30000\n", m.numbers); return 1; }
     }

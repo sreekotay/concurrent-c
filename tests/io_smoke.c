@@ -20,7 +20,7 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     if (!arena.base) { cc_file_close(&f); return 4; }
 
-    CCResult_CCSlice_CCIoError r = cc_file_read_all(&f, &arena);
+    CCResult_CCSlice_CCIoError r = cc_file_read_all(&f, arena);
     if (!r.ok) { cc_file_close(&f); cc_arena_free(&arena); return 5; }
 
     CCSlice out = r.u.value;

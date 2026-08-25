@@ -3,12 +3,12 @@
 #include <string.h>
 
 int main(void) {
-    char buffer[512];
+    _Alignas(CCArenaHost) char buffer[512];
     CCArena arena = cc_arena_create_buffer(buffer, sizeof(buffer), CC_ARENA_FIXED);
     assert(arena.base != NULL);
 
     CCString stable = cc_string_new();
-    assert(cc_string_push(&stable, "stable-promoted-123", &arena) != NULL);
+    assert(cc_string_push(&stable, "stable-promoted-123", arena) != NULL);
 
     CCSlice stable_view = cc_string_as_slice(&stable);
     uint64_t stable_provenance = cc_string_provenance(&stable);
@@ -21,7 +21,7 @@ int main(void) {
     /* SSO fits sizeof(void*) bytes (4 on ILP32, 8 on LP64) — keep payloads
      * short enough for both. */
     CCString inline_stable = cc_string_new();
-    assert(cc_string_push(&inline_stable, "ab", &arena) != NULL);
+    assert(cc_string_push(&inline_stable, "ab", arena) != NULL);
     CCSlice inline_stable_view = cc_string_as_slice(&inline_stable);
     assert(cc_string_provenance(&inline_stable) == CC_SLICE_ID_UNTRACKED);
     assert(inline_stable_view.id == CC_SLICE_ID_UNTRACKED);
@@ -32,7 +32,7 @@ int main(void) {
     assert(arena.a->provenance != cp.provenance);
 
     CCString transient = cc_string_new();
-    assert(cc_string_push(&transient, "temp-promoted-456", &arena) != NULL);
+    assert(cc_string_push(&transient, "temp-promoted-456", arena) != NULL);
     CCSlice transient_view = cc_string_as_slice(&transient);
     uint64_t transient_id = cc_slice_make_id(cc_string_provenance(&transient), false, false, false);
     assert(transient_view.id == transient_id);
@@ -53,14 +53,14 @@ int main(void) {
     assert(memcmp(inline_stable_view.ptr, "ab", inline_stable_view.len) == 0);
 
     CCString after_restore_inline = cc_string_new();
-    assert(cc_string_push(&after_restore_inline, "cd", &arena) != NULL);
+    assert(cc_string_push(&after_restore_inline, "cd", arena) != NULL);
     CCSlice after_restore_inline_view = cc_string_as_slice(&after_restore_inline);
     assert(cc_string_provenance(&after_restore_inline) == CC_SLICE_ID_UNTRACKED);
     assert(after_restore_inline_view.id == CC_SLICE_ID_UNTRACKED);
 
     /* New promoted allocations after restore re-enter the restored checkpoint epoch. */
     CCString after_restore_heap = cc_string_new();
-    assert(cc_string_push(&after_restore_heap, "after-promoted-789", &arena) != NULL);
+    assert(cc_string_push(&after_restore_heap, "after-promoted-789", arena) != NULL);
     CCSlice after_restore_heap_view = cc_string_as_slice(&after_restore_heap);
     assert(cc_string_provenance(&after_restore_heap) == cp.provenance);
     assert(after_restore_heap_view.id == stable_id);

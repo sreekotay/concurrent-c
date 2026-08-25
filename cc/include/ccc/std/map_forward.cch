@@ -24,7 +24,8 @@
 #undef __CC_MAP_INIT
 #endif
 #define __CC_MAP(K, V) Map_##K##_##V
-#define __CC_MAP_INIT(K, V, arena) Map_##K##_##V##_init((arena))
+#define __CC_MAP_INIT(K, V, arena) \
+    Map_##K##_##V##_init(CC__ARENA_HANDLE(arena))
 
 #ifndef __CC_MAP_GENERIC_DEFINED
 #define __CC_MAP_GENERIC_DEFINED
@@ -261,9 +262,10 @@ static inline ${mangled}_chk* ${mangled}_chk_p(void *a) {
 #else
 ${fwd}
 CC_MAP_DECL_ARENA(${k}, ${v}, ${mangled}, ${hash}, ${eq})
-static inline ${mangled}* ${mangled}_new(CCArena* __a) {
+static inline ${mangled}* cc__${mangled}_new(CCArena __a) {
     return ${mangled}_init(__a);
 }
+#define ${mangled}_new(ar) cc__${mangled}_new(CC__ARENA_HANDLE(ar))
 
 /* cc_type_info for ${mangled} (serdes) */
 static const cc_type_info __cc_ti_${mangled} = {

@@ -57,7 +57,7 @@ int main(void) {
     {
         size_t n = resp_bomb(buf, 200);
         Deep d;
-        if (!Deep_parse(buf, n, &arena, &d) || d.kind != Deep_array) {
+        if (!Deep_parse(buf, n, arena, &d) || d.kind != Deep_array) {
             printf("FAIL: depth 256 rejected 200-deep\n"); return 1; }
     }
 
@@ -65,13 +65,13 @@ int main(void) {
     {
         size_t n = resp_bomb(buf, 2);
         Shallow s;
-        if (!Shallow_parse(buf, n, &arena, &s) || s.kind != Shallow_array) {
+        if (!Shallow_parse(buf, n, arena, &s) || s.kind != Shallow_array) {
             printf("FAIL: depth 4 rejected 2-deep\n"); return 1; }
         n = resp_bomb(buf, 6);
-        if (Shallow_parse(buf, n, &arena, &s)) {
+        if (Shallow_parse(buf, n, arena, &s)) {
             printf("FAIL: depth 4 accepted 6-deep\n"); return 1; }
         size_t pos = 0;
-        bool !>(CCError) t = Shallow_try_read(buf, n, &pos, &arena, &s);
+        bool !>(CCError) t = Shallow_try_read(buf, n, &pos, arena, &s);
         if (!t.is_err() || t.error().kind != CC_ERR_PARSE) {
             printf("FAIL: nest overflow not PARSE\n"); return 1; }
     }

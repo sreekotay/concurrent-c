@@ -192,9 +192,11 @@ static int test_last_live_does_not_unbreak_keep_set(void) {
         cc_arena_free(&a);
         return fail(6, "last-live slab release");
     }
-    if (a.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE) {
+    /* Last-live on the root with an armed loan does not rewind and
+     * does not clear a hole. Restore still refuses: keep-set punctured. */
+    if ((a.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE) == 0) {
         cc_arena_free(&a);
-        return fail(6, "last-live should clear slab hole");
+        return fail(6, "last-live with loan must punch hole");
     }
     if (cc_arena_restore(cp)) {
         cc_arena_free(&a);
@@ -255,16 +257,25 @@ static int test_stale_nested_restore_refuses(void) {
         cc_arena_free(&a);
         return fail(8, "third slab");
     }
-    if (!cc_arena_restore(cp1)) {
+    /* LIFO: the older handle is not the latest armed loan. */
+    if (cc_arena_restore(cp1)) {
         cc_arena_free(&a);
-        return fail(8, "restore older checkpoint");
+        return fail(8, "non-LIFO older restore must refuse");
+    }
+    if (!cc_arena_restore(cp2)) {
+        cc_arena_free(&a);
+        return fail(8, "LIFO restore of latest checkpoint");
     }
     if (cc_arena_restore(cp2)) {
         cc_arena_free(&a);
-        return fail(8, "stale nested restore must refuse");
+        return fail(8, "consumed nested restore must refuse");
+    }
+    if (!cc_arena_restore(cp1)) {
+        cc_arena_free(&a);
+        return fail(8, "restore older after newer");
     }
     cc_arena_free(&a);
-    printf("  stale nested restore refuses OK\n");
+    printf("  LIFO nested restore OK\n");
     return 0;
 }
 

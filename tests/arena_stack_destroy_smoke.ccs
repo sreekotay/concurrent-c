@@ -1,4 +1,4 @@
-/* cc_arena_stack / cc_arena_pool_stack attach @destroy (L2/Main at scope exit). */
+/* cc_arena_stack / bind_buffer / pool_stack attach @destroy (L2/Main at exit). */
 #include <ccc/std/prelude.cch>
 #include <assert.h>
 #include <stdio.h>
@@ -13,6 +13,19 @@ int main(void) {
         p = cc_arena_alloc(&s, 128, 8);
         assert(p);
         /* no explicit free — @destroy drains overflow at block exit */
+    }
+    {
+        char buf[32];
+        size_t n = 48;
+        void *p;
+        cc_arena_bind_buffer(b, buf, sizeof(buf));
+        if (b.a) b.a->_flags |= CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW;
+        p = cc_arena_alloc(&b, 128, 8);
+        assert(p);
+        cc_arena_stack(s, n);
+        p = cc_arena_alloc(&s, 16, 16);
+        assert(p);
+        assert(((uintptr_t)p & 15) == 0);
     }
     {
         cc_arena_pool_stack(ps, sizeof(int), 64);

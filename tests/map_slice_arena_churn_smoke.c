@@ -43,7 +43,7 @@ static int run_arena_map(void) {
     CCArena arena = cc_arena_heap(1024 * 64);
     if (!arena.base) return 1;
 
-    SliceCompactMap *m = SliceCompactMap_init(&arena);
+    SliceCompactMap *m = SliceCompactMap_init(arena);
     if (!m) return 2;
 
     for (int i = 0; i < 2000; i++) {

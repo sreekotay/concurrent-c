@@ -3,6 +3,16 @@
 #include <ccc/cc_slice.cch>
 #include <ccc/std/io.cch>
 
+#undef cc_file_read_all
+#undef cc_file_read_all_async
+#undef cc_file_read_all_async_deadline
+#undef cc_file_read_async
+#undef cc_file_read_async_deadline
+#undef cc_file_read_line_async
+#undef cc_file_read_line_async_deadline
+#undef cc_file_read_into
+#undef cc_file_read_line_into
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,8 +35,8 @@ void cc_file_close(CCFile *file) {
     file->handle = NULL;
 }
 
-CCResult_CCSlice_CCIoError cc_file_read_all(CCFile *file, CCArena *arena) {
-    if (!file || !file->handle || !arena) {
+CCResult_CCSlice_CCIoError cc_file_read_all(CCFile *file, CCArena arena) {
+    if (!file || !file->handle || !cc_arena_is_live(arena)) {
         return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(EINVAL));
     }
 
@@ -106,7 +116,7 @@ int cc_file_close_async(CCExec* ex, CCFile *file, CCAsyncHandle* h) {
     return cc__async_complete(h, 0);
 }
 
-int cc_file_read_all_async(CCExec* ex, CCFile *file, CCArena *arena, CCSlice* out, CCAsyncHandle* h) {
+int cc_file_read_all_async(CCExec* ex, CCFile *file, CCArena arena, CCSlice* out, CCAsyncHandle* h) {
     (void)ex;
     if (!out) return EINVAL;
     CCResult_CCSlice_CCIoError r = cc_file_read_all(file, arena);
@@ -115,7 +125,7 @@ int cc_file_read_all_async(CCExec* ex, CCFile *file, CCArena *arena, CCSlice* ou
     return cc__async_complete(h, err);
 }
 
-int cc_file_read_async(CCExec* ex, CCFile *file, CCArena *arena, size_t n, CCSlice* out, CCAsyncHandle* h) {
+int cc_file_read_async(CCExec* ex, CCFile *file, CCArena arena, size_t n, CCSlice* out, CCAsyncHandle* h) {
     (void)ex;
     if (!out) return EINVAL;
     CCResult_bool_CCIoError r = cc_file_read(file, arena, n, out);
@@ -123,7 +133,7 @@ int cc_file_read_async(CCExec* ex, CCFile *file, CCArena *arena, size_t n, CCSli
     return cc__async_complete(h, err);
 }
 
-int cc_file_read_line_async(CCExec* ex, CCFile *file, CCArena *arena, CCSlice* out, CCAsyncHandle* h) {
+int cc_file_read_line_async(CCExec* ex, CCFile *file, CCArena arena, CCSlice* out, CCAsyncHandle* h) {
     (void)ex;
     if (!out) return EINVAL;
     CCResult_bool_CCIoError r = cc_file_read_line(file, arena, out);
