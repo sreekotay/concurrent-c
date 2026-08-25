@@ -8,7 +8,7 @@
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    if (!arena.base) return 1;
+    if (!cc_arena_is_live(arena)) return 1;
 
     double* xs = arena.allocT(16);
     if (!xs) return 2;

@@ -19,7 +19,7 @@ int main(void) {
             CapBlk* cap = cc_arena_alloc_T(CapBlk, &a);
             if (!cap) return;
             cap->seq = 42;
-            cap->arena = a.detach();
+            cap->arena = a.detach() !>;
             outer.spawn(() => [cap] {
                 g_got = cap->seq;
                 cap->arena.free();

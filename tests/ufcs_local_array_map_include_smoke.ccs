@@ -10,7 +10,7 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(64));
     Db db;
     Entr e;
-    if (!arena.base) return 1;
+    if (!cc_arena_is_live(arena)) return 1;
     db.entries = array_map_new::[int, Entr](&arena);
     if (!db.entries) return 2;
     e.x = 1;

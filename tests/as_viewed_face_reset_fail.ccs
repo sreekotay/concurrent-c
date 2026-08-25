@@ -12,7 +12,7 @@ typedef struct {
 int main(void) {
     Box b;
     CCArena tmp = cc_arena_heap(256) @destroy;
-    b.arena = tmp.detach();
+    b.arena = tmp.detach() !>;
     b.reset();
     return 0;
 }

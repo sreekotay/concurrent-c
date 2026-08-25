@@ -13,7 +13,7 @@ int main(void) {
         if (!avail) break;
 
         CCArena detached = blk_arena.detach/*x*/();
-        assert(detached.base);
+        assert(cc_arena_is_live(detached));
         detached.free();
         ran++;
         break;

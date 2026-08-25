@@ -7,13 +7,15 @@
 #include <stdio.h>
 
 int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "%s\n", e.message ? e.message : "error");
+        return 1;
+    }
     CCArena arena = @create(kilobytes(64)) @destroy;
-    CCExclusive* excl = cc_exclusive_create(&arena, 8);
-    if (!excl) return 1;
-    @defer cc_exclusive_destroy(excl);
+    CCExclusive excl = cc_exclusive_create(&arena, 8) !> @destroy;
 
-    CCExclusiveMutex a = excl->mutex(1);
-    CCExclusiveMutex b = excl->mutex(2);
+    CCExclusiveMutex a = excl.mutex(1);
+    CCExclusiveMutex b = excl.mutex(2);
     {
         CCExclusiveGuard g = a.acquire();
         g.release();
@@ -21,7 +23,7 @@ int main(void) {
     a.free(); /* drops key 1; entry back to pool */
 
     /* Name 1 is gone; resolve again (may reuse pooled entry). */
-    CCExclusiveMutex a2 = excl->mutex(1);
+    CCExclusiveMutex a2 = excl.mutex(1);
     {
         CCExclusiveGuard g = a2.acquire();
         g.release();

@@ -11,16 +11,16 @@
 #define NAMES 1024
 #define WORKERS 16
 
-static CCExclusive* g_excl;
+static CCExclusive g_excl;
 static int g_hits[NAMES];
 
 static void worker(int id) {
     int per = NAMES / WORKERS;
     int lo = id * per;
     int hi = (id == WORKERS - 1) ? NAMES : lo + per;
-    CCExclusive* excl = g_excl;
+    CCExclusive excl = g_excl;
     for (int i = lo; i < hi; i++) {
-        CCExclusiveGuard g = excl->acquire((uint64_t)i);
+        CCExclusiveGuard g = excl.acquire((uint64_t)i);
         g_hits[i] = 1;
         g.release();
     }
@@ -30,9 +30,8 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     CCArena arena = @create(megabytes(2)) @destroy;
     /* 8 slots → several grows while 16 fibers insert distinct names. */
-    g_excl = cc_exclusive_create(&arena, 8);
-    if (!g_excl) return 1;
-    @defer cc_exclusive_destroy(g_excl);
+    g_excl = cc_exclusive_create(&arena, 8) !>;
+    @defer cc_exclusive_destroy(&g_excl);
     memset(g_hits, 0, sizeof(g_hits));
 
     {
@@ -56,10 +55,10 @@ int main(void) {
     }
 
     /* Re-resolve every name after growth has settled. */
-    CCExclusive* excl = g_excl; /* local: UFCS on global incomplete ptr misses */
+    CCExclusive excl = g_excl; /* local: UFCS on global incomplete ptr misses */
     int64_t sum = 0;
     for (int i = 0; i < NAMES; i++) {
-        CCExclusiveGuard g = excl->acquire((uint64_t)i);
+        CCExclusiveGuard g = excl.acquire((uint64_t)i);
         sum += i;
         g.release();
     }

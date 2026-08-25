@@ -63,7 +63,7 @@ int main(void) {
 
     {
         CCArena tip = cc_arena_heap(tip_root);
-        tip.block_max = (uint16_t)block_max;
+        tip.a->block_max = (uint16_t)block_max;
         t0 = now_ms();
         for (r = 0; r < tip_rounds; r++) {
             p = NULL;
@@ -92,7 +92,7 @@ int main(void) {
     {
         CCArena bulk = cc_arena_heap(bulk_root);
         double t_reset;
-        bulk.block_max = (uint16_t)block_max;
+        bulk.a->block_max = (uint16_t)block_max;
         t0 = now_ms();
         for (i = 0; i < bulk_n; i++) {
             size_t n = bulk_size(i);
@@ -115,7 +115,7 @@ int main(void) {
 
     {
         CCArena ovf = cc_arena_heap(ovf_root);
-        ovf.block_max = (uint16_t)block_max;
+        ovf.a->block_max = (uint16_t)block_max;
         t0 = now_ms();
         for (i = 0; i < ovf_n; i++) {
             size_t n = 24 + (i * 17) % 512;
@@ -136,7 +136,7 @@ int main(void) {
     t0 = now_ms();
     for (i = 0; i < churn_n; i++) {
         CCArena c = cc_arena_heap(16 * 1024);
-        c.block_max = (uint16_t)block_max;
+        c.a->block_max = (uint16_t)block_max;
         for (j = 0; j < churn_each; j++) {
             size_t n = 16 + (j * 31) % 256;
             if (!cc_arena_alloc_local_grow(&c, n, 8)) {

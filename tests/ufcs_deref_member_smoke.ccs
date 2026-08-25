@@ -10,7 +10,7 @@ typedef struct Entry {
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4)) @destroy;
-    assert(arena.base);
+    assert(cc_arena_is_live(arena));
 
     Entry e = {0};
     e.key = cc_string_from_slice(&arena, @slice("hello"));

@@ -17,7 +17,7 @@ typedef struct {
 static void QuoteBox_destroy(QuoteBox *b) {
     if (!b) return;
     g_quote_box++;
-    if (b->a.base) b->a.destroy();
+    if (cc_arena_is_live(b->a)) b->a.destroy();
     memset(b, 0, sizeof(*b));
 }
 

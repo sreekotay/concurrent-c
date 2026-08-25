@@ -14,7 +14,7 @@ int main(void) {
     uint64_t stable_provenance = cc_string_provenance(&stable);
     uint64_t stable_id = cc_slice_make_id(stable_provenance, false, false, false);
     assert(stable_view.id == stable_id);
-    assert(stable_provenance == arena.provenance);
+    assert(stable_provenance == arena.a->provenance);
     assert(stable_view.len == strlen("stable-promoted-123"));
     assert(memcmp(stable_view.ptr, "stable-promoted-123", stable_view.len) == 0);
 
@@ -29,7 +29,7 @@ int main(void) {
 
     CCArenaCheckpoint cp = cc_arena_checkpoint(&arena);
     assert(cp.provenance == stable_provenance);
-    assert(arena.provenance != cp.provenance);
+    assert(arena.a->provenance != cp.provenance);
 
     CCString transient = cc_string_new();
     assert(cc_string_push(&transient, "temp-promoted-456", &arena) != NULL);
@@ -39,7 +39,7 @@ int main(void) {
     assert(transient_view.id != stable_view.id);
 
     cc_arena_restore(cp);
-    assert(arena.provenance == cp.provenance);
+    assert(arena.a->provenance == cp.provenance);
 
     /* Pre-checkpoint strings keep their original epoch and remain valid. */
     assert(cc_string_provenance(&stable) == cp.provenance);

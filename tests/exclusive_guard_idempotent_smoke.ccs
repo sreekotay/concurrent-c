@@ -6,12 +6,14 @@
 #include <stdio.h>
 
 int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "%s\n", e.message ? e.message : "error");
+        return 1;
+    }
     CCArena arena = @create(kilobytes(16)) @destroy;
-    CCExclusive* excl = cc_exclusive_create(&arena, 0);
-    if (!excl) return 1;
-    @defer cc_exclusive_destroy(excl);
+    CCExclusive excl = cc_exclusive_create(&arena, 0) !> @destroy;
 
-    CCExclusiveMutex m = excl->mutex(42);
+    CCExclusiveMutex m = excl.mutex(42);
     int x = 0;
     {
         CCExclusiveGuard g = m.acquire();

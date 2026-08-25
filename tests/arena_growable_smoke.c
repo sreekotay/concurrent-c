@@ -8,11 +8,11 @@ int main(void) {
     {
         CCArena a = cc_arena_heap(64);
         if (!a.base) { printf("FAIL: heap alloc\n"); return 1; }
-        if (a.block_max != CC_ARENA_DEFAULT_BLOCK_MAX) {
+        if (a.a->block_max != CC_ARENA_DEFAULT_BLOCK_MAX) {
             printf("FAIL: expected default block_max=%u\n", CC_ARENA_DEFAULT_BLOCK_MAX);
             return 1;
         }
-        if (a.block_idx != 0) { printf("FAIL: expected block_idx=0\n"); return 1; }
+        if (a.a->block_idx != 0) { printf("FAIL: expected block_idx=0\n"); return 1; }
 
         // Allocate enough to force several growths / overflow past the budget
         for (int i = 0; i < 100; i++) {
@@ -21,12 +21,12 @@ int main(void) {
             for (int j = 0; j < 10; j++) p[j] = i * 10 + j;
         }
 
-        if (a.block_idx == 0 && !(a._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
+        if (a.a->block_idx == 0 && !(a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
             printf("FAIL: expected growth or overflow\n");
             return 1;
         }
-        printf("  growth: block_idx=%d overflow=%d OK\n", a.block_idx,
-               (a._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) ? 1 : 0);
+        printf("  growth: block_idx=%d overflow=%d OK\n", a.a->block_idx,
+               (a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) ? 1 : 0);
         cc_arena_free(&a);
     }
 
@@ -38,13 +38,13 @@ int main(void) {
         for (int i = 0; i < 50; i++) {
             cc_arena_alloc_T_count(int, &a, 10);
         }
-        int saved_idx = a.block_idx;
+        int saved_idx = a.a->block_idx;
         if (saved_idx == 0) { printf("FAIL: no growth before reset\n"); return 2; }
 
         cc_arena_reset(&a);
-        if (a.block_idx != 0) { printf("FAIL: block_idx not 0 after reset\n"); return 2; }
-        if (a.prev != NULL) { printf("FAIL: prev not NULL after reset\n"); return 2; }
-        if (cc_atomic_load(&a.offset) != 0) { printf("FAIL: offset not 0 after reset\n"); return 2; }
+        if (a.a->block_idx != 0) { printf("FAIL: block_idx not 0 after reset\n"); return 2; }
+        if (a.a->prev != NULL) { printf("FAIL: prev not NULL after reset\n"); return 2; }
+        if (cc_atomic_load(&a.a->offset) != 0) { printf("FAIL: offset not 0 after reset\n"); return 2; }
         printf("  reset: unwound from block_idx=%d OK\n", saved_idx);
         cc_arena_free(&a);
     }
@@ -67,15 +67,15 @@ int main(void) {
         for (int i = 0; i < 50; i++) {
             cc_arena_alloc_T_count(int, &a, 10);
         }
-        int grown_idx = a.block_idx;
+        int grown_idx = a.a->block_idx;
         if (grown_idx == 0) { printf("FAIL: expected growth\n"); return 3; }
 
         // Restore checkpoint - should unwind all grown blocks
         cc_arena_restore(cp);
-        if (a.block_idx != 0) { printf("FAIL: restore didn't unwind to block 0, got %d\n", a.block_idx); return 3; }
-        if (cc_atomic_load(&a.live_allocs) != 1) {
+        if (a.a->block_idx != 0) { printf("FAIL: restore didn't unwind to block 0, got %d\n", a.a->block_idx); return 3; }
+        if (cc_atomic_load(&a.a->live_allocs) != 1) {
             printf("FAIL: restore live_allocs want 1 got %zu\n",
-                   (size_t)cc_atomic_load(&a.live_allocs));
+                   (size_t)cc_atomic_load(&a.a->live_allocs));
             return 3;
         }
 
@@ -90,7 +90,7 @@ int main(void) {
     // --- Test 4: Budget fail-closed when overflow is disabled ---
     {
         CCArena a = cc_arena_heap(64);
-        a.block_max = 3;
+        a.a->block_max = 3;
         if (!cc_arena_set_heap_overflow(&a, false)) {
             printf("FAIL: disable overflow\n");
             return 4;
@@ -105,13 +105,13 @@ int main(void) {
         }
 
         if (alloc_count >= 10000) { printf("FAIL: budget not enforced\n"); return 4; }
-        if (a.block_idx + 1 < a.block_max) { printf("FAIL: budget not reached\n"); return 4; }
-        if (a._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) {
+        if (a.a->block_idx + 1 < a.a->block_max) { printf("FAIL: budget not reached\n"); return 4; }
+        if (a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) {
             printf("FAIL: overflow should stay off\n");
             return 4;
         }
         printf("  budget: exhausted after %d allocs, block_idx=%d/%d OK\n",
-               alloc_count, a.block_idx, a.block_max);
+               alloc_count, a.a->block_idx, a.a->block_max);
         cc_arena_free(&a);
     }
 
@@ -120,32 +120,31 @@ int main(void) {
         CCArena a = cc_arena_heap(64);
         int saw_ovf = 0;
         int i;
-        if (!a.base || a.block_max != CC_ARENA_DEFAULT_BLOCK_MAX) return 41;
+        if (!a.base || a.a->block_max != CC_ARENA_DEFAULT_BLOCK_MAX) return 41;
         for (i = 0; i < 500; i++) {
             if (!cc_arena_alloc_T_count(int, &a, 10)) {
                 printf("FAIL: default path should overflow not NULL\n");
                 return 41;
             }
-            if (a._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) saw_ovf = 1;
+            if (a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) saw_ovf = 1;
         }
         if (!saw_ovf) {
             printf("FAIL: expected tier-3 overflow after slab budget\n");
             return 41;
         }
-        if (a.block_idx + 1 > CC_ARENA_DEFAULT_BLOCK_MAX) {
-            printf("FAIL: grew past default budget (%u)\n", a.block_idx);
+        if (a.a->block_idx + 1 > CC_ARENA_DEFAULT_BLOCK_MAX) {
+            printf("FAIL: grew past default budget (%u)\n", a.a->block_idx);
             return 41;
         }
-        printf("  default budget→overflow: block_idx=%d OK\n", a.block_idx);
+        printf("  default budget→overflow: block_idx=%d OK\n", a.a->block_idx);
         cc_arena_free(&a);
     }
 
     // --- Test 5: Fixed arena (block_max=1) never grows ---
     {
-        uint8_t buf[192];
-        CCArena a;
-        cc_arena_buffer(&a, buf, sizeof(buf));
-        if (a.block_max != 1) { printf("FAIL: buffer should be fixed\n"); return 5; }
+        uint8_t buf[CC_ARENA_REGION_BYTES(192)];
+        CCArena a = cc_arena_wrap_region(buf, sizeof(buf), CC_ARENA_FIXED);
+        if (a.a->block_max != 1) { printf("FAIL: buffer should be fixed\n"); return 5; }
 
         // Fill it up
         int *p = cc_arena_alloc_T_count(int, &a, 30);  // 120 bytes
@@ -160,18 +159,20 @@ int main(void) {
 
     // --- Test 6: Stack (user) first block, overflow to heap ---
     {
-        uint8_t buf[64];
+        uint8_t buf[CC_ARENA_REGION_BYTES(64)];
         CCArena a;
-        if (cc_arena_buffer(&a, buf, sizeof(buf)) != 0) {
+        if (cc_arena_init_region(buf, sizeof(buf), CC_ARENA_FIXED) != 0) {
             printf("FAIL: buffer init\n");
             return 6;
         }
-        a.block_max = 0;
-        if (a.block_max != 0) {
+        a = cc_arena_handle((CCArenaHost *)buf);
+        uint8_t *l1 = a.a->base;
+        a.a->block_max = 0;
+        if (a.a->block_max != 0) {
             printf("FAIL: expected unbounded block_max\n");
             return 6;
         }
-        if (a._flags & CC_ARENA_FLAG_HEAP_OWNED) {
+        if (a.a->_flags & CC_ARENA_FLAG_HEAP_OWNED) {
             printf("FAIL: initial buffer should not be heap-owned\n");
             return 6;
         }
@@ -181,14 +182,14 @@ int main(void) {
             printf("FAIL: stack-first arena should grow to heap\n");
             return 6;
         }
-        if (a.block_idx == 0) {
+        if (a.a->block_idx == 0) {
             printf("FAIL: expected growth off stack block\n");
             return 6;
         }
         memset(p, 0xab, 128);
 
         cc_arena_reset(&a);
-        if (a.base != buf || a.block_idx != 0 || a.prev != NULL) {
+        if (a.a->base != l1 || a.a->block_idx != 0 || a.a->prev != NULL) {
             printf("FAIL: reset should restore stack block\n");
             return 6;
         }
@@ -208,12 +209,13 @@ int main(void) {
 
     // --- Test 7: release resets current block and heap-overflow setter is explicit ---
     {
-        uint8_t buf[256];
+        uint8_t buf[CC_ARENA_REGION_BYTES(256)];
         CCArena a;
-        if (cc_arena_buffer(&a, buf, sizeof(buf)) != 0) {
+        if (cc_arena_init_region(buf, sizeof(buf), CC_ARENA_FIXED) != 0) {
             printf("FAIL: release test init\n");
             return 7;
         }
+        a = cc_arena_handle((CCArenaHost *)buf);
         if (!cc_arena_set_heap_overflow(&a, true)) {
             printf("FAIL: enable heap overflow\n");
             return 7;
@@ -247,7 +249,7 @@ int main(void) {
             printf("FAIL: explicit heap overflow fallback\n");
             return 7;
         }
-        if (!(a._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
+        if (!(a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
             printf("FAIL: expected used heap overflow flag\n");
             return 7;
         }
@@ -329,7 +331,7 @@ int main(void) {
         free(foreign);
 
         cc_arena_reset(&a);
-        if (a._flags & (CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE)) {
+        if (a.a->_flags & (CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE)) {
             printf("FAIL: reset should clear non-rewindable flags\n");
             return 7;
         }

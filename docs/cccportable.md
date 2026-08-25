@@ -4,6 +4,10 @@ A portable tree so teammates and CI compile emitted C with host `cc` and never
 invoke `ccc`. It is not a compiler sysroot: no `.cch`, no `shadow_lower`.
 `--sysroot` remains host-cc cross-compile.
 
+The snapshot pins the headers and runtime it vendors; it does not select a
+source lowerer. Use a unit or CLI version pin for that:
+[backwards compatibility](backwards_compatibility.md).
+
 Authors need `ccc` first ([install](../README.md#install) /
 [getting started](getting-started.md#install)). Consumers do not.
 

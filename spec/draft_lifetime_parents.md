@@ -65,7 +65,7 @@ Build in scope, escape by move:
 CCArena build_index(CCSlice paths) {
     CCArena a = cc_arena_heap(kilobytes(64)) @destroy;  // every error path covered
     for (...) { parse(p, &a) !>; }
-    return a.detach();                                   // success path moves out
+    return a.detach() !>;                                 // success path moves out
 }
 ```
 
@@ -98,7 +98,7 @@ Attaching to a parent that is mid-walk is refused.
 ### `cc_arena_adopt`
 
 ```ccs
-CCArena* !>(CCError) cc_arena_adopt(CCArena* parent, CCArena* src);
+CCArena !>(CCError) cc_arena_adopt(CCArena* parent, CCArena* src);
 ```
 
 Moves `*src` into `parent`: detaches it (all `cc_arena_detach` guards
@@ -137,10 +137,10 @@ glob (§6), and UFCS bare-name dispatch gives every such function the
 Constructors are declared in the product's header:
 
 ```ccs
-CCArena*     create_arena(CCArena* owner, size_t n);              // cc_arena.cch
-CCArenaPool* create_pool(CCArena* owner, size_t elem);            // cc_arena.cch
+CCArena !>(CCError) create_arena(CCArena owner, size_t n);         // cc_arena.cch
+CCArenaPool* create_pool(CCArena owner, size_t elem);              // cc_arena.cch
 CCNursery !>(CCError) cc_arena_create_nursery(CCArena* a);     // cc_nursery.cch
-Session*     create_session(CCArena* owner, int fd);              // user code
+Session*     create_session(CCArena owner, int fd);                // user code
 ```
 
 `create_arena(owner, n)` with `n > 0` carves the child's first slab from
@@ -149,8 +149,8 @@ child's slabs are heap-owned (ordinary `cc_arena_heap` growth): the child
 is free and may later be detached or adopted elsewhere. The size argument
 selects the storage class.
 
-Constructors return `NULL` when the owner cannot back the handle or first
-slab; the nullable-pointer unwrap forms apply.
+`create_arena` is Result. OOM and a dead owner are `cc_err`, never a dummy
+empty handle.
 
 A `create_*` result carries no scope sigil; the constructor named the
 holder. Declaration construction (`name@(args)`) still requires `@destroy`

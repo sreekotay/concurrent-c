@@ -4,8 +4,12 @@
 #include <string.h>
 
 int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "%s\n", e.message ? e.message : "error");
+        return 1;
+    }
     CCArena excl_arena = @create(kilobytes(64)) @destroy;
-    CCExclusive* excl = cc_exclusive_create(&excl_arena, 0);
+    CCExclusive excl = cc_exclusive_create(&excl_arena, 0) !> @destroy;
     CCShardMask mask = cc_shard_mask_make(4);
     CCShardMap maps = {0};
     CCShard* sh;
@@ -14,8 +18,6 @@ int main(void) {
     CCString* v;
     cc_arena_stack(scratch, 512);
 
-    if (!excl) return 1;
-    @defer excl->destroy();
     if (!maps.init(excl, mask)) return 2;
     @defer maps.destroy();
 

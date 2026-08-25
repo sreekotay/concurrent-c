@@ -24,7 +24,7 @@ int main(void) {
 
     for (i = 0; i < db.shard_count; ++i) {
         db.shards[i].key_arena = cc_arena_heap(kilobytes(1));
-        assert(db.shards[i].key_arena.base);
+        assert(cc_arena_is_live(db.shards[i].key_arena));
     }
 
     Db* p = &db;
@@ -35,7 +35,7 @@ int main(void) {
 
     for (i = 0; i < db.shard_count; ++i) {
         db.shards[i].key_arena = cc_arena_heap(kilobytes(1));
-        assert(db.shards[i].key_arena.base);
+        assert(cc_arena_is_live(db.shards[i].key_arena));
         /* Indexed receiver through value. */
         db.shards[i].key_arena.destroy();
     }

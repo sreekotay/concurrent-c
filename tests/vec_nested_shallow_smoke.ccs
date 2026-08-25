@@ -7,7 +7,7 @@ typedef CCVec::[CharVec] NestedCharVec;
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(8));
-    if (!arena.base) return 1;
+    if (!cc_arena_is_live(arena)) return 1;
 
     CCString s1 = @string("alpha", &arena);
     CCString s2 = @string("beta", &arena);

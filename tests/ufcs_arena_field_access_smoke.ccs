@@ -6,6 +6,7 @@ typedef struct {
 } ArenaHolder;
 
 int main(void) {
+    @errhandler(CCError e) { (void)e; return 1; }
     ArenaHolder holder = {0};
     holder.arena = cc_arena_heap(kilobytes(4));
     size_t remaining = holder.arena.remaining();
@@ -19,7 +20,11 @@ int main(void) {
     other.arena = cc_arena_heap(kilobytes(4));
     size_t other_remaining = other_ptr->arena.remaining();
     assert(other_remaining > 0);
-    CCArena detached = other_ptr->arena.detach();
+    char[:] bytes = other_ptr->arena.alloc_slice_bytes(8);
+    assert(bytes.ptr != NULL);
+    assert(bytes.len == 8);
+    other_ptr->arena.reset();
+    CCArena detached = other_ptr->arena.detach() !>;
     detached.free();
 
     printf("ufcs_arena_field_access_smoke: OK\n");

@@ -8,7 +8,7 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(64));
     IntMap m;
     int* p;
-    if (!arena.base) return 1;
+    if (!cc_arena_is_live(arena)) return 1;
     m = array_map_new::[int, int](&arena);
     if (!m) return 2;
     if (m->insert(42, 420) != 0) return 3;

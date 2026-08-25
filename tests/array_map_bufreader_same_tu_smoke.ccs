@@ -27,7 +27,7 @@ int main(void) {
     CCSlicePackedView view;
     CCSlicePacked pk;
     CCString val;
-    if (!a.base) return 1;
+    if (!cc_arena_is_live(a)) return 1;
     sh.arena = a;
     sh.data = array_map_new_count::[CCSlicePacked, CCString](&sh.arena, 8);
     if (!sh.data) return 2;

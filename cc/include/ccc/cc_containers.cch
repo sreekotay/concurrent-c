@@ -46,7 +46,7 @@ static inline void *cc__containers_alloc_payload(CCArena *arena, size_t size_byt
         header = (CCContainersAllocHeader *)(aligned - sizeof(CCContainersAllocHeader));
         header->size_bytes = size_bytes;
         header->raw_alloc = raw;
-        header->provenance = arena ? arena->provenance : 0;
+        header->provenance = arena ? CC__ARENA_HOST(arena)->provenance : 0;
         return (void *)aligned;
     }
 }
@@ -114,7 +114,7 @@ static inline void *cc__containers_realloc(void *ctx, void *ptr, size_t size_byt
         old_header = (CCContainersAllocHeader *)(aligned - sizeof(CCContainersAllocHeader));
         old_header->size_bytes = size_bytes;
         old_header->raw_alloc = raw;
-        old_header->provenance = arena ? arena->provenance : 0;
+        old_header->provenance = arena ? CC__ARENA_HOST(arena)->provenance : 0;
         return (void *)aligned;
     }
 }

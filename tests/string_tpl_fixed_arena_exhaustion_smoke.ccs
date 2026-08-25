@@ -14,7 +14,7 @@
 int main(void) {
     /* Too small for the template output (needs > 24 bytes incl. builder
      * headers): the @string result must be poisoned, not truncated. */
-    char buf[24];
+    char buf[CC_ARENA_REGION_BYTES(24)];
     CCArena a = cc_arena_fixed_buffer(buf, sizeof(buf));
     int v = 123456;
     CCString s = @string(`value=${v} plus a tail that cannot fit in the fixed arena`, &a);
@@ -35,7 +35,7 @@ int main(void) {
     assert(cc_string_len(&s) == 0);
 
     /* Same fixed arena, output that fits: works and is exact. */
-    char buf2[128];
+    char buf2[CC_ARENA_REGION_BYTES(128)];
     CCArena b = cc_arena_fixed_buffer(buf2, sizeof(buf2));
     CCString ok = @string(`v=${v}`, &b);
     assert(!cc_string_failed(&ok));

@@ -38,7 +38,7 @@ int main(void) {
     }
 
     arena = cc_arena_heap(kilobytes(4));
-    if (!arena.base) {
+    if (!cc_arena_is_live(arena)) {
         cc_file_close(&reader);
         return 6;
     }

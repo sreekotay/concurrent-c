@@ -12,7 +12,7 @@ int main(void) {
         b.destroy();
         assert(g_quote_box == 1);
         assert(b.live == 0);
-        assert(b.a.base == NULL);
+        assert(!cc_arena_is_live(b.a));
     }
     g_quote_box = 0;
     {

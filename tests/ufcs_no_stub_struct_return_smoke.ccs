@@ -9,10 +9,11 @@
    this test will fail to build. */
 
 int main(void) {
+    @errhandler(CCError e) { (void)e; return 1; }
     CCArena arena = cc_arena_heap(kilobytes(4));
 
-    // struct-returning UFCS (detach returns CCArena)
-    CCArena detached = arena.detach();
+    // struct-returning UFCS (detach is Result; unwrap yields CCArena)
+    CCArena detached = arena.detach() !>;
     detached.free();
 
     arena = cc_arena_heap(kilobytes(4));

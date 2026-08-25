@@ -7,7 +7,7 @@
  * define body); the compiler harvests the original `.cch` and expands
  * use sites. Host lower/seed strip the attr. */
 #define quote_scratch(name, n) \
-    uint8_t name##_buf[n]; \
+    uint8_t name##_buf[CC_ARENA_REGION_BYTES(n)]; \
     CCArena name = cc_arena_create_buffer(name##_buf, sizeof(name##_buf), CC_ARENA_DEFAULT_BLOCK_MAX) @destroy
 
 #endif

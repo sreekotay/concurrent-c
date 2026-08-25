@@ -32,7 +32,7 @@ typedef struct {
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(8));
-    if (!arena.base) { printf("FAIL arena\n"); return 1; }
+    if (!cc_arena_is_live(arena)) { printf("FAIL arena\n"); return 1; }
 
     /* Force CCVec_Pair AND Map_int_int through the codegen
      * emission path by actually using them in the user TU. */

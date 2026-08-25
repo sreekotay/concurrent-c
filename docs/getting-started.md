@@ -333,7 +333,8 @@ the handle is a consumed loan (`@destroy` restores). Restore rewinds slabs
 and frees Main minted in the later epoch. A mid-slab hole disables a new
 capture until last-live rewind or `reset`. Restore of a handle whose
 overflow keep-set was released refuses (does not pretend to succeed).
-`detach()` refuses a stack or caller-owned L1.
+`a.detach() !>` moves a heap-owned arena to the caller and refuses a stack
+or caller-owned L1 (`cc_err`, source unchanged).
 
 | Constructor | Role |
 |-------------|------|
@@ -346,7 +347,7 @@ Rules of thumb: a view must not outlive its arena; do not capture stack /
 `@scratch` slices into a task or channel. Capturing an arena slice into a
 nursery **pins** that arena until join (no reset/destroy while the pin is live).
 An arena is also a **lifetime parent**: `owner.attach(obj, fn)`,
-`owner.adopt(&a)`, and the `owner.create_arena(n)` / `owner.create_pool(sz)`
+`owner.adopt(&a) !>`, and the `owner.create_arena(n) !>` / `owner.create_pool(sz)`
 constructors attach destroy records that run newest-first at `free` — and at
 `reset`, where attached children die with the other contents. Recipes:
 [Cheatsheet § Lifetime parents](cheatsheet.md#lifetime-parents-attach--adopt--create_).

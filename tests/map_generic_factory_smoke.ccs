@@ -9,7 +9,7 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     Map::[int, int] m;
     int *vp;
-    if (!arena.base) return 1;
+    if (!cc_arena_is_live(arena)) return 1;
     if (Map_len(0) != 0) return 2;
     m = map_new::[int, int](&arena);
     if (!m) return 3;

@@ -14,7 +14,7 @@ int main(void) {
     char long_buf[64];
     size_t i;
 
-    if (!arena.base) return 1;
+    if (!cc_arena_is_live(arena)) return 1;
     if (sizeof(CCSlicePacked) != sizeof(void *)) return 2;
 
     a = cc_slice_packed_empty();
@@ -80,7 +80,7 @@ int main(void) {
     {
         CCArena ovf = cc_arena_malloc(64);
         CCSlicePacked hp;
-        if (!ovf.base) return 21;
+        if (!cc_arena_is_live(ovf)) return 21;
         {
             CCSlice long_s = cc_slice_from_buffer(long_buf, sizeof(long_buf));
             CCResult_CCSlicePacked_CCError rr = long_s.to_packed(&ovf);

@@ -13,8 +13,12 @@
  * This file's ONLY candidate site carries the comment, so if the gate
  * declines it the whole TU goes unlowered and the test fails to build. */
 int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "%s\n", e.message ? e.message : "error");
+        return 1;
+    }
     CCArena a = cc_arena_heap(kilobytes(8));
-    CCArena d = a.detach/*gap*/();
+    CCArena d = a.detach/*gap*/() !>;
     void *probe = cc_arena_alloc(&d, 16, 8);
     printf("ok %d\n", probe != NULL);
     return 0;

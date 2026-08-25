@@ -45,7 +45,7 @@ int main(void) {
     if (cc_string_failed(&owned) || cc_string_is_inline(&owned)) return 9;
     owned.materialize_in(&dst) !>;
     if (cc_string_arena(&owned) != &dst &&
-        cc_string_provenance(&owned) != dst.provenance) return 10;
+        cc_string_provenance(&owned) != dst.a->provenance) return 10;
     CCSlice view = owned.as_slice();
     if (view.len != 23 || memcmp(view.ptr, "hello-materialize-world", 23) != 0) return 11;
 

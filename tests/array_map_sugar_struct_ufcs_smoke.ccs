@@ -17,7 +17,7 @@ int main(void) {
     Db db;
     Entr e;
     Entr* p;
-    if (!arena.base) return 1;
+    if (!cc_arena_is_live(arena)) return 1;
     (void)helper_before_types;
     db.entries = array_map_new::[int, Entr](&arena);
     if (!db.entries) return 2;

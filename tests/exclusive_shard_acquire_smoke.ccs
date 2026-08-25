@@ -7,16 +7,17 @@
 #include <stdio.h>
 
 int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "%s\n", e.message ? e.message : "error");
+        return 1;
+    }
     CCArena arena = @create(kilobytes(64)) @destroy;
-    CCExclusive* excl = cc_exclusive_create(&arena, 0);
+    CCExclusive excl = cc_exclusive_create(&arena, 0) !> @destroy;
     CCShardMask shards;
     CCExclusiveGuard gs[8];
     size_t n;
     uint64_t names[4];
     int shared = 0;
-
-    if (!excl) return 1;
-    @defer excl->destroy();
 
     shards = cc_shard_mask_make(8);
     if (shards.count != 8 || shards.mask != 7) return 2;
@@ -34,18 +35,18 @@ int main(void) {
     names[1] = 1;
     names[2] = 3;
     names[3] = 2;
-    n = excl->acquire_sorted(names, 4, gs, 8);
+    n = excl.acquire_sorted(names, 4, gs, 8);
     if (n != 3) return 7;
     shared++;
     cc_exclusive_guards_release(gs, n);
 
-    n = excl->acquire_range(0, 4, gs, 8);
+    n = excl.acquire_range(0, 4, gs, 8);
     if (n != 4) return 8;
     shared++;
     cc_exclusive_guards_release(gs, n);
 
     /* Cap too small → no locks held. */
-    n = excl->acquire_range(0, 4, gs, 2);
+    n = excl.acquire_range(0, 4, gs, 2);
     if (n != 0) return 9;
 
     if (shared != 2) return 10;

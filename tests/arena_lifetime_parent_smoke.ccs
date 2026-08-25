@@ -20,9 +20,9 @@ static int test_attach_lifo_walk(void) {
     CCArena root = cc_arena_heap(1024) @destroy;
     Obj* a;
     Obj* b;
-    if (!root.base) return fail(1, "ctor");
-    a = cc_arena_alloc_T(Obj, &root);
-    b = cc_arena_alloc_T(Obj, &root);
+    if (!cc_arena_is_live(root)) return fail(1, "ctor");
+    a = cc_arena_alloc_T(Obj, root.a);
+    b = cc_arena_alloc_T(Obj, root.a);
     if (!a || !b) return fail(1, "alloc");
     a->id = 1;
     b->id = 2;
@@ -37,18 +37,18 @@ static int test_attach_lifo_walk(void) {
 
 static int test_carved_child_nested_walk(void) {
     CCArena owner = cc_arena_heap(2048) @destroy;
-    CCArena* child;
+    CCArena child;
     CCArena sink = cc_arena_heap(256) @destroy;
     Obj* o;
-    if (!owner.base || !sink.base) return fail(2, "ctor");
-    child = owner.create_arena(512);            /* carved: storage-bound */
-    if (!child || !child->base) return fail(2, "create carved");
-    o = cc_arena_alloc_T(Obj, child);
+    if (!cc_arena_is_live(owner) || !cc_arena_is_live(sink)) return fail(2, "ctor");
+    child = owner.create_arena(512) !>;            /* carved: storage-bound */
+    if (!cc_arena_is_live(child)) return fail(2, "create carved");
+    o = cc_arena_alloc_T(Obj, child.a);
     if (!o) return fail(2, "child alloc");
     o->id = 3;
-    if (child->attach(o, obj_down) != 0) return fail(2, "child attach");
-    if (sink.adopt(child) != NULL) return fail(2, "adopt must refuse carved L1");
-    if (!child->base) return fail(2, "refused source must stay live");
+    if (child.attach(o, obj_down) != 0) return fail(2, "child attach");
+    if (cc_is_ok(sink.adopt(&child))) return fail(2, "adopt must refuse carved L1");
+    if (!cc_arena_is_live(child)) return fail(2, "refused source must stay live");
     printf("  nested walk:\n");
     owner.free();              /* child record fires -> child walk prints down 3 */
     printf("  carved child: bound + nested walk OK\n");
@@ -58,20 +58,20 @@ static int test_carved_child_nested_walk(void) {
 static int test_heap_child_move(void) {
     CCArena owner = cc_arena_heap(1024) @destroy;
     CCArena dst = cc_arena_heap(1024) @destroy;
-    CCArena* kid;
-    CCArena* moved;
+    CCArena kid;
+    CCArena moved;
     char* s;
-    if (!owner.base || !dst.base) return fail(3, "ctor");
-    kid = owner.create_arena(0);                /* heap-backed: movable */
-    if (!kid || !kid->base) return fail(3, "create heap child");
-    s = (char*)cc_arena_alloc(kid, 16, 8);
+    if (!cc_arena_is_live(owner) || !cc_arena_is_live(dst)) return fail(3, "ctor");
+    kid = owner.create_arena(0) !>;                /* heap-backed: movable */
+    if (!cc_arena_is_live(kid)) return fail(3, "create heap child");
+    s = (char*)cc_arena_alloc(kid.a, 16, 8);
     if (!s) return fail(3, "kid alloc");
     strcpy(s, "survives");
-    moved = dst.adopt(kid);
-    if (!moved || !moved->base) return fail(3, "adopt heap child");
-    if (kid->base) return fail(3, "source must be dead after move");
+    moved = dst.adopt(&kid) !>;
+    if (!cc_arena_is_live(moved)) return fail(3, "adopt heap child");
+    if (cc_arena_is_live(kid)) return fail(3, "source must be dead after move");
     if (strcmp(s, "survives") != 0) return fail(3, "alloc must survive move");
-    if (dst.adopt(kid) != NULL) return fail(3, "second adopt must refuse");
+    if (cc_is_ok(dst.adopt(&kid))) return fail(3, "second adopt must refuse");
     owner.free();              /* record on kid fires on a dead handle: no-op */
     printf("  heap child move OK\n");
     return 0;
@@ -80,11 +80,11 @@ static int test_heap_child_move(void) {
 static int test_scope_arena_adopt(void) {
     CCArena parent = cc_arena_heap(1024) @destroy;
     CCArena tmp = cc_arena_heap(256) @destroy;
-    CCArena* moved;
-    if (!parent.base || !tmp.base) return fail(4, "ctor");
-    moved = parent.adopt(&tmp);
-    if (!moved || !moved->base) return fail(4, "adopt scope arena");
-    if (tmp.base) return fail(4, "scope source must be dead");
+    CCArena moved;
+    if (!cc_arena_is_live(parent) || !cc_arena_is_live(tmp)) return fail(4, "ctor");
+    moved = parent.adopt(&tmp) !>;
+    if (!cc_arena_is_live(moved)) return fail(4, "adopt scope arena");
+    if (cc_arena_is_live(tmp)) return fail(4, "scope source must be dead");
     /* tmp's @destroy discharges vacuously at scope exit (dead no-op) */
     printf("  scope arena adopt OK\n");
     return 0;
@@ -93,15 +93,15 @@ static int test_scope_arena_adopt(void) {
 static int test_reset_walks_contents(void) {
     CCArena a = cc_arena_heap(1024) @destroy;
     Obj* o;
-    if (!a.base) return fail(5, "ctor");
-    o = cc_arena_alloc_T(Obj, &a);
+    if (!cc_arena_is_live(a)) return fail(5, "ctor");
+    o = cc_arena_alloc_T(Obj, a.a);
     if (!o) return fail(5, "alloc");
     o->id = 4;
     if (a.attach(o, obj_down) != 0) return fail(5, "attach");
     printf("  reset walk:\n");
     a.reset();                 /* prints down 4; arena stays live */
-    if (!a.base) return fail(5, "reset must keep arena live");
-    o = cc_arena_alloc_T(Obj, &a);
+    if (!cc_arena_is_live(a)) return fail(5, "reset must keep arena live");
+    o = cc_arena_alloc_T(Obj, a.a);
     if (!o) return fail(5, "alloc after reset");
     o->id = 5;
     if (a.attach(o, obj_down) != 0) return fail(5, "attach after reset");
@@ -115,7 +115,7 @@ static int test_pool_on_parent(void) {
     CCArena owner = cc_arena_heap(1024) @destroy;
     CCArenaPool* p;
     void* e;
-    if (!owner.base) return fail(6, "ctor");
+    if (!cc_arena_is_live(owner)) return fail(6, "ctor");
     p = owner.create_pool(32);
     if (!p) return fail(6, "create_pool");
     e = cc_arena_pool_alloc(p);
@@ -129,13 +129,13 @@ static int test_pool_on_parent(void) {
 static int test_cycle_refusal(void) {
     CCArena src = cc_arena_heap(1024) @destroy;
     CCArena* p2;
-    if (!src.base) return fail(7, "ctor");
-    p2 = cc_arena_alloc_T(CCArena, &src);
+    if (!cc_arena_is_live(src)) return fail(7, "ctor");
+    p2 = cc_arena_alloc_T(CCArena, src.a);
     if (!p2) return fail(7, "alloc handle");
     *p2 = cc_arena_heap(128);
-    if (!p2->base) return fail(7, "inner ctor");
-    if (p2->adopt(&src) != NULL) return fail(7, "cycle adopt must refuse");
-    if (!src.base) return fail(7, "refused source must stay live");
+    if (!cc_arena_is_live(*p2)) return fail(7, "inner ctor");
+    if (cc_is_ok(p2->adopt(&src))) return fail(7, "cycle adopt must refuse");
+    if (!cc_arena_is_live(src)) return fail(7, "refused source must stay live");
     p2->free();
     printf("  cycle refusal OK\n");
     return 0;
@@ -145,11 +145,11 @@ static int test_try_adopt_result(void) {
     @errhandler(CCError e) { (void)e; return fail(8, "unexpected err"); }
     CCArena parent = cc_arena_heap(512) @destroy;
     CCArena tmp = cc_arena_heap(128) @destroy;
-    CCArena* moved;
-    CCArenaPtr !>(CCError) r;
-    if (!parent.base || !tmp.base) return fail(8, "ctor");
+    CCArena moved;
+    CCArena !>(CCError) r;
+    if (!cc_arena_is_live(parent) || !cc_arena_is_live(tmp)) return fail(8, "ctor");
     moved = parent.try_adopt(&tmp) !>;
-    if (!moved || !moved->base) return fail(8, "try_adopt");
+    if (!cc_arena_is_live(moved)) return fail(8, "try_adopt");
     r = parent.try_adopt(&tmp);      /* dead source */
     if (!cc_is_err(r)) return fail(8, "try_adopt must refuse dead source");
     printf("  try_adopt Result OK\n");

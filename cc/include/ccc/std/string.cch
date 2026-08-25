@@ -371,7 +371,7 @@ static inline char *cc_string_reserve(CCString *str, size_t need, CCArena *arena
         header = (CCStringHeapHeader *)cc_arena_alloc(arena, new_total, _Alignof(CCStringHeapHeader));
         if (!header) { cc__string_poison(str); return NULL; }
         header->arena = arena;
-        header->provenance = arena->provenance;
+        header->provenance = CC__ARENA_HOST(arena)->provenance;
         str->data = (char *)(header + 1);
         str->cap = (uint32_t)new_cap;
         if (saved_len > 0) memcpy(str->data, saved, saved_len);
@@ -385,7 +385,7 @@ static inline char *cc_string_reserve(CCString *str, size_t need, CCArena *arena
     header = (CCStringHeapHeader *)cc_arena_realloc(old_arena, arena, header, old_total, new_total, _Alignof(CCStringHeapHeader));
     if (!header) { cc__string_poison(str); return NULL; }
     header->arena = arena;
-    header->provenance = arena->provenance;
+    header->provenance = CC__ARENA_HOST(arena)->provenance;
     str->data = (char *)(header + 1);
     str->cap = (uint32_t)new_cap;
     return str->data;
@@ -444,7 +444,7 @@ static inline bool !>(CCError) cc_string_materialize_in(CCString *s, CCArena *ar
         return cc_ok(true);
     }
     if (cc_string_arena(s) == arena ||
-        cc_string_provenance(s) == arena->provenance) {
+        cc_string_provenance(s) == CC__ARENA_HOST(arena)->provenance) {
         return cc_ok(true);
     }
     {

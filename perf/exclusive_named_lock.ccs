@@ -59,7 +59,7 @@ typedef struct {
 } Rng;
 
 static Row g_rows[MAX_KEYS];
-static CCExclusive* g_excl;
+static CCExclusive g_excl;
 static double g_zipf_cum[MAX_KEYS];
 static double g_zipf_s;
 
@@ -142,10 +142,10 @@ static Rng rng_for_worker(int worker_id) {
 
 static void worker_zipf(int worker_id, int iters, int spins, int keys) {
     Rng rng = rng_for_worker(worker_id);
-    CCExclusive* excl = g_excl; /* local: UFCS on global incomplete ptr misses */
+    CCExclusive excl = g_excl; /* local: UFCS on global incomplete ptr misses */
     for (int i = 0; i < iters; i++) {
         int k = zipf_pick(g_zipf_cum, keys, &rng);
-        CCExclusiveGuard g = excl->acquire((uint64_t)k);
+        CCExclusiveGuard g = excl.acquire((uint64_t)k);
         row_bump(&g_rows[k], spins);
         g.release();
     }
@@ -182,8 +182,8 @@ static double run_zipf(int workers, int iters, int spins, int keys) {
 
 static double run_serial_fastpath(int64_t iters) {
     g_rows[0].value = 0;
-    CCExclusive* excl = g_excl;
-    CCExclusiveMutex m = excl->mutex(1000);
+    CCExclusive excl = g_excl;
+    CCExclusiveMutex m = excl.mutex(1000);
     double t0 = time_now_ms();
     for (int64_t i = 0; i < iters; i++) {
         CCExclusiveGuard g = m.acquire();
@@ -226,12 +226,8 @@ int main(void) {
     zipf_init(g_zipf_cum, keys, g_zipf_s);
 
     CCArena excl_arena = @create(kilobytes(128)) @destroy;
-    g_excl = cc_exclusive_create(&excl_arena, 0);
-    if (!g_excl) {
-        fprintf(stderr, "cc_exclusive_create failed\n");
-        return 1;
-    }
-    @defer cc_exclusive_destroy(g_excl);
+    g_excl = cc_exclusive_create(&excl_arena, 0) !>;
+    @defer cc_exclusive_destroy(&g_excl);
 
     printf("exclusive_named_lock lang=cc\n");
     printf("  workers=%d iters/worker=%d timed_trials=%d warmup=1 "
@@ -271,6 +267,6 @@ int main(void) {
            z_med, z_ops, f_med, f_ops);
 
     /* @defer cc_exclusive_destroy above */
-    g_excl = NULL;
+    g_excl.e = NULL;
     return 0;
 }

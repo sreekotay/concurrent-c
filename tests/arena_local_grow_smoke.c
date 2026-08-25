@@ -13,7 +13,7 @@ int main(void) {
         printf("FAIL: heap\n");
         return 1;
     }
-    a.block_max = 4;
+    a.a->block_max = 4;
 
     for (i = 0; i < 64; i++) {
         unsigned char *p = (unsigned char *)cc_arena_alloc_local_grow(&a, 64, 8);
@@ -26,7 +26,7 @@ int main(void) {
         n++;
     }
     {
-        unsigned blocks = (unsigned)a.block_idx;
+        unsigned blocks = (unsigned)a.a->block_idx;
         if (blocks < 1) {
             printf("FAIL: expected slab growth (block_idx=%u)\n", blocks);
             return 1;

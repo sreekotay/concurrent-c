@@ -8,7 +8,7 @@
     int r = 0;
     {
         CCArena __cc_arena5 = @create(kilobytes(8)) @destroy;
-        if (!__cc_arena5.base) abort();
+        if (!cc_arena_is_live(__cc_arena5)) abort();
         CCArena* a = &__cc_arena5;
         int x = @await noop(3);
         r = x;

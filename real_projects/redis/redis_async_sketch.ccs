@@ -156,7 +156,7 @@ static bool !>(CCError) conn_array_len(Conn* c, size_t nkeys) {
     return c->write(hdr.as_slice());
 }
 
-static bool db_init(DB* db, CCExclusive* excl, CCShardMask mask) {
+static bool db_init(DB* db, CCExclusive excl, CCShardMask mask) {
     CCShardMap* maps;
     if (!db) return false;
     memset(db, 0, sizeof(*db));
@@ -474,12 +474,7 @@ int main(int argc, char** argv) {
     CCShardMask mask = cc_shard_mask_auto((size_t)K_MAX_SHARDS);
 
     CCArena excl_arena = @create(kilobytes(64)) @destroy;
-    CCExclusive* excl = cc_exclusive_create(&excl_arena, mask.count * 2u);
-    if (!excl) {
-        eprintln("redis_async_sketch: exclusive failed") !>;
-        return 1;
-    }
-    @defer excl->destroy();
+    CCExclusive excl = cc_exclusive_create(&excl_arena, mask.count * 2u) !> @destroy;
 
     if (!db_init(&db, excl, mask)) {
         eprintln("redis_async_sketch: db_init failed") !>;

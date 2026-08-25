@@ -175,7 +175,7 @@ static inline int cc_vec_init(CCVec *v,
     if (!h) return -1;
     h->arena = arena;
     h->cap = cap;
-    h->provenance = arena->provenance;
+    h->provenance = CC__ARENA_HOST(arena)->provenance;
     v->data = (void *)((uint8_t *)h + cc__vec_header_bytes());
     return 0;
 }
@@ -202,7 +202,7 @@ static inline int cc_vec_reserve(CCVec *v,
     if (!h) return -1;
     h->arena = arena;
     h->cap = need;
-    h->provenance = arena->provenance;
+    h->provenance = CC__ARENA_HOST(arena)->provenance;
     v->data = (void *)((uint8_t *)h + cc__vec_header_bytes());
     return 0;
 }

@@ -17,7 +17,7 @@ typedef struct { int x; } MyStruct;
 MyStruct* !>(CCIoError) func_with_arena(void) {
     {
         CCArena __cc_arena3 = @create(4096) @destroy;
-        if (!__cc_arena3.base) abort();
+        if (!cc_arena_is_live(__cc_arena3)) abort();
         CCArena* a = &__cc_arena3;
         MyStruct* res = cc_arena_alloc_T(MyStruct, a);  // ERROR occurs here
         if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));

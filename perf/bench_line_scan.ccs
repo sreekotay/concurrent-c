@@ -183,7 +183,7 @@ static ScanStats scan_chan(const char* path) {
 
                 LineMsg msg = {0};
                 msg.data = line;
-                msg.arena = line_a.detach();
+                msg.arena = line_a.detach() !>;
 
                 bool !>(CCIoError) sent = tx.send(msg);
                 if (!cc_io_avail(sent)) {

@@ -2977,14 +2977,14 @@ static inline void cc__life_free(CCLifeMacro* ms, int n) {
 static inline char* cc_rewrite_life_macros(const char* src, size_t n,
                                            const char* extra, size_t extra_n) {
     static const char stack_body[] =
-        "uint8_t name##_cc_stack_buf[nbytes]; "
-        "CCArena name = cc_arena_create_buffer(name##_cc_stack_buf, "
+        "uint8_t name##_cc_stack_buf[CC_ARENA_REGION_BYTES(nbytes)]; "
+        "CCArena name = cc_arena_wrap_region(name##_cc_stack_buf, "
         "sizeof(name##_cc_stack_buf), CC_ARENA_DEFAULT_BLOCK_MAX) @destroy; "
-        "(name)._flags |= CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW";
+        "(name).a->_flags |= CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW";
     static const char pool_body[] =
         "cc_arena_stack(name##_arena, nbytes); "
         "CCArenaPool name; "
-        "cc_arena_pool_init(&name, &name##_arena, elem_size)";
+        "cc_arena_pool_init(&name, (name##_arena).a, elem_size)";
     static const char stack_alias[] = "cc_arena_stack(name, nbytes)";
     static const char pool_alias[] =
         "cc_arena_pool_stack(name, elem_size, nbytes)";

@@ -62,7 +62,7 @@ static CompressedResult* !>(CCIoError) compress_slice(CCSlice data, long seq,
 
     CCArena res_arena = cc_arena_heap(arena_size);
     @defer(err) res_arena.free();
-    if (!res_arena.base)
+    if (!cc_arena_is_live(res_arena))
         return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
 
     CompressedResult* res = cc_arena_alloc_T(CompressedResult, &res_arena);
@@ -115,7 +115,7 @@ static CompressedResult* !>(CCIoError) compress_slice(CCSlice data, long seq,
     g_bytes_out.fetch_add((int64_t)pos);
     g_blocks_done.fetch_add(1);
 
-    res->arena = res_arena.detach();
+    res->arena = res_arena.detach() !>;
     return cc_ok(res);
 }
 
@@ -133,7 +133,7 @@ static void compress_and_write_i(CompressJob* job, int i) {
 
         CCArena blk_arena = cc_arena_heap(want + 64);
         @defer blk_arena.free();
-        if (!blk_arena.base) {
+        if (!cc_arena_is_live(blk_arena)) {
             *job->failed = 1;
         } else {
             ts->read.wait(i) !>;

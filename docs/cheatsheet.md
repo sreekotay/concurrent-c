@@ -558,7 +558,7 @@ cp.try_restore() !>;                   // or leave the scope: @destroy restores
 Slices (`T[:]`) carry provenance. Views must not outlive their arena.
 A mid-slab hole disables a new capture until last-live rewind or `reset`.
 Restore of a handle whose overflow keep-set was released refuses.
-`detach()` moves heap-owned mallocs only — a stack or caller L1 is refused.
+`a.detach() !>` moves heap-owned mallocs only — a stack or caller L1 is refused.
 Details: [getting-started § Arenas](getting-started.md#arenas-name-a-lifetime).
 
 ### Lifetime parents: attach / adopt / `create_*`
@@ -572,24 +572,23 @@ die at reset** (the arena stays live and can attach again).
 CCArena owner = cc_arena_heap(kilobytes(4)) @destroy;
 
 owner.attach(obj, obj_down);               // destroy record; fires at free/reset
-CCArena* child = owner.create_arena(512);  // L1 carved from owner: storage-bound
-CCArena* kid   = owner.create_arena(0);    // heap-backed: movable
-CCArenaPool* p = owner.create_pool(32);    // pool on owner; no explicit destroy
+CCArena child = owner.create_arena(512) !>; // L1 carved from owner: storage-bound
+CCArena kid   = owner.create_arena(0) !>;   // heap-backed: movable
+CCArenaPool* p = owner.create_pool(32);     // pool on owner; no explicit destroy
 
 CCArena tmp = cc_arena_heap(256) @destroy;
 CCArena tmp2 = cc_arena_heap(256) @destroy;
-CCArena* moved = owner.adopt(&tmp);        // move: *tmp zeroed (dead); record attached
-CCArena* m2 = owner.try_adopt(&tmp2) !>;   // Result face (cc_arena_result.cch)
+CCArena moved = owner.adopt(&tmp) !>;       // move: tmp handle nulled; record attached
+CCArena m2 = owner.try_adopt(&tmp2) !>;     // Result face (cc_arena_result.cch)
 ```
 
 A `create_*` result carries no scope sigil — the owner holds the obligation.
 A move consumes its source: the scope `@destroy` on `tmp` above discharges
 vacuously on the dead husk.
-Refusals report on stderr and return `NULL` / `-1`, source untouched: dead
-parent or source, parent mid-teardown, self/cycle, storage-bound source L1
-(stack / caller / carved), outstanding checkpoint loans. A second adopt of
-the same handle refuses (dead source). `adopt` composes with `!>` as a
-nullable pointer. Spec:
+Refusals are Result (`cc_err`), source untouched: dead parent or source,
+parent mid-teardown, self/cycle, storage-bound source L1 (stack / caller /
+carved), outstanding checkpoint loans. A second adopt of the same handle
+refuses (dead source). Spec:
 [draft_lifetime_parents.md](../spec/draft_lifetime_parents.md). Worked
 examples: `tests/arena_lifetime_parent_smoke.ccs`.
 

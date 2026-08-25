@@ -17,7 +17,7 @@ int main(void) {
     CCSlice view = a.slice(p, 14);
     Msg m = {0};
     m.data = view;
-    m.arena = a.detach();
+    m.arena = a.detach() !>;
 
     Msg[~4 >] tx;
     Msg[~4 <] rx;

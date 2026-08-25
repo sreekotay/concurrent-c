@@ -3,7 +3,7 @@
 int main(void) {
     {
         CCArena __cc_arena11 =/*x*/ @create(kilobytes(8)) @destroy;
-        if (!__cc_arena11.base) abort();
+        if (!cc_arena_is_live(__cc_arena11)) abort();
         CCArena* a = &__cc_arena11;
         CCString s = cc_string_new();
         s.append("UFCS smoke\n", a);

@@ -17,36 +17,52 @@
 CC_DECL_RESULT_SPEC(CCResult_CCArenaCheckpoint_CCError, CCArenaCheckpoint, CCError)
 #endif
 
-static inline CCArenaCheckpoint !>(CCError) cc_arena_try_checkpoint(CCArena *arena) {
-    CCArenaCheckpoint cp = cc_arena_checkpoint(arena);
+/* Last-good UFCS still emits fn(&handle). Accept handle or handle*. */
+static inline CCArena cc__arena_val_from_h(CCArena a) { return a; }
+static inline CCArena cc__arena_val_from_p(CCArena *p) {
+    CCArena z;
+    if (!p) {
+        z.a = NULL;
+        return z;
+    }
+    return *p;
+}
+#define CC__ARENA_VAL(x) _Generic((x), \
+    CCArena: cc__arena_val_from_h, \
+    CCArena *: cc__arena_val_from_p \
+)(x)
+
+static inline CCArenaCheckpoint cc__cp_val_from_h(CCArenaCheckpoint c) { return c; }
+static inline CCArenaCheckpoint cc__cp_val_from_p(CCArenaCheckpoint *p) {
+    CCArenaCheckpoint z = {0};
+    return p ? *p : z;
+}
+#define CC__CHECKPOINT_VAL(x) _Generic((x), \
+    CCArenaCheckpoint: cc__cp_val_from_h, \
+    CCArenaCheckpoint *: cc__cp_val_from_p \
+)(x)
+
+static inline CCArenaCheckpoint !>(CCError) cc__arena_try_checkpoint_h(CCArena arena) {
+    CCArenaCheckpoint cp = cc_arena_checkpoint(cc__arena_req(arena, "cc_arena_checkpoint: dead"));
     if (!cp.arena) {
         return cc_err(CC_ERR_INVALID_ARG, "cc_arena_checkpoint: refused");
     }
     return cc_ok(cp);
 }
 
-static inline void !>(CCError) cc_arena_try_restore(CCArenaCheckpoint checkpoint) {
+static inline void !>(CCError) cc__arena_try_restore_h(CCArenaCheckpoint checkpoint) {
     if (!cc_arena_restore(checkpoint)) {
         return cc_err(CC_ERR_INVALID_ARG, "cc_arena_restore: refused");
     }
     return cc_ok();
 }
 
-#ifndef CCResult_CCArenaPtr_CCError_DEFINED
-#define CCResult_CCArenaPtr_CCError_DEFINED 1
-typedef CCArena* CCArenaPtr;
-CC_DECL_RESULT_SPEC(CCResult_CCArenaPtr_CCError, CCArenaPtr, CCError)
-#endif
+#define cc_arena_try_checkpoint(x) cc__arena_try_checkpoint_h(CC__ARENA_VAL(x))
+#define cc_arena_try_restore(x) cc__arena_try_restore_h(CC__CHECKPOINT_VAL(x))
 
-/* Result face over cc_arena_adopt (which reports the specific refusal and
- * returns NULL; the plain form already composes with `!>` as a nullable
- * pointer). CCS: `parent->try_adopt(&a) !>`. */
-static inline CCArenaPtr !>(CCError) cc_arena_try_adopt(CCArena* parent, CCArena* src) {
-    CCArena* h = cc_arena_adopt(parent, src);
-    if (!h) {
-        return cc_err(CC_ERR_INVALID_ARG, "cc_arena_adopt: refused");
-    }
-    return cc_ok(h);
+/* CCS: `parent.try_adopt(&child) !>`. `cc_arena_adopt` is already Result. */
+static inline CCArena !>(CCError) cc_arena_try_adopt(CCArena *parent, CCArena *src) {
+    return cc_arena_adopt(parent, src);
 }
 
 static inline void !>(CCError) cc_arena_checkpoint_try_restore(CCArenaCheckpoint *cp) {

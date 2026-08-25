@@ -5,7 +5,7 @@
 int main(void) {
     {
         CCArena __cc_arena6 = @create(kilobytes(64)) @destroy;
-        if (!__cc_arena6.base) abort();
+        if (!cc_arena_is_live(__cc_arena6)) abort();
         CCArena* a = &__cc_arena6;
         // Test 1: open directory (pointer result, use cc_unwrap_as)
         CCDirIter*!>(CCIoError) iter_res = cc_dir_open(a, ".");

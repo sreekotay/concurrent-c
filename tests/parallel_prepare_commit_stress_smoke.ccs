@@ -116,15 +116,11 @@ int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCExclusive* excl = cc_exclusive_create(&arena, 0);
+    CCExclusive excl = cc_exclusive_create(&arena, 0) !> @destroy;
     Store st;
     int i;
     int sum;
     int expect;
-
-    if (!excl)
-        return 1;
-    @defer excl->destroy();
     memset(&st, 0, sizeof(st));
     st.rel = cc_shard_domain(excl, cc_shard_mask_make(SHARDS));
 

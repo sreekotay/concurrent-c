@@ -8201,14 +8201,14 @@ static int cc__emit_generic_instance(const char* gname,
 
     /* invoke compiled factory once per mangled name. */
     {
-        CCArena def_ar = cc_arena_heap(64 * 1024);
+        CCArena def_ar = cc_arena_heap_c(64 * 1024);
         char* def = NULL;
         char rel[1024];
         int use_line = 1, use_col = 1;
         for (size_t k = 0; k < use_pos && k < n; k++) {
             if (src[k] == '\n') { use_line++; use_col = 1; } else { use_col++; }
         }
-        if (!def_ar.base) {
+        if (!cc_arena_is_live(def_ar)) {
             cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                             use_line, use_col, "type",
                             "compiled generic factory '%s' def arena OOM",

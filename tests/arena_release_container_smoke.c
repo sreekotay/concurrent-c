@@ -20,7 +20,7 @@ static CCArena make_fixed_root_arena(void) {
 }
 
 static void test_empty_heap_overflow_rejected(void) {
-    CCArena arena = cc_arena_heap(0);
+    CCArena arena = (CCArena){0};
     assert(!arena.base);
     assert(!cc_arena_set_heap_overflow(&arena, true));
 }
@@ -38,27 +38,27 @@ static void test_direct_release(ArenaFactory make_arena) {
 
     void *p = cc_arena_alloc(&arena, 32, 8);
     assert(p != NULL);
-    assert(cc_atomic_load(&arena.live_allocs) == 1);
+    assert(cc_atomic_load(&arena.a->live_allocs) == 1);
 
     assert(cc_arena_release(&arena, p));
-    assert(cc_atomic_load(&arena.live_allocs) == 0);
+    assert(cc_atomic_load(&arena.a->live_allocs) == 0);
     /* Last-live root release rewinds and stays epoch/checkpointable. */
-    assert((arena._flags & CC_ARENA_FLAG_NON_REWINDABLE) == 0);
+    assert((arena.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE) == 0);
     {
         CCArenaCheckpoint cp = cc_arena_checkpoint(&arena);
-        assert(cp.arena == &arena);
+        assert(cp.arena == arena.a);
     }
 
     void *q = cc_arena_alloc(&arena, 32, 8);
     assert(q == p);
-    assert(cc_atomic_load(&arena.live_allocs) == 1);
+    assert(cc_atomic_load(&arena.a->live_allocs) == 1);
 
     /* Non-last release: hole stays; flip to count/release mode. */
     void *r = cc_arena_alloc(&arena, 32, 8);
     assert(r != NULL);
     assert(cc_arena_release(&arena, q));
-    assert(cc_atomic_load(&arena.live_allocs) == 1);
-    assert((arena._flags & CC_ARENA_FLAG_NON_REWINDABLE) != 0);
+    assert(cc_atomic_load(&arena.a->live_allocs) == 1);
+    assert((arena.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE) != 0);
     {
         CCArenaCheckpoint cp = cc_arena_checkpoint(&arena);
         assert(cp.arena == NULL);
@@ -72,7 +72,7 @@ static void test_vec_release_on_growth(ArenaFactory make_arena) {
 
     IntVec v = IntVec_init(&arena, 2);
     assert(v.data != NULL);
-    assert(cc_atomic_load(&arena.live_allocs) == 1);
+    assert(cc_atomic_load(&arena.a->live_allocs) == 1);
 
     assert(IntVec_push(&v, 10) == 0);
     assert(IntVec_push(&v, 20) == 0);
@@ -82,7 +82,7 @@ static void test_vec_release_on_growth(ArenaFactory make_arena) {
     assert(IntVec_len(&v) == 3);
     /* Tip-in-place realloc may keep the same pointer; either way only one
      * live slab allocation remains after growth. */
-    assert(cc_atomic_load(&arena.live_allocs) == 1);
+    assert(cc_atomic_load(&arena.a->live_allocs) == 1);
 
     cc_arena_free(&arena);
 }
@@ -91,7 +91,7 @@ static void test_string_release_on_growth(ArenaFactory make_arena) {
     CCArena arena = make_arena();
 
     CCString s = cc_string_new();
-    assert(cc_atomic_load(&arena.live_allocs) == 0);
+    assert(cc_atomic_load(&arena.a->live_allocs) == 0);
 
     assert(cc_string_push(&s, "ab", &arena) != NULL);
     assert(cc_string_push(&s, "cdefghijklmnop", &arena) != NULL); /* forces growth */
@@ -99,7 +99,7 @@ static void test_string_release_on_growth(ArenaFactory make_arena) {
     assert(cc_string_data(&s) != NULL);
     assert(strcmp(cc_string_cstr(&s, &arena), "abcdefghijklmnop") == 0);
     /* Tip-in-place realloc may keep the same pointer; live count stays 1. */
-    assert(cc_atomic_load(&arena.live_allocs) == 1);
+    assert(cc_atomic_load(&arena.a->live_allocs) == 1);
 
     cc_arena_free(&arena);
 }
@@ -109,7 +109,7 @@ static void test_map_release_on_resize_and_destroy(ArenaFactory make_arena) {
 
     IntMap *m = IntMap_init(&arena);
     assert(m != NULL);
-    assert(cc_atomic_load(&arena.live_allocs) == 1); /* map handle */
+    assert(cc_atomic_load(&arena.a->live_allocs) == 1); /* map handle */
 
     for (int i = 0; i < 64; ++i) {
         assert(IntMap_insert(m, i, i + 100) == 0);
@@ -121,10 +121,10 @@ static void test_map_release_on_resize_and_destroy(ArenaFactory make_arena) {
     }
 
     /* Patched map core keeps one stable handle plus one table allocation. */
-    assert(cc_atomic_load(&arena.live_allocs) == 2);
+    assert(cc_atomic_load(&arena.a->live_allocs) == 2);
 
     IntMap_destroy(m);
-    assert(cc_atomic_load(&arena.live_allocs) == 0);
+    assert(cc_atomic_load(&arena.a->live_allocs) == 0);
 
     cc_arena_free(&arena);
 }

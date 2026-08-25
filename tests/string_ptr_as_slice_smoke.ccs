@@ -5,7 +5,7 @@
 /* CCString* p; p->as_slice() — arrow UFCS (not only (*p).as_slice()). */
 int main(void) {
     CCArena a = cc_arena_heap(kilobytes(1)) @destroy;
-    assert(a.base);
+    assert(cc_arena_is_live(a));
 
     CCString s = cc_string_from_slice(&a, @slice("hello"));
     CCString* p = &s;

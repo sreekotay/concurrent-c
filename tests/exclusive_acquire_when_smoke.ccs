@@ -4,7 +4,7 @@
 #include <pthread.h>
 #include <stdio.h>
 
-static CCExclusive* g_excl;
+static CCExclusive g_excl;
 static int g_ready;
 static int g_started;
 static int g_got;
@@ -33,7 +33,7 @@ static void* thread_wait(void* arg) {
     @errhandler(CCError e) cc_error_exit(e);
     CCExclusiveGuard !>(CCError) r;
     (void)arg;
-    r = cc_exclusive_acquire_when(g_excl, 1u, pred_ready, NULL);
+    r = cc_exclusive_acquire_when(g_excl.e, 1u, pred_ready, NULL);
     if (cc_is_ok(r)) {
         cc_exclusive_guard_release(&r.u.value);
         return (void*)1;
@@ -47,7 +47,7 @@ static void* thread_timeout(void* arg) {
     CCDeadline* prev = cc_deadline_push(&d);
     CCExclusiveGuard !>(CCError) r;
     (void)arg;
-    r = cc_exclusive_acquire_when(g_excl, 1u, pred_never, NULL);
+    r = cc_exclusive_acquire_when(g_excl.e, 1u, pred_never, NULL);
     cc_deadline_pop(prev);
     if (cc_is_err(r) && r.u.error.kind == CC_ERR_TIMEOUT)
         return (void*)1;
@@ -63,16 +63,14 @@ int main(void) {
         return 20;
     }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCExclusive* excl = cc_exclusive_create(&arena, 0);
+    CCExclusive excl = cc_exclusive_create(&arena, 0) !> @destroy;
     CCExclusiveMutex m;
     CCExclusiveGuard g;
-    if (!excl) return 1;
-    @defer excl->destroy();
-    m = excl->mutex(1);
+    m = excl.mutex(1);
 
     /* Already true: returns holding, no park. */
     g_ready = 1;
-    g = excl->acquire_when(1u, pred_ready, NULL) !>;
+    g = excl.acquire_when(1u, pred_ready, NULL) !>;
     if (!g._entry) return 2;
     g.release();
 
@@ -85,7 +83,7 @@ int main(void) {
         CCExclusiveGuard !>(CCError) bad = cc_exclusive_acquire_when(NULL, 1u,
                                                                     pred_ready, NULL);
         if (!cc_is_err(bad) || bad.u.error.kind != CC_ERR_INVALID_ARG) return 4;
-        bad = excl->acquire_when(1u, NULL, NULL);
+        bad = excl.acquire_when(1u, NULL, NULL);
         if (!cc_is_err(bad) || bad.u.error.kind != CC_ERR_INVALID_ARG) return 5;
     }
 
@@ -102,14 +100,14 @@ int main(void) {
             }
             CCExclusiveGuard wg;
             g_started = 1;
-            wg = excl->acquire_when(1u, pred_ready, NULL) !>;
+            wg = excl.acquire_when(1u, pred_ready, NULL) !>;
             g_got = 1;
             wg.release();
         });
         while (!g_started) cc_yield();
         cc_sleep_ms(5);
         {
-            CCExclusiveGuard hg = excl->acquire(1u);
+            CCExclusiveGuard hg = excl.acquire(1u);
             g_ready = 1;
             hg.signal();
             hg.release();
@@ -131,12 +129,12 @@ int main(void) {
             }
             CCClosure2 b = cc_closure2_make(write_slot, NULL, NULL);
             g_started = 1;
-            excl->acquire_when_into(1u, pred_ready, NULL, &g_slot, NULL, b) !>;
+            excl.acquire_when_into(1u, pred_ready, NULL, &g_slot, NULL, b) !>;
         });
         while (!g_started) cc_yield();
         cc_sleep_ms(5);
         {
-            CCExclusiveGuard hg = excl->acquire(1u);
+            CCExclusiveGuard hg = excl.acquire(1u);
             g_ready = 1;
             hg.broadcast();
             hg.release();
@@ -152,7 +150,7 @@ int main(void) {
         n.spawn(() => [excl] {
             CCExclusiveGuard !>(CCError) wr;
             g_started = 1;
-            wr = excl->acquire_when(1u, pred_never, NULL);
+            wr = excl.acquire_when(1u, pred_never, NULL);
             if (cc_is_err(wr) && wr.u.error.kind == CC_ERR_CANCELLED)
                 g_got = 1;
             else if (cc_is_ok(wr)) {
@@ -173,7 +171,7 @@ int main(void) {
         n.spawn(() => [excl] {
             CCExclusiveGuard !>(CCError) wr;
             @with_deadline(millis(40)) {
-                wr = excl->acquire_when(1u, pred_never, NULL);
+                wr = excl.acquire_when(1u, pred_never, NULL);
             }
             if (cc_is_err(wr) && wr.u.error.kind == CC_ERR_TIMEOUT)
                 g_got = 1;
@@ -194,7 +192,7 @@ int main(void) {
         if (pthread_create(&th, NULL, thread_wait, NULL) != 0) return 10;
         cc_sleep_ms(20);
         {
-            CCExclusiveGuard hg = excl->acquire(1u);
+            CCExclusiveGuard hg = excl.acquire(1u);
             g_ready = 1;
             hg.signal();
             hg.release();

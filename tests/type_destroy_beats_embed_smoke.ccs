@@ -15,7 +15,7 @@ typedef struct {
 static void Box_destroy(Box *b) {
     if (!b) return;
     g_box++;
-    if (b->a.base) b->a.destroy();
+    if (cc_arena_is_live(b->a)) b->a.destroy();
     memset(b, 0, sizeof(*b));
 }
 
@@ -32,7 +32,7 @@ int main(void) {
         b.destroy();
         assert(g_box == 1);
         assert(b.live == 0);
-        assert(b.a.base == NULL);
+        assert(!cc_arena_is_live(b.a));
     }
     g_box = 0;
     {

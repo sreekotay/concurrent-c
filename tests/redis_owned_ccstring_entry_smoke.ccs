@@ -16,13 +16,13 @@ static int clone_owned_string(CCString* out, CCArena* out_arena, CCSlice src) {
     if (arena_size < ENTRY_ARENA_OVERHEAD) arena_size = ENTRY_ARENA_OVERHEAD;
 
     CCArena arena = cc_arena_heap(arena_size) @destroy;
-    if (!arena.base) return -1;
+    if (!cc_arena_is_live(arena)) return -1;
 
     CCString s = cc_string_from_slice(&arena, src);
     if (src.len > 0 && cc_string_len(&s) != src.len) return -2;
 
     *out = s;
-    *out_arena = arena.detach();
+    *out_arena = arena.detach() !>;
     return 0;
 }
 
@@ -32,7 +32,7 @@ static int owned_entry_init(OwnedEntry* e, CCSlice key, CCSlice value) {
 
     if (clone_owned_string(&e->key, &e->key_arena, key) != 0) return -2;
     if (clone_owned_string(&e->value, &e->value_arena, value) != 0) {
-        if (e->key_arena.base) e->key_arena.free();
+        if (cc_arena_is_live(e->key_arena)) e->key_arena.free();
         memset(e, 0, sizeof(*e));
         return -3;
     }
@@ -45,7 +45,7 @@ static int owned_entry_replace_value(OwnedEntry* e, CCSlice value) {
     if (!e) return -1;
     if (clone_owned_string(&next, &next_arena, value) != 0) return -2;
 
-    if (e->value_arena.base) e->value_arena.free();
+    if (cc_arena_is_live(e->value_arena)) e->value_arena.free();
     e->value = next;
     e->value_arena = next_arena;
     return 0;
@@ -53,8 +53,8 @@ static int owned_entry_replace_value(OwnedEntry* e, CCSlice value) {
 
 static void owned_entry_free(OwnedEntry* e) {
     if (!e) return;
-    if (e->key_arena.base) e->key_arena.free();
-    if (e->value_arena.base) e->value_arena.free();
+    if (cc_arena_is_live(e->key_arena)) e->key_arena.free();
+    if (cc_arena_is_live(e->value_arena)) e->value_arena.free();
     memset(e, 0, sizeof(*e));
 }
 
@@ -63,7 +63,7 @@ int main(void) {
 
     {
         CCArena req_arena = cc_arena_heap(kilobytes(4)) @destroy;
-        assert(req_arena.base);
+        assert(cc_arena_is_live(req_arena));
 
         CCString req_key = cc_string_new();
         CCString req_value = cc_string_new();
@@ -78,7 +78,7 @@ int main(void) {
 
     {
         CCArena req_arena = cc_arena_heap(kilobytes(4)) @destroy;
-        assert(req_arena.base);
+        assert(cc_arena_is_live(req_arena));
 
         CCString next_value = cc_string_new();
         cc_string_push_cstr(&next_value, "two", &req_arena);

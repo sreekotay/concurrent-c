@@ -46,7 +46,7 @@ int main(void) {
     }
 
     CCArena arena = cc_arena_heap(kilobytes(1)) @destroy;
-    if (!arena.base) return 2;
+    if (!cc_arena_is_live(arena)) return 2;
 
     CCSlice key = CC_SLICE_LIT("local-ufcs");
     CCSliceHdr source = key.hdr();

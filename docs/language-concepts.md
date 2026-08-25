@@ -180,7 +180,7 @@ not disable rewind. A mid-slab hole disables a new capture until last-live
 root rewind or `reset`. Restore refuses (no mutate) if that handle's overflow
 keep-set was released, or if the checkpoint would advance the tip. Dropping
 a handle without consume leaves an outstanding loan (diagnostic on
-free/reset/detach) and does not block a later capture. `detach()` refuses a
+free/reset/detach) and does not block a later capture. `a.detach() !>` refuses a
 stack or caller-owned L1.
 
 A view must not outlive its storage — no stack/arena borrow into an outliving

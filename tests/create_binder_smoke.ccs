@@ -5,7 +5,7 @@
 int main(void) {
     {
         CCArena a@(1024) @destroy;
-        if (!a.base) return 1;
+        if (!cc_arena_is_live(a)) return 1;
         char* p = cc_arena_alloc_T_count(char, &a, 16);
         if (!p) return 2;
         p[0] = 'x';

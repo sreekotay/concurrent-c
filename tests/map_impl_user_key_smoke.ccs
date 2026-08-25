@@ -17,7 +17,7 @@ int main(void) {
     GridPos p = {3, 4};
     GridPos q = {5, 6};
     int *vp;
-    if (!arena.base) return 1;
+    if (!cc_arena_is_live(arena)) return 1;
     m = map_new::[GridPos, int](&arena);
     if (!m) return 2;
     if (m->insert(p, 7) != 0) return 3;

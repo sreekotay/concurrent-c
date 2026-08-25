@@ -152,7 +152,7 @@ static int test_drop_fn_dispatch(CCArena* arena) {
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(8));
-    if (!arena.base) {
+    if (!cc_arena_is_live(arena)) {
         printf("FAIL arena: cc_arena_heap returned NULL base\n");
         return 1;
     }

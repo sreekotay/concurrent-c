@@ -6,7 +6,7 @@
 int main(void) {
     {
         CCArena arena_storage = @create(kilobytes(4)) @destroy;
-        if (!arena_storage.base) abort();
+        if (!cc_arena_is_live(arena_storage)) abort();
         CCArena* arena = &arena_storage;
         CCString s = cc_string_new();
 

@@ -22,6 +22,10 @@ freeze a tighter match. A file with no pin always uses the running lowerer. A
 pin whose seed is not in the tree is an error — the driver does not quietly
 substitute a different lowerer.
 
+A source version pin selects the lowerer; it does not freeze the runtime.
+To pin the headers and runtime as a vendored host-C snapshot, use
+[`cccportable`](cccportable.md).
+
 ## Unit header
 
 Kind is not an extension property. Line 1 names it; emit replaces that line

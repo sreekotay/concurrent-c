@@ -24,7 +24,7 @@ typedef struct { int a; int b; int c; } Triple;
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
-    if (!arena.base) return 1;
+    if (!cc_arena_is_live(arena)) return 1;
 
     /* CCVec_int exists only because reflection requested it above. */
     CCVec_int v = CCVec_int_init(&arena, 4);

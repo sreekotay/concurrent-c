@@ -10,14 +10,14 @@ int main(void) {
     }
     {
         CCArena a = cc_arena_heap(kilobytes(1));
-        if (!a.base) return 2;
+        if (!cc_arena_is_live(a)) return 2;
         CCSlice empty = a.slice(NULL, 1);
         if (!cc_slice_is_empty(&empty)) return 3;
         cc_arena_free(&a);
     }
 
     CCArena arena = cc_arena_heap(kilobytes(4));
-    if (!arena.base) return 4;
+    if (!cc_arena_is_live(arena)) return 4;
     char* p = (char*)cc_arena_alloc(&arena, 16, 1);
     if (!p) return 5;
     memcpy(p, "view-arena", 10);

@@ -125,7 +125,7 @@ typedef struct CCExclusiveMap {
     CCExclusiveBucket buckets[];
 } CCExclusiveMap;
 
-struct CCExclusive {
+struct CCExclusiveHost {
     CCArena* arena;
     pthread_mutex_t create_mu;
     /* Lock-free lookups acquire-load this pointer. Grow (under create_mu)
@@ -139,11 +139,11 @@ struct CCExclusive {
     CCArenaPool entry_pool;
 };
 
-static CCExclusiveMap* cc__exclusive_map_load(CCExclusive* excl) {
+static CCExclusiveMap* cc__exclusive_map_load(CCExclusiveHost* excl) {
     return atomic_load_explicit(&excl->map, memory_order_acquire);
 }
 
-static void cc__exclusive_map_publish(CCExclusive* excl, CCExclusiveMap* m) {
+static void cc__exclusive_map_publish(CCExclusiveHost* excl, CCExclusiveMap* m) {
     atomic_store_explicit(&excl->map, m, memory_order_release);
 }
 
@@ -152,7 +152,7 @@ static int cc__excl_is_tomb(CCExclusiveEntry* e) {
 }
 
 /* Like cc_arena_pool_alloc, but fresh entries are 64-byte aligned. */
-static CCExclusiveEntry* cc__excl_entry_alloc(CCExclusive* excl) {
+static CCExclusiveEntry* cc__excl_entry_alloc(CCExclusiveHost* excl) {
     CCArenaPool* p = &excl->entry_pool;
     uint64_t head = cc_atomic_load(&p->freelist);
     for (;;) {
@@ -167,7 +167,7 @@ static CCExclusiveEntry* cc__excl_entry_alloc(CCExclusive* excl) {
         p->arena, sizeof(CCExclusiveEntry), 64);
 }
 
-static void cc__excl_entry_free(CCExclusive* excl, CCExclusiveEntry* e) {
+static void cc__excl_entry_free(CCExclusiveHost* excl, CCExclusiveEntry* e) {
     cc_arena_pool_free(&excl->entry_pool, e);
 }
 
@@ -315,7 +315,7 @@ static void cc__exclusive_map_insert(CCExclusiveMap* m, CCExclusiveEntry* e) {
 /* create_mu held.  Retires the old map for release at destroy.  Rehash drops
  * tombstones (only live entries are copied).  `new_cap` may equal old->cap
  * (compact) or be larger (grow). */
-static int cc__exclusive_rehash(CCExclusive* excl, size_t new_cap) {
+static int cc__exclusive_rehash(CCExclusiveHost* excl, size_t new_cap) {
     CCExclusiveMap* old = cc__exclusive_map_load(excl);
     CCExclusiveMap* neu = cc__exclusive_map_alloc(excl->arena, new_cap);
     if (!neu) return -1;
@@ -334,18 +334,18 @@ static int cc__exclusive_rehash(CCExclusive* excl, size_t new_cap) {
 }
 
 /* create_mu held.  Retires the old map for release at destroy. */
-static int cc__exclusive_grow(CCExclusive* excl) {
+static int cc__exclusive_grow(CCExclusiveHost* excl) {
     CCExclusiveMap* old = cc__exclusive_map_load(excl);
     return cc__exclusive_rehash(excl, old->cap * 2);
 }
 
 /* create_mu held. Drop tombstones at the same capacity. */
-static int cc__exclusive_compact(CCExclusive* excl) {
+static int cc__exclusive_compact(CCExclusiveHost* excl) {
     CCExclusiveMap* old = cc__exclusive_map_load(excl);
     return cc__exclusive_rehash(excl, old->cap);
 }
 
-static CCExclusiveEntry* cc__exclusive_lookup(CCExclusive* excl, uint64_t name) {
+static CCExclusiveEntry* cc__exclusive_lookup(CCExclusiveHost* excl, uint64_t name) {
     CCExclusiveMap* m = cc__exclusive_map_load(excl);
     if (!m) return NULL;
     size_t start = cc__exclusive_slot_cap(m->cap, name);
@@ -361,7 +361,7 @@ static CCExclusiveEntry* cc__exclusive_lookup(CCExclusive* excl, uint64_t name) 
 }
 
 static CCExclusiveEntry* cc__exclusive_install(
-        CCExclusive* excl, CCExclusiveMap* m, uint64_t name) {
+        CCExclusiveHost* excl, CCExclusiveMap* m, uint64_t name) {
     size_t start = cc__exclusive_slot_cap(m->cap, name);
     size_t tomb_idx = (size_t)-1;
     for (size_t i = 0; i < m->cap; i++) {
@@ -408,7 +408,7 @@ static CCExclusiveEntry* cc__exclusive_install(
     return NULL; /* map full of live entries */
 }
 
-static CCExclusiveEntry* cc__exclusive_get_or_create(CCExclusive* excl, uint64_t name) {
+static CCExclusiveEntry* cc__exclusive_get_or_create(CCExclusiveHost* excl, uint64_t name) {
     CCExclusiveEntry* hit = cc__exclusive_lookup(excl, name);
     if (hit) return hit;
 
@@ -760,7 +760,7 @@ void cc_exclusive_unlock_contended(void* entry) {
 
 /* CC_EXCL_DEBUG=1: dump the lock table on SIGUSR1 (the deadlock detector
  * uses _exit, so atexit does not run). Diagnostic only. */
-static CCExclusive* g_cc_excl_debug_last;
+static CCExclusiveHost* g_cc_excl_debug_last;
 
 #define CC_EXCL_DBG_SLOTS 512
 typedef struct {
@@ -788,7 +788,7 @@ static void cc__excl_dbg_unregister(int slot) {
 }
 
 static void cc__exclusive_atexit_dump(void) {
-    CCExclusive* excl = g_cc_excl_debug_last;
+    CCExclusiveHost* excl = g_cc_excl_debug_last;
     if (!excl) return;
     CCExclusiveMap* m = cc__exclusive_map_load(excl);
     fprintf(stderr, "[cc_exclusive] table dump cap=%zu count=%zu:\n",
@@ -899,18 +899,43 @@ static size_t cc__exclusive_round_cap(size_t initial_cap) {
     return cap;
 }
 
-CCExclusive* cc_exclusive_create(CCArena* arena, size_t initial_cap) {
-    if (!arena) return NULL;
+static CCResult_CCExclusive_CCError cc__exclusive_wrap_ok(CCExclusiveHost* h) {
+    CCResult_CCExclusive_CCError r;
+    CCExclusive w;
+    w.e = h;
+    r.ok = 1;
+    r.u.value = w;
+    return r;
+}
 
-    CCExclusive* excl = (CCExclusive*)cc_arena_alloc(
-        arena, sizeof(CCExclusive), _Alignof(CCExclusive));
-    if (!excl) return NULL;
+static CCResult_CCExclusive_CCError cc__exclusive_wrap_err(CCErrorKind k,
+                                                          const char* msg) {
+    CCResult_CCExclusive_CCError r;
+    r.ok = 0;
+    r.u.error = CC_ERROR(k, msg);
+    return r;
+}
+
+CCResult_CCExclusive_CCError cc_exclusive_create(CCArena* arena,
+                                                size_t initial_cap) {
+    CCExclusiveHost* excl;
+    CCExclusiveMap* map;
+    if (!arena)
+        return cc__exclusive_wrap_err(CC_ERR_INVALID_ARG,
+                                     "cc_exclusive_create: null arena");
+
+    excl = (CCExclusiveHost*)cc_arena_alloc(
+        arena, sizeof(CCExclusiveHost), _Alignof(CCExclusiveHost));
+    if (!excl)
+        return cc__exclusive_wrap_err(CC_ERR_OUT_OF_MEMORY,
+                                     "cc_exclusive_create: out of memory");
     memset(excl, 0, sizeof(*excl));
     excl->arena = arena;
 
-    CCExclusiveMap* map =
-        cc__exclusive_map_alloc(arena, cc__exclusive_round_cap(initial_cap));
-    if (!map) return NULL;
+    map = cc__exclusive_map_alloc(arena, cc__exclusive_round_cap(initial_cap));
+    if (!map)
+        return cc__exclusive_wrap_err(CC_ERR_OUT_OF_MEMORY,
+                                     "cc_exclusive_create: map alloc failed");
     cc__exclusive_map_publish(excl, map);
     cc_arena_pool_init(&excl->entry_pool, arena, sizeof(CCExclusiveEntry));
 
@@ -927,30 +952,42 @@ CCExclusive* cc_exclusive_create(CCArena* arena, size_t initial_cap) {
             pthread_detach(wd);
         }
     }
-    return excl;
+    return cc__exclusive_wrap_ok(excl);
+}
+
+CCResult_CCExclusive_CCError cc_arena_create_exclusive(CCArena* arena,
+                                                       size_t initial_cap) {
+    return cc_exclusive_create(arena, initial_cap);
 }
 
 void cc_exclusive_destroy(CCExclusive* excl) {
-    if (!excl) return;
-    pthread_mutex_destroy(&excl->create_mu);
+    CCExclusiveHost* h;
+    if (!excl || !excl->e) return;
+    h = excl->e;
+    excl->e = NULL;
+    pthread_mutex_destroy(&h->create_mu);
 
-    CCExclusiveMap* cur = cc__exclusive_map_load(excl);
-    atomic_store_explicit(&excl->map, NULL, memory_order_relaxed);
-    if (cur) (void)cc_arena_release(excl->arena, cur);
+    {
+        CCExclusiveMap* cur = cc__exclusive_map_load(h);
+        atomic_store_explicit(&h->map, NULL, memory_order_relaxed);
+        if (cur) (void)cc_arena_release(h->arena, cur);
+    }
 
-    CCExclusiveMap* r = excl->retired;
-    excl->retired = NULL;
-    while (r) {
-        CCExclusiveMap* next = r->retired_next;
-        (void)cc_arena_release(excl->arena, r);
-        r = next;
+    {
+        CCExclusiveMap* r = h->retired;
+        h->retired = NULL;
+        while (r) {
+            CCExclusiveMap* next = r->retired_next;
+            (void)cc_arena_release(h->arena, r);
+            r = next;
+        }
     }
 }
 
-CCExclusiveMutex cc_exclusive_mutex(CCExclusive* excl, uint64_t name);
+CCExclusiveMutex cc_exclusive_mutex(CCExclusiveHost* excl, uint64_t name);
 void cc_exclusive_mutex_free(CCExclusiveMutex* m);
 
-CCExclusiveMutex cc_exclusive_mutex(CCExclusive* excl, uint64_t name) {
+CCExclusiveMutex cc_exclusive_mutex(CCExclusiveHost* excl, uint64_t name) {
     CCExclusiveMutex m = {0};
     m.excl = excl;
     m.name = name;
@@ -975,7 +1012,7 @@ static void cc__exclusive_gate_touch_done(CCExclusiveMutex* m,
         cc_exclusive_mutex_free(m);
 }
 
-int cc_exclusive_gate_wait(CCExclusive* excl, uint64_t name) {
+int cc_exclusive_gate_wait(CCExclusiveHost* excl, uint64_t name) {
     CCExclusiveMutex m;
     CCExclusiveEntry* e;
     if (!excl) return CC_EXCL_WAIT_INVALID;
@@ -1012,7 +1049,7 @@ int cc_exclusive_gate_wait(CCExclusive* excl, uint64_t name) {
     }
 }
 
-int cc_exclusive_gate_pass(CCExclusive* excl, uint64_t name) {
+int cc_exclusive_gate_pass(CCExclusiveHost* excl, uint64_t name) {
     CCExclusiveMutex m;
     CCExclusiveEntry* e;
     CCExclusiveGuard g;
@@ -1036,7 +1073,7 @@ int cc_exclusive_gate_pass(CCExclusive* excl, uint64_t name) {
     return CC_EXCL_WAIT_OK;
 }
 
-int cc_exclusive_gate_fail(CCExclusive* excl, uint64_t name) {
+int cc_exclusive_gate_fail(CCExclusiveHost* excl, uint64_t name) {
     CCExclusiveMutex m;
     CCExclusiveEntry* e;
     CCExclusiveGuard g;
@@ -1058,7 +1095,7 @@ int cc_exclusive_gate_fail(CCExclusive* excl, uint64_t name) {
     return CC_EXCL_WAIT_OK;
 }
 
-size_t cc_exclusive_live_count(CCExclusive* excl) {
+size_t cc_exclusive_live_count(CCExclusiveHost* excl) {
     size_t n;
     if (!excl) return 0;
     pthread_mutex_lock(&excl->create_mu);
@@ -1070,7 +1107,7 @@ size_t cc_exclusive_live_count(CCExclusive* excl) {
 void cc_exclusive_mutex_free(CCExclusiveMutex* m) {
     if (!m || !m->excl || !m->_entry) return;
 
-    CCExclusive* excl = m->excl;
+    CCExclusiveHost* excl = m->excl;
     CCExclusiveEntry* e = (CCExclusiveEntry*)m->_entry;
     uint64_t name = m->name;
 

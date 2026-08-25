@@ -196,10 +196,10 @@ static inline CCShard* cc_shard_map_shard(CCShardMap* m, size_t si) {
     return &m->shards[si];
 }
 
-static inline bool cc_shard_map_init(CCShardMap* m, CCExclusive* excl,
+static inline bool cc_shard_map_init(CCShardMap* m, CCExclusive excl,
                                     CCShardMask mask) {
     size_t i, n;
-    if (!m || !excl || mask.count == 0) return false;
+    if (!m || !cc_exclusive_is_live(excl) || mask.count == 0) return false;
     memset(m, 0, sizeof(*m));
     m->domain = cc_shard_domain(excl, mask);
     n = mask.count;

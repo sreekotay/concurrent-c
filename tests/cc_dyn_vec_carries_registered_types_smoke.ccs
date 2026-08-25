@@ -174,7 +174,7 @@ static void test_pointer_identity(void) {
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(8));
-    if (!arena.base) {
+    if (!cc_arena_is_live(arena)) {
         printf("FAIL arena\n");
         return 1;
     }

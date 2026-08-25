@@ -46,7 +46,7 @@ typedef struct {
     int cap;
     int closed;
     int ready;
-    CCExclusive *excl;
+    CCExclusive excl;
     uint64_t name;
 } JobBag;
 
@@ -58,7 +58,7 @@ struct curl_thrdq {
     JobBag jobs;
     JobBag done;
     CCArena lock_arena;
-    CCExclusive *locks;
+    CCExclusive locks;
     CCNursery *workers;
     char *name;
     int aborted;
@@ -90,23 +90,23 @@ static int await_is_idle(void *env) {
 
 /* Hold BAG_AWAIT only. Do not call while holding BAG_JOBS / BAG_DONE. */
 static void await_note(CcThrdq *q, int delta) {
-    CCExclusive *locks;
+    CCExclusive locks;
     CCExclusiveGuard g;
     if (!q || !delta)
         return;
     locks = q->locks;
-    if (!locks)
+    if (!cc_exclusive_is_live(locks))
         return;
-    g = locks->acquire(BAG_AWAIT);
+    g = locks.acquire(BAG_AWAIT);
     q->await_left += delta;
     if (q->await_left == 0)
         g.broadcast();
     g.release();
 }
 
-static int JobBag_init(JobBag *b, CCExclusive *excl, uint64_t name) {
+static int JobBag_init(JobBag *b, CCExclusive excl, uint64_t name) {
     memset(b, 0, sizeof(*b));
-    if (!excl)
+    if (!cc_exclusive_is_live(excl))
         return -1;
     b->excl = excl;
     b->name = name;
@@ -120,7 +120,7 @@ static void JobBag_destroy(JobBag *b) {
     free(b->a);
     b->a = NULL;
     b->n = b->cap = 0;
-    b->excl = NULL;
+    b->excl.e = NULL;
     b->ready = 0;
 }
 
@@ -179,9 +179,9 @@ static int JobBag_remove_if_held(JobBag *b, CcThrdq *q, int from_jobs,
 static int JobBag_push(JobBag *b, CcThrdq *q, Job job, uint32_t max_len) {
     CCExclusiveGuard g;
     int rc = CC_CURLE_OK;
-    if (!b->excl)
+    if (!cc_exclusive_is_live(b->excl))
         return CC_CURLE_SEND_ERROR;
-    g = b->excl->acquire(b->name);
+    g = b->excl.acquire(b->name);
     if (q->aborted || b->closed)
         rc = CC_CURLE_SEND_ERROR;
     else if (max_len && b->n >= (int)max_len)
@@ -203,7 +203,7 @@ static int take_job(CcThrdq *q, Job *out, const CCDeadline *dl) {
     JobBag *done = &q->done;
     CCDeadline *prev = NULL;
     CCDeadline idle;
-    if (!jobs->excl || !done->excl)
+    if (!cc_exclusive_is_live(jobs->excl) || !cc_exclusive_is_live(done->excl))
         return EPIPE;
     if (dl && dl->deadline.tv_sec) {
         idle = *dl;
@@ -217,7 +217,7 @@ static int take_job(CcThrdq *q, Job *out, const CCDeadline *dl) {
         int skipped = 0;
         int got = 0;
         int closed;
-        r = jobs->excl->acquire_when(jobs->name, bag_has_item, jobs);
+        r = jobs->excl.acquire_when(jobs->name, bag_has_item, jobs);
         if (cc_is_err(r)) {
             if (prev)
                 cc_deadline_pop(prev);
@@ -226,7 +226,7 @@ static int take_job(CcThrdq *q, Job *out, const CCDeadline *dl) {
             return EPIPE;
         }
         g_jobs = r.u.value;
-        g_done = done->excl->acquire(done->name);
+        g_done = done->excl.acquire(done->name);
         while (jobs->n > 0 && job_expired(&jobs->a[0])) {
             JobBag_take0(jobs, &exp);
             if (JobBag_append_held(done, exp) != 0)
@@ -260,9 +260,9 @@ static int take_job(CcThrdq *q, Job *out, const CCDeadline *dl) {
 
 static void JobBag_close(JobBag *b) {
     CCExclusiveGuard g;
-    if (!b->ready || !b->excl)
+    if (!b->ready || !cc_exclusive_is_live(b->excl))
         return;
-    g = b->excl->acquire(b->name);
+    g = b->excl.acquire(b->name);
     b->closed = 1;
     g.broadcast();
     g.release();
@@ -271,9 +271,9 @@ static void JobBag_close(JobBag *b) {
 static int JobBag_drain(JobBag *b, CcThrdq *q) {
     CCExclusiveGuard g;
     int i, n;
-    if (!b->ready || !b->excl)
+    if (!b->ready || !cc_exclusive_is_live(b->excl))
         return 0;
-    g = b->excl->acquire(b->name);
+    g = b->excl.acquire(b->name);
     n = b->n;
     for (i = 0; i < n; i++)
         give_back(q, b->a[i].item);
@@ -291,9 +291,9 @@ static void q_release_storage(CcThrdq *q) {
     done = &q->done;
     jobs->destroy();
     done->destroy();
-    if (q->locks) {
-        q->locks->destroy();
-        q->locks = NULL;
+    if (cc_exclusive_is_live(q->locks)) {
+        q->locks.destroy();
+        q->locks.e = NULL;
     }
     q->lock_arena.destroy();
     free(q->name);
@@ -302,16 +302,16 @@ static void q_release_storage(CcThrdq *q) {
 }
 
 static void mark_aborted(CcThrdq *q) {
-    CCExclusive *locks;
+    CCExclusive locks;
     CCExclusiveGuard gs[2];
     if (!q)
         return;
     locks = q->locks;
-    if (!locks) {
+    if (!cc_exclusive_is_live(locks)) {
         q->aborted = 1;
         return;
     }
-    if (locks->acquire_range(BAG_JOBS, BAG_DONE + 1, gs, 2) == 2) {
+    if (locks.acquire_range(BAG_JOBS, BAG_DONE + 1, gs, 2) == 2) {
         q->aborted = 1;
         {
             CCExclusiveGuard *held = gs;
@@ -467,15 +467,15 @@ int Curl_thrdq_create(struct curl_thrdq **ptqueue, const char *name,
     }
 
     q->lock_arena = cc_arena_heap(kilobytes(16));
-    if (!q->lock_arena.base) {
+    if (!cc_arena_is_live(q->lock_arena)) {
         q->teardown();
         return CC_CURLE_OUT_OF_MEMORY;
     }
-    q->locks = cc_exclusive_create(&q->lock_arena, 4);
-    if (!q->locks) {
+    q->locks = cc_exclusive_create(&q->lock_arena, 4) !>(e) {
+        (void)e;
         q->teardown();
         return CC_CURLE_OUT_OF_MEMORY;
-    }
+    };
     {
         JobBag *jobs = &q->jobs;
         JobBag *done = &q->done;
@@ -539,9 +539,9 @@ int Curl_thrdq_recv(struct curl_thrdq *q, void **pitem) {
     if (!q)
         return CC_CURLE_FAILED_INIT;
     done = &q->done;
-    if (!done->excl)
+    if (!cc_exclusive_is_live(done->excl))
         return CC_CURLE_FAILED_INIT;
-    g = done->excl->acquire(done->name);
+    g = done->excl.acquire(done->name);
     if (q->aborted) {
         g.release();
         return CC_CURLE_RECV_ERROR;
@@ -557,7 +557,7 @@ int Curl_thrdq_recv(struct curl_thrdq *q, void **pitem) {
 }
 
 int Curl_thrdq_await_done(struct curl_thrdq *q, uint32_t timeout_ms) {
-    CCExclusive *locks;
+    CCExclusive locks;
     CCExclusiveGuard !>(CCError) r;
     CCExclusiveGuard g;
     CCDeadline *prev = NULL;
@@ -565,13 +565,13 @@ int Curl_thrdq_await_done(struct curl_thrdq *q, uint32_t timeout_ms) {
     if (!q)
         return CC_CURLE_FAILED_INIT;
     locks = q->locks;
-    if (!locks)
+    if (!cc_exclusive_is_live(locks))
         return CC_CURLE_FAILED_INIT;
     if (timeout_ms) {
         idle = cc_deadline_after_ms(timeout_ms);
         prev = cc_deadline_push(&idle);
     }
-    r = locks->acquire_when(BAG_AWAIT, await_is_idle, q);
+    r = locks.acquire_when(BAG_AWAIT, await_is_idle, q);
     if (prev)
         cc_deadline_pop(prev);
     if (cc_is_err(r)) {
@@ -587,7 +587,7 @@ int Curl_thrdq_await_done(struct curl_thrdq *q, uint32_t timeout_ms) {
 void Curl_thrdq_clear(struct curl_thrdq *tqueue,
                       Curl_thrdq_item_match_cb fn_match, void *match_data) {
     CcThrdq *q = tqueue;
-    CCExclusive *locks;
+    CCExclusive locks;
     CCExclusiveGuard gs[2];
     JobBag *jobs;
     JobBag *done;
@@ -597,9 +597,9 @@ void Curl_thrdq_clear(struct curl_thrdq *tqueue,
     locks = q->locks;
     jobs = &q->jobs;
     done = &q->done;
-    if (!locks || !jobs->ready || !done->ready)
+    if (!cc_exclusive_is_live(locks) || !jobs->ready || !done->ready)
         return;
-    if (locks->acquire_range(BAG_JOBS, BAG_DONE + 1, gs, 2) != 2)
+    if (locks.acquire_range(BAG_JOBS, BAG_DONE + 1, gs, 2) != 2)
         abort();
     dropped = jobs->remove_if_held(q, 1, fn_match, match_data);
     done->remove_if_held(q, 0, fn_match, match_data);
@@ -645,7 +645,7 @@ void Curl_thrdq_destroy(struct curl_thrdq *tqueue, bool join) {
 }
 
 void Curl_thrdq_trace(struct curl_thrdq *q, struct Curl_easy *data) {
-    CCExclusive *locks;
+    CCExclusive locks;
     CCExclusiveGuard gs[2];
     JobBag *jobs;
     JobBag *done;
@@ -658,9 +658,9 @@ void Curl_thrdq_trace(struct curl_thrdq *q, struct Curl_easy *data) {
     locks = q->locks;
     jobs = &q->jobs;
     done = &q->done;
-    if (!locks || !jobs->ready || !done->ready)
+    if (!cc_exclusive_is_live(locks) || !jobs->ready || !done->ready)
         return;
-    if (locks->acquire_range(BAG_JOBS, BAG_DONE + 1, gs, 2) != 2)
+    if (locks.acquire_range(BAG_JOBS, BAG_DONE + 1, gs, 2) != 2)
         return;
     (void)q->name;
     for (i = 0; i < jobs->n; i++)

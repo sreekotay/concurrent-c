@@ -33,8 +33,8 @@ typedef struct Lev {
  * fills UCS4 via the Stable ABI — no UTF-8 round-trip.  Equality is by
  * codepoint, so 'é' vs 'e' is one edit, not two. */
 static int lev__ensure_arena(Lev *self) {
-    if (!self->a.base) self->a = cc_arena_heap(kilobytes(256));
-    if (!self->a.base) return -1;
+    if (!cc_arena_is_live(self->a)) self->a = cc_arena_heap(kilobytes(256));
+    if (!cc_arena_is_live(self->a)) return -1;
     cc_arena_reset(&self->a);
     return 0;
 }
@@ -552,7 +552,7 @@ static double !>(CCError) Lev_jaro_winkler(Lev *self, CCPyStr s1, CCPyStr s2) {
 }
 
 static void Lev_destroy(Lev *self) {
-    if (self->a.base) cc_arena_destroy(&self->a);
+    if (cc_arena_is_live(self->a)) cc_arena_destroy(&self->a);
 }
 
 @comptime cc_py_export("cclev", "Lev", NULL);

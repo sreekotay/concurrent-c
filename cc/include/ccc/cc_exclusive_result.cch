@@ -5,8 +5,8 @@
  * with the runtime. C twins (`wait_release` / `signal` / `broadcast`) stay
  * there. CCS:
  *
- *   CCExclusiveGuard g = excl->acquire_when(name, pred, env) !> @destroy;
- *   excl->acquire_when_into(name, pred, env, &slot, &arena, builder) !>;
+ *   CCExclusiveGuard g = excl.acquire_when(name, pred, env) !> @destroy;
+ *   excl.acquire_when_into(name, pred, env, &slot, &arena, builder) !>;
  *   m.acquire_when(pred, env) !>;
  *
  * Success: name is held and pred was true under that hold. Error: not
@@ -28,7 +28,7 @@ CC_DECL_RESULT_SPEC(CCResult_CCExclusiveGuard_CCError, CCExclusiveGuard, CCError
 #endif
 
 static inline CCExclusiveGuard !>(CCError)
-cc_exclusive_acquire_when(CCExclusive* excl, uint64_t name,
+cc_exclusive_acquire_when(CCExclusiveHost* excl, uint64_t name,
                           CCExclusivePred pred, void* env) {
     CCExclusiveGuard g;
     if (!excl || !pred)
@@ -58,7 +58,7 @@ cc_exclusive_mutex_acquire_when(CCExclusiveMutex* m,
 }
 
 static inline void !>(CCError)
-cc_exclusive_acquire_when_into(CCExclusive* excl, uint64_t name,
+cc_exclusive_acquire_when_into(CCExclusiveHost* excl, uint64_t name,
                                CCExclusivePred pred, void* env,
                                void* slot, CCArena* arena,
                                CCClosure2 builder) {

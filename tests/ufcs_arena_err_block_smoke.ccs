@@ -6,14 +6,15 @@ static bool !>(CCError) always_ok_bool(void) {
 }
 
 int main(void) {
+    @errhandler(CCError e) { (void)e; return 1; }
     int ran = 0;
     while (true) {
         CCArena blk_arena = @create(kilobytes(4)) @destroy;
         bool avail =<! always_ok_bool() @err break;
         if (!avail) break;
 
-        CCArena detached = blk_arena.detach();
-        assert(detached.base);
+        CCArena detached = blk_arena.detach() !>;
+        assert(cc_arena_is_live(detached));
         detached.free();
         ran++;
         break;

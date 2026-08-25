@@ -49,9 +49,9 @@ int main(void) {
         }
 
         /* Single slab => no growth. */
-        if (a.block_idx != 0 || a.prev != NULL) {
+        if (a.a->block_idx != 0 || a.a->prev != NULL) {
             printf("FAIL: fixed-slab arena unexpectedly grew (block_idx=%u, prev=%p)\n",
-                   a.block_idx, (void*)a.prev);
+                   a.a->block_idx, (void*)a.a->prev);
             return 1;
         }
 
@@ -92,9 +92,9 @@ int main(void) {
         }
 
         /* Must have grown to more than one slab to actually exercise `prev`. */
-        if (a.prev == NULL || a.block_idx == 0) {
+        if (a.a->prev == NULL || a.a->block_idx == 0) {
             printf("FAIL: growable arena did not span multiple slabs (block_idx=%u)\n",
-                   a.block_idx);
+                   a.a->block_idx);
             return 2;
         }
 
@@ -108,7 +108,7 @@ int main(void) {
             return 2;
         }
 
-        uint32_t slabs = a.block_idx + 1;
+        uint32_t slabs = a.a->block_idx + 1;
         cc_arena_free(&a);
         printf("  growable arena: %ld elements across %u slabs OK\n", N, slabs);
     }

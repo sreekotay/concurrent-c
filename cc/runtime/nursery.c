@@ -137,6 +137,16 @@ typedef struct {
     fiber_v2* hybrid;
 } cc_nursery_child;
 
+#ifndef CC_NURSERY_TASK_CAP
+#define CC_NURSERY_TASK_CAP 1024
+#endif
+
+/* L1 must hold the initial tasks[] — a 1KiB heap grew on the first alloc
+ * and HOST_INLINE retire used to free the inline slab as a standalone malloc. */
+static size_t cc__nursery_arena_bytes(void) {
+    return CC_NURSERY_TASK_CAP * sizeof(cc_nursery_child) + 256;
+}
+
 /* Thread-local: current nursery for code running inside nursery-spawned tasks.
    Used by optional runtime deadlock guard in channel.c. */
 #if defined(__TINYC__)
@@ -244,20 +254,20 @@ static CCNurseryHost* cc__nursery_alloc(void) {
     CCNurseryHost* n = (CCNurseryHost*)malloc(sizeof(CCNurseryHost));
     if (!n) return NULL;
     memset(n, 0, sizeof(*n));
-    n->arena = cc_arena_heap(1024);
-    if (!n->arena.base) {
+    n->arena = cc_arena_heap_c(cc__nursery_arena_bytes());
+    if (!n->arena.a) {
         free(n);
         return NULL;
     }
     /* tasks[] and closing[] live in the nursery's own arena: release is one
      * arena free, nothing to track piecemeal. Slots >= count are never read
      * (every reader is count-guarded), so no zeroing of arena memory. */
-    n->cap = 1024;
+    n->cap = CC_NURSERY_TASK_CAP;
     n->tasks = (cc_nursery_child*)cc_arena_alloc(
-        &n->arena, n->cap * sizeof(cc_nursery_child),
+        n->arena.a, n->cap * sizeof(cc_nursery_child),
         _Alignof(cc_nursery_child));
     if (!n->tasks) {
-        cc_arena_free(&n->arena);
+        cc_arena_destroy(&n->arena);
         free(n);
         return NULL;
     }
@@ -326,7 +336,7 @@ void* cc_nursery_closure_env_alloc(CCNurseryHost* n, size_t size, size_t align) 
        env alloc/free is not the throughput bottleneck. If we revisit this for
        performance, prototype a nursery-scoped reclaimable allocator (local heap
        or pooled size classes) under the same explicit lowering shape. */
-    return cc_arena_alloc(&n->arena, size, align);
+    return cc_arena_alloc(n->arena.a, size, align);
 }
 
 void cc_nursery_cancel(CCNurseryHost* n) {
@@ -505,7 +515,7 @@ static int cc_nursery_grow(CCNurseryHost* n) {
      * arena garbage until release. Slots >= count are never read. */
     size_t new_cap = n->cap ? n->cap * 2 : 8;
     cc_nursery_child* nt = (cc_nursery_child*)cc_arena_alloc(
-        &n->arena, new_cap * sizeof(cc_nursery_child),
+        n->arena.a, new_cap * sizeof(cc_nursery_child),
         _Alignof(cc_nursery_child));
     if (!nt) return ENOMEM;
     if (n->count) memcpy(nt, n->tasks, n->count * sizeof(cc_nursery_child));
@@ -746,16 +756,22 @@ static void cc_nursery_close_registered(CCNurseryHost* n) {
 static void cc_nursery_release(CCNurseryHost* n) {
     int placed;
     /* tasks[] and closing[] are arena contents — the arena free is their
-     * free. */
+     * free. Owner-placed husks stay in the parent slab: keep owner_placed
+     * so a later local @destroy does not free(n). */
     placed = n->owner_placed;
-    cc_arena_free(&n->arena);
+    cc_arena_destroy(&n->arena);
     pthread_mutex_destroy(&n->mu);
     wake_primitive_destroy(&n->alive_wake);
     wake_primitive_destroy(&n->cancel_wake);
-    if (placed)
-        memset(n, 0, sizeof(*n));
-    else
-        free(n);
+    n->tasks = NULL;
+    n->count = 0;
+    n->closing = NULL;
+    n->closing_count = 0;
+    if (placed) {
+        n->owner_placed = 1;
+        return;
+    }
+    free(n);
 }
 
 CCArena* cc_nursery_arena(CCNurseryHost* n) {
@@ -764,21 +780,21 @@ CCArena* cc_nursery_arena(CCNurseryHost* n) {
 
 static void cc__nursery_owner_destroy(void* p) {
     CCNurseryHost* n = (CCNurseryHost*)p;
-    if (!n || !n->arena.base) return;
+    if (!n || !n->arena.a) return;
     (void)cc_nursery_wait(n);
     cc_nursery_free(n);
 }
 
 static int cc__nursery_init_body(CCNurseryHost* n) {
     memset(n, 0, sizeof(*n));
-    n->arena = cc_arena_heap(1024);
-    if (!n->arena.base) return -1;
-    n->cap = 1024;
+    n->arena = cc_arena_heap_c(cc__nursery_arena_bytes());
+    if (!n->arena.a) return -1;
+    n->cap = CC_NURSERY_TASK_CAP;
     n->tasks = (cc_nursery_child*)cc_arena_alloc(
-        &n->arena, n->cap * sizeof(cc_nursery_child),
+        n->arena.a, n->cap * sizeof(cc_nursery_child),
         _Alignof(cc_nursery_child));
     if (!n->tasks) {
-        cc_arena_free(&n->arena);
+        cc_arena_destroy(&n->arena);
         return -1;
     }
     pthread_mutex_init(&n->mu, NULL);
@@ -797,9 +813,10 @@ static int cc__nursery_init_body(CCNurseryHost* n) {
 
 CCResult_CCNursery_CCError cc_arena_create_nursery(CCArena* a) {
     CCNurseryHost* n;
-    if (!a || !a->base)
+    CCArenaHost* h = cc_arena_hostp(a);
+    if (!h || !h->base)
         cc_nursery_die("cc_arena_create_nursery: arena is null or dead");
-    n = (CCNurseryHost*)cc_arena_alloc(a, sizeof(CCNurseryHost),
+    n = (CCNurseryHost*)cc_arena_alloc(h, sizeof(CCNurseryHost),
                                    _Alignof(CCNurseryHost));
     if (!n) {
         fprintf(stderr, "cc_arena_create_nursery: owner cannot back the handle\n");
@@ -810,7 +827,7 @@ CCResult_CCNursery_CCError cc_arena_create_nursery(CCArena* a) {
         return cc__nursery_wrap_oom("cc_arena_create_nursery: nursery init failed");
     }
     n->owner_placed = 1;
-    if (cc_arena_attach(a, n, cc__nursery_owner_destroy) != 0)
+    if (cc_arena_attach(h, n, cc__nursery_owner_destroy) != 0)
         cc_nursery_die("cc_arena_create_nursery: attach to owner failed");
     return cc__nursery_wrap_ok(n);
 }
@@ -987,6 +1004,8 @@ int cc_nursery_wait(CCNurseryHost* n) {
 
 void cc_nursery_free(CCNurseryHost* n) {
     if (!n) return;
+    /* Owner walk and a local @destroy may both fire. Second call is a no-op. */
+    if (n->owner_placed && !n->arena.a) return;
     if (atomic_load_explicit(&n->end_state, memory_order_acquire) ==
             CC_NURSERY_ABANDONED)
         cc_nursery_die("free after abandon");
@@ -1074,7 +1093,7 @@ int cc_nursery_add_closing_chan(CCNurseryHost* n, CCChan* ch) {
          * garbage until release. Slots >= closing_count are never read. */
         size_t new_cap = n->closing_cap ? n->closing_cap * 2 : 4;
         CCChan** nc = (CCChan**)cc_arena_alloc(
-            &n->arena, new_cap * sizeof(CCChan*), _Alignof(CCChan*));
+            n->arena.a, new_cap * sizeof(CCChan*), _Alignof(CCChan*));
         if (!nc) { pthread_mutex_unlock(&n->mu); return ENOMEM; }
         if (n->closing_count)
             memcpy(nc, n->closing, n->closing_count * sizeof(CCChan*));

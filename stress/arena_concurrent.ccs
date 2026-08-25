@@ -18,7 +18,7 @@ cc_atomic_int g_successful_allocs = 0;
 cc_atomic_int g_failed_allocs = 0;
 cc_atomic_int g_bytes_written = 0;
 
-/* Global arena and backing storage */
+/* Global arena and backing storage (host overlays the buffer). */
 CCArena g_arena;
 uint8_t g_arena_buffer[ARENA_SIZE];
 
@@ -46,11 +46,11 @@ int test_concurrent_alloc(void) {
     printf("  concurrent_alloc: %d workers x %d allocs\n", NUM_WORKERS, ALLOCS_PER_WORKER);
 
     /* Initialize arena */
-    int err = cc_arena_buffer(&g_arena, g_arena_buffer, ARENA_SIZE);
-    if (err != 0) {
+    if (cc_arena_init_region(g_arena_buffer, ARENA_SIZE, CC_ARENA_FIXED) != 0) {
         printf("ERROR: arena init failed\n");
         return 1;
     }
+    g_arena = cc_arena_handle((CCArenaHost *)g_arena_buffer);
 
     /* Reset counters */
     cc_atomic_store(&g_successful_allocs, 0);

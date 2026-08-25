@@ -43,7 +43,7 @@ int main(void) {
 
     {
         CCArena arena_storage = @create(kilobytes(4)) @destroy;
-        if (!arena_storage.base) abort();
+        if (!cc_arena_is_live(arena_storage)) abort();
         CCArena* arena = &arena_storage;
         /* two different methods interpolated on ONE template line */
         CCString ts = @string(`w=${conn.wsum()} f=${conn.flush_str()}`, arena);

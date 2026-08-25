@@ -1614,7 +1614,7 @@ ginst_emit_pass:
             CCArena def_ar = cc_arena_heap(64 * 1024);
             char* body = NULL;
             int fi;
-            if (!def_ar.base) {
+            if (!cc_arena_is_live(def_ar)) {
                 fprintf(stderr,
                         "error: generic factory def arena create failed\n");
                 out->err = 1;

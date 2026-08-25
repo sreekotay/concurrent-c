@@ -2,9 +2,10 @@
  * Named exclusive sections (v1).
  *
  *   CCArena arena@(kilobytes(128)) @destroy;
- *   CCExclusive* excl = cc_exclusive_create(&arena, 0);      // default map (64)
- *   // or: excl = cc_exclusive_create(&arena, 256);          // hint → pow2
- *   CCExclusiveMutex m = excl->mutex(name);  // resolve once
+ *   CCExclusive excl = cc_exclusive_create(&arena, 0) !> @destroy;  // default map (64)
+ *   // or: excl = cc_exclusive_create(&arena, 256) !>;              // hint → pow2
+ *   // UFCS: arena.create_exclusive(0) !>
+ *   CCExclusiveMutex m = excl.mutex(name);  // resolve once
  *   CCExclusiveGuard g = m.acquire();
  *   ... short critical section (do not @await) ...
  *   g.release();   // idempotent; also g.destroy() / @destroy
@@ -13,8 +14,8 @@
  * Multi-name (deadlock-safe — always ascending by name):
  *
  *   CCExclusiveGuard gs[8];
- *   size_t n = excl->acquire_sorted(names, count, gs, 8);
- *   size_t n = excl->acquire_range(0, shard_count, gs, 8);  // [lo, hi)
+ *   size_t n = excl.acquire_sorted(names, count, gs, 8);
+ *   size_t n = excl.acquire_range(0, shard_count, gs, 8);  // [lo, hi)
  *   gs->release_n(n);     // LIFO; arrow decays the array to CCExclusiveGuard*
  *
  * Admitted builders (the exclusive conjugation of send_into): admit a name
@@ -22,17 +23,17 @@
  * names, release.  No guards escape the call:
  *
  *   Reply r;
- *   bool ran = excl->acquire_into(name, &r, &arena, builder);
- *   bool ran = excl->acquire_sorted_into(names, count, &r, &arena, builder);
- *   bool ran = excl->acquire_range_into(0, shard_count, &r, &arena, builder);
+ *   bool ran = excl.acquire_into(name, &r, &arena, builder);
+ *   bool ran = excl.acquire_sorted_into(names, count, &r, &arena, builder);
+ *   bool ran = excl.acquire_range_into(0, shard_count, &r, &arena, builder);
  *
  * Conditioned acquire (`cc_exclusive_result.cch`): park inside the primitive
  * until pred is true under the name. Caller is not holding on entry.
  * Pred is a non-suspending observation (int (*)(void*)). Signal under the
  * hold after making pred true:
  *
- *   CCExclusiveGuard g = excl->acquire_when(name, pred, env) !> @destroy;
- *   excl->acquire_when_into(name, pred, env, &r, &arena, builder) !>;
+ *   CCExclusiveGuard g = excl.acquire_when(name, pred, env) !> @destroy;
+ *   excl.acquire_when_into(name, pred, env, &r, &arena, builder) !>;
  *   g.signal();   // or g.broadcast(); still holding
  *
  * Hash-shard geometry partner (pow2 count; compose with exclusive names
@@ -81,6 +82,7 @@
 #define CCC_CC_EXCLUSIVE_CCH
 
 #include <ccc/cc_arena.cch>
+#include <ccc/cc_result.cch>
 #include <ccc/cc_closure.cch>
 #include <stdbool.h>
 #include <stddef.h>
@@ -92,7 +94,33 @@
 extern "C" {
 #endif
 
-typedef struct CCExclusive CCExclusive;
+/* Runtime table (arena-backed). Not the surface type. */
+typedef struct CCExclusiveHost CCExclusiveHost;
+
+/* Surface handle. Create returns this; methods are `excl.mutex` / `excl.acquire`.
+ * UFCS peels `.e`. Copying the handle copies the pointer. */
+typedef struct CCExclusive {
+    CCExclusiveHost* e;
+} CCExclusive;
+
+#ifndef CCResult_CCExclusive_CCError_DEFINED
+#define CCResult_CCExclusive_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCExclusive_CCError, CCExclusive, CCError)
+#endif
+
+static inline CCExclusive cc_exclusive_handle(CCExclusiveHost* h) {
+    CCExclusive r;
+    r.e = h;
+    return r;
+}
+
+static inline int cc_exclusive_is_live(CCExclusive e) {
+    return e.e != NULL;
+}
+
+static inline CCExclusiveHost* cc_exclusive_host(CCExclusive e) {
+    return e.e;
+}
 
 #define CC_EXCL_FREE      0
 #define CC_EXCL_LOCKED    1
@@ -110,7 +138,7 @@ enum {
 typedef int (*CCExclusivePred)(void* env);
 
 typedef struct CCExclusiveMutex {
-    CCExclusive* excl;
+    CCExclusiveHost* excl;
     uint64_t name;
     void* _entry; /* runtime entry; lock word at offset 0 */
 } CCExclusiveMutex;
@@ -120,15 +148,19 @@ typedef struct CCExclusiveGuard {
 } CCExclusiveGuard;
 
 /* Allocates section header + discovery map from `arena`.  Mutex entries are
- * arena-allocated on first resolve.  Returns NULL if arena is NULL/OOM.
+ * arena-allocated on first resolve.  OOM / null arena is an error (no dummy).
  * `initial_cap` is a map capacity hint (rounded up to a power of two);
- * 0 selects the default (64).  The map grows on demand. */
-CCExclusive* cc_exclusive_create(CCArena* arena, size_t initial_cap);
+ * 0 selects the default (64).  The map grows on demand.
+ * CCS: `CCExclusive excl = cc_exclusive_create(&arena, 0) !> @destroy;`
+ * UFCS: `arena.create_exclusive(0) !>` (`cc_arena_create_exclusive`). */
+CCResult_CCExclusive_CCError cc_exclusive_create(CCArena* arena, size_t initial_cap);
+CCResult_CCExclusive_CCError cc_arena_create_exclusive(CCArena* arena,
+                                                       size_t initial_cap);
 /* Tears down the create mutex and releases discovery-map tables; mutex
  * entry storage remains until the arena is freed. */
 void cc_exclusive_destroy(CCExclusive* excl);
 
-CCExclusiveMutex cc_exclusive_mutex(CCExclusive* excl, uint64_t name);
+CCExclusiveMutex cc_exclusive_mutex(CCExclusiveHost* excl, uint64_t name);
 
 /* User-explicit reclaim: remove `name` from the discovery map and return the
  * mutex entry to the section's arena pool.  Requires the mutex not held and
@@ -141,12 +173,12 @@ void cc_exclusive_mutex_free(CCExclusiveMutex* m);
  *   pass: EMPTY→UNARMED; ARMED→COMPLETED + broadcast
  *   fail: EMPTY/ARMED→FAILED; ARMED also broadcasts (waiter wakes with err)
  * Exactly two touchers per name; the second frees the entry. */
-int cc_exclusive_gate_wait(CCExclusive* excl, uint64_t name);
-int cc_exclusive_gate_pass(CCExclusive* excl, uint64_t name);
-int cc_exclusive_gate_fail(CCExclusive* excl, uint64_t name);
+int cc_exclusive_gate_wait(CCExclusiveHost* excl, uint64_t name);
+int cc_exclusive_gate_pass(CCExclusiveHost* excl, uint64_t name);
+int cc_exclusive_gate_fail(CCExclusiveHost* excl, uint64_t name);
 
 /* Live names in the discovery map (under create_mu). */
-size_t cc_exclusive_live_count(CCExclusive* excl);
+size_t cc_exclusive_live_count(CCExclusiveHost* excl);
 
 /* Blocks until the entry's lock is owned by the caller. */
 void cc_exclusive_lock_entry_slow(void* entry);
@@ -179,7 +211,7 @@ static inline CCExclusiveGuard cc_exclusive_mutex_acquire(CCExclusiveMutex* m) {
     return g;
 }
 
-static inline CCExclusiveGuard cc_exclusive_acquire(CCExclusive* excl, uint64_t name) {
+static inline CCExclusiveGuard cc_exclusive_acquire(CCExclusiveHost* excl, uint64_t name) {
     CCExclusiveMutex m = cc_exclusive_mutex(excl, name);
     return cc_exclusive_mutex_acquire(&m);
 }
@@ -223,7 +255,7 @@ static inline void cc_exclusive_guards_release(CCExclusiveGuard* guards, size_t 
  * `out[0 .. return)`.  Returns 0 without holding locks when args are invalid,
  * `count` exceeds CC_EXCLUSIVE_ACQUIRE_MULTI_MAX, or unique names exceed
  * `out_cap` (any partial acquires are rolled back). */
-static inline size_t cc_exclusive_acquire_sorted(CCExclusive* excl,
+static inline size_t cc_exclusive_acquire_sorted(CCExclusiveHost* excl,
                                                 const uint64_t* names,
                                                 size_t count,
                                                 CCExclusiveGuard* out,
@@ -255,7 +287,7 @@ static inline size_t cc_exclusive_acquire_sorted(CCExclusive* excl,
 
 /* Acquire names lo, lo+1, …, hi-1 in ascending order.  Returns 0 when
  * `hi <= lo` or `(hi - lo) > out_cap` (no locks held). */
-static inline size_t cc_exclusive_acquire_range(CCExclusive* excl,
+static inline size_t cc_exclusive_acquire_range(CCExclusiveHost* excl,
                                                uint64_t lo,
                                                uint64_t hi,
                                                CCExclusiveGuard* out,
@@ -288,7 +320,7 @@ static inline size_t cc_exclusive_acquire_range(CCExclusive* excl,
  * see cc_closure.cch).  `arena` is passed through to the builder for owning
  * copies of the result; it may be NULL when the builder does not allocate. */
 
-static inline bool cc_exclusive_acquire_into(CCExclusive* excl, uint64_t name,
+static inline bool cc_exclusive_acquire_into(CCExclusiveHost* excl, uint64_t name,
                                              void* slot, CCArena* arena,
                                              CCClosure2 builder) {
     CCExclusiveGuard g;
@@ -304,7 +336,7 @@ static inline bool cc_exclusive_acquire_into(CCExclusive* excl, uint64_t name,
 
 /* `names` may be unsorted and may contain duplicates (acquired once, always
  * ascending).  count == 0 runs the builder with no names held. */
-static inline bool cc_exclusive_acquire_sorted_into(CCExclusive* excl,
+static inline bool cc_exclusive_acquire_sorted_into(CCExclusiveHost* excl,
                                                     const uint64_t* names,
                                                     size_t count,
                                                     void* slot, CCArena* arena,
@@ -330,7 +362,7 @@ static inline bool cc_exclusive_acquire_sorted_into(CCExclusive* excl,
 
 /* Names lo, lo+1, …, hi-1 ascending.  hi == lo runs the builder with no
  * names held; hi < lo is rejected (builder does not run). */
-static inline bool cc_exclusive_acquire_range_into(CCExclusive* excl,
+static inline bool cc_exclusive_acquire_range_into(CCExclusiveHost* excl,
                                                    uint64_t lo, uint64_t hi,
                                                    void* slot, CCArena* arena,
                                                    CCClosure2 builder) {
@@ -412,14 +444,14 @@ typedef struct CCShardHold {
 } CCShardHold;
 
 typedef struct CCShardDomain {
-    CCExclusive* excl;
+    CCExclusiveHost* excl;
     CCShardMask mask;
 } CCShardDomain;
 
-static inline CCShardDomain cc_shard_domain(CCExclusive* excl,
+static inline CCShardDomain cc_shard_domain(CCExclusive excl,
                                            CCShardMask mask) {
     CCShardDomain d;
-    d.excl = excl;
+    d.excl = excl.e;
     d.mask = mask;
     return d;
 }
@@ -473,5 +505,9 @@ static inline CCShardHold cc_shard_domain_hold_all(CCShardDomain* d) {
 #ifdef __cplusplus
 }
 #endif
+
+@typehooks on CCExclusive {
+    .destroy = cc_type_destroy_call("cc_exclusive_destroy"),
+};
 
 #endif /* CCC_CC_EXCLUSIVE_CCH */

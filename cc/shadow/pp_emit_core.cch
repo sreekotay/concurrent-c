@@ -4096,7 +4096,7 @@ static void shadow_meta_ar_ensure(void) {
     if (!g_shadow_meta_ar_live) {
         /* 1MiB root — large TUs (720-method modules) grow freely. */
         g_shadow_meta_ar = cc_arena_heap(1024 * 1024);
-        if (!g_shadow_meta_ar.base) {
+        if (!cc_arena_is_live(g_shadow_meta_ar)) {
             fprintf(stderr, "error: shadow meta arena create failed\n");
             g_shadow_ufcs_miss = 1;
             return;

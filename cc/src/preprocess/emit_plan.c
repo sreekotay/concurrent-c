@@ -682,8 +682,8 @@ static int cc__invoke_one_factory(const void* fn, const char* name, const char* 
     /* Heap-rooted scratch: large modules (py_module with hundreds of methods)
      * exceed a fixed stack root; overflow slabs grow as needed. */
     {
-        CCArena factory_arena = cc_arena_heap(CC_EMIT_TPL_BUF_SIZE);
-        if (!factory_arena.base) {
+        CCArena factory_arena = cc_arena_heap_c(CC_EMIT_TPL_BUF_SIZE);
+        if (!cc_arena_is_live(factory_arena)) {
             fprintf(stderr,
                     "error: compiled generic factory '%s' scratch arena OOM\n",
                     who);
@@ -694,14 +694,14 @@ static int cc__invoke_one_factory(const void* fn, const char* name, const char* 
                       args,
                       &factory_arena);
         if (!result.ptr || result.len == 0) {
-            cc_arena_free(&factory_arena);
+            cc_arena_destroy(&factory_arena);
             return require_nonempty ? 0 : 1;
         }
         if (result.len > (size_t)UINT32_MAX) {
             fprintf(stderr,
                     "error: compiled generic factory '%s' fragment too large\n",
                     who);
-            cc_arena_free(&factory_arena);
+            cc_arena_destroy(&factory_arena);
             return 0;
         }
         if (cc_string_len(def) > 0 &&
@@ -709,7 +709,7 @@ static int cc__invoke_one_factory(const void* fn, const char* name, const char* 
             fprintf(stderr,
                     "error: compiled generic factory '%s' output string OOM\n",
                     who);
-            cc_arena_free(&factory_arena);
+            cc_arena_destroy(&factory_arena);
             return 0;
         }
         if (!cc_string_push_buffer(def, (const char*)result.ptr,
@@ -717,10 +717,10 @@ static int cc__invoke_one_factory(const void* fn, const char* name, const char* 
             fprintf(stderr,
                     "error: compiled generic factory '%s' output string OOM\n",
                     who);
-            cc_arena_free(&factory_arena);
+            cc_arena_destroy(&factory_arena);
             return 0;
         }
-        cc_arena_free(&factory_arena);
+        cc_arena_destroy(&factory_arena);
     }
     return 1;
 }

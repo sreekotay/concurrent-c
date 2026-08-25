@@ -275,7 +275,7 @@ static int bench_mixed_lifetime_chaos(void) {
            rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1,
            now_sec() - t0);
 
-    if (!(a._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) && a.block_idx == 0) {
+    if (!(a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) && a.a->block_idx == 0) {
         free(slots);
         cc_arena_free(&a);
         return fail("chaos expected extent growth or overflow on small root");
@@ -308,12 +308,12 @@ static int bench_mixed_lifetime_chaos(void) {
     }
 
     cc_arena_reset(&a);
-    if (a.ovf_head != NULL || cc_arena_overflow_raw_bytes(&a) != 0) {
+    if (a.a->ovf_head != NULL || cc_arena_overflow_raw_bytes(&a) != 0) {
         free(slots);
         cc_arena_free(&a);
         return fail("chaos reset left overflow");
     }
-    if (a.block_idx != 0 || a.prev != NULL) {
+    if (a.a->block_idx != 0 || a.a->prev != NULL) {
         free(slots);
         cc_arena_free(&a);
         return fail("chaos reset left extents");
@@ -467,7 +467,7 @@ static int bench_release_scramble(void) {
            rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1,
            now_sec() - t0);
 
-    if (a._flags & CC_ARENA_FLAG_NON_REWINDABLE) {
+    if (a.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE) {
         /* expected after individual releases */
     } else {
         free(ptrs); free(tags); free(sizes); free(alive);
@@ -476,7 +476,7 @@ static int bench_release_scramble(void) {
     }
 
     cc_arena_reset(&a);
-    if (a.ovf_head || cc_arena_overflow_raw_bytes(&a) || a.prev || a.block_idx != 0) {
+    if (a.a->ovf_head || cc_arena_overflow_raw_bytes(&a) || a.a->prev || a.a->block_idx != 0) {
         free(ptrs); free(tags); free(sizes); free(alive);
         cc_arena_free(&a);
         return fail("scramble reset incomplete");
@@ -574,10 +574,10 @@ static int bench_shared_concurrent_mixed(void) {
     double t0;
     int w;
 
-    memset(&g_shared, 0, sizeof(g_shared));
-    if (cc_arena_buffer(&g_shared, g_shared_buf, sizeof(g_shared_buf)) != 0)
+    if (cc_arena_init_region(g_shared_buf, sizeof(g_shared_buf), CC_ARENA_FIXED) != 0)
         return fail("shared buffer init");
-    g_shared.block_max = 1;
+    g_shared = cc_arena_handle((CCArenaHost *)g_shared_buf);
+    g_shared.a->block_max = 1;
     if (!cc_arena_set_heap_overflow(&g_shared, false))
         return fail("disable shared overflow");
 
@@ -615,12 +615,12 @@ static int bench_shared_concurrent_mixed(void) {
     }
 
     cc_arena_reset(&g_shared);
-    if (CC_ATOMIC_LOAD(&g_shared.offset) != 0 &&
-        CC_ATOMIC_LOAD(&g_shared.live_allocs) != 0) {
+    if (CC_ATOMIC_LOAD(&g_shared.a->offset) != 0 &&
+        CC_ATOMIC_LOAD(&g_shared.a->live_allocs) != 0) {
         /* After release-all, live should be 0; offset may be non-zero if
          * NON_REWINDABLE holes remain — reset clears. */
     }
-    if (CC_ATOMIC_LOAD(&g_shared.live_allocs) != 0)
+    if (CC_ATOMIC_LOAD(&g_shared.a->live_allocs) != 0)
         return fail("shared live_allocs nonzero after worker cleanup+reset");
     return 0;
 }

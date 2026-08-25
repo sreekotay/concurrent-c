@@ -13,7 +13,7 @@
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
-    if (!arena.base) return 1;
+    if (!cc_arena_is_live(arena)) return 1;
 
     CCVec_int v = CCVec_int_init(&arena, 8);
     if (CCVec_int_push(&v, 11) != 0) return 2;

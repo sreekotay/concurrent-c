@@ -11,7 +11,7 @@ int main(void) {
     @errhandler(CCError e) { printf("handled\n"); return 0; }
 
     CCArena a1 = cc_arena_heap(kilobytes(4)) @destroy;
-    printf("a1 live=%d\n", a1.base != NULL);
+    printf("a1 live=%d\n", cc_arena_is_live(a1));
 
     int v = boom() !>;              /* diverges */
 

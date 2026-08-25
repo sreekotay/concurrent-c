@@ -61,7 +61,7 @@ int main(void) {
         alive[i] = 1;
         live++;
     }
-    if (!(a._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) || !a.ovf_head) {
+    if (!(a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) || !a.a->ovf_head) {
         printf("FAIL: expected overflow spill (root=%d n=%d)\n", ROOT, N);
         return 4;
     }
@@ -107,7 +107,7 @@ int main(void) {
     grow_ms = now_ms() - t0;
 
     cc_arena_reset(&a);
-    if (a.ovf_head || cc_arena_overflow_raw_bytes(&a) != 0) {
+    if (a.a->ovf_head || cc_arena_overflow_raw_bytes(&a) != 0) {
         printf("FAIL: reset left overflow\n");
         return 7;
     }

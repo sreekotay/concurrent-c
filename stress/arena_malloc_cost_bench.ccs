@@ -55,12 +55,12 @@ static int run_arena(Mode mode, size_t root, size_t n, volatile size_t *sink) {
     else
         a = cc_arena_malloc(root);
 
-    if (!a.base) {
+    if (!cc_arena_is_live(a)) {
         printf("FAIL: %s init\n", mode_name(mode));
         return 1;
     }
-    if (mode == MODE_MALLOC_ARENA && a.block_max != 1) {
-        printf("FAIL: cc_arena_malloc block_max=%u want 1\n", a.block_max);
+    if (mode == MODE_MALLOC_ARENA && a.a->block_max != 1) {
+        printf("FAIL: cc_arena_malloc block_max=%u want 1\n", a.a->block_max);
         cc_arena_free(&a);
         return 1;
     }

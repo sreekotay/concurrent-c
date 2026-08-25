@@ -9,15 +9,17 @@
 #define NAMES 1500
 
 int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "%s\n", e.message ? e.message : "error");
+        return 1;
+    }
     CCArena arena = @create(megabytes(1)) @destroy;
     /* Sized hint 100 → 128; still grows through 1500 names. */
-    CCExclusive* excl = cc_exclusive_create(&arena, 100);
-    if (!excl) return 1;
-    @defer cc_exclusive_destroy(excl);
+    CCExclusive excl = cc_exclusive_create(&arena, 100) !> @destroy;
 
     int64_t sum = 0;
     for (int i = 1; i <= NAMES; i++) {
-        CCExclusiveMutex m = excl->mutex((uint64_t)i);
+        CCExclusiveMutex m = excl.mutex((uint64_t)i);
         CCExclusiveGuard g = m.acquire();
         sum += i;
         g.release();
@@ -25,12 +27,12 @@ int main(void) {
 
     /* Re-resolve a pre-grow and post-grow name. */
     {
-        CCExclusiveGuard g = excl->acquire(1);
+        CCExclusiveGuard g = excl.acquire(1);
         sum += 1;
         g.release();
     }
     {
-        CCExclusiveGuard g = excl->acquire(NAMES);
+        CCExclusiveGuard g = excl.acquire(NAMES);
         sum += NAMES;
         g.release();
     }

@@ -6,10 +6,10 @@
 
 @async int f(void) {
     int x = @await noop(3);
-    char buf[256];
+    char buf[CC_ARENA_REGION_BYTES(256)];
     int out = 0;
-    CCArena arena_storage = {0};
-    if (cc_arena_buffer(&arena_storage, buf, sizeof(buf)) != 0) abort();
+    CCArena arena_storage = cc_arena_wrap_region(buf, sizeof(buf),
+                                                CC_ARENA_FIXED);
     if (1) {
         CCArena* arena = &arena_storage;
         int* slot = cc_arena_alloc_T(int, arena);

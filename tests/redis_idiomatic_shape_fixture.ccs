@@ -7,19 +7,23 @@
 #include <ccc/cc_exclusive.cch>
 #include <ccc/std/task.cch>
 
-@noblock static int touch_shard(CCExclusive* excl, uint64_t shard) {
-    CCExclusiveGuard g = excl->acquire(shard);
+@noblock static int touch_shard(CCExclusive excl, uint64_t shard) {
+    CCExclusiveGuard g = excl.acquire(shard);
     (void)g;
     return 0;
 }
 
-@async int handle_client(CCExclusive* excl, uint64_t shard) {
+@async int handle_client(CCExclusive excl, uint64_t shard) {
     return touch_shard(excl, shard);
 }
 
 int main(void) {
+    @errhandler(CCError e) {
+        (void)e;
+        return 1;
+    }
     CCArena a = @create(megabytes(1)) @destroy;
-    CCExclusive* excl = cc_exclusive_create(&a, 0);
+    CCExclusive excl = cc_exclusive_create(&a, 0) !> @destroy;
     (void)handle_client;
     (void)excl;
     return 0;

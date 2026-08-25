@@ -111,7 +111,7 @@ int main(void) {
         CCArena keep = cc_arena_heap(keep_root);
         double t;
 
-        if (!scratch.base || !keep.base) {
+        if (!cc_arena_is_live(scratch) || !cc_arena_is_live(keep)) {
             cc_arena_free(&scratch);
             cc_arena_free(&keep);
             return 2;

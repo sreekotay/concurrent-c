@@ -20,7 +20,7 @@ int main(void) {
     if (!k_generic_vec || !k_generic_map || !k_generic_new) return 1;
 
     CCArena arena = cc_arena_heap(kilobytes(1));
-    if (!arena.base) return 2;
+    if (!cc_arena_is_live(arena)) return 2;
 
     CCVec::[int] xs = cc_vec_new::[int](&arena);
     xs.push(11);

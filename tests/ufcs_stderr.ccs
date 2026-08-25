@@ -3,7 +3,7 @@
 int main(void) {
     {
         CCArena __cc_arena12 = @create(kilobytes(4)) @destroy;
-        if (!__cc_arena12.base) abort();
+        if (!cc_arena_is_live(__cc_arena12)) abort();
         CCArena* ar = &__cc_arena12;
         CCString s = cc_string_new();
         s.append("stderr line1\n", ar);

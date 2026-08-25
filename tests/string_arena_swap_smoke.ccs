@@ -19,7 +19,7 @@ int main(void) {
     /* Grow again with `second` — arena swap: ownership moves. */
     if (!cc_string_push_cstr(&s, "-and-more-bytes-for-growth", &second)) return 5;
     if (cc_string_arena(&s) != &second) return 6;
-    if (cc_string_provenance(&s) != second.provenance) return 7;
+    if (cc_string_provenance(&s) != second.a->provenance) return 7;
 
     CCSlice view = s.as_slice();
     if (view.len != strlen("hello-arena-swap-seed-and-more-bytes-for-growth")) return 8;

@@ -173,7 +173,7 @@ CompressedResultPtr !>(CCIoError) compress_block(z_stream* strm, Block* blk, CCS
     
     {
         CCArena res_arena_storage = cc_arena_heap(arena_size) @destroy;
-        if (!res_arena_storage.base) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+        if (!cc_arena_is_live(res_arena_storage)) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
         CCArena* res_arena = &res_arena_storage;
         CompressedResult* res = cc_arena_alloc_T(CompressedResult, res_arena);
         if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
@@ -619,7 +619,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                         if (have > 0) {
                             DecompChunk out_chunk = {0};
                             out_chunk.data = out_arena.slice(out_buf, have);
-                            out_chunk.arena = out_arena.detach();
+                            out_chunk.arena = out_arena.detach() !>;
                             bool !>(CCIoError) send_res = decompressed_tx.send(out_chunk);
                             if (send_res.is_err()) {
                                 report_io_error("failed to send decompressed chunk", cc_unwrap_err_as(send_res, CCIoError));
@@ -679,7 +679,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                 
                 DecompChunk chunk = {0};
                 chunk.data = chunk_arena.slice(buf, bytes_read);
-                chunk.arena = chunk_arena.detach();
+                chunk.arena = chunk_arena.detach() !>;
                 bool !>(CCIoError) send_res = compressed_tx.send(chunk);
                 if (send_res.is_err()) {
                     report_io_error("failed to send compressed chunk", cc_unwrap_err_as(send_res, CCIoError));
@@ -1242,7 +1242,7 @@ int process_path(char[:0] path, int num_workers, int level, int strategy) {
 
         {
             CCArena dir_arena_storage = cc_arena_heap(megabytes(1)) @destroy;
-            if (!dir_arena_storage.base) return 1;
+            if (!cc_arena_is_live(dir_arena_storage)) return 1;
             CCArena* dir_arena = &dir_arena_storage;
             CCDirIter* !>(CCIoError) iter_res = cc_dir_open(dir_arena, path);
             if (cc_is_ok(iter_res)) {

@@ -6,8 +6,8 @@
  * domain:
  *
  *   CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
- *   CCExclusive* excl = cc_exclusive_create(&arena, 0);    // 0 → default map
- *   CCExclusiveMutex m = cc_exclusive_mutex(excl, name);   // resolve once
+ *   CCExclusive excl = cc_exclusive_create(&arena, 0) !> @destroy;  // 0 → default map
+ *   CCExclusiveMutex m = excl.mutex(name);                 // resolve once
  *   CCExclusiveGuard g = m.acquire();
  *   ... short critical section (do not @await) ...
  *   g.release();                              // idempotent (local held bit)
@@ -17,11 +17,9 @@
  * or an OS thread. cc_current_deadline() → TIMEOUT; cancelled deadline
  * or nursery (when one exists) → CANCELLED:
  *
- *   CCExclusiveGuard g = excl->acquire_when(name, pred, env) !> @destroy;
+ *   CCExclusiveGuard g = excl.acquire_when(name, pred, env) !> @destroy;
  *   // held; pred was true under the name
  *   // the holder that made pred true: h.signal() while still holding
- *
- *   cc_exclusive_destroy(excl);
  *
  * Same name in one domain ⇒ same lock. Different domains never collide.
  * Keep critical sections short; park/await under the lock stalls others.
@@ -38,12 +36,12 @@ typedef struct {
     int64_t value;
 } Counter;
 
-static CCExclusive* g_excl;
+static CCExclusive g_excl;
 static Counter g_shared;                 /* guarded by name=1 */
 static Counter g_private[NUM_WORKERS];   /* each guarded by name=100+id */
 
 static void bump_shared(int iters) {
-    CCExclusiveMutex m = cc_exclusive_mutex(g_excl, 1); /* resolve once per worker */
+    CCExclusiveMutex m = cc_exclusive_mutex(g_excl.e, 1); /* resolve once per worker */
     for (int i = 0; i < iters; i++) {
         CCExclusiveGuard g = m.acquire();
         g_shared.value++;
@@ -52,7 +50,7 @@ static void bump_shared(int iters) {
 }
 
 static void bump_private(int worker_id, int iters) {
-    CCExclusiveMutex m = cc_exclusive_mutex(g_excl, (uint64_t)(100 + worker_id));
+    CCExclusiveMutex m = cc_exclusive_mutex(g_excl.e, (uint64_t)(100 + worker_id));
     for (int i = 0; i < iters; i++) {
         CCExclusiveGuard g = m.acquire();
         g_private[worker_id].value++;
@@ -64,11 +62,7 @@ int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     CCArena excl_arena = cc_arena_heap(kilobytes(64)) @destroy;
-    g_excl = cc_exclusive_create(&excl_arena, 0);
-    if (!g_excl) {
-        eprintln("cc_exclusive_create failed") !>;
-        return 1;
-    }
+    g_excl = cc_exclusive_create(&excl_arena, 0) !>;
 
     println(@string(`=== Named exclusive: ${NUM_WORKERS} workers × ${ITERS} iters ===`, @scratch)) !>;
 
@@ -102,8 +96,7 @@ int main(void) {
     println(@string(`shared  = ${g_shared.value} (expect ${expect})`, @scratch)) !>;
     println(@string(`private = ${private_sum} (expect ${expect})`, @scratch)) !>;
 
-    cc_exclusive_destroy(g_excl);
-    g_excl = NULL;
+    cc_exclusive_destroy(&g_excl);
 
     if (g_shared.value != expect || private_sum != expect) return 1;
     println("OK") !>;

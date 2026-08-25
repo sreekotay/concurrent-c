@@ -34,7 +34,7 @@ static void assert_switch_template_as_slice(int64_t value) {
 
 int main(void) {
     CCArena arena_storage = @create(kilobytes(8)) @destroy;
-    if (!arena_storage.base) abort();
+    if (!cc_arena_is_live(arena_storage)) abort();
     CCArena *arena = &arena_storage;
 
     CCString literal = @string("hello", arena);

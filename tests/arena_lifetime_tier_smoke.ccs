@@ -13,7 +13,7 @@ static int test_l1_live_and_result_loan(void) {
     CCArena a = cc_arena_heap(256) @destroy;
     void *p;
     CCArenaCheckpoint cp;
-    if (!a.base) return fail(1, "heap ctor");
+    if (!cc_arena_is_live(a)) return fail(1, "heap ctor");
     p = cc_arena_alloc(&a, 32, 8);
     if (!p) return fail(1, "L1 alloc");
     if (cc_arena_live(&a) != 1) return fail(1, "live L1");
@@ -35,8 +35,8 @@ static int test_l2_and_main(void) {
     CCArena m = cc_arena_malloc(64) @destroy;
     void *grown;
     void *ovf;
-    if (!a.base || !m.base) return fail(2, "ctors");
-    a.block_max = 2;
+    if (!cc_arena_is_live(a) || !cc_arena_is_live(m)) return fail(2, "ctors");
+    a.a->block_max = 2;
     if (!cc_arena_alloc(&a, 32, 8)) return fail(2, "fill L1");
     grown = cc_arena_alloc(&a, 128, 8);
     if (!grown || cc_arena_ptr_tier(&a, grown) != CC_ARENA_TIER_L2) {
@@ -58,18 +58,20 @@ static int test_detach_refuses_stack(void) {
     CCArena heap = cc_arena_heap(256) @destroy;
     CCArena taken;
     void *p;
-    if (!s.base || !heap.base) return fail(3, "ctors");
+    if (!cc_arena_is_live(s) || !cc_arena_is_live(heap)) return fail(3, "ctors");
     p = cc_arena_alloc(&s, 16, 8);
     if (!p) {
         cc_arena_free(&s);
         return fail(3, "stack alloc");
     }
-    taken = s.detach();
-    if (taken.base) {
-        cc_arena_free(&s);
-        return fail(3, "stack detach must refuse");
+    {
+        CCArena !>(CCError) dr = s.detach();
+        if (cc_is_ok(dr)) {
+            cc_arena_free(&s);
+            return fail(3, "stack detach must refuse");
+        }
     }
-    if (!s.base) {
+    if (!cc_arena_is_live(s)) {
         cc_arena_free(&s);
         return fail(3, "stack source must stay");
     }
@@ -77,9 +79,9 @@ static int test_detach_refuses_stack(void) {
 
     p = cc_arena_alloc(&heap, 16, 8);
     if (!p) return fail(3, "heap alloc");
-    taken = heap.detach();
-    if (!taken.base) return fail(3, "heap detach");
-    if (heap.base) return fail(3, "heap source emptied");
+    taken = heap.detach() !>;
+    if (!cc_arena_is_live(taken)) return fail(3, "heap detach");
+    if (cc_arena_is_live(heap)) return fail(3, "heap source emptied");
     if (cc_arena_live(&taken) != 1) return fail(3, "detached live");
     taken.free();
     printf("  detach: stack refuse, heap move OK\n");
@@ -91,7 +93,7 @@ static int test_try_checkpoint_refuses_slab_hole(void) {
     void *x;
     void *y;
     CCArenaCheckpoint !>(CCError) r;
-    if (!a.base) return fail(4, "heap ctor");
+    if (!cc_arena_is_live(a)) return fail(4, "heap ctor");
     x = cc_arena_alloc(&a, 16, 8);
     y = cc_arena_alloc(&a, 16, 8);
     if (!x || !y) return fail(4, "pair");

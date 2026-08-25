@@ -8,7 +8,7 @@ int main(void) {
         CCArena arena@(1024) @destroy {
             g_heap_destroyed = 1;
         };
-        if (!arena.base) return 1;
+        if (!cc_arena_is_live(arena)) return 1;
         char* p = cc_arena_alloc_T_count(char, &arena, 64);
         if (!p) return 2;
         p[0] = 'a';
@@ -19,7 +19,7 @@ int main(void) {
         CCArena arena@(backing, sizeof(backing)) @destroy {
             g_buf_destroyed = 1;
         };
-        if (!arena.base) return 3;
+        if (!cc_arena_is_live(arena)) return 3;
         char* p = cc_arena_alloc_T_count(char, &arena, 32);
         if (!p) return 4;
         p[0] = 'b';

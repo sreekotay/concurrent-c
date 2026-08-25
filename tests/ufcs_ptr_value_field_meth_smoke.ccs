@@ -11,7 +11,7 @@ typedef struct Holder {
 
 int main(void) {
     CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
-    assert(a.base);
+    assert(cc_arena_is_live(a));
 
     Holder h = {0};
     Holder* p = &h;

@@ -2164,27 +2164,26 @@ Result*!>(IoError) compress_block(Block* blk) {
     // ... fill in res, do allocations ...
     
     // Transfer ownership: detach leaves res_arena empty, so cleanup is no-op
-    res->arena = res_arena.detach();  // cc_arena_detach(&res_arena)
+    res->arena = res_arena.detach() !>;  // cc_arena_detach(&res_arena)
     return cc_ok(res);
 }
 ```
 
 **Arena ownership transfer with `cc_arena_detach`:**
 
-`cc_arena_detach(CCArena* a)` (UFCS: `a.detach()`) transfers arena-owned mallocs
-(heap L1, L2, Main) to a new owner, leaving the source empty. It refuses a
+`cc_arena_detach(CCArena* a)` (UFCS: `a.detach() !>`) transfers arena-owned mallocs
+(heap L1, L2, Main) to a new owner, leaving the source handle dead. It refuses a
 stack or caller-owned L1 (the returned handle would dangle) and an outstanding
-checkpoint loan; both cases leave the source unchanged, return an empty
-handle, and emit a diagnostic.
+checkpoint loan; both cases leave the source unchanged and return `cc_err`.
 
 ```c
-CCArena cc_arena_detach(CCArena* a);  // heap-owned L1 only; empty on refuse
+CCArena !>(CCError) cc_arena_detach(CCArena* a);  // heap-owned L1 only
 ```
 
 After a successful detach:
 
-- The source arena has `base = NULL` - any cleanup becomes a no-op
-- The returned arena owns all the memory and allocations
+- The source handle is dead (`a.a == NULL`) — cleanup is a no-op
+- The returned handle owns all the memory and allocations
 - The caller is responsible for eventually freeing the returned arena
 
 **Rule:** `@defer(err)` and `@defer(ok)` are only valid in functions returning a result type (`T!>(E)`). Using them in a function returning a non-result type is a compile error.

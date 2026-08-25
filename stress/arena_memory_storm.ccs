@@ -156,7 +156,7 @@ static int bench_budget_overflow_reset(void) {
     MemSample rss0, rss1, rss2;
     double t0, t1;
 
-    if (a.block_max != CC_ARENA_DEFAULT_BLOCK_MAX)
+    if (a.a->block_max != CC_ARENA_DEFAULT_BLOCK_MAX)
         return fail("default block_max != 4");
 
     rss0 = sample_rss();
@@ -171,15 +171,15 @@ static int bench_budget_overflow_reset(void) {
     t1 = now_sec();
     rss1 = sample_rss();
 
-    if (!(a._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW))
+    if (!(a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW))
         return fail("expected overflow after slab budget");
-    if (a.block_idx + 1 > CC_ARENA_DEFAULT_BLOCK_MAX)
+    if (a.a->block_idx + 1 > CC_ARENA_DEFAULT_BLOCK_MAX)
         return fail("grew past default block_max");
 
     ovf_bytes = cc_arena_overflow_raw_bytes(&a);
     gross_before = cc_arena_committed_gross_bytes(&a);
     printf("  storm: allocs=%d live~=%zu slabs=%u ovf=%zu gross=%zu rss_delta=%zd %.3fs\n",
-           STORM_ALLOCS, live, a.block_idx + 1, ovf_bytes, gross_before,
+           STORM_ALLOCS, live, a.a->block_idx + 1, ovf_bytes, gross_before,
            (rss0.ok && rss1.ok) ? (ssize_t)rss1.rss_bytes - (ssize_t)rss0.rss_bytes : (ssize_t)-1,
            t1 - t0);
 
@@ -190,9 +190,9 @@ static int bench_budget_overflow_reset(void) {
            gross_before, gross_after, cc_arena_overflow_raw_bytes(&a),
            rss2.ok ? rss2.rss_bytes : 0);
 
-    if (a.ovf_head != NULL || cc_arena_overflow_raw_bytes(&a) != 0)
+    if (a.a->ovf_head != NULL || cc_arena_overflow_raw_bytes(&a) != 0)
         return fail("reset did not drain overflow");
-    if (a.block_idx != 0 || a.prev != NULL)
+    if (a.a->block_idx != 0 || a.a->prev != NULL)
         return fail("reset did not unwind slabs");
     if (gross_after > ROOT_BYTES + 64 * 1024 && gross_after > MAX_RESIDUAL_GROSS)
         return fail("gross still huge after reset");
@@ -225,11 +225,11 @@ static int bench_reset_pingpong(void) {
         if (g > peak_gross) peak_gross = g;
         if (o > peak_ovf) peak_ovf = o;
         cc_arena_reset(&a);
-        if (a.ovf_head != NULL || cc_arena_overflow_raw_bytes(&a) != 0) {
+        if (a.a->ovf_head != NULL || cc_arena_overflow_raw_bytes(&a) != 0) {
             cc_arena_free(&a);
             return fail("pingpong reset left overflow");
         }
-        if (a.block_idx != 0 || a.prev != NULL) {
+        if (a.a->block_idx != 0 || a.a->prev != NULL) {
             cc_arena_free(&a);
             return fail("pingpong reset left extents");
         }
@@ -271,7 +271,7 @@ static int bench_mixed_align_storm(void) {
         live += n;
     }
     printf("  mixed_align: live~=%zu slabs=%u ovf=%zu gross=%zu %.3fs\n",
-           live, a.block_idx + 1, cc_arena_overflow_raw_bytes(&a),
+           live, a.a->block_idx + 1, cc_arena_overflow_raw_bytes(&a),
            cc_arena_committed_gross_bytes(&a), now_sec() - t0);
     cc_arena_free(&a);
     return 0;
@@ -327,14 +327,14 @@ static int bench_stack_spill(void) {
         live += n;
     }
     printf("  stack_spill: live~=%zu slabs=%u ovf=%zu gross=%zu\n",
-           live, s.block_idx + 1, cc_arena_overflow_raw_bytes(&s),
+           live, s.a->block_idx + 1, cc_arena_overflow_raw_bytes(&s),
            cc_arena_committed_gross_bytes(&s));
-    if (s.block_idx == 0 && !(s._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
+    if (s.a->block_idx == 0 && !(s.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
         cc_arena_free(&s);
         return fail("stack should have grown or overflowed");
     }
     cc_arena_reset(&s);
-    if (s.base != s_cc_stack_buf) {
+    if (s.a->base != s_cc_stack_buf) {
         cc_arena_free(&s);
         return fail("stack reset did not restore stack buf");
     }

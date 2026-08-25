@@ -68,13 +68,11 @@ int main(void) {
         return 1;
     }
     CCArena arena = @create(kilobytes(64)) @destroy;
-    CCExclusive* excl = cc_exclusive_create(&arena, 0);
+    CCExclusive excl = cc_exclusive_create(&arena, 0) !> @destroy;
     CCShardMask mask;
     CCShardDomain d;
     Conn c = {0};
     ConnEnc enc = &c;
-    if (!excl) return 1;
-    @defer excl->destroy();
     mask = cc_shard_mask_make(1);
     d = cc_shard_domain(excl, mask);
     execute(enc, OP_A, &d) !>;

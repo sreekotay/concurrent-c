@@ -13,16 +13,16 @@ typedef struct {
 int main(void) {
     Box b;
     void* p;
-    CCArena* child;
+    CCArena child;
     CCArena tmp = cc_arena_heap(256) @destroy;
-    b.arena = tmp.detach();
+    b.arena = tmp.detach() !>;
     p = b.alloc(16, 8);
     if (!p) {
         printf("fail alloc\n");
         return 1;
     }
-    child = b.create_arena(64);
-    if (!child || !child->base) {
+    child = b.create_arena(64) !>;
+    if (!cc_arena_is_live(child)) {
         printf("fail create_arena\n");
         return 1;
     }

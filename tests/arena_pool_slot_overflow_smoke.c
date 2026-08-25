@@ -16,8 +16,8 @@
  * capacity returned "request argument clone failed" at ~300 bytes.  This
  * smoke pins the three properties that make the pool-slot-with-overflow
  * design correct:
- *   1. The first alloc (the "struct at offset 0") stays in the slot and
- *      its pointer remains the slot pointer.
+ *   1. The host overlays the slot; the first user alloc stays in the
+ *      slot L1 (after the host prefix) and is not relocated by growth.
  *   2. A subsequent oversized alloc transparently spills to a heap slab
  *      (block_idx > 0) and the original struct pointer is NOT invalidated.
  *   3. cc_arena_free frees heap extents but never touches the slot bytes,
@@ -51,14 +51,19 @@ int main(void) {
      * arena out of a caller-owned slot buffer. */
     CCArena a = cc_arena_create_buffer(slot, sizeof(slot), CC_ARENA_GROWABLE);
     if (!a.base) { printf("FAIL: create_buffer returned empty\n"); return 1; }
-    if (a.base != slot_start) { printf("FAIL: arena.base should equal slot\n"); return 1; }
-    if (a.block_max != 0) { printf("FAIL: block_max should be 0 (growable), got %u\n", a.block_max); return 1; }
-    if (a._flags & CC_ARENA_FLAG_HEAP_OWNED) { printf("FAIL: slot root must not be heap-owned\n"); return 1; }
+    if (a.a != (CCArenaHost *)slot_start) { printf("FAIL: host should overlay slot\n"); return 1; }
+    if (a.a->base <= slot_start || a.a->base >= slot_start + SLOT_CAP) {
+        printf("FAIL: L1 should be inside the slot after the host\n"); return 1;
+    }
+    if (a.a->block_max != 0) { printf("FAIL: block_max should be 0 (growable), got %u\n", a.a->block_max); return 1; }
+    if (a.a->_flags & CC_ARENA_FLAG_HEAP_OWNED) { printf("FAIL: slot root must not be heap-owned\n"); return 1; }
 
-    /* Step 1: the "request struct" at offset 0 — simulates RedisRequest. */
+    /* Step 1: the request struct in slot L1 — simulates RedisRequest. */
     FakeReq *req = (FakeReq*)cc_arena_alloc(&a, sizeof(*req), _Alignof(FakeReq));
     if (!req) { printf("FAIL: struct alloc\n"); return 2; }
-    if ((uint8_t*)req != slot_start) { printf("FAIL: first alloc must land at slot base\n"); return 2; }
+    if ((uint8_t*)req < a.a->base || (uint8_t*)req >= slot_start + SLOT_CAP) {
+        printf("FAIL: first alloc must land in the slot L1\n"); return 2;
+    }
     req->a = 0xDEADBEEFBADF00DULL;
     req->b = 0x0123456789ABCDEFULL;
 
@@ -80,8 +85,8 @@ int main(void) {
     if ((uint8_t*)argv1 >= slot_start && (uint8_t*)argv1 < slot_start + SLOT_CAP) {
         printf("FAIL: big argv should be in a heap slab, not in the slot\n"); return 4;
     }
-    if (a.block_idx == 0) { printf("FAIL: block_idx should be > 0 after growth\n"); return 4; }
-    if (a.prev == NULL) { printf("FAIL: prev extent chain should be populated\n"); return 4; }
+    if (a.a->block_idx == 0) { printf("FAIL: block_idx should be > 0 after growth\n"); return 4; }
+    if (a.a->prev == NULL) { printf("FAIL: prev extent chain should be populated\n"); return 4; }
     memset(argv1, 0x77, big_n);
 
     /* Step 4: struct at offset 0 is still intact.  This is the key

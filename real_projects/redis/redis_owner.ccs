@@ -888,12 +888,12 @@ static char[:] !>(CCError) reply_arena_alloc_slice(CCArena* reply_arena, size_t 
 
     const size_t reply_arena_initial = 16 * 1024;
     conn->reply_arena = cc_arena_heap(reply_arena_initial);
-    if (!conn->reply_arena.base) {
+    if (!cc_arena_is_live(conn->reply_arena)) {
         cc_channel_free(reply_tx);
         free(conn);
         return NULL;
     }
-    conn->reply_arena.block_max = 0;
+    conn->reply_arena.a->block_max = 0;
     if (cc_arena_pool(&conn->req_pool, sizeof(RedisRequest)) != 0) {
         cc_arena_free(&conn->reply_arena);
         cc_channel_free(reply_tx);
