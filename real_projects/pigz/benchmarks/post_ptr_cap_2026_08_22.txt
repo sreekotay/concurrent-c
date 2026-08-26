@@ -1,0 +1,52 @@
+# All pigz versions — defaults only
+# Date: 2026-08-22
+# Snapshot: after shadow_lower 0.3.4-214 pointer-value @parallel captures
+# Commit: d3707095
+# Compiler: ccc 0.3.4-213 (last-good 0.3.4-214; emit banner may still say 213)
+# Binaries: out/pigz (2026-08-20 18:28, not rebuilt),
+#           out/pigz_wait (2026-08-22 17:03, rebuilt this run)
+# Compare: benchmarks/post_parallel_promise_2026_08_22.txt
+# Machine: Apple M5, 10 cores
+# Input: testdata/text_50mb.bin (52428800 bytes), Silesia concat
+# Method: 5 interleaved rounds, page-cached input, invoke `<bin> <file>`
+#         no -p / -k / -i; CC_WORKERS, CC_THREADS, PIGZ_* unset
+#         each program picks its own width. gunzip -t after each run.
+#         Fresh work copy per invoke so pigz's delete-source default
+#         does not consume the corpus.
+
+=== Interleaved wall seconds (set 1, first invoke after rebuild) ===
+round       pigz  pigz_wait
+    1      0.258      0.453
+    2      0.234      0.205
+    3      0.235      0.207
+    4      0.235      0.210
+    5      0.235      0.211
+
+=== Summary set 1 (best / median / mean wall, output bytes, gunzip) ===
+binary             dict      best   median     mean          out   gunzip
+pigz               chain    0.234    0.235    0.239     19826359       ok
+pigz_wait          chain    0.205    0.210    0.257     19826922       ok
+
+Round 1 is cold for every binary. Median is the fair column.
+
+=== Interleaved wall seconds (set 2) ===
+round       pigz  pigz_wait
+    1      0.236      0.208
+    2      0.234      0.205
+    3      0.235      0.206
+    4      0.234      0.208
+    5      0.242      0.220
+
+=== Summary set 2 (best / median / mean wall, output bytes, gunzip) ===
+binary             dict      best   median     mean          out   gunzip
+pigz               chain    0.234    0.235    0.236     19826359       ok
+pigz_wait          chain    0.205    0.208    0.209     19826922       ok
+
+=== vs post_parallel_promise_2026_08_22 (median is the fair column) ===
+binary             prev s1  prev s2  this s1  this s2
+pigz                  0.247    0.232    0.235    0.235
+pigz_wait             0.227    0.205    0.210    0.208
+
+Round 1 is cold for every binary. Median is the fair column.
+pigz_wait set-1 round 1 (0.453) is first-invoke after rebuild; later
+rounds sit on the same band as the promise receipt (0.205–0.211).

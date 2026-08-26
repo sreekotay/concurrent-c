@@ -1,0 +1,54 @@
+# All pigz versions — defaults only
+# Date: 2026-08-22
+# Snapshot: after @parallel as CCParallel !>(CCError); ordinary !> unwrap
+# Commit: 3711c959 (working tree dirty: live shadow_lower, not last-good)
+# Compiler: ccc 0.3.4-208
+# Binaries: out/pigz (2026-08-20 18:28, not rebuilt),
+#           out/pigz_wait (2026-08-22 11:55, rebuilt this run)
+# Compare: benchmarks/pre_parallel_promise_2026_08_22.txt
+# Machine: Apple M5, 10 cores
+# Input: testdata/text_50mb.bin (52428800 bytes), Silesia concat
+# Method: 5 interleaved rounds, page-cached input, invoke `<bin> <file>`
+#         no -p / -k / -i; CC_WORKERS, CC_THREADS, PIGZ_* unset
+#         each program picks its own width. gunzip -t after each run.
+#         Fresh work copy per invoke so pigz's delete-source default
+#         does not consume the corpus.
+
+Each binary was invoked as `<bin> <file>` only. No -p, no CC_WORKERS /
+CC_THREADS / PIGZ_CAP / PIGZ_DICT / PIGZ_SEQ. pigz_wait defaults to
+chained 32 KiB dictionaries (one gzip stream); PIGZ_DICT=0 opts out.
+
+=== Interleaved wall seconds (set 1, first invoke after rebuild) ===
+round       pigz  pigz_wait
+    1      0.260      0.526
+    2      0.247      0.221
+    3      0.233      0.227
+    4      0.277      0.242
+    5      0.238      0.206
+
+=== Summary set 1 (best / median / mean wall, output bytes, gunzip) ===
+binary             dict      best   median     mean          out   gunzip
+pigz               chain    0.233    0.247    0.251     19826359       ok
+pigz_wait          chain    0.206    0.227    0.284     19826922       ok
+
+=== Interleaved wall seconds (set 2) ===
+round       pigz  pigz_wait
+    1      0.235      0.433
+    2      0.232      0.207
+    3      0.231      0.205
+    4      0.231      0.203
+    5      0.289      0.202
+
+=== Summary set 2 (best / median / mean wall, output bytes, gunzip) ===
+binary             dict      best   median     mean          out   gunzip
+pigz               chain    0.231    0.232    0.244     19826359       ok
+pigz_wait          chain    0.202    0.205    0.250     19826922       ok
+
+=== vs pre_parallel_promise_2026_08_22 (median is the fair column) ===
+binary             pre median  set1 median  set2 median
+pigz                    0.234        0.247        0.232
+pigz_wait               0.209        0.227        0.205
+
+Round 1 is cold for every binary. Median is the fair column.
+pigz_wait set-1 / set-2 round 1 (0.526 / 0.433) are first-invoke after rebuild;
+later rounds sit on the pre-promise band (0.202–0.227).

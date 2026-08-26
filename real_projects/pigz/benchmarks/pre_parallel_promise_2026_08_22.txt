@@ -1,0 +1,32 @@
+# All pigz versions — defaults only
+# Date: 2026-08-22
+# Snapshot: existing compiler, before @parallel promise work
+# Commit: 3711c959 (working tree dirty: pigz_wait.ccs not rebuilt)
+# Compiler: ccc 0.3.4-208
+# Binaries: out/pigz (2026-08-20 18:28), out/pigz_wait (2026-08-22 11:04)
+# Machine: Apple M5, 10 cores
+# Input: testdata/text_50mb.bin (52428800 bytes), Silesia concat
+# Method: 5 interleaved rounds, page-cached input, invoke `<bin> <file>`
+#         no -p / -k / -i; CC_WORKERS, CC_THREADS, PIGZ_* unset
+#         each program picks its own width. gunzip -t after each run.
+#         Fresh work copy per invoke so pigz's delete-source default
+#         does not consume the corpus.
+
+Each binary was invoked as `<bin> <file>` only. No -p, no CC_WORKERS /
+CC_THREADS / PIGZ_CAP / PIGZ_DICT / PIGZ_SEQ. pigz_wait defaults to
+chained 32 KiB dictionaries (one gzip stream); PIGZ_DICT=0 opts out.
+
+=== Interleaved wall seconds ===
+round       pigz  pigz_wait
+    1      0.234      0.218
+    2      0.557      0.209
+    3      0.236      0.222
+    4      0.233      0.204
+    5      0.234      0.208
+
+=== Summary (best / median / mean wall, output bytes, gunzip) ===
+binary             dict      best   median     mean          out   gunzip
+pigz               chain    0.233    0.234    0.299     19826359       ok
+pigz_wait          chain    0.204    0.209    0.212     19826922       ok
+
+Round 1 is cold for every binary. Median is the fair column.
