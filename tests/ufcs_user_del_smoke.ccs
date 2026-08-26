@@ -1,0 +1,37 @@
+/* Capital user type: declared snake / Tag_meth `del` lowers. Not a verb list. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct Shard {
+    int n;
+} Shard;
+
+static int shard_del(Shard* s, int key) {
+    if (!s || key < 0) return 0;
+    s->n -= key;
+    return 1;
+}
+
+typedef struct ToyStore {
+    int n;
+} ToyStore;
+
+static int ToyStore_del(ToyStore* t, int key) {
+    if (!t || key < 0) return 0;
+    t->n -= key;
+    return 1;
+}
+
+int main(void) {
+    Shard s = { .n = 10 };
+    Shard* p = &s;
+    ToyStore t = { .n = 8 };
+    ToyStore* tp = &t;
+
+    if (!s.del(3) || s.n != 7) return 1;
+    if (!p->del(2) || s.n != 5) return 2;
+    if (!t.del(1) || t.n != 7) return 3;
+    if (!tp->del(4) || t.n != 3) return 4;
+    printf("ufcs_user_del_smoke ok\n");
+    return 0;
+}

@@ -1,0 +1,12 @@
+/* Store.get must not invent store_get when no Type_get / store_get is declared. */
+#include <ccc/std/prelude.cch>
+
+typedef struct Store {
+    int n;
+} Store;
+
+int main(void) {
+    Store s = { .n = 0 };
+    s.get();
+    return 0;
+}

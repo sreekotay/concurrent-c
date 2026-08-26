@@ -2322,10 +2322,10 @@ static int shadow_refs_rewrite_emit(CEmit* out, const char* text, size_t len,
     return 1;
 }
 
-#include "pp_emit_unwrap.cch"
-#include "pp_emit_spawn.cch"
-#include "pp_emit_autoblock.cch"
-#include "pp_emit_strswitch.cch"
+#include "pp_emit_unwrap.h"
+#include "pp_emit_spawn.h"
+#include "pp_emit_autoblock.h"
+#include "pp_emit_strswitch.h"
 
 /* Call-arg text: skip UFCS peel when args are plain literals (preserve strings). */
 static void shadow_emit_call_args_text(AstNode* st, char* dst, size_t cap) {
@@ -8823,5 +8823,5 @@ static int shadow_emit_destroy_cleanup(CEmit* out, ShadowCtx* ctx,
 }
 
 
-#include "pp_emit_async.cch"
-#include "pp_emit_tu.cch"
+#include "pp_emit_async.h"
+#include "pp_emit_tu.h"

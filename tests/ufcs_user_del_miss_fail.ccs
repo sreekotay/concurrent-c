@@ -1,0 +1,15 @@
+/* Missing Type_del / snake del must diagnose at lower, not host
+ * `no member named 'del'`. */
+#include <ccc/std/prelude.cch>
+
+typedef struct Shard {
+    int n;
+} Shard;
+
+int main(void) {
+    Shard s = { .n = 1 };
+    Shard* p = &s;
+    p->del(1);
+    s.del(1);
+    return 0;
+}
