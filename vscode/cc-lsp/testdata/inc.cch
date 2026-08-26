@@ -1,0 +1,1 @@
+static int quote_inc_ok(void) { return 0; }

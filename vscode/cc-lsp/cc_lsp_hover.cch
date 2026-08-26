@@ -1,0 +1,97 @@
+#ifndef CC_LSP_HOVER_CCH
+#define CC_LSP_HOVER_CCH
+
+typedef struct LspHover {
+    const char *tok;
+    const char *md;
+} LspHover;
+
+/* Short present-tense notes from spec/concurrent-c-spec-complete.md. */
+static const LspHover g_hovers[] = {
+    {"@err",
+     "`@err` / `@err ident`\n\n"
+     "Forward the bound error to the matching `@errhandler`.\n"
+     "Must diverge; later statements in the same block are unreachable."},
+    {"@errhandler",
+     "`@errhandler(E e) stmt`\n\n"
+     "Scope policy for bare `!>` and `@err`.\n"
+     "Binds at the declaration point; tasks cannot share the parent's handler."},
+    {"@destroy",
+     "`T x = make() !> @destroy;`\n\n"
+     "Declaration-attached cleanup (RAII). Runs on scope exit if `x` was constructed.\n"
+     "If `make()` fails, `x` is never constructed."},
+    {"@defer",
+     "`@defer stmt;` / `@defer name: stmt;` / `@defer(ok)` / `@defer(err)`\n\n"
+     "Statement-attached cleanup. Runs on scope exit in reverse order.\n"
+     "`ok` / `err` variants are conditional on how the scope leaves.\n"
+     "A named defer is disarmed with `@cancel_defer name;`."},
+    {"@async",
+     "`@async` marks a function that may suspend.\n"
+     "Lowers to an explicit frame and poll function. See `@await`."},
+    {"@await",
+     "`@await expr` is an async-child poll point.\n"
+     "Legal only inside `@async`. Sync code drives async with `@await f(...)` or `cc_block_on`."},
+    {"@cancel_defer",
+     "`@cancel_defer name;`\n\n"
+     "Disarm the named `@defer name:` in this block. A second cancel is a no-op.\n"
+     "Unknown name, or cancel before the `@defer` or outside its block, is a compile error."},
+    {"@with_deadline",
+     "`@with_deadline(dur)` / `@with_deadline(dur) as dl`\n\n"
+     "Pushes an ambient deadline for the block. Cooperative: callees must observe it."},
+    {"@parallel",
+     "`@parallel { … }` / `@parallel (pred)` / `@parallel for (k in lo..hi)`\n\n"
+     "Scheduling sugar, not a nursery. `@serial` arms run on the parent fiber."},
+    {"@serial",
+     "`@serial { … }` inside `@parallel`\n\n"
+     "That arm stays on the calling fiber; sibling arms may run concurrently."},
+    {"@comptime",
+     "`@comptime { … }` runs at compile time (TCC seam). Prefer not to hide policy here."},
+    {"@emit",
+     "`@emit` splices generated source (templates, generics, factories)."},
+    {"@grammar",
+     "`@grammar(rules|schema|cli) Name {~~~~ … ~~~~}`\n\n"
+     "PEG / schema / CLI factory. Lowers to `Name_parse` / `Name_match` / …"},
+    {"@typehooks",
+     "`@typehooks on T { … }` registers UFCS / create / destroy hooks for a type family."},
+    {"@typeview",
+     "`@typeview Name` restricts the callable surface of a type (owned vs view faces)."},
+    {"@scratch",
+     "`@scratch` is a function-local scratch arena for short-lived `@string` / temps.\n"
+     "Do not store pointers from it past the statement."},
+    {"@blocking",
+     "`@blocking` marks a callee that may block the fiber (I/O, locks)."},
+    {"@nonblocking",
+     "`@nonblocking` marks a callee that must not block the fiber."},
+    {"@noblock",
+     "`@noblock` on a hot path: refuse blocking operations (owner-fiber style)."},
+    {"@unsafe",
+     "`@unsafe` opts out of a compile-time safety check. The share must stay visible."},
+    {"@link",
+     "`@link(\"lib\")` records a link dependency (e.g. `@link(\"curl\")`)."},
+    {"@for",
+     "`@for` is the CC-prefixed form used where a bare `for` would be ambiguous."},
+    {"!>",
+     "`expr !>` — unwrap a `T!>(E)`.\n\n"
+     "- `expr !>(e) { … }` handle here (body must diverge)\n"
+     "- `expr !>;` forward to the scope `@errhandler`\n"
+     "- `expr !> @destroy` construct-or-don't + cleanup"},
+    {"!>;",
+     "`expr !>;` forwards failure to the enclosing `@errhandler`.\n"
+     "Equivalent to `expr !>(e) <that handler>`."},
+    {"?>",
+     "`expr ?> default` — on failure, use `default` and stay a value.\n"
+     "`expr ?>(e) fallback(e)` exposes the error when computing the default."},
+};
+
+static const char *hover_for_tok(CCSlice tok) {
+    size_t i;
+    for (i = 0; i < sizeof(g_hovers) / sizeof(g_hovers[0]); i++) {
+        size_t n = strlen(g_hovers[i].tok);
+        if (tok.ptr && tok.len == n && memcmp(tok.ptr, g_hovers[i].tok, n) == 0) {
+            return g_hovers[i].md;
+        }
+    }
+    return NULL;
+}
+
+#endif

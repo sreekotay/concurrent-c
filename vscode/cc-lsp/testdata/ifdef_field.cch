@@ -1,0 +1,10 @@
+#ifndef IFDEF_FIELD_H
+#define IFDEF_FIELD_H
+typedef struct IfdefField {
+#ifdef _WIN32
+    void* handle;
+#else
+    int pid;
+#endif
+} IfdefField;
+#endif

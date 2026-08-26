@@ -27,6 +27,37 @@
       }
     },
     {
+      "label": "cc-lsp: test",
+      "type": "shell",
+      "command": "${workspaceFolder}/vscode/cc-lsp/test.sh",
+      "args": [],
+      "dependsOn": [
+        "cc-lsp: build"
+      ],
+      "problemMatcher": [],
+      "group": "test",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "cc-lsp: build",
+      "type": "shell",
+      "command": "${workspaceFolder}/vscode/cc-lsp/install-local.sh",
+      "args": [
+        "--build-only"
+      ],
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
       "label": "ccc: run (current file)",
       "type": "shell",
       "command": "${workspaceFolder}/cc/bin/ccc",

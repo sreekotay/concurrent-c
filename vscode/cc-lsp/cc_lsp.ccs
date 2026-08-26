@@ -1,0 +1,1248 @@
+#!ccc ccs
+/*
+ * Concurrent-C language server (Phase 1): JSON-RPC over stdio.
+ * Diagnostics come from `ccc --emit-c-only` on a nursery child (latest
+ * `gen` wins; one debounce waiter per uri). Logs go to stderr; stdout is
+ * the LSP wire (exclusive).
+ *
+ *   cc-lsp              # --stdio (default)
+ *   cc-lsp --check FILE
+ *   cc-lsp --smoke
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/exec.cch>
+#include <ccc/std/json.cch>
+#include <ccc/cc_grammar.cch>
+#include <ccc/cc_shape.cch>
+#include <ccc/script/stdio.cch>
+#include <ccc/script/file.cch>
+#include "cc_lsp_hover.cch"
+#include <dirent.h>
+#include <limits.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+@grammar(rules) Json {~~~~
+    include JsonDom
+    string:  [#'"' keep/decode(jstr)/encode(jstr_enc) any [some strchar | esc] #'"']
+    value:   [ws [string | number | object | array
+                 | keep ["true" | "false" | "null"]] ws]
+~~~~}
+
+enum { LSP_ERROR = 1, LSP_WARN = 2, LSP_INFO = 3, DIAG_CAP = 256 };
+
+typedef struct LspDiag {
+    int line;
+    int col;
+    int severity;
+    CCSlice message;
+} LspDiag;
+
+typedef struct JsonId {
+    bool present;
+    bool is_string;
+    char buf[80];
+    size_t len;
+} JsonId;
+
+static char g_root[PATH_MAX];
+static char g_ccc[PATH_MAX];
+
+#define LSP_CAPS \
+    "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":false}," \
+    "\"serverInfo\":{\"name\":\"cc-lsp\",\"version\":\"0.1.0\"}}"
+
+enum { DOC_CAP = 48, DEBOUNCE_MS = 150, TICKET_CAP = 2 };
+enum { LK_OUT = 1, LK_DOCS = 2, LK_TICKET = 3 };
+
+typedef struct OpenDoc {
+    char uri[1024];
+    char *text;
+    size_t len;
+    uint32_t gen;
+    int debounce_armed;
+    int ccc_pid;
+} OpenDoc;
+
+typedef struct CheckKick {
+    char uri[1024];
+    unsigned delay_ms;
+} CheckKick;
+
+typedef struct CheckSnap {
+    char uri[1024];
+    char logical[PATH_MAX];
+    char *text;
+    size_t len;
+    uint32_t gen;
+} CheckSnap;
+
+static OpenDoc g_docs[DOC_CAP];
+static CCExclusive g_excl;
+static CCNursery g_nurs;
+static int g_tickets = TICKET_CAP;
+
+static bool slice_eq(CCSlice s, const char *lit);
+
+static int ident_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+static OpenDoc *doc_find(CCSlice uri) {
+    size_t i;
+    for (i = 0; i < DOC_CAP; i++) {
+        if (g_docs[i].uri[0] && slice_eq(uri, g_docs[i].uri)) return &g_docs[i];
+    }
+    return NULL;
+}
+
+static void doc_put(CCSlice uri, CCSlice text) {
+    OpenDoc *d = doc_find(uri);
+    size_t n;
+    if (!d) {
+        size_t i;
+        for (i = 0; i < DOC_CAP; i++) {
+            if (!g_docs[i].uri[0]) {
+                d = &g_docs[i];
+                break;
+            }
+        }
+        if (!d) d = &g_docs[0];
+        n = uri.len < sizeof(d->uri) - 1 ? uri.len : sizeof(d->uri) - 1;
+        memcpy(d->uri, uri.ptr, n);
+        d->uri[n] = 0;
+    }
+    free(d->text);
+    d->text = NULL;
+    d->len = 0;
+    if (!text.ptr) return;
+    d->text = (char *)malloc(text.len + 1);
+    if (!d->text) return;
+    memcpy(d->text, text.ptr, text.len);
+    d->text[text.len] = 0;
+    d->len = text.len;
+    d->gen++;
+    if (d->gen == 0) d->gen = 1;
+}
+
+static void doc_kill_pid(OpenDoc *d) {
+    if (!d || d->ccc_pid <= 0) return;
+    kill(d->ccc_pid, SIGTERM);
+    d->ccc_pid = 0;
+}
+
+static void doc_drop(CCSlice uri) {
+    OpenDoc *d = doc_find(uri);
+    if (!d) return;
+    doc_kill_pid(d);
+    free(d->text);
+    memset(d, 0, sizeof(*d));
+}
+
+static bool shape_int(CCShapeVal *obj, const char *key, int *out) {
+    CCShapeVal *v = obj ? cc_shape_get(obj, key) : NULL;
+    CCSlice s;
+    if (!v || cc_shape_kind(v) != CC_SHAPE_LEAF || !v->u.bytes) return false;
+    s = cc_shape_slice(v);
+    if (!s.ptr || s.len == 0) return false;
+    *out = atoi(s.ptr);
+    return true;
+}
+
+static bool offset_at(CCSlice text, int line0, int col0, size_t *off) {
+    size_t i = 0;
+    int line = 0;
+    if (!text.ptr) return false;
+    while (i < text.len && line < line0) {
+        if (text.ptr[i] == '\n') line++;
+        i++;
+    }
+    if (line != line0) return false;
+    if (col0 < 0) col0 = 0;
+    if ((size_t)col0 > text.len - i) col0 = (int)(text.len - i);
+    *off = i + (size_t)col0;
+    return true;
+}
+
+static CCSlice token_at(CCSlice text, size_t off) {
+    const char *p;
+    size_t n;
+    size_t i;
+    if (!text.ptr || text.len == 0) return cc_slice_empty();
+    if (off >= text.len) off = text.len - 1;
+    p = text.ptr;
+    n = text.len;
+    i = off;
+    while (i > 0 && (p[i] == ' ' || p[i] == '\t' || p[i] == '\n' || p[i] == '\r')) i--;
+
+    if (p[i] == ';' && i >= 2 && p[i - 2] == '!' && p[i - 1] == '>') {
+        return cc_slice_from_buffer((void *)(p + i - 2), 3);
+    }
+    if (p[i] == '>' && i >= 1 && (p[i - 1] == '!' || p[i - 1] == '?')) {
+        if (i + 1 < n && p[i + 1] == ';') {
+            return cc_slice_from_buffer((void *)(p + i - 1), 3);
+        }
+        return cc_slice_from_buffer((void *)(p + i - 1), 2);
+    }
+    if ((p[i] == '!' || p[i] == '?') && i + 1 < n && p[i + 1] == '>') {
+        if (i + 2 < n && p[i + 2] == ';') {
+            return cc_slice_from_buffer((void *)(p + i), 3);
+        }
+        return cc_slice_from_buffer((void *)(p + i), 2);
+    }
+
+    {
+        size_t start = i;
+        while (start > 0 && ident_char(p[start - 1])) start--;
+        if (start > 0 && p[start - 1] == '@') start--;
+        if (p[start] == '@') {
+            size_t end = start + 1;
+            while (end < n && ident_char(p[end])) end++;
+            return cc_slice_from_buffer((void *)(p + start), end - start);
+        }
+        if (ident_char(p[start])) {
+            size_t end = start;
+            while (end < n && ident_char(p[end])) end++;
+            return cc_slice_from_buffer((void *)(p + start), end - start);
+        }
+    }
+    return cc_slice_from_buffer((void *)(p + i), 1);
+}
+
+static bool slice_eq(CCSlice s, const char *lit) {
+    size_t n = strlen(lit);
+    return s.ptr && s.len == n && memcmp(s.ptr, lit, n) == 0;
+}
+
+static bool slice_starts(CCSlice s, const char *lit) {
+    size_t n = strlen(lit);
+    return s.ptr && s.len >= n && memcmp(s.ptr, lit, n) == 0;
+}
+
+static CCSlice slice_cstr(const char *s) {
+    return cc_slice_from_buffer((void *)s, s ? strlen(s) : 0);
+}
+
+static bool shape_str(CCShapeVal *obj, const char *key, CCSlice *out) {
+    CCShapeVal *v = obj ? cc_shape_get(obj, key) : NULL;
+    if (!v || cc_shape_kind(v) != CC_SHAPE_LEAF || !v->u.bytes) return false;
+    *out = cc_shape_slice(v);
+    return true;
+}
+
+static CCShapeVal *shape_obj(CCShapeVal *obj, const char *key) {
+    CCShapeVal *v = obj ? cc_shape_get(obj, key) : NULL;
+    if (!v || cc_shape_kind(v) != CC_SHAPE_OBJ) return NULL;
+    return v;
+}
+
+static CCShapeVal *shape_arr_at(CCShapeVal *arr, size_t i) {
+    if (!arr || cc_shape_kind(arr) != CC_SHAPE_ARR) return NULL;
+    if (!arr->u.arr || i >= arr->u.arr->n) return NULL;
+    return &arr->u.arr->items[i];
+}
+
+static int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static size_t uri_to_path(CCSlice uri, char *dst, size_t cap) {
+    const char *p = uri.ptr;
+    size_t n = uri.len;
+    size_t i = 0;
+    size_t o = 0;
+    if (!p || cap == 0) return 0;
+    if (n >= 7 && memcmp(p, "file://", 7) == 0) {
+        i = 7;
+        if (n >= i + 9 && memcmp(p + i, "localhost", 9) == 0) i += 9;
+    }
+    while (i < n && o + 1 < cap) {
+        char c = p[i];
+        if (c == '%' && i + 2 < n) {
+            int hi = hex_nibble(p[i + 1]);
+            int lo = hex_nibble(p[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                dst[o++] = (char)((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        dst[o++] = c;
+        i++;
+    }
+    dst[o] = 0;
+    return o;
+}
+
+static void copy_path(char *dst, size_t cap, CCSlice s) {
+    size_t n = s.len;
+    if (n + 1 > cap) n = cap - 1;
+    if (s.ptr && n) memcpy(dst, s.ptr, n);
+    dst[n] = 0;
+}
+
+static void docs_set_pid(CCSlice uri, int pid) {
+    CCExclusiveGuard g;
+    OpenDoc *d;
+    if (!cc_exclusive_is_live(g_excl)) return;
+    g = cc_exclusive_acquire(g_excl.e, LK_DOCS);
+    @defer g.release();
+    d = doc_find(uri);
+    if (d) d->ccc_pid = pid;
+}
+
+static CheckSnap *docs_snapshot(CCSlice uri) {
+    CCExclusiveGuard g;
+    OpenDoc *d;
+    CheckSnap *s;
+    if (!cc_exclusive_is_live(g_excl)) return NULL;
+    g = cc_exclusive_acquire(g_excl.e, LK_DOCS);
+    @defer g.release();
+    d = doc_find(uri);
+    if (!d) return NULL;
+    s = (CheckSnap *)calloc(1, sizeof(CheckSnap));
+    if (!s) return NULL;
+    snprintf(s->uri, sizeof(s->uri), "%s", d->uri);
+    uri_to_path(slice_cstr(d->uri), s->logical, sizeof(s->logical));
+    s->gen = d->gen;
+    if (d->text && d->len) {
+        s->text = (char *)malloc(d->len + 1);
+        if (!s->text) {
+            free(s);
+            return NULL;
+        }
+        memcpy(s->text, d->text, d->len);
+        s->text[d->len] = 0;
+        s->len = d->len;
+    }
+    return s;
+}
+
+static int docs_gen_current(CCSlice uri, uint32_t gen) {
+    CCExclusiveGuard g;
+    OpenDoc *d;
+    int ok = 0;
+    if (!cc_exclusive_is_live(g_excl)) return 0;
+    g = cc_exclusive_acquire(g_excl.e, LK_DOCS);
+    @defer g.release();
+    d = doc_find(uri);
+    ok = d && d->gen == gen;
+    return ok;
+}
+
+static void snap_free(CheckSnap *s) {
+    if (!s) return;
+    free(s->text);
+    free(s);
+}
+
+static int ticket_ready(void *env) {
+    (void)env;
+    return g_tickets > 0;
+}
+
+static void ticket_take(void) {
+    @errhandler(CCError e) { (void)e; return; }
+    CCExclusiveGuard g;
+    if (!cc_exclusive_is_live(g_excl)) return;
+    g = cc_exclusive_acquire_when(g_excl.e, LK_TICKET, ticket_ready, NULL) !>;
+    g_tickets--;
+    g.release();
+}
+
+static void ticket_give(void) {
+    CCExclusiveGuard g;
+    if (!cc_exclusive_is_live(g_excl)) return;
+    g = cc_exclusive_acquire(g_excl.e, LK_TICKET);
+    @defer g.release();
+    if (g_tickets < TICKET_CAP) g_tickets++;
+    g.signal();
+}
+
+static const char *basename_cstr(const char *path) {
+    const char *slash = path ? strrchr(path, '/') : NULL;
+    return slash ? slash + 1 : (path ? path : "buffer.ccs");
+}
+
+/* Quoted includes resolve from dirname(src). Snapshots live in $TMPDIR;
+ * a `#line 1 "logical"` stamp + cwd keep `"browse.cch"` resolving. */
+static int dir_of(const char *path, char *dst, size_t cap) {
+    const char *slash;
+    size_t n;
+    if (!path || path[0] != '/' || !dst || cap < 2) return 0;
+    slash = strrchr(path, '/');
+    if (!slash || slash == path) return 0;
+    n = (size_t)(slash - path);
+    if (n >= cap) return 0;
+    memcpy(dst, path, n);
+    dst[n] = 0;
+    return 1;
+}
+
+static void check_workdir(const char *src, const char *quote_dir, char *dst,
+                          size_t cap) {
+    if (quote_dir && quote_dir[0] == '/') {
+        snprintf(dst, cap, "%s", quote_dir);
+        return;
+    }
+    if (dir_of(src, dst, cap)) return;
+    if (g_root[0]) {
+        snprintf(dst, cap, "%s", g_root);
+        return;
+    }
+    snprintf(dst, cap, ".");
+}
+
+static int make_wave_dir(char *dir, size_t cap) {
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !tmp[0]) tmp = "/tmp";
+    if (snprintf(dir, cap, "%s/cc-lsp-XXXXXX", tmp) >= (int)cap) return 0;
+    return mkdtemp(dir) != NULL;
+}
+
+static void wipe_dir(const char *dir) {
+    DIR *d;
+    struct dirent *ent;
+    if (!dir || !dir[0]) return;
+    d = opendir(dir);
+    if (!d) {
+        rmdir(dir);
+        return;
+    }
+    while ((ent = readdir(d)) != NULL) {
+        char path[PATH_MAX];
+        if (ent->d_name[0] == '.' &&
+            (ent->d_name[1] == 0 ||
+             (ent->d_name[1] == '.' && ent->d_name[2] == 0)))
+            continue;
+        snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        unlink(path);
+    }
+    closedir(d);
+    rmdir(dir);
+}
+
+/* Prior LSP versions wrote `.cc-lsp-*` next to the source. Remove those. */
+static void sweep_project_lsp_junk(const char *dir) {
+    DIR *d;
+    struct dirent *ent;
+    if (!dir || dir[0] != '/') return;
+    d = opendir(dir);
+    if (!d) return;
+    while ((ent = readdir(d)) != NULL) {
+        const char *n = ent->d_name;
+        size_t len = strlen(n);
+        char path[PATH_MAX];
+        int junk = (strncmp(n, ".cc-lsp-", 8) == 0);
+        if (!junk && len > 13 && strcmp(n + len - 13, ".cc-lsp-out.c") == 0)
+            junk = 1;
+        if (!junk) continue;
+        snprintf(path, sizeof(path), "%s/%s", dir, n);
+        unlink(path);
+    }
+    closedir(d);
+}
+
+/* Stamp `#line 1 "logical"` so shadow_fill_quote_dir uses the real folder. */
+static int write_snap_src(const char *src, const char *logical,
+                          const char *text, size_t len) {
+    FILE *f;
+    if (!src || !src[0]) return 0;
+    f = fopen(src, "wb");
+    if (!f) return 0;
+    if (logical && logical[0] == '/' && !strchr(logical, '"')) {
+        if (fprintf(f, "#line 1 \"%s\"\n", logical) < 0) {
+            fclose(f);
+            return 0;
+        }
+    }
+    if (text && len && fwrite(text, 1, len, f) != len) {
+        fclose(f);
+        return 0;
+    }
+    return fclose(f) == 0;
+}
+
+static void cmd_add_check(CCCommand *cmd, const char *src, const char *emit,
+                          const char *quote_dir) {
+    char work[PATH_MAX];
+    check_workdir(src, quote_dir, work, sizeof(work));
+    cmd->arg("--emit-c-only");
+    cmd->arg("--no-runtime");
+    cmd->arg("--no-cache");
+    cmd->arg("-o");
+    cmd->arg(emit);
+    cmd->arg(src);
+    cmd->cwd(slice_cstr(work));
+}
+
+static bool file_executable(const char *path) {
+    return path && path[0] && access(path, X_OK) == 0;
+}
+
+static void resolve_ccc(void) {
+    const char *env;
+    if (g_ccc[0] && file_executable(g_ccc)) return;
+    env = getenv("CC_LSP_CCC");
+    if (env && file_executable(env)) {
+        snprintf(g_ccc, sizeof(g_ccc), "%s", env);
+        return;
+    }
+    env = getenv("CCC");
+    if (env && file_executable(env)) {
+        snprintf(g_ccc, sizeof(g_ccc), "%s", env);
+        return;
+    }
+    if (g_root[0]) {
+        snprintf(g_ccc, sizeof(g_ccc), "%s/cc/bin/ccc", g_root);
+        if (file_executable(g_ccc)) return;
+    }
+    snprintf(g_ccc, sizeof(g_ccc), "ccc");
+}
+
+static void json_id_from(CCShapeVal *root, JsonId *id) {
+    CCShapeVal *v = root ? cc_shape_get(root, "id") : NULL;
+    CCSlice s;
+    size_t i;
+    memset(id, 0, sizeof(*id));
+    if (!v || cc_shape_kind(v) != CC_SHAPE_LEAF) return;
+    s = cc_shape_slice(v);
+    if (!s.ptr || s.len == 0 || s.len >= sizeof(id->buf)) return;
+    memcpy(id->buf, s.ptr, s.len);
+    id->buf[s.len] = 0;
+    id->len = s.len;
+    id->present = true;
+    id->is_string = false;
+    if (s.ptr[0] == '-' || (s.ptr[0] >= '0' && s.ptr[0] <= '9')) {
+        for (i = 1; i < s.len; i++) {
+            if (s.ptr[i] < '0' || s.ptr[i] > '9') {
+                id->is_string = true;
+                break;
+            }
+        }
+    } else {
+        id->is_string = true;
+    }
+}
+
+static void json_push_quoted(CCString *s, CCSlice raw, CCArena *a) {
+    size_t need;
+    char *buf;
+    s->push_char('"', a);
+    need = jstr_enc(raw.ptr ? raw.ptr : "", raw.len, NULL, 0);
+    buf = (char *)cc_arena_alloc(a, need ? need : 1, 1);
+    if (!buf) return;
+    if (need) jstr_enc(raw.ptr ? raw.ptr : "", raw.len, buf, need);
+    s->push_buffer(buf, (uint32_t)need, a);
+    s->push_char('"', a);
+}
+
+static void json_push_id(CCString *s, const JsonId *id, CCArena *a) {
+    if (!id->present) {
+        s->push_cstr("null", a);
+        return;
+    }
+    if (id->is_string) {
+        json_push_quoted(s, slice_cstr(id->buf), a);
+        return;
+    }
+    s->push_cstr(id->buf, a);
+}
+
+static void lsp_write_unlocked(CCSlice body) {
+    char hdr[80];
+    int n = snprintf(hdr, sizeof(hdr), "Content-Length: %zu\r\n\r\n", body.len);
+    fwrite(hdr, 1, (size_t)n, stdout);
+    if (body.ptr && body.len) fwrite(body.ptr, 1, body.len, stdout);
+    fflush(stdout);
+}
+
+static void lsp_write(CCSlice body) {
+    if (cc_exclusive_is_live(g_excl)) {
+        CCExclusiveGuard g = cc_exclusive_acquire(g_excl.e, LK_OUT);
+        @defer g.release();
+        lsp_write_unlocked(body);
+        return;
+    }
+    lsp_write_unlocked(body);
+}
+
+static void lsp_write_str(CCString *body) {
+    lsp_write(cc_string_as_slice(body));
+}
+
+static bool read_exact(char *p, size_t n) {
+    size_t got = 0;
+    while (got < n) {
+        size_t r = fread(p + got, 1, n - got, stdin);
+        if (r == 0) return false;
+        got += r;
+    }
+    return true;
+}
+
+static bool read_lsp_headers(size_t *content_len) {
+    char buf[8192];
+    size_t n = 0;
+    const char *p;
+    *content_len = 0;
+    for (;;) {
+        int c = fgetc(stdin);
+        if (c == EOF) return false;
+        if (n + 1 >= sizeof(buf)) return false;
+        buf[n++] = (char)c;
+        if (n >= 4 && memcmp(buf + n - 4, "\r\n\r\n", 4) == 0) break;
+        if (n >= 2 && buf[n - 1] == '\n' && buf[n - 2] == '\n') break;
+    }
+    buf[n] = 0;
+    p = strstr(buf, "Content-Length:");
+    if (!p) p = strstr(buf, "content-length:");
+    if (!p) return false;
+    p += 15;
+    while (*p == ' ' || *p == '\t') p++;
+    *content_len = (size_t)strtoul(p, NULL, 10);
+    return *content_len > 0 && *content_len < (32u << 20);
+}
+
+static CCSlice line_at(CCSlice text, size_t *off) {
+    size_t i = *off;
+    size_t start = i;
+    if (i >= text.len) return cc_slice_empty();
+    while (i < text.len && text.ptr[i] != '\n' && text.ptr[i] != '\r') i++;
+    *off = i;
+    if (*off < text.len && text.ptr[*off] == '\r') (*off)++;
+    if (*off < text.len && text.ptr[*off] == '\n') (*off)++;
+    return cc_slice_from_buffer((void *)(text.ptr + start), i - start);
+}
+
+static bool parse_diag_line(CCSlice line, LspDiag *d) {
+    const char *p = line.ptr;
+    size_t n = line.len;
+    const char *sev;
+    const char *colon;
+    size_t sevn;
+    int kind;
+    if (!p || n == 0) return false;
+    if (slice_starts(line, "cc:")) return false;
+    if (n >= 6 && memcmp(p, "error:", 6) == 0) return false;
+
+    if ((sev = (const char *)memmem(p, n, ": error: ", 9))) {
+        kind = LSP_ERROR;
+        sevn = 9;
+    } else if ((sev = (const char *)memmem(p, n, ": warning: ", 11))) {
+        kind = LSP_WARN;
+        sevn = 11;
+    } else if ((sev = (const char *)memmem(p, n, ": note: ", 8))) {
+        kind = LSP_INFO;
+        sevn = 8;
+    } else {
+        return false;
+    }
+
+    colon = sev;
+    if (colon > p) colon--;
+    while (colon > p && *colon >= '0' && *colon <= '9') colon--;
+    if (colon == p || *colon != ':') return false;
+    d->col = atoi(colon + 1);
+    {
+        const char *linep = colon - 1;
+        while (linep > p && *linep >= '0' && *linep <= '9') linep--;
+        if (linep < colon - 1 && *linep == ':') {
+            d->line = atoi(linep + 1);
+        } else {
+            d->line = d->col;
+            d->col = 1;
+        }
+    }
+    if (d->line <= 0) d->line = 1;
+    if (d->col <= 0) d->col = 1;
+    d->severity = kind;
+    d->message = cc_slice_from_buffer((void *)(sev + sevn), (size_t)(p + n - (sev + sevn)));
+    return d->message.len > 0;
+}
+
+static size_t parse_diags(CCSlice text, LspDiag *out, size_t cap) {
+    size_t off = 0;
+    size_t n = 0;
+    while (off < text.len && n < cap) {
+        CCSlice line = line_at(text, &off);
+        if (parse_diag_line(line, &out[n])) n++;
+    }
+    return n;
+}
+
+static void push_diag_json(CCString *s, const LspDiag *d, CCArena *a) {
+    s->push_cstr("{\"range\":{\"start\":{\"line\":", a);
+    s->push_int((int64_t)(d->line - 1), a);
+    s->push_cstr(",\"character\":", a);
+    s->push_int((int64_t)(d->col - 1), a);
+    s->push_cstr("},\"end\":{\"line\":", a);
+    s->push_int((int64_t)(d->line - 1), a);
+    s->push_cstr(",\"character\":", a);
+    s->push_int((int64_t)d->col, a);
+    s->push_cstr("}},\"severity\":", a);
+    s->push_int((int64_t)d->severity, a);
+    s->push_cstr(",\"source\":\"ccc\",\"message\":", a);
+    json_push_quoted(s, d->message, a);
+    s->push_char('}', a);
+}
+
+static CCString publish_diags_json(CCArena *a, CCSlice uri, const LspDiag *ds, size_t n) {
+    CCString s = {0};
+    size_t i;
+    s.push_cstr("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":", a);
+    json_push_quoted(&s, uri, a);
+    s.push_cstr(",\"diagnostics\":[", a);
+    for (i = 0; i < n; i++) {
+        if (i) s.push_char(',', a);
+        push_diag_json(&s, &ds[i], a);
+    }
+    s.push_cstr("]}}", a);
+    return s;
+}
+
+static CCProcessOutput !>(CCIoError) run_ccc_check(CCArena *a, const char *src,
+                                                   const char *emit,
+                                                   const char *quote_dir) {
+    CCCommand cmd;
+    resolve_ccc();
+    cmd = cc_command(a, slice_cstr(g_ccc));
+    cmd_add_check(&cmd, src, emit, quote_dir);
+    return cmd.output(a);
+}
+
+static int run_ccc_live(CCArena *a, const char *src, const char *emit,
+                       const char *quote_dir, CCSlice uri,
+                       CCProcessOutput *out) {
+    @errhandler(CCIoError e) {
+        (void)e;
+        docs_set_pid(uri, 0);
+        return 0;
+    }
+    /* cmd.output() select-loops both pipes. spawn()!>'s CCProcess
+     * has been coming back as junk (pid=7, stdout_fd=heap, stderr_fd=1)
+     * and then collect() hangs on the LSP wire. */
+    (void)uri;
+    fprintf(stderr, "cc-lsp: ccc output %s\n", src);
+    *out = run_ccc_check(a, src, emit, quote_dir) !>;
+    return 1;
+}
+
+static size_t check_path(CCArena *a, const char *src, LspDiag *ds, size_t cap, CCSlice *stderr_keep) {
+    char wave[PATH_MAX];
+    char emit[PATH_MAX];
+    char quote[PATH_MAX];
+    CCProcessOutput out;
+    CCSlice err;
+    wave[0] = emit[0] = quote[0] = 0;
+    if (dir_of(src, quote, sizeof(quote))) sweep_project_lsp_junk(quote);
+    if (!make_wave_dir(wave, sizeof(wave))) {
+        ds[0].line = 1;
+        ds[0].col = 1;
+        ds[0].severity = LSP_ERROR;
+        ds[0].message = slice_cstr("mkdtemp failed");
+        if (stderr_keep) *stderr_keep = cc_slice_empty();
+        return 1;
+    }
+    @defer wipe_dir(wave);
+    snprintf(emit, sizeof(emit), "%s/out.c", wave);
+    out = run_ccc_check(a, src, emit, quote) !>(e) {
+        (void)e;
+        ds[0].line = 1;
+        ds[0].col = 1;
+        ds[0].severity = LSP_ERROR;
+        ds[0].message = slice_cstr("failed to run ccc --emit-c-only");
+        if (stderr_keep) *stderr_keep = cc_slice_empty();
+        return 1;
+    };
+    err = out.stderr();
+    if (stderr_keep) *stderr_keep = err;
+    {
+        size_t n = parse_diags(err, ds, cap);
+        if (n == 0 && err.len && out.exit_code() != 0 && cap > 0) {
+            ds[0].line = 1;
+            ds[0].col = 1;
+            ds[0].severity = LSP_ERROR;
+            ds[0].message = err;
+            return 1;
+        }
+        return n;
+    }
+}
+
+static void publish_for_uri(CCArena *a, CCSlice uri, const LspDiag *ds, size_t n) {
+    CCString body = publish_diags_json(a, uri, ds, n);
+    lsp_write_str(&body);
+    fprintf(stderr, "cc-lsp: published %zu diag(s) for %.*s\n",
+            n, (int)uri.len, uri.ptr);
+}
+
+static void remember_root_from(CCShapeVal *params) {
+    CCSlice uri;
+    CCShapeVal *folders;
+    CCShapeVal *first;
+    if (!params || g_root[0]) return;
+    if (shape_str(params, "rootUri", &uri) && uri.len && !slice_eq(uri, "null")) {
+        uri_to_path(uri, g_root, sizeof(g_root));
+        return;
+    }
+    folders = cc_shape_get(params, "workspaceFolders");
+    first = shape_arr_at(folders, 0);
+    if (first && shape_str(first, "uri", &uri)) {
+        uri_to_path(uri, g_root, sizeof(g_root));
+    }
+}
+
+static void reply_result(CCArena *a, const JsonId *id, const char *result_json) {
+    CCString s = {0};
+    s.push_cstr("{\"jsonrpc\":\"2.0\",\"id\":", a);
+    json_push_id(&s, id, a);
+    s.push_cstr(",\"result\":", a);
+    s.push_cstr(result_json, a);
+    s.push_char('}', a);
+    lsp_write_str(&s);
+}
+
+static void reply_hover(CCArena *a, const JsonId *id, const char *md) {
+    CCString s = {0};
+    if (!md) {
+        reply_result(a, id, "null");
+        return;
+    }
+    s.push_cstr("{\"jsonrpc\":\"2.0\",\"id\":", a);
+    json_push_id(&s, id, a);
+    s.push_cstr(",\"result\":{\"contents\":{\"kind\":\"markdown\",\"value\":", a);
+    json_push_quoted(&s, slice_cstr(md), a);
+    s.push_cstr("}}}", a);
+    lsp_write_str(&s);
+}
+
+static void reply_error(CCArena *a, const JsonId *id, int code, const char *msg) {
+    CCString s = {0};
+    s.push_cstr("{\"jsonrpc\":\"2.0\",\"id\":", a);
+    json_push_id(&s, id, a);
+    s.push_cstr(",\"error\":{\"code\":", a);
+    s.push_int((int64_t)code, a);
+    s.push_cstr(",\"message\":", a);
+    json_push_quoted(&s, slice_cstr(msg), a);
+    s.push_cstr("}}", a);
+    lsp_write_str(&s);
+}
+
+static size_t check_snap(CCArena *a, CheckSnap *snap, LspDiag *ds, size_t cap) {
+    char wave[PATH_MAX];
+    char src[PATH_MAX];
+    char emit[PATH_MAX];
+    char quote[PATH_MAX];
+    const char *base;
+    CCProcessOutput out;
+    CCSlice err;
+    size_t n;
+    CCSlice uri = slice_cstr(snap->uri);
+
+    wave[0] = src[0] = emit[0] = quote[0] = 0;
+    if (dir_of(snap->logical, quote, sizeof(quote)))
+        sweep_project_lsp_junk(quote);
+
+    if (!snap->text || snap->len == 0) {
+        if (snap->logical[0] && access(snap->logical, R_OK) == 0) {
+            return check_path(a, snap->logical, ds, cap, NULL);
+        }
+        ds[0].line = 1;
+        ds[0].col = 1;
+        ds[0].severity = LSP_ERROR;
+        ds[0].message = slice_cstr("no buffer text");
+        return 1;
+    }
+
+    base = basename_cstr(snap->logical);
+    if (!base[0]) base = "buffer.ccs";
+    if (!make_wave_dir(wave, sizeof(wave))) {
+        ds[0].line = 1;
+        ds[0].col = 1;
+        ds[0].severity = LSP_ERROR;
+        ds[0].message = slice_cstr("mkdtemp failed");
+        return 1;
+    }
+    @defer wipe_dir(wave);
+    snprintf(src, sizeof(src), "%s/%s", wave, base);
+    snprintf(emit, sizeof(emit), "%s/out.c", wave);
+    if (!write_snap_src(src, snap->logical, snap->text, snap->len)) {
+        ds[0].line = 1;
+        ds[0].col = 1;
+        ds[0].severity = LSP_ERROR;
+        ds[0].message = slice_cstr("failed to write temp buffer");
+        return 1;
+    }
+    memset(&out, 0, sizeof(out));
+    if (!run_ccc_live(a, src, emit, quote, uri, &out)) {
+        ds[0].line = 1;
+        ds[0].col = 1;
+        ds[0].severity = LSP_ERROR;
+        ds[0].message = slice_cstr("failed to run ccc --emit-c-only");
+        return 1;
+    }
+    err = out.stderr();
+    n = parse_diags(err, ds, cap);
+    if (n == 0 && err.len && out.exit_code() != 0 && cap > 0) {
+        ds[0].line = 1;
+        ds[0].col = 1;
+        ds[0].severity = LSP_ERROR;
+        ds[0].message = err;
+        n = 1;
+    }
+    return n;
+}
+
+static void check_waiter(CheckKick *kick) {
+    @errhandler(CCError e) {
+        cc_error_log(e);
+        ticket_give();
+        free(kick);
+        return;
+    }
+    CheckSnap *snap;
+    LspDiag ds[DIAG_CAP];
+    size_t n;
+    CCSlice uri;
+    if (!kick) return;
+    uri = slice_cstr(kick->uri);
+    if (kick->delay_ms) cc_sleep_ms(kick->delay_ms);
+    if (cc_exclusive_is_live(g_excl)) {
+        CCExclusiveGuard g = cc_exclusive_acquire(g_excl.e, LK_DOCS);
+        @defer g.release();
+        OpenDoc *d = doc_find(uri);
+        if (d) d->debounce_armed = 0;
+        if (d) doc_kill_pid(d);
+    }
+    snap = docs_snapshot(uri);
+    free(kick);
+    kick = NULL;
+    if (!snap) return;
+    ticket_take();
+    {
+        CCArena wave = cc_arena_heap(megabytes(4)) @destroy;
+        n = check_snap(&wave, snap, ds, DIAG_CAP);
+        if (docs_gen_current(slice_cstr(snap->uri), snap->gen)) {
+            publish_for_uri(&wave, slice_cstr(snap->uri), ds, n);
+        }
+    }
+    ticket_give();
+    snap_free(snap);
+}
+
+static void kick_check(CCSlice uri, unsigned delay_ms) {
+    CheckKick *kick;
+    OpenDoc *d;
+    if (!cc_exclusive_is_live(g_excl) || !g_nurs.n || !uri.ptr || uri.len == 0) return;
+    {
+        CCExclusiveGuard g = cc_exclusive_acquire(g_excl.e, LK_DOCS);
+        @defer g.release();
+        d = doc_find(uri);
+        if (!d) return;
+        if (delay_ms && d->debounce_armed) return;
+        d->debounce_armed = 1;
+    }
+    kick = (CheckKick *)calloc(1, sizeof(CheckKick));
+    if (!kick) {
+        CCExclusiveGuard g = cc_exclusive_acquire(g_excl.e, LK_DOCS);
+        @defer g.release();
+        d = doc_find(uri);
+        if (d) d->debounce_armed = 0;
+        return;
+    }
+    {
+        size_t n = uri.len < sizeof(kick->uri) - 1 ? uri.len : sizeof(kick->uri) - 1;
+        memcpy(kick->uri, uri.ptr, n);
+        kick->uri[n] = 0;
+        kick->delay_ms = delay_ms;
+    }
+    {
+        CCNursery n = g_nurs;
+        if (n.spawn(() => [kick] {
+                @errhandler(CCError e) {
+                    cc_error_log(e);
+                    free(kick);
+                }
+                check_waiter(kick);
+            }) != 0) {
+            free(kick);
+            CCExclusiveGuard g = cc_exclusive_acquire(g_excl.e, LK_DOCS);
+            @defer g.release();
+            d = doc_find(uri);
+            if (d) d->debounce_armed = 0;
+        }
+    }
+}
+
+static int handle_message(CCArena *keep, CCArena *msg, CCShapeReg *reg, CCSlice raw) {
+    CCShapeVal root;
+    CCSlice method;
+    JsonId id;
+    CCShapeVal *params;
+    (void)keep;
+    if (!cc_dom(Json, raw.ptr, raw.len, reg, msg, &root)) {
+        fprintf(stderr, "cc-lsp: json parse failed (%zu bytes)\n", raw.len);
+        if (raw.ptr && (memmem(raw.ptr, raw.len, "\"method\":\"initialize\"", 21)
+                        || memmem(raw.ptr, raw.len, "\"method\": \"initialize\"", 22))) {
+            JsonId fallback = {0};
+            fallback.present = true;
+            fallback.buf[0] = '1';
+            fallback.len = 1;
+            resolve_ccc();
+            reply_result(msg, &fallback, LSP_CAPS);
+            fprintf(stderr, "cc-lsp: initialize fallback reply\n");
+        }
+        return 0;
+    }
+    json_id_from(&root, &id);
+    if (!shape_str(&root, "method", &method)) {
+        if (id.present) reply_error(msg, &id, -32600, "missing method");
+        return 0;
+    }
+    params = shape_obj(&root, "params");
+
+    if (slice_eq(method, "initialize")
+        || slice_eq(method, "shutdown")
+        || slice_eq(method, "textDocument/didOpen")
+        || slice_eq(method, "textDocument/didSave")
+        || slice_eq(method, "textDocument/didClose")) {
+        fprintf(stderr, "cc-lsp: method %.*s\n", (int)method.len, method.ptr);
+    }
+    if (slice_eq(method, "initialize")) {
+        remember_root_from(params);
+        resolve_ccc();
+        reply_result(msg, &id, LSP_CAPS);
+        return 0;
+    }
+    if (slice_eq(method, "initialized")
+        || slice_eq(method, "$/cancelRequest")
+        || slice_eq(method, "$/setTrace")) {
+        return 0;
+    }
+    if (slice_eq(method, "shutdown")) {
+        reply_result(msg, &id, "null");
+        return 0;
+    }
+    if (slice_eq(method, "exit")) {
+        return 1;
+    }
+    if (slice_eq(method, "textDocument/didOpen")
+        || slice_eq(method, "textDocument/didChange")) {
+        CCShapeVal *td = params ? shape_obj(params, "textDocument") : NULL;
+        CCSlice uri, text;
+        char logical[PATH_MAX];
+        logical[0] = 0;
+        if (!td || !shape_str(td, "uri", &uri)) {
+            fprintf(stderr, "cc-lsp: %.*s missing uri\n", (int)method.len, method.ptr);
+            return 0;
+        }
+        uri_to_path(uri, logical, sizeof(logical));
+        if (slice_eq(method, "textDocument/didOpen")) {
+            if (!shape_str(td, "text", &text)) {
+                fprintf(stderr, "cc-lsp: didOpen missing text, uri=%.*s\n",
+                        (int)uri.len, uri.ptr);
+                doc_put(uri, cc_slice_empty());
+                kick_check(uri, 0);
+                return 0;
+            }
+        } else {
+            CCShapeVal *changes = params ? cc_shape_get(params, "contentChanges") : NULL;
+            CCShapeVal *ch0 = shape_arr_at(changes, 0);
+            if (!ch0 || !shape_str(ch0, "text", &text)) {
+                fprintf(stderr, "cc-lsp: didChange missing text\n");
+                return 0;
+            }
+        }
+        doc_put(uri, text);
+        if (slice_eq(method, "textDocument/didOpen")) {
+            fprintf(stderr, "cc-lsp: kick %.*s text=%zu\n", (int)uri.len, uri.ptr, text.len);
+            kick_check(uri, 0);
+        } else {
+            kick_check(uri, DEBOUNCE_MS);
+        }
+        return 0;
+    }
+    if (slice_eq(method, "textDocument/didSave")) {
+        CCShapeVal *td = params ? shape_obj(params, "textDocument") : NULL;
+        CCSlice uri, text;
+        if (!td || !shape_str(td, "uri", &uri)) return 0;
+        if (shape_str(params, "text", &text)) {
+            doc_put(uri, text);
+        }
+        kick_check(uri, 0);
+        return 0;
+    }
+    if (slice_eq(method, "textDocument/didClose")) {
+        CCShapeVal *td = params ? shape_obj(params, "textDocument") : NULL;
+        CCSlice uri;
+        if (td && shape_str(td, "uri", &uri)) {
+            doc_drop(uri);
+            publish_for_uri(msg, uri, NULL, 0);
+        }
+        return 0;
+    }
+    if (slice_eq(method, "textDocument/hover")) {
+        reply_result(msg, &id, "null");
+        return 0;
+    }
+    if (id.present) reply_error(msg, &id, -32601, "method not found");
+    return 0;
+}
+
+static void docs_kill_all(void) {
+    CCExclusiveGuard g;
+    size_t i;
+    if (!cc_exclusive_is_live(g_excl)) return;
+    g = cc_exclusive_acquire(g_excl.e, LK_DOCS);
+    @defer g.release();
+    for (i = 0; i < DOC_CAP; i++) doc_kill_pid(&g_docs[i]);
+}
+
+static int serve_stdio(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCArena keep = cc_arena_heap(megabytes(1)) @destroy;
+    CCArena msg = cc_arena_heap(megabytes(8)) @destroy;
+    CCShapeReg *reg = cc_shape_reg_create(&keep);
+    CCNursery n;
+    if (!reg) {
+        fprintf(stderr, "cc-lsp: shape registry alloc failed\n");
+        return 1;
+    }
+    g_excl = cc_exclusive_create(&keep, 0) !>(e) {
+        fprintf(stderr, "cc-lsp: exclusive alloc failed: %s\n",
+                e.message ? e.message : "");
+        return 1;
+    };
+    n = keep.create_nursery() !>;
+    g_nurs = n;
+    resolve_ccc();
+    fprintf(stderr, "cc-lsp: stdio ready (ccc=%s)\n", g_ccc[0] ? g_ccc : "ccc");
+    for (;;) {
+        size_t len = 0;
+        char *buf;
+        if (!read_lsp_headers(&len)) {
+            if (feof(stdin)) break;
+            fprintf(stderr, "cc-lsp: header parse failed\n");
+            break;
+        }
+        buf = (char *)cc_arena_alloc(&msg, len, 1);
+        if (!buf || !read_exact(buf, len)) {
+            fprintf(stderr, "cc-lsp: body read failed (len=%zu)\n", len);
+            break;
+        }
+        if (handle_message(&keep, &msg, reg, cc_slice_from_buffer(buf, len))) break;
+        msg.reset();
+    }
+    n.cancel();
+    docs_kill_all();
+    g_nurs.n = NULL;
+    return 0;
+}
+
+static int run_check_file(const char *path) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCArena a = cc_arena_heap(megabytes(4)) @destroy;
+    LspDiag ds[DIAG_CAP];
+    size_t i, n;
+    if (g_root[0] == 0) {
+        CCSlice cwd = cc_dir_cwd(&a);
+        copy_path(g_root, sizeof(g_root), cwd);
+    }
+    n = check_path(&a, path, ds, DIAG_CAP, NULL);
+    for (i = 0; i < n; i++) {
+        printf("%s:%d:%d: %s: %.*s\n",
+               path, ds[i].line, ds[i].col,
+               ds[i].severity == LSP_WARN ? "warning"
+               : ds[i].severity == LSP_INFO ? "note" : "error",
+               (int)ds[i].message.len, ds[i].message.ptr);
+    }
+    return n ? 1 : 0;
+}
+
+static int run_smoke(void) {
+    const char *sample =
+        "/Users/proj/tests/err_syntax_no_handler_fail.ccs:6:5: error: @err with no local handler requires @errhandler\n"
+        "cc: shadow_lower failed (rc=1)\n"
+        "/Users/proj/tests/warn.ccs:12: warning: type mismatch\n";
+    LspDiag ds[8];
+    size_t n = parse_diags(slice_cstr(sample), ds, 8);
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+    CCShapeReg *reg = cc_shape_reg_create(&a);
+    CCShapeVal root;
+    const char *js = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}";
+    if (n != 2 || ds[0].line != 6 || ds[0].col != 5 || ds[1].line != 12) {
+        fprintf(stderr, "cc-lsp --smoke: diag parse failed (n=%zu)\n", n);
+        return 1;
+    }
+    if (!reg || !cc_dom(Json, js, strlen(js), reg, &a, &root)) {
+        fprintf(stderr, "cc-lsp --smoke: json parse failed\n");
+        return 1;
+    }
+    {
+        CCSlice method;
+        if (!shape_str(&root, "method", &method) || !slice_eq(method, "initialize")) {
+            fprintf(stderr, "cc-lsp --smoke: method extract failed\n");
+            return 1;
+        }
+    }
+    {
+        const char *src = "    always_err() @err;\n";
+        CCSlice text = slice_cstr(src);
+        size_t off = 0;
+        CCSlice tok;
+        const char *md;
+        if (!offset_at(text, 0, 18, &off)) {
+            fprintf(stderr, "cc-lsp --smoke: offset_at failed\n");
+            return 1;
+        }
+        tok = token_at(text, off);
+        md = hover_for_tok(tok);
+        if (!md || !slice_eq(tok, "@err")) {
+            fprintf(stderr, "cc-lsp --smoke: hover @err failed (tok=%.*s)\n",
+                    (int)tok.len, tok.ptr ? tok.ptr : "");
+            return 1;
+        }
+    }
+    printf("cc-lsp smoke: ok\n");
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *mode = "--stdio";
+    const char *check_path = NULL;
+    int i;
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--stdio") == 0) {
+            mode = "--stdio";
+        } else if (strcmp(argv[i], "--smoke") == 0) {
+            mode = "--smoke";
+        } else if (strcmp(argv[i], "--check") == 0 && i + 1 < argc) {
+            mode = "--check";
+            check_path = argv[++i];
+        } else if (strcmp(argv[i], "--ccc") == 0 && i + 1 < argc) {
+            snprintf(g_ccc, sizeof(g_ccc), "%s", argv[++i]);
+        } else if (strcmp(argv[i], "--root") == 0 && i + 1 < argc) {
+            snprintf(g_root, sizeof(g_root), "%s", argv[++i]);
+        } else if (argv[i][0] != '-') {
+            mode = "--check";
+            check_path = argv[i];
+        }
+    }
+    if (strcmp(mode, "--smoke") == 0) return run_smoke();
+    if (strcmp(mode, "--check") == 0) {
+        if (!check_path) {
+            fprintf(stderr, "usage: cc-lsp --check FILE\n");
+            return 2;
+        }
+        return run_check_file(check_path);
+    }
+    return serve_stdio();
+}

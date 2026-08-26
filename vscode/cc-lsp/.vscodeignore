@@ -1,0 +1,12 @@
+src/**
+dist/**
+tsconfig.json
+**/*.ts
+node_modules/**
+.gitignore
+test-stdio.js
+test-suite.js
+lsp-harness.js
+test.sh
+testdata/**
+install-local.sh

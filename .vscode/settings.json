@@ -3,5 +3,6 @@
         "*.ccs": "concurrent-c",
         "*.cch": "concurrent-c",
         "*.shcc": "concurrent-c"
-    }
+    },
+    "npm.exclude": "**/vscode/**"
 }

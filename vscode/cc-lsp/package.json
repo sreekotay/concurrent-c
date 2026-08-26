@@ -1,0 +1,87 @@
+{
+  "name": "concurrent-c-lsp",
+  "displayName": "Concurrent-C Language Server",
+  "description": "Live diagnostics for Concurrent-C via a Concurrent-C language server.",
+  "version": "0.1.0",
+  "publisher": "sreekotay",
+  "author": "Concurrent-C Contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sreekotay/concurrent-c.git"
+  },
+  "homepage": "https://github.com/sreekotay/concurrent-c/tree/main/vscode/cc-lsp",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "main": "./extension.js",
+  "scripts": {
+    "test": "node test-suite.js",
+    "test:stdio": "node test-stdio.js"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "concurrent-c.rebuildServer",
+        "title": "Concurrent-C: Rebuild Language Server"
+      },
+      {
+        "command": "concurrent-c.restartServer",
+        "title": "Concurrent-C: Restart Language Server"
+      }
+    ],
+    "languages": [
+      {
+        "id": "concurrent-c",
+        "aliases": [
+          "Concurrent-C",
+          "concurrent-c",
+          "ccc",
+          "ccs",
+          "cch",
+          "shcc"
+        ],
+        "extensions": [
+          ".ccs",
+          ".cch",
+          ".shcc"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "concurrent-c",
+        "scopeName": "source.concurrent-c",
+        "path": "./syntaxes/concurrent-c.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Concurrent-C",
+      "properties": {
+        "concurrent-c.cccPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional. Prefer `CC_LSP_CCC` / `CCC` in the environment, or `<workspace>/cc/bin/ccc`."
+        },
+        "concurrent-c.serverPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional path to `cc-lsp`. Default prefers `<workspace>/vscode/cc-lsp/bin/cc-lsp` so `install-local.sh --build-only` is picked up without reinstalling the extension."
+        },
+        "concurrent-c.restartOnBinaryChange": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Restart the language client when `cc-lsp` is rebuilt. Does not reload the window."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}
