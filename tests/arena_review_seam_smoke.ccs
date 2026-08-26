@@ -164,12 +164,18 @@ int main(void) {
         cc_arena_destroy(&a);
     }
 
-    /* Overlay refuses an unaligned caller region. */
+    /* Overlay aligns up inside the caller region — no silent dead handle. */
     {
         _Alignas(CCArenaHost) uint8_t raw[CC_ARENA_REGION_BYTES(64) + 8];
-        CCArena dead = cc_arena_wrap_region(raw + 1, CC_ARENA_REGION_BYTES(64),
-                                            CC_ARENA_FIXED);
-        if (cc_arena_is_live(dead)) return fail(7, "unaligned overlay");
+        CCArena a = cc_arena_wrap_region(raw + 1, CC_ARENA_REGION_BYTES(64),
+                                         CC_ARENA_FIXED);
+        void *p;
+        if (!cc_arena_is_live(a)) return fail(7, "unaligned overlay");
+        if (((uintptr_t)a.a % _Alignof(CCArenaHost)) != 0)
+            return fail(7, "host not aligned");
+        p = cc_arena_alloc(&a, 16, 8);
+        if (!p) return fail(7, "alloc after align-up");
+        cc_arena_destroy(&a);
     }
 
     printf("arena_review_seam_smoke: ok\n");

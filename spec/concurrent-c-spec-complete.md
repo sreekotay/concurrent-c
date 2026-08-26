@@ -1920,7 +1920,12 @@ CC_ARENA_DEFAULT_BLOCK_MAX` (4), Main overflow on after the slab budget. `cc_are
 individually — not for scratch alloc storms. `cc_arena_buffer` /
 `cc_arena_fixed_buffer` take a caller-owned L1 with overflow off by default;
 enable overflow or raise `block_max` explicitly. `cc_arena_create_buffer`
-sets an explicit `block_max`. `cc_arena_create` aliases `cc_arena_heap`.
+overlays the host at the first `_Alignof(CCArenaHost)` address inside the
+caller region (pad 0..align−1) and sets `block_max`. A non-empty region
+that cannot hold that host plus one L1 byte is a fatal overlay error, not
+a dead handle. Null or zero-size is a dead handle. Two-arg `@create(buf, cap)`
+is `attach_buffer`: a frame host, the whole buffer as L1, no overlay.
+`cc_arena_create` aliases `cc_arena_heap`.
 `cc_arena_live` counts live objects on L1 + L2 + Main.
 
 **`block_max`.** Affects future growth only.
@@ -1956,8 +1961,8 @@ cc_arena_stack(scratch, 4096);
 void* p = scratch.alloc(n, align);
 scratch.reset();  // drain ovf, restore stack root
 
-uint8_t frame[4096];
-cc_arena_buf(win, frame, sizeof frame);  // caller L1; no VLA
+uint8_t frame[CC_ARENA_REGION_BYTES(4096)];
+cc_arena_buf(win, frame, sizeof frame);  // overlay; host may sit after a pad
 ```
 
 ---

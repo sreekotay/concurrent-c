@@ -283,8 +283,35 @@ static inline size_t cc__arena_host_prefix(void) {
     return CC__ARENA_HOST_PREFIX;
 }
 
-/* Region bytes for a caller buffer that should yield `usable` L1 bytes. */
+/* Region bytes for a caller buffer that should yield `usable` L1 bytes.
+ * Overlay may skip up to `_Alignof(CCArenaHost)-1` pad bytes if `buf` is
+ * unaligned — oversize by that, or use attach_buffer (no overlay). */
 #define CC_ARENA_REGION_BYTES(usable) (CC__ARENA_HOST_PREFIX + (size_t)(usable))
+
+static inline void cc__arena_die(const char *msg) {
+    fprintf(stderr, "cc_arena: %s\n", msg);
+    abort();
+}
+
+/* Place an aligned host inside `region`. Pad is 0..align-1. L1 follows the
+ * host prefix. 0 = can place; -1 = null/empty or not enough bytes left. */
+static inline int cc__arena_region_place(void *region, size_t region_bytes,
+                                         CCArenaHost **host_out, size_t *l1_out) {
+    size_t prefix = cc__arena_host_prefix();
+    size_t align = _Alignof(CCArenaHost);
+    uintptr_t base, aligned, end;
+    size_t remain;
+    if (!region || region_bytes == 0 || align == 0) return -1;
+    base = (uintptr_t)region;
+    end = base + region_bytes;
+    aligned = (base + (align - 1u)) & ~(uintptr_t)(align - 1u);
+    if (aligned < base || aligned >= end) return -1;
+    remain = (size_t)(end - aligned);
+    if (remain <= prefix) return -1;
+    if (host_out) *host_out = (CCArenaHost *)aligned;
+    if (l1_out) *l1_out = remain - prefix;
+    return 0;
+}
 
 /* L1 of a HOST_INLINE region lives after the host prefix. Never
  * free that address as a standalone slab — it dies with the region. */
@@ -757,19 +784,17 @@ static inline int cc_arena_buffer(CCArenaHost *arena, void *buffer, size_t capac
     return 0;
 }
 
-/* Overlay the host at byte 0 of `region`. User L1 starts after the prefix;
- * usable capacity is `region_bytes - prefix`. Marks HOST_INLINE.
- * `region` must be `_Alignof(CCArenaHost)`-aligned; else refuse. */
+/* Overlay the host at the first aligned address in `region`. L1 starts
+ * after the host prefix. Unaligned caller bytes are valid — pad is wasted.
+ * Returns -1 if the region cannot hold an aligned host plus 1 L1 byte. */
 static inline int cc_arena_init_region(void *region, size_t region_bytes,
                                        unsigned block_max) {
     size_t prefix = cc__arena_host_prefix();
-    CCArenaHost *h;
-    if (!region || region_bytes <= prefix) return -1;
-    if (((uintptr_t)region % _Alignof(CCArenaHost)) != 0) return -1;
-    h = (CCArenaHost *)region;
+    size_t l1 = 0;
+    CCArenaHost *h = NULL;
+    if (cc__arena_region_place(region, region_bytes, &h, &l1) != 0) return -1;
     memset(h, 0, sizeof(*h));
-    if (cc_arena_buffer(h, (uint8_t *)region + prefix, region_bytes - prefix) != 0)
-        return -1;
+    if (cc_arena_buffer(h, (uint8_t *)h + prefix, l1) != 0) return -1;
     h->block_max = block_max;
     h->_flags |= CC_ARENA_FLAG_HOST_INLINE;
     return 0;
@@ -777,9 +802,15 @@ static inline int cc_arena_init_region(void *region, size_t region_bytes,
 
 static inline CCArena cc_arena_wrap_region(void *region, size_t region_bytes,
                                           unsigned block_max) {
+    CCArenaHost *h = NULL;
+    size_t l1 = 0;
+    if (!region || region_bytes == 0) return cc_arena_handle(NULL);
+    if (cc__arena_region_place(region, region_bytes, &h, &l1) != 0)
+        cc__arena_die("overlay region cannot hold an aligned host + L1 "
+                      "(size with CC_ARENA_REGION_BYTES, or use attach_buffer)");
     if (cc_arena_init_region(region, region_bytes, block_max) != 0)
-        return cc_arena_handle(NULL);
-    return cc_arena_handle((CCArenaHost *)region);
+        cc__arena_die("overlay region init failed");
+    return cc_arena_handle(h);
 }
 
 // Thread-local (non-atomic) fast path for arenas owned by exactly one fiber/thread.
@@ -1639,11 +1670,12 @@ static inline int cc_arena_init_buffer(CCArenaHost *h, void *buffer, size_t capa
     return 0;
 }
 
-/* 3-arg expert path: overlay the host at byte 0 of `buffer`. `capacity`
- * is the whole region; usable L1 is capacity - prefix. GROWABLE / N
- * slabs as `block_max`. Size with CC_ARENA_REGION_BYTES(N) for N usable
- * bytes. CCS 2-arg `@create(buf, cap)` is bind_buffer (frame host, whole
- * buffer is L1). */
+/* 3-arg expert path: overlay the host at the first aligned address in
+ * `buffer`. `capacity` is the whole region; usable L1 is what remains
+ * after pad + prefix. GROWABLE / N slabs as `block_max`. Size with
+ * CC_ARENA_REGION_BYTES(N) for N usable bytes (plus align-1 if `buffer`
+ * may be unaligned). CCS 2-arg `@create(buf, cap)` is bind_buffer
+ * (frame host, whole buffer is L1) — no overlay. */
 static inline CCArena cc_arena_create_buffer(void *buffer, size_t capacity,
                                             unsigned block_max) {
     return cc_arena_wrap_region(buffer, capacity, block_max);
