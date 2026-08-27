@@ -1,0 +1,38 @@
+/* Same-owner stem + _priv both define PrivTag. Extract of the leaf
+ * includes the stem, not an error and not the _priv chapter. */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+CCCommand emit = cc_command(&a, @slice("./cc/bin/ccc"));
+emit.arg("--no-cache");
+emit.arg("--emit-c-only");
+emit.arg("tests/quote_cch_priv_tag_smoke.ccs");
+emit.arg("-o");
+emit.arg("out/quote_cch_priv_tag_smoke.c");
+emit.inherit_stdio();
+int rc = emit.status() !>;
+if (rc != 0) {
+    "emit leaf failed".println() !>;
+    return 1;
+}
+
+CCCommand grep_stem = cc_command(&a, @slice("grep"));
+grep_stem.arg("-q");
+grep_stem.arg("#include \"quote_cch_priv_tag_mod.h\"");
+grep_stem.arg("out/include/tests/quote_cch_priv_tag_mod_leaf.h");
+rc = grep_stem.status() !>;
+if (rc != 0) {
+    "extracted leaf missing stem include".println() !>;
+    return 1;
+}
+
+CCCommand grep_priv = cc_command(&a, @slice("grep"));
+grep_priv.arg("-q");
+grep_priv.arg("quote_cch_priv_tag_mod_priv.h");
+grep_priv.arg("out/include/tests/quote_cch_priv_tag_mod_leaf.h");
+rc = grep_priv.status() !>;
+if (rc == 0) {
+    "extracted leaf included _priv chapter".println() !>;
+    return 1;
+}
+
+return 0;

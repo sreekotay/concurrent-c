@@ -828,9 +828,15 @@ An object-like `#define FLAG` immediately before `#include "foo.cch"`
 stays in this TU; `#ifdef FLAG` inside the extracted `.h` is host cpp,
 including function bodies under that `#ifdef`. File-scope functions in
 a `.cch` live in the owner TU; other TUs see decls. File-scope `static`
-on those functions is dropped so guests link to the owner. A pointer-only name
+on those functions is dropped so guests link to the owner. A file-scope
+data definition becomes `extern` in the extract; `static` data stays.
+A pointer-only name
 the face does not already name as a type is not a guessed
 `typedef struct Tag Tag`; if exactly one same-directory face defines
 the name and that face can extract, the extract includes that face.
-An impl-grade unowned parent is left to the including unit (already
-spliced).
+Two definers with different owners, or none (and the including unit
+does not define it), is an error. Same-owner chapters (`foo.cch` /
+`foo_priv.cch`) count as one; extract includes the stem. `name * 100`
+is not a pointer type. An impl-grade unowned parent is left to the including unit (already
+spliced). Nested includes inside an extracted `.h` are relative to that
+`.h`, not an absolute path.

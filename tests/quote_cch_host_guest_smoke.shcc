@@ -25,6 +25,26 @@ if (rc == 0) {
     return 1;
 }
 
+CCCommand grep_rel = cc_command(&a, @slice("grep"));
+grep_rel.arg("-q");
+grep_rel.arg("#include \"quote_cch_peer_mod.h\"");
+grep_rel.arg("out/include/tests/quote_cch_host_mod.h");
+rc = grep_rel.status() !>;
+if (rc != 0) {
+    "extracted host_mod.h missing relative peer include".println() !>;
+    return 1;
+}
+
+CCCommand grep_abs = cc_command(&a, @slice("grep"));
+grep_abs.arg("-q");
+grep_abs.arg("#include \"/");
+grep_abs.arg("out/include/tests/quote_cch_host_mod.h");
+rc = grep_abs.status() !>;
+if (rc == 0) {
+    "extracted host_mod.h used an absolute include".println() !>;
+    return 1;
+}
+
 CCCommand emit_owner = cc_command(&a, @slice("./cc/bin/ccc"));
 emit_owner.arg("--no-cache");
 emit_owner.arg("--emit-c-only");

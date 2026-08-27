@@ -1,0 +1,14 @@
+#!ccc ccs
+#include <stdio.h>
+#include "quote_cch_priv_tag_mod_leaf.cch"
+
+int main(void) {
+    PrivTag t;
+    t.n = 3;
+    if (priv_tag_n(&t) != 3) {
+        printf("n=%d\n", priv_tag_n(&t));
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

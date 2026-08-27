@@ -1,0 +1,8 @@
+#ifndef TESTS_QUOTE_CCH_PRIV_TAG_MOD_CCH
+#define TESTS_QUOTE_CCH_PRIV_TAG_MOD_CCH
+
+typedef struct {
+    int n;
+} PrivTag;
+
+#endif

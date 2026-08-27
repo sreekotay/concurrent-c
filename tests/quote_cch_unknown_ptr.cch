@@ -1,0 +1,7 @@
+#ifndef TESTS_QUOTE_CCH_UNKNOWN_PTR_CCH
+#define TESTS_QUOTE_CCH_UNKNOWN_PTR_CCH
+
+/* NowhereWs* has no same-directory definer. Extract must say so. */
+static int unknown_ptr_len(NowhereWs* ws) { return ws ? 1 : 0; }
+
+#endif

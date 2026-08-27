@@ -238,7 +238,10 @@ includes `ui_types.cch` → `workspace.ccs`). Other units extract decls and
 the owner unit splices the bodies. A file-scope function body has one
 definition — the owner TU. File-scope `static` on those functions is
 dropped: the extracted `.h` is an extern declaration, and the owner
-splice is the one external definition. `#ifdef` / `#if` in an extracted face stay
+splice is the one external definition. A file-scope data definition
+(`int xs[] = {1,2}`) becomes `extern int xs[];` in the extract; the
+owner splice keeps the initializer. `static` data stays `static`.
+`#ifdef` / `#if` in an extracted face stay
 in the lowered `.h`; an object-like `#define` in this unit before the
 include is host cpp and selects those arms, including function bodies
 that sit under `#ifdef`. A pointer-only name that the face does not already name as a type
@@ -247,8 +250,14 @@ that invents a tagged struct and conflicts with an anonymous
 `typedef struct { … } Tag` or an integer alias already in the unit.
 If exactly one same-directory face defines the name and that face
 can extract (not impl-grade without an owner), the extract includes
-that face. An impl-grade unowned parent already spliced into this
-unit is not extracted from the leaf. Nested quoted includes hoist
+that face. Chapter faces of one owner that share the name
+(`piece_tree.cch` and `piece_tree_priv.cch`) are that one face; extract
+includes the stem. Two faces with different owners is an error.
+`name * 100` is multiplication, not a pointer type. No same-directory face and no type of that name in the
+including unit is an error. An impl-grade unowned parent already spliced into this
+unit is not extracted from the leaf. Nested quoted includes in an
+extracted `.h` use a path relative to that `.h` (same directory is
+the basename). Nested quoted includes hoist
 only when the included face defines a name this face uses and does
 not define, and they insert after this face's definitions of names
 the included face uses (`RtxBuf` before `ui_types.h`). A consumer

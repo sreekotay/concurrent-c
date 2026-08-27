@@ -1,0 +1,6 @@
+#ifndef TESTS_QUOTE_CCH_PRIV_TAG_MOD_LEAF_CCH
+#define TESTS_QUOTE_CCH_PRIV_TAG_MOD_LEAF_CCH
+
+static int priv_tag_n(PrivTag* t) { return t ? t->n : 0; }
+
+#endif

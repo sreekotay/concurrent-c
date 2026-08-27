@@ -1,0 +1,8 @@
+#ifndef TESTS_QUOTE_CCH_AMBIG_A_CCH
+#define TESTS_QUOTE_CCH_AMBIG_A_CCH
+
+typedef struct {
+    int n;
+} AmbigTag;
+
+#endif

@@ -1,0 +1,5 @@
+#include "quote_cch_unknown_ptr.cch"
+
+int main(void) {
+    return unknown_ptr_len(0);
+}

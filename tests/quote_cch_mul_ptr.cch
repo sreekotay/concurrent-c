@@ -1,0 +1,7 @@
+#ifndef TESTS_QUOTE_CCH_MUL_PTR_CCH
+#define TESTS_QUOTE_CCH_MUL_PTR_CCH
+
+/* `d * 100ull` is multiply. Extract must not treat `d` as a pointer type. */
+static int mul_ptr_scale(int d) { return (int)(d * 100ull); }
+
+#endif

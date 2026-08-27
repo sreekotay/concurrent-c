@@ -15169,6 +15169,302 @@ static char* cc__destatic_file_scope_fns(const char* src, size_t n,
     return out;
 }
 
+static int cc__kw_at(const char* src, size_t n, size_t i, const char* kw) {
+    size_t k;
+    if (!src || !kw || i >= n) return 0;
+    k = strlen(kw);
+    if (i + k > n || memcmp(src + i, kw, k) != 0) return 0;
+    if (i > 0 && cc_is_ident_char(src[i - 1])) return 0;
+    if (i + k < n && cc_is_ident_char(src[i + k])) return 0;
+    return 1;
+}
+
+static size_t cc__skip_file_scope_item(const char* src, size_t n, size_t i) {
+    int brace = 0, paren = 0;
+    int last_sig = 0;
+    CCScannerState scan;
+    if (!src) return n;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] == '{') {
+            size_t r = 0;
+            if (brace == 0 && paren == 0 && last_sig == ')' &&
+                cc_find_matching_brace(src, n, i, &r))
+                return r + 1;
+            if (brace == 0 && paren == 0 &&
+                cc_find_matching_brace(src, n, i, &r)) {
+                i = r + 1;
+                last_sig = '}';
+                continue;
+            }
+            brace++;
+            last_sig = '{';
+            i++;
+            continue;
+        }
+        if (src[i] == '}' && brace > 0) brace--;
+        else if (src[i] == '(') paren++;
+        else if (src[i] == ')' && paren > 0) paren--;
+        else if (src[i] == ';' && brace == 0 && paren == 0) {
+            i++;
+            if (i < n && src[i] == '\r') i++;
+            if (i < n && src[i] == '\n') i++;
+            return i;
+        }
+        if (src[i] > 32) last_sig = (unsigned char)src[i];
+        i++;
+    }
+    return n;
+}
+
+/* `=` of a file-scope data definition, or 0. Skips function bodies and
+ * `struct` / `union` / `enum` bodies so `int xs[] = {1}` is the hit. */
+static size_t cc__file_scope_data_eq(const char* src, size_t n, size_t start) {
+    size_t i = start;
+    int brace = 0, paren = 0, brack = 0;
+    CCScannerState scan;
+    if (!src || start >= n) return 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] == '{') {
+            size_t r = 0;
+            if (brace == 0 && paren == 0 && brack == 0 &&
+                cc_find_matching_brace(src, n, i, &r)) {
+                i = r + 1;
+                continue;
+            }
+            brace++;
+            i++;
+            continue;
+        }
+        if (src[i] == '}' && brace > 0) { brace--; i++; continue; }
+        if (src[i] == '(') { paren++; i++; continue; }
+        if (src[i] == ')' && paren > 0) { paren--; i++; continue; }
+        if (src[i] == '[') { brack++; i++; continue; }
+        if (src[i] == ']' && brack > 0) { brack--; i++; continue; }
+        if (src[i] == '=' && brace == 0 && paren == 0 && brack == 0) return i;
+        if (src[i] == ';' && brace == 0 && paren == 0 && brack == 0) return 0;
+        i++;
+    }
+    return 0;
+}
+
+static size_t cc__skip_initializer_eq(const char* src, size_t n, size_t eq) {
+    size_t i = eq + 1;
+    int brace = 0, paren = 0, brack = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] == '{') brace++;
+        else if (src[i] == '}' && brace > 0) brace--;
+        else if (src[i] == '(') paren++;
+        else if (src[i] == ')' && paren > 0) paren--;
+        else if (src[i] == '[') brack++;
+        else if (src[i] == ']' && brack > 0) brack--;
+        else if (src[i] == ';' && brace == 0 && paren == 0 && brack == 0)
+            return i;
+        i++;
+    }
+    return n;
+}
+
+/* Owned extract: `int xs[] = {1,2};` → `extern int xs[];` so the owner
+ * splice is the one definition. `static` data stays. Tentative `int x;`
+ * is left (C merges those). */
+static char* cc__extern_file_scope_data_defs(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    int changed = 0;
+    int at_stmt = 1;
+    int at_bol = 1;
+    CCScannerState scan;
+    if (!src || n == 0) return NULL;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t before = i;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) {
+            size_t k;
+            for (k = before; k < i; k++) {
+                if (src[k] == '\n') at_bol = 1;
+                else if (src[k] != ' ' && src[k] != '\t') at_bol = 0;
+            }
+            cc_sb_append(&out, &out_len, &out_cap, src + before, i - before);
+            continue;
+        }
+        if (at_bol && (src[i] == ' ' || src[i] == '\t')) {
+            cc_sb_append(&out, &out_len, &out_cap, src + i, 1);
+            i++;
+            continue;
+        }
+        if (at_bol && src[i] == '#') {
+            size_t e = i;
+            while (e < n && src[e] != '\n') e++;
+            if (e < n) e++;
+            cc_sb_append(&out, &out_len, &out_cap, src + i, e - i);
+            i = e;
+            at_bol = 1;
+            at_stmt = 1;
+            continue;
+        }
+        if (at_stmt) {
+            size_t p = i;
+            int has_static = 0, has_extern = 0, has_typedef = 0;
+            int dummy = 0;
+            size_t eq;
+            size_t lead = cc_skip_ws_and_comments(src, n, i);
+            if (lead > i) {
+                cc_sb_append(&out, &out_len, &out_cap, src + i, lead - i);
+                i = lead;
+                p = i;
+                at_bol = (i > 0 && src[i - 1] == '\n');
+            }
+            if (i >= n) break;
+            if (src[i] == '#') {
+                size_t e = i;
+                while (e < n && src[e] != '\n') e++;
+                if (e < n) e++;
+                cc_sb_append(&out, &out_len, &out_cap, src + i, e - i);
+                i = e;
+                at_bol = 1;
+                at_stmt = 1;
+                continue;
+            }
+            while (p < n) {
+                p = cc_skip_ws_and_comments(src, n, p);
+                if (p >= n) break;
+                if (cc__kw_at(src, n, p, "static")) { has_static = 1; p += 6; continue; }
+                if (cc__kw_at(src, n, p, "extern")) { has_extern = 1; p += 6; continue; }
+                if (cc__kw_at(src, n, p, "typedef")) { has_typedef = 1; p += 7; continue; }
+                if (cc__kw_at(src, n, p, "const") || cc__kw_at(src, n, p, "volatile") ||
+                    cc__kw_at(src, n, p, "inline")) {
+                    while (p < n && cc_is_ident_char(src[p])) p++;
+                    continue;
+                }
+                break;
+            }
+            if (has_typedef || has_static ||
+                cc__static_follows_file_scope_fn(src, n, i, &dummy)) {
+                size_t e = cc__skip_file_scope_item(src, n, i);
+                cc_sb_append(&out, &out_len, &out_cap, src + i, e - i);
+                i = e;
+                at_stmt = 1;
+                at_bol = (i > 0 && src[i - 1] == '\n');
+                continue;
+            }
+            eq = cc__file_scope_data_eq(src, n, i);
+            if (eq) {
+                size_t semi = cc__skip_initializer_eq(src, n, eq);
+                if (!has_extern)
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "extern ");
+                cc_sb_append(&out, &out_len, &out_cap, src + i, eq - i);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ";");
+                if (semi < n && src[semi] == ';') {
+                    i = semi + 1;
+                    if (i < n && src[i] == '\r') i++;
+                    if (i < n && src[i] == '\n') {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                        i++;
+                        at_bol = 1;
+                    } else {
+                        at_bol = 0;
+                    }
+                } else {
+                    i = semi;
+                    at_bol = 0;
+                }
+                changed = 1;
+                at_stmt = 1;
+                continue;
+            }
+            {
+                size_t e = cc__skip_file_scope_item(src, n, i);
+                cc_sb_append(&out, &out_len, &out_cap, src + i, e - i);
+                i = e;
+                at_stmt = 1;
+                at_bol = (i > 0 && src[i - 1] == '\n');
+                continue;
+            }
+        }
+        at_stmt = (src[i] == ';' || src[i] == '\n');
+        at_bol = (src[i] == '\n');
+        cc_sb_append(&out, &out_len, &out_cap, src + i, 1);
+        i++;
+    }
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
+static const char* cc__path_base(const char* p) {
+    const char* s;
+    if (!p || !p[0]) return "";
+    s = strrchr(p, '/');
+    return s ? s + 1 : p;
+}
+
+/* Quoted include of `to_file` as seen from `from_file`. Same directory
+ * is the basename so an extracted `.h` does not bake in `/Users/…`. */
+static int cc__rel_quoted_include(const char* from_file, const char* to_file,
+                                  char* out, size_t cap) {
+    char from_dir[PATH_MAX];
+    size_t i = 0, last_slash = 0;
+    int up = 0;
+    const char* from_rest;
+    const char* to_rest;
+    size_t o = 0;
+    int u;
+    if (!from_file || !to_file || !out || cap < 2) return -1;
+    if (cc__dirname_local(from_file, from_dir, sizeof(from_dir)) != 0) return -1;
+    {
+        char to_dir[PATH_MAX];
+        if (cc__dirname_local(to_file, to_dir, sizeof(to_dir)) != 0) return -1;
+        if (strcmp(from_dir, to_dir) == 0) {
+            if (snprintf(out, cap, "%s", cc__path_base(to_file)) >= (int)cap)
+                return -1;
+            return 0;
+        }
+    }
+    while (from_dir[i] && to_file[i] && from_dir[i] == to_file[i]) {
+        if (from_dir[i] == '/') last_slash = i;
+        i++;
+    }
+    from_rest = (from_dir[last_slash] == '/') ? from_dir + last_slash + 1
+                                              : from_dir;
+    to_rest = (to_file[last_slash] == '/') ? to_file + last_slash + 1 : to_file;
+    if (from_rest[0]) {
+        up = 1;
+        for (i = 0; from_rest[i]; i++)
+            if (from_rest[i] == '/') up++;
+    }
+    for (u = 0; u < up; u++) {
+        if (o + 3 >= cap) return -1;
+        memcpy(out + o, "../", 3);
+        o += 3;
+    }
+    if (o + strlen(to_rest) + 1 > cap) return -1;
+    memcpy(out + o, to_rest, strlen(to_rest) + 1);
+    return 0;
+}
+
+static int cc__text_has_quoted_path(const char* src, size_t n, const char* path);
+
+static int cc__text_has_quoted_include_target(const char* src, size_t n,
+                                             const char* path) {
+    const char* base;
+    if (!src || !path || !path[0]) return 0;
+    if (cc__text_has_quoted_path(src, n, path)) return 1;
+    base = cc__path_base(path);
+    if (base != path && base[0] && cc__text_has_quoted_path(src, n, base))
+        return 1;
+    return 0;
+}
+
 /* Pointer-only names this face does not define: never invent
  * `typedef struct Tag Tag`. That shape is only compatible with a tagged
  * struct of the same name; an anonymous `typedef struct { … } Tag` or a
@@ -15185,7 +15481,9 @@ static int cc__fwd_is_c_keyword(const char* s, size_t n) {
         "unsigned", "void", "volatile", "while", "_Bool", "bool", "size_t",
         "ssize_t", "ptrdiff_t", "intptr_t", "uintptr_t", "uint8_t", "uint16_t",
         "uint32_t", "uint64_t", "int8_t", "int16_t", "int32_t", "int64_t",
-        "FILE", "va_list", NULL
+        "FILE", "va_list", "DIR", "time_t", "clock_t", "off_t", "dev_t",
+        "ino_t", "mode_t", "pid_t", "uid_t", "gid_t", "pthread_t",
+        "pthread_mutex_t", "pthread_cond_t", "regex_t", "jmp_buf", NULL
     };
     size_t k;
     if (!s || n == 0) return 1;
@@ -15362,13 +15660,31 @@ static int cc__face_needs_type_from(const char* src, size_t n,
 
 static const char* cc__include_source_cch(const char* inc_path) {
     const char* src_cch;
+    const char* base;
+    size_t i;
+    size_t pl;
     if (!inc_path || !inc_path[0]) return NULL;
     src_cch = cc_lowered_header_source_for(inc_path);
-    if (!src_cch) {
-        size_t pl = strlen(inc_path);
-        if (pl >= 4 && strcmp(inc_path + pl - 4, ".cch") == 0) src_cch = inc_path;
+    if (src_cch) return src_cch;
+    /* Extracted `.h` includes are `"peer.h"`; the table is keyed by the
+     * absolute lowered path. Match the basename. */
+    base = cc__path_base(inc_path);
+    pl = strlen(base);
+    for (i = 0; i < g_lowered_local_header_count; i++) {
+        const char* lp = g_lowered_local_headers[i].lowered_path;
+        const char* sp = g_lowered_local_headers[i].source_path;
+        if (lp && strcmp(cc__path_base(lp), base) == 0) return sp;
+        if (sp && pl >= 2 && base[pl - 2] == '.' && base[pl - 1] == 'h') {
+            const char* sb = cc__path_base(sp);
+            size_t sl = strlen(sb);
+            if (sl == pl + 2 && memcmp(sb, base, pl - 2) == 0 &&
+                strcmp(sb + sl - 4, ".cch") == 0)
+                return sp;
+        }
     }
-    return src_cch;
+    if (pl >= 4 && strcmp(inc_path + strlen(inc_path) - 4, ".cch") == 0)
+        return inc_path;
+    return NULL;
 }
 
 static int cc__include_supplies_needed_type(const char* this_src, size_t this_n,
@@ -15556,15 +15872,15 @@ static char* cc__hoist_quoted_includes(const char* src, size_t n) {
     return out;
 }
 
-static int cc__cch_unique_defining_peer(const char* abs_cch,
-                                        const char* name, size_t nlen,
-                                        char* out, size_t cap) {
+static int cc__cch_defining_peers(const char* abs_cch,
+                                 const char* name, size_t nlen,
+                                 char peers[][PATH_MAX], int cap) {
     char dir[PATH_MAX];
     char self[PATH_MAX];
     DIR* dp;
     struct dirent* de;
     int found = 0;
-    if (!abs_cch || !name || nlen == 0 || !out || cap == 0) return 0;
+    if (!abs_cch || !name || nlen == 0 || !peers || cap <= 0) return 0;
     if (!realpath(abs_cch, self)) return 0;
     if (cc__dirname_local(self, dir, sizeof(dir)) != 0) return 0;
     dp = opendir(dir);
@@ -15587,23 +15903,71 @@ static int cc__cch_unique_defining_peer(const char* abs_cch,
             continue;
         }
         if (cc__header_defines_type(text, tn, name, nlen)) {
-            if (found) {
-                free(text);
-                closedir(dp);
-                return 0;
-            }
-            if (strlen(peer_abs) + 1 > cap) {
-                free(text);
-                closedir(dp);
-                return 0;
-            }
-            memcpy(out, peer_abs, strlen(peer_abs) + 1);
-            found = 1;
+            if (found < cap)
+                memcpy(peers[found], peer_abs, strlen(peer_abs) + 1);
+            found++;
         }
         free(text);
     }
     closedir(dp);
     return found;
+}
+
+static int cc__cch_base_is_priv(const char* path) {
+    const char* b = cc__path_base(path);
+    size_t n;
+    if (!b || !b[0]) return 0;
+    n = strlen(b);
+    return n > 9 && memcmp(b + n - 9, "_priv.cch", 9) == 0;
+}
+
+static int cc__paths_same_owner(const char* a, const char* b) {
+    char oa[PATH_MAX], ob[PATH_MAX], ra[PATH_MAX], rb[PATH_MAX];
+    if (!cc__cch_owner_ccs_path(a, oa, sizeof(oa))) return 0;
+    if (!cc__cch_owner_ccs_path(b, ob, sizeof(ob))) return 0;
+    if (realpath(oa, ra) && realpath(ob, rb)) return strcmp(ra, rb) == 0;
+    return strcmp(oa, ob) == 0;
+}
+
+static int cc__defining_peers_one_owner(char found[][PATH_MAX], int nc) {
+    int i;
+    if (nc < 2) return 1;
+    for (i = 1; i < nc; i++) {
+        if (!cc__paths_same_owner(found[0], found[i])) return 0;
+    }
+    return 1;
+}
+
+/* Stem face over `_priv` / longer chapter names (`piece_tree.cch`). */
+static int cc__pick_defining_peer(char found[][PATH_MAX], int nc) {
+    int i, best = 0;
+    if (nc <= 0) return 0;
+    for (i = 1; i < nc; i++) {
+        int a_priv = cc__cch_base_is_priv(found[best]);
+        int b_priv = cc__cch_base_is_priv(found[i]);
+        size_t al, bl;
+        if (a_priv && !b_priv) { best = i; continue; }
+        if (!a_priv && b_priv) continue;
+        al = strlen(cc__path_base(found[best]));
+        bl = strlen(cc__path_base(found[i]));
+        if (bl < al) best = i;
+    }
+    return best;
+}
+
+static int cc__rewrite_root_defines_type(const char* name, size_t nlen) {
+    char* text = NULL;
+    size_t tn = 0;
+    int d;
+    if (!g_rewrite_root_path || !g_rewrite_root_path[0] || !name || nlen == 0)
+        return 0;
+    if (cc__read_file_text(g_rewrite_root_path, &text, &tn) != 0 || !text) {
+        free(text);
+        return 0;
+    }
+    d = cc__header_defines_type(text, tn, name, nlen);
+    free(text);
+    return d;
 }
 
 static int cc__text_has_quoted_path(const char* src, size_t n, const char* path) {
@@ -15647,6 +16011,10 @@ static char* cc__inject_defining_includes(const char* src, size_t n,
             if (p < n && src[p] == '*' && (e - s) < FWD_NAME &&
                 !cc__fwd_skip_name(src + s, e - s) &&
                 !cc__header_defines_type(src, n, src + s, e - s)) {
+                size_t after = cc_skip_ws_and_comments(src, n, p + 1);
+                /* `d * 100ull` is multiply; a type pointer is `Tag *name`. */
+                if (after < n && src[after] >= '0' && src[after] <= '9')
+                    continue;
                 int dup = 0;
                 for (k = 0; k < nn; k++) {
                     if (strlen(names[k]) == e - s &&
@@ -15666,21 +16034,45 @@ static char* cc__inject_defining_includes(const char* src, size_t n,
         if (i < n) i++;
     }
     for (k = 0; k < nn && np < PEER_CAP; k++) {
-        char peer[PATH_MAX];
+        char found[8][PATH_MAX];
+        int nc = cc__cch_defining_peers(abs_cch, names[k], strlen(names[k]),
+                                       found, 8);
         int d;
-        if (!cc__cch_unique_defining_peer(abs_cch, names[k], strlen(names[k]),
-                                          peer, sizeof(peer)))
-            continue;
+        if (nc >= 2) {
+            if (cc__defining_peers_one_owner(found, nc)) {
+                int pick = cc__pick_defining_peer(found, nc);
+                if (pick != 0)
+                    memcpy(found[0], found[pick], strlen(found[pick]) + 1);
+                nc = 1;
+            } else {
+                fprintf(stderr,
+                        "cc: error: cannot extract %s: %s is defined in %s and %s\n",
+                        abs_cch, names[k], cc__path_base(found[0]),
+                        cc__path_base(found[1]));
+                g_local_cch_lower_failed = 1;
+                return NULL;
+            }
+        }
+        if (nc == 0) {
+            if (cc__rewrite_root_defines_type(names[k], strlen(names[k])))
+                continue;
+            fprintf(stderr,
+                    "cc: error: cannot extract %s: %s* is not a type and no "
+                    "same-directory face defines %s\n",
+                    abs_cch, names[k], names[k]);
+            g_local_cch_lower_failed = 1;
+            return NULL;
+        }
         /* Impl-grade with no owner splices into the including .ccs
          * (`document.cch` from find.ccs). Extracting it from the leaf
          * is the error; leave the name unresolved in this .h. */
-        if (cc__local_cch_is_impl_grade(peer) && !cc__cch_has_owner_ccs(peer))
+        if (cc__local_cch_is_impl_grade(found[0]) && !cc__cch_has_owner_ccs(found[0]))
             continue;
         for (d = 0; d < np; d++) {
-            if (strcmp(peers[d], peer) == 0) break;
+            if (strcmp(peers[d], found[0]) == 0) break;
         }
         if (d < np) continue;
-        memcpy(peers[np], peer, strlen(peer) + 1);
+        memcpy(peers[np], found[0], strlen(found[0]) + 1);
         np++;
     }
     if (np == 0) return NULL;
@@ -15691,8 +16083,16 @@ static char* cc__inject_defining_includes(const char* src, size_t n,
         for (k = 0; k < np; k++) {
             const char* lp = cc__lower_local_cch_header(peers[k]);
             char line[PATH_MAX + 16];
-            if (!lp || cc__text_has_quoted_path(src, n, lp)) continue;
-            snprintf(line, sizeof(line), "#include \"%s\"\n", lp);
+            char from_h[PATH_MAX];
+            char rel[PATH_MAX];
+            const char* quote = lp;
+            if (!lp || cc__text_has_quoted_include_target(src, n, lp)) continue;
+            if (cc__build_stable_lowered_header_path(abs_cch, from_h,
+                                                    sizeof(from_h)) == 0 &&
+                cc__rel_quoted_include(from_h, lp, rel, sizeof(rel)) == 0)
+                quote = rel;
+            if (cc__text_has_quoted_include_target(src, n, quote)) continue;
+            snprintf(line, sizeof(line), "#include \"%s\"\n", quote);
             cc_sb_append_cstr(&out, &out_len, &out_cap, line);
             any = 1;
         }
@@ -15980,6 +16380,13 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
         rewritten = cc__rewrite_local_cch_includes_impl(input, input_len, abs_src);
         g_rewrite_allow_impl_splice = saved_splice;
     }
+    if (g_local_cch_lower_failed) {
+        free(input);
+        free(rewritten);
+        if (lowered_idx != (size_t)-1)
+            g_lowered_local_headers[lowered_idx].in_progress = 0;
+        return NULL;
+    }
     g_header_lower_preserve_tu_state++;
     lowered = cc_lower_header_string(rewritten ? rewritten : input,
                                      rewritten ? strlen(rewritten) : input_len,
@@ -16004,6 +16411,13 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
                 lowered = ds;
             }
         }
+        {
+            char* ex = cc__extern_file_scope_data_defs(lowered, strlen(lowered));
+            if (ex) {
+                free(lowered);
+                lowered = ex;
+            }
+        }
     }
     {
         char* hoisted = cc__hoist_quoted_includes(lowered, strlen(lowered));
@@ -16014,6 +16428,14 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     }
     {
         char* pulled = cc__inject_defining_includes(lowered, strlen(lowered), abs_src);
+        if (g_local_cch_lower_failed) {
+            free(pulled);
+            free(lowered);
+            free(input);
+            free(rewritten);
+            g_lowered_local_headers[lowered_idx].in_progress = 0;
+            return NULL;
+        }
         if (pulled) {
             free(lowered);
             lowered = pulled;
@@ -16219,6 +16641,10 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                 }
                 lowered_path = cc__lower_local_cch_header(found ? child_abs
                                                                : child_path);
+                if (g_local_cch_lower_failed) {
+                    free(out);
+                    return NULL;
+                }
                 if (lowered_path) {
                     /* Splice include-graph impl leaves before the extracted
                      * `.h`. The `.h` includes those guests' extracts and
@@ -16231,7 +16657,21 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                             &out, &out_len, &out_cap,
                             found ? child_abs : child_path, current_path);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "#include \"");
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, lowered_path);
+                    if (!g_rewrite_allow_impl_splice) {
+                        char from_h[PATH_MAX];
+                        char rel[PATH_MAX];
+                        if (cc__build_stable_lowered_header_path(current_path,
+                                                                from_h,
+                                                                sizeof(from_h)) == 0 &&
+                            cc__rel_quoted_include(from_h, lowered_path, rel,
+                                                   sizeof(rel)) == 0)
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, rel);
+                        else
+                            cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                             lowered_path);
+                    } else {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, lowered_path);
+                    }
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "\"");
                     if (line_end < n && src[line_end] == '\n') cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
                     changed = 1;

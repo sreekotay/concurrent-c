@@ -4,8 +4,8 @@
 
 int main(void) {
     int v = destatic_hid();
-    if (v != 7 || destatic_cell != 4) {
-        printf("hid=%d cell=%d\n", v, destatic_cell);
+    if (v != 7 || destatic_cell != 4 || destatic_table[1] != 2) {
+        printf("hid=%d cell=%d table=%d\n", v, destatic_cell, destatic_table[1]);
         return 1;
     }
     printf("ok\n");

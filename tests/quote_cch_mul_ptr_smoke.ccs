@@ -1,0 +1,12 @@
+#!ccc ccs
+#include <stdio.h>
+#include "quote_cch_mul_ptr.cch"
+
+int main(void) {
+    if (mul_ptr_scale(2) != 200) {
+        printf("scale=%d\n", mul_ptr_scale(2));
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

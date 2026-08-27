@@ -1,0 +1,5 @@
+#include "quote_cch_ambig_leaf.cch"
+
+int main(void) {
+    return ambig_n(0);
+}

@@ -45,6 +45,26 @@ if (rc != 0) {
     return 1;
 }
 
+CCCommand grep_h_table = cc_command(&a, @slice("grep"));
+grep_h_table.arg("-q");
+grep_h_table.arg("extern int destatic_table");
+grep_h_table.arg("out/include/tests/quote_cch_destatic_mod.h");
+rc = grep_h_table.status() !>;
+if (rc != 0) {
+    "extracted .h missing extern destatic_table".println() !>;
+    return 1;
+}
+
+CCCommand grep_h_table_init = cc_command(&a, @slice("grep"));
+grep_h_table_init.arg("-Fq");
+grep_h_table_init.arg("destatic_table[] =");
+grep_h_table_init.arg("out/include/tests/quote_cch_destatic_mod.h");
+rc = grep_h_table_init.status() !>;
+if (rc == 0) {
+    "extracted .h kept destatic_table initializer".println() !>;
+    return 1;
+}
+
 CCCommand grep_other_body = cc_command(&a, @slice("grep"));
 grep_other_body.arg("-q");
 grep_other_body.arg("DESTATIC_HID_BODY");
@@ -85,6 +105,16 @@ grep_owner_body.arg("out/quote_cch_destatic_mod.c");
 rc = grep_owner_body.status() !>;
 if (rc != 0) {
     "owner TU did not splice destatic_hid body".println() !>;
+    return 1;
+}
+
+CCCommand grep_owner_table = cc_command(&a, @slice("grep"));
+grep_owner_table.arg("-Fq");
+grep_owner_table.arg("destatic_table[] =");
+grep_owner_table.arg("out/quote_cch_destatic_mod.c");
+rc = grep_owner_table.status() !>;
+if (rc != 0) {
+    "owner emit dropped destatic_table initializer".println() !>;
     return 1;
 }
 

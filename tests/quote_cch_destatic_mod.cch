@@ -4,8 +4,10 @@
 #include <ccc/std/prelude.cch>
 
 /* Owned impl-grade face. Strip turns the static bodies into decls;
- * destatic drops `static` so a guest TU can call destatic_hid. */
+ * destatic drops `static` so a guest TU can call destatic_hid.
+ * Non-static data becomes `extern` in the extract. */
 static int destatic_cell = 4;
+int destatic_table[] = { 1, 2, 3 };
 
 static int !>(CCError) destatic_step(int x) {
     @errhandler(CCError e) { return cc_err(e); }

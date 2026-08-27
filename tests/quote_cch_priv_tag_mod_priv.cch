@@ -1,0 +1,9 @@
+#ifndef TESTS_QUOTE_CCH_PRIV_TAG_MOD_PRIV_CCH
+#define TESTS_QUOTE_CCH_PRIV_TAG_MOD_PRIV_CCH
+
+/* Chapter of priv_tag_mod.ccs; repeats PrivTag like piece_tree_priv. */
+typedef struct {
+    int n;
+} PrivTag;
+
+#endif
