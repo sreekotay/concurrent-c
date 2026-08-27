@@ -826,4 +826,5 @@ An object-like `#define FLAG` immediately before `#include "foo.cch"`
 stays in this TU; `#ifdef FLAG` inside the extracted `.h` is host cpp,
 including function bodies under that `#ifdef`. File-scope functions in
 a `.cch` live in the owner TU; other TUs see decls. A pointer-only name
-the face does not define (`RtxWs*`) is a forward in the extract.
+the face does not already name as a type (`RtxWs*`) is a forward in the
+extract; a `typedef uint32_t` (or other alias) of that name is not.

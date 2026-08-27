@@ -1,0 +1,14 @@
+#ifndef TESTS_QUOTE_CCH_INT_ID_MOD_CCH
+#define TESTS_QUOTE_CCH_INT_ID_MOD_CCH
+
+#include <stdint.h>
+
+/* scope.cch shape: the id is an integer alias, and a function takes
+ * IntId*. Extract must not inject `typedef struct IntId IntId`. */
+typedef uint32_t IntId;
+
+static void int_id_put(IntId *out) {
+    if (out) *out = 1;
+}
+
+#endif

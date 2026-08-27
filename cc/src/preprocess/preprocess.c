@@ -15045,10 +15045,11 @@ static char* cc__strip_cch_function_bodies(const char* src, size_t n) {
     return out;
 }
 
-/* Pointer-only names (`RtxWs*`) that this face does not define: emit
- * `typedef struct Tag Tag` so a listing TU can include the face without
- * the parent type's header. Skip C keywords, `CC*` / `__*` (stdlib), and
- * tags already declared in this text. */
+/* Pointer-only names (`RtxWs*`) that this face does not already name as a
+ * type: emit `typedef struct Tag Tag` so a listing TU can include the face
+ * without the parent type's header. Skip C keywords, `CC*` / `__*`
+ * (stdlib), and names this text already typedefs or tags — including
+ * `typedef uint32_t RtxScope` with a later `RtxScope*`. */
 static int cc__fwd_is_c_keyword(const char* s, size_t n) {
     static const char* const kw[] = {
         "auto", "break", "case", "char", "const", "continue", "default", "do",
@@ -15088,7 +15089,7 @@ static int cc__header_defines_type(const char* src, size_t n,
             (i + nlen >= n || !cc_is_ident_char(src[i + nlen]))) {
             size_t p = i;
             while (p > 0 && (src[p - 1] == ' ' || src[p - 1] == '\t' ||
-                             src[p - 1] == '\n'))
+                             src[p - 1] == '\n' || src[p - 1] == '\r'))
                 p--;
             if (p >= 6 && memcmp(src + p - 6, "struct", 6) == 0 &&
                 (p == 6 || !cc_is_ident_char(src[p - 7])))
@@ -15099,13 +15100,33 @@ static int cc__header_defines_type(const char* src, size_t n,
             if (p >= 4 && memcmp(src + p - 4, "enum", 4) == 0 &&
                 (p == 4 || !cc_is_ident_char(src[p - 5])))
                 return 1;
-            if (p >= 7 && memcmp(src + p - 7, "typedef", 7) == 0 &&
-                (p == 7 || !cc_is_ident_char(src[p - 8])))
-                return 1;
             {
                 size_t q = i;
                 while (q > 0 && (src[q - 1] == ' ' || src[q - 1] == '\t')) q--;
                 if (q > 0 && src[q - 1] == '}') return 1;
+            }
+            /* typedef uint32_t Name / typedef unsigned int *Name — not
+             * only `typedef Name` immediately before the identifier. */
+            {
+                size_t q = i;
+                for (;;) {
+                    while (q > 0 && (src[q - 1] == ' ' || src[q - 1] == '\t' ||
+                                     src[q - 1] == '\n' || src[q - 1] == '\r'))
+                        q--;
+                    if (q == 0) break;
+                    if (src[q - 1] == '*') {
+                        q--;
+                        continue;
+                    }
+                    if (cc_is_ident_char(src[q - 1])) {
+                        size_t e = q;
+                        while (q > 0 && cc_is_ident_char(src[q - 1])) q--;
+                        if (e - q == 7 && memcmp(src + q, "typedef", 7) == 0)
+                            return 1;
+                        continue;
+                    }
+                    break;
+                }
             }
         }
         i++;

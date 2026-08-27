@@ -1,0 +1,14 @@
+#!ccc ccs
+#include <stdio.h>
+#include "quote_cch_int_id_mod.cch"
+
+int main(void) {
+    IntId v = 0;
+    int_id_put(&v);
+    if (v != 1) {
+        printf("v=%u\n", (unsigned)v);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

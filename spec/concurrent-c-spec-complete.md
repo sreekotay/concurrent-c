@@ -239,9 +239,11 @@ the owner unit splices the bodies. A file-scope function body has one
 definition — the owner TU. `#ifdef` / `#if` in an extracted face stay
 in the lowered `.h`; an object-like `#define` in this unit before the
 include is host cpp and selects those arms, including function bodies
-that sit under `#ifdef`. A pointer-only name that the face does not
-define (`RtxWs*`) is forwarded as an incomplete `typedef struct`
-so the including unit does not need the parent type's header. Nested
+that sit under `#ifdef`. A pointer-only name that the face does not already name as a type
+(`RtxWs*`) is forwarded as an incomplete `typedef struct` so the
+including unit does not need the parent type's header. A name the face
+typedefs as an integer or other alias (`typedef uint32_t RtxScope` with
+`RtxScope*`) is not forwarded. Nested
 quoted includes inside an extracted face are emitted after that face's
 preamble so a type they define is in scope for earlier decls (the
 extracted `.h` is one-pass C). The including unit's `#include` of the
