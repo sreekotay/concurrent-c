@@ -1,0 +1,20 @@
+#ifndef TESTS_QUOTE_CCH_CHAPTER_OWNER_MOD_LEAF_CCH
+#define TESTS_QUOTE_CCH_CHAPTER_OWNER_MOD_LEAF_CCH
+
+#include <ccc/std/prelude.cch>
+
+/* Chapter face: owned by quote_cch_chapter_owner_mod.ccs (stem_ prefix). */
+int !>(CCError) chapter_owner_leaf_step(int x) {
+    /* CHAPTER_OWNER_LEAF_BODY_MUST_NOT_SPLICE */
+    @errhandler(CCError e) { return cc_err(e); }
+    return cc_ok(x);
+}
+
+int chapter_owner_leaf_add(int a, int b) {
+    /* CHAPTER_OWNER_LEAF_BODY_MUST_NOT_SPLICE */
+    int x = chapter_owner_leaf_step(a) !> { return -1; };
+    int y = chapter_owner_leaf_step(b) !> { return -1; };
+    return x + y;
+}
+
+#endif

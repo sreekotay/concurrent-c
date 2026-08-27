@@ -812,15 +812,16 @@ does a `.foo(` in an interface header included from a `.ccs`. A
 `@typehooks` / `@typeview` face still extracts to a lowered `.h`; callers
 keep `char[:]` argument wrap and the proto's Result error type from the
 original `.cch`. A quoted interface `.cch` extracts; nested includes
-become their own `.h` (impl-grade nested faces need a sibling `.ccs`,
-or a direct include from a `.ccs`). `foo.cch` next to `foo.ccs` extracts
-as decls in every other TU. The `#include` stays in source order so
-types declared above it are in scope.
+become their own `.h` (impl-grade nested faces need an owner `.ccs`,
+or a direct include from that `.ccs`). `foo.ccs` owns `foo.cch`,
+`foo_*.cch`, and any same-directory face those files include
+(`workspace.cch` → `ui_types.cch`). Those faces extract as decls in
+every other TU. The `#include` stays in source order so types declared
+above it are in scope. An extracted face that includes another local
+face rewrites that include to the lowered `.h` path.
 
-A face is not lowered with the includer's preprocessor. `#define FLAG`
-before `#include "foo.cch"` can appear in this TU's generated C; it does
-**not** decide `#ifdef FLAG` inside `foo.cch` when that file extracts to
-`foo.h`. Do not gate listing helpers or `static` tables that way — those
-objects live in the sibling `.ccs`. A file-scope table or function body
-in a `.cch` two TUs include is two copies (or a harvest blank). Include
-only the faces whose lowered meaning that TU owns.
+An object-like `#define FLAG` immediately before `#include "foo.cch"`
+stays in this TU; `#ifdef FLAG` inside the extracted `.h` is host cpp,
+including function bodies under that `#ifdef`. File-scope functions in
+a `.cch` live in the owner TU; other TUs see decls. A pointer-only name
+the face does not define (`RtxWs*`) is a forward in the extract.

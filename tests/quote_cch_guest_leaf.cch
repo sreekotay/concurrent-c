@@ -1,0 +1,20 @@
+#ifndef TESTS_QUOTE_CCH_GUEST_LEAF_CCH
+#define TESTS_QUOTE_CCH_GUEST_LEAF_CCH
+
+#include <ccc/std/prelude.cch>
+
+/* Different stem from host_mod — owned because host_mod.cch includes this. */
+int !>(CCError) guest_leaf_step(int x) {
+    /* GUEST_LEAF_BODY_MUST_NOT_SPLICE */
+    @errhandler(CCError e) { return cc_err(e); }
+    return cc_ok(x);
+}
+
+int guest_leaf_add(int a, int b) {
+    /* GUEST_LEAF_BODY_MUST_NOT_SPLICE */
+    int x = guest_leaf_step(a) !> { return -1; };
+    int y = guest_leaf_step(b) !> { return -1; };
+    return x + y;
+}
+
+#endif

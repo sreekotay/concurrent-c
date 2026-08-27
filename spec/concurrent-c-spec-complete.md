@@ -229,13 +229,20 @@ and does not by itself force a splice. Method-call UFCS in an interface
 header does not force a splice from a `.ccs`. A quoted interface `.cch`
 extracts to a lowered `.h`. Nested local includes inside that header
 extract to their own `.h`; they do not splice into the including unit.
-An impl-grade nested face without a sibling `.ccs` is an error — move
-the bodies to a sibling `.ccs`, or include the face from a `.ccs`. If a
-sibling `.ccs` of the same stem exists, other units extract decls and
-the sibling unit splices the bodies. Nested local includes inside a
-spliced face are processed the same way. An object-like `#define`
-immediately before a quoted include is present for host cpp when the
-include extracts.
+An impl-grade nested face without an owner `.ccs` is an error — move
+the bodies to an owner `.ccs`, or include the face from that `.ccs`.
+The owner is the same-stem sibling (`foo.cch` → `foo.ccs`), a chapter
+face with that prefix (`piece_tree_rb.cch` → `piece_tree.ccs`), or a
+same-directory face included from an owned face (`workspace.cch`
+includes `ui_types.cch` → `workspace.ccs`). Other units extract decls and
+the owner unit splices the bodies. A file-scope function body has one
+definition — the owner TU. `#ifdef` / `#if` in an extracted face stay
+in the lowered `.h`; an object-like `#define` in this unit before the
+include is host cpp and selects those arms, including function bodies
+that sit under `#ifdef`. A pointer-only name that the face does not
+define (`RtxWs*`) is forwarded as an incomplete `typedef struct`
+so the including unit does not need the parent type's header. Nested
+local includes inside a spliced face are processed the same way.
 
 ### 1.8 File-start pragmas
 

@@ -1,0 +1,17 @@
+#ifndef TESTS_QUOTE_CCH_DEFINE_OWNED_MOD_LEAF_CCH
+#define TESTS_QUOTE_CCH_DEFINE_OWNED_MOD_LEAF_CCH
+
+#include <ccc/std/prelude.cch>
+
+#ifdef CFG_ON
+static int define_owned_value(void) { return 7; }
+#else
+static int define_owned_value(void) { return 3; }
+#endif
+
+int !>(CCError) define_owned_step(int x) {
+    @errhandler(CCError e) { return cc_err(e); }
+    return cc_ok(x);
+}
+
+#endif

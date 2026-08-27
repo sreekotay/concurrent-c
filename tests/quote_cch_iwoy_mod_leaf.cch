@@ -1,0 +1,6 @@
+#ifndef TESTS_QUOTE_CCH_IWOY_MOD_LEAF_CCH
+#define TESTS_QUOTE_CCH_IWOY_MOD_LEAF_CCH
+
+static int iwoy_len(IwoyWs* ws) { return ws ? 1 : 0; }
+
+#endif

@@ -1,0 +1,15 @@
+#!ccc ccs
+#include "quote_cch_host_mod.cch"
+#include <stdio.h>
+
+int main(void) {
+    int v = guest_leaf_add(1, 1);
+    int p = peer_mod_val();
+    int h = host_mod_tag();
+    if (v != 2 || p != 4 || h != 1) {
+        printf("guest=%d peer=%d host=%d\n", v, p, h);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

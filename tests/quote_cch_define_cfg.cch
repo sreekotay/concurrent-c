@@ -1,0 +1,12 @@
+#ifndef TESTS_QUOTE_CCH_DEFINE_CFG_CCH
+#define TESTS_QUOTE_CCH_DEFINE_CFG_CCH
+
+static int define_cfg_value(void) {
+#ifdef CFG_ON
+    return 7;
+#else
+    return 3;
+#endif
+}
+
+#endif

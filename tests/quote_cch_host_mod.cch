@@ -1,0 +1,11 @@
+#ifndef TESTS_QUOTE_CCH_HOST_MOD_CCH
+#define TESTS_QUOTE_CCH_HOST_MOD_CCH
+
+/* Owned interface face includes a differently-stemmed impl guest and a
+ * separately-owned peer. Other TUs extract this; the guest is still owned. */
+#include "quote_cch_guest_leaf.cch"
+#include "quote_cch_peer_mod.cch"
+
+static int host_mod_tag(void) { return 1; }
+
+#endif

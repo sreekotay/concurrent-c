@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <unistd.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -14553,10 +14554,15 @@ static int cc__match_local_include_line(const char* line,
  * writes `#include "foo.cch"`. An interface umbrella extracts; nested
  * includes become `#include "foo.h"`. Dumping impl/UFCS descendants into
  * the umbrella's includer is how a TUI TU hits AST_CAP from one
- * `document.cch`. Impl-grade nested faces need a sibling `.ccs`, or a
- * direct include from a `.ccs`. Method-call UFCS does not force a splice
- * when the include is written in a `.ccs`; it still splices when nested
- * inside an already-spliced impl face (redis_db → redis_mem).
+ * `document.cch`. Impl-grade faces need an owner `.ccs`: same-stem
+ * `foo.cch` → `foo.ccs`, or a chapter `foo_bar.cch` → `foo.ccs` in the
+ * same directory. Other TUs extract decls; `#ifdef` stays in the `.h`
+ * so a `#define` in this TU before the include is host cpp. Function
+ * bodies under `#if` stay in the extract (listing helpers). Pointer-only
+ * names not defined in the face get a `typedef struct Tag Tag`.
+ * Method-call UFCS does not force a splice when the include is written
+ * in a `.ccs`; it still splices when nested inside an already-spliced
+ * impl face (redis_db → redis_mem).
  */
 
 #define CC_IMPL_CCH_BEGIN_MARK "/*cc:impl_cch_begin:"
@@ -14742,7 +14748,7 @@ static void cc__cch_grade_memo_set(const char* abs_src, int grade) {
 
 /* Own-text only. A nested impl-grade `#include "leaf.cch"` does not make
  * this file impl-grade — the leaf splices into the including unit unless
- * a sibling `.ccs` owns those bodies; this file still extracts to a `.h`. */
+ * an owner `.ccs` owns those bodies; this file still extracts to a `.h`. */
 static int cc__local_cch_is_impl_grade(const char* abs_src) {
     char* src = NULL;
     size_t n = 0;
@@ -14766,57 +14772,219 @@ static size_t g_spliced_impl_cch_count = 0;
 static size_t g_spliced_impl_cch_cap = 0;
 /* 1 when rewriting a .ccs / spliced impl body: impl children splice.
  * 0 when lowering an interface `.cch` → `.h`: omit impl includes that
- * have no sibling `.ccs` (the including unit already spliced those
- * leaves). Sibling-backed leaves extract to `.h` even in this mode. */
+ * have no owner `.ccs` (the including unit already spliced those
+ * leaves). Owner-backed leaves extract to `.h` even in this mode. */
 static int g_rewrite_allow_impl_splice = 1;
 /* Top-level `.ccs` of the current include rewrite. Used to distinguish
- * the defining sibling TU (`find.ccs` including `find.cch`) from every
- * other consumer. */
+ * the defining owner TU (`find.ccs` including `find.cch` or
+ * `piece_tree.ccs` including `piece_tree_rb.cch`) from every other
+ * consumer. */
 static const char* g_rewrite_root_path = NULL;
 static int cc__lowered_header_needs_ufcs_splice(const char* body, size_t body_len);
 
-static int cc__cch_sibling_ccs_path(const char* abs_cch, char* out, size_t cap) {
+/* Same-stem `foo.cch` → `foo.ccs`, else chapter `foo_bar.cch` → `foo.ccs`. */
+static int cc__cch_stem_owner_ccs_path(const char* abs_cch, char* out, size_t cap) {
+    char dir[PATH_MAX];
+    char stem[PATH_MAX];
+    const char* slash;
+    char* cut;
     size_t n;
     if (!abs_cch || !out || cap < 5) return 0;
     n = strlen(abs_cch);
     if (n < 4 || memcmp(abs_cch + n - 4, ".cch", 4) != 0) return 0;
-    if (n - 4 + 5 > cap) return 0;
-    memcpy(out, abs_cch, n - 4);
-    memcpy(out + n - 4, ".ccs", 5);
-    return 1;
+    slash = strrchr(abs_cch, '/');
+    if (slash) {
+        size_t dlen = (size_t)(slash - abs_cch);
+        if (dlen + 1 >= sizeof(dir)) return 0;
+        memcpy(dir, abs_cch, dlen);
+        dir[dlen] = '\0';
+        snprintf(stem, sizeof(stem), "%s", slash + 1);
+    } else {
+        memcpy(dir, ".", 2);
+        snprintf(stem, sizeof(stem), "%s", abs_cch);
+    }
+    n = strlen(stem);
+    if (n < 4) return 0;
+    stem[n - 4] = '\0';
+    for (;;) {
+        if (snprintf(out, cap, "%s/%s.ccs", dir, stem) >= (int)cap) return 0;
+        if (access(out, F_OK) == 0) return 1;
+        cut = strrchr(stem, '_');
+        if (!cut || cut == stem) break;
+        *cut = '\0';
+    }
+    return 0;
 }
 
-static int cc__cch_has_sibling_ccs(const char* abs_cch) {
-    char sib[PATH_MAX];
-    if (!cc__cch_sibling_ccs_path(abs_cch, sib, sizeof(sib))) return 0;
-    return access(sib, F_OK) == 0;
+static int cc__quoted_include_basename_eq(const char* rel, const char* want_base) {
+    const char* slash;
+    if (!rel || !want_base) return 0;
+    slash = strrchr(rel, '/');
+    return strcmp(slash ? slash + 1 : rel, want_base) == 0;
+}
+
+static int cc__cch_text_quotes_basename(const char* src, size_t n, const char* want_base) {
+    size_t i = 0;
+    if (!src || !want_base) return 0;
+    while (i < n) {
+        size_t line_end = i;
+        size_t path_s = 0, path_e = 0;
+        while (line_end < n && src[line_end] != '\n') line_end++;
+        if (cc__match_local_include_line(src + i, line_end - i, &path_s, &path_e)) {
+            char rel[PATH_MAX];
+            size_t rel_len = path_e - path_s;
+            if (rel_len >= sizeof(rel)) rel_len = sizeof(rel) - 1;
+            memcpy(rel, src + i + path_s, rel_len);
+            rel[rel_len] = '\0';
+            if (cc__quoted_include_basename_eq(rel, want_base)) return 1;
+        }
+        i = (line_end < n) ? line_end + 1 : line_end;
+    }
+    return 0;
+}
+
+/* `workspace.cch` includes `ui_types.cch` → `workspace.ccs` owns the guest. */
+static int cc__cch_includer_owner_ccs_path(const char* abs_cch, char* out, size_t cap,
+                                          int depth) {
+    char dir[PATH_MAX];
+    const char* slash;
+    const char* want_base;
+    DIR* dp;
+    struct dirent* de;
+    if (!abs_cch || !out || cap < 5 || depth > 8) return 0;
+    slash = strrchr(abs_cch, '/');
+    want_base = slash ? slash + 1 : abs_cch;
+    if (slash) {
+        size_t dlen = (size_t)(slash - abs_cch);
+        if (dlen + 1 >= sizeof(dir)) return 0;
+        memcpy(dir, abs_cch, dlen);
+        dir[dlen] = '\0';
+    } else {
+        memcpy(dir, ".", 2);
+    }
+    dp = opendir(dir);
+    if (!dp) return 0;
+    while ((de = readdir(dp)) != NULL) {
+        char peer[PATH_MAX];
+        char* text = NULL;
+        size_t tn = 0;
+        size_t nl;
+        if (!de->d_name[0] || de->d_name[0] == '.') continue;
+        nl = strlen(de->d_name);
+        if (nl < 5 || strcmp(de->d_name + nl - 4, ".cch") != 0) continue;
+        if (strcmp(de->d_name, want_base) == 0) continue;
+        if (snprintf(peer, sizeof(peer), "%s/%s", dir, de->d_name) >= (int)sizeof(peer))
+            continue;
+        if (cc__read_file_text(peer, &text, &tn) != 0 || !text) {
+            free(text);
+            continue;
+        }
+        if (cc__cch_text_quotes_basename(text, tn, want_base)) {
+            if (cc__cch_stem_owner_ccs_path(peer, out, cap)) {
+                free(text);
+                closedir(dp);
+                return 1;
+            }
+            if (cc__cch_includer_owner_ccs_path(peer, out, cap, depth + 1)) {
+                free(text);
+                closedir(dp);
+                return 1;
+            }
+        }
+        free(text);
+    }
+    closedir(dp);
+    return 0;
+}
+
+/* Owner `.ccs`: same-stem / chapter prefix, else a same-dir face that
+ * includes this one and already has an owner (`workspace.cch` → `ui_types.cch`). */
+static int cc__cch_owner_ccs_path(const char* abs_cch, char* out, size_t cap) {
+    if (cc__cch_stem_owner_ccs_path(abs_cch, out, cap)) return 1;
+    return cc__cch_includer_owner_ccs_path(abs_cch, out, cap, 0);
+}
+
+static int cc__cch_has_owner_ccs(const char* abs_cch) {
+    char own[PATH_MAX];
+    return cc__cch_owner_ccs_path(abs_cch, own, sizeof(own));
 }
 
 static int cc__cch_root_is_defining_ccs(const char* abs_cch) {
-    char sib[PATH_MAX];
-    char sib_real[PATH_MAX];
+    char own[PATH_MAX];
+    char own_real[PATH_MAX];
     if (!g_rewrite_root_path || !g_rewrite_root_path[0]) return 0;
-    if (!cc__cch_sibling_ccs_path(abs_cch, sib, sizeof(sib))) return 0;
-    if (access(sib, F_OK) != 0) return 0;
-    if (realpath(sib, sib_real) && strcmp(g_rewrite_root_path, sib_real) == 0)
+    if (!cc__cch_owner_ccs_path(abs_cch, own, sizeof(own))) return 0;
+    if (realpath(own, own_real) && strcmp(g_rewrite_root_path, own_real) == 0)
         return 1;
-    return strcmp(g_rewrite_root_path, sib) == 0;
+    return strcmp(g_rewrite_root_path, own) == 0;
 }
 
-/* Sibling `.ccs` exists and this rewrite is not that file: extract decls. */
+/* Owner `.ccs` exists and this rewrite is not that file: extract decls. */
 static int cc__cch_extract_for_other_tus(const char* abs_cch) {
-    if (!cc__cch_has_sibling_ccs(abs_cch)) return 0;
+    if (!cc__cch_has_owner_ccs(abs_cch)) return 0;
     return !cc__cch_root_is_defining_ccs(abs_cch);
 }
 
+static int cc__line_is_ws_or_comment(const char* s, size_t n) {
+    size_t i = 0;
+    while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')) i++;
+    if (i >= n) return 1;
+    if (s[i] == '/' && i + 1 < n && (s[i + 1] == '/' || s[i + 1] == '*'))
+        return 1;
+    return 0;
+}
+
 /* File-scope `foo(...) { ... }` → `foo(...);` so a sibling-backed `.cch`
- * can extract to a host `.h`. Bodies lower in the defining `.ccs`. */
+ * can extract to a host `.h`. Bodies lower in the defining `.ccs`.
+ * Bodies under `#if` / `#ifdef` stay — host cpp of this TU selects them
+ * (`#define FLAG` before the include). Inner `#if` in a body keeps it. */
+static int cc__span_has_bol_if(const char* src, size_t lo, size_t hi) {
+    size_t i = lo;
+    int bol = 1;
+    if (!src || lo >= hi) return 0;
+    while (i < hi) {
+        if (bol) {
+            while (i < hi && (src[i] == ' ' || src[i] == '\t')) i++;
+            if (i < hi && src[i] == '#') {
+                size_t p = i + 1;
+                while (p < hi && (src[p] == ' ' || src[p] == '\t')) p++;
+                if (p + 2 <= hi && src[p] == 'i' && src[p + 1] == 'f')
+                    return 1;
+            }
+        }
+        bol = (src[i] == '\n');
+        i++;
+    }
+    return 0;
+}
+
+static int cc__bol_hash_if_delta(const char* src, size_t n, size_t hash_at) {
+    size_t p;
+    if (!src || hash_at >= n || src[hash_at] != '#') return 0;
+    p = hash_at + 1;
+    while (p < n && (src[p] == ' ' || src[p] == '\t')) p++;
+    /* Include guards are `#ifndef`. Keep bodies only under `#ifdef` / `#if`
+     * so a `#define FLAG` in the includer can select listing helpers. */
+    if (p + 5 <= n && memcmp(src + p, "ifdef", 5) == 0 &&
+        (p + 5 >= n || !cc_is_ident_char(src[p + 5])))
+        return 1;
+    if (p + 2 <= n && src[p] == 'i' && src[p + 1] == 'f' &&
+        (p + 2 >= n || !cc_is_ident_char(src[p + 2])))
+        return 1;
+    if (p + 5 <= n && memcmp(src + p, "endif", 5) == 0 &&
+        (p + 5 >= n || !cc_is_ident_char(src[p + 5])))
+        return -1;
+    return 0;
+}
+
 static char* cc__strip_cch_function_bodies(const char* src, size_t n) {
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     size_t i = 0;
     int brace = 0;
     int paren = 0;
+    int pp_depth = 0;
+    int at_bol = 1;
     char last_sig = 0;
     int changed = 0;
     CCScannerState scan;
@@ -14826,18 +14994,48 @@ static char* cc__strip_cch_function_bodies(const char* src, size_t n) {
         size_t before = i;
         char c;
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) {
+            size_t k;
+            for (k = before; k < i; k++) {
+                if (src[k] == '\n') {
+                    at_bol = 1;
+                } else if (at_bol && src[k] == '#') {
+                    pp_depth += cc__bol_hash_if_delta(src, n, k);
+                    if (pp_depth < 0) pp_depth = 0;
+                    at_bol = 0;
+                } else if (src[k] != ' ' && src[k] != '\t') {
+                    at_bol = 0;
+                }
+            }
             cc_sb_append(&out, &out_len, &out_cap, src + before, i - before);
             continue;
         }
         c = src[i];
+        if (at_bol && (c == ' ' || c == '\t')) {
+            cc_sb_append(&out, &out_len, &out_cap, src + i, 1);
+            i++;
+            continue;
+        }
+        if (at_bol && c == '#') {
+            pp_depth += cc__bol_hash_if_delta(src, n, i);
+            if (pp_depth < 0) pp_depth = 0;
+            at_bol = 0;
+            cc_sb_append(&out, &out_len, &out_cap, src + i, 1);
+            i++;
+            continue;
+        }
         if (c == '{' && brace == 0 && paren == 0 && last_sig == ')') {
             size_t body_r = 0;
             if (cc_find_matching_brace(src, n, i, &body_r)) {
-                cc_sb_append_cstr(&out, &out_len, &out_cap, ";");
-                i = body_r + 1;
-                last_sig = ';';
-                changed = 1;
-                continue;
+                int keep = (pp_depth > 0) ||
+                           cc__span_has_bol_if(src, i, body_r + 1);
+                if (!keep) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ";");
+                    i = body_r + 1;
+                    last_sig = ';';
+                    at_bol = 0;
+                    changed = 1;
+                    continue;
+                }
             }
         }
         if (c == '{') brace++;
@@ -14845,6 +15043,7 @@ static char* cc__strip_cch_function_bodies(const char* src, size_t n) {
         else if (c == '(') paren++;
         else if (c == ')' && paren > 0) paren--;
         if (c > 32) last_sig = c;
+        at_bol = (c == '\n');
         cc_sb_append(&out, &out_len, &out_cap, src + i, 1);
         i++;
     }
@@ -14852,6 +15051,169 @@ static char* cc__strip_cch_function_bodies(const char* src, size_t n) {
         free(out);
         return NULL;
     }
+    return out;
+}
+
+/* Pointer-only names (`RtxWs*`) that this face does not define: emit
+ * `typedef struct Tag Tag` so a listing TU can include the face without
+ * the parent type's header. Skip C keywords, `CC*` / `__*` (stdlib), and
+ * tags already declared in this text. */
+static int cc__fwd_is_c_keyword(const char* s, size_t n) {
+    static const char* const kw[] = {
+        "auto", "break", "case", "char", "const", "continue", "default", "do",
+        "double", "else", "enum", "extern", "float", "for", "goto", "if",
+        "inline", "int", "long", "register", "restrict", "return", "short",
+        "signed", "sizeof", "static", "struct", "switch", "typedef", "union",
+        "unsigned", "void", "volatile", "while", "_Bool", "bool", "size_t",
+        "ssize_t", "ptrdiff_t", "intptr_t", "uintptr_t", "uint8_t", "uint16_t",
+        "uint32_t", "uint64_t", "int8_t", "int16_t", "int32_t", "int64_t",
+        "FILE", "va_list", NULL
+    };
+    size_t k;
+    if (!s || n == 0) return 1;
+    for (k = 0; kw[k]; k++) {
+        if (strlen(kw[k]) == n && memcmp(kw[k], s, n) == 0) return 1;
+    }
+    return 0;
+}
+
+static int cc__fwd_skip_name(const char* s, size_t n) {
+    if (cc__fwd_is_c_keyword(s, n)) return 1;
+    if (n >= 2 && s[0] == '_' && s[1] == '_') return 1;
+    if (n >= 2 && s[0] == 'C' && s[1] == 'C') return 1;
+    return 0;
+}
+
+static int cc__header_defines_type(const char* src, size_t n,
+                                  const char* name, size_t nlen) {
+    size_t i = 0;
+    CCScannerState scan;
+    if (!src || !name || nlen == 0) return 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (i + nlen <= n && memcmp(src + i, name, nlen) == 0 &&
+            (i == 0 || !cc_is_ident_char(src[i - 1])) &&
+            (i + nlen >= n || !cc_is_ident_char(src[i + nlen]))) {
+            size_t p = i;
+            while (p > 0 && (src[p - 1] == ' ' || src[p - 1] == '\t' ||
+                             src[p - 1] == '\n'))
+                p--;
+            if (p >= 6 && memcmp(src + p - 6, "struct", 6) == 0 &&
+                (p == 6 || !cc_is_ident_char(src[p - 7])))
+                return 1;
+            if (p >= 5 && memcmp(src + p - 5, "union", 5) == 0 &&
+                (p == 5 || !cc_is_ident_char(src[p - 6])))
+                return 1;
+            if (p >= 4 && memcmp(src + p - 4, "enum", 4) == 0 &&
+                (p == 4 || !cc_is_ident_char(src[p - 5])))
+                return 1;
+            if (p >= 7 && memcmp(src + p - 7, "typedef", 7) == 0 &&
+                (p == 7 || !cc_is_ident_char(src[p - 8])))
+                return 1;
+            {
+                size_t q = i;
+                while (q > 0 && (src[q - 1] == ' ' || src[q - 1] == '\t')) q--;
+                if (q > 0 && src[q - 1] == '}') return 1;
+            }
+        }
+        i++;
+    }
+    return 0;
+}
+
+static int cc__line_is_preamble_directive(const char* s, size_t n) {
+    size_t i = 0;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (i >= n || s[i] != '#') return 0;
+    i++;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (i + 7 <= n && memcmp(s + i, "include", 7) == 0) return 1;
+    if (i + 6 <= n && memcmp(s + i, "ifndef", 6) == 0) return 1;
+    if (i + 6 <= n && memcmp(s + i, "define", 6) == 0) return 1;
+    if (i + 6 <= n && memcmp(s + i, "pragma", 6) == 0) return 1;
+    if (i + 2 <= n && s[i] == 'i' && s[i + 1] == 'f' &&
+        (i + 2 >= n || !cc_is_ident_char(s[i + 2])))
+        return 1;
+    return 0;
+}
+
+static size_t cc__after_header_preamble(const char* src, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        size_t line_start = i;
+        size_t line_end;
+        while (i < n && src[i] != '\n') i++;
+        line_end = i;
+        if (i < n && src[i] == '\n') i++;
+        if (cc__line_is_ws_or_comment(src + line_start, line_end - line_start))
+            continue;
+        if (cc__line_is_preamble_directive(src + line_start,
+                                           line_end - line_start))
+            continue;
+        return line_start;
+    }
+    return n;
+}
+
+static char* cc__inject_pointer_forwards(const char* src, size_t n) {
+    enum { FWD_CAP = 32, FWD_NAME = 64 };
+    char names[FWD_CAP][FWD_NAME];
+    int nn = 0;
+    size_t i = 0;
+    size_t insert_at;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    int k;
+    CCScannerState scan;
+    if (!src || n == 0) return NULL;
+    cc_scanner_init(&scan);
+    while (i < n && nn < FWD_CAP) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (i < n && cc_is_ident_start(src[i])) {
+            size_t s = i;
+            size_t e;
+            size_t p;
+            i++;
+            while (i < n && cc_is_ident_char(src[i])) i++;
+            e = i;
+            p = cc_skip_ws_and_comments(src, n, i);
+            if (p < n && src[p] == '*' && (e - s) < FWD_NAME &&
+                !cc__fwd_skip_name(src + s, e - s) &&
+                !cc__header_defines_type(src, n, src + s, e - s)) {
+                int dup = 0;
+                for (k = 0; k < nn; k++) {
+                    if (strlen(names[k]) == e - s &&
+                        memcmp(names[k], src + s, e - s) == 0) {
+                        dup = 1;
+                        break;
+                    }
+                }
+                if (!dup) {
+                    memcpy(names[nn], src + s, e - s);
+                    names[nn][e - s] = '\0';
+                    nn++;
+                }
+            }
+            continue;
+        }
+        i++;
+    }
+    if (nn == 0) return NULL;
+    insert_at = cc__after_header_preamble(src, n);
+    cc_sb_append(&out, &out_len, &out_cap, src, insert_at);
+    for (k = 0; k < nn; k++) {
+        char line[256];
+        snprintf(line, sizeof(line),
+                 "#ifndef %s_FWD_DECLARED\n"
+                 "#define %s_FWD_DECLARED 1\n"
+                 "typedef struct %s %s;\n"
+                 "#endif\n",
+                 names[k], names[k], names[k], names[k]);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, line);
+    }
+    if (insert_at < n)
+        cc_sb_append(&out, &out_len, &out_cap, src + insert_at, n - insert_at);
     return out;
 }
 
@@ -15088,10 +15450,11 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
         CC__LOWER_GIVE_UP("mkdir -p");
     if (cc__read_file_text(abs_src, &input, &input_len) != 0)
         CC__LOWER_GIVE_UP("read");
-    if (cc__local_cch_is_impl_grade(abs_src) && !cc__cch_has_sibling_ccs(abs_src)) {
+    if (cc__local_cch_is_impl_grade(abs_src) && !cc__cch_has_owner_ccs(abs_src)) {
         fprintf(stderr,
                 "cc: error: cannot extract impl-grade header %s "
-                "(move bodies to a sibling .ccs, or #include it from a .ccs)\n",
+                "(move bodies to an owner .ccs — same stem or stem_chapter "
+                "— or #include it from that .ccs)\n",
                 abs_src);
         g_local_cch_lower_failed = 1;
         free(input);
@@ -15112,11 +15475,18 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     if (!lowered) CC__LOWER_GIVE_UP("lower");
     /* Only strip statement-level impl bodies. UFCS in an interface
      * `.cch` (`Type_destroy`, arena `.destroy()`) stays in the `.h`. */
-    if (cc__local_cch_is_impl_grade(abs_src) && cc__cch_has_sibling_ccs(abs_src)) {
+    if (cc__local_cch_is_impl_grade(abs_src) && cc__cch_has_owner_ccs(abs_src)) {
         char* stripped = cc__strip_cch_function_bodies(lowered, strlen(lowered));
         if (stripped) {
             free(lowered);
             lowered = stripped;
+        }
+    }
+    {
+        char* fwd = cc__inject_pointer_forwards(lowered, strlen(lowered));
+        if (fwd) {
+            free(lowered);
+            lowered = fwd;
         }
     }
     if (cc__write_file_text(lowered_path, lowered, strlen(lowered)) != 0)
@@ -15132,6 +15502,60 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     free(rewritten);
     free(lowered);
     return g_lowered_local_headers[lowered_idx].lowered_path;
+}
+
+/* Owner TU extracted an interface face: splice include-graph impl leaves
+ * (`ui_types.cch` included from `workspace.cch`) into this unit. Guests
+ * with their own stem owner (`safe.cch` → `safe.ccs`) stay extracted. */
+static void cc__splice_include_graph_impl_leaves(char** out, size_t* out_len,
+                                                size_t* out_cap,
+                                                const char* parent_abs,
+                                                const char* current_path) {
+    char parent_dir[PATH_MAX];
+    char* src = NULL;
+    size_t n = 0;
+    size_t i = 0;
+    if (!out || !parent_abs || !current_path) return;
+    if (cc__dirname_local(parent_abs, parent_dir, sizeof(parent_dir)) != 0) return;
+    if (cc__read_file_text(parent_abs, &src, &n) != 0 || !src) {
+        free(src);
+        return;
+    }
+    while (i < n) {
+        size_t line_end = i;
+        size_t path_s = 0, path_e = 0;
+        while (line_end < n && src[line_end] != '\n') line_end++;
+        if (cc__match_local_include_line(src + i, line_end - i, &path_s, &path_e)) {
+            char rel[PATH_MAX];
+            char child_path[PATH_MAX];
+            char child_abs[PATH_MAX];
+            size_t rel_len = path_e - path_s;
+            if (rel_len >= 4 && strncmp(src + i + path_e - 4, ".cch", 4) == 0 &&
+                rel_len < sizeof(rel)) {
+                memcpy(rel, src + i + path_s, rel_len);
+                rel[rel_len] = '\0';
+                if (cc__try_quoted_cch_path(parent_dir, rel, child_path,
+                                           sizeof(child_path), child_abs) &&
+                    cc__local_cch_is_impl_grade(child_abs)) {
+                    char stem_own[PATH_MAX];
+                    if (!cc__cch_stem_owner_ccs_path(child_abs, stem_own,
+                                                     sizeof(stem_own)) &&
+                        cc__cch_root_is_defining_ccs(child_abs) &&
+                        !cc__impl_cch_was_spliced(child_abs)) {
+                        size_t line_no = 1;
+                        size_t k;
+                        for (k = 0; k < i; k++)
+                            if (src[k] == '\n') line_no++;
+                        (void)cc__splice_impl_cch_into(out, out_len, out_cap,
+                                                       child_abs, current_path,
+                                                       line_no);
+                    }
+                }
+            }
+        }
+        i = (line_end < n) ? line_end + 1 : line_end;
+    }
+    free(src);
 }
 
 static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, const char* current_path) {
@@ -15201,13 +15625,13 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                                                                         child_len);
                         free(child_src);
                         /* Nested inside a spliced impl face (redis_mem), or
-                         * the defining sibling `.ccs` — not every `.ccs`
+                         * the defining owner `.ccs` — not every `.ccs`
                          * that includes an umbrella with one `.foo(`. */
                         if (ufcs &&
                             (cc__path_ends_with(current_path, ".cch") ||
                              cc__cch_root_is_defining_ccs(child_abs)))
                             splice_child = 1;
-                        else if (ufcs && !cc__cch_has_sibling_ccs(child_abs)) {
+                        else if (ufcs && !cc__cch_has_owner_ccs(child_abs)) {
                             /* Sibling-less leaf: its UFCS may bind
                              * registrations that live only in the parent TU
                              * (CC_MAP_DECL_UFCS in the .ccs, a TU-local
@@ -15231,13 +15655,14 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                         splice_child = 0;
                     if (splice_child) {
                         if (!g_rewrite_allow_impl_splice) {
-                            /* Lowering an interface `.h`: impl leaves with a
-                             * sibling `.ccs` extract; otherwise fail loud. */
-                            if (!cc__cch_has_sibling_ccs(child_abs)) {
+                            /* Lowering an interface `.h`: impl leaves with an
+                             * owner `.ccs` extract; otherwise fail loud. */
+                            if (!cc__cch_has_owner_ccs(child_abs)) {
                                 fprintf(stderr,
                                         "cc: error: cannot extract impl-grade "
-                                        "header %s (move bodies to a sibling "
-                                        ".ccs, or #include it from a .ccs)\n",
+                                        "header %s (move bodies to an owner "
+                                        ".ccs, or #include it from that "
+                                        ".ccs)\n",
                                         child_abs);
                                 g_local_cch_lower_failed = 1;
                                 free(out);
@@ -15270,6 +15695,16 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                 lowered_path = cc__lower_local_cch_header(found ? child_abs
                                                                : child_path);
                 if (lowered_path) {
+                    /* Splice include-graph impl leaves before the extracted
+                     * `.h`. The `.h` includes those guests' extracts and
+                     * defines their include guards — splicing after would
+                     * skip the bodies. */
+                    if (g_rewrite_allow_impl_splice &&
+                        cc__cch_root_is_defining_ccs(found ? child_abs
+                                                           : child_path))
+                        cc__splice_include_graph_impl_leaves(
+                            &out, &out_len, &out_cap,
+                            found ? child_abs : child_path, current_path);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "#include \"");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, lowered_path);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "\"");

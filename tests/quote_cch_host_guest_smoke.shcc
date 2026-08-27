@@ -1,0 +1,72 @@
+/* `host_mod.cch` includes `guest_leaf.cch` (other stem). Owner is still
+ * `host_mod.ccs`. Other TUs extract decls; peer_mod.h must resolve. */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+CCCommand emit_other = cc_command(&a, @slice("./cc/bin/ccc"));
+emit_other.arg("--no-cache");
+emit_other.arg("--emit-c-only");
+emit_other.arg("tests/quote_cch_host_guest_other_mod.ccs");
+emit_other.arg("-o");
+emit_other.arg("out/quote_cch_host_guest_other.c");
+emit_other.inherit_stdio();
+int rc = emit_other.status() !>;
+if (rc != 0) {
+    "emit other failed".println() !>;
+    return 1;
+}
+
+CCCommand grep_other = cc_command(&a, @slice("grep"));
+grep_other.arg("-q");
+grep_other.arg("GUEST_LEAF_BODY_MUST_NOT_SPLICE");
+grep_other.arg("out/quote_cch_host_guest_other.c");
+rc = grep_other.status() !>;
+if (rc == 0) {
+    "other TU spliced guest leaf".println() !>;
+    return 1;
+}
+
+CCCommand emit_owner = cc_command(&a, @slice("./cc/bin/ccc"));
+emit_owner.arg("--no-cache");
+emit_owner.arg("--emit-c-only");
+emit_owner.arg("tests/quote_cch_host_mod.ccs");
+emit_owner.arg("-o");
+emit_owner.arg("out/quote_cch_host_mod.c");
+emit_owner.inherit_stdio();
+rc = emit_owner.status() !>;
+if (rc != 0) {
+    "emit owner failed".println() !>;
+    return 1;
+}
+
+CCCommand grep_owner = cc_command(&a, @slice("grep"));
+grep_owner.arg("-q");
+grep_owner.arg("GUEST_LEAF_BODY_MUST_NOT_SPLICE");
+grep_owner.arg("out/quote_cch_host_mod.c");
+rc = grep_owner.status() !>;
+if (rc != 0) {
+    "owner TU did not splice guest leaf".println() !>;
+    return 1;
+}
+
+CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+build.arg("build");
+build.arg("--no-cache");
+build.arg("tests/quote_cch_host_guest_other_mod.ccs");
+build.arg("tests/quote_cch_host_mod.ccs");
+build.arg("tests/quote_cch_peer_mod.ccs");
+build.arg("-o");
+build.arg("out/quote_cch_host_guest_smoke");
+build.inherit_stdio();
+rc = build.status() !>;
+if (rc != 0) {
+    "build failed".println() !>;
+    return 1;
+}
+CCCommand run = cc_command(&a, @slice("out/quote_cch_host_guest_smoke"));
+run.inherit_stdio();
+rc = run.status() !>;
+if (rc != 0) {
+    "run failed".println() !>;
+    return 1;
+}
+return 0;

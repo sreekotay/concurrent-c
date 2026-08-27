@@ -1,0 +1,13 @@
+#!ccc ccs
+/* Extract names IwoyWs* only — listing must not need the parent type. */
+#include <stdio.h>
+#include "quote_cch_iwoy_mod_leaf.cch"
+
+int main(void) {
+    if (iwoy_len(0) != 0) {
+        printf("iwoy_len failed\n");
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

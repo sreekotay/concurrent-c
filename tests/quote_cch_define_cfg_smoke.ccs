@@ -1,0 +1,14 @@
+#!ccc ccs
+#include <stdio.h>
+#define CFG_ON
+#include "quote_cch_define_cfg.cch"
+
+int main(void) {
+    int v = define_cfg_value();
+    if (v != 7) {
+        printf("cfg=%d\n", v);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

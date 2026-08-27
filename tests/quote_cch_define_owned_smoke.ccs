@@ -1,0 +1,15 @@
+#!ccc ccs
+/* Owned extract: #define before the include must select #ifdef in the face. */
+#include <stdio.h>
+#define CFG_ON
+#include "quote_cch_define_owned_mod_leaf.cch"
+
+int main(void) {
+    int v = define_owned_value();
+    if (v != 7) {
+        printf("owned cfg=%d\n", v);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

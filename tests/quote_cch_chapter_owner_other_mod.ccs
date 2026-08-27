@@ -1,0 +1,13 @@
+#!ccc ccs
+#include "quote_cch_chapter_owner_mod_leaf.cch"
+#include <stdio.h>
+
+int main(void) {
+    int v = chapter_owner_leaf_add(1, 1);
+    if (v != 2) {
+        printf("leaf=%d\n", v);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}
