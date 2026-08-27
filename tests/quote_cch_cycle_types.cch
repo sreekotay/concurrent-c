@@ -1,0 +1,10 @@
+#ifndef TESTS_QUOTE_CCH_CYCLE_TYPES_CCH
+#define TESTS_QUOTE_CCH_CYCLE_TYPES_CCH
+
+typedef struct {
+    int n;
+} CycleRail;
+
+static int cycle_buf_n(const CycleBuf *b) { return b ? b->n : 0; }
+
+#endif

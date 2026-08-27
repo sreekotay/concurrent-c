@@ -1,0 +1,16 @@
+#!ccc ccs
+#include <stdio.h>
+#include "quote_cch_splice_doc.cch"
+
+static int splice_doc_touch(const SpliceDoc *d) { return d ? 1 : 0; }
+
+int main(void) {
+    SpliceDoc d;
+    d.n = 5;
+    if (splice_doc_n(&d) != 5 || splice_doc_touch(&d) != 1) {
+        printf("splice_doc failed\n");
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

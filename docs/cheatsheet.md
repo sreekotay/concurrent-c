@@ -818,10 +818,11 @@ or a direct include from that `.ccs`). `foo.ccs` owns `foo.cch`,
 (`workspace.cch` → `ui_types.cch`). Those faces extract as decls in
 every other TU. The including TU's `#include "foo.cch"` stays in source
 order so types declared above it are in scope. Nested quoted includes
-inside the extracted face hoist after the preamble only when that face
-defines a name this face uses (`ui_types.cch` after a `RtxScrollRail`
-decl). A consumer leaf included last (`nav.cch` after `RtxDoc`) stays
-put. Those includes rewrite to the lowered `.h` path.
+inside the extracted face hoist only when that face defines a name this
+face uses, and they land after this face's definitions of names the
+included face uses (`RtxBuf` before `ui_types.h`). A consumer leaf
+included last (`nav.cch` after `RtxDoc`) stays put. Those includes
+rewrite to the lowered `.h` path.
 
 An object-like `#define FLAG` immediately before `#include "foo.cch"`
 stays in this TU; `#ifdef FLAG` inside the extracted `.h` is host cpp,
@@ -829,4 +830,6 @@ including function bodies under that `#ifdef`. File-scope functions in
 a `.cch` live in the owner TU; other TUs see decls. A pointer-only name
 the face does not already name as a type is not a guessed
 `typedef struct Tag Tag`; if exactly one same-directory face defines
-the name, the extract includes that face.
+the name and that face can extract, the extract includes that face.
+An impl-grade unowned parent is left to the including unit (already
+spliced).

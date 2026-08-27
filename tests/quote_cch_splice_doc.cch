@@ -1,0 +1,25 @@
+#ifndef TESTS_QUOTE_CCH_SPLICE_DOC_CCH
+#define TESTS_QUOTE_CCH_SPLICE_DOC_CCH
+
+#include <ccc/std/prelude.cch>
+
+/* document.cch: impl-grade (statement unwrap), no owner .ccs. Listing
+ * TUs splice this. The leaf names SpliceDoc*; extract must not try to
+ * extract this file. */
+typedef struct {
+    int n;
+} SpliceDoc;
+
+static int !>(CCError) splice_doc_step(int x) {
+    @errhandler(CCError e) { return cc_err(e); }
+    return cc_ok(x);
+}
+
+static int splice_doc_n(const SpliceDoc *d) {
+    int x = splice_doc_step(d ? d->n : 0) !> { return 0; };
+    return x;
+}
+
+#include "quote_cch_splice_doc_nav.cch"
+
+#endif

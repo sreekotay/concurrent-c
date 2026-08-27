@@ -15079,6 +15079,52 @@ static int cc__fwd_skip_name(const char* s, size_t n) {
     return 0;
 }
 
+static int cc__ident_at_is_type_def(const char* src, size_t n, size_t i,
+                                   size_t nlen) {
+    size_t p;
+    if (!src || i + nlen > n) return 0;
+    p = i;
+    while (p > 0 && (src[p - 1] == ' ' || src[p - 1] == '\t' ||
+                     src[p - 1] == '\n' || src[p - 1] == '\r'))
+        p--;
+    if (p >= 6 && memcmp(src + p - 6, "struct", 6) == 0 &&
+        (p == 6 || !cc_is_ident_char(src[p - 7])))
+        return 1;
+    if (p >= 5 && memcmp(src + p - 5, "union", 5) == 0 &&
+        (p == 5 || !cc_is_ident_char(src[p - 6])))
+        return 1;
+    if (p >= 4 && memcmp(src + p - 4, "enum", 4) == 0 &&
+        (p == 4 || !cc_is_ident_char(src[p - 5])))
+        return 1;
+    {
+        size_t q = i;
+        while (q > 0 && (src[q - 1] == ' ' || src[q - 1] == '\t')) q--;
+        if (q > 0 && src[q - 1] == '}') return 1;
+    }
+    {
+        size_t q = i;
+        for (;;) {
+            while (q > 0 && (src[q - 1] == ' ' || src[q - 1] == '\t' ||
+                             src[q - 1] == '\n' || src[q - 1] == '\r'))
+                q--;
+            if (q == 0) break;
+            if (src[q - 1] == '*') {
+                q--;
+                continue;
+            }
+            if (cc_is_ident_char(src[q - 1])) {
+                size_t e = q;
+                while (q > 0 && cc_is_ident_char(src[q - 1])) q--;
+                if (e - q == 7 && memcmp(src + q, "typedef", 7) == 0)
+                    return 1;
+                continue;
+            }
+            break;
+        }
+    }
+    return 0;
+}
+
 static int cc__header_defines_type(const char* src, size_t n,
                                   const char* name, size_t nlen) {
     size_t i = 0;
@@ -15090,47 +15136,7 @@ static int cc__header_defines_type(const char* src, size_t n,
         if (i + nlen <= n && memcmp(src + i, name, nlen) == 0 &&
             (i == 0 || !cc_is_ident_char(src[i - 1])) &&
             (i + nlen >= n || !cc_is_ident_char(src[i + nlen]))) {
-            size_t p = i;
-            while (p > 0 && (src[p - 1] == ' ' || src[p - 1] == '\t' ||
-                             src[p - 1] == '\n' || src[p - 1] == '\r'))
-                p--;
-            if (p >= 6 && memcmp(src + p - 6, "struct", 6) == 0 &&
-                (p == 6 || !cc_is_ident_char(src[p - 7])))
-                return 1;
-            if (p >= 5 && memcmp(src + p - 5, "union", 5) == 0 &&
-                (p == 5 || !cc_is_ident_char(src[p - 6])))
-                return 1;
-            if (p >= 4 && memcmp(src + p - 4, "enum", 4) == 0 &&
-                (p == 4 || !cc_is_ident_char(src[p - 5])))
-                return 1;
-            {
-                size_t q = i;
-                while (q > 0 && (src[q - 1] == ' ' || src[q - 1] == '\t')) q--;
-                if (q > 0 && src[q - 1] == '}') return 1;
-            }
-            /* typedef uint32_t Name / typedef unsigned int *Name — not
-             * only `typedef Name` immediately before the identifier. */
-            {
-                size_t q = i;
-                for (;;) {
-                    while (q > 0 && (src[q - 1] == ' ' || src[q - 1] == '\t' ||
-                                     src[q - 1] == '\n' || src[q - 1] == '\r'))
-                        q--;
-                    if (q == 0) break;
-                    if (src[q - 1] == '*') {
-                        q--;
-                        continue;
-                    }
-                    if (cc_is_ident_char(src[q - 1])) {
-                        size_t e = q;
-                        while (q > 0 && cc_is_ident_char(src[q - 1])) q--;
-                        if (e - q == 7 && memcmp(src + q, "typedef", 7) == 0)
-                            return 1;
-                        continue;
-                    }
-                    break;
-                }
-            }
+            if (cc__ident_at_is_type_def(src, n, i, nlen)) return 1;
         }
         i++;
     }
@@ -15231,18 +15237,23 @@ static int cc__face_needs_type_from(const char* src, size_t n,
     return 0;
 }
 
-static int cc__include_supplies_needed_type(const char* this_src, size_t this_n,
-                                           const char* inc_path) {
+static const char* cc__include_source_cch(const char* inc_path) {
     const char* src_cch;
-    char* text = NULL;
-    size_t tn = 0;
-    int need;
-    if (!inc_path || !inc_path[0]) return 0;
+    if (!inc_path || !inc_path[0]) return NULL;
     src_cch = cc_lowered_header_source_for(inc_path);
     if (!src_cch) {
         size_t pl = strlen(inc_path);
         if (pl >= 4 && strcmp(inc_path + pl - 4, ".cch") == 0) src_cch = inc_path;
     }
+    return src_cch;
+}
+
+static int cc__include_supplies_needed_type(const char* this_src, size_t this_n,
+                                           const char* inc_path) {
+    const char* src_cch = cc__include_source_cch(inc_path);
+    char* text = NULL;
+    size_t tn = 0;
+    int need;
     if (!src_cch) return 0;
     if (cc__read_file_text(src_cch, &text, &tn) != 0 || !text) {
         free(text);
@@ -15253,23 +15264,118 @@ static int cc__include_supplies_needed_type(const char* this_src, size_t this_n,
     return need;
 }
 
+static size_t cc__skip_to_stmt_end(const char* src, size_t n, size_t i) {
+    int brace = 0, paren = 0;
+    CCScannerState scan;
+    if (!src) return n;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] == '{') brace++;
+        else if (src[i] == '}' && brace > 0) brace--;
+        else if (src[i] == '(') paren++;
+        else if (src[i] == ')' && paren > 0) paren--;
+        else if (src[i] == ';' && brace == 0 && paren == 0) {
+            i++;
+            if (i < n && src[i] == '\r') i++;
+            if (i < n && src[i] == '\n') i++;
+            return i;
+        }
+        i++;
+    }
+    return n;
+}
+
+/* End of the last type definition of `name` in this face, or 0. */
+static size_t cc__header_type_def_end(const char* src, size_t n,
+                                     const char* name, size_t nlen) {
+    size_t i = 0;
+    size_t last = 0;
+    CCScannerState scan;
+    if (!src || !name || nlen == 0) return 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (i + nlen <= n && memcmp(src + i, name, nlen) == 0 &&
+            (i == 0 || !cc_is_ident_char(src[i - 1])) &&
+            (i + nlen >= n || !cc_is_ident_char(src[i + nlen]))) {
+            if (cc__ident_at_is_type_def(src, n, i, nlen)) {
+                size_t end = cc__skip_to_stmt_end(src, n, i + nlen);
+                if (end > last) last = end;
+            }
+            i += nlen;
+            continue;
+        }
+        if (i < n) i++;
+    }
+    return last;
+}
+
+/* ui_types uses RtxBuf* defined in workspace: insert the include after
+ * that typedef, not after the preamble. */
+static size_t cc__insert_after_types_needed_by(const char* src, size_t n,
+                                              const char* other, size_t on,
+                                              size_t floor) {
+    size_t insert = floor;
+    size_t i = 0;
+    CCScannerState scan;
+    if (!src || !other) return floor;
+    cc_scanner_init(&scan);
+    while (i < on) {
+        if (cc_scanner_skip_non_code(&scan, other, on, &i)) continue;
+        if (i < on && cc_is_ident_start(other[i])) {
+            size_t s = i;
+            i++;
+            while (i < on && cc_is_ident_char(other[i])) i++;
+            if (cc__fwd_skip_name(other + s, i - s)) continue;
+            if (cc__header_defines_type(src, n, other + s, i - s)) {
+                size_t end = cc__header_type_def_end(src, n, other + s, i - s);
+                if (end > insert) insert = end;
+            }
+            continue;
+        }
+        if (i < on) i++;
+    }
+    return insert;
+}
+
+static size_t cc__hoist_insert_for_include(const char* this_src, size_t this_n,
+                                          const char* inc_path, size_t floor) {
+    const char* src_cch = cc__include_source_cch(inc_path);
+    char* text = NULL;
+    size_t tn = 0;
+    size_t at;
+    if (!src_cch) return floor;
+    if (cc__read_file_text(src_cch, &text, &tn) != 0 || !text) {
+        free(text);
+        return floor;
+    }
+    at = cc__insert_after_types_needed_by(this_src, this_n, text, tn, floor);
+    free(text);
+    return at;
+}
+
 /* Hoist a quoted include only when that face defines a name this face
- * uses and does not define (`ui_types.cch` after `RtxBuf_scroll_x_rail`).
- * A consumer leaf (`nav.cch` after `typedef struct { … } RtxDoc`) stays
- * in source order. The including TU's `#include "workspace.cch"` stays
- * in source order. */
+ * uses and does not define. Insert after this face's definitions of
+ * names the included face uses (`RtxBuf` before `ui_types.h`), not
+ * blindly after the preamble. A consumer leaf stays in source order. */
 static char* cc__hoist_quoted_includes(const char* src, size_t n) {
+    enum { HOIST_CAP = 16 };
+    size_t hoist_lo[HOIST_CAP];
+    size_t hoist_hi[HOIST_CAP];
+    int nh = 0;
     size_t pre;
+    size_t insert_at;
     size_t i;
     char* hoisted = NULL;
     size_t h_len = 0, h_cap = 0;
-    char* rest = NULL;
-    size_t r_len = 0, r_cap = 0;
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
-    int any = 0;
+    int k;
+    int emitted = 0;
     if (!src || n == 0) return NULL;
     pre = cc__after_header_preamble(src, n);
+    insert_at = pre;
     i = pre;
     while (i < n) {
         size_t line_start = i;
@@ -15281,29 +15387,49 @@ static char* cc__hoist_quoted_includes(const char* src, size_t n) {
             char inc[PATH_MAX];
             if (cc__quoted_include_path(src + line_start, line_end - line_start,
                                         inc, sizeof(inc)) &&
-                cc__include_supplies_needed_type(src, n, inc)) {
+                cc__include_supplies_needed_type(src, n, inc) &&
+                nh < HOIST_CAP) {
+                size_t after = cc__hoist_insert_for_include(src, n, inc, pre);
+                if (after > insert_at) insert_at = after;
+                hoist_lo[nh] = line_start;
+                hoist_hi[nh] = i;
+                nh++;
                 cc_sb_append(&hoisted, &h_len, &h_cap, src + line_start,
                              (i > line_start) ? (i - line_start) : (line_end - line_start));
                 if (h_len > 0 && hoisted[h_len - 1] != '\n')
                     cc_sb_append_cstr(&hoisted, &h_len, &h_cap, "\n");
-                any = 1;
-                continue;
             }
         }
-        cc_sb_append(&rest, &r_len, &r_cap, src + line_start,
-                     (i > line_start) ? (i - line_start) : (line_end - line_start));
     }
-    if (!any) {
+    if (nh == 0) {
         free(hoisted);
-        free(rest);
         return NULL;
     }
-    cc_sb_append(&out, &out_len, &out_cap, src, pre);
-    cc_sb_append(&out, &out_len, &out_cap, hoisted, h_len);
-    if (r_len)
-        cc_sb_append(&out, &out_len, &out_cap, rest, r_len);
+    i = 0;
+    while (i < n) {
+        size_t line_start = i;
+        size_t line_end;
+        int skip = 0;
+        if (!emitted && line_start >= insert_at) {
+            cc_sb_append(&out, &out_len, &out_cap, hoisted, h_len);
+            emitted = 1;
+        }
+        while (i < n && src[i] != '\n') i++;
+        line_end = i;
+        if (i < n && src[i] == '\n') i++;
+        for (k = 0; k < nh; k++) {
+            if (line_start == hoist_lo[k]) {
+                skip = 1;
+                break;
+            }
+        }
+        if (skip) continue;
+        cc_sb_append(&out, &out_len, &out_cap, src + line_start,
+                     (i > line_start) ? (i - line_start) : (line_end - line_start));
+    }
+    if (!emitted)
+        cc_sb_append(&out, &out_len, &out_cap, hoisted, h_len);
     free(hoisted);
-    free(rest);
     return out;
 }
 
@@ -15421,6 +15547,11 @@ static char* cc__inject_defining_includes(const char* src, size_t n,
         int d;
         if (!cc__cch_unique_defining_peer(abs_cch, names[k], strlen(names[k]),
                                           peer, sizeof(peer)))
+            continue;
+        /* Impl-grade with no owner splices into the including .ccs
+         * (`document.cch` from find.ccs). Extracting it from the leaf
+         * is the error; leave the name unresolved in this .h. */
+        if (cc__local_cch_is_impl_grade(peer) && !cc__cch_has_owner_ccs(peer))
             continue;
         for (d = 0; d < np; d++) {
             if (strcmp(peers[d], peer) == 0) break;

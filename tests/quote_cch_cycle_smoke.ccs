@@ -1,0 +1,16 @@
+#!ccc ccs
+#include <stdio.h>
+#include "quote_cch_cycle_mod.cch"
+
+int main(void) {
+    CycleBuf b;
+    CycleRail r;
+    b.n = 7;
+    r = cycle_rail_of(&b);
+    if (r.n != 7 || cycle_buf_n(&b) != 7) {
+        printf("cycle failed\n");
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

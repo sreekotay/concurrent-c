@@ -243,11 +243,14 @@ that sit under `#ifdef`. A pointer-only name that the face does not already name
 (`RtxDoc*`, `RtxWs*`) is not forwarded as `typedef struct Tag Tag` —
 that invents a tagged struct and conflicts with an anonymous
 `typedef struct { … } Tag` or an integer alias already in the unit.
-If exactly one same-directory face defines the name, the extract
-includes that face. Nested quoted includes hoist after the preamble
+If exactly one same-directory face defines the name and that face
+can extract (not impl-grade without an owner), the extract includes
+that face. An impl-grade unowned parent already spliced into this
+unit is not extracted from the leaf. Nested quoted includes hoist
 only when the included face defines a name this face uses and does
-not define (a late type face). A consumer leaf included last stays
-in source order. The including unit's `#include` of the face stays
+not define, and they insert after this face's definitions of names
+the included face uses (`RtxBuf` before `ui_types.h`). A consumer
+leaf included last stays in source order. The including unit's `#include` of the face stays
 in source order. Nested local includes inside a spliced face are
 processed the same way.
 

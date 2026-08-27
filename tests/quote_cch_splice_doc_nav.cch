@@ -1,0 +1,8 @@
+#ifndef TESTS_QUOTE_CCH_SPLICE_DOC_NAV_CCH
+#define TESTS_QUOTE_CCH_SPLICE_DOC_NAV_CCH
+
+/* Interface leaf — extractable without an owner. SpliceDoc* must not
+ * pull the unowned impl parent. */
+static int splice_doc_touch(const SpliceDoc *d);
+
+#endif

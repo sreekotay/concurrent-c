@@ -1,0 +1,18 @@
+#ifndef TESTS_QUOTE_CCH_CYCLE_MOD_CCH
+#define TESTS_QUOTE_CCH_CYCLE_MOD_CCH
+
+/* workspace.cch: defines CycleBuf, uses CycleRail from a late type face
+ * that also names CycleBuf*. Hoist must sit after this typedef. */
+typedef struct {
+    int n;
+} CycleBuf;
+
+static CycleRail cycle_rail_of(const CycleBuf *b) {
+    CycleRail r;
+    r.n = b ? b->n : 0;
+    return r;
+}
+
+#include "quote_cch_cycle_types.cch"
+
+#endif
