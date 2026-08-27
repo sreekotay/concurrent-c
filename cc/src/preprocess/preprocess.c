@@ -14925,15 +14925,6 @@ static int cc__cch_extract_for_other_tus(const char* abs_cch) {
     return !cc__cch_root_is_defining_ccs(abs_cch);
 }
 
-static int cc__line_is_ws_or_comment(const char* s, size_t n) {
-    size_t i = 0;
-    while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')) i++;
-    if (i >= n) return 1;
-    if (s[i] == '/' && i + 1 < n && (s[i + 1] == '/' || s[i + 1] == '*'))
-        return 1;
-    return 0;
-}
-
 /* File-scope `foo(...) { ... }` → `foo(...);` so a sibling-backed `.cch`
  * can extract to a host `.h`. Bodies lower in the defining `.ccs`.
  * Bodies under `#if` / `#ifdef` stay — host cpp of this TU selects them
@@ -15141,19 +15132,93 @@ static int cc__line_is_preamble_directive(const char* s, size_t n) {
 static size_t cc__after_header_preamble(const char* src, size_t n) {
     size_t i = 0;
     while (i < n) {
+        size_t line_start;
+        size_t line_end;
+        while (i < n && (src[i] == ' ' || src[i] == '\t' || src[i] == '\r' ||
+                         src[i] == '\n'))
+            i++;
+        if (i >= n) return n;
+        if (i + 1 < n && src[i] == '/' && src[i + 1] == '/') {
+            while (i < n && src[i] != '\n') i++;
+            continue;
+        }
+        if (i + 1 < n && src[i] == '/' && src[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) i++;
+            if (i + 1 < n) i += 2;
+            continue;
+        }
+        line_start = i;
+        line_end = i;
+        while (line_end < n && src[line_end] != '\n') line_end++;
+        if (cc__line_is_preamble_directive(src + line_start, line_end - line_start)) {
+            i = (line_end < n) ? line_end + 1 : line_end;
+            continue;
+        }
+        return line_start;
+    }
+    return n;
+}
+
+static int cc__line_is_quoted_include(const char* s, size_t n) {
+    size_t i = 0;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (i >= n || s[i] != '#') return 0;
+    i++;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (i + 7 > n || memcmp(s + i, "include", 7) != 0) return 0;
+    i += 7;
+    if (i < n && cc_is_ident_char(s[i])) return 0;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    return i < n && s[i] == '"';
+}
+
+/* Extracted `.h` is one-pass C. A type face included at the end
+ * (`ui_types.cch` after `RtxBuf_scroll_x_rail`) must appear before decls
+ * that use those types. The including TU's `#include "workspace.cch"`
+ * still stays in source order. */
+static char* cc__hoist_quoted_includes(const char* src, size_t n) {
+    size_t pre;
+    size_t i;
+    char* hoisted = NULL;
+    size_t h_len = 0, h_cap = 0;
+    char* rest = NULL;
+    size_t r_len = 0, r_cap = 0;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    int any = 0;
+    if (!src || n == 0) return NULL;
+    pre = cc__after_header_preamble(src, n);
+    i = pre;
+    while (i < n) {
         size_t line_start = i;
         size_t line_end;
         while (i < n && src[i] != '\n') i++;
         line_end = i;
         if (i < n && src[i] == '\n') i++;
-        if (cc__line_is_ws_or_comment(src + line_start, line_end - line_start))
+        if (cc__line_is_quoted_include(src + line_start, line_end - line_start)) {
+            cc_sb_append(&hoisted, &h_len, &h_cap, src + line_start,
+                         (i > line_start) ? (i - line_start) : (line_end - line_start));
+            if (h_len > 0 && hoisted[h_len - 1] != '\n')
+                cc_sb_append_cstr(&hoisted, &h_len, &h_cap, "\n");
+            any = 1;
             continue;
-        if (cc__line_is_preamble_directive(src + line_start,
-                                           line_end - line_start))
-            continue;
-        return line_start;
+        }
+        cc_sb_append(&rest, &r_len, &r_cap, src + line_start,
+                     (i > line_start) ? (i - line_start) : (line_end - line_start));
     }
-    return n;
+    if (!any) {
+        free(hoisted);
+        free(rest);
+        return NULL;
+    }
+    cc_sb_append(&out, &out_len, &out_cap, src, pre);
+    cc_sb_append(&out, &out_len, &out_cap, hoisted, h_len);
+    if (r_len)
+        cc_sb_append(&out, &out_len, &out_cap, rest, r_len);
+    free(hoisted);
+    free(rest);
+    return out;
 }
 
 static char* cc__inject_pointer_forwards(const char* src, size_t n) {
@@ -15480,6 +15545,13 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
         if (stripped) {
             free(lowered);
             lowered = stripped;
+        }
+    }
+    {
+        char* hoisted = cc__hoist_quoted_includes(lowered, strlen(lowered));
+        if (hoisted) {
+            free(lowered);
+            lowered = hoisted;
         }
     }
     {

@@ -816,9 +816,11 @@ become their own `.h` (impl-grade nested faces need an owner `.ccs`,
 or a direct include from that `.ccs`). `foo.ccs` owns `foo.cch`,
 `foo_*.cch`, and any same-directory face those files include
 (`workspace.cch` → `ui_types.cch`). Those faces extract as decls in
-every other TU. The `#include` stays in source order so types declared
-above it are in scope. An extracted face that includes another local
-face rewrites that include to the lowered `.h` path.
+every other TU. The including TU's `#include "foo.cch"` stays in source
+order so types declared above it are in scope. Nested quoted includes
+inside the extracted face hoist after the preamble — a type face at the
+end (`ui_types.cch`) is in scope for earlier decls. Those includes
+rewrite to the lowered `.h` path.
 
 An object-like `#define FLAG` immediately before `#include "foo.cch"`
 stays in this TU; `#ifdef FLAG` inside the extracted `.h` is host cpp,

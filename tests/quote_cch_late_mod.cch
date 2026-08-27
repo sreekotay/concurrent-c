@@ -1,0 +1,16 @@
+#ifndef TESTS_QUOTE_CCH_LATE_MOD_CCH
+#define TESTS_QUOTE_CCH_LATE_MOD_CCH
+
+/* Workspace shape: a host function uses a type defined only in a face
+ * included last. Extract must hoist that include before this decl. */
+static LateRail late_rail_of(int n) {
+    LateRail r;
+    r.n = n;
+    return r;
+}
+
+static int late_rail_n(LateRail r) { return r.n; }
+
+#include "quote_cch_late_types.cch"
+
+#endif

@@ -1,0 +1,13 @@
+#!ccc ccs
+#include <stdio.h>
+#include "quote_cch_late_mod.cch"
+
+int main(void) {
+    LateRail r = late_rail_of(3);
+    if (late_rail_n(r) != 3) {
+        printf("late=%d\n", late_rail_n(r));
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

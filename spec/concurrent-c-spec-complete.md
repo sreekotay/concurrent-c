@@ -242,7 +242,11 @@ include is host cpp and selects those arms, including function bodies
 that sit under `#ifdef`. A pointer-only name that the face does not
 define (`RtxWs*`) is forwarded as an incomplete `typedef struct`
 so the including unit does not need the parent type's header. Nested
-local includes inside a spliced face are processed the same way.
+quoted includes inside an extracted face are emitted after that face's
+preamble so a type they define is in scope for earlier decls (the
+extracted `.h` is one-pass C). The including unit's `#include` of the
+face stays in source order. Nested local includes inside a spliced face
+are processed the same way.
 
 ### 1.8 File-start pragmas
 
