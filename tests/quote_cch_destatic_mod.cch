@@ -1,0 +1,21 @@
+#ifndef TESTS_QUOTE_CCH_DESTATIC_MOD_CCH
+#define TESTS_QUOTE_CCH_DESTATIC_MOD_CCH
+
+#include <ccc/std/prelude.cch>
+
+/* Owned impl-grade face. Strip turns the static bodies into decls;
+ * destatic drops `static` so a guest TU can call destatic_hid. */
+static int destatic_cell = 4;
+
+static int !>(CCError) destatic_step(int x) {
+    @errhandler(CCError e) { return cc_err(e); }
+    return cc_ok(x);
+}
+
+static int destatic_hid(void) {
+    /* DESTATIC_HID_BODY */
+    int x = destatic_step(3) !> { return 0; };
+    return x + destatic_cell;
+}
+
+#endif

@@ -1,0 +1,13 @@
+#!ccc ccs
+#include "quote_cch_destatic_mod.cch"
+#include <stdio.h>
+
+int main(void) {
+    int v = destatic_hid();
+    if (v != 7 || destatic_cell != 4) {
+        printf("hid=%d cell=%d\n", v, destatic_cell);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

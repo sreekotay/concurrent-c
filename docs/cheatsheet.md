@@ -827,7 +827,8 @@ rewrite to the lowered `.h` path.
 An object-like `#define FLAG` immediately before `#include "foo.cch"`
 stays in this TU; `#ifdef FLAG` inside the extracted `.h` is host cpp,
 including function bodies under that `#ifdef`. File-scope functions in
-a `.cch` live in the owner TU; other TUs see decls. A pointer-only name
+a `.cch` live in the owner TU; other TUs see decls. File-scope `static`
+on those functions is dropped so guests link to the owner. A pointer-only name
 the face does not already name as a type is not a guessed
 `typedef struct Tag Tag`; if exactly one same-directory face defines
 the name and that face can extract, the extract includes that face.

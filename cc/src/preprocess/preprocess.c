@@ -15046,6 +15046,129 @@ static char* cc__strip_cch_function_bodies(const char* src, size_t n) {
     return out;
 }
 
+/* After `static`, is this a file-scope function? `ident (` that is not
+ * `!>(` result syntax. `static int x;` / `= ` / `arr[n]` / `(*fp)()` stay. */
+static int cc__static_follows_file_scope_fn(const char* src, size_t n,
+                                           size_t after_static, int* is_decl) {
+    size_t i = after_static;
+    int paren = 0;
+    int saw_fn = 0;
+    CCScannerState scan;
+    if (is_decl) *is_decl = 0;
+    if (!src || after_static >= n) return 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (paren == 0 && src[i] == '{') {
+            if (is_decl) *is_decl = 0;
+            return saw_fn;
+        }
+        if (paren == 0 && (src[i] == ';' || src[i] == '=')) {
+            if (is_decl) *is_decl = (src[i] == ';');
+            return saw_fn;
+        }
+        if (src[i] == '(') {
+            if (paren == 0) {
+                size_t b = i;
+                while (b > after_static &&
+                       (src[b - 1] == ' ' || src[b - 1] == '\t' ||
+                        src[b - 1] == '\n' || src[b - 1] == '\r'))
+                    b--;
+                if (b >= 2 && src[b - 2] == '!' && src[b - 1] == '>') {
+                    /* `T !>(E)` */
+                } else if (b > after_static && cc_is_ident_char(src[b - 1])) {
+                    size_t s = b;
+                    while (s > after_static && cc_is_ident_char(src[s - 1]))
+                        s--;
+                    if (!(b - s == 6 && memcmp(src + s, "sizeof", 6) == 0))
+                        saw_fn = 1;
+                }
+            }
+            paren++;
+            i++;
+            continue;
+        }
+        if (src[i] == ')' && paren > 0) {
+            paren--;
+            i++;
+            continue;
+        }
+        i++;
+    }
+    return 0;
+}
+
+/* Drop file-scope `static` on functions. `decls_only` skips leftover
+ * bodies so an extracted `.h` does not grow a second external def.
+ * Owner splice uses `decls_only == 0`. Data (`static int x`) stays. */
+static char* cc__destatic_file_scope_fns(const char* src, size_t n,
+                                        int decls_only) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    int brace = 0;
+    int paren = 0;
+    int changed = 0;
+    int at_bol = 1;
+    CCScannerState scan;
+    if (!src || n == 0) return NULL;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t before = i;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) {
+            size_t k;
+            for (k = before; k < i; k++) {
+                if (src[k] == '\n') at_bol = 1;
+                else if (src[k] != ' ' && src[k] != '\t') at_bol = 0;
+            }
+            cc_sb_append(&out, &out_len, &out_cap, src + before, i - before);
+            continue;
+        }
+        if (at_bol && (src[i] == ' ' || src[i] == '\t')) {
+            cc_sb_append(&out, &out_len, &out_cap, src + i, 1);
+            i++;
+            continue;
+        }
+        if (at_bol && src[i] == '#') {
+            size_t e = i;
+            while (e < n && src[e] != '\n') e++;
+            if (e < n) e++;
+            cc_sb_append(&out, &out_len, &out_cap, src + i, e - i);
+            i = e;
+            at_bol = 1;
+            continue;
+        }
+        if (brace == 0 && paren == 0 && i + 6 <= n &&
+            memcmp(src + i, "static", 6) == 0 &&
+            (i == 0 || !cc_is_ident_char(src[i - 1])) &&
+            (i + 6 >= n || !cc_is_ident_char(src[i + 6]))) {
+            int is_decl = 0;
+            size_t after = i + 6;
+            while (after < n && (src[after] == ' ' || src[after] == '\t'))
+                after++;
+            if (cc__static_follows_file_scope_fn(src, n, after, &is_decl) &&
+                (!decls_only || is_decl)) {
+                i = after;
+                changed = 1;
+                at_bol = 0;
+                continue;
+            }
+        }
+        if (src[i] == '{') brace++;
+        else if (src[i] == '}' && brace > 0) brace--;
+        else if (src[i] == '(') paren++;
+        else if (src[i] == ')' && paren > 0) paren--;
+        at_bol = (src[i] == '\n');
+        cc_sb_append(&out, &out_len, &out_cap, src + i, 1);
+        i++;
+    }
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
 /* Pointer-only names this face does not define: never invent
  * `typedef struct Tag Tag`. That shape is only compatible with a tagged
  * struct of the same name; an anonymous `typedef struct { … } Tag` or a
@@ -15762,6 +15885,17 @@ static int cc__splice_impl_cch_into(char** out, size_t* out_len, size_t* out_cap
             use_len = strlen(rew);
         }
     }
+    /* Owner splice is the one external definition. Drop file-scope
+     * `static` on functions so guests that extracted decls can link. */
+    if (cc__cch_root_is_defining_ccs(child_abs)) {
+        char* ds = cc__destatic_file_scope_fns(use, use_len, 0);
+        if (ds) {
+            if (rew) free(rew);
+            rew = ds;
+            use = rew;
+            use_len = strlen(rew);
+        }
+    }
     cc_sb_append_cstr(out, out_len, out_cap, CC_IMPL_CCH_BEGIN_MARK);
     cc_sb_append_cstr(out, out_len, out_cap, child_abs);
     cc_sb_append_cstr(out, out_len, out_cap, "*/\n");
@@ -15860,6 +15994,15 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
         if (stripped) {
             free(lowered);
             lowered = stripped;
+        }
+        /* Strip leaves `static int foo();`. Guests cannot define that.
+         * Drop `static` on those decls so they bind to the owner TU. */
+        {
+            char* ds = cc__destatic_file_scope_fns(lowered, strlen(lowered), 1);
+            if (ds) {
+                free(lowered);
+                lowered = ds;
+            }
         }
     }
     {

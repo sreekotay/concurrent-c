@@ -1,0 +1,111 @@
+/* Extracted owned impl face drops `static` on function decls; the owner
+ * splice destatics the definition so a guest that calls destatic_hid links. */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+CCCommand emit_other = cc_command(&a, @slice("./cc/bin/ccc"));
+emit_other.arg("--no-cache");
+emit_other.arg("--emit-c-only");
+emit_other.arg("tests/quote_cch_destatic_other_mod.ccs");
+emit_other.arg("-o");
+emit_other.arg("out/quote_cch_destatic_other.c");
+emit_other.inherit_stdio();
+int rc = emit_other.status() !>;
+if (rc != 0) {
+    "emit other failed".println() !>;
+    return 1;
+}
+
+CCCommand grep_h_static = cc_command(&a, @slice("grep"));
+grep_h_static.arg("-q");
+grep_h_static.arg("static int destatic_hid");
+grep_h_static.arg("out/include/tests/quote_cch_destatic_mod.h");
+rc = grep_h_static.status() !>;
+if (rc == 0) {
+    "extracted .h kept static on destatic_hid".println() !>;
+    return 1;
+}
+
+CCCommand grep_h_decl = cc_command(&a, @slice("grep"));
+grep_h_decl.arg("-q");
+grep_h_decl.arg("int destatic_hid");
+grep_h_decl.arg("out/include/tests/quote_cch_destatic_mod.h");
+rc = grep_h_decl.status() !>;
+if (rc != 0) {
+    "extracted .h missing destatic_hid decl".println() !>;
+    return 1;
+}
+
+CCCommand grep_h_cell = cc_command(&a, @slice("grep"));
+grep_h_cell.arg("-q");
+grep_h_cell.arg("static int destatic_cell");
+grep_h_cell.arg("out/include/tests/quote_cch_destatic_mod.h");
+rc = grep_h_cell.status() !>;
+if (rc != 0) {
+    "extracted .h destatic'd destatic_cell".println() !>;
+    return 1;
+}
+
+CCCommand grep_other_body = cc_command(&a, @slice("grep"));
+grep_other_body.arg("-q");
+grep_other_body.arg("DESTATIC_HID_BODY");
+grep_other_body.arg("out/quote_cch_destatic_other.c");
+rc = grep_other_body.status() !>;
+if (rc == 0) {
+    "other TU spliced destatic_hid body".println() !>;
+    return 1;
+}
+
+CCCommand emit_owner = cc_command(&a, @slice("./cc/bin/ccc"));
+emit_owner.arg("--no-cache");
+emit_owner.arg("--emit-c-only");
+emit_owner.arg("tests/quote_cch_destatic_mod.ccs");
+emit_owner.arg("-o");
+emit_owner.arg("out/quote_cch_destatic_mod.c");
+emit_owner.inherit_stdio();
+rc = emit_owner.status() !>;
+if (rc != 0) {
+    "emit owner failed".println() !>;
+    return 1;
+}
+
+CCCommand grep_owner_static = cc_command(&a, @slice("grep"));
+grep_owner_static.arg("-q");
+grep_owner_static.arg("static int destatic_hid");
+grep_owner_static.arg("out/quote_cch_destatic_mod.c");
+rc = grep_owner_static.status() !>;
+if (rc == 0) {
+    "owner emit kept static on destatic_hid".println() !>;
+    return 1;
+}
+
+CCCommand grep_owner_body = cc_command(&a, @slice("grep"));
+grep_owner_body.arg("-q");
+grep_owner_body.arg("DESTATIC_HID_BODY");
+grep_owner_body.arg("out/quote_cch_destatic_mod.c");
+rc = grep_owner_body.status() !>;
+if (rc != 0) {
+    "owner TU did not splice destatic_hid body".println() !>;
+    return 1;
+}
+
+CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+build.arg("build");
+build.arg("--no-cache");
+build.arg("tests/quote_cch_destatic_other_mod.ccs");
+build.arg("tests/quote_cch_destatic_mod.ccs");
+build.arg("-o");
+build.arg("out/quote_cch_destatic_smoke");
+build.inherit_stdio();
+rc = build.status() !>;
+if (rc != 0) {
+    "build failed".println() !>;
+    return 1;
+}
+CCCommand run = cc_command(&a, @slice("out/quote_cch_destatic_smoke"));
+run.inherit_stdio();
+rc = run.status() !>;
+if (rc != 0) {
+    "run failed".println() !>;
+    return 1;
+}
+return 0;

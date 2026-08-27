@@ -236,7 +236,9 @@ face with that prefix (`piece_tree_rb.cch` → `piece_tree.ccs`), or a
 same-directory face included from an owned face (`workspace.cch`
 includes `ui_types.cch` → `workspace.ccs`). Other units extract decls and
 the owner unit splices the bodies. A file-scope function body has one
-definition — the owner TU. `#ifdef` / `#if` in an extracted face stay
+definition — the owner TU. File-scope `static` on those functions is
+dropped: the extracted `.h` is an extern declaration, and the owner
+splice is the one external definition. `#ifdef` / `#if` in an extracted face stay
 in the lowered `.h`; an object-like `#define` in this unit before the
 include is host cpp and selects those arms, including function bodies
 that sit under `#ifdef`. A pointer-only name that the face does not already name as a type
