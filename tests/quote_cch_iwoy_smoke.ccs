@@ -1,5 +1,7 @@
 #!ccc ccs
-/* Extract names IwoyWs* only — listing must not need the parent type. */
+/* Extract names IwoyWs* only. IwoyWs is an anonymous struct in a
+ * sibling face — listing still need not include that face; extract
+ * pulls the unique defining sibling instead of inventing a tag. */
 #include <stdio.h>
 #include "quote_cch_iwoy_mod_leaf.cch"
 

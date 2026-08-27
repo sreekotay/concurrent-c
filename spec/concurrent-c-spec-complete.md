@@ -240,15 +240,16 @@ definition — the owner TU. `#ifdef` / `#if` in an extracted face stay
 in the lowered `.h`; an object-like `#define` in this unit before the
 include is host cpp and selects those arms, including function bodies
 that sit under `#ifdef`. A pointer-only name that the face does not already name as a type
-(`RtxWs*`) is forwarded as an incomplete `typedef struct` so the
-including unit does not need the parent type's header. A name the face
-typedefs as an integer or other alias (`typedef uint32_t RtxScope` with
-`RtxScope*`) is not forwarded. Nested
-quoted includes inside an extracted face are emitted after that face's
-preamble so a type they define is in scope for earlier decls (the
-extracted `.h` is one-pass C). The including unit's `#include` of the
-face stays in source order. Nested local includes inside a spliced face
-are processed the same way.
+(`RtxDoc*`, `RtxWs*`) is not forwarded as `typedef struct Tag Tag` —
+that invents a tagged struct and conflicts with an anonymous
+`typedef struct { … } Tag` or an integer alias already in the unit.
+If exactly one same-directory face defines the name, the extract
+includes that face. Nested quoted includes hoist after the preamble
+only when the included face defines a name this face uses and does
+not define (a late type face). A consumer leaf included last stays
+in source order. The including unit's `#include` of the face stays
+in source order. Nested local includes inside a spliced face are
+processed the same way.
 
 ### 1.8 File-start pragmas
 

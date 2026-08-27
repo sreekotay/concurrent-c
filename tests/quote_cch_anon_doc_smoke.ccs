@@ -1,0 +1,14 @@
+#!ccc ccs
+#include <stdio.h>
+#include "quote_cch_anon_doc_mod.cch"
+
+int main(void) {
+    AnonDoc d;
+    d.n = 4;
+    if (anon_doc_n(&d) != 4 || anon_doc_touch(&d) != 1) {
+        printf("anon_doc failed\n");
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

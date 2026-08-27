@@ -1,0 +1,13 @@
+#ifndef TESTS_QUOTE_CCH_ANON_DOC_MOD_CCH
+#define TESTS_QUOTE_CCH_ANON_DOC_MOD_CCH
+
+/* document.cch shape: anonymous typedef first, consumer leaf last. */
+typedef struct {
+    int n;
+} AnonDoc;
+
+static int anon_doc_n(const AnonDoc *d) { return d ? d->n : 0; }
+
+#include "quote_cch_anon_doc_nav.cch"
+
+#endif

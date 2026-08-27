@@ -1,0 +1,8 @@
+#ifndef TESTS_QUOTE_CCH_ANON_DOC_NAV_CCH
+#define TESTS_QUOTE_CCH_ANON_DOC_NAV_CCH
+
+/* nav.cch shape: names AnonDoc* only. Must not invent
+ * `typedef struct AnonDoc AnonDoc`. */
+static int anon_doc_touch(const AnonDoc *d) { return d ? 1 : 0; }
+
+#endif

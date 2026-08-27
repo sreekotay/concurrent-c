@@ -1,0 +1,10 @@
+#ifndef TESTS_QUOTE_CCH_IWOY_WS_CCH
+#define TESTS_QUOTE_CCH_IWOY_WS_CCH
+
+/* Anonymous struct — the real RtxDoc shape. A tagged-struct forward
+ * of IwoyWs would be a different type. */
+typedef struct {
+    int n;
+} IwoyWs;
+
+#endif

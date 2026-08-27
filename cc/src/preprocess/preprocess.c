@@ -12616,6 +12616,7 @@ char* cc_preprocess_to_string(const char* input, size_t input_len, const char* i
 typedef struct {
     char* source_path;
     char* lowered_path;
+    int in_progress;
 } CCLoweredLocalHeader;
 
 static CCLoweredLocalHeader* g_lowered_local_headers = NULL;
@@ -15045,11 +15046,13 @@ static char* cc__strip_cch_function_bodies(const char* src, size_t n) {
     return out;
 }
 
-/* Pointer-only names (`RtxWs*`) that this face does not already name as a
- * type: emit `typedef struct Tag Tag` so a listing TU can include the face
- * without the parent type's header. Skip C keywords, `CC*` / `__*`
- * (stdlib), and names this text already typedefs or tags — including
- * `typedef uint32_t RtxScope` with a later `RtxScope*`. */
+/* Pointer-only names this face does not define: never invent
+ * `typedef struct Tag Tag`. That shape is only compatible with a tagged
+ * struct of the same name; an anonymous `typedef struct { … } Tag` or a
+ * `typedef uint32_t Tag` already in the unit is a different type.
+ * If exactly one same-directory face defines the name, include that
+ * face. Skip C keywords, `CC*` / `__*` (stdlib). */
+static const char* cc__lower_local_cch_header(const char* source_path);
 static int cc__fwd_is_c_keyword(const char* s, size_t n) {
     static const char* const kw[] = {
         "auto", "break", "case", "char", "const", "continue", "default", "do",
@@ -15194,10 +15197,67 @@ static int cc__line_is_quoted_include(const char* s, size_t n) {
     return i < n && s[i] == '"';
 }
 
-/* Extracted `.h` is one-pass C. A type face included at the end
- * (`ui_types.cch` after `RtxBuf_scroll_x_rail`) must appear before decls
- * that use those types. The including TU's `#include "workspace.cch"`
- * still stays in source order. */
+static int cc__quoted_include_path(const char* s, size_t n, char* out, size_t cap) {
+    size_t ps = 0, pe = 0;
+    size_t len;
+    if (!cc__match_local_include_line(s, n, &ps, &pe)) return 0;
+    len = pe - ps;
+    if (len + 1 > cap) return 0;
+    memcpy(out, s + ps, len);
+    out[len] = '\0';
+    return 1;
+}
+
+/* This face uses a name it does not define, and `other` defines it. */
+static int cc__face_needs_type_from(const char* src, size_t n,
+                                    const char* other, size_t on) {
+    size_t i = 0;
+    CCScannerState scan;
+    if (!src || !other || n == 0 || on == 0) return 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (i < n && cc_is_ident_start(src[i])) {
+            size_t s = i;
+            i++;
+            while (i < n && cc_is_ident_char(src[i])) i++;
+            if (cc__fwd_skip_name(src + s, i - s)) continue;
+            if (cc__header_defines_type(src, n, src + s, i - s)) continue;
+            if (cc__header_defines_type(other, on, src + s, i - s)) return 1;
+            continue;
+        }
+        if (i < n) i++;
+    }
+    return 0;
+}
+
+static int cc__include_supplies_needed_type(const char* this_src, size_t this_n,
+                                           const char* inc_path) {
+    const char* src_cch;
+    char* text = NULL;
+    size_t tn = 0;
+    int need;
+    if (!inc_path || !inc_path[0]) return 0;
+    src_cch = cc_lowered_header_source_for(inc_path);
+    if (!src_cch) {
+        size_t pl = strlen(inc_path);
+        if (pl >= 4 && strcmp(inc_path + pl - 4, ".cch") == 0) src_cch = inc_path;
+    }
+    if (!src_cch) return 0;
+    if (cc__read_file_text(src_cch, &text, &tn) != 0 || !text) {
+        free(text);
+        return 0;
+    }
+    need = cc__face_needs_type_from(this_src, this_n, text, tn);
+    free(text);
+    return need;
+}
+
+/* Hoist a quoted include only when that face defines a name this face
+ * uses and does not define (`ui_types.cch` after `RtxBuf_scroll_x_rail`).
+ * A consumer leaf (`nav.cch` after `typedef struct { … } RtxDoc`) stays
+ * in source order. The including TU's `#include "workspace.cch"` stays
+ * in source order. */
 static char* cc__hoist_quoted_includes(const char* src, size_t n) {
     size_t pre;
     size_t i;
@@ -15218,12 +15278,17 @@ static char* cc__hoist_quoted_includes(const char* src, size_t n) {
         line_end = i;
         if (i < n && src[i] == '\n') i++;
         if (cc__line_is_quoted_include(src + line_start, line_end - line_start)) {
-            cc_sb_append(&hoisted, &h_len, &h_cap, src + line_start,
-                         (i > line_start) ? (i - line_start) : (line_end - line_start));
-            if (h_len > 0 && hoisted[h_len - 1] != '\n')
-                cc_sb_append_cstr(&hoisted, &h_len, &h_cap, "\n");
-            any = 1;
-            continue;
+            char inc[PATH_MAX];
+            if (cc__quoted_include_path(src + line_start, line_end - line_start,
+                                        inc, sizeof(inc)) &&
+                cc__include_supplies_needed_type(src, n, inc)) {
+                cc_sb_append(&hoisted, &h_len, &h_cap, src + line_start,
+                             (i > line_start) ? (i - line_start) : (line_end - line_start));
+                if (h_len > 0 && hoisted[h_len - 1] != '\n')
+                    cc_sb_append_cstr(&hoisted, &h_len, &h_cap, "\n");
+                any = 1;
+                continue;
+            }
         }
         cc_sb_append(&rest, &r_len, &r_cap, src + line_start,
                      (i > line_start) ? (i - line_start) : (line_end - line_start));
@@ -15242,17 +15307,83 @@ static char* cc__hoist_quoted_includes(const char* src, size_t n) {
     return out;
 }
 
-static char* cc__inject_pointer_forwards(const char* src, size_t n) {
-    enum { FWD_CAP = 32, FWD_NAME = 64 };
+static int cc__cch_unique_defining_peer(const char* abs_cch,
+                                        const char* name, size_t nlen,
+                                        char* out, size_t cap) {
+    char dir[PATH_MAX];
+    char self[PATH_MAX];
+    DIR* dp;
+    struct dirent* de;
+    int found = 0;
+    if (!abs_cch || !name || nlen == 0 || !out || cap == 0) return 0;
+    if (!realpath(abs_cch, self)) return 0;
+    if (cc__dirname_local(self, dir, sizeof(dir)) != 0) return 0;
+    dp = opendir(dir);
+    if (!dp) return 0;
+    while ((de = readdir(dp)) != NULL) {
+        char peer[PATH_MAX];
+        char peer_abs[PATH_MAX];
+        char* text = NULL;
+        size_t tn = 0;
+        size_t nl;
+        if (!de->d_name[0] || de->d_name[0] == '.') continue;
+        nl = strlen(de->d_name);
+        if (nl < 5 || strcmp(de->d_name + nl - 4, ".cch") != 0) continue;
+        if (snprintf(peer, sizeof(peer), "%s/%s", dir, de->d_name) >= (int)sizeof(peer))
+            continue;
+        if (!realpath(peer, peer_abs)) continue;
+        if (strcmp(peer_abs, self) == 0) continue;
+        if (cc__read_file_text(peer_abs, &text, &tn) != 0 || !text) {
+            free(text);
+            continue;
+        }
+        if (cc__header_defines_type(text, tn, name, nlen)) {
+            if (found) {
+                free(text);
+                closedir(dp);
+                return 0;
+            }
+            if (strlen(peer_abs) + 1 > cap) {
+                free(text);
+                closedir(dp);
+                return 0;
+            }
+            memcpy(out, peer_abs, strlen(peer_abs) + 1);
+            found = 1;
+        }
+        free(text);
+    }
+    closedir(dp);
+    return found;
+}
+
+static int cc__text_has_quoted_path(const char* src, size_t n, const char* path) {
+    size_t i = 0;
+    size_t plen;
+    if (!src || !path || !(plen = strlen(path))) return 0;
+    while (i + plen <= n) {
+        if (memcmp(src + i, path, plen) == 0) return 1;
+        i++;
+    }
+    return 0;
+}
+
+/* Pointer-only names this face does not define: include the unique
+ * same-directory face that does. No invented `typedef struct Tag Tag`. */
+static char* cc__inject_defining_includes(const char* src, size_t n,
+                                         const char* abs_cch) {
+    enum { FWD_CAP = 32, FWD_NAME = 64, PEER_CAP = 16 };
     char names[FWD_CAP][FWD_NAME];
+    char peers[PEER_CAP][PATH_MAX];
     int nn = 0;
+    int np = 0;
     size_t i = 0;
     size_t insert_at;
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     int k;
     CCScannerState scan;
-    if (!src || n == 0) return NULL;
+    if (!src || n == 0 || !abs_cch) return NULL;
     cc_scanner_init(&scan);
     while (i < n && nn < FWD_CAP) {
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
@@ -15283,20 +15414,38 @@ static char* cc__inject_pointer_forwards(const char* src, size_t n) {
             }
             continue;
         }
-        i++;
+        if (i < n) i++;
     }
-    if (nn == 0) return NULL;
+    for (k = 0; k < nn && np < PEER_CAP; k++) {
+        char peer[PATH_MAX];
+        int d;
+        if (!cc__cch_unique_defining_peer(abs_cch, names[k], strlen(names[k]),
+                                          peer, sizeof(peer)))
+            continue;
+        for (d = 0; d < np; d++) {
+            if (strcmp(peers[d], peer) == 0) break;
+        }
+        if (d < np) continue;
+        memcpy(peers[np], peer, strlen(peer) + 1);
+        np++;
+    }
+    if (np == 0) return NULL;
     insert_at = cc__after_header_preamble(src, n);
     cc_sb_append(&out, &out_len, &out_cap, src, insert_at);
-    for (k = 0; k < nn; k++) {
-        char line[256];
-        snprintf(line, sizeof(line),
-                 "#ifndef %s_FWD_DECLARED\n"
-                 "#define %s_FWD_DECLARED 1\n"
-                 "typedef struct %s %s;\n"
-                 "#endif\n",
-                 names[k], names[k], names[k], names[k]);
-        cc_sb_append_cstr(&out, &out_len, &out_cap, line);
+    {
+        int any = 0;
+        for (k = 0; k < np; k++) {
+            const char* lp = cc__lower_local_cch_header(peers[k]);
+            char line[PATH_MAX + 16];
+            if (!lp || cc__text_has_quoted_path(src, n, lp)) continue;
+            snprintf(line, sizeof(line), "#include \"%s\"\n", lp);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, line);
+            any = 1;
+        }
+        if (!any) {
+            free(out);
+            return NULL;
+        }
     }
     if (insert_at < n)
         cc_sb_append(&out, &out_len, &out_cap, src + insert_at, n - insert_at);
@@ -15508,14 +15657,16 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     char* rewritten = NULL;
     char* lowered = NULL;
     size_t input_len = 0;
-    size_t lowered_idx;
+    size_t lowered_idx = (size_t)-1;
     if (!source_path || !source_path[0]) return NULL;
     if (!realpath(source_path, abs_src)) return NULL;
     cc__register_included_cch_tree(abs_src);
     for (size_t i = 0; i < g_lowered_local_header_count; ++i) {
-        if (strcmp(g_lowered_local_headers[i].source_path, abs_src) == 0 &&
-            access(g_lowered_local_headers[i].lowered_path, F_OK) == 0) {
-            return g_lowered_local_headers[i].lowered_path;
+        if (strcmp(g_lowered_local_headers[i].source_path, abs_src) == 0) {
+            if (g_lowered_local_headers[i].in_progress)
+                return g_lowered_local_headers[i].lowered_path;
+            if (access(g_lowered_local_headers[i].lowered_path, F_OK) == 0)
+                return g_lowered_local_headers[i].lowered_path;
         }
     }
     /* A give-up used to leave the include pointing at the `.cch`, so the
@@ -15526,6 +15677,8 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
                 "cc: error: cannot lower local header %s (%s: %s)\n",          \
                 abs_src, (step), strerror(errno));                             \
         g_local_cch_lower_failed = 1;                                          \
+        if (lowered_idx != (size_t)-1)                                         \
+            g_lowered_local_headers[lowered_idx].in_progress = 0;               \
         return NULL;                                                           \
     } while (0)
     if (cc__build_stable_lowered_header_path(abs_src, lowered_path, sizeof(lowered_path)) != 0)
@@ -15546,6 +15699,16 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
         free(input);
         return NULL;
     }
+    if (cc__ensure_lowered_local_header_capacity(g_lowered_local_header_count + 1) != 0)
+        CC__LOWER_GIVE_UP("header table");
+    lowered_idx = g_lowered_local_header_count++;
+    memset(&g_lowered_local_headers[lowered_idx], 0, sizeof(g_lowered_local_headers[lowered_idx]));
+    g_lowered_local_headers[lowered_idx].source_path = strdup(abs_src);
+    g_lowered_local_headers[lowered_idx].lowered_path = strdup(lowered_path);
+    g_lowered_local_headers[lowered_idx].in_progress = 1;
+    if (!g_lowered_local_headers[lowered_idx].source_path ||
+        !g_lowered_local_headers[lowered_idx].lowered_path)
+        CC__LOWER_GIVE_UP("header table");
     {
         int saved_splice = g_rewrite_allow_impl_splice;
         g_rewrite_allow_impl_splice = 0;
@@ -15576,21 +15739,16 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
         }
     }
     {
-        char* fwd = cc__inject_pointer_forwards(lowered, strlen(lowered));
-        if (fwd) {
+        char* pulled = cc__inject_defining_includes(lowered, strlen(lowered), abs_src);
+        if (pulled) {
             free(lowered);
-            lowered = fwd;
+            lowered = pulled;
         }
     }
     if (cc__write_file_text(lowered_path, lowered, strlen(lowered)) != 0)
         CC__LOWER_GIVE_UP("write");
 #undef CC__LOWER_GIVE_UP
-    if (cc__ensure_lowered_local_header_capacity(g_lowered_local_header_count + 1) != 0) return NULL;
-    lowered_idx = g_lowered_local_header_count++;
-    memset(&g_lowered_local_headers[lowered_idx], 0, sizeof(g_lowered_local_headers[lowered_idx]));
-    g_lowered_local_headers[lowered_idx].source_path = strdup(abs_src);
-    g_lowered_local_headers[lowered_idx].lowered_path = strdup(lowered_path);
-    if (!g_lowered_local_headers[lowered_idx].source_path || !g_lowered_local_headers[lowered_idx].lowered_path) return NULL;
+    g_lowered_local_headers[lowered_idx].in_progress = 0;
     free(input);
     free(rewritten);
     free(lowered);
