@@ -50,7 +50,7 @@ int main(void) {
             int racer_id = i;
             __cc_nursery119.spawn(() => {
                 racer_work(racer_id);
-            });
+            }) !>;
         }
     
     }

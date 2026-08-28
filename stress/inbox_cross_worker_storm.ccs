@@ -33,11 +33,11 @@ int main(void) {
                     for (int j = 0; j < INNER_TASKS; j++) {
                         __cc_nursery126.spawn(() => {
                             cc_atomic_fetch_add(&g_total, 1);
-                        });
+                        }) !>;
                     }
                 
                 }
-            });
+            }) !>;
         }
     
     }

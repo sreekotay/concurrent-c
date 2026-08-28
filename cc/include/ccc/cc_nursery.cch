@@ -122,6 +122,8 @@ void !>(CCError) cc_nursery_spawn(CCNurseryHost* n, void* (*fn)(void*), void* ar
 void !>(CCError) cc_nursery_spawnhybrid(CCNurseryHost* n, void* (*fn)(void*), void* arg);
 void !>(CCError) cc_nursery_spawnhybrid_closure0(CCNurseryHost* n, CCClosure0 c);
 void !>(CCError) cc_nursery_spawn_closure0(CCNurseryHost* n, CCClosure0 c);
+void !>(CCError) cc_nursery_spawn_closure1(CCNurseryHost* n, CCClosure1 c, intptr_t arg0);
+void !>(CCError) cc_nursery_spawn_closure2(CCNurseryHost* n, CCClosure2 c, intptr_t arg0, intptr_t arg1);
 void !>(CCError) cc_nursery_spawn_async_closure0(CCNurseryHost* n, CCAsyncClosure0 c);
 void !>(CCError) cc_nursery_spawnhybrid_async_closure0(CCNurseryHost* n, CCAsyncClosure0 c);
 void !>(CCError) cc_nursery_spawn_async(CCNurseryHost* n, CCTask task);

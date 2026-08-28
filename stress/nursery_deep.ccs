@@ -25,7 +25,7 @@ void nested_spawn(int depth) {
         /* Task at this depth */
         __cc_nursery139.spawn(() => {
             cc_atomic_store(&g_completed[my_depth], 1);
-        });
+        }) !>;
 
         /* Recurse deeper (not in closure, direct call) */
         nested_spawn(depth + 1);

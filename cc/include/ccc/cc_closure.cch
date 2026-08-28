@@ -144,10 +144,6 @@ void* cc_closure1_call(CCClosure1 c, intptr_t arg0);
 /* Invoke a 2-arg closure. */
 void* cc_closure2_call(CCClosure2 c, intptr_t arg0, intptr_t arg1);
 
-/* Spawn arity-1/2 closures in a nursery (bridge for `spawn(c, arg...)`). */
-void !>(CCError) cc_nursery_spawn_closure1(CCNurseryHost* n, CCClosure1 c, intptr_t arg0);
-void !>(CCError) cc_nursery_spawn_closure2(CCNurseryHost* n, CCClosure2 c, intptr_t arg0, intptr_t arg1);
-
 static inline CC_TSAN_NOSAN_FN CCClosure0 cc_closure0_make(void* (*fn)(void*), void* env, void (*drop)(void*)) {
 #if defined(CC_PARSER_MODE)
     (void)fn; (void)env; (void)drop;

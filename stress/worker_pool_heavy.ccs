@@ -49,7 +49,7 @@ int main(void) {
                 cc_atomic_fetch_add(&g_total_sum, r.result);
                 cc_atomic_fetch_add(&g_result_count, 1);
             }
-        });
+        }) !>;
 
         /* Workers + job feeder */
         {
@@ -65,7 +65,7 @@ int main(void) {
                         Result r = {.id = job.id, .result = sum};
                         (void)chan_send(results_tx, r);
                     }
-                });
+                }) !>;
             }
 
             /* Job feeder */
@@ -78,7 +78,7 @@ int main(void) {
                         Job j = {.id = i, .n = i + 1};
                         (void)chan_send(jobs_tx, j);
                     }
-                });
+                }) !>;
             
             }
         

@@ -44,7 +44,7 @@ int main(void) {
                 (void)chan_send(g_tx0, i);
             }
             chan_close(g_tx0);
-        });
+        }) !>;
 
         /* Stage 1 */
         __cc_nursery144.spawn(() => {
@@ -53,7 +53,7 @@ int main(void) {
                 (void)chan_send(g_tx1, v + 1);
             }
             chan_close(g_tx1);
-        });
+        }) !>;
 
         /* Stage 2 */
         __cc_nursery144.spawn(() => {
@@ -62,7 +62,7 @@ int main(void) {
                 (void)chan_send(g_tx2, v + 1);
             }
             chan_close(g_tx2);
-        });
+        }) !>;
 
         /* Stage 3 */
         __cc_nursery144.spawn(() => {
@@ -71,7 +71,7 @@ int main(void) {
                 (void)chan_send(g_tx3, v + 1);
             }
             chan_close(g_tx3);
-        });
+        }) !>;
 
         /* Stage 4 */
         __cc_nursery144.spawn(() => {
@@ -80,7 +80,7 @@ int main(void) {
                 (void)chan_send(g_tx4, v + 1);
             }
             chan_close(g_tx4);
-        });
+        }) !>;
 
         /* Consumer */
         __cc_nursery144.spawn(() => {
@@ -89,7 +89,7 @@ int main(void) {
                 cc_atomic_fetch_add(&g_output_count, 1);
                 cc_atomic_fetch_add(&g_output_sum, v);
             }
-        });
+        }) !>;
     
     }
 

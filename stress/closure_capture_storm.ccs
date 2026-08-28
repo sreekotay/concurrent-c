@@ -29,7 +29,7 @@ int main(void) {
                 /* Use captured values */
                 int local_sum = a + b + c;  /* = i + 2i + 3i = 6i */
                 cc_atomic_fetch_add(&g_sum, local_sum);
-            });
+            }) !>;
         }
     
     }

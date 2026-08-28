@@ -62,6 +62,11 @@ int main(void) {
         return 1;
     }
 
+    /* CI monitors a pipe; without this the first printf can die in the
+     * buffer when the process SIGSEGVs. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
     const char *scale = getenv("CHAOS_SCALE");
     printf("=== cc_embed_stress scale=%s ===\n",
            scale && scale[0] ? scale : "quick");
