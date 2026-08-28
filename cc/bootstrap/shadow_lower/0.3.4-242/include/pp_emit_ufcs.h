@@ -4,6 +4,8 @@
 #pragma once
 
 /* Defined in pp_emit_stmt.cch / pp_emit_spawn.cch (after this include). */
+#include "pp_ast_core.h"
+#include "pp_emit_core.h"
 static void shadow_rewrite_print_and_string(char* expr, size_t cap);
 static AstNode* shadow_expr_closure_kid(AstNode* st);
 static void shadow_splice_closure_arg(char* expr, size_t cap, AstNode* cl);

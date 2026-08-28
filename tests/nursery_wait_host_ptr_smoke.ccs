@@ -1,0 +1,25 @@
+/* cc_nursery_wait peels a CCNursery value, not an already-host pointer. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    CCNurseryHost* n;
+} Hold;
+
+static CCNurseryHost* hold_host(CCNursery* n) {
+    return n->p;
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        (void)e;
+        return 1;
+    }
+    CCNursery n = cc_nursery_create() !> @destroy;
+    Hold h;
+    h.n = hold_host(&n);
+    cc_nursery_wait(n) !>;
+    cc_nursery_wait(h.n) !>;
+    printf("ok\n");
+    return 0;
+}

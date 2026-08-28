@@ -1,0 +1,22 @@
+/* A local T[n] named `path` must not steal `d->path.len`. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    char[:] path;
+} Doc;
+
+int main(void) {
+    char buf[4] = { 'a', 'b', 'c', 'd' };
+    Doc rec;
+    Doc* d = &rec;
+    char path[8];
+
+    rec.path = cc_slice_from_buffer(buf, 4);
+    path[0] = 0;
+    if (path.len != 8) return 1;
+    if (rec.path.len != 4) return 2;
+    if (d->path.len != 4) return 3;
+    printf("ok\n");
+    return 0;
+}

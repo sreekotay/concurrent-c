@@ -1,0 +1,26 @@
+/* CCArena dest-init from a pointer-outer field is a value copy, not a mint. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    CCArena lane;
+} Shard;
+
+typedef struct {
+    Shard shard[2];
+} Find;
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    Find rec;
+    Find* f = &rec;
+    char* p;
+    char* q;
+    rec.shard[0].lane = a;
+    CCArena lane = f->shard[0].lane;
+    p = a.allocT(8);
+    q = lane.allocT(8);
+    if (!p || !q) return 1;
+    printf("ok\n");
+    return 0;
+}
