@@ -446,36 +446,13 @@ CompressedResult* !>(CCError) compress_block(CCSlice data, CCSlice dict,
                 }
                 if (ret != Z_OK) break;
                 if (total_in < data.len || !is_last) {
-#if ZLIB_VERNUM >= 0x1260
                     int setdict = (g.setdict && (dict.len > 0 || i > 0));
-                    ret = deflate(strm, Z_BLOCK);
-                    if (ret == Z_OK) {
-                        int bits = 0;
-                        (void)deflatePending(strm, Z_NULL, &bits);
-                        if ((bits & 1) || !setdict) {
-                            ret = deflate(strm, Z_SYNC_FLUSH);
-                        } else if (bits & 7) {
-                            do {
-                                ret = deflatePrime(strm, 10, 2);
-                                if (ret != Z_OK) break;
-                                (void)deflatePending(strm, Z_NULL, &bits);
-                            } while (bits & 7);
-                            if (ret == Z_OK) ret = deflate(strm, Z_BLOCK);
-                        }
-                    }
-#else
-                    ret = deflate(strm, Z_SYNC_FLUSH);
-#endif
+                    ret = pigz_deflate_splice(strm, 0, setdict);
                     if (ret != Z_OK) break;
                 }
             }
-            if (ret == Z_OK && is_last) {
-                do {
-                    ret = deflate(strm, Z_FINISH);
-                    if (ret != Z_OK && ret != Z_STREAM_END) break;
-                    if (strm->avail_out == 0) { ret = Z_BUF_ERROR; break; }
-                } while (ret != Z_STREAM_END);
-            }
+            if (ret == Z_OK && is_last)
+                ret = pigz_deflate_all(strm, Z_FINISH);
             if (ret != (is_last ? Z_STREAM_END : Z_OK))
                 return cc_err(CC_ERR_IO, "deflate");
         }

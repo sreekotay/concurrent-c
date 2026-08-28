@@ -21,8 +21,8 @@ round       pigz    pigz_cc pigz_idiomatic pigz_channel pigz_parallel    pigz_go
 
 === Summary (best / median / mean wall, output bytes, gunzip) ===
 binary             dict      best   median     mean          out   gunzip
-pigz               chain    0.231    0.234    0.233     19826359       ok
-pigz_cc            chain    0.206    0.210    0.209     19826359       ok
+pigz               chain    0.231    0.234    0.233     19826352       ok
+pigz_cc            chain    0.206    0.210    0.209     19826352       ok
 pigz_idiomatic     chain    0.207    0.208    0.246     19826922       ok
 pigz_channel       indep    0.193    0.194    0.235     20092354       ok
 pigz_parallel      indep    0.194    0.199    0.200     20092354       ok
