@@ -198,11 +198,13 @@ Same `[…]` family: `T[n]` arrays, `T[~n >]` / `T[~n <]` channels.
 
 [recipe_explicit_capture.ccs](../examples/recipe_explicit_capture.ccs)
 
-Spawn takes a closure. Captures into a task are copies.
+Spawn takes a closure. `[x]` copies `x` into the task and the copy is
+immutable. `[&x]` shares the same variable for read-only access; mutation
+requires shipped synchronization or an explicit `@unsafe` closure.
 
 ```c
-n.spawn([x]() => use(x));     // value
-n.spawn([&x]() => { x++; });  // reference
+n.spawn(() => [x] { use(x); });   // immutable value copy
+n.spawn(() => [&x] { use(x); });  // shared, read-only reference
 ```
 
 Stack slices cannot be captured. Arena slices only while the arena outlives the join.

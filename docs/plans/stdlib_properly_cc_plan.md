@@ -32,7 +32,7 @@ Drift is concentrated in **net / HTTP / TLS / DNS** (`CCNetError*` / `CCHttpErro
 | **Result shape** | Fallible ops return `T!>(E)` (via `CC_DECL_RESULT_SPEC` / lowered `CCResult_*` as needed). Domain errors (`CCIoError`, `CCNetError`, `CCError`)—not `int` errno + out-param. |
 | **No taught error out-params** | `E* out_err` is not the curriculum or redis path. Remove or demote to private `cc__*` when flipping. |
 | **C twin quality** | Public name is `cc_<subsystem>_<verb>` (e.g. `cc_tcp_listen`). Same function is what UFCS lowers to / what C calls. Result return is part of that signature, not a parallel `cc_tcp_listen_result`. |
-| **Nullability** | Map lookups stay NULL-not-found. Fallible create uses Result (or established pointer+`!>` NULL synthesis)—not empty handle + out_err. |
+| **Nullability** | Map lookups stay NULL-not-found. A root box (`CCBox` / `CCArena` / `CCNursery` / `CCExclusive`) is a handle; dead means `p == NULL`. Child-from-parent and fallible **use** are Result — not empty handle + `out_err`, not `if (!p)` as the recipe. |
 | **Arena params** | Explicit `CCArena*` / `name@(args)`. Stabilization via `materialize_in` / `clone_into`. |
 | **UFCS completeness** | `recv.method(...)` ↔ `cc_type_method(...)`. |
 | **`@destroy` / ownership** | Resources register create/destroy; happy path shows `@destroy` / `@defer`. |

@@ -431,6 +431,9 @@ has not returned. `n.spawn` still names a task lifetime.
 
 ## Channels
 
+`T[~N >]` is a send end and `T[~N <]` is a receive end; `N` is the
+buffer capacity.
+
 ```c
 @errhandler(CCError e) cc_error_exit(e);
 
@@ -467,12 +470,14 @@ Consumer outside, producer + `close_on` inside. Full recipe:
 
 ## Closures / captures
 
-Spawn takes a closure. Captures into a task are copies (value) unless `&`.
+Spawn takes a closure. `[x]` copies `x` into the task and the copy is
+immutable. `[&x]` shares the same variable for read-only access; mutation
+requires shipped synchronization or an explicit `@unsafe` closure.
 
 ```c
 n.spawn(() => { … });                 // no capture list
-n.spawn(() => [x] { use(x); });       // value
-n.spawn(() => [&x] { use(x); });      // reference (still no shared mutation)
+n.spawn(() => [x] { use(x); });       // immutable value copy
+n.spawn(() => [&x] { use(x); });      // shared, read-only reference
 ```
 
 Re-bind `@errhandler` inside the task. Do not capture stack / `@scratch` slices
