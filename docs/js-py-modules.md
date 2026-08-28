@@ -1,5 +1,7 @@
 # JS / Python interop — host or export
 
+JS and Py support in CC are pure userpsace: py.cch and js.cch - there is zero compiler, runtime, parser or other support for them.
+
 Same headers and marshalling; two ownership models:
 
 | | Who owns `main` | What you get |

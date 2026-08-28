@@ -6,11 +6,11 @@
  *   path is lock-free probe + CAS. Sweeper wake is a second name
  *   (MAX_SHARDS+idx). No seqlock, no reader pin.
  *
- *   Find index is ArrayMap::[CCSliceHdr, Entry*]: u32 probe file, dense
- *   live rows. Keys are views into Entry.key_buf; overwrite retargets the
- *   stored hdr so it does not dangle. Expire walks a due list and
- *   remove()s under the exclusive, capped at WAVE_HOLD_US. The wheel is
- *   death lists only. Mix get is probe + hit (no value copy), same as Go.
+ *   Find index is ArrayMap (u32 probe + dense rows). Keys are views into
+ *   Entry.key_buf; overwrite drops the old row first so the stored hdr
+ *   names the live Entry. Expire walks a due list and remove()s under
+ *   the exclusive, capped at WAVE_HOLD_US. The wheel is death lists only.
+ *   Mix get is probe + hit (no value copy), same as Go.
  *
  *   ./wstore3 <sec> <sweep 0|1> [theta] [wave] [shards] [clients] [write|get|drain]
  *   write : 55% TTL put, 15% never put, 15% delete, 15% get
@@ -322,25 +322,32 @@ static Entry* map_find(CCEpochShard* s, CCSliceHdr k) {
 
 static bool !>(CCError) map_insert(CCEpochShard* s, Entry* e) {
     CCSliceHdr kh;
-    CCSliceHdr* pk;
+    size_t bucket = SIZE_MAX;
+    size_t di;
+    Entry* prev = NULL;
     if (!e || !s->map) return cc_err(CC_ERR_INVALID_ARG, "map insert");
     kh = entry_key_hdr(e);
-    if (s->map->insert(kh, e) != 0)
+    di = WstoreIdx_find_dense(s->map, kh, &bucket);
+    if (di != SIZE_MAX && s->map->dense[di].val != e) {
+        prev = s->map->dense[di].val;
+        WstoreIdx_del_at(s->map, di, bucket);
+    }
+    if (s->map->insert(kh, e) != 0) {
+        if (prev) (void)s->map->insert(entry_key_hdr(prev), prev);
         return cc_err(CC_ERR_OUT_OF_MEMORY, "map insert");
-    /* Overwrite keeps the old key copy; retarget so it names this Entry. */
-    pk = WstoreIdx_find_key_ptr(s->map, kh);
-    if (pk) *pk = kh;
+    }
     return cc_ok(true);
 }
 
 static void map_drop_if(CCEpochShard* s, Entry* e) {
-    MapEnt* p;
     CCSliceHdr kh;
+    size_t bucket = SIZE_MAX;
+    size_t di;
     if (!s->map || !e) return;
     kh = entry_key_hdr(e);
-    p = s->map->get_ptr(kh);
-    if (p && *p == e)
-        s->map->remove(kh);
+    di = WstoreIdx_find_dense(s->map, kh, &bucket);
+    if (di != SIZE_MAX && s->map->dense[di].val == e)
+        WstoreIdx_del_at(s->map, di, bucket);
 }
 
 static void harvest_free(CCEpochShard* s, Entry* e) {
