@@ -5,7 +5,7 @@
 
 int main(void) {
     int x = 7;
-    CCBox::[int] b = CCBox_int_from_host(&x);
+    CCBox::[int] b = &x;
     if (!b.is_live()) return 1;
     if (b.host() != &x) return 2;
     if (*b.host() != 7) return 3;
@@ -14,7 +14,7 @@ int main(void) {
     if (dead.is_live()) return 4;
     if (dead.host() != NULL) return 5;
 
-    CCBox erased = cc_box_from_host(&x);
+    CCBox erased = &x;
     if (!cc_box_is_live(erased)) return 6;
     if (cc_box_host(erased) != &x) return 7;
 

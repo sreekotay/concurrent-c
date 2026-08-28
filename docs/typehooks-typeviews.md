@@ -5,7 +5,7 @@ Two file-scope declarations attach policy to a type. They share the
 
 | | `@typehooks` | `@typeview` |
 |--|--|--|
-| Answers | How this type is created, destroyed, and (optionally) how `x.method` lowers | Which names a caller may use, and which embedded fields are “is-a” faces |
+| Answers | How this type is created, destroyed, walked, and (optionally) how `x.method` lowers | Which names a caller may use, and which embedded fields are “is-a” faces |
 | Typical job | Bodyless `@destroy` / `name@(args)` for *your* type | A wrapper that should act like the field it contains, or a narrower face of one object |
 | Body | Strict C designated init: `.destroy = …,` | Groups: `as:`, `r:`, `w:`, `rw:` |
 
@@ -177,6 +177,49 @@ candidate port_gone (hook compose): not declared
 
 Grep `port_gone` in your sources to find (or write) the callee.
 
+### Extent — `.len` / `.access`
+
+A type with both arms is a **for-in subject**. Ordinary sites may read
+`x.len`; they may not store it. `.access` is the compiler-internal load
+after `i < live len`. Users write the walk, not `s.access(i)`. Point
+access stays `s.at(i) !>` / `s.set(i, v) !>`.
+
+`CCSlice` / `CCSlice_*`, `CCVec_*`, `CCString`, and `T[n]` already
+register. `T*` is not an extent.
+
+```c
+#!ccc ccs
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    int[:] xs = { 1, 2, 3 };
+    int[:] ys = { 10, 20, 30 };
+    int sum = 0;
+    for (v in xs)
+        sum += v;
+    for (i, v in xs)
+        sum += (int)i + v;
+    for (a, b in xs, ys)
+        sum += a * b;
+    printf("%d\n", sum);
+    return 0;
+}
+```
+<!-- smoke-stdout
+155
+-->
+
+| Form | Meaning |
+|------|---------|
+| `for (v in s)` | walk |
+| `for (i, v in s)` | enumerate; `i` is `size_t` |
+| `for (a, b in s, t)` | zip; unequal lens are `CC_ERR_INVALID_ARG` |
+| `for (i in lo..hi)` | sequential range; `hi < lo` is empty |
+
+C `for (;;)` is unchanged. `@parallel for (i in lo..hi)` is the concurrent
+cousin. A user type registers the same two arms (`tests/typehooks_len_access_smoke.ccs`).
+
 ---
 
 ## 2. `@typeview` — faces and allow-lists
@@ -308,8 +351,10 @@ Groups are comma-separated patterns ended by `;`:
 
 Methods belong under `r:` (or `rw:`). A method listed only under `w:` cannot
 be called. `r:` / `w:` / `rw:` patterns match **field and method names
-alike**, and may be trailing-`*` name globs (`out_*`, `get_*`) — membership
-on this type, not a type-family subject. That is why a declaration-time
+alike**, and may be trailing-`*` name globs (`out_*`, `get_*`), leading-`*`
+suffix globs (`*_len`, `*live`), or `^pat` (subtract after the allow-set).
+A group of only denies implies `*` (`r:^p` is every name except `p`).
+Membership is on this type, not a type-family subject. That is why a declaration-time
 existence check cannot decide: `get_*` may match a method written later in
 the file. A glob that matches nothing is a silent no-op at the declaration;
 an exact name that does not exist is the same. Either way the miss shows up
@@ -518,6 +563,10 @@ form independently.
 - Caller should not see `flush` / `sock`? Named `@typeview Mode on T` and
   take `@typeview(Mode) T*`.
 - Custom `x.method` → `cc_foo_<method>` family? `.ufcs` on `@typehooks`.
+- Dest-init mint (`CCBox::[H] b = &x`)? `.cast` on the dest type (implicit|explicit + requested type).
+- Extent / walk (`x.len`, `for (v in s)` / `for (i, v in s)` / `for (a, b in s, t)`)? `.len` + `.access` on `@typehooks`. Users do not write `s.access(i)`.
+- Hide a field on a family (`CCBox_*` `.p`)? Unnamed `@typeview` + `r:^p`
+  (open except that name). User UFCS on the instance stays.
 - Unresolved dynamic names (`obj.greet`)? `.ufcs_sink`, last resort.
 
 ---
@@ -535,5 +584,7 @@ form independently.
   this file (`compile-err` pins the `t.gone()` miss). Also
   `tests/typehooks_fn_idents_smoke.ccs`,
   `tests/typehooks_create_destroy_smoke.ccs`,
+  `tests/typehooks_len_access_smoke.ccs`,
+  `tests/for_in_*_smoke.ccs`,
   `tests/typeview_as_ufcs_smoke.ccs`,
   `tests/typeview_glob_as_smoke.ccs`

@@ -273,6 +273,9 @@ typedef struct {
 
 typedef CCSlice (*CCTypeCreateHandler)(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena);
 typedef CCSlice (*CCTypeUfcsHandler)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena);
+/* Dest-convert: src type, requested dest type, kind "implicit"|"explicit".
+ * Return a callee name, the UFCS pass tag, or empty (hard reject). */
+typedef CCSlice (*CCTypeCastHandler)(CCSlice src_type, CCSlice dest_type, CCSlice kind, CCArena* arena);
 
 /* Niche descriptor (spec/draft_variants.md §11).  A type declares a bit
  * pattern a valid instance is guaranteed never to exhibit — an (offset,
@@ -307,10 +310,28 @@ typedef struct {
     const char* arg_wrap;
 } CCTypeDynamicHook;
 
+/* Extent: ordinary sites may read x.len / x.len(); they may not store it.
+ * kind is "field" (named member) or "call" (callee(recv)). */
+typedef struct {
+    const char* kind;
+    const char* name;
+} CCTypeLenHook;
+
+/* Compiler-internal walk load after i < live len. Users do not write
+ * x.access(i). kind is "load" (named pointer/array field) or "call"
+ * (callee(&recv)[i] — SSO-safe string data). */
+typedef struct {
+    const char* kind;
+    const char* name;
+} CCTypeAccessHook;
+
 typedef struct {
     CCTypeCreateHook create;
     CCTypeDestroyHook destroy;
     CCTypeUfcsHandler ufcs;
+    CCTypeCastHandler cast;
+    CCTypeLenHook len;
+    CCTypeAccessHook access;
     CCTypeDynamicHook ufcs_sink;
     CCTypeNicheHook niche;
 } CCTypeHooks;
@@ -363,6 +384,34 @@ static inline CCTypeDestroyHook cc_type_destroy_hooks(const char* pre_callee, co
     CCTypeDestroyHook hook = {0};
     hook.pre_callee = pre_callee;
     hook.callee = callee;
+    return hook;
+}
+
+static inline CCTypeLenHook cc_type_len_field(const char* field) {
+    CCTypeLenHook hook = {0};
+    hook.kind = "field";
+    hook.name = field;
+    return hook;
+}
+
+static inline CCTypeLenHook cc_type_len_call(const char* callee) {
+    CCTypeLenHook hook = {0};
+    hook.kind = "call";
+    hook.name = callee;
+    return hook;
+}
+
+static inline CCTypeAccessHook cc_type_access_load(const char* field) {
+    CCTypeAccessHook hook = {0};
+    hook.kind = "load";
+    hook.name = field;
+    return hook;
+}
+
+static inline CCTypeAccessHook cc_type_access_call(const char* callee) {
+    CCTypeAccessHook hook = {0};
+    hook.kind = "call";
+    hook.name = callee;
     return hook;
 }
 

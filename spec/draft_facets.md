@@ -100,8 +100,14 @@ typedef struct Conn {
 - Groups are `r:`, `w:`, `rw:`, and `as:`, each a comma-separated list of
   patterns ended by `;` or `}`. Absent groups are empty.
 - Each `r:`/`w:`/`rw:` pattern names a field of `Base` or a UFCS method on
-  `Base*`, or a trailing-`*` glob (same rule as `@typehooks` / type-registration
-  patterns). Unknown non-glob names are ill-formed at the mode declaration.
+  `Base*`, or a name glob: trailing `foo*` / `get_*` (prefix match) or leading
+  `*suffix` / `*_len` (suffix match). Bare `*` matches every name. A leading
+  `^` subtracts: `^p`, `^get_secret`. Allow-set first, then subtract; a
+  matching deny wins. A group that contains only denies implies `*`
+  (`r:^p` is `r: *, ^p`). `^*` is ill-formed. `p` and `^p` in the same
+  group are ill-formed. `as:` cannot use `^`. Type-family subjects use the
+  same trailing-`*` rule as `@typehooks`. Unknown non-glob names are
+  ill-formed at the mode declaration.
 - **`r:`** — may use the name without storing through it: field load or
   UFCS call (`s->len`, `c->write(...)`).
 - **`w:`** — may store through a field (`c->out = …`, `+=`, `++`, …).
@@ -131,7 +137,8 @@ typedef struct Conn {
 - Prefer methods over fields. A method whose first parameter is `Base*` sees
   the full object in its body; listing a field is only for call sites that
   must touch storage. Bare `r: *` on a type that mixes capabilities re-opens
-  every field as a load — use narrow globs (`*_len`, `get_*`) when possible.
+  every field as a load — use `^name` when the surface is open except one
+  field, or narrow globs (`*_len`, `get_*`) when the surface is a subset.
 - A base type may declare several modes with distinct names.
 - The mode declaration appears at file scope in the same translation unit
   that can see the base type's definition.
@@ -333,9 +340,11 @@ surface of the type family. No parallel view name.
 ```
 
 Installed for the slice family by the lowerer (`CCSlice`, markers, and
-`CCSlice_T` share one unnamed facet). `r: *` is observe + call: field
-loads and UFCS are open; field stores (`s.len = …`, `s.ptr = …`) are
-ill-formed. Narrower published families (`as_*`, `get_*`, …) remain the
+`CCSlice_T` share one unnamed facet). `r: *` is the field-store facet:
+observe + call; field stores (`s.len = …`, `s.ptr = …`) are ill-formed.
+`@typehooks` `.len` / `.access` own extent and walk policy — the same
+user story (do not lie about length; do not index past it), two
+mechanisms. Narrower published families (`as_*`, `get_*`, …) remain the
 membership protocol when a mode wants a smaller read surface; the default
 slice contract is “no field writes.”
 - **First-parameter exception:** in a function whose first parameter is
@@ -352,11 +361,27 @@ families such as slices. Prefer narrow globs on types that mix unrelated
 capabilities (see Conn / Encode in §2); the slice family's `r: *` is the
 default open-observe, no-field-write contract.
 
+The named-pointer family uses the opposite contract: methods, not the
+host field.
+
+```c
+@typeview on CCBox_* {
+    r: ^p;
+};
+```
+
+Ordinary sites may call any method (`is_live`, `host`, user UFCS) and
+must not load `.p`. Factory aliases (`CCArena`, `CCNursery`,
+`CCExclusive`) are other subjects and do not match `CCBox_*`.
+First-parameter bodies stay trusted. Designated init may still name `.p`.
+
 ## 8. Ill-formed cases
 
 - Mode entry that is neither a field of `Base` nor a UFCS method name on
   `Base*` (non-glob patterns).
 - Duplicate patterns in one allow-list.
+- `p` and `^p` in the same group, or `^*`.
+- `^` on an `as:` face.
 - Redeclaring `Base_Restrict_Mode` with a different allow-list set.
 - User definition of the mangled identifier.
 - Member or UFCS use of an unmatched name on a restricted receiver.

@@ -6,13 +6,18 @@
  * instance. CCExclusive / CCNursery are the factory aliases.
  * CCArena is that ABI (`.p`); it still aliases `.base`.
  *
- * Later: dest-init `CCBox::[H] b = &x` → from_host (decl only; not Arena/Nursery).
+ * Dest-init `CCBox::[H] b = &x` consults `.cast` (`cc_box_cast_lower_c`) and
+ * rewrites to from_host. Factory aliases (CCArena / CCNursery / CCExclusive)
+ * do not register that arm.
  */
 #ifndef CC_BOX_H
 #define CC_BOX_H
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+
+#include <ccc/cc_arena.cch>
 
 typedef struct CCBox {
     void *p;
@@ -90,5 +95,124 @@ static inline ${arg(0)} *${mangled}_host(${mangled} *b) {
 #endif
 `, arena);
 }
+
+static inline void cc__box_cast_trim(const char **p, size_t *n) {
+    while (*n && (**p == ' ' || **p == '\t')) {
+        (*p)++;
+        (*n)--;
+    }
+    while (*n && ((*p)[*n - 1] == ' ' || (*p)[*n - 1] == '\t'))
+        (*n)--;
+}
+
+static inline int cc__box_cast_is_box(CCSlice ty, const char **host, size_t *host_n,
+                                     int *erased) {
+    const char *p = (const char *)ty.ptr;
+    size_t n = ty.len;
+    if (host) *host = NULL;
+    if (host_n) *host_n = 0;
+    if (erased) *erased = 0;
+    if (!p) return 0;
+    cc__box_cast_trim(&p, &n);
+    if (n == 5 && memcmp(p, "CCBox", 5) == 0) {
+        if (erased) *erased = 1;
+        return 1;
+    }
+    if (n > 6 && memcmp(p, "CCBox_", 6) == 0) {
+        if (host) *host = p + 6;
+        if (host_n) *host_n = n - 6;
+        return 1;
+    }
+    return 0;
+}
+
+static inline int cc__box_cast_is_ptr(CCSlice ty, const char **base, size_t *base_n) {
+    const char *p = (const char *)ty.ptr;
+    size_t n = ty.len;
+    if (base) *base = NULL;
+    if (base_n) *base_n = 0;
+    if (!p) return 0;
+    cc__box_cast_trim(&p, &n);
+    if (!n || p[n - 1] != '*') return 0;
+    n--;
+    cc__box_cast_trim(&p, &n);
+    if (!n) return 0;
+    if (base) *base = p;
+    if (base_n) *base_n = n;
+    return 1;
+}
+
+static inline CCSlice cc__box_cast_pass(void) {
+    static const char pass_tag[] = "__cc_ufcs_pass__";
+    return cc_slice_from_static((void *)pass_tag, sizeof(pass_tag) - 1);
+}
+
+static inline CCSlice cc__box_cast_concat(const char *p, size_t n, const char *suf,
+                                         CCArena *arena) {
+    CCSlice left;
+    CCSlice right;
+    left.ptr = (char *)(void *)p;
+    left.len = n;
+    left.id = 0;
+    right = cc_slice_from_static((void *)suf, suf ? strlen(suf) : 0);
+    return cc_slice_concat2(left, right, arena);
+}
+
+/* `.cast` on CCBox / CCBox_*: dest may insert H* → box; dest must not peel. */
+static inline CCSlice cc_box_cast_lower_c(CCSlice src, CCSlice dest, CCSlice kind,
+                                         CCArena *arena) {
+    const char *dhost = NULL;
+    size_t dhost_n = 0;
+    int derased = 0;
+    const char *sbase = NULL;
+    size_t sbase_n = 0;
+    const char *dp = (const char *)dest.ptr;
+    size_t dn = dest.len;
+    int implicit;
+    implicit = (kind.ptr && kind.len == 8 && memcmp(kind.ptr, "implicit", 8) == 0);
+    if (!cc__box_cast_is_box(dest, &dhost, &dhost_n, &derased))
+        return cc__box_cast_pass();
+    cc__box_cast_trim(&dp, &dn);
+    if (cc__box_cast_is_ptr(src, &sbase, &sbase_n)) {
+        if (derased)
+            return cc_slice_from_static((void *)"cc_box_from_host", 16);
+        if (dhost && sbase && dhost_n == sbase_n &&
+            memcmp(dhost, sbase, dhost_n) == 0)
+            return cc__box_cast_concat(dp, dn, "_from_host", arena);
+    }
+    {
+        const char *shost = NULL;
+        size_t shost_n = 0;
+        int serased = 0;
+        const char *dbase = NULL;
+        size_t dbase_n = 0;
+        const char *sp = (const char *)src.ptr;
+        size_t sn = src.len;
+        if (cc__box_cast_is_box(src, &shost, &shost_n, &serased) &&
+            cc__box_cast_is_ptr(dest, &dbase, &dbase_n)) {
+            if (implicit) return cc__box_cast_pass();
+            cc__box_cast_trim(&sp, &sn);
+            if (serased)
+                return cc_slice_from_static((void *)"cc_box_host", 11);
+            if (shost && dbase && shost_n == dbase_n &&
+                memcmp(shost, dbase, shost_n) == 0)
+                return cc__box_cast_concat(sp, sn, "_host", arena);
+        }
+    }
+    return cc__box_cast_pass();
+}
+
+#include <ccc/cc_type.cch>
+
+@typehooks on CCBox_* {
+    .cast = cc_box_cast_lower_c,
+};
+
+/* Ordinary sites: methods, not `.p`. `^p` is implicit `*` minus the host
+ * field — user UFCS on CCBox::[H] stays open. Factory aliases (CCArena, …)
+ * are other subjects — they do not match CCBox_*. */
+@typeview on CCBox_* {
+    r: ^p;
+};
 
 #endif

@@ -7,8 +7,8 @@
 - **[Backwards compatibility](backwards_compatibility.md)** — Unit headers, version pins, bootstrap seeds
 - **[JS / Python interop](js-py-modules.md)** — hosting (`pydemo.shcc`) and native module export
 - **[When to run what](build-when.md)** — Install vs checkout vs stdlib vs lowerer vs ship vs cold smoke
-- **[Language Concepts](language-concepts.md)** — Defer, results, UFCS, arenas (lifetime vs alloc policy) / provenance, closures
-- **[@typehooks / @typeview](typehooks-typeviews.md)** — Tutorial: lifecycle hooks, is-a faces, allow-list views
+- **[Language Concepts](language-concepts.md)** — Defer, results, UFCS, arenas (lifetime vs alloc policy) / provenance, walks, closures
+- **[@typehooks / @typeview](typehooks-typeviews.md)** — Tutorial: lifecycle hooks, extent / `for in`, is-a faces, allow-list views
 - **[Cheatsheet](cheatsheet.md)** — Quick reference for common patterns
 - **[Debugging](debugging.md)** — VS Code / Cursor debugging setup
 - **[Sanitizers / fuzzing](sanitizers.md)** — ASan/TSan receipts, bridge Docker recipe, fuzz plan

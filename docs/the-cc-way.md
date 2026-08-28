@@ -8,7 +8,8 @@ CC asks two questions repeatedly: What is the smallest fact that actually change
 - **[UFCS](language-concepts.md#3-methods-are-ordinary-functions)** — Attach vocabulary locally without making the operation belong to the type.
 - **[Typeviews](typehooks-typeviews.md#2-typeview--faces-and-allow-lists)** — Same-object authority lenses; narrow what a caller may do without wrappers or new allocation.
 - **[Arenas](language-concepts.md#4-slices-remember-where-bytes-live)** — Name lifetimes and owners; allocation strategy is secondary.
-- **Named pointers (`CCBox`)** — A named, nullable pointer handle represented as `{ H *p }`. Copies refer to the same object; `p == NULL` is the canonical dead state (never born or consumed).
+- **[Walk / extent](language-concepts.md#4-slices-remember-where-bytes-live)** — `for (v in s)` is the bound walk; `.len` is readable; point is `at` / `set` (Result). Users do not write `s.access(i)`.
+- **Named pointers (`CCBox`)** — A named, nullable pointer handle represented as `{ H *p }`. Copies refer to the same object; `p == NULL` is the canonical dead state (never born or consumed). Ordinary sites use `is_live` / `host`, not `.p`.
 - **[Arena-last](cheatsheet.md#keep-pass-the-arena-to-live-on)** — When an operation creates owned output (i.e. allocates memory), make the destination lifetime explicit at that point.
 - **[Results / `!>` / `?>`](language-concepts.md#2-errors-map-to-a-value-or-to-control-flow)** — Make fallible transitions force acknowledgement without forcing local policy. Do not make fallible operations appear infallible; keep errors distinct from successful values.
 - **[`@defer` / `@defer(err)` / `@defer(ok)`](language-concepts.md#1-cleanup-binds-to-a-place)** — Attach cleanup and recovery obligations to the scope where they arise.

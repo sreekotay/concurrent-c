@@ -1,0 +1,8 @@
+/* Ordinary CCBox / CCBox::[H] sites may not load `.p`. Use host / is_live. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    int x = 7;
+    CCBox::[int] b = &x;
+    return b.p != &x; /* ill-formed */
+}

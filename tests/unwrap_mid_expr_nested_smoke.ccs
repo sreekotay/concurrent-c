@@ -1,0 +1,28 @@
+#!ccc ccs
+/* Nested / mixed mid-expression `?>` and `!>`. */
+#include <stdio.h>
+
+int !>(CCError) parse_n(const char* s) {
+    if (!s || s[0] == 'x')
+        return cc_err(CC_ERR_INVALID_ARG, "bad");
+    return cc_ok(10);
+}
+
+static int sink(int v) { return v + 1; }
+
+static int two(int a, int b) { return a * 100 + b; }
+
+int main(void) {
+    @errhandler(CCError e) {
+        (void)e;
+        return 1;
+    }
+    int a = sink(parse_n("x") ?> 41);
+    int b = sink(parse_n("ok") !>);
+    int c = two(parse_n("x") ?> 1, parse_n("ok") !>);
+    int d = two(parse_n("ok") !>, parse_n("x") ?> 2);
+    int e = sink(sink(parse_n("x") ?> 3));
+    int f = (parse_n("x") ?> 5) + (parse_n("ok") !>);
+    printf("a=%d b=%d c=%d d=%d e=%d f=%d\n", a, b, c, d, e, f);
+    return 0;
+}

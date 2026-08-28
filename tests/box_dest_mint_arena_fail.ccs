@@ -1,0 +1,9 @@
+/* Factory alias dest does not insert from_host. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    CCArenaHost host;
+    CCArena a = &host;
+    (void)a;
+    return 0;
+}

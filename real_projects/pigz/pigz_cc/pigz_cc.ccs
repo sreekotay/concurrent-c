@@ -645,9 +645,7 @@ static void !>(CCError) compress_seekable(CompressRun* run, int in_fd, size_t fi
     @defer compress_run_close_pools(run);
 
     CCArena ts_arena = cc_arena_heap(megabytes(2)) @destroy;
-    CCTurnstileRW ts@(cap, &ts_arena) @destroy;
-    if (!cc_exclusive_is_live(ts.core.excl))
-        return cc_err(CC_ERR_OUT_OF_MEMORY, "cc_turnstile_create failed");
+    CCTurnstileRW ts@(cap, ts_arena) !> @destroy;
 
     ZState zs = {0} @destroy {
         if (zs.inited)

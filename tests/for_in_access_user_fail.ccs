@@ -1,0 +1,8 @@
+/* Users do not write s.access(i). */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    char buf[2] = { 'x', 'y' };
+    char[:] s = cc_slice_from_buffer(buf, 2);
+    return (int)s.access(0);
+}

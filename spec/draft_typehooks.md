@@ -22,10 +22,20 @@ registration. The underlying marker API is `cc_type_register` (see
   storage) instead of `T name = callee(args);`. Decl-form is only valid on a
   value binder, not a pointer dest or expression position.
 - Recognized arms match `CCTypeHooks`: `.create`, `.destroy`, `.ufcs`,
-  `.ufcs_sink`, and `.niche`. `.ufcs_dynamic` and `.ufcs_dynamic2` are
-  accepted spellings of `.ufcs_sink`. `.niche` donates a bit pattern a
-  valid instance never exhibits so a `@variant(packed)` arm can carry
-  the discriminant (`spec/draft_variants.md`, packed layout).
+  `.cast`, `.len`, `.access`, `.ufcs_sink`, and `.niche`. `.ufcs_dynamic` and `.ufcs_dynamic2` are
+  accepted spellings of `.ufcs_sink`. `.cast` is dest-convert: the handler
+  sees the source type, the requested dest type, and `kind` (`implicit` at
+  decl-init / assign, `explicit` at a written `(T)e`). It returns a callee
+  name, the UFCS pass tag, or empty (hard reject). Implicit sites ask the
+  dest type only. `.len` / `.access` are extent arms: `cc_type_len_field` /
+  `cc_type_len_call` and `cc_type_access_load` / `cc_type_access_call`.
+  Ordinary sites may read `x.len`; they may not store it. `.access` is the
+  compiler-internal walk load after `i < live len` — users write
+  `for (v in s)` / `for (i, v in s)` / `for (a, b in s, t)`, not `s.access(i)`.
+  `CCSlice` / `CCSlice_*`, `CCVec_*`, and `CCString` register these arms.
+  Unequal zip lengths are `CC_ERR_INVALID_ARG`. `.niche` donates a bit pattern a valid instance never
+  exhibits so a `@variant(packed)` arm can carry the discriminant
+  (`spec/draft_variants.md`, packed layout).
 - Subject may be an exact type (`CCArena`), a pointer key (`MyHandle*`), or
   a trailing-`*` family glob (`CCChanTx_*`), same match/score rule as
   `@typeview` globs.

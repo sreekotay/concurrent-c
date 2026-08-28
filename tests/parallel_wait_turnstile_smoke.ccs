@@ -28,10 +28,8 @@ static int run(CCTurnstile* ts, int use_par, int* order) {
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts_par@(CAP, 1, arena) @destroy;
-    CCTurnstile ts_seq@(CAP, 1, arena) @destroy;
-    if (!cc_exclusive_is_live(ts_par.excl) || !cc_exclusive_is_live(ts_seq.excl))
-        return 1;
+    CCTurnstile ts_par@(CAP, 1, arena) !> @destroy;
+    CCTurnstile ts_seq@(CAP, 1, arena) !> @destroy;
 
     int par_order[N];
     int seq_order[N];

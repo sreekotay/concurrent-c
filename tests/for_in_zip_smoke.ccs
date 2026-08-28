@@ -1,0 +1,16 @@
+/* for (a, b in s, t) — equal extents; product of pairs. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    int[:] xs = { 1, 2, 3 };
+    int[:] ys = { 4, 5, 6 };
+    int sum = 0;
+
+    for (a, b in xs, ys)
+        sum += a * b;
+    if (sum != 32) return 1;
+
+    printf("ok\n");
+    return 0;
+}

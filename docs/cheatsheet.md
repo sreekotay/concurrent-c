@@ -366,6 +366,26 @@ Use either `@destroy` / `wait` or `on_last` + `abandon`, not both. Spec §8.1.5.
 
 ---
 
+## Walk (`for in`)
+
+The walk is not “a nicer `s[i]`.” The compiler pays `i < live .len`, then
+the `.access` load. Point access is `s.at(i) !>`. Users do not write
+`s.access(i)`.
+
+```c
+for (v in s) { … }           // walk
+for (i, v in s) { … }        // enumerate; i is size_t
+for (a, b in s, t) { … }     // zip; unequal → CC_ERR_INVALID_ARG
+for (i in lo..hi) { … }      // sequential range; hi < lo is empty
+```
+
+Subjects: `T[:]`, `CCVec_*`, `CCString`, `T[n]`, or a type with `.len` +
+`.access` on `@typehooks`. `T*` is not an extent. C `for (;;)` is unchanged.
+`@parallel for` is the concurrent cousin — same `in`, independent iterations.
+Tutorial: [typehooks — extent](typehooks-typeviews.md#extent--len--access).
+
+---
+
 ## `@parallel`
 
 Lexical fork-join — not a nursery. `@parallel { … }` is `CCParallel !>(CCError)`.
@@ -516,21 +536,22 @@ Recipe: [recipe_exclusive_named.ccs](../examples/recipe_exclusive_named.ccs).
 Depth cap plus ordered stages. Declare the turnstile **before** the nursery.
 
 ```c
-CCTurnstileRW ts@(cap, &arena) @destroy;
+CCTurnstileRW ts@(cap, arena) !> @destroy;
 ts.enter(i) !>;
 ts.read.wait(i) !>;   …  ts.read.pass(i) !>;
 ts.write.wait(i) !>;  …  ts.write.pass(i) !>;
 ts.leave() !>;
 
-CCTurnstile t@(cap, n_stages, &arena) @destroy;
+CCTurnstile t@(cap, n_stages, arena) !> @destroy;
 t.enter(i) !>;
 t.stage(k).wait(i) !>;  t.wait(k, i) !>;
 ```
 
-`enter(i)` takes a depth token. Stage `wait`/`pass`/`fail` are
-`void !>(CCError)`: a predecessor that errors `fail`s the gate so a parked
-`wait` wakes with `err`, not `ok`. A closed depth channel is an error, not
-`Ok(false)`.
+Create is Result — `cap < 1`, a dead arena, or depth-channel OOM is
+`CC_ERR_*`, not a dead value. `enter(i)` takes a depth token. Stage
+`wait`/`pass`/`fail` are `void !>(CCError)`: a predecessor that errors
+`fail`s the gate so a parked `wait` wakes with `err`, not `ok`. A closed
+depth channel is an error, not `Ok(false)`.
 Recipe: [recipe_turnstile.ccs](../examples/recipe_turnstile.ccs).
 
 ---

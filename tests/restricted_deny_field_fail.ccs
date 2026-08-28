@@ -1,0 +1,16 @@
+/* r:^secret denies the load at an ordinary site. */
+#include <ccc/std/prelude.cch>
+
+typedef struct Bag {
+    int secret;
+    int len;
+} Bag;
+
+@typeview on Bag {
+    r: ^secret;
+};
+
+int main(void) {
+    Bag b = { .secret = 1, .len = 0 };
+    return b.secret;
+}

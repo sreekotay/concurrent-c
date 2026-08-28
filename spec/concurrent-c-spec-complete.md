@@ -5512,10 +5512,10 @@ stage_stmt    ::= '@stage' '(' expr { ',' expr } ')' block
 
 A **turnstile** bounds how many workers run at once (a depth channel of `cap` tokens) and sequences tickets through one or more stages. Stage `k` ticket `i` cannot run until ticket `i-1` has passed that stage. `enter(i)` receives a depth token. Stage `wait`/`pass`/`fail` use named exclusive gate cells created on first touch: `wait` creates ARMED and parks if the cell is absent; `pass` creates UNARMED if absent, or completes an ARMED cell and wakes the waiter `ok`; `fail` marks FAILED and wakes a parked waiter as `err`. The map upsert is the happen-before. Each name has exactly two touchers; the second frees the cell so live names stay O(in-flight). The worker waits and passes each stage, then `leave()` returns the token. A null stage or exclusive, and exclusive INVALID/TIMEOUT/CANCELLED/FAILED, are `void !>(CCError)` — not a silent return.
 
-Declare the turnstile before the nursery so `@destroy` joins children before the depth channel is freed.
+Declare the turnstile before the nursery so `@destroy` joins children before the depth channel is freed. Create is `T !>(CCError)`: a dead arena, `cap < 1`, `n_stages < 1`, exclusive-table allocation, or depth-channel allocation is an error — not a zeroed handle.
 
 ```c
-CCTurnstile t@(cap, n_stages, &arena) @destroy;
+CCTurnstile t@(cap, n_stages, arena) !> @destroy;
 t.enter(i) !>;
 t.stage(k).wait(i) !>;
 t.stage(k)->pass(i) !>;
@@ -5523,7 +5523,7 @@ t.wait(k, i) !>;
 t.pass(k, i) !>;
 t.leave() !>;
 
-CCTurnstileRW ts@(cap, &arena) @destroy;
+CCTurnstileRW ts@(cap, arena) !> @destroy;
 ts.enter(i) !>;
 ts.read.wait(i) !>;   ts.read.pass(i) !>;
 ts.write.wait(i) !>;  ts.write.pass(i) !>;
@@ -5535,9 +5535,10 @@ ts.leave() !>;
 **Runtime API (normative):**
 
 ```c
-int cc_turnstile_init(CCTurnstile* t, int cap, int n_stages,
-                      CCArena* arena, CCTurnstileStage* slots);
-CCTurnstile cc_turnstile_create(int cap, int n_stages, CCArena* arena);
+void !>(CCError) cc_turnstile_init(CCTurnstile* t, int cap, int n_stages,
+                                  CCArena arena, CCTurnstileStage* slots);
+CCTurnstile !>(CCError) cc_turnstile_create(int cap, int n_stages,
+                                           CCArena arena);
 void cc_turnstile_destroy(CCTurnstile* t);
 bool !>(CCIoError) cc_turnstile_enter(CCTurnstile* t, int i);
 bool !>(CCIoError) cc_turnstile_leave(CCTurnstile* t);
@@ -5548,7 +5549,7 @@ void !>(CCError) cc_turnstile_fail(CCTurnstile* t, int k, int i);
 void !>(CCError) cc_turnstile_stage_wait(CCTurnstileStage* s, int i);
 void !>(CCError) cc_turnstile_stage_pass(CCTurnstileStage* s, int i);
 void !>(CCError) cc_turnstile_stage_fail(CCTurnstileStage* s, int i);
-CCTurnstileRW cc_turnstile_rw_create(int cap, CCArena* arena);
+CCTurnstileRW !>(CCError) cc_turnstile_rw_create(int cap, CCArena arena);
 void cc_turnstile_rw_destroy(CCTurnstileRW* w);
 ```
 
@@ -5705,8 +5706,11 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 - Returning the empty slice means "no custom rewrite; fall back to ordinary receiver-type UFCS".
 - `.ufcs_sink` is the last-resort unresolved-method hook. Unresolved methods lower to `callee(&recv, "method", N, arg_wrap(a1), …)`. The sink is destination-aware: wherever a typed destination is visible the callee composes as `<callee>_<mangled dest>` when that function is declared (compose-then-verify; plain callee otherwise). `.ufcs_dynamic` and `.ufcs_dynamic2` are accepted spellings of `.ufcs_sink`.
 - `.niche` donates a bit pattern a valid instance never exhibits, so a `@variant(packed)` arm of this type can carry the discriminant (`spec/draft_variants.md`, packed layout). `cc_type_niche(size, align, offset, width, sentinel)` is the helper.
+- `.cast` is dest-convert. The handler receives the source type, the requested dest type, and `kind` (`implicit` or `explicit`) and returns a callee name, the UFCS pass tag, or empty (hard reject). Implicit sites (decl-init) ask the dest type only. Dest may insert a wrap; dest must not insert a peel.
+- `.len` names the extent (`cc_type_len_field` or `cc_type_len_call`). Ordinary sites may read `x.len` / `x.len()`; they may not store it. `T[n]` `.len` is the constexpr bound `n`.
+- `.access` is the compiler-internal walk load (`cc_type_access_load` or `cc_type_access_call`) after `i < live len`. Users write `for (v in s)` / `for (i, v in s)` / `for (a, b in s, t)`, not `s.access(i)`. Point access stays `at` / `set` (Result). `CCSlice` / `CCSlice_*`, `CCVec_*`, and `CCString` register both arms.
 - `.create` may be registered either as fixed callee strings (`cc_type_create_call(...)`, `cc_type_create_overloads(...)`) or as a callable hook via `cc_type_create_hook(...)`.
-- Recognized hook fields are `.create`, `.destroy`, `.ufcs`, `.ufcs_sink`, and `.niche`.
+- Recognized hook fields are `.create`, `.destroy`, `.ufcs`, `.cast`, `.len`, `.access`, `.ufcs_sink`, and `.niche`.
 
 **UFCS handler contract (normative):**
 
@@ -5732,6 +5736,7 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 - `cc_type_pre_destroy_call("callee")` registers the pre-destroy phase only; it runs before any call-site `@destroy { ... }` body.
 - `cc_type_destroy_hooks("pre", "destroy")` registers both destroy phases.
 - `T name@(args)` is well-formed only when `T` has a `.create` hook (or a `_new` factory on a generic instance). Typedef aliases use the base type's hooks. A dest type with neither a hook nor a `_new` / folklore callee is a compile-time error naming `T`. It must be followed by explicit ownership syntax: either `@destroy` or `@detach`. Omitting both is a compile-time error.
+- When the create callee returns `T!>(E)`, dest-mint is `T name@(args) !> @destroy` (or `@detach`). A written `!>` always unwraps. `cc_adopt` is the exception — adopt is not a Result create.
 - `@detach` does not take a cleanup body.
 - For `T name@(args) @destroy { body };`, lowering order is: registered `pre_callee`, then call-site `body`, then registered `callee`, then the value-field chain (§3.1).
 - `arg_types` for `.create` is inferred from the `@(args)` argument list. Implementations may leave complex local expressions unknown.
@@ -5757,6 +5762,11 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 
 @typehooks on CCChanRx_* {
     .ufcs = cc_channel_rx_lower_c,
+};
+
+@typehooks on CCSlice_* {
+    .len = cc_type_len_field("len"),
+    .access = cc_type_access_load("ptr"),
 };
 ```
 
@@ -6077,22 +6087,43 @@ s.sub(start, end);
 
 #### 9.2.4 Iteration
 
-```c
-// Standard range-for (already in Surface Syntax)
-for (T x : slice) { ... }
+A **for-in** subject is a bound name whose type answers both `.len` and
+`.access` (§9 type-owned registration). Binders and subjects are
+comma-separated identifiers at depth 0. The subject is a bound name, not
+an arbitrary expression. A pointer type (`T*`) is not an extent —
+`for (v in p)` is ill-formed.
 
-// Enumeration (with index)
-for (int i = 0; i < slice.len(); i++) {
-    char item = slice.at((size_t)i) !>;   /* byte slices; Result-checked */
+Stdlib extents: `CCSlice` / `CCSlice_*` (`.len` field, load of `ptr`;
+typed instances use the `.base` layout), `CCVec_*` (`.len` / `data`),
+`CCString` (`.len` field, `cc_string_data` for the load — SSO-safe).
+`T[n]` uses the constexpr bound `n` and an index load.
+
+```c
+for (i in lo..hi) { ... }   /* sequential range; hi < lo is empty */
+for (v in s) { ... }        /* walk: i < s.len, then the .access load */
+for (i, v in s) { ... }     /* enumerate: i is size_t, v is the load */
+for (a, b in s, t) { ... }  /* zip: equal lens, else CC_ERR_INVALID_ARG */
+
+// Point (not the walk)
+for (size_t i = 0; i < s.len; i++) {
+    char item = s.at(i) !>;
 }
 ```
+
+**Zip:** if the two live lengths differ, the construct raises
+`CC_ERR_INVALID_ARG`. There is no silent min. The walk runs only when
+the lengths are equal.
+
+The walk is not “a nicer `s[i]`.” Users do not write `s.access(i)`. C
+`for (;;)` is unchanged. `@parallel for (i in lo..hi)` is §8.11.4.
 
 ---
 
 ### 9.3 Arrays
 
 Arrays in CC are `T[N]` (fixed-size, stack or struct-embedded). They do not
-grow a generic `fill` / `sort` / `reverse` method family. Byte views use
+grow a generic `fill` / `sort` / `reverse` method family. `T[N]` is a
+for-in subject (§9.2.4): `.len` is the constexpr bound `N`. Byte views use
 `char_to_slice_n` / `to_slice_n` over the storage; typed growable sequences
 use `Vec::[T]`.
 
@@ -6461,7 +6492,7 @@ This section documents syntactic sugar and conventions:
 
 - **UFCS / Methods** — method call syntax
 - **UFCS auto-deref** — pointer convenience
-- **Loops** — range and async iteration
+- **Loops** — for-in walk / enumerate / zip / range; C `for (;;)` unchanged
 - **Slicing** — subslice syntax
 - **String literals** — static slices
 - **String-literal `switch` cases** — slice subject with `case "…":`
@@ -6552,20 +6583,40 @@ in both paths.
 
 **Loops:**
 
-Traditional C `for(;;)` is unchanged.
+Traditional C `for(;;)` is unchanged. For-in subjects and zip failure
+are §9.2.4.
 
 ```c
-for (T x : slice) { ... }       // range-for over slice
+for (v in s) { ... }            // walk: i < s.len, then .access
+for (i, v in s) { ... }         // enumerate
+for (a, b in s, t) { ... }      // zip; unequal lens are CC_ERR_INVALID_ARG
+for (i in lo..hi) { ... }       // sequential range
 ```
 
-**Range-for lowering:**
+**Walk lowering:**
 
 ```c
-// for (T x : slice) { BODY }
-// lowers to:
-for (size_t __i = 0; __i < slice.len; __i++) {
-    T x = slice.ptr[__i];
+/* for (v in s) { BODY } */
+for (size_t __i = 0; __i < /* s.len hook */; ++__i) {
+    T v = /* .access load after the bound */;
     BODY
+}
+
+/* for (i, v in s) { BODY } — i is size_t */
+for (size_t i = 0; i < /* s.len hook */; ++i) {
+    T v = /* .access load after the bound */;
+    BODY
+}
+
+/* for (a, b in s, t) { BODY } */
+if (/* s.len */ != /* t.len */) {
+    /* CC_ERR_INVALID_ARG — not a silent min; @errhandler sees the kind */
+} else {
+    for (size_t __i = 0; __i < /* s.len */; ++__i) {
+        A a = /* s.access */;
+        B b = /* t.access */;
+        BODY
+    }
 }
 ```
 

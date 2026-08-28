@@ -1250,3 +1250,634 @@ static void shadow_as_scan_src_path(const char* path) {
     free(text);
 }
 
+static int shadow_cast_is_factory_alias(const char* dest) {
+    return dest && (strcmp(dest, "CCArena") == 0 ||
+                    strcmp(dest, "CCNursery") == 0 ||
+                    strcmp(dest, "CCExclusive") == 0);
+}
+
+static int shadow_cast_is_box_dest(const char* dest) {
+    if (!dest || !dest[0]) return 0;
+    if (strcmp(dest, "CCBox") == 0) return 1;
+    return strncmp(dest, "CCBox_", 6) == 0 && dest[6] != 0;
+}
+
+static void shadow_cast_strip_ty_prefix(const char* ty, char* out, size_t cap) {
+    const char* p = ty ? ty : "";
+    while (*p == ' ' || *p == '\t') p++;
+    for (;;) {
+        if (strncmp(p, "static ", 7) == 0) {
+            p += 7;
+            continue;
+        }
+        if (strncmp(p, "const ", 6) == 0) {
+            p += 6;
+            continue;
+        }
+        if (strncmp(p, "_Atomic ", 8) == 0) {
+            p += 8;
+            continue;
+        }
+        if (strncmp(p, "volatile ", 9) == 0) {
+            p += 9;
+            continue;
+        }
+        break;
+    }
+    snprintf(out, cap, "%s", p);
+}
+
+static int shadow_cast_infer_src(const char* raw, char* src, size_t cap) {
+    const char* p = raw ? raw : "";
+    char ident[80];
+    size_t n = 0;
+    int took_addr = 0;
+    const ShadowBind* b;
+    if (!src || !cap) return 0;
+    src[0] = 0;
+    while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+    if (*p == '&') {
+        took_addr = 1;
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+    }
+    if (*p == '(') {
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+    }
+    if (!cc_is_ident_start(*p)) return 0;
+    while (cc_is_ident_char(*p) && n + 1 < sizeof(ident))
+        ident[n++] = *p++;
+    ident[n] = 0;
+    b = shadow_bind_lookup(ident);
+    if (!b || !b->ty[0]) return 0;
+    if (took_addr)
+        snprintf(src, cap, "%s*", b->ty);
+    else
+        snprintf(src, cap, "%s", b->ty);
+    return src[0] != 0;
+}
+
+/* Implicit dest-init. 1 = emit expr (maybe wrapped). 0 = hard error. */
+static int shadow_cast_decl_init(const char* dest_ty, const char* raw_rhs,
+                                 char* expr, size_t expr_cap) {
+    char dest[128];
+    char src[160];
+    const char* handler = NULL;
+    CCSlice result;
+    char callee[160];
+    char wrap[2048];
+    const char* pass = "__cc_ufcs_pass__";
+    if (!dest_ty || !dest_ty[0] || !expr || !expr[0] || !expr_cap) return 1;
+    shadow_cast_strip_ty_prefix(dest_ty, dest, sizeof(dest));
+    if (strchr(dest, '*')) return 1;
+    if (strncmp(dest, "CCResult_", 9) == 0) return 1;
+    if (strstr(expr, "_from_host(") != NULL ||
+        strstr(expr, "cc_box_from_host(") != NULL)
+        return 1;
+    src[0] = 0;
+    (void)shadow_cast_infer_src(raw_rhs, src, sizeof(src));
+    if (shadow_cast_is_factory_alias(dest)) {
+        int ptr_rhs = (src[0] && strchr(src, '*') != NULL);
+        if (!ptr_rhs && raw_rhs) {
+            const char* q = raw_rhs;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '&') ptr_rhs = 1;
+        }
+        if (ptr_rhs) {
+            fprintf(stderr,
+                    "error: type: no implicit convert from '%s' to '%s' "
+                    "(factory alias; dest does not mint)\n",
+                    src[0] ? src : (raw_rhs ? raw_rhs : "?"), dest);
+            g_shadow_ufcs_miss = 1;
+            return 0;
+        }
+        return 1;
+    }
+    if (g_shadow_ufcs_syms)
+        (void)cc_symbols_lookup_type_cast_call(g_shadow_ufcs_syms, dest,
+                                               &handler);
+    if (!handler || !handler[0]) {
+        if (shadow_cast_is_box_dest(dest))
+            handler = "cc_box_cast_lower_c";
+        else
+            return 1;
+    }
+    if (strcmp(handler, "cc_box_cast_lower_c") != 0) {
+        fprintf(stderr,
+                "error: type: .cast handler '%s' for '%s' is not compiled\n",
+                handler, dest);
+        g_shadow_ufcs_miss = 1;
+        return 0;
+    }
+    if (src[0] && strcmp(src, dest) == 0) return 1;
+    shadow_meta_ar_ensure();
+    result = cc_box_cast_lower_c(
+        cc_slice_from_static((void*)src, strlen(src)),
+        cc_slice_from_static((void*)dest, strlen(dest)),
+        cc_slice_from_static((void*)"implicit", 8), &g_shadow_meta_ar);
+    if (result.ptr && result.len == sizeof("__cc_ufcs_pass__") - 1 &&
+        memcmp(result.ptr, pass, result.len) == 0)
+        return 1;
+    if (!result.ptr || result.len == 0) {
+        fprintf(stderr,
+                "error: type: .cast hook rejected implicit convert to '%s'\n",
+                dest);
+        g_shadow_ufcs_miss = 1;
+        return 0;
+    }
+    if (result.len + 1 > sizeof(callee)) {
+        fprintf(stderr, "error: type: .cast callee overflow for '%s'\n", dest);
+        g_shadow_ufcs_miss = 1;
+        return 0;
+    }
+    memcpy(callee, result.ptr, result.len);
+    callee[result.len] = 0;
+    if (snprintf(wrap, sizeof(wrap), "%s(%s)", callee, expr) >=
+        (int)sizeof(wrap)) {
+        fprintf(stderr, "error: type: .cast wrap overflow for '%s'\n", dest);
+        g_shadow_ufcs_miss = 1;
+        return 0;
+    }
+    if (strlen(wrap) + 1 > expr_cap) {
+        fprintf(stderr, "error: type: .cast wrap overflow for '%s'\n", dest);
+        g_shadow_ufcs_miss = 1;
+        return 0;
+    }
+    snprintf(expr, expr_cap, "%s", wrap);
+    return 1;
+}
+
+/* --- .len / .access extent (for-in walk). Native fallbacks first;
+ * harvested @typehooks overlay when present. */
+
+typedef struct {
+    char elem[96];
+    char len_kind[8];  /* field | call | sizeof */
+    char len_name[80];
+    char acc_kind[8];  /* load | call | index */
+    char acc_name[80];
+    int typed_slice;   /* CCSlice_T: .base.len / .base.ptr */
+} ShadowExtent;
+
+static int g_shadow_for_in_seq;
+
+static int shadow_extent_is_ident(const char* s) {
+    if (!s || !s[0]) return 0;
+    if (!((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') || *s == '_'))
+        return 0;
+    s++;
+    while (*s) {
+        if (!((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') ||
+              (*s >= '0' && *s <= '9') || *s == '_'))
+            return 0;
+        s++;
+    }
+    return 1;
+}
+
+static void shadow_extent_demangle_elem(const char* suf, char* out, size_t cap) {
+    if (!out || !cap) return;
+    out[0] = 0;
+    if (!suf || !suf[0]) return;
+    if (strcmp(suf, "long_long") == 0)
+        snprintf(out, cap, "long long");
+    else
+        snprintf(out, cap, "%s", suf);
+}
+
+static int shadow_extent_native(const char* ty, int array_flag,
+                                ShadowExtent* ex) {
+    if (!ex || !ty) return 0;
+    memset(ex, 0, sizeof(*ex));
+    if (array_flag) {
+        snprintf(ex->elem, sizeof(ex->elem), "%s", ty);
+        snprintf(ex->len_kind, sizeof(ex->len_kind), "sizeof");
+        snprintf(ex->acc_kind, sizeof(ex->acc_kind), "index");
+        return ex->elem[0] != 0;
+    }
+    if (strcmp(ty, "CCSlice") == 0 || strcmp(ty, "CCSliceUnique") == 0 ||
+        strcmp(ty, "CCSliceShared") == 0) {
+        snprintf(ex->elem, sizeof(ex->elem), "char");
+        snprintf(ex->len_kind, sizeof(ex->len_kind), "field");
+        snprintf(ex->len_name, sizeof(ex->len_name), "len");
+        snprintf(ex->acc_kind, sizeof(ex->acc_kind), "load");
+        snprintf(ex->acc_name, sizeof(ex->acc_name), "ptr");
+        return 1;
+    }
+    if (strncmp(ty, "CCSlice_", 8) == 0 && strcmp(ty, "CCSlicePacked") != 0) {
+        shadow_extent_demangle_elem(ty + 8, ex->elem, sizeof(ex->elem));
+        snprintf(ex->len_kind, sizeof(ex->len_kind), "field");
+        snprintf(ex->len_name, sizeof(ex->len_name), "len");
+        snprintf(ex->acc_kind, sizeof(ex->acc_kind), "load");
+        snprintf(ex->acc_name, sizeof(ex->acc_name), "ptr");
+        ex->typed_slice = 1;
+        return ex->elem[0] != 0;
+    }
+    if (strncmp(ty, "CCVec_", 6) == 0) {
+        shadow_extent_demangle_elem(ty + 6, ex->elem, sizeof(ex->elem));
+        snprintf(ex->len_kind, sizeof(ex->len_kind), "field");
+        snprintf(ex->len_name, sizeof(ex->len_name), "len");
+        snprintf(ex->acc_kind, sizeof(ex->acc_kind), "load");
+        snprintf(ex->acc_name, sizeof(ex->acc_name), "data");
+        return ex->elem[0] != 0;
+    }
+    if (strcmp(ty, "CCString") == 0) {
+        snprintf(ex->elem, sizeof(ex->elem), "char");
+        snprintf(ex->len_kind, sizeof(ex->len_kind), "field");
+        snprintf(ex->len_name, sizeof(ex->len_name), "len");
+        snprintf(ex->acc_kind, sizeof(ex->acc_kind), "call");
+        snprintf(ex->acc_name, sizeof(ex->acc_name), "cc_string_data");
+        return 1;
+    }
+    return 0;
+}
+
+static int shadow_extent_resolve(const char* ty, int array_flag,
+                                 ShadowExtent* ex) {
+    const char* lk = NULL;
+    const char* ln = NULL;
+    const char* ak = NULL;
+    const char* an = NULL;
+    char fty[96];
+    if (!shadow_extent_native(ty, array_flag, ex)) {
+        if (!ex) return 0;
+        memset(ex, 0, sizeof(*ex));
+    }
+    if (g_shadow_ufcs_syms && ty && ty[0] && !array_flag) {
+        if (cc_symbols_lookup_type_len(g_shadow_ufcs_syms, ty, &lk, &ln) == 0 &&
+            ln && ln[0]) {
+            snprintf(ex->len_kind, sizeof(ex->len_kind), "%s",
+                     lk && lk[0] ? lk : "field");
+            snprintf(ex->len_name, sizeof(ex->len_name), "%s", ln);
+        }
+        if (cc_symbols_lookup_type_access(g_shadow_ufcs_syms, ty, &ak, &an) ==
+                0 &&
+            an && an[0]) {
+            snprintf(ex->acc_kind, sizeof(ex->acc_kind), "%s",
+                     ak && ak[0] ? ak : "load");
+            snprintf(ex->acc_name, sizeof(ex->acc_name), "%s", an);
+            if (!ex->elem[0] && strcmp(ex->acc_kind, "load") == 0 &&
+                shadow_field_ty_of(ty, an, fty, sizeof(fty))) {
+                size_t L = strlen(fty);
+                while (L && (fty[L - 1] == '*' || fty[L - 1] == ' '))
+                    fty[--L] = 0;
+                snprintf(ex->elem, sizeof(ex->elem), "%s", fty);
+            }
+        }
+    }
+    return ex && ex->len_kind[0] && ex->acc_kind[0] && ex->elem[0];
+}
+
+static int shadow_ty_has_extent(const char* ty, int array_flag) {
+    ShadowExtent ex;
+    return shadow_extent_resolve(ty, array_flag, &ex);
+}
+
+static void shadow_extent_len_c(const ShadowExtent* ex, const char* recv,
+                                char* dst, size_t cap) {
+    if (!ex || !dst || !cap) return;
+    dst[0] = 0;
+    if (strcmp(ex->len_kind, "sizeof") == 0)
+        snprintf(dst, cap, "(sizeof(%s)/sizeof((%s)[0]))", recv, recv);
+    else if (strcmp(ex->len_kind, "call") == 0)
+        snprintf(dst, cap, "%s(&(%s))", ex->len_name, recv);
+    else if (ex->typed_slice)
+        snprintf(dst, cap, "(%s).base.%s", recv, ex->len_name);
+    else
+        snprintf(dst, cap, "(%s).%s", recv, ex->len_name);
+}
+
+static void shadow_extent_load_c(const ShadowExtent* ex, const char* recv,
+                                 const char* idx, char* dst, size_t cap) {
+    if (!ex || !dst || !cap) return;
+    dst[0] = 0;
+    if (strcmp(ex->acc_kind, "index") == 0)
+        snprintf(dst, cap, "(%s)[%s]", recv, idx);
+    else if (strcmp(ex->acc_kind, "call") == 0)
+        snprintf(dst, cap, "%s(&(%s))[%s]", ex->acc_name, recv, idx);
+    else if (ex->typed_slice)
+        snprintf(dst, cap, "((%s*)(%s).base.%s)[%s]", ex->elem, recv,
+                 ex->acc_name, idx);
+    else
+        snprintf(dst, cap, "((%s*)(%s).%s)[%s]", ex->elem, recv, ex->acc_name,
+                 idx);
+}
+
+/* 0 = C for, 1 = walk, 2 = range, 3 = enumerate, 4 = zip, -1 = ill-formed. */
+typedef struct {
+    int kind;
+    char bind[2][64];
+    int nbind;
+    char rest[512];
+    char subj[2][128];
+    int nsubj;
+} ShadowForIn;
+
+static int shadow_for_split_csv(const char* s, char out[][128], int max,
+                                size_t cell) {
+    int n = 0;
+    int depth = 0;
+    const char* p;
+    if (!s || !out || max < 1) return -1;
+    p = s;
+    while (*p) {
+        const char* start;
+        size_t len;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        if (n >= max) return -1;
+        start = p;
+        depth = 0;
+        while (*p) {
+            if (*p == '(' || *p == '[' || *p == '{') depth++;
+            else if (*p == ')' || *p == ']' || *p == '}') depth--;
+            else if (depth == 0 && *p == ',') break;
+            p++;
+        }
+        len = (size_t)(p - start);
+        while (len && (start[len - 1] == ' ' || start[len - 1] == '\t')) len--;
+        if (!len || len + 1 > cell) return -1;
+        memcpy(out[n], start, len);
+        out[n][len] = 0;
+        n++;
+        if (*p == ',') p++;
+    }
+    return n;
+}
+
+static int shadow_for_parse_in(const char* h, ShadowForIn* fi) {
+    const char* p;
+    const char* in;
+    char rawbind[256];
+    char cells[2][128];
+    size_t n;
+    int i;
+    int depth;
+    const char* q;
+    if (!h || !fi) return 0;
+    memset(fi, 0, sizeof(*fi));
+    for (p = h; *p; p++) {
+        if (*p == ';') return 0;
+    }
+    in = NULL;
+    p = h;
+    while (*p) {
+        if (p[0] == 'i' && p[1] == 'n' &&
+            (p == h || !((p[-1] >= 'A' && p[-1] <= 'Z') ||
+                         (p[-1] >= 'a' && p[-1] <= 'z') ||
+                         (p[-1] >= '0' && p[-1] <= '9') || p[-1] == '_')) &&
+            p[2] &&
+            !((p[2] >= 'A' && p[2] <= 'Z') || (p[2] >= 'a' && p[2] <= 'z') ||
+              (p[2] >= '0' && p[2] <= '9') || p[2] == '_')) {
+            in = p;
+            break;
+        }
+        p++;
+    }
+    if (!in) return 0;
+    p = h;
+    while (*p == ' ' || *p == '\t') p++;
+    n = (size_t)(in - p);
+    while (n && (p[n - 1] == ' ' || p[n - 1] == '\t')) n--;
+    if (!n || n >= sizeof(rawbind)) {
+        fprintf(stderr, "error: for-in needs `for (name in subject)`\n");
+        g_shadow_ufcs_miss = 1;
+        return -1;
+    }
+    memcpy(rawbind, p, n);
+    rawbind[n] = 0;
+    p = in + 2;
+    while (*p == ' ' || *p == '\t') p++;
+    snprintf(fi->rest, sizeof(fi->rest), "%s", p);
+    n = strlen(fi->rest);
+    while (n && (fi->rest[n - 1] == ' ' || fi->rest[n - 1] == '\t'))
+        fi->rest[--n] = 0;
+    if (!fi->rest[0]) {
+        fprintf(stderr, "error: for-in needs `for (name in subject)`\n");
+        g_shadow_ufcs_miss = 1;
+        return -1;
+    }
+    fi->nbind = shadow_for_split_csv(rawbind, cells, 2, sizeof(cells[0]));
+    if (fi->nbind < 1) {
+        fprintf(stderr, "error: for-in needs `for (name in subject)`\n");
+        g_shadow_ufcs_miss = 1;
+        return -1;
+    }
+    for (i = 0; i < fi->nbind; i++) {
+        if (!shadow_extent_is_ident(cells[i])) {
+            fprintf(stderr, "error: for-in binder '%s' is not a name\n",
+                    cells[i]);
+            g_shadow_ufcs_miss = 1;
+            return -1;
+        }
+        snprintf(fi->bind[i], sizeof(fi->bind[i]), "%s", cells[i]);
+    }
+    fi->nsubj = shadow_for_split_csv(fi->rest, fi->subj, 2, sizeof(fi->subj[0]));
+    if (fi->nsubj < 1) {
+        fprintf(stderr, "error: for-in needs `for (name in subject)`\n");
+        g_shadow_ufcs_miss = 1;
+        return -1;
+    }
+    depth = 0;
+    for (q = fi->rest; *q; q++) {
+        if (*q == '(' || *q == '[' || *q == '{') depth++;
+        else if (*q == ')' || *q == ']' || *q == '}') depth--;
+        else if (depth == 0 && q[0] == '.' && q[1] == '.') {
+            if (fi->nbind != 1 || fi->nsubj != 1) {
+                fprintf(stderr,
+                        "error: range for-in is `for (i in lo..hi)`\n");
+                g_shadow_ufcs_miss = 1;
+                return -1;
+            }
+            fi->kind = 2;
+            return 2;
+        }
+    }
+    if (fi->nbind == 1 && fi->nsubj == 1) {
+        fi->kind = 1;
+        return 1;
+    }
+    if (fi->nbind == 2 && fi->nsubj == 1) {
+        fi->kind = 3;
+        return 3;
+    }
+    if (fi->nbind == 2 && fi->nsubj == 2) {
+        fi->kind = 4;
+        return 4;
+    }
+    fprintf(stderr,
+            "error: for-in is `for (v in s)`, `for (i, v in s)`, or "
+            "`for (a, b in s, t)`\n");
+    g_shadow_ufcs_miss = 1;
+    return -1;
+}
+
+static int shadow_for_lookup_extent(const char* name, ShadowExtent* ex) {
+    const ShadowBind* sb;
+    char subj_ty[128];
+    int array_flag = 0;
+    if (!name || !ex) return 0;
+    if (!shadow_extent_is_ident(name)) {
+        fprintf(stderr, "error: for-in subject must be a bound name\n");
+        g_shadow_ufcs_miss = 1;
+        return 0;
+    }
+    sb = shadow_bind_lookup(name);
+    if (!sb || !sb->ty[0]) {
+        fprintf(stderr, "error: for-in subject '%s' has no bound type\n",
+                name);
+        g_shadow_ufcs_miss = 1;
+        return 0;
+    }
+    snprintf(subj_ty, sizeof(subj_ty), "%s", sb->ty);
+    array_flag = (sb->flags & SHADOW_BIND_ARRAY) ? 1 : 0;
+    if (strchr(subj_ty, '*')) {
+        fprintf(stderr,
+                "error: T* is not an extent; for (v in %s) is ill-formed\n",
+                name);
+        g_shadow_ufcs_miss = 1;
+        return 0;
+    }
+    if (!shadow_extent_resolve(subj_ty, array_flag, ex)) {
+        fprintf(stderr, "error: '%s' (%s) has no .len/.access extent\n", name,
+                subj_ty);
+        g_shadow_ufcs_miss = 1;
+        return 0;
+    }
+    return 1;
+}
+
+static int shadow_for_split_range(const char* rest, char* lo, size_t locap,
+                                  char* hi, size_t hicap) {
+    int depth = 0;
+    const char* q;
+    size_t n;
+    if (!rest || !lo || !hi) return 0;
+    lo[0] = 0;
+    hi[0] = 0;
+    for (q = rest; *q; q++) {
+        if (*q == '(' || *q == '[' || *q == '{') depth++;
+        else if (*q == ')' || *q == ']' || *q == '}') depth--;
+        else if (depth == 0 && q[0] == '.' && q[1] == '.') {
+            n = (size_t)(q - rest);
+            if (n >= locap) n = locap - 1;
+            memcpy(lo, rest, n);
+            lo[n] = 0;
+            while (n && (lo[n - 1] == ' ' || lo[n - 1] == '\t')) lo[--n] = 0;
+            q += 2;
+            while (*q == ' ' || *q == '\t') q++;
+            snprintf(hi, hicap, "%s", q);
+            n = strlen(hi);
+            while (n && (hi[n - 1] == ' ' || hi[n - 1] == '\t')) hi[--n] = 0;
+            return lo[0] && hi[0];
+        }
+    }
+    return 0;
+}
+
+static int shadow_rewrite_array_len_fields(char* dst, size_t cap) {
+    char out[8192];
+    size_t o = 0;
+    const char* p;
+    int changed = 0;
+    if (!dst || !cap) return 0;
+    p = dst;
+    while (*p && o + 1 < sizeof(out)) {
+        const char* start = p;
+        char name[64];
+        size_t n = 0;
+        const ShadowBind* b;
+        if ((p == dst ||
+             !((p[-1] >= 'A' && p[-1] <= 'Z') || (p[-1] >= 'a' && p[-1] <= 'z') ||
+               (p[-1] >= '0' && p[-1] <= '9') || p[-1] == '_')) &&
+            ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+             *p == '_')) {
+            while (((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+                    (*p >= '0' && *p <= '9') || *p == '_') &&
+                   n + 1 < sizeof(name))
+                name[n++] = *p++;
+            name[n] = 0;
+            if (p[0] == '.' && p[1] == 'l' && p[2] == 'e' && p[3] == 'n' &&
+                !((p[4] >= 'A' && p[4] <= 'Z') || (p[4] >= 'a' && p[4] <= 'z') ||
+                  (p[4] >= '0' && p[4] <= '9') || p[4] == '_') &&
+                p[4] != '(') {
+                b = shadow_bind_lookup(name);
+                if (b && (b->flags & SHADOW_BIND_ARRAY)) {
+                    char repl[160];
+                    snprintf(repl, sizeof(repl),
+                             "(sizeof(%s)/sizeof((%s)[0]))", name, name);
+                    if (o + strlen(repl) >= sizeof(out)) break;
+                    memcpy(out + o, repl, strlen(repl));
+                    o += strlen(repl);
+                    p += 4;
+                    changed = 1;
+                    continue;
+                }
+            }
+            p = start;
+        }
+        out[o++] = *p++;
+    }
+    out[o] = 0;
+    if (changed && o < cap) snprintf(dst, cap, "%s", out);
+    return changed;
+}
+
+static void shadow_extent_check_len_store(const char* text) {
+    int bi;
+    if (!text || !text[0] || g_shadow_restrict_diag) return;
+    for (bi = 0; bi < g_shadow_nbinds; bi++) {
+        const char* name = g_shadow_binds[bi] ? g_shadow_binds[bi]->name : NULL;
+        const char* ty = g_shadow_binds[bi] ? g_shadow_binds[bi]->ty : NULL;
+        int array_flag;
+        const char* p;
+        size_t nl;
+        if (!name || !name[0] || !ty || !ty[0]) continue;
+        array_flag = (g_shadow_binds[bi]->flags & SHADOW_BIND_ARRAY) ? 1 : 0;
+        if (!shadow_ty_has_extent(ty, array_flag)) continue;
+        nl = strlen(name);
+        p = text;
+        while ((p = strstr(p, name)) != NULL) {
+            const char* q;
+            if (p > text &&
+                ((p[-1] >= 'A' && p[-1] <= 'Z') ||
+                 (p[-1] >= 'a' && p[-1] <= 'z') ||
+                 (p[-1] >= '0' && p[-1] <= '9') || p[-1] == '_')) {
+                p += nl;
+                continue;
+            }
+            q = p + nl;
+            if (q[0] == '-' && q[1] == '>') q += 2;
+            else if (q[0] == '.') q += 1;
+            else {
+                p += nl;
+                continue;
+            }
+            while (*q == ' ' || *q == '\t') q++;
+            if (q[0] != 'l' || q[1] != 'e' || q[2] != 'n' ||
+                ((q[3] >= 'A' && q[3] <= 'Z') || (q[3] >= 'a' && q[3] <= 'z') ||
+                 (q[3] >= '0' && q[3] <= '9') || q[3] == '_')) {
+                p += nl;
+                continue;
+            }
+            q += 3;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '(') {
+                p += nl;
+                continue;
+            }
+            if ((q[0] == '=' && q[1] != '=') ||
+                ((q[0] == '+' || q[0] == '-' || q[0] == '*' || q[0] == '/') &&
+                 q[1] == '=') ||
+                g_shadow_restrict_lhs_store) {
+                fprintf(stderr,
+                        "error: extent '.len' on '%s' is not writable\n", ty);
+                g_shadow_restrict_diag = 1;
+                return;
+            }
+            p += nl;
+        }
+    }
+}
+

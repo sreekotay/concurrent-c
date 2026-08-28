@@ -1,0 +1,19 @@
+/* for (v in v) on CCVec::[int]. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4)) @destroy;
+    CCVec::[int] v;
+    int sum = 0;
+    if (!cc_arena_is_live(arena)) return 1;
+    v = cc_vec_new::[int](arena);
+    CCVec_int_push(&v, 10);
+    CCVec_int_push(&v, 20);
+    for (x in v)
+        sum += x;
+    if (sum != 30) return 2;
+    if (v.len != 2) return 3;
+    printf("ok\n");
+    return 0;
+}

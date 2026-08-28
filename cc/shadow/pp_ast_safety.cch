@@ -2205,6 +2205,11 @@ static int shadow_typeview_body_as_names(const char* body, char names[][64],
             p++;
             continue;
         }
+        /* `^pat` deny prefix (and any other punct) must not stall the walk. */
+        if (!shadow_safe_is_word(*p) && *p != '*') {
+            p++;
+            continue;
+        }
         while (*p && (shadow_safe_is_word(*p) || *p == '*')) {
             if (i + 1 < (int)sizeof(tok)) tok[i++] = *p;
             p++;

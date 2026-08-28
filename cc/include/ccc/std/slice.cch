@@ -470,4 +470,13 @@ static inline int64_t !>(CCError) cc_mul_i64_checked(int64_t a, int64_t b) {
 #define CCSlice_materialize_in(s, a) \
     (CCSlice_materialize_in)((s), CC__ARENA_HANDLE(a))
 
+@typehooks on CCSlice {
+    .len = cc_type_len_field("len"),
+    .access = cc_type_access_load("ptr"),
+};
+@typehooks on CCSlice_* {
+    .len = cc_type_len_field("len"),
+    .access = cc_type_access_load("ptr"),
+};
+
 #endif /* CC_STD_SLICE_H */

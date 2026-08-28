@@ -1413,6 +1413,10 @@ static int shadow_ufcs_emit_len_cap(const char* meth, const char* vty,
     size_t i;
     if (!meth || !recv || !dst || !cap) return 0;
     if (strcmp(meth, "len") != 0 && strcmp(meth, "cap") != 0) return 0;
+    if (strcmp(meth, "len") == 0 && rb && (rb->flags & SHADOW_BIND_ARRAY)) {
+        snprintf(dst, cap, "(sizeof(%s)/sizeof((%s)[0]))", recv, recv);
+        return 1;
+    }
 
     rty[0] = 0;
     if (vty && vty[0])
@@ -1700,7 +1704,7 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         char rbase[96];
         ShadowRestrict* rr;
         shadow_restrict_leaf_ty(vty, leaf, sizeof(leaf));
-        rr = shadow_restrict_find_for_ty(leaf);
+        rr = shadow_restrict_find_for_ty(vty);
         if (rr && rr->mode[0])
             snprintf(view_mode, sizeof(view_mode), "%s", rr->mode);
         if (rr && !shadow_restrict_trusted_for(rr)) pending_rr = rr;
@@ -2170,6 +2174,14 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     } else if (!is_arrow && strcmp(meth_name, "load") == 0) {
         snprintf(dst, cap, "cc_atomic_load(&%s)", recv);
     /* twice/halve/fabs/strlen: scalar family + bare (system ufn seed). */
+    } else if (strcmp(meth_name, "access") == 0 &&
+               shadow_ty_has_extent(vty[0] ? vty : (rb && rb->ty[0] ? rb->ty : ""),
+                                    rb && (rb->flags & SHADOW_BIND_ARRAY))) {
+        fprintf(stderr,
+                "error: .access is compiler-internal; write for (v in s) or "
+                "s.at(i)\n");
+        g_shadow_ufcs_miss = 1;
+        return 0;
     } else if (strcmp(meth_name, "len") == 0 &&
                shadow_ufcs_emit_len_cap("len", vty, rb, recv,
                                        is_arrow || SHADOW_UFCS_PTR_RECV(), dst,
@@ -4073,6 +4085,9 @@ static int shadow_emit_ufcs_to_buf(AstNode* st, char* dst, size_t cap,
             }
         }
     }
+    /* `v.push(f() ?> 80)` / recv unwrap — leftover text, not a UFCS kid. */
+    shadow_emit_leftover_qmark_rewrite(recv, sizeof(recv));
+    shadow_emit_leftover_qmark_rewrite(args, sizeof(args));
     if (!shadow_ufcs_lower_parts_as(recv, st->b, args, is_arrow, formal, dst,
                                     cap)) {
         /* Typed miss: return 0 so callers diagnose with site/@as (stmt path)
@@ -4110,6 +4125,7 @@ static int shadow_emit_ufcs_to_buf(AstNode* st, char* dst, size_t cap,
     shadow_rewrite_slice_as_call_args(dst, cap);
     shadow_rewrite_slice_lit_call_args(dst, cap);
     shadow_rewrite_as_call_args(dst, cap);
+    shadow_emit_leftover_qmark_rewrite(dst, cap);
     return 1;
 }
 
@@ -5463,6 +5479,7 @@ static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
                      * any print/string rewrite that reintroduced bare lits. */
                     shadow_rewrite_slice_lit_call_args(dst, cap);
                     shadow_rewrite_as_call_args(dst, cap);
+                    shadow_emit_leftover_qmark_rewrite(dst, cap);
                     if (elem_ty && strncmp(elem_ty, "CCResult_", 9) == 0)
                         shadow_rewrite_result_ctors(dst, cap, elem_ty);
                     shadow_peel_nursery_host_calls(dst, cap);
@@ -5565,6 +5582,7 @@ static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
     shadow_rewrite_generic_types_text(dst, cap);
     shadow_lower_type_of_constexpr(dst, cap);
     shadow_peel_nursery_host_calls(dst, cap);
+    shadow_rewrite_array_len_fields(dst, cap);
 }
 
 /* Emit-site channel_pair → create_named (chan table). */

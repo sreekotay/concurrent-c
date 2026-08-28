@@ -110,6 +110,8 @@ _Static_assert(CC_STRING_INLINE_CAP != CC_STRING_CAP_NICHE,
 @typehooks on CCString {
     .niche = cc_type_niche(/*size*/16, /*align*/8, /*offset*/12,
     /*width*/4, /*sentinel*/0xFFFFFFFF),
+    .len = cc_type_len_field("len"),
+    .access = cc_type_access_call("cc_string_data"),
 };
 
 // ------------------------- Parse error enums ------------------------------

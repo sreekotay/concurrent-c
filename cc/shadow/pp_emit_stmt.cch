@@ -6773,21 +6773,14 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         }
         if (cl) shadow_splice_closure_arg(init, sizeof(init), cl);
         if (has_bang) {
-            /* Result: field unwrap + @errhandler. Plain values (infallible
-             * create hook, cc_adopt): identity — bang is vacuous / null-check
-             * folklore. Nursery births are `T !>(E)` — still unwrap. */
+            /* Result: field unwrap + @errhandler. `!>` always unwraps.
+             * cc_adopt is a plain pointer, not a Result. */
             char ty_lhs[160];
-            const char* chook = shadow_create_hook_for(st->a);
-            int plain = 0;
             if (is_ptr)
                 snprintf(ty_lhs, sizeof(ty_lhs), "%s*", st->a);
             else
                 snprintf(ty_lhs, sizeof(ty_lhs), "%s", st->a);
-            if (chook && chook[0] && strstr(init, chook) != NULL &&
-                strcmp(st->a, "CCNursery") != 0)
-                plain = 1;
-            if (strstr(init, "cc_adopt(") != NULL) plain = 1;
-            if (plain)
+            if (strstr(init, "cc_adopt(") != NULL)
                 return cemit_fmt(out, "%s%s %s = %s;\n", indent, ty_lhs, st->b,
                                  init);
             return shadow_emit_try_assign(out, ctx, indent, ty_lhs, st->b, init,
@@ -6795,42 +6788,239 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         }
         if (is_ptr)
             return cemit_fmt(out, "%s%s* %s = %s;\n", indent, st->a, st->b, init);
+        if (!has_bang &&
+            !shadow_cast_decl_init(st->a, st->c, init, sizeof(init)))
+            return 0;
         /* Value @destroy — cleanup via registered destroy hook at scope exit. */
         return cemit_fmt(out, "%s%s %s = %s;\n", indent, st->a, st->b, init);
     }
     case AST_FOR: {
         char header[768];
         char lowered[2048];
+        ShadowForIn fi;
+        int in_kind;
         int bind_mark;
+        int nbinds_mark;
         int pw = shadow_pw_push_loop(ctx, 0);
         int ok;
-        /* Header is raw text (`i < files.len()`) — peel UFCS like conds. */
         snprintf(header, sizeof(header), "%s", st->a);
         shadow_rewrite_variant_expr(header, sizeof(header), NULL);
+        in_kind = shadow_for_parse_in(header, &fi);
+        if (in_kind < 0) {
+            shadow_pw_pop_loop(ctx, pw, 0);
+            return 0;
+        }
+        if (in_kind == 2) {
+            char lo_raw[256], hi_raw[256];
+            char lo[512], hi[512];
+            int id = g_shadow_for_in_seq++;
+            if (!shadow_for_split_range(fi.rest, lo_raw, sizeof(lo_raw), hi_raw,
+                                        sizeof(hi_raw))) {
+                fprintf(stderr, "error: for-in range needs `lo..hi`\n");
+                g_shadow_ufcs_miss = 1;
+                shadow_pw_pop_loop(ctx, pw, 0);
+                return 0;
+            }
+            shadow_emit_expr_text(st, lo_raw, lo, sizeof(lo), NULL);
+            shadow_emit_expr_text(st, hi_raw, hi, sizeof(hi), NULL);
+            if (!cemit_fmt(out,
+                           "%s{\n"
+                           "%s    size_t __cc_lo_%d = (size_t)(%s);\n"
+                           "%s    size_t __cc_hi_%d = (size_t)(%s);\n"
+                           "%s    size_t %s;\n"
+                           "%s    if (__cc_lo_%d < __cc_hi_%d)\n"
+                           "%s    for (%s = __cc_lo_%d; %s < __cc_hi_%d; ++%s) "
+                           "{\n",
+                           indent, indent, id, lo, indent, id, hi, indent,
+                           fi.bind[0], indent, id, id, indent, fi.bind[0], id,
+                           fi.bind[0], id, fi.bind[0])) {
+                shadow_pw_pop_loop(ctx, pw, 0);
+                return 0;
+            }
+            {
+                char nested[80];
+                shadow_indent_nest(nested, sizeof(nested), indent, 2);
+                nbinds_mark = g_shadow_nbinds;
+                shadow_bind_name(fi.bind[0], "size_t", 0);
+                bind_mark = shadow_push_block_binds(st->body, st->nbody);
+                if (ctx) {
+                    ok = shadow_emit_compound_body(st->body, st->nbody, out, ctx,
+                                                   nested, use_cleanup, 1);
+                } else {
+                    ok = 1;
+                    for (int k = 0; k < st->nbody && ok; k++) {
+                        if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, nested,
+                                                  use_cleanup))
+                            ok = 0;
+                    }
+                }
+                shadow_pop_fn_binds(bind_mark);
+                g_shadow_nbinds = nbinds_mark;
+                if (ok) ok = cemit_fmt(out, "%s    }\n%s}\n", indent, indent);
+                shadow_pw_pop_loop(ctx, pw, 0);
+                return ok;
+            }
+        }
+        if (in_kind == 1 || in_kind == 3) {
+            ShadowExtent ex;
+            char len_c[256];
+            char load_c[384];
+            char idx[64];
+            int id = g_shadow_for_in_seq++;
+            const char* val = (in_kind == 3) ? fi.bind[1] : fi.bind[0];
+            if (!shadow_for_lookup_extent(fi.subj[0], &ex)) {
+                shadow_pw_pop_loop(ctx, pw, 0);
+                return 0;
+            }
+            if (in_kind == 3)
+                snprintf(idx, sizeof(idx), "%s", fi.bind[0]);
+            else
+                snprintf(idx, sizeof(idx), "__cc_fi_%d", id);
+            shadow_extent_len_c(&ex, fi.subj[0], len_c, sizeof(len_c));
+            shadow_extent_load_c(&ex, fi.subj[0], idx, load_c, sizeof(load_c));
+            if (!cemit_fmt(out, "%sfor (size_t %s = 0; %s < (%s); ++%s) {\n",
+                           indent, idx, idx, len_c, idx)) {
+                shadow_pw_pop_loop(ctx, pw, 0);
+                return 0;
+            }
+            {
+                char nested[80];
+                shadow_indent_nest(nested, sizeof(nested), indent, 1);
+                if (!cemit_fmt(out, "%s%s %s = %s;\n", nested, ex.elem, val,
+                               load_c)) {
+                    shadow_pw_pop_loop(ctx, pw, 0);
+                    return 0;
+                }
+                nbinds_mark = g_shadow_nbinds;
+                if (in_kind == 3) shadow_bind_name(fi.bind[0], "size_t", 0);
+                shadow_bind_name(val, ex.elem, 0);
+                bind_mark = shadow_push_block_binds(st->body, st->nbody);
+                if (ctx) {
+                    ok = shadow_emit_compound_body(st->body, st->nbody, out, ctx,
+                                                   nested, use_cleanup, 1);
+                } else {
+                    ok = 1;
+                    for (int k = 0; k < st->nbody && ok; k++) {
+                        if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, nested,
+                                                  use_cleanup))
+                            ok = 0;
+                    }
+                }
+                shadow_pop_fn_binds(bind_mark);
+                g_shadow_nbinds = nbinds_mark;
+                if (ok) ok = cemit_fmt(out, "%s}\n", indent);
+                shadow_pw_pop_loop(ctx, pw, 0);
+                return ok;
+            }
+        }
+        if (in_kind == 4) {
+            ShadowExtent ex_a, ex_b;
+            char len_a[256], len_b[256];
+            char load_a[384], load_b[384];
+            char idx[32];
+            char i1[80], i2[80];
+            int id = g_shadow_for_in_seq++;
+            if (!shadow_for_lookup_extent(fi.subj[0], &ex_a) ||
+                !shadow_for_lookup_extent(fi.subj[1], &ex_b)) {
+                shadow_pw_pop_loop(ctx, pw, 0);
+                return 0;
+            }
+            snprintf(idx, sizeof(idx), "__cc_fi_%d", id);
+            shadow_extent_len_c(&ex_a, fi.subj[0], len_a, sizeof(len_a));
+            shadow_extent_len_c(&ex_b, fi.subj[1], len_b, sizeof(len_b));
+            shadow_extent_load_c(&ex_a, fi.subj[0], idx, load_a, sizeof(load_a));
+            shadow_extent_load_c(&ex_b, fi.subj[1], idx, load_b, sizeof(load_b));
+            shadow_indent_nest(i1, sizeof(i1), indent, 1);
+            shadow_indent_nest(i2, sizeof(i2), indent, 2);
+            if (!cemit_fmt(out,
+                           "%s{\n"
+                           "%s    size_t __cc_zl_%d = (%s);\n"
+                           "%s    size_t __cc_zr_%d = (%s);\n"
+                           "%s    if (__cc_zl_%d != __cc_zr_%d) {\n",
+                           indent, i1, id, len_a, i1, id, len_b, i1, id, id)) {
+                shadow_pw_pop_loop(ctx, pw, 0);
+                return 0;
+            }
+            /* Language raise — not a Result unwrap. try_call's default
+             * __cc_uw_is_err/_err_at do not carry CC_ERR_INVALID_ARG. */
+            if (!cemit_fmt(out,
+                           "%s    CCError e = CC_ERROR(CC_ERR_INVALID_ARG, "
+                           "\"for-in zip: unequal lengths\");\n",
+                           i2)) {
+                shadow_pw_pop_loop(ctx, pw, 0);
+                return 0;
+            }
+            if (!shadow_emit_handler(out, ctx, "e", i2)) {
+                shadow_pw_pop_loop(ctx, pw, 0);
+                return 0;
+            }
+            /* Handler that does not return must not walk (shorter OOB). */
+            if (!cemit_fmt(out,
+                           "%s    } else {\n"
+                           "%s    for (size_t %s = 0; %s < __cc_zl_%d; ++%s) "
+                           "{\n",
+                           i1, i1, idx, idx, id, idx)) {
+                shadow_pw_pop_loop(ctx, pw, 0);
+                return 0;
+            }
+            {
+                char nested[80];
+                shadow_indent_nest(nested, sizeof(nested), indent, 2);
+                if (!cemit_fmt(out, "%s%s %s = %s;\n%s%s %s = %s;\n", nested,
+                               ex_a.elem, fi.bind[0], load_a, nested, ex_b.elem,
+                               fi.bind[1], load_b)) {
+                    shadow_pw_pop_loop(ctx, pw, 0);
+                    return 0;
+                }
+                nbinds_mark = g_shadow_nbinds;
+                shadow_bind_name(fi.bind[0], ex_a.elem, 0);
+                shadow_bind_name(fi.bind[1], ex_b.elem, 0);
+                bind_mark = shadow_push_block_binds(st->body, st->nbody);
+                if (ctx) {
+                    ok = shadow_emit_compound_body(st->body, st->nbody, out, ctx,
+                                                   nested, use_cleanup, 1);
+                } else {
+                    ok = 1;
+                    for (int k = 0; k < st->nbody && ok; k++) {
+                        if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, nested,
+                                                  use_cleanup))
+                            ok = 0;
+                    }
+                }
+                shadow_pop_fn_binds(bind_mark);
+                g_shadow_nbinds = nbinds_mark;
+                if (ok) ok = cemit_fmt(out, "%s    }\n%s    }\n%s}\n", i1, i1,
+                                       indent);
+                shadow_pw_pop_loop(ctx, pw, 0);
+                return ok;
+            }
+        }
+        /* Header is raw text (`i < files.len()`) — peel UFCS like conds. */
         shadow_emit_expr_text(st, header, lowered, sizeof(lowered), NULL);
         if (!cemit_fmt(out, "%sfor (%s) {\n", indent, lowered)) {
             shadow_pw_pop_loop(ctx, pw, 0);
             return 0;
         }
-        char nested[80];
-        shadow_indent_nest(nested, sizeof(nested), indent, 1);
-        /* Same as AST_BLOCK: bind body locals so UFCS sees the receiver type. */
-        bind_mark = shadow_push_block_binds(st->body, st->nbody);
-        if (ctx) {
-            ok = shadow_emit_compound_body(st->body, st->nbody, out, ctx, nested,
-                                           use_cleanup, 1);
-        } else {
-            ok = 1;
-            for (int k = 0; k < st->nbody && ok; k++) {
-                if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, nested,
-                                          use_cleanup))
-                    ok = 0;
+        {
+            char nested[80];
+            shadow_indent_nest(nested, sizeof(nested), indent, 1);
+            bind_mark = shadow_push_block_binds(st->body, st->nbody);
+            if (ctx) {
+                ok = shadow_emit_compound_body(st->body, st->nbody, out, ctx,
+                                               nested, use_cleanup, 1);
+            } else {
+                ok = 1;
+                for (int k = 0; k < st->nbody && ok; k++) {
+                    if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, nested,
+                                              use_cleanup))
+                        ok = 0;
+                }
             }
+            shadow_pop_fn_binds(bind_mark);
+            if (ok) ok = cemit_fmt(out, "%s}\n", indent);
+            shadow_pw_pop_loop(ctx, pw, 0);
+            return ok;
         }
-        shadow_pop_fn_binds(bind_mark);
-        if (ok) ok = cemit_fmt(out, "%s}\n", indent);
-        shadow_pw_pop_loop(ctx, pw, 0);
-        return ok;
     }
     case AST_SLICE_INIT:
         /* Type name[:] = {…} → buffer + CCSlice_T_from_buffer (or stub view).
@@ -7046,6 +7236,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                    (strcmp(expr, "{}") == 0 || strcmp(expr, "{ }") == 0)) {
             snprintf(expr, sizeof(expr), "%s_from_buffer(0, 0)", ty);
         }
+        if (!shadow_cast_decl_init(ty, st->c, expr, sizeof(expr))) return 0;
         return cemit_fmt(out, "%s%s %s = %s;\n", indent, ty, st->b, expr);
     }
     case AST_UFCS_STMT: {
@@ -7125,6 +7316,8 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             else
                 snprintf(call, sizeof(call), "%s.%s(%s)", st->a, st->b, st->c);
         }
+        shadow_emit_leftover_qmark_rewrite(call, sizeof(call));
+        if (!shadow_rewrite_bang_exprs(call, sizeof(call), ctx)) return 0;
         if (strncmp(st->d, "bang_block:", 11) == 0 ||
             strncmp(st->d, "bang_await_block:", 16) == 0) {
             const char* bind = strncmp(st->d, "bang_await_block:", 16) == 0

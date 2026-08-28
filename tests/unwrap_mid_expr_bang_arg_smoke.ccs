@@ -1,0 +1,43 @@
+#!ccc ccs
+/* `!>` in the middle of expressions — args, infix, `if`, `return`. */
+#include <stdio.h>
+
+int !>(CCError) always_err(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "e");
+}
+
+int !>(CCError) always_ok(void) {
+    return cc_ok(99);
+}
+
+static int sink(int v) { return v + 1; }
+
+static int two(int a, int b) { return a + b; }
+
+static int ret_bang(int want_ok) {
+    @errhandler(CCError e) {
+        (void)e;
+        return -1;
+    }
+    if (want_ok)
+        return always_ok() !>;
+    return always_err() !>;
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        (void)e;
+        return 1;
+    }
+    int a = sink(always_ok() !>);
+    int b = two(always_ok() !>, 3);
+    int c = two(1, always_ok() !>);
+    int d = (always_ok() !>) + (always_ok() !>);
+    int taken = 0;
+    if (always_ok() !> > 10) taken = 1;
+    int rb_ok = ret_bang(1);
+    int rb_err = ret_bang(0);
+    printf("a=%d b=%d c=%d d=%d taken=%d rb=%d/%d\n",
+           a, b, c, d, taken, rb_ok, rb_err);
+    return 0;
+}

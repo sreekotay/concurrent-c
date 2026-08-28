@@ -67,9 +67,7 @@ int main(void) {
     }
 
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile t@(CAP, STAGES, arena) @destroy;
-    if (!cc_exclusive_is_live(t.excl))
-        return 1;
+    CCTurnstile t@(CAP, STAGES, arena) !> @destroy;
 
     CCTurnstile* tp = &t;
     int i;

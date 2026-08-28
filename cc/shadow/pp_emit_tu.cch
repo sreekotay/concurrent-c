@@ -1016,6 +1016,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
     /* @typeview modes before UFCS/field checks (erased typedefs emit later).
      * Builtins first (slice family); TU decls may redeclare if compatible. */
     shadow_restrict_register_builtins();
+    g_shadow_extent_len_store_fn = shadow_extent_check_len_store;
     shadow_restrict_register_from_items(items, n);
     /* Glob typeview as: faces → exact embeds once fields / slice instances known. */
     shadow_as_materialize_all_globs();
@@ -3154,10 +3155,17 @@ ginst_emit_pass:
                 tl = 2;
             }
             tok[tl] = 0;
-            fprintf(stderr,
-                    "%s:%zu:%zu: error: unlowered Concurrent-C token '%s' in "
-                    "emit product (refuse host C)\n",
-                    path, line, col, tok[0] ? tok : "?");
+            if (strcmp(tok, "?>") == 0 || strcmp(tok, "!>") == 0)
+                fprintf(stderr,
+                        "%s:%zu:%zu: error: '%s' was not lowered — it must "
+                        "follow a call or identifier, including inside "
+                        "arguments\n",
+                        path, line, col, tok);
+            else
+                fprintf(stderr,
+                        "%s:%zu:%zu: error: Concurrent-C token '%s' was not "
+                        "lowered\n",
+                        path, line, col, tok[0] ? tok : "?");
             if (le > ls)
                 fprintf(stderr, "  %.*s\n", (int)(le - ls), ls);
             out->err = 1;

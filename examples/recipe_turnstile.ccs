@@ -6,13 +6,13 @@
  * wait/pass create a gate cell on first touch. Declare the turnstile
  * before the nursery so join finishes before the depth channel is freed.
  *
- *   CCTurnstileRW ts@(cap, arena) @destroy;
+ *   CCTurnstileRW ts@(cap, arena) !> @destroy;
  *   ts.enter(i) !>;
  *   ts.read.wait(i) !>;  …  ts.read.pass(i) !>;
  *   ts.write.wait(i) !>; …  ts.write.pass(i) !>;
  *   ts.leave() !>;
  *
- * Index form: CCTurnstile t@(cap, n_stages, arena); t.stage(k).wait(i).
+ * Index form: CCTurnstile t@(cap, n_stages, arena) !> @destroy; t.stage(k).wait(i).
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/script/stdio.cch>
@@ -46,9 +46,7 @@ int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstileRW ts@(CAP, arena) @destroy;
-    if (!cc_exclusive_is_live(ts.core.excl))
-        return 1;
+    CCTurnstileRW ts@(CAP, arena) !> @destroy;
 
     CCTurnstileRW* tsp = &ts;
     int i;

@@ -1,4 +1,4 @@
-- typeview: negative^, views (cast) generalize, validate, hooks
+- typeview: views (cast) generalize, validate, hooks
 - ccfile and io cleanup
 - slices, strings, ptrs ,arenas, etc 
 - @create pointer vs val confusions

@@ -136,8 +136,11 @@ dead, epochs as fields, failure is unchanged):
 [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs).
 
 Ordinary slice sites allow loads and UFCS; field stores (`s.len = …`) are
-denied (`@typeview` on the slice family). Tutorial:
-[@typehooks / @typeview](typehooks-typeviews.md).
+denied. The walk is `for (v in s)` (also enumerate / zip / range): the
+compiler pays `i < live .len` and loads. Users do not write `s.access(i)`.
+A guess at a slot is `s.at(i) !>` / `s.set(i, v) !>`. `T*` is not an
+extent. C `for (;;)` is unchanged. Tutorial:
+[@typehooks / @typeview](typehooks-typeviews.md#extent--len--access).
 
 | Arena | Lifetime + storage policy | Typical use |
 |-------|---------------------------|-------------|

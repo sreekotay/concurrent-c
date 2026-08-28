@@ -33,6 +33,11 @@ typedef struct {
     CCOwnedResourceFreeFn create_owner_free;
     char* pre_destroy_call;
     char* destroy_call;
+    char* cast_call;
+    char* len_kind;
+    char* len_name;
+    char* access_kind;
+    char* access_name;
     char* ufcs_dynamic_callee;
     char* ufcs_dynamic_wrap;
     int has_niche;
@@ -187,6 +192,11 @@ void cc_symbols_free(CCSymbolTable* t) {
         }
         free(t->types[i].pre_destroy_call);
         free(t->types[i].destroy_call);
+        free(t->types[i].cast_call);
+        free(t->types[i].len_kind);
+        free(t->types[i].len_name);
+        free(t->types[i].access_kind);
+        free(t->types[i].access_name);
         free(t->types[i].ufcs_dynamic_callee);
         free(t->types[i].ufcs_dynamic_wrap);
         if (t->types[i].ufcs_owner && t->types[i].ufcs_owner_free) {
@@ -367,6 +377,140 @@ int cc_symbols_set_type_pre_destroy_call(CCSymbolTable* t, const char* type_name
     free(entry->pre_destroy_call);
     entry->pre_destroy_call = copy;
     return 0;
+}
+
+int cc_symbols_set_type_cast_call(CCSymbolTable* t, const char* type_name,
+                                  const char* callee) {
+    CCTypeEntry* entry = NULL;
+    char* copy = NULL;
+    int err;
+    if (!t || !type_name || !callee) return EINVAL;
+    err = cc__ensure_type_entry(t, type_name, &entry);
+    if (err != 0) return err;
+    copy = strdup(callee);
+    if (!copy) return ENOMEM;
+    free(entry->cast_call);
+    entry->cast_call = copy;
+    return 0;
+}
+
+int cc_symbols_lookup_type_cast_call(CCSymbolTable* t, const char* type_name,
+                                     const char** out_callee) {
+    CCTypeEntry* best_entry = NULL;
+    size_t best_len = 0;
+    if (!t || !type_name || !out_callee) return EINVAL;
+    *out_callee = NULL;
+    for (size_t ti = 0; ti < t->type_count; ++ti) {
+        CCTypeEntry* entry = &t->types[ti];
+        size_t plen;
+        size_t score;
+        if (!entry->cast_call || !entry->cast_call[0]) continue;
+        if (!cc__ufcs_pattern_matches(entry->type_name, type_name)) continue;
+        plen = strlen(entry->type_name);
+        score = (plen > 0 && entry->type_name[plen - 1] == '*') ? plen - 1 : plen;
+        if (!best_entry || score > best_len) {
+            best_entry = entry;
+            best_len = score;
+            *out_callee = entry->cast_call;
+        }
+    }
+    return best_entry ? 0 : ENOENT;
+}
+
+int cc_symbols_set_type_len(CCSymbolTable* t, const char* type_name,
+                            const char* kind, const char* name) {
+    CCTypeEntry* entry = NULL;
+    char* ck = NULL;
+    char* cn = NULL;
+    int err;
+    if (!t || !type_name || !kind || !name) return EINVAL;
+    err = cc__ensure_type_entry(t, type_name, &entry);
+    if (err != 0) return err;
+    ck = strdup(kind);
+    cn = strdup(name);
+    if (!ck || !cn) {
+        free(ck);
+        free(cn);
+        return ENOMEM;
+    }
+    free(entry->len_kind);
+    free(entry->len_name);
+    entry->len_kind = ck;
+    entry->len_name = cn;
+    return 0;
+}
+
+int cc_symbols_lookup_type_len(CCSymbolTable* t, const char* type_name,
+                               const char** out_kind, const char** out_name) {
+    CCTypeEntry* best_entry = NULL;
+    size_t best_len = 0;
+    if (!t || !type_name || !out_kind || !out_name) return EINVAL;
+    *out_kind = NULL;
+    *out_name = NULL;
+    for (size_t ti = 0; ti < t->type_count; ++ti) {
+        CCTypeEntry* entry = &t->types[ti];
+        size_t plen;
+        size_t score;
+        if (!entry->len_name || !entry->len_name[0]) continue;
+        if (!cc__ufcs_pattern_matches(entry->type_name, type_name)) continue;
+        plen = strlen(entry->type_name);
+        score = (plen > 0 && entry->type_name[plen - 1] == '*') ? plen - 1 : plen;
+        if (!best_entry || score > best_len) {
+            best_entry = entry;
+            best_len = score;
+            *out_kind = entry->len_kind;
+            *out_name = entry->len_name;
+        }
+    }
+    return best_entry ? 0 : ENOENT;
+}
+
+int cc_symbols_set_type_access(CCSymbolTable* t, const char* type_name,
+                               const char* kind, const char* name) {
+    CCTypeEntry* entry = NULL;
+    char* ck = NULL;
+    char* cn = NULL;
+    int err;
+    if (!t || !type_name || !kind || !name) return EINVAL;
+    err = cc__ensure_type_entry(t, type_name, &entry);
+    if (err != 0) return err;
+    ck = strdup(kind);
+    cn = strdup(name);
+    if (!ck || !cn) {
+        free(ck);
+        free(cn);
+        return ENOMEM;
+    }
+    free(entry->access_kind);
+    free(entry->access_name);
+    entry->access_kind = ck;
+    entry->access_name = cn;
+    return 0;
+}
+
+int cc_symbols_lookup_type_access(CCSymbolTable* t, const char* type_name,
+                                  const char** out_kind, const char** out_name) {
+    CCTypeEntry* best_entry = NULL;
+    size_t best_len = 0;
+    if (!t || !type_name || !out_kind || !out_name) return EINVAL;
+    *out_kind = NULL;
+    *out_name = NULL;
+    for (size_t ti = 0; ti < t->type_count; ++ti) {
+        CCTypeEntry* entry = &t->types[ti];
+        size_t plen;
+        size_t score;
+        if (!entry->access_name || !entry->access_name[0]) continue;
+        if (!cc__ufcs_pattern_matches(entry->type_name, type_name)) continue;
+        plen = strlen(entry->type_name);
+        score = (plen > 0 && entry->type_name[plen - 1] == '*') ? plen - 1 : plen;
+        if (!best_entry || score > best_len) {
+            best_entry = entry;
+            best_len = score;
+            *out_kind = entry->access_kind;
+            *out_name = entry->access_name;
+        }
+    }
+    return best_entry ? 0 : ENOENT;
 }
 
 int cc_symbols_set_type_ufcs_dynamic(CCSymbolTable* t, const char* type_name,
@@ -1127,6 +1271,76 @@ static int cc__parse_type_hooks_object(CCSymbolTable* t,
                 continue;
             }
         }
+        if (cc__match_kw_reg(src, obj_r, p, "cast")) {
+            size_t expr_s = 0;
+            size_t expr_e = 0;
+            size_t depth = 0;
+            int in_str = 0, in_chr = 0;
+            char handler[256];
+            size_t hn = 0;
+            p += strlen("cast");
+            p = cc__skip_ws_reg(src, obj_r, p);
+            if (p >= obj_r || src[p] != '=') return -1;
+            p = cc__skip_ws_reg(src, obj_r, p + 1);
+            expr_s = p;
+            while (p < obj_r) {
+                char c = src[p];
+                char c2 = (p + 1 < obj_r) ? src[p + 1] : 0;
+                if (in_str) {
+                    if (c == '\\' && c2) { p += 2; continue; }
+                    if (c == '"') in_str = 0;
+                    p++;
+                    continue;
+                }
+                if (in_chr) {
+                    if (c == '\\' && c2) { p += 2; continue; }
+                    if (c == '\'') in_chr = 0;
+                    p++;
+                    continue;
+                }
+                if (c == '"') { in_str = 1; p++; continue; }
+                if (c == '\'') { in_chr = 1; p++; continue; }
+                if (c == '(' || c == '{' || c == '[') { depth++; p++; continue; }
+                if (c == ')' || c == '}' || c == ']') {
+                    if (depth == 0) break;
+                    depth--;
+                    p++;
+                    continue;
+                }
+                if (c == ',' && depth == 0) {
+                    p++;
+                    break;
+                }
+                p++;
+            }
+            expr_e = p;
+            while (expr_s < expr_e && isspace((unsigned char)src[expr_s])) expr_s++;
+            while (expr_e > expr_s && isspace((unsigned char)src[expr_e - 1])) expr_e--;
+            if (expr_e > expr_s && src[expr_e - 1] == ',') expr_e--;
+            while (expr_e > expr_s && isspace((unsigned char)src[expr_e - 1])) expr_e--;
+            if (expr_e <= expr_s) return -1;
+            if (!cc_is_ident_start(src[expr_s])) {
+                fprintf(stderr,
+                        "%s: error: .cast handler for '%s' must be a function ident\n",
+                        input_path ? input_path : "<input>", type_name);
+                return -1;
+            }
+            hn = 0;
+            while (expr_s + hn < expr_e && cc_is_ident_char(src[expr_s + hn]) &&
+                   hn + 1 < sizeof(handler))
+                hn++;
+            if (expr_s + hn != expr_e) {
+                fprintf(stderr,
+                        "%s: error: .cast handler for '%s' must be a function ident\n",
+                        input_path ? input_path : "<input>", type_name);
+                return -1;
+            }
+            memcpy(handler, src + expr_s, hn);
+            handler[hn] = 0;
+            if (cc_symbols_set_type_cast_call(t, type_name, handler) != 0)
+                return -1;
+            continue;
+        }
         if (cc__match_kw_reg(src, obj_r, p, "ufcs")) {
             size_t expr_s = 0;
             size_t expr_e = 0;
@@ -1184,6 +1398,54 @@ static int cc__parse_type_hooks_object(CCSymbolTable* t,
                 }
             }
             continue;
+        }
+        if (cc__match_kw_reg(src, obj_r, p, "len")) {
+            char name[256];
+            p += strlen("len");
+            p = cc__skip_ws_reg(src, obj_r, p);
+            if (p >= obj_r || src[p] != '=') return -1;
+            p++;
+            if (cc__parse_helper_call_1(src, obj_r, &p, "cc_type_len_field",
+                                       name, sizeof(name))) {
+                if (cc_symbols_set_type_len(t, type_name, "field", name) != 0)
+                    return -1;
+                continue;
+            }
+            if (cc__parse_helper_call_1(src, obj_r, &p, "cc_type_len_call",
+                                       name, sizeof(name))) {
+                if (cc_symbols_set_type_len(t, type_name, "call", name) != 0)
+                    return -1;
+                continue;
+            }
+            fprintf(stderr,
+                    "%s: error: malformed .len = cc_type_len_field/call(\"...\" ) "
+                    "for '%s'\n",
+                    input_path ? input_path : "<input>", type_name);
+            return -1;
+        }
+        if (cc__match_kw_reg(src, obj_r, p, "access")) {
+            char name[256];
+            p += strlen("access");
+            p = cc__skip_ws_reg(src, obj_r, p);
+            if (p >= obj_r || src[p] != '=') return -1;
+            p++;
+            if (cc__parse_helper_call_1(src, obj_r, &p, "cc_type_access_load",
+                                       name, sizeof(name))) {
+                if (cc_symbols_set_type_access(t, type_name, "load", name) != 0)
+                    return -1;
+                continue;
+            }
+            if (cc__parse_helper_call_1(src, obj_r, &p, "cc_type_access_call",
+                                       name, sizeof(name))) {
+                if (cc_symbols_set_type_access(t, type_name, "call", name) != 0)
+                    return -1;
+                continue;
+            }
+            fprintf(stderr,
+                    "%s: error: malformed .access = cc_type_access_load/call(\"...\" ) "
+                    "for '%s'\n",
+                    input_path ? input_path : "<input>", type_name);
+            return -1;
         }
         fprintf(stderr, "%s: error: unsupported cc_type_register hook field for '%s'\n",
                 input_path ? input_path : "<input>", type_name);

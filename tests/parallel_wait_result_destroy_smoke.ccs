@@ -76,9 +76,7 @@ static int !>(CCError) wave_ok(int use_par) {
         CCArena wave = cc_arena_heap(kilobytes(4)) @destroy {
             g_block++;
         };
-        CCTurnstile ts@(2, 1, arena) @destroy;
-        if (!cc_exclusive_is_live(ts.excl))
-            return cc_err(CC_ERR_OUT_OF_MEMORY, "ts");
+        CCTurnstile ts@(2, 1, arena) !> @destroy;
         int i;
         @parallel seq (use_par) wait (ts) for (i in 0..N) {
             @stage (ts, 0, i) { }
@@ -98,9 +96,7 @@ static int !>(CCError) wave_err(int use_par) {
         CCArena wave = cc_arena_heap(kilobytes(4)) @destroy {
             g_block++;
         };
-        CCTurnstile ts@(2, 1, arena) @destroy;
-        if (!cc_exclusive_is_live(ts.excl))
-            return cc_err(CC_ERR_OUT_OF_MEMORY, "ts");
+        CCTurnstile ts@(2, 1, arena) !> @destroy;
         int i;
         @parallel seq (use_par) wait (ts) for (i in 0..N) {
             boom(i) !>;

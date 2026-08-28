@@ -1,0 +1,23 @@
+/* Dest-init mint: CCBox::[H] b = &x / p → from_host via .cast. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    int x = 7;
+    int *p = &x;
+    CCBox::[int] b = &x;
+    CCBox::[int] c = p;
+    CCBox::[int] copy = b;
+    CCBox erased = &x;
+
+    if (!b.is_live()) return 1;
+    if (b.host() != &x) return 2;
+    if (*b.host() != 7) return 3;
+    if (c.host() != &x) return 4;
+    if (copy.host() != &x) return 5;
+    if (!cc_box_is_live(erased)) return 6;
+    if (cc_box_host(erased) != &x) return 7;
+
+    printf("ok\n");
+    return 0;
+}

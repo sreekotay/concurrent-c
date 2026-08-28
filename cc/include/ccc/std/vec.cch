@@ -404,6 +404,8 @@ __attribute__((constructor)) static void cc__ti_reg_${mangled}(void) {
 @typehooks on CCVec_* {
     .create = cc_type_create_call("_new"),
     .destroy = cc_type_destroy_call("_destroy"),
+    .len = cc_type_len_field("len"),
+    .access = cc_type_access_load("data"),
 };
 
 #endif /* CC_STD_VEC_H */

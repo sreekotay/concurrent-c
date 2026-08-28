@@ -2943,11 +2943,17 @@ static inline void* cc_arena_pool_iter_next(CCArenaPoolIter* it) {
 @typehooks on CCSliceShared* {
     .ufcs = cc_ufcs_generic_cc_slice_family_c,
 };
+@typehooks on CCSliceShared {
+    .len = cc_type_len_field("len"),
+    .access = cc_type_access_load("ptr"),
+};
 /* Bodyless `!> @destroy` / `s.destroy()` for adopted unique slices.
  * cc_slice_destroy no-ops when the alloc_id is not in the adopt registry. */
 @typehooks on CCSliceUnique {
     .destroy = cc_type_destroy_call("cc_slice_destroy"),
     .ufcs = cc_ufcs_generic_cc_slice_family_c,
+    .len = cc_type_len_field("len"),
+    .access = cc_type_access_load("ptr"),
 };
 
 /* Lifetime-parent modes (spec/draft_lifetime_parents.md, spec/draft_facets.md).

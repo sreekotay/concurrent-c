@@ -39,24 +39,24 @@ typedef struct {
     int inited;
 } ZState;
 
-static void put_u32le(unsigned char* p, unsigned long v) {
-    p[0] = (unsigned char)v;
-    p[1] = (unsigned char)(v >> 8);
-    p[2] = (unsigned char)(v >> 16);
-    p[3] = (unsigned char)(v >> 24);
-}
-
-static void gzip_trailer(unsigned char t[8], unsigned long crc, unsigned long isize) {
-    put_u32le(t, crc);
-    put_u32le(t + 4, isize);
-}
-
-static CCSlice gzip_hdr_slice(void) {
-    return cc_slice_from_buffer((void*)GZIP_HDR, sizeof(GZIP_HDR));
-}
-
 static size_t deflate_cap(size_t n) {
     return n + (n >> 3) + 1024;
+}
+
+static void !>(CCError) zs_prepare(ZState* zs) {
+    z_stream* strm = &zs->strm;
+    if (zs->inited && deflateReset(strm) != Z_OK) {
+        deflateEnd(strm);
+        zs->inited = 0;
+    }
+    if (!zs->inited) {
+        memset(strm, 0, sizeof(*strm));
+        if (deflateInit2(strm, LEVEL, Z_DEFLATED, -15, 8,
+                         Z_DEFAULT_STRATEGY) != Z_OK)
+            return cc_err(CC_ERR_IO, "deflateInit2");
+        zs->inited = 1;
+    }
+    return cc_ok();
 }
 
 static unsigned char* !>(CCError) read_block(int in_fd, CCArenaPool* pool,
@@ -77,6 +77,7 @@ static unsigned char* !>(CCError) read_block(int in_fd, CCArenaPool* pool,
 static CompressedResult* !>(CCError) compress_slice(CCSlice data,
         const unsigned char* dict, size_t dict_len, bool is_last,
         ZState* zs, CCArenaPool* out_pool) {
+    @errhandler(CCError e) { return cc_err(e); }
     size_t max_out = deflate_cap((size_t)BLOCK_SIZE);
     CompressedResult* res = (CompressedResult*)out_pool.alloc();
     @defer(err) out_pool->free(res);
@@ -87,18 +88,8 @@ static CompressedResult* !>(CCError) compress_slice(CCSlice data,
     res->original_len = data.len;
     res->crc = crc32(0UL, (const Bytef*)data.ptr, (uInt)data.len);
 
+    zs_prepare(zs) !>;
     z_stream* strm = &zs->strm;
-    if (zs->inited && deflateReset(strm) != Z_OK) {
-        deflateEnd(strm);
-        zs->inited = 0;
-    }
-    if (!zs->inited) {
-        memset(strm, 0, sizeof(*strm));
-        if (deflateInit2(strm, LEVEL, Z_DEFLATED, -15, 8,
-                         Z_DEFAULT_STRATEGY) != Z_OK)
-            return cc_err(CC_ERR_IO, "deflateInit2");
-        zs->inited = 1;
-    }
     if (dict_len)
         deflateSetDictionary(strm, dict, (uInt)dict_len);
 
@@ -150,12 +141,10 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
         return cc_err(CC_ERR_INVALID_ARG, "too many blocks");
     int n = (int)n_sz;
 
-    out_file.write(gzip_hdr_slice()) !>;
+    out_file.write(cc_slice_from_buffer((void*)GZIP_HDR, sizeof(GZIP_HDR))) !>;
 
     CCArena ts_arena = cc_arena_heap(megabytes(2)) @destroy;
-    CCTurnstileRW ts@(CAP, &ts_arena) @destroy;
-    if (!cc_exclusive_is_live(ts.core.excl))
-        return cc_err(CC_ERR_OUT_OF_MEMORY, "cc_turnstile_create failed");
+    CCTurnstileRW ts@(CAP, ts_arena) !> @destroy;
 
     CCArenaPool in_pool;
     if (cc_arena_pool(&in_pool, (size_t)BLOCK_SIZE) != 0)
@@ -223,8 +212,13 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
         out_pool.free(r);
     } !>.wait()!>;
 
-    unsigned char t[8];
-    gzip_trailer(t, crc, (unsigned long)(file_len & 0xffffffffUL));
+    unsigned long isize = (unsigned long)(file_len & 0xffffffffUL);
+    unsigned char t[8] = {
+        (unsigned char)crc, (unsigned char)(crc >> 8),
+        (unsigned char)(crc >> 16), (unsigned char)(crc >> 24),
+        (unsigned char)isize, (unsigned char)(isize >> 8),
+        (unsigned char)(isize >> 16), (unsigned char)(isize >> 24),
+    };
     out_file.write(cc_slice_from_buffer(t, sizeof(t))) !>;
 
     out_file.sync() !>;

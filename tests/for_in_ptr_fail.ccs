@@ -1,0 +1,11 @@
+/* T* is not an extent. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    int buf[2] = { 1, 2 };
+    int *p = buf;
+    int n = 0;
+    for (v in p)
+        n += v;
+    return n;
+}

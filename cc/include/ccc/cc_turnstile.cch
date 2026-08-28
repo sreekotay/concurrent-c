@@ -4,13 +4,13 @@
  * One core (depth channel + stages[]). The named 2-stage bind is field
  * aliases over that array — not a second implementation:
  *
- *   CCTurnstile t@(cap, n_stages, &arena) @destroy;
+ *   CCTurnstile t@(cap, n_stages, arena) !> @destroy;
  *   t.enter(i) !>;
  *   t.stage(k).wait(i) !>;  …  t.stage(k)->pass(i) !>;
  *   t.wait(k, i) !>;         …  t.pass(k, i) !>;
  *   t.leave() !>;
  *
- *   CCTurnstileRW ts@(cap, &arena) @destroy;
+ *   CCTurnstileRW ts@(cap, arena) !> @destroy;
  *   ts.enter(i) !>;
  *   ts.read.wait(i) !>;  …  ts.read.pass(i) !>;
  *   ts.write.wait(i) !>; …  ts.write.pass(i) !>;
@@ -42,6 +42,9 @@ typedef struct CCTurnstile {
     CCTurnstileStage* stages;
     int cap;
     int n_stages;
+    /* RW: stages live at (CCTurnstile*)+1 (`read`/`write`). Survives
+     * Result unwrap / by-value copy; `stages` alone would dangle. */
+    int stages_embedded;
 } CCTurnstile;
 
 static inline void cc_turnstile_destroy(CCTurnstile* t);
@@ -54,15 +57,27 @@ static inline uint64_t cc_turnstile_stage_name(const CCTurnstileStage* s, int i)
     return s->name_base + (uint64_t)i;
 }
 
+static inline CCTurnstileStage* cc_turnstile_slots(CCTurnstile* t) {
+    if (!t)
+        return NULL;
+    if (t->stages_embedded)
+        return (CCTurnstileStage*)(t + 1);
+    return t->stages;
+}
+
 static inline int cc_turnstile_ready(const CCTurnstile* t) {
-    return t && cc_exclusive_is_live(t->excl) && t->depth_ch && t->stages &&
-           t->n_stages > 0;
+    return t && cc_exclusive_is_live(t->excl) && t->depth_ch &&
+           t->n_stages > 0 && (t->stages_embedded || t->stages);
 }
 
 static inline CCTurnstileStage* cc_turnstile_stage(CCTurnstile* t, int k) {
-    if (!t || !t->stages || k < 0 || k >= t->n_stages)
+    CCTurnstileStage* slots;
+    if (!t || k < 0 || k >= t->n_stages)
         return NULL;
-    return &t->stages[k];
+    slots = cc_turnstile_slots(t);
+    if (!slots)
+        return NULL;
+    return &slots[k];
 }
 
 static inline void cc_turnstile_stage_destroy(CCTurnstileStage* s) {
@@ -140,12 +155,15 @@ static inline void !>(CCError) cc_turnstile_fail(CCTurnstile* t, int k, int i) {
 
 static inline void cc_turnstile_destroy(CCTurnstile* t) {
     int k;
+    CCTurnstileStage* slots;
     if (!t)
         return;
-    if (t->stages) {
+    slots = cc_turnstile_slots(t);
+    if (slots) {
         for (k = 0; k < t->n_stages; k++)
-            cc_turnstile_stage_destroy(&t->stages[k]);
+            cc_turnstile_stage_destroy(&slots[k]);
         t->stages = NULL;
+        t->stages_embedded = 0;
     }
     if (t->depth_ch) {
         cc_channel_raw_free(t->depth_ch);
@@ -158,13 +176,14 @@ static inline void cc_turnstile_destroy(CCTurnstile* t) {
 }
 
 /* slots[0..n_stages) must be contiguous CCTurnstileStage storage. */
-static inline int cc_turnstile_init(CCTurnstile* t, int cap, int n_stages,
-                                   CCArena arena, CCTurnstileStage* slots) {
+static inline void !>(CCError) cc_turnstile_init(CCTurnstile* t, int cap,
+                                                int n_stages, CCArena arena,
+                                                CCTurnstileStage* slots) {
     int k;
     int tok = 1;
 
     if (!t || !cc_arena_is_live(arena) || !slots || cap < 1 || n_stages < 1)
-        return -1;
+        return cc_err(CC_ERR_INVALID_ARG, "cc_turnstile_init");
     memset(t, 0, sizeof(*t));
     t->cap = cap;
     t->n_stages = n_stages;
@@ -175,42 +194,44 @@ static inline int cc_turnstile_init(CCTurnstile* t, int cap, int n_stages,
         CCResult_CCExclusive_CCError er =
             cc_exclusive_create(arena, (size_t)cap * 4 + 8);
         if (!er.ok)
-            return -1;
+            return cc_err(er.u.error);
         t->excl = er.u.value;
     }
 
     for (k = 0; k < n_stages; k++) {
         if (cc_turnstile_stage_init(&slots[k], t->excl.p,
                                     cc_turnstile_stage_base(k)) != 0)
-            return -1;
+            return cc_err(CC_ERR_INVALID_ARG, "cc_turnstile_init: stage");
     }
 
     t->depth_ch = cc_chan_create((size_t)cap);
     if (!t->depth_ch || cc_chan_init_elem(t->depth_ch, sizeof(int)) != 0)
-        return -1;
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "cc_turnstile_init: depth channel");
     for (k = 0; k < cap; k++) {
         if (cc_channel_raw_send(t->depth_ch, &tok, sizeof(tok)) != 0)
-            return -1;
+            return cc_err(CC_ERR_OUT_OF_MEMORY, "cc_turnstile_init: depth tokens");
     }
-    return 0;
+    return cc_ok();
 }
 
-static inline CCTurnstile cc_turnstile_create(int cap, int n_stages,
-                                             CCArena arena) {
+static inline CCTurnstile !>(CCError) cc_turnstile_create(int cap, int n_stages,
+                                                         CCArena arena) {
     CCTurnstile t;
     CCTurnstileStage* slots;
+    void !>(CCError) ir;
 
     memset(&t, 0, sizeof(t));
     if (!cc_arena_is_live(arena) || cap < 1 || n_stages < 1)
-        return t;
+        return cc_err(CC_ERR_INVALID_ARG, "cc_turnstile_create");
     slots = cc_arena_alloc_T_count(CCTurnstileStage, arena, (size_t)n_stages);
     if (!slots)
-        return t;
-    if (cc_turnstile_init(&t, cap, n_stages, arena, slots) != 0) {
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "cc_turnstile_create");
+    ir = cc_turnstile_init(&t, cap, n_stages, arena, slots);
+    if (!ir.ok) {
         cc_turnstile_destroy(&t);
-        memset(&t, 0, sizeof(t));
+        return cc_err(ir.u.error);
     }
-    return t;
+    return cc_ok(t);
 }
 
 #define cc_turnstile_init(t, cap, n, a, slots) \
@@ -257,14 +278,19 @@ _Static_assert(offsetof(CCTurnstileRW, write) ==
                    offsetof(CCTurnstileRW, read) + sizeof(CCTurnstileStage),
                "CCTurnstileRW read/write must be contiguous stages");
 
-static inline CCTurnstileRW cc_turnstile_rw_create(int cap, CCArena arena) {
+static inline CCTurnstileRW !>(CCError) cc_turnstile_rw_create(int cap,
+                                                             CCArena arena) {
     CCTurnstileRW w;
+    void !>(CCError) ir;
     memset(&w, 0, sizeof(w));
-    if (cc_turnstile_init(&w.core, cap, 2, arena, &w.read) != 0) {
+    ir = cc_turnstile_init(&w.core, cap, 2, arena, &w.read);
+    if (!ir.ok) {
         cc_turnstile_destroy(&w.core);
         memset(&w, 0, sizeof(w));
+        return cc_err(ir.u.error);
     }
-    return w;
+    w.core.stages_embedded = 1;
+    return cc_ok(w);
 }
 #define cc_turnstile_rw_create(cap, a) \
     (cc_turnstile_rw_create)((cap), CC__ARENA_HANDLE(a))

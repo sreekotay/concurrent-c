@@ -3,7 +3,7 @@
 [Getting Started](docs/getting-started.md) ·
 [The CC Way](docs/the-cc-way.md) · [Cheatsheet](docs/cheatsheet.md)
 
-**Version:** 0.3.4-237 (`ccc --version`)
+**Version:** 0.3.4-240 (`ccc --version`)
 
 Concurrent‑C is a **strict C11-superset preprocessor**: `.ccs` lowers to
 plain C and compiles with your **host C compiler**. Structured concurrency,
@@ -44,8 +44,8 @@ Fuller example (error policy + compose): [examples/hello.ccs](examples/hello.ccs
 - [Getting Started](docs/getting-started.md) — install, first program, concurrency
 - [The CC Way](docs/the-cc-way.md) — mental model for ownership, fallibility, and coordination
 - [cccportable](docs/cccportable.md) — ship emitted C so teammates compile with host `cc` only (`portable-install`, `CCCPORTABLE`, file-start pragmas)
-- [Language Concepts](docs/language-concepts.md) — defer, results, UFCS, slices/arenas (arena = lifetime; alloc = policy), closures
-- [@typehooks / @typeview](docs/typehooks-typeviews.md) — lifecycle hooks, is-a faces, allow-list views
+- [Language Concepts](docs/language-concepts.md) — defer, results, UFCS, slices/arenas (arena = lifetime; alloc = policy), walks, closures
+- [@typehooks / @typeview](docs/typehooks-typeviews.md) — lifecycle hooks, extent / `for in`, is-a faces, allow-list views
 - [Cheatsheet](docs/cheatsheet.md)
 - [Language spec](spec/concurrent-c-spec-complete.md)
 - [Stdlib](spec/concurrent-c-stdlib-spec.md)

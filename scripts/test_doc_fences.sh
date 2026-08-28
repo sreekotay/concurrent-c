@@ -31,7 +31,7 @@ else
 fi
 
 # Pin so deleting a tutorial fence is a loud miss, not a quieter suite.
-TYPEHOOKS_TUTORIAL_FENCES=9
+TYPEHOOKS_TUTORIAL_FENCES=10
 
 python3 - "$CCC" "$TYPEHOOKS_TUTORIAL_FENCES" "${DOCS[@]}" <<'PY'
 import pathlib, re, subprocess, sys, tempfile, os
