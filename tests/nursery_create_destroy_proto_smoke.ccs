@@ -14,7 +14,7 @@ int main(void) {
         };
         n.spawn(() => {
             g_task_ran = 1;
-        });
+        }) !>;
     }
 
     if (g_task_ran != 1) return 2;

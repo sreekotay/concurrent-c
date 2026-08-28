@@ -70,8 +70,10 @@ static inline void !>(CCError) cc_parallel_wait(CCParallel* h) {
         return cc_err(CC_ERR_INVALID_ARG, "cc_parallel_wait");
     if (cc_atomic_load(&h->joined))
         return cc_ok();
-    if (h->n)
-        (void)cc_nursery_wait(h->n);
+    if (h->n) {
+        CCResult_void_CCError wr = cc_nursery_wait(h->n);
+        if (!wr.ok) return wr;
+    }
     for (i = 0; i < h->nt; i++) {
         cc_parallel_join(h->tasks[i]);
         free(h->envs[i]);

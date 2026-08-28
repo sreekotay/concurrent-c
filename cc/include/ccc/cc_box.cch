@@ -1,0 +1,94 @@
+/*
+ * Named pointer. Copy shares the host. Dead is p == NULL (never-born or
+ * consumed). Use fails; root birth is a handle, not Result.
+ *
+ * Bare CCBox is the erased core ({ void *p }). CCBox::[H] is the typed
+ * instance. CCExclusive / CCNursery are the factory aliases.
+ * CCArena is that ABI (`.p`); it still aliases `.base`.
+ *
+ * Later: dest-init `CCBox::[H] b = &x` → from_host (decl only; not Arena/Nursery).
+ */
+#ifndef CC_BOX_H
+#define CC_BOX_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+typedef struct CCBox {
+    void *p;
+} CCBox;
+
+static inline CCBox cc_box_empty(void) {
+    CCBox b;
+    b.p = NULL;
+    return b;
+}
+
+static inline CCBox cc_box_from_host(void *h) {
+    CCBox b;
+    b.p = h;
+    return b;
+}
+
+static inline int cc_box_is_live(CCBox b) {
+    return b.p != NULL;
+}
+
+static inline void *cc_box_host(CCBox b) {
+    return b.p;
+}
+
+#define CC_DECL_BOX_SPEC(NAME, H)                                              \
+    typedef struct NAME {                                                      \
+        H *p;                                                                  \
+    } NAME;                                                                    \
+    static inline NAME NAME##_empty(void) {                                    \
+        NAME b;                                                                \
+        b.p = NULL;                                                            \
+        return b;                                                              \
+    }                                                                          \
+    static inline NAME NAME##_from_host(H *h) {                                \
+        NAME b;                                                                \
+        b.p = h;                                                               \
+        return b;                                                              \
+    }                                                                          \
+    static inline int NAME##_is_live(NAME *b) {                                \
+        return b && b->p != NULL;                                              \
+    }                                                                          \
+    static inline H *NAME##_host(NAME *b) {                                    \
+        return b ? b->p : NULL;                                                \
+    }
+
+/* Harvested from this `.cch` (blanked from the lowered `.h`). */
+CC_GENERIC_FACTORY(CCBox, 1) {
+    return @emit(`
+#ifdef CC_FRAGMENT_VALIDATE
+typedef struct ${arg(0)} { char _; } ${arg(0)};
+typedef struct { void *p; } CCBox;
+#endif
+#ifndef ${mangled}_DEFINED
+#define ${mangled}_DEFINED
+typedef struct ${mangled} {
+    ${arg(0)} *p;
+} ${mangled};
+static inline ${mangled} ${mangled}_empty(void) {
+    ${mangled} b;
+    b.p = NULL;
+    return b;
+}
+static inline ${mangled} ${mangled}_from_host(${arg(0)} *h) {
+    ${mangled} b;
+    b.p = h;
+    return b;
+}
+static inline int ${mangled}_is_live(${mangled} *b) {
+    return b && b->p != NULL;
+}
+static inline ${arg(0)} *${mangled}_host(${mangled} *b) {
+    return b ? b->p : NULL;
+}
+#endif
+`, arena);
+}
+
+#endif

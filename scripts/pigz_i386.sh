@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pigz_i386.sh — build/compare original pigz vs pigz_wait (and pigz_cc)
+# pigz_i386.sh — build/compare original pigz vs pigz_idiomatic (and pigz_cc)
 # inside linux/386 Docker.
 #
 # Host tree is mounted read-only; build artifacts stay in an anonymous /work volume.

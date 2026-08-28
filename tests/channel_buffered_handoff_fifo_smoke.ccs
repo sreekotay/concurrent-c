@@ -146,8 +146,8 @@ int main(void) {
         {
             CCNursery n = @create() !> @destroy;
             BigTx txr = tx; BigRx rxr = rx;
-            n.spawn(() => [txr] { big_sender_try_send_into(txr); });
-            n.spawn(() => [rxr] { big_receiver(rxr); });
+            n.spawn(() => [txr] { big_sender_try_send_into(txr); }) !>;
+            n.spawn(() => [rxr] { big_receiver(rxr); }) !>;
         }
     }
     if (cc_atomic_load(&g_errors) != 0) {
@@ -166,8 +166,8 @@ int main(void) {
         {
             CCNursery n = @create() !> @destroy;
             U64Tx txr = tx; U64Rx rxr = rx;
-            n.spawn(() => [txr] { u64_sender_blocking(txr); });
-            n.spawn(() => [rxr] { u64_receiver(rxr); });
+            n.spawn(() => [txr] { u64_sender_blocking(txr); }) !>;
+            n.spawn(() => [rxr] { u64_receiver(rxr); }) !>;
         }
     }
     if (cc_atomic_load(&g_errors) != 0) {

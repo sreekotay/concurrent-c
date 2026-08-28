@@ -33,10 +33,10 @@ int main(void) {
                 int v = -1;
                 rx.recv(&v);
                 if (v != 7) cc_atomic_fetch_add(&g_errors, 1);
-            });
+            }) !>;
             __cc_nursery15.spawn(() => [tx] {
                 tx.send(7);
-            });
+            }) !>;
         
         }
 

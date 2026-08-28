@@ -48,7 +48,7 @@ int main(void) {
             nur.spawn(() => [i, tsp] {
                 @errhandler(CCError e) cc_error_exit(e);
                 worker(tsp, i);
-            });
+            }) !>;
         }
     }
 

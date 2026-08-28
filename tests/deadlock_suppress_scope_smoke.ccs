@@ -51,7 +51,7 @@ static void child_deadlock_case(void) {
                 }
                 (void)chan_recv(rx, &v);
             }
-        });
+        }) !>;
     }
 
     chan_free(ch);

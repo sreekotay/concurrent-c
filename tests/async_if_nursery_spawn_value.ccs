@@ -13,7 +13,7 @@ int g = 0;
         {
             CCNursery __cc_nursery3 = @create() !> @destroy;
 
-            __cc_nursery3.spawn(() => { g = 9; });
+            __cc_nursery3.spawn(() => { g = 9; }) !>;
         
         }
     int x = @await noop(g);

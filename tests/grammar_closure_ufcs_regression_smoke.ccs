@@ -48,7 +48,7 @@ int main(void) {
         /* bug 1: closures force the proto-insertion path */
         CCNursery n = cc_nursery_create() !>;
         int base = 5;
-        n.spawn(() => [base] { (void)base; });
+        n.spawn(() => [base] { (void)base; }) !>;
         cc_nursery_wait(n);
         cc_nursery_free(n);
     }

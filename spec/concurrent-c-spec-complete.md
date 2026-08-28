@@ -3526,15 +3526,18 @@ The compiler enforces the following normative rules:
 code observes it through `n.is_cancelled()`, `cc_cancelled()`, or a
 wait that explicitly observes the current nursery. Nursery wait still joins
 every admitted child before teardown returns. A child return value does not
-cancel peers; the spawn wrapper and library API determine how task errors are
-reported.
+cancel peers.
+
+`n.spawn(...)` is admission: it fails when the child cannot be queued
+(dead nursery, OOM). A child body error is not spawn's result. `n.wait()`
+is the join: it reports the first child join error, if any. A bare spawn
+or wait that ignores Result is ill-formed.
 
 ```c
 CCNursery n = cc_nursery_create() !> @destroy;
-n.spawn(() => ok_task());
-n.spawn(() => failing_task());     // returns cc_err(E)
-int child_err = n.wait();
-if (child_err != 0) return map_child_error(child_err);
+n.spawn(() => ok_task()) !>;
+n.spawn(() => failing_task()) !>;   /* admission ok; body error is wait */
+n.wait() !>(e) { return map_child_error(e); };
 // The sibling runs to completion unless code explicitly calls n.cancel().
 ```
 
@@ -3549,38 +3552,39 @@ nursery:
 
 ```c
 CCNursery outer = cc_nursery_create() !> @destroy;
-outer.spawn(() => consumer(rx));
+outer.spawn(() => consumer(rx)) !>;
 
 CCNursery producers = outer.create_child() !> @destroy { tx.close(); };
-producers.spawn(() => producer(tx));
+producers.spawn(() => producer(tx)) !>;
 ```
 
 The producer nursery joins producers, closes `tx`, and frees itself. The outer
 nursery can then join the consumer after it drains to `ok(false)`.
 
-The pre-destroy wait discards its join integer; its purpose here is ordering,
-not error forwarding.
+`@destroy` waits, then frees. Join error on that wait is not dropped
+(`cc_error_exit`). Use `n.wait() !>` when the join error has local policy.
 
 Use nested nurseries to sequence producer-close before consumer-drain:
 
 ```c
 CCNursery outer = cc_nursery_create() !> @destroy;
-outer.spawn(() => consumer(rx));
+outer.spawn(() => consumer(rx)) !>;
 
 CCNursery inner = outer.create_child() !> @destroy { tx.close(); };
-for (int w = 0; w < N; w++) inner.spawn(() => worker(tx));
+for (int w = 0; w < N; w++) inner.spawn(() => worker(tx)) !>;
 // inner's @destroy closes tx after workers exit; consumer drains and
 // outer's @destroy joins the consumer.
 ```
 
 **Registered close form.** `n.close_on(tx)` is UFCS for
-`cc_nursery_add_closing_tx(n, tx)`. It registers `tx` to close after nursery
+`cc_nursery_close_on(n, tx)` (same registration as `cc_nursery_add_closing_tx`).
+It registers `tx` to close after nursery
 wait, or on the `abandon` last-exit path, and before nursery storage is released:
 
 ```c
 CCNursery n = cc_nursery_create() !> @destroy;
-n.close_on(tx);                    // equivalent to @destroy { tx.close(); }
-n.spawn(() => producer(tx));
+n.close_on(tx) !>;                 // equivalent to @destroy { tx.close(); }
+n.spawn(() => producer(tx)) !>;
 ```
 
 An explicit `@destroy { tx.close(); }` body and `close_on(tx)` have the same

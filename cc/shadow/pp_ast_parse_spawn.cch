@@ -1,4 +1,4 @@
-/* Parse: spawn / send_task / closure / capture infer.
+/* Parse: closure / capture infer (nursery spawn and send_task are UFCS).
  * Included from pp_ast_parse_stmt.cch. */
 #pragma once
 
@@ -300,6 +300,7 @@ static int parse_call_arg_closure(Parser* p, int c0, int end, char* dst,
     int rp = -1;
     int bare;
     int arity;
+    int is_unsafe = 0;
     char formals[96];
     if (out_cl) *out_cl = NULL;
     if (!p || !dst || !cap || c0 < 0 || end > p->n || c0 >= end) return 0;
@@ -307,9 +308,20 @@ static int parse_call_arg_closure(Parser* p, int c0, int end, char* dst,
     cl = find_arrow_closure(p, c0, end, &rp);
     /* rp==-2 is bare-ident form (valid). */
     if (cl < 0 || (rp < 0 && rp != -2)) return 0;
-    bare = (cl == c0);
+    {
+        /* `@unsafe () =>` — the unsafe mark is on the literal, not a call arg. */
+        int cl0 = cl;
+        if (rp != -2 && cl >= c0 + 2 &&
+            tok_eq(p->toks[cl - 2], TK_PUNCT, "@") &&
+            p->toks[cl - 1].kind == TK_IDENT &&
+            spell_eq(p->toks[cl - 1].spell, "unsafe")) {
+            cl0 = cl - 2;
+            is_unsafe = 1;
+        }
+        bare = (cl0 == c0);
+    }
     if (!bare) {
-        int pre_end = cl;
+        int pre_end = is_unsafe ? cl - 2 : cl;
         size_t L;
         while (pre_end > c0 && tok_eq(p->toks[pre_end - 1], TK_PUNCT, ","))
             pre_end--;
@@ -376,6 +388,7 @@ static int parse_call_arg_closure(Parser* p, int c0, int end, char* dst,
         else
             n->c[0] = 0;
         n->e[0] = 0;
+        if (is_unsafe) snprintf(n->f, sizeof(n->f), "unsafe");
         /* Optional explicit captures: `=> [rx, @safe &db, &tx] { … }` */
         if (tok_eq(p_peek(p), TK_PUNCT, "[")) {
             p_next(p);
@@ -983,321 +996,6 @@ static void spawn_infer_value_caps(AstNode* n) {
         spawn_infer_value_caps_stmt(n, n->body[k]);
 }
 
-/* recv -> spawn ( [@unsafe] ( ) => [caps] { stmts } ) ; */
-/* Also `recv.spawn(() => …)` (UFCS spelling). */
-/* recv.spawn(() => …) starting at p->i — no trailing `;` (stmt vs expr). */
-static AstNode* parse_spawn_closure_core(Parser* p) {
-    Token recv = p_peek(p);
-    int arrow_i;
-    int i;
-    if (recv.kind != TK_IDENT) return NULL;
-    if (p->i + 7 >= p->n) return NULL;
-    if (!tok_eq(p->toks[p->i + 1], TK_PUNCT, "->") &&
-        !tok_eq(p->toks[p->i + 1], TK_PUNCT, "."))
-        return NULL;
-    {
-        Token meth = p->toks[p->i + 2];
-        int is_spawn = (shadow_kw(meth) == SHADOW_KW_SPAWN);
-        int is_hybrid = (meth.kind == TK_IDENT &&
-                         spell_eq(meth.spell, "spawnhybrid"));
-        if (!is_spawn && !is_hybrid) return NULL;
-    }
-    if (!tok_eq(p->toks[p->i + 3], TK_PUNCT, "(")) return NULL;
-    /* Optional `@unsafe` before `() =>`. */
-    i = p->i + 4;
-    int is_unsafe = 0;
-    int is_hybrid =
-        (p->toks[p->i + 2].kind == TK_IDENT &&
-         spell_eq(p->toks[p->i + 2].spell, "spawnhybrid"));
-    if (i + 1 < p->n && tok_eq(p->toks[i], TK_PUNCT, "@") &&
-        p->toks[i + 1].kind == TK_IDENT &&
-        spell_eq(p->toks[i + 1].spell, "unsafe")) {
-        is_unsafe = 1;
-        i += 2;
-    }
-    if (i + 2 >= p->n) return NULL;
-    if (!tok_eq(p->toks[i], TK_PUNCT, "(") ||
-        !tok_eq(p->toks[i + 1], TK_PUNCT, ")") ||
-        !tok_eq(p->toks[i + 2], TK_PUNCT, "=>"))
-        return NULL;
-    arrow_i = i + 2;
-
-    p_next(p); /* recv */
-    p_next(p); /* -> or . */
-    p_next(p); /* spawn | spawnhybrid */
-    p_next(p); /* ( */
-    while (p->i < arrow_i - 2) p_next(p); /* optional @unsafe */
-    p_next(p); /* ( */
-    p_next(p); /* ) */
-    p_next(p); /* => */
-
-    AstNode* n = ast_new(p, AST_SPAWN_CLOSURE);
-    if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), recv.spell);
-    if (is_hybrid)
-        snprintf(n->b, sizeof(n->b), "%s",
-                 is_unsafe ? "spawnhybrid_unsafe" : "spawnhybrid");
-    else
-        snprintf(n->b, sizeof(n->b), "%s",
-                 is_unsafe ? "spawn_unsafe" : "spawn");
-    n->e[0] = 0;
-
-    if (tok_eq(p_peek(p), TK_PUNCT, "[")) {
-        p_next(p);
-        while (!tok_eq(p_peek(p), TK_PUNCT, "]") && p_peek(p).kind != TK_EOF &&
-               !p->err) {
-            char item[80];
-            if (!parse_spawn_capture_item(p, item, sizeof(item), 0))
-                return NULL;
-            spawn_caps_add(n->e, sizeof(n->e), item);
-            if (tok_eq(p_peek(p), TK_PUNCT, ",")) p_next(p);
-        }
-        if (!p_accept(p, TK_PUNCT, "]")) {
-            parser_fail(p, p_peek(p), "expected ']' after capture list");
-            return NULL;
-        }
-    }
-
-    if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
-        p_next(p); /* { */
-        while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF &&
-               !p->err) {
-            AstNode* s = parse_stmt(p);
-            if (!s) return NULL;
-            if (n->nbody >= SHADOW_BODY_CAP) {
-                parser_fail_body_cap(p, p_peek(p), "spawn closure body");
-                return NULL;
-            }
-            n->body[n->nbody++] = s;
-        }
-        if (!p_accept(p, TK_PUNCT, "}")) {
-            parser_fail(p, p_peek(p), "expected '}' to close spawn closure");
-            return NULL;
-        }
-        if (!p_accept(p, TK_PUNCT, ")")) {
-            parser_fail(p, p_peek(p), "expected ')' after spawn(() => { ... })");
-            return NULL;
-        }
-    } else {
-        int e0 = p->i;
-        int depth = 1;
-        while (p->i < p->n && depth > 0) {
-            Token t = p_peek(p);
-            if (tok_eq(t, TK_PUNCT, "(")) depth++;
-            else if (tok_eq(t, TK_PUNCT, ")")) {
-                depth--;
-                if (depth == 0) break;
-            }
-            p_next(p);
-        }
-        char expr[256];
-        if (!span_text(p, e0, p->i, expr, sizeof(expr))) {
-            parser_fail(p, p_peek(p), "spawn expression body too long");
-            return NULL;
-        }
-        if (!p_accept(p, TK_PUNCT, ")")) {
-            parser_fail(p, p_peek(p), "expected ')' after spawn(() => expr)");
-            return NULL;
-        }
-        /* Beachhead: `name(args)` → CALL_ARGS body so collect_spawns emits a
-         * real closure (not cc_nursery_spawn_fn with a void call). */
-        {
-            const char* lp = strchr(expr, '(');
-            const char* rp = expr[0] ? strrchr(expr, ')') : NULL;
-            if (lp && rp && rp > lp && n->nbody < 8) {
-                AstNode* s = ast_new(p, AST_CALL_ARGS);
-                size_t nl;
-                size_t al;
-                if (!s) return NULL;
-                nl = (size_t)(lp - expr);
-                while (nl > 0 && (expr[nl - 1] == ' ' || expr[nl - 1] == '\t'))
-                    nl--;
-                if (nl >= sizeof(s->a)) nl = sizeof(s->a) - 1;
-                memcpy(s->a, expr, nl);
-                s->a[nl] = 0;
-                al = (size_t)(rp - lp - 1);
-                if (al >= sizeof(s->b)) al = sizeof(s->b) - 1;
-                memcpy(s->b, lp + 1, al);
-                s->b[al] = 0;
-                n->body[n->nbody++] = s;
-                n->c[0] = 0;
-            } else {
-                snprintf(n->c, sizeof(n->c), "%s", expr);
-            }
-        }
-    }
-    spawn_infer_value_caps(n);
-    return n;
-}
-
-/* recv.spawn(() => …); */
-static AstNode* parse_spawn_closure(Parser* p) {
-    AstNode* n = parse_spawn_closure_core(p);
-    if (!n) return NULL;
-    if (!p_accept(p, TK_PUNCT, ";")) {
-        parser_fail(p, p_peek(p), "expected ';' after spawn(...)");
-        return NULL;
-    }
-    return n;
-}
-
-/* toks[c0..c1) starts with recv.spawn|spawnhybrid(() => …) — if/while cond.
- * Also accepts `.` UFCS spelling. On success: *out_sp set, *out_after = index
- * after spawn's `)`, returns 1. */
-static int try_parse_spawn_cond(Parser* p, int c0, int c1, AstNode** out_sp,
-                                int* out_after) {
-    int saved_i, saved_err, saved_nn, saved_nk;
-    AstNode* sp;
-    if (!p || c0 < 0 || c1 > p->n || c0 + 7 >= c1 || !out_sp) return 0;
-    if (p->toks[c0].kind != TK_IDENT) return 0;
-    if (!tok_eq(p->toks[c0 + 1], TK_PUNCT, "->") &&
-        !tok_eq(p->toks[c0 + 1], TK_PUNCT, "."))
-        return 0;
-    {
-        Token meth = p->toks[c0 + 2];
-        int is_spawn = (shadow_kw(meth) == SHADOW_KW_SPAWN);
-        int is_hybrid = (meth.kind == TK_IDENT &&
-                         spell_eq(meth.spell, "spawnhybrid"));
-        if (!is_spawn && !is_hybrid) return 0;
-    }
-    if (!tok_eq(p->toks[c0 + 3], TK_PUNCT, "(")) return 0;
-    /* Detailed `[@unsafe] () =>` shape validated by parse_spawn_closure_core. */
-    saved_i = p->i;
-    saved_err = p->err;
-    saved_nn = p->nn;
-    saved_nk = p->nkstore;
-    p->i = c0;
-    sp = parse_spawn_closure_core(p);
-    if (!sp || p->err || p->i > c1) {
-        p->i = saved_i;
-        p->err = saved_err;
-        p->nn = saved_nn;
-        p->nkstore = saved_nk;
-        return 0;
-    }
-    *out_sp = sp;
-    if (out_after) *out_after = p->i;
-    p->i = saved_i;
-    return 1;
-}
-
-/* recv.send_task[|_hybrid](() => [caps] { stmts }|expr); — ordered-task beachhead. */
-static AstNode* parse_send_task_closure(Parser* p) {
-    Token recv = p_peek(p);
-    int is_hybrid = 0;
-    if (recv.kind != TK_IDENT) return NULL;
-    if (p->i + 7 >= p->n) return NULL;
-    if (!tok_eq(p->toks[p->i + 1], TK_PUNCT, ".")) return NULL;
-    if (p->toks[p->i + 2].kind != TK_IDENT) return NULL;
-    if (spell_eq(p->toks[p->i + 2].spell, "send_task_hybrid"))
-        is_hybrid = 1;
-    else if (!spell_eq(p->toks[p->i + 2].spell, "send_task"))
-        return NULL;
-    if (!tok_eq(p->toks[p->i + 3], TK_PUNCT, "(")) return NULL;
-    if (!tok_eq(p->toks[p->i + 4], TK_PUNCT, "(")) return NULL;
-    if (!tok_eq(p->toks[p->i + 5], TK_PUNCT, ")")) return NULL;
-    if (!tok_eq(p->toks[p->i + 6], TK_PUNCT, "=>")) return NULL;
-
-    p_next(p); /* recv */
-    p_next(p); /* . */
-    p_next(p); /* send_task[_hybrid] */
-    p_next(p); /* ( */
-    p_next(p); /* ( */
-    p_next(p); /* ) */
-    p_next(p); /* => */
-
-    AstNode* n = ast_new(p, AST_SPAWN_CLOSURE);
-    if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), recv.spell);
-    snprintf(n->b, sizeof(n->b), "%s",
-             is_hybrid ? "send_task_hybrid" : "send_task");
-    n->e[0] = 0;
-
-    if (tok_eq(p_peek(p), TK_PUNCT, "[")) {
-        p_next(p);
-        while (!tok_eq(p_peek(p), TK_PUNCT, "]") && p_peek(p).kind != TK_EOF &&
-               !p->err) {
-            char item[80];
-            if (!parse_spawn_capture_item(p, item, sizeof(item), 0))
-                return NULL;
-            spawn_caps_add(n->e, sizeof(n->e), item);
-            if (tok_eq(p_peek(p), TK_PUNCT, ",")) p_next(p);
-        }
-        if (!p_accept(p, TK_PUNCT, "]")) {
-            parser_fail(p, p_peek(p), "expected ']' after capture list");
-            return NULL;
-        }
-    }
-
-    if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
-        p_next(p); /* { */
-        while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF &&
-               !p->err) {
-            AstNode* s = parse_stmt(p);
-            if (!s) return NULL;
-            if (n->nbody >= SHADOW_BODY_CAP) {
-                parser_fail_body_cap(p, p_peek(p), "send_task closure body");
-                return NULL;
-            }
-            n->body[n->nbody++] = s;
-        }
-        if (!p_accept(p, TK_PUNCT, "}")) {
-            parser_fail(p, p_peek(p), "expected '}' to close send_task closure");
-            return NULL;
-        }
-    } else {
-        /* `tx.send_task(() => [v] compute(v));` expression body. */
-        int e0 = p->i;
-        int depth = 1;
-        while (p->i < p->n && depth > 0) {
-            Token t = p_peek(p);
-            if (tok_eq(t, TK_PUNCT, "(")) depth++;
-            else if (tok_eq(t, TK_PUNCT, ")")) {
-                depth--;
-                if (depth == 0) break;
-            }
-            p_next(p);
-        }
-        {
-            char expr[256];
-            if (!span_text(p, e0, p->i, expr, sizeof(expr))) {
-                parser_fail(p, p_peek(p), "send_task expression body too long");
-                return NULL;
-            }
-            const char* lp = strchr(expr, '(');
-            const char* rp = expr[0] ? strrchr(expr, ')') : NULL;
-            if (lp && rp && rp > lp && n->nbody < 8) {
-                AstNode* s = ast_new(p, AST_CALL_ARGS);
-                size_t nl, al;
-                if (!s) return NULL;
-                nl = (size_t)(lp - expr);
-                while (nl > 0 && (expr[nl - 1] == ' ' || expr[nl - 1] == '\t'))
-                    nl--;
-                if (nl >= sizeof(s->a)) nl = sizeof(s->a) - 1;
-                memcpy(s->a, expr, nl);
-                s->a[nl] = 0;
-                al = (size_t)(rp - lp - 1);
-                if (al >= sizeof(s->b)) al = sizeof(s->b) - 1;
-                memcpy(s->b, lp + 1, al);
-                s->b[al] = 0;
-                n->body[n->nbody++] = s;
-            } else if (n->nbody < 8) {
-                AstNode* s = ast_new(p, AST_EXPR_STMT);
-                if (!s) return NULL;
-                snprintf(s->a, sizeof(s->a), "%s", expr);
-                n->body[n->nbody++] = s;
-            }
-        }
-    }
-    if (!p_accept(p, TK_PUNCT, ")")) {
-        parser_fail(p, p_peek(p), "expected ')' after send_task(() => …)");
-        return NULL;
-    }
-    if (!p_accept(p, TK_PUNCT, ";")) {
-        parser_fail(p, p_peek(p), "expected ';' after send_task(...)");
-        return NULL;
-    }
-    spawn_infer_value_caps(n);
-    return n;
-}
+/* recv.spawn(() => …) and recv.send_task(() => …) are ordinary UFCS
+ * plus a call-arg closure. !>; / !>(e){…} is the UFCS unwrap path. */
 

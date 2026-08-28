@@ -13,10 +13,10 @@ int main(void) {
             {
                 CCNursery __cc_nursery46 = @create() !> @destroy;
 
-                __cc_nursery46.spawn (() => { g = x; });
+                __cc_nursery46.spawn (() => { g = x; }) !>;
             
             }
-        });
+        }) !>;
     
     }
     return 0;

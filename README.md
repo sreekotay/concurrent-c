@@ -3,7 +3,7 @@
 [Getting Started](docs/getting-started.md) ·
 [The CC Way](docs/the-cc-way.md) · [Cheatsheet](docs/cheatsheet.md)
 
-**Version:** 0.3.4-233 (`ccc --version`)
+**Version:** 0.3.4-237 (`ccc --version`)
 
 Concurrent‑C is a **strict C11-superset preprocessor**: `.ccs` lowers to
 plain C and compiles with your **host C compiler**. Structured concurrency,
@@ -235,7 +235,7 @@ Test conventions: `tests/README.md`. Build driver / cache / outputs: [build spec
 last-good **0.3.3-173**: curated suite green for host+backend **gcc** and
 **TinyCC** (`./scripts/smoke_i386.sh`, `./scripts/smoke_arm32.sh`, and the
 same with `CCC_HOST_CC=tcc`). pigz compare on i386 and ARM32 (**0.3.3-174**):
-`pigz_wait` / `pigz_cc` / original all ELF 32-bit and gunzip-clean;
+`pigz_idiomatic` / `pigz_cc` / original all ELF 32-bit and gunzip-clean;
 numbers in [docs/ilp32-docker.md](docs/ilp32-docker.md). Earlier full
 `cc_test` on ARM32: **787 / 787** (`0.3.2-108`).
 

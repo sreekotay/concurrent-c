@@ -1,0 +1,30 @@
+/* Bare CCBox is the erased named pointer. CCBox::[H] is the typed instance.
+ * Arena / nursery handles share that ABI ({ p }). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    int x = 7;
+    CCBox::[int] b = CCBox_int_from_host(&x);
+    if (!b.is_live()) return 1;
+    if (b.host() != &x) return 2;
+    if (*b.host() != 7) return 3;
+
+    CCBox::[int] dead = CCBox_int_empty();
+    if (dead.is_live()) return 4;
+    if (dead.host() != NULL) return 5;
+
+    CCBox erased = cc_box_from_host(&x);
+    if (!cc_box_is_live(erased)) return 6;
+    if (cc_box_host(erased) != &x) return 7;
+
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    if (!a.p) return 8;
+    if (!cc_arena_is_live(a)) return 9;
+
+    CCNursery n = {0};
+    if (n.p) return 10;
+
+    printf("ok\n");
+    return 0;
+}

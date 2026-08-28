@@ -46,10 +46,10 @@ int main(void) {
     {
         CCNursery __cc_nursery18 = @create() !> @destroy;
 
-        __cc_nursery18.spawn(() => [tx1] { producer(tx1, ITERS); });
-        __cc_nursery18.spawn(() => [rx1] { consumer(rx1, ITERS); });
-        __cc_nursery18.spawn(() => [tx2] { producer(tx2, ITERS); });
-        __cc_nursery18.spawn(() => [rx2] { consumer(rx2, ITERS); });
+        __cc_nursery18.spawn(() => [tx1] { producer(tx1, ITERS); }) !>;
+        __cc_nursery18.spawn(() => [rx1] { consumer(rx1, ITERS); }) !>;
+        __cc_nursery18.spawn(() => [tx2] { producer(tx2, ITERS); }) !>;
+        __cc_nursery18.spawn(() => [rx2] { consumer(rx2, ITERS); }) !>;
     
     }
 

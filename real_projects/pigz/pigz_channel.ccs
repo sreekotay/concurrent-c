@@ -1,0 +1,286 @@
+#!ccc ccs
+/*
+ * pigz_channel.ccs — Parallel gzip via an ordered channel + send_task.
+ *
+ * Ordered channel + send_task (same shape as recipe_ordered_parallel.ccs):
+ *   producer: for each block → results_tx.send_task(() => compress)
+ *   consumer: recv on ordered rx → writes .gz bytes in submit order
+ *
+ */
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/script/stdio.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <zlib.h>
+
+#define BLOCK_SIZE (128 * 1024)
+#define BLOCK_ARENA_OVERHEAD 1024
+#define CHAN_CAP 16
+
+typedef struct {
+    long seq;
+    CCSlice data;
+    bool is_last;
+    CCArena arena;
+} Block;
+
+typedef struct {
+    long seq;
+    CCSlice data;
+    unsigned long crc;
+    size_t original_len;
+    bool is_last;
+    CCArena arena;
+} CompressedResult;
+
+cc_atomic_i64 g_bytes_in = 0;
+cc_atomic_i64 g_bytes_out = 0;
+cc_atomic_int g_blocks_done = 0;
+cc_atomic_int g_pipeline_error = 0;
+
+cc_atomic_u64 g_read_ns = 0;
+cc_atomic_u64 g_compress_ns = 0;
+cc_atomic_u64 g_recv_ns = 0;   /* ordered recv = wait for next handle + join */
+cc_atomic_u64 g_write_ns = 0;
+
+static inline uint64_t ns_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/* NULL = allocation or zlib failure (fills the ordered slot; not a channel err). */
+static CompressedResult* compress_block(Block* blk, int level) {
+    size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
+
+    CCArena res_arena_storage = cc_arena_heap(arena_size) @destroy;
+    if (!cc_arena_is_live(res_arena_storage)) return NULL;
+    CCArena* res_arena = &res_arena_storage;
+    CompressedResult* res = cc_arena_alloc_T(CompressedResult, res_arena);
+    if (!res) return NULL;
+
+    res->seq = blk->seq;
+    res->is_last = blk->is_last;
+    res->original_len = blk->data.len;
+    res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
+
+    size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
+    unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, res_arena, max_out);
+    if (!out_buf) return NULL;
+
+    unsigned char header[10] = {0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03};
+    memcpy(out_buf, header, 10);
+    size_t pos = 10;
+
+    z_stream strm = {0};
+    if (deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        return NULL;
+    }
+    strm.next_in = (Bytef*)blk->data.ptr;
+    strm.avail_in = (uInt)blk->data.len;
+    strm.next_out = out_buf + pos;
+    strm.avail_out = (uInt)(max_out - pos - 8);
+
+    int ret = deflate(&strm, Z_FINISH);
+    pos += strm.total_out;
+    deflateEnd(&strm);
+
+    if (ret != Z_STREAM_END) return NULL;
+
+    unsigned long crc = res->crc;
+    size_t in_len = blk->data.len;
+    out_buf[pos++] = crc & 0xff;
+    out_buf[pos++] = (crc >> 8) & 0xff;
+    out_buf[pos++] = (crc >> 16) & 0xff;
+    out_buf[pos++] = (crc >> 24) & 0xff;
+    out_buf[pos++] = in_len & 0xff;
+    out_buf[pos++] = (in_len >> 8) & 0xff;
+    out_buf[pos++] = (in_len >> 16) & 0xff;
+    out_buf[pos++] = (in_len >> 24) & 0xff;
+
+    res->data = res_arena->slice(out_buf, pos);
+    g_bytes_in.fetch_add((int64_t)blk->data.len);
+    g_bytes_out.fetch_add((int64_t)pos);
+    g_blocks_done.fetch_add(1);
+
+    res->arena = res_arena->detach() !>(e) { (void)e; return NULL; };
+    return res;
+}
+
+static bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
+    /* Soft-catch IoError so eprintln !>; can use a CCError handler (not re-enter). */
+    @errhandler(CCError e) {
+        cc_error_log(e);
+        g_pipeline_error.store(1);
+        return false;
+    }
+    size_t n = f->write(data) !>(e) {
+        eprintln(@string(`${what} failed kind=${e.base.kind} os=${e.os_code}`,
+                         @scratch)) !>;
+        g_pipeline_error.store(1);
+        return false;
+    };
+    if (n != data.len) {
+        eprintln(@string(`${what} short write ${n}/${data.len}`, @scratch)) !>;
+        g_pipeline_error.store(1);
+        return false;
+    }
+    return true;
+}
+
+int compress_file(const char* in_path, const char* out_path) {
+    @errhandler(CCError e) { return cc_err_log(e); }
+
+    g_pipeline_error.store(0);
+    g_bytes_in.store(0);
+    g_bytes_out.store(0);
+    g_blocks_done.store(0);
+    g_read_ns.store(0);
+    g_compress_ns.store(0);
+    g_recv_ns.store(0);
+    g_write_ns.store(0);
+
+    char[:0] in_s = cc_slice_cstr(in_path);
+    char[:0] out_s = cc_slice_cstr(out_path);
+
+    CCFile in_file;
+    if (in_file.open(in_s, "rb") != 0) {
+        eprintln(@string(`Failed to open input: ${in_path}`, @scratch)) !>;
+        return 1;
+    }
+    @defer in_file.close();
+
+    CCFile out_file;
+    if (out_file.open(out_s, "wb") != 0) {
+        eprintln(@string(`Failed to open output: ${out_path}`, @scratch)) !>;
+        return 1;
+    }
+    @defer out_file.close();
+
+    /* Ordered channel of CompressedResult* (NULL in a slot = compress failed). */
+    CompressedResult*[~CHAN_CAP >] results_tx;
+    CompressedResult*[~CHAN_CAP ordered <] results_rx;
+    CCChan* ch = cc_channel_pair(&results_tx, &results_rx) !> @destroy;
+
+    CCFile* in_ptr = &in_file;
+    CCFile* out_ptr = &out_file;
+
+    {
+        CCNursery consumer = cc_nursery_create() !> @destroy;
+
+        consumer.spawn(() => [out_ptr, results_rx] {
+            @errhandler(CCError e) cc_error_exit(e);
+            CompressedResult* item = NULL;
+            long expect_seq = 0;
+            while (true) {
+                uint64_t tr0 = ns_now();
+                item = NULL;
+                bool !>(CCIoError) got = results_rx.recv(&item);
+                g_recv_ns.fetch_add(ns_now() - tr0);
+                if (!cc_io_avail(got))
+                    break;
+                if (!item) {
+                    eprintln(@string(`compress task failed (OOM or zlib error)`,
+                                     @scratch)) !>;
+                    g_pipeline_error.store(1);
+                    results_rx.close();
+                    break;
+                }
+                if (item->seq != expect_seq) {
+                    eprintln(@string(`ORDER: expected=${expect_seq} got=${item->seq}`,
+                                     @scratch)) !>;
+                    g_pipeline_error.store(1);
+                }
+                expect_seq++;
+                uint64_t tw0 = ns_now();
+                if (!write_all_or_fail(out_ptr, item->data, "compressed output")) {
+                    item->arena.free();
+                    break;
+                }
+                g_write_ns.fetch_add(ns_now() - tw0);
+                item->arena.free();
+            }
+        }) !>;
+
+        /* Inner producer: close_on auto-closes results_tx when the producer
+         * nursery ends, so the consumer sees EOF after draining. */
+        {
+            CCNursery producer = consumer.create_child() !> @destroy;
+            (void)producer.close_on(results_tx);
+
+            producer.spawn(() => [in_ptr, results_tx] {
+                long seq = 0;
+                while (true) {
+                    if (g_pipeline_error.load()) break;
+
+                    CCArena blk_arena =
+                        cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD) @destroy;
+                    CCSlice data;
+                    uint64_t tread0 = ns_now();
+                    bool !>(CCIoError) read_res =
+                        in_ptr->read(&blk_arena, BLOCK_SIZE, &data);
+                    g_read_ns.fetch_add(ns_now() - tread0);
+
+                    if (read_res.is_err() || !cc_io_avail(read_res)) break;
+
+                    Block* cap = cc_arena_alloc_T(Block, &blk_arena);
+                    if (!cap) break;
+
+                    cap->seq = seq++;
+                    cap->data = data;
+                    cap->is_last = (data.len < BLOCK_SIZE);
+                    cap->arena = blk_arena.detach() !>;
+
+                    bool is_last = cap->is_last;
+                    results_tx.send_task(() => [cap] {
+                        uint64_t tc0 = ns_now();
+                        CompressedResult* out = compress_block(cap, 6);
+                        g_compress_ns.fetch_add(ns_now() - tc0);
+                        cap->arena.free();
+                        return out;
+                    });
+
+                    if (is_last) break;
+                }
+            }) !>;
+        }
+    }
+
+    (void)out_file.sync();
+    return g_pipeline_error.load() ? 1 : 0;
+}
+
+int main(int argc, char* argv[]) {
+    @errhandler(CCError e) { return cc_err_log(e); }
+
+    if (argc < 2) {
+        eprintln(@string(`Usage: ${argv[0]} <file>`, @scratch)) !>;
+        return 1;
+    }
+
+    char out_name[4096];
+    snprintf(out_name, sizeof(out_name), "%s.gz", argv[1]);
+
+    int ret = compress_file(argv[1], out_name);
+    if (ret == 0) {
+        long long bin = (long long)g_bytes_in.load();
+        long long bout = (long long)g_bytes_out.load();
+        int blocks = g_blocks_done.load();
+        println(@string(`Compressed ${argv[1]} -> ${out_name}`, @scratch)) !>;
+        println(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
+                        @scratch)) !>;
+        unsigned long long read_ns = g_read_ns.load();
+        unsigned long long c_ns = g_compress_ns.load();
+        unsigned long long recv_ns = g_recv_ns.load();
+        unsigned long long w_ns = g_write_ns.load();
+        println(@string(`phases(sum): read=${read_ns / 1000000}ms compress=${c_ns / 1000000}ms recv+join=${recv_ns / 1000000}ms write=${w_ns / 1000000}ms`,
+                        @scratch)) !>;
+    }
+
+    return ret;
+}

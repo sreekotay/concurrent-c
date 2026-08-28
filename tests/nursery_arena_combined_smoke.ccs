@@ -17,7 +17,7 @@ void test_nursery_then_arena(void) {
 
         __cc_nursery60.spawn(() => {
             printf("  spawned task\n");
-        });
+        }) !>;
     
     }
     
@@ -53,7 +53,7 @@ void test_arena_then_nursery(void) {
 
         __cc_nursery61.spawn(() => {
             printf("  spawned task\n");
-        });
+        }) !>;
     
     }
     
@@ -75,7 +75,7 @@ void test_interleaved(void) {
 
             __cc_nursery62.spawn(() => {
                 printf("  spawned inside arena\n");
-            });
+            }) !>;
         
         }
         
@@ -96,7 +96,7 @@ void test_interleaved(void) {
         
         __cc_nursery63.spawn(() => {
             printf("  spawned after arena\n");
-        });
+        }) !>;
     
     }
     

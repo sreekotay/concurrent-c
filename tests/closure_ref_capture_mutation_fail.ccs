@@ -12,7 +12,7 @@ int main(void) {
         /* ERROR: mutation of shared reference */
         __cc_nursery51.spawn(() => [&counter] {
             counter++;  /* This should produce a compile error */
-        });
+        }) !>;
     
     }
     

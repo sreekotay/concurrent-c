@@ -180,7 +180,7 @@ static inline int cc_turnstile_init(CCTurnstile* t, int cap, int n_stages,
     }
 
     for (k = 0; k < n_stages; k++) {
-        if (cc_turnstile_stage_init(&slots[k], t->excl.e,
+        if (cc_turnstile_stage_init(&slots[k], t->excl.p,
                                     cc_turnstile_stage_base(k)) != 0)
             return -1;
     }

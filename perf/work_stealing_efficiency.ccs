@@ -33,7 +33,7 @@ void imbalanced_producer() {
         CCNursery __cc_nursery179 = @create() !> @destroy;
 
         for (int i = 0; i < NUM_TASKS; i++) {
-            __cc_nursery179.spawn(() => { do_work(); });
+            __cc_nursery179.spawn(() => { do_work(); }) !>;
         }
     
     }
@@ -54,7 +54,7 @@ int main(void) {
         CCNursery __cc_nursery180 = @create() !> @destroy;
 
         for (int i = 0; i < NUM_TASKS; i++) {
-            __cc_nursery180.spawn(() => { do_work(); });
+            __cc_nursery180.spawn(() => { do_work(); }) !>;
         }
     
     }
@@ -67,7 +67,7 @@ int main(void) {
     {
         CCNursery __cc_nursery181 = @create() !> @destroy;
 
-        __cc_nursery181.spawn(() => { imbalanced_producer(); });
+        __cc_nursery181.spawn(() => { imbalanced_producer(); }) !>;
     
     }
     double imbalanced_ms = time_now_ms() - start;

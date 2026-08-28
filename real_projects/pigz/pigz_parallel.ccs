@@ -190,7 +190,7 @@ static void spawn_compress_all(CompressJob* job, int n) {
             @errhandler(CCError e) cc_error_exit(e);
             compress_and_write_i(job, i);
             ts->leave() !>;
-        });
+        }) !>;
     }
 }
 

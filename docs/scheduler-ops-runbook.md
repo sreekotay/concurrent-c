@@ -26,7 +26,7 @@ Representative correctness pins:
 
 Performance comparison surface:
 
-- `real_projects/pigz/` (`pigz_idiomatic` vs `pigz_pthread`)
+- `real_projects/pigz/` (`pigz_channel` vs `pigz_pthread`)
 - Payload: `real_projects/pigz/testdata/text_200mb.bin`
 - `perf/run_neckbeard_challenges.sh` — six cross-language scheduler
   challenges; the Named Exclusive Lock challenge
@@ -142,7 +142,7 @@ make -C cc
 Rebuild pigz targets when measuring that workload:
 
 ```sh
-make -C real_projects/pigz -B pigz_idiomatic pigz_pthread
+make -C real_projects/pigz -B pigz_channel pigz_pthread
 ```
 
 Stale runtime objects produce misleading results; rebuild `cc` before
@@ -185,7 +185,7 @@ inside the test child for a deterministic latch.
 cp real_projects/pigz/testdata/text_200mb.bin /tmp/pigz_idio.bin
 CC_V2_STATS=1 \
 CC_TASK_WAIT_STATS=1 CC_TASK_WAIT_STATS_DUMP=1 \
-./real_projects/pigz/out/pigz_idiomatic /tmp/pigz_idio.bin \
+./real_projects/pigz/out/pigz_channel /tmp/pigz_idio.bin \
   >/tmp/pigz_idio.out 2>/tmp/pigz_idio.err
 
 # Full with dict chaining (default) vs independent (-i, fair vs idiomatic):

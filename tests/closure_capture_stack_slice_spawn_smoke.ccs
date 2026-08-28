@@ -16,7 +16,7 @@ int main(void) {
     n.spawn(() => {
         int *p = (int*)s.ptr;
         if (p && p[0] == 7) g = 1;
-    });
+    }) !>;
     (void)cc_nursery_wait(n);
     cc_nursery_free(n);
     free(buf);

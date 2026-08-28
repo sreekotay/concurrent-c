@@ -41,13 +41,13 @@ int main(void) {
                     println(@string(`worker: processed job ${job}`, @scratch)) !>;
                     done_tx.send(job) !>;
                 }
-            });
+            }) !>;
         }
 
         /* Feeder in an inner nursery: its @destroy closes jobs_tx once feeder returns. */
         {
             CCNursery feeder = workers.create_child() !> @destroy;
-            (void)feeder.close_on(jobs_tx);
+            feeder.close_on(jobs_tx) !>;
 
             feeder.spawn(() => [jobs_tx] {
                 @errhandler(CCError e) cc_error_exit(e);
@@ -56,7 +56,7 @@ int main(void) {
                 }
                 int n = NUM_JOBS;
                 println(@string(`feeder: sent ${n} jobs`, @scratch)) !>;
-            });
+            }) !>;
         }
         /* feeder @destroy: jobs_tx closed → workers drain and exit. */
     }

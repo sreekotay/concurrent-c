@@ -1,0 +1,19 @@
+/* CCNursery is CCBox::[CCNurseryHost] — same type, one `.p`. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    CCNursery n = cc_nursery_create() !> @destroy;
+    CCBox::[CCNurseryHost] b = n;
+
+    if (!n.p) return 1;
+    if (!b.is_live()) return 2;
+    if (n.p != b.host()) return 3;
+
+    n.spawn(() => { }) !>;
+    n.wait() !>;
+
+    printf("ok\n");
+    return 0;
+}

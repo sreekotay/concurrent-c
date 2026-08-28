@@ -126,10 +126,10 @@ int main(void) {
         CCNursery n = @create() !> @destroy;
         n.spawn(() => [req_rx_raw, reply_tx_raw] {
             handoff_owner(req_rx_raw, reply_tx_raw);
-        });
+        }) !>;
         n.spawn(() => [req_tx_raw, reply_rx_raw] {
             handoff_client(req_tx_raw, reply_rx_raw);
-        });
+        }) !>;
     }
 
     int expected_total = REQUESTS;

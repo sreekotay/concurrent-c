@@ -62,8 +62,8 @@ int main(int argc, char** argv) {
         cc_atomic_int done = 0;
         CCNursery n = cc_nursery_create() !>;
         cc_atomic_store(&g_spin, (i % 97) * 29);
-        if (n.spawn(() => { child_spin(); }) != 0) return 41;
-        if (n.on_last(&done, finish_flag) != 0) return 42;
+        n.spawn(() => { child_spin(); }) !>;
+        n.on_last(&done, finish_flag) !>;
         n.abandon();
         if (!wait_flag(&done, 2000)) return 43;
     }

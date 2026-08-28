@@ -90,9 +90,11 @@ struct CCArenaHost {
 };
 
 typedef struct CCArena {
-    /* `.a` is the host. `.base` is the same pointer — last-good / host C
-     * still write `if (ar.base)` as liveness (same bits as `.a`); it is not the L1 slab. */
+    /* Same ABI as CCBox::[CCArenaHost]: one host pointer. `.p` is the box
+     * field. `.a` / `.base` are the same bits — last-good / host C still
+     * write `if (ar.base)` as liveness; `.base` is not the L1 slab. */
     union {
+        CCArenaHost *p;
         CCArenaHost *a;
         uint8_t *base;
     };
@@ -113,16 +115,16 @@ static inline CCResult_CCArena_CCError cc__arena_err(CCErrorKind k, const char *
 
 static inline CCArena cc_arena_handle(CCArenaHost *h) {
     CCArena r;
-    r.a = h;
+    r.p = h;
     return r;
 }
 
 static inline int cc_arena_is_live(CCArena a) {
-    return a.a != NULL && a.a->base != NULL;
+    return a.p != NULL && a.p->base != NULL;
 }
 
 static inline CCArenaHost *cc_arena_host(CCArena a) {
-    return a.a;
+    return a.p;
 }
 
 static inline CCArenaHost *cc_arena_hostp(const CCArena *p) {

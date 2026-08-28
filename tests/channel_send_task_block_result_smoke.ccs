@@ -29,7 +29,7 @@ int main(void) {
                     int res = compute_result(-1);
                     res;
                 });
-            });
+            }) !>;
         
         }
 

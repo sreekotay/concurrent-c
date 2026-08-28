@@ -17,7 +17,7 @@ int main(void) {
         CCNursery n = cc_nursery_create() !> @destroy;
         n.spawn(() => [base] {
             (void)base[0];
-        });
+        }) !>;
         cc_arena_destroy(&buf); /* ERROR: pin via arena_ptr capture */
     }
     return 0;

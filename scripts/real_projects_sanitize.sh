@@ -11,7 +11,7 @@
 # DYLD_INSERT / interceptor issues). Default on Darwin is build-with-flags
 # + skip run, or --docker for a full Linux pass. Ubuntu CI runs full.
 #
-# Mains: pigz_idiomatic, pigz_wait (PIGZ_DICT=1 SEQ+PAR), pigz_cc (build),
+# Mains: pigz_idiomatic (wait-for + PIGZ_DICT SEQ/PAR), pigz_channel, pigz_cc (build),
 # redis_idiomatic (+ smoke), levenshtein. See docs/sanitizers.md.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -214,21 +214,21 @@ build_run_pigz_idiomatic() {
 
 # Wait-for + cache(zs) + dict chain: take[] snapshot of a loop-carried slot.
 # SEQ is the serial body (no nursery). PAR is the race surface.
-build_run_pigz_wait() {
+build_run_pigz_idiomatic_dict() {
   local san="$1"
   local flags
   flags="$(san_flags "$san")"
-  local bin="$OUT/pigz_wait_${san}"
-  echo -e "${CYA}[$san]${NC} pigz_wait (PIGZ_DICT=1)"
+  local bin="$OUT/pigz_idiomatic_dict_${san}"
+  echo -e "${CYA}[$san]${NC} pigz_idiomatic (PIGZ_DICT=1)"
   if ! "$CCC" build --no-cache -g \
-      real_projects/pigz/pigz_wait.ccs -o "$bin" \
+      real_projects/pigz/pigz_idiomatic.ccs -o "$bin" \
       --cc-flags "$flags" --ld-flags "$flags -lz"; then
-    fail "pigz_wait build"
+    fail "pigz_idiomatic dict build"
     return
   fi
   if ! can_run_sanitized; then
-    skip "pigz_wait run (Darwin ASan/TSan runtime — use --docker / Linux CI)"
-    ok "pigz_wait build"
+    skip "pigz_idiomatic dict run (Darwin ASan/TSan runtime — use --docker / Linux CI)"
+    ok "pigz_idiomatic dict build"
     return
   fi
   python3 -c "open(r'$OUT/pw_in.bin','wb').write((b'The quick brown fox\n')*50000)"
@@ -237,25 +237,58 @@ build_run_pigz_wait() {
   export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1}"
   rm -f "$OUT/pw_in.bin.gz"
   if ! env PIGZ_DICT=1 PIGZ_SEQ=1 run_timeout "$bin" "$OUT/pw_in.bin"; then
-    fail "pigz_wait SEQ dict"
+    fail "pigz_idiomatic SEQ dict"
     return
   fi
   if command -v gzip >/dev/null 2>&1; then
-    gzip -t "$OUT/pw_in.bin.gz" || { fail "pigz_wait SEQ gzip"; return; }
+    gzip -t "$OUT/pw_in.bin.gz" || { fail "pigz_idiomatic SEQ gzip"; return; }
   fi
   mv "$OUT/pw_in.bin.gz" "$OUT/pw_seq.gz"
   if ! env PIGZ_DICT=1 run_timeout "$bin" "$OUT/pw_in.bin"; then
-    fail "pigz_wait PAR dict"
+    fail "pigz_idiomatic PAR dict"
     return
   fi
   if command -v gzip >/dev/null 2>&1; then
-    gzip -t "$OUT/pw_in.bin.gz" || { fail "pigz_wait PAR gzip"; return; }
+    gzip -t "$OUT/pw_in.bin.gz" || { fail "pigz_idiomatic PAR gzip"; return; }
   fi
   if ! cmp -s "$OUT/pw_seq.gz" "$OUT/pw_in.bin.gz"; then
-    fail "pigz_wait SEQ/PAR differ"
+    fail "pigz_idiomatic SEQ/PAR differ"
     return
   fi
-  ok "pigz_wait dict"
+  ok "pigz_idiomatic dict"
+}
+
+build_run_pigz_channel() {
+  local san="$1"
+  local flags ld
+  flags="$(san_flags "$san")"
+  ld="$flags"
+  local bin="$OUT/pigz_channel_${san}"
+  echo -e "${CYA}[$san]${NC} pigz_channel"
+  if ! "$CCC" build --no-cache -g \
+      real_projects/pigz/pigz_channel.ccs -o "$bin" \
+      --cc-flags "$flags" --ld-flags "$ld -lz"; then
+    fail "pigz_channel build"
+    return
+  fi
+  if ! can_run_sanitized; then
+    skip "pigz_channel run (Darwin ASan/TSan runtime — use --docker / Linux CI)"
+    ok "pigz_channel build"
+    return
+  fi
+  printf 'hello real_projects sanitize\n' >"$OUT/pigz_ch_in.txt"
+  rm -f "$OUT/pigz_ch_in.txt.gz"
+  export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1:detect_stack_use_after_return=0}"
+  export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1}"
+  if ! run_timeout "$bin" "$OUT/pigz_ch_in.txt"; then
+    fail "pigz_channel run"
+    return
+  fi
+  [ -f "$OUT/pigz_ch_in.txt.gz" ] || { fail "pigz_channel no .gz"; return; }
+  if command -v gzip >/dev/null 2>&1; then
+    gzip -t "$OUT/pigz_ch_in.txt.gz" || { fail "pigz_channel bad gzip"; return; }
+  fi
+  ok "pigz_channel"
 }
 
 build_pigz_cc() {
@@ -380,7 +413,8 @@ run_san() {
   local san="$1"
   echo -e "${YEL}=== real_projects $san (host=$HOST_OS) ===${NC}"
   build_run_pigz_idiomatic "$san"
-  build_run_pigz_wait "$san"
+  build_run_pigz_idiomatic_dict "$san"
+  build_run_pigz_channel "$san"
   build_pigz_cc "$san"
   build_run_redis "$san"
   build_run_levenshtein "$san"

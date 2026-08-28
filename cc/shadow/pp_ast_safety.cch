@@ -327,6 +327,31 @@ static int shadow_safe_amp_ident(const char* text, char* out, size_t cap) {
         i++;
         while (text[i] == ' ' || text[i] == '\t') i++;
     }
+    /* Box peel: `(recv).p` / `(recv)->p` is the same identity as recv. */
+    if (text[i] == '(') {
+        int depth = 1;
+        size_t j = i + 1;
+        char inner[160];
+        size_t inn = 0;
+        while (text[j] && depth) {
+            if (text[j] == '(') depth++;
+            else if (text[j] == ')') depth--;
+            if (depth == 0) break;
+            if (inn + 1 < sizeof(inner)) inner[inn++] = text[j];
+            j++;
+        }
+        inner[inn] = 0;
+        if (text[j] == ')') {
+            size_t k = j + 1;
+            while (text[k] == ' ' || text[k] == '\t') k++;
+            if (text[k] == '.' && text[k + 1] == 'p' &&
+                !shadow_safe_is_word(text[k + 2]))
+                return shadow_safe_amp_ident(inner, out, cap);
+            if (text[k] == '-' && text[k + 1] == '>' && text[k + 2] == 'p' &&
+                !shadow_safe_is_word(text[k + 3]))
+                return shadow_safe_amp_ident(inner, out, cap);
+        }
+    }
     /* Bare ident, or `obj.field` / `obj->field` lvalues (`&h.arena`). */
     if (!shadow_safe_is_word(text[i]) || (text[i] >= '0' && text[i] <= '9'))
         return 0;
@@ -3667,7 +3692,8 @@ static void shadow_safe_on_spawn(ShadowSafeCtx* ctx, AstNode* st, int escapes) {
     int is_unsafe;
     if (!ctx || !st || ctx->err) return;
     is_unsafe = (strcmp(st->b, "spawn_unsafe") == 0 ||
-                 strcmp(st->b, "spawnhybrid_unsafe") == 0);
+                 strcmp(st->b, "spawnhybrid_unsafe") == 0 ||
+                 strcmp(st->f, "unsafe") == 0);
     /* Task-escaping only for value-captured pointer alias mutation (legacy). */
     if (ctx->in_send_task) escapes = 1;
     p = st->e;
@@ -3764,7 +3790,16 @@ static void shadow_safe_walk_attached_closures(ShadowSafeCtx* ctx, AstNode* st,
                          strcmp(cl->b, "send_task_hybrid") == 0))
             ctx->in_send_task = 1;
         saved_npend = ctx->npending_moves;
-        shadow_safe_on_spawn(ctx, cl, escapes);
+        {
+            /* Nursery spawn is scoped for stack slices (`escapes` 0) but
+             * value-captured pointer alias mutation still task-escapes. */
+            int mut_esc = escapes;
+            if (st->kind == AST_UFCS_STMT &&
+                (strcmp(st->b, "spawn") == 0 ||
+                 strcmp(st->b, "spawnhybrid") == 0))
+                mut_esc = 1;
+            shadow_safe_on_spawn(ctx, cl, mut_esc);
+        }
         {
             int saved_nndefer = ctx->nndefer;
             int saved_ndefer_block = ctx->ndefer_block;
@@ -4044,7 +4079,15 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
             shadow_safe_on_unhandled_call(ctx, st);
         if (!ctx->err) shadow_safe_check_map_key_text(ctx, st, st->a);
         if (!ctx->err) shadow_safe_check_map_key_text(ctx, st, st->c);
-        if (!ctx->err) shadow_safe_walk_attached_closures(ctx, st, 1);
+        {
+            /* Nursery spawn is scoped — same as the old AST_SPAWN_CLOSURE path. */
+            int escapes = 1;
+            if (strcmp(st->b, "spawn") == 0 ||
+                strcmp(st->b, "spawnhybrid") == 0)
+                escapes = 0;
+            if (!ctx->err)
+                shadow_safe_walk_attached_closures(ctx, st, escapes);
+        }
         break;
     case AST_SPAWN_CLOSURE: {
         int prev_st = ctx->in_send_task;

@@ -292,7 +292,7 @@ static void docs_set_pid(CCSlice uri, int pid) {
     CCExclusiveGuard g;
     OpenDoc *d;
     if (!cc_exclusive_is_live(g_excl)) return;
-    g = cc_exclusive_acquire(g_excl.e, LK_DOCS);
+    g = cc_exclusive_acquire(g_excl.p, LK_DOCS);
     @defer g.release();
     d = doc_find(uri);
     if (d) d->ccc_pid = pid;
@@ -303,7 +303,7 @@ static CheckSnap *docs_snapshot(CCSlice uri) {
     OpenDoc *d;
     CheckSnap *s;
     if (!cc_exclusive_is_live(g_excl)) return NULL;
-    g = cc_exclusive_acquire(g_excl.e, LK_DOCS);
+    g = cc_exclusive_acquire(g_excl.p, LK_DOCS);
     @defer g.release();
     d = doc_find(uri);
     if (!d) return NULL;
@@ -330,7 +330,7 @@ static int docs_gen_current(CCSlice uri, uint32_t gen) {
     OpenDoc *d;
     int ok = 0;
     if (!cc_exclusive_is_live(g_excl)) return 0;
-    g = cc_exclusive_acquire(g_excl.e, LK_DOCS);
+    g = cc_exclusive_acquire(g_excl.p, LK_DOCS);
     @defer g.release();
     d = doc_find(uri);
     ok = d && d->gen == gen;
@@ -352,7 +352,7 @@ static void ticket_take(void) {
     @errhandler(CCError e) { (void)e; return; }
     CCExclusiveGuard g;
     if (!cc_exclusive_is_live(g_excl)) return;
-    g = cc_exclusive_acquire_when(g_excl.e, LK_TICKET, ticket_ready, NULL) !>;
+    g = cc_exclusive_acquire_when(g_excl.p, LK_TICKET, ticket_ready, NULL) !>;
     g_tickets--;
     g.release();
 }
@@ -360,7 +360,7 @@ static void ticket_take(void) {
 static void ticket_give(void) {
     CCExclusiveGuard g;
     if (!cc_exclusive_is_live(g_excl)) return;
-    g = cc_exclusive_acquire(g_excl.e, LK_TICKET);
+    g = cc_exclusive_acquire(g_excl.p, LK_TICKET);
     @defer g.release();
     if (g_tickets < TICKET_CAP) g_tickets++;
     g.signal();
@@ -566,7 +566,7 @@ static void lsp_write_unlocked(CCSlice body) {
 
 static void lsp_write(CCSlice body) {
     if (cc_exclusive_is_live(g_excl)) {
-        CCExclusiveGuard g = cc_exclusive_acquire(g_excl.e, LK_OUT);
+        CCExclusiveGuard g = cc_exclusive_acquire(g_excl.p, LK_OUT);
         @defer g.release();
         lsp_write_unlocked(body);
         return;
@@ -916,7 +916,7 @@ static void check_waiter(CheckKick *kick) {
     uri = slice_cstr(kick->uri);
     if (kick->delay_ms) cc_sleep_ms(kick->delay_ms);
     if (cc_exclusive_is_live(g_excl)) {
-        CCExclusiveGuard g = cc_exclusive_acquire(g_excl.e, LK_DOCS);
+        CCExclusiveGuard g = cc_exclusive_acquire(g_excl.p, LK_DOCS);
         @defer g.release();
         OpenDoc *d = doc_find(uri);
         if (d) d->debounce_armed = 0;
@@ -943,7 +943,7 @@ static void kick_check(CCSlice uri, unsigned delay_ms) {
     OpenDoc *d;
     if (!cc_exclusive_is_live(g_excl) || !g_nurs.n || !uri.ptr || uri.len == 0) return;
     {
-        CCExclusiveGuard g = cc_exclusive_acquire(g_excl.e, LK_DOCS);
+        CCExclusiveGuard g = cc_exclusive_acquire(g_excl.p, LK_DOCS);
         @defer g.release();
         d = doc_find(uri);
         if (!d) return;
@@ -952,7 +952,7 @@ static void kick_check(CCSlice uri, unsigned delay_ms) {
     }
     kick = (CheckKick *)calloc(1, sizeof(CheckKick));
     if (!kick) {
-        CCExclusiveGuard g = cc_exclusive_acquire(g_excl.e, LK_DOCS);
+        CCExclusiveGuard g = cc_exclusive_acquire(g_excl.p, LK_DOCS);
         @defer g.release();
         d = doc_find(uri);
         if (d) d->debounce_armed = 0;
@@ -966,19 +966,20 @@ static void kick_check(CCSlice uri, unsigned delay_ms) {
     }
     {
         CCNursery n = g_nurs;
-        if (n.spawn(() => [kick] {
+        n.spawn(() => [kick] {
                 @errhandler(CCError e) {
                     cc_error_log(e);
                     free(kick);
                 }
                 check_waiter(kick);
-            }) != 0) {
+            }) !>(e) {
+            (void)e;
             free(kick);
-            CCExclusiveGuard g = cc_exclusive_acquire(g_excl.e, LK_DOCS);
+            CCExclusiveGuard g = cc_exclusive_acquire(g_excl.p, LK_DOCS);
             @defer g.release();
             d = doc_find(uri);
             if (d) d->debounce_armed = 0;
-        }
+        };
     }
 }
 
@@ -1101,7 +1102,7 @@ static void docs_kill_all(void) {
     CCExclusiveGuard g;
     size_t i;
     if (!cc_exclusive_is_live(g_excl)) return;
-    g = cc_exclusive_acquire(g_excl.e, LK_DOCS);
+    g = cc_exclusive_acquire(g_excl.p, LK_DOCS);
     @defer g.release();
     for (i = 0; i < DOC_CAP; i++) doc_kill_pid(&g_docs[i]);
 }

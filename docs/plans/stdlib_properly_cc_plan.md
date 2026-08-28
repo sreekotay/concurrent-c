@@ -92,7 +92,7 @@ Drift is concentrated in **net / HTTP / TLS / DNS** (`CCNetError*` / `CCHttpErro
 ### Real projects
 
 - **redis_idiomatic.ccs:** Result + arenas + `try_send_into`; listen/accept/fill/write use `!>`. Net drift left is UDP/DNS/HTTP if any.
-- **pigz_idiomatic.ccs:** Ordered `send_task` + arenas; little net. Arena spelling mixed.
+- **pigz_channel.ccs:** Ordered `send_task` + arenas; little net. Arena spelling mixed.
 - **Examples:** Result recipe gold; `recipe_tcp_echo` listen/accept/connect/read/write use `!>` / `cc_io_avail`; `recipe_http_get` uses Result `cc_http_get` + `!>`; `recipe_ordered_parallel` aligned with pigz.
 
 ---

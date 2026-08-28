@@ -145,7 +145,7 @@ int main(void) {
             while (cc_io_avail(rx_p.recv(&v))) {
                 cc_atomic_fetch_add(&sum, v);
             }
-        });
+        }) !>;
 
         {
             CCNursery producer = consumer.create_child() !> @destroy;
@@ -154,17 +154,17 @@ int main(void) {
             /* N. single value capture. */
             producer.spawn(() => [tx_p] {
                 for (int x = 1; x <= 3; x++) (void)tx_p.send(x);
-            });
+            }) !>;
 
             /* M. empty capture list. */
             producer.spawn(() => [] {
                 /* no-op */
-            });
+            }) !>;
 
             /* O. single ref capture. */
             producer.spawn(() => [&sum] {
                 cc_atomic_fetch_add(&sum, 100);
-            });
+            }) !>;
         }
     }
 

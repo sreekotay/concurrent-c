@@ -44,7 +44,7 @@ int main(void) {
     assert(got.int_value == 73);
     {
         CCNursery n = @create() !> @destroy;
-        n.spawn(() => { });
+        n.spawn(() => { }) !>;
     }
     ch.free();
     return 0;

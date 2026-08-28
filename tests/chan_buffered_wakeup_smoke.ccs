@@ -26,13 +26,13 @@ int main(void) {
                 for (int i = 0; i < NUM_ITEMS; i++) {
                     tx.send(i);
                 }
-            });
+            }) !>;
             __cc_nursery6.spawn(() => {
                 int v;
                 for (int i = 0; i < NUM_ITEMS; i++) {
                     rx.recv(&v);
                 }
-            });
+            }) !>;
         
         }
         cc_chan_free(ch);

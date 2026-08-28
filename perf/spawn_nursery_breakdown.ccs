@@ -82,7 +82,7 @@ static double bench_syntax_once(void) {
             for (int i = 0; i < g_batch_size; i++) {
                 __cc_nursery174.spawn(() => [counter_ptr] {
                     cc_atomic_fetch_add(counter_ptr, 1);
-                });
+                }) !>;
             }
         
         }
@@ -128,17 +128,11 @@ static Breakdown bench_manual_once(int use_nursery_env) {
         double t1 = time_now_ms();
 
         for (int i = 0; i < g_batch_size; i++) {
-            if (n.spawn(closures[i]) != 0) {
-                fprintf(stderr, "n.spawn failed\n");
-                abort();
-            }
+            n.spawn(closures[i]) !>;
         }
         double t2 = time_now_ms();
 
-        if (cc_nursery_wait(n) != 0) {
-            fprintf(stderr, "cc_nursery_wait failed\n");
-            abort();
-        }
+        n.wait() !>;
         cc_nursery_free(n);
         double t3 = time_now_ms();
 

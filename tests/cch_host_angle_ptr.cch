@@ -1,0 +1,10 @@
+#ifndef TESTS_CCH_HOST_ANGLE_PTR_CCH
+#define TESTS_CCH_HOST_ANGLE_PTR_CCH
+
+/* Angle include — extract must find this via CC_USER_INCLUDE_PATH / -I
+ * the same way pigz_cc finds <zopfli.h>. */
+#include <AngleHostOpts.h>
+
+void angle_host_touch(const AngleHostOpts* p);
+
+#endif

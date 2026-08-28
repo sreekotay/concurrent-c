@@ -32,6 +32,7 @@
 
 // Compression libraries
 #include <zlib.h>
+#include "../pigz_deflate_splice.cch"
 // zopfli requires passing --cc-flags "-I/opt/homebrew/include" (or install location)
 #include <zopfli.h>
 
@@ -46,7 +47,10 @@ void ZopfliDeflatePart(const ZopfliOptions* options, int datamode, int final,
 
 #define BLOCK_SIZE (128 * 1024)
 #define BLOCK_ARENA_OVERHEAD 1024  // Space for Block struct + alignment
+#define DICT_SIZE  32768
 #define MAX_WORKERS 16
+#define DEFAULT_CAP 32
+#define MAX_CAP     256
 // Channel capacity controls flow: small = more backpressure, limits in-flight blocks
 // Reorder buffer = chan_cap + num_workers, so keep chan_cap reasonable
 #define CHAN_CAP 64
@@ -121,9 +125,6 @@ extern cc_atomic_int g_blocks_done;
 
 /* Global error flag - when set, all tasks should exit ASAP */
 extern cc_atomic_int g_pipeline_error;
-
-/* Global arena pool for input block arenas (set during compress_file) */
-// Pool is now stored in Block.pool instead of global
 
 /* ============================================================================
  * Helper Functions

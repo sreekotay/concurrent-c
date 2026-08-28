@@ -3,6 +3,7 @@
 #pragma once
 
 #include <ccc/cc_ufcs_families.h>
+#include <dirent.h>
 #include "util/text.h"
 #include "comptime/symbols.h"
 #include "comptime/hook_compile.h"
@@ -1182,12 +1183,107 @@ static int shadow_rfn_index(const char* name) {
 
 extern int cc_result_fn_registry_get_err_type(const char* name, size_t name_len,
                                               char* out_buf, size_t out_sz);
+extern int cc_result_fn_registry_contains(const char* name, size_t len);
 extern const char* cc_result_fn_registry_name_at(size_t i);
 extern const char* cc_result_fn_registry_err_type_at(size_t i);
 extern const char* cc_result_fn_registry_result_type_at(size_t i);
 extern size_t cc_result_fn_registry_count(void);
+extern void cc_result_fn_registry_scan_source(const char* src, size_t n);
+extern size_t cc_included_cch_source_count(void);
+extern const char* cc_included_cch_source_path(size_t i);
+extern size_t cc_lowered_local_header_count(void);
+extern const char* cc_lowered_local_header_source_path(size_t i);
 
 static char g_shadow_rfn_hdr_err[64];
+
+static void shadow_rfn_scan_path(const char* path) {
+    FILE* f;
+    long sz;
+    char* buf;
+    if (!path || !path[0]) return;
+    f = fopen(path, "rb");
+    if (!f) return;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return;
+    }
+    sz = ftell(f);
+    if (sz <= 0 || sz > 8 * 1024 * 1024) {
+        fclose(f);
+        return;
+    }
+    rewind(f);
+    buf = (char*)malloc((size_t)sz + 1);
+    if (!buf) {
+        fclose(f);
+        return;
+    }
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+        free(buf);
+        fclose(f);
+        return;
+    }
+    buf[sz] = 0;
+    fclose(f);
+    cc_result_fn_registry_scan_source(buf, (size_t)sz);
+    free(buf);
+}
+
+/* shadow_lower is a child process; the driver's header scan does not
+ * carry over. Walk include roots for Result protos. */
+static void shadow_rfn_scan_dir_faces(const char* dir) {
+    DIR* d;
+    struct dirent* ent;
+    char path[1024];
+    if (!dir || !dir[0]) return;
+    d = opendir(dir);
+    if (!d) return;
+    while ((ent = readdir(d)) != NULL) {
+        size_t n = strlen(ent->d_name);
+        if (n < 3) continue;
+        if (strcmp(ent->d_name + n - 4, ".cch") != 0 &&
+            strcmp(ent->d_name + n - 2, ".h") != 0)
+            continue;
+        snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        shadow_rfn_scan_path(path);
+    }
+    closedir(d);
+}
+
+static void shadow_rfn_scan_included_headers(void) {
+    static int once;
+    const char* env;
+    size_t i, n;
+    if (once) return;
+    once = 1;
+    n = cc_included_cch_source_count();
+    for (i = 0; i < n; i++)
+        shadow_rfn_scan_path(cc_included_cch_source_path(i));
+    n = cc_lowered_local_header_count();
+    for (i = 0; i < n; i++)
+        shadow_rfn_scan_path(cc_lowered_local_header_source_path(i));
+    env = getenv("CC_INCLUDE_PATH");
+    if (env && env[0]) {
+        char buf[4096];
+        char* p;
+        char* next;
+        snprintf(buf, sizeof(buf), "%s", env);
+        for (p = buf; p && *p; p = next) {
+            char ccc[1024];
+            next = strchr(p, ':');
+            if (next) {
+                *next = 0;
+                next++;
+            }
+            if (!p[0]) continue;
+            snprintf(ccc, sizeof(ccc), "%s/ccc", p);
+            shadow_rfn_scan_dir_faces(ccc);
+            shadow_rfn_scan_dir_faces(p);
+        }
+    }
+    shadow_rfn_scan_dir_faces("out/include/ccc");
+    shadow_rfn_scan_dir_faces("cc/include/ccc");
+}
 
 /* Extracted `.cch` Result protos are not AST_RESULT_FN. The driver scan
  * of included / lowered-local headers still recorded their E. */
@@ -1195,6 +1291,7 @@ static const char* shadow_rfn_err_from_hdr(const char* name) {
     size_t k, n, nlen, hits;
     const char* hit;
     if (!name || !name[0]) return NULL;
+    shadow_rfn_scan_included_headers();
     if (cc_result_fn_registry_get_err_type(name, strlen(name),
                                            g_shadow_rfn_hdr_err,
                                            sizeof(g_shadow_rfn_hdr_err)) &&
@@ -4733,6 +4830,10 @@ static void shadow_collect_task_sends(AstNode* n) {
         if (!strchr(n->a, ' ') && !strchr(n->a, '*') && !strchr(n->a, ','))
             shadow_note_task_send(n->a);
     }
+    if (n->kind == AST_UFCS_STMT && n->a[0] &&
+        (strcmp(n->b, "send_task") == 0 ||
+         strcmp(n->b, "send_task_hybrid") == 0))
+        shadow_note_task_send(n->a);
     if (n->kind == AST_CALL_ARGS &&
         (strcmp(n->a, "cc_channel_send_task") == 0 ||
          strcmp(n->a, "cc_channel_send_task_hybrid") == 0) &&
@@ -5154,6 +5255,7 @@ extern int cc_included_cch_each_fn_param(int (*cb)(const char* name, int argi,
                                          void* ctx);
 extern int cc_result_fn_registry_get_err_type(const char* name, size_t name_len,
                                               char* out_buf, size_t out_sz);
+extern int cc_result_fn_registry_contains(const char* name, size_t len);
 extern int cc_result_fn_registry_get_result_type(const char* name,
                                                  size_t name_len, char* out_buf,
                                                  size_t out_sz);

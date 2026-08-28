@@ -20,9 +20,9 @@ int main(void) {
                 int value = 2;
                 tx.send_task(() => [value] {
                     value * 3;
-                });
+                }) !>;
                 return NULL;
-            });
+            }) !>;
             (void)producer;
         
         }

@@ -43,9 +43,9 @@ CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh
 
 **Host:** macOS (Darwin 25), arm64, Docker Desktop, QEMU user-mode  
 **Seed:** `shadow_lower` last-good **0.3.3-174**  
-**Scripts:** `./scripts/pigz_i386.sh`, `./scripts/pigz_arm32.sh` — `pigz.c` vs `pigz_wait` (chained dict) vs `pigz_cc`  
-**Input:** 20 MB Silesia concat, 2 runs; pigz / pigz_cc `-p 4`; `pigz_wait` uses runtime cores (`CC_WORKERS` unset)  
-**Compile:** original pigz `cc -O3`; `pigz_wait` / `pigz_cc` `ccc -O --release` (host `-O2 -DNDEBUG`). The ILP32 `ccc` driver itself was `BUILD=debug` (`-O0 -g`); that does not change product flags.  
+**Scripts:** `./scripts/pigz_i386.sh`, `./scripts/pigz_arm32.sh` — `pigz.c` vs `pigz_idiomatic` (chained dict; then named `pigz_wait`) vs `pigz_cc`  
+**Input:** 20 MB Silesia concat, 2 runs; pigz / pigz_cc `-p 4`; `pigz_idiomatic` uses runtime cores (`CC_WORKERS` unset)  
+**Compile:** original pigz `cc -O3`; `pigz_idiomatic` / `pigz_cc` `ccc -O --release` (host `-O2 -DNDEBUG`). The ILP32 `ccc` driver itself was `BUILD=debug` (`-O0 -g`); that does not change product flags.  
 **Binaries:** ELF 32-bit. Round-trip + gunzip **PASS**. Dumps: [i386](../real_projects/pigz/benchmarks/ilp32_i386_2026_08_19.txt), [ARM32](../real_projects/pigz/benchmarks/ilp32_arm32_2026_08_19.txt).
 
 QEMU user-mode — relative ILP32 only; not comparable to host Darwin or across arches.
@@ -55,7 +55,7 @@ QEMU user-mode — relative ILP32 only; not comparable to host Darwin or across 
 | Implementation | Comp (s) | Comp (MB/s) | Ratio | Decomp (s) | Decomp (MB/s) |
 |----------------|----------|-------------|-------|------------|---------------|
 | pigz (pthread) | 1.540 | 12.4 | 46.0% | 0.505 | 37.8 |
-| pigz_wait (chain) | 0.834 | 22.9 | 46.0% | — | — |
+| pigz_idiomatic (chain; then `pigz_wait`) | 0.834 | 22.9 | 46.0% | — | — |
 | pigz_cc | 0.734 | 26.0 | 46.0% | 0.552 | 34.6 |
 
 ### ARM32 (linux/arm/v7, gnueabihf, gcc)
@@ -63,7 +63,7 @@ QEMU user-mode — relative ILP32 only; not comparable to host Darwin or across 
 | Implementation | Comp (s) | Comp (MB/s) | Ratio | Decomp (s) | Decomp (MB/s) |
 |----------------|----------|-------------|-------|------------|---------------|
 | pigz (pthread) | 0.646 | 29.5 | 46.0% | 0.287 | 66.5 |
-| pigz_wait (chain) | 0.483 | 39.5 | 46.0% | — | — |
+| pigz_idiomatic (chain; then `pigz_wait`) | 0.483 | 39.5 | 46.0% | — | — |
 | pigz_cc | 0.500 | 38.1 | 46.0% | 0.302 | 63.1 |
 
 ## i386 (supported)
@@ -144,7 +144,7 @@ CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh   # self-build ccc + suite backend=tcc
 - ABI: **gnueabihf** / armhf (hard-float), matching TCC’s default arm target
 
 Optional pigz compare (named volumes `ccc-ilp32-work` / `ccc-arm32-work`):
-original `pigz.c`, `pigz_wait` (chained dict by default), and `pigz_cc`
+original `pigz.c`, `pigz_idiomatic` (chained dict by default), and `pigz_cc`
 when the backend can build it. Latest i386 numbers are in
 [Latest pigz receipt](#latest-pigz-receipt--2026-08-19).
 

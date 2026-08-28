@@ -74,7 +74,7 @@ int main(void) {
                 printf("FAIL: received %d items, expected %d\n", idx - 1, NUM_ITEMS);
                 atomic_store(&g_failed, 1);
             }
-        });
+        }) !>;
 
         CCNursery producer = consumer.create_child() !> @destroy;
         producer.spawn(() => [tx] {
@@ -85,8 +85,8 @@ int main(void) {
                 CCTask task = cc_thread_spawn(compute, item);
                 (void)chan_send(tx, task);
             }
-        });
-        producer.wait();
+        }) !>;
+        producer.wait() !>;
         chan_close(tx);
     }
 

@@ -13,7 +13,7 @@ int main(void) {
     n.spawn(() => [tx] {
         @errhandler(CCError e) cc_error_exit(e);
         tx.send(7) !>;
-    });
+    }) !>;
     int64_t v;
     rx.recv(&v) !>;
     return v == 7 ? 0 : 1;

@@ -1,0 +1,10 @@
+/* Header Result UFCS at statement position is unhandled-result.
+ * Nursery spawn is ordinary UFCS; a bare call discards admission. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    CCNursery n = cc_nursery_create() !> @destroy;
+    n.spawn(() => { });
+    return 0;
+}

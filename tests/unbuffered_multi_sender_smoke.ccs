@@ -24,16 +24,16 @@ int main(void) {
         /* 2 senders, each sends 10 messages */
         __cc_nursery95.spawn(() => [tx] {
             for (int i = 0; i < 10; i++) tx.send(i);
-        });
+        }) !>;
         __cc_nursery95.spawn(() => [tx] {
             for (int i = 0; i < 10; i++) tx.send(100 + i);
-        });
+        }) !>;
         
         /* 1 receiver, receives all 20 messages */
         __cc_nursery95.spawn(() => [rx] {
             int v;
             for (int i = 0; i < 20; i++) rx.recv(&v);
-        });
+        }) !>;
     
     }
 

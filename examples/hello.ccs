@@ -31,18 +31,18 @@ int main(void) {
             @errhandler(CCError e) cc_error_exit(e);
             usleep(100000);
             io.println("Hello from task A! (last)") !>;
-        });
+        }) !>;
         n.spawn(() => [io] {
             @errhandler(CCError e) cc_error_exit(e);
             io.println("Hello from task B!") !>;
-        });
+        }) !>;
         n.spawn(() => [io] {
             @errhandler(CCError e) cc_error_exit(e);
             io.println("Hello from task C!") !>(e) {
                 io.println("Task C failed!") !>;
                 @err(e); //forward to installed error handler
             }; //local handling first, then default
-        });
+        }) !>;
     }   // ← nursery teardown waits here
 
     io.println("All tasks completed.") !>;

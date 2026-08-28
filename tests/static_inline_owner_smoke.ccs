@@ -1,0 +1,13 @@
+#!ccc ccs
+/* Same-stem owner splice must keep `static inline` (destatic used to
+ * leave `inline void`, which shadow-lower rejected — pigz_cc). */
+#include <stdio.h>
+#include "static_inline_owner_smoke.cch"
+
+cc_atomic_int g_flag = 0;
+
+int main(void) {
+    flag_set();
+    printf("%d\n", flag_get());
+    return 0;
+}

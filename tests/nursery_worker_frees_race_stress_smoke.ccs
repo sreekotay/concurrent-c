@@ -52,7 +52,7 @@ int main(void) {
                         cc_atomic_fetch_add(&g_count, 1);
                     });
                 }
-            });
+            }) !>;
         }
     }
 

@@ -1,0 +1,10 @@
+#ifndef TESTS_CCH_SDKROOT_HOST_CCH
+#define TESTS_CCH_SDKROOT_HOST_CCH
+
+/* Angle include resolved via CC_SYSROOT (driver --sysroot / -isysroot),
+ * not -I or Homebrew. Host cc still uses the real SDK. */
+#include <SdkHostStream.h>
+
+void sdk_host_touch(SdkHostStream* s);
+
+#endif

@@ -26,7 +26,7 @@ int main(void) {
         {
             CCNursery __cc_nursery177 = @create() !> @destroy;
 
-                __cc_nursery177.spawn(() => { global_counter++; });
+                __cc_nursery177.spawn(() => { global_counter++; }) !>;
         
         }
     }

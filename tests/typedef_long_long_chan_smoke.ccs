@@ -14,7 +14,7 @@ int main(void) {
         @errhandler(CCError e) cc_error_exit(e);
         i64 eleven = 11;
         tx.send(eleven) !>;
-    });
+    }) !>;
     i64 v;
     rx.recv(&v) !>;
     return v == 11 ? 0 : 1;

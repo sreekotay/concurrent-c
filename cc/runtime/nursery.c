@@ -23,6 +23,8 @@
 #include "fiber_sched_boundary.h"
 #include "sched_v2.h"
 
+static CCResult_void_CCError cc__nursery_errno(int err, const char* msg);
+
 /* ============================================================================
  * Nursery spawn timing instrumentation
  * ============================================================================ */
@@ -246,7 +248,7 @@ void cc__chan_set_autoclose_owner(CCChan* ch, CCNurseryHost* owner);
  * binary. */
 static void (*g_cc__nursery_chan_close)(CCChan*) = NULL;
 
-int cc_nursery_add_closing_tx(CCNurseryHost* n, CCChanTx tx) {
+CCResult_void_CCError cc_nursery_add_closing_tx(CCNurseryHost* n, CCChanTx tx) {
     return cc_nursery_add_closing_chan(n, tx.raw);
 }
 
@@ -288,7 +290,7 @@ static CCNurseryHost* cc__nursery_alloc(void) {
 static CCResult_CCNursery_CCError cc__nursery_wrap_ok(CCNurseryHost* h) {
     CCResult_CCNursery_CCError r;
     CCNursery w;
-    w.n = h;
+    w.p = h;
     r.ok = 1;
     r.u.value = w;
     return r;
@@ -309,7 +311,7 @@ CCResult_CCNursery_CCError cc_nursery_create(void) {
 }
 
 CCResult_CCNursery_CCError cc_nursery_create_child(CCNursery parent) {
-    CCNurseryHost* p = parent.n;
+    CCNurseryHost* p = parent.p;
     CCNurseryHost* n;
     if (!p)
         cc_nursery_die("cc_nursery_create_child: parent nursery is null");
@@ -478,7 +480,7 @@ CCDeadline cc_nursery_as_deadline(const CCNurseryHost* n) {
 }
 
 bool cc_nursery_is_cancelled(const CCNurseryHost* n) {
-    if (!n) return true;
+    if (!n) return false;
     if (atomic_load_explicit(&n->cancelled, memory_order_acquire)) return true;
     if (n->deadline.tv_sec == 0) return false;
     struct timespec now;
@@ -616,7 +618,7 @@ void cc_nursery_notify_child_done(CCNurseryHost* n);
 
 /* V2 is the default scheduler. spawn() routes through sched_v2; spawnhybrid()
  * is kept as an alias for source compatibility during the V1 retirement. */
-int cc_nursery_spawn(CCNurseryHost* n, void* (*fn)(void*), void* arg) {
+static int cc__nursery_spawn_errno(CCNurseryHost* n, void* (*fn)(void*), void* arg) {
     if (!n || !fn) return EINVAL;
 
     int timing = nursery_timing_enabled();
@@ -676,45 +678,50 @@ int cc_nursery_spawn(CCNurseryHost* n, void* (*fn)(void*), void* arg) {
     return 0;
 }
 
-int cc_nursery_spawnhybrid(CCNurseryHost* n, void* (*fn)(void*), void* arg) {
+CCResult_void_CCError cc_nursery_spawn(CCNurseryHost* n, void* (*fn)(void*), void* arg) {
+    return cc__nursery_errno(cc__nursery_spawn_errno(n, fn, arg),
+                             "cc_nursery_spawn");
+}
+
+CCResult_void_CCError cc_nursery_spawnhybrid(CCNurseryHost* n, void* (*fn)(void*), void* arg) {
     return cc_nursery_spawn(n, fn, arg);
 }
 
-int cc_nursery_spawn_async_named(CCNurseryHost* n, CCTask task,
+CCResult_void_CCError cc_nursery_spawn_async_named(CCNurseryHost* n, CCTask task,
                                   const char* diag_user_name,
                                   const char* diag_file,
                                   int diag_line) {
     cc_nursery_async_spawn* a;
-    int err;
+    CCResult_void_CCError r;
     if (!n || task.kind == CC_TASK_KIND_INVALID) {
         cc_task_free(&task);
-        return EINVAL;
+        return cc__nursery_errno(EINVAL, "cc_nursery_spawn_async_named");
     }
     a = (cc_nursery_async_spawn*)malloc(sizeof(*a));
     if (!a) {
         cc_task_free(&task);
-        return ENOMEM;
+        return cc__nursery_errno(ENOMEM, "cc_nursery_spawn_async_named");
     }
     a->task = task;
     a->diag_user_name = diag_user_name;
     a->diag_file = diag_file;
     a->diag_line = diag_line;
-    err = cc_nursery_spawn(n, cc__nursery_async_runner, a);
-    if (err != 0) {
+    r = cc_nursery_spawn(n, cc__nursery_async_runner, a);
+    if (!r.ok) {
         cc_task_free(&a->task);
         free(a);
     }
-    return err;
+    return r;
 }
 
-int cc_nursery_spawn_async(CCNurseryHost* n, CCTask task) {
+CCResult_void_CCError cc_nursery_spawn_async(CCNurseryHost* n, CCTask task) {
     /* Anonymous-spawn entry point: kept for callers (and tests) that
      * predate the spawn-site lowering's switch to the `_named` variant.
      * The runner sees NULL metadata and skips the fiber-name stamp. */
     return cc_nursery_spawn_async_named(n, task, NULL, NULL, 0);
 }
 
-int cc_nursery_spawnhybrid_async(CCNurseryHost* n, CCTask task) {
+CCResult_void_CCError cc_nursery_spawnhybrid_async(CCNurseryHost* n, CCTask task) {
     return cc_nursery_spawn_async(n, task);
 }
 
@@ -778,11 +785,22 @@ CCArena* cc_nursery_arena(CCNurseryHost* n) {
     return n ? &n->arena : NULL;
 }
 
+static CCResult_void_CCError cc__nursery_errno(int err, const char* msg) {
+    if (err == 0) return cc_ok_CCResult_void_CCError();
+    if (err == ENOMEM)
+        return cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_OUT_OF_MEMORY, msg));
+    if (err == EINVAL)
+        return cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_INVALID_ARG, msg));
+    return cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_INTERNAL, msg));
+}
+
 static void cc__nursery_owner_destroy(void* p) {
     CCNurseryHost* n = (CCNurseryHost*)p;
+    CCResult_void_CCError w;
     if (!n || !n->arena.a) return;
-    (void)cc_nursery_wait(n);
+    w = cc_nursery_wait(n);
     cc_nursery_free(n);
+    if (!w.ok) cc_error_exit(w.u.error);
 }
 
 static int cc__nursery_init_body(CCNurseryHost* n) {
@@ -894,8 +912,8 @@ void cc_nursery_notify_child_done(CCNurseryHost* n) {
      * another child may take the count to zero and free it any time. */
 }
 
-int cc_nursery_wait(CCNurseryHost* n) {
-    if (!n) return EINVAL;
+CCResult_void_CCError cc_nursery_wait(CCNurseryHost* n) {
+    if (!n) return cc__nursery_errno(EINVAL, "cc_nursery_wait");
     {
         int expected = CC_NURSERY_LIVE;
         if (!atomic_compare_exchange_strong_explicit(&n->end_state, &expected,
@@ -999,7 +1017,7 @@ int cc_nursery_wait(CCNurseryHost* n) {
         atomic_fetch_add_explicit(&g_nursery_timing.wait_tasks_joined, joined, memory_order_relaxed);
         atomic_fetch_add_explicit(&g_nursery_timing.wait_channels_closed, closed, memory_order_relaxed);
     }
-    return first_err;
+    return cc__nursery_errno(first_err, "cc_nursery_wait");
 }
 
 void cc_nursery_free(CCNurseryHost* n) {
@@ -1023,22 +1041,23 @@ void cc_nursery_free(CCNurseryHost* n) {
     cc_nursery_release(n);
 }
 
-int cc_nursery_on_last(CCNurseryHost* n, void* ctx, void (*finish)(void*)) {
-    if (!n || !finish) return EINVAL;
+CCResult_void_CCError cc_nursery_on_last(CCNurseryHost* n, void* ctx, void (*finish)(void*)) {
+    if (!n || !finish)
+        return cc__nursery_errno(EINVAL, "cc_nursery_on_last");
     pthread_mutex_lock(&n->mu);
     if (atomic_load_explicit(&n->end_state, memory_order_acquire) !=
             CC_NURSERY_LIVE) {
         pthread_mutex_unlock(&n->mu);
-        return EINVAL;
+        return cc__nursery_errno(EINVAL, "cc_nursery_on_last");
     }
     if (n->on_last_fn) {
         pthread_mutex_unlock(&n->mu);
-        return EINVAL;
+        return cc__nursery_errno(EINVAL, "cc_nursery_on_last");
     }
     n->on_last_fn = finish;
     n->on_last_ctx = ctx;
     pthread_mutex_unlock(&n->mu);
-    return 0;
+    return cc_ok_CCResult_void_CCError();
 }
 
 /* Hand the nursery to its children and walk away. From the caller's side
@@ -1080,13 +1099,14 @@ void cc_nursery_abandon(CCNurseryHost* n) {
         cc_nursery_last_exit(n);
 }
 
-int cc_nursery_add_closing_chan(CCNurseryHost* n, CCChan* ch) {
-    if (!n || !ch) return EINVAL;
+CCResult_void_CCError cc_nursery_add_closing_chan(CCNurseryHost* n, CCChan* ch) {
+    if (!n || !ch)
+        return cc__nursery_errno(EINVAL, "cc_nursery_add_closing_chan");
     pthread_mutex_lock(&n->mu);
     if (atomic_load_explicit(&n->end_state, memory_order_acquire) ==
             CC_NURSERY_ABANDONED) {
         pthread_mutex_unlock(&n->mu);
-        return EINVAL;
+        return cc__nursery_errno(EINVAL, "cc_nursery_add_closing_chan");
     }
     if (n->closing_count == n->closing_cap) {
         /* Arena-backed like tasks[]: alloc-and-copy, old array is arena
@@ -1094,7 +1114,10 @@ int cc_nursery_add_closing_chan(CCNurseryHost* n, CCChan* ch) {
         size_t new_cap = n->closing_cap ? n->closing_cap * 2 : 4;
         CCChan** nc = (CCChan**)cc_arena_alloc(
             n->arena.a, new_cap * sizeof(CCChan*), _Alignof(CCChan*));
-        if (!nc) { pthread_mutex_unlock(&n->mu); return ENOMEM; }
+        if (!nc) {
+            pthread_mutex_unlock(&n->mu);
+            return cc__nursery_errno(ENOMEM, "cc_nursery_add_closing_chan");
+        }
         if (n->closing_count)
             memcpy(nc, n->closing, n->closing_count * sizeof(CCChan*));
         n->closing = nc;
@@ -1106,5 +1129,5 @@ int cc_nursery_add_closing_chan(CCNurseryHost* n, CCChan* ch) {
     pthread_mutex_unlock(&n->mu);
     /* Mark channel with its autoclose owner for optional runtime guard. */
     cc__chan_set_autoclose_owner(ch, n);
-    return 0;
+    return cc_ok_CCResult_void_CCError();
 }

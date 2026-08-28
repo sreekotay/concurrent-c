@@ -107,7 +107,7 @@ int main(void) {
                 MyData* p = cc_unwrap(res_in_spawn);
                 if (p->x == 100 && p->y == 200) spawn_ok = 1;
             }
-        });
+        }) !>;
     
     }
     printf("spawn: %s\n", spawn_ok ? "ok" : "FAIL");
@@ -131,7 +131,7 @@ int main(void) {
             if (cc_is_ok(res_stdlib)) {
                 spawn_stdlib = 1;
             }
-        });
+        }) !>;
     
     }
     printf("spawn_stdlib: %s\n", spawn_stdlib ? "ok" : "FAIL");

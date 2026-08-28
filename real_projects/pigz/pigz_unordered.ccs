@@ -1,7 +1,7 @@
 /*
  * pigz_unordered.ccs -- pigz WITHOUT ordered delivery (output will be corrupt)
  *
- * Identical to pigz_idiomatic except the consumer reads results in completion
+ * Identical to pigz_channel except the consumer reads results in completion
  * order rather than sequence order.  This removes the head-of-line blocking
  * from ordered_recv and lets us measure the pure scheduling overhead with no
  * pipeline stalls.
@@ -147,7 +147,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
                 cc_arena_free(&r->arena);
             }
         }
-    });
+    }) !>;
 
     CCNursery producer = @create(consumer) !> @destroy {
         chan_close(res_tx);
@@ -190,7 +190,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             if (is_last) break;
         }
         (void)workers.wait();
-    });
+    }) !>;
 
     cc_file_sync(&out_file);
     return 0;

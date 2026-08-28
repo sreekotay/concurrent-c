@@ -48,7 +48,7 @@ int main(void) {
                                 item.seq, worker_id, prev);
                     }
                 }
-            });
+            }) !>;
         }
         
         /* Producer - then close channel */
@@ -59,7 +59,7 @@ int main(void) {
                 cc_atomic_fetch_add(&g_sent, 1);
             }
             chan_close(tx);  /* Explicitly close */
-        });
+        }) !>;
     }
     (void)cc_nursery_wait(n);
     cc_nursery_free(n);

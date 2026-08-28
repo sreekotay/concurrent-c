@@ -76,10 +76,10 @@ int main(void) {
 
     CCChanRx rx_raw = req_rx;
     CCChanTx reply_tx_raw = reply_tx;
-    n.spawn(() => [rx_raw, reply_tx_raw] { owner(rx_raw, reply_tx_raw); });
+    n.spawn(() => [rx_raw, reply_tx_raw] { owner(rx_raw, reply_tx_raw); }) !>;
     CCChanTx req_tx_raw = req_tx;
     CCChanRx reply_rx_raw = reply_rx;
-    n.spawn(() => [req_tx_raw, reply_rx_raw] { client_loop(req_tx_raw, reply_rx_raw); });
+    n.spawn(() => [req_tx_raw, reply_rx_raw] { client_loop(req_tx_raw, reply_rx_raw); }) !>;
 
     cc_nursery_wait(n);
     cc_channel_free(rch);

@@ -58,7 +58,7 @@ int main(void) {
         CCNursery n = @create() !> @destroy;
         int writer_fd = fds[0];
         fds[0] = -1;
-        n.spawn(() => [writer_fd] { writer_task(writer_fd); });
+        n.spawn(() => [writer_fd] { writer_task(writer_fd); }) !>;
     }
 
     close(fds[1]);

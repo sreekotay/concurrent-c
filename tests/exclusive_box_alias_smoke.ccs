@@ -1,0 +1,18 @@
+/* CCExclusive is CCBox::[CCExclusiveHost] — same type, one `.p`. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    CCExclusive e = a.create_exclusive(0) !> @destroy;
+    CCBox::[CCExclusiveHost] b = e;
+
+    if (!cc_exclusive_is_live(e)) return 1;
+    if (!b.is_live()) return 2;
+    if (cc_exclusive_host(e) != b.host()) return 3;
+    if (!cc_exclusive_is_live(b)) return 4;
+
+    printf("ok\n");
+    return 0;
+}

@@ -199,11 +199,9 @@ static uint32_t sum_nur(uint32_t d, uint32_t i) {
     er.i = u24(i * 2 + 1);
     er.out = &right;
 
-    if (cc_nursery_spawn(n, sum_nur_thunk, &el) != 0)
-        abort();
+    cc_nursery_spawn(n.p, sum_nur_thunk, &el) !>;
     atomic_fetch_add_explicit(&g_spawns, 1, memory_order_relaxed);
-    if (cc_nursery_spawn(n, sum_nur_thunk, &er) != 0)
-        abort();
+    cc_nursery_spawn(n.p, sum_nur_thunk, &er) !>;
     atomic_fetch_add_explicit(&g_spawns, 1, memory_order_relaxed);
 
     cc_nursery_destroy(n);

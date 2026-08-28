@@ -31,7 +31,7 @@ int main(void) {
                 __cc_nursery81.spawn(() => [k] {
                     if ((k % 4) == 0) cc_sleep_ms(1);
                     cc_atomic_fetch_add(&g_done, 1);
-                });
+                }) !>;
             }
         
         }

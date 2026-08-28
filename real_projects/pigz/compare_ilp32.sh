@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# compare_ilp32.sh — build original pigz, pigz_wait, and pigz_cc on Linux ILP32.
+# compare_ilp32.sh — build original pigz, pigz_idiomatic, and pigz_cc on Linux ILP32.
 #
-# Headline compare is pigz.c vs pigz_wait (PIGZ_DICT=1). pigz_cc is built
+# Headline compare is pigz.c vs pigz_idiomatic (PIGZ_DICT=1). pigz_cc is built
 # when the backend can; a TinyCC backend may skip it.
 #
 # Run via host wrapper:
@@ -65,13 +65,13 @@ elif [ -z "${CC:-}" ]; then
 fi
 echo "== ccc backend CC=$CC"
 
-echo "== build original pigz + pigz_wait (+ pigz_cc)"
+echo "== build original pigz + pigz_idiomatic (+ pigz_cc)"
 make -C "$SCRIPT_DIR" clean
 # Original pigz stays on gcc unless PIGZ_ORIG_CC is set — TinyCC is the
 # ccc backend for .ccs, not a second host compile of Adler's tree.
 make -C "$SCRIPT_DIR" pigz CC="${PIGZ_ORIG_CC:-cc}" \
   CFLAGS="-O3 -Wall -Wextra -pthread -D_FILE_OFFSET_BITS=64"
-make -C "$SCRIPT_DIR" pigz_wait CCC="$CCC" \
+make -C "$SCRIPT_DIR" pigz_idiomatic CCC="$CCC" \
   CFLAGS="-O3 -Wall -Wextra -pthread -D_FILE_OFFSET_BITS=64"
 if make -C "$SCRIPT_DIR" pigz_cc CCC="$CCC" \
   CFLAGS="-O3 -Wall -Wextra -pthread -D_FILE_OFFSET_BITS=64"; then
@@ -82,14 +82,14 @@ fi
 
 PIGZ="$SCRIPT_DIR/out/pigz"
 PIGZ_CC="$SCRIPT_DIR/out/pigz_cc"
-PIGZ_WAIT="$SCRIPT_DIR/out/pigz_wait"
+PIGZ_IDIOMATIC="$SCRIPT_DIR/out/pigz_idiomatic"
 test -x "$PIGZ" || die "missing $PIGZ"
-test -x "$PIGZ_WAIT" || die "missing $PIGZ_WAIT"
+test -x "$PIGZ_IDIOMATIC" || die "missing $PIGZ_IDIOMATIC"
 
-echo "  pigz:      $(file -b "$PIGZ")"
-echo "  pigz_wait: $(file -b "$PIGZ_WAIT")"
+echo "  pigz:           $(file -b "$PIGZ")"
+echo "  pigz_idiomatic: $(file -b "$PIGZ_IDIOMATIC")"
 file -b "$PIGZ" | grep -q 'ELF 32-bit' || die "pigz is not ELF 32-bit"
-file -b "$PIGZ_WAIT" | grep -q 'ELF 32-bit' || die "pigz_wait is not ELF 32-bit"
+file -b "$PIGZ_IDIOMATIC" | grep -q 'ELF 32-bit' || die "pigz_idiomatic is not ELF 32-bit"
 if [ -x "$PIGZ_CC" ]; then
   echo "  pigz_cc:   $(file -b "$PIGZ_CC")"
   file -b "$PIGZ_CC" | grep -q 'ELF 32-bit' || die "pigz_cc is not ELF 32-bit"
@@ -102,25 +102,25 @@ mkdir -p "$TMP"
 dd if=/dev/urandom of="$TMP/in.bin" bs=1M count=4 status=none
 
 "$PIGZ" -k -c -p "$WORKERS" "$TMP/in.bin" > "$TMP/orig.gz"
-cp "$TMP/in.bin" "$TMP/wait.bin"
-PIGZ_DICT=1 "$PIGZ_WAIT" "$TMP/wait.bin"
+cp "$TMP/in.bin" "$TMP/idio.bin"
+PIGZ_DICT=1 "$PIGZ_IDIOMATIC" "$TMP/idio.bin"
 gunzip -c "$TMP/orig.gz" > "$TMP/orig.out"
-gunzip -c "$TMP/wait.bin.gz" > "$TMP/wait.out"
+gunzip -c "$TMP/idio.bin.gz" > "$TMP/idio.out"
 cmp "$TMP/in.bin" "$TMP/orig.out" && echo "  OK   original pigz round-trip"
-cmp "$TMP/in.bin" "$TMP/wait.out" && echo "  OK   pigz_wait PIGZ_DICT=1 round-trip"
+cmp "$TMP/in.bin" "$TMP/idio.out" && echo "  OK   pigz_idiomatic PIGZ_DICT=1 round-trip"
 if [ -x "$PIGZ_CC" ]; then
   "$PIGZ_CC" -k -c -p "$WORKERS" "$TMP/in.bin" > "$TMP/cc.gz"
   gunzip -c "$TMP/cc.gz" > "$TMP/cc.out"
   cmp "$TMP/in.bin" "$TMP/cc.out" && echo "  OK   pigz_cc round-trip"
-  printf '  sizes: orig=%s wait=%s cc=%s bytes\n' \
-    "$(wc -c < "$TMP/orig.gz")" "$(wc -c < "$TMP/wait.bin.gz")" "$(wc -c < "$TMP/cc.gz")"
+  printf '  sizes: orig=%s idiomatic=%s cc=%s bytes\n' \
+    "$(wc -c < "$TMP/orig.gz")" "$(wc -c < "$TMP/idio.bin.gz")" "$(wc -c < "$TMP/cc.gz")"
 else
-  printf '  sizes: orig=%s wait=%s bytes\n' \
-    "$(wc -c < "$TMP/orig.gz")" "$(wc -c < "$TMP/wait.bin.gz")"
+  printf '  sizes: orig=%s idiomatic=%s bytes\n' \
+    "$(wc -c < "$TMP/orig.gz")" "$(wc -c < "$TMP/idio.bin.gz")"
 fi
 rm -rf "$TMP"
 
-echo "== benchmark (${SIZE_MB} MB, pigz -p ${WORKERS}, ${RUNS} runs; pigz_wait uses runtime cores)"
+echo "== benchmark (${SIZE_MB} MB, pigz -p ${WORKERS}, ${RUNS} runs; pigz_idiomatic uses runtime cores)"
 # Do not export CC_WORKERS — oversubscribe vs pigz -p N (see wait_dict_parity receipt).
 unset CC_WORKERS || true
 cd "$SCRIPT_DIR"

@@ -40,7 +40,7 @@ int main(void) {
             @destroy;
         for (int w = 0; w < WORKERS; w++) {
             int id = w;
-            n.spawn(() => [id] { worker(id); });
+            n.spawn(() => [id] { worker(id); }) !>;
         }
     }
 

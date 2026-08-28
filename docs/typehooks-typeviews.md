@@ -205,10 +205,11 @@ typedef struct {
 };
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     Temp t = {0};
     t.tag = 1;
     t.open("/tmp/tv.txt", "w");   /* → t.file.open(...) */
-    t.write("hi\n");
+    t.write("hi\n") !>;
     t.close();
     return 0;
 }
@@ -277,13 +278,14 @@ typedef struct {
 };
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     Fam_alpha a = {0};
     Fam_beta b = {0};
     a.open("/tmp/tv_glob_a.txt", "w");
-    a.write("A\n");
+    a.write("A\n") !>;
     a.close();
     b.open("/tmp/tv_glob_b.txt", "w");
-    b.write("B\n");
+    b.write("B\n") !>;
     b.close();
     printf("ok\n");
     return 0;
@@ -473,10 +475,11 @@ static void temp_file_unlink(TempFile* t) {
 };
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     TempFile t = {0} @destroy { t.close(); };  /* close, then unlink, then idempotent embed teardown */
     t.path = @slice("/tmp/tv_together.txt");
     t.open(t.path, "w");
-    t.write("hi\n");
+    t.write("hi\n") !>;
     printf("ok\n");
     return 0;
 }

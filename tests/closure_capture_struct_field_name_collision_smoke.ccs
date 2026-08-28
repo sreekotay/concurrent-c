@@ -49,7 +49,7 @@ int main(void) {
         n.spawn(() => [reader, conn, &saw_conn, &hit] {
             cc_atomic_fetch_add(&saw_conn, conn);
             if (reader != NULL) cc_atomic_fetch_add(&hit, 1);
-        });
+        }) !>;
     }
 
     int hit_v = cc_atomic_load(&hit);

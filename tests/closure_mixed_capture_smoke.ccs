@@ -11,7 +11,7 @@ void test_param_capture(int level, const char* name) {
         /* Capture function parameters directly */
         __cc_nursery43.spawn(() => [level, name] {
             printf("param capture: level=%d, name=%s\n", level, name);
-        });
+        }) !>;
     
     }
 }
@@ -27,7 +27,7 @@ int main(void) {
         /* x by value (copied), y by reference (shared, read-only) */
         __cc_nursery44.spawn(() => [x, &y] {
             printf("value x=%d, ref y=%d\n", x, y);
-        });
+        }) !>;
     
     }
     

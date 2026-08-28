@@ -1,0 +1,27 @@
+#ifndef TESTS_CCH_ANON_G_INLINE_CCH
+#define TESTS_CCH_ANON_G_INLINE_CCH
+
+#include <ccc/std/prelude.cch>
+
+/* pigz_cc: anonymous `g = {0}` then static inline helpers. */
+struct {
+    int n;
+    unsigned shift;
+} g = {0};
+
+static inline void put2le(unsigned char* p, unsigned v) {
+    p[0] = (unsigned char)(v & 0xff);
+    p[1] = (unsigned char)((v >> 8) & 0xff);
+}
+
+static inline unsigned get2le(const unsigned char* p) {
+    return (unsigned)p[0] | ((unsigned)p[1] << 8);
+}
+
+static const unsigned x2n_table[] = { 0x40000000, 0x20000000 };
+
+static inline unsigned shift_of(void) {
+    return g.shift ? g.shift : x2n_table[0];
+}
+
+#endif

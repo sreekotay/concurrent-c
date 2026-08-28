@@ -1,0 +1,32 @@
+#!ccc ccs
+/* Early !> in a helper must not require unique pointer Result specs
+ * to be complete yet (pigz_cc eprintln before read_block). */
+#include "result_ptr_early_bang.cch"
+#include <stdio.h>
+
+static inline void note_ok(void) {
+    @errhandler(CCError e) { cc_error_log(e); return; }
+    CCSlice s = cc_slice_cstr("7");
+    int64_t n = s.to_i64() !>;
+    (void)n;
+}
+
+unsigned char* !>(CCError) read_it(void) {
+    return cc_ok((unsigned char*)0);
+}
+
+CompRes* !>(CCError) make_it(void) {
+    return cc_ok((CompRes*)0);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        cc_error_log(e);
+        return 1;
+    }
+    note_ok();
+    unsigned char* p = read_it()!>;
+    CompRes* c = make_it()!>;
+    printf("ok %d %d\n", p ? 1 : 0, c ? 1 : 0);
+    return 0;
+}

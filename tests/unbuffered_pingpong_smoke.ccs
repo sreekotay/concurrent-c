@@ -29,7 +29,7 @@ int main(void) {
                 int v;
                 pong_rx.recv(&v);
             }
-        });
+        }) !>;
         
         /* Pong side: wait for ping, reply */
         __cc_nursery96.spawn(@unsafe () => [ping_rx, pong_tx, &pass] {
@@ -39,7 +39,7 @@ int main(void) {
                 pong_tx.send(v + 1);
             }
             pass = 1;
-        });
+        }) !>;
     
     }
     

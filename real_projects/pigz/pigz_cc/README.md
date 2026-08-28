@@ -3,13 +3,19 @@
 This directory contains the feature-complete Concurrent-C implementation of `pigz`.
 
 ## Relationship to `pigz_idiomatic.ccs`
-While this directory aims for a production-ready, feature-complete tool, a simplified reference implementation is maintained at `../pigz_idiomatic.ccs`. That version is kept as a clean, "easy to debug" example of core Concurrent-C patterns (Result types, Arena ownership, etc.) without the full complexity of production features like dictionary chaining.
+Compress of a seekable file is the `pigz_idiomatic` loop: one ticket per
+block, `@parallel wait` + `@stage` for the 32 KiB dict hop and the
+ordered CRC/write, `cache (zs)` for a warm `z_stream`. Stdin (no
+`n`, no `pread`) is the same helpers in a sequential while-read.
+Decompress is still a three-stage I/O pipeline.
+
+`../pigz_channel.ccs` is the older ordered-channel sketch (independent
+members, no dict). This directory is the product binary.
 
 ## Goals
-- Achieve 1:1 feature parity with original `pigz`.
-- Demonstrate high-performance structured concurrency.
-- Implement advanced patterns like dictionary chaining and ownership transfer.
+- 1:1 feature parity with original `pigz`.
+- The wait-for loop is the program; nurseries are not the compress wire.
 
 ## Structure
 - `pigz_cc.ccs`: Main entry point and implementation.
-- (Additional files will be added as the project grows)
+- `pigz_cc.cch`: Types, CRC/Adler combine, CLI-adjacent helpers.

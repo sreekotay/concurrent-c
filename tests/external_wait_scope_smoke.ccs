@@ -60,12 +60,12 @@ static void child_deadlock_case(void) {
                 }
                 (void)chan_recv(ext_rx, &v);
             }
-        });
+        }) !>;
 
         n.spawn(() => {
             int v = 0;
             (void)chan_recv(int_rx, &v);
-        });
+        }) !>;
     }
 
     chan_free(ext_ch);

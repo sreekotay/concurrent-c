@@ -46,7 +46,7 @@ int main(void) {
         CCNursery n = @create() !> @destroy;
         int reader_fd = fds[0];
         fds[0] = -1;
-        n.spawn(() => [reader_fd] { reader_task(reader_fd); });
+        n.spawn(() => [reader_fd] { reader_task(reader_fd); }) !>;
     }
     close(fds[1]);
 

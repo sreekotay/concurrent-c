@@ -14,7 +14,7 @@ int main(void) {
         @errhandler(CCError e) cc_error_exit(e);
         i8 v = 7;
         tx.send(v) !>;
-    });
+    }) !>;
     i8 got;
     rx.recv(&got) !>;
     return got == 7 ? 0 : 1;

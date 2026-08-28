@@ -58,7 +58,7 @@ int main(void) {
         /* Real no-capture closure BEFORE the comment-with-=>.  Pre-fix
          * this one was the silent victim (UFCS rewrite ran, closure
          * rewrite did not, host C compiler choked). */
-        n.spawnhybrid(() => { plain(); });
+        n.spawnhybrid(() => { plain(); }) !>;
 
         /* Line comment with a => that previously fooled the scanner. */
         // pattern: (cancelled && no_work) => exit
@@ -67,7 +67,7 @@ int main(void) {
          * a for-loop body (the original syscall_kidnap form). */
         for (int i = 0; i < 3; i++) {
             int id = i;
-            n.spawnhybrid(() => [id] { noop(id); });
+            n.spawnhybrid(() => [id] { noop(id); }) !>;
         }
     }
 

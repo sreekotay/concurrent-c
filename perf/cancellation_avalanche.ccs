@@ -235,12 +235,12 @@ void nested_scope(int depth, int base_id, int mode, CCChanRx recv_rx, CCChanRx r
                 int kind = leaf_kind_for_mode(mode, leaf_id);
                 if (kind == WAIT_RECV) {
                     CCChanRx leaf_rx = (mode == WAIT_RECV_SHARDED && (leaf_id & 1)) ? rr_alt : rr;
-                    __cc_nursery153.spawn(() => [leaf_id, leaf_rx] { recv_leaf(leaf_id, leaf_rx); });
+                    __cc_nursery153.spawn(() => [leaf_id, leaf_rx] { recv_leaf(leaf_id, leaf_rx); }) !>;
                 } else if (kind == WAIT_SEND) {
-                    __cc_nursery153.spawn(() => [leaf_id, st] { send_leaf(leaf_id, st); });
+                    __cc_nursery153.spawn(() => [leaf_id, st] { send_leaf(leaf_id, st); }) !>;
                 } else {
                     CCChanRx deadline_wait_rx = (mode == WAIT_RECV_DEADLINE_SHARED) ? rr : dr;
-                    __cc_nursery153.spawn(() => [leaf_id, deadline_wait_rx] { deadline_leaf(leaf_id, deadline_wait_rx); });
+                    __cc_nursery153.spawn(() => [leaf_id, deadline_wait_rx] { deadline_leaf(leaf_id, deadline_wait_rx); }) !>;
                 }
             } else {
                 int child_depth = depth - 1;
@@ -248,7 +248,7 @@ void nested_scope(int depth, int base_id, int mode, CCChanRx recv_rx, CCChanRx r
                 int child_mode = mode;
                 __cc_nursery153.spawn(() => [child_depth, child_base, child_mode, rr, rr_alt, st, dr] {
                     nested_scope(child_depth, child_base, child_mode, rr, rr_alt, st, dr);
-                });
+                }) !>;
             }
         }
     
@@ -329,7 +329,7 @@ int main(void) {
             int root_mode = mode;
             __cc_nursery154.spawn(() => [rr, rr2, st, dr, root_base, root_mode] {
                 nested_scope(g_depth, root_base, root_mode, rr, rr2, st, dr);
-            });
+            }) !>;
             cc_sleep_ms(g_cancel_delay_ms);
             teardown_start = now_ms();
             double t = now_ms();

@@ -106,14 +106,14 @@ int main(void) {
         CCChanRx req_rx_raw = req_rx;
         n.spawn(() => [req_rx_raw] {
             owner(req_rx_raw);
-        });
+        }) !>;
 
         for (int i = 0; i < CLIENTS; ++i) {
             CCChanTx req_tx_raw = req_tx;
             int client_id = i + 1;
             n.spawn(() => [client_id, req_tx_raw] {
                 client_loop(client_id, req_tx_raw);
-            });
+            }) !>;
         }
     }
 

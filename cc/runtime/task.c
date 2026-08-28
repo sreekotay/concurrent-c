@@ -786,7 +786,7 @@ int cc_block_all(int count, CCTask* tasks, intptr_t* results) {
     CCResult_CCNursery_CCError __nr = cc_nursery_create();
     CCNurseryHost* n;
     if (!__nr.ok) return ENOMEM;
-    n = __nr.u.value.n;
+    n = __nr.u.value.p;
 
     CCBlockAllSlot* slots = (CCBlockAllSlot*)calloc((size_t)count, sizeof(CCBlockAllSlot));
     if (!slots) {
@@ -801,17 +801,18 @@ int cc_block_all(int count, CCTask* tasks, intptr_t* results) {
 
     /* Spawn a waiter fiber for each task */
     for (int i = 0; i < count; i++) {
-        int err = cc_nursery_spawn(n, cc__block_all_worker, &slots[i]);
-        if (err != 0) {
+        CCResult_void_CCError sr = cc_nursery_spawn(n, cc__block_all_worker, &slots[i]);
+        if (!sr.ok) {
             cc_nursery_cancel(n);
-            cc_nursery_wait(n);
+            (void)cc_nursery_wait(n);
             cc_nursery_free(n);
             free(slots);
-            return err;
+            return sr.u.error.kind == CC_ERR_OUT_OF_MEMORY ? ENOMEM : EINVAL;
         }
     }
 
-    int err = cc_nursery_wait(n);
+    CCResult_void_CCError wr = cc_nursery_wait(n);
+    int err = wr.ok ? 0 : (wr.u.error.kind == CC_ERR_OUT_OF_MEMORY ? ENOMEM : EINVAL);
     cc_nursery_free(n);
     free(slots);
     return err;
@@ -866,7 +867,7 @@ int cc_block_race(int count, CCTask* tasks, int* winner, intptr_t* result) {
         cc_chan_free(done_chan);
         return ENOMEM;
     }
-    n = __nr.u.value.n;
+    n = __nr.u.value.p;
 
     volatile int winner_flag = 0;
     CCBlockRaceSlot* slots = (CCBlockRaceSlot*)calloc((size_t)count, sizeof(CCBlockRaceSlot));
@@ -885,14 +886,14 @@ int cc_block_race(int count, CCTask* tasks, int* winner, intptr_t* result) {
 
     /* Spawn all tasks */
     for (int i = 0; i < count; i++) {
-        int err = cc_nursery_spawn(n, cc__block_race_worker, &slots[i]);
-        if (err != 0) {
+        CCResult_void_CCError sr = cc_nursery_spawn(n, cc__block_race_worker, &slots[i]);
+        if (!sr.ok) {
             cc_nursery_cancel(n);
-            cc_nursery_wait(n);
+            (void)cc_nursery_wait(n);
             cc_nursery_free(n);
             cc_chan_free(done_chan);
             free(slots);
-            return err;
+            return sr.u.error.kind == CC_ERR_OUT_OF_MEMORY ? ENOMEM : EINVAL;
         }
     }
 
@@ -912,7 +913,7 @@ int cc_block_race(int count, CCTask* tasks, int* winner, intptr_t* result) {
     
     /* Now wait for all workers to finish (they should exit quickly after cancel) */
     cc_nursery_cancel(n);
-    cc_nursery_wait(n);
+    (void)cc_nursery_wait(n);
     cc_nursery_free(n);
     cc_chan_close(done_chan);
     cc_chan_free(done_chan);
@@ -941,7 +942,7 @@ int cc_block_any(int count, CCTask* tasks, int* winner, intptr_t* result) {
         cc_chan_free(done_chan);
         return ENOMEM;
     }
-    n = __nr.u.value.n;
+    n = __nr.u.value.p;
 
     CCBlockRaceSlot* slots = (CCBlockRaceSlot*)calloc((size_t)count, sizeof(CCBlockRaceSlot));
     if (!slots) {
@@ -958,14 +959,14 @@ int cc_block_any(int count, CCTask* tasks, int* winner, intptr_t* result) {
 
     /* Spawn all tasks */
     for (int i = 0; i < count; i++) {
-        int err = cc_nursery_spawn(n, cc__block_race_worker, &slots[i]);
-        if (err != 0) {
+        CCResult_void_CCError sr = cc_nursery_spawn(n, cc__block_race_worker, &slots[i]);
+        if (!sr.ok) {
             cc_nursery_cancel(n);
-            cc_nursery_wait(n);
+            (void)cc_nursery_wait(n);
             cc_nursery_free(n);
             cc_chan_free(done_chan);
             free(slots);
-            return err;
+            return sr.u.error.kind == CC_ERR_OUT_OF_MEMORY ? ENOMEM : EINVAL;
         }
     }
 
@@ -1005,7 +1006,7 @@ int cc_block_any(int count, CCTask* tasks, int* winner, intptr_t* result) {
     
     /* Now wait for all workers to finish */
     cc_nursery_cancel(n);
-    cc_nursery_wait(n);
+    (void)cc_nursery_wait(n);
     cc_nursery_free(n);
     cc_chan_close(done_chan);
     cc_chan_free(done_chan);

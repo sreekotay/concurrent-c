@@ -9,7 +9,7 @@ int main(void) {
     {
         CCNursery __cc_nursery53 = @create() !> @destroy;
 
-        __cc_nursery53.spawn (() => [v] { g = v; });
+        __cc_nursery53.spawn (() => [v] { g = v; }) !>;
     
     }
     if (g != 7) return 1;

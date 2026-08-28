@@ -23,8 +23,8 @@ int main(void) {
 
     {
         CCNursery n = @create() !> @destroy;
-        if (n.spawn_async(add_value(7)) != 0) return 11;
-        if (n.spawn_async(add_value(11)) != 0) return 12;
+        n.spawn_async(add_value(7)) !>;
+        n.spawn_async(add_value(11)) !>;
     }
 
     if (cc_atomic_load(&g_sum) != 18) return 13;
@@ -37,14 +37,8 @@ int main(void) {
     {
         CCNursery n = @create() !> @destroy;
         (void)n.close_on(tx);
-        if (n.spawn_async(produce(tx, 10)) != 0) {
-            cc_chan_free(ch);
-            return 22;
-        }
-        if (n.spawn_async(produce(tx, 20)) != 0) {
-            cc_chan_free(ch);
-            return 23;
-        }
+        n.spawn_async(produce(tx, 10)) !>;
+        n.spawn_async(produce(tx, 20)) !>;
     }
 
     int count = 0;

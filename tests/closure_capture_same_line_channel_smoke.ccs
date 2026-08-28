@@ -16,10 +16,10 @@ int main(void) {
             int v = -1;
             assert(cc_io_avail(chan_recv(rx, &v)));
             g_value = v;
-        });
+        }) !>;
         __cc_nursery35.spawn(() => [tx] {
             (void)chan_send(tx, 42);
-        });
+        }) !>;
     
     }
 

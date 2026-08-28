@@ -17,7 +17,7 @@ int main(void) {
         CCNursery n = cc_nursery_create() !> @destroy;
         n.spawn(() => [view] {
             (void)view;
-        });
+        }) !>;
         /* Original view may still be in outer scope; spawn pin also applies. */
         cc_arena_reset(&buf);
     }

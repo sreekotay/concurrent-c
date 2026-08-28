@@ -24,7 +24,7 @@ int main(void) {
             n.spawn(() => [idx, &slots, &lens] {
                 slots[idx] = (idx + 1) * 10;
                 lens[idx] = (size_t)(idx + 1);
-            });
+            }) !>;
         }
     }
 

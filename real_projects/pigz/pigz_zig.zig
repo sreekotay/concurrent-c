@@ -1,6 +1,6 @@
 // pigz_zig.zig -- Parallel gzip compression in idiomatic Zig
 //
-// Mirrors the architecture of pigz_go.go and pigz_idiomatic.ccs:
+// Mirrors the architecture of pigz_go.go and pigz_channel.ccs:
 //   - Read 128KB blocks from input
 //   - Compress each block concurrently (bounded by channel capacity)
 //   - Write compressed blocks in submission order

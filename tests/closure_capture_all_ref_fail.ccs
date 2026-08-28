@@ -12,7 +12,7 @@ int main(void) {
         /* ERROR: capture-all [&] is not allowed */
         __cc_nursery31.spawn(() => [&] {
             x++;
-        });
+        }) !>;
     
     }
     

@@ -1,0 +1,17 @@
+#!ccc ccs
+/* Extract must accept Name* from an already-included host .h
+ * (pigz_cc / ZopfliOptions* after <zopfli.h>). */
+#include <stdio.h>
+#include "cch_host_h_ptr.cch"
+
+void host_ptr_touch(const HostPtrType* p) {
+    (void)p;
+}
+
+int main(void) {
+    HostPtrType t;
+    t.n = 1;
+    host_ptr_touch(&t);
+    printf("ok\n");
+    return 0;
+}

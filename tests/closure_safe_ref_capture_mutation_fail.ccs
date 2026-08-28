@@ -12,7 +12,7 @@ int main(void) {
         /* ERROR: mutation of shared reference */
         n.spawn(() => [@safe &counter] {
             counter++;
-        });
+        }) !>;
     }
 
     return 0;

@@ -1,5 +1,5 @@
 /*
- * pigz_profile.ccs -- Profiling version of pigz_idiomatic.
+ * pigz_profile.ccs -- Profiling version of pigz_channel.
  *
  * Adds per-block timing to measure:
  *   spawn_ns   : when cc_fiber_spawn_task was called (producer side)
@@ -222,7 +222,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
                 cc_arena_free(&r->arena);
             }
         }
-    });
+    }) !>;
 
     int comp_level = level;
     CCNursery producer = @create(consumer) !> @destroy {
@@ -264,7 +264,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             
             if (is_last) break;
         }
-    });
+    }) !>;
 
     cc_file_sync(&out_file);
     if (cc_atomic_load(&g_pipeline_error)) return 1;

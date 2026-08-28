@@ -1,0 +1,18 @@
+#!ccc ccs
+/* Extract must open $CC_SYSROOT/usr/include/SdkHostStream.h — the same
+ * walk as --sysroot / -isysroot, without replacing clang's SDK. */
+#include <stdio.h>
+#include "cch_sdkroot_host.cch"
+
+void sdk_host_touch(SdkHostStream* s) {
+    if (s) s->n = 1;
+}
+
+int main(void) {
+    SdkHostStream t;
+    t.n = 0;
+    sdk_host_touch(&t);
+    if (t.n != 1) return 1;
+    printf("ok\n");
+    return 0;
+}

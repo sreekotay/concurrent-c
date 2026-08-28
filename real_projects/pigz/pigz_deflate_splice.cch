@@ -1,0 +1,68 @@
+#ifndef PIGZ_DEFLATE_SPLICE_H
+#define PIGZ_DEFLATE_SPLICE_H
+
+#include <zlib.h>
+
+/*
+ * Adler pigz.c:1831 — end a partial raw deflate stream on a byte boundary.
+ *
+ * Z_SYNC_FLUSH always emits an empty stored block (4–5 bytes). The 1.2.6
+ * splice finishes the current block with Z_BLOCK, then:
+ *   already odd-aligned or no dictionary → Z_SYNC_FLUSH
+ *   leftover bits and will SetDictionary → pad with static empty blocks
+ *   already a byte boundary → emit nothing
+ *   -i then Z_FULL_FLUSH so the next member has no history
+ * Last ticket is Z_FINISH.
+ */
+
+static inline int pigz_deflate_all(z_stream* strm, int flush) {
+    int ret = Z_OK;
+    for (;;) {
+        if (strm->avail_out == 0)
+            return Z_BUF_ERROR;
+        ret = deflate(strm, flush);
+        if (ret != Z_OK && ret != Z_STREAM_END)
+            return ret;
+        if (flush == Z_FINISH) {
+            if (ret == Z_STREAM_END)
+                return ret;
+            continue;
+        }
+        if (strm->avail_in == 0)
+            return ret;
+    }
+}
+
+static inline int pigz_deflate_splice(z_stream* strm, int is_last, int setdict) {
+    if (is_last)
+        return pigz_deflate_all(strm, Z_FINISH);
+#if ZLIB_VERNUM >= 0x1260
+    int ret = pigz_deflate_all(strm, Z_BLOCK);
+    if (ret != Z_OK)
+        return ret;
+    int bits = 0;
+    (void)deflatePending(strm, Z_NULL, &bits);
+    if ((bits & 1) || !setdict) {
+        ret = pigz_deflate_all(strm, Z_SYNC_FLUSH);
+    } else if (bits & 7) {
+        do {
+            ret = deflatePrime(strm, 10, 2);
+            if (ret != Z_OK)
+                return ret;
+            (void)deflatePending(strm, Z_NULL, &bits);
+        } while (bits & 7);
+        ret = pigz_deflate_all(strm, Z_BLOCK);
+    }
+    if (ret != Z_OK)
+        return ret;
+#else
+    int ret = pigz_deflate_all(strm, Z_SYNC_FLUSH);
+    if (ret != Z_OK)
+        return ret;
+#endif
+    if (!setdict)
+        ret = pigz_deflate_all(strm, Z_FULL_FLUSH);
+    return ret;
+}
+
+#endif

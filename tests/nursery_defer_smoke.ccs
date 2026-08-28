@@ -11,7 +11,7 @@ int main(void) {
     {
         CCNursery __cc_nursery71 = @create() !> @destroy;
 
-        __cc_nursery71.spawn(() => { worker(1); });
+        __cc_nursery71.spawn(() => { worker(1); }) !>;
 
     }
     return 0;

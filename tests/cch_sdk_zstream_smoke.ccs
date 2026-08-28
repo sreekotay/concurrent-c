@@ -1,0 +1,16 @@
+#!ccc ccs
+#include <stdio.h>
+#include <string.h>
+#include "cch_sdk_zstream.cch"
+
+void sdk_zstream_touch(z_stream* strm) {
+    if (strm) strm->avail_in = 0;
+}
+
+int main(void) {
+    z_stream strm;
+    memset(&strm, 0, sizeof(strm));
+    sdk_zstream_touch(&strm);
+    printf("ok\n");
+    return 0;
+}

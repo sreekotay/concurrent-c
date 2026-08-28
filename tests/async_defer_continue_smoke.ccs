@@ -25,7 +25,7 @@ int main(void) {
 
     {
         CCNursery n = @create() !> @destroy;
-        if (n.spawn_async(worker()) != 0) return 11;
+        n.spawn_async(worker()) !>;
     }
 
     if (g_body_count != 2 || g_cleanup_count != 4) {

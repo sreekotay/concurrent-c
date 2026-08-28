@@ -728,12 +728,12 @@ int main(int argc, char** argv) {
     wp = &w;
     {
         CCNursery n = cc_nursery_create() !> @destroy;
-        if (sweep) n.spawn(() => [sp] { sweeper(sp); });
+        if (sweep) n.spawn(() => [sp] { sweeper(sp); }) !>;
         n.spawn(() => [wp, sp] {
             workload(wp);
             cc_atomic_store(&sp->stop, 1);
             sweep_kick(sp);
-        });
+        }) !>;
     }
     printf("# ops=%ld  drains=%zu drained_recs=%zu dropped=%zu reinserted=%zu rehashes=%zu\n",
            w.ops, s.drains, s.drained_recs, s.dropped, s.reinserted, s.rehashes);

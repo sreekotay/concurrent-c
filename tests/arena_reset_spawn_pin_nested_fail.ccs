@@ -17,7 +17,7 @@ int main(void) {
         memset(view.ptr, 'x', view.len);
         n.spawn(() => [view] {
             (void)view;
-        });
+        }) !>;
     }
     /* view is out of scope; nursery (and captured borrow) still live. */
     cc_arena_reset(&buf);

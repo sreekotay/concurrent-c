@@ -46,7 +46,7 @@ int main(void) {
         int b = sum_ids(g_num_dim);
         printf("idx=%d macro_sum=%d num_sum=%d\n", idx, a, b);
         cc_atomic_store(&g_done, 1);
-    });
+    }) !>;
     (void)cc_nursery_wait(n);
     cc_nursery_free(n);
     if (!cc_atomic_load(&g_done)) abort();

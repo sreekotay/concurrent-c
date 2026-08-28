@@ -36,18 +36,18 @@ int main(void) {
                     int rc = cc_chan_recv(rx.raw, &out, sizeof(int));
                     if (rc == EPIPE) cc_atomic_fetch_add(&g_closed, 1);
                     else cc_atomic_fetch_add(&g_errors, 1);
-                });
+                }) !>;
             }
             __cc_nursery9.spawn(() => [tx] {
                 cc_sleep_ms(1);
                 tx.close();
                 tx.close();
                 tx.close();
-            });
+            }) !>;
             __cc_nursery9.spawn(() => [tx] {
                 cc_sleep_ms(1);
                 tx.close();
-            });
+            }) !>;
         
         }
 

@@ -16,7 +16,7 @@ int main(void) {
     {
         CCNursery n = @create() !> @destroy;
 
-        if (n.spawnhybrid(() => {
+        n.spawnhybrid(() => {
                 CCChan* ch = cc_chan_create(1);
                 if (!ch) {
                     cc_atomic_store(&g_rc, -100);
@@ -34,9 +34,7 @@ int main(void) {
 
                 cc_atomic_store(&g_rc, rc);
                 cc_chan_free(ch);
-            }) != 0) {
-            return 3;
-        }
+            }) !>;
     }
 
     if (!cc_atomic_load(&g_seen_cancelled)) {

@@ -23,7 +23,7 @@ int main(void) {
             for (int i = 1; i <= 3; i++) {
                 (void)chan_send(ch_tx, i);
             }
-        });
+        }) !>;
 
         // This would deadlock without the runtime guard.
         __cc_nursery67.spawn(() => {
@@ -34,7 +34,7 @@ int main(void) {
                 g_err = cc_is_ok(res) ? EPIPE : cc_unwrap_err(res).os_code; /* expect EDEADLK from the guard */
                 break;
             }
-        });
+        }) !>;
     
     }
 

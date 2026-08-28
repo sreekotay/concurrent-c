@@ -120,7 +120,7 @@ static void JobBag_destroy(JobBag *b) {
     free(b->a);
     b->a = NULL;
     b->n = b->cap = 0;
-    b->excl.e = NULL;
+    b->excl.p = NULL;
     b->ready = 0;
 }
 
@@ -293,7 +293,7 @@ static void q_release_storage(CcThrdq *q) {
     done->destroy();
     if (cc_exclusive_is_live(q->locks)) {
         q->locks.destroy();
-        q->locks.e = NULL;
+        q->locks.p = NULL;
     }
     q->lock_arena.destroy();
     free(q->name);
@@ -338,7 +338,7 @@ static void CcThrdq_teardown(CcThrdq *q) {
     }
     w = q->workers;
     if (w)
-        w.wait();
+        w.wait() !>;
     {
         JobBag *done = &q->done;
         done->drain(q);
@@ -383,7 +383,7 @@ static int spawn_worker(CCNursery *n, CcThrdq *q) {
     int rc = -1;
     if (!n)
         return -1;
-    rc = n.spawnhybrid(() => [q] { worker(q); });
+    rc = n.spawnhybrid(() => [q] { worker(q); }) !>;
     return rc;
 }
 

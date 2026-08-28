@@ -12,7 +12,7 @@
  *
  * Idiom: send_task + `ordered` recv. Nested nurseries + close_on match
  * recipe_channel_pipeline / recipe_worker_pool; only the channel kind
- * and send_task differ. Larger example: real_projects/pigz/pigz_idiomatic.ccs.
+ * and send_task differ. Larger example: real_projects/pigz/pigz_channel.ccs.
  */
 #include <ccc/std/prelude.cch>
 #include <stdlib.h>
@@ -71,13 +71,13 @@ int main(void) {
                 eprintln(@string(`missing results: got ${got} of ${n}`, @scratch)) !>;
                 failed.store(1);
             }
-        });
+        }) !>;
 
         /* Producer in an inner nursery: @destroy closes results_tx once the
          * producer returns, so the consumer sees EOF after draining. */
         {
             CCNursery producer = consumer.create_child() !> @destroy;
-            (void)producer.close_on(results_tx);
+            producer.close_on(results_tx) !>;
 
             producer.spawn(() => [results_tx] {
                 @errhandler(CCError e) cc_error_exit(e);
@@ -88,7 +88,7 @@ int main(void) {
                     });
                     println(@string(`[producer] submitted task for item ${i}`, @scratch)) !>;
                 }
-            });
+            }) !>;
         }
     }
 

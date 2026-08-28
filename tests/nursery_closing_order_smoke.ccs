@@ -44,8 +44,8 @@ int main(void) {
         CCNursery __cc_nursery68 = @create() !> @destroy;
         (void)__cc_nursery68.close_on(ch_tx);
 
-        __cc_nursery68.spawn(() => { producer(ch_tx); });
-        __cc_nursery68.spawn(() => { consumer(ch_rx); });
+        __cc_nursery68.spawn(() => { producer(ch_tx); }) !>;
+        __cc_nursery68.spawn(() => { consumer(ch_rx); }) !>;
     
     }
 

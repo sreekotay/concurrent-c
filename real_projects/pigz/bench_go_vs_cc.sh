@@ -22,7 +22,7 @@ make -C "$SCRIPT_DIR/../../cc" > /dev/null
 make -C "$SCRIPT_DIR/../../cc" lower-headers > /dev/null
 
 # Ensure binaries are built
-make pigz pigz_cc pigz_idiomatic pigz_pthread > /dev/null
+make pigz pigz_cc pigz_channel pigz_pthread > /dev/null
 go build -ldflags="-s -w" -o out/pigz_go pigz_go.go > /dev/null
 ZIG_AVAILABLE=0
 if command -v zig >/dev/null 2>&1 && [ -f "$ZIG_SOURCE" ]; then
@@ -54,11 +54,11 @@ fi
 
 # --- benchmark definitions: name, cmd, flags ---
 # CC (Pthread) is the ratio baseline (find by name below).
-# "CC (Full -i)" is Full with --independent: no dict chaining, fair vs Idiomatic.
+# "CC (Full -i)" is Full with --independent: no dict chaining, fair vs Channel.
 # Always pass -k for pigz-compatible CLIs so a run cannot unlink the corpus
 # (that is what aborted the interleaved loop under set -e).
-BENCH_NAMES=("CC (Idiomatic)" "CC (Full)" "CC (Full -i)" "CC (Pthread)" "Go (CGO+zlib)")
-BENCH_CMDS=("$OUT_DIR/pigz_idiomatic" "$OUT_DIR/pigz_cc" "$OUT_DIR/pigz_cc" "$OUT_DIR/pigz_pthread" "$OUT_DIR/pigz_go")
+BENCH_NAMES=("CC (Channel)" "CC (Full)" "CC (Full -i)" "CC (Pthread)" "Go (CGO+zlib)")
+BENCH_CMDS=("$OUT_DIR/pigz_channel" "$OUT_DIR/pigz_cc" "$OUT_DIR/pigz_cc" "$OUT_DIR/pigz_pthread" "$OUT_DIR/pigz_go")
 BENCH_FLAGS=("" "-k -f" "-k -f -i" "" "")
 if [ "$ZIG_AVAILABLE" -eq 1 ]; then
     BENCH_NAMES+=("Zig")

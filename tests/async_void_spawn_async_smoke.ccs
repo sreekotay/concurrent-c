@@ -41,10 +41,10 @@ int main(void) {
     cc_atomic_store(&g_skipped, 0);
 
     CCNursery ns = cc_nursery_create() !>;
-    ns.spawn_async(greet(1));
-    ns.spawn_async(greet(2));
-    ns.spawn_async(early_exit(-1));
-    ns.spawn_async(early_exit(7));
+    ns.spawn_async(greet(1)) !>;
+    ns.spawn_async(greet(2)) !>;
+    ns.spawn_async(early_exit(-1)) !>;
+    ns.spawn_async(early_exit(7)) !>;
     ns.destroy();
 
     int total = cc_atomic_load(&g_total);

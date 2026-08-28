@@ -31,7 +31,7 @@ int main(void) {
             CCTask task = cc_fiber_spawn_task(compute, (void*)41);
             (void)chan_send(tx, task);
             chan_close(tx);
-        });
+        }) !>;
 
         __cc_nursery91.spawn(() => [rx, ch] {
             bool write_failed = false;
@@ -43,7 +43,7 @@ int main(void) {
                     cc_atomic_store(&g_seen, 1);
                 }
             }
-        });
+        }) !>;
     
     }
 

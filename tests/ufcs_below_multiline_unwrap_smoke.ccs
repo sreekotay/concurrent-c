@@ -71,7 +71,7 @@ int main(void) {
      * reparses in play (mirrors the redis TU's pipeline shape). */
     CCNursery n = cc_nursery_create() !>;
     int seven = 7;
-    n.spawn(() => [seven] { side_set(seven); });
+    n.spawn(() => [seven] { side_set(seven); }) !>;
     cc_nursery_wait(n);
     cc_nursery_free(n);
 

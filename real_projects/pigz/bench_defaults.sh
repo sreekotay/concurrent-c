@@ -6,7 +6,7 @@
 #   size_mb  default 50 (MiB, 1024*1024 — matches testdata/text_50mb.bin)
 #   runs     default 5 interleaved rounds
 #   names    comma list, default all built binaries
-#            e.g. pigz,pigz_wait
+#            e.g. pigz,pigz_idiomatic
 #
 # Each invoke is `<bin> <file>` only. No -p / -k / -i.
 # CC_WORKERS, CC_THREADS, PIGZ_* are unset so each program picks its width.
@@ -28,7 +28,7 @@ WANT="${3:-}"
 
 if ! [[ "$SIZE_MB" =~ ^[0-9]+$ && "$RUNS" =~ ^[0-9]+$ && "$RUNS" -ge 1 ]]; then
     echo "Usage: $0 [size_mb] [runs] [comma,names]" >&2
-    echo "  e.g. $0 50 5 pigz,pigz_wait" >&2
+    echo "  e.g. $0 50 5 pigz,pigz_idiomatic" >&2
     exit 1
 fi
 
@@ -58,8 +58,8 @@ fi
 CANDIDATES=(
     "pigz|pigz|chain|"
     "pigz_cc|pigz_cc|chain|"
-    "pigz_wait|pigz_wait|chain|"
-    "pigz_idiomatic|pigz_idiomatic|indep|"
+    "pigz_idiomatic|pigz_idiomatic|chain|"
+    "pigz_channel|pigz_channel|indep|"
     "pigz_parallel|pigz_parallel|indep|"
     "pigz_hybrid|pigz_hybrid|indep|"
     "pigz_pthread|pigz_pthread|indep|"
@@ -173,7 +173,7 @@ emit "#         Fresh work copy per invoke so pigz's delete-source default"
 emit "#         does not consume the corpus."
 emit ""
 emit "Each binary was invoked as \`<bin> <file>\` only. No -p, no CC_WORKERS /"
-emit "CC_THREADS / PIGZ_CAP / PIGZ_DICT / PIGZ_SEQ. pigz_wait defaults to"
+emit "CC_THREADS / PIGZ_CAP / PIGZ_DICT / PIGZ_SEQ. pigz_idiomatic defaults to"
 emit "chained 32 KiB dictionaries (one gzip stream); PIGZ_DICT=0 opts out."
 emit ""
 emit "=== Interleaved wall seconds ==="

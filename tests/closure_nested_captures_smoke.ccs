@@ -20,10 +20,10 @@ int main(void) {
                     int inner = 25;
                     printf("outer=%d middle=%d inner=%d\n", outer, middle, inner);
                     printf("sum=%d\n", outer + middle + inner);
-                });
+                }) !>;
             
             }
-        });
+        }) !>;
     
     }
     

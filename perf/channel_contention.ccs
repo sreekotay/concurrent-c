@@ -232,7 +232,7 @@ static double run_shared_case(const char* phase, int trial, int producers, int c
                 if (cc_atomic_fetch_sub(producers_left_ptr, 1) == 1) {
                     tx_h.close();
                 }
-            });
+            }) !>;
         }
 
         for (int c = 0; c < consumers; c++) {
@@ -249,7 +249,7 @@ static double run_shared_case(const char* phase, int trial, int producers, int c
                     recv_count++;
                 }
                 *sum_slot += local_sum;
-            });
+            }) !>;
         }
     }
 

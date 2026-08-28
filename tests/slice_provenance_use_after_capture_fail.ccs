@@ -11,7 +11,7 @@ int main(void) {
 
         __cc_nursery83.spawn (() => {
             (void)s.len;
-        });
+        }) !>;
     
     }
     // ERROR: moved into closure capture above

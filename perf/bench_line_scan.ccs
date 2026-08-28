@@ -192,7 +192,7 @@ static ScanStats scan_chan(const char* path) {
                 }
             }
             tx.close();
-        });
+        }) !>;
 
         n.spawn(() => [rx, total] {
             LineMsg msg = {0};
@@ -201,7 +201,7 @@ static ScanStats scan_chan(const char* path) {
                 msg.arena.free();
                 msg = (LineMsg){0};
             }
-        });
+        }) !>;
     }
 
     ScanStats out = *total;

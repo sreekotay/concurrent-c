@@ -1,0 +1,15 @@
+#!ccc ccs
+#include <stdio.h>
+#include "cch_host_angle_ptr.cch"
+
+void angle_host_touch(const AngleHostOpts* p) {
+    (void)p;
+}
+
+int main(void) {
+    AngleHostOpts t;
+    t.n = 1;
+    angle_host_touch(&t);
+    printf("ok\n");
+    return 0;
+}

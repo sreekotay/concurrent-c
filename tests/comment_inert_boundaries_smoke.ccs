@@ -21,7 +21,7 @@ int main(void) {
 
     CCNursery nur = cc_nursery_create() !> @destroy;
     int base = 5;
-    nur.spawn(() =>/*x*/ [base] { printf("seen=%d\n", base); });
-    nur.wait();
+    nur.spawn(() =>/*x*/ [base] { printf("seen=%d\n", base); }) !>;
+    nur.wait() !>;
     return 0;
 }

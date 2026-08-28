@@ -128,7 +128,7 @@ int main(void) {
                     }
                     cc_yield();
                 }
-            });
+            }) !>;
         }
         (void)cc_nursery_wait(n);
         cc_nursery_free(n);

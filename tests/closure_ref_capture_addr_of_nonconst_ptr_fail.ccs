@@ -16,7 +16,7 @@ int main(void) {
         __cc_nursery50.spawn(() => [&x] {
             /* ERROR: callee takes int* (not const) */
             maybe_write_i32(&x);
-        });
+        }) !>;
     
     }
 

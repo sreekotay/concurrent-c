@@ -29,7 +29,7 @@ int main(void) {
             @defer cleanup_fn();  // <-- THIS IS THE PROBLEM
             printf("Worker doing work\n");
             // cleanup_fn should run here when closure exits
-        });
+        }) !>;
     
     }
     

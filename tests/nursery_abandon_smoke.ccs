@@ -27,8 +27,15 @@ int main(void) {
     {
         cc_atomic_int done = 0;
         CCNursery n = cc_nursery_create() !>;
-        if (n.on_last(&done, finish_flag) != 0) return 2;
-        if (n.on_last(&done, finish_flag) != EINVAL) return 3;
+        n.on_last(&done, finish_flag) !>;
+        {
+            int saw = 0;
+            n.on_last(&done, finish_flag) !>(e) {
+                saw = 1;
+                if (e.kind != CC_ERR_INVALID_ARG) return 3;
+            };
+            if (!saw) return 3;
+        }
         n.abandon();
         if (!wait_flag(&done, 1000)) return 4;
     }
@@ -37,8 +44,8 @@ int main(void) {
         cc_atomic_int done = 0;
         CCNursery n = cc_nursery_create() !>;
         cc_atomic_store(&g_ran, 0);
-        if (n.spawn(() => { cc_atomic_store(&g_ran, 1); }) != 0) return 11;
-        if (n.on_last(&done, finish_flag) != 0) return 12;
+        n.spawn(() => { cc_atomic_store(&g_ran, 1); }) !>;
+        n.on_last(&done, finish_flag) !>;
         n.abandon();
         if (!wait_flag(&done, 2000)) return 13;
         if (cc_atomic_load(&g_ran) != 1) return 14;
@@ -47,8 +54,8 @@ int main(void) {
     {
         cc_atomic_int done = 0;
         CCNursery n = cc_nursery_create() !>;
-        if (n.spawnhybrid(() => { cc_sleep_ms(5); }) != 0) return 16;
-        if (n.on_last(&done, finish_flag) != 0) return 17;
+        n.spawnhybrid(() => { cc_sleep_ms(5); }) !>;
+        n.on_last(&done, finish_flag) !>;
         n.abandon();
         if (!wait_flag(&done, 2000)) return 18;
     }
@@ -61,7 +68,7 @@ int main(void) {
                                 &tx, &rx) != 0)
             return 20;
         CCNursery n = cc_nursery_create() !>;
-        if (n.close_on(tx) != 0) return 22;
+        n.close_on(tx) !>;
         n.abandon();
         CCResult_bool_CCIoError tr = chan_try_recv(rx, &tmp);
         if (!(cc_is_ok(tr) && !cc_unwrap(tr))) return 23;
@@ -77,14 +84,20 @@ int main(void) {
                                 &tx, &rx) != 0)
             return 30;
         CCNursery n = cc_nursery_create() !>;
-        if (n.spawn(() => [rx] {
+        n.spawn(() => [rx] {
             int x = 0;
             (void)chan_recv(rx, &x);
-        }) != 0)
-            return 32;
-        if (n.on_last(&done, finish_flag) != 0) return 33;
+        }) !>;
+        n.on_last(&done, finish_flag) !>;
         n.abandon();
-        if (n.spawn(() => {}) != EINVAL) return 34;
+        {
+            int saw = 0;
+            n.spawn(() => {}) !>(e) {
+                saw = 1;
+                if (e.kind != CC_ERR_INVALID_ARG) return 34;
+            };
+            if (!saw) return 34;
+        }
         if (!cc_io_avail(chan_send(tx, v))) return 35;
         if (!wait_flag(&done, 2000)) return 36;
         chan_free(tx);
@@ -95,8 +108,8 @@ int main(void) {
         for (i = 0; i < 1000; i++) {
             cc_atomic_int done = 0;
             CCNursery n = cc_nursery_create() !>;
-            if (n.spawn(() => {}) != 0) return 41;
-            if (n.on_last(&done, finish_flag) != 0) return 42;
+            n.spawn(() => {}) !>;
+            n.on_last(&done, finish_flag) !>;
             n.abandon();
             if (!wait_flag(&done, 2000)) return 43;
         }

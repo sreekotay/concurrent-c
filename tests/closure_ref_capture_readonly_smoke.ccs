@@ -15,7 +15,7 @@ int main(void) {
         __cc_nursery52.spawn(() => [&x] {
             printf("ref captured x=%d\n", x);
             /* Reading x is fine */
-        });
+        }) !>;
     
     }
     

@@ -20,8 +20,8 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     CCClosure0 child = cc_closure0_make(child_task, NULL, NULL);
     CCNursery root = cc_nursery_create() !>;
-    assert(root.spawn(child) == 0);
-    assert(root.wait() == 0);
+    root.spawn(child) !>;
+    root.wait() !>;
     root.free();
     assert(g_child_runs == 1);
 
@@ -31,7 +31,7 @@ int main(void) {
     CCClosure0 cancelled_child = cc_closure0_make(cancelled_child_task, NULL, NULL);
     CCNursery child_from_cancelled_parent =
         cc_nursery_spawn_child_closure0(parent, cancelled_child) !>;
-    assert(child_from_cancelled_parent.wait() == 0);
+    child_from_cancelled_parent.wait() !>;
     child_from_cancelled_parent.free();
     parent.free();
     assert(g_cancelled_child_runs == 0);

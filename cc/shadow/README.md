@@ -72,7 +72,7 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 | `pp_ast_core.cch` | Keywords, AstNode, Parser, spell helpers |
 | `pp_ast_parse_stmt.cch` | Control-flow parsers + `parse_stmt` dispatch |
 | `pp_ast_parse_unwrap.cch` | Unwrap / bang / result-local / ptr unwrap |
-| `pp_ast_parse_spawn.cch` | Spawn / send_task / closure / capture infer |
+| `pp_ast_parse_spawn.cch` | Closure / capture infer (spawn and send_task are UFCS) |
 | `pp_ast_parse_ext.cch` | External / TU parsers + `parse_tu` |
 | `pp_emit.cch` | Emit umbrella → core + typehooks + ufcs + stmt |
 | `pp_emit_core.cch` | CEmit, bind/chan tables, `#line` / lead; leftover `?>` API |

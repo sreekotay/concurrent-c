@@ -32,7 +32,7 @@ static void bench_buffered(void) {
             for (int i = 0; i < ITERATIONS; i++) {
                 tx.send(i);
             }
-        });
+        }) !>;
         
         /* Consumer */
         __cc_nursery167.spawn(() => {
@@ -40,7 +40,7 @@ static void bench_buffered(void) {
             for (int i = 0; i < ITERATIONS; i++) {
                 rx.recv(&v);
             }
-        });
+        }) !>;
     
     }
     double elapsed = time_now_ms() - start;
@@ -68,14 +68,14 @@ static void bench_unbuffered(void) {
             for (int i = 0; i < iterations; i++) {
                 tx.send(i);
             }
-        });
+        }) !>;
         
         __cc_nursery168.spawn(() => [iterations] {
             int v;
             for (int i = 0; i < iterations; i++) {
                 rx.recv(&v);
             }
-        });
+        }) !>;
     
     }
     

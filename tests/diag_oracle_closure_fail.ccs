@@ -9,7 +9,7 @@ int main(void) {
     n.spawn(() => {
         int inner = cc_diag_oracle_undeclared(1);   /* line 10 */
         (void)inner;
-    });
+    }) !>;
     int after = cc_diag_oracle_undeclared_two(2);   /* line 13 */
     (void)after;
     return 0;

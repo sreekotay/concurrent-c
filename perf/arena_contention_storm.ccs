@@ -70,7 +70,7 @@ int main(void) {
                     CC_ARENA_DEFAULT_BLOCK_MAX);
                 arena_worker(&local_arena);
                 free(local_buf);
-            });
+            }) !>;
         }
     
     }

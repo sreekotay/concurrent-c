@@ -80,7 +80,7 @@ static double bench_nursery_spawn_once(void) {
             for (int i = 0; i < g_batch_size; i++) {
                 __cc_nursery171.spawn(() => {
                     (void)noop_task(NULL);
-                });
+                }) !>;
             }
         
         }
@@ -98,15 +98,9 @@ static double bench_nursery_api_once(void) {
             abort();
         }
         for (int i = 0; i < g_batch_size; i++) {
-            if (cc_nursery_spawn(n, noop_task, NULL) != 0) {
-                fprintf(stderr, "cc_nursery_spawn failed\n");
-                abort();
-            }
+            cc_nursery_spawn(n.p, noop_task, NULL) !>;
         }
-        if (cc_nursery_wait(n) != 0) {
-            fprintf(stderr, "cc_nursery_wait failed\n");
-            abort();
-        }
+        cc_nursery_wait(n.p) !>;
         cc_nursery_free(n);
     }
     return time_now_ms() - start;

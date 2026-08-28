@@ -44,8 +44,8 @@ int main(void) {
             // Nested closure also captures `ready_tx`
             nursery.spawn(() => [ready_tx] {
                 handle_conn(ready_tx, 42);
-            });
-        });
+            }) !>;
+        }) !>;
     }
 
     int result = 0;

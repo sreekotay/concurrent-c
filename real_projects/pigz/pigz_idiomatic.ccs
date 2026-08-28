@@ -1,286 +1,340 @@
 #!ccc ccs
 /*
- * pigz_idiomatic.ccs — Parallel gzip compression in idiomatic Concurrent-C.
+ * pigz_idiomatic.ccs — pigz as the sequential loop, annotated.
  *
- * Ordered channel + send_task (same shape as recipe_ordered_parallel.ccs):
- *   producer: for each block → results_tx.send_task(() => compress)
- *   consumer: recv on ordered rx → writes .gz bytes in submit order
+ * The body reads top to bottom exactly like the serial program: read a
+ * block, take the predecessor's dictionary, deflate, combine the CRC,
+ * write. The annotations carry all the scheduling:
  *
+ *   @parallel seq (use_par) wait (ts) cache (zs) for …
+ *       — ordered spawn loop; `seq` is the runtime denial (PIGZ_SEQ=1
+ *         runs the same body sequentially). `cache (zs)` adopts the
+ *         hoisted deflate scratch. Sequential: the one local.
+ *         Parallel: exclusive instance per in-flight ticket; which
+ *         one is unobservable. Strip the clause and the serial
+ *         program remains.
+ *   @stage (ts.read, i) / @stage (ts.write, i)
+ *       — ticket-scoped handshakes. wait/pass are Results (the wait-for
+ *         unwraps them). A raise fail()s unpassed stages so a successor
+ *         already in wait wakes with err, not ok.
+ *
+ * Default chains blocks through a 32 KiB tail copy (one gzip stream),
+ * matching pigz. The published thing is that value, not a view into
+ * the input block — so the serial loop and the wait-for free each
+ * block after deflate. PIGZ_DICT=0 is one gzip member per block.
+ * PIGZ_CAP=N (default 32).
  */
 
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
 #include <ccc/script/stdio.cch>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
 #include <zlib.h>
 
 #define BLOCK_SIZE (128 * 1024)
-#define BLOCK_ARENA_OVERHEAD 1024
-#define CHAN_CAP 16
+#define DICT_SIZE  32768
+/* ~2x the scheduler workers: spare in-flight tickets absorb out-of-order
+ * deflate completion so the ordered write stage never starves a runner
+ * (pigz keeps the same lookahead in its job queue). */
+#define DEFAULT_CAP 32
+#define MAX_CAP     256
+#define LEVEL       6
 
-typedef struct {
-    long seq;
-    CCSlice data;
-    bool is_last;
-    CCArena arena;
-} Block;
+static const unsigned char GZIP_HDR[10] = {
+    0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03
+};
 
+/* Pooled: the element is this header followed by the output buffer
+ * (deflate_cap(BLOCK_SIZE) bytes). Returned to out_pool after write. */
 typedef struct {
-    long seq;
     CCSlice data;
     unsigned long crc;
     size_t original_len;
-    bool is_last;
-    CCArena arena;
 } CompressedResult;
+
+/* Reusable deflate state — pigz's deflateReset instead of Init/End per
+ * block. One per runner slot, indexed by the worker binder. */
+typedef struct {
+    z_stream strm;
+    int inited;
+} ZState;
 
 cc_atomic_i64 g_bytes_in = 0;
 cc_atomic_i64 g_bytes_out = 0;
 cc_atomic_int g_blocks_done = 0;
-cc_atomic_int g_pipeline_error = 0;
 
-cc_atomic_u64 g_read_ns = 0;
-cc_atomic_u64 g_compress_ns = 0;
-cc_atomic_u64 g_recv_ns = 0;   /* ordered recv = wait for next handle + join */
-cc_atomic_u64 g_write_ns = 0;
-
-static inline uint64_t ns_now(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+static int stagger_cap(void) {
+    const char* s = getenv("PIGZ_CAP");
+    if (!s || !s[0])
+        return DEFAULT_CAP;
+    int v = atoi(s);
+    if (v < 1)
+        return DEFAULT_CAP;
+    if (v > MAX_CAP)
+        return MAX_CAP;
+    return v;
 }
 
-/* NULL = allocation or zlib failure (fills the ordered slot; not a channel err). */
-static CompressedResult* compress_block(Block* blk, int level) {
-    size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
+static int env_is_one(const char* name) {
+    const char* s = getenv(name);
+    return s && s[0] == '1' && s[1] == '\0';
+}
 
-    CCArena res_arena_storage = cc_arena_heap(arena_size) @destroy;
-    if (!cc_arena_is_live(res_arena_storage)) return NULL;
-    CCArena* res_arena = &res_arena_storage;
-    CompressedResult* res = cc_arena_alloc_T(CompressedResult, res_arena);
-    if (!res) return NULL;
+/* Unset or anything but "0" is on — chaining is the pigz-shaped default. */
+static int env_not_zero(const char* name) {
+    const char* s = getenv(name);
+    return !(s && s[0] == '0' && s[1] == '\0');
+}
 
-    res->seq = blk->seq;
-    res->is_last = blk->is_last;
-    res->original_len = blk->data.len;
-    res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
+static void put_u32le(unsigned char* p, unsigned long v) {
+    p[0] = (unsigned char)v;
+    p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16);
+    p[3] = (unsigned char)(v >> 24);
+}
 
-    size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
-    unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, res_arena, max_out);
-    if (!out_buf) return NULL;
+static void gzip_trailer(unsigned char t[8], unsigned long crc, unsigned long isize) {
+    put_u32le(t, crc);
+    put_u32le(t + 4, isize);
+}
 
-    unsigned char header[10] = {0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03};
-    memcpy(out_buf, header, 10);
-    size_t pos = 10;
+static CCSlice gzip_hdr_slice(void) {
+    return cc_slice_from_buffer((void*)GZIP_HDR, sizeof(GZIP_HDR));
+}
 
-    z_stream strm = {0};
-    if (deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-        return NULL;
+/* One bound: input + 12.5% + slack + gzip wrap (header+trailer). */
+static size_t deflate_cap(size_t n) {
+    return n + (n >> 3) + 1024 + 18;
+}
+
+/* Pooled input block at byte offset `off`. */
+static unsigned char* !>(CCError) read_block(int in_fd, CCArenaPool* pool,
+                                             size_t off, size_t want) {
+    unsigned char* buf = (unsigned char*)pool.alloc();
+    if (!buf)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "block buf");
+    ssize_t got = pread(in_fd, buf, want, (off_t)off);
+    if (got < 0 || (size_t)got != want) {
+        pool->free(buf);
+        return cc_err(CC_ERR_IO, "pread");
     }
-    strm.next_in = (Bytef*)blk->data.ptr;
-    strm.avail_in = (uInt)blk->data.len;
-    strm.next_out = out_buf + pos;
-    strm.avail_out = (uInt)(max_out - pos - 8);
+    return cc_ok(buf);
+}
 
-    int ret = deflate(&strm, Z_FINISH);
-    pos += strm.total_out;
-    deflateEnd(&strm);
+/* !chain: header + Z_FINISH + crc/isize. chain: raw deflate, optional
+ * dictionary, Z_SYNC_FLUSH (Z_FINISH on last). The Adler Z_BLOCK splice
+ * lives in pigz_cc — it saves a few bytes per chunk and is not the loop. */
+static CompressedResult* !>(CCError) compress_slice(CCSlice data,
+        const unsigned char* dict, size_t dict_len, bool is_last, int chain,
+        ZState* zs, CCArenaPool* out_pool) {
+    size_t max_out = deflate_cap((size_t)BLOCK_SIZE);
+    CompressedResult* res = (CompressedResult*)out_pool.alloc();
+    @defer(err) out_pool->free(res);
+    if (!res)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "deflate buf");
+    unsigned char* out_buf = (unsigned char*)(res + 1);
 
-    if (ret != Z_STREAM_END) return NULL;
+    res->original_len = data.len;
+    res->crc = crc32(0UL, (const Bytef*)data.ptr, (uInt)data.len);
 
-    unsigned long crc = res->crc;
-    size_t in_len = blk->data.len;
-    out_buf[pos++] = crc & 0xff;
-    out_buf[pos++] = (crc >> 8) & 0xff;
-    out_buf[pos++] = (crc >> 16) & 0xff;
-    out_buf[pos++] = (crc >> 24) & 0xff;
-    out_buf[pos++] = in_len & 0xff;
-    out_buf[pos++] = (in_len >> 8) & 0xff;
-    out_buf[pos++] = (in_len >> 16) & 0xff;
-    out_buf[pos++] = (in_len >> 24) & 0xff;
+    size_t pos = 0;
+    if (!chain) {
+        memcpy(out_buf, GZIP_HDR, sizeof(GZIP_HDR));
+        pos = sizeof(GZIP_HDR);
+    }
 
-    res->data = res_arena->slice(out_buf, pos);
-    g_bytes_in.fetch_add((int64_t)blk->data.len);
+    z_stream* strm = &zs->strm;
+    if (zs->inited && deflateReset(strm) != Z_OK) {
+        deflateEnd(strm);
+        zs->inited = 0;
+    }
+    if (!zs->inited) {
+        memset(strm, 0, sizeof(*strm));
+        if (deflateInit2(strm, LEVEL, Z_DEFLATED, -15, 8,
+                         Z_DEFAULT_STRATEGY) != Z_OK)
+            return cc_err(CC_ERR_IO, "deflateInit2");
+        zs->inited = 1;
+    }
+    if (chain && dict_len)
+        deflateSetDictionary(strm, dict, (uInt)dict_len);
+
+    strm->next_in = (Bytef*)data.ptr;
+    strm->avail_in = (uInt)data.len;
+    strm->next_out = out_buf + pos;
+    strm->avail_out = (uInt)(max_out - pos - (chain ? 0 : 8));
+
+    int flush = (!chain || is_last) ? Z_FINISH : Z_SYNC_FLUSH;
+    int ret = deflate(strm, flush);
+    uInt left = strm->avail_in;
+    uInt space = strm->avail_out;
+    pos += strm->total_out;
+    if (flush == Z_FINISH ? (ret != Z_STREAM_END)
+                          : (ret != Z_OK || left != 0 || space == 0))
+        return cc_err(CC_ERR_IO, "deflate");
+
+    if (!chain) {
+        gzip_trailer(out_buf + pos, res->crc, (unsigned long)data.len);
+        pos += 8;
+    }
+
+    res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED);
+    g_bytes_in.fetch_add((int64_t)data.len);
     g_bytes_out.fetch_add((int64_t)pos);
     g_blocks_done.fetch_add(1);
-
-    res->arena = res_arena->detach() !>(e) { (void)e; return NULL; };
-    return res;
+    return cc_ok(res);
 }
 
-static bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
-    /* Soft-catch IoError so eprintln !>; can use a CCError handler (not re-enter). */
-    @errhandler(CCError e) {
-        cc_error_log(e);
-        g_pipeline_error.store(1);
-        return false;
-    }
-    size_t n = f->write(data) !>(e) {
-        eprintln(@string(`${what} failed kind=${e.base.kind} os=${e.os_code}`,
-                         @scratch)) !>;
-        g_pipeline_error.store(1);
-        return false;
-    };
-    if (n != data.len) {
-        eprintln(@string(`${what} short write ${n}/${data.len}`, @scratch)) !>;
-        g_pipeline_error.store(1);
-        return false;
-    }
-    return true;
+static void !>(CCError) write_all(CCFile* f, CCSlice s) {
+    @errhandler(CCError e) { return cc_err(e); }
+    size_t nw = f->write(s) !>;
+    if (nw != s.len)
+        return cc_err(CC_ERR_IO, "write");
+    return cc_ok();
 }
 
-int compress_file(const char* in_path, const char* out_path) {
-    @errhandler(CCError e) { return cc_err_log(e); }
+void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
+    @errhandler(CCError e) { return cc_err(e); }
 
-    g_pipeline_error.store(0);
     g_bytes_in.store(0);
     g_bytes_out.store(0);
     g_blocks_done.store(0);
-    g_read_ns.store(0);
-    g_compress_ns.store(0);
-    g_recv_ns.store(0);
-    g_write_ns.store(0);
-
-    char[:0] in_s = cc_slice_cstr(in_path);
-    char[:0] out_s = cc_slice_cstr(out_path);
 
     CCFile in_file;
-    if (in_file.open(in_s, "rb") != 0) {
-        eprintln(@string(`Failed to open input: ${in_path}`, @scratch)) !>;
-        return 1;
-    }
+    if (in_file.open(in_path, "rb") != 0)
+        return cc_err(CC_ERR_IO, "Failed to open input");
     @defer in_file.close();
 
+    size_t file_len = in_file.size() !>;
+    int in_fd = fileno(in_file.handle);
+
     CCFile out_file;
-    if (out_file.open(out_s, "wb") != 0) {
-        eprintln(@string(`Failed to open output: ${out_path}`, @scratch)) !>;
-        return 1;
-    }
+    if (out_file.open(out_path, "wb") != 0)
+        return cc_err(CC_ERR_IO, "Failed to open output");
     @defer out_file.close();
 
-    /* Ordered channel of CompressedResult* (NULL in a slot = compress failed). */
-    CompressedResult*[~CHAN_CAP >] results_tx;
-    CompressedResult*[~CHAN_CAP ordered <] results_rx;
-    CCChan* ch = cc_channel_pair(&results_tx, &results_rx) !> @destroy;
+    /* Empty file is one zero-length ticket, not a zero-byte .gz. */
+    size_t n_sz = file_len ? (file_len + (size_t)BLOCK_SIZE - 1) / (size_t)BLOCK_SIZE : 1;
+    if (n_sz > (size_t)INT_MAX)
+        return cc_err(CC_ERR_INVALID_ARG, "too many blocks");
+    int n = (int)n_sz;
+    int cap = stagger_cap();
+    int chain = env_not_zero("PIGZ_DICT");
 
-    CCFile* in_ptr = &in_file;
-    CCFile* out_ptr = &out_file;
+    if (chain)
+        out_file.write(gzip_hdr_slice()) !>;
 
-    {
-        CCNursery consumer = cc_nursery_create() !> @destroy;
+    CCArena ts_arena = cc_arena_heap(megabytes(2)) @destroy;
+    CCTurnstileRW ts@(cap, &ts_arena) @destroy;
+    if (!cc_exclusive_is_live(ts.core.excl))
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "cc_turnstile_create failed");
 
-        consumer.spawn(() => [out_ptr, results_rx] {
-            @errhandler(CCError e) cc_error_exit(e);
-            CompressedResult* item = NULL;
-            long expect_seq = 0;
-            while (true) {
-                uint64_t tr0 = ns_now();
-                item = NULL;
-                bool !>(CCIoError) got = results_rx.recv(&item);
-                g_recv_ns.fetch_add(ns_now() - tr0);
-                if (!cc_io_avail(got))
-                    break;
-                if (!item) {
-                    eprintln(@string(`compress task failed (OOM or zlib error)`,
-                                     @scratch)) !>;
-                    g_pipeline_error.store(1);
-                    results_rx.close();
-                    break;
-                }
-                if (item->seq != expect_seq) {
-                    eprintln(@string(`ORDER: expected=${expect_seq} got=${item->seq}`,
-                                     @scratch)) !>;
-                    g_pipeline_error.store(1);
-                }
-                expect_seq++;
-                uint64_t tw0 = ns_now();
-                if (!write_all_or_fail(out_ptr, item->data, "compressed output")) {
-                    item->arena.free();
-                    break;
-                }
-                g_write_ns.fetch_add(ns_now() - tw0);
-                item->arena.free();
+    CCArenaPool in_pool;
+    if (cc_arena_pool(&in_pool, (size_t)BLOCK_SIZE) != 0)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "input pool");
+    @defer in_pool.destroy();
+
+    CCArenaPool out_pool;
+    if (cc_arena_pool(&out_pool,
+            sizeof(CompressedResult) + deflate_cap((size_t)BLOCK_SIZE)) != 0)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "output pool");
+    @defer out_pool.destroy();
+
+    /* Loop-carried state — plain locals, exactly as the serial loop
+     * would write them. dictbuf hops ticket-to-ticket through the read
+     * stage (a copied tail, not a view); crc through the write stage.
+     * zs is warm scratch. */
+    unsigned long crc = crc32(0UL, NULL, 0);
+    unsigned long crc_shift = chain ? crc32_combine_gen((z_off_t)BLOCK_SIZE) : 0;
+    unsigned char dictbuf[DICT_SIZE];
+    size_t dict_len = 0;
+    ZState zs = {0} @destroy {
+        if (zs.inited)
+            deflateEnd(&zs.strm);
+    };
+
+    int use_par = !env_is_one("PIGZ_SEQ");
+    int i;
+    @parallel seq (use_par) wait (ts) cache (zs) for (i in 0..n) {
+        size_t off = (size_t)i * (size_t)BLOCK_SIZE;
+        size_t remain = file_len - off;
+        size_t want = remain < (size_t)BLOCK_SIZE ? remain : (size_t)BLOCK_SIZE;
+        bool is_last = (off + want >= file_len);
+
+        unsigned char* buf = NULL;
+        if (want)
+            buf = read_block(in_fd, &in_pool, off, want) !>;
+        CCSlice data = buf
+            ? cc_slice_from_parts(buf, want, CC_SLICE_ID_UNTRACKED)
+            : cc_slice_empty();
+
+        unsigned char take[DICT_SIZE];
+        const unsigned char* d = NULL;
+        size_t dlen = 0;
+        @stage (ts.read, i) {
+            if (chain) {
+                dlen = dict_len;             /* consume predecessor's tail */
+                if (dlen)
+                    memcpy(take, dictbuf, dlen);
+                d = dlen ? take : NULL;
+                size_t tail = data.len < (size_t)DICT_SIZE ? data.len
+                                                           : (size_t)DICT_SIZE;
+                if (tail)
+                    memcpy(dictbuf, data.ptr + (data.len - tail), tail);
+                dict_len = tail;             /* publish mine for i+1 */
             }
-        });
-
-        /* Inner producer: close_on auto-closes results_tx when the producer
-         * nursery ends, so the consumer sees EOF after draining. */
-        {
-            CCNursery producer = consumer.create_child() !> @destroy;
-            (void)producer.close_on(results_tx);
-
-            producer.spawn(() => [in_ptr, results_tx] {
-                long seq = 0;
-                while (true) {
-                    if (g_pipeline_error.load()) break;
-
-                    CCArena blk_arena =
-                        cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD) @destroy;
-                    CCSlice data;
-                    uint64_t tread0 = ns_now();
-                    bool !>(CCIoError) read_res =
-                        in_ptr->read(&blk_arena, BLOCK_SIZE, &data);
-                    g_read_ns.fetch_add(ns_now() - tread0);
-
-                    if (read_res.is_err() || !cc_io_avail(read_res)) break;
-
-                    Block* cap = cc_arena_alloc_T(Block, &blk_arena);
-                    if (!cap) break;
-
-                    cap->seq = seq++;
-                    cap->data = data;
-                    cap->is_last = (data.len < BLOCK_SIZE);
-                    cap->arena = blk_arena.detach() !>;
-
-                    bool is_last = cap->is_last;
-                    results_tx.send_task(() => [cap] {
-                        uint64_t tc0 = ns_now();
-                        CompressedResult* out = compress_block(cap, 6);
-                        g_compress_ns.fetch_add(ns_now() - tc0);
-                        cap->arena.free();
-                        return out;
-                    });
-
-                    if (is_last) break;
-                }
-            });
         }
+
+        CompressedResult* r =
+            compress_slice(data, d, dlen, is_last, chain, &zs, &out_pool) !>;
+
+        @stage (ts.write, i) {
+            if (chain) {
+                size_t len = r->original_len;
+                crc = (len == (size_t)BLOCK_SIZE)
+                    ? crc32_combine_op(crc, r->crc, crc_shift)
+                    : crc32_combine(crc, r->crc, (long)len);
+            }
+            write_all(&out_file, r->data) !>;
+        }
+
+        if (buf) in_pool.free(buf);
+        out_pool.free(r);
+    } !>.wait()!>;
+
+    if (chain) {
+        unsigned char t[8];
+        gzip_trailer(t, crc, (unsigned long)(file_len & 0xffffffffUL));
+        out_file.write(cc_slice_from_buffer(t, sizeof(t))) !>;
     }
 
-    (void)out_file.sync();
-    return g_pipeline_error.load() ? 1 : 0;
+    out_file.sync() !>;
+    return cc_ok();
 }
 
 int main(int argc, char* argv[]) {
     @errhandler(CCError e) { return cc_err_log(e); }
 
     if (argc < 2) {
-        eprintln(@string(`Usage: ${argv[0]} <file>`, @scratch)) !>;
+        @string(`Usage: ${argv[0]} <file>`, @scratch).eprintln() !>;
         return 1;
     }
 
-    char out_name[4096];
-    snprintf(out_name, sizeof(out_name), "%s.gz", argv[1]);
+    char[:0] in_path = cc_slice_cstr(argv[1]);
+    CCString out_name = @string(`${in_path}.gz`, @scratch);
+    if (out_name.failed())
+        return cc_err_log(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "output path"));
 
-    int ret = compress_file(argv[1], out_name);
-    if (ret == 0) {
-        long long bin = (long long)g_bytes_in.load();
-        long long bout = (long long)g_bytes_out.load();
-        int blocks = g_blocks_done.load();
-        println(@string(`Compressed ${argv[1]} -> ${out_name}`, @scratch)) !>;
-        println(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
-                        @scratch)) !>;
-        unsigned long long read_ns = g_read_ns.load();
-        unsigned long long c_ns = g_compress_ns.load();
-        unsigned long long recv_ns = g_recv_ns.load();
-        unsigned long long w_ns = g_write_ns.load();
-        println(@string(`phases(sum): read=${read_ns / 1000000}ms compress=${c_ns / 1000000}ms recv+join=${recv_ns / 1000000}ms write=${w_ns / 1000000}ms`,
-                        @scratch)) !>;
-    }
+    compress_file(in_path, out_name.as_slice()) !>;
 
-    return ret;
+    long long bin = (long long)g_bytes_in.load();
+    long long bout = (long long)g_bytes_out.load();
+    int blocks = g_blocks_done.load();
+    @string(`Compressed ${in_path} -> ${out_name}`, @scratch).println() !>;
+    @string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
+            @scratch).println() !>;
+    return 0;
 }

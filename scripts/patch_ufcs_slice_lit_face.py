@@ -120,11 +120,12 @@ def main() -> int:
         if n != 1:
             print(f"warn: to_slice_n sync failed n={n}", file=sys.stderr)
 
-    # Sync spawn(CCClosure0 value) → spawn_closure0 (not only `=>` literals).
+    # Sync spawn overload (closure0 vs async_named) from leftover helper.
     m = re.search(
-        r"        if \(!shadow_ufcs_ty_is\(vty, rb, \"CCNursery\"\)\) return 0;\n"
-        r"        /\* Closure form:.*?\n"
-        r"        while \(a\[ci\] && \(a\[ci\] == ' ' \|\| a\[ci\] == '\\t'\)\) ci\+\+;",
+        r"static int shadow_ufcs_nursery_spawn_parts\(const char\* recv, const char\* meth_name,\n"
+        r".*?\n"
+        r"    return 1;\n"
+        r"\}",
         cch,
         re.S,
     )
@@ -132,13 +133,10 @@ def main() -> int:
         print("error: spawn closure0 block missing in .cch", file=sys.stderr)
         return 1
     t2, n = re.subn(
-        r"        if \(!shadow_ufcs_ty_is\(vty, rb, \"CCNursery\"\)\) return 0;\n"
-        r"(?:        /\* Closure form:.*?\n)?"
-        r"(?:        if \(strcmp\(meth_name, \"spawn\"\) == 0 && strstr\(a, \"=>\"\)\) \{\n"
-        r"            snprintf\(dst, cap, \"cc_nursery_spawn_closure0\(%s, %s\)\", recv, a\);\n"
-        r"            return 1;\n"
-        r"        \}\n)?"
-        r"        while \(a\[ci\] && \(a\[ci\] == ' ' \|\| a\[ci\] == '\\t'\)\) ci\+\+;",
+        r"static int shadow_ufcs_nursery_spawn_parts\(const char\* recv, const char\* meth_name,\n"
+        r".*?\n"
+        r"    return 1;\n"
+        r"\}",
         m.group(0),
         t,
         count=1,

@@ -164,7 +164,7 @@ static double run_zipf(int workers, int iters, int spins, int keys) {
             int id = w;
             n.spawn(() => [id, iters, spins, keys] {
                 worker_zipf(id, iters, spins, keys);
-            });
+            }) !>;
         }
     }
     double t1 = time_now_ms();
@@ -267,6 +267,6 @@ int main(void) {
            z_med, z_ops, f_med, f_ops);
 
     /* @defer cc_exclusive_destroy above */
-    g_excl.e = NULL;
+    g_excl.p = NULL;
     return 0;
 }

@@ -88,14 +88,14 @@ int main(void) {
                 if (err == 0) {
                     cc_chan_send(done, &v, sizeof(v));
                 }
-            });
+            }) !>;
         }
         for (int i = 0; i < blocking_tasks; i++) {
             __cc_nursery169.spawn(() => [blocking_sleep_us] {
                 blocking_sleep(blocking_sleep_us);
                 int v = 1;
                 cc_chan_send(block_done, &v, sizeof(v));
-            });
+            }) !>;
         }
 
         for (int i = 0; i < releases; i++) {

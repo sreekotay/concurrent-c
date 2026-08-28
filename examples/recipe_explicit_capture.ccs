@@ -31,12 +31,12 @@ int main(void) {
             @errhandler(CCError e) cc_error_exit(e);
             int seen = snapshot;
             println(@string(`  task A sees snapshot = ${seen}`, @scratch)) !>;
-        });
+        }) !>;
         n.spawn(() => {
             @errhandler(CCError e) cc_error_exit(e);
             int seen = snapshot;
             println(@string(`  task B sees snapshot = ${seen}`, @scratch)) !>;
-        });
+        }) !>;
         /* snapshot++ inside the body would be a compile error:
          * value-captured variables are immutable. */
     }
@@ -52,7 +52,7 @@ int main(void) {
         n.spawn(() => [&counter] {
             @errhandler(CCError e) cc_error_exit(e);
             println(@string(`  task C reads counter = ${counter}`, @scratch)) !>;
-        });
+        }) !>;
         /* counter++ in the body would be a compile error:
          * mutation of a shared reference requires a safe wrapper. */
     }

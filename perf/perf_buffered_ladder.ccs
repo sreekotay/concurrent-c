@@ -77,7 +77,7 @@ static double bench_loop_two_fiber_once(void) {
             if (local < 0) {
                 fprintf(stderr, "impossible local=%lld\n", (long long)local);
             }
-        });
+        }) !>;
         __cc_nursery165.spawn(() => {
             volatile int64_t local = 0;
             for (int i = 0; i < g_iterations; i++) {
@@ -86,7 +86,7 @@ static double bench_loop_two_fiber_once(void) {
             if (local < 0) {
                 fprintf(stderr, "impossible local=%lld\n", (long long)local);
             }
-        });
+        }) !>;
     
     }
     double elapsed = time_now_ms() - start;
@@ -129,7 +129,7 @@ static double bench_chan_two_fiber_once(void) {
             for (int i = 0; i < g_iterations; i++) {
                 tx_h.send(i);
             }
-        });
+        }) !>;
 
         __cc_nursery166.spawn(() => {
             int v = 0;
@@ -141,7 +141,7 @@ static double bench_chan_two_fiber_once(void) {
             if (checksum < 0) {
                 fprintf(stderr, "impossible checksum=%lld\n", (long long)checksum);
             }
-        });
+        }) !>;
     
     }
     double elapsed = time_now_ms() - start;

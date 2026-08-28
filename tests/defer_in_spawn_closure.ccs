@@ -95,7 +95,7 @@ void test_defer_spawn_immediate(void) {
             printf("Worker: doing work\n");
             cc_atomic_fetch_add(&g_worker_count, 1);
             // @defer runs here when closure exits
-        });
+        }) !>;
     
     }
     
@@ -130,7 +130,7 @@ void test_defer_spawn_multiple_workers(void) {
                 printf("Worker %d: doing work\n", worker_id);
                 cc_atomic_fetch_add(&g_worker_count, 1);
                 // @defer runs here when closure exits
-            });
+            }) !>;
         }
     
     }

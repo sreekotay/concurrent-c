@@ -53,10 +53,10 @@ int main(void) {
     {
         CCNursery __cc_nursery17 = @create() !> @destroy;
 
-        __cc_nursery17.spawn(() => [tx1] { sender(tx1, N); });
-        __cc_nursery17.spawn(() => [rx1] { receiver(rx1, N); });
-        __cc_nursery17.spawn(() => [tx2] { sender(tx2, N); });
-        __cc_nursery17.spawn(() => [rx2] { receiver(rx2, N); });
+        __cc_nursery17.spawn(() => [tx1] { sender(tx1, N); }) !>;
+        __cc_nursery17.spawn(() => [rx1] { receiver(rx1, N); }) !>;
+        __cc_nursery17.spawn(() => [tx2] { sender(tx2, N); }) !>;
+        __cc_nursery17.spawn(() => [rx2] { receiver(rx2, N); }) !>;
     
     }
 

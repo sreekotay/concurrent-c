@@ -232,9 +232,9 @@ static int run_blocking_hol_demo(void) {
         CCNursery n = @create() !> @destroy;
         HolReqRx req_rx_raw = req_rx;
         HolReqTx req_tx_raw = req_tx;
-        n.spawn(() => [req_rx_raw] { hol_owner_blocking_policy(req_rx_raw); });
-        n.spawn(() => [req_tx_raw] { slow_client_blocking(req_tx_raw); });
-        n.spawn(() => [req_tx_raw] { fast_client_blocking(req_tx_raw); });
+        n.spawn(() => [req_rx_raw] { hol_owner_blocking_policy(req_rx_raw); }) !>;
+        n.spawn(() => [req_tx_raw] { slow_client_blocking(req_tx_raw); }) !>;
+        n.spawn(() => [req_tx_raw] { fast_client_blocking(req_tx_raw); }) !>;
     }
 
     if (cc_atomic_load(&g_errors) != 0) {
@@ -431,9 +431,9 @@ static int run_try_send_non_hol_demo(void) {
         CCNursery n = @create() !> @destroy;
         HolReqRx req_rx_raw = req_rx;
         HolReqTx req_tx_raw = req_tx;
-        n.spawn(() => [req_rx_raw] { hol_owner_try_send_policy(req_rx_raw); });
-        n.spawn(() => [req_tx_raw] { slow_client_try_send(req_tx_raw); });
-        n.spawn(() => [req_tx_raw] { fast_client_try_send(req_tx_raw); });
+        n.spawn(() => [req_rx_raw] { hol_owner_try_send_policy(req_rx_raw); }) !>;
+        n.spawn(() => [req_tx_raw] { slow_client_try_send(req_tx_raw); }) !>;
+        n.spawn(() => [req_tx_raw] { fast_client_try_send(req_tx_raw); }) !>;
     }
 
     if (cc_atomic_load(&g_errors) != 0) {

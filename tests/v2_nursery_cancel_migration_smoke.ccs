@@ -36,7 +36,7 @@ int main(void) {
         {
             CCNursery n = @create() !> @destroy;
 
-            if (n.spawnhybrid(() => {
+            n.spawnhybrid(() => {
                     int first = cc__sched_current_worker_id();
                     int migrated = 0;
                     int iters = 0;
@@ -56,11 +56,9 @@ int main(void) {
                     cc_atomic_store(&g_saw_migration, migrated);
                     cc_atomic_store(&g_loop_iters, iters);
                     cc_atomic_store(&g_seen_cancelled, 1);
-                }) != 0) {
-                return 3;
-            }
+                }) !>;
 
-            if (n.spawnhybrid(() => [n] {
+            n.spawnhybrid(() => [n] {
                     while (cc_atomic_load(&g_ready) == 0) {
                         cc_yield();
                     }
@@ -69,9 +67,7 @@ int main(void) {
                     }
                     cc_atomic_store(&g_cancel_worker, cc__sched_current_worker_id());
                     cc_nursery_cancel(n);
-                }) != 0) {
-                return 4;
-            }
+                }) !>;
         }
         int before = cc_atomic_load(&g_before_worker);
         int after = cc_atomic_load(&g_after_worker);

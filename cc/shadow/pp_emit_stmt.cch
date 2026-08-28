@@ -46,7 +46,7 @@ static const char* shadow_nursery_host_recv(const char* recv, char* dst,
     base[0] = 0;
     if (b) shadow_bind_base_ty(b, base, sizeof(base));
     if (strcmp(base, "CCNursery") == 0) {
-        snprintf(dst, cap, "(%s).n", recv);
+        snprintf(dst, cap, "(%s).p", recv);
         return dst;
     }
     snprintf(dst, cap, "%s", recv);
@@ -2327,6 +2327,40 @@ static int shadow_refs_rewrite_emit(CEmit* out, const char* text, size_t len,
 #include "pp_emit_autoblock.cch"
 #include "pp_emit_strswitch.cch"
 
+/* tx.send_task(() => …) / cc_channel_send_task(tx, () => …):
+ * spawn a fiber and queue the CCTask handle. */
+static int shadow_emit_send_task_fiber(CEmit* out, const char* indent,
+                                       const char* tx, AstNode* cl,
+                                       int hybrid) {
+    char i1[80];
+    char caps_args[256];
+    const char* spawn_fn =
+        hybrid ? "cc_fiber_spawn_closure0_v2" : "cc_fiber_spawn_closure0";
+    if (!out || !indent || !tx || !cl) return 0;
+    if (!shadow_caps_call_args(cl->e, caps_args, sizeof(caps_args))) return 0;
+    shadow_indent_nest(i1, sizeof(i1), indent, 1);
+    if (caps_args[0])
+        return cemit_fmt(out,
+            "%sdo {\n"
+            "%sCCClosure0 __cc_st_c = cc_closure__N%s_make(%s);\n"
+            "%sCCTask __cc_st_t = %s(__cc_st_c);\n"
+            "%sint __cc_st_e = cc_chan_send((%s).raw, &__cc_st_t, "
+            "sizeof(__cc_st_t));\n"
+            "%sif (__cc_st_e != 0) { (void)cc_block_on_intptr(__cc_st_t); }\n"
+            "%s} while (0);\n",
+            indent, i1, cl->d[0] ? cl->d : "1", caps_args, i1, spawn_fn, i1, tx,
+            i1, indent);
+    return cemit_fmt(out,
+        "%sdo {\n"
+        "%sCCClosure0 __cc_st_c = cc_closure__N%s_make();\n"
+        "%sCCTask __cc_st_t = %s(__cc_st_c);\n"
+        "%sint __cc_st_e = cc_chan_send((%s).raw, &__cc_st_t, "
+        "sizeof(__cc_st_t));\n"
+        "%sif (__cc_st_e != 0) { (void)cc_block_on_intptr(__cc_st_t); }\n"
+        "%s} while (0);\n",
+        indent, i1, cl->d[0] ? cl->d : "1", i1, spawn_fn, i1, tx, i1, indent);
+}
+
 /* Call-arg text: skip UFCS peel when args are plain literals (preserve strings). */
 static void shadow_emit_call_args_text(AstNode* st, char* dst, size_t cap) {
     /* Always run expr/UFCS lowering — a format-string `"` in args must not
@@ -2335,7 +2369,7 @@ static void shadow_emit_call_args_text(AstNode* st, char* dst, size_t cap) {
 }
 
 /* Inline wait-for bodies (annotated linear flows) legitimately touch
- * ~20 outer locals; 16 overflowed on pigz_wait's end state. */
+ * ~20 outer locals; 16 overflowed on pigz_idiomatic's end state. */
 enum { SHADOW_PAR_CAP_MAX = 32 };
 
 static CEmit g_shadow_par_helpers;
@@ -4919,13 +4953,13 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
         if (!cemit_fmt(out,
                        "%sif ((%s)) { CCResult_CCNursery_CCError __cc_pw_nr_%d = "
                        "cc_nursery_create(); "
-                       "if (__cc_pw_nr_%d.ok) __cc_pw_n_%d = __cc_pw_nr_%d.u.value.n; }\n",
+                       "if (__cc_pw_nr_%d.ok) __cc_pw_n_%d = __cc_pw_nr_%d.u.value.p; }\n",
                        i1, st->f, id, id, id, id))
             goto fail;
     } else if (!cemit_fmt(out,
                           "%s{ CCResult_CCNursery_CCError __cc_pw_nr_%d = "
                           "cc_nursery_create(); "
-                          "if (__cc_pw_nr_%d.ok) __cc_pw_n_%d = __cc_pw_nr_%d.u.value.n; }\n",
+                          "if (__cc_pw_nr_%d.ok) __cc_pw_n_%d = __cc_pw_nr_%d.u.value.p; }\n",
                           i1, id, id, id, id))
         goto fail;
     if (!cemit_fmt(out, "%sif (!__cc_pw_n_%d) {\n", i1, id))
@@ -4957,7 +4991,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
         return 0;
     /* Env is nursery-arena, not the admitter frame: workers hold this
      * pointer for the join. A stack env plus &locals is visible to SRA
-     * when the admitter is inlined (i386 -O2 pigz_wait). */
+     * when the admitter is inlined (i386 -O2 pigz_idiomatic). */
     if (!cemit_fmt(out, "%sstruct {\n", i2))
         return 0;
     if (!shadow_pw_emit_env_members(out, i2, names, tys, ncaps))
@@ -5084,8 +5118,8 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
                    i4, id, id, id))
         return 0;
     if (!cemit_fmt(out,
-            "%sif (cc_nursery_spawn(__cc_pw_n_%d, __cc_pw_worker_%d, "
-            "&__cc_pw_args_%d[__cc_pw_w_%d]) == 0)\n",
+            "%sif (cc_is_ok(cc_nursery_spawn(__cc_pw_n_%d, __cc_pw_worker_%d, "
+            "&__cc_pw_args_%d[__cc_pw_w_%d])))\n",
             i4, id, id, id, id))
         return 0;
     if (!cemit_fmt(out, "%s    __cc_pw_spawned_%d++;\n%s}\n", i4, id, i3))
@@ -6146,47 +6180,9 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
     }
     case AST_IF: {
         char cond[2048];
-        if (st->e[0] && strcmp(st->e, "spawn_cond") == 0) {
-            AstNode* sp = NULL;
-            int k;
-            for (k = 0; k < st->ndbody; k++) {
-                AstNode* kid = st->dbody[k];
-                if (kid && kid->kind == AST_SPAWN_CLOSURE &&
-                    (strcmp(kid->b, "spawn") == 0 ||
-                     strcmp(kid->b, "spawn_unsafe") == 0 ||
-                     strcmp(kid->b, "spawnhybrid") == 0 ||
-                     strcmp(kid->b, "spawnhybrid_unsafe") == 0)) {
-                    sp = kid;
-                    break;
-                }
-            }
-            if (!sp) return 0;
-            {
-                char args[256];
-                const char* nur_spawn =
-                    (sp->b[0] && (strcmp(sp->b, "spawnhybrid") == 0 ||
-                                  strcmp(sp->b, "spawnhybrid_unsafe") == 0))
-                        ? "cc_nursery_spawnhybrid_closure0"
-                        : "cc_nursery_spawn_closure0";
-                if (!shadow_caps_call_args(sp->e, args, sizeof(args))) return 0;
-                {
-                    char nrecv[192];
-                    shadow_nursery_host_recv(sp->a, nrecv, sizeof(nrecv));
-                    if (args[0])
-                        snprintf(cond, sizeof(cond),
-                                 "%s(%s, cc_closure__N%s_make(%s))%s", nur_spawn,
-                                 nrecv, sp->d[0] ? sp->d : "1", args, st->a);
-                    else
-                        snprintf(cond, sizeof(cond),
-                                 "%s(%s, cc_closure__N%s_make())%s", nur_spawn,
-                                 nrecv, sp->d[0] ? sp->d : "1", st->a);
-                }
-            }
-        } else {
-            if (!shadow_emit_cond_text(st, st->a, cond, sizeof(cond), ctx, out))
-                return 0;
-            if (!shadow_rewrite_bang_exprs(cond, sizeof(cond), ctx)) return 0;
-        }
+        if (!shadow_emit_cond_text(st, st->a, cond, sizeof(cond), ctx, out))
+            return 0;
+        if (!shadow_rewrite_bang_exprs(cond, sizeof(cond), ctx)) return 0;
         /* Newline before then-stmt so `#line` from the body cannot sit
          * mid-`if (cond) #line N` (invalid C). */
         if (!cemit_fmt(out, "%sif (%s)\n", indent, cond)) return 0;
@@ -7055,6 +7051,17 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
     case AST_UFCS_STMT: {
         /* Room for `@string(...).println()` / long @slice args. */
         char call[8192];
+        {
+            AstNode* st_cl = shadow_expr_closure_kid(st);
+            if (st_cl && (strcmp(st->b, "send_task") == 0 ||
+                          strcmp(st->b, "send_task_hybrid") == 0)) {
+                if (strncmp(st_cl->b, "callarg", 7) == 0)
+                    snprintf(st_cl->b, sizeof(st_cl->b), "%s", st->b);
+                return shadow_emit_send_task_fiber(
+                    out, indent, st->a, st_cl,
+                    strcmp(st->b, "send_task_hybrid") == 0);
+            }
+        }
         int await_chan =
             (strcmp(st->d, "bang_await") == 0 || strcmp(st->d, "await") == 0 ||
              strncmp(st->d, "bang_await_block:", 16) == 0);
@@ -7332,6 +7339,52 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             }
             return shadow_emit_try_call(out, ctx, indent, call, st->b, "e", 1);
         }
+        {
+            /* Header Result twins (`cc_nursery_spawn_closure0`) are not
+             * AST_RESULT_FN. Check the lowered callee, not the method
+             * spelling (`spawn` / `close_on`). */
+            const char* strict = getenv("CC_STRICT_RESULT_UNWRAP");
+            int on = 1;
+            if (strict && (strcmp(strict, "0") == 0 ||
+                           strcmp(strict, "false") == 0 ||
+                           strcmp(strict, "off") == 0))
+                on = 0;
+            if (on && strcmp(st->b, "println") != 0 &&
+                strcmp(st->b, "eprintln") != 0 &&
+                strcmp(st->b, "fprintln") != 0) {
+                const char* cal = shadow_outer_call_ident(call);
+                char cname[128];
+                size_t clen = 0;
+                cname[0] = 0;
+                if (cal) {
+                    while (cal[clen] &&
+                           ((cal[clen] >= 'A' && cal[clen] <= 'Z') ||
+                            (cal[clen] >= 'a' && cal[clen] <= 'z') ||
+                            (cal[clen] >= '0' && cal[clen] <= '9') ||
+                            cal[clen] == '_') &&
+                           clen + 1 < sizeof(cname))
+                        clen++;
+                    memcpy(cname, cal, clen);
+                    cname[clen] = 0;
+                }
+                if (cname[0] &&
+                    (shadow_rfn_err(cname) ||
+                     cc_result_fn_registry_contains(cname, clen))) {
+                    const char* path = NULL;
+                    int line = 0;
+                    if (ctx && ctx->cache)
+                        (void)shadow_site_loc(ctx->cache, st, &path, &line);
+                    if (path && line > 0)
+                        fprintf(stderr, "%s:%d:1: error: unhandled-result\n",
+                                path, line);
+                    else
+                        fprintf(stderr, "unhandled-result\n");
+                    fprintf(stderr, "call to '%s'\n", st->b);
+                    if (out) out->err = 1;
+                    return 0;
+                }
+            }
+        }
         return cemit_fmt(out, "%s%s;\n", indent, call);
     }
     case AST_ASSIGN: {
@@ -7559,37 +7612,12 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             return cemit_fmt(out, "%scc_nursery_spawn_fn(%s, %s);\n",
                              indent, nrecv, st->c);
         char args[256];
-        char i1[80];
         if (!shadow_caps_call_args(st->e, args, sizeof(args))) return 0;
         if (st->b[0] && (strcmp(st->b, "send_task") == 0 ||
-                         strcmp(st->b, "send_task_hybrid") == 0)) {
-            const char* spawn_fn =
-                strcmp(st->b, "send_task_hybrid") == 0
-                    ? "cc_fiber_spawn_closure0_v2"
-                    : "cc_fiber_spawn_closure0";
-            shadow_indent_nest(i1, sizeof(i1), indent, 1);
-            if (args[0])
-                return cemit_fmt(out,
-                    "%sdo {\n"
-                    "%sCCClosure0 __cc_st_c = cc_closure__N%s_make(%s);\n"
-                    "%sCCTask __cc_st_t = %s(__cc_st_c);\n"
-                    "%sint __cc_st_e = cc_chan_send((%s).raw, &__cc_st_t, "
-                    "sizeof(__cc_st_t));\n"
-                    "%sif (__cc_st_e != 0) { (void)cc_block_on_intptr(__cc_st_t); }\n"
-                    "%s} while (0);\n",
-                    indent, i1, st->d[0] ? st->d : "1", args, i1, spawn_fn, i1,
-                    st->a, i1, indent);
-            return cemit_fmt(out,
-                "%sdo {\n"
-                "%sCCClosure0 __cc_st_c = cc_closure__N%s_make();\n"
-                "%sCCTask __cc_st_t = %s(__cc_st_c);\n"
-                "%sint __cc_st_e = cc_chan_send((%s).raw, &__cc_st_t, "
-                "sizeof(__cc_st_t));\n"
-                "%sif (__cc_st_e != 0) { (void)cc_block_on_intptr(__cc_st_t); }\n"
-                "%s} while (0);\n",
-                indent, i1, st->d[0] ? st->d : "1", i1, spawn_fn, i1, st->a, i1,
-                indent);
-        }
+                         strcmp(st->b, "send_task_hybrid") == 0))
+            return shadow_emit_send_task_fiber(
+                out, indent, st->a, st,
+                strcmp(st->b, "send_task_hybrid") == 0);
         {
             const char* nur_spawn =
                 (st->b[0] && (strcmp(st->b, "spawnhybrid") == 0 ||
@@ -7642,12 +7670,6 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         /* cc_channel_send_task(tx, () => …) → fiber-spawn + chan_send(CCTask). */
         if (is_send_task && st_cl) {
             char tx[128];
-            char i1[80];
-            const char* spawn_fn =
-                strcmp(st->a, "cc_channel_send_task_hybrid") == 0
-                    ? "cc_fiber_spawn_closure0_v2"
-                    : "cc_fiber_spawn_closure0";
-            char caps_args[256];
             snprintf(st_cl->b, sizeof(st_cl->b), "%s",
                      strcmp(st->a, "cc_channel_send_task_hybrid") == 0
                          ? "send_task_hybrid"
@@ -7679,30 +7701,9 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     snprintf(tx, sizeof(tx), "%s", src);
                 }
             }
-            if (!shadow_caps_call_args(st_cl->e, caps_args, sizeof(caps_args)))
-                return 0;
-            shadow_indent_nest(i1, sizeof(i1), indent, 1);
-            if (caps_args[0])
-                return cemit_fmt(out,
-                    "%sdo {\n"
-                    "%sCCClosure0 __cc_st_c = cc_closure__N%s_make(%s);\n"
-                    "%sCCTask __cc_st_t = %s(__cc_st_c);\n"
-                    "%sint __cc_st_e = cc_chan_send((%s).raw, &__cc_st_t, "
-                    "sizeof(__cc_st_t));\n"
-                    "%sif (__cc_st_e != 0) { (void)cc_block_on_intptr(__cc_st_t); }\n"
-                    "%s} while (0);\n",
-                    indent, i1, st_cl->d[0] ? st_cl->d : "1", caps_args, i1,
-                    spawn_fn, i1, tx, i1, indent);
-            return cemit_fmt(out,
-                "%sdo {\n"
-                "%sCCClosure0 __cc_st_c = cc_closure__N%s_make();\n"
-                "%sCCTask __cc_st_t = %s(__cc_st_c);\n"
-                "%sint __cc_st_e = cc_chan_send((%s).raw, &__cc_st_t, "
-                "sizeof(__cc_st_t));\n"
-                "%sif (__cc_st_e != 0) { (void)cc_block_on_intptr(__cc_st_t); }\n"
-                "%s} while (0);\n",
-                indent, i1, st_cl->d[0] ? st_cl->d : "1", i1, spawn_fn, i1, tx,
-                i1, indent);
+            return shadow_emit_send_task_fiber(
+                out, indent, tx, st_cl,
+                strcmp(st->a, "cc_channel_send_task_hybrid") == 0);
         }
         {
             char args[1024];
@@ -8319,7 +8320,19 @@ static int shadow_arena_from_alloc_init(const char* init, char* arena,
     a0 = comma + 1;
     while (*a0 == ' ' || *a0 == '\t') a0++;
     a1 = a0;
-    while (*a1 && *a1 != ',' && *a1 != ')') a1++;
+    {
+        int depth = 0;
+        while (*a1) {
+            if (*a1 == '(' || *a1 == '[' || *a1 == '{')
+                depth++;
+            else if (*a1 == ')' || *a1 == ']' || *a1 == '}') {
+                if (depth == 0) break;
+                depth--;
+            } else if (*a1 == ',' && depth == 0)
+                break;
+            a1++;
+        }
+    }
     while (a1 > a0 && (a1[-1] == ' ' || a1[-1] == '\t')) a1--;
     n = (size_t)(a1 - a0);
     if (n == 0 || n >= cap) return 0;
@@ -8443,7 +8456,7 @@ static int shadow_emit_one_destroy(AstNode* st, CEmit* out, ShadowCtx* ctx,
     /* Registered-type hooks first (nursery/chan/arena), then arena-pointer
      * release beachhead — order matters for CCNursery … @destroy. */
     if (is_nur && !is_ptr) {
-        /* Value handle: wait + free + null `.n` via cc_nursery_destroy. */
+        /* Value handle: wait + free + null `.p` via cc_nursery_destroy. */
         if (!bare) {
             for (int k = 0; k < ndbody && ok; k++) {
                 if (!shadow_dbody_is_stmt(dbody[k])) continue;

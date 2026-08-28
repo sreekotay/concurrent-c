@@ -54,7 +54,7 @@ static double run_once(void) {
                 for (int i = 0; i < ITERS_PER_PRODUCER; i++) {
                     tx.send(i);
                 }
-            });
+            }) !>;
         }
 
         for (int c = 0; c < CONSUMERS; c++) {
@@ -69,7 +69,7 @@ static double run_once(void) {
                 if (checksum < 0) {
                     fprintf(stderr, "impossible checksum=%lld\n", (long long)checksum);
                 }
-            });
+            }) !>;
         }
     
     }

@@ -1,0 +1,17 @@
+#!ccc ccs
+/* Face extract + host must lower static inline after `struct { … } g = {0};`. */
+#include <stdio.h>
+#include "cch_anon_g_inline.cch"
+
+int main(void) {
+    unsigned char buf[2];
+    g.n = 3;
+    g.shift = 1;
+    put2le(buf, 0x0201);
+    if (g.n != 3) return 1;
+    if (buf[0] != 1 || buf[1] != 2) return 2;
+    if (get2le(buf) != 0x0201) return 3;
+    if (shift_of() != 1) return 4;
+    printf("ok\n");
+    return 0;
+}

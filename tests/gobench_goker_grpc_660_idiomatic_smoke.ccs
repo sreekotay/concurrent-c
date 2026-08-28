@@ -29,7 +29,7 @@ int main(void) {
             if (cc_io_avail(chan_send(done_tx, 1))) {
                 (void)chan_send(progress_tx, 2);
             }
-        });
+        }) !>;
 
         CCResult_bool_CCIoError progress_res;
         @with_deadline(millis(20)) {

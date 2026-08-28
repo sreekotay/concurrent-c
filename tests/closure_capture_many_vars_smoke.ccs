@@ -22,7 +22,7 @@ int main(void) {
         __cc_nursery33.spawn(() => [a, b, c, d, e, f, g, h, i, j] {
             int sum = a + b + c + d + e + f + g + h + i + j;
             printf("sum = %d\n", sum);  // 1+2+...+10 = 55
-        });
+        }) !>;
     
     }
     

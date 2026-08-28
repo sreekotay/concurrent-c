@@ -776,6 +776,90 @@ static int shadow_ufcs_ty_is(const char* vty, const ShadowBind* rb,
     return 0;
 }
 
+/* Nursery spawn is overload, not a rename: leftover must win before
+ * typehooks (generic/hook would emit cc_nursery_spawn, the raw fn-ptr).
+ *   () => {…} / CCClosure0 / make()  → spawn_closure0
+ *   async_fn(…)                      → spawn_async_named
+ * spawn_async is the explicit alias for the task form. */
+static int shadow_ufcs_nursery_spawn_parts(const char* recv, const char* meth_name,
+                                          const char* a, const char* vty,
+                                          const ShadowBind* rb, char* dst,
+                                          size_t cap) {
+    char callee_name[96];
+    size_t ci = 0, cj = 0;
+    if (!shadow_ufcs_ty_is(vty, rb, "CCNursery")) return 0;
+    if (strcmp(meth_name, "spawnhybrid") == 0) {
+        snprintf(dst, cap, "cc_nursery_spawnhybrid_closure0(%s, %s)", recv, a);
+        return 1;
+    }
+    if (strcmp(meth_name, "spawn") != 0 && strcmp(meth_name, "spawn_async") != 0)
+        return 0;
+    if (strcmp(meth_name, "spawn") == 0) {
+        int is_closure0 = 0;
+        int has_cl = 0;
+        if (g_shadow_ufcs_site) {
+            int k;
+            for (k = 0; k < g_shadow_ufcs_site->ndbody; k++) {
+                AstNode* kid = g_shadow_ufcs_site->dbody[k];
+                if (kid && kid->kind == AST_SPAWN_CLOSURE &&
+                    strncmp(kid->b, "callarg", 7) == 0)
+                    has_cl = 1;
+            }
+        }
+        if (strstr(a, "=>") || has_cl || !a[0]) {
+            is_closure0 = 1;
+        } else {
+            const ShadowBind* ab = shadow_bind_for_recv(a);
+            char abase[128];
+            abase[0] = 0;
+            shadow_bind_base_ty(ab, abase, sizeof(abase));
+            if (strcmp(abase, "CCClosure0") == 0 ||
+                (ab && strstr(ab->ty, "CCClosure0") != NULL))
+                is_closure0 = 1;
+            else if (strstr(a, "cc_closure") != NULL &&
+                     strstr(a, "_make") != NULL)
+                is_closure0 = 1;
+        }
+        if (is_closure0) {
+            snprintf(dst, cap, "cc_nursery_spawn_closure0(%s, %s)", recv, a);
+            return 1;
+        }
+    }
+    while (a[ci] && (a[ci] == ' ' || a[ci] == '\t')) ci++;
+    while (a[ci] && cj + 1 < sizeof(callee_name) &&
+           ((a[ci] >= 'A' && a[ci] <= 'Z') || (a[ci] >= 'a' && a[ci] <= 'z') ||
+            (a[ci] >= '0' && a[ci] <= '9') || a[ci] == '_' || a[ci] == ':')) {
+        callee_name[cj++] = a[ci++];
+    }
+    callee_name[cj] = 0;
+    if (cj == 0 || a[ci] != '(')
+        snprintf(callee_name, sizeof(callee_name), "%s", "<async>");
+    snprintf(dst, cap,
+             "cc_nursery_spawn_async_named(%s, %s, \"%s\", __FILE__, __LINE__)",
+             recv, a, callee_name);
+    return 1;
+}
+
+/* Named pointer whose C methods take Host*. One `.p` peel.
+ * CCArena stays a handle token — invented `cc_arena_*` names are macros
+ * that already run CC__ARENA_HOST (detach/adopt/destroy take CCArena*). */
+static int shadow_ufcs_ty_is_box(const char* vty, const ShadowBind* rb) {
+    const char* t;
+    if (shadow_ufcs_ty_is(vty, rb, "CCNursery")) return 1;
+    if (shadow_ufcs_ty_is(vty, rb, "CCExclusive")) return 1;
+    if (shadow_ufcs_ty_is(vty, rb, "CCBox")) return 1;
+    t = (vty && vty[0]) ? vty : (rb && rb->ty[0] ? rb->ty : NULL);
+    if (t && strncmp(t, "CCBox_", 6) == 0) return 1;
+    return 0;
+}
+
+/* Methods that take the handle token, not Host*. */
+static int shadow_ufcs_box_token_meth(const char* meth) {
+    if (!meth) return 0;
+    return strcmp(meth, "destroy") == 0 || strcmp(meth, "create_child") == 0 ||
+           strcmp(meth, "is_live") == 0 || strcmp(meth, "host") == 0;
+}
+
 /* Fat CCSlice / Unique / Shared — NOT Hdr or Packed (those share the
  * "CCSlice" prefix and must not fall into identity / cc_slice_* arms). */
 static int shadow_ufcs_ty_is_ccslice_fat(const char* vty) {
@@ -1588,8 +1672,7 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     /* Args may embed multiline @slice("…") / @string(`…`) payloads. */
     char a[4096];
     char recv_buf[192];
-    char nursery_peel[256];
-    char exclusive_peel[256];
+    char box_peel[256];
     const ShadowBind* rb;
     char vty[128];
     char hdrm[224];
@@ -1925,50 +2008,26 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         }
     }
 #define SHADOW_UFCS_PTR_RECV() (ufcs_ptr_recv)
-    /* CCNursery is a value handle; most C entry points take CCNurseryHost*.
-     * create_child / destroy take the token (or `CCNursery*`), not Host*. */
-    nursery_peel[0] = 0;
-    if (shadow_ufcs_ty_is(vty, rb, "CCNursery") &&
-        strcmp(meth_name, "create_child") != 0 &&
-        strcmp(meth_name, "destroy") != 0) {
+    /* CCBox / nursery / exclusive: Host* methods peel `.p`.
+     * destroy / create_child / is_live / host take the handle token.
+     * CCArena is not peeled — macros unwrap the handle. */
+    box_peel[0] = 0;
+    if (shadow_ufcs_ty_is_box(vty, rb) &&
+        !shadow_ufcs_box_token_meth(meth_name)) {
         const char* last = recv + strlen(recv);
         int already = 0;
         int star = 0;
         int npeel;
         while (last > recv && (last[-1] == ' ' || last[-1] == '\t')) last--;
-        if (last - recv >= 2 && last[-2] == '.' && last[-1] == 'n')
+        if (last - recv >= 2 && last[-2] == '.' && last[-1] == 'p')
             already = 1;
         if (!walked_fields && rb && strchr(rb->ty, '*') != NULL) star = 1;
         if (vty[0] && vty[strlen(vty) - 1] == '*') star = 1;
         if (!already) {
-            npeel = snprintf(nursery_peel, sizeof(nursery_peel),
-                             star ? "(%s)->n" : "(%s).n", recv);
-            if (npeel > 0 && (size_t)npeel < sizeof(nursery_peel)) {
-                recv = nursery_peel;
-                ufcs_ptr_recv = 1;
-            }
-        }
-    }
-    /* CCArena: no peel. Invented `cc_arena_*` names are macros that
-     * already run CC__ARENA_HOST — pass the handle (`&field` / recv).
-     * CCExclusive C entry points take Host*; destroy takes the token. */
-    exclusive_peel[0] = 0;
-    if (shadow_ufcs_ty_is(vty, rb, "CCExclusive") &&
-        strcmp(meth_name, "destroy") != 0) {
-        const char* last = recv + strlen(recv);
-        int already = 0;
-        int star = 0;
-        int npeel;
-        while (last > recv && (last[-1] == ' ' || last[-1] == '\t')) last--;
-        if (last - recv >= 2 && last[-2] == '.' && last[-1] == 'e')
-            already = 1;
-        if (!walked_fields && rb && strchr(rb->ty, '*') != NULL) star = 1;
-        if (vty[0] && vty[strlen(vty) - 1] == '*') star = 1;
-        if (!already) {
-            npeel = snprintf(exclusive_peel, sizeof(exclusive_peel),
-                             star ? "(%s)->e" : "(%s).e", recv);
-            if (npeel > 0 && (size_t)npeel < sizeof(exclusive_peel)) {
-                recv = exclusive_peel;
+            npeel = snprintf(box_peel, sizeof(box_peel),
+                             star ? "(%s)->p" : "(%s).p", recv);
+            if (npeel > 0 && (size_t)npeel < sizeof(box_peel)) {
+                recv = box_peel;
                 ufcs_ptr_recv = 1;
             }
         }
@@ -1976,6 +2035,21 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     /* Chain continuation through typed-slice calls. */
     if (!vty[0])
         (void)shadow_ufcs_recv_slice_ty(recv, vty, sizeof(vty));
+
+    /* Spawn overload before typehooks — hook/generic would emit the raw
+     * fn-ptr twin. Unlifted send_task `=>` is a miss (closure must be a kid). */
+    if (shadow_ufcs_nursery_spawn_parts(recv, meth_name, a, vty, rb, dst, cap))
+        return 1;
+    /* Token method, handle by value — generic hook would insert `&`. */
+    if (shadow_ufcs_ty_is(vty, rb, "CCNursery") &&
+        strcmp(meth_name, "create_child") == 0) {
+        snprintf(dst, cap, "cc_nursery_create_child(%s)", recv);
+        return 1;
+    }
+    if ((strcmp(meth_name, "send_task") == 0 ||
+         strcmp(meth_name, "send_task_hybrid") == 0) &&
+        strstr(a, "=>"))
+        return 0;
 
     /* Longest-matching `.ufcs` hook (glob subject). Its return is the callee.
      * Compose-then-verify: an invented name that is not declared is a CC
@@ -2394,9 +2468,11 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             return 0;
         }
         if (a[0])
-            snprintf(dst, cap, "cc_arena_alloc_T_count(%s, &%s, %s)", et, recv, a);
+            snprintf(dst, cap, "cc_arena_alloc_T_count(%s, %s%s, %s)", et,
+                     SHADOW_UFCS_PTR_RECV() ? "" : "&", recv, a);
         else
-            snprintf(dst, cap, "cc_arena_alloc_T(%s, &%s)", et, recv);
+            snprintf(dst, cap, "cc_arena_alloc_T(%s, %s%s)", et,
+                     SHADOW_UFCS_PTR_RECV() ? "" : "&", recv);
     } else if (!is_arrow && strcmp(meth_name, "block_on") == 0) {
         if (!elem_ty || !elem_ty[0]) return 0;
         snprintf(dst, cap, "cc_block_on(%s, %s)", elem_ty, recv);
@@ -2510,60 +2586,6 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         return 0;
     } else if (!is_arrow && strcmp(meth_name, "fetch_add") == 0) {
         snprintf(dst, cap, "cc_atomic_fetch_add(&%s, %s)", recv, a);
-    /* Nursery.wait / .cancel: typed CC* invent → cc_nursery_{wait,cancel}. */
-    } else if (shadow_ufcs_ty_is(vty, rb, "CCNursery") &&
-               (strcmp(meth_name, "spawn") == 0 ||
-                strcmp(meth_name, "spawn_async") == 0)) {
-        /* One surface: n.spawn(...).
-         *   () => {…}     → sync fiber (closure0)
-         *   async_fn(…)   → @async task (named spawn_async)
-         * spawn_async kept as an explicit alias for the task form. */
-        char callee_name[96];
-        size_t ci = 0, cj = 0;
-        if (!shadow_ufcs_ty_is(vty, rb, "CCNursery")) return 0;
-        /* Closure form: `() => …` literal, CCClosure0 value, or make(). */
-        if (strcmp(meth_name, "spawn") == 0) {
-            int is_closure0 = 0;
-            if (strstr(a, "=>")) {
-                is_closure0 = 1;
-            } else {
-                const ShadowBind* ab = shadow_bind_for_recv(a);
-                char abase[128];
-                abase[0] = 0;
-                shadow_bind_base_ty(ab, abase, sizeof(abase));
-                if (strcmp(abase, "CCClosure0") == 0 ||
-                    (ab && strstr(ab->ty, "CCClosure0") != NULL))
-                    is_closure0 = 1;
-                else if (strstr(a, "cc_closure") != NULL &&
-                         strstr(a, "_make") != NULL)
-                    is_closure0 = 1;
-            }
-            if (is_closure0) {
-                snprintf(dst, cap, "cc_nursery_spawn_closure0(%s, %s)", recv, a);
-                return 1;
-            }
-        }
-        while (a[ci] && (a[ci] == ' ' || a[ci] == '\t')) ci++;
-        while (a[ci] && cj + 1 < sizeof(callee_name) &&
-               ((a[ci] >= 'A' && a[ci] <= 'Z') || (a[ci] >= 'a' && a[ci] <= 'z') ||
-                (a[ci] >= '0' && a[ci] <= '9') || a[ci] == '_' || a[ci] == ':')) {
-            callee_name[cj++] = a[ci++];
-        }
-        callee_name[cj] = 0;
-        if (cj == 0 || a[ci] != '(')
-            snprintf(callee_name, sizeof(callee_name), "%s", "<async>");
-        snprintf(dst, cap,
-                 "cc_nursery_spawn_async_named(%s, %s, \"%s\", __FILE__, __LINE__)",
-                 recv, a, callee_name);
-    } else if (shadow_ufcs_ty_is(vty, rb, "CCNursery") &&
-               strcmp(meth_name, "spawnhybrid") == 0) {
-        snprintf(dst, cap, "cc_nursery_spawnhybrid_closure0(%s, %s)", recv, a);
-    } else if (shadow_ufcs_ty_is(vty, rb, "CCNursery") &&
-               strcmp(meth_name, "close_on") == 0) {
-        snprintf(dst, cap, "cc_nursery_add_closing_tx(%s, %s)", recv, a);
-    } else if (shadow_ufcs_ty_is(vty, rb, "CCNursery") &&
-               strcmp(meth_name, "create_child") == 0) {
-        snprintf(dst, cap, "cc_nursery_create_child(%s)", recv);
     } else if (strcmp(meth_name, "mutex") == 0) {
         if (!shadow_ufcs_ty_is(vty, rb, "CCExclusive")) return 0;
         snprintf(dst, cap, "cc_exclusive_mutex(%s, %s)", recv, a);
@@ -2658,12 +2680,6 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         else
             fn = is_arrow ? "const_char_to_slice_n" : "char_to_slice_n";
         snprintf(dst, cap, "%s(%s, %s)", fn, recv, a);
-    } else if (!is_arrow && strcmp(meth_name, "send_task") == 0) {
-        if (strstr(a, "=>")) return 0;
-        snprintf(dst, cap, "cc_channel_send_task(%s, %s)", recv, a);
-    } else if (!is_arrow && strcmp(meth_name, "send_task_hybrid") == 0) {
-        if (strstr(a, "=>")) return 0;
-        snprintf(dst, cap, "cc_channel_send_task_hybrid(%s, %s)", recv, a);
     } else if (!is_arrow &&
                (strcmp(meth_name, "as_i64") == 0 ||
                 strcmp(meth_name, "as_f64") == 0 ||
@@ -3339,7 +3355,7 @@ static int shadow_ufcs_try_as_retry_on(const char* recv, const char* meth_name,
              * the accessor so host C stays well-typed. */
             if (strcmp(as->outer, "CCNursery") == 0 &&
                 strcmp(as->field, "arena") == 0) {
-                n = snprintf(peeled, sizeof(peeled), "(*cc_nursery_arena((%s).n))",
+                n = snprintf(peeled, sizeof(peeled), "(*cc_nursery_arena((%s).p))",
                              recv);
             } else {
                 /* `o.mid` + file must stay `o.mid.file`. Wrapping to
@@ -5368,9 +5384,9 @@ static void shadow_peel_nursery_host_calls(char* expr, size_t cap) {
                                            ae[-1] == '\n'))
                             ae--;
                         alen = (size_t)(ae - as);
-                        if (alen >= 2 && ae[-1] == 'n' && ae[-2] == '.')
+                        if (alen >= 2 && ae[-1] == 'p' && ae[-2] == '.')
                             already = 1;
-                        if (alen >= 3 && ae[-1] == 'n' && ae[-2] == '>' &&
+                        if (alen >= 3 && ae[-1] == 'p' && ae[-2] == '>' &&
                             ae[-3] == '-')
                             already = 1;
                         if (!already && alen > 0 &&
@@ -5382,7 +5398,7 @@ static void shadow_peel_nursery_host_calls(char* expr, size_t cap) {
                             out[o++] = '(';
                             memcpy(out + o, as, alen);
                             o += alen;
-                            memcpy(out + o, ").n", 3);
+                            memcpy(out + o, ").p", 3);
                             o += 3;
                             p = ae;
                             continue;

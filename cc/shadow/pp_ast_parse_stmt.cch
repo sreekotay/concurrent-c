@@ -2,8 +2,6 @@
  * Requires pp_ast_core.cch. */
 #pragma once
 
-static int try_parse_spawn_cond(Parser* p, int c0, int c1, AstNode** out_sp,
-                                int* out_after);
 static AstNode* parse_stmt(Parser* p);
 static AstNode* parse_block(Parser* p);
 static AstNode* parse_ufcs_expr_range(Parser* p, int i0, int i1);
@@ -1362,8 +1360,6 @@ static int parse_call_arg_closure(Parser* p, int c0, int end, char* dst,
 static void spawn_infer_value_caps(AstNode* n);
 static void spawn_note_closure_local(const char* name);
 static void spawn_reset_closure_locals(void);
-static AstNode* parse_spawn_closure(Parser* p);
-static AstNode* parse_send_task_closure(Parser* p);
 
 static AstNode* parse_if_stmt(Parser* p) {
     if (shadow_kw(p_peek(p)) != SHADOW_KW_IF) return NULL;
@@ -1382,34 +1378,13 @@ static AstNode* parse_if_stmt(Parser* p) {
     if (!n) return NULL;
     if (c0 >= c1) n->a[0] = 0;
     else {
-        AstNode* sp = NULL;
-        int sp_after = -1;
-        if (try_parse_spawn_cond(p, c0, c1, &sp, &sp_after) && sp) {
-            /* Cond = spawn call + trailing compare (e.g. ` != 0`). */
-            if (sp_after < c1) {
-                if (!ast_spell_token_range(p, sp_after, c1, n->a, sizeof(n->a)) &&
-                    !span_text(p, sp_after, c1, n->a, sizeof(n->a))) {
-                    parser_fail(p, p_peek(p), "if spawn-cond suffix too long");
-                    return NULL;
-                }
-            } else {
-                n->a[0] = 0;
-            }
-            if (n->ndbody >= SHADOW_DBODY_CAP) {
-                parser_fail(p, p_peek(p), "too many if-cond attachments");
-                return NULL;
-            }
-            n->dbody[n->ndbody++] = sp;
-            snprintf(n->e, sizeof(n->e), "spawn_cond");
-        } else {
-            AstNode* ue = parse_ufcs_expr_range(p, c0, c1);
-            if (!ast_spell_token_range(p, c0, c1, n->a, sizeof(n->a)) &&
-                !span_text(p, c0, c1, n->a, sizeof(n->a))) {
-                parser_fail(p, p_peek(p), "if condition too long");
-                return NULL;
-            }
-            if (ue) (void)ast_attach_ufcs_kid(p, n, ue);
+        AstNode* ue = parse_ufcs_expr_range(p, c0, c1);
+        if (!ast_spell_token_range(p, c0, c1, n->a, sizeof(n->a)) &&
+            !span_text(p, c0, c1, n->a, sizeof(n->a))) {
+            parser_fail(p, p_peek(p), "if condition too long");
+            return NULL;
         }
+        if (ue) (void)ast_attach_ufcs_kid(p, n, ue);
     }
     AstNode* body = tok_eq(p_peek(p), TK_PUNCT, "{") ? parse_block(p) : parse_stmt(p);
     if (!body) return NULL;
@@ -2598,6 +2573,10 @@ static AstNode* ast_make_ufcs(Parser* p, AstKind kind, int r0, int call_op,
                     return NULL;
                 }
                 spawn_infer_value_caps(cl);
+                /* send_task packs Result into the task; tag before emit/safety. */
+                if (strcmp(n->b, "send_task") == 0 ||
+                    strcmp(n->b, "send_task_hybrid") == 0)
+                    snprintf(cl->b, sizeof(cl->b), "%s", n->b);
                 n->dbody[n->ndbody++] = cl;
             }
         } else {
@@ -4507,10 +4486,6 @@ static AstNode* parse_stmt_inner(Parser* p) {
     n = parse_typed_init(p);
     if (n || p->err) return n;
     n = parse_var_decl(p);
-    if (n || p->err) return n;
-    n = parse_spawn_closure(p);
-    if (n || p->err) return n;
-    n = parse_send_task_closure(p);
     if (n || p->err) return n;
     n = parse_ufcs_stmt(p);
     if (n || p->err) return n;

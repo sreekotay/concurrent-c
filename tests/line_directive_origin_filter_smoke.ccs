@@ -35,7 +35,7 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     {
         CCNursery n = @create() !> @destroy;
-        n.spawnhybrid(() => { plain(); });
+        n.spawnhybrid(() => { plain(); }) !>;
     }
 
 #line 1000 "fake_header.h"
@@ -51,7 +51,7 @@ int main(void) {
      * visitor didn't get confused by the intervening directives. */
     {
         CCNursery n2 = @create() !> @destroy;
-        n2.spawnhybrid(() => { plain(); });
+        n2.spawnhybrid(() => { plain(); }) !>;
     }
 
     return 0;

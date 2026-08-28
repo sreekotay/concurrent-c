@@ -100,7 +100,7 @@ int main(void) {
                 printf("FAIL: got %d items, expected %d\n", got, NUM_ITEMS);
                 cc_atomic_store(&g_failed, 1);
             }
-        });
+        }) !>;
 
         CCNursery producer = consumer.create_child() !> @destroy;
         producer.spawn(() => [tx] {
@@ -126,8 +126,8 @@ int main(void) {
                     break;
                 }
             }
-        });
-        producer.wait();
+        }) !>;
+        producer.wait() !>;
         chan_close(tx);
     }
 

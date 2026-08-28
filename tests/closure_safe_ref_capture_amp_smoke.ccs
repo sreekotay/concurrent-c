@@ -16,7 +16,7 @@ int main(void) {
 
         n.spawn(() => [@safe &x] {
             write_i32(&x, 42);
-        });
+        }) !>;
     }
 
     if (x != 42) {

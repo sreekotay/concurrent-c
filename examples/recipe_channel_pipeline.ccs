@@ -36,11 +36,11 @@ int main(void) {
                 println(@string(`recv: ${v}`, @scratch)) !>;
                 sum.fetch_add(v);
             }
-        });
+        }) !>;
 
         { // inner nursery - parented by outer nursery
             CCNursery inner = outer.create_child() !> @destroy;
-            (void)inner.close_on(tx);
+            inner.close_on(tx) !>;
 
             inner.spawn(() => [tx] {
                 @errhandler(CCError e) cc_error_exit(e);
@@ -48,7 +48,7 @@ int main(void) {
                     tx.send(i) !>;
                     println(@string(`send: ${i}`, @scratch)) !>;
                 }
-            });
+            }) !>;
         }
         /* inner @destroy: wait producer → close tx */
     }

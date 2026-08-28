@@ -46,7 +46,7 @@ int main(void) {
             } else {
                 cc_atomic_fetch_add(&g_errors, 1);
             }
-        });
+        }) !>;
         n.spawn(() => [tx] {
             cc_sleep_ms(1);
             int v = 23;
@@ -56,11 +56,11 @@ int main(void) {
             if (!(rc == 0 || rc == EPIPE || rc == ETIMEDOUT)) {
                 cc_atomic_fetch_add(&g_errors, 1);
             }
-        });
+        }) !>;
         n.spawn(() => [tx] {
             cc_sleep_ms(1);
             chan_close(tx);
-        });
+        }) !>;
         (void)cc_nursery_wait(n);
         cc_nursery_free(n);
 

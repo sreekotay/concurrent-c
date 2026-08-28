@@ -64,10 +64,10 @@ $(OUT_DIR)/pigz: $(PIGZ_SRCS) $(PIGZ_C_DIR)/yarn.h $(PIGZ_C_DIR)/try.h | $(OUT_D
 	$(CC) $(CFLAGS) $(PIGZ_CFLAGS) $(ZOPFLI_CFLAGS) -ffunction-sections -fdata-sections $(SECTION_LDFLAGS) -o $@ $(PIGZ_SRCS) $(PIGZ_LDFLAGS) $(ZOPFLI_LDFLAGS)
 
 # CC version
-$(OUT_DIR)/pigz_cc: pigz_cc/pigz_cc.ccs | $(OUT_DIR)
+$(OUT_DIR)/pigz_cc: pigz_cc/pigz_cc.ccs pigz_cc/pigz_cc.cch pigz_deflate_splice.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ pigz_cc/pigz_cc.ccs --ld-flags "-lz $(ZOPFLI_LDFLAGS)" --cc-flags "$(ZOPFLI_CFLAGS)" --release
 
-# Idiomatic CC version (with T!E result types)
+# Wait-for loop: @parallel seq/wait + chained dictionaries (the idiomatic model)
 $(OUT_DIR)/pigz_idiomatic: pigz_idiomatic.ccs | $(OUT_DIR)
 	$(CCC) -O -o $@ pigz_idiomatic.ccs --ld-flags "-lz" --release
 
@@ -75,9 +75,9 @@ $(OUT_DIR)/pigz_idiomatic: pigz_idiomatic.ccs | $(OUT_DIR)
 $(OUT_DIR)/pigz_parallel: pigz_parallel.ccs | $(OUT_DIR)
 	$(CCC) -O -o $@ pigz_parallel.ccs --ld-flags "-lz" --release
 
-# @parallel seq/wait ordered spawn loop; chained dictionaries; seekable inputs only
-$(OUT_DIR)/pigz_wait: pigz_wait.ccs | $(OUT_DIR)
-	$(CCC) -O -o $@ pigz_wait.ccs --ld-flags "-lz" --release
+# Older ordered-channel + send_task sketch (independent gzip members)
+$(OUT_DIR)/pigz_channel: pigz_channel.ccs | $(OUT_DIR)
+	$(CCC) -O -o $@ pigz_channel.ccs --ld-flags "-lz" --release
 
 # Pthread CC version (OS threads)
 $(OUT_DIR)/pigz_pthread: pigz_pthread.ccs | $(OUT_DIR)
@@ -104,21 +104,21 @@ pigz: $(OUT_DIR)/pigz
 pigz_cc: $(OUT_DIR)/pigz_cc
 pigz_idiomatic: $(OUT_DIR)/pigz_idiomatic
 pigz_parallel: $(OUT_DIR)/pigz_parallel
-pigz_wait: $(OUT_DIR)/pigz_wait
+pigz_channel: $(OUT_DIR)/pigz_channel
 pigz_hybrid: $(OUT_DIR)/pigz_hybrid
 pigz_pthread: $(OUT_DIR)/pigz_pthread
 pigz_profile: $(OUT_DIR)/pigz_profile
 pigz_pthread_profile: $(OUT_DIR)/pigz_pthread_profile
 pigz_unordered: $(OUT_DIR)/pigz_unordered
 
-all: pigz pigz_cc pigz_idiomatic pigz_parallel pigz_wait pigz_hybrid pigz_pthread
+all: pigz pigz_cc pigz_idiomatic pigz_parallel pigz_channel pigz_hybrid pigz_pthread
 
 # Download source files if not present
 setup:
 	./setup.sh
 
 # Test both versions produce identical output
-test: pigz pigz_cc pigz_idiomatic pigz_hybrid
+test: pigz pigz_cc pigz_idiomatic pigz_channel pigz_hybrid
 	@echo "=== Generating test data ==="
 	dd if=/dev/urandom of=test_input.bin bs=1M count=10 2>/dev/null
 	@echo ""
@@ -130,22 +130,32 @@ test: pigz pigz_cc pigz_idiomatic pigz_hybrid
 	$(OUT_DIR)/pigz_cc -k -c test_input.bin > test_cc.gz
 	@echo "CC compressed size: $$(wc -c < test_cc.gz) bytes"
 	@echo ""
-	@echo "=== Testing idiomatic pigz demos ==="
-	$(OUT_DIR)/pigz_idiomatic test_input.bin
-	mv test_input.bin.gz test_idiomatic.gz
-	$(OUT_DIR)/pigz_hybrid test_input.bin
-	mv test_input.bin.gz test_hybrid.gz
+	@echo "=== Testing idiomatic / channel pigz demos ==="
+	cp test_input.bin test_idio.bin
+	$(OUT_DIR)/pigz_idiomatic test_idio.bin
+	mv test_idio.bin.gz test_idiomatic.gz
+	cp test_input.bin test_chan.bin
+	$(OUT_DIR)/pigz_channel test_chan.bin
+	mv test_chan.bin.gz test_channel.gz
+	cp test_input.bin test_hybrid.bin
+	$(OUT_DIR)/pigz_hybrid test_hybrid.bin
+	mv test_hybrid.bin.gz test_hybrid.gz
 	@echo ""
 	@echo "=== Verifying decompression ==="
 	gunzip -c test_orig.gz > test_orig_decomp.bin
 	gunzip -c test_cc.gz > test_cc_decomp.bin
 	gunzip -c test_idiomatic.gz > test_idiomatic_decomp.bin
+	gunzip -c test_channel.gz > test_channel_decomp.bin
 	gunzip -c test_hybrid.gz > test_hybrid_decomp.bin
 	cmp test_input.bin test_orig_decomp.bin && echo "Original: OK"
 	cmp test_input.bin test_cc_decomp.bin && echo "CC: OK"
 	cmp test_input.bin test_idiomatic_decomp.bin && echo "Idiomatic: OK"
+	cmp test_input.bin test_channel_decomp.bin && echo "Channel: OK"
 	cmp test_input.bin test_hybrid_decomp.bin && echo "Hybrid: OK"
-	@rm -f test_input.bin test_orig.gz test_cc.gz test_idiomatic.gz test_hybrid.gz test_orig_decomp.bin test_cc_decomp.bin test_idiomatic_decomp.bin test_hybrid_decomp.bin
+	@rm -f test_input.bin test_idio.bin test_chan.bin test_hybrid.bin \
+	  test_orig.gz test_cc.gz test_idiomatic.gz test_channel.gz test_hybrid.gz \
+	  test_orig_decomp.bin test_cc_decomp.bin test_idiomatic_decomp.bin \
+	  test_channel_decomp.bin test_hybrid_decomp.bin
 
 clean:
 	rm -rf $(OUT_DIR) *.o *.gz *.bin
@@ -153,4 +163,4 @@ clean:
 smoke: pigz_cc
 	@./smoke.sh
 
-.PHONY: setup test clean all pigz pigz_cc pigz_idiomatic pigz_parallel pigz_wait pigz_hybrid smoke
+.PHONY: setup test clean all pigz pigz_cc pigz_idiomatic pigz_parallel pigz_channel pigz_hybrid smoke

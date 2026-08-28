@@ -47,7 +47,7 @@ int main(void) {
                     cc_atomic_fetch_add(&g_s0, 1);
                 }
                 chan_close(g_tx0);
-            });
+            }) !>;
             __n.spawn(() => {
                 int v;
                 while (cc_io_avail(chan_recv(g_rx0, &v))) {
@@ -56,7 +56,7 @@ int main(void) {
                     cc_atomic_fetch_add(&g_s1, 1);
                 }
                 chan_close(g_tx1);
-            });
+            }) !>;
             __n.spawn(() => {
                 int v;
                 while (cc_io_avail(chan_recv(g_rx1, &v))) {
@@ -65,7 +65,7 @@ int main(void) {
                     cc_atomic_fetch_add(&g_s2, 1);
                 }
                 chan_close(g_tx2);
-            });
+            }) !>;
             __n.spawn(() => {
                 int v;
                 while (cc_io_avail(chan_recv(g_rx2, &v))) {
@@ -74,7 +74,7 @@ int main(void) {
                     cc_atomic_fetch_add(&g_s3, 1);
                 }
                 chan_close(g_tx3);
-            });
+            }) !>;
             __n.spawn(() => {
                 int v;
                 while (cc_io_avail(chan_recv(g_rx3, &v))) {
@@ -83,7 +83,7 @@ int main(void) {
                     cc_atomic_fetch_add(&g_s4, 1);
                 }
                 chan_close(g_tx4);
-            });
+            }) !>;
             __n.spawn(() => {
                 int v;
                 while (cc_io_avail(chan_recv(g_rx4, &v))) {
@@ -91,7 +91,7 @@ int main(void) {
                     cc_atomic_fetch_add(&g_out_count, 1);
                     cc_atomic_fetch_add(&g_out_sum, v);
                 }
-            });
+            }) !>;
         }
 
         int expected = (NUM_ITEMS*(NUM_ITEMS-1))/2 + 4*NUM_ITEMS;

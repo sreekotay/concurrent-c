@@ -105,7 +105,7 @@ int main(int argc, char** argv) {
                     handle_client(c);
                 });
             }
-        });
+        }) !>;
     }
 
     cc_listener_close(&ln);

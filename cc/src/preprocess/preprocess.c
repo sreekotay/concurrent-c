@@ -6897,8 +6897,6 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                     }
                 } else if (strcmp(method_name, "spawnhybrid") == 0) {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_spawnhybrid_closure0");
-                } else if (strcmp(method_name, "close_on") == 0) {
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_add_closing_tx");
                 } else if (strcmp(method_name, "spawn_async") == 0) {
                     nursery_spawn_named = 1;
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_spawn_async_named");
@@ -15049,6 +15047,7 @@ static int g_rewrite_allow_impl_splice = 1;
  * consumer. */
 static const char* g_rewrite_root_path = NULL;
 static int cc__lowered_header_needs_ufcs_splice(const char* body, size_t body_len);
+static char* cc__rewrite_header_atomic_ufcs(const char* body, size_t body_len);
 
 /* Same-stem `foo.cch` → `foo.ccs`, else chapter `foo_bar.cch` → `foo.ccs`. */
 static int cc__cch_stem_owner_ccs_path(const char* abs_cch, char* out, size_t cap) {
@@ -15413,7 +15412,12 @@ static char* cc__destatic_file_scope_fns(const char* src, size_t n,
             size_t after = i + 6;
             while (after < n && (src[after] == ' ' || src[after] == '\t'))
                 after++;
-            if (cc__static_follows_file_scope_fn(src, n, after, &is_decl) &&
+            /* `static inline` stays. Stripping `static` leaves
+             * `inline void foo()` which shadow-lower cannot parse
+             * (pigz_cc put2le / cut_short on the owner splice). */
+            if (!(after + 6 <= n && memcmp(src + after, "inline", 6) == 0 &&
+                  (after + 6 >= n || !cc_is_ident_char(src[after + 6]))) &&
+                cc__static_follows_file_scope_fn(src, n, after, &is_decl) &&
                 (!decls_only || is_decl)) {
                 i = after;
                 changed = 1;
@@ -16760,6 +16764,201 @@ static size_t cc__file_scope_decl_end(const char* src, size_t n,
 
 /* Pointer types this face names but does not define. Fills `peers`.
  * Returns count, or -1 and sets g_local_cch_lower_failed. */
+/* `$sysroot/usr/include`, or `sysroot` itself when it is already the
+ * include directory. */
+static int cc__sysroot_include_dir(const char* sysroot, char* inc, size_t cap) {
+    char abs[PATH_MAX];
+    const char* use;
+    if (!sysroot || !sysroot[0] || !inc || cap < 4) return 0;
+    use = realpath(sysroot, abs) ? abs : sysroot;
+    if ((size_t)snprintf(inc, cap, "%s/usr/include", use) < cap &&
+        access(inc, R_OK) == 0)
+        return 1;
+    if ((size_t)snprintf(inc, cap, "%s", use) < cap && access(inc, R_OK) == 0)
+        return 1;
+    return 0;
+}
+
+#ifdef __APPLE__
+/* Clang's default `-isysroot` when SDKROOT is unset. */
+static int cc__darwin_sdk_root(char* out, size_t cap) {
+    static char cached[PATH_MAX];
+    static int state; /* 0 unknown, 1 ok, -1 none */
+    if (state == 0) {
+        FILE* fp = popen("xcrun --show-sdk-path 2>/dev/null", "r");
+        state = -1;
+        if (fp) {
+            if (fgets(cached, (int)sizeof(cached), fp)) {
+                size_t n = strlen(cached);
+                while (n && (cached[n - 1] == '\n' || cached[n - 1] == '\r'))
+                    cached[--n] = 0;
+                if (n && access(cached, R_OK) == 0) state = 1;
+            }
+            pclose(fp);
+        }
+        if (state != 1) {
+            static const char* cms[] = {
+                "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+                "/Applications/Xcode.app/Contents/Developer/Platforms/"
+                "MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+                NULL};
+            int i;
+            for (i = 0; cms[i]; i++) {
+                if (access(cms[i], R_OK) == 0) {
+                    snprintf(cached, sizeof(cached), "%s", cms[i]);
+                    state = 1;
+                    break;
+                }
+            }
+        }
+    }
+    if (state != 1 || !out || cap < 2) return 0;
+    if (strlen(cached) >= cap) return 0;
+    memcpy(out, cached, strlen(cached) + 1);
+    return 1;
+}
+#endif
+
+/* Search `-I` dirs from the driver (`CC_USER_INCLUDE_PATH`) plus host
+ * prefixes and the compile sysroot so extract sees `<zlib.h>` /
+ * `<zopfli.h>` the same way host cc does. */
+static int cc__host_h_on_include_path(const char* rel, char* out, size_t cap) {
+    const char* envs[2];
+    const char* prefixes[] = {"/opt/homebrew/include", "/usr/local/include",
+                              "/usr/include", NULL};
+    const char* sysroots[3];
+    char darwin_sdk[PATH_MAX];
+    char sysinc[PATH_MAX];
+    int e, p, s, nsys;
+    if (!rel || !rel[0] || !out || cap < 4) return 0;
+    envs[0] = getenv("CC_USER_INCLUDE_PATH");
+    envs[1] = getenv("CC_INCLUDE_PATH");
+    for (e = 0; e < 2; e++) {
+        const char* env = envs[e];
+        while (env && env[0]) {
+            const char* colon = strchr(env, ':');
+            size_t n = colon ? (size_t)(colon - env) : strlen(env);
+            if (n > 0 && n + 1 + strlen(rel) + 1 < cap) {
+                memcpy(out, env, n);
+                out[n] = '/';
+                memcpy(out + n + 1, rel, strlen(rel) + 1);
+                if (access(out, R_OK) == 0) return 1;
+            }
+            env = colon ? colon + 1 : NULL;
+        }
+    }
+    nsys = 0;
+    sysroots[nsys++] = getenv("CC_SYSROOT");
+    sysroots[nsys++] = getenv("SDKROOT");
+#ifdef __APPLE__
+    darwin_sdk[0] = 0;
+    if (cc__darwin_sdk_root(darwin_sdk, sizeof(darwin_sdk)))
+        sysroots[nsys++] = darwin_sdk;
+#else
+    (void)darwin_sdk;
+#endif
+    for (s = 0; s < nsys; s++) {
+        if (!sysroots[s] || !sysroots[s][0]) continue;
+        if (!cc__sysroot_include_dir(sysroots[s], sysinc, sizeof(sysinc)))
+            continue;
+        if ((size_t)snprintf(out, cap, "%s/%s", sysinc, rel) < cap &&
+            access(out, R_OK) == 0)
+            return 1;
+    }
+    for (p = 0; prefixes[p]; p++) {
+        if ((size_t)snprintf(out, cap, "%s/%s", prefixes[p], rel) < cap &&
+            access(out, R_OK) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int cc__resolve_host_h(const char* rel, int is_angle, const char* abs_cch,
+                              char* out, size_t cap) {
+    char dir[PATH_MAX];
+    const char* slash;
+    int sibling = 0;
+    if (!rel || !rel[0] || !out || cap < 4) return 0;
+    if (abs_cch && abs_cch[0]) {
+        slash = strrchr(abs_cch, '/');
+        if (slash) {
+            size_t n = (size_t)(slash - abs_cch);
+            if (n + 1 + strlen(rel) + 1 < cap && n < sizeof(dir)) {
+                memcpy(dir, abs_cch, n);
+                dir[n] = 0;
+                snprintf(out, cap, "%s/%s", dir, rel);
+                if (access(out, R_OK) == 0) sibling = 1;
+            }
+        }
+    }
+    /* Quoted: same-directory first. Angle: -I / sysroot first, then the
+     * face directory (tests place `<AngleHostOpts.h>` next to the face). */
+    if (!is_angle && sibling) return 1;
+    if (cc__host_h_on_include_path(rel, out, cap)) return 1;
+    if (is_angle && sibling) {
+        snprintf(out, cap, "%s/%s", dir, rel);
+        return 1;
+    }
+    return sibling;
+}
+
+/* `#include <foo.h>` / `#include "foo.h"` that actually defines `name`.
+ * `ZopfliOptions*` after `#include <zopfli.h>` is not a missing face. */
+static int cc__src_host_h_defines_type(const char* src, size_t n,
+                                      const char* abs_cch, const char* name) {
+    size_t i = 0;
+    size_t nlen;
+    if (!src || n == 0 || !name || !(nlen = strlen(name))) return 0;
+    while (i < n) {
+        size_t line_end = i, p, close, path_s, path_e;
+        char quote;
+        int is_angle;
+        while (line_end < n && src[line_end] != '\n') line_end++;
+        p = i;
+        while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+        if (p < line_end && src[p] == '#') {
+            p++;
+            while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+            if (p + 7 <= line_end && memcmp(src + p, "include", 7) == 0 &&
+                (p + 7 == line_end || !cc_is_ident_char(src[p + 7]))) {
+                p += 7;
+                while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+                if (p < line_end && (src[p] == '<' || src[p] == '"')) {
+                    is_angle = src[p] == '<';
+                    quote = src[p];
+                    close = p + 1;
+                    while (close < line_end &&
+                           src[close] != (quote == '<' ? '>' : '"'))
+                        close++;
+                    if (close < line_end) {
+                        path_s = p + 1;
+                        path_e = close;
+                        if (path_e > path_s + 2 && src[path_e - 2] == '.' &&
+                            src[path_e - 1] == 'h') {
+                            char rel[PATH_MAX];
+                            char resolved[PATH_MAX];
+                            size_t rlen = path_e - path_s;
+                            if (rlen < sizeof(rel) &&
+                                !(rlen >= 4 &&
+                                  memcmp(src + path_e - 4, ".cch", 4) == 0)) {
+                                memcpy(rel, src + path_s, rlen);
+                                rel[rlen] = 0;
+                                if (cc__resolve_host_h(rel, is_angle, abs_cch,
+                                                       resolved,
+                                                       sizeof(resolved)) &&
+                                    cc__path_defines_type(resolved, name, nlen))
+                                    return 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = line_end < n ? line_end + 1 : line_end;
+    }
+    return 0;
+}
+
 static int cc__collect_defining_peer_faces(const char* src, size_t n,
                                           const char* abs_cch,
                                           char peers[][PATH_MAX],
@@ -16859,6 +17058,8 @@ static int cc__collect_defining_peer_faces(const char* src, size_t n,
             if (cc__rewrite_root_defines_type(names[k], strlen(names[k])) ||
                 cc__path_defines_type(g_header_ufcs_parent_path, names[k],
                                      strlen(names[k])))
+                continue;
+            if (cc__src_host_h_defines_type(src, n, abs_cch, names[k]))
                 continue;
             if (!g_local_cch_lower_failed)
                 fprintf(stderr,
@@ -17277,6 +17478,16 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     g_header_lower_preserve_tu_state--;
     /* Never write raw `.cch` into the `.h` — that looks like a successful lower. */
     if (!lowered) CC__LOWER_GIVE_UP("lower");
+    /* Header lower is text, not shadow UFCS. `flag.store(1)` in a face
+     * (pigz_cc cut_short) must become `cc_atomic_store` before the
+     * leftover-member-call check. */
+    {
+        char* atom = cc__rewrite_header_atomic_ufcs(lowered, strlen(lowered));
+        if (atom) {
+            free(lowered);
+            lowered = atom;
+        }
+    }
     /* Bodies already stripped above; this pass is idempotent if lower
      * reintroduced a brace. UFCS in an interface `.cch` stays. */
     if (cc__local_cch_is_impl_grade(abs_src) && cc__cch_has_owner_ccs(abs_src)) {
@@ -17472,10 +17683,28 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                         /* Nested inside a spliced impl face (redis_mem), or
                          * the defining owner `.ccs` — not every `.ccs`
                          * that includes an umbrella with one `.foo(`. */
-                        if (ufcs &&
-                            (cc__path_ends_with(current_path, ".cch") ||
-                             cc__cch_root_is_defining_ccs(child_abs)))
+                        if (ufcs && cc__path_ends_with(current_path, ".cch")) {
+                            /* Nested in a face (redis_mem / impl_cch inner):
+                             * Type_meth lives on the parent. Do not extract. */
                             splice_child = 1;
+                        } else if (ufcs &&
+                                   cc__cch_root_is_defining_ccs(child_abs)) {
+                            /* Owner TU including its face. Extract when
+                             * `.store(` rewrote to host-C (pigz_cc
+                             * cut_short). Unresolved UFCS splices. */
+                            int saved_fail = g_local_cch_lower_failed;
+                            const char* lp = cc__lower_local_cch_header(child_abs);
+                            char* hb = NULL;
+                            size_t hn = 0;
+                            if (!lp || g_local_cch_lower_failed) {
+                                g_local_cch_lower_failed = saved_fail;
+                                splice_child = 1;
+                            } else if (cc__read_file_text(lp, &hb, &hn) == 0 &&
+                                       hb &&
+                                       cc__lowered_header_needs_ufcs_splice(hb, hn))
+                                splice_child = 1;
+                            free(hb);
+                        }
                         else if (ufcs && !cc__cch_has_owner_ccs(child_abs)) {
                             /* Sibling-less leaf: its UFCS may bind
                              * registrations that live only in the parent TU
@@ -17703,6 +17932,161 @@ static const CCLoweredLocalHeader* cc__find_lowered_header_by_include_path(const
             return &g_lowered_local_headers[i];
     }
     return NULL;
+}
+
+/* Shadow UFCS maps bare `.store` / `.load` / `.cas` / `.fetch_add` to
+ * `cc_atomic_*`. Header extract is text-only; rewrite those here so a
+ * face can keep `g_pipeline_error.store(1)` (pigz_cc). */
+static int cc__atomic_ufcs_meth(const char* s, size_t n, size_t k,
+                               size_t* meth_len) {
+    static const struct {
+        const char* n;
+        size_t l;
+    } m[] = {{"fetch_add", 9}, {"store", 5}, {"load", 4}, {"cas", 3}};
+    size_t i;
+    if (!s || !meth_len || k >= n) return 0;
+    for (i = 0; i < sizeof(m) / sizeof(m[0]); i++) {
+        if (k + m[i].l <= n && memcmp(s + k, m[i].n, m[i].l) == 0 &&
+            (k + m[i].l >= n || !cc_is_ident_char(s[k + m[i].l]))) {
+            *meth_len = m[i].l;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static char* cc__rewrite_header_atomic_ufcs(const char* body, size_t body_len) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t p = 0;
+    size_t last = 0;
+    int changed = 0;
+    if (!body || body_len < 8) return NULL;
+    while (p + 3 < body_len) {
+        char c = body[p];
+        char c2 = body[p + 1];
+        size_t k, meth_len, recv0, recv1, q, depth, arg0, arg1;
+        if (c == '/' && c2 == '/') {
+            p += 2;
+            while (p < body_len && body[p] != '\n') p++;
+            continue;
+        }
+        if (c == '/' && c2 == '*') {
+            p += 2;
+            while (p + 1 < body_len && !(body[p] == '*' && body[p + 1] == '/'))
+                p++;
+            if (p + 1 < body_len) p += 2;
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            char quote = c;
+            p++;
+            while (p < body_len) {
+                if (body[p] == '\\' && p + 1 < body_len) {
+                    p += 2;
+                    continue;
+                }
+                if (body[p] == quote) {
+                    p++;
+                    break;
+                }
+                p++;
+            }
+            continue;
+        }
+        if (c != '.') {
+            p++;
+            continue;
+        }
+        k = p + 1;
+        while (k < body_len && (body[k] == ' ' || body[k] == '\t')) k++;
+        if (!cc__atomic_ufcs_meth(body, body_len, k, &meth_len)) {
+            p++;
+            continue;
+        }
+        q = k + meth_len;
+        while (q < body_len && (body[q] == ' ' || body[q] == '\t')) q++;
+        if (q >= body_len || body[q] != '(') {
+            p++;
+            continue;
+        }
+        recv1 = p;
+        while (recv1 > 0 && (body[recv1 - 1] == ' ' || body[recv1 - 1] == '\t'))
+            recv1--;
+        if (recv1 == 0 || !cc_is_ident_char(body[recv1 - 1])) {
+            p++;
+            continue;
+        }
+        recv0 = recv1;
+        while (recv0 > 0 && cc_is_ident_char(body[recv0 - 1])) recv0--;
+        arg0 = q + 1;
+        depth = 1;
+        arg1 = arg0;
+        while (arg1 < body_len && depth > 0) {
+            if (body[arg1] == '"' || body[arg1] == '\'') {
+                char quote = body[arg1++];
+                while (arg1 < body_len) {
+                    if (body[arg1] == '\\' && arg1 + 1 < body_len) {
+                        arg1 += 2;
+                        continue;
+                    }
+                    if (body[arg1] == quote) {
+                        arg1++;
+                        break;
+                    }
+                    arg1++;
+                }
+                continue;
+            }
+            if (body[arg1] == '(')
+                depth++;
+            else if (body[arg1] == ')') {
+                depth--;
+                if (depth == 0) break;
+            }
+            arg1++;
+        }
+        if (depth != 0) {
+            p++;
+            continue;
+        }
+        {
+            char call[192];
+            size_t alen;
+            const char* meth = body + k;
+            while (arg0 < arg1 && (body[arg0] == ' ' || body[arg0] == '\t' ||
+                                   body[arg0] == '\n'))
+                arg0++;
+            alen = arg1 - arg0;
+            while (alen > 0 && (body[arg0 + alen - 1] == ' ' ||
+                                body[arg0 + alen - 1] == '\t' ||
+                                body[arg0 + alen - 1] == '\n'))
+                alen--;
+            if (meth_len == 4 && memcmp(meth, "load", 4) == 0)
+                snprintf(call, sizeof(call), "cc_atomic_load(&%.*s)",
+                         (int)(recv1 - recv0), body + recv0);
+            else if (alen == 0)
+                snprintf(call, sizeof(call), "cc_atomic_%.*s(&%.*s)",
+                         (int)meth_len, meth, (int)(recv1 - recv0),
+                         body + recv0);
+            else
+                snprintf(call, sizeof(call), "cc_atomic_%.*s(&%.*s, %.*s)",
+                         (int)meth_len, meth, (int)(recv1 - recv0),
+                         body + recv0, (int)alen, body + arg0);
+            cc_sb_append(&out, &out_len, &out_cap, body + last, recv0 - last);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, call);
+        }
+        changed = 1;
+        last = arg1 + 1;
+        p = last;
+    }
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    if (last < body_len)
+        cc_sb_append(&out, &out_len, &out_cap, body + last, body_len - last);
+    return out;
 }
 
 /* True when a lowered local header still has method-call UFCS (`->name(` /

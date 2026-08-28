@@ -1088,11 +1088,11 @@ int main(int argc, char** argv) {
             if (sweep)
                 for (int i = 0; i < nshards; i++) {
                     CCEpochShard* sp = &shards[i];
-                    n.spawn(() => [sp] { sweeper(sp); });
+                    n.spawn(() => [sp] { sweeper(sp); }) !>;
                 }
             for (int i = 0; i < nclients; i++) {
                 Client* cp = &clients[i];
-                n.spawn(() => [cp] { client(cp); });
+                n.spawn(() => [cp] { client(cp); }) !>;
             }
             n.spawn(() => [rpp, stp] {
                 reporter(rpp);
@@ -1100,7 +1100,7 @@ int main(int argc, char** argv) {
                     cc_atomic_store(&stp->shards[i].stop, 1);
                     sweep_kick(&stp->shards[i]);
                 }
-            });
+            }) !>;
         }
     }
     {

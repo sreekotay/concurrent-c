@@ -59,7 +59,7 @@ static double run_once(void) {
             for (int i = 0; i < g_iterations; i++) {
                 tx_h.send(i);
             }
-        });
+        }) !>;
 
         __cc_nursery164.spawn(() => {
             int v = 0;
@@ -72,7 +72,7 @@ static double run_once(void) {
             if (checksum < 0) {
                 fprintf(stderr, "impossible checksum=%lld\n", (long long)checksum);
             }
-        });
+        }) !>;
     
     }
     return time_now_ms() - start;

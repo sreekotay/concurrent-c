@@ -25,15 +25,15 @@ int main(void) {
 
     {
         CCNursery n = @create() !> @destroy;
-        if (n.spawnhybrid(() => {
+        n.spawnhybrid(() => {
                 cc_atomic_fetch_add(&g_sum, 1);
-            }) != 0) return 21;
-        if (n.spawnhybrid(() => {
+            }) !>;
+        n.spawnhybrid(() => {
                 cc_atomic_fetch_add(&g_sum, 2);
-            }) != 0) return 22;
-        if (n.spawnhybrid(() => {
+            }) !>;
+        n.spawnhybrid(() => {
                 cc_atomic_fetch_add(&g_sum, 3);
-            }) != 0) return 23;
+            }) !>;
     }
 
     return cc_atomic_load(&g_sum) == 24 ? 0 : 24;

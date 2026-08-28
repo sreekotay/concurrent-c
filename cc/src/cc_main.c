@@ -1663,51 +1663,150 @@ typedef struct {
 } CCBuildOptions;
 
 /* Extract -I paths from cc_flags and set CC_USER_INCLUDE_PATH (colon-separated).
-   This allows TCC parsing to find user-specified include directories. */
-static void cc__apply_user_include_env(const char* cc_flags) {
-    if (!cc_flags || !cc_flags[0]) {
-        unsetenv("CC_USER_INCLUDE_PATH");
-        return;
+ * Paths are realpath'd so extract sees them after any later chdir / cache
+ * work. An already-set env (cc_test .env) is kept and merged. */
+static int cc__append_include_dir(char* dst, size_t cap, size_t* pos,
+                                  const char* dir, size_t dir_len) {
+    char tmp[PATH_MAX];
+    char abs[PATH_MAX];
+    const char* use = dir;
+    size_t n = dir_len;
+    if (!dst || !pos || !dir || dir_len == 0 || cap < 4) return 0;
+    if (dir_len >= sizeof(tmp)) return 0;
+    memcpy(tmp, dir, dir_len);
+    tmp[dir_len] = '\0';
+    if (realpath(tmp, abs)) {
+        use = abs;
+        n = strlen(abs);
     }
-    static char include_paths[4096];
-    include_paths[0] = '\0';
-    size_t pos = 0;
-    const char* p = cc_flags;
-    while (*p) {
-        /* Skip whitespace */
-        while (*p && (*p == ' ' || *p == '\t')) p++;
-        if (!*p) break;
-        /* Check for -I */
-        if (p[0] == '-' && p[1] == 'I') {
-            const char* path_start = p + 2;
-            /* -I may be followed by space or directly by path */
-            if (*path_start == ' ' || *path_start == '\t') {
-                path_start++;
-                while (*path_start && (*path_start == ' ' || *path_start == '\t')) path_start++;
-            }
-            if (*path_start && *path_start != '-') {
-                /* Find end of path (space or end of string) */
-                const char* path_end = path_start;
-                while (*path_end && *path_end != ' ' && *path_end != '\t') path_end++;
-                size_t len = (size_t)(path_end - path_start);
-                if (len > 0 && pos + len + 2 < sizeof(include_paths)) {
-                    if (pos > 0) include_paths[pos++] = ':';
-                    memcpy(include_paths + pos, path_start, len);
-                    pos += len;
-                    include_paths[pos] = '\0';
-                }
-                p = path_end;
-                continue;
+    if (*pos + ( *pos ? 1 : 0 ) + n + 1 > cap) return 0;
+    if (*pos) dst[(*pos)++] = ':';
+    memcpy(dst + *pos, use, n);
+    *pos += n;
+    dst[*pos] = '\0';
+    return 1;
+}
+
+/* `-isysroot PATH`, `-isysrootPATH`, `--sysroot PATH`, `--sysroot=PATH`. */
+static int cc__flag_path_after(const char** pp, const char* flag, int attached,
+                               char* out, size_t cap) {
+    const char* p;
+    const char* s;
+    const char* e;
+    size_t fl, n;
+    if (!pp || !*pp || !flag || !out || cap < 2) return 0;
+    p = *pp;
+    fl = strlen(flag);
+    if (strncmp(p, flag, fl) != 0) return 0;
+    s = p + fl;
+    if (*s == '=')
+        s++;
+    else if (*s == '\0' || *s == ' ' || *s == '\t') {
+        while (*s == ' ' || *s == '\t') s++;
+    } else if (!attached)
+        return 0;
+    if (!*s || *s == '-') return 0;
+    e = s;
+    while (*e && *e != ' ' && *e != '\t') e++;
+    n = (size_t)(e - s);
+    if (n == 0 || n >= cap) return 0;
+    memcpy(out, s, n);
+    out[n] = '\0';
+    *pp = e;
+    return 1;
+}
+
+static void cc__apply_sysroot_env(const char* sysroot) {
+    char abs[PATH_MAX];
+    char inc[PATH_MAX];
+    const char* use;
+    const char* prior;
+    if (!sysroot || !sysroot[0]) return;
+    use = realpath(sysroot, abs) ? abs : sysroot;
+    prior = getenv("CC_SYSROOT");
+    if (!prior || !prior[0])
+        setenv("CC_SYSROOT", use, 1);
+    if ((size_t)snprintf(inc, sizeof(inc), "%s/usr/include", use) < sizeof(inc) &&
+        access(inc, R_OK) == 0) {
+        static char include_paths[4096];
+        const char* cur = getenv("CC_USER_INCLUDE_PATH");
+        size_t pos = 0;
+        include_paths[0] = '\0';
+        if (cur && cur[0]) {
+            const char* e = cur;
+            while (e && e[0]) {
+                const char* colon = strchr(e, ':');
+                size_t n = colon ? (size_t)(colon - e) : strlen(e);
+                (void)cc__append_include_dir(include_paths, sizeof(include_paths),
+                                             &pos, e, n);
+                e = colon ? colon + 1 : NULL;
             }
         }
-        /* Skip to next whitespace or end */
-        while (*p && *p != ' ' && *p != '\t') p++;
+        (void)cc__append_include_dir(include_paths, sizeof(include_paths), &pos,
+                                     inc, strlen(inc));
+        if (include_paths[0])
+            setenv("CC_USER_INCLUDE_PATH", include_paths, 1);
     }
-    if (include_paths[0]) {
+}
+
+static void cc__apply_user_include_env(const char* cc_flags) {
+    static char include_paths[4096];
+    const char* prior = getenv("CC_USER_INCLUDE_PATH");
+    size_t pos = 0;
+    char sysroot[PATH_MAX];
+    sysroot[0] = '\0';
+    include_paths[0] = '\0';
+    if (cc_flags && cc_flags[0]) {
+        const char* p = cc_flags;
+        while (*p) {
+            while (*p && (*p == ' ' || *p == '\t')) p++;
+            if (!*p) break;
+            if (p[0] == '-' && p[1] == 'I') {
+                const char* path_start = p + 2;
+                if (*path_start == ' ' || *path_start == '\t') {
+                    path_start++;
+                    while (*path_start && (*path_start == ' ' || *path_start == '\t'))
+                        path_start++;
+                }
+                if (*path_start && *path_start != '-') {
+                    const char* path_end = path_start;
+                    while (*path_end && *path_end != ' ' && *path_end != '\t')
+                        path_end++;
+                    (void)cc__append_include_dir(include_paths,
+                                                 sizeof(include_paths), &pos,
+                                                 path_start,
+                                                 (size_t)(path_end - path_start));
+                    p = path_end;
+                    continue;
+                }
+            }
+            {
+                const char* q = p;
+                if (cc__flag_path_after(&q, "-isysroot", 1, sysroot,
+                                        sizeof(sysroot)) ||
+                    cc__flag_path_after(&q, "--sysroot", 0, sysroot,
+                                        sizeof(sysroot))) {
+                    p = q;
+                    continue;
+                }
+            }
+            while (*p && *p != ' ' && *p != '\t') p++;
+        }
+    }
+    if (prior && prior[0]) {
+        const char* e = prior;
+        while (e && e[0]) {
+            const char* colon = strchr(e, ':');
+            size_t n = colon ? (size_t)(colon - e) : strlen(e);
+            (void)cc__append_include_dir(include_paths, sizeof(include_paths),
+                                         &pos, e, n);
+            e = colon ? colon + 1 : NULL;
+        }
+    }
+    if (include_paths[0])
         setenv("CC_USER_INCLUDE_PATH", include_paths, 1);
-    } else {
-        unsetenv("CC_USER_INCLUDE_PATH");
-    }
+    if (sysroot[0])
+        cc__apply_sysroot_env(sysroot);
 }
 
 /* Warm-cache diagnostic replay (ccache-style).  Lowering-time warnings are
@@ -1756,6 +1855,10 @@ static int cc__find_shadow_lower(char* dst, size_t cap);
 /* Emit .ccs/.shcc via native shadow_lower (legacy multipass driver removed). */
 static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, const char* out_path, const CCCompileConfig* cfg) {
     cc__apply_user_include_env(opt ? opt->cc_flags : NULL);
+    if (opt && opt->sysroot_flag && opt->sysroot_flag[0])
+        cc__apply_sysroot_env(opt->sysroot_flag);
+    else if (getenv("CC_SYSROOT") && getenv("CC_SYSROOT")[0])
+        cc__apply_sysroot_env(getenv("CC_SYSROOT"));
     if (g_emit_c_inspect) {
         if (g_emit_c_inspect_path && g_emit_c_inspect_path[0]) {
             setenv("CC_EMIT_C_INSPECT", g_emit_c_inspect_path, 1);
@@ -3962,6 +4065,26 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
         }
         cflen += (size_t)n;
     }
+    {
+        const char* sr = getenv("CC_SYSROOT");
+        char abs[PATH_MAX];
+        char probe[PATH_MAX];
+        const char* use;
+        if (sr && sr[0]) {
+            use = realpath(sr, abs) ? abs : sr;
+            if ((size_t)snprintf(probe, sizeof(probe), "%s/usr/include", use) <
+                    sizeof(probe) &&
+                access(probe, R_OK) == 0) {
+                int n = snprintf(cc_flags_buf + cflen, sizeof(cc_flags_buf) - cflen,
+                                 "%s-I%s", cflen ? " " : "", probe);
+                if (n < 0 || (size_t)n >= sizeof(cc_flags_buf) - cflen) {
+                    fprintf(stderr, "cc: sysroot include path too long\n");
+                    return -1;
+                }
+                cflen += (size_t)n;
+            }
+        }
+    }
     (void)cflen;
     argv[argc++] = shadow;
     if (opt->no_cache) argv[argc++] = (char*)"--no-cache";
@@ -4601,6 +4724,23 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
         char inc[PATH_MAX + 8];
         snprintf(inc, sizeof(inc), " -I%s", extra_include_dir);
         strncat(cmd, inc, sizeof(cmd) - strlen(cmd) - 1);
+    }
+    {
+        /* Extra system includes from --sysroot / -isysroot / CC_SYSROOT.
+         * Not `--sysroot` itself — that would hide the host libc. */
+        const char* sr = getenv("CC_SYSROOT");
+        char abs[PATH_MAX];
+        char probe[PATH_MAX];
+        char inc[PATH_MAX + 8];
+        const char* use;
+        if (sr && sr[0]) {
+            use = realpath(sr, abs) ? abs : sr;
+            if ((size_t)snprintf(probe, sizeof(probe), "%s/usr/include", use) <
+                    sizeof(probe) &&
+                access(probe, R_OK) == 0 &&
+                (size_t)snprintf(inc, sizeof(inc), " -I%s", probe) < sizeof(inc))
+                strncat(cmd, inc, sizeof(cmd) - strlen(cmd) - 1);
+        }
     }
     if (opt->cc_flags && *opt->cc_flags) {
         strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
@@ -5357,6 +5497,7 @@ static int run_build_mode(int argc, char** argv) {
         strncat(combined_cc_flags, def, sizeof(combined_cc_flags) - strlen(combined_cc_flags) - 1);
     }
     cc_flags = combined_cc_flags[0] ? combined_cc_flags : cc_flags;
+    cc__apply_user_include_env(cc_flags);
 
     // Apply output directory override before creating/deriving any outputs.
     cc_set_out_dir(out_dir, bin_dir);

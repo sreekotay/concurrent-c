@@ -11,7 +11,7 @@ int main(void) {
         CCNursery n = @create() !> @destroy;
         n.spawn(() => [p] {
             *p = 1; /* ERROR: mutation through value-captured pointer alias */
-        });
+        }) !>;
     }
     return 0;
 }

@@ -103,7 +103,7 @@ static void bench_spawn_overhead(void) {
         for (int i = 0; i < ITERATIONS; i++) {
             __cc_nursery163.spawn(() => [counter_ptr] {
                 cc_atomic_fetch_add(counter_ptr, 1);
-            });
+            }) !>;
         }
     
     }

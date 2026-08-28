@@ -1,0 +1,16 @@
+#ifndef TESTS_STATIC_INLINE_OWNER_SMOKE_CCH
+#define TESTS_STATIC_INLINE_OWNER_SMOKE_CCH
+
+#include <ccc/cc_atomic.cch>
+
+extern cc_atomic_int g_flag;
+
+static inline void flag_set(void) {
+    g_flag.store(1);
+}
+
+static inline int flag_get(void) {
+    return g_flag.load();
+}
+
+#endif

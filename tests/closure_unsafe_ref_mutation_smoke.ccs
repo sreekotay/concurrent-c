@@ -12,7 +12,7 @@ int main(void) {
         /* @unsafe bypasses mutation check - you own this race */
         __cc_nursery54.spawn(@unsafe () => [&counter] {
             counter++;
-        });
+        }) !>;
     
     }
     

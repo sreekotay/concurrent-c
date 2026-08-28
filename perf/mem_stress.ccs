@@ -17,7 +17,7 @@ int main() {
             __cc_nursery161.spawn(() => {
                 cc_sleep_ms(1000);
                 atomic_fetch_add(&g_completed, 1);
-            });
+            }) !>;
             if ((i + 1) % 1000 == 0) {
                 printf("  %d / %d spawned...\n", i + 1, count);
                 fflush(stdout);

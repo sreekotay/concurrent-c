@@ -39,10 +39,10 @@ int main(void) {
                 int v = 1;
                 CCDeadline d = cc_deadline_after_ms(10);
                 (void)cc_chan_deadline_send(tx_data.raw, &v, sizeof(int), &d);
-            });
+            }) !>;
             __cc_nursery16.spawn(() => {
                 tx_close.close();
-            });
+            }) !>;
 
             @with_deadline(millis(30)) {
                 do { /* select: recv/recv */

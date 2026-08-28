@@ -82,6 +82,7 @@
 #define CCC_CC_EXCLUSIVE_CCH
 
 #include <ccc/cc_arena.cch>
+#include <ccc/cc_box.cch>
 #include <ccc/cc_result.cch>
 #include <ccc/cc_closure.cch>
 #include <stdbool.h>
@@ -97,11 +98,13 @@ extern "C" {
 /* Runtime table (arena-backed). Not the surface type. */
 typedef struct CCExclusiveHost CCExclusiveHost;
 
-/* Surface handle. Create returns this; methods are `excl.mutex` / `excl.acquire`.
- * UFCS peels `.e`. Copying the handle copies the pointer. */
-typedef struct CCExclusive {
-    CCExclusiveHost* e;
-} CCExclusive;
+/* Teaching name is the box instance. Host C cannot spell `typedef CCBox::[H]`
+ * in a lowered .h — mint the factory name, then alias. */
+#ifndef CCBox_CCExclusiveHost_DEFINED
+#define CCBox_CCExclusiveHost_DEFINED
+CC_DECL_BOX_SPEC(CCBox_CCExclusiveHost, CCExclusiveHost)
+#endif
+typedef CCBox_CCExclusiveHost CCExclusive;
 
 #ifndef CCResult_CCExclusive_CCError_DEFINED
 #define CCResult_CCExclusive_CCError_DEFINED 1
@@ -110,16 +113,16 @@ CC_DECL_RESULT_SPEC(CCResult_CCExclusive_CCError, CCExclusive, CCError)
 
 static inline CCExclusive cc_exclusive_handle(CCExclusiveHost* h) {
     CCExclusive r;
-    r.e = h;
+    r.p = h;
     return r;
 }
 
 static inline int cc_exclusive_is_live(CCExclusive e) {
-    return e.e != NULL;
+    return e.p != NULL;
 }
 
 static inline CCExclusiveHost* cc_exclusive_host(CCExclusive e) {
-    return e.e;
+    return e.p;
 }
 
 #define CC_EXCL_FREE      0
@@ -462,7 +465,7 @@ typedef struct CCShardDomain {
 static inline CCShardDomain cc_shard_domain(CCExclusive excl,
                                            CCShardMask mask) {
     CCShardDomain d;
-    d.excl = excl.e;
+    d.excl = excl.p;
     d.mask = mask;
     return d;
 }

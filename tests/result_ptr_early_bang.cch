@@ -1,0 +1,10 @@
+#ifndef TESTS_RESULT_PTR_EARLY_BANG_CCH
+#define TESTS_RESULT_PTR_EARLY_BANG_CCH
+
+#include <ccc/std/prelude.cch>
+
+typedef struct {
+    int n;
+} CompRes;
+
+#endif

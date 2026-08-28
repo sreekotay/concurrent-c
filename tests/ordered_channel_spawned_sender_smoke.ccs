@@ -24,7 +24,7 @@ int main(void) {
             __cc_nursery78.spawn(() => [tx] {
                 cc_channel_send_task(tx, () => compute_result(2));
                 cc_channel_send_task(tx, () => compute_result(-1));
-            });
+            }) !>;
         
         }
 

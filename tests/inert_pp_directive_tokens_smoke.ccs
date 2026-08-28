@@ -43,7 +43,7 @@ static void plain(void) {}
 int main_disabled(void) {
     @errhandler(CCError e) cc_error_exit(e);
     CCNursery n = @create() !> @destroy;
-    n.spawnhybrid(() => { plain(); });
+    n.spawnhybrid(() => { plain(); }) !>;
     int[~4 >] tx;
     int[~4 <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
@@ -66,7 +66,7 @@ int main(void) {
      * appearing in #define bodies above. */
     {
         CCNursery n = @create() !> @destroy;
-        n.spawnhybrid(() => { plain(); });
+        n.spawnhybrid(() => { plain(); }) !>;
     }
     return 0;
 }

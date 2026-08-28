@@ -14,7 +14,7 @@ int main(void) {
         __cc_nursery25.spawn(() => {
             int v = 0;
             if (cc_io_avail(chan_recv(rx, &v))) g_value = v;
-        });
+        }) !>;
 
         {
             CCNursery __cc_nursery26 = @create() !> @destroy;
@@ -22,7 +22,7 @@ int main(void) {
 
             __cc_nursery26.spawn(() => {
             (void)chan_send(tx, 42);
-        });
+        }) !>;
         }
     
     }

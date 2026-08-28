@@ -33,7 +33,7 @@ static void* thread_wait(void* arg) {
     @errhandler(CCError e) cc_error_exit(e);
     CCExclusiveGuard !>(CCError) r;
     (void)arg;
-    r = cc_exclusive_acquire_when(g_excl.e, 1u, pred_ready, NULL);
+    r = cc_exclusive_acquire_when(g_excl.p, 1u, pred_ready, NULL);
     if (cc_is_ok(r)) {
         cc_exclusive_guard_release(&r.u.value);
         return (void*)1;
@@ -47,7 +47,7 @@ static void* thread_timeout(void* arg) {
     CCDeadline* prev = cc_deadline_push(&d);
     CCExclusiveGuard !>(CCError) r;
     (void)arg;
-    r = cc_exclusive_acquire_when(g_excl.e, 1u, pred_never, NULL);
+    r = cc_exclusive_acquire_when(g_excl.p, 1u, pred_never, NULL);
     cc_deadline_pop(prev);
     if (cc_is_err(r) && r.u.error.kind == CC_ERR_TIMEOUT)
         return (void*)1;
@@ -103,7 +103,7 @@ int main(void) {
             wg = excl.acquire_when(1u, pred_ready, NULL) !>;
             g_got = 1;
             wg.release();
-        });
+        }) !>;
         while (!g_started) cc_yield();
         cc_sleep_ms(5);
         {
@@ -130,7 +130,7 @@ int main(void) {
             CCClosure2 b = cc_closure2_make(write_slot, NULL, NULL);
             g_started = 1;
             excl.acquire_when_into(1u, pred_ready, NULL, &g_slot, NULL, b) !>;
-        });
+        }) !>;
         while (!g_started) cc_yield();
         cc_sleep_ms(5);
         {
@@ -157,7 +157,7 @@ int main(void) {
                 CCExclusiveGuard hg = wr.u.value;
                 hg.release();
             }
-        });
+        }) !>;
         while (!g_started) cc_yield();
         cc_sleep_ms(5);
         n.cancel();
@@ -179,7 +179,7 @@ int main(void) {
                 CCExclusiveGuard hg = wr.u.value;
                 hg.release();
             }
-        });
+        }) !>;
     }
     if (!g_got) return 9;
 

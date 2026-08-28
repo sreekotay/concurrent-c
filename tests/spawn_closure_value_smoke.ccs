@@ -10,7 +10,7 @@ int main(void) {
     {
         CCNursery __cc_nursery88 = @create() !> @destroy;
 
-        __cc_nursery88.spawn (c);
+        __cc_nursery88.spawn (c) !>;
     
     }
     return (g == 9) ? 0 : 1;

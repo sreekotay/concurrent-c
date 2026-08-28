@@ -25,7 +25,7 @@ WORKERS=${2:-8}
 RUNS=${3:-4}
 MEM_LIMIT_MB=${4:-0}  # 0 = no limit
 
-# Do not default CC_WORKERS. 1x cores is correct for CPU-bound pigz_wait;
+# Do not default CC_WORKERS. 1x cores is correct for CPU-bound pigz_idiomatic;
 # forcing 16 oversubscribes and is the wrong equivalent of pigz -p N.
 echo "=============================================="
 echo "pigz Benchmark: Real Compressible Data"
@@ -60,11 +60,11 @@ ensure_pigz_bins
 
 PIGZ_ORIG="$OUT_DIR/pigz"
 PIGZ_CC="$OUT_DIR/pigz_cc"
-PIGZ_WAIT="$OUT_DIR/pigz_wait"
+PIGZ_IDIOMATIC="$OUT_DIR/pigz_idiomatic"
 HAVE_PIGZ_CC=0
-HAVE_PIGZ_WAIT=0
+HAVE_PIGZ_IDIOMATIC=0
 [ -x "$PIGZ_CC" ] && HAVE_PIGZ_CC=1
-[ -x "$PIGZ_WAIT" ] && HAVE_PIGZ_WAIT=1
+[ -x "$PIGZ_IDIOMATIC" ] && HAVE_PIGZ_IDIOMATIC=1
 
 # Create data directory
 mkdir -p "$DATA_DIR"
@@ -133,7 +133,7 @@ run_compress() {
         start=$(python3 -c 'import time; print(time.time())')
         
         compress_one() {
-            if [ "$key" = "wait" ]; then
+            if [ "$key" = "idiomatic" ]; then
                 PIGZ_DICT=1 "$binary" bench_test.bin
             else
                 "$binary" -k -p "$WORKERS" bench_test.bin
@@ -239,8 +239,8 @@ echo "COMPRESSION BENCHMARKS"
 echo "=============================================="
 echo ""
 
-if [ "$HAVE_PIGZ_WAIT" -eq 1 ]; then
-    run_compress wait "pigz_wait PIGZ_DICT=1 (Concurrent-C)" "$PIGZ_WAIT" "$INPUT_FILE"
+if [ "$HAVE_PIGZ_IDIOMATIC" -eq 1 ]; then
+    run_compress idiomatic "pigz_idiomatic PIGZ_DICT=1 (Concurrent-C)" "$PIGZ_IDIOMATIC" "$INPUT_FILE"
 fi
 if [ "$HAVE_PIGZ_CC" -eq 1 ]; then
     run_compress cc   "pigz_cc (Concurrent-C)"  "$PIGZ_CC" "$INPUT_FILE"
@@ -248,7 +248,7 @@ fi
 run_compress orig "Original pigz (pthread)" "$PIGZ_ORIG" "$INPUT_FILE"
 
 # Create compressed files for decompression benchmarks (pigz / pigz_cc only;
-# pigz_wait has no -d).
+# pigz_idiomatic has no -d).
 echo "=== Preparing Compressed Files ==="
 if [ "$HAVE_PIGZ_CC" -eq 1 ]; then
     cp "$INPUT_FILE" bench_cc.bin
@@ -298,17 +298,17 @@ if [ "$HAVE_PIGZ_CC" -eq 1 ]; then
     fi
 fi
 
-if [ "$HAVE_PIGZ_WAIT" -eq 1 ]; then
-    cp verify_input.bin verify_wait.bin
-    PIGZ_DICT=1 $PIGZ_WAIT verify_wait.bin
-    gunzip -c verify_wait.bin.gz > wait_decomp.bin
-    echo -n "pigz_wait:     "
-    if cmp -s verify_input.bin wait_decomp.bin; then
+if [ "$HAVE_PIGZ_IDIOMATIC" -eq 1 ]; then
+    cp verify_input.bin verify_idio.bin
+    PIGZ_DICT=1 $PIGZ_IDIOMATIC verify_idio.bin
+    gunzip -c verify_idio.bin.gz > idio_decomp.bin
+    echo -n "pigz_idiomatic: "
+    if cmp -s verify_input.bin idio_decomp.bin; then
         echo "PASS"
     else
         echo "FAIL"
     fi
-    rm -f verify_wait.bin verify_wait.bin.gz wait_decomp.bin
+    rm -f verify_idio.bin verify_idio.bin.gz idio_decomp.bin
 fi
 
 # Show compression ratios
@@ -325,9 +325,9 @@ if [ "$HAVE_PIGZ_CC" -eq 1 ]; then
     cc_ratio=$(python3 -c "print(f'{$cc_compressed / $orig_size * 100:.2f}%')")
     echo "pigz_cc:        $(du -h cc.gz | cut -f1) ($cc_compressed bytes) - ${cc_ratio}"
 fi
-if [ "$HAVE_PIGZ_WAIT" -eq 1 ]; then
-    wait_ratio="${COMP_wait_AVG_RATIO:-?}"
-    echo "pigz_wait dict: (see timed runs) avg ratio ${wait_ratio}"
+if [ "$HAVE_PIGZ_IDIOMATIC" -eq 1 ]; then
+    idio_ratio="${COMP_idiomatic_AVG_RATIO:-?}"
+    echo "pigz_idiomatic dict: (see timed runs) avg ratio ${idio_ratio}"
 fi
 
 # Consolidated summary (easy to paste into issues/PRs)
@@ -338,10 +338,10 @@ printf "%-32s  %10s  %12s  %10s  %10s  %12s\n" \
   "pigz (pthread)" \
   "${COMP_orig_AVG_S:-?}" "${COMP_orig_AVG_MBPS:-?}" "${COMP_orig_AVG_RATIO:-?}" \
   "${DECOMP_orig_AVG_S:-?}" "${DECOMP_orig_AVG_MBPS:-?}"
-if [ "$HAVE_PIGZ_WAIT" -eq 1 ]; then
+if [ "$HAVE_PIGZ_IDIOMATIC" -eq 1 ]; then
     printf "%-32s  %10s  %12s  %10s  %10s  %12s\n" \
-      "pigz_wait PIGZ_DICT=1" \
-      "${COMP_wait_AVG_S:-?}" "${COMP_wait_AVG_MBPS:-?}" "${COMP_wait_AVG_RATIO:-?}" \
+      "pigz_idiomatic PIGZ_DICT=1" \
+      "${COMP_idiomatic_AVG_S:-?}" "${COMP_idiomatic_AVG_MBPS:-?}" "${COMP_idiomatic_AVG_RATIO:-?}" \
       "—" "—"
 fi
 if [ "$HAVE_PIGZ_CC" -eq 1 ]; then

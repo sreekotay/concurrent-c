@@ -16,7 +16,7 @@ int main(void) {
         __cc_nursery49.spawn(() => [&x] {
             /* Allowed: callee takes const int* */
             read_only_i32(&x);
-        });
+        }) !>;
     
     }
 

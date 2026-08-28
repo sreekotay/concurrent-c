@@ -1,8 +1,7 @@
 # All pigz versions — defaults only
-# Date: 2026-08-19
-# Commit: 85ab948d + gate-based CCTurnstile (create-on-first-touch)
-# Machine: Apple M5, 10 cores, 24 GB
-# Input: testdata/text_50mb.bin (52,428,800 bytes), Silesia concat
+# Date: 2026-08-28
+# Machine: Apple M5, 10 cores
+# Input: testdata/text_50mb.bin (52428800 bytes), Silesia concat
 # Method: 5 interleaved rounds, page-cached input, invoke `<bin> <file>`
 #         no -p / -k / -i; CC_WORKERS, CC_THREADS, PIGZ_* unset
 #         each program picks its own width. gunzip -t after each run.
@@ -10,38 +9,33 @@
 #         does not consume the corpus.
 
 Each binary was invoked as `<bin> <file>` only. No -p, no CC_WORKERS /
-CC_THREADS / PIGZ_CAP / PIGZ_DICT / PIGZ_SEQ. pigz_wait defaults to
+CC_THREADS / PIGZ_CAP / PIGZ_DICT / PIGZ_SEQ. pigz_idiomatic defaults to
 chained 32 KiB dictionaries (one gzip stream); PIGZ_DICT=0 opts out.
 
 === Interleaved wall seconds ===
-round    pigz   pigz_cc  pigz_wait  idiomatic  parallel  hybrid  pthread  pigz_go  pigz_zig
-    1     0.242     0.387     0.358     0.366     0.353     0.347     0.357     0.239     0.199
-    2     0.215     0.191     0.194     0.178     0.182     0.181     0.174     0.200     0.188
-    3     0.212     0.190     0.190     0.175     0.176     0.175     0.175     0.316     0.250
-    4     0.241     0.212     0.196     0.201     0.181     0.177     0.181     0.238     0.195
-    5     0.218     0.194     0.194     0.179     0.181     0.185     0.179     0.208     0.195
+round       pigz    pigz_cc pigz_idiomatic pigz_channel pigz_parallel    pigz_go   pigz_zig
+    1      0.237      0.210      0.392      0.396      0.206      0.226      0.199
+    2      0.231      0.210      0.208      0.194      0.205      0.210      0.194
+    3      0.234      0.206      0.207      0.193      0.194      0.206      0.203
+    4      0.231      0.212      0.216      0.199      0.199      0.206      0.193
+    5      0.234      0.207      0.207      0.194      0.196      0.206      0.196
 
 === Summary (best / median / mean wall, output bytes, gunzip) ===
-binary             dict    best   median     mean          out   gunzip
-pigz               chain   0.212    0.218    0.226     19826364       ok
-pigz_cc            chain   0.190    0.194    0.235     19826371       ok
-pigz_wait          chain   0.190    0.194    0.227     19826922       ok
-pigz_idiomatic     indep   0.175    0.179    0.220     20092354       ok
-pigz_parallel      indep   0.176    0.181    0.215     20092354       ok
-pigz_hybrid        indep   0.175    0.181    0.213     20092354       ok
-pigz_pthread       indep   0.174    0.179    0.213     20092354       ok
-pigz_go            indep   0.200    0.238    0.240     19826922       ok
-pigz_zig           indep   0.188    0.195    0.206     19826922       ok
+binary             dict      best   median     mean          out   gunzip
+pigz               chain    0.231    0.234    0.233     19826359       ok
+pigz_cc            chain    0.206    0.210    0.209     19826359       ok
+pigz_idiomatic     chain    0.207    0.208    0.246     19826922       ok
+pigz_channel       indep    0.193    0.194    0.235     20092354       ok
+pigz_parallel      indep    0.194    0.199    0.200     20092354       ok
+pigz_go            indep    0.206    0.206    0.211     20092354       ok
+pigz_zig           indep    0.193    0.196    0.197     20092354       ok
 
 Round 1 is cold for every binary. Median is the fair column.
 
-=== Notes ===
-- chain = 32 KiB predecessor dictionary, one gzip stream (pigz default;
-  pigz_cc default; pigz_wait default, PIGZ_DICT=0 opts out).
-- indep = one gzip member per 128 KiB block, no SetDictionary
-  (idiomatic / parallel / hybrid / pthread / Go / Zig).
-- 50 MB is short; treat medians, not means. Same method as
-  defaults_all_versions_2026_08_19.txt (pre-gate). Medians match
-  within a few ms.
-- For a 200 MB dict-vs-pigz -p 16 compare see
-  wait_dict_parity_2026_08_18.txt.
+Notes (2026-08-28):
+- Names: pigz_idiomatic is the wait-for specimen (was pigz_wait).
+  pigz_channel is the ordered-channel sketch (was pigz_idiomatic).
+- pigz_hybrid / pigz_pthread omitted: they still write a 0-byte .gz.
+- pigz_cc matches pigz size (19826359) via the Adler Z_BLOCK splice.
+- pigz_idiomatic is +563 bytes (simple Z_SYNC_FLUSH per chunk; tutorial
+  keeps that, not the splice). Independents share 20092354.

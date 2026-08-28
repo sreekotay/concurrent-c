@@ -37,11 +37,11 @@ static void run_case_buffered(void) {
                 CCDeadline d = cc_deadline_after_ms(40);
                 int rc = cc_chan_deadline_send(tx.raw, &v, sizeof(int), &d);
                 if (!(rc == 0 || rc == EPIPE || rc == ETIMEDOUT)) cc_atomic_fetch_add(&g_errors, 1);
-            });
+            }) !>;
             __cc_nursery7.spawn(() => [tx] {
                 cc_sleep_ms(1);
                 tx.close();
-            });
+            }) !>;
         
         }
 
@@ -95,11 +95,11 @@ static void run_case_unbuffered(void) {
                 CCDeadline d = cc_deadline_after_ms(40);
                 int rc = cc_chan_deadline_send(tx.raw, &v, sizeof(int), &d);
                 if (!(rc == 0 || rc == EPIPE || rc == ETIMEDOUT)) cc_atomic_fetch_add(&g_errors, 1);
-            });
+            }) !>;
             __cc_nursery8.spawn(() => [tx] {
                 cc_sleep_ms(1);
                 tx.close();
-            });
+            }) !>;
         
         }
 

@@ -29,7 +29,7 @@ int main(void) {
     {
         CCNursery n = @create() !> @destroy;
 
-        if (n.spawn(() => [n] {
+        n.spawn(() => [n] {
                 /* Register 1, destroy(2), 3 — LIFO exit order: 3, 2, 1. */
                 @defer { note(1); };
                 CCArena a = cc_arena_heap(kilobytes(1)) @destroy {
@@ -42,9 +42,7 @@ int main(void) {
                 uint32_t gen = cc_nursery_cancel_gen(n);
                 cc_atomic_store(&g_parked, 1);
                 cc_nursery_cancel_wait(n, gen, 30000);
-            }) != 0) {
-            return 3;
-        }
+            }) !>;
 
         while (cc_atomic_load(&g_parked) == 0) {
             cc_yield();

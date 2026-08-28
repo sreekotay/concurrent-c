@@ -50,7 +50,7 @@ int main(void) {
         CCNursery n = @create() !> @destroy;
         n.spawn(() => [req_tx, req_ptr] {
             (void)req_tx.send(req_ptr);
-        });
+        }) !>;
         RedisShapeRequest* got = NULL;
         if (!cc_io_avail(req_rx.recv(&got))) return 7;
         if (!got || got->value != 42) return 8;

@@ -15,7 +15,7 @@ int main(void) {
         __cc_nursery84.spawn (() => {
             // illegal: s was moved before closure creation
             if (s.len == 2) g = 1;
-        });
+        }) !>;
     
     }
     return g;

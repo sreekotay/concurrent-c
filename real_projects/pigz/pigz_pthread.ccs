@@ -1,7 +1,7 @@
 /*
  * pigz_pthread.ccs -- Parallel gzip using cc_thread_spawn (OS threads)
  *
- * Same compression and handoff semantics as pigz_idiomatic.ccs: compress_block
+ * Same compression and handoff semantics as pigz_channel.ccs: compress_block
  * returns a plain CompressedResult* (NULL on failure); the consumer treats NULL
  * as a pipeline error. The transport is a FIFO CCTask channel (OS-thread
  * workers) instead of send_task on fibers.
@@ -202,7 +202,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             cc_atomic_store(&g_pipeline_error, 1);
             cc_channel_close(tasks_rx, cc_io_error(CC_IO_OTHER));
         }
-    });
+    }) !>;
 
     CCNursery producer = @create(consumer) !> @destroy {
         chan_close(tasks_tx);
@@ -249,7 +249,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             
             if (is_last) break;
         }
-    });
+    }) !>;
 
     cc_file_sync(&out_file);
     return cc_atomic_load(&g_pipeline_error) ? 1 : 0;

@@ -190,8 +190,8 @@ static int test_fifo_stream(void) {
         CCNursery n = @create() !> @destroy;
         MsgTx txr = tx;
         MsgRx rxr = rx;
-        n.spawn(() => [txr] { fifo_sender(txr); });
-        n.spawn(() => [rxr] { fifo_receiver(rxr); });
+        n.spawn(() => [txr] { fifo_sender(txr); }) !>;
+        n.spawn(() => [rxr] { fifo_receiver(rxr); }) !>;
     }
     cc_chan_free(ch);
     if (cc_atomic_load(&g_errors) != 0) {

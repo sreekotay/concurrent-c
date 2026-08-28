@@ -31,7 +31,7 @@ int main(void) {
                 c.close();
                 server.cancel();
             });
-        });
+        }) !>;
 
         CCSocket conn = cc_tcp_connect(addr, strlen(addr)) !>(e) {
             eprintln(@string(`connect: ${e}`, @scratch)) !>;

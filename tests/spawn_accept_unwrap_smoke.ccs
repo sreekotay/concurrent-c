@@ -34,7 +34,7 @@ int main(void) {
                 (void)client;
                 break;
             }
-        });
+        }) !>;
     }
 
     {
@@ -50,7 +50,7 @@ int main(void) {
                 (void)client;
                 break;
             }
-        });
+        }) !>;
     }
 
     printf("spawn_accept_unwrap_smoke: PASS\n");

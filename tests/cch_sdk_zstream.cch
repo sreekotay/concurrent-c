@@ -1,0 +1,10 @@
+#ifndef TESTS_CCH_SDK_ZSTREAM_CCH
+#define TESTS_CCH_SDK_ZSTREAM_CCH
+
+#include <zlib.h>
+
+/* pigz_cc face shape: z_stream* after #include <zlib.h>. On Darwin the
+ * header lives in the SDK, not /usr/include. */
+void sdk_zstream_touch(z_stream* strm);
+
+#endif

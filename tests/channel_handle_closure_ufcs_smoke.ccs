@@ -28,7 +28,7 @@ int main(void) {
             while (cc_io_avail(rx.recv(&value))) {
                 cc_atomic_fetch_add(&total, value);
             }
-        });
+        }) !>;
 
         CCNursery producer = consumer.create_child() !> @destroy;
         producer.spawn(() => [tx] {
@@ -38,8 +38,8 @@ int main(void) {
                     break;
                 }
             }
-        });
-        producer.wait();
+        }) !>;
+        producer.wait() !>;
         tx.close();
     }
 

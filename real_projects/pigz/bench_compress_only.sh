@@ -1,5 +1,5 @@
 #!/bin/bash
-# Compression-only benchmark: pigz (pthread) vs pigz_idiomatic (fibers) vs pigz_pthread (cc_thread_spawn)
+# Compression-only benchmark: pigz (pthread) vs pigz_channel (fibers) vs pigz_pthread (cc_thread_spawn)
 # Usage: ./bench_compress_only.sh [size_mb] [runs]
 # Reports BEST time out of N runs.
 set -e
@@ -92,7 +92,7 @@ run_bench() {
 }
 
 # Verify all binaries exist
-for bin in pigz pigz_idiomatic pigz_pthread; do
+for bin in pigz pigz_channel pigz_pthread; do
     if [ ! -f "$OUT_DIR/$bin" ]; then
         echo "Error: $OUT_DIR/$bin not found"
         exit 1
@@ -101,7 +101,7 @@ done
 
 # Run benchmarks
 run_bench "pigz (original, pthreads)"           "$OUT_DIR/pigz -k -p 8"       ORIG
-run_bench "pigz_idiomatic (fibers, @spawn)"      "$OUT_DIR/pigz_idiomatic"     FIBER
+run_bench "pigz_channel (fibers, @spawn)"        "$OUT_DIR/pigz_channel"       FIBER
 run_bench "pigz_pthread (cc_thread_spawn)"        "$OUT_DIR/pigz_pthread"       THREAD
 
 # Summary table
@@ -112,7 +112,7 @@ printf "%-32s  %10s  %10s  %10s\n" "Implementation" "Best(s)" "MB/s" "Correct"
 printf "%-32s  %10s  %10s  %10s\n" "-------------------------------" "--------" "--------" "--------"
 for key in ORIG FIBER THREAD; do
     eval "name_ORIG='pigz (original, pthreads)'"
-    eval "name_FIBER='pigz_idiomatic (fibers)'"
+    eval "name_FIBER='pigz_channel (fibers)'"
     eval "name_THREAD='pigz_pthread (cc_thread_spawn)'"
     eval "n=\$name_${key}"
     eval "s=\$RES_${key}_S"

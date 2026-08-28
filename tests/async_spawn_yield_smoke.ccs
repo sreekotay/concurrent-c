@@ -16,22 +16,22 @@ int main(void) {
             int sum = 0;
             for (int i = 0; i < 100; i++) sum += i;
             g_results[0] = sum;
-        });
+        }) !>;
         __cc_nursery5.spawn(() => {
             int sum = 0;
             for (int i = 0; i < 200; i++) sum += i;
             g_results[1] = sum;
-        });
+        }) !>;
         __cc_nursery5.spawn(() => {
             int sum = 0;
             for (int i = 0; i < 300; i++) sum += i;
             g_results[2] = sum;
-        });
+        }) !>;
         __cc_nursery5.spawn(() => {
             int sum = 0;
             for (int i = 0; i < 400; i++) sum += i;
             g_results[3] = sum;
-        });
+        }) !>;
     
     }
     

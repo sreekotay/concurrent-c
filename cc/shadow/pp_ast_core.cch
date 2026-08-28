@@ -200,7 +200,8 @@ typedef enum {
     AST_ERR_SYNTAX,
     /* Type * name = callee(NULL) !> @destroy { stmts }; — a=type b=name c=callee */
     AST_NURSERY_DESTROY,
-    /* recv.spawn(() => [caps] { stmts }); — a=recv b=spawn d=id e=caps
+    /* Call-arg / send_task / create closure — a=formals|recv b=tag d=id e=caps
+     * f: "unsafe" when the literal was `@unsafe () => …`
      * caps: "x" / "&x" / "@safe&x" (intentional share); empty → inferred */
     AST_SPAWN_CLOSURE,
     /* Ident ( NUM ) ; — e.g. usleep(100000); a=callee b=literal */

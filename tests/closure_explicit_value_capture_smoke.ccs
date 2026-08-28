@@ -14,7 +14,7 @@ int main(void) {
         __cc_nursery42.spawn(() => [x] {
             printf("captured x=%d\n", x);
             /* x is a copy, original is unaffected */
-        });
+        }) !>;
     
     }
     

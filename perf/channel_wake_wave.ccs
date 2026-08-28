@@ -131,7 +131,7 @@ int main(void) {
             g_woke_worker[0] = cc__sched_current_worker_id();
             g_latency_ns[0] = now_ns() - cc_atomic_load(&g_send_start_ns);
             cc_atomic_fetch_add(&g_done, 1);
-        });
+        }) !>;
         receivers.spawn(() => [rx1] {
             int v = -1;
             cc__fiber_set_worker_affinity(1);
@@ -142,7 +142,7 @@ int main(void) {
             g_woke_worker[1] = cc__sched_current_worker_id();
             g_latency_ns[1] = now_ns() - cc_atomic_load(&g_send_start_ns);
             cc_atomic_fetch_add(&g_done, 1);
-        });
+        }) !>;
         receivers.spawn(() => [rx2] {
             int v = -1;
             cc__fiber_set_worker_affinity(2);
@@ -153,7 +153,7 @@ int main(void) {
             g_woke_worker[2] = cc__sched_current_worker_id();
             g_latency_ns[2] = now_ns() - cc_atomic_load(&g_send_start_ns);
             cc_atomic_fetch_add(&g_done, 1);
-        });
+        }) !>;
         receivers.spawn(() => [rx3] {
             int v = -1;
             cc__fiber_set_worker_affinity(3);
@@ -164,7 +164,7 @@ int main(void) {
             g_woke_worker[3] = cc__sched_current_worker_id();
             g_latency_ns[3] = now_ns() - cc_atomic_load(&g_send_start_ns);
             cc_atomic_fetch_add(&g_done, 1);
-        });
+        }) !>;
 
         while (cc_atomic_load(&g_ready) < NUM_WORKERS) {
             cc_yield();

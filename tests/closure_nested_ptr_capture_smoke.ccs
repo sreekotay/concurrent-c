@@ -23,8 +23,8 @@ int main(void) {
             outer.spawn(() => [cap] {
                 g_got = cap->seq;
                 cap->arena.free();
-            });
-        });
+            }) !>;
+        }) !>;
     }
     printf("got=%d\n", g_got);
     return g_got == 42 ? 0 : 1;

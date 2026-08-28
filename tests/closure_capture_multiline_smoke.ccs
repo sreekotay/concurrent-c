@@ -13,7 +13,7 @@ int main(void) {
             if (x == 3) {
                 g = 9;
             }
-        });
+        }) !>;
     
     }
     return (g == 9) ? 0 : 1;

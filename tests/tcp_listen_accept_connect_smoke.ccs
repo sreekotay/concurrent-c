@@ -35,7 +35,7 @@ int main(void) {
 
     {
         CCNursery n = cc_nursery_create() !> @destroy;
-        n.spawn(() => client_task());
+        n.spawn(() => client_task()) !>;
 
         CCSocket client = ln.accept() !>(e) {
             fprintf(stderr, "tcp_listen_accept_connect_smoke: accept err=%d\n", (int)e);

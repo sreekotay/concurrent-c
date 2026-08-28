@@ -14,7 +14,7 @@ int main(void) {
         __cc_nursery82.spawn (() => {
             int* p = (int*)s.ptr;
             if (p && p[0] == 7) g = 1;
-        });
+        }) !>;
     
     }
     return g == 1 ? 0 : 1;

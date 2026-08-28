@@ -11,7 +11,7 @@ int main(void) {
     n.spawn(() => [tx] {
         @errhandler(CCError e) cc_error_exit(e);
         tx.send(9u) !>;
-    });
+    }) !>;
     unsigned int v;
     rx.recv(&v) !>;
     return v == 9u ? 0 : 1;

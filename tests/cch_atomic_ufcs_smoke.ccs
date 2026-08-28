@@ -1,0 +1,11 @@
+/* Face extract must rewrite atomic UFCS (pigz_cc cut_short). */
+#include <stdio.h>
+#include "cch_atomic_ufcs.cch"
+
+cc_atomic_int g_flag = 0;
+
+int main(void) {
+    flag_set();
+    printf("%d\n", flag_get());
+    return 0;
+}

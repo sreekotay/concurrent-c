@@ -17,7 +17,7 @@ int main(void) {
         CCNursery n = cc_nursery_create() !> @destroy;
         n.spawn(() => [p] {
             *p = 42;
-        });
+        }) !>;
     }
 
     if (*p != 42) { free(p); return 2; }
