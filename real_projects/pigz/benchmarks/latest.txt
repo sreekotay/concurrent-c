@@ -9,8 +9,7 @@
 #         does not consume the corpus.
 
 Each binary was invoked as `<bin> <file>` only. No -p, no CC_WORKERS /
-CC_THREADS / PIGZ_CAP / PIGZ_DICT / PIGZ_SEQ. pigz_idiomatic defaults to
-chained 32 KiB dictionaries (one gzip stream); PIGZ_DICT=0 opts out.
+CC_THREADS / PIGZ_*. pigz_idiomatic is one chained gzip stream.
 
 === Interleaved wall seconds ===
 round       pigz    pigz_cc pigz_idiomatic pigz_channel pigz_parallel    pigz_go   pigz_zig
@@ -39,3 +38,5 @@ Notes (2026-08-28):
 - pigz_cc matches pigz size (19826359) via the Adler Z_BLOCK splice.
 - pigz_idiomatic is +563 bytes (simple Z_SYNC_FLUSH per chunk; tutorial
   keeps that, not the splice). Independents share 20092354.
+- After this receipt, pigz_idiomatic dropped PIGZ_DICT / PIGZ_CAP /
+  PIGZ_SEQ knobs (always chain, CAP=32). Defaults-only numbers still apply.

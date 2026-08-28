@@ -67,7 +67,7 @@ $(OUT_DIR)/pigz: $(PIGZ_SRCS) $(PIGZ_C_DIR)/yarn.h $(PIGZ_C_DIR)/try.h | $(OUT_D
 $(OUT_DIR)/pigz_cc: pigz_cc/pigz_cc.ccs pigz_cc/pigz_cc.cch pigz_deflate_splice.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ pigz_cc/pigz_cc.ccs --ld-flags "-lz $(ZOPFLI_LDFLAGS)" --cc-flags "$(ZOPFLI_CFLAGS)" --release
 
-# Wait-for loop: @parallel seq/wait + chained dictionaries (the idiomatic model)
+# Wait-for loop: @parallel wait + chained dictionaries (the idiomatic model)
 $(OUT_DIR)/pigz_idiomatic: pigz_idiomatic.ccs | $(OUT_DIR)
 	$(CCC) -O -o $@ pigz_idiomatic.ccs --ld-flags "-lz" --release
 

@@ -134,7 +134,7 @@ run_compress() {
         
         compress_one() {
             if [ "$key" = "idiomatic" ]; then
-                PIGZ_DICT=1 "$binary" bench_test.bin
+                "$binary" bench_test.bin
             else
                 "$binary" -k -p "$WORKERS" bench_test.bin
             fi
@@ -240,7 +240,7 @@ echo "=============================================="
 echo ""
 
 if [ "$HAVE_PIGZ_IDIOMATIC" -eq 1 ]; then
-    run_compress idiomatic "pigz_idiomatic PIGZ_DICT=1 (Concurrent-C)" "$PIGZ_IDIOMATIC" "$INPUT_FILE"
+    run_compress idiomatic "pigz_idiomatic (Concurrent-C)" "$PIGZ_IDIOMATIC" "$INPUT_FILE"
 fi
 if [ "$HAVE_PIGZ_CC" -eq 1 ]; then
     run_compress cc   "pigz_cc (Concurrent-C)"  "$PIGZ_CC" "$INPUT_FILE"
@@ -300,7 +300,7 @@ fi
 
 if [ "$HAVE_PIGZ_IDIOMATIC" -eq 1 ]; then
     cp verify_input.bin verify_idio.bin
-    PIGZ_DICT=1 $PIGZ_IDIOMATIC verify_idio.bin
+    $PIGZ_IDIOMATIC verify_idio.bin
     gunzip -c verify_idio.bin.gz > idio_decomp.bin
     echo -n "pigz_idiomatic: "
     if cmp -s verify_input.bin idio_decomp.bin; then
@@ -327,7 +327,7 @@ if [ "$HAVE_PIGZ_CC" -eq 1 ]; then
 fi
 if [ "$HAVE_PIGZ_IDIOMATIC" -eq 1 ]; then
     idio_ratio="${COMP_idiomatic_AVG_RATIO:-?}"
-    echo "pigz_idiomatic dict: (see timed runs) avg ratio ${idio_ratio}"
+    echo "pigz_idiomatic: (see timed runs) avg ratio ${idio_ratio}"
 fi
 
 # Consolidated summary (easy to paste into issues/PRs)
@@ -340,7 +340,7 @@ printf "%-32s  %10s  %12s  %10s  %10s  %12s\n" \
   "${DECOMP_orig_AVG_S:-?}" "${DECOMP_orig_AVG_MBPS:-?}"
 if [ "$HAVE_PIGZ_IDIOMATIC" -eq 1 ]; then
     printf "%-32s  %10s  %12s  %10s  %10s  %12s\n" \
-      "pigz_idiomatic PIGZ_DICT=1" \
+      "pigz_idiomatic" \
       "${COMP_idiomatic_AVG_S:-?}" "${COMP_idiomatic_AVG_MBPS:-?}" "${COMP_idiomatic_AVG_RATIO:-?}" \
       "—" "—"
 fi

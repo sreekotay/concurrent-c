@@ -11,7 +11,7 @@
 # DYLD_INSERT / interceptor issues). Default on Darwin is build-with-flags
 # + skip run, or --docker for a full Linux pass. Ubuntu CI runs full.
 #
-# Mains: pigz_idiomatic (wait-for + PIGZ_DICT SEQ/PAR), pigz_channel, pigz_cc (build),
+# Mains: pigz_idiomatic (wait-for + dict chain), pigz_channel, pigz_cc (build),
 # redis_idiomatic (+ smoke), levenshtein. See docs/sanitizers.md.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -212,14 +212,14 @@ build_run_pigz_idiomatic() {
   ok "pigz_idiomatic"
 }
 
-# Wait-for + cache(zs) + dict chain: take[] snapshot of a loop-carried slot.
-# SEQ is the serial body (no nursery). PAR is the race surface.
+# Wait-for + cache(zs) + dict hop: take[] snapshot of a loop-carried slot.
+# Two runs must byte-match (ordered write + copied tail).
 build_run_pigz_idiomatic_dict() {
   local san="$1"
   local flags
   flags="$(san_flags "$san")"
   local bin="$OUT/pigz_idiomatic_dict_${san}"
-  echo -e "${CYA}[$san]${NC} pigz_idiomatic (PIGZ_DICT=1)"
+  echo -e "${CYA}[$san]${NC} pigz_idiomatic (dict hop)"
   if ! "$CCC" build --no-cache -g \
       real_projects/pigz/pigz_idiomatic.ccs -o "$bin" \
       --cc-flags "$flags" --ld-flags "$flags -lz"; then
@@ -236,23 +236,23 @@ build_run_pigz_idiomatic_dict() {
   export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1:detect_stack_use_after_return=0}"
   export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1}"
   rm -f "$OUT/pw_in.bin.gz"
-  if ! env PIGZ_DICT=1 PIGZ_SEQ=1 run_timeout "$bin" "$OUT/pw_in.bin"; then
-    fail "pigz_idiomatic SEQ dict"
+  if ! run_timeout "$bin" "$OUT/pw_in.bin"; then
+    fail "pigz_idiomatic dict run 1"
     return
   fi
   if command -v gzip >/dev/null 2>&1; then
-    gzip -t "$OUT/pw_in.bin.gz" || { fail "pigz_idiomatic SEQ gzip"; return; }
+    gzip -t "$OUT/pw_in.bin.gz" || { fail "pigz_idiomatic dict gzip"; return; }
   fi
-  mv "$OUT/pw_in.bin.gz" "$OUT/pw_seq.gz"
-  if ! env PIGZ_DICT=1 run_timeout "$bin" "$OUT/pw_in.bin"; then
-    fail "pigz_idiomatic PAR dict"
+  mv "$OUT/pw_in.bin.gz" "$OUT/pw_a.gz"
+  if ! run_timeout "$bin" "$OUT/pw_in.bin"; then
+    fail "pigz_idiomatic dict run 2"
     return
   fi
   if command -v gzip >/dev/null 2>&1; then
-    gzip -t "$OUT/pw_in.bin.gz" || { fail "pigz_idiomatic PAR gzip"; return; }
+    gzip -t "$OUT/pw_in.bin.gz" || { fail "pigz_idiomatic dict gzip 2"; return; }
   fi
-  if ! cmp -s "$OUT/pw_seq.gz" "$OUT/pw_in.bin.gz"; then
-    fail "pigz_idiomatic SEQ/PAR differ"
+  if ! cmp -s "$OUT/pw_a.gz" "$OUT/pw_in.bin.gz"; then
+    fail "pigz_idiomatic dict runs differ"
     return
   fi
   ok "pigz_idiomatic dict"

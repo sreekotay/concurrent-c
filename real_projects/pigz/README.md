@@ -25,7 +25,7 @@ make pigz_cc   # CC version (requires CC compiler + zlib)
 ./bench_defaults.sh 50 5 pigz,pigz_idiomatic
 ./benchmark.sh 200 8 3           # older: size / pigz -p workers / runs
 
-# 5. Linux i386 (Docker) — pigz.c vs pigz_idiomatic (PIGZ_DICT=1) vs pigz_cc
+# 5. Linux i386 (Docker) — pigz.c vs pigz_idiomatic vs pigz_cc
 ../../scripts/pigz_i386.sh
 # Optional: PIGZ_BENCH_MB=50 PIGZ_BENCH_WORKERS=8 PIGZ_BENCH_RUNS=3 ../../scripts/pigz_i386.sh
 # TinyCC as the ccc backend (original pigz.c still gcc):
@@ -45,7 +45,7 @@ make pigz_cc   # CC version (requires CC compiler + zlib)
 Receipts (checked in). Reproduce with `./bench_defaults.sh` (optional `BENCH_OUT=benchmarks/latest.txt`):
 
 - [Latest (defaults, 50 MB, 2026-08-28)](benchmarks/latest.txt) — `pigz_idiomatic` / `pigz_channel` names; pigz_cc size-matches pigz; hybrid/pthread omitted (0-byte .gz)
-- [All versions, defaults only, 50 MB, 2026-08-19 (gate turnstile)](benchmarks/defaults_all_versions_2026_08_19_gate.txt) — `<bin> <file>`, no `-p` / `CC_WORKERS` / `PIGZ_*`; table marks `chain` vs `indep` dict per binary (then-`pigz_wait`, now `pigz_idiomatic`, chains by default; `PIGZ_DICT=0` opts out)
+- [All versions, defaults only, 50 MB, 2026-08-19 (gate turnstile)](benchmarks/defaults_all_versions_2026_08_19_gate.txt) — `<bin> <file>`, no `-p` / `CC_WORKERS` / `PIGZ_*`; table marks `chain` vs `indep` dict per binary (then-`pigz_wait`, now `pigz_idiomatic`)
 - [All versions, defaults only, 50 MB, 2026-08-19 (pre-gate)](benchmarks/defaults_all_versions_2026_08_19.txt) — same method, before create-on-first-touch gates
 - [wait-for vs pigz `-p 16`, 200 MB, 2026-08-18](benchmarks/wait_dict_parity_2026_08_18.txt) — chained-dict parity (do not set `CC_WORKERS`; receipt still says `pigz_wait`)
 - [Linux i386 Docker, 20 MB, 2026-08-19](benchmarks/ilp32_i386_2026_08_19.txt) — `pigz.c` vs then-`pigz_wait` vs `pigz_cc` on QEMU (`./scripts/pigz_i386.sh`); summary in [docs/ilp32-docker.md](../../docs/ilp32-docker.md)
@@ -82,17 +82,16 @@ Uses locks (mutex + condvar) via yarn.h for synchronization.
 Seekable compress is `pigz_idiomatic`: the serial block loop, annotated.
 
 ```
-  @parallel seq (use_par) wait (ts) cache (zs) for (i in 0..n) {
+  @parallel wait (ts) cache (zs) for (i in 0..n) {
       pread block i
-      @stage (ts.read, i)   { hop 32 KiB dict; rsync hash }
+      @stage (ts.read, i)   { hop 32 KiB dict }
       deflate (warm zs)
-      @stage (ts.write, i)  { crc/adler combine; write }
+      @stage (ts.write, i)  { crc combine; write }
   } !>.wait()!>;
 ```
 
-`PIGZ_SEQ=1` runs the same body inline. `PIGZ_CAP` (default 32) is
-in-flight tickets. Stdin cannot `pread` / does not know `n` — same
-helpers, sequential. Decompress is still reader → inflate → writer.
+Stdin cannot `pread` / does not know `n` — same helpers, sequential.
+Decompress is still reader → inflate → writer.
 
 ## CC Patterns Demonstrated
 

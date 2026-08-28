@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # compare_ilp32.sh — build original pigz, pigz_idiomatic, and pigz_cc on Linux ILP32.
 #
-# Headline compare is pigz.c vs pigz_idiomatic (PIGZ_DICT=1). pigz_cc is built
+# Headline compare is pigz.c vs pigz_idiomatic. pigz_cc is built
 # when the backend can; a TinyCC backend may skip it.
 #
 # Run via host wrapper:
@@ -103,11 +103,11 @@ dd if=/dev/urandom of="$TMP/in.bin" bs=1M count=4 status=none
 
 "$PIGZ" -k -c -p "$WORKERS" "$TMP/in.bin" > "$TMP/orig.gz"
 cp "$TMP/in.bin" "$TMP/idio.bin"
-PIGZ_DICT=1 "$PIGZ_IDIOMATIC" "$TMP/idio.bin"
+"$PIGZ_IDIOMATIC" "$TMP/idio.bin"
 gunzip -c "$TMP/orig.gz" > "$TMP/orig.out"
 gunzip -c "$TMP/idio.bin.gz" > "$TMP/idio.out"
 cmp "$TMP/in.bin" "$TMP/orig.out" && echo "  OK   original pigz round-trip"
-cmp "$TMP/in.bin" "$TMP/idio.out" && echo "  OK   pigz_idiomatic PIGZ_DICT=1 round-trip"
+cmp "$TMP/in.bin" "$TMP/idio.out" && echo "  OK   pigz_idiomatic round-trip"
 if [ -x "$PIGZ_CC" ]; then
   "$PIGZ_CC" -k -c -p "$WORKERS" "$TMP/in.bin" > "$TMP/cc.gz"
   gunzip -c "$TMP/cc.gz" > "$TMP/cc.out"
