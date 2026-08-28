@@ -1,0 +1,34 @@
+#!ccc cch
+#ifndef TESTS_UFCS_AS_SIBLING_SNAKE_CCH
+#define TESTS_UFCS_AS_SIBLING_SNAKE_CCH
+
+/* Linked-face shape: as: peels `doc`; `layout` is a sibling value field.
+ * Methods on the layout type are snake (`layout_box_set_view`), not
+ * `LayoutBox_set_view`. An explicit peel must dispatch on the field type. */
+
+typedef struct {
+    int n;
+} SiblingDoc;
+
+static inline void sibling_doc_from_n(SiblingDoc* d, int n) {
+    if (d) d->n = n;
+}
+
+typedef struct {
+    int view;
+} LayoutBox;
+
+static inline void layout_box_set_view(LayoutBox* L, int view) {
+    if (L) L->view = view;
+}
+
+typedef struct {
+    SiblingDoc doc;
+    LayoutBox layout;
+} SiblingBuf;
+
+@typeview on SiblingBuf {
+    as: doc;
+};
+
+#endif

@@ -1,0 +1,88 @@
+/* Explicit field peel wins over as: tree (doc-as-tree) and Type_destroy
+ * on the outer. d->tree.destroy is the tree; d->len is the doc wrapper. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    int n;
+} AsPeelTree;
+
+static void AsPeelTree_destroy(AsPeelTree* t) {
+    if (t) t->n = -1;
+}
+
+static int AsPeelTree_write_fd(AsPeelTree* t, int fd) {
+    (void)fd;
+    return t ? t->n : -2;
+}
+
+typedef struct {
+    AsPeelTree tree;
+    CCArena session;
+    CCArena analysis;
+} AsPeelDoc;
+
+static int AsPeelDoc_len(AsPeelDoc* d) {
+    return d ? d->tree.n : 0;
+}
+
+static void AsPeelDoc_destroy(AsPeelDoc* d) {
+    /* Must not run for d->tree.destroy(). */
+    if (d) d->tree.n = 99;
+}
+
+@typehooks on AsPeelDoc {
+    .destroy = AsPeelDoc_destroy,
+};
+
+@typeview on AsPeelDoc {
+    as: tree;
+};
+
+@typeview Highlight on AsPeelDoc {
+    r: len, tree;
+};
+
+static int use_doc(AsPeelDoc* d) {
+    d->tree.destroy();
+    if (d->tree.n != -1) return 1;
+    d->tree.n = 7;
+    if (d->tree.write_fd(1) != 7) return 2;
+    if (d->len() != 7) return 3;
+    d->analysis.reset();
+    {
+        char[:] b = d->session.alloc_slice_bytes(8);
+        if (!b.ptr || b.len != 8) return 4;
+    }
+    return 0;
+}
+
+static int use_highlight(@typeview(Highlight) AsPeelDoc* d) {
+    if (d->len() != 7) return 5;
+    if (d->tree.write_fd(2) != 7) return 6;
+    return 0;
+}
+
+int main(void) {
+    AsPeelDoc d;
+    int rc;
+    memset(&d, 0, sizeof(d));
+    d.tree.n = 3;
+    d.session = cc_arena_heap(kilobytes(4));
+    d.analysis = cc_arena_heap(kilobytes(4));
+    rc = use_doc(&d);
+    if (rc != 0) {
+        printf("use_doc=%d n=%d\n", rc, d.tree.n);
+        return 1;
+    }
+    rc = use_highlight(&d);
+    if (rc != 0) {
+        printf("use_highlight=%d\n", rc);
+        return 1;
+    }
+    d.session.destroy();
+    d.analysis.destroy();
+    printf("ok\n");
+    return 0;
+}

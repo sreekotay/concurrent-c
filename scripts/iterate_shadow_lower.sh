@@ -47,11 +47,15 @@ if [[ "$SMOKE" -eq 1 && "$SHIP" -eq 0 ]]; then
   exit 2
 fi
 
-echo "[iterate] rebuild shadow_lower from cc/shadow (SHADOW_LOWER_SOURCE=ccs)"
+ts() { echo "[iterate] $(date '+%H:%M:%S') $*"; }
+ITER_T0=$(date +%s)
+
+ts "ccs rebuild start"
 make -C cc SHADOW_LOWER_SOURCE=ccs ../out/cc/bin/shadow_lower
+ts "ccs rebuild done ($(( $(date +%s) - ITER_T0 ))s)"
 
 if [[ "$SHIP" -eq 0 ]]; then
-  echo "[iterate] done (live binary: out/cc/bin/shadow_lower)"
+  ts "done (live binary: out/cc/bin/shadow_lower)"
   echo "[iterate] tip: --ship when the face should freeze into bootstrap"
   exit 0
 fi
@@ -60,15 +64,21 @@ SNAP=(./scripts/snapshot_shadow_lower.sh)
 if [[ "$SMOKE" -eq 1 ]]; then
   SNAP+=(--smoke)
 fi
-echo "[iterate] snapshot ${SNAP[*]}"
+t1=$(date +%s)
+ts "snapshot start"
 "${SNAP[@]}"
+ts "snapshot done ($(( $(date +%s) - t1 ))s)"
 
-echo "[iterate] promote"
+t1=$(date +%s)
+ts "promote start"
 ./scripts/promote_shadow_bootstrap.sh
+ts "promote done ($(( $(date +%s) - t1 ))s)"
 
-echo "[iterate] host-cc from new last-good"
+t1=$(date +%s)
+ts "bootstrap host-cc start"
 make -C cc SHADOW_LOWER_SOURCE=bootstrap ../out/cc/bin/shadow_lower
+ts "bootstrap host-cc done ($(( $(date +%s) - t1 ))s)"
 
 VER="$(cat cc/bootstrap/shadow_lower/last-good)"
-echo "[iterate] shipped $VER (not committed)"
+ts "shipped $VER (not committed) — total $(( $(date +%s) - ITER_T0 ))s"
 echo "  git add cc/bootstrap/shadow_lower/last-good cc/bootstrap/shadow_lower/$VER"

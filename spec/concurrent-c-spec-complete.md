@@ -227,7 +227,16 @@ spliced into that unit when the include is written in a `.ccs` or inside
 an already-spliced face. `T !>(E)` on a declaration is result-type syntax
 and does not by itself force a splice. Method-call UFCS in an interface
 header does not force a splice from a `.ccs`. A quoted interface `.cch`
-extracts to a lowered `.h`. Nested local includes inside that header
+extracts to a lowered `.h`. The extracted `.h` is host-cc input. A
+member call in an extracted inline that names a declared `Type_method`
+(same face, an included face, or the face that included this one) lowers
+to that call; a field peel is not rewritten to the outer type's method.
+A leftover member call in the `.h` is an error. The
+lowerer still opens the original face from the quote directory (same)
+roots as quoted `#include`) and harvests fields, type views, and
+typehooks — the same original-face read used for `<ccc/…>`. A rewritten
+`#include` of that `.h` is not an ordinary C header for that harvest.
+Nested local includes inside that header
 extract to their own `.h`; they do not splice into the including unit.
 An impl-grade nested face without an owner `.ccs` is an error — move
 the bodies to an owner `.ccs`, or include the face from that `.ccs`.
@@ -235,7 +244,8 @@ The owner is the same-stem sibling (`foo.cch` → `foo.ccs`), a chapter
 face with that prefix (`piece_tree_rb.cch` → `piece_tree.ccs`), or a
 same-directory face included from an owned face (`workspace.cch`
 includes `ui_types.cch` → `workspace.ccs`). Other units extract decls and
-the owner unit splices the bodies. A file-scope function body has one
+the owner unit splices the bodies after the extracted parent include so
+names that face defines are in scope. A file-scope function body has one
 definition — the owner TU. File-scope `static` on those functions is
 dropped: the extracted `.h` is an extern declaration, and the owner
 splice is the one external definition. A file-scope data definition
@@ -244,16 +254,22 @@ owner splice keeps the initializer. `static` data stays `static`.
 `#ifdef` / `#if` in an extracted face stay
 in the lowered `.h`; an object-like `#define` in this unit before the
 include is host cpp and selects those arms, including function bodies
-that sit under `#ifdef`. A pointer-only name that the face does not already name as a type
-(`RtxDoc*`, `RtxWs*`) is not forwarded as `typedef struct Tag Tag` —
+that sit under `#ifdef`. A pointer type in a declaration — a parameter,
+file-scope declarator, or struct field (`Tag *name`) — that the face does
+not already name as a type is not forwarded as `typedef struct Tag Tag` —
 that invents a tagged struct and conflicts with an anonymous
 `typedef struct { … } Tag` or an integer alias already in the unit.
+A multiply in a function body (`d * 100ull`) is not a pointer type.
+`CC_MAP_DECL_ARENA` / `CC_MAP_DECL_UFCS` / `CC_ARRAY_MAP_DECL` /
+`CC_DECL_SLICE_SPEC` / `CC_DECL_RESULT_SPEC` name the type they bind.
 If exactly one same-directory face defines the name and that face
 can extract (not impl-grade without an owner), the extract includes
+that face. If no same-directory face defines it, and exactly one
+face in the including unit's include graph does, extract includes
 that face. Chapter faces of one owner that share the name
 (`piece_tree.cch` and `piece_tree_priv.cch`) are that one face; extract
 includes the stem. Two faces with different owners is an error.
-`name * 100` is multiplication, not a pointer type. No same-directory face and no type of that name in the
+No same-directory face and no type of that name in the
 including unit is an error. An impl-grade unowned parent already spliced into this
 unit is not extracted from the leaf. Nested quoted includes in an
 extracted `.h` use a path relative to that `.h` (same directory is
@@ -1184,6 +1200,7 @@ CCRes(MyData, MyError) my_function(int arg);
     - A `{ ... }` compound statement whose recursive last statement satisfies this rule.
      A forward-reached or `!>;`-inlined handler whose last statement does not satisfy this rule is a compile error at the `@errhandler` declaration site. The rule applies in `void` functions equally.
 7. A result-typed call that is not consumed by `?>`, `!>`, `@err`, assignment to a result-typed destination, `return`, or a `(void)` cast is ill-formed. `(void)call();` is the one explicit-discard escape hatch.
+8. A `!>` whose call is a bare name with no visible declaration in this unit or an included face is ill-formed. The compiler diagnoses that at the `!>` site and does not emit a Result unwrap.
 
 **Grammar (normative, minus whitespace).**
 
@@ -5555,7 +5572,7 @@ This section defines the core standard library using **UFCS-first design**: meth
 
 - The receiver is the full expression to the left of `.` or `->`.
 - The compiler resolves the receiver to a concrete type before choosing a UFCS lowering rule.
-- Field access and mixed member chains participate normally: `holder.arena.free()` dispatches on `holder.arena`; `ptr->arena.free()` dispatches on `ptr->arena`.
+- Field access and mixed member chains participate normally: `holder.arena.free()` dispatches on `holder.arena`; `ptr->arena.free()` dispatches on `ptr->arena`. An explicit field selection is not the outer type's `@typeview` allow-list or `as:` retry — `d->tree.destroy()` is a method on the field's type; `d->len()` with no peel is still the outer.
 - When multiple links appear in a chain, the nearest concrete typed receiver in the chain determines dispatch.
 - Standard-library families define canonical lowered C namespaces (`cc_file_`*, `cc_arena_`*, `cc_string_*`, `cc_slice_*`, `cc_channel_*`); internal erased-core helpers remain implementation details.
 

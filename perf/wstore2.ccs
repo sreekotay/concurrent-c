@@ -1,0 +1,743 @@
+/*
+ * wstore2.ccs — death-time buckets.
+ *
+ *   owner     : the shard lifetime; bucket epochs and the map are children
+ *   epoch     : recs (Entry pool) + bytes (key/val); dies whole
+ *   bucket    : current epoch + optional retiring epoch (drain)
+ *   wheel     : L0 100ms×64, L1 1s×64, L2 60s×60; beyond → never
+ *   drain     : the one verb — dead/expired drop, live re-insert
+ *   sweeper   : parks on NAME_SWEEP until a published due-fact; walks under NAME_SHARD
+ *   map       : Entry* by key; incremental rehash into a fresh child
+ *
+ *   ./wstore2 <seconds> <sweep 0|1> [waste_theta] [wave_recs]
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/map.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/cc_sched.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <math.h>
+#include <time.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
+
+enum { NAME_SHARD = 1, NAME_SWEEP = 2 };
+
+#define LEVELS 3
+static const int64_t k_unit_ms[LEVELS] = { 100, 1000, 60000 };
+static const int     k_slots[LEVELS]   = { 64, 64, 60 };
+#define MAX_SLOTS 64
+#define NEVER_MS  INT64_MAX
+
+typedef struct Entry {
+    CCSlice key;
+    CCSlice val;
+    int64_t dies_at;
+    uint8_t dead;
+    int8_t  level;
+    uint8_t slot;
+} Entry;
+
+typedef struct Epoch {
+    CCArena recs;
+    CCArena bytes;
+    CCArenaPool pool;
+    size_t live_bytes;
+    size_t dead_bytes;
+} Epoch;
+
+typedef struct Bucket {
+    Epoch cur;
+    Epoch old;
+    CCArenaPoolIter old_it;
+    int draining;
+    int64_t end;
+} Bucket;
+
+typedef struct WheelSlot {
+    Bucket* b;
+    int8_t  level;
+    uint8_t slot;
+} WheelSlot;
+
+typedef struct Shard {
+    CCArena owner;
+    CCExclusive excl;
+    Bucket never;
+    Bucket wheel[LEVELS][MAX_SLOTS];
+    CCArena map_arena;
+    Map::[CCSliceHdr, Entry*] map;
+    CCArena old_map_arena;
+    Map::[CCSliceHdr, Entry*] old_map;
+    int rehashing;
+    int rh_level, rh_slot, rh_old, rh_it_live;
+    CCArenaPoolIter rh_it;
+    CCArenaHost* rh_host;
+    size_t tombstones;
+    double theta;
+    size_t wave_recs;
+    int sweep_on;
+    cc_atomic_int stop;
+    cc_atomic_int sweep_due;
+    cc_atomic_i64 next_slot_end;
+    size_t drains, drained_recs, dropped, reinserted, rehashes, waves;
+    double wave_max_us, wave_sum_us;
+} Shard;
+
+static double now_us(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1e6 + t.tv_nsec / 1e3;
+}
+static int64_t now_ms(void) { return (int64_t)(now_us() / 1000.0); }
+
+static void sweep_arm(Shard* s) { cc_atomic_store(&s->sweep_due, 1); }
+
+static void sweep_kick(Shard* s) {
+    sweep_arm(s);
+    CCExclusiveGuard g = s->excl.acquire(NAME_SWEEP);
+    g.signal();
+    g.release();
+}
+
+static void refresh_next_slot_end(Shard* s) {
+    int64_t m = INT64_MAX;
+    for (int l = 0; l < LEVELS; l++)
+        for (int i = 0; i < k_slots[l]; i++)
+            if (s->wheel[l][i].end < m) m = s->wheel[l][i].end;
+    cc_atomic_store(&s->next_slot_end, m);
+}
+
+/* Only the rotated slot's end changed. Rescan only if that end was the min. */
+static void note_slot_end(Shard* s, int64_t old_end, int64_t new_end) {
+    int64_t cur = cc_atomic_load(&s->next_slot_end);
+    (void)new_end;
+    if (old_end != cur) return;
+    refresh_next_slot_end(s);
+}
+
+static size_t epoch_committed(const Epoch* e) {
+    size_t n = 0;
+    if (e->recs.valid()) n += cc_arena_committed_gross_bytes(e->recs);
+    if (e->bytes.valid()) n += cc_arena_committed_gross_bytes(e->bytes);
+    return n;
+}
+
+static bool !>(CCError) epoch_open(Shard* s, Epoch* e) {
+    *e = (Epoch){0};
+    e->recs = s->owner.create_arena(0) !>(err) { return cc_err(err); };
+    e->bytes = s->owner.create_arena(0) !>(err) {
+        e->recs.destroy();
+        return cc_err(err);
+    };
+    cc_arena_pool_init(&e->pool, e->recs, sizeof(Entry));
+    return cc_ok(true);
+}
+
+static void epoch_close(Epoch* e) {
+    e->recs.destroy();
+    e->bytes.destroy();
+    *e = (Epoch){0};
+}
+
+static Epoch* epoch_of(Bucket* b, Entry* e) {
+    if (b->draining && cc_slice_is_from_arena_epoch(e->key, b->old.bytes))
+        return &b->old;
+    return &b->cur;
+}
+
+static bool !>(CCError) bucket_init(Shard* s, Bucket* b, int64_t end) {
+    memset(b, 0, sizeof(*b));
+    b->end = end;
+    return epoch_open(s, &b->cur);
+}
+
+static bool !>(CCError) bucket_begin_drain(Shard* s, Bucket* b) {
+    Epoch saved;
+    if (b->draining) return cc_ok(false);
+    saved = b->cur;
+    b->draining = 1;
+    epoch_open(s, &b->cur) !>(err) {
+        b->cur = saved;
+        b->draining = 0;
+        return cc_err(err);
+    };
+    b->old = saved;
+    b->old_it = cc_arena_pool_iter(&b->old.pool);
+    sweep_arm(s);
+    return cc_ok(true);
+}
+
+static void bucket_end_drain(Shard* s, Bucket* b) {
+    epoch_close(&b->old);
+    b->draining = 0;
+    s->drains++;
+}
+
+#define COMPACT_FLOOR (4u * 1024u * 1024u)
+static int bucket_wants_compact(const Bucket* b, double theta) {
+    size_t dead, live;
+    if (b->draining) return 0;
+    dead = b->cur.dead_bytes;
+    live = b->cur.live_bytes;
+    return dead >= COMPACT_FLOOR && (double)dead >= theta * (double)live;
+}
+
+static WheelSlot slot_for(Shard* s, int64_t now, int64_t dies_at) {
+    WheelSlot r;
+    r.b = &s->never;
+    r.level = -1;
+    r.slot = 0;
+    if (dies_at == NEVER_MS) return r;
+    for (int l = 0; l < LEVELS; l++) {
+        int64_t unit = k_unit_ms[l];
+        int64_t span = unit * k_slots[l];
+        if (dies_at - now <= span) {
+            int idx = (int)((dies_at / unit) % k_slots[l]);
+            Bucket* b = &s->wheel[l][idx];
+            if (dies_at <= b->end && dies_at > b->end - unit) {
+                r.b = b;
+                r.level = (int8_t)l;
+                r.slot = (uint8_t)idx;
+                return r;
+            }
+            if (b->end <= now && !b->draining) {
+                bool started = 0;
+                {
+                    bool !>(CCError) br = bucket_begin_drain(s, b);
+                    if (!cc_is_err(br)) started = br.u.value;
+                }
+                if (started) {
+                    int64_t old_end = b->end;
+                    b->end += span;
+                    note_slot_end(s, old_end, b->end);
+                    if (dies_at <= b->end && dies_at > b->end - unit) {
+                        r.b = b;
+                        r.level = (int8_t)l;
+                        r.slot = (uint8_t)idx;
+                        return r;
+                    }
+                }
+            }
+            /* Window miss or this slot is already draining: try a coarser level. */
+            continue;
+        }
+    }
+    return r;
+}
+
+static Bucket* bucket_of_entry(Shard* s, Entry* e) {
+    if (e->level < 0) return &s->never;
+    return &s->wheel[(int)e->level][e->slot];
+}
+
+static Entry* map_find(Shard* s, CCSliceHdr k) {
+    Entry** p = s->map->get_ptr(k);
+    if (p) return *p;
+    if (s->rehashing) {
+        p = s->old_map->get_ptr(k);
+        if (p) return *p;
+    }
+    return NULL;
+}
+
+static void map_unlink(Shard* s, CCSliceHdr k) {
+    if (s->map->remove(k)) s->tombstones++;
+    if (s->rehashing && s->old_map->remove(k)) s->tombstones++;
+}
+
+static void entry_mark_dead(Shard* s, Entry* e) {
+    Bucket* b;
+    Epoch* ep;
+    size_t n;
+    if (e->dead) return;
+    e->dead = 1;
+    b = bucket_of_entry(s, e);
+    if (!b) return;
+    ep = epoch_of(b, e);
+    n = e->key.len + e->val.len;
+    if (ep->live_bytes >= n) ep->live_bytes -= n;
+    else ep->live_bytes = 0;
+    ep->dead_bytes += n;
+}
+
+static bool !>(CCError) shard_put(Shard* s, int64_t now, CCSlice key, CCSlice val, int64_t dies_at) {
+    Entry* old = map_find(s, key.hdr());
+    WheelSlot sl = slot_for(s, now, dies_at);
+    Bucket* b = sl.b;
+    Entry* e = (Entry*)b->cur.pool.alloc();
+    CCSlice k2, v2;
+    size_t n;
+    if (!e) return cc_err(CC_ERR_OUT_OF_MEMORY, "entry");
+    e->dead = 1;   /* walk can see the slab before this is a record */
+    k2 = key.clone_into(b->cur.bytes) !>(err) { return cc_err(err); };
+    v2 = val.clone_into(b->cur.bytes) !>(err) { return cc_err(err); };
+    e->key = k2;
+    e->val = v2;
+    e->dies_at = dies_at;
+    e->level = sl.level;
+    e->slot = sl.slot;
+    n = k2.len + v2.len;
+    b->cur.live_bytes += n;
+    if (old) {
+        entry_mark_dead(s, old);
+        map_unlink(s, key.hdr());
+    }
+    if (s->map->insert(k2.hdr(), e) != 0)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "map insert");
+    e->dead = 0;
+    return cc_ok(true);
+}
+
+static bool shard_drop(Shard* s, CCSlice key) {
+    Entry* e = map_find(s, key.hdr());
+    if (!e) return false;
+    entry_mark_dead(s, e);
+    map_unlink(s, key.hdr());
+    return true;
+}
+
+static Entry* shard_get(Shard* s, int64_t now, CCSlice key) {
+    Entry* e = map_find(s, key.hdr());
+    if (!e) return NULL;
+    if (e->dies_at != NEVER_MS && e->dies_at <= now) {
+        entry_mark_dead(s, e);
+        map_unlink(s, key.hdr());
+        return NULL;
+    }
+    return e;
+}
+
+static size_t !>(CCError) bucket_drain_wave(Shard* s, Bucket* b, int64_t now, size_t budget) {
+    size_t n = 0;
+    while (n < budget) {
+        Entry* e = (Entry*)cc_arena_pool_iter_next(&b->old_it);
+        if (!e) {
+            bucket_end_drain(s, b);
+            return cc_ok(n);
+        }
+        n++;
+        s->drained_recs++;
+        if (e->dead) {
+            s->dropped++;
+            continue;
+        }
+        if (e->dies_at != NEVER_MS && e->dies_at <= now) {
+            map_unlink(s, e->key.hdr());
+            s->dropped++;
+            continue;
+        }
+        s->put(now, e->key, e->val, e->dies_at) !>(err) { return cc_err(err); };
+        s->reinserted++;
+    }
+    return cc_ok(n);
+}
+
+static bool !>(CCError) slot_retire(Shard* s, int l, int i) {
+    Bucket* b = &s->wheel[l][i];
+    bool started;
+    if (b->draining) return cc_ok(false);
+    started = bucket_begin_drain(s, b) !>(err) { return cc_err(err); };
+    if (started) {
+        int64_t old_end = b->end;
+        b->end += k_unit_ms[l] * k_slots[l];
+        note_slot_end(s, old_end, b->end);
+    }
+    return cc_ok(started);
+}
+
+static bool !>(CCError) rehash_begin(Shard* s) {
+    CCArena a;
+    Map::[CCSliceHdr, Entry*] m;
+    if (s->rehashing) return cc_ok(false);
+    a = s->owner.create_arena(0) !>(err) { return cc_err(err); };
+    m = map_new::[CCSliceHdr, Entry*](a);
+    if (!m) {
+        a.destroy();
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "map");
+    }
+    s->old_map_arena = s->map_arena;
+    s->old_map = s->map;
+    s->map_arena = a;
+    s->map = m;
+    s->rehashing = 1;
+    s->rh_level = -1;
+    s->rh_slot = 0;
+    s->rh_old = 0;
+    s->rh_it_live = 0;
+    s->tombstones = 0;
+    sweep_arm(s);
+    return cc_ok(true);
+}
+
+static Bucket* rh_bucket(Shard* s) {
+    if (s->rh_level < 0) return &s->never;
+    if (s->rh_level >= LEVELS) return NULL;
+    return &s->wheel[s->rh_level][s->rh_slot];
+}
+
+static void rh_advance(Shard* s) {
+    if (!s->rh_old) {
+        s->rh_old = 1;
+        s->rh_it_live = 0;
+        return;
+    }
+    s->rh_old = 0;
+    s->rh_it_live = 0;
+    if (s->rh_level < 0) {
+        s->rh_level = 0;
+        s->rh_slot = 0;
+        return;
+    }
+    if (++s->rh_slot >= k_slots[s->rh_level]) {
+        s->rh_slot = 0;
+        s->rh_level++;
+    }
+}
+
+static size_t !>(CCError) rehash_wave(Shard* s, size_t budget) {
+    size_t n = 0;
+    while (n < budget) {
+        Bucket* b = rh_bucket(s);
+        CCArenaPool* pool;
+        Entry* e;
+        CCSliceHdr k;
+        Entry** in_old;
+        if (!b) {
+            s->old_map_arena.destroy();
+            s->old_map_arena = (CCArena){0};
+            s->old_map = NULL;
+            s->rehashing = 0;
+            s->rehashes++;
+            return cc_ok(n);
+        }
+        pool = s->rh_old ? (b->draining ? &b->old.pool : NULL) : &b->cur.pool;
+        if (!pool) {
+            rh_advance(s);
+            continue;
+        }
+        if (s->rh_it_live && s->rh_host != pool->arena) s->rh_it_live = 0;
+        if (!s->rh_it_live) {
+            s->rh_it = cc_arena_pool_iter(pool);
+            s->rh_host = pool->arena;
+            s->rh_it_live = 1;
+        }
+        e = (Entry*)cc_arena_pool_iter_next(&s->rh_it);
+        if (!e) {
+            rh_advance(s);
+            continue;
+        }
+        n++;
+        if (e->dead) continue;
+        k = e->key.hdr();
+        in_old = s->old_map->get_ptr(k);
+        if (!in_old || *in_old != e) continue;
+        if (s->map->insert(k, e) != 0)
+            return cc_err(CC_ERR_OUT_OF_MEMORY, "rehash insert");
+        s->old_map->remove(k);
+    }
+    return cc_ok(n);
+}
+
+static int sweep_due_pred(void* env) {
+    Shard* s = (Shard*)env;
+    if (cc_atomic_load(&s->stop)) return 1;
+    if (cc_atomic_load(&s->sweep_due)) return 1;
+    if (now_ms() >= cc_atomic_load(&s->next_slot_end)) return 1;
+    return 0;
+}
+
+static void !>(CCError) sweep_wave(Shard* s) {
+    double t0 = now_us();
+    CCExclusiveGuard g = s->excl.acquire(NAME_SHARD);
+    int64_t now;
+    size_t budget;
+    @defer g.release();
+    now = now_ms();
+    budget = s->wave_recs;
+    cc_atomic_store(&s->sweep_due, 0);
+
+    for (int l = 0; l < LEVELS; l++)
+        for (int i = 0; i < k_slots[l]; i++)
+            if (s->wheel[l][i].end <= now)
+                slot_retire(s, l, i) !>(err) { return cc_err(err); };
+
+    if (bucket_wants_compact(&s->never, s->theta))
+        bucket_begin_drain(s, &s->never) !>(err) { return cc_err(err); };
+
+    if (s->never.draining) {
+        size_t n = bucket_drain_wave(s, &s->never, now, budget)
+            !>(err) { return cc_err(err); };
+        budget -= n < budget ? n : budget;
+    }
+    for (int l = 0; l < LEVELS && budget; l++)
+        for (int i = 0; i < k_slots[l] && budget; i++)
+            if (s->wheel[l][i].draining) {
+                size_t n = bucket_drain_wave(s, &s->wheel[l][i], now, budget)
+                    !>(err) { return cc_err(err); };
+                budget -= n < budget ? n : budget;
+            }
+
+    if (!s->rehashing && s->tombstones > s->map->len() + 4096)
+        rehash_begin(s) !>(err) { return cc_err(err); };
+    if (s->rehashing && budget)
+        rehash_wave(s, budget) !>(err) { return cc_err(err); };
+
+    if (s->never.draining || s->rehashing) sweep_arm(s);
+    else {
+        for (int l = 0; l < LEVELS; l++)
+            for (int i = 0; i < k_slots[l]; i++)
+                if (s->wheel[l][i].draining) {
+                    sweep_arm(s);
+                    break;
+                }
+    }
+
+    {
+        double d = now_us() - t0;
+        s->waves++;
+        s->wave_sum_us += d;
+        if (d > s->wave_max_us) s->wave_max_us = d;
+    }
+    return cc_ok();
+}
+
+static void sweeper(Shard* s) {
+    @errhandler(CCError e) { cc_error_log(e); return; }
+    while (!cc_atomic_load(&s->stop)) {
+        int64_t wait = cc_atomic_load(&s->next_slot_end) - now_ms();
+        CCDeadline dl;
+        CCDeadline* prev;
+        CCExclusiveGuard !>(CCError) r;
+        if (wait < 1) wait = 1;
+        dl = cc_deadline_after_ms((uint64_t)wait);
+        prev = cc_deadline_push(&dl);
+        r = s->excl.acquire_when(NAME_SWEEP, sweep_due_pred, s);
+        cc_deadline_pop(prev);
+        if (cc_is_err(r)) {
+            if (r.u.error.kind == CC_ERR_TIMEOUT) continue;
+            return;
+        }
+        {
+            CCExclusiveGuard hold = r.u.value;
+            hold.release();
+        }
+        if (cc_atomic_load(&s->stop)) return;
+        sweep_wave(s) !>;
+        cc_yield();
+    }
+}
+
+static bool !>(CCError) shard_init(Shard* s, double theta, size_t wave_recs, int sweep_on) {
+    @errhandler(CCError e) { return cc_err(e); }
+    memset(s, 0, sizeof(*s));
+    s->owner = cc_arena_heap(kilobytes(256));
+    if (!s->owner.valid()) return cc_err(CC_ERR_OUT_OF_MEMORY, "owner");
+    s->excl = s->owner.create_exclusive(64) !>;
+    s->theta = theta;
+    s->wave_recs = wave_recs;
+    s->sweep_on = sweep_on;
+    s->map_arena = s->owner.create_arena(0) !>;
+    s->map = map_new::[CCSliceHdr, Entry*](s->map_arena);
+    if (!s->map) return cc_err(CC_ERR_OUT_OF_MEMORY, "map");
+    {
+        int64_t now = now_ms();
+        bucket_init(s, &s->never, NEVER_MS) !>;
+        for (int l = 0; l < LEVELS; l++)
+            for (int i = 0; i < k_slots[l]; i++) {
+                int64_t unit = k_unit_ms[l];
+                int64_t base = (now / unit) * unit;
+                int64_t end = base + unit;
+                while ((int)((end / unit) % k_slots[l]) != (i + 1) % k_slots[l])
+                    end += unit;
+                bucket_init(s, &s->wheel[l][i], end) !>;
+            }
+    }
+    refresh_next_slot_end(s);
+    return cc_ok(true);
+}
+
+static void shard_free(Shard* s) {
+    s->excl.destroy();
+    s->owner.destroy();
+}
+
+static size_t shard_logical(Shard* s) {
+    size_t t = s->never.cur.live_bytes;
+    if (s->never.draining) t += s->never.old.live_bytes;
+    for (int l = 0; l < LEVELS; l++)
+        for (int i = 0; i < k_slots[l]; i++) {
+            t += s->wheel[l][i].cur.live_bytes;
+            if (s->wheel[l][i].draining) t += s->wheel[l][i].old.live_bytes;
+        }
+    return t;
+}
+
+static size_t shard_committed(Shard* s) {
+    size_t t = cc_arena_committed_gross_bytes(s->owner);
+    t += epoch_committed(&s->never.cur);
+    if (s->never.draining) t += epoch_committed(&s->never.old);
+    t += cc_arena_committed_gross_bytes(s->map_arena);
+    if (s->rehashing) t += cc_arena_committed_gross_bytes(s->old_map_arena);
+    for (int l = 0; l < LEVELS; l++)
+        for (int i = 0; i < k_slots[l]; i++) {
+            t += epoch_committed(&s->wheel[l][i].cur);
+            if (s->wheel[l][i].draining) t += epoch_committed(&s->wheel[l][i].old);
+        }
+    return t;
+}
+
+static size_t rss_kib(void) {
+#ifdef __APPLE__
+    struct mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  (task_info_t)&info, &count) != KERN_SUCCESS)
+        return SIZE_MAX;
+    return (size_t)(info.resident_size / 1024);
+#else
+    FILE* f = fopen("/proc/self/status", "r");
+    char line[256];
+    size_t v = 0;
+    if (!f) return SIZE_MAX;
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, "VmRSS: %zu", &v) == 1) break;
+    fclose(f);
+    return v ? v : SIZE_MAX;
+#endif
+}
+
+#define NEVER_POOL 20000
+#define RECENT 8192
+static uint64_t rng_s;
+static char recent[RECENT][32];
+static uint64_t rnd(void) {
+    rng_s ^= rng_s << 13;
+    rng_s ^= rng_s >> 7;
+    rng_s ^= rng_s << 17;
+    return rng_s;
+}
+static double rndf(void) { return (double)(rnd() >> 11) / 9007199254740992.0; }
+
+typedef struct Work { Shard* s; double seconds; long ops; } Work;
+
+static void workload(Work* w) {
+    @errhandler(CCError e) { cc_error_log(e); return; }
+    Shard* s = w->s;
+    char key[64], val[128];
+    size_t recent_n = 0;
+    long seq = 0;
+    double t_end = now_us() + w->seconds * 1e6;
+    double t_next = now_us() + 1e6;
+    memset(val, 'v', sizeof val);
+    printf("# %8s %9s %11s %12s %9s %6s %8s %8s %9s %6s\n",
+           "t_s", "keys", "logical_KiB", "commit_KiB", "rss_KiB",
+           "drains", "dropped", "reinsert", "waves", "rehash");
+    for (long i = 0; ; i++) {
+        double t = now_us();
+        int64_t now;
+        double r;
+        int want_sweep = 0;
+        if (t >= t_end) break;
+        now = (int64_t)(t / 1000.0);
+        r = rndf();
+        {
+            CCExclusiveGuard g = s->excl.acquire(NAME_SHARD);
+            @defer g.release();
+            if (r < 0.55) {
+                int n = snprintf(key, sizeof key, "e:%ld", seq++);
+                double ttl = 50.0 * pow(400.0, rndf());
+                s->put(now, cc_slice_from_buffer(key, (size_t)n),
+                       cc_slice_from_buffer(val, 96), now + (int64_t)ttl) !>;
+                memcpy(recent[recent_n % RECENT], key, (size_t)n + 1);
+                recent_n++;
+            } else if (r < 0.70) {
+                long id = (long)(NEVER_POOL * pow(rndf(), 3.0));
+                int n = snprintf(key, sizeof key, "n:%ld", id);
+                s->put(now, cc_slice_from_buffer(key, (size_t)n),
+                       cc_slice_from_buffer(val, 96), NEVER_MS) !>;
+            } else if (r < 0.85) {
+                if ((rnd() & 1) && recent_n) {
+                    const char* k = recent[rnd() % (recent_n < RECENT ? recent_n : RECENT)];
+                    s->drop(cc_slice_from_buffer((void*)k, strlen(k)));
+                } else {
+                    long id = (long)(NEVER_POOL * pow(rndf(), 3.0));
+                    int n = snprintf(key, sizeof key, "n:%ld", id);
+                    s->drop(cc_slice_from_buffer(key, (size_t)n));
+                }
+            } else {
+                long id = (long)(NEVER_POOL * rndf());
+                int n = snprintf(key, sizeof key, "n:%ld", id);
+                (void)s->get(now, cc_slice_from_buffer(key, (size_t)n));
+            }
+            if (s->sweep_on && bucket_wants_compact(&s->never, s->theta))
+                want_sweep = 1;
+        }
+        w->ops++;
+        if ((i & 255) == 0) {
+            if (want_sweep) sweep_kick(s);
+            cc_yield();
+        }
+        if (t >= t_next) {
+            size_t rss;
+            t_next += 1e6;
+            rss = rss_kib();
+            {
+                char rss_s[32];
+                if (rss == SIZE_MAX) snprintf(rss_s, sizeof rss_s, "?");
+                else snprintf(rss_s, sizeof rss_s, "%zu", rss);
+                printf("  %8.0f %9zu %11zu %12zu %9s %6zu %8zu %8zu %9zu %6zu\n",
+                       (t - (t_end - w->seconds * 1e6)) / 1e6,
+                       s->map->len() + (s->rehashing ? s->old_map->len() : 0),
+                       shard_logical(s) / 1024,
+                       shard_committed(s) / 1024,
+                       rss_s,
+                       s->drains, s->dropped, s->reinserted, s->waves, s->rehashes);
+            }
+            fflush(stdout);
+        }
+    }
+}
+
+int main(int argc, char** argv) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    double seconds = argc > 1 ? atof(argv[1]) : 20;
+    int sweep = argc > 2 ? atoi(argv[2]) : 1;
+    double theta = argc > 3 ? atof(argv[3]) : 0.35;
+    size_t wave = argc > 4 ? (size_t)atol(argv[4]) : 512;
+    static Shard s;
+    static Work w;
+    Shard* sp;
+    Work* wp;
+    rng_s = 0x9E3779B97F4A7C15ull;
+
+    shard_init(&s, theta, wave, sweep) !>;
+    @defer shard_free(&s);
+    printf("# wstore2 seconds=%.0f sweep=%d theta=%.2f wave_recs=%zu "
+           "wheel=100ms x64, 1s x64, 60s x60\n",
+           seconds, sweep, theta, wave);
+
+    w.s = &s;
+    w.seconds = seconds;
+    w.ops = 0;
+    sp = &s;
+    wp = &w;
+    {
+        CCNursery n = cc_nursery_create() !> @destroy;
+        if (sweep) n.spawn(() => [sp] { sweeper(sp); });
+        n.spawn(() => [wp, sp] {
+            workload(wp);
+            cc_atomic_store(&sp->stop, 1);
+            sweep_kick(sp);
+        });
+    }
+    printf("# ops=%ld  drains=%zu drained_recs=%zu dropped=%zu reinserted=%zu rehashes=%zu\n",
+           w.ops, s.drains, s.drained_recs, s.dropped, s.reinserted, s.rehashes);
+    printf("# waves=%zu mean=%.1f us max=%.0f us (budget %zu recs)\n",
+           s.waves, s.waves ? s.wave_sum_us / s.waves : 0, s.wave_max_us, wave);
+    return 0;
+}

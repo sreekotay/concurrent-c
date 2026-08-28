@@ -1,0 +1,53 @@
+#!ccc ccs
+/* Guest extract: named views become typedefs; d->tree.meth is the tree. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+#include "quote_cch_as_field_mod.cch"
+
+static int use_highlight(@typeview(Highlight) QuoteAsDoc* d) {
+    if (d->len() != 7) return 1;
+    if (d->tree.write_fd(1) != 7) return 2;
+    return 0;
+}
+
+static int use_doc(QuoteAsDoc* d) {
+    d->tree.destroy();
+    if (d->tree.n != -1) return 10;
+    d->tree.n = 7;
+    if (d->len() != 7) return 11;
+    d->analysis.reset();
+    {
+        char[:] b = d->session.alloc_slice_bytes(8);
+        if (!b.ptr || b.len != 8) return 12;
+    }
+    return 0;
+}
+
+int main(void) {
+    QuoteAsDoc d;
+    int rc;
+    memset(&d, 0, sizeof(d));
+    d.tree.n = 3;
+    d.session = cc_arena_heap(kilobytes(4));
+    d.analysis = cc_arena_heap(kilobytes(4));
+    d.tree.destroy();
+    if (d.tree.n != -1) {
+        printf("tree.destroy hit doc n=%d\n", d.tree.n);
+        return 1;
+    }
+    d.tree.n = 7;
+    rc = use_doc(&d);
+    if (rc != 0) {
+        printf("use_doc=%d n=%d\n", rc, d.tree.n);
+        return 1;
+    }
+    if (use_highlight(&d) != 0) {
+        printf("highlight peel failed\n");
+        return 1;
+    }
+    d.session.destroy();
+    d.analysis.destroy();
+    printf("ok\n");
+    return 0;
+}

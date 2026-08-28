@@ -3618,6 +3618,52 @@ static void cc__normalize_bool_family_type(char* type_name, size_t type_name_sz)
     snprintf(type_name, type_name_sz, "%s", tmp);
 }
 
+/* Exact family spelling `<Type>_<method>` (RtxDoc_len). Header extract has
+ * no AST pass; snake compose (`rtx_doc_len`) is not the face's callee. */
+static int cc__ufcs_type_meth_callee(char* out, size_t out_sz,
+                                    const char* recv_type_base,
+                                    const char* method_name) {
+    char base[256];
+    const char* t;
+    size_t n = 0;
+    if (!out || out_sz < 4 || !recv_type_base || !method_name || !method_name[0])
+        return 0;
+    cc__copy_type_base(base, sizeof(base), recv_type_base);
+    t = base;
+    for (;;) {
+        while (*t == ' ' || *t == '\t') t++;
+        if (strncmp(t, "const", 5) == 0 && !cc_is_ident_char(t[5])) {
+            t += 5;
+            continue;
+        }
+        if (strncmp(t, "volatile", 8) == 0 && !cc_is_ident_char(t[8])) {
+            t += 8;
+            continue;
+        }
+        if (strncmp(t, "restrict", 8) == 0 && !cc_is_ident_char(t[8])) {
+            t += 8;
+            continue;
+        }
+        if (strncmp(t, "struct", 6) == 0 && !cc_is_ident_char(t[6])) {
+            t += 6;
+            continue;
+        }
+        if (strncmp(t, "union", 5) == 0 && !cc_is_ident_char(t[5])) {
+            t += 5;
+            continue;
+        }
+        break;
+    }
+    while (*t == ' ' || *t == '\t') t++;
+    if (!cc_is_ident_start(*t)) return 0;
+    while (cc_is_ident_char(t[n])) n++;
+    if (n == 0 || n + 1 + strlen(method_name) + 1 > out_sz) return 0;
+    memcpy(out, t, n);
+    out[n] = '_';
+    memcpy(out + n + 1, method_name, strlen(method_name) + 1);
+    return 1;
+}
+
 static int cc__ufcs_fn_name_in_text(const char* src, size_t n, const char* name) {
     size_t nlen;
     if (!src || !name || !name[0]) return 0;
@@ -4185,6 +4231,39 @@ static const char* cc__ufcs_idx_typedef_before(size_t limit,
     return NULL;
 }
 
+static int cc__ufcs_scope_idx_add_decl(size_t pos, int scope_id,
+                                      const char* name, const char* type) {
+    CCUfcsIdxDecl* slot;
+    char alias_type[256];
+    const char* alias = NULL;
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    if (!name || !name[0] || !type || !type[0]) return 0;
+    if (g_ufcs_scope_idx.n_decls == g_ufcs_scope_idx.decls_cap) {
+        size_t cap = g_ufcs_scope_idx.decls_cap
+                         ? g_ufcs_scope_idx.decls_cap * 2
+                         : 128;
+        CCUfcsIdxDecl* nv = (CCUfcsIdxDecl*)realloc(
+            g_ufcs_scope_idx.decls, cap * sizeof(*nv));
+        if (!nv) return -1;
+        g_ufcs_scope_idx.decls = nv;
+        g_ufcs_scope_idx.decls_cap = cap;
+    }
+    slot = &g_ufcs_scope_idx.decls[g_ufcs_scope_idx.n_decls];
+    slot->pos = pos;
+    slot->scope_id = scope_id;
+    snprintf(slot->name, sizeof(slot->name), "%s", name);
+    cc__normalize_ufcs_type_name(slot->type, sizeof(slot->type), type);
+    if (reg)
+        alias = cc_type_registry_lookup_alias(reg, slot->type);
+    if (alias && *alias)
+        snprintf(slot->type, sizeof(slot->type), "%s", alias);
+    if (cc__ufcs_idx_typedef_before(pos, slot->type, alias_type,
+                                   sizeof(alias_type)))
+        snprintf(slot->type, sizeof(slot->type), "%s", alias_type);
+    g_ufcs_scope_idx.n_decls++;
+    return 0;
+}
+
 /* Build scoped-decl/typedef index, and optionally harvest UFCS vars/fields in
  * the same pass (avoids a second full-file walk in the rewrite). */
 static void cc__ufcs_scope_idx_build_ex(const char* src, size_t n,
@@ -4302,7 +4381,10 @@ static void cc__ufcs_scope_idx_build_ex(const char* src, size_t n,
                     }
                 }
             }
-            if (harvest) {
+            {
+                size_t param_open = 0;
+                size_t param_close = 0;
+                int fn_body = 0;
                 size_t close = cc_rskip_ws_and_comments(src, i);
                 if (close > 0 && src[close - 1] == ')') {
                     size_t open = close - 1;
@@ -4327,40 +4409,53 @@ static void cc__ufcs_scope_idx_build_ex(const char* src, size_t n,
                         }
                     }
                     if (depth == 0) {
-                        size_t param_start = open + 1;
-                        size_t p = param_start;
-                        int par = 0, br = 0;
-                        while (p <= close - 1) {
-                            if (p == close - 1 || (src[p] == ',' && par == 0 && br == 0)) {
-                                char decl_name[128];
-                                char decl_type[256];
-                                cc_parse_decl_name_and_type(
-                                    src + param_start, src + p, decl_name,
-                                    sizeof(decl_name), decl_type, sizeof(decl_type));
-                                if (decl_name[0] && strcmp(decl_type, "void") != 0 &&
-                                    !cc_is_non_decl_stmt_type(decl_type)) {
-                                    cc__record_ufcs_var(vars, var_count, var_cap,
-                                                        decl_name, decl_type);
-                                    if (reg && !cc_type_registry_lookup_var(reg, decl_name))
-                                        cc_type_registry_add_var(reg, decl_name, decl_type);
-                                }
-                                param_start = p + 1;
-                            } else if (src[p] == '(') par++;
-                            else if (src[p] == ')' && par > 0) par--;
-                            else if (src[p] == '[') br++;
-                            else if (src[p] == ']' && br > 0) br--;
-                            p++;
-                        }
+                        fn_body = 1;
+                        param_open = open;
+                        param_close = close;
                     }
                 }
-            }
-            if (scope_depth < MAX_SCOPES) {
-                int sid = next_scope_id++;
-                scope_stack[scope_depth++] = sid;
-                if (cc__ufcs_scope_idx_ensure_scopes((size_t)sid + 1) != 0) return;
-                if ((size_t)sid + 1 > g_ufcs_scope_idx.n_scopes)
-                    g_ufcs_scope_idx.n_scopes = (size_t)sid + 1;
-                g_ufcs_scope_idx.scope_close[sid] = (size_t)-1;
+                if (scope_depth < MAX_SCOPES) {
+                    int sid = next_scope_id++;
+                    scope_stack[scope_depth++] = sid;
+                    if (cc__ufcs_scope_idx_ensure_scopes((size_t)sid + 1) != 0) return;
+                    if ((size_t)sid + 1 > g_ufcs_scope_idx.n_scopes)
+                        g_ufcs_scope_idx.n_scopes = (size_t)sid + 1;
+                    g_ufcs_scope_idx.scope_close[sid] = (size_t)-1;
+                }
+                /* Parameters belong to the function body, not file scope.
+                 * Index them after the push so `d` in `Type* d` wins over a
+                 * leftover registry / mix `d`. */
+                if (harvest && fn_body) {
+                    size_t param_start = param_open + 1;
+                    size_t p = param_start;
+                    int par = 0, br = 0;
+                    int sid = scope_stack[scope_depth - 1];
+                    while (p <= param_close - 1) {
+                        if (p == param_close - 1 ||
+                            (src[p] == ',' && par == 0 && br == 0)) {
+                            char decl_name[128];
+                            char decl_type[256];
+                            cc_parse_decl_name_and_type(
+                                src + param_start, src + p, decl_name,
+                                sizeof(decl_name), decl_type, sizeof(decl_type));
+                            if (decl_name[0] && strcmp(decl_type, "void") != 0 &&
+                                !cc_is_non_decl_stmt_type(decl_type)) {
+                                cc__record_ufcs_var(vars, var_count, var_cap,
+                                                    decl_name, decl_type);
+                                if (cc__ufcs_scope_idx_add_decl(i, sid, decl_name,
+                                                               decl_type) != 0)
+                                    return;
+                                if (reg && !cc_type_registry_lookup_var(reg, decl_name))
+                                    cc_type_registry_add_var(reg, decl_name, decl_type);
+                            }
+                            param_start = p + 1;
+                        } else if (src[p] == '(') par++;
+                        else if (src[p] == ')' && par > 0) par--;
+                        else if (src[p] == '[') br++;
+                        else if (src[p] == ']' && br > 0) br--;
+                        p++;
+                    }
+                }
             }
             stmt_start = i + 1;
             i++;
@@ -5759,9 +5854,15 @@ static int g_ufcs_scope_idx_locked = 0;
 /* Header `.cch` → `.h` runs the text UFCS pass with no AST sweep. Same-file
  * wrappers (`cc_closure1_drop` for `c.drop()`) must not count as callees. */
 static int g_ufcs_header_lowering = 0;
+static char g_header_ufcs_parent_path[PATH_MAX];
+static char* cc__header_ufcs_parent_mix(const char* src, size_t n, size_t* out_n);
 static char g_ufcs_header_path[PATH_MAX];
 static int cc__included_cch_contains_fn_except(const char* name, const char* except_abs);
-/* Set when a type-formal member site errored (missing/invalid type
+static int cc__included_cch_has_type_meth(const char* name, const char* except_abs);
+static int cc__header_ufcs_type_meth_visible(const char* name,
+                                            const char* harvest_src,
+                                            size_t harvest_n);
+/* Set when a type-formal member site errored (missing/invalid type)
  * source); the parser-safe wrapper turns it into the error sentinel. */
 static _Thread_local int g_ufcs_typeformal_err = 0;
 
@@ -5815,12 +5916,26 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
     size_t i = 0;
     size_t last_emit = 0;
     int own_idx = 0;
+    int restore_lock = 0;
+    char* mix = NULL;
+    const char* harvest_src = src;
+    size_t harvest_n = n;
     CCScannerState scan;
     if (!src || n == 0) return NULL;
+    /* Nested extract: harvest fields / Type_meth from in-progress parents
+     * (edit.cch sees RtxDoc_len on document.cch). Force a local index so
+     * a locked TU pass cannot hide this header's parameters. */
+    if (g_ufcs_header_lowering) {
+        if (g_ufcs_scope_idx_locked) restore_lock = 1;
+        g_ufcs_scope_idx_locked = 0;
+        mix = cc__header_ufcs_parent_mix(src, n, &harvest_n);
+        if (mix) harvest_src = mix;
+        else harvest_n = n;
+    }
     /* One pass: scoped-decl index + UFCS var/field harvest. Nested calls on
      * receiver substrings must not clobber the parent index (lock). */
     if (!g_ufcs_scope_idx_locked) {
-        cc__ufcs_scope_idx_build_ex(src, n, vars, &var_count,
+        cc__ufcs_scope_idx_build_ex(harvest_src, harvest_n, vars, &var_count,
                                     sizeof(vars) / sizeof(vars[0]), fields,
                                     &field_count, sizeof(fields) / sizeof(fields[0]));
         g_ufcs_scope_idx_locked = 1;
@@ -5893,7 +6008,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                                          &out, &out_len, &out_cap,
                                          &last_emit, &i))
             continue;
-        if (!cc__resolve_generic_ufcs_receiver_type(recv_expr, src, sep_pos,
+        if (!cc__resolve_generic_ufcs_receiver_type(recv_expr, harvest_src, sep_pos,
                                                     vars, var_count, fields, field_count,
                                                     recv_type, sizeof(recv_type), &recv_is_ptr)) {
             /* Parenthesized numeric-literal receiver: type it lexically from
@@ -6257,8 +6372,12 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             /* Types with named `@as` embeds: leave member calls for the AST
              * UFCS pass (as-retry / flat `.destroy()`). Inventing a CC*
              * snake_case twin here invents missing callees like
-             * `cc_temp_file_write` and breaks the host parse. */
-            if (reg && cc_type_registry_has_as_field(reg, recv_type_base)) {
+             * `cc_temp_file_write` and breaks the host parse.
+             * Extracted `.h` has no AST pass — compose Type_meth when the
+             * callee exists (`d->len()` → `RtxDoc_len`). Field names still
+             * skip compose (`cc__lookup_ufcs_field_type`). */
+            if (!g_ufcs_header_lowering && reg &&
+                cc_type_registry_has_as_field(reg, recv_type_base)) {
                 i++;
                 continue;
             }
@@ -6268,18 +6387,38 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 int has_sink =
                     reg && cc_type_registry_get_dynamic_sink(
                                reg, recv_type_base, &sink_callee, &sink_wrap) == 0;
-                int composed =
-                    !cc__lookup_ufcs_field_type(fields, field_count,
-                                                recv_type_base, method_name) &&
-                    cc_ufcs_compose_default_callee(wildcard_callee,
-                                                   sizeof(wildcard_callee),
-                                                   recv_type_base, method_name);
-                int real = composed &&
-                           (g_ufcs_header_lowering
-                                ? cc__included_cch_contains_fn_except(
-                                      wildcard_callee, g_ufcs_header_path)
-                                : (cc__ufcs_fn_name_in_text(src, n, wildcard_callee) ||
-                                   cc_included_cch_contains_fn(wildcard_callee)));
+                int composed = 0;
+                int real = 0;
+                if (!cc__lookup_ufcs_field_type(fields, field_count,
+                                                recv_type_base, method_name)) {
+                    /* Extracted `.h` has no AST pass. Prefer `Type_meth`
+                     * (same face or an included face) over snake compose
+                     * so `d->len()` becomes `RtxDoc_len(d)`, not a miss
+                     * looking for `rtx_doc_len`. Same-file `cc_*` wrappers
+                     * stay excluded: this arm is the exact family only. */
+                    if (g_ufcs_header_lowering &&
+                        cc__ufcs_type_meth_callee(wildcard_callee,
+                                                  sizeof(wildcard_callee),
+                                                  recv_type_base,
+                                                  method_name) &&
+                        cc__header_ufcs_type_meth_visible(wildcard_callee,
+                                                         harvest_src,
+                                                         harvest_n)) {
+                        composed = 1;
+                        real = 1;
+                    } else if (cc_ufcs_compose_default_callee(
+                                   wildcard_callee, sizeof(wildcard_callee),
+                                   recv_type_base, method_name)) {
+                        composed = 1;
+                        real = g_ufcs_header_lowering
+                                   ? cc__included_cch_contains_fn_except(
+                                         wildcard_callee, g_ufcs_header_path)
+                                   : (cc__ufcs_fn_name_in_text(
+                                          src, n, wildcard_callee) ||
+                                      cc_included_cch_contains_fn(
+                                          wildcard_callee));
+                    }
+                }
                 /* Sink-typed receiver, method with no real callee: lower to
                  * `sink(&recv, "method", N, wrap(a1), ...)` here so `!>`
                  * binders type against the sink's Result. Real methods keep
@@ -6828,6 +6967,8 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             cc__ufcs_scope_idx_reset();
             g_ufcs_scope_idx_locked = 0;
         }
+        if (restore_lock) g_ufcs_scope_idx_locked = 1;
+        free(mix);
         return NULL;
     }
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
@@ -6835,6 +6976,8 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         cc__ufcs_scope_idx_reset();
         g_ufcs_scope_idx_locked = 0;
     }
+    if (restore_lock) g_ufcs_scope_idx_locked = 1;
+    free(mix);
     return out;
 }
 
@@ -13112,6 +13255,115 @@ static int cc__included_cch_contains_fn_except(const char* name, const char* exc
     return 0;
 }
 
+/* Type_meth in a parent / sibling face. Text search plus declare/callable
+ * indexes — a nested extract may run before the TU import ingest. */
+static int cc__included_cch_has_type_meth(const char* name, const char* except_abs) {
+    size_t h;
+    if (!name || !name[0]) return 0;
+    for (h = 0; h < g_included_cch_source_count; h++) {
+        size_t fn = 0;
+        const char* fsrc;
+        CCPathTextCache* slot;
+        if (except_abs && except_abs[0] && g_included_cch_sources[h] &&
+            strcmp(g_included_cch_sources[h], except_abs) == 0)
+            continue;
+        fsrc = cc__included_cch_text(h, &fn);
+        if (fsrc && cc__ufcs_fn_name_in_text(fsrc, fn, name)) return 1;
+        slot = cc__path_text_cache_find(g_included_cch_sources[h]);
+        if (slot && (cc__cache_has_declare(slot, name) ||
+                     cc__cache_has_callable(slot, name)))
+            return 1;
+    }
+    return 0;
+}
+
+/* Nested extract: Type_meth may live on the including face (document.cch
+ * while lowering edit.cch), not in this file. Search harvest, registered
+ * faces, the in-progress parent, and other in-progress extracts. */
+static int cc__header_ufcs_type_meth_visible(const char* name,
+                                            const char* harvest_src,
+                                            size_t harvest_n) {
+    size_t i;
+    if (!name || !name[0]) return 0;
+    if (harvest_src && harvest_n &&
+        cc__ufcs_fn_name_in_text(harvest_src, harvest_n, name))
+        return 1;
+    if (cc__included_cch_has_type_meth(name, g_ufcs_header_path))
+        return 1;
+    if (g_header_ufcs_parent_path[0]) {
+        size_t tn = 0;
+        const char* t = cc__path_text_cached(g_header_ufcs_parent_path, &tn);
+        if (t && cc__ufcs_fn_name_in_text(t, tn, name)) return 1;
+    }
+    for (i = 0; i < g_lowered_local_header_count; i++) {
+        const char* path = g_lowered_local_headers[i].source_path;
+        size_t tn = 0;
+        const char* t;
+        if (!g_lowered_local_headers[i].in_progress || !path) continue;
+        if (g_ufcs_header_path[0] && strcmp(path, g_ufcs_header_path) == 0)
+            continue;
+        t = cc__path_text_cached(path, &tn);
+        if (t && cc__ufcs_fn_name_in_text(t, tn, name)) return 1;
+    }
+    return 0;
+}
+
+/* Original header plus in-progress parent faces, so nested extract can
+ * harvest Type_meth / fields from the parent (document.cch while
+ * lowering edit.cch). Call-site offsets stay in the prefix of length n. */
+static char* cc__header_ufcs_parent_mix(const char* src, size_t n, size_t* out_n) {
+    char* out = NULL;
+    size_t w = 0, cap = 0;
+    size_t i;
+    if (!src || !n) return NULL;
+    cc_sb_append(&out, &w, &cap, src, n);
+    if (g_header_ufcs_parent_path[0]) {
+        const char* t;
+        size_t tn = 0;
+        t = cc__path_text_cached(g_header_ufcs_parent_path, &tn);
+        if (t && tn) {
+            cc_sb_append(&out, &w, &cap, "\n", 1);
+            cc_sb_append(&out, &w, &cap, t, tn);
+        }
+    }
+    for (i = 0; i < g_included_cch_source_count; i++) {
+        const char* path = g_included_cch_sources[i];
+        const char* t;
+        size_t tn = 0;
+        if (!path) continue;
+        if (g_ufcs_header_path[0] && strcmp(path, g_ufcs_header_path) == 0)
+            continue;
+        if (g_header_ufcs_parent_path[0] &&
+            strcmp(path, g_header_ufcs_parent_path) == 0)
+            continue;
+        t = cc__path_text_cached(path, &tn);
+        if (!t || !tn) continue;
+        cc_sb_append(&out, &w, &cap, "\n", 1);
+        cc_sb_append(&out, &w, &cap, t, tn);
+    }
+    for (i = 0; i < g_lowered_local_header_count; i++) {
+        const char* path = g_lowered_local_headers[i].source_path;
+        const char* t;
+        size_t tn = 0;
+        if (!g_lowered_local_headers[i].in_progress || !path) continue;
+        if (g_ufcs_header_path[0] && strcmp(path, g_ufcs_header_path) == 0)
+            continue;
+        if (g_header_ufcs_parent_path[0] &&
+            strcmp(path, g_header_ufcs_parent_path) == 0)
+            continue;
+        t = cc__path_text_cached(path, &tn);
+        if (!t || !tn) continue;
+        cc_sb_append(&out, &w, &cap, "\n", 1);
+        cc_sb_append(&out, &w, &cap, t, tn);
+    }
+    if (!out || w == n) {
+        free(out);
+        return NULL;
+    }
+    if (out_n) *out_n = w;
+    return out;
+}
+
 /* Append (comma-separated, deduped) the suffixes of decl-shaped
  * functions named `<prefix><suffix>` found in `text` — the installed
  * variants of a family, for diagnostics. Cold path. */
@@ -14446,12 +14698,27 @@ static void cc__register_included_cch_imports(const char* source_path) {
 }
 
 static int cc__write_file_text(const char* path, const char* buf, size_t len) {
+    char tmp[PATH_MAX];
     FILE* f = NULL;
+    int n;
     if (!path || !buf) return -1;
-    f = fopen(path, "w");
+    n = snprintf(tmp, sizeof(tmp), "%s.%d.tmp", path, (int)getpid());
+    if (n < 0 || (size_t)n >= sizeof(tmp)) return -1;
+    f = fopen(tmp, "w");
     if (!f) return -1;
-    fwrite(buf, 1, len, f);
-    fclose(f);
+    if (fwrite(buf, 1, len, f) != len) {
+        fclose(f);
+        unlink(tmp);
+        return -1;
+    }
+    if (fclose(f) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    if (rename(tmp, path) != 0) {
+        unlink(tmp);
+        return -1;
+    }
     return 0;
 }
 
@@ -15169,6 +15436,95 @@ static char* cc__destatic_file_scope_fns(const char* src, size_t n,
     return out;
 }
 
+static size_t cc__skip_file_scope_item(const char* src, size_t n, size_t i);
+static size_t cc__file_scope_data_eq(const char* src, size_t n, size_t start);
+
+/* File-scope function definition starting at `at`, or 0. Prototypes and
+ * `struct` / `enum` bodies are not functions (`last_sig` before `{`). */
+static int cc__file_scope_fn_def_end(const char* src, size_t n, size_t at,
+                                     size_t* end) {
+    size_t i = at;
+    int paren = 0;
+    int last_sig = 0;
+    CCScannerState scan;
+    if (!src || at >= n) return 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] == '#' && last_sig == 0) return 0;
+        if (src[i] == '{' && paren == 0) {
+            size_t r = 0;
+            if (last_sig != ')') return 0;
+            if (!cc_find_matching_brace(src, n, i, &r)) return 0;
+            if (end) *end = r + 1;
+            return 1;
+        }
+        if (src[i] == ';' && paren == 0) return 0;
+        if (src[i] == '(') paren++;
+        else if (src[i] == ')' && paren > 0) paren--;
+        if (src[i] > 32) last_sig = (unsigned char)src[i];
+        i++;
+    }
+    return 0;
+}
+
+/* Definitions the extract stripped: file-scope function bodies and data
+ * with initializers. Not a second header — no include guard, typedefs,
+ * or prototypes. `#include` stays; a second include is inert. */
+static char* cc__cch_keep_owner_defs(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    int found = 0;
+    CCScannerState scan;
+    if (!src || n == 0) return NULL;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t before = i;
+        size_t fn_end = 0;
+        size_t eq;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (i >= n) break;
+        if (src[i] == '#') {
+            size_t e = i;
+            int is_inc = 0;
+            size_t p;
+            while (e < n && src[e] != '\n') e++;
+            p = i + 1;
+            while (p < e && (src[p] == ' ' || src[p] == '\t')) p++;
+            if (p + 7 <= e && memcmp(src + p, "include", 7) == 0) is_inc = 1;
+            if (is_inc)
+                cc_sb_append(&out, &out_len, &out_cap, src + i,
+                             ((e < n) ? e + 1 : e) - i);
+            i = (e < n) ? e + 1 : e;
+            continue;
+        }
+        if (cc__file_scope_fn_def_end(src, n, i, &fn_end)) {
+            cc_sb_append(&out, &out_len, &out_cap, src + i, fn_end - i);
+            if (fn_end > i && src[fn_end - 1] != '\n')
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+            found = 1;
+            i = fn_end;
+            continue;
+        }
+        eq = cc__file_scope_data_eq(src, n, i);
+        if (eq) {
+            size_t e = cc__skip_file_scope_item(src, n, i);
+            cc_sb_append(&out, &out_len, &out_cap, src + i, e - i);
+            found = 1;
+            i = e;
+            continue;
+        }
+        i = cc__skip_file_scope_item(src, n, i);
+        if (i == before) i++;
+    }
+    if (!found) {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
 static int cc__kw_at(const char* src, size_t n, size_t i, const char* kw) {
     size_t k;
     if (!src || !kw || i >= n) return 0;
@@ -15500,6 +15856,9 @@ static int cc__fwd_skip_name(const char* s, size_t n) {
     return 0;
 }
 
+static int cc__ident_is_factory_type_name(const char* src, size_t n,
+                                         size_t i, size_t nlen);
+
 static int cc__ident_at_is_type_def(const char* src, size_t n, size_t i,
                                    size_t nlen) {
     size_t p;
@@ -15543,11 +15902,266 @@ static int cc__ident_at_is_type_def(const char* src, size_t n, size_t i,
             break;
         }
     }
+    if (cc__ident_is_factory_type_name(src, n, i, nlen)) return 1;
     return 0;
 }
 
-static int cc__header_defines_type(const char* src, size_t n,
-                                  const char* name, size_t nlen) {
+/* `CC_MAP_DECL_ARENA(K,V,Name,…)` / `CC_MAP_DECL_UFCS(Name)` /
+ * `CC_ARRAY_MAP_DECL(K,V,Name,…)` / `CC_DECL_SLICE_SPEC(Name,T)` bind Name. */
+static int cc__ident_is_factory_type_name(const char* src, size_t n,
+                                         size_t i, size_t nlen) {
+    size_t q;
+    int arg = 0;
+    int depth = 0;
+    size_t name_s, name_e, nl;
+    (void)nlen;
+    if (!src || i >= n) return 0;
+    q = i;
+    while (q > 0) {
+        q--;
+        if (src[q] == ')') depth++;
+        else if (src[q] == '(') {
+            if (depth == 0) break;
+            depth--;
+        } else if (src[q] == ',' && depth == 0)
+            arg++;
+        else if (src[q] == ';' || src[q] == '{' || src[q] == '}')
+            return 0;
+    }
+    if (src[q] != '(') return 0;
+    name_e = q;
+    while (name_e > 0 && (src[name_e - 1] == ' ' || src[name_e - 1] == '\t' ||
+                          src[name_e - 1] == '\n' || src[name_e - 1] == '\r'))
+        name_e--;
+    name_s = name_e;
+    while (name_s > 0 && cc_is_ident_char(src[name_s - 1])) name_s--;
+    nl = name_e - name_s;
+    if (nl == 16 && memcmp(src + name_s, "CC_MAP_DECL_UFCS", 16) == 0)
+        return arg == 0;
+    if (nl == 17 && memcmp(src + name_s, "CC_MAP_DECL_ARENA", 17) == 0)
+        return arg == 2;
+    if (nl == 17 && memcmp(src + name_s, "CC_ARRAY_MAP_DECL", 17) == 0)
+        return arg == 2;
+    if (nl == 22 && memcmp(src + name_s, "CC_ARRAY_MAP_DECL_UFCS", 22) == 0)
+        return arg == 0;
+    if (nl == 18 && memcmp(src + name_s, "CC_DECL_SLICE_SPEC", 18) == 0)
+        return arg == 0;
+    if (nl == 19 && memcmp(src + name_s, "CC_DECL_RESULT_SPEC", 19) == 0)
+        return arg == 0;
+    if (nl == 24 && memcmp(src + name_s, "CC_DECL_RESULT_SPEC_VOID", 24) == 0)
+        return arg == 0;
+    return 0;
+}
+
+static size_t cc__skip_to_stmt_end(const char* src, size_t n, size_t i);
+
+/* One scan of a buffer → defined type names. Hoist used to call
+ * cc__header_defines_type once per identifier (full-file memcmp each
+ * time). Shadow self-emit spent ~5 minutes there. */
+typedef struct {
+    const char* src;
+    size_t n;
+    uint64_t sig;
+    const char** name;
+    uint32_t* nlen;
+    uint32_t* end;
+    size_t cap;
+    size_t used;
+    int ok;
+} CCTypeDefIndex;
+
+static uint32_t cc__td_hash(const char* s, size_t n) {
+    uint32_t h = 2166136261u;
+    size_t i;
+    for (i = 0; i < n; i++) {
+        h ^= (unsigned char)s[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static uint64_t cc__td_buf_sig(const char* src, size_t n) {
+    uint64_t s = (uint64_t)n * 11400714819323198485ull;
+    size_t k;
+    size_t take = n < 32 ? n : 32;
+    for (k = 0; k < take; k++)
+        s = s * 131 + (unsigned char)src[k];
+    if (n > 32) {
+        for (k = n - 16; k < n; k++)
+            s = s * 131 + (unsigned char)src[k];
+    }
+    return s;
+}
+
+static void cc__td_index_clear(CCTypeDefIndex* ix) {
+    if (!ix) return;
+    free(ix->name);
+    free(ix->nlen);
+    free(ix->end);
+    memset(ix, 0, sizeof(*ix));
+}
+
+static int cc__td_index_put(CCTypeDefIndex* ix, const char* name, size_t nlen,
+                           size_t end) {
+    size_t mask;
+    uint32_t h;
+    size_t slot;
+    size_t i;
+    if (!ix || !name || nlen == 0 || !ix->cap) return 0;
+    if (nlen > 0xffffffffu || end > 0xffffffffu) return 0;
+    if (ix->used * 2 >= ix->cap) {
+        size_t ncap = ix->cap * 2;
+        const char** nn = (const char**)calloc(ncap, sizeof(*nn));
+        uint32_t* nl = (uint32_t*)calloc(ncap, sizeof(*nl));
+        uint32_t* ne = (uint32_t*)calloc(ncap, sizeof(*ne));
+        size_t old_cap = ix->cap;
+        const char** on = ix->name;
+        uint32_t* ol = ix->nlen;
+        uint32_t* oe = ix->end;
+        if (!nn || !nl || !ne) {
+            free(nn);
+            free(nl);
+            free(ne);
+            return 0;
+        }
+        ix->name = nn;
+        ix->nlen = nl;
+        ix->end = ne;
+        ix->cap = ncap;
+        ix->used = 0;
+        for (i = 0; i < old_cap; i++) {
+            if (!on[i]) continue;
+            if (!cc__td_index_put(ix, on[i], ol[i], oe[i])) {
+                free(on);
+                free(ol);
+                free(oe);
+                return 0;
+            }
+        }
+        free(on);
+        free(ol);
+        free(oe);
+    }
+    mask = ix->cap - 1;
+    h = cc__td_hash(name, nlen);
+    slot = h & mask;
+    for (i = 0; i < ix->cap; i++) {
+        size_t p = (slot + i) & mask;
+        if (!ix->name[p]) {
+            ix->name[p] = name;
+            ix->nlen[p] = (uint32_t)nlen;
+            ix->end[p] = (uint32_t)end;
+            ix->used++;
+            return 1;
+        }
+        if (ix->nlen[p] == nlen && memcmp(ix->name[p], name, nlen) == 0) {
+            if (end > ix->end[p]) ix->end[p] = (uint32_t)end;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int cc__td_index_build(CCTypeDefIndex* ix, const char* src, size_t n) {
+    size_t i = 0;
+    CCScannerState scan;
+    if (!ix || !src) return 0;
+    memset(ix, 0, sizeof(*ix));
+    ix->src = src;
+    ix->n = n;
+    ix->sig = cc__td_buf_sig(src, n);
+    ix->cap = 64;
+    ix->name = (const char**)calloc(ix->cap, sizeof(*ix->name));
+    ix->nlen = (uint32_t*)calloc(ix->cap, sizeof(*ix->nlen));
+    ix->end = (uint32_t*)calloc(ix->cap, sizeof(*ix->end));
+    if (!ix->name || !ix->nlen || !ix->end) {
+        cc__td_index_clear(ix);
+        return 0;
+    }
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (i < n && cc_is_ident_start(src[i])) {
+            size_t s = i;
+            i++;
+            while (i < n && cc_is_ident_char(src[i])) i++;
+            if (cc__ident_at_is_type_def(src, n, s, i - s)) {
+                size_t end = cc__skip_to_stmt_end(src, n, i);
+                if (!cc__td_index_put(ix, src + s, i - s, end)) {
+                    cc__td_index_clear(ix);
+                    return 0;
+                }
+            }
+            continue;
+        }
+        if (i < n) i++;
+    }
+    ix->ok = 1;
+    return 1;
+}
+
+static int cc__td_index_has(const CCTypeDefIndex* ix, const char* name,
+                            size_t nlen) {
+    size_t mask;
+    uint32_t h;
+    size_t slot;
+    size_t i;
+    if (!ix || !ix->ok || !name || nlen == 0 || !ix->cap) return 0;
+    mask = ix->cap - 1;
+    h = cc__td_hash(name, nlen);
+    slot = h & mask;
+    for (i = 0; i < ix->cap; i++) {
+        size_t p = (slot + i) & mask;
+        if (!ix->name[p]) return 0;
+        if (ix->nlen[p] == nlen && memcmp(ix->name[p], name, nlen) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static size_t cc__td_index_end(const CCTypeDefIndex* ix, const char* name,
+                              size_t nlen) {
+    size_t mask;
+    uint32_t h;
+    size_t slot;
+    size_t i;
+    if (!ix || !ix->ok || !name || nlen == 0 || !ix->cap) return 0;
+    mask = ix->cap - 1;
+    h = cc__td_hash(name, nlen);
+    slot = h & mask;
+    for (i = 0; i < ix->cap; i++) {
+        size_t p = (slot + i) & mask;
+        if (!ix->name[p]) return 0;
+        if (ix->nlen[p] == nlen && memcmp(ix->name[p], name, nlen) == 0)
+            return ix->end[p];
+    }
+    return 0;
+}
+
+enum { CC_TD_MEMO = 8 };
+static CCTypeDefIndex g_td_memo[CC_TD_MEMO];
+static unsigned g_td_memo_next;
+
+static const CCTypeDefIndex* cc__td_index_get(const char* src, size_t n) {
+    uint64_t sig;
+    unsigned i;
+    unsigned slot;
+    if (!src) return NULL;
+    sig = cc__td_buf_sig(src, n);
+    for (i = 0; i < CC_TD_MEMO; i++) {
+        if (g_td_memo[i].ok && g_td_memo[i].src == src &&
+            g_td_memo[i].n == n && g_td_memo[i].sig == sig)
+            return &g_td_memo[i];
+    }
+    slot = g_td_memo_next++ % CC_TD_MEMO;
+    cc__td_index_clear(&g_td_memo[slot]);
+    if (!cc__td_index_build(&g_td_memo[slot], src, n))
+        return NULL;
+    return &g_td_memo[slot];
+}
+
+static int cc__header_defines_type_scan(const char* src, size_t n,
+                                       const char* name, size_t nlen) {
     size_t i = 0;
     CCScannerState scan;
     if (!src || !name || nlen == 0) return 0;
@@ -15562,6 +16176,15 @@ static int cc__header_defines_type(const char* src, size_t n,
         i++;
     }
     return 0;
+}
+
+static int cc__header_defines_type(const char* src, size_t n,
+                                  const char* name, size_t nlen) {
+    const CCTypeDefIndex* ix;
+    if (!src || !name || nlen == 0) return 0;
+    ix = cc__td_index_get(src, n);
+    if (ix) return cc__td_index_has(ix, name, nlen);
+    return cc__header_defines_type_scan(src, n, name, nlen);
 }
 
 static int cc__line_is_preamble_directive(const char* s, size_t n) {
@@ -15728,26 +16351,31 @@ static size_t cc__skip_to_stmt_end(const char* src, size_t n, size_t i) {
 /* End of the last type definition of `name` in this face, or 0. */
 static size_t cc__header_type_def_end(const char* src, size_t n,
                                      const char* name, size_t nlen) {
-    size_t i = 0;
-    size_t last = 0;
-    CCScannerState scan;
+    const CCTypeDefIndex* ix;
     if (!src || !name || nlen == 0) return 0;
-    cc_scanner_init(&scan);
-    while (i < n) {
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (i + nlen <= n && memcmp(src + i, name, nlen) == 0 &&
-            (i == 0 || !cc_is_ident_char(src[i - 1])) &&
-            (i + nlen >= n || !cc_is_ident_char(src[i + nlen]))) {
-            if (cc__ident_at_is_type_def(src, n, i, nlen)) {
-                size_t end = cc__skip_to_stmt_end(src, n, i + nlen);
-                if (end > last) last = end;
+    ix = cc__td_index_get(src, n);
+    if (ix) return cc__td_index_end(ix, name, nlen);
+    {
+        size_t i = 0;
+        size_t last = 0;
+        CCScannerState scan;
+        cc_scanner_init(&scan);
+        while (i < n) {
+            if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+            if (i + nlen <= n && memcmp(src + i, name, nlen) == 0 &&
+                (i == 0 || !cc_is_ident_char(src[i - 1])) &&
+                (i + nlen >= n || !cc_is_ident_char(src[i + nlen]))) {
+                if (cc__ident_at_is_type_def(src, n, i, nlen)) {
+                    size_t end = cc__skip_to_stmt_end(src, n, i + nlen);
+                    if (end > last) last = end;
+                }
+                i += nlen;
+                continue;
             }
-            i += nlen;
-            continue;
+            if (i < n) i++;
         }
-        if (i < n) i++;
+        return last;
     }
-    return last;
 }
 
 /* ui_types uses RtxBuf* defined in workspace: insert the include after
@@ -15955,19 +16583,141 @@ static int cc__pick_defining_peer(char found[][PATH_MAX], int nc) {
     return best;
 }
 
-static int cc__rewrite_root_defines_type(const char* name, size_t nlen) {
+static int cc__path_defines_type(const char* path, const char* name, size_t nlen) {
     char* text = NULL;
     size_t tn = 0;
     int d;
-    if (!g_rewrite_root_path || !g_rewrite_root_path[0] || !name || nlen == 0)
-        return 0;
-    if (cc__read_file_text(g_rewrite_root_path, &text, &tn) != 0 || !text) {
+    if (!path || !path[0] || !name || nlen == 0) return 0;
+    if (cc__read_file_text(path, &text, &tn) != 0 || !text) {
         free(text);
         return 0;
     }
     d = cc__header_defines_type(text, tn, name, nlen);
     free(text);
     return d;
+}
+
+static int cc__rewrite_root_defines_type(const char* name, size_t nlen) {
+    return cc__path_defines_type(g_rewrite_root_path, name, nlen);
+}
+
+static int cc__path_ends_cch(const char* path) {
+    size_t n;
+    if (!path) return 0;
+    n = strlen(path);
+    return n >= 4 && memcmp(path + n - 4, ".cch", 4) == 0;
+}
+
+static int cc__cch_lower_in_progress(const char* path) {
+    size_t i;
+    if (!path || !path[0]) return 0;
+    for (i = 0; i < g_lowered_local_header_count; i++) {
+        const char* sp = g_lowered_local_headers[i].source_path;
+        if (g_lowered_local_headers[i].in_progress && sp && strcmp(sp, path) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* Faces in `unit_path`'s quoted `.cch` include graph that define `name`.
+ * Angle includes are the stdlib; project types live on quoted faces.
+ * Skips `self_cch`, in-progress extracts, and the UFCS parent
+ * (planting those would cycle). */
+static void cc__cch_defining_walk(const char* unit_path, const char* self_cch,
+                                 const char* name, size_t nlen,
+                                 char found[][PATH_MAX], int cap, int* nc,
+                                 char vis[][PATH_MAX], int* nvis, int vis_cap) {
+    char abs[PATH_MAX];
+    char source_dir[PATH_MAX];
+    char* src = NULL;
+    size_t n = 0, i = 0;
+    int v;
+    if (!unit_path || !unit_path[0] || !name || nlen == 0 || !found || !nc ||
+        !vis || !nvis || cap <= 0)
+        return;
+    if (!realpath(unit_path, abs)) return;
+    for (v = 0; v < *nvis; v++) {
+        if (strcmp(vis[v], abs) == 0) return;
+    }
+    if (*nvis >= vis_cap) {
+        if (!g_local_cch_lower_failed)
+            fprintf(stderr,
+                    "cc: error: cannot extract %s: include-graph walk overflowed\n",
+                    self_cch ? self_cch : unit_path);
+        g_local_cch_lower_failed = 1;
+        return;
+    }
+    memcpy(vis[*nvis], abs, strlen(abs) + 1);
+    (*nvis)++;
+    if (cc__path_ends_cch(abs) && self_cch && strcmp(abs, self_cch) != 0 &&
+        !cc__cch_lower_in_progress(abs) &&
+        !(g_header_ufcs_parent_path[0] &&
+          strcmp(abs, g_header_ufcs_parent_path) == 0) &&
+        cc__path_defines_type(abs, name, nlen)) {
+        int d;
+        for (d = 0; d < *nc; d++) {
+            if (strcmp(found[d], abs) == 0) break;
+        }
+        if (d == *nc && *nc < cap) {
+            memcpy(found[*nc], abs, strlen(abs) + 1);
+            (*nc)++;
+        }
+    }
+    if (cc__dirname_local(abs, source_dir, sizeof(source_dir)) != 0) return;
+    if (cc__read_file_text(abs, &src, &n) != 0 || !src) {
+        free(src);
+        return;
+    }
+    while (i < n) {
+        size_t line_end = i, p, path_s, path_e;
+        while (line_end < n && src[line_end] != '\n') line_end++;
+        p = i;
+        while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+        if (p < line_end && src[p++] == '#') {
+            while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+            if (p + 7 <= line_end && memcmp(src + p, "include", 7) == 0 &&
+                (p + 7 == line_end || !cc_is_ident_char(src[p + 7]))) {
+                p += 7;
+                while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+                if (p < line_end && src[p] == '"') {
+                    p++;
+                    path_s = p;
+                    while (p < line_end && src[p] != '"') p++;
+                    path_e = p;
+                    if (path_e > path_s + 4 &&
+                        memcmp(src + path_e - 4, ".cch", 4) == 0) {
+                        char rel[PATH_MAX], child[PATH_MAX];
+                        size_t rel_len = path_e - path_s;
+                        if (rel_len < sizeof(rel)) {
+                            memcpy(rel, src + path_s, rel_len);
+                            rel[rel_len] = '\0';
+                            if (snprintf(child, sizeof(child), "%s/%s",
+                                         source_dir, rel) < (int)sizeof(child))
+                                cc__cch_defining_walk(child, self_cch, name,
+                                                      nlen, found, cap, nc,
+                                                      vis, nvis, vis_cap);
+                        }
+                    }
+                }
+            }
+        }
+        i = line_end < n ? line_end + 1 : line_end;
+    }
+    free(src);
+}
+
+static int cc__cch_defining_in_unit(const char* unit_path, const char* self_cch,
+                                   const char* name, size_t nlen,
+                                   char found[][PATH_MAX], int cap) {
+    enum { VIS_CAP = 64 };
+    char vis[VIS_CAP][PATH_MAX];
+    int nvis = 0;
+    int nc = 0;
+    if (!unit_path || !unit_path[0] || !name || nlen == 0 || !found || cap <= 0)
+        return 0;
+    cc__cch_defining_walk(unit_path, self_cch, name, nlen, found, cap, &nc,
+                          vis, &nvis, VIS_CAP);
+    return nc;
 }
 
 static int cc__text_has_quoted_path(const char* src, size_t n, const char* path) {
@@ -15981,40 +16731,86 @@ static int cc__text_has_quoted_path(const char* src, size_t n, const char* path)
     return 0;
 }
 
-/* Pointer-only names this face does not define: include the unique
- * same-directory face that does. No invented `typedef struct Tag Tag`. */
-static char* cc__inject_defining_includes(const char* src, size_t n,
-                                         const char* abs_cch) {
-    enum { FWD_CAP = 32, FWD_NAME = 64, PEER_CAP = 16 };
+/* Function body starts at `{` after a `)`. Struct `{` is the declaration. */
+static size_t cc__file_scope_decl_end(const char* src, size_t n,
+                                     size_t start, size_t item_end) {
+    size_t j = start;
+    int brace = 0, paren = 0;
+    int last = 0;
+    CCScannerState scan;
+    if (!src || start >= item_end) return item_end;
+    cc_scanner_init(&scan);
+    while (j < item_end) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &j)) continue;
+        if (j >= item_end) break;
+        if (src[j] == '{') {
+            if (brace == 0 && paren == 0 && last == ')') return j;
+            brace++;
+        } else if (src[j] == '}' && brace > 0)
+            brace--;
+        else if (src[j] == '(')
+            paren++;
+        else if (src[j] == ')' && paren > 0)
+            paren--;
+        if (src[j] > 32) last = (unsigned char)src[j];
+        j++;
+    }
+    return item_end;
+}
+
+/* Pointer types this face names but does not define. Fills `peers`.
+ * Returns count, or -1 and sets g_local_cch_lower_failed. */
+static int cc__collect_defining_peer_faces(const char* src, size_t n,
+                                          const char* abs_cch,
+                                          char peers[][PATH_MAX],
+                                          int peer_cap) {
+    enum { FWD_CAP = 32, FWD_NAME = 64 };
     char names[FWD_CAP][FWD_NAME];
-    char peers[PEER_CAP][PATH_MAX];
     int nn = 0;
     int np = 0;
     size_t i = 0;
-    size_t insert_at;
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
     int k;
-    CCScannerState scan;
-    if (!src || n == 0 || !abs_cch) return NULL;
-    cc_scanner_init(&scan);
+    if (!src || n == 0 || !abs_cch || !peers || peer_cap <= 0) return 0;
     while (i < n && nn < FWD_CAP) {
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (i < n && cc_is_ident_start(src[i])) {
-            size_t s = i;
-            size_t e;
-            size_t p;
+        CCScannerState inner;
+        size_t item, end, scan_end, j;
+        i = cc_skip_ws_and_comments(src, n, i);
+        if (i >= n) break;
+        {
+            size_t bol = i;
+            while (bol > 0 && (src[bol - 1] == ' ' || src[bol - 1] == '\t'))
+                bol--;
+            if ((bol == 0 || src[bol - 1] == '\n' || src[bol - 1] == '\r') &&
+                src[i] == '#') {
+                while (i < n && src[i] != '\n') i++;
+                if (i < n) i++;
+                continue;
+            }
+        }
+        item = i;
+        end = cc__skip_file_scope_item(src, n, i);
+        if (end <= i) {
             i++;
-            while (i < n && cc_is_ident_char(src[i])) i++;
-            e = i;
-            p = cc_skip_ws_and_comments(src, n, i);
-            if (p < n && src[p] == '*' && (e - s) < FWD_NAME &&
+            continue;
+        }
+        scan_end = cc__file_scope_decl_end(src, n, item, end);
+        cc_scanner_init(&inner);
+        j = item;
+        while (j < scan_end && nn < FWD_CAP) {
+            size_t s, e, p;
+            if (cc_scanner_skip_non_code(&inner, src, n, &j)) continue;
+            if (j >= scan_end || !cc_is_ident_start(src[j])) {
+                if (j < scan_end) j++;
+                continue;
+            }
+            s = j;
+            j++;
+            while (j < scan_end && cc_is_ident_char(src[j])) j++;
+            e = j;
+            p = cc_skip_ws_and_comments(src, n, j);
+            if (p < scan_end && src[p] == '*' && (e - s) < FWD_NAME &&
                 !cc__fwd_skip_name(src + s, e - s) &&
                 !cc__header_defines_type(src, n, src + s, e - s)) {
-                size_t after = cc_skip_ws_and_comments(src, n, p + 1);
-                /* `d * 100ull` is multiply; a type pointer is `Tag *name`. */
-                if (after < n && src[after] >= '0' && src[after] <= '9')
-                    continue;
                 int dup = 0;
                 for (k = 0; k < nn; k++) {
                     if (strlen(names[k]) == e - s &&
@@ -16029,15 +16825,21 @@ static char* cc__inject_defining_includes(const char* src, size_t n,
                     nn++;
                 }
             }
-            continue;
         }
-        if (i < n) i++;
+        i = end;
     }
-    for (k = 0; k < nn && np < PEER_CAP; k++) {
+    for (k = 0; k < nn && np < peer_cap; k++) {
         char found[8][PATH_MAX];
         int nc = cc__cch_defining_peers(abs_cch, names[k], strlen(names[k]),
                                        found, 8);
         int d;
+        if (nc == 0 && g_rewrite_root_path)
+            nc = cc__cch_defining_in_unit(g_rewrite_root_path, abs_cch, names[k],
+                                         strlen(names[k]), found, 8);
+        if (nc == 0 && g_header_ufcs_parent_path[0])
+            nc = cc__cch_defining_in_unit(g_header_ufcs_parent_path, abs_cch,
+                                         names[k], strlen(names[k]), found, 8);
+        if (g_local_cch_lower_failed) return -1;
         if (nc >= 2) {
             if (cc__defining_peers_one_owner(found, nc)) {
                 int pick = cc__pick_defining_peer(found, nc);
@@ -16050,18 +16852,21 @@ static char* cc__inject_defining_includes(const char* src, size_t n,
                         abs_cch, names[k], cc__path_base(found[0]),
                         cc__path_base(found[1]));
                 g_local_cch_lower_failed = 1;
-                return NULL;
+                return -1;
             }
         }
         if (nc == 0) {
-            if (cc__rewrite_root_defines_type(names[k], strlen(names[k])))
+            if (cc__rewrite_root_defines_type(names[k], strlen(names[k])) ||
+                cc__path_defines_type(g_header_ufcs_parent_path, names[k],
+                                     strlen(names[k])))
                 continue;
-            fprintf(stderr,
-                    "cc: error: cannot extract %s: %s* is not a type and no "
-                    "same-directory face defines %s\n",
-                    abs_cch, names[k], names[k]);
+            if (!g_local_cch_lower_failed)
+                fprintf(stderr,
+                        "cc: error: cannot extract %s: %s* is not a type and no "
+                        "same-directory face or including unit defines %s\n",
+                        abs_cch, names[k], names[k]);
             g_local_cch_lower_failed = 1;
-            return NULL;
+            return -1;
         }
         /* Impl-grade with no owner splices into the including .ccs
          * (`document.cch` from find.ccs). Extracting it from the leaf
@@ -16075,6 +16880,34 @@ static char* cc__inject_defining_includes(const char* src, size_t n,
         memcpy(peers[np], found[0], strlen(found[0]) + 1);
         np++;
     }
+    return np;
+}
+
+static void cc__register_defining_peer_faces(const char* src, size_t n,
+                                            const char* abs_cch) {
+    char peers[16][PATH_MAX];
+    int np = cc__collect_defining_peer_faces(src, n, abs_cch, peers, 16);
+    int k;
+    if (np <= 0) return;
+    for (k = 0; k < np; k++)
+        cc__register_included_cch_tree(peers[k]);
+}
+
+/* Pointer types in declarations this face does not define: include the
+ * unique same-directory face, or the unique face in the including unit's
+ * include graph, that does. No invented `typedef struct Tag Tag`. */
+static char* cc__inject_defining_includes(const char* src, size_t n,
+                                         const char* abs_cch) {
+    enum { PEER_CAP = 16 };
+    char peers[PEER_CAP][PATH_MAX];
+    int np;
+    size_t insert_at;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    int k;
+    if (!src || n == 0 || !abs_cch) return NULL;
+    np = cc__collect_defining_peer_faces(src, n, abs_cch, peers, PEER_CAP);
+    if (np < 0) return NULL;
     if (np == 0) return NULL;
     insert_at = cc__after_header_preamble(src, n);
     cc_sb_append(&out, &out_len, &out_cap, src, insert_at);
@@ -16243,17 +17076,18 @@ static int cc__path_ends_with(const char* p, const char* suf) {
     return n >= s && memcmp(p + n - s, suf, s) == 0;
 }
 
-/* Splice an implementation-grade header's raw source into `out` in place of
- * its include line.  Nested local includes inside the header are processed
- * recursively (interface children lower to .h include lines, impl children
- * splice in turn).  `include_line_no` is the 1-based line of the include in
- * the including file, used to restore `#line` provenance after the splice.
- * Returns 0 on success, -1 when the header could not be read (caller falls
- * back to the interface path). */
+/* Splice an implementation-grade header into `out`. Direct includes dump
+ * the raw face (nested includes rewrite first). Owner include-graph
+ * leaves (`owner_defs_only`) splice only the definitions extract
+ * stripped — after the parent `.h`, not a second copy of the header.
+ * `include_line_no` restores `#line` after the splice.
+ * Returns 0 on success, -1 when the header could not be read (caller
+ * falls back) or when a defs-only splice finds no definitions. */
 static int cc__splice_impl_cch_into(char** out, size_t* out_len, size_t* out_cap,
                                     const char* child_abs,
                                     const char* current_path,
-                                    size_t include_line_no) {
+                                    size_t include_line_no,
+                                    int owner_defs_only) {
     char* body = NULL;
     size_t body_len = 0;
     char* rew = NULL;
@@ -16284,6 +17118,23 @@ static int cc__splice_impl_cch_into(char** out, size_t* out_len, size_t* out_cap
             use = rew;
             use_len = strlen(rew);
         }
+    }
+    if (owner_defs_only) {
+        char* defs = cc__cch_keep_owner_defs(use, use_len);
+        if (!defs) {
+            fprintf(stderr,
+                    "cc: error: owner splice of %s: no function "
+                    "definitions\n",
+                    child_abs);
+            g_local_cch_lower_failed = 1;
+            free(rew);
+            free(body);
+            return -1;
+        }
+        if (rew) free(rew);
+        rew = defs;
+        use = rew;
+        use_len = strlen(rew);
     }
     /* Owner splice is the one external definition. Drop file-scope
      * `static` on functions so guests that extracted decls can link. */
@@ -16387,6 +17238,38 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
             g_lowered_local_headers[lowered_idx].in_progress = 0;
         return NULL;
     }
+    {
+        size_t pi;
+        const char* face = rewritten ? rewritten : input;
+        size_t face_n = rewritten ? strlen(rewritten) : input_len;
+        /* Nested extract: Type_meth may live on an in-progress parent. */
+        for (pi = 0; pi < g_lowered_local_header_count; pi++) {
+            if (g_lowered_local_headers[pi].in_progress &&
+                g_lowered_local_headers[pi].source_path)
+                cc__register_included_cch_tree(
+                    g_lowered_local_headers[pi].source_path);
+        }
+        /* Same-directory face that defines `Type*` used here — before UFCS,
+         * so `d->len()` can see `Type_len`. The `.h` include is planted after. */
+        cc__register_defining_peer_faces(face, face_n, abs_src);
+        if (g_local_cch_lower_failed) {
+            free(input);
+            free(rewritten);
+            g_lowered_local_headers[lowered_idx].in_progress = 0;
+            return NULL;
+        }
+    }
+    /* Owner impl bodies carry `?>` / statement `!>` the header subset
+     * cannot parse. Guests only need prototypes — strip before lower. */
+    if (cc__local_cch_is_impl_grade(abs_src) && cc__cch_has_owner_ccs(abs_src)) {
+        const char* face = rewritten ? rewritten : input;
+        size_t face_n = rewritten ? strlen(rewritten) : input_len;
+        char* pre = cc__strip_cch_function_bodies(face, face_n);
+        if (pre) {
+            free(rewritten);
+            rewritten = pre;
+        }
+    }
     g_header_lower_preserve_tu_state++;
     lowered = cc_lower_header_string(rewritten ? rewritten : input,
                                      rewritten ? strlen(rewritten) : input_len,
@@ -16394,8 +17277,8 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     g_header_lower_preserve_tu_state--;
     /* Never write raw `.cch` into the `.h` — that looks like a successful lower. */
     if (!lowered) CC__LOWER_GIVE_UP("lower");
-    /* Only strip statement-level impl bodies. UFCS in an interface
-     * `.cch` (`Type_destroy`, arena `.destroy()`) stays in the `.h`. */
+    /* Bodies already stripped above; this pass is idempotent if lower
+     * reintroduced a brace. UFCS in an interface `.cch` stays. */
     if (cc__local_cch_is_impl_grade(abs_src) && cc__cch_has_owner_ccs(abs_src)) {
         char* stripped = cc__strip_cch_function_bodies(lowered, strlen(lowered));
         if (stripped) {
@@ -16441,6 +17324,18 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
             lowered = pulled;
         }
     }
+    if (cc__lowered_header_needs_ufcs_splice(lowered, strlen(lowered))) {
+        fprintf(stderr,
+                "cc: error: cannot extract %s: member-call UFCS remains "
+                "(no Type_meth in this face or an included face)\n",
+                abs_src);
+        g_local_cch_lower_failed = 1;
+        free(lowered);
+        free(input);
+        free(rewritten);
+        g_lowered_local_headers[lowered_idx].in_progress = 0;
+        return NULL;
+    }
     if (cc__write_file_text(lowered_path, lowered, strlen(lowered)) != 0)
         CC__LOWER_GIVE_UP("write");
 #undef CC__LOWER_GIVE_UP
@@ -16452,8 +17347,9 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
 }
 
 /* Owner TU extracted an interface face: splice include-graph impl leaves
- * (`ui_types.cch` included from `workspace.cch`) into this unit. Guests
- * with their own stem owner (`safe.cch` → `safe.ccs`) stay extracted. */
+ * (`ui_types.cch` included from `workspace.cch`) into this unit after
+ * the parent `.h`. Guests with their own stem owner (`safe.cch` →
+ * `safe.ccs`) stay extracted. */
 static void cc__splice_include_graph_impl_leaves(char** out, size_t* out_len,
                                                 size_t* out_cap,
                                                 const char* parent_abs,
@@ -16493,9 +17389,10 @@ static void cc__splice_include_graph_impl_leaves(char** out, size_t* out_len,
                         size_t k;
                         for (k = 0; k < i; k++)
                             if (src[k] == '\n') line_no++;
-                        (void)cc__splice_impl_cch_into(out, out_len, out_cap,
-                                                       child_abs, current_path,
-                                                       line_no);
+                        if (cc__splice_impl_cch_into(out, out_len, out_cap,
+                                                     child_abs, current_path,
+                                                     line_no, 1) != 0)
+                            g_local_cch_lower_failed = 1;
                     }
                 }
             }
@@ -16562,6 +17459,7 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                  * is not hoisted above the TU declarations. */
                 if (found) {
                     int splice_child = cc__local_cch_is_impl_grade(child_abs);
+                    int ufcs_force_splice = 0;
                     if (!splice_child && g_rewrite_allow_impl_splice) {
                         char* child_src = NULL;
                         size_t child_len = 0;
@@ -16598,8 +17496,28 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                             }
                         }
                     }
-                    if (splice_child && cc__cch_extract_for_other_tus(child_abs))
-                        splice_child = 0;
+                    if (splice_child && cc__cch_extract_for_other_tus(child_abs)) {
+                        /* A child that other TUs include still extracts —
+                         * unless that extract keeps member-call UFCS. An
+                         * extracted `.h` is host-cc input; leftover
+                         * `d->len()` is not C. Splice into the parent so
+                         * the parent's Type_meth rewrite can see the site. */
+                        const char* lp = cc__lower_local_cch_header(child_abs);
+                        char* hb = NULL;
+                        size_t hn = 0;
+                        int still_ufcs = 0;
+                        if (g_local_cch_lower_failed) {
+                            free(out);
+                            return NULL;
+                        }
+                        if (lp && cc__read_file_text(lp, &hb, &hn) == 0 && hb)
+                            still_ufcs = cc__lowered_header_needs_ufcs_splice(hb, hn);
+                        free(hb);
+                        if (still_ufcs)
+                            ufcs_force_splice = 1;
+                        else
+                            splice_child = 0;
+                    }
                     if (splice_child) {
                         if (!g_rewrite_allow_impl_splice) {
                             /* Lowering an interface `.h`: impl leaves with an
@@ -16615,6 +17533,20 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                                 free(out);
                                 return NULL;
                             }
+                            if (ufcs_force_splice) {
+                                size_t line_no = 1;
+                                size_t k;
+                                for (k = 0; k < i; k++)
+                                    if (src[k] == '\n') line_no++;
+                                if (cc__splice_impl_cch_into(&out, &out_len,
+                                                             &out_cap, child_abs,
+                                                             current_path,
+                                                             line_no, 0) == 0) {
+                                    changed = 1;
+                                    i = (line_end < n) ? line_end + 1 : line_end;
+                                    continue;
+                                }
+                            }
                         } else if (cc__impl_cch_was_spliced(child_abs)) {
                             /* Repeat include: the header's guard would make this
                              * inert; keep a blank line so following lines in this
@@ -16629,7 +17561,7 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                                 if (src[k] == '\n') line_no++;
                             if (cc__splice_impl_cch_into(&out, &out_len, &out_cap,
                                                          child_abs, current_path,
-                                                         line_no) == 0) {
+                                                         line_no, 0) == 0) {
                                 changed = 1;
                                 i = (line_end < n) ? line_end + 1 : line_end;
                                 continue;
@@ -16639,23 +17571,33 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                          * an umbrella: fall through to the interface path. */
                     }
                 }
-                lowered_path = cc__lower_local_cch_header(found ? child_abs
-                                                               : child_path);
+                {
+                    const char* parent_set = current_path;
+                    char saved_parent[PATH_MAX];
+                    saved_parent[0] = 0;
+                    if (g_header_ufcs_parent_path[0])
+                        memcpy(saved_parent, g_header_ufcs_parent_path,
+                               sizeof(saved_parent));
+                    if (parent_set && parent_set[0] &&
+                        cc__path_ends_with(parent_set, ".cch")) {
+                        if (!realpath(parent_set, g_header_ufcs_parent_path))
+                            snprintf(g_header_ufcs_parent_path,
+                                     sizeof(g_header_ufcs_parent_path),
+                                     "%s", parent_set);
+                    }
+                    lowered_path = cc__lower_local_cch_header(found ? child_abs
+                                                                   : child_path);
+                    if (saved_parent[0])
+                        memcpy(g_header_ufcs_parent_path, saved_parent,
+                               sizeof(g_header_ufcs_parent_path));
+                    else
+                        g_header_ufcs_parent_path[0] = 0;
+                }
                 if (g_local_cch_lower_failed) {
                     free(out);
                     return NULL;
                 }
                 if (lowered_path) {
-                    /* Splice include-graph impl leaves before the extracted
-                     * `.h`. The `.h` includes those guests' extracts and
-                     * defines their include guards — splicing after would
-                     * skip the bodies. */
-                    if (g_rewrite_allow_impl_splice &&
-                        cc__cch_root_is_defining_ccs(found ? child_abs
-                                                           : child_path))
-                        cc__splice_include_graph_impl_leaves(
-                            &out, &out_len, &out_cap,
-                            found ? child_abs : child_path, current_path);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "#include \"");
                     if (!g_rewrite_allow_impl_splice) {
                         char from_h[PATH_MAX];
@@ -16674,6 +17616,20 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                     }
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "\"");
                     if (line_end < n && src[line_end] == '\n') cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                    /* Owner defs after the extracted parent `.h` so names
+                     * that face defines are in scope. The splice is the
+                     * definitions extract stripped, not a second header. */
+                    if (g_rewrite_allow_impl_splice &&
+                        cc__cch_root_is_defining_ccs(found ? child_abs
+                                                           : child_path)) {
+                        cc__splice_include_graph_impl_leaves(
+                            &out, &out_len, &out_cap,
+                            found ? child_abs : child_path, current_path);
+                        if (g_local_cch_lower_failed) {
+                            free(out);
+                            return NULL;
+                        }
+                    }
                     changed = 1;
                     i = (line_end < n) ? line_end + 1 : line_end;
                     continue;

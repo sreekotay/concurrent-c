@@ -1,0 +1,8 @@
+#ifndef TESTS_QUOTE_CCH_BANG_HIDDEN_CCH
+#define TESTS_QUOTE_CCH_BANG_HIDDEN_CCH
+
+/* Face exports the visible helper. The static in the owner .ccs is
+ * not a declaration for other TUs. */
+int quote_bang_vis(int x);
+
+#endif

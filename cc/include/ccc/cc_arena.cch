@@ -1310,6 +1310,7 @@ static inline CCSlice cc_slice_concat2(CCSlice left, CCSlice right, CCArenaHost 
  *      CCArenaCheckpoint cp;  cp.restore()    -> cc_arena_checkpoint_restore(&cp)
  *                                 cp.abandon()    -> cc_arena_checkpoint_abandon(&cp)
  *      CCArenaPool* p;        p.alloc()      -> cc_arena_pool_alloc(p)
+ *                                 p.alloc_local() -> cc_arena_pool_alloc_local(p)
  *      CCString s;            s.len()         -> cc_string_len(&s)
  *      CCNursery n;          n.wait()       -> cc_nursery_wait(n)
  *
@@ -2107,17 +2108,40 @@ static inline int cc__arena_attach_host(CCArenaHost *parent, CCArenaHost *child)
     return 0;
 }
 
-/* Default L1 for heap-backed children (create_arena(owner, 0)). */
+/* Default L1 for heap-backed children (create_arena(owner, 0) /
+ * create_heap_arena(owner, 0)). */
 #ifndef CC_ARENA_CHILD_DEFAULT_BYTES
 #define CC_ARENA_CHILD_DEFAULT_BYTES 4096
 #endif
 
+/* Heap-backed child with a sized L1. Movable (adopt/detach work). bytes == 0
+ * uses CC_ARENA_CHILD_DEFAULT_BYTES. The owner holds the destroy record. */
+static inline CCResult_CCArena_CCError create_heap_arena(CCArenaHost* owner, size_t bytes) {
+    if (!owner || !owner->base)
+        return cc__arena_err(CC_ERR_INVALID_ARG, "create_heap_arena: owner arena is dead");
+    if (bytes == 0) bytes = CC_ARENA_CHILD_DEFAULT_BYTES;
+    {
+        CCResult_CCArena_CCError r = cc_arena_try_heap(bytes);
+        if (!r.ok) return r;
+        if (cc__arena_attach_host(owner, r.u.value.a) != 0) {
+            cc_arena_destroy(&r.u.value);
+            return cc__arena_err(CC_ERR_INVALID_ARG, "create_heap_arena: attach failed");
+        }
+        return r;
+    }
+}
+
+static inline CCResult_CCArena_CCError cc_arena_create_heap_arena(CCArenaHost* owner,
+                                                                size_t bytes) {
+    return create_heap_arena(owner, bytes);
+}
+
 /* Child-arena constructor: a destroy record is attached so the child dies
  * when the owner does. The size selects the child's storage class:
  *   n > 0  — one owner region (host at front, n usable L1): storage-bound.
- *   n == 0 — heap-backed child (one malloc): movable (adopt/detach work).
- * Both grow to heap L2 after the L1. Birth is Result — never a dummy empty
- * handle. No scope sigil: the owner holds the obligation. */
+ *   n == 0 — create_heap_arena(owner, 0): movable.
+ * Both grow to heap overflow after the L1. Birth is Result — never a dummy
+ * empty handle. No scope sigil: the owner holds the obligation. */
 static inline CCResult_CCArena_CCError create_arena(CCArenaHost* owner, size_t n) {
     CCArenaHost* h;
     if (!owner || !owner->base)
@@ -2140,15 +2164,7 @@ static inline CCResult_CCArena_CCError create_arena(CCArenaHost* owner, size_t n
         }
         return cc__arena_ok(cc_arena_handle(h));
     }
-    {
-        CCResult_CCArena_CCError r = cc_arena_try_heap(CC_ARENA_CHILD_DEFAULT_BYTES);
-        if (!r.ok) return r;
-        if (cc__arena_attach_host(owner, r.u.value.a) != 0) {
-            cc_arena_destroy(&r.u.value);
-            return cc__arena_err(CC_ERR_INVALID_ARG, "create_arena: attach failed");
-        }
-        return r;
-    }
+    return create_heap_arena(owner, 0);
 }
 
 /* UFCS alias: `owner.create_arena(n)` / `owner->create_arena(n)` compose
@@ -2793,6 +2809,32 @@ static inline CCArena cc_arena_pool_detach(CCArenaPool* p) {
     return a;
 }
 
+/* Exclusive-owner pool: Treiber head is a plain store; bump is
+ * alloc_local_grow. Caller must be the only mutator of this pool (the
+ * shard exclusive in wstore3). Shared sites stay on alloc/free. */
+static inline void* cc_arena_pool_alloc_local(CCArenaPool* p) {
+    uint64_t head;
+    void* item;
+    if (!p) return NULL;
+    head = cc_atomic_load(&p->freelist);
+    item = cc__pool_head_ptr(head);
+    if (item) {
+        cc_atomic_store(&p->freelist,
+                        cc__pool_head_pack(*(void**)item, head >> CC__POOL_TAG_SHIFT));
+        return item;
+    }
+    return cc_arena_alloc_local_grow(p->arena, p->elem_size, sizeof(void*));
+}
+
+static inline void cc_arena_pool_free_local(CCArenaPool* p, void* ptr) {
+    uint64_t head;
+    if (!p || !ptr) return;
+    head = cc_atomic_load(&p->freelist);
+    *(void**)ptr = cc__pool_head_ptr(head);
+    cc_atomic_store(&p->freelist,
+                    cc__pool_head_pack(ptr, head >> CC__POOL_TAG_SHIFT));
+}
+
 // Allocate one element from the pool (reuses a freed slot if available).
 // Lock-free: Treiber-stack pop with ABA-safe tagged head.
 static inline void* cc_arena_pool_alloc(CCArenaPool* p) {
@@ -3005,6 +3047,7 @@ static inline void cc__arena_pool_init_impl(CCArenaPool *p, CCArenaHost *a, size
 #define cc_arena_valid(a) cc__arena_valid_impl(CC__ARENA_HOST(a))
 #define cc_arena_adopt(p, s) cc__arena_adopt_impl((p), (s))
 #define cc_arena_create_arena(a, n) create_arena(CC__ARENA_HOST(a), n)
+#define cc_arena_create_heap_arena(a, n) create_heap_arena(CC__ARENA_HOST(a), n)
 #define cc_arena_create_pool(a, sz) create_pool(CC__ARENA_HOST(a), sz)
 #define cc_arena_free(x) _Generic((x), \
     struct CCArena *: cc__arena_free_handlep, \

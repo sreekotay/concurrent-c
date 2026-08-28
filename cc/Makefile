@@ -282,9 +282,15 @@ $(OUT_RUNTIME)/.seed.stamp: $(LOWER_HEADERS_INPUTS) $(wildcard ../third_party/ff
 # stage-1 for engine headers while the stamp recipe also linked it →
 # ETXTBSY ("Text file busy") on the first exec. Stage-1 objs depend on
 # the seed stamp only, so this edge stays acyclic.
+# last-good only changes the version embed in unit_header.o. Relink ccc,
+# but do not re-lower stdlib: stage-1 TUs #include the lowered headers, so
+# rewriting them dirties those .o files and the next make loops.
+LOWER_HEADERS1_LOGIC_OBJS := $(filter-out \
+	$(OBJDIR)/src/preprocess/unit_header.o,$(LOWER_HEADERS1_OBJS))
 $(LOWER_HEADERS_STAMP): $(LOWER_HEADERS_INPUTS) $(wildcard ../third_party/ffc/ffc.h) \
 		$(wildcard runtime/*.c runtime/*.h) \
-		$(OUT_RUNTIME)/.seed.stamp $(LOWER_HEADERS1_BINARY)
+		$(OUT_RUNTIME)/.seed.stamp $(LOWER_HEADERS1_LOGIC_OBJS) \
+		| $(LOWER_HEADERS1_BINARY)
 	@mkdir -p $(OUT_INCLUDE) $(OUT_RUNTIME)
 	@$(LOWER_HEADERS1_BINARY) include $(OUT_INCLUDE) --rewrite-includes runtime $(OUT_RUNTIME)
 	@touch $@
@@ -311,9 +317,14 @@ $(LOWER_HEADERS1_BINARY): $(LOWER_HEADERS1_OBJS) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(LOWER_HEADERS1_OBJS) $(LDLIBS)
 
-$(ENGINE_GEN_DIR)/%.h: $(ENGINE_CCH_DIR)/%.cch $(LOWER_HEADERS1_BINARY)
+# Same last-good trap as LOWER_HEADERS_STAMP: the stage-1 binary relinks
+# when unit_header.o embeds a new seed, which must not rewrite genh and
+# dirty grammar_rules.o on every ship.
+$(ENGINE_GEN_DIR)/%.h: $(ENGINE_CCH_DIR)/%.cch $(LOWER_HEADERS1_LOGIC_OBJS) \
+		| $(LOWER_HEADERS1_BINARY)
 	@mkdir -p $(ENGINE_GEN_DIR)
 	@$(LOWER_HEADERS1_BINARY) $(ENGINE_CCH_DIR) $(ENGINE_GEN_DIR) > /dev/null
+	@touch $@
 
 .PHONY: engine-headers
 engine-headers: $(ENGINE_GEN_HDRS)
@@ -473,12 +484,17 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COM
 	fi
 	# Native self-emit, then host-cc link (same objs as bootstrap).
 	# concurrent_c.o supplies arena_state/FFC (omitted from libshadow_comptime.a).
+	@echo "[shadow_lower] $$(date '+%H:%M:%S') self-emit start ($(SHADOW_LOWER_CCS) --no-cache)"
+	@t0=$$(date +%s); \
 	CC_INCLUDE_PATH="$(abspath $(OUT_INCLUDE)):$(abspath include)" \
 	$(SHADOW_LOWER_SEED_BIN) $(SHADOW_LOWER_CCS) -o $(OBJDIR)/shadow_lower.emit.c --no-cache \
-		--cc-flags="-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1"
+		--cc-flags="-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1" || exit $$?; \
+	echo "[shadow_lower] $$(date '+%H:%M:%S') self-emit done ($$(($$(date +%s)-t0))s, $$(wc -c < $(OBJDIR)/shadow_lower.emit.c | tr -d ' ') bytes)"
 	@if grep -qE '^de#line' $(OBJDIR)/shadow_lower.emit.c; then \
 		echo "error: emit contains de#line (injected-token lead bug)"; exit 1; \
 	fi
+	@echo "[shadow_lower] $$(date '+%H:%M:%S') host-cc start ($(OBJDIR)/shadow_lower.emit.c)"
+	@t0=$$(date +%s); \
 	$(CC) $(CFLAGS) -o $@ $(OBJDIR)/shadow_lower.emit.c \
 		-I../out/include/cc/shadow -I../out/include -I../cc/include \
 		-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
@@ -486,7 +502,8 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COM
 		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \
 		$(abspath $(SHADOW_COMPTIME_LIB)) \
 		$(abspath $(CPARSE_LIB)) \
-		$(LDFLAGS) $(LDLIBS)
+		$(LDFLAGS) $(LDLIBS) || exit $$?; \
+	echo "[shadow_lower] $$(date '+%H:%M:%S') host-cc done ($$(($$(date +%s)-t0))s)"
 	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
 	@cp $@ $(SHADOW_LOWER_SCRIPT)
 	@chmod +x $(SHADOW_LOWER_SCRIPT)
@@ -514,6 +531,8 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_BOOT_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_CO
 		done; \
 	fi
 	# arena_state/FFC live only in concurrent_c.o (see SHADOW_COMPTIME_ENGINE_OBJS).
+	@echo "[shadow_lower] $$(date '+%H:%M:%S') host-cc bootstrap start ($(BOOTSTRAP_DIR)/shadow_lower.c)"
+	@t0=$$(date +%s); \
 	$(CC) $(CFLAGS) -o $@ $(BOOTSTRAP_DIR)/shadow_lower.c \
 		-I$(SHADOW_BOOT_INC) -I$(BOOTSTRAP_DIR)/include -Iinclude -I../out/include \
 		-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
@@ -521,7 +540,8 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_BOOT_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_CO
 		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \
 		$(abspath $(SHADOW_COMPTIME_LIB)) \
 		$(abspath $(CPARSE_LIB)) \
-		$(LDFLAGS) $(LDLIBS)
+		$(LDFLAGS) $(LDLIBS) || exit $$?; \
+	echo "[shadow_lower] $$(date '+%H:%M:%S') host-cc bootstrap done ($$(($$(date +%s)-t0))s)"
 	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
 	@cp $@ $(SHADOW_LOWER_SCRIPT)
 	@chmod +x $(SHADOW_LOWER_SCRIPT)

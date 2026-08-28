@@ -532,6 +532,167 @@ static int shadow_ufcs_hook_resolve(const char* ty, const char* method,
     return 1;
 }
 
+typedef struct {
+    char outer[64];
+    char name[64];
+    char ty[64];
+} ShadowAsScanFld;
+
+static int shadow_as_scan_fld_push(ShadowAsScanFld** v, int* n, int* cap,
+                                  const char* outer, const char* name,
+                                  const char* ty) {
+    ShadowAsScanFld* nv;
+    int nc;
+    if (!v || !n || !cap || !name || !name[0] || !ty) return 0;
+    if (*n >= *cap) {
+        nc = *cap ? *cap * 2 : 8;
+        nv = (ShadowAsScanFld*)realloc(*v, (size_t)nc * sizeof(ShadowAsScanFld));
+        if (!nv) {
+            fprintf(stderr,
+                    "error: type: field harvest grow failed on '%s.%s'\n",
+                    outer && outer[0] ? outer : "(anonymous)", name);
+            g_shadow_ufcs_miss = 1;
+            return 0;
+        }
+        *v = nv;
+        *cap = nc;
+    }
+    snprintf((*v)[*n].outer, sizeof((*v)[0].outer), "%s", outer ? outer : "");
+    snprintf((*v)[*n].name, sizeof((*v)[0].name), "%s", name);
+    snprintf((*v)[*n].ty, sizeof((*v)[0].ty), "%s", ty);
+    (*n)++;
+    return 1;
+}
+
+/* `typedef @typeview Mode on Base { … } [*]? Alias` in an included face.
+ * Same-TU parse registers the alias and allow-list from the AST; an
+ * extracted `.h` is host C and has no AST_AT_STMT. */
+static void shadow_as_scan_typedef_typeviews(const char* text) {
+    const char* p;
+    if (!text) return;
+    p = text;
+    while (*p) {
+        const char* at;
+        const char* q;
+        const char* mode_s;
+        const char* base_s;
+        const char* body_s;
+        const char* body_e;
+        const char* alias_s;
+        size_t mode_n, base_n, alias_n, body_n;
+        char mode[64];
+        char base[96];
+        char alias[64];
+        char body[1024];
+        char base_ty[192];
+        int stars = 0;
+        int depth;
+        at = strstr(p, "@typeview");
+        if (!at) break;
+        if (at > text && shadow_is_ident_char(at[-1])) {
+            p = at + 9;
+            continue;
+        }
+        if (at[9] && shadow_is_ident_char(at[9])) {
+            p = at + 9;
+            continue;
+        }
+        q = at;
+        while (q > text && (q[-1] == ' ' || q[-1] == '\t' || q[-1] == '\n' ||
+                            q[-1] == '\r'))
+            q--;
+        if (!(q >= text + 7 && memcmp(q - 7, "typedef", 7) == 0 &&
+              (q == text + 7 || !shadow_is_ident_char(q[-8])))) {
+            p = at + 9;
+            continue;
+        }
+        q = at + 9;
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+        /* Sugar `typedef @typeview(Mode) Base*` is a different form. */
+        if (*q == '(') {
+            p = at + 9;
+            continue;
+        }
+        mode_s = q;
+        while (shadow_is_ident_char(*q)) q++;
+        mode_n = (size_t)(q - mode_s);
+        if (!mode_n || mode_n >= sizeof(mode)) {
+            p = at + 9;
+            continue;
+        }
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+        if (!(q[0] == 'o' && q[1] == 'n' && !shadow_is_ident_char(q[2]))) {
+            p = at + 9;
+            continue;
+        }
+        q += 2;
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+        base_s = q;
+        while (shadow_is_ident_char(*q)) q++;
+        base_n = (size_t)(q - base_s);
+        if (!base_n || base_n >= sizeof(base)) {
+            p = at + 9;
+            continue;
+        }
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+        if (*q != '{') {
+            p = at + 9;
+            continue;
+        }
+        body_s = q;
+        depth = 0;
+        do {
+            if (*q == '{') depth++;
+            else if (*q == '}') {
+                depth--;
+                q++;
+                if (depth == 0) break;
+                continue;
+            }
+            if (!*q) break;
+            q++;
+        } while (depth > 0);
+        body_e = q;
+        if (depth != 0) {
+            p = at + 9;
+            continue;
+        }
+        body_n = (size_t)(body_e - body_s);
+        if (body_n == 0 || body_n >= sizeof(body)) {
+            p = at + 9;
+            continue;
+        }
+        memcpy(body, body_s, body_n);
+        body[body_n] = 0;
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+        while (*q == '*') {
+            stars = 1;
+            q++;
+            while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+        }
+        alias_s = q;
+        while (shadow_is_ident_char(*q)) q++;
+        alias_n = (size_t)(q - alias_s);
+        if (!alias_n || alias_n >= sizeof(alias)) {
+            p = at + 9;
+            continue;
+        }
+        memcpy(mode, mode_s, mode_n);
+        mode[mode_n] = 0;
+        memcpy(base, base_s, base_n);
+        base[base_n] = 0;
+        memcpy(alias, alias_s, alias_n);
+        alias[alias_n] = 0;
+        (void)shadow_restrict_register(base, mode, body);
+        if (stars)
+            snprintf(base_ty, sizeof(base_ty), "%s_Restrict_%s*", base, mode);
+        else
+            snprintf(base_ty, sizeof(base_ty), "%s_Restrict_%s", base, mode);
+        shadow_td_alias_register(alias, base_ty);
+        p = q;
+    }
+}
+
 /* Scan header text for `Type field @as;` / `@typeview on T { as:… }`.
  * create/destroy/sink/niche/.ufcs come from CCSymbolTable via
  * shadow_ufcs_hooks_collect_* (one harvest — no parallel strstr). */
@@ -543,15 +704,16 @@ static void shadow_as_scan_header_text(const char* text) {
     char pend_field[8][64];
     char pend_target[8][64];
     int npend = 0;
-    /* All value fields of the current / recent structs — for typeview as:. */
-    char fld_outer[64][64];
-    char fld_name[64][64];
-    char fld_ty[64][64];
+    /* Current struct only. Grows. Reset at each `typedef struct` so a
+     * later anonymous alias (RtxDoc) is not a leftover of earlier types. */
+    ShadowAsScanFld* flds = NULL;
     int nfld = 0;
+    int fld_cap = 0;
     /* `@typeview on Base { … }` body capture (may span lines). */
     char tv_base[96];
     int tv_depth = 0;
     if (!text) return;
+    shadow_as_scan_typedef_typeviews(text);
     outer[0] = 0;
     tv_base[0] = 0;
     p = text;
@@ -583,15 +745,20 @@ static void shadow_as_scan_header_text(const char* text) {
                     outer[n] = 0;
                     in_typedef_struct = 1;
                     npend = 0;
+                    nfld = 0;
                 } else if (*s == '{') {
                     outer[0] = 0;
                     in_typedef_struct = 1;
                     npend = 0;
+                    nfld = 0;
                 }
             }
         }
-        if (in_typedef_struct && line[0] == '}') {
-            const char* a = line + 1;
+        {
+            const char* cl = line;
+            while (*cl == ' ' || *cl == '\t') cl++;
+            if (in_typedef_struct && *cl == '}') {
+            const char* a = cl + 1;
             int pi;
             while (*a == ' ' || *a == '\t') a++;
             if (((*a >= 'A' && *a <= 'Z') || (*a >= 'a' && *a <= 'z') ||
@@ -607,11 +774,15 @@ static void shadow_as_scan_header_text(const char* text) {
                      * later file uses field_ty_of, not this scan's fld_*. */
                     int fi;
                     for (fi = 0; fi < nfld; fi++) {
-                        if (!fld_outer[fi][0]) {
-                            snprintf(fld_outer[fi], sizeof(fld_outer[0]), "%s",
-                                     alias);
-                            shadow_field_register_ex(alias, fld_name[fi],
-                                                     fld_ty[fi]);
+                        int same = !flds[fi].outer[0] ||
+                                   (outer[0] &&
+                                    strcmp(flds[fi].outer, outer) == 0);
+                        if (same) {
+                            if (!flds[fi].outer[0])
+                                snprintf(flds[fi].outer, sizeof(flds[fi].outer),
+                                         "%s", alias);
+                            shadow_field_register_ex(alias, flds[fi].name,
+                                                     flds[fi].ty);
                         }
                     }
                     snprintf(outer, sizeof(outer), "%s", alias);
@@ -621,17 +792,26 @@ static void shadow_as_scan_header_text(const char* text) {
                 shadow_as_register(outer, pend_field[pi], pend_target[pi]);
             npend = 0;
             in_typedef_struct = 0;
+            }
         }
-        /* Record ordinary value fields for later typeview as: lookup. */
+        /* Record ordinary fields for later typeview as: lookup.
+         * `struct Tag name` and `Tag *name` are fields; register even
+         * when the local as: table is full. */
         if (in_typedef_struct) {
             const char* t0 = line;
             char fty[64];
             char fname[64];
             size_t ti = 0, fi = 0;
             const char* mid;
+            int stars = 0;
             while (*t0 == ' ' || *t0 == '\t') t0++;
-            if (strncmp(t0, "const ", 6) == 0) {
-                t0 += 6;
+            for (;;) {
+                if (strncmp(t0, "const ", 6) == 0) t0 += 6;
+                else if (strncmp(t0, "volatile ", 9) == 0) t0 += 9;
+                else if (strncmp(t0, "struct ", 7) == 0) t0 += 7;
+                else if (strncmp(t0, "union ", 6) == 0) t0 += 6;
+                else if (strncmp(t0, "enum ", 5) == 0) t0 += 5;
+                else break;
                 while (*t0 == ' ' || *t0 == '\t') t0++;
             }
             while (shadow_is_ident_char(t0[ti]) && ti + 1 < sizeof(fty)) {
@@ -641,20 +821,54 @@ static void shadow_as_scan_header_text(const char* text) {
             fty[ti] = 0;
             mid = t0 + ti;
             while (*mid == ' ' || *mid == '\t') mid++;
-            if (fty[0] && *mid != '*' && *mid != '(') {
+            while (*mid == '*') {
+                stars++;
+                mid++;
+                while (*mid == ' ' || *mid == '\t') mid++;
+            }
+            /* `double (*line_height)(...)` is a field. A leading `(` is
+             * the C declarator, not a reason to skip the member. */
+            if (fty[0] && *mid == '(') {
+                const char* q = mid + 1;
+                while (*q == ' ' || *q == '\t') q++;
+                if (*q == '*' || *q == '^') {
+                    q++;
+                    while (*q == ' ' || *q == '\t') q++;
+                    while (shadow_is_ident_char(q[fi]) && fi + 1 < sizeof(fname)) {
+                        fname[fi] = q[fi];
+                        fi++;
+                    }
+                    fname[fi] = 0;
+                    if (fname[0] && strcmp(fname, fty) != 0) {
+                        char fnty[64];
+                        while (stars > 0 && ti + 1 < sizeof(fty)) {
+                            fty[ti++] = '*';
+                            fty[ti] = 0;
+                            stars--;
+                        }
+                        snprintf(fnty, sizeof(fnty), "%s(*)", fty);
+                        if (outer[0])
+                            shadow_field_register_ex(outer, fname, fnty);
+                        (void)shadow_as_scan_fld_push(&flds, &nfld, &fld_cap,
+                                                      outer, fname, fnty);
+                    }
+                }
+            } else if (fty[0] && *mid != '(') {
                 while (shadow_is_ident_char(mid[fi]) && fi + 1 < sizeof(fname)) {
                     fname[fi] = mid[fi];
                     fi++;
                 }
                 fname[fi] = 0;
-                if (fname[0] && strcmp(fname, fty) != 0 && nfld < 64) {
-                    snprintf(fld_outer[nfld], sizeof(fld_outer[0]), "%s",
-                             outer);
-                    snprintf(fld_name[nfld], sizeof(fld_name[0]), "%s", fname);
-                    snprintf(fld_ty[nfld], sizeof(fld_ty[0]), "%s", fty);
-                    nfld++;
+                    if (fname[0] && strcmp(fname, fty) != 0) {
+                    while (stars > 0 && ti + 1 < sizeof(fty)) {
+                        fty[ti++] = '*';
+                        fty[ti] = 0;
+                        stars--;
+                    }
                     if (outer[0])
                         shadow_field_register_ex(outer, fname, fty);
+                    (void)shadow_as_scan_fld_push(&flds, &nfld, &fld_cap, outer,
+                                                  fname, fty);
                 }
             }
         }
@@ -675,14 +889,15 @@ static void shadow_as_scan_header_text(const char* text) {
             field[fi] = 0;
             t0 = line;
             while (*t0 == ' ' || *t0 == '\t') t0++;
-            /* Skip storage / qualifiers. */
+            /* Skip storage / qualifiers / `struct Tag`. */
             for (;;) {
-                if (strncmp(t0, "const ", 6) == 0) {
-                    t0 += 6;
-                    while (*t0 == ' ' || *t0 == '\t') t0++;
-                    continue;
-                }
-                break;
+                if (strncmp(t0, "const ", 6) == 0) t0 += 6;
+                else if (strncmp(t0, "volatile ", 9) == 0) t0 += 9;
+                else if (strncmp(t0, "struct ", 7) == 0) t0 += 7;
+                else if (strncmp(t0, "union ", 6) == 0) t0 += 6;
+                else if (strncmp(t0, "enum ", 5) == 0) t0 += 5;
+                else break;
+                while (*t0 == ' ' || *t0 == '\t') t0++;
             }
             while (shadow_is_ident_char(t0[ti]) && ti + 1 < sizeof(target)) {
                 target[ti] = t0[ti];
@@ -753,28 +968,38 @@ static void shadow_as_scan_header_text(const char* text) {
                     q += fi;
                     if (shadow_ty_is_glob(tv_base))
                         shadow_as_glob_register(tv_base, fname);
-                    for (i = 0; i < nfld; i++) {
-                        int match = 0;
-                        if (shadow_ty_is_glob(tv_base))
-                            match = shadow_restrict_pattern_matches(
-                                        tv_base, fld_outer[i]) &&
-                                    strcmp(fld_name[i], fname) == 0;
-                        else
-                            match = strcmp(fld_outer[i], tv_base) == 0 &&
-                                    strcmp(fld_name[i], fname) == 0;
-                        if (match) {
-                            shadow_as_register(fld_outer[i], fname, fld_ty[i]);
-                            if (shadow_ty_is_glob(tv_base)) {
-                                int gi;
-                                for (gi = 0; gi < g_shadow_nas_globs; gi++) {
-                                    if (strcmp(g_shadow_as_globs[gi].pat,
-                                               tv_base) == 0 &&
-                                        strcmp(g_shadow_as_globs[gi].field,
-                                               fname) == 0)
-                                        g_shadow_as_globs[gi].hits++;
+                    {
+                        int matched = 0;
+                        char fty[64];
+                        for (i = 0; i < nfld; i++) {
+                            int match = 0;
+                            if (shadow_ty_is_glob(tv_base))
+                                match = shadow_restrict_pattern_matches(
+                                            tv_base, flds[i].outer) &&
+                                        strcmp(flds[i].name, fname) == 0;
+                            else
+                                match = strcmp(flds[i].outer, tv_base) == 0 &&
+                                        strcmp(flds[i].name, fname) == 0;
+                            if (match) {
+                                shadow_as_register(flds[i].outer, fname,
+                                                   flds[i].ty);
+                                matched = 1;
+                                if (shadow_ty_is_glob(tv_base)) {
+                                    int gi;
+                                    for (gi = 0; gi < g_shadow_nas_globs; gi++) {
+                                        if (strcmp(g_shadow_as_globs[gi].pat,
+                                                   tv_base) == 0 &&
+                                            strcmp(g_shadow_as_globs[gi].field,
+                                                   fname) == 0)
+                                            g_shadow_as_globs[gi].hits++;
+                                    }
                                 }
                             }
                         }
+                        if (!matched && !shadow_ty_is_glob(tv_base) &&
+                            shadow_field_ty_of(tv_base, fname, fty,
+                                              sizeof(fty)))
+                            shadow_as_register(tv_base, fname, fty);
                     }
                     while (*q == ' ' || *q == '\t') q++;
                     if (*q == ',') {
@@ -802,10 +1027,69 @@ static void shadow_as_scan_header_text(const char* text) {
         if (!nl) break;
         p = nl + 1;
     }
+    free(flds);
 }
 
-/* Follow one level of #include <ccc/…> / "…" inside scanned text. */
-static void shadow_as_scan_nested_incs(const char* text, int depth) {
+static int shadow_as_project_header_read(const char* rel, const char* from_dir,
+                                          char** out, size_t* out_len,
+                                          char* opened, size_t ocap) {
+    char cand[512];
+    if (!rel || !rel[0] || !out || !out_len) return 0;
+    *out = NULL;
+    *out_len = 0;
+    if (opened && ocap) opened[0] = 0;
+    if (!shadow_project_face_path(rel, from_dir, cand, sizeof(cand)))
+        return 0;
+    if (opened && ocap) snprintf(opened, ocap, "%s", cand);
+    return read_file(cand, out, out_len) && *out != NULL;
+}
+
+static void shadow_as_scan_nested_incs(const char* text, int depth,
+                                      const char* from_dir);
+
+static void shadow_as_scan_opened(const char* rel, const char* opened_path,
+                                 char* text, size_t tlen, int compile,
+                                 int nest, const char* from_dir) {
+    char ndir[512];
+    if (!text) return;
+    shadow_as_scan_header_text(text);
+    shadow_ufcs_hooks_collect_text(rel, text, tlen, compile);
+    if (nest <= 0) return;
+    ndir[0] = 0;
+    if (opened_path && opened_path[0])
+        shadow_dir_of(opened_path, ndir, sizeof(ndir));
+    shadow_as_scan_nested_incs(text, nest, ndir[0] ? ndir : from_dir);
+}
+
+static int shadow_as_scan_rel(const char* rel, const char* from_dir,
+                              int compile, int nest) {
+    char* text = NULL;
+    size_t tlen = 0;
+    char opened[512];
+    const char* fam = rel;
+    if (!rel || !rel[0]) return 0;
+    opened[0] = 0;
+    if (strncmp(rel, "ccc/", 4) == 0) fam = rel + 4;
+    if (shadow_family_header_read(fam, &text, &tlen) && text) {
+        shadow_as_scan_opened(rel, NULL, text, tlen, compile, nest, from_dir);
+        free(text);
+        return 1;
+    }
+    if (shadow_as_project_header_read(rel, from_dir, &text, &tlen, opened,
+                                     sizeof(opened)) &&
+        text) {
+        shadow_as_scan_opened(rel, opened, text, tlen, compile, nest,
+                             from_dir);
+        free(text);
+        return 1;
+    }
+    return 0;
+}
+
+/* Follow #include <ccc/…> / "…" — stdlib via family read, project
+ * faces beside the including file (driver-rewritten .h included). */
+static void shadow_as_scan_nested_incs(const char* text, int depth,
+                                      const char* from_dir) {
     const char* p;
     if (!text || depth <= 0) return;
     p = text;
@@ -813,8 +1097,6 @@ static void shadow_as_scan_nested_incs(const char* text, int depth) {
         const char* lt;
         const char* gt;
         char rel[256];
-        char* nested = NULL;
-        size_t tlen = 0;
         size_t n;
         p += 8;
         lt = strchr(p, '<');
@@ -845,33 +1127,20 @@ static void shadow_as_scan_nested_incs(const char* text, int depth) {
                 rel[rl + 4] = 0;
             }
         }
-        if (strncmp(rel, "ccc/", 4) == 0) {
-            if (shadow_family_header_read(rel + 4, &nested, &tlen) && nested) {
-                shadow_as_scan_header_text(nested);
-                shadow_ufcs_hooks_collect_text(rel, nested, tlen, 0);
-                shadow_as_scan_nested_incs(nested, depth - 1);
-                free(nested);
-            }
-        } else if (shadow_family_header_read(rel, &nested, &tlen) && nested) {
-            shadow_as_scan_header_text(nested);
-            shadow_ufcs_hooks_collect_text(rel, nested, tlen, 0);
-            shadow_as_scan_nested_incs(nested, depth - 1);
-            free(nested);
-        }
+        shadow_as_scan_rel(rel, from_dir, 0, depth - 1);
         p = gt + 1;
     }
 }
 
 /* Resolve #include <ccc/…> / "…" from pass_inc lines and scan for @as/hooks. */
-static void shadow_as_scan_pass_inc(char pass_inc[][256], int npass_inc) {
+static void shadow_as_scan_pass_inc(char pass_inc[][256], int npass_inc,
+                                   const char* from_dir) {
     int i;
     for (i = 0; i < npass_inc; i++) {
         const char* line = pass_inc[i];
         const char* lt;
         const char* gt;
         char rel[256];
-        char* text = NULL;
-        size_t tlen = 0;
         size_t n;
         if (!line) continue;
         lt = strchr(line, '<');
@@ -900,20 +1169,7 @@ static void shadow_as_scan_pass_inc(char pass_inc[][256], int npass_inc) {
                 rel[rl + 4] = 0;
             }
         }
-        /* strip ccc/ prefix for cc/include/ccc/ layout */
-        if (strncmp(rel, "ccc/", 4) == 0) {
-            if (shadow_family_header_read(rel + 4, &text, &tlen) && text) {
-                shadow_as_scan_header_text(text);
-                shadow_ufcs_hooks_collect_text(rel, text, tlen, 0);
-                shadow_as_scan_nested_incs(text, 2);
-                free(text);
-            }
-        } else if (shadow_family_header_read(rel, &text, &tlen) && text) {
-            shadow_as_scan_header_text(text);
-            shadow_ufcs_hooks_collect_text(rel, text, tlen, 0);
-            shadow_as_scan_nested_incs(text, 2);
-            free(text);
-        }
+        shadow_as_scan_rel(rel, from_dir, 0, 2);
     }
 }
 
@@ -928,8 +1184,14 @@ static void shadow_as_scan_tapes(TapeCache* cache) {
         size_t tlen = 0;
         if (!ft) continue;
         if (ft->bytes && ft->len > 0) {
+            char ndir[512];
+            ndir[0] = 0;
             shadow_as_scan_header_text(ft->bytes);
             shadow_ufcs_hooks_collect_spliced_marks(ft->bytes);
+            if (ft->path && ft->path[0])
+                shadow_dir_of(ft->path, ndir, sizeof(ndir));
+            shadow_as_scan_nested_incs(ft->bytes, 2,
+                                       ndir[0] ? ndir : NULL);
         }
         if (!ft->path || !ft->path[0]) continue;
         if (!read_file(ft->path, &text, &tlen) || !text) continue;
@@ -972,14 +1234,19 @@ static void shadow_as_scan_lowered_local_cch(void) {
     }
 }
 
-/* Original TU source (pre-blank): stage1 blanks @comptime on tapes. */
+/* Original TU source (pre-blank): stage1 blanks @comptime on tapes.
+ * Follow quoted includes — after driver rewrite those are .h passthrough. */
 static void shadow_as_scan_src_path(const char* path) {
     char* text = NULL;
     size_t n = 0;
+    char from_dir[512];
     if (!path || !path[0]) return;
     if (!read_file(path, &text, &n) || !text) return;
     shadow_as_scan_header_text(text);
     shadow_ufcs_hooks_collect_text(path, text, n, 1);
+    from_dir[0] = 0;
+    shadow_fill_quote_dir(path, from_dir, sizeof(from_dir));
+    shadow_as_scan_nested_incs(text, 2, from_dir[0] ? from_dir : NULL);
     free(text);
 }
 

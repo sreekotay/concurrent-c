@@ -729,8 +729,14 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         for (si = 0; si < n; si++) shadow_collect_task_sends(items[si]);
     }
     /* @as embeds + destroy hooks from included headers (not spliced into AST). */
-    if (npass_inc > 0 && pass_inc)
-        shadow_as_scan_pass_inc(pass_inc, npass_inc);
+    if (npass_inc > 0 && pass_inc) {
+        char from_dir[512];
+        from_dir[0] = 0;
+        if (src_path && src_path[0])
+            shadow_fill_quote_dir(src_path, from_dir, sizeof(from_dir));
+        shadow_as_scan_pass_inc(pass_inc, npass_inc,
+                               from_dir[0] ? from_dir : NULL);
+    }
     /* Warmed angle-includes (@as / hooks still present in .cch text). */
     shadow_as_scan_tapes(cache);
     /* Quoted local `.cch` lowered to `.h` — scan the original source. */

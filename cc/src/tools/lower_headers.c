@@ -27,6 +27,7 @@
 #include <unistd.h>
 
 #include "header/lower_header.h"
+#include "util/io.h"
 
 /* Create directory and all parents */
 static int mkpath(const char* path, mode_t mode) {
@@ -133,9 +134,6 @@ static char* rel_out_path(const char* input_dir, const char* output_dir,
 
 static int copy_passthrough_h(const char* src_path, const char* dst_path) {
     FILE* in;
-    FILE* out;
-    char buf[64 * 1024];
-    size_t n;
     char* h_dir = strdup(dst_path);
     if (!h_dir) return ENOMEM;
     char* last_slash = strrchr(h_dir, '/');
@@ -147,21 +145,32 @@ static int copy_passthrough_h(const char* src_path, const char* dst_path) {
 
     in = fopen(src_path, "rb");
     if (!in) return errno ? errno : -1;
-    out = fopen(dst_path, "wb");
-    if (!out) {
+    if (fseek(in, 0, SEEK_END) != 0) {
         int e = errno;
         fclose(in);
         return e ? e : -1;
     }
-    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
-        if (fwrite(buf, 1, n, out) != n) {
-            fclose(in);
-            fclose(out);
-            return EIO;
-        }
+    long len = ftell(in);
+    if (len < 0) {
+        int e = errno;
+        fclose(in);
+        return e ? e : -1;
     }
+    if (fseek(in, 0, SEEK_SET) != 0) {
+        int e = errno;
+        fclose(in);
+        return e ? e : -1;
+    }
+    char* buf = malloc((size_t)len + 1);
+    if (!buf) {
+        fclose(in);
+        return ENOMEM;
+    }
+    size_t n = fread(buf, 1, (size_t)len, in);
     fclose(in);
-    if (fclose(out) != 0) return errno ? errno : -1;
+    int err = cc_write_file_if_changed(dst_path, buf, n);
+    free(buf);
+    if (err) return err;
     printf("  passthrough: %s -> %s\n", src_path, dst_path);
     return 0;
 }
@@ -319,10 +328,8 @@ static int rewrite_source_file(const char* src_path, const char* dst_path) {
     const char* to_write = rewritten ? rewritten : buf;
     size_t to_write_len = rewritten ? strlen(rewritten) : nread;
 
-    FILE* out = fopen(dst_path, "wb");
-    if (!out) { int e = errno; free(buf); free(rewritten); return e ? e : -1; }
-    fwrite(to_write, 1, to_write_len, out);
-    fclose(out);
+    int werr = cc_write_file_if_changed(dst_path, to_write, to_write_len);
+    if (werr) { free(buf); free(rewritten); return werr; }
 
     if (changed) printf("  rewrite: %s -> %s\n", src_path, dst_path);
 

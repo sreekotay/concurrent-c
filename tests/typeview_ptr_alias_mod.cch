@@ -1,0 +1,18 @@
+#ifndef TESTS_TYPEVIEW_PTR_ALIAS_MOD_CCH
+#define TESTS_TYPEVIEW_PTR_ALIAS_MOD_CCH
+
+/* Same shape as RtxDocLayout: named view, pointer alias, used from
+ * another TU. `d->style_at(off)` is pointer UFCS, not a value `.`. */
+typedef struct {
+    int n;
+} TvPtrDoc;
+
+static int TvPtrDoc_style_at(TvPtrDoc *d, int off) {
+    return d ? d->n + off : 0;
+}
+
+typedef @typeview Layout on TvPtrDoc {
+    r: style_at;
+} *TvPtrDocLayout;
+
+#endif

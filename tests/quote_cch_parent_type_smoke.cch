@@ -1,0 +1,10 @@
+#ifndef QUOTE_CCH_PARENT_TYPE_SMOKE_CCH
+#define QUOTE_CCH_PARENT_TYPE_SMOKE_CCH
+
+typedef struct {
+    int n;
+} QuoteParentT;
+
+#include "quote_cch_parent_type_helper.cch"
+
+#endif

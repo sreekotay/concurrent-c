@@ -823,11 +823,34 @@ static int handle_include(Pp* pp) {
         }
         if (!pp_quote_include_passthrough_line(hdr.spell, line, sizeof(line)))
             return 0;
-        /* Stay at the #include site. Hoisting quoted locals into pass_inc
+        /* Host still sees the `.h`. Extracted project faces stay CC faces:
+         * warm the original tape (quote dir / including dir) so harvest
+         * sees fields, type views, and typehooks — same as `<ccc/…>`.
+         * Stay at the #include site. Hoisting quoted locals into pass_inc
          * puts a lowered chapter .h above types the .ccs just defined
-         * (`RtxNode` before `#include "piece_tree_rb.cch"`). Umbrellas
-         * already inject here; ordinary `"….h"` (including driver-rewritten
-         * local `.cch`) must too. */
+         * (`RtxNode` before `#include "piece_tree_rb.cch"`). */
+        {
+            const char* sp = NULL;
+            size_t sn = 0;
+            char rel[256];
+            char face_path[512];
+            char from_dir[512];
+            FileTape* cur;
+            pp_quote_include_path(hdr.spell, &sp, &sn);
+            if (sn >= sizeof(rel)) sn = sizeof(rel) - 1;
+            if (sp && sn) memcpy(rel, sp, sn);
+            rel[sn] = 0;
+            from_dir[0] = 0;
+            cur = (pp->nf > 0) ? pp->frames[pp->nf - 1].tape : NULL;
+            if (cur && cur->path && cur->path[0])
+                shadow_dir_of(cur->path, from_dir, sizeof(from_dir));
+            else if (pp->search_dir && pp->search_dir[0])
+                snprintf(from_dir, sizeof(from_dir), "%s", pp->search_dir);
+            if (rel[0] &&
+                shadow_project_face_path(rel, from_dir[0] ? from_dir : NULL,
+                                         face_path, sizeof(face_path)))
+                (void)tape_cache_load(pp->cache, face_path, pp->arena);
+        }
         pp_skip_line(pp);
         return pp_inject_include_at_hash(pp, hdr, line);
     }

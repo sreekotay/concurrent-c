@@ -1,0 +1,65 @@
+#ifndef TESTS_QUOTE_CCH_AS_FIELD_MOD_CCH
+#define TESTS_QUOTE_CCH_AS_FIELD_MOD_CCH
+
+#include <ccc/std/prelude.cch>
+
+/* Earlier anonymous alias in the same face (RtxHlWin before RtxDoc). */
+typedef struct {
+    int from;
+    int n;
+} QuoteAsPad;
+
+typedef struct QuoteAsTree {
+    int n;
+} QuoteAsTree;
+
+static void QuoteAsTree_destroy(QuoteAsTree* t) {
+    if (t) t->n = -1;
+}
+
+static int QuoteAsTree_write_fd(QuoteAsTree* t, int fd) {
+    (void)fd;
+    return t ? t->n : -2;
+}
+
+typedef struct {
+    struct QuoteAsTree tree;
+    CCArena session;
+    CCArena analysis;
+} QuoteAsDoc;
+
+static int QuoteAsDoc_len(QuoteAsDoc* d) {
+    return d ? d->tree.n : 0;
+}
+
+#include "quote_cch_as_field_acc.cch"
+
+static void QuoteAsDoc_destroy(QuoteAsDoc* d) {
+    if (d) d->tree.n = 99;
+}
+
+@typehooks on QuoteAsDoc {
+    .destroy = QuoteAsDoc_destroy,
+};
+
+@typeview on QuoteAsDoc {
+    as: tree;
+};
+
+#ifdef QUOTE_AS_FIELD_IMPL
+typedef @typeview Highlight on QuoteAsDoc {
+    r: len, tree;
+} *QuoteAsDocHighlight;
+
+@typeview Layout on QuoteAsDoc {
+    r: len;
+};
+#endif
+
+static inline int QuoteAsDoc_caret_to_end(QuoteAsDoc* d) {
+    return d ? d->len() : 0;
+}
+
+void quote_as_field_use_hl(@typeview(Highlight) QuoteAsDoc* d);
+
+#endif

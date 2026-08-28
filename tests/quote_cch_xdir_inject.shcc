@@ -1,0 +1,36 @@
+/* Extracted frontend leaf plants the core face that defines QuoteXdirWs. */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+CCCommand emit = cc_command(&a, @slice("./cc/bin/ccc"));
+emit.arg("--emit-c-only");
+emit.arg("tests/quote_cch_xdir_smoke.ccs");
+emit.arg("-o");
+emit.arg("out/quote_cch_xdir_smoke.c");
+emit.inherit_stdio();
+int rc = emit.status() !>;
+if (rc != 0) {
+    "emit xdir smoke failed".println() !>;
+    return 1;
+}
+
+CCCommand grep_inc = cc_command(&a, @slice("grep"));
+grep_inc.arg("-q");
+grep_inc.arg("ws.h");
+grep_inc.arg("out/include/tests/quote_cch_xdir_front/draw.h");
+rc = grep_inc.status() !>;
+if (rc != 0) {
+    "extracted draw.h missing include of core ws.h".println() !>;
+    return 1;
+}
+
+CCCommand grep_tag = cc_command(&a, @slice("grep"));
+grep_tag.arg("-E");
+grep_tag.arg("typedef struct QuoteXdirWs QuoteXdirWs");
+grep_tag.arg("out/include/tests/quote_cch_xdir_front/draw.h");
+rc = grep_tag.status() !>;
+if (rc == 0) {
+    "extracted draw.h invented a tagged struct".println() !>;
+    return 1;
+}
+
+return 0;

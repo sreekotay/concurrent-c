@@ -1,0 +1,35 @@
+#!ccc ccs
+/* Explicit sibling-field peel wins over as: doc. Snake family spelling
+ * lives only on the included face (not as Type_meth, not in this TU). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "ufcs_as_sibling_snake.cch"
+
+int main(void) {
+    SiblingBuf b;
+    LayoutBox L;
+    b.doc.n = 0;
+    b.layout.view = 0;
+    L.view = 0;
+    b.doc.from_n(7);
+    if (b.doc.n != 7) {
+        printf("as: doc peel failed n=%d\n", b.doc.n);
+        return 1;
+    }
+    L.set_view(2);
+    if (L.view != 2) {
+        printf("standalone snake set_view failed view=%d\n", L.view);
+        return 2;
+    }
+    b.layout.set_view(3);
+    if (b.layout.view != 3) {
+        printf("sibling field snake set_view failed view=%d\n", b.layout.view);
+        return 3;
+    }
+    if (b.doc.n != 7) {
+        printf("as: peel mutated doc n=%d\n", b.doc.n);
+        return 4;
+    }
+    printf("ok\n");
+    return 0;
+}

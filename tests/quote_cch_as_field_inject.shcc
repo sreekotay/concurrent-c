@@ -1,0 +1,159 @@
+/* Extracted face names the Highlight / Layout view types at file scope.
+ * Guest emit peels d->tree — not the doc Type_destroy. */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+CCCommand emit = cc_command(&a, @slice("./cc/bin/ccc"));
+emit.arg("--emit-c-only");
+emit.arg("tests/quote_cch_as_field_smoke.ccs");
+emit.arg("-o");
+emit.arg("out/quote_cch_as_field_smoke.c");
+emit.inherit_stdio();
+int rc = emit.status() !>;
+if (rc != 0) {
+    "emit guest failed".println() !>;
+    return 1;
+}
+
+CCCommand grep_hl = cc_command(&a, @slice("grep"));
+grep_hl.arg("-q");
+grep_hl.arg("typedef QuoteAsDoc QuoteAsDoc_Restrict_Highlight");
+grep_hl.arg("out/include/tests/quote_cch_as_field_mod.h");
+rc = grep_hl.status() !>;
+if (rc != 0) {
+    "extracted .h missing Highlight typedef".println() !>;
+    return 1;
+}
+
+CCCommand grep_ly = cc_command(&a, @slice("grep"));
+grep_ly.arg("-q");
+grep_ly.arg("typedef QuoteAsDoc QuoteAsDoc_Restrict_Layout");
+grep_ly.arg("out/include/tests/quote_cch_as_field_mod.h");
+rc = grep_ly.status() !>;
+if (rc != 0) {
+    "extracted .h missing Layout typedef".println() !>;
+    return 1;
+}
+
+CCCommand grep_inline = cc_command(&a, @slice("grep"));
+grep_inline.arg("-E");
+grep_inline.arg("(\\.|->)len\\(");
+grep_inline.arg("out/include/tests/quote_cch_as_field_mod.h");
+rc = grep_inline.status() !>;
+if (rc == 0) {
+    "extracted .h left d->len as a member".println() !>;
+    return 1;
+}
+
+CCCommand grep_inline_fn = cc_command(&a, @slice("grep"));
+grep_inline_fn.arg("-q");
+grep_inline_fn.arg("QuoteAsDoc_len");
+grep_inline_fn.arg("out/include/tests/quote_cch_as_field_mod.h");
+rc = grep_inline_fn.status() !>;
+if (rc != 0) {
+    "extracted .h missing caret_to_end UFCS rewrite".println() !>;
+    return 1;
+}
+
+CCCommand grep_acc_fn = cc_command(&a, @slice("grep"));
+grep_acc_fn.arg("-q");
+grep_acc_fn.arg("QuoteAsDoc_end_off");
+grep_acc_fn.arg("out/include/tests/quote_cch_as_field_acc.h");
+rc = grep_acc_fn.status() !>;
+if (rc != 0) {
+    "nested extract missing end_off".println() !>;
+    return 1;
+}
+
+CCCommand grep_acc_len = cc_command(&a, @slice("grep"));
+grep_acc_len.arg("-q");
+grep_acc_len.arg("QuoteAsDoc_len");
+grep_acc_len.arg("out/include/tests/quote_cch_as_field_acc.h");
+rc = grep_acc_len.status() !>;
+if (rc != 0) {
+    "nested extract missing end_off UFCS rewrite".println() !>;
+    return 1;
+}
+
+CCCommand grep_acc_mem = cc_command(&a, @slice("grep"));
+grep_acc_mem.arg("-E");
+grep_acc_mem.arg("(\\.|->)len\\(");
+grep_acc_mem.arg("out/include/tests/quote_cch_as_field_acc.h");
+rc = grep_acc_mem.status() !>;
+if (rc == 0) {
+    "nested extract left d->len as a member".println() !>;
+    return 1;
+}
+
+CCCommand grep_doc = cc_command(&a, @slice("grep"));
+grep_doc.arg("-E");
+grep_doc.arg("QuoteAsDoc_destroy\\(&d(\\.|->)tree\\)");
+grep_doc.arg("out/quote_cch_as_field_smoke.c");
+rc = grep_doc.status() !>;
+if (rc == 0) {
+    "guest emit bound tree.destroy to the doc".println() !>;
+    return 1;
+}
+
+CCCommand grep_tree = cc_command(&a, @slice("grep"));
+grep_tree.arg("-q");
+grep_tree.arg("QuoteAsTree_destroy");
+grep_tree.arg("out/quote_cch_as_field_smoke.c");
+rc = grep_tree.status() !>;
+if (rc != 0) {
+    "guest emit missing tree.destroy peel".println() !>;
+    return 1;
+}
+
+CCCommand grep_len = cc_command(&a, @slice("grep"));
+grep_len.arg("-q");
+grep_len.arg("QuoteAsDoc_len");
+grep_len.arg("out/quote_cch_as_field_smoke.c");
+rc = grep_len.status() !>;
+if (rc != 0) {
+    "guest emit left d->len as a member".println() !>;
+    return 1;
+}
+
+CCCommand grep_alloc = cc_command(&a, @slice("grep"));
+grep_alloc.arg("-E");
+grep_alloc.arg("(\\.|->)alloc_slice_bytes");
+grep_alloc.arg("out/quote_cch_as_field_smoke.c");
+rc = grep_alloc.status() !>;
+if (rc == 0) {
+    "guest emit left alloc_slice_bytes as a member".println() !>;
+    return 1;
+}
+
+CCCommand emit_owner = cc_command(&a, @slice("./cc/bin/ccc"));
+emit_owner.arg("--emit-c-only");
+emit_owner.arg("tests/quote_cch_as_field_owner.ccs");
+emit_owner.arg("-o");
+emit_owner.arg("out/quote_cch_as_field_owner.c");
+emit_owner.inherit_stdio();
+rc = emit_owner.status() !>;
+if (rc != 0) {
+    "emit owner failed".println() !>;
+    return 1;
+}
+
+CCCommand grep_owner_doc = cc_command(&a, @slice("grep"));
+grep_owner_doc.arg("-E");
+grep_owner_doc.arg("QuoteAsDoc_destroy\\(&d(\\.|->)tree\\)");
+grep_owner_doc.arg("out/quote_cch_as_field_owner.c");
+rc = grep_owner_doc.status() !>;
+if (rc == 0) {
+    "owner emit bound tree.destroy to the doc".println() !>;
+    return 1;
+}
+
+CCCommand grep_owner_tree = cc_command(&a, @slice("grep"));
+grep_owner_tree.arg("-q");
+grep_owner_tree.arg("QuoteAsTree_destroy");
+grep_owner_tree.arg("out/quote_cch_as_field_owner.c");
+rc = grep_owner_tree.status() !>;
+if (rc != 0) {
+    "owner emit missing tree.destroy peel".println() !>;
+    return 1;
+}
+
+return 0;

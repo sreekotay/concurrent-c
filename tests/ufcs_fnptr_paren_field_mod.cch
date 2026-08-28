@@ -1,0 +1,12 @@
+#ifndef TESTS_UFCS_FNPTR_PAREN_FIELD_MOD_CCH
+#define TESTS_UFCS_FNPTR_PAREN_FIELD_MOD_CCH
+
+/* Same shape as RtxMeasure: tagged-less typedef, parenthesized fnptr
+ * fields, then a data pointer. `m->line_height(...)` is C, not UFCS. */
+typedef struct {
+    double (*measure)(void *ctx, int n);
+    double (*line_height)(void *ctx, int style);
+    void *ctx;
+} UfcsParenMeasure;
+
+#endif

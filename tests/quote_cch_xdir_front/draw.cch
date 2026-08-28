@@ -1,0 +1,8 @@
+#ifndef TESTS_QUOTE_CCH_XDIR_FRONT_DRAW_CCH
+#define TESTS_QUOTE_CCH_XDIR_FRONT_DRAW_CCH
+
+/* Names QuoteXdirWs* with no include. The including unit pulls in
+ * ../quote_cch_xdir_core/ws.cch; extract must plant that face. */
+int quote_xdir_w(QuoteXdirWs *w);
+
+#endif

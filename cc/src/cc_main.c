@@ -1751,6 +1751,7 @@ static void cc__replay_diag_sidecar(const char* c_out_path) {
 }
 
 static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path);
+static int cc__find_shadow_lower(char* dst, size_t cap);
 
 /* Emit .ccs/.shcc via native shadow_lower (legacy multipass driver removed). */
 static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, const char* out_path, const CCCompileConfig* cfg) {
@@ -2262,6 +2263,30 @@ static uint64_t cc__fold_file_content(uint64_t h, const char* path) {
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0) h = cc__fnv1a64_update(h, buf, n);
     fclose(f);
     return h;
+}
+
+/* Driver identity for emit keys. `.ccc-bin` mtime is second-granular;
+ * extract / header UFCS live in this binary, so fold its bytes. */
+static uint64_t cc__fold_ccc_driver(uint64_t h) {
+    const char* path = g_ccc_sig_path[0] ? g_ccc_sig_path : g_ccc_path;
+    h = cc__fnv1a64_str(h, "\x03" "ccc:");
+    if (!path || !path[0]) return cc__fnv1a64_str(h, "<absent>");
+    h = cc__fnv1a64_str(h, path);
+    return cc__fold_file_content(h, path);
+}
+
+/* Lowering identity for emit keys. `ccc` is a wrapper; product emit is
+ * `shadow_lower`. Fold that binary's bytes (not mtime): a rebuild with
+ * identical size in the same second must still miss. */
+static uint64_t cc__fold_shadow_lower(uint64_t h) {
+    char path[PATH_MAX];
+    path[0] = '\0';
+    h = cc__fnv1a64_str(h, "\x03" "shadow_lower:");
+    if (cc__find_shadow_lower(path, sizeof(path)) != 0) {
+        return cc__fnv1a64_str(h, "<absent>");
+    }
+    h = cc__fnv1a64_str(h, path);
+    return cc__fold_file_content(h, path);
 }
 
 /* Match an identifier token `kw` at `src[p..]` not followed by an ident char. */
@@ -2967,6 +2992,8 @@ static int cc__build_one_target_objs(int idx,
                 }
                 h = cc__fold_cc_depends(h, src_abs);
                 h = cc__fold_cch_includes(h, src_abs, t_cc_flags);
+                h = cc__fold_ccc_driver(h);
+                h = cc__fold_shadow_lower(h);
                 emit_key = h;
                 uint64_t prev = 0;
                 if (file_exists(c_out) && cc__read_u64_file(meta_path, &prev) == 0 && prev == emit_key) {
@@ -4151,7 +4178,8 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         const char* build_path = opt->build_override ? opt->build_override : choose_build_path(opt->in_path, build_buf, sizeof(build_buf), &multiple);
         if (multiple) build_path = NULL;
         if (build_path && cc__stat_sig(build_path, &build_sig) != 0) { build_sig.mtime_sec = 0; build_sig.size = 0; }
-        /* Emit is host-agnostic: key on ccc (lowering), not the host C compiler. */
+        /* Emit is host-agnostic: key on the lowering toolchain
+         * (shadow_lower content + ccc driver), not the host C compiler. */
         if (cc__stat_sig(g_ccc_sig_path[0] ? g_ccc_sig_path : g_ccc_path, &ccc_sig) != 0) { ccc_sig.mtime_sec = 0; ccc_sig.size = 0; }
 
         uint64_t h = 1469598103934665603ULL;
@@ -4182,6 +4210,8 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
          * dependency's content so editing a comptime-read file re-triggers emit. */
         h = cc__fold_cc_depends(h, opt->in_path);
         h = cc__fold_cch_includes(h, opt->in_path, opt->cc_flags);
+        h = cc__fold_ccc_driver(h);
+        h = cc__fold_shadow_lower(h);
         emit_key = h;
 
         uint64_t prev = 0;
@@ -6204,6 +6234,8 @@ static int run_build_mode(int argc, char** argv) {
                 }
                 h = cc__fold_cc_depends(h, inputs[i]);
                 h = cc__fold_cch_includes(h, inputs[i], cc_flags);
+                h = cc__fold_ccc_driver(h);
+                h = cc__fold_shadow_lower(h);
                 emit_key = h;
 
                 uint64_t prev = 0;

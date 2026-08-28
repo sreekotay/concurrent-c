@@ -21,6 +21,7 @@
 #include "preprocess/preprocess.h"
 #include "preprocess/unit_header.h"
 #include "preprocess/type_graph.h"
+#include "util/io.h"
 #include "util/text.h"
 #include "visitor/pass_type_syntax.h"
 
@@ -783,19 +784,8 @@ int cc_lower_header(const char* cch_path, const char* h_path) {
     const char* to_write = output ? output : input;
     size_t to_write_len = output ? strlen(output) : read_len;
     
-    /* Write output file */
-    FILE* out = fopen(h_path, "w");
-    if (!out) {
-        int err = errno;
-        free(input);
-        free(output);
-        return err ? err : -1;
-    }
-    
-    fwrite(to_write, 1, to_write_len, out);
-    fclose(out);
-    
+    int err = cc_write_file_if_changed(h_path, to_write, to_write_len);
     free(input);
     free(output);
-    return 0;
+    return err;
 }

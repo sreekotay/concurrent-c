@@ -1377,6 +1377,127 @@ static inline char* cc_rewrite_as_attr_to_comment(const char* src, size_t n) {
     return out;
 }
 
+/* Note a named-view (Base, Mode) pair. */
+static inline void cc_tv_note_pair(char bases[][64], char modes[][64], int* n,
+                                   int cap, const char* base, size_t bl,
+                                   const char* mode, size_t ml) {
+    int i;
+    if (!base || !mode || !n || bl == 0 || ml == 0 || *n >= cap) return;
+    if (bl >= 64) bl = 63;
+    if (ml >= 64) ml = 63;
+    for (i = 0; i < *n; i++) {
+        if (strlen(bases[i]) == bl && memcmp(bases[i], base, bl) == 0 &&
+            strlen(modes[i]) == ml && memcmp(modes[i], mode, ml) == 0)
+            return;
+    }
+    memcpy(bases[*n], base, bl);
+    bases[*n][bl] = 0;
+    memcpy(modes[*n], mode, ml);
+    modes[*n][ml] = 0;
+    (*n)++;
+}
+
+/* True when `needle` appears at `#if` depth 0 (not only under `#ifdef IMPL`). */
+static inline int cc_tv_typedef_file_scope(const char* out, size_t w,
+                                           const char* needle, size_t nlen) {
+    size_t i = 0;
+    int depth = 0;
+    if (!out || !needle || !nlen) return 0;
+    while (i < w) {
+        if (i == 0 || out[i - 1] == '\n') {
+            size_t j = i;
+            while (j < w && (out[j] == ' ' || out[j] == '\t')) j++;
+            if (j < w && out[j] == '#') {
+                j++;
+                while (j < w && (out[j] == ' ' || out[j] == '\t')) j++;
+                if (j + 6 <= w && memcmp(out + j, "ifndef", 6) == 0) {
+                    size_t name_l, name_r, k, nml;
+                    int guard = 0;
+                    j += 6;
+                    while (j < w && (out[j] == ' ' || out[j] == '\t')) j++;
+                    name_l = j;
+                    while (j < w && cc_is_ident_char(out[j])) j++;
+                    name_r = j;
+                    k = j;
+                    while (k < w && out[k] != '\n') k++;
+                    if (k < w) k++;
+                    while (k < w && (out[k] == ' ' || out[k] == '\t')) k++;
+                    if (k < w && out[k] == '#') {
+                        k++;
+                        while (k < w && (out[k] == ' ' || out[k] == '\t')) k++;
+                        if (k + 6 <= w && memcmp(out + k, "define", 6) == 0) {
+                            k += 6;
+                            while (k < w && (out[k] == ' ' || out[k] == '\t'))
+                                k++;
+                            nml = name_r - name_l;
+                            if (nml && k + nml <= w &&
+                                memcmp(out + k, out + name_l, nml) == 0 &&
+                                (k + nml >= w ||
+                                 !cc_is_ident_char(out[k + nml])))
+                                guard = 1;
+                        }
+                    }
+                    if (!guard) depth++;
+                } else if (j + 5 <= w && memcmp(out + j, "ifdef", 5) == 0)
+                    depth++;
+                else if (j + 5 <= w && memcmp(out + j, "endif", 5) == 0) {
+                    if (depth > 0) depth--;
+                } else if (j + 2 <= w && memcmp(out + j, "if", 2) == 0 &&
+                           (j + 2 >= w || !cc_is_ident_char(out[j + 2])))
+                    depth++;
+                while (i < w && out[i] != '\n') i++;
+                if (i < w) i++;
+                continue;
+            }
+        }
+        if (depth == 0 && i + nlen <= w && memcmp(out + i, needle, nlen) == 0)
+            return 1;
+        i++;
+    }
+    return 0;
+}
+
+/* Byte after `} Base;` (last match). */
+static inline size_t cc_tv_after_base_close(const char* out, size_t w,
+                                            const char* base) {
+    size_t bl, i, best = (size_t)-1;
+    if (!out || !base || !base[0]) return (size_t)-1;
+    bl = strlen(base);
+    for (i = 0; i < w; i++) {
+        size_t j, k;
+        if (out[i] != '}') continue;
+        j = i + 1;
+        while (j < w && (out[j] == ' ' || out[j] == '\t' ||
+                         out[j] == '\n' || out[j] == '\r'))
+            j++;
+        if (j + bl > w || memcmp(out + j, base, bl) != 0) continue;
+        if (j + bl < w && cc_is_ident_char(out[j + bl])) continue;
+        k = j + bl;
+        while (k < w && (out[k] == ' ' || out[k] == '\t' ||
+                         out[k] == '\n' || out[k] == '\r'))
+            k++;
+        if (k < w && out[k] == ';') best = k + 1;
+    }
+    return best;
+}
+
+static inline char* cc_tv_insert_at(char* out, size_t* w, size_t* cap,
+                                    size_t at, const char* s, size_t slen) {
+    if (!out || !w || !cap || !s || at > *w) return NULL;
+    if (*w + slen + 1 > *cap) {
+        size_t nc = *cap * 2 + slen + 64;
+        char* nb = (char*)realloc(out, nc + 1);
+        if (!nb) return NULL;
+        out = nb;
+        *cap = nc;
+    }
+    memmove(out + at + slen, out + at, *w - at);
+    memcpy(out + at, s, slen);
+    *w += slen;
+    out[*w] = 0;
+    return out;
+}
+
 /* Erase `@typeview` define blocks from lowered `.h` text.
  * Faces and allow-lists are Concurrent-C AST facts (like `as:`); host C must
  * not see them. Skips comments and string/char literals. Forms:
@@ -1385,6 +1506,9 @@ static inline char* cc_rewrite_as_attr_to_comment(const char* src, size_t n) {
  *   typedef @typeview Mode on Base { … } Alias;
  * For the typedef form, emits `typedef Base_Restrict_Mode Alias` (optional `*`).
  * Sugar `@typeview(Mode) Base` is rewritten to `Base_Restrict_Mode`.
+ * Named `typedef Base Base_Restrict_Mode` is emitted after `} Base;` when
+ * that typedef is not already visible at file scope (a define under
+ * `#ifdef IMPL` does not count).
  * Returns malloc'd buffer or NULL when unchanged / OOM. */
 static inline char* cc_strip_typeview_blocks(const char* src, size_t n) {
     size_t i = 0;
@@ -1392,6 +1516,9 @@ static inline char* cc_strip_typeview_blocks(const char* src, size_t n) {
     size_t w = 0;
     char* out;
     int changed = 0;
+    char tv_base[32][64];
+    char tv_mode[32][64];
+    int ntv = 0;
     if (!src || n == 0) return NULL;
     out_cap = n + 8;
     out = (char*)malloc(out_cap + 1);
@@ -1497,6 +1624,9 @@ static inline char* cc_strip_typeview_blocks(const char* src, size_t n) {
                         w += 10;
                         memcpy(out + w, src + mode_l, mode_r - mode_l);
                         w += mode_r - mode_l;
+                        cc_tv_note_pair(tv_base, tv_mode, &ntv, 32,
+                                        src + base_l, base_r - base_l,
+                                        src + mode_l, mode_r - mode_l);
                         i = p;
                         changed = 1;
                         continue;
@@ -1643,13 +1773,22 @@ static inline char* cc_strip_typeview_blocks(const char* src, size_t n) {
                                     out[w++] = ';';
                                     end++;
                                 }
+                                cc_tv_note_pair(tv_base, tv_mode, &ntv, 32,
+                                                src + base_l2, base_r2 - base_l2,
+                                                src + mode_l2, mode_r2 - mode_l2);
                                 i = end;
                                 changed = 1;
                                 continue;
                             }
                         }
                         if (end < n && src[end] == ';') end++;
-                        /* Plain define: erase entirely. */
+                        /* Named define: record the pair. The typedef is
+                         * planted after `} Base;` so it is visible when
+                         * this define sat under `#ifdef IMPL`. */
+                        if (mode_r2 > mode_l2)
+                            cc_tv_note_pair(tv_base, tv_mode, &ntv, 32,
+                                            src + base_l2, base_r2 - base_l2,
+                                            src + mode_l2, mode_r2 - mode_l2);
                         i = end;
                         changed = 1;
                         continue;
@@ -1668,6 +1807,71 @@ static inline char* cc_strip_typeview_blocks(const char* src, size_t n) {
     }
     out[w] = '\0';
     if (!changed) { free(out); return NULL; }
+    if (ntv > 0) {
+        int pi, nwant = 0;
+        size_t pos[32];
+        int want[32];
+        int a, b;
+        for (pi = 0; pi < ntv && nwant < 32; pi++) {
+            char needle[160];
+            int nlen = snprintf(needle, sizeof(needle),
+                                "typedef %s %s_Restrict_%s",
+                                tv_base[pi], tv_base[pi], tv_mode[pi]);
+            size_t at;
+            if (nlen <= 0) continue;
+            if (cc_tv_typedef_file_scope(out, w, needle, (size_t)nlen))
+                continue;
+            at = cc_tv_after_base_close(out, w, tv_base[pi]);
+            if (at == (size_t)-1) {
+                /* Typedef form already wrote `typedef Base_Restrict_Mode…`
+                 * at the typeview site. Plant the named view immediately
+                 * before that use when `} Base;` was not found. */
+                char use[160];
+                int ulen = snprintf(use, sizeof(use), "typedef %s_Restrict_%s",
+                                    tv_base[pi], tv_mode[pi]);
+                size_t ui = 0;
+                if (ulen > 0) {
+                    while (ui + (size_t)ulen <= w) {
+                        if (memcmp(out + ui, use, (size_t)ulen) == 0 &&
+                            (ui == 0 || !cc_is_ident_char(out[ui - 1])) &&
+                            (ui + (size_t)ulen >= w ||
+                             !cc_is_ident_char(out[ui + (size_t)ulen]))) {
+                            at = ui;
+                            break;
+                        }
+                        ui++;
+                    }
+                }
+            }
+            if (at == (size_t)-1) continue;
+            pos[nwant] = at;
+            want[nwant] = pi;
+            nwant++;
+        }
+        for (a = 0; a < nwant; a++) {
+            for (b = a + 1; b < nwant; b++) {
+                if (pos[b] > pos[a]) {
+                    size_t tp = pos[a];
+                    int tw = want[a];
+                    pos[a] = pos[b];
+                    want[a] = want[b];
+                    pos[b] = tp;
+                    want[b] = tw;
+                }
+            }
+        }
+        for (a = 0; a < nwant; a++) {
+            char td[192];
+            int tlen = snprintf(td, sizeof(td), "\ntypedef %s %s_Restrict_%s;",
+                                tv_base[want[a]], tv_base[want[a]],
+                                tv_mode[want[a]]);
+            char* nb;
+            if (tlen <= 0) continue;
+            nb = cc_tv_insert_at(out, &w, &out_cap, pos[a], td, (size_t)tlen);
+            if (!nb) { free(out); return NULL; }
+            out = nb;
+        }
+    }
     return out;
 }
 

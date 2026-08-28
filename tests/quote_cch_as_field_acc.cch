@@ -1,0 +1,9 @@
+#ifndef TESTS_QUOTE_CCH_AS_FIELD_ACC_CCH
+#define TESTS_QUOTE_CCH_AS_FIELD_ACC_CCH
+
+/* Nested face (edit.cch): UFCS on the parent's type, callee in the parent. */
+static inline int QuoteAsDoc_end_off(QuoteAsDoc* d) {
+    return d ? d->len() : 0;
+}
+
+#endif

@@ -1,0 +1,10 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "quote_cch_parent_type_smoke.cch"
+
+int main(void) {
+    QuoteParentT t = { .n = 7 };
+    int v = quote_parent_leaf_n(&t) !> { return 1; };
+    printf("%d\n", v);
+    return v != 7;
+}

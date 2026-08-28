@@ -3505,6 +3505,7 @@ static int shadow_restrict_parse_kind_label(const char** pp, int* out_kind) {
 
 static int shadow_field_ty_of(const char* outer, const char* field, char* dst,
                               size_t cap);
+static int shadow_ty_restrict_base(const char* ty, char* dst, size_t cap);
 static const char* shadow_td_alias_resolve(const char* ty);
 static void shadow_ty_base_stars(const char* ty, char* base, size_t bcap,
                                  int* stars);
@@ -3519,6 +3520,8 @@ static void shadow_as_resolve_transitive(void);
 static void shadow_as_glob_register(const char* pat, const char* field);
 static void shadow_as_materialize_globs_for(const char* outer);
 static void shadow_as_materialize_all_globs(void);
+static int shadow_as_field_target(const char* outer, const char* field,
+                                  char* dst, size_t cap);
 static int shadow_ty_is_glob(const char* s) {
     return s && strchr(s, '*') != NULL;
 }
@@ -4372,13 +4375,37 @@ static int shadow_type_has_callable_field(const char* ty, const char* field) {
     return shadow_is_fnptr_ty(f->field_ty);
 }
 
+/* `Base_Restrict_Mode` → `Base`. Named views share Base's fields. */
+static int shadow_ty_restrict_base(const char* ty, char* dst, size_t cap) {
+    const char* hit;
+    size_t n, i;
+    if (!ty || !dst || !cap) return 0;
+    hit = strstr(ty, "_Restrict_");
+    if (!hit || hit == ty) return 0;
+    n = (size_t)(hit - ty);
+    if (n == 0 || n >= cap) return 0;
+    for (i = 0; i < n; i++) {
+        char c = ty[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == '_'))
+            return 0;
+    }
+    memcpy(dst, ty, n);
+    dst[n] = 0;
+    return 1;
+}
+
 /* Look up registered field type of `outer.field` (borrowed into dst). */
 static int shadow_field_ty_of(const char* outer, const char* field, char* dst,
                               size_t cap) {
     ShadowStructField* f;
+    char base[128];
     if (!outer || !field || !dst || !cap) return 0;
     dst[0] = 0;
     f = shadow_field_find(outer, field);
+    if ((!f || !f->field_ty || !f->field_ty[0]) &&
+        shadow_ty_restrict_base(outer, base, sizeof(base)))
+        f = shadow_field_find(base, field);
     if (!f || !f->field_ty || !f->field_ty[0]) return 0;
     snprintf(dst, cap, "%s", f->field_ty);
     {
@@ -6184,6 +6211,30 @@ static const ShadowAsEmbed* shadow_as_lookup(const char* outer,
             return &g_shadow_as[i];
     }
     return NULL;
+}
+
+/* Field type of an as: face (`as: tree` → RtxPieceTree). Used when the
+ * struct field table missed the member (`struct Tag name`). */
+static int shadow_as_field_target(const char* outer, const char* field,
+                                  char* dst, size_t cap) {
+    int i;
+    char base[128];
+    if (!outer || !field || !dst || !cap) return 0;
+    dst[0] = 0;
+    shadow_as_materialize_globs_for(outer);
+    for (i = 0; i < g_shadow_nas; i++) {
+        if (strcmp(g_shadow_as[i].outer, outer) == 0 &&
+            strcmp(g_shadow_as[i].field, field) == 0 &&
+            g_shadow_as[i].target[0] &&
+            strchr(g_shadow_as[i].field, '.') == NULL) {
+            snprintf(dst, cap, "%s", g_shadow_as[i].target);
+            return 1;
+        }
+    }
+    if (shadow_ty_restrict_base(outer, base, sizeof(base)) && base[0] &&
+        strcmp(base, outer) != 0)
+        return shadow_as_field_target(base, field, dst, cap);
+    return 0;
 }
 
 /* Close transitive @as paths: Outer→Mid→CCFile becomes Outer / mid.file / CCFile. */

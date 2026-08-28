@@ -6,6 +6,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <unistd.h>
 #include <ccc/std/vec.cch>
 
 extern size_t cc_unit_header_skip(const char* src, size_t n);
@@ -706,5 +707,113 @@ static void shadow_fill_quote_dir(const char* path, char* dst, size_t cap) {
         return;
     }
     snprintf(dst, cap, ".");
+}
+
+static void shadow_dir_of(const char* path, char* dst, size_t cap) {
+    char buf[512];
+    char* slash;
+    if (!dst || !cap) return;
+    dst[0] = 0;
+    if (!path || !path[0]) return;
+    snprintf(buf, sizeof(buf), "%s", path);
+    slash = strrchr(buf, '/');
+    if (!slash) {
+        snprintf(dst, cap, ".");
+        return;
+    }
+    *slash = 0;
+    snprintf(dst, cap, "%s", buf);
+}
+
+/* Trailing .h → CC face suffix. Do not spell that suffix in a literal. */
+static void shadow_rel_prefer_face(char* rel, size_t cap) {
+    size_t n;
+    if (!rel || !cap) return;
+    n = strlen(rel);
+    if (n > 2 && rel[n - 2] == '.' && rel[n - 1] == 'h') {
+        size_t rl;
+        rel[n - 2] = 0;
+        rl = strlen(rel);
+        if (rl + 4 < cap) {
+            rel[rl] = '.';
+            rel[rl + 1] = 'c';
+            rel[rl + 2] = 'c';
+            rel[rl + 3] = 'h';
+            rel[rl + 4] = 0;
+        }
+    }
+}
+
+/* Original project face for a quoted include. Driver extract rewrites the
+ * suffix to .h for host-cc; the lowerer still opens the face from the
+ * same roots as quoted `#include` (including dir, SHADOW_QUOTE_DIR,
+ * CC_INCLUDE_PATH). 1 and writes dst when the face is readable. */
+static int shadow_project_face_path(const char* rel, const char* from_dir,
+                                   char* dst, size_t cap) {
+    char face[256];
+    char cand[512];
+    const char* env;
+    const char* slash;
+    const char* base;
+    if (!rel || !rel[0] || !dst || !cap) return 0;
+    dst[0] = 0;
+    snprintf(face, sizeof(face), "%s", rel);
+    shadow_rel_prefer_face(face, sizeof(face));
+    slash = strrchr(face, '/');
+    base = slash ? slash + 1 : face;
+    if (from_dir && from_dir[0]) {
+        snprintf(cand, sizeof(cand), "%s/%s", from_dir, face);
+        if (access(cand, R_OK) == 0) {
+            snprintf(dst, cap, "%s", cand);
+            return 1;
+        }
+        if (base != face) {
+            snprintf(cand, sizeof(cand), "%s/%s", from_dir, base);
+            if (access(cand, R_OK) == 0) {
+                snprintf(dst, cap, "%s", cand);
+                return 1;
+            }
+        }
+    }
+    env = getenv("SHADOW_QUOTE_DIR");
+    if (env && env[0] && (!from_dir || strcmp(env, from_dir) != 0)) {
+        snprintf(cand, sizeof(cand), "%s/%s", env, face);
+        if (access(cand, R_OK) == 0) {
+            snprintf(dst, cap, "%s", cand);
+            return 1;
+        }
+        if (base != face) {
+            snprintf(cand, sizeof(cand), "%s/%s", env, base);
+            if (access(cand, R_OK) == 0) {
+                snprintf(dst, cap, "%s", cand);
+                return 1;
+            }
+        }
+    }
+    if (face[0] == '/' && access(face, R_OK) == 0) {
+        snprintf(dst, cap, "%s", face);
+        return 1;
+    }
+    env = getenv("CC_INCLUDE_PATH");
+    if (env && env[0]) {
+        char paths[1024];
+        char* p;
+        char* sep;
+        snprintf(paths, sizeof(paths), "%s", env);
+        p = paths;
+        while (p && *p) {
+            sep = strchr(p, ':');
+            if (sep) *sep = 0;
+            if (*p) {
+                snprintf(cand, sizeof(cand), "%s/%s", p, face);
+                if (access(cand, R_OK) == 0) {
+                    snprintf(dst, cap, "%s", cand);
+                    return 1;
+                }
+            }
+            p = sep ? sep + 1 : NULL;
+        }
+    }
+    return 0;
 }
 

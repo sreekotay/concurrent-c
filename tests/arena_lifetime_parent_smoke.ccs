@@ -77,6 +77,30 @@ static int test_heap_child_move(void) {
     return 0;
 }
 
+static int test_heap_child_sized(void) {
+    CCArena owner = cc_arena_heap(1024) @destroy;
+    CCArena kid;
+    CCArena dst = cc_arena_heap(1024) @destroy;
+    CCArena moved;
+    char* s;
+    size_t committed;
+    if (!cc_arena_is_live(owner)) return fail(9, "ctor");
+    kid = owner.create_heap_arena(65536) !>;
+    if (!cc_arena_is_live(kid)) return fail(9, "create_heap_arena");
+    committed = cc_arena_committed_gross_bytes(kid);
+    if (committed < 65536) return fail(9, "sized L1");
+    s = (char*)cc_arena_alloc(kid.a, 16, 8);
+    if (!s) return fail(9, "kid alloc");
+    strcpy(s, "sized");
+    moved = dst.adopt(&kid) !>;
+    if (!cc_arena_is_live(moved)) return fail(9, "adopt sized heap child");
+    if (cc_arena_is_live(kid)) return fail(9, "source must be dead after move");
+    if (strcmp(s, "sized") != 0) return fail(9, "alloc must survive move");
+    owner.free();
+    printf("  sized heap child OK\n");
+    return 0;
+}
+
 static int test_scope_arena_adopt(void) {
     CCArena parent = cc_arena_heap(1024) @destroy;
     CCArena tmp = cc_arena_heap(256) @destroy;
@@ -167,6 +191,7 @@ int main(void) {
     if ((rc = test_attach_lifo_walk()) != 0) return rc;
     if ((rc = test_carved_child_nested_walk()) != 0) return rc;
     if ((rc = test_heap_child_move()) != 0) return rc;
+    if ((rc = test_heap_child_sized()) != 0) return rc;
     if ((rc = test_scope_arena_adopt()) != 0) return rc;
     if ((rc = test_reset_walks_contents()) != 0) return rc;
     if ((rc = test_pool_on_parent()) != 0) return rc;

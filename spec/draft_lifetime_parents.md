@@ -30,7 +30,8 @@ slab (L1) live:
 |---|---|---|---|
 | scope value | `CCArena a = cc_arena_heap(n) @destroy;` | yes (heap L1) | scope epilogue |
 | embedded child | `owner->create_arena(n)`, `n > 0` — L1 carved from owner | no — storage-bound | owner's walk |
-| free child | `owner->create_arena(0)` — heap L1 | yes — may move again | owner's walk |
+| free child | `owner->create_arena(0)` — heap L1 (default 4096) | yes — may move again | owner's walk |
+| sized free child | `owner->create_heap_arena(bytes)` — heap L1 of `bytes` (`0` = default) | yes — may move again | owner's walk |
 
 A `cc_arena_stack` arena is a scope value whose L1 no move accepts; an
 embedded child is the same refusal one level up — its L1 is the owner's
@@ -154,16 +155,19 @@ Constructors are declared in the product's header:
 
 ```ccs
 CCArena !>(CCError) create_arena(CCArena owner, size_t n);         // cc_arena.cch
+CCArena !>(CCError) create_heap_arena(CCArena owner, size_t bytes); // cc_arena.cch
 CCArenaPool* !>(CCError) create_pool(CCArena owner, size_t elem);  // cc_arena.cch
 CCNursery !>(CCError) cc_arena_create_nursery(CCArena* a);     // cc_nursery.cch
 Session*     create_session(CCArena owner, int fd);                // user code
 ```
 
 `create_arena(owner, n)` with `n > 0` carves the child's first slab from
-the owner: the child is storage-bound and cannot move. With `n == 0` the
-child's slabs are heap-owned (ordinary `cc_arena_heap` growth): the child
-is free and may later be detached or adopted elsewhere. The size argument
-selects the storage class.
+the owner: the child is storage-bound and cannot move. With `n == 0` it is
+`create_heap_arena(owner, 0)`: a free heap child with the default L1, which
+may later be detached or adopted elsewhere. `create_heap_arena(owner, bytes)`
+is the sized heap-child spelling — L1 is `bytes` (or the default when
+`bytes` is 0). The `create_arena` size argument selects the storage class;
+it does not size a heap child's L1.
 
 `create_arena` is Result. OOM and a dead owner are `cc_err`, never a dummy
 empty handle.

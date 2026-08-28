@@ -252,6 +252,10 @@ On an expression of type `Base_Restrict_Mode` or `Base_Restrict_Mode*`:
 - `as:` retry on the base, when applicable to a listed method, still applies
   for that method's resolution on the base; the restriction only filters which
   names may be attempted.
+- An explicit field selection (`d->tree.write_fd(fd)`) is member access
+  plus UFCS on the field's type. The outer view's allow-list does not
+  apply; `write_fd` need not be listed on the outer mode. `d->len()`
+  with no peel is still the outer.
 
 ### Call edge
 

@@ -1,0 +1,10 @@
+#include <ccc/std/prelude.cch>
+#include "quote_cch_bang_hidden.cch"
+
+int main(void) {
+    @errhandler(CCError e) { return 1; }
+    /* Same spelling as a static in the owner TU. This unit only includes
+     * the face, so the name is not visible. */
+    size_t n = quote_bang_hidden(1) !>;
+    return (int)n;
+}

@@ -123,7 +123,7 @@ shared there. Object and link metas (`.obj`, `.link`) live under
 independently caches C emission, object compilation, runtime compilation, and
 linking.
 
-Cache keys include the relevant source and build-file signatures, compiler inputs, target and sysroot, command-line and environment flags, compile-time bindings, runtime signatures, declared `#pragma cc_depends` content, and the contents of `#include`d `.cch` files (quoted and angled, resolved on the compile include path). Object and link keys also fold the host-compiler fingerprint. Object reuse also checks dependency files. Host `.d` files rebuild objects from already-emitted C; they do not re-lower a `.ccs`.
+Cache keys include the relevant source and build-file signatures, the lowering compiler (`shadow_lower`) content bytes, the driver (`ccc`) signature, target and sysroot, command-line and environment flags, compile-time bindings, runtime signatures, declared `#pragma cc_depends` content, and the contents of `#include`d `.cch` files (quoted and angled, resolved on the compile include path). Object and link keys also fold the host-compiler fingerprint. Object reuse also checks dependency files. Host `.d` files rebuild objects from already-emitted C; they do not re-lower a `.ccs`. A lowerer rebuild with different bytes is an emit miss.
 
 Failed emission is not cached. A diagnostic-producing emit fails the build, and a later invocation reruns it even when prior cache metadata exists. `--no-cache` and `CC_NO_CACHE=1` force each selected phase to execute.
 

@@ -1,0 +1,9 @@
+#ifndef TESTS_QUOTE_CCH_XDIR_CORE_WS_CCH
+#define TESTS_QUOTE_CCH_XDIR_CORE_WS_CCH
+
+/* Type lives in another directory than the leaf that names it. */
+typedef struct {
+    int n;
+} QuoteXdirWs;
+
+#endif

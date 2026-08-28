@@ -1,0 +1,14 @@
+#ifndef QUOTE_CCH_PARENT_TYPE_HELPER_CCH
+#define QUOTE_CCH_PARENT_TYPE_HELPER_CCH
+
+#include <ccc/std/prelude.cch>
+
+/* Impl-grade chapter of the parent face. Uses QuoteParentT from that face;
+ * the owner splice must follow the extracted parent `.h`. */
+static int !>(CCError) quote_parent_leaf_n(const QuoteParentT *p) {
+    @errhandler(CCError e) { return cc_err(e); }
+    if (!p) return cc_err(CC_ERR_INVALID_ARG, "null");
+    return cc_ok(p->n);
+}
+
+#endif

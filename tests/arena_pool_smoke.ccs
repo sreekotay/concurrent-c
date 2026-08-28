@@ -42,6 +42,18 @@ int main(void) {
     // Test UFCS (via ccc build)
     // We'll use a .ccs file for that if needed, but we can test the C API here.
     
+    Point* loc1 = (Point*)cc_arena_pool_alloc_local(&p);
+    Point* loc2 = (Point*)cc_arena_pool_alloc_local(&p);
+    if (!loc1 || !loc2 || loc1 == loc2) {
+        printf("FAIL: pool alloc_local\n");
+        return 1;
+    }
+    cc_arena_pool_free_local(&p, loc1);
+    if (cc_arena_pool_alloc_local(&p) != loc1) {
+        printf("FAIL: pool alloc_local reuse\n");
+        return 1;
+    }
+
     printf("arena_pool_smoke ok\n");
     return 0;
 }

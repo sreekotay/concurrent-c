@@ -1,0 +1,32 @@
+#!ccc ccs
+/* Function-pointer fields harvested from an included face stay C
+ * member calls. The type lives in the .cch so header-text harvest
+ * (not same-TU AST) is the path that must see `(*line_height)`. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "ufcs_fnptr_paren_field_mod.cch"
+
+static double paren_lh(void *ctx, int style) {
+    (void)ctx;
+    (void)style;
+    return 2.5;
+}
+
+static double paren_measure(void *ctx, int n) {
+    (void)ctx;
+    return (double)n;
+}
+
+int main(void) {
+    UfcsParenMeasure m = { .measure = paren_measure, .line_height = paren_lh,
+                           .ctx = 0 };
+    const UfcsParenMeasure *p = &m;
+    double h = p->line_height(p->ctx, 0);
+    double w = p->measure(p->ctx, 4);
+    if (h != 2.5 || w != 4.0) {
+        fprintf(stderr, "fnptr paren field: h=%g w=%g\n", h, w);
+        return 1;
+    }
+    printf("ufcs_fnptr_paren_field_smoke: OK\n");
+    return 0;
+}

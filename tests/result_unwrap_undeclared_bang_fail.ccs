@@ -1,0 +1,9 @@
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    @errhandler(CCError e) { return 1; }
+    /* No declaration of this name. `!>` must not emit a Result unwrap
+     * and leave host-cc to invent `int` / fail on `__r.u.value`. */
+    int n = no_such_result_fn(0) !>;
+    return n;
+}

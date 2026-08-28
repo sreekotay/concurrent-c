@@ -1,0 +1,30 @@
+#!ccc ccs
+/* Owner TU: cleanup lives here (document.ccs shape). Extract rewrites
+ * the include to .h; d->tree.destroy() is still the tree. */
+#define QUOTE_AS_FIELD_IMPL
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+#include "quote_cch_as_field_mod.cch"
+
+static void QuoteAsDoc_owner_cleanup(QuoteAsDoc* d) {
+    if (!d) return;
+    d->tree.destroy();
+}
+
+int main(void) {
+    QuoteAsDoc d;
+    memset(&d, 0, sizeof(d));
+    d.tree.n = 3;
+    d.session = cc_arena_heap(kilobytes(4));
+    d.analysis = cc_arena_heap(kilobytes(4));
+    QuoteAsDoc_owner_cleanup(&d);
+    if (d.tree.n != -1) {
+        printf("owner peel missed n=%d\n", d.tree.n);
+        return 1;
+    }
+    d.session.destroy();
+    d.analysis.destroy();
+    printf("ok\n");
+    return 0;
+}

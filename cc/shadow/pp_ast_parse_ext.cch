@@ -48,8 +48,15 @@ static AstNode* parse_fn(Parser* p) {
         return NULL;
     name_i = ti + 1;
     {
+        int ty_end = ti + 1;
+        int iend = has_struct ? -1 : peek_c_int_type_end(p, ti);
         int is_slice = 0;
         int is_slice_unique = 0;
+        /* Owner splice destatics `static long long f` → `long long f`. */
+        if (iend > ti) {
+            ty_end = iend;
+            name_i = iend;
+        }
         if (!has_struct && name_i + 2 < p->n &&
             tok_eq(p->toks[name_i], TK_PUNCT, "[") &&
             tok_eq(p->toks[name_i + 1], TK_PUNCT, ":")) {
@@ -85,7 +92,7 @@ static AstNode* parse_fn(Parser* p) {
 
         if (has_const) p_next(p); /* const */
         if (has_struct) p_next(p); /* struct */
-        p_next(p); /* ret / tag */
+        while (p->i < ty_end) p_next(p); /* ret / tag / long long */
         if (is_slice) {
             p_next(p); /* [ */
             p_next(p); /* : */
@@ -120,7 +127,16 @@ static AstNode* parse_fn(Parser* p) {
             else if (has_struct)
                 snprintf(rbuf, sizeof(rbuf), "struct %.*s",
                          (int)rty.spell.len, rty.spell.ptr);
-            else if (has_const)
+            else if (ty_end > ti + 1) {
+                if (!ast_spell_token_range(p, ti, ty_end, rbuf, sizeof(rbuf)) &&
+                    !span_text(p, ti, ty_end, rbuf, sizeof(rbuf)))
+                    return NULL;
+                if (has_const) {
+                    char prefixed[256];
+                    snprintf(prefixed, sizeof(prefixed), "const %s", rbuf);
+                    snprintf(rbuf, sizeof(rbuf), "%s", prefixed);
+                }
+            } else if (has_const)
                 snprintf(rbuf, sizeof(rbuf), "const %.*s",
                          (int)rty.spell.len, rty.spell.ptr);
             else
@@ -3118,9 +3134,17 @@ static AstNode* parse_fn_proto(Parser* p) {
         return NULL;
     if (ri + 2 >= p->n) return NULL;
     int ni = ri + 1;
+    int ty_end = ri + 1;
     int is_ptr = 0;
     int is_slice = 0;
     int is_slice_unique = 0;
+    if (!has_struct) {
+        int iend = peek_c_int_type_end(p, ri);
+        if (iend > ri) {
+            ty_end = iend;
+            ni = iend;
+        }
+    }
     if (!has_struct && ni + 2 < p->n &&
         tok_eq(p->toks[ni], TK_PUNCT, "[") &&
         tok_eq(p->toks[ni + 1], TK_PUNCT, ":")) {
@@ -3158,7 +3182,7 @@ static AstNode* parse_fn_proto(Parser* p) {
 
     if (has_const) p_next(p); /* const */
     if (has_struct) p_next(p); /* struct */
-    p_next(p); /* ret / tag */
+    while (p->i < ty_end) p_next(p); /* ret / tag / long long */
     if (is_slice) {
         p_next(p); /* [ */
         p_next(p); /* : */
@@ -3201,7 +3225,16 @@ static AstNode* parse_fn_proto(Parser* p) {
         else if (has_struct)
             snprintf(ty, sizeof(ty), "struct %.*s",
                      (int)rty.spell.len, rty.spell.ptr);
-        else if (has_const)
+        else if (ty_end > ri + 1) {
+            if (!ast_spell_token_range(p, ri, ty_end, ty, sizeof(ty)) &&
+                !span_text(p, ri, ty_end, ty, sizeof(ty)))
+                return NULL;
+            if (has_const) {
+                char prefixed[256];
+                snprintf(prefixed, sizeof(prefixed), "const %s", ty);
+                snprintf(ty, sizeof(ty), "%s", prefixed);
+            }
+        } else if (has_const)
             snprintf(ty, sizeof(ty), "const %.*s",
                      (int)rty.spell.len, rty.spell.ptr);
         else

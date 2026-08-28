@@ -380,10 +380,12 @@ int main(int argc, char** argv) {
         if (shadow_emit_cache_hit(in_path, argv[0], no_cache, cached_c,
                                   sizeof(cached_c), NULL)) {
             if (shadow_build_host(in_path, out_path, NULL, 0, argv[0],
-                                  no_cache, NULL, 0, NULL, 0) != 0) {
-                return 1;
+                                  no_cache, NULL, 0, NULL, 0) == 0) {
+                return 0;
             }
-            return 0;
+            /* Host-cc rejected a cached emit (missing extract diag, stale
+             * .h include). Drop the hit and re-lower so extract can speak. */
+            shadow_emit_cache_invalidate(in_path, argv[0]);
         }
     }
 

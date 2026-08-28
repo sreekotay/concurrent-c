@@ -51,8 +51,11 @@ if [[ -z "$SHADOW" ]]; then
   echo "error: no shadow_lower binary (make -C cc)" >&2
   exit 1
 fi
-echo "[snapshot] emit via shadow_lower ($SHADOW)"
+ts() { echo "[snapshot] $(date '+%H:%M:%S') $*"; }
+t0=$(date +%s)
+ts "emit start via $SHADOW ($SRC --no-cache)"
 "$SHADOW" "$SRC" -o "$LATEST/shadow_lower.c" --no-cache
+ts "emit done ($(( $(date +%s) - t0 ))s, $(wc -c < "$LATEST/shadow_lower.c" | tr -d ' ') bytes)"
 EMITTER="native:$SHADOW"
 
 if [[ ! -s "$LATEST/shadow_lower.c" ]]; then
@@ -141,7 +144,8 @@ fi
 echo "[snapshot] wrote $LATEST ($(du -sh "$LATEST" | awk '{print $1}'))"
 
 if [[ "$SMOKE" -eq 1 ]]; then
-  echo "[snapshot] host-cc smoke of latest/"
+  t1=$(date +%s)
+  ts "host-cc smoke start"
   OBJ="$ROOT/out/cc/obj"
   OUT_BIN="$LATEST/shadow_lower"
   for need in "$OBJ/shadow_tcc_compile.o" "$OBJ/libshadow_comptime.a" \
@@ -164,9 +168,12 @@ if [[ "$SMOKE" -eq 1 ]]; then
     "$OBJ/libshadow_comptime.a" \
     "$OBJ/cparse/libcparse.a" \
     -L"$ROOT/third_party/tcc" -ltcc -lpthread -lm
+  ts "host-cc smoke binary done ($(( $(date +%s) - t1 ))s)"
+  t2=$(date +%s)
+  ts "hello.ccs emit start"
   "$OUT_BIN" "$ROOT/examples/hello.ccs" -o "$LATEST/hello_smoke.c" --no-cache
   test -s "$LATEST/hello_smoke.c"
-  echo "[snapshot] smoke OK → $OUT_BIN"
+  ts "hello.ccs emit done ($(( $(date +%s) - t2 ))s) — smoke OK → $OUT_BIN"
 fi
 
 echo "[snapshot] done (not promoted; run scripts/promote_shadow_bootstrap.sh when ready)"

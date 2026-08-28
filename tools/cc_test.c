@@ -205,6 +205,35 @@ static long long now_ms_monotonic(void) {
     return (long long)ts.tv_sec * 1000LL + (long long)(ts.tv_nsec / 1000000LL);
 }
 
+static int g_cc_test_profile;
+
+static int run_one_test(const char* stem, const char* input_path, int compile_fail,
+                        int verbose,
+                        const char* out_dir,
+                        const char* bin_dir,
+                        int use_cache,
+                        int opt_o0,
+                        int build_timeout_sec,
+                        int run_timeout_sec);
+
+static int run_one_test_maybe_profile(const char* stem, const char* input_path,
+                                      int compile_fail, int verbose,
+                                      const char* out_dir, const char* bin_dir,
+                                      int use_cache, int opt_o0,
+                                      int build_timeout_sec, int run_timeout_sec) {
+    long long t0;
+    int rc;
+    if (!g_cc_test_profile)
+        return run_one_test(stem, input_path, compile_fail, verbose, out_dir,
+                            bin_dir, use_cache, opt_o0, build_timeout_sec,
+                            run_timeout_sec);
+    t0 = now_ms_monotonic();
+    rc = run_one_test(stem, input_path, compile_fail, verbose, out_dir, bin_dir,
+                      use_cache, opt_o0, build_timeout_sec, run_timeout_sec);
+    fprintf(stderr, "[TIME] %s %lldms\n", stem, now_ms_monotonic() - t0);
+    return rc;
+}
+
 // Runs command via one `sh -c` with optional timeout. Returns:
 // - exit code of the command (0..255)
 // - 124 on timeout (like GNU timeout)
@@ -1150,6 +1179,11 @@ int main(int argc, char** argv) {
         }
     }
 
+    {
+        const char* env = getenv("CC_TEST_PROFILE");
+        if (env && env[0] && strcmp(env, "0") != 0) g_cc_test_profile = 1;
+    }
+
     (void)ensure_out_dir();
     (void)ensure_dir_p("bin");
     if (clean && !list_only) {
@@ -1279,7 +1313,7 @@ int main(int argc, char** argv) {
 
         ran++;
         if (jobs <= 1) {
-            if (run_one_test(stem, path, compile_fail, verbose, "out", "bin",
+            if (run_one_test_maybe_profile(stem, path, compile_fail, verbose, "out", "bin",
                              use_cache, opt_o0, build_timeout_sec,
                              run_timeout_sec) != 0) {
                 failed++;
@@ -1306,7 +1340,7 @@ int main(int argc, char** argv) {
             snprintf(bin_dir, sizeof(bin_dir), "bin/.cc_test/%s", stem);
             (void)ensure_dir_p(out_dir);
             (void)ensure_dir_p(bin_dir);
-            int rc = run_one_test(stem, path, compile_fail, verbose, out_dir,
+            int rc = run_one_test_maybe_profile(stem, path, compile_fail, verbose, out_dir,
                                   bin_dir, use_cache, opt_o0, build_timeout_sec,
                                   run_timeout_sec);
             _exit(rc == 0 ? 0 : 1);

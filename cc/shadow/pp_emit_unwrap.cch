@@ -279,6 +279,50 @@ static const char* shadow_bang_chain_lhs_ty(const char* mode) {
     return NULL;
 }
 
+/* Naked `name(...) !>` must name a visible callee. Emitting
+ * `__typeof__(name(...)) __r` for an undeclared name lets host-cc invent
+ * `int` and then fail on `__r.u.value`. Member hops stay on the UFCS path.
+ * Only a simple call is checked: a ternary `(fail ? f() : g())` and a
+ * Result local `r !>` are not bare names. */
+static int shadow_bang_naked_call_visible(AstNode* st, ShadowCtx* ctx,
+                                          const char* src_call) {
+    char callee[64];
+    size_t ni = 0;
+    const char* p;
+    const char* path = NULL;
+    int line = 0;
+    if (!src_call || !src_call[0]) return 1;
+    if (strstr(src_call, "CCResult_")) return 1;
+    if (strchr(src_call, '.') != NULL || strstr(src_call, "->") != NULL)
+        return 1;
+    p = src_call;
+    while (*p == ' ' || *p == '\t' || *p == '(') p++;
+    while (shadow_is_id(*p) && ni + 1 < sizeof(callee))
+        callee[ni++] = *p++;
+    callee[ni] = 0;
+    if (!callee[0]) return 1;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '(') return 1;
+    if (strncmp(callee, "cc_ok", 5) == 0 ||
+        strncmp(callee, "cc_err", 6) == 0 ||
+        strncmp(callee, "cc_channel_", 11) == 0 ||
+        strncmp(callee, "cc_chan_", 8) == 0 ||
+        strncmp(callee, "cc_py_", 6) == 0)
+        return 1;
+    if (shadow_ufcs_callee_declared(callee)) return 1;
+    if (shadow_rfn_err(callee)) return 1;
+    if (shadow_site_loc(ctx ? ctx->cache : NULL, st, &path, &line) && path)
+        fprintf(stderr,
+                "%s:%d:1: error: type: '!>' on '%s': no visible declaration\n",
+                path, line, callee);
+    else
+        fprintf(stderr,
+                "error: type: '!>' on '%s': no visible declaration\n",
+                callee);
+    g_shadow_ufcs_miss = 1;
+    return 0;
+}
+
 static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                   const char* indent) {
     const char* call = st->b;
@@ -393,6 +437,13 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
     /* bang_chain Result check must see the SOURCE call (before UFCS rewrite
      * turns `m.get("r")` into `cc_py_obj_callm(...)`). */
     const char* src_call = call ? call : "";
+    if ((strcmp(mode, "bang") == 0 ||
+         strncmp(mode, "bang_stmt", 9) == 0 ||
+         strncmp(mode, "bang_block", 10) == 0) &&
+        !shadow_bang_naked_call_visible(st, ctx, src_call)) {
+        if (out) out->err = 1;
+        return 0;
+    }
     if (shadow_emit_channel_pair_expr(callbuf, sizeof(callbuf), call))
         call = callbuf;
     else {

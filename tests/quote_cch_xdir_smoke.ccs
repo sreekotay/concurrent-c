@@ -1,0 +1,18 @@
+#!ccc ccs
+/* Frontend-shaped leaf names a type defined in another directory.
+ * Extract must find that face via the including unit, not invent a tag. */
+#include <stdio.h>
+#include "quote_cch_xdir_core/ws.cch"
+#include "quote_cch_xdir_front/draw.cch"
+
+int quote_xdir_w(QuoteXdirWs *w) { return w ? w->n : 0; }
+
+int main(void) {
+    QuoteXdirWs ws = { .n = 3 };
+    if (quote_xdir_w(&ws) != 3) {
+        printf("quote_xdir_w failed\n");
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

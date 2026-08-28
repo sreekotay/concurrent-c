@@ -1,0 +1,31 @@
+#!ccc cch
+#ifndef TESTS_UFCS_AS_OUTER_DESTROY_CCH
+#define TESTS_UFCS_AS_OUTER_DESTROY_CCH
+
+/* Face-only Type_destroy. Arrow `d->destroy()` must stay on the outer
+ * even when as: tree also has destroy. */
+
+typedef struct {
+    int n;
+} AsOuterTree;
+
+static inline void AsOuterTree_destroy(AsOuterTree* t) {
+    if (t) t->n = -1;
+}
+
+typedef struct {
+    AsOuterTree tree;
+    int outer;
+} AsOuterDoc;
+
+static inline void AsOuterDoc_destroy(AsOuterDoc* d) {
+    if (!d) return;
+    d->tree.n = 0;
+    d->outer = 99;
+}
+
+@typeview on AsOuterDoc {
+    as: tree;
+};
+
+#endif

@@ -1,0 +1,22 @@
+#!ccc ccs
+/* Named pointer typeview lives in the included face. The owner TU
+ * binds `TvPtrDocLayout d` and calls `d->style_at` — harvest must
+ * see the `*` on the alias. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "typeview_ptr_alias_mod.cch"
+
+static int use_layout(TvPtrDocLayout d, int off) {
+    return d->style_at(off);
+}
+
+int main(void) {
+    TvPtrDoc doc = { .n = 3 };
+    int r = use_layout(&doc, 1);
+    if (r != 4) {
+        fprintf(stderr, "typeview_ptr_alias: got %d\n", r);
+        return 1;
+    }
+    printf("typeview_ptr_alias_smoke: OK\n");
+    return 0;
+}

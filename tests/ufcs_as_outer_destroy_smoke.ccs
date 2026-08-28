@@ -1,0 +1,37 @@
+#!ccc ccs
+/* `p->destroy()` is the outer Type_destroy. as: tree must not steal it.
+ * `p->tree.destroy()` is still the field. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "ufcs_as_outer_destroy.cch"
+
+int main(void) {
+    AsOuterDoc box;
+    AsOuterDoc* p;
+    box.tree.n = 3;
+    box.outer = 1;
+    p = &box;
+    p->destroy();
+    if (box.outer != 99 || box.tree.n != 0) {
+        printf("arrow destroy stole as: tree outer=%d n=%d\n", box.outer,
+               box.tree.n);
+        return 1;
+    }
+    box.tree.n = 5;
+    box.outer = 2;
+    p->tree.destroy();
+    if (box.tree.n != -1 || box.outer != 2) {
+        printf("explicit tree.destroy missed n=%d outer=%d\n", box.tree.n,
+               box.outer);
+        return 2;
+    }
+    box.tree.n = 7;
+    box.outer = 3;
+    box.destroy();
+    if (box.outer != 99 || box.tree.n != 0) {
+        printf("dot destroy failed outer=%d n=%d\n", box.outer, box.tree.n);
+        return 3;
+    }
+    printf("ok\n");
+    return 0;
+}

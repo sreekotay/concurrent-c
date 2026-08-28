@@ -766,6 +766,8 @@ static int shadow_ufcs_ty_is(const char* vty, const ShadowBind* rb,
             starred[n + 1] = 0;
             if (strcmp(vty, starred) == 0) return 1;
         }
+        /* After a field peel, vty is the field. Do not match the outer bind. */
+        return 0;
     }
     if (rb && rb->ty[0]) {
         shadow_bind_base_ty(rb, base, sizeof(base));
@@ -1060,7 +1062,7 @@ static int shadow_ufcs_emit_destroy(const char* vty, const ShadowBind* rb,
     }
     if (vbase[0] && vbase[0] >= 'A' && vbase[0] <= 'Z') {
         snprintf(dhook, sizeof(dhook), "%s_destroy", vbase);
-        if (shadow_ufn_exists(dhook))
+        if (shadow_ufcs_callee_declared(dhook))
             return shadow_ufcs_emit_unary_life(dhook, recv, is_arrow_or_ptr, dst,
                                               cap);
     }
@@ -1604,36 +1606,35 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         snprintf(vty, sizeof(vty), "%s", g_shadow_ufcs_hint_vty);
     if (!vty[0] && strstr(recv, "cc_nursery_arena("))
         snprintf(vty, sizeof(vty), "CCArena");
-    /* @typeview: allow-list filter; resolve remaining methods as Base*. */
+    /* @typeview: resolve named views to Base so `d->tree.meth` walks the
+     * struct. Allow-list applies after the field peel — explicit
+     * `t.field.name` is not a method on the outer view. */
     char view_mode[64];
+    ShadowRestrict* pending_rr = NULL;
     view_mode[0] = 0;
     {
         char leaf[96];
+        char rbase[96];
         ShadowRestrict* rr;
         shadow_restrict_leaf_ty(vty, leaf, sizeof(leaf));
         rr = shadow_restrict_find_for_ty(leaf);
         if (rr && rr->mode[0])
             snprintf(view_mode, sizeof(view_mode), "%s", rr->mode);
-        if (rr && !shadow_restrict_trusted_for(rr)) {
-            if (!shadow_restrict_allows_use(rr, meth_name)) {
-                fprintf(stderr,
-                        "error: restricted mode '%s' on '%s' does not allow "
-                        "method '%s' (flush-under-hold / capability deny)\n",
-                        shadow_restrict_mode_label(rr), rr->base, meth_name);
-                g_shadow_restrict_diag = 1;
-                g_shadow_ufcs_miss = 1;
-                return 0;
-            }
-            /* Named view (Base_Restrict_Mode): resolve UFCS on Base.
-             * Unnamed / family match (CCSlice_T → CCSlice facet): keep the
-             * concrete receiver type so instance methods stay typed. */
-            if (!shadow_restrict_is_unnamed(rr) &&
-                strcmp(leaf, rr->mangled) == 0) {
-                if (vty[0] && vty[strlen(vty) - 1] == '*')
-                    snprintf(vty, sizeof(vty), "%s*", rr->base);
-                else
-                    snprintf(vty, sizeof(vty), "%s", rr->base);
-            }
+        if (rr && !shadow_restrict_trusted_for(rr)) pending_rr = rr;
+        /* Named view (Base_Restrict_Mode): resolve UFCS on Base.
+         * Unnamed / family match (CCSlice_T → CCSlice facet): keep the
+         * concrete receiver type so instance methods stay typed. */
+        if (rr && !shadow_restrict_is_unnamed(rr) &&
+            strcmp(leaf, rr->mangled) == 0) {
+            if (vty[0] && vty[strlen(vty) - 1] == '*')
+                snprintf(vty, sizeof(vty), "%s*", rr->base);
+            else
+                snprintf(vty, sizeof(vty), "%s", rr->base);
+        } else if (shadow_ty_restrict_base(leaf, rbase, sizeof(rbase))) {
+            if (vty[0] && vty[strlen(vty) - 1] == '*')
+                snprintf(vty, sizeof(vty), "%s*", rbase);
+            else
+                snprintf(vty, sizeof(vty), "%s", rbase);
         }
     }
     /* Member-generic factory before elem_ty→vty fallback: `::[T]` formal is the
@@ -1816,7 +1817,9 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                     continue;
                 }
             }
-            if (!shadow_field_ty_of(outer, fname, fty, sizeof(fty))) break;
+            if (!shadow_field_ty_of(outer, fname, fty, sizeof(fty)) &&
+                !shadow_as_field_target(outer, fname, fty, sizeof(fty)))
+                break;
             {
                 const char* resolved = shadow_td_alias_resolve(fty);
                 if (resolved && resolved[0] && strcmp(resolved, fty) != 0)
@@ -1835,6 +1838,19 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             snprintf(vty, sizeof(vty), "%s", fty);
         }
     }
+    /* Outer view allow-list: `d->len()` is still Highlight. `d->tree.meth`
+     * already peeled — the method is on the field's type. */
+    if (!walked_fields && pending_rr &&
+        !shadow_restrict_allows_use(pending_rr, meth_name)) {
+        fprintf(stderr,
+                "error: restricted mode '%s' on '%s' does not allow "
+                "method '%s' (flush-under-hold / capability deny)\n",
+                shadow_restrict_mode_label(pending_rr), pending_rr->base,
+                meth_name);
+        g_shadow_restrict_diag = 1;
+        g_shadow_ufcs_miss = 1;
+        return 0;
+    }
     /* Amp follows the operator only: `.` → &recv, `->` → recv.
      * `(&x)->meth` is already an address expression. Type `*` does not
      * rewrite `.` into a pointer call. */
@@ -1845,16 +1861,23 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         const char* rp = recv;
         while (*rp == '(' || *rp == ' ' || *rp == '\t') rp++;
         recv_addr = (*rp == '&');
-        if (!walked_fields && rb && strchr(rb->ty, '*') != NULL) {
+        if (!walked_fields && rb && rb->ty[0]) {
+            const char* check = shadow_td_alias_resolve(rb->ty);
+            if (!check || !check[0]) check = rb->ty;
+            if (strchr(check, '*') != NULL) {
             /* Map/ArrayMap sugar and user structs use `->`. CC* handles
-             * (CCChan, CCNursery, …) and C strings keep `.` UFCS. */
-            const char* bt = vty[0] ? vty : rb->ty;
+             * (CCChan, CCNursery, …) and C strings keep `.` UFCS.
+             * Named pointer views (`typedef @typeview … *RtxDocLayout`)
+             * resolve to `Base_Restrict_Mode*` — the alias spelling has
+             * no star. */
+            const char* bt = vty[0] ? vty : check;
             if (strncmp(bt, "CC", 2) == 0) handle = 1;
             if (strcmp(bt, "char") == 0 ||
                 strcmp(bt, "unsigned char") == 0 ||
                 strcmp(bt, "signed char") == 0)
                 handle = 1;
             if (!handle) type_is_ptr = 1;
+            }
         }
         if (recv_addr) type_is_ptr = 1;
         /* Field / subscript hop in recv (`p->out.meth`, `w->bufs[i].meth`):
@@ -2547,8 +2570,17 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     } else if (strcmp(meth_name, "destroy") == 0) {
         /* Type_destroy is the full chain (RtxDoc_destroy munmaps, zeros).
          * Embed flatten is only for types that have no Type_destroy —
-         * registered deltas + value embeds (CCTempFile unlink then file). */
-        if (!is_arrow && vty[0] && vty[0] >= 'A' && vty[0] <= 'Z') {
+         * registered deltas + value embeds (CCTempFile unlink then file).
+         * A receiver that already names a field is that field: do not
+         * apply the outer Type_destroy when the peel missed. */
+        if (recv && !walked_fields &&
+            (strchr(recv, '.') != NULL || strstr(recv, "->") != NULL))
+            return 0;
+        /* Dot and arrow: `d->destroy()` is still the outer Type_destroy.
+         * `!is_arrow` skipped pointer receivers and as: retried the
+         * embed (`as: tree` → RtxPieceTree_destroy) — a live session
+         * then made the next from_buffer "doc already live". */
+        if (vty[0] && vty[0] >= 'A' && vty[0] <= 'Z') {
             char body[768];
             size_t bo = 0;
             int have = 0;
@@ -3008,7 +3040,9 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                 tag[--tl] = 0;
             }
         }
-        if (!ptr_recv && recv && strstr(recv, ".u.value")) ptr_recv = 1;
+        /* `.u.value` is the Result ok temp. A pointer ok-type already
+         * set ptr_recv via the star strip; a value (CCJsVal) must keep
+         * `&recv` so `cc_js_val_get` sees `CCJsVal *`. */
         if (tag[0]) {
             char composed[160];
             char snake[160];
@@ -3040,17 +3074,17 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             }
             snake[si] = 0;
             composed[0] = 0;
-            /* Prefer registered callees visible as static fns in the TU:
-             *   Type_meth, snake_type_meth, snake_meth_{int,cstr},
-             *   snake_meth, snake_legacy_meth, bare meth (arena_avail).
-             * Alias binds resolve to the struct tag; still accept Alias_meth. */
+            /* Same declare oracle as Type_meth: TU ufn table or a face
+             * prototype (`rtx_layout_set_view` in an included .cch). Ufn
+             * harvest sees only this TU's AST — linked-TU snake methods
+             * are declarations on the face, not local defs. */
             if (shadow_td_alias_ufn_meth(tag, meth_name, tryc, sizeof(tryc))) {
                 snprintf(composed, sizeof(composed), "%s", tryc);
                 found = 1;
             }
             if (!found && snake[0]) {
                 snprintf(tryc, sizeof(tryc), "%s_type_%s", snake, meth_name);
-                if (shadow_ufn_exists(tryc)) {
+                if (shadow_ufcs_callee_declared(tryc)) {
                     snprintf(composed, sizeof(composed), "%s", tryc);
                     found = 1;
                 }
@@ -3066,21 +3100,21 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                              meth_name);
                 else
                     tryc[0] = 0;
-                if (tryc[0] && shadow_ufn_exists(tryc)) {
+                if (tryc[0] && shadow_ufcs_callee_declared(tryc)) {
                     snprintf(composed, sizeof(composed), "%s", tryc);
                     found = 1;
                 }
             }
             if (!found && snake[0]) {
                 snprintf(tryc, sizeof(tryc), "%s_%s", snake, meth_name);
-                if (shadow_ufn_exists(tryc)) {
+                if (shadow_ufcs_callee_declared(tryc)) {
                     snprintf(composed, sizeof(composed), "%s", tryc);
                     found = 1;
                 }
             }
             if (!found && snake[0]) {
                 snprintf(tryc, sizeof(tryc), "%s_legacy_%s", snake, meth_name);
-                if (shadow_ufn_exists(tryc)) {
+                if (shadow_ufcs_callee_declared(tryc)) {
                     snprintf(composed, sizeof(composed), "%s", tryc);
                     found = 1;
                 }
@@ -3257,6 +3291,17 @@ static int shadow_ufcs_try_as_retry_on(const char* recv, const char* meth_name,
     else
         shadow_bind_base_ty(rb, vty, sizeof(vty));
     if (!vty[0]) return 0;
+    /* as: retry is only for methods the outer does not declare.
+     * `d->destroy()` with Type_destroy on the face must not become
+     * the embed's destroy (`as: tree`). */
+    {
+        char declared[160];
+        if (strcmp(meth_name, "destroy") == 0 &&
+            shadow_type_destroy_fn(vty, declared, sizeof(declared)))
+            return 0;
+        snprintf(declared, sizeof(declared), "%s_%s", vty, meth_name);
+        if (shadow_ufcs_callee_declared(declared)) return 0;
+    }
     ptr = is_arrow;
     if (!ptr && rb && strchr(rb->ty, '*') != NULL && strncmp(vty, "CC", 2) != 0)
         ptr = 1;
