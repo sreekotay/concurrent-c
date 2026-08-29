@@ -19,7 +19,7 @@ int main(void) {
     }
 
     CCArena a = cc_arena_heap(kilobytes(1)) @destroy;
-    char[:] view = cc_arena_alloc_slice_bytes(&a, 32);
+    char[:] view = a.alloc_slice_bytes(32);
     if (!view.ptr) return 1;
     memset(view.ptr, 'x', view.len);
 
@@ -27,7 +27,7 @@ int main(void) {
         CCNursery n = cc_nursery_create() !> @destroy;
         n.spawn(() => [view] {
             (void)view;
-        });
+        }) !>;
     } /* join before arena destroy */
 
     printf("SHAPE-T2: prevented (stack-slice escape); "

@@ -9,7 +9,7 @@ int main(void) {
     IntMap m;
     int* p;
     if (!cc_arena_is_live(arena)) return 1;
-    m = array_map_new::[int, int](&arena);
+    m = array_map_new::[int, int](arena);
     if (!m) return 2;
     if (m->insert(42, 420) != 0) return 3;
     p = m->get_ptr(42);

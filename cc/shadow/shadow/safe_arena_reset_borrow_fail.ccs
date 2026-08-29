@@ -3,10 +3,10 @@
 
 int main(void) {
     CCArena buf = cc_arena_heap(kilobytes(4));
-    char* backing = cc_arena_alloc_T_count(char, &buf, 64);
+    char* backing = cc_arena_alloc_T_count(char, buf, 64);
     char[:] view = cc_slice_from_parts(backing, 64, 0);
     (void)view;
-    cc_arena_reset(&buf);
+    cc_arena_reset(buf);
     cc_arena_free(&buf);
     return 0;
 }

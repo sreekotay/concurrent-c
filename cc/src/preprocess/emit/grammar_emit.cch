@@ -26,7 +26,7 @@
 #include <ccc/cc_arena.cch>
 #include <ccc/std/string.cch>
 
-static inline void cc_gr__cat(CCString* o, CCString piece, CCArena* a) {
+static inline void cc_gr__cat(CCString* o, CCString piece, CCArena a) {
     cc_string_push_slice(o, cc_string_as_slice(&piece), a);
 }
 
@@ -37,7 +37,7 @@ static inline void cc_gr__cat(CCString* o, CCString piece, CCArena* a) {
  * Apple Silicon (vector->GPR lane-extract latency dominates ~11-byte
  * median runs); re-adding needs a stay-in-vector-domain design plus
  * on-hardware interleaved numbers. */
-static inline CCString cc_gr_swar_run_text(CCArena* a, int k, int T, int b1, int b2) {
+static inline CCString cc_gr_swar_run_text(CCArena a, int k, int T, int b1, int b2) {
     CCString o = cc_string_new();
     cc_gr__cat(&o, @string(`#if defined(__SSE2__)
     { while (p + 16 <= n) {
@@ -84,7 +84,7 @@ static inline CCString cc_gr_swar_run_text(CCArena* a, int k, int T, int b1, int
  * frac/exp scaffolding is skipped entirely (the common path for ids and
  * plain integers).  svf/sve rollbacks preserve the grammar's opt-frac /
  * opt-exp semantics ("1.5e" parses as the number "1.5"). */
-static inline CCString cc_gr_number_fast_tail_text(CCArena* a, int k) {
+static inline CCString cc_gr_number_fast_tail_text(CCArena a, int k) {
     return @string(`    if (p < n && (s[p] == 46 || s[p] == 69 || s[p] == 101)) {
     if (s[p] == 46) {
       size_t svf${k} = p; p++;
@@ -105,7 +105,7 @@ static inline CCString cc_gr_number_fast_tail_text(CCArena* a, int k) {
  * Spans live in meta (bits 10+) for interior nodes; u stays a byte pointer
  * everywhere.  Includes the lazy ffc number accessor (borrow stays the
  * default; ffc runs on use; FFC_IMPL lives in cc/runtime/arena_state.c). */
-static inline CCString cc_gr_node_api_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_node_api_text(CCArena a, const char* n) {
     /* unused: full node API is always emitted; TU may use only a subset.
      * Attr after `static` (not between type and name) — CC parse accepts that. */
     return @string(`static __attribute__((unused)) int ${n}Node_id(const ${n}Node* nd) { return (int)(nd->meta & 0xFFu); }
@@ -148,7 +148,7 @@ static inline __attribute__((unused)) double ${n}Node_as_f64(const ${n}Node* nd)
  * SOURCE anchor so __unwind works; materialize installs without a
  * re-scan.  tgrow doubles the tape (and, when the grammar has codecs,
  * the stash arrays in lockstep). */
-static inline CCString cc_gr_tape_substrate_text(CCArena* a, const char* n, int has_codecs) {
+static inline CCString cc_gr_tape_substrate_text(CCArena a, const char* n, int has_codecs) {
     CCString o = cc_string_new();
     cc_gr__cat(&o, @string(`typedef struct { unsigned long long meta;
     union { const char* bytes; } u; } ${n}Node;
@@ -197,7 +197,7 @@ enum { CC_GR_WMEASURE = 0, CC_GR_WPUT = 1, CC_GR_WCHK = 2 };
 
 /* printable-byte annotation for emitted compares: 61 -> "'='". '*' and '/'
  * stay hex so a comment can never contain a comment terminator. */
-static inline CCString cc_gr_chr_text(CCArena* a, int b) {
+static inline CCString cc_gr_chr_text(CCArena a, int b) {
     if (b >= 0x21 && b <= 0x7e && b != '\'' && b != '\\' && b != '*' && b != '/') {
         char ch = (char)b;
         return @string(`'${ch}'`, a);
@@ -217,7 +217,7 @@ static inline CCString cc_gr_chr_text(CCArena* a, int b) {
 /* C-string-literal escape for emitted byte runs: identifier-ish bytes pass,
  * everything else becomes \NNN octal (always 3 digits, so a following
  * digit can't extend the escape). */
-static inline CCString cc_gr_esc_text(CCArena* a, const unsigned char* src, int len) {
+static inline CCString cc_gr_esc_text(CCArena a, const unsigned char* src, int len) {
     CCString o = cc_string_new();
     for (int i = 0; i < len; i++) {
         unsigned char c = src[i];
@@ -239,7 +239,7 @@ static inline CCString cc_gr_esc_text(CCArena* a, const unsigned char* src, int 
 
 /* pending constant-byte run: short runs as annotated stores, long runs as
  * one memcpy of an escaped literal; chk proves space once per run */
-static inline CCString cc_gr_wflush_text(CCArena* a, int md, const unsigned char* lit, int nlit) {
+static inline CCString cc_gr_wflush_text(CCArena a, int md, const unsigned char* lit, int nlit) {
     CCString o = cc_string_new();
     if (md == CC_GR_WCHK)
         cc_gr__cat(&o, @string(`    if (cap - o < ${nlit}) return 0;
@@ -261,7 +261,7 @@ static inline CCString cc_gr_wflush_text(CCArena* a, int md, const unsigned char
 
 /* compare-chain digit count into `dest` — no divisions on the 1-6 digit
  * values wire formats actually carry; full 20-digit chain so it's total */
-static inline CCString cc_gr_digits_expr_text(CCArena* a, int k, CCString dest) {
+static inline CCString cc_gr_digits_expr_text(CCArena a, int k, CCString dest) {
     CCString o = cc_string_new();
     unsigned long long p = 10;
     cc_gr__cat(&o, @string(`      ${dest} `, a), a);
@@ -279,7 +279,7 @@ static inline CCString cc_gr_digits_expr_text(CCArena* a, int k, CCString dest) 
  *   measure — digit count by compare chain, no divisions
  *   put     — reversed digit buffer, space already proven
  *   chk     — count first, prove space, then write BACKWARD in place */
-static inline CCString cc_gr_wint_text(CCArena* a, int k, int md, const char* expr, int is_unsigned) {
+static inline CCString cc_gr_wint_text(CCArena a, int k, int md, const char* expr, int is_unsigned) {
     CCString o = cc_string_new();
     if (md == CC_GR_WPUT && is_unsigned) {
         cc_gr__cat(&o, @string(`    { unsigned long long u${k} = (unsigned long long)(${expr});
@@ -338,7 +338,7 @@ static inline CCString cc_gr_wint_text(CCArena* a, int k, int md, const char* ex
 
 /* float writer body (flush already done by the caller): %.17g round-trips
  * doubles exactly; chk asks snprintf for the exact need first */
-static inline CCString cc_gr_wfloat_text(CCArena* a, int k, int md, const char* field) {
+static inline CCString cc_gr_wfloat_text(CCArena a, int k, int md, const char* field) {
     if (md == CC_GR_WPUT)
         return @string(`    { char tb${k}[64]; int n${k} = snprintf(tb${k}, sizeof tb${k}, "%.17g", v->${field});
       memcpy(dst + o, tb${k}, (size_t)n${k}); o += (size_t)n${k}; }
@@ -356,7 +356,7 @@ static inline CCString cc_gr_wfloat_text(CCArena* a, int k, int md, const char* 
  * caller): encoded when the rule's codec has an /encode inverse, memcpy
  * otherwise; k is meaningful only for the chk+encoder arm (the caller
  * allocates it only then, keeping the label sequence stable) */
-static inline CCString cc_gr_wleaf_body_text(CCArena* a, int md, int k, const char* enc,
+static inline CCString cc_gr_wleaf_body_text(CCArena a, int md, int k, const char* enc,
                                              const char* pexpr, const char* lexpr) {
     if (enc && md == CC_GR_WPUT)
         return @string(`    o += ${enc}((const char*)${pexpr}, ${lexpr}, dst + o, (size_t)-1);
@@ -382,7 +382,7 @@ static inline CCString cc_gr_wleaf_body_text(CCArena* a, int md, int k, const ch
 
 /* raw bytes field: measure is just the length; put/chk memcpy (flush done
  * by the caller on the non-measure paths) */
-static inline CCString cc_gr_wbytes_text(CCArena* a, int md, const char* field) {
+static inline CCString cc_gr_wbytes_text(CCArena a, int md, const char* field) {
     if (md == CC_GR_WMEASURE)
         return @string(`    o += v->${field}.len;
 `, a);
@@ -396,7 +396,7 @@ static inline CCString cc_gr_wbytes_text(CCArena* a, int md, const char* field) 
 }
 
 /* count-driven items: delegate each element to its own writer triplet */
-static inline CCString cc_gr_witems_text(CCArena* a, int k, int md,
+static inline CCString cc_gr_witems_text(CCArena a, int k, int md,
                                          const char* field, const char* etype) {
     CCString o = cc_string_new();
     cc_gr__cat(&o, @string(`    { size_t i${k};
@@ -416,7 +416,7 @@ static inline CCString cc_gr_witems_text(CCArena* a, int k, int md,
     return o;
 }
 
-static inline CCString cc_gr_wschema_text(CCArena* a, int md, const char* field,
+static inline CCString cc_gr_wschema_text(CCArena a, int md, const char* field,
                                           const char* etype) {
     if (md == CC_GR_WPUT)
         return @string(`    if (!v->${field}) return 0;
@@ -433,7 +433,7 @@ static inline CCString cc_gr_wschema_text(CCArena* a, int md, const char* field,
 
 /* narrowed delimited list: separator byte between elements comes from the
  * decomposed rule; open/close bytes ride the caller's constant-run WAcc */
-static inline CCString cc_gr_wnarrow_list_text(CCArena* a, int k, int md,
+static inline CCString cc_gr_wnarrow_list_text(CCArena a, int k, int md,
                                                const char* field, const char* etype, int sep_b) {
     CCString o = cc_string_new();
     cc_gr__cat(&o, @string(`    { size_t i${k};
@@ -462,27 +462,27 @@ static inline CCString cc_gr_wnarrow_list_text(CCArena* a, int k, int md,
  * whole-function fold cannot absorb them). An out-of-range kind refuses to
  * emit anything: the writers return 0 — the same didn't-fit/error value the
  * checked entry already reports — never garbage bytes. */
-static inline CCString cc_gr_wunion_head_text(CCArena* a) {
+static inline CCString cc_gr_wunion_head_text(CCArena a) {
     return @string(`    switch (v->kind) {
 `, a);
 }
 
-static inline CCString cc_gr_wunion_case_text(CCArena* a, const char* sname, const char* vname) {
+static inline CCString cc_gr_wunion_case_text(CCArena a, const char* sname, const char* vname) {
     return @string(`    case ${sname}_${vname}: {
 `, a);
 }
 
-static inline CCString cc_gr_wunion_arm_fix_text(CCArena* a, long cfix) {
+static inline CCString cc_gr_wunion_arm_fix_text(CCArena a, long cfix) {
     return @string(`    o += ${cfix};   /* variant skeleton */
 `, a);
 }
 
-static inline CCString cc_gr_wunion_break_text(CCArena* a) {
+static inline CCString cc_gr_wunion_break_text(CCArena a) {
     return @string(`    break; }
 `, a);
 }
 
-static inline CCString cc_gr_wunion_default_text(CCArena* a) {
+static inline CCString cc_gr_wunion_default_text(CCArena a) {
     return @string(`    default: return 0;   /* invalid kind: refuse to emit garbage */
     }
 `, a);
@@ -490,38 +490,38 @@ static inline CCString cc_gr_wunion_default_text(CCArena* a) {
 
 /* Field-discriminated write: emit the discriminant int from arm tag
  * (EQ → literal imm; GE → derived length expression), never from a stored lie. */
-static inline CCString cc_gr_wdisc_open_text(CCArena* a) {
+static inline CCString cc_gr_wdisc_open_text(CCArena a) {
     return @string(`    { long long __wd;
       switch (v->kind) {
 `, a);
 }
 
-static inline CCString cc_gr_wdisc_eq_text(CCArena* a, const char* sname,
+static inline CCString cc_gr_wdisc_eq_text(CCArena a, const char* sname,
                                            const char* vname, long long imm) {
     return @string(`      case ${sname}_${vname}: __wd = ${imm}LL; break;
 `, a);
 }
 
-static inline CCString cc_gr_wdisc_ge_text(CCArena* a, const char* sname,
+static inline CCString cc_gr_wdisc_ge_text(CCArena a, const char* sname,
                                            const char* vname, const char* expr) {
     return @string(`      case ${sname}_${vname}: __wd = (long long)(${expr}); break;
 `, a);
 }
 
-static inline CCString cc_gr_wdisc_close_text(CCArena* a) {
+static inline CCString cc_gr_wdisc_close_text(CCArena a) {
     return @string(`      default: return 0;
       }
 `, a);
 }
 
-static inline CCString cc_gr_wdisc_end_text(CCArena* a) {
+static inline CCString cc_gr_wdisc_end_text(CCArena a) {
     return @string(`    }
 `, a);
 }
 
 /* writer-triplet function heads/tails and the checked _write entry.
  * measure's tail folds the whole structural skeleton to ONE constant. */
-static inline CCString cc_gr_write_head_text(CCArena* a, int md, const char* n) {
+static inline CCString cc_gr_write_head_text(CCArena a, int md, const char* n) {
     if (md == CC_GR_WPUT)
         return @string(`static __attribute__((unused)) size_t ${n}__wput(const ${n}* v, char* dst) {
     size_t o = 0;
@@ -538,7 +538,7 @@ static inline CCString cc_gr_write_head_text(CCArena* a, int md, const char* n) 
 `, a);
 }
 
-static inline CCString cc_gr_write_tail_text(CCArena* a, int md, long cfix) {
+static inline CCString cc_gr_write_tail_text(CCArena a, int md, long cfix) {
     CCString o = cc_string_new();
     if (md == CC_GR_WMEASURE && cfix)
         cc_gr__cat(&o, @string(`    o += ${cfix};   /* structural skeleton */
@@ -555,7 +555,7 @@ static inline CCString cc_gr_write_tail_text(CCArena* a, int md, long cfix) {
     return o;
 }
 
-static inline CCString cc_gr_write_entry_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_write_entry_text(CCArena a, const char* n) {
     return @string(`static __attribute__((unused)) size_t ${n}_write(const ${n}* v, char* dst, size_t cap) {
     size_t o = 0;
     if (!${n}__wchk(v, dst, cap, &o)) return 0;
@@ -575,7 +575,7 @@ static __attribute__((unused)) size_t ${n}_write_unchecked(const ${n}* v, char* 
  * union-variant field prefix ("" or "u.<variant>."). */
 
 /* extractor head/tail: G__x_R captures a span (xa,xb) + dirty flag */
-static inline CCString cc_gr_x_head_text(CCArena* a, const char* g, const char* r) {
+static inline CCString cc_gr_x_head_text(CCArena a, const char* g, const char* r) {
     return @string(`static int ${g}__x_${r}(const unsigned char* s, size_t n, size_t* io,
         size_t* xa, size_t* xb, int* xdr) {
     size_t p = *io;
@@ -584,7 +584,7 @@ static inline CCString cc_gr_x_head_text(CCArena* a, const char* g, const char* 
 `, a);
 }
 
-static inline CCString cc_gr_x_tail_text(CCArena* a, const char* fail) {
+static inline CCString cc_gr_x_tail_text(CCArena a, const char* fail) {
     /* Some matchers never jump to fail (unfailing bodies); keep the label. */
     return @string(`    *io = p; return 1;
 ${fail}: __attribute__((unused));
@@ -595,7 +595,7 @@ ${fail}: __attribute__((unused));
 
 /* matcher/pad call: G__<class>_<rule>(s, n, &p[, depth]) or fail.
  * darg is "" or ", cc_depth" / ", cc_depth + 1". */
-static inline CCString cc_gr_pad_call_text(CCArena* a, const char* g, const char* cls,
+static inline CCString cc_gr_pad_call_text(CCArena a, const char* g, const char* cls,
                                            const char* r, const char* fail,
                                            const char* darg) {
     return @string(`    if (!${g}__${cls}_${r}(s, n, &p${darg})) { cc_grammar_note_fail(p); goto ${fail}; };
@@ -603,7 +603,7 @@ static inline CCString cc_gr_pad_call_text(CCArena* a, const char* g, const char
 }
 
 /* overflow-checked store of an unsigned accumulator into a signed 64-bit field */
-static inline CCString cc_gr_bind_int_store_text(CCArena* a, int k, int neg,
+static inline CCString cc_gr_bind_int_store_text(CCArena a, int k, int neg,
                                                  const char* pfx, const char* field,
                                                  const char* fail) {
     if (neg)
@@ -624,7 +624,7 @@ static inline CCString cc_gr_bind_int_store_text(CCArena* a, int k, int neg,
 /* fused int run: ONE accumulate-while-scan loop, no second conversion
  * pass, no charset loads — the hand-parser inner loop, derived.
  * A value outside signed 64-bit range is a parse failure (not wrap). */
-static inline CCString cc_gr_bind_int_run_text(CCArena* a, int k, int neg,
+static inline CCString cc_gr_bind_int_run_text(CCArena a, int k, int neg,
                                                const char* pfx, const char* field,
                                                const char* fail) {
     CCString o = cc_string_new();
@@ -651,14 +651,14 @@ static inline CCString cc_gr_bind_int_run_text(CCArena* a, int k, int neg,
 
 /* span-bind openers: call the extractor, or set up locals for an inline
  * expansion (the C driver recurses rg_emit_node between open and close) */
-static inline CCString cc_gr_bind_span_call_text(CCArena* a, int k, const char* g,
+static inline CCString cc_gr_bind_span_call_text(CCArena a, int k, const char* g,
                                                  const char* r, const char* fail) {
     return @string(`    { size_t xa${k}, xb${k}; int xd${k};
       if (!${g}__x_${r}(s, n, &p, &xa${k}, &xb${k}, &xd${k})) { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
-static inline CCString cc_gr_bind_span_inline_text(CCArena* a, int k) {
+static inline CCString cc_gr_bind_span_inline_text(CCArena a, int k) {
     return @string(`    { size_t xa${k}, xb${k}; int xd${k} = 0;
       { size_t* xa = &xa${k}; size_t* xb = &xb${k}; int* xdr = &xd${k};
         (void)xa; (void)xb; (void)xdr;
@@ -666,7 +666,7 @@ static inline CCString cc_gr_bind_span_inline_text(CCArena* a, int k) {
 }
 
 /* int over the captured span: matcher validated the digits already */
-static inline CCString cc_gr_bind_int_span_text(CCArena* a, int k,
+static inline CCString cc_gr_bind_int_span_text(CCArena a, int k,
                                                 const char* pfx, const char* field,
                                                 const char* fail) {
     CCString o = cc_string_new();
@@ -687,7 +687,7 @@ static inline CCString cc_gr_bind_int_span_text(CCArena* a, int k,
 }
 
 /* float over the captured span: ffc parses JSON doubles */
-static inline CCString cc_gr_bind_float_span_text(CCArena* a, int k, const char* pfx,
+static inline CCString cc_gr_bind_float_span_text(CCArena a, int k, const char* pfx,
                                                   const char* field, const char* fail) {
     return @string(`      (void)xd${k};
       { ffc_parse_options o${k}; o${k}.format = FFC_PRESET_JSON; o${k}.decimal_point = '.';
@@ -701,7 +701,7 @@ static inline CCString cc_gr_bind_float_span_text(CCArena* a, int k, const char*
 
 /* slice bind closers: clean spans borrow raw, dirty spans decode through
  * the rule's codec (same provenance contract as the collect/DOM tiers) */
-static inline CCString cc_gr_bind_slice_codec_text(CCArena* a, int k, const char* pfx,
+static inline CCString cc_gr_bind_slice_codec_text(CCArena a, int k, const char* pfx,
                                                    const char* field, const char* codec,
                                                    const char* fail) {
     return @string(`      if (!xd${k}) out->${pfx}${field} = cc_slice_from_buffer((void*)(s + xa${k}), xb${k} - xa${k});
@@ -710,7 +710,7 @@ static inline CCString cc_gr_bind_slice_codec_text(CCArena* a, int k, const char
 `, a);
 }
 
-static inline CCString cc_gr_bind_slice_borrow_text(CCArena* a, int k,
+static inline CCString cc_gr_bind_slice_borrow_text(CCArena a, int k,
                                                     const char* pfx, const char* field) {
     return @string(`      (void)xd${k};
       out->${pfx}${field} = cc_slice_from_buffer((void*)(s + xa${k}), xb${k} - xa${k});
@@ -721,7 +721,7 @@ static inline CCString cc_gr_bind_slice_borrow_text(CCArena* a, int k,
 /* counted opaque payload: exactly out->cfield bytes, borrowed */
 /* cpfx: prefix for the length int; fpfx: prefix for the payload bind.
  * They differ when a field-discriminated arm reads a product-level len. */
-static inline CCString cc_gr_bytes_term_text(CCArena* a, int k, const char* cpfx,
+static inline CCString cc_gr_bytes_term_text(CCArena a, int k, const char* cpfx,
                                              const char* cfield, const char* fpfx,
                                              const char* field, const char* fail) {
     /* CCSliceHdr: wire borrow is {ptr,len}; full CCSlice keeps provenance id. */
@@ -736,7 +736,7 @@ static inline CCString cc_gr_bytes_term_text(CCArena* a, int k, const char* cpfx
 /* count-driven items: cap > 0 fills the struct's INLINE array (zero
  * alloc; larger count is a protocol error), else exact-size allocation.
  * cpfx = count int prefix; fpfx = items bind prefix (may differ). */
-static inline CCString cc_gr_items_counted_text(CCArena* a, int k, const char* T,
+static inline CCString cc_gr_items_counted_text(CCArena a, int k, const char* T,
                                                 const char* cpfx, const char* cfield,
                                                 const char* fpfx, const char* field,
                                                 int cap, const char* fail) {
@@ -752,7 +752,7 @@ static inline CCString cc_gr_items_counted_text(CCArena* a, int k, const char* T
       if (C${k} < 0) { cc_grammar_note_fail(p); goto ${fail}; };
       if ((unsigned long long)C${k} > n - p) { *cc_inc = 1; { cc_grammar_note_fail(p); goto ${fail}; }; }
       size_t cap${k} = C${k} > 0 ? (size_t)C${k} : 1;
-      ${T}* v${k} = (${T}*)cc_arena_alloc_local(arena, cap${k} * sizeof(${T}), _Alignof(${T}));
+      ${T}* v${k} = (${T}*)cc_arena_alloc_local_grow(arena, cap${k} * sizeof(${T}), _Alignof(${T}));
       if (!v${k}) { cc_grammar_note_fail(p); goto ${fail}; };
       for (long long i${k} = 0; i${k} < C${k}; i${k}++)
           if (!${T}__fill(s, n, &p, arena, &v${k}[i${k}], cc_inc, cc_depth + 1)) { cc_grammar_note_fail(p); goto ${fail}; };
@@ -762,26 +762,26 @@ static inline CCString cc_gr_items_counted_text(CCArena* a, int k, const char* T
 
 /* growable element-vector pieces, shared by the delimited items form and
  * the narrowed list form (the drivers interleave pads between them) */
-static inline CCString cc_gr_lvec_head_text(CCArena* a, int k, const char* T, const char* fail) {
+static inline CCString cc_gr_lvec_head_text(CCArena a, int k, const char* T, const char* fail) {
     return @string(`    { size_t cap${k} = 8, cnt${k} = 0;
     ${T}* v${k} = (${T}*)cc_arena_alloc_local(arena, cap${k} * sizeof(${T}), _Alignof(${T}));
     if (!v${k}) { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
-static inline CCString cc_gr_byte_check_text(CCArena* a, int b, const char* fail) {
+static inline CCString cc_gr_byte_check_text(CCArena a, int b, const char* fail) {
     return @string(`    if (!(p < n && s[p] == ${b})) { cc_grammar_note_fail(p); goto ${fail}; };
     p++;
 `, a);
 }
 
-static inline CCString cc_gr_loop_open_text(CCArena* a, int b) {
+static inline CCString cc_gr_loop_open_text(CCArena a, int b) {
     return @string(`    if (p < n && s[p] != ${b}) {
     for (;;) {
 `, a);
 }
 
-static inline CCString cc_gr_lvec_grow_text(CCArena* a, int k, const char* T, const char* fail) {
+static inline CCString cc_gr_lvec_grow_text(CCArena a, int k, const char* T, const char* fail) {
     return @string(`    if (cnt${k} == cap${k}) {
         ${T}* nv${k} = (${T}*)cc_arena_realloc(arena, arena, v${k},
             cap${k} * sizeof(${T}), cap${k} * 2 * sizeof(${T}), _Alignof(${T}));
@@ -791,19 +791,19 @@ static inline CCString cc_gr_lvec_grow_text(CCArena* a, int k, const char* T, co
 `, a);
 }
 
-static inline CCString cc_gr_lvec_fill_text(CCArena* a, int k, const char* T, const char* fail) {
+static inline CCString cc_gr_lvec_fill_text(CCArena a, int k, const char* T, const char* fail) {
     return @string(`    if (!${T}__fill(s, n, &p, arena, &v${k}[cnt${k}], cc_inc, cc_depth + 1)) { cc_grammar_note_fail(p); goto ${fail}; };
     cnt${k}++;
 `, a);
 }
 
-static inline CCString cc_gr_new_fill_proto_text(CCArena* a, const char* T) {
+static inline CCString cc_gr_new_fill_proto_text(CCArena a, const char* T) {
     return @string(`static ${T}* ${T}__new_fill(const unsigned char* s, size_t n, size_t* io,
     CCArena arena, int* cc_inc, int cc_depth);
 `, a);
 }
 
-static inline CCString cc_gr_new_fill_def_text(CCArena* a, const char* T) {
+static inline CCString cc_gr_new_fill_def_text(CCArena a, const char* T) {
     return @string(`static __attribute__((unused)) ${T}* ${T}__new_fill(const unsigned char* s, size_t n, size_t* io,
     CCArena arena, int* cc_inc, int cc_depth) {
     ${T}* q = (${T}*)cc_arena_alloc_local(arena, sizeof(${T}), _Alignof(${T}));
@@ -815,7 +815,7 @@ static inline CCString cc_gr_new_fill_def_text(CCArena* a, const char* T) {
 `, a);
 }
 
-static inline CCString cc_gr_bind_schema_text(CCArena* a, int k, const char* T,
+static inline CCString cc_gr_bind_schema_text(CCArena a, int k, const char* T,
                                               const char* pfx, const char* field,
                                               const char* fail) {
     return @string(`    { ${T}* q${k} = ${T}__new_fill(s, n, &p, arena, cc_inc, cc_depth + 1);
@@ -826,7 +826,7 @@ static inline CCString cc_gr_bind_schema_text(CCArena* a, int k, const char* T,
 
 /* separator handling: the narrowed form has no pads inside the sep arm
  * (one piece); the delimited items form pads after the sep (split) */
-static inline CCString cc_gr_lvec_sep_close_text(CCArena* a, int b) {
+static inline CCString cc_gr_lvec_sep_close_text(CCArena a, int b) {
     return @string(`    if (p < n && s[p] == ${b}) { p++; continue; }
     break;
     }
@@ -834,12 +834,12 @@ static inline CCString cc_gr_lvec_sep_close_text(CCArena* a, int b) {
 `, a);
 }
 
-static inline CCString cc_gr_lvec_sep_open_text(CCArena* a, int b) {
+static inline CCString cc_gr_lvec_sep_open_text(CCArena a, int b) {
     return @string(`    if (p < n && s[p] == ${b}) { p++;
 `, a);
 }
 
-static inline CCString cc_gr_lvec_loop_close_text(CCArena* a) {
+static inline CCString cc_gr_lvec_loop_close_text(CCArena a) {
     return @string(`    continue; }
     break;
     }
@@ -847,19 +847,19 @@ static inline CCString cc_gr_lvec_loop_close_text(CCArena* a) {
 `, a);
 }
 
-static inline CCString cc_gr_lvec_store_text(CCArena* a, int k,
+static inline CCString cc_gr_lvec_store_text(CCArena a, int k,
                                              const char* pfx, const char* field) {
     return @string(`    out->${pfx}${field} = v${k}; out->${pfx}${field}_n = cnt${k}; }
 `, a);
 }
 
-static inline CCString cc_gr_presence_text(CCArena* a, int bit) {
+static inline CCString cc_gr_presence_text(CCArena a, int bit) {
     return @string(`    out->cc__set |= 1ULL << ${bit};
 `, a);
 }
 
 /* literal terms: bounds-driven failure = INCOMPLETE, content = malformed */
-static inline CCString cc_gr_lit1_term_text(CCArena* a, int b, const char* fail) {
+static inline CCString cc_gr_lit1_term_text(CCArena a, int b, const char* fail) {
     CCString c = cc_gr_chr_text(a, b);
     return @string(`    if (p >= n) { *cc_inc = 1; { cc_grammar_note_fail(p); goto ${fail}; }; }
     if (s[p] != ${b} /*${c}*/) { cc_grammar_note_fail(p); goto ${fail}; };
@@ -867,7 +867,7 @@ static inline CCString cc_gr_lit1_term_text(CCArena* a, int b, const char* fail)
 `, a);
 }
 
-static inline CCString cc_gr_litn_term_text(CCArena* a, const unsigned char* lit, int len,
+static inline CCString cc_gr_litn_term_text(CCArena a, const unsigned char* lit, int len,
                                             const char* fail) {
     /* Short lits (CRLF, "\r\n", small delimiters): per-byte compares beat
      * memcmp at redis / framing density — libc call + setup dominates. */
@@ -897,7 +897,7 @@ static inline CCString cc_gr_litn_term_text(CCArena* a, const unsigned char* lit
 /* ---- key-dispatch pieces, shared by the delimited fields form and the
  * narrowed member-list form: capture the key span, switch on length,
  * memcmp chain within a length class, unknown keys to the Ld arm ---- */
-static inline CCString cc_gr_key_span_text(CCArena* a, int k, const char* g,
+static inline CCString cc_gr_key_span_text(CCArena a, int k, const char* g,
                                            const char* r, const char* fail) {
     return @string(`    { size_t xa${k}, xb${k}; int xd${k};
       if (!${g}__x_${r}(s, n, &p, &xa${k}, &xb${k}, &xd${k})) { cc_grammar_note_fail(p); goto ${fail}; };
@@ -906,40 +906,40 @@ static inline CCString cc_gr_key_span_text(CCArena* a, int k, const char* g,
 }
 
 /* member-scope byte check (6-space indent, inside the key block) */
-static inline CCString cc_gr_kv_check_text(CCArena* a, int b, const char* fail) {
+static inline CCString cc_gr_kv_check_text(CCArena a, int b, const char* fail) {
     return @string(`      if (!(p < n && s[p] == ${b})) { cc_grammar_note_fail(p); goto ${fail}; };
       p++;
 `, a);
 }
 
-static inline CCString cc_gr_key_switch_open_text(CCArena* a, int k) {
+static inline CCString cc_gr_key_switch_open_text(CCArena a, int k) {
     return @string(`      switch (xb${k} - xa${k}) {
 `, a);
 }
 
-static inline CCString cc_gr_key_case_text(CCArena* a, int len) {
+static inline CCString cc_gr_key_case_text(CCArena a, int len) {
     return @string(`      case ${len}:
 `, a);
 }
 
-static inline CCString cc_gr_key_memcmp_open_text(CCArena* a, int k,
+static inline CCString cc_gr_key_memcmp_open_text(CCArena a, int k,
                                                   const unsigned char* key, int len) {
     CCString esc = cc_gr_esc_text(a, key, len);
     return @string(`        if (memcmp(s + xa${k}, "${esc}", ${len}) == 0) {
 `, a);
 }
 
-static inline CCString cc_gr_key_break_text(CCArena* a) {
+static inline CCString cc_gr_key_break_text(CCArena a) {
     return @string(`          break; }
 `, a);
 }
 
-static inline CCString cc_gr_key_goto_dflt_text(CCArena* a, int k) {
+static inline CCString cc_gr_key_goto_dflt_text(CCArena a, int k) {
     return @string(`        goto Ld${k};
 `, a);
 }
 
-static inline CCString cc_gr_key_default_text(CCArena* a, int k) {
+static inline CCString cc_gr_key_default_text(CCArena a, int k) {
     return @string(`      default: goto Ld${k};
       }
       goto Ln${k};
@@ -948,20 +948,20 @@ Ld${k}:
 }
 
 /* Reflective Type__fk — field-name string-switch (structured; not opaque). */
-static inline CCString cc_gr_fk_get_open_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_fk_get_open_text(CCArena a, const char* n) {
     return @string(`static inline __attribute__((always_inline)) int ${n}__fk(CCSlice k) {
     switch (k) {
 `, a);
 }
 
-static inline CCString cc_gr_fk_case_text(CCArena* a, const unsigned char* key, int len,
+static inline CCString cc_gr_fk_case_text(CCArena a, const unsigned char* key, int len,
                                           int ord) {
     CCString esc = cc_gr_esc_text(a, key, len);
     return @string(`    case "${esc}": return ${ord};
 `, a);
 }
 
-static inline CCString cc_gr_fk_fn_close_text(CCArena* a) {
+static inline CCString cc_gr_fk_fn_close_text(CCArena a) {
     return @string(`    default: return -1;
     }
 }
@@ -969,66 +969,66 @@ static inline CCString cc_gr_fk_fn_close_text(CCArena* a) {
 }
 
 /* the Ld arm: skip through the grammar's value/else rule, or hard-fail */
-static inline CCString cc_gr_pad_call6_text(CCArena* a, const char* g, const char* cls,
+static inline CCString cc_gr_pad_call6_text(CCArena a, const char* g, const char* cls,
                                             const char* r, const char* fail,
                                             const char* darg) {
     return @string(`      if (!${g}__${cls}_${r}(s, n, &p${darg})) { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
-static inline CCString cc_gr_unknown_member_text(CCArena* a, const char* fail) {
+static inline CCString cc_gr_unknown_member_text(CCArena a, const char* fail) {
     return @string(`      { cc_grammar_note_fail(p); goto ${fail}; };   /* unknown member and no else rule */
 `, a);
 }
 
-static inline CCString cc_gr_key_loop_end_text(CCArena* a, int k) {
+static inline CCString cc_gr_key_loop_end_text(CCArena a, int k) {
     return @string(`Ln${k}: ;
     }
 `, a);
 }
 
 /* ---- reflective face: field table, name lookup, compiled get ---- */
-static inline CCString cc_gr_ftable_head_text(CCArena* a, const char* n, int cnt) {
+static inline CCString cc_gr_ftable_head_text(CCArena a, const char* n, int cnt) {
     return @string(`static const CCGramField ${n}__fields[${cnt}] = {
 `, a);
 }
 
-static inline CCString cc_gr_ftable_row_items_text(CCArena* a, const char* field,
+static inline CCString cc_gr_ftable_row_items_text(CCArena a, const char* field,
                                                    const char* gk, const char* n,
                                                    const char* etype) {
     return @string(`    { "${field}", ${gk}, (unsigned)offsetof(${n}, ${field}), (unsigned)offsetof(${n}, ${field}_n), "${etype}" },
 `, a);
 }
 
-static inline CCString cc_gr_ftable_row_text(CCArena* a, const char* field,
+static inline CCString cc_gr_ftable_row_text(CCArena a, const char* field,
                                              const char* gk, const char* n) {
     return @string(`    { "${field}", ${gk}, (unsigned)offsetof(${n}, ${field}), 0, 0 },
 `, a);
 }
 
-static inline CCString cc_gr_ftable_empty_row_text(CCArena* a) {
+static inline CCString cc_gr_ftable_empty_row_text(CCArena a) {
     return @string(`    { 0, 0, 0, 0, 0 },
 `, a);
 }
 
-static inline CCString cc_gr_ftable_close_text(CCArena* a) {
+static inline CCString cc_gr_ftable_close_text(CCArena a) {
     return @string(`};
 `, a);
 }
 
-static inline CCString cc_gr_field_fn_head_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_field_fn_head_text(CCArena a, const char* n) {
     return @string(`static __attribute__((unused)) const CCGramField* ${n}_field(const char* k, size_t kl) {
     CCSlice ks = cc_slice_from_buffer((void*)k, kl);
     switch (${n}__fk(ks)) {
 `, a);
 }
 
-static inline CCString cc_gr_field_ord_hit_text(CCArena* a, const char* n, int j) {
+static inline CCString cc_gr_field_ord_hit_text(CCArena a, const char* n, int j) {
     return @string(`    case ${j}: return &${n}__fields[${j}];
 `, a);
 }
 
-static inline CCString cc_gr_switch_end_ret0_text(CCArena* a) {
+static inline CCString cc_gr_switch_end_ret0_text(CCArena a) {
     return @string(`    default: break;
     }
     return 0;
@@ -1038,7 +1038,7 @@ static inline CCString cc_gr_switch_end_ret0_text(CCArena* a) {
 
 /* compiled get: dispatch straight to member reads — the field table is
  * the reflective face, this is the fast one */
-static inline CCString cc_gr_get_fn_head_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_get_fn_head_text(CCArena a, const char* n) {
     return @string(`static __attribute__((unused)) int ${n}_get(const ${n}* v, const char* k, CCGramValue* out) {
     CCSlice ks = cc_slice_from_buffer((void*)k, strlen(k));
     (void)v;
@@ -1046,7 +1046,7 @@ static inline CCString cc_gr_get_fn_head_text(CCArena* a, const char* n) {
 `, a);
 }
 
-static inline CCString cc_gr_get_ord_hit_open_text(CCArena* a, const char* gk,
+static inline CCString cc_gr_get_ord_hit_open_text(CCArena a, const char* gk,
                                                    const char* n, int j) {
     return @string(`    case ${j}: {
             out->kind = ${gk};
@@ -1054,7 +1054,7 @@ static inline CCString cc_gr_get_ord_hit_open_text(CCArena* a, const char* gk,
 `, a);
 }
 
-static inline CCString cc_gr_get_present_text(CCArena* a, int presence, int j) {
+static inline CCString cc_gr_get_present_text(CCArena a, int presence, int j) {
     if (presence)
         return @string(`            out->present = (int)((v->cc__set >> ${j}) & 1);
 `, a);
@@ -1063,7 +1063,7 @@ static inline CCString cc_gr_get_present_text(CCArena* a, int presence, int j) {
 }
 
 /* vk: 0 int, 1 float, 2 items, 3 slice (CCSlice), 4 bytes (CCSliceHdr→CCSlice) */
-static inline CCString cc_gr_get_value_text(CCArena* a, int vk, const char* field) {
+static inline CCString cc_gr_get_value_text(CCArena a, int vk, const char* field) {
     if (vk == 0)
         return @string(`            out->i = v->${field};
 `, a);
@@ -1080,14 +1080,14 @@ static inline CCString cc_gr_get_value_text(CCArena* a, int vk, const char* fiel
 `, a);
 }
 
-static inline CCString cc_gr_get_hit_close_text(CCArena* a) {
+static inline CCString cc_gr_get_hit_close_text(CCArena a) {
     return @string(`            return 1;
         }
 `, a);
 }
 
 /* ---- tagged-union first-byte dispatch (`one of`) ---- */
-static inline CCString cc_gr_union_head_text(CCArena* a, const char* fail) {
+static inline CCString cc_gr_union_head_text(CCArena a, const char* fail) {
     return @string(`    if (p >= n) { *cc_inc = 1; { cc_grammar_note_fail(p); goto ${fail}; }; }
     switch (s[p]) {
 `, a);
@@ -1095,38 +1095,38 @@ static inline CCString cc_gr_union_head_text(CCArena* a, const char* fail) {
 
 /* Field-discriminated `one of ... by <field>`: discriminant already bound.
  * Emitter passes sep="" for the first arm and "else " for later arms. */
-static inline CCString cc_gr_funion_open_text(CCArena* a, const char* pfx,
+static inline CCString cc_gr_funion_open_text(CCArena a, const char* pfx,
                                               const char* field) {
     return @string(`    { long long __d = out->${pfx}${field};
 `, a);
 }
 
-static inline CCString cc_gr_funion_eq_text(CCArena* a, const char* sep, long long imm,
+static inline CCString cc_gr_funion_eq_text(CCArena a, const char* sep, long long imm,
                                             const char* sname, const char* vname) {
     return @string(`      ${sep}if (__d == ${imm}LL) {
         out->kind = ${sname}_${vname};
 `, a);
 }
 
-static inline CCString cc_gr_funion_ge_text(CCArena* a, const char* sep, long long imm,
+static inline CCString cc_gr_funion_ge_text(CCArena a, const char* sep, long long imm,
                                             const char* sname, const char* vname) {
     return @string(`      ${sep}if (__d >= ${imm}LL) {
         out->kind = ${sname}_${vname};
 `, a);
 }
 
-static inline CCString cc_gr_funion_arm_end_text(CCArena* a) {
+static inline CCString cc_gr_funion_arm_end_text(CCArena a) {
     return @string(`      }
 `, a);
 }
 
-static inline CCString cc_gr_funion_fail_text(CCArena* a, const char* fail) {
+static inline CCString cc_gr_funion_fail_text(CCArena a, const char* fail) {
     return @string(`      else { cc_grammar_note_fail(p); goto ${fail}; };
     }
 `, a);
 }
 
-static inline CCString cc_gr_union_case_text(CCArena* a, int db,
+static inline CCString cc_gr_union_case_text(CCArena a, int db,
                                              const char* sname, const char* vname) {
     CCString c = cc_gr_chr_text(a, db);
     return @string(`    case ${db}: /*${c}*/ {
@@ -1134,30 +1134,30 @@ static inline CCString cc_gr_union_case_text(CCArena* a, int db,
 `, a);
 }
 
-static inline CCString cc_gr_union_break_text(CCArena* a) {
+static inline CCString cc_gr_union_break_text(CCArena a) {
     return @string(`        break; }
 `, a);
 }
 
-static inline CCString cc_gr_union_default_text(CCArena* a,
+static inline CCString cc_gr_union_default_text(CCArena a,
                                                 const char* sname, const char* vname) {
     return @string(`    default: {
         out->kind = ${sname}_${vname};
 `, a);
 }
 
-static inline CCString cc_gr_union_no_default_text(CCArena* a, const char* fail) {
+static inline CCString cc_gr_union_no_default_text(CCArena a, const char* fail) {
     return @string(`    default: { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
-static inline CCString cc_gr_union_close_text(CCArena* a) {
+static inline CCString cc_gr_union_close_text(CCArena a) {
     return @string(`    }
 `, a);
 }
 
 /* ---- matcher-tier substrate: pool/charset tables, prototypes, frames ---- */
-static inline CCString cc_gr_pool_table_text(CCArena* a, const char* n,
+static inline CCString cc_gr_pool_table_text(CCArena a, const char* n,
                                              const unsigned char* pool, int npool) {
     CCString o = cc_string_new();
     cc_gr__cat(&o, @string(`static const unsigned char ${n}__pool[${npool}] = {`, a), a);
@@ -1172,7 +1172,7 @@ static inline CCString cc_gr_pool_table_text(CCArena* a, const char* n,
 
 /* compact human description of a charset row, for the emitted table.
  * The 128-byte/16-slack truncation guard is part of the output contract. */
-static inline CCString cc_gr_cs_desc_text(CCArena* a, const unsigned char* set) {
+static inline CCString cc_gr_cs_desc_text(CCArena a, const unsigned char* set) {
     CCString o = cc_string_new();
     int c = 0;
     while (c < 256 && o.len + 16 < 128) {
@@ -1191,7 +1191,7 @@ static inline CCString cc_gr_cs_desc_text(CCArena* a, const unsigned char* set) 
     return o;
 }
 
-static inline CCString cc_gr_cs_head_text(CCArena* a, const char* n, int nsets) {
+static inline CCString cc_gr_cs_head_text(CCArena a, const char* n, int nsets) {
     return @string(`#if defined(__SSE2__)
 #include <emmintrin.h>
 #endif
@@ -1199,7 +1199,7 @@ static const unsigned char ${n}__cs[${nsets}][32] = {
 `, a);
 }
 
-static inline CCString cc_gr_cs_row_text(CCArena* a, int s, const unsigned char* set) {
+static inline CCString cc_gr_cs_row_text(CCArena a, int s, const unsigned char* set) {
     CCString o = cc_string_new();
     CCString desc = cc_gr_cs_desc_text(a, set);
     cc_gr__cat(&o, @string(`  /* cs${s}: ${desc} */
@@ -1213,13 +1213,13 @@ static inline CCString cc_gr_cs_row_text(CCArena* a, int s, const unsigned char*
     return o;
 }
 
-static inline CCString cc_gr_matcher_proto_text(CCArena* a, const char* attr, const char* n,
+static inline CCString cc_gr_matcher_proto_text(CCArena a, const char* attr, const char* n,
                                                 const char* cls, const char* r, const char* suf) {
     return @string(`static ${attr}int ${n}__${cls}_${r}${suf}(const unsigned char* s, size_t n, size_t* io);
 `, a);
 }
 
-static inline CCString cc_gr_matcher_head_text(CCArena* a, const char* attr, const char* n,
+static inline CCString cc_gr_matcher_head_text(CCArena a, const char* attr, const char* n,
                                                const char* cls, const char* r, const char* suf) {
     return @string(`static ${attr}int ${n}__${cls}_${r}${suf}(const unsigned char* s, size_t n, size_t* io) {
     size_t p = *io;
@@ -1228,7 +1228,7 @@ static inline CCString cc_gr_matcher_head_text(CCArena* a, const char* attr, con
 }
 
 /* padded-form trampoline: lead pad inline, then the __np body */
-static inline CCString cc_gr_np_call_text(CCArena* a, const char* n, const char* cls,
+static inline CCString cc_gr_np_call_text(CCArena a, const char* n, const char* cls,
                                           const char* r, const char* fail,
                                           const char* darg) {
     return @string(`    if (!${n}__${cls}_${r}__np(s, n, &p${darg})) { cc_grammar_note_fail(p); goto ${fail}; };
@@ -1236,13 +1236,13 @@ static inline CCString cc_gr_np_call_text(CCArena* a, const char* n, const char*
 }
 
 /* inline span-extraction close (pairs with cc_gr_bind_span_inline_text) */
-static inline CCString cc_gr_bind_span_inline_close_text(CCArena* a) {
+static inline CCString cc_gr_bind_span_inline_close_text(CCArena a) {
     return @string(`      }
 `, a);
 }
 
 /* pad-rule call carrying the collect context (build mode) */
-static inline CCString cc_gr_pad_call_ctx_text(CCArena* a, const char* n, const char* cls,
+static inline CCString cc_gr_pad_call_ctx_text(CCArena a, const char* n, const char* cls,
                                                const char* r, const char* fail,
                                                const char* darg) {
     return @string(`    if (!${n}__${cls}_${r}(c, s, n, &p${darg})) { cc_grammar_note_fail(p); goto ${fail}; };
@@ -1250,7 +1250,7 @@ static inline CCString cc_gr_pad_call_ctx_text(CCArena* a, const char* n, const 
 }
 
 /* ---- schema driver pieces: manifest, struct decl, fill/parse frames ---- */
-static inline CCString cc_gr_schema_manifest_text(CCArena* a, const char* n, int line,
+static inline CCString cc_gr_schema_manifest_text(CCArena a, const char* n, int line,
                                                   const char* u1, const char* u2,
                                                   const char* fmtline) {
     return @string(`/* @grammar(schema) ${n} (line ${line}): ${u1}${u2}. API:
@@ -1264,38 +1264,38 @@ ${fmtline} */
 `, a);
 }
 
-static inline CCString cc_gr_enum_open_text(CCArena* a) {
+static inline CCString cc_gr_enum_open_text(CCArena a) {
     return @string(`typedef enum { `, a);
 }
 
-static inline CCString cc_gr_enum_item_text(CCArena* a, const char* sep,
+static inline CCString cc_gr_enum_item_text(CCArena a, const char* sep,
                                             const char* n, const char* vname) {
     return @string(`${sep}${n}_${vname}`, a);
 }
 
-static inline CCString cc_gr_enum_close_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_enum_close_text(CCArena a, const char* n) {
     return @string(` } ${n}Kind;
 `, a);
 }
 
-static inline CCString cc_gr_ffc_include_text(CCArena* a) {
+static inline CCString cc_gr_ffc_include_text(CCArena a) {
     return @string(`#include <ccc/vendor/ffc.h>
 `, a);
 }
 
-static inline CCString cc_gr_fwd_type_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_fwd_type_text(CCArena a, const char* n) {
     return @string(`typedef struct ${n} ${n};
 `, a);
 }
 
-static inline CCString cc_gr_struct_open_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_struct_open_text(CCArena a, const char* n) {
     return @string(`typedef struct ${n} {
 `, a);
 }
 
 /* vk: 0 int, 1 float, 2 slice (CCSlice), 3 cap-array, 4 arena pointer,
  *     5 bytes (CCSliceHdr) */
-static inline CCString cc_gr_member_text(CCArena* a, int vk, const char* T,
+static inline CCString cc_gr_member_text(CCArena a, int vk, const char* T,
                                          const char* field, int cap) {
     if (vk == 0) return @string(`    long long ${field};
 `, a);
@@ -1314,7 +1314,7 @@ static inline CCString cc_gr_member_text(CCArena* a, int vk, const char* T,
 }
 
 /* union-variant member: deeper indent, self-references need `struct` */
-static inline CCString cc_gr_umember_text(CCArena* a, int vk, const char* T,
+static inline CCString cc_gr_umember_text(CCArena a, int vk, const char* T,
                                           const char* field, int cap) {
     if (vk == 0) return @string(`            long long ${field};
 `, a);
@@ -1332,57 +1332,57 @@ static inline CCString cc_gr_umember_text(CCArena* a, int vk, const char* T,
 `, a);
 }
 
-static inline CCString cc_gr_presence_member_text(CCArena* a) {
+static inline CCString cc_gr_presence_member_text(CCArena a) {
     return @string(`    unsigned long long cc__set;   /* presence bitmap, bit i = field i */
 `, a);
 }
 
-static inline CCString cc_gr_union_decl_open_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_union_decl_open_text(CCArena a, const char* n) {
     return @string(`    ${n}Kind kind;
     union {
 `, a);
 }
 
-static inline CCString cc_gr_variant_open_text(CCArena* a) {
+static inline CCString cc_gr_variant_open_text(CCArena a) {
     return @string(`        struct {
 `, a);
 }
 
-static inline CCString cc_gr_variant_close_text(CCArena* a, const char* vname) {
+static inline CCString cc_gr_variant_close_text(CCArena a, const char* vname) {
     return @string(`        } ${vname};
 `, a);
 }
 
-static inline CCString cc_gr_union_decl_close_text(CCArena* a) {
+static inline CCString cc_gr_union_decl_close_text(CCArena a) {
     return @string(`    } u;
 `, a);
 }
 
-static inline CCString cc_gr_empty_member_text(CCArena* a) {
+static inline CCString cc_gr_empty_member_text(CCArena a) {
     return @string(`    char cc__empty;
 `, a);
 }
 
 /* Unit variant arms (literals only): C forbids empty structs. */
-static inline CCString cc_gr_uempty_member_text(CCArena* a) {
+static inline CCString cc_gr_uempty_member_text(CCArena a) {
     return @string(`            char cc__empty;
 `, a);
 }
 
-static inline CCString cc_gr_struct_close_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_struct_close_text(CCArena a, const char* n) {
     return @string(`} ${n};
 `, a);
 }
 
 /* Comptime capacity for `items Elem count cap N` — call sites derive array
  * sizes from this instead of restating N. */
-static inline CCString cc_gr_items_cap_text(CCArena* a, const char* sname,
+static inline CCString cc_gr_items_cap_text(CCArena a, const char* sname,
                                             const char* field, int cap) {
     return @string(`enum { ${sname}_${field}_cap = ${cap} };
 `, a);
 }
 
-static inline CCString cc_gr_fill_head_text(CCArena* a, const char* n,
+static inline CCString cc_gr_fill_head_text(CCArena a, const char* n,
                                             int force_inline) {
     /* always_inline splices LEAF fills into counted `items T` loops and
      * pipeline `Name_read` call sites, which otherwise pay a full call
@@ -1400,12 +1400,12 @@ static inline CCString cc_gr_fill_head_text(CCArena* a, const char* n,
 `, a);
 }
 
-static inline CCString cc_gr_fill_zero_text(CCArena* a) {
+static inline CCString cc_gr_fill_zero_text(CCArena a) {
     return @string(`    memset(out, 0, sizeof *out);
 `, a);
 }
 
-static inline CCString cc_gr_fill_tail_text(CCArena* a, const char* fail) {
+static inline CCString cc_gr_fill_tail_text(CCArena a, const char* fail) {
     return @string(`    *io = p;
     return 1;
 ${fail}: __attribute__((unused));
@@ -1415,7 +1415,7 @@ ${fail}: __attribute__((unused));
 `, a);
 }
 
-static inline CCString cc_gr_parse_fn_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_parse_fn_text(CCArena a, const char* n) {
     return @string(`static int ${n}_parse(const char* s0, size_t n, CCArena arena, ${n}* out) {
     const unsigned char* s = (const unsigned char*)s0;
     size_t p = 0;
@@ -1430,7 +1430,7 @@ static inline CCString cc_gr_parse_fn_text(CCArena* a, const char* n) {
 
 /* Public measure face: exact encoded size (0 = cannot emit / invalid kind).
  * Same substrate as cc_write / cc_format; no destination buffer. */
-static inline CCString cc_gr_measure_fn_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_measure_fn_text(CCArena a, const char* n) {
     return @string(`static __attribute__((unused)) size_t ${n}_measure(const ${n}* v) {
     return ${n}__wmeasure(v);
 }
@@ -1438,7 +1438,7 @@ static inline CCString cc_gr_measure_fn_text(CCArena* a, const char* n) {
 }
 
 /* CCString face: measure once, allocate exactly, write unchecked */
-static inline CCString cc_gr_tostr_fn_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_tostr_fn_text(CCArena a, const char* n) {
     return @string(`static __attribute__((unused)) CCString ${n}_to_str(const ${n}* v, CCArena arena) {
     CCString s = cc_string_new();
     size_t need = ${n}__wmeasure(v);
@@ -1456,15 +1456,15 @@ static inline CCString cc_gr_tostr_fn_text(CCArena* a, const char* n) {
  * the backtracking tails compose from shared save/restore/ok pieces. ---- */
 
 /* charset membership expressions (rg_cs_expr forms) */
-static inline CCString cc_gr_cse_eq_text(CCArena* a, int lo) {
+static inline CCString cc_gr_cse_eq_text(CCArena a, int lo) {
     return @string(`s[p] == ${lo}`, a);
 }
 
-static inline CCString cc_gr_cse_range_text(CCArena* a, int lo, unsigned int span) {
+static inline CCString cc_gr_cse_range_text(CCArena a, int lo, unsigned int span) {
     return @string(`((unsigned)(s[p] - ${lo}) <= ${span}u)`, a);
 }
 
-static inline CCString cc_gr_cse_bytes_text(CCArena* a, int b0, int b1, int b2, int b3, int nb) {
+static inline CCString cc_gr_cse_bytes_text(CCArena a, int b0, int b1, int b2, int b3, int nb) {
     CCString o = cc_string_new();
     int bs[4];
     bs[0] = b0; bs[1] = b1; bs[2] = b2; bs[3] = b3;
@@ -1478,19 +1478,19 @@ static inline CCString cc_gr_cse_bytes_text(CCArena* a, int b0, int b1, int b2, 
     return o;
 }
 
-static inline CCString cc_gr_cse_bitset_text(CCArena* a, const char* n, int cs) {
+static inline CCString cc_gr_cse_bitset_text(CCArena a, const char* n, int cs) {
     return @string(`(${n}__cs[${cs}][((unsigned char)s[p]) >> 3] & (1u << (((unsigned char)s[p]) & 7u)))`, a);
 }
 
 /* literal matches: single byte, 4/5-byte word compare, pool memcmp */
-static inline CCString cc_gr_m_lit1_text(CCArena* a, int b, const char* fail) {
+static inline CCString cc_gr_m_lit1_text(CCArena a, int b, const char* fail) {
     CCString c = cc_gr_chr_text(a, b);
     return @string(`    if (!(p < n && s[p] == ${b} /*${c}*/)) { cc_grammar_note_fail(p); goto ${fail}; };
     p++;
 `, a);
 }
 
-static inline CCString cc_gr_m_word_text(CCArena* a, unsigned int w, const unsigned char* bytes,
+static inline CCString cc_gr_m_word_text(CCArena a, unsigned int w, const unsigned char* bytes,
                                          int len, const char* fail) {
     CCString lit = cc_gr_esc_text(a, bytes, len);
     if (len == 4)
@@ -1507,7 +1507,7 @@ static inline CCString cc_gr_m_word_text(CCArena* a, unsigned int w, const unsig
     }
 }
 
-static inline CCString cc_gr_m_litn_text(CCArena* a, const char* n, int off, int len,
+static inline CCString cc_gr_m_litn_text(CCArena a, const char* n, int off, int len,
                                          const unsigned char* bytes, const char* fail) {
     CCString lit = cc_gr_esc_text(a, bytes, len);
     return @string(`    if (!(p + ${len} <= n && memcmp(s + p, ${n}__pool + ${off}, ${len}) == 0)) { cc_grammar_note_fail(p); goto ${fail}; };   /* "${lit}" */
@@ -1515,13 +1515,13 @@ static inline CCString cc_gr_m_litn_text(CCArena* a, const char* n, int off, int
 `, a);
 }
 
-static inline CCString cc_gr_m_cs1_text(CCArena* a, CCString cx, const char* fail) {
+static inline CCString cc_gr_m_cs1_text(CCArena a, CCString cx, const char* fail) {
     return @string(`    if (!(p < n && ${cx})) { cc_grammar_note_fail(p); goto ${fail}; };
     p++;
 `, a);
 }
 
-static inline CCString cc_gr_m_skip_text(CCArena* a, const char* fail) {
+static inline CCString cc_gr_m_skip_text(CCArena a, const char* fail) {
     return @string(`    if (!(p < n)) { cc_grammar_note_fail(p); goto ${fail}; };
     p++;
 `, a);
@@ -1529,7 +1529,7 @@ static inline CCString cc_gr_m_skip_text(CCArena* a, const char* fail) {
 
 /* pp-token kind terminal: host supplies `cc_grammar_ppkind_at` (weak default
  * in <ccc/cc_grammar.cch> returns 0). On match the hook advances *io. */
-static inline CCString cc_gr_m_ppkind_text(CCArena* a, const char* n, const char* kind,
+static inline CCString cc_gr_m_ppkind_text(CCArena a, const char* n, const char* kind,
                                            int klen, const char* fail) {
     (void)n;
     CCString kn = cc_gr_esc_text(a, (const unsigned char*)kind, klen);
@@ -1538,7 +1538,7 @@ static inline CCString cc_gr_m_ppkind_text(CCArena* a, const char* n, const char
 }
 
 /* Fallible miss leaf: zero-width tape node at the restored cursor (collect). */
-static inline CCString cc_gr_fallible_leaf_text(CCArena* a, const char* n, int rid,
+static inline CCString cc_gr_fallible_leaf_text(CCArena a, const char* n, int rid,
                                                  const char* fail) {
     return @string(`    if (c->total == c->cap && !${n}__tgrow(c)) { cc_grammar_note_fail(p); goto ${fail}; };
     { ${n}Node* ndf = &c->tape[c->total++];
@@ -1548,7 +1548,7 @@ static inline CCString cc_gr_fallible_leaf_text(CCArena* a, const char* n, int r
 }
 
 /* rule reference call: class r/m (plain) or b (collect ctx), opt. __np */
-static inline CCString cc_gr_ref_call_text(CCArena* a, const char* n, const char* cls,
+static inline CCString cc_gr_ref_call_text(CCArena a, const char* n, const char* cls,
                                            const char* r, const char* suf, int with_ctx,
                                            const char* fail, const char* darg) {
     if (with_ctx)
@@ -1559,7 +1559,7 @@ static inline CCString cc_gr_ref_call_text(CCArena* a, const char* n, const char
 }
 
 /* keep: span anchor open, extract-mode close, tape writes */
-static inline CCString cc_gr_keep_open_text(CCArena* a, int k, int has_codec) {
+static inline CCString cc_gr_keep_open_text(CCArena a, int k, int has_codec) {
     if (has_codec)
         return @string(`    { size_t ka${k} = p; int dr${k} = 0; (void)dr${k};
 `, a);
@@ -1567,7 +1567,7 @@ static inline CCString cc_gr_keep_open_text(CCArena* a, int k, int has_codec) {
 `, a);
 }
 
-static inline CCString cc_gr_keep_x_close_text(CCArena* a, int k, int has_codec) {
+static inline CCString cc_gr_keep_x_close_text(CCArena a, int k, int has_codec) {
     if (has_codec)
         return @string(`    *xa = ka${k}; *xb = p; *xdr = dr${k};
     }
@@ -1577,12 +1577,12 @@ static inline CCString cc_gr_keep_x_close_text(CCArena* a, int k, int has_codec)
 `, a);
 }
 
-static inline CCString cc_gr_tgrow_guard_text(CCArena* a, const char* n, const char* fail) {
+static inline CCString cc_gr_tgrow_guard_text(CCArena a, const char* n, const char* fail) {
     return @string(`    if (c->total == c->cap && !${n}__tgrow(c)) { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
-static inline CCString cc_gr_keep_tape_text(CCArena* a, const char* n, int k, int rid) {
+static inline CCString cc_gr_keep_tape_text(CCArena a, const char* n, int k, int rid) {
     return @string(`    { ${n}Node* nd${k} = &c->tape[c->total++];
       nd${k}->meta = ${rid}u | (((unsigned long long)(p - ka${k})) << 10);
       nd${k}->u.bytes = (const char*)(s + ka${k}); }
@@ -1592,7 +1592,7 @@ static inline CCString cc_gr_keep_tape_text(CCArena* a, const char* n, int k, in
 
 /* codec keep: raw span on the tape (unwind anchor); dirty spans decode NOW
  * into the mat_* stash while hot */
-static inline CCString cc_gr_keep_codec_tape_text(CCArena* a, const char* n, int k, int rid,
+static inline CCString cc_gr_keep_codec_tape_text(CCArena a, const char* n, int k, int rid,
                                                   int cb, const char* codec, const char* fail) {
     return @string(`    { size_t ti${k} = c->total;
       ${n}Node* nd${k} = &c->tape[c->total++];
@@ -1622,7 +1622,7 @@ static inline CCString cc_gr_keep_codec_tape_text(CCArena* a, const char* n, int
 }
 
 /* collect: BEGIN/END markers bracket the child's span */
-static inline CCString cc_gr_collect_begin_text(CCArena* a, const char* n, int rid,
+static inline CCString cc_gr_collect_begin_text(CCArena a, const char* n, int rid,
                                                 const char* fail, int dom) {
     CCString o = cc_string_new();
     cc_gr__cat(&o, @string(`    { if (c->bdepth >= 512) { cc_grammar_note_fail(p); goto ${fail}; };
@@ -1638,7 +1638,7 @@ static inline CCString cc_gr_collect_begin_text(CCArena* a, const char* n, int r
     return o;
 }
 
-static inline CCString cc_gr_collect_end_text(CCArena* a, const char* n,
+static inline CCString cc_gr_collect_end_text(CCArena a, const char* n,
                                               const char* fail, int dom) {
     if (dom)
         return @string(`    { size_t bi = c->bstack[--c->bdepth];
@@ -1652,39 +1652,39 @@ static inline CCString cc_gr_collect_end_text(CCArena* a, const char* n,
 }
 
 /* ALT first-set dispatch skeleton */
-static inline CCString cc_gr_alt_disp_head_text(CCArena* a, int k) {
+static inline CCString cc_gr_alt_disp_head_text(CCArena a, int k) {
     return @string(`    {
     if (p >= n) goto Lb${k};
     switch (s[p]) {
 `, a);
 }
 
-static inline CCString cc_gr_alt_case_text(CCArena* a, int bch) {
+static inline CCString cc_gr_alt_case_text(CCArena a, int bch) {
     return @string(`    case ${bch}:
 `, a);
 }
 
-static inline CCString cc_gr_mark_dirty_text(CCArena* a, int dk) {
+static inline CCString cc_gr_mark_dirty_text(CCArena a, int dk) {
     return @string(`    dr${dk} = 1;
 `, a);
 }
 
-static inline CCString cc_gr_break_text(CCArena* a) {
+static inline CCString cc_gr_break_text(CCArena a) {
     return @string(`    break;
 `, a);
 }
 
-static inline CCString cc_gr_default_text(CCArena* a) {
+static inline CCString cc_gr_default_text(CCArena a) {
     return @string(`    default:
 `, a);
 }
 
-static inline CCString cc_gr_alt_default_fail_text(CCArena* a, int k) {
+static inline CCString cc_gr_alt_default_fail_text(CCArena a, int k) {
     return @string(`    default: goto Lb${k};
 `, a);
 }
 
-static inline CCString cc_gr_alt_disp_tail_text(CCArena* a, int k, const char* fail) {
+static inline CCString cc_gr_alt_disp_tail_text(CCArena a, int k, const char* fail) {
     return @string(`    }
     goto Lok${k};
 Lb${k}: { cc_grammar_note_fail(p); goto ${fail}; };
@@ -1695,7 +1695,7 @@ Lok${k}: ; }
 /* backtracking building blocks: cursor (+tape snapshot) save and restore.
  * risky = keeps under a codec keep: tape/bdepth/vsp roll back by value;
  * unwind = plain keeps: the engine's __unwind truncates the tape. */
-static inline CCString cc_gr_save_text(CCArena* a, int k, int risky) {
+static inline CCString cc_gr_save_text(CCArena a, int k, int risky) {
     if (risky)
         return @string(`    { size_t sv${k} = p; size_t lt${k} = c->total, ld${k} = c->bdepth, lv${k} = c->vsp;
 `, a);
@@ -1703,13 +1703,13 @@ static inline CCString cc_gr_save_text(CCArena* a, int k, int risky) {
 `, a);
 }
 
-static inline CCString cc_gr_goto_ok_text(CCArena* a, int k) {
+static inline CCString cc_gr_goto_ok_text(CCArena a, int k) {
     return @string(`    goto Lok${k};
 `, a);
 }
 
 /* rk: 0 plain cursor restore, 1 unwind call, 2 by-value tape restore */
-static inline CCString cc_gr_restore_text(CCArena* a, const char* br, int k, int rk,
+static inline CCString cc_gr_restore_text(CCArena a, const char* br, int k, int rk,
                                           const char* n) {
     if (rk == 2)
         return @string(`${br}: p = sv${k}; { c->total = lt${k}; c->bdepth = ld${k}; c->vsp = lv${k}; }
@@ -1721,47 +1721,47 @@ static inline CCString cc_gr_restore_text(CCArena* a, const char* br, int k, int
 `, a);
 }
 
-static inline CCString cc_gr_goto_fail_text(CCArena* a, const char* fail) {
+static inline CCString cc_gr_goto_fail_text(CCArena a, const char* fail) {
     return @string(`    { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
-static inline CCString cc_gr_ok_close_text(CCArena* a, int k) {
+static inline CCString cc_gr_ok_close_text(CCArena a, int k) {
     return @string(`Lok${k}: ; }
 `, a);
 }
 
 /* PEG `not` succeeds by falling through after the child miss restore; no
  * `goto Lok`. Close the save-block without a join label. */
-static inline CCString cc_gr_block_close_text(CCArena* a) {
+static inline CCString cc_gr_block_close_text(CCArena a) {
     return @string(`}
 `, a);
 }
 
 /* PEG `not` / `and` (peek): child already ran; restore cursor. `not` fails
  * if the child matched; `and` fails if the child missed. */
-static inline CCString cc_gr_not_hit_text(CCArena* a, int k, const char* fail) {
+static inline CCString cc_gr_not_hit_text(CCArena a, int k, const char* fail) {
     return @string(`    p = sv${k}; { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
-static inline CCString cc_gr_and_hit_text(CCArena* a, int k) {
+static inline CCString cc_gr_and_hit_text(CCArena a, int k) {
     return @string(`    p = sv${k}; goto Lok${k};
 `, a);
 }
 
 /* fused string-body scan: SWAR run + escape arm */
-static inline CCString cc_gr_forever_open_text(CCArena* a) {
+static inline CCString cc_gr_forever_open_text(CCArena a) {
     return @string(`    for (;;) {
 `, a);
 }
 
-static inline CCString cc_gr_cs_run_text(CCArena* a, CCString cx) {
+static inline CCString cc_gr_cs_run_text(CCArena a, CCString cx) {
     return @string(`    while (p < n && ${cx}) p++;
 `, a);
 }
 
-static inline CCString cc_gr_scan_esc_tail_text(CCArena* a, const char* br, int k) {
+static inline CCString cc_gr_scan_esc_tail_text(CCArena a, const char* br, int k) {
     return @string(`    continue;
 ${br}: p = sv${k}; }
     break;
@@ -1770,7 +1770,7 @@ ${br}: p = sv${k}; }
 }
 
 /* any/some generic loop frame */
-static inline CCString cc_gr_loop_head_text(CCArena* a, int k, int risky) {
+static inline CCString cc_gr_loop_head_text(CCArena a, int k, int risky) {
     if (risky)
         return @string(`    { size_t sv${k}; size_t lt${k} = 0, ld${k} = 0, lv${k} = 0;
     for (;;) { sv${k} = p; lt${k} = c->total; ld${k} = c->bdepth; lv${k} = c->vsp;
@@ -1780,76 +1780,76 @@ static inline CCString cc_gr_loop_head_text(CCArena* a, int k, int risky) {
 `, a);
 }
 
-static inline CCString cc_gr_loop_break_text(CCArena* a, int k) {
+static inline CCString cc_gr_loop_break_text(CCArena a, int k) {
     return @string(`    if (p == sv${k}) break;
     }
 `, a);
 }
 
 /* ---- rules driver (rg_emit): manifest, tables, rule frames, entries ---- */
-static inline CCString cc_gr_rules_manifest_head_text(CCArena* a, const char* n,
+static inline CCString cc_gr_rules_manifest_head_text(CCArena a, const char* n,
                                                       int line, int nrules) {
     return @string(`/* @grammar(rules) ${n} (line ${line}): ${nrules} rule(s). API:
 `, a);
 }
 
-static inline CCString cc_gr_rules_manifest_match_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_rules_manifest_match_text(CCArena a, const char* n) {
     return @string(` *   cc_match(${n}, s, n)                     -> ${n}_match
 `, a);
 }
 
-static inline CCString cc_gr_rules_manifest_parse_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_rules_manifest_parse_text(CCArena a, const char* n) {
     return @string(` *   cc_parse(${n}, s, n, arena)              -> ${n}_parse -> ${n}Node* tape
 `, a);
 }
 
-static inline CCString cc_gr_rules_manifest_collect_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_rules_manifest_collect_text(CCArena a, const char* n) {
     return @string(` *   cc_collect(${n}, s, n, arena, cb, env)   -> ${n}_collect
 `, a);
 }
 
-static inline CCString cc_gr_rules_manifest_dom_text(CCArena* a, const char* n) {
-    return @string(` *   cc_dom(${n}, s, n, reg, arena, &out)      -> ${n}_dom (shaped: hidden-class DOM)
+static inline CCString cc_gr_rules_manifest_dom_text(CCArena a, const char* n) {
+    return @string(` *   cc_dom(${n}, s, n, reg, arena, out)      -> ${n}_dom (shaped: hidden-class DOM)
 `, a);
 }
 
-static inline CCString cc_gr_rules_manifest_nodes_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_rules_manifest_nodes_text(CCArena a, const char* n) {
     return @string(` *   nodes: ${n}Node_{id,is_list,len,first,next,count,slice}; ids: ${n}_KEEP_<rule>
 `, a);
 }
 
-static inline CCString cc_gr_rules_manifest_none_text(CCArena* a) {
+static inline CCString cc_gr_rules_manifest_none_text(CCArena a) {
     return @string(` *   (no tier referenced by this file -> none emitted; factory only)
 `, a);
 }
 
-static inline CCString cc_gr_rules_manifest_close_text(CCArena* a) {
+static inline CCString cc_gr_rules_manifest_close_text(CCArena a) {
     return @string(` */
 `, a);
 }
 
-static inline CCString cc_gr_rules_typedef_text(CCArena* a, const char* n, int nrules) {
+static inline CCString cc_gr_rules_typedef_text(CCArena a, const char* n, int nrules) {
     return @string(`typedef struct { int rule_count; } ${n};
 static inline __attribute__((unused)) int ${n}_rule_count(void) { return ${nrules}; }
 `, a);
 }
 
-static inline CCString cc_gr_nest_max_text(CCArena* a, const char* n, int maxd) {
+static inline CCString cc_gr_nest_max_text(CCArena a, const char* n, int maxd) {
     return @string(`enum { ${n}__nest_max = ${maxd} };
 `, a);
 }
 
 /* codec table: rule id -> codec index (0 = none) */
-static inline CCString cc_gr_codec_of_head_text(CCArena* a, const char* n, int nrules) {
+static inline CCString cc_gr_codec_of_head_text(CCArena a, const char* n, int nrules) {
     return @string(`static const short ${n}__codec_of[${nrules}] = {`, a);
 }
 
-static inline CCString cc_gr_short_item_text(CCArena* a, int v) {
+static inline CCString cc_gr_short_item_text(CCArena a, int v) {
     return @string(`${v},`, a);
 }
 
 /* derived restore: cold backward pop of nodes born at/after the resume pos */
-static inline CCString cc_gr_unwind_fn_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_unwind_fn_text(CCArena a, const char* n) {
     return @string(`static __attribute__((noinline, unused)) void ${n}__unwind(${n}__ctx* c, const unsigned char* sv) {
     while (c->total > 1 && (const unsigned char*)c->tape[c->total - 1].u.bytes >= sv)
         c->total--;
@@ -1860,18 +1860,18 @@ static inline CCString cc_gr_unwind_fn_text(CCArena* a, const char* n) {
 `, a);
 }
 
-static inline CCString cc_gr_shape_end_proto_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_shape_end_proto_text(CCArena a, const char* n) {
     return @string(`static int ${n}__shape_end(${n}__ctx* c, size_t bi);
 `, a);
 }
 
-static inline CCString cc_gr_keep_def_text(CCArena* a, const char* n, const char* r, int rid) {
+static inline CCString cc_gr_keep_def_text(CCArena a, const char* n, const char* r, int rid) {
     return @string(`#define ${n}_KEEP_${r} ${rid}
 `, a);
 }
 
 /* rule function prototype / head; al carries the linkage+inline attr text */
-static inline CCString cc_gr_rule_proto_text(CCArena* a, const char* al, const char* n,
+static inline CCString cc_gr_rule_proto_text(CCArena a, const char* al, const char* n,
                                              const char* cls, const char* r, const char* suf,
                                              int with_ctx) {
     if (with_ctx)
@@ -1881,7 +1881,7 @@ static inline CCString cc_gr_rule_proto_text(CCArena* a, const char* al, const c
 `, a);
 }
 
-static inline CCString cc_gr_rule_head_text(CCArena* a, const char* al, const char* n,
+static inline CCString cc_gr_rule_head_text(CCArena a, const char* al, const char* n,
                                             const char* cls, const char* r, const char* suf,
                                             int with_ctx) {
     if (with_ctx)
@@ -1898,29 +1898,29 @@ static inline CCString cc_gr_rule_head_text(CCArena* a, const char* al, const ch
 }
 
 /* padded-entry trampoline scaffold around the lead pad + __np call */
-static inline CCString cc_gr_pp_open_text(CCArena* a) {
+static inline CCString cc_gr_pp_open_text(CCArena a) {
     return @string(`    { size_t _pp = p;
 `, a);
 }
 
-static inline CCString cc_gr_pp_close_text(CCArena* a) {
+static inline CCString cc_gr_pp_close_text(CCArena a) {
     return @string(`    (void)_pp; }
 `, a);
 }
 
-static inline CCString cc_gr_entry_def_text(CCArena* a, const char* n, const char* which,
+static inline CCString cc_gr_entry_def_text(CCArena a, const char* n, const char* which,
                                             const char* cls, const char* r0) {
     return @string(`#define ${n}__ENTRY_${which} ${n}__${cls}_${r0}
 `, a);
 }
 
-static inline CCString cc_gr_entry_pure_def_text(CCArena* a, const char* n, int pure0) {
+static inline CCString cc_gr_entry_pure_def_text(CCArena a, const char* n, int pure0) {
     return @string(`#define ${n}__ENTRY_PURE ${pure0}
 `, a);
 }
 
 /* parse entry: tape ctx setup, entry dispatch, root span back-patch */
-static inline CCString cc_gr_parse_entry_head_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_parse_entry_head_text(CCArena a, const char* n) {
     return @string(`static ${n}Node* ${n}_parse(const char* s, size_t n, CCArena arena) {
     ${n}__ctx c0;
     size_t p = 0;
@@ -1947,7 +1947,7 @@ static inline CCString cc_gr_parse_entry_head_text(CCArena* a, const char* n) {
 }
 
 /* materialize: install the eager mat_* stash; fallback codec decode */
-static inline CCString cc_gr_mat_head_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_mat_head_text(CCArena a, const char* n) {
     return @string(`    { size_t t;
     for (t = 1; t < c0.total; t++) {
         unsigned long long m = c0.tape[t].meta;
@@ -1967,12 +1967,12 @@ static inline CCString cc_gr_mat_head_text(CCArena* a, const char* n) {
 `, a);
 }
 
-static inline CCString cc_gr_mat_case_text(CCArena* a, int ci, const char* codec) {
+static inline CCString cc_gr_mat_case_text(CCArena a, int ci, const char* codec) {
     return @string(`            case ${ci}: if (!${codec}(kp, kl, &v, arena)) return 0; break;
 `, a);
 }
 
-static inline CCString cc_gr_mat_tail_text(CCArena* a) {
+static inline CCString cc_gr_mat_tail_text(CCArena a) {
     return @string(`            default: continue;
             }
             c0.tape[t].meta = (unsigned long long)id
@@ -1983,13 +1983,13 @@ static inline CCString cc_gr_mat_tail_text(CCArena* a) {
 `, a);
 }
 
-static inline CCString cc_gr_parse_entry_tail_text(CCArena* a) {
+static inline CCString cc_gr_parse_entry_tail_text(CCArena a) {
     return @string(`    return c0.tape;
 }
 `, a);
 }
 
-static inline CCString cc_gr_collect_fn_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_collect_fn_text(CCArena a, const char* n) {
     return @string(`static int ${n}_collect(const char* s, size_t n, CCArena arena,
         int (*cb)(void* env, int id, CCSlice v), void* env) {
     ${n}Node* tape = ${n}_parse(s, n, arena);
@@ -2007,15 +2007,15 @@ static inline CCString cc_gr_collect_fn_text(CCArena* a, const char* n) {
 
 /* shaped-DOM substrate: container classification, value-stack grow,
  * leaf shaping, bottom-up shape_end, and the dom entry */
-static inline CCString cc_gr_dynobj_head_text(CCArena* a, const char* n, int nrules) {
+static inline CCString cc_gr_dynobj_head_text(CCArena a, const char* n, int nrules) {
     return @string(`static const unsigned char ${n}__dynobj[${nrules}] = {`, a);
 }
 
-static inline CCString cc_gr_dynobj_item_text(CCArena* a, const char* sep, int v) {
+static inline CCString cc_gr_dynobj_item_text(CCArena a, const char* sep, int v) {
     return @string(`${sep}${v}`, a);
 }
 
-static inline CCString cc_gr_vgrow_fn_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_vgrow_fn_text(CCArena a, const char* n) {
     return @string(`static __attribute__((noinline)) int ${n}__vgrow(${n}__ctx* c) {
     size_t nc = c->vcap * 2;
     CCShapeVal* nv = (CCShapeVal*)cc_arena_realloc(c->arena, c->arena, c->vstack,
@@ -2028,14 +2028,14 @@ static inline CCString cc_gr_vgrow_fn_text(CCArena* a, const char* n) {
 `, a);
 }
 
-static inline CCString cc_gr_shape_leaf_head_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_shape_leaf_head_text(CCArena a, const char* n) {
     return @string(`static int ${n}__shape_leaf(${n}__ctx* c, const ${n}Node* ln, CCShapeVal* out) {
     unsigned long long m = ln->meta;
     int id = (int)(m & 0xFFu);
 `, a);
 }
 
-static inline CCString cc_gr_shape_leaf_dirty_head_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_shape_leaf_dirty_head_text(CCArena a, const char* n) {
     return @string(`    if (m & 0x200u) {   /* dirty: prefer keep-commit stash; else decode */
         size_t ti = (size_t)(ln - c->tape);
         if (c->mat_ptr && c->mat_ptr[ti]) {
@@ -2047,12 +2047,12 @@ static inline CCString cc_gr_shape_leaf_dirty_head_text(CCArena* a, const char* 
 `, a);
 }
 
-static inline CCString cc_gr_shape_leaf_case_text(CCArena* a, int ci, const char* codec) {
+static inline CCString cc_gr_shape_leaf_case_text(CCArena a, int ci, const char* codec) {
     return @string(`        case ${ci}: if (!${codec}((const char*)ln->u.bytes, (size_t)(m >> 10), &v, c->arena)) return 0; break;
 `, a);
 }
 
-static inline CCString cc_gr_shape_leaf_dirty_tail_text(CCArena* a) {
+static inline CCString cc_gr_shape_leaf_dirty_tail_text(CCArena a) {
     return @string(`        default: *out = cc_shape_leaf(id, ln->u.bytes, (size_t)(m >> 10), 0); return 1;
         }
         *out = cc_shape_leaf(id, (const char*)v.ptr, v.len, cc_slice_is_unique(v));
@@ -2061,14 +2061,14 @@ static inline CCString cc_gr_shape_leaf_dirty_tail_text(CCArena* a) {
 `, a);
 }
 
-static inline CCString cc_gr_shape_leaf_tail_text(CCArena* a) {
+static inline CCString cc_gr_shape_leaf_tail_text(CCArena a) {
     return @string(`    *out = cc_shape_leaf(id, ln->u.bytes, (size_t)(m >> 10), 0);
     return 1;
 }
 `, a);
 }
 
-static inline CCString cc_gr_shape_end_fn_text(CCArena* a, const char* n, int nrules) {
+static inline CCString cc_gr_shape_end_fn_text(CCArena a, const char* n, int nrules) {
     return @string(`static int ${n}__shape_end(${n}__ctx* c, size_t bi) {
     ${n}Node* nd = c->tape + bi;
     size_t span = c->total - bi;
@@ -2134,7 +2134,7 @@ static inline CCString cc_gr_shape_end_fn_text(CCArena* a, const char* n, int nr
 `, a);
 }
 
-static inline CCString cc_gr_dom_entry_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_dom_entry_text(CCArena a, const char* n) {
     return @string(`static __attribute__((unused)) int ${n}_dom(const char* s0, size_t n,
         CCShapeReg* reg, CCArena arena, CCShapeVal* out) {
     const unsigned char* s = (const unsigned char*)s0;
@@ -2177,7 +2177,7 @@ static inline CCString cc_gr_dom_entry_text(CCArena* a, const char* n) {
 }
 
 /* ---- rules-tier match entry ---- */
-static inline CCString cc_gr_match_entry_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_match_entry_text(CCArena a, const char* n) {
     return @string(`static int ${n}_match(const char* s, size_t n) {
     size_t p = 0;
     cc_grammar_fail_reset();
@@ -2201,7 +2201,7 @@ static inline CCString cc_gr_match_entry_text(CCArena* a, const char* n) {
  * The `!>` in the emitted signature is SURFACE syntax: generated code
  * speaks the language's own idiom (the result rewriter runs after the
  * grammar seam). */
-static inline CCString cc_gr_stream_face_text(CCArena* a, const char* n) {
+static inline CCString cc_gr_stream_face_text(CCArena a, const char* n) {
     return @string(`static bool !>(CCError) ${n}_try_read(const char* s0, size_t n,
         size_t* pos, CCArena arena, ${n}* out) {
     size_t p = *pos;

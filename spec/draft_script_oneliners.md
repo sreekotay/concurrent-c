@@ -32,7 +32,7 @@ Otherwise:
 cc_println(@string(`${EXPR}`)) !>;
 ```
 
-(so `-E '1+2'` still stringifies, while `-E '@string(`hi`, &a)'` does not
+(so `-E '1+2'` still stringifies, while `-E '@string(`hi`, a)'` does not
 nest templates). `-e` and `-E` are mutually exclusive.
 
 `-e -` reads the program text from standard input to end-of-file; the
@@ -58,7 +58,7 @@ predecls; they declare `a` / `io` / `in` / `args` explicitly when needed.
 | Name | Type | Declaration |
 | ---- | ---- | ----------- |
 | `a` | `CCArena` | `a@(megabytes(1)) @destroy` |
-| `io` | `CCStdio` | private `__cc_io_arena` + `io@(&__cc_io_arena) @destroy` |
+| `io` | `CCStdio` | private `__cc_io_arena` + `io@(__cc_io_arena) @destroy` |
 | `in` | `char[:]` | `io.read_all() !>` |
 | `args` | `CCSlice` | `{ .ptr = (char *)(argv + 1), .len = (size_t)(argc > 1 ? argc - 1 : 0) }` |
 | `line` | `char[:]` | current input line (`-n` / `-p` only; loop-local) |
@@ -117,7 +117,7 @@ to `CCSlice` then `cc_slice_*` (no `cc_char_*` UFCS family):
 ```c
 io.println(path) !>;
 io.eprintln(line) !>;
-io.println(@string(`n=${n}`, &a)) !>;
+io.println(@string(`n=${n}`, a)) !>;
 path.println() !>;                 /* also OK */
 "literal".println() !>;
 println(path) !>;                  /* naked alias */

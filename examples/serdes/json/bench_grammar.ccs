@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
     const char* fn = argc > 1 ? argv[1] : "twitter.json";
     int K = argc > 2 ? atoi(argv[2]) : 100, T = argc > 3 ? atoi(argv[3]) : 3;
     FILE* f = fopen(fn, "rb");
-    if (!f) { eprintln(@string(`cannot open ${fn}`, &pa)) !>; return 1; }
+    if (!f) { eprintln(@string(`cannot open ${fn}`, pa)) !>; return 1; }
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
     char* b = (char*)malloc((size_t)n + 1);
     size_t rd = fread(b, 1, (size_t)n, f); b[rd] = 0; fclose(f);
@@ -53,26 +53,26 @@ int main(int argc, char** argv) {
     for (int t = 0; t < T; t++) { double t0 = now_s();
         for (int i = 0; i < K; i++) if (!Json_match(b, rd)) { eprintln("match FAIL") !>; return 1; }
         double dt = now_s() - t0; if (dt < best) best = dt; }
-    println(@string(`${fn} gen match    ${n*(double)K/best/1e6} MB/s  ${best/K*1e6} us/parse`, &pa)) !>;
+    println(@string(`${fn} gen match    ${n*(double)K/best/1e6} MB/s  ${best/K*1e6} us/parse`, pa)) !>;
 
     best = 1e18;
     for (int t = 0; t < T; t++) { double t0 = now_s();
         for (int i = 0; i < K; i++) { g_keeps = 0; g_bytes = 0; ar.reset();
-            if (!Json_collect(b, rd, &ar, cb, 0)) { eprintln("collect FAIL") !>; return 1; } }
+            if (!Json_collect(b, rd, ar, cb, 0)) { eprintln("collect FAIL") !>; return 1; } }
         double dt = now_s() - t0; if (dt < best) best = dt; }
-    println(@string(`${fn} gen collect  ${n*(double)K/best/1e6} MB/s  ${best/K*1e6} us/parse  (keeps=${g_keeps} bytes=${g_bytes})`, &pa)) !>;
+    println(@string(`${fn} gen collect  ${n*(double)K/best/1e6} MB/s  ${best/K*1e6} us/parse  (keeps=${g_keeps} bytes=${g_bytes})`, pa)) !>;
     best = 1e18;
     for (int t = 0; t < T; t++) { double t0 = now_s();
         for (int i = 0; i < K; i++) { ar.reset();
-            if (!Json_parse(b, rd, &ar)) { eprintln("dom FAIL") !>; return 1; } }
+            if (!Json_parse(b, rd, ar)) { eprintln("dom FAIL") !>; return 1; } }
         double dt = now_s() - t0; if (dt < best) best = dt; }
-    println(@string(`${fn} gen DOM      ${n*(double)K/best/1e6} MB/s  ${best/K*1e6} us/parse`, &pa)) !>;
+    println(@string(`${fn} gen DOM      ${n*(double)K/best/1e6} MB/s  ${best/K*1e6} us/parse`, pa)) !>;
 
     /* the schema tier is twitter-shaped ({"statuses":[...]}); skip corpora
      * it doesn't model rather than failing the whole run */
     { Feed probe; ar.reset();
-      if (!Feed_parse(b, rd, &ar, &probe)) {
-          println(@string(`${fn} gen schema     (skipped: corpus is not Feed-shaped)`, &pa)) !>;
+      if (!Feed_parse(b, rd, ar, &probe)) {
+          println(@string(`${fn} gen schema     (skipped: corpus is not Feed-shaped)`, pa)) !>;
           return 0;
       } }
     best = 1e18;
@@ -80,11 +80,11 @@ int main(int argc, char** argv) {
     for (int t = 0; t < T; t++) { double t0 = now_s();
         for (int i = 0; i < K; i++) { ar.reset();
             Feed fd;
-            if (!Feed_parse(b, rd, &ar, &fd)) { eprintln("schema FAIL") !>; return 1; }
+            if (!Feed_parse(b, rd, ar, &fd)) { eprintln("schema FAIL") !>; return 1; }
             sn = fd.statuses_n; tl = 0;
             for (size_t j = 0; j < fd.statuses_n; j++) tl += fd.statuses[j].text.len; }
         double dt = now_s() - t0; if (dt < best) best = dt; }
-    println(@string(`${fn} gen schema   ${n*(double)K/best/1e6} MB/s  ${best/K*1e6} us/parse  (statuses=${sn} textbytes=${tl})`, &pa)) !>; }
+    println(@string(`${fn} gen schema   ${n*(double)K/best/1e6} MB/s  ${best/K*1e6} us/parse  (statuses=${sn} textbytes=${tl})`, pa)) !>; }
 
     return 0;
 }

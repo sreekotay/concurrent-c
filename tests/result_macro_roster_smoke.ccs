@@ -19,7 +19,7 @@ int main(void) {
     @errhandler(CCError e) { printf("caught=%d\n", e.message && e.message[0]); return 0; }
     CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
-    CCPy py = cc_py_new(false, &a) !>;
+    CCPy py = cc_py_new(false, a) !>;
     py.exec(@string(`
         def f(x):
             return x + 0.5

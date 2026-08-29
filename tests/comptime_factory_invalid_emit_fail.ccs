@@ -8,7 +8,7 @@
  * as a confusing error deep in the merged translation unit. */
 
 @comptime CCSlice bad_factory(CCSlice generic_name, CCSlice mangled,
-                              CCSliceArray type_args, CCArena *arena) {
+                              CCSliceArray type_args, CCArena arena) {
     static char buf[4096];
     (void)generic_name;
     (void)arena;

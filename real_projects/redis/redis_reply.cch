@@ -6,7 +6,7 @@
 #ifndef REDIS_REPLY_CCH
 #define REDIS_REPLY_CCH
 
-static CCSlice !>(CCError) reply_arena_alloc_slice(CCArena* reply_arena, size_t n);
+static CCSlice !>(CCError) reply_arena_alloc_slice(CCArena reply_arena, size_t n);
 
 static bool reply_slice_eq_ignore_case(char[:] s, const char* cstr) {
     size_t len = strlen(cstr);
@@ -121,7 +121,7 @@ static size_t RedisReply_write(const RedisReply* reply, char* dst, size_t cap) {
 enum { k_reply_encode_cap_max = 1 << 30 };
 
 static CCSlice !>(CCError) reply_wire_encode_into_arena(const RespGReply* wire,
-                                                        CCArena* reply_arena) {
+                                                        CCArena reply_arena) {
     @errhandler(CCError e) { return cc_err(e); }
     size_t need = cc_measure(RespGReply, wire);
     if (need == 0 || need > (size_t)k_reply_encode_cap_max) {
@@ -136,7 +136,7 @@ static CCSlice !>(CCError) reply_wire_encode_into_arena(const RespGReply* wire,
     return cc_ok(out);
 }
 
-static RedisReply !>(CCError) config_get_reply(char[:] key, CCArena* reply_arena) {
+static RedisReply !>(CCError) config_get_reply(char[:] key, CCArena reply_arena) {
     @errhandler(CCError e) { return cc_err(e); }
     RespGReply items[2];
     size_t n = 0;
@@ -156,8 +156,8 @@ static RedisReply !>(CCError) config_get_reply(char[:] key, CCArena* reply_arena
     return cc_ok(reply_wire(out));
 }
 
-static CCSlice !>(CCError) reply_arena_alloc_slice(CCArena* reply_arena, size_t n) {
-    char[:] s = reply_arena->alloc_slice_bytes(n);
+static CCSlice !>(CCError) reply_arena_alloc_slice(CCArena reply_arena, size_t n) {
+    char[:] s = reply_arena.alloc_slice_bytes(n);
     if (n > 0 && !s.ptr) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply encode OOM"));
     return cc_ok(s);
 }

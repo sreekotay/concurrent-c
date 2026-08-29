@@ -3,7 +3,7 @@
 
 /* Anchor form splices; it must refuse an arena arg rather than ignore it. */
 @comptime {
-    CCArena *arena = 0;
+    CCArena arena = {0};
     @emit(CC_EMIT_AFTER_PRELUDE, `enum { PATH_EMIT_AA = 1 };`, arena);
 }
 

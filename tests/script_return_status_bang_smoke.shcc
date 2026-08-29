@@ -11,7 +11,7 @@ static int run_ccc_version(void) {
         (void)e;
         return 1;
     }
-    CCCommand cmd = cc_command(&a, @slice("./cc/bin/ccc"));
+    CCCommand cmd = cc_command(a, @slice("./cc/bin/ccc"));
     cmd.arg("--version");
     /* Value-receiver UFCS for inherit_stdio (mutates a probe, not the run). */
     CCCommand probe = cmd;

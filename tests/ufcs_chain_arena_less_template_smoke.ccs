@@ -11,13 +11,13 @@ int main(void) {
     if (memcmp(t.ptr, "world", 5) != 0) return 2;
 
     bool found = false;
-    size_t pos = @string(`hello world`).index_of(@slice("world"), &found);
+    size_t pos = @string(`hello world`).index_of(@slice("world"), found);
     if (!found || pos != 6) return 3;
 
     /* Arena form still chains as CCString. */
     CCArena a = cc_arena_heap(kilobytes(4));
     if (!a.valid()) return 4;
-    size_t n = @string(`abcdef`, &a).len();
+    size_t n = @string(`abcdef`, a).len();
     if (n != 6) return 5;
 
     printf("ok sub=%.*s pos=%zu len=%zu\n", (int)t.len, (const char *)t.ptr, pos, n);

@@ -2,9 +2,8 @@
 
 int main(void) {
     {
-        CCArena __cc_arena12 = @create(kilobytes(4)) @destroy;
-        if (!cc_arena_is_live(__cc_arena12)) abort();
-        CCArena* ar = &__cc_arena12;
+        CCArena ar = @create(kilobytes(4)) @destroy;
+        if (!cc_arena_is_live(ar)) abort();
         CCString s = cc_string_new();
         s.append("stderr line1\n", ar);
         s.append("stderr line2\n", ar);

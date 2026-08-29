@@ -31,33 +31,33 @@ int main(int argc, char** argv) {
 
     CCArena ar = cc_arena_create((size_t)fn * 24 + (48 << 20));
     CCArena shp = cc_arena_create(16 << 20);
-    CCShapeReg* reg = cc_shape_reg_create(&shp);
+    CCShapeReg* reg = cc_shape_reg_create(shp);
     double best;
 
     best = 1e18;
     for (int t = 0; t < 3; t++) { double t0 = now_s();
         for (int i = 0; i < K; i++) {
             ar.reset();
-            if (!Json_parse(buf, rd, &ar)) return 1;
+            if (!Json_parse(buf, rd, ar)) return 1;
         }
         double dt = now_s() - t0; if (dt < best) best = dt; }
-    println(@string(`gen tape DOM   ${rd*(double)K/best/1e6} MB/s  ${best/K*1e6} us/parse`, &pa)) !>;
+    println(@string(`gen tape DOM   ${rd*(double)K/best/1e6} MB/s  ${best/K*1e6} us/parse`, pa)) !>;
 
     best = 1e18;
     for (int t = 0; t < 3; t++) { double t0 = now_s();
         for (int i = 0; i < K; i++) {
             ar.reset();
             CCShapeVal v;
-            if (!Json_dom(buf, rd, reg, &ar, &v)) return 1;
+            if (!Json_dom(buf, rd, reg, ar, &v)) return 1;
         }
         double dt = now_s() - t0; if (dt < best) best = dt; }
-    println(@string(`gen shaped DOM ${rd*(double)K/best/1e6} MB/s  ${best/K*1e6} us/parse  shapes=${reg->nshapes} dicts=${reg->dict_objs}`, &pa)) !>;
+    println(@string(`gen shaped DOM ${rd*(double)K/best/1e6} MB/s  ${best/K*1e6} us/parse  shapes=${reg->nshapes} dicts=${reg->dict_objs}`, pa)) !>;
 
     /* access: id/text/retweet_count/user.screen_name per tweet */
     {
         ar.reset();
         CCShapeVal sv;
-        if (!Json_dom(buf, rd, reg, &ar, &sv)) return 1;
+        if (!Json_dom(buf, rd, reg, ar, &sv)) return 1;
         CCShapeVal* st = cc_shape_get(&sv, "statuses");
         if (!st) { eprintln("no statuses") !>; return 0; }
         CCShapeKey kid = cc_shape_key("id"), ktx = cc_shape_key("text"),
@@ -84,7 +84,7 @@ int main(int argc, char** argv) {
                 }
             }
             double dt = now_s() - t0; if (dt < best) best = dt; }
-        println(@string(`access shaped  ${(double)nlk/best/1e6} Mlookups/s (prepared keys, sum=${sum})`, &pa)) !>;
+        println(@string(`access shaped  ${(double)nlk/best/1e6} Mlookups/s (prepared keys, sum=${sum})`, pa)) !>;
     }
     return 0;
 }

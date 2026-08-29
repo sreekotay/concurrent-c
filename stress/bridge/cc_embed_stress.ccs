@@ -82,7 +82,7 @@ int main(void) {
         printf("RESULT skip_js_ta_hail true\n");
     } else {
         CCArena a = cc_arena_heap(megabytes(4)) @destroy;
-        CCJsDom js = cc_js_new(true, &a) !> @destroy;
+        CCJsDom js = cc_js_new(true, a) !> @destroy;
         js.exec("globalThis.sum = (a) => a.reduce((s, x) => s + x, 0)") !>;
         CCJsDomVal g = js.eval("globalThis") !> @destroy;
         double buf[8];
@@ -108,7 +108,7 @@ int main(void) {
         printf("RESULT skip_js_cb_blizzard true\n");
     } else {
         CCArena a = cc_arena_heap(megabytes(2)) @destroy;
-        CCJsDom js = cc_js_new(true, &a) !> @destroy;
+        CCJsDom js = cc_js_new(true, a) !> @destroy;
         js.exec("globalThis.apply = (f, x) => f(x)") !>;
         CCJsDomVal g = js.eval("globalThis") !> @destroy;
         for (i = 0; i < N && ok; i++) {
@@ -127,7 +127,7 @@ int main(void) {
         printf("RESULT skip_js_cb_hosted true\n");
     } else {
         CCArena a = cc_arena_heap(megabytes(2)) @destroy;
-        CCResult_CCJsDom_CCJsError mk = cc_js_new(false, &a);
+        CCResult_CCJsDom_CCJsError mk = cc_js_new(false, a);
         if (!mk.ok) {
             printf("RESULT skip_js_cb_hosted true\n");
         } else {
@@ -155,7 +155,7 @@ int main(void) {
         printf("RESULT skip_js_ta_cb_compose true\n");
     } else {
         CCArena a = cc_arena_heap(megabytes(4)) @destroy;
-        CCJsDom js = cc_js_new(true, &a) !> @destroy;
+        CCJsDom js = cc_js_new(true, a) !> @destroy;
         js.exec("globalThis.sum = (a) => a.reduce((s, x) => s + x, 0); "
                 "globalThis.apply = (f, x) => f(x)") !>;
         CCJsDomVal g = js.eval("globalThis") !> @destroy;
@@ -192,7 +192,7 @@ int main(void) {
             double buf[4] = {1.0, 2.0, 3.0, 4.0};
             CCSlice_double xs = CCSlice_double_from_buffer(buf, 4);
             for (i = 0; i < ND; i++) {
-                CCResult_CCJsDom_CCJsError mk = cc_js_new(true, &a);
+                CCResult_CCJsDom_CCJsError mk = cc_js_new(true, a);
                 if (!mk.ok) {
                     ok = 0;
                     ND = i;
@@ -290,7 +290,7 @@ int main(void) {
         printf("RESULT skip_js_hosted_promise true\n");
     } else {
         CCArena a = cc_arena_heap(megabytes(2)) @destroy;
-        CCResult_CCJsDom_CCJsError mk = cc_js_new(false, &a);
+        CCResult_CCJsDom_CCJsError mk = cc_js_new(false, a);
         if (!mk.ok) {
             printf("RESULT skip_js_hosted_promise true\n");
         } else {
@@ -324,7 +324,7 @@ int main(void) {
     } else {
         CCArena a = cc_arena_heap(megabytes(4)) @destroy;
         for (i = 0; i < N && ok; i++) {
-            CCResult_CCPy_CCPyError mk = cc_py_new(true, &a);
+            CCResult_CCPy_CCPyError mk = cc_py_new(true, a);
             if (!mk.ok) {
                 ok = 0;
                 break;
@@ -360,8 +360,8 @@ int main(void) {
         printf("RESULT skip_py_clone_hail true\n");
     } else {
         CCArena a = cc_arena_heap(megabytes(2)) @destroy;
-        CCPy first = cc_py_new(false, &a) !>;
-        CCResult_CCPy_CCPyError r2 = cc_py_new(false, &a);
+        CCPy first = cc_py_new(false, a) !>;
+        CCResult_CCPy_CCPyError r2 = cc_py_new(false, a);
         if (r2.is_err()) {
             printf("RESULT skip_py_clone_hail true\n");
             cc_py_close(&first);
@@ -399,7 +399,7 @@ int main(void) {
         printf("RESULT skip_py_ull_bounds true\n");
     } else {
         CCArena a = cc_arena_heap(kilobytes(256)) @destroy;
-        CCPy py = cc_py_new(false, &a) !>;
+        CCPy py = cc_py_new(false, a) !>;
         U64Echo seed = {0};
         py_expose::[U64Echo](&py, "u64echo", &seed) !>;
         py.exec(@slice(

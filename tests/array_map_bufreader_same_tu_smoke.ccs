@@ -29,7 +29,7 @@ int main(void) {
     CCString val;
     if (!cc_arena_is_live(a)) return 1;
     sh.arena = a;
-    sh.data = array_map_new_count::[CCSlicePacked, CCString](&sh.arena, 8);
+    sh.data = array_map_new_count::[CCSlicePacked, CCString](sh.arena, 8);
     if (!sh.data) return 2;
     pk = cc_slice_packed_borrow_slice(&view, CC_SLICE_LIT("k"));
     val = cc_string_new();

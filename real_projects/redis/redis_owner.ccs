@@ -142,7 +142,7 @@ static void redis_conn_destroy(RedisConn* conn);
 static void redis_conn_release_slot(RedisConn* conn, RedisRequest* req);
 /* Defined with the reply path below; the owner's array-reply builders
  * (MGET/KEYS) allocate through it into conn->reply_arena. */
-static char[:] !>(CCError) reply_arena_alloc_slice(CCArena* reply_arena, size_t n);
+static char[:] !>(CCError) reply_arena_alloc_slice(CCArena reply_arena, size_t n);
 
 /* After drain-to-zero (see RedisConn lifetime), free the conn. */
 @typehooks on RedisConn* {
@@ -150,7 +150,7 @@ static char[:] !>(CCError) reply_arena_alloc_slice(CCArena* reply_arena, size_t 
 };
 
 
-static void redis_diag_fprintln(CCString* line, CCArena* scratch) {
+static void redis_diag_fprintln(CCString* line, CCArena scratch) {
     const char* p = cc_string_cstr(line, scratch);
     if (p) fprintf(stderr, "%s\n", p);
 }
@@ -191,7 +191,7 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
 @grammar(schema) RespGCmd {~~~~
     use Resp
     one of [
-        framed [ #'*' argc: int Resp.number "\r\n" args: items RespGArg argc cap 8 ]
+        framed [ #'*' argc: int Resp.number "\r\n" args: items RespGArg argc cap 16 ]
         plain  [ text: Resp.line "\r\n" ]
     ]
 ~~~~}
@@ -460,7 +460,7 @@ static size_t RedisReply_write(const RedisReply* reply, char* dst, size_t cap) {
 enum { k_reply_encode_cap_max = 1 << 30 };
 
 static char[:] !>(CCError) reply_wire_encode_into_arena(const RespGReply* wire,
-                                                        CCArena* reply_arena) {
+                                                        CCArena reply_arena) {
     @errhandler(CCError e) { return cc_err(e); }
     size_t need = cc_measure(RespGReply, wire);
     if (need == 0 || need > (size_t)k_reply_encode_cap_max) {
@@ -476,7 +476,7 @@ static char[:] !>(CCError) reply_wire_encode_into_arena(const RespGReply* wire,
 }
 
 /* CONFIG GET: two-element array via schema, encoded into reply_arena. */
-static RedisReply !>(CCError) config_get_reply(char[:] key, CCArena* reply_arena) {
+static RedisReply !>(CCError) config_get_reply(char[:] key, CCArena reply_arena) {
     @errhandler(CCError e) { return cc_err(e); }
     RespGReply items[2];
     size_t n = 0;
@@ -585,7 +585,7 @@ static void !>(CCError) redis_conn_request_slot(RedisConn* conn, RedisRequest** 
     req->arena = cc_arena_create_buffer(req->argv_buf,
                                         sizeof(req->argv_buf),
                                         CC_ARENA_GROWABLE);
-    if (!cc_arena_valid(&req->arena)) {
+    if (!cc_arena_valid(req->arena)) {
         cc_arena_pool_free(&conn->req_pool, req);
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "request arena init failed"));
     }
@@ -631,10 +631,7 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     req->kind = kind;
     req->argc = req_argc;
     for (size_t i = 0; i < req_argc; ++i) {
-        req->argv[i] = cc_slice_clone(&req->arena, args[arg_start + i]);
-        if (args[arg_start + i].len > 0 && !req->argv[i].ptr) {
-            return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "request argument clone failed"));
-        }
+        req->argv[i] = args[arg_start + i].clone_into(req->arena) !>;
     }
 
     *out = redis_request_slot_commit(&slot);
@@ -647,7 +644,7 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
  * before the slot is released.  DbCmdClock sampled at most once (clock.now()). */
 @noblock static RedisReply !>(CCError) execute_request_body(RedisDb* db,
                                                            RedisRequest* req,
-                                                           CCArena* reply_arena) {
+                                                           CCArena reply_arena) {
     @errhandler(CCError e) { return cc_err(e); }
     DbCmdClock clock = {0};
     switch (req->kind) {
@@ -679,7 +676,7 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
             return cc_ok(reply_simple("OK"));
         }
         case REDIS_CMD_APPEND:
-            return db_append(db, req->argv[0], req->argv[1], &req->arena, &clock);
+            return db_append(db, req->argv[0], req->argv[1], req->arena, &clock);
         case REDIS_CMD_STRLEN:
             return cc_ok(db_strlen(db, req->argv[0], &clock));
         case REDIS_CMD_TYPE:
@@ -760,8 +757,8 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
  * reply_arena are no-ops (PONG/OK stay static; GET-str copies DB bytes;
  * WIRE arrays built in-arena stay put).  Encode belongs at socket write. */
 @noblock static inline bool !>(CCError) redis_reply_ensure_owned(RedisReply* reply,
-                                                                      CCArena* reply_arena) {
-    if (!reply || !reply_arena) {
+                                                                      CCArena reply_arena) {
+    if (!reply || !reply_arena.p) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "reply ensure_owned null"));
     }
     return reply->data.materialize_in(reply_arena);
@@ -769,7 +766,7 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
 
 @noblock static RedisReply !>(CCError) execute_request(RedisDb* db,
                                                        RedisRequest* req,
-                                                       CCArena* reply_arena) {
+                                                       CCArena reply_arena) {
     @errhandler(CCError e) { return cc_err(e); }
     RedisReply reply = execute_request_body(db, req, reply_arena) !>;
     redis_reply_ensure_owned(&reply, reply_arena) !>;
@@ -868,7 +865,7 @@ static bool redis_conn_write_reply(RedisConn* conn, const RedisReply* reply) {
     return conn->write_wire_reply(&wire);
 }
 
-static char[:] !>(CCError) reply_arena_alloc_slice(CCArena* reply_arena, size_t n) {
+static char[:] !>(CCError) reply_arena_alloc_slice(CCArena reply_arena, size_t n) {
     char[:] s = cc_arena_alloc_slice_bytes(reply_arena, n);
     if (n > 0 && !s.ptr) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply encode OOM"));
     return cc_ok(s);
@@ -952,7 +949,7 @@ static void redis_conn_drain_inflight(RedisConn* conn) {
 
 static inline void reply_arena_reset(RedisConn* conn) {
     if (!conn) return;
-    cc_arena_reset(&conn->reply_arena);
+    cc_arena_reset(conn->reply_arena);
 }
 
 /* Explicit builder: sugar closures that capture @async frame locals lower
@@ -966,7 +963,7 @@ static void* owner_reply_entry(void* env, intptr_t slot_i, intptr_t arena_i) {
     @errhandler(CCError e) cc_error_exit(e);
     OwnerReplyEnv* e = (OwnerReplyEnv*)env;
     RedisReply* slot = (RedisReply*)slot_i;
-    CCArena* arena = (CCArena*)arena_i;
+    CCArena arena = *(CCArena*)arena_i;
     RedisReply !>(CCError) built = execute_request(e->db, e->req, arena);
     if (built.is_err()) *slot = err_reply(built.error());
     else *slot = built.value();
@@ -984,7 +981,7 @@ static void* owner_reply_entry(void* env, intptr_t slot_i, intptr_t arena_i) {
         @nonblocking {
             CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
             CCString line = @string("redis_owner: db_init failed (out of memory?)", scratch);
-            redis_diag_fprintln(&line, &scratch);
+            redis_diag_fprintln(&line, scratch);
         }
         return 1;
     }
@@ -1002,8 +999,8 @@ static void* owner_reply_entry(void* env, intptr_t slot_i, intptr_t arena_i) {
             CCArena preload_scratch =
                 @create(preload_scratch_buf, sizeof(preload_scratch_buf)) @destroy;
             CCString line =
-                @string(`redis_owner: preloaded ${preload_key_count} keys`, &preload_scratch);
-            redis_diag_fprintln(&line, &preload_scratch);
+                @string(`redis_owner: preloaded ${preload_key_count} keys`, preload_scratch);
+            redis_diag_fprintln(&line, preload_scratch);
         }
         db_dump_mem_stats(&db, "post-preload");
         redis_mem_emit_gap(&db, "post-preload");
@@ -1030,7 +1027,7 @@ static void* owner_reply_entry(void* env, intptr_t slot_i, intptr_t arena_i) {
         OwnerReplyEnv build_env = { .db = &db, .req = req };
         CCClosure2 builder = cc_closure2_make(owner_reply_entry, &build_env, NULL);
         bool !>(CCIoError) queued =
-            cc_channel_try_send_into(conn->reply_tx, builder, &conn->reply_arena);
+            conn->reply_tx.try_send_into(builder, conn->reply_arena);
         if (cc_is_err(queued)) {
             cc_channel_close(conn->reply_tx, queued.error());
             continue;
@@ -1153,7 +1150,7 @@ int main(int argc, char** argv) {
         CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
         const char* msg = e.message ? e.message : "unknown error";
         CCString line = @string(`fatal: ${msg}`, scratch);
-        redis_diag_fprintln(&line, &scratch);
+        redis_diag_fprintln(&line, scratch);
         return 1;
     }
 
@@ -1165,7 +1162,7 @@ int main(int argc, char** argv) {
             char scratch_buf[256];
             CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
             CCString line = @string(`invalid port: ${argv[1]}`, scratch);
-            redis_diag_fprintln(&line, &scratch);
+            redis_diag_fprintln(&line, scratch);
             return 1;
         }
         port = (int)parsed;
@@ -1178,7 +1175,7 @@ int main(int argc, char** argv) {
         char scratch_buf[256];
         CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
         CCString line = @string(`listen error: ${(int)e}`, scratch);
-        redis_diag_fprintln(&line, &scratch);
+        redis_diag_fprintln(&line, scratch);
         return 1;
     };
     @defer cc_listener_close(&ln);
@@ -1220,7 +1217,7 @@ int main(int argc, char** argv) {
                 (void)server.spawn_async(handle_client(client, req_tx, id));
             }
             cc_channel_close(req_ch);
-        });
+        }) !>;
 
         (void)server.spawn_async(owner_loop(req_rx));
     }

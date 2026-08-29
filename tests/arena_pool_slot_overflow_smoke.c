@@ -59,7 +59,7 @@ int main(void) {
     if (a.a->_flags & CC_ARENA_FLAG_HEAP_OWNED) { printf("FAIL: slot root must not be heap-owned\n"); return 1; }
 
     /* Step 1: the request struct in slot L1 — simulates RedisRequest. */
-    FakeReq *req = (FakeReq*)cc_arena_alloc(&a, sizeof(*req), _Alignof(FakeReq));
+    FakeReq *req = (FakeReq*)cc_arena_alloc(a, sizeof(*req), _Alignof(FakeReq));
     if (!req) { printf("FAIL: struct alloc\n"); return 2; }
     if ((uint8_t*)req < a.a->base || (uint8_t*)req >= slot_start + SLOT_CAP) {
         printf("FAIL: first alloc must land in the slot L1\n"); return 2;
@@ -69,7 +69,7 @@ int main(void) {
 
     /* Step 2: argv[0] that fits in the slot. */
     const size_t small_n = 4;
-    char *argv0 = (char*)cc_arena_alloc(&a, small_n, 1);
+    char *argv0 = (char*)cc_arena_alloc(a, small_n, 1);
     if (!argv0) { printf("FAIL: small argv alloc\n"); return 3; }
     if ((uint8_t*)argv0 < slot_start || (uint8_t*)argv0 >= slot_start + SLOT_CAP) {
         printf("FAIL: small argv should stay in slot\n"); return 3;
@@ -80,7 +80,7 @@ int main(void) {
      * This is the case that used to fail with "request argument clone failed"
      * under block_max=1. */
     const size_t big_n = BIG_N;
-    char *argv1 = (char*)cc_arena_alloc(&a, big_n, 1);
+    char *argv1 = (char*)cc_arena_alloc(a, big_n, 1);
     if (!argv1) { printf("FAIL: big argv alloc (growable should have spilled to heap)\n"); return 4; }
     if ((uint8_t*)argv1 >= slot_start && (uint8_t*)argv1 < slot_start + SLOT_CAP) {
         printf("FAIL: big argv should be in a heap slab, not in the slot\n"); return 4;

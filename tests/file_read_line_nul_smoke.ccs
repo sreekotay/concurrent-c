@@ -37,7 +37,7 @@ int main(void) {
         return 1;
     }
 
-    cc_arena_reset(&a);
+    cc_arena_reset(a);
     got = cc_file_read_line_into(&f, &a, &line);
     if (cc_is_err(got) || !cc_value(got)) abort();
     if (line.len != 5 || memcmp(line.ptr, "next\n", 5) != 0) {

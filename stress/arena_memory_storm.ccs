@@ -90,7 +90,7 @@ static int bench_tip_growth(void) {
     t0 = now_sec();
     for (i = 0; i < TIP_ITERS; i++) {
         size_t want = sz + 32 + (i % 17);
-        void *np = cc_arena_realloc(&a, &a, p, sz, want, 8);
+        void *np = cc_arena_realloc(a, a, p, sz, want, 8);
         if (!np) return fail("tip realloc OOM");
         if (p && np != p) moves++;
         p = (unsigned char *)np;
@@ -123,16 +123,16 @@ static int bench_tip_stranding(void) {
     size_t moves = 0;
     size_t i;
 
-    alive = (unsigned char *)cc_arena_realloc(&a, &a, NULL, 0, 256, 8);
+    alive = (unsigned char *)cc_arena_realloc(a, a, NULL, 0, 256, 8);
     if (!alive) return fail("stranding seed");
     alive_sz = 256;
     memset(alive, 0xa5, alive_sz);
 
     for (i = 0; i < 200; i++) {
-        void *pad = cc_arena_alloc(&a, 64 + (i % 48), 8);
+        void *pad = cc_arena_alloc(a, 64 + (i % 48), 8);
         void *np;
         if (!pad) return fail("stranding pad");
-        np = cc_arena_realloc(&a, &a, alive, alive_sz, alive_sz + 48, 8);
+        np = cc_arena_realloc(a, a, alive, alive_sz, alive_sz + 48, 8);
         if (!np) return fail("stranding grow");
         if (np != alive) moves++;
         alive = (unsigned char *)np;
@@ -163,7 +163,7 @@ static int bench_budget_overflow_reset(void) {
     t0 = now_sec();
     for (i = 0; i < STORM_ALLOCS; i++) {
         size_t n = 24 + (i * 17) % 512;
-        void *p = cc_arena_alloc(&a, n, 8);
+        void *p = cc_arena_alloc(a, n, 8);
         if (!p) return fail("storm alloc");
         memset(p, (int)(i & 0xff), n < 16 ? n : 16);
         live += n;
@@ -183,7 +183,7 @@ static int bench_budget_overflow_reset(void) {
            (rss0.ok && rss1.ok) ? (ssize_t)rss1.rss_bytes - (ssize_t)rss0.rss_bytes : (ssize_t)-1,
            t1 - t0);
 
-    cc_arena_reset(&a);
+    cc_arena_reset(a);
     gross_after = cc_arena_committed_gross_bytes(&a);
     rss2 = sample_rss();
     printf("  reset: gross %zu → %zu ovf=%zu rss=%zu\n",
@@ -213,7 +213,7 @@ static int bench_reset_pingpong(void) {
         size_t g, o;
         for (i = 0; i < PINGPONG_ALLOCS; i++) {
             size_t n = 32 + ((i * 41 + r * 7) % 768);
-            void *p = cc_arena_alloc(&a, n, 16);
+            void *p = cc_arena_alloc(a, n, 16);
             if (!p) {
                 cc_arena_free(&a);
                 return fail("pingpong alloc");
@@ -224,7 +224,7 @@ static int bench_reset_pingpong(void) {
         o = cc_arena_overflow_raw_bytes(&a);
         if (g > peak_gross) peak_gross = g;
         if (o > peak_ovf) peak_ovf = o;
-        cc_arena_reset(&a);
+        cc_arena_reset(a);
         if (a.a->ovf_head != NULL || cc_arena_overflow_raw_bytes(&a) != 0) {
             cc_arena_free(&a);
             return fail("pingpong reset left overflow");
@@ -258,7 +258,7 @@ static int bench_mixed_align_storm(void) {
         size_t n = (size_t)1 << (3 + (i % 10)); /* 8 .. 4KiB */
         n += (i * 13) % aln; /* occasionally odd vs align */
         if (n < 8) n = 8;
-        void *p = cc_arena_alloc(&a, n, aln);
+        void *p = cc_arena_alloc(a, n, aln);
         if (!p) {
             cc_arena_free(&a);
             return fail("mixed align alloc");
@@ -290,7 +290,7 @@ static int bench_arena_churn(void) {
         CCArena a = cc_arena_heap(8 * 1024);
         for (j = 0; j < CHURN_ALLOCS_EACH; j++) {
             size_t n = 16 + (j * 31) % 256;
-            void *p = cc_arena_alloc(&a, n, 8);
+            void *p = cc_arena_alloc(a, n, 8);
             if (!p) {
                 cc_arena_free(&a);
                 return fail("churn alloc");
@@ -319,7 +319,7 @@ static int bench_stack_spill(void) {
     size_t live = 0;
     for (i = 0; i < 4000; i++) {
         size_t n = 64 + (i % 128);
-        void *p = cc_arena_alloc(&s, n, 8);
+        void *p = cc_arena_alloc(s, n, 8);
         if (!p) {
             cc_arena_free(&s);
             return fail("stack spill alloc");
@@ -333,7 +333,7 @@ static int bench_stack_spill(void) {
         cc_arena_free(&s);
         return fail("stack should have grown or overflowed");
     }
-    cc_arena_reset(&s);
+    cc_arena_reset(s);
     if (s.a->base != s_cc_stack_buf) {
         cc_arena_free(&s);
         return fail("stack reset did not restore stack buf");
@@ -364,7 +364,7 @@ static int bench_concurrent_nursery_arenas(void) {
                 size_t i;
                 for (i = 0; i < CONC_ALLOCS_EACH; i++) {
                     size_t nsz = 16 + ((size_t)wid * 19 + i * 23) % 384;
-                    void *p = cc_arena_alloc(&a, nsz, 8);
+                    void *p = cc_arena_alloc(a, nsz, 8);
                     if (!p) {
                         cc_atomic_fetch_add(&g_conc_fail, 1);
                         break;

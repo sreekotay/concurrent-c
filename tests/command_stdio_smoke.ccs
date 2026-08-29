@@ -3,9 +3,9 @@
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(64));
-    CCCommand cat = cc_command(&arena, "/bin/sh");
-    CCCommand merged = cc_command(&arena, "/bin/sh");
-    CCCommand env_cmd = cc_command(&arena, "/bin/sh");
+    CCCommand cat = cc_command(arena, "/bin/sh");
+    CCCommand merged = cc_command(arena, "/bin/sh");
+    CCCommand env_cmd = cc_command(arena, "/bin/sh");
     const char* envp[] = {
         "CC_STDIO_SMOKE=works",
         NULL,

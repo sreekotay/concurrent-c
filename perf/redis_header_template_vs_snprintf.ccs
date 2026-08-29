@@ -56,14 +56,14 @@ static void verify_same_output(const size_t* values, int count) {
     cc_arena_stack(tmp, STACK_ARENA_BYTES);
     for (int i = 0; i < count && i < 16; i++) {
         size_t value = values[i];
-        CCString hdr_str = @string(`$${value}\r\n`, &tmp);
+        CCString hdr_str = @string(`$${value}\r\n`, tmp);
         char[:0] hdr = hdr_str.as_slice();
         char buf[64];
         int hdr_len = snprintf(buf, sizeof(buf), "$%zu\r\n", value);
         if (hdr_len <= 0 || (size_t)hdr_len >= sizeof(buf)) abort();
         if (hdr.len != (size_t)hdr_len) abort();
         if (memcmp(hdr.ptr, buf, hdr.len) != 0) abort();
-        cc_arena_reset(&tmp);
+        cc_arena_reset(tmp);
     }
     cc_arena_free(&tmp);
 }
@@ -75,7 +75,7 @@ static double run_cc_template_loop(const size_t* values, int value_count, int it
     double start = time_now_ms();
     for (int i = 0; i < iterations; i++) {
         size_t value = values[i % value_count];
-        CCString hdr_str = @string(`$${value}\r\n`, &tmp);
+        CCString hdr_str = @string(`$${value}\r\n`, tmp);
         char[:0] hdr = hdr_str.as_slice();
         size_t hdr_len = hdr.len;
         size_t len = hdr_len + value + 2;
@@ -85,7 +85,7 @@ static double run_cc_template_loop(const size_t* values, int value_count, int it
             mark ^= (unsigned char)p[0];
             mark ^= (unsigned char)p[hdr_len - 1];
         }
-        cc_arena_reset(&tmp);
+        cc_arena_reset(tmp);
     }
     double elapsed = time_now_ms() - start;
     cc_arena_free(&tmp);

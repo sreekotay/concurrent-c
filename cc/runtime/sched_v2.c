@@ -914,7 +914,7 @@ static __thread fiber_v2* tls_v2_current_fiber = NULL;
  * path. Starts at 1 so that 0 unambiguously means "no fiber running". */
 static __thread uint64_t tls_v2_dispatch_seq = 0;
 #endif
-bool cc_nursery_is_cancelled(const CCNurseryHost* n);
+bool cc_nursery_is_cancelled_host(const CCNurseryHost* n);
 void cc_nursery_notify_child_done(CCNurseryHost* n);
 
 /* Mirror of nursery.c's CC_NURSERY_WORKER_FREES gate.  Latched on first
@@ -935,7 +935,7 @@ static void fiber_v2_entry(mco_coro* co) {
     if (!f) return;
     atomic_thread_fence(memory_order_acquire);
     if (f->entry_fn) {
-        if (f->admission_nursery && cc_nursery_is_cancelled(f->admission_nursery)) {
+        if (f->admission_nursery && cc_nursery_is_cancelled_host(f->admission_nursery)) {
             f->result = NULL;
         } else {
             f->result = f->entry_fn(f->entry_arg);

@@ -46,15 +46,15 @@ static void handle_client(CCSocket sock) {
     CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
 
     CCNetError peer_err = CC_NET_OK;
-    CCSlice peer = sock.peer_addr(&a, &peer_err);
+    char[:] peer = sock.peer_addr(a, &peer_err);
     if (peer_err == CC_NET_OK) {
         println(@string(`client connected: ${peer}`, @scratch)) !>;
     }
 
     for (;;) {
         a.reset();
-        CCSlice data;
-        if (!cc_io_avail(sock.read(&a, 1024, &data))) {
+        char[:] data;
+        if (!cc_io_avail(sock.read(a, 1024, &data))) {
             println("client disconnected") !>;
             break;
         }
@@ -92,7 +92,7 @@ static void run_test_client(void) {
         return;
     };
     if (!ok) got = 0;
-    CCSlice got_slice = cc_slice_from_buffer(buf, got);
+    char[:] got_slice = cc_slice_from_buffer(buf, got);
     println(@string(`test client got ${got} bytes: ${got_slice}`, @scratch)) !>;
     sock.close();
 }
@@ -105,7 +105,7 @@ static bool parse_test_flag(int argc, char** argv) {
     CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
     TcpEchoOpts opts = {0};
     /* Pure parse — no usage ritual; unknown flags are just "not test mode". */
-    if (!cc_parse_args(TcpEchoOpts, argc, argv, &a, &opts)) return false;
+    if (!cc_parse_args(TcpEchoOpts, argc, argv, a, &opts)) return false;
     return opts.test;
 }
 

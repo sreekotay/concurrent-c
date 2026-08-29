@@ -46,7 +46,7 @@ static void* p_alloc(size_t n) {
     /* `cc_arena_alloc` returns NULL on OOM; for negative `n` we force NULL
      * to exercise the NULL path without actually allocating. */
     if (n == 0) return NULL;
-    return cc_arena_alloc(&g_arena, n, 1);
+    return cc_arena_alloc(g_arena, n, 1);
 }
 
 /* 1. `?>` ternary: Result LHS with binder. */

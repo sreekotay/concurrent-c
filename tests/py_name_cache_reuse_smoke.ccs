@@ -19,7 +19,7 @@ int main(void) {
         return 0;
     }
 
-    CCPy py = cc_py_new(false, &a) !>;
+    CCPy py = cc_py_new(false, a) !>;
     CCPyObj s = py.eval(@slice("'AbCd'")) !> @destroy;
 
     char meth[16];

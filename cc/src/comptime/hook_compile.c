@@ -391,9 +391,9 @@ static int cc__emit_lambda_definition(char** out,
                                       size_t expr_len,
                                       const char* lambda_name,
                                       CCComptimeTypeHookKind kind) {
-    static const char* param_types_ufcs[6]   = { "CCSlice", "CCSlice", "CCSlice", "CCSliceArray", "CCSliceArray", "CCArena *" };
-    static const char* param_types_create[4] = { "CCSlice", "CCSliceArray", "CCSliceArray", "CCArena *" };
-    static const char* param_types_factory[4] = { "CCSlice", "CCSlice", "CCSliceArray", "CCArena *" };
+    static const char* param_types_ufcs[6]   = { "CCSlice", "CCSlice", "CCSlice", "CCSliceArray", "CCSliceArray", "CCArena" };
+    static const char* param_types_create[4] = { "CCSlice", "CCSliceArray", "CCSliceArray", "CCArena" };
+    static const char* param_types_factory[4] = { "CCSlice", "CCSlice", "CCSliceArray", "CCArena" };
     const char** param_types;
     int expected_params;
     if (kind == CC_COMPTIME_TYPE_HOOK_UFCS) {
@@ -470,17 +470,17 @@ static void cc__emit_wrapper(char** out,
     cc__hc_sb_append_cstr(out, out_len, out_cap, entry_name);
     if (kind == CC_COMPTIME_TYPE_HOOK_UFCS) {
         cc__hc_sb_append_cstr(out, out_len, out_cap,
-                              "(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena *arena) {\n    return ");
+                              "(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena arena) {\n    return ");
         cc__hc_sb_append_cstr(out, out_len, out_cap, callable_name);
         cc__hc_sb_append_cstr(out, out_len, out_cap, "(recv_type, method, mode, argv, arg_types, arena);\n}\n");
     } else if (kind == CC_COMPTIME_TYPE_HOOK_GENERIC_FACTORY) {
         cc__hc_sb_append_cstr(out, out_len, out_cap,
-                              "(CCSlice generic_name, CCSlice mangled, CCSliceArray type_args, CCArena *arena) {\n    return ");
+                              "(CCSlice generic_name, CCSlice mangled, CCSliceArray type_args, CCArena arena) {\n    return ");
         cc__hc_sb_append_cstr(out, out_len, out_cap, callable_name);
         cc__hc_sb_append_cstr(out, out_len, out_cap, "(generic_name, mangled, type_args, arena);\n}\n");
     } else {
         cc__hc_sb_append_cstr(out, out_len, out_cap,
-                              "(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena *arena) {\n    return ");
+                              "(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena arena) {\n    return ");
         cc__hc_sb_append_cstr(out, out_len, out_cap, callable_name);
         cc__hc_sb_append_cstr(out, out_len, out_cap, "(type_name, argv, arg_types, arena);\n}\n");
     }

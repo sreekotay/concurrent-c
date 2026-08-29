@@ -34,9 +34,9 @@ static int unarmed_probe(void) {
     }
     CCArena arena = cc_arena_heap(kilobytes(16)) @destroy;
     CCExclusive excl = cc_exclusive_create(arena, 8) !> @destroy;
-    if (cc_exclusive_gate_pass(excl.p, 42) != CC_EXCL_WAIT_OK) return 1;
-    if (cc_exclusive_gate_wait(excl.p, 42) != CC_EXCL_WAIT_OK) return 1;
-    if (cc_exclusive_live_count(excl.p) != 0) return 1;
+    if (cc_exclusive_gate_pass(excl, 42) != CC_EXCL_WAIT_OK) return 1;
+    if (cc_exclusive_gate_wait(excl, 42) != CC_EXCL_WAIT_OK) return 1;
+    if (cc_exclusive_live_count(excl) != 0) return 1;
     return 0;
 }
 
@@ -48,9 +48,9 @@ static int fail_probe(void) {
     }
     CCArena arena = cc_arena_heap(kilobytes(16)) @destroy;
     CCExclusive excl = cc_exclusive_create(arena, 8) !> @destroy;
-    if (cc_exclusive_gate_fail(excl.p, 7) != CC_EXCL_WAIT_OK) return 1;
-    if (cc_exclusive_gate_wait(excl.p, 7) != CC_EXCL_WAIT_FAILED) return 1;
-    if (cc_exclusive_live_count(excl.p) != 0) return 1;
+    if (cc_exclusive_gate_fail(excl, 7) != CC_EXCL_WAIT_OK) return 1;
+    if (cc_exclusive_gate_wait(excl, 7) != CC_EXCL_WAIT_FAILED) return 1;
+    if (cc_exclusive_live_count(excl) != 0) return 1;
     return 0;
 }
 
@@ -88,10 +88,10 @@ int main(void) {
     }
     /* Trailing UNARMED cell per stage (last pass opens N); everything else
      * reclaimed by the two-touch free. */
-    if (cc_exclusive_live_count(t.excl.p) > (size_t)STAGES)
+    if (cc_exclusive_live_count(t.excl) > (size_t)STAGES)
         g_fail = 1;
     if (g_fail) {
-        fprintf(stderr, "FAIL live=%zu\n", cc_exclusive_live_count(t.excl.p));
+        fprintf(stderr, "FAIL live=%zu\n", cc_exclusive_live_count(t.excl));
         return 1;
     }
     printf("turnstile_index_smoke: OK\n");

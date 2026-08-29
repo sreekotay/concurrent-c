@@ -89,7 +89,7 @@ int main(void) {
     /* corpora: reproduce the golden parser's exact borrow/materialize split */
     {
         Counts t = {0};
-        cc_arena_reset(&arena);
+        cc_arena_reset(arena);
         long ok = file_collect("examples/serdes/json/twitter.json", arena, &t);
         if (ok == 0) { printf("FAIL: twitter rejected\n"); return 1; }
         if (ok == 1 && (t.borrowed != 17787 || t.materialized != 312)) {
@@ -98,7 +98,7 @@ int main(void) {
             return 1;
         }
         Counts m = {0};
-        cc_arena_reset(&arena);
+        cc_arena_reset(arena);
         ok = file_collect("examples/serdes/json/numbers.json", arena, &m);
         if (ok == 0) { printf("FAIL: numbers rejected\n"); return 1; }
         if (ok == 1 && m.numbers != 30000) { printf("FAIL: numbers %ld != 30000\n", m.numbers); return 1; }

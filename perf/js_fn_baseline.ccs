@@ -113,7 +113,7 @@ int main(int argc, char **argv) {
     report_ns("c_native", iters);
 
     {
-        CCJsDom js = cc_js_new(true, &a) !> @destroy;
+        CCJsDom js = cc_js_new(true, a) !> @destroy;
         CCJsFn f_cc = js_fn(add_k, 7);
 
         js.exec(

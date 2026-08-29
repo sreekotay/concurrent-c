@@ -117,7 +117,7 @@ static inline void !>(CCError) cc_turnstile_stage_wait(CCTurnstileStage* s,
     if (i <= 0)
         return cc_ok();
     return cc_turnstile_from_excl(
-        cc_exclusive_gate_wait(s->excl, cc_turnstile_stage_name(s, i)),
+        cc_exclusive_gate_wait_host(s->excl, cc_turnstile_stage_name(s, i)),
         "cc_turnstile_stage_wait");
 }
 
@@ -127,7 +127,7 @@ static inline void !>(CCError) cc_turnstile_stage_pass(CCTurnstileStage* s,
     if (!s || !s->excl || i < 0)
         return cc_err(CC_ERR_INVALID_ARG, "cc_turnstile_stage_pass");
     return cc_turnstile_from_excl(
-        cc_exclusive_gate_pass(s->excl, cc_turnstile_stage_name(s, i + 1)),
+        cc_exclusive_gate_pass_host(s->excl, cc_turnstile_stage_name(s, i + 1)),
         "cc_turnstile_stage_pass");
 }
 
@@ -137,7 +137,7 @@ static inline void !>(CCError) cc_turnstile_stage_fail(CCTurnstileStage* s,
     if (!s || !s->excl || i < 0)
         return cc_err(CC_ERR_INVALID_ARG, "cc_turnstile_stage_fail");
     return cc_turnstile_from_excl(
-        cc_exclusive_gate_fail(s->excl, cc_turnstile_stage_name(s, i + 1)),
+        cc_exclusive_gate_fail_host(s->excl, cc_turnstile_stage_name(s, i + 1)),
         "cc_turnstile_stage_fail");
 }
 

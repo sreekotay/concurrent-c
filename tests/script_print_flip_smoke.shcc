@@ -9,11 +9,11 @@ CCArena a = @create(kilobytes(4)) @destroy;
 CCSlice hi = @slice("hello");
 hi.println() !>;
 
-CCString world = @string(`world`, &a);
+CCString world = @string(`world`, a);
 world.println() !>;
 
 "plain".println() !>;
-@string(`tpl=${42}`, &a).println() !>;
+@string(`tpl=${42}`, a).println() !>;
 
 "err-line".eprintln() !>;
 hi.fprintln(STDERR_FILENO) !>;

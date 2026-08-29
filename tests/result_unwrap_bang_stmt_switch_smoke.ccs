@@ -1,0 +1,43 @@
+/* Statement `!>;` in an opaque variant switch must discard Ok (no
+ * unused-value) and keep `#line` aligned. Assignment `!>;` in the same
+ * dump still yields the Ok value. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+@variant Cell {
+    txt: int;
+    num: int;
+};
+
+static bool !>(CCError) write_ok(void) {
+    return cc_ok(true);
+}
+
+static int !>(CCError) write_num(void) {
+    return cc_ok(7);
+}
+
+static int go(Cell* cell) {
+    @errhandler(CCError e) { return 1; }
+    switch (cell) {
+    case .txt:
+        write_ok() !>;
+        break;
+    case .num: {
+        int n = write_num() !>;
+        if (n != 7) return 2;
+        write_ok() !>;
+        break;
+    }
+    }
+    return 0;
+}
+
+int main(void) {
+    Cell a = { .txt = 1 };
+    Cell b = { .num = 2 };
+    if (go(&a) != 0) return 1;
+    if (go(&b) != 0) return 1;
+    printf("ok\n");
+    return 0;
+}

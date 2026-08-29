@@ -2288,7 +2288,7 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
         while (!cc__chan_closed(ch) && !ch->rx_error_closed && ch->count == ch->cap) {
             /* Check if current nursery is cancelled - unblock so the fiber can exit */
             CCNurseryHost* cur_nursery = cc__runtime_current_nursery();
-            if (cur_nursery && cc_nursery_is_cancelled(cur_nursery)) {
+            if (cur_nursery && cc_nursery_is_cancelled_host(cur_nursery)) {
                 return ECANCELED;
             }
             cc__fiber_wait_node node = {0};
@@ -4371,7 +4371,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         /* Check if current nursery is cancelled - unblock so the fiber can exit */
         {
             CCNurseryHost* cur_nursery = cc__runtime_current_nursery();
-            if (cur_nursery && cc_nursery_is_cancelled(cur_nursery)) {
+            if (cur_nursery && cc_nursery_is_cancelled_host(cur_nursery)) {
                 pthread_mutex_unlock(&ch->mu);
                 return ECANCELED;
             }
@@ -5309,22 +5309,22 @@ int cc_chan_deadline_send_take_slice(CCChan* ch, const CCSliceUnique* slice, con
 }
 
 int cc_chan_nursery_send(CCChan* ch, CCNurseryHost* n, const void* value, size_t value_size) {
-    CCDeadline d = cc_nursery_as_deadline(n);
+    CCDeadline d = cc_nursery_as_deadline_host(n);
     return cc_chan_deadline_send(ch, value, value_size, &d);
 }
 
 int cc_chan_nursery_recv(CCChan* ch, CCNurseryHost* n, void* out_value, size_t value_size) {
-    CCDeadline d = cc_nursery_as_deadline(n);
+    CCDeadline d = cc_nursery_as_deadline_host(n);
     return cc_chan_deadline_recv(ch, out_value, value_size, &d);
 }
 
 int cc_chan_nursery_send_take(CCChan* ch, CCNurseryHost* n, void* ptr) {
-    CCDeadline d = cc_nursery_as_deadline(n);
+    CCDeadline d = cc_nursery_as_deadline_host(n);
     return cc_chan_deadline_send_take(ch, ptr, &d);
 }
 
 int cc_chan_nursery_send_take_slice(CCChan* ch, CCNurseryHost* n, const CCSliceUnique* slice) {
-    CCDeadline d = cc_nursery_as_deadline(n);
+    CCDeadline d = cc_nursery_as_deadline_host(n);
     return cc_chan_deadline_send_take_slice(ch, slice, &d);
 }
 

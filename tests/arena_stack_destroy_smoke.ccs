@@ -10,7 +10,7 @@ int main(void) {
         assert(cc_arena_is_live(s));
         assert(s.a->block_max == CC_ARENA_DEFAULT_BLOCK_MAX);
         assert(s.a->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW);
-        p = cc_arena_alloc(&s, 128, 8);
+        p = cc_arena_alloc(s, 128, 8);
         assert(p);
         /* no explicit free — @destroy drains overflow at block exit */
     }
@@ -20,10 +20,10 @@ int main(void) {
         void *p;
         cc_arena_bind_buffer(b, buf, sizeof(buf));
         if (b.a) b.a->_flags |= CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW;
-        p = cc_arena_alloc(&b, 128, 8);
+        p = cc_arena_alloc(b, 128, 8);
         assert(p);
         cc_arena_stack(s, n);
-        p = cc_arena_alloc(&s, 16, 16);
+        p = cc_arena_alloc(s, 16, 16);
         assert(p);
         assert(((uintptr_t)p & 15) == 0);
     }

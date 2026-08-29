@@ -17,7 +17,7 @@ int main(void) {
         return 0;
     }
 
-    CCResult_CCJsDom_CCJsError mk = cc_js_new(true, &a);
+    CCResult_CCJsDom_CCJsError mk = cc_js_new(true, a);
     if (!mk.ok) {
         printf("new failed: %s\n", mk.u.error.base.message);
         return 1;
@@ -34,7 +34,7 @@ int main(void) {
            st.ok && sx.ok && sx.u.value == 42 ? "true" : "false");
 
     /* A second domain is a second node: state does not cross. */
-    CCResult_CCJsDom_CCJsError mk2 = cc_js_new(true, &a);
+    CCResult_CCJsDom_CCJsError mk2 = cc_js_new(true, a);
     if (!mk2.ok) { printf("second new failed\n"); return 1; }
     CCJsDom iso2 = mk2.u.value;
     CCResult_int64_t_CCJsError other =
@@ -127,7 +127,7 @@ int main(void) {
 
     /* A spawn that cannot exec names the executable it tried. */
     CCResult_CCJsDom_CCJsError bad_exe =
-        cc_js_new_exe(true, "definitely-not-a-node", &a);
+        cc_js_new_exe(true, "definitely-not-a-node", a);
     printf("missing_exe_articulate %s\n",
            !bad_exe.ok &&
                    strstr(bad_exe.u.error.base.message, "definitely-not-a-node")

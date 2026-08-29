@@ -12,7 +12,7 @@ int main(void) {
         cc_arena_bind_buffer(bound, buffer, sizeof(buffer));
         if (!cc_arena_is_live(bound)) abort();
         assert((bound.a->_flags & CC_ARENA_FLAG_HOST_OWNED) == 0);
-        int* x = cc_arena_alloc_T(int, &bound);
+        int* x = cc_arena_alloc_T(int, bound);
         assert(x != NULL);
         *x = 42;
         assert(*x == 42);
@@ -26,7 +26,7 @@ int main(void) {
     {
         CCArena created = @create(buffer, sizeof(buffer)) @destroy;
         if (!cc_arena_is_live(created)) abort();
-        int* x = cc_arena_alloc_T(int, &created);
+        int* x = cc_arena_alloc_T(int, created);
         assert(x != NULL);
         *x = 42;
         assert((char*)x >= buffer);

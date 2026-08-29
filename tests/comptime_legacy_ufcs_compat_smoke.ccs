@@ -32,7 +32,7 @@ static void legacy_wild_alpha_bump(LegacyWildAlpha* toy) {
     toy->value += 1000;
 }
 
-static CCSlice generic_toy_ufcs(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena) {
+static CCSlice generic_toy_ufcs(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena arena) {
     (void)recv_type;
     (void)mode;
     (void)argv;
@@ -42,7 +42,7 @@ static CCSlice generic_toy_ufcs(CCSlice recv_type, CCSlice method, CCSlice mode,
         method, arena);
 }
 
-static CCSlice override_toy_legacy_ufcs(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena) {
+static CCSlice override_toy_legacy_ufcs(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena arena) {
     (void)recv_type;
     (void)mode;
     (void)argv;
@@ -52,7 +52,7 @@ static CCSlice override_toy_legacy_ufcs(CCSlice recv_type, CCSlice method, CCSli
         method, arena);
 }
 
-static CCSlice override_toy_type_ufcs(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena) {
+static CCSlice override_toy_type_ufcs(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena arena) {
     (void)recv_type;
     (void)mode;
     (void)argv;
@@ -62,7 +62,7 @@ static CCSlice override_toy_type_ufcs(CCSlice recv_type, CCSlice method, CCSlice
         method, arena);
 }
 
-static CCSlice legacy_wild_ufcs(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena) {
+static CCSlice legacy_wild_ufcs(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena arena) {
     (void)recv_type;
     (void)mode;
     (void)argv;

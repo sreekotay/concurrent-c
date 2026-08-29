@@ -40,7 +40,7 @@ int main(void) {
     Pair p = { 1, 2 };
     v.push(p);
 
-    Map::[int, int] m = map_new::[int, int](&arena);
+    Map::[int, int] m = map_new::[int, int](arena);
     m->insert(7, 70);
 
     /* Primitive — registered by runtime constructor. */

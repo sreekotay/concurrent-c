@@ -934,7 +934,7 @@ static int shadow_fmt_string_arena_expr(char* dst, size_t cap, const char* tpl,
     shadow_tpl_dedent_inplace(ded, sizeof(ded));
     tpl = ded;
     /* Build pushes into side without the CCString decl line — wrap ourselves. */
-    if (!cemit_fmt(&side, "({ CCArena* __cc_tpl_arena = (%s); "
+    if (!cemit_fmt(&side, "({ CCArena __cc_tpl_arena = CC__ARENA_HANDLE(%s); "
                           "CCString __cc_tpl = cc_string_new(); ",
                    arena)) {
         free(side.buf);
@@ -1117,7 +1117,7 @@ static void shadow_rewrite_print_and_string(char* expr, size_t cap) {
                              tpl, arena);
                 else {
                     if (shadow_arena_is_scratch(arena))
-                        snprintf(aexpr, sizeof(aexpr), "&__cc_str_scratch");
+                        snprintf(aexpr, sizeof(aexpr), "__cc_str_scratch");
                     else
                         snprintf(aexpr, sizeof(aexpr), "%s", arena);
                     (void)shadow_fmt_string_arena_expr(built, sizeof(built), tpl,
@@ -1765,6 +1765,28 @@ static void shadow_collect_binds_node(AstNode* st) {
         if (bind_ty[0])
             shadow_collect_bind_one(st->b, bind_ty, flags);
         shadow_note_local_decl(st);
+    } else if (st->kind == AST_STATIC_VAR) {
+        /* File-scope / static object — same UFCS bind as a local. */
+        char bind_ty[168];
+        int flags = 0;
+        shadow_register_from_text(st->a);
+        if (st->c[0] == '*')
+            snprintf(bind_ty, sizeof(bind_ty), "%s*", st->a);
+        else
+            snprintf(bind_ty, sizeof(bind_ty), "%s", st->a);
+        if (st->c[0] == '[') flags |= SHADOW_BIND_ARRAY;
+        if (strstr(bind_ty, "cc_atomic_int") || strstr(bind_ty, "atomic"))
+            flags |= SHADOW_BIND_ATOMIC;
+        if (strncmp(bind_ty, "CCSlice_", 8) == 0)
+            shadow_slice_need(bind_ty + 8);
+        if (bind_ty[0] && st->b[0])
+            shadow_collect_bind_one(st->b, bind_ty, flags);
+    } else if (st->kind == AST_GLOBAL_ARR) {
+        char bind_ty[168];
+        shadow_register_from_text(st->a);
+        snprintf(bind_ty, sizeof(bind_ty), "%s", st->a);
+        if (bind_ty[0] && st->b[0])
+            shadow_collect_bind_one(st->b, bind_ty, SHADOW_BIND_ARRAY);
     } else if (st->kind == AST_RAW_LINE) {
         shadow_slice_note_raw(st->a);
         shadow_map_note_raw(st->a);
@@ -2162,7 +2184,7 @@ static int shadow_scratch_cp_push(ShadowCtx* ctx, CEmit* out, const char* indent
     if (!indent) indent = "    ";
     return cemit_fmt(out,
                      "%sCCArenaCheckpoint __cc_scratch_cp%d = "
-                     "cc_arena_checkpoint(&__cc_str_scratch);\n",
+                     "cc_arena_checkpoint(__cc_str_scratch);\n",
                      indent, id);
 }
 
@@ -4061,7 +4083,7 @@ static int shadow_pw_emit_exit(CEmit* out, ShadowCtx* ctx, const char* indent,
             return 0;
     }
     if (kind > 0 &&
-        !cemit_fmt(out, "%s    cc_nursery_cancel(__cc_pw_sh->nur);\n", indent))
+        !cemit_fmt(out, "%s    cc_nursery_cancel_host(__cc_pw_sh->nur);\n", indent))
         return 0;
     if (!cemit_fmt(out, "%s    goto __cc_pw_done_%d;\n%s}\n", indent,
                    ctx->pw_id, indent))
@@ -4180,7 +4202,7 @@ static int shadow_pw_emit_cache_alloc(CEmit* out, const char* pad,
         init = (d && d->c[0]) ? d->c : NULL;
         if (!cemit_fmt(out,
                 "%sif (__cc_pw_args_%d && __cc_pw_nw_%d > 1)\n"
-                "%s__cc_pw_cx_%s = cc_nursery_closure_env_alloc("
+                "%s__cc_pw_cx_%s = cc_nursery_closure_env_alloc_host("
                 "__cc_pw_n_%d, (size_t)(__cc_pw_nw_%d - 1) * sizeof(%s), "
                 "16);\n",
                 pad, id, id, pad1, names[k], id, id, tys[k]))
@@ -4533,7 +4555,7 @@ static int shadow_emit_stage(AstNode* st, CEmit* out, ShadowCtx* ctx,
     /* Cancelled successors still handshake; the block is suppressible. */
     if (ctx->pw_body == 2) {
         if (!cemit_fmt(out,
-                "%sif (!cc_nursery_is_cancelled(__cc_pw_sh->nur)) {\n",
+                "%sif (!cc_nursery_is_cancelled_host(__cc_pw_sh->nur)) {\n",
                 indent))
             return 0;
     }
@@ -4790,7 +4812,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
              "__cc_pw_sl->err = __cc_pw_eb; "
              "__cc_pw_sl->failed = 1; "
              "__cc_pw_sl->i = %s; "
-             "cc_nursery_cancel(__cc_pw_sh->nur); "
+             "cc_nursery_cancel_host(__cc_pw_sh->nur); "
              "goto __cc_pw_done_%d;",
              st->a, id);
     shadow_pw_make_handler(&h_body, &h_body_raw, htext);
@@ -4833,7 +4855,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
              "__cc_pw_sl->err = __cc_pw_eb; "
              "__cc_pw_sl->failed = 1; "
              "__cc_pw_sl->i = %s; "
-             "cc_nursery_cancel(__cc_pw_sh->nur); }",
+             "cc_nursery_cancel_host(__cc_pw_sh->nur); }",
              st->a);
     shadow_pw_make_handler(&h_dis, &h_dis_raw, htext);
     tctx.eh = &h_dis;
@@ -4917,7 +4939,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
              "__cc_pw_sl->err = __cc_pw_eb; "
              "__cc_pw_sl->failed = 1; "
              "__cc_pw_sl->i = %s; "
-             "cc_nursery_cancel(__cc_pw_sh->nur); }",
+             "cc_nursery_cancel_host(__cc_pw_sh->nur); }",
              st->a);
     shadow_pw_make_handler(&h_leave, &h_leave_raw, htext);
     tctx.eh = &h_leave;
@@ -5038,14 +5060,14 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
         return 0;
     if (!cemit_fmt(out,
             "%sif (__cc_pw_work_%d)\n"
-            "%s__cc_pw_slots_%d = cc_nursery_closure_env_alloc("
+            "%s__cc_pw_slots_%d = cc_nursery_closure_env_alloc_host("
             "__cc_pw_n_%d, (size_t)__cc_pw_nw_%d * "
             "sizeof(*__cc_pw_slots_%d), 16);\n",
             i2, id, i3, id, id, id, id))
         return 0;
     if (!cemit_fmt(out,
             "%sif (__cc_pw_slots_%d)\n"
-            "%s__cc_pw_args_%d = cc_nursery_closure_env_alloc("
+            "%s__cc_pw_args_%d = cc_nursery_closure_env_alloc_host("
             "__cc_pw_n_%d, (size_t)__cc_pw_nw_%d * "
             "sizeof(*__cc_pw_args_%d), 16);\n",
             i2, id, i3, id, id, id, id))
@@ -5054,7 +5076,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
         return 0;
     if (!cemit_fmt(out,
             "%sif (__cc_pw_args_%d)\n"
-            "%s__cc_pw_e = cc_nursery_closure_env_alloc("
+            "%s__cc_pw_e = cc_nursery_closure_env_alloc_host("
             "__cc_pw_n_%d, sizeof(*__cc_pw_e), 16);\n",
             i2, id, i3, id))
         return 0;
@@ -5063,7 +5085,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
             "%sif (!__cc_pw_work_%d || !__cc_pw_slots_%d || "
             "!__cc_pw_args_%d || !__cc_pw_e || !__cc_pw_cxok_%d) {\n"
             "%sif (__cc_pw_work_%d) cc_chan_free(__cc_pw_work_%d);\n"
-            "%scc_nursery_free(__cc_pw_n_%d);\n",
+            "%scc_nursery_free_host(__cc_pw_n_%d);\n",
             i2, id, id, id, id, i3, id, id, i3, id))
         return 0;
     if (!shadow_pw_emit_fin_decl(out, i3, dest != NULL))
@@ -5118,7 +5140,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
                    i4, id, id, id))
         return 0;
     if (!cemit_fmt(out,
-            "%sif (cc_is_ok(cc_nursery_spawn(__cc_pw_n_%d, __cc_pw_worker_%d, "
+            "%sif (cc_is_ok(cc_nursery_spawn_host(__cc_pw_n_%d, __cc_pw_worker_%d, "
             "&__cc_pw_args_%d[__cc_pw_w_%d])))\n",
             i4, id, id, id, id))
         return 0;
@@ -5139,7 +5161,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
     if (!cemit_fmt(out, "%sfor (%s = (int)(%s); %s < (int)(%s); %s++) {\n",
                    i4, st->a, lo, st->a, hi, st->a))
         return 0;
-    if (!cemit_fmt(out, "%sif (cc_nursery_is_cancelled(__cc_pw_n_%d)) break;\n",
+    if (!cemit_fmt(out, "%sif (cc_nursery_is_cancelled_host(__cc_pw_n_%d)) break;\n",
                    i5, id))
         return 0;
     if (!shadow_emit_try_call(out, &tctx, i5, call, "cc_turnstile_enter",
@@ -5153,7 +5175,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
     if (!cemit_fmt(out, "%sfor (%s = (int)(%s); %s < (int)(%s); %s++) {\n",
                    i4, st->a, lo, st->a, hi, st->a))
         return 0;
-    if (!cemit_fmt(out, "%sif (cc_nursery_is_cancelled(__cc_pw_n_%d)) break;\n",
+    if (!cemit_fmt(out, "%sif (cc_nursery_is_cancelled_host(__cc_pw_n_%d)) break;\n",
                    i5, id))
         return 0;
     if (!shadow_emit_try_call(out, &tctx, i5, call, "cc_turnstile_enter",
@@ -5188,7 +5210,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
         return 0;
     if (!cemit_fmt(out, "%scc_chan_close(__cc_pw_work_%d);\n", i3, id))
         return 0;
-    if (!cemit_fmt(out, "%s(void)cc_nursery_wait(__cc_pw_n_%d);\n", i3, id))
+    if (!cemit_fmt(out, "%s(void)cc_nursery_wait_host(__cc_pw_n_%d);\n", i3, id))
         return 0;
     if (!shadow_pw_emit_cache_destroys(out, ctx, i3, i4, names, tys, ncaps,
                                        id))
@@ -5247,7 +5269,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
         return 0;
     if (!cemit_fmt(out, "%scc_chan_free(__cc_pw_work_%d);\n", i3, id))
         return 0;
-    if (!cemit_fmt(out, "%scc_nursery_free(__cc_pw_n_%d);\n", i3, id))
+    if (!cemit_fmt(out, "%scc_nursery_free_host(__cc_pw_n_%d);\n", i3, id))
         return 0;
     rbind = reh->b[0] ? reh->b : "e";
     /* Nested emit (cache destroy bodies) may have moved ctx->site. */
@@ -5915,7 +5937,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             if (!cemit_fmt(out, "%s{\n", indent)) return 0;
             if (!shadow_scratch_cp_push(ctx, out, nested)) return 0;
             {
-                if (!shadow_emit_tpl_build(out, st->a, "&__cc_str_scratch", nested,
+                if (!shadow_emit_tpl_build(out, st->a, "__cc_str_scratch", nested,
                                            "__msg"))
                     return 0;
             }
@@ -6965,7 +6987,13 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 return 0;
             }
             /* Language raise — not a Result unwrap. try_call's default
-             * __cc_uw_is_err/_err_at do not carry CC_ERR_INVALID_ARG. */
+             * __cc_uw_is_err/_err_at do not carry CC_ERR_INVALID_ARG.
+             * Required `!>;` / `!>(e){…}` (parse). Site handler wins. */
+            if (strcmp(st->e, "zip_bang") != 0) {
+                fprintf(stderr, "error: unconsumed Result\n");
+                shadow_pw_pop_loop(ctx, pw, 0);
+                return 0;
+            }
             if (!cemit_fmt(out,
                            "%s    CCError e = CC_ERROR(CC_ERR_INVALID_ARG, "
                            "\"for-in zip: unequal lengths\");\n",
@@ -6973,9 +7001,24 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 shadow_pw_pop_loop(ctx, pw, 0);
                 return 0;
             }
-            if (!shadow_emit_handler(out, ctx, "e", i2)) {
-                shadow_pw_pop_loop(ctx, pw, 0);
-                return 0;
+            {
+                AstNode* saved_eh = ctx ? ctx->eh : NULL;
+                int hk;
+                if (ctx) {
+                    for (hk = 0; hk < st->ndbody; hk++) {
+                        if (st->dbody[hk] &&
+                            st->dbody[hk]->kind == AST_ERRHANDLER) {
+                            ctx->eh = st->dbody[hk];
+                            break;
+                        }
+                    }
+                }
+                if (!shadow_emit_handler(out, ctx, "e", i2)) {
+                    if (ctx) ctx->eh = saved_eh;
+                    shadow_pw_pop_loop(ctx, pw, 0);
+                    return 0;
+                }
+                if (ctx) ctx->eh = saved_eh;
             }
             /* Handler that does not return must not walk (shorter OOB). */
             if (!cemit_fmt(out,
@@ -7135,7 +7178,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     char arena_expr[160];
                     if (shadow_arena_is_scratch(arena)) {
                         snprintf(arena_expr, sizeof(arena_expr),
-                                 "&__cc_str_scratch");
+                                 "__cc_str_scratch");
                     } else {
                         snprintf(arena_expr, sizeof(arena_expr), "%s", arena);
                     }

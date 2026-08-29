@@ -10,7 +10,7 @@
 int main(void) {
     {
         CCArena buf = cc_arena_heap(kilobytes(4));
-        char* backing = cc_arena_alloc_T_count(char, &buf, 64);
+        char* backing = cc_arena_alloc_T_count(char, buf, 64);
         if (!backing) return 1;
         memset(backing, 'a', 64);
         char[:] view = cc_slice_from_parts(backing, 64, 0);
@@ -19,7 +19,7 @@ int main(void) {
     }
     {
         CCArena buf = cc_arena_heap(kilobytes(4));
-        char* backing = cc_arena_alloc_T_count(char, &buf, 32);
+        char* backing = cc_arena_alloc_T_count(char, buf, 32);
         if (!backing) return 3;
         memset(backing, 'b', 32);
         {
@@ -27,8 +27,8 @@ int main(void) {
             if (view.len != 32) return 4;
         }
         /* Earlier sibling's `view`/`buf` must not count as a live borrow here. */
-        cc_arena_reset(&buf);
-        char* again = cc_arena_alloc_T_count(char, &buf, 16);
+        cc_arena_reset(buf);
+        char* again = cc_arena_alloc_T_count(char, buf, 16);
         if (!again) return 5;
         cc_arena_free(&buf);
     }

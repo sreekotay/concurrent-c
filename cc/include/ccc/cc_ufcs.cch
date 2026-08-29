@@ -5,7 +5,7 @@
 
 #include <ccc/cc_arena.cch>
 
-typedef CCSlice (*CCUfcsRewriteFn)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena *arena);
+typedef CCSlice (*CCUfcsRewriteFn)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena arena);
 
 typedef struct {
     CCSlice pattern;
@@ -33,10 +33,10 @@ static inline bool cc_ufcs_slice_eq_cstr(CCSlice s, const char *cstr) {
     return cstr && s.len == len && memcmp(s.ptr, cstr, len) == 0;
 }
 
-static inline CCSlice cc_ufcs_emit_value(CCArena *arena, CCSlice callee) {
+static inline CCSlice cc_ufcs_emit_value(CCArena arena, CCSlice callee) {
     size_t prefix_len = sizeof(CC_UFCS_VALUE_TAG) - 1;
     size_t total = prefix_len + callee.len;
-    CCSlice out = arena ? cc_arena_alloc_slice_bytes(arena, total) : cc_slice_empty();
+    CCSlice out = arena.p ? cc_arena_alloc_slice_bytes(arena, total) : cc_slice_empty();
     char *buf = (char *)out.ptr;
     if (total > 0 && !buf) return cc_slice_empty();
     memcpy(buf, CC_UFCS_VALUE_TAG, prefix_len);
@@ -44,7 +44,7 @@ static inline CCSlice cc_ufcs_emit_value(CCArena *arena, CCSlice callee) {
     return out;
 }
 
-static inline CCSlice cc_ufcs_emit_value_cstr(CCArena *arena, const char *callee) {
+static inline CCSlice cc_ufcs_emit_value_cstr(CCArena arena, const char *callee) {
     CCSlice callee_slice = callee ? cc_slice_from_static((void *)callee, strlen(callee)) : cc_slice_empty();
     return cc_ufcs_emit_value(arena, callee_slice);
 }
@@ -68,7 +68,7 @@ static inline CCUfcsRegistration cc_ufcs_register(const char *pattern, CCUfcsRew
     return reg;
 }
 
-static inline CCSlice cc_ufcs_apply(CCUfcsRegistration reg, CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena *arena) {
+static inline CCSlice cc_ufcs_apply(CCUfcsRegistration reg, CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena arena) {
     if (!reg.rewrite) return cc_slice_empty();
     return reg.rewrite(recv_type, method, mode, argv, arg_types, arena);
 }

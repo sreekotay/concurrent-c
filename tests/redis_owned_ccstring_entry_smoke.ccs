@@ -67,8 +67,8 @@ int main(void) {
 
         CCString req_key = cc_string_new();
         CCString req_value = cc_string_new();
-        cc_string_push_cstr(&req_key, "alpha", &req_arena);
-        cc_string_push_cstr(&req_value, "one", &req_arena);
+        cc_string_push_cstr(&req_key, "alpha", req_arena);
+        cc_string_push_cstr(&req_value, "one", req_arena);
 
         assert(owned_entry_init(&entry, req_key.as_slice(), req_value.as_slice()) == 0);
     }
@@ -81,7 +81,7 @@ int main(void) {
         assert(cc_arena_is_live(req_arena));
 
         CCString next_value = cc_string_new();
-        cc_string_push_cstr(&next_value, "two", &req_arena);
+        cc_string_push_cstr(&next_value, "two", req_arena);
         assert(owned_entry_replace_value(&entry, next_value.as_slice()) == 0);
     }
 

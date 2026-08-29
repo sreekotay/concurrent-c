@@ -16,7 +16,7 @@ int main(void) {
     a.a->block_max = 4;
 
     for (i = 0; i < 64; i++) {
-        unsigned char *p = (unsigned char *)cc_arena_alloc_local_grow(&a, 64, 8);
+        unsigned char *p = (unsigned char *)cc_arena_alloc_local_grow(a, 64, 8);
         if (!p) {
             printf("FAIL: local_grow alloc %zu\n", i);
             return 1;

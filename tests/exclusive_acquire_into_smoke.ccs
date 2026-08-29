@@ -76,7 +76,7 @@ int main(void) {
     /* Surface form: builder closure literal with captures. */
     int captured = 11;
     bool ran = excl.acquire_into(5u, &slot, arena,
-        (int* out, CCArena* a) => [captured] {
+        (int* out, CCArena a) => [captured] {
             (void)a;
             *out = captured;
             return NULL;

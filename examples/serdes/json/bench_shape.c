@@ -66,11 +66,11 @@ int main(int argc, char** argv) {
 
     /* correctness: both DOMs must digest identically (untimed) */
     {
-        cc_arena_reset(&tape_ar);
-        JsonParser tp = json_parser(b, n, &tape_ar); JsonNode tv;
+        cc_arena_reset(tape_ar);
+        JsonParser tp = json_parser(b, n, tape_ar); JsonNode tv;
         if (JsonParser_parse(&tp, &tv) != JSON_OK) { fprintf(stderr, "tape parse failed\n"); return 1; }
-        JShParser* sp = jsh_parser(&shp_ar); JShVal sv;
-        if (JShParser_parse(sp, b, n, &rec_ar, &sv) != JSON_OK) { fprintf(stderr, "shape parse failed\n"); return 1; }
+        JShParser* sp = jsh_parser(shp_ar); JShVal sv;
+        if (JShParser_parse(sp, b, n, rec_ar, &sv) != JSON_OK) { fprintf(stderr, "shape parse failed\n"); return 1; }
         long a = node_sum(&tv), c = jsh_sum(&sv);
         if (a != c) { fprintf(stderr, "DIGEST MISMATCH tape=%ld shape=%ld\n", a, c); return 1; }
     }
@@ -79,8 +79,8 @@ int main(int argc, char** argv) {
     double best = 1e18;
     for (int t = 0; t < T; t++) { double t0 = now_s();
         for (int i = 0; i < K; i++) {
-            cc_arena_reset(&tape_ar);
-            JsonParser p = json_parser(b, n, &tape_ar); JsonNode v;
+            cc_arena_reset(tape_ar);
+            JsonParser p = json_parser(b, n, tape_ar); JsonNode v;
             if (JsonParser_parse(&p, &v) != JSON_OK) return 1;
         }
         double dt = now_s() - t0; if (dt < best) best = dt; }
@@ -88,14 +88,14 @@ int main(int argc, char** argv) {
            n * (double)K / best / 1e6, best / K * 1e6, sizeof(JsonNode));
 
     /* parse throughput: shapes (persistent shapes, records reset per parse) */
-    JShParser* sp = jsh_parser(&shp_ar);
+    JShParser* sp = jsh_parser(shp_ar);
     best = 1e18;
     long hits = 0, misses = 0; uint32_t nshapes = 0;
     for (int t = 0; t < T; t++) { double t0 = now_s();
         for (int i = 0; i < K; i++) {
-            cc_arena_reset(&rec_ar);
+            cc_arena_reset(rec_ar);
             JShVal v;
-            if (JShParser_parse(sp, b, n, &rec_ar, &v) != JSON_OK) return 1;
+            if (JShParser_parse(sp, b, n, rec_ar, &v) != JSON_OK) return 1;
         }
         double dt = now_s() - t0; if (dt < best) best = dt; }
     hits = sp->shape_hits; misses = sp->shape_misses; nshapes = sp->nshapes;
@@ -111,12 +111,12 @@ int main(int argc, char** argv) {
     }
 
     /* ---- access: id/text/user.screen_name per tweet ---- */
-    cc_arena_reset(&tape_ar);
-    JsonParser tp = json_parser(b, n, &tape_ar); JsonNode tv;
+    cc_arena_reset(tape_ar);
+    JsonParser tp = json_parser(b, n, tape_ar); JsonNode tv;
     if (JsonParser_parse(&tp, &tv) != JSON_OK) return 1;
-    cc_arena_reset(&rec_ar);
+    cc_arena_reset(rec_ar);
     JShVal sv;
-    if (JShParser_parse(sp, b, n, &rec_ar, &sv) != JSON_OK) return 1;
+    if (JShParser_parse(sp, b, n, rec_ar, &sv) != JSON_OK) return 1;
 
     JsonNode* tstat = JsonNode_get(&tv, "statuses");
     JShVal*   sstat = JShVal_get(&sv, "statuses");
@@ -248,7 +248,7 @@ int main(int argc, char** argv) {
     {
         CCArena m_shp = cc_arena_create(16 << 20);
         CCArena m_rec = cc_arena_create(48 << 20);
-        JShParser* mp = jsh_parser(&m_shp);
+        JShParser* mp = jsh_parser(m_shp);
 
         /* DEEP: one 3000-key map object (unique keys) -> depth cap trips */
         size_t mcap = 1 << 20, mn = 0;
@@ -258,11 +258,11 @@ int main(int argc, char** argv) {
             mn += (size_t)snprintf(mj + mn, mcap - mn, "%s\"user%05d\":{\"a\":%d}", i ? "," : "", i, i);
         mn += (size_t)snprintf(mj + mn, mcap - mn, "}");
 
-        cc_arena_reset(&tape_ar);
-        JsonParser mtp = json_parser(mj, mn, &tape_ar); JsonNode mtv;
+        cc_arena_reset(tape_ar);
+        JsonParser mtp = json_parser(mj, mn, tape_ar); JsonNode mtv;
         if (JsonParser_parse(&mtp, &mtv) != JSON_OK) { fprintf(stderr, "map tape parse failed\n"); return 1; }
         JShVal msv;
-        if (JShParser_parse(mp, mj, mn, &m_rec, &msv) != JSON_OK) { fprintf(stderr, "map shape parse failed\n"); return 1; }
+        if (JShParser_parse(mp, mj, mn, m_rec, &msv) != JSON_OK) { fprintf(stderr, "map shape parse failed\n"); return 1; }
         if (node_sum(&mtv) != jsh_sum(&msv)) { fprintf(stderr, "MAP DIGEST MISMATCH\n"); return 1; }
         if (mp->dict_objs < 1) { fprintf(stderr, "map did not dict\n"); return 1; }
         {
@@ -281,10 +281,10 @@ int main(int argc, char** argv) {
         for (int i = 0; i < 500; i++)
             mn += (size_t)snprintf(mj + mn, mcap - mn, "%s{\"u%04d\":%d,\"x\":1}", i ? "," : "", i, i);
         mn += (size_t)snprintf(mj + mn, mcap - mn, "]");
-        cc_arena_reset(&tape_ar); cc_arena_reset(&m_rec);
-        mtp = json_parser(mj, mn, &tape_ar);
+        cc_arena_reset(tape_ar); cc_arena_reset(m_rec);
+        mtp = json_parser(mj, mn, tape_ar);
         if (JsonParser_parse(&mtp, &mtv) != JSON_OK) { fprintf(stderr, "wide tape parse failed\n"); return 1; }
-        if (JShParser_parse(mp, mj, mn, &m_rec, &msv) != JSON_OK) { fprintf(stderr, "wide shape parse failed\n"); return 1; }
+        if (JShParser_parse(mp, mj, mn, m_rec, &msv) != JSON_OK) { fprintf(stderr, "wide shape parse failed\n"); return 1; }
         if (node_sum(&mtv) != jsh_sum(&msv)) { fprintf(stderr, "WIDE DIGEST MISMATCH\n"); return 1; }
 
         printf("dict fallback  deep: shapes=%u dicts=%ld   wide: shapes=%u dicts=%ld  (bounded, digests agree)\n",

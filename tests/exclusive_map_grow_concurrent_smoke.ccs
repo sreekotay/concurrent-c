@@ -18,9 +18,8 @@ static void worker(int id) {
     int per = NAMES / WORKERS;
     int lo = id * per;
     int hi = (id == WORKERS - 1) ? NAMES : lo + per;
-    CCExclusive excl = g_excl;
     for (int i = lo; i < hi; i++) {
-        CCExclusiveGuard g = excl.acquire((uint64_t)i);
+        CCExclusiveGuard g = g_excl.acquire((uint64_t)i);
         g_hits[i] = 1;
         g.release();
     }
@@ -55,10 +54,9 @@ int main(void) {
     }
 
     /* Re-resolve every name after growth has settled. */
-    CCExclusive excl = g_excl; /* local: UFCS on global incomplete ptr misses */
     int64_t sum = 0;
     for (int i = 0; i < NAMES; i++) {
-        CCExclusiveGuard g = excl.acquire((uint64_t)i);
+        CCExclusiveGuard g = g_excl.acquire((uint64_t)i);
         sum += i;
         g.release();
     }

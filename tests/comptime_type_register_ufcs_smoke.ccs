@@ -20,7 +20,7 @@ static void lambda_toy_ping(LambdaToy* toy) {
     toy->value += 10;
 }
 
-static CCSlice named_toy_ufcs_rewrite(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena) {
+static CCSlice named_toy_ufcs_rewrite(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena arena) {
     (void)recv_type;
     (void)mode;
     (void)argv;

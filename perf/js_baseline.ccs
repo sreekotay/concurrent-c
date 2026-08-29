@@ -136,7 +136,7 @@ static double !>(CCError) Math_rows_map(Math *self, CCJsVal f) {
     double[:] xs = CCSlice_double_from_buffer(self->rx, (size_t)self->rn);
     long long[:] ks = CCSlice_long_long_from_buffer(self->rk, (size_t)self->rn);
     double[:] zs = CCSlice_double_from_buffer(self->rz, (size_t)self->rn);
-    CCSlice out = f.map::[double](&a, xs, ks, zs) !>;
+    CCSlice out = f.map::[double](a, xs, ks, zs) !>;
     double acc = 0;
     for (size_t i = 0; i < out.len; i++) acc += ((const double *)out.ptr)[i];
     self->calls += 1;

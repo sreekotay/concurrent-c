@@ -7,7 +7,7 @@
 typedef struct { int id; double weight; } Widget;
 
 @comptime CCSlice reflect_emit_factory(CCSlice generic_name, CCSlice mangled,
-                                        CCSliceArray type_args, CCArena* arena) {
+                                        CCSliceArray type_args, CCArena arena) {
     (void)generic_name;
     if (type_args.len < 1 || !mangled.ptr) return cc_slice_empty();
 

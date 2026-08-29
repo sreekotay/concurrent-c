@@ -7,9 +7,8 @@
 @async int f(void) {
     int r = 0;
     {
-        CCArena __cc_arena5 = @create(kilobytes(8)) @destroy;
-        if (!cc_arena_is_live(__cc_arena5)) abort();
-        CCArena* a = &__cc_arena5;
+        CCArena a = @create(kilobytes(8)) @destroy;
+        if (!cc_arena_is_live(a)) abort();
         int x = @await noop(3);
         r = x;
         /* Use arena to ensure name binding is correct. */

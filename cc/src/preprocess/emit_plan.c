@@ -674,11 +674,11 @@ static CCFactorySlice cc__factory_slice_cstr(const char* s) {
  * distinguishes the base (must define the type) from extensions (empty opts
  * out). */
 static int cc__invoke_one_factory(const void* fn, const char* name, const char* mangled,
-                                  CCFactorySliceArray args, CCString* def, CCArena* out_ar,
+                                  CCFactorySliceArray args, CCString* def, CCArena out_ar,
                                   int require_nonempty, const char* who) {
     CCGenericFactoryFn call = (CCGenericFactoryFn)(uintptr_t)fn;
     CCFactorySlice result;
-    if (!fn || !def || !out_ar) return 0;
+    if (!fn || !def || !out_ar.p) return 0;
     /* Heap-rooted scratch: large modules (py_module with hundreds of methods)
      * exceed a fixed stack root; overflow slabs grow as needed. */
     {
@@ -689,10 +689,14 @@ static int cc__invoke_one_factory(const void* fn, const char* name, const char* 
                     who);
             return 0;
         }
-        result = call(cc__factory_slice_cstr(name),
-                      cc__factory_slice_cstr(mangled),
-                      args,
-                      &factory_arena);
+        {
+            CCFactoryArena fa;
+            fa.p = factory_arena.p;
+            result = call(cc__factory_slice_cstr(name),
+                          cc__factory_slice_cstr(mangled),
+                          args,
+                          fa);
+        }
         if (!result.ptr || result.len == 0) {
             cc_arena_destroy(&factory_arena);
             return require_nonempty ? 0 : 1;
@@ -705,7 +709,7 @@ static int cc__invoke_one_factory(const void* fn, const char* name, const char* 
             return 0;
         }
         if (cc_string_len(def) > 0 &&
-            !cc_string_push_buffer(def, "\n", 1u, *out_ar)) {
+            !cc_string_push_buffer(def, "\n", 1u, out_ar)) {
             fprintf(stderr,
                     "error: compiled generic factory '%s' output string OOM\n",
                     who);
@@ -713,7 +717,7 @@ static int cc__invoke_one_factory(const void* fn, const char* name, const char* 
             return 0;
         }
         if (!cc_string_push_buffer(def, (const char*)result.ptr,
-                                   (uint32_t)result.len, *out_ar)) {
+                                   (uint32_t)result.len, out_ar)) {
             fprintf(stderr,
                     "error: compiled generic factory '%s' output string OOM\n",
                     who);
@@ -727,13 +731,13 @@ static int cc__invoke_one_factory(const void* fn, const char* name, const char* 
 
 int cc_emit_plan_invoke_generic_factory(const char* name, const char* mangled,
                                         const char type_args[8][128], int nargs,
-                                        CCArena* out_ar, char** out_def) {
+                                        CCArena out_ar, char** out_def) {
     CCGenericReg* r = cc__generic_find(name, CC_GENERIC_COMPILED);
     CCFactorySliceArray args = {0};
     CCFactorySlice arg_slices[8];
     CCString def = cc_string_new();
     const char* cstr;
-    if (!r || !mangled || !out_ar || !out_def || nargs <= 0 || nargs > 8) return 0;
+    if (!r || !mangled || !out_ar.p || !out_def || nargs <= 0 || nargs > 8) return 0;
     if (!r->handler_name || !r->fn_ptr) return 0;  /* base required and compiled */
     *out_def = NULL;
     for (int i = 0; i < nargs; i++)
@@ -762,7 +766,7 @@ int cc_emit_plan_invoke_generic_factory(const char* name, const char* mangled,
     if (cc_string_failed(&def)) return 0;
     /* Assembled factory text is host C; lower Result sugar here (not at
      * @emit literal-piece time — ${} can split mid-signature). */
-    cstr = cc_string_cstr(&def, *out_ar);
+    cstr = cc_string_cstr(&def, out_ar);
     if (!cstr) {
         /* Empty is only reachable if base returned empty — already failed. */
         char* empty = (char*)cc_arena_alloc(out_ar, 1, 1);
@@ -798,7 +802,7 @@ int cc_emit_plan_invoke_generic_factory(const char* name, const char* mangled,
 CCGenProduceStatus cc_emit_plan_produce_generic_def(
     const char* gname, const char* mangled, const char orig_args[8][128], int nargs,
     const char* reflect_src, size_t reflect_len, const char* input_path,
-    CCArena* out_ar, char** out_def, char* err, size_t err_cap) {
+    CCArena out_ar, char** out_def, char* err, size_t err_cap) {
     if (err && err_cap) err[0] = '\0';
     if (out_def) *out_def = NULL;
     cc_emit_plan_set_reflect_source(reflect_src, reflect_len);

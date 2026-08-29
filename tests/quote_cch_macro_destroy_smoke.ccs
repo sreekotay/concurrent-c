@@ -6,7 +6,7 @@
 int main(void) {
     {
         quote_scratch(s, 32);
-        void* p = cc_arena_alloc(&s, 128, 8);
+        void* p = cc_arena_alloc(s, 128, 8);
         assert(p);
     }
     printf("ok\n");

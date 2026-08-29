@@ -1,4 +1,4 @@
-/* The hosted transport behind the unified domain: cc_js_new(false, &a)
+/* The hosted transport behind the unified domain: cc_js_new(false, a)
  * embeds libnode and serves the SAME ops the isolated tier serves —
  * require/eval/exec, vals, the dynamic sink — by posting each op onto
  * the loop thread.  Rungs prove scalar and string materialization,
@@ -17,7 +17,7 @@ int main(void) {
         return 0;
     }
 
-    CCResult_CCJsDom_CCJsError mk = cc_js_new(false, &a);
+    CCResult_CCJsDom_CCJsError mk = cc_js_new(false, a);
     if (!mk.ok) {
         printf("new failed: %s\n", mk.u.error.base.message);
         return 1;
@@ -116,9 +116,9 @@ int main(void) {
                                                                : "false");
 
     /* Hosted embeds once per process; the exe knob belongs to isolated. */
-    CCResult_CCJsDom_CCJsError second = cc_js_new(false, &a);
+    CCResult_CCJsDom_CCJsError second = cc_js_new(false, a);
     printf("second_hosted_refused %s\n", !second.ok ? "true" : "false");
-    CCResult_CCJsDom_CCJsError exe = cc_js_new_exe(false, "/usr/bin/node", &a);
+    CCResult_CCJsDom_CCJsError exe = cc_js_new_exe(false, "/usr/bin/node", a);
     printf("exe_on_hosted_refused %s\n",
            !exe.ok && strstr(exe.u.error.base.message, "ISOLATED") ? "true"
                                                                    : "false");

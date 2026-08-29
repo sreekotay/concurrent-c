@@ -3,8 +3,8 @@
  * JS twin of examples/py/pydemo.shcc — same surface, same ownership: CC
  * owns main and drives a Node domain.
  *
- *   pydemo:  cc_py_new(false, &a)   →  libpython in-process
- *   jsdemo:  cc_js_new(iso, &a)     →  libnode in-process, or node child
+ *   pydemo:  cc_py_new(false, a)   →  libpython in-process
+ *   jsdemo:  cc_js_new(iso, a)     →  libnode in-process, or node child
  *
  * One constructor, transport as the flag: `false` embeds a full Node in
  * this process (needs libnode-dev; one per process — V8's rule);
@@ -31,19 +31,19 @@ if (!cc_js_dom_available(iso)) {
 if (iso)
     "jsdemo: isolated (hosted unavailable — libnode not found)".println() !>;
 
-CCJsDom js = cc_js_new(iso, &a) !> @destroy;
+CCJsDom js = cc_js_new(iso, a) !> @destroy;
 
 double v = js.eval("Math.sqrt(2)")!>.as_f64() !>;
-println(@string(`Math.sqrt(2.0) = ${v}`, &a)) !>;
+println(@string(`Math.sqrt(2.0) = ${v}`, a)) !>;
 
 long long pv = js.eval("Math.pow(2,10)")!>.as_i64() !>;
-println(@string(`Math.pow(2,10) = ${pv}`, &a)) !>;
+println(@string(`Math.pow(2,10) = ${pv}`, a)) !>;
 
 CCJsDomVal os = js.require("os") !> @destroy;
-CCSlice plat = os.platform()!>.as_slice(&a) !>;
-println(@string(`os.platform()  = ${plat}`, &a)) !>;
+char[:] plat = os.platform()!>.as_slice(a) !>;
+println(@string(`os.platform()  = ${plat}`, a)) !>;
 
-CCSlice ver = js.eval("process.version")!>.as_slice(&a) !>;
-println(@string(`node.version   = ${ver}`, &a)) !>;
+char[:] ver = js.eval("process.version")!>.as_slice(a) !>;
+println(@string(`node.version   = ${ver}`, a)) !>;
 
 return 0;

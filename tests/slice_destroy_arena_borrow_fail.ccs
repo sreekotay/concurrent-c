@@ -4,7 +4,7 @@
 
 int main(void) {
     CCArena a = cc_arena_heap(kilobytes(4));
-    char[:] view = cc_arena_alloc_slice_bytes(&a, 32);
+    char[:] view = cc_arena_alloc_slice_bytes(a, 32);
     if (!view.ptr) return 1;
     memset(view.ptr, 'a', view.len);
 

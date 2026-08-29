@@ -6,7 +6,7 @@
 /* ${...} slots in @emit use type-driven dispatch (_Generic), not identifier names. */
 
 @comptime CCSlice slot_dispatch_factory(CCSlice gname, CCSlice sym,
-                                        CCSliceArray type_args, CCArena *arena) {
+                                        CCSliceArray type_args, CCArena arena) {
     (void)gname;
     if (type_args.len < 2 || !sym.ptr) return cc_slice_empty();
     CCSlice elem0 = type_args.items[0];

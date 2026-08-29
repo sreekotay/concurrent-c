@@ -19,7 +19,7 @@ int main(void) {
     if (lit.ptr != lit_ptr || lit.len != 3) return 2;
 
     /* Same-arena epoch: no-op. */
-    CCSlice local = cc_arena_alloc_slice_bytes(&dst, 4);
+    CCSlice local = cc_arena_alloc_slice_bytes(dst, 4);
     if (!local.ptr) return 3;
     memcpy(local.ptr, "PING", 4);
     void* local_ptr = local.ptr;
@@ -27,11 +27,11 @@ int main(void) {
     if (local.ptr != local_ptr) return 4;
 
     /* Cross-arena borrow: copy into dst. */
-    CCSlice borrowed = cc_arena_alloc_slice_bytes(&src, 5);
+    CCSlice borrowed = cc_arena_alloc_slice_bytes(src, 5);
     if (!borrowed.ptr) return 5;
     memcpy(borrowed.ptr, "hello", 5);
     borrowed.materialize_in(dst) !>;
-    if (!cc_slice_is_from_arena_epoch(borrowed, &dst)) return 6;
+    if (!cc_slice_is_from_arena_epoch(borrowed, dst)) return 6;
     if (borrowed.len != 5 || memcmp(borrowed.ptr, "hello", 5) != 0) return 7;
 
     /* Empty: no-op. */

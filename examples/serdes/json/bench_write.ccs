@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
 
     const char* path = argc > 1 ? argv[1] : "examples/serdes/json/twitter.json";
     FILE* f = fopen(path, "rb");
-    if (!f) { eprintln(@string(`no corpus at ${path}`, &pa)) !>; return 1; }
+    if (!f) { eprintln(@string(`no corpus at ${path}`, pa)) !>; return 1; }
     fseek(f, 0, SEEK_END); long fn = ftell(f); fseek(f, 0, SEEK_SET);
     char* buf = (char*)malloc((size_t)fn + 1);
     size_t rd = fread(buf, 1, (size_t)fn, f);
@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
     char* hout = (char*)malloc(cap);
     size_t hw = hand_write(&feed, hout);
     if (hw != w || memcmp(hout, out, w) != 0) {
-        eprintln(@string(`MISMATCH gen=${w} hand=${hw}`, &pa)) !>;
+        eprintln(@string(`MISMATCH gen=${w} hand=${hw}`, pa)) !>;
         return 1;
     }
 
@@ -114,7 +114,7 @@ int main(int argc, char** argv) {
         double dt = now_s() - t0;
         if (dt < best) best = dt;
     }
-    println(@string(`json write gen  ${(double)w * K / best / 1e6} MB/s  (${w} bytes/iter, statuses=${feed.statuses_n})`, &pa)) !>;
+    println(@string(`json write gen  ${(double)w * K / best / 1e6} MB/s  (${w} bytes/iter, statuses=${feed.statuses_n})`, pa)) !>;
     best = 1e30;
     for (int r = 0; r < 5; r++) {
         double t0 = now_s();
@@ -125,7 +125,7 @@ int main(int argc, char** argv) {
         double dt = now_s() - t0;
         if (dt < best) best = dt;
     }
-    println(@string(`json write hand ${(double)w * K / best / 1e6} MB/s  (unchecked single-pass)`, &pa)) !>;
+    println(@string(`json write hand ${(double)w * K / best / 1e6} MB/s  (unchecked single-pass)`, pa)) !>;
     free(buf); free(out); free(hout);
     arena.destroy();
     return 0;

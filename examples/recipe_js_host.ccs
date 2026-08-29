@@ -39,7 +39,7 @@ static void main_js(CCJs *js, void *ctx) {
     js->exec("globalThis.hits = (globalThis.hits ?? 0) + 1") !>;
 
     /* The require door: real Node modules, not a subset. */
-    CCSlice s =
+    char[:] s =
         js->global()!>.__ccRequire("os")!>.platform()!>.as_slice(js->arena) !>;
     printf("os.platform()  = %.*s\n", (int)s.len, (const char *)s.ptr);
 

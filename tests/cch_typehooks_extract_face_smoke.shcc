@@ -1,7 +1,7 @@
 /* Typehooks header extracts to a lowered .h. Callers must still see
  * `char[:]` params and the proto's Result error type. */
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
-CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
 build.arg("build");
 build.arg("--no-cache");
 build.arg("tests/cch_typehooks_extract_face_main_mod.ccs");
@@ -14,7 +14,7 @@ if (rc != 0) {
     "build failed".println() !>;
     return 1;
 }
-CCCommand run = cc_command(&a, @slice("out/cch_typehooks_extract_face_smoke"));
+CCCommand run = cc_command(a, @slice("out/cch_typehooks_extract_face_smoke"));
 run.inherit_stdio();
 rc = run.status() !>;
 if (rc != 0) {

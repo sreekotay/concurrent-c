@@ -6,7 +6,7 @@
 /* @emit backtick builder — same ${...} grammar as @string, returns CCSlice. */
 
 @comptime CCSlice pair_factory(CCSlice generic_name, CCSlice mangled,
-                               CCSliceArray type_args, CCArena *arena) {
+                               CCSliceArray type_args, CCArena arena) {
     (void)generic_name;
     if (type_args.len < 2 || !mangled.ptr) return cc_slice_empty();
     return @emit(`

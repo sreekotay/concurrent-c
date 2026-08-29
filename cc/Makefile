@@ -439,16 +439,28 @@ SHADOW_LOWER_CCS_DEPS := $(SHADOW_LOWER_CCS) $(SHADOW_BUILD_CCH) \
 	$(wildcard ../cc/shadow/shadow_*.cch) \
 	$(wildcard ../cc/shadow/shadow_*.h) \
 	$(CPARSE_LIB)
-# last-good still spells Map/Vec init as `Foo_init(&handle)`. Stdlib init
-# now takes CCArena by value; rewrite only the copied include tree.
+# last-good still spells Map/Vec init as `Foo_init(&handle)`, hook/box
+# last args as `&g_shadow_meta_ar`, and operate as `reset(&handle)`.
+# Allocate/operate take CCArena by value; rewrite only the copied tree.
+# Slot ops stay `&` (`destroy`/`free`/`adopt`/`detach`/`try_adopt`).
 SHADOW_BOOT_INC := $(OBJDIR)/shadow_boot_inc
-$(SHADOW_BOOT_INC)/.stamp: $(wildcard $(BOOTSTRAP_DIR)/include/*.h)
+SHADOW_BOOT_C := $(OBJDIR)/shadow_boot_inc/shadow_lower.c
+$(SHADOW_BOOT_INC)/.stamp: $(wildcard $(BOOTSTRAP_DIR)/include/*.h) \
+		$(BOOTSTRAP_DIR)/shadow_lower.c
 	@mkdir -p $(SHADOW_BOOT_INC)
 	@for f in $(BOOTSTRAP_DIR)/include/*.h; do \
 		b=$$(basename "$$f"); \
-		sed 's/\([A-Za-z_][A-Za-z0-9_]*_init\)(\&g_shadow_meta_ar/\1(g_shadow_meta_ar/g' \
+		sed -e 's/\([A-Za-z_][A-Za-z0-9_]*_init\)(\&g_shadow_meta_ar/\1(g_shadow_meta_ar/g' \
+		    -e 's/, \&g_shadow_meta_ar)/, g_shadow_meta_ar)/g' \
+		    -e 's/cc_arena_reset(\&/cc_arena_reset(/g' \
+		    -e 's/cc_arena_alloc(\&/cc_arena_alloc(/g' \
+		    -e 's/cc_arena_checkpoint(\&/cc_arena_checkpoint(/g' \
 			"$$f" > "$(SHADOW_BOOT_INC)/$$b"; \
 	done
+	@sed -e 's/cc_arena_reset(\&/cc_arena_reset(/g' \
+	    -e 's/cc_arena_alloc(\&/cc_arena_alloc(/g' \
+	    -e 's/cc_arena_checkpoint(\&/cc_arena_checkpoint(/g' \
+		$(BOOTSTRAP_DIR)/shadow_lower.c > $(SHADOW_BOOT_C)
 	@touch $@
 
 SHADOW_LOWER_BOOT_DEPS := $(BOOTSTRAP_DIR)/shadow_lower.c \
@@ -531,9 +543,9 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_BOOT_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_CO
 		done; \
 	fi
 	# arena_state/FFC live only in concurrent_c.o (see SHADOW_COMPTIME_ENGINE_OBJS).
-	@echo "[shadow_lower] $$(date '+%H:%M:%S') host-cc bootstrap start ($(BOOTSTRAP_DIR)/shadow_lower.c)"
+	@echo "[shadow_lower] $$(date '+%H:%M:%S') host-cc bootstrap start ($(SHADOW_BOOT_C))"
 	@t0=$$(date +%s); \
-	$(CC) $(CFLAGS) -o $@ $(BOOTSTRAP_DIR)/shadow_lower.c \
+	$(CC) $(CFLAGS) -o $@ $(SHADOW_BOOT_C) \
 		-I$(SHADOW_BOOT_INC) -I$(BOOTSTRAP_DIR)/include -Iinclude -I../out/include \
 		-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
 		$(abspath $(SHADOW_TCC_OBJ)) \

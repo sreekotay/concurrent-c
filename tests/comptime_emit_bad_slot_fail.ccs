@@ -6,7 +6,7 @@
 /* ${...} slots must use a type supported by the @emit/@string slot _Generic. */
 
 @comptime CCSlice bad_slot_factory(CCSlice generic_name, CCSlice mangled,
-                                   CCSliceArray type_args, CCArena *arena) {
+                                   CCSliceArray type_args, CCArena arena) {
     (void)generic_name;
     (void)type_args;
     (void)mangled;

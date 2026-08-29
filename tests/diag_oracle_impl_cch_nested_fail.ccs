@@ -2,7 +2,7 @@
 #include "diag_oracle_impl_cch_nested_outer.cch"
 int main(void) {
     CCArena a = cc_arena_heap(kilobytes(16));
-    LocalMap m = array_map_new::[int, int](&a);
+    LocalMap m = array_map_new::[int, int](a);
     if (!m) return 1;
     (void)after_nested();
     (void)nested_len(m);

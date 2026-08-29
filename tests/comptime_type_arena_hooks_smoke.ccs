@@ -5,7 +5,7 @@ static int g_destroyed = 0;
 static int g_pre_destroyed = 0;
 static int g_pre_before_body = 0;
 
-static size_t arena_avail(CCArena* arena) {
+static size_t arena_avail(CCArena arena) {
     return cc_arena_remaining(arena);
 }
 

@@ -13,7 +13,7 @@
 
 typedef struct Entry { int id; } Entry;
 
-static CCSlice !>(CCError) clone_key(CCArena* arena, char[:] src) {
+static CCSlice !>(CCError) clone_key(CCArena arena, char[:] src) {
     CCSlice cloned = cc_slice_clone(arena, src);
     if (src.len > 0 && (!cloned.ptr || cloned.len != src.len)) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "clone failed"));
@@ -21,7 +21,7 @@ static CCSlice !>(CCError) clone_key(CCArena* arena, char[:] src) {
     return cc_ok(cloned);
 }
 
-static bool !>(CCError) insert_one(CCArena* arena,
+static bool !>(CCError) insert_one(CCArena arena,
                                    Map::[char[:], Entry*] entries,
                                    char[:] key,
                                    Entry* e) {

@@ -309,7 +309,7 @@ static void shadow_infer_callarg2_send_into(AstNode* cl) {
         }
     }
     if (!elem || !elem[0]) return;
-    snprintf(cl->a, sizeof(cl->a), "%s* slot, CCArena* arena", elem);
+    snprintf(cl->a, sizeof(cl->a), "%s* slot, CCArena arena", elem);
 }
 
 static AstNode* shadow_expr_closure_kid(AstNode* st) {
@@ -832,8 +832,15 @@ static int shadow_emit_closure_formals(AstNode* cl, CEmit* out) {
             name[ni++] = *p++;
         name[ni] = 0;
         if (!ty[0] || !name[0]) return 0;
-        if (!cemit_fmt(out, "    %s %s = (%s)__arg%d;\n", ty, name, ty, ai))
+        /* Runtime passes handle formals as intptr_t &handle. A C cast
+         * `(CCArena)__arg` is invalid; reload the handle from that slot. */
+        if (strcmp(ty, "CCArena") == 0 || strcmp(ty, "CCNursery") == 0 ||
+            strcmp(ty, "CCExclusive") == 0) {
+            if (!cemit_fmt(out, "    %s %s = *(%s*)__arg%d;\n", ty, name, ty, ai))
+                return 0;
+        } else if (!cemit_fmt(out, "    %s %s = (%s)__arg%d;\n", ty, name, ty, ai)) {
             return 0;
+        }
         ai++;
         while (*p && *p != ',') p++;
         if (*p == ',') p++;

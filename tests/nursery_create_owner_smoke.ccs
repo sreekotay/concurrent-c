@@ -15,6 +15,10 @@ int main(void) {
         printf("fail n.alloc\n");
         return 1;
     }
+    if (n.remaining() == 0) {
+        printf("fail n.remaining\n");
+        return 1;
+    }
     printf("ok\n");
     return 0;
 }

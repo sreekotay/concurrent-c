@@ -45,9 +45,8 @@ cc_atomic_int g_pipeline_error = 0;
 static CompressedResult* compress_block(Block* blk, int level) {
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
 
-    CCArena res_arena_storage = @create(arena_size) @destroy;
-    if (!cc_arena_is_live(res_arena_storage)) return NULL;
-    CCArena* res_arena = &res_arena_storage;
+    CCArena res_arena = @create(arena_size) @destroy;
+    if (!cc_arena_is_live(res_arena)) return NULL;
     CompressedResult* res = cc_arena_alloc_T(CompressedResult, res_arena);
     if (!res) return NULL;
 
@@ -95,7 +94,7 @@ static CompressedResult* compress_block(Block* blk, int level) {
     cc_atomic_fetch_add(&g_bytes_out, pos);
     cc_atomic_fetch_add(&g_blocks_done, 1);
 
-    res->arena = res_arena->detach() !>(e) { (void)e; return NULL; };
+    res->arena = res_arena.detach() !>(e) { (void)e; return NULL; };
     return res;
 }
 
@@ -186,14 +185,14 @@ int compress_file(const char* in_path, const char* out_path) {
 
             CCArena blk_arena = @create(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD) @destroy;
             CCSlice data;
-            bool !>(CCIoError) read_res = in_ptr->read(&blk_arena, BLOCK_SIZE, &data);
+            bool !>(CCIoError) read_res = in_ptr->read(blk_arena, BLOCK_SIZE, &data);
 
             if (read_res.is_err() || !cc_io_avail(read_res)) {
                 break;
             }
 
             Block* cap = NULL;
-            cap = cc_arena_alloc_T(Block, &blk_arena);
+            cap = cc_arena_alloc_T(Block, blk_arena);
             if (!cap) {
                 break;
             }

@@ -58,9 +58,8 @@ static inline uint64_t ns_now(void) {
 static CompressedResult* compress_block(Block* blk, int level) {
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
 
-    CCArena res_arena_storage = cc_arena_heap(arena_size) @destroy;
-    if (!cc_arena_is_live(res_arena_storage)) return NULL;
-    CCArena* res_arena = &res_arena_storage;
+    CCArena res_arena = cc_arena_heap(arena_size) @destroy;
+    if (!cc_arena_is_live(res_arena)) return NULL;
     CompressedResult* res = cc_arena_alloc_T(CompressedResult, res_arena);
     if (!res) return NULL;
 
@@ -103,12 +102,12 @@ static CompressedResult* compress_block(Block* blk, int level) {
     out_buf[pos++] = (in_len >> 16) & 0xff;
     out_buf[pos++] = (in_len >> 24) & 0xff;
 
-    res->data = res_arena->slice(out_buf, pos);
+    res->data = res_arena.slice(out_buf, pos);
     g_bytes_in.fetch_add((int64_t)blk->data.len);
     g_bytes_out.fetch_add((int64_t)pos);
     g_blocks_done.fetch_add(1);
 
-    res->arena = res_arena->detach() !>(e) { (void)e; return NULL; };
+    res->arena = res_arena.detach() !>(e) { (void)e; return NULL; };
     return res;
 }
 
@@ -223,12 +222,12 @@ int compress_file(const char* in_path, const char* out_path) {
                     CCSlice data;
                     uint64_t tread0 = ns_now();
                     bool !>(CCIoError) read_res =
-                        in_ptr->read(&blk_arena, BLOCK_SIZE, &data);
+                        in_ptr->read(blk_arena, BLOCK_SIZE, &data);
                     g_read_ns.fetch_add(ns_now() - tread0);
 
                     if (read_res.is_err() || !cc_io_avail(read_res)) break;
 
-                    Block* cap = cc_arena_alloc_T(Block, &blk_arena);
+                    Block* cap = cc_arena_alloc_T(Block, blk_arena);
                     if (!cap) break;
 
                     cap->seq = seq++;

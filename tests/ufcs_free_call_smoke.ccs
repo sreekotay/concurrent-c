@@ -28,9 +28,9 @@ int main(void) {
     assert(r3.ok);
 
     /* @string template and CCString value arguments (`_Generic` arms). */
-    CCResult_size_t_CCError r4 = println(@string(`templated ${40 + 2}`, &a));
+    CCResult_size_t_CCError r4 = println(@string(`templated ${40 + 2}`, a));
     assert(r4.ok);
-    CCString cs = cc_string_from("built line", &a);
+    CCString cs = cc_string_from("built line", a);
     CCResult_size_t_CCError r5 = println(cs);
     assert(r5.ok);
 

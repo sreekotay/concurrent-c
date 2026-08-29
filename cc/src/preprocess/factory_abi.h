@@ -25,8 +25,13 @@ typedef struct {
     size_t          len;
 } CCFactorySliceArray;
 
+/* Same layout as CCArena — handle by value, not a slot. */
+typedef struct CCFactoryArena {
+    void* p;
+} CCFactoryArena;
+
 typedef CCFactorySlice (*CCGenericFactoryFn)(CCFactorySlice, CCFactorySlice,
-                                             CCFactorySliceArray, void*);
+                                             CCFactorySliceArray, CCFactoryArena);
 
 #define CC_FACTORY_ABI_PROBE_SYM "__cc_gfac_slice_abi_size"
 #define CC_FACTORY_ABI_PROBE_DEF \

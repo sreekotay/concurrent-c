@@ -78,7 +78,7 @@ int main(void) {
 
     /* 1. Family members: the declaration form's ##_ tokens ARE the
      *    method set. */
-    Vec::[double] v@(&arena) @destroy;
+    Vec::[double] v@(arena) @destroy;
     v.push(1.0);
     v.push(3.0);
     v.push(8.0);
@@ -96,7 +96,7 @@ int main(void) {
      *    the print name first. Handles keep the family as methods. */
     println("printed naked") !>;
     fprintln(STDERR_FILENO, "printed naked to stderr") !>;
-    CCStdio io = cc_stdio_create(&arena);
+    CCStdio io = cc_stdio_create(arena);
     io.println("printed via a handle") !>;
     fprintln(STDOUT_FILENO, "also via naked fprintln") !>;
 

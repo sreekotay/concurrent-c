@@ -913,7 +913,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                     // Decompress all available input.
                     while (!error && (strm.avail_in > 0 || strm.avail_out == 0)) {
                         CCArena out_arena = cc_arena_heap(BLOCK_SIZE + 256) @destroy;
-                        unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, &out_arena, BLOCK_SIZE);
+                        unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, out_arena, BLOCK_SIZE);
                         if (!out_buf) {
                             eprintln(@string(`Error: failed to allocate decompression output chunk`, @scratch)) !>;
                             mark_pipeline_error();
@@ -976,7 +976,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
             @errhandler(CCError e) cc_error_exit(e);
             while (!g_pipeline_error.load()) {
                 CCArena chunk_arena = cc_arena_heap(BLOCK_SIZE + 256) @destroy;
-                unsigned char* buf = cc_arena_alloc_T_count(unsigned char, &chunk_arena, BLOCK_SIZE);
+                unsigned char* buf = cc_arena_alloc_T_count(unsigned char, chunk_arena, BLOCK_SIZE);
                 if (!buf) {
                     eprintln(@string(`Error: failed to allocate compressed input chunk`, @scratch)) !>;
                     mark_pipeline_error();
@@ -1063,9 +1063,8 @@ int process_path(char[:0] path, int num_workers, int level, int strategy) {
         }
 
         {
-            CCArena dir_arena_storage = cc_arena_heap(megabytes(1)) @destroy;
-            if (!cc_arena_is_live(dir_arena_storage)) return 1;
-            CCArena* dir_arena = &dir_arena_storage;
+            CCArena dir_arena = cc_arena_heap(megabytes(1)) @destroy;
+            if (!cc_arena_is_live(dir_arena)) return 1;
             CCDirIter* !>(CCIoError) iter_res = cc_dir_open(dir_arena, path);
             if (cc_is_ok(iter_res)) {
                 CCDirIter* iter = cc_unwrap_as(iter_res, CCDirIter*);

@@ -4,7 +4,7 @@
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
 {
-    CCCommand which = cc_command(&a, @slice("sh"));
+    CCCommand which = cc_command(a, @slice("sh"));
     which.arg("-c");
     which.arg("command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1");
     int rc = which.status() !>;
@@ -12,7 +12,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand run = cc_command(&a, @slice("python3"));
+    CCCommand run = cc_command(a, @slice("python3"));
     run.arg("tests/cc_node_bridge_neg.py");
     run.inherit_stdio();
     int rc = run.status() !>;

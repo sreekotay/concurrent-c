@@ -559,7 +559,7 @@ void cc_exclusive_lock_entry_slow(void* entry) {
 bool cc_cancelled(void);
 typedef struct CCNurseryHost CCNurseryHost;
 CCNurseryHost* cc__runtime_current_nursery(void);
-bool cc_nursery_is_cancelled(const CCNurseryHost* n);
+bool cc_nursery_is_cancelled_host(const CCNurseryHost* n);
 
 /* Unlink `node` from the condition queue.  Returns 1 if it was still queued. */
 static int cc__exclusive_cond_dequeue(CCExclusiveEntry* e, CCExclusiveWaiter* node) {
@@ -690,7 +690,7 @@ int cc_exclusive_guard_wait_release(CCExclusiveGuard* g) {
         /* No nursery is not cancelled. A bare OS thread is not cancelled. */
         {
             CCNurseryHost* nur = cc__runtime_current_nursery();
-            if ((nur && cc_nursery_is_cancelled(nur)) || (dl && dl->cancelled))
+            if ((nur && cc_nursery_is_cancelled_host(nur)) || (dl && dl->cancelled))
                 return cc__exclusive_cond_leave(e, &node, 0);
         }
         if (dl && dl->deadline.tv_sec != 0 && cc_deadline_expired(dl))
@@ -980,10 +980,10 @@ void cc_exclusive_destroy(CCExclusive* excl) {
     }
 }
 
-CCExclusiveMutex cc_exclusive_mutex(CCExclusiveHost* excl, uint64_t name);
+CCExclusiveMutex cc_exclusive_mutex_host(CCExclusiveHost* excl, uint64_t name);
 void cc_exclusive_mutex_free(CCExclusiveMutex* m);
 
-CCExclusiveMutex cc_exclusive_mutex(CCExclusiveHost* excl, uint64_t name) {
+CCExclusiveMutex cc_exclusive_mutex_host(CCExclusiveHost* excl, uint64_t name) {
     CCExclusiveMutex m = {0};
     m.excl = excl;
     m.name = name;
@@ -1008,11 +1008,11 @@ static void cc__exclusive_gate_touch_done(CCExclusiveMutex* m,
         cc_exclusive_mutex_free(m);
 }
 
-int cc_exclusive_gate_wait(CCExclusiveHost* excl, uint64_t name) {
+int cc_exclusive_gate_wait_host(CCExclusiveHost* excl, uint64_t name) {
     CCExclusiveMutex m;
     CCExclusiveEntry* e;
     if (!excl) return CC_EXCL_WAIT_INVALID;
-    m = cc_exclusive_mutex(excl, name);
+    m = cc_exclusive_mutex_host(excl, name);
     e = (CCExclusiveEntry*)m._entry;
     if (!e) return CC_EXCL_WAIT_INVALID;
 
@@ -1045,13 +1045,13 @@ int cc_exclusive_gate_wait(CCExclusiveHost* excl, uint64_t name) {
     }
 }
 
-int cc_exclusive_gate_pass(CCExclusiveHost* excl, uint64_t name) {
+int cc_exclusive_gate_pass_host(CCExclusiveHost* excl, uint64_t name) {
     CCExclusiveMutex m;
     CCExclusiveEntry* e;
     CCExclusiveGuard g;
     uint32_t st;
     if (!excl) return CC_EXCL_WAIT_INVALID;
-    m = cc_exclusive_mutex(excl, name);
+    m = cc_exclusive_mutex_host(excl, name);
     e = (CCExclusiveEntry*)m._entry;
     if (!e) return CC_EXCL_WAIT_INVALID;
 
@@ -1069,13 +1069,13 @@ int cc_exclusive_gate_pass(CCExclusiveHost* excl, uint64_t name) {
     return CC_EXCL_WAIT_OK;
 }
 
-int cc_exclusive_gate_fail(CCExclusiveHost* excl, uint64_t name) {
+int cc_exclusive_gate_fail_host(CCExclusiveHost* excl, uint64_t name) {
     CCExclusiveMutex m;
     CCExclusiveEntry* e;
     CCExclusiveGuard g;
     uint32_t st;
     if (!excl) return CC_EXCL_WAIT_INVALID;
-    m = cc_exclusive_mutex(excl, name);
+    m = cc_exclusive_mutex_host(excl, name);
     e = (CCExclusiveEntry*)m._entry;
     if (!e) return CC_EXCL_WAIT_INVALID;
 
@@ -1091,7 +1091,7 @@ int cc_exclusive_gate_fail(CCExclusiveHost* excl, uint64_t name) {
     return CC_EXCL_WAIT_OK;
 }
 
-size_t cc_exclusive_live_count(CCExclusiveHost* excl) {
+size_t cc_exclusive_live_count_host(CCExclusiveHost* excl) {
     size_t n;
     if (!excl) return 0;
     pthread_mutex_lock(&excl->create_mu);

@@ -198,9 +198,9 @@ char[:0] root = cc_script_repo_root(
 char[:0] baseline = cc_script_path_join(root, @slice("perf/compiler_baseline.txt"), &a);
 
 if (!cc_script_path_exists(baseline)) {
-    CCString s = @string(`perf check: no baseline at ${baseline}`, &a);
+    CCString s = @string(`perf check: no baseline at ${baseline}`, a);
     s.eprintln() !>;
-    s = @string(`perf check: run ./scripts/capture_baseline.sh first`, &a);
+    s = @string(`perf check: run ./scripts/capture_baseline.sh first`, a);
     s.eprintln() !>;
     return 1;
 }
@@ -212,7 +212,7 @@ if (current_path_arg.ptr) {
     current_path = current_path_arg;
 } else {
     {
-        CCString s = @string(`perf check: capturing current metrics (this takes ~60s)...`, &a);
+        CCString s = @string(`perf check: capturing current metrics (this takes ~60s)...`, a);
         s.println() !>;
     }
     char[:0] capture = cc_script_path_join(root, @slice("scripts/capture_baseline.sh"), &a);
@@ -222,7 +222,7 @@ if (current_path_arg.ptr) {
 if (update) {
     cc_file_copy(current_path, baseline, &a) !>;
     {
-        CCString s = @string(`perf check: baseline updated. New contents:`, &a);
+        CCString s = @string(`perf check: baseline updated. New contents:`, a);
         s.println() !>;
     }
     cc_script_print_file(baseline, &a) !>;
@@ -234,7 +234,7 @@ Metrics cur = load_metrics(current_path, &a) !>;
 
 "".println() !>;
 {
-    CCString s = @string(`perf check: comparing current vs baseline (${baseline})`, &a);
+    CCString s = @string(`perf check: comparing current vs baseline (${baseline})`, a);
     s.println() !>;
 }
 
@@ -263,14 +263,14 @@ check_wall(&a, base, cur);
 
 "".println() !>;
 if (regressions > 0) {
-    CCString s = @string(`perf check: FAIL — ${regressions} regression(s), ${warnings} warning(s)`, &a);
+    CCString s = @string(`perf check: FAIL — ${regressions} regression(s), ${warnings} warning(s)`, a);
     s.println() !>;
-    s = @string(`perf check: if intentional, re-run with --update`, &a);
+    s = @string(`perf check: if intentional, re-run with --update`, a);
     s.println() !>;
     return 1;
 }
 if (warnings > 0) {
-    CCString s = @string(`perf check: OK with ${warnings} warning(s) (no regressions)`, &a);
+    CCString s = @string(`perf check: OK with ${warnings} warning(s) (no regressions)`, a);
     s.println() !>;
 } else {
     "perf check: OK".println() !>;

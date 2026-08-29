@@ -2237,16 +2237,18 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                 snprintf(stack_name, sizeof(stack_name), "__cc_et_as_%d", rewrite_count);
                 if (has_anchor) {
                     /* Self-contained: stack arena, build, splice (cc_emit_raw
-                       copies), then free.  arena_name is a CCArena* alias so
-                       TinyCC _Generic peels (it does not match a handle value). */
+                       copies), then free the stack binding (slot). Allocate
+                       sites take the handle; no invented CCArena* alias. */
+                    snprintf(arena_name, sizeof(arena_name), "%s", stack_name);
                     cc__sb_append_fmt_local(&out, &out_len, &out_cap,
-                                            "({ cc_arena_stack(%s, %d); CCArena* %s = &%s; "
+                                            "({ cc_arena_stack(%s, %d); "
                                             "CCString %s = cc_string_new(); ",
                                             stack_name, CC_EMIT_TPL_BUF_SIZE,
-                                            arena_name, stack_name, builder_name);
+                                            builder_name);
                 } else {
                     cc__sb_append_fmt_local(&out, &out_len, &out_cap,
-                                            "({ CCArena* %s = (", arena_name);
+                                            "({ CCArena %s = CC__ARENA_HANDLE(",
+                                            arena_name);
                     cc_sb_append(&out, &out_len, &out_cap, src + arena_s, arena_e - arena_s);
                     cc__sb_append_fmt_local(&out, &out_len, &out_cap,
                                             "); CCString %s = cc_string_new(); ", builder_name);
@@ -2292,7 +2294,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     if (ol <= 0) ol = scan.line;
                     cc__sb_append_fmt_local(&out, &out_len, &out_cap,
                                             "cc_emit_tpl_splice_at(%d, \"%s\", %d, cc_string_as_slice(&%s)); "
-                                            "cc_arena_free(%s); 0; })",
+                                            "cc_arena_free(&%s); 0; })",
                                             anchor_val, shown ? shown : "<input>", ol,
                                             builder_name, arena_name);
                 } else {
@@ -2383,9 +2385,9 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     snprintf(builder_name, sizeof(builder_name), "__cc_tpl_%d", rewrite_count);
                     snprintf(arena_name, sizeof(arena_name), "__cc_tpl_arena_%d", rewrite_count);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "({ ");
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "CCArena* ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "CCArena ");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, arena_name);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, " = (");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, " = CC__ARENA_HANDLE(");
                     cc_sb_append(&out, &out_len, &out_cap, src + arg2_s, arg2_e - arg2_s);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "CCString ");
@@ -2448,9 +2450,9 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     snprintf(policy_name, sizeof(policy_name), "__cc_tpl_policy_%d", rewrite_count);
                     snprintf(arena_name, sizeof(arena_name), "__cc_tpl_arena_%d", rewrite_count);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "({ ");
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "CCArena* ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "CCArena ");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, arena_name);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, " = (");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, " = CC__ARENA_HANDLE(");
                     cc_sb_append(&out, &out_len, &out_cap, src + arg3_s, arg3_e - arg3_s);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "CCStringPolicy ");
@@ -2539,7 +2541,7 @@ char* cc_normalize_template_recv_chains_text(const char* src, size_t n) {
  *
  *   @comptime{cc_generic_register("Name",__cc_gfac_Name);}
  *   @comptime CCSlice __cc_gfac_Name(CCSlice generic_name, CCSlice mangled,
- *                                    CCSliceArray type_args, CCArena *arena)
+ *                                    CCSliceArray type_args, CCArena arena)
  *   { (void)generic_name;...(void)arena; [if (type_args.len < arity || ...) ...] ... }
  *
  * The `CC_GENERIC_FACTORY(...)` token span and the body's opening `{` are
@@ -2680,7 +2682,7 @@ static char* cc__rewrite_generic_factory(const char* src, size_t n, const char* 
                 cc_sb_append_cstr(&out, &out_len, &out_cap, handler_sym);
                 cc_sb_append_cstr(&out, &out_len, &out_cap,
                                   "(CCSlice generic_name, CCSlice mangled, "
-                                  "CCSliceArray type_args, CCArena *arena)");
+                                  "CCSliceArray type_args, CCArena arena)");
                 /* Preserve the original `)`..`{` span (newlines included). */
                 cc_sb_append(&out, &out_len, &out_cap, src + p + 1, brace - (p + 1));
                 /* Auto-void the implicit params (unused ones won't warn; used
@@ -8367,7 +8369,7 @@ static int cc__emit_generic_instance(const char* gname,
             size_t rlen = g_reflect_snapshot ? g_reflect_snapshot_len : n;
             CCGenProduceStatus ps = cc_emit_plan_produce_generic_def(
                 gname, mangled, orig_args, nargs,
-                rsrc, rlen, input_path, &def_ar, &def, ferr, sizeof(ferr));
+                rsrc, rlen, input_path, def_ar, &def, ferr, sizeof(ferr));
             if (ps == CC_GEN_PRODUCE_ENSURE_FAILED) {
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                                 use_line, use_col, "type",
@@ -23331,11 +23333,11 @@ static CCValueHoistEntry* cc__value_hoist_lookup(const char* expr) {
 }
 
 /* Evaluate expr or return a cached literal for this TU pass.  *out_lit points
- * into `arena`; owned until cc_arena_free(arena).  Returns rc from eval_literal. */
+ * into `arena`; owned until cc_arena_free(&arena).  Returns rc from eval_literal. */
 static int cc__value_hoist_eval(const char* expr,
                                 char** out_lit, size_t* out_len,
                                 char* err, size_t err_sz,
-                                CCArena* arena) {
+                                CCArena arena) {
     CCValueHoistEntry* hit = cc__value_hoist_lookup(expr);
     if (hit) {
         *out_lit = hit->lit;
@@ -23420,7 +23422,7 @@ char* cc__resolve_comptime_value(const char* src, size_t n, const char* input_pa
         size_t litlen = 0;
         char err[512];
         err[0] = '\0';
-        int rc = cc__value_hoist_eval(expr, &lit, &litlen, err, sizeof(err), &hoist_arena);
+        int rc = cc__value_hoist_eval(expr, &lit, &litlen, err, sizeof(err), hoist_arena);
         if (rc != 0) {
             char rel[1024], ofile[1024];
             int oline = 1;

@@ -1,7 +1,7 @@
 /* Extracted typehooks header: `T !>(E) Type_read_at` proto + a non-static
  * `char[:] !>(E)` in the caller TU must still compose `b->read_at`. */
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
-CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
 build.arg("build");
 build.arg("--no-cache");
 build.arg("tests/ufcs_after_slice_result_main_mod.ccs");
@@ -14,7 +14,7 @@ if (rc != 0) {
     "build failed".println() !>;
     return 1;
 }
-CCCommand run = cc_command(&a, @slice("out/ufcs_after_slice_result_hdr_smoke"));
+CCCommand run = cc_command(a, @slice("out/ufcs_after_slice_result_hdr_smoke"));
 run.inherit_stdio();
 rc = run.status() !>;
 if (rc != 0) {

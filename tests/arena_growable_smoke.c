@@ -41,7 +41,7 @@ int main(void) {
         int saved_idx = a.a->block_idx;
         if (saved_idx == 0) { printf("FAIL: no growth before reset\n"); return 2; }
 
-        cc_arena_reset(&a);
+        cc_arena_reset(a);
         if (a.a->block_idx != 0) { printf("FAIL: block_idx not 0 after reset\n"); return 2; }
         if (a.a->prev != NULL) { printf("FAIL: prev not NULL after reset\n"); return 2; }
         if (cc_atomic_load(&a.a->offset) != 0) { printf("FAIL: offset not 0 after reset\n"); return 2; }
@@ -60,7 +60,7 @@ int main(void) {
         for (int i = 0; i < 4; i++) p0[i] = i;
 
         // Take checkpoint in block 0
-        CCArenaCheckpoint cp = cc_arena_checkpoint(&a);
+        CCArenaCheckpoint cp = cc_arena_checkpoint(a);
         if (cp.block_idx != 0) { printf("FAIL: cp block_idx should be 0\n"); return 3; }
 
         // Force growth past block 0
@@ -91,7 +91,7 @@ int main(void) {
     {
         CCArena a = cc_arena_heap(64);
         a.a->block_max = 3;
-        if (!cc_arena_set_heap_overflow(&a, false)) {
+        if (!cc_arena_set_heap_overflow(a, false)) {
             printf("FAIL: disable overflow\n");
             return 4;
         }
@@ -177,7 +177,7 @@ int main(void) {
             return 6;
         }
 
-        void *p = cc_arena_alloc(&a, 128, 8);
+        void *p = cc_arena_alloc(a, 128, 8);
         if (!p) {
             printf("FAIL: stack-first arena should grow to heap\n");
             return 6;
@@ -188,13 +188,13 @@ int main(void) {
         }
         memset(p, 0xab, 128);
 
-        cc_arena_reset(&a);
+        cc_arena_reset(a);
         if (a.a->base != l1 || a.a->block_idx != 0 || a.a->prev != NULL) {
             printf("FAIL: reset should restore stack block\n");
             return 6;
         }
 
-        void *q = cc_arena_alloc(&a, 128, 8);
+        void *q = cc_arena_alloc(a, 128, 8);
         if (!q) {
             printf("FAIL: alloc after reset\n");
             return 6;
@@ -216,35 +216,35 @@ int main(void) {
             return 7;
         }
         a = cc_arena_handle((CCArenaHost *)buf);
-        if (!cc_arena_set_heap_overflow(&a, true)) {
+        if (!cc_arena_set_heap_overflow(a, true)) {
             printf("FAIL: enable heap overflow\n");
             return 7;
         }
 
-        void *p = cc_arena_alloc(&a, 64, 8);
+        void *p = cc_arena_alloc(a, 64, 8);
         if (!p) {
             printf("FAIL: tracked alloc in fixed arena\n");
             return 7;
         }
-        if (!cc_arena_release(&a, p)) {
+        if (!cc_arena_release(a, p)) {
             printf("FAIL: release tracked arena ptr\n");
             return 7;
         }
-        if (cc_arena_release(&a, p) != 0) {
+        if (cc_arena_release(a, p) != 0) {
             printf("FAIL: double release should fail\n");
             return 7;
         }
-        void *p2 = cc_arena_alloc(&a, 64, 8);
+        void *p2 = cc_arena_alloc(a, 64, 8);
         if (!p2 || p2 != p) {
             printf("FAIL: release should make current block reusable\n");
             return 7;
         }
-        if (!cc_arena_release(&a, p2)) {
+        if (!cc_arena_release(a, p2)) {
             printf("FAIL: release second tracked ptr\n");
             return 7;
         }
 
-        void *spill = cc_arena_alloc(&a, 512, 8);
+        void *spill = cc_arena_alloc(a, 512, 8);
         if (!spill) {
             printf("FAIL: explicit heap overflow fallback\n");
             return 7;
@@ -259,7 +259,7 @@ int main(void) {
             return 7;
         }
         memset(spill, 0x5a, 512);
-        void *bigger_spill = cc_arena_realloc(&a, &a, spill, 512, 1024, 8);
+        void *bigger_spill = cc_arena_realloc(a, a, spill, 512, 1024, 8);
         if (!bigger_spill) {
             printf("FAIL: overflow realloc\n");
             return 7;
@@ -275,7 +275,7 @@ int main(void) {
             printf("FAIL: overflow byte accounting after realloc\n");
             return 7;
         }
-        if (!cc_arena_release(&a, bigger_spill)) {
+        if (!cc_arena_release(a, bigger_spill)) {
             printf("FAIL: release heap overflow ptr\n");
             return 7;
         }
@@ -285,7 +285,7 @@ int main(void) {
         }
         /* Current-epoch overflow release does not disable checkpoint. */
         {
-            CCArenaCheckpoint cp = cc_arena_checkpoint(&a);
+            CCArenaCheckpoint cp = cc_arena_checkpoint(a);
             if (cp.arena == NULL) {
                 printf("FAIL: checkpoint should work after current-epoch overflow release\n");
                 return 7;
@@ -293,14 +293,14 @@ int main(void) {
             cc_arena_restore(cp);
         }
 
-        void *moved_src = cc_arena_alloc(&a, 64, 8);
+        void *moved_src = cc_arena_alloc(a, 64, 8);
         CCArena moved_dst = cc_arena_heap(1024);
         if (!moved_src || !moved_dst.base) {
             printf("FAIL: cross-arena realloc setup\n");
             return 7;
         }
         memset(moved_src, 0xa5, 64);
-        void *moved = cc_arena_realloc(&a, &moved_dst, moved_src, 64, 96, 8);
+        void *moved = cc_arena_realloc(a, moved_dst, moved_src, 64, 96, 8);
         if (!moved) {
             printf("FAIL: cross-arena realloc\n");
             return 7;
@@ -324,18 +324,18 @@ int main(void) {
             return 7;
         }
         /* Overflow ownership is fail-closed: foreign pointers are refused. */
-        if (cc_arena_release(&a, foreign)) {
+        if (cc_arena_release(a, foreign)) {
             printf("FAIL: foreign overflow release should be refused\n");
             return 7;
         }
         free(foreign);
 
-        cc_arena_reset(&a);
+        cc_arena_reset(a);
         if (a.a->_flags & (CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE)) {
             printf("FAIL: reset should clear non-rewindable flags\n");
             return 7;
         }
-        if (cc_arena_checkpoint(&a).arena == NULL) {
+        if (cc_arena_checkpoint(a).arena == NULL) {
             printf("FAIL: checkpoint should work again after reset\n");
             return 7;
         }

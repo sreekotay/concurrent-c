@@ -87,7 +87,7 @@ int main(void) {
         t = now_ms();
         for (i = 0; i < n; i++) {
             size_t sz = item_size(i);
-            ptrs[i] = (unsigned char *)cc_arena_alloc(&a, sz, 8);
+            ptrs[i] = (unsigned char *)cc_arena_alloc(a, sz, 8);
             if (!ptrs[i]) {
                 cc_arena_free(&a);
                 return 2;
@@ -119,7 +119,7 @@ int main(void) {
         for (i = 0; i < n / 2; i++) {
             size_t idx = order[i];
             if (!alive[idx]) continue;
-            if (!cc_arena_release(&a, ptrs[idx])) {
+            if (!cc_arena_release(a, ptrs[idx])) {
                 cc_arena_free(&a);
                 return 3;
             }
@@ -136,7 +136,7 @@ int main(void) {
             void *np;
             if (!alive[i]) continue;
             want = (size_t)sizes[i] + 48 + (i % 64);
-            np = cc_arena_realloc(&a, &a, ptrs[i], sizes[i], want, 8);
+            np = cc_arena_realloc(a, a, ptrs[i], sizes[i], want, 8);
             if (!np) {
                 cc_arena_free(&a);
                 return 4;
@@ -159,7 +159,7 @@ int main(void) {
         }
 
         t = now_ms();
-        cc_arena_reset(&a);
+        cc_arena_reset(a);
         cc_arena_free(&a);
         reclaim_ms = now_ms() - t;
         live = 0;

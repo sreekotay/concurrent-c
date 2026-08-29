@@ -65,7 +65,7 @@ static CompressedResult* !>(CCIoError) compress_slice(CCSlice data, long seq,
     if (!cc_arena_is_live(res_arena))
         return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
 
-    CompressedResult* res = cc_arena_alloc_T(CompressedResult, &res_arena);
+    CompressedResult* res = cc_arena_alloc_T(CompressedResult, res_arena);
     if (!res)
         return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
 
@@ -75,7 +75,7 @@ static CompressedResult* !>(CCIoError) compress_slice(CCSlice data, long seq,
     res->crc = crc32(0UL, (const Bytef*)data.ptr, (uInt)data.len);
 
     size_t max_out = data.len + (data.len >> 3) + 256;
-    unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, &res_arena, max_out);
+    unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, res_arena, max_out);
     if (!out_buf)
         return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
 
@@ -143,7 +143,7 @@ static void compress_and_write_i(CompressJob* job, int i) {
                 *job->failed = 1;
             } else {
                 bool !>(CCIoError) read_r =
-                    job->in->read(&blk_arena, want, &data);
+                    job->in->read(blk_arena, want, &data);
                 if (read_r.is_err() || !cc_io_avail(read_r) || data.len != want) {
                     *job->failed = 1;
                 } else {

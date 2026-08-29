@@ -23,7 +23,7 @@ static void *worker(void *arg) {
     int i;
     for (i = 0; i < ALLOCS_EACH; i++) {
         size_t n = 24 + (size_t)((id * 17 + i * 31) % 200);
-        unsigned char *p = (unsigned char *)cc_arena_alloc(&g_arena, n, 8);
+        unsigned char *p = (unsigned char *)cc_arena_alloc(g_arena, n, 8);
         if (!p) {
             cc_atomic_fetch_add(&g_fail, 1);
             continue;
@@ -84,7 +84,7 @@ int main(void) {
             return 1;
         }
 
-        cc_arena_reset(&g_arena);
+        cc_arena_reset(g_arena);
         if (g_arena.a->prev || g_arena.a->ovf_head || cc_arena_overflow_raw_bytes(&g_arena)) {
             printf("FAIL: reset left chain/ovf\n");
             return 1;

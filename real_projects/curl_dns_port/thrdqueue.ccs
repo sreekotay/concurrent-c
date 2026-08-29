@@ -59,7 +59,7 @@ struct curl_thrdq {
     JobBag done;
     CCArena lock_arena;
     CCExclusive locks;
-    CCNursery *workers;
+    CCNursery workers;
     char *name;
     int aborted;
     Curl_thrdq_item_free_cb fn_free;
@@ -325,7 +325,7 @@ static void mark_aborted(CcThrdq *q) {
 /* Give back queued jobs (do not run), close (wakes workers), wait
  * in-flight process, give back leftover done, free q. */
 static void CcThrdq_teardown(CcThrdq *q) {
-    CCNursery *w;
+    CCNursery w;
     if (!q)
         return;
     mark_aborted(q);
@@ -337,15 +337,15 @@ static void CcThrdq_teardown(CcThrdq *q) {
             await_note(q, -dropped);
     }
     w = q->workers;
-    if (w)
+    if (cc_nursery_is_live(w))
         w.wait() !>;
     {
         JobBag *done = &q->done;
         done->drain(q);
     }
-    if (w) {
-        w->free();
-        q->workers = NULL;
+    if (cc_nursery_is_live(w)) {
+        w.free();
+        q->workers.p = NULL;
     }
     q_release_storage(q);
 }
@@ -379,12 +379,14 @@ static void worker(CcThrdq *q) {
     }
 }
 
-static int spawn_worker(CCNursery *n, CcThrdq *q) {
-    int rc = -1;
-    if (!n)
+static int spawn_worker(CCNursery n, CcThrdq *q) {
+    if (!cc_nursery_is_live(n))
         return -1;
-    rc = n.spawnhybrid(() => [q] { worker(q); }) !>;
-    return rc;
+    n.spawnhybrid(() => [q] { worker(q); }) !>(e) {
+        (void)e;
+        return -1;
+    };
+    return 0;
 }
 
 /* Abandon last-exit: workers are already dead. Do not wait/free the nursery. */
@@ -397,14 +399,14 @@ static void finish_q(void *arg) {
     done = &q->done;
     jobs = &q->jobs;
     done->drain(q);
-    q->workers = NULL;
+    q->workers.p = NULL;
     q_release_storage(q);
 }
 
 /* Take a live slot below `cap` and spawn. 1 spawned, 0 already at cap, -1 failed.
  * cas writes the current live back into n on failure — the loop reloads. */
 static int spawn_up_to(CcThrdq *q, int cap) {
-    CCNursery *w = q->workers;
+    CCNursery w = q->workers;
     int n = q->live.load();
     while (n < cap) {
         if (!q->live.cas(&n, n + 1))
@@ -471,7 +473,7 @@ int Curl_thrdq_create(struct curl_thrdq **ptqueue, const char *name,
         q->teardown();
         return CC_CURLE_OUT_OF_MEMORY;
     }
-    q->locks = cc_exclusive_create(&q->lock_arena, 4) !>(e) {
+    q->locks = cc_exclusive_create(q->lock_arena, 4) !>(e) {
         (void)e;
         q->teardown();
         return CC_CURLE_OUT_OF_MEMORY;
@@ -486,8 +488,12 @@ int Curl_thrdq_create(struct curl_thrdq **ptqueue, const char *name,
         }
     }
 
-    q->workers = cc_nursery_create();
-    if (!q->workers) {
+    q->workers = cc_nursery_create() !>(e) {
+        (void)e;
+        q->teardown();
+        return CC_CURLE_OUT_OF_MEMORY;
+    };
+    if (!cc_nursery_is_live(q->workers)) {
         q->teardown();
         return CC_CURLE_OUT_OF_MEMORY;
     }
@@ -614,7 +620,7 @@ void Curl_thrdq_clear(struct curl_thrdq *tqueue,
 /* curl multi quick_exit: process is dying — do not block on getaddrinfo. */
 static void detach_teardown(CcThrdq *q) {
     JobBag *jobs;
-    CCNursery *w;
+    CCNursery w;
     if (!q)
         return;
     mark_aborted(q);
@@ -626,7 +632,7 @@ static void detach_teardown(CcThrdq *q) {
         if (dropped)
             await_note(q, -dropped);
     }
-    if (!w) {
+    if (!cc_nursery_is_live(w)) {
         finish_q(q);
         return;
     }

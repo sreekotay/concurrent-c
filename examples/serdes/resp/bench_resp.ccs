@@ -108,13 +108,13 @@ int main(int argc, char** argv) {
             size_t pos = 0; gc = 0; gb = 0;
             while (pos < n) {
                 RespCmd c;
-                if (!RespCmd_read(buf, n, &pos, &ar, &c)) { eprintln("gen FAIL") !>; return 1; }
+                if (!RespCmd_read(buf, n, &pos, ar, &c)) { eprintln("gen FAIL") !>; return 1; }
                 gc++;
                 for (size_t j = 0; j < c.args_n; j++) gb += c.args[j].data.len;
             }
         }
         double dt = now_s() - t0; if (dt < best) best = dt; }
-    println(@string(`resp gen      ${n*(double)K/best/1e6} MB/s  ${gc*(double)K/best/1e6} Mcmd/s  (cmds=${gc} argbytes=${gb})`, &pa)) !>;
+    println(@string(`resp gen      ${n*(double)K/best/1e6} MB/s  ${gc*(double)K/best/1e6} Mcmd/s  (cmds=${gc} argbytes=${gb})`, pa)) !>;
 
     best = 1e18;
     long hc = 0; unsigned long long hb = 0;
@@ -122,10 +122,10 @@ int main(int argc, char** argv) {
     for (int t = 0; t < T; t++) { double t0 = now_s();
         for (int i = 0; i < K; i++) { hb = 0; hc = hand_parse(buf, n, ha, 16, &hb); if (hc < 0) { eprintln("hand FAIL") !>; return 1; } }
         double dt = now_s() - t0; if (dt < best) best = dt; }
-    println(@string(`resp hand     ${n*(double)K/best/1e6} MB/s  ${hc*(double)K/best/1e6} Mcmd/s  (cmds=${hc} argbytes=${hb})`, &pa)) !>;
+    println(@string(`resp hand     ${n*(double)K/best/1e6} MB/s  ${hc*(double)K/best/1e6} Mcmd/s  (cmds=${hc} argbytes=${hb})`, pa)) !>;
 
     if (gc != hc || gb != hb) {
-        eprintln(@string(`MISMATCH gen ${gc}/${gb} hand ${hc}/${hb}`, &pa)) !>;
+        eprintln(@string(`MISMATCH gen ${gc}/${gb} hand ${hc}/${hb}`, pa)) !>;
         return 1;
     }
     /* ENCODE: generated writer vs hand — Redis-client hot path.
@@ -160,7 +160,7 @@ int main(int argc, char** argv) {
                 sink_buf(eb, en);
             }
             double dt = now_s() - t0; if (dt < best) best = dt; }
-        println(@string(`resp enc gen  ${en*(double)K/best/1e6} MB/s  ${NCMD*(double)K/best/1e6} Mcmd/s`, &pa)) !>;
+        println(@string(`resp enc gen  ${en*(double)K/best/1e6} MB/s  ${NCMD*(double)K/best/1e6} Mcmd/s`, pa)) !>;
 
         best = 1e18;
         for (int t = 0; t < T; t++) { double t0 = now_s();
@@ -190,10 +190,10 @@ int main(int argc, char** argv) {
             }
             double dt = now_s() - t0; if (dt < best) best = dt; }
         if (en_hand != en) {
-            eprintln(@string(`ENCODE LEN MISMATCH gen ${en} hand ${en_hand}`, &pa)) !>;
+            eprintln(@string(`ENCODE LEN MISMATCH gen ${en} hand ${en_hand}`, pa)) !>;
             return 1;
         }
-        println(@string(`resp enc hand ${en_hand*(double)K/best/1e6} MB/s  ${NCMD*(double)K/best/1e6} Mcmd/s  (dynamic, unchecked)`, &pa)) !>;
+        println(@string(`resp enc hand ${en_hand*(double)K/best/1e6} MB/s  ${NCMD*(double)K/best/1e6} Mcmd/s  (dynamic, unchecked)`, pa)) !>;
         free(eb);
     }
 

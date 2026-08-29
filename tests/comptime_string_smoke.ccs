@@ -12,11 +12,11 @@
     CCArena a = cc_arena_create(4096);
 
     CCString s = cc_string_new();
-    cc_string_push_cstr(&s, "n=", &a);
+    cc_string_push_cstr(&s, "n=", a);
     cc_string_push_int(&s, 42, &a);
-    cc_string_push_cstr(&s, " ok", &a);
+    cc_string_push_cstr(&s, " ok", a);
 
-    const char* z = cc_string_cstr(&s, &a);
+    const char* z = cc_string_cstr(&s, a);
     int n = (int)cc_string_len(&s);
 
     /* Exercise as_slice + the slice vocabulary on the built string. */

@@ -28,9 +28,8 @@ static void fetch_one(int idx, int* status_p, size_t* body_len_p) {
     char buf[32 * 1024];
     {
         CCArena scratch = cc_arena_create_buffer(buf, sizeof(buf), CC_ARENA_GROWABLE) @destroy;
-        CCArena* arena = &scratch;
         const char* url = g_urls[idx];
-        CCHttpResponse resp = cc_http_get(arena, url, strlen(url)) !>(e) {
+        CCHttpResponse resp = cc_http_get(scratch, url, strlen(url)) !>(e) {
             status_p[idx] = -1;
             int code = (int)e.code;
             println(@string(`[${idx}] ${url} -> ERROR ${code}`, @scratch)) !> { return; };

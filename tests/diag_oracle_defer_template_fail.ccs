@@ -5,7 +5,7 @@ int main(void) {
     @errhandler(CCError e) { fprintf(stderr, "%s\n", e.message); return 1; }
     CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
     @defer fprintf(stderr, "leaving\n");
-    CCString s = @string(`v=${(int)42}`, &a);
+    CCString s = @string(`v=${(int)42}`, a);
     (void)s;
     int x = cc_diag_oracle_undeclared(3);   /* line 10 */
     (void)x;

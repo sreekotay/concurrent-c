@@ -20,8 +20,8 @@ int main(void) {
 
     {
         CCNursery n = cc_nursery_create() !> @destroy;
-        n.spawn(() => [&counter] { cc_atomic_fetch_add(&counter, 1); });
-        n.spawn(() => [&counter] { cc_atomic_fetch_add(&counter, 1); });
+        n.spawn(() => [&counter] { cc_atomic_fetch_add(&counter, 1); }) !>;
+        n.spawn(() => [&counter] { cc_atomic_fetch_add(&counter, 1); }) !>;
     }
 
     printf("shape-t7-shared-mut-spawn: prevented "

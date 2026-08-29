@@ -7,7 +7,7 @@ int main(void) {
     {
         CCArena arena_storage = @create(kilobytes(4)) @destroy;
         if (!cc_arena_is_live(arena_storage)) abort();
-        CCArena* arena = &arena_storage;
+        CCArena arena = arena_storage;
         // First string - simple case
         CCString s1 = cc_string_new();
         s1.append("first:", arena);

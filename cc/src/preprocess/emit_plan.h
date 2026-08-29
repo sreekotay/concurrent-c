@@ -171,7 +171,7 @@ int cc_emit_plan_ensure_generic_factory(const char* generic_name, const char* in
  * On success `*out_def` is a NUL-terminated C fragment owned by `out_ar`. */
 int cc_emit_plan_invoke_generic_factory(const char* name, const char* mangled,
                                         const char type_args[8][128], int nargs,
-                                        CCArena* out_ar, char** out_def);
+                                        CCArena out_ar, char** out_def);
 
 /* Use-site production: ensure the registered factory dylib is compiled, then
  * invoke it to produce the C definition text for `mangled`.  On failure the
@@ -190,7 +190,7 @@ int cc_emit_plan_take_exec_error(void);
 CCGenProduceStatus cc_emit_plan_produce_generic_def(
     const char* gname, const char* mangled, const char orig_args[8][128], int nargs,
     const char* reflect_src, size_t reflect_len, const char* input_path,
-    CCArena* out_ar, char** out_def, char* err, size_t err_cap);
+    CCArena out_ar, char** out_def, char* err, size_t err_cap);
 /* Emit `def_text` as an AFTER_PRELUDE fragment unless `mangled` was already
  * emitted this TU.  Returns 1 if newly added, 0 if a duplicate/full/failed. */
 int cc_emit_plan_generic_def_emit_once(const char* mangled, const char* def_text);

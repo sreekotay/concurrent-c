@@ -12,7 +12,7 @@ static int64_t !>(CCError) increment_and_store(char[:] key, int64_t value) {
     CCArena a = @create(buf, sizeof(buf)) @destroy;
     if (!cc_arena_is_live(a)) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "alloc"));
 
-    CCString s = @string(value, &a);
+    CCString s = @string(value, a);
     char[:0] v = s.as_slice();
     bool !>(CCError) set_res = accept_value(key, v);
     if (set_res.is_err()) return cc_err(set_res.error());

@@ -42,9 +42,8 @@ int main(void) {
     printf("q=%d wrote=%d flushed=%d\n", q, conn.wrote, conn.flushed);
 
     {
-        CCArena arena_storage = @create(kilobytes(4)) @destroy;
-        if (!cc_arena_is_live(arena_storage)) abort();
-        CCArena* arena = &arena_storage;
+        CCArena arena = @create(kilobytes(4)) @destroy;
+        if (!cc_arena_is_live(arena)) abort();
         /* two different methods interpolated on ONE template line */
         CCString ts = @string(`w=${conn.wsum()} f=${conn.flush_str()}`, arena);
         CCSlice tv = cc_string_as_slice(&ts);

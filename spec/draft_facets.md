@@ -78,7 +78,7 @@ A named mode on a completed struct type lists names under use-kind groups:
 ```c
 typedef struct Conn {
     CCSocket* sock;
-    CCArena* arena;
+    CCArena arena;
     CCString out;
 } Conn;
 
@@ -294,7 +294,7 @@ restriction never grants unlisted names.
 ```c
 typedef struct Conn {
     CCSocket* sock;
-    CCArena* arena;
+    CCArena arena;
     CCString out;
 } Conn;
 

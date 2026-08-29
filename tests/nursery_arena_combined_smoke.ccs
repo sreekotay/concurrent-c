@@ -22,9 +22,8 @@ void test_nursery_then_arena(void) {
     }
     
     {
-        CCArena __cc_arena7 = @create(kilobytes(4)) @destroy;
-        if (!cc_arena_is_live(__cc_arena7)) abort();
-        CCArena* a = &__cc_arena7;
+        CCArena a = @create(kilobytes(4)) @destroy;
+        if (!cc_arena_is_live(a)) abort();
         int* p = cc_arena_alloc_T(int, a);
         *p = 42;
         printf("  arena allocated: %d\n", *p);
@@ -39,9 +38,8 @@ void test_arena_then_nursery(void) {
     printf("test_arena_then_nursery:\n");
     
     {
-        CCArena __cc_arena8 = @create(kilobytes(4)) @destroy;
-        if (!cc_arena_is_live(__cc_arena8)) abort();
-        CCArena* a = &__cc_arena8;
+        CCArena a = @create(kilobytes(4)) @destroy;
+        if (!cc_arena_is_live(a)) abort();
         int* p = cc_arena_alloc_T(int, a);
         *p = 123;
         printf("  arena allocated: %d\n", *p);
@@ -65,9 +63,8 @@ void test_interleaved(void) {
     printf("test_interleaved:\n");
     
     {
-        CCArena __cc_arena9 = @create(kilobytes(4)) @destroy;
-        if (!cc_arena_is_live(__cc_arena9)) abort();
-        CCArena* a1 = &__cc_arena9;
+        CCArena a1 = @create(kilobytes(4)) @destroy;
+        if (!cc_arena_is_live(a1)) abort();
         printf("  arena a1 active\n");
         
         {
@@ -87,9 +84,8 @@ void test_interleaved(void) {
         CCNursery __cc_nursery63 = @create() !> @destroy;
 
         {
-            CCArena __cc_arena10 = @create(kilobytes(4)) @destroy;
-            if (!cc_arena_is_live(__cc_arena10)) abort();
-            CCArena* a2 = &__cc_arena10;
+            CCArena a2 = @create(kilobytes(4)) @destroy;
+            if (!cc_arena_is_live(a2)) abort();
             printf("  arena inside nursery\n");
         
         }

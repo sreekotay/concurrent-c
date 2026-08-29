@@ -248,7 +248,7 @@ static int fz_write_bytes(const char* path, const char* buf, size_t len) {
 CCArena a = @create(megabytes(64)) @destroy;
 
 @errhandler(CCError e) {
-    CCString em = @string(`fuzz_comment: error: ${cc_error_str(e)}`, &a);
+    CCString em = @string(`fuzz_comment: error: ${cc_error_str(e)}`, a);
     (void)em.eprintln();
     return 2;
 }
@@ -322,12 +322,12 @@ if (fz_file_exists(cache_path)) {
         g_ncorpus++;
     }
     {
-        CCString m = @string(`fuzz_comment: corpus cache hit (${g_ncorpus} files)`, &a);
+        CCString m = @string(`fuzz_comment: corpus cache hit (${g_ncorpus} files)`, a);
         m.println() !>;
     }
 } else {
     "fuzz_comment: probing corpus (one-time; cached under scratch dir)".println() !>;
-    CCSliceArray files = cc_glob(@slice("tests/*.ccs"), &a) !>;
+    CCSliceArray files = cc_glob(@slice("tests/*.ccs"), a) !>;
     static const char* SIDECARS[] = {
         ".args", ".exit", ".stdin", ".env", ".ldflags",
         ".requires_async", ".compile_err", ".stderr", ".build_stderr", NULL,

@@ -41,7 +41,7 @@ static Counter g_shared;                 /* guarded by name=1 */
 static Counter g_private[NUM_WORKERS];   /* each guarded by name=100+id */
 
 static void bump_shared(int iters) {
-    CCExclusiveMutex m = cc_exclusive_mutex(g_excl.p, 1); /* resolve once per worker */
+    CCExclusiveMutex m = g_excl.mutex(1); /* resolve once per worker */
     for (int i = 0; i < iters; i++) {
         CCExclusiveGuard g = m.acquire();
         g_shared.value++;
@@ -50,7 +50,7 @@ static void bump_shared(int iters) {
 }
 
 static void bump_private(int worker_id, int iters) {
-    CCExclusiveMutex m = cc_exclusive_mutex(g_excl.p, (uint64_t)(100 + worker_id));
+    CCExclusiveMutex m = g_excl.mutex((uint64_t)(100 + worker_id));
     for (int i = 0; i < iters; i++) {
         CCExclusiveGuard g = m.acquire();
         g_private[worker_id].value++;

@@ -272,7 +272,7 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
         usleep(1000); /* brief gap to reduce resource contention */
 
         CCArena test_arena = cc_arena_heap(megabytes(4)) @destroy;
-        CCCommand cmd = cc_command(&test_arena, "./ccc");
+        CCCommand cmd = cc_command(test_arena, "./ccc");
         cmd.arg("run");
         cmd.arg_if(release, "--release");
         cmd.arg_if(timeout_for_file > 0, "--timeout");
@@ -371,7 +371,7 @@ int main(int argc, char** argv) {
         }
         trace_write("SESSION start pid=%d examples=%d stress=%d perf=%d",
                     (int)getpid(), do_examples, do_stress, do_perf);
-        CCString tip = @string(`Trace log: ${TRACE_PATH} (fsynced per test)\n`, &arena);
+        CCString tip = @string(`Trace log: ${TRACE_PATH} (fsynced per test)\n`, arena);
         const char* tip_cstr = tip.cstr(&arena);
         if (tip_cstr) fputs(tip_cstr, stdout);
     }

@@ -92,7 +92,7 @@ static ScanStats scan_slurp(const char* path) {
     }
     @defer cc_file_close(&f);
 
-    CCSlice !>(CCIoError) rr = cc_file_read_all(&f, &a);
+    CCSlice !>(CCIoError) rr = cc_file_read_all(&f, a);
     if (cc_is_err(rr)) {
         fprintf(stderr, "bench_line_scan: read_all failed\n");
         abort();
@@ -123,7 +123,7 @@ static ScanStats scan_sync(const char* path) {
         }
         if (!cc_value(got)) break;
         tally_line(line, &s);
-        cc_arena_reset(&scratch);
+        cc_arena_reset(scratch);
     }
     return s;
 }

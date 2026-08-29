@@ -364,7 +364,7 @@ void cc_listener_serve(CCListener* ln, CCNursery n, CCClosure1 on_conn) {
     }
     /* Borrow-call: cc_closure1_call is single-shot (drops env). An accept
      * loop must invoke on_conn many times, then drop once at the end. */
-    while (!cc_nursery_is_cancelled(n.p)) {
+    while (!cc_nursery_is_cancelled(n)) {
         CCResult_CCSocket_CCNetError ar = cc_listener_accept(ln);
         CCSocket client;
         if (cc_is_err(ar)) break;

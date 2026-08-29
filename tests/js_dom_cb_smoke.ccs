@@ -60,7 +60,7 @@ int main(void) {
     int any = 0;
 
     if (cc_js_dom_available(false)) {
-        CCJsDom js = cc_js_new(false, &a) !> @destroy;
+        CCJsDom js = cc_js_new(false, a) !> @destroy;
         rc |= run_domain(&js, "hosted");
         any = 1;
     } else {
@@ -69,7 +69,7 @@ int main(void) {
     }
 
     if (cc_js_dom_available(true)) {
-        CCJsDom js = cc_js_new(true, &a) !> @destroy;
+        CCJsDom js = cc_js_new(true, a) !> @destroy;
         rc |= run_domain(&js, "iso");
         any = 1;
     } else {

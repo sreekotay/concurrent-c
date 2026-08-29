@@ -63,7 +63,7 @@ int main(void) {
     }
     /* malformed: no tree */
     {
-        cc_arena_reset(&arena);
+        cc_arena_reset(arena);
         if (Json_parse("[1,]", 4, arena) != 0) { printf("FAIL: bad accepted\n"); return 1; }
     }
     /* corpora: golden Cow split through the DOM, zero-copy pointer proof */
@@ -73,7 +73,7 @@ int main(void) {
             fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
             char* b = (char*)malloc((size_t)n);
             size_t rd = fread(b, 1, (size_t)n, f); fclose(f);
-            cc_arena_reset(&arena);
+            cc_arena_reset(arena);
             JsonNode* root = Json_parse(b, rd, arena);
             if (!root) { printf("FAIL: twitter parse\n"); return 1; }
             Walk w = {0}; w.s = b; w.n = rd;

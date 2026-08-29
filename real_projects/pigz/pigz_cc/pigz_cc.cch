@@ -69,7 +69,7 @@ typedef struct {
     CCSlice dict;  // Copy of previous block's tail
     CCSlice lens;  // Optional: list of rsyncable segment lengths (size_t)
     bool is_last;
-    CCArena* arena; // Pointer to arena (borrowed from pool or heap-allocated)
+    CCArena arena; /* borrowed handle (pool or heap); same .p, not a slot */
     CCChan* pool;   // Pool to return arena to (NULL if heap-allocated)
 } Block;
 

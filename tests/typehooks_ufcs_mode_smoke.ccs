@@ -14,7 +14,7 @@ static int box_bump(Box* b) {
 
 static char[:] box_ufcs(char[:] recv_type, char[:] method, char[:] mode,
                         CCSliceArray argv, CCSliceArray arg_types,
-                        CCArena* arena) {
+                        CCArena arena) {
     (void)recv_type;
     (void)argv;
     (void)arg_types;

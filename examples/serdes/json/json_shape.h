@@ -62,7 +62,7 @@ struct JShShape {
                                           * one (a.b.c.d is shared structure,
                                           * not an object anyone queries) */
     uint32_t lookup_cap;
-    CCArena* ar;                         /* shape arena (for the lazy build) */
+    CCArena ar;                          /* shape arena (for the lazy build) */
     JShShape* predicted;                 /* final shape last completed from this
                                           * FIRST-key shape — allocation-site
                                           * prediction: slots preallocated
@@ -92,7 +92,7 @@ typedef struct { const char* key; uint32_t klen, hash; JShVal v; } JShDEnt;
 typedef struct { uint32_t n, cap; JShDEnt ents[]; } JShDict;
 typedef struct {
     JsonParser jp;                       /* reuse json.h scanning state (per parse) */
-    CCArena* shape_arena;                /* persistent: shapes, keys, lookups, stack */
+    CCArena shape_arena;                 /* persistent: shapes, keys, lookups, stack */
     JShShape root;
     struct { uint64_t h; JShShape* to; } ttab[JSH_MAX_SHAPES * 2];
     uint32_t nshapes;
@@ -146,7 +146,7 @@ static inline void* jsh__ralloc(JShParser* p, size_t sz) {
     return out;
 }
 
-static inline JShParser* jsh_parser(CCArena* shape_arena) {
+static inline JShParser* jsh_parser(CCArena shape_arena) {
     JShParser* p = (JShParser*)cc_arena_alloc_local(shape_arena, sizeof(JShParser), _Alignof(JShParser));
     if (!p) return NULL;
     memset(p, 0, sizeof *p);
@@ -160,7 +160,7 @@ static inline JShParser* jsh_parser(CCArena* shape_arena) {
 
 /* per-shape key->slot table: built ONCE at shape creation (in the shape
  * arena), shared by every instance of the shape */
-static JShDesc* jsh__build_lookup(JShShape* s, CCArena* arena) {
+static JShDesc* jsh__build_lookup(JShShape* s, CCArena arena) {
     uint32_t cap = 4;
     while (cap < s->nslots * 2) cap <<= 1;
     JShDesc* t = (JShDesc*)cc_arena_alloc_local(arena, cap * sizeof(JShDesc), _Alignof(JShDesc));
@@ -446,7 +446,7 @@ static JsonStatus jsh__value(JShParser* p, JShVal* out) {
 /* records (objects, arrays, slots, materialized strings) go to rec_arena —
  * resettable per parse; shapes persist in the parser's shape arena */
 static inline JsonStatus JShParser_parse(JShParser* p, const char* src, size_t len,
-                                         CCArena* rec_arena, JShVal* out) {
+                                         CCArena rec_arena, JShVal* out) {
     p->jp = json_parser(src, len, rec_arena);
     p->sp = 0;
     p->alloc_fail = 0;

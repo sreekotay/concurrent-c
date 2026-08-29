@@ -9,7 +9,7 @@
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
-static CCResult_CCSlice_CCError get_slice(CCArena* a) {
+static CCResult_CCSlice_CCError get_slice(CCArena a) {
     char* p = (char*)cc_arena_alloc(a, 4, 1);
     if (!p) return cc_err_CCResult_CCSlice_CCError(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "oom"));
     p[0] = 'o';
@@ -23,7 +23,7 @@ int main(void) {
         return 1;
     }
     CCArena a = cc_arena_heap(kilobytes(1)) @destroy;
-    CCSlice in = get_slice(&a) !>;
+    CCSlice in = get_slice(a) !>;
     if (in.len != 2 || !in.ptr) return 2;
     if (in.ptr[0] != 'o' || in.ptr[1] != 'k') return 3;
     printf("result_unwrap_slice_expr_bang_smoke: PASS len=%zu\n", in.len);

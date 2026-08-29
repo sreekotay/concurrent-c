@@ -15,7 +15,7 @@ typedef struct Lev {
 static int lev__ensure_arena(Lev *self) {
     if (!cc_arena_is_live(self->a)) self->a = cc_arena_heap(kilobytes(64));
     if (!cc_arena_is_live(self->a)) return -1;
-    cc_arena_reset(&self->a);
+    cc_arena_reset(self->a);
     return 0;
 }
 
@@ -24,9 +24,9 @@ static int lev__prep(Lev *self, CCPyStr s1, CCPyStr s2,
     CCResult_CCSlice_uint32_t_CCError ra, rb;
     CCSlice_uint32_t ca, cb;
     if (lev__ensure_arena(self) != 0) return -1;
-    ra = s1.codepoints(&self->a);
+    ra = s1.codepoints(self->a);
     if (CCResult_CCSlice_uint32_t_CCError_is_err(ra)) return -1;
-    rb = s2.codepoints(&self->a);
+    rb = s2.codepoints(self->a);
     if (CCResult_CCSlice_uint32_t_CCError_is_err(rb)) return -1;
     ca = CCResult_CCSlice_uint32_t_CCError_value(ra);
     cb = CCResult_CCSlice_uint32_t_CCError_value(rb);
@@ -37,7 +37,7 @@ static int lev__prep(Lev *self, CCPyStr s1, CCPyStr s2,
     return 0;
 }
 
-static long long lev__dp(CCArena *a, const uint32_t *s, size_t n,
+static long long lev__dp(CCArena a, const uint32_t *s, size_t n,
                          const uint32_t *t, size_t m, long long sub) {
     size_t *prev = cc_arena_alloc_T_count(size_t, a, m + 1);
     size_t *cur  = cc_arena_alloc_T_count(size_t, a, m + 1);
@@ -61,7 +61,7 @@ static long long !>(CCError) Lev_distance(Lev *self, CCPyStr s1, CCPyStr s2) {
     uint32_t *a, *b; size_t n, m;
     if (lev__prep(self, s1, s2, &a, &n, &b, &m) != 0)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
-    long long d = lev__dp(&self->a, a, n, b, m, 1);
+    long long d = lev__dp(self->a, a, n, b, m, 1);
     if (d < 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
     return cc_ok(d);
 }
@@ -71,7 +71,7 @@ static double !>(CCError) Lev_ratio(Lev *self, CCPyStr s1, CCPyStr s2) {
     if (lev__prep(self, s1, s2, &a, &n, &b, &m) != 0)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
     if (n + m == 0) return cc_ok(1.0);
-    long long d = lev__dp(&self->a, a, n, b, m, 2);
+    long long d = lev__dp(self->a, a, n, b, m, 2);
     if (d < 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
     return cc_ok((double)((long long)(n + m) - d) / (double)(n + m));
 }
@@ -92,7 +92,7 @@ static long long !>(CCError) Lev_hamming(Lev *self, CCPyStr s1, CCPyStr s2,
 }
 
 static double lev__jaro(const uint32_t *a, size_t n, const uint32_t *b, size_t m,
-                        CCArena *ar) {
+                        CCArena ar) {
     if (n == 0 && m == 0) return 1.0;
     if (n == 0 || m == 0) return 0.0;
     {
@@ -128,7 +128,7 @@ static double !>(CCError) Lev_jaro(Lev *self, CCPyStr s1, CCPyStr s2) {
     uint32_t *a, *b; size_t n, m;
     if (lev__prep(self, s1, s2, &a, &n, &b, &m) != 0)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
-    double j = lev__jaro(a, n, b, m, &self->a);
+    double j = lev__jaro(a, n, b, m, self->a);
     if (j < 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
     return cc_ok(j);
 }
@@ -138,7 +138,7 @@ static double !>(CCError) Lev_jaro_winkler(Lev *self, CCPyStr s1, CCPyStr s2) {
     if (lev__prep(self, s1, s2, &a, &n, &b, &m) != 0)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
     {
-        double j = lev__jaro(a, n, b, m, &self->a);
+        double j = lev__jaro(a, n, b, m, self->a);
         size_t l = 0, lim = n < m ? n : m;
         if (j < 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
         if (j <= 0.7) return cc_ok(j);

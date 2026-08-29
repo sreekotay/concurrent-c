@@ -11,7 +11,7 @@ The binder `@(...)` selects the declared type's `.create` hook. Ownership
 
 ```c
 CCArena a@(megabytes(1)) @destroy;
-Vec::[char] out@(&a) @destroy;
+Vec::[char] out@(a) @destroy;
 ```
 
 **Legacy (still accepted):** `T name = @create(args) @destroy;` lowers to

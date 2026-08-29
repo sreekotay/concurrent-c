@@ -213,14 +213,14 @@ int main(int argc, char **argv) {
     report_ns("c_native", iters);
 
     {
-        CCPy py = cc_py_new(false, &a) !> @destroy;
+        CCPy py = cc_py_new(false, a) !> @destroy;
         rc |= bench_domain(&py, "py_call", "py_fn_inproc", iters);
     }
 
     if (cc_py_proc_available()) {
         /* Isolated pays ~100µs/hop; keep the sample short enough to finish. */
         long long on = iters / 100 > 500 ? iters / 100 : 500;
-        CCPy py = cc_py_new(true, &a) !> @destroy;
+        CCPy py = cc_py_new(true, a) !> @destroy;
         printf("\nisolated CC→operator.call→py_fn (iters=%lld)\n", on);
         rc |= bench_iso(&py, on);
     } else {

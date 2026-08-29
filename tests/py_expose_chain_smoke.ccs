@@ -27,7 +27,7 @@ int main(void) {
     @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
     CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
     if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
-    CCPy py = cc_py_new(false, &a) !>;
+    CCPy py = cc_py_new(false, a) !>;
 
     Counter cseed = { .n = 0 };
     Greeter gseed = { .calls = 0 };
@@ -43,7 +43,7 @@ int main(void) {
         import cc.counter2 as c2
         import cc.greeter as g
         out = [c.bump(4), c2.bump(6), g.hello(), g.hello()]
-        `, &a).as_slice())!>;
+        `, a).as_slice())!>;
 
     CCPyObj m = py.import("__main__") !> @destroy;
     CCSlice rs = m.get("out")!>.as_slice()!>;

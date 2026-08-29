@@ -10,7 +10,7 @@ int main(void) {
     cc_arena_stack(a, 1024);
     
     CCArenaPool p;
-    cc_arena_pool_init(&p, &a, sizeof(struct Point));
+    cc_arena_pool_init(&p, a, sizeof(struct Point));
     
     // Test UFCS alloc
     struct Point* p1 = (struct Point*)p.alloc();

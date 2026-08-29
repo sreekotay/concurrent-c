@@ -1,4 +1,4 @@
-/* cc_nursery_wait peels a CCNursery value, not an already-host pointer. */
+/* leftover wait(n) passes the box; Host* uses the _host seam. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
@@ -19,7 +19,7 @@ int main(void) {
     Hold h;
     h.n = hold_host(&n);
     cc_nursery_wait(n) !>;
-    cc_nursery_wait(h.n) !>;
+    cc_nursery_wait_host(h.n) !>;
     printf("ok\n");
     return 0;
 }

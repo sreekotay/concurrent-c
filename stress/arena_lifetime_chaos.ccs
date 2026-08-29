@@ -171,7 +171,7 @@ static int bench_mixed_lifetime_chaos(void) {
             uint32_t tag = lcg(&rng);
             unsigned char *p;
             if (slots[si].live) kill_slot(&a, &slots[si]);
-            p = (unsigned char *)cc_arena_alloc(&a, n, 8);
+            p = (unsigned char *)cc_arena_alloc(a, n, 8);
             if (!p) {
                 free(slots);
                 cc_arena_free(&a);
@@ -193,7 +193,7 @@ static int bench_mixed_lifetime_chaos(void) {
         } else if (op == 4) {
             /* Tip grow: dedicated tip object. */
             size_t want = tip_sz + 24 + (r % 40);
-            void *np = cc_arena_realloc(&a, &a, tip, tip_sz, want, 8);
+            void *np = cc_arena_realloc(a, a, tip, tip_sz, want, 8);
             if (!np) {
                 free(slots);
                 cc_arena_free(&a);
@@ -208,7 +208,7 @@ static int bench_mixed_lifetime_chaos(void) {
         } else if (op == 5) {
             /* Bury tip with a pad alloc. */
             size_t n = 32 + (r % 200);
-            void *pad = cc_arena_alloc(&a, n, 8);
+            void *pad = cc_arena_alloc(a, n, 8);
             if (!pad) {
                 free(slots);
                 cc_arena_free(&a);
@@ -223,7 +223,7 @@ static int bench_mixed_lifetime_chaos(void) {
             uint32_t tag = lcg(&rng);
             unsigned char *p;
             if (slots[si].live) kill_slot(&a, &slots[si]);
-            p = (unsigned char *)cc_arena_alloc(&a, n, 16);
+            p = (unsigned char *)cc_arena_alloc(a, n, 16);
             if (!p) {
                 free(slots);
                 cc_arena_free(&a);
@@ -291,12 +291,12 @@ static int bench_mixed_lifetime_chaos(void) {
         size_t di;
         for (di = 0; di < SLOTS; di++) {
             if (!slots[di].live) continue;
-            if (!cc_arena_release(&a, slots[di].ptr)) {
+            if (!cc_arena_release(a, slots[di].ptr)) {
                 free(slots);
                 cc_arena_free(&a);
                 return fail("first release should succeed");
             }
-            if (cc_arena_release(&a, slots[di].ptr)) {
+            if (cc_arena_release(a, slots[di].ptr)) {
                 free(slots);
                 cc_arena_free(&a);
                 return fail("double-release returned success (must fail closed)");
@@ -307,7 +307,7 @@ static int bench_mixed_lifetime_chaos(void) {
         }
     }
 
-    cc_arena_reset(&a);
+    cc_arena_reset(a);
     if (a.a->ovf_head != NULL || cc_arena_overflow_raw_bytes(&a) != 0) {
         free(slots);
         cc_arena_free(&a);
@@ -377,7 +377,7 @@ static int bench_release_scramble(void) {
     for (i = 0; i < RELEASE_SCRAMBLE_N; i++) {
         size_t n = 24 + (lcg(&rng) % 400);
         uint32_t tag = lcg(&rng);
-        ptrs[i] = (unsigned char *)cc_arena_alloc(&a, n, 8);
+        ptrs[i] = (unsigned char *)cc_arena_alloc(a, n, 8);
         if (!ptrs[i]) {
             free(ptrs); free(tags); free(sizes); free(alive);
             cc_arena_free(&a);
@@ -412,7 +412,7 @@ static int bench_release_scramble(void) {
         for (k = 0; k < RELEASE_SCRAMBLE_N / 2; k++) {
             size_t idx = order[k];
             if (!alive[idx]) continue;
-            if (!cc_arena_release(&a, ptrs[idx])) {
+            if (!cc_arena_release(a, ptrs[idx])) {
                 free(order); free(ptrs); free(tags); free(sizes); free(alive);
                 cc_arena_free(&a);
                 return fail("scramble release");
@@ -431,7 +431,7 @@ static int bench_release_scramble(void) {
         void *np;
         if (!alive[i]) continue;
         want = (size_t)sizes[i] + 64 + (i % 50);
-        np = cc_arena_realloc(&a, &a, ptrs[i], sizes[i], want, 8);
+        np = cc_arena_realloc(a, a, ptrs[i], sizes[i], want, 8);
         if (!np) {
             free(ptrs); free(tags); free(sizes); free(alive);
             cc_arena_free(&a);
@@ -475,7 +475,7 @@ static int bench_release_scramble(void) {
         return fail("expected NON_REWINDABLE after mid-lifetime releases");
     }
 
-    cc_arena_reset(&a);
+    cc_arena_reset(a);
     if (a.a->ovf_head || cc_arena_overflow_raw_bytes(&a) || a.a->prev || a.a->block_idx != 0) {
         free(ptrs); free(tags); free(sizes); free(alive);
         cc_arena_free(&a);
@@ -520,13 +520,13 @@ static void shared_worker(int wid) {
             uint32_t tag = lcg(&rng);
             unsigned char *p;
             if (alive[si]) {
-                if (!cc_arena_release(&g_shared, local[si])) {
+                if (!cc_arena_release(g_shared, local[si])) {
                     cc_atomic_fetch_add(&g_shared_fail, 1);
                     return;
                 }
                 alive[si] = 0;
             }
-            p = (unsigned char *)cc_arena_alloc(&g_shared, nsz, 8);
+            p = (unsigned char *)cc_arena_alloc(g_shared, nsz, 8);
             if (!p) {
                 cc_atomic_fetch_add(&g_shared_fail, 1);
                 return;
@@ -538,7 +538,7 @@ static void shared_worker(int wid) {
             alive[si] = 1;
         } else if (kind == 3) {
             if (alive[si]) {
-                if (!cc_arena_release(&g_shared, local[si])) {
+                if (!cc_arena_release(g_shared, local[si])) {
                     cc_atomic_fetch_add(&g_shared_fail, 1);
                     return;
                 }
@@ -558,7 +558,7 @@ static void shared_worker(int wid) {
             cc_atomic_fetch_add(&g_shared_fail, 1);
             return;
         }
-        (void)cc_arena_release(&g_shared, local[i]);
+        (void)cc_arena_release(g_shared, local[i]);
     }
 }
 
@@ -578,7 +578,7 @@ static int bench_shared_concurrent_mixed(void) {
         return fail("shared buffer init");
     g_shared = cc_arena_handle((CCArenaHost *)g_shared_buf);
     g_shared.a->block_max = 1;
-    if (!cc_arena_set_heap_overflow(&g_shared, false))
+    if (!cc_arena_set_heap_overflow(g_shared, false))
         return fail("disable shared overflow");
 
     cc_atomic_store(&g_shared_fail, 0);
@@ -613,7 +613,7 @@ static int bench_shared_concurrent_mixed(void) {
             return fail("shared concurrent ops incomplete");
     }
 
-    cc_arena_reset(&g_shared);
+    cc_arena_reset(g_shared);
     if (CC_ATOMIC_LOAD(&g_shared.a->offset) != 0 &&
         CC_ATOMIC_LOAD(&g_shared.a->live_allocs) != 0) {
         /* After release-all, live should be 0; offset may be non-zero if
@@ -636,7 +636,7 @@ static int bench_tip_vs_churn_release(void) {
     rss_begin(&rss);
     for (i = 0; i < 30000; i++) {
         size_t want = tip_sz + 16 + (i % 13);
-        void *np = cc_arena_realloc(&a, &a, tip, tip_sz, want, 8);
+        void *np = cc_arena_realloc(a, a, tip, tip_sz, want, 8);
         unsigned char *ephemeral;
         size_t en;
         if (!np) {
@@ -649,7 +649,7 @@ static int bench_tip_vs_churn_release(void) {
         tip_sz = want;
 
         en = 48 + (i % 100);
-        ephemeral = (unsigned char *)cc_arena_alloc(&a, en, 8);
+        ephemeral = (unsigned char *)cc_arena_alloc(a, en, 8);
         if (!ephemeral) {
             cc_arena_free(&a);
             return fail("ephemeral alloc");
@@ -657,7 +657,7 @@ static int bench_tip_vs_churn_release(void) {
         ephemeral[0] = (unsigned char)i;
         /* Ephemeral alloc buries tip; release does not restore tip-ness while
          * tip remains live → next tip grow should often move. */
-        if (!cc_arena_release(&a, ephemeral)) {
+        if (!cc_arena_release(a, ephemeral)) {
             cc_arena_free(&a);
             return fail("ephemeral release");
         }

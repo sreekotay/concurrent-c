@@ -3,23 +3,23 @@
  * defines the next can use. */
 #include <ccc/script/py.cch>
 
-CCPy py = cc_py_new(false, &a) !> @destroy;
+CCPy py = cc_py_new(false, a) !> @destroy;
 
 py.exec("def triple(x):\n    return x * 3\n") !>;
 CCPyObj v = py.eval(@slice("triple(14)")) !> @destroy;
 int64_t n = v.as_i64() !>;
-println(@string(`triple=${n}`, &a)) !>;
+println(@string(`triple=${n}`, a)) !>;
 
 /* The declared destination joins resolution — same shape as the JS twin:
  * a scalar destination extracts through the typed sink variant, no
  * intermediate CCPyObj in user space. */
 double d = py.eval(@slice("2.5 * triple(2)")) !>;
 long long big = py.eval(@slice("1 << 40")) !>;
-println(@string(`typed=${d} ${big}`, &a)) !>;
+println(@string(`typed=${d} ${big}`, a)) !>;
 
 /* A bad expression is an ordinary Python failure. */
 CCPyObj bad = py.eval(@slice("1/0")) !>(e) {
-    println(@string(`caught=${e.type_name}`, &a)) !>;
+    println(@string(`caught=${e.type_name}`, a)) !>;
     return 0;
 } @destroy;
 (void)bad;

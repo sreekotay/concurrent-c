@@ -40,7 +40,7 @@ int main(void) {
         tx.try_send_into(
             (slot, arena) => {
                 /* Reserve-then-write: produce into the admitted slot.
-                 * slot/arena types inferred from typed tx (SendIntoMsg*, CCArena*). */
+                 * slot/arena types inferred from typed tx (SendIntoMsg*, CCArena). */
                 (void)arena;
                 memset(slot, 0, sizeof(*slot));
                 slot->built_at = (uintptr_t)slot;

@@ -9,14 +9,14 @@
  *
  * @scratch is throwaway. To keep a product past the call that creates it,
  * pass the arena it should live on — last parameter, so UFCS binds the data:
- * n.label(&keep).
+ * n.label(keep).
  */
 #include <ccc/std/prelude.cch>
 #include <stdlib.h>
 #include <ccc/script/stdio.cch>
 
 /* Arena last: the CCString lives on `a`, not in this call. */
-static CCString label(int n, CCArena *a) {  // Caller chooses the product lifetime - arena as last parameter.
+static CCString label(int n, CCArena a) {   // Caller chooses the product lifetime - arena as last parameter.
     return @string(`req-${n}`, a);          // Produced storage lives on that arena.
 }
 
@@ -29,14 +29,14 @@ int main(void) {
 
         /* scratch allocation, reclaimed at cp.restore(); the element
          * type comes from the destination */
-        CCArenaCheckpoint cp = arena.try_checkpoint() !> @destroy;
+        CCArenaCheckpoint cp = arena.checkpoint() @destroy;
         char* scratch = arena.allocT(1024);
         if (scratch) scratch[0] = '\0';
         cp.try_restore() !>;
     }
 
     int n = 3;
-    CCString kept = n.label(&keep);
+    CCString kept = n.label(keep);
     println(@string(`kept ${kept}`, @scratch)) !>;
     return 0;
 }

@@ -15,7 +15,7 @@ p.println() !>;
 char *mut = (char *)"mut";
 mut->println() !>;
 
-@string(`tpl=${1}`, &a).println() !>;
+@string(`tpl=${1}`, a).println() !>;
 
 "err".eprintln() !>;
 

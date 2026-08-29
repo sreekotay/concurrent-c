@@ -7,7 +7,7 @@
  * Side-by-side with: examples/serdes/json/tools/minify.py
  * Suite: tests/script_minify_smoke.shcc (symlink) + .stdin/.stdout
  */
-Vec::[char] out@(&a) @destroy;
+Vec::[char] out@(a) @destroy;
 bool instr = false;
 bool esc = false;
 

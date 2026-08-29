@@ -503,7 +503,7 @@ static FileTape* tape_cache_find(TapeCache* c, const char* path) {
  * comptime prepare+blank rewrites the buffer before whitelist parse.
  * Line-splices like `read_file` — PpTok expects spliced bytes. */
 static FileTape* tape_cache_load_bytes(TapeCache* c, const char* path,
-                                       char* bytes, size_t len, CCArena* arena) {
+                                       char* bytes, size_t len, CCArena arena) {
     FileTape* hit = tape_cache_find(c, path);
     if (hit) {
         free(bytes);
@@ -566,7 +566,7 @@ static FileTape* tape_cache_load_bytes(TapeCache* c, const char* path,
     return ft;
 }
 
-static FileTape* tape_cache_load(TapeCache* c, const char* path, CCArena* arena) {
+static FileTape* tape_cache_load(TapeCache* c, const char* path, CCArena arena) {
     char* bytes = NULL;
     size_t len = 0;
     if (!read_file(path, &bytes, &len)) return NULL;

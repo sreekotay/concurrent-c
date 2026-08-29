@@ -51,7 +51,7 @@ int main(void) {
 
     for (i = 0; i < N; i++) {
         size_t sz = item_size(i);
-        ptrs[i] = (unsigned char *)cc_arena_alloc(&a, sz, 8);
+        ptrs[i] = (unsigned char *)cc_arena_alloc(a, sz, 8);
         if (!ptrs[i]) {
             printf("FAIL: alloc %zu\n", i);
             return 3;
@@ -78,7 +78,7 @@ int main(void) {
     for (i = 0; i < N / 2; i++) {
         size_t idx = order[i];
         if (!alive[idx]) continue;
-        if (!cc_arena_release(&a, ptrs[idx])) {
+        if (!cc_arena_release(a, ptrs[idx])) {
             printf("FAIL: release %zu\n", idx);
             return 5;
         }
@@ -95,7 +95,7 @@ int main(void) {
         void *np;
         if (!alive[i]) continue;
         want = (size_t)sizes[i] + 48 + (i % 32);
-        np = cc_arena_realloc(&a, &a, ptrs[i], sizes[i], want, 8);
+        np = cc_arena_realloc(a, a, ptrs[i], sizes[i], want, 8);
         if (!np) {
             printf("FAIL: realloc %zu\n", i);
             return 6;
@@ -106,7 +106,7 @@ int main(void) {
     }
     grow_ms = now_ms() - t0;
 
-    cc_arena_reset(&a);
+    cc_arena_reset(a);
     if (a.a->ovf_head || cc_arena_overflow_raw_bytes(&a) != 0) {
         printf("FAIL: reset left overflow\n");
         return 7;

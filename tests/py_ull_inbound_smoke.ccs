@@ -38,7 +38,7 @@ int main(void) {
         puts("py_ull_inbound_smoke: SKIP (no libpython)");
         return 0;
     }
-    CCPy py = cc_py_new(false, &a) !>;
+    CCPy py = cc_py_new(false, a) !>;
     U64Echo seed = {0};
     py_expose::[U64Echo](&py, "u64echo", &seed) !>;
 

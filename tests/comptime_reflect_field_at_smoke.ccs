@@ -6,7 +6,7 @@
 typedef struct { int x; long y; } RFld;
 
 @comptime CCSlice rfld_factory(CCSlice generic_name, CCSlice mangled,
-                               CCSliceArray type_args, CCArena* arena) {
+                               CCSliceArray type_args, CCArena arena) {
     (void)generic_name; (void)mangled; (void)type_args;
     CCReflectField f0, f1;
     if (cc_reflect_field_at("RFld", 0, &f0) != 0) return cc_slice_empty();

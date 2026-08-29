@@ -101,7 +101,7 @@ enum { PASS_INC_CAP = 64, SYS_INC_CAP = 16, CPP_DIR_CAP = 256 };
 
 typedef struct {
     TapeCache* cache;
-    CCArena* arena;
+    CCArena arena;
     const char* search_dir; /* directory prefix for "..." includes */
     /* Angle-include search roots (e.g. cc/include). Used to warm stage-1
      * cache; <...> are not spliced into the AST stream (passthrough emit). */

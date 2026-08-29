@@ -37,7 +37,7 @@ int main(int argc, char **argv) {
     if (n < 2) n = 2;
 
     if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
-    CCPy py = cc_py_new(false, &a) !>;
+    CCPy py = cc_py_new(false, a) !>;
 
     CCResult_void_CCPyError probe = cc_py_exec(&py, @string(`
         import matplotlib
@@ -47,8 +47,8 @@ int main(int argc, char **argv) {
     if (probe.is_err()) { puts("SKIP (no matplotlib)"); return 0; }
 
     /* A damped sine, computed in CC. */
-    double *xs = cc_arena_alloc_T_count(double, &a, (size_t)n);
-    double *ys = cc_arena_alloc_T_count(double, &a, (size_t)n);
+    double *xs = cc_arena_alloc_T_count(double, a, (size_t)n);
+    double *ys = cc_arena_alloc_T_count(double, a, (size_t)n);
     if (!xs || !ys) { puts("SKIP (allocation)"); return 0; }
     for (long long i = 0; i < n; i++) {
         double t = (double)i / (double)(n - 1) * 20.0;

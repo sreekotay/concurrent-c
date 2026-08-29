@@ -1,0 +1,553 @@
+/*
+ * Throwaway: same tiny surface as redis_async_sketch, different MGET hold.
+ *
+ * Sketch / idiomatic MGET: hold_sorted(unique shards), then a sequential
+ * lookup+encode loop. One client pins every involved shard for the whole
+ * command; encode runs while those exclusives are still held.
+ *
+ * This file: each MGET key is a wait-for ticket. The ticket hold_one's
+ * that key's shard, copies the value into ticket-local snap, releases,
+ * then @stage-encodes in argv order. Other clients can use a shard as
+ * soon as that key's snapshot is done — they do not wait for later
+ * keys' encode. Holding through the write stage would pin the shard
+ * while earlier tickets drain the turnstile; that is the worse of both
+ * worlds, so the copy is required. Values live in shard arenas: a
+ * concurrent DEL/SET can free the CCString once the hold drops.
+ *
+ * Each ticket holds at most one shard, so there is no lock-order
+ * deadlock. Two keys on the same shard just queue on that exclusive.
+ *
+ * Everything else is the sketch (PING…FLUSHDB, ln.serve, Conn encode).
+ * Likely thrown away; the question is whether overlapping per-key holds
+ * plus ordered encode is a hold story we want anywhere.
+ *
+ * Mid-MGET ticket error (admission / clone / encode) after array_len
+ * leaves a truncated RESP array; the connection dies. Same caveat as
+ * the sketch, plus: a late ticket failure can land after earlier bulks
+ * are already in Conn.out.
+ *
+ * Build: `make redis_parallel`
+ * Run:   ./out/redis_parallel [addr]   # default 127.0.0.1:6382
+ */
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/std/net.cch>
+#include <ccc/std/map.cch>
+#include <ccc/std/hash.cch>
+#include <ccc/std/string.cch>
+#include <ccc/std/shard_map.cch>
+#include <ccc/cc_exclusive.cch>
+#include <ccc/script/stdio.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <signal.h>
+
+#define K_READ_BUF   (16 * 1024)
+#define K_CMD_ARENA  (64 * 1024)
+#define K_OUT_BUF    (8 * 1024)
+#define K_PIPELINE   16
+#define K_MAX_ARGS   64
+#define K_MAX_SHARDS 64
+/* In-flight MGET tickets. Depth 4: enough overlap for an 8-key MGET
+ * without eight concurrent snaps / holds. */
+#define K_MGET_CAP   4
+
+static const char* k_listen = "127.0.0.1:6382";
+
+typedef enum Hold {
+    HOLD_NONE = 0,
+    HOLD_KEY,
+    HOLD_KEYS,
+    HOLD_ALL,
+} Hold;
+
+typedef struct DB {
+    CCShardMap maps;
+} DB;
+
+typedef struct Cmd {
+    char[:] args[K_MAX_ARGS];
+    size_t argc;
+} Cmd;
+
+typedef struct Conn {
+    CCSocket* sock;
+    CCArena arena; /* stack root + GROWABLE spill; reset on flush */
+    CCString out;   /* contiguous encode buffer in arena */
+} Conn;
+
+/* Encode phase: methods only (no sock/flush; fields stay behind Conn* bodies). */
+typedef @typeview Encode on Conn {
+    r: write, lit, simple, err, ok, pong, null, integer, bulk, array_*;
+} *ConnEnc;
+
+static bool !>(CCIoError) write_all(CCSocket* sock, char[:] data) {
+    @errhandler(CCError e) cc_error_exit(e);
+    size_t off = 0;
+    while (off < data.len) {
+        size_t n = sock->write(data.ptr + off, data.len - off) !>(e) {
+            return cc_err(e);
+        };
+        if (n == 0)
+            return cc_err(cc_io_error(CC_ERROR(CC_ERR_CLOSED, "short write")));
+        off += n;
+    }
+    return cc_ok(true);
+}
+
+static bool !>(CCIoError) conn_flush(Conn* c) {
+    @errhandler(CCError e) cc_error_exit(e);
+    char[:] data;
+    if (!c || !c->arena.p)
+        return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "conn flush: null")));
+    data = c->out.as_slice();
+    if (data.len == 0) return cc_ok(true);
+    /* LIFO: release handle, then reclaim the encode arena. */
+    @defer c->arena.reset();
+    @defer c->out.release(c->arena);
+    write_all(c->sock, data) !>(e) { return cc_err(e); };
+    return cc_ok(true);
+}
+
+/* Encode-only: never flush/socket — safe under a shard hold.
+ * Format on @scratch (stack), then one append into Conn.out. */
+static bool !>(CCError) conn_write(Conn* c, char[:] data) {
+    if (!c || !c->arena.p)
+        return cc_err(CC_ERR_INVALID_ARG, "conn encode: null");
+    if (data.len == 0) return cc_ok(true);
+    if (!c->out.append(data, c->arena) || c->out.failed())
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "conn encode oom");
+    return cc_ok(true);
+}
+
+/* Fixed wire bytes → lit(char[:]) (lits → CC_SLICE_LIT). Interpolated → @string. */
+static bool !>(CCError) conn_lit(Conn* c, char[:] s) {
+    return c->write(s);
+}
+
+static bool !>(CCError) conn_simple(Conn* c, const char* s) {
+    CCString line = @string(`+${s}\r\n`, @scratch);
+    return c->write(line.as_slice());
+}
+
+static bool !>(CCError) conn_err(Conn* c, const char* s) {
+    CCString line = @string(`-ERR ${s}\r\n`, @scratch);
+    return c->write(line.as_slice());
+}
+
+static bool !>(CCError) conn_ok(Conn* c) { return c->lit("+OK\r\n"); }
+static bool !>(CCError) conn_pong(Conn* c) { return c->lit("+PONG\r\n"); }
+static bool !>(CCError) conn_null(Conn* c) { return c->lit("$-1\r\n"); }
+
+static bool !>(CCError) conn_integer(Conn* c, int64_t v) {
+    CCString line = @string(`:${v}\r\n`, @scratch);
+    return c->write(line.as_slice());
+}
+
+static bool !>(CCError) conn_bulk(Conn* c, char[:] b) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCString hdr = @string(`$${b.len}\r\n`, @scratch);
+    c->write(hdr.as_slice()) !>;
+    c->write(b) !>;
+    return c->lit("\r\n");
+}
+
+static bool !>(CCError) conn_array_len(Conn* c, size_t nkeys) {
+    CCString hdr = @string(`*${nkeys}\r\n`, @scratch);
+    return c->write(hdr.as_slice());
+}
+
+static bool db_init(DB* db, CCExclusive excl, CCShardMask mask) {
+    CCShardMap* maps;
+    if (!db) return false;
+    memset(db, 0, sizeof(*db));
+    maps = &db->maps;
+    return maps->init(excl, mask);
+}
+
+static void db_free(DB* db) {
+    if (!db) return;
+    cc_shard_map_destroy(&db->maps);
+    memset(db, 0, sizeof(*db));
+}
+
+static size_t shard_of(DB* db, char[:] key) {
+    CCShardMap* maps = &db->maps;
+    return maps->index(cc_hash_slice(key));
+}
+
+static Hold hold_for(char[:] name) {
+    switch (name) {
+    case "GET":
+    case "SET":
+    case "INCR":
+        return HOLD_KEY;
+    case "DEL":
+    case "EXISTS":
+        return HOLD_KEYS;
+    case "DBSIZE":
+    case "FLUSHDB":
+        return HOLD_ALL;
+    default:
+        return HOLD_NONE;
+    }
+}
+
+static bool !>(CCError) exec_incr(CCShard* sh, char[:] key,
+                                  ConnEnc conn) {
+    @errhandler(CCError e) cc_error_exit(e);
+    CCString* v = sh->get(key);
+    int64_t n = 0;
+    if (v) {
+        char[:] s = v->as_slice();
+        int64_t parsed = s.to_i64() !>(e) {
+            (void)e;
+            return conn->err("value is not an integer");
+        };
+        n = parsed;
+    }
+    n++;
+    CCString num = @string(`${n}`, @scratch);
+    if (!sh->put(key, num.as_slice())) return conn->err("oom");
+    return conn->integer(n);
+}
+
+static bool !>(CCError) exec_key(DB* db, Cmd* c, size_t si,
+                                 ConnEnc conn) {
+    CCShardMap* maps = &db->maps;
+    CCShard* sh = maps->shard(si);
+    char[:] name = c->args[0];
+    char[:] key = c->args[1];
+    CCString* v;
+
+    if (!sh) return conn->err("internal");
+    switch (name) {
+    case "GET":
+        v = sh->get(key);
+        if (!v) return conn->null();
+        return conn->bulk(v->as_slice());
+    case "SET":
+        if (c->argc < 3) return conn->err("wrong number of arguments");
+        if (!sh->put(key, c->args[2])) return conn->err("oom");
+        return conn->ok();
+    case "INCR":
+        return exec_incr(sh, key, conn);
+    default:
+        return conn->err("internal");
+    }
+}
+
+static bool !>(CCError) exec_keys(DB* db, Cmd* c,
+                                  ConnEnc conn) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCShardMap* maps = &db->maps;
+    char[:] name = c->args[0];
+    size_t i;
+    int64_t n;
+    CCShard* sh;
+
+    switch (name) {
+    case "DEL":
+        n = 0;
+        for (i = 1; i < c->argc; i++) {
+            sh = maps->shard(shard_of(db, c->args[i]));
+            if (sh && sh->delete(c->args[i])) n++;
+        }
+        return conn->integer(n);
+    case "EXISTS":
+        n = 0;
+        for (i = 1; i < c->argc; i++) {
+            sh = maps->shard(shard_of(db, c->args[i]));
+            if (sh && sh->get(c->args[i])) n++;
+        }
+        return conn->integer(n);
+    default:
+        return conn->err("internal");
+    }
+}
+
+static bool !>(CCError) exec_all(DB* db, Cmd* c,
+                                 ConnEnc conn) {
+    CCShardMap* maps = &db->maps;
+    char[:] name = c->args[0];
+    switch (name) {
+    case "DBSIZE":
+        return conn->integer((int64_t)maps->len());
+    case "FLUSHDB":
+        if (!maps->reset()) return conn->err("oom");
+        return conn->ok();
+    default:
+        return conn->err("internal");
+    }
+}
+
+static size_t unique_shards(DB* db, Cmd* c, uint64_t* names, size_t cap) {
+    size_t n = 0, i, j;
+    for (i = 1; i < c->argc; i++) {
+        uint64_t si = (uint64_t)shard_of(db, c->args[i]);
+        int seen = 0;
+        for (j = 0; j < n; j++) {
+            if (names[j] == si) {
+                seen = 1;
+                break;
+            }
+        }
+        if (!seen && n < cap) names[n++] = si;
+    }
+    return n;
+}
+
+static void !>(CCError) require_held(CCShardHold* hold) {
+    if (!hold || !hold->held())
+        return cc_err(CC_ERR_INVALID_ARG, "shard admission failed");
+    return cc_ok();
+}
+
+/* Per-key hold_one, snapshot, release; encode in argv order on the
+ * turnstile. Conn.out/arena are only touched in @stage (serialized).
+ * Snap lives in a ticket-local arena — Conn.arena is not concurrent. */
+static bool !>(CCError) exec_mget_parallel(DB* db, Cmd* c, ConnEnc conn) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCShardMap* maps = &db->maps;
+    size_t nkeys = c->argc - 1;
+    size_t i;
+    char ts_slab[16 * 1024];
+    CCArena ts_arena = @create(ts_slab, sizeof(ts_slab)) @destroy;
+    CCTurnstile ts@(K_MGET_CAP, 1, ts_arena) !> @destroy;
+
+    conn->array_len(nkeys) !>;
+    @parallel wait (ts) for (i in 0..nkeys) {
+        char[:] key = c->args[i + 1];
+        size_t si = shard_of(db, key);
+        char snap_buf[4096];
+        CCArena snap_a =
+            cc_arena_create_buffer(snap_buf, sizeof(snap_buf), CC_ARENA_GROWABLE)
+            @destroy;
+        int present = 0;
+        char[:] copy = {0};
+
+        {
+            CCShardHold hold = maps->hold_one((uint64_t)si);
+            @defer hold.release();
+            require_held(&hold) !>;
+            CCShard* sh = maps->shard(si);
+            CCString* v = sh ? sh->get(key) : NULL;
+            if (v) {
+                char[:] src = v->as_slice();
+                copy = src.clone_into(snap_a) !>;
+                present = 1;
+            }
+        }
+
+        @stage (ts, 0, i) {
+            if (!present)
+                conn->null() !>;
+            else
+                conn->bulk(copy) !>;
+        }
+    } !>.wait()!>;
+    return cc_ok(true);
+}
+
+/* Encode phase only — ship (flush/sock) stays on Conn* in handle_client. */
+static bool !>(CCError) execute(DB* db, Cmd* c,
+                                ConnEnc conn) {
+    Hold h = HOLD_NONE;
+    char[:] name;
+    size_t i;
+
+    if (c->argc == 0) return conn->err("empty command");
+    name = c->args[0];
+    /* Fold for string-switch; names are tiny (GET/MGET/…). */
+    for (i = 0; i < name.len; i++)
+        if (name.ptr[i] >= 'a' && name.ptr[i] <= 'z') name.ptr[i] -= 32;
+    switch (name) {
+    case "PING":
+        if (c->argc > 1) return conn->bulk(c->args[1]);
+        return conn->pong();
+    case "ECHO":
+        if (c->argc < 2) return conn->err("wrong number of arguments");
+        return conn->bulk(c->args[1]);
+    case "MGET":
+        if (c->argc < 2) return conn->err("wrong number of arguments");
+        return exec_mget_parallel(db, c, conn);
+    default:
+        break;
+    }
+    h = hold_for(name);
+    if (h == HOLD_NONE) return conn->err("unknown command");
+
+    CCShardMap* maps = &db->maps;
+    if (h == HOLD_KEY) {
+        size_t si;
+        if (c->argc < 2) return conn->err("wrong number of arguments");
+        si = shard_of(db, c->args[1]);
+        CCShardHold hold = maps->hold_one((uint64_t)si);
+        @defer hold.release();
+        if (!hold.held()) return conn->err("shard admission failed");
+        return exec_key(db, c, si, conn);
+    }
+    if (h == HOLD_KEYS) {
+        uint64_t names[K_MAX_SHARDS];
+        size_t nnames;
+        if (c->argc < 2) return conn->err("wrong number of arguments");
+        nnames = unique_shards(db, c, names, (size_t)K_MAX_SHARDS);
+        CCShardHold hold = maps->hold_sorted(names, nnames);
+        @defer hold.release();
+        if (!hold.held()) return conn->err("shard admission failed");
+        return exec_keys(db, c, conn);
+    }
+    {
+        CCShardHold hold = maps->hold_all();
+        @defer hold.release();
+        if (!hold.held()) return conn->err("shard admission failed");
+        return exec_all(db, c, conn);
+    }
+}
+
+static bool !>(CCIoError) read_cmd(BufReader::[CCSocket]* br, CCArena arena, Cmd* out) {
+    @errhandler(CCError e) cc_error_exit(e);
+    for (;;) {
+        size_t i, start, end;
+        memset(out, 0, sizeof(*out));
+
+        char[:] line = br->read_line() !>(e) { return cc_err(e); };
+        if (line.len == 0) {
+            if (br->eof) return cc_ok(false);
+            continue;
+        }
+
+        if (line.ptr[0] != '*') {
+            start = 0;
+            while (start < line.len && out->argc < (size_t)K_MAX_ARGS) {
+                while (start < line.len && line.ptr[start] == ' ') start++;
+                if (start >= line.len) break;
+                end = start;
+                while (end < line.len && line.ptr[end] != ' ') end++;
+                char[:] part = line.sub(start, end);
+                char[:] owned = part.clone_into(arena) !>(e) {
+                    return cc_err(cc_io_error(e));
+                };
+                out->args[out->argc++] = owned;
+                start = end;
+            }
+            if (out->argc == 0) continue;
+            return cc_ok(true);
+        }
+
+        char[:] argc_s = line.sub(1, line.len);
+        int64_t n = argc_s.to_i64() !>(e) {
+            (void)e;
+            return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "bad argc")));
+        };
+        if (n < 0 || n > K_MAX_ARGS)
+            return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "bad argc")));
+        if (n == 0) continue;
+        for (i = 0; i < (size_t)n; i++) {
+            char[:] hdr = br->read_line() !>(e) { return cc_err(e); };
+            if (hdr.len == 0 || hdr.ptr[0] != '$')
+                return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "bad bulk")));
+            char[:] blen_s = hdr.sub(1, hdr.len);
+            int64_t blen = blen_s.to_i64() !>(e) {
+                (void)e;
+                return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "bad bulk")));
+            };
+            if (blen < 0 || blen > (int64_t)K_CMD_ARENA)
+                return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "bad bulk")));
+
+            char[:] payload = br->read_exact((size_t)blen + 2) !>(e) {
+                return cc_err(e);
+            };
+            char[:] part = payload.sub(0, (size_t)blen);
+            char[:] owned = part.clone_into(arena) !>(e) {
+                return cc_err(cc_io_error(e));
+            };
+            out->args[out->argc++] = owned;
+        }
+        return cc_ok(true);
+    }
+}
+
+static void handle_client(CCSocket client, DB* db) {
+    @errhandler(CCError e) cc_error_exit(e);
+    char read_buf[K_READ_BUF];
+    char cmd_buf[K_CMD_ARENA];
+    char out_slab[K_OUT_BUF];
+    BufReader::[CCSocket] br;
+    CCArena arena =
+        cc_arena_create_buffer(out_slab, sizeof(out_slab), CC_ARENA_GROWABLE)
+        @destroy;
+    Conn conn = { .sock = &client, .arena = arena, .out = cc_string_new() };
+    @defer client.close();
+    @defer conn.flush() !>(e) { (void)e; }; /* exit-only; errors swallowed */
+    br.init(&client, read_buf, sizeof(read_buf));
+
+    for (;;) {
+        size_t i;
+        for (i = 0; i < (size_t)K_PIPELINE; i++) {
+            Cmd c;
+            if (i > 0 && br.buffered() == 0) break;
+            CCArena cmd_a = @create(cmd_buf, sizeof(cmd_buf)) @destroy;
+
+            bool ok = read_cmd(&br, cmd_a, &c) !>(e) {
+                if (i == 0 && e.base.kind != CC_ERR_CLOSED)
+                    conn.err(cc_io_error_str(e)) !>(e2) { (void)e2; };
+                return;
+            };
+            if (!ok) return;
+            execute(db, &c, &conn) !>(e) {
+                (void)e;
+                return;
+            };
+        }
+        /* Steady-state: checked ship (defer alone would swallow write failure). */
+        conn.flush() !>(e) {
+            (void)e;
+            return;
+        };
+    }
+}
+
+int main(int argc, char** argv) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    const char* addr = argc > 1 ? argv[1] : k_listen;
+    DB db = {0};
+    CCShardMask mask = cc_shard_mask_auto((size_t)K_MAX_SHARDS);
+
+    CCArena excl_arena = @create(kilobytes(64)) @destroy;
+    CCExclusive excl = cc_exclusive_create(excl_arena, mask.count * 2u) !> @destroy;
+
+    if (!db_init(&db, excl, mask)) {
+        eprintln("redis_parallel: db_init failed") !>;
+        return 1;
+    }
+    @defer db_free(&db);
+
+    CCListener ln = cc_tcp_listen(cc_slice_cstr(addr)) !>(e) {
+        eprintln(@string(`listen: ${e}`, @scratch)) !>;
+        return 1;
+    };
+    @defer ln.close();
+
+    size_t nshards = db.maps.count();
+    println(@string(`redis-parallel on ${addr} shards=${nshards}`,
+                    @scratch)) !>;
+
+    /* !> @destroy joins (wait-then-free); cancel unparks accept. */
+    CCNursery server = cc_nursery_create() !> @destroy;
+    server.cancel_on_signals(SIGINT, SIGTERM) !>;
+
+    server.spawn(() => [@safe &db, @safe &ln, server] {
+        ln.serve(server, (CCSocket* accepted) => [@safe &db, server] {
+            CCSocket client = *accepted;
+            (void)client.set_nodelay(1);
+            server.spawn(() => [@safe &db, client] {
+                handle_client(client, &db);
+            }) !>;
+        });
+    }) !>;
+    return 0;
+}

@@ -171,6 +171,12 @@ def test_basics(port):
           [b"1", None, b"2", b"3"])
     check("MSET pair", c.cmd("MSET", "ma", "9", "md", "4"), "OK")
     check("MGET overwrite", c.cmd("MGET", "ma", "md"), [b"9", b"4"])
+    check("MGET 8 keys", c.cmd("MGET", "ma", "md", "x1", "x2", "x3", "x4", "x5", "x6"),
+          [b"9", b"4", None, None, None, None, None, None])
+    check("MGET 20 keys",
+          c.cmd("MGET", "ma", "md", "a", "b", "c", "d", "e", "f", "g", "h",
+                "i", "j", "k", "l", "m", "n", "o", "p", "q", "r"),
+          [b"9", b"4"] + [None] * 18)
 
     check("FLUSHDB", c.cmd("FLUSHDB"), "OK")
     check("DBSIZE empty", c.cmd("DBSIZE"), 0)

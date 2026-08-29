@@ -24,7 +24,7 @@ static int box_sum9(Box* b, int a0, int a1, int a2, int a3, int a4, int a5,
 
 static char[:] box_ufcs(char[:] recv_type, char[:] method, char[:] mode,
                         CCSliceArray argv, CCSliceArray arg_types,
-                        CCArena* arena) {
+                        CCArena arena) {
     (void)recv_type;
     (void)mode;
     (void)argv;

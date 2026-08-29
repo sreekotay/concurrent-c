@@ -8,12 +8,12 @@ int main(void) {
     CCArena a = cc_arena_heap(kilobytes(32)) @destroy;
     Vec::[int] xs = vec_new::[int](a);
     const char *doc = "xs.push(99); don't invent";
-    CCString s = @string(`xs.push(99) don't`, &a);
+    CCString s = @string(`xs.push(99) don't`, a);
     xs.push(1);
     if (xs.len() != 1 || *xs.get(0) != 1) return 1;
     if (!strstr(doc, "push") || !strstr(doc, "don't")) return 2;
-    if (!strstr(cc_string_cstr(&s, &a), "push") ||
-        !strstr(cc_string_cstr(&s, &a), "don't"))
+    if (!strstr(cc_string_cstr(&s, a), "push") ||
+        !strstr(cc_string_cstr(&s, a), "don't"))
         return 3;
     printf("string_tpl_ufcs_lookalike_smoke ok\n");
     return 0;

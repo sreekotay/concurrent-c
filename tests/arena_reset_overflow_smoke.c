@@ -10,11 +10,11 @@ int main(void) {
         printf("FAIL: init\n");
         return 1;
     }
-    if (!cc_arena_set_heap_overflow(&a, true)) {
+    if (!cc_arena_set_heap_overflow(a, true)) {
         printf("FAIL: enable overflow\n");
         return 1;
     }
-    spill = cc_arena_alloc(&a, 512, 8);
+    spill = cc_arena_alloc(a, 512, 8);
     if (!spill) {
         printf("FAIL: overflow alloc\n");
         return 1;
@@ -31,12 +31,12 @@ int main(void) {
         printf("FAIL: overflow alloc must stay rewindable\n");
         return 1;
     }
-    if (cc_arena_checkpoint(&a).arena == NULL) {
+    if (cc_arena_checkpoint(a).arena == NULL) {
         printf("FAIL: checkpoint should work after overflow alloc\n");
         return 1;
     }
 
-    cc_arena_reset(&a);
+    cc_arena_reset(a);
 
     if (a.a->ovf_head != NULL) {
         printf("FAIL: ovf_head not cleared\n");
@@ -50,7 +50,7 @@ int main(void) {
         printf("FAIL: flags after reset\n");
         return 1;
     }
-    if (cc_arena_checkpoint(&a).arena == NULL) {
+    if (cc_arena_checkpoint(a).arena == NULL) {
         printf("FAIL: checkpoint should work after reset\n");
         return 1;
     }

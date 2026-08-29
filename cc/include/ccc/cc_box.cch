@@ -148,7 +148,7 @@ static inline CCSlice cc__box_cast_pass(void) {
 }
 
 static inline CCSlice cc__box_cast_concat(const char *p, size_t n, const char *suf,
-                                         CCArena *arena) {
+                                         CCArena arena) {
     CCSlice left;
     CCSlice right;
     left.ptr = (char *)(void *)p;
@@ -160,7 +160,7 @@ static inline CCSlice cc__box_cast_concat(const char *p, size_t n, const char *s
 
 /* `.cast` on CCBox / CCBox_*: dest may insert H* → box; dest must not peel. */
 static inline CCSlice cc_box_cast_lower_c(CCSlice src, CCSlice dest, CCSlice kind,
-                                         CCArena *arena) {
+                                         CCArena arena) {
     const char *dhost = NULL;
     size_t dhost_n = 0;
     int derased = 0;

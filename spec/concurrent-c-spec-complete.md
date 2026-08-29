@@ -160,7 +160,7 @@ decide whether a slice is copyable or must move.
 
 ```c
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
-CCString greeting = @string(`hello ${now()}`, &a);   // arena provenance
+CCString greeting = @string(`hello ${now()}`, a);   // arena provenance
 // greeting is copyable while `a` is live; captured into a task only if
 // `a` provably outlives the task.
 ```
@@ -362,7 +362,7 @@ bugs.
 | `@scoped`      | Type tied to a lexical scope (cannot escape)                            | `@scoped type Guard::[T];`             |
 | `@unsafe`      | Closure hatch: skip mutation-of-share checks on that spawn              | `n.spawn(@unsafe () => [&x] { x++; });` |
 | `@slice`       | Build-time canonical sentinel slice                                     | `char[:0] m = @slice("recv");`         |
-| `@string`      | Templated string: arena `String`, or arena-less bounded `char[:]` (§9.1.2) | `CCString s = @string("hi", &arena);`  |
+| `@string`      | Templated string: arena `String`, or arena-less bounded `char[:]` (§9.1.2) | `CCString s = @string("hi", arena);`  |
 | `unsafe`       | (Bare) waive provenance and sendability in a block                      | `unsafe { ptr_cast(); }`               |
 
 
@@ -558,8 +558,8 @@ int!>(IoError) read_int(char[:] data) {
     return cc_ok(parse_int(trimmed));
 }
 
-Vec::[int] numbers@(&arena) @destroy;
-Map::[char[:], int] registry@(&arena) @destroy;
+Vec::[int] numbers@(arena) @destroy;
+Map::[char[:], int] registry@(arena) @destroy;
 ```
 
 **Rule (type arguments, normative).** `::[...]` specializes the name it
@@ -952,7 +952,7 @@ revision defines multi-line tag bodies.
  * @returns     populated Metrics map
  * @errors      CC_ERR_IO, CC_ERR_PARSE
  */
-static Metrics !>(CCError) load_metrics(const char* path, CCArena* a);
+static Metrics !>(CCError) load_metrics(const char* path, CCArena a);
 ```
 
 Aside from `.shcc` `@task` opt-in (§9.5.2a), CCDoc does not affect program
@@ -1885,9 +1885,9 @@ CCArena cc_arena_fixed_buffer(void* buf, size_t cap);    // create_buffer(..., C
 #ifndef CC_ARENA_DEFAULT_BLOCK_MAX
 #define CC_ARENA_DEFAULT_BLOCK_MAX 4u
 #endif
-bool cc_arena_set_heap_overflow(CCArena* a, bool enabled);
+bool cc_arena_set_heap_overflow(CCArena a, bool enabled);
 
-// Lifecycle
+// Lifecycle (`*` is the binding slot — the only justified star)
 void cc_arena_free(CCArena* a);          // drain ovf; free heap extents/root; clear handle
 void cc_arena_reset(CCArena* a);         // drain ovf; unwind extents; restore original root
 void cc_arena_destroy(CCArena* a);       // alias for cc_arena_free
@@ -1895,24 +1895,24 @@ CCArena cc_arena_detach(CCArena* a);     // heap-owned L1 only; empty on refuse
 
 // Checkpoints (cross-block; new capture disabled after a slab hole)
 typedef struct CCArenaCheckpoint CCArenaCheckpoint;
-CCArenaCheckpoint cc_arena_checkpoint(CCArena* a);           // C twin (@scratch)
+CCArenaCheckpoint cc_arena_checkpoint(CCArena a);           // C twin (@scratch)
 bool cc_arena_restore(CCArenaCheckpoint checkpoint);         // C twin; false: refuse
-CCArenaCheckpoint !>(CCError) cc_arena_try_checkpoint(CCArena* a);
+CCArenaCheckpoint !>(CCError) cc_arena_try_checkpoint(CCArena a);
 void !>(CCError) cc_arena_try_restore(CCArenaCheckpoint checkpoint);
-size_t cc_arena_live(const CCArena* a);  // L1 + L2 + Main
-CCArenaTier cc_arena_ptr_tier(const CCArena* a, const void* ptr);
+size_t cc_arena_live(CCArena a);  // L1 + L2 + Main
+CCArenaTier cc_arena_ptr_tier(CCArena a, const void* ptr);
 
 // Shared alloc (thread-safe tip CAS + meta_lock on grow/ovf/chain)
-void* cc_arena_alloc(CCArena* a, size_t nbytes, size_t align);
-void* cc_arena_realloc(CCArena* old_a, CCArena* new_a, void* p,
+void* cc_arena_alloc(CCArena a, size_t nbytes, size_t align);
+void* cc_arena_realloc(CCArena old_a, CCArena new_a, void* p,
                        size_t old_n, size_t new_n, size_t align);
-bool cc_arena_release(CCArena* a, void* ptr);
+bool cc_arena_release(CCArena a, void* ptr);
 
 // Local alloc (exclusive owner only — UB if shared)
-void* cc_arena_alloc_local(CCArena* a, size_t nbytes, size_t align);       // current slab; NULL if full
-void* cc_arena_alloc_local_grow(CCArena* a, size_t nbytes, size_t align);  // local tip, unlocked grow, then ovf
-void* cc_arena_realloc_local(CCArena* a, void* p, size_t old_n, size_t new_n, size_t align);       // tip fit only
-void* cc_arena_realloc_local_grow(CCArena* a, void* p, size_t old_n, size_t new_n, size_t align);  // tip, else local grow/copy
+void* cc_arena_alloc_local(CCArena a, size_t nbytes, size_t align);       // current slab; NULL if full
+void* cc_arena_alloc_local_grow(CCArena a, size_t nbytes, size_t align);  // local tip, unlocked grow, then ovf
+void* cc_arena_realloc_local(CCArena a, void* p, size_t old_n, size_t new_n, size_t align);       // tip fit only
+void* cc_arena_realloc_local_grow(CCArena a, void* p, size_t old_n, size_t new_n, size_t align);  // tip, else local grow/copy
 
 #define cc_arena_alloc_T(T, arena)                 // shared default; UFCS: a.allocT()
 #define cc_arena_alloc_T_count(T, arena, count)    // UFCS: a.allocT(n)
@@ -1922,11 +1922,11 @@ void* cc_arena_realloc_local_grow(CCArena* a, void* p, size_t old_n, size_t new_
 #define cc_arena_alloc_T_count_local_grow(T, arena, count)
 
 // Tracked slices (empty slice on failure; len==0 is also empty)
-CCSlice cc_arena_alloc_slice_bytes(CCArena* a, size_t len);  // UFCS: a.alloc_slice_bytes(n)
-CCSlice cc_arena_alloc_slice(CCArena* a, size_t elem_size, size_t count, size_t align);
-CCSlice cc_arena_slice(const CCArena* a, void* ptr, size_t len);  // UFCS: a.slice(ptr, len)
+CCSlice cc_arena_alloc_slice_bytes(CCArena a, size_t len);  // UFCS: a.alloc_slice_bytes(n)
+CCSlice cc_arena_alloc_slice(CCArena a, size_t elem_size, size_t count, size_t align);
+CCSlice cc_arena_slice(CCArena a, void* ptr, size_t len);  // UFCS: a.slice(ptr, len)
 
-int cc_arena_would_fit(const CCArena* a, size_t nbytes, size_t align);  // current slab only
+int cc_arena_would_fit(CCArena a, size_t nbytes, size_t align);  // current slab only
 size_t kilobytes(size_t n);
 size_t megabytes(size_t n);
 ```
@@ -1936,7 +1936,7 @@ arena. Pool bump fills use shared `cc_arena_alloc`.
 
 ```c
 typedef struct CCArenaPool CCArenaPool;
-void cc_arena_pool_init(CCArenaPool* p, CCArena* a, size_t sz);
+void cc_arena_pool_init(CCArenaPool* p, CCArena a, size_t sz);
 int cc_arena_pool(CCArenaPool* p, size_t sz);       // owns its own arena
 void* cc_arena_pool_alloc(CCArenaPool* p);          // UFCS: p.alloc()
 void cc_arena_pool_free(CCArenaPool* p, void* ptr); // UFCS: p.free(ptr)
@@ -2000,7 +2000,7 @@ holds the active slab.
 
 ```c
 CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
-int* xs = cc_arena_alloc_T_count(int, &a, 100);
+int* xs = cc_arena_alloc_T_count(int, a, 100);
 
 cc_arena_stack(scratch, 4096);
 void* p = scratch.alloc(n, align);
@@ -2114,7 +2114,7 @@ free/reset/detach) and does not block a later capture.
 ```c
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 CCArenaCheckpoint cp = a.try_checkpoint() !> @destroy;
-char* tmp = cc_arena_alloc_T_count(char, &a, 1024);
+char* tmp = cc_arena_alloc_T_count(char, a, 1024);
 cp.try_restore() !>;  // reclaim post-checkpoint bytes
 ```
 
@@ -2221,7 +2221,7 @@ Result*!>(IoError) compress_block(Block* blk) {
     CCArena res_arena = cc_arena_heap(blk->data.len + 4096);
     @defer(err) cc_arena_free(&res_arena);  // cleanup on error only
     
-    Result* res = res_arena.allocT();  // cc_arena_alloc_T(Result, &res_arena)
+    Result* res = res_arena.allocT();  // cc_arena_alloc_T(Result, res_arena)
     if (!res) return cc_err(io_error(CC_IO_OUT_OF_MEMORY));
     
     // ... fill in res, do allocations ...
@@ -2309,7 +2309,7 @@ void!>(DbError) transfer(Db* db, Account from, Account to, int amount) {
 }
 
 // Conditional cleanup
-void!>(IoError) process(char[:] path, CCArena* out) {
+void!>(IoError) process(char[:] path, CCArena out) {
     CCArena scratch = cc_arena_heap(kilobytes(64));
     @defer cleanup: cc_arena_free(&scratch);
     
@@ -2940,10 +2940,10 @@ bool !>(CCIoError) queued =
 ```
 
 On a typed `T[~ … >]` handle, an untyped `(slot, arena)` builder infers
-`slot` as `T*` and `arena` as `CCArena*`. Explicit parameter types remain
+`slot` as `T*` and `arena` as `CCArena`. Explicit parameter types remain
 allowed and are not overwritten. The builder's `slot` denotes uninitialized
 storage for one `T`. `arena` is optional element payload backing supplied by
-the caller (or `NULL`) — a write buffer for variable-sized bytes in `*slot`,
+the caller (or an empty handle) — a write buffer for variable-sized bytes in `*slot`,
 not a channel-owned pool the runtime resets. The runtime does not acquire or
 extend that arena's lifetime; internal pointers in the constructed `T` remain
 subject to their ordinary provenance and lifetime contracts.
@@ -3341,7 +3341,7 @@ CCNursery n = cc_nursery_create() !> @destroy;
 n.spawn(() => {
     CCArena arena;
     arena_pool.recv(&arena);  // Borrow
-    void* p = cc_arena_alloc(&arena, 100, 1);
+    void* p = cc_arena_alloc(arena, 100, 1);
     arena_pool.send(arena);   // Return (auto-reset)
 });
 ```
@@ -3478,7 +3478,7 @@ UFCS on the explicit nursery handle.
 
 #### 8.1.1 Construction
 
-`CCNursery !>(CCError) cc_arena_create_nursery(CCArena* a)` (UFCS
+`CCNursery !>(CCError) cc_arena_create_nursery(CCArena a)` (UFCS
 `a.create_nursery()`) births a nursery into a live arena. A null or dead arena
 aborts. `CCNursery !>(CCError) cc_nursery_create(void)` is the self-owned handle
 (`abandon` is allowed). `CCNursery !>(CCError) cc_nursery_create_child(CCNursery parent)`
@@ -5115,13 +5115,13 @@ exclusive twin of `send_into` (§7.4): admit the name set, run
 
 ```c
 Reply r;
-bool ran = excl.acquire_into(name, &r, &arena,
-    (Reply* slot, CCArena* a) => [req] {
+bool ran = excl.acquire_into(name, &r, arena,
+    (Reply* slot, CCArena a) => [req] {
         *slot = compute(req, a);   /* own the result before returning */
         return NULL;
     });
-bool ran = excl.acquire_sorted_into(names, count, &r, &arena, builder);
-bool ran = excl.acquire_range_into(lo, hi, &r, &arena, builder);  /* [lo, hi) */
+bool ran = excl.acquire_sorted_into(names, count, &r, arena, builder);
+bool ran = excl.acquire_range_into(lo, hi, &r, arena, builder);  /* [lo, hi) */
 ```
 
 The builder is an ordinary `CCClosure2`; builder closure literals lower as
@@ -5250,12 +5250,12 @@ size_t cc_exclusive_acquire_sorted(CCExclusive* excl, const uint64_t* names,
 size_t cc_exclusive_acquire_range(CCExclusive* excl, uint64_t lo, uint64_t hi,
                                   CCExclusiveGuard* out, size_t out_cap);
 bool cc_exclusive_acquire_into(CCExclusive* excl, uint64_t name,
-                               void* slot, CCArena* arena, CCClosure2 builder);
+                               void* slot, CCArena arena, CCClosure2 builder);
 bool cc_exclusive_acquire_sorted_into(CCExclusive* excl, const uint64_t* names,
-                                      size_t count, void* slot, CCArena* arena,
+                                      size_t count, void* slot, CCArena arena,
                                       CCClosure2 builder);
 bool cc_exclusive_acquire_range_into(CCExclusive* excl, uint64_t lo, uint64_t hi,
-                                     void* slot, CCArena* arena,
+                                     void* slot, CCArena arena,
                                      CCClosure2 builder);
 void cc_exclusive_guards_release(CCExclusiveGuard* guards, size_t n);
 void cc_exclusive_guard_release(CCExclusiveGuard* g);
@@ -5277,10 +5277,10 @@ CCExclusiveGuard !>(CCError) cc_exclusive_acquire_when(CCExclusive* excl,
 CCExclusiveGuard !>(CCError) cc_exclusive_mutex_acquire_when(
     CCExclusiveMutex* m, CCExclusivePred pred, void* env);
 void !>(CCError) cc_exclusive_acquire_when_into(CCExclusive* excl, uint64_t name,
-    CCExclusivePred pred, void* env, void* slot, CCArena* arena,
+    CCExclusivePred pred, void* env, void* slot, CCArena arena,
     CCClosure2 builder);
 void !>(CCError) cc_exclusive_mutex_acquire_when_into(CCExclusiveMutex* m,
-    CCExclusivePred pred, void* env, void* slot, CCArena* arena,
+    CCExclusivePred pred, void* env, void* slot, CCArena arena,
     CCClosure2 builder);
 ```
 
@@ -5642,8 +5642,8 @@ UFCS is a type-owned extensible language feature. Libraries declare custom lower
 **Primary registration API:**
 
 ```c
-typedef CCSlice (*CCTypeCreateHandler)(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena);
-typedef CCSlice (*CCTypeUfcsHandler)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena);
+typedef CCSlice (*CCTypeCreateHandler)(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena arena);
+typedef CCSlice (*CCTypeUfcsHandler)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena arena);
 
 typedef struct {
     const char* callee1;
@@ -5708,7 +5708,7 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 - `.niche` donates a bit pattern a valid instance never exhibits, so a `@variant(packed)` arm of this type can carry the discriminant (`spec/draft_variants.md`, packed layout). `cc_type_niche(size, align, offset, width, sentinel)` is the helper.
 - `.cast` is dest-convert. The handler receives the source type, the requested dest type, and `kind` (`implicit` or `explicit`) and returns a callee name, the UFCS pass tag, or empty (hard reject). Implicit sites (decl-init) ask the dest type only. Dest may insert a wrap; dest must not insert a peel.
 - `.len` names the extent (`cc_type_len_field` or `cc_type_len_call`). Ordinary sites may read `x.len` / `x.len()`; they may not store it. `T[n]` `.len` is the constexpr bound `n`.
-- `.access` is the compiler-internal walk load (`cc_type_access_load` or `cc_type_access_call`) after `i < live len`. Users write `for (v in s)` / `for (i, v in s)` / `for (a, b in s, t)`, not `s.access(i)`. Point access stays `at` / `set` (Result). `CCSlice` / `CCSlice_*`, `CCVec_*`, and `CCString` register both arms.
+- `.access` is the compiler-internal walk load (`cc_type_access_load` or `cc_type_access_call`) after `i < live len`. Users write `for (v in s)` / `for (i, v in s)` / `for (a, b in s, t) { … } !>;`, not `s.access(i)`. Point access stays `at` / `set` (Result). `CCSlice` / `CCSlice_*`, `CCVec_*`, and `CCString` register both arms.
 - `.create` may be registered either as fixed callee strings (`cc_type_create_call(...)`, `cc_type_create_overloads(...)`) or as a callable hook via `cc_type_create_hook(...)`.
 - Recognized hook fields are `.create`, `.destroy`, `.ufcs`, `.cast`, `.len`, `.access`, `.ufcs_sink`, and `.niche`.
 
@@ -5888,10 +5888,10 @@ s.push("count=", &arena)
 char[:] view = s.as_slice();
 if (s.failed()) { /* growth/OOM — do not treat partial text as success */ }
 
-String msg = @string(42, &arena);
-String html = @string(html_policy, `<h1>${title}</h1>`, &arena);
+String msg = @string(42, arena);
+String html = @string(html_policy, `<h1>${title}</h1>`, arena);
 // Tag example: policy sees tag "meta" for the second hole
-String row = @string(row_policy, `name=${name}; age=$~meta{age}`, &arena);
+String row = @string(row_policy, `name=${name}; age=$~meta{age}`, arena);
 ```
 
 #### 9.1.2 Arena-less `@string` — bounded-template stack form
@@ -5959,8 +5959,8 @@ The arena form is unchanged: the same template with an arena yields an owned `St
 ```c
 int main(void) {
     CC_ARENA_STACK(__cc_str_scratch, 1024);   // max of default and any @scratch(N)
-    CCString s = @string(`r=${ratio}`, &__cc_str_scratch);
-    println(@string(`x=${x}`, &__cc_str_scratch));
+    CCString s = @string(`r=${ratio}`, __cc_str_scratch);
+    println(@string(`x=${x}`, __cc_str_scratch));
 }
 ```
 
@@ -5991,7 +5991,7 @@ Formatted text uses `@string` templates and `cc_string_from` / push helpers
 (stdlib Strings). There is no separate printf-style `format` entry point.
 
 ```c
-CCString msg = @string(`Hello ${name}! Score: ${score}`, &arena);
+CCString msg = @string(`Hello ${name}! Score: ${score}`, arena);
 if (cc_string_failed(&msg)) { /* arena could not hold the output */ }
 ```
 
@@ -6102,7 +6102,7 @@ typed instances use the `.base` layout), `CCVec_*` (`.len` / `data`),
 for (i in lo..hi) { ... }   /* sequential range; hi < lo is empty */
 for (v in s) { ... }        /* walk: i < s.len, then the .access load */
 for (i, v in s) { ... }     /* enumerate: i is size_t, v is the load */
-for (a, b in s, t) { ... }  /* zip: equal lens, else CC_ERR_INVALID_ARG */
+for (a, b in s, t) { ... } !>;  /* zip: void !>(CCError) */
 
 // Point (not the walk)
 for (size_t i = 0; i < s.len; i++) {
@@ -6110,9 +6110,12 @@ for (size_t i = 0; i < s.len; i++) {
 }
 ```
 
-**Zip:** if the two live lengths differ, the construct raises
+**Zip:** the construct is a statement of type `void !>(CCError)`. Consume
+with `!>;` (enclosing `@errhandler`) or `!>(e) { … }`. A bare zip is an
+unconsumed Result. If the two live lengths differ, the Result is
 `CC_ERR_INVALID_ARG`. There is no silent min. The walk runs only when
-the lengths are equal.
+the lengths are equal. Walk, enumerate, and range cannot fail and do
+not take `!>`.
 
 The walk is not “a nicer `s[i]`.” Users do not write `s.access(i)`. C
 `for (;;)` is unchanged. `@parallel for (i in lo..hi)` is §8.11.4.
@@ -6283,7 +6286,7 @@ APIs. Fallible script helpers return `T !>(CCError)` (or the corresponding
 
 ```c
 CCArena a@(megabytes(1)) @destroy;
-CCStdio io@(&a) @destroy;
+CCStdio io@(a) @destroy;
 
 char[:] in = io.read_all() !>;
 io.write_all(out.as_slice()) !>;
@@ -6298,7 +6301,7 @@ receiver):
 ```c
 io.println(path) !>;               /* preferred when io is in scope */
 io.eprintln(line) !>;
-io.println(@string(`n=${n}`, &a)) !>;
+io.println(@string(`n=${n}`, a)) !>;
 
 path.println() !>;                 /* also OK: UFCS on data */
 "literal".println() !>;            /* lit/cstr → CCSlice temp → cc_slice_* */
@@ -6391,7 +6394,7 @@ Example (stdin transform):
 #!/usr/bin/env -S ./cc/bin/ccc --as=shcc
 
 CCArena a@(megabytes(1)) @destroy;
-CCStdio io@(&a) @destroy;
+CCStdio io@(a) @destroy;
 char[:] in = io.read_all() !>;
 /* … transform into out … */
 io.write_all(out.as_slice()) !>;
@@ -6589,7 +6592,7 @@ are §9.2.4.
 ```c
 for (v in s) { ... }            // walk: i < s.len, then .access
 for (i, v in s) { ... }         // enumerate
-for (a, b in s, t) { ... }      // zip; unequal lens are CC_ERR_INVALID_ARG
+for (a, b in s, t) { ... } !>;  // zip; void !>(CCError)
 for (i in lo..hi) { ... }       // sequential range
 ```
 
@@ -6608,9 +6611,9 @@ for (size_t i = 0; i < /* s.len hook */; ++i) {
     BODY
 }
 
-/* for (a, b in s, t) { BODY } */
+/* for (a, b in s, t) { BODY } !>; */
 if (/* s.len */ != /* t.len */) {
-    /* CC_ERR_INVALID_ARG — not a silent min; @errhandler sees the kind */
+    /* CC_ERR_INVALID_ARG — not a silent min; !>; / !>(e){…} sees the kind */
 } else {
     for (size_t __i = 0; __i < /* s.len */; ++__i) {
         A a = /* s.access */;
@@ -6918,20 +6921,20 @@ construction. See the stdlib spec for full API reference, rules, and examples.
 
 ```c
 // Vec::[T]
-Vec::[T] v@(&arena) @destroy;
+Vec::[T] v@(arena) @destroy;
 v.push(value);
 T* x = v.get_ptr(index);
 T[:] slice = v.as_slice();
 
 // Map::[K,V] — tiny K/V, max probe locality
-Map::[K, V] m@(&arena) @destroy;
+Map::[K, V] m@(arena) @destroy;
 m->insert(key, value);
 V* x = m->get_ptr(key);
 m->remove(key);
 
 // ArrayMap::[K,V] — wide values; empty buckets stay cheap
-ArrayMap::[K, V] am@(&arena) @destroy;
-ArrayMap::[K, V] sized = array_map_new_count::[K, V](&arena, 1024);
+ArrayMap::[K, V] am@(arena) @destroy;
+ArrayMap::[K, V] sized = array_map_new_count::[K, V](arena, 1024);
 am->insert(key, value);
 V* y = am->get_ptr(key);
 am->del(key);
@@ -7288,7 +7291,7 @@ typedef enum CCEmitAnchor {
 
 | Form | Returns | Use when |
 |------|---------|----------|
-| `@emit(\`...\`, arena)` | `CCSlice` | Generic factories and any `@comptime` function that builds definition text and returns it; the fragment is built into the caller-supplied `CCArena*` |
+| `@emit(\`...\`, arena)` | `CCSlice` | Generic factories and any `@comptime` function that builds definition text and returns it; the fragment is built into the caller-supplied `CCArena` |
 | `@emit(CCEmitAnchor, \`...\`)` | `void` (lowers to splice side effect) | `@comptime {}` blocks and `@comptime for` bodies that emit declarations at a named anchor |
 
 Both forms share the same backtick `${...}` grammar as `@string`. Each `${expr}` slot uses type-driven dispatch (`cc_emit_tpl_append_slot` / C11 `_Generic`); supported types are `CCSlice`, C strings (`char*` / `const char*` / char arrays), integers, and floating-point.
@@ -7325,7 +7328,7 @@ The factory body has implicit parameters and returns the definition text via
 - `generic_name` (`CCSlice`) — the registered name, e.g. `Pair`
 - `mangled` (`CCSlice`) — the mangled instantiation name at the use site
 - `type_args` (`CCSliceArray`) — the type-argument spellings
-- `arena` (`CCArena*`) — scratch arena for building the fragment
+- `arena` (`CCArena`) — scratch arena for building the fragment
 
 **Sugar ergonomics.** The implicit parameters are auto-voided, so a body that
 ignores one needn't write `(void)…`. `arg(i)` is shorthand for
@@ -8184,7 +8187,7 @@ Surface `tx.send(value)`, `rx.recv(&out)`, `tx.close()`, and `cc_channel_pair(&t
 **Arena allocation alignment:**
 
 ```c
-void* cc_arena_alloc(CCArena* a, size_t nbytes, size_t align);
+void* cc_arena_alloc(CCArena a, size_t nbytes, size_t align);
 ```
 
 `align` is a power of two (`>= 1`). Typed helpers use `_Alignof(T)`.

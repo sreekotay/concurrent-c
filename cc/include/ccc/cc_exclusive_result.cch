@@ -28,10 +28,10 @@ CC_DECL_RESULT_SPEC(CCResult_CCExclusiveGuard_CCError, CCExclusiveGuard, CCError
 #endif
 
 static inline CCExclusiveGuard !>(CCError)
-cc_exclusive_acquire_when(CCExclusiveHost* excl, uint64_t name,
+cc_exclusive_acquire_when(CCExclusive excl, uint64_t name,
                           CCExclusivePred pred, void* env) {
     CCExclusiveGuard g;
-    if (!excl || !pred)
+    if (!excl.p || !pred)
         return cc_err(CC_ERR_INVALID_ARG, "cc_exclusive_acquire_when");
     for (;;) {
         g = cc_exclusive_acquire(excl, name);
@@ -50,20 +50,26 @@ cc_exclusive_acquire_when(CCExclusiveHost* excl, uint64_t name,
 }
 
 static inline CCExclusiveGuard !>(CCError)
+cc_exclusive_acquire_when_host(CCExclusiveHost* excl, uint64_t name,
+                               CCExclusivePred pred, void* env) {
+    return cc_exclusive_acquire_when(cc_exclusive_handle(excl), name, pred, env);
+}
+
+static inline CCExclusiveGuard !>(CCError)
 cc_exclusive_mutex_acquire_when(CCExclusiveMutex* m,
                                 CCExclusivePred pred, void* env) {
     if (!m || !m->excl)
         return cc_err(CC_ERR_INVALID_ARG, "cc_exclusive_acquire_when");
-    return cc_exclusive_acquire_when(m->excl, m->name, pred, env);
+    return cc_exclusive_acquire_when_host(m->excl, m->name, pred, env);
 }
 
 static inline void !>(CCError)
-cc_exclusive_acquire_when_into(CCExclusiveHost* excl, uint64_t name,
+cc_exclusive_acquire_when_into(CCExclusive excl, uint64_t name,
                                CCExclusivePred pred, void* env,
                                void* slot, CCArena arena,
                                CCClosure2 builder) {
     CCExclusiveGuard !>(CCError) r;
-    if (!excl || !pred) {
+    if (!excl.p || !pred) {
         cc_closure2_drop(builder);
         return cc_err(CC_ERR_INVALID_ARG, "cc_exclusive_acquire_when_into");
     }
@@ -86,8 +92,9 @@ cc_exclusive_mutex_acquire_when_into(CCExclusiveMutex* m,
         cc_closure2_drop(builder);
         return cc_err(CC_ERR_INVALID_ARG, "cc_exclusive_acquire_when_into");
     }
-    return cc_exclusive_acquire_when_into(m->excl, m->name, pred, env,
-                                          slot, arena, builder);
+    return cc_exclusive_acquire_when_into(cc_exclusive_handle(m->excl),
+                                          m->name, pred, env, slot, arena,
+                                          builder);
 }
 
 #define cc_exclusive_acquire_when_into(excl, name, pred, env, slot, a, b) \

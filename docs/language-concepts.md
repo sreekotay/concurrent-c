@@ -93,7 +93,7 @@ u.mean(6.0);          // same call
 ```
 
 Parameter order for methods: **receiver first, arena last** (when an arena is needed).
-That is what makes `s.clone_into(&a)` and `clone_into(s, &a)` the same shape.
+That is what makes `s.clone_into(a)` and `clone_into(s, a)` the same shape.
 
 Generics: `Name::[args]` instantiates a factory (`CC_GENERIC_FACTORY`).
 `Vec::[T]`, `Map::[K,V]`, `ArrayMap::[K,V]`, and non-char `T[:]` are that
@@ -108,7 +108,7 @@ Fallible chain: unwrap (`!>` / `?>`), then the next method sees the value.
 
 ```c
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
-CCStdio io = cc_stdio_create(&a);
+CCStdio io = cc_stdio_create(a);
 io.println("hi") !>;
 io.println(@string(`n=${n}`, @scratch)) !>;
 /* also fine: println("hi") !>;  /  @string(`…`, @scratch).println() !>; */
@@ -138,6 +138,8 @@ dead, epochs as fields, failure is unchanged):
 Ordinary slice sites allow loads and UFCS; field stores (`s.len = …`) are
 denied. The walk is `for (v in s)` (also enumerate / zip / range): the
 compiler pays `i < live .len` and loads. Users do not write `s.access(i)`.
+Zip is a statement that can fail: `for (a, b in s, t) { … } !>;`. Walk,
+enumerate, and range cannot fail and do not take `!>`.
 A guess at a slot is `s.at(i) !>` / `s.set(i, v) !>`. `T*` is not an
 extent. C `for (;;)` is unchanged. Tutorial:
 [@typehooks / @typeview](typehooks-typeviews.md#extent--len--access).
@@ -152,7 +154,7 @@ extent. C `for (;;)` is unchanged. Tutorial:
 ```c
 /* Heap — owns the root; @destroy frees slabs + overflow. */
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
-CCStdio io = cc_stdio_create(&a);
+CCStdio io = cc_stdio_create(a);
 char* p = a.allocT(64);
 char[:] s = a.alloc_slice_bytes(32);   /* arena provenance */
 

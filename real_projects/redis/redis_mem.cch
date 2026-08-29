@@ -125,15 +125,15 @@ static size_t redis_mem_key_arenas_gross_B(const RedisDb* db) {
     size_t i;
     if (!db || !db->shards) return 0;
     for (i = 0; i < db->shard_count; ++i)
-        sum += cc_arena_committed_gross_bytes(&db->shards[i].key_arena);
+        sum += cc_arena_committed_gross_bytes(db->shards[i].key_arena);
     return sum;
 }
 
 static size_t redis_mem_arenas_gross_B(const RedisDb* db) {
     if (!db) return 0;
-    return cc_arena_committed_gross_bytes(&db->map_arena) +
+    return cc_arena_committed_gross_bytes(db->map_arena) +
            redis_mem_key_arenas_gross_B(db) +
-           cc_arena_committed_gross_bytes(&db->value_arena);
+           cc_arena_committed_gross_bytes(db->value_arena);
 }
 
 /* One machine-parseable line: footprint − (map+key+value live). Always on.
@@ -276,8 +276,8 @@ static void redis_mem_report(const RedisDb* db, const char* tag) {
 
 /* Print each bump slab's capacity for `a`, newest (current root) first, then each
  * older extent via ->prev.  Matches cc_arena_slab_chain_bytes (sum of these). */
-static void redis_db_fprint_arena_slab_chain_detail(const char* tag, const char* pool, const CCArena* a) {
-    const CCArenaHost* cur = a ? a->a : NULL;
+static void redis_db_fprint_arena_slab_chain_detail(const char* tag, const char* pool, CCArena a) {
+    const CCArenaHost* cur = a.a;
     fprintf(stderr, "redis_idiomatic: mem[%s] arena_%s_slab_sizes_B (root_first", tag ? tag : "db", pool);
     while (cur && cur->base) {
         fprintf(stderr, " %zu", cur->capacity);
@@ -320,25 +320,25 @@ static void db_dump_mem_stats(RedisDb* db, const char* tag) {
                 1024u,
                 db->shard_count,
                 1024u);
-        redis_db_fprint_arena_slab_chain_detail(tag, "map", &db->map_arena);
+        redis_db_fprint_arena_slab_chain_detail(tag, "map", db->map_arena);
         for (si = 0; db->shards && si < db->shard_count; ++si) {
             char pool[32];
             snprintf(pool, sizeof(pool), "key%zu", si);
-            redis_db_fprint_arena_slab_chain_detail(tag, pool, &db->shards[si].key_arena);
-            k_slab += cc_arena_slab_chain_bytes(&db->shards[si].key_arena);
-            k_ovf += cc_arena_overflow_raw_bytes(&db->shards[si].key_arena);
-            k_ext += cc_arena_extent_struct_bytes(&db->shards[si].key_arena);
-            k_gross += cc_arena_committed_gross_bytes(&db->shards[si].key_arena);
+            redis_db_fprint_arena_slab_chain_detail(tag, pool, db->shards[si].key_arena);
+            k_slab += cc_arena_slab_chain_bytes(db->shards[si].key_arena);
+            k_ovf += cc_arena_overflow_raw_bytes(db->shards[si].key_arena);
+            k_ext += cc_arena_extent_struct_bytes(db->shards[si].key_arena);
+            k_gross += cc_arena_committed_gross_bytes(db->shards[si].key_arena);
         }
-        redis_db_fprint_arena_slab_chain_detail(tag, "value", &db->value_arena);
-        size_t m_slab = cc_arena_slab_chain_bytes(&db->map_arena);
-        size_t m_ovf = cc_arena_overflow_raw_bytes(&db->map_arena);
-        size_t m_ext = cc_arena_extent_struct_bytes(&db->map_arena);
-        size_t m_gross = cc_arena_committed_gross_bytes(&db->map_arena);
-        size_t v_slab = cc_arena_slab_chain_bytes(&db->value_arena);
-        size_t v_ovf = cc_arena_overflow_raw_bytes(&db->value_arena);
-        size_t v_ext = cc_arena_extent_struct_bytes(&db->value_arena);
-        size_t v_gross = cc_arena_committed_gross_bytes(&db->value_arena);
+        redis_db_fprint_arena_slab_chain_detail(tag, "value", db->value_arena);
+        size_t m_slab = cc_arena_slab_chain_bytes(db->map_arena);
+        size_t m_ovf = cc_arena_overflow_raw_bytes(db->map_arena);
+        size_t m_ext = cc_arena_extent_struct_bytes(db->map_arena);
+        size_t m_gross = cc_arena_committed_gross_bytes(db->map_arena);
+        size_t v_slab = cc_arena_slab_chain_bytes(db->value_arena);
+        size_t v_ovf = cc_arena_overflow_raw_bytes(db->value_arena);
+        size_t v_ext = cc_arena_extent_struct_bytes(db->value_arena);
+        size_t v_gross = cc_arena_committed_gross_bytes(db->value_arena);
         fprintf(stderr,
                 "redis_idiomatic: mem[%s] arena_committed_B "
                 "map slabs=%zu ovf=%zu ext_meta=%zu gross=%zu | "

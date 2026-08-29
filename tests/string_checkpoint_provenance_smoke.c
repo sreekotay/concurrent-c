@@ -27,7 +27,7 @@ int main(void) {
     assert(inline_stable_view.id == CC_SLICE_ID_UNTRACKED);
     assert(memcmp(inline_stable_view.ptr, "ab", inline_stable_view.len) == 0);
 
-    CCArenaCheckpoint cp = cc_arena_checkpoint(&arena);
+    CCArenaCheckpoint cp = cc_arena_checkpoint(arena);
     assert(cp.provenance == stable_provenance);
     assert(arena.a->provenance != cp.provenance);
 

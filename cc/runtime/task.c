@@ -784,9 +784,9 @@ int cc_block_all(int count, CCTask* tasks, intptr_t* results) {
     }
 
     CCResult_CCNursery_CCError __nr = cc_nursery_create();
-    CCNurseryHost* n;
+    CCNursery n;
     if (!__nr.ok) return ENOMEM;
-    n = __nr.u.value.p;
+    n = __nr.u.value;
 
     CCBlockAllSlot* slots = (CCBlockAllSlot*)calloc((size_t)count, sizeof(CCBlockAllSlot));
     if (!slots) {
@@ -862,12 +862,12 @@ int cc_block_race(int count, CCTask* tasks, int* winner, intptr_t* result) {
     if (!done_chan) return ENOMEM;
 
     CCResult_CCNursery_CCError __nr = cc_nursery_create();
-    CCNurseryHost* n;
+    CCNursery n;
     if (!__nr.ok) {
         cc_chan_free(done_chan);
         return ENOMEM;
     }
-    n = __nr.u.value.p;
+    n = __nr.u.value;
 
     volatile int winner_flag = 0;
     CCBlockRaceSlot* slots = (CCBlockRaceSlot*)calloc((size_t)count, sizeof(CCBlockRaceSlot));
@@ -937,12 +937,12 @@ int cc_block_any(int count, CCTask* tasks, int* winner, intptr_t* result) {
     if (!done_chan) return ENOMEM;
 
     CCResult_CCNursery_CCError __nr = cc_nursery_create();
-    CCNurseryHost* n;
+    CCNursery n;
     if (!__nr.ok) {
         cc_chan_free(done_chan);
         return ENOMEM;
     }
-    n = __nr.u.value.p;
+    n = __nr.u.value;
 
     CCBlockRaceSlot* slots = (CCBlockRaceSlot*)calloc((size_t)count, sizeof(CCBlockRaceSlot));
     if (!slots) {

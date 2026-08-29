@@ -18,7 +18,7 @@ int main(void) {
 
     CCArena arena = cc_arena_heap(kilobytes(4));
     if (!cc_arena_is_live(arena)) return 4;
-    char* p = (char*)cc_arena_alloc(&arena, 16, 1);
+    char* p = (char*)cc_arena_alloc(arena, 16, 1);
     if (!p) return 5;
     memcpy(p, "view-arena", 10);
 
@@ -29,7 +29,7 @@ int main(void) {
     if (memcmp(view.ptr, "view-arena", 10) != 0) return 9;
 
     uint64_t old_id = cc_slice_alloc_id(view.id);
-    cc_arena_reset(&arena);
+    cc_arena_reset(arena);
     CCSlice stale = cc_slice_from_parts(p, 10, cc_slice_make_id(old_id, false, false, false));
     if (cc_slice_is_from_arena_epoch(stale, arena)) return 10;
 

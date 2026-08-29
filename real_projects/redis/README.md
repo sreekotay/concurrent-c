@@ -10,6 +10,10 @@ The supported Concurrent-C Redis variants are:
 - `redis_async_sketch.ccs` — tiny command surface peer of `redis.go`
   (`ln.serve` + Conn encode). Teaching peer of the complete server.
   Default listen `127.0.0.1:6381`. Not the bench target.
+- `redis_parallel.ccs` — throwaway sketch sibling: same tiny surface,
+  MGET is `@parallel wait` (per-key `hold_one`, snapshot, ordered
+  encode) instead of `hold_sorted` + a sequential loop. Default listen
+  `127.0.0.1:6382`. Not a bench target; likely deleted.
 - `redis.go` — same tiny surface in Go (architecture reference only).
 - `redis_owner.ccs` — channel / single-owner-fiber variant (historical;
   still used by the async line-map gate and lock-compare benches).
@@ -20,6 +24,7 @@ The supported Concurrent-C Redis variants are:
 - `setup.sh` fetches upstream Redis into `redis_c/`
 - `redis_idiomatic.ccs` is the default single-file implementation
 - `redis_async_sketch.ccs` is the tiny sketch sibling (`make redis_async_sketch`)
+- `redis_parallel.ccs` is a throwaway wait-for MGET experiment (`make redis_parallel`)
 - `redis.go` is the Go architecture reference (`go build -o out/redis_go redis.go`)
 - `redis_owner.ccs` is the N:1 owner-fiber alternative (`make redis_owner`)
 - `redis_smoke.py` is the functional smoke (basics, expiry, 1000-op pipeline,
@@ -77,6 +82,8 @@ cd real_projects/redis
 PIPELINE=16 ./bench_robust.sh
 CLIENTS=1 PIPELINE=1 ./bench_robust.sh
 REPEATS=5 PIPELINE=16 ./bench_robust.sh
+INCLUDE_SKETCH=1 INCLUDE_PARALLEL=1 INCLUDE_UPSTREAM=0 INCLUDE_IDIOMATIC=0 \
+  BENCH_TESTS=set,get,mget ./bench_robust.sh   # sketch vs wait-for MGET
 CLIENTS_SWEEP="1 5 50" ./bench_conn_sweep.sh   # RSS vs concurrent clients
 ```
 

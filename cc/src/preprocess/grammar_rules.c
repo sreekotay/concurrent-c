@@ -122,7 +122,7 @@ typedef struct {
     const char* name;                     /* declared grammar Name */
     char err[512]; size_t err_at; int failed;
 
-    CCArena* ir;   /* IR + analysis scratch (cc_arena_stack at engine entry) */
+    CCArena ir;   /* IR + analysis scratch (cc_arena_stack at engine entry) */
 
     RNode* nodes; int nnodes, cap_nodes;
     int entry_idx, entry_set;   /* first rule declared at include-depth 0 */
@@ -161,7 +161,7 @@ static int rg_fail(RG* g, size_t at, const char* msg) {
 static int rg_grow(RG* g, void** p, int* cap, int need, size_t elem, size_t align,
                    size_t at, const char* oom) {
     if (need <= *cap) return 0;
-    if (!g->ir) return rg_fail(g, at, "internal: grammar IR has no arena");
+    if (!g->ir.p) return rg_fail(g, at, "internal: grammar IR has no arena");
     int ncap = *cap > 0 ? *cap : 8;
     while (ncap < need) {
         if (ncap > (1 << 28)) return rg_fail(g, at, oom);
@@ -179,7 +179,7 @@ static int rg_grow(RG* g, void** p, int* cap, int need, size_t elem, size_t alig
 
 static void* rg_mem(const RG* g, size_t n, size_t align) {
     void* p;
-    if (!g->ir || n == 0) return NULL;
+    if (!g->ir.p || n == 0) return NULL;
     p = cc_arena_alloc_local_grow(g->ir, n, align);
     if (p) memset(p, 0, n);
     return p;
@@ -1365,7 +1365,7 @@ typedef struct {
      * the driver entries). Contents are valid only until the next eb_emit —
      * every text piece is copied into the output buffer and the scratch
      * rewinds to its stack root (overflow extents freed). */
-    CCArena* scratch;
+    CCArena scratch;
 } EB;
 
 static int rw_pad_rule(const RG* g, RFirst* F, RKeeps* K, int nd);
@@ -1424,7 +1424,7 @@ static void rg_emit_swar_run(EB* e, int k, int T, int b1, int b2) {
 
 /* C boolean: `s[p]` ∈ charset `cs` — range / tiny equality / bitset.
  * Analysis stays here; the expression text is CC-authored. */
-static CCString rg_cs_expr_cs(const RG* g, int cs, CCArena* a) {
+static CCString rg_cs_expr_cs(const RG* g, int cs, CCArena a) {
     int lo, hi, bytes[4];
     if (rf_charset_range(g->sets[cs], &lo, &hi)) {
         if (lo == hi) return cc_gr_cse_eq_text(a, lo);
@@ -1876,7 +1876,7 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     RFirst Fstor; RKeeps Kstor;
     RFirst* F = &Fstor; RKeeps* K = &Kstor;
     cc_arena_stack(sc, 32768);   /* piece scratch: stack root, heap overflow */
-    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, 1, &sc };
+    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, 1, sc };
     int lbl = 0;
     if (rf_prepare(F, g) || rk_prepare(K, g)) { cc_arena_free(&sc); return NULL; }
     e.dom = want_dom;
@@ -2294,7 +2294,7 @@ typedef struct {
     int line0;
     char err[256]; size_t err_at;
 
-    CCArena* ir;   /* schema IR (same stack-rooted arena as the used rules) */
+    CCArena ir;   /* schema IR (same stack-rooted arena as the used rules) */
 
     char usename[S_NAME];
     char usepath[256];                   /* use "path" as Name: file-backed factory */
@@ -2337,7 +2337,7 @@ static int ss_fail(SS* s, size_t at, const char* msg) {
 static int ss_grow(SS* s, void** p, int* cap, int need, size_t elem, size_t align,
                    size_t at, const char* oom) {
     if (need <= *cap) return 0;
-    if (!s->ir) return ss_fail(s, at, "internal: schema IR has no arena");
+    if (!s->ir.p) return ss_fail(s, at, "internal: schema IR has no arena");
     int ncap = *cap > 0 ? *cap : 8;
     while (ncap < need) {
         if (ncap > (1 << 28)) return ss_fail(s, at, oom);
@@ -2355,7 +2355,7 @@ static int ss_grow(SS* s, void** p, int* cap, int need, size_t elem, size_t alig
 
 static void* ss_mem(SS* s, size_t n, size_t align) {
     void* p;
-    if (!s->ir || n == 0) return NULL;
+    if (!s->ir.p || n == 0) return NULL;
     p = cc_arena_alloc_local_grow(s->ir, n, align);
     if (p) memset(p, 0, n);
     return p;
@@ -4465,8 +4465,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     cc_arena_stack(ir, 65536);
     memset(&ssstor, 0, sizeof ssstor);
     memset(&gstor, 0, sizeof gstor);
-    ss->ir = &ir;
-    g->ir = &ir;
+    ss->ir = ir;
+    g->ir = ir;
     ss->b = body; ss->n = body_len; ss->line0 = line;
     ss->uterm = -1;
     ss->nest_max = 128;
@@ -4709,7 +4709,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     cc__sname = name;
     cc__fpfx[0] = '\0';
     {
-    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, 0, &sc };
+    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, 0, sc };
     int lbl = 0;
     unsigned char* local_xdone = (unsigned char*)rg_mem(g, (size_t)g->nrules, 1);
     if (!local_xdone) goto done;
@@ -5134,7 +5134,7 @@ static char* cc__rules_emit(const char* name, const char* body, size_t body_len,
     RG gstor;
     RG* g = &gstor;
     memset(&gstor, 0, sizeof gstor);
-    g->ir = &ir;
+    g->ir = ir;
     g->body = body; g->n = body_len; g->file = file; g->line0 = line; g->name = name;
     g->nest_max = 128;
 

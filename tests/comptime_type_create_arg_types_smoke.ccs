@@ -16,7 +16,7 @@ static CreateToy create_toy_from_cstr(const char* text) {
     return (CreateToy){ .value = (int)strlen(text) };
 }
 
-static CCSlice create_toy_create(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena) {
+static CCSlice create_toy_create(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena arena) {
     (void)type_name;
     (void)argv;
     if (arg_types.len == 1 && CCSlice_eq_cstr(&arg_types.items[0], "int")) {

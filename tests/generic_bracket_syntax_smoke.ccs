@@ -15,7 +15,7 @@ int main(void) {
     int* p = v.get_ptr(1);
     if (!p || *p != 20) return 3;
 
-    Map::[int, int] m = map_new::[int, int](&arena);
+    Map::[int, int] m = map_new::[int, int](arena);
     m->insert(1, 100);
     m->insert(2, 200);
 

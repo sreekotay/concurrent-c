@@ -273,8 +273,8 @@ domains here).
 
 Packages: cwd `node_modules`, same as Node itself.
 
-From Concurrent-C (not Python): `cc_js_new(false, &a)` hosted
-(libnode), or `cc_js_new(true, &a)` for this wire —
+From Concurrent-C (not Python): `cc_js_new(false, a)` hosted
+(libnode), or `cc_js_new(true, a)` for this wire —
 [`jsdemo.shcc`](https://github.com/sreekotay/concurrent-c/blob/main/examples/js/jsdemo.shcc).
 
 ## Publishing

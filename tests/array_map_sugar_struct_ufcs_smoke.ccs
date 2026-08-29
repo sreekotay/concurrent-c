@@ -19,7 +19,7 @@ int main(void) {
     Entr* p;
     if (!cc_arena_is_live(arena)) return 1;
     (void)helper_before_types;
-    db.entries = array_map_new::[int, Entr](&arena);
+    db.entries = array_map_new::[int, Entr](arena);
     if (!db.entries) return 2;
     e.x = 7;
     if (db.entries->insert(1, e) != 0) return 3;

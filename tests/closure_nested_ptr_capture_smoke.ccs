@@ -16,7 +16,7 @@ int main(void) {
         CCNursery outer = cc_nursery_create() !> @destroy;
         outer.spawn(() => [outer] {
             CCArena a = cc_arena_heap(4096) @destroy;
-            CapBlk* cap = cc_arena_alloc_T(CapBlk, &a);
+            CapBlk* cap = cc_arena_alloc_T(CapBlk, a);
             if (!cap) return;
             cap->seq = 42;
             cap->arena = a.detach() !>;

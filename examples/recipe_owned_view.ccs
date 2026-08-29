@@ -64,14 +64,14 @@ static void !>(CCError) doc_replace(Doc* d, char[:] next) {
         d->body = cc_slice_empty();
         return cc_ok();
     }
-    char[:] owned = next.clone_into(&d->store) !>(e) { return cc_err(e); };
+    char[:] owned = next.clone_into(d->store) !>(e) { return cc_err(e); };
     d->body = owned;
     return cc_ok();
 }
 
 /* Arena last: the copy lives on `a` (analysis, or a frame the callee owns). */
-static char[:] !>(CCError) doc_copy_into(Doc* d, CCArena* a) {
-    if (!d || !a) return cc_err(CC_ERR_INVALID_ARG, "copy_into");
+static char[:] !>(CCError) doc_copy_into(Doc* d, CCArena a) {
+    if (!d || !a.valid()) return cc_err(CC_ERR_INVALID_ARG, "copy_into");
     return d->body.clone_into(a);
 }
 
@@ -112,7 +112,7 @@ int main(void) {
 
     println(@string(`measure=${measure_len(&d)}`, @scratch)) !>;
 
-    char[:] note = d.copy_into(&d.analysis) !>;
+    char[:] note = d.copy_into(d.analysis) !>;
     println(@string(`analysis=${note.len}`, @scratch)) !>;
 
     d.replace(@slice("too-long!")) !>(e) {

@@ -41,7 +41,7 @@ cc_file_copy(@slice("tests/unwrap_destroy_closure_smoke.ccs"),
 char[:] expected =
     cc_file_read_path(@slice("tests/unwrap_destroy_closure_smoke.stdout"), &a) !>;
 
-CCCommand cmd = cc_command(&a, @slice("./cc/bin/ccc"));
+CCCommand cmd = cc_command(a, @slice("./cc/bin/ccc"));
 cmd.arg("run");
 cmd.arg(dst_path);
 cmd.stderr_to_stdout(); /* match prior Make recipe: 2>&1 */
@@ -55,7 +55,7 @@ unlink(dst_path);
 rmdir(dir);
 
 if (rc != 0) {
-    CCString em = @string(`FAIL out-of-tree-smoke: ccc run exited ${rc}`, &a);
+    CCString em = @string(`FAIL out-of-tree-smoke: ccc run exited ${rc}`, a);
     em.eprintln() !>;
     if (actual.ptr && actual.len)
         fwrite(actual.ptr, 1, actual.len, stderr);

@@ -5,7 +5,7 @@
 
 typedef CCSlice (*ShadowUfcsRewriteFn)(CCSlice recv_type, CCSlice method,
                                        CCSlice mode, CCSliceArray argv,
-                                       CCSliceArray arg_types, CCArena* arena);
+                                       CCSliceArray arg_types, CCArena arena);
 
 static void shadow_ufcs_sb_append(char** o, size_t* n, size_t* c, const char* s,
                                  size_t ln) {
@@ -495,7 +495,7 @@ static int shadow_ufcs_hook_resolve(const char* ty, const char* method,
         arg_types.items = na ? type_store : NULL;
         arg_types.len = (size_t)na;
         shadow_meta_ar_ensure();
-        result = rewrite(recv, meth, mode, argv, arg_types, &g_shadow_meta_ar);
+        result = rewrite(recv, meth, mode, argv, arg_types, g_shadow_meta_ar);
     }
     if (result.ptr && result.len == sizeof("__cc_ufcs_pass__") - 1 &&
         memcmp(result.ptr, pass, result.len) == 0)
@@ -1387,7 +1387,7 @@ static int shadow_cast_decl_init(const char* dest_ty, const char* raw_rhs,
     result = cc_box_cast_lower_c(
         cc_slice_from_static((void*)src, strlen(src)),
         cc_slice_from_static((void*)dest, strlen(dest)),
-        cc_slice_from_static((void*)"implicit", 8), &g_shadow_meta_ar);
+        cc_slice_from_static((void*)"implicit", 8), g_shadow_meta_ar);
     if (result.ptr && result.len == sizeof("__cc_ufcs_pass__") - 1 &&
         memcmp(result.ptr, pass, result.len) == 0)
         return 1;
@@ -1720,7 +1720,7 @@ static int shadow_for_parse_in(const char* h, ShadowForIn* fi) {
     }
     fprintf(stderr,
             "error: for-in is `for (v in s)`, `for (i, v in s)`, or "
-            "`for (a, b in s, t)`\n");
+            "`for (a, b in s, t) { ... } !>;`\n");
     g_shadow_ufcs_miss = 1;
     return -1;
 }

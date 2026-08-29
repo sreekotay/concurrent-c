@@ -15,7 +15,7 @@
 typedef struct Store {
     CCArena map_arena;
     CCArena key_arena;
-    Map::[CCSliceHdr, int] entries;
+    Map::[char[:], int] entries;
     size_t key_insert_bytes;
     size_t key_delete_bytes;
 } Store;
@@ -44,7 +44,7 @@ static bool !>(CCError) store_init(Store* store) {
         return cc_err(CC_ERR_OUT_OF_MEMORY, "key arena");
     }
 
-    store->entries = map_new::[CCSliceHdr, int](&store->map_arena);
+    store->entries = map_new::[char[:], int](store->map_arena);
     if (!store->entries) {
         store->free();
         return cc_err(CC_ERR_OUT_OF_MEMORY, "store map");
@@ -53,16 +53,15 @@ static bool !>(CCError) store_init(Store* store) {
     return cc_ok(true);
 }
 
-static CCSliceHdr !>(CCError) store_anchor_key(Store* store, char[:] key) {
+static char[:] !>(CCError) store_anchor_key(Store* store, char[:] key) {
     if (!store) return cc_err(CC_ERR_INVALID_ARG, "anchor without store");
-    CCSliceHdr view = key.hdr();
-    CCSliceHdr stable = view.clone_into(&store->key_arena) !>(e) { return cc_err(e); };
+    char[:] stable = key.clone_into(store->key_arena) !>(e) { return cc_err(e); };
     store->key_insert_bytes += key.len;
     return cc_ok(stable);
 }
 
-static void !>(CCError) store_insert_entry(Store* store, CCSliceHdr key, int value) {
-    Map::[CCSliceHdr, int] entries = store ? store->entries : NULL;
+static void !>(CCError) store_insert_entry(Store* store, char[:] key, int value) {
+    Map::[char[:], int] entries = store ? store->entries : NULL;
     if (!entries) return cc_err(CC_ERR_INVALID_ARG, "insert without entries");
     int rc = entries->insert(key, value);
     if (rc != 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "insert");
@@ -70,29 +69,28 @@ static void !>(CCError) store_insert_entry(Store* store, CCSliceHdr key, int val
 }
 
 static bool !>(CCError) store_put(Store* store, char[:] key, int value) {
-    Map::[CCSliceHdr, int] entries = store ? store->entries : NULL;
+    Map::[char[:], int] entries = store ? store->entries : NULL;
     if (!entries) return cc_err(CC_ERR_INVALID_ARG, "put without store");
 
-    CCSliceHdr query = key.hdr();
-    int* existing = entries->get_ptr(query);
+    int* existing = entries->get_ptr(key);
     if (existing) {
         *existing = value;
         return cc_ok(true);
     }
 
-    CCSliceHdr stable_key = store_anchor_key(store, key) !>(e) { return cc_err(e); };
+    char[:] stable_key = store_anchor_key(store, key) !>(e) { return cc_err(e); };
     store->insert_entry(stable_key, value) !>(e) { return cc_err(e); };
     return cc_ok(true);
 }
 
 static int* store_get(Store* store, char[:] key) {
     if (!store || !store->entries) return NULL;
-    return store->entries->get_ptr(key.hdr());
+    return store->entries->get_ptr(key);
 }
 
 static bool store_delete(Store* store, char[:] key) {
     if (!store || !store->entries) return false;
-    if (!store->entries->remove(key.hdr())) return false;
+    if (!store->entries->remove(key)) return false;
     store->key_delete_bytes += key.len;
     return true;
 }
@@ -112,7 +110,7 @@ int main(void) {
     for (int request_id = 0; request_id < 3; request_id++) {
         CCArenaCheckpoint request_scope = request_arena.checkpoint() @destroy;
 
-        CCString key = @string(`user:${request_id}`, &request_arena);
+        CCString key = @string(`user:${request_id}`, request_arena);
         store.put(key.as_slice(), request_id * 10) !>;
     }
 
@@ -121,7 +119,7 @@ int main(void) {
 
     if (!store.delete(CC_SLICE_LIT("user:1"))) return 3;
 
-    Map::[CCSliceHdr, int] entries = store.entries;
+    Map::[char[:], int] entries = store.entries;
     size_t n = entries->len();
     size_t live = store.key_logical_live_bytes();
     println(@string(`entries=${n} logical_key_bytes=${live} inserted=${store.key_insert_bytes} deleted=${store.key_delete_bytes}`, @scratch)) !>;

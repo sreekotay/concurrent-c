@@ -68,7 +68,7 @@ static int run_arena(Mode mode, size_t root, size_t n, volatile size_t *sink) {
     t0 = now_ms();
     for (i = 0; i < n; i++) {
         size_t sz = bulk_size(i);
-        unsigned char *p = (unsigned char *)cc_arena_alloc(&a, sz, 8);
+        unsigned char *p = (unsigned char *)cc_arena_alloc(a, sz, 8);
         if (!p) {
             printf("FAIL: %s alloc i=%zu\n", mode_name(mode), i);
             cc_arena_free(&a);
@@ -81,7 +81,7 @@ static int run_arena(Mode mode, size_t root, size_t n, volatile size_t *sink) {
     gross = cc_arena_committed_gross_bytes(&a);
     ovf = cc_arena_overflow_raw_bytes(&a);
     t_reset = now_ms();
-    cc_arena_reset(&a);
+    cc_arena_reset(a);
     reset_ms = now_ms() - t_reset;
     cc_arena_free(&a);
     total_ms = now_ms() - t0;

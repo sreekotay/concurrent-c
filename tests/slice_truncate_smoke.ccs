@@ -13,7 +13,7 @@ int main(void) {
     if (!a.valid()) return 1;
 
     /* Shrink a fill buffer to the bytes actually written. */
-    CCSlice out = cc_arena_alloc_slice_bytes(&a, 64);
+    CCSlice out = cc_arena_alloc_slice_bytes(a, 64);
     if (!out.ptr || out.len != 64) return 2;
     memcpy(out.ptr, "PONG", 4);
     void* base = out.ptr;
@@ -33,7 +33,7 @@ int main(void) {
 
     /* A length longer than the slice is refused, not silently accepted:
      * this is the shape that turns a wire length into an over-read. */
-    CCSlice ans = cc_arena_alloc_slice_bytes(&a, 16);
+    CCSlice ans = cc_arena_alloc_slice_bytes(a, 16);
     if (!ans.ptr) return 8;
     CCResult_bool_CCError lying = cc_slice_truncate(&ans, 4096);
     if (!lying.is_err()) return 9;

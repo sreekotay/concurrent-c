@@ -7,8 +7,9 @@ int main(void) {
     int[:] ys = { 4, 5, 6 };
     int sum = 0;
 
-    for (a, b in xs, ys)
+    for (a, b in xs, ys) {
         sum += a * b;
+    } !>;
     if (sum != 32) return 1;
 
     printf("ok\n");

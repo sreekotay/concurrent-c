@@ -232,7 +232,7 @@ static char* cc__splice_header_vec_decls(const char* src, size_t n) {
         cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
         cc_sb_append_cstr(&out, &out_len, &out_cap, inst->mangled_name);
         cc_sb_append_cstr(&out, &out_len, &out_cap,
-                          "_new(CCArena* __a) {\n    return ");
+                          "_new(CCArena __a) {\n    return ");
         cc_sb_append_cstr(&out, &out_len, &out_cap, inst->mangled_name);
         cc_sb_append_cstr(&out, &out_len, &out_cap,
                           "_init(__a, 0);\n}\n#endif\n");

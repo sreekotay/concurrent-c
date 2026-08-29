@@ -17,7 +17,7 @@
  *    3. Modules        py.import("statistics")
  *    4. Calls          st.mean(xs)        — the method IS the attribute
  *    5. Chains         py.import(..)!>.get(..)!>.as_slice()!>
- *    6. Sequences      lst.as_list::[double](&arena)
+ *    6. Sequences      lst.as_list::[double](arena)
  *    7. Failure        e.type_name, e.traceback
  *    8. Keywords       f(x, py_kw("width", 4))
  */
@@ -54,7 +54,9 @@ int main(void) {
     CCPyObj scaled = py.eval(@slice("scale([1.5, 2.5, 3.0], 2)")) !> @destroy;
 
     /* 6. A Python sequence becomes a typed run of T. */
-    CCSlice ys = scaled.as_list::[double](&arena) !>;
+    /* as_list::[double] still returns an erased CCSlice (element count
+     * in .len). Dest to double[:] is a missing wrapper — peel stays. */
+    char[:] ys = scaled.as_list::[double](arena) !>;
     double* yv = (double*)ys.ptr;
     printf("scaled=%zu first=%g last=%g\n", ys.len, yv[0], yv[ys.len - 1]);
 
@@ -68,13 +70,13 @@ int main(void) {
 
     /* 5. `!>` links hops: each unwraps, the next dispatches on the
      *    unwrapped value. */
-    CCSlice ver = py.import("sys")!>.get("version")!>.as_slice()!>;
+    char[:] ver = py.import("sys")!>.get("version")!>.as_slice()!>;
     printf("python=%.6s\n", (const char*)ver.ptr);
 
     /* 8. A keyword argument is an ordinary argument that carries the name
      *    it binds to; order among keywords does not matter. */
     CCPyObj main = py.import("__main__") !> @destroy;
-    CCSlice pad = main.pad(7, py_kw("width", 4), py_kw("fill", "0"))
+    char[:] pad = main.pad(7, py_kw("width", 4), py_kw("fill", "0"))
                       !>.as_slice()!>;
     printf("pad=%.*s\n", (int)pad.len, (const char*)pad.ptr);
 

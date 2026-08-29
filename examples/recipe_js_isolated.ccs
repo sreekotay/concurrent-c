@@ -11,7 +11,7 @@
  * crash isolation.  Same broker, same rules as the Python package
  * `concurrent-c-node`.
  *
- * Which node runs is ambient-first: cc_js_new_exe(true, exe, &a) > CC_NODE_BIN
+ * Which node runs is ambient-first: cc_js_new_exe(true, exe, a) > CC_NODE_BIN
  * > `node` on PATH; which packages it sees is the working directory's
  * node_modules — `npm install` next to your program is the whole setup.
  */
@@ -39,19 +39,19 @@ int main(void) {
     }
 
     /* Two domains are two nodes: separate heaps, separate state. */
-    CCJsDom A = cc_js_new(true, &a) !> @destroy;
-    CCJsDom B = cc_js_new(true, &a) !> @destroy;
+    CCJsDom A = cc_js_new(true, a) !> @destroy;
+    CCJsDom B = cc_js_new(true, a) !> @destroy;
     A.exec("globalThis.who = 'A'") !>;
     B.exec("globalThis.who = 'B'") !>;
-    CCSlice wa = A.eval("who")!>.as_slice(&a) !>;
-    CCSlice wb = B.eval("who")!>.as_slice(&a) !>;
+    char[:] wa = A.eval("who")!>.as_slice(a) !>;
+    char[:] wb = B.eval("who")!>.as_slice(a) !>;
     printf("domain A says %.*s, domain B says %.*s\n",
            (int)wa.len, (const char *)wa.ptr, (int)wb.len,
            (const char *)wb.ptr);
 
     /* Real modules through the sink: get+call over the wire. */
     CCJsDomVal os = A.require("os") !> @destroy;
-    CCSlice plat = os.platform()!>.as_slice(&a) !>;
+    char[:] plat = os.platform()!>.as_slice(a) !>;
     long long cpus = os.availableParallelism() !>;
     printf("os.platform() = %.*s, %lld cpus\n", (int)plat.len,
            (const char *)plat.ptr, cpus);

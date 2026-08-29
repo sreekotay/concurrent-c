@@ -18,7 +18,7 @@ int main(void) {
     {
         CCArena arena_storage = @create(kilobytes(4)) @destroy;
         if (!cc_arena_is_live(arena_storage)) abort();
-        CCArena* arena = &arena_storage;
+        CCArena arena = arena_storage;
         // Case 1: String literal argument
         cc_std_out.write("case1:");
         

@@ -21,7 +21,7 @@
 int main(void) {
     CCArena a = cc_arena_heap(kilobytes(16));
     NestedUfcsDb db = {0};
-    db.entries = array_map_new::[int, int](&a);
+    db.entries = array_map_new::[int, int](a);
     if (!db.entries) return 1;
 
     if (db.entries->insert(1, 10) != 0) return 2;

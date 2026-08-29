@@ -60,7 +60,7 @@ static inline bool cc_shard_init_count(CCShard* m, size_t buckets) {
     if (!m) return false;
     memset(m, 0, sizeof(*m));
     m->arena = cc_arena_malloc(CC_SHARD_MAP_ARENA_ROOT);
-    if (!cc_arena_valid(&m->arena)) return false;
+    if (!cc_arena_valid(m->arena)) return false;
     if (buckets == 0)
         m->data = CCShardMapTable_init(m->arena);
     else
@@ -204,8 +204,8 @@ static inline bool cc_shard_map_init(CCShardMap* m, CCExclusive excl,
     m->domain = cc_shard_domain(excl, mask);
     n = mask.count;
     m->root = cc_arena_heap(n * sizeof(CCShard) + 64);
-    if (!cc_arena_valid(&m->root)) return false;
-    m->shards = cc_arena_alloc_T_count(CCShard, &m->root, n);
+    if (!cc_arena_valid(m->root)) return false;
+    m->shards = cc_arena_alloc_T_count(CCShard, m->root, n);
     if (!m->shards) {
         cc_arena_destroy(&m->root);
         memset(m, 0, sizeof(*m));

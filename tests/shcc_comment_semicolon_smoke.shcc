@@ -3,7 +3,7 @@
  * walk in builtin-owned @destroy rewrite.) */
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 {
-    CCCommand which = cc_command(&a, @slice("sh"));
+    CCCommand which = cc_command(a, @slice("sh"));
     which.arg("-c");
     which.arg("true");
     int rc = which.status() !>;

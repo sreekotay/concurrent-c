@@ -19,7 +19,7 @@ static void pp_free_macros(Pp* pp) {
     pp->nmacros = 0;
 }
 
-static int run_file(TapeCache* cache, CCArena* arena, const char* name,
+static int run_file(TapeCache* cache, CCArena arena, const char* name,
                     AstNode*** items, int* nitems, Parser* parser_out) {
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", FIX, name);
@@ -74,7 +74,7 @@ static int expect_kind(AstNode* n, AstKind k, const char* a, const char* b) {
     return 1;
 }
 
-static int test_pp_number(CCArena* arena) {
+static int test_pp_number(CCArena arena) {
     const char* src = "1e+1+2.";
     TokBuild b;
     Token toks[16];
@@ -103,7 +103,7 @@ static int test_pp_number(CCArena* arena) {
     return 1;
 }
 
-static int test_cache_identity(TapeCache* cache, CCArena* arena) {
+static int test_cache_identity(TapeCache* cache, CCArena arena) {
     char path[512];
     snprintf(path, sizeof(path), "%s/fields.inc", FIX);
     FileTape* a = tape_cache_load(cache, path, arena);
@@ -116,7 +116,7 @@ static int test_cache_identity(TapeCache* cache, CCArena* arena) {
 }
 
 /* CC digraphs must be one punct each (C lexer would split => / !>). */
-static int test_cc_digraphs(CCArena* arena) {
+static int test_cc_digraphs(CCArena arena) {
     const char* src = "()=>{} int!>E @defer";
     TokBuild b;
     Token toks[32];
@@ -169,8 +169,8 @@ int main(void) {
         pass = 0;
     }
 
-    pass &= test_pp_number(&arena);
-    pass &= test_cc_digraphs(&arena);
+    pass &= test_pp_number(arena);
+    pass &= test_cc_digraphs(arena);
     pass &= test_cache_identity(&cache, arena);
 
     /* typedef fork */
@@ -349,7 +349,7 @@ int main(void) {
             return 1;
         }
         pp.cache = &cache;
-        pp.arena = &arena;
+        pp.arena = arena;
         pp.search_dir = FIX;
         pp.out = out_buf;
         pp.out_cap = 4096;

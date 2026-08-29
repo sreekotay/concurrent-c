@@ -10,7 +10,7 @@
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
 {
-    CCCommand which = cc_command(&a, @slice("sh"));
+    CCCommand which = cc_command(a, @slice("sh"));
     which.arg("-c");
     which.arg("command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1");
     int rc = which.status() !>;
@@ -18,7 +18,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+    CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
     build.arg("build");
     build.arg("npm/cc-python/src/cc_python.ccs");
     build.arg("-o");
@@ -29,7 +29,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand run = cc_command(&a, @slice("sh"));
+    CCCommand run = cc_command(a, @slice("sh"));
     run.arg("-c");
     run.arg("CC_PYTHON_ADDON=$PWD/bin/cc_python_await.node node tests/cc_python_bridge_await.js");
     run.inherit_stdio();

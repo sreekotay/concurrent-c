@@ -123,7 +123,7 @@ static void* cc__closure0_trampoline(void* p) {
     return r;
 }
 
-CCResult_void_CCError cc_nursery_spawn_closure0(CCNurseryHost* n, CCClosure0 c) {
+CCResult_void_CCError cc_nursery_spawn_closure0_host(CCNurseryHost* n, CCClosure0 c) {
     CCClosure0Heap* h;
     CCResult_void_CCError r;
     if (!n || !c.fn)
@@ -136,14 +136,9 @@ CCResult_void_CCError cc_nursery_spawn_closure0(CCNurseryHost* n, CCClosure0 c) 
     h->c = c;
     /* TSan release: sync with acquire in trampoline to make captures visible */
     TSAN_RELEASE(c.env);
-    r = cc_nursery_spawn(n, cc__closure0_trampoline, h);
+    r = cc_nursery_spawn_host(n, cc__closure0_trampoline, h);
     if (!r.ok) free(h);
     return r;
-}
-
-/* spawnhybrid is a source-compat alias for spawn now that V2 is the default. */
-CCResult_void_CCError cc_nursery_spawnhybrid_closure0(CCNurseryHost* n, CCClosure0 c) {
-    return cc_nursery_spawn_closure0(n, c);
 }
 
 CCResult_CCNursery_CCError cc_nursery_spawn_child_closure0(CCNursery parent, CCClosure0 c) {
@@ -153,8 +148,8 @@ CCResult_CCNursery_CCError cc_nursery_spawn_child_closure0(CCNursery parent, CCC
             CC_ERROR(CC_ERR_INVALID_ARG, "cc_nursery_spawn_child_closure0: null fn"));
     r = cc_nursery_create_child(parent);
     if (!r.ok) return r;
-    if (!cc_nursery_spawn_closure0(r.u.value.p, c).ok) {
-        cc_nursery_free(r.u.value.p);
+    if (!cc_nursery_spawn_closure0(r.u.value, c).ok) {
+        cc_nursery_free(r.u.value);
         return cc_err_CCResult_CCNursery_CCError(
             CC_ERROR(CC_ERR_INTERNAL, "cc_nursery_spawn_child_closure0: spawn failed"));
     }
@@ -181,7 +176,7 @@ static void* cc__closure1_trampoline(void* p) {
     return r;
 }
 
-CCResult_void_CCError cc_nursery_spawn_closure1(CCNurseryHost* n, CCClosure1 c, intptr_t arg0) {
+CCResult_void_CCError cc_nursery_spawn_closure1_host(CCNurseryHost* n, CCClosure1 c, intptr_t arg0) {
     CCClosure1Heap* h;
     CCResult_void_CCError r;
     if (!n || !c.fn)
@@ -195,7 +190,7 @@ CCResult_void_CCError cc_nursery_spawn_closure1(CCNurseryHost* n, CCClosure1 c, 
     h->arg0 = arg0;
     /* TSan release: sync with acquire in trampoline to make captures visible */
     TSAN_RELEASE(c.env);
-    r = cc_nursery_spawn(n, cc__closure1_trampoline, h);
+    r = cc_nursery_spawn_host(n, cc__closure1_trampoline, h);
     if (!r.ok) free(h);
     return r;
 }
@@ -207,8 +202,8 @@ CCResult_CCNursery_CCError cc_nursery_spawn_child_closure1(CCNursery parent, CCC
             CC_ERROR(CC_ERR_INVALID_ARG, "cc_nursery_spawn_child_closure1: null fn"));
     r = cc_nursery_create_child(parent);
     if (!r.ok) return r;
-    if (!cc_nursery_spawn_closure1(r.u.value.p, c, arg0).ok) {
-        cc_nursery_free(r.u.value.p);
+    if (!cc_nursery_spawn_closure1(r.u.value, c, arg0).ok) {
+        cc_nursery_free(r.u.value);
         return cc_err_CCResult_CCNursery_CCError(
             CC_ERROR(CC_ERR_INTERNAL, "cc_nursery_spawn_child_closure1: spawn failed"));
     }
@@ -237,7 +232,7 @@ static void* cc__closure2_trampoline(void* p) {
     return r;
 }
 
-CCResult_void_CCError cc_nursery_spawn_closure2(CCNurseryHost* n, CCClosure2 c, intptr_t arg0, intptr_t arg1) {
+CCResult_void_CCError cc_nursery_spawn_closure2_host(CCNurseryHost* n, CCClosure2 c, intptr_t arg0, intptr_t arg1) {
     CCClosure2Heap* h;
     CCResult_void_CCError r;
     if (!n || !c.fn)
@@ -252,7 +247,7 @@ CCResult_void_CCError cc_nursery_spawn_closure2(CCNurseryHost* n, CCClosure2 c, 
     h->arg1 = arg1;
     /* TSan release: sync with acquire in trampoline to make captures visible */
     TSAN_RELEASE(c.env);
-    r = cc_nursery_spawn(n, cc__closure2_trampoline, h);
+    r = cc_nursery_spawn_host(n, cc__closure2_trampoline, h);
     if (!r.ok) free(h);
     return r;
 }
@@ -264,8 +259,8 @@ CCResult_CCNursery_CCError cc_nursery_spawn_child_closure2(CCNursery parent, CCC
             CC_ERROR(CC_ERR_INVALID_ARG, "cc_nursery_spawn_child_closure2: null fn"));
     r = cc_nursery_create_child(parent);
     if (!r.ok) return r;
-    if (!cc_nursery_spawn_closure2(r.u.value.p, c, arg0, arg1).ok) {
-        cc_nursery_free(r.u.value.p);
+    if (!cc_nursery_spawn_closure2(r.u.value, c, arg0, arg1).ok) {
+        cc_nursery_free(r.u.value);
         return cc_err_CCResult_CCNursery_CCError(
             CC_ERROR(CC_ERR_INTERNAL, "cc_nursery_spawn_child_closure2: spawn failed"));
     }
@@ -298,17 +293,14 @@ CCTask cc_async_closure0_start(CCAsyncClosure0 c) {
     return out;
 }
 
-CCResult_void_CCError cc_nursery_spawn_async_closure0(CCNurseryHost* n, CCAsyncClosure0 c) {
+CCResult_void_CCError cc_nursery_spawn_async_closure0_host(CCNurseryHost* n, CCAsyncClosure0 c) {
     if (!n || !c.start)
         return cc_err_CCResult_void_CCError(
             CC_ERROR(CC_ERR_INVALID_ARG, "cc_nursery_spawn_async_closure0"));
     /* V2 is the default; use the V2 async-task start so non-fiber tasks get
      * bridged through the V2 scheduler. */
-    return cc_nursery_spawn_async(n, cc_async_closure0_start_v2(c));
-}
-
-CCResult_void_CCError cc_nursery_spawnhybrid_async_closure0(CCNurseryHost* n, CCAsyncClosure0 c) {
-    return cc_nursery_spawn_async_closure0(n, c);
+    return cc_nursery_spawn_async_named_host(n, cc_async_closure0_start_v2(c),
+                                            NULL, NULL, 0);
 }
 
 void* cc_closure0_call(CCClosure0 c) {

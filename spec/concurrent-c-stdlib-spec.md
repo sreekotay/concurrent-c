@@ -52,7 +52,7 @@ stdlib header uses them.
 
 Public C types use the `CC` prefix and public C functions use the `cc_` prefix.
 Unless a section states otherwise, a slice returned from an operation that
-accepts a `CCArena *` remains valid until that arena releases or reuses its
+accepts a `CCArena` remains valid until that arena releases or reuses its
 storage.
 
 ## Arenas
@@ -97,13 +97,13 @@ The generic collection factories (`CC_GENERIC_FACTORY` in `vec.cch`,
 `map_forward.cch`, `array_map.cch`; `T[:]` in `cc_slice.cch`) are:
 
 ```c
-Vec::[T] vec_new::[T](CCArena *arena);
-Map::[K, V] map_new::[K, V](CCArena *arena);
-ArrayMap::[K, V] array_map_new::[K, V](CCArena *arena);
-ArrayMap::[K, V] array_map_new_count::[K, V](CCArena *arena, size_t count);
+Vec::[T] vec_new::[T](CCArena arena);
+Map::[K, V] map_new::[K, V](CCArena arena);
+ArrayMap::[K, V] array_map_new::[K, V](CCArena arena);
+ArrayMap::[K, V] array_map_new_count::[K, V](CCArena arena, size_t count);
 ```
 
-Construction sugar is the binder: `Vec::[T] v@(&arena) @destroy;` (and the
+Construction sugar is the binder: `Vec::[T] v@(arena) @destroy;` (and the
 Map / ArrayMap equivalents). Those binders select the `.create` hook, which
 is the `_new` factory. The signatures above are the free-name grid.
 
@@ -273,14 +273,14 @@ allocation's scope.
 `<ccc/std/slice.cch>` provides:
 
 ```c
-CCResult_CCSlice_CCError cc_slice_clone_into(CCSlice *src, CCArena *arena);
-CCResult_CCSliceHdr_CCError cc_slice_hdr_clone_into(CCSliceHdr *src, CCArena *arena);
+CCResult_CCSlice_CCError cc_slice_clone_into(CCSlice *src, CCArena arena);
+CCResult_CCSliceHdr_CCError cc_slice_hdr_clone_into(CCSliceHdr *src, CCArena arena);
 
 /* Stabilize `*s` in `arena` (mutate in place). */
-bool !>(CCError) cc_slice_materialize_in(CCSlice *s, CCArena *arena);
+bool !>(CCError) cc_slice_materialize_in(CCSlice *s, CCArena arena);
 
 /* UTF-8 bytes → Unicode scalar values in `arena`. */
-uint32_t[:] !>(CCError) cc_slice_utf8_codepoints(const CCSlice *s, CCArena *arena);
+uint32_t[:] !>(CCError) cc_slice_utf8_codepoints(const CCSlice *s, CCArena arena);
 
 /* Checked index — same Result/error in all builds (no debug/release split). */
 char !>(CCError) cc_slice_get_checked(CCSlice *s, size_t idx);
@@ -323,10 +323,10 @@ typedef struct CCSlicePacked {
 } CCSlicePacked;  /* 8 bytes on 64-bit little-endian hosts */
 
 CCSlicePacked cc_slice_packed_empty(void);
-CCResult_CCSlicePacked_CCError cc_slice_to_packed(CCSlice *src, CCArena *arena); /* UFCS: src.to_packed(arena) */
+CCResult_CCSlicePacked_CCError cc_slice_to_packed(CCSlice *src, CCArena arena); /* UFCS: src.to_packed(arena) */
 CCSlicePacked cc_slice_packed_borrow(CCSlicePackedView *view);           /* probe only */
 CCSlicePacked cc_slice_packed_borrow_slice(CCSlicePackedView *view, CCSlice src);
-void cc_slice_packed_release(CCArena *arena, CCSlicePacked *r); /* heap only; clears *r */
+void cc_slice_packed_release(CCArena arena, CCSlicePacked *r); /* heap only; clears *r */
 uint32_t cc_slice_packed_len(const CCSlicePacked *r);
 CCSlice cc_slice_packed_as_slice(const CCSlicePacked *r);  /* inline/view: storage must stay live */
 int cc_slice_packed_is_inline(const CCSlicePacked *r);
@@ -343,13 +343,13 @@ Borrowed views are for probes only — do not insert them.
 `<ccc/std/string.cch>` provides:
 
 ```c
-CCSlice cc_slice_clone(CCArena *arena, CCSlice s);
-char *cc_slice_c_str(CCArena *arena, CCSlice s);
-CCSliceArray cc_slice_split_all(CCArena *arena, CCSlice s, CCSlice delim);
+CCSlice cc_slice_clone(CCArena arena, CCSlice s);
+char *cc_slice_c_str(CCArena arena, CCSlice s);
+CCSliceArray cc_slice_split_all(CCArena arena, CCSlice s, CCSlice delim);
 size_t cc_slice_concat_lenv(const CCSlice *parts, size_t count);
 CCSlice cc_slice_concat_into(void *dst, size_t cap, const CCSlice *parts, size_t count);
-CCSlice cc_slice_concat_many(CCArena *arena, const CCSlice *parts, size_t count);
-CCSlice cc_concat(CCArena *arena, ...);
+CCSlice cc_slice_concat_many(CCArena arena, const CCSlice *parts, size_t count);
+CCSlice cc_concat(CCArena arena, ...);
 ```
 
 Clone operations copy bytes into the supplied arena. `cc_slice_c_str` appends a
@@ -415,9 +415,9 @@ are:
 
 ```c
 CCString cc_string_new(void);
-CCString cc_string_with_capacity(CCArena *arena, size_t cap);
-CCString cc_string_from_slice(CCArena *arena, CCSlice slice);
-CCString cc_string_from(value, CCArena *arena);
+CCString cc_string_with_capacity(CCArena arena, size_t cap);
+CCString cc_string_from_slice(CCArena arena, CCSlice slice);
+CCString cc_string_from(value, CCArena arena);
 
 bool cc_string_failed(const CCString *str);
 size_t cc_string_len(const CCString *str);
@@ -425,29 +425,29 @@ size_t cc_string_cap(const CCString *str);
 bool cc_string_is_inline(const CCString *str);
 const char *cc_string_data_const(const CCString *str);
 char *cc_string_data(CCString *str);
-CCArena *cc_string_arena(const CCString *str);
+CCArena cc_string_arena(const CCString *str);
 uint64_t cc_string_provenance(const CCString *str);
 CCSlice cc_string_as_slice(const CCString *str);
-CCSlice cc_string_persist_slice(CCArena *arena, const CCString *str);
-bool !>(CCError) cc_string_materialize_in(CCString *str, CCArena *arena);
-const char *cc_string_cstr(CCString *str, CCArena *arena);
+CCSlice cc_string_persist_slice(CCArena arena, const CCString *str);
+bool !>(CCError) cc_string_materialize_in(CCString *str, CCArena arena);
+const char *cc_string_cstr(CCString *str, CCArena arena);
 
-char *cc_string_reserve(CCString *str, size_t need, CCArena *arena);
-CCString *cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len, CCArena *arena);
-CCString *cc_string_push_slice(CCString *str, CCSlice data, CCArena *arena);
-CCString *cc_string_push_char(CCString *str, char c, CCArena *arena);
-CCString *cc_string_push_int(CCString *str, int64_t value, CCArena *arena);
-CCString *cc_string_push_uint(CCString *str, uint64_t value, CCArena *arena);
-CCString *cc_string_push_f32(CCString *str, float value, CCArena *arena);
-CCString *cc_string_push_f64(CCString *str, double value, CCArena *arena);
-CCString *cc_string_push_float(CCString *str, double value, CCArena *arena);
-CCString *cc_string_push_cstr(CCString *str, const char *value, CCArena *arena);
+char *cc_string_reserve(CCString *str, size_t need, CCArena arena);
+CCString *cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len, CCArena arena);
+CCString *cc_string_push_slice(CCString *str, CCSlice data, CCArena arena);
+CCString *cc_string_push_char(CCString *str, char c, CCArena arena);
+CCString *cc_string_push_int(CCString *str, int64_t value, CCArena arena);
+CCString *cc_string_push_uint(CCString *str, uint64_t value, CCArena arena);
+CCString *cc_string_push_f32(CCString *str, float value, CCArena arena);
+CCString *cc_string_push_f64(CCString *str, double value, CCArena arena);
+CCString *cc_string_push_float(CCString *str, double value, CCArena arena);
+CCString *cc_string_push_cstr(CCString *str, const char *value, CCArena arena);
 CCString *cc_string_clear(CCString *str);
-CCString *cc_string_push(CCString *str, value, CCArena *arena);
-CCString *cc_string_append(CCString *str, value, CCArena *arena);
+CCString *cc_string_push(CCString *str, value, CCArena arena);
+CCString *cc_string_append(CCString *str, value, CCArena arena);
 
 void cc_string_release_heap(CCString *str);
-void cc_string_release(CCString *str, CCArena *arena);
+void cc_string_release(CCString *str, CCArena arena);
 ```
 
 `cc_string_from` has `_Generic` associations for `CCSlice`, `char *`,
@@ -480,7 +480,7 @@ a no-op; otherwise the bytes are copied into a new string in `arena` and
 Scalar conversion helpers have the form:
 
 ```c
-CCString <scalar-type>_to_str(<scalar-type> value, CCArena *arena);
+CCString <scalar-type>_to_str(<scalar-type> value, CCArena arena);
 ```
 
 The named helpers are `char_to_str`, `signed_char_to_str`,
@@ -591,11 +591,11 @@ The file API is:
 ```c
 int cc_file_open(CCFile *file, char[:0] path, const char *mode);
 void cc_file_close(CCFile *file);
-CCResult_CCSlice_CCIoError cc_file_read_all(CCFile *file, CCArena *arena);
-CCResult_CCSlice_CCIoError cc_file_read(CCFile *file, CCArena *arena, size_t n);
-CCResult_bool_CCIoError cc_file_read_into(CCFile *file, CCArena *arena, size_t n, CCSlice *out);
-CCResult_CCSlice_CCIoError cc_file_read_line(CCFile *file, CCArena *arena);
-CCResult_bool_CCIoError cc_file_read_line_into(CCFile *file, CCArena *arena, CCSlice *out);
+CCResult_CCSlice_CCIoError cc_file_read_all(CCFile *file, CCArena arena);
+CCResult_CCSlice_CCIoError cc_file_read(CCFile *file, CCArena arena, size_t n);
+CCResult_bool_CCIoError cc_file_read_into(CCFile *file, CCArena arena, size_t n, CCSlice *out);
+CCResult_CCSlice_CCIoError cc_file_read_line(CCFile *file, CCArena arena);
+CCResult_bool_CCIoError cc_file_read_line_into(CCFile *file, CCArena arena, CCSlice *out);
 CCResult_size_t_CCIoError cc_file_write(CCFile *file, CCSlice data);
 CCResult_size_t_CCIoError cc_file_read_buf(CCFile *file, void *buf, size_t n);
 CCResult_bool_CCIoError cc_file_read_buf_into(CCFile *file, void *buf, size_t n, size_t *out);
@@ -697,7 +697,7 @@ unsupported `Src` returns `CC_IO_INVALID_ARGUMENT` (not a silent no-op).
 File-only buffered writes remain:
 
 ```c
-int cc_buf_writer_init(CCBufWriter *writer, CCFile *file, CCArena *arena, size_t cap);
+int cc_buf_writer_init(CCBufWriter *writer, CCFile *file, CCArena arena, size_t cap);
 CCResult_size_t_CCIoError cc_buf_writer_flush(CCBufWriter *writer);
 CCResult_size_t_CCIoError cc_buf_writer_write(CCBufWriter *writer, CCSlice data);
 ```
@@ -731,12 +731,12 @@ int cc_file_open_async(CCExec *ex, CCFile *file, char[:0] path, const char *mode
 int cc_file_open_async_deadline(CCExec *ex, CCFile *file, char[:0] path, const char *mode, CCAsyncHandle *handle, const CCDeadline *deadline);
 int cc_file_close_async(CCExec *ex, CCFile *file, CCAsyncHandle *handle);
 int cc_file_close_async_deadline(CCExec *ex, CCFile *file, CCAsyncHandle *handle, const CCDeadline *deadline);
-int cc_file_read_all_async(CCExec *ex, CCFile *file, CCArena *arena, CCSlice *out, CCAsyncHandle *handle);
-int cc_file_read_all_async_deadline(CCExec *ex, CCFile *file, CCArena *arena, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
-int cc_file_read_async(CCExec *ex, CCFile *file, CCArena *arena, size_t n, CCSlice *out, CCAsyncHandle *handle);
-int cc_file_read_async_deadline(CCExec *ex, CCFile *file, CCArena *arena, size_t n, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
-int cc_file_read_line_async(CCExec *ex, CCFile *file, CCArena *arena, CCSlice *out, CCAsyncHandle *handle);
-int cc_file_read_line_async_deadline(CCExec *ex, CCFile *file, CCArena *arena, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
+int cc_file_read_all_async(CCExec *ex, CCFile *file, CCArena arena, CCSlice *out, CCAsyncHandle *handle);
+int cc_file_read_all_async_deadline(CCExec *ex, CCFile *file, CCArena arena, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
+int cc_file_read_async(CCExec *ex, CCFile *file, CCArena arena, size_t n, CCSlice *out, CCAsyncHandle *handle);
+int cc_file_read_async_deadline(CCExec *ex, CCFile *file, CCArena arena, size_t n, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
+int cc_file_read_line_async(CCExec *ex, CCFile *file, CCArena arena, CCSlice *out, CCAsyncHandle *handle);
+int cc_file_read_line_async_deadline(CCExec *ex, CCFile *file, CCArena arena, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
 int cc_file_write_async(CCExec *ex, CCFile *file, CCSlice data, size_t *out_written, CCAsyncHandle *handle);
 int cc_file_write_async_deadline(CCExec *ex, CCFile *file, CCSlice data, size_t *out_written, CCAsyncHandle *handle, const CCDeadline *deadline);
 ```
@@ -751,9 +751,9 @@ Path helpers are part of `<ccc/std/io.cch>`:
 ```c
 char cc_path_sep(void);
 bool cc_path_is_abs(char[:0] path);
-char[:0] cc_path_join(CCArena *arena, char[:0] a, char[:0] b);
-char[:0] cc_path_dirname(CCArena *arena, char[:0] path);
-char[:0] cc_path_basename(CCArena *arena, char[:0] path);
+char[:0] cc_path_join(CCArena arena, char[:0] a, char[:0] b);
+char[:0] cc_path_dirname(CCArena arena, char[:0] path);
+char[:0] cc_path_basename(CCArena arena, char[:0] path);
 ```
 
 Path arguments are NUL-terminated borrows (`char[:0]`). The returned `join`,
@@ -771,7 +771,7 @@ UFCS and naked aliases remain valid (UFCS either way on the chosen receiver):
 ```c
 io.println(path) !>;                  /* preferred when io is in scope */
 io.eprintln(line) !>;
-io.println(@string(`n=${n}`, &a)) !>;
+io.println(@string(`n=${n}`, a)) !>;
 
 path.println() !>;                    /* also OK: UFCS on data */
 "literal".println() !>;               /* lit/cstr → CCSlice → cc_slice_* */
@@ -822,7 +822,7 @@ Each generated `Name` has `T *data` and `size_t len`, with capacity and arena
 metadata stored by the vector core. Its public family is:
 
 ```c
-Name Name_init(CCArena *arena, size_t initial_cap);
+Name Name_init(CCArena arena, size_t initial_cap);
 int Name_reserve(Name *vec, size_t need);
 int Name_push(Name *vec, T value);
 T *Name_push_ptr(Name *vec);
@@ -868,8 +868,8 @@ increasing index order.
 The public generated family is:
 
 ```c
-Name *Name_init(CCArena *arena);
-Name *Name_init_count(CCArena *arena, size_t count);
+Name *Name_init(CCArena arena);
+Name *Name_init_count(CCArena arena, size_t count);
 void Name_destroy(Name *map);
 int Name_insert(Name *map, K key, V value);
 int Name_put(Name *map, K key, V value, int *ret);
@@ -916,8 +916,8 @@ collides with the tomb sentinel:
 The public generated family is:
 
 ```c
-Name *Name_init(CCArena *arena);
-Name *Name_init_count(CCArena *arena, size_t count);
+Name *Name_init(CCArena arena);
+Name *Name_init_count(CCArena arena, size_t count);
 void Name_destroy(Name *map);
 int Name_insert(Name *map, K key, V value);
 V *Name_get(Name *map, K key);
@@ -1064,8 +1064,8 @@ typedef struct {
 
 typedef struct CCDirIter CCDirIter;
 
-CCResult_CCDirIterptr_CCIoError cc_dir_open(CCArena *arena, char[:0] path);
-CCResult_CCDirEntry_CCIoError cc_dir_next(CCDirIter *iter, CCArena *arena);
+CCResult_CCDirIterptr_CCIoError cc_dir_open(CCArena arena, char[:0] path);
+CCResult_CCDirEntry_CCIoError cc_dir_next(CCDirIter *iter, CCArena arena);
 void cc_dir_close(CCDirIter *iter);
 
 bool cc_path_exists(char[:0] path);
@@ -1075,10 +1075,10 @@ CCResult_bool_CCIoError cc_dir_create(char[:0] path);
 CCResult_bool_CCIoError cc_dir_create_all(char[:0] path);
 CCResult_bool_CCIoError cc_dir_remove(char[:0] path);
 CCResult_bool_CCIoError cc_file_remove(char[:0] path);
-char[:0] cc_dir_cwd(CCArena *arena);
+char[:0] cc_dir_cwd(CCArena arena);
 CCResult_bool_CCIoError cc_dir_chdir(char[:0] path);
 
-CCSliceArray!>(CCIoError) cc_glob(char[:0] pattern, CCArena *arena);
+CCSliceArray!>(CCIoError) cc_glob(char[:0] pattern, CCArena arena);
 bool cc_glob_match(char[:0] pattern, char[:0] name);
 ```
 
@@ -1174,15 +1174,15 @@ Piped I/O and capture functions are:
 
 ```c
 CCResult_size_t_CCIoError cc_process_write(CCProcess *process, CCSlice data);
-CCResult_CCSlice_CCIoError cc_process_read(CCProcess *process, CCArena *arena, size_t max_bytes);
-CCResult_CCSlice_CCIoError cc_process_read_stderr(CCProcess *process, CCArena *arena, size_t max_bytes);
+CCResult_CCSlice_CCIoError cc_process_read(CCProcess *process, CCArena arena, size_t max_bytes);
+CCResult_CCSlice_CCIoError cc_process_read_stderr(CCProcess *process, CCArena arena, size_t max_bytes);
 void cc_process_close_stdin(CCProcess *process);
-CCResult_CCSlice_CCIoError cc_process_read_all(CCProcess *process, CCArena *arena);
-CCResult_CCSlice_CCIoError cc_process_read_all_stderr(CCProcess *process, CCArena *arena);
-CCResult_CCProcessOutput_CCIoError cc_process_run_config(CCArena *arena, const CCProcessConfig *config);
-CCResult_CCProcessOutput_CCIoError cc_process_run_with_input(CCArena *arena, const CCProcessConfig *config, CCSlice input);
-CCResult_CCProcessOutput_CCIoError cc_process_run(CCArena *arena, const char *program, const char **args);
-CCResult_CCProcessOutput_CCIoError cc_process_run_shell(CCArena *arena, const char *command);
+CCResult_CCSlice_CCIoError cc_process_read_all(CCProcess *process, CCArena arena);
+CCResult_CCSlice_CCIoError cc_process_read_all_stderr(CCProcess *process, CCArena arena);
+CCResult_CCProcessOutput_CCIoError cc_process_run_config(CCArena arena, const CCProcessConfig *config);
+CCResult_CCProcessOutput_CCIoError cc_process_run_with_input(CCArena arena, const CCProcessConfig *config, CCSlice input);
+CCResult_CCProcessOutput_CCIoError cc_process_run(CCArena arena, const char *program, const char **args);
+CCResult_CCProcessOutput_CCIoError cc_process_run_shell(CCArena arena, const char *command);
 ```
 
 The process-output accessors are:
@@ -1204,7 +1204,7 @@ and its exit code is zero.
 Environment functions are:
 
 ```c
-CCSlice cc_env_get(CCArena *arena, const char *name);
+CCSlice cc_env_get(CCArena arena, const char *name);
 CCResult_bool_CCIoError cc_env_set(const char *name, const char *value);
 CCResult_bool_CCIoError cc_env_unset(const char *name);
 ```
@@ -1217,8 +1217,8 @@ allocation fails.
 `<ccc/std/exec.cch>` defines the arena-backed `CCCommand` builder:
 
 ```c
-CCCommand cc_command_new(CCArena *arena, char[:0] program);
-CCCommand cc_command(CCArena *arena, char[:0] program);
+CCCommand cc_command_new(CCArena arena, char[:0] program);
+CCCommand cc_command(CCArena arena, char[:0] program);
 size_t cc_command_argc(const CCCommand *command);
 const char *cc_command_get(const CCCommand *command, size_t index);
 const char *cc_command_program(const CCCommand *command);
@@ -1243,11 +1243,11 @@ CCCommand *cc_command_env(CCCommand *command, const char **env);
 const char **cc_command_argv(CCCommand *command);
 CCProcessConfig cc_command_process_config(CCCommand *command);
 CCResult_CCProcess_CCIoError cc_command_spawn(CCCommand *command);
-CCResult_CCProcessOutput_CCIoError cc_command_run(CCCommand *command, CCArena *arena);
-CCResult_CCProcessOutput_CCIoError cc_command_output(CCCommand *command, CCArena *arena);
-CCResult_CCProcessOutput_CCIoError cc_command_output_with_input(CCCommand *command, CCArena *arena, CCSlice input);
+CCResult_CCProcessOutput_CCIoError cc_command_run(CCCommand *command, CCArena arena);
+CCResult_CCProcessOutput_CCIoError cc_command_output(CCCommand *command, CCArena arena);
+CCResult_CCProcessOutput_CCIoError cc_command_output_with_input(CCCommand *command, CCArena arena, CCSlice input);
 CCResult_int_CCIoError cc_command_status(CCCommand *command);
-CCResult_CCProcessOutput_CCIoError cc_command_capture(CCCommand *command, CCArena *arena);
+CCResult_CCProcessOutput_CCIoError cc_command_capture(CCCommand *command, CCArena arena);
 ```
 
 `program`, `cwd`, and `arg_slice` take NUL-terminated path/token borrows
@@ -1460,7 +1460,7 @@ void cc_listener_close(CCListener *listener);
 
 CCIoError cc_net_to_io_error(CCNetError err);
 
-CCResult_bool_CCIoError cc_socket_read(CCSocket *socket, CCArena *arena, size_t max_bytes, CCSlice *out);
+CCResult_bool_CCIoError cc_socket_read(CCSocket *socket, CCArena arena, size_t max_bytes, CCSlice *out);
 CCResult_bool_CCIoError cc_socket_read_into(CCSocket *socket, char *buf, size_t max_bytes, size_t *out);
 CCResult_bool_CCIoError cc_socket_read_buf_into(CCSocket *socket, char *buf, size_t max_bytes, size_t *out); /* alias of read_into */
 CCResult_bool_CCIoError cc_socket_read_into_deadline(CCSocket *socket, char *buf, size_t max_bytes, size_t *out, const CCDeadline *deadline);
@@ -1470,8 +1470,8 @@ CCResult_size_t_CCIoError cc_socket_write_deadline(CCSocket *socket, const char 
 void cc_socket_shutdown(CCSocket *socket, CCShutdownMode mode, CCNetError *out_err);
 void cc_socket_close(CCSocket *socket);
 int cc_socket_set_nodelay(CCSocket *socket, int on);
-CCSlice cc_socket_peer_addr(CCSocket *socket, CCArena *arena, CCNetError *out_err);
-CCSlice cc_socket_local_addr(CCSocket *socket, CCArena *arena, CCNetError *out_err);
+CCSlice cc_socket_peer_addr(CCSocket *socket, CCArena arena, CCNetError *out_err);
+CCSlice cc_socket_local_addr(CCSocket *socket, CCArena arena, CCNetError *out_err);
 ```
 
 Listen `addr` is a NUL-terminated borrow (`char[:0]` / `CCSlice`), same shape
@@ -1533,15 +1533,15 @@ UDP functions are:
 ```c
 CCUdpSocket cc_udp_bind(const char *addr, size_t addr_len, CCNetError *out_err);
 size_t cc_udp_send_to(CCUdpSocket *socket, const char *data, size_t len, const char *addr, size_t addr_len, CCNetError *out_err);
-CCUdpPacket cc_udp_recv_from(CCUdpSocket *socket, CCArena *arena, size_t max_bytes, CCNetError *out_err);
+CCUdpPacket cc_udp_recv_from(CCUdpSocket *socket, CCArena arena, size_t max_bytes, CCNetError *out_err);
 void cc_udp_close(CCUdpSocket *socket);
 ```
 
 DNS and address functions are:
 
 ```c
-CCSlice cc_dns_lookup(CCArena *arena, const char *hostname, size_t hostname_len, CCNetError *out_err);
-CCSlice cc_ip_addr_to_string(CCIpAddr *addr, CCArena *arena);
+CCSlice cc_dns_lookup(CCArena arena, const char *hostname, size_t hostname_len, CCNetError *out_err);
+CCSlice cc_ip_addr_to_string(CCIpAddr *addr, CCArena arena);
 CCIpAddr cc_ip_parse(const char *text, size_t len, CCNetError *out_err);
 ```
 
@@ -1557,8 +1557,8 @@ typedef enum CCDnsFamily {
     CC_DNS_IPV6 = 6
 } CCDnsFamily;
 
-CCSlice cc_dns_lookup_family(CCArena *arena, const char *hostname, size_t hostname_len, CCDnsFamily family, CCNetError *out_err);
-CCSlice cc_dns_reverse(CCArena *arena, const CCIpAddr *addr, CCNetError *out_err);
+CCSlice cc_dns_lookup_family(CCArena arena, const char *hostname, size_t hostname_len, CCDnsFamily family, CCNetError *out_err);
+CCSlice cc_dns_reverse(CCArena arena, const CCIpAddr *addr, CCNetError *out_err);
 ```
 
 The header declares them; the shipped runtime does not provide definitions.
@@ -1620,13 +1620,13 @@ The API is:
 
 ```c
 CCHttpClientConfig cc_http_client_config_default(void);
-CCHttpResponse!>(CCHttpErrorInfo) cc_http_get(CCArena *arena, const char *url, size_t url_len);
-CCHttpResponse!>(CCHttpErrorInfo) cc_http_post(CCArena *arena, const char *url, size_t url_len, const char *body, size_t body_len);
+CCHttpResponse!>(CCHttpErrorInfo) cc_http_get(CCArena arena, const char *url, size_t url_len);
+CCHttpResponse!>(CCHttpErrorInfo) cc_http_post(CCArena arena, const char *url, size_t url_len, const char *body, size_t body_len);
 CCHttpClient cc_http_client_new(CCHttpClientConfig config);
 CCHttpClient cc_http_client_default(void);
-CCHttpResponse!>(CCHttpErrorInfo) cc_http_client_get(CCHttpClient *client, CCArena *arena, const char *url, size_t url_len);
-CCHttpResponse!>(CCHttpErrorInfo) cc_http_client_post(CCHttpClient *client, CCArena *arena, const char *url, size_t url_len, const char *body, size_t body_len);
-CCHttpResponse!>(CCHttpErrorInfo) cc_http_client_request(CCHttpClient *client, CCArena *arena, CCHttpRequest request);
+CCHttpResponse!>(CCHttpErrorInfo) cc_http_client_get(CCHttpClient *client, CCArena arena, const char *url, size_t url_len);
+CCHttpResponse!>(CCHttpErrorInfo) cc_http_client_post(CCHttpClient *client, CCArena arena, const char *url, size_t url_len, const char *body, size_t body_len);
+CCHttpResponse!>(CCHttpErrorInfo) cc_http_client_request(CCHttpClient *client, CCArena arena, CCHttpRequest request);
 ```
 
 Response body, headers, final URL, and any arena-backed error `message` use
@@ -1687,7 +1687,7 @@ typedef struct CCTlsConn {
     void *iobuf;
     size_t iobuf_len;
     CCSocket underlying;
-    CCArena *info_arena;
+    CCArena info_arena;
     uint8_t flags;
 } CCTlsConn;
 ```
@@ -1698,10 +1698,10 @@ The connection API is:
 #define CC_TLS_IOBUF_SIZE (16384 + 16384 + 325)
 
 CCTlsClientConfig cc_tls_client_config_default(void);
-CCTlsConn cc_tls_connect(CCSocket socket, CCTlsClientConfig config, void *iobuf, size_t iobuf_len, CCArena *info_arena, CCNetError *out_err);
-CCTlsConn cc_tls_connect_addr(const char *addr, size_t addr_len, CCTlsClientConfig config, CCArena *conn_arena, CCNetError *out_err);
-CCTlsConn cc_tls_accept(CCSocket socket, CCTlsServerConfig config, void *iobuf, size_t iobuf_len, CCArena *info_arena, CCNetError *out_err);
-CCSlice cc_tls_read(CCTlsConn *conn, CCArena *arena, size_t max_bytes, CCNetError *out_err);
+CCTlsConn cc_tls_connect(CCSocket socket, CCTlsClientConfig config, void *iobuf, size_t iobuf_len, CCArena info_arena, CCNetError *out_err);
+CCTlsConn cc_tls_connect_addr(const char *addr, size_t addr_len, CCTlsClientConfig config, CCArena conn_arena, CCNetError *out_err);
+CCTlsConn cc_tls_accept(CCSocket socket, CCTlsServerConfig config, void *iobuf, size_t iobuf_len, CCArena info_arena, CCNetError *out_err);
+CCSlice cc_tls_read(CCTlsConn *conn, CCArena arena, size_t max_bytes, CCNetError *out_err);
 size_t cc_tls_write(CCTlsConn *conn, const char *data, size_t len, CCNetError *out_err);
 void cc_tls_shutdown(CCTlsConn *conn, CCShutdownMode mode, CCNetError *out_err);
 void cc_tls_close(CCTlsConn *conn);
@@ -1717,9 +1717,9 @@ slices are available through it.
 Certificate-loading entry points are:
 
 ```c
-CCTlsCertChain *cc_tls_load_cert_chain(CCArena *arena, const char *path, size_t path_len, CCNetError *out_err);
-CCTlsPrivateKey *cc_tls_load_private_key(CCArena *arena, const char *path, size_t path_len, CCNetError *out_err);
-CCTlsTrustAnchors *cc_tls_load_trust_anchors(CCArena *arena, const char *path, size_t path_len, CCNetError *out_err);
+CCTlsCertChain *cc_tls_load_cert_chain(CCArena arena, const char *path, size_t path_len, CCNetError *out_err);
+CCTlsPrivateKey *cc_tls_load_private_key(CCArena arena, const char *path, size_t path_len, CCNetError *out_err);
+CCTlsTrustAnchors *cc_tls_load_trust_anchors(CCArena arena, const char *path, size_t path_len, CCNetError *out_err);
 ```
 
 Each returns null and writes
@@ -1784,7 +1784,7 @@ an explicit, costed operation (Moves).
 ```c
 #include <ccc/script/py.cch>
 
-CCPy py = cc_py_new(false, &a) !> @destroy;
+CCPy py = cc_py_new(false, a) !> @destroy;
 CCPyObj np = py.import("numpy") !> @destroy;
 CCPyObj arr = np.call("arange", 10) !> @destroy;
 double s = arr.call("sum").as_f64() !>;
@@ -1806,14 +1806,14 @@ that degrade rather than fail when Python is absent:
 
 ```c
 if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
-CCPy py = cc_py_new(false, &arena) !>;
+CCPy py = cc_py_new(false, arena) !>;
 ```
 
 The probe is the loader — same search order, same `CC_LIBPYTHON` override —
 so it cannot disagree with the constructor. After a true probe, `!>` on
 `cc_py_new` means what it says: a real initialization failure.
 
-The constructor shape is the family's — `cc_py_new(isolated, &arena)`,
+The constructor shape is the family's — `cc_py_new(isolated, arena)`,
 transport first, arena last, mirroring `cc_js_new`.  `false` opens an
 in-process interpreter; Python multiplies in-process (every handle
 after the first is an isolated subinterpreter with its own GIL), so
@@ -1942,12 +1942,12 @@ is identical either way. Raw bytes only move when both sides agree on what
 they mean: a `float32` array asked for as `double` converts per element
 rather than being reinterpreted.
 
-`f.map::[T](&arena, cols…)` calls a callable once per row across column
+`f.map::[T](arena, cols…)` calls a callable once per row across column
 slices, in one crossing: each argument is a typed slice of equal length,
 row `i` passes element `i` of every column, and the results land as a
 `T[:]` run in the arena — `CCSlice !>(CCPyError)`. Columns are
 independently typed, so a row may be a heterogeneous argument tuple
-(`f.map::[double](&a, xs, ks, zs)` with `double`, `int64_t`, `double`
+(`f.map::[double](a, xs, ks, zs)` with `double`, `int64_t`, `double`
 columns). The type argument names the result element type, the same
 reading as `as_list`. Columns of unequal length are a `CCPyError` naming
 the column, before any call runs; a row whose call raises or whose result
@@ -2013,11 +2013,11 @@ truncation.
 
 Explicit extraction remains for held objects:
 `.as_i64() !>`, `.as_f64() !>`, `.as_slice() !>` (`str`/`bytes` copied into
-the home handle's scratch arena from `cc_py_new(false, &arena)`). Override the
+the home handle's scratch arena from `cc_py_new(false, arena)`). Override the
 destination with `.as_slice_into(&dst) !>`. The result slice is minted with
 that arena's provenance epoch. Anything else stays a `CCPyObj`.
 
-`cc_py_new(false, &arena)` stores `arena` on the handle. Error text and default
+`cc_py_new(false, arena)` stores `arena` on the handle. Error text and default
 `.as_slice()` allocate from it. Every `CCPyObj` carries `home` pointing at
 that handle so obj methods can reach the scratch arena.
 
@@ -2069,8 +2069,8 @@ creates an isolated interpreter with its own GIL, so two handles run Python
 in parallel:
 
 ```c
-CCPy a = cc_py_new(false, &arena) !> @destroy;
-CCPy b = cc_py_new(false, &arena) !> @destroy;   /* isolated: its own GIL */
+CCPy a = cc_py_new(false, arena) !> @destroy;
+CCPy b = cc_py_new(false, arena) !> @destroy;   /* isolated: its own GIL */
 ```
 
 There is no pool type. A set of interpreters is an ordinary array of `CCPy`,
@@ -2382,7 +2382,7 @@ and invisible to JS; `global`/`eval`/`exec`; the `CCJsVal` `.ufcs_sink`
 with destination-typed variants; `.get`/`.as_*`/`.hold`; `f.map::[T]` row
 batching; unsigned inbound via `napi_get_value_bigint_uint64`;
 `js_pos` for keyword-bag escape).  Domains are implemented:
-`cc_js_new(isolated, &arena)` yields one handle over two transports —
+`cc_js_new(isolated, arena)` yields one handle over two transports —
 hosted libnode in-process, or a node child per handle on the
 `concurrent-c-node` wire — with `cc_js_host_new`/`run` as the raw
 loop-thread door beneath the hosted tier.  Isolated wire typed arrays
@@ -2463,7 +2463,7 @@ of a runtime.
 
 ### Domains: one handle, two transports
 
-`CCJsDom js = cc_js_new(isolated, &arena) !> @destroy` yields a domain
+`CCJsDom js = cc_js_new(isolated, arena) !> @destroy` yields a domain
 — a JavaScript runtime this program owns — behind one surface:
 `require`/`eval`/`exec` on the handle, `CCJsDomVal` values whose
 attribute access is property lookup and whose method calls dispatch
@@ -2498,7 +2498,7 @@ stale binary never silently serves a different host.
 the `concurrent-c-node` line-JSON wire (the same broker source,
 embedded and kept byte-identical by test) over a socketpair — wire
 latency per hop, buying N domains per process, per-domain node
-executables (`cc_js_new_exe(true, exe, &arena)` > `CC_NODE_BIN` >
+executables (`cc_js_new_exe(true, exe, arena)` > `CC_NODE_BIN` >
 `node` on PATH), separate heaps and event loops, and crash isolation:
 a child dying fails its own domain's calls, articulately, and nothing
 else.
@@ -2911,7 +2911,7 @@ so the borrow rule holds with no escape.
 run of `T`; a `TypedArray` whose element type matches `T` is read with
 one `memcpy`, anything else takes the per-element walk with the same
 result. `obj.as_map::[K, V](&arena, m)` fills a Map from a `Map` or a
-plain object's own enumerable properties. `f.map::[T](&arena, cols…)`
+plain object's own enumerable properties. `f.map::[T](arena, cols…)`
 calls a callable once per row across column slices in one crossing, as
 for Python.
 

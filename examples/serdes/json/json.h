@@ -77,14 +77,14 @@ typedef enum { JSON_OK = 1, JSON_BAD = -1 } JsonStatus;
 
 typedef struct {
     const char* src; size_t len, pos;
-    CCArena* arena;                             /* nodes + materialized strings */
+    CCArena arena;                              /* nodes + materialized strings */
     JsonNode* node_batch;                       /* carved from arena in slabs */
     size_t node_batch_left;
     long borrowed_strs, materialized_strs;      /* the copy-rate story */
 } JsonParser;
 
 /* factory: source data first, arena LAST */
-static inline JsonParser json_parser(const char* src, size_t len, CCArena* arena) {
+static inline JsonParser json_parser(const char* src, size_t len, CCArena arena) {
     JsonParser p = {0}; p.src=src; p.len=len; p.arena=arena; return p;
 }
 

@@ -71,7 +71,7 @@ static inline void !>(CCError) cc_parallel_wait(CCParallel* h) {
     if (cc_atomic_load(&h->joined))
         return cc_ok();
     if (h->n) {
-        CCResult_void_CCError wr = cc_nursery_wait(h->n);
+        CCResult_void_CCError wr = cc_nursery_wait_host(h->n);
         if (!wr.ok) return wr;
     }
     for (i = 0; i < h->nt; i++) {
@@ -110,7 +110,7 @@ static inline int cc__parallel_cancel_one(CCParallel* h) {
     if (!cc_atomic_cas(&h->cancelled, &expected, 1))
         return 0;
     if (h->n)
-        cc_nursery_cancel(h->n);
+        cc_nursery_cancel_host(h->n);
     return 1;
 }
 
@@ -184,7 +184,7 @@ static inline CCSlice cc_parallel_lower_c(CCSlice recv_type,
                                           CCSlice mode,
                                           CCSliceArray argv,
                                           CCSliceArray arg_types,
-                                          CCArena *arena) {
+                                          CCArena arena) {
     (void)recv_type;
     (void)mode;
     (void)argv;

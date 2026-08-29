@@ -28,7 +28,7 @@ void arena_worker(int worker_id) {
         /* Vary allocation sizes */
         size_t size = 16 + (worker_id * 7 + i * 13) % 256;
 
-        void* ptr = cc_arena_alloc(&g_arena, size, 8);
+        void* ptr = cc_arena_alloc(g_arena, size, 8);
         if (ptr != NULL) {
             /* Write a pattern to verify memory is usable */
             memset(ptr, (uint8_t)(worker_id ^ i), size);
@@ -91,7 +91,7 @@ int test_reset_during_use(void) {
     @errhandler(CCError e) cc_error_exit(e);
     printf("  reset_during_use: testing arena reset safety\n");
 
-    cc_arena_reset(&g_arena);
+    cc_arena_reset(g_arena);
 
     /* Reset counters */
     cc_atomic_store(&g_successful_allocs, 0);
@@ -105,7 +105,7 @@ int test_reset_during_use(void) {
             int worker_id = w;
             __cc_nursery108.spawn(() => {
                 for (int i = 0; i < 50; i++) {
-                    void* ptr = cc_arena_alloc(&g_arena, 64, 8);
+                    void* ptr = cc_arena_alloc(g_arena, 64, 8);
                     if (ptr) {
                         cc_atomic_fetch_add(&g_successful_allocs, 1);
                     }
@@ -117,7 +117,7 @@ int test_reset_during_use(void) {
         __cc_nursery108.spawn(() => {
             for (int i = 0; i < 5; i++) {
                 cc_sleep_ms(1);
-                cc_arena_reset(&g_arena);
+                cc_arena_reset(g_arena);
             }
         });
 
@@ -126,7 +126,7 @@ int test_reset_during_use(void) {
             int worker_id = w;
             __cc_nursery108.spawn(() => {
                 for (int i = 0; i < 50; i++) {
-                    void* ptr = cc_arena_alloc(&g_arena, 64, 8);
+                    void* ptr = cc_arena_alloc(g_arena, 64, 8);
                     if (ptr) {
                         cc_atomic_fetch_add(&g_successful_allocs, 1);
                     }

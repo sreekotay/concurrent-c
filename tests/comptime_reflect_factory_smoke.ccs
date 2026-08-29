@@ -15,7 +15,7 @@ typedef struct {
 } Widget;
 
 @comptime CCSlice describe_factory(CCSlice generic_name, CCSlice mangled,
-                                   CCSliceArray type_args, CCArena* arena) {
+                                   CCSliceArray type_args, CCArena arena) {
     static char buf[4096];
     (void)generic_name;
     (void)arena;

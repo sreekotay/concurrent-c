@@ -65,7 +65,7 @@ static void pin(int cond, const char* msg) {
 
 /* ---------- Case (1): cc_dyn_vec carrying codegen-emitted CCVec::[Point2] ---------- */
 
-static void test_codegen_emitted_container_element(CCArena* arena) {
+static void test_codegen_emitted_container_element(CCArena arena) {
     /* Use CCVec::[Point2] first so the codegen pass emits cc_type_info
      * for `CCVec_Point2` (otherwise `type_of(CCVec_Point2)` would
      * return NULL — that's a different failure mode, covered by
@@ -114,7 +114,7 @@ static void test_codegen_emitted_container_element(CCArena* arena) {
 
 /* ---------- Case (2): cc_dyn_vec carrying user-registered struct ---------- */
 
-static void test_user_registered_struct_element(CCArena* arena) {
+static void test_user_registered_struct_element(CCArena arena) {
     const cc_type_info* ti = type_of(RegPair);
     pin(ti != NULL, "type_of(RegPair) resolved");
     if (!ti) return;
@@ -179,8 +179,8 @@ int main(void) {
         return 1;
     }
 
-    test_codegen_emitted_container_element(&arena);
-    test_user_registered_struct_element(&arena);
+    test_codegen_emitted_container_element(arena);
+    test_user_registered_struct_element(arena);
     test_pointer_identity();
 
     cc_arena_destroy(&arena);

@@ -5,7 +5,7 @@
  * factory names both spellings that could have resolved it. */
 int main(void) {
     CCArena a = cc_arena_heap(kilobytes(8));
-    CCResult_CCPy_CCPyError pr = cc_py_new(false, &a);
+    CCResult_CCPy_CCPyError pr = cc_py_new(false, a);
     CCPy py = CCResult_CCPy_CCPyError_value(pr);
     py.expse::[int]("x");
     return 0;

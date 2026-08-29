@@ -3,7 +3,7 @@
 
 int main(void) {
     CCArena a = cc_arena_heap(kilobytes(4));
-    char[:] view = cc_arena_alloc_slice_bytes(&a, 32);
+    char[:] view = cc_arena_alloc_slice_bytes(a, 32);
     CCSlice[~4 >] tx;
     CCSlice[~4 <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);

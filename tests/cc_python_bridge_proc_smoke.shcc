@@ -9,7 +9,7 @@
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
 {
-    CCCommand which = cc_command(&a, @slice("sh"));
+    CCCommand which = cc_command(a, @slice("sh"));
     which.arg("-c");
     which.arg("command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 "
               "&& python3 -c 'import numpy' >/dev/null 2>&1");
@@ -18,7 +18,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand run = cc_command(&a, @slice("sh"));
+    CCCommand run = cc_command(a, @slice("sh"));
     run.arg("-c");
     run.arg("node tests/cc_python_bridge_proc.js");
     run.inherit_stdio();

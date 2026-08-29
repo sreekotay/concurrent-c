@@ -23,7 +23,7 @@
  * Embedded Python is a backtick template: real newlines and real indentation,
  * which matters most for the one language here where indentation is syntax. */
 
-typedef struct Counter { CCArena *arena; long long n; } Counter;
+typedef struct Counter { CCArena arena; long long n; } Counter;
 
 static long long Counter_add(Counter *self, long long a, long long b) { (void)self; return a + b; }
 static long long Counter_bump(Counter *self, long long by) { self->n += by; return self->n; }
@@ -38,9 +38,9 @@ int main(void) {
     @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
     CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
     if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
-    CCPy py = cc_py_new(false, &a) !>;
+    CCPy py = cc_py_new(false, a) !>;
 
-    Counter seed = { .arena = &a, .n = 0 };
+    Counter seed = { .arena = a, .n = 0 };
     py_expose::[Counter](&py, "counter", &seed) !>;
 
     py.exec(@string(`

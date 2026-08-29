@@ -99,7 +99,7 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
 
     CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
-    CCStdio io = cc_stdio_create(&a);
+    CCStdio io = cc_stdio_create(a);
 
     CCNursery n = a.create_nursery() !>; // will be destroyed with the arena safely
     n.spawn(() => [io] {
@@ -282,14 +282,14 @@ types or non-negative decimal integers (`SmallVec::[int, 8]`). Multi-word types 
 factory is a use-site error — include the header that registers it.
 
 ```c
-Vec::[int] v@(&arena) @destroy;     // CCVec_int; dot UFCS
+Vec::[int] v@(arena) @destroy;      // CCVec_int; dot UFCS
 v.push(10);
-Map::[int, double] m = map_new::[int, double](&arena);
+Map::[int, double] m = map_new::[int, double](arena);
 m->insert(1, 2.5);                  // Map is Name*; arrow UFCS
 ```
 
 `.` = value receiver, `->` = pointer. Free-name grid:
-`vec_new::[int](&arena)` is the same instance as the binder. Recipe:
+`vec_new::[int](arena)` is the same instance as the binder. Recipe:
 [recipe_user_generics.ccs](../examples/recipe_user_generics.ccs) ·
 [Cheatsheet](cheatsheet.md#generics-nameargs) · spec
 [§12.1](../spec/concurrent-c-spec-complete.md#121-registered-factories).
@@ -309,7 +309,7 @@ storage.”
 
 ```c
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;  /* names this lifetime */
-CCStdio io = cc_stdio_create(&a);
+CCStdio io = cc_stdio_create(a);
 char* p = a.allocT(64);
 char[:] s = a.alloc_slice_bytes(32);               /* arena provenance */
 io.println(@string(`len=${s.len}`, @scratch)) !>;  /* @scratch: @string arena only */

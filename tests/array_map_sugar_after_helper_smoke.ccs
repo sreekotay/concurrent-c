@@ -23,7 +23,7 @@ int main(void) {
     Entr* p;
     CCSliceHdr k;
     if (!cc_arena_is_live(arena)) return 1;
-    db.entries = array_map_new::[CCSliceHdr, Entr](&arena);
+    db.entries = array_map_new::[CCSliceHdr, Entr](arena);
     if (!db.entries) return 2;
     k = key_view(@slice("k"));
     e.n = 99;

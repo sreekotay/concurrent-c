@@ -5,7 +5,7 @@
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     
-    Map/*x*/::[int, int] m = map_new::[int, int](&arena);
+    Map/*x*/::[int, int] m = map_new::[int, int](arena);
     
     /* UFCS method calls - m.method(args) -> Map_int_int_method(&m, args) */
     m.insert(1, 100);

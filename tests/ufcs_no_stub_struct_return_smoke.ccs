@@ -33,7 +33,7 @@ int main(void) {
 
     // CCString -> CCSlice via as_slice UFCS (struct-return)
     CCArena a2 = cc_arena_heap(kilobytes(4));
-    CCString s = int_to_str(42, &a2);
+    CCString s = int_to_str(42, a2);
     CCSlice view = s.as_slice();
     (void)view;
     cc_arena_free(&a2);

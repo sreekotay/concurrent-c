@@ -100,3 +100,31 @@ static size_t !>(CCError) parse_inline_args(char[:] line, char[:]* args, size_t 
      * like Redis — do not turn it into a parse error. */
     return cc_ok(argc);
 }
+
+static size_t count_inline_tokens(char[:] line) {
+    size_t n = 0, pos = 0;
+    const char* data = (const char*)line.ptr;
+    while (pos < line.len) {
+        while (pos < line.len && data[pos] == ' ') pos++;
+        if (pos >= line.len) break;
+        n++;
+        while (pos < line.len && data[pos] != ' ') pos++;
+    }
+    return n;
+}
+
+/* Inline argv on `arena` — no compile-time slot cap. Bulk bytes stay a
+ * borrow of `line` (the read buffer). */
+static size_t !>(CCError) parse_inline_args_arena(char[:] line, CCArena arena,
+                                                 char[:]** out_args) {
+    size_t n = count_inline_tokens(line);
+    char[:]* args;
+    if (n == 0) {
+        *out_args = NULL;
+        return cc_ok(0);
+    }
+    args = cc_arena_alloc_T_count(CCSlice, arena, n);
+    if (!args) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "inline argv"));
+    *out_args = args;
+    return parse_inline_args(line, args, n);
+}

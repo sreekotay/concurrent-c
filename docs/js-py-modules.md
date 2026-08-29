@@ -47,7 +47,7 @@ extra binding.
 #!/usr/bin/env -S ./cc/bin/ccc
 #include <ccc/script/py.cch>
 
-CCPy py = cc_py_new(false, &a) !> @destroy;
+CCPy py = cc_py_new(false, a) !> @destroy;
 
 CCPyObj math = py.import("math") !> @destroy;
 double v = math.sqrt(2.0) !>;
@@ -57,7 +57,7 @@ CCPyObj stats = py.import("statistics") !> @destroy;
 double xs[:] = {1.0, 2.0, 3.0, 4.0, 42.0};
 double mv = stats.mean(xs) !>;
 
-CCSlice vs = py.import("sys")!>.get("version")!>.as_slice()!>;
+char[:] vs = py.import("sys")!>.get("version")!>.as_slice()!>;
 ```
 
 ```sh
@@ -66,7 +66,7 @@ ccc examples/py/pydemo.shcc
 ```
 
 Probe with `cc_py_available()` when you want a clean skip without libpython.
-`cc_py_new(true, &a)` opens a **process-isolated** child (probe:
+`cc_py_new(true, a)` opens a **process-isolated** child (probe:
 `cc_py_proc_available()`); objects stay remote handles / scalars — never
 shared `PyObject*`. Same-process homes refuse foreign-home object args by
 name; `obj.clone_into(&other)` pickle-copies between inproc interpreters
@@ -107,12 +107,12 @@ flag, mirroring `concurrent-c-python`'s `create()` /
 `create({isolated: true})`:
 
 ```c
-CCJsDom js = cc_js_new(false, &a) !> @destroy;   /* in-process node   */
-CCJsDom js = cc_js_new(true,  &a) !> @destroy;   /* node child        */
+CCJsDom js = cc_js_new(false, a) !> @destroy;   /* in-process node   */
+CCJsDom js = cc_js_new(true,  a) !> @destroy;   /* node child        */
 
 double v = js.eval("Math.sqrt(2)")!>.as_f64() !>;
 CCJsDomVal os = js.require("os") !> @destroy;
-CCSlice plat = os.platform()!>.as_slice(&a) !>;
+char[:] plat = os.platform()!>.as_slice(a) !>;
 long long cpus = os.availableParallelism() !>;
 ```
 

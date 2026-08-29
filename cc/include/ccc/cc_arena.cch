@@ -131,20 +131,14 @@ static inline CCArenaHost *cc_arena_hostp(const CCArena *p) {
     return p ? p->a : NULL;
 }
 
-/* Peel Host* / handle / handle* so existing C and .cch call sites keep
- * compiling during the box migration. Functions, not `(x)->a`, so a
+/* Peel Host* or handle. `CCArena*` is a slot only — not an allocate
+ * argument — so it is not listed here. Functions, not `(x)->a`, so a
  * parameter named `new_arena` cannot eat the field token. */
 static inline CCArenaHost *cc__arena_host_from_host(CCArenaHost *h) { return h; }
 static inline CCArenaHost *cc__arena_host_from_chost(const CCArenaHost *h) {
     return (CCArenaHost *)(uintptr_t)(const void *)h;
 }
 static inline CCArenaHost *cc__arena_host_from_handle(CCArena a) { return a.a; }
-static inline CCArenaHost *cc__arena_host_from_handlep(CCArena *p) {
-    return p ? p->a : NULL;
-}
-static inline CCArenaHost *cc__arena_host_from_chandlep(const CCArena *p) {
-    return p ? p->a : NULL;
-}
 static inline CCArena cc__arena_handle_from_host(CCArenaHost *h) {
     return cc_arena_handle(h);
 }
@@ -152,48 +146,44 @@ static inline CCArena cc__arena_handle_from_chost(const CCArenaHost *h) {
     return cc_arena_handle((CCArenaHost *)(uintptr_t)(const void *)h);
 }
 static inline CCArena cc__arena_handle_from_handle(CCArena a) { return a; }
-static inline CCArena cc__arena_handle_from_handlep(CCArena *p) {
-    return p ? *p : cc_arena_handle(NULL);
-}
-static inline CCArena cc__arena_handle_from_chandlep(const CCArena *p) {
-    return p ? *p : cc_arena_handle(NULL);
-}
-/* No void* association: TinyCC's _Generic treats every pointer as matching
- * void*, which would skip `.a` and operate on the handle as if it were a
- * host (unaligned atomics / EXC_BAD_ACCESS in the comptime executor).
- * Associations use the tag `struct CCArena` so TinyCC and Clang both match
- * a handle value (TinyCC does not match the typedef name). */
+/* Handle-by-value is `default`, not `struct CCArena`. Clang takes `&` of a
+ * `_Generic` controlling expression when both `struct T` and `struct T *`
+ * are listed; we do not list `T*`. `default` also matches TinyCC, which
+ * does not associate the typedef name. No void* arm on HOST/HANDLE:
+ * TinyCC treats every pointer as void*. */
 #define CC__ARENA_HOST(x) _Generic((x), \
     CCArenaHost *: cc__arena_host_from_host, \
     const CCArenaHost *: cc__arena_host_from_chost, \
-    struct CCArena *: cc__arena_host_from_handlep, \
-    const struct CCArena *: cc__arena_host_from_chandlep, \
-    struct CCArena: cc__arena_host_from_handle \
+    default: cc__arena_host_from_handle \
 )(x)
 /* Identity as a handle. Allocator arguments and stored fields use this —
  * never a pointer to the caller's binding. */
 #define CC__ARENA_HANDLE(x) _Generic((x), \
     CCArenaHost *: cc__arena_handle_from_host, \
     const CCArenaHost *: cc__arena_handle_from_chost, \
-    struct CCArena *: cc__arena_handle_from_handlep, \
-    const struct CCArena *: cc__arena_handle_from_chandlep, \
-    struct CCArena: cc__arena_handle_from_handle \
+    default: cc__arena_handle_from_handle \
 )(x)
-/* Last-good / tests still pass NULL for “no arena”. No void* arm — TinyCC
- * would then treat every pointer as void* and skip `.a`. Unlisted pointer
- * types (NULL) take default. */
+/* Optional arena: handle, Host*, or NULL. TinyCC cannot list void*
+ * (every pointer would match). */
 static inline CCArena cc__arena_handle_none(void *unused) {
     (void)unused;
     return cc_arena_handle(NULL);
 }
+#if defined(__TINYC__)
 #define CC__ARENA_HANDLE_OR_NULL(x) _Generic((x), \
     CCArenaHost *: cc__arena_handle_from_host, \
     const CCArenaHost *: cc__arena_handle_from_chost, \
-    struct CCArena *: cc__arena_handle_from_handlep, \
-    const struct CCArena *: cc__arena_handle_from_chandlep, \
     struct CCArena: cc__arena_handle_from_handle, \
     default: cc__arena_handle_none \
 )(x)
+#else
+#define CC__ARENA_HANDLE_OR_NULL(x) _Generic((x), \
+    CCArenaHost *: cc__arena_handle_from_host, \
+    const CCArenaHost *: cc__arena_handle_from_chost, \
+    void *: cc__arena_handle_none, \
+    default: cc__arena_handle_from_handle \
+)(x)
+#endif
 
 struct CCArenaCheckpoint {
     CCArenaHost* arena;
@@ -1347,7 +1337,7 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
                                                         CCSlice mode,
                                                         CCSliceArray argv,
                                                         CCSliceArray arg_types,
-                                                        CCArenaHost *arena) {
+                                                        CCArena arena) {
     const char *t;
     size_t tlen;
     size_t max_total;
@@ -1366,7 +1356,7 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
     (void)arg_types;
     t = (const char *)recv_type.ptr;
     tlen = recv_type.len;
-    if (!t || tlen == 0 || !arena) return cc_slice_empty();
+    if (!t || tlen == 0 || !arena.p) return cc_slice_empty();
     /* Strip optional leading "struct " / "union " qualifiers that TCC
        occasionally reports for elaborated type names. */
     if (tlen >= 7 && memcmp(t, "struct ", 7) == 0) { t += 7; tlen -= 7; }
@@ -1475,7 +1465,7 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
        `cc_` + `_` separator + method. */
     max_total = 6 /* const_ */ + 9 /* volatile_ */ + 9 /* restrict_ */ +
                 3 /* "cc_" */ + tlen * 2 + 1 /* "_" */ + method.len;
-    out = cc_arena_alloc_slice_bytes(arena, max_total);
+    out = cc_arena_alloc_slice_bytes(CC__ARENA_HOST(arena), max_total);
     buf = (char *)out.ptr;
     if (!buf) return cc_slice_empty();
     wi = 0;
@@ -1536,7 +1526,7 @@ static inline CCSlice cc_ufcs_generic_cc_slice_family_c(CCSlice recv_type,
                                                         CCSlice mode,
                                                         CCSliceArray argv,
                                                         CCSliceArray arg_types,
-                                                        CCArenaHost *arena) {
+                                                        CCArena arena) {
     static const char prefix[] = "cc_slice_";
     size_t prefix_len = sizeof(prefix) - 1;
     size_t total;
@@ -1546,9 +1536,9 @@ static inline CCSlice cc_ufcs_generic_cc_slice_family_c(CCSlice recv_type,
     (void)mode;
     (void)argv;
     (void)arg_types;
-    if (!arena) return cc_slice_empty();
+    if (!arena.p) return cc_slice_empty();
     total = prefix_len + method.len;
-    out = cc_arena_alloc_slice_bytes(arena, total);
+    out = cc_arena_alloc_slice_bytes(CC__ARENA_HOST(arena), total);
     buf = (char *)out.ptr;
     if (!buf) return cc_slice_empty();
     memcpy(buf, prefix, prefix_len);
@@ -1606,8 +1596,10 @@ static inline size_t gigabytes(size_t n) {
 #endif
 
 /* Heap-rooted arena: one malloc (host at the front, L1 after). block_max
- * defaults to 4, overflow after the slab budget. Create always returns a
- * handle; OOM is empty (first alloc fails). CCS Result face: cc_arena_try_heap. */
+ * defaults to 4, overflow after the slab budget. Create never fails: the
+ * handle is always returned. Malloc failure is an empty handle; first
+ * alloc is the OOM. `cc_arena_try_heap` is the C face that reports that
+ * malloc. CCS birth is `CCArena a = cc_arena_heap(n) @destroy`. */
 static inline CCResult_CCArena_CCError cc_arena_try_heap(size_t bytes) {
     size_t total;
     void *raw;

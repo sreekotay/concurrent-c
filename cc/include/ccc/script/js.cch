@@ -2024,7 +2024,7 @@ static inline CCJsVal !>(CCJsError) cc_js_val_callm(CCJsVal *obj,
     return r;
 }
 
-/* Bulk rows: `f.map::[T](&arena, cols...)` calls the held JS function once
+/* Bulk rows: `f.map::[T](arena, cols...)` calls the held JS function once
  * per row — each argument is a typed slice (a column), row r's call is
  * `f(col0[r], col1[r], ...)`, and the results land in a typed run of `T`.
  * Columns may have DIFFERENT element types, but every column must have the
@@ -3852,8 +3852,8 @@ static inline void cc_js_host_close(CCJsHost *host) {
 
 /* ---- domains: one handle, two transports ----
  *
- *     CCJsDom js = cc_js_new(false, &a) !> @destroy;  // in-process node
- *     CCJsDom js = cc_js_new(true, &a)  !> @destroy;  // node child
+ *     CCJsDom js = cc_js_new(false, a) !> @destroy;  // in-process node
+ *     CCJsDom js = cc_js_new(true, a)  !> @destroy;  // node child
  *     CCJsDomVal os = js.require("os") !> @destroy;
  *     CCSlice plat = os.platform()!>.as_slice(&a) !>;
  *
@@ -3882,7 +3882,7 @@ static inline void cc_js_host_close(CCJsHost *host) {
  * The isolated child runs the embedded broker (the same source as
  * pypi/cc-node/cc_node/broker.cjs — a parity rung keeps the two
  * identical), written once to the cache directory.  Which node runs is
- * ambient-first: `cc_js_new_exe(true, exe, &a)` > `CC_NODE_BIN` >
+ * ambient-first: `cc_js_new_exe(true, exe, a)` > `CC_NODE_BIN` >
  * `node` on PATH — and which packages it sees is the working
  * directory's node_modules, exactly as node itself resolves there. */
 
@@ -5990,14 +5990,14 @@ static inline CCResult_CCJsDom_CCJsError cc_js_dom_new(CCArena arena) {
 
 /* ---- the front door: one constructor, transport as the flag ----
  *
- *     CCJsDom js = cc_js_new(false, &a) !> @destroy;  // in-process node
- *     CCJsDom js = cc_js_new(true, &a)  !> @destroy;  // node child
+ *     CCJsDom js = cc_js_new(false, a) !> @destroy;  // in-process node
+ *     CCJsDom js = cc_js_new(true, a)  !> @destroy;  // node child
  *
  * Same handle, same ops (require/eval/exec, vals, chains, the sink);
  * only the transport differs, and the flag at the call site is the
  * boundary: hosted is in-process (sub-µs ops, one per process — V8's
  * rule, enforced by the host constructor), isolated is a spawned child
- * (wire latency, N domains, crash isolation).  `cc_js_new_exe(true, exe, &a)` names
+ * (wire latency, N domains, crash isolation).  `cc_js_new_exe(true, exe, a)` names
  * a node executable for an isolated domain; the hosted tier embeds
  * libnode, so an executable there is refused rather than ignored. */
 static inline CCResult_CCJsDom_CCJsError cc_js_new_exe(_Bool isolated, const char *node_exe, CCArena arena) {
@@ -6010,7 +6010,7 @@ static inline CCResult_CCJsDom_CCJsError cc_js_new_exe(_Bool isolated, const cha
     if (node_exe && node_exe[0]) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: new: a node executable selects the child of an "
-                 "ISOLATED domain (cc_js_new_exe(true, exe, &a)); the "
+                 "ISOLATED domain (cc_js_new_exe(true, exe, a)); the "
                  "hosted tier embeds libnode");
         return cc__js_dom_errd("new");
     }

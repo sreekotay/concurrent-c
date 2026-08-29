@@ -2,7 +2,7 @@
  * Full C / CC / Go race: real_projects/raytracer/compare.sh */
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
-CCCommand sh = cc_command(&a, @slice("sh"));
+CCCommand sh = cc_command(a, @slice("sh"));
 sh.arg("real_projects/raytracer/smoke.sh");
 sh.inherit_stdio();
 int rc = sh.status() !>;

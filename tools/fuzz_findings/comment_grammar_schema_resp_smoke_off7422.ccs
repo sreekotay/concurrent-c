@@ -164,7 +164,7 @@ int main(void) {
                 printf("FAIL: ufcs to_str\n"); return 1;
             }
             /* schema values drop into the language's string templates */
-            CCString ts = @string(`pipe> ${c.to_str(&arena)}`, &arena);
+            CCString ts = @string(`pipe> ${c.to_str(&arena)}`, arena);
             CCSlice tv = cc_string_as_slice(&ts);
             if (tv.len != 6 + fv.len || memcmp(tv.ptr, "pipe> ", 6) != 0 ||
                 memcmp((const char*)tv.ptr + 6, src, fv.len) != 0) {

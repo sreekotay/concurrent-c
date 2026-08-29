@@ -16,7 +16,7 @@ int main(void) {
         puts("py_as_list_bounds_smoke: SKIP (no libpython)");
         return 0;
     }
-    CCPy py = cc_py_new(false, &a) !>;
+    CCPy py = cc_py_new(false, a) !>;
 
     /* In-range int list still works. */
     CCPyObj small = py.eval(@slice("[1, 2, 3]")) !> @destroy;

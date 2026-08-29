@@ -17,7 +17,7 @@ int main(void) {
         return 1;
     }
     CCArena a = @create(megabytes(1)) @destroy;
-    CCStdio io = @create(&a) @destroy;
+    CCStdio io = @create(a) @destroy;
 
     CCSlice direct = cc_stdio_read_all(&io) !>;
     (void)direct;

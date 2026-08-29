@@ -62,7 +62,7 @@ int cc_comptime_exec_eval_literal(const char* expr,
                                   const CCComptimeExecOpts* opts,
                                   char** out_lit, size_t* out_len,
                                   char* err_buf, size_t err_sz,
-                                  CCArena* arena);
+                                  CCArena arena);
 
 /* Validate a generated C fragment (a generic factory/template definition) in
  * isolation, before it is spliced into the merged translation unit.  Compiles

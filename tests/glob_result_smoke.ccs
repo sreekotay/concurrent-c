@@ -7,7 +7,7 @@ int main(void) {
 
     /* Existing dir, no matches → Ok(empty). */
     CCSliceArray!>(CCIoError) none_res =
-        cc_glob(@slice("cc/include/*.no_such_ext_zz"), &a);
+        cc_glob(@slice("cc/include/*.no_such_ext_zz"), a);
     if (cc_is_err(none_res)) {
         printf("unexpected err for no-match glob\n");
         return 1;
@@ -20,7 +20,7 @@ int main(void) {
 
     /* Missing directory → Err (not empty success). */
     CCSliceArray!>(CCIoError) miss_res =
-        cc_glob(@slice("this/dir/does/not/exist_zz/*.ccs"), &a);
+        cc_glob(@slice("this/dir/does/not/exist_zz/*.ccs"), a);
     if (!cc_is_err(miss_res)) {
         printf("missing dir should be Err, got Ok(len=%zu)\n",
                cc_unwrap(miss_res).len());
@@ -34,7 +34,7 @@ int main(void) {
     }
 
     /* Positive match. */
-    CCSliceArray files = cc_glob(@slice("cc/include/ccc/*.cch"), &a) !>(err) {
+    CCSliceArray files = cc_glob(@slice("cc/include/ccc/*.cch"), a) !>(err) {
         printf("glob include failed: kind=%d os=%d\n", (int)err.base.kind,
                (int)err.os_code);
         return 1;

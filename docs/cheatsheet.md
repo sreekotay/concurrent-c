@@ -245,7 +245,7 @@ Destination-aware: a typed dest composes `<callee>_<mangled dest>` when declared
 
 Receiver first; **arena last** when the call needs one. That is the
 convention and what makes UFCS land on the data, not the arena:
-`s.clone_into(&a)` is `clone_into(s, &a)`. Arena first would be
+`s.clone_into(a)` is `clone_into(s, a)`. Arena first would be
 `a.clone_into(s)`. Recipe:
 [recipe_ufcs_forms.ccs](../examples/recipe_ufcs_forms.ccs).
 Tutorial: [typehooks-typeviews.md](typehooks-typeviews.md). Spec: `spec/draft_typehooks.md`.
@@ -260,12 +260,12 @@ emitted `${mangled}_<member>` functions are the methods. `Vec`, `Map`,
 container path.
 
 ```c
-Vec::[int] v@(&arena) @destroy;          // struct CCVec_int
+Vec::[int] v@(arena) @destroy;            // struct CCVec_int
 v.push(10);                              // dot: Vec is the struct
-vec_new::[int](&arena);                  // same instance
+vec_new::[int](arena);                   // same instance
 
-Map::[int, double] m = map_new::[int, double](&arena);
-Map::[size_t, int] n = map_new::[size_t, int](&arena);
+Map::[int, double] m = map_new::[int, double](arena);
+Map::[size_t, int] n = map_new::[size_t, int](arena);
 m->insert(1, 2.5);                       // arrow: Map sugar is Name*
 
 double[:] xs;                            // CCSlice_double (char[:] stays CCSlice)
@@ -285,7 +285,7 @@ Prefer `io.println` when a `CCStdio` handle is in scope (`<ccc/script/stdio.cch>
 
 ```c
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
-CCStdio io = cc_stdio_create(&a);
+CCStdio io = cc_stdio_create(a);
 io.println("hi") !>;
 io.println(@string(`n=${n}`, @scratch)) !>;
 /* also fine: println("hi") !>;  /  msg.println() !>; */
@@ -310,7 +310,7 @@ There is no printf `format` entry point. Spec:
 ```c
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
 int n = 42;
-CCString msg = @string(`n=${n}; price=$100`, &a);      // owned
+CCString msg = @string(`n=${n}; price=$100`, a);       // owned
 char[:] hdr = @string(`:${n}\r\n`);                    // block-scoped borrow
 println(@string(`len=${msg.len()}`, @scratch)) !>;     // throwaway
 ```
@@ -375,7 +375,7 @@ the `.access` load. Point access is `s.at(i) !>`. Users do not write
 ```c
 for (v in s) { … }           // walk
 for (i, v in s) { … }        // enumerate; i is size_t
-for (a, b in s, t) { … }     // zip; unequal → CC_ERR_INVALID_ARG
+for (a, b in s, t) { … } !>; // zip; void !>(CCError); unequal → @errhandler
 for (i in lo..hi) { … }      // sequential range; hi < lo is empty
 ```
 
@@ -624,19 +624,19 @@ examples: `tests/arena_lifetime_parent_smoke.ccs`.
 
 `@scratch` is throwaway — gone after the consuming call. To **keep** a
 product, pass the arena it should live on. That arena is the **last**
-parameter (convention, and so UFCS binds the data: `s.clone_into(&a)`
-is `clone_into(s, &a)`).
+parameter (convention, and so UFCS binds the data: `s.clone_into(a)`
+is `clone_into(s, a)`).
 
 ```c
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
 
 io.println(@string(`tmp`, @scratch)) !>;     // gone after println
 
-CCString keep = @string(`keep me`, &a);      // lives on `a`
-CCString out  = cc_script_sh_read_at(keep, &a) !>;
+CCString keep = @string(`keep me`, a);       // lives on `a`
+CCString out  = cc_script_sh_read_at(keep, a) !>;
 
-CCString load(CCSlice path, CCArena *a);     // arena last → keep on `a`
-s.clone_into(&a);
+CCString load(CCSlice path, CCArena a);      // arena last → keep on `a`
+s.clone_into(a);
 ```
 
 Recipe: [recipe_arena_scope.ccs](../examples/recipe_arena_scope.ccs).

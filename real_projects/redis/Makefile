@@ -69,6 +69,10 @@ $(OUT_DIR)/redis_cc: redis_cc/redis_cc.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
 $(OUT_DIR)/redis_async_sketch: redis_async_sketch.ccs | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_async_sketch.ccs --release
 
+# Throwaway: sketch + wait-for MGET (per-key hold, snapshot, ordered encode).
+$(OUT_DIR)/redis_parallel: redis_parallel.ccs | $(OUT_DIR)
+	$(CCC) -O -o $@ redis_parallel.ccs --release
+
 redis_idiomatic: $(OUT_DIR)/redis_idiomatic
 redis_owner: $(OUT_DIR)/redis_owner
 redis_lock: $(OUT_DIR)/redis_lock
@@ -78,6 +82,7 @@ redis_idiomatic_profile: $(OUT_DIR)/redis_idiomatic_profile
 redis_idiomatic_debug: $(OUT_DIR)/redis_idiomatic_debug
 redis_cc: $(OUT_DIR)/redis_cc
 redis_async_sketch: $(OUT_DIR)/redis_async_sketch
+redis_parallel: $(OUT_DIR)/redis_parallel
 
 all: redis_idiomatic redis_cc
 
@@ -90,4 +95,4 @@ print-config:
 	@echo "REDIS_SRC_DIR=$(REDIS_SRC_DIR)"
 	@echo "REDIS_IDIOMATIC_DEFS=$(REDIS_IDIOMATIC_DEFS)"
 
-.PHONY: setup upstream redis_idiomatic redis_owner redis_lock redis_idiomatic_gen redis_idiomatic_hand redis_idiomatic_profile redis_idiomatic_debug redis_cc redis_async_sketch all clean print-config
+.PHONY: setup upstream redis_idiomatic redis_owner redis_lock redis_idiomatic_gen redis_idiomatic_hand redis_idiomatic_profile redis_idiomatic_debug redis_cc redis_async_sketch redis_parallel all clean print-config

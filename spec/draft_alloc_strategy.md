@@ -66,7 +66,7 @@ exhaustion of a fixed arena with heap overflow disabled returns `NULL`.
 Heap overflow is an explicit fallback beyond the arena's block policy:
 
 ```c
-bool cc_arena_set_heap_overflow(CCArena *arena, bool enabled);
+bool cc_arena_set_heap_overflow(CCArena arena, bool enabled);
 ```
 
 The operation fails for an invalid arena. Disabling overflow after the arena has
@@ -93,7 +93,7 @@ hole and leaves the chunk allocated until reset/restore.
 ## Individual release
 
 ```c
-bool cc_arena_release(CCArena *arena, void *ptr);
+bool cc_arena_release(CCArena arena, void *ptr);
 ```
 
 The caller passes a live pointer owned through that arena. A pointer in an arena

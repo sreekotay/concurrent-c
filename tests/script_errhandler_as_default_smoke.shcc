@@ -4,10 +4,10 @@
  * (statement-position as: projection + printable face message).
  */
 
-CCCommand ok = cc_command(&a, @slice("/usr/bin/true"));
+CCCommand ok = cc_command(a, @slice("/usr/bin/true"));
 ok.status() !>;
 
-CCCommand bad = cc_command(&a, @slice("/no/such/binary_xyz_errhandler_as"));
+CCCommand bad = cc_command(a, @slice("/no/such/binary_xyz_errhandler_as"));
 bad.status() !>;
 /* unreachable on success of the failure path */
 return 0;

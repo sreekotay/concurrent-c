@@ -29,7 +29,7 @@ int main(void) {
     v.push(2);
     {
         CCArena a = cc_arena_heap(kilobytes(4));
-        Map::[size_t, int] m = map_new::[size_t, int](&a);
+        Map::[size_t, int] m = map_new::[size_t, int](a);
         if (!m) {
             printf("generic_multiword_arg_smoke FAIL map new\n");
             cc_arena_free(&a);

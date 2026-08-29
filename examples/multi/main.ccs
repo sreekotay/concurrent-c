@@ -4,9 +4,8 @@ int add_ints(int a, int b);
 
 int main(void) {
     int v = add_ints(2, 3);
-    CCArena arena_storage@(kilobytes(4)) @destroy;
-    if (!cc_arena_is_live(arena_storage)) return 1;
-    CCArena* arena = &arena_storage;
+    CCArena arena@(kilobytes(4)) @destroy;
+    if (!cc_arena_is_live(arena)) return 1;
     {
         CCString s = cc_string_new();
         s.append("multi ok: ", arena);

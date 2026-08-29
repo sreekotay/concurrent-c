@@ -1,0 +1,30 @@
+/* Form-P `!>;` rewrite must stay one physical line so `#line` after an
+ * opaque variant-switch dump still names the next user statement. */
+#include <ccc/std/prelude.cch>
+
+@variant Cell {
+    txt: int;
+    num: int;
+};
+
+static bool !>(CCError) write_ok(void) {
+    return cc_ok(true);
+}
+
+static int go(Cell* cell) {
+    @errhandler(CCError e) { return 1; }
+    switch (cell) {
+    case .txt:
+        write_ok() !>;
+        no_such_after_bang();
+        break;
+    case .num:
+        break;
+    }
+    return 0;
+}
+
+int main(void) {
+    Cell v = { .txt = 1 };
+    return go(&v);
+}

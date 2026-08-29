@@ -22,7 +22,7 @@
 #define CC_OL_PREDECL_A "CCArena a@(megabytes(1)) @destroy;\n"
 #define CC_OL_PREDECL_IO_ARENA \
     "CCArena __cc_io_arena@(megabytes(1)) @destroy;\n"
-#define CC_OL_PREDECL_IO "CCStdio io@(&__cc_io_arena) @destroy;\n"
+#define CC_OL_PREDECL_IO "CCStdio io@(__cc_io_arena) @destroy;\n"
 #define CC_OL_PREDECL_IN "char[:] in = io.read_all() !>;\n"
 /* Injected as erased CCSlice — same shape legacy lowers `char *[:]` to.
  * Keep the sugar out of the magic text so native shadow does not need it. */
@@ -297,7 +297,7 @@ char* cc_script_oneliner_predecls_for(const char* src, size_t len,
     /* Primaries first: `line`/`nr` are -n/-p loop locals only, never ambient in
      * a file .shcc, and dropping them has to happen before implications run.
      * Scanning post-implication left `int line = 1;` pulling in an injected
-     * `CCStdio io = @create(&a) @destroy;` — ahead of the script's own arena. */
+     * `CCStdio io = @create(a) @destroy;` — ahead of the script's own arena. */
     cc__ol_scan_primaries(src, len, &p);
     p.want_line = 0;
     p.want_nr = 0;

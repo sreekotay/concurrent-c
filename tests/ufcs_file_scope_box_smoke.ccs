@@ -1,0 +1,21 @@
+/* File-scope box binds: g_excl.mutex without a local copy. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_exclusive.cch>
+#include <stdio.h>
+
+static CCExclusive g_excl;
+
+int main(void) {
+    @errhandler(CCError e) {
+        (void)e;
+        return 1;
+    }
+    CCArena arena = cc_arena_heap(kilobytes(16)) @destroy;
+    g_excl = cc_exclusive_create(arena, 0) !>;
+    CCExclusiveMutex m = g_excl.mutex(1);
+    CCExclusiveGuard g = m.acquire();
+    g.release();
+    cc_exclusive_destroy(&g_excl);
+    printf("ok\n");
+    return 0;
+}

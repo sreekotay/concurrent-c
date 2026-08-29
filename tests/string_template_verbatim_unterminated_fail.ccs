@@ -5,7 +5,7 @@
 
 int main(void) {
     CCArena a0 = @create(kilobytes(1)) @destroy;
-    CCString s = @string(`bad ${{never closed`, &a0);
+    CCString s = @string(`bad ${{never closed`, a0);
     (void)s;
     return 0;
 }

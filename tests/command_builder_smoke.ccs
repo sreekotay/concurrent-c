@@ -4,7 +4,7 @@
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(64));
 
-    CCCommand cmd = cc_command(&arena, "ccc");
+    CCCommand cmd = cc_command(arena, "ccc");
     cmd.arg("run");
     cmd.arg_if(false, "--timeout");
     cmd.arg_i32_if(true, 10);
@@ -41,7 +41,7 @@ int main(void) {
         return 7;
     }
 
-    CCCommand echo = cc_command(&arena, "true");
+    CCCommand echo = cc_command(arena, "true");
     CCResult_int_CCIoError status;
     status = echo.status();
     if (cc_is_err(status)) {

@@ -48,7 +48,7 @@ tools/gen_emit_tpl_prelude.sh
 
 ## User-facing `@emit` projection
 
-- **`@emit(\`...\`, arena)`** — returns `CCSlice` built into the caller's `CCArena*`; use in generic factories (the return form requires the arena).
+- **`@emit(\`...\`, arena)`** — returns `CCSlice` built into the caller's `CCArena`; use in generic factories (the return form requires the arena).
 - **`@emit(CCEmitAnchor, \`...\`)`** — splices at an anchor from `@comptime {}` / `@comptime for` (no arena: builds into a private stack arena, splices, frees).
 - `${expr}` slots dispatch by **expression type** (`_Generic`), not variable names.
 - `@comptime for` + backtick `@emit`: each unrolled iteration is wrapped in `@comptime { }` when the body contains `@emit(` with a backtick template (detected structurally, not by substring).

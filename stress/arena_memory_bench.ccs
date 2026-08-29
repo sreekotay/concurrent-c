@@ -82,7 +82,7 @@ int main(void) {
                 sz = want;
             }
             sink ^= (size_t)p[0] + sz;
-            cc_arena_reset(&tip);
+            cc_arena_reset(tip);
         }
         cc_arena_free(&tip);
         tip_ms = now_ms() - t0;
@@ -96,7 +96,7 @@ int main(void) {
         t0 = now_ms();
         for (i = 0; i < bulk_n; i++) {
             size_t n = bulk_size(i);
-            unsigned char *q = (unsigned char *)cc_arena_alloc_local_grow(&bulk, n, 8);
+            unsigned char *q = (unsigned char *)cc_arena_alloc_local_grow(bulk, n, 8);
             if (!q) {
                 cc_arena_free(&bulk);
                 return 4;
@@ -107,7 +107,7 @@ int main(void) {
         bulk_gross = cc_arena_committed_gross_bytes(&bulk);
         bulk_ovf = cc_arena_overflow_raw_bytes(&bulk);
         t_reset = now_ms();
-        cc_arena_reset(&bulk);
+        cc_arena_reset(bulk);
         reset_ms = now_ms() - t_reset;
         cc_arena_free(&bulk);
         bulk_ms = now_ms() - t0;
@@ -119,7 +119,7 @@ int main(void) {
         t0 = now_ms();
         for (i = 0; i < ovf_n; i++) {
             size_t n = 24 + (i * 17) % 512;
-            unsigned char *q = (unsigned char *)cc_arena_alloc(&ovf, n, 8);
+            unsigned char *q = (unsigned char *)cc_arena_alloc(ovf, n, 8);
             if (!q) {
                 cc_arena_free(&ovf);
                 return 6;
@@ -139,7 +139,7 @@ int main(void) {
         c.a->block_max = (uint16_t)block_max;
         for (j = 0; j < churn_each; j++) {
             size_t n = 16 + (j * 31) % 256;
-            if (!cc_arena_alloc_local_grow(&c, n, 8)) {
+            if (!cc_arena_alloc_local_grow(c, n, 8)) {
                 cc_arena_free(&c);
                 return 8;
             }

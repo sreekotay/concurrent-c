@@ -10,7 +10,7 @@ typedef struct Chunk {
 
 int main(void) {
     CCArena a = cc_arena_heap(kilobytes(4));
-    char* p = (char*)cc_arena_alloc(&a, 32, 1);
+    char* p = (char*)cc_arena_alloc(a, 32, 1);
     if (!p) return 1;
     memcpy(p, "arena-len-ok", 12);
 

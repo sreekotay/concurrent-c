@@ -413,7 +413,7 @@ static int !>(CCError) fm_host_cc_rejects(const char* c_path, CCArena* a,
 CCArena a = @create(megabytes(96)) @destroy;
 
 @errhandler(CCError e) {
-    CCString em = @string(`fuzz_mutate: error: ${cc_error_str(e)}`, &a);
+    CCString em = @string(`fuzz_mutate: error: ${cc_error_str(e)}`, a);
     (void)em.eprintln();
     return 2;
 }
@@ -458,7 +458,7 @@ fm_mkdir_p("tools/fuzz_findings");
 
 /* ---- corpus: all tests/*.ccs ---- */
 {
-    CCSliceArray files = cc_glob(@slice("tests/*.ccs"), &a) !>;
+    CCSliceArray files = cc_glob(@slice("tests/*.ccs"), a) !>;
     for (size_t fi = 0; fi < files.len() && g_ncorpus < FM_MAX_CORPUS; fi++) {
         CCSlice ps = files.get(fi);
         if (!ps.ptr || ps.len == 0 || ps.len >= sizeof(g_corpus[0].path)) continue;

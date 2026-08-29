@@ -12,7 +12,7 @@ int main(void) {
         assert(s.a->base == frame + CC__ARENA_HOST_PREFIX);
         assert(s.a->block_max == CC_ARENA_DEFAULT_BLOCK_MAX);
         assert(s.a->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW);
-        p = cc_arena_alloc(&s, 16, 8);
+        p = cc_arena_alloc(s, 16, 8);
         assert(p);
         /* no explicit free — @destroy drains overflow at block exit */
     }

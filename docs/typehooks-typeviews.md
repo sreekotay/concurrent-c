@@ -127,7 +127,7 @@ static int port_put_2(Port* p, char[:] data) { /* .put → this name, not port_p
 
 static char[:] port_ufcs(char[:] recv_type, char[:] method, char[:] mode,
                          CCSliceArray argv, CCSliceArray arg_types,
-                         CCArena* arena) {
+                         CCArena arena) {
     (void)recv_type;
     (void)mode; /* named `@typeview Mode on T` — otherwise empty */
     (void)argv;
@@ -200,8 +200,9 @@ int main(void) {
         sum += v;
     for (i, v in xs)
         sum += (int)i + v;
-    for (a, b in xs, ys)
+    for (a, b in xs, ys) {
         sum += a * b;
+    } !>;
     printf("%d\n", sum);
     return 0;
 }
@@ -214,7 +215,7 @@ int main(void) {
 |------|---------|
 | `for (v in s)` | walk |
 | `for (i, v in s)` | enumerate; `i` is `size_t` |
-| `for (a, b in s, t)` | zip; unequal lens are `CC_ERR_INVALID_ARG` |
+| `for (a, b in s, t) { … } !>;` | zip; `void !>(CCError)`; unequal → `@errhandler` |
 | `for (i in lo..hi)` | sequential range; `hi < lo` is empty |
 
 C `for (;;)` is unchanged. `@parallel for (i in lo..hi)` is the concurrent
@@ -564,7 +565,7 @@ form independently.
   take `@typeview(Mode) T*`.
 - Custom `x.method` → `cc_foo_<method>` family? `.ufcs` on `@typehooks`.
 - Dest-init mint (`CCBox::[H] b = &x`)? `.cast` on the dest type (implicit|explicit + requested type).
-- Extent / walk (`x.len`, `for (v in s)` / `for (i, v in s)` / `for (a, b in s, t)`)? `.len` + `.access` on `@typehooks`. Users do not write `s.access(i)`.
+- Extent / walk (`x.len`, `for (v in s)` / `for (i, v in s)` / `for (a, b in s, t) { … } !>;`)? `.len` + `.access` on `@typehooks`. Users do not write `s.access(i)`.
 - Hide a field on a family (`CCBox_*` `.p`)? Unnamed `@typeview` + `r:^p`
   (open except that name). User UFCS on the instance stays.
 - Unresolved dynamic names (`obj.greet`)? `.ufcs_sink`, last resort.

@@ -12,7 +12,7 @@ int main(void) {
     CCNursery n = cc_nursery_create() !> @destroy;
 
     {
-        char[:] view = cc_arena_alloc_slice_bytes(&buf, 64);
+        char[:] view = cc_arena_alloc_slice_bytes(buf, 64);
         if (!view.ptr) return 1;
         memset(view.ptr, 'x', view.len);
         n.spawn(() => [view] {
@@ -20,6 +20,6 @@ int main(void) {
         }) !>;
     }
     /* view is out of scope; nursery (and captured borrow) still live. */
-    cc_arena_reset(&buf);
+    cc_arena_reset(buf);
     return 0;
 }

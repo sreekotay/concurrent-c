@@ -19,7 +19,7 @@ int main(void) {
     }
     CCArena a = cc_arena_heap(kilobytes(8));
     CCArena d = a.detach/*gap*/() !>;
-    void *probe = cc_arena_alloc(&d, 16, 8);
+    void *probe = cc_arena_alloc(d, 16, 8);
     printf("ok %d\n", probe != NULL);
     return 0;
 }

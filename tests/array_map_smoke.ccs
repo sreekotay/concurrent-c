@@ -14,12 +14,12 @@ int main(void) {
     size_t i;
 
     if (!cc_arena_is_live(arena)) return 1;
-    sized = array_map_new_count::[int, int](&arena, 64);
+    sized = array_map_new_count::[int, int](arena, 64);
     if (!sized) return 14;
     if (sized->cap() < 64) return 15;
     sized->destroy();
 
-    m = array_map_new::[int, int](&arena);
+    m = array_map_new::[int, int](arena);
     if (!m) return 2;
 
     for (i = 0; i < 100; i++) {

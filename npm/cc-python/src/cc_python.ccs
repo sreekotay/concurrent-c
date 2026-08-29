@@ -347,7 +347,7 @@ static CcPyObjBox *ccpy__box(CcPyDom *d, CCPyObj o) {
     else {
         /* the loop thread also allocates from this arena (aio requests) */
         pthread_mutex_lock(&d->mu);
-        b = (CcPyObjBox *)cc_arena_alloc(&d->arena, sizeof(*b), 16);
+        b = (CcPyObjBox *)cc_arena_alloc(d->arena, sizeof(*b), 16);
         pthread_mutex_unlock(&d->mu);
     }
     if (!b) {
@@ -517,7 +517,7 @@ static int ccpy__cb_ret_tag(CcPyDom *d, void *env, void *ret, int *rkind,
             return -1;
         }
         if (cc__js.GetValueStringUtf8(env, ret, NULL, 0, &len) != 0) break;
-        copy = (char *)cc_arena_alloc(&d->job_arena, len + 1, 16);
+        copy = (char *)cc_arena_alloc(d->job_arena, len + 1, 16);
         if (!copy) break;
         if (cc__js.GetValueStringUtf8(env, ret, copy, len + 1, &got) != 0)
             break;
@@ -1034,7 +1034,7 @@ static void *ccpy__cb_wrap(CcPyDom *d, void *env, void *fnval, char *errbuf,
         return NULL;
     }
     pthread_mutex_lock(&d->mu);
-    box = (CcJsCbBox *)cc_arena_alloc(&d->arena, sizeof(*box), 16);
+    box = (CcJsCbBox *)cc_arena_alloc(d->arena, sizeof(*box), 16);
     pthread_mutex_unlock(&d->mu);
     if (!box) {
         snprintf(errbuf, errcap, "cc-python: out of memory");
@@ -1093,7 +1093,7 @@ static void ccpy__job_tag(CcPyDom *d, CcPyJob *j, CCPyObj val) {
         const char *s = cc__py.AsUTF8AndSize(val.o, &n);
         if (s) {
             char *copy =
-                (char *)cc_arena_alloc(&d->exec_arena, (size_t)n + 1, 16);
+                (char *)cc_arena_alloc(d->exec_arena, (size_t)n + 1, 16);
             if (copy) {
                 memcpy(copy, s, (size_t)n);
                 copy[n] = 0;
@@ -1152,7 +1152,7 @@ static void ccpy__job_tag(CcPyDom *d, CcPyJob *j, CCPyObj val) {
             cc_py_obj_release(&val);
             return;
         }
-        copy = (char *)cc_arena_alloc(&d->exec_arena, (size_t)n + 1, 16);
+        copy = (char *)cc_arena_alloc(d->exec_arena, (size_t)n + 1, 16);
         if (!copy) {
             cc__py.DecRef(sobj);
             j->rkind = 6;
@@ -1805,7 +1805,7 @@ static void *ccpy__cb_call_aio(CcPyDom *d, CcJsCbBox *box, void *args, int n) {
     pthread_mutex_lock(&d->mu);
     req = d->cbreq_free;
     if (req) d->cbreq_free = req->up;
-    else req = (CcJsCbReq *)cc_arena_alloc(&d->arena, sizeof(*req), 16);
+    else req = (CcJsCbReq *)cc_arena_alloc(d->arena, sizeof(*req), 16);
     pthread_mutex_unlock(&d->mu);
     if (!req) return cc__py_raise("cc-python: out of memory");
     memset(req, 0, sizeof(*req));
@@ -1970,7 +1970,7 @@ static void *ccpy__exec_main(void *arg) {
         }
         while (!d->qhead && !d->stopping && !d->loop_mode) {
             if (!d->inflight && d->pending_done == 0 && d->sched_live == 0)
-                cc_arena_reset(&d->exec_arena);
+                cc_arena_reset(d->exec_arena);
             pthread_cond_wait(&d->cv, &d->mu);
         }
         if (d->loop_mode) continue;
@@ -2160,7 +2160,7 @@ static void ccpy__async_complete(void *env, void *jscb, void *ctx, void *data) {
                d->sched_live == 0 && d->cb_live == 0;
         pthread_mutex_unlock(&d->mu);
         if (idle) {
-            cc_arena_reset(&d->job_arena);
+            cc_arena_reset(d->job_arena);
             if (d->tsfn_reffed && !d->stopping && cc__js.UnrefTsfn) {
                 cc__js.UnrefTsfn(env, d->tsfn);
                 d->tsfn_reffed = 0;
@@ -2294,7 +2294,7 @@ static CCJsVal !>(CCError) CcPython_create(CcPython *self, CCJs *js) {
      * otherwise races CPython process-global init and aborts Node. */
     if (ccpy__claim_inproc_owner(owner_err, sizeof(owner_err)) != 0)
         return cc_err(CC_ERR_INVALID_ARG, owner_err);
-    d = (CcPyDom *)cc_arena_alloc(&ar, sizeof(*d), 16);
+    d = (CcPyDom *)cc_arena_alloc(ar, sizeof(*d), 16);
     if (!d) {
         cc_arena_destroy(&ar);
         ccpy__release_inproc_owner();
@@ -2686,7 +2686,7 @@ static void *ccpy__bigint_to_py(CcPyDom *d, void *env, void *v, int async,
         snprintf(errbuf, errcap, "cc-python: cannot read a BigInt argument");
         return NULL;
     }
-    buf = async ? (char *)cc_arena_alloc(&d->job_arena, len + 1, 16)
+    buf = async ? (char *)cc_arena_alloc(d->job_arena, len + 1, 16)
                 : (char *)cc__js_scratch(len + 1);
     if (!buf) {
         snprintf(errbuf, errcap, "cc-python: out of memory");
@@ -2738,7 +2738,7 @@ static int ccpy__string_arg(CcPyDom *d, void *env, void *v, CCPyArg *out,
             snprintf(errbuf, errcap, "cc-python: cannot read a string argument");
             return -1;
         }
-        copy = (char *)cc_arena_alloc(&d->job_arena, len + 1, 16);
+        copy = (char *)cc_arena_alloc(d->job_arena, len + 1, 16);
         if (!copy) {
             snprintf(errbuf, errcap, "cc-python: out of memory");
             return -1;
@@ -2810,7 +2810,7 @@ static void *ccpy__js_to_py(CcPyDom *d, void *env, void *v, CcPyJob *j,
             return NULL;
         }
         if (j) {
-            buf = (char *)cc_arena_alloc(&d->arena, len + 1, 1);
+            buf = (char *)cc_arena_alloc(d->arena, len + 1, 1);
             if (!buf) {
                 snprintf(errbuf, errcap, "cc-python: out of memory");
                 return NULL;
@@ -3973,7 +3973,7 @@ static int ccpy__pack_kwargs(CcPyDom *d, void *env, void *kw,
                                   errcap) != 0)
                 return -1;
         }
-        nm = (char *)cc_arena_alloc(&d->arena, got + 1, 1);
+        nm = (char *)cc_arena_alloc(d->arena, got + 1, 1);
         if (!nm) {
             snprintf(errbuf, errcap, "cc-python: out of memory");
             return -1;
@@ -4038,7 +4038,7 @@ static CCJsVal !>(CCError) CcPython_invoke_async(CcPython *self, CCJs *js,
     pthread_mutex_unlock(&d->mu);
     if (!j) {
         pthread_mutex_lock(&d->mu); /* the loop thread allocates here too */
-        j = (CcPyJob *)cc_arena_alloc(&d->arena, sizeof(*j), 16);
+        j = (CcPyJob *)cc_arena_alloc(d->arena, sizeof(*j), 16);
         pthread_mutex_unlock(&d->mu);
     }
     if (!j) return cc_err(CC_ERR_IO, "cc-python: out of memory");
@@ -4169,7 +4169,7 @@ static CCJsVal !>(CCError) CcPython_invoke_async_kw(CcPython *self, CCJs *js,
     pthread_mutex_unlock(&d->mu);
     if (!j) {
         pthread_mutex_lock(&d->mu); /* the loop thread allocates here too */
-        j = (CcPyJob *)cc_arena_alloc(&d->arena, sizeof(*j), 16);
+        j = (CcPyJob *)cc_arena_alloc(d->arena, sizeof(*j), 16);
         pthread_mutex_unlock(&d->mu);
     }
     if (!j) return cc_err(CC_ERR_IO, "cc-python: out of memory");

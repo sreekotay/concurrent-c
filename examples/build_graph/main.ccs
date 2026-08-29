@@ -1,9 +1,8 @@
 #include <ccc/std/prelude.cch>
 
 int main(void) {
-    CCArena arena_storage@(kilobytes(4)) @destroy;
-    if (!cc_arena_is_live(arena_storage)) return 1;
-    CCArena* arena = &arena_storage;
+    CCArena arena@(kilobytes(4)) @destroy;
+    if (!cc_arena_is_live(arena)) return 1;
     {
         CCString s = cc_string_new();
         s.append("build_graph hello\n", arena);

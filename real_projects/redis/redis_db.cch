@@ -120,7 +120,7 @@ static size_t db_string_cap_8x(size_t len) {
     return rounded;
 }
 
-static CCString !>(CCError) db_clone_value_into_arena(CCArena* arena,
+static CCString !>(CCError) db_clone_value_into_arena(CCArena arena,
                                                       char[:] src,
                                                       const char* err_msg) {
     size_t cap = db_string_cap_8x(src.len);
@@ -181,7 +181,7 @@ static bool db_init(RedisDb* db, size_t bucket_count, size_t shard_count) {
         db_free_arenas_only(db);
         return false;
     }
-    db->shards = (RedisDbShard*)cc_arena_alloc(&db->map_arena,
+    db->shards = (RedisDbShard*)cc_arena_alloc(db->map_arena,
                                                shard_count * sizeof(RedisDbShard),
                                                _Alignof(RedisDbShard));
     if (!db->shards) {
@@ -195,10 +195,10 @@ static bool db_init(RedisDb* db, size_t bucket_count, size_t shard_count) {
         if (!db_init_key_arena(&db->shards[i].key_arena, key_arena_root))
             goto fail;
         db->shards[i].entries =
-            array_map_new_count::[CCSlicePacked, RedisEntry](&db->map_arena, per_shard);
+            array_map_new_count::[CCSlicePacked, RedisEntry](db->map_arena, per_shard);
         if (!db->shards[i].entries) goto fail;
         /* Side expires dict starts small; grows only for keys that get a TTL. */
-        db->shards[i].expires = array_map_new::[CCSlicePacked, int64_t](&db->map_arena);
+        db->shards[i].expires = array_map_new::[CCSlicePacked, int64_t](db->map_arena);
         if (!db->shards[i].expires) goto fail;
     }
     return true;
@@ -233,7 +233,7 @@ static void db_release_value(RedisDb* db, CCString* value) {
             return;
         }
     }
-    value->release(&db->value_arena);
+    value->release(db->value_arena);
 }
 
 /* Replace path for an existing STR-arm payload.  In-place overwrite when
@@ -247,13 +247,13 @@ static void !>(CCError) db_value_replace(RedisDb* db, CCString* cell, char[:] va
         if (!cell->clear()) {
             return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "entry value clear failed"));
         }
-        if (!cell->push_slice(value, &db->value_arena)) {
+        if (!cell->push_slice(value, db->value_arena)) {
             return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "entry value replace failed"));
         }
         return cc_ok();
     }
     CCString replacement =
-        db_clone_value_into_arena(&db->value_arena, value, "entry value clone failed") !>;
+        db_clone_value_into_arena(db->value_arena, value, "entry value clone failed") !>;
     db_release_value(db, cell);
     *cell = replacement;
     return cc_ok();
@@ -270,7 +270,7 @@ static void !>(CCError) db_entry_store_str(RedisDb* db, RedisValue* val, char[:]
         return cc_ok();
     }
     CCString cloned =
-        db_clone_value_into_arena(&db->value_arena, value, "entry value clone failed") !>;
+        db_clone_value_into_arena(db->value_arena, value, "entry value clone failed") !>;
     *val = { .str = cloned };
     return cc_ok();
 }
@@ -320,7 +320,7 @@ static CCSlicePacked !>(CCError) db_clone_key_packed(RedisDb* db, char[:] key) {
     if (!db) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db key clone without db"));
     sh = db_shard_for_key(db, key);
     if (!sh) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db key clone without shard"));
-    CCSlicePacked !>(CCError) rr = key.to_packed(&sh->key_arena);
+    CCSlicePacked !>(CCError) rr = key.to_packed(sh->key_arena);
     if (rr.is_err()) return cc_err(rr.error());
     return cc_ok(rr.value());
 }
@@ -337,7 +337,7 @@ static void db_release_key_packed(RedisDb* db, CCSlicePacked* k) {
     }
     sh = db_shard_at(db, db_shard_index_for_packed(db, *k));
     if (!sh) return;
-    cc_slice_packed_release(&sh->key_arena, k);
+    cc_slice_packed_release(sh->key_arena, k);
 }
 
 static int64_t db_expires_get(RedisDb* db, CCSlicePacked kh) {
@@ -550,14 +550,14 @@ static void !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value,
     }
 
     CCString owned_str =
-        db_clone_value_into_arena(&db->value_arena, value, "entry value clone failed") !>;
+        db_clone_value_into_arena(db->value_arena, value, "entry value clone failed") !>;
     db_insert_new_entry(db, key, (RedisValue){ .str = owned_str }, expires_at_ms) !>;
     return cc_ok();
 }
 
 /* GET: num cells render at the boundary (arena-less @string → reply_arena). */
 static RedisReply !>(CCError) db_get(RedisDb* db, char[:] key,
-                                     CCArena* reply_arena, DbCmdClock* clock) {
+                                     CCArena reply_arena, DbCmdClock* clock) {
     @errhandler(CCError e) { return cc_err(e); }
     RedisEntry* cell = db_lookup_live(db, key, clock);
     if (!cell) return cc_ok(reply_null());
@@ -633,7 +633,7 @@ static RedisReply !>(CCError) db_setnx(RedisDb* db, char[:] key, char[:] value, 
 static RedisReply !>(CCError) db_append(RedisDb* db,
                                         char[:] key,
                                         char[:] suffix,
-                                        CCArena* scratch,
+                                        CCArena scratch,
                                         DbCmdClock* clock) {
     @errhandler(CCError e) { return cc_err(e); }
     RedisEntry* cell = db_lookup_live(db, key, clock);
@@ -761,7 +761,7 @@ static RedisReply !>(CCError) db_persist(RedisDb* db, char[:] key, DbCmdClock* c
 static RedisReply !>(CCError) db_mget(RedisDb* db,
                                       char[:]* keys,
                                       size_t nkeys,
-                                      CCArena* reply_arena,
+                                      CCArena reply_arena,
                                       DbCmdClock* clock) {
     @errhandler(CCError e) { return cc_err(e); }
     for (size_t i = 0; i < nkeys; ++i) {
@@ -890,7 +890,7 @@ static RedisReply db_flush(RedisDb* db) {
  * batched write mis-encodes under --release). */
 static RedisReply !>(CCError) db_keys(RedisDb* db,
                                       char[:] pattern,
-                                      CCArena* reply_arena,
+                                      CCArena reply_arena,
                                       DbCmdClock* clock) {
     @errhandler(CCError e) { return cc_err(e); }
     /* Depth cap for glob_match's recursion (fiber stacks are ~2MiB). */

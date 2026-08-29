@@ -1,4 +1,4 @@
-/* Process-isolated Python: a full CPython child per cc_py_new(true, &a)
+/* Process-isolated Python: a full CPython child per cc_py_new(true, a)
  * handle on the broker.py wire.  Scalars cross by value; modules stay
  * remote handles.  Two domains do not share state. */
 #include <ccc/std/prelude.cch>
@@ -15,7 +15,7 @@ int main(void) {
         return 0;
     }
 
-    CCResult_CCPy_CCPyError mk = cc_py_new(true, &a);
+    CCResult_CCPy_CCPyError mk = cc_py_new(true, a);
     if (!mk.ok) {
         printf("new failed: %s\n", mk.u.error.base.message);
         return 1;
@@ -48,7 +48,7 @@ int main(void) {
            rv.ok && fabs(r - 1.4142135623730951) < 1e-9 ? "true" : "false");
 
     /* A second domain is a second python: state does not cross. */
-    CCResult_CCPy_CCPyError mk2 = cc_py_new(true, &a);
+    CCResult_CCPy_CCPyError mk2 = cc_py_new(true, a);
     if (!mk2.ok) {
         printf("second new failed: %s\n", mk2.u.error.base.message);
         return 1;

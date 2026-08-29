@@ -237,7 +237,9 @@ typedef enum {
     /* Type[*] name = expr @destroy [ {D} ]; — a=type b=name c=init
      * d="*"|"", e unused; cleanup from registered destroy / arena_release */
     AST_VAL_DESTROY,
-    /* for (hdr) { stmts } — a=hdr text, body=stmts */
+    /* for (hdr) { stmts } — a=hdr text, body=stmts.
+     * Zip (a, b in s, t) is void Result: e="zip_bang", optional
+     * AST_ERRHANDLER in dbody. Walk / enum / range / C for cannot fail. */
     AST_FOR,
     /* Type[*] name = expr; — a=type b=name c=expr d="*"|"", UFCS rewritten on emit */
     AST_TYPED_INIT,

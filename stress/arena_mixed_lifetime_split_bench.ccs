@@ -146,7 +146,7 @@ int main(void) {
 
         /* Mid-life: drop the entire ephemeral lifetime — one reset, not N/2 releases. */
         t = now_ms();
-        cc_arena_reset(&scratch);
+        cc_arena_reset(scratch);
         for (i = 0; i < n; i++) {
             if (!ephemeral[i] || !alive[i]) continue;
             alive[i] = 0;
@@ -162,7 +162,7 @@ int main(void) {
             void *np;
             if (!alive[i]) continue;
             want = (size_t)sizes[i] + 48 + (i % 64);
-            np = cc_arena_realloc(&keep, &keep, ptrs[i], sizes[i], want, 8);
+            np = cc_arena_realloc(keep, keep, ptrs[i], sizes[i], want, 8);
             if (!np) {
                 cc_arena_free(&scratch);
                 cc_arena_free(&keep);
@@ -180,7 +180,7 @@ int main(void) {
         }
 
         t = now_ms();
-        cc_arena_reset(&keep);
+        cc_arena_reset(keep);
         cc_arena_free(&scratch);
         cc_arena_free(&keep);
         reclaim_ms = now_ms() - t;

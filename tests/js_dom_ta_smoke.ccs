@@ -18,7 +18,7 @@ int main(void) {
         return 0;
     }
 
-    CCJsDom js = cc_js_new(true, &a) !> @destroy;
+    CCJsDom js = cc_js_new(true, a) !> @destroy;
 
     /* Result path: eval returns a Float64Array → K_TA with decoded bytes. */
     CCJsDomVal ta = js.eval("new Float64Array([1.5, 2.5, 3])") !>;

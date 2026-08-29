@@ -11,7 +11,7 @@ int main(void) {
     cc_arena_stack(a, 1024);
     
     CCArenaPool p;
-    cc_arena_pool_init(&p, &a, sizeof(Point));
+    cc_arena_pool_init(&p, a, sizeof(Point));
     
     // Allocate a few
     Point* p1 = (Point*)cc_arena_pool_alloc(&p);

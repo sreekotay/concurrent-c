@@ -9,7 +9,7 @@ typedef struct Msg {
 
 int main(void) {
     CCArena a = cc_arena_heap(kilobytes(4));
-    char[:] view = cc_arena_alloc_slice_bytes(&a, 16);
+    char[:] view = cc_arena_alloc_slice_bytes(a, 16);
     if (!view.ptr) return 1;
     memset(view.ptr, 'x', view.len);
 

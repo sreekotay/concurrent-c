@@ -19,6 +19,12 @@
 #   SKETCH_PORT      default 6395 (when INCLUDE_SKETCH=1)
 #   INCLUDE_SKETCH   1 = also bench redis_async_sketch (default 0)
 #   SKETCH_BIN       path to sketch binary
+#   INCLUDE_PARALLEL 1 = also bench redis_parallel (default 0)
+#   PARALLEL_BIN     path to redis_parallel binary
+#   PARALLEL_PORT    default 6396 (when INCLUDE_PARALLEL=1)
+#   INCLUDE_UPSTREAM 1 = bench upstream redis-server (default 1)
+#   INCLUDE_IDIOMATIC 1 = bench redis_idiomatic (default 1)
+#   MGET_KEYS        keys per custom MGET (default 8)
 #   GO_PORT          default 6397 (when INCLUDE_GO=1)
 #   INCLUDE_GO       1 = also bench redis.go (default 0)
 #   GO_BIN           path to redis_go binary
@@ -33,9 +39,14 @@ BENCH_BIN="$SCRIPT_DIR/redis_c/src/redis-benchmark"
 UPSTREAM_BIN="$SCRIPT_DIR/redis_c/src/redis-server"
 IDIOMATIC_BIN="${IDIOMATIC_BIN:-$SCRIPT_DIR/out/redis_idiomatic}"
 SKETCH_BIN="${SKETCH_BIN:-$SCRIPT_DIR/out/redis_async_sketch}"
+PARALLEL_BIN="${PARALLEL_BIN:-$SCRIPT_DIR/out/redis_parallel}"
 GO_BIN="${GO_BIN:-$SCRIPT_DIR/out/redis_go}"
 INCLUDE_SKETCH="${INCLUDE_SKETCH:-0}"
+INCLUDE_PARALLEL="${INCLUDE_PARALLEL:-0}"
+INCLUDE_UPSTREAM="${INCLUDE_UPSTREAM:-1}"
+INCLUDE_IDIOMATIC="${INCLUDE_IDIOMATIC:-1}"
 INCLUDE_GO="${INCLUDE_GO:-0}"
+MGET_KEYS="${MGET_KEYS:-8}"
 
 REPEATS="${REPEATS:-6}"
 REQUESTS="${REQUESTS:-500000}"
@@ -46,6 +57,7 @@ BENCH_TESTS="${BENCH_TESTS:-set,get,incr}"
 UPSTREAM_PORT="${UPSTREAM_PORT:-6391}"
 IDIOMATIC_PORT="${IDIOMATIC_PORT:-6393}"
 SKETCH_PORT="${SKETCH_PORT:-6395}"
+PARALLEL_PORT="${PARALLEL_PORT:-6396}"
 GO_PORT="${GO_PORT:-6397}"
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-0.05}"
 MEMLOG_ON_EXIT="${MEMLOG_ON_EXIT:-1}"
@@ -58,22 +70,42 @@ need() {
     fi
 }
 need "$BENCH_BIN" "redis-benchmark"
-need "$UPSTREAM_BIN" "redis-server"
-need "$IDIOMATIC_BIN" "redis_idiomatic"
+if [[ "$INCLUDE_UPSTREAM" == "1" ]]; then
+    need "$UPSTREAM_BIN" "redis-server"
+fi
+if [[ "$INCLUDE_IDIOMATIC" == "1" ]]; then
+    need "$IDIOMATIC_BIN" "redis_idiomatic"
+fi
 if [[ "$INCLUDE_SKETCH" == "1" ]]; then
     need "$SKETCH_BIN" "redis_async_sketch"
+fi
+if [[ "$INCLUDE_PARALLEL" == "1" ]]; then
+    need "$PARALLEL_BIN" "redis_parallel"
 fi
 if [[ "$INCLUDE_GO" == "1" ]]; then
     need "$GO_BIN" "redis_go"
 fi
 
 # Labels shuffled each (round, cmd). Order is presentation-stable in summary.
-LABELS=(upstream idiomatic)
+LABELS=()
+if [[ "$INCLUDE_UPSTREAM" == "1" ]]; then
+    LABELS+=(upstream)
+fi
+if [[ "$INCLUDE_IDIOMATIC" == "1" ]]; then
+    LABELS+=(idiomatic)
+fi
 if [[ "$INCLUDE_SKETCH" == "1" ]]; then
     LABELS+=(sketch)
 fi
+if [[ "$INCLUDE_PARALLEL" == "1" ]]; then
+    LABELS+=(parallel)
+fi
 if [[ "$INCLUDE_GO" == "1" ]]; then
     LABELS+=(go)
+fi
+if [[ ${#LABELS[@]} -eq 0 ]]; then
+    echo "no servers selected (INCLUDE_UPSTREAM/IDIOMATIC/SKETCH/PARALLEL/GO)" >&2
+    exit 1
 fi
 LABELS_PY="$(printf "'%s'," "${LABELS[@]}")"
 LABELS_PY="[${LABELS_PY%,}]"
@@ -101,8 +133,6 @@ PY
 }
 
 # --- start servers concurrently ---
-"$UPSTREAM_BIN"  --save "" --appendonly no --port "$UPSTREAM_PORT" >"$TMP_DIR/upstream.log"  2>&1 &
-UPSTREAM_PID=$!
 CC_WORKERS_OVERRIDE="${CC_WORKERS:-}"
 env_prefix=""
 [[ -n "$CC_WORKERS_OVERRIDE"   ]] && env_prefix+="CC_WORKERS=$CC_WORKERS_OVERRIDE "
@@ -116,13 +146,23 @@ for _k in CC_V2_EAGER_THREADS CC_V2_GROW_RATE_US CC_V2_GROW_DEPTH_X \
         env_prefix+="${_k}=${!_k} "
     fi
 done
-if [[ -n "$env_prefix" ]]; then
-    env $env_prefix "$IDIOMATIC_BIN" "$IDIOMATIC_PORT" >"$TMP_DIR/idiomatic.log" 2>&1 &
-else
-    "$IDIOMATIC_BIN" "$IDIOMATIC_PORT" >"$TMP_DIR/idiomatic.log" 2>&1 &
+ALL_PIDS=""
+UPSTREAM_PID=""
+if [[ "$INCLUDE_UPSTREAM" == "1" ]]; then
+    "$UPSTREAM_BIN"  --save "" --appendonly no --port "$UPSTREAM_PORT" >"$TMP_DIR/upstream.log"  2>&1 &
+    UPSTREAM_PID=$!
+    ALL_PIDS="$UPSTREAM_PID"
 fi
-IDIOMATIC_PID=$!
-ALL_PIDS="$UPSTREAM_PID $IDIOMATIC_PID"
+IDIOMATIC_PID=""
+if [[ "$INCLUDE_IDIOMATIC" == "1" ]]; then
+    if [[ -n "$env_prefix" ]]; then
+        env $env_prefix "$IDIOMATIC_BIN" "$IDIOMATIC_PORT" >"$TMP_DIR/idiomatic.log" 2>&1 &
+    else
+        "$IDIOMATIC_BIN" "$IDIOMATIC_PORT" >"$TMP_DIR/idiomatic.log" 2>&1 &
+    fi
+    IDIOMATIC_PID=$!
+    ALL_PIDS="$ALL_PIDS $IDIOMATIC_PID"
+fi
 
 SKETCH_PID=""
 if [[ "$INCLUDE_SKETCH" == "1" ]]; then
@@ -136,6 +176,17 @@ if [[ "$INCLUDE_SKETCH" == "1" ]]; then
     ALL_PIDS="$ALL_PIDS $SKETCH_PID"
 fi
 
+PARALLEL_PID=""
+if [[ "$INCLUDE_PARALLEL" == "1" ]]; then
+    if [[ -n "$env_prefix" ]]; then
+        env $env_prefix "$PARALLEL_BIN" "127.0.0.1:$PARALLEL_PORT" >"$TMP_DIR/parallel.log" 2>&1 &
+    else
+        "$PARALLEL_BIN" "127.0.0.1:$PARALLEL_PORT" >"$TMP_DIR/parallel.log" 2>&1 &
+    fi
+    PARALLEL_PID=$!
+    ALL_PIDS="$ALL_PIDS $PARALLEL_PID"
+fi
+
 GO_PID=""
 if [[ "$INCLUDE_GO" == "1" ]]; then
     "$GO_BIN" "127.0.0.1:$GO_PORT" >"$TMP_DIR/go.log" 2>&1 &
@@ -143,10 +194,17 @@ if [[ "$INCLUDE_GO" == "1" ]]; then
     ALL_PIDS="$ALL_PIDS $GO_PID"
 fi
 
-wait_port "$UPSTREAM_PORT"
-wait_port "$IDIOMATIC_PORT"
+if [[ "$INCLUDE_UPSTREAM" == "1" ]]; then
+    wait_port "$UPSTREAM_PORT"
+fi
+if [[ "$INCLUDE_IDIOMATIC" == "1" ]]; then
+    wait_port "$IDIOMATIC_PORT"
+fi
 if [[ "$INCLUDE_SKETCH" == "1" ]]; then
     wait_port "$SKETCH_PORT"
+fi
+if [[ "$INCLUDE_PARALLEL" == "1" ]]; then
+    wait_port "$PARALLEL_PORT"
 fi
 if [[ "$INCLUDE_GO" == "1" ]]; then
     wait_port "$GO_PORT"
@@ -205,16 +263,29 @@ with open(out_path, "w", buffering=1) as f:
         time.sleep(interval)
 PY
 
-python3 "$TMP_DIR/sampler.py" "$UPSTREAM_PID"  "$TMP_DIR/upstream_samples.txt"  "$SAMPLE_INTERVAL" &
-UPSTREAM_SAMPLER_PID=$!
-python3 "$TMP_DIR/sampler.py" "$IDIOMATIC_PID" "$TMP_DIR/idiomatic_samples.txt" "$SAMPLE_INTERVAL" &
-IDIOMATIC_SAMPLER_PID=$!
-ALL_PIDS="$ALL_PIDS $UPSTREAM_SAMPLER_PID $IDIOMATIC_SAMPLER_PID"
+UPSTREAM_SAMPLER_PID=""
+if [[ "$INCLUDE_UPSTREAM" == "1" ]]; then
+    python3 "$TMP_DIR/sampler.py" "$UPSTREAM_PID"  "$TMP_DIR/upstream_samples.txt"  "$SAMPLE_INTERVAL" &
+    UPSTREAM_SAMPLER_PID=$!
+    ALL_PIDS="$ALL_PIDS $UPSTREAM_SAMPLER_PID"
+fi
+IDIOMATIC_SAMPLER_PID=""
+if [[ "$INCLUDE_IDIOMATIC" == "1" ]]; then
+    python3 "$TMP_DIR/sampler.py" "$IDIOMATIC_PID" "$TMP_DIR/idiomatic_samples.txt" "$SAMPLE_INTERVAL" &
+    IDIOMATIC_SAMPLER_PID=$!
+    ALL_PIDS="$ALL_PIDS $IDIOMATIC_SAMPLER_PID"
+fi
 SKETCH_SAMPLER_PID=""
 if [[ "$INCLUDE_SKETCH" == "1" ]]; then
     python3 "$TMP_DIR/sampler.py" "$SKETCH_PID" "$TMP_DIR/sketch_samples.txt" "$SAMPLE_INTERVAL" &
     SKETCH_SAMPLER_PID=$!
     ALL_PIDS="$ALL_PIDS $SKETCH_SAMPLER_PID"
+fi
+PARALLEL_SAMPLER_PID=""
+if [[ "$INCLUDE_PARALLEL" == "1" ]]; then
+    python3 "$TMP_DIR/sampler.py" "$PARALLEL_PID" "$TMP_DIR/parallel_samples.txt" "$SAMPLE_INTERVAL" &
+    PARALLEL_SAMPLER_PID=$!
+    ALL_PIDS="$ALL_PIDS $PARALLEL_SAMPLER_PID"
 fi
 GO_SAMPLER_PID=""
 if [[ "$INCLUDE_GO" == "1" ]]; then
@@ -228,15 +299,33 @@ ulimit -n 65536 2>/dev/null || ulimit -n 8192 2>/dev/null || true
 # Parse "SET: 1234567.89 requests per second" → "1234567.89".
 # redis-benchmark prints a leading space on the final line (" SET: ...").
 extract_rps() {
-    grep -E "${1}: [0-9.]+ requests per second" "$2" | tail -1 \
-        | sed -E 's/.*: ([0-9.]+) requests per second.*/\1/'
+    # Built-in -t tests print "SET: 123.4 requests per second". A custom
+    # MGET line is titled "mget key:__rand_int__ …: 123.4 requests …".
+    if [[ "$1" == "MGET" ]]; then
+        grep -E "[0-9.]+ requests per second" "$2" | tail -1 \
+            | sed -E 's/.*: ([0-9.]+) requests per second.*/\1/'
+    else
+        grep -E "${1}: [0-9.]+ requests per second" "$2" | tail -1 \
+            | sed -E 's/.*: ([0-9.]+) requests per second.*/\1/'
+    fi
 }
 
 run_one() {
     # args: label port cmd outfile
-    "$BENCH_BIN" -h 127.0.0.1 -p "$2" -n "$REQUESTS" -c "$CLIENTS" \
-        -P "$PIPELINE" -q -r "$RANDOM_KEYS" -t "$3" \
-        >"$4" 2>&1
+    if [[ "$3" == "mget" ]]; then
+        local -a keys=()
+        local i
+        for i in $(seq 1 "$MGET_KEYS"); do
+            keys+=("key:__rand_int__")
+        done
+        "$BENCH_BIN" -h 127.0.0.1 -p "$2" -n "$REQUESTS" -c "$CLIENTS" \
+            -P "$PIPELINE" -q -r "$RANDOM_KEYS" mget "${keys[@]}" \
+            >"$4" 2>&1
+    else
+        "$BENCH_BIN" -h 127.0.0.1 -p "$2" -n "$REQUESTS" -c "$CLIENTS" \
+            -P "$PIPELINE" -q -r "$RANDOM_KEYS" -t "$3" \
+            >"$4" 2>&1
+    fi
 }
 
 # CC.MEMLOG [phase] — phase becomes the mem_gap / mem[...] tag in idiomatic.log.
@@ -266,6 +355,7 @@ port_for() {
         upstream)  echo "$UPSTREAM_PORT"  ;;
         idiomatic) echo "$IDIOMATIC_PORT" ;;
         sketch)    echo "$SKETCH_PORT"    ;;
+        parallel)  echo "$PARALLEL_PORT"  ;;
         go)        echo "$GO_PORT"        ;;
         *) echo "unknown label: $1" >&2; exit 1 ;;
     esac
@@ -276,6 +366,7 @@ pid_for() {
         upstream)  echo "$UPSTREAM_PID"  ;;
         idiomatic) echo "$IDIOMATIC_PID" ;;
         sketch)    echo "$SKETCH_PID"    ;;
+        parallel)  echo "$PARALLEL_PID"  ;;
         go)        echo "$GO_PID"        ;;
         *) echo "unknown label: $1" >&2; exit 1 ;;
     esac
@@ -286,6 +377,7 @@ log_for() {
         upstream)  echo "$TMP_DIR/upstream.log"  ;;
         idiomatic) echo "$TMP_DIR/idiomatic.log" ;;
         sketch)    echo "$TMP_DIR/sketch.log"    ;;
+        parallel)  echo "$TMP_DIR/parallel.log"  ;;
         go)        echo "$TMP_DIR/go.log"        ;;
         *) echo "unknown label: $1" >&2; exit 1 ;;
     esac
@@ -331,7 +423,7 @@ print(' '.join(labels))")"
             fi
         done
     done
-    if [[ $r -eq 0 && "$MEMLOG_AFTER_WARMUP" != "0" ]]; then
+    if [[ $r -eq 0 && "$MEMLOG_AFTER_WARMUP" != "0" && "$INCLUDE_IDIOMATIC" == "1" ]]; then
         echo >&2 "[mem] CC.MEMLOG post-warmup"
         request_idiomatic_memlog post-warmup \
             || echo "warning: CC.MEMLOG post-warmup failed; see $TMP_DIR/idiomatic.log" >&2
@@ -339,13 +431,13 @@ print(' '.join(labels))")"
 done
 
 # --- stop samplers and let them flush ---
-for p in "$UPSTREAM_SAMPLER_PID" "$IDIOMATIC_SAMPLER_PID" $SKETCH_SAMPLER_PID $GO_SAMPLER_PID; do
+for p in $UPSTREAM_SAMPLER_PID $IDIOMATIC_SAMPLER_PID $SKETCH_SAMPLER_PID $PARALLEL_SAMPLER_PID $GO_SAMPLER_PID; do
     [[ -n "$p" ]] || continue
     kill "$p" 2>/dev/null || true
     wait "$p" 2>/dev/null || true
 done
 
-if [[ "$MEMLOG_ON_EXIT" != "0" ]]; then
+if [[ "$MEMLOG_ON_EXIT" != "0" && "$INCLUDE_IDIOMATIC" == "1" ]]; then
     echo >&2 "[mem] CC.MEMLOG final"
     request_idiomatic_memlog final \
         || echo "warning: CC.MEMLOG final failed; see $TMP_DIR/idiomatic.log" >&2
@@ -361,7 +453,8 @@ by = defaultdict(list)
 for r in rows:
     by[(r["cmd"], r["label"])].append(float(r["rps"]))
 
-cmds = sorted({r["cmd"] for r in rows}, key=lambda c: ["set","get","incr"].index(c) if c in ["set","get","incr"] else 99)
+_cmd_ord = ["set","get","incr","mget"]
+cmds = sorted({r["cmd"] for r in rows}, key=lambda c: _cmd_ord.index(c) if c in _cmd_ord else 99)
 labels = $LABELS_PY
 
 def read_samples(path):
@@ -459,8 +552,8 @@ def read_idiomatic_memlog(path):
 
 print()
 print("== bench_robust summary ==")
-print(f"rounds={$REPEATS} requests_per_round={$REQUESTS} clients={$CLIENTS} pipeline={$PIPELINE} cc_workers={'$CC_WORKERS_OVERRIDE' or 'default'}")
-print(f"labels={','.join(labels)} include_sketch={'$INCLUDE_SKETCH'} include_go={'$INCLUDE_GO'}")
+print(f"rounds={$REPEATS} requests_per_round={$REQUESTS} clients={$CLIENTS} pipeline={$PIPELINE} mget_keys={$MGET_KEYS} cc_workers={'$CC_WORKERS_OVERRIDE' or 'default'}")
+print(f"labels={','.join(labels)} include_sketch={'$INCLUDE_SKETCH'} include_parallel={'$INCLUDE_PARALLEL'} include_go={'$INCLUDE_GO'}")
 samp = "  ".join(f"{lab}={sample_peaks[lab]['n']}" for lab in labels)
 print(f"sample_interval={$SAMPLE_INTERVAL}s  samples_taken: {samp}")
 print()
@@ -479,6 +572,7 @@ for cmd in cmds:
     ups = by.get((cmd, "upstream"), [])
     idm = by.get((cmd, "idiomatic"), [])
     sk  = by.get((cmd, "sketch"), [])
+    par = by.get((cmd, "parallel"), [])
     go  = by.get((cmd, "go"), [])
     def ratio_line(a_name, a, b_name, b):
         ratio = statistics.median(a) / statistics.median(b)
@@ -491,11 +585,18 @@ for cmd in cmds:
         ratio_line("go", go, "upstream", ups)
     if ups and sk:
         ratio_line("sketch", sk, "upstream", ups)
+    if ups and par:
+        ratio_line("parallel", par, "upstream", ups)
     if idm and go:
         ratio_line("idiomatic", idm, "go", go)
     if idm and sk:
         ratio = statistics.median(idm) / statistics.median(sk)
         print(f"  idiomatic/sketch median:   {ratio:.3f}x")
+    if idm and par:
+        ratio = statistics.median(idm) / statistics.median(par)
+        print(f"  idiomatic/parallel median: {ratio:.3f}x")
+    if sk and par:
+        ratio_line("parallel", par, "sketch", sk)
     print()
 
 print("[RESOURCE PEAKS] (sampled every $SAMPLE_INTERVAL s across the whole run)")

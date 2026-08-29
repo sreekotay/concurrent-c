@@ -18,11 +18,11 @@ static void assert_switch_template_as_slice(int64_t value) {
     switch (1) {
         case 1: {
             CCArena tmp = @create(kilobytes(1)) @destroy;
-            CCString hdr_str = @string(`$${value}\r\n`, &tmp);
+            CCString hdr_str = @string(`$${value}\r\n`, tmp);
             char[:0] hdr = hdr_str.as_slice();
             assert(hdr.eq_cstr("$42\r\n"));
 
-            CCString s = @string(`:${value}\r\n`, &tmp);
+            CCString s = @string(`:${value}\r\n`, tmp);
             char[:0] wire = s.as_slice();
             assert(wire.eq_cstr(":42\r\n"));
             return;
@@ -35,7 +35,7 @@ static void assert_switch_template_as_slice(int64_t value) {
 int main(void) {
     CCArena arena_storage = @create(kilobytes(8)) @destroy;
     if (!cc_arena_is_live(arena_storage)) abort();
-    CCArena *arena = &arena_storage;
+    CCArena arena = arena_storage;
 
     CCString literal = @string("hello", arena);
     char[:0] literal_view = literal.as_slice();

@@ -67,13 +67,11 @@ typedef enum RedisReplyKind {
     REDIS_REPLY_WIRE,
 } RedisReplyKind;
 
-/* Max command arguments AFTER the command word.  Wire token cap is
- * RespGCmd_args_cap (schema `items … cap N`); server TUs static-assert
- * REDIS_ARGV_MAX + 1 == RespGCmd_args_cap.  Bounds variadic commands:
- * DEL/EXISTS/MGET take up to REDIS_ARGV_MAX keys, MSET up to
- * REDIS_ARGV_MAX/2 pairs. */
+/* Owner-fiber argv AFTER the command word (redis_owner). Idiomatic has
+ * no argc cap: schema `items` without `cap N` + a parse arena. Owner
+ * still static-asserts REDIS_ARGV_MAX + 1 == RespGCmd_args_cap. */
 #ifndef REDIS_ARGV_MAX
-#define REDIS_ARGV_MAX 7
+#define REDIS_ARGV_MAX 15
 #endif
 
 typedef struct RedisRequest {

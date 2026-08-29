@@ -2,7 +2,7 @@
  * splice destatics the definition so a guest that calls destatic_hid links. */
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
-CCCommand emit_other = cc_command(&a, @slice("./cc/bin/ccc"));
+CCCommand emit_other = cc_command(a, @slice("./cc/bin/ccc"));
 emit_other.arg("--no-cache");
 emit_other.arg("--emit-c-only");
 emit_other.arg("tests/quote_cch_destatic_other_mod.ccs");
@@ -15,7 +15,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_h_static = cc_command(&a, @slice("grep"));
+CCCommand grep_h_static = cc_command(a, @slice("grep"));
 grep_h_static.arg("-q");
 grep_h_static.arg("static int destatic_hid");
 grep_h_static.arg("out/include/tests/quote_cch_destatic_mod.h");
@@ -25,7 +25,7 @@ if (rc == 0) {
     return 1;
 }
 
-CCCommand grep_h_decl = cc_command(&a, @slice("grep"));
+CCCommand grep_h_decl = cc_command(a, @slice("grep"));
 grep_h_decl.arg("-q");
 grep_h_decl.arg("int destatic_hid");
 grep_h_decl.arg("out/include/tests/quote_cch_destatic_mod.h");
@@ -35,7 +35,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_h_cell = cc_command(&a, @slice("grep"));
+CCCommand grep_h_cell = cc_command(a, @slice("grep"));
 grep_h_cell.arg("-q");
 grep_h_cell.arg("static int destatic_cell");
 grep_h_cell.arg("out/include/tests/quote_cch_destatic_mod.h");
@@ -45,7 +45,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_h_table = cc_command(&a, @slice("grep"));
+CCCommand grep_h_table = cc_command(a, @slice("grep"));
 grep_h_table.arg("-q");
 grep_h_table.arg("extern int destatic_table");
 grep_h_table.arg("out/include/tests/quote_cch_destatic_mod.h");
@@ -55,7 +55,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_h_table_init = cc_command(&a, @slice("grep"));
+CCCommand grep_h_table_init = cc_command(a, @slice("grep"));
 grep_h_table_init.arg("-Fq");
 grep_h_table_init.arg("destatic_table[] =");
 grep_h_table_init.arg("out/include/tests/quote_cch_destatic_mod.h");
@@ -65,7 +65,7 @@ if (rc == 0) {
     return 1;
 }
 
-CCCommand grep_other_body = cc_command(&a, @slice("grep"));
+CCCommand grep_other_body = cc_command(a, @slice("grep"));
 grep_other_body.arg("-q");
 grep_other_body.arg("DESTATIC_HID_BODY");
 grep_other_body.arg("out/quote_cch_destatic_other.c");
@@ -75,7 +75,7 @@ if (rc == 0) {
     return 1;
 }
 
-CCCommand emit_owner = cc_command(&a, @slice("./cc/bin/ccc"));
+CCCommand emit_owner = cc_command(a, @slice("./cc/bin/ccc"));
 emit_owner.arg("--no-cache");
 emit_owner.arg("--emit-c-only");
 emit_owner.arg("tests/quote_cch_destatic_mod.ccs");
@@ -88,7 +88,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_owner_static = cc_command(&a, @slice("grep"));
+CCCommand grep_owner_static = cc_command(a, @slice("grep"));
 grep_owner_static.arg("-q");
 grep_owner_static.arg("static int destatic_hid");
 grep_owner_static.arg("out/quote_cch_destatic_mod.c");
@@ -98,7 +98,7 @@ if (rc == 0) {
     return 1;
 }
 
-CCCommand grep_owner_body = cc_command(&a, @slice("grep"));
+CCCommand grep_owner_body = cc_command(a, @slice("grep"));
 grep_owner_body.arg("-q");
 grep_owner_body.arg("DESTATIC_HID_BODY");
 grep_owner_body.arg("out/quote_cch_destatic_mod.c");
@@ -108,7 +108,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_owner_table = cc_command(&a, @slice("grep"));
+CCCommand grep_owner_table = cc_command(a, @slice("grep"));
 grep_owner_table.arg("-Fq");
 grep_owner_table.arg("destatic_table[] =");
 grep_owner_table.arg("out/quote_cch_destatic_mod.c");
@@ -118,7 +118,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
 build.arg("build");
 build.arg("--no-cache");
 build.arg("tests/quote_cch_destatic_other_mod.ccs");
@@ -131,7 +131,7 @@ if (rc != 0) {
     "build failed".println() !>;
     return 1;
 }
-CCCommand run = cc_command(&a, @slice("out/quote_cch_destatic_smoke"));
+CCCommand run = cc_command(a, @slice("out/quote_cch_destatic_smoke"));
 run.inherit_stdio();
 rc = run.status() !>;
 if (rc != 0) {

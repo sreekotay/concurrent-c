@@ -33,7 +33,7 @@ line two
            memcmp(ts.ptr, zs.ptr, zs.len) == 0);
 
     /* Inline one-liner: closer shares the line, no dedent. */
-    CCString one = @string(`  two leading spaces stay`, &a);
+    CCString one = @string(`  two leading spaces stay`, a);
     CCSlice ones = one.as_slice();
     printf("[%.*s]\n", (int)ones.len, (const char*)ones.ptr);
 

@@ -19,8 +19,8 @@ int main(void) {
         return 0;
     }
 
-    CCPy first = cc_py_new(false, &a) !>;
-    CCResult_CCPy_CCPyError r2 = cc_py_new(false, &a);
+    CCPy first = cc_py_new(false, a) !>;
+    CCResult_CCPy_CCPyError r2 = cc_py_new(false, a);
     if (r2.is_err()) {
         /* Runtime cannot make a second interpreter — nothing to clone into. */
         puts("ok");
@@ -64,7 +64,7 @@ int main(void) {
 
     /* Process-isolated target refuses by name. */
     if (cc_py_proc_available()) {
-        CCResult_CCPy_CCPyError rp = cc_py_new(true, &a);
+        CCResult_CCPy_CCPyError rp = cc_py_new(true, a);
         if (rp.ok) {
             CCPy proc = rp.u.value;
             CCResult_CCPyObj_CCPyError refused = src.clone_into(&proc);

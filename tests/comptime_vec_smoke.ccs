@@ -12,7 +12,7 @@
     CCArena a = cc_arena_create(4096);
 
     CCVec v = {0};
-    cc_vec_init(&v, &a, sizeof(int), _Alignof(int), 4);
+    cc_vec_init(&v, a, sizeof(int), _Alignof(int), 4);
     int sum = 0;
     for (int i = 1; i <= 5; i++) {
         int* slot = (int*)cc_vec_push_slot(&v, sizeof(int), _Alignof(int));

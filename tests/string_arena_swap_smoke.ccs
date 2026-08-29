@@ -31,10 +31,10 @@ int main(void) {
 
     /* Wrong-arena release: refuse (overflow ownership is always tracked). */
     {
-        void *p = cc_arena_alloc(&first, 32, 8);
+        void *p = cc_arena_alloc(first, 32, 8);
         if (!p) return 10;
-        if (cc_arena_release(&other, p)) return 11; /* must fail */
-        if (!cc_arena_release(&first, p)) return 12;
+        if (cc_arena_release(other, p)) return 11; /* must fail */
+        if (!cc_arena_release(first, p)) return 12;
     }
 
     puts("string_arena_swap_smoke: PASS");

@@ -5,6 +5,6 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(16));
     ArrayMap::[int, int] m;
     if (!cc_arena_is_live(arena)) return 1;
-    m = array_map_new::[int, int](&arena);
+    m = array_map_new::[int, int](arena);
     return (int)m->nosuch();
 }

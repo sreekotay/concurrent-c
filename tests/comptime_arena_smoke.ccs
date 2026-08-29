@@ -11,12 +11,12 @@
     CCArena a = cc_arena_create(4096);
     CCSlice l = CC_SLICE_LIT("foo");
     CCSlice r = CC_SLICE_LIT("bar");
-    CCSlice cat = cc_slice_concat2(l, r, &a);
+    CCSlice cat = cc_slice_concat2(l, r, a);
 
     int ok = cc_slice_eq_cstr(&cat, "foobar") ? 1 : 0;
     int len = (int)cat.len;
 
-    char* z = (char*)cc_arena_alloc(&a, (size_t)len + 1, 1);
+    char* z = (char*)cc_arena_alloc(a, (size_t)len + 1, 1);
     memcpy(z, cat.ptr, (size_t)len);
     z[len] = 0;
 

@@ -12,7 +12,7 @@ int main(void) {
     int *vp;
     if (!cc_arena_is_live(arena)) return 1;
     if (ArrayMap_len(0) != 0) return 2;
-    m = array_map_new::[int, int](&arena);
+    m = array_map_new::[int, int](arena);
     if (!m) return 3;
     if (m->insert(1, 10) != 0) return 4;
     vp = m->get_ptr(1);

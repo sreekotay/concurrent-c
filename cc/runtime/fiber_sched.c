@@ -243,7 +243,7 @@ void   sched_v2_fiber_dec_external_wait(fiber_v2* f);
 int    sched_v2_fiber_external_wait_active(fiber_v2* f);
 void   sched_v2_debug_dump_fiber(fiber_v2* f, const char* prefix);
 void   sched_v2_debug_dump_state(const char* prefix);
-bool cc_nursery_is_cancelled(const CCNurseryHost* n);
+bool cc_nursery_is_cancelled_host(const CCNurseryHost* n);
 CCNurseryHost* cc__runtime_current_nursery(void);
 
 void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, const char* file, int line);
@@ -1057,7 +1057,7 @@ int cc__fiber_suspend_until_ready_or_cancel(_Atomic int* flag, int expected,
     if (sched_v2_in_context()) {
         sched_v2_set_park_reason(reason);
         while (atomic_load_explicit(flag, memory_order_acquire) == expected) {
-            if (cur_nursery && cc_nursery_is_cancelled(cur_nursery)) {
+            if (cur_nursery && cc_nursery_is_cancelled_host(cur_nursery)) {
                 sched_v2_set_park_reason(NULL);
                 cc_external_wait_leave();
                 return ECANCELED;
@@ -1092,7 +1092,7 @@ int cc__fiber_suspend_until_ready_or_cancel_until(_Atomic int* flag, int expecte
         fiber_v2* self = sched_v2_current_fiber();
         sched_v2_set_park_reason(reason);
         while (atomic_load_explicit(flag, memory_order_acquire) == expected) {
-            if (cur_nursery && cc_nursery_is_cancelled(cur_nursery)) {
+            if (cur_nursery && cc_nursery_is_cancelled_host(cur_nursery)) {
                 sched_v2_set_park_reason(NULL);
                 cc_external_wait_leave();
                 return ECANCELED;

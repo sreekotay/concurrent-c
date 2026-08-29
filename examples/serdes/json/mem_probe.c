@@ -95,7 +95,7 @@ int main(int argc, char **argv) {
     /* ours: one parse, bump_used + committed slab reservation */
     {
         CCArena ar = cc_arena_create((size_t)n * 24 + (48 << 20));
-        JsonParser p = json_parser(b, n, &ar);
+        JsonParser p = json_parser(b, n, ar);
         JsonNode v;
         if (JsonParser_parse(&p, &v) != JSON_OK) {
             out_fd(STDERR_FILENO, "ours: parse failed\n");

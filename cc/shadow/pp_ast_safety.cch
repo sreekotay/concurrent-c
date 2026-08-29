@@ -96,7 +96,7 @@ typedef struct {
     ShadowSafeRfn* rfns;
     int nrfn;
     int rfn_cap;
-    CCArena* safe_ar;
+    CCArena safe_ar;
     int strict_unhandled; /* CC_STRICT_RESULT_UNWRAP (default on) */
     int in_async;         /* walking an @async fn body */
     int in_send_task;     /* send_task[_hybrid] closure packs Result payload */
@@ -202,7 +202,7 @@ static int shadow_safe_ident_eq(const char* a, const char* b) {
 static int shadow_safe_var_reserve(ShadowSafeCtx* ctx, int need) {
     ShadowSafeVar** nbuf;
     int ncap;
-    if (!ctx || !ctx->safe_ar) return 0;
+    if (!ctx || !ctx->safe_ar.p) return 0;
     if (need <= ctx->var_cap) return 1;
     ncap = ctx->var_cap ? ctx->var_cap * 2 : 32;
     while (ncap < need) ncap *= 2;
@@ -3042,7 +3042,7 @@ static void shadow_safe_push_eh(ShadowSafeCtx* ctx, AstNode* eh) {
 static int shadow_safe_rfn_reserve(ShadowSafeCtx* ctx, int need) {
     ShadowSafeRfn* nbuf;
     int ncap;
-    if (!ctx || !ctx->safe_ar) return 0;
+    if (!ctx || !ctx->safe_ar.p) return 0;
     if (need <= ctx->rfn_cap) return 1;
     ncap = ctx->rfn_cap ? ctx->rfn_cap * 2 : 16;
     while (ncap < need) ncap *= 2;
@@ -4662,7 +4662,7 @@ static int shadow_safety_check(AstNode** items, int n, TapeCache* cache) {
     memset(structs, 0, sizeof(structs));
     memset(variants, 0, sizeof(variants));
     safe_ar = cc_arena_heap(64 * 1024);
-    ctx.safe_ar = cc_arena_is_live(safe_ar) ? &safe_ar : NULL;
+    ctx.safe_ar = safe_ar;
     ctx.cache = cache;
     ctx.structs = structs;
     ctx.nstructs = 0;

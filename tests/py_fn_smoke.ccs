@@ -61,12 +61,12 @@ int main(void) {
     }
 
     {
-        CCPy py = cc_py_new(false, &a) !> @destroy;
+        CCPy py = cc_py_new(false, a) !> @destroy;
         rc |= run_domain(&py, "inproc");
     }
 
     if (cc_py_proc_available()) {
-        CCPy py = cc_py_new(true, &a) !> @destroy;
+        CCPy py = cc_py_new(true, a) !> @destroy;
         rc |= run_domain(&py, "iso");
     } else {
         printf("iso_apply SKIP\n");

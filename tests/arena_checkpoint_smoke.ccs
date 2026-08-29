@@ -8,7 +8,7 @@ int main(void) {
     {
         CCArena __cc_arena1 = @create(buffer, sizeof(buffer)) @destroy;
         if (!cc_arena_is_live(__cc_arena1)) abort();
-        CCArena* arena = &__cc_arena1;
+        CCArena arena = __cc_arena1;
         int* a1 = cc_arena_alloc_T(int, arena);
         assert(a1 != NULL);
         *a1 = 11;
@@ -19,11 +19,11 @@ int main(void) {
         int* a2 = cc_arena_alloc_T_count(int, arena, 4);
         assert(a2 != NULL);
         a2[0] = 22;
-        assert(cc_atomic_load(&arena->a->live_allocs) == 2);
+        assert(cc_atomic_load(&arena.a->live_allocs) == 2);
 
         // Restore: allocations after checkpoint should be reclaimed
         cc_arena_restore(cp);
-        assert(cc_atomic_load(&arena->a->live_allocs) == 1);
+        assert(cc_atomic_load(&arena.a->live_allocs) == 1);
 
         int* a3 = cc_arena_alloc_T_count(int, arena, 4);
         assert(a3 != NULL);

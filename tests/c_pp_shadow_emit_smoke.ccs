@@ -45,7 +45,7 @@ static int norm_eq(const char* a, size_t alen, const char* b, size_t blen) {
 
 /* Same succession path as native shadow_lower: comptime prepare/exec →
  * stage1 bytes → stage2 → parse → safety → emit → comptime splice. */
-static int lower_file(TapeCache* cache, CCArena* arena, const char* name,
+static int lower_file(TapeCache* cache, CCArena arena, const char* name,
                       ShadowEmitKind kind, CEmit* out) {
     char path[512];
     char* stage1_src = NULL;
@@ -234,7 +234,7 @@ static int test_diag_line(void) {
     if (!ft) { printf("FAIL: load bad_token\n"); return 0; }
     Token tokbuf[256];
     Pp pp = {0};
-    pp.cache = &cache; pp.arena = &arena; pp.search_dir = FIX;
+    pp.cache = &cache; pp.arena = arena; pp.search_dir = FIX;
     pp.out = tokbuf; pp.out_cap = 256;
     if (!pp_run(&pp, ft)) { printf("FAIL: pp bad\n"); return 0; }
     Parser p = {0};
@@ -382,7 +382,7 @@ static int test_cap_stage2(void) {
         return 0;
     }
     pp.cache = &cache;
-    pp.arena = &arena;
+    pp.arena = arena;
     pp.search_dir = FIX;
     pp.out = tokbuf;
     pp.out_cap = 8;
@@ -434,7 +434,7 @@ static int test_cap_body(void) {
         return 0;
     }
     pp.cache = &cache;
-    pp.arena = &arena;
+    pp.arena = arena;
     pp.search_dir = FIX;
     pp.out = tokbuf;
     pp.out_cap = 4096;
@@ -490,7 +490,7 @@ static int test_cap_field(void) {
         return 0;
     }
     pp.cache = &cache;
-    pp.arena = &arena;
+    pp.arena = arena;
     pp.search_dir = FIX;
     pp.out = tokbuf;
     pp.out_cap = 4096;

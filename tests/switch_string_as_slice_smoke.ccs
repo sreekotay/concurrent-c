@@ -3,7 +3,7 @@
 #include <string.h>
 
 /* UFCS inside opaque string-switch bodies (locals are not bind-registered). */
-static int bulk_len(CCSlice name, CCString* v, CCArena* a) {
+static int bulk_len(CCSlice name, CCString* v, CCArena a) {
     switch (name) {
     case "GET": {
         if (!v) return -1;
@@ -24,8 +24,8 @@ int main(void) {
     CCArena a = cc_arena_heap(kilobytes(1)) @destroy;
     assert(cc_arena_is_live(a));
     CCString s = cc_string_from_slice(a, @slice("hello"));
-    assert(bulk_len(CC_SLICE_LIT("GET"), &s, &a) == 5);
-    assert(bulk_len(CC_SLICE_LIT("ECHO"), &s, &a) == 1);
-    assert(bulk_len(CC_SLICE_LIT("X"), &s, &a) == 0);
+    assert(bulk_len(CC_SLICE_LIT("GET"), &s, a) == 5);
+    assert(bulk_len(CC_SLICE_LIT("ECHO"), &s, a) == 1);
+    assert(bulk_len(CC_SLICE_LIT("X"), &s, a) == 0);
     return 0;
 }

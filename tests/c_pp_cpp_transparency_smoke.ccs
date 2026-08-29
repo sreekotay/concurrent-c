@@ -51,7 +51,7 @@ int main(void) {
     if (!ft) { printf("FAIL: tape\n"); return 1; }
 
     pp.cache = &cache;
-    pp.arena = &arena;
+    pp.arena = arena;
     pp.out = out_buf;
     pp.out_cap = 256;
     if (!pp_run(&pp, ft)) {
@@ -134,7 +134,7 @@ int main(void) {
         ft2 = tape_cache_load_bytes(&cache, "<cpp-ifdef>", owned2, strlen(src2), arena);
         if (!ft2) { printf("FAIL: tape ifdef\n"); return 1; }
         pp2.cache = &cache;
-        pp2.arena = &arena;
+        pp2.arena = arena;
         pp2.out = out2;
         pp2.out_cap = 256;
         if (!pp_run(&pp2, ft2)) {

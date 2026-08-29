@@ -17,7 +17,7 @@ int main(void) {
     Holder* p = &h;
     h.out = cc_string_with_capacity(a, 32);
 
-    assert(p->out.push_slice(@slice("hi"), &a));
+    assert(p->out.push_slice(@slice("hi"), a));
     assert(!p->out.failed());
     assert(p->out.len() == 2);
 

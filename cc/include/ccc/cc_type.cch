@@ -271,11 +271,11 @@ typedef struct {
     const char* callee;
 } CCTypeDestroyHook;
 
-typedef CCSlice (*CCTypeCreateHandler)(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena);
-typedef CCSlice (*CCTypeUfcsHandler)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena);
+typedef CCSlice (*CCTypeCreateHandler)(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena arena);
+typedef CCSlice (*CCTypeUfcsHandler)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena arena);
 /* Dest-convert: src type, requested dest type, kind "implicit"|"explicit".
  * Return a callee name, the UFCS pass tag, or empty (hard reject). */
-typedef CCSlice (*CCTypeCastHandler)(CCSlice src_type, CCSlice dest_type, CCSlice kind, CCArena* arena);
+typedef CCSlice (*CCTypeCastHandler)(CCSlice src_type, CCSlice dest_type, CCSlice kind, CCArena arena);
 
 /* Niche descriptor (spec/draft_variants.md §11).  A type declares a bit
  * pattern a valid instance is guaranteed never to exhibit — an (offset,

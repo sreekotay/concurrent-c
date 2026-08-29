@@ -1768,7 +1768,7 @@ ginst_emit_pass:
                     int frag_line = 0;
                     CCGenProduceStatus st = cc_emit_plan_produce_generic_def(
                         inst->family, inst->mangled, args128, nargs, rsrc,
-                        rlen, path, &def_ar, &body, err, sizeof(err));
+                        rlen, path, def_ar, &body, err, sizeof(err));
                     if (st != CC_GEN_PRODUCE_OK) {
                         const char* path_base = path;
                         const char* slash = path_base ? strrchr(path_base, '/')
@@ -1887,7 +1887,7 @@ ginst_emit_pass:
                         cc_arena_free(&def_ar);
                         return 0;
                     }
-                    body = (char*)cc_arena_alloc(&def_ar, tpl_cap, 1);
+                    body = (char*)cc_arena_alloc(def_ar, tpl_cap, 1);
                     if (!body) {
                         fprintf(stderr,
                                 "error: generic tpl buffer arena OOM for %s\n",

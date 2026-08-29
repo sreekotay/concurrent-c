@@ -11,7 +11,7 @@
     CCArena arena_storage = cc_arena_wrap_region(buf, sizeof(buf),
                                                 CC_ARENA_FIXED);
     if (1) {
-        CCArena* arena = &arena_storage;
+        CCArena arena = arena_storage;
         int* slot = cc_arena_alloc_T(int, arena);
         if (!slot) abort();
         *slot = x;

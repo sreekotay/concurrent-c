@@ -1,11 +1,11 @@
 /*
  * Script-facing stdio + flipped console print.
  *
- *   CCStdio io@(&a) @destroy;
+ *   CCStdio io@(a) @destroy;
  *   char[:] in = io.read_all() !>;
  *   msg.println() !>;                 // CCSlice / CCString / cstr receivers
  *   "literal".println() !>;
- *   @string(`n=${n}`, &a).println() !>;
+ *   @string(`n=${n}`, a).println() !>;
  *   msg.fprintln(STDERR_FILENO) !>;   // UFCS: data first, then fd
  *
  * Naked aliases (call position; sink-oriented for f*):
@@ -229,7 +229,7 @@ static inline bool !>(CCError) cc_stdio_read_line(CCStdio *io, CCSlice *out) {
  *
  * Data receiver: `path.println()` → `cc_slice_println(&path)`.
  * Cstr / string lit as data receivers coerce to CCSlice then cc_slice_*.
- * Temps: `io.println(@string(`…`, &a))` or `@string(`…`, &a).println()`. */
+ * Temps: `io.println(@string(`…`, a))` or `@string(`…`, a).println()`. */
 
 static inline size_t !>(CCError) cc__script_io_from_ioerr(size_t !>(CCIoError) r) {
     if (cc_is_err(r)) {

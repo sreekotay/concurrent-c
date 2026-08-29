@@ -29,7 +29,7 @@ static CCArena g_arena;
 
 static void* alloc_or_null(int n) {
     if (n == 0) return NULL;
-    return cc_arena_alloc(&g_arena, (size_t)n, 1);
+    return cc_arena_alloc(g_arena, (size_t)n, 1);
 }
 
 static CCIoError g_captured;

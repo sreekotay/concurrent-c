@@ -27,7 +27,7 @@ void cc_emit_plan_snake_name(const char* name, char* out, size_t cap);
 CCGenProduceStatus cc_emit_plan_produce_generic_def(
     const char* gname, const char* mangled, const char orig_args[8][128],
     int nargs, const char* reflect_src, size_t reflect_len,
-    const char* input_path, CCArena* out_ar, char** out_def, char* err,
+    const char* input_path, CCArena out_ar, char** out_def, char* err,
     size_t err_cap);
 int cc_emit_plan_generic_invalid_report_once(const char* mangled);
 int cc_emit_plan_take_exec_error(void);
@@ -4379,7 +4379,7 @@ static void shadow_meta_ar_clear_tables(void) {
     g_shadow_binds_cap = 0;
     g_shadow_cap_binds = NULL;
     g_shadow_cap_binds_cap = 0;
-    if (g_shadow_meta_ar_live) cc_arena_reset(&g_shadow_meta_ar);
+    if (g_shadow_meta_ar_live) cc_arena_reset(g_shadow_meta_ar);
 }
 
 /* Grow a ShadowBind pointer table on the TU meta arena. Each bind is
@@ -4397,7 +4397,7 @@ static int shadow_bind_tab_grow(ShadowBind*** tab, int* cap, int nlive, int need
     }
     ncap = *cap ? *cap * 2 : 64;
     while (ncap < need) ncap *= 2;
-    nbuf = (ShadowBind**)cc_arena_alloc(&g_shadow_meta_ar,
+    nbuf = (ShadowBind**)cc_arena_alloc(g_shadow_meta_ar,
                                         (size_t)ncap * sizeof(ShadowBind*),
                                         _Alignof(ShadowBind*));
     if (!nbuf) {
@@ -4420,7 +4420,7 @@ static ShadowBind* shadow_bind_new_slot(ShadowBind*** tab, int* cap, int* n,
         shadow_table_grow_failed(table, item);
         return NULL;
     }
-    b = (ShadowBind*)cc_arena_alloc(&g_shadow_meta_ar, sizeof(ShadowBind),
+    b = (ShadowBind*)cc_arena_alloc(g_shadow_meta_ar, sizeof(ShadowBind),
                                     _Alignof(ShadowBind));
     if (!b) {
         shadow_table_grow_failed(table, item);
@@ -4445,7 +4445,7 @@ static CCSliceHdr shadow_meta_intern_name(const char* name) {
     n = strlen(name);
     shadow_meta_ar_ensure();
     if (!g_shadow_meta_ar_live) return h;
-    p = (char*)cc_arena_alloc(&g_shadow_meta_ar, n + 1, 1);
+    p = (char*)cc_arena_alloc(g_shadow_meta_ar, n + 1, 1);
     if (!p) return h;
     memcpy(p, name, n + 1);
     return cc_slice_hdr_from_buffer(p, n);

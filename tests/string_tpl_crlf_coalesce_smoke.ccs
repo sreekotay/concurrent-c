@@ -8,15 +8,15 @@
 int main(void) {
     const char* s = "OK";
     CCArena a = cc_arena_heap(kilobytes(1)) @destroy;
-    CCString line = @string(`+${s}\r\n`, &a);
+    CCString line = @string(`+${s}\r\n`, a);
     assert(line.len() == 5);
     assert(memcmp(line.data(), "+OK\r\n", 5) == 0);
 
-    CCString hdr = @string(`:${42}\r\n`, &a);
+    CCString hdr = @string(`:${42}\r\n`, a);
     assert(hdr.len() == 5);
     assert(memcmp(hdr.data(), ":42\r\n", 5) == 0);
 
-    CCString plain = @string(`pre\r\npost`, &a);
+    CCString plain = @string(`pre\r\npost`, a);
     assert(plain.len() == 9);
     assert(memcmp(plain.data(), "pre\r\npost", 9) == 0);
 

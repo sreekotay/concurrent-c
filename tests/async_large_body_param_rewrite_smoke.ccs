@@ -10,17 +10,17 @@ typedef struct Cmd {
     size_t argc;
 } Cmd;
 
-@async int !>(CCError) read_cmd(BufReader::[CCSocket]* br, Cmd* out, CCArena* a) {
+@async int !>(CCError) read_cmd(BufReader::[CCSocket]* br, Cmd* out, CCArena a) {
     /* Many small statements (emit #line grows past 8KiB). */
     size_t i;
     memset(out, 0, sizeof(*out));
     for (i = 0; i < 200; i++) {
-        if (!br || !out || !a) return cc_err(CC_ERR_INVALID_ARG, "null");
+        if (!br || !out || !a.p) return cc_err(CC_ERR_INVALID_ARG, "null");
         (void)br->eof;
         (void)a;
         out->argc = 0;
     }
-    if (!br || !out || !a) return cc_err(CC_ERR_INVALID_ARG, "null");
+    if (!br || !out || !a.p) return cc_err(CC_ERR_INVALID_ARG, "null");
     out->argc = 1;
     out->args[0] = CC_SLICE_LIT("ok");
     return cc_ok(1);
@@ -37,7 +37,7 @@ int main(void) {
     Cmd c;
     CCArena a = cc_arena_heap(1024) @destroy;
     br.init(&sock, buf, sizeof(buf));
-    int n = @await read_cmd(&br, &c, &a) !>;
+    int n = @await read_cmd(&br, &c, a) !>;
     if (n != 1 || c.argc != 1) return 2;
     printf("async_large_body_param_rewrite_smoke ok\n");
     return 0;

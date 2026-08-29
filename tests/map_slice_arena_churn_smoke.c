@@ -25,11 +25,11 @@ static inline CompactSlice compact_from_slice(CCSlice s) {
     return out;
 }
 
-static CCSlice clone_cstr(CCArena *arena, const char *s) {
+static CCSlice clone_cstr(CCArena arena, const char *s) {
     return cc_slice_clone(arena, cc_slice_cstr(s));
 }
 
-static CompactSlice clone_value(CCArena *arena, const char *s) {
+static CompactSlice clone_value(CCArena arena, const char *s) {
     CCSlice src = cc_slice_cstr(s);
     size_t n = src.len + 1;
     char *buf = (char *)cc_arena_alloc(arena, n, 1);
@@ -49,8 +49,8 @@ static int run_arena_map(void) {
     for (int i = 0; i < 2000; i++) {
         char key_buf[32];
         snprintf(key_buf, sizeof(key_buf), "key:%d", i);
-        CCSlice key = clone_cstr(&arena, key_buf);
-        CompactSlice value = clone_value(&arena, "seed");
+        CCSlice key = clone_cstr(arena, key_buf);
+        CompactSlice value = clone_value(arena, "seed");
         if (!key.ptr || !value.ptr) return 3;
         if (SliceCompactMap_insert(m, key, value) != 0) return 4;
     }
@@ -65,9 +65,9 @@ static int run_arena_map(void) {
             return 5;
         }
 
-        CompactSlice replacement = clone_value(&arena, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+        CompactSlice replacement = clone_value(arena, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
         if (!replacement.ptr) return 6;
-        if (cell->ptr) (void)cc_arena_release(&arena, cell->ptr);
+        if (cell->ptr) (void)cc_arena_release(arena, cell->ptr);
         *cell = replacement;
 
         cell = SliceCompactMap_get_ptr(m, query);

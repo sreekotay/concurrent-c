@@ -13,6 +13,6 @@ CCArena a = @create(kilobytes(4)) @destroy;
 
 io.println("io works") !>;
 
-@string(`a works: ${41 + 1}`, &a).println() !>;
+@string(`a works: ${41 + 1}`, a).println() !>;
 
 return 0;

@@ -778,11 +778,11 @@ static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t e
 static int cc__exec_run_litproj_tu(const char* tu,
                                    char** out_lit, size_t* out_len,
                                    char* err_buf, size_t err_sz,
-                                   CCArena* arena) {
+                                   CCArena arena) {
     CCExecErrSink sink;
     if (out_lit) *out_lit = NULL;
     if (out_len) *out_len = 0;
-    if (!arena) {
+    if (!arena.p) {
         if (err_buf && err_sz) snprintf(err_buf, err_sz, "comptime value eval requires an arena");
         return -1;
     }
@@ -1147,10 +1147,10 @@ int cc_comptime_exec_eval_literal(const char* expr,
                                   const CCComptimeExecOpts* opts,
                                   char** out_lit, size_t* out_len,
                                   char* err_buf, size_t err_sz,
-                                  CCArena* arena) {
+                                  CCArena arena) {
     if (out_len) *out_len = 0;
     if (out_lit) *out_lit = NULL;
-    if (!expr || !out_lit || !arena) {
+    if (!expr || !out_lit || !arena.p) {
         if (err_buf && err_sz) snprintf(err_buf, err_sz, "invalid eval_literal args");
         return -1;
     }

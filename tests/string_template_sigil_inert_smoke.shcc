@@ -10,7 +10,7 @@
  * runs before the sigil pass, so the same source is already fine there — which
  * is why this test is a `.shcc`. */
 int n = 7;
-println(@string(`sigil '!>' and n=${n}`, &a)) !>;
-println(@string(`bare !> here`, &a)) !>;
-println(@string(`and ?> too`, &a)) !>;
+println(@string(`sigil '!>' and n=${n}`, a)) !>;
+println(@string(`bare !> here`, a)) !>;
+println(@string(`and ?> too`, a)) !>;
 return 0;

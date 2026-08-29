@@ -23,13 +23,13 @@ static int run_soft(void) {
     g_kept_ok = 0;
 
     CCString kept = @string(`kept:alpha`, @scratch);
-    g_rem_kept = cc_arena_remaining(&__cc_str_scratch);
+    g_rem_kept = cc_arena_remaining(__cc_str_scratch);
 
     @defer {
         CCSlice sl = cc_string_as_slice(&kept);
         g_kept_ok = (sl.len == 10 && sl.ptr &&
                      sl.ptr[0] == 'k' && sl.ptr[9] == 'a');
-        g_rem_defer = cc_arena_remaining(&__cc_str_scratch);
+        g_rem_defer = cc_arena_remaining(__cc_str_scratch);
         if (saved >= 0) {
             (void)dup2(saved, STDERR_FILENO);
             close(saved);

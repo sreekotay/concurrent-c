@@ -35,7 +35,7 @@ int main(void) {
         old_alloc_id = cc_slice_alloc_id(cloned.id);
     }
 
-    cc_arena_reset(&arena);
+    cc_arena_reset(arena);
     /* Stale header reconstructed only to probe epoch bits — borrow scope ended above. */
     {
         CCSlice stale = cc_slice_from_parts((void*)"x", 1, cc_slice_make_id(old_alloc_id, false, false, false));

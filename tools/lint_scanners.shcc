@@ -122,8 +122,8 @@ CCSlice root = cc_script_repo_root(@slice(""), &a) !>;
 cc_dir_chdir(root) !>;
 
 int fail = 0;
-CCSliceArray c_files = cc_glob(@slice("cc/src/**/*.c"), &a) !>;
-CCSliceArray h_files = cc_glob(@slice("cc/src/**/*.h"), &a) !>;
+CCSliceArray c_files = cc_glob(@slice("cc/src/**/*.c"), a) !>;
+CCSliceArray h_files = cc_glob(@slice("cc/src/**/*.h"), a) !>;
 
 for (size_t pass = 0; pass < 2; pass++) {
     CCSliceArray files = (pass == 0) ? c_files : h_files;

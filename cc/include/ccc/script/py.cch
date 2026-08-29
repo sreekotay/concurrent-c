@@ -2,12 +2,12 @@
  * Python interop: interpreter arenas (see "Python interop" in
  * spec/concurrent-c-stdlib-spec.md), light v1.
  *
- *   CCPy py = cc_py_new(false, &a) !> @destroy;
+ *   CCPy py = cc_py_new(false, a) !> @destroy;
  *   CCPyObj m = py.import("math") !> @destroy;
  *   CCPyObj r = m.call_f("sqrt", 2.0) !> @destroy;
  *   double v = r.as_f64() !>;
  *
- * `cc_py_new(true, &a)` opens a process-isolated domain: a python child
+ * `cc_py_new(true, a)` opens a process-isolated domain: a python child
  * on the broker.py wire (remote handles / materialized scalars).
  *
  * libpython is dlopen'd at cc_py; absence is a CCPyError, not a link
@@ -1056,7 +1056,7 @@ static inline void cc_py_runtime_desc(char *buf, size_t cap) {
  * says:
  *
  *     if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
- *     CCPy py = cc_py_new(false, &a) !>;
+ *     CCPy py = cc_py_new(false, a) !>;
  *
  * This IS the loader (same soname list, same CC_LIBPYTHON override), so
  * the probe and the constructor cannot disagree. */
@@ -4484,7 +4484,7 @@ cc__py_iso_str(CCPyObj *obj) {
  * interpreter, which not every runtime can provide. */
 static int cc__py_main_taken;
 
-/* `cc_py_new(isolated, &arena)` yields an interpreter — the same
+/* `cc_py_new(isolated, arena)` yields an interpreter — the same
  * constructor shape as `cc_js_new`: the transport is the flag, arena
  * last.  `arena` is the handle scratch: error messages and default
  * `.as_slice()` backing; explicit `.as_slice_into(&dst)` can override
@@ -5665,7 +5665,7 @@ static inline CCPyArg cc__py_arg_buffer(CCPyArg a) {
 
 /* ---- vectorized call: one crossing for N calls ----
  *
- * `f.map::[T](&arena, cols...)` calls the held Python callable once per row:
+ * `f.map::[T](arena, cols...)` calls the held Python callable once per row:
  * each argument is a typed slice (a column), row r's call is
  * `f(col0[r], col1[r], ...)`, and the results land in a typed run of `T`.
  * Columns may have DIFFERENT element types — a row is then a heterogeneous

@@ -50,7 +50,7 @@ int main(void) {
     s = cc_slice_packed_as_slice(&long_p);
     if (s.len != sizeof(long_buf) || memcmp(s.ptr, long_buf, sizeof(long_buf)) != 0) return 8;
 
-    m = array_map_new::[CCSlicePacked, int](&arena);
+    m = array_map_new::[CCSlicePacked, int](arena);
     if (!m) return 9;
     if (m->insert(a, 11) != 0) return 10;
     if (m->insert(long_p, 22) != 0) return 11;

@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* `f.map::[T](&arena, cols...)` — one crossing calls f once per row.
+/* `f.map::[T](arena, cols...)` — one crossing calls f once per row.
  *
  * Mixed column types on purpose: a row is then a heterogeneous argument
  * tuple, which is the case the batching question was really about. The
@@ -16,7 +16,7 @@ int main(void) {
     @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
     CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
-    CCPy py = cc_py_new(false, &a) !>;
+    CCPy py = cc_py_new(false, a) !>;
 
     py.exec(@string(`
         def mul_add(x, k, z):
@@ -34,7 +34,7 @@ int main(void) {
     int64_t ks[:] = {2, 3, 4, 5};          /* mixed: int column */
     double zs[:]  = {0.25, 0.25, 0.25, 0.25};
 
-    CCSlice out = f.map::[double](&a, xs, ks, zs) !>;
+    CCSlice out = f.map::[double](a, xs, ks, zs) !>;
     const double *ov = (const double *)out.ptr;
 
     int ok = out.len == 4;

@@ -287,7 +287,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "error: PpStmt accepted non-statement\n");
         return 1;
     }
-    cc_arena_reset(&gate);
+    cc_arena_reset(gate);
     (void)PpStmt_collect("break;", 6, gate, shadow_keep_nop, NULL);
     cc_arena_free(&gate);
 
@@ -409,7 +409,7 @@ int main(int argc, char** argv) {
             CCArena type_arena = cc_arena_create(8 << 20);
             TapeCache type_cache = {0};
             FileTape* type_ft = tape_cache_load_bytes(
-                &type_cache, in_path, type_src, type_len, &type_arena);
+                &type_cache, in_path, type_src, type_len, type_arena);
             type_src = NULL;
             if (type_ft) {
                 enum { SHADOW_TYPE_TOK_INIT = 1 << 17 };
@@ -421,7 +421,7 @@ int main(int argc, char** argv) {
                     const char* prefs[4];
                     int pi;
                     type_pp.cache = &type_cache;
-                    type_pp.arena = &type_arena;
+                    type_pp.arena = type_arena;
                     type_pp.search_dir = search_dir;
                     /* Same sys-include probe as the product pass. */
                     prefs[0] = ".";
@@ -501,7 +501,7 @@ int main(int argc, char** argv) {
     CCArena arena = cc_arena_create(16 << 20);
     TapeCache cache = {0};
     FileTape* ft =
-        tape_cache_load_bytes(&cache, in_path, stage1_src, stage1_len, &arena);
+        tape_cache_load_bytes(&cache, in_path, stage1_src, stage1_len, arena);
     stage1_src = NULL; /* owned by tape (or freed on load failure) */
     if (!ft) {
         if (diag_capturing) (void)shadow_diag_cap_end(NULL, NULL);
@@ -531,7 +531,7 @@ int main(int argc, char** argv) {
     }
     Pp pp = {0};
     pp.cache = &cache;
-    pp.arena = &arena;
+    pp.arena = arena;
     pp.search_dir = search_dir;
     {
         char sys_cc[256], sys_out[256];

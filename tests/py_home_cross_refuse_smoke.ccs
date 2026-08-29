@@ -20,8 +20,8 @@ int main(void) {
         return 0;
     }
 
-    CCPy first = cc_py_new(false, &a) !>;
-    CCResult_CCPy_CCPyError r2 = cc_py_new(false, &a);
+    CCPy first = cc_py_new(false, a) !>;
+    CCResult_CCPy_CCPyError r2 = cc_py_new(false, a);
     if (r2.is_err()) {
         /* Runtime cannot make a second interpreter — nothing to cross. */
         puts("ok");

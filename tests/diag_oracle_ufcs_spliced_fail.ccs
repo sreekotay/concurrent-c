@@ -5,7 +5,7 @@
 
 int main(void) {
     CCArena a = cc_arena_heap(kilobytes(16));
-    DiagUfcsMap m = array_map_new::[int, int](&a);
+    DiagUfcsMap m = array_map_new::[int, int](a);
     if (!m) return 1;
     int[~1 >] tx;
     int[~1 <] rx;

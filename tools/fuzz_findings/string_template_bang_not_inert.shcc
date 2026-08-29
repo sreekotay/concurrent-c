@@ -1,6 +1,6 @@
 #include <ccc/script/py.cch>
 CCPy p1 = cc_py_new(&a) !> @destroy;
-CCPy p2 = cc_py_new(&a) !>(e) { println(@string(`no second`, &a)) !>; return 0; };
+CCPy p2 = cc_py_new(&a) !>(e) { println(@string(`no second`, a)) !>; return 0; };
 p2.exec(@slice("import cc.host\n")) !>;      /* fails: ModuleNotFoundError */
-println(@string(`REACHED PAST A FAILING BARE '!>'`, &a)) !>;
+println(@string(`REACHED PAST A FAILING BARE '!>'`, a)) !>;
 return 0;

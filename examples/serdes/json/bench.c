@@ -43,8 +43,8 @@ int main(int argc,char**argv){
   CCArena ar=cc_arena_create((size_t)n*24+(48<<20));   /* request arena, reset per parse */
   double best=1e18;long bor=0,mat=0;int ok=0;
   for(int t=0;t<T;t++){double t0=now_s();for(int i=0;i<K;i++){
-      cc_arena_reset(&ar);
-      JsonParser p=json_parser(b,n,&ar);JsonNode v;   /* p.parse(&v) == JsonParser_parse(&p,&v) */
+      cc_arena_reset(ar);
+      JsonParser p=json_parser(b,n,ar);JsonNode v;   /* p.parse(&v) == JsonParser_parse(&p,&v) */
       ok=JsonParser_parse(&p,&v)==JSON_OK;
       if(ok){bor=p.borrowed_strs;mat=p.materialized_strs;}
     }double dt=now_s()-t0;if(dt<best)best=dt;}
@@ -53,8 +53,8 @@ int main(int argc,char**argv){
   outf(STDOUT_FILENO,"%-14s %6.0f MB/s  %7.1f us/parse   %.1f%% zero-copy (borrow=%ld mat=%ld)  node=%zuB",
     fn, n*(double)K/best/1e6, best/K*1e6, zc, bor, mat, sizeof(JsonNode));
   if(check){                       /* one untimed parse + walk, after the clock stops */
-    cc_arena_reset(&ar);
-    JsonParser p=json_parser(b,n,&ar);JsonNode v;
+    cc_arena_reset(ar);
+    JsonParser p=json_parser(b,n,ar);JsonNode v;
     if(JsonParser_parse(&p,&v)!=JSON_OK){out_fd(STDOUT_FILENO,"\n");outf(STDERR_FILENO,"%s: verify parse failed\n",fn);return 1;}
     outf(STDOUT_FILENO,"  chk=%ld", sum(&v));
   }

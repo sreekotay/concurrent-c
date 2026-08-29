@@ -2,7 +2,7 @@
  * decls; the defining TU still splices. */
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
-CCCommand emit_main = cc_command(&a, @slice("./cc/bin/ccc"));
+CCCommand emit_main = cc_command(a, @slice("./cc/bin/ccc"));
 emit_main.arg("--no-cache");
 emit_main.arg("--emit-c-only");
 emit_main.arg("tests/quote_cch_sibling_ccs_main_mod.ccs");
@@ -15,7 +15,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_parent = cc_command(&a, @slice("grep"));
+CCCommand grep_parent = cc_command(a, @slice("grep"));
 grep_parent.arg("-q");
 grep_parent.arg("SIBLING_LEAF_BODY_MUST_NOT_SPLICE");
 grep_parent.arg("out/quote_cch_sibling_ccs_main.c");
@@ -25,7 +25,7 @@ if (rc == 0) {
     return 1;
 }
 
-CCCommand emit_leaf = cc_command(&a, @slice("./cc/bin/ccc"));
+CCCommand emit_leaf = cc_command(a, @slice("./cc/bin/ccc"));
 emit_leaf.arg("--no-cache");
 emit_leaf.arg("--emit-c-only");
 emit_leaf.arg("tests/quote_cch_sibling_ccs_leaf_mod.ccs");
@@ -38,7 +38,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_leaf = cc_command(&a, @slice("grep"));
+CCCommand grep_leaf = cc_command(a, @slice("grep"));
 grep_leaf.arg("-q");
 grep_leaf.arg("SIBLING_LEAF_BODY_MUST_NOT_SPLICE");
 grep_leaf.arg("out/quote_cch_sibling_ccs_leaf.c");
@@ -48,7 +48,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
 build.arg("build");
 build.arg("--no-cache");
 build.arg("tests/quote_cch_sibling_ccs_main_mod.ccs");
@@ -61,7 +61,7 @@ if (rc != 0) {
     "build failed".println() !>;
     return 1;
 }
-CCCommand run = cc_command(&a, @slice("out/quote_cch_sibling_ccs_smoke"));
+CCCommand run = cc_command(a, @slice("out/quote_cch_sibling_ccs_smoke"));
 run.inherit_stdio();
 rc = run.status() !>;
 if (rc != 0) {

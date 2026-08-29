@@ -1,0 +1,9 @@
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    int[:] xs = { 1, 2 };
+    int[:] ys = { 3, 4 };
+    for (a, b in xs, ys)
+        (void)a;
+    return 0;
+}
