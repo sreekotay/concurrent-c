@@ -1,0 +1,25 @@
+# Linux ARM32 Docker — pigz TCC backend (FAIL)
+# Date: 2026-08-30
+# Seed: shadow_lower last-good 0.3.4-259
+# Host: macOS (Darwin 25), arm64, Docker Desktop, QEMU user-mode linux/arm/v7
+# ABI: gnueabihf / armhf
+# Command: FORCE_TOOLCHAIN=1 CCC_HOST_CC=tcc PIGZ_BENCH_MB=20 PIGZ_BENCH_WORKERS=4 PIGZ_BENCH_RUNS=2 ./scripts/pigz_arm32.sh
+# Volume: ccc-arm32-work
+# Backend: TinyCC (/work/third_party/tcc/tcc) for ccc build + product compiles
+# Method: compare_ilp32.sh — ELF 32-bit, 4 MiB random gunzip round-trip, then
+#         benchmark.sh on Silesia concat (not reached).
+# Note: QEMU user-mode — relative ILP32 only; not comparable to host Darwin
+#       or to the i386 QEMU receipt. gcc-backend receipt: ilp32_arm32_2026_08_30.txt
+
+=== Build ===
+pigz (original cc -O3):  OK — ELF 32-bit LSB pie, ARM, EABI5
+pigz_idiomatic (ccc):    OK — ELF 32-bit LSB executable, ARM, EABI5
+pigz_cc (ccc):           FAIL — cc: shadow_lower failed (rc=-1); SKIP pigz_cc
+
+=== Correctness ===
+original pigz round-trip: not completed (compare aborted after idiomatic failure)
+pigz_idiomatic:           FAIL — Bus error (QEMU signal 7) compressing 4 MiB round-trip input
+pigz_cc:                  SKIP (not built)
+
+=== Benchmark ===
+Not run.

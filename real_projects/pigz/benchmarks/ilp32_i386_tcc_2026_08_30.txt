@@ -1,0 +1,41 @@
+# Linux i386 Docker — pigz.c vs pigz_idiomatic vs pigz_cc (TCC backend)
+# Date: 2026-08-30
+# Seed: shadow_lower last-good 0.3.4-259
+# Host: macOS (Darwin 25), arm64, Docker Desktop, QEMU user-mode linux/386
+# Command: FORCE_TOOLCHAIN=1 CCC_HOST_CC=tcc PIGZ_BENCH_MB=20 PIGZ_BENCH_WORKERS=4 PIGZ_BENCH_RUNS=2 ./scripts/pigz_i386.sh
+# Volume: ccc-ilp32-work
+# Backend: TinyCC (/work/third_party/tcc/tcc) for ccc build + product compiles
+# Method: compare_ilp32.sh — ELF 32-bit, 4 MiB random gunzip round-trip, then
+#         benchmark.sh on Silesia concat. pigz / pigz_cc: -p 4. pigz_idiomatic:
+#         CC_WORKERS unset (runtime cores), chained dict (PIGZ_DICT=1).
+# Compile: pigz cc -O3; pigz_idiomatic / pigz_cc  ccc -O --release (-O2 -DNDEBUG).
+#          ILP32 ccc driver was BUILD=debug (-O0 -g); product flags unchanged.
+# Note: QEMU user-mode — relative ILP32 only; not comparable to host Darwin.
+
+Binaries: ELF 32-bit LSB, Intel 80386, dynamically linked.
+
+=== Correctness ===
+original pigz round-trip: OK
+pigz_idiomatic PIGZ_DICT=1: OK
+pigz_cc:                    OK
+gunzip cmp of 20 MB timed input: PASS all three
+
+=== Compression (avg of 2 runs, 20 MB Silesia concat) ===
+Implementation           Comp(s)  Comp(MB/s)  Ratio
+pigz (pthread)             1.696        11.2  46.0%
+pigz_idiomatic             1.152        16.6  46.0%
+pigz_cc (Concurrent-C)     1.346        14.2  46.0%
+
+  pigz_idiomatic  Run 1: 1.322s 14.4 MB/s   Run 2: 0.982s 19.4 MB/s
+  pigz_cc         Run 1: 1.249s 15.3 MB/s   Run 2: 1.443s 13.2 MB/s
+  pigz            Run 1: 1.679s 11.4 MB/s   Run 2: 1.714s 11.1 MB/s
+
+=== Decompression (avg of 2; pigz_idiomatic has no -d) ===
+Implementation           Decomp(s)  Decomp(MB/s)
+pigz (pthread)               0.771          24.7
+pigz_cc (Concurrent-C)       0.952          20.0
+
+=== Output sizes (20 MB input) ===
+pigz:           9200951 bytes
+pigz_cc:        9200951 bytes
+pigz_idiomatic: 9201184 bytes (timed compress)
