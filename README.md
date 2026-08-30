@@ -37,7 +37,8 @@ int main(void) {
 }
 ```
 
-Fuller example (error policy + compose): [examples/hello.ccs](examples/hello.ccs).
+Script hello (`.shcc`, shebang-friendly): [examples/hello.shcc](examples/hello.shcc).
+Full nursery tour: [examples/hello.ccs](examples/hello.ccs).
 
 ### Docs
 
@@ -199,6 +200,7 @@ jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null |
 (cd third_party/tcc && ./configure --config-cc_ext && make -j"$jobs" libtcc.a tcc libtcc1.a)
 make cc -j"$jobs"
 ./cc/bin/ccc run examples/hello.ccs
+./cc/bin/ccc run examples/hello.shcc   # same language, script form
 ```
 
 Optional install from the tree: `make install PREFIX=/opt/ccc` and

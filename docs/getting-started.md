@@ -581,7 +581,8 @@ Shebang from a repo checkout (cwd = repo root):
 ill-formed — scripts must be OS-executable. Pins:
 [backwards compatibility](backwards_compatibility.md).
 
-Try [examples/py/pydemo.shcc](../examples/py/pydemo.shcc),
+Try [examples/hello.shcc](../examples/hello.shcc),
+[examples/py/pydemo.shcc](../examples/py/pydemo.shcc),
 [examples/js/jsdemo.shcc](../examples/js/jsdemo.shcc), or
 [tools/cc_perf_check.shcc](../tools/cc_perf_check.shcc). Full rules:
 [Language spec §9.5 — Script Library](../spec/concurrent-c-spec-complete.md#95-script-library-shcc--cccscript);

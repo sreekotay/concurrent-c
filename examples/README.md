@@ -6,7 +6,8 @@ Demonstrations of Concurrent-C features and patterns.
 
 ```bash
 # Build and run any example
-./cc/bin/ccc run examples/hello.ccs
+./cc/bin/ccc run examples/hello.ccs      # nursery tour (.ccs)
+./cc/bin/ccc run examples/hello.shcc     # one-liner script (.shcc)
 ```
 
 ## Learning Path (Recommended Order)
