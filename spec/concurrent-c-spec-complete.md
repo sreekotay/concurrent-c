@@ -6148,8 +6148,8 @@ the subject.
 with `!>;` (enclosing `@errhandler`) or `!>(e) { … }`. A bare zip is an
 unconsumed Result. If the two live lengths differ, the Result is
 `CC_ERR_INVALID_ARG`. There is no silent min. The walk runs only when
-the lengths are equal. Copy walk, enumerate, and range cannot fail and
-do not take `!>`.
+the lengths are equal. Copy walk, enumerate, and range are not Results:
+a trailing `!>` is ill-formed.
 
 The walk is not “a nicer `s[i]`.” Users do not write `s.access(i)`. C
 `for (;;)` is unchanged. `@parallel for (i in lo..hi)` is §8.11.4.

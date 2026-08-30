@@ -148,7 +148,7 @@ a name, a field path (`t->words`), or a view (`line.sub(start, line.len)` —
 hoisted to a hidden local; mut walk stores through that header). Users do not write `s.access(i)`.
 Zip is a statement that can fail: `for (a, b in s, t) { … } !>;`.
 `for (&a, b in s, t)` stores through `a`'s subject. Copy walk,
-enumerate, and range cannot fail and do not take `!>`.
+enumerate, and range are not Results: a trailing `!>` is ill-formed.
 A guess at a slot is `s.at(i) !>` / `s.set(i, v) !>`. Point through a
 local when you need C indexing: `char *p = s.ptr; p[i]`. `CCString`
 is not a slice: `.data` is the SSO union — use `as_slice()` / `cstr()`, or dest-init `char[:] v = s`.

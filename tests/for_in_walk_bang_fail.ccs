@@ -1,3 +1,4 @@
+/* Copy walk is not a Result. `!>` is the unwrap signal — not decoration. */
 #include <ccc/std/prelude.cch>
 
 int main(void) {
