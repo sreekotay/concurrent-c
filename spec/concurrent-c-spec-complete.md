@@ -5159,7 +5159,7 @@ An acquire blocks until the caller owns the named entry. Uncontended acquire is 
 ```c
 CCExclusiveGuard g = excl.acquire_when(name, pred, env) !> @destroy;
 m.acquire_when(pred, env) !>;
-excl.acquire_when_into(name, pred, env, &slot, &arena, builder) !>;
+excl.acquire_when_into(name, pred, env, &slot, arena, builder) !>;
 ```
 
 `pred` is `int (*)(void* env)` (nonzero = true). It runs only while the name is held and must not suspend. Wake means retry, not “still true.” Anyone who makes `pred` become true signals that name **while still holding**:
@@ -5797,7 +5797,7 @@ This same contract applies to standard-library families such as channels, files,
 
 `String` is a small, moveable handle. Short values stay inline; larger values live in an arena-owned buffer. Copying a `String` aliases the same storage. To obtain an independent copy, use `as_slice().clone(a)` / `cc_string_from_slice`. Heap contents live until released or their arena is reset/freed.
 
-`String.as_slice()` returns a length-keyed `char[:]` / `CCSlice` view (not necessarily NUL-terminated). Dest-init `char[:] v = s` and assign `v = s` insert that view. Call `s.cstr(&arena)` / `cc_string_cstr` when a `const char*` is required.
+`String.as_slice()` returns a length-keyed `char[:]` / `CCSlice` view (not necessarily NUL-terminated). Dest-init `char[:] v = s` and assign `v = s` insert that view. Call `s.cstr(arena)` / `cc_string_cstr` when a `const char*` is required.
 
 **Template literal dedent (normative).** Every backtick template —
 `@string`, `@emit`, wherever a template literal appears — dedents against
@@ -5819,7 +5819,7 @@ and pass through unchanged.
     py.exec(@string(`
         def scale(xs, k):
             return [x * k for x in xs]
-        `, &arena).as_slice()) !>;
+        `, arena).as_slice()) !>;
     // the callee receives "def scale(xs, k):\n    return [x * k for x in xs]\n"
 ```
 
@@ -5832,41 +5832,41 @@ spaces) is preserved.
 ```c
 // C ABI / library constructors (language aliases String/Arena accepted)
 String   cc_string_new(void);                     // empty inline; no arena yet
-String   cc_string_with_capacity(Arena* a, size_t cap);
-String   cc_string_from(expr, Arena* a);          // expression-generic helper
-String   cc_string_from_slice(Arena* a, char[:] initial);
+String   cc_string_with_capacity(CCArena a, size_t cap);
+String   cc_string_from(expr, CCArena a);          // expression-generic helper
+String   cc_string_from_slice(CCArena a, char[:] initial);
 char[:0] @slice("...");                           // build-time canonical slice
-String   @string(expr, Arena* a);                 // literal/single-value builder
-String   @string(policy, `...`, Arena* a);        // templated builder
+String   @string(expr, CCArena a);                 // literal/single-value builder
+String   @string(policy, `...`, CCArena a);        // templated builder
 String   @string(`...`, @scratch);                // temp stack arena (§9.1.4)
 String   @string(`...`, @scratch(N));             // sized temp stack arena (§9.1.4)
 char[:]  @string(`...`);                          // arena-less bounded template (§9.1.2)
 
-String* cc_string_push(String* s, value, Arena* a);          // _Generic dispatch
-String* cc_string_push_slice(String* s, char[:] data, Arena* a);
-String* cc_string_push_char(String* s, char c, Arena* a);
-String* cc_string_push_int(String* s, int64_t value, Arena* a);
-String* cc_string_push_uint(String* s, uint64_t value, Arena* a);
-String* cc_string_push_float(String* s, double value, Arena* a);
+String* cc_string_push(String* s, value, CCArena a);          // _Generic dispatch
+String* cc_string_push_slice(String* s, char[:] data, CCArena a);
+String* cc_string_push_char(String* s, char c, CCArena a);
+String* cc_string_push_int(String* s, int64_t value, CCArena a);
+String* cc_string_push_uint(String* s, uint64_t value, CCArena a);
+String* cc_string_push_float(String* s, double value, CCArena a);
 String* cc_string_clear(String* s);
 char[:]  cc_string_as_slice(const String* s);     // length view
-const char* cc_string_cstr(String* s, Arena* a);  // ensures NUL; NULL on failure
+const char* cc_string_cstr(String* s, CCArena a);  // ensures NUL; NULL on failure
 bool     cc_string_failed(const String* s);       // poisoned after growth failure
 
 // UFCS (primary for users; arena last where growth may allocate)
-String* s.append(value, Arena* a);     // alias for push
-String* s.push(value, Arena* a);
-String* s.push_char(char c, Arena* a);
-String* s.push_int(int64_t value, Arena* a);
-String* s.push_uint(uint64_t value, Arena* a);
-String* s.push_float(double value, Arena* a);
+String* s.append(value, CCArena a);     // alias for push
+String* s.push(value, CCArena a);
+String* s.push_char(char c, CCArena a);
+String* s.push_int(int64_t value, CCArena a);
+String* s.push_uint(uint64_t value, CCArena a);
+String* s.push_float(double value, CCArena a);
 String* s.clear();
 char[:] s.as_slice();                 // also dest-init: char[:] v = s
-const char* s.cstr(Arena* a);
+const char* s.cstr(CCArena a);
 size_t  s.len();
 size_t  s.cap();
 bool    s.failed();
-String  <primitive>.to_str(Arena* a);  // e.g. 42.to_str(&arena)
+String  <primitive>.to_str(CCArena a);  // e.g. 42.to_str(arena)
 ```
 
 **Slice lifetime:** The slice returned by `as_slice()` remains valid until the next mutating call on the same `String` (e.g., `push`, `clear`) or until its arena storage is released/reset. For stable references, clone into another arena.
@@ -5888,9 +5888,9 @@ Example:
 ```c
 CCArena arena = cc_arena_heap(megabytes(1));
 String s = cc_string_new();
-s.push("count=", &arena)
- .push_char('x', &arena)
- .push_int(42, &arena);
+s.push("count=", arena)
+ .push_char('x', arena)
+ .push_int(42, arena);
 char[:] view = s.as_slice();
 if (s.failed()) { /* growth/OOM — do not treat partial text as success */ }
 
@@ -5958,7 +5958,7 @@ The arena form is unchanged: the same template with an arena yields an owned `St
 
 #### 9.1.4 `@scratch` — temporary arena operand for `@string`
 
-`@scratch` and `@scratch(N)` are legal **only** as the arena argument of `@string` (including `@string(policy, \`...\`, @scratch)` and `@string(expr, @scratch)`). They are not expressions, not general `CCArena*` values, and not a revival of retired `@arena { }` blocks.
+`@scratch` and `@scratch(N)` are legal **only** as the arena argument of `@string` (including `@string(policy, \`...\`, @scratch)` and `@string(expr, @scratch)`). They are not expressions and not general `CCArena` bindings.
 
 **Lowering.** All `@string(..., @scratch)` / `@scratch(N)` sites in the same function or closure body share one stack arena injected at the start of that body:
 
@@ -6975,7 +6975,7 @@ V* y = am->get_ptr(key);
 am->del(key);
 ```
 
-**Implementation note:** `Vec::[T]` instantiates `CC_GENERIC_FACTORY(Vec, 1)`
+`Vec::[T]` instantiates `CC_GENERIC_FACTORY(Vec, 1)`
 in `vec.cch` (`Vec::[int]` → `CCVec_int`). `Map::[K,V]` instantiates
 `CC_GENERIC_FACTORY(Map, 2)` in `map_forward.cch` (`Map::[int,int]` →
 `Map_int_int*`). `ArrayMap::[K,V]` instantiates `CC_GENERIC_FACTORY(ArrayMap, 2)`
@@ -7430,7 +7430,7 @@ the supported way to specialize conditionally (e.g. emit `_inverse` only when
 
 **Rule:** Each `${expr}` slot in `@emit(\`...\`, arena)` lowers to `cc_emit_tpl_append_slot(...)`, which uses C11 `_Generic` on the expression type to pick the append helper (`CCSlice`, integers, floating-point, or C string). Slot dispatch does not depend on variable names.
 
-**Implementation note:** A factory compiles in-process on the libtcc comptime evaluator on first use (the same evaluator that runs `@comptime` blocks), not by spawning the host C compiler — first-use lowering is in the millisecond range. The relocated factory code stays resident for the remainder of the compile; if libtcc is unavailable the compiler falls back to a host-compiled shared object.
+A factory compiles in-process on the libtcc comptime evaluator on first use (the same evaluator that runs `@comptime` blocks). First-use lowering is in the millisecond range. The relocated factory code stays resident for the remainder of the compile; if libtcc is unavailable the compiler falls back to a host-compiled shared object.
 
 **Rule:** This is the same registration machinery as UFCS custom lowering (§9.0): the library owns the C lowering, the compiler owns the splice.
 
@@ -7463,7 +7463,7 @@ type_of(T).name        // const char* display spelling
 }
 ```
 
-Compiled factories and `@comptime` blocks read the same field set through value helpers or the legacy byte callbacks:
+Compiled factories and `@comptime` blocks read the same field set through value helpers or the `cc_reflect_field_*` byte-buffer callbacks:
 
 ```c
 typedef struct CCReflectField { char name[128]; char type[128]; int index; } CCReflectField;
@@ -7557,7 +7557,7 @@ For the array and function-pointer forms the `type` spelling carries the extent 
 
 **Rule:** A declaration list reflects under the same all-or-nothing discipline as struct fields, through the same declarator parser. An entry that is unnamed, or spelled in a form the parser cannot model exactly, is a compile-time error naming the list — never a dropped entry, which would leave `p.index` naming a different position than the source does.
 
-**Implementation note:** By default the compiler routes `@comptime if` predicate evaluation and `@comptime for` field loading through the libtcc comptime executor (`CC_COMPTIME_UNIFIED_EXEC=1`). Set `CC_COMPTIME_UNIFIED_EXEC=0` to use the legacy structural text resolver only. Both `@string` and `@emit` share one backtick `${...}` scanner (`preprocess/template_scan.c`). `@emit` slot values are appended via type-driven `_Generic` dispatch in `cc_emit_tpl.cch`, not name heuristics.
+The compiler routes `@comptime if` predicate evaluation and `@comptime for` field loading through the libtcc comptime executor when `CC_COMPTIME_UNIFIED_EXEC=1` (default). When `CC_COMPTIME_UNIFIED_EXEC=0`, predicate evaluation and field loading use the structural text resolver. Both `@string` and `@emit` share one backtick `${...}` scanner (`preprocess/template_scan.c`). `@emit` slot values are appended via type-driven `_Generic` dispatch in `cc_emit_tpl.cch`, not name heuristics.
 
 ---
 
@@ -7747,8 +7747,9 @@ c_process(s.ptr, s.len);  // decompose slice into ptr/len
 extern void c_fill_buffer(char* ptr, size_t len);
 
 CCArena arena = cc_arena_heap(megabytes(1));
-CCVec::[char] buf = cc_vec_with_capacity::[char](&arena, 1000);
-c_fill_buffer(buf.ptr, buf.cap());  // fill with C code
+CCVec::[char] buf = cc_vec_new::[char](arena);
+buf.reserve(1000);
+c_fill_buffer(buf.data, buf.cap());  // fill with C code
 ```
 
 **C struct interop:**
@@ -8346,7 +8347,7 @@ Handles: `T[~N >, Drop]`, `T[~N <, DropOld]`. There is no `Sample` mode and no `
 ### Pattern 1: Request Handler
 
 ```c
-@async @latency_sensitive Response!>(IoError) my_handler(Request* req, Arena* a) {
+@async @latency_sensitive Response!>(IoError) my_handler(Request* req, CCArena a) {
     // CPU work: inline (compiler inlines aggressively)
     Parsed p = parse(req.body);
     
@@ -8485,7 +8486,7 @@ This keeps deadlines precise and prevents “everything is always under a deadli
 #include <ccc/std/log.cch>
 
 // Handler: Mark @latency_sensitive to ensure predictable latency
-@async @latency_sensitive Response!>(IoError) api_handler(Request* req, Arena* a) {
+@async @latency_sensitive Response!>(IoError) api_handler(Request* req, CCArena a) {
     // CPU work: parse (inlined, no latency)
     UserId user_id = parse_user_id(req.path) !>(e) return cc_err(e);
     
@@ -8617,14 +8618,14 @@ Neither form introduces a nursery.
 **Storage:**
 
 ```c
-@async void handler(char[:] request_body, Arena* a) {
+@async void handler(char[:] request_body, CCArena a) {
     char[:] trimmed = request_body.trim();  // View: points into request_body
     char[:] owned = request_body.clone(a);  // Copy: heap-allocated in arena
     
     // Frame layout:
     struct Frame {
         char[:] request_body;      // Move-only value; stored in frame
-        Arena* a;                  // Pointer; stored in frame
+        CCArena a;                 // Handle; stored in frame by value
         char[:] trimmed;           // View; stored in frame; points to request_body
         char[:] owned;             // Move-only; stored in frame; heap-allocated
     };

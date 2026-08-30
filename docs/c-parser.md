@@ -9,10 +9,10 @@ It is a host-C library that sits on the existing tape, not a second
 include engine and not more cases in `parse_field_simple` /
 `parse_static_fn`.
 
-This reverses `cc/docs/ARCHITECTURE.md` ADR-S1 (whitelist forever). The
-whitelist was the right beachhead. `#else` becoming a type name is why
-it is the wrong ceiling. We still do **not** own a C compiler: parse +
-two projections; host `cc` compiles the emit; TCC evaluates lowered C.
+A whitelist-only front cannot name every token (`#else` as a type name is
+the canonical failure). This repo owns a full C23+ parser instead. We do
+**not** own a C compiler: parse + two projections; host `cc` compiles
+the emit; TCC evaluates lowered C.
 
 ## Layers
 

@@ -952,8 +952,8 @@ CC__ARENA_SYS int cc__arena_grow_locked(CCArenaHost *arena, size_t size, size_t 
     CC_ATOMIC_STORE(&extent->live_allocs, CC_ATOMIC_LOAD(&arena->live_allocs));
     extent->provenance = arena->provenance;
     /* Extent struct is its own malloc. Do not inherit HOST_INLINE /
-     * HOST_OWNED (those name the root host). A retired HOST_INLINE L1 is
-     * not a standalone slab — clear HEAP_OWNED so free/reset skip it. */
+     * HOST_OWNED (those name the root host). A HOST_INLINE L1 slab that is
+     * no longer active is not a standalone slab — clear HEAP_OWNED so free/reset skip it. */
     extent->_flags = (arena->_flags | CC_ARENA_FLAG_IS_EXTENT)
                    & ~(CC_ARENA_FLAG_HOST_INLINE | CC_ARENA_FLAG_HOST_OWNED
                        | CC_ARENA_FLAG_REGION_OWNED);
@@ -1041,6 +1041,8 @@ static inline void *cc_arena_alloc_host(CCArenaHost *arena, size_t size, size_t 
     return cc__arena_alloc_host_epoch(arena, size, align, NULL);
 }
 
+/* cc_arena_alloc takes CCArena by value (not CCArena*). CC__ARENA_HOST peels
+ * Host* or handle; pass the binding, not &arena. */
 #define cc_arena_alloc(a, n, al) cc_arena_alloc_host(CC__ARENA_HOST(a), (n), (al))
 
 /* Exclusive-owner grow path: plain bump, unlocked slab grow, then chunk/object
@@ -1386,10 +1388,8 @@ static inline CCSlice cc_slice_concat2(CCSlice left, CCSlice right, CCArenaHost 
  * @comptime hook TU compiler defines CC_PARSER_MODE while still needing
  * this helper as a referenceable symbol for `.ufcs = ...` registrations.
  *
- * The name retains the historical `_cc_prefix_lower_c` suffix for
- * backwards compatibility with existing `.ufcs = ...` registrations that
- * spell it out explicitly; the `CC`-prefix case is now one of two shapes
- * it handles, not a hard requirement. */
+ * The `_cc_prefix_lower_c` suffix names both CC-prefixed and bare-user-type
+ * shapes; explicit `.ufcs = ...` registrations may spell it out. */
 static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
                                                         CCSlice method,
                                                         CCSlice mode,
@@ -1607,12 +1607,8 @@ static inline CCSlice cc_ufcs_generic_cc_slice_family_c(CCSlice recv_type,
 /* ------------------------------------------------------------
  * Size-helper sugar.
  *
- * Lives next to the arena constructor — every call site that
- * allocates an arena reads better with `kilobytes(8)` than
- * `8 * 1024`, and it's silly to require a `prelude.cch` include
- * just for this.  Smoke tests that include only `cc_arena.cch`
- * (e.g. `tests/cc_dyn_vec_basic_smoke.ccs`) get the helpers
- * automatically.
+ * Lives next to the arena constructor — `kilobytes(8)` reads better than
+ * `8 * 1024` at every call site that allocates an arena.
  * ------------------------------------------------------------ */
 
 static inline size_t kilobytes(size_t n) {
@@ -2055,8 +2051,8 @@ CC__ARENA_SYS void cc_arena_free(CCArenaHost* a) {
 
         if (base && (flags & CC_ARENA_FLAG_HEAP_OWNED) && base != inline_l1)
             cc_free(base);
-        /* REGION_OWNED: heap ctor malloced the overlay. HOST_OWNED: legacy
-         * separately malloced host. Grow sets HEAP_OWNED on the root for the
+        /* REGION_OWNED: heap ctor malloced the overlay. HOST_OWNED:
+         * separately malloced host overlay. Grow sets HEAP_OWNED on the root for the
          * current slab — that must not free a stack/caller overlay. */
         if (flags & (CC_ARENA_FLAG_REGION_OWNED | CC_ARENA_FLAG_HOST_OWNED))
             cc_free(a);
@@ -2660,7 +2656,8 @@ static inline size_t cc_arena_remaining(const CCArenaHost *arena) {
 /* --- Committed backing (for memory accounting / diagnostics) ----------------
  * Slab chain: every heap-owned bump block (current root + each extent in ->prev).
  * Overflow: sum of raw malloc sizes for live heap-overflow nodes on this root.
- * Extent meta: cc_malloc(CCArenaHost) wrappers for retired slabs (not the root struct).
+ * Extent meta: cc_malloc(CCArenaHost) wrappers for previous slabs in the
+ * chain (not the root struct).
  * Gross is the arena-owned malloc total from these sources (excludes
  * caller-owned initial buffers without HEAP_OWNED). Bump accounting uses
  * slab membership (pointer range) + per-slab live_allocs, not per-alloc nodes. */
@@ -3015,9 +3012,8 @@ static inline void* cc_arena_pool_iter_next(CCArenaPoolIter* it) {
  *                 while bare user types like `RedisConn` map directly to
  *                 `redis_conn_<method>` with no synthetic prefix).
  * Types whose C API diverges further (CCNursery, CCChanTx/Rx families with
- * renamed methods) can still register their own specific pattern with a
- * bespoke rewrite to win over the generic default.  Per-type `.ufcs = ...`
- * opt-ins in the std headers are no longer needed and have been removed. */
+ * renamed methods) register a specific pattern with a bespoke rewrite to
+ * win over the generic default. */
 
 @typehooks on * {
     .ufcs = cc_ufcs_generic_cc_prefix_lower_c,

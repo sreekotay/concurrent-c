@@ -57,8 +57,8 @@ Optional diagnostics (when present in the linked runtime):
   attribution: spawn / fiber_v2 (ordered `send_task` await) / poll, with total ms
 - `CC_DEBUG_WAKE`, `CC_DEBUG_DEADLOCK_RUNTIME`, `CC_DEBUG_SYSMON`
 
-`CC_WORKER_GAP_STATS*` was removed — it was documented but never shipped a dump
-path; use `CC_V2_STATS` + `CC_TASK_WAIT_STATS` instead.
+`CC_WORKER_GAP_STATS*` is not available; use `CC_V2_STATS` +
+`CC_TASK_WAIT_STATS`.
 
 Additional live implementation knobs are non-normative and may change:
 

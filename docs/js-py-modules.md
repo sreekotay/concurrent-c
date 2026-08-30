@@ -486,7 +486,7 @@ static const Wf seed = {0};
 ccc build welford.ccs   # → bin/welford.node + bin/welford.abi3.so
 ```
 
-Python — the class the first-minute user was looking for, ten lines:
+Python — a minimal host-facing class, ten lines:
 
 ```python
 import array, welford

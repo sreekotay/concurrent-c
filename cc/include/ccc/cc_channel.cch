@@ -62,7 +62,7 @@ CCIoError cc__chan_get_close_error(CCChan* ch, bool is_recv);
 
 /*
  * Typed result helper with channel context. Behaves like
- * cc_chan_result_from_errno for legacy int-returning close_err paths, but
+ * cc_chan_result_from_errno for int-returning close_err paths, but
  * additionally promotes a stored structured CCIoError to the Err arm when
  * cc_chan_close_with() / cc_chan_cancel() set one. is_recv selects which side
  * of the close to read (tx-side error on recv, rx-side error on send).
@@ -410,9 +410,8 @@ static inline CCChan* cc_channel_pair_create_returning(size_t capacity,
  *   1. Inside `@async` bodies, the state-machine frame promotion
  *      mangles locals declared inside `({ ... })` (e.g. `CCChan* __cc_ch`
  *      gets rewritten to `CCChan* __f->__cc_ch`, which is invalid C).
- *   2. A single inline function generates the same code paths as before
- *      while keeping the lowering's emit small and the lowered C
- *      hand-crafted-looking (one call, no `do { ... } while(0)` block). */
+ *   2. A single inline function keeps the lowering emit small and produces
+ *      one clean call site in lowered C (no statement-expression block). */
 static inline CCChan* cc_channel_pair_create_named(size_t capacity,
                                                     CCChanMode mode,
                                                     bool allow_send_take,
@@ -695,11 +694,9 @@ static inline CCSlice cc_channel_rx_lower_c(CCSlice recv_type, CCSlice method, C
 @typehooks on CCChanRx_* {
     .ufcs = cc_channel_rx_lower_c,
 };
-/* Raw (untyped) aliases: `CCChanTx tx = ...; tx.send(1)` used to hit
-   the builtin-callable lookup in ufcs.c.  Now that the AST dispatch is
-   registry-only, the bare aliases also need explicit hooks — the
-   wildcard pattern `CCChanTx_*` only matches the typed family
-   (CCChanTx_int, CCChanTx_Foo, ...), not the plain CCChanTx typedef. */
+/* Raw (untyped) aliases: bare CCChanTx / CCChanRx also need explicit hooks.
+   The wildcard pattern `CCChanTx_*` matches the typed family only, not the
+   plain CCChanTx typedef. */
 @typehooks on CCChanTx {
     .ufcs = cc_channel_tx_lower_c,
 };

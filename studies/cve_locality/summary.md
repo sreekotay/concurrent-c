@@ -69,7 +69,7 @@ Rust-parity miss: FFI wrong deleter.
 | `escaping-ref-capture-frame-check` | CVE-2023-54235 | Extend escaping-closure frame analysis from stack slices to `&`-captured locals |
 | `default-checked-arith` | SHAPE-integer-overflow | optional; bare `+` still wraps |
 
-Shipped from this study (no longer backlog): `enforce-arena-provenance`,
+Implemented rules: `enforce-arena-provenance`,
 `channel-stable-borrow` (arena + non-arena / untracked), `pointer-alias-as-ref-capture`,
 `owned-buffer-child-free-ban`, destroy/detach under arena epoch pin,
 nursery join-before-free (T6 cancel/stop on the nursery surface),

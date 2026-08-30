@@ -3,7 +3,7 @@
 [Getting Started](docs/getting-started.md) ·
 [The CC Way](docs/the-cc-way.md) · [Cheatsheet](docs/cheatsheet.md)
 
-**Version:** 0.3.4-240 (`ccc --version`)
+**Version:** 0.3.4-258 (`ccc --version`)
 
 Concurrent‑C is a **strict C11-superset preprocessor**: `.ccs` lowers to
 plain C and compiles with your **host C compiler**. Structured concurrency,
@@ -19,8 +19,8 @@ Toolchain:
 - Vendored TinyCC runs **comptime** (`CONFIG_CC_EXT`); it can also be selected as a host-C backend if desired.
 
 ```c
-#include <ccc/cc_runtime.cch>      // core runtime
-#include <ccc/std/prelude.cch>     // standard library (channels, arena, etc.)
+#include <ccc/cc_runtime.cch>      // nurseries, channels, core runtime
+#include <ccc/std/prelude.cch>     // vec/map/dir, arenas, … — not <stdio.h> / <string.h>
 ```
 
 ```c
@@ -238,14 +238,13 @@ Or: `make test TCC_EXT=1 TCC_INC=third_party/tcc TCC_LIB=../third_party/tcc/libt
 
 Test conventions: `tests/README.md`. Build driver / cache / outputs: [build spec](spec/concurrent-c-build.md). Channel close + deadlock patterns: `examples/recipe_channel_pipeline.ccs`, [getting started](docs/getting-started.md).
 
-**Linux ILP32 (last verified 2026-08-19).** Docker cold smokes on i386 and
-`linux/arm/v7` (gnueabihf / armhf, QEMU on Apple Silicon), `shadow_lower`
-last-good **0.3.3-173**: curated suite green for host+backend **gcc** and
-**TinyCC** (`./scripts/smoke_i386.sh`, `./scripts/smoke_arm32.sh`, and the
-same with `CCC_HOST_CC=tcc`). pigz compare on i386 and ARM32 (**0.3.3-174**):
-`pigz_idiomatic` / `pigz_cc` / original all ELF 32-bit and gunzip-clean;
-numbers in [docs/ilp32-docker.md](docs/ilp32-docker.md). Earlier full
-`cc_test` on ARM32: **787 / 787** (`0.3.2-108`).
+**Linux ILP32.** Docker cold smokes on i386 and `linux/arm/v7`
+(gnueabihf / armhf, QEMU on Apple Silicon): curated suite green for
+host+backend **gcc** and **TinyCC** (`./scripts/smoke_i386.sh`,
+`./scripts/smoke_arm32.sh`, and the same with `CCC_HOST_CC=tcc`). pigz
+compare on i386 and ARM32: `pigz_idiomatic` / `pigz_cc` / original all
+ELF 32-bit and gunzip-clean. Receipts:
+[docs/ilp32-docker.md](docs/ilp32-docker.md).
 
 ### Updating TCC
 

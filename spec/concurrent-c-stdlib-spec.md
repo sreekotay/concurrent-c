@@ -678,13 +678,13 @@ or arena-owned byte buffer, and cursor state.
 ```c
 BufReader::[CCSocket] br;
 br.init(&sock, stack_buf, sizeof(stack_buf));
-/* or */ br.init_arena(&sock, &arena, cap);
+/* or */ br.init_arena(&sock, arena, cap);
 
 size_t pending = br.buffered();
 bool got = br.fill() !>;                 /* Ok(false) at EOF */
 CCSlice line = br.read_line() !>;        /* view into br's buffer; strips \r */
 CCSlice bulk = br.read_exact(n) !>;      /* view; Err if short after EOF */
-CCSlice owned = br.read_line_dup(&arena) !>;
+CCSlice owned = br.read_line_dup(arena) !>;
 ```
 
 | Method | Role |
@@ -1353,7 +1353,7 @@ sites use the stable macros `cc_parse_args`, `cc_prepare_args`, and
 ~~~~}
 
 Opts opts = {0};
-bool go = cc_prepare_args(Opts, argc, argv, &arena, &opts, stderr) !>;
+bool go = cc_prepare_args(Opts, argc, argv, arena, &opts, stderr) !>;
 if (!go) return 0; /* help flag named `help` → Ok(false); usage printed */
 ```
 
@@ -1933,9 +1933,9 @@ type, so the callee names the dtype; that is the trade for not copying.
 `py_buf` applies to a typed slice, which is what has a contiguous run to
 borrow. Any other argument passes through unchanged and marshals normally.
 
-`obj.as_list::[T](&arena)` converts a Python sequence to a typed run of
+`obj.as_list::[T](arena)` converts a Python sequence to a typed run of
 `T` — numbers to CC scalars, strings to arena-backed slices — and
-`obj.as_map::[K, V](&arena, m)` fills a Map and yields the pair count. The
+`obj.as_map::[K, V](arena, m)` fills a Map and yields the pair count. The
 type argument names the element type(s); an element that will not convert,
 or a number outside `T`'s range (including narrowing `int` /
 `int64_t` destinations), is a `CCPyError` naming the index — never a
@@ -1959,7 +1959,7 @@ columns). The type argument names the result element type, the same
 reading as `as_list`. Columns of unequal length are a `CCPyError` naming
 the column, before any call runs; a row whose call raises or whose result
 does not convert is a `CCPyError` naming the row. The free spelling is
-`cc_py_obj_map(T, &f, &arena, cols…)`, to eight columns.
+`cc_py_obj_map(T, &f, arena, cols…)`, to eight columns.
 
 One crossing for N calls removes the per-call FFI overhead but not the
 Python calls themselves, so it lands between the per-call form and a loop
@@ -2456,10 +2456,10 @@ isolation and no event loop — so engine identity is never silent:
 
 - `js.engine` names the backend the handle got, and every `CCJsError`
   message carries it.
-- `cc_js_new(&arena)` takes the first backend in probe order.
-  `cc_js_new_with(&arena, CC_JS_QUICKJS)` (or `CC_JS_NODE`) demands one
-  and fails cleanly when it is not loadable, naming what was demanded and
-  what was found.
+- `cc_js_new(false, arena)` hosts in-process (libnode when available).
+  `cc_js_new(true, arena)` spawns an isolated child node process. Both
+  forms fail cleanly when the requested transport is not loadable, naming
+  what was demanded and what was found.
 
 What a given engine build resolves is observed, not authored: a probe
 program reports each table slot (resolved from host, implemented over the
@@ -2491,7 +2491,7 @@ keyed by source hash.  Discovery overrides: `CC_NODE_INCLUDE`,
 and the constructor answers rather than degrades: a second live hosted
 domain, a hosted domain after close, and a hosted domain inside an
 existing Node-API host are each refused by name.  Beneath this tier
-sits the raw door — `CCJsHost host = cc_js_host_new(&arena) !>
+sits the raw door — `CCJsHost host = cc_js_host_new(arena) !>
 @destroy`, `host.run(fn, ctx)` — which runs a CC closure on the loop
 thread with a live `CCJs`, where the whole guest surface holds with no
 per-op posting; the bootstrap installs `globalThis.__ccRequire`, a
@@ -2914,10 +2914,10 @@ freed CC memory. The view is writable, and writes land in the CC buffer;
 pass a copy to withhold write access. Detachment is engine-enforced,
 so the borrow rule holds with no escape.
 
-`obj.as_list::[T](&arena)` converts an `Array` or `TypedArray` to a typed
+`obj.as_list::[T](arena)` converts an `Array` or `TypedArray` to a typed
 run of `T`; a `TypedArray` whose element type matches `T` is read with
 one `memcpy`, anything else takes the per-element walk with the same
-result. `obj.as_map::[K, V](&arena, m)` fills a Map from a `Map` or a
+result. `obj.as_map::[K, V](arena, m)` fills a Map from a `Map` or a
 plain object's own enumerable properties. `f.map::[T](arena, cols…)`
 calls a callable once per row across column slices in one crossing, as
 for Python.

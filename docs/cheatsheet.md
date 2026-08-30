@@ -59,9 +59,9 @@ result with `?>` or `!>`. Recipe:
 ### Declare / return
 
 ```c
-int !>(CCError) read_config(const char* key) {
-    if (!key || !key[0]) return cc_err(CC_ERR_INVALID_ARG, "empty key");
-    if (strcmp(key, "timeout") == 0) return cc_ok(30);
+int !>(CCError) read_config(CCSlice key) {
+    if (!key.len) return cc_err(CC_ERR_INVALID_ARG, "empty key");
+    if (key.eq_cstr("timeout")) return cc_ok(30);
     return cc_err(CC_ERR_NOT_FOUND, "key not found");
 }
 ```
@@ -390,6 +390,7 @@ s.at(i) !>                    // point (Result)
 s.set(i, v) !>
 dst.copy(src) !> / dst.move(src) !> / dst.fill(c) !>
 s.clone_into(a) !>            // arena last
+s.eq(other) / s.eq_cstr("x")  // compare slices; not memcmp in CC examples
 char *p = s.ptr;              // peel; fields are read-only
 ```
 
@@ -592,6 +593,7 @@ slabs (L2, ~1.5×) → **Main** (`malloc`, still arena-owned; freed on reset /
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;  // names the lifetime
 char* p = a.allocT(64);
 char[:] s = a.alloc_slice_bytes(32);   // arena provenance
+/* C API: pass CCArena by value — cc_arena_alloc(a, n, align), cc_dir_cwd(scratch); not &a */
 
 cc_arena_stack(tmp, 1024);             // same policy; L1 on the stack; @destroy at scope exit
 cc_arena_buf(win, frame, sizeof frame); // same sugar; caller L1 (no VLA)
@@ -847,10 +849,12 @@ Jupyter/Colab: `from cc_node import require`).
 
 ```c
 #include <ccc/cc_runtime.cch>      // nurseries, channels, core
-#include <ccc/std/prelude.cch>     // kilobytes, common std
+#include <ccc/std/prelude.cch>     // kilobytes, vec/map/dir, … — not <stdio.h> / <string.h>
 #include <ccc/script/stdio.cch>    // CCStdio / io.println
-#include <ccc/script/prelude.cch>  // forced in for .shcc; usable from .ccs too
+#include <ccc/script/prelude.cch>  // forced in for .shcc (<stdio.h> + std prelude); not <string.h>
 #include <ccc/cc_atomic.cch>       // portable atomics
+#include <stdio.h>                 // printf, … — include when you use C stdio
+#include <string.h>                // memcpy, strcmp, … — include when you use C strings
 #include "leaf.cch"                // local face; nested .cch is fine
 ```
 

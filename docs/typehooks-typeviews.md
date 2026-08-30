@@ -513,7 +513,7 @@ typedef struct {
 } TempFile;
 
 static void temp_file_unlink(TempFile* t) {
-    if (!t->path.ptr || !t->path.len) return;
+    if (!t->path.len) return;
     unlink((const char*)t->path.ptr);
 }
 

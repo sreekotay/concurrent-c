@@ -104,7 +104,7 @@ rule — Vec is the struct (`v.push`), Map/ArrayMap sugar is `Name*`
 
 Fallible chain: unwrap (`!>` / `?>`), then the next method sees the value.
 
-**Print** (include `<ccc/script/stdio.cch>`): prefer **`io.println`** when a `CCStdio` handle is in scope. Naked `println` / data-first `.println()` remain valid. Templates need an arena — prefer `@scratch` for throwaways.
+**Print** (include `<ccc/script/stdio.cch>`): prefer **`io.println`** when a `CCStdio` handle is in scope. Naked `println` / data-first `.println()` remain valid. Templates need an arena — prefer `@scratch` for throwaways. Neither `<ccc/std/prelude.cch>` nor `<ccc/cc_runtime.cch>` pulls `<stdio.h>` or `<string.h>` — `#include` them when you call `printf`, `memcmp`, etc.
 
 ```c
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
@@ -149,7 +149,8 @@ hoisted to a hidden local; mut walk stores through that header). Users do not wr
 Zip is a statement that can fail: `for (a, b in s, t) { … } !>;`.
 `for (&a, b in s, t)` stores through `a`'s subject. Copy walk,
 enumerate, and range are not Results: a trailing `!>` is ill-formed.
-A guess at a slot is `s.at(i) !>` / `s.set(i, v) !>`. Point through a
+A guess at a slot is `s.at(i) !>` / `s.set(i, v) !>`. Compare slices with
+`s.eq(other)` / `s.eq_cstr("x")`, not `memcmp`, in CC examples. Point through a
 local when you need C indexing: `char *p = s.ptr; p[i]`. `CCString`
 is not a slice: `.data` is the SSO union — use `as_slice()` / `cstr()`, or dest-init `char[:] v = s`.
 `int[:] xs = v` dest-wraps `Vec::[int]` the same way; `for (x in v)` still
@@ -170,6 +171,7 @@ CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
 CCStdio io = cc_stdio_create(a);
 char* p = a.allocT(64);
 char[:] s = a.alloc_slice_bytes(32);   /* arena provenance */
+/* C API: pass CCArena by value — cc_arena_alloc(a, n, align), cc_dir_cwd(scratch); not &a */
 
 /* Stack — buffer lives in the frame; @destroy frees L2/Main at scope exit. */
 cc_arena_stack(tmp, 1024);

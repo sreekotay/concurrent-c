@@ -54,8 +54,10 @@ typedef struct {
     uint64_t id;   // allocation id | flags
 } CCSlice;
 
-/* Header-local byte copy/zero. Do not #include <string.h> from this file —
- * default CCS TUs must not declare memcpy / memset unless the user does. */
+/* Header-local byte copy/zero for generated code and stdlib helpers.
+ * cc__bytes_zero is the generated-zero primitive. Do not #include <string.h>
+ * from this file — default CCS TUs must not declare memcpy / memset unless
+ * the user does. */
 static inline void cc__bytes_copy(void *d, const void *s, size_t n) {
     unsigned char *D = (unsigned char *)d;
     const unsigned char *S = (const unsigned char *)s;
@@ -89,7 +91,7 @@ static inline int cc__bytes_cmp(const void *a, const void *b, size_t n) {
    - `T[n:]`  lowers to `CCSlice`
    - `T[:k]`  lowers to `CCSlice`
    - `T[:k!]` lowers to `CCSliceUnique`
-   - legacy `T[:!]` still lowers to `CCSliceUnique` (ABI-identical to CCSlice)
+   - `T[:!]` lowers to `CCSliceUnique` (ABI-identical to CCSlice)
    - `CCSliceShared` is a semantic marker for shared tracked slices; both
      marker types use the common `cc_slice_*` ABI. */
 typedef CCSlice CCSliceUnique;
@@ -312,7 +314,7 @@ static inline CCSlice CCSliceHdr_as_slice(const CCSliceHdr *sh) {
     return cc_slice_hdr_as_slice(sh);
 }
 
-/* Aliases: older spelling + short UFCS `.slice()`. */
+/* Aliases: alternate spellings + short UFCS `.slice()`. */
 static inline CCSlice cc_slice_hdr_slice(const CCSliceHdr *sh) {
     return cc_slice_hdr_as_slice(sh);
 }

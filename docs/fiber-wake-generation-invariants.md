@@ -3,9 +3,8 @@
 This checklist documents the scheduler invariants for the generation-driven
 worker sleep/wake protocol in `cc/runtime/fiber_sched.c`.
 
-For scheduler v3 planning, this document is also the compatibility checklist for
-preserving wake correctness while the implementation is switched behind
-`CC_RUNTIME_V3`.
+When `CC_RUNTIME_V3` is enabled, this checklist preserves wake correctness
+across the v3 scheduler boundary.
 
 ## Core idea
 

@@ -16,14 +16,14 @@
 
 /* Surface channel helpers (ergonomic layer over CCChanTx/CCChanRx).
    Canonical lowered/manual-C surface uses the `cc_channel_*` family.
-   Legacy `channel_pair` / `chan_*` spellings remain as compatibility aliases. */
+   `channel_pair` / `chan_*` spellings are compatibility aliases. */
 
 /* Surface constructor marker. This is lowered by the CC frontend; the runtime does not implement it.
    Declared here to avoid implicit-declaration warnings if the lowering misses a call site. */
 CCChan* channel_pair(CCChanTx* tx, CCChanRx* rx);
 CCChan* cc_channel_pair(CCChanTx* tx, CCChanRx* rx);
 
-/* Legacy compatibility aliases over the canonical channel family. */
+/* Compatibility aliases over the canonical channel family. */
 #define chan_send(tx, value) cc_channel_send((tx), (value))
 #define chan_recv(rx, out_ptr) cc_channel_recv((rx), (out_ptr))
 #define chan_try_send(tx, value) cc_channel_try_send((tx), (value))
@@ -32,7 +32,7 @@ CCChan* cc_channel_pair(CCChanTx* tx, CCChanRx* rx);
 #define chan_free(h) cc_channel_free((h))
 #define chan_send_take(tx, value) cc_channel_send_take((tx), (value))
 #define chan_send_task(tx, value) cc_channel_send_task((tx), (value))
-/* Generated closure bodies can still emit these transitional nursery-aware names. */
+/* Generated closure bodies may emit these nursery-aware channel names. */
 #define cc_nursery_send(tx_ptr, value) cc_channel_send(*(tx_ptr), (value))
 #define cc_nursery_recv(rx_ptr, out_ptr) cc_channel_recv(*(rx_ptr), (out_ptr))
 #define cc_nursery_close(h_ptr) cc_channel_close(*(h_ptr))
@@ -61,7 +61,7 @@ int cc_external_wait_active(void);
 
 // Forward declarations for runtime handles.
 typedef struct CCChan CCChan;
-/* CCTask is now defined in <ccc/std/task.cch> as a value type */
+/* CCTask is defined in <ccc/std/task.cch> as a value type */
 
 /* Explicit move primitive.
    Best-effort: uses GNU statement-expr supported by Clang/GCC.

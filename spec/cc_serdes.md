@@ -378,7 +378,7 @@ only when `*_present` is true (user-set), so apply sites need not write the
 
 ```c
 Opts opts = {0};
-bool go = cc_prepare_args(Opts, argc, argv, &arena, &opts, stderr) !>;
+bool go = cc_prepare_args(Opts, argc, argv, arena, &opts, stderr) !>;
 if (!go) return 0; /* help flag named `help` → Ok(false); usage printed */
 ```
 

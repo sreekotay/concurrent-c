@@ -1,12 +1,13 @@
 /*
- * Implementation seam — not a CCS API.
+ * Runtime memory seam — not part of the default CCS surface.
  *
- * Default CCS TUs do not include this header (and this file is empty
- * unless a runtime/comptime build flag is set). Copy and fill go through
- * slice dest-bulk (`dst.copy(src)`, `dst.move(src)`, `dst.fill(c)`).
- * Allocation goes through the arena. Do not call malloc / memcpy / memset
- * or any cc_malloc / cc_memcpy / cc_memset spelling from .ccs.
+ * Default CCS translation units do not include this header and do not get
+ * libc memory names (malloc, memcpy, memset, …). User .ccs code allocates
+ * through arenas and copies/fills through slice dest-bulk
+ * (`dst.copy(src)`, `dst.move(src)`, `dst.fill(c)`). Generated zero uses
+ * cc__bytes_zero in cc_slice.cch.
  *
+ * This header is empty unless a runtime/comptime build flag is set.
  * Bodies: cc/runtime/cc_mem.c. @comptime / libtcc alias to libc because
  * those TUs cannot link the runtime.
  */
