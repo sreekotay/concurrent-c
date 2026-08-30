@@ -217,7 +217,12 @@ static int take_job(CcThrdq *q, Job *out, const CCDeadline *dl) {
         int skipped = 0;
         int got = 0;
         int closed;
+        /* An empty worker pool is intentionally parked until libcurl sends
+         * more work or closes the bag; the host event loop is the progress
+         * source, so this wait is outside the runtime dependency graph. */
+        cc_deadlock_suppress_enter();
         r = jobs->excl.acquire_when(jobs->name, bag_has_item, jobs);
+        cc_deadlock_suppress_leave();
         if (cc_is_err(r)) {
             if (prev)
                 cc_deadline_pop(prev);
