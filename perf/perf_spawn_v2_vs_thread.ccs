@@ -9,7 +9,7 @@
  * spawn/scheduling/join/result overhead rather than user work.
  */
 #include <ccc/std/prelude.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <stdint.h>
 #include <time.h>
@@ -92,6 +92,7 @@ static double run_v2_once(int tasks, uintptr_t* checksum_out) {
 }
 
 int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     int tasks = env_int_or("CC_SUBSTRATE_TASKS", DEFAULT_TASKS);
     int runs = env_int_or("CC_SUBSTRATE_RUNS", DEFAULT_RUNS);
     if (tasks <= 0 || runs <= 0) return 2;
@@ -105,14 +106,13 @@ int main(void) {
         expected ^= (uintptr_t)tiny_work((void*)(uintptr_t)(i + 1));
     }
 
-    printf("perf_spawn_v2_vs_thread: tasks=%d runs=%d\n", tasks, runs);
+    println(@string(`perf_spawn_v2_vs_thread: tasks=${tasks} runs=${runs}`, @scratch)) !>;
 
     for (int i = 0; i < runs; i++) {
         uintptr_t checksum = 0;
         thread_ms[i] = run_thread_once(tasks, &checksum);
         if (checksum != expected) {
-            fprintf(stderr, "thread checksum mismatch: got=%llu expected=%llu\n",
-                    (unsigned long long)checksum, (unsigned long long)expected);
+            eprintln(@string(`thread checksum mismatch: got=${(unsigned long long)checksum} expected=${(unsigned long long)expected}`, @scratch)) !>;
             return 3;
         }
     }
@@ -121,8 +121,7 @@ int main(void) {
         uintptr_t checksum = 0;
         v2_ms[i] = run_v2_once(tasks, &checksum);
         if (checksum != expected) {
-            fprintf(stderr, "v2 checksum mismatch: got=%llu expected=%llu\n",
-                    (unsigned long long)checksum, (unsigned long long)expected);
+            eprintln(@string(`v2 checksum mismatch: got=${(unsigned long long)checksum} expected=${(unsigned long long)expected}`, @scratch)) !>;
             return 4;
         }
     }
@@ -137,13 +136,10 @@ int main(void) {
     double thread_tps = (double)tasks / (thread_median_ms / 1000.0);
     double v2_tps = (double)tasks / (v2_median_ms / 1000.0);
 
-    printf("  cc_thread_spawn median:        %.3f ms  %.2f us/task  %.0f tasks/sec\n",
-           thread_median_ms, thread_us, thread_tps);
-    printf("  cc_fiber_spawn_task_v2 median: %.3f ms  %.2f us/task  %.0f tasks/sec\n",
-           v2_median_ms, v2_us, v2_tps);
-    printf("  v2 / thread throughput:        %.1f%%\n",
-           thread_tps > 0.0 ? (v2_tps / thread_tps) * 100.0 : 0.0);
-    printf("  v2 delta:                      %.2f us/task\n", v2_us - thread_us);
+    println(@string(` cc_thread_spawn median: ${thread_median_ms} ms ${thread_us} us/task ${thread_tps} tasks/sec`, @scratch)) !>;
+    println(@string(` cc_fiber_spawn_task_v2 median: ${v2_median_ms} ms ${v2_us} us/task ${v2_tps} tasks/sec`, @scratch)) !>;
+    println(@string(` v2 / thread throughput: ${thread_tps > 0.0 ? (v2_tps / thread_tps) * 100.0 : 0.0}%`, @scratch)) !>;
+    println(@string(` v2 delta: ${v2_us - thread_us} us/task`, @scratch)) !>;
 
     free(thread_ms);
     free(v2_ms);

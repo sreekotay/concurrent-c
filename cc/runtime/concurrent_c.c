@@ -53,6 +53,7 @@
 #include "parallel.c"
 #include "future.c"
 #include "turnstile.c"
+#include "float_format_zmij.c"
 
 #ifdef CC_ENABLE_ASYNC
 #include "async_chan.c"

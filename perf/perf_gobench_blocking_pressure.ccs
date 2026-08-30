@@ -3,7 +3,7 @@
  * Pattern: many tasks parked on channel recv, subset released; optional blocking load.
  */
 #include <ccc/cc_runtime.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <time.h>
 
@@ -36,17 +36,15 @@ static void blocking_sleep(int us) {
 }
 
 static void print_sched_stats(const char* label) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCSchedulerStats s;
     if (cc_scheduler_stats(&s) == 0) {
-        printf("  %s: sched workers=%zu queue=%zu/%zu\n",
-               label, s.workers, s.queue_len, s.queue_cap);
+        println(@string(` ${label}: sched workers=${s.workers}u queue=${s.queue_len}u/${s.queue_cap}u`, @scratch)) !>;
     }
     CCExecStats ex;
     uint64_t fails = 0;
     if (cc_blocking_pool_stats(&ex, &fails) == 0) {
-        printf("  %s: blocking workers=%zu queue=%zu/%zu fails=%llu\n",
-               label, ex.workers, ex.queue_len, ex.queue_cap,
-               (unsigned long long)fails);
+        println(@string(` ${label}: blocking workers=${ex.workers}u queue=${ex.queue_len}u/${ex.queue_cap}u fails=${(unsigned long long)fails}`, @scratch)) !>;
     }
 }
 
@@ -73,8 +71,7 @@ int main(void) {
     if (cc_chan_init_elem(done, sizeof(int)) != 0) return 4;
     if (cc_chan_init_elem(block_done, sizeof(int)) != 0) return 5;
 
-    printf("perf_gobench_blocking_pressure: tasks=%d releases=%d block=%d sleep_us=%d\n",
-           tasks, releases, blocking_tasks, blocking_sleep_us);
+    println(@string(`perf_gobench_blocking_pressure: tasks=${tasks} releases=${releases} block=${blocking_tasks} sleep_us=${blocking_sleep_us}`, @scratch)) !>;
     print_sched_stats("start");
 
     double start = time_now_ms();
@@ -120,15 +117,14 @@ int main(void) {
                 bdone++;
             }
         }
-        printf("  released=%d/%d blocking_done=%d/%d\n",
-               ok, releases, bdone, blocking_tasks);
+        println(@string(` released=${ok}/${releases} blocking_done=${bdone}/${blocking_tasks}`, @scratch)) !>;
     
     }
     double elapsed = time_now_ms() - start;
 
     print_sched_stats("end");
-    printf("  elapsed_ms=%.1f\n", elapsed);
-    printf("perf_gobench_blocking_pressure: DONE\n");
+    println(@string(` elapsed_ms=${elapsed}`, @scratch)) !>;
+    println("perf_gobench_blocking_pressure: DONE") !>;
 
     cc_chan_free(work);
     cc_chan_free(done);

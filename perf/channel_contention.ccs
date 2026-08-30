@@ -9,7 +9,7 @@
 
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <time.h>
 
@@ -75,13 +75,14 @@ static int work_share(int total, int idx, int workers) {
 }
 
 static void trace_worker_state_ensure(int roles) {
+    @errhandler(CCError e) cc_error_exit(e);
     if (roles <= g_trace_role_capacity) return;
     g_role_last_worker = (int*)realloc(g_role_last_worker, sizeof(int) * roles);
     g_role_switches = (int*)realloc(g_role_switches, sizeof(int) * roles);
     g_role_samples = (int*)realloc(g_role_samples, sizeof(int) * roles);
     g_role_worker_hits = (int*)realloc(g_role_worker_hits, sizeof(int) * roles * TRACE_MAX_WORKERS);
     if (!g_role_last_worker || !g_role_switches || !g_role_samples || !g_role_worker_hits) {
-        fprintf(stderr, "channel_contention: trace allocation failed\n");
+        eprintln("channel_contention: trace allocation failed") !>;
         abort();
     }
     g_trace_role_capacity = roles;
@@ -152,6 +153,7 @@ static inline void trace_worker_sample(int role, int iter) {
 }
 
 static void trace_worker_summary(const char* phase, int trial, int producers, int consumers) {
+    @errhandler(CCError e) cc_error_exit(e);
     if (!trace_contention_workers_enabled()) return;
     int roles = producers + consumers;
     int max_workers = (int)cc_sched_get_num_workers();
@@ -170,33 +172,20 @@ static void trace_worker_summary(const char* phase, int trial, int producers, in
                 best_worker = w;
             }
         }
-        char role_name[16];
-        if (role < g_trace_consumer_base) {
-            snprintf(role_name, sizeof(role_name), "p%d", role + 1);
-        } else {
-            snprintf(role_name, sizeof(role_name), "c%d", role - g_trace_consumer_base + 1);
-        }
-        fprintf(stderr,
-                "CC_TRACE_WORKERS phase=%s trial=%d role=%s samples=%d switches=%d active_workers=%d dominant=%d dominant_hits=%d last=%d\n",
-                phase,
-                trial,
-                role_name,
-                g_role_samples[role],
-                g_role_switches[role],
-                active_workers,
-                best_worker,
-                best_hits,
-                g_role_last_worker[role]);
+        CCString role_name = role < g_trace_consumer_base
+            ? @string(`p${role + 1}`, @scratch)
+            : @string(`c${role - g_trace_consumer_base + 1}`, @scratch);
+        eprintln(@string(`CC_TRACE_WORKERS phase=${phase} trial=${trial} role=${role_name} samples=${g_role_samples[role]} switches=${g_role_switches[role]} active_workers=${active_workers} dominant=${best_worker} dominant_hits=${best_hits} last=${g_role_last_worker[role]}`, @scratch)) !>;
     }
 }
 
 static void trace_trial_marker(const char* phase, int trial, const char* event, double elapsed_ms) {
+    @errhandler(CCError e) cc_error_exit(e);
     if (!trace_contention_trials_enabled()) return;
     if (elapsed_ms >= 0.0) {
-        fprintf(stderr, "CC_TRACE_TRIAL phase=%s trial=%d event=%s elapsed_ms=%.2f\n",
-                phase, trial, event, elapsed_ms);
+        eprintln(@string(`CC_TRACE_TRIAL phase=${phase} trial=${trial} event=${event} elapsed_ms=${elapsed_ms}`, @scratch)) !>;
     } else {
-        fprintf(stderr, "CC_TRACE_TRIAL phase=%s trial=%d event=%s\n", phase, trial, event);
+        eprintln(@string(`CC_TRACE_TRIAL phase=${phase} trial=${trial} event=${event}`, @scratch)) !>;
     }
 }
 
@@ -268,6 +257,7 @@ static double run_shared_case(const char* phase, int trial, int producers, int c
 }
 
 int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     setvbuf(stdout, NULL, _IONBF, 0);
     trace_contention_workers_init();
     int messages = bench_messages();
@@ -275,11 +265,10 @@ int main(void) {
     int producers = bench_producers();
     int consumers = bench_consumers();
 
-    printf("=================================================================\n");
-    printf("SHARED CHANNEL CONTENTION TEST\n");
-    printf("Messages: %d | Trials: %d | Contention: %dx%d\n",
-           messages, trials, producers, consumers);
-    printf("=================================================================\n\n");
+    println("=================================================================") !>;
+    println("SHARED CHANNEL CONTENTION TEST") !>;
+    println(@string(`Messages: ${messages} | Trials: ${trials} | Contention: ${producers}x${consumers}`, @scratch)) !>;
+    println("=================================================================") !>;
 
     double* baseline_times = (double*)calloc((size_t)trials, sizeof(double));
     double* contention_times = (double*)calloc((size_t)trials, sizeof(double));
@@ -288,8 +277,7 @@ int main(void) {
     for (int trial = 1; trial <= trials; trial++) {
         baseline_times[trial - 1] = run_shared_case("baseline", trial, 1, 1);
         contention_times[trial - 1] = run_shared_case("contention", trial, producers, consumers);
-        printf("  Trial %d:  baseline=%6.2f ms  contention=%6.2f ms\n",
-               trial, baseline_times[trial - 1], contention_times[trial - 1]);
+        println(@string(` Trial ${trial}: baseline=${baseline_times[trial - 1]} ms contention=${contention_times[trial - 1]} ms`, @scratch)) !>;
     }
 
     double best_baseline = baseline_times[0];
@@ -301,13 +289,11 @@ int main(void) {
 
     double interference = (best_contention - best_baseline) / best_baseline * 100.0;
 
-    printf("\n");
-    printf("  Best baseline:    %6.2f ms  (%8.0f msgs/sec)\n",
-           best_baseline, (double)messages * 1000.0 / best_baseline);
-    printf("  Best contention:  %6.2f ms  (%8.0f msgs/sec)\n",
-           best_contention, (double)messages * 1000.0 / best_contention);
-    printf("\n");
-    printf("Interference: %.2f%%  (best-of-%d)\n", interference, trials);
+    println("") !>;
+    println(@string(` Best baseline: ${best_baseline} ms (${(double)messages * 1000.0 / best_baseline} msgs/sec)`, @scratch)) !>;
+    println(@string(` Best contention: ${best_contention} ms (${(double)messages * 1000.0 / best_contention} msgs/sec)`, @scratch)) !>;
+    println("") !>;
+    println(@string(`Interference: ${interference}% (best-of-${trials})`, @scratch)) !>;
 
     free(baseline_times);
     free(contention_times);

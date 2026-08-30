@@ -22,18 +22,18 @@
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/script/js.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 static void main_js(CCJs *js, void *ctx) {
     (void)ctx;
     @errhandler(CCJsError e) {
-        fprintf(stderr, "js: %s\n", e.base.message);
+        cc_error_log(e.base);
         return;
     }
 
     /* The guest-mode surface, unchanged — UFCS chains and `!>`. */
     double v = js->global()!>.get("Math")!>.sqrt(2.0) !>;
-    printf("Math.sqrt(2)   = %.6f\n", v);
+    println(@string(`Math.sqrt(2)   = ${v}`, @scratch)) !>;
 
     /* State persists across runs: the environment is one live Node. */
     js->exec("globalThis.hits = (globalThis.hits ?? 0) + 1") !>;
@@ -41,15 +41,15 @@ static void main_js(CCJs *js, void *ctx) {
     /* The require door: real Node modules, not a subset. */
     char[:] s =
         js->global()!>.__ccRequire("os")!>.platform()!>.as_slice(js->arena) !>;
-    printf("os.platform()  = %.*s\n", (int)s.len, (const char *)s.ptr);
+    println(@string(`os.platform()  = ${s}`, @scratch)) !>;
 
     long long hits = js->eval("globalThis.hits")!>.as_i64() !>;
-    printf("hits           = %lld\n", hits);
+    println(@string(`hits           = ${hits}`, @scratch)) !>;
 }
 
 int main(void) {
     @errhandler(CCJsError e) {
-        fprintf(stderr, "fatal: %s\n", e.base.message);
+        cc_error_log(e.base);
         return 1;
     }
 

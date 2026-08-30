@@ -6,7 +6,7 @@
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 #define MAX_DEPTH 20
 
@@ -34,7 +34,8 @@ void nested_spawn(int depth) {
 }
 
 int main(void) {
-    printf("nursery_deep: nesting %d levels\n", MAX_DEPTH);
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    println(@string(`nursery_deep: nesting ${MAX_DEPTH} levels`, @scratch)) !>;
 
     nested_spawn(0);
 
@@ -43,6 +44,6 @@ int main(void) {
         if (cc_atomic_load(&g_completed[i])) completed++;
     }
 
-    printf("nursery_deep: completed %d/%d levels\n", completed, MAX_DEPTH);
+    println(@string(`nursery_deep: completed ${completed}/${MAX_DEPTH} levels`, @scratch)) !>;
     return (completed == MAX_DEPTH) ? 0 : 1;
 }

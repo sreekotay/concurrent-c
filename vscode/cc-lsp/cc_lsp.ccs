@@ -14,7 +14,7 @@
 #include <ccc/std/json.cch>
 #include <ccc/cc_grammar.cch>
 #include <ccc/cc_shape.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <ccc/script/file.cch>
 #include "cc_lsp_hover.cch"
 #include <dirent.h>

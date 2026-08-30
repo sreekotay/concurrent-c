@@ -1,12 +1,12 @@
 /* Naked print names: `println(x)` / `print` / `eprintln` / `eprint`
  * alias the declared cc_println family (`_Generic` over the argument)
- * when script/stdio.cch is included — a fixed four-name alias, not a
+ * when stdio.cch is included — a fixed four-name alias, not a
  * general tier. A TU-declared binding of the same name always wins,
  * member position is untouched, and every other undeclared name keeps
  * its honest implicit-declaration error. For scalar helpers, declare
  * the natural name: prefix is plain C and postfix arrives via the
  * bare-name tier. */
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <assert.h>
 #include <stdio.h>
 

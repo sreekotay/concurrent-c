@@ -2,9 +2,8 @@
 // hand-rolled reference. Corpus: K SET commands, redis-benchmark shaped.
 #include <ccc/std/prelude.cch>
 #include <stdlib.h>
-#include <stdio.h>
 #include <string.h>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <time.h>
 
 /* Bulk lengths are non-negative: `keep [some digit]` (no opt '-') so the
@@ -93,10 +92,28 @@ int main(int argc, char** argv) {
     size_t n = 0;
     for (int i = 0; i < NCMD; i++) {
         char key[32], val[32];
-        int kl = snprintf(key, sizeof key, "key:%d", i);
-        int vl = snprintf(val, sizeof val, "value-%d-xxxxxxxx", i);
-        n += (size_t)snprintf(buf + n, cap - n, "*3\r\n$3\r\nSET\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n",
-                              kl, key, vl, val);
+        size_t kl = 0;
+        key[kl++] = 'k'; key[kl++] = 'e'; key[kl++] = 'y'; key[kl++] = ':';
+        kl += put_u(key + kl, (unsigned long long)i);
+        size_t vl = 0;
+        val[vl++] = 'v'; val[vl++] = 'a'; val[vl++] = 'l'; val[vl++] = 'u';
+        val[vl++] = 'e'; val[vl++] = '-';
+        vl += put_u(val + vl, (unsigned long long)i);
+        memcpy(val + vl, "-xxxxxxxx", 9);
+        vl += 9;
+        char* d = buf + n;
+        size_t o = 0;
+        d[o++] = '*'; o += put_u(d + o, 3); d[o++] = '\r'; d[o++] = '\n';
+        const char* parts[3] = { "SET", key, val };
+        size_t plens[3] = { 3, kl, vl };
+        for (int a2 = 0; a2 < 3; a2++) {
+            d[o++] = '$'; o += put_u(d + o, (unsigned long long)plens[a2]);
+            d[o++] = '\r'; d[o++] = '\n';
+            memcpy(d + o, parts[a2], plens[a2]);
+            o += plens[a2];
+            d[o++] = '\r'; d[o++] = '\n';
+        }
+        n += o;
     }
 
     CCArena ar = cc_arena_create(64 << 20);

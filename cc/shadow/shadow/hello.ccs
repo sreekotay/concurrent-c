@@ -1,6 +1,6 @@
 /* Shadow golden twin of examples/hello.ccs (full surface). */
 #include <ccc/cc_runtime.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <unistd.h>
 
 int main(void) {

@@ -18,7 +18,7 @@
 
 #include <inttypes.h>
 #include <stdint.h>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <time.h>
 
@@ -84,7 +84,7 @@ int main(void) {
     uint64_t* round_max_ns = (uint64_t*)calloc((size_t)rounds, sizeof(uint64_t));
 
     if (!round_max_ns) {
-        fprintf(stderr, "Failed to allocate stats buffer\n");
+        eprintln("Failed to allocate stats buffer") !>;
         return 1;
     }
 
@@ -95,12 +95,11 @@ int main(void) {
     int bad_value_rounds = 0;
     uint64_t total_max_ns = 0;
 
-    printf("=================================================================\n");
-    printf("CHANNEL WAKE WAVE DIAGNOSTIC\n");
-    printf("=================================================================\n");
-    printf("Workers: %d | Rounds: %d | Settle: %d ms | Slow threshold: %d us\n",
-           NUM_WORKERS, rounds, settle_ms, slow_us);
-    printf("\n");
+    println("=================================================================") !>;
+    println("CHANNEL WAKE WAVE DIAGNOSTIC") !>;
+    println("=================================================================") !>;
+    println(@string(`Workers: ${NUM_WORKERS} | Rounds: ${rounds} | Settle: ${settle_ms} ms | Slow threshold: ${slow_us} us`, @scratch)) !>;
+    println("") !>;
 
     for (int round = 0; round < rounds; round++) {
         reset_round_state();
@@ -112,7 +111,7 @@ int main(void) {
 
         CCNursery receivers = @create() !> @destroy;
         if (!cc_nursery_is_live(receivers)) {
-            fprintf(stderr, "Failed to create receiver nursery\n");
+            eprintln("Failed to create receiver nursery") !>;
             cc_chan_free(ch0);
             cc_chan_free(ch1);
             cc_chan_free(ch2);
@@ -204,23 +203,11 @@ int main(void) {
         if (max_ns >= (uint64_t)slow_us * 1000ull) slow_rounds++;
 
         if (trace_slow && max_ns >= (uint64_t)slow_us * 1000ull) {
-            printf("round %d slow: max=%.3f ms mismatches=%d values=%d lat_us=[%.1f %.1f %.1f %.1f] start=[%d %d %d %d] woke=[%d %d %d %d]\n",
-                   round + 1,
-                   (double)max_ns / 1000000.0,
-                   mismatches,
-                   bad_values,
-                   (double)g_latency_ns[0] / 1000.0,
-                   (double)g_latency_ns[1] / 1000.0,
-                   (double)g_latency_ns[2] / 1000.0,
-                   (double)g_latency_ns[3] / 1000.0,
-                   g_start_worker[0],
-                   g_start_worker[1],
-                   g_start_worker[2],
-                   g_start_worker[3],
-                   g_woke_worker[0],
-                   g_woke_worker[1],
-                   g_woke_worker[2],
-                   g_woke_worker[3]);
+            int sw0 = g_start_worker[0], sw1 = g_start_worker[1], sw2 = g_start_worker[2], sw3 = g_start_worker[3];
+            int ww0 = g_woke_worker[0], ww1 = g_woke_worker[1], ww2 = g_woke_worker[2], ww3 = g_woke_worker[3];
+            double lat0 = (double)g_latency_ns[0] / 1000.0, lat1 = (double)g_latency_ns[1] / 1000.0;
+            double lat2 = (double)g_latency_ns[2] / 1000.0, lat3 = (double)g_latency_ns[3] / 1000.0;
+            println(@string(`round ${round + 1} slow: max=${(double)max_ns / 1000000.0} ms mismatches=${mismatches} values=${bad_values} lat_us=[${lat0} ${lat1} ${lat2} ${lat3}] start=[${sw0} ${sw1} ${sw2} ${sw3}] woke=[${ww0} ${ww1} ${ww2} ${ww3}]`, @scratch)) !>;
         }
     }
 
@@ -230,24 +217,24 @@ int main(void) {
     uint64_t p90 = round_max_ns[((rounds - 1) * 9) / 10];
     uint64_t worst = round_max_ns[rounds - 1];
 
-    printf("Round max wake latency (one parked recv per worker):\n");
-    printf("  best:   %.3f ms\n", (double)best / 1000000.0);
-    printf("  median: %.3f ms\n", (double)median / 1000000.0);
-    printf("  p90:    %.3f ms\n", (double)p90 / 1000000.0);
-    printf("  worst:  %.3f ms\n", (double)worst / 1000000.0);
-    printf("  mean:   %.3f ms\n", (double)total_max_ns / (double)rounds / 1000000.0);
-    printf("\n");
-    printf("Rounds with max >= %d us: %d/%d\n", slow_us, slow_rounds, rounds);
-    printf("Rounds with worker mismatch: %d/%d\n", mismatch_rounds, rounds);
-    printf("Rounds with bad recv payloads: %d/%d\n", bad_value_rounds, rounds);
-    printf("\n");
-    printf("DATA_WAKE_WAVE_BEST_MS: %.3f\n", (double)best / 1000000.0);
-    printf("DATA_WAKE_WAVE_MEDIAN_MS: %.3f\n", (double)median / 1000000.0);
-    printf("DATA_WAKE_WAVE_P90_MS: %.3f\n", (double)p90 / 1000000.0);
-    printf("DATA_WAKE_WAVE_WORST_MS: %.3f\n", (double)worst / 1000000.0);
-    printf("DATA_WAKE_WAVE_SLOW_RATE: %.2f\n", 100.0 * (double)slow_rounds / (double)rounds);
-    printf("DATA_WAKE_WAVE_MISMATCH_RATE: %.2f\n", 100.0 * (double)mismatch_rounds / (double)rounds);
-    printf("=================================================================\n");
+    println("Round max wake latency (one parked recv per worker):") !>;
+    println(@string(` best: ${(double)best / 1000000.0} ms`, @scratch)) !>;
+    println(@string(` median: ${(double)median / 1000000.0} ms`, @scratch)) !>;
+    println(@string(` p90: ${(double)p90 / 1000000.0} ms`, @scratch)) !>;
+    println(@string(` worst: ${(double)worst / 1000000.0} ms`, @scratch)) !>;
+    println(@string(` mean: ${(double)total_max_ns / (double)rounds / 1000000.0} ms`, @scratch)) !>;
+    println("") !>;
+    println(@string(`Rounds with max >= ${slow_us} us: ${slow_rounds}/${rounds}`, @scratch)) !>;
+    println(@string(`Rounds with worker mismatch: ${mismatch_rounds}/${rounds}`, @scratch)) !>;
+    println(@string(`Rounds with bad recv payloads: ${bad_value_rounds}/${rounds}`, @scratch)) !>;
+    println("") !>;
+    println(@string(`DATA_WAKE_WAVE_BEST_MS: ${(double)best / 1000000.0}`, @scratch)) !>;
+    println(@string(`DATA_WAKE_WAVE_MEDIAN_MS: ${(double)median / 1000000.0}`, @scratch)) !>;
+    println(@string(`DATA_WAKE_WAVE_P90_MS: ${(double)p90 / 1000000.0}`, @scratch)) !>;
+    println(@string(`DATA_WAKE_WAVE_WORST_MS: ${(double)worst / 1000000.0}`, @scratch)) !>;
+    println(@string(`DATA_WAKE_WAVE_SLOW_RATE: ${100.0 * (double)slow_rounds / (double)rounds}`, @scratch)) !>;
+    println(@string(`DATA_WAKE_WAVE_MISMATCH_RATE: ${100.0 * (double)mismatch_rounds / (double)rounds}`, @scratch)) !>;
+    println("=================================================================") !>;
 
     free(round_max_ns);
     return bad_value_rounds == 0 ? 0 : 1;

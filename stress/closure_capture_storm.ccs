@@ -6,7 +6,7 @@
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 #define NUM_CLOSURES 100
 
@@ -14,7 +14,7 @@ cc_atomic_int g_sum = 0;
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    printf("closure_capture_storm: %d closures with captures\n", NUM_CLOSURES);
+    println(@string(`closure_capture_storm: ${NUM_CLOSURES} closures with captures`, @scratch)) !>;
 
     {
         CCNursery __cc_nursery116 = @create() !> @destroy;
@@ -39,6 +39,6 @@ int main(void) {
     int expected = 6 * NUM_CLOSURES * (NUM_CLOSURES - 1) / 2;
     int final = cc_atomic_load(&g_sum);
 
-    printf("closure_capture_storm: sum %d (expected %d)\n", final, expected);
+    println(@string(`closure_capture_storm: sum ${final} (expected ${expected})`, @scratch)) !>;
     return (final == expected) ? 0 : 1;
 }

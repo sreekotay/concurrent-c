@@ -561,7 +561,7 @@ for u in \
     cc/include/ccc/script/prelude.cch \
     cc/include/ccc/script/py.cch \
     cc/include/ccc/script/sh.cch \
-    cc/include/ccc/script/stdio.cch \
+    cc/include/ccc/stdio.cch \
     cc/include/ccc/script/temp.cch
 do
     "$BIN" --preserve "$u" >/dev/null || fail "preserve $u"

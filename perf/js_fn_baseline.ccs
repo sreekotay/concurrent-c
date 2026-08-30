@@ -20,7 +20,9 @@
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/script/js.cch>
-#include <stdio.h>
+
+extern int cc_eprintf(const char *fmt, ...);
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -60,10 +62,11 @@ static double g_ms[64];
 static int g_samples = 7;
 
 static double report_ns(const char *mode, long long per) {
+    @errhandler(CCError e) cc_error_exit(e);
     double m = median(g_ms, g_samples);
     double ns = m * 1e6 / (double)per;
-    printf("  %-14s %9.2f ms  %9.1f ns/call\n", mode, m, ns);
-    printf("RESULT scalar %s ns_per_call %.1f\n", mode, ns);
+    println(@string(` ${mode} ${m} ms ${ns} ns/call`, @scratch)) !>;
+    println(@string(`RESULT scalar ${mode} ns_per_call ${ns}`, @scratch)) !>;
     return ns;
 }
 
@@ -72,14 +75,8 @@ static long long want_sum(long long k, long long n) {
 }
 
 int main(int argc, char **argv) {
-    @errhandler(CCError e) {
-        fprintf(stderr, "fatal: %s\n", e.message);
-        return 1;
-    }
-    @errhandler(CCJsError e) {
-        fprintf(stderr, "js: %s\n", e.base.message ? e.base.message : "?");
-        return 1;
-    }
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    @errhandler(CCJsError e) { (void)cc_eprintf("js: %s\n", e.base.message ? e.base.message : "?"); return 1; }
     CCArena a = cc_arena_heap(megabytes(8)) @destroy;
     long long iters = argc > 1 ? atoll(argv[1]) : 2000LL;
     long long want = 0;
@@ -97,8 +94,8 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    printf("js_fn_baseline iters=%lld samples=%d\n", iters, g_samples);
-    printf("\nscalar (ns/call)\n");
+    println(@string(`js_fn_baseline iters=${iters} samples=${g_samples}`, @scratch)) !>;
+    println("scalar (ns/call)") !>;
 
     want = want_sum(7, iters);
     for (s = 0; s < g_samples; s++) {
@@ -106,7 +103,7 @@ int main(int argc, char **argv) {
         long long r = add_k_c(7, iters);
         g_ms[s] = now_ms() - t0;
         if (r != want) {
-            fprintf(stderr, "MISMATCH c_native: want=%lld got=%lld\n", want, r);
+            eprintln(@string(`MISMATCH c_native: want=${want} got=${r}`, @scratch)) !>;
             return 1;
         }
     }
@@ -143,7 +140,7 @@ int main(int argc, char **argv) {
             got = r;
         }
         if (got != want) {
-            fprintf(stderr, "MISMATCH js_call: want=%lld got=%lld\n", want, got);
+            eprintln(@string(`MISMATCH js_call: want=${want} got=${got}`, @scratch)) !>;
             return 1;
         }
         ns_js = report_ns("js_call", iters);
@@ -156,15 +153,12 @@ int main(int argc, char **argv) {
             got = r;
         }
         if (got != want) {
-            fprintf(stderr, "MISMATCH js_fn: want=%lld got=%lld\n",
-                    want, got);
+            eprintln(@string(`MISMATCH js_fn: want=${want} got=${got}`, @scratch)) !>;
             return 1;
         }
         ns_fn = report_ns("js_fn", iters);
-        printf("  %-14s ratio js_fn/js_call %.2fx\n", "js_fn",
-               ns_js > 0 ? ns_fn / ns_js : 0.0);
-        printf("RESULT ratio js_fn_over_js_call %.2f\n",
-               ns_js > 0 ? ns_fn / ns_js : 0.0);
+        println(@string(` js_fn ratio js_fn/js_call ${ns_js > 0 ? ns_fn / ns_js : 0.0}x`, @scratch)) !>;
+        println(@string(`RESULT ratio js_fn_over_js_call ${ns_js > 0 ? ns_fn / ns_js : 0.0}`, @scratch)) !>;
     }
 
     return 0;

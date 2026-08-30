@@ -2,7 +2,7 @@
 // Measures: spawn, queue, context switch, join
 
 #include <ccc/cc_sched.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -40,8 +40,9 @@ static inline uint64_t now_ns(void) {
 }
 
 int main(void) {
-    printf("=== Fiber Overhead Profile ===\n");
-    printf("Tasks: %d, Work iterations per task: %d\n\n", NUM_TASKS, WORK_ITERATIONS);
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    println("=== Fiber Overhead Profile ===") !>;
+    println(@string(`Tasks: ${NUM_TASKS}, Work iterations per task: ${WORK_ITERATIONS}\n`, @scratch)) !>;
     
     // Warmup
     for (int i = 0; i < 100; i++) {
@@ -61,7 +62,7 @@ int main(void) {
         }
         double avg_ms = (double)total / RUNS / 1000000.0;
         double per_task_us = (double)total / RUNS / NUM_TASKS / 1000.0;
-        printf("1. Sequential (baseline):    %8.2f ms total, %6.2f us/task\n", avg_ms, per_task_us);
+        println(@string(`1. Sequential (baseline): ${avg_ms} ms total, ${per_task_us} us/task`, @scratch)) !>;
     }
     
     // 2. cc_thread_spawn (OS threads via thread pool)
@@ -81,7 +82,7 @@ int main(void) {
         }
         double avg_ms = (double)total / RUNS / 1000000.0;
         double per_task_us = (double)total / RUNS / NUM_TASKS / 1000.0;
-        printf("2. cc_thread_spawn:       %8.2f ms total, %6.2f us/task\n", avg_ms, per_task_us);
+        println(@string(`2. cc_thread_spawn: ${avg_ms} ms total, ${per_task_us} us/task`, @scratch)) !>;
     }
     
     // 3. cc_fiber_spawn_task (fibers)
@@ -101,11 +102,11 @@ int main(void) {
         }
         double avg_ms = (double)total / RUNS / 1000000.0;
         double per_task_us = (double)total / RUNS / NUM_TASKS / 1000.0;
-        printf("3. cc_fiber_spawn_task:      %8.2f ms total, %6.2f us/task\n", avg_ms, per_task_us);
+        println(@string(`3. cc_fiber_spawn_task: ${avg_ms} ms total, ${per_task_us} us/task`, @scratch)) !>;
     }
     
     // 4. Spawn-only overhead (spawn + immediate join, minimal work)
-    printf("\n--- Spawn/Join Overhead (minimal work) ---\n");
+    println("--- Spawn/Join Overhead (minimal work) ---") !>;
     
     {
         uint64_t total_spawn = 0, total_fiber = 0;
@@ -134,11 +135,11 @@ int main(void) {
         }
         double spawn_us = (double)total_spawn / RUNS / NUM_TASKS / 1000.0;
         double fiber_us = (double)total_fiber / RUNS / NUM_TASKS / 1000.0;
-        printf("cc_thread_spawn overhead:           %6.2f us/task\n", spawn_us);
-        printf("cc_fiber overhead:           %6.2f us/task\n", fiber_us);
-        printf("Fiber overhead delta:        %6.2f us/task\n", fiber_us - spawn_us);
+        println(@string(`cc_thread_spawn overhead: ${spawn_us} us/task`, @scratch)) !>;
+        println(@string(`cc_fiber overhead: ${fiber_us} us/task`, @scratch)) !>;
+        println(@string(`Fiber overhead delta: ${fiber_us - spawn_us} us/task`, @scratch)) !>;
     }
     
-    printf("\nDone.\n");
+    println("Done.") !>;
     return 0;
 }

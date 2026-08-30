@@ -3,7 +3,7 @@
  * No extra join primitive: @parallel { h1.wait() !>; h2.wait() !>; }.
  */
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 
 static void bump(int* p, int v) {
     if (p)

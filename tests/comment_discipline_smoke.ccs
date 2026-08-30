@@ -6,7 +6,7 @@
  *   #define println(x) user_println(x)
  */
 #include <ccc/cc_runtime.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <stdio.h>
 
 /* A real user macro binding wins over the print alias. */

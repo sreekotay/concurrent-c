@@ -8,7 +8,7 @@
 
 #include <stdio.h>
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <ccc/std/cli.cch>
 #include <ccc/script/pathx.cch>
 #include <ccc/script/file.cch>

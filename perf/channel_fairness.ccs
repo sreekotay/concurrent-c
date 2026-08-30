@@ -12,7 +12,7 @@
 
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -28,21 +28,22 @@ typedef struct {
 cc_atomic_int g_worker_counts[NUM_WORKERS];
 
 void print_distribution(const char* label) {
-    printf("\n=== %s ===\n", label);
-    printf("Distribution:\n");
+    @errhandler(CCError e) cc_error_exit(e);
+    println(@string(`\n=== ${label} ===`, @scratch)) !>;
+    println("Distribution:") !>;
     int total = 0;
     for (int i = 0; i < NUM_WORKERS; i++) {
         int count = cc_atomic_load(&g_worker_counts[i]);
         total += count;
         float pct = 100.0f * count / NUM_ITEMS;
-        printf("  Worker %d: %3d items (%5.1f%%)", i, count, pct);
-        printf(" |");
+        println(@string(` Worker ${i}: ${count} items (${pct}%)`, @scratch)) !>;
+        println(" |") !>;
         int bar_len = (count * 40) / NUM_ITEMS;
-        for (int j = 0; j < bar_len; j++) printf("#");
-        for (int j = bar_len; j < 40; j++) printf(" ");
-        printf("|\n");
+        for (int j = 0; j < bar_len; j++) println("#") !>;
+        for (int j = bar_len; j < 40; j++) println(" ") !>;
+        println("|") !>;
     }
-    printf("  Total: %d (expected %d)\n", total, NUM_ITEMS);
+    println(@string(` Total: ${total} (expected ${NUM_ITEMS})`, @scratch)) !>;
     
     int expected_per_worker = NUM_ITEMS / NUM_WORKERS;
     int max_count = 0, min_count = NUM_ITEMS;
@@ -52,8 +53,7 @@ void print_distribution(const char* label) {
         if (count < min_count) min_count = count;
     }
     float imbalance = (float)(max_count - min_count) / expected_per_worker * 100;
-    printf("  Imbalance: %.1f%% (max=%d, min=%d, expected~%d)\n", 
-           imbalance, max_count, min_count, expected_per_worker);
+    println(@string(` Imbalance: ${imbalance}% (max=${max_count}, min=${min_count}, expected~${expected_per_worker})`, @scratch)) !>;
 }
 
 /* Test 1: Large buffer - demonstrates unfairness */
@@ -140,27 +140,28 @@ void run_test_small_buffer(void) {
 }
 
 int main(void) {
-    printf("Channel Fairness Benchmark\n");
-    printf("==========================\n");
-    printf("Demonstrates fiber scheduler fairness issue.\n");
-    printf("\n%d workers competing for %d items.\n", NUM_WORKERS, NUM_ITEMS);
-    printf("Fair distribution: ~%d items/worker.\n", NUM_ITEMS / NUM_WORKERS);
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    println("Channel Fairness Benchmark") !>;
+    println("==========================") !>;
+    println("Demonstrates fiber scheduler fairness issue.") !>;
+    println(@string(`\n${NUM_WORKERS} workers competing for ${NUM_ITEMS} items.`, @scratch)) !>;
+    println(@string(`Fair distribution: ~${NUM_ITEMS / NUM_WORKERS} items/worker.`, @scratch)) !>;
     
     run_test_large_buffer();
     run_test_small_buffer();
     
-    printf("\n");
-    printf("Root Cause:\n");
-    printf("-----------\n");
-    printf("When chan_send() wakes a waiting receiver, the sender\n");
-    printf("continues running without yielding. With large buffers,\n");
-    printf("the producer fills the buffer before workers wake,\n");
-    printf("then one worker drains everything.\n");
-    printf("\n");
-    printf("Fix Options:\n");
-    printf("1. chan_send() yields to woken waiter (immediate fairness)\n");
-    printf("2. FIFO wake + preemptive scheduling (OS-level fairness)\n");
-    printf("3. Work-stealing with fair queue (runtime change)\n");
+    println("") !>;
+    println("Root Cause:") !>;
+    println("-----------") !>;
+    println("When chan_send wakes a waiting receiver, the sender") !>;
+    println("continues running without yielding. With large buffers,") !>;
+    println("the producer fills the buffer before workers wake,") !>;
+    println("then one worker drains everything.") !>;
+    println("") !>;
+    println("Fix Options:") !>;
+    println("1. chan_send yields to woken waiter (immediate fairness)") !>;
+    println("2. FIFO wake + preemptive scheduling (OS-level fairness)") !>;
+    println("3. Work-stealing with fair queue (runtime change)") !>;
     
     return 0;
 }

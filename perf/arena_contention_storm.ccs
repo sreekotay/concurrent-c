@@ -12,7 +12,7 @@
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <time.h>
 
@@ -53,10 +53,10 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     setvbuf(stdout, NULL, _IONBF, 0);
 
-    printf("=================================================================\n");
-    printf("CC PER-FIBER ARENA: %d fibers x %d allocs\n", NUM_FIBERS, ALLOCS_PER_FIBER);
-    printf("Total allocations: %d\n", NUM_FIBERS * ALLOCS_PER_FIBER);
-    printf("=================================================================\n\n");
+    println("=================================================================") !>;
+    println(@string(`CC PER-FIBER ARENA: ${NUM_FIBERS} fibers x ${ALLOCS_PER_FIBER} allocs`, @scratch)) !>;
+    println(@string(`Total allocations: ${NUM_FIBERS * ALLOCS_PER_FIBER}`, @scratch)) !>;
+    println("=================================================================") !>;
 
     double start = time_now_ms();
     {
@@ -79,12 +79,12 @@ int main(void) {
     int success = cc_atomic_load(&g_success);
     int fail = cc_atomic_load(&g_fail);
 
-    printf("Results:\n");
-    printf("  Success: %d\n", success);
-    printf("  Fail:    %d\n", fail);
-    printf("  Time:    %.2f ms\n", duration);
-    printf("  Throughput: %.2f M allocs/sec\n", (double)success / duration / 1000.0);
-    printf("=================================================================\n");
+    println("Results:") !>;
+    println(@string(` Success: ${success}`, @scratch)) !>;
+    println(@string(` Fail: ${fail}`, @scratch)) !>;
+    println(@string(` Time: ${duration} ms`, @scratch)) !>;
+    println(@string(` Throughput: ${(double)success / duration / 1000.0} M allocs/sec`, @scratch)) !>;
+    println("=================================================================") !>;
 
     return 0;
 }

@@ -1,6 +1,6 @@
 /* @string(..., @scratch) / @scratch(N): shared fn/closure stack arena sugar. */
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <assert.h>
 #include <stdio.h>
 

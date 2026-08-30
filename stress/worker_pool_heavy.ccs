@@ -6,7 +6,7 @@
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 /* Reduced numbers for stress test reliability */
 static const int NUM_WORKERS = 4;
@@ -29,7 +29,7 @@ cc_atomic_int g_total_sum = 0;
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    printf("worker_pool_heavy: %d workers, %d jobs\n", NUM_WORKERS, NUM_JOBS);
+    println(@string(`worker_pool_heavy: ${NUM_WORKERS} workers, ${NUM_JOBS} jobs`, @scratch)) !>;
 
     /* Use unbuffered channels */
     Job[~ >] jobs_tx;
@@ -95,7 +95,6 @@ int main(void) {
     int result_count = cc_atomic_load(&g_result_count);
     int total_sum = cc_atomic_load(&g_total_sum);
 
-    printf("worker_pool_heavy: %d results, sum %d (expected %d)\n",
-           result_count, total_sum, expected);
+    println(@string(`worker_pool_heavy: ${result_count} results, sum ${total_sum} (expected ${expected})`, @scratch)) !>;
     return (result_count == NUM_JOBS && total_sum == expected) ? 0 : 1;
 }

@@ -9,7 +9,7 @@
  * The "immediate completion" scenario maximizes the race window.
  */
 #include <ccc/cc_runtime.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 #define ITERATIONS 50000
 
@@ -23,7 +23,7 @@ void* instant_task(void* arg) {
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    printf("fiber_spawn_join_tight: %d iterations\n", ITERATIONS);
+    println(@string(`fiber_spawn_join_tight: ${ITERATIONS} iterations`, @scratch)) !>;
     
     for (int iter = 0; iter < ITERATIONS; iter++) {
         CCNursery n = cc_nursery_create() !>;
@@ -32,16 +32,16 @@ int main(void) {
         n.free();
         
         if ((iter + 1) % 10000 == 0) {
-            printf("  completed %d/%d (counter=%d)\n", iter + 1, ITERATIONS, cc_atomic_load(&counter));
+            println(@string(`  completed ${iter + 1}/${ITERATIONS} (counter=${cc_atomic_load(&counter)})`, @scratch)) !>;
         }
     }
     
     int c = cc_atomic_load(&counter);
     if (c != ITERATIONS) {
-        fprintf(stderr, "FAIL: counter=%d, expected=%d\n", c, ITERATIONS);
+        eprintln(@string(`FAIL: counter=${c}, expected=${ITERATIONS}`, @scratch)) !>;
         return 1;
     }
     
-    printf("fiber_spawn_join_tight: PASS\n");
+    println(@string(`fiber_spawn_join_tight: PASS`, @scratch)) !>;
     return 0;
 }

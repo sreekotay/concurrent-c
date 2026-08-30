@@ -15,32 +15,33 @@
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/std/task.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 @async int producer(CCChanTx tx) {
     @errhandler(CCIoError e) { (void)e; return -1; }
-    printf("Producer: about to send...\n");
+    println(@string(`Producer: about to send...`, @scratch)) !>;
     int val = 42;
     @await tx.send(val) !>;
-    printf("Producer: sent!\n");
+    println(@string(`Producer: sent!`, @scratch)) !>;
     return 1;
 }
 
 @async int consumer(CCChanRx rx) {
     @errhandler(CCIoError e) { (void)e; return -1; }
-    printf("Consumer: about to recv...\n");
+    println(@string(`Consumer: about to recv...`, @scratch)) !>;
     int v = 0;
     @await rx.recv(&v) !>;
-    printf("Consumer: received %d\n", v);
+    println(@string(`Consumer: received ${v}`, @scratch)) !>;
     return v;
 }
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    printf("Deadlock Detection Test\n");
-    printf("========================\n");
-    printf("This test creates an intentional deadlock.\n");
-    printf("Set CC_DEADLOCK_DETECT=0 to disable detection.\n\n");
+    println(@string(`Deadlock Detection Test`, @scratch)) !>;
+    println(@string(`========================`, @scratch)) !>;
+    println(@string(`This test creates an intentional deadlock.`, @scratch)) !>;
+    println(@string(`Set CC_DEADLOCK_DETECT=0 to disable detection.
+`, @scratch)) !>;
     
     int[~ >] tx;  /* Unbuffered channel - requires rendezvous */
     int[~ <] rx;
@@ -62,7 +63,7 @@ int main(void) {
     }
     
     /* Never reached - deadlock above */
-    printf("Completed!\n");
+    println(@string(`Completed!`, @scratch)) !>;
     ch.free();
     return 0;
 }

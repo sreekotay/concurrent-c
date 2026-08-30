@@ -8,7 +8,7 @@
 
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <time.h>
 
@@ -58,10 +58,11 @@ int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     srand(time(NULL));
 
-    printf("=================================================================\n");
-    printf("LOST WAKEUP HAMMER: %d fibers | %d ops each\n", NUM_FIBERS * 2, OPS_PER_FIBER);
-    printf("Targeting unbuffered channel rendezvous contention...\n");
-    printf("=================================================================\n\n");
+    println(@string(`=================================================================`, @scratch)) !>;
+    println(@string(`LOST WAKEUP HAMMER: ${NUM_FIBERS * 2} fibers | ${OPS_PER_FIBER} ops each`, @scratch)) !>;
+    println(@string(`Targeting unbuffered channel rendezvous contention...`, @scratch)) !>;
+    println(@string(`=================================================================
+`, @scratch)) !>;
 
     int[~ >] tx1_h, tx2_h;
     int[~ <] rx1_h, rx2_h;
@@ -94,15 +95,18 @@ int main(void) {
         while (cc_atomic_load(&g_recvs_completed) < TOTAL_OPS) {
             cc_sleep_ms(500);
             int current = cc_atomic_load(&g_recvs_completed);
-            printf("\rProgress: %d/%d operations...", current, TOTAL_OPS);
+            cc_fprint(STDOUT_FILENO, @string(`
+Progress: ${current}/${TOTAL_OPS} operations...`, @scratch)) !>;
             
             if (current == last_count) {
                 stalled_iters++;
                 if (stalled_iters > 10) { // 5 seconds of no progress
-                    printf("\n\n!!! HANG DETECTED !!!\n");
-                    printf("Possible Lost Wakeup bug in channel selection.\n");
-                    printf("Sends completed: %d\n", cc_atomic_load(&g_sends_completed));
-                    printf("Recvs completed: %d\n", current);
+                    println(@string(`
+
+!!! HANG DETECTED !!!`, @scratch)) !>;
+                    println(@string(`Possible Lost Wakeup bug in channel selection.`, @scratch)) !>;
+                    println(@string(`Sends completed: ${cc_atomic_load(&g_sends_completed)}`, @scratch)) !>;
+                    println(@string(`Recvs completed: ${current}`, @scratch)) !>;
                     exit(1);
                 }
             } else {
@@ -113,8 +117,10 @@ int main(void) {
     
     }
 
-    printf("\n\nRESULT: PASS - All %d operations completed without a hang.\n", TOTAL_OPS);
-    printf("=================================================================\n");
+    println(@string(`
+
+RESULT: PASS - All ${TOTAL_OPS} operations completed without a hang.`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch)) !>;
 
     return 0;
 }

@@ -8,7 +8,7 @@
  * Force the bang body via close(2) so the write fails with EBADF.
  */
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <stdio.h>
 #include <unistd.h>
 

@@ -8,7 +8,7 @@
  * Uses nested nurseries to create the race scenario.
  */
 #include <ccc/cc_runtime.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 #define ITERATIONS 2000
 #define NUM_OBSERVERS 8
@@ -36,7 +36,7 @@ void* observer_task(void* arg) {
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    printf("join_init_race: %d iterations\n", ITERATIONS);
+    println(@string(`join_init_race: ${ITERATIONS} iterations`, @scratch)) !>;
     
     for (int iter = 0; iter < ITERATIONS; iter++) {
         cc_atomic_store(&target_done, 0);
@@ -53,15 +53,15 @@ int main(void) {
         
         int obs = cc_atomic_load(&observers_done);
         if (obs != NUM_OBSERVERS) {
-            fprintf(stderr, "FAIL: iter %d: only %d/%d observers done\n", iter, obs, NUM_OBSERVERS);
+            eprintln(@string(`FAIL: iter ${iter}: only ${obs}/${NUM_OBSERVERS} observers done`, @scratch)) !>;
             return 1;
         }
         
         if ((iter + 1) % 200 == 0) {
-            printf("  completed %d/%d\n", iter + 1, ITERATIONS);
+            println(@string(`  completed ${iter + 1}/${ITERATIONS}`, @scratch)) !>;
         }
     }
     
-    printf("join_init_race: PASS\n");
+    println(@string(`join_init_race: PASS`, @scratch)) !>;
     return 0;
 }

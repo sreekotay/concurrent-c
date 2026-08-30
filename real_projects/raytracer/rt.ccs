@@ -13,6 +13,7 @@
  * Book: https://raytracing.github.io/books/RayTracingInOneWeekend.html
  */
 #include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -464,6 +465,8 @@ static int write_ppm(const char* path, const uint8_t* fb, int w, int h) {
 }
 
 int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
     int smoke = env_truth("RT_SMOKE");
     int w = env_int("RT_WIDTH", smoke ? 48 : 400);
     int spp = env_int("RT_SAMPLES", smoke ? 2 : 10);
@@ -492,7 +495,7 @@ int main(void) {
     nworld = build_world(world);
     fb = (uint8_t*)malloc((size_t)w * (size_t)h * 3u);
     if (!fb) {
-        fprintf(stderr, "rt: out of memory\n");
+        eprintln("rt: out of memory") !>;
         return 1;
     }
     job_store.fb = fb;
@@ -519,13 +522,12 @@ int main(void) {
     sum = checksum_rgb(fb, (size_t)w * (size_t)h * 3u);
     ppm = getenv("RT_PPM");
     if (ppm && ppm[0] && !write_ppm(ppm, fb, w, h)) {
-        fprintf(stderr, "rt: failed to write %s\n", ppm);
+        eprintln(@string(`rt: failed to write ${ppm}`, @scratch)) !>;
         free(fb);
         return 1;
     }
-    printf("rt impl=cc seq=%d width=%d height=%d spp=%d depth=%d spheres=%d "
-           "checksum=0x%016llx time_ms=%.2f\n",
-           seq, w, h, spp, depth, nworld, (unsigned long long)sum, t1 - t0);
+    println(@string(`rt impl=cc seq=${seq} width=${w} height=${h} spp=${spp} depth=${depth} spheres=${nworld} checksum=0x${sum} time_ms=${t1 - t0}`,
+                    @scratch)) !>;
     free(fb);
     return 0;
 }

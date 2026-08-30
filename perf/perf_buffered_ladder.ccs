@@ -8,7 +8,7 @@
  *  4) channel buffered producer+consumer fibers (target workload)
  */
 #include <ccc/std/prelude.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <time.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -48,6 +48,7 @@ static void sort_doubles(double* arr, int n) {
 }
 
 static double bench_loop_local_once(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     volatile int64_t checksum_a = 0;
     volatile int64_t checksum_b = 0;
     double start = time_now_ms();
@@ -57,8 +58,7 @@ static double bench_loop_local_once(void) {
     }
     double elapsed = time_now_ms() - start;
     if (checksum_a < 0 || checksum_b < 0) {
-        fprintf(stderr, "impossible checksums=%lld,%lld\n",
-                (long long)checksum_a, (long long)checksum_b);
+        eprintln(@string(`impossible checksums=${(long long)checksum_a},${(long long)checksum_b}`, @scratch)) !>;
     }
     return (g_iterations * 2.0) / (elapsed / 1000.0);
 }
@@ -75,7 +75,7 @@ static double bench_loop_two_fiber_once(void) {
                 local += i;
             }
             if (local < 0) {
-                fprintf(stderr, "impossible local=%lld\n", (long long)local);
+                eprintln(@string(`impossible local=${(long long)local}`, @scratch)) !>;
             }
         }) !>;
         __cc_nursery165.spawn(() => {
@@ -84,7 +84,7 @@ static double bench_loop_two_fiber_once(void) {
                 local += i;
             }
             if (local < 0) {
-                fprintf(stderr, "impossible local=%lld\n", (long long)local);
+                eprintln(@string(`impossible local=${(long long)local}`, @scratch)) !>;
             }
         }) !>;
     
@@ -94,6 +94,7 @@ static double bench_loop_two_fiber_once(void) {
 }
 
 static double bench_chan_single_once(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int[~1000 >] tx_h;
     int[~1000 <] rx_h;
     cc_channel_pair(&tx_h, &rx_h);
@@ -108,7 +109,7 @@ static double bench_chan_single_once(void) {
     }
     double elapsed = time_now_ms() - start;
     if (checksum < 0) {
-        fprintf(stderr, "impossible checksum=%lld\n", (long long)checksum);
+        eprintln(@string(`impossible checksum=${(long long)checksum}`, @scratch)) !>;
     }
     tx_h.close();
     return (g_iterations * 2.0) / (elapsed / 1000.0);
@@ -139,7 +140,7 @@ static double bench_chan_two_fiber_once(void) {
                 checksum += v;
             }
             if (checksum < 0) {
-                fprintf(stderr, "impossible checksum=%lld\n", (long long)checksum);
+                eprintln(@string(`impossible checksum=${(long long)checksum}`, @scratch)) !>;
             }
         }) !>;
     
@@ -158,9 +159,10 @@ static double median_ops(double (*fn)(void)) {
 }
 
 int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     g_iterations = env_int_or("CC_BUF_ITERS", DEFAULT_ITERATIONS);
     g_samples = env_int_or("CC_BUF_SAMPLES", DEFAULT_SAMPLES);
-    printf("perf_buffered_ladder: cap=%d iters=%d samples=%d\n", CHANNEL_CAPACITY, g_iterations, g_samples);
+    println(@string(`perf_buffered_ladder: cap=${CHANNEL_CAPACITY} iters=${g_iterations} samples=${g_samples}`, @scratch)) !>;
     (void)bench_chan_two_fiber_once(); /* warmup */
 
     double loop_local = median_ops(bench_loop_local_once);
@@ -168,21 +170,20 @@ int main(void) {
     double chan_single = median_ops(bench_chan_single_once);
     double chan_two_fiber = median_ops(bench_chan_two_fiber_once);
 
-    printf("  local loop only:            %.0f ops/sec\n", loop_local);
-    printf("  two-fiber loop only:        %.0f ops/sec\n", loop_two_fiber);
-    printf("  channel single-thread pair: %.0f ops/sec\n", chan_single);
-    printf("  channel buffered 2-fiber:   %.0f ops/sec\n", chan_two_fiber);
+    println(@string(` local loop only: ${loop_local} ops/sec`, @scratch)) !>;
+    println(@string(` two-fiber loop only: ${loop_two_fiber} ops/sec`, @scratch)) !>;
+    println(@string(` channel single-thread pair: ${chan_single} ops/sec`, @scratch)) !>;
+    println(@string(` channel buffered 2-fiber: ${chan_two_fiber} ops/sec`, @scratch)) !>;
 
-    printf("  overhead vs local loop:\n");
-    printf("    two-fiber loop:   %.1f%%\n", (loop_two_fiber / loop_local) * 100.0);
-    printf("    chan single:      %.1f%%\n", (chan_single / loop_local) * 100.0);
-    printf("    chan 2-fiber:     %.1f%%\n", (chan_two_fiber / loop_local) * 100.0);
-    printf("  overhead vs two-fiber loop:\n");
-    printf("    chan single:      %.1f%%\n", (chan_single / loop_two_fiber) * 100.0);
-    printf("    chan 2-fiber:     %.1f%%\n", (chan_two_fiber / loop_two_fiber) * 100.0);
-    printf("  buffered vs single-thread channel: %.1f%%\n",
-           (chan_two_fiber / chan_single) * 100.0);
+    println(" overhead vs local loop:") !>;
+    println(@string(` two-fiber loop: ${(loop_two_fiber / loop_local) * 100.0}%`, @scratch)) !>;
+    println(@string(` chan single: ${(chan_single / loop_local) * 100.0}%`, @scratch)) !>;
+    println(@string(` chan 2-fiber: ${(chan_two_fiber / loop_local) * 100.0}%`, @scratch)) !>;
+    println(" overhead vs two-fiber loop:") !>;
+    println(@string(` chan single: ${(chan_single / loop_two_fiber) * 100.0}%`, @scratch)) !>;
+    println(@string(` chan 2-fiber: ${(chan_two_fiber / loop_two_fiber) * 100.0}%`, @scratch)) !>;
+    println(@string(` buffered vs single-thread channel: ${(chan_two_fiber / chan_single) * 100.0}%`, @scratch)) !>;
 
-    printf("perf_buffered_ladder: DONE\n");
+    println("perf_buffered_ladder: DONE") !>;
     return 0;
 }

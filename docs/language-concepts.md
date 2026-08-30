@@ -104,7 +104,7 @@ rule — Vec is the struct (`v.push`), Map/ArrayMap sugar is `Name*`
 
 Fallible chain: unwrap (`!>` / `?>`), then the next method sees the value.
 
-**Print** (include `<ccc/script/stdio.cch>`): prefer **`io.println`** when a `CCStdio` handle is in scope. Naked `println` / data-first `.println()` remain valid. Templates need an arena — prefer `@scratch` for throwaways. Neither `<ccc/std/prelude.cch>` nor `<ccc/cc_runtime.cch>` pulls `<stdio.h>` or `<string.h>` — `#include` them when you call `printf`, `memcmp`, etc.
+**Print** (include `<ccc/stdio.cch>`): prefer **`io.println`** when a `CCStdio` handle is in scope. Naked `println` / data-first `.println()` remain valid. Templates need an arena — prefer `@scratch` for throwaways. Neither `<ccc/std/prelude.cch>` nor `<ccc/cc_runtime.cch>` pulls `<stdio.h>` or `<string.h>` — `#include` them when you call `printf`, `memcmp`, etc.
 
 ```c
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;

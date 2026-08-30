@@ -9,7 +9,7 @@
 
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <time.h>
 
@@ -19,9 +19,10 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     setvbuf(stdout, NULL, _IONBF, 0);
 
-    printf("=================================================================\n");
-    printf("NURSERY BACKPRESSURE TRAP: Can cancellation break backpressure?\n");
-    printf("=================================================================\n\n");
+    println(@string(`=================================================================`, @scratch)) !>;
+    println(@string(`NURSERY BACKPRESSURE TRAP: Can cancellation break backpressure?`, @scratch)) !>;
+    println(@string(`=================================================================
+`, @scratch)) !>;
 
     int[~CHANNEL_CAP >] tx_h; int[~CHANNEL_CAP <] rx_h;
     cc_channel_pair(&tx_h, &rx_h);
@@ -29,7 +30,7 @@ int main(void) {
 
     // 1. Fill the channel to create backpressure
     tx.send(1);
-    printf("Channel is full. Next send will block.\n");
+    println(@string(`Channel is full. Next send will block.`, @scratch)) !>;
 
     {
         CCNursery __cc_nursery138 = @create() !> @destroy;
@@ -37,23 +38,24 @@ int main(void) {
         // 2. Spawn a fiber that will block on send
         CCChanTx t = tx;
         __cc_nursery138.spawn(() => [t] {
-            printf("[Fiber] Attempting to send to full channel (will block)...\n");
+            println(@string(`[Fiber] Attempting to send to full channel (will block)...`, @scratch)) !>;
             int rc = cc_chan_send(t.raw, (int[]){2}, sizeof(int));
-            printf("[Fiber] Send returned with code: %d (expected EPIPE=32 or ECANCELED=89)\n", rc);
+            println(@string(`[Fiber] Send returned with code: ${rc} (expected EPIPE=32 or ECANCELED=89)`, @scratch)) !>;
         }) !>;
 
         // 3. Wait a bit to ensure the fiber is actually blocked
         cc_sleep_ms(500);
 
         // 4. Close the channel to break backpressure
-        printf("[Main] Closing channel to unblock fiber...\n");
+        println(@string(`[Main] Closing channel to unblock fiber...`, @scratch)) !>;
         t.close();
-        printf("[Main] Channel closed. Nursery will exit when fiber completes.\n");
+        println(@string(`[Main] Channel closed. Nursery will exit when fiber completes.`, @scratch)) !>;
     
     }
 
-    printf("\nRESULT: PASS - The nursery successfully joined the blocked fiber!\n");
-    printf("=================================================================\n");
+    println(@string(`
+RESULT: PASS - The nursery successfully joined the blocked fiber!`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch)) !>;
 
     return 0;
 }

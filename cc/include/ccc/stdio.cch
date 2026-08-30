@@ -1,5 +1,5 @@
 /*
- * Script-facing stdio + flipped console print.
+ * Console print + flipped UFCS stdio (`println`, `eprintln`, `CCStdio`, …).
  *
  *   CCStdio io@(a) @destroy;
  *   char[:] in = io.read_all() !>;
@@ -15,8 +15,8 @@
  * `cc_print*` macros are lowered-C sugar (driver inject / oneliners / naked
  * alias targets). Prefer UFCS on the data in new script code.
  */
-#ifndef CC_SCRIPT_STDIO_H
-#define CC_SCRIPT_STDIO_H
+#ifndef CC_STDIO_H
+#define CC_STDIO_H
 
 #include <errno.h>
 #include <stdio.h>
@@ -561,4 +561,4 @@ static inline size_t !>(CCError) cc__fprintln_string_ptr(int fd, const CCString 
 
 #define cc_stdio_create(a) (cc_stdio_create)(CC__ARENA_HANDLE(a))
 
-#endif /* CC_SCRIPT_STDIO_H */
+#endif /* CC_STDIO_H */

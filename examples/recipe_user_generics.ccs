@@ -24,7 +24,7 @@
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_instantiate.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 /* 1. A family in eight lines: the template is the whole definition.
  *    `arg(i)` is the i-th type argument; `${mangled}` the instance name. */
@@ -52,7 +52,7 @@ static int !>(CCError) Pair_int_int_at(Pair::[int, int]* pr, int i) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { fprintf(stderr, "eh: %s\n", e.message); return 1; }
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     /* 2 + 3. The type names the instance; the free-name form constructs
      * it — and requests the monomorph by itself, so either mention
@@ -61,19 +61,19 @@ int main(void) {
 
     /* 4. The emitted `${mangled}_<member>` definitions are the method
      * set — same dispatch as Vec/Map members. */
-    printf("head=%d tail=%g\n", p.head(), p.tail());
+    println(@string(`head=${p.head()} tail=${p.tail()}`, @scratch)) !>;
 
     /* 5. Declared above — no factory edit. */
-    printf("span=%g\n", p.span());
+    println(@string(`span=${p.span()}`, @scratch)) !>;
 
     /* A second monomorph is just another spelling of the same family;
      * the instance-layer mangled name is always callable directly. */
     Pair::[int, int] q = Pair_int_int_make(10, 20);
-    printf("q=%d,%d\n", q.head(), q.tail());
+    println(@string(`q=${q.head()},${q.tail()}`, @scratch)) !>;
 
     /* 6. Declared above — a Result member unwraps like any other. */
     int second = q.at(1) !>;
-    printf("at=%d\n", second);
+    println(@string(`at=${second}`, @scratch)) !>;
 
     /* The miss fails loud: `p.middle()` names the receiver's type and
      * lists its installed methods (make, head, tail, span). */

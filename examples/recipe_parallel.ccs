@@ -37,7 +37,7 @@
  */
 #include <ccc/std/prelude.cch>
 #include <stdint.h>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 
 #define U24_MASK 0xFFFFFFu
 #define DEPTH 8

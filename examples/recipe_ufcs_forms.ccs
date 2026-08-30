@@ -32,8 +32,7 @@
  * (tests/ufcs_vec_member_miss_fail) — not shown here because they do not compile.
  */
 #include <ccc/cc_runtime.cch>
-#include <stdio.h>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <math.h>
 #include <unistd.h>
 
@@ -63,8 +62,8 @@ static int !>(CCError) get(int v) {
 /* !> / !>; must diverge or forward — here the helper's policy returns -1. */
 static int get_or_die(int v) {
     @errhandler(CCError e) {
-        /* fprintf: avoid Result print inside the same-E handler. */
-        fprintf(stderr, "get_or_die: %s\n", cc_error_str(e));
+        /* cc_eprintf: avoid Result print inside the same-E handler. */
+        (void)cc_eprintf("get_or_die: %s\n", cc_error_str(e));
         return -1;
     }
     return get(v) !>;

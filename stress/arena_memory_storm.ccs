@@ -9,7 +9,7 @@
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -71,13 +71,15 @@ static double now_sec(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
-static int fail(const char *msg) {
-    printf("FAIL: %s\n", msg);
+int fail(const char *msg) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    eprintln(@string(`FAIL: ${msg}`, @scratch)) !>;
     return 1;
 }
 
 /* Sequential tip realloc on a large root — should stay in-place (no moves). */
 static int bench_tip_growth(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a = cc_arena_heap(megabytes(4)) @destroy;
     unsigned char *p = NULL;
     size_t sz = 0;
@@ -103,8 +105,7 @@ static int bench_tip_growth(void) {
     live = sz;
     gross = cc_arena_committed_gross_bytes(a);
     waste_pct = gross ? (int)((100 * (gross - live)) / gross) : 0;
-    printf("  tip_realloc: iters=%d moves=%zu live=%zu gross=%zu waste=%d%% %.3fs\n",
-           TIP_ITERS, moves, live, gross, waste_pct, t1 - t0);
+    println(@string(`  tip_realloc: iters=${TIP_ITERS} moves=${moves} live=${live} gross=${gross} waste=${waste_pct}% $~float_dec(3){t1 - t0}s`, @scratch)) !>;
     if (moves != 0)
         return fail("tip realloc left the bump tip (expected zero moves on large root)");
     if (waste_pct > MAX_WASTE_PCT)
@@ -117,6 +118,7 @@ static int bench_tip_growth(void) {
  * grow A again — must move. Proves tip-fast-path is tip-only, not magical.
  */
 static int bench_tip_stranding(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     unsigned char *alive = NULL;
     size_t alive_sz = 0;
@@ -139,7 +141,7 @@ static int bench_tip_stranding(void) {
         alive_sz += 48;
         alive[alive_sz - 1] = (unsigned char)i;
     }
-    printf("  tip_stranding: buried grows moves=%zu (expect >0)\n", moves);
+    println(@string(`  tip_stranding: buried grows moves=${moves} (expect >0)`, @scratch)) !>;
     if (moves == 0)
         return fail("expected moves when tip is buried by pad allocs");
     return 0;
@@ -147,6 +149,7 @@ static int bench_tip_stranding(void) {
 
 /* Hammer past the 4-slab budget into overflow; measure mix + reset reclaim. */
 static int bench_budget_overflow_reset(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a = cc_arena_heap(4 * 1024); /* small root → hit budget fast */
     size_t live = 0;
     size_t i;
@@ -178,17 +181,18 @@ static int bench_budget_overflow_reset(void) {
 
     ovf_bytes = cc_arena_overflow_raw_bytes(a);
     gross_before = cc_arena_committed_gross_bytes(a);
-    printf("  storm: allocs=%d live~=%zu slabs=%u ovf=%zu gross=%zu rss_delta=%zd %.3fs\n",
-           STORM_ALLOCS, live, a.a->block_idx + 1, ovf_bytes, gross_before,
-           (rss0.ok && rss1.ok) ? (ssize_t)rss1.rss_bytes - (ssize_t)rss0.rss_bytes : (ssize_t)-1,
-           t1 - t0);
+    {
+        ssize_t rss_delta = (rss0.ok && rss1.ok) ? (ssize_t)rss1.rss_bytes - (ssize_t)rss0.rss_bytes : (ssize_t)-1;
+        println(@string(`  storm: allocs=${STORM_ALLOCS} live~=${live} slabs=${a.a->block_idx + 1} ovf=${ovf_bytes} gross=${gross_before} rss_delta=${rss_delta} $~float_dec(3){t1 - t0}s`, @scratch)) !>;
+    }
 
     cc_arena_reset(a);
     gross_after = cc_arena_committed_gross_bytes(a);
     rss2 = sample_rss();
-    printf("  reset: gross %zu → %zu ovf=%zu rss=%zu\n",
-           gross_before, gross_after, cc_arena_overflow_raw_bytes(a),
-           rss2.ok ? rss2.rss_bytes : 0);
+    {
+        size_t rss_out = rss2.ok ? rss2.rss_bytes : 0;
+        println(@string(`  reset: gross ${gross_before} → ${gross_after} ovf=${cc_arena_overflow_raw_bytes(a)} rss=${rss_out}`, @scratch)) !>;
+    }
 
     if (a.a->ovf_head != NULL || cc_arena_overflow_raw_bytes(a) != 0)
         return fail("reset did not drain overflow");
@@ -203,6 +207,7 @@ static int bench_budget_overflow_reset(void) {
 
 /* Fill → overflow → reset, many times; residual must stay bounded. */
 static int bench_reset_pingpong(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a = cc_arena_heap(8 * 1024);
     size_t r, i;
     size_t peak_gross = 0;
@@ -234,9 +239,7 @@ static int bench_reset_pingpong(void) {
             return fail("pingpong reset left extents");
         }
     }
-    printf("  reset_pingpong: rounds=%d peak_gross=%zu peak_ovf=%zu residual=%zu %.3fs\n",
-           PINGPONG_ROUNDS, peak_gross, peak_ovf, cc_arena_committed_gross_bytes(a),
-           now_sec() - t0);
+    println(@string(`  reset_pingpong: rounds=${PINGPONG_ROUNDS} peak_gross=${peak_gross} peak_ovf=${peak_ovf} residual=${cc_arena_committed_gross_bytes(a)} $~float_dec(3){now_sec() - t0}s`, @scratch)) !>;
     if (cc_arena_committed_gross_bytes(a) > 64 * 1024) {
         a.destroy();
         return fail("pingpong residual root ballooned");
@@ -247,6 +250,7 @@ static int bench_reset_pingpong(void) {
 
 /* Mix alignments + power-of-two sizes to thrash padding / ovf paths. */
 static int bench_mixed_align_storm(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     static const size_t aligns[] = {1, 2, 4, 8, 16, 32, 64};
     CCArena a = cc_arena_heap(16 * 1024);
     size_t i;
@@ -270,15 +274,14 @@ static int bench_mixed_align_storm(void) {
         ((unsigned char *)p)[0] = (unsigned char)i;
         live += n;
     }
-    printf("  mixed_align: live~=%zu slabs=%u ovf=%zu gross=%zu %.3fs\n",
-           live, a.a->block_idx + 1, cc_arena_overflow_raw_bytes(a),
-           cc_arena_committed_gross_bytes(a), now_sec() - t0);
+    println(@string(`  mixed_align: live~=${live} slabs=${a.a->block_idx + 1} ovf=${cc_arena_overflow_raw_bytes(a)} gross=${cc_arena_committed_gross_bytes(a)} $~float_dec(3){now_sec() - t0}s`, @scratch)) !>;
     a.destroy();
     return 0;
 }
 
 /* Many short-lived arenas: create / fill / destroy churn. */
 static int bench_arena_churn(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     size_t i, j;
     double t0, t1;
     MemSample rss0 = sample_rss();
@@ -305,15 +308,16 @@ static int bench_arena_churn(void) {
     }
     t1 = now_sec();
     rss1 = sample_rss();
-    printf("  churn: arenas=%d peak_gross=%zu rss_delta=%zd %.3fs\n",
-           CHURN_ARENAS, peak_gross,
-           (rss0.ok && rss1.ok) ? (ssize_t)rss1.rss_bytes - (ssize_t)rss0.rss_bytes : (ssize_t)-1,
-           t1 - t0);
+    {
+        ssize_t rss_delta = (rss0.ok && rss1.ok) ? (ssize_t)rss1.rss_bytes - (ssize_t)rss0.rss_bytes : (ssize_t)-1;
+        println(@string(`  churn: arenas=${CHURN_ARENAS} peak_gross=${peak_gross} rss_delta=${rss_delta} $~float_dec(3){t1 - t0}s`, @scratch)) !>;
+    }
     return 0;
 }
 
 /* Stack scratch: fill past stack slab into heap extents / overflow. */
 static int bench_stack_spill(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     cc_arena_stack(s, 2048);
     size_t i;
     size_t live = 0;
@@ -326,9 +330,7 @@ static int bench_stack_spill(void) {
         }
         live += n;
     }
-    printf("  stack_spill: live~=%zu slabs=%u ovf=%zu gross=%zu\n",
-           live, s.a->block_idx + 1, cc_arena_overflow_raw_bytes(s),
-           cc_arena_committed_gross_bytes(s));
+    println(@string(`  stack_spill: live~=${live} slabs=${s.a->block_idx + 1} ovf=${cc_arena_overflow_raw_bytes(s)} gross=${cc_arena_committed_gross_bytes(s)}`, @scratch)) !>;
     if (s.a->block_idx == 0 && !(s.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
         s.destroy();
         return fail("stack should have grown or overflowed");
@@ -348,6 +350,7 @@ cc_atomic_size g_conc_bytes = 0;
 
 /* Per-task heap arenas under a nursery — no shared-arena CAS; stress create/free. */
 static int bench_concurrent_nursery_arenas(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     @errhandler(CCError e) cc_error_exit(e);
     double t0 = now_sec();
     cc_atomic_store(&g_conc_ok, 0);
@@ -382,8 +385,7 @@ static int bench_concurrent_nursery_arenas(void) {
         int ok = cc_atomic_load(&g_conc_ok);
         int failed = cc_atomic_load(&g_conc_fail);
         size_t bytes = cc_atomic_load(&g_conc_bytes);
-        printf("  conc_nursery_arenas: workers=%d ok=%d fail=%d bytes=%zu %.3fs\n",
-               CONC_WORKERS, ok, failed, bytes, now_sec() - t0);
+        println(@string(`  conc_nursery_arenas: workers=${CONC_WORKERS} ok=${ok} fail=${failed} bytes=${bytes} $~float_dec(3){now_sec() - t0}s`, @scratch)) !>;
         if (failed != 0 || ok != CONC_WORKERS * CONC_ALLOCS_EACH)
             return fail("concurrent nursery arena allocs incomplete");
     }
@@ -391,9 +393,12 @@ static int bench_concurrent_nursery_arenas(void) {
 }
 
 int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     MemSample rss_start = sample_rss();
-    printf("arena_memory_storm: start rss=%zu default_block_max=%u\n",
-           rss_start.ok ? rss_start.rss_bytes : 0, CC_ARENA_DEFAULT_BLOCK_MAX);
+    {
+        size_t start_rss = rss_start.ok ? rss_start.rss_bytes : 0;
+        println(@string(`arena_memory_storm: start rss=${start_rss} default_block_max=${CC_ARENA_DEFAULT_BLOCK_MAX}`, @scratch)) !>;
+    }
 
     if (bench_tip_growth()) return 1;
     if (bench_tip_stranding()) return 2;
@@ -406,8 +411,8 @@ int main(void) {
 
     {
         MemSample rss_end = sample_rss();
-        printf("arena_memory_storm: PASS end_rss=%zu\n",
-               rss_end.ok ? rss_end.rss_bytes : 0);
+        size_t end_rss = rss_end.ok ? rss_end.rss_bytes : 0;
+        println(@string(`arena_memory_storm: PASS end_rss=${end_rss}`, @scratch)) !>;
     }
     return 0;
 }

@@ -34,7 +34,7 @@
 #include <ccc/std/net.cch>
 #include <ccc/std/map.cch>
 #include <ccc/std/string.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -931,8 +931,7 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
 
 /* !> binders on CCIoError results project the as: CCError face into `e`. */
 static void redis_client_drop_log(const char* phase, CCError e) {
-    fprintf(stderr, "redis_idiomatic: client drop: %s: %s\n", phase,
-            cc_error_str(e));
+    eprintln(@string(`redis_idiomatic: client drop: ${phase}: ${cc_error_str(e)}`, @scratch)) !>;
 }
 
 static bool redis_conn_write_err_now(RedisConn* conn, CCError e) {
@@ -1086,10 +1085,9 @@ int main(int argc, char** argv) {
         port = (int)parsed;
     }
 
-    char addr[64];
-    snprintf(addr, sizeof(addr), "127.0.0.1:%d", port);
+    CCString addr = @string(`127.0.0.1:${port}`, @scratch);
 
-    CCListener ln = cc_tcp_listen(cc_slice_cstr(addr)) !>(e) {
+    CCListener ln = cc_tcp_listen(addr.as_slice()) !>(e) {
         eprintln(@string(`listen error: ${e}`, @scratch)) !>;
         return 1;
     };

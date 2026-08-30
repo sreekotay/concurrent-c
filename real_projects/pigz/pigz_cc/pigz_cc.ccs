@@ -9,7 +9,7 @@
 
 #include "pigz_cc.cch"
 #include <ccc/std/cli.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <limits.h>
 
 /* ============================================================================
@@ -86,24 +86,41 @@ static inline bool path_is_stdout(const char* path) {
 
 static bool copy_path_checked(char* dst, size_t dst_cap, const char* src, const char* what) {
     if (!dst || dst_cap == 0 || !src) return false;
-    int n = snprintf(dst, dst_cap, "%s", src);
-    if (n < 0 || (size_t)n >= dst_cap) {
+    CCString s = @string(`${src}`, @scratch);
+    if (s.failed()) {
         @errhandler(CCError e) { cc_error_log(e); mark_pipeline_error(); return false; }
         eprintln(@string(`Error: ${what} path too long: ${src}`, @scratch)) !>;
         mark_pipeline_error();
         return false;
     }
+    const char* c = cc_string_cstr(&s, __cc_str_scratch);
+    size_t n = c ? strlen(c) : 0;
+    if (n >= dst_cap) {
+        @errhandler(CCError e) { cc_error_log(e); mark_pipeline_error(); return false; }
+        eprintln(@string(`Error: ${what} path too long: ${src}`, @scratch)) !>;
+        mark_pipeline_error();
+        return false;
+    }
+    memcpy(dst, c, n + 1);
     return true;
 }
 
 static bool build_suffixed_path(char* dst, size_t dst_cap, const char* path, const char* suffix) {
     if (!dst || dst_cap == 0 || !path || !suffix) return false;
-    int n = snprintf(dst, dst_cap, "%s%s", path, suffix);
-    if (n < 0 || (size_t)n >= dst_cap) {
+    CCString s = @string(`${path}${suffix}`, @scratch);
+    if (s.failed()) {
         @errhandler(CCError e) { cc_error_log(e); return false; }
         eprintln(@string(`pigz_cc: output path too long: ${path}${suffix}`, @scratch)) !>;
         return false;
     }
+    const char* c = cc_string_cstr(&s, __cc_str_scratch);
+    size_t n = c ? strlen(c) : 0;
+    if (n >= dst_cap) {
+        @errhandler(CCError e) { cc_error_log(e); return false; }
+        eprintln(@string(`pigz_cc: output path too long: ${path}${suffix}`, @scratch)) !>;
+        return false;
+    }
+    memcpy(dst, c, n + 1);
     return true;
 }
 
@@ -1029,7 +1046,8 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
         size_t out_total = cc_atomic_load(p_total_out);
         // pigz-style: percentage saved = (out - in) / out
         double ratio = out_total > 0 ? 100.0 * (double)(out_total - in_total) / (double)out_total : 0.0;
-        printf("%10zu %10zu %6.1f%% %s\n", in_total, out_total, ratio, in_path ? in_path : "<stdin>");
+        println(@string(`${in_total} ${out_total} ${ratio}% ${in_path ? in_path : "<stdin>"}`,
+                        @scratch)) !>;
     }
 
     if (!g.test && !g.list) {

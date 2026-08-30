@@ -3,7 +3,7 @@
  * Arms may adopt/cancel it; .wait() on the same dest is ill-formed.
  */
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 
 int main(void) {
     @errhandler(CCError err) { cc_error_log(err); return 1; }

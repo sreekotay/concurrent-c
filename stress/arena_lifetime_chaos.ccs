@@ -16,7 +16,7 @@
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_atomic.cch>
 #include "mem_sample.h"
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -76,8 +76,9 @@ static double now_sec(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
-static int fail(const char *msg) {
-    printf("FAIL: %s\n", msg);
+int fail(const char *msg) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    eprintln(@string(`FAIL: ${msg}`, @scratch)) !>;
     return 1;
 }
 
@@ -129,6 +130,7 @@ static void kill_slot(CCArena a, Slot *s) {
 
 /* Deterministic chaos: alloc / release / tip-grow / bury / verify interleaved. */
 static int bench_mixed_lifetime_chaos(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a = cc_arena_heap(ROOT_CHAOS);
     Slot *slots;
     uint32_t rng = 0xC0FFEEu;
@@ -151,7 +153,7 @@ static int bench_mixed_lifetime_chaos(void) {
 
     rss_begin(&rss);
     t0 = now_sec();
-    printf("  mixed_lifetime: ops=%d slots=%d root=%d\n", CHAOS_OPS, SLOTS, ROOT_CHAOS);
+    println(@string(`  mixed_lifetime: ops=${CHAOS_OPS} slots=${SLOTS} root=${ROOT_CHAOS}`, @scratch)) !>;
 
     for (i = 0; i < CHAOS_OPS; i++) {
         uint32_t r = lcg(&rng);
@@ -268,12 +270,11 @@ static int bench_mixed_lifetime_chaos(void) {
     }
 
     rss_touch(&rss);
-    printf("  mixed_lifetime: live=%zu alloc=%zu rel=%zu tip=%zu bury=%zu tip_moves=%zu "
-           "peak_gross=%zu peak_ovf=%zu peak_rss=%zu (Δ%zd) %.3fs\n",
-           live, ops_alloc, ops_rel, ops_tip, ops_bury, tip_moves, peak_gross, peak_ovf,
-           rss.ok ? rss.peak_rss : 0,
-           rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1,
-           now_sec() - t0);
+    {
+        size_t peak_rss_out = rss.ok ? rss.peak_rss : 0;
+        ssize_t peak_delta = rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1;
+        println(@string(`  mixed_lifetime: live=${live} alloc=${ops_alloc} rel=${ops_rel} tip=${ops_tip} bury=${ops_bury} tip_moves=${tip_moves} peak_gross=${peak_gross} peak_ovf=${peak_ovf} peak_rss=${peak_rss_out} (Δ${peak_delta}) $~float_dec(3){now_sec() - t0}s`, @scratch)) !>;
+    }
 
     if (!(a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) && a.a->block_idx == 0) {
         free(slots);
@@ -328,11 +329,11 @@ static int bench_mixed_lifetime_chaos(void) {
     free(slots);
     {
         StressMemSample end = stress_mem_sample();
-        printf("  mixed_lifetime: after_free rss=%zu residual_vs_start=%zd hwm=%zu cgroup_peak=%zu\n",
-               end.ok ? end.current : 0,
-               (rss.ok && end.ok) ? (ssize_t)end.current - (ssize_t)rss.start_rss : (ssize_t)-1,
-               end.hwm_ok ? end.hwm : 0,
-               end.cgroup_ok ? end.cgroup_peak : rss.cgroup_peak);
+        size_t end_rss = end.ok ? end.current : 0;
+        ssize_t residual = (rss.ok && end.ok) ? (ssize_t)end.current - (ssize_t)rss.start_rss : (ssize_t)-1;
+        size_t end_hwm = end.hwm_ok ? end.hwm : 0;
+        size_t end_cgroup = end.cgroup_ok ? end.cgroup_peak : rss.cgroup_peak;
+        println(@string(`  mixed_lifetime: after_free rss=${end_rss} residual_vs_start=${residual} hwm=${end_hwm} cgroup_peak=${end_cgroup}`, @scratch)) !>;
 #if !defined(__APPLE__)
         /* Soft RSS: Linux often returns pages; macOS phys_footprint retains.
          * Integrity + gross/ovf already fail-closed above. */
@@ -348,6 +349,7 @@ static int bench_mixed_lifetime_chaos(void) {
 
 /* Alloc many → scramble-release half → grow survivors → reset; track RSS. */
 static int bench_release_scramble(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a = cc_arena_heap(ROOT_CHAOS);
     unsigned char **ptrs;
     uint32_t *tags;
@@ -460,12 +462,11 @@ static int bench_release_scramble(void) {
         if (o > peak_ovf) peak_ovf = o;
     }
 
-    printf("  release_scramble: n=%d released=%zu live=%zu peak_gross=%zu peak_ovf=%zu "
-           "peak_rss=%zu (Δ%zd) %.3fs\n",
-           RELEASE_SCRAMBLE_N, released, live, peak_gross, peak_ovf,
-           rss.ok ? rss.peak_rss : 0,
-           rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1,
-           now_sec() - t0);
+    {
+        size_t peak_rss_out = rss.ok ? rss.peak_rss : 0;
+        ssize_t peak_delta = rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1;
+        println(@string(`  release_scramble: n=${RELEASE_SCRAMBLE_N} released=${released} live=${live} peak_gross=${peak_gross} peak_ovf=${peak_ovf} peak_rss=${peak_rss_out} (Δ${peak_delta}) $~float_dec(3){now_sec() - t0}s`, @scratch)) !>;
+    }
 
     if (a.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE) {
         /* expected after individual releases */
@@ -486,11 +487,11 @@ static int bench_release_scramble(void) {
 
     {
         StressMemSample end = stress_mem_sample();
-        printf("  release_scramble: after_free rss=%zu residual_vs_start=%zd hwm=%zu cgroup_peak=%zu\n",
-               end.ok ? end.current : 0,
-               (rss.ok && end.ok) ? (ssize_t)end.current - (ssize_t)rss.start_rss : (ssize_t)-1,
-               end.hwm_ok ? end.hwm : 0,
-               end.cgroup_ok ? end.cgroup_peak : rss.cgroup_peak);
+        size_t end_rss = end.ok ? end.current : 0;
+        ssize_t residual = (rss.ok && end.ok) ? (ssize_t)end.current - (ssize_t)rss.start_rss : (ssize_t)-1;
+        size_t end_hwm = end.hwm_ok ? end.hwm : 0;
+        size_t end_cgroup = end.cgroup_ok ? end.cgroup_peak : rss.cgroup_peak;
+        println(@string(`  release_scramble: after_free rss=${end_rss} residual_vs_start=${residual} hwm=${end_hwm} cgroup_peak=${end_cgroup}`, @scratch)) !>;
     }
     return 0;
 }
@@ -569,6 +570,7 @@ static void shared_worker(int wid) {
 static uint8_t g_shared_buf[32 * 1024 * 1024];
 
 static int bench_shared_concurrent_mixed(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     @errhandler(CCError e) cc_error_exit(e);
     RssTrack rss;
     double t0;
@@ -600,13 +602,9 @@ static int bench_shared_concurrent_mixed(void) {
     {
         int fails = cc_atomic_load(&g_shared_fail);
         int ops = cc_atomic_load(&g_shared_ops);
-        printf("  shared_concurrent(fixed): workers=%d ops=%d fail=%d live_gross=%zu "
-               "peak_rss=%zu (Δ%zd) %.3fs\n",
-               CONC_WORKERS, ops, fails,
-               cc_arena_committed_gross_bytes(g_shared),
-               rss.ok ? rss.peak_rss : 0,
-               rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1,
-               now_sec() - t0);
+        size_t peak_rss_out = rss.ok ? rss.peak_rss : 0;
+        ssize_t peak_delta = rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1;
+        println(@string(`  shared_concurrent(fixed): workers=${CONC_WORKERS} ops=${ops} fail=${fails} live_gross=${cc_arena_committed_gross_bytes(g_shared)} peak_rss=${peak_rss_out} (Δ${peak_delta}) $~float_dec(3){now_sec() - t0}s`, @scratch)) !>;
         if (fails != 0)
             return fail("shared concurrent integrity/release failure");
         if (ops != CONC_WORKERS * CONC_OPS_EACH)
@@ -626,6 +624,7 @@ static int bench_shared_concurrent_mixed(void) {
 
 /* Fat-root tip stays in place while unrelated short-lived allocs churn via release. */
 static int bench_tip_vs_churn_release(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a = cc_arena_heap(ROOT_FAT);
     unsigned char *tip = NULL;
     size_t tip_sz = 0, moves = 0;
@@ -669,11 +668,8 @@ static int bench_tip_vs_churn_release(void) {
         return fail("tip prefix corrupt");
     }
 
-    printf("  tip_vs_churn_release: tip_sz=%zu moves=%zu (expect >0 once buried) "
-           "gross=%zu peak_rss_delta=%zd %.3fs\n",
-           tip_sz, moves, cc_arena_committed_gross_bytes(a),
-           rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1,
-           now_sec() - t0);
+    ssize_t peak_rss_delta = rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1;
+    println(@string(`  tip_vs_churn_release: tip_sz=${tip_sz} moves=${moves} (expect >0 once buried) gross=${cc_arena_committed_gross_bytes(a)} peak_rss_delta=${peak_rss_delta} $~float_dec(3){now_sec() - t0}s`, @scratch)) !>;
     if (moves == 0) {
         a.destroy();
         return fail("expected tip moves after ephemeral bury+release");
@@ -683,10 +679,14 @@ static int bench_tip_vs_churn_release(void) {
 }
 
 int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     StressMemSample rss0 = stress_mem_sample();
-    printf("arena_lifetime_chaos: start_rss=%zu hwm=%zu cgroup_peak=%zu\n",
-           rss0.ok ? rss0.current : 0, rss0.hwm_ok ? rss0.hwm : 0,
-           rss0.cgroup_ok ? rss0.cgroup_peak : 0);
+    {
+        size_t start_rss = rss0.ok ? rss0.current : 0;
+        size_t start_hwm = rss0.hwm_ok ? rss0.hwm : 0;
+        size_t start_cgroup = rss0.cgroup_ok ? rss0.cgroup_peak : 0;
+        println(@string(`arena_lifetime_chaos: start_rss=${start_rss} hwm=${start_hwm} cgroup_peak=${start_cgroup}`, @scratch)) !>;
+    }
 
     if (bench_mixed_lifetime_chaos()) return 1;
     if (bench_release_scramble()) return 2;
@@ -696,12 +696,11 @@ int main(void) {
     {
         StressMemSample rss1 = stress_mem_sample();
         size_t peak = stress_mem_best_peak(&rss1, rss1.ok ? rss1.current : 0);
-        printf("arena_lifetime_chaos: PASS end_rss=%zu delta=%zd hwm=%zu cgroup_peak=%zu best_peak=%zu\n",
-               rss1.ok ? rss1.current : 0,
-               (rss0.ok && rss1.ok) ? (ssize_t)rss1.current - (ssize_t)rss0.current : (ssize_t)-1,
-               rss1.hwm_ok ? rss1.hwm : 0,
-               rss1.cgroup_ok ? rss1.cgroup_peak : 0,
-               peak);
+        size_t end_rss = rss1.ok ? rss1.current : 0;
+        ssize_t end_delta = (rss0.ok && rss1.ok) ? (ssize_t)rss1.current - (ssize_t)rss0.current : (ssize_t)-1;
+        size_t end_hwm = rss1.hwm_ok ? rss1.hwm : 0;
+        size_t end_cgroup = rss1.cgroup_ok ? rss1.cgroup_peak : 0;
+        println(@string(`arena_lifetime_chaos: PASS end_rss=${end_rss} delta=${end_delta} hwm=${end_hwm} cgroup_peak=${end_cgroup} best_peak=${peak}`, @scratch)) !>;
 #if !defined(__APPLE__)
         if (rss0.ok && rss1.ok) {
             size_t resid = rss1.current > rss0.current ? rss1.current - rss0.current : 0;

@@ -14,7 +14,7 @@
  * hello.ccs (e.g. CCNursery n = ... !> @destroy { ... };).
  */
 #include <ccc/cc_runtime.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <stdio.h>
 
 /* Writes two lines to `path`. If `inject_error` is nonzero, returns an

@@ -86,6 +86,10 @@ endif
 # _Thread_local (ccc frontend TLS is process-scoped under TINYC — ccc is not
 # multi-threaded across those sites).
 ifeq ($(CC_IS_TCC),1)
+  # TCC on ARM cannot emit some ELF shared/TLS relocs; i386 is fine with tcc -shared.
+  ifneq (,$(filter arm% armv%,$(shell uname -m 2>/dev/null)))
+    RUNTIME_DYLIB_LINK_CC := cc
+  endif
   CFLAGS += -std=c11 -D_Thread_local= -D__thread=
   # liblfds has no TCC port (needs GCC __atomic_* / OS PAL).
   CFLAGS += -DCC_NO_LIBLFDS
@@ -102,12 +106,6 @@ ifeq ($(CC_IS_TCC),1)
   endif
   # Match typical gcc/clang link sets for pthread/dl users in the runtime TU.
   LDLIBS += -lm -ldl -lpthread
-  # Unity runtime TUs (cc_mem variadics, concurrent_c aggregates): host tcc rejects them.
-  HOST_POSIX_CC := cc
-  HOST_POSIX_CFLAGS := $(CFLAGS_COMMON) $(if $(filter debug,$(BUILD)),-O0 -g,-O2 -ffunction-sections -fdata-sections)     -DCC_TCC_EXT_AVAILABLE -DCONFIG_CC_EXT -I$(TCC_INC)
-else
-  HOST_POSIX_CC := $(CC)
-  HOST_POSIX_CFLAGS := $(CFLAGS)
 endif
 
 # Compile runtime as a single translation unit for easy linking. concurrent_c.c pulls in channel/nursery/scheduler/fiber_sched/fiber/io/string/exec and async shards when CC_ENABLE_ASYNC.
@@ -139,9 +137,7 @@ else
   OUT_BINDIR ?= ../out/cc/bin
 endif
 OBJS := $(SRCS:%.c=$(OBJDIR)/%.o)
-RUNTIME_CORE_OBJ := $(OBJDIR)/runtime/concurrent_c.core.o
-RUNTIME_FLOAT_OBJ := $(OBJDIR)/runtime/float_format_zmij.o
-DEPS := $(OBJS:.o=.d) $(RUNTIME_CORE_OBJ:.o=.d) $(RUNTIME_FLOAT_OBJ:.o=.d)
+DEPS := $(OBJS:.o=.d)
 REAL_BINARY := bin/.ccc-bin
 CCC_SCRIPT  := bin/ccc
 CCC_WRAPPER_TEMPLATE := scripts/ccc_wrapper.sh
@@ -399,7 +395,7 @@ $(RUNTIME_DYLIB): $(OBJDIR)/runtime/concurrent_c.o
 ifeq ($(shell uname -s),Darwin)
 	$(CC) $(CFLAGS) $(RUNTIME_DYLIB_LINK) -install_name libcc_runtime.dylib -o $@ $< -lpthread -lm
 else
-	$(CC) $(CFLAGS) $(RUNTIME_DYLIB_LINK) -o $@ $< -lpthread -lm
+	$(or $(RUNTIME_DYLIB_LINK_CC),$(CC)) $(CFLAGS) $(RUNTIME_DYLIB_LINK) -o $@ $< -lpthread -lm
 endif
 
 $(SHADOW_TCC_OBJ): $(SHADOW_TCC_C) $(TCC_LIB_DEP)
@@ -612,15 +608,13 @@ $(LOWER_HEADERS_BINARY): $(LOWER_HEADERS_OBJS) $(TCC_LIB_DEP)
 
 $(OBJDIR)/runtime/concurrent_c.o: $(LOWER_HEADERS_STAMP)
 	@mkdir -p $(dir $@)
-	$(HOST_POSIX_CC) $(HOST_POSIX_CFLAGS) $(RUNTIME_PIC) -MMD -MP -MF $(RUNTIME_CORE_OBJ:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $(RUNTIME_CORE_OBJ)
-	$(HOST_POSIX_CC) $(HOST_POSIX_CFLAGS) $(RUNTIME_PIC) -MMD -MP -MF $(RUNTIME_FLOAT_OBJ:.o=.d) -c runtime/float_format_zmij.c -o $(RUNTIME_FLOAT_OBJ)
-	$(HOST_POSIX_CC) -nostdlib -r -o $@ $(RUNTIME_CORE_OBJ) $(RUNTIME_FLOAT_OBJ)
+	$(CC) $(CFLAGS) -Iruntime $(RUNTIME_PIC) -MMD -MP -MF $(@:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $@
 
 # arena_state.o for lower_headers*: compile the seeded rewrite (has .h includes).
 # Depend on the seed stamp only — never LOWER_HEADERS_STAMP (breaks cold -j).
 $(OBJDIR)/runtime/arena_state.o: $(OUT_RUNTIME)/.seed.stamp
 	@mkdir -p $(dir $@)
-	$(HOST_POSIX_CC) $(HOST_POSIX_CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $(OUT_RUNTIME)/arena_state.c -o $@
+	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $(OUT_RUNTIME)/arena_state.c -o $@
 
 # Stage-1 objs compile against the crude seed (not the lowered stamp —
 # a stamp dep here would cycle: stamp → stage-1 binary → these objs).

@@ -34,13 +34,7 @@
 // Compression libraries
 #include <zlib.h>
 #include "../pigz_deflate_splice.cch"
-// zopfli requires passing --cc-flags "-I/opt/homebrew/include" (or install location)
-#include <zopfli.h>
-
-// Manual declaration for ZopfliDeflatePart (matches pigz.c:435-438)
-void ZopfliDeflatePart(const ZopfliOptions* options, int datamode, int final,
-                       const unsigned char* in, size_t instart, size_t inend,
-                       unsigned char* bp, unsigned char** out, size_t* outsize);
+#include "zopfli_face.cch"
 
 /* ============================================================================
  * Configuration

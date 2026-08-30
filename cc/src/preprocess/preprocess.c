@@ -7277,7 +7277,7 @@ static int cc__tu_declares_fn(const char* src, size_t n, const char* name) {
  * `CCVec_int`). Normalized here, before any recognizer, so every
  * downstream pass sees one spelling. Comment/string-aware. */
 /* Naked print names at call position alias the declared `cc_print*` family
- * (script/stdio.cch). Fixed six-name alias, not a general tier:
+ * (stdio.cch). Fixed six-name alias, not a general tier:
  *   print/println/eprint/eprintln(data)     — data only
  *   fprint/fprintln(fd, data)               — fd first (fprintf-shaped)
  * A TU-declared function or macro of the same name wins (real binding

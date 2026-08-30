@@ -1,6 +1,6 @@
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <errno.h>
 
 #define ROUNDS 20
@@ -24,7 +24,7 @@ static void cycle_actor(CCChanTx tx, CCChanRx rx, int token) {
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    printf("cycle_ring3_deadline: %d rounds\n", ROUNDS);
+    println(@string(`cycle_ring3_deadline: ${ROUNDS} rounds`, @scratch)) !>;
     cc_atomic_store(&g_timeouts, 0);
 
     for (int round = 0; round < ROUNDS; round++) {
@@ -55,6 +55,6 @@ int main(void) {
 
     int timeouts = cc_atomic_load(&g_timeouts);
     int expected = ROUNDS * ACTORS_PER_ROUND;
-    printf("cycle_ring3_deadline: timeouts=%d/%d\n", timeouts, expected);
+    println(@string(`cycle_ring3_deadline: timeouts=${timeouts}/${expected}`, @scratch)) !>;
     return (timeouts == expected) ? 0 : 1;
 }

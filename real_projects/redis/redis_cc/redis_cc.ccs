@@ -9,7 +9,7 @@
  */
 
 #include <ccc/std/prelude.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include "redis_cc.cch"
 
 static void print_roadmap(void) {
@@ -28,6 +28,6 @@ int main(int argc, char** argv) {
     (void)argv;
 
     print_roadmap();
-    printf("Representative command: %s\n", redis_command_name(REDIS_CMD_SET));
+    println(@string(`Representative command: ${redis_command_name(REDIS_CMD_SET)}`, @scratch)) !>;
     return 0;
 }

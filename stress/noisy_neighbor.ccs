@@ -15,7 +15,7 @@
 
 #include <ccc/cc_runtime.cch>
 #include <ccc/std/prelude.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
@@ -30,19 +30,21 @@ atomic_int g_heartbeats = 0;
 
 /* A "Heartbeat" fiber that should keep ticking if the scheduler is fair */
 void heartbeat_fiber() {
+    @errhandler(CCError e) { cc_error_log(e); return; }
     setvbuf(stdout, NULL, _IONBF, 0);
-    printf("[Heartbeat] Started\n");
+    println(@string(`[Heartbeat] Started`, @scratch)) !>;
     while (!cc_cancelled()) {
         cc_sleep_ms(HEARTBEAT_INTERVAL_MS);
         int val = atomic_fetch_add(&g_heartbeats, 1) + 1;
-        printf("[Heartbeat] Tick %d\n", val);
+        println(@string(`[Heartbeat] Tick ${val}`, @scratch)) !>;
     }
-    printf("[Heartbeat] Cancelled, exiting\n");
+    println(@string(`[Heartbeat] Cancelled, exiting`, @scratch)) !>;
 }
 
 /* A "CPU Hog" fiber that performs intensive math in a tight loop */
 void hog_fiber(int id) {
-    printf("[Hog %d] Started CPU-intensive loop...\n", id);
+    @errhandler(CCError e) { cc_error_log(e); return; }
+    println(@string(`[Hog ${id}] Started CPU-intensive loop...`, @scratch)) !>;
     
     volatile double x = 1.1;
     while (!cc_cancelled()) {
@@ -53,7 +55,7 @@ void hog_fiber(int id) {
         }
     }
     
-    printf("[Hog %d] Stopped\n", id);
+    println(@string(`[Hog ${id}] Stopped`, @scratch)) !>;
 }
 
 int main(void) {
@@ -64,17 +66,18 @@ int main(void) {
     snprintf(workers_buf, sizeof(workers_buf), "%d", NUM_WORKERS);
     setenv("CC_V2_THREADS", workers_buf, 1);
 
-    printf("=================================================================\n");
-    printf("NOISY NEIGHBOR CHALLENGE: Can the CC Scheduler handle CPU hogs?\n");
-    printf("Workers: %d | CPU Hogs: %d\n", NUM_WORKERS, NUM_HOGS);
-    printf("=================================================================\n\n");
+    println(@string(`=================================================================`, @scratch)) !>;
+    println(@string(`NOISY NEIGHBOR CHALLENGE: Can the CC Scheduler handle CPU hogs?`, @scratch)) !>;
+    println(@string(`Workers: ${NUM_WORKERS} | CPU Hogs: ${NUM_HOGS}`, @scratch)) !>;
+    println(@string(`=================================================================
+`, @scratch)) !>;
 
     {
         CCNursery __cc_nursery137 = @create() !> @destroy;
 
         __cc_nursery137.spawnhybrid(() => { heartbeat_fiber(); }) !>;
 
-        printf("!!! Unleashing CPU Hogs !!!\n");
+        println(@string(`!!! Unleashing CPU Hogs !!!`, @scratch)) !>;
         for (int i = 0; i < NUM_HOGS; i++) {
             int id = i;
             __cc_nursery137.spawnhybrid(() => [id] { hog_fiber(id); }) !>;
@@ -87,17 +90,17 @@ int main(void) {
 
         int final_beats = atomic_load(&g_heartbeats);
         int expected = (TEST_DURATION_SEC * 1000 / HEARTBEAT_INTERVAL_MS);
-        printf("\n=================================================================\n");
-        printf("FINAL RESULTS\n");
-        printf("Total Heartbeats: %d\n", final_beats);
+        println(@string(`
+=================================================================`, @scratch)) !>;
+        println(@string(`FINAL RESULTS`, @scratch)) !>;
+        println(@string(`Total Heartbeats: ${final_beats}`, @scratch)) !>;
         if (final_beats >= expected * 0.8) {
-            printf("RESULT: PASS - The scheduler is fair even with CPU hogs!\n");
+            println(@string(`RESULT: PASS - The scheduler is fair even with CPU hogs!`, @scratch)) !>;
         } else {
-            printf("RESULT: FAIL - The scheduler was starved by CPU hogs.\n");
-            printf("Heartbeat efficiency: %.1f%%\n",
-                   (double)final_beats * 100.0 / expected);
+            println(@string(`RESULT: FAIL - The scheduler was starved by CPU hogs.`, @scratch)) !>;
+            println(@string(`Heartbeat efficiency: $~float_dec(1){(double)final_beats * 100.0 / expected}%%`, @scratch)) !>;
         }
-        printf("=================================================================\n");
+        println(@string(`=================================================================`, @scratch)) !>;
         fflush(stdout);
         /* Don't bother joining — hogs won't yield. Harness owns shutdown. */
         _exit(0);

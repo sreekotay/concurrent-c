@@ -11,7 +11,7 @@
  * - Result matches the winner's return value
  */
 #include <ccc/cc_runtime.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 #define ITERATIONS 50
 
@@ -26,7 +26,8 @@
 }
 
 int main(void) {
-    printf("block_race_timing: %d iterations (correctness test)\n", ITERATIONS);
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    println(@string(`block_race_timing: ${ITERATIONS} iterations (correctness test)`, @scratch)) !>;
     
     int a_wins = 0;
     int b_wins = 0;
@@ -44,7 +45,7 @@ int main(void) {
         
         if (err != 0) {
             errors++;
-            fprintf(stderr, "  iter %d: ERROR err=%d\n", iter, err);
+            eprintln(@string(`  iter ${iter}: ERROR err=${err}`, @scratch)) !>;
             continue;
         }
         
@@ -52,36 +53,35 @@ int main(void) {
         if (winner == 0) {
             if (result != 42) {
                 errors++;
-                fprintf(stderr, "  iter %d: winner=0 but result=%d (expected 42)\n", iter, (int)result);
+                eprintln(@string(`  iter ${iter}: winner=0 but result=${(int)result} (expected 42)`, @scratch)) !>;
             } else {
                 a_wins++;
             }
         } else if (winner == 1) {
             if (result != 99) {
                 errors++;
-                fprintf(stderr, "  iter %d: winner=1 but result=%d (expected 99)\n", iter, (int)result);
+                eprintln(@string(`  iter ${iter}: winner=1 but result=${(int)result} (expected 99)`, @scratch)) !>;
             } else {
                 b_wins++;
             }
         } else {
             errors++;
-            fprintf(stderr, "  iter %d: invalid winner=%d\n", iter, winner);
+            eprintln(@string(`  iter ${iter}: invalid winner=${winner}`, @scratch)) !>;
         }
         
         if ((iter + 1) % 10 == 0) {
-            printf("  completed %d/%d (a=%d, b=%d, err=%d)\n", 
-                   iter + 1, ITERATIONS, a_wins, b_wins, errors);
+            println(@string(`  completed ${iter + 1}/${ITERATIONS} (a=${a_wins}, b=${b_wins}, err=${errors})`, @scratch)) !>;
         }
     }
     
-    printf("\nResults: task_a_wins=%d, task_b_wins=%d, errors=%d\n", 
-           a_wins, b_wins, errors);
+    println(@string(`
+Results: task_a_wins=${a_wins}, task_b_wins=${b_wins}, errors=${errors}`, @scratch)) !>;
     
     if (errors > 0) {
-        fprintf(stderr, "FAIL: %d errors\n", errors);
+        eprintln(@string(`FAIL: ${errors} errors`, @scratch)) !>;
         return 1;
     }
     
-    printf("block_race_timing: PASS (correctness verified)\n");
+    println(@string(`block_race_timing: PASS (correctness verified)`, @scratch)) !>;
     return 0;
 }

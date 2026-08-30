@@ -1,6 +1,6 @@
 /* @async T!>(E): Result return packs through task ABI; @await yields T!>(E). */
 #include <ccc/cc_runtime.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <stdio.h>
 
 @async int !>(CCError) echo(CCChanTx tx, CCChanRx rx, int v) {

@@ -27,7 +27,7 @@
 
 #include <ccc/cc_runtime.cch>
 #include <stdlib.h>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 
 enum { N_TASKS = 8, N_ITERS = 100000 };
 

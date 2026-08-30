@@ -14,7 +14,7 @@
  * maximizing the chance of hitting this race window.
  */
 #include <ccc/cc_runtime.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 #define ITERATIONS 10000
 #define BATCH_SIZE 100
@@ -27,8 +27,8 @@ static void* trivial_task(void* arg) {
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    printf("fiber_join_race: testing join/completion race condition\n");
-    printf("  iterations=%d, batch_size=%d\n", ITERATIONS, BATCH_SIZE);
+    println(@string(`fiber_join_race: testing join/completion race condition`, @scratch)) !>;
+    println(@string(`  iterations=${ITERATIONS}, batch_size=${BATCH_SIZE}`, @scratch)) !>;
     
     int completed = 0;
     
@@ -47,10 +47,10 @@ int main(void) {
         
         /* Progress indicator every 1000 */
         if (completed % 1000 == 0) {
-            printf("  completed %d/%d\n", completed, ITERATIONS);
+            println(@string(`  completed ${completed}/${ITERATIONS}`, @scratch)) !>;
         }
     }
     
-    printf("fiber_join_race: PASS (%d spawns completed)\n", completed);
+    println(@string(`fiber_join_race: PASS (${completed} spawns completed)`, @scratch)) !>;
     return 0;
 }

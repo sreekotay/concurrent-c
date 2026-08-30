@@ -1,7 +1,7 @@
 /* CCListener.serve: accept until nursery cancel; on_conn gets CCSocket*. */
 #include <ccc/std/prelude.cch>
 #include <ccc/std/net.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <stdio.h>
 #include <string.h>
 

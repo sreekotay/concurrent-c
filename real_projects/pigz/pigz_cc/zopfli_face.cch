@@ -1,0 +1,24 @@
+#ifndef PIGZ_CC_ZOPFLI_FACE_CCH
+#define PIGZ_CC_ZOPFLI_FACE_CCH
+
+#include <stddef.h>
+
+/* Minimal zopfli surface for pigz_cc face extract. Host builds still link
+ * libzopfli; this avoids extract needing -I to a system zopfli.h path. */
+
+typedef struct ZopfliOptions {
+    int verbose;
+    int verbose_more;
+    int numiterations;
+    int blocksplitting;
+    int blocksplittinglast;
+    int blocksplittingmax;
+} ZopfliOptions;
+
+void ZopfliInitOptions(ZopfliOptions* options);
+
+void ZopfliDeflatePart(const ZopfliOptions* options, int datamode, int final,
+                       const unsigned char* in, size_t instart, size_t inend,
+                       unsigned char* bp, unsigned char** out, size_t* outsize);
+
+#endif

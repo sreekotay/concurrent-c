@@ -14,7 +14,7 @@
  * Next: recipe_result_error_handling.ccs.
  */
 #include <ccc/cc_runtime.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <unistd.h>
 
 int main(void) {

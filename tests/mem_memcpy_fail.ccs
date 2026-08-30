@@ -1,6 +1,6 @@
 /* Default CCS includes do not declare memcpy. Include <string.h> to use it. */
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 
 int main(void) {
     char a[4] = {1, 2, 3, 4};

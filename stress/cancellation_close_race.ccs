@@ -7,7 +7,7 @@
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 #define NUM_ROUNDS 10
 #define TASKS_PER_ROUND 8
@@ -27,7 +27,7 @@ cc_atomic_int g_close_errors = 0;
 
 /* Test 1: cc_block_race cancellation under load */
 int test_race_cancellation(void) {
-    printf("  race_cancellation: %d rounds x %d tasks\n", NUM_ROUNDS, TASKS_PER_ROUND);
+    println(@string(`  race_cancellation: ${NUM_ROUNDS} rounds x ${TASKS_PER_ROUND} tasks`, @scratch)) !>;
     
     for (int round = 0; round < NUM_ROUNDS; round++) {
         CCTaskIntptr tasks[TASKS_PER_ROUND];
@@ -41,7 +41,7 @@ int test_race_cancellation(void) {
         int err = cc_block_race(TASKS_PER_ROUND, tasks, &winner, &result);
         
         if (err != 0) {
-            printf("  race_cancellation: round %d failed err=%d\n", round, err);
+            println(@string(`  race_cancellation: round ${round} failed err=${err}`, @scratch)) !>;
             return 1;
         }
         
@@ -49,15 +49,14 @@ int test_race_cancellation(void) {
         cc_atomic_fetch_add(&g_cancelled, TASKS_PER_ROUND - 1);
     }
     
-    printf("  race_cancellation: completed=%d, cancelled=%d\n",
-           cc_atomic_load(&g_completed), cc_atomic_load(&g_cancelled));
+    println(@string(`  race_cancellation: completed=${cc_atomic_load(&g_completed)}, cancelled=${cc_atomic_load(&g_cancelled)}`, @scratch)) !>;
     return 0;
 }
 
 /* Test 2: Channel close while recv is waiting */
 int test_close_while_recv(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    printf("  close_while_recv: testing close() interrupts blocking recv\n");
+    println(@string(`  close_while_recv: testing close() interrupts blocking recv`, @scratch)) !>;
     
     cc_atomic_store(&g_close_errors, 0);
     
@@ -91,14 +90,14 @@ int test_close_while_recv(void) {
     }
     
     int close_errors = cc_atomic_load(&g_close_errors);
-    printf("  close_while_recv: recv-after-close errors=%d (expected ~10)\n", close_errors);
+    println(@string(`  close_while_recv: recv-after-close errors=${close_errors} (expected ~10)`, @scratch)) !>;
     return (close_errors >= 5) ? 0 : 1;
 }
 
 /* Test 3: Concurrent close - multiple threads closing same channel */
 int test_concurrent_close(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    printf("  concurrent_close: multiple threads racing to close\n");
+    println(@string(`  concurrent_close: multiple threads racing to close`, @scratch)) !>;
     
     for (int round = 0; round < NUM_ROUNDS; round++) {
         int[~4 >] tx;
@@ -118,12 +117,13 @@ int test_concurrent_close(void) {
         ch.free();
     }
     
-    printf("  concurrent_close: %d rounds completed\n", NUM_ROUNDS);
+    println(@string(`  concurrent_close: ${NUM_ROUNDS} rounds completed`, @scratch)) !>;
     return 0;
 }
 
 int main(void) {
-    printf("cancellation_close_race: starting\n");
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    println(@string(`cancellation_close_race: starting`, @scratch)) !>;
     
     int err = 0;
     
@@ -136,6 +136,6 @@ int main(void) {
     err = test_concurrent_close();
     if (err != 0) return err;
     
-    printf("cancellation_close_race: PASS\n");
+    println(@string(`cancellation_close_race: PASS`, @scratch)) !>;
     return 0;
 }

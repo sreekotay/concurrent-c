@@ -93,7 +93,7 @@ Create `hello.ccs`:
 ```c
 #!ccc ccs
 #include <ccc/cc_runtime.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);

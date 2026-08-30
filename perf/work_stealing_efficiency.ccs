@@ -4,7 +4,7 @@
 
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <time.h>
 
@@ -43,9 +43,9 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     setvbuf(stdout, NULL, _IONBF, 0);
     
-    printf("=================================================================\n");
-    printf("WORK STEALING EFFICIENCY: %d tasks\n", NUM_TASKS);
-    printf("=================================================================\n\n");
+    println("=================================================================") !>;
+    println(@string(`WORK STEALING EFFICIENCY: ${NUM_TASKS} tasks`, @scratch)) !>;
+    println("=================================================================") !>;
 
     // 1. Balanced Spawn: Distribute from main
     cc_atomic_store(&g_completed, 0);
@@ -59,7 +59,7 @@ int main(void) {
     
     }
     double balanced_ms = time_now_ms() - start;
-    printf("Balanced Spawn (from main):   %8.2f ms\n", balanced_ms);
+    println(@string(`Balanced Spawn (from main): ${balanced_ms} ms`, @scratch)) !>;
 
     // 2. Imbalanced Spawn: All tasks spawned from inside ONE fiber
     cc_atomic_store(&g_completed, 0);
@@ -71,17 +71,17 @@ int main(void) {
     
     }
     double imbalanced_ms = time_now_ms() - start;
-    printf("Imbalanced Spawn (from fiber): %8.2f ms\n", imbalanced_ms);
+    println(@string(`Imbalanced Spawn (from fiber): ${imbalanced_ms} ms`, @scratch)) !>;
 
     double overhead = (imbalanced_ms - balanced_ms) / balanced_ms * 100.0;
-    printf("\nWork Stealing Overhead:       %8.2f%%\n", overhead);
+    println(@string(`\nWork Stealing Overhead: ${overhead}%`, @scratch)) !>;
     
     if (overhead < 50.0) {
-        printf("RESULT: SUCCESS - Your work stealer is a beast!\n");
+        println("RESULT: SUCCESS - Your work stealer is a beast!") !>;
     } else {
-        printf("RESULT: FAIL - Significant overhead when work is localized.\n");
+        println("RESULT: FAIL - Significant overhead when work is localized.") !>;
     }
-    printf("=================================================================\n");
+    println("=================================================================") !>;
 
     return 0;
 }

@@ -5,7 +5,7 @@
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_arena.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -28,6 +28,7 @@ static size_t bulk_size(size_t i) {
 }
 
 int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     size_t tip_rounds = env_zu("ARENA_MEM_TIP_ROUNDS", 400);
     size_t tip_steps = env_zu("ARENA_MEM_TIP_STEPS", 5000);
     size_t tip_root = env_zu("ARENA_MEM_TIP_ROOT", 8u * 1024u * 1024u);
@@ -58,8 +59,7 @@ int main(void) {
     double t0 = 0;
     volatile size_t sink = 0;
 
-    printf("arena_memory_bench(cc): tip=%zux%zu bulk=%zu ovf=%zu block_max=%u\n",
-           tip_rounds, tip_steps, bulk_n, ovf_n, block_max);
+    println(@string(`arena_memory_bench(cc): tip=${tip_rounds}x${tip_steps} bulk=${bulk_n} ovf=${ovf_n} block_max=${block_max}`, @scratch)) !>;
 
     {
         CCArena tip = cc_arena_heap(tip_root);
@@ -148,9 +148,7 @@ int main(void) {
     }
     churn_ms = now_ms() - t0;
 
-    printf("RESULT lang=cc block_max=%u tip_ms=%.3f tip_moves=%zu bulk_ms=%.3f bulk_gross=%zu bulk_ovf=%zu "
-           "ovf_ms=%.3f ovf_gross=%zu ovf_bytes=%zu reset_ms=%.3f churn_ms=%.3f sink=%zu\n",
-           block_max, tip_ms, moves, bulk_ms, bulk_gross, bulk_ovf,
-           ovf_ms, ovf_gross, ovf_bytes, reset_ms, churn_ms, (size_t)sink);
+    size_t sink_out = (size_t)sink;
+    println(@string(`RESULT lang=cc block_max=${block_max} tip_ms=$~float_dec(3){tip_ms} tip_moves=${moves} bulk_ms=$~float_dec(3){bulk_ms} bulk_gross=${bulk_gross} bulk_ovf=${bulk_ovf} ovf_ms=${ovf_ms} ovf_gross=${ovf_gross} ovf_bytes=${ovf_bytes} reset_ms=${reset_ms} churn_ms=${churn_ms} sink=${sink_out}`, @scratch)) !>;
     return 0;
 }

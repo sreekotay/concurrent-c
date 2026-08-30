@@ -770,7 +770,7 @@ helpers implement POSIX path syntax only: `cc_path_sep()` is `/`, and
 
 ## Script console print
 
-`<ccc/script/stdio.cch>` (script prelude, not `<ccc/std/…>`) defines
+`<ccc/stdio.cch>` (not `<ccc/std/…>`) defines
 `CCStdio` for arena-backed stdin reads and line-oriented console writes.
 When script `io` is in scope, preferred examples are handle-first. Data-first
 UFCS and naked aliases remain valid (UFCS either way on the chosen receiver):

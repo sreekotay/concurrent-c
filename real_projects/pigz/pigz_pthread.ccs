@@ -13,6 +13,7 @@
 
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
+#include <ccc/stdio.cch>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -113,13 +114,13 @@ static bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
     CCResult_size_t_CCIoError wr = cc_file_write(f, data);
     if (cc_is_err(wr)) {
         CCIoError err = cc_unwrap_err_as(wr, CCIoError);
-        fprintf(stderr, "%s failed kind=%d os=%d\n", what, err.base.kind, err.os_code);
+        eprintln(@string(`${what} failed kind=${err.base.kind} os=${err.os_code}`, @scratch)) !>;
         cc_atomic_store(&g_pipeline_error, 1);
         return false;
     }
     size_t n = cc_unwrap_as(wr, size_t);
     if (n != data.len) {
-        fprintf(stderr, "%s short write %zu/%zu\n", what, n, data.len);
+        eprintln(@string(`${what} short write ${n}/${data.len}`, @scratch)) !>;
         cc_atomic_store(&g_pipeline_error, 1);
         return false;
     }
@@ -139,7 +140,7 @@ static int pthread_task_recv(CCChanRx rx, CompressedResult** out) {
     if (rc == EPIPE) return 0;
     if (rc != 0) return -1;
     if (task.kind != CC_TASK_KIND_SPAWN) {
-        fprintf(stderr, "pthread_task_recv: expected SPAWN task, kind=%d\n", (int)task.kind);
+        eprintln(@string(`pthread_task_recv: expected SPAWN task, kind=${(int)task.kind}`, @scratch)) !>;
         return -1;
     }
     *out = (CompressedResult*)cc_block_on_intptr(task);
@@ -152,14 +153,14 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     
     CCFile in_file;
     if (cc_file_open(&in_file, cc_slice_cstr(in_path), "rb") != 0) {
-        fprintf(stderr, "Failed to open input: %s\n", in_path);
+        eprintln(@string(`Failed to open input: ${in_path}`, @scratch)) !>;
         return 1;
     }
     @defer cc_file_close(&in_file);
 
     CCFile out_file;
     if (cc_file_open(&out_file, cc_slice_cstr(out_path), "wb") != 0) {
-        fprintf(stderr, "Failed to open output: %s\n", out_path);
+        eprintln(@string(`Failed to open output: ${out_path}`, @scratch)) !>;
         return 1;
     }
     @defer cc_file_close(&out_file);
@@ -180,13 +181,13 @@ int compress_file(const char* in_path, const char* out_path, int level) {
         int rc;
         while ((rc = pthread_task_recv(tasks_rx, &r)) == 1) {
             if (!r) {
-                fprintf(stderr, "compress task failed (OOM or zlib error)\n");
+                eprintln(@string(`compress task failed (OOM or zlib error)`, @scratch)) !>;
                 cc_atomic_store(&g_pipeline_error, 1);
                 tasks_rx.close_with(cc_io_error(CC_IO_OTHER));
                 break;
             }
             if (r->seq != expect_seq) {
-                fprintf(stderr, "ORDER: expected=%ld got=%ld\n", expect_seq, r->seq);
+                eprintln(@string(`ORDER: expected=${expect_seq} got=${r->seq}`, @scratch)) !>;
                 cc_atomic_store(&g_pipeline_error, 1);
             }
             expect_seq++;
@@ -235,7 +236,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             
             CCTask task = cc_thread_spawn(compress_task_wrapper, blk);
             if (task.kind != CC_TASK_KIND_SPAWN) {
-                fprintf(stderr, "cc_thread_spawn failed seq=%ld\n", blk->seq);
+                eprintln(@string(`cc_thread_spawn failed seq=${blk->seq}`, @scratch)) !>;
                 cc_arena_free(&blk->arena);
                 cc_atomic_store(&g_pipeline_error, 1);
                 break;
@@ -255,23 +256,28 @@ int compress_file(const char* in_path, const char* out_path, int level) {
 }
 
 int main(int argc, char *argv[]) {
+    @errhandler(CCError e) { return cc_err_log(e); }
+
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <file>\n", argv[0]);
+        eprintln(@string(`Usage: ${argv[0]} <file>`, @scratch)) !>;
         return 1;
     }
-    
-    char out_name[4096];
-    snprintf(out_name, sizeof(out_name), "%s.gz", argv[1]);
-    
-    int ret = compress_file(argv[1], out_name, 6);
-    
+
+    char[:0] in_path = cc_slice_cstr(argv[1]);
+    CCString out_name = @string(`${in_path}.gz`, @scratch);
+    if (out_name.failed())
+        return cc_err_log(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "output path"));
+
+    int ret = compress_file((const char*)in_path.ptr, cc_string_cstr(&out_name, __cc_str_scratch), 6);
+
     if (ret == 0) {
-        printf("Compressed %s -> %s\n", argv[1], out_name);
-        printf("Stats: %lld bytes in, %lld bytes out, %d blocks\n",
-               (long long)cc_atomic_load(&g_bytes_in),
-               (long long)cc_atomic_load(&g_bytes_out),
-               cc_atomic_load(&g_blocks_done));
+        long long bin = (long long)cc_atomic_load(&g_bytes_in);
+        long long bout = (long long)cc_atomic_load(&g_bytes_out);
+        int blocks = cc_atomic_load(&g_blocks_done);
+        println(@string(`Compressed ${in_path} -> ${out_name}`, @scratch)) !>;
+        println(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
+                        @scratch)) !>;
     }
-    
+
     return ret;
 }

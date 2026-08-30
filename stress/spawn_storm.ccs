@@ -6,7 +6,7 @@
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 #define NUM_TASKS 1000
 
@@ -14,7 +14,7 @@ cc_atomic_int g_counter = 0;
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    printf("spawn_storm: spawning %d tasks\n", NUM_TASKS);
+    println(@string(`spawn_storm: spawning ${NUM_TASKS} tasks`, @scratch)) !>;
 
     {
         CCNursery __cc_nursery147 = @create() !> @destroy;
@@ -28,6 +28,6 @@ int main(void) {
     }
 
     int final = cc_atomic_load(&g_counter);
-    printf("spawn_storm: completed %d/%d tasks\n", final, NUM_TASKS);
+    println(@string(`spawn_storm: completed ${final}/${NUM_TASKS} tasks`, @scratch)) !>;
     return (final == NUM_TASKS) ? 0 : 1;
 }

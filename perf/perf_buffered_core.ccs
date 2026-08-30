@@ -8,7 +8,9 @@
  * - cc_block_on_intptr()
  */
 #include <ccc/std/prelude.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
+
+extern int cc_eprintf(const char *fmt, ...);
 #include <time.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -52,7 +54,7 @@ static void* producer_main(void* arg) {
     (void)arg;
     for (int i = 0; i < g_iterations; i++) {
         if (cc_chan_send(g_channel, &i, sizeof(i)) != 0) {
-            fprintf(stderr, "cc_chan_send failed\n");
+            (void)cc_eprintf("cc_chan_send failed\n");
             abort();
         }
     }
@@ -65,18 +67,19 @@ static void* consumer_main(void* arg) {
     int64_t checksum = 0;
     for (int i = 0; i < g_iterations; i++) {
         if (cc_chan_recv(g_channel, &v, sizeof(v)) != 0) {
-            fprintf(stderr, "cc_chan_recv failed\n");
+            (void)cc_eprintf("cc_chan_recv failed\n");
             abort();
         }
         checksum += v;
     }
     if (checksum < 0) {
-        fprintf(stderr, "impossible checksum=%lld\n", (long long)checksum);
+        (void)cc_eprintf("impossible checksum=%lld\n", (long long)checksum);
     }
     return NULL;
 }
 
 static double run_once(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCChanTx tx = {0};
     CCChanRx rx = {0};
     g_channel = cc_chan_pair_create_returning(CHANNEL_CAPACITY,
@@ -89,7 +92,7 @@ static double run_once(void) {
                                               &tx,
                                               &rx);
     if (!g_channel) {
-        fprintf(stderr, "cc_chan_pair_create_returning failed\n");
+        eprintln("cc_chan_pair_create_returning failed") !>;
         abort();
     }
 
@@ -107,14 +110,15 @@ static double run_once(void) {
 }
 
 int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     if (cc_scheduler_init() != 0) {
-        fprintf(stderr, "cc_scheduler_init failed\n");
+        eprintln("cc_scheduler_init failed") !>;
         return 1;
     }
 
     g_iterations = env_int_or("CC_BUF_ITERS", DEFAULT_ITERATIONS);
     g_samples = env_int_or("CC_BUF_SAMPLES", DEFAULT_SAMPLES);
-    printf("perf_buffered_core: cap=%d iters=%d samples=%d\n", CHANNEL_CAPACITY, g_iterations, g_samples);
+    println(@string(`perf_buffered_core: cap=${CHANNEL_CAPACITY} iters=${g_iterations} samples=${g_samples}`, @scratch)) !>;
 
     (void)run_once();
 
@@ -123,14 +127,14 @@ int main(void) {
     for (int i = 0; i < g_samples; i++) {
         elapsed_ms[i] = run_once();
         ops_sec[i] = (g_iterations * 2.0) / (elapsed_ms[i] / 1000.0);
-        printf("  run %d: %.0f ops/sec (%.2f ms)\n", i + 1, ops_sec[i], elapsed_ms[i]);
+        println(@string(` run ${i + 1}: ${ops_sec[i]} ops/sec (${elapsed_ms[i]} ms)`, @scratch)) !>;
     }
 
     sort_doubles(ops_sec, g_samples);
     sort_doubles(elapsed_ms, g_samples);
     int mid = g_samples / 2;
-    printf("  median: %.0f ops/sec (%.2f ms)\n", ops_sec[mid], elapsed_ms[mid]);
-    printf("perf_buffered_core: DONE\n");
+    println(@string(` median: ${ops_sec[mid]} ops/sec (${elapsed_ms[mid]} ms)`, @scratch)) !>;
+    println("perf_buffered_core: DONE") !>;
 
     cc_scheduler_shutdown();
     return 0;

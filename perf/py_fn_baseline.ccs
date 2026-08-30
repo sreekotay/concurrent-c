@@ -26,10 +26,12 @@
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/script/py.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+extern int cc_eprintf(const char *fmt, ...);
 
 static CCPyObj !>(CCPyError) add_k(long long k, const CCPyObj *args, int argc) {
     @errhandler(CCPyError e) { return cc_err(e); }
@@ -64,10 +66,11 @@ static double g_ms[64];
 static int g_samples = 7;
 
 static double report_ns(const char *mode, long long per) {
+    @errhandler(CCError e) cc_error_exit(e);
     double m = median(g_ms, g_samples);
     double ns = m * 1e6 / (double)per;
-    printf("  %-14s %9.2f ms  %9.1f ns/call\n", mode, m, ns);
-    printf("RESULT scalar %s ns_per_call %.1f\n", mode, ns);
+    println(@string(` ${mode} ${m} ms ${ns} ns/call`, @scratch)) !>;
+    println(@string(`RESULT scalar ${mode} ns_per_call ${ns}`, @scratch)) !>;
     return ns;
 }
 
@@ -78,10 +81,8 @@ static long long want_sum(long long k, long long n) {
 
 static int bench_domain(CCPy *py, const char *py_mode, const char *fn_mode,
                         long long iters) {
-    @errhandler(CCPyError e) {
-        fprintf(stderr, "py: %s\n", e.base.message ? e.base.message : "?");
-        return 1;
-    }
+    @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCPyError e) { (void)cc_eprintf("py: %s\n", e.base.message ? e.base.message : "?"); return 1; }
     long long want = want_sum(7, iters);
     long long got = 0;
     int s;
@@ -117,7 +118,7 @@ static int bench_domain(CCPy *py, const char *py_mode, const char *fn_mode,
         got = (long long)r;
     }
     if (got != want) {
-        fprintf(stderr, "MISMATCH %s: want=%lld got=%lld\n", py_mode, want, got);
+        eprintln(@string(`MISMATCH ${py_mode}: want=${want} got=${got}`, @scratch)) !>;
         return 1;
     }
     ns_py = report_ns(py_mode, iters);
@@ -130,25 +131,21 @@ static int bench_domain(CCPy *py, const char *py_mode, const char *fn_mode,
         got = (long long)r;
     }
     if (got != want) {
-        fprintf(stderr, "MISMATCH %s: want=%lld got=%lld\n", fn_mode, want, got);
+        eprintln(@string(`MISMATCH ${fn_mode}: want=${want} got=${got}`, @scratch)) !>;
         return 1;
     }
     ns_fn = report_ns(fn_mode, iters);
 
-    printf("  %-14s ratio %s/%s %.2fx\n", fn_mode, fn_mode, py_mode,
-           ns_py > 0 ? ns_fn / ns_py : 0.0);
-    printf("RESULT ratio %s_over_%s %.2f\n", fn_mode, py_mode,
-           ns_py > 0 ? ns_fn / ns_py : 0.0);
+    println(@string(` ${fn_mode} ratio ${fn_mode}/${py_mode} ${ns_py > 0 ? ns_fn / ns_py : 0.0}x`, @scratch)) !>;
+    println(@string(`RESULT ratio ${fn_mode}_over_${py_mode} ${ns_py > 0 ? ns_fn / ns_py : 0.0}`, @scratch)) !>;
     return 0;
 }
 
 /* Isolated wire refuses exec/eval, so drive callbacks from CC via
  * operator.call(f, i) instead of a Python apply_n loop. */
 static int bench_iso(CCPy *py, long long iters) {
-    @errhandler(CCPyError e) {
-        fprintf(stderr, "py: %s\n", e.base.message ? e.base.message : "?");
-        return 1;
-    }
+    @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCPyError e) { (void)cc_eprintf("py: %s\n", e.base.message ? e.base.message : "?"); return 1; }
     long long want = want_sum(7, iters);
     long long got = 0;
     int s;
@@ -175,7 +172,7 @@ static int bench_iso(CCPy *py, long long iters) {
         got = t;
     }
     if (got != want) {
-        fprintf(stderr, "MISMATCH py_fn_iso: want=%lld got=%lld\n", want, got);
+        eprintln(@string(`MISMATCH py_fn_iso: want=${want} got=${got}`, @scratch)) !>;
         return 1;
     }
     report_ns("py_fn_iso", iters);
@@ -183,10 +180,7 @@ static int bench_iso(CCPy *py, long long iters) {
 }
 
 int main(int argc, char **argv) {
-    @errhandler(CCError e) {
-        fprintf(stderr, "fatal: %s\n", e.message);
-        return 1;
-    }
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a = cc_arena_heap(megabytes(8)) @destroy;
     long long iters = argc > 1 ? atoll(argv[1]) : 200000LL;
     long long want = 0;
@@ -203,8 +197,8 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    printf("py_fn_baseline iters=%lld samples=%d\n", iters, g_samples);
-    printf("\nscalar (ns/call)\n");
+    println(@string(`py_fn_baseline iters=${iters} samples=${g_samples}`, @scratch)) !>;
+    println("scalar (ns/call)") !>;
 
     want = want_sum(7, iters);
     for (s = 0; s < g_samples; s++) {
@@ -212,7 +206,7 @@ int main(int argc, char **argv) {
         long long r = add_k_c(7, iters);
         g_ms[s] = now_ms() - t0;
         if (r != want) {
-            fprintf(stderr, "MISMATCH c_native: want=%lld got=%lld\n", want, r);
+            eprintln(@string(`MISMATCH c_native: want=${want} got=${r}`, @scratch)) !>;
             return 1;
         }
     }
@@ -227,10 +221,10 @@ int main(int argc, char **argv) {
         /* Isolated pays ~100µs/hop; keep the sample short enough to finish. */
         long long on = iters / 100 > 500 ? iters / 100 : 500;
         CCPy py = cc_py_new(true, a) !> @destroy;
-        printf("\nisolated CC→operator.call→py_fn (iters=%lld)\n", on);
+        println(@string(`\nisolated CC→operator.call→py_fn (iters=${on})`, @scratch)) !>;
         rc |= bench_iso(&py, on);
     } else {
-        printf("\nisolated SKIP (no python3 child)\n");
+        println("isolated SKIP (no python3 child)") !>;
     }
 
     return rc;

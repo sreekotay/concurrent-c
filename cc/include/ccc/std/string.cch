@@ -301,7 +301,7 @@ typedef CCSlice (*CCStringPolicy)(CCArena arena, CCSlice tag, CCSlice value);
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* Provided by cc/runtime/float_format_zmij.c (linked into the runtime object). */
+/* Provided by cc/runtime/float_format_zmij.c (unity-included in concurrent_c.c). */
 char *cc_zmij_f64_to_string(double v, char *buf);
 char *cc_zmij_f32_to_string(float v, char *buf);
 #ifdef __cplusplus

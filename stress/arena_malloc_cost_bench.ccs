@@ -7,7 +7,7 @@
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_arena.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -41,7 +41,8 @@ static const char *mode_name(Mode m) {
     return "raw_malloc";
 }
 
-static int run_arena(Mode mode, size_t root, size_t n, volatile size_t *sink) {
+int run_arena(Mode mode, size_t root, size_t n, volatile size_t *sink) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a;
     size_t i;
     size_t live = 0;
@@ -56,11 +57,11 @@ static int run_arena(Mode mode, size_t root, size_t n, volatile size_t *sink) {
         a = cc_arena_malloc(root);
 
     if (!cc_arena_is_live(a)) {
-        printf("FAIL: %s init\n", mode_name(mode));
+        println(@string(`FAIL: ${mode_name(mode)} init`, @scratch)) !>;
         return 1;
     }
     if (mode == MODE_MALLOC_ARENA && a.a->block_max != 1) {
-        printf("FAIL: cc_arena_malloc block_max=%u want 1\n", a.a->block_max);
+        println(@string(`FAIL: cc_arena_malloc block_max=${a.a->block_max} want 1`, @scratch)) !>;
         a.destroy();
         return 1;
     }
@@ -70,7 +71,7 @@ static int run_arena(Mode mode, size_t root, size_t n, volatile size_t *sink) {
         size_t sz = bulk_size(i);
         unsigned char *p = (unsigned char *)cc_arena_alloc(a, sz, 8);
         if (!p) {
-            printf("FAIL: %s alloc i=%zu\n", mode_name(mode), i);
+            println(@string(`FAIL: ${mode_name(mode)} alloc i=${i}`, @scratch)) !>;
             a.destroy();
             return 1;
         }
@@ -87,15 +88,13 @@ static int run_arena(Mode mode, size_t root, size_t n, volatile size_t *sink) {
     total_ms = now_ms() - t0;
     alloc_ms = total_ms - reset_ms;
 
-    printf("RESULT mode=%s root=%zu n=%zu live=%zu gross=%zu ovf=%zu "
-           "alloc_ms=%.3f reset_ms=%.3f total_ms=%.3f block_max=%u\n",
-           mode_name(mode), root, n, live, gross, ovf,
-           alloc_ms, reset_ms, total_ms,
-           mode == MODE_HEAP ? CC_ARENA_DEFAULT_BLOCK_MAX : 1u);
+    unsigned block_max_out = mode == MODE_HEAP ? CC_ARENA_DEFAULT_BLOCK_MAX : 1u;
+    println(@string(`RESULT mode=${mode_name(mode)} root=${root} n=${n} live=${live} gross=${gross} ovf=${ovf} alloc_ms=$~float_dec(3){alloc_ms} reset_ms=$~float_dec(3){reset_ms} total_ms=$~float_dec(3){total_ms} block_max=${block_max_out}`, @scratch)) !>;
     return 0;
 }
 
-static int run_raw(size_t n, volatile size_t *sink) {
+int run_raw(size_t n, volatile size_t *sink) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     unsigned char **ptrs;
     size_t i;
     size_t live = 0;
@@ -125,20 +124,19 @@ static int run_raw(size_t n, volatile size_t *sink) {
     alloc_ms = total_ms - reset_ms;
     free(ptrs);
 
-    printf("RESULT mode=raw_malloc root=0 n=%zu live=%zu gross=%zu ovf=0 "
-           "alloc_ms=%.3f reset_ms=%.3f total_ms=%.3f block_max=0\n",
-           n, live, live, alloc_ms, reset_ms, total_ms);
+    println(@string(`RESULT mode=raw_malloc root=0 n=${n} live=${live} gross=${live} ovf=0 alloc_ms=$~float_dec(3){alloc_ms} reset_ms=$~float_dec(3){reset_ms} total_ms=$~float_dec(3){total_ms} block_max=0`, @scratch)) !>;
     return 0;
 }
 
 int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     size_t n = env_zu("ARENA_MALLOC_COST_N", 800000);
     size_t root = env_zu("ARENA_MALLOC_COST_ROOT", 64u * 1024u); /* tiny root → force spill */
     size_t fat_root = env_zu("ARENA_MALLOC_COST_FAT_ROOT", 16u * 1024u * 1024u);
     volatile size_t sink = 0;
 
-    printf("arena_malloc_cost: n=%zu tiny_root=%zu fat_root=%zu\n", n, root, fat_root);
-    printf("  (cc_arena_malloc = fixed root + per-object overflow; no extent growth)\n");
+    println(@string(`arena_malloc_cost: n=${n} tiny_root=${root} fat_root=${fat_root}`, @scratch)) !>;
+    println(@string(`  (cc_arena_malloc = fixed root + per-object overflow; no extent growth)`, @scratch)) !>;
 
     /* Opposite cases: durable ctor used as scratch. */
     if (run_arena(MODE_MALLOC_ARENA, root, n, &sink)) return 1;
@@ -149,6 +147,6 @@ int main(void) {
     /* Raw malloc keep-alive + free-all. */
     if (run_raw(n, &sink)) return 5;
 
-    printf("arena_malloc_cost: PASS sink=%zu\n", (size_t)sink);
+    println(@string(`arena_malloc_cost: PASS sink=${(size_t)sink}`, @scratch)) !>;
     return 0;
 }

@@ -6,7 +6,7 @@
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 #define OUTER_TASKS 32
 #define INNER_TASKS 128
@@ -15,7 +15,7 @@ cc_atomic_int g_counter = 0;
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    printf("inbox_spawn_stress: outer=%d inner=%d\n", OUTER_TASKS, INNER_TASKS);
+    println(@string(`inbox_spawn_stress: outer=${OUTER_TASKS} inner=${INNER_TASKS}`, @scratch)) !>;
 
     {
         CCNursery __cc_nursery127 = @create() !> @destroy;
@@ -39,6 +39,6 @@ int main(void) {
 
     int total = cc_atomic_load(&g_counter);
     int expected = OUTER_TASKS * INNER_TASKS;
-    printf("inbox_spawn_stress: completed %d/%d\n", total, expected);
+    println(@string(`inbox_spawn_stress: completed ${total}/${expected}`, @scratch)) !>;
     return (total == expected) ? 0 : 1;
 }

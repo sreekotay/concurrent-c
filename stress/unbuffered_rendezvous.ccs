@@ -7,7 +7,7 @@
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
 #include <ccc/std/task.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 #define NUM_PAIRS 50
 #define MSGS_PER_PAIR 100
@@ -46,7 +46,8 @@ int[~ <] g_rx;
 CCChan* g_ch;
 
 int main(void) {
-    printf("unbuffered_rendezvous: %d pairs x %d msgs\n", NUM_PAIRS, MSGS_PER_PAIR);
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    println(@string(`unbuffered_rendezvous: ${NUM_PAIRS} pairs x ${MSGS_PER_PAIR} msgs`, @scratch)) !>;
 
     g_ch = cc_channel_pair(&g_tx, &g_rx);
 
@@ -65,7 +66,7 @@ int main(void) {
 
     int err = cc_block_all(task_count, tasks, results);
     if (err != 0) {
-        printf("ERROR: cc_block_all failed with err=%d\n", err);
+        println(@string(`ERROR: cc_block_all failed with err=${err}`, @scratch)) !>;
         g_ch.free();
         return 1;
     }
@@ -79,24 +80,22 @@ int main(void) {
     int chk_recv = cc_atomic_load(&g_checksum_received);
     int expected = NUM_PAIRS * MSGS_PER_PAIR;
 
-    printf("unbuffered_rendezvous: sent=%d, received=%d (expected=%d)\n",
-           sent, received, expected);
-    printf("unbuffered_rendezvous: checksum sent=%d, received=%d\n",
-           chk_sent, chk_recv);
+    println(@string(`unbuffered_rendezvous: sent=${sent}, received=${received} (expected=${expected})`, @scratch)) !>;
+    println(@string(`unbuffered_rendezvous: checksum sent=${chk_sent}, received=${chk_recv}`, @scratch)) !>;
 
     if (sent != expected) {
-        printf("ERROR: sent count mismatch\n");
+        println(@string(`ERROR: sent count mismatch`, @scratch)) !>;
         return 1;
     }
     if (received != expected) {
-        printf("ERROR: received count mismatch\n");
+        println(@string(`ERROR: received count mismatch`, @scratch)) !>;
         return 2;
     }
     if (chk_sent != chk_recv) {
-        printf("ERROR: checksum mismatch (data corruption)\n");
+        println(@string(`ERROR: checksum mismatch (data corruption)`, @scratch)) !>;
         return 3;
     }
 
-    printf("unbuffered_rendezvous: PASS\n");
+    println(@string(`unbuffered_rendezvous: PASS`, @scratch)) !>;
     return 0;
 }

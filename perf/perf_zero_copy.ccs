@@ -3,7 +3,7 @@
  * Compares channel throughput with different payload sizes.
  */
 #include <ccc/std/prelude.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <string.h>
 #include <time.h>
 
@@ -31,6 +31,7 @@ typedef struct {
 } Large;
 
 static void bench_int(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int[~100 >] tx;
     int[~100 <] rx;
     cc_channel_pair(&tx, &rx);
@@ -48,11 +49,12 @@ static void bench_int(void) {
     double elapsed = time_now_ms() - start;
     double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
     
-    printf("  int (4 bytes): %.0f ops/sec (%.1f ms)\n", ops_per_sec, elapsed);
+    println(@string(` int (4 bytes): ${ops_per_sec} ops/sec (${elapsed} ms)`, @scratch)) !>;
     tx.close();
 }
 
 static void bench_small(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     Small[~100 >] tx;
     Small[~100 <] rx;
     cc_channel_pair(&tx, &rx);
@@ -70,12 +72,12 @@ static void bench_small(void) {
     double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
     double mb_per_sec = (ITERATIONS * sizeof(Small) / 1048576.0) / (elapsed / 1000.0);
     
-    printf("  Small (%zu bytes): %.0f ops/sec, %.1f MB/sec\n", 
-           sizeof(Small), ops_per_sec, mb_per_sec);
+    println(@string(` Small (${sizeof(Small)}u bytes): ${ops_per_sec} ops/sec, ${mb_per_sec} MB/sec`, @scratch)) !>;
     tx.close();
 }
 
 static void bench_medium(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     Medium[~100 >] tx;
     Medium[~100 <] rx;
     cc_channel_pair(&tx, &rx);
@@ -94,12 +96,12 @@ static void bench_medium(void) {
     double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
     double mb_per_sec = (ITERATIONS * sizeof(Medium) / 1048576.0) / (elapsed / 1000.0);
     
-    printf("  Medium (%zu bytes): %.0f ops/sec, %.1f MB/sec\n",
-           sizeof(Medium), ops_per_sec, mb_per_sec);
+    println(@string(` Medium (${sizeof(Medium)}u bytes): ${ops_per_sec} ops/sec, ${mb_per_sec} MB/sec`, @scratch)) !>;
     tx.close();
 }
 
 static void bench_large(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     Large[~50 >] tx;  /* Smaller buffer for large payloads */
     Large[~50 <] rx;
     cc_channel_pair(&tx, &rx);
@@ -119,22 +121,22 @@ static void bench_large(void) {
     double ops_per_sec = iterations / (elapsed / 1000.0);
     double mb_per_sec = (iterations * sizeof(Large) / 1048576.0) / (elapsed / 1000.0);
     
-    printf("  Large (%zu bytes): %.0f ops/sec, %.1f MB/sec\n",
-           sizeof(Large), ops_per_sec, mb_per_sec);
+    println(@string(` Large (${sizeof(Large)}u bytes): ${ops_per_sec} ops/sec, ${mb_per_sec} MB/sec`, @scratch)) !>;
     tx.close();
 }
 
 int main(void) {
-    printf("perf_zero_copy: measuring channel throughput by payload size\n\n");
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    println("perf_zero_copy: measuring channel throughput by payload size") !>;
     
     bench_int();
     bench_small();
     bench_medium();
     bench_large();
     
-    printf("\n  Note: For true zero-copy, use recv() -> send_take() pipeline\n");
-    printf("  with unique slices from channel receives.\n");
+    println(" Note: For true zero-copy, use recv() -> send_take() pipeline") !>;
+    println(" with unique slices from channel receives.") !>;
     
-    printf("\nperf_zero_copy: DONE\n");
+    println("perf_zero_copy: DONE") !>;
     return 0;
 }

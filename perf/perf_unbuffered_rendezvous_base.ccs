@@ -5,7 +5,9 @@
  * This stresses enqueue/dequeue of waiters and handoff wake behavior.
  */
 #include <ccc/std/prelude.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
+
+extern int cc_eprintf(const char *fmt, ...);
 #include <time.h>
 #include <stdint.h>
 
@@ -67,7 +69,7 @@ static double run_once(void) {
                     checksum += v;
                 }
                 if (checksum < 0) {
-                    fprintf(stderr, "impossible checksum=%lld\n", (long long)checksum);
+                    (void)cc_eprintf("impossible checksum=%lld\n", (long long)checksum);
                 }
             }) !>;
         }
@@ -77,8 +79,8 @@ static double run_once(void) {
 }
 
 int main(void) {
-    printf("perf_unbuffered_rendezvous_base: producers=%d consumers=%d iters=%d\n",
-           PRODUCERS, CONSUMERS, ITERS_PER_PRODUCER);
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    println(@string(`perf_unbuffered_rendezvous_base: producers=${PRODUCERS} consumers=${CONSUMERS} iters=${ITERS_PER_PRODUCER}`, @scratch)) !>;
 
     (void)run_once();
 
@@ -87,13 +89,13 @@ int main(void) {
     for (int i = 0; i < SAMPLES; i++) {
         elapsed_ms[i] = run_once();
         ops_sec[i] = (TOTAL_MESSAGES * 2.0) / (elapsed_ms[i] / 1000.0);
-        printf("  run %d: %.0f ops/sec (%.2f ms)\n", i + 1, ops_sec[i], elapsed_ms[i]);
+        println(@string(` run ${i + 1}: ${ops_sec[i]} ops/sec (${elapsed_ms[i]} ms)`, @scratch)) !>;
     }
 
     sort_doubles(ops_sec, SAMPLES);
     sort_doubles(elapsed_ms, SAMPLES);
     int mid = SAMPLES / 2;
-    printf("  median: %.0f ops/sec (%.2f ms)\n", ops_sec[mid], elapsed_ms[mid]);
-    printf("perf_unbuffered_rendezvous_base: DONE\n");
+    println(@string(` median: ${ops_sec[mid]} ops/sec (${elapsed_ms[mid]} ms)`, @scratch)) !>;
+    println("perf_unbuffered_rendezvous_base: DONE") !>;
     return 0;
 }

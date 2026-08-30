@@ -15,7 +15,7 @@
  * Compare: ./perf/compare_parallel_hello.sh
  */
 #include <ccc/std/prelude.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdint.h>
 #include <stdlib.h>
 #include <time.h>
@@ -56,6 +56,7 @@ static uint32_t sum_seq(uint32_t d, uint32_t i) {
 }
 
 static uint32_t sum_par(uint32_t d, uint32_t i) {
+    @errhandler(CCError e) cc_error_exit(e);
     if (d >= g_depth)
         return i;
     uint32_t left = 0;
@@ -68,6 +69,7 @@ static uint32_t sum_par(uint32_t d, uint32_t i) {
 }
 
 static uint32_t sum_cut(uint32_t d, uint32_t i) {
+    @errhandler(CCError e) cc_error_exit(e);
     if (d >= g_depth)
         return i;
     uint32_t left = 0;
@@ -104,11 +106,12 @@ static uint32_t run_on_fiber(sum_fn fn) {
 }
 
 static double time_once(sum_fn fn, uint32_t expect, int on_fiber) {
+    @errhandler(CCError e) cc_error_exit(e);
     double t0 = now_ms();
     uint32_t r = on_fiber ? run_on_fiber(fn) : fn(0, 0);
     double t1 = now_ms();
     if (r != expect) {
-        fprintf(stderr, "mismatch: got=%u expect=%u\n", r, expect);
+        eprintln(@string(`mismatch: got=${r} expect=${expect}`, @scratch)) !>;
         abort();
     }
     return t1 - t0;
@@ -136,6 +139,7 @@ static uint32_t env_u32(const char* key, uint32_t fallback) {
 }
 
 int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     g_depth = env_u32("CC_PAR_DEPTH", 20);
     g_cut = env_u32("CC_PAR_CUT", 8);
     g_samples = (int)env_u32("CC_PAR_SAMPLES", 5);
@@ -154,15 +158,12 @@ int main(void) {
         vs_par = par_ms > 0.0 ? seq_ms / par_ms : 0.0;
     }
 
-    printf("parallel_hello (@parallel): depth=%u cut=%u samples=%d (par on fiber)\n",
-           g_depth, g_cut, g_samples);
-    printf("  seq  %u  %.2f ms\n", expect, seq_ms);
+    println(@string(`parallel_hello (@parallel): depth=${g_depth} cut=${g_cut} samples=${g_samples} (par on fiber)`, @scratch)) !>;
+    println(@string(` seq ${expect} ${seq_ms} ms`, @scratch)) !>;
     if (bare)
-        printf("  par  %u  %.2f ms  vs_seq %.2fx  (@parallel { })\n",
-               expect, par_ms, vs_par);
+        println(@string(` par ${expect} ${par_ms} ms vs_seq ${vs_par}x (@parallel { })`, @scratch)) !>;
     else
-        printf("  par  skipped  (CC_PAR_BARE=0; ungated 16M-node spawn OOMs)\n");
-    printf("  cut  %u  %.2f ms  vs_seq %.2fx  (@parallel (d<%u))\n",
-           expect, cut_ms, vs_cut, g_cut);
+        println("  par  skipped  (CC_PAR_BARE=0; ungated 16M-node spawn OOMs)") !>;
+    println(@string(` cut ${expect} ${cut_ms} ms vs_seq ${vs_cut}x (@parallel (d<${g_cut}))`, @scratch)) !>;
     return 0;
 }

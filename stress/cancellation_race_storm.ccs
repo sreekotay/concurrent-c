@@ -8,7 +8,7 @@
 
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <time.h>
 
@@ -37,20 +37,23 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     setvbuf(stdout, NULL, _IONBF, 0);
     
-    printf("=================================================================\n");
-    printf("CANCELLATION RACE STORM: Hunting for Zombie Fibers\n");
-    printf("Spawners: %d | Spawns per iter: %d | Iters: %d\n", NUM_SPAWNERS, SPAWNS_PER_ITER, NUM_ITERS);
-    printf("=================================================================\n\n");
+    println(@string(`=================================================================`, @scratch)) !>;
+    println(@string(`CANCELLATION RACE STORM: Hunting for Zombie Fibers`, @scratch)) !>;
+    println(@string(`Spawners: ${NUM_SPAWNERS} | Spawns per iter: ${SPAWNS_PER_ITER} | Iters: ${NUM_ITERS}`, @scratch)) !>;
+    println(@string(`=================================================================
+`, @scratch)) !>;
 
     for (int iter = 1; iter <= NUM_ITERS; iter++) {
         cc_atomic_store(&g_fibers_started, 0);
         cc_atomic_store(&g_fibers_finished, 0);
 
-        printf("\rIteration %d/%d...", iter, NUM_ITERS);
+        cc_fprint(STDOUT_FILENO, @string(`
+Iteration ${iter}/${NUM_ITERS}...`, @scratch)) !>;
 
         CCNursery n = cc_nursery_create() !>;
         if (!cc_nursery_is_live(n)) {
-            printf("\nFailed to create nursery!\n");
+            println(@string(`
+Failed to create nursery!`, @scratch)) !>;
             return 1;
         }
 
@@ -82,18 +85,22 @@ int main(void) {
         int finished = cc_atomic_load(&g_fibers_finished);
         
         if (started != finished) {
-            printf("\n\n!!! FAILURE DETECTED !!!\n");
-            printf("Iteration: %d\n", iter);
-            printf("Fibers started:  %d\n", started);
-            printf("Fibers finished: %d\n", finished);
-            printf("Zombie count:    %d\n", started - finished);
-            printf("=================================================================\n");
+            println(@string(`
+
+!!! FAILURE DETECTED !!!`, @scratch)) !>;
+            println(@string(`Iteration: ${iter}`, @scratch)) !>;
+            println(@string(`Fibers started:  ${started}`, @scratch)) !>;
+            println(@string(`Fibers finished: ${finished}`, @scratch)) !>;
+            println(@string(`Zombie count:    ${started - finished}`, @scratch)) !>;
+            println(@string(`=================================================================`, @scratch)) !>;
             return 1;
         }
     }
 
-    printf("\n\nRESULT: PASS - No zombie fibers detected after %d iterations.\n", NUM_ITERS);
-    printf("=================================================================\n");
+    println(@string(`
+
+RESULT: PASS - No zombie fibers detected after ${NUM_ITERS} iterations.`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch)) !>;
 
     return 0;
 }

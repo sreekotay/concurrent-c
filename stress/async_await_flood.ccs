@@ -7,7 +7,7 @@
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
 #include <ccc/std/task.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 #define NUM_TASKS 100
 #define BATCH_SIZE 10
@@ -51,7 +51,8 @@ cc_atomic_int g_completed = 0;
 }
 
 int main(void) {
-    printf("async_await_flood: %d tasks in batches of %d\n", NUM_TASKS, BATCH_SIZE);
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    println(@string(`async_await_flood: ${NUM_TASKS} tasks in batches of ${BATCH_SIZE}`, @scratch)) !>;
 
     int total_sum = 0;
     int num_batches = NUM_TASKS / BATCH_SIZE;
@@ -82,7 +83,7 @@ int main(void) {
         /* Run all concurrently */
         int err = cc_block_all(BATCH_SIZE, tasks, results);
         if (err != 0) {
-            printf("ERROR: batch %d failed with err=%d\n", batch, err);
+            println(@string(`ERROR: batch ${batch} failed with err=${err}`, @scratch)) !>;
             return 1;
         }
 
@@ -93,13 +94,13 @@ int main(void) {
     }
 
     int completed = cc_atomic_load(&g_completed);
-    printf("async_await_flood: completed=%d, sum=%d\n", completed, total_sum);
+    println(@string(`async_await_flood: completed=${completed}, sum=${total_sum}`, @scratch)) !>;
 
     if (completed != NUM_TASKS) {
-        printf("ERROR: expected %d completions\n", NUM_TASKS);
+        println(@string(`ERROR: expected ${NUM_TASKS} completions`, @scratch)) !>;
         return 2;
     }
 
-    printf("async_await_flood: PASS\n");
+    println(@string(`async_await_flood: PASS`, @scratch)) !>;
     return 0;
 }

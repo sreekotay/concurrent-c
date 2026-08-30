@@ -13,7 +13,7 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
 #include <errno.h>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -161,6 +161,7 @@ void free_resource(Resource* r) {
 }
 
 void recv_leaf(int id, CCChanRx rx) {
+    @errhandler(CCError e) cc_error_exit(e);
     Resource* res = alloc_resource(id);
     if (!res) return;
     @defer free_resource(res);
@@ -171,7 +172,7 @@ void recv_leaf(int id, CCChanRx rx) {
     int ignored = 0;
     int rc = cc_chan_recv(rx.raw, &ignored, sizeof(int));
     if (rc != 0 && rc != EPIPE && rc != ECANCELED) {
-        fprintf(stderr, "FAIL: recv_leaf rc=%d\n", rc);
+        eprintln(@string(`FAIL: recv_leaf rc=${rc}`, @scratch)) !>;
         exit(2);
     }
 
@@ -180,6 +181,7 @@ void recv_leaf(int id, CCChanRx rx) {
 }
 
 void send_leaf(int id, CCChanTx tx) {
+    @errhandler(CCError e) cc_error_exit(e);
     Resource* res = alloc_resource(id);
     if (!res) return;
     @defer free_resource(res);
@@ -190,7 +192,7 @@ void send_leaf(int id, CCChanTx tx) {
     int value = id;
     int rc = cc_chan_send(tx.raw, &value, sizeof(value));
     if (rc != 0 && rc != EPIPE && rc != ECANCELED) {
-        fprintf(stderr, "FAIL: send_leaf rc=%d\n", rc);
+        eprintln(@string(`FAIL: send_leaf rc=${rc}`, @scratch)) !>;
         exit(2);
     }
 
@@ -199,6 +201,7 @@ void send_leaf(int id, CCChanTx tx) {
 }
 
 void deadline_leaf(int id, CCChanRx rx) {
+    @errhandler(CCError e) cc_error_exit(e);
     Resource* res = alloc_resource(id);
     if (!res) return;
     @defer free_resource(res);
@@ -212,7 +215,7 @@ void deadline_leaf(int id, CCChanRx rx) {
         rc = cc_chan_recv(rx.raw, &ignored, sizeof(int));
     }
     if (rc != 0 && rc != EPIPE && rc != ECANCELED && rc != ETIMEDOUT) {
-        fprintf(stderr, "FAIL: deadline_leaf rc=%d\n", rc);
+        eprintln(@string(`FAIL: deadline_leaf rc=${rc}`, @scratch)) !>;
         exit(2);
     }
 
@@ -264,9 +267,8 @@ int main(void) {
     g_iterations = env_int_or("CC_AVALANCHE_ITERATIONS", DEFAULT_ITERATIONS);
     g_cancel_delay_ms = env_int_or("CC_AVALANCHE_CANCEL_DELAY_MS", DEFAULT_CANCEL_DELAY_MS);
 
-    printf("Cancellation Avalanche Challenge - CC\n");
-    printf("Mode: %s | Depth: %d | Width: %d | Iterations: %d | Cancel delay: %dms\n",
-           mode_name(mode), g_depth, g_width, g_iterations, g_cancel_delay_ms);
+    println("Cancellation Avalanche Challenge - CC") !>;
+    println(@string(`Mode: ${mode_name(mode)} | Depth: ${g_depth} | Width: ${g_width} | Iterations: ${g_iterations} | Cancel delay: ${g_cancel_delay_ms}ms`, @scratch)) !>;
 
     int expected = expected_leaf_count();
     double total_teardown_ms = 0.0;
@@ -381,36 +383,22 @@ int main(void) {
         if (started != expected || finished != expected || allocated != freed ||
             recv_waiters != recv_finished || send_waiters != send_finished ||
             deadline_waiters != deadline_finished) {
-            fprintf(stderr,
-                    "FAIL: iter=%d started=%d finished=%d allocated=%d freed=%d leak_of=%d recv=%d/%d send=%d/%d deadline=%d/%d\n",
-                    iter, started, finished, allocated, freed, allocated - freed,
-                    recv_finished, recv_waiters, send_finished, send_waiters,
-                    deadline_finished, deadline_waiters);
+            long long leak = allocated - freed;
+            eprintln(@string(`FAIL: iter=${iter} started=${started} finished=${finished} allocated=${allocated} freed=${freed} leak_of=${leak} recv=${recv_finished} of ${recv_waiters} send=${send_finished} of ${send_waiters} deadline=${deadline_finished} of ${deadline_waiters}`, @scratch)) !>;
             return 1;
         }
 
-        printf("Iter %d: started=%d finished=%d allocated=%d freed=%d recv=%d send=%d deadline=%d teardown_ms=%.3f recv_close_ms=%.3f send_close_ms=%.3f deadline_close_ms=%.3f post_close_join_ms=%.3f\n",
-               iter + 1, started, finished, allocated, freed,
-               recv_waiters, send_waiters, deadline_waiters, teardown_ms,
-               recv_close_ms, send_close_ms, deadline_close_ms, post_close_join_ms);
+        int iter_n = iter + 1;
+        println(@string(`Iter ${iter_n}: started=${started} finished=${finished} allocated=${allocated} freed=${freed} recv=${recv_waiters} send=${send_waiters} deadline=${deadline_waiters} teardown_ms=${teardown_ms} recv_close_ms=${recv_close_ms} send_close_ms=${send_close_ms} deadline_close_ms=${deadline_close_ms} post_close_join_ms=${post_close_join_ms}`, @scratch)) !>;
     }
 
-    printf("SUMMARY status=clean mode=%s leaks=0 started=%d finished=%d avg_teardown_ms=%.3f max_teardown_ms=%.3f avg_recv_close_ms=%.3f avg_send_close_ms=%.3f avg_deadline_close_ms=%.3f avg_post_close_join_ms=%.3f max_recv_close_ms=%.3f max_send_close_ms=%.3f max_deadline_close_ms=%.3f max_post_close_join_ms=%.3f recv=%d send=%d deadline=%d\n",
-           mode_name(mode),
-           expected * g_iterations,
-           expected * g_iterations,
-           total_teardown_ms / (double)g_iterations,
-           max_teardown_ms,
-           total_recv_close_ms / (double)g_iterations,
-           total_send_close_ms / (double)g_iterations,
-           total_deadline_close_ms / (double)g_iterations,
-           total_post_close_join_ms / (double)g_iterations,
-           max_recv_close_ms,
-           max_send_close_ms,
-           max_deadline_close_ms,
-           max_post_close_join_ms,
-           total_recv,
-           total_send,
-           total_deadline);
+    long long started_total = expected * g_iterations;
+    long long finished_total = expected * g_iterations;
+    double avg_teardown = total_teardown_ms / (double)g_iterations;
+    double avg_recv_close = total_recv_close_ms / (double)g_iterations;
+    double avg_send_close = total_send_close_ms / (double)g_iterations;
+    double avg_deadline_close = total_deadline_close_ms / (double)g_iterations;
+    double avg_post_close_join = total_post_close_join_ms / (double)g_iterations;
+    println(@string(`SUMMARY status=clean mode=${mode_name(mode)} leaks=0 started=${started_total} finished=${finished_total} avg_teardown_ms=${avg_teardown} max_teardown_ms=${max_teardown_ms} avg_recv_close_ms=${avg_recv_close} avg_send_close_ms=${avg_send_close} avg_deadline_close_ms=${avg_deadline_close} avg_post_close_join_ms=${avg_post_close_join} max_recv_close_ms=${max_recv_close_ms} max_send_close_ms=${max_send_close_ms} max_deadline_close_ms=${max_deadline_close_ms} max_post_close_join_ms=${max_post_close_join_ms} recv=${total_recv} send=${total_send} deadline=${total_deadline}`, @scratch)) !>;
     return 0;
 }

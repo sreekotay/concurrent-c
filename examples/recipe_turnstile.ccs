@@ -15,7 +15,7 @@
  * Index form: CCTurnstile t@(cap, n_stages, arena) !> @destroy; t.stage(k).wait(i).
  */
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 
 #define N   8
 #define CAP 2

@@ -12,7 +12,7 @@
  * Temp prints use @string(`...`, @scratch) — no hand-rolled arena.
  */
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 
 #define NUM_WORKERS 3
 #define NUM_JOBS    9

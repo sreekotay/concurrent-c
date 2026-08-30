@@ -14,7 +14,7 @@
  *     tests/switch_body_cap_result_fn_smoke.ccs -o /tmp/x.c
  */
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 
 static int64_t !>(CCError) parse_i(char[:] s) {
     return s.to_i64();

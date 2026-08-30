@@ -21,7 +21,7 @@
  *    9. peel — `.ptr` when a T* must leave
  */
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }

@@ -28,7 +28,7 @@
 
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 
 #define OPS 100000
@@ -66,7 +66,7 @@ void tx_fiber(int[~ >] tx) {
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     setvbuf(stdout, NULL, _IONBF, 0);
-    printf("match_lost_wakeup: 1+1 fibers x %d ops (unbuffered, select/1case)\n", OPS);
+    println(@string(`match_lost_wakeup: 1+1 fibers x ${OPS} ops (unbuffered, select/1case)`, @scratch)) !>;
 
     int[~ >] tx_h;
     int[~ <] rx_h;
@@ -88,15 +88,18 @@ int main(void) {
         while (cc_atomic_load(&g_recvs) < OPS) {
             cc_sleep_ms(500);
             int cur = cc_atomic_load(&g_recvs);
-            printf("\r  %d/%d", cur, OPS);
+            cc_fprint(STDOUT_FILENO, @string(`
+  ${cur}/${OPS}`, @scratch)) !>;
             if (cur == last) {
-                if (++stalled > 10) { printf("\nHANG (bug #2)\n"); exit(1); }
+                if (++stalled > 10) { println(@string(`
+HANG (bug #2)`, @scratch)) !>; exit(1); }
             } else {
                 last = cur;
                 stalled = 0;
             }
         }
     }
-    printf("\nPASS\n");
+    println(@string(`
+PASS`, @scratch)) !>;
     return 0;
 }

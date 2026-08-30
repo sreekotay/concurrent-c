@@ -1,6 +1,6 @@
 #include <ccc/std/prelude.cch>
 #include <stdint.h>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -115,6 +115,7 @@ static double run_snprintf_loop(const size_t* values, int value_count, int itera
 }
 
 int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     int iterations = bench_iterations();
     int trials = bench_trials();
     int value_count = bench_value_count();
@@ -126,34 +127,31 @@ int main(void) {
     fill_values(values, value_count);
     verify_same_output(values, value_count);
 
-    printf("=================================================================\n");
-    printf("REDIS HEADER TEMPLATE VS SNPRINTF\n");
-    printf("Iterations: %d | Trials: %d | Distinct lens: %d\n", iterations, trials, value_count);
-    printf("=================================================================\n\n");
+    println("=================================================================") !>;
+    println("REDIS HEADER TEMPLATE VS SNPRINTF") !>;
+    println(@string(`Iterations: ${iterations} | Trials: ${trials} | Distinct lens: ${value_count}`, @scratch)) !>;
+    println("=================================================================") !>;
 
     for (int trial = 1; trial <= trials; trial++) {
         double cc_ms = run_cc_template_loop(values, value_count, iterations);
         double snprintf_ms = run_snprintf_loop(values, value_count, iterations);
         if (trial == 1 || cc_ms < best_cc) best_cc = cc_ms;
         if (trial == 1 || snprintf_ms < best_snprintf) best_snprintf = snprintf_ms;
-        printf("  Trial %d:  cc_template=%8.2f ms  snprintf=%8.2f ms\n",
-               trial, cc_ms, snprintf_ms);
+        println(@string(`  Trial ${trial}:  cc_template=${cc_ms} ms  snprintf=${snprintf_ms} ms`, @scratch)) !>;
     }
 
-    printf("\n");
-    printf("  Best cc_template: %8.2f ms  (%10.0f hdr/sec)\n",
-           best_cc, (double)iterations / best_cc * 1000.0);
-    printf("  Best snprintf:    %8.2f ms  (%10.0f hdr/sec)\n",
-           best_snprintf, (double)iterations / best_snprintf * 1000.0);
-    printf("  Sink: len=%zu byte=%u\n", (size_t)g_len_sink, (unsigned)g_byte_sink);
+    println("") !>;
+    println(@string(` Best cc_template: ${best_cc} ms (${(double)iterations / best_cc * 1000.0} hdr/sec)`, @scratch)) !>;
+    println(@string(`  Best snprintf:    ${best_snprintf} ms  (${(double)iterations / best_snprintf * 1000.0} hdr/sec)`, @scratch)) !>;
+    println(@string(` Sink: len=${(size_t)g_len_sink} byte=${(unsigned)g_byte_sink}`, @scratch)) !>;
 
     if (best_cc <= best_snprintf) {
-        printf("RESULT: PASS - CC template loop is not slower than snprintf.\n");
+        println("RESULT: PASS - CC template loop is not slower than snprintf.") !>;
     } else {
         double slowdown = ((best_cc - best_snprintf) / best_snprintf) * 100.0;
-        printf("RESULT: FAIL - CC template loop is %.2f%% slower than snprintf.\n", slowdown);
+        println(@string(`RESULT: FAIL - CC template loop is ${slowdown}% slower than snprintf.`, @scratch)) !>;
     }
-    printf("=================================================================\n");
+    println("=================================================================") !>;
 
     free(values);
     return 0;

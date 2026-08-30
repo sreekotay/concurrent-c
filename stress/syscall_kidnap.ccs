@@ -9,7 +9,7 @@
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_nursery.cch>
 #include <ccc/std/prelude.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <unistd.h>
 #include <time.h>
@@ -32,10 +32,11 @@ atomic_int g_kidnappers_done = 0;
  * cancel still needs to work: after the parent nursery is cancelled, the
  * heartbeat exits its loop on the next wake. */
 void heartbeat_fiber() {
+    @errhandler(CCError e) { cc_error_log(e); return; }
     setvbuf(stdout, NULL, _IONBF, 0);
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    printf("[Heartbeat] Started\n");
+    println(@string(`[Heartbeat] Started`, @scratch)) !>;
     struct timespec ts = { .tv_sec = 0, .tv_nsec = HEARTBEAT_INTERVAL_MS * 1000000L };
     while (!cc_cancelled()) {
         nanosleep(&ts, NULL);
@@ -44,21 +45,22 @@ void heartbeat_fiber() {
         double ms = (double)(now.tv_sec - t0.tv_sec) * 1000.0
                   + (double)(now.tv_nsec - t0.tv_nsec) / 1e6;
         int n = atomic_fetch_add(&g_heartbeats, 1) + 1;
-        printf("[Heartbeat] Tick %d @ %.1fms\n", n, ms);
+        println(@string(`[Heartbeat] Tick ${n} @ $~float_dec(1){ms}ms`, @scratch)) !>;
     }
-    printf("[Heartbeat] Cancelled, exiting\n");
+    println(@string(`[Heartbeat] Cancelled, exiting`, @scratch)) !>;
 }
 
 /* A "Kidnapper" fiber that uses a RAW blocking syscall (sleep) */
 void kidnapper_fiber(int id) {
+    @errhandler(CCError e) { cc_error_log(e); return; }
     setvbuf(stdout, NULL, _IONBF, 0);
     atomic_fetch_add(&g_kidnappers_active, 1);
-    printf("[Kidnapper %d] Kidnapping an OS thread for 2 seconds...\n", id);
+    println(@string(`[Kidnapper ${id}] Kidnapping an OS thread for 2 seconds...`, @scratch)) !>;
     
     // Do the work (blocking syscall)
     sleep(2); 
     
-    printf("[Kidnapper %d] Released OS thread\n", id);
+    println(@string(`[Kidnapper ${id}] Released OS thread`, @scratch)) !>;
     atomic_fetch_sub(&g_kidnappers_active, 1);
     atomic_fetch_add(&g_kidnappers_done, 1);
     
@@ -73,10 +75,11 @@ int main(void) {
     // Ensure we have a fixed number of workers for the test
     setenv("CC_V2_THREADS", "16", 1);
     
-    printf("=================================================================\n");
-    printf("KIDNAPPING CHALLENGE: Can the CC Scheduler survive rude IO?\n");
-    printf("Workers: 16 | Kidnappers: %d\n", NUM_KIDNAPPERS);
-    printf("=================================================================\n\n");
+    println(@string(`=================================================================`, @scratch)) !>;
+    println(@string(`KIDNAPPING CHALLENGE: Can the CC Scheduler survive rude IO?`, @scratch)) !>;
+    println(@string(`Workers: 16 | Kidnappers: ${NUM_KIDNAPPERS}`, @scratch)) !>;
+    println(@string(`=================================================================
+`, @scratch)) !>;
 
     {
         CCNursery __cc_nursery148 = @create() !> @destroy;
@@ -84,7 +87,8 @@ int main(void) {
         // 1. No warmup. Heartbeat and kidnappers race for workers from T=0.
         __cc_nursery148.spawnhybrid(() => { heartbeat_fiber(); }) !>;
 
-        printf("\n!!! Unleashing Kidnappers !!!\n");
+        println(@string(`
+!!! Unleashing Kidnappers !!!`, @scratch)) !>;
         for (int i = 0; i < NUM_KIDNAPPERS; i++) {
             int id = i;
             __cc_nursery148.spawnhybrid(() => [id] { kidnapper_fiber(id); }) !>;
@@ -95,11 +99,11 @@ int main(void) {
             cc_sleep_ms(1000);
             int beats = atomic_load(&g_heartbeats);
             int active = atomic_load(&g_kidnappers_active);
-            printf("T+%ds: Heartbeats=%d | Active Kidnappers=%d\n", i+1, beats, active);
+            println(@string(`T+${i+1}s: Heartbeats=${beats} | Active Kidnappers=${active}`, @scratch)) !>;
         }
 
         // 5. Cancel the nursery - signals all fibers to stop
-        printf("Cancelling nursery...=========================================\n");
+        println(@string(`Cancelling nursery...=========================================`, @scratch)) !>;
         __cc_nursery148.cancel();
     
     }
@@ -107,18 +111,19 @@ int main(void) {
     int final_beats = atomic_load(&g_heartbeats);
     int final_done = atomic_load(&g_kidnappers_done);
     int final_active = atomic_load(&g_kidnappers_active);
-    printf("\n=================================================================\n");
-    printf("FINAL RESULTS\n");
-    printf("Total Heartbeats:       %d\n", final_beats);
-    printf("Kidnappers Completed:   %d / %d\n", final_done, NUM_KIDNAPPERS);
-    printf("Kidnappers Still Active:%d\n", final_active);
+    println(@string(`
+=================================================================`, @scratch)) !>;
+    println(@string(`FINAL RESULTS`, @scratch)) !>;
+    println(@string(`Total Heartbeats:       ${final_beats}`, @scratch)) !>;
+    println(@string(`Kidnappers Completed:   ${final_done} / ${NUM_KIDNAPPERS}`, @scratch)) !>;
+    println(@string(`Kidnappers Still Active:${final_active}`, @scratch)) !>;
     
     if (final_beats > (TEST_DURATION_SEC * (1000/HEARTBEAT_INTERVAL_MS)) * 0.8) {
-        printf("RESULT: PASS - The scheduler survived the kidnapping!\n");
+        println(@string(`RESULT: PASS - The scheduler survived the kidnapping!`, @scratch)) !>;
     } else {
-        printf("RESULT: FAIL - The scheduler was bricked by blocking IO.\n");
+        println(@string(`RESULT: FAIL - The scheduler was bricked by blocking IO.`, @scratch)) !>;
     }
-    printf("=================================================================\n");
+    println(@string(`=================================================================`, @scratch)) !>;
 
     return 0;
 }

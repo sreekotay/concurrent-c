@@ -21,7 +21,7 @@
  * samples=0  verify only, then exit (also for vs_bash)
  */
 #include <ccc/std/prelude.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -89,14 +89,14 @@ static ScanStats scan_slurp(const char* path) {
     @defer cc_arena_free(&a);
     CCFile f;
     if (cc_file_open(&f, cc_slice_cstr((char*)path), "rb") != 0) {
-        fprintf(stderr, "bench_line_scan: open failed: %s\n", path);
+        eprintln(@string(`bench_line_scan: open failed: ${path}`, @scratch)) !>;
         abort();
     }
     @defer cc_file_close(&f);
 
     CCSlice !>(CCIoError) rr = cc_file_read_all(&f, a);
     if (cc_is_err(rr)) {
-        fprintf(stderr, "bench_line_scan: read_all failed\n");
+        eprintln("bench_line_scan: read_all failed") !>;
         abort();
     }
     tally_blob(cc_value(rr), &s);
@@ -111,7 +111,7 @@ static ScanStats scan_sync(const char* path) {
     @defer cc_arena_free(&scratch);
     CCFile f;
     if (cc_file_open(&f, cc_slice_cstr((char*)path), "rb") != 0) {
-        fprintf(stderr, "bench_line_scan: open failed: %s\n", path);
+        eprintln(@string(`bench_line_scan: open failed: ${path}`, @scratch)) !>;
         abort();
     }
     @defer cc_file_close(&f);
@@ -120,7 +120,7 @@ static ScanStats scan_sync(const char* path) {
         CCSlice line = cc_slice_empty();
         bool !>(CCIoError) got = cc_file_read_line_into(&f, scratch, &line);
         if (cc_is_err(got)) {
-            fprintf(stderr, "bench_line_scan: read_line failed\n");
+            eprintln("bench_line_scan: read_line failed") !>;
             abort();
         }
         if (!cc_value(got)) break;
@@ -147,7 +147,7 @@ static ScanStats scan_chan(const char* path) {
                                         /*is_sync=*/false, CC_CHAN_TOPO_DEFAULT,
                                         /*is_ordered=*/false, &tx, &rx);
     if (!ch) {
-        fprintf(stderr, "bench_line_scan: channel_pair failed (cap=%zu)\n", cap);
+        eprintln(@string(`bench_line_scan: channel_pair failed (cap=${cap})`, @scratch)) !>;
         abort();
     }
     @defer ch.free();
@@ -164,7 +164,7 @@ static ScanStats scan_chan(const char* path) {
         n.spawn(() => [tx, path] {
             CCFile f;
             if (cc_file_open(&f, cc_slice_cstr((char*)path), "rb") != 0) {
-                fprintf(stderr, "bench_line_scan: open failed: %s\n", path);
+                eprintln(@string(`bench_line_scan: open failed: ${path}`, @scratch)) !>;
                 abort();
             }
             @defer cc_file_close(&f);
@@ -223,18 +223,17 @@ static double time_mode(ScanStats (*fn)(const char*), const char* path, int pass
 
 static void report_mode(const char* name, double* samples, int n, double slurp_med,
                         ScanStats st, int64_t file_bytes, int passes) {
+    @errhandler(CCError e) cc_error_exit(e);
     sort_doubles(samples, n);
     double med = samples[n / 2];
     double mb = (file_bytes * (double)passes) / (1024.0 * 1024.0);
     double mb_s = med > 0 ? mb / (med / 1000.0) : 0;
     double rel = slurp_med > 0 ? med / slurp_med : 0;
-    printf("%-10s  median %7.2f ms  %6.1f MB/s  %5.2fx slurp  "
-           "(lines=%lld ctx=%lld ex=%lld)\n",
-           name, med, mb_s, rel,
-           (long long)st.lines, (long long)st.ctx, (long long)st.ex);
+    println(@string(`  ${name}  median ${med} ms  ${mb_s} MB/s  ${rel}x slurp  (lines=${st.lines} ctx=${st.ctx} ex=${st.ex})`, @scratch)) !>;
 }
 
 int main(int argc, char** argv) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     const char* path = k_path_default;
     int samples = 7;
     int passes = 8;
@@ -265,7 +264,7 @@ int main(int argc, char** argv) {
     int want_sync = !strcmp(mode, "all") || !strcmp(mode, "sync");
     int want_chan = !strcmp(mode, "all") || !strcmp(mode, "chan");
     if (!want_slurp && !want_sync && !want_chan) {
-        fprintf(stderr, "bench_line_scan: mode must be all|slurp|sync|chan\n");
+        eprintln("bench_line_scan: mode must be all|slurp|sync|chan") !>;
         return 2;
     }
 
@@ -274,7 +273,7 @@ int main(int argc, char** argv) {
 
     FILE* hf = fopen(path, "rb");
     if (!hf) {
-        fprintf(stderr, "bench_line_scan: cannot open %s\n", path);
+        eprintln(@string(`bench_line_scan: cannot open ${path}`, @scratch)) !>;
         return 1;
     }
     fseek(hf, 0, SEEK_END);
@@ -282,12 +281,10 @@ int main(int argc, char** argv) {
     fclose(hf);
 
     if (!timed_only) {
-        printf("bench_line_scan: path=%s bytes=%lld samples=%d passes=%d mode=%s chan_cap=%zu\n",
-               path, (long long)file_bytes, samples, passes, mode, g_chan_cap);
+        println(@string(`bench_line_scan: path=${path} bytes=${(long long)file_bytes} samples=${samples} passes=${passes} mode=${mode} chan_cap=${g_chan_cap}u`, @scratch)) !>;
         if (want_chan)
-            printf("chan: buffered depth=%zu LineMsg slots\n", g_chan_cap);
-        printf("work: line count + count(\"%s\") + count(\"%s\")\n",
-               (const char*)k_ctx.ptr, (const char*)k_ex.ptr);
+            println(@string(`chan: buffered depth=${g_chan_cap}u LineMsg slots`, @scratch)) !>;
+        println(@string(`work: line count + count(\"${(const char*)k_ctx.ptr}\") + count(\"${(const char*)k_ex.ptr}\")`, @scratch)) !>;
     }
 
     /*
@@ -307,7 +304,7 @@ int main(int argc, char** argv) {
             ScanStats a = scan_sync(path);
             if (!have_ref) { ref = a; have_ref = 1; }
             else if (!stats_eq(ref, a)) {
-                fprintf(stderr, "bench_line_scan: FAIL sync mismatch\n");
+                eprintln("bench_line_scan: FAIL sync mismatch") !>;
                 return 1;
             }
         }
@@ -315,18 +312,16 @@ int main(int argc, char** argv) {
             ScanStats b = scan_chan(path);
             if (!have_ref) { ref = b; have_ref = 1; }
             else if (!stats_eq(ref, b)) {
-                fprintf(stderr, "bench_line_scan: FAIL chan mismatch\n");
+                eprintln("bench_line_scan: FAIL chan mismatch") !>;
                 return 1;
             }
         }
-        printf("check: lines=%lld ctx=%lld ex=%lld  reparse_sites=%lld\n",
-               (long long)ref.lines, (long long)ref.ctx, (long long)ref.ex,
-               (long long)(ref.ctx + ref.ex - 1));
+        println(@string(`check: lines=${(long long)ref.lines} ctx=${(long long)ref.ctx} ex=${(long long)ref.ex} reparse_sites=${(long long)(ref.ctx + ref.ex - 1)}`, @scratch)) !>;
     }
 
     /* samples=0: verify only (for vs_bash cold check). */
     if (samples == 0) {
-        printf("bench_line_scan: DONE\n");
+        println("bench_line_scan: DONE") !>;
         return 0;
     }
 
@@ -347,11 +342,11 @@ int main(int argc, char** argv) {
         if (want_sync) sync_s[i] = time_mode(scan_sync, path, passes, &last);
         if (want_chan) chan_s[i] = time_mode(scan_chan, path, passes, &last);
         if (!timed_only) {
-            printf("  sample %d:", i + 1);
-            if (want_slurp) printf(" slurp=%.2f", slurp_s[i]);
-            if (want_sync) printf(" sync=%.2f", sync_s[i]);
-            if (want_chan) printf(" chan=%.2f", chan_s[i]);
-            printf(" ms\n");
+            println(@string(` sample ${i + 1}:`, @scratch)) !>;
+            if (want_slurp) println(@string(` slurp=${slurp_s[i]}`, @scratch)) !>;
+            if (want_sync) println(@string(` sync=${sync_s[i]}`, @scratch)) !>;
+            if (want_chan) println(@string(` chan=${chan_s[i]}`, @scratch)) !>;
+            println(" ms") !>;
         }
     }
 
@@ -362,13 +357,13 @@ int main(int argc, char** argv) {
         sort_doubles(slurp_s, samples);
         slurp_med = slurp_s[samples / 2];
     }
-    printf("---\n");
+    println("---") !>;
     if (want_slurp)
         report_mode("slurp", slurp_s, samples, slurp_med, ref, file_bytes, passes);
     if (want_sync)
         report_mode("sync", sync_s, samples, slurp_med, ref, file_bytes, passes);
     if (want_chan)
         report_mode("chan", chan_s, samples, slurp_med, ref, file_bytes, passes);
-    printf("bench_line_scan: DONE\n");
+    println("bench_line_scan: DONE") !>;
     return 0;
 }

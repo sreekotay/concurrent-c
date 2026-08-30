@@ -5,7 +5,7 @@
  * nursery's completion, testing join synchronization under contention.
  */
 #include <ccc/cc_runtime.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 #define ITERATIONS 500
 #define NUM_WAITERS 10
@@ -33,7 +33,7 @@ void* waiter_task(void* arg) {
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    printf("fiber_multi_joiner_race: %d iterations, %d waiters each\n", ITERATIONS, NUM_WAITERS);
+    println(@string(`fiber_multi_joiner_race: ${ITERATIONS} iterations, ${NUM_WAITERS} waiters each`, @scratch)) !>;
     
     for (int iter = 0; iter < ITERATIONS; iter++) {
         cc_atomic_store(&completed, 0);
@@ -51,15 +51,15 @@ int main(void) {
         /* All waiters should have completed */
         int c = cc_atomic_load(&completed);
         if (c != NUM_WAITERS) {
-            fprintf(stderr, "FAIL: iter %d: only %d/%d waiters completed\n", iter, c, NUM_WAITERS);
+            eprintln(@string(`FAIL: iter ${iter}: only ${c}/${NUM_WAITERS} waiters completed`, @scratch)) !>;
             return 1;
         }
         
         if ((iter + 1) % 100 == 0) {
-            printf("  completed %d/%d\n", iter + 1, ITERATIONS);
+            println(@string(`  completed ${iter + 1}/${ITERATIONS}`, @scratch)) !>;
         }
     }
     
-    printf("fiber_multi_joiner_race: PASS\n");
+    println(@string(`fiber_multi_joiner_race: PASS`, @scratch)) !>;
     return 0;
 }

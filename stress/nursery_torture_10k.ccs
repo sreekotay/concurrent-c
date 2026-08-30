@@ -6,7 +6,7 @@
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <time.h>
 
@@ -38,25 +38,29 @@ void recursive_nursery(int depth) {
 }
 
 int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     setvbuf(stdout, NULL, _IONBF, 0);
-    printf("=================================================================\n");
-    printf("NURSERY TORTURE: Nesting %d levels deep\n", TORTURE_DEPTH);
-    printf("=================================================================\n\n");
+    println(@string(`=================================================================`, @scratch)) !>;
+    println(@string(`NURSERY TORTURE: Nesting ${TORTURE_DEPTH} levels deep`, @scratch)) !>;
+    println(@string(`=================================================================
+`, @scratch)) !>;
 
     double start = time_now_ms();
     recursive_nursery(0);
     double duration = time_now_ms() - start;
 
     int final_count = cc_atomic_load(&g_count);
-    printf("Completed: %d/%d levels\n", final_count, TORTURE_DEPTH);
-    printf("Total Time: %.2f ms (%.4f ms per level)\n", duration, duration / TORTURE_DEPTH);
+    println(@string(`Completed: ${final_count}/${TORTURE_DEPTH} levels`, @scratch)) !>;
+    println(@string(`Total Time: $~float_dec(2){duration} ms ($~float_dec(4){duration / TORTURE_DEPTH} ms per level)`, @scratch)) !>;
 
     if (final_count == TORTURE_DEPTH) {
-        printf("\nRESULT: PASS - Nurseries scale linearly to extreme depths!\n");
+        println(@string(`
+RESULT: PASS - Nurseries scale linearly to extreme depths!`, @scratch)) !>;
     } else {
-        printf("\nRESULT: FAIL - Lost some fibers in the abyss.\n");
+        println(@string(`
+RESULT: FAIL - Lost some fibers in the abyss.`, @scratch)) !>;
     }
-    printf("=================================================================\n");
+    println(@string(`=================================================================`, @scratch)) !>;
 
     return 0;
 }

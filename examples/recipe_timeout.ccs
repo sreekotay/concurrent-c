@@ -34,7 +34,7 @@
  * Duration helpers: seconds(n), millis(n) (see cc_sched.cch).
  */
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }

@@ -281,7 +281,7 @@ SmallVec::[long long, 8] w;              // multi-word types stay one arg
 
 ## Print
 
-Prefer `io.println` when a `CCStdio` handle is in scope (`<ccc/script/stdio.cch>`):
+Prefer `io.println` when a `CCStdio` handle is in scope (`<ccc/stdio.cch>`):
 
 ```c
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
@@ -850,7 +850,7 @@ Jupyter/Colab: `from cc_node import require`).
 ```c
 #include <ccc/cc_runtime.cch>      // nurseries, channels, core
 #include <ccc/std/prelude.cch>     // kilobytes, vec/map/dir, … — not <stdio.h> / <string.h>
-#include <ccc/script/stdio.cch>    // CCStdio / io.println
+#include <ccc/stdio.cch>    // CCStdio / io.println
 #include <ccc/script/prelude.cch>  // forced in for .shcc (<stdio.h> + std prelude); not <string.h>
 #include <ccc/cc_atomic.cch>       // portable atomics
 #include <stdio.h>                 // printf, … — include when you use C stdio

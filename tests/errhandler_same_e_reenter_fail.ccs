@@ -3,7 +3,7 @@
  * Report via cc_error_exit / !> { abort(); }, not !>; in the handler body.
  */
 #include <ccc/cc_runtime.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 
 int main(void) {

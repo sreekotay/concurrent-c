@@ -5,7 +5,9 @@
  * Measures one producer + one consumer over a cap=1000 channel.
  */
 #include <ccc/std/prelude.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
+
+extern int cc_eprintf(const char *fmt, ...);
 #include <time.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -70,7 +72,7 @@ static double run_once(void) {
             }
             /* Keep the checksum live so the loop cannot be elided. */
             if (checksum < 0) {
-                fprintf(stderr, "impossible checksum=%lld\n", (long long)checksum);
+                (void)cc_eprintf("impossible checksum=%lld\n", (long long)checksum);
             }
         }) !>;
     
@@ -79,9 +81,10 @@ static double run_once(void) {
 }
 
 int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     g_iterations = env_int_or("CC_BUF_ITERS", DEFAULT_ITERATIONS);
     g_samples = env_int_or("CC_BUF_SAMPLES", DEFAULT_SAMPLES);
-    printf("perf_buffered_base: cap=%d iters=%d samples=%d\n", CHANNEL_CAPACITY, g_iterations, g_samples);
+    println(@string(`perf_buffered_base: cap=${CHANNEL_CAPACITY} iters=${g_iterations} samples=${g_samples}`, @scratch)) !>;
 
     /* Warmup to reduce first-run noise. */
     (void)run_once();
@@ -91,13 +94,13 @@ int main(void) {
     for (int i = 0; i < g_samples; i++) {
         elapsed_ms[i] = run_once();
         ops_sec[i] = (g_iterations * 2.0) / (elapsed_ms[i] / 1000.0);
-        printf("  run %d: %.0f ops/sec (%.2f ms)\n", i + 1, ops_sec[i], elapsed_ms[i]);
+        println(@string(` run ${i + 1}: ${ops_sec[i]} ops/sec (${elapsed_ms[i]} ms)`, @scratch)) !>;
     }
 
     sort_doubles(ops_sec, g_samples);
     sort_doubles(elapsed_ms, g_samples);
     int mid = g_samples / 2;
-    printf("  median: %.0f ops/sec (%.2f ms)\n", ops_sec[mid], elapsed_ms[mid]);
-    printf("perf_buffered_base: DONE\n");
+    println(@string(` median: ${ops_sec[mid]} ops/sec (${elapsed_ms[mid]} ms)`, @scratch)) !>;
+    println("perf_buffered_base: DONE") !>;
     return 0;
 }

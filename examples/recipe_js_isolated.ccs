@@ -17,7 +17,7 @@
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/script/js.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <time.h>
 
 static double now_ms(void) {
@@ -28,7 +28,7 @@ static double now_ms(void) {
 
 int main(void) {
     @errhandler(CCError e) {
-        fprintf(stderr, "fatal: %s\n", e.message);
+        cc_error_log(e);
         return 1;
     }
 
@@ -46,16 +46,13 @@ int main(void) {
     B.exec("globalThis.who = 'B'") !>;
     char[:] wa = A.eval("who")!>.as_slice(a) !>;
     char[:] wb = B.eval("who")!>.as_slice(a) !>;
-    printf("domain A says %.*s, domain B says %.*s\n",
-           (int)wa.len, (const char *)wa.ptr, (int)wb.len,
-           (const char *)wb.ptr);
+    println(@string(`domain A says ${wa}, domain B says ${wb}`, @scratch)) !>;
 
     /* Real modules through the sink: get+call over the wire. */
     CCJsDomVal os = A.require("os") !> @destroy;
     char[:] plat = os.platform()!>.as_slice(a) !>;
     long long cpus = os.availableParallelism() !>;
-    printf("os.platform() = %.*s, %lld cpus\n", (int)plat.len,
-           (const char *)plat.ptr, cpus);
+    println(@string(`os.platform() = ${plat}, ${cpus} cpus`, @scratch)) !>;
 
     /* The crossing profile, measured — this is why the tier is a
      * separate, explicit door. */
@@ -64,8 +61,7 @@ int main(void) {
         double t0 = now_ms();
         for (int i = 0; i < N; i++) (void)A.eval_i64("1");
         double per = (now_ms() - t0) * 1000.0 / N;
-        printf("wire round-trip: %.0f us/hop (in-process hosted tier: sub-us)\n",
-               per);
+        println(@string(`wire round-trip: ${per} us/hop (in-process hosted tier: sub-us)`, @scratch)) !>;
     }
 
     return 0;

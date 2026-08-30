@@ -7,7 +7,7 @@
  * This test validates our signal-based implementation doesn't regress.
  */
 #include <ccc/std/prelude.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <time.h>
 
 #define ITERATIONS 1000
@@ -20,6 +20,7 @@ static double time_now_ms(void) {
 
 /* Single channel recv (baseline) */
 static void bench_single_channel(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int[~100 >] tx;
     int[~100 <] rx;
     cc_channel_pair(&tx, &rx);
@@ -42,13 +43,14 @@ static void bench_single_channel(void) {
     double elapsed = time_now_ms() - start;
     double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
     
-    printf("  single channel recv: %.0f ops/sec (%.2f ms)\n", ops_per_sec, elapsed);
+    println(@string(` single channel recv: ${ops_per_sec} ops/sec (${elapsed} ms)`, @scratch)) !>;
     
     tx.close();
 }
 
 /* Two-channel select - one always ready */
 static void bench_two_channel_one_ready(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int[~100 >] tx1, tx2;
     int[~100 <] rx1, rx2;
     cc_channel_pair(&tx1, &rx1);
@@ -82,7 +84,7 @@ static void bench_two_channel_one_ready(void) {
     double elapsed = time_now_ms() - start;
     double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
     
-    printf("  2-channel select (1 ready): %.0f ops/sec (%.2f ms)\n", ops_per_sec, elapsed);
+    println(@string(` 2-channel select (1 ready): ${ops_per_sec} ops/sec (${elapsed} ms)`, @scratch)) !>;
     
     tx1.close();
     tx2.close();
@@ -90,6 +92,7 @@ static void bench_two_channel_one_ready(void) {
 
 /* Two-channel select - alternating */
 static void bench_two_channel_alternating(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int[~100 >] tx1, tx2;
     int[~100 <] rx1, rx2;
     cc_channel_pair(&tx1, &rx1);
@@ -127,7 +130,7 @@ static void bench_two_channel_alternating(void) {
     double elapsed = time_now_ms() - start;
     double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
     
-    printf("  2-channel select (alternating): %.0f ops/sec (%.2f ms)\n", ops_per_sec, elapsed);
+    println(@string(` 2-channel select (alternating): ${ops_per_sec} ops/sec (${elapsed} ms)`, @scratch)) !>;
     
     tx1.close();
     tx2.close();
@@ -135,6 +138,7 @@ static void bench_two_channel_alternating(void) {
 
 /* Four-channel select */
 static void bench_four_channel(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int[~100 >] tx1, tx2, tx3, tx4;
     int[~100 <] rx1, rx2, rx3, rx4;
     cc_channel_pair(&tx1, &rx1);
@@ -182,7 +186,7 @@ static void bench_four_channel(void) {
     double elapsed = time_now_ms() - start;
     double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
     
-    printf("  4-channel select (round-robin): %.0f ops/sec (%.2f ms)\n", ops_per_sec, elapsed);
+    println(@string(` 4-channel select (round-robin): ${ops_per_sec} ops/sec (${elapsed} ms)`, @scratch)) !>;
     
     tx1.close();
     tx2.close();
@@ -194,13 +198,14 @@ static void bench_four_channel(void) {
    in closures is complex. The sequential tests above cover select performance. */
 
 int main(void) {
-    printf("perf_match_select: measuring cc_chan_match_select performance\n");
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    println("perf_match_select: measuring cc_chan_match_select performance") !>;
     
     bench_single_channel();
     bench_two_channel_one_ready();
     bench_two_channel_alternating();
     bench_four_channel();
     
-    printf("perf_match_select: DONE\n");
+    println("perf_match_select: DONE") !>;
     return 0;
 }

@@ -4810,12 +4810,9 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
     return 0;
 }
 
-/* The three commands that produce a runtime object: compile the runtime TU,
- * compile the C float formatter, merge them with `-r`. */
+/* The command that produces a runtime object (single unity TU). */
 typedef struct {
-    char core[4096];
-    char float_fmt[4096];
-    char merge[4096];
+    char compile[4096];
 } CCRuntimeCmds;
 
 static uint64_t cc__fnv1a64(const void* data, size_t n, uint64_t h) {
@@ -4977,13 +4974,12 @@ static int cc__runtime_obj_is_stale(const char* runtime_obj_path) {
 static void cc__runtime_build_cmds(const CCBuildOptions* opt, const char* cc_bin, int is_tcc,
                                    const CCHostCcProfile* host_prof,
                                    const char* target_part, const char* sysroot_part,
-                                   const char* obj, const char* core_obj, const char* float_obj,
-                                   const char* float_src, CCRuntimeCmds* out) {
+                                   const char* obj, CCRuntimeCmds* out) {
     const char* ccflags_env = getenv("CFLAGS");
     const char* cppflags_env = getenv("CPPFLAGS");
-    out->core[0] = out->float_fmt[0] = out->merge[0] = '\0';
+    out->compile[0] = '\0';
 
-    snprintf(out->core, sizeof(out->core), "%s %s %s %s %s -DCC_ENABLE_ASYNC -I%s -I%s -I%s -I%s -c %s -o %s",
+    snprintf(out->compile, sizeof(out->compile), "%s %s %s %s %s -DCC_ENABLE_ASYNC -I%s -I%s -I%s -I%s -I%s/runtime -c %s -o %s",
              cc_bin,
              ccflags_env ? ccflags_env : "",
              cppflags_env ? cppflags_env : "",
@@ -4993,50 +4989,20 @@ static void cc__runtime_build_cmds(const CCBuildOptions* opt, const char* cc_bin
              g_cc_include,
              g_cc_dir,
              g_repo_root,
+             g_cc_dir,
              g_cc_runtime_c,
-             core_obj);
-    if (host_prof->ok ? host_prof->no_liblfds : is_tcc) {
-        /* liblfds has no TCC port (needs GCC __atomic_* / OS PAL). Native ring
-         * queue remains the primary lock-free path when CC_NO_LIBLFDS is set. */
-        strncat(out->core, " -DCC_NO_LIBLFDS", sizeof(out->core) - strlen(out->core) - 1);
-    }
-    cc__append_host_cc_flags(out->core, sizeof(out->core), cc_bin);
-    if (opt->cc_flags && *opt->cc_flags) {
-        strncat(out->core, " ", sizeof(out->core) - strlen(out->core) - 1);
-        strncat(out->core, opt->cc_flags, sizeof(out->core) - strlen(out->core) - 1);
-    }
-    if (!is_tcc)
-        strncat(out->core, " -ffunction-sections -fdata-sections", sizeof(out->core) - strlen(out->core) - 1);
-
-    snprintf(out->float_fmt, sizeof(out->float_fmt), "%s %s %s %s %s -I%s -I%s -I%s -I%s -c %s -o %s",
-             cc_bin,
-             ccflags_env ? ccflags_env : "",
-             cppflags_env ? cppflags_env : "",
-             target_part ? target_part : "",
-             sysroot_part ? sysroot_part : "",
-             g_cc_lowered_include,
-             g_cc_include,
-             g_cc_dir,
-             g_repo_root,
-             float_src,
-             float_obj);
-    cc__append_host_cc_flags(out->float_fmt, sizeof(out->float_fmt), cc_bin);
-    if (opt->cc_flags && *opt->cc_flags) {
-        strncat(out->float_fmt, " ", sizeof(out->float_fmt) - strlen(out->float_fmt) - 1);
-        strncat(out->float_fmt, opt->cc_flags, sizeof(out->float_fmt) - strlen(out->float_fmt) - 1);
-    }
-    if (!is_tcc)
-        strncat(out->float_fmt, " -ffunction-sections -fdata-sections",
-                sizeof(out->float_fmt) - strlen(out->float_fmt) - 1);
-
-    snprintf(out->merge, sizeof(out->merge), "%s %s %s %s -nostdlib -r %s %s -o %s",
-             cc_bin,
-             target_part ? target_part : "",
-             sysroot_part ? sysroot_part : "",
-             cppflags_env ? cppflags_env : "",
-             core_obj,
-             float_obj,
              obj);
+    if (host_prof->ok ? host_prof->no_liblfds : is_tcc) {
+        strncat(out->compile, " -DCC_NO_LIBLFDS", sizeof(out->compile) - strlen(out->compile) - 1);
+    }
+    cc__append_host_cc_flags(out->compile, sizeof(out->compile), cc_bin);
+    if (opt->cc_flags && *opt->cc_flags) {
+        strncat(out->compile, " ", sizeof(out->compile) - strlen(out->compile) - 1);
+        strncat(out->compile, opt->cc_flags, sizeof(out->compile) - strlen(out->compile) - 1);
+    }
+    if (!is_tcc)
+        strncat(out->compile, " -ffunction-sections -fdata-sections",
+                sizeof(out->compile) - strlen(out->compile) - 1);
 }
 
 static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
@@ -5095,49 +5061,27 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
 
     // Host-native runtime objects under <cache>/host/<fp>/.
     char runtime_obj[PATH_MAX];
-    char runtime_core_obj[PATH_MAX];
-    char runtime_float_obj[PATH_MAX];
-    char runtime_float_src[PATH_MAX];
     const char* rt_root = g_host_obj_root[0] ? g_host_obj_root : g_out_root;
-    snprintf(runtime_float_src, sizeof(runtime_float_src), "%s/runtime/float_format_zmij.c", g_cc_dir);
 
-    /* Name the objects after a hash of the commands that build them, so each
-     * variant gets its own file. <cache>/host/<fp>/ is keyed on the host CC
-     * alone; sharing one runtime.o across variants made every debug/release
-     * flip rebuild the runtime. Derive the hash from commands written against
-     * placeholder output paths, since the real paths contain the hash. */
     CCRuntimeCmds probe;
-    char ph_obj[PATH_MAX], ph_core[PATH_MAX], ph_float[PATH_MAX];
+    char ph_obj[PATH_MAX];
     snprintf(ph_obj, sizeof(ph_obj), "%s/runtime.o", rt_root);
-    snprintf(ph_core, sizeof(ph_core), "%s/runtime.core.o", rt_root);
-    snprintf(ph_float, sizeof(ph_float), "%s/runtime.float.o", rt_root);
     cc__runtime_build_cmds(opt, cc_bin, is_tcc, &host_prof, target_part, sysroot_part,
-                           ph_obj, ph_core, ph_float, runtime_float_src, &probe);
-    uint64_t vh = cc__fnv1a64(probe.core, strlen(probe.core), 0);
-    vh = cc__fnv1a64(probe.float_fmt, strlen(probe.float_fmt), vh);
-    vh = cc__fnv1a64(probe.merge, strlen(probe.merge), vh);
+                           ph_obj, &probe);
+    uint64_t vh = cc__fnv1a64(probe.compile, strlen(probe.compile), 0);
     char variant[17];
     snprintf(variant, sizeof(variant), "%016llx", (unsigned long long)vh);
 
     snprintf(runtime_obj, sizeof(runtime_obj), "%s/runtime-%s.o", rt_root, variant);
-    snprintf(runtime_core_obj, sizeof(runtime_core_obj), "%s/runtime-%s.core.o", rt_root, variant);
-    snprintf(runtime_float_obj, sizeof(runtime_float_obj), "%s/runtime-%s.float.o", rt_root, variant);
 
     CCRuntimeCmds cmds;
     cc__runtime_build_cmds(opt, cc_bin, is_tcc, &host_prof, target_part, sysroot_part,
-                           runtime_obj, runtime_core_obj, runtime_float_obj, runtime_float_src, &cmds);
+                           runtime_obj, &cmds);
 
-    /* Reuse the cached object when the very same commands produced it and
-     * nothing it was built from has changed. The recipe is the authority, not
-     * the hash: should the hash ever fail to separate two variants, the
-     * byte-exact comparison still forces a rebuild rather than handing back a
-     * wrong object. Without this cache an installed ccc — which has no prebuilt
-     * runtime object to fall back on — recompiles the whole runtime TU on every
-     * run. */
     char recipe_path[PATH_MAX];
-    char recipe[sizeof(cmds.core) + sizeof(cmds.float_fmt) + sizeof(cmds.merge) + 4];
+    char recipe[sizeof(cmds.compile) + 2];
     snprintf(recipe_path, sizeof(recipe_path), "%s.recipe", runtime_obj);
-    snprintf(recipe, sizeof(recipe), "%s\n%s\n%s\n", cmds.core, cmds.float_fmt, cmds.merge);
+    snprintf(recipe, sizeof(recipe), "%s\n", cmds.compile);
     if (file_exists(runtime_obj) && cc__file_text_equals(recipe_path, recipe)) {
         struct stat obj_st;
         if (stat(runtime_obj, &obj_st) == 0 && obj_st.st_mtime >= cc__runtime_inputs_mtime()) {
@@ -5148,9 +5092,7 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
         }
     }
 
-    if (run_cmd(cmds.core, opt->verbose) != 0) return -1;
-    if (run_cmd(cmds.float_fmt, opt->verbose) != 0) return -1;
-    if (run_cmd(cmds.merge, opt->verbose) != 0) return -1;
+    if (run_cmd(cmds.compile, opt->verbose) != 0) return -1;
     cc__write_file_text(recipe_path, recipe);
     strncpy(out_runtime_path, runtime_obj, out_runtime_cap);
     out_runtime_path[out_runtime_cap - 1] = '\0';

@@ -23,13 +23,13 @@
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/script/py.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 int main(void) {
     /* `cc_error_site()` names the `!>` that routed the error here — the CC
      * position a Python exception's message does not carry. */
     @errhandler(CCError e) {
-        fprintf(stderr, "fatal: %s (at %s)\n", e.message, cc_error_site());
+        cc_error_log(e);
         return 1;
     }
 
@@ -58,7 +58,7 @@ int main(void) {
      * in .len). Dest to double[:] is a missing wrapper — peel stays. */
     char[:] ys = scaled.as_list::[double](arena) !>;
     double* yv = (double*)ys.ptr;
-    printf("scaled=%zu first=%g last=%g\n", ys.len, yv[0], yv[ys.len - 1]);
+    println(@string(`scaled=${ys.len} first=${yv[0]} last=${yv[ys.len - 1]}`, @scratch)) !>;
 
     /* 3 + 4. An imported module is an object; its attributes are
      *    methods. Arguments marshal by static type — a typed slice
@@ -66,19 +66,19 @@ int main(void) {
     CCPyObj st = py.import("statistics") !> @destroy;
     double xs[:] = {1.0, 2.0, 3.0, 4.0, 42.0};
     double mean = st.mean(xs) !>;
-    printf("mean=%g\n", mean);
+    println(@string(`mean=${mean}`, @scratch)) !>;
 
     /* 5. `!>` links hops: each unwraps, the next dispatches on the
      *    unwrapped value. */
     char[:] ver = py.import("sys")!>.get("version")!>.as_slice()!>;
-    printf("python=%.6s\n", (const char*)ver.ptr);
+    println(@string(`python=${ver.sub(0, 6)}`, @scratch)) !>;
 
     /* 8. A keyword argument is an ordinary argument that carries the name
      *    it binds to; order among keywords does not matter. */
     CCPyObj main = py.import("__main__") !> @destroy;
     char[:] pad = main.pad(7, py_kw("width", 4), py_kw("fill", "0"))
                       !>.as_slice()!>;
-    printf("pad=%.*s\n", (int)pad.len, (const char*)pad.ptr);
+    println(@string(`pad=${pad}`, @scratch)) !>;
 
     /* 7. A failure carries the exception class and, when it crossed
      *    Python frames, the formatted traceback. The handler recovers
@@ -89,12 +89,12 @@ int main(void) {
         `, arena).as_slice()) !>;
 
     CCPyObj bad = py.eval(@slice("boom()")) !>(e) {
-        printf("caught %.*s\n", (int)e.type_name.len, (const char*)e.type_name.ptr);
-        printf("traceback lines=%d\n", e.traceback.len > 0);
+        println(@string(`caught ${e.type_name}`, @scratch)) !>;
+        println(@string(`traceback lines=${e.traceback.len > 0}`, @scratch)) !>;
         return 0;
     } @destroy;
     (void)bad;
 
-    printf("unreachable\n");
+    println(@string(`unreachable`, @scratch)) !>;
     return 9;
 }

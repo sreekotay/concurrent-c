@@ -42,6 +42,7 @@
 #include <ccc/std/map.cch>
 #include <ccc/std/static_map.cch>
 #include <ccc/std/string.cch>
+#include <ccc/stdio.cch>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdatomic.h>
@@ -151,8 +152,8 @@ static char[:] !>(CCError) reply_arena_alloc_slice(CCArena reply_arena, size_t n
 
 
 static void redis_diag_fprintln(CCString* line, CCArena scratch) {
-    const char* p = cc_string_cstr(line, scratch);
-    if (p) fprintf(stderr, "%s\n", p);
+    (void)scratch;
+    line->eprintln() !>;
 }
 
 static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
@@ -990,7 +991,7 @@ static void* owner_reply_entry(void* env, intptr_t slot_i, intptr_t arena_i) {
         bool preload_ok = false;
         preload_ok = db_preload_keys_ok(&db, preload_keys);
         if (!preload_ok) {
-            fprintf(stderr, "redis_owner: preload failed\n");
+            eprintln("redis_owner: preload failed") !>;
             return 1;
         }
         size_t preload_key_count = (size_t)preload_keys;
@@ -1168,10 +1169,9 @@ int main(int argc, char** argv) {
         port = (int)parsed;
     }
 
-    char addr[64];
-    snprintf(addr, sizeof(addr), "127.0.0.1:%d", port);
+    CCString addr = @string(`127.0.0.1:${port}`, @scratch);
 
-    CCListener ln = cc_tcp_listen(cc_slice_cstr(addr)) !>(e) {
+    CCListener ln = cc_tcp_listen(addr.as_slice()) !>(e) {
         char scratch_buf[256];
         CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
         CCString line = @string(`listen error: ${(int)e}`, scratch);
@@ -1186,8 +1186,7 @@ int main(int argc, char** argv) {
 
     CCListener* ln_ptr = &ln;
 
-    printf("redis_owner listening on %s\n", addr);
-    fflush(stdout);
+    eprintln(@string(`redis_owner listening on ${addr}`, @scratch)) !>;
 
     {
         CCNursery server = cc_nursery_create() !> @destroy;
@@ -1202,7 +1201,7 @@ int main(int argc, char** argv) {
             while (true) {
                 CCSocket client = ln_ptr->accept() !>(e) {
                     if (!server.is_cancelled()) {
-                        fprintf(stderr, "redis_owner accept error: %d\n", (int)e);
+                        eprintln(@string(`redis_owner accept error: ${(int)e}`, @scratch)) !>;
                     }
                     break;
                 };

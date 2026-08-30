@@ -13,7 +13,7 @@
  * and do not return; analysis copies take d.analysis (arena last).
  */
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 
 #define DOC_MAX 8
 

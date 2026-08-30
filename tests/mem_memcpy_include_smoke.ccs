@@ -1,6 +1,6 @@
 /* Explicit Gap: #include <string.h> declares memcpy. */
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <string.h>
 
 int main(void) {

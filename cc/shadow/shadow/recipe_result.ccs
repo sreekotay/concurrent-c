@@ -25,7 +25,7 @@
  */
 #include <ccc/std/prelude.cch>
 #include <stdlib.h>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 
 /* A fallible operation: returns T!>(CCError). */
 int !>(CCError) read_config_value(const char* key) {

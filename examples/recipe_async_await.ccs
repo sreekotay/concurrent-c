@@ -16,7 +16,7 @@
  */
 
 #include <ccc/cc_runtime.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 
 /* Suspends twice on the channel, then returns the echoed value. */
 @async int !>(CCError) echo_through_channel(CCChanTx tx, CCChanRx rx, int value) {

@@ -3,41 +3,41 @@
  * If this fails, we have isolated the bug.
  */
 #include <ccc/cc_runtime.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 cc_atomic_int g = 0;
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    printf("nested_minimal: single iteration\n");
+    println(@string(`nested_minimal: single iteration`, @scratch)) !>;
     
     {
         CCNursery __cc_nursery133 = @create() !> @destroy;
 
         __cc_nursery133.spawn (() => [] {
-            printf("  fiber1: starting\n");
+            println(@string(`  fiber1: starting`, @scratch)) !>;
             {
                 CCNursery __cc_nursery134 = @create() !> @destroy;
 
                 __cc_nursery134.spawn (() => [] {
-                    printf("  fiber2: running\n");
+                    println(@string(`  fiber2: running`, @scratch)) !>;
                     cc_atomic_store(&g, 42);
                 }) !>;
             
             }
-            printf("  fiber1: done\n");
+            println(@string(`  fiber1: done`, @scratch)) !>;
         }) !>;
     
     }
     
     int val = cc_atomic_load(&g);
-    printf("nested_minimal: g=%d (expected 42)\n", val);
+    println(@string(`nested_minimal: g=${val} (expected 42)`, @scratch)) !>;
     
     if (val == 42) {
-        printf("nested_minimal: PASS\n");
+        println(@string(`nested_minimal: PASS`, @scratch)) !>;
         return 0;
     } else {
-        printf("nested_minimal: FAIL\n");
+        println(@string(`nested_minimal: FAIL`, @scratch)) !>;
         return 1;
     }
 }

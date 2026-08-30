@@ -14,6 +14,7 @@
 
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
+#include <ccc/stdio.cch>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -114,13 +115,13 @@ static bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
     CCResult_size_t_CCIoError wr = cc_file_write(f, data);
     if (cc_is_err(wr)) {
         CCIoError err = cc_unwrap_err_as(wr, CCIoError);
-        fprintf(stderr, "%s failed kind=%d os=%d\n", what, err.base.kind, err.os_code);
+        eprintln(@string(`${what} failed kind=${err.base.kind} os=${err.os_code}`, @scratch)) !>;
         cc_atomic_store(&g_pipeline_error, 1);
         return false;
     }
     size_t n = cc_unwrap_as(wr, size_t);
     if (n != data.len) {
-        fprintf(stderr, "%s short write %zu/%zu\n", what, n, data.len);
+        eprintln(@string(`${what} short write ${n}/${data.len}`, @scratch)) !>;
         cc_atomic_store(&g_pipeline_error, 1);
         return false;
     }
@@ -169,14 +170,14 @@ void* compress_task_wrapper(void* arg) {
 static void print_stats(const char* label) {
     long blocks = cc_atomic_load(&g_blocks_done);
     if (blocks <= 0) return;
-    printf("\n=== pigz block timing: %s (%ld blocks) ===\n", label, blocks);
-    printf("queue_wait avg:   %.1f us\n",
-           (double)cc_atomic_load(&g_queue_wait_ns) / 1000.0 / (double)blocks);
-    printf("compress avg:     %.1f us\n",
-           (double)cc_atomic_load(&g_compress_ns) / 1000.0 / (double)blocks);
-    printf("end_to_end avg:   %.1f us\n",
-           (double)cc_atomic_load(&g_end_to_end_ns) / 1000.0 / (double)blocks);
-    printf("===\n");
+    double qw = (double)cc_atomic_load(&g_queue_wait_ns) / 1000.0 / (double)blocks;
+    double comp = (double)cc_atomic_load(&g_compress_ns) / 1000.0 / (double)blocks;
+    double e2e = (double)cc_atomic_load(&g_end_to_end_ns) / 1000.0 / (double)blocks;
+    println(@string(`\n=== pigz block timing: ${label} (${blocks} blocks) ===`, @scratch)) !>;
+    println(@string(`queue_wait avg:   ${qw} us`, @scratch)) !>;
+    println(@string(`compress avg:     ${comp} us`, @scratch)) !>;
+    println(@string(`end_to_end avg:   ${e2e} us`, @scratch)) !>;
+    println(@string(`===`, @scratch)) !>;
 }
 
 int compress_file(const char* in_path, const char* out_path, int level) {
@@ -188,14 +189,14 @@ int compress_file(const char* in_path, const char* out_path, int level) {
 
     CCFile in_file;
     if (cc_file_open(&in_file, cc_slice_cstr(in_path), "rb") != 0) {
-        fprintf(stderr, "Failed to open input: %s\n", in_path);
+        eprintln(@string(`Failed to open input: ${in_path}`, @scratch)) !>;
         return 1;
     }
     @defer cc_file_close(&in_file);
 
     CCFile out_file;
     if (cc_file_open(&out_file, cc_slice_cstr(out_path), "wb") != 0) {
-        fprintf(stderr, "Failed to open output: %s\n", out_path);
+        eprintln(@string(`Failed to open output: ${out_path}`, @scratch)) !>;
         return 1;
     }
     @defer cc_file_close(&out_file);
@@ -271,27 +272,32 @@ int compress_file(const char* in_path, const char* out_path, int level) {
 }
 
 int main(int argc, char *argv[]) {
+    @errhandler(CCError e) { return cc_err_log(e); }
+
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <file>\n", argv[0]);
+        eprintln(@string(`Usage: ${argv[0]} <file>`, @scratch)) !>;
         return 1;
     }
-    
-    char out_name[4096];
-    snprintf(out_name, sizeof(out_name), "%s.gz", argv[1]);
+
+    char[:0] in_path = cc_slice_cstr(argv[1]);
+    CCString out_name = @string(`${in_path}.gz`, @scratch);
+    if (out_name.failed())
+        return cc_err_log(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "output path"));
 
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    int rc = compress_file(argv[1], out_name, 6);
+    int rc = compress_file((const char*)in_path.ptr, cc_string_cstr(&out_name, __cc_str_scratch), 6);
     clock_gettime(CLOCK_MONOTONIC, &t1);
 
     if (rc == 0) {
-        double elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+        (void)t0;
+        (void)t1;
         long blocks = cc_atomic_load(&g_blocks_done);
-        fprintf(stderr, "Compressed %s -> %s\n", argv[1], out_name);
-        fprintf(stderr, "Stats: %lld bytes in, %lld bytes out, %ld blocks\n",
-                (long long)cc_atomic_load(&g_bytes_in),
-                (long long)cc_atomic_load(&g_bytes_out),
-                blocks);
+        long long bin = (long long)cc_atomic_load(&g_bytes_in);
+        long long bout = (long long)cc_atomic_load(&g_bytes_out);
+        eprintln(@string(`Compressed ${in_path} -> ${out_name}`, @scratch)) !>;
+        eprintln(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
+                          @scratch)) !>;
         print_stats("fiber tasks");
     }
     return rc;

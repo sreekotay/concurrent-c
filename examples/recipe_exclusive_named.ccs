@@ -26,7 +26,7 @@
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_exclusive.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 
 #define NUM_WORKERS 4
 #define ITERS       1000

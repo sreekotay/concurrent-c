@@ -2,7 +2,7 @@
  * top level, statement-position handler bodies, and hoisted chain-link
  * handlers alike. */
 #include <ccc/cc_runtime.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <stdio.h>
 
 static int cc_int_twice(int v) { return v * 2; }

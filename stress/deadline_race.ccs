@@ -6,7 +6,7 @@
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 #define NUM_RACERS 20
 
@@ -41,7 +41,7 @@ void racer_work(int racer_id) {
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    printf("deadline_race: %d racers with varying deadlines\n", NUM_RACERS);
+    println(@string(`deadline_race: ${NUM_RACERS} racers with varying deadlines`, @scratch)) !>;
 
     {
         CCNursery __cc_nursery119 = @create() !> @destroy;
@@ -59,7 +59,6 @@ int main(void) {
     int timed_out = cc_atomic_load(&g_timed_out);
     int total = completed + timed_out;
 
-    printf("deadline_race: %d completed, %d timed out, %d total\n",
-           completed, timed_out, total);
+    println(@string(`deadline_race: ${completed} completed, ${timed_out} timed out, ${total} total`, @scratch)) !>;
     return (total == NUM_RACERS) ? 0 : 1;
 }

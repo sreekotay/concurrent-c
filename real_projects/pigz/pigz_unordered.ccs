@@ -12,6 +12,7 @@
 
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
+#include <ccc/stdio.cch>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -108,14 +109,14 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     
     CCFile in_file;
     if (cc_file_open(&in_file, cc_slice_cstr(in_path), "rb") != 0) {
-        fprintf(stderr, "Failed to open input: %s\n", in_path);
+        eprintln(@string(`Failed to open input: ${in_path}`, @scratch)) !>;
         return 1;
     }
     @defer cc_file_close(&in_file);
 
     CCFile out_file;
     if (cc_file_open(&out_file, cc_slice_cstr(out_path), "wb") != 0) {
-        fprintf(stderr, "Failed to open output: %s\n", out_path);
+        eprintln(@string(`Failed to open output: ${out_path}`, @scratch)) !>;
         return 1;
     }
     @defer cc_file_close(&out_file);
@@ -196,23 +197,29 @@ int compress_file(const char* in_path, const char* out_path, int level) {
 }
 
 int main(int argc, char *argv[]) {
+    @errhandler(CCError e) { return cc_err_log(e); }
+
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <file>\n", argv[0]);
+        eprintln(@string(`Usage: ${argv[0]} <file>`, @scratch)) !>;
         return 1;
     }
-    
-    char out_name[4096];
-    snprintf(out_name, sizeof(out_name), "%s.gz", argv[1]);
-    
-    int ret = compress_file(argv[1], out_name, 6);
-    
+
+    char[:0] in_path = cc_slice_cstr(argv[1]);
+    CCString out_name = @string(`${in_path}.gz`, @scratch);
+    if (out_name.failed())
+        return cc_err_log(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "output path"));
+
+    int ret = compress_file((const char*)in_path.ptr, cc_string_cstr(&out_name, __cc_str_scratch), 6);
+
     if (ret == 0) {
-        printf("Compressed %s -> %s (UNORDERED - output corrupt)\n", argv[1], out_name);
-        printf("Stats: %lld bytes in, %lld bytes out, %d blocks\n",
-               (long long)cc_atomic_load(&g_bytes_in),
-               (long long)cc_atomic_load(&g_bytes_out),
-               cc_atomic_load(&g_blocks_done));
+        long long bin = (long long)cc_atomic_load(&g_bytes_in);
+        long long bout = (long long)cc_atomic_load(&g_bytes_out);
+        int blocks = cc_atomic_load(&g_blocks_done);
+        println(@string(`Compressed ${in_path} -> ${out_name} (UNORDERED - output corrupt)`,
+                        @scratch)) !>;
+        println(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
+                        @scratch)) !>;
     }
-    
+
     return ret;
 }

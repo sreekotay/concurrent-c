@@ -1,7 +1,7 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/std/net.cch>
+#include <ccc/stdio.cch>
 #include <netinet/tcp.h>
-#include <stdio.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,17 +69,16 @@ int main(int argc, char** argv) {
     int total_replies = env_int_or_default("CC_PING_TOTAL_REPLIES", -1, -1);
     atomic_store_explicit(&g_total_replies_remaining, (long long)total_replies, memory_order_relaxed);
 
-    char addr[64];
-    snprintf(addr, sizeof(addr), "127.0.0.1:%d", port);
+    CCString addr = @string(`127.0.0.1:${port}`, @scratch);
 
-    CCListener ln = cc_tcp_listen(cc_slice_cstr(addr)) !>(e) {
-        fprintf(stderr, "ping_server listen error: %d\n", (int)e);
+    CCListener ln = cc_tcp_listen(addr.as_slice()) !>(e) {
+        eprintln(@string(`ping_server listen error: ${e}`, @scratch)) !>;
         return 1;
     };
     int one = 1;
     (void)setsockopt(ln.fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
-    printf("ping_server listening on %s\n", addr);
+    println(@string(`ping_server listening on ${addr}`, @scratch)) !>;
     fflush(stdout);
 
     CCListener* ln_ptr = &ln;

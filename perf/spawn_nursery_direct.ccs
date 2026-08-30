@@ -3,7 +3,7 @@
  * Measures: nursery-based spawn creation and completion throughput.
  */
 #include <ccc/std/prelude.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <time.h>
 
 #define ITERATIONS 100000
@@ -22,7 +22,7 @@ static double time_now_ms(void) {
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    printf("spawn_nursery_direct: measuring nursery spawn throughput (direct calls)\n");
+    println("spawn_nursery_direct: measuring nursery spawn throughput (direct calls)") !>;
 
     double start = time_now_ms();
 
@@ -43,9 +43,8 @@ int main(void) {
     int total_spawns = cc_atomic_load(&global_counter);
     double spawns_per_sec = total_spawns / (elapsed / 1000.0);
 
-    printf("  nursery spawns: %.0f spawns/sec (%.1f ms, total=%d)\n",
-           spawns_per_sec, elapsed, total_spawns);
+    println(@string(` nursery spawns: ${spawns_per_sec} spawns/sec (${elapsed} ms, total=${total_spawns})`, @scratch)) !>;
 
-    printf("spawn_nursery_direct: DONE\n");
+    println("spawn_nursery_direct: DONE") !>;
     return 0;
 }

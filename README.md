@@ -242,9 +242,9 @@ Test conventions: `tests/README.md`. Build driver / cache / outputs: [build spec
 
 **Linux ILP32.** Docker cold smokes on i386 and `linux/arm/v7`
 (gnueabihf / armhf, QEMU on Apple Silicon): curated suite **0 failures**
-with host+backend **gcc** (`./scripts/smoke_i386.sh`,
-`./scripts/smoke_arm32.sh`); TinyCC self-build (`CCC_HOST_CC=tcc`) fails
-at `ccc` compile. pigz compare on i386 and ARM32: `pigz_idiomatic` /
+with host+backend **gcc** or **TinyCC** (`./scripts/smoke_i386.sh`,
+`./scripts/smoke_arm32.sh`, and `CCC_HOST_CC=tcc` variants — seed
+0.3.4-259). pigz compare on i386 and ARM32: `pigz_idiomatic` /
 `pigz_cc` / original all ELF 32-bit and gunzip-clean. Receipts:
 [docs/ilp32-docker.md](docs/ilp32-docker.md).
 

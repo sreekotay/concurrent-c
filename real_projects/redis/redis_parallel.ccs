@@ -38,7 +38,7 @@
 #include <ccc/std/string.cch>
 #include <ccc/std/shard_map.cch>
 #include <ccc/cc_exclusive.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

@@ -54,7 +54,7 @@
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/script/py.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <time.h>
 
@@ -89,30 +89,33 @@ static double g_ms[64];
 static int g_samples = 7;
 
 static double report_ns(const char *mode, long long per) {
+    @errhandler(CCError e) cc_error_exit(e);
     double m = median(g_ms, g_samples);
     double ns = m * 1e6 / (double)per;
-    printf("  %-14s %9.2f ms  %9.1f ns/call\n", mode, m, ns);
-    printf("RESULT scalar %s ns_per_call %.1f\n", mode, ns);
+    println(@string(` ${mode} ${m} ms ${ns} ns/call`, @scratch)) !>;
+    println(@string(`RESULT scalar ${mode} ns_per_call ${ns}`, @scratch)) !>;
     return ns;
 }
 
 static double report_ms(const char *mode) {
+    @errhandler(CCError e) cc_error_exit(e);
     double m = median(g_ms, g_samples);
-    printf("  %-14s %9.2f ms\n", mode, m);
-    printf("RESULT bulk %s ms %.2f\n", mode, m);
+    println(@string(` ${mode} ${m} ms`, @scratch)) !>;
+    println(@string(`RESULT bulk ${mode} ms ${m}`, @scratch)) !>;
     return m;
 }
 
 static double report_row(const char *mode, long long rows) {
+    @errhandler(CCError e) cc_error_exit(e);
     double m = median(g_ms, g_samples);
     double ns = m * 1e6 / (double)rows;
-    printf("  %-14s %9.2f ms  %9.1f ns/row\n", mode, m, ns);
-    printf("RESULT vector %s ns_per_row %.1f\n", mode, ns);
+    println(@string(` ${mode} ${m} ms ${ns} ns/row`, @scratch)) !>;
+    println(@string(`RESULT vector ${mode} ns_per_row ${ns}`, @scratch)) !>;
     return ns;
 }
 
 int main(int argc, char **argv) {
-    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a = cc_arena_heap(megabytes(64)) @destroy;
 
     long long iters = (argc > 1) ? atoll(argv[1]) : 300000;
@@ -141,13 +144,12 @@ int main(int argc, char **argv) {
         `, a).as_slice()) !>;
     CCPyObj main_mod = py.import("__main__") !> @destroy;
     CCSlice ev = main_mod.env()!>.as_slice()!>;
-    printf("py_baseline iters=%lld n=%lld samples=%d python=%.*s\n",
-           iters, n, g_samples, (int)ev.len, (const char *)ev.ptr);
+    println(@string(`py_baseline iters=${iters} n=${n} samples=${g_samples} python=${ev}`, @scratch)) !>;
 
     long long sink = 0, want_mul_add = 0, want_add = 0;
 
     /* ---- scalar ladder ---- */
-    printf("\nscalar (one add / one mul-add per call):\n");
+    println("scalar (one add / one mul-add per call):") !>;
 
     for (int s = 0; s < g_samples; s++) {
         Math local = { .calls = 0 };
@@ -267,8 +269,7 @@ int main(int argc, char **argv) {
     double ns_attr = report_ns("py_to_cc_attr", iters);
 
     if (got_pycall != want_add || got_tocc != want_add || got_attr != want_add) {
-        fprintf(stderr, "MISMATCH add: want=%lld pycall=%lld tocc=%lld attr=%lld\n",
-                want_add, got_pycall, got_tocc, got_attr);
+        eprintln(@string(`MISMATCH add: want=${want_add} pycall=${got_pycall} tocc=${got_tocc} attr=${got_attr}`, @scratch)) !>;
         return 1;
     }
 
@@ -322,13 +323,12 @@ int main(int argc, char **argv) {
     }
     double ns_pypy = report_ns("py_to_py", on);
     if (got_ccpy != got_pypy) {
-        fprintf(stderr, "MISMATCH mul_add: cc_to_py=%lld py_to_py=%lld\n",
-                got_ccpy, got_pypy);
+        eprintln(@string(`MISMATCH mul_add: cc_to_py=${got_ccpy} py_to_py=${got_pypy}`, @scratch)) !>;
         return 1;
     }
 
     /* ---- rows: N calls, one crossing vs N crossings ---- */
-    printf("\nrows (%lld rows of (f64, i64, f64)):\n", on);
+    println(@string(`\nrows (${on} rows of (f64, i64, f64)):`, @scratch)) !>;
 
     double *rx = cc_arena_alloc_T_count(double, a, (size_t)on);
     int64_t *rk = cc_arena_alloc_T_count(int64_t, a, (size_t)on);
@@ -388,17 +388,15 @@ int main(int argc, char **argv) {
 
     /* Same values, same order, both accumulate in doubles — exact match. */
     if (got_rowcall != got_rowmap || got_rowcall != got_rowpy) {
-        fprintf(stderr, "MISMATCH rows: per_call=%.17g map=%.17g py=%.17g\n",
-                got_rowcall, got_rowmap, got_rowpy);
+        eprintln(@string(`MISMATCH rows: per_call=${got_rowcall} map=${got_rowmap} py=${got_rowpy}`, @scratch)) !>;
         return 1;
     }
-    printf("  batching: map vs per-call %.2fx, map vs native rows %.2fx\n",
-           ns_rowcall / ns_rowmap, ns_rowpy / ns_rowmap);
-    printf("RESULT ratio map_vs_per_call x %.2f\n", ns_rowcall / ns_rowmap);
-    printf("RESULT ratio map_vs_row_py x %.2f\n", ns_rowpy / ns_rowmap);
+    println(@string(` batching: map vs per-call ${ns_rowcall / ns_rowmap}x, map vs native rows ${ns_rowpy / ns_rowmap}x`, @scratch)) !>;
+    println(@string(`RESULT ratio map_vs_per_call x ${ns_rowcall / ns_rowmap}`, @scratch)) !>;
+    println(@string(`RESULT ratio map_vs_row_py x ${ns_rowpy / ns_rowmap}`, @scratch)) !>;
 
     /* ---- bulk ---- */
-    printf("\nbulk (%lld doubles):\n", n);
+    println(@string(`\nbulk (${n} doubles):`, @scratch)) !>;
 
     double *xs = cc_arena_alloc_T_count(double, a, (size_t)n);
     if (!xs) { puts("SKIP (allocation)"); return 0; }
@@ -448,7 +446,7 @@ int main(int argc, char **argv) {
 
     CCPyObj built_o = main_mod.build(n) !> @destroy;
     double built = built_o.as_f64() !>;
-    if ((long long)built != n) { fprintf(stderr, "bulk build mismatch\n"); return 1; }
+    if ((long long)built != n) { eprintln("bulk build mismatch") !>; return 1; }
 
     double got;
     if (have_numpy) {
@@ -459,7 +457,7 @@ int main(int argc, char **argv) {
             g_ms[s] = now_ms() - t0;
         }
         report_ms("numpy_sum");
-        if (got != cc_sum) { fprintf(stderr, "MISMATCH numpy_sum\n"); return 1; }
+        if (got != cc_sum) { eprintln("MISMATCH numpy_sum") !>; return 1; }
     }
 
     for (int s = 0; s < g_samples; s++) {
@@ -469,7 +467,7 @@ int main(int argc, char **argv) {
         g_ms[s] = now_ms() - t0;
     }
     report_ms("py_sum");
-    if (got != cc_sum) { fprintf(stderr, "MISMATCH py_sum\n"); return 1; }
+    if (got != cc_sum) { eprintln("MISMATCH py_sum") !>; return 1; }
 
     double[:] view = CCSlice_double_from_buffer(xs, (size_t)n);
     double ms_send_list = 0, ms_send_buf = 0, ms_recv_list = 0, ms_recv_buf = 0;
@@ -481,7 +479,7 @@ int main(int argc, char **argv) {
             g_ms[s] = now_ms() - t0;
         }
         ms_send_list = report_ms("send_list");
-        if (got != cc_sum) { fprintf(stderr, "MISMATCH send_list\n"); return 1; }
+        if (got != cc_sum) { eprintln("MISMATCH send_list") !>; return 1; }
 
         for (int s = 0; s < g_samples; s++) {
             double t0 = now_ms();
@@ -490,7 +488,7 @@ int main(int argc, char **argv) {
             g_ms[s] = now_ms() - t0;
         }
         ms_send_buf = report_ms("send_buf");
-        if (got != cc_sum) { fprintf(stderr, "MISMATCH send_buf\n"); return 1; }
+        if (got != cc_sum) { eprintln("MISMATCH send_buf") !>; return 1; }
 
         CCPyObj arr = main_mod.get_array() !> @destroy;
         for (int s = 0; s < g_samples; s++) {
@@ -501,7 +499,7 @@ int main(int argc, char **argv) {
             double acc = 0;
             const double *rv = (const double *)r.ptr;
             for (size_t k = 0; k < r.len; k++) acc += rv[k];
-            if (acc != cc_sum) { fprintf(stderr, "MISMATCH recv_buf\n"); return 1; }
+            if (acc != cc_sum) { eprintln("MISMATCH recv_buf") !>; return 1; }
             cc_arena_free(&ex);
         }
         ms_recv_buf = report_ms("recv_buf");
@@ -514,31 +512,26 @@ int main(int argc, char **argv) {
             double t0 = now_ms();
             CCSlice r = lst.as_list::[double](ex) !>;
             g_ms[s] = now_ms() - t0;
-            if (r.len != (size_t)n) { fprintf(stderr, "MISMATCH recv_list len\n"); return 1; }
+            if (r.len != (size_t)n) { eprintln("MISMATCH recv_list len") !>; return 1; }
             cc_arena_free(&ex);
         }
         ms_recv_list = report_ms("recv_list");
     }
 
     /* ---- derived ratios: overhead each way, against the native rung ---- */
-    printf("\nratios (native control = 1.0):\n");
-    printf("  py_to_cc  / py_call    %5.2fx   crossing into CC vs a Python call\n",
-           ns_tocc / ns_pycall);
-    printf("  py_to_cc_attr/py_to_cc %5.2fx   the per-call attribute lookup\n",
-           ns_attr / ns_tocc);
-    printf("  cc_to_py_3 / py_to_py  %5.2fx   crossing out of CC vs a Python call\n",
-           ns_ccpy3 / ns_pypy);
-    printf("  py_inline / c_native   %5.1fx   the two floors\n", ns_inline / ns_c);
+    println("ratios (native control = 1.0):") !>;
+    println(@string(` py_to_cc / py_call ${ns_tocc / ns_pycall}x crossing into CC vs a Python call`, @scratch)) !>;
+    println(@string(` py_to_cc_attr/py_to_cc ${ns_attr / ns_tocc}x the per-call attribute lookup`, @scratch)) !>;
+    println(@string(` cc_to_py_3 / py_to_py ${ns_ccpy3 / ns_pypy}x crossing out of CC vs a Python call`, @scratch)) !>;
+    println(@string(` py_inline / c_native ${ns_inline / ns_c}x the two floors`, @scratch)) !>;
     if (have_numpy && ms_send_buf > 0)
-        printf("  send_list / send_buf   %5.0fx   what py_buf removes (outbound)\n",
-               ms_send_list / ms_send_buf);
+        println(@string(` send_list / send_buf ${ms_send_list / ms_send_buf}x what py_buf removes (outbound)`, @scratch)) !>;
     if (have_numpy && ms_recv_buf > 0)
-        printf("  recv_list / recv_buf   %5.0fx   what the buffer probe removes (inbound)\n",
-               ms_recv_list / ms_recv_buf);
-    printf("RESULT ratio py_to_cc_vs_py_call x %.2f\n", ns_tocc / ns_pycall);
-    printf("RESULT ratio cc_to_py_vs_py_to_py x %.2f\n", ns_ccpy3 / ns_pypy);
+        println(@string(` recv_list / recv_buf ${ms_recv_list / ms_recv_buf}x what the buffer probe removes (inbound)`, @scratch)) !>;
+    println(@string(`RESULT ratio py_to_cc_vs_py_call x ${ns_tocc / ns_pycall}`, @scratch)) !>;
+    println(@string(`RESULT ratio cc_to_py_vs_py_to_py x ${ns_ccpy3 / ns_pypy}`, @scratch)) !>;
 
     (void)want_mul_add;
-    printf("\nagree=%.1f sink=%lld\n", cc_sum, sink);
+    println(@string(`\nagree=${cc_sum} sink=${sink}`, @scratch)) !>;
     return 0;
 }

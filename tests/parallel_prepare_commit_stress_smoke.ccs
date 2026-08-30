@@ -3,7 +3,7 @@
  * shard holds. Workers contend; cells must match committed deltas.
  */
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <ccc/cc_atomic.cch>
 #include <string.h>
 

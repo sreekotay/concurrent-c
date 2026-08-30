@@ -39,7 +39,7 @@
 
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 #define NUM_ITEMS 100
 #define REPEATS   500
@@ -94,8 +94,7 @@ int main(void) {
         int expected_sum = (NUM_ITEMS*(NUM_ITEMS-1))/2 + 2*NUM_ITEMS;
 
         if (recv != NUM_ITEMS || sum != expected_sum) {
-            fprintf(stderr, "FAIL iter %d: recv=%d sum=%d (expected %d/%d) - bug #3 drain truncation\n",
-                    iter, recv, sum, NUM_ITEMS, expected_sum);
+            eprintln(@string(`FAIL iter ${iter}: recv=${recv} sum=${sum} (expected ${NUM_ITEMS}/${expected_sum}) - bug #3 drain truncation`, @scratch)) !>;
             fails++;
             if (fails >= 3) {
                 g_ch0.free(); g_ch1.free(); g_ch2.free();
@@ -105,6 +104,6 @@ int main(void) {
         g_ch0.free(); g_ch1.free(); g_ch2.free();
     }
     if (fails > 0) return 1;
-    printf("buffered_drain_truncation: OK (%d iters)\n", REPEATS);
+    println(@string(`buffered_drain_truncation: OK (${REPEATS} iters)`, @scratch)) !>;
     return 0;
 }

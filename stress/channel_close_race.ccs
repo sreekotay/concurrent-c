@@ -11,7 +11,7 @@
 
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <time.h>
 
@@ -32,7 +32,7 @@ void sender(int[~10 >] tx, int id, int trace, int trace_every) {
         if (trace && trace_every > 0) {
             ops++;
             if ((ops % trace_every) == 0) {
-                printf("[send %d] ops=%d rc=%d\n", id, ops, rc);
+                println(@string(`[send ${id}] ops=${ops} rc=${rc}`, @scratch)) !>;
             }
         }
         if (rc != 0) break; // Channel closed
@@ -49,7 +49,7 @@ void receiver(int[~10 <] rx, int id, int trace, int trace_every) {
         if (trace && trace_every > 0) {
             ops++;
             if ((ops % trace_every) == 0) {
-                printf("[recv %d] ops=%d rc=%d\n", id, ops, rc);
+                println(@string(`[recv ${id}] ops=${ops} rc=${rc}`, @scratch)) !>;
             }
         }
         if (rc != 0) break; // Channel closed
@@ -73,10 +73,11 @@ int main(void) {
     int trace = env_int_or("CC_STRESS_TRACE", 0);
     int trace_every = env_int_or("CC_STRESS_TRACE_EVERY", 1000);
 
-    printf("=================================================================\n");
-    printf("CHANNEL CLOSE RACE: %d fibers | %d iterations\n", num_fibers * 2, num_iters);
-    printf("Targeting atomic teardown and immediate eviction...\n");
-    printf("=================================================================\n\n");
+    println(@string(`=================================================================`, @scratch)) !>;
+    println(@string(`CHANNEL CLOSE RACE: ${num_fibers * 2} fibers | ${num_iters} iterations`, @scratch)) !>;
+    println(@string(`Targeting atomic teardown and immediate eviction...`, @scratch)) !>;
+    println(@string(`=================================================================
+`, @scratch)) !>;
 
     for (int iter = 1; iter <= num_iters; iter++) {
         cc_atomic_store(&g_sends_attempted, 0);
@@ -84,7 +85,8 @@ int main(void) {
         cc_atomic_store(&g_sends_finished, 0);
         cc_atomic_store(&g_recvs_finished, 0);
 
-        printf("\rIteration %d/%d...", iter, num_iters);
+        cc_fprint(STDOUT_FILENO, @string(`
+Iteration ${iter}/${num_iters}...`, @scratch)) !>;
 
         int[~10 >] tx_h; int[~10 <] rx_h;
         cc_channel_pair(&tx_h, &rx_h);
@@ -117,20 +119,25 @@ int main(void) {
         int r_fin = cc_atomic_load(&g_recvs_finished);
 
         if (s_att != s_fin || r_att != r_fin) {
-            printf("\n\n!!! FAILURE DETECTED !!!\n");
-            printf("Iteration: %d\n", iter);
-            printf("Sends: %d attempted, %d finished (%d hanging)\n", s_att, s_fin, s_att - s_fin);
-            printf("Recvs: %d attempted, %d finished (%d hanging)\n", r_att, r_fin, r_att - r_fin);
+            println(@string(`
+
+!!! FAILURE DETECTED !!!`, @scratch)) !>;
+            println(@string(`Iteration: ${iter}`, @scratch)) !>;
+            println(@string(`Sends: ${s_att} attempted, ${s_fin} finished (${s_att - s_fin} hanging)`, @scratch)) !>;
+            println(@string(`Recvs: ${r_att} attempted, ${r_fin} finished (${r_att - r_fin} hanging)`, @scratch)) !>;
             return 1;
         }
         if (verbose) {
-            printf("\n  Sends: %d attempted, %d finished\n", s_att, s_fin);
-            printf("  Recvs: %d attempted, %d finished\n", r_att, r_fin);
+            println(@string(`
+  Sends: ${s_att} attempted, ${s_fin} finished`, @scratch)) !>;
+            println(@string(`  Recvs: ${r_att} attempted, ${r_fin} finished`, @scratch)) !>;
         }
     }
 
-    printf("\n\nRESULT: PASS - All %d iterations survived the chaos close.\n", num_iters);
-    printf("=================================================================\n");
+    println(@string(`
+
+RESULT: PASS - All ${num_iters} iterations survived the chaos close.`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch)) !>;
 
     return 0;
 }

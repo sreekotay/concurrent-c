@@ -7,7 +7,7 @@
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 
 /* Reduced numbers for stress test reliability */
 static const int NUM_WORKERS = 2;
@@ -18,7 +18,7 @@ cc_atomic_i64 g_sum = 0;
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    printf("fanout_fanin: %d workers, %d items\n", NUM_WORKERS, NUM_ITEMS);
+    println(@string(`fanout_fanin: ${NUM_WORKERS} workers, ${NUM_ITEMS} items`, @scratch)) !>;
 
     /* Use unbuffered channels to avoid fiber wake issues with buffered channels */
     int[~ >] work_tx;
@@ -83,7 +83,6 @@ int main(void) {
 
     int collected = cc_atomic_load(&g_collected);
     long long sum = cc_atomic_load(&g_sum);
-    printf("fanout_fanin: collected %d, sum %lld (expected %lld)\n",
-           collected, sum, expected);
+    println(@string(`fanout_fanin: collected ${collected}, sum ${sum} (expected ${expected})`, @scratch)) !>;
     return (collected == NUM_ITEMS && sum == expected) ? 0 : 1;
 }

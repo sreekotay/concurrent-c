@@ -3,7 +3,7 @@
  * Who finished is Prep.ready. Revert whoever finished. No gate_punch.
  */
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <string.h>
 
 typedef struct Prep {

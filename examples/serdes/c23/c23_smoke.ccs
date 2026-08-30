@@ -1,7 +1,7 @@
 /* C23 SERDES experiment: tokenizer + PEG syntax. */
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_grammar.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <string.h>
 
 @grammar(rules) C23Tok {~~~~
@@ -38,62 +38,64 @@ static int on_keep(void* env, int id, CCSlice v) {
 }
 
 int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
     const char* num = "int x = 1'000;";
     if (!C23Tok_match(num, strlen(num))) {
-        printf("FAIL: tok 1'000\n");
+        eprintln(@string(`FAIL: tok 1'000`, @scratch)) !>;
         return 1;
     }
     const char* u8s = "u8\"hi\"";
     if (!C23Tok_match(u8s, strlen(u8s))) {
-        printf("FAIL: tok u8 string\n");
+        eprintln(@string(`FAIL: tok u8 string`, @scratch)) !>;
         return 1;
     }
     if (!C23Tok_match("ifdef", 5)) {
-        printf("FAIL: tok ifdef ident\n");
+        eprintln(@string(`FAIL: tok ifdef ident`, @scratch)) !>;
         return 1;
     }
 
     CCArena a = cc_arena_create(1 << 16);
     g_keeps = 0;
     if (!C23Tok_collect(num, strlen(num), a, on_keep, 0)) {
-        printf("FAIL: tok collect\n");
+        eprintln(@string(`FAIL: tok collect`, @scratch)) !>;
         return 1;
     }
     /* ident int, ident x, punct =, pp_number 1'000, punct ; */
     if (g_keeps != 5) {
-        printf("FAIL: tok keep count %d\n", g_keeps);
+        eprintln(@string(`FAIL: tok keep count ${g_keeps}`, @scratch)) !>;
         return 1;
     }
 
     if (!C23Syn_match(k_tu, strlen(k_tu))) {
-        printf("FAIL: syn tu\n");
+        eprintln(@string(`FAIL: syn tu`, @scratch)) !>;
         return 1;
     }
     const char* bad = "void f(void) { ifdef (x) return; }";
     const char* okif = "void f(void) { if (x) return; }";
     if (C23Syn_match(bad, strlen(bad))) {
-        printf("FAIL: syn ifdef accepted as if\n");
+        eprintln(@string(`FAIL: syn ifdef accepted as if`, @scratch)) !>;
         return 1;
     }
     if (!C23Syn_match(okif, strlen(okif))) {
-        printf("FAIL: syn if\n");
+        eprintln(@string(`FAIL: syn if`, @scratch)) !>;
         return 1;
     }
     const char* proto = "void f(void);";
     const char* fptr = "int (*fp)(void);";
     const char* tdef = "typedef int T; T x; T *p;";
     if (!C23Syn_match(proto, strlen(proto))) {
-        printf("FAIL: syn proto\n");
+        eprintln(@string(`FAIL: syn proto`, @scratch)) !>;
         return 1;
     }
     if (!C23Syn_match(fptr, strlen(fptr))) {
-        printf("FAIL: syn fptr\n");
+        eprintln(@string(`FAIL: syn fptr`, @scratch)) !>;
         return 1;
     }
     if (!C23Syn_match(tdef, strlen(tdef))) {
-        printf("FAIL: syn typedef-name spec\n");
+        eprintln(@string(`FAIL: syn typedef-name spec`, @scratch)) !>;
         return 1;
     }
-    printf("c23 serdes tok+syn: OK\n");
+    println(@string(`c23 serdes tok+syn: OK`, @scratch)) !>;
     return 0;
 }

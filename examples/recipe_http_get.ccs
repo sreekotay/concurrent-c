@@ -12,7 +12,7 @@
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_parallel.cch>
 #include <ccc/std/http.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <string.h>
 
 const char* g_urls[] = {

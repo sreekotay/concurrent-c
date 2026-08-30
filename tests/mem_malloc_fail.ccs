@@ -1,6 +1,6 @@
 /* Default CCS includes do not declare malloc. Include <stdlib.h> to use it. */
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 
 int main(void) {
     void *p = malloc(16);

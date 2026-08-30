@@ -4,7 +4,7 @@
  * always win, statement keywords precede calls without blinding the
  * scan, decoys in comments and strings never count, and exact
  * first-parameter matching holds under cv and variadics. */
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <assert.h>
 #include <stdio.h>
 

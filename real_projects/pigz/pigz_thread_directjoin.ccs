@@ -8,6 +8,7 @@
 
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
+#include <ccc/stdio.cch>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -223,32 +224,35 @@ int compress_file(const char* in_path, const char* out_path, int level) {
 }
 
 int main(int argc, char *argv[]) {
+    @errhandler(CCError e) { return cc_err_log(e); }
+
     if (argc < 2) return 1;
-    char out_name[4096];
-    snprintf(out_name, sizeof(out_name), "%s.gz", argv[1]);
-    int ret = compress_file(argv[1], out_name, 6);
+
+    char[:0] in_path = cc_slice_cstr(argv[1]);
+    CCString out_name = @string(`${in_path}.gz`, @scratch);
+    if (out_name.failed())
+        return cc_err_log(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "output path"));
+
+    int ret = compress_file((const char*)in_path.ptr, cc_string_cstr(&out_name, __cc_str_scratch), 6);
     if (ret == 0) {
-        printf("Stats: %lld bytes in, %lld bytes out, %d blocks\n",
-               (long long)cc_atomic_load(&g_bytes_in),
-               (long long)cc_atomic_load(&g_bytes_out),
-               cc_atomic_load(&g_blocks_done));
+        long long bin = (long long)cc_atomic_load(&g_bytes_in);
+        long long bout = (long long)cc_atomic_load(&g_bytes_out);
+        int blocks = cc_atomic_load(&g_blocks_done);
+        println(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
+                        @scratch)) !>;
         if (getenv("PIGZ_PHASE_STATS")) {
-            printf("PhaseStats(thread_directjoin): spawns=%llu joins=%llu\n",
-                   (unsigned long long)g_blocks_spawned, (unsigned long long)g_blocks_joined);
-            printf("  spawn: %.3f ms total (%.3f us/block)\n",
-                   (double)g_spawn_ns / 1000000.0,
-                   g_blocks_spawned ? (double)g_spawn_ns / 1000.0 / (double)g_blocks_spawned : 0.0);
-            printf("  join:  %.3f ms total (%.3f us/block)\n",
-                   (double)g_join_ns / 1000000.0,
-                   g_blocks_joined ? (double)g_join_ns / 1000.0 / (double)g_blocks_joined : 0.0);
-            printf("  write: %.3f ms total (%.3f us/block)\n",
-                   (double)g_write_ns / 1000000.0,
-                   g_blocks_joined ? (double)g_write_ns / 1000.0 / (double)g_blocks_joined : 0.0);
+            println(@string(`PhaseStats(thread_directjoin): spawns=${g_blocks_spawned} joins=${g_blocks_joined}`,
+                            @scratch)) !>;
+            println(@string(`  spawn: ${(double)g_spawn_ns / 1000000.0} ms total (${g_blocks_spawned ? (double)g_spawn_ns / 1000.0 / (double)g_blocks_spawned : 0.0} us/block)`,
+                            @scratch)) !>;
+            println(@string(`  join:  ${(double)g_join_ns / 1000000.0} ms total (${g_blocks_joined ? (double)g_join_ns / 1000.0 / (double)g_blocks_joined : 0.0} us/block)`,
+                            @scratch)) !>;
+            println(@string(`  write: ${(double)g_write_ns / 1000000.0} ms total (${g_blocks_joined ? (double)g_write_ns / 1000.0 / (double)g_blocks_joined : 0.0} us/block)`,
+                            @scratch)) !>;
             uint64_t task_ns = cc_atomic_load(&g_task_exec_ns);
             uint64_t task_n = cc_atomic_load(&g_task_exec_count);
-            printf("  task:  %.3f ms total (%.3f us/task)\n",
-                   (double)task_ns / 1000000.0,
-                   task_n ? (double)task_ns / 1000.0 / (double)task_n : 0.0);
+            println(@string(`  task:  ${(double)task_ns / 1000000.0} ms total (${task_n ? (double)task_ns / 1000.0 / (double)task_n : 0.0} us/task)`,
+                            @scratch)) !>;
         }
     }
     return ret;

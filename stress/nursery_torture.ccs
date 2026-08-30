@@ -7,7 +7,7 @@
 
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 
 #define TORTURE_DEPTH 10000
@@ -32,21 +32,24 @@ void torture_nesting(int depth) {
 }
 
 int main(void) {
-    printf("=================================================================\n");
-    printf("NURSERY TORTURE: Nesting %d levels of nurseries\n", TORTURE_DEPTH);
-    printf("=================================================================\n\n");
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    println(@string(`=================================================================`, @scratch)) !>;
+    println(@string(`NURSERY TORTURE: Nesting ${TORTURE_DEPTH} levels of nurseries`, @scratch)) !>;
+    println(@string(`=================================================================
+`, @scratch)) !>;
 
     torture_nesting(0);
 
     int total = cc_atomic_load(&g_completed_levels);
-    printf("\nFinal Result: %d/%d levels completed.\n", total, TORTURE_DEPTH);
+    println(@string(`
+Final Result: ${total}/${TORTURE_DEPTH} levels completed.`, @scratch)) !>;
 
     if (total == TORTURE_DEPTH) {
-        printf("RESULT: PASS - The runtime handled extreme nesting!\n");
+        println(@string(`RESULT: PASS - The runtime handled extreme nesting!`, @scratch)) !>;
     } else {
-        printf("RESULT: FAIL - Some levels were lost or the runtime crashed.\n");
+        println(@string(`RESULT: FAIL - Some levels were lost or the runtime crashed.`, @scratch)) !>;
     }
-    printf("=================================================================\n");
+    println(@string(`=================================================================`, @scratch)) !>;
 
     return 0;
 }

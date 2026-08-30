@@ -9,7 +9,7 @@
  * store arena until the whole store is freed.
  */
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 
 typedef struct Store {
     CCArena map_arena;

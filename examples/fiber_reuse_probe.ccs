@@ -3,7 +3,7 @@
  * Requires CC_V2_STATS=1 (atexit dump).
  */
 #include <ccc/std/prelude.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <string.h>
 
@@ -36,11 +36,13 @@ static void batch_n(int n) {
 }
 
 int main(int argc, char** argv) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
     const char* mode = (argc > 1) ? argv[1] : "batch";
     int warm = (argc > 2) ? atoi(argv[2]) : 0;
 
-    printf("fiber_reuse_probe: mode=%s N=%d warm=%d\n", mode, N, warm);
-    printf("  (CC_V2_STATS atexit: coro reuse vs fresh)\n");
+    println(@string(`fiber_reuse_probe: mode=${mode} N=${N} warm=${warm}`, @scratch)) !>;
+    println(@string(`  (CC_V2_STATS atexit: coro reuse vs fresh)`, @scratch)) !>;
 
     if (warm > 0)
         serial_n(warm);
@@ -50,6 +52,6 @@ int main(int argc, char** argv) {
     else
         batch_n(N);
 
-    printf("done\n");
+    println(@string(`done`, @scratch)) !>;
     return 0;
 }

@@ -7,7 +7,7 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_arena.cch>
 #include "mem_sample.h"
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -36,6 +36,7 @@ static uint32_t lcg(uint32_t *s) {
 }
 
 int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     size_t n = env_zu("MIX_LIFE_N", 200000);
     /* Equal-budget with split peer: default = MIX_LIFE_TOTAL_ROOT (32MiB). */
     size_t total_root = env_zu("MIX_LIFE_TOTAL_ROOT", 32u * 1024u * 1024u);
@@ -73,7 +74,7 @@ int main(void) {
     order = (size_t *)malloc(n * sizeof(size_t));
     if (!ptrs || !sizes || !alive || !order) return 1;
 
-    printf("mixed_lifetime(cc arena+release): n=%zu root=%zu seed=%u\n", n, root, seed);
+    println(@string(`mixed_lifetime(cc arena+release): n=${n} root=${root} seed=${seed}`, @scratch)) !>;
 
     m0 = stress_mem_sample();
     rss0 = m0.ok ? m0.current : 0;
@@ -171,14 +172,8 @@ int main(void) {
     best_peak = stress_mem_best_peak(&m1, sampled_peak);
     cgroup_peak = m1.cgroup_ok ? m1.cgroup_peak : 0;
 
-    printf("RESULT lang=cc strategy=arena_release n=%zu freed=%zu peak_live=%zu "
-           "root=%zu peak_gross=%zu peak_ovf=%zu "
-           "alloc_ms=%.3f midfree_ms=%.3f grow_ms=%.3f reclaim_ms=%.3f total_ms=%.3f "
-           "rss_peak_delta=%zd rss_end_delta=%zd hwm=%zu cgroup_peak=%zu sink=%zu\n",
-           n, freed, peak_live, root, peak_gross, peak_ovf,
-           alloc_ms, midfree_ms, grow_ms, reclaim_ms, total_ms,
-           (ssize_t)best_peak - (ssize_t)rss0, (ssize_t)rss1 - (ssize_t)rss0,
-           m1.hwm_ok ? m1.hwm : 0, cgroup_peak, (size_t)sink);
+    size_t hwm_out = m1.hwm_ok ? m1.hwm : 0;
+    println(@string(`RESULT lang=cc strategy=arena_release n=${n} freed=${freed} peak_live=${peak_live} root=${root} peak_gross=${peak_gross} peak_ovf=${peak_ovf} alloc_ms=$~float_dec(3){alloc_ms} midfree_ms=$~float_dec(3){midfree_ms} grow_ms=$~float_dec(3){grow_ms} reclaim_ms=$~float_dec(3){reclaim_ms} total_ms=$~float_dec(3){total_ms} rss_peak_delta=${(ssize_t)best_peak - (ssize_t)rss0} rss_end_delta=${(ssize_t)rss1 - (ssize_t)rss0} hwm=${hwm_out} cgroup_peak=${cgroup_peak} sink=${(size_t)sink}`, @scratch)) !>;
 
     free(ptrs);
     free(sizes);

@@ -17,7 +17,7 @@
 #include <ccc/std/prelude.cch>
 #include <stdlib.h>
 #include <ccc/cc_atomic.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <unistd.h>
 
 #define NUM_ITEMS 8

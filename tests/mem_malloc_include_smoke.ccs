@@ -1,6 +1,6 @@
 /* Explicit Gap: #include <stdlib.h> declares malloc. */
 #include <ccc/std/prelude.cch>
-#include <ccc/script/stdio.cch>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 
 int main(void) {

@@ -15,7 +15,7 @@
 #include <ccc/std/map.cch>
 #include <ccc/cc_atomic.cch>
 #include <ccc/cc_sched.cch>
-#include <stdio.h>
+#include <ccc/stdio.cch>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -634,9 +634,7 @@ static void workload(Work* w) {
     double t_end = now_us() + w->seconds * 1e6;
     double t_next = now_us() + 1e6;
     memset(val, 'v', sizeof val);
-    printf("# %8s %9s %11s %12s %9s %6s %8s %8s %9s %6s\n",
-           "t_s", "keys", "logical_KiB", "commit_KiB", "rss_KiB",
-           "drains", "dropped", "reinsert", "waves", "rehash");
+    println("#      t_s      keys logical_KiB commit_KiB rss_KiB drains dropped reinsert  waves rehash") !>;
     for (long i = 0; ; i++) {
         double t = now_us();
         int64_t now;
@@ -687,16 +685,11 @@ static void workload(Work* w) {
             t_next += 1e6;
             rss = rss_kib();
             {
-                char rss_s[32];
-                if (rss == SIZE_MAX) snprintf(rss_s, sizeof rss_s, "?");
-                else snprintf(rss_s, sizeof rss_s, "%zu", rss);
-                printf("  %8.0f %9zu %11zu %12zu %9s %6zu %8zu %8zu %9zu %6zu\n",
-                       (t - (t_end - w->seconds * 1e6)) / 1e6,
-                       s->map->len() + (s->rehashing ? s->old_map->len() : 0),
-                       shard_logical(s) / 1024,
-                       shard_committed(s) / 1024,
-                       rss_s,
-                       s->drains, s->dropped, s->reinserted, s->waves, s->rehashes);
+                CCString rss_str = rss == SIZE_MAX
+                    ? @string(`?`, @scratch)
+                    : @string(`${rss}`, @scratch);
+                size_t keys = s->map->len() + (s->rehashing ? s->old_map->len() : 0);
+                println(@string(`  ${(t - (t_end - w->seconds * 1e6)) / 1e6} ${keys} ${shard_logical(s) / 1024} ${shard_committed(s) / 1024} ${rss_str} ${s->drains} ${s->dropped} ${s->reinserted} ${s->waves} ${s->rehashes}`, @scratch)) !>;
             }
             fflush(stdout);
         }
@@ -717,9 +710,7 @@ int main(int argc, char** argv) {
 
     shard_init(&s, theta, wave, sweep) !>;
     @defer shard_free(&s);
-    printf("# wstore2 seconds=%.0f sweep=%d theta=%.2f wave_recs=%zu "
-           "wheel=100ms x64, 1s x64, 60s x60\n",
-           seconds, sweep, theta, wave);
+    println(@string(`# wstore2 seconds=${seconds} sweep=${sweep} theta=${theta} wave_recs=${wave} wheel=100ms x64, 1s x64, 60s x60`, @scratch)) !>;
 
     w.s = &s;
     w.seconds = seconds;
@@ -735,9 +726,7 @@ int main(int argc, char** argv) {
             sweep_kick(sp);
         }) !>;
     }
-    printf("# ops=%ld  drains=%zu drained_recs=%zu dropped=%zu reinserted=%zu rehashes=%zu\n",
-           w.ops, s.drains, s.drained_recs, s.dropped, s.reinserted, s.rehashes);
-    printf("# waves=%zu mean=%.1f us max=%.0f us (budget %zu recs)\n",
-           s.waves, s.waves ? s.wave_sum_us / s.waves : 0, s.wave_max_us, wave);
+    println(@string(`# ops=${w.ops}  drains=${s.drains} drained_recs=${s.drained_recs} dropped=${s.dropped} reinserted=${s.reinserted} rehashes=${s.rehashes}`, @scratch)) !>;
+    println(@string(`# waves=${s.waves} mean=${s.waves ? s.wave_sum_us / s.waves : 0} us max=${s.wave_max_us} us (budget ${wave} recs)`, @scratch)) !>;
     return 0;
 }

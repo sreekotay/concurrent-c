@@ -8,8 +8,9 @@
  * cc__bytes_zero in cc_slice.cch.
  *
  * This header is empty unless a runtime/comptime build flag is set.
- * Bodies: cc/runtime/cc_mem.c. @comptime / libtcc alias to libc because
- * those TUs cannot link the runtime.
+ * Bodies: cc/runtime/cc_mem.c (gcc/clang host only). cc/runtime/cc_mem_heap.c
+ * always linked for shadow-emitted cc__heap_* calls. @comptime / host tcc
+ * alias to libc via macros below.
  */
 #ifndef CC_MEM_H
 #define CC_MEM_H
