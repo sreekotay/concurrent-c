@@ -121,7 +121,7 @@ install-check:
 	test -x "$$ccc_bin" || { echo "install-check: $$ccc_bin is not executable"; exit 1; }; \
 	work="$$(mktemp -d)"; \
 	trap 'rm -rf "$$work"' EXIT INT TERM; \
-	printf '#include <ccc/std/prelude.cch>\n#include <stdio.h>\n\nint main(void) {\n    CCArena a = cc_arena_heap(kilobytes(4));\n    CCVec::[int] v = cc_vec_new::[int](&a);\n    v.push(41);\n    int got = *v.get(0);\n    printf("install-check ok\\n");\n    cc_arena_free(&a);\n    return got == 41 ? 0 : 1;\n}\n' > "$$work/install_check.ccs"; \
+	printf '#include <ccc/std/prelude.cch>\n#include <stdio.h>\n\nint main(void) {\n    CCArena a = cc_arena_heap(kilobytes(4));\n    CCVec::[int] v = cc_vec_new::[int](a);\n    v.push(41);\n    int got = *v.get(0);\n    printf("install-check ok\\n");\n    cc_arena_free(&a);\n    return got == 41 ? 0 : 1;\n}\n' > "$$work/install_check.ccs"; \
 	echo "install-check: compiling against $(DESTDIR)$(PREFIX) in $$work"; \
 	( cd "$$work" && "$$ccc_bin" run install_check.ccs ) || { \
 		echo "install-check: FAILED — the installed prefix cannot compile a program"; exit 1; }; \
