@@ -63,14 +63,24 @@ int cc_external_wait_active(void);
 typedef struct CCChan CCChan;
 /* CCTask is defined in <ccc/std/task.cch> as a value type */
 
-/* Explicit move primitive — ownership transfer at the language/shadow layer.
-   Runtime is a copy; use-after-move is diagnosed by shadow, not zeroed here. */
+/* cc_move is transfer: copy, then leave the source empty so generated
+   drop / variant transition / @destroy do not still own. User use after
+   the move is shadow (compile error), not a runtime check on the empty
+   bytes. Dead-state is an inline byte loop — not a cc_mem.c symbol. */
 #if defined(CC_PARSER_MODE)
 /* During TCC parse-to-stub-AST, macros expand before recording. We emit a real call the recorder can see. */
 static inline void cc__move_marker_impl(void* p) { (void)p; }
 #define cc_move(x) (cc__move_marker_impl(&(x)), (x))
 #else
-#define cc_move(x) ({ __typeof__(x) __cc_tmp = (x); __cc_tmp; })
+static inline void cc__move_dead(void *p, size_t n) {
+    unsigned char *b = (unsigned char *)p;
+    while (n--) *b++ = 0;
+}
+#define cc_move(x) ({ \
+    __typeof__(x) __cc_tmp = (x); \
+    cc__move_dead(&(x), sizeof(x)); \
+    __cc_tmp; \
+})
 #endif
 
 #endif // CC_RUNTIME_H

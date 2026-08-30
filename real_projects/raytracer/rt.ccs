@@ -526,8 +526,10 @@ int main(void) {
         free(fb);
         return 1;
     }
-    println(@string(`rt impl=cc seq=${seq} width=${w} height=${h} spp=${spp} depth=${depth} spheres=${nworld} checksum=0x${sum} time_ms=${t1 - t0}`,
-                    @scratch)) !>;
+    /* Same checksum spelling as rt.c / go (0x%016llx). ${sum} is decimal. */
+    printf("rt impl=cc seq=%d width=%d height=%d spp=%d depth=%d spheres=%d "
+           "checksum=0x%016llx time_ms=%.2f\n",
+           seq, w, h, spp, depth, nworld, (unsigned long long)sum, t1 - t0);
     free(fb);
     return 0;
 }

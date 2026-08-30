@@ -716,10 +716,15 @@ unsafe {
 
 **Rule (no implicit last-use move):** Move-only values have no implicit "last use" move. Explicit move or drop is required. This prevents silent moves from distant code.
 
+**Rule (move dead-state):** `cc_move(x)` transfers the value and leaves `x`
+empty. Generated drop, variant transition, and `@destroy` on the source
+must not still own. The empty bytes are teardown, not a user diagnostic.
+
 **Rule (use-after-move):** Compile-time error for:
 
 - Bare unique slice after move
 - Borrowed views from moved owner
+- Any later read or write of the moved-from name that is not generated teardown
 
 **Rule (function parameters):** Move-only values move by-value; pass as pointer to retain ownership:
 

@@ -62,8 +62,7 @@ int main(void) {
     c = (Cell){ .num = 9 };
     if (g_drops != 2) { printf("drops after cl transition = %d\n", g_drops); return 5; }
 
-    /* cc_move zeroes the source arm; the following transition drop is a
-     * no-op on the moved-out payload */
+    /* cc_move leaves the source arm dead; transition drop is a no-op */
     c = { .txt = payload_from("moved") };
     Payload taken = { 0 };
     if (c.kind == .txt) {

@@ -13,7 +13,7 @@ CC asks two questions repeatedly: What is the smallest fact that actually change
 - **[Arena-last](cheatsheet.md#keep-pass-the-arena-to-live-on)** — When an operation creates owned output (i.e. allocates memory), make the destination lifetime explicit at that point.
 - **[Results / `!>` / `?>`](language-concepts.md#2-errors-map-to-a-value-or-to-control-flow)** — Make fallible transitions force acknowledgement without forcing local policy. Do not make fallible operations appear infallible; keep errors distinct from successful values.
 - **[`@defer` / `@defer(err)` / `@defer(ok)`](language-concepts.md#1-cleanup-binds-to-a-place)** — Attach cleanup and recovery obligations to the scope where they arise.
-- **[Move / dead-state](cheatsheet.md#lifetime-parents-attach--adopt--create_)** — Use transfer semantics only where transfer itself is consequential.
+- **[Move / dead-state](cheatsheet.md#lifetime-parents-attach--adopt--create_)** — `cc_move` transfers; the source is empty for teardown. User use after the move is a compile error, not a runtime zero-check.
 - **[Single-shot closures](language-concepts.md#5-closures-carry-captures)** — Represent one remaining action or obligation without inventing a larger task object.
 - **[Turnstiles / gates](cheatsheet.md#pipeline-turnstile-ccturnstile)** — Express named local admission predicates; not locks, not DAGs.
 - **[Tickets](cheatsheet.md#parallel)** — Names for relationships and admission, not counters or schedule positions.

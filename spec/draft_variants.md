@@ -154,7 +154,8 @@ A whole-variant transition drops the old active arm exactly once before
 installing the replacement. A same-arm transition follows the same drop path.
 If the old arm has no registered destructor, that path is a no-op.
 Moving an arm with `cc_move` follows the ordinary move rules: the moved source
-arm is dead, and the variant must be replaced before any later read.
+arm is empty (generated drop is a no-op), and the variant must be replaced
+before any later read. User use of the moved name is a compile-time error.
 
 ## Results
 
