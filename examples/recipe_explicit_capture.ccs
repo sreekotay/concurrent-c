@@ -13,9 +13,23 @@
  * Mutation through a reference capture is a compile error unless the
  * captured variable is wrapped in a thread-safe type (CCAtomic::[T],
  * CCMutex::[T]) or the closure is marked @unsafe.
+ *
+ * A list is not ritual. `() => { use(x); }` already value-captures every
+ * outer name the body uses (copy at spawn; the copy is immutable). Write
+ * a list when implicit is the wrong mode:
+ *
+ *   [&x]     — share the frame object (this file)
+ *   [x]      — same copy as implicit; write it when the name will be
+ *              rebound before the task runs (C for-loop index, accept sock)
+ *   [x, &y]  — mix
+ *
+ * `@parallel for` gives each iteration its own index — no list
+ * (recipe_fanout_capture.ccs). Named lists elsewhere:
+ * recipe_channel_pipeline.ccs `[&sum, rx]`, recipe_worker_pool.ccs
+ * `[jobs_rx, done_tx]`, recipe_tcp_echo.ccs `[sock]`,
+ * recipe_exclusive_named.ccs `[id]`.
  */
 #include <ccc/cc_runtime.cch>
-#include <stdlib.h>
 #include <ccc/script/stdio.cch>
 
 int main(void) {

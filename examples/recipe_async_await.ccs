@@ -16,7 +16,6 @@
  */
 
 #include <ccc/cc_runtime.cch>
-#include <stdlib.h>
 #include <ccc/script/stdio.cch>
 
 /* Suspends twice on the channel, then returns the echoed value. */

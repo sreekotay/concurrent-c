@@ -14,7 +14,6 @@
  * hello.ccs (e.g. CCNursery n = ... !> @destroy { ... };).
  */
 #include <ccc/cc_runtime.cch>
-#include <stdlib.h>
 #include <ccc/script/stdio.cch>
 #include <stdio.h>
 

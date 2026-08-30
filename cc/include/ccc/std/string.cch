@@ -53,6 +53,7 @@ _Static_assert(sizeof(CCString) == 16, "CCString should stay compact on 64-bit t
 typedef struct CCStringHeapHeader {
     CCArena arena;
     uint64_t provenance;
+    uint32_t gen;
 } CCStringHeapHeader;
 
 /* Sticky failure poison.
@@ -394,6 +395,7 @@ static inline char *cc_string_reserve(CCString *str, size_t need, CCArena arena)
         if (!header) { cc__string_poison(str); return NULL; }
         header->arena = arena;
         header->provenance = CC__ARENA_HOST(arena)->provenance;
+        header->gen = cc_slice_gen_birth();
         str->data = (char *)(header + 1);
         str->cap = (uint32_t)new_cap;
         if (saved_len > 0) cc__mem_copy(str->data, saved, saved_len);
@@ -404,11 +406,23 @@ static inline char *cc_string_reserve(CCString *str, size_t need, CCArena arena)
     old_arena = header->arena;
     old_total = sizeof(CCStringHeapHeader) + str->cap;
     new_total = sizeof(CCStringHeapHeader) + new_cap;
-    header = (CCStringHeapHeader *)cc_arena_realloc(old_arena, arena, header, old_total, new_total, _Alignof(CCStringHeapHeader));
-    if (!header) { cc__string_poison(str); return NULL; }
-    header->arena = arena;
-    header->provenance = CC__ARENA_HOST(arena)->provenance;
-    str->data = (char *)(header + 1);
+    {
+        CCStringHeapHeader *old_h = header;
+        uint32_t old_gen = header->gen;
+        header = (CCStringHeapHeader *)cc_arena_realloc(
+            old_arena, arena, header, old_total, new_total,
+            _Alignof(CCStringHeapHeader));
+        if (!header) { cc__string_poison(str); return NULL; }
+        header->arena = arena;
+        header->provenance = CC__ARENA_HOST(arena)->provenance;
+        if (header != old_h) {
+            cc_slice_gen_kill(old_gen);
+            header->gen = cc_slice_gen_birth();
+        } else {
+            header->gen = old_gen;
+        }
+        str->data = (char *)(header + 1);
+    }
     str->cap = (uint32_t)new_cap;
     return str->data;
 }
@@ -420,8 +434,11 @@ static inline void cc_string_release_heap(CCString *str) {
     if (cc_string_is_inline(str)) return;
     if (!cc_string_heap_data(str)) return;
     header = cc__string_heap_header(str);
-    if (header && cc_arena_is_live(header->arena))
-        (void)cc_arena_release(header->arena, header);
+    if (header) {
+        cc_slice_gen_kill(header->gen);
+        if (cc_arena_is_live(header->arena))
+            (void)cc_arena_release(header->arena, header);
+    }
 }
 
 /* End ownership of heap backing (via arena_release) and zero *str.
@@ -991,8 +1008,16 @@ static inline CCSlice cc_string_as_slice(const CCString *str) {
     if (!str || cc_string_failed(str)) return cc_slice_empty();
     data = cc_string_data_const(str);
     if (!data) return cc_slice_empty();
-    return cc_slice_from_parts((void *)data, str->len,
-                               cc_slice_make_id(cc_string_provenance(str), false, false, false));
+    if (cc_string_is_inline(str))
+        return cc_slice_from_parts((void *)data, str->len, CC_SLICE_ID_UNTRACKED);
+    {
+        CCStringHeapHeader *header = cc__string_heap_header(str);
+        if (!header)
+            return cc_slice_from_parts((void *)data, str->len, CC_SLICE_ID_UNTRACKED);
+        return cc_slice_from_parts((void *)data, str->len,
+                                   cc_slice_make_grower_id(header->provenance,
+                                                          header->gen));
+    }
 }
 static inline const char *cc_string_cstr(CCString *str, CCArena arena) {
     char *data;

@@ -11,7 +11,6 @@
 
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_parallel.cch>
-#include <stdlib.h>
 #include <ccc/std/http.cch>
 #include <ccc/script/stdio.cch>
 #include <string.h>

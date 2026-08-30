@@ -1,0 +1,46 @@
+/* Leftover as_slice after a moving vec realloc: at/set fail-close. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    CCVec::[char] v = cc_vec_new::[char](a);
+    if (v.push('A') != 0) return 2;
+
+    char[:] s = v;
+    if (s.at(0) !> != 'A') return 3;
+
+    /* Bury the tip so the next grow cannot stay in place. */
+    (void)a.alloc(256, 8);
+    int i;
+    for (i = 0; i < 32; i++) {
+        if (v.push((char)('B' + (i % 26))) != 0) return 4;
+    }
+
+    if (v.data == s.ptr) {
+        /* In-place: leftover prefix stays valid. */
+        if (s.at(0) !> != 'A') return 5;
+        printf("slice_grower_moved_smoke: in-place OK\n");
+        return 0;
+    }
+
+    {
+        char !>(CCError) r = s.at(0);
+        if (!cc_is_err(r)) return 6;
+    }
+    {
+        bool !>(CCError) w = s.set(0, 'Z');
+        if (!cc_is_err(w)) return 7;
+    }
+    {
+        char[:] live = v;
+        if (live.at(0) !> != 'A') return 8;
+    }
+    printf("slice_grower_moved_smoke: moved OK\n");
+    return 0;
+}

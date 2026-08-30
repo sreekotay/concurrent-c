@@ -2,7 +2,7 @@
  * Recipe: walk and buffers
  *
  * The bound is the live extent. Walk it. Point access is `at` / `set`
- * (Result). Bytes move through dest-bulk (`dst.copy` / `dst.move` /
+ * (Result). Bytes go through dest-bulk (`dst.copy` / `dst.copy_overlap` /
  * `dst.fill`) and arena clone. A text slice interpolates in `${…}`.
  * `.ptr` is legal C; it is not required to print or walk.
  *
@@ -12,7 +12,7 @@
  *
  *    1. Arena buffer
  *    2. Point access — at / set
- *    3. fill / copy / move
+ *    3. fill / copy / copy_overlap
  *    4. clone_into — keep on another arena
  *    5. walk / enumerate / zip / range
  *    6. mut walk
@@ -39,15 +39,15 @@ int main(void) {
     char c0 = buf.at(0) !>;
     println(@string(`point=${c0}`, @scratch)) !>;
 
-    /* 3. fill / copy / move — dest too short is Result.
+    /* 3. fill / copy / copy_overlap — dest too short is Result.
      *    memcpy(buf.ptr, hi.ptr, 2);  — undeclared unless <string.h>
-     *    dst.move is overlap-tolerant copy (source stays live).
-     *    Transfer-move (dead source) is a different operation. */
+     *    dst.copy_overlap is overlap-safe copy (source stays live).
+     *    Ownership transfer is cc_move / return / send_take. */
     buf.fill('x') !>;
     char[:] hi = {'H', 'i'};
     buf.copy(hi) !>;
     char[:] mid = buf.sub(2, 4);
-    mid.move(hi) !>;
+    mid.copy_overlap(hi) !>;
 
     /* Same print: peel vs interpolating a view. */
     println(@string(`bulk C  = ${buf.ptr[0]}${buf.ptr[1]}${buf.ptr[2]}${buf.ptr[3]}`, @scratch)) !>;

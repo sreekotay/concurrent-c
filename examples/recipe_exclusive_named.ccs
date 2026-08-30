@@ -25,7 +25,6 @@
  * Keep critical sections short; park/await under the lock stalls others.
  */
 #include <ccc/std/prelude.cch>
-#include <stdlib.h>
 #include <ccc/cc_exclusive.cch>
 #include <ccc/script/stdio.cch>
 

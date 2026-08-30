@@ -16,7 +16,6 @@
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/script/stdio.cch>
-#include <stdio.h>
 
 #define N   8
 #define CAP 2
@@ -62,8 +61,7 @@ int main(void) {
     }
 
     if (g_fail || g_read_next != N || g_write_next != N) {
-        fprintf(stderr, "FAIL read=%d write=%d fail=%d\n",
-                g_read_next, g_write_next, g_fail);
+        eprintln(@string(`FAIL read=${g_read_next} write=${g_write_next} fail=${g_fail}`, @scratch)) !>;
         return 1;
     }
     println("turnstile: 8 tickets, cap 2, read then write in order") !>;

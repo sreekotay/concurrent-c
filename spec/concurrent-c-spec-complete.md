@@ -1516,13 +1516,17 @@ remaining room (strings, vecs, arenas) keep capacity on the owner.
 // Slice ID bit layout (uint64_t id):
 //
 // Bits 0–59 : allocation ID (opaque, non-zero for tracked allocations)
+//   Grower-minted views (Vec / heap String as_slice) pack this field as:
+//   Bits 0–39 : arena epoch
+//   Bits 40–58 : generation
+//   Bit 59     : grower. Canonical static id has bits 0–59 all 1 and is not a grower.
 // Bit 60    : is_cstr (`ptr[len]` is defined and 0)
 // Bit 61    : is_transferable
 // Bit 62    : is_subslice
 // Bit 63    : is_unique
 ```
 
-- **Bits 0–59 (allocation ID):** Unique per tracked allocation. 0 indicates no epoch (untracked, or static with only flags).
+- **Bits 0–59 (allocation ID):** Unique per tracked allocation. 0 indicates no epoch (untracked, or static with only flags). A grower-minted leftover view after a moving Vec / heap String realloc is stale: Result `at` / `set` is `CC_ERR_INVALID_ARG`. In-place growth keeps the generation. `id == 0` does not join.
 - **Bit 60 — `is_cstr`:** 1 if `ptr[len]` is a defined `0` (C-string capability). Set on `CC_SLICE_LIT` / `from_static` / `cc_slice_cstr`. Cleared on `from_buffer` and brace inits. `sub` recomputes it (keep when the new end is the old end and the parent had it; otherwise set only when `ptr[end] == 0` is an in-payload load). Untracked is `(alloc == 0 && !unique)` — the cstr bit alone is not lifetime.
 - **Bit 61 — `is_transferable`:** 1 if the allocation may be transferred across threads via `send_take`; 0 otherwise.
 - **Bit 62 — `is_subslice`:** 1 if the slice does not cover the full allocation.
@@ -6080,8 +6084,14 @@ are in `spec/concurrent-c-stdlib-spec.md`.
 
 #### 9.2.3 Mutation Methods
 
-Shipped byte-slice mutation is in-place length and indexed write. There is no
-generic `T[:].reverse` / `sort` / `fill` / `copy`.
+Byte-slice mutation is in-place length, indexed write, and dest-bulk.
+`dst.copy(src)` copies `src.len` bytes (regions must not overlap).
+`dst.copy_overlap(src)` is the same copy when regions may overlap; the
+source view stays live. `dst.fill(c)` writes `c` through `dst.len`.
+Each is `bool !>(CCError)`: a null window, or dest shorter than `src`
+on the copy family, is `CC_ERR_INVALID_ARG`. There is no generic
+`T[:].reverse` / `sort`. Ownership transfer is `cc_move` / `return` /
+`send_take`, not dest-bulk.
 
 ```c
 bool !>(CCError) truncate(CCSlice *s, size_t n);
@@ -6150,6 +6160,15 @@ unconsumed Result. If the two live lengths differ, the Result is
 `CC_ERR_INVALID_ARG`. There is no silent min. The walk runs only when
 the lengths are equal. Copy walk, enumerate, and range are not Results:
 a trailing `!>` is ill-formed.
+
+A minted `T[:]` from `Vec` / heap `CCString` (`as_slice` / dest-init)
+captures a generation on `id`. Owner realloc that **moves** the backing
+kills that generation. Result `at` / `set` on the leftover view is
+`CC_ERR_INVALID_ARG` (`slice: backing moved`). In-place growth keeps
+the generation — the leftover view still names its prefix. `id == 0`
+(`from_buffer`) is untracked and does not join this check. Walking the
+owner (`for (x in v)`) uses the live header. Walking the leftover
+view still loads `ptr` (Gap, same as `s.ptr[i]`).
 
 The walk is not “a nicer `s[i]`.” Users do not write `s.access(i)`. C
 `for (;;)` is unchanged. `@parallel for (i in lo..hi)` is §8.11.4.

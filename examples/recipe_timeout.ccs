@@ -34,7 +34,6 @@
  * Duration helpers: seconds(n), millis(n) (see cc_sched.cch).
  */
 #include <ccc/std/prelude.cch>
-#include <stdlib.h>
 #include <ccc/script/stdio.cch>
 
 int main(void) {

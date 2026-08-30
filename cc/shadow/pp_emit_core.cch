@@ -5047,6 +5047,10 @@ static void shadow_chan_reset(void) {
     shadow_as_register("CCIoError", "base", "CCError");
     /* Opaque nursery: header lowering strips `as: (Region)n`. */
     shadow_as_register_viewed("CCNursery", "arena", "CCArena", "Region");
+    /* Teaching alias is CCBox::[CCNurseryHost]; angle-includes do not
+     * harvest `.p`. Local field must win over viewed `as: arena`. */
+    shadow_field_register_ex("CCNursery", "p", "CCNurseryHost*");
+    shadow_field_register_ex("CCBox_CCNurseryHost", "p", "CCNurseryHost*");
     /* Angle-includes do not harvest CCSlice members. Field-miss `as:` hop
      * needs the ABI names on the landing type. */
     shadow_field_register_ex("CCSlice", "ptr", "char*");

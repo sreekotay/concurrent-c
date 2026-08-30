@@ -4945,7 +4945,7 @@ static int cc__runtime_obj_is_stale(const char* runtime_obj_path) {
     const char* runtime_sources[] = {
         "concurrent_c.c", "scheduler.c", "fiber_sched.c", "nursery.c",
         "channel.c", "fiber.c", "exec.c", "closure.c", "task_intptr.c",
-        "float_format_zmij.c",
+        "float_format_zmij.c", "slice_gen.c",
         NULL
     };
     char src_path[PATH_MAX];

@@ -12,7 +12,6 @@
  * n.label(keep).
  */
 #include <ccc/std/prelude.cch>
-#include <stdlib.h>
 #include <ccc/script/stdio.cch>
 
 /* Arena last: the CCString lives on `a`, not in this call. */

@@ -4,7 +4,7 @@
  * Default CCS translation units do not include this header and do not get
  * libc memory names (malloc, memcpy, memset, …). User .ccs code allocates
  * through arenas and copies/fills through slice dest-bulk
- * (`dst.copy(src)`, `dst.move(src)`, `dst.fill(c)`). Generated zero uses
+ * (`dst.copy(src)`, `dst.copy_overlap(src)`, `dst.fill(c)`). Generated zero uses
  * cc__bytes_zero in cc_slice.cch.
  *
  * This header is empty unless a runtime/comptime build flag is set.

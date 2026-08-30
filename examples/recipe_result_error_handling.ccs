@@ -17,11 +17,12 @@
  * `!>(e) { local; @err(e); }` when you want work before the default.
  *
  * Temp prints: `@string(`...`, @scratch)` injects a shared fn/closure stack arena
- * (no hand-rolled CCArena). Next: recipe_unwrap_destroy_forms.ccs;
+ * (no hand-rolled CCArena). Prelude does not declare `strcmp` — include
+ * `<string.h>` when the fixture uses it. Next: recipe_unwrap_destroy_forms.ccs;
  * recipe_ufcs_forms.ccs covers method dispatch including fallible chains.
  */
 #include <ccc/std/prelude.cch>
-#include <stdlib.h>
+#include <string.h>
 #include <ccc/script/stdio.cch>
 
 /* A fallible operation: returns T!>(CCError). */

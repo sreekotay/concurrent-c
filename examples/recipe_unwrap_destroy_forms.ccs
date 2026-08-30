@@ -26,7 +26,6 @@
  *   11. Same as 10 but split across lines
  */
 #include <ccc/cc_runtime.cch>
-#include <stdlib.h>
 #include <ccc/script/stdio.cch>
 
 /* Test fixture: maybe_null(0) succeeds (pointer to "hello"), 

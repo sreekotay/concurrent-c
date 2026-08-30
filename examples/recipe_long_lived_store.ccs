@@ -9,7 +9,6 @@
  * store arena until the whole store is freed.
  */
 #include <ccc/std/prelude.cch>
-#include <stdlib.h>
 #include <ccc/script/stdio.cch>
 
 typedef struct Store {

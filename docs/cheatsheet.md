@@ -388,7 +388,7 @@ for (ch in line.sub(lo, hi))  // view; compiler hoists a local
 for (&ch in line.sub(lo, hi)) { … } !>;
 s.at(i) !>                    // point (Result)
 s.set(i, v) !>
-dst.copy(src) !> / dst.move(src) !> / dst.fill(c) !>
+dst.copy(src) !> / dst.copy_overlap(src) !> / dst.fill(c) !>
 s.clone_into(a) !>            // arena last
 s.eq(other) / s.eq_cstr("x")  // compare slices; not memcmp in CC examples
 char *p = s.ptr;              // peel; fields are read-only

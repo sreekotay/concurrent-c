@@ -8,7 +8,6 @@
  */
 
 #include <ccc/std/prelude.cch>
-#include <stdlib.h>
 #include <ccc/script/stdio.cch>
 
 #define NUM_TASKS 5

@@ -51,14 +51,14 @@ CCResult_bool_CCError cc_slice_copy(CCSlice* dst, CCSlice src) {
     return cc_ok_CCResult_bool_CCError(true);
 }
 
-CCResult_bool_CCError cc_slice_move(CCSlice* dst, CCSlice src) {
+CCResult_bool_CCError cc_slice_copy_overlap(CCSlice* dst, CCSlice src) {
     if (!dst || (dst->len && !dst->ptr) || (src.len && !src.ptr)) {
         return cc_err_CCResult_bool_CCError(
-            CC_ERROR(CC_ERR_INVALID_ARG, "slice move: null"));
+            CC_ERROR(CC_ERR_INVALID_ARG, "slice copy_overlap: null"));
     }
     if (src.len > dst->len) {
         return cc_err_CCResult_bool_CCError(
-            CC_ERROR(CC_ERR_INVALID_ARG, "slice move: dest too short"));
+            CC_ERROR(CC_ERR_INVALID_ARG, "slice copy_overlap: dest too short"));
     }
     if (src.len) memmove(dst->ptr, src.ptr, src.len);
     return cc_ok_CCResult_bool_CCError(true);

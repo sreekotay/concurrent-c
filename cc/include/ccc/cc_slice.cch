@@ -34,11 +34,19 @@
 
 // Slice id bit layout (matches spec):
 // Bits 0–59 : allocation id (non-zero for tracked allocations)
+//   Grower-minted views (Vec / heap String as_slice) pack this field as:
+//   Bits 0–39 : arena epoch
+//   Bits 40–58 : generation
+//   Bit 59     : grower. Canonical static id has bits 0–59 all 1 and is not a grower.
 // Bit 60    : is_cstr (ptr[len] is defined and 0 — C-string capability)
 // Bit 61    : is_transferable
 // Bit 62    : is_subslice
 // Bit 63    : is_unique (has destructor, move-only)
 #define CC_SLICE_ID_ALLOC_MASK 0x0FFFFFFFFFFFFFFFULL
+#define CC_SLICE_ID_EPOCH_MASK 0x000000FFFFFFFFFFULL
+#define CC_SLICE_ID_GEN_SHIFT  40
+#define CC_SLICE_ID_GEN_MASK   0x07FFFF0000000000ULL
+#define CC_SLICE_ID_GROWER     (1ULL << 59)
 #define CC_SLICE_ID_CSTR         (1ULL << 60)
 #define CC_SLICE_ID_TRANSFERABLE (1ULL << 61)
 #define CC_SLICE_ID_SUBSLICE     (1ULL << 62)
@@ -276,6 +284,39 @@ static inline bool cc_slice_is_canonical_id(uint64_t id) {
     return (id & CC_SLICE_ID_ALLOC_MASK) == CC_SLICE_ID_CANONICAL_ALLOC;
 }
 static inline uint64_t cc_slice_alloc_id(uint64_t id) { return id & CC_SLICE_ID_ALLOC_MASK; }
+static inline int cc_slice_is_grower_id(uint64_t id) {
+    return ((id & CC_SLICE_ID_GROWER) != 0) && !cc_slice_is_canonical_id(id);
+}
+static inline uint64_t cc_slice_id_epoch(uint64_t id) {
+    uint64_t a = cc_slice_alloc_id(id);
+    if (cc_slice_is_grower_id(id)) return a & CC_SLICE_ID_EPOCH_MASK;
+    return a;
+}
+static inline uint32_t cc_slice_id_gen(uint64_t id) {
+    if (!cc_slice_is_grower_id(id)) return 0;
+    return (uint32_t)((id & CC_SLICE_ID_GEN_MASK) >> CC_SLICE_ID_GEN_SHIFT);
+}
+static inline uint64_t cc_slice_make_grower_id(uint64_t epoch, uint32_t gen) {
+    uint64_t a = (epoch & CC_SLICE_ID_EPOCH_MASK) |
+                 (((uint64_t)(gen & 0x7FFFFu)) << CC_SLICE_ID_GEN_SHIFT) |
+                 CC_SLICE_ID_GROWER;
+    return cc_slice_make_id(a, false, false, false);
+}
+#if defined(CC_COMPTIME) || defined(CC_PARSER_MODE)
+static inline uint32_t cc_slice_gen_birth(void) { return 1; }
+static inline void cc_slice_gen_kill(uint32_t gen) { (void)gen; }
+static inline int cc_slice_gen_is_live(uint32_t gen) { (void)gen; return 1; }
+#else
+uint32_t cc_slice_gen_birth(void);
+void cc_slice_gen_kill(uint32_t gen);
+int cc_slice_gen_is_live(uint32_t gen);
+#endif
+static inline int cc_slice_grower_stale(uint64_t id) {
+    uint32_t g;
+    if (!cc_slice_is_grower_id(id)) return 0;
+    g = cc_slice_id_gen(id);
+    return g == 0 || !cc_slice_gen_is_live(g);
+}
 /* Untracked = no alloc epoch and not unique. `is_cstr` alone is not lifetime. */
 static inline bool cc_slice_is_untracked_id(uint64_t id) {
     return (id & CC_SLICE_ID_ALLOC_MASK) == 0 &&
@@ -453,6 +494,7 @@ static inline int cc_slice_store_at(CCSlice *s, size_t idx, size_t elsz,
     unsigned char *d;
     const unsigned char *p;
     if (!s || !s->ptr || !src || !elsz || idx >= s->len) return -1;
+    if (cc_slice_grower_stale(s->id)) return -1;
     if (idx && elsz > ((size_t)-1) / idx) return -1;
     d = (unsigned char *)s->ptr + idx * elsz;
     p = (const unsigned char *)src;

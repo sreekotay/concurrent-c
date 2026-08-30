@@ -32,7 +32,6 @@
  * (tests/ufcs_vec_member_miss_fail) — not shown here because they do not compile.
  */
 #include <ccc/cc_runtime.cch>
-#include <stdlib.h>
 #include <stdio.h>
 #include <ccc/script/stdio.cch>
 #include <math.h>

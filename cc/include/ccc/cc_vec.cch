@@ -17,6 +17,7 @@ typedef struct CCVecHeader {
     CCArena arena;
     size_t cap;
     uint64_t provenance;
+    uint32_t gen;
 } CCVecHeader;
 
 /* The comptime executor's TCC sysinclude does not declare max_align_t; use the
@@ -141,10 +142,12 @@ static inline void cc_vec_sync_len(CCVec *v) {
 }
 
 static inline CCSlice cc_vec_as_slice(const CCVec *v) {
+    CCVecHeader *h;
     if (!v || !v->data) return cc_slice_empty();
-    return cc_slice_from_parts(v->data,
-                               v->len,
-                               cc_slice_make_id(cc_vec_provenance(v), false, false, false));
+    h = cc__vec_header(v);
+    if (!h) return cc_slice_empty();
+    return cc_slice_from_parts(v->data, v->len,
+                               cc_slice_make_grower_id(h->provenance, h->gen));
 }
 
 static inline void cc_vec_apply_slice(CCVec *v, CCSlice slice) {
@@ -175,6 +178,7 @@ static inline int cc_vec_init(CCVec *v,
     h->arena = arena;
     h->cap = cap;
     h->provenance = CC__ARENA_HOST(arena)->provenance;
+    h->gen = cc_slice_gen_birth();
     v->data = (void *)((uint8_t *)h + cc__vec_header_bytes());
     return 0;
 }
@@ -197,12 +201,23 @@ static inline int cc_vec_reserve(CCVec *v,
     old_total = cc__vec_alloc_size(elem_size, h->cap);
     new_total = cc__vec_alloc_size(elem_size, need);
     if (old_total == 0 || new_total == 0) return -1;
-    h = (CCVecHeader *)cc_arena_realloc(arena, arena, h, old_total, new_total, CC__VEC_MAX_ALIGN);
-    if (!h) return -1;
-    h->arena = arena;
-    h->cap = need;
-    h->provenance = CC__ARENA_HOST(arena)->provenance;
-    v->data = (void *)((uint8_t *)h + cc__vec_header_bytes());
+    {
+        CCVecHeader *old_h = h;
+        uint32_t old_gen = h->gen;
+        h = (CCVecHeader *)cc_arena_realloc(arena, arena, h, old_total,
+                                            new_total, CC__VEC_MAX_ALIGN);
+        if (!h) return -1;
+        h->arena = arena;
+        h->cap = need;
+        h->provenance = CC__ARENA_HOST(arena)->provenance;
+        if (h != old_h) {
+            cc_slice_gen_kill(old_gen);
+            h->gen = cc_slice_gen_birth();
+        } else {
+            h->gen = old_gen;
+        }
+        v->data = (void *)((uint8_t *)h + cc__vec_header_bytes());
+    }
     return 0;
 }
 

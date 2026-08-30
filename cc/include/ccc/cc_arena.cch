@@ -2735,7 +2735,7 @@ static inline CCSlice cc_arena_alloc_slice(CCArenaHost *arena, size_t elem_size,
 static inline bool cc_slice_is_from_arena_epoch(CCSlice slice, const CCArenaHost *arena) {
     uint64_t e;
     if (!arena || cc_slice_is_untracked(slice)) return false;
-    e = cc_slice_alloc_id(slice.id);
+    e = cc_slice_id_epoch(slice.id);
     return e >= arena->epoch_floor && e <= arena->provenance;
 }
 

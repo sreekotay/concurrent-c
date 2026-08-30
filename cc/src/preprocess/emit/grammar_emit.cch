@@ -59,7 +59,7 @@ static inline CCString cc_gr_swar_run_text(CCArena a, int k, int T, int b1, int 
     } }
 #else
     { const unsigned long long L${k} = 0x0101010101010101ULL, H${k} = 0x8080808080808080ULL;
-    while (p + 8 <= n) { unsigned long long w${k}; memcpy(&w${k}, s + p, 8);
+    while (p + 8 <= n) { unsigned long long w${k}; cc__bytes_copy(&w${k}, s + p, 8);
         unsigned long long m${k} = 0;
 `, a), a);
     if (T > 0)
@@ -179,7 +179,7 @@ static __attribute__((noinline)) int ${n}__tgrow(${n}__ctx* c) {
         unsigned char* ncw = (unsigned char*)cc_arena_realloc(c->arena, c->arena, c->mat_cow,
             c->cap, nc, 1);
         if (!np || !nl || !ncw) return 0;
-        memset(np + c->cap, 0, (nc - c->cap) * sizeof(char*));
+        cc__bytes_zero(np + c->cap, (nc - c->cap) * sizeof(char*));
         c->mat_ptr = np; c->mat_len = nl; c->mat_cow = ncw;
     }
 `, a), a);
@@ -253,7 +253,7 @@ static inline CCString cc_gr_wflush_text(CCArena a, int md, const unsigned char*
         }
     } else {
         CCString esc = cc_gr_esc_text(a, lit, nlit);
-        cc_gr__cat(&o, @string(`    memcpy(dst + o, "${esc}", ${nlit}); o += ${nlit};
+        cc_gr__cat(&o, @string(`    cc__bytes_copy(dst + o, "${esc}", ${nlit}); o += ${nlit};
 `, a), a);
     }
     return o;
@@ -341,12 +341,12 @@ static inline CCString cc_gr_wint_text(CCArena a, int k, int md, const char* exp
 static inline CCString cc_gr_wfloat_text(CCArena a, int k, int md, const char* field) {
     if (md == CC_GR_WPUT)
         return @string(`    { char tb${k}[64]; int n${k} = snprintf(tb${k}, sizeof tb${k}, "%.17g", v->${field});
-      memcpy(dst + o, tb${k}, (size_t)n${k}); o += (size_t)n${k}; }
+      cc__bytes_copy(dst + o, tb${k}, (size_t)n${k}); o += (size_t)n${k}; }
 `, a);
     if (md == CC_GR_WCHK)
         return @string(`    { char tb${k}[64]; int n${k} = snprintf(tb${k}, sizeof tb${k}, "%.17g", v->${field});
       if (n${k} < 0 || cap - o < (size_t)n${k}) return 0;
-      memcpy(dst + o, tb${k}, (size_t)n${k}); o += (size_t)n${k}; }
+      cc__bytes_copy(dst + o, tb${k}, (size_t)n${k}); o += (size_t)n${k}; }
 `, a);
     return @string(`    { char tb${k}[64]; o += (size_t)snprintf(tb${k}, sizeof tb${k}, "%.17g", v->${field}); }
 `, a);
@@ -370,11 +370,11 @@ static inline CCString cc_gr_wleaf_body_text(CCArena a, int md, int k, const cha
         return @string(`    o += ${enc}((const char*)${pexpr}, ${lexpr}, 0, 0);
 `, a);
     if (md == CC_GR_WPUT)
-        return @string(`    memcpy(dst + o, ${pexpr}, ${lexpr}); o += ${lexpr};
+        return @string(`    cc__bytes_copy(dst + o, ${pexpr}, ${lexpr}); o += ${lexpr};
 `, a);
     if (md == CC_GR_WCHK)
         return @string(`    if (cap - o < ${lexpr}) return 0;
-    memcpy(dst + o, ${pexpr}, ${lexpr}); o += ${lexpr};
+    cc__bytes_copy(dst + o, ${pexpr}, ${lexpr}); o += ${lexpr};
 `, a);
     return @string(`    o += ${lexpr};
 `, a);
@@ -390,7 +390,7 @@ static inline CCString cc_gr_wbytes_text(CCArena a, int md, const char* field) {
     if (md == CC_GR_WCHK)
         cc_gr__cat(&o, @string(`    if (cap - o < v->${field}.len) return 0;
 `, a), a);
-    cc_gr__cat(&o, @string(`    memcpy(dst + o, v->${field}.ptr, v->${field}.len); o += v->${field}.len;
+    cc_gr__cat(&o, @string(`    cc__bytes_copy(dst + o, v->${field}.ptr, v->${field}.len); o += v->${field}.len;
 `, a), a);
     return o;
 }
@@ -808,7 +808,7 @@ static inline CCString cc_gr_new_fill_def_text(CCArena a, const char* T) {
     CCArena arena, int* cc_inc, int cc_depth) {
     ${T}* q = (${T}*)cc_arena_alloc_local(arena, sizeof(${T}), _Alignof(${T}));
     if (!q) return 0;
-    memset(q, 0, sizeof(*q));
+    cc__bytes_zero(q, sizeof(*q));
     if (!${T}__fill(s, n, io, arena, q, cc_inc, cc_depth)) return 0;
     return q;
 }
@@ -886,7 +886,7 @@ static inline CCString cc_gr_litn_term_text(CCArena a, const unsigned char* lit,
 `, a), a);
     } else {
         CCString esc = cc_gr_esc_text(a, lit, len);
-        cc_gr__cat(&o, @string(`    if (memcmp(s + p, "${esc}", ${len}) != 0) { cc_grammar_note_fail(p); goto ${fail}; };
+        cc_gr__cat(&o, @string(`    if (cc__bytes_cmp(s + p, "${esc}", ${len}) != 0) { cc_grammar_note_fail(p); goto ${fail}; };
 `, a), a);
     }
     cc_gr__cat(&o, @string(`    p += ${len};
@@ -925,7 +925,7 @@ static inline CCString cc_gr_key_case_text(CCArena a, int len) {
 static inline CCString cc_gr_key_memcmp_open_text(CCArena a, int k,
                                                   const unsigned char* key, int len) {
     CCString esc = cc_gr_esc_text(a, key, len);
-    return @string(`        if (memcmp(s + xa${k}, "${esc}", ${len}) == 0) {
+    return @string(`        if (cc__bytes_cmp(s + xa${k}, "${esc}", ${len}) == 0) {
 `, a);
 }
 
@@ -1495,13 +1495,13 @@ static inline CCString cc_gr_m_word_text(CCArena a, unsigned int w, const unsign
     CCString lit = cc_gr_esc_text(a, bytes, len);
     if (len == 4)
         return @string(`    if (!(p + 4 <= n)) { cc_grammar_note_fail(p); goto ${fail}; };
-    { unsigned int w; memcpy(&w, s + p, 4); if (w != ${w}u) { cc_grammar_note_fail(p); goto ${fail}; }; }  /* "${lit}" */
+    { unsigned int w; cc__bytes_copy(&w, s + p, 4); if (w != ${w}u) { cc_grammar_note_fail(p); goto ${fail}; }; }  /* "${lit}" */
     p += 4;
 `, a);
     {
         int b4 = (int)bytes[4];
         return @string(`    if (!(p + 5 <= n)) { cc_grammar_note_fail(p); goto ${fail}; };
-    { unsigned int w; memcpy(&w, s + p, 4); if (w != ${w}u || s[p + 4] != ${b4}) { cc_grammar_note_fail(p); goto ${fail}; }; }  /* "${lit}" */
+    { unsigned int w; cc__bytes_copy(&w, s + p, 4); if (w != ${w}u || s[p + 4] != ${b4}) { cc_grammar_note_fail(p); goto ${fail}; }; }  /* "${lit}" */
     p += 5;
 `, a);
     }
@@ -1510,7 +1510,7 @@ static inline CCString cc_gr_m_word_text(CCArena a, unsigned int w, const unsign
 static inline CCString cc_gr_m_litn_text(CCArena a, const char* n, int off, int len,
                                          const unsigned char* bytes, const char* fail) {
     CCString lit = cc_gr_esc_text(a, bytes, len);
-    return @string(`    if (!(p + ${len} <= n && memcmp(s + p, ${n}__pool + ${off}, ${len}) == 0)) { cc_grammar_note_fail(p); goto ${fail}; };   /* "${lit}" */
+    return @string(`    if (!(p + ${len} <= n && cc__bytes_cmp(s + p, ${n}__pool + ${off}, ${len}) == 0)) { cc_grammar_note_fail(p); goto ${fail}; };   /* "${lit}" */
     p += ${len};
 `, a);
 }
@@ -1604,7 +1604,7 @@ static inline CCString cc_gr_keep_codec_tape_text(CCArena a, const char* n, int 
           c->mat_len = (size_t*)cc_arena_alloc_local(c->arena, c->cap * sizeof(size_t), 8);
           c->mat_cow = (unsigned char*)cc_arena_alloc_local(c->arena, c->cap, 1);
           if (!c->mat_ptr || !c->mat_len || !c->mat_cow) { cc_grammar_note_fail(p); goto ${fail}; };
-          memset(c->mat_ptr, 0, c->cap * sizeof(char*));
+          cc__bytes_zero(c->mat_ptr, c->cap * sizeof(char*));
         }
         { CCSlice v${k};
           switch (${cb}) {

@@ -15,7 +15,6 @@
  * and send_task differ. Larger example: real_projects/pigz/pigz_channel.ccs.
  */
 #include <ccc/std/prelude.cch>
-#include <stdlib.h>
 #include <ccc/cc_atomic.cch>
 #include <ccc/script/stdio.cch>
 #include <unistd.h>

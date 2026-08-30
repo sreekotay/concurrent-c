@@ -31,12 +31,10 @@
  * allocates (peer addr, read buffer, CLI parse).
  */
 #include <ccc/cc_runtime.cch>
-#include <stdlib.h>
 #include <ccc/std/prelude.cch>
 #include <ccc/std/net.cch>
 #include <ccc/std/cli.cch>
 #include <ccc/script/stdio.cch>
-#include <string.h>
 
 #define PORT "127.0.0.1:9000"
 

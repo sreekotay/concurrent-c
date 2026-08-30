@@ -2241,6 +2241,8 @@ static int shadow_as_field_miss_path(const char* outer, const char* leaf,
         if (strcmp(g_shadow_as[i].outer, outer) != 0) continue;
         if (!g_shadow_as[i].target[0]) continue;
         if (strcmp(g_shadow_as[i].field, leaf) == 0) continue;
+        /* Value embed only. Viewed / accessor as: (CCNursery.arena) is UFCS. */
+        if (!shadow_type_has_field(outer, g_shadow_as[i].field)) continue;
         if (!shadow_type_has_field(g_shadow_as[i].target, leaf)) continue;
         hits++;
         hit = g_shadow_as[i].field;

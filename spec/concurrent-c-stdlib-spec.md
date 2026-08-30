@@ -291,9 +291,9 @@ bool !>(CCError) cc_slice_set(CCSlice *s, size_t idx, char c);
 bool !>(CCError) cc_slice_truncate(CCSlice *s, size_t n);
 
 /* Dest-bulk — no third length. Dest shorter than `src` is an error. */
-bool !>(CCError) cc_slice_copy(CCSlice *dst, CCSlice src);   /* memcpy */
-bool !>(CCError) cc_slice_move(CCSlice *dst, CCSlice src);   /* memmove */
-bool !>(CCError) cc_slice_fill(CCSlice *dst, char c);        /* memset */
+bool !>(CCError) cc_slice_copy(CCSlice *dst, CCSlice src);
+bool !>(CCError) cc_slice_copy_overlap(CCSlice *dst, CCSlice src); /* overlap-safe */
+bool !>(CCError) cc_slice_fill(CCSlice *dst, char c);
 ```
 
 `materialize_in` is a no-op when the slice is empty, canonical/static, or

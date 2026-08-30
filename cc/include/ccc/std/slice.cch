@@ -177,6 +177,9 @@ static inline char !>(CCError) cc_slice_get_checked(CCSlice* s, size_t idx) {
     if (!s || !s->ptr || idx >= s->len) {
         return cc_err(CC_ERR_INVALID_ARG, "slice get: index out of bounds");
     }
+    if (cc_slice_grower_stale(s->id)) {
+        return cc_err(CC_ERR_INVALID_ARG, "slice: backing moved");
+    }
     return cc_ok(((char*)s->ptr)[idx]);
 }
 static inline char !>(CCError) CCSlice_get_checked(CCSlice* s, size_t idx) {
@@ -194,6 +197,9 @@ static inline char !>(CCError) CCSlice_at(CCSlice* s, size_t idx) {
 static inline bool !>(CCError) cc_slice_set(CCSlice* s, size_t idx, char c) {
     if (!s || !s->ptr || idx >= s->len) {
         return cc_err(CC_ERR_INVALID_ARG, "slice set: index out of bounds");
+    }
+    if (cc_slice_grower_stale(s->id)) {
+        return cc_err(CC_ERR_INVALID_ARG, "slice: backing moved");
     }
     ((char*)s->ptr)[idx] = c;
     return cc_ok(true);
@@ -234,15 +240,17 @@ static inline bool !>(CCError) CCSliceUnique_truncate(CCSliceUnique* s, size_t n
 }
 
 /* Dest-bulk. Bodies live in runtime/slice_mem.c so this header does not
- * pull memcpy/memmove/memset into user TUs. UFCS: dst.copy(src) !>. */
+ * pull memcpy/memmove/memset into user TUs. UFCS: dst.copy(src) !>,
+ * dst.copy_overlap(src) !> (overlap-safe copy; source stays live).
+ * Ownership transfer is cc_move / return / send_take, not dest-bulk. */
 bool !>(CCError) cc_slice_copy(CCSlice* dst, CCSlice src);
-bool !>(CCError) cc_slice_move(CCSlice* dst, CCSlice src);
+bool !>(CCError) cc_slice_copy_overlap(CCSlice* dst, CCSlice src);
 bool !>(CCError) cc_slice_fill(CCSlice* dst, char c);
 static inline bool !>(CCError) CCSlice_copy(CCSlice* dst, CCSlice src) {
     return cc_slice_copy(dst, src);
 }
-static inline bool !>(CCError) CCSlice_move(CCSlice* dst, CCSlice src) {
-    return cc_slice_move(dst, src);
+static inline bool !>(CCError) CCSlice_copy_overlap(CCSlice* dst, CCSlice src) {
+    return cc_slice_copy_overlap(dst, src);
 }
 static inline bool !>(CCError) CCSlice_fill(CCSlice* dst, char c) {
     return cc_slice_fill(dst, c);

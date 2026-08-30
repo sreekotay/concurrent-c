@@ -10,11 +10,10 @@
  * the consumer, which by then has drained the remaining values.
  *
  * The consumer captures &sum by reference and uses an atomic — only one
- * fiber writes so a plain int would be correct today, but atomic is the
+ * fiber writes so a plain int would suffice here, but atomic is the
  * right default for anything a second fiber might ever touch.
  */
 #include <ccc/std/prelude.cch>
-#include <stdlib.h>
 #include <ccc/script/stdio.cch>
 
 int main(void) {
