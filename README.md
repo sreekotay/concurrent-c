@@ -69,7 +69,7 @@ Fuller example (error policy + compose): [examples/hello.ccs](examples/hello.ccs
 | [cctext](https://github.com/sreekotay/cctext) | Open multi-GB text, CSV, code, JSON and navigate and edit in ms. Includes deep-search file explorer (TUI and GUI). Open and edit an 8GB file with <5MB memory usage in under 2ms. |
 | [rlsw-cc](https://github.com/sreekotay/rlsw-cc) | Update to raylib software rendering, running at 1.5x to 2x speed |
 
-### Real programs, measured
+### Real projects, measured
 
 Full bench suite: **[perf/](perf/)**. Dated JS/Python receipts:
 **[perf/baselines/](perf/baselines/)** ([catalog](perf/baselines/README.md)).
