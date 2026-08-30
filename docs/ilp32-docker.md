@@ -26,21 +26,18 @@ CCC_HOST_CC=tcc ./scripts/smoke_i386.sh         # host+backend = TinyCC
 CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh
 ```
 
-## Latest receipt — 2026-08-29
+## Latest receipt — 2026-08-30
 
 **Host:** macOS (Darwin 25), arm64, Docker Desktop, QEMU user-mode  
-**Seed:** `shadow_lower` last-good **0.3.4-248** (not committed)  
-**Host cold:** `./scripts/smoke_bootstrap_fresh.sh` — wipe `out/` / `cc/bin/` / `bin/`, `make -C cc` from last-good, hello — **ok** (`ccc 0.3.4-248`)  
+**Seed:** `shadow_lower` last-good **0.3.4-258**  
 **Suite:** hello, channel pipeline, fiber spawn, chan task, park/wake, nursery — expect `ELF 32-bit`
 
 | Command | Host CC | Backend | Result |
 |---------|---------|---------|--------|
 | `./scripts/smoke_i386.sh` | gcc (`cc`) | gcc | **0 failures** |
-| `CCC_HOST_CC=tcc ./scripts/smoke_i386.sh` | TinyCC | TinyCC | not re-run |
-| `./scripts/smoke_arm32.sh` | gcc (`cc`) | gcc | not re-run |
-| `CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh` | TinyCC | TinyCC | not re-run |
-
-Last full matrix (tcc + ARM32): 2026-08-19, seed **0.3.3-173**. Pigz ILP32 numbers below are still that day’s run.
+| `CCC_HOST_CC=tcc ./scripts/smoke_i386.sh` | TinyCC | TinyCC | **FAIL** (`ccc` self-build: `stddef.h` not found) |
+| `./scripts/smoke_arm32.sh` | gcc (`cc`) | gcc | **0 failures** |
+| `CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh` | TinyCC | TinyCC | **FAIL** (`ccc` self-build: `stddef.h` not found) |
 
 ## Latest pigz receipt — 2026-08-19
 

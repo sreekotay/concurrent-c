@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if !defined(__TINYC__)
 CCIoError cc_io_from_errno(int err) {
     CCErrorKind kind = CC_ERR_IO;
     switch (err) {
@@ -47,6 +48,7 @@ CCIoError cc_io_from_errno(int err) {
     }
     return cc_io_error_os(kind, err);
 }
+#endif
 
 static FILE *cc__file_fp(CCFile *file) {
     return file ? (FILE *)file->handle : NULL;

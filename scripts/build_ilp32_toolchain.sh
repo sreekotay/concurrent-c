@@ -44,7 +44,19 @@ rm -rf out/cc out/cc-tcc out/bin 2>/dev/null || true
 
 printf '== TinyCC (patched, --config-cc_ext)\n'
 ./scripts/apply_tcc_patches.sh
-(cd third_party/tcc && ./configure --config-cc_ext && make libtcc.a tcc libtcc1.a -j"$JOBS")
+# Linux configure omits CONFIG_TCC_SYSINCLUDEPATHS; in-tree tcc needs gcc's paths.
+tcc_configure_extras=(--config-bcheck=no)
+tcc_sysinc="$(gcc -Wp,-v -E -x c /dev/null 2>&1 \
+  | awk '/^ /{gsub(/^ +/,""); if ($0 != "" && $0 !~ /search/) print}' \
+  | paste -sd: - || true)"
+tcc_inc_dir="$(pwd)/third_party/tcc/include"
+if [ -n "$tcc_sysinc" ]; then
+  tcc_configure_extras+=(--sysincludepaths="$tcc_inc_dir:$tcc_sysinc")
+else
+  tcc_configure_extras+=(--sysincludepaths="$tcc_inc_dir")
+fi
+(cd third_party/tcc && ./configure --config-cc_ext "${tcc_configure_extras[@]}" \
+  && make libtcc.a tcc libtcc1.a -j"$JOBS")
 nm third_party/tcc/libtcc.a >/dev/null \
   || die "libtcc.a missing after patched build"
 grep -q 'CONFIG_cc_ext=yes' third_party/tcc/config.mak \

@@ -96,8 +96,18 @@ ifeq ($(CC_IS_TCC),1)
   else
     CFLAGS += -B$(TCC_INC)
   endif
+  # Host tcc compile: libc/POSIX headers (ILP32 smoke uses system gcc sysinclude).
+  ifeq ($(shell uname -s),Linux)
+    CFLAGS += -isystem /usr/include
+  endif
   # Match typical gcc/clang link sets for pthread/dl users in the runtime TU.
   LDLIBS += -lm -ldl -lpthread
+  # Unity runtime TUs (cc_mem variadics, concurrent_c aggregates): host tcc rejects them.
+  HOST_POSIX_CC := cc
+  HOST_POSIX_CFLAGS := $(CFLAGS_COMMON) $(if $(filter debug,$(BUILD)),-O0 -g,-O2 -ffunction-sections -fdata-sections)     -DCC_TCC_EXT_AVAILABLE -DCONFIG_CC_EXT -I$(TCC_INC)
+else
+  HOST_POSIX_CC := $(CC)
+  HOST_POSIX_CFLAGS := $(CFLAGS)
 endif
 
 # Compile runtime as a single translation unit for easy linking. concurrent_c.c pulls in channel/nursery/scheduler/fiber_sched/fiber/io/string/exec and async shards when CC_ENABLE_ASYNC.
@@ -409,10 +419,10 @@ $(SHADOW_COMPTIME_LIB): $(SHADOW_COMPTIME_OBJ) $(SHADOW_COMPTIME_ENGINE_OBJS)
 CPARSE_LIB := $(OBJDIR)/cparse/libcparse.a
 $(OBJDIR)/cparse/cparse.o: cparse/cparse.c cparse/cparse.h
 	@mkdir -p $(dir $@)
-	$(CC) -O0 -g -Wall -Wextra -std=c11 -c -o $@ $<
+	$(CC) $(CFLAGS) -std=c11 -c -o $@ $<
 $(OBJDIR)/cparse/expand.o: cparse/expand.c cparse/cparse.h
 	@mkdir -p $(dir $@)
-	$(CC) -O0 -g -Wall -Wextra -std=c11 -c -o $@ $<
+	$(CC) $(CFLAGS) -std=c11 -c -o $@ $<
 $(CPARSE_LIB): $(OBJDIR)/cparse/cparse.o $(OBJDIR)/cparse/expand.o
 	@mkdir -p $(dir $@)
 	@rm -f $@
@@ -602,15 +612,15 @@ $(LOWER_HEADERS_BINARY): $(LOWER_HEADERS_OBJS) $(TCC_LIB_DEP)
 
 $(OBJDIR)/runtime/concurrent_c.o: $(LOWER_HEADERS_STAMP)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(RUNTIME_PIC) -MMD -MP -MF $(RUNTIME_CORE_OBJ:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $(RUNTIME_CORE_OBJ)
-	$(CC) $(CFLAGS) $(RUNTIME_PIC) -MMD -MP -MF $(RUNTIME_FLOAT_OBJ:.o=.d) -c runtime/float_format_zmij.c -o $(RUNTIME_FLOAT_OBJ)
-	$(CC) -nostdlib -r -o $@ $(RUNTIME_CORE_OBJ) $(RUNTIME_FLOAT_OBJ)
+	$(HOST_POSIX_CC) $(HOST_POSIX_CFLAGS) $(RUNTIME_PIC) -MMD -MP -MF $(RUNTIME_CORE_OBJ:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $(RUNTIME_CORE_OBJ)
+	$(HOST_POSIX_CC) $(HOST_POSIX_CFLAGS) $(RUNTIME_PIC) -MMD -MP -MF $(RUNTIME_FLOAT_OBJ:.o=.d) -c runtime/float_format_zmij.c -o $(RUNTIME_FLOAT_OBJ)
+	$(HOST_POSIX_CC) -nostdlib -r -o $@ $(RUNTIME_CORE_OBJ) $(RUNTIME_FLOAT_OBJ)
 
 # arena_state.o for lower_headers*: compile the seeded rewrite (has .h includes).
 # Depend on the seed stamp only — never LOWER_HEADERS_STAMP (breaks cold -j).
 $(OBJDIR)/runtime/arena_state.o: $(OUT_RUNTIME)/.seed.stamp
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $(OUT_RUNTIME)/arena_state.c -o $@
+	$(HOST_POSIX_CC) $(HOST_POSIX_CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $(OUT_RUNTIME)/arena_state.c -o $@
 
 # Stage-1 objs compile against the crude seed (not the lowered stamp —
 # a stamp dep here would cycle: stamp → stage-1 binary → these objs).
