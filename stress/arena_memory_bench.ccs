@@ -73,7 +73,7 @@ int main(void) {
                 /* Single-owner tip: local tier (peer bumps are non-atomic too). */
                 void *np = cc_arena_realloc_local_grow(tip, p, sz, want, 8);
                 if (!np) {
-                    cc_arena_free(&tip);
+                    tip.destroy();
                     return 2;
                 }
                 if (p && np != p) moves++;
@@ -84,7 +84,7 @@ int main(void) {
             sink ^= (size_t)p[0] + sz;
             cc_arena_reset(tip);
         }
-        cc_arena_free(&tip);
+        tip.destroy();
         tip_ms = now_ms() - t0;
     }
 
@@ -98,7 +98,7 @@ int main(void) {
             size_t n = bulk_size(i);
             unsigned char *q = (unsigned char *)cc_arena_alloc_local_grow(bulk, n, 8);
             if (!q) {
-                cc_arena_free(&bulk);
+                bulk.destroy();
                 return 4;
             }
             q[0] = (unsigned char)i;
@@ -109,7 +109,7 @@ int main(void) {
         t_reset = now_ms();
         cc_arena_reset(bulk);
         reset_ms = now_ms() - t_reset;
-        cc_arena_free(&bulk);
+        bulk.destroy();
         bulk_ms = now_ms() - t0;
     }
 
@@ -121,7 +121,7 @@ int main(void) {
             size_t n = 24 + (i * 17) % 512;
             unsigned char *q = (unsigned char *)cc_arena_alloc(ovf, n, 8);
             if (!q) {
-                cc_arena_free(&ovf);
+                ovf.destroy();
                 return 6;
             }
             q[0] = (unsigned char)i;
@@ -129,7 +129,7 @@ int main(void) {
         }
         ovf_gross = cc_arena_committed_gross_bytes(ovf);
         ovf_bytes = cc_arena_overflow_raw_bytes(ovf);
-        cc_arena_free(&ovf); /* reclaim extents + overflow inside ovf_ms */
+        ovf.destroy(); /* reclaim extents + overflow inside ovf_ms */
         ovf_ms = now_ms() - t0;
     }
 
@@ -140,11 +140,11 @@ int main(void) {
         for (j = 0; j < churn_each; j++) {
             size_t n = 16 + (j * 31) % 256;
             if (!cc_arena_alloc_local_grow(c, n, 8)) {
-                cc_arena_free(&c);
+                c.destroy();
                 return 8;
             }
         }
-        cc_arena_free(&c);
+        c.destroy();
     }
     churn_ms = now_ms() - t0;
 

@@ -89,7 +89,7 @@ int main(void) {
             size_t sz = item_size(i);
             ptrs[i] = (unsigned char *)cc_arena_alloc(a, sz, 8);
             if (!ptrs[i]) {
-                cc_arena_free(&a);
+                a.destroy();
                 return 2;
             }
             ptrs[i][0] = (unsigned char)i;
@@ -120,7 +120,7 @@ int main(void) {
             size_t idx = order[i];
             if (!alive[idx]) continue;
             if (!cc_arena_release(a, ptrs[idx])) {
-                cc_arena_free(&a);
+                a.destroy();
                 return 3;
             }
             alive[idx] = 0;
@@ -138,7 +138,7 @@ int main(void) {
             want = (size_t)sizes[i] + 48 + (i % 64);
             np = cc_arena_realloc(a, a, ptrs[i], sizes[i], want, 8);
             if (!np) {
-                cc_arena_free(&a);
+                a.destroy();
                 return 4;
             }
             ptrs[i] = (unsigned char *)np;
@@ -160,7 +160,7 @@ int main(void) {
 
         t = now_ms();
         cc_arena_reset(a);
-        cc_arena_free(&a);
+        a.destroy();
         reclaim_ms = now_ms() - t;
         live = 0;
     }

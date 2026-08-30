@@ -29,7 +29,7 @@ int main(void) {
         CCNursery n = cc_nursery_create() !>;
         cc_nursery_spawn(n, instant_task, NULL);
         cc_nursery_wait(n);
-        cc_nursery_free(n);
+        n.free();
         
         if ((iter + 1) % 10000 == 0) {
             printf("  completed %d/%d (counter=%d)\n", iter + 1, ITERATIONS, cc_atomic_load(&counter));

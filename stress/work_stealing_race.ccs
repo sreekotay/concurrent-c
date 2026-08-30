@@ -65,7 +65,7 @@ int main(void) {
             cc_nursery_spawn(n, burst_task, (void*)(intptr_t)i);
         }
         cc_nursery_wait(n);
-        cc_nursery_free(n);
+        n.free();
         
         int c = cc_atomic_load(&completed);
         int d = cc_atomic_load(&duplicates);

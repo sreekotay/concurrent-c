@@ -169,7 +169,7 @@ static bool db_init(DB* db, CCExclusive excl, CCShardMask mask) {
 
 static void db_free(DB* db) {
     if (!db) return;
-    cc_shard_map_destroy(&db->maps);
+    db->maps.destroy();
     memset(db, 0, sizeof(*db));
 }
 

@@ -30,7 +30,7 @@ void* outer_task(void* arg) {
     cc_nursery_wait(inner);
     fprintf(stderr, "DEBUG: iter %d - inner done\n", iter);
     fflush(stderr);
-    cc_nursery_free(inner);
+    inner.free();
     
     fprintf(stderr, "DEBUG: iter %d - outer fiber done\n", iter);
     fflush(stderr);
@@ -53,7 +53,7 @@ int main(void) {
         cc_nursery_wait(outer);
         fprintf(stderr, "DEBUG: iter %d - outer done\n", i);
         fflush(stderr);
-        cc_nursery_free(outer);
+        outer.free();
         
         fprintf(stderr, "DEBUG: iter %d - outer nursery done\n", i);
         fflush(stderr);

@@ -73,8 +73,8 @@ int main(void) {
             return 1;
         }
 
-        cc_chan_free(g_ch0); cc_chan_free(g_ch1); cc_chan_free(g_ch2);
-        cc_chan_free(g_ch3); cc_chan_free(g_ch4);
+        g_ch0.free(); g_ch1.free(); g_ch2.free();
+        g_ch3.free(); g_ch4.free();
     }
     printf("pipeline_repeat: %d iterations OK\n", REPEATS);
     return 0;

@@ -75,7 +75,7 @@ int test_consumer_outside(void) {
         cc_atomic_fetch_add(&g_received, 1);
     }
     
-    cc_chan_free(ch);
+    ch.free();
     
     int sent = cc_atomic_load(&g_sent);
     int recv = cc_atomic_load(&g_received);

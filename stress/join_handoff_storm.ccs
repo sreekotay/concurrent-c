@@ -22,7 +22,7 @@ void* chain_task(void* arg) {
     CCNursery n = cc_nursery_create() !>;
     cc_nursery_spawn(n, chain_task, (void*)(intptr_t)(depth - 1));
     cc_nursery_wait(n);
-    cc_nursery_free(n);
+    n.free();
 
     cc_atomic_fetch_add(&g_completed, 1);
     return NULL;
@@ -40,7 +40,7 @@ int main(void) {
         CCNursery n = cc_nursery_create() !>;
         cc_nursery_spawn(n, chain_task, (void*)(intptr_t)DEPTH);
         cc_nursery_wait(n);
-        cc_nursery_free(n);
+        n.free();
 
         int got = cc_atomic_load(&g_completed);
         int expected = DEPTH;

@@ -415,8 +415,8 @@ int main(void) {
         CCPyObj m = py.import("__main__") !> @destroy;
         CCSlice oks = m.get("ok")!>.as_slice()!>;
         CCSlice negs = m.get("neg")!>.as_slice()!>;
-        if (oks.len != 4 || memcmp(oks.ptr, "True", 4) != 0) ok = 0;
-        if (negs.len != 4 || memcmp(negs.ptr, "True", 4) != 0) ok = 0;
+        if (!oks.eq_cstr("True")) ok = 0;
+        if (!negs.eq_cstr("True")) ok = 0;
 
         CCPyObj big = py.eval(@slice("[2**40]")) !> @destroy;
         CCResult_CCSlice_CCPyError bad = cc_py_obj_as_list(int, &big, a);

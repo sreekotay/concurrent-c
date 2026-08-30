@@ -581,7 +581,7 @@ static RedisReply db_del(RedisDb* db, char[:]* keys, size_t nkeys,
                          DbCmdClock* clock) {
     int64_t removed = 0;
     if (!db || !db->shards) return reply_integer(0);
-    for (size_t i = 0; i < nkeys; ++i) {
+    for (i in 0..nkeys) {
         RedisEntry* cell = db_lookup_live(db, keys[i], clock);
         if (!cell) continue;
         db_remove_entry(db, keys[i], cell);
@@ -593,7 +593,7 @@ static RedisReply db_del(RedisDb* db, char[:]* keys, size_t nkeys,
 static RedisReply db_exists(RedisDb* db, char[:]* keys, size_t nkeys,
                             DbCmdClock* clock) {
     int64_t found = 0;
-    for (size_t i = 0; i < nkeys; ++i) {
+    for (i in 0..nkeys) {
         if (db_lookup_live(db, keys[i], clock)) found++;
     }
     return reply_integer(found);
@@ -764,13 +764,13 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
                                       CCArena reply_arena,
                                       DbCmdClock* clock) {
     @errhandler(CCError e) { return cc_err(e); }
-    for (size_t i = 0; i < nkeys; ++i) {
+    for (i in 0..nkeys) {
         (void)db_lookup_live(db, keys[i], clock);
     }
 
     char[:] vals[REDIS_ARGV_MAX] = {0};
     bool found[REDIS_ARGV_MAX] = {0};
-    for (size_t i = 0; i < nkeys; ++i) {
+    for (i in 0..nkeys) {
         RedisEntry* cell = db_lookup_live(db, keys[i], clock);
         found[i] = cell != NULL;
         if (cell) {
@@ -794,7 +794,7 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
     }
 
     RespGBulk elems[REDIS_ARGV_MAX];
-    for (size_t i = 0; i < nkeys; ++i)
+    for (i in 0..nkeys)
         elems[i] = wire_bulk_or_nil(vals[i], found[i]);
 
     RespGBulkArray arr;
@@ -817,8 +817,9 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
 
 static void !>(CCError) db_mset(RedisDb* db, char[:]* args, size_t argc) {
     @errhandler(CCError e) { return cc_err(e); }
-    for (size_t i = 0; i + 1 < argc; i += 2) {
-        db_set(db, args[i], args[i + 1], 0) !>;
+    for (i in 0..(argc / 2)) {
+        size_t k = i * 2;
+        db_set(db, args[k], args[k + 1], 0) !>;
     }
     return cc_ok();
 }

@@ -32,7 +32,7 @@ void* nested_task(void* arg) {
         CCNursery n = cc_nursery_create() !>;
         cc_nursery_spawn(n, nested_task, (void*)(intptr_t)(depth + 1));
         cc_nursery_wait(n);
-        cc_nursery_free(n);
+        n.free();
     }
     
     return (void*)(intptr_t)depth;
@@ -48,7 +48,7 @@ int main(void) {
         CCNursery n = cc_nursery_create() !>;
         cc_nursery_spawn(n, nested_task, (void*)(intptr_t)1);
         cc_nursery_wait(n);
-        cc_nursery_free(n);
+        n.free();
         
         int reached = cc_atomic_load(&deepest_reached);
         if (reached != DEPTH) {

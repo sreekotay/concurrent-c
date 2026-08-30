@@ -17,6 +17,7 @@
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/script/js.cch>
+#include <stdio.h>
 #include <time.h>
 
 static double now_ms(void) {

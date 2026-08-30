@@ -112,8 +112,8 @@ int main(void) {
         double t;
 
         if (!cc_arena_is_live(scratch) || !cc_arena_is_live(keep)) {
-            cc_arena_free(&scratch);
-            cc_arena_free(&keep);
+            scratch.destroy();
+            keep.destroy();
             return 2;
         }
 
@@ -123,8 +123,8 @@ int main(void) {
             CCArena *dest = ephemeral[i] ? &scratch : &keep;
             ptrs[i] = (unsigned char *)cc_arena_alloc(*dest, sz, 8);
             if (!ptrs[i]) {
-                cc_arena_free(&scratch);
-                cc_arena_free(&keep);
+                scratch.destroy();
+                keep.destroy();
                 return 3;
             }
             ptrs[i][0] = (unsigned char)i;
@@ -164,8 +164,8 @@ int main(void) {
             want = (size_t)sizes[i] + 48 + (i % 64);
             np = cc_arena_realloc(keep, keep, ptrs[i], sizes[i], want, 8);
             if (!np) {
-                cc_arena_free(&scratch);
-                cc_arena_free(&keep);
+                scratch.destroy();
+                keep.destroy();
                 return 4;
             }
             ptrs[i] = (unsigned char *)np;
@@ -181,8 +181,8 @@ int main(void) {
 
         t = now_ms();
         cc_arena_reset(keep);
-        cc_arena_free(&scratch);
-        cc_arena_free(&keep);
+        scratch.destroy();
+        keep.destroy();
         reclaim_ms = now_ms() - t;
         live = 0;
     }

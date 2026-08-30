@@ -2,6 +2,8 @@
 // hand-rolled reference. Corpus: K SET commands, redis-benchmark shaped.
 #include <ccc/std/prelude.cch>
 #include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 #include <ccc/script/stdio.cch>
 #include <time.h>
 

@@ -197,7 +197,7 @@ static int bench_budget_overflow_reset(void) {
     if (gross_after > ROOT_BYTES + 64 * 1024 && gross_after > MAX_RESIDUAL_GROSS)
         return fail("gross still huge after reset");
 
-    cc_arena_free(&a);
+    a.destroy();
     return 0;
 }
 
@@ -215,7 +215,7 @@ static int bench_reset_pingpong(void) {
             size_t n = 32 + ((i * 41 + r * 7) % 768);
             void *p = cc_arena_alloc(a, n, 16);
             if (!p) {
-                cc_arena_free(&a);
+                a.destroy();
                 return fail("pingpong alloc");
             }
             ((unsigned char *)p)[0] = (unsigned char)(r ^ i);
@@ -226,11 +226,11 @@ static int bench_reset_pingpong(void) {
         if (o > peak_ovf) peak_ovf = o;
         cc_arena_reset(a);
         if (a.a->ovf_head != NULL || cc_arena_overflow_raw_bytes(a) != 0) {
-            cc_arena_free(&a);
+            a.destroy();
             return fail("pingpong reset left overflow");
         }
         if (a.a->block_idx != 0 || a.a->prev != NULL) {
-            cc_arena_free(&a);
+            a.destroy();
             return fail("pingpong reset left extents");
         }
     }
@@ -238,10 +238,10 @@ static int bench_reset_pingpong(void) {
            PINGPONG_ROUNDS, peak_gross, peak_ovf, cc_arena_committed_gross_bytes(a),
            now_sec() - t0);
     if (cc_arena_committed_gross_bytes(a) > 64 * 1024) {
-        cc_arena_free(&a);
+        a.destroy();
         return fail("pingpong residual root ballooned");
     }
-    cc_arena_free(&a);
+    a.destroy();
     return 0;
 }
 
@@ -260,11 +260,11 @@ static int bench_mixed_align_storm(void) {
         if (n < 8) n = 8;
         void *p = cc_arena_alloc(a, n, aln);
         if (!p) {
-            cc_arena_free(&a);
+            a.destroy();
             return fail("mixed align alloc");
         }
         if (((uintptr_t)p % aln) != 0) {
-            cc_arena_free(&a);
+            a.destroy();
             return fail("alignment broken");
         }
         ((unsigned char *)p)[0] = (unsigned char)i;
@@ -273,7 +273,7 @@ static int bench_mixed_align_storm(void) {
     printf("  mixed_align: live~=%zu slabs=%u ovf=%zu gross=%zu %.3fs\n",
            live, a.a->block_idx + 1, cc_arena_overflow_raw_bytes(a),
            cc_arena_committed_gross_bytes(a), now_sec() - t0);
-    cc_arena_free(&a);
+    a.destroy();
     return 0;
 }
 
@@ -292,7 +292,7 @@ static int bench_arena_churn(void) {
             size_t n = 16 + (j * 31) % 256;
             void *p = cc_arena_alloc(a, n, 8);
             if (!p) {
-                cc_arena_free(&a);
+                a.destroy();
                 return fail("churn alloc");
             }
             ((unsigned char *)p)[0] = (unsigned char)j;
@@ -301,7 +301,7 @@ static int bench_arena_churn(void) {
             size_t g = cc_arena_committed_gross_bytes(a);
             if (g > peak_gross) peak_gross = g;
         }
-        cc_arena_free(&a);
+        a.destroy();
     }
     t1 = now_sec();
     rss1 = sample_rss();
@@ -321,7 +321,7 @@ static int bench_stack_spill(void) {
         size_t n = 64 + (i % 128);
         void *p = cc_arena_alloc(s, n, 8);
         if (!p) {
-            cc_arena_free(&s);
+            s.destroy();
             return fail("stack spill alloc");
         }
         live += n;
@@ -330,15 +330,15 @@ static int bench_stack_spill(void) {
            live, s.a->block_idx + 1, cc_arena_overflow_raw_bytes(s),
            cc_arena_committed_gross_bytes(s));
     if (s.a->block_idx == 0 && !(s.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
-        cc_arena_free(&s);
+        s.destroy();
         return fail("stack should have grown or overflowed");
     }
     cc_arena_reset(s);
     if (s.a->base != s_cc_stack_buf) {
-        cc_arena_free(&s);
+        s.destroy();
         return fail("stack reset did not restore stack buf");
     }
-    cc_arena_free(&s);
+    s.destroy();
     return 0;
 }
 
@@ -373,7 +373,7 @@ static int bench_concurrent_nursery_arenas(void) {
                     cc_atomic_fetch_add(&g_conc_ok, 1);
                     cc_atomic_fetch_add(&g_conc_bytes, nsz);
                 }
-                cc_arena_free(&a);
+                a.destroy();
             }) !>;
         }
     }

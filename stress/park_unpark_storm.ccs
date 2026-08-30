@@ -55,7 +55,7 @@ int main(void) {
     
     }
 
-    cc_chan_free(ch);
+    ch.free();
 
     int got = cc_atomic_load(&g_received);
     printf("park_unpark_storm: received %d/%d\n", got, total);

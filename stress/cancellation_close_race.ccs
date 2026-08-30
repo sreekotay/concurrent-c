@@ -87,7 +87,7 @@ int test_close_while_recv(void) {
         
         }
         
-        cc_chan_free(ch);
+        ch.free();
     }
     
     int close_errors = cc_atomic_load(&g_close_errors);
@@ -115,7 +115,7 @@ int test_concurrent_close(void) {
         
         }
         
-        cc_chan_free(ch);
+        ch.free();
     }
     
     printf("  concurrent_close: %d rounds completed\n", NUM_ROUNDS);

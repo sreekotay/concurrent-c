@@ -57,8 +57,8 @@ int main(void) {
     
     }
 
-    cc_chan_free(ch1);
-    cc_chan_free(ch2);
-    cc_chan_free(ch3);
+    ch1.free();
+    ch2.free();
+    ch3.free();
     return 0;
 }

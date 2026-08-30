@@ -18,6 +18,7 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
 #include <ccc/script/stdio.cch>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "ra.h"
@@ -120,7 +121,7 @@ static void !>(CCError) drain_try(World* w, int dest);
 static void !>(CCError) hop_or_drain(World* w, int src, HopTx tx, uint64_t ran) {
     @errhandler(CCError e) { return cc_err(e); }
     for (;;) {
-        bool !>(CCIoError) sent = cc_channel_try_send(tx, ran);
+        bool !>(CCIoError) sent = tx.try_send(ran);
         if (cc_io_avail(sent))
             return cc_ok();
         drain_try(w, src) !>;
@@ -171,10 +172,10 @@ static void !>(CCError) drain_try(World* w, int dest) {
     @errhandler(CCError e) { return cc_err(e); }
     HopRx rx = w->rxs[dest];
     uint64_t r;
-    bool !>(CCIoError) got = cc_channel_try_recv(rx, &r);
+    bool !>(CCIoError) got = rx.try_recv(&r);
     while (cc_io_avail(got)) {
         w->shards[dest].apply(r, w->bits, w->atomic) !>;
-        got = cc_channel_try_recv(rx, &r);
+        got = rx.try_recv(&r);
     }
     return cc_ok();
 }

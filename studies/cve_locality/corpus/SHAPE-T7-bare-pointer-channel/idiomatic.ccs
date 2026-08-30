@@ -26,8 +26,10 @@ int main(void) {
     if (!cc_io_avail(cc_channel_send(tx, heap))) return 3;
 
     char* got = NULL;
-    if (!cc_io_avail(cc_channel_recv(rx, &got))) return 4;
-    if (!got || memcmp(got, "payload!", 8) != 0) return 5;
+    if (!cc_io_avail(rx.recv(&got))) return 4;
+    if (!got) return 5;
+    char[:] got_slice = cc_slice_from_buffer((void*)got, 8);
+    if (!got_slice.eq_cstr("payload!")) return 5;
 
     free(heap);
     /* Bug-shaped (also still compiles if moved above recv):

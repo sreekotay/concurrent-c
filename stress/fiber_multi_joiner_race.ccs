@@ -46,7 +46,7 @@ int main(void) {
             cc_nursery_spawn(n, waiter_task, NULL);
         }
         cc_nursery_wait(n);
-        cc_nursery_free(n);
+        n.free();
         
         /* All waiters should have completed */
         int c = cc_atomic_load(&completed);

@@ -225,10 +225,9 @@ static CCSlice hop_dict(unsigned char dictbuf[DICT_SIZE], size_t* dict_len,
 static CCSlice rsync_scan(CCSlice data, unsigned long* rolling,
                           size_t* hits, size_t max_hits) {
     size_t n_hits = 0;
-    const unsigned char* p = (const unsigned char*)data.ptr;
     size_t last = 0;
-    for (size_t i = 0; i < data.len; i++) {
-        *rolling = ((*rolling << 1) ^ p[i]) & 0xFFF;
+    for (i, ch in data) {
+        *rolling = ((*rolling << 1) ^ ch) & 0xFFF;
         if (*rolling == 2047 && n_hits < max_hits) {
             hits[n_hits++] = (i + 1) - last;
             last = i + 1;

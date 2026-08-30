@@ -160,7 +160,7 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
                 *err = CC_ERROR(CC_ERR_OUT_OF_MEMORY, "argv");
                 return RESP_PARSE_ERROR;
             }
-            for (i = 0; i < n; i++) {
+            for (i in 0..n) {
                 RespGArg a;
                 bool !>(CCError) ar =
                     RespGArg_try_read(src, avail, &pos, arena, &a);
@@ -695,7 +695,7 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
         int64_t removed = 0;
         if (!payload_ok(cmd->argc, 1, -1, 0))
             return enc->err("wrong number of arguments");
-        for (i = 0; i < nkeys; i++) {
+        for (i in 0..nkeys) {
             RedisEntry* cell = db_lookup_live(db, keys[i], &clock);
             if (!cell) continue;
             db_remove_entry(db, keys[i], cell);
@@ -708,7 +708,7 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
         int64_t found = 0;
         if (!payload_ok(cmd->argc, 1, -1, 0))
             return enc->err("wrong number of arguments");
-        for (i = 0; i < nkeys; i++) {
+        for (i in 0..nkeys) {
             if (db_lookup_live(db, keys[i], &clock)) found++;
         }
         return enc->integer(found);
@@ -720,7 +720,7 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
         /* Sketch shape: header then bulks. Mid-encode Err truncates the
          * array on the wire (conn closes) — same caveat as the sketch. */
         enc->array_len(nkeys) !>;
-        for (i = 0; i < nkeys; i++) {
+        for (i in 0..nkeys) {
             RedisEntry* cell = db_lookup_live(db, keys[i], &clock);
             RedisValue* val;
             if (!cell) {
@@ -802,7 +802,7 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
             }
         }
         enc->array_len(matched) !>;
-        for (i = 0; i < matched; i++)
+        for (i in 0..matched)
             enc->bulk(hits[i]) !>;
         return cc_ok(true);
     }

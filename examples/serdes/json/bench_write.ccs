@@ -10,6 +10,8 @@
 // as a Feed are skipped.
 #include <ccc/std/prelude.cch>
 #include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 #include <ccc/script/stdio.cch>
 #include <time.h>
 #include <ccc/std/json.cch>
@@ -97,7 +99,9 @@ int main(int argc, char** argv) {
     }
     char* hout = (char*)malloc(cap);
     size_t hw = hand_write(&feed, hout);
-    if (hw != w || memcmp(hout, out, w) != 0) {
+    CCSlice hs = cc_slice_from_buffer(hout, w);
+    CCSlice os = cc_slice_from_buffer(out, w);
+    if (hw != w || !hs.eq(os)) {
         eprintln(@string(`MISMATCH gen=${w} hand=${hw}`, pa)) !>;
         return 1;
     }

@@ -75,7 +75,7 @@ int main(void) {
 
         // 4. Wait for the target nursery to finish and clean up
         cc_nursery_wait(n);
-        cc_nursery_free(n);
+        n.free();
 
         //  verification
         int started = cc_atomic_load(&g_fibers_started);

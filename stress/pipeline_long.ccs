@@ -93,11 +93,11 @@ int main(void) {
     
     }
 
-    cc_chan_free(g_ch0);
-    cc_chan_free(g_ch1);
-    cc_chan_free(g_ch2);
-    cc_chan_free(g_ch3);
-    cc_chan_free(g_ch4);
+    g_ch0.free();
+    g_ch1.free();
+    g_ch2.free();
+    g_ch3.free();
+    g_ch4.free();
 
     /* Each item goes through 4 increments (+4) */
     /* Sum of (i + 4) for i=0..NUM_ITEMS-1 = sum(i) + 4*NUM_ITEMS */

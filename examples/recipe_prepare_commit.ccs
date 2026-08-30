@@ -19,7 +19,6 @@
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/script/stdio.cch>
-#include <string.h>
 
 typedef struct Prep {
     int ready;
@@ -111,9 +110,8 @@ int main(void) {
 
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
     CCExclusive excl = cc_exclusive_create(arena, 0) !> @destroy;
-    Store st;
+    Store st = {0};
     int hit;
-    memset(&st, 0, sizeof(st));
     st.rel = cc_shard_domain(excl, cc_shard_mask_make(8));
 
     run_pair(&st, 1, 2, -1) !>;

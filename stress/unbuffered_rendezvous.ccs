@@ -66,12 +66,12 @@ int main(void) {
     int err = cc_block_all(task_count, tasks, results);
     if (err != 0) {
         printf("ERROR: cc_block_all failed with err=%d\n", err);
-        cc_chan_free(g_ch);
+        g_ch.free();
         return 1;
     }
 
     chan_close(g_tx);
-    cc_chan_free(g_ch);
+    g_ch.free();
 
     int sent = cc_atomic_load(&g_total_sent);
     int received = cc_atomic_load(&g_total_received);

@@ -53,7 +53,7 @@ int main(void) {
     
     }
 
-    cc_chan_free(ch);
+    ch.free();
 
     int recv_count = cc_atomic_load(&g_received);
     printf("channel_flood: received %d/%d\n", recv_count, total_msgs);

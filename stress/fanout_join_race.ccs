@@ -41,7 +41,7 @@ int main(void) {
             cc_nursery_spawn(n, fan_task, (void*)(intptr_t)i);
         }
         cc_nursery_wait(n);
-        cc_nursery_free(n);
+        n.free();
         
         int s = cc_atomic_load(&sum);
         

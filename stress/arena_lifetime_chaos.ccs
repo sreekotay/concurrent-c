@@ -145,7 +145,7 @@ static int bench_mixed_lifetime_chaos(void) {
 
     slots = (Slot *)calloc(SLOTS, sizeof(Slot));
     if (!slots) {
-        cc_arena_free(&a);
+        a.destroy();
         return fail("slots OOM");
     }
 
@@ -174,7 +174,7 @@ static int bench_mixed_lifetime_chaos(void) {
             p = (unsigned char *)cc_arena_alloc(a, n, 8);
             if (!p) {
                 free(slots);
-                cc_arena_free(&a);
+                a.destroy();
                 return fail("chaos alloc");
             }
             paint(p, (uint32_t)n, tag);
@@ -196,7 +196,7 @@ static int bench_mixed_lifetime_chaos(void) {
             void *np = cc_arena_realloc(a, a, tip, tip_sz, want, 8);
             if (!np) {
                 free(slots);
-                cc_arena_free(&a);
+                a.destroy();
                 return fail("chaos tip realloc");
             }
             if (tip && np != tip) tip_moves++;
@@ -211,7 +211,7 @@ static int bench_mixed_lifetime_chaos(void) {
             void *pad = cc_arena_alloc(a, n, 8);
             if (!pad) {
                 free(slots);
-                cc_arena_free(&a);
+                a.destroy();
                 return fail("chaos bury");
             }
             ((unsigned char *)pad)[0] = 0xBD;
@@ -226,7 +226,7 @@ static int bench_mixed_lifetime_chaos(void) {
             p = (unsigned char *)cc_arena_alloc(a, n, 16);
             if (!p) {
                 free(slots);
-                cc_arena_free(&a);
+                a.destroy();
                 return fail("chaos large alloc");
             }
             paint(p, (uint32_t)n, tag);
@@ -244,7 +244,7 @@ static int bench_mixed_lifetime_chaos(void) {
                 if (!slots[k].live) continue;
                 if (!check_paint(slots[k].ptr, slots[k].size, slots[k].tag)) {
                     free(slots);
-                    cc_arena_free(&a);
+                    a.destroy();
                     return fail("mid-chaos checksum");
                 }
             }
@@ -258,12 +258,12 @@ static int bench_mixed_lifetime_chaos(void) {
 
     if (verify_live(slots, SLOTS, &live)) {
         free(slots);
-        cc_arena_free(&a);
+        a.destroy();
         return 1;
     }
     if (tip && tip_sz > 0 && tip[0] != (unsigned char)0xA11A) {
         free(slots);
-        cc_arena_free(&a);
+        a.destroy();
         return fail("tip paint broken");
     }
 
@@ -277,12 +277,12 @@ static int bench_mixed_lifetime_chaos(void) {
 
     if (!(a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) && a.a->block_idx == 0) {
         free(slots);
-        cc_arena_free(&a);
+        a.destroy();
         return fail("chaos expected extent growth or overflow on small root");
     }
     if (ops_tip > 100 && tip_moves == 0) {
         free(slots);
-        cc_arena_free(&a);
+        a.destroy();
         return fail("chaos tip never moved despite bury-before-tip cadence");
     }
 
@@ -293,12 +293,12 @@ static int bench_mixed_lifetime_chaos(void) {
             if (!slots[di].live) continue;
             if (!cc_arena_release(a, slots[di].ptr)) {
                 free(slots);
-                cc_arena_free(&a);
+                a.destroy();
                 return fail("first release should succeed");
             }
             if (cc_arena_release(a, slots[di].ptr)) {
                 free(slots);
-                cc_arena_free(&a);
+                a.destroy();
                 return fail("double-release returned success (must fail closed)");
             }
             slots[di].live = 0;
@@ -310,21 +310,21 @@ static int bench_mixed_lifetime_chaos(void) {
     cc_arena_reset(a);
     if (a.a->ovf_head != NULL || cc_arena_overflow_raw_bytes(a) != 0) {
         free(slots);
-        cc_arena_free(&a);
+        a.destroy();
         return fail("chaos reset left overflow");
     }
     if (a.a->block_idx != 0 || a.a->prev != NULL) {
         free(slots);
-        cc_arena_free(&a);
+        a.destroy();
         return fail("chaos reset left extents");
     }
     if (cc_arena_committed_gross_bytes(a) > MAX_RESIDUAL_GROSS) {
         free(slots);
-        cc_arena_free(&a);
+        a.destroy();
         return fail("chaos residual gross after reset");
     }
 
-    cc_arena_free(&a);
+    a.destroy();
     free(slots);
     {
         StressMemSample end = stress_mem_sample();
@@ -368,7 +368,7 @@ static int bench_release_scramble(void) {
     alive = (uint8_t *)calloc(RELEASE_SCRAMBLE_N, 1);
     if (!ptrs || !tags || !sizes || !alive) {
         free(ptrs); free(tags); free(sizes); free(alive);
-        cc_arena_free(&a);
+        a.destroy();
         return fail("scramble OOM");
     }
 
@@ -380,7 +380,7 @@ static int bench_release_scramble(void) {
         ptrs[i] = (unsigned char *)cc_arena_alloc(a, n, 8);
         if (!ptrs[i]) {
             free(ptrs); free(tags); free(sizes); free(alive);
-            cc_arena_free(&a);
+            a.destroy();
             return fail("scramble alloc");
         }
         paint(ptrs[i], (uint32_t)n, tag);
@@ -399,7 +399,7 @@ static int bench_release_scramble(void) {
         size_t k;
         if (!order) {
             free(ptrs); free(tags); free(sizes); free(alive);
-            cc_arena_free(&a);
+            a.destroy();
             return fail("order OOM");
         }
         for (i = 0; i < RELEASE_SCRAMBLE_N; i++) order[i] = i;
@@ -414,7 +414,7 @@ static int bench_release_scramble(void) {
             if (!alive[idx]) continue;
             if (!cc_arena_release(a, ptrs[idx])) {
                 free(order); free(ptrs); free(tags); free(sizes); free(alive);
-                cc_arena_free(&a);
+                a.destroy();
                 return fail("scramble release");
             }
             alive[idx] = 0;
@@ -434,7 +434,7 @@ static int bench_release_scramble(void) {
         np = cc_arena_realloc(a, a, ptrs[i], sizes[i], want, 8);
         if (!np) {
             free(ptrs); free(tags); free(sizes); free(alive);
-            cc_arena_free(&a);
+            a.destroy();
             return fail("scramble realloc");
         }
         ptrs[i] = (unsigned char *)np;
@@ -447,7 +447,7 @@ static int bench_release_scramble(void) {
         if (!alive[i]) continue;
         if (!check_paint(ptrs[i], sizes[i], tags[i])) {
             free(ptrs); free(tags); free(sizes); free(alive);
-            cc_arena_free(&a);
+            a.destroy();
             return fail("scramble survivor corrupt after realloc");
         }
     }
@@ -471,17 +471,17 @@ static int bench_release_scramble(void) {
         /* expected after individual releases */
     } else {
         free(ptrs); free(tags); free(sizes); free(alive);
-        cc_arena_free(&a);
+        a.destroy();
         return fail("expected NON_REWINDABLE after mid-lifetime releases");
     }
 
     cc_arena_reset(a);
     if (a.a->ovf_head || cc_arena_overflow_raw_bytes(a) || a.a->prev || a.a->block_idx != 0) {
         free(ptrs); free(tags); free(sizes); free(alive);
-        cc_arena_free(&a);
+        a.destroy();
         return fail("scramble reset incomplete");
     }
-    cc_arena_free(&a);
+    a.destroy();
     free(ptrs); free(tags); free(sizes); free(alive);
 
     {
@@ -640,7 +640,7 @@ static int bench_tip_vs_churn_release(void) {
         unsigned char *ephemeral;
         size_t en;
         if (!np) {
-            cc_arena_free(&a);
+            a.destroy();
             return fail("tip churn realloc");
         }
         if (tip && np != tip) moves++;
@@ -651,21 +651,21 @@ static int bench_tip_vs_churn_release(void) {
         en = 48 + (i % 100);
         ephemeral = (unsigned char *)cc_arena_alloc(a, en, 8);
         if (!ephemeral) {
-            cc_arena_free(&a);
+            a.destroy();
             return fail("ephemeral alloc");
         }
         ephemeral[0] = (unsigned char)i;
         /* Ephemeral alloc buries tip; release does not restore tip-ness while
          * tip remains live → next tip grow should often move. */
         if (!cc_arena_release(a, ephemeral)) {
-            cc_arena_free(&a);
+            a.destroy();
             return fail("ephemeral release");
         }
         if ((i & 8191u) == 0) rss_touch(&rss);
     }
 
     if (tip_sz >= 4 && tip[0] != (unsigned char)0x711u) {
-        cc_arena_free(&a);
+        a.destroy();
         return fail("tip prefix corrupt");
     }
 
@@ -675,10 +675,10 @@ static int bench_tip_vs_churn_release(void) {
            rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1,
            now_sec() - t0);
     if (moves == 0) {
-        cc_arena_free(&a);
+        a.destroy();
         return fail("expected tip moves after ephemeral bury+release");
     }
-    cc_arena_free(&a);
+    a.destroy();
     return 0;
 }
 

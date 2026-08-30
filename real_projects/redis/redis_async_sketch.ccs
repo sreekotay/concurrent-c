@@ -221,14 +221,14 @@ static bool !>(CCError) exec(CCShardMap* maps, Cmd* c, char[:] name,
         return conn->integer(n);
     case "DEL":
         n = 0;
-        for (i = 1; i < c->argc; i++) {
+        for (i in 1..c->argc) {
             sh = maps->shard(shard_of(maps, c->args[i]));
             if (sh && sh->delete(c->args[i])) n++;
         }
         return conn->integer(n);
     case "EXISTS":
         n = 0;
-        for (i = 1; i < c->argc; i++) {
+        for (i in 1..c->argc) {
             sh = maps->shard(shard_of(maps, c->args[i]));
             if (sh && sh->get(c->args[i])) n++;
         }
@@ -238,7 +238,7 @@ static bool !>(CCError) exec(CCShardMap* maps, Cmd* c, char[:] name,
          * wire (conn closes). Acceptable for this sketch. */
         nkeys = c->argc - 1;
         conn->array_len(nkeys) !>;
-        for (i = 1; i < c->argc; i++) {
+        for (i in 1..c->argc) {
             sh = maps->shard(shard_of(maps, c->args[i]));
             v = sh ? sh->get(c->args[i]) : NULL;
             if (!v) conn->null() !>;
@@ -380,7 +380,7 @@ static bool !>(CCIoError) read_cmd(BufReader::[CCSocket]* br, CCArena arena, Cmd
         out->args = cmd_alloc_args(arena, (size_t)n);
         if (!out->args)
             return cc_err(cc_io_error(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "argv")));
-        for (i = 0; i < (size_t)n; i++) {
+        for (i in 0..(size_t)n) {
             char[:] hdr = br->read_line() !>(e) { return cc_err(e); };
             if (hdr.len == 0) {
                 return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "bad bulk")));
@@ -421,7 +421,7 @@ static void handle_client(CCSocket client, CCShardMap* maps) {
 
     for (;;) {
         size_t i;
-        for (i = 0; i < (size_t)K_PIPELINE; i++) {
+        for (i in 0..(size_t)K_PIPELINE) {
             Cmd c;
             if (i > 0 && br.buffered() == 0) break;
             cc_arena_stack(cmd_a, K_CMD_ARENA);

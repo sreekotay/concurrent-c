@@ -98,11 +98,11 @@ int main(void) {
                     iter, recv, sum, NUM_ITEMS, expected_sum);
             fails++;
             if (fails >= 3) {
-                cc_chan_free(g_ch0); cc_chan_free(g_ch1); cc_chan_free(g_ch2);
+                g_ch0.free(); g_ch1.free(); g_ch2.free();
                 return 1;
             }
         }
-        cc_chan_free(g_ch0); cc_chan_free(g_ch1); cc_chan_free(g_ch2);
+        g_ch0.free(); g_ch1.free(); g_ch2.free();
     }
     if (fails > 0) return 1;
     printf("buffered_drain_truncation: OK (%d iters)\n", REPEATS);

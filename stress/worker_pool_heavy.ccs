@@ -86,8 +86,8 @@ int main(void) {
     
     }
 
-    cc_chan_free(jobs_ch);
-    cc_chan_free(results_ch);
+    jobs_ch.free();
+    results_ch.free();
 
     /* Expected: sum of (n*(n+1)/2) for n=1..NUM_JOBS */
     /* = sum of triangular numbers = NUM_JOBS*(NUM_JOBS+1)*(NUM_JOBS+2)/6 */

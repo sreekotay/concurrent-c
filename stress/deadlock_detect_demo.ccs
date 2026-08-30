@@ -63,6 +63,6 @@ int main(void) {
     
     /* Never reached - deadlock above */
     printf("Completed!\n");
-    cc_chan_free(ch);
+    ch.free();
     return 0;
 }
