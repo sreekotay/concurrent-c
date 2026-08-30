@@ -591,7 +591,7 @@ Erasure is a spelling: `xs.base` reads the raw element-counted core; passing an 
 
 `{0}` and designated initializers (`{ .ptr = p, .len = n }`) remain ordinary C struct initialization of the slice header, not element lists.
 
-Ordinary sites on the slice family deny field stores (`s.len = …`); loads and UFCS remain open. See `draft_facets.md` for the unnamed `@typeview on CCSlice { r: *; }` facet.
+Ordinary sites on the slice family may read `.ptr`, `.len`, and `.id`; they may not store fields. Typed `T[:]` is a distinct wrapper (`CCSlice_T` with a `CCSlice base` embed). `@typeview on CCSlice_* { as: base; }` retries a field miss through that embed, so `xs.len` / `xs.ptr` / `xs.id` lower to `xs.base.…`. `.ptr` is `char *`; element index is `(T *)xs.ptr`. Explicit `xs.base` remains the erased core. See `draft_as.md` and `draft_facets.md` for the unnamed `@typeview on CCSlice { r: *; }` facet.
 
 ---
 
@@ -747,7 +747,7 @@ char[:] stack_slice = buf[:];
 
 // Spawned task: ERROR (closure copies slice struct, ptr points to dead stack)
 n.spawn(() => {
-    use(stack_slice);  // BAD: stack_slice.ptr points to caller's stack frame
+    use(stack_slice);  // BAD: the view points at the caller's stack frame
 });
 ```
 
@@ -1473,7 +1473,7 @@ Slices are *views*; they do not own memory.
 
 **Rule (`!` marker semantics):** The `!` suffix on a slice type is a **type-level uniqueness guarantee**. A value typed `T[:!]` or `T[:k!]` is statically required to carry `id.is_unique=1` at the ABI level (§3.4) — i.e., the compiler rejects any assignment, copy, or parameter pass that would duplicate it outside a move context (`cc_move()`, `return`, `send_take`). Use `T[:!]` in function signatures to **demand** that callers hand over ownership. `T[:]` by contrast says nothing about uniqueness at the type level — the value may or may not be unique; the compiler relies on the runtime `is_unique` bit to enforce copy rules at the call site.
 
-**Rule (`T[:k]` / `T[:k!]` semantics):** Sentinel slices are ABI-identical to `T[:]`. The sentinel value `k` is a type-level guarantee about the element just past the logical end of the view (typically `k = 0` to guarantee NUL-termination for C interop). Applying `!` composes the two guarantees: `T[:k!]` demands both the sentinel and type-level uniqueness.
+**Rule (`T[:k]` / `T[:k!]` semantics):** Sentinel slices are ABI-identical to `T[:]`. The sentinel value `k` is a type-level guarantee about the element just past the logical end of the view (typically `k = 0` to guarantee NUL-termination for C interop). On `T[:0]`, `len` is the payload and index `len` is a valid load of `0`. Applying `!` composes the two guarantees: `T[:k!]` demands both the sentinel and type-level uniqueness. The `is_cstr` id bit is the value-level twin of `[:0]`: it survives erase to `T[:]` so `to_c` / `to_cstr` copy only when the terminator is not already there.
 
 **Implicit conversions:**
 
@@ -1488,7 +1488,10 @@ Slices are *views*; they do not own memory.
 
 **Explicit conversions:**
 
-- `slice.ptr` yields `T`*
+- `slice.ptr` is `char *` on `CCSlice` / `char[:]`; typed `T[:]` uses `.base.ptr`
+- `slice.id` yields the provenance token
+- `slice.to_c(arena)` yields `char[:0]` (`is_cstr`); copies into `arena` only when the bit is clear
+- `slice.to_cstr(arena)` yields `char *` — `to_c(arena).ptr`
 
 ---
 
@@ -1512,13 +1515,15 @@ remaining room (strings, vecs, arenas) keep capacity on the owner.
 ```
 // Slice ID bit layout (uint64_t id):
 //
-// Bits 0–60 : allocation ID (opaque, non-zero for tracked allocations)
+// Bits 0–59 : allocation ID (opaque, non-zero for tracked allocations)
+// Bit 60    : is_cstr (`ptr[len]` is defined and 0)
 // Bit 61    : is_transferable
 // Bit 62    : is_subslice
 // Bit 63    : is_unique
 ```
 
-- **Bits 0–60 (allocation ID):** Unique per tracked allocation. 0 indicates static or untracked memory.
+- **Bits 0–59 (allocation ID):** Unique per tracked allocation. 0 indicates no epoch (untracked, or static with only flags).
+- **Bit 60 — `is_cstr`:** 1 if `ptr[len]` is a defined `0` (C-string capability). Set on `CC_SLICE_LIT` / `from_static` / `cc_slice_cstr`. Cleared on `from_buffer` and brace inits. `sub` recomputes it (keep when the new end is the old end and the parent had it; otherwise set only when `ptr[end] == 0` is an in-payload load). Untracked is `(alloc == 0 && !unique)` — the cstr bit alone is not lifetime.
 - **Bit 61 — `is_transferable`:** 1 if the allocation may be transferred across threads via `send_take`; 0 otherwise.
 - **Bit 62 — `is_subslice`:** 1 if the slice does not cover the full allocation.
 - **Bit 63 — `is_unique`:** 1 if the slice has destructor semantics and is move-only.
@@ -1528,7 +1533,8 @@ remaining room (strings, vecs, arenas) keep capacity on the owner.
 
 | Condition                                           | Meaning                                                                                                           |
 | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `id == 0`                                           | Static or untracked slice (string literals, unsafe slices). Not unique, not transferable, no provenance tracking. |
+| `id == 0`                                           | Untracked slice (`from_buffer`, foreign). Not unique, not transferable, no cstr bit. |
+| canonical alloc + `is_cstr`                         | Static / `CC_SLICE_LIT` / `from_static`. Channel-stable. `to_c` does not copy. |
 | `id != 0 && is_unique == 0`                         | View slice (arena, stack). Copyable. Not transferable.                                                            |
 | `id != 0 && is_unique == 1 && is_transferable == 1` | Unique, transferable slice (from `recv()`).                                                                       |
 | `id != 0 && is_unique == 1 && is_transferable == 0` | Unique, non-transferable slice (from `adopt()`).                                                                  |
@@ -5706,7 +5712,7 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 - Returning the empty slice means "no custom rewrite; fall back to ordinary receiver-type UFCS".
 - `.ufcs_sink` is the last-resort unresolved-method hook. Unresolved methods lower to `callee(&recv, "method", N, arg_wrap(a1), …)`. The sink is destination-aware: wherever a typed destination is visible the callee composes as `<callee>_<mangled dest>` when that function is declared (compose-then-verify; plain callee otherwise). `.ufcs_dynamic` and `.ufcs_dynamic2` are accepted spellings of `.ufcs_sink`.
 - `.niche` donates a bit pattern a valid instance never exhibits, so a `@variant(packed)` arm of this type can carry the discriminant (`spec/draft_variants.md`, packed layout). `cc_type_niche(size, align, offset, width, sentinel)` is the helper.
-- `.cast` is dest-convert. The handler receives the source type, the requested dest type, and `kind` (`implicit` or `explicit`) and returns a callee name, the UFCS pass tag, or empty (hard reject). Implicit sites (decl-init) ask the dest type only. Dest may insert a wrap; dest must not insert a peel.
+- `.cast` is dest-convert. The handler receives the source type, the requested dest type, and `kind` (`implicit` or `explicit`) and returns a callee name, the UFCS pass tag, or empty (hard reject). Implicit sites (decl-init and `=`) ask the dest type only. Dest may insert a wrap; dest must not insert a peel. A slice dest may wrap `CCString` / `CCString*` as `as_slice`, or `CCVec_T` / `CCVec_T*` as `Name_as_slice` when the dest element is `T` (`int[:]` ← `Vec::[int]`; `char[:]` ← `Vec::[char]`). `v.as_slice()` remains the explicit spelling. For-in does not dest-cast: `for (x in v)` walks the live vec.
 - `.len` names the extent (`cc_type_len_field` or `cc_type_len_call`). Ordinary sites may read `x.len` / `x.len()`; they may not store it. `T[n]` `.len` is the constexpr bound `n`.
 - `.access` is the compiler-internal walk load (`cc_type_access_load` or `cc_type_access_call`) after `i < live len`. Users write `for (v in s)` / `for (i, v in s)` / `for (a, b in s, t) { … } !>;`, not `s.access(i)`. Point access stays `at` / `set` (Result). `CCSlice` / `CCSlice_*`, `CCVec_*`, and `CCString` register both arms.
 - `.create` may be registered either as fixed callee strings (`cc_type_create_call(...)`, `cc_type_create_overloads(...)`) or as a callable hook via `cc_type_create_hook(...)`.
@@ -5791,7 +5797,7 @@ This same contract applies to standard-library families such as channels, files,
 
 `String` is a small, moveable handle. Short values stay inline; larger values live in an arena-owned buffer. Copying a `String` aliases the same storage. To obtain an independent copy, use `as_slice().clone(a)` / `cc_string_from_slice`. Heap contents live until released or their arena is reset/freed.
 
-`String.as_slice()` returns a length-keyed `char[:]` / `CCSlice` view (not necessarily NUL-terminated). Call `s.cstr(&arena)` / `cc_string_cstr` when a `const char*` is required.
+`String.as_slice()` returns a length-keyed `char[:]` / `CCSlice` view (not necessarily NUL-terminated). Dest-init `char[:] v = s` and assign `v = s` insert that view. Call `s.cstr(&arena)` / `cc_string_cstr` when a `const char*` is required.
 
 **Template literal dedent (normative).** Every backtick template —
 `@string`, `@emit`, wherever a template literal appears — dedents against
@@ -5855,7 +5861,7 @@ String* s.push_int(int64_t value, Arena* a);
 String* s.push_uint(uint64_t value, Arena* a);
 String* s.push_float(double value, Arena* a);
 String* s.clear();
-char[:] s.as_slice();
+char[:] s.as_slice();                 // also dest-init: char[:] v = s
 const char* s.cstr(Arena* a);
 size_t  s.len();
 size_t  s.cap();
@@ -6034,16 +6040,18 @@ CCSlice sub(CCSlice s, size_t start, size_t end);
 char !>(CCError) at(CCSlice *s, size_t index);           /* = get_checked */
 char !>(CCError) get_checked(CCSlice *s, size_t index);
 bool !>(CCError) set(CCSlice *s, size_t index, char c);
-
 s.len();
 s.sub(start, end);
 s.at(i);
 s.get_checked(i);
 s.set(i, c);
+s.ptr;
+s.id;
 ```
 
-`ptr` is a field (`s.ptr`), not a method. Typed `T[:]` instances expose the same
-`len` / `sub` / `at` names on the generated `CCSlice_<T>` family.
+Ordinary sites may read `.ptr` / `.len` / `.id`; they may not store fields.
+Typed instances expose `len` / `sub` / `at` on `CCSlice_<T>`; the core
+fields live on `.base`.
 
 #### 9.2.2 Query Methods
 
@@ -6087,23 +6095,31 @@ s.sub(start, end);
 
 #### 9.2.4 Iteration
 
-A **for-in** subject is a bound name or a field path off a bind
-(`s`, `t->words`, `t.words`) whose type answers both `.len` and
-`.access` (§9 type-owned registration). Binders are comma-separated
-identifiers at depth 0. The subject is not an arbitrary expression
-(no call, no arithmetic). A pointer type (`T*`) is not an extent —
+A **for-in** subject is a bound name, a field path off a bind
+(`s`, `t->words`, `t.words`), or a **view** off that path whose type
+answers both `.len` and `.access` (§9 type-owned registration) —
+`s.sub(lo, hi)`, `s.trim()`, `str.as_slice()`. A view is bound to a
+hidden local for the walk (`T tmp = expr; for (v in tmp)`). Mut walk
+stores through that same local (the header is a view; the store is into
+the receiver's backing). Binders are
+comma-separated identifiers at depth 0. Arithmetic and an untyped call
+are ill-formed. A pointer type (`T*`) is not an extent —
 `for (v in p)` is ill-formed.
 
 Stdlib extents: `CCSlice` / `CCSlice_*` (`.len` field, load of `ptr`;
-typed instances use the `.base` layout), `CCVec_*` (`.len` / `data`),
+typed instances hop those names through `as: base`), `CCVec_*` (`.len` / `data`),
 `CCString` (`.len` field, `cc_string_data` for the load — SSO-safe).
 `T[n]` uses the constexpr bound `n` and an index load.
 
 ```c
 for (i in lo..hi) { ... }   /* sequential range; hi < lo is empty */
 for (v in s) { ... }        /* walk: i < s.len, then the .access load */
+for (&v in s) { ... } !>;   /* mut walk: v = … is s.set(i, …) */
+for (&v in s.sub(lo, hi)) { ... } !>;
 for (i, v in s) { ... }     /* enumerate: i is size_t, v is the load */
+for (i, &v in s) { ... } !>;
 for (a, b in s, t) { ... } !>;  /* zip: void !>(CCError) */
+for (&a, &b in s, t) { ... } !>;
 
 // Point (not the walk)
 for (size_t i = 0; i < s.len; i++) {
@@ -6111,12 +6127,29 @@ for (size_t i = 0; i < s.len; i++) {
 }
 ```
 
+A for-in **value** binder is not a C object. `v` in the body is the load
+(a copy) and is const in that loop. Writing `v` (`v =`, `v +=`, `++v`)
+is ill-formed: `&v` in the pattern stores into the walk; a local rebinds
+the copy. Unary `&v` is ill-formed in either pattern — a C pointer into
+the extent is peel of the subject (`s.ptr`). The range binder `i` in
+`for (i in lo..hi)` and the enumerate index are ordinary `size_t`
+locals. `for (&i in lo..hi)` is ill-formed.
+
+**Mut walk:** `for (&v in s) { … } !>;` (or `for (i, &v in s)`, or zip
+`for (&a, b in s, t)`). The construct is `void !>(CCError)` (zip already
+is). Consume with `!>;` or `!>(e) { … }`. A bare mut-walk is an
+unconsumed Result. `v = x` / `v += x` / `++v` store through the same
+`.access` peel as the load (`s.ptr[i]`, `v.data[i]`, `cc_string_data`,
+`a[i]`) and unroll into that `!>`. The subject is any for-in extent.
+Field assignment (`v.x =`) is ill-formed — assign the binder, or peel
+the subject.
+
 **Zip:** the construct is a statement of type `void !>(CCError)`. Consume
 with `!>;` (enclosing `@errhandler`) or `!>(e) { … }`. A bare zip is an
 unconsumed Result. If the two live lengths differ, the Result is
 `CC_ERR_INVALID_ARG`. There is no silent min. The walk runs only when
-the lengths are equal. Walk, enumerate, and range cannot fail and do
-not take `!>`.
+the lengths are equal. Copy walk, enumerate, and range cannot fail and
+do not take `!>`.
 
 The walk is not “a nicer `s[i]`.” Users do not write `s.access(i)`. C
 `for (;;)` is unchanged. `@parallel for (i in lo..hi)` is §8.11.4.
@@ -6592,6 +6625,7 @@ are §9.2.4.
 
 ```c
 for (v in s) { ... }            // walk: i < s.len, then .access
+for (&v in s) { ... } !>;       // mut walk: v = … → set
 for (i, v in s) { ... }         // enumerate
 for (a, b in s, t) { ... } !>;  // zip; void !>(CCError)
 for (i in lo..hi) { ... }       // sequential range
@@ -6638,7 +6672,7 @@ s[..end]         // elements [0, end)
 s[..]            // equivalent to s
 ```
 
-**Rule (checked-index):** Protected byte-slice index ops (`at` / `get_checked` / `set`) return `CC_ERR_INVALID_ARG` on out-of-bounds or null in **all** builds — no debug/release split. Raw `.ptr` indexing and unchecked C stores are outside this surface (Gap). Subslice ops that cannot form a valid range yield an empty view.
+**Rule (checked-index):** Protected byte-slice index ops (`at` / `get_checked` / `set`) return `CC_ERR_INVALID_ARG` on out-of-bounds or null in **all** builds — no debug/release split. Raw `s.ptr[i]` indexing and unchecked C stores are outside this surface (Gap). Subslice ops that cannot form a valid range yield an empty view.
 
 **String literals:**
 

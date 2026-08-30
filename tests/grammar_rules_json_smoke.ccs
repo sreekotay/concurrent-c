@@ -10,6 +10,9 @@
 //   - faithful JSON numbers (no leading zeros, optional frac/exp)
 //   - strings: RFC 8259 — unescaped U+0000–U+001F fail; escapes incl \uXXXX
 #include <ccc/std/prelude.cch>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
 
 @grammar(rules) Json {~~~~
     include JsonRfc

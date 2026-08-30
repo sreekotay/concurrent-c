@@ -3840,7 +3840,9 @@ static int cc__is_slice_ufcs_method(const char* method_name) {
             strcmp(method_name, "eq") == 0 ||
             strcmp(method_name, "eq_cstr") == 0 ||
             strcmp(method_name, "str") == 0 ||
-            strcmp(method_name, "bytes") == 0);
+            strcmp(method_name, "bytes") == 0 ||
+            strcmp(method_name, "to_c") == 0 ||
+            strcmp(method_name, "to_cstr") == 0);
 }
 
 static void cc__normalize_ufcs_type_name(char* out, size_t out_sz, const char* type_name) {
@@ -17537,18 +17539,10 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
             lowered = pulled;
         }
     }
-    if (cc__lowered_header_needs_ufcs_splice(lowered, strlen(lowered))) {
-        fprintf(stderr,
-                "cc: error: cannot extract %s: member-call UFCS remains "
-                "(no Type_meth in this face or an included face)\n",
-                abs_src);
-        g_local_cch_lower_failed = 1;
-        free(lowered);
-        free(input);
-        free(rewritten);
-        g_lowered_local_headers[lowered_idx].in_progress = 0;
-        return NULL;
-    }
+    /* Leftover `->len()` is not a failed extract. Sibling-less helpers
+     * (map UFCS registered only in the parent TU) splice into the owner
+     * so phase3 can rewrite them. An error here made those includes
+     * uncompilable. */
     if (cc__write_file_text(lowered_path, lowered, strlen(lowered)) != 0)
         CC__LOWER_GIVE_UP("write");
 #undef CC__LOWER_GIVE_UP

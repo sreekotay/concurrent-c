@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 static volatile int g_err = 0;
 static volatile int g_got = 0;

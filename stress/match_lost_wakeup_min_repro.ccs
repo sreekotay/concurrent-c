@@ -78,8 +78,8 @@ int main(void) {
         CCNursery __nur = @create() !> @destroy;
         CCChanRx r = rx;
         CCChanTx t = tx;
-        __nur.spawn(() => [r] { rx_fiber(r); });
-        __nur.spawn(() => [t] { tx_fiber(t); });
+        __nur.spawn(() => [r] { rx_fiber(r); }) !>;
+        __nur.spawn(() => [t] { tx_fiber(t); }) !>;
 
         /* Watchdog: bail early if recv progress stalls.  This is not a
          * perf budget — a healthy run finishes OPS in well under a

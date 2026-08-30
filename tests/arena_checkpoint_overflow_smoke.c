@@ -294,12 +294,12 @@ static int test_stack_chunk_epoch_drain(void) {
         return fail(4, "stack root fill");
     }
     grown = cc_arena_alloc(s, 128, 8);
-    if (!grown || !cc__arena_find_block(&s, grown)) {
+    if (!grown || !cc__arena_find_block(s, grown)) {
         cc_arena_free(&s);
         return fail(4, "stack grow");
     }
     keep = cc_arena_alloc(s, 5000, 8);
-    if (!keep || cc__arena_find_block(&s, keep) || !s.a->ovf_chunks) {
+    if (!keep || cc__arena_find_block(s, keep) || !s.a->ovf_chunks) {
         cc_arena_free(&s);
         return fail(4, "stack chunk overflow keep");
     }
@@ -357,12 +357,12 @@ static int test_heap_chunk_epoch_drain(void) {
         return fail(5, "heap root fill");
     }
     grown = cc_arena_alloc(a, 128, 8);
-    if (!grown || !cc__arena_find_block(&a, grown)) {
+    if (!grown || !cc__arena_find_block(a, grown)) {
         cc_arena_free(&a);
         return fail(5, "heap grow");
     }
     keep = cc_arena_alloc(a, 5000, 8);
-    if (!keep || cc__arena_find_block(&a, keep) || !a.a->ovf_chunks) {
+    if (!keep || cc__arena_find_block(a, keep) || !a.a->ovf_chunks) {
         cc_arena_free(&a);
         return fail(5, "heap chunk overflow keep");
     }

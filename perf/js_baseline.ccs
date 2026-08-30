@@ -65,7 +65,7 @@ static long long Math_calls(Math *self) {
 static double Math_sum_f64(Math *self, double[:] xs) {
     double acc = 0;
     self->calls += 1;
-    for (size_t i = 0; i < xs.base.len; i++) acc += ((double *)xs.base.ptr)[i];
+    for (x in xs) acc += x;
     return acc;
 }
 /* State-owned series, built outside the timed region; `series` returns it

@@ -18,9 +18,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
 #include <stdbool.h>
-#include <limits.h>
 #include <ccc/cc_arena.cch>
 
 /* Sugar: ArrayMap::[K,V] / array_map_new::[K,V] / array_map_new_count::[K,V]. */
@@ -55,7 +53,7 @@ static inline size_t cc_array_map_quad(uint32_t displacement) {
 
 /* High 8 bits of the hash (uncorrelated with low bits used for home bucket). */
 static inline uint32_t cc_array_map_hash_frag8(size_t hash) {
-    return (uint32_t)(hash >> ((sizeof(size_t) - 1u) * (size_t)CHAR_BIT)) & 0xffu;
+    return (uint32_t)(hash >> ((sizeof(size_t) - 1u) * 8u)) & 0xffu;
 }
 
 static inline uint32_t cc_array_map_pack_slot(size_t dense_index, size_t hash) {
@@ -70,6 +68,17 @@ static inline size_t cc_array_map_slot_dense(uint32_t slot) {
 
 static inline uint32_t cc_array_map_slot_frag(uint32_t slot) {
     return slot >> CC_ARRAY_MAP_FRAG_SHIFT;
+}
+
+static inline void cc__am_zero(void *p, size_t n) {
+    unsigned char *b = (unsigned char *)p;
+    while (n--) *b++ = 0;
+}
+
+static inline void cc__am_copy(void *d, const void *s, size_t n) {
+    unsigned char *o = (unsigned char *)d;
+    const unsigned char *i = (const unsigned char *)s;
+    while (n--) *o++ = *i++;
 }
 
 static inline void cc_array_map_prefetch(const void *p) {
@@ -168,7 +177,7 @@ static inline int cc_array_map_core_rehash(CCArrayMapCore *m,
         nb = (uint32_t *)cc_arena_alloc(m->arena, new_bucket_cap * sizeof(uint32_t),
                                         _Alignof(uint32_t));
         if (!nb) return -1;
-        memset(nb, 0, new_bucket_cap * sizeof(uint32_t));
+        cc__am_zero(nb, new_bucket_cap * sizeof(uint32_t));
         mask = new_bucket_cap - 1u;
         for (i = 0; i < m->len; i++) {
             size_t h = k->hash(cc_array_map_core_slot(m, k, i));
@@ -295,7 +304,7 @@ static inline bool cc_array_map_core_del_at(CCArrayMapCore *m,
         void *lp = cc_array_map_core_slot(m, k, last);
         uint32_t old_pack;
         size_t mb;
-        memcpy(cc_array_map_core_slot(m, k, di), lp, k->slot_size);
+        cc__am_copy(cc_array_map_core_slot(m, k, di), lp, k->slot_size);
         if (m->dense_bkt) {
             mb = (size_t)m->dense_bkt[last];
             m->dense_bkt[di] = (uint32_t)mb;
@@ -328,16 +337,16 @@ static inline int cc_array_map_core_insert(CCArrayMapCore *m,
         di = cc_array_map_core_lookup_h(m, k, key, h, &bucket);
     }
     if (di != SIZE_MAX) {
-        memcpy((char *)cc_array_map_core_slot(m, k, di) + k->val_off, val,
-               k->val_size);
+        cc__am_copy((char *)cc_array_map_core_slot(m, k, di) + k->val_off, val,
+                    k->val_size);
         return 0;
     }
     if (bucket == SIZE_MAX || !m->buckets) return -1;
     if (m->buckets[bucket] == CC_ARRAY_MAP_TOMB && m->tomb_count)
         m->tomb_count--;
     sp = cc_array_map_core_slot(m, k, m->len);
-    memcpy(sp, key, k->key_size);
-    memcpy((char *)sp + k->val_off, val, k->val_size);
+    cc__am_copy(sp, key, k->key_size);
+    cc__am_copy((char *)sp + k->val_off, val, k->val_size);
     m->buckets[bucket] = cc_array_map_pack_slot(m->len, h);
     if (m->dense_bkt) m->dense_bkt[m->len] = (uint32_t)bucket;
     m->len++;
@@ -361,7 +370,7 @@ static inline void cc_array_map_core_clear(CCArrayMapCore *m) {
     m->len = 0;
     m->tomb_count = 0;
     bcap = cc_array_map_core_buckets_cap(m);
-    if (m->buckets && bcap) memset(m->buckets, 0, bcap * sizeof(uint32_t));
+    if (m->buckets && bcap) cc__am_zero(m->buckets, bcap * sizeof(uint32_t));
 }
 
 static inline void cc_array_map_core_destroy(CCArrayMapCore *m) {
@@ -564,6 +573,10 @@ static inline CCArrayMapCore *cc_array_map_core_init_count(CCArena arena,
  * instantiate this family. The concrete type is `ArrayMap_<K>_<V>*`.
  * A hand-written `CC_ARRAY_MAP_DECL` that names the same instance
  * suppresses the splice. Header lowering blanks the factory from `.h`. */
+#if defined(CC_COMPTIME) || defined(__TINYC__)
+#include <stdio.h>
+#include <string.h>
+#endif
 CC_GENERIC_FACTORY(ArrayMap, 2) {
     char k[80], v[80], hash[96], eq[96], fwd[256];
     char newfn[96], newcfn[96], compact[80];

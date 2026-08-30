@@ -23,13 +23,13 @@ static double !>(CCError) Halver_half(Halver *self, double v) {
 static double Halver_sum(Halver *self, double[:] xs) {
     double acc = 0;
     (void)self;
-    for (size_t i = 0; i < xs.base.len; i++) acc += ((double *)xs.base.ptr)[i];
+    for (size_t i = 0; i < xs.len; i++) acc += ((double *)xs.ptr)[i];
     return acc;
 }
 
 static void Halver_fill(Halver *self, double[:] xs, double v) {
     (void)self;
-    for (size_t i = 0; i < xs.base.len; i++) ((double *)xs.base.ptr)[i] = v;
+    for (size_t i = 0; i < xs.len; i++) ((double *)xs.ptr)[i] = v;
 }
 
 /* Materialize as a fresh typed memoryview (owned copy). */

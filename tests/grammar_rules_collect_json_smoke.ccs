@@ -11,6 +11,9 @@
 // parser + this codec must reproduce that exact split.
 #include <ccc/std/prelude.cch>
 #include <ccc/std/json.cch>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 @grammar(rules) Json {~~~~
     include JsonKeep

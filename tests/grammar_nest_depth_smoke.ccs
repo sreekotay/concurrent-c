@@ -1,6 +1,8 @@
 // Nest limit: default 128, per-grammar `depth N` override.
 // Schema counts nested __fill; rules counts generated-rule calls.
 #include <ccc/std/prelude.cch>
+#include <string.h>
+#include <stdio.h>
 
 @grammar(schema) Deep {~~~~
     depth 256

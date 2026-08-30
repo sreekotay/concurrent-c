@@ -7,15 +7,14 @@
  * CCArena is that ABI (`.p`); it still aliases `.base`.
  *
  * Dest-init `CCBox::[H] b = &x` consults `.cast` (`cc_box_cast_lower_c`) and
- * rewrites to from_host. Factory aliases (CCArena / CCNursery / CCExclusive)
- * do not register that arm.
+ * rewrites to from_host. A teaching alias (`CC_DECL_BOX_ALIAS` /
+ * `typedef CCBox::[H] Name`) does not mint. `as: p` hops UFCS to Host*.
  */
 #ifndef CC_BOX_H
 #define CC_BOX_H
 
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
 
 #include <ccc/cc_arena.cch>
 
@@ -64,6 +63,12 @@ static inline void *cc_box_host(CCBox b) {
         return b ? b->p : NULL;                                                \
     }
 
+/* Teaching name of a named pointer. Host `.h` cannot spell `typedef CCBox::[H]`.
+ * CCS: `CCBox::[Host]` and Alias are the same type. */
+#define CC_DECL_BOX_ALIAS(Alias, Host)                                         \
+    CC_DECL_BOX_SPEC(CCBox_##Host, Host)                                       \
+    typedef CCBox_##Host Alias
+
 /* Harvested from this `.cch` (blanked from the lowered `.h`). */
 CC_GENERIC_FACTORY(CCBox, 1) {
     return @emit(`
@@ -96,6 +101,21 @@ static inline ${arg(0)} *${mangled}_host(${mangled} *b) {
 `, arena);
 }
 
+static inline int cc__box_bytes_eq(const char *a, const char *b, size_t n) {
+    if (!n) return 1;
+    if (!a || !b) return 0;
+    while (n--) {
+        if (*a++ != *b++) return 0;
+    }
+    return 1;
+}
+
+static inline size_t cc__box_cstr_len(const char *s) {
+    size_t n = 0;
+    if (s) while (s[n]) n++;
+    return n;
+}
+
 static inline void cc__box_cast_trim(const char **p, size_t *n) {
     while (*n && (**p == ' ' || **p == '\t')) {
         (*p)++;
@@ -114,11 +134,11 @@ static inline int cc__box_cast_is_box(CCSlice ty, const char **host, size_t *hos
     if (erased) *erased = 0;
     if (!p) return 0;
     cc__box_cast_trim(&p, &n);
-    if (n == 5 && memcmp(p, "CCBox", 5) == 0) {
+    if (n == 5 && cc__box_bytes_eq(p, "CCBox", 5)) {
         if (erased) *erased = 1;
         return 1;
     }
-    if (n > 6 && memcmp(p, "CCBox_", 6) == 0) {
+    if (n > 6 && cc__box_bytes_eq(p, "CCBox_", 6)) {
         if (host) *host = p + 6;
         if (host_n) *host_n = n - 6;
         return 1;
@@ -154,7 +174,7 @@ static inline CCSlice cc__box_cast_concat(const char *p, size_t n, const char *s
     left.ptr = (char *)(void *)p;
     left.len = n;
     left.id = 0;
-    right = cc_slice_from_static((void *)suf, suf ? strlen(suf) : 0);
+    right = cc_slice_from_static((void *)suf, cc__box_cstr_len(suf));
     return cc_slice_concat2(left, right, arena);
 }
 
@@ -169,7 +189,8 @@ static inline CCSlice cc_box_cast_lower_c(CCSlice src, CCSlice dest, CCSlice kin
     const char *dp = (const char *)dest.ptr;
     size_t dn = dest.len;
     int implicit;
-    implicit = (kind.ptr && kind.len == 8 && memcmp(kind.ptr, "implicit", 8) == 0);
+    implicit = (kind.ptr && kind.len == 8 &&
+                cc__box_bytes_eq((const char *)kind.ptr, "implicit", 8));
     if (!cc__box_cast_is_box(dest, &dhost, &dhost_n, &derased))
         return cc__box_cast_pass();
     cc__box_cast_trim(&dp, &dn);
@@ -177,7 +198,7 @@ static inline CCSlice cc_box_cast_lower_c(CCSlice src, CCSlice dest, CCSlice kin
         if (derased)
             return cc_slice_from_static((void *)"cc_box_from_host", 16);
         if (dhost && sbase && dhost_n == sbase_n &&
-            memcmp(dhost, sbase, dhost_n) == 0)
+            cc__box_bytes_eq(dhost, sbase, dhost_n))
             return cc__box_cast_concat(dp, dn, "_from_host", arena);
     }
     {
@@ -195,7 +216,7 @@ static inline CCSlice cc_box_cast_lower_c(CCSlice src, CCSlice dest, CCSlice kin
             if (serased)
                 return cc_slice_from_static((void *)"cc_box_host", 11);
             if (shost && dbase && shost_n == dbase_n &&
-                memcmp(shost, dbase, shost_n) == 0)
+                cc__box_bytes_eq(shost, dbase, shost_n))
                 return cc__box_cast_concat(sp, sn, "_host", arena);
         }
     }
@@ -212,6 +233,7 @@ static inline CCSlice cc_box_cast_lower_c(CCSlice src, CCSlice dest, CCSlice kin
  * field — user UFCS on CCBox::[H] stays open. Factory aliases (CCArena, …)
  * are other subjects — they do not match CCBox_*. */
 @typeview on CCBox_* {
+    as: p;
     r: ^p;
 };
 

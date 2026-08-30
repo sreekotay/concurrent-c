@@ -1,5 +1,6 @@
 #include <ccc/std/prelude.cch>
 #include <assert.h>
+#include <stdio.h>
 
 typedef struct {
     CCArena arena;

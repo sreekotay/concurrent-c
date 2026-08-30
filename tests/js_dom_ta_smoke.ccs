@@ -30,7 +30,7 @@ int main(void) {
         if (ta.kind == CC__JS_DOM_K_TA &&
             info.kind == CC__JS_DOM_TA_F64 && info.nelem == 3 &&
             info.esz == 8 && info.bytes.len == 24) {
-            const double *p = (const double *)info.bytes.ptr;
+            const double *p = (const double *)(info.bytes.ptr);
             for (i = 0; i < info.nelem; i++) sum += p[i];
             ta_result = fabs(sum - 7.0) < 1e-12;
         }

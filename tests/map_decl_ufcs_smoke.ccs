@@ -1,5 +1,6 @@
 /* Test UFCS opt-in for CC_MAP_DECL_ARENA-generated map types. */
 #include <ccc/std/prelude.cch>
+#include <ccc/std/map.cch>
 #include <stdio.h>
 
 static inline size_t hash_int_key(int key) {

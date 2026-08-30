@@ -1,0 +1,15 @@
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    @errhandler(CCError e) {
+        (void)e;
+        return 1;
+    }
+    char[:] s = {'a', 'b'};
+    char *p = 0;
+    for (&ch in s) {
+        p = &ch;
+    } !>;
+    (void)p;
+    return 0;
+}

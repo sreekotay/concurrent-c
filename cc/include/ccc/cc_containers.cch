@@ -3,6 +3,8 @@
 
 #include <ccc/cc_arena.cch>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 /* The comptime executor's TCC backend (a) does not declare max_align_t in its
  * sysinclude and (b) rejects _Alignas/alignas with a *type* operand (it wants a

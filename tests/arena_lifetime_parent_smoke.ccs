@@ -4,6 +4,7 @@
  * and an Alloc face. spec/draft_lifetime_parents.md */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int fail(int code, const char *msg) {

@@ -13,7 +13,7 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     CCNursery n = cc_nursery_create() !> @detach;
     n.spawn(() => {
-        int *p = (int*)s.ptr;
+        int *p = (int*)(s.ptr);
         if (p && s.len == 4 && p[0] == 1) g = 1;
     }) !>;
     (void)cc_nursery_wait(n);

@@ -9,6 +9,7 @@
    Note: Nested UFCS (cc_std_out.write(s.as_slice())) is tested separately in ufcs_nested_multiline.ccs
 */
 #include <ccc/std/prelude.cch>
+#include <stdlib.h>
 
 typedef struct {
     CCVec::[int] items;

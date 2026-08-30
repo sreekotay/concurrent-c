@@ -11,12 +11,12 @@ static CCSlice !>(CCError) reply_arena_alloc_slice(CCArena reply_arena, size_t n
 static bool reply_slice_eq_ignore_case(char[:] s, const char* cstr) {
     size_t len = strlen(cstr);
     if (s.len != len) return 0;
-    for (size_t i = 0; i < len; ++i) {
-        char a = ((const char*)s.ptr)[i];
+    for (i, a in s) {
+        char ca = a;
         char b = cstr[i];
-        if (a >= 'a' && a <= 'z') a = (char)(a - 'a' + 'A');
+        if (ca >= 'a' && ca <= 'z') ca = (char)(ca - 'a' + 'A');
         if (b >= 'a' && b <= 'z') b = (char)(b - 'a' + 'A');
-        if (a != b) return 0;
+        if (ca != b) return 0;
     }
     return 1;
 }

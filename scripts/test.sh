@@ -155,6 +155,28 @@ if [ "$need_cc" = 1 ]; then
   make -C cc all
 fi
 
+# `make all` already lowers. When the binary is fresh but stdlib/runtime
+# changed — or a warm seed overwrote out/include with crude host-C — re-lower
+# before the harness compiles against those headers.
+need_headers=0
+if [ "$need_cc" = 0 ]; then
+  if [ ! -f "./out/include/.headers_lowered.stamp" ]; then
+    need_headers=1
+  elif grep -q '!>(CCError)' ./out/include/ccc/cc_arena_result.h 2>/dev/null; then
+    echo "[test] out/include still has unlowered !>(CCError); re-lowering"
+    need_headers=1
+  elif find cc/include cc/runtime -type f \
+       \( -name '*.cch' -o -name '*.h' -o -name '*.c' \) \
+       -newer ./out/include/.headers_lowered.stamp 2>/dev/null | head -1 | grep -q .; then
+    echo "[test] stdlib/runtime newer than lowered headers; re-lowering"
+    need_headers=1
+  fi
+fi
+if [ "$need_headers" = 1 ]; then
+  echo "[test] lowering headers (make -C cc lower-headers)"
+  make -C cc lower-headers
+fi
+
 if [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; then
   echo "[test] FAIL: needs shadow_lower (make -C cc failed?)"
   exit 1
@@ -191,6 +213,11 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] unit-header quote-include selftest FAILED"
     exit 1
   fi
+  # Wrap files are content-keyed (no PID in the final path) so emit/obj hit.
+  if ! sh scripts/test_wrap_cache_stable.sh; then
+    echo "[test] wrap-cache stable selftest FAILED"
+    exit 1
+  fi
   # Root-tape `#ifdef` / `#ifndef` emit is a clean copy (host cpp selects).
   if ! sh scripts/test_ifdef_passthrough.sh; then
     echo "[test] ifdef passthrough selftest FAILED"
@@ -204,6 +231,11 @@ if [ -x "./cc/bin/ccc" ]; then
   # Tutorial fences: docs/typehooks-typeviews.md is the source of truth.
   if ! bash scripts/test_doc_fences.sh; then
     echo "[test] doc fence smoke FAILED"
+    exit 1
+  fi
+  # CVE locality corpus: every idiomatic.ccs still builds and runs.
+  if ! sh scripts/test_cve_locality.sh; then
+    echo "[test] CVE locality corpus smoke FAILED"
     exit 1
   fi
   # FileTape `#line` / CC_LN index + emit-cache replay of remapped loci.

@@ -57,7 +57,7 @@ int main(void) {
         __cc_nursery120.spawn(() => {
             int r = cc_block_on(int, producer(tx));  /* Blocks this thread! */
             (void)r;
-        });
+        }) !>;
     
     }
     

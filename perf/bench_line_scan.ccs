@@ -68,10 +68,12 @@ static void tally_blob(CCSlice blob, ScanStats* s) {
     s->ex = (int64_t)cc_slice_count(blob, k_ex);
     s->bytes = (int64_t)blob.len;
     s->lines = 0;
-    for (size_t i = 0; i < blob.len; i++) {
-        if (((const char*)blob.ptr)[i] == '\n') s->lines++;
+    char last = 0;
+    for (ch in blob) {
+        if (ch == '\n') s->lines++;
+        last = ch;
     }
-    if (blob.len > 0 && ((const char*)blob.ptr)[blob.len - 1] != '\n')
+    if (blob.len > 0 && last != '\n')
         s->lines++;
 }
 
@@ -171,7 +173,7 @@ static ScanStats scan_chan(const char* path) {
                 CCArena line_a = cc_arena_heap(256);
                 CCSlice line = cc_slice_empty();
                 bool !>(CCIoError) got =
-                    cc_file_read_line_into(&f, &line_a, &line);
+                    cc_file_read_line_into(&f, line_a, &line);
                 if (cc_is_err(got)) {
                     cc_arena_free(&line_a);
                     abort();

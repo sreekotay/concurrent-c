@@ -419,9 +419,9 @@ int main(void) {
         if (negs.len != 4 || memcmp(negs.ptr, "True", 4) != 0) ok = 0;
 
         CCPyObj big = py.eval(@slice("[2**40]")) !> @destroy;
-        CCResult_CCSlice_CCPyError bad = cc_py_obj_as_list(int, &big, &a);
+        CCResult_CCSlice_CCPyError bad = cc_py_obj_as_list(int, &big, a);
         if (!bad.is_err()) ok = 0;
-        CCSlice wide = big.as_list::[int64_t](&a) !>;
+        CCSlice wide = big.as_list::[int64_t](a) !>;
         if (wide.len != 1 || ((int64_t *)wide.ptr)[0] != (1LL << 40)) ok = 0;
 
         cc_py_close(&py);

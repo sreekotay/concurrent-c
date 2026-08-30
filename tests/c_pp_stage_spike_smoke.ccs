@@ -11,6 +11,9 @@
 ~~~~}
 
 #include "../cc/shadow/c_pp_spike.cch"
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
 
 static const char* FIX = "cc/shadow/fixtures";
 

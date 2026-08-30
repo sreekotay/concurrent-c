@@ -1987,6 +1987,40 @@ static int shadow_for_is_zip(const char* h) {
            shadow_for_csv_count(in + 2, NULL) == 2;
 }
 
+static int shadow_for_hdr_is_range(const char* h) {
+    const char* in;
+    const char* q;
+    int depth = 0;
+    in = shadow_for_hdr_in(h);
+    if (!in) return 0;
+    for (q = in + 2; *q; q++) {
+        if (*q == '(' || *q == '[' || *q == '{') depth++;
+        else if (*q == ')' || *q == ']' || *q == '}') {
+            if (depth) depth--;
+        } else if (depth == 0 && q[0] == '.' && q[1] == '.')
+            return 1;
+    }
+    return 0;
+}
+
+/* `&name` in the binder list (before `in`). Not `&&`. */
+static int shadow_for_has_mut_bind(const char* h) {
+    const char* in;
+    const char* p;
+    int depth = 0;
+    in = shadow_for_hdr_in(h);
+    if (!h || !in) return 0;
+    for (p = h; p < in; p++) {
+        if (*p == '(' || *p == '[' || *p == '{') depth++;
+        else if (*p == ')' || *p == ']' || *p == '}') {
+            if (depth) depth--;
+        } else if (depth == 0 && *p == '&' && p[1] != '&' &&
+                   (p == h || p[-1] != '&'))
+            return 1;
+    }
+    return 0;
+}
+
 /* Zip is void !>(CCError). `!>;` → enclosing @errhandler. `!>(e){…}`
  * attaches a site handler. Same channel as `@parallel {…} !>`. */
 static int parse_for_zip_bang_tail(Parser* p, AstNode* n) {
@@ -2094,7 +2128,12 @@ static AstNode* parse_for(Parser* p) {
         n->body[0] = s;
         n->nbody = 1;
     }
-    if (shadow_for_is_zip(n->a)) {
+    if (shadow_for_has_mut_bind(n->a) && shadow_for_hdr_is_range(n->a)) {
+        parser_fail(p, p_peek(p),
+                    "range for-in is `for (i in lo..hi)` (`&i` is not a slot)");
+        return NULL;
+    }
+    if (shadow_for_is_zip(n->a) || shadow_for_has_mut_bind(n->a)) {
         if (!parse_for_zip_bang_tail(p, n)) return NULL;
     } else if (tok_eq(p_peek(p), TK_PUNCT, "!>")) {
         parser_fail(p, p_peek(p), "this for cannot fail");
@@ -2941,6 +2980,14 @@ static AstNode* parse_ufcs_stmt(Parser* p) {
         return NULL;
     }
     int a1 = p->i - 1;
+    /* The call is a C expression. Leftover postfix / assign (`s.ptr[i]`,
+     * `p++`, `x += 1`) is legal C — restore so assign / expr_stmt own it.
+     * Do not make that C illegal by demanding `;` here. */
+    if (!tok_eq(p_peek(p), TK_PUNCT, ";") &&
+        !tok_eq(p_peek(p), TK_PUNCT, "!>")) {
+        p->i = save;
+        return NULL;
+    }
     AstNode* n = ast_make_ufcs(p, AST_UFCS_STMT, r0, call_op, a0, a1, targ0,
                                targ1);
     if (!n) {

@@ -9,7 +9,6 @@
 #define CC_ARC_CCH
 
 #include <ccc/cc_atomic.cch>
-#include <stdlib.h>
 #include <stddef.h>
 
 typedef void (*CCArcDropFn)(void* ptr);
@@ -38,20 +37,7 @@ static inline void* cc_arc_get(CCArc a) {
     return a.ctrl ? a.ctrl->ptr : NULL;
 }
 
-static inline CCArc cc_arc_from_ptr(void* ptr, CCArcDropFn drop_fn) {
-    CCArc a = cc_arc_null();
-    if (!ptr) return a;
-    CCArcCtrl* c = (CCArcCtrl*)malloc(sizeof(CCArcCtrl));
-    if (!c) {
-        if (drop_fn) drop_fn(ptr);
-        return a;
-    }
-    c->strong = 1;
-    c->drop_fn = drop_fn;
-    c->ptr = ptr;
-    a.ctrl = c;
-    return a;
-}
+CCArc cc_arc_from_ptr(void* ptr, CCArcDropFn drop_fn);
 
 static inline CCArc cc_arc_clone(CCArc a) {
     if (!a.ctrl) return a;
@@ -59,18 +45,7 @@ static inline CCArc cc_arc_clone(CCArc a) {
     return a;
 }
 
-static inline void cc_arc_drop(CCArc* a) {
-    CCArcCtrl* c;
-    int prev;
-    if (!a || !a->ctrl) return;
-    c = a->ctrl;
-    a->ctrl = NULL;
-    prev = cc_atomic_fetch_sub(&c->strong, 1);
-    if (prev == 1) {
-        if (c->drop_fn) c->drop_fn(c->ptr);
-        free(c);
-    }
-}
+void cc_arc_drop(CCArc* a);
 
 static inline void CCArc_destroy(CCArc* a) { cc_arc_drop(a); }
 

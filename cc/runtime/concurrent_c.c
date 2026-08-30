@@ -10,6 +10,11 @@
  *   CC_ENABLE_TLS   - Enable TLS support (requires BearSSL)
  */
 
+/* Emit out-of-line arena/result sys bodies on the first include of those
+ * headers (channel.c etc. pull them in before arena_state.c). */
+#define CC_ARENA_IMPL 1
+#define CC_RESULT_IMPL 1
+
 #if defined(__TINYC__)
 /* ucontext fiber backend (TCC aarch64 has no inline asm for minicoro ASM).
  * Do not set _XOPEN_SOURCE here — it breaks Apple SDK headers under TCC;
@@ -33,6 +38,7 @@
 #include "exec.c"
 #include "arena_state.c"
 #include "slice_adopt.c"
+#include "slice_mem.c"
 #include "cc_rt_diag.c"
 #include "cc_type_info.c"
 #include "cc_dyn_vec.c"
@@ -43,6 +49,10 @@
 #include "dir.c"
 #include "process.c"
 #include "exclusive.c"
+#include "arc.c"
+#include "parallel.c"
+#include "future.c"
+#include "turnstile.c"
 
 #ifdef CC_ENABLE_ASYNC
 #include "async_chan.c"

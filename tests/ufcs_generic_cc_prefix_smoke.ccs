@@ -8,6 +8,8 @@
 // (opt-in registrations live in cc_arena.cch).
 #include <ccc/std/prelude.cch>
 #include <assert.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 int main(void) {
     char backing[1024];

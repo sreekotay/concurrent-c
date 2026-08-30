@@ -18,8 +18,7 @@ static CCSlice shout_policy(CCArena arena, CCSlice tag, CCSlice value) {
 }
 
 int main(void) {
-    CCArena arena_storage = @create(kilobytes(8)) @destroy;
-    CCArena *a = &arena_storage;
+    CCArena a = @create(kilobytes(8)) @destroy;
 
     /* backtick emission — the reason this syntax exists */
     CCString bt = @string(`code: ${{`tpl`}} done`, a);

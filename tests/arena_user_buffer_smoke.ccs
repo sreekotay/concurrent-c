@@ -1,6 +1,8 @@
 // Test: owned arena with user-provided buffer
 #include <ccc/std/prelude.cch>
 #include <assert.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 int main(void) {
     // User-provided stack buffer

@@ -82,12 +82,12 @@ int main(void) {
         CCNursery __cc_nursery148 = @create() !> @destroy;
 
         // 1. No warmup. Heartbeat and kidnappers race for workers from T=0.
-        __cc_nursery148.spawnhybrid(() => { heartbeat_fiber(); });
+        __cc_nursery148.spawnhybrid(() => { heartbeat_fiber(); }) !>;
 
         printf("\n!!! Unleashing Kidnappers !!!\n");
         for (int i = 0; i < NUM_KIDNAPPERS; i++) {
             int id = i;
-            __cc_nursery148.spawnhybrid(() => [id] { kidnapper_fiber(id); });
+            __cc_nursery148.spawnhybrid(() => [id] { kidnapper_fiber(id); }) !>;
         }
 
         // 4. Monitor heartbeats while kidnappers are active (kidnappers block for 2s each)

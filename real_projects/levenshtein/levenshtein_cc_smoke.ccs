@@ -30,10 +30,10 @@ static int lev__prep(Lev *self, CCPyStr s1, CCPyStr s2,
     if (CCResult_CCSlice_uint32_t_CCError_is_err(rb)) return -1;
     ca = CCResult_CCSlice_uint32_t_CCError_value(ra);
     cb = CCResult_CCSlice_uint32_t_CCError_value(rb);
-    *a = (uint32_t *)ca.base.ptr;
-    *n = ca.base.len;
-    *b = (uint32_t *)cb.base.ptr;
-    *m = cb.base.len;
+    *a = (uint32_t *)ca.ptr;
+    *n = ca.len;
+    *b = (uint32_t *)cb.ptr;
+    *m = cb.len;
     return 0;
 }
 

@@ -377,7 +377,7 @@ static int shadow_emit_ab_scalar_helper(CEmit* out, int id, const char* callee,
         }
         if (!cemit_str(out, ");\n}\n")) return 0;
         if (!cemit_fmt(out,
-                "static void __cc_ab_drop_%d(void* __p) { free(__p); }\n"
+                "static void __cc_ab_drop_%d(void* __p) { cc__heap_free(__p); }\n"
                 "static CCClosure0 __cc_ab_make_%d(",
                 id, id))
             return 0;
@@ -387,7 +387,7 @@ static int shadow_emit_ab_scalar_helper(CEmit* out, int id, const char* callee,
         }
         if (!cemit_fmt(out,
                 ") {\n"
-                "    __cc_ab_env_%d* __e = (__cc_ab_env_%d*)calloc(1, "
+                "    __cc_ab_env_%d* __e = (__cc_ab_env_%d*)cc__heap_calloc(1, "
                 "sizeof(*__e));\n",
                 id, id))
             return 0;
@@ -435,7 +435,7 @@ static int shadow_emit_ab_void_helper(CEmit* out, int id, const char* callee,
         }
         if (!cemit_str(out, ");\n    return NULL;\n}\n")) return 0;
         if (!cemit_fmt(out,
-                "static void __cc_ab_drop_%d(void* __p) { free(__p); }\n"
+                "static void __cc_ab_drop_%d(void* __p) { cc__heap_free(__p); }\n"
                 "static CCClosure0 __cc_ab_make_%d(",
                 id, id))
             return 0;
@@ -445,7 +445,7 @@ static int shadow_emit_ab_void_helper(CEmit* out, int id, const char* callee,
         }
         if (!cemit_fmt(out,
                 ") {\n"
-                "    __cc_ab_env_%d* __e = (__cc_ab_env_%d*)calloc(1, "
+                "    __cc_ab_env_%d* __e = (__cc_ab_env_%d*)cc__heap_calloc(1, "
                 "sizeof(*__e));\n",
                 id, id))
             return 0;
@@ -558,7 +558,7 @@ static int shadow_emit_ab_batch_helper(CEmit* out, const ShadowAbBatch* b) {
         }
     }
     if (!cemit_fmt(out, "}\n"
-            "static void __cc_ab_drop_%d(void* __p) { free(__p); }\n"
+            "static void __cc_ab_drop_%d(void* __p) { cc__heap_free(__p); }\n"
             "static CCClosure0 __cc_ab_make_%d(",
             id, id))
         return 0;
@@ -593,7 +593,7 @@ static int shadow_emit_ab_batch_helper(CEmit* out, const ShadowAbBatch* b) {
     }
     if (!cemit_fmt(out,
             ") {\n"
-            "    __cc_ab_env_%d* __e = (__cc_ab_env_%d*)calloc(1, "
+            "    __cc_ab_env_%d* __e = (__cc_ab_env_%d*)cc__heap_calloc(1, "
             "sizeof(*__e));\n",
             id, id))
         return 0;
@@ -653,7 +653,7 @@ static int shadow_emit_ab_struct_helper(CEmit* out, int id, const char* callee,
     }
     if (!cemit_str(out, ");\n    return NULL;\n}\n")) return 0;
     if (!cemit_fmt(out,
-            "static void __cc_ab_drop_%d(void* __p) { free(__p); }\n"
+            "static void __cc_ab_drop_%d(void* __p) { cc__heap_free(__p); }\n"
             "static CCClosure0 __cc_ab_make_%d(%s* __ret",
             id, id, ret_ty ? ret_ty : "void"))
         return 0;
@@ -662,7 +662,7 @@ static int shadow_emit_ab_struct_helper(CEmit* out, int id, const char* callee,
     }
     if (!cemit_fmt(out,
             ") {\n"
-            "    __cc_ab_env_%d* __e = (__cc_ab_env_%d*)calloc(1, "
+            "    __cc_ab_env_%d* __e = (__cc_ab_env_%d*)cc__heap_calloc(1, "
             "sizeof(*__e));\n"
             "    if (__e) __e->__ret = __ret;\n",
             id, id))

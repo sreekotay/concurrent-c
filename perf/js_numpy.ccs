@@ -37,7 +37,7 @@ static long long !>(CCError) Np_init(Np *self) {
     if (!cc_py_available()) return cc_ok(0LL);
     self->arena = cc_arena_heap(megabytes(4));
     CCPy *py = &self->py;
-    *py = cc_py_new(false, &self->arena) !>;
+    *py = cc_py_new(false, self->arena) !>;
     CCResult_CCPyObj_CCPyError np = py->import("numpy");
     if (!np.is_ok()) return cc_ok(0LL);
     self->np = CCResult_CCPyObj_CCPyError_value(np);

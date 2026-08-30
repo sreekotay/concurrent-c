@@ -17,12 +17,12 @@ int main(void) {
     if (!p) return 1;
     memset(p, 'u', 8);
     /* unique + transferable provenance — move-only */
-    char[:!] owned = cc_slice_from_parts(p, 8, cc_slice_make_id(1, true, true, false));
+    char[:!] owned = cc_adopt(p, 8, free);
 
     char[:!] other = cc_move(owned);
     /* owned is moved; other is the sole owner */
     if (other.len != 8) return 2;
-    free(other.ptr); /* sole free — adopt/deleter would be cleaner in real code */
+    other.destroy();
 
     printf("SHAPE-T8: prevented (unique move-only); idiomatic single owner ok\n");
     return 0;

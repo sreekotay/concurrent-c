@@ -1,6 +1,8 @@
 // Test: Owned channels (resource pools) with lifecycle callbacks
 #include <ccc/std/prelude.cch>
 #include <assert.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 // Test resource: a simple counter struct
 typedef struct {

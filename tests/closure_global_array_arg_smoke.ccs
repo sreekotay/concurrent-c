@@ -16,6 +16,7 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_nursery.cch>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define ARR_N 4
 

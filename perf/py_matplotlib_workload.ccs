@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot
-        `, &a).as_slice());
+        `, a).as_slice());
     if (probe.is_err()) { puts("SKIP (no matplotlib)"); return 0; }
 
     /* A damped sine, computed in CC. */
@@ -71,7 +71,7 @@ int main(int argc, char **argv) {
             plt.close(fig)
             import os
             return float(os.path.getsize(path))
-        `, &a).as_slice()) !>;
+        `, a).as_slice()) !>;
 
     CCPyObj m = py.import("__main__") !> @destroy;
 

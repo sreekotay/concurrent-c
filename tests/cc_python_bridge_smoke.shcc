@@ -58,8 +58,8 @@ setTimeout(() => {
   py.destroy();
   console.log('double_destroy_ok', py.closed);
 }, 50);
-"`, &a);
-    run.arg(js.cstr(&a));
+"`, a);
+    run.arg(js.cstr(a));
     run.inherit_stdio();
     int rc = run.status() !>;
     if (rc != 0) { "bridge checks failed".println() !>; return 1; }

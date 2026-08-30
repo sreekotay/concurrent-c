@@ -29,7 +29,7 @@ void recursive_nursery(int depth) {
 
         __cc_nursery141.spawn(() => {
             cc_atomic_fetch_add(&g_count, 1);
-        });
+        }) !>;
         
         // Recurse deeper
         recursive_nursery(depth + 1);

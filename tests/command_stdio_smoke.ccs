@@ -1,5 +1,7 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/std/exec.cch>
+#include <string.h>
+#include <stdio.h>
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(64));
@@ -16,7 +18,7 @@ int main(void) {
     cat.arg("-c");
     cat.arg("cat");
     cat.stdin("hello");
-    res = cat.output(&arena);
+    res = cat.output(arena);
     if (cc_is_err(res)) {
         cc_arena_free(&arena);
         return 1;
@@ -38,7 +40,7 @@ int main(void) {
     merged.arg("-c");
     merged.arg("printf out; printf err 1>&2");
     merged.stderr_to_stdout();
-    res = merged.output(&arena);
+    res = merged.output(arena);
     if (cc_is_err(res)) {
         cc_arena_free(&arena);
         return 5;
@@ -60,7 +62,7 @@ int main(void) {
     env_cmd.arg("-c");
     env_cmd.arg("printf %s \"$CC_STDIO_SMOKE\"");
     env_cmd.env(envp);
-    res = env_cmd.output(&arena);
+    res = env_cmd.output(arena);
     if (cc_is_err(res)) {
         cc_arena_free(&arena);
         return 9;

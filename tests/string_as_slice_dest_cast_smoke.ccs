@@ -1,0 +1,29 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <string.h>
+
+/* Dest-init / assign: CCString → char[:] inserts as_slice (a view wrap). */
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(1)) @destroy;
+    assert(cc_arena_is_live(a));
+
+    CCString s = cc_string_from_slice(a, @slice("hello"));
+    CCString* p = &s;
+
+    char[:] v = s;
+    assert(v.len == 5);
+    assert(memcmp(v.ptr, "hello", 5) == 0);
+
+    char[:] w = p;
+    assert(w.len == 5);
+    assert(memcmp(w.ptr, "hello", 5) == 0);
+
+    v = s;
+    assert(v.len == 5);
+
+    char[:] d = s.as_slice();
+    assert(d.len == 5);
+    assert(d.ptr == v.ptr);
+
+    return 0;
+}

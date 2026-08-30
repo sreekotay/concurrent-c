@@ -12,7 +12,7 @@ int main(void) {
     CCSlice s = cc_slice_from_parts(buf, 4, CC_SLICE_ID_UNTRACKED);
 
     CCClosure0 c = () => {
-        int* p = (int*)s.ptr;
+        int* p = (int*)(s.ptr);
         if (p && s.len == 4 && p[0] == 1) g = 1;
         return NULL;
     };

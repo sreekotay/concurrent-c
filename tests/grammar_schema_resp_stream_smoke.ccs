@@ -12,6 +12,8 @@
 //   array in the struct (zero allocation on the parse hot path) and a
 //   larger count is a protocol ERROR — the redis server's own policy.
 #include <ccc/std/prelude.cch>
+#include <string.h>
+#include <stdio.h>
 
 @grammar(schema) RespArg {~~~~
     rules [

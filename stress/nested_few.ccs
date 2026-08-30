@@ -23,10 +23,10 @@ int main(void) {
 
                     __cc_nursery132.spawn (() => [x] {
                         cc_atomic_store(&g, x);
-                    });
+                    }) !>;
                 
                 }
-            });
+            }) !>;
         
         }
     }

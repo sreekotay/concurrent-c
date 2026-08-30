@@ -11,6 +11,8 @@
 //   Name_read(s, n, &pos, ..) incremental entry: one value per call, for
 //                             pipelines (Name_parse still requires p == n)
 #include <ccc/std/prelude.cch>
+#include <string.h>
+#include <stdio.h>
 
 // LIGHTWEIGHT: these schemas are fully self-contained — the rules they need
 // live INLINE in the same block (`rules [...]`), referenced bare. No separate

@@ -31,8 +31,8 @@ console.log('bump', m.pair_counter.bump(4));
 console.log('bump_default', m.pair_counter.bump());
 console.log('half', m.pair_halver.half(10));
 console.log('flat_hidden', typeof m.bump === 'undefined');
-"`, &a);
-    run.arg(js.cstr(&a));
+"`, a);
+    run.arg(js.cstr(a));
     run.inherit_stdio();
     int rc = run.status() !>;
     if (rc != 0) { "import failed".println() !>; return 1; }

@@ -121,7 +121,7 @@ int main(void) {
         for (i = 0; i < n; i++) {
             size_t sz = item_size(i);
             CCArena *dest = ephemeral[i] ? &scratch : &keep;
-            ptrs[i] = (unsigned char *)cc_arena_alloc(dest, sz, 8);
+            ptrs[i] = (unsigned char *)cc_arena_alloc(*dest, sz, 8);
             if (!ptrs[i]) {
                 cc_arena_free(&scratch);
                 cc_arena_free(&keep);
@@ -137,8 +137,8 @@ int main(void) {
         }
         alloc_ms = now_ms() - t;
         peak_live = live;
-        scratch_gross = cc_arena_committed_gross_bytes(&scratch);
-        keep_gross = cc_arena_committed_gross_bytes(&keep);
+        scratch_gross = cc_arena_committed_gross_bytes(scratch);
+        keep_gross = cc_arena_committed_gross_bytes(keep);
         {
             StressMemSample m = stress_mem_sample();
             if (m.ok && m.current > sampled_peak) sampled_peak = m.current;

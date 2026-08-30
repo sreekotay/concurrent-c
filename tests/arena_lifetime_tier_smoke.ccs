@@ -17,7 +17,7 @@ static int test_l1_live_and_result_loan(void) {
     p = cc_arena_alloc(a, 32, 8);
     if (!p) return fail(1, "L1 alloc");
     if (cc_arena_live(a) != 1) return fail(1, "live L1");
-    if (cc_arena_ptr_tier(&a, p) != CC_ARENA_TIER_L1) return fail(1, "tier L1");
+    if (cc_arena_ptr_tier(a, p) != CC_ARENA_TIER_L1) return fail(1, "tier L1");
 
     cp = a.try_checkpoint() !>;
     if (cc_arena_alloc(a, 32, 8) == NULL) return fail(1, "post-checkpoint");
@@ -39,13 +39,13 @@ static int test_l2_and_main(void) {
     a.a->block_max = 2;
     if (!cc_arena_alloc(a, 32, 8)) return fail(2, "fill L1");
     grown = cc_arena_alloc(a, 128, 8);
-    if (!grown || cc_arena_ptr_tier(&a, grown) != CC_ARENA_TIER_L2) {
+    if (!grown || cc_arena_ptr_tier(a, grown) != CC_ARENA_TIER_L2) {
         return fail(2, "tier L2");
     }
     if (cc_arena_live(a) != 2) return fail(2, "live L1+L2");
 
     ovf = cc_arena_alloc(m, 128, 8);
-    if (!ovf || cc_arena_ptr_tier(&m, ovf) != CC_ARENA_TIER_MAIN) {
+    if (!ovf || cc_arena_ptr_tier(m, ovf) != CC_ARENA_TIER_MAIN) {
         return fail(2, "tier Main");
     }
     if (cc_arena_live(m) != 1) return fail(2, "live Main");

@@ -1,0 +1,9 @@
+/* Raw memcpy is not a CCS API. Copy through slice dest-bulk: dst.copy(src). */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    char a[4] = {1, 2, 3, 4};
+    char b[4];
+    cc_memcpy(b, a, 4);
+    return (int)b[0];
+}

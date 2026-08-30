@@ -43,6 +43,8 @@
  *   shifted stub-AST line/col so the first closure was silently dropped.
  */
 #include <ccc/std/prelude.cch>
+#include <stdlib.h>
+#include <stdio.h>
 
 static char* maybe_null(int want_null) {
     static char buf[] = "hello";

@@ -1,6 +1,7 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_instantiate.cch>
 #include <stdio.h>
+#include <string.h>
 
 /* #pragma cc_depends declares a comptime build dependency: the named file's
  * content is folded into the emit cache key, so editing the data file forces a

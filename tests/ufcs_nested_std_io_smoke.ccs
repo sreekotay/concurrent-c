@@ -2,6 +2,7 @@
    This tests that s.as_slice() inside cc_std_out.write() is correctly rewritten
    even when there are multiple CCString variables in the same scope. */
 #include <ccc/std/prelude.cch>
+#include <stdlib.h>
 
 int main(void) {
     {

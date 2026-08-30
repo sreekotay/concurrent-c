@@ -1,4 +1,5 @@
 #include <ccc/std/prelude.cch>
+#include <ccc/std/map.cch>
 #include <assert.h>
 #include <string.h>
 

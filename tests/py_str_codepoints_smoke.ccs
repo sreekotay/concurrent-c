@@ -22,10 +22,10 @@ int main(void) {
     CCPyStr view;
     assert(cc__py_in_pystr(&view, s.o, "s") == 0);
 
-    CCResult_CCSlice_uint32_t_CCError r = view.codepoints(&arena);
+    CCResult_CCSlice_uint32_t_CCError r = view.codepoints(arena);
     assert(r.is_ok());
     uint32_t[:] cps = r.value();
-    assert(cps.base.len == 5);
+    assert(cps.len == 5);
     assert(cps.at(0) == (uint32_t)'h');
     assert(cps.at(1) == 0xE9u);
     assert(cps.at(4) == (uint32_t)'o');
@@ -35,7 +35,7 @@ int main(void) {
         CCPyObj empty = py.eval(@slice("''")) !> @destroy;
         CCPyStr ev;
         assert(cc__py_in_pystr(&ev, empty.o, "e") == 0);
-        CCResult_CCSlice_uint32_t_CCError er = ev.codepoints(&arena);
+        CCResult_CCSlice_uint32_t_CCError er = ev.codepoints(arena);
         assert(er.is_ok());
         assert(er.value().base.len == 0);
     }
@@ -45,10 +45,10 @@ int main(void) {
         CCPyObj astral = py.eval(@slice("'\U0001d54a'")) !> @destroy;
         CCPyStr av;
         assert(cc__py_in_pystr(&av, astral.o, "a") == 0);
-        CCResult_CCSlice_uint32_t_CCError ar = av.codepoints(&arena);
+        CCResult_CCSlice_uint32_t_CCError ar = av.codepoints(arena);
         assert(ar.is_ok());
         uint32_t[:] ac = ar.value();
-        assert(ac.base.len == 1);
+        assert(ac.len == 1);
         assert(ac.at(0) == 0x1D54Au);
     }
 

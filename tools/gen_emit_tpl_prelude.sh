@@ -30,13 +30,13 @@ TMP="$OUT.tmp.$$"
     "#include <stdlib.h>\n" \
     "#include <stdbool.h>\n" \
     "#include <ctype.h>\n" \
+    "#define CC_COMPTIME 1\n" \
     "#include <ccc/cc_slice.h>\n" \
     "#include <ccc/cc_arena.h>\n" \
     "/* cc_arena.h declares this extern (defined in the compiled runtime). The\n" \
     "   comptime TU is standalone (never linked against the runtime), so define a\n" \
     "   per-TU instance here — provenance ids only need uniqueness within one run. */\n" \
     "cc_atomic_u64 cc_arena_prov_counter = 0;\n" \
-    "#define CC_COMPTIME 1\n" \
     "#include <ccc/std/string.h>\n" \
     "#include <ccc/std/vec.h>\n" \
     "#include <ccc/std/hash.h>\n" \

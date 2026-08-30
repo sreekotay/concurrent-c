@@ -1,0 +1,26 @@
+/* Two as: faces both offering `.len` — ill-formed at the use. */
+#include <ccc/std/prelude.cch>
+
+typedef struct {
+    int len;
+} AsFldA;
+
+typedef struct {
+    int len;
+} AsFldB;
+
+typedef struct {
+    AsFldA a;
+    AsFldB b;
+    int extra;
+} AsFldDup;
+
+@typeview on AsFldDup {
+    as: a, b;
+};
+
+int main(void) {
+    AsFldDup o = {0};
+    o.extra = 1;
+    return o.len;
+}

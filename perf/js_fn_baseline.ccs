@@ -127,15 +127,18 @@ int main(int argc, char **argv) {
         CCJsDomVal f_js = g.get("add7_js") !> @destroy;
 
         {
-            long long d = g.apply_n(f_js, 200LL) !>;
+            CCJsDomVal d_v = g.apply_n(f_js, 200LL) !>;
+            long long d = d_v.as_i64() !>;
             (void)d;
-            d = g.apply_n(f_cc, 200LL) !>;
+            d_v = g.apply_n(f_cc, 200LL) !>;
+            d = d_v.as_i64() !>;
             (void)d;
         }
 
         for (s = 0; s < g_samples; s++) {
             double t0 = now_ms();
-            long long r = g.apply_n(f_js, iters) !>;
+            CCJsDomVal r_v = g.apply_n(f_js, iters) !>;
+            long long r = r_v.as_i64() !>;
             g_ms[s] = now_ms() - t0;
             got = r;
         }
@@ -147,7 +150,8 @@ int main(int argc, char **argv) {
 
         for (s = 0; s < g_samples; s++) {
             double t0 = now_ms();
-            long long r = g.apply_n(f_cc, iters) !>;
+            CCJsDomVal r_v = g.apply_n(f_cc, iters) !>;
+            long long r = r_v.as_i64() !>;
             g_ms[s] = now_ms() - t0;
             got = r;
         }

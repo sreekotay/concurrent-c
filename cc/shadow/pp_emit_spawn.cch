@@ -834,8 +834,7 @@ static int shadow_emit_closure_formals(AstNode* cl, CEmit* out) {
         if (!ty[0] || !name[0]) return 0;
         /* Runtime passes handle formals as intptr_t &handle. A C cast
          * `(CCArena)__arg` is invalid; reload the handle from that slot. */
-        if (strcmp(ty, "CCArena") == 0 || strcmp(ty, "CCNursery") == 0 ||
-            strcmp(ty, "CCExclusive") == 0) {
+        if (shadow_ty_is_box_alias(ty) || shadow_ty_is_box_instance(ty)) {
             if (!cemit_fmt(out, "    %s %s = *(%s*)__arg%d;\n", ty, name, ty, ai))
                 return 0;
         } else if (!cemit_fmt(out, "    %s %s = (%s)__arg%d;\n", ty, name, ty, ai)) {
@@ -943,9 +942,9 @@ static int shadow_emit_closure_def_raw(AstNode* cl, CEmit* out, TapeCache* cache
     }
     if (!cemit_fmt(out,
             "} cc_closure__N%s_env;\n"
-            "static void cc_closure__N%s_env_drop(void* p) { if (p) free(p); }\n"
+            "static void cc_closure__N%s_env_drop(void* p) { if (p) cc__heap_free(p); }\n"
             "static %s cc_closure__N%s_make(%s) {\n"
-            "    cc_closure__N%s_env* __env = (cc_closure__N%s_env*)malloc(sizeof(*__env));\n",
+            "    cc_closure__N%s_env* __env = (cc_closure__N%s_env*)cc__heap_alloc(sizeof(*__env));\n",
             id, id, ccty, id, proto, id, id))
         return 0;
     {

@@ -30,7 +30,7 @@ int main(void) {
     {
         char[:] view = a.alloc_slice_bytes(8);
         if (!view.ptr) return 1;
-        memcpy(view.ptr, "payload!", 8);
+        view.copy(cc_slice_from_static((void*)"payload!", 8)) !>;
         /* Would be ill-formed: cc_channel_send(tx, view); */
         (void)view;
     } /* borrow ends — epoch may advance */

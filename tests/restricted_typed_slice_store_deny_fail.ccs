@@ -1,0 +1,8 @@
+/* Typed T[:] inherits slice-family field stores denied. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    int[:] xs = { 1, 2, 3 };
+    xs.len = 1;
+    return (int)xs.len;
+}

@@ -1,3 +1,4 @@
+#include <stdio.h>
 #!/usr/bin/env -S ./cc/bin/ccc --as=shcc version=0.3
 /*
  * Smoke: make.shcc runners take an @string line (quotes keep a word).
@@ -18,7 +19,8 @@ if (rc == 0) {
 CCString q = @string(`printf "hello world"`, @scratch);
 CCString got = cc_script_sh_read(q) !>;
 CCSlice sl = got.as_slice();
-if (sl.len != 11 || !sl.ptr || memcmp(sl.ptr, "hello world", 11) != 0) {
+char *p = sl.ptr;
+if (sl.len != 11 || !p || memcmp(p, "hello world", 11) != 0) {
     "FAIL cc_script_sh_read".eprintln() !>;
     return 1;
 }

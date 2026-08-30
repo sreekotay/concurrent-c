@@ -9,7 +9,7 @@ int main(void) {
     CCString t = @string(`
         properly margined
     four spaces only
-        `, &a);
+        `, a);
     (void)t;
     return 0;
 }

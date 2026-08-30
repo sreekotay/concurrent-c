@@ -3,6 +3,8 @@
 // the arm tag (EQ imm / GE payload.len) — stored len is ignored.
 // Construction and projection use the protected @variant surface.
 #include <ccc/std/prelude.cch>
+#include <string.h>
+#include <stdio.h>
 
 @grammar(schema) Bulk {~~~~
     rules [

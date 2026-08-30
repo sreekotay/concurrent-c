@@ -428,8 +428,9 @@ static int shadow_strsw_emit_head(CEmit* out, ShadowCtx* ctx, AstNode* st,
     snprintf(pref, sizeof(pref), "__cc_ss%d", id);
     for (i = 0; i < nkeys; i++)
         if (key_lens[i] > max_len) max_len = key_lens[i];
-    /* Tiny tables: length+memcmp beats FNV MPH (JSON schema keys, short
-     * command names). Larger sets keep the perfect-hash probe. */
+    /* Tiny tables: length+cc__bytes_cmp beats FNV MPH (JSON schema keys,
+     * short command names). Larger sets keep the perfect-hash probe.
+     * Do not emit memcmp — that would require string.h in every TU. */
     if (nkeys <= 8 && max_len <= 16) use_linear = 1;
     if (!cemit_fmt(out, "%sint %s;\n", indent, pref)) return 0;
     if (!cemit_fmt(out, "%s{\n", indent)) return 0;
@@ -449,7 +450,7 @@ static int shadow_strsw_emit_head(CEmit* out, ShadowCtx* ctx, AstNode* st,
             const char* sep = (i == 0) ? "if" : "else if";
             snprintf(num, sizeof(num), "%u", (unsigned)key_lens[i]);
             if (!cemit_fmt(out,
-                           "%s  %s (%s_k.len == %s && memcmp(%s_p, \"%s\", %s) "
+                           "%s  %s (%s_k.len == %s && cc__bytes_cmp(%s_p, \"%s\", %s) "
                            "== 0) %s_idx = %d;\n",
                            indent, sep, pref, num, pref, keys[i], num, pref, i))
                 return 0;

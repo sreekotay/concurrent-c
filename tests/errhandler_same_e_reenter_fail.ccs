@@ -4,6 +4,7 @@
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/script/stdio.cch>
+#include <stdlib.h>
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(1)) @destroy;

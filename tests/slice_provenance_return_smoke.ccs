@@ -1,5 +1,6 @@
 // Smoke: returning a move-only slice works when explicitly moved.
 #include <ccc/cc_runtime.cch>
+#include <stdlib.h>
 
 CCSlice make_ok(void) {
     int* p0 = (int*)malloc(sizeof(int) * 2);
@@ -10,7 +11,7 @@ CCSlice make_ok(void) {
 
 int main(void) {
     CCSlice t = make_ok();
-    int* p = (int*)t.ptr;
+    int* p = (int*)(t.ptr);
     return (p && p[0] == 7) ? 0 : 1;
 }
 

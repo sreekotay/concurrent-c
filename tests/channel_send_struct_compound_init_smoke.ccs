@@ -36,7 +36,7 @@ int main(void) {
     if (cc_is_err(recv_res) || !cc_value(recv_res)) return 4;
     if (got.data.len != 16) return 5;
     if (memcmp(got.data.ptr, "compound-init-ok", 16) != 0) return 6;
-    if (!cc_slice_is_from_arena_epoch(got.data, &got.arena)) return 7;
+    if (!cc_slice_is_from_arena_epoch(got.data, got.arena)) return 7;
 
     got.arena.free();
     return 0;

@@ -1220,6 +1220,20 @@ static void shadow_emit_cache_invalidate(const char* in_path,
     unlink(c_path);
 }
 
+/* True when bin exists and is not older than tu.o / runtime.o. */
+static int shadow_bin_fresh(const char* bin_path, const char* o_path,
+                            const char* runtime_o) {
+    ShadowFileSig bin, obj, rt;
+    if (shadow_stat_sig(bin_path, &bin) != 0 || bin.size <= 0) return 0;
+    if (shadow_stat_sig(o_path, &obj) != 0) return 0;
+    if (bin.mtime_sec < obj.mtime_sec) return 0;
+    if (runtime_o && runtime_o[0]) {
+        if (shadow_stat_sig(runtime_o, &rt) != 0) return 0;
+        if (bin.mtime_sec < rt.mtime_sec) return 0;
+    }
+    return 1;
+}
+
 /* Host build from emit buffer or existing cached emit.c.
  * If emit_buf is NULL, require a warm emit cache hit.
  * dep_paths: transitive inputs observed on the cold path (may be NULL/0
@@ -1291,18 +1305,30 @@ static int shadow_build_host(const char* in_path, const char* bin_path,
             fprintf(stderr, "error: cannot mkdir %s\n", dir);
             return -1;
         }
-        if (shadow_host_compile(c_path, o_path, in_path) != 0) {
-            unlink(ekey_path);
-            unlink(okey_path);
-            return -1;
+        {
+            long long t_cc = shadow_now_ms();
+            if (shadow_host_compile(c_path, o_path, in_path) != 0) {
+                unlink(ekey_path);
+                unlink(okey_path);
+                return -1;
+            }
+            shadow_prof_span("host_cc", t_cc);
         }
         (void)shadow_write_u64_file(okey_path, okey);
     }
 
-    if (shadow_host_link(o_path, bin_path, runtime_o, c_path, in_path) != 0) {
-        unlink(ekey_path);
-        unlink(okey_path);
-        return -1;
+    /* Emit/obj reuse still used to relink every process. Skip when the
+     * binary is already newer than tu.o and runtime.o. */
+    if (cache_ok && shadow_bin_fresh(bin_path, o_path, runtime_o))
+        return 0;
+    {
+        long long t_ld = shadow_now_ms();
+        if (shadow_host_link(o_path, bin_path, runtime_o, c_path, in_path) != 0) {
+            unlink(ekey_path);
+            unlink(okey_path);
+            return -1;
+        }
+        shadow_prof_span("host_link", t_ld);
     }
     return 0;
 }

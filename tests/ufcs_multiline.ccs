@@ -1,4 +1,5 @@
 #include <ccc/std/prelude.cch>
+#include <stdlib.h>
 
 // UFCS smoke: validate compiler-side overload selection for cc_std_out.write:
 // - cc_std_out.write("literal") -> cc_std_out_write(cc_slice_from_buffer(...))

@@ -1,0 +1,1 @@
+range for-in is `for (i in lo..hi)` (`&i` is not a slot)

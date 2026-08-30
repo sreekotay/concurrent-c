@@ -14,6 +14,8 @@
 // tiers (tape, unwind, accessors) are never emitted — instantiation happens
 // at use, not at declaration.
 #include <ccc/std/prelude.cch>
+#include <string.h>
+#include <stdio.h>
 
 @grammar(rules) Kv {~~~~
     include "grammar_factory_kv.rules"

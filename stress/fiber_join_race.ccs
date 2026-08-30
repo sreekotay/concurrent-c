@@ -39,7 +39,7 @@ int main(void) {
             for (int i = 0; i < BATCH_SIZE; i++) {
                 __cc_nursery124.spawn(() => {
                     /* Trivial work - complete as fast as possible */
-                });
+                }) !>;
             }
         
         }

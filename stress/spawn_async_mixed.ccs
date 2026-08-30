@@ -50,22 +50,22 @@ int test_consumer_outside(void) {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
                 if (cc_io_avail(chan_send(tx, 0 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
-        });
+        }) !>;
         __cc_nursery146.spawn(() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
                 if (cc_io_avail(chan_send(tx, 1 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
-        });
+        }) !>;
         __cc_nursery146.spawn(() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
                 if (cc_io_avail(chan_send(tx, 2 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
-        });
+        }) !>;
         __cc_nursery146.spawn(() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
                 if (cc_io_avail(chan_send(tx, 3 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
-        });
+        }) !>;
     
     }
     

@@ -1,0 +1,10 @@
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    char[:] s = {'a', 'b'};
+    char *p = 0;
+    for (ch in s)
+        p = &ch;
+    (void)p;
+    return 0;
+}

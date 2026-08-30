@@ -39,8 +39,8 @@ console.log('default', c.bump());
 console.log('checked', c.bump_checked(3));
 try { c.bump_checked(-1); } catch (e) { console.log('raised:', e.constructor.name, e.code + ':', e.message); }
 console.log('private_hidden', typeof c._clamp === 'undefined');
-"`, &a);
-    run.arg(js.cstr(&a));
+"`, a);
+    run.arg(js.cstr(a));
     run.inherit_stdio();
     int rc = run.status() !>;
     if (rc != 0) { "import failed".println() !>; return 1; }

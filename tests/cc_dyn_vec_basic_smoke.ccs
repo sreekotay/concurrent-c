@@ -15,6 +15,7 @@
 #include <ccc/cc_type.cch>
 #include <ccc/cc_arena.cch>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ---- Drop-fn dispatch fixture ----

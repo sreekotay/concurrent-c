@@ -20,7 +20,6 @@
 
 #include <errno.h>
 #include <stdio.h>
-#include <string.h>
 #include <unistd.h>
 
 #include <ccc/cc_arena.cch>
@@ -74,11 +73,11 @@ static inline CCSlice !>(CCError) cc_stdio_read_all(CCStdio *io) {
             if (!new_buf) {
                 return cc_err(CC_ERR_OUT_OF_MEMORY, "CCStdio.read_all: grow");
             }
-            memcpy(new_buf, total, total_len);
+            cc__bytes_copy(new_buf, total, total_len);
             total = new_buf;
             total_cap = new_cap;
         }
-        memcpy(total + total_len, buf, n);
+        cc__bytes_copy(total + total_len, buf, n);
         total_len += n;
     }
     CCSlice slice = cc_slice_from_parts(total, total_len, CC_SLICE_ID_UNTRACKED);

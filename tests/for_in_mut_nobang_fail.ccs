@@ -1,0 +1,8 @@
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    char[:] s = {'a'};
+    for (&ch in s)
+        ch = 'x';
+    return 0;
+}

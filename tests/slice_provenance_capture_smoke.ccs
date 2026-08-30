@@ -1,5 +1,6 @@
 // Smoke: move-only slice can be captured into a closure (implicit move into env).
 #include <ccc/cc_runtime.cch>
+#include <stdlib.h>
 
 int g = 0;
 
@@ -12,7 +13,7 @@ int main(void) {
         CCNursery __cc_nursery82 = @create() !> @destroy;
 
         __cc_nursery82.spawn (() => {
-            int* p = (int*)s.ptr;
+            int* p = (int*)(s.ptr);
             if (p && p[0] == 7) g = 1;
         }) !>;
     

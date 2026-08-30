@@ -9,6 +9,8 @@
 // Dispatch = first byte of each variant's leading literal; at most one
 // variant may lack one (the DEFAULT arm — see the inline-command union).
 #include <ccc/std/prelude.cch>
+#include <string.h>
+#include <stdio.h>
 
 @grammar(schema) Reply {~~~~
     rules [

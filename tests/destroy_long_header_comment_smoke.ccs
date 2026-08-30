@@ -29,6 +29,7 @@
  * two lines captured in the .stdout file.
  */
 #include <ccc/std/prelude.cch>
+#include <stdio.h>
 
 static void alpha(void) {
     CCArena a = cc_arena_heap(1024) @destroy;

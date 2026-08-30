@@ -258,17 +258,16 @@ typedef struct RedisCmd {
 
 /* ASCII fold into caller storage — do not mutate the read buffer. */
 static char[:] fold_name(char[:] src, char* buf, size_t cap) {
-    size_t i;
     if (src.len == 0 || src.len >= cap) {
         char[:] empty = {0};
         return empty;
     }
-    for (i = 0; i < src.len; i++) {
-        char ch = src.ptr[i];
-        if (ch >= 'a' && ch <= 'z') ch -= 32;
-        buf[i] = ch;
+    for (i, ch in src) {
+        char f = ch;
+        if (f >= 'a' && f <= 'z') f -= 32;
+        buf[i] = f;
     }
-    char[:] out = { .ptr = buf, .len = src.len };
+    char[:] out = cc_slice_from_buffer(buf, src.len );
     return out;
 }
 
@@ -857,9 +856,12 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
         char[:] get;
         if (cmd->argc != 3) return enc->err("wrong number of arguments");
         get = fold_name(cmd->args[1], sub, sizeof(sub));
-        if (get.len != 3 || get.ptr[0] != 'G' || get.ptr[1] != 'E' ||
-            get.ptr[2] != 'T')
+        switch (get) {
+        case "GET":
+            break;
+        default:
             return enc->err("unsupported command");
+        }
         return enc_wire_result(
             enc, config_get_reply(cmd->args[2], enc->reply_arena));
     }

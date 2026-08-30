@@ -1361,7 +1361,7 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                     snprintf(repl, sizeof(repl),
                              "/* cc_channel_pair */ do { "
                              "CCChan* __cc_ch = cc_channel_pair_create_named(%s, %s, %d, %s, %d, %s, %d, &%s, %s, \"%s\", __FILE__, __LINE__); "
-                             "if (!__cc_ch) { fprintf(stderr, \"CC: cc_channel_pair failed\\n\"); abort(); } "
+                             "if (!__cc_ch) { cc_result_panic(\"cc_channel_pair failed\", __FILE__, __LINE__); } "
                              "} while(0);",
                              cap_expr, bp_enum, allow_take ? 1 : 0, elem_sz_expr,
                              (tx_mode == 1) ? 1 : 0, topo_enum, ordered_task ? 1 : 0, tx_name, rx_arg,

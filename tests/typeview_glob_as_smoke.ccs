@@ -39,6 +39,7 @@ int main(void) {
 
     /* Prelude typed slices use the same glob face on CCSlice_*. */
     double xs[:] = {1.0, 2.0, 3.0};
+    assert(xs.len == 3);
     assert(xs.len() == 3);
     assert(erased_take(xs) == 3 * sizeof(double));
 

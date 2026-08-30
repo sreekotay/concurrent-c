@@ -33,7 +33,7 @@ int main(void) {
     if (!sh.data) return 2;
     pk = cc_slice_packed_borrow_slice(&view, CC_SLICE_LIT("k"));
     val = cc_string_new();
-    if (!val.push_slice(CC_SLICE_LIT("v"), &sh.arena)) return 3;
+    if (!val.push_slice(CC_SLICE_LIT("v"), sh.arena)) return 3;
     if (sh.data->insert(pk, val) != 0) return 4;
     if (!sh.data->get_ptr(pk)) return 5;
     (void)&touch_br;

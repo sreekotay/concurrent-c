@@ -1,6 +1,7 @@
 // Test: closure capture type inference handles later declarations on the same line.
 #include <ccc/std/prelude.cch>
 #include <assert.h>
+#include <stdio.h>
 
 static int g_value = -1;
 

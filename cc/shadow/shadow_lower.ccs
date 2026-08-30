@@ -9,7 +9,31 @@
  *   (no -o)         write text to stdout
  */
 #include <ccc/std/prelude.cch>
+#include <ccc/std/map.cch>
+#include <stdio.h>
+#include <string.h>
 #include <unistd.h>
+#include <sys/time.h>
+
+static int shadow_prof_on(void) {
+    static int once = 0, on = 0;
+    if (!once) {
+        const char* e = getenv("CC_SHADOW_PROFILE");
+        on = e && e[0] && e[0] != '0';
+        once = 1;
+    }
+    return on;
+}
+static long long shadow_now_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+static void shadow_prof_span(const char* name, long long t0) {
+    if (!shadow_prof_on()) return;
+    fprintf(stderr, "shadow_profile: %-18s %4lld ms\n", name,
+            shadow_now_ms() - t0);
+}
 
 @grammar(rules) PpTok {~~~~
     include "pp_tok.rules"
@@ -270,6 +294,8 @@ static int shadow_runtime_libdir(char* dst, size_t cap) {
 }
 
 int main(int argc, char** argv) {
+    long long t_main = shadow_now_ms();
+    long long t_span;
     CCArena gate = cc_arena_create(4096);
     (void)PpTok_match(";", 1);
     (void)PpTok_collect(";", 1, gate, shadow_keep_nop, NULL);
@@ -293,6 +319,7 @@ int main(int argc, char** argv) {
 
     /* Typed emit-template schema check — fails the self-build, not user TUs. */
     if (!shadow_tpl_selfcheck()) return 1;
+    shadow_prof_span("startup_selfcheck", t_main);
 
     const char* in_path = NULL;
     const char* out_path = NULL;
@@ -379,8 +406,11 @@ int main(int argc, char** argv) {
         char cached_c[600];
         if (shadow_emit_cache_hit(in_path, argv[0], no_cache, cached_c,
                                   sizeof(cached_c), NULL)) {
+            t_span = shadow_now_ms();
             if (shadow_build_host(in_path, out_path, NULL, 0, argv[0],
                                   no_cache, NULL, 0, NULL, 0) == 0) {
+                shadow_prof_span("host_build_warm", t_span);
+                shadow_prof_span("total", t_main);
                 return 0;
             }
             /* Host-cc rejected a cached emit (missing extract diag, stale
@@ -403,7 +433,10 @@ int main(int argc, char** argv) {
         char* type_src = NULL;
         size_t type_len = 0;
         cc_ct_field_reg_clear();
+        t_span = shadow_now_ms();
         type_src = shadow_comptime_type_pass_src(in_path, &type_len);
+        {
+            int did_type = type_src != NULL;
         if (type_src) {
             int type_ok = 0;
             CCArena type_arena = cc_arena_create(8 << 20);
@@ -475,6 +508,8 @@ int main(int argc, char** argv) {
             /* Attempted-but-failed is not "unknown type" / unsupported forms. */
             if (!type_ok) cc_ct_field_reg_set_type_pass_failed(1);
         }
+        shadow_prof_span(did_type ? "type_pass" : "type_pass_skip", t_span);
+        }
     }
     /* Type pass blanks @comptime, so it may diag on types that only exist
      * after comptime splice.  Those must not poison the product-pass check
@@ -491,11 +526,13 @@ int main(int argc, char** argv) {
      * Stage1 consumes the prepare+blank buffer; diags keep in_path. */
     char* stage1_src = NULL;
     size_t stage1_len = 0;
+    t_span = shadow_now_ms();
     if (shadow_comptime_exec_file(in_path, &stage1_src, &stage1_len) != 0) {
         if (diag_capturing) (void)shadow_diag_cap_end(NULL, NULL);
         free(stage1_src);
         return 1;
     }
+    shadow_prof_span("comptime_exec", t_span);
 
     /* Redis/pigz TUs tokenize many nested .cch headers through this arena. */
     CCArena arena = cc_arena_create(16 << 20);
@@ -561,6 +598,7 @@ int main(int argc, char** argv) {
     pp.out = tokbuf;
     pp.out_cap = SHADOW_TOKBUF_INIT;
     pp.out_grow = 1;
+    t_span = shadow_now_ms();
     if (!pp_run(&pp, ft)) {
         if (diag_capturing) (void)shadow_diag_cap_end(NULL, NULL);
         if (!pp.err_msg[0]) {
@@ -575,6 +613,10 @@ int main(int argc, char** argv) {
         return 1;
     }
     tokbuf = pp.out;
+    shadow_prof_span("pp_run", t_span);
+    if (shadow_prof_on())
+        fprintf(stderr, "shadow_profile: tokens             %d\n", pp.nout);
+    t_span = shadow_now_ms();
     if (!shadow_rewrite_restricted_type_sugar(tokbuf, &pp.nout)) {
         if (diag_capturing) (void)shadow_diag_cap_end(NULL, NULL);
         {
@@ -597,6 +639,8 @@ int main(int argc, char** argv) {
     p.cache = &cache;
     AstNode** items = NULL;
     int n = 0;
+    shadow_prof_span("type_sugar", t_span);
+    t_span = shadow_now_ms();
     if (!parse_tu(&p, &items, &n)) {
         if (diag_capturing) (void)shadow_diag_cap_end(NULL, NULL);
         if (!p.err_msg[0]) {
@@ -612,7 +656,9 @@ int main(int argc, char** argv) {
     }
     g_shadow_prelude_off = p.prelude_off;
     if (p.linenumbers_off) g_shadow_no_line = 1;
+    shadow_prof_span("parse_tu", t_span);
 
+    t_span = shadow_now_ms();
     if (!shadow_safety_check(items, n, &cache)) {
         if (diag_capturing) (void)shadow_diag_cap_end(NULL, NULL);
         pp_free_macros(&pp);
@@ -621,8 +667,10 @@ int main(int argc, char** argv) {
         cc_arena_free(&arena);
         return 1;
     }
+    shadow_prof_span("safety", t_span);
 
     CEmit emit = {0};
+    t_span = shadow_now_ms();
     if (!shadow_emit(items, n, &cache, &emit, kind, pp.pass_inc, pp.npass_inc,
                      pp.pass_def, pp.npass_def, in_path)) {
         if (diag_capturing) (void)shadow_diag_cap_end(NULL, NULL);
@@ -638,6 +686,10 @@ int main(int argc, char** argv) {
         cc_arena_free(&arena);
         return 1;
     }
+    shadow_prof_span("emit", t_span);
+    if (shadow_prof_on())
+        fprintf(stderr, "shadow_profile: emit_bytes         %zu\n", emit.len);
+    t_span = shadow_now_ms();
     if (shadow_comptime_splice_emit(&emit.buf, &emit.len, in_path) != 0) {
         if (diag_capturing) (void)shadow_diag_cap_end(NULL, NULL);
         {
@@ -652,6 +704,7 @@ int main(int argc, char** argv) {
         cc_arena_free(&arena);
         return 1;
     }
+    shadow_prof_span("comptime_splice", t_span);
     if (diag_capturing)
         (void)shadow_diag_cap_end(&diag_buf, &diag_len);
 
@@ -702,10 +755,13 @@ int main(int argc, char** argv) {
         if (shadow_collect_emit_deps(&cache, in_path, dep_paths, &ndeps,
                                      dep_owned, &nowned) != 0) {
             rc = 1;
-        } else if (shadow_build_host(in_path, out_path, emit.buf, emit.len,
-                                     argv[0], no_cache, dep_paths, ndeps,
-                                     diag_buf, diag_len) != 0) {
-            rc = 1;
+        } else {
+            t_span = shadow_now_ms();
+            if (shadow_build_host(in_path, out_path, emit.buf, emit.len,
+                                  argv[0], no_cache, dep_paths, ndeps,
+                                  diag_buf, diag_len) != 0)
+                rc = 1;
+            shadow_prof_span("host_build", t_span);
         }
         for (di = 0; di < nowned; di++) free(dep_owned[di]);
     } else if (write_text) {
@@ -728,5 +784,6 @@ int main(int argc, char** argv) {
     pp_free_macros(&pp);
     tape_cache_free(&cache);
     cc_arena_free(&arena);
+    shadow_prof_span("total", t_main);
     return rc;
 }

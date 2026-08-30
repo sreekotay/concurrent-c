@@ -182,7 +182,9 @@ Grep `port_gone` in your sources to find (or write) the callee.
 A type with both arms is a **for-in subject**. Ordinary sites may read
 `x.len`; they may not store it. `.access` is the compiler-internal load
 after `i < live len`. Users write the walk, not `s.access(i)`. Point
-access stays `s.at(i) !>` / `s.set(i, v) !>`.
+access stays `s.at(i) !>` / `s.set(i, v) !>`. Slice fields (`.ptr` /
+`.len` / `.id`) are readable and read-only. `CCString` hides the SSO
+union; use `as_slice()` / `cstr()`.
 
 `CCSlice` / `CCSlice_*`, `CCVec_*`, `CCString`, and `T[n]` already
 register. `T*` is not an extent.
@@ -213,9 +215,11 @@ int main(void) {
 
 | Form | Meaning |
 |------|---------|
-| `for (v in s)` | walk |
+| `for (v in s)` | walk (copy; `v =` / `&v` ill-formed) |
+| `for (&v in s) { … } !>;` | mut walk; `v =` is `.set` |
 | `for (i, v in s)` | enumerate; `i` is `size_t` |
 | `for (a, b in s, t) { … } !>;` | zip; `void !>(CCError)`; unequal → `@errhandler` |
+| `for (&a, b in s, t) { … } !>;` | zip mut; `a =` stores through `s` |
 | `for (i in lo..hi)` | sequential range; `hi < lo` is empty |
 
 C `for (;;)` is unchanged. `@parallel for (i in lo..hi)` is the concurrent
@@ -232,7 +236,8 @@ no vtable, erased in the lowered C. Narrowing is implicit (like `T*` →
 ### Faces (`as:`) — “this wrapper *is* its embed”
 
 The common wrapper case. UFCS that misses on the outer type retries on the
-named field.
+named field. A field that is not a member of the outer retries the same
+way (`xs.len` on a typed slice → `xs.base.len`). A local member wins.
 
 ```c
 #!ccc ccs
@@ -561,12 +566,15 @@ form independently.
   the body runs before the outer hook and embed teardown.
 - `name@(args)` for that type? Same block, `.create`.
 - Wrapper should reuse an embed’s methods? `@typeview` + `as: field`.
+  Named pointer? `CC_DECL_BOX_ALIAS(Name, Host)` / `typedef CCBox::[Host] Name`
+  plus `as: p` (inherited from `CCBox_*`). Host* methods retry through `.p`;
+  dest-init does not mint on the teaching name.
 - Caller should not see `flush` / `sock`? Named `@typeview Mode on T` and
   take `@typeview(Mode) T*`.
 - Custom `x.method` → `cc_foo_<method>` family? `.ufcs` on `@typehooks`.
-- Dest-init mint (`CCBox::[H] b = &x`)? `.cast` on the dest type (implicit|explicit + requested type).
-- Extent / walk (`x.len`, `for (v in s)` / `for (i, v in s)` / `for (a, b in s, t) { … } !>;`)? `.len` + `.access` on `@typehooks`. Users do not write `s.access(i)`.
-- Hide a field on a family (`CCBox_*` `.p`)? Unnamed `@typeview` + `r:^p`
+- Dest-init mint (`CCBox::[H] b = &x`, `char[:] v = str`)? `.cast` on the dest type (implicit|explicit + requested type).
+- Extent / walk (`x.len`, `for (v in s)` / `for (i, v in s)` / `for (a, b in s, t) { … } !>;`)? `.len` + `.access` on `@typehooks`. Users do not write `s.access(i)`. Slice fields are read-only. `CCString` hides `.data` (SSO).
+- Hide a field on a family (`CCBox_*` `.p`, `CCString` `.data`)? Unnamed `@typeview` + `r:^name`
   (open except that name). User UFCS on the instance stays.
 - Unresolved dynamic names (`obj.greet`)? `.ufcs_sink`, last resort.
 

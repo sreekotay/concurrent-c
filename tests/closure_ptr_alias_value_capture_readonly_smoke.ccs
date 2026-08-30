@@ -1,6 +1,7 @@
 /* Smoke: value-capture of T* alias is OK if the body only reads. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
+#include <stdlib.h>
 
 int main(void) {
     @errhandler(CCError e) {

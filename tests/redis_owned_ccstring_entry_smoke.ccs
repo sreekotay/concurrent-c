@@ -73,8 +73,8 @@ int main(void) {
         assert(owned_entry_init(&entry, req_key.as_slice(), req_value.as_slice()) == 0);
     }
 
-    assert(strcmp(cc_string_cstr(&entry.key, &entry.key_arena), "alpha") == 0);
-    assert(strcmp(cc_string_cstr(&entry.value, &entry.value_arena), "one") == 0);
+    assert(strcmp(cc_string_cstr(&entry.key, entry.key_arena), "alpha") == 0);
+    assert(strcmp(cc_string_cstr(&entry.value, entry.value_arena), "one") == 0);
 
     {
         CCArena req_arena = cc_arena_heap(kilobytes(4)) @destroy;
@@ -85,8 +85,8 @@ int main(void) {
         assert(owned_entry_replace_value(&entry, next_value.as_slice()) == 0);
     }
 
-    assert(strcmp(cc_string_cstr(&entry.key, &entry.key_arena), "alpha") == 0);
-    assert(strcmp(cc_string_cstr(&entry.value, &entry.value_arena), "two") == 0);
+    assert(strcmp(cc_string_cstr(&entry.key, entry.key_arena), "alpha") == 0);
+    assert(strcmp(cc_string_cstr(&entry.value, entry.value_arena), "two") == 0);
 
     owned_entry_free(&entry);
     return 0;

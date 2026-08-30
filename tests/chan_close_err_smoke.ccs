@@ -2,6 +2,7 @@
 #include <ccc/std/prelude.cch>
 #include <assert.h>
 #include <errno.h>
+#include <stdio.h>
 
 int main(void) {
     // Test 1: cc_chan_close_err() makes recv return the error code (downstream propagation)

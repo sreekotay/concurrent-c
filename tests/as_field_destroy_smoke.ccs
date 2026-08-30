@@ -18,7 +18,7 @@ int main(void) {
     char path_copy[128];
 
     {
-        CCTempFile tmp = cc_temp_file(&a) !> @destroy;
+        CCTempFile tmp = cc_temp_file(a) !> @destroy;
         assert(tmp.file.handle != NULL);
         assert(tmp.path.ptr && tmp.path.len > 0);
         assert(tmp.path.len + 1 < sizeof(path_copy));
@@ -33,7 +33,7 @@ int main(void) {
     assert(access(path_copy, F_OK) != 0);
 
     {
-        CCTempFile tmp = cc_temp_file(&a) !>;
+        CCTempFile tmp = cc_temp_file(a) !>;
         assert(tmp.file.handle != NULL);
         assert(tmp.path.len + 1 < sizeof(path_copy));
         memcpy(path_copy, tmp.path.ptr, tmp.path.len + 1);

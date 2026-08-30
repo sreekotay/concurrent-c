@@ -9,8 +9,6 @@
 #define CC_STD_MAP_FORWARD_H
 
 #include <ccc/cc_compat.cch>
-#include <stdlib.h>
-#include <string.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -100,7 +98,7 @@ static inline size_t cc_map_hash_slice(CCSlice s) {
     return h;
 }
 static inline int cc_map_eq_slice(CCSlice a, CCSlice b) {
-    return a.len == b.len && (a.ptr == b.ptr || (a.ptr && b.ptr && memcmp(a.ptr, b.ptr, a.len) == 0));
+    return cc_slice_eq(&a, b);
 }
 
 static inline size_t cc_map_hash_slice_hdr(CCSliceHdr sh) {
@@ -111,7 +109,9 @@ static inline size_t cc_map_hash_slice_hdr(CCSliceHdr sh) {
     return h;
 }
 static inline int cc_map_eq_slice_hdr(CCSliceHdr a, CCSliceHdr b) {
-    return a.len == b.len && (a.ptr == b.ptr || (a.ptr && b.ptr && memcmp(a.ptr, b.ptr, a.len) == 0));
+    CCSlice sa = cc_slice_hdr_as_slice(&a);
+    CCSlice sb = cc_slice_hdr_as_slice(&b);
+    return cc_slice_eq(&sa, sb);
 }
 
 /* CCSlicePacked hash/eq live in slice_packed.cch (needs the type).  Map sugar
@@ -201,15 +201,23 @@ size_t ccj_map_bucket_index_from_itr();
 
 #define Map(K, V, Name, HASH_FN, EQ_FN) CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)
 
-/* Single real CC_MAP_DECL_ARENA body for both modes.  Under CC_PARSER_MODE the
- * heavy cc_containers include inside map_impl.cch is gated out; the parser-safe
- * ccj_* forward decls above stand in so the real bodies still parse. */
+/* map_impl defines CC_MAP_DECL_ARENA. Do not include it on the default
+ * host-CCS path: that pulls cc_containers (string.h / stdlib.h) into
+ * every TU. Parser mode needs the stub macro; shadow_lower host-cc
+ * (SHADOW_HAVE_LIBTCC) still spells CC_MAP_DECL_ARENA in last-good.
+ * User Map TUs get the body from map.cch / emit-plan map.h. */
+#if defined(CC_PARSER_MODE) || defined(SHADOW_HAVE_LIBTCC)
 #include "map_impl.cch"
+#endif
 
 /* `Map::[K,V]` / `map_new::[K,V]` instantiate this family. The concrete
  * type is `Map_<K>_<V>*`. A hand-written `CC_MAP_DECL_ARENA` that names
  * the same `Map_<K>_<V>` suppresses the splice. Header lowering blanks
  * the factory from `.h`; harvest keeps it as a Concurrent-C fact. */
+#if defined(CC_COMPTIME) || defined(__TINYC__)
+#include <stdio.h>
+#include <string.h>
+#endif
 CC_GENERIC_FACTORY(Map, 2) {
     char k[80], v[80], hash[96], eq[96], fwd[256];
     size_t kn = arg(0).len < sizeof(k) - 1 ? arg(0).len : sizeof(k) - 1;
@@ -260,6 +268,7 @@ static inline ${mangled}_chk* ${mangled}_chk_p(void *a) {
     (void)a; return (${mangled}_chk*)0;
 }
 #else
+#include <ccc/std/map.h>
 ${fwd}
 CC_MAP_DECL_ARENA(${k}, ${v}, ${mangled}, ${hash}, ${eq})
 static inline ${mangled}* cc__${mangled}_new(CCArena __a) {

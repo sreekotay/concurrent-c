@@ -33,7 +33,7 @@ int main(void) {
     vs.materialize_in(a) !>;
     if (vs.ptr != ptr || vs.len != len) return 7;
 
-    CCSlice alt = ver.as_slice_into(&other) !>;
+    CCSlice alt = ver.as_slice_into(other) !>;
     if (!cc_slice_is_from_arena_epoch(alt, other)) return 8;
     void *alt_ptr = alt.ptr;
     alt.materialize_in(other) !>;

@@ -1,9 +1,9 @@
 /* Embedded NUL in a line must not truncate or glue the next line. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 int main(void) {
     char path[] = "/tmp/cc_read_line_nul_XXXXXX";
@@ -26,7 +26,7 @@ int main(void) {
     @defer cc_arena_free(&a);
 
     CCSlice line = cc_slice_empty();
-    bool !>(CCIoError) got = cc_file_read_line_into(&f, &a, &line);
+    bool !>(CCIoError) got = cc_file_read_line_into(&f, a, &line);
     if (cc_is_err(got) || !cc_value(got)) abort();
     if (line.len != 8) {
         fprintf(stderr, "line1 len=%zu want 8\n", line.len);
@@ -38,14 +38,14 @@ int main(void) {
     }
 
     cc_arena_reset(a);
-    got = cc_file_read_line_into(&f, &a, &line);
+    got = cc_file_read_line_into(&f, a, &line);
     if (cc_is_err(got) || !cc_value(got)) abort();
     if (line.len != 5 || memcmp(line.ptr, "next\n", 5) != 0) {
         fprintf(stderr, "line2 corrupt (len=%zu)\n", line.len);
         return 1;
     }
 
-    got = cc_file_read_line_into(&f, &a, &line);
+    got = cc_file_read_line_into(&f, a, &line);
     if (cc_is_err(got) || cc_value(got)) {
         fprintf(stderr, "expected EOF\n");
         return 1;

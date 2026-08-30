@@ -247,10 +247,10 @@ case-insensitive). Byte-slice query is this family — there is no generic
 `T[:].contains` / `T[:].find`.
 
 Slice UFCS maps `hdr`, `len`, `trim`, `trim_left`, `trim_right`, `sub`,
-`starts_with`, `ends_with`, `eq`, `eq_cstr`, `has`, `has_ci`, `truncate`, and
-`destroy` to the corresponding `CCSlice_*` or `cc_slice_*` function. Checked
-index UFCS (`at`, `get_checked`, `set`) is documented under arena-backed slice
-operations below.
+`starts_with`, `ends_with`, `eq`, `eq_cstr`, `has`, `has_ci`, `truncate`,
+`to_c`, `to_cstr`, `copy`, `move`, `fill`, and `destroy` to the corresponding
+`CCSlice_*` or `cc_slice_*` function. Checked index UFCS (`at`,
+`get_checked`, `set`) is documented under arena-backed slice operations below.
 
 ### Arena typed allocation
 
@@ -275,6 +275,8 @@ allocation's scope.
 ```c
 CCResult_CCSlice_CCError cc_slice_clone_into(CCSlice *src, CCArena arena);
 CCResult_CCSliceHdr_CCError cc_slice_hdr_clone_into(CCSliceHdr *src, CCArena arena);
+CCSlice !>(CCError) cc_slice_to_c(CCSlice *s, CCArena arena);
+char * !>(CCError) cc_slice_to_cstr(CCSlice *s, CCArena arena);
 
 /* Stabilize `*s` in `arena` (mutate in place). */
 bool !>(CCError) cc_slice_materialize_in(CCSlice *s, CCArena arena);
@@ -287,6 +289,11 @@ char !>(CCError) cc_slice_get_checked(CCSlice *s, size_t idx);
 char !>(CCError) cc_slice_at(CCSlice *s, size_t idx);          /* same as get_checked */
 bool !>(CCError) cc_slice_set(CCSlice *s, size_t idx, char c);
 bool !>(CCError) cc_slice_truncate(CCSlice *s, size_t n);
+
+/* Dest-bulk — no third length. Dest shorter than `src` is an error. */
+bool !>(CCError) cc_slice_copy(CCSlice *dst, CCSlice src);   /* memcpy */
+bool !>(CCError) cc_slice_move(CCSlice *dst, CCSlice src);   /* memmove */
+bool !>(CCError) cc_slice_fill(CCSlice *dst, char c);        /* memset */
 ```
 
 `materialize_in` is a no-op when the slice is empty, canonical/static, or
@@ -304,8 +311,8 @@ allocation failure returns `CC_ERR_OUT_OF_MEMORY`. UFCS:
 
 Out-of-bounds or null-pointer index ops return `CC_ERR_INVALID_ARG`.
 `truncate` shrinks `len` in place and returns `CC_ERR_INVALID_ARG` when `n`
-exceeds the current length or `s` is null. Raw `s.ptr[i]` / `((char*)s.ptr)[i]`
-is an untracked Gap outside this surface.
+exceeds the current length or `s` is null. Raw `s.ptr[i]` is an
+untracked Gap outside this surface.
 
 ### Packed slice handles
 

@@ -1,0 +1,54 @@
+/* Dest-init / assign: Vec::[T] → T[:] inserts as_slice (a view wrap).
+ * for-in on the vec stays live — it does not dest-cast. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    CCVec::[int] v;
+    CCVec::[int]* p;
+    CCVec::[char] cv;
+
+    assert(cc_arena_is_live(a));
+    v = cc_vec_new::[int](a);
+    assert(v.push(1) == 0 && v.push(2) == 0 && v.push(3) == 0);
+
+    int[:] xs = v;
+    assert(xs.len == 3);
+    assert(((int *)xs.ptr)[0] == 1);
+    assert(((int *)xs.ptr)[2] == 3);
+
+    xs = v;
+    assert(xs.len() == 3);
+
+    p = &v;
+    int[:] ys = p;
+    assert(ys.len() == 3);
+    assert(((int *)ys.ptr)[1] == 2);
+
+    int[:] zs = v.as_slice();
+    assert(zs.len() == 3);
+    assert(zs.ptr == xs.ptr);
+
+    cv = cc_vec_new::[char](a);
+    assert(cv.push('a') == 0 && cv.push('b') == 0);
+    char[:] bs = cv;
+    assert(bs.len == 2);
+    assert(bs.ptr[0] == 'a' && bs.ptr[1] == 'b');
+
+    /* Live walk — dest-cast is not inserted. */
+    int sum = 0;
+    for (x in v)
+        sum += x;
+    assert(sum == 6);
+
+    /* Explicit snapshot. */
+    int snap = 0;
+    for (x in v.as_slice())
+        snap += x;
+    assert(snap == 6);
+
+    printf("ok\n");
+    return 0;
+}

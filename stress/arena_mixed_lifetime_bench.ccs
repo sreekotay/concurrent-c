@@ -100,8 +100,8 @@ int main(void) {
         }
         alloc_ms = now_ms() - t;
         peak_live = live;
-        peak_gross = cc_arena_committed_gross_bytes(&a);
-        peak_ovf = cc_arena_overflow_raw_bytes(&a);
+        peak_gross = cc_arena_committed_gross_bytes(a);
+        peak_ovf = cc_arena_overflow_raw_bytes(a);
         {
             StressMemSample m = stress_mem_sample();
             if (m.ok && m.current > sampled_peak) sampled_peak = m.current;
@@ -148,8 +148,8 @@ int main(void) {
         }
         grow_ms = now_ms() - t;
         {
-            size_t g = cc_arena_committed_gross_bytes(&a);
-            size_t o = cc_arena_overflow_raw_bytes(&a);
+            size_t g = cc_arena_committed_gross_bytes(a);
+            size_t o = cc_arena_overflow_raw_bytes(a);
             if (g > peak_gross) peak_gross = g;
             if (o > peak_ovf) peak_ovf = o;
         }

@@ -2,6 +2,7 @@
  * symbols (CC_MAP_DECL_UFCS). Without splice/write-back, host C sees raw
  * map->len() in out/include/.../helper.h and fails. */
 #include <ccc/std/prelude.cch>
+#include <ccc/std/map.cch>
 #include <stdio.h>
 
 static inline size_t hash_int_key(int key) {

@@ -16,7 +16,7 @@ int main(void) {
         line one
             nested keeps its extra four
         line two
-        `, &a);
+        `, a);
     /* Locals: UFCS `.len` cast is dropped on emit today (`(int)s.len` stays). */
     CCSlice ts = t.as_slice();
     printf("[%.*s]\n", (int)ts.len, (const char*)ts.ptr);
@@ -26,7 +26,7 @@ int main(void) {
 line one
     nested keeps its extra four
 line two
-`, &a);
+`, a);
     CCSlice zs = z.as_slice();
     printf("same=%d\n",
            ts.len == zs.len &&
@@ -41,7 +41,7 @@ line two
     int n = 7;
     CCString ip = @string(`
         n=${n}
-        `, &a);
+        `, a);
     CCSlice ips = ip.as_slice();
     printf("[%.*s]\n", (int)ips.len, (const char*)ips.ptr);
     return 0;

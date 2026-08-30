@@ -14,6 +14,9 @@
 #include "../cc/shadow/shadow_comptime.h"
 #include <fcntl.h>
 #include <unistd.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 static const char* FIX = "cc/shadow/shadow";
 

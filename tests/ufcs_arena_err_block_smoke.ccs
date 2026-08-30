@@ -1,5 +1,6 @@
 #include <ccc/std/prelude.cch>
 #include <assert.h>
+#include <stdio.h>
 
 static bool !>(CCError) always_ok_bool(void) {
     return cc_ok(true);

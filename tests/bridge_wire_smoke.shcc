@@ -5,6 +5,7 @@
  * later replies onto the wrong promises, and ordinary prints reach
  * the real stdout.  Rungs live in tests/bridge_wire.js
  * (npm/cc-python) and tests/bridge_wire.py (pypi/cc-node). */
+#include <stdio.h>
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
 {

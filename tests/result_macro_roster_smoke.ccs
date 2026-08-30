@@ -25,18 +25,18 @@ int main(void) {
             return x + 0.5
         def boom(x):
             raise ValueError('row zero')
-        `, &a).as_slice()) !>;
+        `, a).as_slice()) !>;
     CCPyObj m = py.import("__main__") !> @destroy;
     CCPyObj f = m.get("f") !> @destroy;
     CCPyObj boom = m.get("boom") !> @destroy;
     double xs[:] = {1.0, 2.0};
     CCPyArg col = cc__py_arg_ts_CCSlice_double(xs);
 
-    CCSlice out = aliased_map(&f, &a, 8, 1, 1, &col) !>;
+    CCSlice out = aliased_map(&f, a, 8, 1, 1, &col) !>;
     printf("n=%zu v0=%.1f v1=%.1f\n", out.len,
-           ((const double *)out.ptr)[0], ((const double *)out.ptr)[1]);
+           ((const double *)(out.ptr))[0], ((const double *)(out.ptr))[1]);
 
-    CCSlice bad = aliased_map(&boom, &a, 8, 1, 1, &col) !>;
+    CCSlice bad = aliased_map(&boom, a, 8, 1, 1, &col) !>;
     (void)bad;
     puts("unreached");
     return 1;

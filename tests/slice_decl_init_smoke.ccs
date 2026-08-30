@@ -34,10 +34,15 @@ int main(void) {
     char[:] t = "hello";
     assert(t.len == 5);
 
+    /* Type position + braced bytes — same as a C array, then a slice view. */
+    char[:] br = {'a', 'b', 'c', 'd'};
+    assert(br.len == 4);
+    assert(memcmp(br.ptr, "abcd", 4) == 0);
+
     /* Declarator position + braced initializer: typed instance,
      * len counts elements, at() indexes elements. */
     double xs[:] = {1.0, 2.0, 3.0, 4.0, 42.0};
-    assert(xs.base.len == 5);
+    assert(xs.len == 5);
     assert(xs.len() == 5);
     assert(xs.at(4) == 42.0);
 
@@ -49,7 +54,7 @@ int main(void) {
     /* Element-wise sub stays typed. */
     {
         CCSlice_int mid = ys.sub(1, 3);
-        assert(mid.base.len == 2);
+        assert(mid.len == 2);
         assert(mid.at(0) == 2);
     }
 

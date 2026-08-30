@@ -4,9 +4,6 @@
 #ifndef CC_STD_EXEC_H
 #define CC_STD_EXEC_H
 
-#include <errno.h>
-#include <string.h>
-
 #include <ccc/cc_compat.cch>
 #include <ccc/cc_type.cch>
 #include <ccc/cc_ufcs.cch>

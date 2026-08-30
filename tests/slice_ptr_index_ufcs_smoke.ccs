@@ -1,5 +1,4 @@
-/* Raw `.ptr[i]` on CCSlice / char[:] must be field access + index
- * (untracked Gap), not a void-typed expression. */
+/* Named peel is the Gap: `s.ptr[i]`. `.ptr[i]` is hidden at ordinary sites. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
@@ -11,7 +10,7 @@ int main(void) {
     char ch0 = in.ptr[0];
     char ch1 = in.ptr[1];
     if (ch0 != 'h' || ch1 != 'i') {
-        fprintf(stderr, "CCSlice.ptr index: got %c%c want hi\n", ch0, ch1);
+        fprintf(stderr, "CCSlice as_ptr index: got %c%c want hi\n", ch0, ch1);
         return 1;
     }
 
@@ -19,16 +18,16 @@ int main(void) {
     char c0 = s.ptr[0];
     char c1 = s.ptr[1];
     if (c0 != 'o' || c1 != 'k') {
-        fprintf(stderr, "char[:].ptr index: got %c%c want ok\n", c0, c1);
+        fprintf(stderr, "char[:] as_ptr index: got %c%c want ok\n", c0, c1);
         return 2;
     }
 
-    /* Write through the Gap path. */
     char buf[2] = {'x', 'y'};
     CCSlice m = cc_slice_from_buffer(buf, 2);
-    m.ptr[0] = 'z';
-    if (buf[0] != 'z' || m.ptr[1] != 'y') {
-        fprintf(stderr, "CCSlice.ptr store failed\n");
+    char* mp = m.ptr;
+    mp[0] = 'z';
+    if (buf[0] != 'z' || mp[1] != 'y') {
+        fprintf(stderr, "CCSlice as_ptr store failed\n");
         return 3;
     }
 

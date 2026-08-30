@@ -138,6 +138,17 @@ run_one examples/recipe_ordered_parallel.ccs \
   "[consumer] item 8: 8^2 = 64" \
   "Done! Results printed in order despite out-of-order completion."
 
+run_one examples/recipe_walk.ccs \
+  "point=A" \
+  "bulk C  = HiHi" \
+  "bulk CC = HiHi" \
+  "kept=Hi" \
+  "walk n=2 sum=152" \
+  "mut=CC" \
+  "view=Cc" \
+  "vec live=9 snap=2" \
+  "done"
+
 run_one examples/recipe_owned_view.ccs \
   "len=5" \
   "reopen=2" \

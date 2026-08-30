@@ -46,7 +46,7 @@ static void handle_bump(Handle* h) { h->gen += 40; }
 @variant(packed) PCell { h: Handle; num: int64_t; };
 @variant        UCell { h: Handle; num: int64_t; };
 
-static void run_packed(CCArena* a, CCString* out) {
+static void run_packed(CCArena a, CCString* out) {
     PCell c = { .h = handle_make("live") };
     PCell* pc = &c;
     if (pc->kind == .h) {
@@ -64,7 +64,7 @@ static void run_packed(CCArena* a, CCString* out) {
     }
 }
 
-static void run_unpacked(CCArena* a, CCString* out) {
+static void run_unpacked(CCArena a, CCString* out) {
     UCell c = { .h = handle_make("live") };
     UCell* pc = &c;
     if (pc->kind == .h) {
@@ -90,12 +90,12 @@ int main(void) {
 
     g_drops = 0;
     CCString pbuf = cc_string_new();
-    run_packed(&arena, &pbuf);
+    run_packed(arena, &pbuf);
     int pdrops = g_drops;
 
     g_drops = 0;
     CCString ubuf = cc_string_new();
-    run_unpacked(&arena, &ubuf);
+    run_unpacked(arena, &ubuf);
     int udrops = g_drops;
 
     const char* ps = cc_string_cstr(&pbuf, arena);

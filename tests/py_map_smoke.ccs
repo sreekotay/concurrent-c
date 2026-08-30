@@ -24,7 +24,7 @@ int main(void) {
         def bad(x, k, z):
             if k == 2: raise ValueError('row two')
             return 0.0
-        `, &a).as_slice()) !>;
+        `, a).as_slice()) !>;
     CCPyObj m = py.import("__main__") !> @destroy;
     CCPyObj f = m.get("mul_add") !> @destroy;
     CCPyObj bad = m.get("bad") !> @destroy;
@@ -35,13 +35,14 @@ int main(void) {
     double zs[:]  = {0.25, 0.25, 0.25, 0.25};
 
     CCSlice out = f.map::[double](a, xs, ks, zs) !>;
-    const double *ov = (const double *)out.ptr;
+    const double *ov = (const double *)(out.ptr);
 
     int ok = out.len == 4;
     for (size_t i = 0; i < 4 && ok; i++) {
-        double want = m.mul_add(((const double *)xs.base.ptr)[i],
-                            ((const int64_t *)ks.base.ptr)[i],
-                            ((const double *)zs.base.ptr)[i]) !>;
+        CCPyObj row = m.mul_add(((const double *)xs.ptr)[i],
+                            ((const int64_t *)ks.ptr)[i],
+                            ((const double *)zs.ptr)[i]) !> @destroy;
+        double want = row.as_f64() !>;
         ok = ov[i] == want;
     }
     printf("map ok=%d first=%.2f last=%.2f\n", ok, ov[0], ov[3]);
@@ -49,14 +50,14 @@ int main(void) {
     /* A raising row surfaces as an error naming the row (k==2 is row 0),
      * not a partial slice. */
     {
-        CCResult_CCSlice_CCPyError r = cc_py_obj_map(double, &bad, &a, xs, ks, zs);
+        CCResult_CCSlice_CCPyError r = cc_py_obj_map(double, &bad, a, xs, ks, zs);
         const char *msg = r.is_err() ? CCResult_CCSlice_CCPyError_error(r).base.message : "";
         printf("raise_caught=%d row_named=%d\n", r.is_err() ? 1 : 0,
                strstr(msg, "row 0") != NULL);
     }
     /* Length mismatch is structural, named before any call runs. */
     {
-        CCResult_CCSlice_CCPyError r2 = cc_py_obj_map(double, &f, &a, xs, twoval, zs);
+        CCResult_CCSlice_CCPyError r2 = cc_py_obj_map(double, &f, a, xs, twoval, zs);
         const char *msg = r2.is_err() ? CCResult_CCSlice_CCPyError_error(r2).base.message : "";
         printf("len_caught=%d col_named=%d\n", r2.is_err() ? 1 : 0,
                strstr(msg, "column 1") != NULL);

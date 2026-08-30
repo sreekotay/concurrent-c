@@ -26,8 +26,7 @@ void short_lived_fiber() {
     cc_atomic_fetch_add(&g_fibers_finished, 1);
 }
 
-void spawner_fiber(void* n_ptr) {
-    CCNursery n = (CCNursery )n_ptr;
+void spawner_fiber(CCNursery n) {
     for (int i = 0; i < SPAWNS_PER_ITER; i++) {
         // Hammer the nursery while it's being cancelled!
         (void)cc_nursery_spawn(n, (void* (*)(void*))short_lived_fiber, NULL);
@@ -50,7 +49,7 @@ int main(void) {
         printf("\rIteration %d/%d...", iter, NUM_ITERS);
 
         CCNursery n = cc_nursery_create() !>;
-        if (!n) {
+        if (!cc_nursery_is_live(n)) {
             printf("\nFailed to create nursery!\n");
             return 1;
         }
@@ -60,7 +59,7 @@ int main(void) {
 
             // 1. Start spawners that hammer the target nursery
             for (int s = 0; s < NUM_SPAWNERS; s++) {
-                __cc_nursery112.spawn(() => [n] { spawner_fiber(n); });
+                __cc_nursery112.spawn(() => [n] { spawner_fiber(n); }) !>;
             }
 
             // 2. Wait just a tiny bit to get the storm going
@@ -70,7 +69,7 @@ int main(void) {
             __cc_nursery112.spawn(() => [n] { 
                 cc_sleep_ms(2);
                 cc_nursery_cancel(n); 
-            });
+            }) !>;
         
         }
 

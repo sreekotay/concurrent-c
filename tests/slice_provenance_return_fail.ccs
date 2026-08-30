@@ -1,5 +1,6 @@
 // Compile-fail: returning a move-only slice must use cc_move.
 #include <ccc/cc_runtime.cch>
+#include <stdlib.h>
 
 CCSlice make_bad(void) {
     int* p0 = (int*)malloc(sizeof(int) * 2);

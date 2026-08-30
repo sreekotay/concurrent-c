@@ -9,6 +9,8 @@
 // a byte array plus its length and the origin line, and main() checks all of it
 // at runtime.
 #include <ccc/std/prelude.cch>
+#include <string.h>
+#include <stdio.h>
 
 @comptime void echoEngine(CCSlice name, CCSlice body, const char* file, int line) {
     (void)file;

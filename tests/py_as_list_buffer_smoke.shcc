@@ -24,14 +24,16 @@ CCPyObj ld = m.get("lst_d") !> @destroy;
 CCPyObj bq = m.get("buf_q") !> @destroy;
 CCPyObj bf = m.get("buf_f") !> @destroy;
 
-CCSlice xs = bd.as_list::[double](&a) !>;
-CCSlice ys = ld.as_list::[double](&a) !>;
-CCSlice qs = bq.as_list::[int64_t](&a) !>;
+CCSlice xs = bd.as_list::[double](a) !>;
+CCSlice ys = ld.as_list::[double](a) !>;
+CCSlice qs = bq.as_list::[int64_t](a) !>;
 /* float32 exporter, double destination: per-element fallback, not raw. */
-CCSlice fs = bf.as_list::[double](&a) !>;
+CCSlice fs = bf.as_list::[double](a) !>;
 
-double *xv = (double *)xs.ptr, *yv = (double *)ys.ptr, *fv = (double *)fs.ptr;
-int64_t *qv = (int64_t *)qs.ptr;
+char *xp = xs.ptr, *yp = ys.ptr, *fp = fs.ptr,
+     *qp = qs.ptr;
+double *xv = (double *)xp, *yv = (double *)yp, *fv = (double *)fp;
+int64_t *qv = (int64_t *)qp;
 int ok = xs.len == 4 && ys.len == 4 && qs.len == 3 && fs.len == 2;
 for (size_t i = 0; i < 4 && ok; i++) ok = xv[i] == yv[i];
 ok = ok && qv[0] == 10 && qv[2] == 30;

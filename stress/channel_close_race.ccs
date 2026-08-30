@@ -99,8 +99,8 @@ int main(void) {
                 CCChanRx r = rx;
                 int sid = i;
                 int rid = i;
-                __cc_nursery113.spawn(() => [t, sid, trace, trace_every] { sender(t, sid, trace, trace_every); });
-                __cc_nursery113.spawn(() => [r, rid, trace, trace_every] { receiver(r, rid, trace, trace_every); });
+                __cc_nursery113.spawn(() => [t, sid, trace, trace_every] { sender(t, sid, trace, trace_every); }) !>;
+                __cc_nursery113.spawn(() => [r, rid, trace, trace_every] { receiver(r, rid, trace, trace_every); }) !>;
             }
 
             // 2. Close from parent context immediately.

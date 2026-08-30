@@ -6,7 +6,6 @@
 #define CC_EXEC_H
 
 #include <ccc/cc_compat.cch>
-#include <errno.h>
 
 typedef struct CCExec CCExec;
 

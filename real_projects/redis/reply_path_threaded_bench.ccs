@@ -53,13 +53,12 @@ static void reply_init_inline(BenchWireReply* wr, uint64_t seq) {
     if (len < 0 || (size_t)len >= sizeof(wr->inline_buf)) {
         bench_abort("failed to build inline reply");
     }
-    wr->reply.data.ptr = wr->inline_buf;
-    wr->reply.data.len = (size_t)len;
+    wr->reply.data = wr->inline_buf.to_slice_n((size_t)len);
 }
 
 static void reply_rebase_inline_ptr(BenchWireReply* wr) {
     if (!wr || !wr->data_inline) return;
-    wr->reply.data.ptr = wr->inline_buf;
+    wr->reply.data = wr->inline_buf.to_slice_n(wr->reply.data.len);
 }
 
 static void* local_producer(void* arg) {

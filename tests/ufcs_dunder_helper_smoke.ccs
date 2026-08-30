@@ -10,7 +10,7 @@ typedef struct Box {
 } Box;
 
 static int box__decode(Box *self, CCSlice s, size_t *n_out) {
-    CCResult_CCSlice_uint32_t_CCError r = s.utf8_codepoints(&self->a);
+    CCResult_CCSlice_uint32_t_CCError r = s.utf8_codepoints(self->a);
     if (r.is_err()) return -1;
     *n_out = r.value().base.len;
     return 0;

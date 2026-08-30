@@ -20,14 +20,14 @@ int main(void) {
 
     /* In-range int list still works. */
     CCPyObj small = py.eval(@slice("[1, 2, 3]")) !> @destroy;
-    CCSlice ok = small.as_list::[int](&a) !>;
+    CCSlice ok = small.as_list::[int](a) !>;
     if (ok.len != 3) return 2;
-    int *iv = (int *)ok.ptr;
+    int *iv = (int *)(ok.ptr);
     if (iv[0] != 1 || iv[2] != 3) return 3;
 
     /* 2^40 fits int64_t but not int — must refuse. */
     CCPyObj big = py.eval(@slice("[2**40]")) !> @destroy;
-    CCResult_CCSlice_CCPyError bad = cc_py_obj_as_list(int, &big, &a);
+    CCResult_CCSlice_CCPyError bad = cc_py_obj_as_list(int, &big, a);
     if (!bad.is_err()) {
         fprintf(stderr, "expected as_list::[int] overflow refuse\n");
         return 4;
@@ -39,9 +39,9 @@ int main(void) {
     }
 
     /* Same value as int64_t is fine. */
-    CCSlice wide = big.as_list::[int64_t](&a) !>;
+    CCSlice wide = big.as_list::[int64_t](a) !>;
     if (wide.len != 1) return 6;
-    int64_t *lv = (int64_t *)wide.ptr;
+    int64_t *lv = (int64_t *)(wide.ptr);
     if (lv[0] != (1LL << 40)) return 7;
 
     puts("ok");

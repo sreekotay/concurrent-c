@@ -3331,8 +3331,8 @@ void cc_emit_plan_fprint_container_prelude(FILE* out, int use_cch,
     fprintf(out, "#define __CC_RESTORE_PARSER_MODE_AFTER_CONTAINERS 1\n");
     fprintf(out, "#endif\n");
     if (use_cch) {
-        /* TCC parse path: map_forward (from prelude) already froze the parser
-         * stub CC_MAP_DECL_ARENA — do not include map_impl (cc_containers). */
+        /* TCC parse path: map_forward (from prelude) includes map_impl only
+         * under CC_PARSER_MODE (stub CC_MAP_DECL_ARENA, no cc_containers). */
         if (need_vec) fprintf(out, "#include <ccc/std/vec.cch>\n");
         if (need_chan) fprintf(out, "#include <ccc/cc_channel.cch>\n");
     } else {

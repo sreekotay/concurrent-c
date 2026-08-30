@@ -32,6 +32,7 @@ New to Concurrent-C? Work through these in order:
 | 12a | `recipe_turnstile.ccs` | Pipeline turnstile | `CCTurnstileRW`: depth cap + ordered read/write stages |
 | 12b | `recipe_prepare_commit.ccs` | Prepare / join / hold / commit | Parallel prepares; `.wait()` is the join; hold only around commit; revert who finished |
 | 13 | `recipe_arena_scope.ccs` | Memory | Arena names a lifetime; `@scratch` dies; keep by passing the arena last |
+| 13a | `recipe_walk.ccs` | Walk / buffers | `for in`; dest-bulk copy/move/fill; no memcpy / malloc |
 | 14 | `recipe_owned_view.ccs` | Locality | Owned or view; constructors assume dead; failure is unchanged; faces at the use site |
 | 15 | `recipe_long_lived_store.ccs` | Provenance | Anchoring request-lifetime views in a long-lived arena |
 | 16 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` for resource management |
@@ -56,6 +57,7 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_turnstile.ccs` | Pipeline turnstile | Depth cap + `read`/`write` wait/pass; index form `stage(k)` |
 | `recipe_prepare_commit.ccs` | Prepare + commit | `@parallel` join, `hold_sorted`, revert finished sides |
 | `recipe_arena_scope.ccs` | Scoped memory | Named lifetime; keep a product by passing the arena last |
+| `recipe_walk.ccs` | Walk / buffers | Extent walk; `dst.copy` / `move` / `fill`; `clone_into`; vec dest-init |
 | `recipe_owned_view.ccs` | Owned or view | Construct / destroy / reopen; epochs as fields; Measure cannot `replace` |
 | `recipe_long_lived_store.ccs` | Long-lived store | Explicit provenance movement into an arena-owned store |
 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` on scope exit |

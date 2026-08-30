@@ -8,6 +8,8 @@
  * teardown. */
 #include <ccc/std/prelude.cch>
 #include <ccc/script/js.cch>
+#include <string.h>
+#include <stdio.h>
 
 int main(void) {
     CCArena a = cc_arena_heap(megabytes(1)) @destroy;
@@ -50,7 +52,7 @@ int main(void) {
     CCResult_CCJsDomVal_CCJsError plat = cc_js_dom_val_callm(&os, "platform", 0);
     int plat_ok = 0;
     if (plat.ok) {
-        CCResult_CCSlice_CCJsError ps = cc_js_dom_val_as_slice(&plat.u.value, &a);
+        CCResult_CCSlice_CCJsError ps = cc_js_dom_val_as_slice(&plat.u.value, a);
         plat_ok = ps.ok && ps.u.value.len >= 3;
     }
     printf("method_call %s\n", plat_ok ? "true" : "false");
@@ -62,7 +64,7 @@ int main(void) {
         CCResult_CCJsDomVal_CCJsError j = cc_js_dom_val_callm(
             &path, "join", 2, CC_JS_DOM_ARG("a"), CC_JS_DOM_ARG("b"));
         if (j.ok) {
-            CCResult_CCSlice_CCJsError jsl = cc_js_dom_val_as_slice(&j.u.value, &a);
+            CCResult_CCSlice_CCJsError jsl = cc_js_dom_val_as_slice(&j.u.value, a);
             join_ok = jsl.ok && jsl.u.value.len == 3;
         }
         cc_js_dom_val_release(&path);
@@ -80,7 +82,7 @@ int main(void) {
             cc_js_dom_val_callm(&av, "sort", 0);
         if (sorted.ok) {
             CCResult_CCSlice_CCJsError ss =
-                cc_js_dom_val_as_slice(&sorted.u.value, &a);
+                cc_js_dom_val_as_slice(&sorted.u.value, a);
             val_arg_ok = ss.ok && ss.u.value.len == 5; /* "1,2,3" */
         }
         cc_js_dom_val_release(&av);

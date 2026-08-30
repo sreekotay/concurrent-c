@@ -93,14 +93,14 @@ static double bench_nursery_api_once(void) {
     double start = time_now_ms();
     for (int batch = 0; batch < total_batches(); batch++) {
         CCNursery n = cc_nursery_create() !>;
-        if (!n) {
+        if (!cc_nursery_is_live(n)) {
             fprintf(stderr, "cc_nursery_create failed\n");
             abort();
         }
         for (int i = 0; i < g_batch_size; i++) {
-            cc_nursery_spawn(n.p, noop_task, NULL) !>;
+            cc_nursery_spawn(n, noop_task, NULL) !>;
         }
-        cc_nursery_wait(n.p) !>;
+        cc_nursery_wait(n) !>;
         cc_nursery_free(n);
     }
     return time_now_ms() - start;

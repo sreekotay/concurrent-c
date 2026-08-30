@@ -685,43 +685,36 @@ static AstNode* parse_var_unwrap(Parser* p) {
     ShadowKwKind tykw = shadow_kw(p_peek(p));
     Token ty = p_peek(p);
     int is_named_ty = (ty.kind == TK_IDENT);
-    int is_char_slice = 0;
     int name_i;
     int ty0 = p->i;
     int ty1 = -1;
     int nstars = 0;
     int is_slice_sugar = 0;
-    /* `char[:] name = … !>` — slice surface (→ CCSlice). */
-    if (tykw == SHADOW_KW_CHAR && p->i + 4 < p->n &&
-        tok_eq(p->toks[p->i + 1], TK_PUNCT, "[") &&
-        tok_eq(p->toks[p->i + 2], TK_PUNCT, ":") &&
-        tok_eq(p->toks[p->i + 3], TK_PUNCT, "]"))
-        is_char_slice = 1;
-    if (tykw != SHADOW_KW_INT && tykw != SHADOW_KW_SIZE_T &&
-        tykw != SHADOW_KW_BOOL && !is_named_ty && !is_char_slice)
+    char slice_ty[96];
+    slice_ty[0] = 0;
+    /* Type-position `T[:…] name` — same walker as typed_init (`[:0]`, `[:!]`). */
+    {
+        int spelled = -1;
+        if (ast_try_spell_slice_at(p, ty0, p->n, slice_ty, sizeof(slice_ty),
+                                  &spelled) &&
+            spelled > 0 && spelled < p->n &&
+            p->toks[spelled].kind == TK_IDENT) {
+            is_slice_sugar = 1;
+            name_i = spelled;
+        }
+    }
+    if (!is_slice_sugar && tykw != SHADOW_KW_INT && tykw != SHADOW_KW_SIZE_T &&
+        tykw != SHADOW_KW_BOOL && tykw != SHADOW_KW_CHAR && !is_named_ty)
         return NULL;
     /* Don't steal `int name;` / typedef / fn forms — need `Type name = … !>`.
      * Multiword (`unsigned int` / `long long`) and stars (`int**`) allowed. */
-    if (is_char_slice) {
-        name_i = p->i + 4;
-    } else {
+    if (!is_slice_sugar) {
         ty1 = peek_c_int_type_end(p, ty0);
         if (ty1 < 0) ty1 = ty0 + 1;
         name_i = ty1;
-        /* `T[:] name = … !>` — typed-slice sugar for any element type
-         * (`double[:]` → CCSlice_double), the same surface params and
-         * brace-literal decls already speak. */
-        if (name_i + 3 < p->n &&
-            tok_eq(p->toks[name_i], TK_PUNCT, "[") &&
-            tok_eq(p->toks[name_i + 1], TK_PUNCT, ":") &&
-            tok_eq(p->toks[name_i + 2], TK_PUNCT, "]")) {
-            is_slice_sugar = 1;
-            name_i += 3;
-        } else {
-            while (name_i < p->n && tok_eq(p->toks[name_i], TK_PUNCT, "*")) {
-                nstars++;
-                name_i++;
-            }
+        while (name_i < p->n && tok_eq(p->toks[name_i], TK_PUNCT, "*")) {
+            nstars++;
+            name_i++;
         }
     }
     /* Pointer locals (`T* x = … !>` / `!> {…} @destroy`) stay with
@@ -757,21 +750,9 @@ static AstNode* parse_var_unwrap(Parser* p) {
     }
 
     char tytxt[128];
-    if (is_char_slice) {
-        while (p->i < name_i) p_next(p); /* char [ : ] */
-        snprintf(tytxt, sizeof(tytxt), "CCSlice");
-    } else if (is_slice_sugar) {
-        char elem[96];
-        size_t k;
-        if (!ast_spell_token_range(p, ty0, ty1, elem, sizeof(elem)) &&
-            !span_text(p, ty0, ty1, elem, sizeof(elem))) {
-            parser_fail(p, ty, "unwrap lhs type too long");
-            return NULL;
-        }
-        for (k = 0; elem[k]; k++)
-            if (elem[k] == ' ' || elem[k] == '\t') elem[k] = '_';
-        snprintf(tytxt, sizeof(tytxt), "CCSlice_%s", elem);
-        while (p->i < name_i) p_next(p); /* T [ : ] */
+    if (is_slice_sugar) {
+        snprintf(tytxt, sizeof(tytxt), "%s", slice_ty);
+        while (p->i < name_i) p_next(p); /* T [ : … ] */
     } else {
         if (ty1 > ty0 + 1 || nstars > 0) {
             if (!ast_spell_token_range(p, ty0, ty1, tytxt, sizeof(tytxt)) &&

@@ -1,4 +1,5 @@
 #include <ccc/std/prelude.cch>
+#include <stdio.h>
 
 /* Guards the "no parser-mode UFCS method stubs" regression: TCC's stub-AST
    parser synthesizes a UFCS call as `int method()`, which would otherwise

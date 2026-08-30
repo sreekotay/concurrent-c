@@ -23,7 +23,7 @@ void torture_nesting(int depth) {
 
         __cc_nursery140.spawn(() => {
             cc_atomic_fetch_add(&g_completed_levels, 1);
-        });
+        }) !>;
 
         // Recurse! Each level is a new nursery scope.
         torture_nesting(depth + 1);

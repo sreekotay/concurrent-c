@@ -12,5 +12,6 @@
 #define CC_STD_MAP_H
 
 #include "map_forward.cch"
+#include "map_impl.cch"
 
 #endif /* CC_STD_MAP_H */

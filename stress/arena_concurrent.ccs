@@ -64,7 +64,7 @@ int test_concurrent_alloc(void) {
             int worker_id = w;
             __cc_nursery107.spawn(() => {
                 arena_worker(worker_id);
-            });
+            }) !>;
         }
     
     }
@@ -110,7 +110,7 @@ int test_reset_during_use(void) {
                         cc_atomic_fetch_add(&g_successful_allocs, 1);
                     }
                 }
-            });
+            }) !>;
         }
 
         /* One worker periodically resets (simulates request boundary) */
@@ -119,7 +119,7 @@ int test_reset_during_use(void) {
                 cc_sleep_ms(1);
                 cc_arena_reset(g_arena);
             }
-        });
+        }) !>;
 
         /* More workers allocate */
         for (int w = NUM_WORKERS / 2; w < NUM_WORKERS; w++) {
@@ -131,7 +131,7 @@ int test_reset_during_use(void) {
                         cc_atomic_fetch_add(&g_successful_allocs, 1);
                     }
                 }
-            });
+            }) !>;
         }
     
     }

@@ -1220,7 +1220,7 @@ static char* cc__va_emit_packed_lowering(CCVaDef* def, const char* src,
     } else {
         int o = 1 - d;
         cc_sb_append_fmt(&out, &ol, &oc,
-                         " %s __n; __builtin_memcpy(&__n, __v->__cc_p + %u, %u);"
+                         " %s __n; cc__bytes_copy(&__n, __v->__cc_p + %u, %u);"
                          " return __n == (%s)%lluULL ? %s_%s : %s_%s; }",
                          nut, def->niche_off, def->niche_width,
                          nut, def->niche_sentinel,
@@ -1232,26 +1232,26 @@ static char* cc__va_emit_packed_lowering(CCVaDef* def, const char* src,
         if (!arm->is_void) {
             cc_sb_append_fmt(&out, &ol, &oc,
                              " static inline %s %s__cc_get_%s(const %s* __v) {"
-                             " %s __x; __builtin_memcpy(&__x, __v->__cc_p, sizeof(%s)); return __x; }",
+                             " %s __x; cc__bytes_copy(&__x, __v->__cc_p, sizeof(%s)); return __x; }",
                              arm->type, v, arm->name, v, arm->type, arm->type);
         }
         /* setter */
         if (arm->is_void) {
             cc_sb_append_fmt(&out, &ol, &oc,
                              " static inline %s %s__cc_set_%s(void) {"
-                             " %s __r; __builtin_memset(__r.__cc_p, 0, sizeof(%s));",
+                             " %s __r; cc__bytes_zero(__r.__cc_p, sizeof(%s));",
                              v, v, arm->name, v, v);
         } else {
             cc_sb_append_fmt(&out, &ol, &oc,
                              " static inline %s %s__cc_set_%s(%s __x) {"
-                             " %s __r; __builtin_memset(__r.__cc_p, 0, sizeof(%s));"
-                             " __builtin_memcpy(__r.__cc_p, &__x, sizeof(%s));",
+                             " %s __r; cc__bytes_zero(__r.__cc_p, sizeof(%s));"
+                             " cc__bytes_copy(__r.__cc_p, &__x, sizeof(%s));",
                              v, v, arm->name, arm->type, v, v, arm->type);
         }
         if (a != d && def->narms == 2) {
             /* non-donor arm stamps the niche sentinel */
             cc_sb_append_fmt(&out, &ol, &oc,
-                             " %s __s = (%s)%lluULL; __builtin_memcpy(__r.__cc_p + %u, &__s, %u);",
+                             " %s __s = (%s)%lluULL; cc__bytes_copy(__r.__cc_p + %u, &__s, %u);",
                              nut, nut, def->niche_sentinel, def->niche_off, def->niche_width);
         }
         cc_sb_append_fmt(&out, &ol, &oc, " return __r; }");

@@ -8,7 +8,7 @@ CC asks two questions repeatedly: What is the smallest fact that actually change
 - **[UFCS](language-concepts.md#3-methods-are-ordinary-functions)** — Attach vocabulary locally without making the operation belong to the type.
 - **[Typeviews](typehooks-typeviews.md#2-typeview--faces-and-allow-lists)** — Same-object authority lenses; narrow what a caller may do without wrappers or new allocation.
 - **[Arenas](language-concepts.md#4-slices-remember-where-bytes-live)** — Name lifetimes and owners; allocation strategy is secondary.
-- **[Walk / extent](language-concepts.md#4-slices-remember-where-bytes-live)** — `for (v in s)` is the bound walk; `.len` is readable; point is `at` / `set` (Result). Users do not write `s.access(i)`.
+- **[Walk / extent](cheatsheet.md#walk-for-in)** — The bound is the live extent. Walk it; do not reconstruct `i < .len`. Slice fields are read-only. `CCString` is an owner: `as_slice()` / dest `char[:] v = s` / `cstr()`, not `.data`. Recipe: [recipe_walk.ccs](../examples/recipe_walk.ccs).
 - **Named pointers (`CCBox`)** — A named, nullable pointer handle represented as `{ H *p }`. Copies refer to the same object; `p == NULL` is the canonical dead state (never born or consumed). Ordinary sites use `is_live` / `host`, not `.p`.
 - **[Arena-last](cheatsheet.md#keep-pass-the-arena-to-live-on)** — When an operation creates owned output (i.e. allocates memory), make the destination lifetime explicit at that point.
 - **[Results / `!>` / `?>`](language-concepts.md#2-errors-map-to-a-value-or-to-control-flow)** — Make fallible transitions force acknowledgement without forcing local policy. Do not make fallible operations appear infallible; keep errors distinct from successful values.
@@ -21,6 +21,7 @@ CC asks two questions repeatedly: What is the smallest fact that actually change
 - **[Top-level owners + views](getting-started.md#locality-owned-or-view)** — Prefer one real owner with non-owning views over manufactured shared ownership.
 
 The CC programming mental model:
+TUTORIAL=IDIOMATIC=PERFORMANT=PRODUCTION
 - **One path** — Tutorial code uses the same idioms and APIs as production code; performance is not a separate programming model.
 - **Ownership is binary** — Memory is owned, or it is not. Views, borrows, slices, provenance, authority, and lifetime constraints describe non-owner access; they should not be promoted into additional ownership states.
 - **Sharing is not shared ownership** — First look for the actual owner. Introduce transfer only when the application really creates a new independent lifetime.

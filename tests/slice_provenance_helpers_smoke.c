@@ -53,19 +53,19 @@ int main(void) {
         return 7;
     }
 
-    CCSlice path = cc_path_join(&arena, CC_SLICE_LIT("/tmp"), CC_SLICE_LIT("file"));
+    CCSlice path = cc_path_join(arena, CC_SLICE_LIT("/tmp"), CC_SLICE_LIT("file"));
     if (!path.ptr || !cc_slice_is_from_arena_epoch(path, arena)) {
         fprintf(stderr, "expected path join to carry arena provenance\n");
         return 8;
     }
 
-    CCSlice dir = cc_path_dirname(&arena, path);
+    CCSlice dir = cc_path_dirname(arena, path);
     if (!dir.ptr || !cc_slice_is_from_arena_epoch(dir, arena)) {
         fprintf(stderr, "expected dirname allocation to carry arena provenance\n");
         return 9;
     }
 
-    CCSlice base = cc_path_basename(&arena, path);
+    CCSlice base = cc_path_basename(arena, path);
     if (!base.ptr || !cc_slice_is_from_arena_epoch(base, arena)) {
         fprintf(stderr, "expected basename allocation to carry arena provenance\n");
         return 10;

@@ -13,8 +13,8 @@ Counts come from `corpus/*/verdict.md`. Gap means off-surface escape
 | | Count |
 |--|------:|
 | Corpus entries | 27 |
-| **prevented** (protected surface blocks the shape) | 19 |
-| **mitigated** (idiom dissolves it; C-shaped rewrite still compiles) | 6 |
+| **prevented** (protected surface blocks the shape) | 21 |
+| **mitigated** (idiom dissolves it; C-shaped rewrite still compiles) | 4 |
 | **still_expressible** claim-A miss | 1 |
 | **still_expressible** `parity: rust_unsafe` | 1 |
 
@@ -38,8 +38,9 @@ Representative wins — full table in `summary.md`:
 
 - **Unique / move-once** — use-after-move, curl-style keep-pointer-after-free
   (SHAPE-T8, CVE-2021-22945).
-- **Nursery + arena epoch** — teardown vs in-flight, borrow vs reset
-  (CVE-2025-31115, CVE-2017-13245, CVE-2020-12387, …).
+- **Nursery + arena epoch** — teardown vs in-flight, borrow vs reset,
+  cancel/stop join-before-free (CVE-2025-31115, CVE-2017-13245,
+  CVE-2020-12387, CVE-2024-38561, CVE-2025-39945, …).
 - **Channel-stable borrow** — non-unique / untracked slice send (SHAPE-T3-*).
 - **Pointer-field channel ban** — by-value struct with raw `T*` field
   (SHAPE-T7-pointer-channel-send).
@@ -54,17 +55,16 @@ Representative wins — full table in `summary.md`:
 
 ## Where CC is structure-only (mitigated)
 
-Idiom works; escape hatch still compiles:
+Idiom works; a CC spelling of the bug still compiles:
 
-- Cancel / stop races outside nursery-only policy (CVE-2024-38561,
-  CVE-2025-39945).
 - Integer overflow into alloc size — `cc_*_i64_checked` vs bare `+`
   (SHAPE-integer-overflow).
-- Length under-count / OOB write — checked size + `at`/`set` vs raw
-  `ptr[i]=` (CVE-2016-5180, SHAPE-T9-raw-index-oob).
+- Length under-count / OOB write — checked size + `at`/`set` vs
+  `as_ptr()[i]=` (CVE-2016-5180, SHAPE-T9-raw-index-oob).
 - Task state in a frame the task outlives — nursery join replaces the
   hand-rolled completion flag, but escaping-frame analysis covers stack
-  slices and not `&`-captured scalars (CVE-2023-54235).
+  slices and not `&`-captured scalars (CVE-2023-54235). That is a real
+  CC spelling (outer nursery + `&` to inner-frame state), not a pthread Gap.
 
 ## Reading
 
@@ -74,9 +74,9 @@ checked index, slice len/ptr store ban, exhaustive variant switch) cover
 most claim-A shapes in this corpus. Remaining honesty:
 
 1. Bare pointer **handles** on channels — protocol, not Send lattice.
-2. Raw `.ptr` / `malloc` — Gap, like `unsafe`.
-3. T6 stop/join — mitigated until nursery-only stop is language policy.
-4. T2 frame escape — tracked for stack slices, not for `&`-captured scalars.
+2. `as_ptr()` / `malloc` — Gap, like `unsafe`.
+3. T2 frame escape — tracked for stack slices, not for `&`-captured scalars
+   (CVE-2023-54235).
 
 Do not treat this folder as a product guarantee. It is a language instrument:
 hits validate seams; misses feed backlog or conscious Gaps.

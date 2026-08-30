@@ -7,6 +7,7 @@
 
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
+#include <stdlib.h>
 
 void test_nursery_then_arena(void) {
     @errhandler(CCError e) cc_error_exit(e);

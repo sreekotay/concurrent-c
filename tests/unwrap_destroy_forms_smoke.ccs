@@ -8,6 +8,7 @@
  */
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
+#include <stdlib.h>
 
 static char* maybe_null(int want_null) {
     static char buf[] = "hello";

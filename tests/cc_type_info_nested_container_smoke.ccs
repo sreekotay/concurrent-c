@@ -22,7 +22,7 @@ int main(void) {
     CCVec::[int] inner = cc_vec_new::[int](arena);
     inner.push(7);
 
-    CCVec::[CCVec::[int]] outer = cc_vec_new::[CCVec::[int]](&arena);
+    CCVec::[CCVec::[int]] outer = cc_vec_new::[CCVec::[int]](arena);
     outer.push(inner);
 
     int fails = 0;

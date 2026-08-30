@@ -1,0 +1,7 @@
+/* CCString SSO union is not a pointer. Use as_slice() / data() / cstr(). */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    CCString s = {0};
+    return s.data != 0; /* ill-formed */
+}

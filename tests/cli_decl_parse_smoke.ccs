@@ -1,6 +1,8 @@
 // Recognition of the `@grammar(cli)` declaration DSL as an ordinary
 // `@grammar(rules)` factory. Argv overlay is not this grammar's job.
 #include <ccc/std/prelude.cch>
+#include <string.h>
+#include <stdio.h>
 
 @grammar(rules) CliSyntax {~~~~
 include "../cc/include/ccc/std/cli_decl.rules"

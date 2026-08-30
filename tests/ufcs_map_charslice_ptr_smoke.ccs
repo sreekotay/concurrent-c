@@ -5,7 +5,7 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     if (!cc_arena_is_live(arena)) return 1;
 
-    Map::[char[:], int*] m = map_new::[char[:], int*](&arena);
+    Map::[char[:], int*] m = map_new::[char[:], int*](arena);
 
     char[:] k1 = @slice("alpha");
     char[:] k2 = @slice("beta");

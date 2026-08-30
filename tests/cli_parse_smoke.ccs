@@ -2,6 +2,8 @@
 #include <ccc/std/cli.cch>
 #include <stdlib.h>
 #include <unistd.h>
+#include <string.h>
+#include <stdio.h>
 
 @grammar(cli) SmokeOpts {~~~~
     help: flag -h, --help desc "show help"

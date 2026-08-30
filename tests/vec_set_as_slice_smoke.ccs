@@ -14,9 +14,9 @@ int main(void) {
     if (v.set(10, 77) == 0) return 6;
 
     CCSlice_int s = v.as_slice();
-    if (s.len() != 3) return 7;
+    if (s.len != 3) return 7;
 
-    int *items = (int *)s.base.ptr;
+    int *items = (int *)s.ptr;
     if (!items || items[0] != 10 || items[1] != 99 || items[2] != 30) return 8;
 
     printf("vec_set_as_slice ok\n");

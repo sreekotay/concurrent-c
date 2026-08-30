@@ -4,6 +4,7 @@
 // a real type + operation. (The full dialect compiler grows in that file; its
 // target is examples/serdes/json/json.h.)
 #include <ccc/std/prelude.cch>
+#include <stdio.h>
 
 @grammar(rules) Toy {~~~~
     ws:     any charset [#' ' #'\t']

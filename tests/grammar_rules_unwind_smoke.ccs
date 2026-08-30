@@ -6,6 +6,8 @@
 // comma, the cascade unwinds the push, and `single` re-parses the same span.
 // A leaked node would double the callback count; a lost one would zero it.
 #include <ccc/std/prelude.cch>
+#include <string.h>
+#include <stdio.h>
 
 @grammar(rules) Duo {~~~~
     top:    [pair | single]

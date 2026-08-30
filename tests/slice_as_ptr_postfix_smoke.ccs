@@ -1,0 +1,55 @@
+/* Peel is a C expression. Postfix and assign after `as_ptr()` stay legal. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    CCSlice data;
+} PeelReply;
+
+int main(void) {
+    char[:] name = {'a', 'b', 'C', 'd'};
+    char[:] lit = "abcde";
+    size_t i;
+    PeelReply box;
+    PeelReply* reply;
+
+    if (lit.len != 5 || lit.ptr[0] != 'a' || lit.ptr[4] != 'e') {
+        fprintf(stderr, "string-lit slice: len=%zu want 5 abcde\n", lit.len);
+        return 5;
+    }
+
+    /* The line that used to fail parse: UFCS stmt stole the call, saw `[`. */
+    for (i = 0; i < name.len; i++) {
+        if (name.ptr[i] >= 'a' && name.ptr[i] <= 'z')
+            name.ptr[i] -= 32;
+    }
+    if (name.ptr[0] != 'A' || name.ptr[1] != 'B' ||
+        name.ptr[2] != 'C' || name.ptr[3] != 'D') {
+        fprintf(stderr, "as_ptr assign: got %c%c%c%c want ABCD\n",
+                name.ptr[0], name.ptr[1],
+                name.ptr[2], name.ptr[3]);
+        return 1;
+    }
+
+    name.ptr[1] = 'Z';
+    if (name.ptr[1] != 'Z') {
+        fprintf(stderr, "as_ptr store: name[1]=%c want Z\n", name.ptr[1]);
+        return 2;
+    }
+
+    box.data = name;
+    reply = &box;
+    if (reply->data.ptr[0] != 'A' || reply->data.ptr[2] != 'C') {
+        fprintf(stderr, "field as_ptr index failed\n");
+        return 3;
+    }
+    reply->data.ptr[3] = 'W';
+    if (name.ptr[3] != 'W') {
+        fprintf(stderr, "field as_ptr store: name[3]=%c want W\n",
+                name.ptr[3]);
+        return 4;
+    }
+
+    printf("slice_as_ptr_postfix_smoke: OK\n");
+    return 0;
+}

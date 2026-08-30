@@ -2,11 +2,11 @@
  * Driver smoke: ccc -e/-E, token-gated predecls, -n/-p, --save / ccc @name.
  */
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <string.h>
+#include <stdlib.h>
 
 static int run_capture(const char* cmd, char* out, size_t out_cap, int* exit_code) {
     char wrapped[2048];
@@ -97,7 +97,7 @@ int main(void) {
     /* 5) args predecl */
     snprintf(cmd, sizeof(cmd),
              "./cc/bin/ccc -e '"
-             "if (args.len >= 1) printf(\"%%s\\n\", ((char**)args.ptr)[0]);"
+             "if (args.len >= 1) printf(\"%%s\\n\", ((char**)(args.ptr))[0]);"
              "' hello");
     if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
         fprintf(stderr, "FAIL args predecl (exit %d):\n%s\n", ec, out);
@@ -199,7 +199,7 @@ int main(void) {
 
     /* 8b) -E with nested @string template (no backtick nesting in wrap) */
     snprintf(cmd, sizeof(cmd),
-             "./cc/bin/ccc -E '@string(`hi-tpl`, &a)'");
+             "./cc/bin/ccc -E '@string(`hi-tpl`, a)'");
     if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
         fprintf(stderr, "FAIL -E @string (exit %d):\n%s\n", ec, out);
         failed = 1;

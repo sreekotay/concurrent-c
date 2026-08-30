@@ -1,4 +1,5 @@
 #include <ccc/std/prelude.cch>
+#include <stdio.h>
 
 static int !>(CCError) early_int(void) {
     return cc_ok(41);

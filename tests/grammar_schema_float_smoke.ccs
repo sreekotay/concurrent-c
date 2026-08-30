@@ -1,6 +1,8 @@
 // Schema float/double binds: keep borrows number text; ffc parses at bind.
 #include <ccc/std/prelude.cch>
 #include <math.h>
+#include <string.h>
+#include <stdio.h>
 
 @grammar(rules) Num {~~~~
     top:   number

@@ -26,10 +26,7 @@
 
 #include <ccc/cc_exclusive.cch>
 #include <ccc/cc_channel.cch>
-#include <errno.h>
 #include <stddef.h>
-#include <stdlib.h>
-#include <string.h>
 
 typedef struct CCTurnstileStage {
     CCExclusiveHost* excl;
@@ -91,7 +88,6 @@ static inline int cc_turnstile_stage_init(CCTurnstileStage* s, CCExclusiveHost* 
                                          uint64_t name_base) {
     if (!s)
         return -1;
-    memset(s, 0, sizeof(*s));
     s->excl = excl;
     s->name_base = name_base;
     return 0;
@@ -184,7 +180,7 @@ static inline void !>(CCError) cc_turnstile_init(CCTurnstile* t, int cap,
 
     if (!t || !cc_arena_is_live(arena) || !slots || cap < 1 || n_stages < 1)
         return cc_err(CC_ERR_INVALID_ARG, "cc_turnstile_init");
-    memset(t, 0, sizeof(*t));
+    *t = (CCTurnstile){0};
     t->cap = cap;
     t->n_stages = n_stages;
     t->stages = slots;
@@ -216,11 +212,9 @@ static inline void !>(CCError) cc_turnstile_init(CCTurnstile* t, int cap,
 
 static inline CCTurnstile !>(CCError) cc_turnstile_create(int cap, int n_stages,
                                                          CCArena arena) {
-    CCTurnstile t;
+    CCTurnstile t = {0};
     CCTurnstileStage* slots;
     void !>(CCError) ir;
-
-    memset(&t, 0, sizeof(t));
     if (!cc_arena_is_live(arena) || cap < 1 || n_stages < 1)
         return cc_err(CC_ERR_INVALID_ARG, "cc_turnstile_create");
     slots = cc_arena_alloc_T_count(CCTurnstileStage, arena, (size_t)n_stages);
@@ -239,33 +233,8 @@ static inline CCTurnstile !>(CCError) cc_turnstile_create(int cap, int n_stages,
 #define cc_turnstile_create(cap, n, a) \
     (cc_turnstile_create)((cap), (n), CC__ARENA_HANDLE(a))
 
-static inline bool !>(CCIoError) cc_turnstile_enter(CCTurnstile* t, int i) {
-    int tok = 0;
-    int rc;
-    (void)i;
-    if (!cc_turnstile_ready(t))
-        return cc_err(cc_io_error(CC_IO_INVALID_ARGUMENT));
-    rc = cc_channel_raw_recv(t->depth_ch, &tok, sizeof(tok));
-    if (rc != 0) {
-        /* EPIPE is Ok(false) on a byte stream. Here it means the depth
-         * channel closed; `!>` would treat that as success and spawn unbounded. */
-        if (rc == EPIPE)
-            return cc_err(cc_io_error(CC_IO_CONNECTION_CLOSED));
-        return cc_chan_result_with(t->depth_ch, rc, /*is_recv=*/true);
-    }
-    return cc_ok(true);
-}
-
-static inline bool !>(CCIoError) cc_turnstile_leave(CCTurnstile* t) {
-    int tok = 1;
-    int rc;
-    if (!t || !t->depth_ch)
-        return cc_err(cc_io_error(CC_IO_INVALID_ARGUMENT));
-    rc = cc_channel_raw_send(t->depth_ch, &tok, sizeof(tok));
-    if (rc == EPIPE)
-        return cc_err(cc_io_error(CC_IO_CONNECTION_CLOSED));
-    return cc_chan_result_with(t->depth_ch, rc, /*is_recv=*/false);
-}
+bool !>(CCIoError) cc_turnstile_enter(CCTurnstile* t, int i);
+bool !>(CCIoError) cc_turnstile_leave(CCTurnstile* t);
 
 /* Two-stage face: read/write are the core's stages[0]/stages[1]. */
 typedef struct CCTurnstileRW {
@@ -280,13 +249,12 @@ _Static_assert(offsetof(CCTurnstileRW, write) ==
 
 static inline CCTurnstileRW !>(CCError) cc_turnstile_rw_create(int cap,
                                                              CCArena arena) {
-    CCTurnstileRW w;
+    CCTurnstileRW w = {0};
     void !>(CCError) ir;
-    memset(&w, 0, sizeof(w));
     ir = cc_turnstile_init(&w.core, cap, 2, arena, &w.read);
     if (!ir.ok) {
         cc_turnstile_destroy(&w.core);
-        memset(&w, 0, sizeof(w));
+        w = (CCTurnstileRW){0};
         return cc_err(ir.u.error);
     }
     w.core.stages_embedded = 1;

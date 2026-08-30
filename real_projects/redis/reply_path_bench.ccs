@@ -12,7 +12,8 @@
 #define BENCH_ITERS 500000
 
 /* Bench-only: WIRE payload travels with the value so by-value channel
- * copies can rebase data.ptr after memcpy.  Not part of production RedisReply. */
+ * copies can rebase the view onto inline_buf after memcpy.
+ * Not part of production RedisReply. */
 typedef struct BenchWireReply {
     RedisReply reply;
     int data_inline;
@@ -40,13 +41,12 @@ static void reply_init_inline(BenchWireReply* wr, uint64_t seq) {
     if (len < 0 || (size_t)len >= sizeof(wr->inline_buf)) {
         bench_abort("failed to build inline reply");
     }
-    wr->reply.data.ptr = wr->inline_buf;
-    wr->reply.data.len = (size_t)len;
+    wr->reply.data = wr->inline_buf.to_slice_n((size_t)len);
 }
 
 static void reply_rebase_inline_ptr(BenchWireReply* wr) {
     if (!wr || !wr->data_inline) return;
-    wr->reply.data.ptr = wr->inline_buf;
+    wr->reply.data = wr->inline_buf.to_slice_n(wr->reply.data.len);
 }
 
 static int notify_signal(void* ctx_ptr) {

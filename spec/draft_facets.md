@@ -115,7 +115,11 @@ typedef struct Conn {
 - **`as:`** — is-a faces (at most one path per target type). Not an
   allow-list group. Each pattern is `field` or `(Mode)field`. `as:` is a
   projection: when the outer misses, retry through this path on that
-  face. The plain form exposes a value embed's full surface. The
+  face — UFCS first, then a field load or store that is not a member of
+  the outer (`xs.len` on `CCSlice_int` → `xs.base.len`). The plain form
+  exposes a value embed's full surface, or a
+  single-pointer hop (`as: p` on `CCBox_*` / a teaching alias of
+  `CCBox::[H]` — UFCS miss retries on the host). The
   parenthesized form takes a named mode of the landing — `(Mode)` names
   the face, not the hop's static type. A pointer field is a hop
   (`as: (Region)n` on `CCNursery` projects Region through the host; the
@@ -340,8 +344,9 @@ surface of the type family. No parallel view name.
 ```
 
 Installed for the slice family by the lowerer (`CCSlice`, markers, and
-`CCSlice_T` share one unnamed facet). `r: *` is the field-store facet:
-observe + call; field stores (`s.len = …`, `s.ptr = …`) are ill-formed.
+`CCSlice_T` share one unnamed facet). Ordinary sites may read `.ptr` /
+`.len` / `.id`; field stores (`s.len = …`) are ill-formed. Raw
+`s.ptr[i]` is the expressible Gap.
 `@typehooks` `.len` / `.access` own extent and walk policy — the same
 user story (do not lie about length; do not index past it), two
 mechanisms. Narrower published families (`as_*`, `get_*`, …) remain the
@@ -374,6 +379,16 @@ Ordinary sites may call any method (`is_live`, `host`, user UFCS) and
 must not load `.p`. Factory aliases (`CCArena`, `CCNursery`,
 `CCExclusive`) are other subjects and do not match `CCBox_*`.
 First-parameter bodies stay trusted. Designated init may still name `.p`.
+
+`CCString` hides the SSO union (`.data` is not a pointer when the
+bytes are inline). `.len` / `.cap` are readable; field stores are
+ill-formed. The view is `as_slice()`; a C string is `cstr(arena)`.
+
+```c
+@typeview on CCString {
+    r: ^data, ^inline_buf, ^_inline_word;
+};
+```
 
 ## 8. Ill-formed cases
 

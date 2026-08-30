@@ -19,7 +19,7 @@ int main(void) {
         printf("FAIL: overflow alloc\n");
         return 1;
     }
-    if (cc_arena_overflow_raw_bytes(&a) < 512) {
+    if (cc_arena_overflow_raw_bytes(a) < 512) {
         printf("FAIL: overflow accounting before reset\n");
         return 1;
     }
@@ -42,7 +42,7 @@ int main(void) {
         printf("FAIL: ovf_head not cleared\n");
         return 1;
     }
-    if (cc_arena_overflow_raw_bytes(&a) != 0) {
+    if (cc_arena_overflow_raw_bytes(a) != 0) {
         printf("FAIL: overflow bytes after reset\n");
         return 1;
     }

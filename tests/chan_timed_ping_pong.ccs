@@ -8,6 +8,7 @@
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_channel.cch>
 #include <ccc/cc_atomic.cch>
+#include <stdio.h>
 
 #define N 5000
 

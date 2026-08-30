@@ -22,11 +22,11 @@ int main(void) {
                 __cc_nursery134.spawn (() => [] {
                     printf("  fiber2: running\n");
                     cc_atomic_store(&g, 42);
-                });
+                }) !>;
             
             }
             printf("  fiber1: done\n");
-        });
+        }) !>;
     
     }
     

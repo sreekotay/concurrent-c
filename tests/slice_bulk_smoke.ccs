@@ -1,0 +1,46 @@
+/* dst.copy / move / fill — dest-bulk, no third n. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    char buf[8];
+    CCSlice dst = cc_slice_from_buffer(buf, 8);
+    dst.fill('x') !>;
+    if (dst.len != 8) return 2;
+    {
+        char* p = dst.ptr;
+        size_t i;
+        for (i = 0; i < dst.len; i++) {
+            if (p[i] != 'x') return 3;
+        }
+    }
+
+    CCSlice src = CC_SLICE_LIT("hello");
+    dst.copy(src) !>;
+    if (dst.len != 8) return 4;
+    {
+        char* p = dst.ptr;
+        if (p[0] != 'h' || p[4] != 'o' || p[5] != 'x') return 5;
+    }
+
+    /* Overlap: move, not copy. */
+    CCSlice window = dst.sub(0, 5);
+    CCSlice tail = dst.sub(2, 7);
+    tail.move(window) !>;
+    {
+        char* p = dst.ptr;
+        if (p[2] != 'h' || p[6] != 'o') return 6;
+    }
+
+    CCSlice tiny = cc_slice_from_buffer(buf, 2);
+    CCResult_bool_CCError too_short = tiny.copy(src);
+    if (!too_short.is_err()) return 7;
+
+    puts("slice_bulk_smoke: PASS");
+    return 0;
+}

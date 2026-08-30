@@ -1,0 +1,33 @@
+/* Comma locals share one AST name blob; each ident must bind for for-in. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    char buf[6] = { 'a', '\n', 'b', '\n', 'c', 0 };
+    CCSlice unused_s, tree_s, mut_s = cc_slice_empty();
+    char[:] tree;
+    int n = 0;
+    int m = 0;
+    int t = 0;
+
+    unused_s = cc_slice_from_buffer(buf, 1);
+    tree_s = cc_slice_from_buffer(buf, 5);
+    mut_s = cc_slice_from_buffer(buf + 2, 3);
+
+    for (ch in tree_s)
+        if (ch == '\n') n++;
+    if (n != 2) return 1;
+
+    for (ch in mut_s)
+        if (ch == '\n') m++;
+    if (m != 1) return 2;
+
+    tree = tree_s;
+    for (ch in tree)
+        if (ch == '\n') t++;
+    if (t != 2) return 3;
+    if (unused_s.len != 1) return 4;
+
+    printf("ok\n");
+    return 0;
+}

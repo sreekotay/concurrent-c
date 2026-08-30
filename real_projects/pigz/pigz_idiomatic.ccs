@@ -16,6 +16,10 @@
 
 #define BLOCK_SIZE (128 * 1024)
 #define DICT_SIZE  32768
+/* zlib uInt is unsigned int. Shadow #if does not see UINT_MAX. */
+_Static_assert(BLOCK_SIZE <= UINT_MAX, "BLOCK_SIZE must fit zlib uInt");
+_Static_assert((BLOCK_SIZE + (BLOCK_SIZE >> 3) + 1024) <= UINT_MAX,
+               "deflate_cap(BLOCK_SIZE) must fit zlib uInt");
 /* ~2x the scheduler workers: spare in-flight tickets absorb out-of-order
  * deflate so the ordered write stage never starves a runner. */
 #define CAP        32
@@ -75,10 +79,13 @@ static unsigned char* !>(CCError) read_block(int in_fd, CCArenaPool* pool,
 /* Raw deflate, optional dictionary, Z_SYNC_FLUSH (Z_FINISH on last).
  * The Adler Z_BLOCK splice lives in pigz_cc — not the loop. */
 static CompressedResult* !>(CCError) compress_slice(CCSlice data,
-        const unsigned char* dict, size_t dict_len, bool is_last,
+        char[:] dict, bool is_last,
         ZState* zs, CCArenaPool* out_pool) {
     @errhandler(CCError e) { return cc_err(e); }
     size_t max_out = deflate_cap((size_t)BLOCK_SIZE);
+    if (data.len > (size_t)UINT_MAX || dict.len > (size_t)UINT_MAX ||
+        max_out > (size_t)UINT_MAX)
+        return cc_err(CC_ERR_INVALID_ARG, "deflate chunk exceeds uInt");
     CompressedResult* res = (CompressedResult*)out_pool.alloc();
     @defer(err) out_pool->free(res);
     if (!res)
@@ -90,8 +97,8 @@ static CompressedResult* !>(CCError) compress_slice(CCSlice data,
 
     zs_prepare(zs) !>;
     z_stream* strm = &zs->strm;
-    if (dict_len)
-        deflateSetDictionary(strm, dict, (uInt)dict_len);
+    if (dict.len)
+        deflateSetDictionary(strm, (const Bytef*)dict.ptr, (uInt)dict.len);
 
     strm->next_in = (Bytef*)data.ptr;
     strm->avail_in = (uInt)data.len;
@@ -183,13 +190,12 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
             : cc_slice_empty();
 
         unsigned char take[DICT_SIZE];
-        const unsigned char* d = NULL;
-        size_t dlen = 0;
+        char[:] dict = {0};
         @stage (ts.read, i) {
-            dlen = dict_len;                 /* consume predecessor's tail */
+            size_t dlen = dict_len;          /* consume predecessor's tail */
             if (dlen)
                 memcpy(take, dictbuf, dlen);
-            d = dlen ? take : NULL;
+            dict = cc_slice_from_buffer(take, dlen);
             size_t tail = data.len < (size_t)DICT_SIZE ? data.len
                                                        : (size_t)DICT_SIZE;
             if (tail)
@@ -198,7 +204,7 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
         }
 
         CompressedResult* r =
-            compress_slice(data, d, dlen, is_last, &zs, &out_pool) !>;
+            compress_slice(data, dict, is_last, &zs, &out_pool) !>;
 
         @stage (ts.write, i) {
             size_t len = r->original_len;

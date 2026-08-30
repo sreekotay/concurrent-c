@@ -295,8 +295,7 @@ example](#more-advanced-example)).
 ```c
 static double Sig_sum(Sig *self, double[:] xs) {          // Float64Array /
     double acc = 0;                                       // numpy float64 /
-    for (size_t i = 0; i < xs.base.len; i++)              // array.array('d')
-        acc += ((double *)xs.base.ptr)[i];
+    for (x in xs) acc += x;                                // array.array('d')
     return acc;
 }
 static void Sig_fill(Sig *self, double[:] xs, double v);  // writes land in
@@ -462,18 +461,18 @@ update.
 typedef struct Wf { char _; } Wf;
 
 static void !>(CCError) Wf_step(Wf *self, double[:] st, double x) {
-    if (st.base.len < 3) return cc_err(CC_ERR_INVALID_ARG, "state needs 3 doubles");
-    double *s = (double *)st.base.ptr;
+    if (st.len < 3) return cc_err(CC_ERR_INVALID_ARG, "state needs 3 doubles");
+    double *s = st.ptr;
     double n = s[0] + 1.0, d = x - s[1];
     double mean = s[1] + d / n;
     s[0] = n;  s[1] = mean;  s[2] += d * (x - mean);
     return cc_ok();
 }
 static double Wf_mean(Wf *self, double[:] st) {
-    return ((double *)st.base.ptr)[1];
+    return st.ptr[1];
 }
 static double !>(CCError) Wf_variance(Wf *self, double[:] st) {
-    double *s = (double *)st.base.ptr;
+    double *s = st.ptr;
     if (s[0] < 2.0) return cc_err(CC_ERR_INVALID_ARG, "need two samples");
     return cc_ok(s[2] / (s[0] - 1.0));
 }

@@ -1,7 +1,7 @@
 #include <ccc/std/prelude.cch>
 
 static int has_mode(char[::] argv, char[:] want) {
-    CCSlice* items = (CCSlice*)argv.ptr;
+    CCSlice* items = (CCSlice*)(void*)argv.ptr;
     size_t n = argv.len;
     for (size_t i = 0; i < n; ++i) {
         char[:] item = items[i];
@@ -21,7 +21,7 @@ int main(void) {
     };
 
     char[::] argv = cc_slice_from_buffer(items, 2);
-    char[:] second = ((CCSlice*)argv.ptr)[1];
+    char[:] second = ((CCSlice*)(void*)argv.ptr)[1];
     if (argv.len() != 2) return 3;
     if (!second.eq_cstr("await")) return 4;
     if (!has_mode(argv, cc_slice_from_buffer((void*)"await", 5))) return 5;

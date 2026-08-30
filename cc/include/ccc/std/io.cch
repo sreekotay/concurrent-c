@@ -1,16 +1,10 @@
 /*
- * Header-only file I/O helpers for Concurrent-C stdlib (phase 1).
- * C ABI uses prefixed names. Short aliases are opt-in via std/prelude.h.
+ * File I/O face. Libc bodies live in runtime/io.c.
  */
 #ifndef CC_STD_IO_H
 #define CC_STD_IO_H
 
 #include <ccc/cc_compat.cch>
-#include <stdio.h>
-#include <errno.h>
-#include <string.h>
-#include <limits.h>
-#include <stdlib.h>
 
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_io_error.cch>
@@ -21,8 +15,14 @@
 #include "async_io.cch"
 #include "string.cch"
 
+#ifndef SEEK_SET
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+#endif
+
 typedef struct {
-    FILE *handle;
+    void *handle;
 } CCFile;
 
 typedef struct {
@@ -69,27 +69,7 @@ int cc_file_read_all_async_deadline(CCExec* ex, CCFile *file, CCArena arena, CCS
 // - Ok(false) = EOF (no more data)
 // - Err(e) = actual error
 // Usage: while (cc_io_avail(cc_file_read(file, arena, n, &data))) { process(data); }
-static inline bool !>(CCIoError) cc_file_read_into(CCFile *file, CCArena arena, size_t n, CCSlice *out) {
-    if (!file || !file->handle || !cc_arena_is_live(arena) || n == 0 || !out) {
-        return cc_err(cc_io_from_errno(EINVAL));
-    }
-    char *buf = (char *)cc_arena_alloc(arena, n, sizeof(char));
-    if (!buf) {
-        return cc_err(cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
-    }
-    size_t got = fread(buf, 1, n, file->handle);
-    if (got == 0) {
-        if (ferror(file->handle)) {
-            return cc_err(cc_io_from_errno(errno));
-        }
-        // EOF - return Ok(false)
-        *out = cc_slice_empty();
-        return cc_ok(false);
-    }
-    // Got data - return Ok(true)
-    *out = cc_slice_from_parts(buf, got, CC_SLICE_ID_UNTRACKED);
-    return cc_ok(true);
-}
+bool !>(CCIoError) cc_file_read_into(CCFile *file, CCArena arena, size_t n, CCSlice *out);
 
 int cc_file_read_async(CCExec* ex, CCFile *file, CCArena arena, size_t n, CCSlice* out, CCAsyncHandle* h);
 int cc_file_read_async_deadline(CCExec* ex, CCFile *file, CCArena arena, size_t n, CCSlice* out, CCAsyncHandle* h, const CCDeadline* deadline);
@@ -99,18 +79,13 @@ int cc_file_read_async_deadline(CCExec* ex, CCFile *file, CCArena arena, size_t 
  * leaves the remainder of the buffer untouched — so the terminator is the
  * first '\0' whose tail is still all fill.  strlen is wrong when the line
  * contains embedded NULs (it would truncate and corrupt line boundaries). */
+/* Bytes written by fgets into a buffer that was pre-filled with
+ * CC__FGETS_FILL.  fgets always NUL-terminates after the last byte read and
+ * leaves the remainder of the buffer untouched — so the terminator is the
+ * first '\0' whose tail is still all fill.  strlen is wrong when the line
+ * contains embedded NULs (it would truncate and corrupt line boundaries).
+ * Staging + fill live in runtime/io.c. */
 enum { CC__FGETS_FILL = 0xFF };
-static inline size_t cc__fgets_payload_len(const char *buf, size_t cap) {
-    size_t n;
-    for (n = 0; n < cap; n++) {
-        size_t k;
-        if (buf[n] != '\0') continue;
-        k = n + 1;
-        while (k < cap && (unsigned char)buf[k] == (unsigned char)CC__FGETS_FILL) k++;
-        if (k == cap) return n;
-    }
-    return 0;
-}
 
 // Read one line (includes delimiter). Returns:
 // - Ok(true) = got line (stored in *out)
@@ -119,38 +94,7 @@ static inline size_t cc__fgets_payload_len(const char *buf, size_t cap) {
 // Usage: while (cc_io_avail(cc_file_read_line(file, arena, &line))) { process(line); }
 //
 // Line bytes are allocated in `arena` (that is why the arena is passed).
-// Staging uses a stack buffer + fgets (block I/O, stops at newline) then a
-// single push into the arena — never fgetc-per-byte, never getline/malloc.
-// NUL-clean: payload length uses the fill-tail trick, not strlen.
-static inline bool !>(CCIoError) cc_file_read_line_into(CCFile *file, CCArena arena, CCSlice *out) {
-    CCString line;
-    char buf[8192];
-    if (!file || !file->handle || !cc_arena_is_live(arena) || !out) {
-        return cc_err(cc_io_from_errno(EINVAL));
-    }
-    line = cc_string_new();
-    for (;;) {
-        size_t n;
-        memset(buf, CC__FGETS_FILL, sizeof(buf));
-        if (!fgets(buf, (int)sizeof(buf), file->handle)) {
-            if (ferror(file->handle)) {
-                return cc_err(cc_io_from_errno(errno));
-            }
-            if (line.len == 0) {
-                *out = cc_slice_empty();
-                return cc_ok(false);
-            }
-            break;
-        }
-        n = cc__fgets_payload_len(buf, sizeof(buf));
-        if (!cc_string_push_slice(&line, cc_slice_from_buffer(buf, n), arena)) {
-            return cc_err(cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
-        }
-        if (n > 0 && buf[n - 1] == '\n') break;
-    }
-    *out = cc_string_as_slice(&line);
-    return cc_ok(true);
-}
+bool !>(CCIoError) cc_file_read_line_into(CCFile *file, CCArena arena, CCSlice *out);
 
 int cc_file_read_line_async(CCExec* ex, CCFile *file, CCArena arena, CCSlice* out, CCAsyncHandle* h);
 int cc_file_read_line_async_deadline(CCExec* ex, CCFile *file, CCArena arena, CCSlice* out, CCAsyncHandle* h, const CCDeadline* deadline);
@@ -166,69 +110,15 @@ int cc_file_write_async_deadline(CCExec* ex, CCFile *file, CCSlice data, size_t*
 // - Err(e) = actual error
 // For streaming scenarios where you want to reuse the same buffer.
 // Usage: while (cc_io_avail(cc_file_read_buf(file, buf, n, &got))) { process(buf, got); }
-static inline bool !>(CCIoError) cc_file_read_buf_into(CCFile *file, void *buf, size_t n, size_t *out) {
-    if (!file || !file->handle || !buf || n == 0 || !out) {
-        return cc_err(cc_io_from_errno(EINVAL));
-    }
-    size_t got = fread(buf, 1, n, file->handle);
-    if (got == 0) {
-        if (ferror(file->handle)) {
-            return cc_err(cc_io_from_errno(errno));
-        }
-        // EOF - return Ok(false)
-        *out = 0;
-        return cc_ok(false);
-    }
-    // Got data - return Ok(true)
-    *out = got;
-    return cc_ok(true);
-}
+bool !>(CCIoError) cc_file_read_buf_into(CCFile *file, void *buf, size_t n, size_t *out);
 
 // Write from caller-provided buffer (no slice overhead). Returns bytes written.
 // For streaming scenarios where you want to avoid slice construction.
-static inline size_t !>(CCIoError) cc_file_write_buf(CCFile *file, const void *buf, size_t n) {
-    if (!file || !file->handle || !buf) {
-        return cc_err(cc_io_from_errno(EINVAL));
-    }
-    if (n == 0) return cc_ok(0);
-    size_t written = fwrite(buf, 1, n, file->handle);
-    if (written != n && ferror(file->handle)) {
-        return cc_err(cc_io_from_errno(errno));
-    }
-    return cc_ok(written);
-}
-
-static inline size_t !>(CCIoError) cc_file_sync(CCFile *file) {
-    if (!file || !file->handle) return cc_err(cc_io_from_errno(EINVAL));
-    if (fflush(file->handle) != 0) return cc_err(cc_io_from_errno(errno));
-    return cc_ok(0);
-}
-
-static inline size_t !>(CCIoError) cc_file_seek(CCFile *file, long offset, int whence) {
-    if (!file || !file->handle) return cc_err(cc_io_from_errno(EINVAL));
-    if (fseek(file->handle, offset, whence) != 0) return cc_err(cc_io_from_errno(errno));
-    return cc_ok(0);
-}
-
-static inline size_t !>(CCIoError) cc_file_tell(CCFile *file) {
-    if (!file || !file->handle) return cc_err(cc_io_from_errno(EINVAL));
-    long pos = ftell(file->handle);
-    if (pos < 0) return cc_err(cc_io_from_errno(errno));
-    return cc_ok((size_t)pos);
-}
-
-// Get file size in bytes. Returns 0 for non-seekable files (pipes, sockets).
-// Does not change file position.
-static inline size_t !>(CCIoError) cc_file_size(CCFile *file) {
-    if (!file || !file->handle) return cc_err(cc_io_from_errno(EINVAL));
-    long cur = ftell(file->handle);
-    if (cur < 0) return cc_ok(0);  // Non-seekable
-    if (fseek(file->handle, 0, SEEK_END) != 0) return cc_ok(0);
-    long end = ftell(file->handle);
-    fseek(file->handle, cur, SEEK_SET);  // Restore position
-    if (end < 0) return cc_ok(0);
-    return cc_ok((size_t)end);
-}
+size_t !>(CCIoError) cc_file_write_buf(CCFile *file, const void *buf, size_t n);
+size_t !>(CCIoError) cc_file_sync(CCFile *file);
+size_t !>(CCIoError) cc_file_seek(CCFile *file, long offset, int whence);
+size_t !>(CCIoError) cc_file_tell(CCFile *file);
+size_t !>(CCIoError) cc_file_size(CCFile *file);
 
 /* Canonical file-family wrappers. Methods lower to `cc_file_*`; for the read-style
    operations, the public family returns direct values while the explicit `*_into`
@@ -322,106 +212,16 @@ static inline bool cc_path_is_abs(CCSlice path) {
     return p[0] == '/';
 }
 
-// Join two path segments with separator if needed. Allocates in arena.
-static inline CCSlice cc_path_join(CCArena arena, CCSlice a, CCSlice b) {
-    if (!cc_arena_is_live(arena)) return cc_slice_empty();
-    size_t need_sep = (a.len > 0 && ((char*)a.ptr)[a.len - 1] != cc_path_sep()) ? 1 : 0;
-    size_t total = a.len + need_sep + b.len;
-    CCSlice out = cc_arena_alloc_slice_bytes(arena, total + 1);
-    char *buf = (char *)out.ptr;
-    if (!buf) return cc_slice_empty();
-    size_t off = 0;
-    if (a.len) { memcpy(buf + off, a.ptr, a.len); off += a.len; }
-    if (need_sep) { buf[off++] = cc_path_sep(); }
-    if (b.len) { memcpy(buf + off, b.ptr, b.len); off += b.len; }
-    buf[off] = '\0';
-    out.len = off;
-    return out;
-}
-
-// Dirname: returns parent directory (or "." if none). Allocates in arena.
-static inline CCSlice cc_path_dirname(CCArena arena, CCSlice path) {
-    if (!cc_arena_is_live(arena) || !path.ptr || path.len == 0) return cc_slice_from_static(".", 1);
-    const char *p = (const char *)path.ptr;
-    size_t len = path.len;
-    while (len > 0 && p[len - 1] == cc_path_sep()) len--;
-    if (len == 0) return cc_slice_from_static("/", 1);
-    size_t i = len;
-    while (i > 0 && p[i - 1] != cc_path_sep()) i--;
-    if (i == 0) return cc_slice_from_static(".", 1);
-    while (i > 1 && p[i - 1] == cc_path_sep()) i--;
-    CCSlice out = cc_arena_alloc_slice_bytes(arena, i + 1);
-    char *buf = (char *)out.ptr;
-    if (!buf) return cc_slice_empty();
-    memcpy(buf, p, i);
-    buf[i] = '\0';
-    out.len = i;
-    return out;
-}
-
-// Basename: returns last path component (empty if path ends with separator). Allocates in arena.
-static inline CCSlice cc_path_basename(CCArena arena, CCSlice path) {
-    if (!cc_arena_is_live(arena) || !path.ptr || path.len == 0) return cc_slice_empty();
-    const char *p = (const char *)path.ptr;
-    size_t len = path.len;
-    while (len > 0 && p[len - 1] == cc_path_sep()) len--;
-    size_t end = len;
-    size_t start = 0;
-    for (size_t i = len; i > 0; --i) {
-        if (p[i - 1] == cc_path_sep()) { start = i; break; }
-    }
-    size_t out_len = (end > start) ? (end - start) : 0;
-    CCSlice out = cc_arena_alloc_slice_bytes(arena, out_len + 1);
-    char *buf = (char *)out.ptr;
-    if (!buf) return cc_slice_empty();
-    if (out_len) memcpy(buf, p + start, out_len);
-    buf[out_len] = '\0';
-    out.len = out_len;
-    return out;
-}
+CCSlice cc_path_join(CCArena arena, CCSlice a, CCSlice b);
+CCSlice cc_path_dirname(CCArena arena, CCSlice path);
+CCSlice cc_path_basename(CCArena arena, CCSlice path);
 
 // ------------------------- Buffered reader/writer --------------------------
 #include "bufio.cch"
 
-static inline int cc_buf_writer_init(CCBufWriter *w, CCFile *f, CCArena arena, size_t cap) {
-    if (!w || !f || !cc_arena_is_live(arena) || cap == 0) return -1;
-    memset(w, 0, sizeof(*w));
-    w->file = f;
-    w->buf = (char *)cc_arena_alloc(arena, cap, sizeof(char));
-    if (!w->buf) return -1;
-    w->cap = cap;
-    w->len = 0;
-    return 0;
-}
-
-static inline size_t !>(CCIoError) cc_buf_writer_flush(CCBufWriter *w) {
-    if (!w || !w->file || !w->file->handle) return cc_err(cc_io_from_errno(EINVAL));
-    size_t written = fwrite(w->buf, 1, w->len, w->file->handle);
-    if (written != w->len) {
-        if (ferror(w->file->handle)) return cc_err(cc_io_from_errno(errno));
-    }
-    w->len = 0;
-    return cc_ok(written);
-}
-
-static inline size_t !>(CCIoError) cc_buf_writer_write(CCBufWriter *w, CCSlice data) {
-    if (!w || !w->buf || !w->file || !w->file->handle) return cc_err(cc_io_from_errno(EINVAL));
-    size_t off = 0;
-    while (off < data.len) {
-        size_t space = w->cap - w->len;
-        if (space == 0) {
-            size_t !>(CCIoError) fl = cc_buf_writer_flush(w);
-            if (cc_is_err(fl)) return fl;
-            space = w->cap;
-        }
-        size_t chunk = data.len - off;
-        if (chunk > space) chunk = space;
-        memcpy(w->buf + w->len, (char*)data.ptr + off, chunk);
-        w->len += chunk;
-        off += chunk;
-    }
-    return cc_ok(data.len);
-}
+int cc_buf_writer_init(CCBufWriter *w, CCFile *f, CCArena arena, size_t cap);
+size_t !>(CCIoError) cc_buf_writer_flush(CCBufWriter *w);
+size_t !>(CCIoError) cc_buf_writer_write(CCBufWriter *w, CCSlice data);
 
 /* cc_file_close is idempotent (nulls handle; no-op when already closed),
  * as a registered destroy hook must be. */

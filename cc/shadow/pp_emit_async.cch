@@ -317,7 +317,7 @@ static int shadow_emit_async_fn(AstNode* it, CEmit* out, TapeCache* cache) {
             if (!cemit_fmt(&syn,
                     "      {\n"
                     "        %s __cc_ar = %s_body(__f);\n"
-                    "        %s* __cc_arp = (%s*)malloc(sizeof(*__cc_arp));\n"
+                    "        %s* __cc_arp = (%s*)cc__heap_alloc(sizeof(*__cc_arp));\n"
                     "        if (__cc_arp) *__cc_arp = __cc_ar;\n"
                     "        __f->__r = (intptr_t)(void*)__cc_arp;\n"
                     "      }\n",
@@ -352,19 +352,19 @@ static int shadow_emit_async_fn(AstNode* it, CEmit* out, TapeCache* cache) {
                 "  for (int __i = 0; __i < 1; __i++) {\n"
                 "    cc_task_intptr_free(&__f->__t[__i]);\n"
                 "  }\n"
-                "  free(__f);\n"
+                "  cc__heap_free(__f);\n"
                 "}\n\n"))
             ok = 0;
         if (ok && !cemit_fmt(&syn, "CCTaskIntptr %s(%s) {\n", it->b, params))
             ok = 0;
         if (ok && !cemit_fmt(&syn,
-                "  %s_frame* __f = (%s_frame*)calloc(1, sizeof(%s_frame));\n",
+                "  %s_frame* __f = (%s_frame*)cc__heap_calloc(1, sizeof(%s_frame));\n",
                 base, base, base))
             ok = 0;
         if (ok && !cemit_str(&syn,
                 "  if (!__f) {\n"
                 "    CCTaskIntptr __t;\n"
-                "    memset(&__t, 0, sizeof(__t));\n"
+                "    cc__bytes_zero(&__t, sizeof(__t));\n"
                 "    return __t;\n"
                 "  }\n"
                 "  __f->__st = 0;\n"))

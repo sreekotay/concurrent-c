@@ -2,7 +2,7 @@
  * Slice ABI and helpers.
  *
  * Layout matches the codegen contract: {ptr,len,id} (24 bytes on 64-bit).
- * - ptr  : data pointer (`char*` so `s.ptr[i]` indexes bytes; ABI width matches `T*`)
+ * - ptr  : data pointer (`char*` so trusted/host index is bytes; ABI width matches `T*`)
  * - len  : logical length of the view
  * - id   : provenance/uniqueness token (0 if not tracked)
  *
@@ -10,8 +10,8 @@
  * send_take eligibility uses `id` flags (`CC_SLICE_ID_SUBSLICE`, uniqueness,
  * transferability) plus `len` — not a preserved available-length field.
  *
- * Most helpers are header-only. FFI adopt (`cc_adopt`) + `cc_slice_destroy`
- * need a small runtime registry (see cc/runtime/slice_adopt.c).
+ * Dest-bulk and other libc-using helpers live in `cc/runtime/slice_mem.c`.
+ * FFI adopt + `cc_slice_destroy` live in `cc/runtime/slice_adopt.c`.
  *
  * Provenance axes:
  * - Untracked (id==0 / from_buffer): no lifetime help; raw ptr+len.
@@ -24,8 +24,6 @@
 
 #include <ccc/cc_compat.cch>
 #include <stddef.h>
-#include <string.h>
-#include <ctype.h>
 
 // Explicit "untracked" id - signals this slice has no provenance tracking.
 // Use sparingly: passing untracked slices through channels or storing them
@@ -35,11 +33,13 @@
 #endif
 
 // Slice id bit layout (matches spec):
-// Bits 0–60 : allocation id (non-zero for tracked allocations)
+// Bits 0–59 : allocation id (non-zero for tracked allocations)
+// Bit 60    : is_cstr (ptr[len] is defined and 0 — C-string capability)
 // Bit 61    : is_transferable
 // Bit 62    : is_subslice
 // Bit 63    : is_unique (has destructor, move-only)
-#define CC_SLICE_ID_ALLOC_MASK 0x1FFFFFFFFFFFFFFFULL
+#define CC_SLICE_ID_ALLOC_MASK 0x0FFFFFFFFFFFFFFFULL
+#define CC_SLICE_ID_CSTR         (1ULL << 60)
 #define CC_SLICE_ID_TRANSFERABLE (1ULL << 61)
 #define CC_SLICE_ID_SUBSLICE     (1ULL << 62)
 #define CC_SLICE_ID_UNIQUE       (1ULL << 63)
@@ -48,17 +48,40 @@
 #define CC_SLICE_ID_CANONICAL_ALLOC CC_SLICE_ID_ALLOC_MASK
 
 typedef struct {
-    /* `char*` so `s.ptr[i]` is a well-formed byte Gap (not void-typed). */
+    /* `char*` so trusted/host `s.ptr[i]` is a byte index (not void-typed). */
     char *ptr;
     size_t len;
     uint64_t id;   // allocation id | flags
 } CCSlice;
 
+/* Header-local byte copy/zero. Do not #include <string.h> from this file —
+ * default CCS TUs must not declare memcpy / memset unless the user does. */
+static inline void cc__bytes_copy(void *d, const void *s, size_t n) {
+    unsigned char *D = (unsigned char *)d;
+    const unsigned char *S = (const unsigned char *)s;
+    size_t i;
+    for (i = 0; i < n; i++) D[i] = S[i];
+}
+static inline void cc__bytes_zero(void *d, size_t n) {
+    unsigned char *D = (unsigned char *)d;
+    size_t i;
+    for (i = 0; i < n; i++) D[i] = 0;
+}
+static inline int cc__bytes_cmp(const void *a, const void *b, size_t n) {
+    const unsigned char *A = (const unsigned char *)a;
+    const unsigned char *B = (const unsigned char *)b;
+    size_t i;
+    for (i = 0; i < n; i++) {
+        if (A[i] != B[i]) return (int)A[i] - (int)B[i];
+    }
+    return 0;
+}
+
 /* Unnamed facet (enforced by shadow_lower for the whole slice family —
- * CCSlice / Unique / Shared / Packed / Hdr / CCSlice_T). Ordinary sites:
- * field loads + UFCS OK; field stores denied. First-param CCSlice* bodies
- * are trusted (stdlib + user methods). Equivalent surface:
- *   @typeview on CCSlice { r: *; };
+ * CCSlice / Unique / Shared / Packed / Hdr / CCSlice_T). Ordinary sites
+ * may read `.ptr` / `.len` / `.id`; they may not store fields.
+ * First-param CCSlice* bodies are trusted (stdlib + user methods).
+ * Equivalent surface: `@typeview on CCSlice { r: *; };`
  * (Not written live here: angle-includes are host-C passthrough.) */
 
 /* Surface type sugar:
@@ -81,7 +104,8 @@ typedef CCSlice CCSliceShared;
  * The instance name carries the element type at compile time; `.base`
  * is the visible erasure spelling; one family face
  * `@typeview on CCSlice_* { as: base; }` (after the scalar instances)
- * supplies method retry into the byte helpers and arg-position autocast.
+ * supplies method retry, field-miss hop (`.len` / `.ptr` / `.id`), and
+ * arg-position autocast.
  * Element-wise methods and the scaled `bytes()` view come from the
  * `CC_GENERIC_FACTORY(CCSlice, 1)` body below, with sizeof(T) in hand.
  * `len` on a typed slice counts ELEMENTS; `bytes()` converts to an
@@ -245,14 +269,20 @@ static inline uint64_t cc_slice_clear_flags(uint64_t id, uint64_t flags) {
 static inline bool cc_slice_is_unique_id(uint64_t id) { return (id & CC_SLICE_ID_UNIQUE) != 0; }
 static inline bool cc_slice_is_transferable_id(uint64_t id) { return (id & CC_SLICE_ID_TRANSFERABLE) != 0; }
 static inline bool cc_slice_is_subslice_id(uint64_t id) { return (id & CC_SLICE_ID_SUBSLICE) != 0; }
+static inline bool cc_slice_is_cstr_id(uint64_t id) { return (id & CC_SLICE_ID_CSTR) != 0; }
 static inline bool cc_slice_is_canonical_id(uint64_t id) {
     return (id & CC_SLICE_ID_ALLOC_MASK) == CC_SLICE_ID_CANONICAL_ALLOC;
 }
 static inline uint64_t cc_slice_alloc_id(uint64_t id) { return id & CC_SLICE_ID_ALLOC_MASK; }
-static inline bool cc_slice_is_untracked_id(uint64_t id) { return id == CC_SLICE_ID_UNTRACKED; }
+/* Untracked = no alloc epoch and not unique. `is_cstr` alone is not lifetime. */
+static inline bool cc_slice_is_untracked_id(uint64_t id) {
+    return (id & CC_SLICE_ID_ALLOC_MASK) == 0 &&
+           (id & CC_SLICE_ID_UNIQUE) == 0;
+}
 static inline bool cc_slice_is_unique(CCSlice s) { return cc_slice_is_unique_id(s.id); }
 static inline bool cc_slice_is_transferable(CCSlice s) { return cc_slice_is_transferable_id(s.id); }
 static inline bool cc_slice_is_subslice(CCSlice s) { return cc_slice_is_subslice_id(s.id); }
+static inline bool cc_slice_is_cstr(CCSlice s) { return cc_slice_is_cstr_id(s.id); }
 static inline bool cc_slice_is_canonical(CCSlice s) { return cc_slice_is_canonical_id(s.id); }
 static inline bool cc_slice_is_untracked(CCSlice s) { return cc_slice_is_untracked_id(s.id); }
 
@@ -264,7 +294,10 @@ static inline CCSlice cc_slice_from_buffer(void *ptr, size_t len) {
 }
 
 static inline CCSlice cc_slice_from_static(void *ptr, size_t len) {
-    CCSlice s = {ptr, len, cc_slice_make_id(CC_SLICE_ID_CANONICAL_ALLOC, false, false, false)};
+    CCSlice s = {ptr, len,
+                 cc_slice_make_id(CC_SLICE_ID_CANONICAL_ALLOC, false, false,
+                                  false) |
+                     CC_SLICE_ID_CSTR};
     return s;
 }
 
@@ -337,12 +370,18 @@ static inline CCSlice const_signed_char_to_slice_n(const signed char *p,
     return signed_char_to_slice_n(p, n);
 }
 
-/* NUL-terminated C string → untracked view (strlen). No UFCS — call this
- * only at a trust boundary where the pointer is known to be a cstr. Prefer
+/* NUL-terminated C string → untracked view. No UFCS — call this only at
+ * a trust boundary where the pointer is known to be a cstr. Prefer
  * literal init / @slice for literals and to_slice_n for counted buffers. */
 static inline CCSlice cc_slice_cstr(const char *cstr) {
+    size_t n = 0;
     if (!cstr) return cc_slice_empty();
-    return cc_slice_from_buffer((void *)cstr, strlen(cstr));
+    while (cstr[n]) n++;
+    {
+        CCSlice s = cc_slice_from_buffer((void *)cstr, n);
+        s.id |= CC_SLICE_ID_CSTR;
+        return s;
+    }
 }
 
 /* String literal → canonical static slice. `lit` must be a string literal
@@ -357,24 +396,40 @@ static inline bool CCSlice_is_empty(CCSlice* s) {
 }
 static inline bool cc_slice_is_empty(CCSlice* s) { return CCSlice_is_empty(s); }
 
+/* Unique cleared. Subslice marked unless the view still covers the full
+ * allocation. `is_cstr` is recomputed: keep when `end == len` and the
+ * parent had it; otherwise set only when `ptr[end] == 0` (in-payload). */
+static inline uint64_t cc_slice_id_after_sub(CCSlice s, size_t start, size_t end) {
+    uint64_t id = cc_slice_clear_flags(s.id, CC_SLICE_ID_UNIQUE);
+    bool covers_full = (start == 0) && (end == s.len) &&
+                       !cc_slice_is_subslice_id(s.id);
+    bool cstr = 0;
+    if (covers_full)
+        id = cc_slice_clear_flags(id, CC_SLICE_ID_SUBSLICE);
+    else
+        id |= CC_SLICE_ID_SUBSLICE;
+    if (s.ptr) {
+        if (end == s.len)
+            cstr = cc_slice_is_cstr_id(s.id);
+        else if (end < s.len)
+            cstr = (s.ptr[end] == 0);
+    }
+    if (cstr)
+        id |= CC_SLICE_ID_CSTR;
+    else
+        id = cc_slice_clear_flags(id, CC_SLICE_ID_CSTR);
+    return id;
+}
+
 static inline CCSlice cc__slice_sub_value(CCSlice s, size_t start, size_t end) {
     if (start > end || end > s.len) {
         return cc_slice_empty();
     }
     uint8_t *base = (uint8_t *)s.ptr;
-    uint64_t id = cc_slice_clear_flags(s.id, CC_SLICE_ID_UNIQUE);
-    /* Full-range of a non-subslice keeps is_subslice clear; any proper
-     * subrange, or a full-range of an existing subslice, sets it. */
-    bool covers_full = (start == 0) && (end == s.len) && !cc_slice_is_subslice_id(s.id);
-    if (covers_full) {
-        id = cc_slice_clear_flags(id, CC_SLICE_ID_SUBSLICE);
-    } else {
-        id |= CC_SLICE_ID_SUBSLICE;
-    }
     CCSlice sub = {
         .ptr = base ? (char *)(base + start) : NULL,
         .len = end - start,
-        .id = id,
+        .id = cc_slice_id_after_sub(s, start, end),
     };
     return sub;
 }
@@ -386,6 +441,21 @@ static inline const char* cc_slice_str(CCSlice* s) {
 
 static inline const uint8_t* cc_slice_bytes(CCSlice* s) {
     return (const uint8_t*)s->ptr;
+}
+
+/* Store one element at `idx` (element count, not bytes). Used by mut
+ * for-in (`for (&v in s)`). 0 on success; -1 if the view or index is bad. */
+static inline int cc_slice_store_at(CCSlice *s, size_t idx, size_t elsz,
+                                    const void *src) {
+    size_t k;
+    unsigned char *d;
+    const unsigned char *p;
+    if (!s || !s->ptr || !src || !elsz || idx >= s->len) return -1;
+    if (idx && elsz > ((size_t)-1) / idx) return -1;
+    d = (unsigned char *)s->ptr + idx * elsz;
+    p = (const unsigned char *)src;
+    for (k = 0; k < elsz; k++) d[k] = p[k];
+    return 0;
 }
 
 /* ---- Aggregate slice array ---- */
@@ -425,14 +495,26 @@ static inline bool cc_slice_get(CCSlice s, size_t idx, char *out) {
 }
 
 static inline size_t cc_slice_index_of(CCSlice s, CCSlice needle, bool *found) {
-    if (needle.len == 0 || needle.len > s.len) { if (found) *found = false; return 0; }
-    const uint8_t *hay = (const uint8_t *)s.ptr;
-    for (size_t i = 0; i + needle.len <= s.len; ++i) {
-        if (memcmp(hay + i, needle.ptr, needle.len) == 0) {
-            if (found) *found = true; return i;
+    const uint8_t *hay;
+    const uint8_t *nd;
+    size_t i, j;
+    if (needle.len == 0 || needle.len > s.len) {
+        if (found) *found = false;
+        return 0;
+    }
+    hay = (const uint8_t *)s.ptr;
+    nd = (const uint8_t *)needle.ptr;
+    for (i = 0; i + needle.len <= s.len; ++i) {
+        for (j = 0; j < needle.len; ++j) {
+            if (hay[i + j] != nd[j]) break;
+        }
+        if (j == needle.len) {
+            if (found) *found = true;
+            return i;
         }
     }
-    if (found) *found = false; return 0;
+    if (found) *found = false;
+    return 0;
 }
 
 /* UFCS: s.has(needle) — substring presence (wraps index_of).
@@ -467,15 +549,27 @@ static inline bool cc_slice_has_ci(CCSlice *s, CCSlice needle) {
 }
 
 static inline size_t cc_slice_last_index_of(CCSlice s, CCSlice needle, bool *found) {
-    if (needle.len == 0 || needle.len > s.len) { if (found) *found = false; return 0; }
-    const uint8_t *hay = (const uint8_t *)s.ptr;
-    for (size_t i = s.len - needle.len + 1; i-- > 0;) {
-        if (memcmp(hay + i, needle.ptr, needle.len) == 0) {
-            if (found) *found = true; return i;
+    const uint8_t *hay;
+    const uint8_t *nd;
+    size_t i, j;
+    if (needle.len == 0 || needle.len > s.len) {
+        if (found) *found = false;
+        return 0;
+    }
+    hay = (const uint8_t *)s.ptr;
+    nd = (const uint8_t *)needle.ptr;
+    for (i = s.len - needle.len + 1; i-- > 0;) {
+        for (j = 0; j < needle.len; ++j) {
+            if (hay[i + j] != nd[j]) break;
+        }
+        if (j == needle.len) {
+            if (found) *found = true;
+            return i;
         }
         if (i == 0) break;
     }
-    if (found) *found = false; return 0;
+    if (found) *found = false;
+    return 0;
 }
 
 static inline size_t cc_slice_count(CCSlice s, CCSlice needle) {
@@ -493,10 +587,14 @@ static inline size_t cc_slice_count(CCSlice s, CCSlice needle) {
 
 /* ---- Trim helpers ---- */
 
+static inline int cc__ascii_isspace(unsigned char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
 static inline size_t cc__trim_left_idx(CCSlice s) {
     size_t i = 0;
     const unsigned char *p = (const unsigned char *)s.ptr;
-    while (i < s.len && isspace(p[i])) i++;
+    while (i < s.len && cc__ascii_isspace(p[i])) i++;
     return i;
 }
 
@@ -504,7 +602,7 @@ static inline size_t cc__trim_right_idx(CCSlice s) {
     if (s.len == 0) return 0;
     const unsigned char *p = (const unsigned char *)s.ptr;
     size_t i = s.len;
-    while (i > 0 && isspace(p[i-1])) i--;
+    while (i > 0 && cc__ascii_isspace(p[i-1])) i--;
     return i;
 }
 
@@ -542,10 +640,18 @@ static inline uint64_t cc_slice_hash64(CCSlice s) {
 }
 
 static inline bool cc__slice_eq(CCSlice a, CCSlice b) {
+    const uint8_t *pa;
+    const uint8_t *pb;
+    size_t i;
     if (a.len != b.len) return false;
     if (a.ptr == b.ptr) return true;
     if (!a.ptr || !b.ptr) return false;
-    return memcmp(a.ptr, b.ptr, a.len) == 0;
+    pa = (const uint8_t *)a.ptr;
+    pb = (const uint8_t *)b.ptr;
+    for (i = 0; i < a.len; ++i) {
+        if (pa[i] != pb[i]) return false;
+    }
+    return true;
 }
 
 /* ---- UFCS methods (receiver is CCSlice*) ---- */
@@ -587,15 +693,33 @@ static inline CCSlice cc__slice_sub_const_ptr(const CCSlice* s, size_t start, si
 static inline CCSlice CCSlice_sub(CCSlice* s, size_t start, size_t end) { return cc__slice_sub_ptr(s, start, end); }
 
 static inline bool cc_slice_starts_with(CCSlice* s, CCSlice prefix) {
+    const uint8_t *p;
+    const uint8_t *q;
+    size_t i;
     if (!s) return false;
-    return s->len >= prefix.len && memcmp(s->ptr, prefix.ptr, prefix.len) == 0;
+    if (s->len < prefix.len) return false;
+    p = (const uint8_t *)s->ptr;
+    q = (const uint8_t *)prefix.ptr;
+    for (i = 0; i < prefix.len; ++i) {
+        if (p[i] != q[i]) return false;
+    }
+    return true;
 }
 static inline bool CCSlice_starts_with(CCSlice* s, CCSlice prefix) { return cc_slice_starts_with(s, prefix); }
 
 static inline bool cc_slice_ends_with(CCSlice* s, CCSlice suffix) {
+    const uint8_t *p;
+    const uint8_t *q;
+    size_t i, off;
     if (!s) return false;
-    return s->len >= suffix.len &&
-        memcmp((uint8_t *)s->ptr + (s->len - suffix.len), suffix.ptr, suffix.len) == 0;
+    if (s->len < suffix.len) return false;
+    off = s->len - suffix.len;
+    p = (const uint8_t *)s->ptr;
+    q = (const uint8_t *)suffix.ptr;
+    for (i = 0; i < suffix.len; ++i) {
+        if (p[off + i] != q[i]) return false;
+    }
+    return true;
 }
 static inline bool CCSlice_ends_with(CCSlice* s, CCSlice suffix) { return cc_slice_ends_with(s, suffix); }
 
@@ -606,13 +730,18 @@ static inline bool cc_slice_eq(CCSlice* s, CCSlice other) {
 static inline bool CCSlice_eq(CCSlice* s, CCSlice other) { return cc_slice_eq(s, other); }
 
 static inline bool cc_slice_eq_cstr(CCSlice* s, const char* cstr) {
-    if (!s) return false;
-    size_t len = cstr ? strlen(cstr) : 0;
-    if (!cstr) return false;
+    const uint8_t *p;
+    size_t i, len = 0;
+    if (!s || !cstr) return false;
+    while (cstr[len]) len++;
     if (s->len != len) return false;
     if (s->len == 0) return true;
     if (!s->ptr) return false;
-    return memcmp(s->ptr, cstr, len) == 0;
+    p = (const uint8_t *)s->ptr;
+    for (i = 0; i < len; ++i) {
+        if (p[i] != (uint8_t)cstr[i]) return false;
+    }
+    return true;
 }
 static inline bool CCSlice_eq_cstr(CCSlice* s, const char* cstr) { return cc_slice_eq_cstr(s, cstr); }
 

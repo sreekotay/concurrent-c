@@ -6,6 +6,9 @@
 // other. Golden cross-check: twitter leaf borrow/mat must be 17787/312.
 #include <ccc/std/prelude.cch>
 #include <ccc/std/json.cch>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 @grammar(rules) Json {~~~~
     include JsonDom

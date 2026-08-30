@@ -40,7 +40,7 @@ int main(void) {
             printf("[Fiber] Attempting to send to full channel (will block)...\n");
             int rc = cc_chan_send(t.raw, (int[]){2}, sizeof(int));
             printf("[Fiber] Send returned with code: %d (expected EPIPE=32 or ECANCELED=89)\n", rc);
-        });
+        }) !>;
 
         // 3. Wait a bit to ensure the fiber is actually blocked
         cc_sleep_ms(500);

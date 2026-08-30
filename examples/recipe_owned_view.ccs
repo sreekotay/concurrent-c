@@ -34,7 +34,7 @@ static void Doc_destroy(Doc* d) {
 static void !>(CCError) doc_from_view(Doc* d, char[:] src) {
     if (!d) return cc_err(CC_ERR_INVALID_ARG, "from_view without doc");
     if (d->store.valid()) return cc_err(CC_ERR_INVALID_ARG, "from_view on live doc");
-    if (src.len && src.id == 0)
+    if (src.len && cc_slice_is_untracked_id(src.id))
         return cc_err(CC_ERR_INVALID_ARG, "untracked view");
     d->store = cc_arena_heap(kilobytes(1));
     if (!d->store.valid()) return cc_err(CC_ERR_OUT_OF_MEMORY, "store");

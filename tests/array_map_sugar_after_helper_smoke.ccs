@@ -2,10 +2,7 @@
 #include <stdio.h>
 
 static inline CCSliceHdr key_view(char[:] key) {
-    CCSliceHdr h = {0};
-    h.ptr = key.ptr;
-    h.len = key.len;
-    return h;
+    return cc_slice_hdr_from_buffer(key.ptr, key.len);
 }
 
 typedef struct Entr { int64_t n; } Entr;

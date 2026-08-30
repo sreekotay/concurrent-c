@@ -8,6 +8,8 @@
 //   - Reader cursor on empty input: clean EOF, not an error.
 //   - multi-byte literal at end-of-input: bounds-checked, no overread.
 #include <ccc/std/prelude.cch>
+#include <string.h>
+#include <stdio.h>
 
 /* decode: strip '%' markers; REJECT any span containing 'x' (validation).
  * Only invoked when the dirty flag saw a '%' branch — clean spans borrow. */

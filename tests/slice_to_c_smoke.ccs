@@ -1,0 +1,65 @@
+/* to_c / to_cstr: copy only when !is_cstr. to_cstr is to_c.ptr. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena a = cc_arena_heap(kilobytes(1)) @destroy;
+    if (!a.valid()) return 1;
+
+    char[:0] lit = "abcde";
+    char[:0] z = lit.to_c(a) !>;
+    if (z.len != 5 || z.ptr != lit.ptr) {
+        fprintf(stderr, "lit to_c should not copy\n");
+        return 2;
+    }
+    char *p = lit.to_cstr(a) !>;
+    if (p != lit.ptr || p[5] != 0) {
+        fprintf(stderr, "lit to_cstr peel failed\n");
+        return 3;
+    }
+
+    char[:] br = {'a', 'b', 'c', 'd'};
+    char[:0] zb = br.to_c(a) !>;
+    if (zb.len != 4 || zb.ptr == br.ptr) {
+        fprintf(stderr, "brace to_c should copy\n");
+        return 4;
+    }
+    if (zb.ptr[0] != 'a' || zb.ptr[3] != 'd' || zb.ptr[4] != 0) {
+        fprintf(stderr, "brace to_c bytes wrong\n");
+        return 5;
+    }
+    char *pb = br.to_cstr(a) !>;
+    if (pb == br.ptr || pb[4] != 0) {
+        fprintf(stderr, "brace to_cstr should copy\n");
+        return 6;
+    }
+
+    char[:] mid = lit.sub(0, 2);
+    char[:0] zm = mid.to_c(a) !>;
+    if (zm.ptr == mid.ptr || zm.len != 2 || zm.ptr[2] != 0) {
+        fprintf(stderr, "interior sub should lose cstr and copy\n");
+        return 7;
+    }
+
+    char[:] rest = lit.sub(1, 5);
+    char[:0] zr = rest.to_c(a) !>;
+    if (zr.ptr != rest.ptr || zr.len != 4 || zr.ptr[4] != 0) {
+        fprintf(stderr, "end-aligned sub should keep cstr\n");
+        return 8;
+    }
+
+    char[:] from_c = cc_slice_cstr("hi");
+    char[:0] zc = from_c.to_c(a) !>;
+    if (zc.ptr != from_c.ptr || zc.len != 2 || zc.ptr[2] != 0) {
+        fprintf(stderr, "cc_slice_cstr should already be cstr\n");
+        return 9;
+    }
+
+    printf("slice_to_c_smoke: OK\n");
+    return 0;
+}

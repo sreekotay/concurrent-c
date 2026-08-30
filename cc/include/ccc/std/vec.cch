@@ -19,7 +19,6 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
 #include <stdbool.h>
 /* cc_runtime.cch transitively pulls the channel/future runtime, whose symbols
  * the standalone comptime TU can't link; vec uses nothing from it, so skip it
@@ -272,7 +271,9 @@ static inline CCVec_size_t cc__CCVec_size_t_new(CCArena __a) {
 /*
  * CC_VEC_DECL_HEAP(T, Name)
  *
- * Heap-backed vector (tool/test-only; not arena-scoped).
+ * Heap-backed vector (tool/test-only; not arena-scoped). The TU that
+ * expands this macro must already have realloc/free (this header does
+ * not include stdlib.h).
  */
 #define CC_VEC_DECL_HEAP(T, Name)                                                 \
     typedef struct { size_t len, cap; T *data; } Name;                            \
@@ -375,7 +376,7 @@ typedef struct ${mangled}_chk { char _; } ${mangled}_chk;
 static inline ${mangled}_chk ${mangled}_chk_new(void *a) {
     ${mangled}_chk z;
     (void)a;
-    memset(&z, 0, sizeof(z));
+    z._ = 0;
     return z;
 }
 #else

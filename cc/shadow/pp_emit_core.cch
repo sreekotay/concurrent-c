@@ -3222,12 +3222,16 @@ static int g_shadow_nginst;
 enum {
     SHADOW_BIND_ARRAY = 1,
     SHADOW_BIND_ATOMIC = 2,
-    SHADOW_BIND_CACHE = 4
+    SHADOW_BIND_CACHE = 4,
+    SHADOW_BIND_WALK = 8,
+    SHADOW_BIND_WALK_MUT = 16
 };
 typedef struct ShadowBind {
     char name[64];
     char ty[128];
     int flags;
+    char walk_subj[128];
+    char walk_idx[64];
 } ShadowBind;
 static ShadowBind** g_shadow_binds;
 static int g_shadow_nbinds;
@@ -3930,10 +3934,10 @@ static int shadow_restrict_register(const char* base, const char* mode,
             g_shadow_restrict_diag = 1;
             return 0;
         }
-        if (stars != 0) {
+        if (stars > 1) {
             fprintf(stderr,
                     "error: @typeview %s on %s: as: field '%s' must be a "
-                    "value embed, not a pointer\n",
+                    "value embed or a single pointer hop\n",
                     mlabel, base, as_fields[i]);
             g_shadow_restrict_diag = 1;
             return 0;
@@ -4149,6 +4153,7 @@ static void shadow_restrict_check_text(const char* text) {
                             "error: restricted mode '%s' on '%s' does not allow "
                             "field '%s'\n",
                             shadow_restrict_mode_label(rr), rr->base, field);
+                    fprintf(stderr, "note: %s.%s\n", name, field);
                     g_shadow_restrict_diag = 1;
                     return;
                 }
@@ -4243,15 +4248,20 @@ static void shadow_restrict_check_call_widen(const char* fn, const char* args) {
     }
 }
 
-/* Angle-includes are passthrough (not spliced into the AST), so the
- * slice-family unnamed facet is installed here — same meaning as:
- *   @typeview on CCSlice { r: *; };
- * Loads + UFCS open; field stores denied; first-arg bodies trusted. */
+/* Angle-includes are passthrough (not spliced into the AST), so family
+ * unnamed facets are installed here.
+ * Slice: all fields readable, none writable (`r: *`).
+ * String: SSO union is not a pointer — hide it; `.len` / `.cap` + UFCS.
+ * Box: methods, not `.p`. First-arg bodies trusted. */
 static void shadow_restrict_register_builtins(void) {
     (void)shadow_restrict_register("CCSlice", "", "{ r: *; }");
+    (void)shadow_restrict_register(
+        "CCString", "", "{ r: ^data, ^inline_buf, ^_inline_word; }");
     /* Named pointer: methods, not `.p`. Same body as `cc_box.cch`.
      * Header lowering strips the live `@typeview`; pin after table reset. */
-    (void)shadow_restrict_register("CCBox_*", "", "{ r: ^p; }");
+    (void)shadow_restrict_register("CCBox_*", "", "{ as: p; r: ^p; }");
+    /* Named-pointer hop — header lowering strips the live `@typeview`. */
+    shadow_as_glob_register("CCBox_*", "p");
     /* Typed-slice family face — also declared in cc_slice.cch as
      * `@typeview on CCSlice_* { as: base; }` (stripped from host `.h`). */
     shadow_as_glob_register("CCSlice_*", "base");
@@ -4633,6 +4643,20 @@ static int shadow_field_ty_of(const char* outer, const char* field, char* dst,
     char base[128];
     if (!outer || !field || !dst || !cap) return 0;
     dst[0] = 0;
+    /* Factory-spliced CCBox::[H] may not have scanned fields yet. */
+    if (field[0] == 'p' && field[1] == 0) {
+        const char* ty = outer;
+        const char* res = shadow_td_alias_resolve(outer);
+        if (res && res[0]) ty = res;
+        if (strcmp(ty, "CCBox") == 0) {
+            snprintf(dst, cap, "void*");
+            return 1;
+        }
+        if (strncmp(ty, "CCBox_", 6) == 0 && ty[6]) {
+            snprintf(dst, cap, "%s*", ty + 6);
+            return 1;
+        }
+    }
     f = shadow_field_find(outer, field);
     if ((!f || !f->field_ty || !f->field_ty[0]) &&
         shadow_ty_restrict_base(outer, base, sizeof(base)))
@@ -5023,6 +5047,11 @@ static void shadow_chan_reset(void) {
     shadow_as_register("CCIoError", "base", "CCError");
     /* Opaque nursery: header lowering strips `as: (Region)n`. */
     shadow_as_register_viewed("CCNursery", "arena", "CCArena", "Region");
+    /* Angle-includes do not harvest CCSlice members. Field-miss `as:` hop
+     * needs the ABI names on the landing type. */
+    shadow_field_register_ex("CCSlice", "ptr", "char*");
+    shadow_field_register_ex("CCSlice", "len", "size_t");
+    shadow_field_register_ex("CCSlice", "id", "uint64_t");
     g_shadow_ndhooks = 0;
     g_shadow_nchooks = 0;
     if (g_shadow_ufcs_syms) {
@@ -6100,6 +6129,26 @@ static const char* shadow_td_alias_resolve(const char* ty) {
     return cur;
 }
 
+/* Spelled CCBox / CCBox_H — dest-mint and Host* peel. */
+static int shadow_ty_is_box_instance(const char* ty) {
+    if (!ty || !ty[0]) return 0;
+    if (strcmp(ty, "CCBox") == 0) return 1;
+    return strncmp(ty, "CCBox_", 6) == 0 && ty[6] != 0;
+}
+
+/* Teaching name of a named pointer: typedef of CCBox_H, or CCArena
+ * (same ABI, union `.p` / `.a` / `.base`). Dest does not mint. */
+static int shadow_ty_is_box_alias(const char* ty) {
+    const char* res;
+    if (!ty || !ty[0]) return 0;
+    if (strcmp(ty, "CCArena") == 0 ||
+        strncmp(ty, "CCArena_Restrict_", 17) == 0)
+        return 1;
+    if (shadow_ty_is_box_instance(ty)) return 0;
+    res = shadow_td_alias_resolve(ty);
+    return res && shadow_ty_is_box_instance(res);
+}
+
 /* True when `tag` is a `typedef struct tag Alias` base (after bind resolve). */
 static int shadow_td_alias_is_base(const char* tag) {
     int i;
@@ -6394,9 +6443,19 @@ static void shadow_as_materialize_globs_for(const char* outer) {
         char target[64];
         int stars = 0;
         ShadowAsGlob* g = &g_shadow_as_globs[idxs[i]];
-        if (!shadow_field_ty_of(outer, g->field, fty, sizeof(fty))) continue;
+        if (!shadow_field_ty_of(outer, g->field, fty, sizeof(fty))) {
+            /* Prelude `CCSlice_*` instances are not field-scanned (angle
+             * include). The family glob is `as: base` → CCSlice. */
+            if (strcmp(g->field, "base") == 0 &&
+                strncmp(outer, "CCSlice_", 8) == 0 &&
+                strcmp(outer, "CCSlicePacked") != 0) {
+                shadow_field_register_ex(outer, "base", "CCSlice");
+                snprintf(fty, sizeof(fty), "CCSlice");
+            } else
+                continue;
+        }
         shadow_ty_base_stars(fty, target, sizeof(target), &stars);
-        if (!target[0] || stars != 0) continue;
+        if (!target[0] || stars > 1) continue;
         shadow_as_register(outer, g->field, target);
         g->hits++;
     }

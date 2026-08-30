@@ -6,6 +6,8 @@
 #include <ccc/std/prelude.cch>
 #include <assert.h>
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 typedef struct Conn {
     CCChanTx ready_tx;

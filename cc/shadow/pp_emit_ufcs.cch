@@ -854,14 +854,13 @@ static int shadow_ufcs_nursery_spawn_parts(const char* recv, const char* meth_na
     return 1;
 }
 
-/* Named pointer whose C methods take Host*. One `.p` peel.
- * CCNursery / CCExclusive / CCArena are handle tokens (surface takes the
- * box). Generic CCBox_* still peel. */
+/* Spelled CCBox / CCBox_H — Host* methods peel `.p`. Teaching aliases
+ * (typedef of CCBox_H, CCArena) pass the handle token. */
 static int shadow_ufcs_ty_is_box(const char* vty, const ShadowBind* rb) {
     const char* t;
     if (shadow_ufcs_ty_is(vty, rb, "CCBox")) return 1;
     t = (vty && vty[0]) ? vty : (rb && rb->ty[0] ? rb->ty : NULL);
-    if (t && strncmp(t, "CCBox_", 6) == 0) return 1;
+    if (t && shadow_ty_is_box_instance(t)) return 1;
     return 0;
 }
 
@@ -872,38 +871,16 @@ static int shadow_ufcs_box_token_meth(const char* meth) {
            strcmp(meth, "is_live") == 0 || strcmp(meth, "host") == 0;
 }
 
-/* CCNursery is a boxed handle. Pass the token. Destroy is the slot. */
-static int shadow_ufcs_nursery_slot_meth(const char* meth) {
+/* Slot methods take T* so they can null the binding. */
+static int shadow_ufcs_box_alias_slot_meth(const char* vty, const char* meth) {
     if (!meth) return 0;
-    return strcmp(meth, "destroy") == 0;
-}
-
-static int shadow_ufcs_nursery_pass_handle(const char* vty, const ShadowBind* rb,
-                                          const char* meth) {
-    if (!shadow_ufcs_ty_is(vty, rb, "CCNursery")) return 0;
-    return !shadow_ufcs_nursery_slot_meth(meth);
-}
-
-/* CCExclusive surface takes the box; destroy is the slot. */
-static int shadow_ufcs_exclusive_slot_meth(const char* meth) {
-    if (!meth) return 0;
-    return strcmp(meth, "destroy") == 0;
-}
-
-static int shadow_ufcs_exclusive_pass_handle(const char* vty,
-                                            const ShadowBind* rb,
-                                            const char* meth) {
-    if (!shadow_ufcs_ty_is(vty, rb, "CCExclusive")) return 0;
-    return !shadow_ufcs_exclusive_slot_meth(meth);
-}
-
-/* CCArena is a boxed handle. Pass the token; macros run CC__ARENA_HOST.
- * Slot methods still take CCArena* so they can null the binding. */
-static int shadow_ufcs_arena_slot_meth(const char* meth) {
-    if (!meth) return 0;
-    return strcmp(meth, "destroy") == 0 || strcmp(meth, "free") == 0 ||
-           strcmp(meth, "detach") == 0 || strcmp(meth, "adopt") == 0 ||
-           strcmp(meth, "try_adopt") == 0;
+    if (strcmp(meth, "destroy") == 0) return 1;
+    if (!vty) return 0;
+    if (strcmp(vty, "CCArena") == 0 ||
+        strncmp(vty, "CCArena_Restrict_", 17) == 0)
+        return strcmp(meth, "free") == 0 || strcmp(meth, "detach") == 0 ||
+               strcmp(meth, "adopt") == 0 || strcmp(meth, "try_adopt") == 0;
+    return 0;
 }
 
 static int shadow_ufcs_ty_ends_star(const char* t) {
@@ -935,14 +912,20 @@ static int shadow_ufcs_ty_is_arena_handle(const char* vty, const ShadowBind* rb)
     return strncmp(t, "CCArena_Restrict_", 17) == 0;
 }
 
-static int shadow_ufcs_arena_pass_handle(const char* recv, const char* vty,
-                                        const ShadowBind* rb,
-                                        const char* meth) {
-    int is_arena = 0;
-    if (recv && strstr(recv, "cc_nursery_arena(")) is_arena = 1;
-    if (shadow_ufcs_ty_is_arena_handle(vty, rb)) is_arena = 1;
-    if (!is_arena) return 0;
-    return !shadow_ufcs_arena_slot_meth(meth);
+static int shadow_ufcs_pass_handle(const char* recv, const char* vty,
+                                  const ShadowBind* rb, const char* meth) {
+    const char* t;
+    if (recv && strstr(recv, "cc_nursery_arena("))
+        return !shadow_ufcs_box_alias_slot_meth("CCArena", meth);
+    t = (vty && vty[0]) ? vty : (rb && rb->ty[0] ? rb->ty : NULL);
+    if (shadow_ufcs_ty_is_arena_handle(vty, rb))
+        return !shadow_ufcs_box_alias_slot_meth(t ? t : "CCArena", meth);
+    if (t && shadow_ty_is_box_alias(t))
+        return !shadow_ufcs_box_alias_slot_meth(t, meth);
+    if (shadow_ufcs_ty_is(vty, rb, "CCNursery") ||
+        shadow_ufcs_ty_is(vty, rb, "CCExclusive"))
+        return !shadow_ufcs_box_alias_slot_meth(vty, meth);
+    return 0;
 }
 
 /* Fat CCSlice / Unique / Shared — NOT Hdr or Packed (those share the
@@ -2031,7 +2014,9 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     }
     /* Outer view allow-list: `d->len()` is still Highlight. `d->tree.meth`
      * already peeled — the method is on the field's type. */
+    /* Unnamed facets hide fields, not methods (`s.data()` vs `s.data`). */
     if (!walked_fields && pending_rr &&
+        !shadow_restrict_is_unnamed(pending_rr) &&
         !shadow_restrict_allows_use(pending_rr, meth_name)) {
         fprintf(stderr,
                 "error: restricted mode '%s' on '%s' does not allow "
@@ -2143,14 +2128,13 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     /* Boxed arena / nursery handle: pass the token. Do not invent `&` —
      * a peel (`cc_nursery_arena(n)`) is an rvalue; `cc_arena_alloc`
      * unwraps it. */
-    if (shadow_ufcs_arena_pass_handle(recv, vty, rb, meth_name) ||
-        shadow_ufcs_nursery_pass_handle(vty, rb, meth_name) ||
-        shadow_ufcs_exclusive_pass_handle(vty, rb, meth_name))
+    if (shadow_ufcs_pass_handle(recv, vty, rb, meth_name))
         ufcs_ptr_recv = 1;
     /* `@typeview(Alloc) CCArena*` is pointer-to-handle. Allocate ops take
      * the handle (`*a`), not the slot. vty is already Base after view
      * resolve — the star lives on the bind. */
-    if (shadow_ufcs_arena_pass_handle(recv, vty, rb, meth_name) &&
+    if (shadow_ufcs_pass_handle(recv, vty, rb, meth_name) &&
+        shadow_ufcs_ty_is_arena_handle(vty, rb) &&
         shadow_ufcs_arena_recv_is_ptr(vty, rb, walked_fields)) {
         const char* rp = recv;
         while (*rp == ' ' || *rp == '\t' || *rp == '(') rp++;
@@ -2197,12 +2181,7 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                     return shadow_ufcs_fmt_call(
                         dst, cap, hcal,
                         (hook_by_val || SHADOW_UFCS_PTR_RECV() ||
-                         shadow_ufcs_arena_pass_handle(recv, vty, rb,
-                                                       meth_name) ||
-                         shadow_ufcs_nursery_pass_handle(vty, rb,
-                                                         meth_name) ||
-                         shadow_ufcs_exclusive_pass_handle(vty, rb,
-                                                           meth_name))
+                         shadow_ufcs_pass_handle(recv, vty, rb, meth_name))
                             ? ""
                             : "&",
                         recv, a);
@@ -2408,9 +2387,7 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                 strcmp(tag, "CCString") != 0) {
                 const char* amp =
                     (is_arrow || SHADOW_UFCS_PTR_RECV() ||
-                     shadow_ufcs_arena_pass_handle(recv, vty, rb, meth_name) ||
-                     shadow_ufcs_nursery_pass_handle(vty, rb, meth_name) ||
-                     shadow_ufcs_exclusive_pass_handle(vty, rb, meth_name))
+                     shadow_ufcs_pass_handle(recv, vty, rb, meth_name))
                         ? ""
                         : "&";
                 const char* callee = NULL;
@@ -3495,6 +3472,12 @@ static int shadow_ufcs_try_as_retry_on(const char* recv, const char* meth_name,
     else
         shadow_bind_base_ty(rb, vty, sizeof(vty));
     if (!vty[0]) return 0;
+    {
+        const char* res = shadow_td_alias_resolve(vty);
+        shadow_as_materialize_globs_for(vty);
+        if (res && res[0] && strcmp(res, vty) != 0)
+            shadow_as_materialize_globs_for(res);
+    }
     /* as: retry is only for methods the outer does not declare.
      * `d->destroy()` with Type_destroy on the face must not become
      * the embed's destroy (`as: tree`). */
@@ -3515,8 +3498,10 @@ static int shadow_ufcs_try_as_retry_on(const char* recv, const char* meth_name,
         int n, ok;
         {
             char leaf[128];
+            const char* res = shadow_td_alias_resolve(vty);
             shadow_restrict_leaf_ty(vty, leaf, sizeof(leaf));
-            if (strcmp(as->outer, vty) != 0 && strcmp(as->outer, leaf) != 0)
+            if (strcmp(as->outer, vty) != 0 && strcmp(as->outer, leaf) != 0 &&
+                !(res && res[0] && strcmp(as->outer, res) == 0))
                 continue;
         }
         if (strchr(as->field, '.')) continue;
@@ -3565,19 +3550,27 @@ static int shadow_ufcs_try_as_retry_on(const char* recv, const char* meth_name,
             }
         }
         if (n < 0 || (size_t)n >= sizeof(peeled)) continue;
-        /* Value embed: inner UFCS is always '.'. Accessor peels have no
-         * bind — hint the face target so CCArena.alloc still composes. */
+        /* Value embed: inner UFCS is '.'. A single-pointer hop (`as: p`)
+         * is a Host* expression — inner recv is already a pointer. */
         {
             const char* saved_hint = g_shadow_ufcs_hint_vty;
+            char fty[96];
+            char base[64];
+            int stars = 0;
+            int hop_ptr = 0;
+            if (shadow_field_ty_of(as->outer, as->field, fty, sizeof(fty))) {
+                shadow_ty_base_stars(fty, base, sizeof(base), &stars);
+                hop_ptr = (stars == 1);
+            }
             g_shadow_ufcs_hint_vty = as->target;
-            ok = shadow_ufcs_lower_parts(peeled, meth_name, args, 0, elem_ty,
-                                         cand, sizeof(cand));
+            ok = shadow_ufcs_lower_parts(peeled, meth_name, args, hop_ptr,
+                                         elem_ty, cand, sizeof(cand));
             g_shadow_ufcs_hint_vty = saved_hint;
+            if (!ok)
+                ok = shadow_ufcs_try_as_retry_on(peeled, meth_name, args,
+                                                 hop_ptr, elem_ty, as->target,
+                                                 cand, sizeof(cand));
         }
-        if (!ok)
-            ok = shadow_ufcs_try_as_retry_on(peeled, meth_name, args, 0,
-                                             elem_ty, as->target, cand,
-                                             sizeof(cand));
         if (!ok) continue;
         if (nhit) {
             fprintf(stderr,
@@ -5521,6 +5514,10 @@ static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
                                   size_t cap, const char* elem_ty) {
     int i;
     char cur[8192];
+    if (shadow_walk_expr_addr(text)) {
+        if (dst && cap) dst[0] = 0;
+        return;
+    }
     /* Boolean / ternary mixes are multi-call — peel text, don't trust one kid. */
     int multi = text && (strstr(text, "&&") || strstr(text, "||") ||
                          strchr(text, '?'));
@@ -5570,6 +5567,8 @@ static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
                     if (elem_ty && strncmp(elem_ty, "CCResult_", 9) == 0)
                         shadow_rewrite_result_ctors(dst, cap, elem_ty);
                     shadow_peel_nursery_host_calls(dst, cap);
+                    shadow_rewrite_array_len_fields(dst, cap);
+                    (void)shadow_rewrite_as_field_reads(dst, cap);
                     return;
                 }
                 g_shadow_sink_dest[0] = 0;
@@ -5631,6 +5630,8 @@ static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
                 if (elem_ty && strncmp(elem_ty, "CCResult_", 9) == 0)
                     shadow_rewrite_result_ctors(dst, cap, elem_ty);
                 shadow_peel_nursery_host_calls(dst, cap);
+                shadow_rewrite_array_len_fields(dst, cap);
+                (void)shadow_rewrite_as_field_reads(dst, cap);
                 return;
             }
             /* Keep sink dest for peel — bang/`!>` suffix breaks exact match
@@ -5650,6 +5651,8 @@ static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
                 if (elem_ty && strncmp(elem_ty, "CCResult_", 9) == 0)
                     shadow_rewrite_result_ctors(dst, cap, elem_ty);
                 shadow_peel_nursery_host_calls(dst, cap);
+                shadow_rewrite_array_len_fields(dst, cap);
+                (void)shadow_rewrite_as_field_reads(dst, cap);
                 return;
             }
             /* Keep sink dest only for bang suffix — subexpression calls
@@ -5670,6 +5673,7 @@ static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
     shadow_lower_type_of_constexpr(dst, cap);
     shadow_peel_nursery_host_calls(dst, cap);
     shadow_rewrite_array_len_fields(dst, cap);
+    (void)shadow_rewrite_as_field_reads(dst, cap);
 }
 
 /* Emit-site channel_pair → create_named (chan table). */

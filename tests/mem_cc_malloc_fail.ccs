@@ -1,0 +1,7 @@
+/* Raw malloc is not a CCS API. Allocate through an arena. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    void *p = cc_malloc(16);
+    return p ? 0 : 1;
+}

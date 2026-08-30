@@ -103,7 +103,7 @@ int main(int argc, char** argv) {
                     CCSocket c = *pclient;
                     free(pclient);
                     handle_client(c);
-                });
+                }) !>;
             }
         }) !>;
     }

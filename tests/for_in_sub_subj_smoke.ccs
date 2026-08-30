@@ -1,0 +1,25 @@
+/* for (ch in line.sub(start, line.len)) — hoist the view, then walk. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    char[:] line = "hello";
+    size_t start = 1;
+    int n = 0;
+    char last = 0;
+
+    for (ch in line.sub(start, line.len)) {
+        n++;
+        last = ch;
+    }
+    if (n != 4) return 1;
+    if (last != 'o') return 2;
+
+    for (i, ch in line.sub(0, 2)) {
+        if (i == 0 && ch != 'h') return 3;
+        if (i == 1 && ch != 'e') return 4;
+    }
+
+    printf("for_in_sub_subj_smoke: OK\n");
+    return 0;
+}

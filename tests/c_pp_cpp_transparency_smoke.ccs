@@ -24,6 +24,9 @@ static void cpp_t_demand_grammars(void) {
 }
 
 #include "../cc/shadow/c_pp_spike.cch"
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 int main(void) {
     const char* src =

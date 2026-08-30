@@ -9,6 +9,7 @@
 //      block at the bottom makes max-logical exceed the site's physical
 //      line, forcing the collision).
 #include <ccc/std/prelude.cch>
+#include <stdio.h>
 
 @grammar(schema) RG {~~~~
     rules [

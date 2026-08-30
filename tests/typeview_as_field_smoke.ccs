@@ -1,0 +1,53 @@
+/* as: field miss: unique path hops; local field wins; stores follow the landing. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+
+typedef struct {
+    int kind;
+    int code;
+} AsFieldInner;
+
+typedef struct {
+    AsFieldInner base;
+    int extra;
+} AsFieldOuter;
+
+@typeview on AsFieldOuter {
+    as: base;
+};
+
+typedef struct {
+    AsFieldInner base;
+    int kind;
+} AsFieldShadow;
+
+@typeview on AsFieldShadow {
+    as: base;
+};
+
+int main(void) {
+    AsFieldOuter o = {0};
+    AsFieldOuter *p;
+    AsFieldShadow s = {0};
+
+    o.extra = 9;
+    o.base.kind = 3;
+    assert(o.kind == 3);
+    o.kind = 4;
+    assert(o.base.kind == 4);
+    assert(o.extra == 9);
+
+    p = &o;
+    assert(p->kind == 4);
+    p->code = 11;
+    assert(o.base.code == 11);
+
+    s.kind = 1;
+    s.base.kind = 2;
+    assert(s.kind == 1);
+    assert(s.base.kind == 2);
+
+    printf("ok\n");
+    return 0;
+}

@@ -28,6 +28,7 @@
 #include <ccc/cc_nursery.cch>
 #include <ccc/std/task.cch>
 #include <stdio.h>
+#include <string.h>
 
 /*
  * Doc comment for bad_name.  Example usage:

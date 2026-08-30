@@ -106,8 +106,8 @@ tutorial, idiomatic, and production code — and race their upstreams
   [latest record](perf/benchmarks/neckbeard_2026_08_14.txt).
 - [**CVE locality study**](studies/cve_locality/) — 27 real CVE/shape
   reconstructions under idiomatic CC, pre-registered rules, misses
-  counted as backlog: **19 prevented, 6 mitigated, 2 still expressible**
-  — every demo builds and runs.
+  counted as backlog: **21 prevented, 4 mitigated, 2 still expressible**
+  — every demo builds and runs (`scripts/test_cve_locality.sh`).
 
 Compiler internals: [architecture](cc/docs/ARCHITECTURE.md), [shadow_lower ops / layout](cc/shadow/README.md), [bootstrap](cc/bootstrap/shadow_lower/README.md), [debug vars](cc/src/diag/DEBUG_VARS.md).
 

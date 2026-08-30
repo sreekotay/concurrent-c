@@ -111,7 +111,7 @@ int main(void) {
         int[~1 >] tx3; int[~1 <] rx3; CCChan* ch3 = cc_channel_pair(&tx3, &rx3);
 
         CCNursery receivers = @create() !> @destroy;
-        if (!receivers) {
+        if (!cc_nursery_is_live(receivers)) {
             fprintf(stderr, "Failed to create receiver nursery\n");
             cc_chan_free(ch0);
             cc_chan_free(ch1);

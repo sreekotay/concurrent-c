@@ -130,20 +130,32 @@ Slices are views — `T[:]` is `{ptr, len, id}`; storing it does not take the
 bytes. Provenance (stack, arena, static, unique, …) is what the compiler uses
 to reject views that outlive their storage. `id == 0` is untracked.
 `char[:0]` is the NUL-terminated refinement — prefer `char[:0] s = "hi";` for
-string literals. How those facts compose into an object (constructors assume
-dead, epochs as fields, failure is unchanged):
+string literals (`len` is the payload; `ptr[len]` is `0`). `is_cstr` on the
+slice id survives erase to `char[:]`; `s.to_c(arena) !>` returns `char[:0]`
+and copies only when the bit is clear. `s.to_cstr(arena) !>` is
+`s.to_c(arena) !>.ptr`. How those facts compose into an object
+(constructors assume dead, epochs as fields, failure is unchanged):
 [getting started — locality](getting-started.md#locality-owned-or-view) ·
 [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs).
 
-Ordinary slice sites allow loads and UFCS; field stores (`s.len = …`) are
-denied. The walk is `for (v in s)` (also enumerate / zip / range): the
-compiler pays `i < live .len` and loads. The subject is a name or a field
-path (`t->words`). Users do not write `s.access(i)`.
-Zip is a statement that can fail: `for (a, b in s, t) { … } !>;`. Walk,
+Ordinary slice sites may read `.ptr`, `.len`, and `.id`; they may not
+store fields. Typed `T[:]` carries those fields on `.base`. The walk is `for (v in s)` (also enumerate /
+zip / range): the compiler pays `i < live .len` and loads. `v` is a copy —
+`v =` and `&v` are ill-formed. `for (&v in s) { … } !>;` is the mut walk:
+`v = x` stores through the same `.access` peel as the load (slice, vec,
+string, `T[n]`). The subject is
+a name, a field path (`t->words`), or a view (`line.sub(start, line.len)` —
+hoisted to a hidden local; mut walk stores through that header). Users do not write `s.access(i)`.
+Zip is a statement that can fail: `for (a, b in s, t) { … } !>;`.
+`for (&a, b in s, t)` stores through `a`'s subject. Copy walk,
 enumerate, and range cannot fail and do not take `!>`.
-A guess at a slot is `s.at(i) !>` / `s.set(i, v) !>`. `T*` is not an
-extent. C `for (;;)` is unchanged. Tutorial:
+A guess at a slot is `s.at(i) !>` / `s.set(i, v) !>`. Point through a
+local when you need C indexing: `char *p = s.ptr; p[i]`. `CCString`
+is not a slice: `.data` is the SSO union — use `as_slice()` / `cstr()`, or dest-init `char[:] v = s`.
+`int[:] xs = v` dest-wraps `Vec::[int]` the same way; `for (x in v)` still
+walks the live vec. `T*` is not an extent. C `for (;;)` is unchanged. Tutorial:
 [@typehooks / @typeview](typehooks-typeviews.md#extent--len--access).
+Recipe: [recipe_walk.ccs](../examples/recipe_walk.ccs).
 
 | Arena | Lifetime + storage policy | Typical use |
 |-------|---------------------------|-------------|

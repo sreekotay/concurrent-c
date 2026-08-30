@@ -112,7 +112,7 @@ int main(void) {
             return 1;
         }
         {
-            void *moved = cc_arena_realloc_local_grow(&loc, lp, 32, 64, 8);
+            void *moved = cc_arena_realloc_local_grow(loc, lp, 32, 64, 8);
             if (!moved || moved == lp) {
                 printf("FAIL: realloc_local_grow non-tip move\n");
                 return 1;

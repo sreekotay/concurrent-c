@@ -45,4 +45,14 @@ typedef int bool;
 #define cc_static_assert(cond, why) \
     ((void)sizeof(struct { int why : (cond) ? 1 : -1; }))
 
+/* Compiler-emitted heap (closures, frames). Not malloc — that name stays
+ * undeclared until the user includes <stdlib.h>. */
+void *cc__heap_alloc(size_t n);
+void *cc__heap_calloc(size_t n, size_t sz);
+void cc__heap_free(void *p);
+
+/* Generated zero/copy: `cc__bytes_zero` / `cc__bytes_copy` in cc_slice.cch.
+ * Do not emit memset / memcpy / __builtin_memset — TinyCC has no builtins,
+ * and default CCS TUs must not declare the libc names. */
+
 #endif /* CC_COMPAT_H */

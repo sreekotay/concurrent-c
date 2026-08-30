@@ -42,9 +42,9 @@ int main(void) {
         {
             CCNursery __cc_nursery118 = @create() !> @destroy;
 
-            __cc_nursery118.spawn(() => [tx2, rx1] { cycle_actor(tx2, rx1, 1); });
-            __cc_nursery118.spawn(() => [tx3, rx2] { cycle_actor(tx3, rx2, 2); });
-            __cc_nursery118.spawn(() => [tx1, rx3] { cycle_actor(tx1, rx3, 3); });
+            __cc_nursery118.spawn(() => [tx2, rx1] { cycle_actor(tx2, rx1, 1); }) !>;
+            __cc_nursery118.spawn(() => [tx3, rx2] { cycle_actor(tx3, rx2, 2); }) !>;
+            __cc_nursery118.spawn(() => [tx1, rx3] { cycle_actor(tx1, rx3, 3); }) !>;
         
         }
 

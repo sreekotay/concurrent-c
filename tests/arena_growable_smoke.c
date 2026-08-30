@@ -1,6 +1,7 @@
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 int main(void) {
     // --- Test 1: Basic growth ---
@@ -16,7 +17,7 @@ int main(void) {
 
         // Allocate enough to force several growths / overflow past the budget
         for (int i = 0; i < 100; i++) {
-            int *p = cc_arena_alloc_T_count(int, &a, 10);  // 40 bytes per alloc
+            int *p = cc_arena_alloc_T_count(int, a, 10);  // 40 bytes per alloc
             if (!p) { printf("FAIL: growth alloc at i=%d\n", i); return 1; }
             for (int j = 0; j < 10; j++) p[j] = i * 10 + j;
         }
@@ -36,7 +37,7 @@ int main(void) {
         if (!a.base) return 2;
 
         for (int i = 0; i < 50; i++) {
-            cc_arena_alloc_T_count(int, &a, 10);
+            cc_arena_alloc_T_count(int, a, 10);
         }
         int saved_idx = a.a->block_idx;
         if (saved_idx == 0) { printf("FAIL: no growth before reset\n"); return 2; }
@@ -55,7 +56,7 @@ int main(void) {
         if (!a.base) return 3;
 
         // Allocate in block 0
-        int *p0 = cc_arena_alloc_T_count(int, &a, 4);
+        int *p0 = cc_arena_alloc_T_count(int, a, 4);
         if (!p0) return 3;
         for (int i = 0; i < 4; i++) p0[i] = i;
 
@@ -65,7 +66,7 @@ int main(void) {
 
         // Force growth past block 0
         for (int i = 0; i < 50; i++) {
-            cc_arena_alloc_T_count(int, &a, 10);
+            cc_arena_alloc_T_count(int, a, 10);
         }
         int grown_idx = a.a->block_idx;
         if (grown_idx == 0) { printf("FAIL: expected growth\n"); return 3; }
@@ -99,7 +100,7 @@ int main(void) {
 
         int alloc_count = 0;
         while (alloc_count < 10000) {
-            int *p = cc_arena_alloc_T_count(int, &a, 10);
+            int *p = cc_arena_alloc_T_count(int, a, 10);
             if (!p) break;
             alloc_count++;
         }
@@ -122,7 +123,7 @@ int main(void) {
         int i;
         if (!a.base || a.a->block_max != CC_ARENA_DEFAULT_BLOCK_MAX) return 41;
         for (i = 0; i < 500; i++) {
-            if (!cc_arena_alloc_T_count(int, &a, 10)) {
+            if (!cc_arena_alloc_T_count(int, a, 10)) {
                 printf("FAIL: default path should overflow not NULL\n");
                 return 41;
             }
@@ -147,11 +148,11 @@ int main(void) {
         if (a.a->block_max != 1) { printf("FAIL: buffer should be fixed\n"); return 5; }
 
         // Fill it up
-        int *p = cc_arena_alloc_T_count(int, &a, 30);  // 120 bytes
+        int *p = cc_arena_alloc_T_count(int, a, 30);  // 120 bytes
         if (!p) { printf("FAIL: initial alloc\n"); return 5; }
 
         // This should fail (fixed arena, no growth)
-        int *q = cc_arena_alloc_T_count(int, &a, 30);
+        int *q = cc_arena_alloc_T_count(int, a, 30);
         if (q != NULL) { printf("FAIL: fixed arena should not grow\n"); return 5; }
         printf("  fixed: correctly rejected overflow OK\n");
         // No cc_arena_free needed (user-backed)
@@ -253,7 +254,7 @@ int main(void) {
             printf("FAIL: expected used heap overflow flag\n");
             return 7;
         }
-        size_t spill_bytes = cc_arena_overflow_raw_bytes(&a);
+        size_t spill_bytes = cc_arena_overflow_raw_bytes(a);
         if (spill_bytes < 512) {
             printf("FAIL: expected overflow byte accounting\n");
             return 7;
@@ -271,7 +272,7 @@ int main(void) {
                 return 7;
             }
         }
-        if (cc_arena_overflow_raw_bytes(&a) < 1024) {
+        if (cc_arena_overflow_raw_bytes(a) < 1024) {
             printf("FAIL: overflow byte accounting after realloc\n");
             return 7;
         }
@@ -279,7 +280,7 @@ int main(void) {
             printf("FAIL: release heap overflow ptr\n");
             return 7;
         }
-        if (cc_arena_overflow_raw_bytes(&a) != 0) {
+        if (cc_arena_overflow_raw_bytes(a) != 0) {
             printf("FAIL: overflow byte accounting after release\n");
             return 7;
         }
@@ -312,7 +313,7 @@ int main(void) {
                 return 7;
             }
         }
-        if (cc__arena_find_block(&a, moved) || !cc__arena_find_block(&moved_dst, moved)) {
+        if (cc__arena_find_block(a, moved) || !cc__arena_find_block(moved_dst, moved)) {
             printf("FAIL: cross-arena realloc ownership\n");
             return 7;
         }

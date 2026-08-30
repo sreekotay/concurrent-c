@@ -71,7 +71,7 @@ int main(void) {
             for (i = 0; i < tip_steps; i++) {
                 size_t want = sz + 16 + (i % 17);
                 /* Single-owner tip: local tier (peer bumps are non-atomic too). */
-                void *np = cc_arena_realloc_local_grow(&tip, p, sz, want, 8);
+                void *np = cc_arena_realloc_local_grow(tip, p, sz, want, 8);
                 if (!np) {
                     cc_arena_free(&tip);
                     return 2;
@@ -104,8 +104,8 @@ int main(void) {
             q[0] = (unsigned char)i;
             sink ^= q[0];
         }
-        bulk_gross = cc_arena_committed_gross_bytes(&bulk);
-        bulk_ovf = cc_arena_overflow_raw_bytes(&bulk);
+        bulk_gross = cc_arena_committed_gross_bytes(bulk);
+        bulk_ovf = cc_arena_overflow_raw_bytes(bulk);
         t_reset = now_ms();
         cc_arena_reset(bulk);
         reset_ms = now_ms() - t_reset;
@@ -127,8 +127,8 @@ int main(void) {
             q[0] = (unsigned char)i;
             sink ^= q[0];
         }
-        ovf_gross = cc_arena_committed_gross_bytes(&ovf);
-        ovf_bytes = cc_arena_overflow_raw_bytes(&ovf);
+        ovf_gross = cc_arena_committed_gross_bytes(ovf);
+        ovf_bytes = cc_arena_overflow_raw_bytes(ovf);
         cc_arena_free(&ovf); /* reclaim extents + overflow inside ovf_ms */
         ovf_ms = now_ms() - t0;
     }

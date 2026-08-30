@@ -53,7 +53,7 @@ for call, args in (("divide", (1, 0)), ("add", ("x", 1)), ("add", (1,))):
         getattr(c, call)(*args)
     except Exception as e:
         out.append(type(e).__name__)
-`, &a).as_slice()) !>;
+`, a).as_slice()) !>;
 
     CCPyObj m = py.import("__main__") !> @destroy;
     CCSlice rs = m.get("out")!>.as_slice()!>;

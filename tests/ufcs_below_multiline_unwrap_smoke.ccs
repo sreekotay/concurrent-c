@@ -22,6 +22,7 @@
 #include <ccc/std/task.cch>
 #include <ccc/cc_type.cch>
 #include <ccc/cc_closure.cch>
+#include <stdlib.h>
 
 typedef struct Gadget { int n; } Gadget;
 

@@ -2082,8 +2082,8 @@ static int ast_spell_token_range(Parser* p, int start, int end, char* dst,
                     if (strncmp(ret, "CCResult_", 9) == 0)
                         snprintf(wrap, sizeof(wrap),
                                  "({ %s* __cc_ap = (%s*)(void*)cc_block_on_intptr(%s); "
-                                 "%s __cc_av; memset(&__cc_av, 0, sizeof(__cc_av)); "
-                                 "if (__cc_ap) { __cc_av = *__cc_ap; free(__cc_ap); } "
+                                 "%s __cc_av; cc__bytes_zero(&__cc_av, sizeof(__cc_av)); "
+                                 "if (__cc_ap) { __cc_av = *__cc_ap; cc__heap_free(__cc_ap); } "
                                  "__cc_av; })",
                                  ret, ret, call, ret);
                     else

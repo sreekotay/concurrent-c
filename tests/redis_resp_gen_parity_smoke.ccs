@@ -28,6 +28,8 @@ static int64_t !>(CCError) parse_i64(char[:] s) {
     return cc_ok(neg ? -v : v);
 }
 #include "../real_projects/redis/redis_resp.cch"
+#include <string.h>
+#include <stdio.h>
 
 /* ---- the HAND reader (the parity ORACLE) ----
  * Retired from the server (the grammar reader is the only production
@@ -213,7 +215,7 @@ typedef struct { int status; size_t argc; unsigned long hash; } Ev;
 static unsigned long ev_hash(char[:]* args, size_t argc) {
     unsigned long h = 5381;
     for (size_t i = 0; i < argc; i++) {
-        const unsigned char* p = (const unsigned char*)args[i].ptr;
+        const unsigned char* p = (const unsigned char*)(args[i].ptr);
         for (size_t j = 0; j < args[i].len; j++) h = h * 33 + p[j];
         h = h * 33 + 0xFF;
     }

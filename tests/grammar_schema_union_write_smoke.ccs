@@ -6,6 +6,8 @@
 // kind refuses to emit anything: 0 bytes, the writer's error convention.
 // User construction uses the protected arm surface (not raw `.u`).
 #include <ccc/std/prelude.cch>
+#include <string.h>
+#include <stdio.h>
 
 @grammar(schema) Reply {~~~~
     rules [

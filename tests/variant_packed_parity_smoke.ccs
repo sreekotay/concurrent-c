@@ -45,7 +45,7 @@ static void handle_destroy(Handle* h) {
 @variant(packed) PCell { h: Handle; num: int64_t; };
 @variant        UCell { h: Handle; num: int64_t; };
 
-static void run_packed(CCArena* a, CCString* out) {
+static void run_packed(CCArena a, CCString* out) {
     PCell c = { .h = handle_make("live") };         /* init into destructor arm */
     cc_string_push(out, "kind:", a);
     cc_string_push_int(out, (int64_t)(c.kind == .h), a);
@@ -62,7 +62,7 @@ static void run_packed(CCArena* a, CCString* out) {
     cc_string_push_int(out, c.num ?> -1, a);
 }
 
-static void run_unpacked(CCArena* a, CCString* out) {
+static void run_unpacked(CCArena a, CCString* out) {
     UCell c = { .h = handle_make("live") };
     cc_string_push(out, "kind:", a);
     cc_string_push_int(out, (int64_t)(c.kind == .h), a);
@@ -87,12 +87,12 @@ int main(void) {
 
     g_drops = 0;
     CCString pbuf = cc_string_new();
-    run_packed(&arena, &pbuf);
+    run_packed(arena, &pbuf);
     int pdrops = g_drops;
 
     g_drops = 0;
     CCString ubuf = cc_string_new();
-    run_unpacked(&arena, &ubuf);
+    run_unpacked(arena, &ubuf);
     int udrops = g_drops;
 
     const char* ps = cc_string_cstr(&pbuf, arena);

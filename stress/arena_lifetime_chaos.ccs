@@ -119,7 +119,7 @@ static int verify_live(Slot *slots, size_t nslots, size_t *live_out) {
     return 0;
 }
 
-static void kill_slot(CCArena *a, Slot *s) {
+static void kill_slot(CCArena a, Slot *s) {
     if (!s->live || !s->ptr) return;
     (void)cc_arena_release(a, s->ptr);
     s->ptr = NULL;
@@ -170,7 +170,7 @@ static int bench_mixed_lifetime_chaos(void) {
             size_t n = slot_size(lcg(&rng));
             uint32_t tag = lcg(&rng);
             unsigned char *p;
-            if (slots[si].live) kill_slot(&a, &slots[si]);
+            if (slots[si].live) kill_slot(a, &slots[si]);
             p = (unsigned char *)cc_arena_alloc(a, n, 8);
             if (!p) {
                 free(slots);
@@ -187,7 +187,7 @@ static int bench_mixed_lifetime_chaos(void) {
             /* New alloc buries the bump tip; tip ptr stays live (may move on grow). */
         } else if (op == 3) {
             if (slots[si].live) {
-                kill_slot(&a, &slots[si]);
+                kill_slot(a, &slots[si]);
                 ops_rel++;
             }
         } else if (op == 4) {
@@ -222,7 +222,7 @@ static int bench_mixed_lifetime_chaos(void) {
             size_t n = 2048 + (r % 8192);
             uint32_t tag = lcg(&rng);
             unsigned char *p;
-            if (slots[si].live) kill_slot(&a, &slots[si]);
+            if (slots[si].live) kill_slot(a, &slots[si]);
             p = (unsigned char *)cc_arena_alloc(a, n, 16);
             if (!p) {
                 free(slots);
@@ -250,8 +250,8 @@ static int bench_mixed_lifetime_chaos(void) {
             }
         }
 
-        g = cc_arena_committed_gross_bytes(&a);
-        o = cc_arena_overflow_raw_bytes(&a);
+        g = cc_arena_committed_gross_bytes(a);
+        o = cc_arena_overflow_raw_bytes(a);
         if (g > peak_gross) peak_gross = g;
         if (o > peak_ovf) peak_ovf = o;
     }
@@ -308,7 +308,7 @@ static int bench_mixed_lifetime_chaos(void) {
     }
 
     cc_arena_reset(a);
-    if (a.a->ovf_head != NULL || cc_arena_overflow_raw_bytes(&a) != 0) {
+    if (a.a->ovf_head != NULL || cc_arena_overflow_raw_bytes(a) != 0) {
         free(slots);
         cc_arena_free(&a);
         return fail("chaos reset left overflow");
@@ -318,7 +318,7 @@ static int bench_mixed_lifetime_chaos(void) {
         cc_arena_free(&a);
         return fail("chaos reset left extents");
     }
-    if (cc_arena_committed_gross_bytes(&a) > MAX_RESIDUAL_GROSS) {
+    if (cc_arena_committed_gross_bytes(a) > MAX_RESIDUAL_GROSS) {
         free(slots);
         cc_arena_free(&a);
         return fail("chaos residual gross after reset");
@@ -390,8 +390,8 @@ static int bench_release_scramble(void) {
         live++;
     }
     rss_touch(&rss);
-    peak_gross = cc_arena_committed_gross_bytes(&a);
-    peak_ovf = cc_arena_overflow_raw_bytes(&a);
+    peak_gross = cc_arena_committed_gross_bytes(a);
+    peak_ovf = cc_arena_overflow_raw_bytes(a);
 
     /* Scramble-release ~half via Fisher–Yates index order. */
     {
@@ -454,8 +454,8 @@ static int bench_release_scramble(void) {
 
     rss_touch(&rss);
     {
-        size_t g = cc_arena_committed_gross_bytes(&a);
-        size_t o = cc_arena_overflow_raw_bytes(&a);
+        size_t g = cc_arena_committed_gross_bytes(a);
+        size_t o = cc_arena_overflow_raw_bytes(a);
         if (g > peak_gross) peak_gross = g;
         if (o > peak_ovf) peak_ovf = o;
     }
@@ -476,7 +476,7 @@ static int bench_release_scramble(void) {
     }
 
     cc_arena_reset(a);
-    if (a.a->ovf_head || cc_arena_overflow_raw_bytes(&a) || a.a->prev || a.a->block_idx != 0) {
+    if (a.a->ovf_head || cc_arena_overflow_raw_bytes(a) || a.a->prev || a.a->block_idx != 0) {
         free(ptrs); free(tags); free(sizes); free(alive);
         cc_arena_free(&a);
         return fail("scramble reset incomplete");
@@ -592,7 +592,7 @@ static int bench_shared_concurrent_mixed(void) {
             int wid = w;
             n.spawn(() => {
                 shared_worker(wid);
-            });
+            }) !>;
         }
     }
 
@@ -603,7 +603,7 @@ static int bench_shared_concurrent_mixed(void) {
         printf("  shared_concurrent(fixed): workers=%d ops=%d fail=%d live_gross=%zu "
                "peak_rss=%zu (Δ%zd) %.3fs\n",
                CONC_WORKERS, ops, fails,
-               cc_arena_committed_gross_bytes(&g_shared),
+               cc_arena_committed_gross_bytes(g_shared),
                rss.ok ? rss.peak_rss : 0,
                rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1,
                now_sec() - t0);
@@ -671,7 +671,7 @@ static int bench_tip_vs_churn_release(void) {
 
     printf("  tip_vs_churn_release: tip_sz=%zu moves=%zu (expect >0 once buried) "
            "gross=%zu peak_rss_delta=%zd %.3fs\n",
-           tip_sz, moves, cc_arena_committed_gross_bytes(&a),
+           tip_sz, moves, cc_arena_committed_gross_bytes(a),
            rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1,
            now_sec() - t0);
     if (moves == 0) {

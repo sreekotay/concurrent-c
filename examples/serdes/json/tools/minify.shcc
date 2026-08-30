@@ -1,3 +1,4 @@
+#include <stdio.h>
 #!/usr/bin/env -S ./cc/bin/ccc
 /*
  * Twin of minify.py: strip structural JSON whitespace, preserve string bytes.

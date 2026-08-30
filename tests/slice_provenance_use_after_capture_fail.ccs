@@ -1,5 +1,6 @@
 // Compile-fail: using a move-only slice after it was moved into a closure capture.
 #include <ccc/cc_runtime.cch>
+#include <stdlib.h>
 
 int main(void) {
     @errhandler(CCError e) { (void)e; abort(); }

@@ -268,13 +268,20 @@ lower-headers: $(LOWER_HEADERS_STAMP)
 # an existing stage-1 binary (survives `make clean`) without relinking it.
 # Crude host-C seed of out/include + out/runtime. Stage-1 comps against this;
 # must not depend on LOWER_HEADERS_STAMP (cold -j recursion).
+# Warm path: do not rewrite out/include. A second make that only needs
+# stage-1 objs would otherwise clobber a finished lower with unlowered
+# `!>(CCError)` copies; the stamp recipe re-lowers when inputs change.
 $(OUT_RUNTIME)/.seed.stamp: $(LOWER_HEADERS_INPUTS) $(wildcard ../third_party/ffc/ffc.h) \
 		$(wildcard runtime/*.c runtime/*.h)
 	@mkdir -p $(OUT_INCLUDE) $(OUT_RUNTIME)
-	@echo "seed headers for stage-1 lower_headers..."
-	@bash ../scripts/seed_headers_for_stage1.sh \
-		"$(abspath include)" "$(abspath $(OUT_INCLUDE))" \
-		"$(abspath runtime)" "$(abspath $(OUT_RUNTIME))"
+	@if [ -x "$(LOWER_HEADERS1_BINARY)" ] && [ -d "$(OUT_INCLUDE)/ccc" ]; then \
+		echo "seed headers: skip (warm; stage-1 + out/include present)"; \
+	else \
+		echo "seed headers for stage-1 lower_headers..."; \
+		bash ../scripts/seed_headers_for_stage1.sh \
+			"$(abspath include)" "$(abspath $(OUT_INCLUDE))" \
+			"$(abspath runtime)" "$(abspath $(OUT_RUNTIME))"; \
+	fi
 	@touch $@
 
 # Stage-1 is a normal prereq (not a recipe-time recursive make). The old

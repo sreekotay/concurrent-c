@@ -1,0 +1,16 @@
+/* Slice fields are readable. Stores stay denied (restricted_slice_store_deny). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    char buf[2] = { 'h', 'i' };
+    char[:] s = cc_slice_from_buffer(buf, 2);
+    if (!s.ptr || s.ptr[0] != 'h' || s.ptr[1] != 'i') return 1;
+    if (s.len != 2) return 2;
+    (void)s.id;
+    int[:] xs = { 1, 2, 3 };
+    if (xs.len != 3 || !xs.ptr) return 3;
+    (void)xs.id;
+    printf("slice_fields_ro_smoke: OK\n");
+    return 0;
+}

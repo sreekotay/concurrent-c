@@ -27,6 +27,7 @@
 #include <sys/time.h>
 #include <signal.h>
 #include <errno.h>
+#include <limits.h>
 #include <dirent.h>
 #include <time.h>
 
@@ -48,6 +49,10 @@ void ZopfliDeflatePart(const ZopfliOptions* options, int datamode, int final,
 #define BLOCK_SIZE (128 * 1024)
 #define BLOCK_ARENA_OVERHEAD 1024  // Space for Block struct + alignment
 #define DICT_SIZE  32768
+/* zlib uInt is unsigned int. Shadow #if does not see UINT_MAX. */
+_Static_assert(BLOCK_SIZE <= UINT_MAX, "BLOCK_SIZE must fit zlib uInt");
+_Static_assert((BLOCK_SIZE + (BLOCK_SIZE >> 3) + 1024) <= UINT_MAX,
+               "deflate_cap(BLOCK_SIZE) must fit zlib uInt");
 #define MAX_WORKERS 16
 #define DEFAULT_CAP 32
 #define MAX_CAP     256

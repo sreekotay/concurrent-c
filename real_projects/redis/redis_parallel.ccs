@@ -354,15 +354,16 @@ static bool !>(CCError) exec_mget_parallel(DB* db, Cmd* c, ConnEnc conn) {
 /* Encode phase only — ship (flush/sock) stays on Conn* in handle_client. */
 static bool !>(CCError) execute(DB* db, Cmd* c,
                                 ConnEnc conn) {
+    @errhandler(CCError e) { return cc_err(e); }
     Hold h = HOLD_NONE;
     char[:] name;
-    size_t i;
 
     if (c->argc == 0) return conn->err("empty command");
     name = c->args[0];
     /* Fold for string-switch; names are tiny (GET/MGET/…). */
-    for (i = 0; i < name.len; i++)
-        if (name.ptr[i] >= 'a' && name.ptr[i] <= 'z') name.ptr[i] -= 32;
+    for (&ch in name) {
+        if (ch >= 'a' && ch <= 'z') ch -= 32;
+    } !>;
     switch (name) {
     case "PING":
         if (c->argc > 1) return conn->bulk(c->args[1]);
@@ -419,13 +420,15 @@ static bool !>(CCIoError) read_cmd(BufReader::[CCSocket]* br, CCArena arena, Cmd
             continue;
         }
 
-        if (line.ptr[0] != '*') {
+        char lead = line.at(0) !>;
+        if (lead != '*') {
             start = 0;
+            const char *data = line.ptr;
             while (start < line.len && out->argc < (size_t)K_MAX_ARGS) {
-                while (start < line.len && line.ptr[start] == ' ') start++;
+                while (start < line.len && data[start] == ' ') start++;
                 if (start >= line.len) break;
                 end = start;
-                while (end < line.len && line.ptr[end] != ' ') end++;
+                while (end < line.len && data[end] != ' ') end++;
                 char[:] part = line.sub(start, end);
                 char[:] owned = part.clone_into(arena) !>(e) {
                     return cc_err(cc_io_error(e));
@@ -447,7 +450,11 @@ static bool !>(CCIoError) read_cmd(BufReader::[CCSocket]* br, CCArena arena, Cmd
         if (n == 0) continue;
         for (i = 0; i < (size_t)n; i++) {
             char[:] hdr = br->read_line() !>(e) { return cc_err(e); };
-            if (hdr.len == 0 || hdr.ptr[0] != '$')
+            if (hdr.len == 0) {
+                return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "bad bulk")));
+            }
+            char h0 = hdr.at(0) !>;
+            if (h0 != '$')
                 return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "bad bulk")));
             char[:] blen_s = hdr.sub(1, hdr.len);
             int64_t blen = blen_s.to_i64() !>(e) {

@@ -1,6 +1,9 @@
 // Test: Owned channel syntax T[~N owned { ... }]
 #include <ccc/std/prelude.cch>
 #include <assert.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 static int g_create_count = 0;
 static int g_destroy_count = 0;

@@ -1,0 +1,10 @@
+/* Default CCS includes do not declare memcpy. Include <string.h> to use it. */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/stdio.cch>
+
+int main(void) {
+    char a[4] = {1, 2, 3, 4};
+    char b[4];
+    memcpy(b, a, 4);
+    return (int)b[0];
+}

@@ -6,8 +6,8 @@ mark still_expressible entries that safe Rust also leaves open.
 
 | Verdict | Count | Entries |
 |---------|------:|---------|
-| prevented | 19 | CVE-2017-13245, CVE-2014-0160, CVE-2025-31115, CVE-2008-5038, CVE-2020-12387, CVE-2013-4153, CVE-2026-10653, CVE-2021-22945, CVE-2015-0286, CVE-2013-4559, CVE-2015-7547, SHAPE-T2-stack-escape, SHAPE-T8-use-after-move, SHAPE-T7-shared-mut-spawn, SHAPE-T10-inactive-arm, SHAPE-T3-channel-borrow-send, SHAPE-T3-nonarena-borrow-send, SHAPE-T5-ignored-result, SHAPE-T7-pointer-channel-send |
-| mitigated | 6 | CVE-2024-38561, CVE-2025-39945, CVE-2016-5180, CVE-2023-54235, SHAPE-integer-overflow, SHAPE-T9-raw-index-oob |
+| prevented | 21 | CVE-2017-13245, CVE-2014-0160, CVE-2025-31115, CVE-2008-5038, CVE-2020-12387, CVE-2013-4153, CVE-2026-10653, CVE-2021-22945, CVE-2015-0286, CVE-2013-4559, CVE-2015-7547, CVE-2024-38561, CVE-2025-39945, SHAPE-T2-stack-escape, SHAPE-T8-use-after-move, SHAPE-T7-shared-mut-spawn, SHAPE-T10-inactive-arm, SHAPE-T3-channel-borrow-send, SHAPE-T3-nonarena-borrow-send, SHAPE-T5-ignored-result, SHAPE-T7-pointer-channel-send |
+| mitigated | 4 | CVE-2016-5180, CVE-2023-54235, SHAPE-integer-overflow, SHAPE-T9-raw-index-oob |
 | still_expressible | 2 | SHAPE-T8-adopt-wrong-deleter (`parity: rust_unsafe`), SHAPE-T7-bare-pointer-channel |
 | n/a | 0 | — |
 | **total** | **27** | |
@@ -16,8 +16,7 @@ Of which still_expressible with `parity: rust_unsafe`: **1** (not a claim-A back
 Claim-A still_expressible (CC miss): **1** (bare `T*` channel send).
 
 Corpus health: all **27** `idiomatic.ccs` demos build and run
-(`ccc build` + execute; nursery `@destroy` join, channel_pair `@destroy`
-→ `create_named`).
+(`scripts/test_cve_locality.sh`, wired into `scripts/test.sh`).
 
 ## Rust claim-A scorecard
 
@@ -50,8 +49,8 @@ escapes (raw `free`, hand `memcpy`, `@unsafe`) go in Gap — same pattern as Rus
 | CVE-2025-31115 | owner-only free | **prevented** (owned-buffer-child-free-ban) | — | untracked `malloc`+`free` |
 | CVE-2013-4153 | Drop once | **prevented** (arena tree + child-free ban) | — | malloc tree without provenance |
 | CVE-2026-10653 | `Arc` or don’t share | **prevented** (`CCArc` + homemade last-drop ban; redis drain idiom) | — | `@unsafe` / untracked `malloc` folklore |
-| CVE-2024-38561 | join/cancel ownership | **mitigated** (nursery wait-before-free; cooperative deadline) | — | raw pthread / stop-outside-nursery |
-| CVE-2025-39945 | sync cancel before free | **mitigated** (nursery cancel+join) | — | external workqueues / async cancel folklore |
+| CVE-2024-38561 | join/cancel ownership | **prevented** (nursery owns join; cancel cannot skip wait) | — | raw pthread / `kthread_stop` |
+| CVE-2025-39945 | sync cancel before free | **prevented** (nursery cancel+join; no fire-and-forget free) | — | external workqueues |
 | CVE-2023-54235 | `thread::scope` joins before borrow ends | **mitigated** (nursery join is the protocol) | — | outer-scope nursery + `&`-captured scalar |
 | SHAPE-T8-adopt-wrong-deleter | n/a (`unsafe` / `from_raw`) | **still_expressible** | `rust_unsafe` | deleter↔allocator trusted |
 | SHAPE-T10-inactive-arm | enum match / inactive ban | **prevented** (protected projection + raw `.u` ban; schema `one of` shares the surface) | — | `@unsafe`; compound-literal `.kind`/`.u` interop |
@@ -68,12 +67,12 @@ Rust-parity miss: FFI wrong deleter.
 | `bare-pointer-channel-send-ban` | SHAPE-T7-bare-pointer-channel | Ban non-branded `T*` send; keep redis handle exceptions |
 | Full non-`Send` type lattice | T7 | partial; bare `T*` open |
 | `escaping-ref-capture-frame-check` | CVE-2023-54235 | Extend escaping-closure frame analysis from stack slices to `&`-captured locals |
-| Nursery-only task stop/join | CVE-2024-38561 / CVE-2025-39945 | would flip T6 toward prevented |
 | `default-checked-arith` | SHAPE-integer-overflow | optional; bare `+` still wraps |
 
 Shipped from this study (no longer backlog): `enforce-arena-provenance`,
 `channel-stable-borrow` (arena + non-arena / untracked), `pointer-alias-as-ref-capture`,
 `owned-buffer-child-free-ban`, destroy/detach under arena epoch pin,
+nursery join-before-free (T6 cancel/stop on the nursery surface),
 `variant-raw-u-ban`, `atomic-shared-owner` (`CCArc`), `pointer-channel-send-ban`,
 `checked-index-write` (Result `at`/`set`, all builds), default-on strict Result
 unwrap (opt out with `CC_STRICT_RESULT_UNWRAP=0`),
@@ -86,4 +85,3 @@ unwrap (opt out with `CC_STRICT_RESULT_UNWRAP=0`),
 | Implement `bare-pointer-channel-send-ban` | flip T7 residual → prevented (careful w/ redis) |
 | Implement `escaping-ref-capture-frame-check` | flip T2 scalar residual → prevented (CVE-2023-54235) |
 | Default-on checked arith | harden the remaining arithmetic Gap |
-| Nursery-only task stop | flip T6 mitigated pair → prevented |

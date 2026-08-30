@@ -18,7 +18,7 @@ int main(void) {
     if (cloned.len != 5 || memcmp(cloned.ptr, "hello", 5) != 0) return 3;
 
     CCSliceHdr hdr = src.hdr();
-    CCResult_CCSliceHdr_CCError hdr_res = hdr.clone_into(&arena);
+    CCResult_CCSliceHdr_CCError hdr_res = hdr.clone_into(arena);
     if (hdr_res.is_err()) return 4;
     CCSliceHdr cloned_hdr = CCResult_CCSliceHdr_CCError_value(hdr_res);
     if (cloned_hdr.len != 5 || memcmp(cloned_hdr.ptr, "hello", 5) != 0) return 5;

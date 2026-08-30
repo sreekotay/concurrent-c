@@ -4572,7 +4572,7 @@ static void shadow_safe_walk_fn(ShadowSafeCtx* ctx, AstNode* fn) {
     ctx->ndefer_block = saved_ndefer_block;
 }
 
-/* Missing field that lives one member deep → spell `.base.field`. */
+/* Missing field: unique `as:` hop is emit's job; else suggest peel. */
 static int shadow_safe_field_on(ShadowSafeStruct* s, const char* field) {
     int i;
     if (!s || !field) return 0;
@@ -4631,17 +4631,35 @@ static void shadow_safe_check_field_suggest_text(ShadowSafeCtx* ctx, AstNode* st
             outer = shadow_safe_find_struct(ctx, strip);
         }
         if (!outer || shadow_safe_field_on(outer, field)) continue;
-        /* Only the nested-suggest case — bare misses stay host/UFCS. */
-        for (i = 0; i < outer->nf; i++) {
-            shadow_safe_strip_ty(outer->fty[i], nested_ty, sizeof(nested_ty));
-            inner = shadow_safe_find_struct(ctx, nested_ty);
-            if (!inner || !shadow_safe_field_on(inner, field)) continue;
-            {
+        /* Unique `as:` face that has the field: emit hops. Two faces:
+         * ambiguous. A nested member without `as:` still suggests peel. */
+        {
+            int as_hits = 0;
+            int nest_i = -1;
+            for (i = 0; i < outer->nf; i++) {
+                shadow_safe_strip_ty(outer->fty[i], nested_ty, sizeof(nested_ty));
+                inner = shadow_safe_find_struct(ctx, nested_ty);
+                if (!inner || !shadow_safe_field_on(inner, field)) continue;
+                if (outer->is_as[i]) as_hits++;
+                else if (nest_i < 0)
+                    nest_i = i;
+            }
+            if (as_hits > 1) {
+                char msg[192];
+                snprintf(msg, sizeof(msg),
+                         "as: ambiguous field '%s' on '%s'", field,
+                         outer->name);
+                shadow_safe_err_at(ctx, st, msg);
+                return;
+            }
+            if (as_hits == 1) continue;
+            if (nest_i >= 0) {
                 char msg[192];
                 snprintf(msg, sizeof(msg),
                          "field not found: %s — member '%s' has it; "
                          "spell '.%s.%s'",
-                         field, outer->fname[i], outer->fname[i], field);
+                         field, outer->fname[nest_i], outer->fname[nest_i],
+                         field);
                 shadow_safe_err_at(ctx, st, msg);
                 return;
             }

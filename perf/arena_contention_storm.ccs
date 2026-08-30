@@ -29,7 +29,7 @@ static double time_now_ms(void) {
 cc_atomic_int g_success = 0;
 cc_atomic_int g_fail = 0;
 
-void arena_worker(CCArena* arena) {
+void arena_worker(CCArena arena) {
     int local_success = 0;
     int local_fail = 0;
     for (int i = 0; i < ALLOCS_PER_FIBER; i++) {
@@ -68,7 +68,7 @@ int main(void) {
                 CCArena local_arena = cc_arena_wrap_region(
                     local_buf, FIBER_ARENA_SIZE,
                     CC_ARENA_DEFAULT_BLOCK_MAX);
-                arena_worker(&local_arena);
+                arena_worker(local_arena);
                 free(local_buf);
             }) !>;
         }

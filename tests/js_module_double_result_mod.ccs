@@ -47,12 +47,12 @@ static double !>(CCError) GamutCounter_half(GamutCounter *self, double x) {
  * converts per element — same sum either way. */
 static double GamutCounter_sum(GamutCounter *self, double[:] xs) {
     double acc = 0;
-    for (size_t i = 0; i < xs.base.len; i++) acc += ((double *)xs.base.ptr)[i];
+    for (size_t i = 0; i < xs.len; i++) acc += ((double *)xs.ptr)[i];
     return acc;
 }
 /* The borrow is writable: writes land in the caller's TypedArray. */
 static void GamutCounter_fill(GamutCounter *self, double[:] xs, double v) {
-    for (size_t i = 0; i < xs.base.len; i++) ((double *)xs.base.ptr)[i] = v;
+    for (size_t i = 0; i < xs.len; i++) ((double *)xs.ptr)[i] = v;
 }
 /* A typed-slice return materializes as a fresh Float64Array. */
 static double[:] GamutCounter_row(GamutCounter *self) {
@@ -129,10 +129,10 @@ static double !>(CCError) GamutCounter_rowmap(GamutCounter *self, CCJsVal f,
     @errhandler(CCError e) { return cc_err(e); }
     CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     /* The destination names the element type — no spelled formal. */
-    double[:] ys = f.map(&a, xs, ks) !>;
+    double[:] ys = f.map(a, xs, ks) !>;
     double s = 0;
-    for (size_t i = 0; i < ys.base.len; i++)
-        s += ((const double *)ys.base.ptr)[i];
+    for (size_t i = 0; i < ys.len; i++)
+        s += ((const double *)ys.ptr)[i];
     return cc_ok(s);
 }
 

@@ -35,11 +35,11 @@ static bool !>(CCError) insert_one(CCArena arena,
 
 int main(void) {
     CCArena arena = cc_arena_heap(1024);
-    Map::[char[:], Entry*] entries = map_new::[char[:], Entry*](&arena);
+    Map::[char[:], Entry*] entries = map_new::[char[:], Entry*](arena);
     Entry e = { .id = 1 };
     char[:] key = { .ptr = (char*)"hello", .len = 5 };
 
-    bool !>(CCError) r = insert_one(&arena, entries, key, &e);
+    bool !>(CCError) r = insert_one(arena, entries, key, &e);
     if (r.is_err()) {
         fprintf(stderr, "err: %s\n", r.error().message);
         cc_arena_free(&arena);

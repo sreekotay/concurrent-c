@@ -4,6 +4,7 @@
  * Previously: unexpected statement (shadow subset) on the comma. */
 #include <ccc/std/prelude.cch>
 #include <stdint.h>
+#include <stdio.h>
 
 typedef struct Lev {
     CCArena a;

@@ -1,0 +1,11 @@
+/* Explicit Gap: #include <string.h> declares memcpy. */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/stdio.cch>
+#include <string.h>
+
+int main(void) {
+    char a[4] = {1, 2, 3, 4};
+    char b[4];
+    memcpy(b, a, 4);
+    return b[0] == 1 ? 0 : 1;
+}

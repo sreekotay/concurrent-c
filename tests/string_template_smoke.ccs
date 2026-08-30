@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 static CCSlice demo_policy(CCArena arena, CCSlice tag, CCSlice value) {
     if (CCSlice_is_empty(&tag)) return value;

@@ -313,7 +313,10 @@ int n = 42;
 CCString msg = @string(`n=${n}; price=$100`, a);       // owned
 char[:] hdr = @string(`:${n}\r\n`);                    // block-scoped borrow
 println(@string(`len=${msg.len()}`, @scratch)) !>;     // throwaway
+println(@string(`bulk=${s.sub(0, 4)}`, @scratch)) !>;  // text slice
 ```
+
+Recipe: [recipe_walk.ccs](../examples/recipe_walk.ccs).
 
 | In the template | Meaning |
 |-----------------|--------|
@@ -369,20 +372,38 @@ Use either `@destroy` / `wait` or `on_last` + `abandon`, not both. Spec §8.1.5.
 ## Walk (`for in`)
 
 The walk is not “a nicer `s[i]`.” The compiler pays `i < live .len`, then
-the `.access` load. Point access is `s.at(i) !>`. Users do not write
-`s.access(i)`.
+the `.access` load. Point access is `s.at(i) !>`. Ordinary sites may read
+`.ptr` / `.len` / `.id`; they may not store fields. A C string is
+`s.to_c(scratch) !>` (`char[:0]`) or `s.to_cstr(scratch) !>` (`char *`).
+Users do not write `s.access(i)`.
 
 ```c
-for (v in s) { … }           // walk
-for (i, v in s) { … }        // enumerate; i is size_t
-for (a, b in s, t) { … } !>; // zip; void !>(CCError); unequal → @errhandler
-for (i in lo..hi) { … }      // sequential range; hi < lo is empty
+for (v in s) { … }            // walk (v is a copy; v = / &v are errors)
+for (&v in s) { … } !>;       // mut walk: v = … is set into the loop !>
+for (i, v in s) { … }         // enumerate; i is size_t
+for (a, b in s, t) { … } !>;  // zip; void !>(CCError); unequal → @errhandler
+for (&a, b in s, t) { … } !>; // zip mut: a = … stores through s's peel
+for (i in lo..hi) { … }       // sequential range; hi < lo is empty
+for (ch in line.sub(lo, hi))  // view; compiler hoists a local
+for (&ch in line.sub(lo, hi)) { … } !>;
+s.at(i) !>                    // point (Result)
+s.set(i, v) !>
+dst.copy(src) !> / dst.move(src) !> / dst.fill(c) !>
+s.clone_into(a) !>            // arena last
+char *p = s.ptr;              // peel; fields are read-only
 ```
 
-Subjects: `T[:]`, `CCVec_*`, `CCString`, `T[n]`, or a type with `.len` +
-`.access` on `@typehooks`. `T*` is not an extent. C `for (;;)` is unchanged.
+Subjects: a name, field path, or view (`s.sub(lo, hi)`, `s.trim()`,
+`str.as_slice()` / dest-init `char[:] v = str`). A vec is an extent —
+`for (x in v)` walks the grower. Dest-init `int[:] xs = v` is a view
+header (same convert as string); `for (x in v.as_slice())` is that
+snapshot. A view is hoisted to a hidden local; mut walk stores
+through that header into the receiver. `T*` is not an extent. C `for (;;)`
+is unchanged.
 `@parallel for` is the concurrent cousin — same `in`, independent iterations.
+A text slice interpolates in `${…}`.
 Tutorial: [typehooks — extent](typehooks-typeviews.md#extent--len--access).
+Recipe: [recipe_walk.ccs](../examples/recipe_walk.ccs).
 
 ---
 
@@ -640,6 +661,7 @@ s.clone_into(a);
 ```
 
 Recipe: [recipe_arena_scope.ccs](../examples/recipe_arena_scope.ccs).
+Walk / clone: [recipe_walk.ccs](../examples/recipe_walk.ccs).
 
 ---
 
@@ -749,6 +771,7 @@ ccc examples/js/jsdemo.shcc         # CC→JS (guest; Node owns env)
 
 | Pattern | Recipe |
 |---------|--------|
+| Walk / dest-bulk buffers | [recipe_walk.ccs](../examples/recipe_walk.ccs) |
 | Owned or view / reopen | [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs) |
 | Worker pool | [recipe_worker_pool.ccs](../examples/recipe_worker_pool.ccs) |
 | Fan-out / `@parallel for` | [recipe_fanout_capture.ccs](../examples/recipe_fanout_capture.ccs) |

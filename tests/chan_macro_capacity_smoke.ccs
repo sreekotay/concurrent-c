@@ -1,6 +1,7 @@
 // Test: Channel capacity can be a macro/constant
 #include <ccc/std/prelude.cch>
 #include <assert.h>
+#include <stdio.h>
 
 #define NUM_ITEMS 4
 

@@ -1,3 +1,4 @@
+#include <stdio.h>
 #!/usr/bin/env -S ./cc/bin/ccc
 /*
  * Smoke: return cmd.status() !>; matches @errhandler(CCIoError) for UFCS

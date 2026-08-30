@@ -1,4 +1,5 @@
 #include <ccc/std/prelude.cch>
+#include <ccc/std/map.cch>
 #include <stdio.h>
 
 CC_MAP_DECL_ARENA(CCSlice, int, SliceIntMap, cc_map_hash_slice, cc_map_eq_slice);

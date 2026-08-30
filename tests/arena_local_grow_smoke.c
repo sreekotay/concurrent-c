@@ -32,7 +32,7 @@ int main(void) {
             return 1;
         }
         {
-            void *grown = cc_arena_realloc_local_grow(&a, last, 64, 200, 8);
+            void *grown = cc_arena_realloc_local_grow(a, last, 64, 200, 8);
             if (!grown) {
                 printf("FAIL: realloc_local_grow\n");
                 return 1;

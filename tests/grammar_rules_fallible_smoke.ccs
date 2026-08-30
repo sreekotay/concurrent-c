@@ -2,6 +2,7 @@
 // host hook (weak default always misses — so a lone ppkind rule rejects).
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_grammar.cch>
+#include <stdio.h>
 
 @grammar(rules) Soft {~~~~
     line:   [item #'x']

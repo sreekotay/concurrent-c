@@ -209,17 +209,16 @@ static unsigned char* !>(CCError) read_block(int in_fd, CCArenaPool* pool,
 }
 
 /* Consume predecessor tail; publish this block's tail for i+1. */
-static void hop_dict(unsigned char dictbuf[DICT_SIZE], size_t* dict_len,
-                     CCSlice data, unsigned char take[DICT_SIZE],
-                     const unsigned char** d, size_t* dlen) {
-    *dlen = *dict_len;
-    if (*dlen)
-        memcpy(take, dictbuf, *dlen);
-    *d = *dlen ? take : NULL;
+static CCSlice hop_dict(unsigned char dictbuf[DICT_SIZE], size_t* dict_len,
+                        CCSlice data, unsigned char take[DICT_SIZE]) {
+    size_t dlen = *dict_len;
+    if (dlen)
+        memcpy(take, dictbuf, dlen);
     size_t tail = data.len < (size_t)DICT_SIZE ? data.len : (size_t)DICT_SIZE;
     if (tail)
         memcpy(dictbuf, (const unsigned char*)data.ptr + (data.len - tail), tail);
     *dict_len = tail;
+    return cc_slice_from_buffer(take, dlen);
 }
 
 /* Rolling hash continues across blocks (pigz reader). Hits live after data. */
@@ -392,6 +391,9 @@ static void !>(CCError) write_container_trailer(CCFile* out, const ZipWriteInfo*
 CompressedResult* !>(CCError) compress_block(CCSlice data, CCSlice dict,
         CCSlice lens, bool is_last, ZState* zs, CCArenaPool* out_pool) {
     size_t max_out = deflate_cap(data.len ? data.len : 1);
+    if (data.len > (size_t)UINT_MAX || dict.len > (size_t)UINT_MAX ||
+        max_out > (size_t)UINT_MAX)
+        return cc_err(CC_ERR_INVALID_ARG, "deflate chunk exceeds uInt");
     CompressedResult* res = (CompressedResult*)out_pool.alloc();
     @defer(err) out_pool->free(res);
     if (!res)
@@ -437,6 +439,8 @@ CompressedResult* !>(CCError) compress_block(CCSlice data, CCSlice dict,
             for (size_t i = 0; i < n_lens; i++) {
                 size_t segment_len = segs[i];
                 if (segment_len == 0) segment_len = data.len - total_in;
+                if (segment_len > (size_t)UINT_MAX)
+                    return cc_err(CC_ERR_INVALID_ARG, "deflate chunk exceeds uInt");
                 strm->avail_in = (uInt)segment_len;
                 total_in += segment_len;
                 while (strm->avail_in > 0) {
@@ -582,14 +586,9 @@ static void !>(CCError) compress_one(CompressRun* run, CCSlice data, bool is_las
     check_interrupt() !>;
 
     unsigned char take[DICT_SIZE];
-    const unsigned char* d = NULL;
-    size_t dlen = 0;
     CCSlice dict = cc_slice_empty();
-    if (g.setdict) {
-        hop_dict(run->dictbuf, &run->dict_len, data, take, &d, &dlen);
-        if (dlen)
-            dict = cc_slice_from_parts((void*)d, dlen, CC_SLICE_ID_UNTRACKED);
-    }
+    if (g.setdict)
+        dict = hop_dict(run->dictbuf, &run->dict_len, data, take);
 
     CCSlice lens = cc_slice_empty();
     size_t max_hits = g.block / 5;
@@ -645,21 +644,17 @@ static void !>(CCError) compress_seekable(CompressRun* run, int in_fd, size_t fi
             : cc_slice_empty();
 
         unsigned char take[DICT_SIZE];
-        const unsigned char* d = NULL;
-        size_t dlen = 0;
+        CCSlice dict = cc_slice_empty();
         CCSlice lens = cc_slice_empty();
         @stage (ts.read, i) {
             if (g.setdict)
-                hop_dict(run->dictbuf, &run->dict_len, data, take, &d, &dlen);
+                dict = hop_dict(run->dictbuf, &run->dict_len, data, take);
             if (g.rsync && buf) {
                 size_t max_hits = block / 5;
                 lens = rsync_scan(data, &run->rolling, hits_at(buf, block), max_hits);
             }
         }
 
-        CCSlice dict = dlen
-            ? cc_slice_from_parts((void*)d, dlen, CC_SLICE_ID_UNTRACKED)
-            : cc_slice_empty();
         CompressedResult* r =
             compress_block(data, dict, lens, is_last, &zs, &run->out_pool) !>;
 
@@ -906,6 +901,13 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                         break;
                     }
                     if (!recv_res.value()) break;
+                    if (in_chunk.data.len > (size_t)UINT_MAX) {
+                        eprintln(@string(`Error: inflate chunk exceeds uInt`, @scratch)) !>;
+                        mark_pipeline_error();
+                        cc_channel_close_err(compressed_ch, EIO);
+                        in_chunk.arena.free();
+                        break;
+                    }
                     strm.next_in = (Bytef*)in_chunk.data.ptr;
                     strm.avail_in = (uInt)in_chunk.data.len;
                     
@@ -1274,6 +1276,10 @@ int main(int argc, char *argv[]) {
 
     g.max_mem = (size_t)max_mem_mb * 1024 * 1024;
     g.block = (size_t)(block_kb < 32 ? 32 : block_kb) * 1024;
+    if (g.block > (size_t)UINT_MAX || deflate_cap(g.block) > (size_t)UINT_MAX) {
+        eprintln(@string(`pigz_cc: -b block exceeds zlib uInt`, @scratch)) !>;
+        return 1;
+    }
     ZopfliInitOptions(&g.zopts);
     int worker_count = (int)num_workers;
     int level = g.level;

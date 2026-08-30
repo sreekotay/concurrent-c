@@ -147,17 +147,16 @@ static size_t shard_of(CCShardMap* maps, char[:] key) {
 
 /* ASCII fold into caller storage — do not mutate the cloned argv. */
 static char[:] fold_name(char[:] src, char* buf, size_t cap) {
-    size_t i;
     if (src.len == 0 || src.len >= cap) {
         char[:] empty = {0};
         return empty;
     }
-    for (i = 0; i < src.len; i++) {
-        char ch = src.ptr[i];
-        if (ch >= 'a' && ch <= 'z') ch -= 32;
-        buf[i] = ch;
+    for (i, ch in src) {
+        char f = ch;
+        if (f >= 'a' && f <= 'z') f -= 32;
+        buf[i] = f;
     }
-    char[:] out = { .ptr = buf, .len = src.len };
+    char[:] out = cc_slice_from_buffer(buf, src.len );
     return out;
 }
 
@@ -339,14 +338,16 @@ static bool !>(CCIoError) read_cmd(BufReader::[CCSocket]* br, CCArena arena, Cmd
             continue;
         }
 
-        if (line.ptr[0] != '*') {
+        char lead = line.at(0) !>;
+        if (lead != '*') {
             size_t ntok = 0;
+            const char *data = line.ptr;
             start = 0;
             while (start < line.len) {
-                while (start < line.len && line.ptr[start] == ' ') start++;
+                while (start < line.len && data[start] == ' ') start++;
                 if (start >= line.len) break;
                 ntok++;
-                while (start < line.len && line.ptr[start] != ' ') start++;
+                while (start < line.len && data[start] != ' ') start++;
             }
             if (ntok == 0) continue;
             out->args = cmd_alloc_args(arena, ntok);
@@ -354,10 +355,10 @@ static bool !>(CCIoError) read_cmd(BufReader::[CCSocket]* br, CCArena arena, Cmd
                 return cc_err(cc_io_error(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "argv")));
             start = 0;
             while (start < line.len) {
-                while (start < line.len && line.ptr[start] == ' ') start++;
+                while (start < line.len && data[start] == ' ') start++;
                 if (start >= line.len) break;
                 end = start;
-                while (end < line.len && line.ptr[end] != ' ') end++;
+                while (end < line.len && data[end] != ' ') end++;
                 char[:] part = line.sub(start, end);
                 char[:] owned = part.clone_into(arena) !>(e) {
                     return cc_err(cc_io_error(e));
@@ -381,7 +382,11 @@ static bool !>(CCIoError) read_cmd(BufReader::[CCSocket]* br, CCArena arena, Cmd
             return cc_err(cc_io_error(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "argv")));
         for (i = 0; i < (size_t)n; i++) {
             char[:] hdr = br->read_line() !>(e) { return cc_err(e); };
-            if (hdr.len == 0 || hdr.ptr[0] != '$')
+            if (hdr.len == 0) {
+                return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "bad bulk")));
+            }
+            char h0 = hdr.at(0) !>;
+            if (h0 != '$')
                 return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "bad bulk")));
             char[:] blen_s = hdr.sub(1, hdr.len);
             int64_t blen = blen_s.to_i64() !>(e) {

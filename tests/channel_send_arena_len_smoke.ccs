@@ -34,7 +34,7 @@ int main(void) {
     bool !>(CCIoError) recv_res = cc_channel_recv(rx, &got);
     if (cc_is_err(recv_res) || !cc_value(recv_res)) return 4;
 
-    CCSlice view = cc_arena_slice(&got.arena,
+    CCSlice view = cc_arena_slice(got.arena,
                                   (uint8_t*)got.arena.a->base + got.offset,
                                   got.len);
     if (view.len != 12) return 5;

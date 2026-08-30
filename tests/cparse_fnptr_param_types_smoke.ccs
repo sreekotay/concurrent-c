@@ -16,7 +16,7 @@ static double measure_impl(void *ctx, char[:] bytes, int n) {
 }
 
 static int on_ints_impl(int[:] xs) {
-    return (int)xs.base.len;
+    return (int)xs.len;
 }
 
 static int on_uniq_impl(char[:!] u) {

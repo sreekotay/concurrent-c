@@ -138,7 +138,7 @@ int main(int argc, char **argv) {
                 return v + " numpy " + numpy.__version__
             except Exception:
                 return v + " numpy absent"
-        `, &a).as_slice()) !>;
+        `, a).as_slice()) !>;
     CCPyObj main_mod = py.import("__main__") !> @destroy;
     CCSlice ev = main_mod.env()!>.as_slice()!>;
     printf("py_baseline iters=%lld n=%lld samples=%d python=%.*s\n",
@@ -215,22 +215,23 @@ int main(int argc, char **argv) {
             for x, k, z in zip(xs, ks, zs):
                 r += f(x, k, z)
             return r
-        `, &a).as_slice()) !>;
+        `, a).as_slice()) !>;
 
     /* CPython specializes bytecode adaptively; warm each loop before timing
      * so the mode that runs first does not pay for everyone. */
     {
         int64_t d;
-        d = main_mod.py_inline(20000);     (void)d;
-        d = main_mod.py_call(20000);       (void)d;
-        d = main_mod.py_to_cc(20000);      (void)d;
-        d = main_mod.py_to_cc_attr(20000); (void)d;
-        d = main_mod.py_to_py(20000);      (void)d;
+        { CCPyObj o = main_mod.py_inline(20000) !> @destroy; d = o.as_i64() !>; } (void)d;
+        { CCPyObj o = main_mod.py_call(20000) !> @destroy; d = o.as_i64() !>; } (void)d;
+        { CCPyObj o = main_mod.py_to_cc(20000) !> @destroy; d = o.as_i64() !>; } (void)d;
+        { CCPyObj o = main_mod.py_to_cc_attr(20000) !> @destroy; d = o.as_i64() !>; } (void)d;
+        { CCPyObj o = main_mod.py_to_py(20000) !> @destroy; d = o.as_i64() !>; } (void)d;
     }
 
     for (int s = 0; s < g_samples; s++) {
         double t0 = now_ms();
-        int64_t r = main_mod.py_inline(iters) !>;
+        CCPyObj r_o = main_mod.py_inline(iters) !> @destroy;
+        int64_t r = r_o.as_i64() !>;
         g_ms[s] = now_ms() - t0;
         want_add = (long long)r;
         sink += r;
@@ -240,7 +241,8 @@ int main(int argc, char **argv) {
     long long got_pycall = 0, got_tocc = 0, got_attr = 0;
     for (int s = 0; s < g_samples; s++) {
         double t0 = now_ms();
-        int64_t r = main_mod.py_call(iters) !>;
+        CCPyObj r_o = main_mod.py_call(iters) !> @destroy;
+        int64_t r = r_o.as_i64() !>;
         g_ms[s] = now_ms() - t0;
         got_pycall = (long long)r;
     }
@@ -248,7 +250,8 @@ int main(int argc, char **argv) {
 
     for (int s = 0; s < g_samples; s++) {
         double t0 = now_ms();
-        int64_t r = main_mod.py_to_cc(iters) !>;
+        CCPyObj r_o = main_mod.py_to_cc(iters) !> @destroy;
+        int64_t r = r_o.as_i64() !>;
         g_ms[s] = now_ms() - t0;
         got_tocc = (long long)r;
     }
@@ -256,7 +259,8 @@ int main(int argc, char **argv) {
 
     for (int s = 0; s < g_samples; s++) {
         double t0 = now_ms();
-        int64_t r = main_mod.py_to_cc_attr(iters) !>;
+        CCPyObj r_o = main_mod.py_to_cc_attr(iters) !> @destroy;
+        int64_t r = r_o.as_i64() !>;
         g_ms[s] = now_ms() - t0;
         got_attr = (long long)r;
     }
@@ -277,20 +281,32 @@ int main(int argc, char **argv) {
     long long got_ccpy = 0, got_pypy = 0;
     for (int s = 0; s < g_samples; s++) {
         double t0 = now_ms();
-        for (long long i = 0; i < on; i++) { int64_t v = main_mod.noargs_py() !>; sink += v; }
+        for (long long i = 0; i < on; i++) {
+            CCPyObj v_o = main_mod.noargs_py() !> @destroy;
+            int64_t v = v_o.as_i64() !>;
+            sink += v;
+        }
         g_ms[s] = now_ms() - t0;
     }
     report_ns("cc_to_py_0", on);
     for (int s = 0; s < g_samples; s++) {
         double t0 = now_ms();
-        for (long long i = 0; i < on; i++) { int64_t v = main_mod.one_py(i) !>; sink += v; }
+        for (long long i = 0; i < on; i++) {
+            CCPyObj v_o = main_mod.one_py(i) !> @destroy;
+            int64_t v = v_o.as_i64() !>;
+            sink += v;
+        }
         g_ms[s] = now_ms() - t0;
     }
     report_ns("cc_to_py_1", on);
     for (int s = 0; s < g_samples; s++) {
         long long t = 0;
         double t0 = now_ms();
-        for (long long i = 0; i < on; i++) { int64_t v = main_mod.mul_add_py(3, i, 7) !>; t += v; }
+        for (long long i = 0; i < on; i++) {
+            CCPyObj v_o = main_mod.mul_add_py(3, i, 7) !> @destroy;
+            int64_t v = v_o.as_i64() !>;
+            t += v;
+        }
         g_ms[s] = now_ms() - t0;
         got_ccpy = t;
         sink += t;
@@ -298,7 +314,8 @@ int main(int argc, char **argv) {
     double ns_ccpy3 = report_ns("cc_to_py_3", on);
     for (int s = 0; s < g_samples; s++) {
         double t0 = now_ms();
-        int64_t r = main_mod.py_to_py(on) !>;
+        CCPyObj r_o = main_mod.py_to_py(on) !> @destroy;
+        int64_t r = r_o.as_i64() !>;
         g_ms[s] = now_ms() - t0;
         got_pypy = (long long)r;
         sink += r;
@@ -327,10 +344,12 @@ int main(int argc, char **argv) {
     double[:] rzs = CCSlice_double_from_buffer(rz, (size_t)on);
 
     CCPyObj fax = main_mod.get("mul_add_py") !> @destroy;
-    { int64_t d = main_mod.rows_prep(on); (void)d; }
+    { CCPyObj d_o = main_mod.rows_prep(on) !> @destroy; int64_t d = d_o.as_i64() !>; (void)d; }
     {
-        CCSlice w = fax.map::[double](a, rxs, rks, rzs); (void)w;
-        double  d = main_mod.rows_py_loop();              (void)d;
+        CCSlice w = fax.map::[double](a, rxs, rks, rzs) !>; (void)w;
+        CCPyObj d_o = main_mod.rows_py_loop() !> @destroy;
+        double d = d_o.as_f64() !>;
+        (void)d;
     }
 
     double got_rowcall = 0, got_rowmap = 0, got_rowpy = 0;
@@ -338,7 +357,8 @@ int main(int argc, char **argv) {
         double acc = 0;
         double t0 = now_ms();
         for (long long i = 0; i < on; i++) {
-            double v = main_mod.mul_add_py(rx[i], rk[i], rz[i]) !>;
+            CCPyObj v_o = main_mod.mul_add_py(rx[i], rk[i], rz[i]) !> @destroy;
+            double v = v_o.as_f64() !>;
             acc += v;
         }
         g_ms[s] = now_ms() - t0;
@@ -359,7 +379,8 @@ int main(int argc, char **argv) {
 
     for (int s = 0; s < g_samples; s++) {
         double t0 = now_ms();
-        double r = main_mod.rows_py_loop() !>;
+        CCPyObj r_o = main_mod.rows_py_loop() !> @destroy;
+        double r = r_o.as_f64() !>;
         g_ms[s] = now_ms() - t0;
         got_rowpy = r;
     }
@@ -423,16 +444,18 @@ int main(int argc, char **argv) {
             return A
         def get_list():
             return L
-        `, &a).as_slice()) !>;
+        `, a).as_slice()) !>;
 
-    double built = main_mod.build(n) !>;
+    CCPyObj built_o = main_mod.build(n) !> @destroy;
+    double built = built_o.as_f64() !>;
     if ((long long)built != n) { fprintf(stderr, "bulk build mismatch\n"); return 1; }
 
     double got;
     if (have_numpy) {
         for (int s = 0; s < g_samples; s++) {
             double t0 = now_ms();
-            got = main_mod.numpy_sum() !>;
+            CCPyObj got_v = main_mod.numpy_sum() !> @destroy;
+            got = got_v.as_f64() !>;
             g_ms[s] = now_ms() - t0;
         }
         report_ms("numpy_sum");
@@ -441,7 +464,8 @@ int main(int argc, char **argv) {
 
     for (int s = 0; s < g_samples; s++) {
         double t0 = now_ms();
-        got = main_mod.py_sum() !>;
+        CCPyObj got_v = main_mod.py_sum() !> @destroy;
+        got = got_v.as_f64() !>;
         g_ms[s] = now_ms() - t0;
     }
     report_ms("py_sum");
@@ -452,7 +476,8 @@ int main(int argc, char **argv) {
     if (have_numpy) {
         for (int s = 0; s < g_samples; s++) {
             double t0 = now_ms();
-            got = main_mod.send_list(view) !>;
+            CCPyObj got_v = main_mod.send_list(view) !> @destroy;
+            got = got_v.as_f64() !>;
             g_ms[s] = now_ms() - t0;
         }
         ms_send_list = report_ms("send_list");
@@ -460,7 +485,8 @@ int main(int argc, char **argv) {
 
         for (int s = 0; s < g_samples; s++) {
             double t0 = now_ms();
-            got = main_mod.send_buf(py_buf(view)) !>;
+            CCPyObj got_v = main_mod.send_buf(py_buf(view)) !> @destroy;
+            got = got_v.as_f64() !>;
             g_ms[s] = now_ms() - t0;
         }
         ms_send_buf = report_ms("send_buf");
@@ -470,7 +496,7 @@ int main(int argc, char **argv) {
         for (int s = 0; s < g_samples; s++) {
             CCArena ex = cc_arena_heap((size_t)(n + 16) * 8 + 4096);
             double t0 = now_ms();
-            CCSlice r = arr.as_list::[double](&ex) !>;
+            CCSlice r = arr.as_list::[double](ex) !>;
             g_ms[s] = now_ms() - t0;
             double acc = 0;
             const double *rv = (const double *)r.ptr;
@@ -486,7 +512,7 @@ int main(int argc, char **argv) {
         for (int s = 0; s < g_samples; s++) {
             CCArena ex = cc_arena_heap((size_t)(n + 16) * 8 + 4096);
             double t0 = now_ms();
-            CCSlice r = lst.as_list::[double](&ex) !>;
+            CCSlice r = lst.as_list::[double](ex) !>;
             g_ms[s] = now_ms() - t0;
             if (r.len != (size_t)n) { fprintf(stderr, "MISMATCH recv_list len\n"); return 1; }
             cc_arena_free(&ex);

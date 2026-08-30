@@ -7,8 +7,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <string.h>
 #include <time.h>
+#include <string.h>
 
 #define N       20000
 #define ROOT    256
@@ -107,7 +107,7 @@ int main(void) {
     grow_ms = now_ms() - t0;
 
     cc_arena_reset(a);
-    if (a.a->ovf_head || cc_arena_overflow_raw_bytes(&a) != 0) {
+    if (a.a->ovf_head || cc_arena_overflow_raw_bytes(a) != 0) {
         printf("FAIL: reset left overflow\n");
         return 7;
     }

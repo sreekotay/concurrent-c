@@ -19,8 +19,8 @@
 
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
-#include <string.h>
 #include <stdint.h>
+#include <string.h>
 
 /* sizeof == 16 (multiple of 8) so pool stride == elem_size, tight packing. */
 typedef struct Elem {
@@ -39,7 +39,7 @@ int main(void) {
         if (!a.base) { printf("FAIL: cc_arena_create returned empty\n"); return 1; }
 
         CCArenaPool pool;
-        cc_arena_pool_init(&pool, &a, sizeof(Elem));
+        cc_arena_pool_init(&pool, a, sizeof(Elem));
 
         for (long i = 0; i < N; i++) {
             Elem *e = (Elem*)cc_arena_pool_alloc(&pool);
@@ -82,7 +82,7 @@ int main(void) {
         if (!a.base) { printf("FAIL: cc_arena_heap returned empty\n"); return 2; }
 
         CCArenaPool pool;
-        cc_arena_pool_init(&pool, &a, sizeof(Elem));
+        cc_arena_pool_init(&pool, a, sizeof(Elem));
 
         for (long i = 0; i < N; i++) {
             Elem *e = (Elem*)cc_arena_pool_alloc(&pool);

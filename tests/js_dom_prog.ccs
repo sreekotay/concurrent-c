@@ -8,6 +8,8 @@
  * spawn naming the missing executable. */
 #include <ccc/std/prelude.cch>
 #include <ccc/script/js.cch>
+#include <string.h>
+#include <stdio.h>
 
 int main(void) {
     CCArena a = cc_arena_heap(megabytes(1)) @destroy;
@@ -51,7 +53,7 @@ int main(void) {
     CCResult_CCJsDomVal_CCJsError plat = cc_js_dom_val_callm(&os, "platform", 0);
     int plat_ok = 0;
     if (plat.ok) {
-        CCResult_CCSlice_CCJsError ps = cc_js_dom_val_as_slice(&plat.u.value, &a);
+        CCResult_CCSlice_CCJsError ps = cc_js_dom_val_as_slice(&plat.u.value, a);
         plat_ok = ps.ok && ps.u.value.len >= 3;
     }
     printf("wire_method_call %s\n", plat_ok ? "true" : "false");
@@ -64,7 +66,7 @@ int main(void) {
         CCResult_CCJsDomVal_CCJsError j = cc_js_dom_val_callm(
             &path, "join", 2, CC_JS_DOM_ARG("a"), CC_JS_DOM_ARG("b"));
         if (j.ok) {
-            CCResult_CCSlice_CCJsError js = cc_js_dom_val_as_slice(&j.u.value, &a);
+            CCResult_CCSlice_CCJsError js = cc_js_dom_val_as_slice(&j.u.value, a);
             join_ok = js.ok && js.u.value.len == 3;
         }
         cc_js_dom_val_release(&path);

@@ -1,0 +1,15 @@
+/* Teaching alias of CCBox::[H] does not dest-mint. */
+#include <ccc/std/prelude.cch>
+
+typedef struct BoxHopHost {
+    int n;
+} BoxHopHost;
+
+typedef CCBox::[BoxHopHost] BoxHop;
+
+int main(void) {
+    BoxHopHost host;
+    BoxHop w = &host;
+    (void)w;
+    return 0;
+}

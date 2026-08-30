@@ -3,7 +3,6 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
 
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_slice.cch>

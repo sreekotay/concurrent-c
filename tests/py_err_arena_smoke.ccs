@@ -18,7 +18,7 @@ int main(void) {
     CCPyError e1 = CCResult_CCPyObj_CCPyError_error(r1);
     if (!e1.base.message || !e1.base.message[0]) return 3;
     /* Message must live in the scratch arena, not only the static buf. */
-    if (!cc__arena_find_block(&a, e1.base.message)) return 4;
+    if (!cc__arena_find_block(a, e1.base.message)) return 4;
     char first[256];
     size_t n1 = strlen(e1.base.message);
     if (n1 >= sizeof(first)) n1 = sizeof(first) - 1;
@@ -29,7 +29,7 @@ int main(void) {
     if (!r2.is_err()) return 5;
     CCPyError e2 = CCResult_CCPyObj_CCPyError_error(r2);
     if (!e2.base.message || !e2.base.message[0]) return 6;
-    if (!cc__arena_find_block(&a, e2.base.message)) return 7;
+    if (!cc__arena_find_block(a, e2.base.message)) return 7;
     /* Prior message still intact after the second failure. */
     if (strcmp(first, e1.base.message) != 0) return 8;
     if (strcmp(e1.base.message, e2.base.message) == 0) return 9;

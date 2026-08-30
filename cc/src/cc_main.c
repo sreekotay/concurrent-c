@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
+#include <sys/time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -45,6 +46,24 @@ static char* cc__read_all_file(const char* path, size_t* out_len);
 static const char* cc__version_string(void);
 static int cc__write_file_bytes(const char* path, const char* data, size_t len);
 static int cc__mkdir_p(const char* path);
+static int cc__prof_on(void) {
+    static int once = 0, on = 0;
+    if (!once) {
+        const char* e = getenv("CC_CCC_PROFILE");
+        on = e && e[0] && e[0] != '0';
+        once = 1;
+    }
+    return on;
+}
+static long long cc__now_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+static void cc__prof_span(const char* name, long long t0) {
+    if (!cc__prof_on()) return;
+    fprintf(stderr, "ccc_profile: %-20s %4lld ms\n", name, cc__now_ms() - t0);
+}
 static int cc__take_unit_flag(int argc, char** argv, int* i,
                               CCUnitKind* as_kind, char* pin, size_t pin_cap);
 
@@ -917,6 +936,26 @@ static int file_exists(const char* path) {
     if (!f) return 0;
     fclose(f);
     return 1;
+}
+
+/* Content-keyed wrap: stable `path`, pid only on the temp. Parallel
+ * testers rename onto the same name; bytes already match `path`. */
+static int cc__install_wrap_file(const char* path, const void* data, size_t n) {
+    char tmp[PATH_MAX];
+    int w;
+    if (!path || path[0] == '\0' || (!data && n)) return -1;
+    if (file_exists(path)) return 0;
+    w = snprintf(tmp, sizeof(tmp), "%s.%d.tmp", path, (int)getpid());
+    if (w < 0 || (size_t)w >= sizeof(tmp)) return -1;
+    if (cc__write_file_bytes(tmp, (const char*)data, n) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    if (rename(tmp, path) != 0) {
+        unlink(tmp);
+        if (!file_exists(path)) return -1;
+    }
+    return 0;
 }
 
 static void detect_host_target(CCBuildTarget* t) {
@@ -3606,7 +3645,6 @@ static int cc__materialize_shcc_for_native(const char* shcc_path, char* out_ccs,
     uint64_t h;
     char dir[PATH_MAX];
     char path[PATH_MAX];
-    char tmp[PATH_MAX];
     if (!shcc_path || !out_ccs || !cap) return -1;
     out_ccs[0] = '\0';
     raw = cc__read_all_file(shcc_path, &raw_len);
@@ -3639,23 +3677,11 @@ static int cc__materialize_shcc_for_native(const char* shcc_path, char* out_ccs,
         free(rewritten);
         return -1;
     }
-    /* Per-process path: parallel cc_test must not race a shared wrap file. */
-    snprintf(path, sizeof(path), "%s/%016llx.%d.ccs", dir, (unsigned long long)h,
-             (int)getpid());
-    if (!file_exists(path)) {
-        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-        if (cc__write_file_bytes(tmp, rewritten, rw_len) != 0) {
-            unlink(tmp);
-            free(rewritten);
-            return -1;
-        }
-        if (rename(tmp, path) != 0) {
-            unlink(tmp);
-            if (!file_exists(path)) {
-                free(rewritten);
-                return -1;
-            }
-        }
+    /* Content key only. PID is on the temp inside cc__install_wrap_file. */
+    snprintf(path, sizeof(path), "%s/%016llx.ccs", dir, (unsigned long long)h);
+    if (cc__install_wrap_file(path, rewritten, rw_len) != 0) {
+        free(rewritten);
+        return -1;
     }
     free(rewritten);
     if (strlen(path) + 1 > cap) {
@@ -3677,7 +3703,6 @@ static int cc__materialize_strip_header(const char* in_path, CCUnitKind kind,
     uint64_t h;
     char dir[PATH_MAX];
     char path[PATH_MAX];
-    char tmp[PATH_MAX];
     char line_dir[PATH_MAX + 64];
     const char* ext = (kind == CC_UNIT_KIND_CCH) ? "cch" : "ccs";
     int nline;
@@ -3718,32 +3743,25 @@ static int cc__materialize_strip_header(const char* in_path, CCUnitKind kind,
         free(raw);
         return -1;
     }
-    snprintf(path, sizeof(path), "%s/%016llx.%d.%s", dir, (unsigned long long)h,
-             (int)getpid(), ext);
-    if (!file_exists(path)) {
-        FILE* f;
-        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-        f = fopen(tmp, "wb");
-        if (!f) {
+    snprintf(path, sizeof(path), "%s/%016llx.%s", dir, (unsigned long long)h, ext);
+    {
+        size_t body = (raw_len > skip) ? (raw_len - skip) : 0;
+        size_t total = (size_t)nline + body;
+        char* blob = (char*)malloc(total ? total : 1);
+        if (!blob) {
             free(raw);
             return -1;
         }
-        if (fwrite(line_dir, 1, (size_t)nline, f) != (size_t)nline ||
-            (raw_len > skip &&
-             fwrite(raw + skip, 1, raw_len - skip, f) != raw_len - skip)) {
-            fclose(f);
-            unlink(tmp);
+        if (nline > 0)
+            memcpy(blob, line_dir, (size_t)nline);
+        if (body)
+            memcpy(blob + (size_t)nline, raw + skip, body);
+        if (cc__install_wrap_file(path, blob, total) != 0) {
+            free(blob);
             free(raw);
             return -1;
         }
-        fclose(f);
-        if (rename(tmp, path) != 0) {
-            unlink(tmp);
-            if (!file_exists(path)) {
-                free(raw);
-                return -1;
-            }
-        }
+        free(blob);
     }
     free(raw);
     if (strlen(path) + 1 > cap) {
@@ -3875,6 +3893,8 @@ static int cc__ensure_pinned_shadow_lower(const char* pin, char* dst, size_t cap
  * flags. Options contract: forward, handle here, or hard error — never drop.
  * .shcc is rewritten to a temp .ccs first (script entry); host CC is unchanged. */
 static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path) {
+    long long t_fn = cc__now_ms();
+    long long t_span;
     char shadow[PATH_MAX];
     char cc_flags_buf[2048];
     char cc_flags_arg[2200];
@@ -3917,17 +3937,21 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     }
 
     if (kind == CC_UNIT_KIND_SHCC) {
+        t_span = cc__now_ms();
         if (cc__materialize_shcc_for_native(opt->in_path, shcc_wrap,
                                             sizeof(shcc_wrap)) != 0)
             return -1;
+        cc__prof_span("wrap_shcc", t_span);
         opt_local = *opt;
         opt_local.in_path = shcc_wrap;
         opt = &opt_local;
         set_quote = 1;
     } else if (kind == CC_UNIT_KIND_CCS || kind == CC_UNIT_KIND_CCH) {
+        t_span = cc__now_ms();
         if (cc__materialize_strip_header(opt->in_path, kind, unit_wrap,
                                          sizeof(unit_wrap)) != 0)
             return -1;
+        cc__prof_span("wrap_unit", t_span);
         if (strcmp(unit_wrap, opt->in_path) != 0) {
             opt_local = *opt;
             opt_local.in_path = unit_wrap;
@@ -3938,7 +3962,9 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     if (set_quote && orig_in[0])
         cc__dir_of_path(orig_in, quote_dir, sizeof(quote_dir));
 
+    t_span = cc__now_ms();
     if (cc__load_const_bindings(opt, bindings, &binding_count) != 0) return -1;
+    cc__prof_span("const_bindings", t_span);
     if (opt->dump_consts && !opt->dump_comptime) {
         for (size_t i = 0; i < binding_count; ++i) {
             printf("CONST %s=%lld\n", bindings[i].name, bindings[i].value);
@@ -3946,6 +3972,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     }
     if (opt->dry_run) return 0;
 
+    t_span = cc__now_ms();
     if (cc__ensure_pinned_shadow_lower(pin[0] ? pin : opt->ccc_version_pin,
                                       shadow, sizeof(shadow)) != 0) {
         if (!pin[0] && !(opt->ccc_version_pin && opt->ccc_version_pin[0])) {
@@ -3955,8 +3982,10 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
         }
         return -1;
     }
+    cc__prof_span("find_shadow_lower", t_span);
     /* Installed / non-prebuilt layouts: build or locate concurrent_c.o and
      * hand it to shadow_lower (it only probes checkout-relative paths). */
+    t_span = cc__now_ms();
     {
         char runtime_obj[PATH_MAX];
         int runtime_reused = 0;
@@ -3977,6 +4006,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
             unsetenv("SHADOW_RUNTIME_O");
         }
         (void)runtime_reused;
+        cc__prof_span("ensure_runtime", t_span);
     }
     /* Fold --target / --sysroot / existing cc_flags (incl. CLI -D) + build.cc. */
     cc_flags_buf[0] = 0;
@@ -4111,6 +4141,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
         for (int i = 0; argv[i]; ++i) fprintf(stderr, " %s", argv[i]);
         fprintf(stderr, "\n");
     }
+    t_span = cc__now_ms();
     pid = fork();
     if (pid < 0) {
         fprintf(stderr, "cc: fork failed for shadow_lower\n");
@@ -4128,9 +4159,13 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
                 WIFEXITED(status) ? WEXITSTATUS(status) : -1);
         return -1;
     }
+    cc__prof_span("shadow_lower", t_span);
+    t_span = cc__now_ms();
     if (cc__finish_emit_c(orig_in[0] ? orig_in : opt->in_path, out_path,
                           opt->mode == CC_MODE_EMIT_C) != 0)
         return -1;
+    cc__prof_span("finish_emit", t_span);
+    cc__prof_span("run_shadow_lower", t_fn);
     return 0;
 }
 
@@ -5204,6 +5239,7 @@ static int ensure_cc_test_tool(const char* cc_bin, const char* target_part, cons
 }
 
 static int run_build_mode(int argc, char** argv) {
+    long long t_build = cc__now_ms();
     // cc build [step] [options] <input.ccs> [output] [-- args...]
     enum { max_cli = 32 };
     char* cli_names[max_cli];
@@ -6808,6 +6844,7 @@ static int run_build_mode(int argc, char** argv) {
         .ccc_version_pin = version_pin[0] ? version_pin : NULL,
     };
     CCBuildSummary sum;
+    cc__prof_span("pre_compile", t_build);
     int compile_err = compile_with_build(&opt, &sum);
     print_build_summary(&opt, &sum, step == CC_BUILD_STEP_RUN ? "run" : "default");
     for (size_t i = 0; i < cli_count; ++i) {
@@ -6881,7 +6918,12 @@ static int run_build_mode(int argc, char** argv) {
             exec_argv[idx++] = run_argv[j];
         }
         exec_argv[idx] = NULL;
-        return run_exec_timeout(bin_path, exec_argv, verbose, run_timeout);
+        {
+            long long t_run = cc__now_ms();
+            int rrc = run_exec_timeout(bin_path, exec_argv, verbose, run_timeout);
+            cc__prof_span("run_exec", t_run);
+            return rrc;
+        }
     }
     return 0;
 
@@ -7133,25 +7175,10 @@ static char* cc__materialize_e_unit(const char* program, size_t program_len,
         free(unit);
         return NULL;
     }
-    /* Per-process path avoids parallel cc_test races on a shared
-     * content-keyed file under out/.cc-build/e/. */
-    snprintf(path, sizeof(path), "%s/%016llx.%d.shcc", dir,
-             (unsigned long long)h, (int)getpid());
-    if (!file_exists(path)) {
-        char tmp[PATH_MAX];
-        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-        if (cc__write_file_bytes(tmp, unit, unit_len) != 0) {
-            unlink(tmp);
-            free(unit);
-            return NULL;
-        }
-        if (rename(tmp, path) != 0) {
-            unlink(tmp);
-            if (!file_exists(path)) {
-                free(unit);
-                return NULL;
-            }
-        }
+    snprintf(path, sizeof(path), "%s/%016llx.shcc", dir, (unsigned long long)h);
+    if (cc__install_wrap_file(path, unit, unit_len) != 0) {
+        free(unit);
+        return NULL;
     }
     free(unit);
     out_path = (char*)malloc(strlen(path) + 1);
@@ -7289,7 +7316,9 @@ static int cc__run_shcc_unit(int argc, char** argv, int unit_idx,
 }
 
 int main(int argc, char **argv) {
+    long long t_main = cc__now_ms();
     cc_init_paths(argv[0]);
+    cc__prof_span("init_paths", t_main);
     cc_diag_init();
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];

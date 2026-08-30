@@ -39,8 +39,8 @@ const solo = require(process.cwd() + '/bin/solo_stats.node');
 console.log('solo_flat', typeof solo.mean === 'function');
 solo.add(10);
 console.log('solo_independent', solo.mean() === 10 && m.stats.mean() === 4);
-"`, &a);
-    run.arg(js.cstr(&a));
+"`, a);
+    run.arg(js.cstr(a));
     run.inherit_stdio();
     int rc = run.status() !>;
     if (rc != 0) { "node run failed".println() !>; return 1; }

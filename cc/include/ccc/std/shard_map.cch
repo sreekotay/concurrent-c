@@ -31,7 +31,6 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
 #include <stdbool.h>
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_result.cch>
@@ -58,7 +57,7 @@ typedef struct CCShard {
 
 static inline bool cc_shard_init_count(CCShard* m, size_t buckets) {
     if (!m) return false;
-    memset(m, 0, sizeof(*m));
+    *m = (CCShard){0};
     m->arena = cc_arena_malloc(CC_SHARD_MAP_ARENA_ROOT);
     if (!cc_arena_valid(m->arena)) return false;
     if (buckets == 0)
@@ -105,7 +104,7 @@ static inline bool cc_shard_get_into(CCShard* m, CCSlice key, CCArena arena,
                                     CCString* out) {
     CCString* v;
     if (!out) return false;
-    memset(out, 0, sizeof(*out));
+    *out = (CCString){0};
     if (!cc_arena_is_live(arena)) return false;
     v = cc_shard_get(m, key);
     if (!v) return false;
@@ -200,7 +199,7 @@ static inline bool cc_shard_map_init(CCShardMap* m, CCExclusive excl,
                                     CCShardMask mask) {
     size_t i, n;
     if (!m || !cc_exclusive_is_live(excl) || mask.count == 0) return false;
-    memset(m, 0, sizeof(*m));
+    *m = (CCShardMap){0};
     m->domain = cc_shard_domain(excl, mask);
     n = mask.count;
     m->root = cc_arena_heap(n * sizeof(CCShard) + 64);
@@ -208,7 +207,7 @@ static inline bool cc_shard_map_init(CCShardMap* m, CCExclusive excl,
     m->shards = cc_arena_alloc_T_count(CCShard, m->root, n);
     if (!m->shards) {
         cc_arena_destroy(&m->root);
-        memset(m, 0, sizeof(*m));
+        *m = (CCShardMap){0};
         return false;
     }
     for (i = 0; i < n; i++) {
@@ -216,7 +215,7 @@ static inline bool cc_shard_map_init(CCShardMap* m, CCExclusive excl,
             size_t j;
             for (j = 0; j < i; j++) cc_shard_destroy(&m->shards[j]);
             cc_arena_destroy(&m->root);
-            memset(m, 0, sizeof(*m));
+            *m = (CCShardMap){0};
             return false;
         }
     }
@@ -232,7 +231,7 @@ static inline void cc_shard_map_destroy(CCShardMap* m) {
         m->shards = NULL;
     }
     cc_arena_destroy(&m->root);
-    memset(m, 0, sizeof(*m));
+    *m = (CCShardMap){0};
 }
 
 /* Re-init every cell (FLUSHDB). Keeps domain / shard count. */
@@ -259,8 +258,7 @@ static inline size_t cc_shard_map_len(const CCShardMap* m) {
  * resolves when as: retry is not on the peel path. */
 static inline CCShardHold cc_shard_map_hold_one(CCShardMap* m, uint64_t si) {
     if (!m) {
-        CCShardHold h;
-        memset(&h, 0, sizeof(h));
+        CCShardHold h = {0};
         return h;
     }
     return cc_shard_domain_hold_one(&m->domain, si);
@@ -270,8 +268,7 @@ static inline CCShardHold cc_shard_map_hold_sorted(CCShardMap* m,
                                                   const uint64_t* names,
                                                   size_t count) {
     if (!m) {
-        CCShardHold h;
-        memset(&h, 0, sizeof(h));
+        CCShardHold h = {0};
         return h;
     }
     return cc_shard_domain_hold_sorted(&m->domain, names, count);
@@ -279,8 +276,7 @@ static inline CCShardHold cc_shard_map_hold_sorted(CCShardMap* m,
 
 static inline CCShardHold cc_shard_map_hold_all(CCShardMap* m) {
     if (!m) {
-        CCShardHold h;
-        memset(&h, 0, sizeof(h));
+        CCShardHold h = {0};
         return h;
     }
     return cc_shard_domain_hold_all(&m->domain);

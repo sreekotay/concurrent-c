@@ -1,3 +1,4 @@
+#include <stdio.h>
 #!/usr/bin/env -S ./cc/bin/ccc
 /*
  * Naked fprint/fprintln: fd first, then data (fprintf-shaped).

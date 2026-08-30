@@ -1,0 +1,8 @@
+/* Raw memset is not a CCS API. Fill through slice dest-bulk: dst.fill(c). */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    char buf[4];
+    cc_memset(buf, 0, 4);
+    return (int)buf[0];
+}

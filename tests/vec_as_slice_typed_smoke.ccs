@@ -21,6 +21,7 @@ int main(void) {
 
     /* Typed view: element-count len, typed at/sub. */
     CCSlice_double s = v.as_slice();
+    assert(s.len == 3);
     assert(s.len() == 3);
     assert(s.at(1) == 2.5);
     CCSlice_double mid = s.sub(0, 2);

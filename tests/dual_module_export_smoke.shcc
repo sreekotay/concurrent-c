@@ -50,8 +50,8 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
         echo "narrowing failed"
     fi
     ./cc/bin/ccc build tests/dual_module_export_mod.ccs --module=rb 2>&1 | grep -o "no such entry (targets: py js)"
-    `, &a);
-    run.arg(sh.cstr(&a));
+    `, a);
+    run.arg(sh.cstr(a));
     run.inherit_stdio();
     int rc = run.status() !>;
     if (rc != 0) { "dual checks failed".println() !>; return 1; }

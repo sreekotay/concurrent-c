@@ -11,6 +11,9 @@
 // grammar must agree byte-for-byte on ids, text, and screen names.
 #include <ccc/std/prelude.cch>
 #include <ccc/std/json.cch>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 @grammar(rules) Json {~~~~
     include JsonDom

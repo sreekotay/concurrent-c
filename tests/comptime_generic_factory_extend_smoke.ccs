@@ -2,6 +2,7 @@
 #include <ccc/cc_instantiate.cch>
 #include <ccc/cc_slice.cch>
 #include <stdio.h>
+#include <string.h>
 
 /* CC_GENERIC_FACTORY defines the type; CC_GENERIC_FACTORY_EXTEND adds operations
  * elsewhere without editing the base.  At a use site the base runs first (so

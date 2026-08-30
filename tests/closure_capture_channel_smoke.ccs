@@ -1,6 +1,7 @@
 // Test: Closure can capture channel handles
 #include <ccc/std/prelude.cch>
 #include <assert.h>
+#include <stdio.h>
 
 int main(void) {
     int[~4 >] tx;

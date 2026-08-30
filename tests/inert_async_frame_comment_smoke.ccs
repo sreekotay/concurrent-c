@@ -6,6 +6,7 @@
  * via redis_idiomatic: the frame struct gained the member
  * `* req->arena bytes ( e;` and the reparse exploded. */
 #include <ccc/std/prelude.cch>
+#include <stdio.h>
 
 @async int worker(int[~4 <] rx) {
     /* the reply may still borrow

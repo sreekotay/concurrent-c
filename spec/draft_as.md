@@ -2,8 +2,8 @@
 
 Status: draft — surface is `@typeview on T { as: field; }`
 (`draft_facets.md`). UFCS-miss retry (including transitive walk),
-arg-position autocast, and `@errhandler` fallback (exact Result `E`, else
-unique face path to the handler parameter type).
+field-miss retry, arg-position autocast, and `@errhandler` fallback
+(exact Result `E`, else unique face path to the handler parameter type).
 
 ## 1. Surface
 
@@ -23,9 +23,11 @@ typedef struct CCTempFile {
 
 - The field name is required; an anonymous face is ill-formed. The lowered
   C member is exactly the source name — no synthetic names.
-- A plain `as: field` face is a value embed. A pointer field is
-  ill-formed in the plain form. `(Mode)field` may hop through a pointer
-  (projection; the mode names the landing face).
+- A plain `as: field` face is a value embed, or a **single-pointer hop**
+  (`as: p` on a named pointer). `T**` and further stars are ill-formed.
+  A pointer hop is not a value embed: destroy does not walk it.
+  `(Mode)field` may also hop through a pointer (the mode names the
+  landing face).
 - Layout is ordinary field layout: `sizeof(Type)` at the declaration site
   with `Type`'s alignment. No field flattening.
 - At most one face path to any given type from a struct (direct or
@@ -49,6 +51,7 @@ field's type with receiver `&recv.name`:
 
 ```c
 tmp.write(buf)      /* lowers to */  cc_file_write(&tmp.file, buf)
+w.bump()            /* as: p hop */  WidgetHost_bump(w.p)
 ```
 
 - Exactly one `as:` field resolving the method: that lowering is taken.
@@ -56,11 +59,19 @@ tmp.write(buf)      /* lowers to */  cc_file_write(&tmp.file, buf)
 - More than one (distinct `as:` paths both provide the method): ill-formed,
   ambiguous.
 
+A field load or store `x.leaf` (or `x->leaf`) that is not a member of
+`Outer` retries the same faces: exactly one landing that has `leaf`
+lowers to `x.path.leaf`. A local member wins (`x.leaf` stays `x.leaf`).
+`x.leaf()` is UFCS, not this hop. Two faces both offering `leaf` is
+ill-formed at the use. Stores inherit the landing facet (`r: *` on
+`CCSlice` still denies `xs.len =`). Explicit `x.path` remains ordinary
+member access.
+
 Retry walks `as:` fields transitively: after probing `Outer`'s direct embeds,
 each embed type's `as:` fields are probed the same way. A cycle in the `as:`
 graph is ill-formed at the struct declaration. Method-name clashes across
 distinct embed types (same method, different `as:` targets) are ill-formed
-at the call.
+at the call. Field-name clashes follow the same rule at the use.
 
 Argument-position conversion applies the same rule to type mismatches: an
 `Outer*` (or `Outer` lvalue's address) passed where `T*` is expected, when

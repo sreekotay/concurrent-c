@@ -313,7 +313,7 @@ CCStdio io = cc_stdio_create(a);
 char* p = a.allocT(64);
 char[:] s = a.alloc_slice_bytes(32);               /* arena provenance */
 io.println(@string(`len=${s.len}`, @scratch)) !>;  /* @scratch: @string arena only */
-/* walk: for (ch in s) { … } — not s.ptr[i]; a guess is s.at(i) !> */
+/* walk: for (ch in s) { … }; mut: for (&ch in s) { ch = …; } !>; s.ptr[i] is the Gap */
 ```
 
 **Allocation policy** (`cc_arena_heap` / `cc_arena_stack` defaults) — three

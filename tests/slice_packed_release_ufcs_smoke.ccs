@@ -9,11 +9,11 @@ int main(void) {
     assert(cc_arena_is_live(a));
 
     CCSlice long_s = @slice("the-quick-brown-fox-jumps-over-the-lazy-dog");
-    CCSlicePacked pk = long_s.to_packed(&a) !>;
+    CCSlicePacked pk = long_s.to_packed(a) !>;
     assert(!cc_slice_packed_is_inline(&pk));
     assert(pk.as_slice().len == long_s.len);
 
-    pk.release(&a);
+    pk.release(a);
     assert(cc_slice_packed_is_empty(&pk));
     return 0;
 }

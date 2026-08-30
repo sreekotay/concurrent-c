@@ -87,20 +87,34 @@ static inline const char* cc_error_str(CCError e) {
     return cc_error_kind_str(e.kind);
 }
 
-#include <stdio.h>
-#include <stdlib.h>
+#if defined(CC_COMPTIME) || defined(__TINYC__) || defined(CC_RESULT_IMPL)
+#include <ccc/cc_mem.cch>
+#if defined(CC_RESULT_IMPL)
+#define CC__RESULT_SYS
+#else
+#define CC__RESULT_SYS static inline
+#endif
+#endif
+
+#ifdef CC__RESULT_SYS
+CC__RESULT_SYS void cc_result_panic(const char *msg, const char *file, int line) {
+    if (cc_eprintf("CC: %s at %s:%d\n", msg ? msg : "result",
+                   file ? file : "?", line) < 0)
+        cc_abort();
+    cc_abort();
+}
 
 /* Report a CCError to stderr. Building block for soft handlers:
  *   @errhandler(CCError e) { cc_error_log(e); return 1; }
  * Does not diverge — pair with return/cancel at the binding site. */
-static inline void cc_error_log(CCError e) {
-    if (fprintf(stderr, "fatal: %s\n", cc_error_str(e)) < 0) abort();
+CC__RESULT_SYS void cc_error_log(CCError e) {
+    if (cc_eprintf( "fatal: %s\n", cc_error_str(e)) < 0) cc_abort();
 }
 
 /* Log then return 1 — soft terminate for int-returning frames:
  *   @errhandler(CCError e) { return cc_err_log(e); }
  */
-static inline int cc_err_log(CCError e) {
+CC__RESULT_SYS int cc_err_log(CCError e) {
     cc_error_log(e);
     return 1;
 }
@@ -108,10 +122,16 @@ static inline int cc_err_log(CCError e) {
 /* Log then exit(1). The standard named `@errhandler` terminate policy:
  *   @errhandler(CCError e) cc_error_exit(e);
  * Recognized as diverging for expression-position `!>;`. */
-static inline void cc_error_exit(CCError e) {
+CC__RESULT_SYS void cc_error_exit(CCError e) {
     cc_error_log(e);
-    exit(1);
+    cc_exit(1);
 }
+#else
+void cc_result_panic(const char *msg, const char *file, int line);
+void cc_error_log(CCError e);
+int cc_err_log(CCError e);
+void cc_error_exit(CCError e);
+#endif
 
 /*
  * Result type layout:
@@ -148,9 +168,7 @@ static inline void cc_error_exit(CCError e) {
     /* UFCS method: r.value() -> name##_value(r) */                                 \
     static inline OkType name##_value(name r) {                                     \
         if (!r.ok) {                                                                \
-            fprintf(stderr, "CC: value failed on %s at %s:%d\n",                    \
-                    #name, __FILE__, __LINE__);                                     \
-            abort();                                                                \
+            cc_result_panic("value failed on " #name, __FILE__, __LINE__);                                     \
         }                                                                           \
         return r.u.value;                                                           \
     }                                                                               \
@@ -169,9 +187,7 @@ static inline void cc_error_exit(CCError e) {
     /* UFCS method: r.error() -> name##_error(r) */                                 \
     static inline ErrType name##_error(name r) {                                    \
         if (r.ok) {                                                                 \
-            fprintf(stderr, "CC: error failed on %s at %s:%d\n",                    \
-                    #name, __FILE__, __LINE__);                                     \
-            abort();                                                                \
+            cc_result_panic("error failed on " #name, __FILE__, __LINE__);                                     \
         }                                                                           \
         return r.u.error;                                                           \
     }                                                                               \
@@ -243,9 +259,7 @@ CC_DECL_RESULT_SPEC(CCResult_charptr_CCError, char*, CCError)
     /* UFCS method: r.value() -> name##_value(r); yields nothing, aborts on err. */ \
     static inline void name##_value(name r) {                                       \
         if (!r.ok) {                                                                \
-            fprintf(stderr, "CC: value failed on %s at %s:%d\n",                    \
-                    #name, __FILE__, __LINE__);                                     \
-            abort();                                                                \
+            cc_result_panic("value failed on " #name, __FILE__, __LINE__);                                     \
         }                                                                           \
     }                                                                               \
     static inline void name##_unwrap(name r) { name##_value(r); }                   \
@@ -253,9 +267,7 @@ CC_DECL_RESULT_SPEC(CCResult_charptr_CCError, char*, CCError)
     static inline bool name##_is_err(name r) { return !r.ok; }                      \
     static inline ErrType name##_error(name r) {                                    \
         if (r.ok) {                                                                 \
-            fprintf(stderr, "CC: error failed on %s at %s:%d\n",                    \
-                    #name, __FILE__, __LINE__);                                     \
-            abort();                                                                \
+            cc_result_panic("error failed on " #name, __FILE__, __LINE__);                                     \
         }                                                                           \
         return r.u.error;                                                           \
     }                                                                               \
@@ -428,7 +440,7 @@ int  cc_rt_diag_unwrap_site(int i, const char** out_file, const char** out_line_
  * of its own (a Python exception, an errno).  "" before any unwrap:
  *
  *     @errhandler(CCError e) {
- *         fprintf(stderr, "fatal: %s (at %s)\n", e.message, cc_error_site());
+ *         cc_eprintf( "fatal: %s (at %s)\n", e.message, cc_error_site());
  *         return 1;
  *     }
  */
@@ -520,32 +532,28 @@ const char* cc_error_site(void);
 #define cc_unwrap(res) ({ \
     __typeof__(res) __r = (res); \
     if (!__r.ok) { \
-        fprintf(stderr, "cc_unwrap called on error result\n"); \
-        abort(); \
+        cc_result_panic("cc_unwrap called on error result", __FILE__, __LINE__); \
     } \
     __r.u.value; \
 })
 #define cc_unwrap_as(res, T) ({ \
     __typeof__(res) __r = (res); \
     if (!__r.ok) { \
-        fprintf(stderr, "cc_unwrap_as called on error result\n"); \
-        abort(); \
+        cc_result_panic("cc_unwrap_as called on error result", __FILE__, __LINE__); \
     } \
     *(T*)(void*)&__r.u.value; \
 })
 #define cc_unwrap_err(res) ({ \
     __typeof__(res) __r = (res); \
     if (__r.ok) { \
-        fprintf(stderr, "cc_unwrap_err called on ok result\n"); \
-        abort(); \
+        cc_result_panic("cc_unwrap_err called on ok result", __FILE__, __LINE__); \
     } \
     __r.u.error; \
 })
 #define cc_unwrap_err_as(res, T) ({ \
     __typeof__(res) __r = (res); \
     if (__r.ok) { \
-        fprintf(stderr, "cc_unwrap_err_as called on ok result\n"); \
-        abort(); \
+        cc_result_panic("cc_unwrap_err_as called on ok result", __FILE__, __LINE__); \
     } \
     *(T*)(void*)&__r.u.error; \
 })

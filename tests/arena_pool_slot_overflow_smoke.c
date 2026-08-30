@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 /* Shaped to force growth in a 512-byte slot: the struct (~200B) + the
  * cloned argv bytes (~400B) together exceed the slot, so the second argv

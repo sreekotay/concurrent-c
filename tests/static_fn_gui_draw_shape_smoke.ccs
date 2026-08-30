@@ -150,18 +150,19 @@ static void gui_draw_buf_shape(GuiBuf *b, int ph, int focused) {
                 while (k < bytes.len || k == 0) {
                     size_t off = row.byte_start + k;
                     char[:] one = bytes.sub(k, k + 1);
-                    if (has && (b->doc.sel_covers(off) !>)) {
+                    int covers = b->doc.sel_covers(off) !>;
+                    size_t col = gui_box_col_at(line_off, 0) !>;
+                    if (has && covers) {
                         (void)off;
                     } else if (phave && (off == plo || off == phi)) {
                         (void)y;
                     }
-                    if (box_row && (gui_box_col_at(line_off, 0) !>) ==
-                        off - line_off) {
+                    if (box_row && col == off - line_off) {
                         (void)one;
                     }
                     if (focused &&
                         (box_row &&
-                         line_off + (gui_box_col_at(line_off, 0) !>) ==
+                         line_off + col ==
                          row.byte_start + row.byte_len)) {
                         (void)acc;
                     }

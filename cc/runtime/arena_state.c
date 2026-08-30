@@ -1,4 +1,7 @@
+#define CC_ARENA_IMPL 1
+#define CC_RESULT_IMPL 1
 #include <ccc/cc_arena.cch>
+#include "cc_mem.c"
 
 cc_atomic_u64 cc_arena_prov_counter = 1;
 

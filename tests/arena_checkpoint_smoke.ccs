@@ -1,6 +1,8 @@
 // Test: arena checkpoints restore allocation position without invalidating prior allocations
 #include <ccc/std/prelude.cch>
 #include <assert.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 int main(void) {
     char buffer[1024];

@@ -29,7 +29,7 @@ int main(void) {
     }
     {
         CCSlice_Pt mid = ps.sub(1, 3);
-        assert(mid.base.len == 2);
+        assert(mid.len == 2);
         Pt m0 = mid.at(0);
         assert(m0.x == 3);
     }

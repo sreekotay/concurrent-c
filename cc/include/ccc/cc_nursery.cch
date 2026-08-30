@@ -25,9 +25,8 @@ typedef struct CCNurseryHost CCNurseryHost;
  * in a lowered .h — mint the factory name, then alias. */
 #ifndef CCBox_CCNurseryHost_DEFINED
 #define CCBox_CCNurseryHost_DEFINED
-CC_DECL_BOX_SPEC(CCBox_CCNurseryHost, CCNurseryHost)
+CC_DECL_BOX_ALIAS(CCNursery, CCNurseryHost);
 #endif
-typedef CCBox_CCNurseryHost CCNursery;
 
 #ifndef CCResult_CCNursery_CCError_DEFINED
 #define CCResult_CCNursery_CCError_DEFINED 1

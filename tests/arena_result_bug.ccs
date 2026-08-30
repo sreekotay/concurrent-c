@@ -10,6 +10,8 @@
 // is preceded by an identifier (indicating a pointer type declaration).
 
 #include <ccc/std/prelude.cch>
+#include <stdlib.h>
+#include <stdio.h>
 
 typedef struct { int x; } MyStruct;
 

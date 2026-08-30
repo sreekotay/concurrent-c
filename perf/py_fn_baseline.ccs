@@ -101,15 +101,18 @@ static int bench_domain(CCPy *py, const char *py_mode, const char *fn_mode,
 
     /* Warm specialize. */
     {
-        int64_t d = main_mod.apply_n(f_py, 20000LL) !>;
+        CCPyObj d_v = main_mod.apply_n(f_py, 20000LL) !> @destroy;
+        int64_t d = d_v.as_i64() !>;
         (void)d;
-        d = main_mod.apply_n(f_cc, 20000LL) !>;
+        CCPyObj d_v2 = main_mod.apply_n(f_cc, 20000LL) !> @destroy;
+        d = d_v2.as_i64() !>;
         (void)d;
     }
 
     for (s = 0; s < g_samples; s++) {
         double t0 = now_ms();
-        int64_t r = main_mod.apply_n(f_py, iters) !>;
+        CCPyObj r_v = main_mod.apply_n(f_py, iters) !> @destroy;
+        int64_t r = r_v.as_i64() !>;
         g_ms[s] = now_ms() - t0;
         got = (long long)r;
     }
@@ -121,7 +124,8 @@ static int bench_domain(CCPy *py, const char *py_mode, const char *fn_mode,
 
     for (s = 0; s < g_samples; s++) {
         double t0 = now_ms();
-        int64_t r = main_mod.apply_n(f_cc, iters) !>;
+        CCPyObj r_v = main_mod.apply_n(f_cc, iters) !> @destroy;
+        int64_t r = r_v.as_i64() !>;
         g_ms[s] = now_ms() - t0;
         got = (long long)r;
     }
@@ -153,7 +157,8 @@ static int bench_iso(CCPy *py, long long iters) {
 
     /* Warm. */
     for (s = 0; s < 200; s++) {
-        long long v = op.call(f_cc, (long long)s)!>.as_i64()!>;
+        CCPyObj v_obj = op.call(f_cc, (long long)s) !> @destroy;
+        long long v = v_obj.as_i64() !>;
         (void)v;
     }
 
@@ -162,7 +167,8 @@ static int bench_iso(CCPy *py, long long iters) {
         long long t = 0;
         double t0 = now_ms();
         for (i = 0; i < iters; i++) {
-            long long v = op.call(f_cc, i)!>.as_i64()!>;
+            CCPyObj v_obj = op.call(f_cc, i) !> @destroy;
+            long long v = v_obj.as_i64() !>;
             t += v;
         }
         g_ms[s] = now_ms() - t0;

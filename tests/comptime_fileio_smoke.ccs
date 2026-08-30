@@ -1,6 +1,7 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_instantiate.cch>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* Comptime can use "as much CC as possible": the executor TU links libc and the
  * prelude pulls in <stdio.h>/<stdlib.h>/<ctype.h>/<stdbool.h>.  This block writes

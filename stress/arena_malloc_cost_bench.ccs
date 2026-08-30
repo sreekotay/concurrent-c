@@ -78,8 +78,8 @@ static int run_arena(Mode mode, size_t root, size_t n, volatile size_t *sink) {
         *sink ^= p[0];
         live += sz;
     }
-    gross = cc_arena_committed_gross_bytes(&a);
-    ovf = cc_arena_overflow_raw_bytes(&a);
+    gross = cc_arena_committed_gross_bytes(a);
+    ovf = cc_arena_overflow_raw_bytes(a);
     t_reset = now_ms();
     cc_arena_reset(a);
     reset_ms = now_ms() - t_reset;

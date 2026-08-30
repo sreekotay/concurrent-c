@@ -5,6 +5,7 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_exclusive.cch>
 #include <stdio.h>
+#include <stdlib.h>
 
 int main(void) {
     @errhandler(CCError e) {

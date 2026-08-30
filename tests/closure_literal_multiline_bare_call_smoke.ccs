@@ -12,6 +12,7 @@
  *      pass's search window to unrelated text — the node's logical line must
  *      resolve through the buffer's #line ledger. */
 #include <ccc/std/prelude.cch>
+#include <stdio.h>
 
 @grammar(schema) BCG {~~~~
     rules [

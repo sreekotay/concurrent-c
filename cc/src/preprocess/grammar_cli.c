@@ -761,7 +761,7 @@ static char *cc__cli_grammar_emit(const char *name,
                         "CCArena arena, %s *out) {\n"
                         "    CCCliFillResult r;\n"
                         "    if (!out) return 0;\n"
-                        "    memset(out, 0, sizeof(*out));\n"
+                        "    cc__bytes_zero(out, sizeof(*out));\n"
                         "    cc_cli_apply_defaults(%s__cli_fields, %s__cli_field_count, out);\n"
                         "    r = cc_cli_fill(%s__cli_fields, %s__cli_field_count, "
                         "argc, argv, arena, out);\n"
@@ -778,7 +778,7 @@ static char *cc__cli_grammar_emit(const char *name,
                         "        return cc_err_CCResult_bool_CCError(\n"
                         "            CC_ERROR(CC_ERR_INVALID_ARG, \"%s_prepare: null out\"));\n"
                         "    }\n"
-                        "    memset(out, 0, sizeof(*out));\n"
+                        "    cc__bytes_zero(out, sizeof(*out));\n"
                         "    return cc_cli_prepare_fields(%s__cli_fields, "
                         "%s__cli_field_count, argc, argv, arena, out, usage_out);\n"
                         "}\n",

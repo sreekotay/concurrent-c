@@ -1401,7 +1401,7 @@ static inline CCString cc_gr_fill_head_text(CCArena a, const char* n,
 }
 
 static inline CCString cc_gr_fill_zero_text(CCArena a) {
-    return @string(`    memset(out, 0, sizeof *out);
+    return @string(`    cc__bytes_zero(out, sizeof *out);
 `, a);
 }
 

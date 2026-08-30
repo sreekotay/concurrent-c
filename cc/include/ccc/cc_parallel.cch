@@ -26,8 +26,6 @@
 #include <ccc/cc_nursery.cch>
 #include <ccc/cc_type.cch>
 #include <ccc/cc_ufcs.cch>
-#include <stdlib.h>
-#include <string.h>
 
 #ifndef CC_PARALLEL_TASK_MAX
 #define CC_PARALLEL_TASK_MAX 32
@@ -59,32 +57,11 @@ CC_DECL_RESULT_SPEC(CCResult_CCParallel_CCError, CCParallel, CCError)
 #endif
 
 static inline CCParallel cc_parallel_empty(void) {
-    CCParallel h;
-    memset(&h, 0, sizeof(h));
+    CCParallel h = {0};
     return h;
 }
 
-static inline void !>(CCError) cc_parallel_wait(CCParallel* h) {
-    int i;
-    if (!h)
-        return cc_err(CC_ERR_INVALID_ARG, "cc_parallel_wait");
-    if (cc_atomic_load(&h->joined))
-        return cc_ok();
-    if (h->n) {
-        CCResult_void_CCError wr = cc_nursery_wait_host(h->n);
-        if (!wr.ok) return wr;
-    }
-    for (i = 0; i < h->nt; i++) {
-        cc_parallel_join(h->tasks[i]);
-        free(h->envs[i]);
-        h->envs[i] = NULL;
-    }
-    h->nt = 0;
-    cc_atomic_store(&h->joined, 1);
-    if (h->fail)
-        return cc_err(h->err);
-    return cc_ok();
-}
+void !>(CCError) cc_parallel_wait(CCParallel* h);
 
 static inline int cc__parallel_contains(const CCParallel* root,
                                         const CCParallel* needle) {

@@ -9,6 +9,9 @@
  * after close), and a clean process exit (no wedged loop thread). */
 #include <ccc/std/prelude.cch>
 #include <ccc/script/js.cch>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 static void rung_basics(CCJs *js, void *ctx) {
     (void)ctx;
