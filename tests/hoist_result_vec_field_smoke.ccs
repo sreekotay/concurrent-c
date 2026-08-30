@@ -1,0 +1,26 @@
+/* Result Ok struct with a Vec field must wait for the Vec::[T] factory
+ * (not hoist before DECL). Host-cc must not see unknown CCVec_T. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct Box {
+    CCVec::[uint64_t] words;
+} Box;
+
+static Box !>(CCError) Box_make(CCArena store) {
+    Box b;
+    b.words = vec_new::[uint64_t](store);
+    return cc_ok(b);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    Box b = Box_make(a) !>;
+    if (b.words.len() != 0) return 2;
+    printf("ok\n");
+    return 0;
+}

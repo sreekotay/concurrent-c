@@ -44,6 +44,14 @@ cover scene: sequential C, Concurrent-C `@parallel for` over scanlines,
 and Go with one goroutine per row. Same camera, same per-pixel LCG,
 checksum of the framebuffer. `./raytracer/compare.sh` (or `--smoke`).
 
+## RandomAccess
+
+[`random_access/`](random_access/) is HPC Challenge GUPS. Upstream is
+Chapel's release RA at one locale (`ra.chpl` / `ra-atomics.chpl`,
+`-nl 1`); CC `smp` / `smp-atomic` are the matched race.
+`./random_access/compare.sh` (or `--smoke`). Multi-locale is
+`./random_access/compare_dist.sh` (`ra_dist.ccs`).
+
 ## Sanitizers / fuzz
 
 ```bash

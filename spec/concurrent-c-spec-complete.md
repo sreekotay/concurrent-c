@@ -6087,10 +6087,11 @@ s.sub(start, end);
 
 #### 9.2.4 Iteration
 
-A **for-in** subject is a bound name whose type answers both `.len` and
-`.access` (§9 type-owned registration). Binders and subjects are
-comma-separated identifiers at depth 0. The subject is a bound name, not
-an arbitrary expression. A pointer type (`T*`) is not an extent —
+A **for-in** subject is a bound name or a field path off a bind
+(`s`, `t->words`, `t.words`) whose type answers both `.len` and
+`.access` (§9 type-owned registration). Binders are comma-separated
+identifiers at depth 0. The subject is not an arbitrary expression
+(no call, no arithmetic). A pointer type (`T*`) is not an extent —
 `for (v in p)` is ill-formed.
 
 Stdlib extents: `CCSlice` / `CCSlice_*` (`.len` field, load of `ptr`;

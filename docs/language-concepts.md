@@ -137,7 +137,8 @@ dead, epochs as fields, failure is unchanged):
 
 Ordinary slice sites allow loads and UFCS; field stores (`s.len = …`) are
 denied. The walk is `for (v in s)` (also enumerate / zip / range): the
-compiler pays `i < live .len` and loads. Users do not write `s.access(i)`.
+compiler pays `i < live .len` and loads. The subject is a name or a field
+path (`t->words`). Users do not write `s.access(i)`.
 Zip is a statement that can fail: `for (a, b in s, t) { … } !>;`. Walk,
 enumerate, and range cannot fail and do not take `!>`.
 A guess at a slot is `s.at(i) !>` / `s.set(i, v) !>`. `T*` is not an

@@ -1,0 +1,29 @@
+/* for (v in t->words) / for (i, v in t.words) — field path, not a local. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct Box {
+    CCVec::[int] words;
+} Box;
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4)) @destroy;
+    Box b;
+    Box* p;
+    int sum = 0;
+    size_t i;
+    int v;
+    if (!cc_arena_is_live(arena)) return 1;
+    b.words = vec_new::[int](arena);
+    if (b.words.push(10) != 0 || b.words.push(20) != 0) return 2;
+    p = &b;
+    for (x in p->words)
+        sum += x;
+    if (sum != 30) return 3;
+    sum = 0;
+    for (i, v in b.words)
+        sum += (int)i + v;
+    if (sum != 31) return 4;
+    printf("ok\n");
+    return 0;
+}

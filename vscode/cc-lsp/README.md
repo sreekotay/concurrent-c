@@ -24,13 +24,14 @@ Pair with [`../ccs-syntax/`](../ccs-syntax/) for highlighting. See [`../roadmap.
 Diagnostics: `didOpen` / `didSave` kick immediately; `didChange` debounces
 (~150 ms, one waiter per file). `.ccs` and `.cch` both run
 `ccc --emit-c-only` (a header is a unit). The session fiber does not
-wait on `ccc`. Hover is static (`@` sigils, `!>`, `?>`) and does not
-invoke `ccc`.
+wait on `ccc`. Hover is off (the handler returns `null`).
 
-Unsaved buffers are written under `$TMPDIR` (never next to the source).
-A `#line 1 "real/path"` stamp plus `cwd` = the file’s directory keep
-quoted includes (`"browse.cch"`) resolving. Opening a file also deletes
-leftover `.cc-lsp-*` / `*.cc-lsp-out.c` from older servers.
+Unsaved buffers are written under `$TMPDIR/cc-lsp-<pid>/` (never next
+to the source, never `cwd` into the project). `ccc --out-dir` stays
+inside that wave so `out/.cc-build` does not appear beside the file.
+A `#line 1 "real/path"` stamp keeps quoted includes (`"browse.cch"`)
+resolving. Opening a file also deletes leftover `.cc-lsp-*` /
+`*.cc-lsp-out.c` from older servers.
 
 ## Iterate (no window reload)
 

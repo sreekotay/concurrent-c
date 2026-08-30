@@ -1,0 +1,187 @@
+#!ccc ccs
+/*
+ * HPCC RandomAccess — single-locale Chapel-matched pairs.
+ *
+ *   smp         unlocked XOR  ↔  ra.chpl, -nl 1
+ *   smp-atomic  fetch_xor     ↔  ra-atomics.chpl, -nl 1
+ *
+ * The table is a Vec::[uint64_t] on a named arena. A slice is a view of
+ * those words; the vec is the owner. Multi-locale Chapel is a separate
+ * experiment.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/script/stdio.cch>
+#include <string.h>
+#include <time.h>
+#include "ra.h"
+
+typedef struct Span {
+    uint64_t lo;
+    uint64_t hi;
+} Span;
+
+typedef struct Table {
+    int bits;
+    int atomic;
+    Vec::[uint64_t] words;
+} Table;
+
+static Span worker_span(int w, int nw, uint64_t nupdate) {
+    Span s;
+    uint64_t per = nupdate / (uint64_t)nw;
+    s.lo = (uint64_t)w * per;
+    s.hi = (w == nw - 1) ? nupdate : s.lo + per;
+    return s;
+}
+
+/* Arena last: the words live on `store`. */
+static Table !>(CCError) Table_create(int bits, int atomic, CCArena store) {
+    Table t;
+    size_t n = (size_t)ra_nwords(bits);
+    t.bits = bits;
+    t.atomic = atomic;
+    t.words = vec_new::[uint64_t](store);
+    if (t.words.reserve(n) != 0)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "Table reserve");
+    if (!t.words.at_grow(n - 1))
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "Table grow");
+    return cc_ok(t);
+}
+
+static void !>(CCError) Table_init(Table* t) {
+    size_t i;
+    uint64_t v;
+    for (i, v in t->words) {
+        (void)v;
+        if (t->words.set(i, (uint64_t)i) != 0)
+            return cc_err(CC_ERR_INVALID_ARG, "Table init");
+    }
+    return cc_ok();
+}
+
+static void !>(CCError) Table_apply(Table* t, uint64_t ran) {
+    size_t idx = (size_t)ra_index(ran, t->bits);
+    uint64_t* base = t->words.begin();
+    if (!base || idx >= t->words.len())
+        return cc_err(CC_ERR_INVALID_ARG, "Table apply: index out of range");
+    if (t->atomic)
+        cc_atomic_u64_fetch_xor((cc_atomic_u64*)(base + idx), ran);
+    else
+        base[idx] ^= ran;
+    return cc_ok();
+}
+
+static void !>(CCError) Table_apply_range(Table* t, uint64_t lo, uint64_t hi) {
+    @errhandler(CCError e) { return cc_err(e); }
+    uint64_t ran = ra_starts((int64_t)lo);
+    uint64_t i;
+    for (i in lo..hi) {
+        ran = ra_step(ran);
+        t->apply(ran) !>;
+    }
+    return cc_ok();
+}
+
+static uint64_t Table_errors(Table* t) {
+    uint64_t n = 0;
+    size_t i;
+    uint64_t v;
+    for (i, v in t->words) {
+        if (v != (uint64_t)i)
+            n++;
+    }
+    return n;
+}
+
+static int env_truth(const char* k) {
+    const char* s = getenv(k);
+    if (!s || !s[0] || strcmp(s, "0") == 0)
+        return 0;
+    return 1;
+}
+
+static int env_int(const char* k, int def) {
+    const char* s = getenv(k);
+    if (!s || !s[0])
+        return def;
+    return atoi(s);
+}
+
+static double now_s(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1.0e-9;
+}
+
+static uint64_t !>(CCError) run_smp(int bits, int nw, int atomic, double* timed) {
+    @errhandler(CCError e) { return cc_err(e); }
+    size_t bytes = (size_t)ra_nwords(bits) * sizeof(uint64_t) + kilobytes(4);
+    CCArena store = cc_arena_heap(bytes) @destroy;
+    Table t = Table_create(bits, atomic, store) !>;
+    uint64_t nupdate = ra_nupdate(bits);
+    double t0, t1;
+    int w;
+
+    t.init() !>;
+
+    t0 = now_s();
+    @parallel for (w in 0..nw) {
+        @errhandler(CCError e) cc_error_exit(e);
+        Span s = worker_span(w, nw, nupdate);
+        t.apply_range(s.lo, s.hi) !>;
+    } !>.wait()!>;
+    t1 = now_s();
+    *timed = t1 - t0;
+
+    t.apply_range(0, nupdate) !>;
+    return cc_ok(t.errors());
+}
+
+int main(int argc, char** argv) {
+    const char* mode;
+    int bits;
+    int workers;
+    int lo = RA_MIN_BITS;
+    int hi = RA_MAX_BITS;
+    int maxw = RA_MAX_WORKERS;
+    uint64_t nupdate;
+    uint64_t errors;
+    double seconds = 0.0;
+    double gups;
+    double frac;
+
+    @errhandler(CCError e) cc_error_exit(e);
+
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    CCStdio io = cc_stdio_create(a);
+
+    if (argc >= 2)
+        mode = argv[1];
+    else if (getenv("MODE") && getenv("MODE")[0])
+        mode = getenv("MODE");
+    else
+        mode = "smp";
+    if (strcmp(mode, "smp") != 0 && strcmp(mode, "smp-atomic") != 0) {
+        io.println("mode must be smp|smp-atomic") !>;
+        return 2;
+    }
+
+    bits = env_int("TABLE_BITS", env_truth("RA_SMOKE") ? 16 : 26);
+    workers = env_int("WORKERS", 4);
+    if (bits < RA_MIN_BITS || bits > RA_MAX_BITS) {
+        io.println(@string(`TABLE_BITS must be ${lo}..${hi}`, @scratch)) !>;
+        return 2;
+    }
+    if (workers < 1 || workers > RA_MAX_WORKERS) {
+        io.println(@string(`WORKERS must be 1..${maxw}`, @scratch)) !>;
+        return 2;
+    }
+
+    nupdate = ra_nupdate(bits);
+    errors = run_smp(bits, workers, strcmp(mode, "smp-atomic") == 0, &seconds) !>;
+    gups = (seconds > 0.0) ? ((double)nupdate / seconds / 1.0e9) : 0.0;
+    frac = (nupdate > 0) ? ((double)errors / (double)nupdate) : 0.0;
+    io.println(@string(`gups impl=cc mode=${mode} table_bits=${bits} nupdate=${nupdate} seconds=${seconds} workers=${workers} errors=${errors} error_frac=${frac} gups=${gups}`, @scratch)) !>;
+    return (errors <= nupdate / 100) ? 0 : 1;
+}

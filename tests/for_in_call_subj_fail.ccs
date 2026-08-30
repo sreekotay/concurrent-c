@@ -1,0 +1,10 @@
+/* for-in subject is a name or field path, not a call. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    int n = 0;
+    for (v in vec_new::[int](a))
+        n += v;
+    return n;
+}

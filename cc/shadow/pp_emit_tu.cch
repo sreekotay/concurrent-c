@@ -1363,10 +1363,11 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             }
             if (items[i]->kind == AST_TYPEDEF_STRUCT) {
                 /* Hoist Result Ok/Err arms, and factory-needed structs
-                 * (py_expose::[T]). Do NOT hoist structs that embed
-                 * ArrayMap_/Map_/CCVec_ for factory reasons alone — those
-                 * DECL macros land after this pass; early hoist is what
-                 * broke ArrayMap + BufReader:: in one TU. */
+                 * (py_expose::[T]). Never hoist a struct that embeds
+                 * ArrayMap_/Map_/CCVec_ — those DECL macros land after
+                 * this pass. Result hoist used to punch through that skip
+                 * (`Table !>(CCError)` with a Vec field) and host-cc then
+                 * suggested CCSlice_T for the still-unknown CCVec_T. */
                 const char* alias =
                     items[i]->b[0] ? items[i]->b : items[i]->a;
                 int needed = 0;
@@ -1387,11 +1388,10 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                         }
                     }
                 }
-                if (needed_result) {
-                    needed = 1;
-                } else if (shadow_alias_is_factory_type_arg(alias) &&
-                           !shadow_typedef_struct_embeds_generic_container(
-                               items[i])) {
+                if (shadow_typedef_struct_embeds_generic_container(items[i])) {
+                    needed = 0;
+                } else if (needed_result ||
+                           shadow_alias_is_factory_type_arg(alias)) {
                     needed = 1;
                 }
                 if (!needed) continue;

@@ -46,6 +46,7 @@ typedef _Atomic intptr_t cc_atomic_intptr;
 
 #define cc_atomic_fetch_add(ptr, val) atomic_fetch_add_explicit((ptr), (val), memory_order_seq_cst)
 #define cc_atomic_fetch_sub(ptr, val) atomic_fetch_sub_explicit((ptr), (val), memory_order_seq_cst)
+#define cc_atomic_fetch_xor(ptr, val) atomic_fetch_xor_explicit((ptr), (val), memory_order_seq_cst)
 #define cc_atomic_load(ptr) atomic_load_explicit((ptr), memory_order_seq_cst)
 #define cc_atomic_store(ptr, val) atomic_store_explicit((ptr), (val), memory_order_seq_cst)
 #define cc_atomic_cas(ptr, expected_ptr, desired) \
@@ -67,6 +68,7 @@ typedef volatile intptr_t cc_atomic_intptr;
 
 #define cc_atomic_fetch_add(ptr, val) ((*(ptr)) += (val), (*(ptr)) - (val))
 #define cc_atomic_fetch_sub(ptr, val) ((*(ptr)) -= (val), (*(ptr)) + (val))
+#define cc_atomic_fetch_xor(ptr, val) ((*(ptr)) ^= (val), (*(ptr)) ^ (val))
 #define cc_atomic_load(ptr) (*(ptr))
 #define cc_atomic_store(ptr, val) ((*(ptr)) = (val))
 #define cc_atomic_cas(ptr, expected_ptr, desired) \
@@ -85,6 +87,7 @@ typedef volatile intptr_t cc_atomic_intptr;
 
 #define cc_atomic_fetch_add(ptr, val) __sync_fetch_and_add((ptr), (val))
 #define cc_atomic_fetch_sub(ptr, val) __sync_fetch_and_sub((ptr), (val))
+#define cc_atomic_fetch_xor(ptr, val) __sync_fetch_and_xor((ptr), (val))
 #define cc_atomic_load(ptr) __sync_fetch_and_add((ptr), 0)
 #define cc_atomic_store(ptr, val) do { __sync_synchronize(); *(ptr) = (val); __sync_synchronize(); } while(0)
 #define cc_atomic_cas(ptr, expected_ptr, desired) \
@@ -103,6 +106,7 @@ typedef volatile intptr_t cc_atomic_intptr;
 
 #define cc_atomic_fetch_add(ptr, val) ((*(ptr)) += (val), (*(ptr)) - (val))
 #define cc_atomic_fetch_sub(ptr, val) ((*(ptr)) -= (val), (*(ptr)) + (val))
+#define cc_atomic_fetch_xor(ptr, val) ((*(ptr)) ^= (val), (*(ptr)) ^ (val))
 #define cc_atomic_load(ptr) (*(ptr))
 #define cc_atomic_store(ptr, val) ((*(ptr)) = (val))
 #define cc_atomic_cas(ptr, expected_ptr, desired) \
@@ -112,5 +116,11 @@ typedef volatile intptr_t cc_atomic_intptr;
 #warning "Unknown compiler - using non-atomic fallback. Not thread-safe!"
 
 #endif
+
+/* Typed wrapper. Atomic typedefs peel to scalars, so this is not
+ * `.fetch_xor()` UFCS (that family hook exists only for fetch_add). */
+static inline uint64_t cc_atomic_u64_fetch_xor(cc_atomic_u64* p, uint64_t v) {
+    return cc_atomic_fetch_xor(p, v);
+}
 
 #endif /* CC_ATOMIC_CCH */

@@ -77,6 +77,10 @@ test("hello.ccs publishes empty", async () => {
     c.didOpen(uri, read(helloPath), 1);
     const d = await c.waitDiag(uri, 20000);
     assert(d.diagnostics.length === 0, `hello dirty: ${JSON.stringify(d.diagnostics)}`);
+    assert(
+      !fs.existsSync(path.join(repo, "examples", "out")),
+      "check must not create examples/out"
+    );
   });
 });
 
@@ -139,6 +143,10 @@ test("quoted include + no project junk", async () => {
       assert(
         lspJunk(path.dirname(uses)).length === 0,
         `testdata junk: ${lspJunk(path.dirname(uses)).join(",")}`
+      );
+      assert(
+        !fs.existsSync(path.join(path.dirname(uses), "out")),
+        "check must not create testdata/out"
       );
     });
   } finally {

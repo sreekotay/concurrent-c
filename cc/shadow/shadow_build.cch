@@ -534,6 +534,72 @@ static int shadow_diag_quoted_ident_col(const char* err, const char* orig) {
     return 0;
 }
 
+/* Host-cc "unknown type name 'CCVec_T'; did you mean 'CCSlice_T'?" is a
+ * lie — Vec::[T] and T[:] are different types. Say which family it is. */
+static int shadow_host_diag_surface_generic(const char* ident, char* fam,
+                                            size_t fcap, char* args,
+                                            size_t acap) {
+    if (!ident || !ident[0] || !fam || !fcap || !args || !acap) return 0;
+    if (strncmp(ident, "CCVec_", 6) == 0 && ident[6]) {
+        snprintf(fam, fcap, "Vec");
+        snprintf(args, acap, "%s", ident + 6);
+        return 1;
+    }
+    if (strncmp(ident, "ArrayMap_", 9) == 0 && ident[9]) {
+        snprintf(fam, fcap, "ArrayMap");
+        snprintf(args, acap, "%s", ident + 9);
+        return 1;
+    }
+    if (strncmp(ident, "Map_", 4) == 0 && ident[4]) {
+        snprintf(fam, fcap, "Map");
+        snprintf(args, acap, "%s", ident + 4);
+        return 1;
+    }
+    return 0;
+}
+
+static int shadow_host_diag_rewrite_unknown_generic(const char* line,
+                                                    char* out, size_t cap) {
+    const char* err;
+    const char* q1;
+    const char* q2;
+    const char* mean;
+    char ident[160];
+    char fam[32];
+    char args[128];
+    char loc[512];
+    size_t ilen;
+    size_t locn;
+    if (!line || !out || !cap) return 0;
+    err = strstr(line, "error: unknown type name '");
+    if (!err) return 0;
+    q1 = err + strlen("error: unknown type name '");
+    q2 = strchr(q1, '\'');
+    if (!q2) return 0;
+    ilen = (size_t)(q2 - q1);
+    if (!ilen || ilen >= sizeof(ident)) return 0;
+    memcpy(ident, q1, ilen);
+    ident[ilen] = 0;
+    if (!shadow_host_diag_surface_generic(ident, fam, sizeof(fam), args,
+                                          sizeof(args)))
+        return 0;
+    locn = (size_t)(err - line);
+    if (locn >= sizeof(loc)) locn = sizeof(loc) - 1;
+    memcpy(loc, line, locn);
+    loc[locn] = 0;
+    mean = strstr(q2, "did you mean 'CCSlice");
+    if (mean)
+        snprintf(out, cap,
+                 "%serror: unknown type name '%s' — that is %s::[%s], "
+                 "not a slice",
+                 loc, ident, fam, args);
+    else
+        snprintf(out, cap,
+                 "%serror: unknown type name '%s' — that is %s::[%s]",
+                 loc, ident, fam, args);
+    return 1;
+}
+
 static int shadow_diag_is_snippet(const char* line, int want_ln,
                                   const char** after_bar) {
     const char* p = line;
@@ -630,6 +696,7 @@ static void shadow_host_diag_replay(const char* text, size_t len) {
         } else {
             int ln = 0, col = 0;
             char mapped_line[4096];
+            char rewritten[4096];
             const char* print = line;
             int remapped = 0;
             /* Remap `…/out/include/REL.h:L:C: …` → `REL.cch:L: …`. Lowering
@@ -672,6 +739,9 @@ static void shadow_host_diag_replay(const char* text, size_t len) {
                     }
                 }
             }
+            if (shadow_host_diag_rewrite_unknown_generic(print, rewritten,
+                                                        sizeof(rewritten)))
+                print = rewritten;
             fprintf(stderr, "%s\n", print);
             if (remapped
                     ? shadow_orig_src_line(path, ln, orig, sizeof(orig))

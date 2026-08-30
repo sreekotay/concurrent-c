@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # compare_wstore3.sh — CCEpochKeys vs Go death-time twin
 #
-# Default is four 1s pairs: write 1/1 × {cc, go} × sweep {off, on}.
-# That is the tax row. N/N, get, drain, and longer windows are opt-in.
-# 1s cells have ~±20% noise; tax columns need e.g.
-#   REPEATS=5 ./perf/compare_wstore3.sh 30
-# and then median/min, not a single pass.
-# Runs are shuffled; the summary table is this pass only.
-# Does not set or unset GOMAXPROCS / CC_WORKERS.
+# Standing cell (quote this; do not invent another command):
+#   ./perf/compare_wstore3.sh stand
+# get N/N, 5s, θ=0.35, wave=512, repeats=3. Override REPEATS / seconds after stand.
 #
+# Default without stand is the tax smoke: write 1/1 × {cc, go} × sweep {off, on}, 1s.
+# 1s cells have ~±20% noise. Runs are shuffled; summary prints ops, memory, and
+# both sides' final live_n / map_n. Does not set or unset GOMAXPROCS / CC_WORKERS.
+#
+#   ./perf/compare_wstore3.sh stand
+#   ./perf/compare_wstore3.sh stand 5
+#   REPEATS=1 ./perf/compare_wstore3.sh stand
+#   FREE=0 ./perf/compare_wstore3.sh stand   # Go: no freelist; trim GC+FreeOSMemory
 #   ./perf/compare_wstore3.sh [seconds]
 #   SHAPES=1,n ./perf/compare_wstore3.sh
 #   MIXES=write,get ./perf/compare_wstore3.sh
@@ -19,7 +23,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CCC="${CCC:-$REPO_ROOT/cc/bin/ccc}"
 OUT="$SCRIPT_DIR/out"
-SEC="${1:-1}"
+SEC=1
+if [ "${1:-}" = "stand" ] || [ "${1:-}" = "standing" ]; then
+    shift
+    MIXES="${MIXES:-get}"
+    SHAPES="${SHAPES:-n}"
+    REPEATS="${REPEATS:-3}"
+    SEC="${1:-5}"
+elif [ -n "${1:-}" ]; then
+    SEC="$1"
+fi
 NCPU="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 if [ "$NCPU" -lt 1 ]; then NCPU=1; fi
 if [ "$NCPU" -gt 64 ]; then NCPU=64; fi
@@ -30,12 +43,17 @@ if [ "${FULL:-0}" = 1 ]; then
 fi
 MIXES="${MIXES:-write}"
 SHAPES="${SHAPES:-1}"
+REPEATS="${REPEATS:-1}"
+if ! [[ "$REPEATS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "REPEATS must be a positive integer (got $REPEATS)" >&2
+    exit 1
+fi
 
 mkdir -p "$OUT"
 JOBLIST="$OUT/this_run.jobs"
 ORDER="$OUT/this_run.order"
 
-echo "# compare_wstore3 seconds=$SEC ncpu=$NCPU mixes=$MIXES shapes=$SHAPES GOMAXPROCS=${GOMAXPROCS:-} CC_WORKERS=${CC_WORKERS:-}"
+echo "# compare_wstore3 seconds=$SEC ncpu=$NCPU mixes=$MIXES shapes=$SHAPES repeats=$REPEATS FREE=${FREE:-1} GOMAXPROCS=${GOMAXPROCS:-} CC_WORKERS=${CC_WORKERS:-}"
 echo "# build"
 "$CCC" --release -o "$OUT/wstore3" "$SCRIPT_DIR/wstore3.ccs"
 go build -o "$OUT/wstore3_go" "$SCRIPT_DIR/go/wstore3.go"
@@ -75,50 +93,73 @@ sys.stdout.write("\n")
 ' > "$ORDER"
 
 : > "$JOBLIST"
-while IFS= read -r job || [ -n "$job" ]; do
-    [ -n "$job" ] || continue
-    set -- $job
-    echo "$1_$5_s$2_$3x$4.txt" >> "$JOBLIST"
-done < "$ORDER"
+rep=0
+while [ "$rep" -lt "$REPEATS" ]; do
+    while IFS= read -r job || [ -n "$job" ]; do
+        [ -n "$job" ] || continue
+        set -- $job
+        if [ "$REPEATS" -gt 1 ]; then
+            echo "$1_$5_s$2_$3x$4_r${rep}.txt" >> "$JOBLIST"
+        else
+            echo "$1_$5_s$2_$3x$4.txt" >> "$JOBLIST"
+        fi
+    done < "$ORDER"
+    rep=$((rep + 1))
+done
 
-echo "# ${#JOBS[@]} jobs shuffled (${SEC}s each)"
+echo "# ${#JOBS[@]} cells shuffled × ${REPEATS} (${SEC}s each)"
 
 run() {
-    local tag="$1" sweep="$2" shards="$3" clients="$4" mix="$5"
-    local bin rec
+    local tag="$1" sweep="$2" shards="$3" clients="$4" mix="$5" rec="$6"
+    local bin
     if [ "$tag" = cc ]; then
         bin="$OUT/wstore3"
     else
         bin="$OUT/wstore3_go"
     fi
-    rec="${tag}_${mix}_s${sweep}_${shards}x${clients}.txt"
-    echo "# --- $tag mix=$mix sweep=$sweep ${shards}/${clients} ---"
+    echo "# --- $tag mix=$mix sweep=$sweep ${shards}/${clients} rec=$rec ---"
     "$bin" "$SEC" "$sweep" 0.35 512 "$shards" "$clients" "$mix" \
         > "$OUT/$rec"
-    grep -E '^# (ops=|expire:|index:|compact:|waves=|mem:|hitch |wstore3|wstore3-go)' "$OUT/$rec"
+    grep -E '^# (ops=|expire:|index:|compact:|keys:|waves=|mem:|hitch |wstore3|wstore3-go)' "$OUT/$rec"
 }
 
-while IFS= read -r job || [ -n "$job" ]; do
-    [ -n "$job" ] || continue
-    # shellcheck disable=SC2086
-    run $job
-done < "$ORDER"
+while IFS= read -r rec || [ -n "$rec" ]; do
+    [ -n "$rec" ] || continue
+    base="${rec%.txt}"
+    base="${base%_r*}"
+    # rec is tag_mix_sSW_SHxCL.txt or ..._rN.txt
+    tag="${base%%_*}"
+    rest="${base#*_}"
+    mix="${rest%%_s*}"
+    shape="${rest#*_s}"
+    sweep="${shape%%_*}"
+    sc="${shape#*_}"
+    shards="${sc%%x*}"
+    clients="${sc#*x}"
+    run "$tag" "$sweep" "$shards" "$clients" "$mix" "$rec"
+done < "$JOBLIST"
 
 python3 - "$OUT" "$SEC" "$NCPU" "$JOBLIST" <<'PY'
-import re, sys
+import re, sys, statistics
 from pathlib import Path
 
 out = Path(sys.argv[1])
 sec, ncpu = sys.argv[2], sys.argv[3]
 wanted = [ln.strip() for ln in Path(sys.argv[4]).read_text().splitlines() if ln.strip()]
-pat = re.compile(r"^(cc|go)_(write|get|drain)_s([01])_(\d+)x(\d+)\.txt$")
+pat = re.compile(r"^(cc|go)_(write|get|drain)_s([01])_(\d+)x(\d+)(?:_r(\d+))?\.txt$")
 ops_re = re.compile(r"ops=\d+ \(([0-9.]+)M/s\).*get_hits=(\d+)/(\d+)")
 exp_re = re.compile(r"expire: dropped=(\d+) drained_recs=(\d+)")
 idx_re = re.compile(r"index: rehashes=(\d+)")
 waves_re = re.compile(r"^# waves=(\d+)", re.M)
-mem_re = re.compile(r"mem: (idle|end) commit_KiB=(\d+) rss_KiB=(\d+|\?) epochs=(\d+)")
+mem_re = re.compile(
+    r"mem: (idle|end|trim) commit_KiB=(\d+) rss_KiB=(\d+|\?) epochs=(\d+)"
+    r"(?: live_n=(\d+)(?: map_n=(\d+))?)?"
+)
+keys_re = re.compile(r"^# keys: live_n=(\d+)(?: map_n=(\d+))?", re.M)
+trim_keys_re = re.compile(r"^# keys: trim live_n=(\d+)(?: map_n=(\d+))?", re.M)
+live_re = re.compile(r"compact: .* live_n=(\d+)")
 
-rows = {}
+samples = {}
 order = []
 for name in wanted:
     m = pat.match(name)
@@ -130,25 +171,53 @@ for name in wanted:
     em = exp_re.search(text)
     im = idx_re.search(text)
     wm = waves_re.search(text)
+    km = keys_re.search(text)
+    tk = trim_keys_re.search(text)
+    lm = live_re.search(text)
     if not om:
         continue
     hits, gets = int(om.group(2)), int(om.group(3))
     dropped = int(em.group(1)) if em else 0
     drained = int(em.group(2)) if em else 0
     idle_c = idle_r = end_c = end_r = epochs = None
+    trim_c = trim_r = None
+    end_live = end_map = trim_live = trim_map = None
     for mm in mem_re.finditer(text):
         kind = mm.group(1)
         ck = int(mm.group(2))
         rk = None if mm.group(3) == "?" else int(mm.group(3))
         epochs = int(mm.group(4))
+        ln = int(mm.group(5)) if mm.group(5) is not None else None
+        mn = int(mm.group(6)) if mm.group(6) is not None else None
         if kind == "idle":
             idle_c, idle_r = ck, rk
+        elif kind == "trim":
+            trim_c, trim_r = ck, rk
+            if ln is not None:
+                trim_live = ln
+            if mn is not None:
+                trim_map = mn
         else:
             end_c, end_r = ck, rk
-    key = (mix, sh, cl)
-    if key not in order:
-        order.append(key)
-    rows[(mix, sh, cl, lang, sweep)] = {
+            if ln is not None:
+                end_live = ln
+            if mn is not None:
+                end_map = mn
+    if km:
+        end_live = int(km.group(1))
+        if km.group(2) is not None:
+            end_map = int(km.group(2))
+    elif end_live is None and lm:
+        end_live = int(lm.group(1))
+    if tk:
+        trim_live = int(tk.group(1))
+        if tk.group(2) is not None:
+            trim_map = int(tk.group(2))
+    shape = (mix, sh, cl)
+    if shape not in order:
+        order.append(shape)
+    key = (mix, sh, cl, lang, sweep)
+    samples.setdefault(key, []).append({
         "mops": float(om.group(1)),
         "hit": (100.0 * hits / gets) if gets else 0.0,
         "dropped": dropped,
@@ -160,12 +229,53 @@ for name in wanted:
         "end_c": end_c,
         "end_r": end_r,
         "epochs": epochs,
+        "live": end_live,
+        "mapn": end_map,
+        "trim_c": trim_c,
+        "trim_r": trim_r,
+        "trim_live": trim_live,
+        "trim_map": trim_map,
+    })
+
+def med(xs):
+    xs = [x for x in xs if x is not None]
+    if not xs:
+        return None
+    return statistics.median(xs)
+
+def collapse(recs):
+    if not recs:
+        return None
+    return {
+        "mops": med([r["mops"] for r in recs]),
+        "mops_lo": min(r["mops"] for r in recs),
+        "mops_hi": max(r["mops"] for r in recs),
+        "n": len(recs),
+        "hit": med([r["hit"] for r in recs]),
+        "dropped": med([r["dropped"] for r in recs]),
+        "ok": all(r["ok"] for r in recs),
+        "rehash": med([r["rehash"] for r in recs]),
+        "waves": med([r["waves"] for r in recs]),
+        "idle_c": med([r["idle_c"] for r in recs]),
+        "idle_r": med([r["idle_r"] for r in recs]),
+        "end_c": med([r["end_c"] for r in recs]),
+        "end_r": med([r["end_r"] for r in recs]),
+        "epochs": med([r["epochs"] for r in recs]),
+        "live": med([r["live"] for r in recs]),
+        "mapn": med([r["mapn"] for r in recs]),
+        "trim_c": med([r["trim_c"] for r in recs]),
+        "trim_r": med([r["trim_r"] for r in recs]),
+        "trim_live": med([r["trim_live"] for r in recs]),
+        "trim_map": med([r["trim_map"] for r in recs]),
     }
 
+rows = {k: collapse(v) for k, v in samples.items()}
+nrep = max((len(v) for v in samples.values()), default=1)
+
 def tax(off, on):
-    if not off:
+    if not off or not off["mops"]:
         return None
-    return 100.0 * (on - off) / off
+    return 100.0 * (on["mops"] - off["mops"]) / off["mops"]
 
 def fmt_tax(t):
     if t is None:
@@ -173,14 +283,33 @@ def fmt_tax(t):
     return f"{t:+6.0f}%"
 
 def fmt_drop(n):
+    if n is None:
+        return "?"
     if n >= 1_000_000:
         return f"{n/1e6:.1f}M"
     if n >= 1000:
         return f"{n/1e3:.0f}k"
-    return str(n)
+    return f"{n:.0f}"
+
+def fmt_kib(n):
+    if n is None:
+        return "     ?"
+    if n >= 1024:
+        return f"{n/1024:6.1f}M"
+    return f"{n:6.0f}k"
+
+def fmt_keys(n):
+    if n is None:
+        return "     ?"
+    if n >= 1_000_000:
+        return f"{n/1e6:5.2f}M"
+    if n >= 1000:
+        return f"{n/1e3:5.1f}k"
+    return f"{n:6.0f}"
 
 print()
-print(f"# summary  seconds={sec} ncpu={ncpu}  (this pass only)")
+print(f"# summary  seconds={sec} ncpu={ncpu}  repeats={nrep}  "
+      f"{'median' if nrep > 1 else 'this pass only'}")
 print(f"# {'mix':<6} {'shape':<6} {'CC off':>7} {'CC on':>7} {'CC tax':>7} "
       f"{'Go off':>7} {'Go on':>7} {'Go tax':>7} {'on CC/Go':>8} "
       f"{'hit%':>5} {'expire':>7} {'rehash':>6} {'waves':>6}")
@@ -195,26 +324,25 @@ for mix, sh, cl in order:
         missing += 1
         print(f"# {mix:<6} {sh + '/' + cl:<6}  (incomplete)")
         continue
-    ctax = tax(cc0["mops"], cc1["mops"])
-    gtax = tax(go0["mops"], go1["mops"])
+    ctax = tax(cc0, cc1)
+    gtax = tax(go0, go1)
     ratio = cc1["mops"] / go1["mops"] if go1["mops"] else 0.0
     expire = fmt_drop(cc1["dropped"])
     mark = "" if cc1["ok"] and go1["ok"] else " !dropped!=drained"
     print(f"# {mix:<6} {sh + '/' + cl:<6} {cc0['mops']:7.2f} {cc1['mops']:7.2f} "
           f"{fmt_tax(ctax):>7} {go0['mops']:7.2f} {go1['mops']:7.2f} "
           f"{fmt_tax(gtax):>7} {ratio:8.2f} {cc1['hit']:5.0f} {expire:>7} "
-          f"{cc1['rehash']:6d} {cc1['waves']:6d}{mark}")
-
-def fmt_kib(n):
-    if n is None:
-        return "     ?"
-    if n >= 1024:
-        return f"{n/1024:6.1f}M"
-    return f"{n:6d}k"
+          f"{cc1['rehash']:6.0f} {cc1['waves']:6.0f}{mark}")
+    if nrep > 1:
+        print(f"# {'':<6} {'':<6}  [{cc0['mops_lo']:.2f}-{cc0['mops_hi']:.2f}] "
+              f"[{cc1['mops_lo']:.2f}-{cc1['mops_hi']:.2f}]         "
+              f"[{go0['mops_lo']:.2f}-{go0['mops_hi']:.2f}] "
+              f"[{go1['mops_lo']:.2f}-{go1['mops_hi']:.2f}]")
 
 print()
-print(f"# {'mix':<6} {'shape':<6} {'sweep':<5} {'CC idle':>8} {'CC end':>8} {'CC rss':>8} "
-      f"{'Go idle':>8} {'Go end':>8} {'Go rss':>8} {'epochs':>7}")
+print(f"# {'mix':<6} {'shape':<6} {'sweep':<5} "
+      f"{'CC idle':>8} {'CC end':>8} {'CC rss':>8} {'CC keys':>8} "
+      f"{'Go idle':>8} {'Go end':>8} {'Go rss':>8} {'Go keys':>8}")
 for mix, sh, cl in order:
     for sweep, label in (("0", "off"), ("1", "on")):
         cc = rows.get((mix, sh, cl, "cc", sweep))
@@ -222,16 +350,58 @@ for mix, sh, cl in order:
         if not cc or not go:
             print(f"# {mix:<6} {sh + '/' + cl:<6} {label:<5}  (incomplete)")
             continue
+        mark = ""
+        if cc["live"] is not None and cc["mapn"] is not None and cc["live"] != cc["mapn"]:
+            mark += " !cc live!=map"
+        if go["live"] is not None and go["mapn"] is not None and go["live"] != go["mapn"]:
+            mark += " !go live!=map"
         print(f"# {mix:<6} {sh + '/' + cl:<6} {label:<5} "
               f"{fmt_kib(cc['idle_c']):>8} {fmt_kib(cc['end_c']):>8} {fmt_kib(cc['end_r']):>8} "
+              f"{fmt_keys(cc['live']):>8} "
               f"{fmt_kib(go['idle_c']):>8} {fmt_kib(go['end_c']):>8} {fmt_kib(go['end_r']):>8} "
-              f"{(str(cc['epochs']) + '/' + str(go['epochs'])) if cc['epochs'] is not None and go['epochs'] is not None else '?':>7}")
+              f"{fmt_keys(go['live']):>8}{mark}")
 
+print()
+print(f"# {'mix':<6} {'shape':<6} {'sweep':<5} "
+      f"{'CC trim':>8} {'CC t-rss':>8} {'CC B/k':>7} "
+      f"{'Go trim':>8} {'Go t-rss':>8} {'Go B/k':>7}")
+
+def b_per_key(rss_kib, keys):
+    if rss_kib is None or keys is None or keys <= 0:
+        return None
+    return (rss_kib * 1024.0) / keys
+
+def fmt_bkey(n):
+    if n is None:
+        return "     ?"
+    return f"{n:6.0f}"
+
+for mix, sh, cl in order:
+    for sweep, label in (("0", "off"), ("1", "on")):
+        cc = rows.get((mix, sh, cl, "cc", sweep))
+        go = rows.get((mix, sh, cl, "go", sweep))
+        if not cc or not go:
+            print(f"# {mix:<6} {sh + '/' + cl:<6} {label:<5}  (incomplete)")
+            continue
+        mark = ""
+        if cc["trim_live"] is not None and cc["trim_map"] is not None and cc["trim_live"] != cc["trim_map"]:
+            mark += " !cc live!=map"
+        if go["trim_live"] is not None and go["trim_map"] is not None and go["trim_live"] != go["trim_map"]:
+            mark += " !go live!=map"
+        print(f"# {mix:<6} {sh + '/' + cl:<6} {label:<5} "
+              f"{fmt_keys(cc['trim_live']):>8} {fmt_kib(cc['trim_r']):>8} "
+              f"{fmt_bkey(b_per_key(cc['trim_r'], cc['trim_live'])):>7} "
+              f"{fmt_keys(go['trim_live']):>8} {fmt_kib(go['trim_r']):>8} "
+              f"{fmt_bkey(b_per_key(go['trim_r'], go['trim_live'])):>7}{mark}")
+
+print("# ops table and mem table are one result. Quote both.")
 print("# expire = CC sweep-on dropped (must equal drained_recs). "
       "rehash = CC index grow, not expire.")
 print("# tax = (sweep-on − sweep-off) / sweep-off. on CC/Go = sweep-on ratio.")
 print("# mem idle = post-init, before preload/clients. CC commit = arena; "
-      "Go commit = HeapSys. epochs = buckets with live keys.")
+      "Go commit = HeapSys. keys = mix-end live_n. trim = expire to 1M after mix.")
+if nrep > 1:
+    print("# repeats: ops/mem cells are medians; bracket lines are min-max M/s.")
 if missing:
     sys.exit(1)
 PY

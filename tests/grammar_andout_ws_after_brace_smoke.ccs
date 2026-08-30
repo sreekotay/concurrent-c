@@ -1,0 +1,60 @@
+/* FIRST-set hole: leading ws on `decl` is hoisted, so `__np` FIRST is
+ * a-z and a space after `{` never starts a declaration. `object` has no
+ * pad after the open brace; `decl` begins with ws. `{ foo}` must match
+ * and parse like `{foo}` — the full padded entry has to run. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+@grammar(rules) AndOut {~~~~
+    object: [#'{' opt [decl any [#',' decl]] #'}']
+    ws:     any charset [#' ' #'\t' #'\n']
+    decl:   [ws keep [some charset [#'a' - #'z']]]
+~~~~}
+
+@grammar(schema) AndOutObj {~~~~
+    use AndOut
+    #'{'
+    n: AndOut.decl
+    #'}'
+~~~~}
+
+static int expect_match(const char* src, int want, const char* tag) {
+    int got = AndOut_match(src, strlen(src));
+    if (got != want) {
+        printf("FAIL: %s AndOut_match(%s) = %d, want %d\n", tag, src, got, want);
+        return 0;
+    }
+    return 1;
+}
+
+static int expect_parse(const char* src, const char* want, const char* tag) {
+    CCArena arena = cc_arena_heap(kilobytes(4)) @destroy;
+    AndOutObj o;
+    if (!AndOutObj_parse(src, strlen(src), arena, &o)) {
+        printf("FAIL: %s parse %s\n", tag, src);
+        return 0;
+    }
+    if (!o.n.ptr || o.n.len != strlen(want) || memcmp(o.n.ptr, want, o.n.len) != 0) {
+        printf("FAIL: %s n=%.*s want %s\n", tag, (int)o.n.len, o.n.ptr ? o.n.ptr : "",
+               want);
+        return 0;
+    }
+    return 1;
+}
+
+int main(void) {
+    int pass = 1;
+    pass &= expect_match("{}", 1, "empty");
+    pass &= expect_match("{foo}", 1, "tight");
+    pass &= expect_match("{ foo}", 1, "space-after-brace");
+    pass &= expect_match("{\nfoo}", 1, "nl-after-brace");
+    pass &= expect_match("{foo, bar}", 1, "comma-ws");
+    pass &= expect_match("{foo,}", 0, "trailing-comma");
+    pass &= expect_parse("{foo}", "foo", "schema-tight");
+    pass &= expect_parse("{ foo}", "foo", "schema-space-after-brace");
+    pass &= expect_parse("{\tfoo}", "foo", "schema-tab-after-brace");
+    if (!pass) return 1;
+    printf("ok\n");
+    return 0;
+}

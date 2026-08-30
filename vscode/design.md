@@ -108,12 +108,10 @@ still starts — it starts on the *latest* snapshot, not the one that
 armed it. A 30 k TU will feel like “pause then squiggle” until Phase 2.
 That is correct.
 
-`gen` is correctness (which snapshot may publish). The ticket chan
-(two live `ccc` processes) is a resource bound across **files**. One
-`uri` holds at most one wave: start the new one, kill the previous
-child (`ccc` pid, not just the fiber — `cmd.output()` will not see a
-nursery cancel). The corpse drops on stale `gen` if it still finishes.
-Do not spend both tickets on two generations of the same buffer.
+`gen` is correctness (which snapshot may publish). Do not park the
+check fiber on `acquire_when` waiting for a ticket — that stalls the
+scheduler. One `uri` holds at most one debounce waiter. A finishing
+wave that sees a newer `gen` drops and kicks again (delay 0).
 
 `$ /cancelRequest` is a **request-id** cancel (a hover, later a
 completion). It does not bump `gen` and it does not kill a check.
@@ -126,10 +124,12 @@ no-op.
 session replaces the text in place, then copies a snapshot for the wave.
 The wave never holds a pointer into the live table.
 
-A buffer check writes under `$TMPDIR` (never the project tree) and
-stamps `#line 1 "logical"` so quoted includes (`"browse.cch"`) still
-resolve from the real file’s directory. `cwd` is that directory, not
-the first workspace folder — out-of-tree projects (cctext) are
+A buffer check writes under `$TMPDIR/cc-lsp-<pid>/wXXXXXX/` (never the
+project tree) and stamps `#line 1 "logical"` so quoted includes
+(`"browse.cch"`) still resolve from the real file’s directory. `cwd`
+and `--out-dir` stay inside the wave — do not chdir into the source
+folder (`ccc` would then write `out/.cc-build/unit_native/<hash>`
+next to every opened file). Out-of-tree projects (cctext) are
 first-class.
 
 ## Surfaces
@@ -176,7 +176,7 @@ stdin fiber  ──frames──►  inbox  ──►  session (parent)
                           didOpen/Change ┤
                                          │ snapshot {uri, gen, text}
                                          ▼
-                               check nursery (≤2 live ccc)
+                               check nursery (ccc on latest gen)
                                          │
                                 if gen still current
                                          ▼

@@ -1,0 +1,13 @@
+# Built binaries, compare receipts, ccc scratch
+out/
+
+# Chapel HPCC RA sources — fetched by setup.sh, not committed
+chapel/*.chpl
+chapel/COMMIT.txt
+
+# chpl in-tree leftovers if someone compiles from chapel/
+chapel/ra
+chapel/ra_real
+chapel/ra-atomics
+chapel/ra-atomics_real
+*_real

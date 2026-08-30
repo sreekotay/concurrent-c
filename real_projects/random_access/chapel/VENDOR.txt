@@ -1,0 +1,22 @@
+Chapel HPCC RandomAccess — upstream for this specimen.
+
+Source: https://github.com/chapel-lang/chapel
+Path:   test/release/examples/benchmarks/hpcc/
+Pin:    see COMMIT.txt (chapel `main` at fetch)
+License: Apache-2.0 (Chapel)
+
+  ra.chpl              official RA: forall updates, unlocked XOR
+  ra-atomics.chpl      same stream, atomic xor
+  RARandomStream.chpl  LCG (default) or HPCC LFSR (POLY 0x7)
+  HPCCProblemSize.chpl problem-size helper (we pass --n)
+
+Refresh: ../setup.sh  (sources are gitignored; only this file is committed)
+
+Build (from this directory):
+  chpl --fast -suseLCG=false ra.chpl -o ../out/ra_chpl
+  chpl --fast -suseLCG=false ra-atomics.chpl -o ../out/ra_chpl_atomic
+
+-suseLCG=false selects the HPCC LFSR so the stream matches ra.h.
+Run with -nl 1 for the SMP pair (CC smp / smp-atomic). Multi-locale
+is `../compare_dist.sh`: -nl N when CHPL_COMM is not none, against
+CC ra_dist.ccs. On one locale ra.chpl is Figure 5.

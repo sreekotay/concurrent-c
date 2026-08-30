@@ -4,11 +4,12 @@
 // put / putExpires / expire / persist / delete / get.
 // TTL lands on the wheel; never is expires-none only. get does not collect.
 // Records share one freelist per shard (drained-slot storage is reused).
-// No explicit compaction: Go's twin relies on the Go GC and runtime heap
-// management for reclaim. The committed/RSS mem columns between CC and Go
-// may diverge after a drain when compaction returns pages in CC.
+// FREE=0: no freelist; expire drops the pointer; trim runs GC+FreeOSMemory.
+// CC twin uses per-generation arenas (not this list).
 //
 //	go run ./perf/go/wstore3.go <sec> <sweep 0|1> [theta] [wave] [shards] [clients] [write|get|drain]
+//	Compare: ./perf/compare_wstore3.sh stand
+//	         FREE=0 ./perf/compare_wstore3.sh stand
 //
 // Does not pin GOMAXPROCS. Report what the runtime chose.
 package main
@@ -18,12 +19,16 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
 )
+
+/* FREE=0: no per-shard reuse list. Default is the reuse list. */
+var useFree = true
 
 const (
 	levels        = 3
@@ -38,6 +43,7 @@ const (
 	valCap        = 128
 	neverPool     = 20000
 	recentN       = 8192
+	trimKeys      = 1_000_000 /* post-mix: expire to this many, then mem: trim */
 )
 
 var (
@@ -247,7 +253,7 @@ func (s *shard) bucketOf(e *entry) *bucket {
 }
 
 func (s *shard) alloc() *entry {
-	if s.free != nil {
+	if useFree && s.free != nil {
 		x := s.free
 		s.free = x.freeNext
 		*x = entry{}
@@ -257,6 +263,9 @@ func (s *shard) alloc() *entry {
 }
 
 func (s *shard) freeOne(x *entry) {
+	if !useFree {
+		return
+	}
 	x.freeNext = s.free
 	s.free = x
 }
@@ -311,6 +320,11 @@ func (s *shard) place(sl wheelSlot, key, val []byte, diesAt int64) {
 	e.diesAt = diesAt
 	e.level = sl.level
 	e.slot = sl.slot
+	/* Delete first. Assign of an equal string keeps the old key header,
+	   which aliases old.keyBuf — then freeOne mutates it. */
+	if old != nil {
+		delete(s.m, mapKey(old.keyBytes()))
+	}
 	s.m[mapKey(e.keyBytes())] = e
 	e.dead = 0
 	b.cur.link(e)
@@ -469,93 +483,64 @@ func (s *shard) noteHold(verb string, us float64, n int) {
 	}
 }
 
-func (s *shard) retireHold() {
+func (s *shard) sweepWave() {
+	s.prepare(nowMs())
 	s.mu.Lock()
 	s.holdT0 = nowUs()
 	s.holdSteps = 0
 	now := nowMs()
 	s.sweepDue.Store(false)
 	n := 0
-	capped := false
-	for l := 0; l < levels && !capped; l++ {
-		for i := 0; i < kSlots[l]; i++ {
-			b := &s.wheel[l][i]
-			if b.end > now {
-				continue
-			}
-			s.retire(l, i)
-			n++
-			if s.holdUp() {
-				capped = true
-				break
-			}
-		}
-	}
-	if s.endsDirty {
-		s.refreshNextEnd()
-	}
-	us := nowUs() - s.holdT0
-	s.mu.Unlock()
-	if n > 0 {
-		s.noteHold("retire", us, n)
-	}
-}
-
-func (s *shard) scanHold() {
-	s.mu.Lock()
-	s.holdT0 = nowUs()
-	s.holdSteps = 0
-	now := nowMs()
-	n := 0
-	did := false
-	verb := "scan"
-	for l := 0; l < levels && n < s.waveRecs; l++ {
-		for i := 0; i < kSlots[l] && n < s.waveRecs; i++ {
-			b := &s.wheel[l][i]
-			if !b.scanning {
-				continue
-			}
-			verb = "wheel"
-			n += s.scanDue(b, int8(l), uint8(i), now, s.waveRecs-n)
-			did = true
-			if s.holdUp() {
-				l = levels
-				break
-			}
-		}
-	}
-	if s.endsDirty {
-		s.refreshNextEnd()
-	}
-	us := nowUs() - s.holdT0
-	s.mu.Unlock()
-	if did {
-		s.noteHold(verb, us, n)
-	}
-}
-
-func (s *shard) sweepWave() {
-	now := nowMs()
-	s.prepare(now)
 	if now >= s.nextEnd.Load() {
-		s.retireHold()
+		for l := 0; l < levels; l++ {
+			for i := 0; i < kSlots[l]; i++ {
+				if s.wheel[l][i].end > now {
+					continue
+				}
+				s.retire(l, i)
+				n++
+			}
+		}
 	}
-	if s.wheelScanning() {
-		s.scanHold()
+	if !s.holdUp() {
+		scanned := 0
+		for l := 0; l < levels && scanned < s.waveRecs && !s.holdUp(); l++ {
+			for i := 0; i < kSlots[l] && scanned < s.waveRecs && !s.holdUp(); i++ {
+				b := &s.wheel[l][i]
+				if !b.scanning {
+					continue
+				}
+				scanned += s.scanDue(b, int8(l), uint8(i), now, s.waveRecs-scanned)
+			}
+		}
+		n += scanned
 	}
+	if s.endsDirty {
+		s.refreshNextEnd()
+	}
+	us := nowUs() - s.holdT0
 	if s.more(nowMs()) {
 		s.arm()
+	}
+	s.mu.Unlock()
+	if n > 0 {
+		s.noteHold("expire", us, n)
 	}
 }
 
 func (s *shard) sweeper() {
+	timer := time.NewTimer(time.Hour)
+	defer timer.Stop()
+	if !timer.Stop() {
+		<-timer.C
+	}
 	for !s.stop.Load() {
 		if !s.sweepDue.Load() && nowMs() < s.nextEnd.Load() {
 			wait := s.nextEnd.Load() - nowMs()
 			if wait < 1 {
 				wait = 1
 			}
-			timer := time.NewTimer(time.Duration(wait) * time.Millisecond)
+			timer.Reset(time.Duration(wait) * time.Millisecond)
 			select {
 			case <-timer.C:
 			case <-s.kick:
@@ -599,6 +584,16 @@ func (s *shard) init(idx int, wave int, sweepOn bool) {
 
 func (s *shard) keys() int { return len(s.m) }
 
+func (s *shard) liveEntries() int {
+	t := s.never.cur.liveN
+	for l := 0; l < levels; l++ {
+		for i := 0; i < kSlots[l]; i++ {
+			t += s.wheel[l][i].cur.liveN
+		}
+	}
+	return t
+}
+
 func (s *shard) logical() int {
 	t := s.never.cur.liveBytes
 	for l := 0; l < levels; l++ {
@@ -639,9 +634,71 @@ func (st *store) epochsLive() int {
 	return n
 }
 
+func (st *store) liveEntries() int {
+	n := 0
+	for _, s := range st.shards {
+		n += s.liveEntries()
+	}
+	return n
+}
+
+func (st *store) mapKeys() int {
+	n := 0
+	for _, s := range st.shards {
+		n += s.keys()
+	}
+	return n
+}
+
+func (s *shard) epochKill(ep *epoch, want int) int {
+	n := 0
+	e := ep.liveHead
+	for e != nil && n < want {
+		nxt := e.liveNext
+		s.markDead(e)
+		n++
+		e = nxt
+	}
+	return n
+}
+
+func (s *shard) trim(want int) int {
+	n := 0
+	for l := 0; l < levels && n < want; l++ {
+		for i := 0; i < kSlots[l] && n < want; i++ {
+			n += s.epochKill(&s.wheel[l][i].cur, want-n)
+		}
+	}
+	if n < want {
+		n += s.epochKill(&s.never.cur, want-n)
+	}
+	return n
+}
+
+func (st *store) trimTo(target int) {
+	live := st.liveEntries()
+	if live <= target {
+		return
+	}
+	need := live - target
+	for _, s := range st.shards {
+		if need <= 0 {
+			return
+		}
+		s.mu.Lock()
+		have := s.liveEntries()
+		take := need
+		if take > have {
+			take = have
+		}
+		need -= s.trim(take)
+		s.mu.Unlock()
+	}
+}
+
 func printMem(st *store, when string) {
-	fmt.Printf("# mem: %s commit_KiB=%d rss_KiB=%d epochs=%d\n",
-		when, heapKiB(), rssKiB(), st.epochsLive())
+	fmt.Printf("# mem: %s commit_KiB=%d rss_KiB=%d epochs=%d live_n=%d map_n=%d\n",
+		when, heapKiB(), rssKiB(), st.epochsLive(), st.liveEntries(), st.mapKeys())
 }
 
 func rssKiB() uint64 {
@@ -882,7 +939,17 @@ func argFloat(i int, def float64) float64 {
 	return f
 }
 
+func envFree() bool {
+	switch os.Getenv("FREE") {
+	case "0", "off", "no":
+		return false
+	default:
+		return true
+	}
+}
+
 func main() {
+	useFree = envFree()
 	seconds := argFloat(1, 20)
 	sweep := argInt(2, 1)
 	theta := argFloat(3, 0.35)
@@ -930,9 +997,10 @@ func main() {
 		mixName = "get"
 	}
 	fmt.Printf("# wstore3-go seconds=%.0f sweep=%d mix=%s theta=%.2f wave_recs=%d "+
-		"shards=%d clients=%d gomaxprocs=%d "+
+		"shards=%d clients=%d gomaxprocs=%d freelist=%d "+
 		"wheel=100ms x64, 1s x64, 60s x60\n",
-		seconds, sweep, mixName, theta, wave, nshards, nclients, runtime.GOMAXPROCS(0))
+		seconds, sweep, mixName, theta, wave, nshards, nclients, runtime.GOMAXPROCS(0),
+		map[bool]int{true: 1, false: 0}[useFree])
 	printMem(st, "idle")
 	if mixGet {
 		st.preloadNever()
@@ -1009,7 +1077,21 @@ func main() {
 	if seconds > 0 {
 		rate = float64(ops) / seconds / 1e6
 	}
+	live, mapn := 0, 0
+	for _, s := range st.shards {
+		live += s.liveEntries()
+		mapn += s.keys()
+	}
 	printMem(st, "end")
+	fmt.Printf("# keys: live_n=%d map_n=%d\n", live, mapn)
+	st.trimTo(trimKeys)
+	if !useFree {
+		runtime.GC()
+		debug.FreeOSMemory()
+	}
+	printMem(st, "trim")
+	fmt.Printf("# keys: trim live_n=%d map_n=%d target=%d\n",
+		st.liveEntries(), st.mapKeys(), trimKeys)
 	fmt.Printf("# ops=%d (%.2fM/s)  get_hits=%d/%d\n", ops, rate, hits, gets)
 	fmt.Printf("# expire: dropped=%d drained_recs=%d drains=%d reinserted=%d\n",
 		dropped, drec, drains, reins)

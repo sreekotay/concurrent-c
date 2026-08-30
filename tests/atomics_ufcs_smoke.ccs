@@ -14,13 +14,15 @@ int main(void) {
     int now = counter.load();
 
     big.fetch_add(5);
+    uint64_t xor_old = cc_atomic_u64_fetch_xor(&big, 3);
     uint64_t bnow = big.load();
 
     int expected = 42;
     int swapped = counter.cas(&expected, 100);
     int final_v = counter.load();
 
-    printf("%d %d %llu %d %d\n", before, now,
-           (unsigned long long)bnow, swapped, final_v);
-    return 0;
+    printf("%d %d %llu %llu %d %d\n", before, now,
+           (unsigned long long)xor_old, (unsigned long long)bnow,
+           swapped, final_v);
+    return xor_old == 5 && bnow == 6 ? 0 : 1;
 }

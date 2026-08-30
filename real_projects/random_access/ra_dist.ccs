@@ -1,0 +1,358 @@
+#!ccc ccs
+/*
+ * HPCC RandomAccess — multi-locale Chapel-matched pairs.
+ *
+ *   dist         unlocked XOR after a hop  ↔  ra.chpl, -nl N, useOn
+ *   dist-atomic  fetch_xor after a hop     ↔  ra-atomics.chpl, -nl N
+ *
+ * Two placement facts, not a distributed array:
+ *   update_owner(u)  — who generates stream[u]  (block of 0..N_U-1)
+ *   table_owner(i)   — who owns T[i]            (block of 0..m-1)
+ * They are not the same. A remote update is an N:1 send of `r`; the
+ * owner applies. Chapel's `on T[r & mask]` is that hop. One locale
+ * and this file collapses to the smp kernel (no channels).
+ *
+ * In-process channels, not a network. Same sentence as Chapel locales;
+ * not the same comm cost.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/script/stdio.cch>
+#include <string.h>
+#include <time.h>
+#include "ra.h"
+
+enum { RA_HOP_CAP = 1024 };
+
+typedef uint64_t[~RA_HOP_CAP N:1 >] HopTx;
+typedef uint64_t[~RA_HOP_CAP N:1 <] HopRx;
+
+typedef struct Span {
+    uint64_t lo;
+    uint64_t hi;
+} Span;
+
+typedef struct Shard {
+    uint64_t word0;
+    uint64_t n;
+    Vec::[uint64_t] words;
+} Shard;
+
+typedef struct World {
+    int nloc;
+    int bits;
+    int atomic;
+    int ngen;
+    uint64_t nwords;
+    cc_atomic_int done;
+    Shard shards[RA_MAX_LOCALES];
+    HopTx txs[RA_MAX_LOCALES];
+    HopRx rxs[RA_MAX_LOCALES];
+    CCChan* chans[RA_MAX_LOCALES];
+} World;
+
+static Span block_span(int part, int nparts, uint64_t n) {
+    Span s;
+    uint64_t per = n / (uint64_t)nparts;
+    s.lo = (uint64_t)part * per;
+    s.hi = (part == nparts - 1) ? n : s.lo + per;
+    return s;
+}
+
+static int table_owner(uint64_t idx, int nloc, uint64_t nwords) {
+    uint64_t per = nwords / (uint64_t)nloc;
+    int o = (int)(idx / per);
+    if (o >= nloc)
+        return nloc - 1;
+    return o;
+}
+
+static Shard !>(CCError) shard_create(uint64_t word0, uint64_t n, CCArena store) {
+    Shard s;
+    s.word0 = word0;
+    s.n = n;
+    s.words = vec_new::[uint64_t](store);
+    if (s.words.reserve((size_t)n) != 0)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "shard reserve");
+    if (n > 0 && !s.words.at_grow((size_t)n - 1))
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "shard grow");
+    return cc_ok(s);
+}
+
+static void !>(CCError) shard_init(Shard* s) {
+    size_t i;
+    uint64_t v;
+    for (i, v in s->words) {
+        (void)v;
+        if (s->words.set(i, s->word0 + (uint64_t)i) != 0)
+            return cc_err(CC_ERR_INVALID_ARG, "shard init");
+    }
+    return cc_ok();
+}
+
+static void !>(CCError) shard_apply(Shard* s, uint64_t ran, int bits, int atomic) {
+    uint64_t idx = ra_index(ran, bits);
+    uint64_t local = idx - s->word0;
+    uint64_t* base = s->words.begin();
+    if (!base || local >= s->n)
+        return cc_err(CC_ERR_INVALID_ARG, "shard apply: index out of range");
+    if (atomic)
+        cc_atomic_u64_fetch_xor((cc_atomic_u64*)(base + (size_t)local), ran);
+    else
+        base[(size_t)local] ^= ran;
+    return cc_ok();
+}
+
+static uint64_t shard_errors(Shard* s) {
+    uint64_t n = 0;
+    size_t i;
+    uint64_t v;
+    for (i, v in s->words) {
+        if (v != s->word0 + (uint64_t)i)
+            n++;
+    }
+    return n;
+}
+
+static void !>(CCError) generate_span(World* w, int src, uint64_t lo, uint64_t hi, int drain);
+static void !>(CCError) drain_try(World* w, int dest);
+
+static void !>(CCError) hop_or_drain(World* w, int src, HopTx tx, uint64_t ran) {
+    @errhandler(CCError e) { return cc_err(e); }
+    for (;;) {
+        bool !>(CCIoError) sent = cc_channel_try_send(tx, ran);
+        if (cc_io_avail(sent))
+            return cc_ok();
+        drain_try(w, src) !>;
+    }
+}
+
+static void !>(CCError) apply_one(Shard* shards, int nloc, uint64_t nwords,
+                                  uint64_t ran, int bits, int atomic) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int owner = table_owner(ra_index(ran, bits), nloc, nwords);
+    shards[owner].apply(ran, bits, atomic) !>;
+    return cc_ok();
+}
+
+static void !>(CCError) verify_replay(Shard* shards, int nloc, uint64_t nwords,
+                                      uint64_t nupdate, int bits, int atomic) {
+    @errhandler(CCError e) { return cc_err(e); }
+    uint64_t ran = ra_starts(0);
+    uint64_t i;
+    for (i in 0..nupdate) {
+        ran = ra_step(ran);
+        apply_one(shards, nloc, nwords, ran, bits, atomic) !>;
+    }
+    return cc_ok();
+}
+
+static int env_truth(const char* k) {
+    const char* s = getenv(k);
+    if (!s || !s[0] || strcmp(s, "0") == 0)
+        return 0;
+    return 1;
+}
+
+static int env_int(const char* k, int def) {
+    const char* s = getenv(k);
+    if (!s || !s[0])
+        return def;
+    return atoi(s);
+}
+
+static double now_s(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1.0e-9;
+}
+
+static void !>(CCError) drain_try(World* w, int dest) {
+    @errhandler(CCError e) { return cc_err(e); }
+    HopRx rx = w->rxs[dest];
+    uint64_t r;
+    bool !>(CCIoError) got = cc_channel_try_recv(rx, &r);
+    while (cc_io_avail(got)) {
+        w->shards[dest].apply(r, w->bits, w->atomic) !>;
+        got = cc_channel_try_recv(rx, &r);
+    }
+    return cc_ok();
+}
+
+static void !>(CCError) run_one_gen(World* w, int g, int nt, uint64_t nupdate) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int src;
+    int t;
+    Span s;
+    int drain;
+    if (w->nloc == 1) {
+        src = 0;
+        t = g;
+        s = block_span(g, nt, nupdate);
+        drain = 0;
+    } else {
+        src = g / nt;
+        t = g % nt;
+        Span loc_span = block_span(src, w->nloc, nupdate);
+        uint64_t nloc_up = loc_span.hi - loc_span.lo;
+        s = block_span(t, nt, nloc_up);
+        s.lo += loc_span.lo;
+        s.hi += loc_span.lo;
+        drain = (t == 0);
+    }
+    generate_span(w, src, s.lo, s.hi, drain) !>;
+    cc_atomic_fetch_add(&w->done, 1);
+    if (drain) {
+        while (cc_atomic_load(&w->done) < w->ngen)
+            drain_try(w, src) !>;
+        drain_try(w, src) !>;
+    }
+    return cc_ok();
+}
+
+static void spawn_gens(CCNursery n, World* w, int nt, uint64_t nupdate) {
+    @errhandler(CCError e) cc_error_exit(e);
+    int g;
+    for (g = 0; g < w->ngen; g++) {
+        int id = g;
+        n.spawn(() => [w, id, nt, nupdate] {
+            @errhandler(CCError e) cc_error_exit(e);
+            run_one_gen(w, id, nt, nupdate) !>;
+        }) !>;
+    }
+}
+
+static void !>(CCError) generate_span(World* w, int src, uint64_t lo, uint64_t hi, int drain) {
+    @errhandler(CCError e) { return cc_err(e); }
+    uint64_t ran = ra_starts((int64_t)lo);
+    uint64_t i;
+    for (i in lo..hi) {
+        ran = ra_step(ran);
+        int owner = table_owner(ra_index(ran, w->bits), w->nloc, w->nwords);
+        if (owner == src)
+            w->shards[src].apply(ran, w->bits, w->atomic) !>;
+        else
+            hop_or_drain(w, src, w->txs[owner], ran) !>;
+        if (drain)
+            drain_try(w, src) !>;
+    }
+    return cc_ok();
+}
+
+static uint64_t !>(CCError) run_dist(int bits, int nloc, int nt, int atomic, double* timed) {
+    @errhandler(CCError e) { return cc_err(e); }
+    uint64_t nwords = ra_nwords(bits);
+    uint64_t nupdate = ra_nupdate(bits);
+    size_t bytes = (size_t)nwords * sizeof(uint64_t) + kilobytes(4);
+    CCArena store = cc_arena_heap(bytes) @destroy;
+    World world;
+    World* w = &world;
+    int loc;
+    int d;
+    double t0, t1;
+    uint64_t errors = 0;
+
+    world.nloc = nloc;
+    world.bits = bits;
+    world.atomic = atomic;
+    world.nwords = nwords;
+    world.ngen = (nloc == 1) ? nt : nloc * nt;
+    world.done = 0;
+    for (loc = 0; loc < nloc; loc++) {
+        Span blk = block_span(loc, nloc, nwords);
+        world.shards[loc] = shard_create(blk.lo, blk.hi - blk.lo, store) !>;
+        world.shards[loc].init() !>;
+        world.chans[loc] = NULL;
+    }
+
+    if (nloc > 1) {
+        for (d = 0; d < nloc; d++) {
+            HopTx tx;
+            HopRx rx;
+            CCChan* ch = cc_channel_pair(&tx, &rx);
+            if (!ch)
+                return cc_err(CC_ERR_IO, "hop channel");
+            world.chans[d] = ch;
+            world.txs[d] = tx;
+            world.rxs[d] = rx;
+        }
+    }
+
+    t0 = now_s();
+    {
+        CCNursery gens = cc_nursery_create() !> @destroy;
+        spawn_gens(gens, w, nt, nupdate);
+    }
+    t1 = now_s();
+    *timed = t1 - t0;
+
+    if (nloc > 1) {
+        for (d = 0; d < nloc; d++) {
+            if (w->chans[d]) {
+                cc_channel_close(w->txs[d]);
+                cc_chan_free(w->chans[d]);
+            }
+        }
+    }
+
+    verify_replay(w->shards, nloc, nwords, nupdate, bits, atomic) !>;
+    for (loc = 0; loc < nloc; loc++)
+        errors += w->shards[loc].errors();
+    return cc_ok(errors);
+}
+
+int main(int argc, char** argv) {
+    const char* mode;
+    int bits;
+    int nloc;
+    int workers;
+    int lo = RA_MIN_BITS;
+    int hi = RA_MAX_BITS;
+    int maxl = RA_MAX_LOCALES;
+    int maxw = RA_MAX_WORKERS;
+    uint64_t nupdate;
+    uint64_t errors;
+    double seconds = 0.0;
+    double gups;
+    double frac;
+
+    @errhandler(CCError e) cc_error_exit(e);
+
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    CCStdio io = cc_stdio_create(a);
+
+    if (argc >= 2)
+        mode = argv[1];
+    else if (getenv("MODE") && getenv("MODE")[0])
+        mode = getenv("MODE");
+    else
+        mode = "dist";
+    if (strcmp(mode, "dist") != 0 && strcmp(mode, "dist-atomic") != 0) {
+        io.println("mode must be dist|dist-atomic") !>;
+        return 2;
+    }
+
+    bits = env_int("TABLE_BITS", env_truth("RA_SMOKE") ? 16 : 20);
+    nloc = env_int("LOCALES", 2);
+    workers = env_int("WORKERS", 1);
+    if (bits < RA_MIN_BITS || bits > RA_MAX_BITS) {
+        io.println(@string(`TABLE_BITS must be ${lo}..${hi}`, @scratch)) !>;
+        return 2;
+    }
+    if (nloc < 1 || nloc > RA_MAX_LOCALES || !ra_is_pow2(nloc)) {
+        io.println(@string(`LOCALES must be a power of 2 in 1..${maxl}`, @scratch)) !>;
+        return 2;
+    }
+    if (workers < 1 || workers > RA_MAX_WORKERS) {
+        io.println(@string(`WORKERS must be 1..${maxw}`, @scratch)) !>;
+        return 2;
+    }
+
+    nupdate = ra_nupdate(bits);
+    errors = run_dist(bits, nloc, workers, strcmp(mode, "dist-atomic") == 0,
+                      &seconds) !>;
+    gups = (seconds > 0.0) ? ((double)nupdate / seconds / 1.0e9) : 0.0;
+    frac = (nupdate > 0) ? ((double)errors / (double)nupdate) : 0.0;
+    io.println(@string(`gups impl=cc mode=${mode} table_bits=${bits} nupdate=${nupdate} seconds=${seconds} locales=${nloc} workers=${workers} errors=${errors} error_frac=${frac} gups=${gups}`, @scratch)) !>;
+    return (errors <= nupdate / 100) ? 0 : 1;
+}
