@@ -1,6 +1,7 @@
 #define CC_ARENA_IMPL 1
 #define CC_RESULT_IMPL 1
 #include <ccc/cc_arena.cch>
+#include "cc_mem_heap.c"
 #ifndef __TINYC__
 #include "cc_mem.c"
 #endif

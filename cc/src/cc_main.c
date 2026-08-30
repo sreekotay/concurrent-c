@@ -662,6 +662,10 @@ static void cc_init_paths(const char* argv0) {
         snprintf(g_cc_lowered_include, sizeof(g_cc_lowered_include), "%s/out/include", g_repo_root);
         // Prefer the compiler-build runtime object (built by `make -C cc`) which now lives under out/.
         snprintf(g_cc_runtime_o, sizeof(g_cc_runtime_o), "%s/out/cc/obj/runtime/concurrent_c.o", g_repo_root);
+        if (access(g_cc_runtime_o, F_OK) != 0) {
+            snprintf(g_cc_runtime_o, sizeof(g_cc_runtime_o),
+                     "%s/out/cc-tcc/obj/runtime/concurrent_c.o", g_repo_root);
+        }
         /* Prefer rewritten runtime (ccc wrapper rewrites .cch includes to .h).
          * Compiling cc/runtime sources directly feeds host-cc raw @as sugar. */
         snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c),
@@ -4945,7 +4949,7 @@ static int cc__runtime_obj_is_stale(const char* runtime_obj_path) {
     const char* runtime_sources[] = {
         "concurrent_c.c", "scheduler.c", "fiber_sched.c", "nursery.c",
         "channel.c", "fiber.c", "exec.c", "closure.c", "task_intptr.c",
-        "float_format_zmij.c", "slice_gen.c",
+        "float_format_zmij.c", "slice_gen.c", "cc_mem_heap.c",
         NULL
     };
     char src_path[PATH_MAX];
@@ -5060,7 +5064,8 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
     // cc__prebuilt_runtime_applies; a caller's own flags must not be dropped.
     // NOTE: Check if prebuilt is stale (runtime sources changed but make not run).
     int prebuilt_applies = cc__prebuilt_runtime_applies(opt, target_part, sysroot_part);
-    if (!opt->opt_release && !is_tcc && prebuilt_applies &&
+    int prebuilt_from_host_tcc = is_tcc && strstr(g_cc_runtime_o, "/cc-tcc/") != NULL;
+    if (!opt->opt_release && (!is_tcc || prebuilt_from_host_tcc) && prebuilt_applies &&
         file_exists(g_cc_runtime_o) && !cc__runtime_obj_is_stale(g_cc_runtime_o)) {
         strncpy(out_runtime_path, g_cc_runtime_o, out_runtime_cap);
         out_runtime_path[out_runtime_cap - 1] = '\0';
