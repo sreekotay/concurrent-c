@@ -397,7 +397,7 @@ Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
 | `@parallel { a = f(); b = g(); }` | Independent assignment arms. First on the caller; the rest may spawn. |
 | `@parallel { h1.wait() !>; h2.wait() !>; }` | Expression arms. No assignment: the expression just runs. |
 | `h1.adopt(h2)` | Cancel tree. `h1.cancel()` is child then parent; `h2.cancel()` is child only. |
-| `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. First arm has finished; siblings may still run. `h.wait()` joins and publishes their writes. One unmarked arm is ill-formed: this dest is never live on the caller. Mark the caller `@serial`, or join with `!>.wait()!>`. Pointer names copy the pointer; other names are by reference and must outlive `.wait()`. |
+| `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. When there is a kick, the first arm has finished; siblings may still run. `h.wait()` joins and publishes their writes. One assignment arm is ill-formed: this dest is never live on the caller. One expression arm is the worker (spawned); dest is live. Mark the caller `@serial`, or join with `!>.wait()!>`. Pointer names copy the pointer; other names are by reference and must outlive `.wait()`. |
 | `h.cancel()` | `bool !>(CCIoError)`. `true` = this call stored live→cancelled on `h` or an adopted child. |
 | `h.pause()` / `h.resume()` | `bool !>(CCIoError)`. `true` = this call's transition. |
 | `h.cancelled` | Atomic flag. Safe to poll from a sibling while `cancel()` stores. Visible after `h.wait()`. |

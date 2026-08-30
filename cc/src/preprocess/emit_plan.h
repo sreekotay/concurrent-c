@@ -34,6 +34,9 @@ typedef struct CCEmitPlanComptimeSchedule {
     size_t frag_index[CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS];
 } CCEmitPlanComptimeSchedule;
 
+/* Fold `type_of(T).nfields` for `@comptime { }` host C (reflect table). */
+char* cc_lower_type_of_for_comptime_exec(const char* src, size_t n);
+
 /* --- source scan (shared preprocess + visitor passes) --- */
 size_t cc_emit_plan_line_start_before(const char* src, size_t pos);
 size_t cc_emit_plan_find_ident_top_level(const char* src, size_t start, size_t len,

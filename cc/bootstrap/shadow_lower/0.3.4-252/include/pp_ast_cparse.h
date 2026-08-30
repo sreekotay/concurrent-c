@@ -4,6 +4,7 @@
  * AST params/body kids (never whole-fn FileTape reprint). */
 #pragma once
 
+#include "pp_ast_core.h"
 enum { CP_FLAT_FIELD = 1, CP_FLAT_PPDIR = 2, CP_FLAT_FUNC = 3 };
 enum { SHADOW_CP_FLAT_CAP = 256 };
 

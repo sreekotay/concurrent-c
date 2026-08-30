@@ -235,10 +235,13 @@ No `T?`. Pick the shape that matches the operation:
 `for` forms are `CCParallel !>(CCError)`: create can fail; `.wait()` is
 the join. A dest is live before the arms. Bare `@parallel { }` is an
 unconsumed Result — bind (`CCParallel h = … !>;`) or `!>.wait()!>;`.
-Binding starts the arms and does not join. The first arm has finished
-when the construct returns `h`; siblings may still be running. A dest
-bound to one unmarked arm is ill-formed: this dest is never live on
-the caller. Mark that arm `@serial`, or join with `!>.wait()!>`.
+Binding starts the arms and does not join. When there is a kick, the
+first arm has finished when the construct returns `h`; siblings may
+still be running. A dest bound to one assignment arm is ill-formed:
+this dest is never live on the caller. A dest bound to one expression
+arm (`CCParallel h = @parallel { work(); } !>;`) is the worker
+(spawned); dest is live. Mark a caller strand `@serial`, or join with
+`!>.wait()!>`.
 `h.wait()` joins them and publishes their writes. Pointer names copy
 the pointer; other captured names are the frame object and must
 outlive `.wait()`. `h.cancelled` is

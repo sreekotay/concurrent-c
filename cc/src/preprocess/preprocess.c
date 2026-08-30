@@ -19399,7 +19399,19 @@ static int cc__ti_name_is_container(const char* s, size_t n) {
     return 0;
 }
 
+static char* cc__lower_type_of_constexpr_ex(const char* src, size_t n,
+                                            int for_exec);
+
 char* cc__lower_type_of_constexpr(const char* src, size_t n) {
+    return cc__lower_type_of_constexpr_ex(src, n, 0);
+}
+
+char* cc_lower_type_of_for_comptime_exec(const char* src, size_t n) {
+    return cc__lower_type_of_constexpr_ex(src, n, 1);
+}
+
+static char* cc__lower_type_of_constexpr_ex(const char* src, size_t n,
+                                            int for_exec) {
     if (!src || n == 0) return NULL;
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
@@ -19480,6 +19492,13 @@ char* cc__lower_type_of_constexpr(const char* src, size_t n) {
         case MK_NFIELDS:
             if (is_prim) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "((size_t)0)");
+            } else if (for_exec) {
+                /* @comptime { } is host C: cc_type_of(T) needs a registered
+                 * cc_type_info. Field count is already on the reflect table. */
+                cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                  "((size_t)cc_reflect_field_count(\"");
+                cc_sb_append(&out, &out_len, &out_cap, T, Tn);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "\"))");
             } else {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "((size_t)cc_type_of(\"");
                 cc_sb_append(&out, &out_len, &out_cap, T, Tn);

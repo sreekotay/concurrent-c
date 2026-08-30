@@ -437,6 +437,7 @@ char* cc__rewrite_async_void_ret(const char* src, size_t n);
 // preprocess-for-parse path and the shadow_lower / factory emit path.
 // Returns malloc'd string on change, NULL otherwise.
 char* cc__lower_type_of_constexpr(const char* src, size_t n);
+char* cc_lower_type_of_for_comptime_exec(const char* src, size_t n);
 
 // D2.0: resolve `@comptime if (PRED) { ... } [else { ... }]` by evaluating the
 // compile-time-constant predicate and splicing the taken branch in place (the

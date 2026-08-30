@@ -80,6 +80,23 @@ printf '%s\n' "$emit8" | grep -q 'int q' || fail "overlay dropped int q"
 printf '%s\n' "$emit8" | grep -q 'int \* r' || fail "overlay dropped int *r"
 printf '%s\n' "$emit8" | grep -q 'int \* s' || fail "overlay dropped int *s (star on later comma name)"
 
+emit8a="$("$SL" tests/cparse_comma_array_fields_smoke.ccs --no-cache)" \
+    || fail "lower cparse_comma_array_fields_smoke"
+body8a="$(printf '%s\n' "$emit8a" | sed -n '/typedef struct Node/,/^} Node;/p')"
+printf '%s\n' "$body8a" | grep -q 'int spec_a\[6\]' \
+    || fail "overlay dropped int spec_a[6]"
+printf '%s\n' "$body8a" | grep -q 'int spec_b\[6\]' \
+    || fail "comma array spec_b lost its type (int spec_b[6])"
+printf '%s\n' "$body8a" | grep -q 'int spec_c\[6\]' \
+    || fail "comma array spec_c lost its type (int spec_c[6])"
+printf '%s\n' "$body8a" | grep -q 'size_t lens\[2\]' \
+    || fail "overlay dropped size_t lens[2]"
+printf '%s\n' "$body8a" | grep -q 'size_t caps\[2\]' \
+    || fail "comma array caps lost its type (size_t caps[2])"
+if printf '%s\n' "$body8a" | grep -E -q '^[[:space:]]+spec_b\[6\];'; then
+    fail "spec_b reprinted as a typeless declarator"
+fi
+
 emit9="$("$SL" tests/cparse_nested_fields_smoke.ccs --no-cache)" \
     || fail "lower cparse_nested_fields_smoke"
 printf '%s\n' "$emit9" | grep -q 'union' || fail "overlay dropped nested union"

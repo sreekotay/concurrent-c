@@ -1,0 +1,16 @@
+/* UFCS in a C-for increment slot. */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+
+int main(void) {
+    cc_atomic_int c = 0;
+    for (; c.load() < 3; c.fetch_add(1)) {
+    }
+    if (c.load() != 3) {
+        fprintf(stderr, "FAIL c=%d\n", c.load());
+        return 1;
+    }
+    printf("for_incr_ufcs_smoke: OK\n");
+    return 0;
+}

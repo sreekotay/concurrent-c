@@ -1,0 +1,32 @@
+/* Nested UFCS: array element field method — n->attrs[i].name.eq(...) */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    CCSlice name;
+} Attr;
+
+typedef struct {
+    Attr attrs[2];
+} Node;
+
+int main(void) {
+    Node n;
+    Node* p = &n;
+    size_t i;
+    int hit = 0;
+
+    n.attrs[0].name = cc_slice_from_buffer((void*)"foo", 3);
+    n.attrs[1].name = cc_slice_from_buffer((void*)"bar", 3);
+
+    for (i = 0; i < 2; i++) {
+        if (p->attrs[i].name.eq(cc_slice_from_buffer((void*)"bar", 3)))
+            hit++;
+    }
+    if (hit != 1) {
+        fprintf(stderr, "FAIL hit=%d\n", hit);
+        return 1;
+    }
+    printf("ufcs_indexed_field_eq_smoke: OK\n");
+    return 0;
+}

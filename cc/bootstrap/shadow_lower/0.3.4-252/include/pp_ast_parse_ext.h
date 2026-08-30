@@ -3,6 +3,7 @@
 #pragma once
 
 /* [const] [struct] Ret[*+] name ( params ) { body } — ret in e (default int). */
+#include "pp_ast_core.h"
 static AstNode* parse_fn(Parser* p) {
     if (!shadow_cparse_fn_in_attach) {
         int cp = shadow_cparse_try_file_fn(p);

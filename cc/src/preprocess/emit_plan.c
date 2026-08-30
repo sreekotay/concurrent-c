@@ -2073,6 +2073,9 @@ static int cc__block_needs_executor(const char* src, size_t body_l, size_t body_
          cc__span_contains(src + body_l + 1, body_r - body_l - 1, "cc_canonical_name")))
         return 1;
     for (size_t j = body_l + 1; j + 2 < body_r; j++) {
+        /* `type_of` is a language construct; the body is host C and must
+         * run through the executor so the fold can replace it. */
+        if (cc_match_ident_kw(src, body_r, j, "type_of")) return 1;
         if (cc_match_ident_kw(src, body_r, j, "for")) return 1;
         if (cc_match_ident_kw(src, body_r, j, "while")) return 1;
         if (cc_match_ident_kw(src, body_r, j, "do")) return 1;
@@ -2280,6 +2283,35 @@ static size_t cc__emit_find_logical_line(const char* src, size_t len,
     return fallback < len ? fallback : len;
 }
 
+/* `__ccs<digits>` dummy: `=0` with optional spaces, then `};` (file-scope
+ * `enum{__ccsN=0};`) or `,` (enumerator inside `enum { }`). Emit may insert
+ * spaces around `=` when reprinting tokens. */
+static int cc__emit_match_ccs_dummy(const char* p, const char** end, int* comma) {
+    const char* q;
+    if (!p || memcmp(p, "__ccs", 5) != 0) return 0;
+    q = p + 5;
+    if (*q < '0' || *q > '9') return 0;
+    while (*q >= '0' && *q <= '9') q++;
+    while (*q == ' ' || *q == '\t') q++;
+    if (*q != '=') return 0;
+    q++;
+    while (*q == ' ' || *q == '\t') q++;
+    if (*q != '0') return 0;
+    q++;
+    while (*q == ' ' || *q == '\t') q++;
+    if (q[0] == '}' && q[1] == ';') {
+        if (comma) *comma = 0;
+        if (end) *end = q + 2;
+        return 1;
+    }
+    if (*q == ',') {
+        if (comma) *comma = 1;
+        if (end) *end = q + 1;
+        return 1;
+    }
+    return 0;
+}
+
 static size_t cc__emit_resolve_anchor_pos(CCEmitAnchor anchor, size_t site_pos,
                                           int site_line, const char* src, size_t len,
                                           const char* input_path,
@@ -2287,11 +2319,35 @@ static size_t cc__emit_resolve_anchor_pos(CCEmitAnchor anchor, size_t site_pos,
     switch (anchor) {
     case CC_EMIT_AT_COMPTIME_SITE: {
         char marker[64];
+        char emarker[64];
         size_t pos;
         size_t k;
         int in_block = 0;
         snprintf(marker, sizeof(marker), "enum{__ccs%zu=0};", site_pos);
+        snprintf(emarker, sizeof(emarker), "__ccs%zu=0,", site_pos);
         const char* hit = src ? strstr(src, marker) : NULL;
+        if (!hit && src && emarker[0])
+            hit = strstr(src, emarker);
+        if (!hit && src) {
+            const char* p = src;
+            while ((p = strstr(p, "__ccs")) != NULL) {
+                const char* endp = NULL;
+                int comma = 0;
+                if (cc__emit_match_ccs_dummy(p, &endp, &comma)) {
+                    char want[64];
+                    size_t wlen = (size_t)snprintf(want, sizeof(want),
+                                                    "__ccs%zu", site_pos);
+                    if (wlen < sizeof(want) &&
+                        (size_t)(endp - p) >= wlen &&
+                        memcmp(p, want, wlen) == 0 &&
+                        !((p[wlen] >= '0' && p[wlen] <= '9'))) {
+                        hit = p;
+                        break;
+                    }
+                }
+                p += 5;
+            }
+        }
         /* Serdes stage1 markers use un-harvested body_l; exec fragments record
          * harvested site_pos. Fall back to the nearest `__ccs<digits>` anchor. */
         if (!hit && src) {
@@ -2319,6 +2375,23 @@ static size_t cc__emit_resolve_anchor_pos(CCEmitAnchor anchor, size_t site_pos,
                 }
                 if (!best) best = p;
                 p = q;
+            }
+            if (!best) {
+                p = src;
+                while ((p = strstr(p, "__ccs")) != NULL) {
+                    const char* endp = NULL;
+                    int comma = 0;
+                    if (!cc__emit_match_ccs_dummy(p, &endp, &comma) || !comma) {
+                        p += 5;
+                        continue;
+                    }
+                    if ((size_t)(p - src) >= logic_pos) {
+                        best = p;
+                        break;
+                    }
+                    if (!best) best = p;
+                    p = endp;
+                }
             }
             hit = best;
         }
@@ -2558,7 +2631,12 @@ int cc_emit_plan_splice_comptime_fragments(char** src, size_t* len, const char* 
     for (size_t i = 0; i < sched.n; i++) order[i] = i;
     for (size_t i = 0; i + 1 < sched.n; i++) {
         for (size_t j = i + 1; j < sched.n; j++) {
-            if (sched.pos[order[j]] > sched.pos[order[i]]) {
+            /* High pos first so earlier sites stay valid. Equal pos: later
+             * fragment first so same-site inserts keep collection order
+             * (field 0 … N, then a trailing enumerator such as NPROP). */
+            if (sched.pos[order[j]] > sched.pos[order[i]] ||
+                (sched.pos[order[j]] == sched.pos[order[i]] &&
+                 order[j] > order[i])) {
                 size_t t = order[i];
                 order[i] = order[j];
                 order[j] = t;
@@ -2615,6 +2693,19 @@ int cc_emit_plan_splice_comptime_fragments(char** src, size_t* len, const char* 
         if (pos > 0 && pos <= *len && (*src)[pos - 1] != '\n') {
             if (cc__emit_splice_at(src, len, pos, "\n", input_path) != 0) return -1;
             pos += 1;
+        }
+        /* Inside `enum { }`: drop the dummy enumerator so members replace it. */
+        {
+            size_t q = pos;
+            const char* endp = NULL;
+            int comma = 0;
+            while (q < *len && ((*src)[q] == ' ' || (*src)[q] == '\t')) q++;
+            if (cc__emit_match_ccs_dummy(*src + q, &endp, &comma) && comma) {
+                size_t drop = (size_t)(endp - (*src + q));
+                memmove(*src + q, *src + q + drop, *len - (q + drop));
+                *len -= drop;
+                (*src)[*len] = '\0';
+            }
         }
         const char* text = f->text ? f->text : "";
         const char* extra_nl =

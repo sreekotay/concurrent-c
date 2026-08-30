@@ -1,0 +1,22 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* `@comptime { }` is host C. `type_of(T).nfields` must lower to a reflect
+ * call — a bare `type_of(Computed)` is not a C identifier. */
+typedef struct {
+    int bg;
+    int fg;
+    int accent;
+} Computed;
+
+@comptime {
+    int nf = (int)type_of(Computed).nfields;
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE, "enum { COMPUTED_NFIELDS = %d };\n", nf);
+}
+
+int main(void) {
+    if (COMPUTED_NFIELDS != 3) return 1;
+    printf("comptime_typeof_nfields_exec_smoke ok nfields=%d\n", COMPUTED_NFIELDS);
+    return 0;
+}

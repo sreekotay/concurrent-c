@@ -5338,7 +5338,7 @@ CCParallel h2 = @parallel { c = p(); d = q(); } !>;
 
 `h1.adopt(h2)` links a cancel tree. `h1.cancel()` cancels adopted children (newest first), then `h1`. `h2.cancel()` cancels `h2` only. Adopt is not a move: both handles stay live. Self, cycle, a second parent, a joined parent or child, and a full child list are errors.
 
-A dest bound to the construct (`CCParallel h = @parallel { … } !>;`) is that handle before any arm runs. Binding starts the arms and does not join. The first arm has finished on the caller when the construct returns `h`. Remaining arms may still be running. `h.wait()` joins them and synchronizes-with every arm: after it returns, those arms' writes to captured objects are visible. `@parallel { … } !>.wait()!>;` waits before the statement completes. A dest bound to a one-arm `@parallel` whose arm is not `@serial` is ill-formed: this dest is never live on the caller. `@parallel { work(); } !>.wait()!>;` is well-formed. `CCParallel h = @parallel { @serial { a = t; } } !>;` marks the caller strand. Reading another arm's destinations before `.wait()` returns is undefined. Arms may `h.cancel()`, `h.adopt(…)`, `h.pause()`, and `h.resume()`. `h.wait()` in an arm of `h` is ill-formed. The first arm is not a task of `h`: cancel from the caller stops spawned siblings; the caller continues.
+A dest bound to the construct (`CCParallel h = @parallel { … } !>;`) is that handle before any arm runs. Binding starts the arms and does not join. When there is a kick, the first arm has finished on the caller when the construct returns `h`. Remaining arms may still be running. `h.wait()` joins them and synchronizes-with every arm: after it returns, those arms' writes to captured objects are visible. `@parallel { … } !>.wait()!>;` waits before the statement completes. A dest bound to a one-arm `@parallel` whose arm is an assignment is ill-formed: this dest is never live on the caller. A dest bound to a one-arm expression (`CCParallel h = @parallel { work(); } !>;`) is well-formed: that arm is the worker (spawned); dest is live on the caller. `@parallel { work(); } !>.wait()!>;` is well-formed. `CCParallel h = @parallel { @serial { a = t; } } !>;` marks the caller strand. Reading another arm's destinations before `.wait()` returns is undefined. Arms may `h.cancel()`, `h.adopt(…)`, `h.pause()`, and `h.resume()`. `h.wait()` in an arm of `h` is ill-formed. The first arm of a multi-arm construct is not a task of `h`: cancel from the caller stops spawned siblings; the caller continues.
 
 `h.cancelled` is an atomic flag. A concurrent load with `h.cancel()` is defined. After `h.wait()`, a load of `h.cancelled` is visible to the waiter.
 
@@ -5350,7 +5350,7 @@ Spawned arms do not inherit the caller's current deadline scope. The first arm r
 
 Compound assignment, indirection, field and subscript destinations, declarations, and other statements are ill-formed as assignment arms. A bare `{ }` as a direct child of `@parallel { }` is ill-formed; braces are C scope, not an arm. A `for` statement as a direct child is ill-formed — the loop is a form of the keyword (§8.11.4).
 
-Lowering is fork-join: the dest exists before any arm runs; the first arm runs on the caller; each remaining arm is spawned and attached to the dest. `.wait()` joins. If spawn fails, that arm runs on the caller. The result is the same either way.
+Lowering is fork-join: the dest exists before any arm runs. A dest-live one-arm expression has no kick: that arm is spawned and attached to the dest. Otherwise the first arm runs on the caller and each remaining arm is spawned and attached to the dest. `.wait()` joins. If spawn fails, that arm runs on the caller. The result is the same either way.
 
 A `return` in any arm joins every spawned sibling, then returns from the function. The construct does not wait for a later or earlier arm that has not returned — including an arm that never will (an external hang). If two arms both `return`, which value is taken is not specified. On the sequential denial (`seq` false, or `#pragma(@parallel) off`) it is a normal C `return`: later arms do not run.
 
@@ -7189,6 +7189,13 @@ A `@comptime { ... }` block runs during compilation and may be used to initializ
 String-literal case labels (§11) are valid in `@comptime {}` with the same
 surface rules as at runtime.
 
+**Rule (`type_of` in an executed block):** The body of `@comptime {}` is compiled
+as host C. Structural `type_of(T)` members that appear there are lowered to host
+calls before that compile — `type_of(T).nfields` is `cc_reflect_field_count("T")`
+for a user type, the same count `@comptime for (f in type_of(T).fields)` walks.
+`@comptime for` in the main translation unit is a compile-time unroll, not host C,
+and keeps the `type_of` spelling.
+
 ---
 
 ### 14.6 Built-in `@comptime` Queries
@@ -7281,6 +7288,8 @@ typedef enum CCEmitAnchor {
 **Rule:** `cc_emit_*` text is splice-once per anchor/site; consecutive emits at the same anchor/site concatenate into one block.
 
 **Rule (anchor after what the fragment references).** A fragment is spliced verbatim at its anchor and is subject to ordinary C declaration order. Emitted code that calls or names something declared in the source must be anchored where that declaration already stands — `CC_EMIT_AT_COMPTIME_SITE` for a `@comptime` block that follows the declarations it reflects over. `CC_EMIT_AFTER_PRELUDE` precedes the file's own declarations, so a wrapper spliced there calls an undeclared function; the real definition then conflicts with the implicit one, and the error names the *source* line rather than the emitted call.
+
+**Rule (site splice into an enumerator list).** When `@comptime {}` or `@comptime for` sits inside `enum { … }`, `CC_EMIT_AT_COMPTIME_SITE` inserts the fragment as enumerators at that construct — not after the translation unit. A trailing enumerator written after the construct (for example `NPROP`) follows the last emitted member, so its implicit value is one past the last explicit member. Arrays sized by that enumerator use that count.
 
 **Rule (a fragment is host C).** Splicing happens after the passes that lower CC syntax, so a fragment may not contain `!>`, `?>`, `@errhandler`, or any other construct those passes handle — the parser reports `'@' statements require CC external parser`. Emitted code consumes a Result through the accessors (§Results), which are ordinary macros.
 
@@ -7405,7 +7414,7 @@ the supported way to specialize conditionally (e.g. emit `_inverse` only when
 type_of(T).size        // size_t  — sizeof(T)
 type_of(T).align       // size_t  — alignof(T)
 type_of(T).kind        // cc_type_kind
-type_of(T).nfields     // field count
+type_of(T).nfields     // field count (in `@comptime {}`, the host reflect count)
 type_of(T).name        // const char* display spelling
 ```
 

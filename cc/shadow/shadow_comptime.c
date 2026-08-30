@@ -128,11 +128,11 @@ static int shadow_ct_apply_life_macros(char** buf, size_t* n) {
 }
 
 /* Space-blank @comptime {…} / @comptime fn/const decls (layout-preserving).
- * File-scope `@comptime {…}` also leaves `enum{__ccs<body_l>=0};` on one
- * all-space line inside the blanked span (never crossing newlines — eating a
- * newline shifts every later diagnostic line by -1). Nested / in-function
+ * File-scope `@comptime {…}` leaves `enum{__ccs<body_l>=0};` on one all-space
+ * line. A block inside `enum { … }` leaves `__ccs<body_l>=0,` (a dummy
+ * enumerator) so CC_EMIT_AT_COMPTIME_SITE can splice members there. In-function
  * blocks stay space-blank only (whitelist rejects enum as a statement).
- * Leaves CC_GENERIC_FACTORY sugar intact for shadow instantiate.
+ * Never overwrite a newline. Leaves CC_GENERIC_FACTORY sugar intact.
  * Unmatched braces → NULL (same fail-loud contract as header lower_header). */
 static void shadow_ct_blank_unterminated(const char* src, size_t at,
                                          const char* what) {
@@ -155,16 +155,45 @@ static char* shadow_ct_blank_comptime(const char* src, size_t n) {
     memcpy(out, src, n);
     out[n] = '\0';
     cc_inert_scan_init(&sc, NULL);
+    int pending_enum = 0;
+    int enum_at[32];
+    int nenum = 0;
     for (size_t i = 0; i < n;) {
         if (cc_inert_scan_step(&sc, src, n, &i)) continue;
         if (src[i] == '{') {
+            if (pending_enum && nenum < 32)
+                enum_at[nenum++] = brace_depth;
+            pending_enum = 0;
             brace_depth++;
             i++;
             continue;
         }
         if (src[i] == '}' && brace_depth > 0) {
             brace_depth--;
+            if (nenum && enum_at[nenum - 1] == brace_depth)
+                nenum--;
             i++;
+            continue;
+        }
+        if (pending_enum) {
+            /* `enum` / `enum Tag` then `{` — whitespace must not drop the flag
+             * or `enum {\n@comptime for` never plants an enumerator marker. */
+            if (src[i] == ' ' || src[i] == '\t' || src[i] == '\n' ||
+                src[i] == '\r') {
+                i++;
+                continue;
+            }
+            if (cc_is_ident_start(src[i])) {
+                while (i < n && cc_is_ident_char(src[i])) i++;
+                continue;
+            }
+            pending_enum = 0;
+        }
+        if (src[i] == 'e' && i + 4 <= n && memcmp(src + i, "enum", 4) == 0 &&
+            (i + 4 >= n || !cc_is_ident_char(src[i + 4])) &&
+            (i == 0 || !cc_is_ident_char(src[i - 1]))) {
+            pending_enum = 1;
+            i += 4;
             continue;
         }
         if (src[i] != '@' || !cc_match_ident_kw(src, n, i + 1, "comptime")) {
@@ -191,9 +220,12 @@ static char* shadow_ct_blank_comptime(const char* src, size_t n) {
                 for (size_t k = i; k <= body_r; ++k) {
                     if (out[k] != '\n') out[k] = ' ';
                 }
-                if (file_scope) {
-                    mlen = snprintf(marker, sizeof(marker),
-                                    "enum{__ccs%zu=0};", body_l);
+                if (file_scope || nenum > 0) {
+                    mlen = file_scope
+                               ? snprintf(marker, sizeof(marker),
+                                          "enum{__ccs%zu=0};", body_l)
+                               : snprintf(marker, sizeof(marker),
+                                          "__ccs%zu=0,", body_l);
                     /* Place on a single blanked line that has room — never
                      * overwrite '\n' (line-map must stay stable). */
                     if (mlen > 0 && (size_t)mlen < sizeof(marker)) {
@@ -256,6 +288,29 @@ static char* shadow_ct_blank_comptime(const char* src, size_t n) {
                 }
                 for (size_t k = i; k <= end; ++k) {
                     if (out[k] != '\n') out[k] = ' ';
+                }
+                /* Inside `enum { }`: one dummy enumerator so unrolled
+                 * `@emit(CC_EMIT_AT_COMPTIME_SITE)` splices into this list
+                 * (stage1 never sees the inner `@comptime { }` wraps). */
+                if (nenum > 0) {
+                    char marker[64];
+                    int mlen = snprintf(marker, sizeof(marker),
+                                        "__ccs%zu=0,", body_l);
+                    if (mlen > 0 && (size_t)mlen < sizeof(marker)) {
+                        size_t p = i;
+                        while (p <= end) {
+                            size_t line_end = p;
+                            size_t room;
+                            while (line_end <= end && out[line_end] != '\n')
+                                line_end++;
+                            room = line_end - p;
+                            if (room >= (size_t)mlen) {
+                                memcpy(out + p, marker, (size_t)mlen);
+                                break;
+                            }
+                            p = (line_end <= end) ? line_end + 1 : end + 1;
+                        }
+                    }
                 }
                 i = end + 1;
                 continue;

@@ -1,0 +1,1 @@
+comptime_emit_enum_site_smoke ok P_bg=0 P_fg=1 P_accent=2 NPROP=3

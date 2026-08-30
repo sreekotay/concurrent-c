@@ -1,0 +1,25 @@
+/* Comma-declared arrays must keep the element type on every name.
+ * Flatten used to reprint the declarator span (`spec_b[6];`) and drop
+ * `int` from later kids in the emitted struct. */
+typedef struct Node {
+    int spec_a[6], spec_b[6], spec_c[6];
+    size_t lens[2], caps[2];
+} Node;
+
+int main(void) {
+    Node n;
+    int i;
+    for (i = 0; i < 6; i++) {
+        n.spec_a[i] = i;
+        n.spec_b[i] = i + 10;
+        n.spec_c[i] = i + 20;
+    }
+    n.lens[0] = 6;
+    n.lens[1] = 6;
+    n.caps[0] = 6;
+    n.caps[1] = 6;
+    return (n.spec_a[5] == 5 && n.spec_b[0] == 10 && n.spec_c[5] == 25 &&
+            n.lens[1] == 6 && n.caps[0] == 6)
+               ? 0
+               : 1;
+}

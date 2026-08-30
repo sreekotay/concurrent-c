@@ -1,0 +1,30 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+/* CC_EMIT_AT_COMPTIME_SITE inside `enum { }` splices members there.
+ * A trailing enumerator (NPROP) follows the last field, so its implicit
+ * value is the field count — arrays sized by NPROP are not [0]. */
+typedef struct {
+    int bg;
+    int fg;
+    int accent;
+} Computed;
+
+enum {
+@comptime for (f in type_of(Computed).fields) {
+    @emit(CC_EMIT_AT_COMPTIME_SITE, `    P_${f.name} = ${f.index},`);
+}
+    NPROP
+};
+
+int main(void) {
+    int xs[NPROP];
+    if (P_bg != 0 || P_fg != 1 || P_accent != 2) return 1;
+    if (NPROP != 3) return 2;
+    if ((int)(sizeof(xs) / sizeof(xs[0])) != 3) return 3;
+    printf("comptime_emit_enum_site_smoke ok P_bg=%d P_fg=%d P_accent=%d NPROP=%d\n",
+           P_bg, P_fg, P_accent, NPROP);
+    return 0;
+}

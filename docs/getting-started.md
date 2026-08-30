@@ -424,8 +424,9 @@ not cancel. Spec §8.1.5.
 Independent work. The brace and `for` forms are `CCParallel !>(CCError)`.
 `.wait()` joins. Binding the handle starts the arms and does not join.
 Not a nursery: `n.spawn` names a lifetime. A dest is live before the
-arms. A dest bound to one unmarked arm is ill-formed — mark the caller
-`@serial`, or join with `!>.wait()!>`. `@serial` is a multi-statement
+arms. A dest bound to one assignment arm is ill-formed. A dest bound
+to one expression is the worker (spawned); dest is live. Mark the
+caller `@serial`, or join with `!>.wait()!>`. `@serial` is a multi-statement
 arm that writes one outer name.
 
 ```c

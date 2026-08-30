@@ -1121,7 +1121,9 @@ int cc_comptime_exec_eval_int(const char* expr,
         if (tenv && tenv[0]) cc__exec_timeout_ms = atoi(tenv);
     }
     cc__exec_start = clock();
-    char* tu = cc__exec_build_eval_tu(expr);
+    char* tof = cc_lower_type_of_for_comptime_exec(expr, strlen(expr));
+    char* tu = cc__exec_build_eval_tu(tof ? tof : expr);
+    free(tof);
     if (!tu) {
         if (err_buf && err_sz) snprintf(err_buf, err_sz, "OOM building eval TU");
         return -1;
@@ -1217,6 +1219,14 @@ int cc_comptime_exec_block_body(const char* body, size_t body_len,
                 snprintf(err_buf, err_sz, "%s",
                          swerr[0] ? swerr : "string switch rewrite failed");
             return -1;
+        }
+        {
+            char* tof = cc_lower_type_of_for_comptime_exec(lowered,
+                                                          strlen(lowered));
+            if (tof) {
+                free(lowered);
+                lowered = tof;
+            }
         }
         tu = cc__exec_build_tu(lowered, strlen(lowered),
                                opts ? opts->input_path : NULL,
