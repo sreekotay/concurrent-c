@@ -95,6 +95,10 @@ tutorial, idiomatic, and production code — and race their upstreams
   Chapel `ra.chpl` `-nl 1` is the upstream, CC `smp` the matched
   single-locale race (`./real_projects/random_access/compare.sh`).
   Multi-locale: `compare_dist.sh` / `ra_dist.ccs`.
+- [**stylo-cc**](real_projects/stylo-cc/) — a Concurrent-C styling engine
+  raced against actual Servo Stylo on a frozen StyleBench workload. Exact
+  11-property style dumps gate correctness; dated receipts and the
+  remaining implementation differences are documented in the project.
 - [**The Neckbeard Challenges**](perf/run_neckbeard_challenges.sh) — six
   cross-language robustness gauntlets (syscall kidnapping, wake storms,
   fairness, named locks) run head-to-head against pthreads, Go, and Zig,

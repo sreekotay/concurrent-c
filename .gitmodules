@@ -12,3 +12,6 @@
 [submodule "third_party/curl"]
 	path = third_party/curl
 	url = https://github.com/curl/curl.git
+[submodule "real_projects/stylo-cc"]
+	path = real_projects/stylo-cc
+	url = https://github.com/sreekotay/stylo-cc.git
