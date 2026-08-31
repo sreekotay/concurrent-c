@@ -854,6 +854,21 @@ static int shadow_ufcs_nursery_spawn_parts(const char* recv, const char* meth_na
     return 1;
 }
 
+/* leave is overload: no leftover → leave1 (void); ctx+finish → leave_with. */
+static int shadow_ufcs_nursery_leave_parts(const char* recv, const char* meth_name,
+                                          const char* a, const char* vty,
+                                          const ShadowBind* rb, char* dst,
+                                          size_t cap) {
+    if (!shadow_ufcs_ty_is(vty, rb, "CCNursery")) return 0;
+    if (strcmp(meth_name, "leave") != 0) return 0;
+    if (!a || !a[0]) {
+        snprintf(dst, cap, "cc_nursery_leave1(%s)", recv);
+        return 1;
+    }
+    snprintf(dst, cap, "cc_nursery_leave_with(%s, %s)", recv, a);
+    return 1;
+}
+
 /* Spelled CCBox / CCBox_H — Host* methods peel `.p`. Teaching aliases
  * (typedef of CCBox_H, CCArena) pass the handle token. */
 static int shadow_ufcs_ty_is_box(const char* vty, const ShadowBind* rb) {
@@ -2156,6 +2171,8 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     /* Spawn overload before typehooks — hook/generic would emit the raw
      * fn-ptr twin. Unlifted send_task `=>` is a miss (closure must be a kid). */
     if (shadow_ufcs_nursery_spawn_parts(recv, meth_name, a, vty, rb, dst, cap))
+        return 1;
+    if (shadow_ufcs_nursery_leave_parts(recv, meth_name, a, vty, rb, dst, cap))
         return 1;
     /* Token method, handle by value — generic hook would insert `&`. */
     if (shadow_ufcs_ty_is(vty, rb, "CCNursery") &&
@@ -3640,6 +3657,15 @@ static void shadow_ufcs_diagnose_miss_at(const char* recv, const char* meth,
             snprintf(vty, sizeof(vty), "%s", recv);
     }
     if (!vty[0]) return;
+    if (shadow_restrict_diagnose_unknown_view(vty)) {
+        g_shadow_ufcs_miss = 1;
+        return;
+    }
+    {
+        char pretty[160];
+        shadow_restrict_pretty_view(vty, pretty, sizeof(pretty));
+        if (pretty[0]) snprintf(vty, sizeof(vty), "%s", pretty);
+    }
     is_scalar = shadow_ufcs_is_scalar_ty(vty);
     is_handle =
         (strncmp(vty, "CCChan", 6) == 0 || strncmp(vty, "CCResult_", 9) == 0);

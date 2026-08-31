@@ -18,7 +18,7 @@ int main(void) {
 
         {
             CCNursery __cc_nursery22 = @create() !> @destroy;
-            (void)__cc_nursery22.close_on(tx);
+            (void)__cc_nursery22.close(tx);
 
             __cc_nursery22.spawn(() => [tx] {
                 cc_channel_send_task(tx, () => {

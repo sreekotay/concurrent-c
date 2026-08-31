@@ -2,6 +2,8 @@
 
 Status: implemented
 
+Recipe: [`examples/recipe_variant.ccs`](../examples/recipe_variant.ccs).
+
 ## Declaration and default layout
 
 `@variant` declares a value-type tagged union:
@@ -134,7 +136,7 @@ switch (value) {
 }
 ```
 
-Every arm must appear unless the switch has a `default:`. Missing or unknown
+Every arm must appear. A `default:` forfeits the check. Missing or unknown
 arms are compile-time errors. The default-layout interop spelling
 `switch (value.kind)` with `case Name_arm:` labels is checked the same way.
 

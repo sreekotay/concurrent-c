@@ -47,17 +47,17 @@ static inline CCNurseryHost* cc_nursery_host(CCNursery n) {
     return n.p;
 }
 
-/* Self-owned nursery (malloc). The abandonable form: no arena record.
+/* Self-owned nursery (malloc). The leave-capable form: no arena record.
  * Join with wait/free or `@destroy`. Programmer errors abort. */
 CCNursery !>(CCError) cc_nursery_create(void);
 
 /* Cancel-tree nest: inherit cancel/deadline snapshot from `parent`.
  * Parent handle is required (empty `.p` aborts). UFCS: `parent.create_child()`.
- * Malloc handle — join with `@destroy` or wait; `abandon` is allowed. */
+ * Malloc handle — join with `@destroy` or wait; `leave` is allowed. */
 CCNursery !>(CCError) cc_nursery_create_child(CCNursery parent);
 
 /* Lifetime-parent birth. Handle lives in `a`; `a` must be live (null/dead
- * abort). Walk of `a` joins. `abandon` is refused. UFCS: `a.create_nursery()`
+ * abort). Walk of `a` joins. `leave` is refused. UFCS: `a.create_nursery()`
  * via the generic `cc_arena_` prefix — writing this function installs it. */
 CCNursery !>(CCError) cc_nursery_create_on(CCArena a);
 /* UFCS `a.create_nursery()`; peel via CC__ARENA_HANDLE. */
@@ -118,7 +118,7 @@ static inline void cc_nursery_cancel(CCNursery n) {
  * sigwait thread that invokes handler(n) once (CCClosure1, single-shot).
  *
  * Call once, BEFORE spawning into `n`. Nursery must outlive the wait.
- * Does not compose with `abandon` (the signal thread holds a raw pointer).
+ * Does not compose with `leave` (the signal thread holds a raw pointer).
  *
  *   n.on_shutdown((CCNursery n) => { n.cancel(); }) !>;
  *   n.cancel_on_signals(SIGINT, SIGTERM) !>;   // cancel-only
@@ -170,7 +170,7 @@ static inline CCDeadline cc_nursery_as_deadline(CCNursery n) {
     return cc_nursery_as_deadline_host(n.p);
 }
 
-// Register a channel to be auto-closed after wait, or on abandon last-exit.
+// Register a channel to be auto-closed at EMPTY (wait / @destroy, or leave).
 static inline void !>(CCError) cc_nursery_add_closing_chan(CCNursery n,
                                                           CCChan* ch) {
     return cc_nursery_add_closing_chan_host(n.p, ch);
@@ -180,9 +180,13 @@ static inline void !>(CCError) cc_nursery_add_closing_tx(CCNursery n,
                                                         CCChanTx tx) {
     return cc_nursery_add_closing_chan(n, tx.raw);
 }
-/* Surface C twin of `n.close_on(tx)` — same registration as add_closing_tx. */
-static inline void !>(CCError) cc_nursery_close_on(CCNursery n, CCChanTx tx) {
+/* Surface: `n.close(tx)` arms this nursery's EMPTY to close `tx` (both paths). */
+static inline void !>(CCError) cc_nursery_close(CCNursery n, CCChanTx tx) {
     return cc_nursery_add_closing_tx(n, tx);
+}
+/* Alias of `cc_nursery_close`. */
+static inline void !>(CCError) cc_nursery_close_on(CCNursery n, CCChanTx tx) {
+    return cc_nursery_close(n, tx);
 }
 
 // Check cancellation flag.
@@ -205,7 +209,7 @@ static inline void cc_nursery_cancel_wait(CCNursery n, uint32_t expected_gen,
     cc_nursery_cancel_wait_host(n.p, expected_gen, timeout_ms);
 }
 
-/* Admission. Dead host / OOM / abandoned is err. Child body error is wait. */
+/* Admission. Dead host / OOM / left nursery is err. Child body error is wait. */
 static inline void !>(CCError) cc_nursery_spawn(CCNursery n, void* (*fn)(void*),
                                                void* arg) {
     return cc_nursery_spawn_host(n.p, fn, arg);
@@ -289,29 +293,46 @@ static inline void !>(CCError) cc_nursery_wait(CCNursery n) {
     return cc_nursery_wait_host(n.p);
 }
 
-// Register a hook that runs after the last child is dead on the abandon
-// path, before the nursery is freed. One hook. Not run by wait/free.
-// The hook must not touch this nursery at all (it runs before release, so
-// anyone it wakes races the teardown) — in particular it must not wait,
-// free, or abandon it.
+/* Leftover at EMPTY on the LEFT path only. One hook. Not run by wait/free.
+ * Must not touch this nursery (it runs before release). Prefer `n.leave(ctx,
+ * finish)` which registers then consumes. */
 static inline void !>(CCError) cc_nursery_on_last(CCNursery n, void* ctx,
                                                  void (*finish)(void*)) {
     return cc_nursery_on_last_host(n.p, ctx, finish);
 }
 
-// Consume the handle. The last child to exit (or this call, if none are
-// live) frees the nursery at an unpredictable time on a worker thread, so
-// any later call on `n` is a use-after-free unless the caller owns
-// independent proof that a child is still live (e.g. it holds the channel a
-// child is provably blocked on); such calls get EINVAL but are not part of
-// the supported lifecycle. When the join set is empty the runtime closes
-// registered channels, runs on_last if set, and frees the nursery. Not
-// cancel. Requires worker-frees mode (the default). An abandon-capable
-// nursery must be self-owned (`cc_nursery_create()`): `abandon` on a
-// `cc_arena_create_nursery` nursery is refused — the owner's record would
-// fire on freed storage.
-static inline void cc_nursery_abandon(CCNursery n) {
+/* OPEN → LEFT. Consume the handle. Last child (or this call, if none are
+ * live) reaches EMPTY then DEAD on a worker at an unpredictable time, so
+ * any later call on `n` is a use-after-free unless the caller owns
+ * independent proof that a child is still live. At EMPTY the runtime closes
+ * registered channels, runs leftover if this path came via LEFT, and frees.
+ * Not cancel. Requires worker-frees mode (the default). A leave-capable
+ * nursery must be self-owned (`cc_nursery_create()`): `leave` on a
+ * `cc_arena_create_nursery` nursery is refused — the owner's record would
+ * fire on freed storage. */
+static inline void cc_nursery_leave1(CCNursery n) {
     cc_nursery_abandon_host(n.p);
+}
+
+/* Register leftover, then OPEN → LEFT. UFCS: `n.leave(ctx, finish)`. */
+static inline void !>(CCError) cc_nursery_leave_with(CCNursery n, void* ctx,
+                                                    void (*finish)(void*)) {
+    CCResult_void_CCError r = cc_nursery_on_last(n, ctx, finish);
+    if (!r.ok) return r;
+    cc_nursery_leave1(n);
+    return cc_ok_CCResult_void_CCError();
+}
+
+/* UFCS `n.leave()` / `n.leave(ctx, finish)` and the C twin. */
+#define CC__NURSERY_LEAVE_PICK(_1, _2, _3, NAME, ...) NAME
+#define cc_nursery_leave(...)                                                      \
+    CC__NURSERY_LEAVE_PICK(__VA_ARGS__, cc_nursery_leave_with,                      \
+                           cc__nursery_leave_needs_0_or_2, cc_nursery_leave1)(     \
+        __VA_ARGS__)
+
+/* Alias of `cc_nursery_leave1`. */
+static inline void cc_nursery_abandon(CCNursery n) {
+    cc_nursery_leave1(n);
 }
 
 // Destroy nursery and free task handles (tasks must be finished).
@@ -331,8 +352,8 @@ static inline void cc_nursery_destroy(CCNursery* wrap) {
 }
 
 /* Spawn / spawnhybrid stay leftover overload (closure0 vs async_named vs
- * raw fn-ptr). close_on is prefix-shaped (`cc_nursery_close_on`). Generic
- * `cc_` prefix covers the rest. */
+ * raw fn-ptr). `close` / `leave` are prefix-shaped (`cc_nursery_close`,
+ * `cc_nursery_leave` arity macro). Generic `cc_` prefix covers the rest. */
 @typehooks on CCNursery {
     .create = cc_type_create_overloads("cc_nursery_create", "cc_nursery_spawn_child_closure0"),
     .destroy = cc_type_destroy_call("cc_nursery_destroy"),

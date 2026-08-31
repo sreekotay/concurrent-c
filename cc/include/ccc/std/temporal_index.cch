@@ -15,20 +15,26 @@
  *   if (!ix.init(2, now_ms)) …;
  *   @defer ix.destroy();
  *
- *   ix.set(si, now, key, dies_at);   // dies_at<=now or 0 → del
- *   int64_t when = ix.get(si, key);  // 0 = no TTL
+ *   ix.set(si, now, key, dies_at, user);  // dies_at<=now or 0 → del
+ *   int64_t when = ix.get(si, key);       // 0 = no TTL
  *   ix.del(si, key);
  *
+ *   Key bytes are a view — they must stay live until del / gone. user is
+ *   an optional cookie (Entry*, RedisEntry*, …) handed back to gone.
+ *
  *   n = ix.sweep(si, now, budget, gone, env);
- *   // gone(env, key) runs under the same shard serialisation, before the
- *   // row is dropped. Copy the slice if you stash it.
+ *   // gone(env, key, user) runs under the same shard serialisation, before
+ *   // the row is dropped. key is only valid during the callback.
+ *
+ *   Hold-capped sweep: retire once, then scan in chunks, then refresh.
+ *   sh->retire(now); sh->scan(now, n, gone, env); sh->refresh();
  *
  *   ix.len_at(si) / ix.len_all()
  *   ix.next_due(si)                  // earliest slot end; INT64_MAX if idle
  *
  * Per-cell (when you already have si):
  *   CCTemporalShard* sh = ix.shard(si);
- *   sh->set(now, key, dies_at);
+ *   sh->set(now, key, dies_at, user);
  *
  * Redis later: keep entries[]; replace RedisExpiresMap with this; sweep
  * calls gone → db delete. Do not put no-TTL SET keys here.
@@ -43,7 +49,6 @@
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_result.cch>
 #include <ccc/cc_slice.cch>
-#include <ccc/std/slice_packed.cch>
 #include <ccc/std/array_map.cch>
 
 #ifndef CC_TEMPORAL_MAX_SHARDS
@@ -56,10 +61,11 @@
 static const int64_t cc_temporal_unit_ms[CC_TEMPORAL_LEVELS] = { 100, 1000, 60000 };
 static const int cc_temporal_slots[CC_TEMPORAL_LEVELS] = { 64, 64, 60 };
 
-typedef void (*CCTemporalGone)(void* env, CCSlice key);
+typedef void (*CCTemporalGone)(void* env, CCSlice key, void* user);
 
 typedef struct CCTemporalEnt {
-    CCSlicePacked key;
+    CCSliceHdr key;
+    void* user;
     int64_t dies_at;
     int8_t level;
     uint8_t slot;
@@ -70,8 +76,8 @@ typedef struct CCTemporalEnt {
 
 typedef CCTemporalEnt* CCTemporalRef;
 
-CC_ARRAY_MAP_DECL(CCSlicePacked, CCTemporalRef, CCTemporalTab,
-                  cc_map_hash_slice_packed, cc_map_eq_slice_packed)
+CC_ARRAY_MAP_DECL(CCSliceHdr, CCTemporalRef, CCTemporalTab,
+                  cc_map_hash_slice_hdr, cc_map_eq_slice_hdr)
 
 typedef struct CCTemporalBucket {
     CCTemporalEnt* live_head;
@@ -101,8 +107,12 @@ static inline size_t cc_temporal_gen_l1(void) {
     return 64u * sizeof(CCTemporalEnt) + 4096u;
 }
 
-static inline CCSlicePacked cc_temporal_probe(CCSlicePackedView* view, CCSlice key) {
-    return cc_slice_packed_borrow_slice(view, key);
+static inline CCSliceHdr cc_temporal_hdr(CCSlice key) {
+    return cc_slice_hdr_from_buffer(key.ptr, key.len);
+}
+
+static inline CCSlice cc_temporal_key_slice(const CCTemporalEnt* e) {
+    return cc_slice_hdr_as_slice(&e->key);
 }
 
 static inline void cc_temporal_link(CCTemporalBucket* b, CCTemporalEnt* e) {
@@ -167,19 +177,14 @@ static inline void cc_temporal_rotate(CCTemporalShard* s, int l, int i) {
 }
 
 static inline CCTemporalEnt* cc_temporal_find(CCTemporalShard* s, CCSlice key) {
-    CCSlicePackedView view;
-    CCSlicePacked pk;
     CCTemporalRef* p;
     if (!s || !s->map) return NULL;
-    pk = cc_temporal_probe(&view, key);
-    p = CCTemporalTab_get_ptr(s->map, pk);
+    p = CCTemporalTab_get_ptr(s->map, cc_temporal_hdr(key));
     return p ? *p : NULL;
 }
 
 static inline void cc_temporal_mark_dead(CCTemporalShard* s, CCTemporalEnt* e) {
     CCTemporalBucket* b;
-    CCSlicePackedView view;
-    CCSlicePacked pk;
     size_t bucket = SIZE_MAX;
     size_t di;
     if (!s || !e || e->dead) return;
@@ -189,8 +194,7 @@ static inline void cc_temporal_mark_dead(CCTemporalShard* s, CCTemporalEnt* e) {
         if (b->scan_e == e) b->scan_e = e->live_next;
         cc_temporal_unlink(b, e);
     }
-    pk = cc_temporal_probe(&view, cc_slice_packed_as_slice(&e->key));
-    di = CCTemporalTab_find_dense(s->map, pk, &bucket);
+    di = CCTemporalTab_find_dense(s->map, e->key, &bucket);
     if (di != SIZE_MAX && s->map->dense[di].val == e)
         (void)CCTemporalTab_del_at(s->map, di, bucket);
 }
@@ -223,21 +227,22 @@ static inline bool cc_temporal_slot_for(CCTemporalShard* s, int64_t now, int64_t
 static inline bool cc_temporal_shard_del(CCTemporalShard* s, CCSlice key);
 
 static inline bool cc_temporal_shard_set(CCTemporalShard* s, int64_t now,
-                                        CCSlice key, int64_t dies_at) {
+                                        CCSlice key, int64_t dies_at, void* user) {
     CCTemporalEnt* old;
     CCTemporalEnt* e;
     CCTemporalBucket* b;
-    CCSlice k;
-    CCResult_CCSlicePacked_CCError packed;
+    CCSliceHdr kh;
     int8_t level;
     uint8_t slot;
     if (!s || !s->map) return false;
     if (dies_at <= now) return cc_temporal_shard_del(s, key);
     if (!cc_temporal_slot_for(s, now, dies_at, &level, &slot)) return false;
     b = &s->wheel[level][slot];
+    kh = cc_temporal_hdr(key);
     old = cc_temporal_find(s, key);
     if (old && !old->dead && cc_temporal_bucket_of(s, old) == b) {
         old->dies_at = dies_at;
+        old->user = user;
         return true;
     }
     if (!cc_temporal_ensure_recs(s, b)) return false;
@@ -246,18 +251,14 @@ static inline bool cc_temporal_shard_set(CCTemporalShard* s, int64_t now,
     if (!e) return false;
     memset(e, 0, sizeof(*e));
     e->dead = 1;
-    k = key;
-    packed = cc_slice_to_packed(&k, b->recs);
-    if (!cc_is_ok(packed)) return false;
-    e->key = packed.u.value;
+    e->key = kh;
+    e->user = user;
     e->dies_at = dies_at;
     e->level = level;
     e->slot = slot;
     if (old) {
-        CCSlicePackedView view;
-        CCSlicePacked pk = cc_temporal_probe(&view, key);
         size_t bucket = SIZE_MAX;
-        size_t di = CCTemporalTab_find_dense(s->map, pk, &bucket);
+        size_t di = CCTemporalTab_find_dense(s->map, old->key, &bucket);
         if (di != SIZE_MAX && s->map->dense[di].val == old)
             (void)CCTemporalTab_del_at(s->map, di, bucket);
     }
@@ -320,7 +321,7 @@ static inline size_t cc_temporal_scan(CCTemporalShard* s, int64_t now, size_t bu
                 n++;
                 b->scan_e = nxt;
                 if (e->dies_at <= now || b->end <= now) {
-                    if (gone) gone(env, cc_slice_packed_as_slice(&e->key));
+                    if (gone) gone(env, cc_temporal_key_slice(e), e->user);
                     cc_temporal_mark_dead(s, e);
                 }
                 e = nxt;
@@ -335,6 +336,22 @@ static inline size_t cc_temporal_scan(CCTemporalShard* s, int64_t now, size_t bu
             }
         }
     return n;
+}
+
+static inline void cc_temporal_shard_retire(CCTemporalShard* s, int64_t now) {
+    if (!s || !s->map) return;
+    if (now >= s->next_end) cc_temporal_retire(s, now);
+}
+
+static inline size_t cc_temporal_shard_scan(CCTemporalShard* s, int64_t now,
+                                           size_t budget, CCTemporalGone gone,
+                                           void* env) {
+    if (!s || !s->map || !budget) return 0;
+    return cc_temporal_scan(s, now, budget, gone, env);
+}
+
+static inline void cc_temporal_shard_refresh(CCTemporalShard* s) {
+    if (s && s->ends_dirty) cc_temporal_refresh_next(s);
 }
 
 /* One hold: mark due slots, then spend budget walking them. */
@@ -355,7 +372,7 @@ static inline bool cc_temporal_shard_init(CCTemporalShard* s, int64_t now) {
     memset(s, 0, sizeof(*s));
     s->heap = cc_arena_heap(kilobytes(64));
     if (!cc_arena_valid(s->heap)) return false;
-    s->map = CCTemporalTab_init_count(s->heap, 64);
+    s->map = CCTemporalTab_init_count(s->heap, 256);
     if (!s->map) {
         cc_arena_destroy(&s->heap);
         return false;
@@ -427,9 +444,9 @@ static inline CCTemporalShard* cc_temporal_index_shard(CCTemporalIndex* ix, size
 }
 
 static inline bool cc_temporal_index_set(CCTemporalIndex* ix, size_t si, int64_t now,
-                                        CCSlice key, int64_t dies_at) {
+                                        CCSlice key, int64_t dies_at, void* user) {
     CCTemporalShard* sh = cc_temporal_index_shard(ix, si);
-    return sh && cc_temporal_shard_set(sh, now, key, dies_at);
+    return sh && cc_temporal_shard_set(sh, now, key, dies_at, user);
 }
 
 static inline int64_t cc_temporal_index_get(CCTemporalIndex* ix, size_t si, CCSlice key) {

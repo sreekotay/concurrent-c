@@ -15,7 +15,7 @@ int main(void) {
 
     {
         CCNursery __cc_nursery38 = @create() !> @destroy;
-        (void)__cc_nursery38.close_on(tx_h);
+        (void)__cc_nursery38.close(tx_h);
 
         /* UFCS on typedef aliases inside a spawn; result comes back on a
          * second channel (no T* alias smuggle into the nursery). */

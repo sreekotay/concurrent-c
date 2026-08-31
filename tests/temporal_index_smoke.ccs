@@ -9,7 +9,8 @@ typedef struct GoneEnv {
     char last[32];
 } GoneEnv;
 
-static void on_gone(void* env, CCSlice key) {
+static void on_gone(void* env, CCSlice key, void* user) {
+    (void)user;
     GoneEnv* g = (GoneEnv*)env;
     size_t n = key.len < 31 ? key.len : 31;
     g->n++;
@@ -26,14 +27,14 @@ int main(void) {
     memset(&gone, 0, sizeof gone);
     if (!ix.init(2, now)) return 1;
     if (ix.len_all() != 0) return 2;
-    if (!ix.set(0, now, a, now + 250)) return 3;
+    if (!ix.set(0, now, a, now + 250, NULL)) return 3;
     if (ix.get(0, a) != now + 250) return 4;
     if (ix.get(1, a) != 0) return 5;
     if (ix.len_at(0) != 1) return 6;
-    if (!ix.set(0, now, b, now + 800)) return 7;
+    if (!ix.set(0, now, b, now + 800, NULL)) return 7;
     if (ix.len_all() != 2) return 8;
     /* persist */
-    if (!ix.set(0, now, b, 0)) return 9;
+    if (!ix.set(0, now, b, 0, NULL)) return 9;
     if (ix.get(0, b) != 0) return 10;
     if (ix.len_at(0) != 1) return 11;
     /* not yet due */

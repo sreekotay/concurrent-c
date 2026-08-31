@@ -95,6 +95,21 @@ run_one examples/recipe_unwrap_destroy_forms.ccs \
   "with_default=fallback" \
   "done"
 
+run_one examples/recipe_variant.ccs \
+  "kind=num n=42" \
+  "kind=txt" \
+  "switched=42" \
+  "flag=on" \
+  "fallback=-1" \
+  "required=-1" \
+  "after num=7" \
+  "rearm drops=1" \
+  "incr fresh=5" \
+  "incr hot=42" \
+  "incr parse=101" \
+  "junk kept txt=abc" \
+  "done"
+
 run_one examples/recipe_channel_pipeline.ccs \
   "sum = 6 (expected 6)"
 

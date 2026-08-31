@@ -17,7 +17,7 @@ int main(void) {
 
     {
         CCNursery __cc_nursery94 = @create() !> @destroy;
-        (void)__cc_nursery94.close_on(tx);
+        (void)__cc_nursery94.close(tx);
 
         /* 1 sender, sends 20 messages */
         __cc_nursery94.spawn(() => [tx] {

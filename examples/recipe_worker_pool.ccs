@@ -46,7 +46,7 @@ int main(void) {
         /* Feeder in an inner nursery: its @destroy closes jobs_tx once feeder returns. */
         {
             CCNursery feeder = workers.create_child() !> @destroy;
-            feeder.close_on(jobs_tx) !>;
+            feeder.close(jobs_tx) !>;
 
             feeder.spawn(() => [jobs_tx] {
                 @errhandler(CCError e) cc_error_exit(e);

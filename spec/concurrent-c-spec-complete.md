@@ -241,16 +241,23 @@ extract to their own `.h`; they do not splice into the including unit.
 An impl-grade nested face without an owner `.ccs` is an error — move
 the bodies to an owner `.ccs`, or include the face from that `.ccs`.
 The owner is the same-stem sibling (`foo.cch` → `foo.ccs`), a chapter
-face with that prefix (`piece_tree_rb.cch` → `piece_tree.ccs`), or a
-same-directory face included from an owned face (`workspace.cch`
-includes `ui_types.cch` → `workspace.ccs`). Other units extract decls and
-the owner unit splices the bodies after the extracted parent include so
-names that face defines are in scope. A file-scope function body has one
-definition — the owner TU. File-scope `static` on those functions is
-dropped: the extracted `.h` is an extern declaration, and the owner
-splice is the one external definition. A file-scope data definition
-(`int xs[] = {1,2}`) becomes `extern int xs[];` in the extract; the
-owner splice keeps the initializer. `static` data stays `static`.
+face with that prefix (`piece_tree_rb.cch` → `piece_tree.ccs`), a
+same-directory `.ccs` that includes the chapter (`document.ccs`
+includes `utf8.cch`), or a same-directory face included from an owned
+face (`workspace.cch` includes `ui_types.cch` → `workspace.ccs`). When
+both a `.ccs` include and a face-includer exist, the `.ccs` include is
+the owner. Other units extract decls and the owner unit splices the
+bodies after the extracted parent include so names that face defines
+are in scope. One include in one translation unit is either an
+extracted `#include` of the lowered `.h` or a splice of the chapter
+body, not both. A textual include guard does not apply to a splice.
+A file-scope function body has one definition — the owner TU.
+File-scope `static` on those functions is dropped: the extracted `.h`
+is an extern declaration, and the owner splice is the one external
+definition. A file-scope data definition (`int xs[] = {1,2}`) becomes
+`extern int xs[];` in the extract; the owner splice keeps the
+initializer. `static` data stays `static` in the extract and is not
+repeated in an owner include-graph splice.
 `#ifdef` / `#if` in an extracted face stay
 in the lowered `.h`; an object-like `#define` in this unit before the
 include is host cpp and selects those arms, including function bodies
@@ -3456,11 +3463,26 @@ This section specifies:
 
 ### 8.1 Structured Concurrency with `CCNursery`
 
-A **nursery** is a join set with a handle. Every task is a child of some nursery. `wait` and `@destroy` keep the handle until the set is empty. `abandon` consumes the handle; children may still be running. The join set does not outlive the last child: when the last child is dead the runtime closes registered channels, runs `on_last` if one is registered, and frees the nursery.
+A **nursery** is a join set with a handle. Every task is a child of some nursery.
+
+```
+OPEN ──spawn*──┬── JOINING ── EMPTY ── DEAD     owner stays (wait / @destroy)
+               └── LEFT    ── EMPTY ── DEAD     owner gone (leave)
+```
+
+| Phase | Meaning |
+| --- | --- |
+| OPEN | admit spawn |
+| JOINING | owner waiting |
+| LEFT | handle consumed; children may still run |
+| EMPTY | join set empty: close armed channels; leftover if the path was LEFT |
+| DEAD | freed |
+
+`wait` and `@destroy` keep the handle (OPEN → JOINING → EMPTY → DEAD). `leave` consumes the handle (OPEN → LEFT → EMPTY → DEAD). `close(tx)` arms this nursery's EMPTY to close `tx` on both paths. It is not teardown.
 
 `CCNursery` is a library type. The join form is `a.create_nursery()` (handle in
 the arena; the walk joins). `cc_nursery_create()` is the self-owned malloc form
-(`@destroy` or `abandon`). Nested cancel inheritance is `parent.create_child()`.
+(`@destroy` or `leave`). Nested cancel inheritance is `parent.create_child()`.
 The construction-plus-destruction pattern is idiomatic:
 
 ```c
@@ -3485,8 +3507,8 @@ UFCS on the explicit nursery handle.
 - Child task handles cannot outlive the nursery's scope (compile-time error if they escape).
 - `n.wait()` joins every child and returns the first nonzero child error it
   records; it does not cancel siblings.
-- `n.abandon()` consumes the handle. The caller does not join. The runtime
-  releases the join set after the last child is dead.
+- `n.leave()` consumes the handle (OPEN → LEFT). The caller does not join. The runtime
+  releases the join set after the last child is dead (EMPTY → DEAD).
 - Peer tasks cannot wait on each other (compile-time error).
 
 ---
@@ -3496,7 +3518,7 @@ UFCS on the explicit nursery handle.
 `CCNursery !>(CCError) cc_arena_create_nursery(CCArena a)` (UFCS
 `a.create_nursery()`) births a nursery into a live arena. A null or dead arena
 aborts. `CCNursery !>(CCError) cc_nursery_create(void)` is the self-owned handle
-(`abandon` is allowed). `CCNursery !>(CCError) cc_nursery_create_child(CCNursery parent)`
+(`leave` is allowed). `CCNursery !>(CCError) cc_nursery_create_child(CCNursery parent)`
 (UFCS `parent.create_child()`) snapshots cancel and deadline from a required
 parent handle; an empty parent (null host) aborts.
 
@@ -3531,7 +3553,7 @@ The compiler enforces the following normative rules:
 
 - **Rule (task handle escape):** A task handle returned by `spawn` may not be stored in a variable that outlives the nursery, returned from the enclosing function, or captured in closures escaping the nursery.
 - **Rule (no peer joins):** A child task may not @await or otherwise join another sibling's completion.
-- **Rule (join the set):** The caller joins the set with `@destroy` or `n.wait()`. `n.abandon()` consumes the handle and does not join.
+- **Rule (join the set):** The caller joins the set with `@destroy` or `n.wait()`. `n.leave()` consumes the handle and does not join.
 
 ---
 
@@ -3591,59 +3613,60 @@ for (int w = 0; w < N; w++) inner.spawn(() => worker(tx)) !>;
 // outer's @destroy joins the consumer.
 ```
 
-**Registered close form.** `n.close_on(tx)` is UFCS for
-`cc_nursery_close_on(n, tx)` (same registration as `cc_nursery_add_closing_tx`).
-It registers `tx` to close after nursery
-wait, or on the `abandon` last-exit path, and before nursery storage is released:
+**Registered close form.** `n.close(tx)` is UFCS for
+`cc_nursery_close(n, tx)` (same registration as `cc_nursery_add_closing_tx`).
+It arms this nursery's EMPTY to close `tx` after wait / `@destroy`, or on
+the LEFT path, and before nursery storage is released:
 
 ```c
 CCNursery n = cc_nursery_create() !> @destroy;
-n.close_on(tx) !>;                 // equivalent to @destroy { tx.close(); }
+n.close(tx) !>;                 // equivalent to @destroy { tx.close(); }
 n.spawn(() => producer(tx)) !>;
 ```
 
-An explicit `@destroy { tx.close(); }` body and `close_on(tx)` have the same
+An explicit `@destroy { tx.close(); }` body and `n.close(tx)` have the same
 observable close-after-join placement, but they are distinct lowerings.
 
 `@nursery`, bare `nursery { ... }`, `spawn { ... }`, and `@closing(...)` are
 unsupported spellings and are compile-time errors. Structured concurrency uses
-an explicit `CCNursery` declaration and UFCS `spawn` / `close_on` /
-`on_last` / `abandon` calls.
+an explicit `CCNursery` declaration and UFCS `spawn` / `close` / `leave` calls.
 
 If `CC_NURSERY_CLOSING_RUNTIME_GUARD=1`, a receive that would park in the
 current nursery waiting for a channel registered in that same nursery's
-`close_on` set fails with `EDEADLK`. This immediate specialized guard is
+`close` set fails with `EDEADLK`. This immediate specialized guard is
 optional and is independent of the scheduler's general detector (§8.7.1).
 
 ---
 
-#### 8.1.5 Abandon
+#### 8.1.5 Leave
 
-`n.on_last(ctx, finish)` is UFCS for `cc_nursery_on_last` and registers one
-hook. `n.abandon()` is UFCS for `cc_nursery_abandon` and consumes the
-handle. Extra after-work is `on_last`, registered before `abandon`.
+`n.leave()` is UFCS for `cc_nursery_leave` and consumes the handle
+(OPEN → LEFT). `n.leave(ctx, finish)` registers one leftover that runs at
+EMPTY on the LEFT path only, then leaves. `wait` / `@destroy` never run a
+leftover; the owner writes the next line at EMPTY.
 
 ```c
-n.on_last(q, finish_q);   // optional
-n.abandon();              // always this
+n.leave(q, finish_q);   // leftover at EMPTY on the LEFT path
+n.leave();              // leave with no leftover
 ```
 
-A program uses either `wait` / `@destroy` or `on_last` + `abandon`. Mixing
-them is a programming error (the runtime aborts). After `abandon` the
-handle is invalid: no `wait`, `free`, `spawn`, or `close_on`. Spawn after
-`abandon` fails with `EINVAL`.
+A program uses either `wait` / `@destroy` or `leave`. Mixing them is a
+programming error (the runtime aborts). After `leave` the handle is
+invalid: no `wait`, `free`, `spawn`, or `close`. Spawn after `leave` fails
+with `EINVAL`.
 
-When `alive_count` is already zero, last-exit runs on the caller. When
-children remain, the last child's completion runs last-exit on a scheduler
-worker (the child fiber is already dead). Last-exit closes registered
-channels, runs `on_last` if set, and frees the nursery.
+When `alive_count` is already zero, EMPTY runs on the caller. When children
+remain, the last child's completion runs EMPTY on a scheduler worker (the
+child fiber is already dead). EMPTY closes registered channels, runs leftover
+if the path was LEFT, and frees the nursery (DEAD).
 
-`on_last` does not run on `wait` / `@destroy`. The hook must not `wait`,
-`free`, or `abandon` this nursery. `abandon` is not cancellation; in-flight
-work runs to completion. `abandon` requires worker-frees mode (the default).
-`on_signals` does not compose with `abandon`.
+Leftover does not run on `wait` / `@destroy`. The leftover must not `wait`,
+`free`, or `leave` this nursery. `leave` is not cancellation; in-flight
+work runs to completion. `leave` requires worker-frees mode (the default).
+`on_signals` does not compose with `leave`. Drop a listener with an ordinary
+assignment before `leave`, not as a leftover.
 
-`@destroy` and `abandon` do not compose: `@destroy` waits.
+`@destroy` and `leave` do not compose: `@destroy` waits.
 
 ---
 
@@ -3652,14 +3675,14 @@ work runs to completion. `abandon` requires worker-frees mode (the default).
 A nursery guarantees:
 
 - All spawned children are joined before the nursery's `@destroy` returns.
-- No child outlives the join set. After `abandon`, the handle is invalid;
+- No child outlives the join set. After `leave`, the handle is invalid;
   the set is released after the last child is dead.
 - No forgotten-join deadlocks (impossible syntactically) on the `wait` /
   `@destroy` path.
 - No cyclic peer waits (impossible syntactically).
 - First recorded child error returned by an explicit `n.wait()`.
 - Explicit cooperative cancellation through `n.cancel()`.
-- Deterministic channel close ordering (via `@destroy { ch.close(); }`, or `close_on` from C), including on the `abandon` last-exit path.
+- Deterministic channel close ordering (via `@destroy { ch.close(); }`, or `n.close(tx)`), including on the LEFT path at EMPTY.
 
 A nursery does **not** guarantee:
 
@@ -3667,7 +3690,7 @@ A nursery does **not** guarantee:
 - Fairness or starvation freedom.
 - Immediate cancellation of blocking operations (cooperative; see §8.5).
 - Stack unwinding on cancellation.
-- That `abandon` composes with `on_signals`.
+- That `leave` composes with `on_signals`.
 
 ---
 
@@ -4534,8 +4557,9 @@ intptr_t cc_block_on_intptr(CCTaskIntptr task);
 void cc_nursery_cancel(CCNursery n);
 bool cc_nursery_is_cancelled(const CCNursery n);
 bool cc_cancelled(void);  // current nursery
-int cc_nursery_on_last(CCNursery n, void* ctx, void (*finish)(void*));  // UFCS: n.on_last
-void cc_nursery_abandon(CCNursery n);  // UFCS: n.abandon — consume handle; last-exit frees
+void cc_nursery_leave(CCNursery n);  // UFCS: n.leave() — OPEN → LEFT; EMPTY frees
+CCResult_void_CCError cc_nursery_leave_with(CCNursery n, void* ctx, void (*finish)(void*));  // n.leave(ctx, finish)
+CCResult_void_CCError cc_nursery_close(CCNursery n, CCChanTx tx);  // n.close(tx) — arm EMPTY to close tx
 
 // Deadline cancellation and polling
 void cc_cancel(CCDeadline* d);
@@ -4612,7 +4636,7 @@ cc_block_on(void, producer(tx, 5));  // Hangs forever on 5th send
 
    ```
    error: async: `@closing(...)` is unsupported; use an explicit nursery and
-   `@destroy { chan.close(); }` or `close_on(chan)`
+   `@destroy { chan.close(); }` or `n.close(chan)`
    ```
 
 2. **`cc_block_on` heuristic warning.** `cc_block_on(T, f(...))` where `f` is an `@async` function that performs channel operations inside a loop and is not marked `@nonblocking` produces a warning:
@@ -4625,7 +4649,7 @@ cc_block_on(void, producer(tx, 5));  // Hangs forever on 5th send
 
    This is a heuristic, not a proof. Marking the function `@nonblocking` suppresses the warning; the compiler does not verify the annotation.
 
-There is no general compile-time deadlock analysis. In particular, a consumer that receives inside the nursery that owns a channel's `close_on` compiles cleanly and deadlocks only at runtime; the fix is to move the consumer outside the owning nursery scope.
+There is no general compile-time deadlock analysis. In particular, a consumer that receives inside the nursery that owns a channel's `close` compiles cleanly and deadlocks only at runtime; the fix is to move the consumer outside the owning nursery scope.
 
 #### Runtime detection
 
@@ -4633,7 +4657,7 @@ The scheduler's monitor detects a deadlock when every worker thread is idle and 
 
 - Fibers inside `cc_external_wait_enter/leave` or `cc_deadlock_suppress_enter/leave` scopes are excluded from the verdict; an external wait is not a deadlock.
 - `CC_DEADLOCK_ABORT=0` downgrades the exit to a warning: the dump prints and the (deadlocked) program keeps running, which allows log capture.
-- `CC_NURSERY_CLOSING_RUNTIME_GUARD=1` (opt-in): a recv that would wait forever on a channel whose `close_on` owner is the current nursery fails with `EDEADLK` instead of deadlocking.
+- `CC_NURSERY_CLOSING_RUNTIME_GUARD=1` (opt-in): a recv that would wait forever on a channel whose `close` owner is the current nursery fails with `EDEADLK` instead of deadlocking.
 
 Detection is best-effort: it cannot see deadlocks involving resources outside the runtime (other processes, foreign locks).
 

@@ -134,7 +134,7 @@ What that program uses:
 | `T!>(E)` | Fallible value. `?>` : `E → T`. `!>` : `E →` control flow |
 | `@destroy` | Cleanup on **successful declaration construction** (`!> @destroy` = unwrap succeeded, then defer) |
 | `CCArena` / `CCStdio` | Arena **names** the window’s lifetime; growth/overflow is storage policy — prefer **`io.println(…)`** (see [Arenas](#arenas-name-a-lifetime)) |
-| `CCNursery` | `a.create_nursery()` — handle lives in `a`; arena `@destroy` waits. `abandon` is only for `cc_nursery_create()` |
+| `CCNursery` | `a.create_nursery()` — handle lives in `a`; arena `@destroy` waits. `leave` is only for `cc_nursery_create()` |
 | `n.spawn(() => [io] { … })` | UFCS spawn of a closure; capture `io` by value into the task |
 
 `CCNursery n = a.create_nursery() !>;` is `!>` (unwrap or route `E`).
@@ -142,7 +142,7 @@ There is no `@destroy` on `n` — the handle is a child of `a`. Arena
 `@destroy` walks attached children first (wait/join), then frees slabs.
 That runs when `main` returns, so both tasks finish (A is still asleep)
 before the process exits. The self-owned form is
-`cc_nursery_create() !> @destroy` (or `abandon`).
+`cc_nursery_create() !> @destroy` (or `leave`).
 
 A fuller hello (stdio helpers, per-task `@errhandler`, local-then-default
 errors) is in the repo: [examples/hello.ccs](../examples/hello.ccs).
@@ -230,6 +230,11 @@ CCNursery n = cc_nursery_create() !> @destroy;
 Tasks do not inherit `@errhandler` — re-bind inside each spawn. More:
 [recipe_result_error_handling.ccs](../examples/recipe_result_error_handling.ccs) ·
 [Language Concepts §2](language-concepts.md#2-errors-map-to-a-value-or-to-control-flow).
+
+`@variant` is tagged *data* (one arm always active), not a Result. Construct
+with one designator; project only under `switch` / `kind ==` / `?>` / `!>`;
+a variant `switch` names every arm (`default:` forfeits the check). Recipe:
+[recipe_variant.ccs](../examples/recipe_variant.ccs).
 
 ### UFCS — methods are ordinary functions
 
@@ -399,10 +404,10 @@ worked example (out of tree):
 ### Nurseries
 
 Tasks are scoped to a `CCNursery`. Three births:
-`a.create_nursery()` (handle in `a`; arena `@destroy` waits; no `abandon`),
+`a.create_nursery()` (handle in `a`; arena `@destroy` waits; no `leave`),
 `parent.create_child()` (cancel/deadline snapshot), and
 `cc_nursery_create()` (self-owned malloc). The last two join with
-`@destroy` or `abandon`:
+`@destroy` or `leave`:
 
 ```c
 @errhandler(CCError e) cc_error_exit(e);
@@ -414,10 +419,10 @@ Tasks are scoped to a `CCNursery`. Three births:
 /* both tasks have finished */
 ```
 
-To consume a self-owned handle without joining, register optional
-after-work and abandon (`n.on_last(ctx, finish); n.abandon();`). Last-exit
-closes registered channels, runs the hook, and frees the nursery. That is
-not cancel. Spec §8.1.5.
+To consume a self-owned handle without joining, leave
+(`n.leave(ctx, finish)` or `n.leave()`). EMPTY closes registered channels,
+runs leftover if the path was LEFT, and frees the nursery. That is not
+cancel. Spec §8.1.5.
 
 ### `@parallel`
 
@@ -455,7 +460,7 @@ Spec §8.11.
 
 Typed ends `T[~N >]` (send) and `T[~N <]` (recv). Pair them, send/recv with
 UFCS, and let nested nurseries own the close protocol — consumer outside,
-producer + `close_on(tx)` inside:
+producer + `close(tx)` inside:
 
 ```c
 @errhandler(CCError e) cc_error_exit(e);
@@ -475,7 +480,7 @@ CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
 
     {
         CCNursery inner = outer.create_child() !> @destroy;
-        (void)inner.close_on(tx);
+        (void)inner.close(tx);
 
         inner.spawn(() => [tx] {
             for (int i = 0; i < 5; i++)

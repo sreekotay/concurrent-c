@@ -124,7 +124,7 @@ static double bench_chan_two_fiber_once(void) {
     double start = time_now_ms();
     {
         CCNursery __cc_nursery166 = @create() !> @destroy;
-        (void)__cc_nursery166.close_on(tx_h);
+        (void)__cc_nursery166.close(tx_h);
 
         __cc_nursery166.spawn(() => {
             for (int i = 0; i < g_iterations; i++) {

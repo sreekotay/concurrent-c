@@ -1,7 +1,7 @@
 /*
  * Recipe: Channel Pipeline (Producer/Consumer)
  *
- *   inner { producer }              close_on(tx) — tx closes when producer finishes
+ *   inner { producer }              close(tx) — tx closes when producer finishes
  *   outer { consumer, inner }       consumer sees close → drains → exits
  *
  * Nested nurseries encode the close protocol without any explicit
@@ -39,7 +39,7 @@ int main(void) {
 
         { // inner nursery - parented by outer nursery
             CCNursery inner = outer.create_child() !> @destroy;
-            inner.close_on(tx) !>;
+            inner.close(tx) !>;
 
             inner.spawn(() => [tx] {
                 @errhandler(CCError e) cc_error_exit(e);

@@ -43,7 +43,7 @@ int main(void) {
         /* Workers: receive, process, send result */
         {
             CCNursery __cc_nursery123 = @create() !> @destroy;
-            (void)__cc_nursery123.close_on(done_tx);
+            (void)__cc_nursery123.close(done_tx);
 
             for (int w = 0; w < NUM_WORKERS; w++) {
                 __cc_nursery123.spawn(() => {
@@ -59,7 +59,7 @@ int main(void) {
             /* Producer: fan out work items */
             {
                 CCNursery __cc_nursery122 = @create() !> @destroy;
-                (void)__cc_nursery122.close_on(work_tx);
+                (void)__cc_nursery122.close(work_tx);
 
                 __cc_nursery122.spawn(() => {
                     for (int i = 0; i < NUM_ITEMS; i++) {

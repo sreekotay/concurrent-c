@@ -1,0 +1,15 @@
+#!ccc ccs
+#include "cch_face_chapter.cch"
+#include "cch_face_chapter_face.cch"
+#include <stdio.h>
+
+int main(void) {
+    int v = cch_face_chapter_add(1, 1);
+    int w = cch_face_chapter_face_use();
+    if (v != 4 || w != 5) {
+        printf("v=%d w=%d\n", v, w);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

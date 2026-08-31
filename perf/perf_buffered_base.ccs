@@ -55,7 +55,7 @@ static double run_once(void) {
     double start = time_now_ms();
     {
         CCNursery __cc_nursery164 = @create() !> @destroy;
-        (void)__cc_nursery164.close_on(tx_h);
+        (void)__cc_nursery164.close(tx_h);
 
         __cc_nursery164.spawn(() => {
             for (int i = 0; i < g_iterations; i++) {

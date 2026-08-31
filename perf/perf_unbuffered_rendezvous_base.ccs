@@ -48,7 +48,7 @@ static double run_once(void) {
     double start = time_now_ms();
     {
         CCNursery __cc_nursery172 = @create() !> @destroy;
-        (void)__cc_nursery172.close_on(tx_h);
+        (void)__cc_nursery172.close(tx_h);
 
         for (int p = 0; p < PRODUCERS; p++) {
             (void)p;

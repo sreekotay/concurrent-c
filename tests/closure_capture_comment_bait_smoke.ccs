@@ -23,7 +23,7 @@ int main(void) {
 
         {
             CCNursery __cc_nursery_inner = @create() !> @destroy;
-            (void)__cc_nursery_inner.close_on(tx);
+            (void)__cc_nursery_inner.close(tx);
 
             CCNursery producer = cc_nursery_create() !> @destroy;
             producer.spawn(() => [tx] {

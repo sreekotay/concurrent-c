@@ -1873,6 +1873,7 @@ static void shadow_bind_param_list(const char* params) {
         if (strstr(ps[i].ty, "cc_atomic_int") || strstr(ps[i].ty, "atomic"))
             flags |= SHADOW_BIND_ATOMIC;
         shadow_ginst_need_from_type(ps[i].ty);
+        (void)shadow_restrict_diagnose_unknown_view(ps[i].ty);
         shadow_bind_name(ps[i].name, ps[i].ty, flags);
         shadow_cap_bind_name(ps[i].name, ps[i].ty, flags);
     }
@@ -8131,7 +8132,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         {
             /* Header Result twins (`cc_nursery_spawn_closure0`) are not
              * AST_RESULT_FN. Check the lowered callee, not the method
-             * spelling (`spawn` / `close_on`). */
+             * spelling (`spawn` / `close` / `leave`). */
             const char* strict = getenv("CC_STRICT_RESULT_UNWRAP");
             int on = 1;
             if (strict && (strcmp(strict, "0") == 0 ||

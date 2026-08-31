@@ -33,7 +33,7 @@ static int test_legacy_form(void) {
 
     {
         CCNursery __cc_n = @create() !> @destroy;
-        (void)__cc_n.close_on(tx);
+        (void)__cc_n.close(tx);
         for (int i = 0; i < n; i++) {
             intptr_t v = values[i];
             cc_channel_send_task_hybrid(tx, () => [v] compute(v));
@@ -69,7 +69,7 @@ static int test_ufcs_method_form(void) {
 
     {
         CCNursery __cc_n = @create() !> @destroy;
-        (void)__cc_n.close_on(tx);
+        (void)__cc_n.close(tx);
         for (int i = 0; i < n; i++) {
             intptr_t v = values[i];
             tx.send_task_hybrid(() => [v] compute(v));
@@ -106,7 +106,7 @@ static int test_rich_payload(void) {
 
     {
         CCNursery __cc_n = @create() !> @destroy;
-        (void)__cc_n.close_on(result_tx);
+        (void)__cc_n.close(result_tx);
         for (int i = 0; i < n; i++) {
             int v = values[i];
             result_tx.send_task_hybrid(() => [v] compute_result(v));

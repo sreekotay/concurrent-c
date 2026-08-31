@@ -19,8 +19,8 @@ int main(void) {
     
     {
         CCNursery __cc_nursery96 = @create() !> @destroy;
-        (void)__cc_nursery96.close_on(ping_tx);
-        (void)__cc_nursery96.close_on(pong_tx);
+        (void)__cc_nursery96.close(ping_tx);
+        (void)__cc_nursery96.close(pong_tx);
 
         /* Ping side: send, wait for pong */
         __cc_nursery96.spawn(() => [ping_tx, pong_rx] {

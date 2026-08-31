@@ -151,7 +151,7 @@ int main(void) {
 
         {
             CCNursery producer = consumer.create_child() !> @destroy;
-            (void)producer.close_on(tx_p);
+            (void)producer.close(tx_p);
 
             /* N. single value capture. */
             producer.spawn(() => [tx_p] {

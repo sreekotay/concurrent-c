@@ -1,0 +1,178 @@
+#!ccc ccs
+/*
+ * Recipe: @variant
+ *
+ * A variant is ordinary data alternatives — not T!>(E). One arm is
+ * always active. Name it at construction. Read it only when that arm
+ * is protected (switch / kind== / ?> / !>). The variant is data;
+ * reading an inactive arm is fallible, so the unwrap operators apply
+ * to the projection.
+ *
+ *    1. Declare — one type per arm; void carries no payload
+ *    2. Construct — exactly one designated arm
+ *    3. Switch / kind — every arm; each case dominates its projection.
+ *       `default:` forfeits the check.
+ *    4. ?> / !> on a projection — inactive arm is fallback or leave
+ *    5. Same-arm assign still runs the old destroy chain
+ *    6. Put together — INCR: switch, parse txt, checked add, stay a num
+ *
+ * Packed two-arm niche layout is `@variant(packed)` — same surface,
+ * different representation (spec/draft_variants.md).
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+@variant Cell {
+    txt: CCString;
+    num: int64_t;
+};
+
+@variant Flag {
+    off: void;
+    on:  void;
+    code: int;
+};
+
+typedef struct Held { int n; } Held;
+
+static int g_held_drops = 0;
+
+static void held_destroy(Held* h) {
+    if (!h) return;
+    g_held_drops++;
+}
+
+@typehooks on Held {
+    .destroy = held_destroy,
+};
+
+@variant Slot {
+    held: Held;
+    num: int64_t;
+};
+
+static int64_t require_num(Cell* c) {
+    int64_t v = c->num !> { return -1; };
+    return v;
+}
+
+static int64_t !>(CCError) cell_as_i64(Cell* cell) {
+    switch (cell) {
+        case .num:
+            return cc_ok(cell->num);
+        case .txt: {
+            char[:] sl = cell->txt.as_slice();
+            return sl.to_i64();
+        }
+    }
+    /* No empty arm. Host C does not see the switch is closed. */
+    return cc_err(CC_ERR_INVALID_ARG, "closed switch");
+}
+
+static int64_t !>(CCError) incr(Cell* cell, int64_t delta) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int64_t base = cell_as_i64(cell) !>;
+    int64_t next = cc_add_i64_checked(base, delta) !>;
+    *cell = { .num = next };
+    return cc_ok(next);
+}
+
+static void print_cell(const char* label, Cell* c) {
+    @errhandler(CCError e) { cc_error_log(e); return; }
+    switch (c) {
+        case .num: {
+            int64_t nv = c->num;
+            println(@string(`${label} num=${nv}`, @scratch)) !>;
+            break;
+        }
+        case .txt: {
+            char[:] sl = c->txt.as_slice();
+            println(@string(`${label} txt=${sl}`, @scratch)) !>;
+            break;
+        }
+    }
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+
+    /* 1–2. One arm at construction. `.kind` is read-only. */
+    Cell n = { .num = 42 };
+    Cell t = { .txt = cc_string_from("hello", a) };
+    if (n.kind == .num) {
+        int64_t nv = n.num;
+        println(@string(`kind=num n=${nv}`, @scratch)) !>;
+    }
+    if (t.kind == .txt)
+        println("kind=txt") !>;
+
+    /* 3. Subject-switch. Pointer subject: mutate in place. */
+    Cell* p = &n;
+    switch (p) {
+        case .num: {
+            int64_t nv = p->num;
+            println(@string(`switched=${nv}`, @scratch)) !>;
+            break;
+        }
+        case .txt:
+            println("switched=txt") !>;
+            break;
+    }
+
+    /* Void-arm constructor. */
+    Flag f = { .on = {} };
+    switch (f) {
+        case .off:
+            println("flag=off") !>;
+            break;
+        case .on:
+            println("flag=on") !>;
+            break;
+        case .code: {
+            int code = f.code;
+            println(@string(`flag=${code}`, @scratch)) !>;
+            break;
+        }
+    }
+
+    /* 4. The variant is data; an inactive projection is fallible. */
+    int64_t fb = t.num ?> -1;
+    println(@string(`fallback=${fb}`, @scratch)) !>;
+    println(@string(`required=${require_num(&t)}`, @scratch)) !>;
+
+    t = { .num = 7 };
+    print_cell("after", &t);
+
+    /* 5. Same-arm: new .held still destroys the old one. */
+    Slot s = { .held = { .n = 1 } };
+    s = { .held = { .n = 2 } };
+    if (g_held_drops != 1) return 4;
+    println("rearm drops=1") !>;
+    s = { .num = 0 };
+    if (g_held_drops != 2) return 5;
+
+    /* 6. Fresh num, hot num, then txt that parses. */
+    Cell c = { .num = 0 };
+    int64_t r1 = incr(&c, 5) !>;
+    println(@string(`incr fresh=${r1}`, @scratch)) !>;
+    int64_t r2 = incr(&c, 37) !>;
+    if (r2 != 42) return 2;
+    println(@string(`incr hot=${r2}`, @scratch)) !>;
+
+    Cell legacy = { .txt = cc_string_from("100", a) };
+    int64_t r3 = incr(&legacy, 1) !>;
+    if (r3 != 101) return 3;
+    println(@string(`incr parse=${r3}`, @scratch)) !>;
+
+    Cell junk = { .txt = cc_string_from("abc", a) };
+    incr(&junk, 1) !>(e) {
+        (void)e;
+        if (junk.kind != .txt) return 6;
+        print_cell("junk kept", &junk);
+    };
+
+    println("done") !>;
+    return 0;
+}

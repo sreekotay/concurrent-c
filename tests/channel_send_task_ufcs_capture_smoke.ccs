@@ -13,7 +13,7 @@ int main(void) {
 
         {
             CCNursery __cc_nursery24 = @create() !> @destroy;
-            (void)__cc_nursery24.close_on(tx);
+            (void)__cc_nursery24.close(tx);
 
             CCNursery producer = cc_nursery_create() !> @destroy;
             producer.spawn(() => [tx] {

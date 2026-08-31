@@ -39,7 +39,7 @@ int main(void) {
         /* Senders */
         {
             CCNursery __cc_nursery143 = @create() !> @destroy;
-            (void)__cc_nursery143.close_on(tx);
+            (void)__cc_nursery143.close(tx);
 
             for (int s = 0; s < SENDERS; s++) {
                 int n = MSGS_PER_SENDER;

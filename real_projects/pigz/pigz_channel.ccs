@@ -206,11 +206,11 @@ int compress_file(const char* in_path, const char* out_path) {
             }
         }) !>;
 
-        /* Inner producer: close_on auto-closes results_tx when the producer
+        /* Inner producer: close() auto-closes results_tx when the producer
          * nursery ends, so the consumer sees EOF after draining. */
         {
             CCNursery producer = consumer.create_child() !> @destroy;
-            (void)producer.close_on(results_tx);
+            (void)producer.close(results_tx);
 
             producer.spawn(() => [in_ptr, results_tx] {
                 long seq = 0;

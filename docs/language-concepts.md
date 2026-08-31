@@ -78,6 +78,27 @@ domain error type when the **payload** matters at the boundary; register
 
 ---
 
+## 2a. Data alternatives are `@variant`
+
+[recipe_variant.ccs](../examples/recipe_variant.ccs) · [spec/draft_variants.md](../spec/draft_variants.md)
+
+`T!>(E)` is the function error channel. `@variant` is ordinary tagged data:
+one named arm is always active. Construct with exactly one designator.
+Project only when a `switch` / `kind ==` / `?>` / `!>` protects that arm.
+The variant is data; reading an inactive arm is fallible, so `?>` / `!>`
+apply to the projection. A variant `switch` names every arm; `default:`
+forfeits the check.
+
+```c
+@variant Cell { txt: CCString; num: int64_t; };
+
+Cell c = { .num = 42 };
+int64_t n = c.num ?> 0;
+c = { .txt = cc_string_from("hi", a) };
+```
+
+---
+
 ## 3. Methods are ordinary functions
 
 [recipe_ufcs_forms.ccs](../examples/recipe_ufcs_forms.ccs) · [recipe_user_generics.ccs](../examples/recipe_user_generics.ccs)
@@ -279,7 +300,7 @@ Spawned arms do not inherit `@with_deadline`; they poll `h.cancelled`.
 When several arms share one deadline, name it (`as dl`) and use `dl`,
 or write `@with_deadline(dl)` to make that object current.
 `n.spawn` names a lifetime that may outlive the spawn point (`@destroy`
-waits that nursery; `n.abandon()` consumes the handle without joining).
+waits that nursery; `n.leave()` consumes the handle without joining).
 
 | Form | Meaning |
 |------|---------|

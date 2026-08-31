@@ -1192,7 +1192,7 @@ int main(int argc, char** argv) {
         CCNursery server = cc_nursery_create() !> @destroy;
         /* On cancel, close req_tx so owner_loop's recv returns
          * Ok(false) and the owner exits cleanly. */
-        (void)server.close_on(req_tx);
+        (void)server.close(req_tx);
 
         server.cancel_on_shutdown() !>;
 

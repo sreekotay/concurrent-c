@@ -164,6 +164,66 @@ names and accessors when operators cannot run (plain C, `@emit`, generators).
 
 ---
 
+## `@variant` — data alternatives
+
+Ordinary tagged data — not `T!>(E)`. One arm is always active. Name it at
+construction. Read it only when that arm is protected. Recipe:
+[recipe_variant.ccs](../examples/recipe_variant.ccs) ·
+[spec/draft_variants.md](../spec/draft_variants.md).
+
+```c
+@variant Cell {
+    txt: CCString;
+    num: int64_t;
+};
+
+@variant Flag { off: void; on: void; code: int; };
+
+Cell n = { .num = 42 };
+Cell t = { .txt = cc_string_from("hi", a) };
+Flag f = { .on = {} };
+```
+
+A void arm is `{ .arm = {} }`. `.kind` is read-only. Tags change through construction or whole-variant
+assign, not `v.kind = …`. Assign runs the old arm's destroy chain
+(same-arm too). A
+bare `.arm` resolves from the expected kind type (`if (v.kind == .num)`,
+`case .num:`).
+
+Projection (`v.num` / `p->num`) is legal only when protected:
+
+| Protect | Meaning |
+|---------|---------|
+| `switch (v)` / `switch (p)` + `case .arm:` | each case dominates that arm; every arm (`default:` forfeits the check) |
+| `if (v.kind == .arm)` in the same block | syntactic, not data-flow |
+| `v.arm ?> fallback` | inactive → value of the arm's type |
+| `v.arm !> { … }` | inactive → handler (must diverge) |
+
+```c
+switch (cell) {
+    case .num: cell->num += 1; break;
+    case .txt: use(cell->txt.as_slice()); break;
+}
+
+int64_t n = cell->num ?> 0;
+int64_t req = cell->num !> { return -1; };
+
+cell = { .num = 7 };
+```
+
+The variant is data, not `T!>(E)`. Reading an inactive arm is fallible, so
+`?>` / `!>` apply to the projection: inactive → fallback or leave. A `!>`
+on a Result remains "the call failed".
+
+`@variant(packed)` is at most two arms with a proved niche. Same
+surface; no raw `.u`. Three-plus arms stay on the default layout.
+
+A variant `switch` must name every arm; `default:` forfeits the check.
+Unprotected projection, two arms in one initializer, and writing `.kind`
+or `.u` are compile errors.
+
+---
+
 ## Cleanup: `@defer` / `@destroy` / registration
 
 `@destroy` attaches cleanup to **successful declaration construction** — `@defer`
@@ -362,15 +422,15 @@ Growth failure poisons the `CCString`; it never truncates.
 Nested: `outer.create_child()` parents the inner nursery under `outer`.
 Independent value joins use `@parallel` (next), not a nursery.
 
-To drop the handle without joining, register optional after-work then abandon
-(the handle is consumed; last child frees the nursery):
+To drop the handle without joining, leave (OPEN → LEFT). Optional leftover
+runs at EMPTY on that path only (not on wait / `@destroy`):
 
 ```c
-n.on_last(q, finish_q);   // optional; not run by wait / @destroy
-n.abandon();              // not cancel; in-flight work runs to completion
+n.leave(q, finish_q);   // leftover at EMPTY; not cancel
+n.leave();              // leave with no leftover
 ```
 
-Use either `@destroy` / `wait` or `on_last` + `abandon`, not both. Spec §8.1.5.
+Use either `@destroy` / `wait` or `leave`, not both. Spec §8.1.5.
 
 ---
 
@@ -504,7 +564,7 @@ CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
 
     {
         CCNursery inner = outer.create_child() !> @destroy;
-        (void)inner.close_on(tx);          // close tx when inner joins
+        (void)inner.close(tx);          // arm EMPTY to close tx
         inner.spawn(() => [tx] {
             @errhandler(CCError e) cc_error_exit(e);
             for (int i = 0; i < 5; i++)
@@ -514,7 +574,7 @@ CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
 }
 ```
 
-Consumer outside, producer + `close_on` inside. Full recipe:
+Consumer outside, producer + `close(tx)` inside. Full recipe:
 [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs).
 
 ---
@@ -782,6 +842,7 @@ ccc examples/js/jsdemo.shcc         # CC→JS (guest; Node owns env)
 
 | Pattern | Recipe |
 |---------|--------|
+| `@variant` tagged data | [recipe_variant.ccs](../examples/recipe_variant.ccs) |
 | Walk / dest-bulk buffers | [recipe_walk.ccs](../examples/recipe_walk.ccs) |
 | Owned or view / reopen | [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs) |
 | Worker pool | [recipe_worker_pool.ccs](../examples/recipe_worker_pool.ccs) |
@@ -876,11 +937,14 @@ keep `char[:]` argument wrap and the proto's Result error type from the
 original `.cch`. A quoted interface `.cch` extracts; nested includes
 become their own `.h` (impl-grade nested faces need an owner `.ccs`,
 or a direct include from that `.ccs`). `foo.ccs` owns `foo.cch`,
-`foo_*.cch`, and any same-directory face those files include
-(`workspace.cch` → `ui_types.cch`). Those faces extract as decls in
-every other TU. The owner splices the bodies after the extracted parent
-include. The including TU's `#include "foo.cch"` stays in source
-order so types declared above it are in scope. Nested quoted includes
+`foo_*.cch`, a same-directory `.ccs` that includes the chapter
+(`document.ccs` → `utf8.cch`), and any same-directory face those files
+include (`workspace.cch` → `ui_types.cch`). A `.ccs` include wins over
+a face-includer. Those faces extract as decls in every other TU. One
+include in one TU is extract or splice, not both. The owner splices
+the bodies after the extracted parent include. The including TU's
+`#include "foo.cch"` stays in source order so types declared above it
+are in scope. Nested quoted includes
 inside the extracted face hoist only when that face defines a name this
 face uses, and they land after this face's definitions of names the
 included face uses (`RtxBuf` before `ui_types.h`). A consumer leaf
@@ -892,7 +956,8 @@ stays in this TU; `#ifdef FLAG` inside the extracted `.h` is host cpp,
 including function bodies under that `#ifdef`. File-scope functions in
 a `.cch` live in the owner TU; other TUs see decls. File-scope `static`
 on those functions is dropped so guests link to the owner. A file-scope
-data definition becomes `extern` in the extract; `static` data stays.
+data definition becomes `extern` in the extract; `static` data stays
+in the extract and is not repeated in an owner include-graph splice.
 A pointer type in a declaration (`Tag *name` in a parameter, file-scope
 declarator, or struct field) that the face does not already name as a
 type is not a guessed `typedef struct Tag Tag`; if exactly one

@@ -36,7 +36,7 @@ int main(void) {
 
     {
         CCNursery n = @create() !> @destroy;
-        (void)n.close_on(tx);
+        (void)n.close(tx);
         n.spawn_async(produce(tx, 10)) !>;
         n.spawn_async(produce(tx, 20)) !>;
     }

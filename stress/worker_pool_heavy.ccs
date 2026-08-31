@@ -54,7 +54,7 @@ int main(void) {
         /* Workers + job feeder */
         {
             CCNursery __cc_nursery151 = @create() !> @destroy;
-            (void)__cc_nursery151.close_on(results_tx);
+            (void)__cc_nursery151.close(results_tx);
 
             for (int w = 0; w < NUM_WORKERS; w++) {
                 __cc_nursery151.spawn(() => {
@@ -71,7 +71,7 @@ int main(void) {
             /* Job feeder */
             {
                 CCNursery __cc_nursery150 = @create() !> @destroy;
-                (void)__cc_nursery150.close_on(jobs_tx);
+                (void)__cc_nursery150.close(jobs_tx);
 
                 __cc_nursery150.spawn(() => {
                     for (int i = 0; i < NUM_JOBS; i++) {

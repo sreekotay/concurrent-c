@@ -1,0 +1,20 @@
+/* @typeview(Encode) Fam_alpha* — Fam_alpha is not a type (Fam_alpha1 is). */
+#include <ccc/std/prelude.cch>
+
+typedef struct {
+    int sock;
+    int out_len;
+} Fam_alpha1;
+
+@typeview Encode on Fam_* {
+    r: out_len, write;
+};
+
+static int use1(@typeview(Encode) Fam_alpha* enc) {
+    return enc->write("x");
+}
+
+int main(void) {
+    Fam_alpha1 a = {0};
+    return use1(&a);
+}

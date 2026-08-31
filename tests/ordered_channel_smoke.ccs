@@ -31,7 +31,7 @@ static int test_legacy_ordered_recv(void) {
 
     {
         CCNursery __cc_nursery73 = @create() !> @destroy;
-        (void)__cc_nursery73.close_on(tx);
+        (void)__cc_nursery73.close(tx);
 
         for (int i = 0; i < n; i++) {
             intptr_t v = values[i];
@@ -73,7 +73,7 @@ static int test_typed_ordered_stmt_form(void) {
 
     {
         CCNursery __cc_nursery74 = @create() !> @destroy;
-        (void)__cc_nursery74.close_on(tx);
+        (void)__cc_nursery74.close(tx);
 
         for (int i = 0; i < n; i++) {
             intptr_t v = values[i];
@@ -113,7 +113,7 @@ static int test_typed_ordered_expr_form(void) {
 
     {
         CCNursery __cc_nursery75 = @create() !> @destroy;
-        (void)__cc_nursery75.close_on(tx);
+        (void)__cc_nursery75.close(tx);
 
         for (int i = 0; i < n; i++) {
             intptr_t v = values[i];
@@ -155,7 +155,7 @@ static int test_ordered_result_payload(void) {
 
     {
         CCNursery __cc_nursery76 = @create() !> @destroy;
-        (void)__cc_nursery76.close_on(result_tx);
+        (void)__cc_nursery76.close(result_tx);
 
         for (int i = 0; i < n; i++) {
             int v = values[i];

@@ -15,7 +15,7 @@
  *   clear    retract both bags under one sorted hold (jobs then done)
  *   destroy  give_back queued jobs (do not run), close jobs,
  *            join: wait in-flight getaddrinfo, give_back leftover done, free q
- *            detach: on_last(finish_q) + workers.abandon() — do not wait
+ *            detach: revoke listener, then workers.leave(q, finish_q)
  *
  * getaddrinfo stays blocking. The bags are lists you can retract from.
  * Exclusive acquire_when is the bag wait and await_done (not a channel).
@@ -394,7 +394,7 @@ static int spawn_worker(CCNursery n, CcThrdq *q) {
     return 0;
 }
 
-/* Abandon last-exit: workers are already dead. Do not wait/free the nursery. */
+/* LEFT leftover at EMPTY: workers are already dead. Do not wait/free the nursery. */
 static void finish_q(void *arg) {
     CcThrdq *q = (CcThrdq *)arg;
     JobBag *done;
@@ -641,8 +641,9 @@ static void detach_teardown(CcThrdq *q) {
         finish_q(q);
         return;
     }
-    (void)w.on_last(q, finish_q);
-    w.abandon();
+    q->fn_event = NULL;
+    q->fn_user_data = NULL;
+    w.leave(q, finish_q) !>;
 }
 
 void Curl_thrdq_destroy(struct curl_thrdq *tqueue, bool join) {

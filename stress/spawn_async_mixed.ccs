@@ -44,7 +44,7 @@ int test_consumer_outside(void) {
     /* Producers inside nursery - channel closed when they all finish */
     {
         CCNursery __cc_nursery146 = @create() !> @destroy;
-        (void)__cc_nursery146.close_on(tx);
+        (void)__cc_nursery146.close(tx);
 
         __cc_nursery146.spawn(() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {

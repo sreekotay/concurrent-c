@@ -20,7 +20,7 @@ int main(void) {
 
         {
             CCNursery __cc_nursery6 = @create() !> @destroy;
-            (void)__cc_nursery6.close_on(tx);
+            (void)__cc_nursery6.close(tx);
 
             __cc_nursery6.spawn(() => {
                 for (int i = 0; i < NUM_ITEMS; i++) {

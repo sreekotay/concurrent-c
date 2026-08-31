@@ -6327,6 +6327,91 @@ static int shadow_restrict_emit_named_glob_all(CEmit* out, const char* indent,
     return 1;
 }
 
+static int shadow_ty_has_struct_fields(const char* ty) {
+    size_t i, n;
+    if (!ty || !ty[0] || !shadow_fields_ensure()) return 0;
+    n = ShadowFieldVec_len(&g_shadow_fields);
+    for (i = 0; i < n; i++) {
+        ShadowStructField* f = ShadowFieldVec_get(&g_shadow_fields, i);
+        if (f && f->ty && strcmp(f->ty, ty) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Unknown `@typeview(Mode) Concrete*` — Concrete was never declared.
+ * Returns 1 if it printed (and sets restrict diag). */
+static int shadow_restrict_diagnose_unknown_view(const char* ty) {
+    char spelled[96];
+    char rbase[96];
+    char rmode[64];
+    ShadowRestrict* rr;
+    size_t i, n;
+    int nmatch = 0;
+    if (!ty || !ty[0]) return 0;
+    shadow_restrict_spelled_leaf(ty, spelled, sizeof(spelled));
+    if (!shadow_restrict_split_view(spelled, rbase, sizeof(rbase), rmode,
+                                   sizeof(rmode)))
+        return 0;
+    if (shadow_ty_has_struct_fields(rbase)) return 0;
+    fprintf(stderr,
+            "error: @typeview(%s) %s*: '%s' is not a declared type\n",
+            rmode, rbase, rbase);
+    fprintf(stderr,
+            "note: named views attach to a concrete type, not a family "
+            "prefix\n");
+    rr = shadow_restrict_find_named(rbase, rmode);
+    if (rr && strchr(rr->base, '*') && shadow_fields_ensure()) {
+        fprintf(stderr, "note: @typeview %s on %s matches", rmode, rr->base);
+        n = ShadowFieldVec_len(&g_shadow_fields);
+        for (i = 0; i < n; i++) {
+            size_t j;
+            int dup = 0;
+            ShadowStructField* f = ShadowFieldVec_get(&g_shadow_fields, i);
+            const char* mty;
+            if (!f || !f->ty || !f->ty[0]) continue;
+            mty = f->ty;
+            if (!shadow_restrict_pattern_matches(rr->base, mty)) continue;
+            for (j = 0; j < i; j++) {
+                ShadowStructField* prev = ShadowFieldVec_get(&g_shadow_fields, j);
+                if (prev && prev->ty && strcmp(prev->ty, mty) == 0) {
+                    dup = 1;
+                    break;
+                }
+            }
+            if (dup) continue;
+            if (nmatch == 0)
+                fprintf(stderr, ": %s", mty);
+            else if (nmatch < 6)
+                fprintf(stderr, ", %s", mty);
+            nmatch++;
+        }
+        if (nmatch > 6) fprintf(stderr, ", …");
+        fprintf(stderr, "\n");
+        if (nmatch > 0)
+            fprintf(stderr, "note: write @typeview(%s) <one of those>*\n",
+                    rmode);
+    }
+    g_shadow_restrict_diag = 1;
+    return 1;
+}
+
+/* `Fam_alpha_Restrict_Encode*` → `Fam_alpha (Encode)` for UFCS misses. */
+static void shadow_restrict_pretty_view(const char* ty, char* dst, size_t cap) {
+    char spelled[96];
+    char rbase[96];
+    char rmode[64];
+    if (!dst || !cap) return;
+    dst[0] = 0;
+    if (!ty) return;
+    shadow_restrict_spelled_leaf(ty, spelled, sizeof(spelled));
+    if (shadow_restrict_split_view(spelled, rbase, sizeof(rbase), rmode,
+                                  sizeof(rmode))) {
+        snprintf(dst, cap, "%s (mode %s)", rbase, rmode);
+        return;
+    }
+    snprintf(dst, cap, "%s", spelled[0] ? spelled : ty);
+}
+
 static const char* shadow_td_alias_one(const char* ty) {
     int i;
     if (!ty || !ty[0]) return ty;

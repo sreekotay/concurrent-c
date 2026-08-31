@@ -15114,6 +15114,60 @@ static int cc__cch_text_quotes_basename(const char* src, size_t n, const char* w
     return 0;
 }
 
+/* Same-dir `.ccs` that `#include`s this chapter. Preferred over a
+ * face-includer (`workspace.cch` → `workspace.ccs`) so a chapter
+ * included from a public face is still owned by the `.ccs` that
+ * includes it (`document.ccs` → `utf8.cch`). Several `.ccs` files
+ * may include it; the lexicographically first name is the owner. */
+static int cc__cch_direct_ccs_owner_path(const char* abs_cch, char* out, size_t cap) {
+    char dir[PATH_MAX];
+    char best_name[PATH_MAX];
+    const char* slash;
+    const char* want_base;
+    DIR* dp;
+    struct dirent* de;
+    int have = 0;
+    if (!abs_cch || !out || cap < 5) return 0;
+    slash = strrchr(abs_cch, '/');
+    want_base = slash ? slash + 1 : abs_cch;
+    if (slash) {
+        size_t dlen = (size_t)(slash - abs_cch);
+        if (dlen + 1 >= sizeof(dir)) return 0;
+        memcpy(dir, abs_cch, dlen);
+        dir[dlen] = '\0';
+    } else {
+        memcpy(dir, ".", 2);
+    }
+    best_name[0] = '\0';
+    dp = opendir(dir);
+    if (!dp) return 0;
+    while ((de = readdir(dp)) != NULL) {
+        char peer[PATH_MAX];
+        char* text = NULL;
+        size_t tn = 0;
+        size_t nl;
+        if (!de->d_name[0] || de->d_name[0] == '.') continue;
+        nl = strlen(de->d_name);
+        if (nl < 5 || strcmp(de->d_name + nl - 4, ".ccs") != 0) continue;
+        if (snprintf(peer, sizeof(peer), "%s/%s", dir, de->d_name) >= (int)sizeof(peer))
+            continue;
+        if (cc__read_file_text(peer, &text, &tn) != 0 || !text) {
+            free(text);
+            continue;
+        }
+        if (cc__cch_text_quotes_basename(text, tn, want_base)) {
+            if (!have || strcmp(de->d_name, best_name) < 0) {
+                snprintf(best_name, sizeof(best_name), "%s", de->d_name);
+                have = 1;
+            }
+        }
+        free(text);
+    }
+    closedir(dp);
+    if (!have) return 0;
+    return snprintf(out, cap, "%s/%s", dir, best_name) < (int)cap;
+}
+
 /* `workspace.cch` includes `ui_types.cch` → `workspace.ccs` owns the guest. */
 static int cc__cch_includer_owner_ccs_path(const char* abs_cch, char* out, size_t cap,
                                           int depth) {
@@ -15168,10 +15222,12 @@ static int cc__cch_includer_owner_ccs_path(const char* abs_cch, char* out, size_
     return 0;
 }
 
-/* Owner `.ccs`: same-stem / chapter prefix, else a same-dir face that
- * includes this one and already has an owner (`workspace.cch` → `ui_types.cch`). */
+/* Owner `.ccs`: same-stem / chapter prefix, else a same-dir `.ccs`
+ * that includes this chapter, else a same-dir face that includes this
+ * one and already has an owner (`workspace.cch` → `ui_types.cch`). */
 static int cc__cch_owner_ccs_path(const char* abs_cch, char* out, size_t cap) {
     if (cc__cch_stem_owner_ccs_path(abs_cch, out, cap)) return 1;
+    if (cc__cch_direct_ccs_owner_path(abs_cch, out, cap)) return 1;
     return cc__cch_includer_owner_ccs_path(abs_cch, out, cap, 0);
 }
 
@@ -15517,11 +15573,31 @@ static char* cc__cch_keep_owner_defs(const char* src, size_t n) {
         }
         eq = cc__file_scope_data_eq(src, n, i);
         if (eq) {
-            size_t e = cc__skip_file_scope_item(src, n, i);
-            cc_sb_append(&out, &out_len, &out_cap, src + i, e - i);
-            found = 1;
-            i = e;
-            continue;
+            size_t p = i;
+            int is_static = 0;
+            /* `static` data stays in the extracted `.h`. Pasting it
+             * again here is a second definition: the include guard
+             * was stripped with the rest of the header. */
+            while (p < eq) {
+                if (p + 6 <= n && memcmp(src + p, "static", 6) == 0 &&
+                    (p == 0 || !cc_is_ident_char(src[p - 1])) &&
+                    (p + 6 >= n || !cc_is_ident_char(src[p + 6]))) {
+                    is_static = 1;
+                    break;
+                }
+                p++;
+            }
+            if (is_static) {
+                i = cc__skip_file_scope_item(src, n, i);
+                continue;
+            }
+            {
+                size_t e = cc__skip_file_scope_item(src, n, i);
+                cc_sb_append(&out, &out_len, &out_cap, src + i, e - i);
+                found = 1;
+                i = e;
+                continue;
+            }
         }
         i = cc__skip_file_scope_item(src, n, i);
         if (i == before) i++;
@@ -17666,7 +17742,6 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                  * is not hoisted above the TU declarations. */
                 if (found) {
                     int splice_child = cc__local_cch_is_impl_grade(child_abs);
-                    int ufcs_force_splice = 0;
                     if (!splice_child && g_rewrite_allow_impl_splice) {
                         char* child_src = NULL;
                         size_t child_len = 0;
@@ -17722,26 +17797,12 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                         }
                     }
                     if (splice_child && cc__cch_extract_for_other_tus(child_abs)) {
-                        /* A child that other TUs include still extracts —
-                         * unless that extract keeps member-call UFCS. An
-                         * extracted `.h` is host-cc input; leftover
-                         * `d->len()` is not C. Splice into the parent so
-                         * the parent's Type_meth rewrite can see the site. */
-                        const char* lp = cc__lower_local_cch_header(child_abs);
-                        char* hb = NULL;
-                        size_t hn = 0;
-                        int still_ufcs = 0;
-                        if (g_local_cch_lower_failed) {
-                            free(out);
-                            return NULL;
-                        }
-                        if (lp && cc__read_file_text(lp, &hb, &hn) == 0 && hb)
-                            still_ufcs = cc__lowered_header_needs_ufcs_splice(hb, hn);
-                        free(hb);
-                        if (still_ufcs)
-                            ufcs_force_splice = 1;
-                        else
-                            splice_child = 0;
+                        /* Other TUs extract decls. Leftover member-call
+                         * UFCS in that `.h` is a leftover-UFCS error, not
+                         * a reason to also splice: the include guard
+                         * cannot see an inline, and extract+splice in one
+                         * TU redefines file-scope `static` data. */
+                        splice_child = 0;
                     }
                     if (splice_child) {
                         if (!g_rewrite_allow_impl_splice) {
@@ -17757,20 +17818,6 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                                 g_local_cch_lower_failed = 1;
                                 free(out);
                                 return NULL;
-                            }
-                            if (ufcs_force_splice) {
-                                size_t line_no = 1;
-                                size_t k;
-                                for (k = 0; k < i; k++)
-                                    if (src[k] == '\n') line_no++;
-                                if (cc__splice_impl_cch_into(&out, &out_len,
-                                                             &out_cap, child_abs,
-                                                             current_path,
-                                                             line_no, 0) == 0) {
-                                    changed = 1;
-                                    i = (line_end < n) ? line_end + 1 : line_end;
-                                    continue;
-                                }
                             }
                         } else if (cc__impl_cch_was_spliced(child_abs)) {
                             /* Repeat include: the header's guard would make this

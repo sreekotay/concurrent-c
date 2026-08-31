@@ -159,7 +159,7 @@ static ScanStats scan_chan(const char* path) {
 
     {
         CCNursery n = @create() !> @destroy;
-        (void)n.close_on(tx);
+        (void)n.close(tx);
 
         n.spawn(() => [tx, path] {
             CCFile f;

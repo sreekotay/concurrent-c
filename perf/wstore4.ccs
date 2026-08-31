@@ -1,0 +1,1031 @@
+/*
+ * wstore4.ccs — wstore3 mix, values in ArrayMap, TTL via CCTemporalIndex.
+ *
+ *   Same exclusive + shard domain, same client mix, same print lines as
+ *   wstore3. Entries live in one immortal recs arena (holes until destroy).
+ *   Death times live only in the index; never / no-TTL keys are not set
+ *   there. Sweeper is one hold: ix.sweep → gone deletes the value.
+ *
+ *   ./wstore4 <sec> <sweep 0|1> [theta] [wave] [shards] [clients] [write|get|drain]
+ *   Compare: ./perf/compare_wstore4.sh stand
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/temporal_index.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/cc_sched.cch>
+#include <ccc/cc_exclusive.cch>
+#include <ccc/stdio.cch>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <math.h>
+#include <time.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
+
+#define NEVER_MS  INT64_MAX
+#define MAX_SHARDS 64
+#define MAX_CLIENTS 64
+#define WAVE_HOLD_US 100.0
+#define WAVE_HOLD_SAMPLE 16
+#define HITCH_US     1000.0
+#define KEY_CAP      32
+#define VAL_CAP      128
+#define TRIM_KEYS    1000000
+
+@variant Val {
+    empty:  void;
+    num:    int64_t;
+    bytes:  CCSlice;
+    intern: CCSlice;
+};
+
+typedef struct Get {
+    Val     val;
+    int64_t dies_at;
+    char    copy[VAL_CAP];
+} Get;
+
+enum { E_VAL_EMPTY = 0, E_VAL_NUM, E_VAL_BYTES, E_VAL_INTERN };
+
+typedef struct Entry {
+    char key_buf[KEY_CAP];
+    char val_buf[VAL_CAP];
+    int64_t dies_at;
+    uint8_t key_len;
+    uint8_t val_len;
+    uint8_t kind;
+    uint8_t dead;
+} Entry;
+
+typedef Entry* MapEnt;
+CC_ARRAY_MAP_DECL(CCSliceHdr, MapEnt, WstoreVal, cc_map_hash_slice_hdr,
+                  cc_map_eq_slice_hdr)
+typedef WstoreVal* ShardMap;
+
+typedef struct CCEpochKeys CCEpochKeys;
+
+typedef struct CCEpochShard {
+    int idx;
+    CCEpochKeys* store;
+    CCTemporalShard* ttl;
+    CCArena owner;
+    CCArena recs;
+    CCArena map_arena;
+    ShardMap map;
+    CCExclusiveMutex sweep_mu;
+    CCNursery nursery;
+    double theta;
+    size_t wave_recs;
+    int sweep_on;
+    cc_atomic_int stop;
+    cc_atomic_int sweep_due;
+    size_t drains, drained_recs, dropped, reinserted, rehashes, waves;
+    size_t tombstones, compacts;
+    double wave_max_us, wave_sum_us;
+    double hold_t0;
+    int hold_steps;
+    size_t ops;
+    size_t gets, get_hits;
+    size_t live_bytes;
+    size_t never_n;
+    size_t free_n;
+} CCEpochShard;
+
+typedef struct CCEpochKeys {
+    int nshards;
+    CCEpochShard* shards;
+    CCExclusive excl;
+    CCShardDomain locks;
+    CCTemporalIndex ix;
+} CCEpochKeys;
+
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
+static double now_us(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1e6 + t.tv_nsec / 1e3;
+}
+static int64_t now_ms(void) { return (int64_t)(now_us() / 1000.0); }
+
+static void sweep_arm(CCEpochShard* s) { cc_atomic_store(&s->sweep_due, 1); }
+
+static void sweep_kick(CCEpochShard* s) {
+    sweep_arm(s);
+    CCExclusiveGuard g = s->sweep_mu.acquire();
+    g.signal();
+    g.release();
+}
+
+static CCSlice entry_key(const Entry* e) {
+    return cc_slice_from_buffer((char*)e->key_buf, e->key_len);
+}
+
+static CCSliceHdr entry_key_hdr(const Entry* e) {
+    return cc_slice_hdr_from_buffer((char*)e->key_buf, e->key_len);
+}
+
+static size_t entry_val_live(const Entry* e) {
+    return e->kind == E_VAL_BYTES ? e->val_len : 0;
+}
+
+static Val entry_val(const Entry* e) {
+    switch (e->kind) {
+    case E_VAL_NUM: {
+        int64_t n;
+        memcpy(&n, e->val_buf, sizeof n);
+        return (Val){ .num = n };
+    }
+    case E_VAL_BYTES:
+        return (Val){ .bytes = cc_slice_from_buffer((char*)e->val_buf, e->val_len) };
+    case E_VAL_INTERN: {
+        CCSlice s;
+        memcpy(&s, e->val_buf, sizeof s);
+        return (Val){ .intern = s };
+    }
+    default:
+        return (Val){ .empty = {} };
+    }
+}
+
+static int val_copy_into(Entry* e, Val* v) {
+    switch (v) {
+    case .empty:
+        e->kind = E_VAL_EMPTY;
+        e->val_len = 0;
+        return 1;
+    case .num:
+        e->kind = E_VAL_NUM;
+        e->val_len = 0;
+        memcpy(e->val_buf, &v->num, sizeof(int64_t));
+        return 1;
+    case .intern:
+        e->kind = E_VAL_INTERN;
+        e->val_len = 0;
+        memcpy(e->val_buf, &v->intern, sizeof(CCSlice));
+        return 1;
+    case .bytes:
+        if (v->bytes.len > VAL_CAP) return 0;
+        e->kind = E_VAL_BYTES;
+        e->val_len = (uint8_t)v->bytes.len;
+        if (e->val_len) memmove(e->val_buf, v->bytes.ptr, e->val_len);
+        return 1;
+    }
+}
+
+static int entry_fill(Entry* e, CCSlice key, Val v) {
+    if (key.len > KEY_CAP) return 0;
+    e->key_len = (uint8_t)key.len;
+    if (e->key_len) memcpy(e->key_buf, key.ptr, e->key_len);
+    return val_copy_into(e, &v);
+}
+
+static void get_miss(Get* g) {
+    g->val = (Val){ .empty = {} };
+    g->dies_at = NEVER_MS;
+}
+
+static Entry* map_find(CCEpochShard* s, CCSliceHdr k) {
+    MapEnt* p;
+    if (!s->map) return NULL;
+    p = s->map->get_ptr(k);
+    if (!p || !*p || (*p)->dead) return NULL;
+    return *p;
+}
+
+static bool !>(CCError) map_insert(CCEpochShard* s, Entry* e) {
+    CCSliceHdr kh;
+    size_t bucket = SIZE_MAX;
+    size_t di;
+    Entry* prev = NULL;
+    if (!e || !s->map) return cc_err(CC_ERR_INVALID_ARG, "map insert");
+    kh = entry_key_hdr(e);
+    di = WstoreVal_find_dense(s->map, kh, &bucket);
+    if (di != SIZE_MAX && s->map->dense[di].val != e) {
+        prev = s->map->dense[di].val;
+        WstoreVal_del_at(s->map, di, bucket);
+    }
+    if (s->map->insert(kh, e) != 0) {
+        if (prev) (void)s->map->insert(entry_key_hdr(prev), prev);
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "map insert");
+    }
+    return cc_ok(true);
+}
+
+static void map_drop_if(CCEpochShard* s, Entry* e) {
+    CCSliceHdr kh;
+    size_t bucket = SIZE_MAX;
+    size_t di;
+    if (!s->map || !e) return;
+    kh = entry_key_hdr(e);
+    di = WstoreVal_find_dense(s->map, kh, &bucket);
+    if (di != SIZE_MAX && s->map->dense[di].val == e)
+        WstoreVal_del_at(s->map, di, bucket);
+}
+
+static void note_never(CCEpochShard* s, int64_t old_dies, int64_t new_dies) {
+    int was = old_dies == NEVER_MS;
+    int now = new_dies == NEVER_MS;
+    if (was && !now && s->never_n) s->never_n--;
+    else if (!was && now) s->never_n++;
+}
+
+static void entry_mark_dead(CCEpochShard* s, Entry* e) {
+    size_t n;
+    if (!e || e->dead) return;
+    e->dead = 1;
+    n = e->key_len + entry_val_live(e);
+    if (s->live_bytes >= n) s->live_bytes -= n;
+    else s->live_bytes = 0;
+    if (e->dies_at == NEVER_MS && s->never_n) s->never_n--;
+    s->tombstones++;
+    map_drop_if(s, e);
+    s->free_n++;
+}
+
+static bool ttl_set(CCEpochShard* s, int64_t now, Entry* e, int64_t dies_at) {
+    return s->ttl && e && s->ttl->set(now, entry_key(e), dies_at, e);
+}
+
+static bool ttl_del(CCEpochShard* s, CCSlice key) {
+    return s->ttl && s->ttl->del(key);
+}
+
+static bool cc_epoch_shard_delete(CCEpochShard* s, CCSlice key) {
+    Entry* e = map_find(s, key.hdr());
+    if (!e) return false;
+    (void)ttl_del(s, key);
+    entry_mark_dead(s, e);
+    return true;
+}
+
+static bool !>(CCError) shard_place(CCEpochShard* s, int64_t now, CCSlice key, Val v,
+                                   int64_t dies_at) {
+    Entry* old = map_find(s, key.hdr());
+    Entry* e;
+    size_t n, old_n;
+    int64_t old_dies = 0;
+    if (old) {
+        old_n = entry_val_live(old);
+        old_dies = old->dies_at;
+        if (!val_copy_into(old, &v))
+            return cc_err(CC_ERR_INVALID_ARG, "entry cap");
+        old->dies_at = dies_at;
+        n = entry_val_live(old);
+        if (old_n > n) s->live_bytes -= old_n - n;
+        else s->live_bytes += n - old_n;
+        note_never(s, old_dies, dies_at);
+        if (dies_at == NEVER_MS) {
+            if (old_dies != NEVER_MS) (void)ttl_del(s, entry_key(old));
+        } else if (!ttl_set(s, now, old, dies_at))
+            return cc_err(CC_ERR_OUT_OF_MEMORY, "ttl set");
+        return cc_ok(true);
+    }
+    if (!s->recs.valid())
+        return cc_err(CC_ERR_INVALID_ARG, "recs");
+    e = (Entry*)s->recs.alloc_local_grow(sizeof(Entry), _Alignof(Entry));
+    if (!e) return cc_err(CC_ERR_OUT_OF_MEMORY, "entry");
+    memset(e, 0, sizeof(*e));
+    e->dead = 1;
+    if (!entry_fill(e, key, v))
+        return cc_err(CC_ERR_INVALID_ARG, "entry cap");
+    e->dies_at = dies_at;
+    n = e->key_len + entry_val_live(e);
+    map_insert(s, e) !>(err) { return cc_err(err); };
+    e->dead = 0;
+    s->live_bytes += n;
+    note_never(s, 0, dies_at);
+    if (dies_at != NEVER_MS && !ttl_set(s, now, e, dies_at)) {
+        entry_mark_dead(s, e);
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "ttl set");
+    }
+    return cc_ok(true);
+}
+
+static bool !>(CCError) cc_epoch_shard_put(CCEpochShard* s, CCSlice key, Val v) {
+    return shard_place(s, now_ms(), key, v, NEVER_MS);
+}
+
+static bool !>(CCError) cc_epoch_shard_put_expires(CCEpochShard* s, int64_t now, CCSlice key,
+                                                 Val v, int64_t dies_at) {
+    if (dies_at <= now) {
+        cc_epoch_shard_delete(s, key);
+        return cc_ok(true);
+    }
+    return shard_place(s, now, key, v, dies_at);
+}
+
+static bool !>(CCError) cc_epoch_shard_expire(CCEpochShard* s, int64_t now, CCSlice key,
+                                            int64_t dies_at) {
+    Entry* old = map_find(s, key.hdr());
+    if (!old) return cc_ok(false);
+    if (dies_at <= now) {
+        cc_epoch_shard_delete(s, key);
+        return cc_ok(true);
+    }
+    note_never(s, old->dies_at, dies_at);
+    old->dies_at = dies_at;
+    if (!ttl_set(s, now, old, dies_at))
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "ttl set");
+    return cc_ok(true);
+}
+
+static bool !>(CCError) cc_epoch_shard_persist(CCEpochShard* s, CCSlice key) {
+    Entry* old = map_find(s, key.hdr());
+    if (!old) return cc_ok(false);
+    if (old->dies_at == NEVER_MS) return cc_ok(true);
+    note_never(s, old->dies_at, NEVER_MS);
+    old->dies_at = NEVER_MS;
+    (void)ttl_del(s, key);
+    return cc_ok(true);
+}
+
+static Entry* cc_epoch_shard_get(CCEpochShard* s, CCSlice key) {
+    Entry* e = map_find(s, key.hdr());
+    s->gets++;
+    if (e) s->get_hits++;
+    return e;
+}
+
+static void expire_gone(void* env, CCSlice key, void* user) {
+    CCEpochShard* s = (CCEpochShard*)env;
+    Entry* e = (Entry*)user;
+    (void)key;
+    if (!e) e = map_find(s, key.hdr());
+    if (!e || e->dead) return;
+    entry_mark_dead(s, e);
+    s->dropped++;
+}
+
+static void note_hold(CCEpochShard* s, const char* verb, double us, size_t n) {
+    @errhandler(CCError e) cc_error_exit(e);
+    s->waves++;
+    s->wave_sum_us += us;
+    if (us > s->wave_max_us) s->wave_max_us = us;
+    if (us >= HITCH_US)
+        println(@string(`# hitch shard=${s->idx} verb=${verb} us=${us} n=${n}`, @scratch)) !>;
+}
+
+static int sweep_due_pred(void* env) {
+    CCEpochShard* s = (CCEpochShard*)env;
+    return cc_atomic_load(&s->sweep_due) || cc_atomic_load(&s->stop);
+}
+
+static int64_t shard_next_due(CCEpochShard* s) {
+    return s->ttl ? s->ttl->next_due() : INT64_MAX;
+}
+
+static size_t shard_ttl_n(CCEpochShard* s) {
+    return s->ttl ? s->ttl->len() : 0;
+}
+
+/* Retire once, then 16-rec scans; clock every chunk, stop at WAVE_HOLD_US. */
+static size_t sweep_held(CCEpochShard* s, int64_t now) {
+    size_t n = 0;
+    if (!s->ttl) return 0;
+    s->ttl->retire(now);
+    while (n < s->wave_recs) {
+        size_t chunk = WAVE_HOLD_SAMPLE;
+        size_t got;
+        if (chunk > s->wave_recs - n) chunk = s->wave_recs - n;
+        got = s->ttl->scan(now, chunk, expire_gone, s);
+        n += got;
+        s->hold_steps += (int)got;
+        if (got < chunk) break;
+        if ((now_us() - s->hold_t0) >= WAVE_HOLD_US) break;
+    }
+    s->ttl->refresh();
+    return n;
+}
+
+static void !>(CCError) sweep_wave(CCEpochShard* s) {
+    double us;
+    size_t n;
+    int64_t now;
+    CCShardHold hold = s->store->locks.hold_one((uint64_t)s->idx);
+    @defer hold.release();
+    if (!hold.held()) return cc_err(CC_ERR_INVALID_ARG, "shard hold");
+    s->hold_t0 = now_us();
+    s->hold_steps = 0;
+    now = now_ms();
+    cc_atomic_store(&s->sweep_due, 0);
+    n = sweep_held(s, now);
+    s->drained_recs += n;
+    if (n) s->drains++;
+    us = now_us() - s->hold_t0;
+    if (n) note_hold(s, "expire", us, n);
+    if (n == s->wave_recs || now_ms() >= shard_next_due(s)) sweep_arm(s);
+    return cc_ok();
+}
+
+static void sweeper(CCEpochShard* s) {
+    @errhandler(CCError e) { cc_error_log(e); return; }
+    while (!cc_atomic_load(&s->stop)) {
+        int64_t wait = shard_next_due(s) - now_ms();
+        CCDeadline dl;
+        CCDeadline* prev;
+        CCExclusiveGuard !>(CCError) r;
+        if (wait < 1) wait = 1;
+        dl = cc_deadline_after_ms((uint64_t)wait);
+        prev = cc_deadline_push(&dl);
+        r = s->sweep_mu.acquire_when(sweep_due_pred, s);
+        cc_deadline_pop(prev);
+        if (cc_is_err(r)) {
+            if (r.u.error.kind != CC_ERR_TIMEOUT) return;
+        } else {
+            CCExclusiveGuard hold = r.u.value;
+            hold.release();
+        }
+        if (cc_atomic_load(&s->stop)) return;
+        sweep_wave(s) !>;
+        if (cc_atomic_load(&s->stop)) return;
+    }
+}
+
+static bool !>(CCError) shard_init(CCEpochShard* s, int idx, double theta, size_t wave_recs,
+                                  int sweep_on, CCExclusive excl) {
+    @errhandler(CCError e) { return cc_err(e); }
+    memset(s, 0, sizeof(*s));
+    s->idx = idx;
+    s->owner = cc_arena_heap(kilobytes(256));
+    if (!s->owner.valid()) return cc_err(CC_ERR_OUT_OF_MEMORY, "owner");
+    s->sweep_mu = excl.mutex((uint64_t)MAX_SHARDS + (uint64_t)idx);
+    s->theta = theta;
+    s->wave_recs = wave_recs;
+    s->sweep_on = sweep_on;
+    s->map_arena = s->owner.create_arena(0) !>;
+    s->map = WstoreVal_init_count(s->map_arena, 256);
+    if (!s->map) return cc_err(CC_ERR_OUT_OF_MEMORY, "map");
+    s->recs = s->owner.create_heap_arena(64u * sizeof(Entry) + 4096u) !>;
+    return cc_ok(true);
+}
+
+static void shard_free(CCEpochShard* s) {
+    s->owner.destroy();
+}
+
+static size_t shard_keys(CCEpochShard* s) {
+    return s->map ? s->map->len() : 0;
+}
+
+static size_t shard_live_entries(const CCEpochShard* s) {
+    return s->map ? s->map->len() : 0;
+}
+
+static size_t shard_ix_commit(const CCEpochShard* s) {
+    CCTemporalShard* ts;
+    size_t t = 0;
+    int l, i;
+    ts = s->ttl;
+    if (!ts) return 0;
+    if (cc_arena_valid(ts->heap))
+        t += cc_arena_committed_gross_bytes(ts->heap);
+    for (l = 0; l < CC_TEMPORAL_LEVELS; l++)
+        for (i = 0; i < cc_temporal_slots[l]; i++)
+            if (cc_arena_valid(ts->wheel[l][i].recs))
+                t += cc_arena_committed_gross_bytes(ts->wheel[l][i].recs);
+    return t;
+}
+
+static size_t shard_recs_commit(const CCEpochShard* s) {
+    size_t t = 0;
+    if (s->recs.valid())
+        t += cc_arena_committed_gross_bytes(s->recs);
+    t += shard_ix_commit(s);
+    return t;
+}
+
+static size_t shard_committed(CCEpochShard* s) {
+    size_t t = cc_arena_committed_gross_bytes(s->owner);
+    t += shard_recs_commit(s);
+    t += cc_arena_committed_gross_bytes(s->map_arena);
+    return t;
+}
+
+static size_t shard_epochs_live(const CCEpochShard* s) {
+    CCTemporalShard* ts;
+    size_t n = s->never_n ? 1u : 0u;
+    int l, i;
+    ts = s->ttl;
+    if (!ts) return n;
+    for (l = 0; l < CC_TEMPORAL_LEVELS; l++)
+        for (i = 0; i < cc_temporal_slots[l]; i++)
+            if (ts->wheel[l][i].live_n) n++;
+    return n;
+}
+
+static size_t shard_logical(CCEpochShard* s) {
+    return s->live_bytes;
+}
+
+static void shard_never_bytes(const CCEpochShard* s, size_t* live, size_t* dead) {
+    *live = s->never_n;
+    *dead = s->free_n;
+}
+
+static size_t find_trim_i(CCEpochShard* s, int ttl_only) {
+    size_t i, n;
+    if (!s->map) return SIZE_MAX;
+    n = s->map->len();
+    for (i = n; i > 0; ) {
+        Entry* e;
+        i--;
+        e = s->map->dense[i].val;
+        if (!e || e->dead) continue;
+        if (ttl_only && e->dies_at == NEVER_MS) continue;
+        return i;
+    }
+    return SIZE_MAX;
+}
+
+static size_t shard_trim(CCEpochShard* s, size_t want) {
+    size_t n = 0;
+    int pass;
+    for (pass = 0; pass < 2 && n < want; pass++) {
+        int ttl_only = pass == 0;
+        while (n < want) {
+            size_t i = find_trim_i(s, ttl_only);
+            Entry* e;
+            if (i == SIZE_MAX) break;
+            e = s->map->dense[i].val;
+            if (!e) break;
+            (void)ttl_del(s, entry_key(e));
+            entry_mark_dead(s, e);
+            n++;
+        }
+    }
+    return n;
+}
+
+static void store_trim(CCEpochKeys* st, size_t target) {
+    size_t live = 0, need;
+    int i;
+    for (i = 0; i < st->nshards; i++) {
+        CCShardHold hold = st->locks.hold_one((uint64_t)i);
+        live += shard_live_entries(&st->shards[i]);
+        hold.release();
+    }
+    if (live <= target) return;
+    need = live - target;
+    for (i = 0; i < st->nshards && need; i++) {
+        CCShardHold hold = st->locks.hold_one((uint64_t)i);
+        size_t have = shard_live_entries(&st->shards[i]);
+        size_t take = need < have ? need : have;
+        need -= shard_trim(&st->shards[i], take);
+        hold.release();
+    }
+}
+
+static void store_counts(CCEpochKeys* st, size_t* live, size_t* mapn) {
+    int i;
+    *live = 0;
+    *mapn = 0;
+    for (i = 0; i < st->nshards; i++) {
+        CCShardHold hold = st->locks.hold_one((uint64_t)i);
+        *live += shard_live_entries(&st->shards[i]);
+        *mapn += shard_keys(&st->shards[i]);
+        hold.release();
+    }
+}
+
+static uint64_t key_hash(CCSlice k) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (b in k) {
+        h ^= (uint8_t)b;
+        h *= 0x100000001b3ull;
+    }
+    return h;
+}
+
+static uint64_t shard_si(CCEpochKeys* st, CCSlice key) {
+    return key_hash(key) % (uint64_t)st->nshards;
+}
+
+static bool !>(CCError) cc_epoch_keys_put(CCEpochKeys* st, CCSlice key, Val v) {
+    uint64_t si = shard_si(st, key);
+    CCShardHold hold = st->locks.hold_one(si);
+    @defer hold.release();
+    if (!hold.held()) return cc_err(CC_ERR_INVALID_ARG, "shard hold");
+    return cc_epoch_shard_put(&st->shards[si], key, v);
+}
+
+static bool !>(CCError) cc_epoch_keys_put_expires(CCEpochKeys* st, int64_t now, CCSlice key,
+                                                Val v, int64_t dies_at) {
+    uint64_t si = shard_si(st, key);
+    CCShardHold hold = st->locks.hold_one(si);
+    @defer hold.release();
+    if (!hold.held()) return cc_err(CC_ERR_INVALID_ARG, "shard hold");
+    return cc_epoch_shard_put_expires(&st->shards[si], now, key, v, dies_at);
+}
+
+static bool !>(CCError) cc_epoch_keys_expire(CCEpochKeys* st, int64_t now, CCSlice key,
+                                           int64_t dies_at) {
+    uint64_t si = shard_si(st, key);
+    CCShardHold hold = st->locks.hold_one(si);
+    @defer hold.release();
+    if (!hold.held()) return cc_err(CC_ERR_INVALID_ARG, "shard hold");
+    return cc_epoch_shard_expire(&st->shards[si], now, key, dies_at);
+}
+
+static bool !>(CCError) cc_epoch_keys_persist(CCEpochKeys* st, CCSlice key) {
+    uint64_t si = shard_si(st, key);
+    CCShardHold hold = st->locks.hold_one(si);
+    @defer hold.release();
+    if (!hold.held()) return cc_err(CC_ERR_INVALID_ARG, "shard hold");
+    return cc_epoch_shard_persist(&st->shards[si], key);
+}
+
+static bool cc_epoch_keys_delete(CCEpochKeys* st, CCSlice key) {
+    uint64_t si = shard_si(st, key);
+    CCShardHold hold = st->locks.hold_one(si);
+    @defer hold.release();
+    if (!hold.held()) return false;
+    return cc_epoch_shard_delete(&st->shards[si], key);
+}
+
+static void cc_epoch_keys_get(CCEpochKeys* st, CCSlice key, Get* out) {
+    uint64_t si = shard_si(st, key);
+    CCShardHold hold = st->locks.hold_one(si);
+    Entry* e;
+    @defer hold.release();
+    if (!hold.held()) { get_miss(out); return; }
+    e = cc_epoch_shard_get(&st->shards[si], key);
+    if (!e) { get_miss(out); return; }
+    out->val = entry_val(e);
+    out->dies_at = e->dies_at;
+}
+
+static size_t rss_kib(void) {
+#ifdef __APPLE__
+    struct mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  (task_info_t)&info, &count) != KERN_SUCCESS)
+        return SIZE_MAX;
+    return (size_t)(info.resident_size / 1024);
+#else
+    FILE* f = fopen("/proc/self/status", "r");
+    char line[256];
+    size_t v = 0;
+    if (!f) return SIZE_MAX;
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, "VmRSS: %zu", &v) == 1) break;
+    fclose(f);
+    return v ? v : SIZE_MAX;
+#endif
+}
+
+static void print_mem(CCEpochKeys* st, const char* when) {
+    @errhandler(CCError e) cc_error_exit(e);
+    size_t commit = 0, epochs = 0, live = 0, mapn = 0;
+    size_t rss;
+    for (int i = 0; i < st->nshards; i++) {
+        CCEpochShard* s = &st->shards[i];
+        CCShardHold hold = st->locks.hold_one((uint64_t)i);
+        commit += shard_committed(s);
+        epochs += shard_epochs_live(s);
+        live += shard_live_entries(s);
+        mapn += shard_keys(s);
+        hold.release();
+    }
+    rss = rss_kib();
+    if (rss == SIZE_MAX)
+        println(@string(`# mem: ${when} commit_KiB=${commit / 1024} rss_KiB=? epochs=${epochs} live_n=${live} map_n=${mapn}`, @scratch)) !>;
+    else
+        println(@string(`# mem: ${when} commit_KiB=${commit / 1024} rss_KiB=${rss} epochs=${epochs} live_n=${live} map_n=${mapn}`, @scratch)) !>;
+    fflush(stdout);
+}
+
+#define NEVER_POOL 20000
+#define RECENT 8192
+
+typedef struct Client {
+    CCEpochKeys* st;
+    int id;
+    int nclients;
+    int mix_get;
+    int mix_drain;
+    uint64_t rng;
+    double t_start;
+    double t_end;
+    long ops;
+    char recent[RECENT][32];
+    size_t recent_n;
+} Client;
+
+static uint64_t rnd(Client* c) {
+    c->rng ^= c->rng << 13;
+    c->rng ^= c->rng >> 7;
+    c->rng ^= c->rng << 17;
+    return c->rng;
+}
+static double rndf(Client* c) { return (double)(rnd(c) >> 11) / 9007199254740992.0; }
+
+static CCSlice recent_at(Client* c) {
+    const char* k = c->recent[rnd(c) % (c->recent_n < RECENT ? c->recent_n : RECENT)];
+    size_t n = 0;
+    while (k[n]) n++;
+    return cc_slice_from_buffer((char*)k, n);
+}
+
+static void remember_key(Client* c, CCSlice kb) {
+    char* dst = c->recent[c->recent_n % RECENT];
+    size_t n = kb.len < 31 ? kb.len : 31;
+    if (n) memcpy(dst, kb.ptr, n);
+    dst[n] = 0;
+    c->recent_n++;
+}
+
+static void client(Client* c) {
+    @errhandler(CCError e) { cc_error_log(e); return; }
+    CCEpochKeys* st = c->st;
+    char val[128];
+    long seq = 0;
+    double p_ttl = c->mix_get ? 0.20 : 0.55;
+    double p_never = c->mix_get ? 0.25 : 0.70;
+    double p_del = c->mix_get ? 0.30 : 0.85;
+    memset(val, 'v', sizeof val);
+    for (long i = 0; ; i++) {
+        double t = now_us();
+        int64_t now;
+        double r;
+        CCEpochShard* s;
+        CCSlice kb;
+        if (t >= c->t_end) break;
+        if (c->mix_drain && t >= c->t_start + (c->t_end - c->t_start) * 0.10)
+            return;
+        now = (int64_t)(t / 1000.0);
+        r = rndf(c);
+        {
+            CCShardHold hold;
+            uint64_t si;
+            if (c->mix_drain) {
+                if (c->nclients == 1) kb = @string(`e:${seq}`);
+                else kb = @string(`e:${c->id}:${seq}`);
+                seq++;
+                si = shard_si(st, kb);
+                s = &st->shards[si];
+                hold = st->locks.hold_one(si);
+                @defer hold.release();
+                if (!hold.held()) return;
+                s->ops++;
+                {
+                    Val v = { .bytes = cc_slice_from_buffer(val, 96) };
+                    s->put_expires(now, kb, v, now + 200) !>;
+                }
+                c->ops++;
+                continue;
+            } else if (r < p_ttl) {
+                if (c->nclients == 1) kb = @string(`e:${seq}`);
+                else kb = @string(`e:${c->id}:${seq}`);
+                seq++;
+            } else if (r < p_never) {
+                long id = (long)(NEVER_POOL * pow(rndf(c), 3.0));
+                kb = @string(`n:${id}`);
+            } else if (r < p_del) {
+                if ((rnd(c) & 1) && c->recent_n) kb = recent_at(c);
+                else {
+                    long id = (long)(NEVER_POOL * pow(rndf(c), 3.0));
+                    kb = @string(`n:${id}`);
+                }
+            } else {
+                if (c->mix_get && c->recent_n && (rnd(c) & 3) == 0)
+                    kb = recent_at(c);
+                else {
+                    long id = (long)(NEVER_POOL * rndf(c));
+                    kb = @string(`n:${id}`);
+                }
+            }
+            si = shard_si(st, kb);
+            s = &st->shards[si];
+            hold = st->locks.hold_one(si);
+            @defer hold.release();
+            if (!hold.held()) return;
+            s->ops++;
+            if (r >= p_del) {
+                (void)s->get(kb);
+            } else if (r < p_ttl) {
+                int64_t dies = now + (int64_t)(50.0 * pow(400.0, rndf(c)));
+                Val v = { .bytes = cc_slice_from_buffer(val, 96) };
+                s->put_expires(now, kb, v, dies) !>;
+                remember_key(c, kb);
+            } else if (r < p_never) {
+                Val v = { .bytes = cc_slice_from_buffer(val, 96) };
+                s->put(kb, v) !>;
+            } else {
+                s->delete(kb);
+            }
+        }
+        c->ops++;
+    }
+}
+
+static void !>(CCError) preload_never(CCEpochKeys* st) {
+    char val[128];
+    Val v;
+    memset(val, 'v', sizeof val);
+    v = (Val){ .bytes = cc_slice_from_buffer(val, 96) };
+    for (long id = 0; id < NEVER_POOL; id++) {
+        CCSlice k = @string(`n:${id}`);
+        uint64_t si = shard_si(st, k);
+        CCEpochShard* s = &st->shards[si];
+        CCShardHold hold = st->locks.hold_one(si);
+        if (!hold.held()) return cc_err(CC_ERR_INVALID_ARG, "shard hold");
+        s->put(k, v) !>(err) { hold.release(); return cc_err(err); };
+        hold.release();
+    }
+    return cc_ok();
+}
+
+typedef struct Reporter {
+    CCEpochKeys* st;
+    double t_start;
+    double t_end;
+    size_t* nworkers;
+} Reporter;
+
+static void reporter(Reporter* rp) {
+    @errhandler(CCError e) cc_error_exit(e);
+    CCEpochKeys* st = rp->st;
+    println("#      t_s      keys logical_KiB commit_KiB rss_KiB drains dropped reinsert  waves rehash      ops") !>;
+    for (;;) {
+        size_t keys = 0, logical = 0, committed = 0;
+        size_t drains = 0, dropped = 0, reins = 0, waves = 0, rehash = 0, ops = 0;
+        cc_sleep_ms(1000);
+        if (now_us() >= rp->t_end) {
+            if (rp->nworkers) *rp->nworkers = cc_sched_get_num_workers();
+            return;
+        }
+        for (int i = 0; i < st->nshards; i++) {
+            CCEpochShard* s = &st->shards[i];
+            CCShardHold hold = st->locks.hold_one((uint64_t)i);
+            if (!hold.held()) continue;
+            keys += shard_keys(s);
+            logical += shard_logical(s);
+            committed += shard_committed(s);
+            drains += s->drains;
+            dropped += s->dropped;
+            reins += s->reinserted;
+            waves += s->waves;
+            rehash += s->rehashes;
+            ops += s->ops;
+            hold.release();
+        }
+        {
+            size_t rss = rss_kib();
+            CCString rss_str = rss == SIZE_MAX
+                ? @string(`?`, @scratch)
+                : @string(`${rss}`, @scratch);
+            println(@string(`  ${(now_us() - rp->t_start) / 1e6} ${keys} ${logical / 1024} ${committed / 1024} ${rss_str} ${drains} ${dropped} ${reins} ${waves} ${rehash} ${ops}`, @scratch)) !>;
+            fflush(stdout);
+        }
+    }
+}
+
+int main(int argc, char** argv) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    double seconds = argc > 1 ? atof(argv[1]) : 20;
+    int sweep = argc > 2 ? atoi(argv[2]) : 1;
+    double theta = argc > 3 ? atof(argv[3]) : 0.35;
+    size_t wave = argc > 4 ? (size_t)atol(argv[4]) : 512;
+    int nshards = argc > 5 ? atoi(argv[5]) : 1;
+    int nclients = argc > 6 ? atoi(argv[6]) : 1;
+    int mix_get = 0;
+    int mix_drain = 0;
+    size_t nworkers = 0;
+    static CCEpochShard shards[MAX_SHARDS];
+    static Client clients[MAX_CLIENTS];
+    static CCEpochKeys st;
+    static Reporter rp;
+    if (nshards < 1) nshards = 1;
+    if (nshards > MAX_SHARDS) nshards = MAX_SHARDS;
+    if (nclients < 1) nclients = 1;
+    if (nclients > MAX_CLIENTS) nclients = MAX_CLIENTS;
+    if (argc > 7) {
+        if (strcmp(argv[7], "get") == 0) mix_get = 1;
+        else if (strcmp(argv[7], "drain") == 0) mix_drain = 1;
+        else if (strcmp(argv[7], "write") != 0) {
+            eprintln("mix must be write, get, or drain") !>;
+            return 1;
+        }
+    }
+
+    st.nshards = nshards;
+    st.shards = shards;
+    CCArena excl_arena = cc_arena_heap(kilobytes(64));
+    @defer excl_arena.destroy();
+    if (!excl_arena.valid()) return 1;
+    CCExclusive excl = cc_exclusive_create(excl_arena, (size_t)MAX_SHARDS * 2u) !> @destroy;
+    st.excl = excl;
+    st.locks = cc_shard_domain(excl, cc_shard_mask_ceil((size_t)nshards, MAX_SHARDS));
+    if (!cc_temporal_index_init(&st.ix, (size_t)nshards, now_ms())) return 1;
+    @defer cc_temporal_index_destroy(&st.ix);
+    for (int i = 0; i < nshards; i++) {
+        shard_init(&shards[i], i, theta, wave, sweep, excl) !>;
+        shards[i].store = &st;
+        shards[i].ttl = cc_temporal_index_shard(&st.ix, (size_t)i);
+        if (!shards[i].ttl) return 1;
+    }
+    @defer { for (int i = 0; i < nshards; i++) shard_free(&shards[i]); }
+
+    println(@string(`# wstore4 CCEpochKeys seconds=${seconds} sweep=${sweep} mix=${mix_drain ? "drain" : (mix_get ? "get" : "write")} theta=${theta} wave_recs=${wave} shards=${nshards} clients=${nclients} temporal_index=1 wheel=100ms x64, 1s x64, 60s x60`, @scratch)) !>;
+    print_mem(&st, "idle");
+    if (mix_get) preload_never(&st) !>;
+
+    {
+        double t0 = now_us();
+        rp.st = &st;
+        rp.t_start = t0;
+        rp.t_end = t0 + seconds * 1e6;
+        rp.nworkers = &nworkers;
+        for (int i = 0; i < nclients; i++) {
+            clients[i].st = &st;
+            clients[i].id = i;
+            clients[i].nclients = nclients;
+            clients[i].rng = 0x9E3779B97F4A7C15ull;
+            if (i != 0)
+                clients[i].rng ^= (uint64_t)(i + 1) * 0xD1B54A32D192ED03ull;
+            clients[i].t_start = t0;
+            clients[i].t_end = rp.t_end;
+            clients[i].ops = 0;
+            clients[i].recent_n = 0;
+            clients[i].mix_get = mix_get;
+            clients[i].mix_drain = mix_drain;
+        }
+        {
+            CCNursery n = cc_nursery_create() !> @destroy;
+            CCEpochKeys* stp = &st;
+            Reporter* rpp = &rp;
+            for (int i = 0; i < nshards; i++) shards[i].nursery = n;
+            if (sweep)
+                for (int i = 0; i < nshards; i++) {
+                    CCEpochShard* sp = &shards[i];
+                    n.spawn(() => [sp] { sweeper(sp); }) !>;
+                }
+            for (int i = 0; i < nclients; i++) {
+                Client* cp = &clients[i];
+                n.spawn(() => [cp] { client(cp); }) !>;
+            }
+            n.spawn(() => [rpp, stp] {
+                reporter(rpp);
+                for (int i = 0; i < stp->nshards; i++) {
+                    cc_atomic_store(&stp->shards[i].stop, 1);
+                    sweep_kick(&stp->shards[i]);
+                }
+            }) !>;
+        }
+    }
+    {
+        long ops = 0;
+        size_t drains = 0, drec = 0, dropped = 0, reins = 0, rehash = 0, compacts = 0, waves = 0;
+        size_t gets = 0, hits = 0, ttl_n = 0;
+        double wsum = 0, wmax = 0;
+        size_t total_live = 0, total_map = 0, total_free = 0, total_recs_commit = 0;
+        for (int i = 0; i < nclients; i++) ops += clients[i].ops;
+        for (int i = 0; i < nshards; i++) {
+            CCEpochShard* s = &shards[i];
+            drains += s->drains;
+            drec += s->drained_recs;
+            dropped += s->dropped;
+            reins += s->reinserted;
+            rehash += s->rehashes;
+            compacts += s->compacts;
+            waves += s->waves;
+            gets += s->gets;
+            hits += s->get_hits;
+            wsum += s->wave_sum_us;
+            if (s->wave_max_us > wmax) wmax = s->wave_max_us;
+            total_live += shard_live_entries(s);
+            total_map += shard_keys(s);
+            total_free += s->free_n;
+            total_recs_commit += shard_recs_commit(s);
+            ttl_n += shard_ttl_n(s);
+        }
+        double free_frac = (total_live + total_free) > 0 ? (double)total_free / (double)(total_live + total_free) : 0.0;
+        double slack = (total_live * sizeof(Entry)) > 0 ? (double)total_recs_commit / (double)(total_live * sizeof(Entry)) : 0.0;
+        print_mem(&st, "end");
+        println(@string(`# keys: live_n=${total_live} map_n=${total_map}`, @scratch)) !>;
+        store_trim(&st, TRIM_KEYS);
+        {
+            size_t trim_live = 0, trim_map = 0;
+            store_counts(&st, &trim_live, &trim_map);
+            print_mem(&st, "trim");
+            println(@string(`# keys: trim live_n=${trim_live} map_n=${trim_map} target=${TRIM_KEYS}`, @scratch)) !>;
+        }
+        println(@string(`# ops=${ops} (${seconds > 0 ? ops / seconds / 1e6 : 0}M/s)  get_hits=${hits}/${gets} workers=${nworkers}`, @scratch)) !>;
+        println(@string(`# expire: dropped=${dropped} drained_recs=${drec} drains=${drains} reinserted=${reins}`, @scratch)) !>;
+        println(@string(`# index: rehashes=${rehash}  (map grow, not expire)`, @scratch)) !>;
+        println(@string(`# compact: compacts=${compacts} free_frac=${free_frac} slack=${slack} live_n=${total_live} free_n=${total_free} recs_commit_KiB=${total_recs_commit / 1024} ttl_n=${ttl_n}`, @scratch)) !>;
+        println(@string(`# waves=${waves} mean=${waves ? wsum / waves : 0} us max=${wmax} us (hold ${WAVE_HOLD_US} us / sample ${WAVE_HOLD_SAMPLE}, budget ${wave} recs)`, @scratch)) !>;
+        for (int i = 0; i < nshards; i++) {
+            CCEpochShard* s = &shards[i];
+            size_t nlive = 0, ndead = 0;
+            shard_never_bytes(s, &nlive, &ndead);
+            println(@string(`#   shard ${i}: ops=${s->ops} keys=${shard_keys(s)} waves=${s->waves} drains=${s->drains} ttl_n=${shard_ttl_n(s)} never_n=${nlive} free_n=${ndead}`, @scratch)) !>;
+        }
+    }
+    return 0;
+}

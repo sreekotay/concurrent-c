@@ -141,7 +141,7 @@ These are the flags the runtime actually reads (see `getenv` calls in
 | `CC_CHAN_TRACE_RECV_EMPTY=1` | Trace recv-on-empty wait/wake transitions |
 | `CC_CHAN_TRACE_REQ_WAKE=1` | Trace requested-wake events |
 | `CC_CHAN_TRACE_OBJ=<ptr>` | Filter the traces above to a single channel object address |
-| `CC_NURSERY_CLOSING_RUNTIME_GUARD=1` | Recv that waits on a channel whose `close_on` owner is the current nursery fails with `EDEADLK` instead of deadlocking |
+| `CC_NURSERY_CLOSING_RUNTIME_GUARD=1` | Recv that waits on a channel whose `close` owner is the current nursery fails with `EDEADLK` instead of deadlocking |
 | `CC_WORKERS=n` | Set worker thread count |
 | `CC_V2_STATS=1` | Dump V2 scheduler counters at exit |
 | `CC_TASK_WAIT_STATS=1` + `CC_TASK_WAIT_STATS_DUMP=1` | Attribute `block_on` waits (spawn / fiber_v2 / poll) |
@@ -182,7 +182,7 @@ lines in the dump (the R2 channel metadata), pointing back at the user's
 declaration site.
 
 ### What to look for in the dump
-- `reason=chan_recv_wait_empty` with `closed=0` and `count=0` → channel never closed, but no sender is running. Usually the closing-nursery foot-gun (consumer inside the nursery that owns `close_on`) or a producer that exited early.
+- `reason=chan_recv_wait_empty` with `closed=0` and `count=0` → channel never closed, but no sender is running. Usually the closing-nursery foot-gun (consumer inside the nursery that owns `close`) or a producer that exited early.
 - `reason=chan_send_*` with `count == cap` → buffer full and no consumer draining; check consumer lifetime and buffer sizing.
 - `parked external-wait` / `parked deadlock-suppressed` counts are excluded from the verdict — fibers inside `cc_external_wait_enter/leave` / `cc_deadlock_suppress_enter/leave` scopes do not trigger the detector.
 - `inflight` > 0 on a stalled channel → an in-flight lock-free enqueue never completed; that is a runtime bug, not an application bug.

@@ -1,6 +1,6 @@
 #!ccc ccs
-/* Abandon last-exit protocol hammer. The abandon race (worker's
- * notify_child_done and the abandoning caller both qualifying as closer)
+/* Leave last-exit protocol hammer. The leave race (worker's
+ * notify_child_done and the leaving caller both qualifying as closer)
  * only aborted when freed-memory scribble faked `finishing == 0`. Under
  * Guard Malloc every freed page unmaps, so ANY touch of the nursery after
  * the closer frees it crashes deterministically instead of once per few
@@ -20,7 +20,7 @@ static void finish_flag(void* p) {
 }
 
 /* Per-iteration child spin: sweeps the worker's notify_child_done across
- * the caller's on_last/abandon window so the "both sides qualify as closer"
+ * the caller's leave window so the "both sides qualify as closer"
  * interleaving actually occurs, instead of the worker always finishing
  * first (Guard Malloc slows the allocating main thread far more than the
  * empty child). */
@@ -63,8 +63,7 @@ int main(int argc, char** argv) {
         CCNursery n = cc_nursery_create() !>;
         cc_atomic_store(&g_spin, (i % 97) * 29);
         n.spawn(() => { child_spin(); }) !>;
-        n.on_last(&done, finish_flag) !>;
-        n.abandon();
+        n.leave(&done, finish_flag) !>;
         if (!wait_flag(&done, 2000)) return 43;
     }
     printf("nursery_abandon_gmalloc_stress_smoke: OK\n");

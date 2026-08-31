@@ -867,7 +867,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
     _Atomic size_t* p_total_out = &total_out;
 
     {
-        /* Keep the writer outside the producer scopes so producer-owned close_on()
+        /* Keep the writer outside the producer scopes so producer-owned close()
          * can close channels as soon as the upstream task exits. */
         CCClosure0 decomp_writer_task = () => [out_ptr, decompressed_rx, decompressed_ch, p_total_out] {
             @errhandler(CCError e) cc_error_exit(e);
@@ -987,7 +987,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
             }
         };
         CCNursery decompressor = writer.create_child() !> @destroy;
-        (void)decompressor.close_on(decompressed_tx);
+        (void)decompressor.close(decompressed_tx);
         decompressor.spawn(decomp_inflate_task) !>;
 
         CCClosure0 decomp_reader_task = () => [in_ptr, compressed_tx, compressed_ch, p_total_in] {
@@ -1037,7 +1037,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
             }
         };
         CCNursery reader = decompressor.create_child() !> @destroy;
-        (void)reader.close_on(compressed_tx);
+        (void)reader.close(compressed_tx);
         reader.spawn(decomp_reader_task) !>;
     }
 

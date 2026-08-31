@@ -1,0 +1,8 @@
+#ifndef TESTS_CCH_FACE_CHAPTER_FACE_CCH
+#define TESTS_CCH_FACE_CHAPTER_FACE_CCH
+
+#include "cch_face_chapter.cch"
+
+int cch_face_chapter_face_use(void);
+
+#endif

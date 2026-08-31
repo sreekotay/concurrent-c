@@ -35,7 +35,7 @@ CCChan* cc_channel_pair(CCChanTx* tx, CCChanRx* rx);
 /* Generated closure bodies may emit these nursery-aware channel names. */
 #define cc_nursery_send(tx_ptr, value) cc_channel_send(*(tx_ptr), (value))
 #define cc_nursery_recv(rx_ptr, out_ptr) cc_channel_recv(*(rx_ptr), (out_ptr))
-#define cc_nursery_close(h_ptr) cc_channel_close(*(h_ptr))
+#define cc_nursery_chan_close(h_ptr) cc_channel_close(*(h_ptr))
 
 /* Language-level cancellation helpers.
    The runtime already provides cc_cancel(CCDeadline*) / cc_is_cancelled(const CCDeadline*).

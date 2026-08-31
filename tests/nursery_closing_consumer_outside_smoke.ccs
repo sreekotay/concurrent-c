@@ -23,7 +23,7 @@ int main(void) {
     // Spawn producer(s) inside nursery; channel is closed on nursery exit.
     {
         CCNursery __cc_nursery64 = @create() !> @destroy;
-        (void)__cc_nursery64.close_on(ch_tx);
+        (void)__cc_nursery64.close(ch_tx);
 
         __cc_nursery64.spawn(() => { producer(ch_tx); }) !>;
     

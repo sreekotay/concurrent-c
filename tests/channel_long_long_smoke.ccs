@@ -8,7 +8,7 @@ int main(void) {
     long long[~4 <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
     CCNursery n = cc_nursery_create() !> @destroy;
-    (void)n.close_on(tx);
+    (void)n.close(tx);
     n.spawn(() => [tx] {
         @errhandler(CCError e) cc_error_exit(e);
         tx.send(7) !>;

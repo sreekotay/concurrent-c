@@ -16,7 +16,7 @@ int main(void) {
     
     {
         CCNursery __cc_nursery2 = @create() !> @destroy;
-        (void)__cc_nursery2.close_on(tx);
+        (void)__cc_nursery2.close(tx);
 
         __cc_nursery2.spawn(@unsafe () => [tx, &sent] {
             for (int i = 0; i < 10; i++) tx.send(i);

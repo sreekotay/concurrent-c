@@ -1,0 +1,21 @@
+#ifndef TESTS_CCH_FACE_CHAPTER_CCH
+#define TESTS_CCH_FACE_CHAPTER_CCH
+
+#include <ccc/std/prelude.cch>
+
+static const int cch_face_chapter_tab[] = { 1, 2, 3 };
+
+static int !>(CCError) cch_face_chapter_step(int x) {
+    /* FACE_CHAPTER_BODY_MUST_NOT_SPLICE_INTO_FACE */
+    @errhandler(CCError e) { return cc_err(e); }
+    return cc_ok(x + cch_face_chapter_tab[0]);
+}
+
+static int cch_face_chapter_add(int a, int b) {
+    /* FACE_CHAPTER_BODY_MUST_NOT_SPLICE_INTO_FACE */
+    int x = cch_face_chapter_step(a) !> { return -1; };
+    int y = cch_face_chapter_step(b) !> { return -1; };
+    return x + y;
+}
+
+#endif

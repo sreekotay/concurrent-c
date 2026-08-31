@@ -36,7 +36,7 @@ int main(void) {
             };
             if (!saw) return 3;
         }
-        n.abandon();
+        n.leave();
         if (!wait_flag(&done, 1000)) return 4;
     }
 
@@ -45,8 +45,7 @@ int main(void) {
         CCNursery n = cc_nursery_create() !>;
         cc_atomic_store(&g_ran, 0);
         n.spawn(() => { cc_atomic_store(&g_ran, 1); }) !>;
-        n.on_last(&done, finish_flag) !>;
-        n.abandon();
+        n.leave(&done, finish_flag) !>;
         if (!wait_flag(&done, 2000)) return 13;
         if (cc_atomic_load(&g_ran) != 1) return 14;
     }
@@ -55,8 +54,7 @@ int main(void) {
         cc_atomic_int done = 0;
         CCNursery n = cc_nursery_create() !>;
         n.spawnhybrid(() => { cc_sleep_ms(5); }) !>;
-        n.on_last(&done, finish_flag) !>;
-        n.abandon();
+        n.leave(&done, finish_flag) !>;
         if (!wait_flag(&done, 2000)) return 18;
     }
 
@@ -68,8 +66,8 @@ int main(void) {
                                 &tx, &rx) != 0)
             return 20;
         CCNursery n = cc_nursery_create() !>;
-        n.close_on(tx) !>;
-        n.abandon();
+        n.close(tx) !>;
+        n.leave();
         CCResult_bool_CCIoError tr = chan_try_recv(rx, &tmp);
         if (!(cc_is_ok(tr) && !cc_unwrap(tr))) return 23;
         chan_free(tx);
@@ -88,8 +86,7 @@ int main(void) {
             int x = 0;
             (void)chan_recv(rx, &x);
         }) !>;
-        n.on_last(&done, finish_flag) !>;
-        n.abandon();
+        n.leave(&done, finish_flag) !>;
         {
             int saw = 0;
             n.spawn(() => {}) !>(e) {
@@ -109,8 +106,7 @@ int main(void) {
             cc_atomic_int done = 0;
             CCNursery n = cc_nursery_create() !>;
             n.spawn(() => {}) !>;
-            n.on_last(&done, finish_flag) !>;
-            n.abandon();
+            n.leave(&done, finish_flag) !>;
             if (!wait_flag(&done, 2000)) return 43;
         }
     }

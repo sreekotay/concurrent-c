@@ -20,7 +20,7 @@ int main(void) {
 
         {
             CCNursery __cc_nursery28 = @create() !> @destroy;
-            (void)__cc_nursery28.close_on(tx);
+            (void)__cc_nursery28.close(tx);
 
             __cc_nursery28.spawn(() => {
                 for (int i = 1; i <= 3; i++) (void)chan_send(tx, i);

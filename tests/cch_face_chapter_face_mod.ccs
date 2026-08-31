@@ -1,0 +1,6 @@
+#!ccc ccs
+#include "cch_face_chapter_face.cch"
+
+int cch_face_chapter_face_use(void) {
+    return cch_face_chapter_add(1, 2);
+}

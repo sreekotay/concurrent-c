@@ -25,7 +25,7 @@ static void bench_buffered(void) {
 
     {
         CCNursery __cc_nursery167 = @create() !> @destroy;
-        (void)__cc_nursery167.close_on(tx);
+        (void)__cc_nursery167.close(tx);
 
         /* Producer */
         __cc_nursery167.spawn(() => {
@@ -61,7 +61,7 @@ static void bench_unbuffered(void) {
     
     {
         CCNursery __cc_nursery168 = @create() !> @destroy;
-        (void)__cc_nursery168.close_on(tx);
+        (void)__cc_nursery168.close(tx);
 
         __cc_nursery168.spawn(() => [iterations] {
             for (int i = 0; i < iterations; i++) {

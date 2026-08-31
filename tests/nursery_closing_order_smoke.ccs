@@ -43,7 +43,7 @@ int main(void) {
     // Spec: closing(ch) must close after all children exit (i.e., after joining).
     {
         CCNursery __cc_nursery68 = @create() !> @destroy;
-        (void)__cc_nursery68.close_on(ch_tx);
+        (void)__cc_nursery68.close(ch_tx);
 
         __cc_nursery68.spawn(() => { producer(ch_tx); }) !>;
         __cc_nursery68.spawn(() => { consumer(ch_rx); }) !>;
