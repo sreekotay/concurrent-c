@@ -194,7 +194,7 @@ Projection (`v.num` / `p->num`) is legal only when protected:
 
 | Protect | Meaning |
 |---------|---------|
-| `switch (v)` / `switch (p)` + `case .arm:` | each case dominates that arm; every arm (`default:` forfeits the check) |
+| `switch (v)` / `switch (p)` / `switch (h.cell)` + `case .arm:` | each case dominates that arm; every arm (`default:` forfeits the check) |
 | `if (v.kind == .arm)` in the same block | syntactic, not data-flow |
 | `v.arm ?> fallback` | inactive → value of the arm's type |
 | `v.arm !> { … }` | inactive → handler (must diverge) |

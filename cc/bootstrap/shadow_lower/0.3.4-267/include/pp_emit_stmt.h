@@ -3,6 +3,10 @@
 #pragma once
 
 /* 1 = emit CCShadow* beachhead stubs; 0 = real CCSlice_* / CCChan* from runtime. */
+#include "pp_ast_core.h"
+#include "pp_emit_core.h"
+#include "pp_tape.h"
+#include "pp_emit_typehooks.h"
 static int g_shadow_slice_stub = 1;
 static int g_shadow_chan_stub = 1;
 
@@ -2768,10 +2772,10 @@ static int shadow_refs_rewrite_emit(CEmit* out, const char* text, size_t len,
     return 1;
 }
 
-#include "pp_emit_unwrap.cch"
-#include "pp_emit_spawn.cch"
-#include "pp_emit_autoblock.cch"
-#include "pp_emit_strswitch.cch"
+#include "pp_emit_unwrap.h"
+#include "pp_emit_spawn.h"
+#include "pp_emit_autoblock.h"
+#include "pp_emit_strswitch.h"
 
 /* tx.send_task(() => …) / cc_channel_send_task(tx, () => …):
  * spawn a fiber and queue the CCTask handle. */
@@ -9669,5 +9673,5 @@ static int shadow_emit_destroy_cleanup(CEmit* out, ShadowCtx* ctx,
 }
 
 
-#include "pp_emit_async.cch"
-#include "pp_emit_tu.cch"
+#include "pp_emit_async.h"
+#include "pp_emit_tu.h"

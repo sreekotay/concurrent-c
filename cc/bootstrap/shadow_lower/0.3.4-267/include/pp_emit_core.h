@@ -8,6 +8,8 @@
 #include "comptime/symbols.h"
 #include "comptime/hook_compile.h"
 
+#include "pp_ast_core.h"
+#include "pp_tape.h"
 char* cc_ct_extract_type_decls_prelude(const char* src, size_t n);
 
 static int g_shadow_prelude_off;
@@ -980,10 +982,10 @@ static void shadow_rewrite_at_slice(char* expr, size_t cap) {
     snprintf(expr, cap, "%s", tmp);
 }
 
-/* Rewrite #include <… .cch> / "… .cch" → .h for host/TCC consumption. */
+/* Rewrite #include <… .h> / "… .h" → .h for host/TCC consumption. */
 static void shadow_rewrite_pass_inc(char* dst, size_t cap, const char* src) {
     size_t n = src ? strlen(src) : 0;
-    /* "...foo.cch>" / "...foo.cch\"" → "...foo.h>" / "...foo.h\"" */
+    /* "...foo.h>" / "...foo.cch\"" → "...foo.h>" / "...foo.h\"" */
     if (n >= 5 && src[n - 5] == '.' && src[n - 4] == 'c' && src[n - 3] == 'c' &&
         src[n - 2] == 'h' && (src[n - 1] == '>' || src[n - 1] == '"')) {
         snprintf(dst, cap, "%.*s.h%c", (int)(n - 5), src, src[n - 1]);
@@ -1253,7 +1255,7 @@ static void shadow_rfn_scan_dir_faces(const char* dir) {
     while ((ent = readdir(d)) != NULL) {
         size_t n = strlen(ent->d_name);
         if (n < 3) continue;
-        if (strcmp(ent->d_name + n - 4, ".cch") != 0 &&
+        if (strcmp(ent->d_name + n - 4, ".h") != 0 &&
             strcmp(ent->d_name + n - 2, ".h") != 0)
             continue;
         snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
@@ -5099,7 +5101,7 @@ static int shadow_cc_slice_erased_has(const char* method) {
         size_t i;
         csv[0] = 0;
         loaded = 1;
-        if (shadow_family_header_read("cc_slice.cch", &fsrc, &fn) && fsrc) {
+        if (shadow_family_header_read("cc_slice.h", &fsrc, &fn) && fsrc) {
             for (i = 0; i + 10 < fn; i++) {
                 const char* pref = NULL;
                 size_t plen = 0;

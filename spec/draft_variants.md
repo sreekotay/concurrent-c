@@ -125,7 +125,8 @@ directly.
 
 ## Checked switch
 
-`switch` accepts a variant value or pointer as its subject. `case .arm:` labels
+`switch` accepts a variant value, pointer, or field path whose type is a
+variant (`h.cell`, `r->del`) as its subject. `case .arm:` labels
 resolve from the subject type, and each case protects projection of its arm:
 
 ```c

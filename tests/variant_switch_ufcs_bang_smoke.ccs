@@ -1,0 +1,85 @@
+/* Field-path switch subject (`r->del`, `r.del`) and UFCS `!>` inside
+ * `case .arm:`. This is the coalesce shape: copy, unwrap, rebind. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    char[:] bytes;
+} Buf;
+
+@variant Del {
+    text: Buf;
+    pieces: int;
+};
+
+typedef struct {
+    Del del;
+} Rec;
+
+static void !>(CCError) commit_text(Rec* r, char[:] src) {
+    Del arm;
+    char[:] dst;
+    @errhandler(CCError e) { return cc_err(e); }
+    /* Body contains `r->del` so a subject-ptr scan of the dump must
+     * not mark the value `arm` as a pointer. */
+    arm = r->del;
+    switch (arm) {
+        case .text:
+            dst = arm.text.bytes;
+            {
+                char[:] tail = dst;
+                tail.copy_overlap(src) !>;
+            }
+            r->del = { .text = { .bytes = dst } };
+            return cc_ok();
+        case .pieces:
+            return cc_err(CC_ERR_INTERNAL, "pieces");
+    }
+    return cc_err(CC_ERR_INTERNAL, "closed");
+}
+
+static void !>(CCError) commit_field(Rec* r, char[:] src) {
+    char[:] dst;
+    @errhandler(CCError e) { return cc_err(e); }
+    switch (r->del) {
+        case .text:
+            dst = r->del.text.bytes;
+            dst.copy(src) !>;
+            r->del = { .text = { .bytes = dst } };
+            return cc_ok();
+        case .pieces:
+            return cc_err(CC_ERR_INTERNAL, "pieces");
+    }
+    return cc_err(CC_ERR_INTERNAL, "closed");
+}
+
+static int hold_is_text(Rec r) {
+    switch (r.del) {
+        case .text: return 1;
+        case .pieces: return 0;
+    }
+    return 0;
+}
+
+int main(void) {
+    char buf[8];
+    Rec r;
+    Rec *p;
+    buf[0] = 'a';
+    buf[1] = 'b';
+    r.del = { .text = { .bytes = cc_slice_from_buffer(buf, 2) } };
+    if (!hold_is_text(r)) return 1;
+    p = &r;
+    commit_text(p, cc_slice_from_buffer(buf, 2)) !> { return 2; };
+    commit_field(p, cc_slice_from_buffer(buf, 2)) !> { return 5; };
+    {
+        Del d = p->del;
+        if (d.kind == .text) {
+            if (d.text.bytes.len != 2 || d.text.bytes.ptr[0] != 'a') return 3;
+        } else {
+            return 4;
+        }
+    }
+    printf("ok\n");
+    return 0;
+}
