@@ -52,7 +52,7 @@ static int run_pool(CCTurnstile* ts) {
     cc_atomic_store(&g_timed_out, 0);
     cc_atomic_store(&g_done, 0);
     int i;
-    @parallel wait (ts) @for (i in 0..N) {
+    @parallel wait (ts) for (i in 0..N) {
         bump_peak();
         meet_cap();
         cc_atomic_fetch_add(&g_done, 1);
@@ -78,7 +78,7 @@ static int run_seq(CCTurnstile* ts) {
     cc_atomic_store(&g_peak, 0);
     cc_atomic_store(&g_done, 0);
     int i;
-    @parallel seq (0) wait (ts) @for (i in 0..N) {
+    @parallel seq (0) wait (ts) for (i in 0..N) {
         bump_peak();
         cc_atomic_fetch_add(&g_done, 1);
         cc_atomic_fetch_sub(&g_live, 1);

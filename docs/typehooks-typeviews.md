@@ -226,7 +226,7 @@ int main(void) {
 | `@for (&a, b in s, t) { … } !>;` | zip mut; `a =` stores through `s` |
 | `@for (i in lo..hi)` | sequential range; `hi < lo` is empty |
 
-C `for (;;)` is unchanged. `@parallel @for (i in lo..hi)` is the concurrent
+C `for (;;)` is unchanged. `@parallel for (i in lo..hi)` is the concurrent
 cousin. A user type registers the same two arms (`tests/typehooks_len_access_smoke.ccs`).
 
 Mut walk and zip hard-wire `CCError` — part of why fallible APIs should not

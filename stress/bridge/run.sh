@@ -57,6 +57,7 @@ if need node && need python3; then
 
   echo "--- cc_node_stress_wire ---"
   CHAOS_SCALE="$SCALE" \
+    PYTHONUNBUFFERED=1 \
     PYTHONPATH="$ROOT/pypi/cc-node${PYTHONPATH:+:$PYTHONPATH}" \
     python3 "$ROOT/stress/bridge/cc_node_stress_wire.py" || rc=1
 else

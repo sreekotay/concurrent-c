@@ -11,7 +11,9 @@
  *    1. Declare — one type per arm; void carries no payload
  *    2. Construct — exactly one designated arm
  *    3. Switch / kind — every arm; each case dominates its projection.
- *       `default:` forfeits the check.
+ *       `case .arm(bind):` binds the payload; `@switch (h.cell)` and
+ *       `@switch (r->del)` accept field-path subjects. `default:` forfeits
+ *       the check. Bare `{0}` on a variant is a compile error.
  *    4. ?> / !> on a projection — inactive arm is fallback or leave
  *    5. Same-arm assign still runs the old destroy chain
  *    6. Put together — INCR: switch, parse txt, checked add, stay a num
@@ -34,6 +36,8 @@
 };
 
 typedef struct Held { int n; } Held;
+
+typedef struct { Cell cell; } WrappedCell;
 
 static int g_held_drops = 0;
 
@@ -58,10 +62,10 @@ static int64_t require_num(Cell* c) {
 
 static int64_t !>(CCError) cell_as_i64(Cell* cell) {
     @switch (cell) {
-        case .num:
-            return cc_ok(cell->num);
-        case .txt: {
-            char[:] sl = cell->txt.as_slice();
+        case .num(n):
+            return cc_ok(n);
+        case .txt(s): {
+            char[:] sl = s.as_slice();
             return sl.to_i64();
         }
     }
@@ -80,14 +84,27 @@ static int64_t !>(CCError) incr(Cell* cell, int64_t delta) {
 static void print_cell(const char* label, Cell* c) {
     @errhandler(CCError e) { cc_error_log(e); return; }
     @switch (c) {
-        case .num: {
-            int64_t nv = c->num;
+        case .num(nv):
             println(@string(`${label} num=${nv}`, @scratch)) !>;
             break;
-        }
-        case .txt: {
-            char[:] sl = c->txt.as_slice();
+        case .txt(s): {
+            char[:] sl = s.as_slice();
             println(@string(`${label} txt=${sl}`, @scratch)) !>;
+            break;
+        }
+    }
+}
+
+static void print_wrapped(const char* label, WrappedCell* w) {
+    @errhandler(CCError e) { cc_error_log(e); return; }
+    /* Field-path subject — same check as @switch (w.cell) on the value. */
+    @switch (w->cell) {
+        case .num(nv):
+            println(@string(`${label} wrapped num=${nv}`, @scratch)) !>;
+            break;
+        case .txt(s): {
+            char[:] sl = s.as_slice();
+            println(@string(`${label} wrapped txt=${sl}`, @scratch)) !>;
             break;
         }
     }
@@ -111,15 +128,16 @@ int main(void) {
     /* 3. Subject-switch. Pointer subject: mutate in place. */
     Cell* p = &n;
     @switch (p) {
-        case .num: {
-            int64_t nv = p->num;
+        case .num(nv):
             println(@string(`switched=${nv}`, @scratch)) !>;
             break;
-        }
-        case .txt:
-            println("switched=txt") !>;
+        case .txt(s):
+            println(@string(`switched=txt len=${s.len()}`, @scratch)) !>;
             break;
     }
+
+    WrappedCell wrap = { .cell = t };
+    print_wrapped("field-path", &wrap);
 
     /* Void-arm constructor. */
     Flag f = { .on = {} };
@@ -130,11 +148,9 @@ int main(void) {
         case .on:
             println("flag=on") !>;
             break;
-        case .code: {
-            int code = f.code;
+        case .code(code):
             println(@string(`flag=${code}`, @scratch)) !>;
             break;
-        }
     }
 
     /* 4. The variant is data; an inactive projection is fallible. */

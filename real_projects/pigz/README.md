@@ -82,7 +82,7 @@ Uses locks (mutex + condvar) via yarn.h for synchronization.
 Seekable compress is `pigz_idiomatic`: the serial block loop, annotated.
 
 ```
-  @parallel wait (ts) cache (zs) @for (i in 0..n) {
+  @parallel wait (ts) cache (zs) for (i in 0..n) {
       pread block i
       @stage (ts.read, i)   { hop 32 KiB dict }
       deflate (warm zs)

@@ -1,0 +1,1 @@
+variant_zero_init_fail.ccs:10:11: error: variant 'V' requires an explicit arm — `{0}` zero-initializes to '.a', not an empty value

@@ -2,7 +2,7 @@
  * Concurrent-C port of the Shirley weekend final scene.
  *
  * Same algorithm as rt.c / go/rt.go. Rows are independent: each pixel
- * seeds its own LCG, so `@parallel @for` over y matches sequential.
+ * seeds its own LCG, so `@parallel for` over y matches sequential.
  * Vec3 stays C-shaped free functions so the three ports stay comparable.
  *
  *   RT_WIDTH / RT_SAMPLES / RT_DEPTH   image (default 400 / 10 / 20)
@@ -513,7 +513,7 @@ int main(void) {
         for (y = 0; y < h; y++)
             render_row(job, y);
     } else {
-        @parallel @for (y in 0..h) {
+        @parallel for (y in 0..h) {
             render_row(job, y);
         } !>.wait()!>;
     }

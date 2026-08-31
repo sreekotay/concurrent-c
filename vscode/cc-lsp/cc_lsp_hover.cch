@@ -39,7 +39,7 @@ static const LspHover g_hovers[] = {
      "`@with_deadline(dur)` / `@with_deadline(dur) as dl`\n\n"
      "Pushes an ambient deadline for the block. Cooperative: callees must observe it."},
     {"@parallel",
-     "`@parallel { … }` / `@parallel (pred)` / `@parallel @for (k in lo..hi)`\n\n"
+     "`@parallel { … }` / `@parallel (pred)` / `@parallel for (k in lo..hi)`\n\n"
      "Scheduling sugar, not a nursery. `@serial` arms run on the parent fiber."},
     {"@serial",
      "`@serial { … }` inside `@parallel`\n\n"

@@ -520,8 +520,22 @@ static void env_sidecar_restore(EnvSidecar* e) {
     env_sidecar_clear(e);
 }
 
+/* `.shcc` quote/cch smokes shell out to several cold `ccc --emit-c-only`
+ * passes plus a `--no-cache` build. ~3s alone; exceeds the 10s default under
+ * `--jobs` contention (TIMEOUT, not a wrong oracle). */
+static int nested_quote_cch_run_timeout(const char* stem) {
+    if (!stem) return 0;
+    if (strncmp(stem, "quote_cch_", 10) == 0) return 30;
+    if (strcmp(stem, "cch_face_chapter_smoke") == 0) return 30;
+    return 0;
+}
+
 static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     if (!stem) return default_timeout_sec;
+    {
+        int t = nested_quote_cch_run_timeout(stem);
+        if (t) return t;
+    }
     if (strcmp(stem, "chan_park_wake_lostwake_stress_smoke") == 0) return 20;
     /* Inner `cc` + `ccc build --release` + three weekend-image runs. The
      * 10s default trips under --jobs contention (TIMEOUT, not a wrong

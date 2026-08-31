@@ -5,7 +5,7 @@ int main(void) {
     int gate = 3;
     int i;
     int xs[4];
-    @parallel wait (gate) @for (i in 0..4) {
+    @parallel wait (gate) for (i in 0..4) {
         xs[i] = i;
     } !>.wait()!>;
     return xs[0];

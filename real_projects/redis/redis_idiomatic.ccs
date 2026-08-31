@@ -558,10 +558,9 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
         if (!cell) return enc->null();
         val = &cell->val;
         @switch (val) {
-        case .str:
-            return enc->bulk(val->str.as_slice());
-        case .num: {
-            int64_t n = val->num;
+        case .str(s):
+            return enc->bulk(s.as_slice());
+        case .num(n): {
             char[:] text = @string(`${n}`);
             return enc->bulk(text);
         }

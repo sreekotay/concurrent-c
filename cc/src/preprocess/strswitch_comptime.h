@@ -5,7 +5,7 @@
 
 #include <stddef.h>
 
-/* Rewrite string-literal case switches in a `@comptime` block body.
+/* Rewrite string-literal `switch` / `@switch` in a `@comptime` block body.
  * Returns a newly allocated buffer (caller frees). On success with no
  * string switches, returns a copy of the input.
  * On hard error (mixed labels, bad escapes, etc.): fills err, returns NULL. */

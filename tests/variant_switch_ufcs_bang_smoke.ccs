@@ -39,13 +39,11 @@ static void !>(CCError) commit_text(Rec* r, char[:] src) {
 }
 
 static void !>(CCError) commit_field(Rec* r, char[:] src) {
-    char[:] dst;
     @errhandler(CCError e) { return cc_err(e); }
     @switch (r->del) {
-        case .text:
-            dst = r->del.text.bytes;
-            dst.copy(src) !>;
-            r->del = { .text = { .bytes = dst } };
+        case .text(buf):
+            buf.bytes.copy(src) !>;
+            r->del = { .text = { .bytes = buf.bytes } };
             return cc_ok();
         case .pieces:
             return cc_err(CC_ERR_INTERNAL, "pieces");

@@ -2,7 +2,7 @@
 
 int main(void) {
     int a = 0;
-    @parallel @for (i in 0..2) {
+    @parallel for (i in 0..2) {
         @serial {
             a = i;
         }

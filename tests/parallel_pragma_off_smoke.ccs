@@ -45,7 +45,7 @@ int main(void) {
     int last = -1;
     int sum = 0;
     int order_ok = 1;
-    @parallel @for (i in 0..N) {
+    @parallel for (i in 0..N) {
         if (i != last + 1)
             order_ok = 0;
         last = i;
@@ -63,7 +63,7 @@ int main(void) {
     int wsum = 0;
     last = -1;
     order_ok = 1;
-    @parallel wait (ts) @for (i in 0..N) worker (w) {
+    @parallel wait (ts) for (i in 0..N) worker (w) {
         wsum += w;
         if (i != last + 1)
             order_ok = 0;

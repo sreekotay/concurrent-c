@@ -3,7 +3,7 @@
 int main(void) {
     int i;
     int xs[4];
-    @parallel (1) @for (i in 0..4) {
+    @parallel (1) for (i in 0..4) {
         xs[i] = i;
     } !>.wait()!>;
     return xs[0];

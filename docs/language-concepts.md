@@ -80,14 +80,21 @@ domain error type when the **payload** matters at the boundary; register
 
 ## 2a. Data alternatives are `@variant`
 
-[recipe_variant.ccs](../examples/recipe_variant.ccs) · [spec/draft_variants.md](../spec/draft_variants.md)
+[Cheatsheet](cheatsheet.md#variant--data-alternatives) ·
+[recipe_variant.ccs](../examples/recipe_variant.ccs) ·
+[spec/draft_variants.md](../spec/draft_variants.md)
 
 `T!>(E)` is the function error channel. `@variant` is ordinary tagged data:
-one named arm is always active. Construct with exactly one designator.
-Project only when a `switch` / `kind ==` / `?>` / `!>` protects that arm.
-The variant is data; reading an inactive arm is fallible, so `?>` / `!>`
-apply to the projection. A variant `switch` names every arm; `default:`
-forfeits the check.
+one named arm is always active. Construct with exactly one designator — bare
+`{0}` is a compile error (it zero-initializes to the first arm tag, not an
+empty value). Project only when a `switch` / `kind ==` / `?>` / `!>` protects
+that arm. The variant is data; reading an inactive arm is fallible, so `?>` /
+`!>` apply to the projection.
+
+Checked `@switch` accepts a value, pointer, or field-path subject (`h.cell`,
+`r->del`). Every arm must appear (`default:` forfeits the check). Use
+`case .arm(bind):` to bind the dominated payload in the case body; void arms
+cannot bind.
 
 ```c
 @variant Cell { txt: CCString; num: int64_t; };
@@ -95,6 +102,11 @@ forfeits the check.
 Cell c = { .num = 42 };
 int64_t n = c.num ?> 0;
 c = { .txt = cc_string_from("hi", a) };
+
+@switch (c) {
+    case .num(v): use_i64(v); break;
+    case .txt(s): use(s.as_slice()); break;
+}
 ```
 
 ---
@@ -333,8 +345,8 @@ waits that nursery; `n.leave()` consumes the handle without joining).
 | `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. `h.wait()` joins. Arms may cancel/adopt/pause `h`. `h.wait()` inside an arm of `h` is an error. |
 | `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; writes exactly one outer name. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. The body always runs. |
-| `@parallel @for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; a span of 0 or 1 is a plain `for`. `return` is `break` then `return` from the function after the join. |
-| `@parallel wait (ts) @for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished. A targeting `break` is `ok(false)` and must be bound. `return` drains, then leaves the function. `@stage` is a handshake, not a Result. |
+| `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; a span of 0 or 1 is a plain `for`. `return` is `break` then `return` from the function after the join. |
+| `@parallel wait (ts) for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished. A targeting `break` is `ok(false)` and must be bound. `return` drains, then leaves the function. `@stage` is a handshake, not a Result. |
 
 ```c
 int a = 0, b = 0;
@@ -346,7 +358,7 @@ int a = 0, b = 0;
     b = g();
 } !>.wait()!>;
 
-@parallel @for (y in 0..h) {
+@parallel for (y in 0..h) {
     row(y);
 } !>.wait()!>;
 ```

@@ -231,10 +231,26 @@ Tasks do not inherit `@errhandler` — re-bind inside each spawn. More:
 [recipe_result_error_handling.ccs](../examples/recipe_result_error_handling.ccs) ·
 [Language Concepts §2](language-concepts.md#2-errors-map-to-a-value-or-to-control-flow).
 
+### Variants
+
 `@variant` is tagged *data* (one arm always active), not a Result. Construct
-with one designator; project only under `switch` / `kind ==` / `?>` / `!>`;
-a variant `switch` names every arm (`default:` forfeits the check). Recipe:
-[recipe_variant.ccs](../examples/recipe_variant.ccs).
+with one designator — `{0}` is a compile error (use `{ .arm = … }`). Project
+only under `@switch` / `kind ==` / `?>` / `!>`. Subject may be a value,
+pointer, or field path (`h.cell`, `r->del`). Prefer `case .arm(bind):` to
+bind the dominated payload in the case body. Every arm must appear
+(`default:` forfeits the check).
+
+[Cheatsheet — `@variant`](cheatsheet.md#variant--data-alternatives) ·
+[Language Concepts §2a](language-concepts.md#2a-data-alternatives-are-variant) ·
+[Spec](../spec/draft_variants.md) ·
+[recipe_variant.ccs](../examples/recipe_variant.ccs)
+
+```c
+@switch (cell) {
+    case .num(n): use_i64(n); break;
+    case .txt(s): use(s.as_slice()); break;
+}
+```
 
 ### UFCS — methods are ordinary functions
 
@@ -446,7 +462,7 @@ int a = 0, b = 0;
     b = g();
 } !>.wait()!>;
 
-@parallel @for (y in 0..h) {
+@parallel for (y in 0..h) {
     row(y);
 } !>.wait()!>;
 ```

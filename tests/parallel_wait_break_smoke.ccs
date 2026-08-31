@@ -16,7 +16,7 @@ static int run(int use_par, int* xs) {
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
     CCTurnstile ts@(4, 1, arena) !> @destroy;
     int i;
-    bool fin = @parallel seq (use_par) wait (ts) @for (i in 0..N) {
+    bool fin = @parallel seq (use_par) wait (ts) for (i in 0..N) {
         cc_atomic_fetch_add(&g_hits, 1);
         @stage (ts, 0, i) {
             xs[i] = i + 1;

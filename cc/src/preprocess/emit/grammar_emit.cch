@@ -950,7 +950,7 @@ Ld${k}:
 /* Reflective Type__fk — field-name string-switch (structured; not opaque). */
 static inline CCString cc_gr_fk_get_open_text(CCArena a, const char* n) {
     return @string(`static inline __attribute__((always_inline)) int ${n}__fk(CCSlice k) {
-    switch (k) {
+    @switch (k) {
 `, a);
 }
 

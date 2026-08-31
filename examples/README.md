@@ -19,17 +19,17 @@ New to Concurrent-C? Work through these in order:
 | 1  | `hello.ccs` | First nursery | `cc_nursery_create`, `n.spawn()`, basic structured concurrency |
 | 2  | `recipe_result_error_handling.ccs` | Results & `@errhandler` | `?>` : `E → T`; `!>` : `E →` control flow; `(e)` exposes; bare `!>` routes |
 | 3  | `recipe_unwrap_destroy_forms.ccs` | Unwrap shape | Same two ops × modifiers; `@destroy` on successful construction |
-| 3a | `recipe_variant.ccs` | `@variant` | Tagged data (not Result); construct / switch / `?>` / `!>` |
+| 3a | `recipe_variant.ccs` | `@variant` | Tagged data (not Result); construct / `@switch` / `case .arm(bind):` / `?>` / `!>` |
 | 4  | `recipe_ufcs_forms.ccs` | UFCS shape | One dispatch rule × spellings (families, bare-name, fallible chains) |
 | 4a | `recipe_user_generics.ccs` | Generics | `Name::[args]` + `CC_GENERIC_FACTORY` — same rule as Vec/Map |
-| 5  | `recipe_fanout_capture.ccs` | Independent fan-out | `@parallel @for`; the index is the per-iteration value |
+| 5  | `recipe_fanout_capture.ccs` | Independent fan-out | `@parallel for`; the index is the per-iteration value |
 | 6  | `recipe_explicit_capture.ccs` | Capture semantics | Value vs reference capture, mutation rules |
 | 7  | `recipe_channel_pipeline.ccs` | Communication | Channels, owned close, producer/consumer |
 | 8  | `recipe_async_await.ccs` | Async/Await | `@async` call stacks vs `spawn`, `@await`, composition |
 | 9  | `recipe_timeout.ccs` | Deadlines & cancel | `@with_deadline`; live dest `h.cancel()`; siblings poll `h.cancelled` |
 | 10 | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
 | 11 | `recipe_ordered_parallel.ccs` | Ordered fan-out | `send_task` + ordered recv, FIFO without reorder buffer |
-| 11a | `recipe_parallel.ccs` | `@parallel` | assignment join, `@serial` arms, handle fan-in, `@parallel (pred)`, `@parallel @for` |
+| 11a | `recipe_parallel.ccs` | `@parallel` | assignment join, `@serial` arms, handle fan-in, `@parallel (pred)`, `@parallel for` |
 | 12 | `recipe_exclusive_named.ccs` | Named exclusivity | `CCExclusive`, resolve-once mutex, `acquire_when`, short guard CS |
 | 12a | `recipe_turnstile.ccs` | Pipeline turnstile | `CCTurnstileRW`: depth cap + ordered read/write stages |
 | 12b | `recipe_prepare_commit.ccs` | Prepare / join / hold / commit | Parallel prepares; `.wait()` is the join; hold only around commit; revert who finished |
@@ -50,7 +50,7 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 
 | File | Pattern | Key Concept |
 |------|---------|-------------|
-| `recipe_fanout_capture.ccs` | Fan-out | `@parallel @for`; disjoint slots; spawn-loop copy is `recipe_explicit_capture` |
+| `recipe_fanout_capture.ccs` | Fan-out | `@parallel for`; disjoint slots; spawn-loop copy is `recipe_explicit_capture` |
 | `recipe_explicit_capture.ccs` | Capture semantics | Value vs reference capture |
 | `recipe_channel_pipeline.ccs` | Producer/consumer | Nested ownership + channel close |
 | `recipe_async_await.ccs` | Async/Await | `@async`, `@await`, `cc_block_on` |
@@ -65,12 +65,12 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` on scope exit |
 | `recipe_timeout.ccs` | Deadline | Ambient / bound clock; `h.cancel()` stops siblings via `h.cancelled` |
 | `recipe_result_error_handling.ccs` | Results | `?>` : `E → T`; `!>` : `E →` control flow; `(e)` / bare `!>` |
-| `recipe_variant.ccs` | `@variant` | One active arm; protected projection; exhaustive `@switch` |
+| `recipe_variant.ccs` | `@variant` | One active arm; `case .arm(bind):`; field-path `@switch`; exhaustive check |
 | `recipe_unwrap_destroy_forms.ccs` | Unwrap matrix | Two ops × modifiers; `@destroy` on successful construction |
 | `recipe_ufcs_forms.ccs` | UFCS matrix | One rule × spellings, including bare-name and fallible chains |
 | `recipe_user_generics.ccs` | User generics | `CC_GENERIC_FACTORY` — same `Name::[args]` rule as Vec/Map |
 | `recipe_ordered_parallel.ccs` | Ordered fan-out | `send_task` + ordered recv, FIFO await |
-| `recipe_parallel.ccs` | `@parallel` | Value join; `@serial` arms; handle `.wait()` fan-in; `@parallel (pred)`; `@parallel @for` |
+| `recipe_parallel.ccs` | `@parallel` | Value join; `@serial` arms; handle `.wait()` fan-in; `@parallel (pred)`; `@parallel for` |
 
 ### Python interop (one boundary, two doors)
 
@@ -127,7 +127,7 @@ scanner still accepts raw controls. Full ladder:
 | File | Demonstrates |
 |------|--------------|
 | `recipe_tcp_echo.ccs` | TCP sockets, listen/accept/read/write |
-| `recipe_http_get.ccs` | Parallel HTTP requests with `@parallel @for` |
+| `recipe_http_get.ccs` | Parallel HTTP requests with `@parallel for` |
 
 HTTP examples require libcurl (system curl on macOS) and `-DCC_ENABLE_HTTP=1`. The
 source already declares `@link("curl")`, so linking is automatic:

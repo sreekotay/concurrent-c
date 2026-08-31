@@ -4522,7 +4522,7 @@ static int shadow_pw_emit_exit(CEmit* out, ShadowCtx* ctx, const char* indent,
     return 1;
 }
 
-/* @parallel @for: break/return write the shared exit cell, then leave
+/* @parallel for: break/return write the shared exit cell, then leave
  * the walk. The construct site joins the other half, then break is
  * fallthrough and return is return from the function. */
 static int shadow_pf_emit_exit(CEmit* out, ShadowCtx* ctx, const char* indent,
@@ -4542,7 +4542,7 @@ static int shadow_pf_emit_exit(CEmit* out, ShadowCtx* ctx, const char* indent,
     return cemit_fmt(out, "%sreturn;\n", indent);
 }
 
-/* 1 = emitted, 0 = emit failed, -1 = not a wait-for / join / @parallel @for return. */
+/* 1 = emitted, 0 = emit failed, -1 = not a wait-for / join / @parallel for return. */
 static int shadow_par_try_return(CEmit* out, ShadowCtx* ctx, const char* indent,
                                  const char* rv) {
     if (ctx && ctx->pw_body == 2)
@@ -4831,7 +4831,7 @@ static int shadow_pw_collect_stages(AstNode** body, int nbody,
     return 1;
 }
 
-/* Join @serial / @parallel @for: same handshake as wait-for. wait/pass
+/* Join @serial / @parallel for: same handshake as wait-for. wait/pass
  * unwrap into a region handler; an error fail()s unpassed stages so a
  * parked wait wakes with err, then the enclosing @errhandler runs. */
 static int shadow_emit_stage_region(AstNode** body, int nbody, CEmit* dest,
@@ -5775,7 +5775,7 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                              use_cleanup);
     if (!st->par_wake) {
         fprintf(stderr,
-                "error: '@parallel @for' must be joined with '!>.wait()!>'\n");
+                "error: '@parallel for' must be joined with '!>.wait()!>'\n");
         out->err = 1;
         return 0;
     }
@@ -5783,7 +5783,7 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
     shadow_par_trim(st->b, lo, sizeof(lo));
     shadow_par_trim(st->c, hi, sizeof(hi));
     if (!lo[0] || !hi[0] || !st->a[0]) {
-        fprintf(stderr, "error: malformed @parallel @for\n");
+        fprintf(stderr, "error: malformed @parallel for\n");
         out->err = 1;
         return 0;
     }
@@ -5814,7 +5814,7 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
     for (k = 0; k < st->nbody; k++) {
         if (!shadow_par_scan_node(st->body[k], st->a, names, tys, &ncaps,
                                   SHADOW_PAR_CAP_MAX)) {
-            fprintf(stderr, "error: @parallel @for capture table full\n");
+            fprintf(stderr, "error: @parallel for capture table full\n");
             out->err = 1;
             return 0;
         }
@@ -6048,7 +6048,7 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
                        "%sif (cc_atomic_load(&__cc_pf_ex_%d.xk) == 2) {\n",
                        i1, id))
             return 0;
-        /* Nested @parallel @for / wait-for: join this span, then the
+        /* Nested @parallel for / wait-for: join this span, then the
          * enclosing construct's return (do not return from a void walk). */
         pr = shadow_par_try_return(out, ctx, i1, rty ? rvname : NULL);
         if (pr == 0) return 0;
@@ -6416,6 +6416,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         size_t body_cap = sizeof(body);
         char* bodyp = body;
         ShadowVariant* v = NULL;
+        int subj_ptr = 0;
         int have_desig = (st->d[0] && strstr(st->d, "case .") != NULL);
         int strsw = 0;
         if (have_desig && strcmp(st->f, "cc_switch") != 0) {
@@ -6496,23 +6497,24 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             }
             return cemit_fmt(out, "%s}\n", indent);
         }
+        char subj_raw[320];
         shadow_emit_expr_text(st, st->a, expr, sizeof(expr), NULL);
+        snprintf(subj_raw, sizeof(subj_raw), "%s", expr);
         /* Subject-switch: resolve via bind — never assume the sole @variant. */
         if (g_shadow_nvariants && have_desig) {
-            int ptr = 0;
-            v = shadow_variant_for_subject(expr, &ptr);
+            v = shadow_variant_for_subject(expr, &subj_ptr);
             if (shadow_variant_diag_switch(ctx, st, out, expr, st->d, v))
                 return 0;
             if (v) {
                 char kinded[320];
                 if (v->is_packed) {
-                    if (ptr)
+                    if (subj_ptr)
                         snprintf(kinded, sizeof(kinded), "%s__cc_kind(%s)",
                                  v->name, expr);
                     else
                         snprintf(kinded, sizeof(kinded),
                                  "%s__cc_kind(&(%s))", v->name, expr);
-                } else if (ptr)
+                } else if (subj_ptr)
                     snprintf(kinded, sizeof(kinded), "(%s)->kind", expr);
                 else
                     snprintf(kinded, sizeof(kinded), "(%s).kind", expr);
@@ -6594,6 +6596,13 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             }
             shadow_rewrite_defer_in_opaque(bodyp, body_cap);
             shadow_rewrite_print_and_string(bodyp, body_cap);
+            /* Designator case labels before UFCS peel — otherwise
+             * `case .text(bind):` is misread as UFCS on receiver `case`. */
+            if (v) {
+                shadow_rewrite_switch_case_bindings(bodyp, body_cap, subj_raw, v,
+                                                    subj_ptr);
+                shadow_rewrite_variant_expr(bodyp, body_cap, v->name);
+            }
             {
                 int bind_mark = g_shadow_nbinds;
                 shadow_bind_opaque_locals(bodyp);
@@ -6601,8 +6610,8 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 g_shadow_nbinds = bind_mark;
             }
             snprintf(bodyp, body_cap, "%s", tmp);
-            shadow_rewrite_variant_expr(bodyp, body_cap,
-                                        v ? v->name : NULL);
+            if (!v)
+                shadow_rewrite_variant_expr(bodyp, body_cap, NULL);
             /* Opaque subject-switch bodies never walk AST_STMT_UNWRAP kids —
              * lower `!>`, `!>(e){…}`, and `?>` in the text. */
             if (!shadow_rewrite_bang_exprs(bodyp, body_cap, ctx)) {

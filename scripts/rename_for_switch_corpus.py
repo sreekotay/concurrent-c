@@ -51,7 +51,7 @@ def transform_for_line(line: str) -> str:
     if COMPTIME_FOR_RE.search(line):
         return line
     if PARALLEL_FOR_RE.search(line):
-        line = PARALLEL_FOR_RE.sub("@parallel @for (", line, count=1)
+        line = PARALLEL_FOR_RE.sub("@parallel for (", line, count=1)
 
     if C_FOR_RE.search(line):
         return line

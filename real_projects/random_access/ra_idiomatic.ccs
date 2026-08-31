@@ -126,7 +126,7 @@ static uint64_t !>(CCError) run_smp(int bits, int nw, int atomic, double* timed)
     t.init() !>;
 
     t0 = now_s();
-    @parallel @for (w in 0..nw) {
+    @parallel for (w in 0..nw) {
         @errhandler(CCError e) cc_error_exit(e);
         Span s = worker_span(w, nw, nupdate);
         t.apply_range(s.lo, s.hi) !>;

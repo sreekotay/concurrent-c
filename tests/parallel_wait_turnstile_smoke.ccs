@@ -16,7 +16,7 @@ static int run(CCTurnstile* ts, int use_par, int* order) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     int i;
     g_next = 0;
-    @parallel seq (use_par) wait (ts) @for (i in 0..N) {
+    @parallel seq (use_par) wait (ts) for (i in 0..N) {
         ts.wait(0, i) !>;
         order[i] = g_next;
         g_next = g_next + 1;

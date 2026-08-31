@@ -6,7 +6,7 @@ int main(void) {
     CCTurnstile ts@(2, 1, arena) !> @destroy;
     int s = 0;
     int i;
-    @parallel wait (ts) cache (s) @for (i in 0..4) {
+    @parallel wait (ts) cache (s) for (i in 0..4) {
         @stage (ts, 0, i) {
             s++;
         }

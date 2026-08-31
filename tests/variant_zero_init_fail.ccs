@@ -1,0 +1,13 @@
+/* Fail oracle: `{0}` on a variant picks the first arm tag, not "empty". */
+#include <ccc/std/prelude.cch>
+
+@variant V {
+    a: int;
+    b: int;
+};
+
+int main(void) {
+    V v = {0};
+    (void)v;
+    return 0;
+}

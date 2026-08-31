@@ -7,7 +7,7 @@
 - **[Backwards compatibility](backwards_compatibility.md)** — Unit headers, version pins, bootstrap seeds
 - **[JS / Python interop](js-py-modules.md)** — hosting (`pydemo.shcc`) and native module export
 - **[When to run what](build-when.md)** — Install vs checkout vs stdlib vs lowerer vs ship vs cold smoke
-- **[Language Concepts](language-concepts.md)** — Defer, results, UFCS, arenas (lifetime vs alloc policy) / provenance, walks, closures
+- **[Language Concepts](language-concepts.md)** — Defer, results, UFCS, `@variant`, arenas (lifetime vs alloc policy) / provenance, walks, closures
 - **[@typehooks / @typeview](typehooks-typeviews.md)** — Tutorial: lifecycle hooks, extent / `for in`, is-a faces, allow-list views
 - **[Cheatsheet](cheatsheet.md)** — Quick reference for common patterns
 - **[Debugging](debugging.md)** — VS Code / Cursor debugging setup
@@ -22,7 +22,7 @@
 - **[Channels](../spec/concurrent-c-channel.md)** — Runtime channel state machine and wake/close invariants
 - **[Build](../spec/concurrent-c-build.md)** — Compiler driver, outputs, cache, and target graph
 - **[Grammar and SERDES](../spec/cc_serdes.md)** — Grammar engines and serialization operations
-- **[Variants](../spec/draft_variants.md)** — Tagged-union semantics and packed layout
+- **[Variants](../spec/draft_variants.md)** — Tagged-union semantics, `case .arm(bind):`, field-path switch, packed layout · [recipe](../examples/recipe_variant.ccs) · [cheatsheet](cheatsheet.md#variant--data-alternatives)
 - **[Type views](../spec/draft_facets.md)** — `@typeview` faces and allow-lists (draft). Tutorial: [typehooks-typeviews.md](typehooks-typeviews.md)
 - **[Allocator Strategy](../spec/draft_alloc_strategy.md)** — Arena release, heap overflow, and checkpoint/restore
 - **[Fiber Scheduler](../spec/concurrent-c-scheduler.md)** — Scheduler state machine and park/wake contract

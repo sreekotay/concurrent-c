@@ -11,7 +11,7 @@
 
 static int for_late(void) {
     int i;
-    @parallel @for (i in 0..N) {
+    @parallel for (i in 0..N) {
         if (i == HI)
             return 20;
     } !>.wait()!>;
@@ -21,7 +21,7 @@ static int for_late(void) {
 /* HI may claim first and skip LO. Waiting for LO hangs. */
 static int for_two(void) {
     int i;
-    @parallel @for (i in 0..N) {
+    @parallel for (i in 0..N) {
         if (i == LO)
             return 3;
         if (i == HI)
@@ -33,7 +33,7 @@ static int for_two(void) {
 /* Return upgrades break. A skipped break ticket is not joined as a return. */
 static int for_ret_brk(void) {
     int i;
-    @parallel @for (i in 0..N) {
+    @parallel for (i in 0..N) {
         if (i == LO)
             break;
         if (i == HI)
@@ -44,8 +44,8 @@ static int for_ret_brk(void) {
 
 static int nested_for(void) {
     int i, j;
-    @parallel @for (i in 0..8) {
-        @parallel @for (j in 0..8) {
+    @parallel for (i in 0..8) {
+        @parallel for (j in 0..8) {
             if (i == 7 && j == 7)
                 return 7;
         } !>.wait()!>;
@@ -79,7 +79,7 @@ static int wait_late(void) {
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
     CCTurnstile ts@(2, 1, arena) !> @destroy;
     int i;
-    @parallel wait (ts) @for (i in 0..8) {
+    @parallel wait (ts) for (i in 0..8) {
         @stage (ts, 0, i) {
         }
         if (i == 5)
@@ -98,7 +98,7 @@ static int wait_two(void) {
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
     CCTurnstile ts@(2, 1, arena) !> @destroy;
     int i;
-    @parallel wait (ts) @for (i in 0..8) {
+    @parallel wait (ts) for (i in 0..8) {
         @stage (ts, 0, i) {
         }
         if (i == 1)
@@ -118,7 +118,7 @@ static int wait_before_stage(void) {
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
     CCTurnstile ts@(2, 1, arena) !> @destroy;
     int i;
-    @parallel wait (ts) @for (i in 0..8) {
+    @parallel wait (ts) for (i in 0..8) {
         if (i == 3)
             return 4;
         @stage (ts, 0, i) {
@@ -130,7 +130,7 @@ static int wait_before_stage(void) {
 #pragma(@parallel) off
 static int seq_for_ret(void) {
     int i;
-    @parallel @for (i in 0..N) {
+    @parallel for (i in 0..N) {
         if (i == 0)
             return 3;
         if (i == HI)

@@ -70,6 +70,9 @@ Signal s = { .hup = {} };
 On the default layout, `{ .kind = Signal_hup }` is also a valid tag-only
 initializer for a payload-less arm.
 
+Bare `{0}` / `{ 0 }` on a variant type is a compile error: in C it
+zero-initializes the tag to the first arm, not an empty or invalid value.
+
 Braced assignment is defined for variant lvalues and performs an arm
 transition:
 
@@ -127,15 +130,17 @@ directly.
 
 `switch` accepts a variant value, pointer, or field path whose type is a
 variant (`h.cell`, `r->del`) as its subject. `case .arm:` labels
-resolve from the subject type, and each case protects projection of its arm:
+resolve from the subject type, and each case protects projection of its arm.
+`case .arm(bind):` binds the dominated payload to `bind` for the case body
+(void arms cannot bind):
 
 ```c
 @switch (value) {
-    case .str:
-        use_string(value.str);
+    case .str(s):
+        use_string(s);
         break;
-    case .num:
-        use_number(value.num);
+    case .num(n):
+        use_number(n);
         break;
 }
 ```
@@ -143,6 +148,26 @@ resolve from the subject type, and each case protects projection of its arm:
 Every arm must appear. A `default:` forfeits the check. Missing or unknown
 arms are compile-time errors. The default-layout interop spelling
 `switch (value.kind)` with `case Name_arm:` labels is checked the same way.
+
+Field-path subjects work the same way — no local rebind required when using
+`case .arm(bind):`:
+
+```c
+typedef struct { Del del; } Rec;
+
+@switch (r->del) {
+    case .text(buf):
+        buf.bytes.copy(src) !>;
+        break;
+    case .pieces(n):
+        use(n);
+        break;
+}
+```
+
+Without a bind, `case .arm:` still dominates projection of `subject.arm` in
+the case body. Rebinding a copy (`arm = r->del; @switch (arm)`) remains valid
+when UFCS or move semantics need a value subject.
 
 `@match` is not a variant branching construct. The keyword remains reserved;
 variant branching uses protected projection or checked `@switch`.
@@ -173,8 +198,8 @@ RedisValue !>(CCError) load_value(void);
 
 RedisValue value = load_value() !>;
 @switch (value) {
-    case .str: /* ... */ break;
-    case .num: /* ... */ break;
+    case .str(s): /* ... */ break;
+    case .num(n): /* ... */ break;
 }
 ```
 

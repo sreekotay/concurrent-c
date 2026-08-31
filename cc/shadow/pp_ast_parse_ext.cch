@@ -250,7 +250,7 @@ static AstNode* parse_with_deadline(Parser* p) {
 
 /* @parallel { name = expr; | expr; | @serial { … }; … }
  * @parallel (pred) { … }
- * @parallel @for (name in lo..hi) { … } */
+ * @parallel for (name in lo..hi) { … } */
 static int parallel_is_decl_arm(AstNode* s) {
     if (!s) return 0;
     return s->kind == AST_VAR_DECL || s->kind == AST_VAR_INT ||
@@ -543,7 +543,7 @@ static AstNode* parse_parallel_block(Parser* p) {
                 s = ser;
             } else if (s->kind == AST_FOR) {
                 parser_fail(p, at,
-                            "for is not an @parallel { } arm; use @parallel @for "
+                            "for is not an @parallel { } arm; use @parallel for "
                             "or @serial { … }");
                 return NULL;
             } else {
@@ -570,10 +570,14 @@ static AstNode* parse_parallel_block(Parser* p) {
     return n;
 }
 
-/* gate/seq_cond are "" for the bare bisect form (`@parallel @for`). */
-static int peek_at_for(Parser* p) {
+/* gate/seq_cond are "" for the bare bisect form (`@parallel for`). */
+static int peek_parallel_at_for(Parser* p) {
     return p->i + 1 < p->n && tok_eq(p->toks[p->i], TK_PUNCT, "@") &&
            shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_FOR;
+}
+
+static int peek_parallel_for(Parser* p) {
+    return shadow_kw(p_peek(p)) == SHADOW_KW_FOR;
 }
 
 static AstNode* parse_parallel_for(Parser* p, const char* gate,
@@ -582,29 +586,29 @@ static AstNode* parse_parallel_for(Parser* p, const char* gate,
     int rp;
     int depth;
     AstNode* n;
-    if (!tok_eq(p_peek(p), TK_PUNCT, "@")) {
-        parser_fail(p, p_peek(p), "expected `@for` after @parallel");
+    if (peek_parallel_at_for(p)) {
+        parser_fail(p, p_peek(p),
+                    "`@for` is standalone only; use `@parallel for (...)`");
         return NULL;
     }
-    p_next(p); /* @ */
-    if (shadow_kw(p_peek(p)) != SHADOW_KW_FOR) {
-        parser_fail(p, p_peek(p), "expected `@for` after @parallel");
+    if (!peek_parallel_for(p)) {
+        parser_fail(p, p_peek(p), "expected 'for' after @parallel");
         return NULL;
     }
     p_next(p); /* for */
     if (!tok_eq(p_peek(p), TK_PUNCT, "(")) {
-        parser_fail(p, p_peek(p), "expected '(' after @parallel @for");
+        parser_fail(p, p_peek(p), "expected '(' after @parallel for");
         return NULL;
     }
     p_next(p);
     name = p_next(p);
     if (name.kind != TK_IDENT) {
-        parser_fail(p, name, "expected name after @parallel @for (");
+        parser_fail(p, name, "expected name after @parallel for (");
         return NULL;
     }
     if (!tok_eq(p_peek(p), TK_IDENT, "in")) {
         parser_fail(p, p_peek(p),
-                    "expected 'in' after @parallel @for (name");
+                    "expected 'in' after @parallel for (name");
         return NULL;
     }
     p_next(p); /* in */
@@ -620,7 +624,7 @@ static AstNode* parse_parallel_for(Parser* p, const char* gate,
         rp++;
     }
     if (rp >= p->n || depth != 0) {
-        parser_fail(p, p_peek(p), "unterminated @parallel @for (...)");
+        parser_fail(p, p_peek(p), "unterminated @parallel for (...)");
         return NULL;
     }
     n = ast_new(p, AST_PARALLEL_FOR);
@@ -631,12 +635,12 @@ static AstNode* parse_parallel_for(Parser* p, const char* gate,
     if (seq_cond && seq_cond[0]) snprintf(n->f, sizeof(n->f), "%s", seq_cond);
     if (!parallel_split_range(p, rp, n->b, sizeof(n->b), n->c, sizeof(n->c))) {
         parser_fail(p, p_peek(p),
-                    "expected `lo..hi` after @parallel @for (name in");
+                    "expected `lo..hi` after @parallel for (name in");
         return NULL;
     }
     p->i = rp;
     if (!p_accept(p, TK_PUNCT, ")")) {
-        parser_fail(p, p_peek(p), "expected ')' after @parallel @for range");
+        parser_fail(p, p_peek(p), "expected ')' after @parallel for range");
         return NULL;
     }
     if (tok_eq(p_peek(p), TK_IDENT, "worker")) {
@@ -663,7 +667,7 @@ static AstNode* parse_parallel_for(Parser* p, const char* gate,
         }
     }
     if (!tok_eq(p_peek(p), TK_PUNCT, "{")) {
-        parser_fail(p, p_peek(p), "expected '{' after @parallel @for (...)");
+        parser_fail(p, p_peek(p), "expected '{' after @parallel for (...)");
         return NULL;
     }
     p_next(p);
@@ -672,13 +676,13 @@ static AstNode* parse_parallel_for(Parser* p, const char* gate,
         AstNode* s = parse_stmt(p);
         if (!s) return NULL;
         if (n->nbody >= SHADOW_BODY_CAP) {
-            parser_fail_body_cap(p, p_peek(p), "@parallel @for body");
+            parser_fail_body_cap(p, p_peek(p), "@parallel for body");
             return NULL;
         }
         n->body[n->nbody++] = s;
     }
     if (!p_accept(p, TK_PUNCT, "}")) {
-        parser_fail(p, p_peek(p), "expected '}' to close @parallel @for");
+        parser_fail(p, p_peek(p), "expected '}' to close @parallel for");
         return NULL;
     }
     return n;
@@ -993,7 +997,7 @@ static AstNode* parse_parallel_head(Parser* p) {
         return NULL;
     p_next(p); /* @ */
     p_next(p); /* parallel */
-    if (peek_at_for(p))
+    if (peek_parallel_at_for(p) || peek_parallel_for(p))
         return parse_parallel_for(p, "", "");
     pred[0] = 0;
     gate[0] = 0;
@@ -1002,7 +1006,7 @@ static AstNode* parse_parallel_head(Parser* p) {
         if (!parallel_spell_cond(p, "@parallel predicate too long", pred,
                                  sizeof(pred)))
             return NULL;
-        if (peek_at_for(p)) {
+        if (peek_parallel_at_for(p) || peek_parallel_for(p)) {
             parser_fail(p, p_peek(p), "expected '{' after @parallel (...)");
             return NULL;
         }
@@ -1046,10 +1050,10 @@ static AstNode* parse_parallel_head(Parser* p) {
             if (!parallel_spell_cache_names(p, cache, sizeof(cache)))
                 return NULL;
         }
-        if (!peek_at_for(p)) {
+        if (!peek_parallel_at_for(p) && !peek_parallel_for(p)) {
             parser_fail(p, p_peek(p),
                         "@parallel wait (...) [cache (...)] requires "
-                        "`@for (name in lo..hi)`");
+                        "`for (name in lo..hi)`");
             return NULL;
         }
         n = parse_parallel_for(p, gate, pred);
@@ -1062,9 +1066,9 @@ static AstNode* parse_parallel_head(Parser* p) {
                     "cache (name) requires the wait (gate) form");
         return NULL;
     }
-    if (peek_at_for(p)) {
+    if (peek_parallel_at_for(p) || peek_parallel_for(p)) {
         parser_fail(p, p_peek(p),
-                    "@parallel seq (...) with `@for` requires 'wait (gate)'");
+                    "@parallel seq (...) with 'for' requires 'wait (gate)'");
         return NULL;
     }
     n = parse_parallel_block(p);

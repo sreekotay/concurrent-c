@@ -645,7 +645,7 @@ static void !>(CCError) compress_seekable(CompressRun* run, int in_fd, size_t fi
     };
 
     int i;
-    @parallel seq (use_par) wait (ts) cache (zs) @for (i in 0..n) {
+    @parallel seq (use_par) wait (ts) cache (zs) for (i in 0..n) {
         check_interrupt() !>;
         size_t off = (size_t)i * block;
         size_t remain = file_len - off;

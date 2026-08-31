@@ -11,7 +11,7 @@ static int run(int use_par, int cut, int* out_fin) {
     int i;
     int xs[N];
     for (i = 0; i < N; i++) xs[i] = 0;
-    bool fin = @parallel seq (use_par) wait (ts) @for (i in 0..N) {
+    bool fin = @parallel seq (use_par) wait (ts) for (i in 0..N) {
         @stage (ts, 0, i) {
             xs[i] = 1;
         }
@@ -37,7 +37,7 @@ static int run_assign(void) {
     CCTurnstile ts@(2, 1, arena) !> @destroy;
     int i;
     bool fin;
-    fin = @parallel seq (0) wait (ts) @for (i in 0..N) {
+    fin = @parallel seq (0) wait (ts) for (i in 0..N) {
         @stage (ts, 0, i) { }
     } !>.wait()!>;
     return fin ? 0 : 1;

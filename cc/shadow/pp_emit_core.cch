@@ -2755,6 +2755,203 @@ static void shadow_variant_packed_materialize(char* expr, size_t cap,
     if (strlen(out) < cap) snprintf(expr, cap, "%s", out);
 }
 
+/* End of one `case` / `default` body at switch-body depth (depth 0). */
+static const char* shadow_switch_case_body_end(const char* start) {
+    const char* p = start;
+    int depth = 0;
+    while (*p) {
+        if (depth == 0) {
+            if (strncmp(p, "case", 4) == 0 && !shadow_is_id(p[4]) &&
+                (p == start || !shadow_is_id(p[-1]))) {
+                const char* q = p + 4;
+                while (*q == ' ' || *q == '\t') q++;
+                if (*q == '.' || shadow_is_id(*q)) return p;
+            }
+            if (strncmp(p, "default", 7) == 0 && !shadow_is_id(p[7]) &&
+                (p == start || !shadow_is_id(p[-1]))) {
+                const char* q = p + 7;
+                while (*q == ' ' || *q == '\t') q++;
+                if (*q == ':') return p;
+            }
+            if (*p == '}') return p;
+        }
+        if (*p == '{') depth++;
+        else if (*p == '}') depth--;
+        p++;
+    }
+    return p;
+}
+
+static void shadow_variant_arm_bind_proj(char* out, size_t cap, ShadowVariant* v,
+                                        int ma, const char* subj, int subj_ptr) {
+    if (!out || !cap || !v || ma < 0 || !subj) {
+        if (out && cap) out[0] = 0;
+        return;
+    }
+    if (v->is_packed) {
+        if (subj_ptr)
+            snprintf(out, cap, "%s__cc_get_%s(%s)", v->name, v->arms[ma], subj);
+        else
+            snprintf(out, cap, "%s__cc_get_%s(&(%s))", v->name, v->arms[ma],
+                     subj);
+    } else if (subj_ptr) {
+        snprintf(out, cap, "(%s)->u.%s", subj, v->arms[ma]);
+    } else {
+        snprintf(out, cap, "(%s).u.%s", subj, v->arms[ma]);
+    }
+}
+
+/* `case .arm(bind):` → `case Name_arm:` plus a dominated payload binding. */
+static void shadow_rewrite_switch_case_bindings(char* body, size_t cap,
+                                                const char* subj, ShadowVariant* v,
+                                                int subj_ptr) {
+    char stack[SHADOW_VARIANT_REWRITE_BUF];
+    char* tmp = stack;
+    char* heap = NULL;
+    size_t tmp_cap = sizeof(stack);
+    const char* p;
+    char* o;
+    size_t orem;
+    size_t blen;
+    if (!body || !cap || !v || !subj || !subj[0]) return;
+    blen = strlen(body);
+    if (blen + 4096 > tmp_cap) {
+        tmp_cap = blen + 4096 + 1;
+        heap = (char*)malloc(tmp_cap);
+        if (!heap) return;
+        tmp = heap;
+    }
+    p = body;
+    o = tmp;
+    orem = tmp_cap - 1;
+    while (*p) {
+        if (strncmp(p, "case", 4) == 0 && !shadow_is_id(p[4]) &&
+            (p == body || !shadow_is_id(p[-1]))) {
+            const char* q = p + 4;
+            const char* arm;
+            const char* e;
+            const char* bind = NULL;
+            const char* bind_e = NULL;
+            ShadowVariant* mv;
+            int ma;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '.') {
+                arm = q + 1;
+                while (*arm == ' ' || *arm == '\t') arm++;
+                e = arm;
+                while (*e && shadow_is_id(*e)) e++;
+                if (e > arm &&
+                    shadow_variant_arm_match(v, body, q, arm, (size_t)(e - arm),
+                                             &mv, &ma)) {
+                    const char* after = e;
+                    while (*after == ' ' || *after == '\t') after++;
+                    if (*after == '(') {
+                        bind = after + 1;
+                        bind_e = bind;
+                        while (*bind_e && shadow_is_id(*bind_e)) bind_e++;
+                        if (*bind_e == ')' && bind_e > bind) after = bind_e + 1;
+                        else {
+                            bind = NULL;
+                            after = e;
+                        }
+                    } else
+                        after = e;
+                    while (*after == ' ' || *after == '\t') after++;
+                    if (bind && *after == ':' && !mv->is_void[ma]) {
+                        const char* colon = after;
+                        const char* body0 = colon + 1;
+                        const char* body_end;
+                        char bind_name[64];
+                        char proj[256];
+                        char prelude[384];
+                        size_t bind_len = (size_t)(bind_e - bind);
+                        int n;
+                        int braced;
+                        if (bind_len >= sizeof(bind_name)) bind_len = sizeof(bind_name) - 1;
+                        memcpy(bind_name, bind, bind_len);
+                        bind_name[bind_len] = 0;
+                        shadow_variant_arm_bind_proj(proj, sizeof(proj), mv, ma,
+                                                     subj, subj_ptr);
+                        while (*body0 == ' ' || *body0 == '\t' || *body0 == '\n' ||
+                               *body0 == '\r')
+                            body0++;
+                        body_end = shadow_switch_case_body_end(body0);
+                        braced = (*body0 == '{');
+                        n = snprintf(o, orem, "case %s_%s:", mv->name, mv->arms[ma]);
+                        if (n < 0 || (size_t)n >= orem) {
+                            orem = 0;
+                            break;
+                        }
+                        o += n;
+                        orem -= (size_t)n;
+                        n = snprintf(prelude, sizeof(prelude), "%s %s = %s;",
+                                     mv->tys[ma], bind_name, proj);
+                        if (braced) {
+                            const char* open = body0;
+                            size_t mid = (size_t)(open + 1 - (colon + 1));
+                            if (mid > orem) {
+                                orem = 0;
+                                break;
+                            }
+                            memcpy(o, colon + 1, mid);
+                            o += mid;
+                            orem -= mid;
+                            n = snprintf(o, orem, "\n%s\n", prelude);
+                            if (n < 0 || (size_t)n >= orem) {
+                                orem = 0;
+                                break;
+                            }
+                            o += n;
+                            orem -= (size_t)n;
+                            p = open + 1;
+                            continue;
+                        }
+                        n = snprintf(o, orem, "\n{\n%s\n", prelude);
+                        if (n < 0 || (size_t)n >= orem) {
+                            orem = 0;
+                            break;
+                        }
+                        o += n;
+                        orem -= (size_t)n;
+                        {
+                            size_t bl = (size_t)(body_end - body0);
+                            if (bl > orem) {
+                                orem = 0;
+                                break;
+                            }
+                            memcpy(o, body0, bl);
+                            o += bl;
+                            orem -= bl;
+                        }
+                        n = snprintf(o, orem, "\n}\n");
+                        if (n < 0 || (size_t)n >= orem) {
+                            orem = 0;
+                            break;
+                        }
+                        o += n;
+                        orem -= (size_t)n;
+                        p = body_end;
+                        continue;
+                    }
+                }
+            }
+        }
+        if (orem == 0) break;
+        *o++ = *p++;
+        orem--;
+    }
+    *o = 0;
+    if (orem == 0) {
+        fprintf(stderr,
+                "error: switch case-binding rewrite buffer full (refuse "
+                "truncated emit)\n");
+        free(heap);
+        return;
+    }
+    if (strlen(tmp) < cap) snprintf(body, cap, "%s", tmp);
+    free(heap);
+}
+
 /* Rewrite variant designators / arm projections in leftover expr text.
  * `{ .num = 42 }` → `{ .kind = Name_num, .u.num = 42 }` when Name known;
  * `.kind == .num` → `.kind == Name_num`; `v.num` → `v.u.num` for arms. */
@@ -3008,11 +3205,20 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
                 if (e > arm &&
                     shadow_variant_arm_match(v, expr, q, arm, (size_t)(e - arm),
                                              &mv, &ma)) {
-                    int n = snprintf(o, rem, "case %s_%s", mv->name, mv->arms[ma]);
+                    const char* after = e;
+                    int n;
+                    while (*after == ' ' || *after == '\t') after++;
+                    if (*after == '(') {
+                        const char* b = after + 1;
+                        const char* be = b;
+                        while (*be && shadow_is_id(*be)) be++;
+                        if (*be == ')' && be > b) after = be + 1;
+                    }
+                    n = snprintf(o, rem, "case %s_%s", mv->name, mv->arms[ma]);
                     if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
                     o += n;
                     rem -= (size_t)n;
-                    p = e;
+                    p = after;
                     goto cont;
                 }
             }
@@ -7587,6 +7793,8 @@ static int shadow_variant_diag_ctor(ShadowCtx* ctx, AstNode* st, CEmit* out,
     first_arm[0] = 0;
     if (!expr) return 0;
     v = vty ? shadow_variant_find(vty) : NULL;
+    if (!v && lhs_for_braced && lhs_for_braced[0])
+        v = shadow_variant_for_recv(lhs_for_braced);
     brace = expr;
     while (*brace == ' ' || *brace == '\t') brace++;
     /* Strip outer `(Name){` compound form for scanning. Plain-struct
@@ -7608,6 +7816,23 @@ static int shadow_variant_diag_ctor(ShadowCtx* ctx, AstNode* st, CEmit* out,
     if (*brace != '{') {
         /* braced assign: rhs may be `{ … }` without type prefix */
         return 0;
+    }
+    if (v && !is_compound_lit) {
+        const char* q = brace + 1;
+        char msg[384];
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+        if (*q == '0') {
+            const char* r = q + 1;
+            while (*r == ' ' || *r == '\t' || *r == '\n' || *r == '\r') r++;
+            if (*r == '}' || *r == ',') {
+                snprintf(msg, sizeof(msg),
+                         "variant '%s' requires an explicit arm — `{0}` "
+                         "zero-initializes to '.%s', not an empty value",
+                         v->name, v->arms[0]);
+                shadow_variant_err_loc(ctx, st, out, "{0}", 0, msg);
+                return 1;
+            }
+        }
     }
     p = brace + 1;
     while (*p) {
@@ -7870,8 +8095,28 @@ static int shadow_variant_diag_switch(ShadowCtx* ctx, AstNode* st, CEmit* out,
                     shadow_variant_err_loc(ctx, st, out, needle, 0, msg);
                     return 1;
                 }
-                covered |= 1u << ai;
-                p = e;
+                {
+                    const char* after = e;
+                    while (*after == ' ' || *after == '\t') after++;
+                    if (*after == '(') {
+                        const char* b = after + 1;
+                        const char* be = b;
+                        while (*be && shadow_is_id(*be)) be++;
+                        if (*be == ')' && be > b) {
+                            if (v->is_void[ai]) {
+                                snprintf(msg, sizeof(msg),
+                                         "void arm '.%.*s' cannot bind a payload",
+                                         (int)alen, arm);
+                                shadow_variant_err_loc(ctx, st, out, needle, 0,
+                                                      msg);
+                                return 1;
+                            }
+                            after = be + 1;
+                        }
+                    }
+                    covered |= 1u << ai;
+                    p = after;
+                }
                 continue;
             }
             /* tag constant Name_arm */

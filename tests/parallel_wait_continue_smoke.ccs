@@ -12,7 +12,7 @@ static int run(int use_par, int* xs) {
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
     CCTurnstile ts@(4, 1, arena) !> @destroy;
     int i;
-    @parallel seq (use_par) wait (ts) @for (i in 0..N) {
+    @parallel seq (use_par) wait (ts) for (i in 0..N) {
         if ((i % 2) == 0)
             continue;
         @stage (ts, 0, i) {

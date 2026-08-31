@@ -354,9 +354,9 @@ bugs.
 | `@with_deadline` | Apply deadline to a block                                             | `@with_deadline(seconds(5)) { … }`     |
 | `@parallel`      | Join independent assignment arms, or walk an index range              | `@parallel { a = f(); b = g(); } !>.wait()!>;` |
 | `@parallel (pred)` | Same join; spawn if `pred`, otherwise run the arms in order         | `@parallel (d < k) { a = f(); b = g(); } !>.wait()!>;` |
-| `@parallel @for`  | Independent iterations over a half-open integer range                 | `@parallel @for (i in 0..n) { … } !>.wait()!>;` |
+| `@parallel for`  | Independent iterations over a half-open integer range                 | `@parallel for (i in 0..n) { … } !>.wait()!>;` |
 | `@parallel seq (cond)` | Same join; `seq` names the denial: run the arms in order         | `@parallel seq (use_par) { a = f(); b = g(); } !>.wait()!>;` |
-| `@parallel wait (ts) @for` | Ordered spawn loop over a turnstile; `bool !>(CCError)` | `bool fin = @parallel wait (ts) @for (i in 0..n) { step(i) !>; } !>;` |
+| `@parallel wait (ts) @for` | Ordered spawn loop over a turnstile; `bool !>(CCError)` | `bool fin = @parallel wait (ts) for (i in 0..n) { step(i) !>; } !>;` |
 | `@serial`        | Multi-statement arm of `@parallel { }`; assigns one outer name        | `@serial { int t = f(); a = t; }`      |
 | `@destroy`     | Attach cleanup to a result-unwrap                                       | `FILE* f = open() !> @destroy;`         |
 | `@comptime`    | Compile-time evaluation / conditional                                   | `@comptime if (DEBUG) { }`             |
@@ -389,9 +389,9 @@ bugs.
 | `@errhandler(E e) stmt` / `{ }` | Block-scoped handler for Result error type `E` (§3.1)    | `@errhandler(CCError e) cc_error_exit(e);` |
 | `@parallel { arms }`            | `CCParallel !>(CCError)` join of `name = expr;`, `expr !>;`, or `@serial` arms (§8.11) | `@parallel { a = f(); b = g(); } !>.wait()!>;` |
 | `@parallel (pred) { arms }`     | Same join; spawn if `pred`, else run in order (§8.11.3)   | `@parallel (d < k) { a = f(); b = g(); } !>.wait()!>;` |
-| `@parallel @for (i in lo..hi)`   | Independent iterations over a half-open range (§8.11.4)   | `@parallel @for (y in 0..h) { row(y); } !>.wait()!>;` |
+| `@parallel for (i in lo..hi)`   | Independent iterations over a half-open range (§8.11.4)   | `@parallel for (y in 0..h) { row(y); } !>.wait()!>;` |
 | `@parallel seq (cond) { arms }` | Same join; named sequential denial (§8.11.5)              | `@parallel seq (use_par) { a = f(); b = g(); } !>.wait()!>;` |
-| `@parallel [seq (cond)] wait (ts) @for` | Ordered spawn loop over a turnstile; `bool !>(CCError)` (§8.11.6) | `bool fin = @parallel wait (ts) @for (i in 0..n) { step(i) !>; } !>;` |
+| `@parallel [seq (cond)] wait (ts) @for` | Ordered spawn loop over a turnstile; `bool !>(CCError)` (§8.11.6) | `bool fin = @parallel wait (ts) for (i in 0..n) { step(i) !>; } !>;` |
 | `@serial { stmts }`             | Multi-statement arm of `@parallel { }` (§8.11.2)          | `@serial { int t = f(); a = t; }`          |
 | `worker (w)`                    | Wait-for binder: the runner slot index (§8.11.6)          | `wait (ts) @for (i in 0..n) worker (w) { z[w]… }` |
 | `cache (name, …)`               | Wait-for clause: warm scratch, instance unobservable (§8.11.6) | `wait (ts) cache (zs) @for (i in 0..n) { … &zs … }` |
@@ -459,9 +459,9 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cl
 | `@parallel { a = …; b = …; }` | `CCParallel !>(CCError)` join. Always tries to spawn. | `@parallel { left = f(); right = g(); } !>.wait()!>;` |
 | `@parallel { @serial { … } … }` | Same join; an arm may be ordinary C that writes one outer name. | `@parallel { @serial { int t = f(); a = t; } b = g(); } !>.wait()!>;` |
 | `@parallel (pred) { a = …; b = …; }` | Same arms. Spawn if `pred`; otherwise serial. | `@parallel (d < k) { left = f(); right = g(); } !>.wait()!>;` |
-| `@parallel @for (i in lo..hi) { }` | Independent iterations over a half-open integer range. Bisects; may sequentialize. | `@parallel @for (y in 0..h) { row(y); } !>.wait()!>;` |
+| `@parallel for (i in lo..hi) { }` | Independent iterations over a half-open integer range. Bisects; may sequentialize. | `@parallel for (y in 0..h) { row(y); } !>.wait()!>;` |
 | `@parallel seq (cond) { a = …; b = …; }` | Same arms; `seq` names the denial: run in order when `cond` is false. | `@parallel seq (use_par) { left = f(); right = g(); } !>.wait()!>;` |
-| `@parallel [seq (cond)] wait (ts) @for (i in lo..hi) { }` | Ordered spawn loop: `bool !>(CCError)`; `enter(i)` in loop order on the caller, depth-capped, `leave()` after each body. | `bool fin = @parallel wait (ts) @for (i in 0..n) { step(i) !>; } !>;` |
+| `@parallel [seq (cond)] wait (ts) for (i in lo..hi) { }` | Ordered spawn loop: `bool !>(CCError)`; `enter(i)` in loop order on the caller, depth-capped, `leave()` after each body. | `bool fin = @parallel wait (ts) for (i in 0..n) { step(i) !>; } !>;` |
 
 
 ### Deadline Scope Forms
@@ -3456,7 +3456,7 @@ This section specifies:
 - **§8.8 Blocking, Stalling, and Execution Contexts** — execution model for blocking operations, stalling classification, and cancellation guarantees
 - **§8.9 Error handling in async and nurseries** — composition of result unwrap operators (`?>`, `!>`, `@err`, `@errhandler`) defined in §3.1 with async functions and nursery teardown
 - **§8.10 Named exclusive sections (`CCExclusive`)** — arena-backed, name-keyed mutual exclusion for short critical sections; `acquire_when` gates entry on a predicate
-- **§8.11 `@parallel`** — `CCParallel !>(CCError)` join of independent assignments or `@serial` arms (§8.11.2), live dest / `.wait()` / `.cancel()` / `.adopt()`, optional spawn predicate, `@parallel @for` over a half-open index range, and `@parallel wait @for` as `bool !>(CCError)` (§8.11.6)
+- **§8.11 `@parallel`** — `CCParallel !>(CCError)` join of independent assignments or `@serial` arms (§8.11.2), live dest / `.wait()` / `.cancel()` / `.adopt()`, optional spawn predicate, `@parallel for` over a half-open index range, and `@parallel wait @for` as `bool !>(CCError)` (§8.11.6)
 - **§8.12 Ordered pipeline turnstile (`CCTurnstile`)** — depth cap plus sequenced stages; stage wait/pass use create-on-first-touch gate cells
 
 ---
@@ -5355,7 +5355,7 @@ void !>(CCError) cc_exclusive_mutex_acquire_when_into(CCExclusiveMutex* m,
 
 `@parallel` names a join of independent work. It is not a nursery. The brace form is `CCParallel !>(CCError)`: create can fail; `.wait()` is the join. The implementation may run some arms or iterations on other workers, or run all of them on the caller. `n.spawn` does not sequentialize; `@parallel` may.
 
-The form is selected by the tokens after `@parallel`: `{` (always try to spawn), `(` or `seq (` (spawn if the predicate, §8.11.3, §8.11.5), `wait (` (ordered spawn loop over a turnstile; an expression of type `bool !>(CCError)`, §8.11.6), or `@for` (bisected range, §8.11.4). Assignment join and `@parallel @for` are `CCParallel !>(CCError)`. A statement consumes the Result and waits (`!>.wait()!>;`) or binds the handle (`CCParallel h = … !>;`). A bare construct is an unconsumed Result. The wait-for form is `bool !>(CCError)`.
+The form is selected by the tokens after `@parallel`: `{` (always try to spawn), `(` or `seq (` (spawn if the predicate, §8.11.3, §8.11.5), `wait (` (ordered spawn loop over a turnstile; an expression of type `bool !>(CCError)`, §8.11.6), or `@for` (bisected range, §8.11.4). Assignment join and `@parallel for` are `CCParallel !>(CCError)`. A statement consumes the Result and waits (`!>.wait()!>;`) or binds the handle (`CCParallel h = … !>;`). A bare construct is an unconsumed Result. The wait-for form is `bool !>(CCError)`.
 
 **Captures.** A body or arm may use locals of the enclosing frame. A pointer-typed name is captured by copying the pointer; uses inside the body see that pointer value, and writes through it hit the pointee. An array name copies the decayed element pointer. Every other name is captured by reference: the lowering takes the local's address, and every use denotes the frame's object itself. A write through a reference capture is visible to the frame after `.wait()` and to concurrently running arms or iterations, subject to the construct's independence and ordering rules. Reference-captured objects must outlive `.wait()`. A dest-live handle does not extend those objects' storage; a pointer capture does not require the pointer slot to outlive `.wait()`, only the pointee. The loop index of a `for` form is a per-iteration value, not a capture. These rules are distinct from closure-literal capture lists (§2.2), which copy by value because a closure may escape its frame.
 
@@ -5417,7 +5417,7 @@ T a, b;
 
 `@serial { … }` is an arm of `@parallel { }`. Its body is ordinary C. It assigns exactly one simple outer name already in scope. Locals, `if`, `for`, and inner `{ }` are C scope inside the arm. After the join, that outer write is visible the same way an assignment arm's write is.
 
-`@serial` is legal only as a direct child of `@parallel { }`. It is not a handle, not an `else`, and not a file- or function-scope statement. It is ill-formed in `@parallel @for`, nested inside another `@serial`, without a following `{ … }`, with an empty body, with no simple outer assignment, or with two or more distinct simple outer names. An assignment to a field, subscript, or indirection does not count as the outer name.
+`@serial` is legal only as a direct child of `@parallel { }`. It is not a handle, not an `else`, and not a file- or function-scope statement. It is ill-formed in `@parallel for`, nested inside another `@serial`, without a following `{ … }`, with an empty body, with no simple outer assignment, or with two or more distinct simple outer names. An assignment to a field, subscript, or indirection does not count as the outer name.
 
 A `for` inside `@serial` is ordinary C. `return` in the arm is the assignment-join `return` of §8.11.1.
 
@@ -5435,10 +5435,10 @@ T left, right;
 
 Independence is unchanged: reading another arm's destination is undefined on both paths.
 
-#### 8.11.4 `@parallel @for`
+#### 8.11.4 `@parallel for`
 
 ```c
-@parallel @for (i in lo..hi) {
+@parallel for (i in lo..hi) {
     work(i);
 } !>.wait()!>;
 ```
@@ -5447,7 +5447,7 @@ Independence is unchanged: reading another arm's destination is undefined on bot
 
 A `for` statement as a direct child of `@parallel { }` is ill-formed. The loop is a form of the keyword, not a statement the brace happens to contain.
 
-Lowering bisects the range: one half is spawned, the other runs on the caller, then the spawn is joined. A span of length 0 or 1 runs as an ordinary sequential `for`. Nested `@parallel @for` bisects the same way. If a spawn fails, that half runs on the caller.
+Lowering bisects the range: one half is spawned, the other runs on the caller, then the spawn is joined. A span of length 0 or 1 runs as an ordinary sequential `for`. Nested `@parallel for` bisects the same way. If a spawn fails, that half runs on the caller.
 
 Iterations must not race. Disjoint writes (`img[y * w + x] = …` for distinct `(x, y)`) are the caller's fact. A `goto` whose target is not a label in the same `for` body is ill-formed.
 
@@ -5469,14 +5469,14 @@ Iterations must not race. Disjoint writes (`img[y * w + x] = …` for distinct `
 #### 8.11.6 `wait` — ordered spawn loop
 
 ```c
-bool fin = @parallel seq (use_par) wait (ts) @for (i in 0..n) {
+bool fin = @parallel seq (use_par) wait (ts) for (i in 0..n) {
     step(job, i) !>;
 } !>;
 ```
 
-The wait-for form is an expression of type `bool !>(CCError)`. `ok(true)` means the range ran out. `ok(false)` means a `break` that targets this wait-for cancelled the nursery. A ticket error is `err`. `continue` does not produce `false`. `return` leaves the function after drain and does not yield the construct's Result. Assignment join and bisect `@parallel @for` remain statements.
+The wait-for form is an expression of type `bool !>(CCError)`. `ok(true)` means the range ran out. `ok(false)` means a `break` that targets this wait-for cancelled the nursery. A ticket error is `err`. `continue` does not produce `false`. `return` leaves the function after drain and does not yield the construct's Result. Assignment join and bisect `@parallel for` remain statements.
 
-`@parallel wait (gate) @for (i in lo..hi) { … }` runs the loop as an ordered spawn loop. `gate` is the name of a `CCTurnstile` or `CCTurnstileRW` (§8.12) in scope; any other type is ill-formed. Iterations are tickets: the construct calls `enter(i)` on the caller in loop order — the depth cap bounds in-flight iterations — then spawns the body. `leave()` runs after the body on every path. If a spawn is denied, that iteration's body runs on the caller before the next `enter`; the token is never leaked. `wait` without `for`, or with an assignment-join body, is ill-formed.
+`@parallel wait (gate) for (i in lo..hi) { … }` runs the loop as an ordered spawn loop. `gate` is the name of a `CCTurnstile` or `CCTurnstileRW` (§8.12) in scope; any other type is ill-formed. Iterations are tickets: the construct calls `enter(i)` on the caller in loop order — the depth cap bounds in-flight iterations — then spawns the body. `leave()` runs after the body on every path. If a spawn is denied, that iteration's body runs on the caller before the next `enter`; the token is never leaked. `wait` without `for`, or with an assignment-join body, is ill-formed.
 
 The optional `seq (cond)` prefix composes: when `cond` is false the same body runs as a plain sequential `for` on the caller, with no `enter`/`leave` and no spawn. The construct also takes this path when it cannot allocate its join scope. Stage `wait`/`pass` still run: on the sequential path `pass` precedes the successor's `wait` in program order, so the gate cell is UNARMED and the wait returns immediately.
 
@@ -5490,15 +5490,15 @@ Body statements may raise with `!>`. Errors are stop-starting: a failure stops n
 
 The loop-carried case is the point: state that hops from ticket `i` to `i+1` (a chained compression dictionary, a running checksum, an output file position) sits in an `@stage` block in the body and reads exactly as it does in the sequential loop. The parallel run and the denied run produce the same output.
 
-A wait-for whose body can so `break` cannot discard the bool: `bool fin = @parallel wait (ts) @for (…) { … if (c) break; } !>;` is the form. `int` and `_Bool` are the C spellings of the same Ok payload. `fin = @parallel wait (…) @for (…) { … } !>;` binds a name already in scope. A bare wait-for statement with no targeting `break` is implicitly unwrapped (`!>;`) into the matching handler. Discarding the bool when `break` is present is ill-formed. A bool bind on assignment join or `@parallel @for` is ill-formed.
+A wait-for whose body can so `break` cannot discard the bool: `bool fin = @parallel wait (ts) for (…) { … if (c) break; } !>;` is the form. `int` and `_Bool` are the C spellings of the same Ok payload. `fin = @parallel wait (…) for (…) { … } !>;` binds a name already in scope. A bare wait-for statement with no targeting `break` is implicitly unwrapped (`!>;`) into the matching handler. Discarding the bool when `break` is present is ill-formed. A bool bind on assignment join or `@parallel for` is ill-formed.
 
 `break`, `continue`, and `return` in the body are the same statements as in a `for`. On the sequential path they are those statements. On the parallel path they join first: `break` and `return` cancel so no new ticket enters; in-flight tickets finish and pass every `@stage` they have not passed; a cancelled ticket skips the work inside an `@stage`. `return` is `break` then `return`: the same drain as `break`, then the function returns that value. The construct does not wait for a lower ticket that has not returned. If two tickets both `return`, which value is taken is not specified. A later ticket's error, including `CANCELLED` from the drain, does not beat an earlier ticket's `return`; a lower failing ticket still beats a later `return`. `break` alone leaves the construct as `ok(false)`. `continue` finishes the ticket the same way without cancelling. Stage-guarded effects and other self-serializing writes are the serial program's; ambient effects of a drained successor (an atomic, a log line, a counter) may have occurred. A `goto` whose target is not a label in the same wait-for body is ill-formed: the body is a ticket, and a jump cannot leave it.
 
 #### 8.11.7 Grain and limits
 
-An assignment or `@serial` arm after the first is spawned as a fiber and attached to the dest; `.wait()` joins. `@parallel @for` spawns one half of a span at each bisection; a span of length 0 or 1 is a sequential `for`. In-flight `@parallel` fibers are capped at 256 times the number of online processors; further arms and leftover spans run on the caller. That ceiling is an allocation bound, not a grain. The construct does not estimate how much work an arm contains. A caller who knows a cutoff writes it on the join (`@parallel (d < k) { … }`) so the same arms run in parallel above the cut and in order below it.
+An assignment or `@serial` arm after the first is spawned as a fiber and attached to the dest; `.wait()` joins. `@parallel for` spawns one half of a span at each bisection; a span of length 0 or 1 is a sequential `for`. In-flight `@parallel` fibers are capped at 256 times the number of online processors; further arms and leftover spans run on the caller. That ceiling is an allocation bound, not a grain. The construct does not estimate how much work an arm contains. A caller who knows a cutoff writes it on the join (`@parallel (d < k) { … }`) so the same arms run in parallel above the cut and in order below it.
 
-The range bounds of `@parallel @for` are converted to `int`. A span whose length does not fit in `int` is outside this form.
+The range bounds of `@parallel for` are converted to `int`. A span whose length does not fit in `int` is outside this form.
 
 An implementation may reject a function that exceeds a finite number of `@parallel` constructs, assignment arms, or captured names. The first arm of an assignment join always runs on the caller.
 
@@ -6209,7 +6209,7 @@ owner (`@for (x in v)`) uses the live header. Walking the leftover
 view still loads `ptr` (Gap, same as `s.ptr[i]`).
 
 The walk is not “a nicer `s[i]`.” Users do not write `s.access(i)`. C
-`for (;;)` is unchanged. `@parallel @for (i in lo..hi)` is §8.11.4.
+`for (;;)` is unchanged. `@parallel for (i in lo..hi)` is §8.11.4.
 
 ---
 
@@ -8669,7 +8669,7 @@ An assignment `@parallel` block lowers to `cc_parallel_spawn` of a file-scope th
 
 `@parallel (pred) { … }` lowers to `if (!(pred)) {` the same arms in order `} else` a file-scope spawn helper. A false predicate does not call spawn. The helper holds `CCTask` and env so the sequential path stays a small function.
 
-`@parallel @for (i in lo..hi)` lowers to a file-scope walk that bisects `[lo, hi)`: spawn one half, walk the other, join. A span of length ≤ 1, or a failed spawn, is a C `for` over that span. The walk environment is stack-allocated at the call site and copied for the spawned half.
+`@parallel for (i in lo..hi)` lowers to a file-scope walk that bisects `[lo, hi)`: spawn one half, walk the other, join. A span of length ≤ 1, or a failed spawn, is a C `for` over that span. The walk environment is stack-allocated at the call site and copied for the spawned half.
 
 Neither form introduces a nursery.
 

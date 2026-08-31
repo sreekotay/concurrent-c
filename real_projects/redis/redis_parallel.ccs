@@ -318,7 +318,7 @@ static bool !>(CCError) exec_mget_parallel(DB* db, Cmd* c, ConnEnc conn) {
     CCTurnstile ts@(K_MGET_CAP, 1, ts_arena) !> @destroy;
 
     conn->array_len(nkeys) !>;
-    @parallel wait (ts) @for (i in 0..nkeys) {
+    @parallel wait (ts) for (i in 0..nkeys) {
         char[:] key = c->args[i + 1];
         size_t si = shard_of(db, key);
         char snap_buf[4096];

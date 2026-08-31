@@ -24,7 +24,7 @@ static int run(CCTurnstile* ts, int* done) {
         return -1;
     }
     int i;
-    @parallel wait (ts) @for (i in 0..N) {
+    @parallel wait (ts) for (i in 0..N) {
         work(i, done) !>;
     } !>.wait()!>;
     return 0;

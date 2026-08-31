@@ -598,6 +598,14 @@ char* cc_comptime_strswitch_rewrite(const char* body, size_t body_len,
             continue;
         }
 
+        /* `@switch` is required for string cases. Consume `@` so a leftover
+         * sigil does not sit in front of the rewritten if/else (hook TU
+         * drops any chunk that still has `@`, which used to hide port_ufcs). */
+        if (c == '@' && i + 1 < body_len &&
+            cc__at_kw(body, body_len, i + 1, "switch")) {
+            i++;
+            c = body[i];
+        }
         if (cc__at_kw(body, body_len, i, "switch")) {
             size_t after = cc_skip_ws_and_comments(body, body_len, i + 6);
             size_t rpar = 0, lbrace = 0, rbrace = 0;
