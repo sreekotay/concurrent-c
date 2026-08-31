@@ -32,7 +32,7 @@ static int run_before(int* done) {
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
     CCTurnstile ts@(CAP, 1, arena) !> @destroy;
     int i;
-    @parallel wait (ts) for (i in 0..N) {
+    @parallel wait (ts) @for (i in 0..N) {
         before(i) !>;
         @stage (ts, 0, i) {
             done[i] = 1;
@@ -49,7 +49,7 @@ static int run_inside(int* done) {
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
     CCTurnstile ts@(CAP, 1, arena) !> @destroy;
     int i;
-    @parallel wait (ts) for (i in 0..N) {
+    @parallel wait (ts) @for (i in 0..N) {
         @stage (ts, 0, i) {
             inside(i, done) !>;
         }

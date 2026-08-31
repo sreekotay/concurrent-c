@@ -93,7 +93,7 @@ static int64_t !>(CCError) db_incrby(const char* key, int64_t delta) {
 static int64_t db_get_num(const char* key) {
     RedisValue* cell = db_lookup(key);
     if (!cell) return -1;
-    switch (cell) {
+    @switch (cell) {
         case .num: return cell->num;
         case .str: return -2;
     }

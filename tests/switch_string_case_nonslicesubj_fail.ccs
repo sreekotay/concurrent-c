@@ -3,7 +3,7 @@
 
 int main(void) {
     int name = 1;
-    switch (name) {
+    @switch (name) {
     case "GET":
         return 1;
     default:

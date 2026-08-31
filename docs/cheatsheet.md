@@ -194,13 +194,13 @@ Projection (`v.num` / `p->num`) is legal only when protected:
 
 | Protect | Meaning |
 |---------|---------|
-| `switch (v)` / `switch (p)` / `switch (h.cell)` + `case .arm:` | each case dominates that arm; every arm (`default:` forfeits the check) |
+| `@switch (v)` / `@switch (p)` / `@switch (h.cell)` + `case .arm:` | each case dominates that arm; every arm (`default:` forfeits the check) |
 | `if (v.kind == .arm)` in the same block | syntactic, not data-flow |
 | `v.arm ?> fallback` | inactive → value of the arm's type |
 | `v.arm !> { … }` | inactive → handler (must diverge) |
 
 ```c
-switch (cell) {
+@switch (cell) {
     case .num: cell->num += 1; break;
     case .txt: use(cell->txt.as_slice()); break;
 }
@@ -450,14 +450,14 @@ lengths). Point access is `s.at(i) !>`. Ordinary sites may read `.ptr` /
 Users do not write `s.access(i)`.
 
 ```c
-for (v in s) { … }            // walk (v is a copy; v = / &v are errors)
-for (&v in s) { … } !>;       // mut walk: v = … is .access store; write bound is Result
-for (i, v in s) { … }         // enumerate; i is size_t
-for (a, b in s, t) { … } !>;  // zip; void !>(CCError); unequal → @errhandler
-for (&a, b in s, t) { … } !>; // zip mut: a = … stores through s's peel
-for (i in lo..hi) { … }       // sequential range; hi < lo is empty
-for (ch in line.sub(lo, hi))  // view; compiler hoists a local
-for (&ch in line.sub(lo, hi)) { … } !>;
+@for (v in s) { … }            // walk (v is a copy; v = / &v are errors)
+@for (&v in s) { … } !>;       // mut walk: v = … is .access store; write bound is Result
+@for (i, v in s) { … }         // enumerate; i is size_t
+@for (a, b in s, t) { … } !>;  // zip; void !>(CCError); unequal → @errhandler
+@for (&a, b in s, t) { … } !>; // zip mut: a = … stores through s's peel
+@for (i in lo..hi) { … }       // sequential range; hi < lo is empty
+@for (ch in line.sub(lo, hi))  // view; compiler hoists a local
+@for (&ch in line.sub(lo, hi)) { … } !>;
 s.at(i) !>                    // point (Result)
 s.set(i, v) !>
 dst.copy(src) !> / dst.copy_overlap(src) !> / dst.fill(c) !>
@@ -468,12 +468,12 @@ char *p = s.ptr;              // peel; fields are read-only
 
 Subjects: a name, field path, or view (`s.sub(lo, hi)`, `s.trim()`,
 `str.as_slice()` / dest-init `char[:] v = str`). A vec is an extent —
-`for (x in v)` walks the grower. Dest-init `int[:] xs = v` is a view
-header (same convert as string); `for (x in v.as_slice())` is that
+`@for (x in v)` walks the grower. Dest-init `int[:] xs = v` is a view
+header (same convert as string); `@for (x in v.as_slice())` is that
 snapshot. A view is hoisted to a hidden local; mut walk stores
 through that header into the receiver. `T*` is not an extent. C `for (;;)`
 is unchanged.
-`@parallel for` is the concurrent cousin — same `in`, independent iterations.
+`@parallel @for` is the concurrent cousin — same `in`, independent iterations.
 A text slice interpolates in `${…}`.
 Tutorial: [typehooks — extent](typehooks-typeviews.md#extent--len--access).
 Recipe: [recipe_walk.ccs](../examples/recipe_walk.ccs).
@@ -498,8 +498,8 @@ Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
 | void host | `h.wait() !>(e) { (void)e; };` — UFCS `!>` lowers in void. No Result wrapper. |
 | `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; writes exactly one outer name. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. Body always runs. |
-| `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; span 0 or 1 is a plain `for`. |
-| `@parallel wait (ts) for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished (§8.11.6). |
+| `@parallel @for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; span 0 or 1 is a plain `for`. |
+| `@parallel wait (ts) @for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished (§8.11.6). |
 | `cache (zs)` | After `wait`: adopt enclosing scratch; instance identity unobservable. |
 | `@stage (ts.read, i) { … }` | Ticket handshake in a wait-for body; pass on every exit. Not a Result. |
 | `break` / `continue` / `return` | Same as `for`. Parallel path drains first. `return` is `break` then `return`. Two returns: unspecified which value (drain still happens). Join: `return` joins sibling arms first. Wait-for `break` is `ok(false)` and must be bound. |
@@ -526,11 +526,11 @@ CCParallel h2 = @parallel { c = p(); d = q(); } !>;
     b = g();
 } !>.wait()!>;
 
-@parallel for (i in 0..n) {    // half-open; bisects
+@parallel @for (i in 0..n) {    // half-open; bisects
     work(i);
 } !>.wait()!>;
 
-bool fin = @parallel wait (ts) for (i in 0..n) {
+bool fin = @parallel wait (ts) @for (i in 0..n) {
     @stage (ts, 0, i) { work(i); }
     if (done) break;           // ok(false); bind the bool
 } !>;
@@ -849,7 +849,7 @@ ccc examples/js/jsdemo.shcc         # CC→JS (guest; Node owns env)
 | Walk / dest-bulk buffers | [recipe_walk.ccs](../examples/recipe_walk.ccs) |
 | Owned or view / reopen | [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs) |
 | Worker pool | [recipe_worker_pool.ccs](../examples/recipe_worker_pool.ccs) |
-| Fan-out / `@parallel for` | [recipe_fanout_capture.ccs](../examples/recipe_fanout_capture.ccs) |
+| Fan-out / `@parallel @for` | [recipe_fanout_capture.ccs](../examples/recipe_fanout_capture.ccs) |
 | Ordered parallel | [recipe_ordered_parallel.ccs](../examples/recipe_ordered_parallel.ccs) |
 | `@parallel` / `@serial` | [recipe_parallel.ccs](../examples/recipe_parallel.ccs) |
 | Prepare A+B / hold / commit | [recipe_prepare_commit.ccs](../examples/recipe_prepare_commit.ccs) |

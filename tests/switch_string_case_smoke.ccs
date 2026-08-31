@@ -5,7 +5,7 @@
 #include <string.h>
 
 static int classify(CCSlice name) {
-    switch (name) {
+    @switch (name) {
     case "GET":
         return 1;
     case "SET":
@@ -18,7 +18,7 @@ static int classify(CCSlice name) {
 }
 
 static int fallthrough_pair(CCSlice name) {
-    switch (name) {
+    @switch (name) {
     case "A":
     case "B":
         return 10;

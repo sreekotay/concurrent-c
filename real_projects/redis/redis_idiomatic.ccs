@@ -160,7 +160,7 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
                 *err = CC_ERROR(CC_ERR_OUT_OF_MEMORY, "argv");
                 return RESP_PARSE_ERROR;
             }
-            for (i in 0..n) {
+            @for (i in 0..n) {
                 RespGArg a;
                 bool !>(CCError) ar =
                     RespGArg_try_read(src, avail, &pos, arena, &a);
@@ -262,7 +262,7 @@ static char[:] fold_name(char[:] src, char* buf, size_t cap) {
         char[:] empty = {0};
         return empty;
     }
-    for (i, ch in src) {
+    @for (i, ch in src) {
         char f = ch;
         if (f >= 'a' && f <= 'z') f -= 32;
         buf[i] = f;
@@ -306,7 +306,7 @@ static bool !>(CCError) rr_cmd_next(RespReader* reader, RedisCmd* out,
 #include "redis_db.cch"
 
 static RedisOp redis_op(char[:] name) {
-    switch (name) {
+    @switch (name) {
     case "PING":
         return REDIS_OP_PING;
     case "ECHO":
@@ -548,7 +548,7 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
     size_t nkeys = cmd->argc > 0 ? cmd->argc - 1 : 0;
     CCArena reply_arena = enc->reply_arena;
     DbCmdClock clock = {0};
-    switch (op) {
+    @switch (op) {
     case REDIS_OP_GET: {
         RedisEntry* cell;
         RedisValue* val;
@@ -557,7 +557,7 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
         cell = db_lookup_live(db, keys[0], &clock);
         if (!cell) return enc->null();
         val = &cell->val;
-        switch (val) {
+        @switch (val) {
         case .str:
             return enc->bulk(val->str.as_slice());
         case .num: {
@@ -612,7 +612,7 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
         cell = db_lookup_live(db, keys[0], &clock);
         if (!cell) return enc->integer(0);
         val = &cell->val;
-        switch (val) {
+        @switch (val) {
         case .str:
             return enc->integer((int64_t)val->str.len());
         case .num: {
@@ -695,7 +695,7 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
         int64_t removed = 0;
         if (!payload_ok(cmd->argc, 1, -1, 0))
             return enc->err("wrong number of arguments");
-        for (i in 0..nkeys) {
+        @for (i in 0..nkeys) {
             RedisEntry* cell = db_lookup_live(db, keys[i], &clock);
             if (!cell) continue;
             db_remove_entry(db, keys[i], cell);
@@ -708,7 +708,7 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
         int64_t found = 0;
         if (!payload_ok(cmd->argc, 1, -1, 0))
             return enc->err("wrong number of arguments");
-        for (i in 0..nkeys) {
+        @for (i in 0..nkeys) {
             if (db_lookup_live(db, keys[i], &clock)) found++;
         }
         return enc->integer(found);
@@ -720,7 +720,7 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
         /* Sketch shape: header then bulks. Mid-encode Err truncates the
          * array on the wire (conn closes) — same caveat as the sketch. */
         enc->array_len(nkeys) !>;
-        for (i in 0..nkeys) {
+        @for (i in 0..nkeys) {
             RedisEntry* cell = db_lookup_live(db, keys[i], &clock);
             RedisValue* val;
             if (!cell) {
@@ -728,7 +728,7 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
                 continue;
             }
             val = &cell->val;
-            switch (val) {
+            @switch (val) {
             case .str:
                 enc->bulk(val->str.as_slice()) !>;
                 break;
@@ -802,7 +802,7 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
             }
         }
         enc->array_len(matched) !>;
-        for (i in 0..matched)
+        @for (i in 0..matched)
             enc->bulk(hits[i]) !>;
         return cc_ok(true);
     }
@@ -841,7 +841,7 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
     if (cmd->argc == 0) return enc->err("empty command");
     op = redis_op(cmd->args[0]);
 
-    switch (op) {
+    @switch (op) {
     case REDIS_OP_PING:
         if (!payload_ok(cmd->argc, 0, 1, 0))
             return enc->err("wrong number of arguments");
@@ -856,7 +856,7 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
         char[:] get;
         if (cmd->argc != 3) return enc->err("wrong number of arguments");
         get = fold_name(cmd->args[1], sub, sizeof(sub));
-        switch (get) {
+        @switch (get) {
         case "GET":
             break;
         default:
@@ -995,7 +995,7 @@ static bool db_setup(RedisDb* db, size_t shard_count, const char* shard_src) {
     @defer conn->reply_arena.reset();
 
     *n_out = 0;
-    for (n in 0..(size_t)k_pipeline_window_cap) {
+    @for (n in 0..(size_t)k_pipeline_window_cap) {
         cc_arena_stack(cmd_a, k_cmd_arena);
         RedisCmd cmd = {0};
         bool has = rr_cmd_next(reader, &cmd, cmd_a) !>;

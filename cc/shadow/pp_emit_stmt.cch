@@ -4522,7 +4522,7 @@ static int shadow_pw_emit_exit(CEmit* out, ShadowCtx* ctx, const char* indent,
     return 1;
 }
 
-/* @parallel for: break/return write the shared exit cell, then leave
+/* @parallel @for: break/return write the shared exit cell, then leave
  * the walk. The construct site joins the other half, then break is
  * fallthrough and return is return from the function. */
 static int shadow_pf_emit_exit(CEmit* out, ShadowCtx* ctx, const char* indent,
@@ -4542,7 +4542,7 @@ static int shadow_pf_emit_exit(CEmit* out, ShadowCtx* ctx, const char* indent,
     return cemit_fmt(out, "%sreturn;\n", indent);
 }
 
-/* 1 = emitted, 0 = emit failed, -1 = not a wait-for / join / @parallel for return. */
+/* 1 = emitted, 0 = emit failed, -1 = not a wait-for / join / @parallel @for return. */
 static int shadow_par_try_return(CEmit* out, ShadowCtx* ctx, const char* indent,
                                  const char* rv) {
     if (ctx && ctx->pw_body == 2)
@@ -4831,7 +4831,7 @@ static int shadow_pw_collect_stages(AstNode** body, int nbody,
     return 1;
 }
 
-/* Join @serial / @parallel for: same handshake as wait-for. wait/pass
+/* Join @serial / @parallel @for: same handshake as wait-for. wait/pass
  * unwrap into a region handler; an error fail()s unpassed stages so a
  * parked wait wakes with err, then the enclosing @errhandler runs. */
 static int shadow_emit_stage_region(AstNode** body, int nbody, CEmit* dest,
@@ -5775,7 +5775,7 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                              use_cleanup);
     if (!st->par_wake) {
         fprintf(stderr,
-                "error: '@parallel for' must be joined with '!>.wait()!>'\n");
+                "error: '@parallel @for' must be joined with '!>.wait()!>'\n");
         out->err = 1;
         return 0;
     }
@@ -5783,7 +5783,7 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
     shadow_par_trim(st->b, lo, sizeof(lo));
     shadow_par_trim(st->c, hi, sizeof(hi));
     if (!lo[0] || !hi[0] || !st->a[0]) {
-        fprintf(stderr, "error: malformed @parallel for\n");
+        fprintf(stderr, "error: malformed @parallel @for\n");
         out->err = 1;
         return 0;
     }
@@ -5814,7 +5814,7 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
     for (k = 0; k < st->nbody; k++) {
         if (!shadow_par_scan_node(st->body[k], st->a, names, tys, &ncaps,
                                   SHADOW_PAR_CAP_MAX)) {
-            fprintf(stderr, "error: @parallel for capture table full\n");
+            fprintf(stderr, "error: @parallel @for capture table full\n");
             out->err = 1;
             return 0;
         }
@@ -6048,7 +6048,7 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
                        "%sif (cc_atomic_load(&__cc_pf_ex_%d.xk) == 2) {\n",
                        i1, id))
             return 0;
-        /* Nested @parallel for / wait-for: join this span, then the
+        /* Nested @parallel @for / wait-for: join this span, then the
          * enclosing construct's return (do not return from a void walk). */
         pr = shadow_par_try_return(out, ctx, i1, rty ? rvname : NULL);
         if (pr == 0) return 0;
@@ -6418,6 +6418,13 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         ShadowVariant* v = NULL;
         int have_desig = (st->d[0] && strstr(st->d, "case .") != NULL);
         int strsw = 0;
+        if (have_desig && strcmp(st->f, "cc_switch") != 0) {
+            fprintf(stderr,
+                    "error: variant switch requires `@switch`; "
+                    "use `@switch (v) { case .arm: ... }`\n");
+            g_shadow_ufcs_miss = 1;
+            return 0;
+        }
         /* Structured body (case labels + stmts) — preferred for !> unwrap. */
         if (st->nbody > 0 && !st->d[0] && !st->span_len) {
             char nested[80];
@@ -6441,6 +6448,13 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             strsw = shadow_strsw_try(st, out, ctx, indent, body, sizeof(body),
                                     expr, sizeof(expr));
             if (strsw < 0) return 0;
+            if (strsw && strcmp(st->f, "cc_switch") != 0) {
+                fprintf(stderr,
+                        "error: string switch requires `@switch`; "
+                        "use `@switch (name) { case \"GET\": ... }`\n");
+                g_shadow_ufcs_miss = 1;
+                return 0;
+            }
             if (!strsw) {
                 if (!cemit_fmt(out, "%sswitch (%s) {\n", indent, expr))
                     return 0;
@@ -7296,6 +7310,13 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         shadow_rewrite_variant_expr(header, sizeof(header), NULL);
         in_kind = shadow_for_parse_in(header, &fi);
         if (in_kind < 0) {
+            shadow_pw_pop_loop(ctx, pw, 0);
+            return 0;
+        }
+        if (in_kind > 0 && strcmp(st->f, "cc_for") != 0) {
+            fprintf(stderr,
+                    "error: walk loop requires `@for`; use `@for (... in ...)`\n");
+            g_shadow_ufcs_miss = 1;
             shadow_pw_pop_loop(ctx, pw, 0);
             return 0;
         }

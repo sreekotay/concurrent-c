@@ -3,7 +3,7 @@
 int main(void) {
     int s = 0;
     int i;
-    @parallel cache (s) for (i in 0..4) {
+    @parallel cache (s) @for (i in 0..4) {
         s++;
     } !>.wait()!>;
     return s;

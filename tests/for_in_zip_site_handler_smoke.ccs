@@ -6,7 +6,7 @@ int main(void) {
     int[:] xs = { 1, 2 };
     int[:] ys = { 4, 5, 6 };
     int trips = 0;
-    for (a, b in xs, ys) {
+    @for (a, b in xs, ys) {
         trips++;
         (void)a;
         (void)b;

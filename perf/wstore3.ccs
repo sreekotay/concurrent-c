@@ -219,7 +219,7 @@ static Val entry_val(const Entry* e) {
 }
 
 static int val_copy_into(Entry* e, Val* v) {
-    switch (v) {
+    @switch (v) {
     case .empty:
         e->kind = E_VAL_EMPTY;
         e->val_len = 0;
@@ -804,7 +804,7 @@ static void store_counts(CCEpochKeys* st, size_t* live, size_t* mapn) {
 
 static uint64_t key_hash(CCSlice k) {
     uint64_t h = 0xcbf29ce484222325ull;
-    for (b in k) {
+    @for (b in k) {
         h ^= (uint8_t)b;
         h *= 0x100000001b3ull;
     }

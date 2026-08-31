@@ -12,7 +12,7 @@ Vec::[char] out@(a) @destroy;
 bool instr = false;
 bool esc = false;
 
-for (ch in in) {
+@for (ch in in) {
     if (instr) {
         out.push(ch);
         if (esc) esc = false;

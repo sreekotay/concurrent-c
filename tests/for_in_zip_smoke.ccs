@@ -1,4 +1,4 @@
-/* for (a, b in s, t) — equal extents; product of pairs. */
+/* @for (a, b in s, t) — equal extents; product of pairs. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
@@ -7,7 +7,7 @@ int main(void) {
     int[:] ys = { 4, 5, 6 };
     int sum = 0;
 
-    for (a, b in xs, ys) {
+    @for (a, b in xs, ys) {
         sum += a * b;
     } !>;
     if (sum != 32) return 1;

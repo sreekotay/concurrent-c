@@ -295,7 +295,7 @@ example](#more-advanced-example)).
 ```c
 static double Sig_sum(Sig *self, double[:] xs) {          // Float64Array /
     double acc = 0;                                       // numpy float64 /
-    for (x in xs) acc += x;                                // array.array('d')
+    @for (x in xs) acc += x;                                // array.array('d')
     return acc;
 }
 static void Sig_fill(Sig *self, double[:] xs, double v);  // writes land in

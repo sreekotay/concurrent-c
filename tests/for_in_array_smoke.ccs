@@ -1,4 +1,4 @@
-/* T[n] constexpr .len and for (v in a). */
+/* T[n] constexpr .len and @for (v in a). */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
@@ -7,7 +7,7 @@ int main(void) {
     int sum = 0;
     if (a.len != 4) return 1;
     if (a.len() != 4) return 2;
-    for (v in a)
+    @for (v in a)
         sum += v;
     if (sum != 10) return 3;
     printf("ok\n");

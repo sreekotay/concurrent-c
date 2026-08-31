@@ -266,8 +266,8 @@ typedef enum {
      * the Ok is the promise. `.wait()` is UFCS (par_wake = join here).
      * A dest name is that handle before any arm runs. */
     AST_PARALLEL,
-    /* @parallel for (name in lo..hi) { stmts } — a=name b=lo c=hi; body=stmts.
-     * @parallel [seq (cond)] wait (gate) [cache (names)] for … [worker (w)]
+    /* @parallel @for (name in lo..hi) { stmts } — a=name b=lo c=hi; body=stmts.
+     * @parallel [seq (cond)] wait (gate) [cache (names)] @for … [worker (w)]
      * — e=gate name, f=seq cond, h=cache name CSV, g=worker binder;
      * e empty is the bisect walk form.
      * The construct is CCParallel !>(CCError). `.wait()` is bool !>(CCError)
@@ -1316,6 +1316,8 @@ static int parse_struct_fields(Parser* p, AstNode* st);
 static AstNode* parse_external(Parser* p);
 static AstNode* parse_stmt(Parser* p);
 static AstNode* parse_switch_stmt(Parser* p);
+static AstNode* parse_cc_switch(Parser* p);
+static AstNode* parse_cc_for(Parser* p);
 static AstNode* parse_at_stmt(Parser* p);
 static AstNode* parse_with_deadline(Parser* p);
 static AstNode* parse_parallel(Parser* p);

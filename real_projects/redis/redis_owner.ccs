@@ -159,7 +159,7 @@ static void redis_diag_fprintln(CCString* line, CCArena scratch) {
 static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
     size_t len = strlen(cstr);
     if (s.len != len) return false;
-    for (i, a in s) {
+    @for (i, a in s) {
         char ca = a;
         char b = cstr[i];
         if (ca >= 'a' && ca <= 'z') ca = (char)(ca - 'a' + 'A');

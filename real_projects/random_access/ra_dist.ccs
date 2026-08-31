@@ -83,7 +83,7 @@ static Shard !>(CCError) shard_create(uint64_t word0, uint64_t n, CCArena store)
 static void !>(CCError) shard_init(Shard* s) {
     size_t i;
     uint64_t v;
-    for (i, v in s->words) {
+    @for (i, v in s->words) {
         (void)v;
         if (s->words.set(i, s->word0 + (uint64_t)i) != 0)
             return cc_err(CC_ERR_INVALID_ARG, "shard init");
@@ -108,7 +108,7 @@ static uint64_t shard_errors(Shard* s) {
     uint64_t n = 0;
     size_t i;
     uint64_t v;
-    for (i, v in s->words) {
+    @for (i, v in s->words) {
         if (v != s->word0 + (uint64_t)i)
             n++;
     }
@@ -141,7 +141,7 @@ static void !>(CCError) verify_replay(Shard* shards, int nloc, uint64_t nwords,
     @errhandler(CCError e) { return cc_err(e); }
     uint64_t ran = ra_starts(0);
     uint64_t i;
-    for (i in 0..nupdate) {
+    @for (i in 0..nupdate) {
         ran = ra_step(ran);
         apply_one(shards, nloc, nwords, ran, bits, atomic) !>;
     }
@@ -227,7 +227,7 @@ static void !>(CCError) generate_span(World* w, int src, uint64_t lo, uint64_t h
     @errhandler(CCError e) { return cc_err(e); }
     uint64_t ran = ra_starts((int64_t)lo);
     uint64_t i;
-    for (i in lo..hi) {
+    @for (i in lo..hi) {
         ran = ra_step(ran);
         int owner = table_owner(ra_index(ran, w->bits), w->nloc, w->nwords);
         if (owner == src)

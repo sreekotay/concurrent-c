@@ -1,4 +1,4 @@
-/* User @typehooks .len / .access + for (v in bag). */
+/* User @typehooks .len / .access + @for (v in bag). */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
@@ -18,7 +18,7 @@ int main(void) {
     int sum = 0;
     b.p = xs;
     b.n = 3;
-    for (v in b)
+    @for (v in b)
         sum += v;
     if (sum != 15) return 1;
     if (b.n != 3) return 2;

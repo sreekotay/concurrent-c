@@ -1,4 +1,4 @@
-/* for (v in v) on CCVec::[int]. */
+/* @for (v in v) on CCVec::[int]. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
@@ -10,7 +10,7 @@ int main(void) {
     v = cc_vec_new::[int](arena);
     CCVec_int_push(&v, 10);
     CCVec_int_push(&v, 20);
-    for (x in v)
+    @for (x in v)
         sum += x;
     if (sum != 30) return 2;
     if (v.len != 2) return 3;

@@ -9,7 +9,7 @@ int main(void) {
     int i;
     for (i = 0; i < N; i++)
         seq[i] = i * 3 + 1;
-    @parallel for (i in 0..N) {
+    @parallel @for (i in 0..N) {
         par[i] = i * 3 + 1;
     } !>.wait()!>;
     for (i = 0; i < N; i++) {

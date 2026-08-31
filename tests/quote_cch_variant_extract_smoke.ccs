@@ -13,7 +13,7 @@ int main(void) {
         printf("cell kind\n");
         return 1;
     }
-    switch (c) {
+    @switch (c) {
         case .num:
             if (c.num.n != 7) {
                 printf("cell num\n");

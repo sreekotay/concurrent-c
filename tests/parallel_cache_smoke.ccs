@@ -27,7 +27,7 @@ static int run_par(void) {
         cc_atomic_fetch_add(&g_destroyed, 1);
     };
     int i;
-    @parallel wait (ts) cache (s) for (i in 0..N) {
+    @parallel wait (ts) cache (s) @for (i in 0..N) {
         if (s.live)
             cc_atomic_fetch_add(&g_overlap, 1);
         s.live = 1;
@@ -49,7 +49,7 @@ static int run_seq(void) {
         cc_atomic_fetch_add(&g_destroyed, 1);
     };
     int i;
-    @parallel seq (0) wait (ts) cache (s) for (i in 0..N) {
+    @parallel seq (0) wait (ts) cache (s) @for (i in 0..N) {
         s.hits++;
     } !>.wait()!>;
     if (s.hits != N) {

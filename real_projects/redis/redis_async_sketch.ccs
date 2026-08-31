@@ -151,7 +151,7 @@ static char[:] fold_name(char[:] src, char* buf, size_t cap) {
         char[:] empty = {0};
         return empty;
     }
-    for (i, ch in src) {
+    @for (i, ch in src) {
         char f = ch;
         if (f >= 'a' && f <= 'z') f -= 32;
         buf[i] = f;
@@ -161,7 +161,7 @@ static char[:] fold_name(char[:] src, char* buf, size_t cap) {
 }
 
 static Hold hold_for(char[:] name) {
-    switch (name) {
+    @switch (name) {
     case "GET":
     case "SET":
     case "INCR":
@@ -187,7 +187,7 @@ static bool !>(CCError) exec(CCShardMap* maps, Cmd* c, char[:] name,
     size_t i, nkeys;
     int64_t n;
 
-    switch (name) {
+    @switch (name) {
     case "GET":
         sh = maps->shard(si);
         if (!sh) return conn->err("internal");
@@ -221,14 +221,14 @@ static bool !>(CCError) exec(CCShardMap* maps, Cmd* c, char[:] name,
         return conn->integer(n);
     case "DEL":
         n = 0;
-        for (i in 1..c->argc) {
+        @for (i in 1..c->argc) {
             sh = maps->shard(shard_of(maps, c->args[i]));
             if (sh && sh->delete(c->args[i])) n++;
         }
         return conn->integer(n);
     case "EXISTS":
         n = 0;
-        for (i in 1..c->argc) {
+        @for (i in 1..c->argc) {
             sh = maps->shard(shard_of(maps, c->args[i]));
             if (sh && sh->get(c->args[i])) n++;
         }
@@ -238,7 +238,7 @@ static bool !>(CCError) exec(CCShardMap* maps, Cmd* c, char[:] name,
          * wire (conn closes). Acceptable for this sketch. */
         nkeys = c->argc - 1;
         conn->array_len(nkeys) !>;
-        for (i in 1..c->argc) {
+        @for (i in 1..c->argc) {
             sh = maps->shard(shard_of(maps, c->args[i]));
             v = sh ? sh->get(c->args[i]) : NULL;
             if (!v) conn->null() !>;
@@ -282,7 +282,7 @@ static bool !>(CCError) execute(CCShardMap* maps, Cmd* c, ConnEnc conn) {
     if (c->argc == 0) return conn->err("empty command");
     name = fold_name(c->args[0], fold, sizeof(fold));
     if (name.len == 0) return conn->err("unknown command");
-    switch (name) {
+    @switch (name) {
     case "PING":
         if (c->argc > 1) return conn->bulk(c->args[1]);
         return conn->pong();
@@ -380,7 +380,7 @@ static bool !>(CCIoError) read_cmd(BufReader::[CCSocket]* br, CCArena arena, Cmd
         out->args = cmd_alloc_args(arena, (size_t)n);
         if (!out->args)
             return cc_err(cc_io_error(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "argv")));
-        for (i in 0..(size_t)n) {
+        @for (i in 0..(size_t)n) {
             char[:] hdr = br->read_line() !>(e) { return cc_err(e); };
             if (hdr.len == 0) {
                 return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "bad bulk")));
@@ -421,7 +421,7 @@ static void handle_client(CCSocket client, CCShardMap* maps) {
 
     for (;;) {
         size_t i;
-        for (i in 0..(size_t)K_PIPELINE) {
+        @for (i in 0..(size_t)K_PIPELINE) {
             Cmd c;
             if (i > 0 && br.buffered() == 0) break;
             cc_arena_stack(cmd_a, K_CMD_ARENA);

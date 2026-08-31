@@ -10,7 +10,7 @@
 
 int main(void) {
     V v = { .num = 3 };
-    switch (v) {
+    @switch (v) {
         case .num: break;
         case .strr: break;
     }

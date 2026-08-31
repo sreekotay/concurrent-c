@@ -1,7 +1,7 @@
 /*
  * Recipe: Async HTTP Requests
  *
- * Independent fetches are `@parallel for`. Soft-fail per URL so offline
+ * Independent fetches are `@parallel @for`. Soft-fail per URL so offline
  * CI can SKIP. Arena-local response body. `@link("curl")` for the lib.
  *
  * Build:
@@ -49,7 +49,7 @@ int main(void) {
     int status[NUM_URLS] = {0};
     size_t body_len[NUM_URLS] = {0};
     int i;
-    @parallel for (i in 0..NUM_URLS) {
+    @parallel @for (i in 0..NUM_URLS) {
         fetch_one(i, status, body_len);
     } !>.wait()!>;
 

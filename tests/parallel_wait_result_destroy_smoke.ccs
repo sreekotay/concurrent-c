@@ -78,7 +78,7 @@ static int !>(CCError) wave_ok(int use_par) {
         };
         CCTurnstile ts@(2, 1, arena) !> @destroy;
         int i;
-        @parallel seq (use_par) wait (ts) for (i in 0..N) {
+        @parallel seq (use_par) wait (ts) @for (i in 0..N) {
             @stage (ts, 0, i) { }
         } !>.wait()!>;
         (void)wave;
@@ -98,7 +98,7 @@ static int !>(CCError) wave_err(int use_par) {
         };
         CCTurnstile ts@(2, 1, arena) !> @destroy;
         int i;
-        @parallel seq (use_par) wait (ts) for (i in 0..N) {
+        @parallel seq (use_par) wait (ts) @for (i in 0..N) {
             boom(i) !>;
         } !>.wait()!>;
         (void)wave;

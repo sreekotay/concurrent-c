@@ -31,7 +31,7 @@ registration. The underlying marker API is `cc_type_register` (see
   `cc_type_len_call` and `cc_type_access_load` / `cc_type_access_call`.
   Ordinary sites may read `x.len`; they may not store it. `.access` is the
   compiler-internal walk load after `i < live len` — users write
-  `for (v in s)` / `for (i, v in s)` / `for (a, b in s, t) { … } !>;`,
+  `@for (v in s)` / `@for (i, v in s)` / `@for (a, b in s, t) { … } !>;`,
   not `s.access(i)`. `CCSlice` / `CCSlice_*`, `CCVec_*`, and `CCString`
   register these arms. Zip is `void !>(CCError)`: consume with `!>;` or
   `!>(e) { … }`. Unequal lengths are `CC_ERR_INVALID_ARG`. `.niche` donates a bit pattern a valid instance never

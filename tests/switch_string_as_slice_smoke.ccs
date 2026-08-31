@@ -4,7 +4,7 @@
 
 /* UFCS inside opaque string-switch bodies (locals are not bind-registered). */
 static int bulk_len(CCSlice name, CCString* v, CCArena a) {
-    switch (name) {
+    @switch (name) {
     case "GET": {
         if (!v) return -1;
         char[:] s = v->as_slice();

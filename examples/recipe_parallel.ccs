@@ -15,7 +15,7 @@
  *       the assignments in order on the caller. The body always
  *       runs — the predicate is scheduling, not presence.
  *
- *   @parallel for (i in lo..hi) { work(i); }
+ *   @parallel @for (i in lo..hi) { work(i); }
  *       Independent iterations over a half-open integer range.
  *       The lowerer bisects the span; a span of length 0 or 1
  *       is an ordinary for.
@@ -79,7 +79,7 @@ int main(void) {
     int k;
     for (k = 0; k < N; k++)
         seq[k] = k * k;
-    @parallel for (k in 0..N) {
+    @parallel @for (k in 0..N) {
         par[k] = k * k;
     } !>.wait()!>;
     for (k = 0; k < N; k++) {

@@ -32,7 +32,7 @@ static char[:] port_ufcs(char[:] recv_type, char[:] method, char[:] mode,
     (void)mode; /* named `@typeview Mode on T` — otherwise empty */
     (void)argv;
     (void)arg_types;
-    switch (method) {
+    @switch (method) {
     case "put": return @slice("port_put_2");
     default:    return @string(`port_${method}`, arena).as_slice();
     }

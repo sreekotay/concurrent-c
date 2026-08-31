@@ -1,4 +1,4 @@
-/* for (i, v in s) — index is size_t, v is the .access load. */
+/* @for (i, v in s) — index is size_t, v is the .access load. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
@@ -7,7 +7,7 @@ int main(void) {
     int sum = 0;
     size_t last = 99;
 
-    for (i, v in ys) {
+    @for (i, v in ys) {
         if (i == 0 && v != 10) return 1;
         if (i == 1 && v != 20) return 2;
         if (i == 2 && v != 30) return 3;

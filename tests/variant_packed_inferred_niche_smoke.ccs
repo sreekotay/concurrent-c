@@ -26,7 +26,7 @@ int main(void) {
     if (b.kind != OptPtr_none) return 3;
 
     int hits = 0;
-    switch (b) {
+    @switch (b) {
         case .some: return 4;
         case .none: hits = 1; break;
     }

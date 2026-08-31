@@ -23,7 +23,7 @@ static void !>(CCError) commit_text(Rec* r, char[:] src) {
     /* Body contains `r->del` so a subject-ptr scan of the dump must
      * not mark the value `arm` as a pointer. */
     arm = r->del;
-    switch (arm) {
+    @switch (arm) {
         case .text:
             dst = arm.text.bytes;
             {
@@ -41,7 +41,7 @@ static void !>(CCError) commit_text(Rec* r, char[:] src) {
 static void !>(CCError) commit_field(Rec* r, char[:] src) {
     char[:] dst;
     @errhandler(CCError e) { return cc_err(e); }
-    switch (r->del) {
+    @switch (r->del) {
         case .text:
             dst = r->del.text.bytes;
             dst.copy(src) !>;
@@ -54,7 +54,7 @@ static void !>(CCError) commit_field(Rec* r, char[:] src) {
 }
 
 static int hold_is_text(Rec r) {
-    switch (r.del) {
+    @switch (r.del) {
         case .text: return 1;
         case .pieces: return 0;
     }

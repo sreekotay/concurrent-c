@@ -34,7 +34,7 @@ static char[:] hdr_hook_box_ufcs(char[:] recv_type, char[:] method, char[:] mode
     (void)argv;
     (void)arg_types;
     (void)arena;
-    switch (method) {
+    @switch (method) {
     case "bump": return @slice("hdr_hook_box_bump_impl");
     default:     return @slice("__cc_ufcs_pass__");
     }

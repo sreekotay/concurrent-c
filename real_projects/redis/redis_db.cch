@@ -562,7 +562,7 @@ static RedisReply !>(CCError) db_get(RedisDb* db, char[:] key,
     RedisEntry* cell = db_lookup_live(db, key, clock);
     if (!cell) return cc_ok(reply_null());
     RedisValue* val = &cell->val;
-    switch (val) {
+    @switch (val) {
         case .str: return cc_ok(reply_bulk(val->str.as_slice()));
         case .num: {
             int64_t n = val->num;
@@ -581,7 +581,7 @@ static RedisReply db_del(RedisDb* db, char[:]* keys, size_t nkeys,
                          DbCmdClock* clock) {
     int64_t removed = 0;
     if (!db || !db->shards) return reply_integer(0);
-    for (i in 0..nkeys) {
+    @for (i in 0..nkeys) {
         RedisEntry* cell = db_lookup_live(db, keys[i], clock);
         if (!cell) continue;
         db_remove_entry(db, keys[i], cell);
@@ -593,7 +593,7 @@ static RedisReply db_del(RedisDb* db, char[:]* keys, size_t nkeys,
 static RedisReply db_exists(RedisDb* db, char[:]* keys, size_t nkeys,
                             DbCmdClock* clock) {
     int64_t found = 0;
-    for (i in 0..nkeys) {
+    @for (i in 0..nkeys) {
         if (db_lookup_live(db, keys[i], clock)) found++;
     }
     return reply_integer(found);
@@ -608,7 +608,7 @@ static RedisReply db_strlen(RedisDb* db, char[:] key, DbCmdClock* clock) {
     RedisEntry* cell = db_lookup_live(db, key, clock);
     if (!cell) return reply_integer(0);
     RedisValue* val = &cell->val;
-    switch (val) {
+    @switch (val) {
         case .str: return reply_integer((int64_t)val->str.len());
         case .num: {
             /* length of the canonical decimal render, no storage touched */
@@ -643,7 +643,7 @@ static RedisReply !>(CCError) db_append(RedisDb* db,
     }
     RedisValue* val = &cell->val;
     char[:] old = cc_slice_empty();
-    switch (val) {
+    @switch (val) {
         case .str: old = val->str.as_slice(); break;
         case .num: {
             /* Render the int cell into request scratch: the arena-less
@@ -764,18 +764,18 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
                                       CCArena reply_arena,
                                       DbCmdClock* clock) {
     @errhandler(CCError e) { return cc_err(e); }
-    for (i in 0..nkeys) {
+    @for (i in 0..nkeys) {
         (void)db_lookup_live(db, keys[i], clock);
     }
 
     char[:] vals[REDIS_ARGV_MAX] = {0};
     bool found[REDIS_ARGV_MAX] = {0};
-    for (i in 0..nkeys) {
+    @for (i in 0..nkeys) {
         RedisEntry* cell = db_lookup_live(db, keys[i], clock);
         found[i] = cell != NULL;
         if (cell) {
             RedisValue* val = &cell->val;
-            switch (val) {
+            @switch (val) {
                 case .str:
                     vals[i] = val->str.as_slice();
                     break;
@@ -794,7 +794,7 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
     }
 
     RespGBulk elems[REDIS_ARGV_MAX];
-    for (i in 0..nkeys)
+    @for (i in 0..nkeys)
         elems[i] = wire_bulk_or_nil(vals[i], found[i]);
 
     RespGBulkArray arr;
@@ -817,7 +817,7 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
 
 static void !>(CCError) db_mset(RedisDb* db, char[:]* args, size_t argc) {
     @errhandler(CCError e) { return cc_err(e); }
-    for (i in 0..(argc / 2)) {
+    @for (i in 0..(argc / 2)) {
         size_t k = i * 2;
         db_set(db, args[k], args[k + 1], 0) !>;
     }

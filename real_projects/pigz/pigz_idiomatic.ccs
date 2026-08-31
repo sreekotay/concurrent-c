@@ -176,7 +176,7 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
     };
 
     int i;
-    @parallel wait (ts) cache (zs) for (i in 0..n) {
+    @parallel wait (ts) cache (zs) @for (i in 0..n) {
         size_t off = (size_t)i * (size_t)BLOCK_SIZE;
         size_t remain = file_len - off;
         size_t want = remain < (size_t)BLOCK_SIZE ? remain : (size_t)BLOCK_SIZE;

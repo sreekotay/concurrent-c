@@ -14,7 +14,7 @@ typedef struct {
 
 static int64_t !>(CCError) hold_as_i64(Hold* h) {
     Cell cell = h->cell;
-    switch (cell) {
+    @switch (cell) {
         case .num:
             return cc_ok(cell.num);
         case .txt: {

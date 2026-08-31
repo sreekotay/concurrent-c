@@ -1,5 +1,5 @@
 /*
- * @parallel for: break stops new iterations; the construct ends;
+ * @parallel @for: break stops new iterations; the construct ends;
  * the function continues.
  */
 #include <ccc/std/prelude.cch>
@@ -14,7 +14,7 @@ int main(void) {
     int after = 0;
     for (i = 0; i < N; i++)
         xs[i] = 0;
-    @parallel for (i in 0..N) {
+    @parallel @for (i in 0..N) {
         xs[i] = 1;
         if (i == CUT)
             break;

@@ -2,7 +2,7 @@
 
 int main(void) {
     char[:] s = {'a', 'b'};
-    for (ch in s)
+    @for (ch in s)
         ch = 'x';
     return 0;
 }

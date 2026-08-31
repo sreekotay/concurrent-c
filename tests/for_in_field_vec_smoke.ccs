@@ -1,4 +1,4 @@
-/* for (v in t->words) / for (i, v in t.words) — field path, not a local. */
+/* @for (v in t->words) / @for (i, v in t.words) — field path, not a local. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
@@ -17,11 +17,11 @@ int main(void) {
     b.words = vec_new::[int](arena);
     if (b.words.push(10) != 0 || b.words.push(20) != 0) return 2;
     p = &b;
-    for (x in p->words)
+    @for (x in p->words)
         sum += x;
     if (sum != 30) return 3;
     sum = 0;
-    for (i, v in b.words)
+    @for (i, v in b.words)
         sum += (int)i + v;
     if (sum != 31) return 4;
     printf("ok\n");

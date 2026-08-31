@@ -1,5 +1,5 @@
 /* Subject-switch + designator case labels (spec/draft_variants.md §5b,
- * RATIFIED): `switch (v)` on a variant VALUE and `switch (p)` on a variant
+ * RATIFIED): `@switch (v)` on a variant VALUE and `@switch (p)` on a variant
  * POINTER are C constraint violations trapped and rewritten to a switch on
  * the tag; `case .arm:` labels lower to tag constants and each case
  * dominates its arm's projections.  Pointer subjects need nothing special:
@@ -16,7 +16,7 @@
 };
 
 static int64_t bump(RedisValue* cell, int64_t delta) {
-    switch (cell) {                       /* pointer subject */
+    @switch (cell) {                       /* pointer subject */
         case .num:
             cell->num += delta;           /* in-place mutation, dominated */
             return cell->num;
@@ -39,7 +39,7 @@ int main(void) {
     if (bump(&s, 1) != -1) return 3;
 
     int hit = 0;
-    switch (s) {                          /* value subject */
+    @switch (s) {                          /* value subject */
         case .txt:
             hit = (int)strlen(s.txt);
             break;

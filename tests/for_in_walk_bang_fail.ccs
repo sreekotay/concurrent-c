@@ -3,7 +3,7 @@
 
 int main(void) {
     int[:] xs = { 1, 2 };
-    for (v in xs) {
+    @for (v in xs) {
         (void)v;
     } !>;
     return 0;

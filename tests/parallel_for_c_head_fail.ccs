@@ -2,7 +2,7 @@
 
 int main(void) {
     int s = 0;
-    @parallel for (int i = 0; i < 4; i++) {
+    @parallel @for (int i = 0; i < 4; i++) {
         s += i;
     } !>.wait()!>;
     return s;

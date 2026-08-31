@@ -1,4 +1,4 @@
-/* Sequential for (v in s) on char[:] and int[:]. */
+/* Sequential @for (v in s) on char[:] and int[:]. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
@@ -9,14 +9,14 @@ int main(void) {
     int n = 0;
     int sum = 0;
 
-    for (c in s) {
+    @for (c in s) {
         if (c != 'a' && c != 'b' && c != 'c') return 1;
         n++;
     }
     if (n != 3) return 2;
     if (s.len != 3) return 3;
 
-    for (x in ys)
+    @for (x in ys)
         sum += x;
     if (sum != 6) return 4;
     if (ys.len() != 3) return 5;

@@ -74,7 +74,7 @@ policy. Callers can still propagate with `!>(e) return cc_err(e);` without
 reading `e`. Prefer `T!>(CCError)` for cross-cutting fallible work. Use a
 domain error type when the **payload** matters at the boundary; register
 `@typeview on MyError { as: base; }` when CCError dispatch must participate
-(script default handler, `for (…, … in …) !>;`, shared `@errhandler`).
+(script default handler, `@for (…, … in …) !>;`, shared `@errhandler`).
 
 ---
 
@@ -171,9 +171,9 @@ and copies only when the bit is clear. `s.to_cstr(arena) !>` is
 [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs).
 
 Ordinary slice sites may read `.ptr`, `.len`, and `.id`; they may not
-store fields. Typed `T[:]` carries those fields on `.base`. The walk is `for (v in s)` (also enumerate /
+store fields. Typed `T[:]` carries those fields on `.base`. The walk is `@for (v in s)` (also enumerate /
 zip / range): the compiler pays `i < live .len` and loads. `v` is a copy —
-`v =` and `&v` are ill-formed. `for (&v in s) { … } !>;` is the mut walk:
+`v =` and `&v` are ill-formed. `@for (&v in s) { … } !>;` is the mut walk:
 `v = x` stores through the same `.access` peel as the load (slice, vec,
 string, `T[n]`). `.len` / `.access` return the naked bound and slot —
 the hook is not Result. The walk re-reads `.len` each iteration. A write
@@ -181,15 +181,15 @@ re-reads `.len`; `i >= len` is `CC_ERR_INVALID_ARG` (`"for-in write"`).
 That check is the mut walk's Result, not a skip. The subject is
 a name, a field path (`t->words`), or a view (`line.sub(start, line.len)` —
 hoisted to a hidden local; mut walk stores through that header). Users do not write `s.access(i)`.
-Zip is a statement that can fail: `for (a, b in s, t) { … } !>;`.
-`for (&a, b in s, t) { … } !>;` stores through `a`'s subject. Copy walk, enumerate,
+Zip is a statement that can fail: `@for (a, b in s, t) { … } !>;`.
+`@for (&a, b in s, t) { … } !>;` stores through `a`'s subject. Copy walk, enumerate,
 and range are not Results: a trailing `!>` is ill-formed. Mut walk and
 zip consume `!>`.
 A guess at a slot is `s.at(i) !>` / `s.set(i, v) !>`. Compare slices with
 `s.eq(other)` / `s.eq_cstr("x")`, not `memcmp`, in CC examples. Point through a
 local when you need C indexing: `char *p = s.ptr; p[i]`. `CCString`
 is not a slice: `.data` is the SSO union — use `as_slice()` / `cstr()`, or dest-init `char[:] v = s`.
-`int[:] xs = v` dest-wraps `Vec::[int]` the same way; `for (x in v)` still
+`int[:] xs = v` dest-wraps `Vec::[int]` the same way; `@for (x in v)` still
 walks the live vec. `T*` is not an extent. C `for (;;)` is unchanged. Tutorial:
 [@typehooks / @typeview](typehooks-typeviews.md#extent--len--access).
 Recipe: [recipe_walk.ccs](../examples/recipe_walk.ccs).
@@ -333,8 +333,8 @@ waits that nursery; `n.leave()` consumes the handle without joining).
 | `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. `h.wait()` joins. Arms may cancel/adopt/pause `h`. `h.wait()` inside an arm of `h` is an error. |
 | `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; writes exactly one outer name. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. The body always runs. |
-| `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; a span of 0 or 1 is a plain `for`. `return` is `break` then `return` from the function after the join. |
-| `@parallel wait (ts) for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished. A targeting `break` is `ok(false)` and must be bound. `return` drains, then leaves the function. `@stage` is a handshake, not a Result. |
+| `@parallel @for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; a span of 0 or 1 is a plain `for`. `return` is `break` then `return` from the function after the join. |
+| `@parallel wait (ts) @for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished. A targeting `break` is `ok(false)` and must be bound. `return` drains, then leaves the function. `@stage` is a handshake, not a Result. |
 
 ```c
 int a = 0, b = 0;
@@ -346,7 +346,7 @@ int a = 0, b = 0;
     b = g();
 } !>.wait()!>;
 
-@parallel for (y in 0..h) {
+@parallel @for (y in 0..h) {
     row(y);
 } !>.wait()!>;
 ```

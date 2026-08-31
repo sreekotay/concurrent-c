@@ -1,0 +1,1611 @@
+/*
+ * wstore5.ccs — wstore3 plus always-new writes.
+ *
+ *   Same exclusive, wheel, gen arenas, mix, and prints as wstore3. A write
+ *   always allocates in the dest bucket and marks the old row dead. Same-slot
+ *   overwrite is a hole, not an in-place mutate. Expire that stays in slot
+ *   is the same. Persist of an already-never key is a no-op (not a write).
+ *   never is paged: seal the current arena every NEVER_PAGE allocs, reset
+ *   a page when live_n hits 0. Every bucket has a free list (pop, else
+ *   bump). Same-key LIFO pop keeps the map pointer. Overwrite of a never
+ *   key writes back on that key's page. New
+ *   never keys go to current. Copy-out only when the page table is full.
+ *   Sweep does not evac mixed pages. Sweep hold is named chunks: retire,
+ *   expire, compact. Drain parks the gen arena (pointer steal only).
+ *   After the exclusive drops, the sweeper destroys the stolen gens so
+ *   munmap is not on the client hold. At most one cold L1 stays pooled
+ *   for the next bump. Park does not destroy if the queue is full. The
+ *   index owns key bytes (map arena + key freelist) — a second lifetime;
+ *   draining a value gen does not shrink it. A value gen holds payload
+ *   and list links only.
+ *
+ *   ./wstore5 <sec> <sweep 0|1> [theta] [wave] [shards] [clients] [write|get|drain]
+ *   Compare: ./perf/compare_wstore5.sh stand
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/cc_sched.cch>
+#include <ccc/cc_exclusive.cch>
+#include <ccc/stdio.cch>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <math.h>
+#include <time.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
+
+#define LEVELS 3
+static const int64_t k_unit_ms[LEVELS] = { 100, 1000, 60000 };
+static const int     k_slots[LEVELS]   = { 64, 64, 60 };
+#define MAX_SLOTS 64
+#define NEVER_MS  INT64_MAX
+#define MAX_SHARDS 64
+#define MAX_CLIENTS 64
+#define WAVE_HOLD_US 100.0
+#define WAVE_HOLD_SAMPLE 16
+#define HITCH_US     1000.0
+#define KEY_CAP      32
+#define VAL_CAP      128
+#define TRIM_KEYS    1000000 /* post-mix: expire to this many, then mem: trim */
+#define NEVER_PAGE   8192
+#define NEVER_PAGES  16
+#define RECLAIM_CAP  64
+#define ARENA_POOL_CAP 1 /* one cold L1; fat drained gens destroy */
+
+@variant Val {
+    empty:  void;
+    num:    int64_t;
+    bytes:  CCSlice;
+    intern: CCSlice;
+};
+
+typedef struct Get {
+    Val     val;
+    int64_t dies_at;
+    char    copy[VAL_CAP];
+} Get;
+
+enum { E_VAL_EMPTY = 0, E_VAL_NUM, E_VAL_BYTES, E_VAL_INTERN };
+
+/* Index-owned. Map CCSliceHdr points here; not in a value gen. */
+typedef struct KeySlot {
+    char buf[KEY_CAP];
+    uint8_t len;
+    struct KeySlot* free_next;
+} KeySlot;
+
+typedef struct Entry {
+    KeySlot* key; /* map arena; null after map drop */
+    char val_buf[VAL_CAP];
+    int64_t dies_at;
+    uint8_t val_len;
+    uint8_t kind;
+    uint8_t dead;
+    int8_t  level;
+    uint8_t slot;
+    uint32_t epoch_gen;
+    struct Entry* live_next;
+    struct Entry* live_prev;
+} Entry;
+
+typedef struct Epoch {
+    Entry* live_head;
+    Entry* live_tail;
+    size_t live_n;
+    size_t live_bytes;
+    size_t dead_bytes;
+    uint32_t gen;
+    size_t born;
+    uint32_t seq;
+} Epoch;
+
+typedef Entry* MapEnt;
+/* Hand DECL: ArrayMap::[K, user-V] hoists before this TU's typedefs. */
+CC_ARRAY_MAP_DECL(CCSliceHdr, MapEnt, WstoreIdx, cc_map_hash_slice_hdr,
+                  cc_map_eq_slice_hdr)
+typedef WstoreIdx* ShardMap;
+
+typedef struct Bucket {
+    Epoch cur;
+    Entry* scan_e;
+    int scanning;
+    int64_t end;
+    CCArena recs; /* lazy; reset on empty drain (wheel slot or never page) */
+    Entry* free_head; /* this gen; cleared on park / reset */
+} Bucket;
+
+typedef struct WheelSlot {
+    Bucket* b;
+    int8_t  level;
+    uint8_t slot;
+} WheelSlot;
+
+typedef struct CCEpochKeys CCEpochKeys;
+
+typedef struct CCEpochShard {
+    int idx;
+    CCEpochKeys* store;         /* hold_one via store->locks */
+    CCArena owner;
+    size_t free_n; /* holes in still-live gen arenas (not a reuse list) */
+    CCExclusiveMutex sweep_mu;  /* name MAX_SHARDS+idx — wake, not data */
+    Bucket never_pg[NEVER_PAGES];
+    uint8_t never_i;
+    uint32_t never_seq;
+    size_t evacs, pops, park_full;
+    CCArena reclaim_q[RECLAIM_CAP];
+    int reclaim_n;
+    CCArena arena_pool[ARENA_POOL_CAP];
+    int arena_pool_n;
+    Bucket wheel[LEVELS][MAX_SLOTS];
+    CCArena map_arena;
+    ShardMap map;
+    KeySlot* key_free;
+    CCNursery nursery;
+    double theta;
+    size_t wave_recs;
+    int sweep_on;
+    cc_atomic_int stop;
+    cc_atomic_int sweep_due;
+    cc_atomic_i64 next_slot_end;
+    size_t drains, drained_recs, dropped, reinserted, rehashes, waves;
+    size_t tombstones, compacts;
+    double wave_max_us, wave_sum_us;
+    double hold_t0;
+    int hold_steps;
+    int ends_dirty;
+    size_t ops;
+    size_t gets, get_hits;
+} CCEpochShard;
+
+typedef struct CCEpochKeys {
+    int nshards;
+    CCEpochShard* shards;
+    CCExclusive excl;
+    CCShardDomain locks;        /* names 0..nshards-1; mask ceiled to pow2 */
+} CCEpochKeys;
+
+static CCShardHold shard_hold(CCEpochKeys* st, uint64_t si) {
+    return st->locks.hold_one(si);
+}
+
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
+static double now_us(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1e6 + t.tv_nsec / 1e3;
+}
+static int64_t now_ms(void) { return (int64_t)(now_us() / 1000.0); }
+
+static void sweep_arm(CCEpochShard* s) { cc_atomic_store(&s->sweep_due, 1); }
+
+static void note_hold(CCEpochShard* s, const char* verb, double us, size_t n);
+
+static void sweep_kick(CCEpochShard* s) {
+    sweep_arm(s);
+    CCExclusiveGuard g = s->sweep_mu.acquire();
+    g.signal();
+    g.release();
+}
+
+static void refresh_next_slot_end(CCEpochShard* s) {
+    int64_t m = INT64_MAX;
+    for (int l = 0; l < LEVELS; l++)
+        for (int i = 0; i < k_slots[l]; i++)
+            if (s->wheel[l][i].end < m) m = s->wheel[l][i].end;
+    cc_atomic_store(&s->next_slot_end, m);
+    s->ends_dirty = 0;
+}
+
+static void note_slot_end(CCEpochShard* s, int64_t old_end, int64_t new_end) {
+    int64_t cur = cc_atomic_load(&s->next_slot_end);
+    (void)new_end;
+    if (old_end == cur) s->ends_dirty = 1;
+}
+
+static size_t gen_l1(void) { return 64u * sizeof(Entry) + 4096u; }
+
+static CCSlice entry_key(const Entry* e) {
+    if (!e || !e->key) return cc_slice_from_buffer((char*)NULL, 0);
+    return cc_slice_from_buffer((char*)e->key->buf, e->key->len);
+}
+
+static CCSliceHdr entry_key_hdr(const Entry* e) {
+    if (!e || !e->key) return cc_slice_hdr_from_buffer((char*)NULL, 0);
+    return cc_slice_hdr_from_buffer((char*)e->key->buf, e->key->len);
+}
+
+static KeySlot* key_alloc(CCEpochShard* s, CCSlice key) {
+    KeySlot* k;
+    if (key.len > KEY_CAP) return NULL;
+    k = s->key_free;
+    if (k) s->key_free = k->free_next;
+    else {
+        k = (KeySlot*)s->map_arena.alloc_local_grow(sizeof(KeySlot), _Alignof(KeySlot));
+        if (!k) return NULL;
+    }
+    k->len = (uint8_t)key.len;
+    k->free_next = NULL;
+    if (k->len) memcpy(k->buf, key.ptr, k->len);
+    return k;
+}
+
+static void key_release(CCEpochShard* s, KeySlot* k) {
+    if (!k) return;
+    k->free_next = s->key_free;
+    s->key_free = k;
+}
+
+static size_t entry_val_live(const Entry* e) {
+    return e->kind == E_VAL_BYTES ? e->val_len : 0;
+}
+
+static Val entry_val(const Entry* e) {
+    switch (e->kind) {
+    case E_VAL_NUM: {
+        int64_t n;
+        memcpy(&n, e->val_buf, sizeof n);
+        return (Val){ .num = n };
+    }
+    case E_VAL_BYTES:
+        return (Val){ .bytes = cc_slice_from_buffer((char*)e->val_buf, e->val_len) };
+    case E_VAL_INTERN: {
+        CCSlice s;
+        memcpy(&s, e->val_buf, sizeof s);
+        return (Val){ .intern = s };
+    }
+    default:
+        return (Val){ .empty = {} };
+    }
+}
+
+static int val_copy_into(Entry* e, Val* v) {
+    @switch (v) {
+    case .empty:
+        e->kind = E_VAL_EMPTY;
+        e->val_len = 0;
+        return 1;
+    case .num:
+        e->kind = E_VAL_NUM;
+        e->val_len = 0;
+        memcpy(e->val_buf, &v->num, sizeof(int64_t));
+        return 1;
+    case .intern:
+        e->kind = E_VAL_INTERN;
+        e->val_len = 0;
+        memcpy(e->val_buf, &v->intern, sizeof(CCSlice));
+        return 1;
+    case .bytes:
+        if (v->bytes.len > VAL_CAP) return 0;
+        e->kind = E_VAL_BYTES;
+        e->val_len = (uint8_t)v->bytes.len;
+        if (e->val_len) memmove(e->val_buf, v->bytes.ptr, e->val_len);
+        return 1;
+    }
+}
+
+static int entry_bind(CCEpochShard* s, Entry* e, CCSlice key, Val v) {
+    if (!e->key) {
+        e->key = key_alloc(s, key);
+        if (!e->key) return 0;
+    }
+    return val_copy_into(e, &v);
+}
+
+static void get_miss(Get* g) {
+    g->val = (Val){ .empty = {} };
+    g->dies_at = NEVER_MS;
+}
+
+static void live_link(Epoch* ep, Entry* e) {
+    e->live_next = NULL;
+    e->live_prev = ep->live_tail;
+    if (ep->live_tail) ep->live_tail->live_next = e;
+    else ep->live_head = e;
+    ep->live_tail = e;
+    ep->live_n++;
+    e->epoch_gen = ep->gen;
+}
+
+static void live_unlink(Epoch* ep, Entry* e) {
+    if (e->live_prev) e->live_prev->live_next = e->live_next;
+    else if (ep->live_head == e) ep->live_head = e->live_next;
+    if (e->live_next) e->live_next->live_prev = e->live_prev;
+    else if (ep->live_tail == e) ep->live_tail = e->live_prev;
+    e->live_next = NULL;
+    e->live_prev = NULL;
+    if (ep->live_n) ep->live_n--;
+}
+
+static void bucket_reset(Bucket* b, int64_t end) {
+    b->cur.live_head = NULL;
+    b->cur.live_tail = NULL;
+    b->cur.live_n = 0;
+    b->cur.live_bytes = 0;
+    b->cur.dead_bytes = 0;
+    b->cur.gen = 0;
+    b->cur.born = 0;
+    b->cur.seq = 0;
+    b->scan_e = NULL;
+    b->scanning = 0;
+    b->free_head = NULL;
+    b->end = end;
+}
+
+static CCArena arena_none(void) {
+    CCArena a;
+    memset(&a, 0, sizeof a);
+    return a;
+}
+
+/* Fat prior-gen: destroy so pages can go back. Keep one reset L1. */
+static void arena_release(CCEpochShard* s, CCArena a) {
+    if (!a.valid()) return;
+    if (a.committed_gross_bytes() > gen_l1() * 2u ||
+        s->arena_pool_n >= ARENA_POOL_CAP) {
+        a.destroy();
+        s->compacts++;
+        return;
+    }
+    a.reset();
+    s->arena_pool[s->arena_pool_n++] = a;
+    s->compacts++;
+}
+
+static void shard_drop_pool(CCEpochShard* s) {
+    while (s->arena_pool_n) {
+        CCArena a = s->arena_pool[--s->arena_pool_n];
+        s->arena_pool[s->arena_pool_n] = arena_none();
+        if (a.valid()) a.destroy();
+    }
+}
+
+static CCArena arena_pool_take(CCEpochShard* s) {
+    if (!s->arena_pool_n) return arena_none();
+    return s->arena_pool[--s->arena_pool_n];
+}
+
+static bool !>(CCError) bucket_ensure_recs(CCEpochShard* s, Bucket* b) {
+    CCArena pooled;
+    if (b->recs.valid()) return cc_ok(true);
+    pooled = arena_pool_take(s);
+    if (pooled.valid()) {
+        b->recs = pooled;
+        return cc_ok(true);
+    }
+    b->recs = s->owner.create_heap_arena(gen_l1()) !>;
+    return cc_ok(true);
+}
+
+static void bucket_reclaim(CCEpochShard* s, Bucket* b) {
+    if (!b || b->cur.live_n || !b->recs.valid()) return;
+    if (b->recs.committed_gross_bytes() > gen_l1() * 2u) {
+        CCArena a = b->recs;
+        b->recs = arena_none();
+        a.destroy();
+    } else {
+        b->recs.reset();
+    }
+    b->cur.dead_bytes = 0;
+    b->cur.born = 0;
+    b->free_head = NULL;
+    s->compacts++;
+}
+
+/* Detach an empty gen so the slot can bump a fresh arena. Reset later.
+ * 0 = queue full; caller must not rotate / reuse. Never resets here. */
+static int bucket_try_park(CCEpochShard* s, Bucket* b) {
+    if (!b || b->cur.live_n) return 0;
+    if (!b->recs.valid()) return 1;
+    if (s->reclaim_n >= RECLAIM_CAP) {
+        s->park_full++;
+        return 0;
+    }
+    s->reclaim_q[s->reclaim_n++] = b->recs;
+    b->recs = arena_none();
+    b->cur.dead_bytes = 0;
+    b->cur.born = 0;
+    b->free_head = NULL;
+    return 1;
+}
+
+static int never_is_page(const CCEpochShard* s, const Bucket* b) {
+    return b >= s->never_pg && b < s->never_pg + NEVER_PAGES;
+}
+
+static Bucket* never_cur(CCEpochShard* s) {
+    return &s->never_pg[s->never_i];
+}
+
+static void bucket_push_free(Bucket* b, Entry* e) {
+    e->live_next = b->free_head;
+    e->live_prev = NULL;
+    b->free_head = e;
+}
+
+static Entry* !>(CCError) bucket_pop_or_bump(CCEpochShard* s, Bucket* b) {
+    @errhandler(CCError err) { return cc_err(err); }
+    Entry* e;
+    if (b->free_head) {
+        e = b->free_head;
+        b->free_head = e->live_next;
+        e->live_next = NULL;
+        e->live_prev = NULL;
+        e->dead = 1;
+        s->pops++;
+        return cc_ok(e);
+    }
+    bucket_ensure_recs(s, b) !>(err) { return cc_err(err); };
+    e = (Entry*)b->recs.alloc_local_grow(sizeof(Entry), _Alignof(Entry));
+    if (!e) return cc_err(CC_ERR_OUT_OF_MEMORY, "entry");
+    e->key = NULL;
+    e->dead = 1;
+    e->live_next = NULL;
+    e->live_prev = NULL;
+    b->cur.born++;
+    return cc_ok(e);
+}
+
+static void never_reclaim_empty(CCEpochShard* s) {
+    int i;
+    for (i = 0; i < NEVER_PAGES; i++) {
+        Bucket* b = &s->never_pg[i];
+        if (b->cur.live_n) continue;
+        if (s->sweep_on) (void)bucket_try_park(s, b);
+        else bucket_reclaim(s, b);
+    }
+}
+
+static int never_pick_empty(CCEpochShard* s) {
+    int i;
+    for (i = 0; i < NEVER_PAGES; i++) {
+        if (s->never_pg[i].cur.live_n) continue;
+        if (!bucket_try_park(s, &s->never_pg[i])) continue;
+        s->never_i = (uint8_t)i;
+        s->never_pg[i].cur.born = 0;
+        s->never_pg[i].cur.seq = ++s->never_seq;
+        return 1;
+    }
+    return 0;
+}
+
+static bool !>(CCError) map_insert(CCEpochShard* s, Entry* e);
+static void entry_mark_dead(CCEpochShard* s, Entry* e);
+static int hold_up(CCEpochShard* s);
+
+static Bucket* never_dirtiest(CCEpochShard* s) {
+    Bucket* best = NULL;
+    double best_frac = 1.0;
+    int i;
+    for (i = 0; i < NEVER_PAGES; i++) {
+        Bucket* b = &s->never_pg[i];
+        double frac;
+        if (i == (int)s->never_i || !b->cur.live_n || !b->cur.born) continue;
+        frac = (double)b->cur.live_n / (double)b->cur.born;
+        if (!best || frac < best_frac ||
+            (frac == best_frac && b->cur.seq < best->cur.seq)) {
+            best = b;
+            best_frac = frac;
+        }
+    }
+    return best;
+}
+
+/* hold: honor WAVE_HOLD_US. Write-path full-table evac passes 0. */
+static size_t !>(CCError) never_evac_some(CCEpochShard* s, Bucket* from, Bucket* to,
+                                         size_t budget, int hold) {
+    @errhandler(CCError e) { return cc_err(e); }
+    Entry* e;
+    size_t n = 0;
+    if (!from || !to || from == to || !budget) return cc_ok(0);
+    e = from->scan_e ? from->scan_e : from->cur.live_head;
+    from->scanning = 1;
+    while (e && n < budget) {
+        Entry* nxt = e->live_next;
+        Entry* neu;
+        size_t nb;
+        if (hold && hold_up(s)) break;
+        neu = bucket_pop_or_bump(s, to) !>(err) { return cc_err(err); };
+        if (!entry_bind(s, neu, entry_key(e), entry_val(e)))
+            return cc_err(CC_ERR_INVALID_ARG, "entry cap");
+        neu->dies_at = NEVER_MS;
+        neu->level = -1;
+        neu->slot = (uint8_t)(to - s->never_pg);
+        nb = entry_val_live(neu);
+        map_insert(s, neu) !>(err) { return cc_err(err); };
+        neu->dead = 0;
+        live_link(&to->cur, neu);
+        to->cur.live_bytes += nb;
+        from->scan_e = nxt;
+        entry_mark_dead(s, e);
+        s->evacs++;
+        n++;
+        e = nxt;
+    }
+    if (!from->cur.live_n) {
+        from->scan_e = NULL;
+        from->scanning = 0;
+        (void)bucket_try_park(s, from);
+    } else if (!e) {
+        from->scan_e = NULL;
+        from->scanning = 0;
+    }
+    return cc_ok(n);
+}
+
+static bool !>(CCError) never_prepare(CCEpochShard* s) {
+    @errhandler(CCError e) { return cc_err(e); }
+    Bucket* np = never_cur(s);
+    if (np->cur.born < NEVER_PAGE) {
+        if (!np->recs.valid())
+            bucket_ensure_recs(s, np) !>(err) { return cc_err(err); };
+        return cc_ok(true);
+    }
+    never_reclaim_empty(s);
+    if (never_pick_empty(s)) {
+        bucket_ensure_recs(s, never_cur(s)) !>(err) { return cc_err(err); };
+        return cc_ok(true);
+    }
+    {
+        Bucket* vic = never_dirtiest(s);
+        if (!vic) return cc_err(CC_ERR_OUT_OF_MEMORY, "never pages");
+        never_evac_some(s, vic, np, SIZE_MAX, 0) !>(err) { return cc_err(err); };
+    }
+    if (!never_pick_empty(s))
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "never pages");
+    bucket_ensure_recs(s, never_cur(s)) !>(err) { return cc_err(err); };
+    return cc_ok(true);
+}
+
+static size_t never_compact(CCEpochShard* s) {
+    int before = s->reclaim_n;
+    never_reclaim_empty(s);
+    if (s->reclaim_n > before) return (size_t)(s->reclaim_n - before);
+    return 0;
+}
+
+static WheelSlot slot_for(CCEpochShard* s, int64_t now, int64_t dies_at) {
+    WheelSlot r;
+    int l;
+    r.b = NULL;
+    r.level = -1;
+    r.slot = 0;
+    for (l = 0; l < LEVELS; l++) {
+        int64_t unit = k_unit_ms[l];
+        int64_t span = unit * k_slots[l];
+        int idx;
+        if (dies_at - now > span) continue;
+        idx = (int)((dies_at / unit) % k_slots[l]);
+        r.b = &s->wheel[l][idx];
+        if (dies_at >= r.b->end - unit && dies_at < r.b->end) {
+            r.level = (int8_t)l;
+            r.slot = (uint8_t)idx;
+            return r;
+        }
+    }
+    l = LEVELS - 1;
+    {
+        int64_t unit = k_unit_ms[l];
+        int idx = (int)((dies_at / unit) % k_slots[l]);
+        r.b = &s->wheel[l][idx];
+        r.level = (int8_t)l;
+        r.slot = (uint8_t)idx;
+    }
+    return r;
+}
+
+static Bucket* bucket_of_entry(CCEpochShard* s, Entry* e) {
+    if (e->level < 0) {
+        if (e->slot >= (uint8_t)NEVER_PAGES) return NULL;
+        return &s->never_pg[e->slot];
+    }
+    return &s->wheel[(int)e->level][e->slot];
+}
+
+static Entry* map_find(CCEpochShard* s, CCSliceHdr k) {
+    MapEnt* p;
+    if (!s->map) return NULL;
+    p = s->map->get_ptr(k);
+    if (!p || !*p || (*p)->dead) return NULL;
+    return *p;
+}
+
+static bool !>(CCError) map_insert(CCEpochShard* s, Entry* e) {
+    CCSliceHdr kh;
+    size_t bucket = SIZE_MAX;
+    size_t di;
+    Entry* prev = NULL;
+    if (!e || !e->key || !s->map) return cc_err(CC_ERR_INVALID_ARG, "map insert");
+    kh = entry_key_hdr(e);
+    di = WstoreIdx_find_dense(s->map, kh, &bucket);
+    if (di != SIZE_MAX && s->map->dense[di].val != e) {
+        prev = s->map->dense[di].val;
+        WstoreIdx_del_at(s->map, di, bucket);
+    }
+    if (s->map->insert(kh, e) != 0) {
+        if (prev) (void)s->map->insert(entry_key_hdr(prev), prev);
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "map insert");
+    }
+    return cc_ok(true);
+}
+
+static void map_drop_if(CCEpochShard* s, Entry* e) {
+    CCSliceHdr kh;
+    size_t bucket = SIZE_MAX;
+    size_t di;
+    if (!s->map || !e || !e->key) return;
+    kh = entry_key_hdr(e);
+    di = WstoreIdx_find_dense(s->map, kh, &bucket);
+    if (di != SIZE_MAX && s->map->dense[di].val == e)
+        WstoreIdx_del_at(s->map, di, bucket);
+    key_release(s, e->key);
+    e->key = NULL;
+}
+
+static void harvest_free(CCEpochShard* s, Entry* e) {
+    e->dead = 1;
+    e->live_next = NULL;
+    e->live_prev = NULL;
+    s->free_n++; /* hole until that generation resets */
+}
+
+/* drop_map=0: leave the map pointing at e (same-key LIFO pop will reuse it). */
+static void entry_retire(CCEpochShard* s, Entry* e, int drop_map) {
+    Bucket* b;
+    Epoch* ep;
+    size_t n;
+    if (!e || e->dead) return;
+    e->dead = 1;
+    b = bucket_of_entry(s, e);
+    if (!b) {
+        harvest_free(s, e);
+        return;
+    }
+    ep = &b->cur;
+    n = entry_val_live(e);
+    if (b->scan_e == e) b->scan_e = e->live_next;
+    live_unlink(ep, e);
+    if (ep->live_bytes >= n) ep->live_bytes -= n;
+    else ep->live_bytes = 0;
+    ep->dead_bytes += n;
+    s->tombstones++;
+    if (drop_map) map_drop_if(s, e);
+    harvest_free(s, e);
+    bucket_push_free(b, e);
+}
+
+static void entry_mark_dead(CCEpochShard* s, Entry* e) {
+    entry_retire(s, e, 1);
+}
+
+static bool cc_epoch_shard_delete(CCEpochShard* s, CCSlice key) {
+    Entry* e = map_find(s, key.hdr());
+    if (!e) return false;
+    entry_mark_dead(s, e);
+    never_reclaim_empty(s);
+    return true;
+}
+
+static bool !>(CCError) shard_place(CCEpochShard* s, WheelSlot sl, CCSlice key, Val v,
+                                   int64_t dies_at) {
+    Entry* old = map_find(s, key.hdr());
+    Bucket* b = sl.b;
+    Entry* e;
+    Entry* keep = old;
+    size_t n;
+    int never = 0;
+    int same = 0;
+    if (!b) return cc_err(CC_ERR_INVALID_ARG, "closed generation");
+    never = never_is_page(s, b);
+    if (old && bucket_of_entry(s, old) == b) {
+        entry_retire(s, old, 0);
+        old = NULL;
+        s->reinserted++;
+        same = 1;
+    }
+    e = bucket_pop_or_bump(s, b) !>(err) { return cc_err(err); };
+    if (!entry_bind(s, e, key, v))
+        return cc_err(CC_ERR_INVALID_ARG, "entry cap");
+    e->dies_at = dies_at;
+    e->level = sl.level;
+    e->slot = sl.slot;
+    n = entry_val_live(e);
+    if (!(same && e == keep))
+        map_insert(s, e) !>(err) { return cc_err(err); };
+    e->dead = 0;
+    live_link(&b->cur, e);
+    b->cur.live_bytes += n;
+    if (old) {
+        entry_mark_dead(s, old);
+        s->reinserted++;
+    }
+    if (never) never_reclaim_empty(s);
+    return cc_ok(true);
+}
+
+static bool !>(CCError) cc_epoch_shard_put(CCEpochShard* s, CCSlice key, Val v) {
+    WheelSlot sl;
+    Entry* old = map_find(s, key.hdr());
+    if (old && old->level < 0) {
+        sl.b = &s->never_pg[old->slot];
+        sl.level = -1;
+        sl.slot = old->slot;
+        return shard_place(s, sl, key, v, NEVER_MS);
+    }
+    never_prepare(s) !>(err) { return cc_err(err); };
+    sl.b = never_cur(s);
+    sl.level = -1;
+    sl.slot = s->never_i;
+    return shard_place(s, sl, key, v, NEVER_MS);
+}
+
+static bool !>(CCError) cc_epoch_shard_put_expires(CCEpochShard* s, int64_t now, CCSlice key,
+                                                 Val v, int64_t dies_at) {
+    if (dies_at <= now) {
+        cc_epoch_shard_delete(s, key);
+        return cc_ok(true);
+    }
+    return shard_place(s, slot_for(s, now, dies_at), key, v, dies_at);
+}
+
+static bool !>(CCError) cc_epoch_shard_expire(CCEpochShard* s, int64_t now, CCSlice key,
+                                            int64_t dies_at) {
+    Entry* old = map_find(s, key.hdr());
+    WheelSlot sl;
+    if (!old) return cc_ok(false);
+    if (dies_at <= now) {
+        cc_epoch_shard_delete(s, key);
+        return cc_ok(true);
+    }
+    sl = slot_for(s, now, dies_at);
+    return shard_place(s, sl, entry_key(old), entry_val(old), dies_at);
+}
+
+static bool !>(CCError) cc_epoch_shard_persist(CCEpochShard* s, CCSlice key) {
+    Entry* old = map_find(s, key.hdr());
+    WheelSlot sl;
+    if (!old) return cc_ok(false);
+    if (old->level < 0) {
+        old->dies_at = NEVER_MS;
+        return cc_ok(true);
+    }
+    never_prepare(s) !>(err) { return cc_err(err); };
+    sl.b = never_cur(s);
+    sl.level = -1;
+    sl.slot = s->never_i;
+    return shard_place(s, sl, entry_key(old), entry_val(old), NEVER_MS);
+}
+
+/* Caller holds the shard exclusive. Mix matches Go: find + hit, no copy. */
+static Entry* cc_epoch_shard_get(CCEpochShard* s, CCSlice key) {
+    Entry* e = map_find(s, key.hdr());
+    s->gets++;
+    if (e) s->get_hits++;
+    return e;
+}
+
+static int hold_budget(CCEpochShard* s) {
+    return (now_us() - s->hold_t0) >= WAVE_HOLD_US;
+}
+
+static int hold_up(CCEpochShard* s) {
+    s->hold_steps++;
+    if ((s->hold_steps & (WAVE_HOLD_SAMPLE - 1)) != 0) return 0;
+    return hold_budget(s);
+}
+
+static void slot_rotate(CCEpochShard* s, int l, int i) {
+    Bucket* b = &s->wheel[l][i];
+    int64_t old_end = b->end;
+    b->end += k_unit_ms[l] * k_slots[l];
+    b->scan_e = NULL;
+    b->scanning = 0;
+    note_slot_end(s, old_end, b->end);
+}
+
+static void note_hold(CCEpochShard* s, const char* verb, double us, size_t n) {
+    @errhandler(CCError e) cc_error_exit(e);
+    s->waves++;
+    s->wave_sum_us += us;
+    if (us > s->wave_max_us) s->wave_max_us = us;
+    if (us >= HITCH_US)
+        println(@string(`# hitch shard=${s->idx} verb=${verb} us=${us} n=${n}`, @scratch)) !>;
+}
+
+static void finish_chunk(CCEpochShard* s, const char* verb, size_t n, double t0) {
+    double us = now_us() - t0;
+    if (n) note_hold(s, verb, us, n);
+}
+
+/* Under the exclusive: take the parked handles. Destroy is after release. */
+static size_t steal_reclaim(CCEpochShard* s, CCArena* out, size_t cap) {
+    size_t n = 0;
+    while (s->reclaim_n && n < cap) {
+        out[n++] = s->reclaim_q[--s->reclaim_n];
+        s->reclaim_q[s->reclaim_n] = arena_none();
+    }
+    return n;
+}
+
+static void reclaim_stolen(CCEpochShard* s, CCArena* q, size_t n) {
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCArena a = q[i];
+        q[i] = arena_none();
+        if (!a.valid()) continue;
+        a.destroy();
+        s->compacts++;
+    }
+}
+
+static int wheel_scanning(const CCEpochShard* s) {
+    for (int l = 0; l < LEVELS; l++)
+        for (int i = 0; i < k_slots[l]; i++)
+            if (s->wheel[l][i].scanning) return 1;
+    return 0;
+}
+
+/* Mark due slots for scan. Empty slots rotate now; arena reset is reclaim. */
+static size_t retire_mark(CCEpochShard* s, int64_t now) {
+    size_t n = 0;
+    for (int l = 0; l < LEVELS && !hold_up(s); l++)
+        for (int i = 0; i < k_slots[l] && !hold_up(s); i++) {
+            Bucket* b = &s->wheel[l][i];
+            if (b->end > now || b->scanning) continue;
+            if (b->cur.live_n == 0) {
+                if (!bucket_try_park(s, b)) continue;
+                b->cur.live_head = NULL;
+                b->cur.live_tail = NULL;
+                b->cur.live_bytes = 0;
+                b->cur.dead_bytes = 0;
+                b->cur.gen++;
+                slot_rotate(s, l, i);
+                s->drains++;
+                n++;
+                continue;
+            }
+            b->scanning = 1;
+            b->scan_e = b->cur.live_head;
+            n++;
+        }
+    return n;
+}
+
+/* Tomb + free due keys on scanning lists. Caller holds shard_mu. */
+static size_t expire_scan(CCEpochShard* s, int64_t now, size_t budget) {
+    size_t n = 0;
+    for (int l = 0; l < LEVELS && n < budget && !hold_up(s); l++)
+        for (int i = 0; i < k_slots[l] && n < budget && !hold_up(s); i++) {
+            Bucket* b = &s->wheel[l][i];
+            Entry* e;
+            if (!b->scanning) continue;
+            e = b->scan_e ? b->scan_e : b->cur.live_head;
+            while (e && n < budget && !hold_up(s)) {
+                Entry* nxt = e->live_next;
+                n++;
+                s->drained_recs++;
+                b->scan_e = nxt;
+                if (e->dies_at <= now || b->end <= now) {
+                    entry_mark_dead(s, e);
+                    s->dropped++;
+                }
+                e = nxt;
+            }
+            if (!e) {
+                b->scan_e = NULL;
+                b->scanning = 0;
+                if (b->cur.live_n == 0) {
+                    if (!bucket_try_park(s, b)) {
+                        /* stay due; reclaim chunk must drain the queue first */
+                    } else {
+                        b->cur.live_head = NULL;
+                        b->cur.live_tail = NULL;
+                        b->cur.live_bytes = 0;
+                        b->cur.gen++;
+                        slot_rotate(s, l, i);
+                        s->drains++;
+                    }
+                }
+            }
+        }
+    return n;
+}
+
+static int sweep_due_pred(void* env) {
+    CCEpochShard* s = (CCEpochShard*)env;
+    return cc_atomic_load(&s->sweep_due) || cc_atomic_load(&s->stop);
+}
+
+static int sweep_more(CCEpochShard* s) {
+    if (s->reclaim_n) return 1;
+    if (wheel_scanning(s)) return 1;
+    if (now_ms() >= cc_atomic_load(&s->next_slot_end)) return 1;
+    return 0;
+}
+
+static void !>(CCError) sweep_wave(CCEpochShard* s) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCArena stolen[RECLAIM_CAP];
+    size_t stolen_n = 0;
+    size_t n;
+    double t0;
+    int64_t now;
+    {
+        CCShardHold hold = shard_hold(s->store, (uint64_t)s->idx);
+        @defer hold.release();
+        if (!hold.held()) return cc_err(CC_ERR_INVALID_ARG, "shard hold");
+        s->hold_t0 = now_us();
+        s->hold_steps = 0;
+        now = now_ms();
+        cc_atomic_store(&s->sweep_due, 0);
+        if (now >= cc_atomic_load(&s->next_slot_end) && !hold_budget(s)) {
+            t0 = now_us();
+            n = retire_mark(s, now);
+            finish_chunk(s, "retire", n, t0);
+        }
+        if (!hold_budget(s)) {
+            t0 = now_us();
+            n = expire_scan(s, now, s->wave_recs);
+            finish_chunk(s, "expire", n, t0);
+        }
+        if (!hold_budget(s)) {
+            t0 = now_us();
+            n = never_compact(s);
+            finish_chunk(s, "compact", n, t0);
+        }
+        stolen_n = steal_reclaim(s, stolen, RECLAIM_CAP);
+        if (s->ends_dirty) refresh_next_slot_end(s);
+        if (sweep_more(s)) sweep_arm(s);
+    }
+    reclaim_stolen(s, stolen, stolen_n);
+    return cc_ok();
+}
+
+static void sweeper(CCEpochShard* s) {
+    @errhandler(CCError e) { cc_error_log(e); return; }
+    while (!cc_atomic_load(&s->stop)) {
+        int64_t wait = cc_atomic_load(&s->next_slot_end) - now_ms();
+        CCDeadline dl;
+        CCDeadline* prev;
+        CCExclusiveGuard !>(CCError) r;
+        if (wait < 1) wait = 1;
+        if (wheel_scanning(s)) wait = 1;
+        dl = cc_deadline_after_ms((uint64_t)wait);
+        prev = cc_deadline_push(&dl);
+        r = s->sweep_mu.acquire_when(sweep_due_pred, s);
+        cc_deadline_pop(prev);
+        if (cc_is_err(r)) {
+            if (r.u.error.kind != CC_ERR_TIMEOUT) return;
+        } else {
+            CCExclusiveGuard hold = r.u.value;
+            hold.release();
+        }
+        if (cc_atomic_load(&s->stop)) return;
+        sweep_wave(s) !>;
+        if (cc_atomic_load(&s->stop)) return;
+    }
+}
+
+static bool !>(CCError) shard_init(CCEpochShard* s, int idx, double theta, size_t wave_recs,
+                                  int sweep_on, int nshards, CCExclusive excl) {
+    @errhandler(CCError e) { return cc_err(e); }
+    memset(s, 0, sizeof(*s));
+    s->idx = idx;
+    s->owner = cc_arena_heap(kilobytes(256));
+    if (!s->owner.valid()) return cc_err(CC_ERR_OUT_OF_MEMORY, "owner");
+    s->sweep_mu = excl.mutex((uint64_t)MAX_SHARDS + (uint64_t)idx);
+    s->theta = theta;
+    (void)nshards;
+    s->wave_recs = wave_recs;
+    s->sweep_on = sweep_on;
+    s->map_arena = s->owner.create_arena(0) !>;
+    s->map = WstoreIdx_init_count(s->map_arena, 256);
+    if (!s->map) return cc_err(CC_ERR_OUT_OF_MEMORY, "map");
+    {
+        int64_t now = now_ms();
+        for (int p = 0; p < NEVER_PAGES; p++)
+            bucket_reset(&s->never_pg[p], NEVER_MS);
+        s->never_i = 0;
+        s->never_pg[0].cur.seq = ++s->never_seq;
+        for (int l = 0; l < LEVELS; l++)
+            for (int i = 0; i < k_slots[l]; i++) {
+                int64_t unit = k_unit_ms[l];
+                int64_t base = (now / unit) * unit;
+                int64_t end = base + unit;
+                while ((int)((end / unit) % k_slots[l]) != (i + 1) % k_slots[l])
+                    end += unit;
+                bucket_reset(&s->wheel[l][i], end);
+            }
+    }
+    refresh_next_slot_end(s);
+    return cc_ok(true);
+}
+
+static void shard_free(CCEpochShard* s) {
+    s->owner.destroy();
+}
+
+static size_t shard_keys(CCEpochShard* s) {
+    return s->map ? s->map->len() : 0;
+}
+
+static void shard_never_bytes(const CCEpochShard* s, size_t* live, size_t* dead) {
+    size_t lv = 0, dd = 0;
+    int i;
+    for (i = 0; i < NEVER_PAGES; i++) {
+        lv += s->never_pg[i].cur.live_bytes;
+        dd += s->never_pg[i].cur.dead_bytes;
+    }
+    *live = lv;
+    *dead = dd;
+}
+
+static size_t shard_logical(CCEpochShard* s) {
+    size_t t = 0;
+    int i;
+    for (i = 0; i < NEVER_PAGES; i++)
+        t += s->never_pg[i].cur.live_bytes;
+    for (int l = 0; l < LEVELS; l++)
+        for (i = 0; i < k_slots[l]; i++)
+            t += s->wheel[l][i].cur.live_bytes;
+    return t;
+}
+
+static size_t shard_recs_commit(const CCEpochShard* s) {
+    size_t t = 0;
+    int i;
+    for (i = 0; i < NEVER_PAGES; i++)
+        if (s->never_pg[i].recs.valid())
+            t += cc_arena_committed_gross_bytes(s->never_pg[i].recs);
+    for (int l = 0; l < LEVELS; l++)
+        for (i = 0; i < k_slots[l]; i++)
+            if (s->wheel[l][i].recs.valid())
+                t += cc_arena_committed_gross_bytes(s->wheel[l][i].recs);
+    for (i = 0; i < s->reclaim_n; i++)
+        if (s->reclaim_q[i].valid())
+            t += cc_arena_committed_gross_bytes(s->reclaim_q[i]);
+    for (i = 0; i < s->arena_pool_n; i++)
+        if (s->arena_pool[i].valid())
+            t += cc_arena_committed_gross_bytes(s->arena_pool[i]);
+    return t;
+}
+
+static size_t shard_committed(CCEpochShard* s) {
+    size_t t = cc_arena_committed_gross_bytes(s->owner);
+    t += shard_recs_commit(s);
+    t += cc_arena_committed_gross_bytes(s->map_arena);
+    return t;
+}
+
+static size_t shard_epochs_live(const CCEpochShard* s) {
+    size_t n = 0;
+    int i;
+    for (i = 0; i < NEVER_PAGES; i++)
+        if (s->never_pg[i].cur.live_n) n++;
+    for (int l = 0; l < LEVELS; l++)
+        for (i = 0; i < k_slots[l]; i++)
+            if (s->wheel[l][i].cur.live_n) n++;
+    return n;
+}
+
+static size_t shard_live_entries(const CCEpochShard* s) {
+    size_t t = 0;
+    int i;
+    for (i = 0; i < NEVER_PAGES; i++)
+        t += s->never_pg[i].cur.live_n;
+    for (int l = 0; l < LEVELS; l++)
+        for (i = 0; i < k_slots[l]; i++)
+            t += s->wheel[l][i].cur.live_n;
+    return t;
+}
+
+/* Kill live rows, wheel first. Caller holds the shard exclusive. */
+static size_t epoch_kill(CCEpochShard* s, Bucket* b, size_t want) {
+    size_t n = 0;
+    Entry* e;
+    if (!b) return 0;
+    e = b->cur.live_head;
+    while (e && n < want) {
+        Entry* nxt = e->live_next;
+        entry_mark_dead(s, e);
+        n++;
+        e = nxt;
+    }
+    bucket_reclaim(s, b);
+    return n;
+}
+
+static size_t shard_trim(CCEpochShard* s, size_t want) {
+    size_t n = 0;
+    int l, i;
+    for (l = 0; l < LEVELS && n < want; l++)
+        for (i = 0; i < k_slots[l] && n < want; i++)
+            n += epoch_kill(s, &s->wheel[l][i], want - n);
+    if (n < want) {
+        int p;
+        for (p = 0; p < NEVER_PAGES && n < want; p++)
+            n += epoch_kill(s, &s->never_pg[p], want - n);
+    }
+    return n;
+}
+
+static void store_trim(CCEpochKeys* st, size_t target) {
+    size_t live = 0, need;
+    int i;
+    for (i = 0; i < st->nshards; i++) {
+        CCShardHold hold = st->locks.hold_one((uint64_t)i);
+        live += shard_live_entries(&st->shards[i]);
+        hold.release();
+    }
+    if (live <= target) return;
+    need = live - target;
+    for (i = 0; i < st->nshards && need; i++) {
+        CCShardHold hold = st->locks.hold_one((uint64_t)i);
+        size_t have = shard_live_entries(&st->shards[i]);
+        size_t take = need < have ? need : have;
+        need -= shard_trim(&st->shards[i], take);
+        while (st->shards[i].reclaim_n) {
+            CCArena a = st->shards[i].reclaim_q[--st->shards[i].reclaim_n];
+            st->shards[i].reclaim_q[st->shards[i].reclaim_n] = arena_none();
+            arena_release(&st->shards[i], a);
+        }
+        shard_drop_pool(&st->shards[i]);
+        hold.release();
+    }
+}
+
+static void store_counts(CCEpochKeys* st, size_t* live, size_t* mapn) {
+    int i;
+    *live = 0;
+    *mapn = 0;
+    for (i = 0; i < st->nshards; i++) {
+        CCShardHold hold = st->locks.hold_one((uint64_t)i);
+        *live += shard_live_entries(&st->shards[i]);
+        *mapn += shard_keys(&st->shards[i]);
+        hold.release();
+    }
+}
+
+static uint64_t key_hash(CCSlice k) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    @for (b in k) {
+        h ^= (uint8_t)b;
+        h *= 0x100000001b3ull;
+    }
+    return h;
+}
+
+static uint64_t shard_si(CCEpochKeys* st, CCSlice key) {
+    return key_hash(key) % (uint64_t)st->nshards;
+}
+
+static CCEpochShard* shard_of(CCEpochKeys* st, CCSlice key) {
+    return &st->shards[shard_si(st, key)];
+}
+
+static bool !>(CCError) cc_epoch_keys_put(CCEpochKeys* st, CCSlice key, Val v) {
+    uint64_t si = shard_si(st, key);
+    CCShardHold hold = st->locks.hold_one(si);
+    @defer hold.release();
+    if (!hold.held()) return cc_err(CC_ERR_INVALID_ARG, "shard hold");
+    return cc_epoch_shard_put(&st->shards[si], key, v);
+}
+
+static bool !>(CCError) cc_epoch_keys_put_expires(CCEpochKeys* st, int64_t now, CCSlice key,
+                                                Val v, int64_t dies_at) {
+    uint64_t si = shard_si(st, key);
+    CCShardHold hold = st->locks.hold_one(si);
+    @defer hold.release();
+    if (!hold.held()) return cc_err(CC_ERR_INVALID_ARG, "shard hold");
+    return cc_epoch_shard_put_expires(&st->shards[si], now, key, v, dies_at);
+}
+
+static bool !>(CCError) cc_epoch_keys_expire(CCEpochKeys* st, int64_t now, CCSlice key,
+                                           int64_t dies_at) {
+    uint64_t si = shard_si(st, key);
+    CCShardHold hold = st->locks.hold_one(si);
+    @defer hold.release();
+    if (!hold.held()) return cc_err(CC_ERR_INVALID_ARG, "shard hold");
+    return cc_epoch_shard_expire(&st->shards[si], now, key, dies_at);
+}
+
+static bool !>(CCError) cc_epoch_keys_persist(CCEpochKeys* st, CCSlice key) {
+    uint64_t si = shard_si(st, key);
+    CCShardHold hold = st->locks.hold_one(si);
+    @defer hold.release();
+    if (!hold.held()) return cc_err(CC_ERR_INVALID_ARG, "shard hold");
+    return cc_epoch_shard_persist(&st->shards[si], key);
+}
+
+static bool cc_epoch_keys_delete(CCEpochKeys* st, CCSlice key) {
+    uint64_t si = shard_si(st, key);
+    CCShardHold hold = st->locks.hold_one(si);
+    @defer hold.release();
+    if (!hold.held()) return false;
+    return cc_epoch_shard_delete(&st->shards[si], key);
+}
+
+static void cc_epoch_keys_get(CCEpochKeys* st, CCSlice key, Get* out) {
+    uint64_t si = shard_si(st, key);
+    CCShardHold hold = st->locks.hold_one(si);
+    Entry* e;
+    @defer hold.release();
+    if (!hold.held()) { get_miss(out); return; }
+    e = cc_epoch_shard_get(&st->shards[si], key);
+    if (!e) { get_miss(out); return; }
+    out->val = entry_val(e);
+    out->dies_at = e->dies_at;
+}
+
+static size_t rss_kib(void) {
+#ifdef __APPLE__
+    struct mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  (task_info_t)&info, &count) != KERN_SUCCESS)
+        return SIZE_MAX;
+    return (size_t)(info.resident_size / 1024);
+#else
+    FILE* f = fopen("/proc/self/status", "r");
+    char line[256];
+    size_t v = 0;
+    if (!f) return SIZE_MAX;
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, "VmRSS: %zu", &v) == 1) break;
+    fclose(f);
+    return v ? v : SIZE_MAX;
+#endif
+}
+
+static void print_mem(CCEpochKeys* st, const char* when) {
+    @errhandler(CCError e) cc_error_exit(e);
+    size_t commit = 0, epochs = 0, live = 0, mapn = 0;
+    size_t rss;
+    for (int i = 0; i < st->nshards; i++) {
+        CCEpochShard* s = &st->shards[i];
+        CCShardHold hold = st->locks.hold_one((uint64_t)i);
+        commit += shard_committed(s);
+        epochs += shard_epochs_live(s);
+        live += shard_live_entries(s);
+        mapn += shard_keys(s);
+        hold.release();
+    }
+    rss = rss_kib();
+    if (rss == SIZE_MAX)
+        println(@string(`# mem: ${when} commit_KiB=${commit / 1024} rss_KiB=? epochs=${epochs} live_n=${live} map_n=${mapn}`, @scratch)) !>;
+    else
+        println(@string(`# mem: ${when} commit_KiB=${commit / 1024} rss_KiB=${rss} epochs=${epochs} live_n=${live} map_n=${mapn}`, @scratch)) !>;
+    fflush(stdout);
+}
+
+#define NEVER_POOL 20000
+#define RECENT 8192
+
+typedef struct Client {
+    CCEpochKeys* st;
+    int id;
+    int nclients;
+    int mix_get;
+    int mix_drain;
+    uint64_t rng;
+    double t_start;
+    double t_end;
+    long ops;
+    char recent[RECENT][32];
+    size_t recent_n;
+} Client;
+
+static uint64_t rnd(Client* c) {
+    c->rng ^= c->rng << 13;
+    c->rng ^= c->rng >> 7;
+    c->rng ^= c->rng << 17;
+    return c->rng;
+}
+static double rndf(Client* c) { return (double)(rnd(c) >> 11) / 9007199254740992.0; }
+
+static CCSlice recent_at(Client* c) {
+    const char* k = c->recent[rnd(c) % (c->recent_n < RECENT ? c->recent_n : RECENT)];
+    size_t n = 0;
+    while (k[n]) n++;
+    return cc_slice_from_buffer((char*)k, n);
+}
+
+static void remember_key(Client* c, CCSlice kb) {
+    char* dst = c->recent[c->recent_n % RECENT];
+    size_t n = kb.len < 31 ? kb.len : 31;
+    if (n) memcpy(dst, kb.ptr, n);
+    dst[n] = 0;
+    c->recent_n++;
+}
+
+static void client(Client* c) {
+    @errhandler(CCError e) { cc_error_log(e); return; }
+    CCEpochKeys* st = c->st;
+    char val[128];
+    long seq = 0;
+    double p_ttl = c->mix_get ? 0.20 : 0.55;
+    double p_never = c->mix_get ? 0.25 : 0.70;
+    double p_del = c->mix_get ? 0.30 : 0.85;
+    memset(val, 'v', sizeof val);
+    for (long i = 0; ; i++) {
+        double t = now_us();
+        int64_t now;
+        double r;
+        CCEpochShard* s;
+        CCSlice kb;
+        if (t >= c->t_end) break;
+        if (c->mix_drain && t >= c->t_start + (c->t_end - c->t_start) * 0.10)
+            return;
+        now = (int64_t)(t / 1000.0);
+        r = rndf(c);
+        {
+            CCShardHold hold;
+            uint64_t si;
+            if (c->mix_drain) {
+                if (c->nclients == 1) kb = @string(`e:${seq}`);
+                else kb = @string(`e:${c->id}:${seq}`);
+                seq++;
+                si = shard_si(st, kb);
+                s = &st->shards[si];
+                hold = st->locks.hold_one(si);
+                @defer hold.release();
+                if (!hold.held()) return;
+                s->ops++;
+                {
+                    Val v = { .bytes = cc_slice_from_buffer(val, 96) };
+                    s->put_expires(now, kb, v, now + 200) !>;
+                }
+                c->ops++;
+                continue;
+            } else if (r < p_ttl) {
+                if (c->nclients == 1) kb = @string(`e:${seq}`);
+                else kb = @string(`e:${c->id}:${seq}`);
+                seq++;
+            } else if (r < p_never) {
+                long id = (long)(NEVER_POOL * pow(rndf(c), 3.0));
+                kb = @string(`n:${id}`);
+            } else if (r < p_del) {
+                if ((rnd(c) & 1) && c->recent_n) kb = recent_at(c);
+                else {
+                    long id = (long)(NEVER_POOL * pow(rndf(c), 3.0));
+                    kb = @string(`n:${id}`);
+                }
+            } else {
+                if (c->mix_get && c->recent_n && (rnd(c) & 3) == 0)
+                    kb = recent_at(c);
+                else {
+                    long id = (long)(NEVER_POOL * rndf(c));
+                    kb = @string(`n:${id}`);
+                }
+            }
+            si = shard_si(st, kb);
+            s = &st->shards[si];
+            hold = st->locks.hold_one(si);
+            @defer hold.release();
+            if (!hold.held()) return;
+            s->ops++;
+            if (r >= p_del) {
+                (void)s->get(kb);
+            } else if (r < p_ttl) {
+                int64_t dies = now + (int64_t)(50.0 * pow(400.0, rndf(c)));
+                Val v = { .bytes = cc_slice_from_buffer(val, 96) };
+                s->put_expires(now, kb, v, dies) !>;
+                remember_key(c, kb);
+            } else if (r < p_never) {
+                Val v = { .bytes = cc_slice_from_buffer(val, 96) };
+                s->put(kb, v) !>;
+            } else {
+                s->delete(kb);
+            }
+        }
+        c->ops++;
+    }
+}
+
+static void !>(CCError) preload_never(CCEpochKeys* st) {
+    char val[128];
+    Val v;
+    memset(val, 'v', sizeof val);
+    v = (Val){ .bytes = cc_slice_from_buffer(val, 96) };
+    for (long id = 0; id < NEVER_POOL; id++) {
+        CCSlice k = @string(`n:${id}`);
+        uint64_t si = shard_si(st, k);
+        CCEpochShard* s = &st->shards[si];
+        CCShardHold hold = st->locks.hold_one(si);
+        if (!hold.held()) return cc_err(CC_ERR_INVALID_ARG, "shard hold");
+        s->put(k, v) !>(err) { hold.release(); return cc_err(err); };
+        hold.release();
+    }
+    return cc_ok();
+}
+
+typedef struct Reporter {
+    CCEpochKeys* st;
+    double t_start;
+    double t_end;
+    size_t* nworkers;
+} Reporter;
+
+static void reporter(Reporter* rp) {
+    @errhandler(CCError e) cc_error_exit(e);
+    CCEpochKeys* st = rp->st;
+    println("#      t_s      keys logical_KiB commit_KiB rss_KiB drains dropped reinsert  waves rehash      ops") !>;
+    for (;;) {
+        size_t keys = 0, logical = 0, committed = 0;
+        size_t drains = 0, dropped = 0, reins = 0, waves = 0, rehash = 0, ops = 0;
+        cc_sleep_ms(1000);
+        if (now_us() >= rp->t_end) {
+            if (rp->nworkers) *rp->nworkers = cc_sched_get_num_workers();
+            return;
+        }
+        for (int i = 0; i < st->nshards; i++) {
+            CCEpochShard* s = &st->shards[i];
+            CCShardHold hold = st->locks.hold_one((uint64_t)i);
+            if (!hold.held()) continue;
+            keys += shard_keys(s);
+            logical += shard_logical(s);
+            committed += shard_committed(s);
+            drains += s->drains;
+            dropped += s->dropped;
+            reins += s->reinserted;
+            waves += s->waves;
+            rehash += s->rehashes;
+            ops += s->ops;
+            hold.release();
+        }
+        {
+            size_t rss = rss_kib();
+            CCString rss_str = rss == SIZE_MAX
+                ? @string(`?`, @scratch)
+                : @string(`${rss}`, @scratch);
+            println(@string(`  ${(now_us() - rp->t_start) / 1e6} ${keys} ${logical / 1024} ${committed / 1024} ${rss_str} ${drains} ${dropped} ${reins} ${waves} ${rehash} ${ops}`, @scratch)) !>;
+            fflush(stdout);
+        }
+    }
+}
+
+int main(int argc, char** argv) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    double seconds = argc > 1 ? atof(argv[1]) : 20;
+    int sweep = argc > 2 ? atoi(argv[2]) : 1;
+    double theta = argc > 3 ? atof(argv[3]) : 0.35;
+    size_t wave = argc > 4 ? (size_t)atol(argv[4]) : 512;
+    int nshards = argc > 5 ? atoi(argv[5]) : 1;
+    int nclients = argc > 6 ? atoi(argv[6]) : 1;
+    int mix_get = 0;
+    int mix_drain = 0;
+    size_t nworkers = 0;
+    static CCEpochShard shards[MAX_SHARDS];
+    static Client clients[MAX_CLIENTS];
+    static CCEpochKeys st;
+    static Reporter rp;
+    if (nshards < 1) nshards = 1;
+    if (nshards > MAX_SHARDS) nshards = MAX_SHARDS;
+    if (nclients < 1) nclients = 1;
+    if (nclients > MAX_CLIENTS) nclients = MAX_CLIENTS;
+    if (argc > 7) {
+        if (strcmp(argv[7], "get") == 0) mix_get = 1;
+        else if (strcmp(argv[7], "drain") == 0) mix_drain = 1;
+        else if (strcmp(argv[7], "write") != 0) {
+            eprintln("mix must be write, get, or drain") !>;
+            return 1;
+        }
+    }
+
+    st.nshards = nshards;
+    st.shards = shards;
+    CCArena excl_arena = cc_arena_heap(kilobytes(64));
+    @defer excl_arena.destroy();
+    if (!excl_arena.valid()) return 1;
+    CCExclusive excl = cc_exclusive_create(excl_arena, (size_t)MAX_SHARDS * 2u) !> @destroy;
+    st.excl = excl;
+    st.locks = cc_shard_domain(excl, cc_shard_mask_ceil((size_t)nshards, MAX_SHARDS));
+    for (int i = 0; i < nshards; i++) {
+        shard_init(&shards[i], i, theta, wave, sweep, nshards, excl) !>;
+        shards[i].store = &st;
+    }
+    @defer { for (int i = 0; i < nshards; i++) shard_free(&shards[i]); }
+
+    println(@string(`# wstore5 CCEpochKeys seconds=${seconds} sweep=${sweep} mix=${mix_drain ? "drain" : (mix_get ? "get" : "write")} theta=${theta} wave_recs=${wave} shards=${nshards} clients=${nclients} gen_arena=1 always_new=1 never_page=${NEVER_PAGE} wheel=100ms x64, 1s x64, 60s x60`, @scratch)) !>;
+    print_mem(&st, "idle");
+    if (mix_get) preload_never(&st) !>;
+
+    {
+        double t0 = now_us();
+        rp.st = &st;
+        rp.t_start = t0;
+        rp.t_end = t0 + seconds * 1e6;
+        rp.nworkers = &nworkers;
+        for (int i = 0; i < nclients; i++) {
+            clients[i].st = &st;
+            clients[i].id = i;
+            clients[i].nclients = nclients;
+            clients[i].rng = 0x9E3779B97F4A7C15ull;
+            if (i != 0)
+                clients[i].rng ^= (uint64_t)(i + 1) * 0xD1B54A32D192ED03ull;
+            clients[i].t_start = t0;
+            clients[i].t_end = rp.t_end;
+            clients[i].ops = 0;
+            clients[i].recent_n = 0;
+            clients[i].mix_get = mix_get;
+            clients[i].mix_drain = mix_drain;
+        }
+        {
+            CCNursery n = cc_nursery_create() !> @destroy;
+            CCEpochKeys* stp = &st;
+            Reporter* rpp = &rp;
+            for (int i = 0; i < nshards; i++) shards[i].nursery = n;
+            if (sweep)
+                for (int i = 0; i < nshards; i++) {
+                    CCEpochShard* sp = &shards[i];
+                    n.spawn(() => [sp] { sweeper(sp); }) !>;
+                }
+            for (int i = 0; i < nclients; i++) {
+                Client* cp = &clients[i];
+                n.spawn(() => [cp] { client(cp); }) !>;
+            }
+            n.spawn(() => [rpp, stp] {
+                reporter(rpp);
+                for (int i = 0; i < stp->nshards; i++) {
+                    cc_atomic_store(&stp->shards[i].stop, 1);
+                    sweep_kick(&stp->shards[i]);
+                }
+            }) !>;
+        }
+    }
+    {
+        long ops = 0;
+        size_t drains = 0, drec = 0, dropped = 0, reins = 0, rehash = 0, compacts = 0, evacs = 0, pops = 0, pfull = 0, waves = 0;
+        size_t gets = 0, hits = 0;
+        double wsum = 0, wmax = 0;
+        size_t total_live = 0, total_map = 0, total_free = 0, total_recs_commit = 0;
+        for (int i = 0; i < nclients; i++) ops += clients[i].ops;
+        for (int i = 0; i < nshards; i++) {
+            CCEpochShard* s = &shards[i];
+            drains += s->drains;
+            drec += s->drained_recs;
+            dropped += s->dropped;
+            reins += s->reinserted;
+            rehash += s->rehashes;
+            compacts += s->compacts;
+            evacs += s->evacs;
+            pops += s->pops;
+            pfull += s->park_full;
+            waves += s->waves;
+            gets += s->gets;
+            hits += s->get_hits;
+            wsum += s->wave_sum_us;
+            if (s->wave_max_us > wmax) wmax = s->wave_max_us;
+            total_live += shard_live_entries(s);
+            total_map += shard_keys(s);
+            total_free += s->free_n;
+            total_recs_commit += shard_recs_commit(s);
+        }
+        double free_frac = (total_live + total_free) > 0 ? (double)total_free / (double)(total_live + total_free) : 0.0;
+        double slack = (total_live * sizeof(Entry)) > 0 ? (double)total_recs_commit / (double)(total_live * sizeof(Entry)) : 0.0;
+        print_mem(&st, "end");
+        println(@string(`# keys: live_n=${total_live} map_n=${total_map}`, @scratch)) !>;
+        store_trim(&st, TRIM_KEYS);
+        {
+            size_t trim_live = 0, trim_map = 0;
+            store_counts(&st, &trim_live, &trim_map);
+            print_mem(&st, "trim");
+            println(@string(`# keys: trim live_n=${trim_live} map_n=${trim_map} target=${TRIM_KEYS}`, @scratch)) !>;
+        }
+        println(@string(`# ops=${ops} (${seconds > 0 ? ops / seconds / 1e6 : 0}M/s)  get_hits=${hits}/${gets} workers=${nworkers}`, @scratch)) !>;
+        println(@string(`# expire: dropped=${dropped} drained_recs=${drec} drains=${drains} reinserted=${reins}`, @scratch)) !>;
+        println(@string(`# index: rehashes=${rehash}  (map grow, not expire)`, @scratch)) !>;
+        println(@string(`# compact: compacts=${compacts} evacs=${evacs} pops=${pops} park_full=${pfull} free_frac=${free_frac} slack=${slack} live_n=${total_live} free_n=${total_free} recs_commit_KiB=${total_recs_commit / 1024}`, @scratch)) !>;
+        println(@string(`# waves=${waves} mean=${waves ? wsum / waves : 0} us max=${wmax} us (hold ${WAVE_HOLD_US} us / sample ${WAVE_HOLD_SAMPLE}, budget ${wave} recs)`, @scratch)) !>;
+        for (int i = 0; i < nshards; i++) {
+            CCEpochShard* s = &shards[i];
+            size_t nlive = 0, ndead = 0;
+            shard_never_bytes(s, &nlive, &ndead);
+            println(@string(`#   shard ${i}: ops=${s->ops} keys=${shard_keys(s)} waves=${s->waves} drains=${s->drains} compacts=${s->compacts} evacs=${s->evacs} never_live=${nlive} never_dead=${ndead}`, @scratch)) !>;
+        }
+    }
+    return 0;
+}

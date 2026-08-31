@@ -4,7 +4,7 @@
 int main(void) {
     CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
     int n = 0;
-    for (v in vec_new::[int](a))
+    @for (v in vec_new::[int](a))
         n += v;
     return n;
 }

@@ -39,13 +39,13 @@ int main(void) {
 
     /* Live walk — dest-cast is not inserted. */
     int sum = 0;
-    for (x in v)
+    @for (x in v)
         sum += x;
     assert(sum == 6);
 
     /* Explicit snapshot. */
     int snap = 0;
-    for (x in v.as_slice())
+    @for (x in v.as_slice())
         snap += x;
     assert(snap == 6);
 

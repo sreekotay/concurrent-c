@@ -3,7 +3,7 @@
 
 int main(void) {
     CCSlice name = CC_SLICE_LIT("GET");
-    switch (name) {
+    @switch (name) {
     case "GET":
         return 1;
     case 2:

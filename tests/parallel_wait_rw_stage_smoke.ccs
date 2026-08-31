@@ -16,7 +16,7 @@ static int run_rw(int use_par) {
     int xs[N];
     memset(xs, 0, sizeof(xs));
     unsigned char big[32768];
-    @parallel seq (use_par) wait (ts) for (i in 0..N) {
+    @parallel seq (use_par) wait (ts) @for (i in 0..N) {
         unsigned char take[32768];
         @stage (ts.read, i) {
             take[0] = (unsigned char)i;

@@ -243,7 +243,7 @@ static CCSlice rsync_scan(CCSlice data, unsigned long* rolling,
                           size_t* hits, size_t max_hits) {
     size_t n_hits = 0;
     size_t last = 0;
-    for (i, ch in data) {
+    @for (i, ch in data) {
         *rolling = ((*rolling << 1) ^ ch) & 0xFFF;
         if (*rolling == 2047 && n_hits < max_hits) {
             hits[n_hits++] = (i + 1) - last;
@@ -645,7 +645,7 @@ static void !>(CCError) compress_seekable(CompressRun* run, int in_fd, size_t fi
     };
 
     int i;
-    @parallel seq (use_par) wait (ts) cache (zs) for (i in 0..n) {
+    @parallel seq (use_par) wait (ts) cache (zs) @for (i in 0..n) {
         check_interrupt() !>;
         size_t off = (size_t)i * block;
         size_t remain = file_len - off;

@@ -37,7 +37,7 @@ int main(void) {
     if (s.kind != PackedRV_str) return 3;
 
     int seen = 0;
-    switch (s) {
+    @switch (s) {
         case .str: seen = 1; break;
         case .num: return 4;
     }

@@ -13,7 +13,7 @@
 };
 
 static int classify(Signal s) {
-    switch (s) {
+    @switch (s) {
         case .hup:  return 1;
         case .term: return 2;
         case .info: return 100 + s.info;

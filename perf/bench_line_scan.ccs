@@ -69,7 +69,7 @@ static void tally_blob(CCSlice blob, ScanStats* s) {
     s->bytes = (int64_t)blob.len;
     s->lines = 0;
     char last = 0;
-    for (ch in blob) {
+    @for (ch in blob) {
         if (ch == '\n') s->lines++;
         last = ch;
     }

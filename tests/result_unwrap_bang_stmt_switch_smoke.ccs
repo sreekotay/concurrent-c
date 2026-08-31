@@ -19,7 +19,7 @@ static int !>(CCError) write_num(void) {
 
 static int go(Cell* cell) {
     @errhandler(CCError e) { return 1; }
-    switch (cell) {
+    @switch (cell) {
     case .txt:
         write_ok() !>;
         break;

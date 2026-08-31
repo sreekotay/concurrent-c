@@ -179,7 +179,7 @@ static size_t shard_of(DB* db, char[:] key) {
 }
 
 static Hold hold_for(char[:] name) {
-    switch (name) {
+    @switch (name) {
     case "GET":
     case "SET":
     case "INCR":
@@ -223,7 +223,7 @@ static bool !>(CCError) exec_key(DB* db, Cmd* c, size_t si,
     CCString* v;
 
     if (!sh) return conn->err("internal");
-    switch (name) {
+    @switch (name) {
     case "GET":
         v = sh->get(key);
         if (!v) return conn->null();
@@ -248,7 +248,7 @@ static bool !>(CCError) exec_keys(DB* db, Cmd* c,
     int64_t n;
     CCShard* sh;
 
-    switch (name) {
+    @switch (name) {
     case "DEL":
         n = 0;
         for (i = 1; i < c->argc; i++) {
@@ -272,7 +272,7 @@ static bool !>(CCError) exec_all(DB* db, Cmd* c,
                                  ConnEnc conn) {
     CCShardMap* maps = &db->maps;
     char[:] name = c->args[0];
-    switch (name) {
+    @switch (name) {
     case "DBSIZE":
         return conn->integer((int64_t)maps->len());
     case "FLUSHDB":
@@ -318,7 +318,7 @@ static bool !>(CCError) exec_mget_parallel(DB* db, Cmd* c, ConnEnc conn) {
     CCTurnstile ts@(K_MGET_CAP, 1, ts_arena) !> @destroy;
 
     conn->array_len(nkeys) !>;
-    @parallel wait (ts) for (i in 0..nkeys) {
+    @parallel wait (ts) @for (i in 0..nkeys) {
         char[:] key = c->args[i + 1];
         size_t si = shard_of(db, key);
         char snap_buf[4096];
@@ -361,10 +361,10 @@ static bool !>(CCError) execute(DB* db, Cmd* c,
     if (c->argc == 0) return conn->err("empty command");
     name = c->args[0];
     /* Fold for string-switch; names are tiny (GET/MGET/…). */
-    for (&ch in name) {
+    @for (&ch in name) {
         if (ch >= 'a' && ch <= 'z') ch -= 32;
     } !>;
-    switch (name) {
+    @switch (name) {
     case "PING":
         if (c->argc > 1) return conn->bulk(c->args[1]);
         return conn->pong();

@@ -250,7 +250,7 @@ static AstNode* parse_with_deadline(Parser* p) {
 
 /* @parallel { name = expr; | expr; | @serial { … }; … }
  * @parallel (pred) { … }
- * @parallel for (name in lo..hi) { … } */
+ * @parallel @for (name in lo..hi) { … } */
 static int parallel_is_decl_arm(AstNode* s) {
     if (!s) return 0;
     return s->kind == AST_VAR_DECL || s->kind == AST_VAR_INT ||
@@ -543,7 +543,7 @@ static AstNode* parse_parallel_block(Parser* p) {
                 s = ser;
             } else if (s->kind == AST_FOR) {
                 parser_fail(p, at,
-                            "for is not an @parallel { } arm; use @parallel for "
+                            "for is not an @parallel { } arm; use @parallel @for "
                             "or @serial { … }");
                 return NULL;
             } else {
@@ -570,27 +570,41 @@ static AstNode* parse_parallel_block(Parser* p) {
     return n;
 }
 
-/* gate/seq_cond are "" for the bare bisect form (`@parallel for`). */
+/* gate/seq_cond are "" for the bare bisect form (`@parallel @for`). */
+static int peek_at_for(Parser* p) {
+    return p->i + 1 < p->n && tok_eq(p->toks[p->i], TK_PUNCT, "@") &&
+           shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_FOR;
+}
+
 static AstNode* parse_parallel_for(Parser* p, const char* gate,
                                    const char* seq_cond) {
     Token name;
     int rp;
     int depth;
     AstNode* n;
+    if (!tok_eq(p_peek(p), TK_PUNCT, "@")) {
+        parser_fail(p, p_peek(p), "expected `@for` after @parallel");
+        return NULL;
+    }
+    p_next(p); /* @ */
+    if (shadow_kw(p_peek(p)) != SHADOW_KW_FOR) {
+        parser_fail(p, p_peek(p), "expected `@for` after @parallel");
+        return NULL;
+    }
     p_next(p); /* for */
     if (!tok_eq(p_peek(p), TK_PUNCT, "(")) {
-        parser_fail(p, p_peek(p), "expected '(' after @parallel for");
+        parser_fail(p, p_peek(p), "expected '(' after @parallel @for");
         return NULL;
     }
     p_next(p);
     name = p_next(p);
     if (name.kind != TK_IDENT) {
-        parser_fail(p, name, "expected name after @parallel for (");
+        parser_fail(p, name, "expected name after @parallel @for (");
         return NULL;
     }
     if (!tok_eq(p_peek(p), TK_IDENT, "in")) {
         parser_fail(p, p_peek(p),
-                    "expected 'in' after @parallel for (name");
+                    "expected 'in' after @parallel @for (name");
         return NULL;
     }
     p_next(p); /* in */
@@ -606,7 +620,7 @@ static AstNode* parse_parallel_for(Parser* p, const char* gate,
         rp++;
     }
     if (rp >= p->n || depth != 0) {
-        parser_fail(p, p_peek(p), "unterminated @parallel for (...)");
+        parser_fail(p, p_peek(p), "unterminated @parallel @for (...)");
         return NULL;
     }
     n = ast_new(p, AST_PARALLEL_FOR);
@@ -617,12 +631,12 @@ static AstNode* parse_parallel_for(Parser* p, const char* gate,
     if (seq_cond && seq_cond[0]) snprintf(n->f, sizeof(n->f), "%s", seq_cond);
     if (!parallel_split_range(p, rp, n->b, sizeof(n->b), n->c, sizeof(n->c))) {
         parser_fail(p, p_peek(p),
-                    "expected `lo..hi` after @parallel for (name in");
+                    "expected `lo..hi` after @parallel @for (name in");
         return NULL;
     }
     p->i = rp;
     if (!p_accept(p, TK_PUNCT, ")")) {
-        parser_fail(p, p_peek(p), "expected ')' after @parallel for range");
+        parser_fail(p, p_peek(p), "expected ')' after @parallel @for range");
         return NULL;
     }
     if (tok_eq(p_peek(p), TK_IDENT, "worker")) {
@@ -649,7 +663,7 @@ static AstNode* parse_parallel_for(Parser* p, const char* gate,
         }
     }
     if (!tok_eq(p_peek(p), TK_PUNCT, "{")) {
-        parser_fail(p, p_peek(p), "expected '{' after @parallel for (...)");
+        parser_fail(p, p_peek(p), "expected '{' after @parallel @for (...)");
         return NULL;
     }
     p_next(p);
@@ -658,13 +672,13 @@ static AstNode* parse_parallel_for(Parser* p, const char* gate,
         AstNode* s = parse_stmt(p);
         if (!s) return NULL;
         if (n->nbody >= SHADOW_BODY_CAP) {
-            parser_fail_body_cap(p, p_peek(p), "@parallel for body");
+            parser_fail_body_cap(p, p_peek(p), "@parallel @for body");
             return NULL;
         }
         n->body[n->nbody++] = s;
     }
     if (!p_accept(p, TK_PUNCT, "}")) {
-        parser_fail(p, p_peek(p), "expected '}' to close @parallel for");
+        parser_fail(p, p_peek(p), "expected '}' to close @parallel @for");
         return NULL;
     }
     return n;
@@ -979,7 +993,7 @@ static AstNode* parse_parallel_head(Parser* p) {
         return NULL;
     p_next(p); /* @ */
     p_next(p); /* parallel */
-    if (shadow_kw(p_peek(p)) == SHADOW_KW_FOR)
+    if (peek_at_for(p))
         return parse_parallel_for(p, "", "");
     pred[0] = 0;
     gate[0] = 0;
@@ -988,7 +1002,7 @@ static AstNode* parse_parallel_head(Parser* p) {
         if (!parallel_spell_cond(p, "@parallel predicate too long", pred,
                                  sizeof(pred)))
             return NULL;
-        if (shadow_kw(p_peek(p)) == SHADOW_KW_FOR) {
+        if (peek_at_for(p)) {
             parser_fail(p, p_peek(p), "expected '{' after @parallel (...)");
             return NULL;
         }
@@ -1032,10 +1046,10 @@ static AstNode* parse_parallel_head(Parser* p) {
             if (!parallel_spell_cache_names(p, cache, sizeof(cache)))
                 return NULL;
         }
-        if (shadow_kw(p_peek(p)) != SHADOW_KW_FOR) {
+        if (!peek_at_for(p)) {
             parser_fail(p, p_peek(p),
                         "@parallel wait (...) [cache (...)] requires "
-                        "'for (name in lo..hi)'");
+                        "`@for (name in lo..hi)`");
             return NULL;
         }
         n = parse_parallel_for(p, gate, pred);
@@ -1048,9 +1062,9 @@ static AstNode* parse_parallel_head(Parser* p) {
                     "cache (name) requires the wait (gate) form");
         return NULL;
     }
-    if (shadow_kw(p_peek(p)) == SHADOW_KW_FOR) {
+    if (peek_at_for(p)) {
         parser_fail(p, p_peek(p),
-                    "@parallel seq (...) with 'for' requires 'wait (gate)'");
+                    "@parallel seq (...) with `@for` requires 'wait (gate)'");
         return NULL;
     }
     n = parse_parallel_block(p);
@@ -1809,6 +1823,10 @@ static AstNode* parse_at_stmt(Parser* p) {
         return parse_with_deadline(p);
     if (p->i + 1 < p->n && shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_PARALLEL)
         return parse_parallel(p);
+    if (p->i + 1 < p->n && shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_FOR)
+        return parse_cc_for(p);
+    if (p->i + 1 < p->n && shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_SWITCH)
+        return parse_cc_switch(p);
     if (p->i + 1 < p->n && shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_STAGE)
         return parse_stage(p);
     if (p->i + 1 < p->n && shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_SERIAL) {
@@ -2559,9 +2577,100 @@ static AstNode* parse_typedef_enum(Parser* p) {
     return n;
 }
 
+/* Variant designator (`case .arm`) or string-literal cases — require @switch. */
+static int switch_body_is_checked(Parser* p, size_t body_off) {
+    FileTape* ft = (p->cache && p_peek(p).file_id)
+                       ? tape_by_id(p->cache, p_peek(p).file_id)
+                       : NULL;
+    const char* bytes;
+    size_t blen, off;
+    int d, in_bt, in_dq, in_sq;
+    if (!ft || !ft->bytes) return 0;
+    bytes = ft->bytes;
+    blen = ft->len;
+    off = body_off;
+    if (off >= blen || bytes[off] != '{') return 0;
+    d = 1;
+    in_bt = in_dq = in_sq = 0;
+    off++;
+    while (off < blen && d > 0) {
+        char c = bytes[off];
+        if (in_bt) {
+            if (c == '\\' && off + 1 < blen) {
+                off += 2;
+                continue;
+            }
+            if (c == '`') in_bt = 0;
+            off++;
+            continue;
+        }
+        if (in_dq) {
+            if (c == '\\' && off + 1 < blen) {
+                off += 2;
+                continue;
+            }
+            if (c == '"') in_dq = 0;
+            off++;
+            continue;
+        }
+        if (in_sq) {
+            if (c == '\\' && off + 1 < blen) {
+                off += 2;
+                continue;
+            }
+            if (c == '\'') in_sq = 0;
+            off++;
+            continue;
+        }
+        if (c == '`') {
+            in_bt = 1;
+            off++;
+            continue;
+        }
+        if (c == '"') {
+            in_dq = 1;
+            off++;
+            continue;
+        }
+        if (c == '\'') {
+            in_sq = 1;
+            off++;
+            continue;
+        }
+        if (c == 'c' && off + 4 < blen && memcmp(bytes + off, "case", 4) == 0 &&
+            (off == 0 ||
+             !(((bytes[off - 1] >= 'A' && bytes[off - 1] <= 'Z') ||
+                (bytes[off - 1] >= 'a' && bytes[off - 1] <= 'z') ||
+                (bytes[off - 1] >= '0' && bytes[off - 1] <= '9') ||
+                bytes[off - 1] == '_'))) &&
+            !((bytes[off + 4] >= 'A' && bytes[off + 4] <= 'Z') ||
+              (bytes[off + 4] >= 'a' && bytes[off + 4] <= 'z') ||
+              (bytes[off + 4] >= '0' && bytes[off + 4] <= '9') ||
+              bytes[off + 4] == '_')) {
+            size_t j = off + 4;
+            while (j < blen &&
+                   (bytes[j] == ' ' || bytes[j] == '\t' ||
+                    bytes[j] == '\n' || bytes[j] == '\r'))
+                j++;
+            if (j < blen && (bytes[j] == '.' || bytes[j] == '"')) return 1;
+        }
+        if (c == '{') d++;
+        else if (c == '}') {
+            d--;
+            if (d == 0) break;
+        }
+        off++;
+    }
+    return 0;
+}
+
 /* switch (expr) { body } — prefer structured stmts (unwrap/case); opaque
- * text fallback for `@string` / tick-heavy bodies. */
-static AstNode* parse_switch_stmt(Parser* p) {
+ * text fallback for `@string` / tick-heavy bodies. cc_switch: `@switch`. */
+static AstNode* parse_switch_loop(Parser* p, int cc_switch) {
+    if (cc_switch) {
+        if (!tok_eq(p_peek(p), TK_PUNCT, "@")) return NULL;
+        p_next(p); /* @ */
+    }
     if (shadow_kw(p_peek(p)) != SHADOW_KW_SWITCH) return NULL;
     p_next(p); /* switch */
     if (!p_accept(p, TK_PUNCT, "(")) {
@@ -2585,8 +2694,27 @@ static AstNode* parse_switch_stmt(Parser* p) {
         parser_fail(p, p_peek(p), "switch expr too long");
         return NULL;
     }
-    if (!p_accept(p, TK_PUNCT, ")") || !p_accept(p, TK_PUNCT, "{")) {
+    if (!p_accept(p, TK_PUNCT, ")")) {
         parser_fail(p, p_peek(p), "expected ') {' after switch");
+        return NULL;
+    }
+    {
+        Token body_brace = p_peek(p);
+        if (!tok_eq(body_brace, TK_PUNCT, "{")) {
+            parser_fail(p, p_peek(p), "expected '{ after switch");
+            return NULL;
+        }
+        if (!cc_switch &&
+            switch_body_is_checked(p, (size_t)body_brace.offset)) {
+            parser_fail(p, body_brace,
+                        "checked switch requires `@switch`; use "
+                        "`@switch (v) { case .arm: ... }` or "
+                        "`@switch (name) { case \"GET\": ... }`");
+            return NULL;
+        }
+    }
+    if (!p_accept(p, TK_PUNCT, "{")) {
+        parser_fail(p, p_peek(p), "expected '{ after switch");
         return NULL;
     }
     /* Structured beachhead only when the body needs stmt AST for !> / ?>.
@@ -2711,6 +2839,7 @@ static AstNode* parse_switch_stmt(Parser* p) {
         if (!n) return NULL;
         snprintf(n->a, sizeof(n->a), "%s", expr);
         n->d[0] = 0;
+        if (cc_switch) snprintf(n->f, sizeof(n->f), "cc_switch");
         /* body[] stays on-node — kids_storage aliases the enclosing fn body
          * list (same nkstore cursor), which once emitted a bare `case 0:`.
          * Fat !> switches that exceed SHADOW_BODY_CAP fall back to opaque
@@ -2869,6 +2998,7 @@ switch_opaque_body:
             AstNode* n = ast_new(p, AST_SWITCH);
             if (!n) return NULL;
             snprintf(n->a, sizeof(n->a), "%s", expr);
+            if (cc_switch) snprintf(n->f, sizeof(n->f), "cc_switch");
             n->file_id = p_peek(p).file_id;
             if (nlen + 1 <= sizeof(n->d)) {
                 memcpy(n->d, bytes + start, nlen);
@@ -2897,6 +3027,10 @@ switch_opaque_body:
         }
     }
 }
+
+static AstNode* parse_switch_stmt(Parser* p) { return parse_switch_loop(p, 0); }
+
+static AstNode* parse_cc_switch(Parser* p) { return parse_switch_loop(p, 1); }
 
 /* typedef struct [Tag] { fields } Alias ;
  * Opaque: typedef struct Tag Alias ; */

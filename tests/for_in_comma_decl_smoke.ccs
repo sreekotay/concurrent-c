@@ -14,16 +14,16 @@ int main(void) {
     tree_s = cc_slice_from_buffer(buf, 5);
     mut_s = cc_slice_from_buffer(buf + 2, 3);
 
-    for (ch in tree_s)
+    @for (ch in tree_s)
         if (ch == '\n') n++;
     if (n != 2) return 1;
 
-    for (ch in mut_s)
+    @for (ch in mut_s)
         if (ch == '\n') m++;
     if (m != 1) return 2;
 
     tree = tree_s;
-    for (ch in tree)
+    @for (ch in tree)
         if (ch == '\n') t++;
     if (t != 2) return 3;
     if (unused_s.len != 1) return 4;

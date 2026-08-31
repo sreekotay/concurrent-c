@@ -6,7 +6,7 @@
     CCSlice m = CC_SLICE_LIT("get");
     int v = 0;
     int ft = 0;
-    switch (m) {
+    @switch (m) {
     case "get":
         v = 1;
         break;
@@ -17,7 +17,7 @@
         v = -1;
         break;
     }
-    switch (CC_SLICE_LIT("B")) {
+    @switch (CC_SLICE_LIT("B")) {
     case "A":
     case "B":
         ft = 10;

@@ -1832,7 +1832,7 @@ static int shadow_for_parse_in(const char* h, ShadowForIn* fi) {
     n = (size_t)(in - p);
     while (n && (p[n - 1] == ' ' || p[n - 1] == '\t')) n--;
     if (!n || n >= sizeof(rawbind)) {
-        fprintf(stderr, "error: for-in needs `for (name in subject)`\n");
+        fprintf(stderr, "error: for-in needs `@for (name in subject)`\n");
         g_shadow_ufcs_miss = 1;
         return -1;
     }
@@ -1845,13 +1845,13 @@ static int shadow_for_parse_in(const char* h, ShadowForIn* fi) {
     while (n && (fi->rest[n - 1] == ' ' || fi->rest[n - 1] == '\t'))
         fi->rest[--n] = 0;
     if (!fi->rest[0]) {
-        fprintf(stderr, "error: for-in needs `for (name in subject)`\n");
+        fprintf(stderr, "error: for-in needs `@for (name in subject)`\n");
         g_shadow_ufcs_miss = 1;
         return -1;
     }
     fi->nbind = shadow_for_split_csv(rawbind, cells, 2, sizeof(cells[0]));
     if (fi->nbind < 1) {
-        fprintf(stderr, "error: for-in needs `for (name in subject)`\n");
+        fprintf(stderr, "error: for-in needs `@for (name in subject)`\n");
         g_shadow_ufcs_miss = 1;
         return -1;
     }
@@ -1866,7 +1866,7 @@ static int shadow_for_parse_in(const char* h, ShadowForIn* fi) {
     }
     fi->nsubj = shadow_for_split_csv(fi->rest, fi->subj, 2, sizeof(fi->subj[0]));
     if (fi->nsubj < 1) {
-        fprintf(stderr, "error: for-in needs `for (name in subject)`\n");
+        fprintf(stderr, "error: for-in needs `@for (name in subject)`\n");
         g_shadow_ufcs_miss = 1;
         return -1;
     }
@@ -1877,14 +1877,14 @@ static int shadow_for_parse_in(const char* h, ShadowForIn* fi) {
         else if (depth == 0 && q[0] == '.' && q[1] == '.') {
             if (fi->nbind != 1 || fi->nsubj != 1) {
                 fprintf(stderr,
-                        "error: range for-in is `for (i in lo..hi)`\n");
+                        "error: range for-in is `@for (i in lo..hi)`\n");
                 g_shadow_ufcs_miss = 1;
                 return -1;
             }
             fi->kind = 2;
             if (fi->mut[0]) {
                 fprintf(stderr,
-                        "error: range for-in is `for (i in lo..hi)` "
+                        "error: range for-in is `@for (i in lo..hi)` "
                         "(`&i` is not a slot)\n");
                 g_shadow_ufcs_miss = 1;
                 return -1;
@@ -1912,8 +1912,8 @@ static int shadow_for_parse_in(const char* h, ShadowForIn* fi) {
         return 4;
     }
     fprintf(stderr,
-            "error: for-in is `for (v in s)`, `for (&v in s) { ... } !>;`, "
-            "`for (i, v in s)`, or `for (a, b in s, t) { ... } !>;`\n");
+            "error: for-in is `@for (v in s)`, `@for (&v in s) { ... } !>;`, "
+            "`@for (i, v in s)`, or `@for (a, b in s, t) { ... } !>;`\n");
     g_shadow_ufcs_miss = 1;
     return -1;
 }

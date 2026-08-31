@@ -130,7 +130,7 @@ variant (`h.cell`, `r->del`) as its subject. `case .arm:` labels
 resolve from the subject type, and each case protects projection of its arm:
 
 ```c
-switch (value) {
+@switch (value) {
     case .str:
         use_string(value.str);
         break;
@@ -145,7 +145,7 @@ arms are compile-time errors. The default-layout interop spelling
 `switch (value.kind)` with `case Name_arm:` labels is checked the same way.
 
 `@match` is not a variant branching construct. The keyword remains reserved;
-variant branching uses protected projection or checked `switch`.
+variant branching uses protected projection or checked `@switch`.
 
 No constructor functions are generated. Designated initializers select an arm,
 and the generated `Name_arm` identifiers remain enum constants.
@@ -172,7 +172,7 @@ channel, while `@variant` represents ordinary data alternatives:
 RedisValue !>(CCError) load_value(void);
 
 RedisValue value = load_value() !>;
-switch (value) {
+@switch (value) {
     case .str: /* ... */ break;
     case .num: /* ... */ break;
 }

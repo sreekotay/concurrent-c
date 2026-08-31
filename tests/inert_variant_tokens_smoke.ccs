@@ -5,7 +5,7 @@
  *
  * Inert appearances (block comment):
  *   @variant Ghost { boo: int; }
- *   switch (g) { case .boo: g = { .boo = 1 }; }
+ *   @switch (g) { case .boo: g = { .boo = 1 }; }
  *   if (g.kind == .boo) x = g.boo ?> 0;
  */
 #include <ccc/std/prelude.cch>
@@ -15,7 +15,7 @@
 
 // inert in a line comment: @variant Ghost2 { boo: void; };  case .boo:
 static const char* g_str =
-    "@variant Ghost3 { boo: int; }; switch (v) { case .boo: break; } v.kind = 9;";
+    "@variant Ghost3 { boo: int; }; @switch (v) { case .boo: break; } v.kind = 9;";
 
 /* A #define body carrying variant-ish tokens must stay untouched (the
  * macro is never expanded). */
@@ -30,7 +30,7 @@ static const char* g_str =
 int main(void) {
     if (strlen(g_str) < 10) return 1;
     Real v = { .num = 5 };
-    switch (v) {
+    @switch (v) {
         case .num:
             if (v.num != 5) return 2;
             break;

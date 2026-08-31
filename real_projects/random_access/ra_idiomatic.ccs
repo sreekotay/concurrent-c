@@ -52,7 +52,7 @@ static Table !>(CCError) Table_create(int bits, int atomic, CCArena store) {
 static void !>(CCError) Table_init(Table* t) {
     size_t i;
     uint64_t v;
-    for (i, v in t->words) {
+    @for (i, v in t->words) {
         (void)v;
         if (t->words.set(i, (uint64_t)i) != 0)
             return cc_err(CC_ERR_INVALID_ARG, "Table init");
@@ -76,7 +76,7 @@ static void !>(CCError) Table_apply_range(Table* t, uint64_t lo, uint64_t hi) {
     @errhandler(CCError e) { return cc_err(e); }
     uint64_t ran = ra_starts((int64_t)lo);
     uint64_t i;
-    for (i in lo..hi) {
+    @for (i in lo..hi) {
         ran = ra_step(ran);
         t->apply(ran) !>;
     }
@@ -87,7 +87,7 @@ static uint64_t Table_errors(Table* t) {
     uint64_t n = 0;
     size_t i;
     uint64_t v;
-    for (i, v in t->words) {
+    @for (i, v in t->words) {
         if (v != (uint64_t)i)
             n++;
     }
@@ -126,7 +126,7 @@ static uint64_t !>(CCError) run_smp(int bits, int nw, int atomic, double* timed)
     t.init() !>;
 
     t0 = now_s();
-    @parallel for (w in 0..nw) {
+    @parallel @for (w in 0..nw) {
         @errhandler(CCError e) cc_error_exit(e);
         Span s = worker_span(w, nw, nupdate);
         t.apply_range(s.lo, s.hi) !>;

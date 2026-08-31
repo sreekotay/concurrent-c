@@ -1,4 +1,4 @@
-/* for (c in s) on CCString (SSO-safe data load). */
+/* @for (c in s) on CCString (SSO-safe data load). */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
@@ -8,7 +8,7 @@ int main(void) {
     int n = 0;
     if (!cc_arena_is_live(arena)) return 1;
     s = cc_string_from_slice(arena, CC_SLICE_LIT("ab"));
-    for (c in s) {
+    @for (c in s) {
         if (c != 'a' && c != 'b') return 2;
         n++;
     }

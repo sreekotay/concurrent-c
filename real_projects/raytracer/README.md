@@ -1,7 +1,7 @@
 # Weekend raytracer
 
 Peter Shirley's [Ray Tracing in One Weekend](https://raytracing.github.io/books/RayTracingInOneWeekend.html)
-final scene, three times: sequential C, Concurrent-C `@parallel for` over
+final scene, three times: sequential C, Concurrent-C `@parallel @for` over
 scanlines, and Go with one goroutine per row.
 
 The book is the algorithm. This folder is the race: same spheres, same
@@ -28,11 +28,11 @@ All three ports share:
 - gamma-2 byte conversion and an FNV-1a checksum of the framebuffer
 
 C is the sequential reference (`cc -O2`). CC defaults to
-`@parallel for (y in 0..h)`; `RT_SEQ=1` is the same loop without spawn.
+`@parallel @for (y in 0..h)`; `RT_SEQ=1` is the same loop without spawn.
 Go defaults to one goroutine per scanline; `RT_SEQ=1` is the ordinary
 `for`.
 
-`@parallel for` bisects the row range. Writes are disjoint. The world
+`@parallel @for` bisects the row range. Writes are disjoint. The world
 and camera are read-only.
 
 Go is not under-built (`go build` is the optimizing compile; C/CC are
@@ -47,7 +47,7 @@ model is not the gap. Do not hand-inline the hit test to chase C.
 | file | role |
 |---|---|
 | `rt.c` | sequential C reference |
-| `rt.ccs` | CC port; `@parallel for` over rows |
+| `rt.ccs` | CC port; `@parallel @for` over rows |
 | `go/rt.go` | Go port; per-row goroutines |
 | `compare.sh` | build, run five rows, demand matching checksums |
 | `COPYING.txt` | Shirley's CC0 notice |
@@ -66,7 +66,7 @@ row — above 1× means faster than the C reference.
 |---|---|---|
 | C seq | 1000 ms | — |
 | CC seq | 1007 ms | 0.99× |
-| CC `@parallel for` | 160 ms | **6.27×** |
+| CC `@parallel @for` | 160 ms | **6.27×** |
 | Go seq | 2150 ms | 0.47× |
 | Go per-row goroutines | 421 ms | 2.38× |
 

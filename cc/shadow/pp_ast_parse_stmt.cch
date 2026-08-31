@@ -2086,8 +2086,12 @@ static int parse_for_zip_bang_tail(Parser* p, AstNode* n) {
     }
 }
 
-/* for ( hdr ) { stmts } | for ( hdr ) stmt */
-static AstNode* parse_for(Parser* p) {
+/* cc_for: `@for (name in s)` walk / zip / range. Bare `for` is C-only. */
+static AstNode* parse_for_loop(Parser* p, int cc_for) {
+    if (cc_for) {
+        if (!tok_eq(p_peek(p), TK_PUNCT, "@")) return NULL;
+        p_next(p); /* @ */
+    }
     if (shadow_kw(p_peek(p)) != SHADOW_KW_FOR) return NULL;
     p_next(p);
     if (!tok_eq(p_peek(p), TK_PUNCT, "(")) {
@@ -2105,6 +2109,18 @@ static AstNode* parse_for(Parser* p) {
     if (h0 >= h1) n->a[0] = 0;
     else if (!span_text(p, h0, h1, n->a, sizeof(n->a))) {
         parser_fail(p, p_peek(p), "for header too long");
+        return NULL;
+    }
+    if (shadow_for_hdr_in(n->a)) {
+        if (!cc_for) {
+            parser_fail(p, p_peek(p),
+                        "walk loop requires `@for`; use `@for (... in ...)`");
+            return NULL;
+        }
+        snprintf(n->f, sizeof(n->f), "cc_for");
+    } else if (cc_for) {
+        parser_fail(p, p_peek(p),
+                    "`@for` requires `for (name in subject)`");
         return NULL;
     }
     if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
@@ -2131,7 +2147,7 @@ static AstNode* parse_for(Parser* p) {
     }
     if (shadow_for_has_mut_bind(n->a) && shadow_for_hdr_is_range(n->a)) {
         parser_fail(p, p_peek(p),
-                    "range for-in is `for (i in lo..hi)` (`&i` is not a slot)");
+                    "range for-in is `@for (i in lo..hi)` (`&i` is not a slot)");
         return NULL;
     }
     if (shadow_for_is_zip(n->a) || shadow_for_has_mut_bind(n->a)) {
@@ -2143,6 +2159,10 @@ static AstNode* parse_for(Parser* p) {
     }
     return n;
 }
+
+static AstNode* parse_for(Parser* p) { return parse_for_loop(p, 0); }
+
+static AstNode* parse_cc_for(Parser* p) { return parse_for_loop(p, 1); }
 
 /* CC_ARRAY_MAP_FOREACH(h, k, v) stmt — lower to dense-row for (std macro). */
 static AstNode* parse_array_map_foreach(Parser* p) {

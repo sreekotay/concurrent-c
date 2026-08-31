@@ -7,7 +7,7 @@ static int run(CCSlice name) {
     CCShard m;
     if (!m.init()) return -1;
     if (!m.put(CC_SLICE_LIT("k"), CC_SLICE_LIT("v"))) return -2;
-    switch (name) {
+    @switch (name) {
     case "GET": {
         CCShard* sh = &m;
         CCString* v = sh->get(CC_SLICE_LIT("k"));

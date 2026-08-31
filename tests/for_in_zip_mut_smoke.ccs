@@ -11,7 +11,7 @@ int main(void) {
     int[:] xs = { 1, 2, 3 };
     int[:] ys = { 10, 20, 30 };
 
-    for (&a, b in xs, ys) {
+    @for (&a, b in xs, ys) {
         a = a + b;
     } !>;
     if (((int *)xs.ptr)[0] != 11 || ((int *)xs.ptr)[1] != 22 ||
@@ -21,7 +21,7 @@ int main(void) {
         ((int *)ys.ptr)[2] != 30)
         return 3;
 
-    for (a, &b in xs, ys) {
+    @for (a, &b in xs, ys) {
         b = b + 1;
     } !>;
     if (((int *)ys.ptr)[0] != 11 || ((int *)ys.ptr)[1] != 21 ||

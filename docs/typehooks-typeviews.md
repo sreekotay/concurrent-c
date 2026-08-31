@@ -132,7 +132,7 @@ static char[:] port_ufcs(char[:] recv_type, char[:] method, char[:] mode,
     (void)mode; /* named `@typeview Mode on T` — otherwise empty */
     (void)argv;
     (void)arg_types;
-    switch (method) {
+    @switch (method) {
     case "put": return @slice("port_put_2");
     default:    return @string(`port_${method}`, arena).as_slice();
     }
@@ -202,11 +202,11 @@ int main(void) {
     int[:] xs = { 1, 2, 3 };
     int[:] ys = { 10, 20, 30 };
     int sum = 0;
-    for (v in xs)
+    @for (v in xs)
         sum += v;
-    for (i, v in xs)
+    @for (i, v in xs)
         sum += (int)i + v;
-    for (a, b in xs, ys) {
+    @for (a, b in xs, ys) {
         sum += a * b;
     } !>;
     printf("%d\n", sum);
@@ -219,14 +219,14 @@ int main(void) {
 
 | Form | Meaning |
 |------|---------|
-| `for (v in s)` | walk (copy; `v =` / `&v` ill-formed) |
-| `for (&v in s) { … } !>;` | mut walk; `v =` is `.access` store; write bound is Result |
-| `for (i, v in s)` | enumerate; `i` is `size_t` |
-| `for (a, b in s, t) { … } !>;` | zip; `void !>(CCError)`; unequal → `@errhandler` |
-| `for (&a, b in s, t) { … } !>;` | zip mut; `a =` stores through `s` |
-| `for (i in lo..hi)` | sequential range; `hi < lo` is empty |
+| `@for (v in s)` | walk (copy; `v =` / `&v` ill-formed) |
+| `@for (&v in s) { … } !>;` | mut walk; `v =` is `.access` store; write bound is Result |
+| `@for (i, v in s)` | enumerate; `i` is `size_t` |
+| `@for (a, b in s, t) { … } !>;` | zip; `void !>(CCError)`; unequal → `@errhandler` |
+| `@for (&a, b in s, t) { … } !>;` | zip mut; `a =` stores through `s` |
+| `@for (i in lo..hi)` | sequential range; `hi < lo` is empty |
 
-C `for (;;)` is unchanged. `@parallel for (i in lo..hi)` is the concurrent
+C `for (;;)` is unchanged. `@parallel @for (i in lo..hi)` is the concurrent
 cousin. A user type registers the same two arms (`tests/typehooks_len_access_smoke.ccs`).
 
 Mut walk and zip hard-wire `CCError` — part of why fallible APIs should not
@@ -711,7 +711,7 @@ form independently.
   take `@typeview(Mode) T*`.
 - Custom `x.method` → `cc_foo_<method>` family? `.ufcs` on `@typehooks`.
 - Dest-init mint (`CCBox::[H] b = &x`, `char[:] v = str`)? `.cast` on the dest type (implicit|explicit + requested type).
-- Extent / walk (`x.len`, `for (v in s)` / `for (&v in s) { … } !>;` / `for (i, v in s)` / `for (a, b in s, t) { … } !>;`)? `.len` + `.access` on `@typehooks` (naked). Mut walk's write bound is the Result. Users do not write `s.access(i)`. Slice fields are read-only. `CCString` hides `.data` (SSO).
+- Extent / walk (`x.len`, `@for (v in s)` / `@for (&v in s) { … } !>;` / `@for (i, v in s)` / `@for (a, b in s, t) { … } !>;`)? `.len` + `.access` on `@typehooks` (naked). Mut walk's write bound is the Result. Users do not write `s.access(i)`. Slice fields are read-only. `CCString` hides `.data` (SSO).
 - Hide a field on a family (`CCBox_*` `.p`, `CCString` `.data`)? Unnamed `@typeview` + `r:^name`
   (deny-only ≡ `r: *, ^name`). Prefix/suffix globs (`out_*`, `*_len`) for subsets. User UFCS stays.
 - Type-family subject? `@typeview on Pat_* { … }` (unnamed surface) or

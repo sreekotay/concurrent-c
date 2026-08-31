@@ -62,28 +62,28 @@ int main(void) {
     int sum = 0;
     int[:] xs = { 1, 2, 3 };
     int[:] ys = { 10, 20, 30 };
-    for (c in hi)
+    @for (c in hi)
         n++;
-    for (i, v in xs)
+    @for (i, v in xs)
         sum += (int)i + v;
-    for (p, q in xs, ys) {
+    @for (p, q in xs, ys) {
         sum += p * q;
     } !>;
-    for (i in 0..3)
+    @for (i in 0..3)
         sum += (int)i;
     println(@string(`walk n=${n} sum=${sum}`, @scratch)) !>;
 
     /* 6. Mut walk — binder is not an object; `ch =` is .access store.
      *    Write re-reads .len; i >= len is CC_ERR_INVALID_ARG. */
     char[:] word = {'c', 'c'};
-    for (&ch in word) {
+    @for (&ch in word) {
         if (ch >= 'a' && ch <= 'z')
             ch -= 32;
     } !>;
     println(@string(`mut=${word}`, @scratch)) !>;
 
     /* 7. View — compiler hoists `sub`; store is into the receiver. */
-    for (&ch in word.sub(1, word.len)) {
+    @for (&ch in word.sub(1, word.len)) {
         ch = 'c';
     } !>;
     println(@string(`view=${word}`, @scratch)) !>;
@@ -93,7 +93,7 @@ int main(void) {
     if (v.push(4) != 0 || v.push(5) != 0) return 3;
     int[:] snap = v;
     int live = 0;
-    for (x in v)
+    @for (x in v)
         live += x;
     println(@string(`vec live=${live} snap=${snap.len}`, @scratch)) !>;
 

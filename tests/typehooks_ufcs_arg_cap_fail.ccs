@@ -30,7 +30,7 @@ static char[:] box_ufcs(char[:] recv_type, char[:] method, char[:] mode,
     (void)argv;
     (void)arg_types;
     (void)arena;
-    switch (method) {
+    @switch (method) {
     case "sum9": return @slice("box_sum9");
     default:     return @slice("__cc_ufcs_pass__");
     }

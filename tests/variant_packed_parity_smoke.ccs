@@ -53,7 +53,7 @@ static void run_packed(CCArena a, CCString* out) {
         cc_string_push(out, " h.gen:", a);
         cc_string_push_int(out, (int64_t)c.h.gen, a);
     }
-    switch (c) {
+    @switch (c) {
         case .h:   cc_string_push(out, " arm:h", a);   break;
         case .num: cc_string_push(out, " arm:num", a); break;
     }
@@ -70,7 +70,7 @@ static void run_unpacked(CCArena a, CCString* out) {
         cc_string_push(out, " h.gen:", a);
         cc_string_push_int(out, (int64_t)c.h.gen, a);
     }
-    switch (c) {
+    @switch (c) {
         case .h:   cc_string_push(out, " arm:h", a);   break;
         case .num: cc_string_push(out, " arm:num", a); break;
     }

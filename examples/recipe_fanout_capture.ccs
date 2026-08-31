@@ -1,7 +1,7 @@
 /*
  * Recipe: Independent fan-out
  *
- * Independent iterations are `@parallel for`. The index is the
+ * Independent iterations are `@parallel @for`. The index is the
  * per-iteration value; writes go to disjoint slots. `n.spawn` in a C
  * for-loop still needs a per-task copy of the loop variable — see
  * recipe_explicit_capture.ccs.
@@ -24,7 +24,7 @@ int main(void) {
     println(@string(`=== Fan-out: ${NUM_TASKS} independent iterations ===`, @scratch)) !>;
 
     int k;
-    @parallel for (k in 0..NUM_TASKS) {
+    @parallel @for (k in 0..NUM_TASKS) {
         results[k] = compute(k);
     } !>.wait()!>;
 

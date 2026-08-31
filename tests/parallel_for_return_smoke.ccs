@@ -1,5 +1,5 @@
 /*
- * @parallel for: return is break then return — stop new iterations,
+ * @parallel @for: return is break then return — stop new iterations,
  * join the other half, then return from the function.
  */
 #include <ccc/std/prelude.cch>
@@ -12,7 +12,7 @@ static int g_xs[N];
 
 static int go(void) {
     int i;
-    @parallel for (i in 0..N) {
+    @parallel @for (i in 0..N) {
         g_xs[i] = 1;
         if (i == CUT)
             return 7;
