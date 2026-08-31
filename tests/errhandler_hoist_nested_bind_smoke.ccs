@@ -1,0 +1,22 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+/* Hoisted @errhandler: `e` must stay in scope inside nested stmts
+ * (SHAPE-T9 / integer-overflow corpus). */
+static int !>(CCError) boom(void) {
+    return cc_err(CC_ERR_INVALID_ARG, "boom");
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        if (e.kind != CC_ERR_INVALID_ARG) {
+            fprintf(stderr, "unexpected: %s\n", e.message);
+            return 2;
+        }
+        if (!e.message || !e.message[0]) return 3;
+        printf("ok\n");
+        return 0;
+    }
+    boom() !>;
+    return 1;
+}

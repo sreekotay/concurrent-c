@@ -5,6 +5,6 @@
  * Extracting this must fail loud — not splice the leaf into the includer. */
 static int nested_impl_via_umbrella_decl(void) { return 1; }
 
-#include "quote_cch_umbrella_impl_leaf_impl.cch"
+#include "quote_cch_nested_impl_unowned_leaf.cch"
 
 #endif

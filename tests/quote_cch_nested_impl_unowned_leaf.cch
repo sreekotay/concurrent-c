@@ -1,0 +1,19 @@
+#ifndef TESTS_QUOTE_CCH_NESTED_IMPL_UNOWNED_LEAF_CCH
+#define TESTS_QUOTE_CCH_NESTED_IMPL_UNOWNED_LEAF_CCH
+
+#include <ccc/std/prelude.cch>
+
+/* Impl-grade leaf with no owner `.ccs`. Nested from an umbrella extract
+ * must fail loud — not splice into the including unit. */
+static int !>(CCError) nested_impl_unowned_step(int x) {
+    @errhandler(CCError e) { return cc_err(e); }
+    return cc_ok(x);
+}
+
+static int nested_impl_unowned_add(int a, int b) {
+    int x = nested_impl_unowned_step(a) !> { return -1; };
+    int y = nested_impl_unowned_step(b) !> { return -1; };
+    return x + y;
+}
+
+#endif

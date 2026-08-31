@@ -1,43 +1,25 @@
 /*
- * CCTemporalIndex — death-time index (key → absolute deadline ms).
+ * CCTemporalIndex — intrusive death wheel.
  *
- * Not a value store. The caller owns values (RedisEntry, …). This holds only
- * keys that have a TTL. No deadline ⇒ not present. get() == 0 means none.
+ * The caller owns the value and embeds a CCTemporalNode on it. This is only
+ * bucket heads + rotate/reclaim. No key map, no second allocation. Expire
+ * is a list unlink of the caller's node — same layout as a value-in-the-wheel
+ * store. Relink on TTL change (no new node).
  *
- * Concurrency-agnostic: serialize each shard yourself (hold_one(si) or an
- * owner fiber). Nothing here takes a lock.
+ *   e.ttl.user = e;   // or any cookie
+ *   sh->set(now, &e.ttl, dies_at);   // 0 / past → drop
+ *   sh->drop(&e.ttl);
+ *   e.ttl.dies_at                    // 0 if not on the wheel
  *
- * Wheel is 100ms×64, 1s×64, 60s×60. Longer TTLs sit on the coarsest slot
- * until they fit. Each occupied wheel bucket has a lazy recs arena; an empty
- * drain resets it (generation close).
+ * gone(env, node) runs before unlink. node is valid only during the callback.
+ * Hold-capped sweep: retire once, scan in chunks, refresh.
  *
- *   CCTemporalIndex ix;
- *   if (!ix.init(2, now_ms)) …;
- *   @defer ix.destroy();
+ * on_empty(env, level, slot) runs when a due bucket rotates empty. The index
+ * does not own value storage; a caller with per-slot gen arenas resets there.
+ * A value must live in the arena of its current slot — relink across slots
+ * without realloc leaves a live node in a generation that is about to reset.
  *
- *   ix.set(si, now, key, dies_at, user);  // dies_at<=now or 0 → del
- *   int64_t when = ix.get(si, key);       // 0 = no TTL
- *   ix.del(si, key);
- *
- *   Key bytes are a view — they must stay live until del / gone. user is
- *   an optional cookie (Entry*, RedisEntry*, …) handed back to gone.
- *
- *   n = ix.sweep(si, now, budget, gone, env);
- *   // gone(env, key, user) runs under the same shard serialisation, before
- *   // the row is dropped. key is only valid during the callback.
- *
- *   Hold-capped sweep: retire once, then scan in chunks, then refresh.
- *   sh->retire(now); sh->scan(now, n, gone, env); sh->refresh();
- *
- *   ix.len_at(si) / ix.len_all()
- *   ix.next_due(si)                  // earliest slot end; INT64_MAX if idle
- *
- * Per-cell (when you already have si):
- *   CCTemporalShard* sh = ix.shard(si);
- *   sh->set(now, key, dies_at, user);
- *
- * Redis later: keep entries[]; replace RedisExpiresMap with this; sweep
- * calls gone → db delete. Do not put no-TTL SET keys here.
+ * Do not put no-TTL keys on the wheel.
  */
 #ifndef CC_STD_TEMPORAL_INDEX_H
 #define CC_STD_TEMPORAL_INDEX_H
@@ -48,8 +30,6 @@
 #include <string.h>
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_result.cch>
-#include <ccc/cc_slice.cch>
-#include <ccc/std/array_map.cch>
 
 #ifndef CC_TEMPORAL_MAX_SHARDS
 #define CC_TEMPORAL_MAX_SHARDS 64
@@ -61,40 +41,36 @@
 static const int64_t cc_temporal_unit_ms[CC_TEMPORAL_LEVELS] = { 100, 1000, 60000 };
 static const int cc_temporal_slots[CC_TEMPORAL_LEVELS] = { 64, 64, 60 };
 
-typedef void (*CCTemporalGone)(void* env, CCSlice key, void* user);
+typedef struct CCTemporalNode CCTemporalNode;
+typedef void (*CCTemporalGone)(void* env, CCTemporalNode* node);
+typedef void (*CCTemporalReclaim)(void* env, int level, int slot);
 
-typedef struct CCTemporalEnt {
-    CCSliceHdr key;
+struct CCTemporalNode {
     void* user;
     int64_t dies_at;
     int8_t level;
     uint8_t slot;
     uint8_t dead;
-    struct CCTemporalEnt* live_next;
-    struct CCTemporalEnt* live_prev;
-} CCTemporalEnt;
-
-typedef CCTemporalEnt* CCTemporalRef;
-
-CC_ARRAY_MAP_DECL(CCSliceHdr, CCTemporalRef, CCTemporalTab,
-                  cc_map_hash_slice_hdr, cc_map_eq_slice_hdr)
+    CCTemporalNode* live_next;
+    CCTemporalNode* live_prev;
+};
 
 typedef struct CCTemporalBucket {
-    CCTemporalEnt* live_head;
-    CCTemporalEnt* live_tail;
+    CCTemporalNode* live_head;
+    CCTemporalNode* live_tail;
     size_t live_n;
-    CCTemporalEnt* scan_e;
+    CCTemporalNode* scan_e;
     int scanning;
     int64_t end;
-    CCArena recs;
 } CCTemporalBucket;
 
 typedef struct CCTemporalShard {
-    CCArena heap;
-    CCTemporalTab* map;
     CCTemporalBucket wheel[CC_TEMPORAL_LEVELS][CC_TEMPORAL_MAX_SLOTS];
     int64_t next_end;
     int ends_dirty;
+    size_t live_n;
+    CCTemporalReclaim on_empty;
+    void* on_empty_env;
 } CCTemporalShard;
 
 typedef struct CCTemporalIndex {
@@ -103,19 +79,7 @@ typedef struct CCTemporalIndex {
     size_t nshards;
 } CCTemporalIndex;
 
-static inline size_t cc_temporal_gen_l1(void) {
-    return 64u * sizeof(CCTemporalEnt) + 4096u;
-}
-
-static inline CCSliceHdr cc_temporal_hdr(CCSlice key) {
-    return cc_slice_hdr_from_buffer(key.ptr, key.len);
-}
-
-static inline CCSlice cc_temporal_key_slice(const CCTemporalEnt* e) {
-    return cc_slice_hdr_as_slice(&e->key);
-}
-
-static inline void cc_temporal_link(CCTemporalBucket* b, CCTemporalEnt* e) {
+static inline void cc_temporal_link(CCTemporalBucket* b, CCTemporalNode* e) {
     e->live_next = NULL;
     e->live_prev = b->live_tail;
     if (b->live_tail) b->live_tail->live_next = e;
@@ -124,7 +88,7 @@ static inline void cc_temporal_link(CCTemporalBucket* b, CCTemporalEnt* e) {
     b->live_n++;
 }
 
-static inline void cc_temporal_unlink(CCTemporalBucket* b, CCTemporalEnt* e) {
+static inline void cc_temporal_unlink(CCTemporalBucket* b, CCTemporalNode* e) {
     if (e->live_prev) e->live_prev->live_next = e->live_next;
     else if (b->live_head == e) b->live_head = e->live_next;
     if (e->live_next) e->live_next->live_prev = e->live_prev;
@@ -135,8 +99,9 @@ static inline void cc_temporal_unlink(CCTemporalBucket* b, CCTemporalEnt* e) {
 }
 
 static inline CCTemporalBucket* cc_temporal_bucket_of(CCTemporalShard* s,
-                                                     const CCTemporalEnt* e) {
-    if (!s || !e || e->level < 0 || e->level >= CC_TEMPORAL_LEVELS) return NULL;
+                                                     const CCTemporalNode* e) {
+    if (!s || !e || e->dead || e->level < 0 || e->level >= CC_TEMPORAL_LEVELS)
+        return NULL;
     if (e->slot >= (uint8_t)cc_temporal_slots[e->level]) return NULL;
     return &s->wheel[e->level][e->slot];
 }
@@ -151,22 +116,6 @@ static inline void cc_temporal_refresh_next(CCTemporalShard* s) {
     s->ends_dirty = 0;
 }
 
-static inline bool cc_temporal_ensure_recs(CCTemporalShard* s, CCTemporalBucket* b) {
-    CCResult_CCArena_CCError r;
-    if (!s || !b) return false;
-    if (cc_arena_valid(b->recs)) return true;
-    r = cc_arena_create_heap_arena(s->heap, cc_temporal_gen_l1());
-    if (!cc_is_ok(r)) return false;
-    b->recs = r.u.value;
-    return true;
-}
-
-static inline void cc_temporal_reclaim(CCTemporalShard* s, CCTemporalBucket* b) {
-    (void)s;
-    if (!b || b->live_n || !cc_arena_valid(b->recs)) return;
-    cc_arena_reset(b->recs);
-}
-
 static inline void cc_temporal_rotate(CCTemporalShard* s, int l, int i) {
     CCTemporalBucket* b = &s->wheel[l][i];
     int64_t old = b->end;
@@ -174,29 +123,22 @@ static inline void cc_temporal_rotate(CCTemporalShard* s, int l, int i) {
     b->scan_e = NULL;
     b->scanning = 0;
     if (old == s->next_end) s->ends_dirty = 1;
+    if (s->on_empty) s->on_empty(s->on_empty_env, l, i);
 }
 
-static inline CCTemporalEnt* cc_temporal_find(CCTemporalShard* s, CCSlice key) {
-    CCTemporalRef* p;
-    if (!s || !s->map) return NULL;
-    p = CCTemporalTab_get_ptr(s->map, cc_temporal_hdr(key));
-    return p ? *p : NULL;
-}
-
-static inline void cc_temporal_mark_dead(CCTemporalShard* s, CCTemporalEnt* e) {
+static inline void cc_temporal_mark_dead(CCTemporalShard* s, CCTemporalNode* e) {
     CCTemporalBucket* b;
-    size_t bucket = SIZE_MAX;
-    size_t di;
     if (!s || !e || e->dead) return;
     e->dead = 1;
-    b = cc_temporal_bucket_of(s, e);
-    if (b) {
+    if (e->level >= 0 && e->level < CC_TEMPORAL_LEVELS &&
+        e->slot < (uint8_t)cc_temporal_slots[e->level]) {
+        b = &s->wheel[e->level][e->slot];
         if (b->scan_e == e) b->scan_e = e->live_next;
         cc_temporal_unlink(b, e);
+        if (s->live_n) s->live_n--;
     }
-    di = CCTemporalTab_find_dense(s->map, e->key, &bucket);
-    if (di != SIZE_MAX && s->map->dense[di].val == e)
-        (void)CCTemporalTab_del_at(s->map, di, bucket);
+    e->dies_at = 0;
+    e->level = -1;
 }
 
 static inline bool cc_temporal_slot_for(CCTemporalShard* s, int64_t now, int64_t dies_at,
@@ -224,66 +166,40 @@ static inline bool cc_temporal_slot_for(CCTemporalShard* s, int64_t now, int64_t
     return true;
 }
 
-static inline bool cc_temporal_shard_del(CCTemporalShard* s, CCSlice key);
+static inline void cc_temporal_shard_drop(CCTemporalShard* s, CCTemporalNode* node) {
+    cc_temporal_mark_dead(s, node);
+}
 
 static inline bool cc_temporal_shard_set(CCTemporalShard* s, int64_t now,
-                                        CCSlice key, int64_t dies_at, void* user) {
-    CCTemporalEnt* old;
-    CCTemporalEnt* e;
+                                        CCTemporalNode* node, int64_t dies_at) {
     CCTemporalBucket* b;
-    CCSliceHdr kh;
     int8_t level;
     uint8_t slot;
-    if (!s || !s->map) return false;
-    if (dies_at <= now) return cc_temporal_shard_del(s, key);
-    if (!cc_temporal_slot_for(s, now, dies_at, &level, &slot)) return false;
-    b = &s->wheel[level][slot];
-    kh = cc_temporal_hdr(key);
-    old = cc_temporal_find(s, key);
-    if (old && !old->dead && cc_temporal_bucket_of(s, old) == b) {
-        old->dies_at = dies_at;
-        old->user = user;
+    if (!s || !node) return false;
+    if (dies_at <= now) {
+        cc_temporal_shard_drop(s, node);
         return true;
     }
-    if (!cc_temporal_ensure_recs(s, b)) return false;
-    e = (CCTemporalEnt*)cc_arena_alloc_local_grow(b->recs, sizeof(CCTemporalEnt),
-                                                 _Alignof(CCTemporalEnt));
-    if (!e) return false;
-    memset(e, 0, sizeof(*e));
-    e->dead = 1;
-    e->key = kh;
-    e->user = user;
-    e->dies_at = dies_at;
-    e->level = level;
-    e->slot = slot;
-    if (old) {
-        size_t bucket = SIZE_MAX;
-        size_t di = CCTemporalTab_find_dense(s->map, old->key, &bucket);
-        if (di != SIZE_MAX && s->map->dense[di].val == old)
-            (void)CCTemporalTab_del_at(s->map, di, bucket);
+    if (!cc_temporal_slot_for(s, now, dies_at, &level, &slot)) return false;
+    b = &s->wheel[level][slot];
+    if (!node->dead && node->level == level && node->slot == slot) {
+        node->dies_at = dies_at;
+        return true;
     }
-    if (CCTemporalTab_insert(s->map, e->key, e) != 0) return false;
-    e->dead = 0;
-    cc_temporal_link(b, e);
-    if (old) cc_temporal_mark_dead(s, old);
+    if (!node->dead) cc_temporal_mark_dead(s, node);
+    node->dead = 0;
+    node->dies_at = dies_at;
+    node->level = level;
+    node->slot = slot;
+    node->live_next = NULL;
+    node->live_prev = NULL;
+    cc_temporal_link(b, node);
+    s->live_n++;
     return true;
-}
-
-static inline bool cc_temporal_shard_del(CCTemporalShard* s, CCSlice key) {
-    CCTemporalEnt* e = cc_temporal_find(s, key);
-    if (!e) return false;
-    cc_temporal_mark_dead(s, e);
-    return true;
-}
-
-static inline int64_t cc_temporal_shard_get(CCTemporalShard* s, CCSlice key) {
-    CCTemporalEnt* e = cc_temporal_find(s, key);
-    if (!e || e->dead) return 0;
-    return e->dies_at;
 }
 
 static inline size_t cc_temporal_shard_len(const CCTemporalShard* s) {
-    return s && s->map ? CCTemporalTab_len(s->map) : 0;
+    return s ? s->live_n : 0;
 }
 
 static inline int64_t cc_temporal_shard_next_due(const CCTemporalShard* s) {
@@ -298,7 +214,6 @@ static inline void cc_temporal_retire(CCTemporalShard* s, int64_t now) {
             if (b->end > now || b->scanning) continue;
             if (b->live_n == 0) {
                 cc_temporal_rotate(s, l, i);
-                cc_temporal_reclaim(s, b);
                 continue;
             }
             b->scanning = 1;
@@ -313,15 +228,15 @@ static inline size_t cc_temporal_scan(CCTemporalShard* s, int64_t now, size_t bu
     for (l = 0; l < CC_TEMPORAL_LEVELS && n < budget; l++)
         for (i = 0; i < cc_temporal_slots[l] && n < budget; i++) {
             CCTemporalBucket* b = &s->wheel[l][i];
-            CCTemporalEnt* e;
+            CCTemporalNode* e;
             if (!b->scanning) continue;
             e = b->scan_e ? b->scan_e : b->live_head;
             while (e && n < budget) {
-                CCTemporalEnt* nxt = e->live_next;
+                CCTemporalNode* nxt = e->live_next;
                 n++;
                 b->scan_e = nxt;
                 if (e->dies_at <= now || b->end <= now) {
-                    if (gone) gone(env, cc_temporal_key_slice(e), e->user);
+                    if (gone) gone(env, e);
                     cc_temporal_mark_dead(s, e);
                 }
                 e = nxt;
@@ -329,24 +244,21 @@ static inline size_t cc_temporal_scan(CCTemporalShard* s, int64_t now, size_t bu
             if (!e) {
                 b->scan_e = NULL;
                 b->scanning = 0;
-                if (b->live_n == 0) {
-                    cc_temporal_rotate(s, l, i);
-                    cc_temporal_reclaim(s, b);
-                }
+                if (b->live_n == 0) cc_temporal_rotate(s, l, i);
             }
         }
     return n;
 }
 
 static inline void cc_temporal_shard_retire(CCTemporalShard* s, int64_t now) {
-    if (!s || !s->map) return;
+    if (!s) return;
     if (now >= s->next_end) cc_temporal_retire(s, now);
 }
 
 static inline size_t cc_temporal_shard_scan(CCTemporalShard* s, int64_t now,
                                            size_t budget, CCTemporalGone gone,
                                            void* env) {
-    if (!s || !s->map || !budget) return 0;
+    if (!s || !budget) return 0;
     return cc_temporal_scan(s, now, budget, gone, env);
 }
 
@@ -354,12 +266,11 @@ static inline void cc_temporal_shard_refresh(CCTemporalShard* s) {
     if (s && s->ends_dirty) cc_temporal_refresh_next(s);
 }
 
-/* One hold: mark due slots, then spend budget walking them. */
 static inline size_t cc_temporal_shard_sweep(CCTemporalShard* s, int64_t now,
                                             size_t budget, CCTemporalGone gone,
                                             void* env) {
     size_t n = 0;
-    if (!s || !s->map) return 0;
+    if (!s) return 0;
     if (now >= s->next_end) cc_temporal_retire(s, now);
     if (budget) n = cc_temporal_scan(s, now, budget, gone, env);
     if (s->ends_dirty) cc_temporal_refresh_next(s);
@@ -370,13 +281,6 @@ static inline bool cc_temporal_shard_init(CCTemporalShard* s, int64_t now) {
     int l, i;
     if (!s) return false;
     memset(s, 0, sizeof(*s));
-    s->heap = cc_arena_heap(kilobytes(64));
-    if (!cc_arena_valid(s->heap)) return false;
-    s->map = CCTemporalTab_init_count(s->heap, 256);
-    if (!s->map) {
-        cc_arena_destroy(&s->heap);
-        return false;
-    }
     for (l = 0; l < CC_TEMPORAL_LEVELS; l++) {
         int64_t unit = cc_temporal_unit_ms[l];
         for (i = 0; i < cc_temporal_slots[l]; i++) {
@@ -393,9 +297,7 @@ static inline bool cc_temporal_shard_init(CCTemporalShard* s, int64_t now) {
 }
 
 static inline void cc_temporal_shard_destroy(CCTemporalShard* s) {
-    if (!s) return;
-    if (cc_arena_valid(s->heap)) cc_arena_destroy(&s->heap);
-    memset(s, 0, sizeof(*s));
+    if (s) memset(s, 0, sizeof(*s));
 }
 
 static inline bool cc_temporal_index_init(CCTemporalIndex* ix, size_t nshards,
@@ -417,8 +319,6 @@ static inline bool cc_temporal_index_init(CCTemporalIndex* ix, size_t nshards,
     memset(ix->shards, 0, nshards * sizeof(CCTemporalShard));
     for (i = 0; i < nshards; i++) {
         if (!cc_temporal_shard_init(&ix->shards[i], now_ms)) {
-            size_t j;
-            for (j = 0; j < i; j++) cc_temporal_shard_destroy(&ix->shards[j]);
             cc_arena_destroy(&ix->root);
             memset(ix, 0, sizeof(*ix));
             return false;
@@ -428,12 +328,7 @@ static inline bool cc_temporal_index_init(CCTemporalIndex* ix, size_t nshards,
 }
 
 static inline void cc_temporal_index_destroy(CCTemporalIndex* ix) {
-    size_t i;
     if (!ix) return;
-    if (ix->shards) {
-        for (i = 0; i < ix->nshards; i++) cc_temporal_shard_destroy(&ix->shards[i]);
-        ix->shards = NULL;
-    }
     if (cc_arena_valid(ix->root)) cc_arena_destroy(&ix->root);
     memset(ix, 0, sizeof(*ix));
 }
@@ -444,19 +339,15 @@ static inline CCTemporalShard* cc_temporal_index_shard(CCTemporalIndex* ix, size
 }
 
 static inline bool cc_temporal_index_set(CCTemporalIndex* ix, size_t si, int64_t now,
-                                        CCSlice key, int64_t dies_at, void* user) {
+                                        CCTemporalNode* node, int64_t dies_at) {
     CCTemporalShard* sh = cc_temporal_index_shard(ix, si);
-    return sh && cc_temporal_shard_set(sh, now, key, dies_at, user);
+    return sh && cc_temporal_shard_set(sh, now, node, dies_at);
 }
 
-static inline int64_t cc_temporal_index_get(CCTemporalIndex* ix, size_t si, CCSlice key) {
+static inline void cc_temporal_index_drop(CCTemporalIndex* ix, size_t si,
+                                         CCTemporalNode* node) {
     CCTemporalShard* sh = cc_temporal_index_shard(ix, si);
-    return sh ? cc_temporal_shard_get(sh, key) : 0;
-}
-
-static inline bool cc_temporal_index_del(CCTemporalIndex* ix, size_t si, CCSlice key) {
-    CCTemporalShard* sh = cc_temporal_index_shard(ix, si);
-    return sh && cc_temporal_shard_del(sh, key);
+    if (sh) cc_temporal_shard_drop(sh, node);
 }
 
 static inline size_t cc_temporal_index_sweep(CCTemporalIndex* ix, size_t si, int64_t now,
@@ -466,7 +357,6 @@ static inline size_t cc_temporal_index_sweep(CCTemporalIndex* ix, size_t si, int
     return sh ? cc_temporal_shard_sweep(sh, now, budget, gone, env) : 0;
 }
 
-/* Named len_at so UFCS does not collide with 0-arg .len() on containers. */
 static inline size_t cc_temporal_index_len_at(CCTemporalIndex* ix, size_t si) {
     CCTemporalShard* sh = cc_temporal_index_shard(ix, si);
     return sh ? cc_temporal_shard_len(sh) : 0;

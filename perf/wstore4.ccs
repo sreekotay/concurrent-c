@@ -2,9 +2,11 @@
  * wstore4.ccs — wstore3 mix, values in ArrayMap, TTL via CCTemporalIndex.
  *
  *   Same exclusive + shard domain, same client mix, same print lines as
- *   wstore3. Entries live in one immortal recs arena (holes until destroy).
- *   Death times live only in the index; never / no-TTL keys are not set
- *   there. Sweeper is one hold: ix.sweep → gone deletes the value.
+ *   wstore3. Never keys live in one immortal arena. TTL values live in a
+ *   lazy per-wheel-slot gen arena; empty rotate (on_empty) resets it.
+ *   A slot change reallocs so a reset cannot free a still-live entry.
+ *   Same-slot TTL update stays in place. Never / no-TTL keys stay off the
+ *   wheel. Sweeper is one hold: retire, scan, gone deletes the value.
  *
  *   ./wstore4 <sec> <sweep 0|1> [theta] [wave] [shards] [clients] [write|get|drain]
  *   Compare: ./perf/compare_wstore4.sh stand
@@ -57,6 +59,9 @@ typedef struct Entry {
     uint8_t val_len;
     uint8_t kind;
     uint8_t dead;
+    int8_t  recs_level;
+    uint8_t recs_slot;
+    CCTemporalNode ttl;
 } Entry;
 
 typedef Entry* MapEnt;
@@ -71,7 +76,8 @@ typedef struct CCEpochShard {
     CCEpochKeys* store;
     CCTemporalShard* ttl;
     CCArena owner;
-    CCArena recs;
+    CCArena never_recs;
+    CCArena recs[CC_TEMPORAL_LEVELS][CC_TEMPORAL_MAX_SLOTS];
     CCArena map_arena;
     ShardMap map;
     CCExclusiveMutex sweep_mu;
@@ -246,18 +252,84 @@ static void entry_mark_dead(CCEpochShard* s, Entry* e) {
     s->free_n++;
 }
 
-static bool ttl_set(CCEpochShard* s, int64_t now, Entry* e, int64_t dies_at) {
-    return s->ttl && e && s->ttl->set(now, entry_key(e), dies_at, e);
+static size_t gen_l1(void) { return 64u * sizeof(Entry) + 4096u; }
+
+static CCArena* recs_of(CCEpochShard* s, int8_t level, uint8_t slot) {
+    if (level < 0) return &s->never_recs;
+    return &s->recs[level][slot];
 }
 
-static bool ttl_del(CCEpochShard* s, CCSlice key) {
-    return s->ttl && s->ttl->del(key);
+static bool dest_slot(CCEpochShard* s, int64_t now, int64_t dies_at,
+                      int8_t* level, uint8_t* slot) {
+    if (dies_at == NEVER_MS) {
+        *level = -1;
+        *slot = 0;
+        return true;
+    }
+    if (!s->ttl || dies_at <= now) return false;
+    return cc_temporal_slot_for(s->ttl, now, dies_at, level, slot);
+}
+
+static bool same_gen(const Entry* e, int8_t level, uint8_t slot) {
+    return e->recs_level == level && (level < 0 || e->recs_slot == slot);
+}
+
+static bool !>(CCError) recs_ensure(CCEpochShard* s, int8_t level, uint8_t slot) {
+    CCArena* a = recs_of(s, level, slot);
+    if (a->valid()) return cc_ok(true);
+    *a = s->owner.create_heap_arena(gen_l1()) !>;
+    return cc_ok(true);
+}
+
+static void recs_reclaim(void* env, int level, int slot) {
+    CCEpochShard* s = (CCEpochShard*)env;
+    CCArena* a;
+    if (!s || level < 0 || level >= CC_TEMPORAL_LEVELS) return;
+    if (slot < 0 || slot >= cc_temporal_slots[level]) return;
+    a = &s->recs[level][slot];
+    if (!a->valid()) return;
+    a->reset();
+    s->compacts++;
+}
+
+static void ttl_node_init(Entry* e) {
+    memset(&e->ttl, 0, sizeof(e->ttl));
+    e->ttl.dead = 1;
+    e->ttl.level = -1;
+    e->ttl.user = e;
+}
+
+static Entry* entry_alloc(CCEpochShard* s, int8_t level, uint8_t slot) {
+    CCArena* a = recs_of(s, level, slot);
+    Entry* e = (Entry*)a->alloc_local_grow(sizeof(Entry), _Alignof(Entry));
+    if (!e) return NULL;
+    memset(e, 0, sizeof(*e));
+    e->dead = 1;
+    e->recs_level = level;
+    e->recs_slot = slot;
+    ttl_node_init(e);
+    return e;
+}
+
+static bool ttl_bind(CCEpochShard* s, int64_t now, Entry* e, int64_t dies_at) {
+    if (!s->ttl || !e) return false;
+    e->ttl.user = e;
+    if (dies_at == NEVER_MS) {
+        s->ttl->drop(&e->ttl);
+        return true;
+    }
+    return s->ttl->set(now, &e->ttl, dies_at);
+}
+
+static void ttl_drop(CCEpochShard* s, Entry* e) {
+    if (!s->ttl || !e) return;
+    s->ttl->drop(&e->ttl);
 }
 
 static bool cc_epoch_shard_delete(CCEpochShard* s, CCSlice key) {
     Entry* e = map_find(s, key.hdr());
     if (!e) return false;
-    (void)ttl_del(s, key);
+    ttl_drop(s, e);
     entry_mark_dead(s, e);
     return true;
 }
@@ -268,7 +340,11 @@ static bool !>(CCError) shard_place(CCEpochShard* s, int64_t now, CCSlice key, V
     Entry* e;
     size_t n, old_n;
     int64_t old_dies = 0;
-    if (old) {
+    int8_t level;
+    uint8_t slot;
+    if (!dest_slot(s, now, dies_at, &level, &slot))
+        return cc_err(CC_ERR_INVALID_ARG, "ttl slot");
+    if (old && same_gen(old, level, slot)) {
         old_n = entry_val_live(old);
         old_dies = old->dies_at;
         if (!val_copy_into(old, &v))
@@ -278,18 +354,13 @@ static bool !>(CCError) shard_place(CCEpochShard* s, int64_t now, CCSlice key, V
         if (old_n > n) s->live_bytes -= old_n - n;
         else s->live_bytes += n - old_n;
         note_never(s, old_dies, dies_at);
-        if (dies_at == NEVER_MS) {
-            if (old_dies != NEVER_MS) (void)ttl_del(s, entry_key(old));
-        } else if (!ttl_set(s, now, old, dies_at))
+        if (!ttl_bind(s, now, old, dies_at))
             return cc_err(CC_ERR_OUT_OF_MEMORY, "ttl set");
         return cc_ok(true);
     }
-    if (!s->recs.valid())
-        return cc_err(CC_ERR_INVALID_ARG, "recs");
-    e = (Entry*)s->recs.alloc_local_grow(sizeof(Entry), _Alignof(Entry));
+    recs_ensure(s, level, slot) !>(err) { return cc_err(err); };
+    e = entry_alloc(s, level, slot);
     if (!e) return cc_err(CC_ERR_OUT_OF_MEMORY, "entry");
-    memset(e, 0, sizeof(*e));
-    e->dead = 1;
     if (!entry_fill(e, key, v))
         return cc_err(CC_ERR_INVALID_ARG, "entry cap");
     e->dies_at = dies_at;
@@ -298,9 +369,16 @@ static bool !>(CCError) shard_place(CCEpochShard* s, int64_t now, CCSlice key, V
     e->dead = 0;
     s->live_bytes += n;
     note_never(s, 0, dies_at);
-    if (dies_at != NEVER_MS && !ttl_set(s, now, e, dies_at)) {
+    if (dies_at != NEVER_MS && !ttl_bind(s, now, e, dies_at)) {
         entry_mark_dead(s, e);
+        if (old && !old->dead)
+            map_insert(s, old) !>(err) { return cc_err(err); };
         return cc_err(CC_ERR_OUT_OF_MEMORY, "ttl set");
+    }
+    if (old) {
+        ttl_drop(s, old);
+        entry_mark_dead(s, old);
+        s->reinserted++;
     }
     return cc_ok(true);
 }
@@ -326,21 +404,14 @@ static bool !>(CCError) cc_epoch_shard_expire(CCEpochShard* s, int64_t now, CCSl
         cc_epoch_shard_delete(s, key);
         return cc_ok(true);
     }
-    note_never(s, old->dies_at, dies_at);
-    old->dies_at = dies_at;
-    if (!ttl_set(s, now, old, dies_at))
-        return cc_err(CC_ERR_OUT_OF_MEMORY, "ttl set");
-    return cc_ok(true);
+    return shard_place(s, now, entry_key(old), entry_val(old), dies_at);
 }
 
 static bool !>(CCError) cc_epoch_shard_persist(CCEpochShard* s, CCSlice key) {
     Entry* old = map_find(s, key.hdr());
     if (!old) return cc_ok(false);
     if (old->dies_at == NEVER_MS) return cc_ok(true);
-    note_never(s, old->dies_at, NEVER_MS);
-    old->dies_at = NEVER_MS;
-    (void)ttl_del(s, key);
-    return cc_ok(true);
+    return shard_place(s, now_ms(), entry_key(old), entry_val(old), NEVER_MS);
 }
 
 static Entry* cc_epoch_shard_get(CCEpochShard* s, CCSlice key) {
@@ -350,11 +421,9 @@ static Entry* cc_epoch_shard_get(CCEpochShard* s, CCSlice key) {
     return e;
 }
 
-static void expire_gone(void* env, CCSlice key, void* user) {
+static void expire_gone(void* env, CCTemporalNode* node) {
     CCEpochShard* s = (CCEpochShard*)env;
-    Entry* e = (Entry*)user;
-    (void)key;
-    if (!e) e = map_find(s, key.hdr());
+    Entry* e = node ? (Entry*)node->user : NULL;
     if (!e || e->dead) return;
     entry_mark_dead(s, e);
     s->dropped++;
@@ -459,7 +528,6 @@ static bool !>(CCError) shard_init(CCEpochShard* s, int idx, double theta, size_
     s->map_arena = s->owner.create_arena(0) !>;
     s->map = WstoreVal_init_count(s->map_arena, 256);
     if (!s->map) return cc_err(CC_ERR_OUT_OF_MEMORY, "map");
-    s->recs = s->owner.create_heap_arena(64u * sizeof(Entry) + 4096u) !>;
     return cc_ok(true);
 }
 
@@ -476,24 +544,19 @@ static size_t shard_live_entries(const CCEpochShard* s) {
 }
 
 static size_t shard_ix_commit(const CCEpochShard* s) {
-    CCTemporalShard* ts;
-    size_t t = 0;
-    int l, i;
-    ts = s->ttl;
-    if (!ts) return 0;
-    if (cc_arena_valid(ts->heap))
-        t += cc_arena_committed_gross_bytes(ts->heap);
-    for (l = 0; l < CC_TEMPORAL_LEVELS; l++)
-        for (i = 0; i < cc_temporal_slots[l]; i++)
-            if (cc_arena_valid(ts->wheel[l][i].recs))
-                t += cc_arena_committed_gross_bytes(ts->wheel[l][i].recs);
-    return t;
+    (void)s;
+    return 0;
 }
 
 static size_t shard_recs_commit(const CCEpochShard* s) {
     size_t t = 0;
-    if (s->recs.valid())
-        t += cc_arena_committed_gross_bytes(s->recs);
+    int l, i;
+    if (s->never_recs.valid())
+        t += cc_arena_committed_gross_bytes(s->never_recs);
+    for (l = 0; l < CC_TEMPORAL_LEVELS; l++)
+        for (i = 0; i < cc_temporal_slots[l]; i++)
+            if (s->recs[l][i].valid())
+                t += cc_arena_committed_gross_bytes(s->recs[l][i]);
     t += shard_ix_commit(s);
     return t;
 }
@@ -541,21 +604,40 @@ static size_t find_trim_i(CCEpochShard* s, int ttl_only) {
     return SIZE_MAX;
 }
 
+static size_t kill_wheel_bucket(CCEpochShard* s, int l, int i, size_t want) {
+    CCTemporalBucket* b;
+    CCTemporalNode* n;
+    size_t got = 0;
+    if (!s->ttl) return 0;
+    b = &s->ttl->wheel[l][i];
+    n = b->live_head;
+    while (n && got < want) {
+        CCTemporalNode* nxt = n->live_next;
+        Entry* e = (Entry*)n->user;
+        s->ttl->drop(n);
+        if (e && !e->dead) entry_mark_dead(s, e);
+        got++;
+        n = nxt;
+    }
+    recs_reclaim(s, l, i);
+    return got;
+}
+
 static size_t shard_trim(CCEpochShard* s, size_t want) {
     size_t n = 0;
-    int pass;
-    for (pass = 0; pass < 2 && n < want; pass++) {
-        int ttl_only = pass == 0;
-        while (n < want) {
-            size_t i = find_trim_i(s, ttl_only);
-            Entry* e;
-            if (i == SIZE_MAX) break;
-            e = s->map->dense[i].val;
-            if (!e) break;
-            (void)ttl_del(s, entry_key(e));
-            entry_mark_dead(s, e);
-            n++;
-        }
+    int l, i;
+    for (l = 0; l < CC_TEMPORAL_LEVELS && n < want; l++)
+        for (i = 0; i < cc_temporal_slots[l] && n < want; i++)
+            n += kill_wheel_bucket(s, l, i, want - n);
+    while (n < want) {
+        size_t di = find_trim_i(s, 0);
+        Entry* e;
+        if (di == SIZE_MAX) break;
+        e = s->map->dense[di].val;
+        if (!e) break;
+        ttl_drop(s, e);
+        entry_mark_dead(s, e);
+        n++;
     }
     return n;
 }
@@ -928,10 +1010,12 @@ int main(int argc, char** argv) {
         shards[i].store = &st;
         shards[i].ttl = cc_temporal_index_shard(&st.ix, (size_t)i);
         if (!shards[i].ttl) return 1;
+        shards[i].ttl->on_empty = recs_reclaim;
+        shards[i].ttl->on_empty_env = &shards[i];
     }
     @defer { for (int i = 0; i < nshards; i++) shard_free(&shards[i]); }
 
-    println(@string(`# wstore4 CCEpochKeys seconds=${seconds} sweep=${sweep} mix=${mix_drain ? "drain" : (mix_get ? "get" : "write")} theta=${theta} wave_recs=${wave} shards=${nshards} clients=${nclients} temporal_index=1 wheel=100ms x64, 1s x64, 60s x60`, @scratch)) !>;
+    println(@string(`# wstore4 CCEpochKeys seconds=${seconds} sweep=${sweep} mix=${mix_drain ? "drain" : (mix_get ? "get" : "write")} theta=${theta} wave_recs=${wave} shards=${nshards} clients=${nclients} temporal_index=1 gen_arena=1 wheel=100ms x64, 1s x64, 60s x60`, @scratch)) !>;
     print_mem(&st, "idle");
     if (mix_get) preload_never(&st) !>;
 

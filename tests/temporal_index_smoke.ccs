@@ -1,4 +1,4 @@
-/* CCTemporalIndex: set / get / del / persist / sweep. Not wired to Redis. */
+/* CCTemporalIndex: intrusive wheel — set / persist / sweep / gone. */
 #include <ccc/std/prelude.cch>
 #include <ccc/std/temporal_index.cch>
 #include <stdio.h>
@@ -9,43 +9,64 @@ typedef struct GoneEnv {
     char last[32];
 } GoneEnv;
 
-static void on_gone(void* env, CCSlice key, void* user) {
-    (void)user;
+static int reclaim_n;
+
+static void on_reclaim(void* env, int level, int slot) {
+    (void)env;
+    (void)level;
+    (void)slot;
+    reclaim_n++;
+}
+
+static void on_gone(void* env, CCTemporalNode* node) {
     GoneEnv* g = (GoneEnv*)env;
-    size_t n = key.len < 31 ? key.len : 31;
+    const char* k = node && node->user ? (const char*)node->user : "";
+    size_t n = 0;
+    while (k[n] && n < 31) n++;
     g->n++;
-    memcpy(g->last, key.ptr, n);
+    memcpy(g->last, k, n);
     g->last[n] = 0;
+}
+
+static void node_init(CCTemporalNode* n, const char* key) {
+    memset(n, 0, sizeof(*n));
+    n->dead = 1;
+    n->level = -1;
+    n->user = (void*)key;
 }
 
 int main(void) {
     CCTemporalIndex ix;
+    CCTemporalNode na, nb;
     GoneEnv gone;
-    CCSlice a = cc_slice_from_buffer("alpha", 5);
-    CCSlice b = cc_slice_from_buffer("beta", 4);
-    int64_t now = 1 * 60 * 1000; /* sit inside a 60s wheel */
+    int64_t now = 1 * 60 * 1000;
     memset(&gone, 0, sizeof gone);
+    node_init(&na, "alpha");
+    node_init(&nb, "beta");
     if (!ix.init(2, now)) return 1;
+    {
+        CCTemporalShard* sh = ix.shard(0);
+        if (!sh) return 17;
+        sh->on_empty = on_reclaim;
+        sh->on_empty_env = NULL;
+    }
     if (ix.len_all() != 0) return 2;
-    if (!ix.set(0, now, a, now + 250, NULL)) return 3;
-    if (ix.get(0, a) != now + 250) return 4;
-    if (ix.get(1, a) != 0) return 5;
+    if (!ix.set(0, now, &na, now + 250)) return 3;
+    if (na.dead || na.dies_at != now + 250) return 4;
+    if (ix.len_at(1) != 0) return 5;
     if (ix.len_at(0) != 1) return 6;
-    if (!ix.set(0, now, b, now + 800, NULL)) return 7;
+    if (!ix.set(0, now, &nb, now + 800)) return 7;
     if (ix.len_all() != 2) return 8;
-    /* persist */
-    if (!ix.set(0, now, b, 0, NULL)) return 9;
-    if (ix.get(0, b) != 0) return 10;
+    if (!ix.set(0, now, &nb, 0)) return 9;
+    if (!nb.dead) return 10;
     if (ix.len_at(0) != 1) return 11;
-    /* not yet due */
     if (ix.sweep(0, now + 50, 64, on_gone, &gone) != 0 && gone.n) return 12;
-    if (ix.get(0, a) == 0) return 13;
-    /* due */
+    if (na.dead) return 13;
     (void)ix.sweep(0, now + 400, 64, on_gone, &gone);
-    if (ix.get(0, a) != 0) return 14;
-    if (gone.n < 1) return 15;
-    if (strcmp(gone.last, "alpha") != 0) return 16;
-    if (ix.len_all() != 0) return 17;
+    if (gone.n < 1) return 14;
+    if (strcmp(gone.last, "alpha") != 0) return 15;
+    if (ix.len_all() != 0) return 16;
+    if (reclaim_n < 1) return 18;
     ix.destroy();
     printf("temporal_index_smoke ok\n");
     return 0;
