@@ -239,6 +239,11 @@ static uint64_t shadow_toolchain_content_fp(const char* self_path) {
     h = shadow_fold_file_content(h, self_path);
     h = shadow_fold_file_content(h, "out/cc/obj/libshadow_comptime.a");
     h = shadow_fold_file_content(h, "third_party/tcc/libtcc.a");
+    {
+        const char* ver = getenv("CCC_VERSION");
+        h = shadow_fnv1a64_str(h, "\x03" "ccc_version:");
+        h = shadow_fnv1a64_str(h, ver && ver[0] ? ver : "<unknown>");
+    }
     /* Include root *paths* only; header bytes are validated via emit.deps. */
     h = shadow_fnv1a64_str(h, "out/include");
     h = shadow_fnv1a64_str(h, "cc/include");

@@ -680,17 +680,23 @@ static void cc_init_paths(const char* argv0) {
     // `cc/bin/ccc` is a thin shell wrapper that almost never changes on rebuild;
     // make updates `cc/bin/.ccc-bin`. Keying the wrapper made caches survive
     // lowering changes (e.g. #105 #line resync) and serve stale .c outputs.
-    snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/cc/bin/.ccc-bin", g_repo_root);
-    if (!file_exists(g_ccc_sig_path)) {
-        snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/out/cc/bin/.ccc-bin", g_repo_root);
+    // Installed `ccc` *is* .ccc-bin; do not walk $prefix/cc/bin/.ccc-bin (miss)
+    // and do not pick up an app-cwd leftover.
+    if (g_layout_installed && g_ccc_path[0]) {
+        strncpy(g_ccc_sig_path, g_ccc_path, sizeof(g_ccc_sig_path));
+        g_ccc_sig_path[sizeof(g_ccc_sig_path) - 1] = '\0';
+    } else {
+        snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/cc/bin/.ccc-bin", g_repo_root);
         if (!file_exists(g_ccc_sig_path)) {
-            /* Fallback: wrapper / argv0 (installed layouts without a .ccc-bin). */
-            snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/cc/bin/ccc", g_repo_root);
+            snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/out/cc/bin/.ccc-bin", g_repo_root);
             if (!file_exists(g_ccc_sig_path)) {
-                snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/out/cc/bin/ccc", g_repo_root);
+                snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/cc/bin/ccc", g_repo_root);
                 if (!file_exists(g_ccc_sig_path)) {
-                    strncpy(g_ccc_sig_path, g_ccc_path, sizeof(g_ccc_sig_path));
-                    g_ccc_sig_path[sizeof(g_ccc_sig_path) - 1] = '\0';
+                    snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/out/cc/bin/ccc", g_repo_root);
+                    if (!file_exists(g_ccc_sig_path)) {
+                        strncpy(g_ccc_sig_path, g_ccc_path, sizeof(g_ccc_sig_path));
+                        g_ccc_sig_path[sizeof(g_ccc_sig_path) - 1] = '\0';
+                    }
                 }
             }
         }
@@ -2435,6 +2441,17 @@ static uint64_t cc__fold_shadow_lower(uint64_t h) {
     return cc__fold_file_content(h, path);
 }
 
+/* Public toolchain id (`ccc --version` / seed). Binary folds can miss when
+ * find_shadow_lower resolves to the same path both sides of an overwrite,
+ * or to "<absent>" from an app cwd. A seed bump must always miss. */
+static uint64_t cc__fold_toolchain_id(uint64_t h) {
+    char ver[64];
+    ver[0] = 0;
+    cc_ccc_version_current(ver, sizeof(ver));
+    h = cc__fnv1a64_str(h, "\x03" "ccc_version:");
+    return cc__fnv1a64_str(h, ver[0] ? ver : "<unknown>");
+}
+
 /* Match an identifier token `kw` at `src[p..]` not followed by an ident char. */
 static int cc__pp_kw_at(const char* src, size_t n, size_t p, const char* kw) {
     size_t kl = strlen(kw);
@@ -3140,6 +3157,7 @@ static int cc__build_one_target_objs(int idx,
                 h = cc__fold_cch_includes(h, src_abs, t_cc_flags);
                 h = cc__fold_ccc_driver(h);
                 h = cc__fold_shadow_lower(h);
+                h = cc__fold_toolchain_id(h);
                 emit_key = h;
                 uint64_t prev = 0;
                 if (file_exists(c_out) && cc__read_u64_file(meta_path, &prev) == 0 && prev == emit_key) {
@@ -3578,12 +3596,25 @@ static int cc__scan_frontend_flags(int argc, char** argv) {
     return 0;
 }
 
-/* Resolve native shadow_lower beside ccc (not the ccc-run wrapper). */
+/* Resolve native shadow_lower beside ccc (not the ccc-run wrapper).
+ * Never take a cwd-relative `out/cc/bin/shadow_lower`: from an app tree that
+ * is a miss or a stale copy, and the emit key then fails to track the
+ * lowerer that exec actually runs. */
 static int cc__find_shadow_lower(char* dst, size_t cap) {
     const char* env = getenv("CC_SHADOW_LOWER");
     if (env && env[0] && access(env, X_OK) == 0) {
         snprintf(dst, cap, "%s", env);
         return 0;
+    }
+    /* Same directory as the running ccc (install: $PREFIX/bin/ccc). */
+    if (g_ccc_path[0]) {
+        char dir[PATH_MAX];
+        snprintf(dir, sizeof(dir), "%s", g_ccc_path);
+        cc__dirname_inplace(dir);
+        if (dir[0] &&
+            (size_t)snprintf(dst, cap, "%s/shadow_lower", dir) < cap &&
+            access(dst, X_OK) == 0)
+            return 0;
     }
     /* Prefix install: $PREFIX/bin/ccc + $PREFIX/bin/shadow_lower. */
     if (g_layout_installed && g_repo_root[0]) {
@@ -3596,8 +3627,6 @@ static int cc__find_shadow_lower(char* dst, size_t cap) {
         snprintf(dst, cap, "%s/cc/bin/shadow_lower", g_repo_root);
         if (access(dst, X_OK) == 0) return 0;
     }
-    snprintf(dst, cap, "out/cc/bin/shadow_lower");
-    if (access(dst, X_OK) == 0) return 0;
     return -1;
 }
 
@@ -4152,6 +4181,11 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
         return -1;
     }
     if (pid == 0) {
+        char ver[64];
+        ver[0] = 0;
+        cc_ccc_version_current(ver, sizeof(ver));
+        if (ver[0] && setenv("CCC_VERSION", ver, 1) != 0)
+            _exit(127);
         if (quote_dir[0] && setenv("SHADOW_QUOTE_DIR", quote_dir, 1) != 0)
             _exit(127);
         execv(shadow, argv);
@@ -4374,6 +4408,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         h = cc__fold_cch_includes(h, opt->in_path, opt->cc_flags);
         h = cc__fold_ccc_driver(h);
         h = cc__fold_shadow_lower(h);
+        h = cc__fold_toolchain_id(h);
         emit_key = h;
 
         uint64_t prev = 0;
@@ -6360,6 +6395,7 @@ static int run_build_mode(int argc, char** argv) {
                 h = cc__fold_cch_includes(h, inputs[i], cc_flags);
                 h = cc__fold_ccc_driver(h);
                 h = cc__fold_shadow_lower(h);
+                h = cc__fold_toolchain_id(h);
                 emit_key = h;
 
                 uint64_t prev = 0;

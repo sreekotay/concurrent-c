@@ -248,6 +248,11 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] emit .cch include cache selftest FAILED"
     exit 1
   fi
+  # Seed / lowerer-binary change must bust the lowered-C cache.
+  if ! sh scripts/test_emit_toolchain_cache.sh; then
+    echo "[test] emit toolchain cache selftest FAILED"
+    exit 1
+  fi
   # Full SERDES goldens/recipes: scripts/test_shadow.sh (not this gate).
 
   if [ "$quick" = 0 ]; then
