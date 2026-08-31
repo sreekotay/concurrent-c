@@ -1,16 +1,28 @@
-/* Extracted interface @variant is host C. Construction uses the lowered
- * tag; a same-TU struct field named `buf` is not rewritten. */
+/* Extracted interface @variant is host C in the .h. The guest harvests
+ * the arms: one-arm construction, switch, and projection. A same-TU
+ * struct field named `buf` is not rewritten. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include "quote_cch_variant_extract.cch"
 
 int main(void) {
-    QuoteVaCell c = { .kind = QuoteVaCell_num, .u.num = { .n = 7 } };
+    QuoteVaCell c = { .num = { .n = 7 } };
     QuoteVaField f = { .tag = 1, .buf = NULL };
     QuoteVaHold h;
-    if (c.kind != QuoteVaCell_num || c.u.num.n != 7) {
-        printf("cell kind/num\n");
+    if (c.kind != QuoteVaCell_num) {
+        printf("cell kind\n");
         return 1;
+    }
+    switch (c) {
+        case .num:
+            if (c.num.n != 7) {
+                printf("cell num\n");
+                return 1;
+            }
+            break;
+        case .flag:
+            printf("cell flag\n");
+            return 1;
     }
     f.buf = (char *)0;
     if (f.tag != 1) {
@@ -22,8 +34,7 @@ int main(void) {
         printf("field compound\n");
         return 1;
     }
-    h = (QuoteVaHold){0};
-    h.cell = (QuoteVaCell){ .kind = QuoteVaCell_flag };
+    h = (QuoteVaHold){ .cell = { .flag = {} } };
     if (h.cell.kind != QuoteVaCell_flag) {
         printf("hold flag\n");
         return 1;

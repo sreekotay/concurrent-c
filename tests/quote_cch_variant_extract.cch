@@ -9,8 +9,8 @@ typedef struct {
     int64_t n;
 } QuoteVaNum;
 
-/* Interface face: file-scope variant decl must extract to enum+union C.
- * Guests include the .h; the sigil must not remain. */
+/* Interface face: extract lowers to enum+union C (no leftover sigil).
+ * Including TUs harvest the arms and speak the protected surface. */
 @variant QuoteVaCell {
     num: QuoteVaNum;
     flag: void;

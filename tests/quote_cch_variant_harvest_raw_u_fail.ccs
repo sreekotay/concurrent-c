@@ -1,0 +1,8 @@
+/* Fail: a guest of an extracted @variant cannot reach into `.u`. */
+#include <ccc/std/prelude.cch>
+#include "quote_cch_variant_extract.cch"
+
+int main(void) {
+    QuoteVaCell c = { .num = { .n = 7 } };
+    return (int)c.u.num.n;
+}

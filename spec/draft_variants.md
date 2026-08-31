@@ -43,6 +43,9 @@ Default-layout variants and schema `one of` share that layout and the same
 protected consumption surface (construction, dominated projection, raw `.u`
 ban); see `spec/cc_serdes.md`. They remain distinct families: schemas own
 wire faces; variants own destructor/transition and packing.
+An including TU of an extracted interface `.cch` that declared
+`@variant Name` receives that same surface. The lowered `.h` stays
+enum-and-union C.
 `sizeof(Name)` includes the tag and the largest arm. Construction, projection,
 switching, and transition do not allocate.
 

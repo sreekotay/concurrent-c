@@ -5,6 +5,8 @@
  * Requires pp_ast_core.cch (AstNode / TapeCache). */
 #pragma once
 
+#include "pp_ast_core.h"
+#include "pp_tape.h"
 enum {
     SHADOW_SAFE_PIN_CAP = 24,
     SHADOW_SAFE_EH_CAP = 16,
@@ -2742,7 +2744,7 @@ static void shadow_variant_harvest_incs(const char* text, const char* from_dir,
             n = 0;
             while (*q && *q != quote && n + 1 < sizeof(rel)) rel[n++] = *q++;
             rel[n] = 0;
-            if (n < 4 || strcmp(rel + n - 4, ".cch") != 0) continue;
+            if (n < 4 || strcmp(rel + n - 4, ".h") != 0) continue;
             cand[0] = 0;
             if (from_dir && from_dir[0] && rel[0] != '/')
                 snprintf(cand, sizeof(cand), "%s/%s", from_dir, rel);
@@ -2787,7 +2789,7 @@ static void shadow_variant_harvest_scan(TapeCache* cache) {
             if (!ft) continue;
             if (ft->path && ft->path[0]) {
                 pl = strlen(ft->path);
-                if (pl >= 4 && strcmp(ft->path + pl - 4, ".cch") == 0)
+                if (pl >= 4 && strcmp(ft->path + pl - 4, ".h") == 0)
                     shadow_variant_harvest_path(ft->path, 2);
                 shadow_harvest_dir_of(ft->path, dir, sizeof(dir));
             } else {
