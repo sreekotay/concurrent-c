@@ -230,22 +230,21 @@ def eval_storm() -> None:
 
 def handle_boomerang() -> None:
     """Return JS handles from Python callbacks while GC releases race the wire."""
-    print("=== handle_boomerang ===")
+    print("=== handle_boomerang ===", flush=True)
     js = cc_node.create()
-    # Each iter: JS → Python with a fresh fn; Python returns it; JS calls it.
     boom = js.eval(
         "(cb, n) => { let s = 0; for (let i = 0; i < n; i++) "
         "s += cb((x) => x + i)(1); return s; }"
     )
-    # Compose: Python returns a curried JS fn built from another callback.
     compose = js.eval(
         "(cb) => { const f = cb((a) => (b) => a * 10 + b); return f(3)(4); }"
     )
     n = 250 if FULL else 100
     t0 = time.perf_counter()
     total = boom(lambda g: g, n)
+    print("PROGRESS handle_boomerang boom ok", flush=True)
     composed = compose(lambda g: g)
-    # Fan the same shape across many short-lived handles + forced GC.
+    print("PROGRESS handle_boomerang compose ok", flush=True)
     deep = js.eval(
         "(cb) => cb((x) => cb((y) => cb((z) => x + y + z)(1))(2))(3)"
     )
@@ -255,13 +254,15 @@ def handle_boomerang() -> None:
             deep_ok += 1
         if i % 7 == 0:
             gc.collect()
-    # Multi-arg return: hand back one of several handles.
+    print("PROGRESS handle_boomerang deep ok", flush=True)
     pick = js.eval(
         "(cb) => { const a = (x) => x + 1; const b = (x) => x + 2; "
         "return cb(a, b)(10); }"
     )
     picked = pick(lambda a, b: b)
+    print("PROGRESS handle_boomerang pick ok", flush=True)
     js.destroy()
+    print("PROGRESS handle_boomerang destroy ok", flush=True)
     result("handle_boomerang_ms %.1f", (time.perf_counter() - t0) * 1000)
     result("handle_boomerang_n %d", n)
     ok("handle_boomerang_total", total == sum(1 + i for i in range(n)))

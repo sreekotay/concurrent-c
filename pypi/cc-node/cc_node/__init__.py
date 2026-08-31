@@ -36,6 +36,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 __all__ = [
     "create", "get", "reset", "kernel", "reset_kernel",
@@ -136,8 +137,9 @@ class JsHandle:
         p.text(repr(self))
 
     def __del__(self):
-        # Never nest a sync wire op from GC into an in-flight _req — that
-        # steals the outer reply (e.g. returning a callback arg handle).
+        # Queue only — never flush from GC.  Pass-through handles (returned
+        # from a callback back to JS) defer release until the outer wire
+        # op completes; see Bridge._passthrough_h.
         try:
             if not self._d.closed:
                 self._d._queue_release(self._h)
@@ -197,6 +199,7 @@ class Bridge:
         self._depth = 0
         self._parked = {}
         self._pending_release = []
+        self._passthrough_h = set()
         self._close_pending = False
         self._destroy_done = False
         self._cell_require_ready = False
@@ -217,17 +220,50 @@ class Bridge:
             raise JsError("cc-node: the node child exited") from None
 
     def _queue_release(self, hid):
+        if hid in self._passthrough_h:
+            return
         self._pending_release.append(hid)
-        if self._depth == 0:
-            self._flush_releases()
 
-    def _flush_releases(self):
+    def _drain_pending_releases(self):
+        """Send queued releases (must run with depth==0, not from __del__)."""
         while self._pending_release and not self.closed:
             hid = self._pending_release.pop(0)
             try:
-                self._req("release", h=hid)
+                self._wire_call("release", h=hid)
             except Exception:
                 pass
+
+    def _on_depth_zero(self):
+        if self._passthrough_h:
+            self._pending_release.extend(self._passthrough_h)
+            self._passthrough_h.clear()
+        # One proxy drop can queue the same id more than once; the child
+        # deletes on first release — dedupe before draining.
+        seen = set()
+        uniq = []
+        for hid in self._pending_release:
+            if hid not in seen:
+                seen.add(hid)
+                uniq.append(hid)
+        self._pending_release = uniq
+        self._flush_shm()
+        if self._close_pending:
+            self._finish_destroy()
+        else:
+            self._drain_pending_releases()
+
+    def _wire_call(self, op, **kw):
+        """One wire round-trip without depth / release side effects."""
+        rid = self._nid
+        self._nid += 1
+        kw["id"] = rid
+        kw["op"] = op
+        try:
+            self._send(kw)
+        except (BrokenPipeError, ValueError):
+            self.closed = True
+            raise JsError("cc-node: the node child exited") from None
+        return self._wait_reply(rid)
 
     def _shm_write(self, raw):
         _shm_seq[0] += 1
@@ -349,6 +385,10 @@ class Bridge:
     def _req(self, op, **kw):
         if self.closed:
             raise JsError("cc-node: bridge is closed")
+        # Drop-driven releases queue outside wire ops; drain before the
+        # next op so stats()/teardown see a settled ledger.
+        if self._depth == 0:
+            self._drain_pending_releases()
         rid = self._nid
         self._nid += 1
         kw["id"] = rid
@@ -364,11 +404,7 @@ class Bridge:
         finally:
             self._depth -= 1
             if self._depth == 0:
-                self._flush_shm()
-                if self._close_pending:
-                    self._finish_destroy()
-                else:
-                    self._flush_releases()
+                self._on_depth_zero()
 
     def _serve_callback(self, msg):
         fn = self._cbs.get(msg["cb"])
@@ -376,7 +412,12 @@ class Bridge:
             if fn is None:
                 raise JsError("cc-node: unknown callback")
             args = [self._decode_result(a) for a in msg["args"]]
-            self._send({"cbr": msg["cbid"], "v": self._encode(fn(*args))})
+            ret = fn(*args)
+            if isinstance(ret, JsHandle):
+                # Python was a pass-through; JS re-owns the handle for the
+                # rest of this wire op — do not release from __del__ mid-flight.
+                self._passthrough_h.add(ret._h)
+            self._send({"cbr": msg["cbid"], "v": self._encode(ret)})
         except Exception as e:  # crosses back as a JS error, message intact
             try:
                 self._send({"cbr": msg["cbid"], "e": str(e)})
@@ -601,6 +642,10 @@ class Bridge:
         self._close_pending = False
         self.closed = True
         try:
+            self._drain_pending_releases()
+        except Exception:
+            pass
+        try:
             if self._p.poll() is None and not self._wire_w.closed:
                 rid = self._nid
                 self._nid += 1
@@ -611,12 +656,19 @@ class Bridge:
             self._wire_w.close()
         except Exception:
             pass
-        # Drain to EOF so the broker's farewell reply has somewhere to
-        # land — closing the reply fd under its write is an EPIPE crash
-        # in the child.
+        # Drain the farewell reply (bounded — an idle child must not
+        # block teardown forever).
         try:
-            while self._read_line():
-                pass
+            deadline = time.monotonic() + 2.0
+            fd = self._resp_fd
+            while fd is not None and time.monotonic() < deadline:
+                if self._p.poll() is not None:
+                    break
+                ready, _, _ = select.select([fd], [], [], 0.1)
+                if not ready:
+                    continue
+                if not self._read_line():
+                    break
         except Exception:
             pass
         try:
