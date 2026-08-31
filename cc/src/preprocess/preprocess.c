@@ -12762,6 +12762,7 @@ typedef struct {
     char* source_path;
     char* lowered_path;
     int in_progress;
+    int ready; /* 1 only after this process wrote the `.h` */
 } CCLoweredLocalHeader;
 
 static CCLoweredLocalHeader* g_lowered_local_headers = NULL;
@@ -15017,8 +15018,9 @@ static void cc__cch_grade_memo_set(const char* abs_src, int grade) {
 }
 
 /* Own-text only. A nested impl-grade `#include "leaf.cch"` does not make
- * this file impl-grade — the leaf splices into the including unit unless
- * an owner `.ccs` owns those bodies; this file still extracts to a `.h`. */
+ * this file impl-grade. The leaf splices only when an owner `.ccs` exists
+ * (same-stem, a same-dir `.ccs` that includes it, or a face-includer);
+ * otherwise that include fails. This file still extracts to a `.h`. */
 static int cc__local_cch_is_impl_grade(const char* abs_src) {
     char* src = NULL;
     size_t n = 0;
@@ -17384,6 +17386,11 @@ static int cc__splice_impl_cch_into(char** out, size_t* out_len, size_t* out_cap
         return -1;
     }
     rew = cc__rewrite_local_cch_includes_impl(body, body_len, child_abs);
+    if (g_local_cch_lower_failed) {
+        free(rew);
+        free(body);
+        return -1;
+    }
     use = rew ? rew : body;
     use_len = rew ? strlen(rew) : body_len;
     /* Angle `<ccc/….cch>` inside the splice is not pass_inc (those lines
@@ -17462,20 +17469,31 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
         if (strcmp(g_lowered_local_headers[i].source_path, abs_src) == 0) {
             if (g_lowered_local_headers[i].in_progress)
                 return g_lowered_local_headers[i].lowered_path;
-            if (access(g_lowered_local_headers[i].lowered_path, F_OK) == 0)
+            /* A failed extract used to leave this slot + a leftover `.h`
+             * from an older source. The next rewrite (stage1 after type
+             * pass) then reused that file and the compile succeeded. */
+            if (g_lowered_local_headers[i].ready)
                 return g_lowered_local_headers[i].lowered_path;
         }
     }
     /* A give-up used to leave the include pointing at the `.cch`, so the
      * later parse reported something unrelated.  Fail at this include. */
+#define CC__LOWER_ABANDON_SLOT()                                               \
+    do {                                                                       \
+        if (lowered_idx != (size_t)-1) {                                       \
+            g_lowered_local_headers[lowered_idx].in_progress = 0;               \
+            g_lowered_local_headers[lowered_idx].ready = 0;                     \
+            if (g_lowered_local_headers[lowered_idx].lowered_path)              \
+                unlink(g_lowered_local_headers[lowered_idx].lowered_path);      \
+        }                                                                      \
+    } while (0)
 #define CC__LOWER_GIVE_UP(step)                                                \
     do {                                                                       \
         fprintf(stderr,                                                        \
                 "cc: error: cannot lower local header %s (%s: %s)\n",          \
                 abs_src, (step), strerror(errno));                             \
         g_local_cch_lower_failed = 1;                                          \
-        if (lowered_idx != (size_t)-1)                                         \
-            g_lowered_local_headers[lowered_idx].in_progress = 0;               \
+        CC__LOWER_ABANDON_SLOT();                                              \
         return NULL;                                                           \
     } while (0)
     if (cc__build_stable_lowered_header_path(abs_src, lowered_path, sizeof(lowered_path)) != 0)
@@ -17515,8 +17533,7 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     if (g_local_cch_lower_failed) {
         free(input);
         free(rewritten);
-        if (lowered_idx != (size_t)-1)
-            g_lowered_local_headers[lowered_idx].in_progress = 0;
+        CC__LOWER_ABANDON_SLOT();
         return NULL;
     }
     {
@@ -17536,7 +17553,7 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
         if (g_local_cch_lower_failed) {
             free(input);
             free(rewritten);
-            g_lowered_local_headers[lowered_idx].in_progress = 0;
+            CC__LOWER_ABANDON_SLOT();
             return NULL;
         }
     }
@@ -17607,7 +17624,7 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
             free(lowered);
             free(input);
             free(rewritten);
-            g_lowered_local_headers[lowered_idx].in_progress = 0;
+            CC__LOWER_ABANDON_SLOT();
             return NULL;
         }
         if (pulled) {
@@ -17622,7 +17639,9 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     if (cc__write_file_text(lowered_path, lowered, strlen(lowered)) != 0)
         CC__LOWER_GIVE_UP("write");
 #undef CC__LOWER_GIVE_UP
+#undef CC__LOWER_ABANDON_SLOT
     g_lowered_local_headers[lowered_idx].in_progress = 0;
+    g_lowered_local_headers[lowered_idx].ready = 1;
     free(input);
     free(rewritten);
     free(lowered);
@@ -17763,16 +17782,20 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                             /* Owner TU including its face. Extract when
                              * `.store(` rewrote to host-C (pigz_cc
                              * cut_short). Unresolved UFCS splices. */
-                            int saved_fail = g_local_cch_lower_failed;
                             const char* lp = cc__lower_local_cch_header(child_abs);
                             char* hb = NULL;
                             size_t hn = 0;
-                            if (!lp || g_local_cch_lower_failed) {
-                                g_local_cch_lower_failed = saved_fail;
+                            if (g_local_cch_lower_failed) {
+                                /* Nested unowned impl (or other loud
+                                 * extract fail): do not splice instead. */
+                                free(out);
+                                return NULL;
+                            }
+                            if (!lp)
                                 splice_child = 1;
-                            } else if (cc__read_file_text(lp, &hb, &hn) == 0 &&
-                                       hb &&
-                                       cc__lowered_header_needs_ufcs_splice(hb, hn))
+                            else if (cc__read_file_text(lp, &hb, &hn) == 0 &&
+                                     hb &&
+                                     cc__lowered_header_needs_ufcs_splice(hb, hn))
                                 splice_child = 1;
                             free(hb);
                         }
@@ -17804,22 +17827,23 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                          * TU redefines file-scope `static` data. */
                         splice_child = 0;
                     }
-                    if (splice_child) {
-                        if (!g_rewrite_allow_impl_splice) {
-                            /* Lowering an interface `.h`: impl leaves with an
-                             * owner `.ccs` extract; otherwise fail loud. */
-                            if (!cc__cch_has_owner_ccs(child_abs)) {
-                                fprintf(stderr,
-                                        "cc: error: cannot extract impl-grade "
-                                        "header %s (move bodies to an owner "
-                                        ".ccs, or #include it from that "
-                                        ".ccs)\n",
-                                        child_abs);
-                                g_local_cch_lower_failed = 1;
-                                free(out);
-                                return NULL;
-                            }
-                        } else if (cc__impl_cch_was_spliced(child_abs)) {
+                    if (splice_child && !cc__cch_has_owner_ccs(child_abs)) {
+                        /* Unowned impl-grade: fail at this include, whether
+                         * extracting a parent `.h` or splicing an owner
+                         * face. A nested leaf must not compile just because
+                         * an umbrella was included. */
+                        fprintf(stderr,
+                                "cc: error: cannot extract impl-grade "
+                                "header %s (move bodies to an owner "
+                                ".ccs, or #include it from that "
+                                ".ccs)\n",
+                                child_abs);
+                        g_local_cch_lower_failed = 1;
+                        free(out);
+                        return NULL;
+                    }
+                    if (splice_child && g_rewrite_allow_impl_splice) {
+                        if (cc__impl_cch_was_spliced(child_abs)) {
                             /* Repeat include: the header's guard would make this
                              * inert; keep a blank line so following lines in this
                              * file keep their physical numbers. */
@@ -17827,20 +17851,22 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                             changed = 1;
                             i = (line_end < n) ? line_end + 1 : line_end;
                             continue;
-                        } else {
-                            size_t line_no = 1;
-                            for (size_t k = 0; k < i; k++)
-                                if (src[k] == '\n') line_no++;
-                            if (cc__splice_impl_cch_into(&out, &out_len, &out_cap,
-                                                         child_abs, current_path,
-                                                         line_no, 0) == 0) {
-                                changed = 1;
-                                i = (line_end < n) ? line_end + 1 : line_end;
-                                continue;
-                            }
                         }
-                        /* Unreadable header, or sibling extract while lowering
-                         * an umbrella: fall through to the interface path. */
+                        size_t line_no = 1;
+                        for (size_t k = 0; k < i; k++)
+                            if (src[k] == '\n') line_no++;
+                        if (cc__splice_impl_cch_into(&out, &out_len, &out_cap,
+                                                     child_abs, current_path,
+                                                     line_no, 0) == 0) {
+                            changed = 1;
+                            i = (line_end < n) ? line_end + 1 : line_end;
+                            continue;
+                        }
+                        if (g_local_cch_lower_failed) {
+                            free(out);
+                            return NULL;
+                        }
+                        /* Unreadable header: fall through to the interface path. */
                     }
                 }
                 {
