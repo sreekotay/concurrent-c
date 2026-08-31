@@ -8630,6 +8630,82 @@ static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* i
     return 1;
 }
 
+/* Type-position PascalCase / `_make` after builtins + registered factories.
+ * `Pair::[int, double]` → `Pair_int_double` (no factory required). */
+static int cc__try_rewrite_pascal_generic(const char* src, size_t n,
+                                          char** out, size_t* out_len,
+                                          size_t* out_cap, size_t* io_i,
+                                          size_t* io_last_emit) {
+    size_t i = *io_i;
+    size_t id_e, gen_lb = 0, br_close, fl, params_len, mi;
+    const char* params;
+    char gname[128];
+    char orig_args[8][128];
+    char mang_args[8][128];
+    char mangled[256];
+    char pascal[128];
+    int nargs = 0;
+    int is_make = 0;
+    if (!(i == 0 || !cc_is_ident_char(src[i - 1]))) return 0;
+    if (i >= n || !cc_is_ident_start(src[i])) return 0;
+    id_e = i;
+    while (id_e < n && cc_is_ident_char(src[id_e])) id_e++;
+    if (!cc__ident_generic_bracket(src, n, id_e, &gen_lb)) return 0;
+    fl = id_e - i;
+    if (!fl || fl >= sizeof(gname)) return 0;
+    memcpy(gname, src + i, fl);
+    gname[fl] = 0;
+    if (strcmp(gname, "Vec") == 0 || strcmp(gname, "CCVec") == 0 ||
+        strcmp(gname, "Map") == 0 || strcmp(gname, "ArrayMap") == 0 ||
+        strcmp(gname, "vec_new") == 0 || strcmp(gname, "cc_vec_new") == 0 ||
+        strcmp(gname, "vec_from") == 0 || strcmp(gname, "cc_vec_from") == 0 ||
+        strcmp(gname, "map_new") == 0 || strcmp(gname, "cc_map_new") == 0 ||
+        strcmp(gname, "array_map_new") == 0 ||
+        strcmp(gname, "array_map_new_count") == 0)
+        return 0;
+    if (fl > 5 && strcmp(gname + fl - 5, "_make") == 0) {
+        size_t k, po = 0;
+        int up = 1;
+        is_make = 1;
+        for (k = 0; k + 5 < fl && po + 1 < sizeof(pascal); k++) {
+            char c = gname[k];
+            if (c == '_') {
+                up = 1;
+                continue;
+            }
+            if (up && c >= 'a' && c <= 'z')
+                c = (char)(c - 'a' + 'A');
+            pascal[po++] = c;
+            up = 0;
+        }
+        pascal[po] = 0;
+        if (pascal[0]) snprintf(gname, sizeof(gname), "%s", pascal);
+    } else if (!(gname[0] >= 'A' && gname[0] <= 'Z'))
+        return 0;
+    if (!cc__find_matching_bracket(src, n, gen_lb, &br_close)) return 0;
+    params = src + gen_lb + 1;
+    params_len = br_close - gen_lb - 1;
+    nargs = cc__split_type_args(params, params_len, orig_args, mang_args, 8);
+    if (nargs <= 0) return 0;
+    snprintf(mangled, sizeof(mangled), "%s", gname);
+    for (mi = 0; mi < (size_t)nargs; mi++) {
+        size_t used = strlen(mangled);
+        if (used + 1 + strlen(mang_args[mi]) >= sizeof(mangled)) return 0;
+        mangled[used] = '_';
+        memcpy(mangled + used + 1, mang_args[mi], strlen(mang_args[mi]) + 1);
+    }
+    if (is_make) {
+        size_t used = strlen(mangled);
+        if (used + 6 >= sizeof(mangled)) return 0;
+        memcpy(mangled + used, "_make", 6);
+    }
+    cc_sb_append(out, out_len, out_cap, src + *io_last_emit, i - *io_last_emit);
+    cc_sb_append(out, out_len, out_cap, mangled, strlen(mangled));
+    *io_last_emit = br_close + 1;
+    *io_i = br_close + 1;
+    return 1;
+}
+
 static int cc__source_has_generic_container_syntax(const char* src, size_t n) {
     if (!src || n < 4) return 0;
     /* Match only syntax the rewriter actually lowers — not mangled names like
@@ -8798,7 +8874,7 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
         }
 
         /* Look for canonical CCVec::[ / cc_vec_new::[ and Map forms. */
-        int is_vec_type = 0, is_map_type = 0, is_vec_new = 0, is_map_new = 0;
+        int is_vec_type = 0, is_map_type = 0, is_vec_new = 0, is_vec_from = 0, is_map_new = 0;
         int use_bracket = 0;
         size_t blb = 0;
         const char* retired_vec_syntax = NULL;
@@ -8825,6 +8901,10 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 is_vec_new = 1; kw_len = 10; use_bracket = 1;
             } else if (cc__builtin_generic_at(src, n, i, "vec_new", &blb)) {
                 is_vec_new = 1; kw_len = 7; use_bracket = 1;
+            } else if (cc__builtin_generic_at(src, n, i, "cc_vec_from", &blb)) {
+                is_vec_from = 1; kw_len = 11; use_bracket = 1;
+            } else if (cc__builtin_generic_at(src, n, i, "vec_from", &blb)) {
+                is_vec_from = 1; kw_len = 8; use_bracket = 1;
             } else if (i + 11 <= n && memcmp(src + i, "cc_vec_new<", 11) == 0) {
                 retired_vec_syntax = "cc_vec_new<T>";
             } else if (i + 8 <= n && memcmp(src + i, "vec_new<", 8) == 0) {
@@ -8853,7 +8933,7 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
             return NULL;
         }
         
-        if (is_vec_type || is_map_type || is_vec_new || is_map_new) {
+        if (is_vec_type || is_map_type || is_vec_new || is_vec_from || is_map_new) {
             size_t delim_start = use_bracket ? blb : kw_start + kw_len;
             size_t delim_end = 0;
             int found = 0;
@@ -8888,7 +8968,7 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
             char orig_key_type[128] = {0};
             char orig_val_type[128] = {0};
             
-            if (is_vec_type || is_vec_new) {
+            if (is_vec_type || is_vec_new || is_vec_from) {
                 /* Single type parameter: capture code-only text, since it
                  * feeds both the macro operand and the mangled name. */
                 cc__copy_type_arg_text(params, 0, params_len,
@@ -9031,7 +9111,13 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                     size_t paren_end = 0;
                     if (cc_find_matching_paren(src, n, j, &paren_end)) {
                         /* Emit macro call with type param first, then original args */
-                        if (is_vec_new) {
+                        if (is_vec_from) {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "CCVec_");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, elem_type);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "_from(");
+                            cc_sb_append(&out, &out_len, &out_cap, src + j + 1, paren_end - j - 1);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                        } else if (is_vec_new) {
                             cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_VEC_INIT(");
                             cc_sb_append_cstr(&out, &out_len, &out_cap, elem_type);
                             cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
@@ -9070,7 +9156,11 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                     }
                 }
                 /* Fallback if no paren found */
-                if (is_vec_new) {
+                if (is_vec_from) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "CCVec_");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, elem_type);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "_from(NULL, 0, 0)");
+                } else if (is_vec_new) {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_VEC_INIT(");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, elem_type);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, ", NULL)");
@@ -9098,6 +9188,12 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
             
             i = delim_end + 1;
             continue;
+        }
+
+        {
+            int pr = cc__try_rewrite_pascal_generic(src, n, &out, &out_len,
+                                                    &out_cap, &i, &last_emit);
+            if (pr) continue;
         }
 
         /* Python extraction members carry their element types as leading
@@ -13641,6 +13737,246 @@ const char* cc_ufcs_family_members_for(const char* base) {
     hdr = cc_ufcs_family_header_for(base);
     if (!hdr) return "";
     return cc_family_header_members(hdr);
+}
+
+static int cc__th_pat_matches(const char* pat, size_t pn, const char* ty) {
+    if (!pat || !ty || pn == 0) return 0;
+    if (pat[pn - 1] == '*') {
+        size_t pre = pn - 1;
+        return strlen(ty) >= pre && memcmp(ty, pat, pre) == 0;
+    }
+    return strlen(ty) == pn && memcmp(ty, pat, pn) == 0;
+}
+
+static int cc__hook_is_suffix(const char* hook) {
+    return hook && hook[0] == '_' && hook[1] && hook[1] != '_';
+}
+
+static void cc__expand_destroy_hook(const char* ty, const char* hook,
+                                   char* out, size_t cap) {
+    char base[160];
+    size_t n;
+    if (!out || !cap) return;
+    out[0] = 0;
+    if (!hook || !hook[0]) return;
+    if (!cc__hook_is_suffix(hook) || !ty || !ty[0]) {
+        snprintf(out, cap, "%s", hook);
+        return;
+    }
+    snprintf(base, sizeof(base), "%s", ty);
+    n = strlen(base);
+    while (n && (base[n - 1] == ' ' || base[n - 1] == '\t' || base[n - 1] == '*'))
+        base[--n] = 0;
+    snprintf(out, cap, "%s%s", base, hook);
+}
+
+static size_t cc__th_skip_ws(const char* s, size_t n, size_t p) {
+    while (p < n && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r'))
+        p++;
+    return p;
+}
+
+static int cc__th_parse_cstr(const char* s, size_t n, size_t* io,
+                             char* out, size_t cap) {
+    size_t p = *io;
+    size_t o = 0;
+    if (p >= n || s[p] != '"') return 0;
+    p++;
+    while (p < n && s[p] != '"') {
+        if (s[p] == '\\' && p + 1 < n) p++;
+        if (o + 1 < cap) out[o++] = s[p];
+        p++;
+    }
+    if (p >= n || s[p] != '"') return 0;
+    if (out && cap) out[o] = 0;
+    *io = p + 1;
+    return 1;
+}
+
+/* `.destroy = cc_type_destroy_call("_x")` / hooks / bare ident in a
+ * `@typehooks` body. Writes the hook spelling (suffix or full name). */
+static int cc__th_body_destroy_hook(const char* s, size_t lo, size_t hi,
+                                   char* out, size_t cap) {
+    size_t p = lo;
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    while (p + 8 < hi) {
+        size_t q;
+        if (s[p] != '.' || memcmp(s + p + 1, "destroy", 7) != 0 ||
+            (p + 8 < hi && cc_is_ident_char(s[p + 8]))) {
+            p++;
+            continue;
+        }
+        q = cc__th_skip_ws(s, hi, p + 8);
+        if (q >= hi || s[q] != '=') {
+            p++;
+            continue;
+        }
+        q = cc__th_skip_ws(s, hi, q + 1);
+        if (q < hi && cc_is_ident_start(s[q])) {
+            size_t id_e = q;
+            char name[80];
+            size_t nl;
+            while (id_e < hi && cc_is_ident_char(s[id_e])) id_e++;
+            nl = id_e - q;
+            if (nl >= sizeof(name)) return 0;
+            memcpy(name, s + q, nl);
+            name[nl] = 0;
+            q = cc__th_skip_ws(s, hi, id_e);
+            if (q < hi && s[q] == '(') {
+                q = cc__th_skip_ws(s, hi, q + 1);
+                if (strcmp(name, "cc_type_destroy_call") == 0 ||
+                    strcmp(name, "cc_type_pre_destroy_call") == 0) {
+                    if (strcmp(name, "cc_type_pre_destroy_call") == 0)
+                        return 0;
+                    return cc__th_parse_cstr(s, hi, &q, out, cap);
+                }
+                if (strcmp(name, "cc_type_destroy_hooks") == 0) {
+                    char pre[80];
+                    if (!cc__th_parse_cstr(s, hi, &q, pre, sizeof(pre)))
+                        return 0;
+                    q = cc__th_skip_ws(s, hi, q);
+                    if (q < hi && s[q] == ',') q++;
+                    q = cc__th_skip_ws(s, hi, q);
+                    return cc__th_parse_cstr(s, hi, &q, out, cap);
+                }
+                return 0;
+            }
+            snprintf(out, cap, "%s", name);
+            return 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+int cc_ufcs_family_destroy_callee(const char* type_name, char* out, size_t cap) {
+    const char* suf;
+    char* text = NULL;
+    size_t n = 0;
+    size_t i;
+    char hook[128];
+    char best[128];
+    size_t best_score = 0;
+    int hit = 0;
+    if (!type_name || !type_name[0] || !out || !cap) return 0;
+    out[0] = 0;
+    suf = cc_ufcs_family_header_for(type_name);
+    if (!suf) suf = cc_ufcs_family_header_suffix(type_name);
+    if (!suf) return 0;
+    if (cc__family_header_open(suf, &text, &n) != 0 || !text) return 0;
+    hook[0] = 0;
+    best[0] = 0;
+    i = 0;
+    while (i + 10 < n) {
+        size_t p, sub_l, sub_r, brace_l, brace_r, depth;
+        int ls = 0, lc = 0, st = 0, ch = 0;
+        if (!(text[i] == '@' && memcmp(text + i, "@typehooks", 10) == 0 &&
+              (i + 10 >= n || !cc_is_ident_char(text[i + 10])))) {
+            i++;
+            continue;
+        }
+        p = cc__th_skip_ws(text, n, i + 10);
+        if (!(p + 2 < n && text[p] == 'o' && text[p + 1] == 'n' &&
+              !cc_is_ident_char(text[p + 2]))) {
+            i++;
+            continue;
+        }
+        p = cc__th_skip_ws(text, n, p + 2);
+        sub_l = p;
+        while (p < n && cc_is_ident_char(text[p])) p++;
+        if (p < n && text[p] == '*') p++;
+        sub_r = p;
+        p = cc__th_skip_ws(text, n, p);
+        if (p >= n || text[p] != '{' || sub_r <= sub_l) {
+            i++;
+            continue;
+        }
+        if (!cc__th_pat_matches(text + sub_l, sub_r - sub_l, type_name)) {
+            i = p + 1;
+            continue;
+        }
+        brace_l = p;
+        brace_r = 0;
+        depth = 0;
+        for (; p < n; p++) {
+            char d = text[p];
+            char d2 = (p + 1 < n) ? text[p + 1] : 0;
+            if (lc) {
+                if (d == '\n') lc = 0;
+                continue;
+            }
+            if (ls) {
+                if (d == '*' && d2 == '/') {
+                    ls = 0;
+                    p++;
+                }
+                continue;
+            }
+            if (st) {
+                if (d == '\\' && d2) {
+                    p++;
+                    continue;
+                }
+                if (d == '"') st = 0;
+                continue;
+            }
+            if (ch) {
+                if (d == '\\' && d2) {
+                    p++;
+                    continue;
+                }
+                if (d == '\'') ch = 0;
+                continue;
+            }
+            if (d == '/' && d2 == '/') {
+                lc = 1;
+                p++;
+                continue;
+            }
+            if (d == '/' && d2 == '*') {
+                ls = 1;
+                p++;
+                continue;
+            }
+            if (d == '"') {
+                st = 1;
+                continue;
+            }
+            if (d == '\'') {
+                ch = 1;
+                continue;
+            }
+            if (d == '{') {
+                depth++;
+                continue;
+            }
+            if (d == '}') {
+                if (depth == 0) break;
+                depth--;
+                if (depth == 0) {
+                    brace_r = p;
+                    break;
+                }
+            }
+        }
+        if (brace_r > brace_l &&
+            cc__th_body_destroy_hook(text, brace_l + 1, brace_r, hook,
+                                     sizeof(hook)) &&
+            hook[0]) {
+            size_t score = sub_r - sub_l;
+            if (!hit || score > best_score) {
+                memcpy(best, hook, sizeof(best));
+                best_score = score;
+                hit = 1;
+            }
+        }
+        i = (brace_r > brace_l) ? brace_r + 1 : p + 1;
+    }
+    free(text);
+    if (!hit) return 0;
+    cc__expand_destroy_hook(type_name, best, out, cap);
+    return out[0] != 0;
 }
 
 

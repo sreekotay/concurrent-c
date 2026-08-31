@@ -1,0 +1,49 @@
+/* Harvested face must carry __cc_drop for destroy-hooked arms. */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+CCCommand emit = cc_command(a, @slice("./cc/bin/ccc"));
+emit.arg("--no-cache");
+emit.arg("--emit-c-only");
+emit.arg("tests/quote_cch_variant_drop_smoke.ccs");
+emit.arg("-o");
+emit.arg("out/quote_cch_variant_drop_smoke.c");
+emit.inherit_stdio();
+int rc = emit.status() !>;
+if (rc != 0) {
+    "emit guest failed".println() !>;
+    return 1;
+}
+
+CCCommand grep_drop = cc_command(a, @slice("grep"));
+grep_drop.arg("-q");
+grep_drop.arg("QuoteDropCell__cc_drop");
+grep_drop.arg("out/include/tests/quote_cch_variant_drop.h");
+rc = grep_drop.status() !>;
+if (rc != 0) {
+    "extracted .h missing QuoteDropCell__cc_drop".println() !>;
+    return 1;
+}
+
+CCCommand grep_arm = cc_command(a, @slice("grep"));
+grep_arm.arg("-q");
+grep_arm.arg("QuoteDropVecArm__cc_drop");
+grep_arm.arg("out/include/tests/quote_cch_variant_drop.h");
+rc = grep_arm.status() !>;
+if (rc != 0) {
+    "extracted .h missing QuoteDropVecArm__cc_drop".println() !>;
+    return 1;
+}
+
+CCCommand grep_sigil = cc_command(a, @slice("grep"));
+grep_sigil.arg("-q");
+grep_sigil.arg("-F");
+grep_sigil.arg("Vec::[");
+grep_sigil.arg("out/include/tests/quote_cch_variant_drop.h");
+rc = grep_sigil.status() !>;
+if (rc == 0) {
+    "extracted .h still has Vec::[".println() !>;
+    return 1;
+}
+
+"ok".println() !>;
+return 0;

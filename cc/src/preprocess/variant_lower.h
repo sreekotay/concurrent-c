@@ -5,7 +5,8 @@
  * Phase-1 canonical text passes:
  *   - cc_rewrite_variant_decls_text: `@variant Name { arm: Type; ... };` at
  *     file scope → `typedef enum {...} NameKind; typedef struct Name {...} Name;`
- *     (+ a Name__cc_drop helper when any arm type has a registered destructor),
+ *     (+ a Name__cc_drop helper when any arm type has a registered destructor
+ *     or a family `@typehooks` destroy hook),
  *     and populates the per-TU variant registry.  Also commits schema `one of`
  *     types queued via cc_variant_schema_pending_add (same surface rules).
  *   - cc_rewrite_variant_uses_text: the trapped consumption surface —

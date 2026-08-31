@@ -10,9 +10,10 @@
  *         typedef struct Name { NameKind kind; union { Ta a; Tb b; } u; } Name;
  *     plus, when any arm type has a registered destructor
  *     (`@comptime cc_type_register(...)` hooks, resolved through the ambient
- *     unwrap-destroy symbol table), a `Name__cc_drop(Name*)` helper that
- *     drops the ACTIVE arm.  The pass populates a per-thread registry the
- *     uses pass consults.
+ *     unwrap-destroy symbol table, or family `@typehooks` when that table is
+ *     empty — quoted extract omits prelude), a `Name__cc_drop(Name*)` helper
+ *     that drops the ACTIVE arm.  The pass populates a per-thread registry
+ *     the uses pass consults.
  *
  *  2. cc_rewrite_variant_uses_text — the trapped consumption dialect (§4-§6):
  *     - designated-init construction with tag auto-fill (decl init +
@@ -57,6 +58,7 @@
 #include <string.h>
 
 #include "comptime/symbols.h"
+#include "preprocess/preprocess.h"
 #include "util/text.h"
 #include "util/text_scan.h"
 #include "visitor/pass_unwrap_destroy.h"
@@ -1305,6 +1307,51 @@ static char* cc__va_emit_packed_lowering(CCVaDef* def, const char* src,
     return cc__va_pad_repl(src, at, after + 1, out, &ol, &oc);
 }
 
+static int cc__va_hook_is_suffix(const char* hook) {
+    return hook && hook[0] == '_' && hook[1] && hook[1] != '_';
+}
+
+static void cc__va_expand_destroy(const char* key, const char* hook,
+                                 char* out, size_t cap) {
+    char base[160];
+    size_t n;
+    if (!out || !cap) return;
+    out[0] = 0;
+    if (!hook || !hook[0]) return;
+    if (!cc__va_hook_is_suffix(hook) || !key || !key[0]) {
+        snprintf(out, cap, "%s", hook);
+        return;
+    }
+    snprintf(base, sizeof(base), "%s", key);
+    n = strlen(base);
+    while (n && (base[n - 1] == ' ' || base[n - 1] == '\t' || base[n - 1] == '*'))
+        base[--n] = 0;
+    snprintf(out, cap, "%s%s", base, hook);
+}
+
+static void cc__va_bind_arm_destroy(CCVaArm* arm, CCVaDef* def, CCSymbolTable* sym) {
+    char key[160];
+    char family[160];
+    size_t o = 0;
+    const char* callee = NULL;
+    if (!arm || !def) return;
+    for (const char* t = arm->type; *t && o + 1 < sizeof(key); t++)
+        if (!isspace((unsigned char)*t)) key[o++] = *t;
+    key[o] = '\0';
+    if (!key[0]) return;
+    if (sym && cc_symbols_lookup_type_destroy_call(sym, key, &callee) == 0 && callee) {
+        cc__va_expand_destroy(key, callee, arm->destroy, sizeof(arm->destroy));
+        arm->destroy_takes_value = (o > 0 && key[o - 1] == '*');
+        def->has_drop = 1;
+        return;
+    }
+    if (cc_ufcs_family_destroy_callee(key, family, sizeof(family))) {
+        snprintf(arm->destroy, sizeof(arm->destroy), "%s", family);
+        arm->destroy_takes_value = (o > 0 && key[o - 1] == '*');
+        def->has_drop = 1;
+    }
+}
+
 char* cc_rewrite_variant_decls_text(const char* src, size_t n, const char* input_path) {
     g_va_n = 0;           /* per-TU registry: reset unconditionally */
     g_va_tmp_id = 0;
@@ -1526,20 +1573,10 @@ char* cc_rewrite_variant_decls_text(const char* src, size_t n, const char* input
                                vname, arm->name, vname, vname, vname);
                     arm_errs++;
                 } else {
-                    /* Destructor lookup via registered type hooks. */
-                    if (!arm->is_void && sym) {
-                        char key[160];
-                        size_t o = 0;
-                        for (const char* t = arm->type; *t && o + 1 < sizeof(key); t++)
-                            if (!isspace((unsigned char)*t)) key[o++] = *t;
-                        key[o] = '\0';
-                        const char* callee = NULL;
-                        if (cc_symbols_lookup_type_destroy_call(sym, key, &callee) == 0 && callee) {
-                            snprintf(arm->destroy, sizeof(arm->destroy), "%s", callee);
-                            arm->destroy_takes_value = (o > 0 && key[o - 1] == '*');
-                            def->has_drop = 1;
-                        }
-                    }
+                    /* Destructor: ambient symbols, else family @typehooks
+                     * (quoted extract has no prelude / empty symbol table). */
+                    if (!arm->is_void)
+                        cc__va_bind_arm_destroy(arm, def, sym);
                     def->narms++;
                 }
             }

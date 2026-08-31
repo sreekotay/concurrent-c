@@ -1,0 +1,25 @@
+/* Header type-position Name::[args]: proto, params, vec_from, user Pair. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "quote_cch_generic_face.cch"
+
+int main(void) {
+    char buf[4];
+    QuotePair::[int, int] p;
+    Vec::[char] v;
+    buf[0] = 'x';
+    buf[1] = 'y';
+    p = quote_pair_make::[int, int](3, 4);
+    p = quote_pair_id(p);
+    if (p.head() != 3 || p.tail() != 4) {
+        printf("pair\n");
+        return 1;
+    }
+    v = quote_vec_wrap(buf, 2, 4);
+    if (v.len() != 2) {
+        printf("vec\n");
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

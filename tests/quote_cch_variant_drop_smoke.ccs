@@ -1,0 +1,27 @@
+/* Header @variant with destroy-hooked arms: extract writes Name__cc_drop
+ * into the .h; the guest assign / scope-exit path calls that helper. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "quote_cch_variant_drop.cch"
+
+int main(void) {
+    char buf[4];
+    buf[0] = 'a';
+    buf[1] = 'b';
+    {
+        QuoteDropCell c = { .text = vec_from::[char](buf, 2, 4) };
+        if (c.kind != QuoteDropCell_text) {
+            printf("cell kind\n");
+            return 1;
+        }
+    }
+    {
+        QuoteDropVecArm v = { .text = vec_from::[char](buf, 2, 4) };
+        if (v.kind != QuoteDropVecArm_text) {
+            printf("vecarm kind\n");
+            return 1;
+        }
+    }
+    printf("ok\n");
+    return 0;
+}

@@ -225,6 +225,11 @@ const char* cc_ufcs_family_members_for(const char* base);
 int cc_ufcs_family_accepts(const char* base, const char* method);
 int cc_ufcs_family_accepts_in_tu(const char* base, const char* method,
                                  const char* src, size_t n);
+/* Family `@typehooks` `.destroy` for `type_name` (glob subject, suffix
+ * `_destroy` expanded on the instance). 1 and writes the callee when the
+ * family header registers a destroy hook — extract faces that omit
+ * prelude still emit `Name__cc_drop`. */
+int cc_ufcs_family_destroy_callee(const char* type_name, char* out, size_t cap);
 /* True when `base` is a generic-factory instance emitted this TU (member
  * set derived from the fragment; see cc_emit_plan_note_generic_instance). */
 int cc_ufcs_generic_instance_known(const char* base);

@@ -1,0 +1,19 @@
+#ifndef TESTS_QUOTE_CCH_VARIANT_DROP_CCH
+#define TESTS_QUOTE_CCH_VARIANT_DROP_CCH
+
+#include <stddef.h>
+
+/* Extract must emit __cc_drop even though this face does not include
+ * prelude (CCVec_* typehooks live in std/vec.cch). */
+
+@variant QuoteDropCell {
+    text: CCVec_char;
+    flag: void;
+};
+
+@variant QuoteDropVecArm {
+    text: Vec::[char];
+    num: int;
+};
+
+#endif

@@ -2,6 +2,7 @@
  * Requires pp_ast_core.cch. */
 #pragma once
 
+#include "pp_ast_core.h"
 static AstNode* parse_stmt(Parser* p);
 static AstNode* parse_block(Parser* p);
 static AstNode* parse_ufcs_expr_range(Parser* p, int i0, int i1);
@@ -4421,11 +4422,11 @@ static AstNode* parse_call_args(Parser* p) {
     return n;
 }
 
-#include "pp_ast_parse_unwrap.cch"
-#include "pp_ast_parse_spawn.cch"
+#include "pp_ast_parse_unwrap.h"
+#include "pp_ast_parse_spawn.h"
 
 static AstNode* parse_stmt(Parser* p);
-#include "pp_ast_parse_err.cch"
+#include "pp_ast_parse_err.h"
 
 /* Defined in pp_ast_parse_ext.cch (included after this file). */
 static AstNode* parse_typedef_int(Parser* p);

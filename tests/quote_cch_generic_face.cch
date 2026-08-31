@@ -1,0 +1,28 @@
+#ifndef TESTS_QUOTE_CCH_GENERIC_FACE_CCH
+#define TESTS_QUOTE_CCH_GENERIC_FACE_CCH
+
+#include <stddef.h>
+
+CC_GENERIC_FACTORY(QuotePair, 2) {
+    return @emit(`
+        typedef struct { ${arg(0)} first; ${arg(1)} second; } ${mangled};
+        static inline ${mangled} ${mangled}_make(${arg(0)} a, ${arg(1)} b) {
+            ${mangled} r; r.first = a; r.second = b; return r;
+        }
+        static inline ${arg(0)} ${mangled}_head(${mangled}* self) { return self->first; }
+        static inline ${arg(1)} ${mangled}_tail(${mangled}* self) { return self->second; }`, arena);
+}
+
+static QuotePair::[int, int] quote_pair_id(QuotePair::[int, int] p);
+
+static Vec::[char] quote_vec_wrap(char *p, size_t n, size_t cap);
+
+static QuotePair::[int, int] quote_pair_id(QuotePair::[int, int] p) {
+    return p;
+}
+
+static Vec::[char] quote_vec_wrap(char *p, size_t n, size_t cap) {
+    return vec_from::[char](p, n, cap);
+}
+
+#endif

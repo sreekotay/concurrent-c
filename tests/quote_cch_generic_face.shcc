@@ -1,0 +1,49 @@
+/* Extracted face must spell Name::[args] to host C (no leftover ::). */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+CCCommand emit = cc_command(a, @slice("./cc/bin/ccc"));
+emit.arg("--no-cache");
+emit.arg("--emit-c-only");
+emit.arg("tests/quote_cch_generic_face_smoke.ccs");
+emit.arg("-o");
+emit.arg("out/quote_cch_generic_face_smoke.c");
+emit.inherit_stdio();
+int rc = emit.status() !>;
+if (rc != 0) {
+    "emit guest failed".println() !>;
+    return 1;
+}
+
+CCCommand grep_col = cc_command(a, @slice("grep"));
+grep_col.arg("-q");
+grep_col.arg("-F");
+grep_col.arg("::[");
+grep_col.arg("out/include/tests/quote_cch_generic_face.h");
+rc = grep_col.status() !>;
+if (rc == 0) {
+    "extracted .h still has ::[".println() !>;
+    return 1;
+}
+
+CCCommand grep_pair = cc_command(a, @slice("grep"));
+grep_pair.arg("-q");
+grep_pair.arg("QuotePair_int_int");
+grep_pair.arg("out/include/tests/quote_cch_generic_face.h");
+rc = grep_pair.status() !>;
+if (rc != 0) {
+    "extracted .h missing QuotePair_int_int".println() !>;
+    return 1;
+}
+
+CCCommand grep_vec = cc_command(a, @slice("grep"));
+grep_vec.arg("-q");
+grep_vec.arg("CCVec_char");
+grep_vec.arg("out/include/tests/quote_cch_generic_face.h");
+rc = grep_vec.status() !>;
+if (rc != 0) {
+    "extracted .h missing CCVec_char".println() !>;
+    return 1;
+}
+
+"ok".println() !>;
+return 0;
