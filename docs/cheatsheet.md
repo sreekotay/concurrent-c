@@ -106,6 +106,11 @@ CCNursery n = cc_nursery_create() !> @destroy;
 
 Tasks do not inherit `@errhandler` — re-bind inside each spawn body.
 
+**Anti-pattern:** `T!>(MyError)` instead of `T!>(CCError)` does not force
+callers to handle failures — a matching `@errhandler` or blind
+`!>(e) return cc_err(e);` is enough. See
+[language concepts §2](language-concepts.md#2-errors-map-to-a-value-or-to-control-flow).
+
 ### C lowered API
 
 `T!>(E)` is sugar over a tagged union. The lowerer emits a concrete type and
@@ -371,15 +376,19 @@ Use either `@destroy` / `wait` or `on_last` + `abandon`, not both. Spec §8.1.5.
 
 ## Walk (`for in`)
 
-The walk is not “a nicer `s[i]`.” The compiler pays `i < live .len`, then
-the `.access` load. Point access is `s.at(i) !>`. Ordinary sites may read
-`.ptr` / `.len` / `.id`; they may not store fields. A C string is
+The walk is not “a nicer `s[i]`.” `.len` / `.access` are naked (`size_t`,
+`T`) — the hook is not Result. The walk re-reads `.len` every iteration,
+then `.access`. Copy walk / enumerate / range are void. Mut walk is
+`void !>(CCError)`: a write re-reads `.len`, and `i >= len` is that
+error (`"for-in write"`) — not a skip. Zip is also Result (unequal
+lengths). Point access is `s.at(i) !>`. Ordinary sites may read `.ptr` /
+`.len` / `.id`; they may not store fields. A C string is
 `s.to_c(scratch) !>` (`char[:0]`) or `s.to_cstr(scratch) !>` (`char *`).
 Users do not write `s.access(i)`.
 
 ```c
 for (v in s) { … }            // walk (v is a copy; v = / &v are errors)
-for (&v in s) { … } !>;       // mut walk: v = … is set into the loop !>
+for (&v in s) { … } !>;       // mut walk: v = … is .access store; write bound is Result
 for (i, v in s) { … }         // enumerate; i is size_t
 for (a, b in s, t) { … } !>;  // zip; void !>(CCError); unequal → @errhandler
 for (&a, b in s, t) { … } !>; // zip mut: a = … stores through s's peel

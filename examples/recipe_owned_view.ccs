@@ -5,8 +5,11 @@
  * Memory is owned or it is a view. Lifetime is a field. A constructor
  * assumes the object is dead — reopen is destroy then construct, not
  * memset. Fallible work is T!>(E); a pre-mutation fault leaves the
- * object unchanged. A @typeview is the use-site face: measure may
- * len / span, not replace.
+ * object unchanged.
+ *
+ * @typeview (docs/typehooks-typeviews.md §2): named `Measure` mode —
+ * `measure_len(@typeview(Measure) Doc*)` may call `len` / `span`, not
+ * `replace`. Unnamed allow-lists and `^` deny live in the tutorial.
  *
  * In a real program these hooks and faces live next to the type
  * (document.cch). Frame copies take a scratch arena the callee owns
@@ -79,6 +82,7 @@ static char[:] !>(CCError) doc_copy_into(Doc* d, CCArena a) {
     .destroy = Doc_destroy,
 };
 
+/* Named mode at the use site — measure_len may read, not mutate. */
 @typeview Measure on Doc {
     r: len, span;
 };

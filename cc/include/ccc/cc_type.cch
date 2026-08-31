@@ -311,15 +311,15 @@ typedef struct {
 } CCTypeDynamicHook;
 
 /* Extent: ordinary sites may read x.len / x.len(); they may not store it.
- * kind is "field" (named member) or "call" (callee(recv)). */
+ * Returns size_t — naked, not Result. kind is "field" or "call". */
 typedef struct {
     const char* kind;
     const char* name;
 } CCTypeLenHook;
 
-/* Compiler-internal walk load after i < live len. Users do not write
- * x.access(i). kind is "load" (named pointer/array field) or "call"
- * (callee(&recv)[i] — SSO-safe string data). */
+/* Compiler-internal walk slot after i < live len. Users do not write
+ * x.access(i). Returns T / the slot — naked, not Result. kind is "load"
+ * (named pointer/array field) or "call" (callee(&recv)[i] — SSO string). */
 typedef struct {
     const char* kind;
     const char* name;

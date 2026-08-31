@@ -486,8 +486,10 @@ static inline const uint8_t* cc_slice_bytes(CCSlice* s) {
     return (const uint8_t*)s->ptr;
 }
 
-/* Store one element at `idx` (element count, not bytes). Used by mut
- * for-in (`for (&v in s)`). 0 on success; -1 if the view or index is bad. */
+/* Store one element at `idx` (element count, not bytes). Point store,
+ * not the walk: mut for-in writes through the `.access` peel after the
+ * compiler re-checks live `.len`. 0 on success; -1 if the view or index
+ * is bad. */
 static inline int cc_slice_store_at(CCSlice *s, size_t idx, size_t elsz,
                                     const void *src) {
     size_t k;

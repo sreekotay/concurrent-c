@@ -1,0 +1,20 @@
+/* sock is not in Encode on Fam_* — denied at the named view. */
+#include <ccc/std/prelude.cch>
+
+typedef struct {
+    int sock;
+    int out_len;
+} Fam_alpha;
+
+@typeview Encode on Fam_* {
+    r: out_len, write;
+};
+
+static int use_enc(@typeview(Encode) Fam_alpha* enc) {
+    return enc->sock;
+}
+
+int main(void) {
+    Fam_alpha a = {0};
+    return use_enc(&a);
+}

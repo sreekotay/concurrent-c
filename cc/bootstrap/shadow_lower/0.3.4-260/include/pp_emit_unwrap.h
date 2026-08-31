@@ -2,6 +2,8 @@
  * Included from pp_emit_stmt.cch. */
 #pragma once
 
+#include "pp_emit_core.h"
+#include "pp_ast_core.h"
 static int shadow_emit_try_call(CEmit* out, ShadowCtx* ctx, const char* indent,
                                 const char* call, const char* site,
                                 const char* bind, int discard_ok) {

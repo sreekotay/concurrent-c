@@ -180,11 +180,15 @@ Grep `port_gone` in your sources to find (or write) the callee.
 ### Extent — `.len` / `.access`
 
 A type with both arms is a **for-in subject**. Ordinary sites may read
-`x.len`; they may not store it. `.access` is the compiler-internal load
-after `i < live len`. Users write the walk, not `s.access(i)`. Point
-access stays `s.at(i) !>` / `s.set(i, v) !>`. Slice fields (`.ptr` /
-`.len` / `.id`) are readable and read-only. `CCString` hides the SSO
-union; use `as_slice()` / `cstr()`.
+`x.len`; they may not store it. `.len` / `.access` are naked (`size_t`,
+`T`) — the hook is not Result. `.access` is the compiler-internal slot
+after `i < live len`. Users write the walk, not `s.access(i)`. Copy
+walk / enumerate / range are void. Mut walk is `void !>(CCError)`: a
+write re-reads `.len`, and `i >= len` is that error (`"for-in write"`),
+not a skip. Zip is also Result (unequal lengths). Point access stays
+`s.at(i) !>` / `s.set(i, v) !>`. Slice fields (`.ptr` / `.len` / `.id`)
+are readable and read-only. `CCString` hides the SSO union; use
+`as_slice()` / `cstr()`.
 
 `CCSlice` / `CCSlice_*`, `CCVec_*`, `CCString`, and `T[n]` already
 register. `T*` is not an extent.
@@ -216,7 +220,7 @@ int main(void) {
 | Form | Meaning |
 |------|---------|
 | `for (v in s)` | walk (copy; `v =` / `&v` ill-formed) |
-| `for (&v in s) { … } !>;` | mut walk; `v =` is `.set` |
+| `for (&v in s) { … } !>;` | mut walk; `v =` is `.access` store; write bound is Result |
 | `for (i, v in s)` | enumerate; `i` is `size_t` |
 | `for (a, b in s, t) { … } !>;` | zip; `void !>(CCError)`; unequal → `@errhandler` |
 | `for (&a, b in s, t) { … } !>;` | zip mut; `a =` stores through `s` |
@@ -225,6 +229,9 @@ int main(void) {
 C `for (;;)` is unchanged. `@parallel for (i in lo..hi)` is the concurrent
 cousin. A user type registers the same two arms (`tests/typehooks_len_access_smoke.ccs`).
 
+Mut walk and zip hard-wire `CCError` — part of why fallible APIs should not
+use a custom `E` to “force handling” ([language concepts §2](language-concepts.md#2-errors-map-to-a-value-or-to-control-flow)).
+
 ---
 
 ## 2. `@typeview` — faces and allow-lists
@@ -232,6 +239,62 @@ cousin. A user type registers the same two arms (`tests/typehooks_len_access_smo
 A view is a **type-system lens on the same object**. No second allocation,
 no vtable, erased in the lowered C. Narrowing is implicit (like `T*` →
 `const T*`). Widening never happens — there is no cast back to the full type.
+
+Two mechanisms share one `@typeview` block:
+
+| Mechanism | Groups | Job |
+|-----------|--------|-----|
+| **Is-a faces** | `as:` | UFCS (and related) retry through an embedded field — outer *is* inner for method lookup |
+| **Allow-lists** | `r:`, `w:`, `rw:` | Which field loads, stores, and UFCS calls ordinary sites may use |
+
+Groups are comma-separated patterns ended by `;` (or `}`). A bare comma-list
+with no label is sugar for a single `r:` group.
+
+### Pattern language
+
+Patterns appear in two places — **subject** (after `on`) and **allow-list**
+entries (`r:` / `w:` / `rw:`).
+
+| Pattern | Where | Meaning |
+|---------|-------|---------|
+| `Box` | subject | exact type |
+| `Fam_*` | subject | type-family glob — every struct whose name matches; **narrowest pattern wins**; equal score → ill-formed |
+| `len`, `write` | allow-list | exact field or UFCS method name |
+| `out_*`, `get_*` | allow-list | **prefix** glob — name starts with the literal before `*` |
+| `*_len`, `*live` | allow-list | **suffix** glob — name ends with the literal after `*` |
+| `*` | allow-list | every field and UFCS method on the type |
+| `^secret`, `^p` | allow-list | **deny** — subtract this name after the allow-set is built; a matching deny wins |
+| `r:^p` alone | allow-list | deny-only group implies `*` first — same as `r: *, ^p` |
+
+**Subject globs** install the same view body on every matching type (`Fam_*`,
+`CCSlice_*`, `CCBox_*`). Types that match but lack an `as:` field are
+skipped. Unnamed (`@typeview on Fam_*`) is the ordinary surface of each
+match. Named (`@typeview Encode on Fam_*`) is one mode for the family —
+write `@typeview(Encode) Fam_alpha*` (mangles to `Fam_alpha_Restrict_Encode`).
+A single `typedef` alias cannot name a family glob.
+
+**Allow-list globs** match **field and method names alike** (`out_*` covers
+`out_len` and any `out_foo()` UFCS). Membership is checked at the use site;
+a glob that matches nothing at the declaration is a silent no-op (same as an
+exact name written before the method exists). **`as:` uses exact field names
+only** — no `^`, no name globs.
+
+**Use kinds:**
+
+| Group | Ordinary sites may |
+|-------|-------------------|
+| `r:` | load a field or **call** a UFCS method |
+| `w:` | store through a field (`=`, `+=`, `++`, …) |
+| `rw:` | both |
+| `as:` | faces — not an allow-list |
+
+Methods belong under `r:` (or `rw:`). A method listed only under `w:` cannot
+be called. Construction stays open: designated init may name any field even
+when an unnamed allow-list hides it later.
+
+**Trusted bodies:** a function whose **first** parameter is the full type (or
+pointer) sees every field in its body — how `cc_slice_*` mutates `.ptr`
+while `@typeview on CCSlice { r: *; }` forbids field stores at ordinary sites.
 
 ### Faces (`as:`) — “this wrapper *is* its embed”
 
@@ -303,9 +366,9 @@ no UFCS method 'gone' for receiver type 'Temp'
 
 A trailing-`*` subject installs the same face on every match that has the
 field; types that match the glob but lack the field are skipped.
-Narrowest view wins, same score rule as `@typehooks`. Named modes on a
-glob (`@typeview Encode on Fam_*`) are ill-formed — globs are unnamed
-only:
+Narrowest view wins, same score rule as `@typehooks`. Named modes use
+the same glob (`@typeview Encode on Fam_*`); the parameter names a
+concrete match:
 
 ```c
 #!ccc ccs
@@ -344,28 +407,59 @@ int main(void) {
 ok
 -->
 
+```c
+#!ccc ccs
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    int sock;
+    int out_len;
+} Fam_alpha;
+
+typedef struct {
+    int sock;
+    int out_len;
+} Fam_beta;
+
+@typeview Encode on Fam_* {
+    r: out_len, write;
+};
+
+static int fam_alpha_write(Fam_alpha* c, const char* data) {
+    (void)c;
+    (void)data;
+    return 1;
+}
+
+static int fam_beta_write(Fam_beta* c, const char* data) {
+    (void)c;
+    (void)data;
+    return 2;
+}
+
+static int use_a(@typeview(Encode) Fam_alpha* enc) {
+    return enc->write("x") + enc->out_len;
+}
+
+static int use_b(@typeview(Encode) Fam_beta* enc) {
+    return enc->write("y");
+}
+
+int main(void) {
+    Fam_alpha a = { .out_len = 3 };
+    Fam_beta b = {0};
+    printf("%d %d\n", use_a(&a), use_b(&b));
+    return 0;
+}
+```
+<!-- smoke-stdout
+4 2
+-->
+
 ### Allow-lists — fewer names on the same object
 
-Groups are comma-separated patterns ended by `;`:
-
-| Group | Meaning |
-|-------|---------|
-| `r:` | Load a field or **call** a UFCS method |
-| `w:` | Store through a field (`=`, `+=`, `++`, …) |
-| `rw:` | Both |
-| `as:` | Faces (not an allow-list) |
-
-Methods belong under `r:` (or `rw:`). A method listed only under `w:` cannot
-be called. `r:` / `w:` / `rw:` patterns match **field and method names
-alike**, and may be trailing-`*` name globs (`out_*`, `get_*`), leading-`*`
-suffix globs (`*_len`, `*live`), or `^pat` (subtract after the allow-set).
-A group of only denies implies `*` (`r:^p` is every name except `p`).
-Membership is on this type, not a type-family subject. That is why a declaration-time
-existence check cannot decide: `get_*` may match a method written later in
-the file. A glob that matches nothing is a silent no-op at the declaration;
-an exact name that does not exist is the same. Either way the miss shows up
-at a use the list does not cover. `as:` stays exact field names — no name
-glob. Construction stays open: designated init may name any field.
+#### Exact names and prefix globs
 
 ```c
 #!ccc ccs
@@ -398,10 +492,46 @@ int main(void) {
 n=3 len=3 hits=0
 -->
 
-**Unnamed** — the allow-list *is* the ordinary surface of the type. No
-parallel view name. A function whose **first** parameter is that type (or
-pointer) sees the full object, so method bodies can still write private
-fields:
+`out_*` is a **prefix** glob: `out_len` matches; `secret` does not. The same
+rule covers UFCS names (`get_*` → `b.get_n()`).
+
+#### Suffix globs
+
+Leading `*` matches the **tail** of a name (`*_len` → `out_len`, `array_len`):
+
+```c
+#!ccc ccs
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct Conn {
+    int sock;
+    int out_len;
+} Conn;
+
+@typeview Encode on Conn {
+    r: *_len;
+};
+
+static int use_enc(@typeview(Encode) Conn* enc) {
+    return enc->out_len;
+}
+
+int main(void) {
+    Conn c = { .out_len = 3 };
+    printf("%d\n", use_enc(&c));
+    return 0;
+}
+```
+<!-- smoke-stdout
+3
+-->
+
+#### Open surface and deny (`^`)
+
+Bare `*` opens every name; `^field` subtracts one entry. A group of **only**
+denies implies `*` first (`r:^secret` ≡ `r: *, ^secret`). Deny wins when both
+match.
 
 ```c
 #!ccc ccs
@@ -414,7 +544,7 @@ typedef struct Box {
 } Box;
 
 @typeview on Box {
-    r: len, bump;
+    r: ^secret;
 };
 
 static int box_bump(Box* b) {   /* first arg → full Box */
@@ -424,7 +554,7 @@ static int box_bump(Box* b) {   /* first arg → full Box */
 
 int main(void) {
     Box b = { .secret = 7, .len = 0 };  /* init may name .secret */
-    int n = b.bump();                   /* OK */
+    int n = b.bump();                   /* OK — bump not denied */
     /* b.secret; */                     /* ill-formed at ordinary use */
     printf("n=%d len=%d\n", n, b.len);
     return 0;
@@ -434,8 +564,16 @@ int main(void) {
 n=1 len=1
 -->
 
-**Named** — several faces of one owned type. Callers write the mode on the
-parameter; a `Base*` narrows implicitly; a view pointer never widens back:
+Stdlib uses the same shape on open families — slice field stores forbidden,
+methods stay open; box host field hidden, methods stay open:
+
+```c
+@typeview on CCSlice   { r: *; };              /* reads OK; s.len = … ill-formed */
+@typeview on CCBox_*   { as: p;  r: ^p; };     /* b.host() OK; b.p ill-formed */
+@typeview on CCString  { r: ^data, ^inline_buf, ^_inline_word; };
+```
+
+#### Named modes — several faces of one type
 
 ```c
 #!ccc ccs
@@ -573,9 +711,11 @@ form independently.
   take `@typeview(Mode) T*`.
 - Custom `x.method` → `cc_foo_<method>` family? `.ufcs` on `@typehooks`.
 - Dest-init mint (`CCBox::[H] b = &x`, `char[:] v = str`)? `.cast` on the dest type (implicit|explicit + requested type).
-- Extent / walk (`x.len`, `for (v in s)` / `for (i, v in s)` / `for (a, b in s, t) { … } !>;`)? `.len` + `.access` on `@typehooks`. Users do not write `s.access(i)`. Slice fields are read-only. `CCString` hides `.data` (SSO).
+- Extent / walk (`x.len`, `for (v in s)` / `for (&v in s) { … } !>;` / `for (i, v in s)` / `for (a, b in s, t) { … } !>;`)? `.len` + `.access` on `@typehooks` (naked). Mut walk's write bound is the Result. Users do not write `s.access(i)`. Slice fields are read-only. `CCString` hides `.data` (SSO).
 - Hide a field on a family (`CCBox_*` `.p`, `CCString` `.data`)? Unnamed `@typeview` + `r:^name`
-  (open except that name). User UFCS on the instance stays.
+  (deny-only ≡ `r: *, ^name`). Prefix/suffix globs (`out_*`, `*_len`) for subsets. User UFCS stays.
+- Type-family subject? `@typeview on Pat_* { … }` (unnamed surface) or
+  `@typeview Mode on Pat_* { … }` plus `@typeview(Mode) Concrete*`. `as:` skips types without the field.
 - Unresolved dynamic names (`obj.greet`)? `.ufcs_sink`, last resort.
 
 ---
@@ -585,7 +725,7 @@ form independently.
 - [Cheatsheet](cheatsheet.md) — destroy / UFCS one-liners
 - [Language concepts](language-concepts.md) — `@destroy` and ordinary UFCS
 - [Getting started](getting-started.md) — first program; [faces at the use site](getting-started.md#locality-owned-or-view)
-- [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs) — Measure may `len` / `span`, not `replace`
+- [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs) — named `Measure` mode at the parameter; tutorial has globs and `^` deny
 - Spec: [type hooks](../spec/draft_typehooks.md),
   [type views](../spec/draft_facets.md),
   [type-owned registration](../spec/concurrent-c-spec-complete.md)
@@ -596,4 +736,5 @@ form independently.
   `tests/typehooks_len_access_smoke.ccs`,
   `tests/for_in_*_smoke.ccs`,
   `tests/typeview_as_ufcs_smoke.ccs`,
-  `tests/typeview_glob_as_smoke.ccs`
+  `tests/typeview_glob_as_smoke.ccs`,
+  `tests/typeview_glob_named_smoke.ccs`

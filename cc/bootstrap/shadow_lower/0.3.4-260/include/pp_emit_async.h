@@ -5,6 +5,10 @@
 /* Replace whole-word param names with `__f->__p_<name>` (fiber-hot shape).
  * Skip `.name` / `->name` — Result bang lowers to `__r.u.value`, and a param
  * named `value` must not become `__r.u.__f->__p_value`. */
+#include "pp_emit_stmt.h"
+#include "pp_ast_core.h"
+#include "pp_emit_core.h"
+#include "pp_tape.h"
 static void shadow_async_rewrite_params(char* text, size_t cap, ShadowParam* ps,
                                         int np) {
     char out[8192];

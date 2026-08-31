@@ -15,7 +15,7 @@
  *    3. fill / copy / copy_overlap
  *    4. clone_into — keep on another arena
  *    5. walk / enumerate / zip / range
- *    6. mut walk
+ *    6. mut walk (`.access` store; write bound is Result — `!>`)
  *    7. view (`sub`) — hoisted header; mut writes the receiver
  *    8. vec: live walk vs dest-init view
  *    9. peel — `.ptr` when a T* must leave
@@ -73,7 +73,8 @@ int main(void) {
         sum += (int)i;
     println(@string(`walk n=${n} sum=${sum}`, @scratch)) !>;
 
-    /* 6. Mut walk — binder is not an object; `ch =` is set into this !>. */
+    /* 6. Mut walk — binder is not an object; `ch =` is .access store.
+     *    Write re-reads .len; i >= len is CC_ERR_INVALID_ARG. */
     char[:] word = {'c', 'c'};
     for (&ch in word) {
         if (ch >= 'a' && ch <= 'z')

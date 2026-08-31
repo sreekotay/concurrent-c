@@ -5722,8 +5722,8 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 - `.ufcs_sink` is the last-resort unresolved-method hook. Unresolved methods lower to `callee(&recv, "method", N, arg_wrap(a1), …)`. The sink is destination-aware: wherever a typed destination is visible the callee composes as `<callee>_<mangled dest>` when that function is declared (compose-then-verify; plain callee otherwise). `.ufcs_dynamic` and `.ufcs_dynamic2` are accepted spellings of `.ufcs_sink`.
 - `.niche` donates a bit pattern a valid instance never exhibits, so a `@variant(packed)` arm of this type can carry the discriminant (`spec/draft_variants.md`, packed layout). `cc_type_niche(size, align, offset, width, sentinel)` is the helper.
 - `.cast` is dest-convert. The handler receives the source type, the requested dest type, and `kind` (`implicit` or `explicit`) and returns a callee name, the UFCS pass tag, or empty (hard reject). Implicit sites (decl-init and `=`) ask the dest type only. Dest may insert a wrap; dest must not insert a peel. A slice dest may wrap `CCString` / `CCString*` as `as_slice`, or `CCVec_T` / `CCVec_T*` as `Name_as_slice` when the dest element is `T` (`int[:]` ← `Vec::[int]`; `char[:]` ← `Vec::[char]`). `v.as_slice()` remains the explicit spelling. For-in does not dest-cast: `for (x in v)` walks the live vec.
-- `.len` names the extent (`cc_type_len_field` or `cc_type_len_call`). Ordinary sites may read `x.len` / `x.len()`; they may not store it. `T[n]` `.len` is the constexpr bound `n`.
-- `.access` is the compiler-internal walk load (`cc_type_access_load` or `cc_type_access_call`) after `i < live len`. Users write `for (v in s)` / `for (i, v in s)` / `for (a, b in s, t) { … } !>;`, not `s.access(i)`. Point access stays `at` / `set` (Result). `CCSlice` / `CCSlice_*`, `CCVec_*`, and `CCString` register both arms.
+- `.len` names the extent (`cc_type_len_field` or `cc_type_len_call`). It returns `size_t` — naked, not Result. The hook checks the minimum (usually nothing). Ordinary sites may read `x.len` / `x.len()`; they may not store it. `T[n]` `.len` is the constexpr bound `n`.
+- `.access` is the compiler-internal walk slot (`cc_type_access_load` or `cc_type_access_call`). It returns `T` / the slot — naked, not Result. Users write `for (v in s)` / `for (&v in s) { … } !>;` / `for (i, v in s)` / `for (a, b in s, t) { … } !>;`, not `s.access(i)`. The walk re-reads `.len` every iteration, then calls `.access`. A write through `.access` re-reads `.len`; `i >= len` is `CC_ERR_INVALID_ARG` (`"for-in write"`) — that check is the mut walk's Result, not a skip and not `set()`. Point access stays `at` / `set` (Result). A user type joins for-in by registering both arms. `CCSlice` / `CCSlice_*`, `CCVec_*`, and `CCString` register both.
 - `.create` may be registered either as fixed callee strings (`cc_type_create_call(...)`, `cc_type_create_overloads(...)`) or as a callable hook via `cc_type_create_hook(...)`.
 - Recognized hook fields are `.create`, `.destroy`, `.ufcs`, `.cast`, `.len`, `.access`, `.ufcs_sink`, and `.niche`.
 
@@ -6128,8 +6128,8 @@ typed instances hop those names through `as: base`), `CCVec_*` (`.len` / `data`)
 
 ```c
 for (i in lo..hi) { ... }   /* sequential range; hi < lo is empty */
-for (v in s) { ... }        /* walk: i < s.len, then the .access load */
-for (&v in s) { ... } !>;   /* mut walk: v = … is s.set(i, …) */
+for (v in s) { ... }        /* walk: re-read s.len, then .access load */
+for (&v in s) { ... } !>;   /* mut walk: v = … is .access store; write bound is Result */
 for (&v in s.sub(lo, hi)) { ... } !>;
 for (i, v in s) { ... }     /* enumerate: i is size_t, v is the load */
 for (i, &v in s) { ... } !>;
@@ -6150,21 +6150,23 @@ the extent is peel of the subject (`s.ptr`). The range binder `i` in
 `for (i in lo..hi)` and the enumerate index are ordinary `size_t`
 locals. `for (&i in lo..hi)` is ill-formed.
 
-**Mut walk:** `for (&v in s) { … } !>;` (or `for (i, &v in s)`, or zip
-`for (&a, b in s, t)`). The construct is `void !>(CCError)` (zip already
-is). Consume with `!>;` or `!>(e) { … }`. A bare mut-walk is an
-unconsumed Result. `v = x` / `v += x` / `++v` store through the same
-`.access` peel as the load (`s.ptr[i]`, `v.data[i]`, `cc_string_data`,
-`a[i]`) and unroll into that `!>`. The subject is any for-in extent.
-Field assignment (`v.x =`) is ill-formed — assign the binder, or peel
-the subject.
+**Mut walk:** `for (&v in s) { … } !>;` (or `for (i, &v in s)`). Type:
+`void !>(CCError)`. The `.access` hook stays naked. `v = x` / `v += x`
+/ `++v` store through the same `.access` peel as the load (`s.ptr[i]`,
+`v.data[i]`, `cc_string_data`, `a[i]`). Before that store the walk
+re-reads `.len`; `i >= len` is `CC_ERR_INVALID_ARG` (`"for-in write"`).
+That check is the error — not a skip, not `set()`. Consume with `!>;`
+(enclosing `@errhandler`) or `!>(e) { … }`. A bare mut walk is an
+unconsumed Result. Field assignment (`v.x =`) is ill-formed — assign
+the binder, or peel the subject. Zip with `&` binders is still zip
+(Result); the zip length check is the other zip error.
 
 **Zip:** the construct is a statement of type `void !>(CCError)`. Consume
 with `!>;` (enclosing `@errhandler`) or `!>(e) { … }`. A bare zip is an
 unconsumed Result. If the two live lengths differ, the Result is
 `CC_ERR_INVALID_ARG`. There is no silent min. The walk runs only when
 the lengths are equal. Copy walk, enumerate, and range are not Results:
-a trailing `!>` is ill-formed.
+a trailing `!>` is ill-formed. Mut walk and zip are Results.
 
 A minted `T[:]` from `Vec` / heap `CCString` (`as_slice` / dest-init)
 captures a generation on `id`. Owner realloc that **moves** the backing
@@ -6648,8 +6650,8 @@ Traditional C `for(;;)` is unchanged. For-in subjects and zip failure
 are §9.2.4.
 
 ```c
-for (v in s) { ... }            // walk: i < s.len, then .access
-for (&v in s) { ... } !>;       // mut walk: v = … → set
+for (v in s) { ... }            // walk: re-read .len, then .access
+for (&v in s) { ... } !>;       // mut walk: write bound is Result
 for (i, v in s) { ... }         // enumerate
 for (a, b in s, t) { ... } !>;  // zip; void !>(CCError)
 for (i in lo..hi) { ... }       // sequential range
@@ -6658,10 +6660,17 @@ for (i in lo..hi) { ... }       // sequential range
 **Walk lowering:**
 
 ```c
-/* for (v in s) { BODY } */
+/* for (v in s) { BODY } — condition re-reads .len every iteration */
 for (size_t __i = 0; __i < /* s.len hook */; ++__i) {
     T v = /* .access load after the bound */;
     BODY
+}
+
+/* for (&v in s) { v = x; } !>; — write re-reads .len; i >= len is the Result */
+for (size_t __i = 0; __i < /* s.len hook */; ++__i) {
+    T v = /* .access load */;
+    /* v = x → if (__i >= s.len) { e = "for-in write"; goto @errhandler } */
+    /*         else access-store */
 }
 
 /* for (i, v in s) { BODY } — i is size_t */

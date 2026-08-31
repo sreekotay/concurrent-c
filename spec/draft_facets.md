@@ -132,10 +132,13 @@ typedef struct Conn {
   through the field (`t.field.name`) is unaffected by the mode.
 - The subject `Base` may be a trailing-`*` type-family glob (`CCSlice_*`),
   same match/score rule as allow-list patterns and `@typehooks`.
-  Narrowest matching view wins; equal-score conflicts are ill-formed. Named
-  modes (`@typeview Mode on Pat*`) are ill-formed — globs are unnamed only.
-  Face fields must exist on each concrete match; types that match the glob
-  but lack the field are skipped.
+  Narrowest matching view wins; equal-score conflicts are ill-formed.
+  Unnamed `@typeview on Pat*` is the ordinary surface of each match.
+  Named `@typeview Mode on Pat*` is one mode for the family; the use site
+  is `@typeview(Mode) Concrete*` and mangles to `Concrete_Restrict_Mode`.
+  A `typedef` alias of a glob subject is ill-formed (one name cannot denote
+  the family). Face fields must exist on each concrete match; types that
+  match the glob but lack the field are skipped.
 - Method names belong under `r:` (or `rw:`); a method under `w:` alone cannot
   be called (there is no store form for methods).
 - Prefer methods over fields. A method whose first parameter is `Base*` sees

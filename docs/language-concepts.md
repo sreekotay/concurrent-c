@@ -65,6 +65,17 @@ int b = read() !>;
 int c = read() !>(e) { /* local */ @err(e); };
 ```
 
+**Anti-pattern — custom `E` to force handling:** Do not pick `T!>(MyError)`
+instead of `T!>(CCError)` hoping bare `!>` becomes unusable without “real”
+handling. Bare `!>` routes to an in-scope `@errhandler` whose parameter type
+matches `E`; without one, the call is ill-formed — but
+`@errhandler(MyError e) cc_error_exit(e);` restores the same log-and-exit
+policy. Callers can still propagate with `!>(e) return cc_err(e);` without
+reading `e`. Prefer `T!>(CCError)` for cross-cutting fallible work. Use a
+domain error type when the **payload** matters at the boundary; register
+`@typeview on MyError { as: base; }` when CCError dispatch must participate
+(script default handler, `for (…, … in …) !>;`, shared `@errhandler`).
+
 ---
 
 ## 3. Methods are ordinary functions
@@ -143,12 +154,16 @@ store fields. Typed `T[:]` carries those fields on `.base`. The walk is `for (v 
 zip / range): the compiler pays `i < live .len` and loads. `v` is a copy —
 `v =` and `&v` are ill-formed. `for (&v in s) { … } !>;` is the mut walk:
 `v = x` stores through the same `.access` peel as the load (slice, vec,
-string, `T[n]`). The subject is
+string, `T[n]`). `.len` / `.access` return the naked bound and slot —
+the hook is not Result. The walk re-reads `.len` each iteration. A write
+re-reads `.len`; `i >= len` is `CC_ERR_INVALID_ARG` (`"for-in write"`).
+That check is the mut walk's Result, not a skip. The subject is
 a name, a field path (`t->words`), or a view (`line.sub(start, line.len)` —
 hoisted to a hidden local; mut walk stores through that header). Users do not write `s.access(i)`.
 Zip is a statement that can fail: `for (a, b in s, t) { … } !>;`.
-`for (&a, b in s, t)` stores through `a`'s subject. Copy walk,
-enumerate, and range are not Results: a trailing `!>` is ill-formed.
+`for (&a, b in s, t) { … } !>;` stores through `a`'s subject. Copy walk, enumerate,
+and range are not Results: a trailing `!>` is ill-formed. Mut walk and
+zip consume `!>`.
 A guess at a slot is `s.at(i) !>` / `s.set(i, v) !>`. Compare slices with
 `s.eq(other)` / `s.eq_cstr("x")`, not `memcmp`, in CC examples. Point through a
 local when you need C indexing: `char *p = s.ptr; p[i]`. `CCString`

@@ -1,0 +1,51 @@
+/* CCTemporalIndex: set / get / del / persist / sweep. Not wired to Redis. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/temporal_index.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct GoneEnv {
+    int n;
+    char last[32];
+} GoneEnv;
+
+static void on_gone(void* env, CCSlice key) {
+    GoneEnv* g = (GoneEnv*)env;
+    size_t n = key.len < 31 ? key.len : 31;
+    g->n++;
+    memcpy(g->last, key.ptr, n);
+    g->last[n] = 0;
+}
+
+int main(void) {
+    CCTemporalIndex ix;
+    GoneEnv gone;
+    CCSlice a = cc_slice_from_buffer("alpha", 5);
+    CCSlice b = cc_slice_from_buffer("beta", 4);
+    int64_t now = 1 * 60 * 1000; /* sit inside a 60s wheel */
+    memset(&gone, 0, sizeof gone);
+    if (!ix.init(2, now)) return 1;
+    if (ix.len_all() != 0) return 2;
+    if (!ix.set(0, now, a, now + 250)) return 3;
+    if (ix.get(0, a) != now + 250) return 4;
+    if (ix.get(1, a) != 0) return 5;
+    if (ix.len_at(0) != 1) return 6;
+    if (!ix.set(0, now, b, now + 800)) return 7;
+    if (ix.len_all() != 2) return 8;
+    /* persist */
+    if (!ix.set(0, now, b, 0)) return 9;
+    if (ix.get(0, b) != 0) return 10;
+    if (ix.len_at(0) != 1) return 11;
+    /* not yet due */
+    if (ix.sweep(0, now + 50, 64, on_gone, &gone) != 0 && gone.n) return 12;
+    if (ix.get(0, a) == 0) return 13;
+    /* due */
+    (void)ix.sweep(0, now + 400, 64, on_gone, &gone);
+    if (ix.get(0, a) != 0) return 14;
+    if (gone.n < 1) return 15;
+    if (strcmp(gone.last, "alpha") != 0) return 16;
+    if (ix.len_all() != 0) return 17;
+    ix.destroy();
+    printf("temporal_index_smoke ok\n");
+    return 0;
+}

@@ -1,0 +1,53 @@
+/* @typeview Encode on Fam_* — named mode on a type-family glob. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    int sock;
+    int out_len;
+} Fam_alpha;
+
+typedef struct {
+    int sock;
+    int out_len;
+} Fam_beta;
+
+@typeview Encode on Fam_* {
+    r: out_len, write;
+};
+
+static int fam_alpha_write(Fam_alpha* c, const char* data) {
+    (void)data;
+    if (c) c->out_len++;
+    return 1;
+}
+
+static int fam_beta_write(Fam_beta* c, const char* data) {
+    (void)data;
+    if (c) c->out_len++;
+    return 2;
+}
+
+static int use_enc_a(@typeview(Encode) Fam_alpha* enc) {
+    (void)enc->out_len;
+    return enc->write("x");
+}
+
+static int use_enc_b(@typeview(Encode) Fam_beta* enc) {
+    return enc->write("y");
+}
+
+int main(void) {
+    Fam_alpha a;
+    Fam_beta b;
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+    a.out_len = 3;
+    if (use_enc_a(&a) != 1) return 1;
+    if (a.out_len != 4) return 2;
+    if (use_enc_b(&b) != 2) return 3;
+    if (b.out_len != 1) return 4;
+    printf("ok\n");
+    return 0;
+}

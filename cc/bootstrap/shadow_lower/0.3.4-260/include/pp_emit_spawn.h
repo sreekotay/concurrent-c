@@ -3,6 +3,9 @@
 #pragma once
 
 /* Top-level arity of `args…)` (comma count + 1 when non-empty). */
+#include "pp_ast_core.h"
+#include "pp_emit_core.h"
+#include "pp_tape.h"
 static int shadow_create_arg_count(const char* args_with_close) {
     const char* p = args_with_close;
     int depth = 0, n = 0, any = 0;

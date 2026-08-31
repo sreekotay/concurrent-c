@@ -1,4 +1,4 @@
-/* for (&ch in s) { ch = … } !>; — cursor write is set into the loop handler. */
+/* for (&ch in s) { ch = … } !>; — cursor write is the .access store. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
