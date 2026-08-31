@@ -825,11 +825,14 @@ family at call position only.
 #define CC_VEC_DECL_ARENA(T, Name) /* declares the Name family */
 ```
 
-Each generated `Name` has `T *data` and `size_t len`, with capacity and arena
-metadata stored by the vector core. Its public family is:
+Each generated `Name` has `T *data`, `size_t len`, and `size_t cap` (element
+count; the high bit marks a `from` wrap). Arena-backed storage keeps arena,
+provenance, and grower generation in a prefix header before `data`. `from`
+does not plant that header. Its public family is:
 
 ```c
 Name Name_init(CCArena arena, size_t initial_cap);
+Name Name_from(T *ptr, size_t len, size_t cap);
 int Name_reserve(Name *vec, size_t need);
 int Name_push(Name *vec, T value);
 T *Name_push_ptr(Name *vec);
@@ -839,6 +842,7 @@ T *Name_get_ptr(Name *vec, size_t index);
 int Name_set(Name *vec, size_t index, T value);
 T *Name_at_grow(Name *vec, size_t index);
 void Name_clear(Name *vec);
+void Name_destroy(Name *vec);
 CCSlice Name_as_slice(const Name *vec);
 uint64_t Name_provenance(const Name *vec);
 size_t Name_len(const Name *vec);
@@ -855,7 +859,15 @@ null on allocation failure. Growth multiplies capacity by 1.6 (`(cap * 8) / 5`).
 A pointer or slice into a vector is invalidated by an operation that grows its
 storage.
 
-Vector UFCS maps these method names to the generated family with `&vec`.
+`Name_from` wraps caller storage. It does not allocate, grow, or release.
+`reserve` / `push` / `at_grow` that would exceed the given cap fail. `destroy`
+unbinds only.
+
+`Name_destroy` on an arena-backed vector releases the prefix allocation
+(`cc_arena_release`) and kills the grower generation. `clear` keeps capacity.
+
+Vector UFCS maps these method names to the generated family with `&vec`
+(`from`, `init`, `destroy`, `reserve`, `push`, `clear`, `len`, `cap`, …).
 `CCVec_char` and `CCVec_size_t` are predefined. `CC_VEC_FOREACH` iterates in
 increasing index order.
 

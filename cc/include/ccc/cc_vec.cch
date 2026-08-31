@@ -11,14 +11,19 @@
 typedef struct CCVec {
     void *data;
     size_t len;
+    size_t cap;   /* elements; high bit set ⇒ from-constructed */
 } CCVec;
 
+/* Prefix on arena-backed allocations only. Cap lives on the handle.
+ * from() never plants this — do not subtract from data when the from-bit
+ * is set. */
 typedef struct CCVecHeader {
     CCArena arena;
-    size_t cap;
     uint64_t provenance;
     uint32_t gen;
 } CCVecHeader;
+
+#define CC_VEC_FROM ((size_t)1 << (sizeof(size_t) * 8 - 1))
 
 /* The comptime executor's TCC sysinclude does not declare max_align_t; use the
  * conventional maximal alignment (16) there. Normal builds keep the portable
@@ -29,24 +34,34 @@ typedef struct CCVecHeader {
 #define CC__VEC_MAX_ALIGN _Alignof(max_align_t)
 #endif
 
+static inline int cc_vec_is_from(const CCVec *v) {
+    return v && (v->cap & CC_VEC_FROM) != 0;
+}
+
+static inline size_t cc_vec_cap(const CCVec *v) {
+    return v ? (v->cap & ~CC_VEC_FROM) : 0;
+}
+
 static inline size_t cc__vec_header_bytes(void) {
     size_t align = CC__VEC_MAX_ALIGN;
     return (sizeof(CCVecHeader) + align - 1) & ~(align - 1);
 }
 
 static inline CCVecHeader *cc__vec_header(const CCVec *v) {
-    if (!v || !v->data) return NULL;
+    if (!v || !v->data || cc_vec_is_from(v)) return NULL;
     return (CCVecHeader *)((uint8_t *)v->data - cc__vec_header_bytes());
-}
-
-static inline size_t cc_vec_cap(const CCVec *v) {
-    CCVecHeader *h = cc__vec_header(v);
-    return h ? h->cap : 0;
 }
 
 static inline CCArena cc_vec_arena(const CCVec *v) {
     CCVecHeader *h = cc__vec_header(v);
     return h ? h->arena : cc_arena_handle(NULL);
+}
+
+static inline void cc__vec_unbind(CCVec *v) {
+    if (!v) return;
+    v->data = NULL;
+    v->len = 0;
+    v->cap = 0;
 }
 
 #ifdef CC_PARSER_MODE
@@ -78,20 +93,31 @@ static inline int cc_vec_init(CCVec *v,
     (void)elem_align;
     (void)initial_cap;
     if (!v) return -1;
-    v->len = 0;
-    v->data = NULL;
+    cc__vec_unbind(v);
     return cc_arena_is_live(arena) ? 0 : -1;
+}
+
+static inline int cc_vec_from(CCVec *v, void *ptr, size_t len, size_t cap) {
+    if (!v) return -1;
+    cc__vec_unbind(v);
+    if (cap & CC_VEC_FROM) return -1;
+    if (len > cap) return -1;
+    if (len && !ptr) return -1;
+    if (cap && !ptr) return -1;
+    v->data = ptr;
+    v->len = len;
+    v->cap = cap | CC_VEC_FROM;
+    return 0;
 }
 
 static inline int cc_vec_reserve(CCVec *v,
                                  size_t elem_size,
                                  size_t elem_align,
                                  size_t need) {
-    (void)v;
     (void)elem_size;
     (void)elem_align;
-    (void)need;
-    return 0;
+    if (!v) return -1;
+    return need <= cc_vec_cap(v) ? 0 : -1;
 }
 
 static inline void *cc_vec_push_slot(CCVec *v,
@@ -123,6 +149,10 @@ static inline void cc_vec_clear(CCVec *v) {
     v->len = 0;
 }
 
+static inline void cc_vec_destroy(CCVec *v) {
+    cc__vec_unbind(v);
+}
+
 #else
 
 static inline uint64_t cc_vec_provenance(const CCVec *v) {
@@ -144,6 +174,8 @@ static inline void cc_vec_sync_len(CCVec *v) {
 static inline CCSlice cc_vec_as_slice(const CCVec *v) {
     CCVecHeader *h;
     if (!v || !v->data) return cc_slice_empty();
+    if (cc_vec_is_from(v))
+        return cc_slice_from_parts(v->data, v->len, CC_SLICE_ID_UNTRACKED);
     h = cc__vec_header(v);
     if (!h) return cc_slice_empty();
     return cc_slice_from_parts(v->data, v->len,
@@ -156,6 +188,19 @@ static inline void cc_vec_apply_slice(CCVec *v, CCSlice slice) {
     v->len = slice.len;
 }
 
+static inline int cc_vec_from(CCVec *v, void *ptr, size_t len, size_t cap) {
+    if (!v) return -1;
+    cc__vec_unbind(v);
+    if (cap & CC_VEC_FROM) return -1;
+    if (len > cap) return -1;
+    if (len && !ptr) return -1;
+    if (cap && !ptr) return -1;
+    v->data = ptr;
+    v->len = len;
+    v->cap = cap | CC_VEC_FROM;
+    return 0;
+}
+
 static inline int cc_vec_init(CCVec *v,
                               CCArena arena,
                               size_t elem_size,
@@ -165,8 +210,7 @@ static inline int cc_vec_init(CCVec *v,
     size_t total;
     size_t cap;
     if (!v) return -1;
-    v->len = 0;
-    v->data = NULL;
+    cc__vec_unbind(v);
     if (!cc_arena_is_live(arena)) return -1;
 
     cap = initial_cap > 0 ? initial_cap : 8;
@@ -176,10 +220,11 @@ static inline int cc_vec_init(CCVec *v,
     h = (CCVecHeader *)cc_arena_alloc(arena, total, CC__VEC_MAX_ALIGN);
     if (!h) return -1;
     h->arena = arena;
-    h->cap = cap;
     h->provenance = CC__ARENA_HOST(arena)->provenance;
     h->gen = cc_slice_gen_birth();
     v->data = (void *)((uint8_t *)h + cc__vec_header_bytes());
+    v->len = 0;
+    v->cap = cap;
     return 0;
 }
 
@@ -189,16 +234,19 @@ static inline int cc_vec_reserve(CCVec *v,
                                  size_t need) {
     CCVecHeader *h;
     CCArena arena;
+    size_t old_cap;
     size_t old_total;
     size_t new_total;
     if (!v) return -1;
+    old_cap = cc_vec_cap(v);
+    if (need <= old_cap) return 0;
+    if (cc_vec_is_from(v)) return -1;
     h = cc__vec_header(v);
     if (!h || !cc_arena_is_live(h->arena)) return -1;
-    if (need <= h->cap) return 0;
 
     arena = h->arena;
     (void)elem_align;
-    old_total = cc__vec_alloc_size(elem_size, h->cap);
+    old_total = cc__vec_alloc_size(elem_size, old_cap);
     new_total = cc__vec_alloc_size(elem_size, need);
     if (old_total == 0 || new_total == 0) return -1;
     {
@@ -208,7 +256,6 @@ static inline int cc_vec_reserve(CCVec *v,
                                             new_total, CC__VEC_MAX_ALIGN);
         if (!h) return -1;
         h->arena = arena;
-        h->cap = need;
         h->provenance = CC__ARENA_HOST(arena)->provenance;
         if (h != old_h) {
             cc_slice_gen_kill(old_gen);
@@ -217,6 +264,7 @@ static inline int cc_vec_reserve(CCVec *v,
             h->gen = old_gen;
         }
         v->data = (void *)((uint8_t *)h + cc__vec_header_bytes());
+        v->cap = need;
     }
     return 0;
 }
@@ -265,6 +313,22 @@ static inline void *cc_vec_at_grow(CCVec *v,
 static inline void cc_vec_clear(CCVec *v) {
     if (!v) return;
     v->len = 0;
+}
+
+static inline void cc_vec_destroy(CCVec *v) {
+    CCVecHeader *h;
+    if (!v) return;
+    if (cc_vec_is_from(v) || !v->data) {
+        cc__vec_unbind(v);
+        return;
+    }
+    h = cc__vec_header(v);
+    if (h) {
+        cc_slice_gen_kill(h->gen);
+        if (cc_arena_is_live(h->arena))
+            (void)cc_arena_release(h->arena, h);
+    }
+    cc__vec_unbind(v);
 }
 
 #endif

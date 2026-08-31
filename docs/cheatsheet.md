@@ -344,9 +344,10 @@ emitted `${mangled}_<member>` functions are the methods. `Vec`, `Map`,
 container path.
 
 ```c
-Vec::[int] v@(arena) @destroy;            // struct CCVec_int
+Vec::[int] v@(arena) @destroy;            // struct CCVec_int; destroy releases
 v.push(10);                              // dot: Vec is the struct
 vec_new::[int](arena);                   // same instance
+Vec::[char] w = vec_from::[char](p, n, c); // wrap; no grow / no release
 
 Map::[int, double] m = map_new::[int, double](arena);
 Map::[size_t, int] n = map_new::[size_t, int](arena);

@@ -1,0 +1,64 @@
+/* from() wraps caller storage: stay in cap, no grow, destroy does not
+ * release the backing. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    char buf[8];
+    char mark;
+    Vec::[char] v;
+    size_t i;
+
+    for (i = 0; i < 8; i++) buf[i] = (char)('a' + (int)i);
+    mark = buf[0];
+
+    v = vec_from::[char](buf, 2, 8);
+    if (!cc_vec_is_from((const CCVec *)&v)) {
+        fprintf(stderr, "FAIL: from-bit unset\n");
+        return 1;
+    }
+    if (v.len() != 2 || v.cap() != 8) {
+        fprintf(stderr, "FAIL: len/cap %zu %zu\n", v.len(), v.cap());
+        return 2;
+    }
+    if (v.push('x') != 0 || v.push('y') != 0) {
+        fprintf(stderr, "FAIL: in-cap push\n");
+        return 3;
+    }
+    if (v.len() != 4 || buf[2] != 'x' || buf[3] != 'y') {
+        fprintf(stderr, "FAIL: wrap write\n");
+        return 4;
+    }
+    /* Fill to cap, then grow must fail. */
+    while (v.len() < v.cap()) {
+        if (v.push('z') != 0) {
+            fprintf(stderr, "FAIL: fill push\n");
+            return 5;
+        }
+    }
+    if (v.push('!') == 0) {
+        fprintf(stderr, "FAIL: from grew past cap\n");
+        return 6;
+    }
+    if (v.reserve(16) == 0) {
+        fprintf(stderr, "FAIL: from reserve grew\n");
+        return 7;
+    }
+    if (v.reserve(4) != 0) {
+        fprintf(stderr, "FAIL: in-cap reserve\n");
+        return 8;
+    }
+
+    v.destroy();
+    if (v.len() != 0 || v.cap() != 0 || v.data() != NULL) {
+        fprintf(stderr, "FAIL: destroy did not unbind\n");
+        return 9;
+    }
+    if (buf[0] != mark) {
+        fprintf(stderr, "FAIL: destroy released wrap backing\n");
+        return 10;
+    }
+
+    printf("vec_from_smoke ok\n");
+    return 0;
+}

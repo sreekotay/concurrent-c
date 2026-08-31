@@ -78,6 +78,5 @@ void cc_dyn_vec_clear(cc_dyn_vec* v) {
 void cc_dyn_vec_free(cc_dyn_vec* v) {
     if (!v) return;
     cc_dyn_vec_clear(v);
-    v->base.data = NULL;
-    v->base.len  = 0;
+    cc_vec_destroy(&v->base);
 }

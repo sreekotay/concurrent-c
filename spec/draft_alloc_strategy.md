@@ -163,6 +163,7 @@ release path automatically:
 - Arena-backed maps release replaced table storage during resize.
 - Map destruction releases both table storage and the arena-backed map handle.
 - `clear` may retain capacity; destruction releases backing allocations.
+- `Vec` `from` wraps caller storage and does not grow or release.
 
 Container growth therefore keeps only the current backing allocation live when
 the arena's release accounting can reclaim the replaced allocation.

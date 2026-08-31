@@ -1,0 +1,41 @@
+/* Arena Vec destroy releases the prefix allocation. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    Vec::[int] v;
+    size_t before;
+    size_t mid;
+    size_t after;
+
+    if (!cc_arena_is_live(arena)) return 1;
+    before = arena.live();
+    v = cc_vec_new::[int](arena);
+    if (v.push(1) != 0 || v.push(2) != 0) {
+        fprintf(stderr, "FAIL: push\n");
+        return 2;
+    }
+    mid = arena.live();
+    if (mid <= before) {
+        fprintf(stderr, "FAIL: init did not allocate (%zu -> %zu)\n",
+                before, mid);
+        return 3;
+    }
+    v.destroy();
+    after = arena.live();
+    if (after != before) {
+        fprintf(stderr, "FAIL: destroy did not release (%zu -> %zu -> %zu)\n",
+                before, mid, after);
+        return 4;
+    }
+    if (v.len() != 0 || v.cap() != 0 || v.data() != NULL) {
+        fprintf(stderr, "FAIL: destroy did not unbind\n");
+        return 5;
+    }
+    v.destroy();
+
+    printf("vec_destroy_release_smoke ok\n");
+    arena.destroy();
+    return 0;
+}
