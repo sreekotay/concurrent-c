@@ -27,6 +27,7 @@ echo "== vendored headers + runtime (symlinks dereferenced)"
 rm -rf $PKG/vendor/include $PKG/vendor/runtime
 cp -rL out/include $PKG/vendor/include
 cp -rL out/runtime $PKG/vendor/runtime
+cp -rL cc/runtime/vendor $PKG/vendor/runtime/vendor
 # ccc/vendor (third_party headers behind symlinks) ships in cc/include,
 # not the lowered tree — the runtime includes it by <ccc/vendor/...>.
 cp -rL cc/include/ccc/vendor $PKG/vendor/include/ccc/vendor
