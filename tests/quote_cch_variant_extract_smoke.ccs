@@ -1,0 +1,33 @@
+/* Extracted interface @variant is host C. Construction uses the lowered
+ * tag; a same-TU struct field named `buf` is not rewritten. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "quote_cch_variant_extract.cch"
+
+int main(void) {
+    QuoteVaCell c = { .kind = QuoteVaCell_num, .u.num = { .n = 7 } };
+    QuoteVaField f = { .tag = 1, .buf = NULL };
+    QuoteVaHold h;
+    if (c.kind != QuoteVaCell_num || c.u.num.n != 7) {
+        printf("cell kind/num\n");
+        return 1;
+    }
+    f.buf = (char *)0;
+    if (f.tag != 1) {
+        printf("field tag\n");
+        return 1;
+    }
+    f = (QuoteVaField){ .tag = 2, .buf = (char *)0 };
+    if (f.tag != 2) {
+        printf("field compound\n");
+        return 1;
+    }
+    h = (QuoteVaHold){0};
+    h.cell = (QuoteVaCell){ .kind = QuoteVaCell_flag };
+    if (h.cell.kind != QuoteVaCell_flag) {
+        printf("hold flag\n");
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

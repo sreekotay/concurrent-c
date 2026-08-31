@@ -14,7 +14,7 @@
  *             submitted task → results print 1..N even if work finished
  *             2,1,4,3,...
  *
- * Idiom: send_task + `ordered` recv. Nested nurseries + close_on match
+ * Idiom: send_task + `ordered` recv. Nested nurseries + close() match
  * recipe_channel_pipeline / recipe_worker_pool; only the channel kind
  * and send_task differ. Larger example: real_projects/pigz/pigz_idiomatic.ccs.
  */

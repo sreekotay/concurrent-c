@@ -33,7 +33,7 @@ does not block curl's event loop. It talks to a small queue ABI:
 
 - `thrdqueue.ccs` — nursery-owned hybrid pool implementing `Curl_thrdq_*`.
   Bags are Exclusive + retractable arrays (`acquire_when` to pop). Detach
-  is `on_last` + `abandon` (no reaper).
+  is `leave(q, finish_q)` (no reaper).
 - `cc_thrdqueue.h` — C ABI matching `lib/thrdqueue.h` (CURLcode as int).
 - `thrdqueue_smoke.c` — knob/ABI check without libcurl.
 - `make cc` / `make stock` — flip `out/prefix` between flavors.

@@ -5,8 +5,8 @@
  *   done_ch: workers → main (completion ledger, no shared counter)
  *
  * Nested nurseries drive the close protocol:
- *   feeder nursery @destroy → closes jobs_tx when the feeder finishes,
- *                             causing workers to drain jobs_rx and exit.
+ *   feeder.close(jobs_tx) arms EMPTY to close jobs when the feeder nursery
+ *   joins; workers drain jobs_rx and exit.
  *   worker nursery @destroy → joins all workers before main drains done_rx.
  *
  * Temp prints use @string(`...`, @scratch) — no hand-rolled arena.

@@ -7,7 +7,7 @@ Living plan. Inventory from the 2026-07-25 pass; policy updated for current tast
 | Check | Meaning |
 |-------|---------|
 | **tutorial = idiomatic = performant = production** | One surface. No beginner dialect, no second "real" API, no slow path taught first. |
-| **Dissolve lifetime; express ownership** | Prefer nursery/`close_on`/`@destroy`, arena provenance, channel transfer/`send_into`, owner fibers. Lifetime should look like app protocol (Redis conn/reply), not refcount algebra. |
+| **Dissolve lifetime; express ownership** | Prefer nursery/`close`/`leave`/`@destroy`, arena provenance, channel transfer/`send_into`, owner fibers. Lifetime should look like app protocol (Redis conn/reply), not refcount algebra. |
 | **Explicit arenas; no default magic** | Allocating edges name a `CCArena*` (or `name@(args)` / `@destroy`). No hidden thread-local heap for user-visible payloads. |
 | **C is first-class** | Every blessed CC API has a clean, greppable `cc_*` twin suitable as the lowered / plain-C call. UFCS is sugar over that name—not a second ABI. Avoid unspeakable lowered symbols and "CC-only" Result wrappers with junk C names. |
 | **No API museum (yet)** | In-tree out-param net/HTTP surfaces are not sacred. Prefer flipping primary names to Result and updating callers in the same change over long dual-ship. Keep a thin internal helper only when it simplifies the `.c` implementation—not as a taught second API. |

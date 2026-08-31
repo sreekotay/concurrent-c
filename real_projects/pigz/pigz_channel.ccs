@@ -206,8 +206,8 @@ int compress_file(const char* in_path, const char* out_path) {
             }
         }) !>;
 
-        /* Inner producer: close() auto-closes results_tx when the producer
-         * nursery ends, so the consumer sees EOF after draining. */
+        /* Inner producer: close() arms EMPTY to close results_tx when the
+         * producer nursery joins, so the consumer sees EOF after draining. */
         {
             CCNursery producer = consumer.create_child() !> @destroy;
             (void)producer.close(results_tx);

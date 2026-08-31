@@ -1,4 +1,5 @@
-/* Impl-grade local header (the @variant forces the raw splice): defines a
+/* Impl-grade local header (`@defer` forces the raw splice; file-scope
+ * `@variant` alone is extractable): defines a
  * map type and a DB struct holding it, then includes a nested sibling
  * that does UFCS on both — through a parameter and through the struct
  * field. Text after the nested include must still lower too. */
@@ -19,6 +20,7 @@ typedef struct NestedUfcsDb {
 #include "impl_cch_nested_ufcs_inner.cch"
 
 static void nested_ufcs_destroy(NestedUfcsDb* db) {
+    @defer (void)0;
     if (db && db->entries) db->entries->destroy();
 }
 

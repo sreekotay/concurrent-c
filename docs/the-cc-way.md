@@ -17,6 +17,7 @@ CC asks two questions repeatedly: What is the smallest fact that actually change
 - **[Move / dead-state](cheatsheet.md#lifetime-parents-attach--adopt--create_)** — `cc_move` transfers; the source is empty for teardown. User use after the move is a compile error, not a runtime zero-check.
 - **[Single-shot closures](language-concepts.md#5-closures-carry-captures)** — Represent one remaining action or obligation without inventing a larger task object.
 - **[Turnstiles / gates](cheatsheet.md#pipeline-turnstile-ccturnstile)** — Express named local admission predicates; not locks, not DAGs.
+- **[Nurseries](cheatsheet.md#structured-concurrency)** — Join set with a handle. Lifecycle: OPEN → JOINING/LEFT → EMPTY → DEAD. `wait` / `@destroy` join; `leave` consumes the handle; `close(tx)` arms EMPTY to close a channel (not teardown). Recipe: [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs).
 - **[Tickets](cheatsheet.md#parallel)** — Names for relationships and admission, not counters or schedule positions.
 - **Local sigils** — Mark consequential decision boundaries directly in source.
 - **[Top-level owners + views](getting-started.md#locality-owned-or-view)** — Prefer one real owner with non-owning views over manufactured shared ownership.

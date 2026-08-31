@@ -14872,6 +14872,28 @@ static size_t cc__skip_type_policy_at(const char* src, size_t n, size_t i) {
     return p > i ? p : i + 1;
 }
 
+/* File-scope `@variant Name { … };` / `@variant(packed) Name { … };`.
+ * Extract lowers this to the enum+union C; it is not impl-grade. */
+static size_t cc__skip_variant_decl_at(const char* src, size_t n, size_t i) {
+    size_t p, body_r = 0;
+    if (!src || i >= n || src[i] != '@') return 0;
+    if (!cc_match_ident_kw(src, n, i + 1, "variant")) return 0;
+    p = cc_skip_ws_and_comments(src, n, i + 1 + 7);
+    if (p < n && src[p] == '(') {
+        size_t rp = 0;
+        if (!cc_find_matching_paren(src, n, p, &rp)) return 0;
+        p = cc_skip_ws_and_comments(src, n, rp + 1);
+    }
+    if (p >= n || !cc_is_ident_start(src[p])) return 0;
+    while (p < n && cc_is_ident_char(src[p])) p++;
+    p = cc_skip_ws_and_comments(src, n, p);
+    if (p >= n || src[p] != '{') return 0;
+    if (!cc_find_matching_brace(src, n, p, &body_r)) return 0;
+    p = cc_skip_ws_and_comments(src, n, body_r + 1);
+    if (p < n && src[p] == ';') p++;
+    return p;
+}
+
 /* `!>` statement unwrap (`!>;`, `!> {`, `!>(e) {`) vs result-type `T !>(E)`.
  * Both spell `!>(` — the type form is followed by a declarator, the
  * statement form by `{` or `;`. */
@@ -14890,9 +14912,10 @@ static int cc__bang_unwrap_is_stmt(const char* src, size_t n, size_t i) {
 
 /* True when header text contains constructs only the full TU pipeline can
  * lower.  Comment/string aware.  `@comptime` blocks/functions,
- * `@typeview` / `@typehooks`, and CC_GENERIC_FACTORY bodies are skipped
- * (the interface pipeline strips and harvests those the way stdlib
- * headers do); `T !>(E)` result-type syntax is allowed. */
+ * `@typeview` / `@typehooks`, file-scope `@variant` decls, and
+ * CC_GENERIC_FACTORY bodies are skipped (the interface pipeline strips
+ * and harvests those the way stdlib headers do); `T !>(E)` result-type
+ * syntax is allowed. */
 static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
     static const char fac_kw[] = "CC_GENERIC_FACTORY";
     static const char fac_kw_ext[] = "CC_GENERIC_FACTORY_EXTEND";
@@ -14937,6 +14960,11 @@ static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
         if (c == '@' && i + 1 < n && cc_is_ident_start(src[i + 1])) {
             {
                 size_t after = cc__skip_type_policy_at(src, n, i);
+                if (after) {
+                    i = after;
+                    continue;
+                }
+                after = cc__skip_variant_decl_at(src, n, i);
                 if (after) {
                     i = after;
                     continue;
@@ -17827,11 +17855,12 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                          * TU redefines file-scope `static` data. */
                         splice_child = 0;
                     }
-                    if (splice_child && !cc__cch_has_owner_ccs(child_abs)) {
-                        /* Unowned impl-grade: fail at this include, whether
-                         * extracting a parent `.h` or splicing an owner
-                         * face. A nested leaf must not compile just because
-                         * an umbrella was included. */
+                    if (splice_child && !cc__cch_has_owner_ccs(child_abs) &&
+                        !g_rewrite_allow_impl_splice) {
+                        /* Unowned impl-grade while extracting an interface
+                         * umbrella: the nested leaf must not sneak through
+                         * as a leftover `.h`. An owner `.ccs` (or an
+                         * already-spliced impl face) still splices below. */
                         fprintf(stderr,
                                 "cc: error: cannot extract impl-grade "
                                 "header %s (move bodies to an owner "

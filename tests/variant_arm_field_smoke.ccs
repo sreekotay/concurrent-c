@@ -1,0 +1,32 @@
+/* Arm name `buf` must not rewrite a same-TU struct field `.buf`. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdint.h>
+
+@variant V {
+    buf: const char*;
+    flag: void;
+};
+
+typedef struct {
+    int tag;
+    char *buf;
+} Field;
+
+int main(void) {
+    Field f = { .tag = 1, .buf = "x" };
+    V v = { .buf = "ok" };
+    if (!f.buf || f.buf[0] != 'x' || f.tag != 1) return 1;
+    f.buf = "y";
+    if (!f.buf || f.buf[0] != 'y') return 2;
+    f = (Field){ .tag = 2, .buf = "z" };
+    if (f.tag != 2 || !f.buf || f.buf[0] != 'z') return 3;
+    if (v.kind != V_buf) return 4;
+    if (v.kind == .buf) {
+        if (!v.buf || v.buf[0] != 'o') return 5;
+    } else {
+        return 5;
+    }
+    printf("ok\n");
+    return 0;
+}

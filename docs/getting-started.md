@@ -419,10 +419,12 @@ Tasks are scoped to a `CCNursery`. Three births:
 /* both tasks have finished */
 ```
 
-To consume a self-owned handle without joining, leave
-(`n.leave(ctx, finish)` or `n.leave()`). EMPTY closes registered channels,
-runs leftover if the path was LEFT, and frees the nursery. That is not
-cancel. Spec §8.1.5.
+Lifecycle: OPEN → JOINING/LEFT → EMPTY → DEAD. `wait` / `@destroy` join
+(OPEN → JOINING → EMPTY → DEAD). To consume a self-owned handle without
+joining, `leave` (`n.leave(ctx, finish)` or `n.leave()`; OPEN → LEFT →
+EMPTY → DEAD). `close(tx)` arms EMPTY to close `tx` on both paths. EMPTY
+closes registered channels, runs leftover if the path was LEFT, and frees the
+nursery. `leave` is not cancel. Spec §8.1.5.
 
 ### `@parallel`
 

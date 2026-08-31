@@ -415,13 +415,16 @@ Modes are checked in the slow path before blocking. The fast path always attempt
 
 ## Autoclose
 
-A channel may have an `autoclose_owner` (a nursery). When the nursery exits, it calls `cc_chan_close` on all registered channels. This is a convenience; explicit close works identically.
+A channel may have an `autoclose_owner` (a nursery). Registration is
+`n.close(tx)` (deprecated: `close_on`); at EMPTY the nursery calls `cc_chan_close`
+on all registered channels — on both the waited (JOINING) and LEFT paths.
+This is a convenience; explicit close works identically.
 
 When `CC_NURSERY_CLOSING_RUNTIME_GUARD=1`, a blocking receive on an empty,
 open autoclose channel from the same owning nursery returns `EDEADLK`. This
 optional runtime diagnostic catches a receive-until-close cycle in which the
-nursery cannot exit to perform its own autoclose. It does not change normal
-autoclose semantics.
+nursery cannot reach EMPTY to perform its own autoclose. It does not change
+normal autoclose semantics.
 
 ## Invariants
 

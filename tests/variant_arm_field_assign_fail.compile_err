@@ -1,0 +1,1 @@
+error: braced assignment 'lhs = { ... };' is only defined for @variant types — 'f' is not a variant (for a plain struct use a compound literal: 'lhs = (T){ ... };')

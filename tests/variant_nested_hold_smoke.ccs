@@ -1,0 +1,48 @@
+/* Nested designator `{ .cell = { .num = n } }` and UFCS inside `case .arm:`. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdint.h>
+
+@variant Cell {
+    txt: CCString;
+    num: int64_t;
+};
+
+typedef struct {
+    Cell cell;
+} Hold;
+
+static int64_t !>(CCError) hold_as_i64(Hold* h) {
+    Cell cell = h->cell;
+    switch (cell) {
+        case .num:
+            return cc_ok(cell.num);
+        case .txt: {
+            char[:] sl = cell.txt.as_slice();
+            return sl.to_i64();
+        }
+    }
+    return cc_err(CC_ERR_INVALID_ARG, "closed switch");
+}
+
+int main(void) {
+    Hold a = { .cell = { .num = 3 } };
+    Hold b;
+    int64_t n;
+    b = (Hold){ .cell = { .num = 9 } };
+    if (a.cell.kind != Cell_num) return 1;
+    if (b.cell.kind != Cell_num) return 2;
+    n = hold_as_i64(&a) !> { return 3; };
+    if (n != 3) return 4;
+    n = hold_as_i64(&b) !> { return 5; };
+    if (n != 9) return 6;
+    {
+        CCArena arena = cc_arena_heap(kilobytes(4)) @destroy;
+        CCString s = cc_string_from("12", arena);
+        Hold c = { .cell = { .txt = s } };
+        n = hold_as_i64(&c) !> { return 7; };
+        if (n != 12) return 8;
+    }
+    printf("ok\n");
+    return 0;
+}

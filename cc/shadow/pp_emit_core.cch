@@ -2327,6 +2327,19 @@ static ShadowVariant* shadow_variant_find_by_arm(const char* arm) {
     return hits == 1 ? found : NULL;
 }
 
+static int shadow_variant_any_arm(const char* arm, size_t alen) {
+    int i, a;
+    if (!arm || !alen) return 0;
+    for (i = 0; i < g_shadow_nvariants; i++) {
+        for (a = 0; a < g_shadow_variants[i].narm; a++) {
+            if (strlen(g_shadow_variants[i].arms[a]) == alen &&
+                memcmp(g_shadow_variants[i].arms[a], arm, alen) == 0)
+                return 1;
+        }
+    }
+    return 0;
+}
+
 static int shadow_variant_arm_match(ShadowVariant* hint, const char* expr,
                                     const char* site, const char* arm,
                                     size_t alen, ShadowVariant** out_v,
@@ -2764,7 +2777,8 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
             shadow_recv_name_before(expr, acc, recv, sizeof(recv)))
             v = shadow_variant_for_recv(recv);
     }
-    if (!v && g_shadow_nvariants == 1) v = &g_shadow_variants[0];
+    /* Do not default to the only variant in the TU — that rewrites
+     * ordinary struct fields (`Field.buf`) whenever an arm shares the name. */
     p = expr;
     o = out;
     rem = sizeof(out) - 1;
@@ -2845,9 +2859,12 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
                 /* Nested payload `{ .len=, .data= }` inside `.arm = {…}` /
                  * `.u.arm = {…}` must not re-tag field names that collide with
                  * other variant arms (RESP `.data`). Source still has `.bulk =`
-                 * before rewrite inserts `.u.`. */
+                 * before rewrite inserts `.u.`. A nested `{ .num = }` under an
+                 * ordinary field (`.cell = { … }`) is a variant payload and
+                 * may unique-arm rewrite. */
                 const char* q = pre;
-                int under_u = 0;
+                int under_payload = 0;
+                int nested_field = 0;
                 int depth = 0;
                 while (q > expr) {
                     q--;
@@ -2888,21 +2905,42 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
                                 r--;
                             id = r; /* first char of designator ident */
                             if (id > expr && id[-1] == '.' && id_end > id) {
-                                /* Nested `{ .field = }` under any `.ident = {`
-                                 * is a payload struct — never re-tag fields
-                                 * that collide with other variant arms
-                                 * (RESP `.bulk = { .len, .data }`). */
-                                under_u = 1;
+                                char parent[64];
+                                size_t pl = (size_t)(id_end - id);
+                                if (pl >= sizeof(parent)) pl = sizeof(parent) - 1;
+                                memcpy(parent, id, pl);
+                                parent[pl] = 0;
+                                /* Parent is a variant arm → payload struct
+                                 * (RESP `.bulk = { .len, .data }`). Ordinary
+                                 * field → nested variant (`Hold.cell`). */
+                                if (shadow_variant_any_arm(parent, pl))
+                                    under_payload = 1;
+                                else
+                                    nested_field = 1;
                             }
                         }
                         break;
                     }
                 }
-                ShadowVariant* mv;
-                int ma;
-                if (!under_u &&
-                    shadow_variant_arm_match(v, expr, p, arm, (size_t)(e - arm),
-                                             &mv, &ma)) {
+                ShadowVariant* mv = NULL;
+                int ma = -1;
+                int typed_other = (vty && vty[0] && !v);
+                int match = 0;
+                if (!under_payload) {
+                    if (v) {
+                        match = shadow_variant_arm_match(v, expr, p, arm,
+                                                         (size_t)(e - arm),
+                                                         &mv, &ma);
+                        /* Typed hint: only that variant — do not unique-arm
+                         * a colliding struct field on the same initializer. */
+                        if (match && mv != v) match = 0;
+                    } else if (!typed_other || nested_field) {
+                        match = shadow_variant_arm_match(NULL, expr, p, arm,
+                                                         (size_t)(e - arm),
+                                                         &mv, &ma);
+                    }
+                }
+                if (match && mv && ma >= 0) {
                     int n;
                     const char* rest = eq + 1;
                     if (mv->is_packed) {
@@ -3145,6 +3183,11 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
     }
     if (v && v->is_packed)
         shadow_variant_packed_materialize(expr, cap, v);
+    else if (!v && g_shadow_nvariants == 1 && g_shadow_variants[0].is_packed)
+        /* Comparison/probe text has no decl hint (`v->kind == .n`).
+         * Do not use this as the designated-init hint — that rewrites
+         * ordinary struct fields that share an arm name. */
+        shadow_variant_packed_materialize(expr, cap, &g_shadow_variants[0]);
     /* Close / unwrap packed set calls left as
      * `{ Name__cc_set_arm(x }` or `(Name){ Name__cc_set_arm(x }` inside a
      * larger expression (call args, bang typeof). Runs even when the rewrite
@@ -7475,6 +7518,7 @@ static int shadow_variant_diag_ctor(ShadowCtx* ctx, AstNode* st, CEmit* out,
                 /* Unique-arm / multi-owner / unresolved braced assign. */
                 int owners = 0;
                 int oi;
+                int known_other = (vty && vty[0] && !shadow_variant_find(vty));
                 ShadowVariant* uv = NULL;
                 for (oi = 0; oi < g_shadow_nvariants; oi++) {
                     if (shadow_variant_arm_index(&g_shadow_variants[oi], arm,
@@ -7482,6 +7526,33 @@ static int shadow_variant_diag_ctor(ShadowCtx* ctx, AstNode* st, CEmit* out,
                         owners++;
                         uv = &g_shadow_variants[oi];
                     }
+                }
+                if (known_other) {
+                    if (lhs_for_braced && lhs_for_braced[0] && !is_compound_lit) {
+                        char lhs_needle[96];
+                        if (owners == 0)
+                            snprintf(msg, sizeof(msg),
+                                     "braced assignment 'lhs = { ... };' is only "
+                                     "defined for @variant types — '%s' does not "
+                                     "resolve to a variant and '.%.*s' is not an arm "
+                                     "of any declared variant (for a plain struct use "
+                                     "a compound literal: 'lhs = (T){ ... };')",
+                                     lhs_for_braced, (int)alen, arm);
+                        else
+                            snprintf(msg, sizeof(msg),
+                                     "braced assignment 'lhs = { ... };' is only "
+                                     "defined for @variant types — '%s' is not a "
+                                     "variant (for a plain struct use a compound "
+                                     "literal: 'lhs = (T){ ... };')",
+                                     lhs_for_braced);
+                        snprintf(lhs_needle, sizeof(lhs_needle), "%s = {",
+                                 lhs_for_braced);
+                        shadow_variant_err_loc(ctx, st, out, lhs_needle, 0, msg);
+                        return 1;
+                    }
+                    /* Decl-init of a non-variant (`Field f = { .buf = }`). */
+                    p = eq + 1;
+                    continue;
                 }
                 if (lhs_for_braced && lhs_for_braced[0] && owners == 0 &&
                     !is_compound_lit) {

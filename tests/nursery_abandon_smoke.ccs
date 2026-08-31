@@ -27,14 +27,19 @@ int main(void) {
     {
         cc_atomic_int done = 0;
         CCNursery n = cc_nursery_create() !>;
-        n.on_last(&done, finish_flag) !>;
+        n.leave(&done, finish_flag) !>;
+        if (!wait_flag(&done, 1000)) return 4;
+    }
+
+    {
+        cc_atomic_int done = 0;
+        CCNursery n = cc_nursery_create() !>;
+        cc_nursery_register_leftover_host(n.p, &done, finish_flag) !>;
         {
-            int saw = 0;
-            n.on_last(&done, finish_flag) !>(e) {
-                saw = 1;
-                if (e.kind != CC_ERR_INVALID_ARG) return 3;
-            };
-            if (!saw) return 3;
+            CCResult_void_CCError r =
+                cc_nursery_register_leftover_host(n.p, &done, finish_flag);
+            if (r.ok) return 3;
+            if (r.u.error.kind != CC_ERR_INVALID_ARG) return 3;
         }
         n.leave();
         if (!wait_flag(&done, 1000)) return 4;

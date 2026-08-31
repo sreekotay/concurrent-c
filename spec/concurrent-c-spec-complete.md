@@ -3615,8 +3615,9 @@ for (int w = 0; w < N; w++) inner.spawn(() => worker(tx)) !>;
 
 **Registered close form.** `n.close(tx)` is UFCS for
 `cc_nursery_close(n, tx)` (same registration as `cc_nursery_add_closing_tx`).
-It arms this nursery's EMPTY to close `tx` after wait / `@destroy`, or on
-the LEFT path, and before nursery storage is released:
+Deprecated: `close_on` / `cc_nursery_close_on`. It arms this nursery's EMPTY to
+close `tx` after wait / `@destroy`, or on the LEFT path, and before nursery
+storage is released:
 
 ```c
 CCNursery n = cc_nursery_create() !> @destroy;
@@ -3641,9 +3642,11 @@ optional and is independent of the scheduler's general detector (§8.7.1).
 #### 8.1.5 Leave
 
 `n.leave()` is UFCS for `cc_nursery_leave` and consumes the handle
-(OPEN → LEFT). `n.leave(ctx, finish)` registers one leftover that runs at
-EMPTY on the LEFT path only, then leaves. `wait` / `@destroy` never run a
-leftover; the owner writes the next line at EMPTY.
+(OPEN → LEFT). Deprecated: `abandon` / `cc_nursery_abandon`. `n.leave(ctx, finish)`
+registers one leftover that runs at EMPTY on the LEFT path only, then leaves
+(`cc_nursery_leave_with`). Deprecated leftover-only registration: `on_last` /
+`cc_nursery_on_last` — prefer the two-argument `leave`. `wait` / `@destroy`
+never run a leftover; the owner writes the next line at EMPTY.
 
 ```c
 n.leave(q, finish_q);   // leftover at EMPTY on the LEFT path
@@ -4560,6 +4563,10 @@ bool cc_cancelled(void);  // current nursery
 void cc_nursery_leave(CCNursery n);  // UFCS: n.leave() — OPEN → LEFT; EMPTY frees
 CCResult_void_CCError cc_nursery_leave_with(CCNursery n, void* ctx, void (*finish)(void*));  // n.leave(ctx, finish)
 CCResult_void_CCError cc_nursery_close(CCNursery n, CCChanTx tx);  // n.close(tx) — arm EMPTY to close tx
+/* Deprecated — docs/deprecated.md */
+void cc_nursery_abandon(CCNursery n);
+CCResult_void_CCError cc_nursery_on_last(CCNursery n, void* ctx, void (*finish)(void*));
+CCResult_void_CCError cc_nursery_close_on(CCNursery n, CCChanTx tx);
 
 // Deadline cancellation and polling
 void cc_cancel(CCDeadline* d);

@@ -197,29 +197,36 @@ arena die with it, with no record.
 
 ## 7. Nursery
 
+Lifecycle phases: OPEN → JOINING/LEFT → EMPTY → DEAD (see
+`concurrent-c-spec-complete.md` §8.1).
+
 `CCNursery !>(CCError) cc_arena_create_nursery(CCArena* a)` births a nursery into a live owner:
 handle in the owner's storage, record attached. A null or dead arena aborts.
 The nursery's teardown — one entry serving the record fn, the registered
 destroy hook, and manual destruction — is: if dead, return; join all tasks;
 release. Release destroys the nursery's embedded arena, running the walk
 over everything created through the nursery's face, after the join on both
-the waited and abandoned exit paths, and then zeroes the handle rather than
+the waited (JOINING) and LEFT exit paths, and then zeroes the handle rather than
 freeing it, so the husk outlives the owner's record.
 
 `cc_nursery_create()` is the self-owned malloc handle, freed at release; no
 record ever points at it. `parent.create_child()` is the cancel-tree nest
 (parent handle required; empty host aborts).
 
-An abandon-capable nursery is self-owned. `abandon` hands the handle to the
-children: the last one to exit frees it at an unpredictable time on a worker
-thread, so no outside owner may hold a destroy record for it — the record
-would fire on freed storage, and the dead-state protocol cannot help when
-the handle's own storage is gone. `abandon` on an owner-attached nursery
-aborts; a nursery that must be abandoned is created with
-`cc_nursery_create()`.
+A leave-capable nursery is self-owned. `n.leave()` consumes the handle
+(OPEN → LEFT): the last child to exit reaches EMPTY then DEAD at an
+unpredictable time on a worker thread, so no outside owner may hold a
+destroy record for it — the record would fire on freed storage, and the
+dead-state protocol cannot help when the handle's own storage is gone.
+`n.leave(ctx, finish)` registers one leftover that runs at EMPTY on the LEFT
+path only, then leaves. `leave` on an owner-attached nursery is refused; a
+nursery that must be left is created with `cc_nursery_create()`. Deprecated:
+`abandon` (`n.leave()`), `on_last` (leftover registration only; prefer
+`n.leave(ctx, finish)`).
 
-The `closing(ch)` list is not a parent record: channels close **after
-wait** — a join signal, not a destroy obligation. It is unchanged.
+`n.close(tx)` arms this nursery's EMPTY to close `tx` on both the waited
+and LEFT paths. It is not teardown and not a parent record — channels close
+at EMPTY, a join-set signal, not a destroy obligation. Deprecated: `close_on`.
 
 The nursery handle projects Region through the host:
 `as: (Region)n;`.

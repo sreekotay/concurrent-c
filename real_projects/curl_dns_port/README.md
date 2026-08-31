@@ -38,8 +38,8 @@ dependency graph.
 `clear` retracts both bags under one sorted hold — not a channel bounce.
 
 `destroy(join)` drains queued jobs (they do not run), closes the jobs
-bag, and waits the nursery. Detach registers `on_last` and `abandon`s
-the nursery; last-exit drains done and frees the queue.
+bag, and waits the nursery. Detach calls `workers.leave(q, finish_q)`;
+the EMPTY leftover drains done and frees the queue.
 
 `min_threads`, `max_threads`, and `idle_time_ms` are honored. `max_threads
 == 0` or `min > max` is `CURLE_BAD_FUNCTION_ARGUMENT`.

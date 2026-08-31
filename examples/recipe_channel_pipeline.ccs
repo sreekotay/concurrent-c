@@ -1,13 +1,13 @@
 /*
  * Recipe: Channel Pipeline (Producer/Consumer)
  *
- *   inner { producer }              close(tx) — tx closes when producer finishes
+ *   inner { producer }              close(tx) — arms EMPTY to close tx
  *   outer { consumer, inner }       consumer sees close → drains → exits
  *
  * Nested nurseries encode the close protocol without any explicit
- * `tx.close()` or refcount: the inner nursery's @destroy waits for the
- * producer, then auto-closes tx; the outer nursery's @destroy waits for
- * the consumer, which by then has drained the remaining values.
+ * `tx.close()` in @destroy: inner.close(tx) registers the close; inner's
+ * @destroy waits for the producer, then EMPTY closes tx; outer's @destroy
+ * waits for the consumer after it drains.
  *
  * The consumer captures &sum by reference and uses an atomic — only one
  * fiber writes so a plain int would suffice here, but atomic is the

@@ -1,0 +1,28 @@
+#ifndef TESTS_QUOTE_CCH_VARIANT_EXTRACT_CCH
+#define TESTS_QUOTE_CCH_VARIANT_EXTRACT_CCH
+
+#include <stdint.h>
+
+/* Payload type is written before the variant; extract must not hoist
+ * the lowered enum/struct above this typedef. */
+typedef struct {
+    int64_t n;
+} QuoteVaNum;
+
+/* Interface face: file-scope variant decl must extract to enum+union C.
+ * Guests include the .h; the sigil must not remain. */
+@variant QuoteVaCell {
+    num: QuoteVaNum;
+    flag: void;
+};
+
+typedef struct {
+    int tag;
+    char *buf;
+} QuoteVaField;
+
+typedef struct {
+    QuoteVaCell cell;
+} QuoteVaHold;
+
+#endif

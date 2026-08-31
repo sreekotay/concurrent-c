@@ -185,35 +185,35 @@ struct CCNurseryHost {
     fiber_v2* _Atomic alive_waiter;
     wake_primitive alive_wake;
 
-    /* LIVE → JOINING (wait) or ABANDONED (abandon). After abandon the
-     * handle is consumed; last-exit frees the object. */
+    /* LIVE → JOINING (wait) or LEFT (leave). After leave the
+     * handle is consumed; EMPTY frees the object. */
     _Atomic int end_state;
     _Atomic int finishing;
-    void (*on_last_fn)(void*);
-    void* on_last_ctx;
+    void (*leftover_fn)(void*);
+    void* leftover_ctx;
 };
 
 enum {
     CC_NURSERY_LIVE = 0,
     CC_NURSERY_JOINING = 1,
-    CC_NURSERY_ABANDONED = 2
+    CC_NURSERY_LEFT = 2
 };
 
-/* Abandon-mode last-exit arbitration lives in ONE atomic word: the high bit
- * of alive_count is the abandoned flag, the low bits are the live-child
- * count. Both exit-qualifying operations (abandon's fetch_or, notify's
+/* LEFT-path EMPTY arbitration lives in ONE atomic word: the high bit
+ * of alive_count is the LEFT flag, the low bits are the live-child
+ * count. Both exit-qualifying operations (leave's fetch_or, notify's
  * fetch_sub) are RMWs on this word, so they are totally ordered and exactly
- * one of them observes "abandoned and count zero" at its own linearization
+ * one of them observes "LEFT and count zero" at its own linearization
  * point. The non-closer must not touch the nursery after its RMW — the
  * closer frees it. (The previous two-variable protocol — end_state stores
  * paired with alive_count loads under seq-cst fences — guaranteed no LOST
  * exit but let both sides qualify; the loser then consulted `finishing`
  * inside an object the winner had already freed. Freed-memory scribble could
- * fake finishing==0 and run a second teardown: the nursery_abandon_smoke
+ * fake finishing==0 and run a second teardown: the nursery_leave_smoke
  * malloc abort.) end_state remains the user-facing lifecycle state (spawn /
- * on_last / wait refusals, loud-die diagnostics); it no longer arbitrates. */
-#define CC_NURSERY_ALIVE_ABANDONED_BIT ((size_t)1 << (sizeof(size_t) * 8 - 1))
-#define CC_NURSERY_ALIVE_COUNT_MASK    (~CC_NURSERY_ALIVE_ABANDONED_BIT)
+ * leftover / wait refusals, loud-die diagnostics); it no longer arbitrates. */
+#define CC_NURSERY_ALIVE_LEFT_BIT ((size_t)1 << (sizeof(size_t) * 8 - 1))
+#define CC_NURSERY_ALIVE_COUNT_MASK    (~CC_NURSERY_ALIVE_LEFT_BIT)
 
 static void cc_nursery_die(const char* msg) {
     fprintf(stderr, "cc_nursery: %s\n", msg);
@@ -244,7 +244,7 @@ void cc__chan_set_autoclose_owner(CCChan* ch, CCNurseryHost* owner);
  * makes closing_count nonzero — installs it; the teardown loops only consult
  * it when closing_count > 0, so the pointer is always set before it is
  * needed (both writes publish under the same nursery mutex). Cost tracks
- * source behavior: no close_on in the program, no channel code in the
+ * source behavior: no n.close in the program, no channel code in the
  * binary. */
 static void (*g_cc__nursery_chan_close)(CCChan*) = NULL;
 
@@ -619,13 +619,13 @@ static int cc__nursery_spawn_errno(CCNurseryHost* n, void* (*fn)(void*), void* a
     /* Worker-frees mode: publish the pending child on alive_count BEFORE
      * enqueuing so a worker that races us to MCO_DEAD always observes a
      * matching increment when it calls cc_nursery_notify_child_done.  In
-     * the classic mode this counter is never consulted. The abandoned
-     * check and the increment share mu so abandon cannot last-exit
+     * the classic mode this counter is never consulted. The LEFT
+     * check and the increment share mu so leave cannot reach EMPTY
      * between them. */
     int worker_frees = cc_nursery_worker_frees_mode();
     pthread_mutex_lock(&n->mu);
     if (atomic_load_explicit(&n->end_state, memory_order_acquire) ==
-            CC_NURSERY_ABANDONED) {
+            CC_NURSERY_LEFT) {
         pthread_mutex_unlock(&n->mu);
         return EINVAL;
     }
@@ -638,7 +638,7 @@ static int cc__nursery_spawn_errno(CCNurseryHost* n, void* (*fn)(void*), void* a
     if (!t) {
         if (worker_frees) {
             /* May last-exit if this increment was the last live child
-             * after abandon. Do not touch n afterward. */
+             * after leave. Do not touch n afterward. */
             cc_nursery_notify_child_done(n);
         }
         return ENOMEM;
@@ -829,25 +829,25 @@ CCResult_CCNursery_CCError cc_nursery_create_on(CCArena a) {
     return cc__nursery_wrap_ok(n);
 }
 
-/* Last child is already dead (fiber returned to the pool). Close
- * registered channels, run on_last, free. The single-word protocol
+/* Last child is already dead (fiber returned to the pool). Reach EMPTY:
+ * close registered channels, run leftover, free. The single-word protocol
  * guarantees a unique caller; `finishing` is a tripwire, not an arbiter —
  * a second entry means the protocol was broken upstream, and deduping it
  * quietly would hide a use-after-free (no silent degradation).
- * The on_last callback must not touch the nursery: it runs before release,
+ * The leftover callback must not touch the nursery: it runs before release,
  * and whoever it wakes races the teardown. */
-static void cc_nursery_last_exit(CCNurseryHost* n) {
+static void cc_nursery_at_empty(CCNurseryHost* n) {
     int expected = 0;
     void (*fn)(void*);
     void* ctx;
     if (!atomic_compare_exchange_strong_explicit(&n->finishing, &expected, 1,
             memory_order_acq_rel, memory_order_relaxed))
-        cc_nursery_die("last-exit entered twice (abandon protocol violation)");
+        cc_nursery_die("EMPTY entered twice (leave protocol violation)");
     cc_nursery_close_registered(n);
-    fn = n->on_last_fn;
-    ctx = n->on_last_ctx;
-    n->on_last_fn = NULL;
-    n->on_last_ctx = NULL;
+    fn = n->leftover_fn;
+    ctx = n->leftover_ctx;
+    n->leftover_fn = NULL;
+    n->leftover_ctx = NULL;
     if (fn)
         fn(ctx);
     cc_nursery_release(n);
@@ -856,15 +856,15 @@ static void cc_nursery_last_exit(CCNurseryHost* n) {
 void cc_nursery_notify_child_done(CCNurseryHost* n) {
     if (!n) return;
     size_t prev = atomic_fetch_sub_explicit(&n->alive_count, 1, memory_order_acq_rel);
-    if (prev == (CC_NURSERY_ALIVE_ABANDONED_BIT | 1)) {
-        /* Abandoned, and this decrement took the count to zero: unique
+    if (prev == (CC_NURSERY_ALIVE_LEFT_BIT | 1)) {
+        /* LEFT path, and this decrement took the count to zero: unique
          * closer (see the protocol comment on the bit). No waiter can
-         * exist — wait-after-abandon dies — so go straight to teardown. */
-        cc_nursery_last_exit(n);
+         * exist — wait-after-leave dies — so go straight to teardown. */
+        cc_nursery_at_empty(n);
         return;
     }
     if (prev == 1) {
-        /* Wait-mode boundary. The nursery is pinned here: the abandoned
+        /* Wait-mode boundary. The nursery is pinned here: the LEFT
          * bit was clear in `prev`, so teardown can only come from
          * cc_nursery_wait / cc_nursery_free on the owner's side, and the
          * owner is either parked below or hasn't reached them.
@@ -897,8 +897,8 @@ CCResult_void_CCError cc_nursery_wait_host(CCNurseryHost* n) {
         int expected = CC_NURSERY_LIVE;
         if (!atomic_compare_exchange_strong_explicit(&n->end_state, &expected,
                 CC_NURSERY_JOINING, memory_order_acq_rel, memory_order_acquire)) {
-            if (expected == CC_NURSERY_ABANDONED)
-                cc_nursery_die("wait after abandon");
+            if (expected == CC_NURSERY_LEFT)
+                cc_nursery_die("wait after leave");
         }
     }
     int first_err = 0;
@@ -925,7 +925,7 @@ CCResult_void_CCError cc_nursery_wait_host(CCNurseryHost* n) {
              * notifier, leaving us parked with no signal coming.
              * Stress: `tests/stress/nursery_worker_frees_race_stress_smoke.ccs`. */
             atomic_thread_fence(memory_order_seq_cst);
-            /* Mask is hygiene: JOINING excludes ABANDONED, the bit cannot
+            /* Mask is hygiene: JOINING excludes LEFT, the bit cannot
              * be set here. */
             while ((atomic_load_explicit(&n->alive_count, memory_order_acquire) &
                     CC_NURSERY_ALIVE_COUNT_MASK) != 0) {
@@ -1004,8 +1004,8 @@ void cc_nursery_free_host(CCNurseryHost* n) {
     /* Owner walk and a local @destroy may both fire. Second call is a no-op. */
     if (n->owner_placed && !n->arena.a) return;
     if (atomic_load_explicit(&n->end_state, memory_order_acquire) ==
-            CC_NURSERY_ABANDONED)
-        cc_nursery_die("free after abandon");
+            CC_NURSERY_LEFT)
+        cc_nursery_die("free after leave");
     if (!cc_nursery_worker_frees_mode()) {
         /* Classic: tasks[] still owns fiber_v2 references until free. */
         for (size_t i = 0; i < n->count; ++i) {
@@ -1020,62 +1020,58 @@ void cc_nursery_free_host(CCNurseryHost* n) {
     cc_nursery_release(n);
 }
 
-CCResult_void_CCError cc_nursery_on_last_host(CCNurseryHost* n, void* ctx, void (*finish)(void*)) {
+CCResult_void_CCError cc_nursery_register_leftover_host(CCNurseryHost* n, void* ctx, void (*finish)(void*)) {
     if (!n || !finish)
-        return cc__nursery_errno(EINVAL, "cc_nursery_on_last");
+        return cc__nursery_errno(EINVAL, "cc_nursery_register_leftover");
     pthread_mutex_lock(&n->mu);
     if (atomic_load_explicit(&n->end_state, memory_order_acquire) !=
             CC_NURSERY_LIVE) {
         pthread_mutex_unlock(&n->mu);
-        return cc__nursery_errno(EINVAL, "cc_nursery_on_last");
+        return cc__nursery_errno(EINVAL, "cc_nursery_register_leftover");
     }
-    if (n->on_last_fn) {
+    if (n->leftover_fn) {
         pthread_mutex_unlock(&n->mu);
-        return cc__nursery_errno(EINVAL, "cc_nursery_on_last");
+        return cc__nursery_errno(EINVAL, "cc_nursery_register_leftover");
     }
-    n->on_last_fn = finish;
-    n->on_last_ctx = ctx;
+    n->leftover_fn = finish;
+    n->leftover_ctx = ctx;
     pthread_mutex_unlock(&n->mu);
     return cc_ok_CCResult_void_CCError();
 }
 
-/* Hand the nursery to its children and walk away. From the caller's side
- * the handle is CONSUMED: the last child to exit (or this call, if none are
- * live) frees the object at an unpredictable time on a worker thread.
- * Calling anything on `n` after abandon is a use-after-free unless the
- * caller owns independent proof that a child is still live (e.g. it holds
- * the channel a spawned child is provably blocked on); such calls get
- * EINVAL, they are not part of the supported lifecycle. This is also why an
- * abandon-capable nursery must never have a lifetime parent: an owner's
- * destroy record would eventually fire on freed storage. */
-void cc_nursery_abandon_host(CCNurseryHost* n) {
+/* OPEN → LEFT. From the caller's side the handle is CONSUMED: the last child
+ * to exit (or this call, if none are live) reaches EMPTY then DEAD on a
+ * worker at an unpredictable time. Calling anything on `n` after leave is a
+ * use-after-free unless the caller owns independent proof that a child is
+ * still live. A leave-capable nursery must never have a lifetime parent. */
+void cc_nursery_leave_host(CCNurseryHost* n) {
     int expected;
     size_t prev;
     if (!n) return;
     if (n->owner_placed)
-        cc_nursery_die("abandon on an owner-attached nursery "
+        cc_nursery_die("leave on an owner-attached nursery "
                        "(cc_arena_create_nursery); use cc_nursery_create()");
     if (!cc_nursery_worker_frees_mode())
-        cc_nursery_die("abandon requires worker-frees mode");
+        cc_nursery_die("leave requires worker-frees mode");
     pthread_mutex_lock(&n->mu);
     expected = CC_NURSERY_LIVE;
     if (!atomic_compare_exchange_strong_explicit(&n->end_state, &expected,
-            CC_NURSERY_ABANDONED, memory_order_acq_rel, memory_order_acquire)) {
+            CC_NURSERY_LEFT, memory_order_acq_rel, memory_order_acquire)) {
         pthread_mutex_unlock(&n->mu);
         if (expected == CC_NURSERY_JOINING)
-            cc_nursery_die("abandon while wait in progress");
-        cc_nursery_die("double abandon");
+            cc_nursery_die("leave while wait in progress");
+        cc_nursery_die("double leave");
     }
     /* Single-word arbitration (see the protocol comment on the bit).
-     * Under mu so no spawn increment can interleave: spawn's not-abandoned
+     * Under mu so no spawn increment can interleave: spawn's not-LEFT
      * check and its increment share this mutex, so a zero count observed by
      * this RMW is final — no child exists and none can appear. */
     prev = atomic_fetch_or_explicit(&n->alive_count,
-                                    CC_NURSERY_ALIVE_ABANDONED_BIT,
+                                    CC_NURSERY_ALIVE_LEFT_BIT,
                                     memory_order_acq_rel);
     pthread_mutex_unlock(&n->mu);
     if ((prev & CC_NURSERY_ALIVE_COUNT_MASK) == 0)
-        cc_nursery_last_exit(n);
+        cc_nursery_at_empty(n);
 }
 
 CCResult_void_CCError cc_nursery_add_closing_chan_host(CCNurseryHost* n, CCChan* ch) {
@@ -1083,7 +1079,7 @@ CCResult_void_CCError cc_nursery_add_closing_chan_host(CCNurseryHost* n, CCChan*
         return cc__nursery_errno(EINVAL, "cc_nursery_add_closing_chan");
     pthread_mutex_lock(&n->mu);
     if (atomic_load_explicit(&n->end_state, memory_order_acquire) ==
-            CC_NURSERY_ABANDONED) {
+            CC_NURSERY_LEFT) {
         pthread_mutex_unlock(&n->mu);
         return cc__nursery_errno(EINVAL, "cc_nursery_add_closing_chan");
     }

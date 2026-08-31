@@ -1,0 +1,20 @@
+/* Fail: braced assignment to a non-variant that shares an arm name
+ * must not unique-arm-rewrite into a variant construction. */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant V {
+    buf: const char*;
+    flag: void;
+};
+
+typedef struct {
+    int tag;
+    char *buf;
+} Field;
+
+int main(void) {
+    Field f = { .tag = 1, .buf = "x" };
+    f = { .buf = "y" };
+    return f.tag;
+}

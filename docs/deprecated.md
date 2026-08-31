@@ -74,3 +74,22 @@ code puts the rewrite on `.ufcs`. Compatibility smoke:
 
 `.ufcs_dynamic` and `.ufcs_dynamic2` are accepted spellings of the same
 destination-aware last-resort sink. New registrations use `.ufcs_sink`.
+
+## Nursery lifecycle: `close_on` / `on_last` / `abandon`
+
+**Prefer:** `n.close(tx)`, `n.leave()`, `n.leave(ctx, finish)`
+
+Lifecycle: OPEN → JOINING/LEFT → EMPTY → DEAD. See cheatsheet §Structured
+concurrency and spec §8.1.
+
+| Deprecated | Prefer |
+|------------|--------|
+| `n.close_on(tx)` / `cc_nursery_close_on` | `n.close(tx)` / `cc_nursery_close` |
+| `n.on_last(ctx, finish)` / `cc_nursery_on_last` | `n.leave(ctx, finish)` / `cc_nursery_leave_with` |
+| `n.abandon()` / `cc_nursery_abandon` | `n.leave()` / `cc_nursery_leave` |
+
+Host C twins: `cc_nursery_register_leftover_host` (leftover only),
+`cc_nursery_leave_host`. Deprecated macros: `cc_nursery_on_last_host`,
+`cc_nursery_abandon_host`.
+
+Arena checkpoint `cp.abandon()` is a different API — not deprecated here.

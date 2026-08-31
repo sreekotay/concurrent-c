@@ -1,5 +1,5 @@
 #!ccc ccs
-/* Leave last-exit protocol hammer. The leave race (worker's
+/* Leave EMPTY protocol hammer. The leave race (worker's
  * notify_child_done and the leaving caller both qualifying as closer)
  * only aborted when freed-memory scribble faked `finishing == 0`. Under
  * Guard Malloc every freed page unmaps, so ANY touch of the nursery after

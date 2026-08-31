@@ -422,8 +422,11 @@ Growth failure poisons the `CCString`; it never truncates.
 Nested: `outer.create_child()` parents the inner nursery under `outer`.
 Independent value joins use `@parallel` (next), not a nursery.
 
-To drop the handle without joining, leave (OPEN → LEFT). Optional leftover
-runs at EMPTY on that path only (not on wait / `@destroy`):
+Lifecycle: OPEN → JOINING/LEFT → EMPTY → DEAD. `wait` / `@destroy` keep the
+handle (OPEN → JOINING → EMPTY → DEAD). `leave` consumes it (OPEN → LEFT →
+EMPTY → DEAD). `close(tx)` arms EMPTY to close `tx` on both paths — not
+teardown. Optional leftover runs at EMPTY on the LEFT path only (not on
+wait / `@destroy`):
 
 ```c
 n.leave(q, finish_q);   // leftover at EMPTY; not cancel

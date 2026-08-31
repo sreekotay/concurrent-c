@@ -756,11 +756,13 @@ static const CCVaIdHits* cc__va_hits_for(const char* s, size_t n,
  * parameters textually in src[0..use_pos).  Recognizes
  *   Variant id | Variant* id | Variant *id | VariantKind id
  * The LAST match before the use wins.  Returns variant index or -1. */
-static int cc__va_resolve_root(const char* s, size_t n, size_t use_pos,
-                               const char* id, size_t idl, int* out_form) {
+static int cc__va_resolve_root_x(const char* s, size_t n, size_t use_pos,
+                                 const char* id, size_t idl, int* out_form,
+                                 int* out_other) {
     /* Nearest declarator wins.  A later non-variant `T* out` must shadow an
      * earlier schema/variant `V* out` (generated fill helpers use `out`). */
     int found = -1, form = CC_VA_FORM_VALUE;
+    int other = 0;
     const CCVaIdHits* hits;
     size_t hi;
     if (use_pos > n) use_pos = n;
@@ -797,6 +799,7 @@ static int cc__va_resolve_root(const char* s, size_t n, size_t use_pos,
                 int vi = cc__va_find(s + ts, te - ts);
                 if (vi >= 0) {
                     found = vi;
+                    other = 0;
                     form = stars > 0 ? CC_VA_FORM_PTR : CC_VA_FORM_VALUE;
                     continue;
                 }
@@ -804,14 +807,17 @@ static int cc__va_resolve_root(const char* s, size_t n, size_t use_pos,
                     vi = cc__va_find_kind(s + ts, te - ts);
                     if (vi >= 0) {
                         found = vi;
+                        other = 0;
                         form = CC_VA_FORM_KIND;
                         continue;
                     }
                 }
                 found = -1;
+                other = 1;
                 form = CC_VA_FORM_VALUE;
             }
         }
+        if (out_other) *out_other = other;
         if (found >= 0 && out_form) *out_form = form;
         return found;
     }
@@ -846,6 +852,7 @@ static int cc__va_resolve_root(const char* s, size_t n, size_t use_pos,
             int vi = cc__va_find(s + ts, te - ts);
             if (vi >= 0) {
                 found = vi;
+                other = 0;
                 form = stars > 0 ? CC_VA_FORM_PTR : CC_VA_FORM_VALUE;
                 continue;
             }
@@ -853,17 +860,32 @@ static int cc__va_resolve_root(const char* s, size_t n, size_t use_pos,
                 vi = cc__va_find_kind(s + ts, te - ts);
                 if (vi >= 0) {
                     found = vi;
+                    other = 0;
                     form = CC_VA_FORM_KIND;
                     continue;
                 }
             }
             /* Nearest decl is some other type — clear any earlier variant hit. */
             found = -1;
+            other = 1;
             form = CC_VA_FORM_VALUE;
         }
     }
+    if (out_other) *out_other = other;
     if (found >= 0 && out_form) *out_form = form;
     return found;
+}
+
+static int cc__va_resolve_root(const char* s, size_t n, size_t use_pos,
+                               const char* id, size_t idl, int* out_form) {
+    return cc__va_resolve_root_x(s, n, use_pos, id, idl, out_form, NULL);
+}
+
+static int cc__va_ident_has_nonvariant_decl(const char* s, size_t n, size_t use_pos,
+                                           const char* id, size_t idl) {
+    int other = 0;
+    (void)cc__va_resolve_root_x(s, n, use_pos, id, idl, NULL, &other);
+    return other;
 }
 
 /* Extract the base expression that a member accessor at `acc` (position of
@@ -2081,10 +2103,16 @@ static int cc__va_step_construct(const char* s, size_t n, const char* path, CCVa
                             } else if (repl) {
                                 if (cc__va_edit_add(ed, i, rb + 1, repl) != 0) nerr++;
                             }
+                            i = rb + 1;
+                            continue;
                         }
                     }
                 }
-                i = rb + 1;
+                /* Non-variant compound literal: walk inside so a nested
+                 * `{ .arm = }` payload (e.g. `(Hold){ .cell = { .num = 3 } }`)
+                 * is still rewritten. */
+                if (par == 0) last_boundary = i + 1;
+                i++;
                 continue;
             }
             /* (b)/(c): `... = {` */
@@ -2145,8 +2173,13 @@ static int cc__va_step_construct(const char* s, size_t n, const char* path, CCVa
                         } else if (repl) {
                             if (cc__va_edit_add(ed, i, rb + 1, repl) != 0) nerr++;
                         }
+                        i = rb + 1;
+                        continue;
                     }
-                    i = rb + 1;
+                    /* `Hold h = { .cell = { .num = 3 } }`: leave the outer
+                     * braces for C, walk inside for the nested variant. */
+                    if (par == 0) last_boundary = i + 1;
+                    i++;
                     continue;
                 }
                 /* Braced ASSIGNMENT (statement level only: '=' outside parens). */
@@ -2157,6 +2190,30 @@ static int cc__va_step_construct(const char* s, size_t n, const char* path, CCVa
                     int lhs_show = (int)(lhs_b - lhs_a) > 64 ? 64 : (int)(lhs_b - lhs_a);
                     int vi = cc__va_resolve_lvalue(s, n, stmt_a, eq, &form);
                     if (vi < 0) {
+                        /* Unique-arm guess is only for unresolved LHS
+                         * (field paths, missing decls). A simple ident
+                         * declared as a non-variant must not be rewritten
+                         * just because some variant in the TU has that arm
+                         * (`Field f; f = { .buf = ... }` vs `@variant V { buf: }`). */
+                        int skip_guess = 0;
+                        if (lhs_b > lhs_a && cc_is_ident_start(s[lhs_a])) {
+                            size_t e = lhs_a;
+                            while (e < lhs_b && cc_is_ident_char(s[e])) e++;
+                            size_t rest = e;
+                            while (rest < lhs_b && isspace((unsigned char)s[rest])) rest++;
+                            if (rest == lhs_b &&
+                                cc__va_ident_has_nonvariant_decl(s, n, stmt_a,
+                                                                 s + lhs_a, e - lhs_a))
+                                skip_guess = 1;
+                        }
+                        if (skip_guess) {
+                            cc__va_err(s, n, path, stmt_a,
+                                       "braced assignment 'lhs = { ... };' is only defined for @variant types — '%.*s' is not a variant (for a plain struct use a compound literal: 'lhs = (T){ ... };')",
+                                       lhs_show, s + lhs_a);
+                            nerr++;
+                            i = rb + 1;
+                            continue;
+                        }
                         /* fall back: unique-arm resolution */
                         int uvi = -1;
                         int owners = cc__va_variants_with_arm(s + d_ia, d_ib - d_ia, &uvi);

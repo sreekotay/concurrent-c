@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "preprocess/preprocess.h"
+#include "preprocess/variant_lower.h"
 #include "preprocess/unit_header.h"
 #include "preprocess/type_graph.h"
 #include "util/io.h"
@@ -551,6 +552,7 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     char* buf_inc = NULL;
     char* buf_as = NULL;
     char* buf_types = NULL;
+    char* buf_va = NULL;
     char* buf_vec = NULL;
     char* buf_result_ctors = NULL;
     char* buf2 = NULL;
@@ -644,6 +646,24 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     if (buf_types) {
         cur = buf_types;
         cur_len = strlen(buf_types);
+    }
+
+    /* Pass 0c2: `@variant Name { … };` → enum+union C so a guest `.h`
+     * does not leave the sigil (impl-grade splice is the other path). */
+    buf_va = cc_rewrite_variant_decls_text(cur, cur_len, input_path);
+    if (buf_va == (char*)-1) {
+        free(buf_ded);
+        free(buf0);
+        free(buf_fac);
+        free(buf_inc);
+        free(buf_as);
+        free(buf_types);
+        cc_result_spec_table_free(&state.result_specs);
+        return NULL;
+    }
+    if (buf_va) {
+        cur = buf_va;
+        cur_len = strlen(buf_va);
     }
 
     buf_vec = cc__splice_header_vec_decls(cur, cur_len);
@@ -742,6 +762,7 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     free(buf_inc);
     free(buf_as);
     free(buf_types);
+    free(buf_va);
     free(buf_vec);
     free(buf_result_ctors);
     free(buf2);
