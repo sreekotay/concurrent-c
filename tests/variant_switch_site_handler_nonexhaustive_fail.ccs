@@ -1,0 +1,21 @@
+/* Fail oracle: site-handler unwrap inside `case .arm:` still exhausts. */
+#include <ccc/std/prelude.cch>
+
+@variant V {
+    a: int;
+    b: int;
+    c: int;
+};
+
+static void !>(CCError) boom(void) {
+    return cc_err(CC_ERR_INTERNAL, "x");
+}
+
+int main(void) {
+    V v = { .a = 1 };
+    @switch (v) {
+        case .a:
+            boom() !>(e) { (void)e; break; };
+    }
+    return 0;
+}

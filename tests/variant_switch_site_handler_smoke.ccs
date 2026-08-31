@@ -1,0 +1,69 @@
+/* Site-handler `!>(e) { … }` inside `case .arm:` — undo's tree.replace
+ * shape. Bare `!>` already lowered in the opaque dump; the binder form
+ * must walk AST_STMT_UNWRAP (or the opaque text rewrite). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    char[:] bytes;
+} Buf;
+
+@variant Del {
+    text: Buf;
+    pieces: int;
+};
+
+typedef struct {
+    Del del;
+} Rec;
+
+static void !>(CCError) boom(int fail, const char* msg) {
+    if (fail) return cc_err(CC_ERR_INTERNAL, msg);
+    return cc_ok();
+}
+
+/* Statement `callee() !>(e) { … }` on a value subject. */
+static void !>(CCError) apply_local(Del arm, int fail) {
+    @switch (arm) {
+        case .text:
+            boom(fail, "text") !>(e) { return cc_err(e); };
+            return cc_ok();
+        case .pieces:
+            boom(fail, "pieces") !>(e) { return cc_err(e); };
+            return cc_ok();
+    }
+    return cc_err(CC_ERR_INTERNAL, "closed");
+}
+
+/* UFCS + field-path subject — `d->tree.replace(...) !>(e)` stand-in. */
+static void !>(CCError) apply_field(Rec* r, char[:] src) {
+    char[:] dst;
+    @switch (r->del) {
+        case .text:
+            dst = r->del.text.bytes;
+            dst.copy(src) !>(e) { return cc_err(e); };
+            r->del = { .text = { .bytes = dst } };
+            return cc_ok();
+        case .pieces:
+            return cc_err(CC_ERR_INTERNAL, "pieces");
+    }
+    return cc_err(CC_ERR_INTERNAL, "closed");
+}
+
+int main(void) {
+    char buf[8];
+    Rec r;
+    Rec *p;
+    int hit;
+    buf[0] = 'a';
+    buf[1] = 'b';
+    r.del = { .text = { .bytes = cc_slice_from_buffer(buf, 2) } };
+    p = &r;
+    apply_local(p->del, 0) !>(e) { (void)e; return 1; };
+    apply_field(p, cc_slice_from_buffer(buf, 2)) !>(e) { (void)e; return 3; };
+    hit = 0;
+    apply_local(p->del, 1) !>(e) { hit = 1; };
+    if (!hit) return 4;
+    printf("ok\n");
+    return 0;
+}

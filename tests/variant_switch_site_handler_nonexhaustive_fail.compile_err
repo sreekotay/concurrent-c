@@ -1,0 +1,1 @@
+variant_switch_site_handler_nonexhaustive_fail.ccs:16:6: error: switch on variant 'V' is not exhaustive: missing arms '.b', '.c' (add the missing cases or a 'default:' to opt out)
