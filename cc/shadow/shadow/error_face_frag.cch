@@ -73,7 +73,7 @@ static inline int cc_err_log(CCError e) {
     return 1;
 }
 
-static inline void cc_error_exit(CCError e) {
+static inline _Noreturn void cc_error_exit(CCError e) {
     cc_error_log(e);
     exit(1);
 }

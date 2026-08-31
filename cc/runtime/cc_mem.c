@@ -12,8 +12,8 @@ void *cc_memcpy(void *d, const void *s, size_t n) { return memcpy(d, s, n); }
 void *cc_memmove(void *d, const void *s, size_t n) { return memmove(d, s, n); }
 void *cc_memset(void *d, int c, size_t n) { return memset(d, c, n); }
 int cc_memcmp(const void *a, const void *b, size_t n) { return memcmp(a, b, n); }
-void cc_abort(void) { abort(); }
-void cc_exit(int code) { exit(code); }
+_Noreturn void cc_abort(void) { abort(); }
+_Noreturn void cc_exit(int code) { exit(code); }
 
 int cc_eprintf(const char *fmt, ...) {
     va_list ap;

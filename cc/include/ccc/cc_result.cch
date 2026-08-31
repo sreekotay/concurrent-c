@@ -121,8 +121,9 @@ CC__RESULT_SYS int cc_err_log(CCError e) {
 
 /* Log then exit(1). The standard named `@errhandler` terminate policy:
  *   @errhandler(CCError e) cc_error_exit(e);
- * Recognized as diverging for expression-position `!>;`. */
-CC__RESULT_SYS void cc_error_exit(CCError e) {
+ * Recognized as diverging for expression-position `!>;`. `_Noreturn`
+ * closes the hoisted-handler trailer for the host C compiler. */
+CC__RESULT_SYS CC_NORETURN void cc_error_exit(CCError e) {
     cc_error_log(e);
     cc_exit(1);
 }
@@ -130,7 +131,7 @@ CC__RESULT_SYS void cc_error_exit(CCError e) {
 void cc_result_panic(const char *msg, const char *file, int line);
 void cc_error_log(CCError e);
 int cc_err_log(CCError e);
-void cc_error_exit(CCError e);
+CC_NORETURN void cc_error_exit(CCError e);
 #endif
 
 /*

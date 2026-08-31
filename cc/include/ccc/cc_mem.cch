@@ -35,6 +35,7 @@
 #define cc_exit exit
 #define cc_eprintf(...) fprintf(stderr, __VA_ARGS__)
 #else
+#include <ccc/cc_compat.cch>
 void *cc_malloc(size_t n);
 void cc_free(void *p);
 void *cc_realloc(void *p, size_t n);
@@ -42,8 +43,8 @@ void *cc_memcpy(void *d, const void *s, size_t n);
 void *cc_memmove(void *d, const void *s, size_t n);
 void *cc_memset(void *d, int c, size_t n);
 int cc_memcmp(const void *a, const void *b, size_t n);
-void cc_abort(void);
-void cc_exit(int code);
+CC_NORETURN void cc_abort(void);
+CC_NORETURN void cc_exit(int code);
 int cc_eprintf(const char *fmt, ...);
 #endif
 
