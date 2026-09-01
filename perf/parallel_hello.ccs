@@ -10,9 +10,9 @@
  *   CC_PAR_SAMPLES  default 5
  *   CC_PAR_CUT      default 8
  *   CC_PAR_BARE     default 1; 0 skips ungated `@parallel { }`
- *                   (depth 24 completes at ~128 MB RSS — the in-flight
- *                   cap inlines most spawns and stacks bind lazily —
- *                   but spawn/join churn makes it ~70x slower than seq)
+ *                   (the adaptive spawn gate classifies the storm site
+ *                   as churn and inlines the flood: depth 24 completes
+ *                   in ~0.5s at ~38 MB RSS on defaults)
  *
  * Compare: ./perf/compare_parallel_hello.sh
  */
@@ -165,7 +165,7 @@ int main(void) {
     if (bare)
         println(@string(` par ${expect} ${par_ms} ms vs_seq ${vs_par}x (@parallel { })`, @scratch)) !>;
     else
-        println("  par  skipped  (CC_PAR_BARE=0; ungated join churn is ~70x slower than seq)") !>;
+        println("  par  skipped  (CC_PAR_BARE=0)") !>;
     println(@string(` cut ${expect} ${cut_ms} ms vs_seq ${vs_cut}x (@parallel (d<${g_cut}))`, @scratch)) !>;
     return 0;
 }

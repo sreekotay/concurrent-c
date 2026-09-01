@@ -1,0 +1,159 @@
+/*
+ * Victim-under-storm probe: does a spawn storm starve a well-grained
+ * @parallel workload, and do the scheduler's countermeasures help?
+ *
+ * A victim `@parallel for` (CC_PROBE_VICTIMS arms of CC_PROBE_ARM_MS of
+ * real spin each) is timed solo, then again while a storm fiber runs
+ * ungated `@parallel { }` trees back to back. Drive the matrix from the
+ * environment:
+ *
+ *   CC_PAR_SPAWN_BACKLOG   0 = no spawn denial; N = deny at queue depth N
+ *   CC_V2_JOIN_STEAL       1 = joiner may unlink+run a still-queued child
+ *   CC_V2_STEAL_MIN_DEPTH  steal only when the queue is at least this deep
+ *
+ *   CC_PROBE_VICTIMS   default 64
+ *   CC_PROBE_ARM_MS    default 3
+ *   CC_PROBE_DEPTH     storm tree depth, default 16
+ *   CC_PROBE_SAMPLES   default 3 (median)
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+#include <stdint.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define U24_MASK 0xFFFFFFu
+
+static uint32_t g_storm_depth = 16;
+static int g_victims = 64;
+static double g_arm_ms = 3.0;
+static int g_samples = 3;
+
+static volatile int g_storm_stop = 0;
+static volatile long g_storm_trees = 0;
+
+static inline uint32_t u24(uint32_t x) {
+    return x & U24_MASK;
+}
+
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+/* Real CPU work: spin until the deadline. */
+static void spin_ms(double ms) {
+    double t0 = now_ms();
+    volatile uint32_t sink = 0;
+    while (now_ms() - t0 < ms)
+        sink = u24(sink * 2 + 1);
+}
+
+static uint32_t storm_tree(uint32_t d, uint32_t i) {
+    @errhandler(CCError e) cc_error_exit(e);
+    if (d >= g_storm_depth || g_storm_stop)
+        return i;
+    uint32_t left = 0;
+    uint32_t right = 0;
+    @parallel {
+        left  = storm_tree(d + 1, u24(i * 2));
+        right = storm_tree(d + 1, u24(i * 2 + 1));
+    } !>.wait()!>;
+    return u24(left + right);
+}
+
+static void* storm_thunk(void* arg) {
+    (void)arg;
+    while (!g_storm_stop) {
+        (void)storm_tree(0, 0);
+        g_storm_trees = g_storm_trees + 1;
+    }
+    return NULL;
+}
+
+static void* victim_thunk(void* arg) {
+    @errhandler(CCError e) cc_error_exit(e);
+    double* out = (double*)arg;
+    int i;
+    double t0 = now_ms();
+    @parallel for (i in 0..g_victims) {
+        spin_ms(g_arm_ms);
+    } !>.wait()!>;
+    *out = now_ms() - t0;
+    return NULL;
+}
+
+static double victim_once(void) {
+    double ms = 0.0;
+    CCTask t = cc_fiber_spawn_task(victim_thunk, &ms);
+    if (t.kind == CC_TASK_KIND_INVALID)
+        abort();
+    (void)cc_block_on_intptr(t);
+    return ms;
+}
+
+static void sort_doubles(double* arr, int n) {
+    int i, j;
+    for (i = 0; i < n - 1; i++) {
+        for (j = i + 1; j < n; j++) {
+            if (arr[j] < arr[i]) {
+                double t = arr[i];
+                arr[i] = arr[j];
+                arr[j] = t;
+            }
+        }
+    }
+}
+
+static double victim_median(void) {
+    double xs[64];
+    int i;
+    int n = g_samples > 64 ? 64 : g_samples;
+    for (i = 0; i < n; i++)
+        xs[i] = victim_once();
+    sort_doubles(xs, n);
+    return xs[n / 2];
+}
+
+static uint32_t env_u32(const char* key, uint32_t fallback) {
+    const char* s = getenv(key);
+    if (!s || !s[0]) return fallback;
+    return (uint32_t)atoi(s);
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    g_storm_depth = env_u32("CC_PROBE_DEPTH", 16);
+    g_victims = (int)env_u32("CC_PROBE_VICTIMS", 64);
+    g_arm_ms = (double)env_u32("CC_PROBE_ARM_MS", 3);
+    g_samples = (int)env_u32("CC_PROBE_SAMPLES", 3);
+    if (g_samples < 1) g_samples = 1;
+
+    double serial_ms = (double)g_victims * g_arm_ms;
+
+    (void)victim_once(); /* warm the pools */
+    double solo_ms = victim_median();
+
+    CCTask storm = cc_fiber_spawn_task(storm_thunk, NULL);
+    if (storm.kind == CC_TASK_KIND_INVALID)
+        abort();
+    spin_ms(30.0); /* let the storm establish its backlog */
+    long trees0 = g_storm_trees;
+    double t0 = now_ms();
+    double under_ms = victim_median();
+    double window_ms = now_ms() - t0;
+    long trees1 = g_storm_trees;
+
+    g_storm_stop = 1;
+    (void)cc_block_on_intptr(storm);
+
+    double storm_rate =
+        window_ms > 0.0 ? (double)(trees1 - trees0) * 1000.0 / window_ms : 0.0;
+
+    println(@string(`steal_probe: victims=${g_victims} x ${g_arm_ms}ms (serial ${serial_ms}ms), storm depth=${g_storm_depth} ungated`, @scratch)) !>;
+    println(@string(` victim solo   ${solo_ms} ms`, @scratch)) !>;
+    println(@string(` victim +storm ${under_ms} ms`, @scratch)) !>;
+    println(@string(` storm rate    ${storm_rate} trees/s during victim window`, @scratch)) !>;
+    return 0;
+}

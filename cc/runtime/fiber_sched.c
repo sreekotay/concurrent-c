@@ -17,8 +17,11 @@
 * Trade-off: mco_create/destroy are slower (mmap/munmap syscalls),
 * but coroutine pooling (99% reuse) amortizes this cost.
 * Host TCC on Darwin uses ucontext (no ARM asm); mmap stacks have been
-* observed to hand swapcontext a NULL sp — use the calloc allocator. */
-#if !defined(__TINYC__)
+* observed to hand swapcontext a NULL sp — use the calloc allocator.
+* CC_MCO_NO_VMEM (sanitizer builds): mmap'd stacks are invisible to ASan;
+* the calloc allocator turns a stale write into a freed coro stack from a
+* raw SIGSEGV into a heap-use-after-free report with alloc/free stacks. */
+#if !defined(__TINYC__) && !defined(CC_MCO_NO_VMEM)
 #define MCO_USE_VMEM_ALLOCATOR
 #endif
 

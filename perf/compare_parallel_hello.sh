@@ -8,9 +8,10 @@
 #   * Parallel rows run the join on a worker (CC fiber / Go goroutine)
 #     so the timed path is park_fiber / goro switch, not a thread park
 #   * Rows:
-#       CC @parallel par — skipped here (ungated at depth 24 completes at
-#                          ~128 MB RSS but is ~70x slower than seq: pure
-#                          spawn/join churn. CC_PAR_BARE=1 to include it.)
+#       CC @parallel par — skipped here (grain-sweep focus; for the
+#                          ungated head-to-head see
+#                          compare_parallel_unbound.sh. CC_PAR_BARE=1
+#                          to include it.)
 #       CC @parallel cut — @parallel (d < CC_PAR_CUT); same arms, serial below cut.
 #       CC lowered       — explicit spawn-while-d<grain sweep
 #       Go               — same explicit grain sweep (go + WaitGroup)

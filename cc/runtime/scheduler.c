@@ -376,23 +376,456 @@ static int cc_parallel_cap(void) {
     return cap;
 }
 
+size_t sched_v2_ready_depth(void);
+uint32_t sched_v2_current_fiber_suspends(void);
+
+/* Backlog-keyed spawn denial. When the scheduler's ready queue already
+ * holds this many runnable fibers, a further @parallel spawn adds
+ * queue/lock traffic but no parallelism — no worker would reach it soon.
+ * Denying instead makes the lowering run the arm inline on the caller
+ * (the documented spawn-failure fallback: no task record, no enqueue, no
+ * join). Workers keep draining the retained backlog in parallel, so
+ * fine-grained spawn storms self-limit to roughly the threshold.
+ *
+ * Default off. Queue depth cannot distinguish churn from legitimate
+ * arms waiting their turn: perf/parallel_steal_probe.ccs shows any
+ * fixed threshold serializes a well-grained @parallel for whenever the
+ * queue is busy (64 arms x 3ms ran fully serial under a concurrent
+ * spawn storm, and lost half their speedup even solo), while ungated
+ * FIFO keeps real work parallel because churn entries drain in
+ * microseconds. The gate only wins when the entire workload is churn
+ * (perf/parallel_hello.ccs ungated: ~16x faster, ~32x smaller RSS), so
+ * it stays an opt-in knob for such workloads. -1 sentinel = unread. */
+static _Atomic int g_par_backlog_cached = -1;
+
+static int cc_parallel_spawn_backlog(void) {
+    int v = atomic_load_explicit(&g_par_backlog_cached, memory_order_relaxed);
+    if (v >= 0) return v;
+    const char* s = getenv("CC_PAR_SPAWN_BACKLOG");
+    int newv = 0;
+    if (s && s[0]) {
+        long n = strtol(s, NULL, 10);
+        if (n > 0 && n <= 1000000L) newv = (int)n;
+    }
+    atomic_store_explicit(&g_par_backlog_cached, newv, memory_order_relaxed);
+    return newv;
+}
+
+/* CC_PAR_NOCAP=1 (diagnostic): skip the in-flight cap accounting entirely
+ * — isolates the cost of the two shared-cacheline RMWs per spawn. */
+static _Atomic int g_par_nocap_cached = -1;
+
+static int cc_parallel_nocap(void) {
+    int v = atomic_load_explicit(&g_par_nocap_cached, memory_order_relaxed);
+    if (v >= 0) return v;
+    const char* s = getenv("CC_PAR_NOCAP");
+    int newv = (s && s[0] && s[0] != '0') ? 1 : 0;
+    atomic_store_explicit(&g_par_nocap_cached, newv, memory_order_relaxed);
+    return newv;
+}
+
+/* ============================================================================
+ * Duration-adaptive spawn gating (CC_PAR_ADAPT, default on).
+ *
+ * The fixed backlog gate above serializes legitimate work because queue
+ * depth cannot distinguish a million 1us churn entries from 64 real 3ms
+ * arms. Arm DURATION can — spawning an arm cheaper than the spawn+join
+ * round trip (~1.5us) is a pure loss, spawning a multi-ms arm is always a
+ * win — and duration is measurable per call site: the lowering passes each
+ * @parallel construct's thunk, a stable per-construct function pointer.
+ *
+ * Per site: spawns run through a timing trampoline (two clock reads per
+ * arm) until the first clean sample classifies the site, then a 1-in-1k
+ * resample trickle keeps the verdict honest. Once classified:
+ *   - churn (clean arm < threshold): deny the spawn whenever the ready
+ *     queue is non-trivial. The lowering runs the denied arm inline on
+ *     the caller — nothing is queued, so denied work can never strand,
+ *     and inline is faster than spawn for such arms anyway. A denied
+ *     subtree that turns its fiber into a long serial run parks no work:
+ *     if it kidnaps its worker, sysmon's eviction sees the queue backlog
+ *     and staffs a replacement — recovery is sysmon's job; the gate's
+ *     only duty is that admitted work is always globally visible.
+ *   - real (clean arm >= threshold): never denied; steady-state spawns
+ *     run unwrapped except for the resample trickle.
+ *
+ * A wrong verdict is never sticky: the trickle re-measures and flips it
+ * within ~1k spawns of contrary evidence (see the state enum below).
+ * CC_PAR_ADAPT=0 opts out wholesale.
+ *
+ * Table: fixed-size open-addressed, fn-keyed, insert-only. On overflow
+ * new sites stay unclassified and simply spawn — the pre-gate behavior. */
+#define CC_PAR_SITE_SLOTS 256u /* power of two */
+
+/* Site verdict. Fast-commit / fast-recover: one clean sample is enough
+ * to (re)classify, because a resample trickle keeps flowing forever and
+ * corrects any wrong verdict within ~a thousand spawns. This replaced a
+ * slow-commit design (8 samples, frozen verdict) whose caution bought
+ * nothing: rare freak samples (hundreds of ms of CPU passing every
+ * cleanliness filter, cause unexplained) could still poison a frozen
+ * verdict, while honest verdicts didn't need 8 samples to begin with.
+ *   VIRGIN: no clean evidence yet. Spawns run (wrapped for measurement,
+ *     within a budget), bounded by a generous flood limit.
+ *   CHURN:  finest clean grain under the threshold. Deny when the queue
+ *     is busy (the lowering runs denied arms inline on the caller — so
+ *     denied work executes immediately and can never strand).
+ *   REAL:   clean grain above the threshold. Never denied.
+ * Transition asymmetry: any clean cheap sample flips to CHURN at once;
+ * flipping CHURN->REAL takes CC_PAR_HEAVY_STREAK consecutive heavy clean
+ * samples. Toward-spawning is the starvation-safe direction, so it may
+ * be taken on light evidence when VIRGIN, but a churn verdict should not
+ * be un-done by one freak heavy sample. */
+enum {
+    CC_PAR_SITE_VIRGIN = 0,
+    CC_PAR_SITE_CHURN = 1,
+    CC_PAR_SITE_REAL = 2,
+};
+#define CC_PAR_HEAVY_STREAK 3u
+/* Resample cadence: 1 in 2^10 spawns/denials stays measured after a
+ * verdict, bounding both the steady-state overhead (~0.1%) and the
+ * recovery latency of a wrong verdict (~1k spawns). */
+#define CC_PAR_RESAMPLE_MASK 1023u
+
+typedef struct {
+    _Atomic(void*)   fn;
+    _Atomic int      state;
+    _Atomic uint32_t heavy_streak;
+    _Atomic uint32_t attempts; /* wrapped VIRGIN spawns; caps overhead */
+    _Atomic uint64_t min_ns;   /* diagnostics (CC_PAR_ADAPT_DEBUG) */
+    _Atomic uint64_t max_ns;
+    _Atomic uint32_t samples;  /* diagnostics: accepted clean samples */
+} cc_par_site;
+
+/* Stop wrapping every VIRGIN spawn after this budget (a site whose arms
+ * always suspend would pay the trampoline forever); it keeps the 1-in-1k
+ * resample trickle, so it can still classify later. */
+#define CC_PAR_LEARN_ATTEMPTS (1u << 20)
+
+static cc_par_site g_par_sites[CC_PAR_SITE_SLOTS];
+
+static _Atomic int g_par_adapt_cached = -1;      /* CC_PAR_ADAPT, default 1 */
+static _Atomic long g_par_churn_ns_cached = -1;  /* CC_PAR_CHURN_NS */
+static _Atomic int g_par_adapt_backlog_cached = -1; /* CC_PAR_ADAPT_BACKLOG */
+
+static void cc_par_adapt_dump(void);
+
+/* Debug counters are guarded by this flag: the denial path runs tens of
+ * millions of times per second across all workers, and an unconditional
+ * shared-cacheline RMW there is a measurable tax. */
+static int g_par_adapt_debug = 0;
+
+static int cc_parallel_adapt_on(void) {
+    int v = atomic_load_explicit(&g_par_adapt_cached, memory_order_relaxed);
+    if (v >= 0) return v;
+    const char* s = getenv("CC_PAR_ADAPT");
+    int newv = (s && s[0] == '0') ? 0 : 1;
+    const char* dbg = getenv("CC_PAR_ADAPT_DEBUG");
+    if (dbg && dbg[0] && dbg[0] != '0') {
+        g_par_adapt_debug = 1;
+        atexit(cc_par_adapt_dump);
+    }
+    atomic_store_explicit(&g_par_adapt_cached, newv, memory_order_relaxed);
+    return newv;
+}
+
+/* Churn threshold: mean arm duration below this classifies the site as
+ * churn. Default 32us ~ 20x the measured spawn+join round trip, wide of
+ * both edges: hello-style tree arms measure ~1-2us, the steal probe's
+ * legitimate arms 3ms. */
+static uint64_t cc_parallel_churn_ns(void) {
+    long v = atomic_load_explicit(&g_par_churn_ns_cached, memory_order_relaxed);
+    if (v >= 0) return (uint64_t)v;
+    const char* s = getenv("CC_PAR_CHURN_NS");
+    long newv = 32000;
+    if (s && s[0]) {
+        long n = strtol(s, NULL, 10);
+        if (n >= 0 && n <= 1000000000L) newv = n;
+    }
+    atomic_store_explicit(&g_par_churn_ns_cached, newv, memory_order_relaxed);
+    return (uint64_t)newv;
+}
+
+/* Queue depth at which a churn site's spawns are denied. The empirical
+ * sweet spot from the backlog sweep (196ms/4MB at depth 24); anything
+ * 2..8 measured within noise of each other. */
+static int cc_parallel_adapt_backlog(void) {
+    int v = atomic_load_explicit(&g_par_adapt_backlog_cached,
+                                 memory_order_relaxed);
+    if (v >= 0) return v;
+    const char* s = getenv("CC_PAR_ADAPT_BACKLOG");
+    int newv = 4;
+    if (s && s[0]) {
+        long n = strtol(s, NULL, 10);
+        if (n > 0 && n <= 1000000L) newv = (int)n;
+    }
+    atomic_store_explicit(&g_par_adapt_backlog_cached, newv,
+                          memory_order_relaxed);
+    return newv;
+}
+
+static _Atomic uint64_t g_par_adapt_denials = 0;
+static _Atomic uint64_t g_par_adapt_spawns = 0;
+/* Denials issued on this thread; the sampler snapshots it around an arm to
+ * reject samples whose bodies absorbed denied (inlined) child arms. Valid
+ * because a sample is only accepted when the arm never suspended, and a
+ * non-suspending fiber never migrates threads mid-run. */
+static __thread uint64_t tls_par_denials = 0;
+/* Spawn calls issued on this thread; same snapshot discipline. An arm that
+ * spawned is a composite (recursive tree node): its duration measures the
+ * subtree, not a body. Only leaf arms — the construct's finest grain, the
+ * thing a fiber would actually be spent on — are valid samples. */
+static __thread uint64_t tls_par_spawn_calls = 0;
+/* Per-thread resample ticker: every (CC_PAR_RESAMPLE_MASK+1)-th spawn at a
+ * classified site stays measured so a wrong verdict gets overturned. */
+static __thread uint32_t tls_par_tick = 0;
+
+/* CC_PAR_ADAPT_DEBUG=1: dump the site table at exit. */
+static void cc_par_adapt_dump(void) {
+    fprintf(stderr, "[par_adapt] spawns=%llu denials=%llu churn_ns=%llu\n",
+            (unsigned long long)atomic_load_explicit(&g_par_adapt_spawns,
+                                                     memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_par_adapt_denials,
+                                                     memory_order_relaxed),
+            (unsigned long long)cc_parallel_churn_ns());
+    for (unsigned i = 0; i < CC_PAR_SITE_SLOTS; i++) {
+        cc_par_site* s = &g_par_sites[i];
+        void* fn = atomic_load_explicit(&s->fn, memory_order_acquire);
+        if (!fn) continue;
+        int st = atomic_load_explicit(&s->state, memory_order_relaxed);
+        fprintf(stderr,
+                "[par_adapt] site fn=%p samples=%u min_ns=%llu "
+                "max_ns=%llu (%s)\n",
+                fn,
+                atomic_load_explicit(&s->samples, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&s->min_ns,
+                                                         memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&s->max_ns,
+                                                         memory_order_relaxed),
+                st == CC_PAR_SITE_CHURN  ? "churn"
+                : st == CC_PAR_SITE_REAL ? "real"
+                                         : "virgin");
+    }
+}
+
+/* One-entry TLS memo: recursive constructs call with the same thunk
+ * millions of times in a row, and the denial fast path runs per node —
+ * the hash probe was ~half the denied-spawn cost. */
+static __thread void* tls_par_site_fn = NULL;
+static __thread cc_par_site* tls_par_site = NULL;
+
+static cc_par_site* cc_par_site_get_slow(void* (*fn)(void*)) {
+    uintptr_t h = (uintptr_t)fn;
+    h ^= h >> 17;
+    h *= 0x9E3779B97F4A7C15ull;
+    uint32_t idx = (uint32_t)(h >> 32) & (CC_PAR_SITE_SLOTS - 1u);
+    for (uint32_t k = 0; k < 8; k++) {
+        cc_par_site* s = &g_par_sites[(idx + k) & (CC_PAR_SITE_SLOTS - 1u)];
+        void* cur = atomic_load_explicit(&s->fn, memory_order_acquire);
+        if (cur == (void*)fn) return s;
+        if (cur == NULL) {
+            void* expect = NULL;
+            if (atomic_compare_exchange_strong_explicit(
+                    &s->fn, &expect, (void*)fn,
+                    memory_order_acq_rel, memory_order_acquire))
+                return s;
+            if (expect == (void*)fn) return s;
+        }
+    }
+    return NULL; /* probe window full: stay unclassified, always spawn */
+}
+
+static inline cc_par_site* cc_par_site_get(void* (*fn)(void*)) {
+    if (tls_par_site_fn == (void*)fn) return tls_par_site;
+    cc_par_site* s = cc_par_site_get_slow(fn);
+    if (s) {
+        tls_par_site_fn = (void*)fn;
+        tls_par_site = s;
+    }
+    return s;
+}
+
+/* Thread CPU time, not wall time: under saturation the OS deschedules
+ * workers mid-arm, and wall time bills the arm for its time off-CPU —
+ * measured: "clean" samples averaging 300ms for ns-scale bodies purely
+ * from stolen timeslices. CPU time is immune, and it is valid for our
+ * samples because a never-suspended arm never migrates threads. */
+static uint64_t cc_par_cpu_ns(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+typedef struct {
+    void* (*fn)(void*);
+    void*        arg;
+    cc_par_site* site;
+} cc_par_timed;
+
+static void* cc_par_timed_run(void* p) {
+    cc_par_timed w = *(cc_par_timed*)p;
+    free(p);
+    uint32_t s0 = sched_v2_current_fiber_suspends();
+    uint64_t d0 = tls_par_denials;
+    uint64_t c0 = tls_par_spawn_calls;
+    uint64_t t0 = cc_par_cpu_ns();
+    void* r = w.fn(w.arg);
+    uint64_t dt = cc_par_cpu_ns() - t0;
+    /* Only LEAF arms that ran to completion yield a valid body-cost
+     * sample. Disqualifiers:
+     *   - the arm suspended (park or preemption requeue): its duration
+     *     includes off-CPU dependencies, not just its body;
+     *   - the arm issued nested @parallel spawns or had them denied: it
+     *     is a composite (recursive tree node) whose duration measures
+     *     the whole subtree. Sampling composites is what made every
+     *     previous scheme self-defeating: quiet-phase subtrees produce
+     *     honest multi-ms CPU samples that flip a churn site to "real"
+     *     (measured 53ms means from exactly this).
+     * Leaf bodies are the construct's finest grain — the thing a fiber
+     * would actually be spent on — so they answer the gate's question
+     * exactly. Sites whose every arm disqualifies never classify and
+     * keep spawning: the safe default for genuinely blocking work. */
+    if (sched_v2_current_fiber_suspends() == s0 && tls_par_denials == d0 &&
+        tls_par_spawn_calls == c0) {
+        cc_par_site* s = w.site;
+        atomic_fetch_add_explicit(&s->samples, 1, memory_order_relaxed);
+        uint64_t m = atomic_load_explicit(&s->min_ns, memory_order_relaxed);
+        while ((m == 0 || dt < m) &&
+               !atomic_compare_exchange_weak_explicit(
+                   &s->min_ns, &m, dt, memory_order_relaxed,
+                   memory_order_relaxed)) {}
+        m = atomic_load_explicit(&s->max_ns, memory_order_relaxed);
+        while (dt > m && !atomic_compare_exchange_weak_explicit(
+                             &s->max_ns, &m, dt, memory_order_relaxed,
+                             memory_order_relaxed)) {}
+        /* Fast commit, asymmetric: one cheap clean sample is a churn
+         * verdict on the spot (a wrong one costs one resample interval
+         * of inlining before the trickle overturns it — cheap, and the
+         * safe direction is unaffected: denied arms still run, inline).
+         * Un-doing a churn verdict takes CC_PAR_HEAVY_STREAK consecutive
+         * heavy cleans, so one freak sample can't reopen the floodgate —
+         * except from VIRGIN, where heavy evidence has no verdict to
+         * overturn and commits REAL immediately; if that first sample
+         * was a freak, the trickle demotes it just as fast. */
+        if (dt < cc_parallel_churn_ns()) {
+            atomic_store_explicit(&s->heavy_streak, 0, memory_order_relaxed);
+            atomic_store_explicit(&s->state, CC_PAR_SITE_CHURN,
+                                  memory_order_relaxed);
+        } else {
+            uint32_t k = atomic_fetch_add_explicit(&s->heavy_streak, 1,
+                                                   memory_order_relaxed) + 1;
+            int st = atomic_load_explicit(&s->state, memory_order_relaxed);
+            if (st == CC_PAR_SITE_VIRGIN || k >= CC_PAR_HEAVY_STREAK) {
+                atomic_store_explicit(&s->heavy_streak, 0,
+                                      memory_order_relaxed);
+                atomic_store_explicit(&s->state, CC_PAR_SITE_REAL,
+                                      memory_order_relaxed);
+            }
+        }
+    }
+    return r;
+}
+
 CCTask cc_parallel_spawn(void* (*fn)(void*), void* arg) {
     CCTask invalid;
     memset(&invalid, 0, sizeof(invalid));
     if (!fn) return invalid;
+    tls_par_spawn_calls++;
+    if (cc_parallel_nocap())
+        return cc_fiber_spawn_task(fn, arg);
+    /* Fixed backlog gate first (opt-in override; see its comment). The
+     * denied path stays RMW-free (one relaxed load of the queue depth),
+     * so a spawn storm running mostly inline doesn't hammer g_par_live. */
+    int backlog = cc_parallel_spawn_backlog();
+    if (backlog > 0 && sched_v2_ready_depth() >= (size_t)backlog) {
+        tls_par_denials++;
+        return invalid;
+    }
+
+    /* Adaptive gate: deny churn-classified sites when the queue is busy;
+     * measure virgin sites and a resample trickle of classified ones.
+     * A non-NULL site past this block means "wrap in the trampoline". */
+    cc_par_site* site = NULL;
+    if (cc_parallel_adapt_on() && (site = cc_par_site_get(fn)) != NULL) {
+        int st = atomic_load_explicit(&site->state, memory_order_relaxed);
+        if (st == CC_PAR_SITE_CHURN) {
+            if ((++tls_par_tick & CC_PAR_RESAMPLE_MASK) != 0) {
+                if (sched_v2_ready_depth() >=
+                    (size_t)cc_parallel_adapt_backlog()) {
+                    if (g_par_adapt_debug)
+                        atomic_fetch_add_explicit(&g_par_adapt_denials, 1,
+                                                  memory_order_relaxed);
+                    tls_par_denials++;
+                    return invalid;
+                }
+                site = NULL; /* queue shallow: admit unwrapped */
+            }
+            /* resample tick: admit wrapped, regardless of depth, so a
+             * stale churn verdict keeps receiving contrary evidence */
+        } else if (st == CC_PAR_SITE_REAL) {
+            if ((++tls_par_tick & CC_PAR_RESAMPLE_MASK) != 0)
+                site = NULL; /* steady state: unwrapped, never denied */
+        } else { /* VIRGIN */
+            /* No verdict yet: flood bound. Deny only past a depth no
+             * legitimate coarse construct reaches (a churn storm floods
+             * thousands deep in its first milliseconds; a real @parallel
+             * for queues at most its arm count, typically <= a few
+             * hundred). Bounds the pre-verdict RSS/queue flood at zero
+             * serialization risk. */
+            if (sched_v2_ready_depth() >= 512) {
+                if (g_par_adapt_debug)
+                    atomic_fetch_add_explicit(&g_par_adapt_denials, 1,
+                                              memory_order_relaxed);
+                tls_par_denials++;
+                return invalid;
+            }
+            if (atomic_fetch_add_explicit(&site->attempts, 1,
+                                          memory_order_relaxed) >=
+                    CC_PAR_LEARN_ATTEMPTS &&
+                (++tls_par_tick & CC_PAR_RESAMPLE_MASK) != 0)
+                site = NULL; /* budget spent (arms never sample clean):
+                              * stop paying the trampoline, keep trickle */
+        }
+    } else {
+        site = NULL;
+    }
+
+    void* (*spawn_fn)(void*) = fn;
+    void* spawn_arg = arg;
+    cc_par_timed* w = NULL;
+    if (site) {
+        w = (cc_par_timed*)malloc(sizeof(*w));
+        if (w) {
+            w->fn = fn;
+            w->arg = arg;
+            w->site = site;
+            spawn_fn = cc_par_timed_run;
+            spawn_arg = w;
+        }
+    }
+
+    if (g_par_adapt_debug)
+        atomic_fetch_add_explicit(&g_par_adapt_spawns, 1,
+                                  memory_order_relaxed);
     int prev = atomic_fetch_add_explicit(&g_par_live, 1, memory_order_acq_rel);
     if (prev >= cc_parallel_cap()) {
         atomic_fetch_sub_explicit(&g_par_live, 1, memory_order_acq_rel);
+        free(w);
+        /* Cap denial inlines the arm on the caller like any other denial;
+         * the sampler must see it or inline subtrees poison samples. */
+        tls_par_denials++;
         return invalid;
     }
-    CCTask t = cc_fiber_spawn_task(fn, arg);
-    if (t.kind == CC_TASK_KIND_INVALID)
+    CCTask t = cc_fiber_spawn_task(spawn_fn, spawn_arg);
+    if (t.kind == CC_TASK_KIND_INVALID) {
         atomic_fetch_sub_explicit(&g_par_live, 1, memory_order_acq_rel);
+        free(w);
+        tls_par_denials++;
+    }
     return t;
 }
 
 void cc_parallel_join(CCTask t) {
     (void)cc_block_on_intptr(t);
-    atomic_fetch_sub_explicit(&g_par_live, 1, memory_order_acq_rel);
+    if (!cc_parallel_nocap())
+        atomic_fetch_sub_explicit(&g_par_live, 1, memory_order_acq_rel);
 }
 

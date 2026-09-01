@@ -163,6 +163,13 @@ struct fiber_v2 {
     _Atomic int state;    /* Base state plus FIBER_V2_FLAG_SIGNAL_PENDING. */
     int        last_thread_id;
     uint64_t   generation;
+    /* Times this fiber left the CPU without dying (park or requeue).
+     * Consumers: the adaptive spawn gate's sampler (scheduler.c), which
+     * rejects arm-duration samples from fibers that ever suspended —
+     * their wall time measures the subtree they joined, not their own
+     * body. Relaxed atomics: incremented by the worker that ran the
+     * fiber, read from inside the fiber possibly after migration. */
+    _Atomic uint32_t suspends;
 
     void* (*entry_fn)(void*);
     void*      entry_arg;
@@ -1447,6 +1454,10 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
         return;
     }
 
+    /* Every path below is a suspension (yield/pending requeue or park
+     * commit); the fiber comes back to the CPU later. See field comment. */
+    atomic_fetch_add_explicit(&f->suspends, 1, memory_order_relaxed);
+
     int raw_state = atomic_load_explicit(&f->state, memory_order_acquire);
     int yk = f->yield_kind;
     if (yk == V2_YIELD_YIELD || fiber_v2_state_has_signal_pending(raw_state)) {
@@ -2698,6 +2709,15 @@ char* sched_v2_fiber_result_buf(fiber_v2* f) {
     return f ? f->result_buf : NULL;
 }
 
+size_t sched_v2_ready_depth(void) {
+    return atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed);
+}
+
+uint32_t sched_v2_current_fiber_suspends(void) {
+    fiber_v2* f = tls_v2_current_fiber;
+    return f ? atomic_load_explicit(&f->suspends, memory_order_relaxed) : 0;
+}
+
 void sched_v2_fiber_release(fiber_v2* f) {
     if (f) fiber_v2_free(f);
 }
@@ -3189,6 +3209,7 @@ fiber_v2* sched_v2_spawn_in_nursery(void* (*fn)(void*), void* arg, CCNurseryHost
     f->entry_arg = arg;
     f->saved_nursery = nursery;
     f->admission_nursery = nursery;
+    atomic_store_explicit(&f->suspends, 0, memory_order_relaxed);
     /* Do NOT create/init the coroutine here.
      *
      * We park the task on the global run queue with only fn/arg attached;

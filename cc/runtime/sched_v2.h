@@ -49,6 +49,18 @@ void   sched_v2_deadline_scope_pop(void* prev);
 int    sched_v2_current_worker_id(void); /* -1 if not on a V2 worker thread */
 void   sched_v2_shutdown(void);
 
+/* Current ready-queue depth (relaxed snapshot). Used by cc_parallel_spawn
+ * for backlog-keyed spawn denial: when the queue is already deep, another
+ * spawn only adds scheduling overhead — the denied arm runs inline on the
+ * caller instead (the lowering's documented spawn-failure fallback). */
+size_t sched_v2_ready_depth(void);
+
+/* Suspension count (parks + requeues) of the calling fiber; 0 off-fiber.
+ * The adaptive spawn gate compares before/after running an arm to reject
+ * wall-time samples polluted by blocking (joining a subtree, channel
+ * waits): only run-to-completion arms measure their own body. */
+uint32_t sched_v2_current_fiber_suspends(void);
+
 /* Accessors for task.c integration */
 int    sched_v2_fiber_done(fiber_v2* f);
 void*  sched_v2_fiber_result(fiber_v2* f);
