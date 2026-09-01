@@ -11,6 +11,7 @@
 #include <sys/time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <signal.h>
@@ -60,9 +61,27 @@ static long long cc__now_ms(void) {
     gettimeofday(&tv, NULL);
     return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
 }
+static const char* cc__prof_base(const char* path) {
+    const char* s;
+    if (!path || !path[0]) return "";
+    s = strrchr(path, '/');
+    return s ? s + 1 : path;
+}
 static void cc__prof_span(const char* name, long long t0) {
     if (!cc__prof_on()) return;
-    fprintf(stderr, "ccc_profile: %-20s %4lld ms\n", name, cc__now_ms() - t0);
+    {
+        long long now = cc__now_ms();
+        fprintf(stderr, "ccc_profile: %-24s %5lld ms  wall=%lld\n",
+                name, now - t0, now);
+    }
+}
+static void cc__prof_span_arg(const char* name, const char* arg, long long t0) {
+    if (!cc__prof_on()) return;
+    {
+        long long now = cc__now_ms();
+        fprintf(stderr, "ccc_profile: %-24s %5lld ms  wall=%lld  %s\n",
+                name, now - t0, now, cc__prof_base(arg));
+    }
 }
 static int cc__take_unit_flag(int argc, char** argv, int* i,
                               CCUnitKind* as_kind, char* pin, size_t pin_cap);
@@ -480,6 +499,34 @@ static void cc_set_out_dir(const char* out_dir_opt, const char* bin_dir_opt) {
 
     snprintf(g_cache_root, sizeof(g_cache_root), "%s/.cc-build", g_out_root);
     cc_refresh_host_obj_root(NULL);
+}
+
+/* Shebang / `ccc --as=shcc` scripts are not the product. Keep their
+ * compile artifacts out of the project's `out/` so `rm -rf out` does
+ * not rebuild make.shcc on every true-cold app build. */
+static int cc__input_is_shcc(CCUnitKind unit_kind, const char* path) {
+    CCUnitKind k = unit_kind;
+    char pin[CC_CCC_VERSION_PIN_CAP];
+    char err[256];
+    pin[0] = '\0';
+    if (k == CC_UNIT_KIND_UNKNOWN && path && path[0]) {
+        if (cc_unit_resolve(path, unit_kind, NULL, &k, pin, err, sizeof(err)) != 0)
+            return 0;
+    }
+    return k == CC_UNIT_KIND_SHCC;
+}
+
+static int cc__use_script_cache_dirs(void) {
+    const char* tmp = getenv("TMPDIR");
+    char root[PATH_MAX];
+    if (!tmp || !tmp[0]) tmp = "/tmp";
+    if (snprintf(root, sizeof(root), "%s/cc-script-%ld", tmp,
+                 (long)getuid()) >= (int)sizeof(root))
+        return -1;
+    snprintf(g_out_root, sizeof(g_out_root), "%s/out", root);
+    snprintf(g_bin_root, sizeof(g_bin_root), "%s/bin", root);
+    snprintf(g_cache_root, sizeof(g_cache_root), "%s/.cc-build", g_out_root);
+    return 0;
 }
 
 // Check if a path layout is valid (runtime source exists).
@@ -2692,6 +2739,108 @@ static uint64_t cc__fold_cch_includes(uint64_t h, const char* in_path,
     return cc__fold_cch_includes_rec(h, in_path, &st);
 }
 
+typedef struct {
+    char path[PATH_MAX];
+    off_t sz;
+} CCPrefetchCcs;
+
+static int cc__prefetch_ccs_sz_cmp(const void* a, const void* b) {
+    const CCPrefetchCcs* x = (const CCPrefetchCcs*)a;
+    const CCPrefetchCcs* y = (const CCPrefetchCcs*)b;
+    if (y->sz > x->sz) return 1;
+    if (y->sz < x->sz) return -1;
+    return 0;
+}
+
+typedef struct {
+    pid_t pid[24];
+    int st[24];
+    int done[24];
+    int n;
+} CCKeepKids;
+
+static void cc__keep_add(CCKeepKids* k, pid_t p) {
+    if (!k || p <= 0 || k->n >= (int)(sizeof(k->pid) / sizeof(k->pid[0])))
+        return;
+    k->pid[k->n] = p;
+    k->st[k->n] = 0;
+    k->done[k->n] = 0;
+    k->n++;
+}
+
+static int cc__keep_note(CCKeepKids* k, pid_t p, int st) {
+    int i;
+    if (!k) return 0;
+    for (i = 0; i < k->n; i++) {
+        if (k->pid[i] == p) {
+            k->st[i] = st;
+            k->done[i] = 1;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int cc__keep_wait_all(CCKeepKids* k) {
+    int i, rc = 0;
+    if (!k) return 0;
+    for (i = 0; i < k->n; i++) {
+        if (!k->done[i]) {
+            if (waitpid(k->pid[i], &k->st[i], 0) < 0) {
+                k->st[i] = -1;
+                rc = -1;
+            }
+            k->done[i] = 1;
+        }
+        if (k->st[i] < 0 || !WIFEXITED(k->st[i]) || WEXITSTATUS(k->st[i]) != 0)
+            rc = -1;
+    }
+    return rc;
+}
+
+/* Start include-graph prefetch in the background. TU workers begin
+ * immediately; flock still serializes a shared first writer. Fat units
+ * first. Prefetch failure is not fatal — emit is the source of truth. */
+static int cc__prefetch_ccs_start(char paths[][PATH_MAX], int n, int jobs,
+                                  CCKeepKids* keep) {
+    CCPrefetchCcs* items;
+    int w, k;
+    if (n <= 0) return 0;
+    if (jobs < 1) jobs = 1;
+    if (jobs > 64) jobs = 64;
+    if (jobs > n) jobs = n;
+    items = (CCPrefetchCcs*)calloc((size_t)n, sizeof(CCPrefetchCcs));
+    if (!items) return -1;
+    for (k = 0; k < n; k++) {
+        struct stat st;
+        snprintf(items[k].path, PATH_MAX, "%s", paths[k]);
+        items[k].sz = (stat(paths[k], &st) == 0) ? st.st_size : 0;
+    }
+    qsort(items, (size_t)n, sizeof(items[0]), cc__prefetch_ccs_sz_cmp);
+    for (w = 0; w < jobs; w++) {
+        pid_t pid = fork();
+        if (pid < 0) {
+            free(items);
+            return -1;
+        }
+        if (pid == 0) {
+            int r = 0;
+            for (k = w; k < n; k += jobs) {
+                long long t = cc__now_ms();
+                if (cc_prefetch_lower_ccs_includes(items[k].path) != 0) {
+                    r = 1;
+                    break;
+                }
+                cc__prof_span_arg("prefetch_ccs", items[k].path, t);
+            }
+            _exit(r);
+        }
+        cc__keep_add(keep, pid);
+    }
+    free(items);
+    return 0;
+}
+
 static int cc__copy_file(const char* src, const char* dst) {
     if (!src || !dst || !src[0] || !dst[0]) return -1;
     FILE* in = fopen(src, "rb");
@@ -3125,6 +3274,8 @@ static int cc__build_one_target_objs(int idx,
                  g_host_obj_root[0] ? g_host_obj_root : g_cache_root, cache_stem);
 
         uint64_t emit_key = 0;
+        long long t_emit = cc__now_ms();
+        int emit_reused = 0;
         if (!is_raw_c) {
             if (cache_ok) {
                 CCFileSig in_sig;
@@ -3162,6 +3313,7 @@ static int cc__build_one_target_objs(int idx,
                 uint64_t prev = 0;
                 if (file_exists(c_out) && cc__read_u64_file(meta_path, &prev) == 0 && prev == emit_key) {
                     cc__replay_diag_sidecar(c_out);
+                    emit_reused = 1;
                 } else {
                     int err = cc__compile_with_env(base_cli_opt, src_abs, c_out, cfg);
                     if (err != 0) return err;
@@ -3172,9 +3324,12 @@ static int cc__build_one_target_objs(int idx,
                 if (err != 0) return err;
             }
         }
+        cc__prof_span_arg(emit_reused ? "tu_emit_reuse" : "tu_emit", src_abs, t_emit);
 
         if (base_cli_opt && base_cli_opt->mode != CC_MODE_EMIT_C) {
             uint64_t obj_key = 0;
+            long long t_obj = cc__now_ms();
+            int obj_reused = 0;
             if (cache_ok) {
                 uint64_t h = 1469598103934665603ULL;
                 if (is_raw_c) {
@@ -3197,7 +3352,7 @@ static int cc__build_one_target_objs(int idx,
                 obj_key = h;
                 uint64_t prev = 0;
                 if (file_exists(o_out) && cc__read_u64_file(obj_meta_path, &prev) == 0 && prev == obj_key && !cc__deps_require_rebuild(d_out, o_out)) {
-                    /* reuse */
+                    obj_reused = 1;
                 } else {
                     CCBuildOptions opt = *base_cli_opt;
                     opt.in_path = src_abs;
@@ -3211,6 +3366,7 @@ static int cc__build_one_target_objs(int idx,
                 opt.cc_flags = t_cc_flags[0] ? t_cc_flags : base_cli_opt->cc_flags;
                 if (cc__compile_c_to_obj(&opt, c_for_compile, o_out, d_out, src_dir, t_target_part, t_sysroot_part) != 0) return -1;
             }
+            cc__prof_span_arg(obj_reused ? "tu_obj_reuse" : "tu_obj", src_abs, t_obj);
 
             caches[idx].obj_paths[caches[idx].obj_count] = strdup(o_out);
             caches[idx].obj_keys[caches[idx].obj_count] = obj_key;
@@ -3278,18 +3434,6 @@ static void cc__target_obj_dir(const CCBuildTargetDecl* t, const char* build_dir
              g_host_obj_root[0] ? g_host_obj_root : g_out_root, build_id_hex, t->name);
 }
 
-static int cc__target_deps_done(int idx, const CCBuildTargetDecl* targets,
-                                size_t target_count, const CCTargetObjCache* caches) {
-    size_t di;
-    if (idx < 0 || (size_t)idx >= target_count) return 0;
-    for (di = 0; di < targets[idx].dep_count; ++di) {
-        int d = cc__find_target_idx(targets, target_count, targets[idx].deps[di]);
-        if (d < 0) return 0;
-        if (caches[d].state != 2) return 0;
-    }
-    return 1;
-}
-
 static int cc__mark_needed_targets(int idx, const CCBuildTargetDecl* targets,
                                    size_t target_count, unsigned char* needed,
                                    unsigned char* walk) {
@@ -3309,8 +3453,42 @@ static int cc__mark_needed_targets(int idx, const CCBuildTargetDecl* targets,
     return 0;
 }
 
-/* Parallel ready-set scheduler for CC_TARGET_DEPS. Fail-loud: first child
- * failure SIGTERMs the rest and returns that error. */
+/* Parallel scheduler for needed TUs. CC_TARGET_DEPS is a link-set (and
+ * cycle check), not a compile barrier: emit+cc of layout does not need
+ * document.o. Fail-loud: first child failure SIGTERMs the rest. */
+/* waitpid(-1) that does not steal overlapped runtime/prefetch children. */
+static pid_t cc__wait_build_job(const pid_t* known, int nknown, int* status,
+                                CCKeepKids* keep) {
+    for (;;) {
+        int st = 0;
+        pid_t p = waitpid(-1, &st, 0);
+        int i;
+        if (p < 0) return -1;
+        if (cc__keep_note(keep, p, st)) continue;
+        for (i = 0; i < nknown; i++) {
+            if (known[i] == p) {
+                if (status) *status = st;
+                return p;
+            }
+        }
+    }
+}
+
+static off_t cc__target_src_bytes(const CCBuildTargetDecl* t,
+                                  const char* build_dir) {
+    off_t sum = 0;
+    size_t si;
+    if (!t) return 0;
+    for (si = 0; si < t->src_count; si++) {
+        char abs[PATH_MAX];
+        struct stat st;
+        if (!t->srcs[si]) continue;
+        cc__join_path(build_dir, t->srcs[si], abs, sizeof(abs));
+        if (stat(abs, &st) == 0) sum += st.st_size;
+    }
+    return sum;
+}
+
 static int cc__build_target_objs_parallel(int chosen_idx,
                                           const CCBuildTargetDecl* targets,
                                           size_t target_count,
@@ -3323,7 +3501,8 @@ static int cc__build_target_objs_parallel(int chosen_idx,
                                           const CCFileSig* cc_sig_for_key,
                                           int cache_ok,
                                           CCTargetObjCache* caches,
-                                          int jobs) {
+                                          int jobs,
+                                          CCKeepKids* keep) {
     unsigned char needed[64];
     unsigned char walk[64];
     typedef struct {
@@ -3350,11 +3529,15 @@ static int cc__build_target_objs_parallel(int chosen_idx,
     while (remaining > 0 || nrun > 0) {
         while (nrun < jobs && fail_rc == 0) {
             int pick = -1;
+            off_t pick_sz = -1;
             for (i = 0; i < target_count; ++i) {
+                off_t sz;
                 if (!needed[i] || caches[i].state != 0) continue;
-                if (!cc__target_deps_done((int)i, targets, target_count, caches)) continue;
-                pick = (int)i;
-                break;
+                sz = cc__target_src_bytes(&targets[i], build_dir);
+                if (pick < 0 || sz > pick_sz) {
+                    pick = (int)i;
+                    pick_sz = sz;
+                }
             }
             if (pick < 0) break;
 
@@ -3392,9 +3575,12 @@ static int cc__build_target_objs_parallel(int chosen_idx,
 
         {
             int status = 0;
-            pid_t done = waitpid(-1, &status, 0);
+            pid_t known[64];
+            pid_t done;
             int slot = -1;
             int idx = -1;
+            for (i = 0; i < (size_t)nrun; ++i) known[i] = running[i].pid;
+            done = cc__wait_build_job(known, nrun, &status, keep);
             if (done < 0) {
                 perror("cc: waitpid");
                 fail_rc = -1;
@@ -3418,8 +3604,12 @@ static int cc__build_target_objs_parallel(int chosen_idx,
                 /* Cancel siblings. */
                 for (i = 0; i < (size_t)nrun; ++i) kill(running[i].pid, SIGTERM);
                 while (nrun > 0) {
+                    pid_t kp[64];
                     int st = 0;
-                    pid_t p = waitpid(-1, &st, 0);
+                    pid_t p;
+                    int k;
+                    for (k = 0; k < nrun; k++) kp[k] = running[k].pid;
+                    p = cc__wait_build_job(kp, nrun, &st, keep);
                     if (p < 0) break;
                     for (i = 0; i < (size_t)nrun; ++i) {
                         if (running[i].pid == p) {
@@ -4022,24 +4212,30 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     {
         char runtime_obj[PATH_MAX];
         int runtime_reused = 0;
+        size_t out_n = out_path ? strlen(out_path) : 0;
+        /* Emit-C (-o foo.c) does not host_build. Skip the ~1s --release
+         * runtime.o so build-graph workers can overlap it with lowering. */
+        int emit_c = (out_n >= 2 && out_path[out_n - 2] == '.' &&
+                      out_path[out_n - 1] == 'c');
         const char* target_part =
             (opt->target_flag && opt->target_flag[0]) ? opt->target_flag : NULL;
         const char* sysroot_part =
             (opt->sysroot_flag && opt->sysroot_flag[0]) ? opt->sysroot_flag : NULL;
-        if (!opt->no_runtime &&
+        if (!opt->no_runtime && !emit_c &&
             cc__ensure_runtime_obj(opt, target_part, sysroot_part, runtime_obj,
                                    sizeof(runtime_obj), &runtime_reused) != 0)
             return -1;
-        if (!opt->no_runtime && runtime_obj[0]) {
+        if (!opt->no_runtime && !emit_c && runtime_obj[0]) {
             if (setenv("SHADOW_RUNTIME_O", runtime_obj, 1) != 0) {
                 fprintf(stderr, "cc: setenv SHADOW_RUNTIME_O failed\n");
                 return -1;
             }
-        } else {
+        } else if (!emit_c) {
             unsetenv("SHADOW_RUNTIME_O");
         }
         (void)runtime_reused;
-        cc__prof_span("ensure_runtime", t_span);
+        cc__prof_span_arg(emit_c ? "ensure_runtime_skip" : "ensure_runtime",
+                          opt->in_path, t_span);
     }
     /* Fold --target / --sysroot / existing cc_flags (incl. CLI -D) + build.cc. */
     cc_flags_buf[0] = 0;
@@ -4197,13 +4393,13 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
                 WIFEXITED(status) ? WEXITSTATUS(status) : -1);
         return -1;
     }
-    cc__prof_span("shadow_lower", t_span);
+    cc__prof_span_arg("shadow_lower", opt->in_path, t_span);
     t_span = cc__now_ms();
     if (cc__finish_emit_c(orig_in[0] ? orig_in : opt->in_path, out_path,
                           opt->mode == CC_MODE_EMIT_C) != 0)
         return -1;
-    cc__prof_span("finish_emit", t_span);
-    cc__prof_span("run_shadow_lower", t_fn);
+    cc__prof_span_arg("finish_emit", opt->in_path, t_span);
+    cc__prof_span_arg("run_shadow_lower", opt->in_path, t_fn);
     return 0;
 }
 
@@ -4844,7 +5040,11 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
         strncat(cmd, " -o ", sizeof(cmd) - strlen(cmd) - 1);
         strncat(cmd, obj_path, sizeof(cmd) - strlen(cmd) - 1);
     }
-    if (run_cmd(cmd, opt->verbose) != 0) return -1;
+    {
+        long long t_cc = cc__now_ms();
+        if (run_cmd(cmd, opt->verbose) != 0) return -1;
+        cc__prof_span_arg("host_cc", c_path ? c_path : obj_path, t_cc);
+    }
     return 0;
 }
 
@@ -5130,8 +5330,34 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
         }
     }
 
-    if (run_cmd(cmds.compile, opt->verbose) != 0) return -1;
-    cc__write_file_text(recipe_path, recipe);
+    {
+        char lock_path[PATH_MAX];
+        int lock_fd = -1;
+        snprintf(lock_path, sizeof(lock_path), "%s.lock", runtime_obj);
+        lock_fd = open(lock_path, O_CREAT | O_RDWR, 0644);
+        if (lock_fd >= 0) flock(lock_fd, LOCK_EX);
+        if (file_exists(runtime_obj) && cc__file_text_equals(recipe_path, recipe)) {
+            struct stat obj_st;
+            if (stat(runtime_obj, &obj_st) == 0 &&
+                obj_st.st_mtime >= cc__runtime_inputs_mtime()) {
+                strncpy(out_runtime_path, runtime_obj, out_runtime_cap);
+                out_runtime_path[out_runtime_cap - 1] = '\0';
+                if (out_reused) *out_reused = 1;
+                if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
+                return 0;
+            }
+        }
+        {
+            long long t_rt = cc__now_ms();
+            if (run_cmd(cmds.compile, opt->verbose) != 0) {
+                if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
+                return -1;
+            }
+            cc__prof_span("runtime_cc", t_rt);
+        }
+        cc__write_file_text(recipe_path, recipe);
+        if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
+    }
     strncpy(out_runtime_path, runtime_obj, out_runtime_cap);
     out_runtime_path[out_runtime_cap - 1] = '\0';
     if (out_reused) *out_reused = 0;
@@ -5569,6 +5795,12 @@ static int run_build_mode(int argc, char** argv) {
     if (step != CC_BUILD_STEP_TEST && pos_count == 0 && !build_path_for_help) {
         fprintf(stderr, "cc: missing input (and no build.cc in scope)\n");
         goto parse_fail;
+    }
+
+    if (!out_dir && !bin_dir && !user_out && pos_count > 0 &&
+        cc__input_is_shcc(unit_kind, pos_args[0])) {
+        if (cc__use_script_cache_dirs() == 0)
+            cc_refresh_host_obj_root(cc_bin);
     }
 
     if (ensure_out_dir() != 0) {
@@ -6063,6 +6295,8 @@ static int run_build_mode(int argc, char** argv) {
             memset(caches, 0, sizeof(caches));
             char chain[64][128];
             memset(chain, 0, sizeof(chain));
+            char prefetch_ccs[128][PATH_MAX];
+            int nprefetch = 0;
             {
                 char abs_ccs[128][PATH_MAX];
                 const char* ptrs[128];
@@ -6088,9 +6322,12 @@ static int run_build_mode(int argc, char** argv) {
                             cc__join_path(build_dir, s, abs_ccs[nc],
                                           sizeof(abs_ccs[nc]));
                             ptrs[nc] = abs_ccs[nc];
+                            snprintf(prefetch_ccs[nc], PATH_MAX, "%s",
+                                     abs_ccs[nc]);
                             nc++;
                         }
                     }
+                    nprefetch = nc;
                     if (nc > 0 && cc_check_link_set_faces(ptrs, nc) != 0) {
                         cc_build_free_targets(targets, target_count, def_name);
                         free(targets);
@@ -6098,8 +6335,65 @@ static int run_build_mode(int argc, char** argv) {
                     }
                 }
             }
+            /* Overlap --release runtime.o with TU emit. Workers emit .c and
+             * skip ensure_runtime; flock inside ensure serializes leftovers. */
+            pid_t rt_pid = -1;
+            if (!no_runtime) {
+                long long t_fork = cc__now_ms();
+                rt_pid = fork();
+                if (rt_pid == 0) {
+                    char warm_target[256];
+                    char warm_sysroot[256];
+                    char warm_rt[PATH_MAX];
+                    int warm_reused = 0;
+                    cc__make_cross_parts(chosen,
+                                         target_flag ? target_flag : "",
+                                         sysroot_flag ? sysroot_flag : "",
+                                         warm_target, sizeof(warm_target),
+                                         warm_sysroot, sizeof(warm_sysroot));
+                    int rc = cc__ensure_runtime_obj(&base_opt, warm_target,
+                                                    warm_sysroot, warm_rt,
+                                                    sizeof(warm_rt),
+                                                    &warm_reused);
+                    _exit(rc == 0 ? 0 : 1);
+                }
+                if (rt_pid < 0) {
+                    char warm_target[256];
+                    char warm_sysroot[256];
+                    char warm_rt[PATH_MAX];
+                    int warm_reused = 0;
+                    cc__make_cross_parts(chosen,
+                                         target_flag ? target_flag : "",
+                                         sysroot_flag ? sysroot_flag : "",
+                                         warm_target, sizeof(warm_target),
+                                         warm_sysroot, sizeof(warm_sysroot));
+                    if (cc__ensure_runtime_obj(&base_opt, warm_target,
+                                               warm_sysroot, warm_rt,
+                                               sizeof(warm_rt),
+                                               &warm_reused) != 0) {
+                        cc_build_free_targets(targets, target_count, def_name);
+                        free(targets);
+                        goto parse_fail;
+                    }
+                    cc__prof_span("ensure_runtime_once", t_fork);
+                } else {
+                    cc__prof_span("ensure_runtime_fork", t_fork);
+                }
+            }
             int jobs = cc__resolve_build_jobs(g_build_jobs);
             int r;
+            CCKeepKids keep;
+            memset(&keep, 0, sizeof(keep));
+            if (rt_pid > 0) cc__keep_add(&keep, rt_pid);
+            if (nprefetch > 0) {
+                long long t_pf = cc__now_ms();
+                if (cc__prefetch_ccs_start(prefetch_ccs, nprefetch, jobs,
+                                           &keep) != 0) {
+                    /* Start failed: TUs still lower on demand. */
+                }
+                cc__prof_span("prefetch_ccs_fork", t_pf);
+            }
+            long long t_objs = cc__now_ms();
             if (jobs <= 1) {
                 r = cc__build_target_objs_rec(chosen_idx, targets, target_count, build_dir, &cfg, &base_opt,
                                               target_flag ? target_flag : "", sysroot_flag ? sysroot_flag : "",
@@ -6107,7 +6401,30 @@ static int run_build_mode(int argc, char** argv) {
             } else {
                 r = cc__build_target_objs_parallel(chosen_idx, targets, target_count, build_dir, &cfg, &base_opt,
                                                    target_flag ? target_flag : "", sysroot_flag ? sysroot_flag : "",
-                                                   &build_sig, &cc_sig, cache_ok, caches, jobs);
+                                                   &build_sig, &cc_sig, cache_ok, caches, jobs,
+                                                   &keep);
+            }
+            cc__prof_span("build_objs", t_objs);
+            {
+                long long t_w = cc__now_ms();
+                int bg = cc__keep_wait_all(&keep);
+                cc__prof_span("bg_wait", t_w);
+                if (bg != 0 && r == 0 && rt_pid > 0) {
+                    /* Prefetch is best-effort. runtime.o is not. */
+                    int i, rt_bad = 0;
+                    for (i = 0; i < keep.n; i++) {
+                        if (keep.pid[i] == rt_pid &&
+                            (keep.st[i] < 0 || !WIFEXITED(keep.st[i]) ||
+                             WEXITSTATUS(keep.st[i]) != 0))
+                            rt_bad = 1;
+                    }
+                    if (rt_bad) {
+                        fprintf(stderr, "cc: runtime.o compile failed\n");
+                        cc_build_free_targets(targets, target_count, def_name);
+                        free(targets);
+                        goto parse_fail;
+                    }
+                }
             }
             if (r == -2) {
                 fprintf(stderr, "cc: cycle in CC_TARGET_DEPS\n");
@@ -6174,13 +6491,18 @@ static int run_build_mode(int argc, char** argv) {
 
             char runtime_path[PATH_MAX];
             int runtime_reused = 0;
-            if (cc__ensure_runtime_obj(&base_opt, chosen_target_part, chosen_sysroot_part, runtime_path, sizeof(runtime_path), &runtime_reused) != 0) {
-                cc_build_free_targets(targets, target_count, def_name);
-                free(targets);
-                goto parse_fail;
+            {
+                long long t_rt = cc__now_ms();
+                if (cc__ensure_runtime_obj(&base_opt, chosen_target_part, chosen_sysroot_part, runtime_path, sizeof(runtime_path), &runtime_reused) != 0) {
+                    cc_build_free_targets(targets, target_count, def_name);
+                    free(targets);
+                    goto parse_fail;
+                }
+                cc__prof_span("ensure_runtime_link", t_rt);
             }
 
             int link_reused = 0;
+            long long t_link = cc__now_ms();
             if (cache_ok) {
                 char out_stem[128];
                 cc__stem_from_path(user_out, out_stem, sizeof(out_stem));
@@ -6227,6 +6549,7 @@ static int run_build_mode(int argc, char** argv) {
                     goto parse_fail;
                 }
             }
+            cc__prof_span(link_reused ? "link_reuse" : "link", t_link);
 
             if (summary) {
                 fprintf(stderr, "cc build summary:\n  step: %s\n  target: %s\n  out_dir: %s\n  obj: %zu\n  bin: %s (%s)\n",
@@ -7946,6 +8269,9 @@ int main(int argc, char **argv) {
     cc_flags = combined_cc_flags_main[0] ? combined_cc_flags_main : cc_flags;
 
     cc_set_out_dir(out_dir, bin_dir);
+    if (!out_dir && !bin_dir && !user_out && pos_count > 0 &&
+        cc__input_is_shcc(unit_kind, pos_args[0]))
+        (void)cc__use_script_cache_dirs();
     cc_refresh_host_obj_root(cc_bin);
     if (ensure_out_dir() != 0) {
         fprintf(stderr, "cc: failed to create out dirs under: %s\n", g_out_root);

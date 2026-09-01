@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 
 #include "preprocess/comptime_prepare.h"
 #include "preprocess/emit_plan.h"
@@ -12,6 +13,32 @@
 #include "util/path.h"
 #include "util/text.h"
 #include "util/text_scan.h"
+
+static int shadow_ct_prof_on(void) {
+    static int once = 0, on = 0;
+    if (!once) {
+        const char* e = getenv("CC_SHADOW_PROFILE");
+        if (!e || !e[0] || e[0] == '0') e = getenv("CC_CCC_PROFILE");
+        on = e && e[0] && e[0] != '0';
+        once = 1;
+    }
+    return on;
+}
+
+static long long shadow_ct_now_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+static void shadow_ct_prof(const char* name, long long t0) {
+    if (!shadow_ct_prof_on()) return;
+    {
+        long long now = shadow_ct_now_ms();
+        fprintf(stderr, "ct_profile: %-22s %4lld ms  wall=%lld\n", name,
+                now - t0, now);
+    }
+}
 
 static void shadow_ct_ensure_repo_root(const char* input_path) {
     char root[1024];
@@ -370,8 +397,12 @@ static int shadow_ct_apply_local_cch_rewrite(char** buf, size_t* n,
                                             const char* input_path) {
     char* lowered;
     if (!buf || !*buf || !n) return -1;
-    lowered = cc_rewrite_local_cch_includes_to_lowered_headers(*buf, *n,
-                                                              input_path);
+    {
+        long long t0 = shadow_ct_now_ms();
+        lowered = cc_rewrite_local_cch_includes_to_lowered_headers(*buf, *n,
+                                                                  input_path);
+        shadow_ct_prof("cch_rewrite", t0);
+    }
     if (cc_local_header_lower_failed()) {
         free(lowered);
         return -1;
@@ -481,22 +512,33 @@ static char* shadow_ct_load_with_harvest(const char* input_path, size_t* out_n) 
     buf = shadow_ct_read_file(input_path, &n);
     if (!buf) return NULL;
     cc_reset_included_cch_sources();
-    if (shadow_ct_apply_local_cch_rewrite(&buf, &n, input_path) != 0) {
-        free(buf);
-        return NULL;
+    {
+        long long t0 = shadow_ct_now_ms();
+        if (shadow_ct_apply_local_cch_rewrite(&buf, &n, input_path) != 0) {
+            free(buf);
+            return NULL;
+        }
+        shadow_ct_prof("load_rewrite", t0);
     }
     {
+        long long t0 = shadow_ct_now_ms();
         char* lowered = cc_rewrite_system_cch_includes_to_lowered_headers(buf, n);
         if (lowered) {
             free(buf);
             buf = lowered;
             n = strlen(buf);
         }
+        shadow_ct_prof("load_sysinc", t0);
     }
-    shadow_ct_append_harvest(&buf, &n, cc_harvest_local_header_factories());
-    shadow_ct_append_harvest(&buf, &n, cc_harvest_header_comptime_functions());
-    shadow_ct_append_harvest(&buf, &n, cc_harvest_local_header_comptime_blocks());
     {
+        long long t0 = shadow_ct_now_ms();
+        shadow_ct_append_harvest(&buf, &n, cc_harvest_local_header_factories());
+        shadow_ct_append_harvest(&buf, &n, cc_harvest_header_comptime_functions());
+        shadow_ct_append_harvest(&buf, &n, cc_harvest_local_header_comptime_blocks());
+        shadow_ct_prof("load_harvest", t0);
+    }
+    {
+        long long t0 = shadow_ct_now_ms();
         char* th = cc_rewrite_typehooks_to_register(buf, n);
         if (th) {
             free(buf);
@@ -507,9 +549,93 @@ static char* shadow_ct_load_with_harvest(const char* input_path, size_t* out_n) 
             free(buf);
             return NULL;
         }
+        shadow_ct_prof("load_typehooks", t0);
     }
     if (out_n) *out_n = n;
     return buf;
+}
+
+/* True when this file (or a quoted `.cch` it includes) might need the
+ * type-pass harvest. Full rewrite+harvest just to return NULL was the
+ * bulk of `type_pass_skip` on projects with no `@comptime`. */
+static int shadow_ct_type_pass_needles(const char* src, size_t n) {
+    /* Same second gate as after harvest: `@typehooks` → `cc_type_register`
+     * does not need the field-registry parse. Only these do. */
+    return cc_contains_token_top_level(src, n, "type_of") ||
+           cc_contains_token_top_level(src, n, "cc_reflect_field_") ||
+           cc_contains_token_top_level(src, n, "__cc_rf_");
+}
+
+static int shadow_ct_quoted_cch_rel(const char* line, size_t len, char* rel,
+                                    size_t cap) {
+    size_t i = 0, q, e;
+    while (i < len && (line[i] == ' ' || line[i] == '\t')) i++;
+    if (i >= len || line[i] != '#') return 0;
+    i++;
+    while (i < len && (line[i] == ' ' || line[i] == '\t')) i++;
+    if (i + 7 > len || memcmp(line + i, "include", 7) != 0) return 0;
+    i += 7;
+    while (i < len && (line[i] == ' ' || line[i] == '\t')) i++;
+    if (i >= len || line[i] != '"') return 0;
+    i++;
+    q = i;
+    while (i < len && line[i] != '"') i++;
+    if (i >= len || i < q + 4) return 0;
+    e = i - q;
+    if (memcmp(line + q + e - 4, ".cch", 4) != 0) return 0;
+    if (e >= cap) return 0;
+    memcpy(rel, line + q, e);
+    rel[e] = 0;
+    return 1;
+}
+
+static int shadow_ct_type_pass_tree_needed(const char* path, const char* alt_dir,
+                                          int depth) {
+    char* buf;
+    size_t n = 0, off = 0;
+    char dir[1024];
+    const char* slash;
+    if (!path || !path[0] || depth > 24) return 0;
+    buf = shadow_ct_read_file(path, &n);
+    if (!buf) return 0;
+    if (shadow_ct_type_pass_needles(buf, n)) {
+        free(buf);
+        return 1;
+    }
+    slash = strrchr(path, '/');
+    if (slash) {
+        size_t dlen = (size_t)(slash - path);
+        if (dlen >= sizeof(dir)) dlen = sizeof(dir) - 1;
+        memcpy(dir, path, dlen);
+        dir[dlen] = 0;
+    } else {
+        memcpy(dir, ".", 2);
+    }
+    while (off < n) {
+        size_t end = off;
+        char rel[512];
+        char child[1024];
+        int hit = 0;
+        while (end < n && buf[end] != '\n') end++;
+        if (shadow_ct_quoted_cch_rel(buf + off, end - off, rel, sizeof(rel))) {
+            if (rel[0] == '/')
+                snprintf(child, sizeof(child), "%s", rel);
+            else
+                snprintf(child, sizeof(child), "%s/%s", dir, rel);
+            hit = shadow_ct_type_pass_tree_needed(child, NULL, depth + 1);
+            if (!hit && alt_dir && alt_dir[0] && rel[0] != '/') {
+                snprintf(child, sizeof(child), "%s/%s", alt_dir, rel);
+                hit = shadow_ct_type_pass_tree_needed(child, NULL, depth + 1);
+            }
+            if (hit) {
+                free(buf);
+                return 1;
+            }
+        }
+        off = (end < n) ? end + 1 : end;
+    }
+    free(buf);
+    return 0;
 }
 
 char* shadow_comptime_type_pass_src(const char* input_path, size_t* out_n) {
@@ -519,6 +645,13 @@ char* shadow_comptime_type_pass_src(const char* input_path, size_t* out_n) {
     if (out_n) *out_n = 0;
     if (!input_path || !input_path[0]) return NULL;
     shadow_ct_ensure_repo_root(input_path);
+    {
+        const char* qd = getenv("SHADOW_QUOTE_DIR");
+        if (!shadow_ct_type_pass_tree_needed(input_path, qd, 0)) {
+            cc_ct_field_reg_set_type_pass_skipped(0);
+            return NULL;
+        }
+    }
     buf = shadow_ct_load_with_harvest(input_path, &n);
     if (!buf) return NULL;
     /* Skip the type-pass parse+harvest when the TU (incl. harvest) has no
@@ -554,24 +687,36 @@ int shadow_comptime_exec_file(const char* input_path, char** out_stage1_src,
     if (out_stage1_len) *out_stage1_len = 0;
     if (!input_path || !input_path[0]) return -1;
     shadow_ct_ensure_repo_root(input_path);
-    buf = shadow_ct_load_with_harvest(input_path, &n);
+    {
+        long long t0 = shadow_ct_now_ms();
+        buf = shadow_ct_load_with_harvest(input_path, &n);
+        shadow_ct_prof("exec_load", t0);
+    }
     if (!buf) {
         fprintf(stderr, "%s:1:1: error: comptime: cannot read input\n",
                 input_path);
         return -1;
     }
 
-    if (cc_comptime_prepare_source(&buf, &n, input_path) != 0) {
-        free(buf);
-        return -1;
+    {
+        long long t0 = shadow_ct_now_ms();
+        if (cc_comptime_prepare_source(&buf, &n, input_path) != 0) {
+            free(buf);
+            return -1;
+        }
+        shadow_ct_prof("exec_prepare", t0);
     }
     cc_emit_plan_clear_generic_factory_registrations();
     cc_emit_plan_clear_comptime_fragments();
     /* Field is_as comes from type-pass registry via cc_reflect_field_*;
      * reflect_src stays Concurrent-C for methods / fallbacks. */
-    if (cc_emit_plan_exec_comptime_blocks(buf, n, input_path) != 0) {
-        free(buf);
-        return -1;
+    {
+        long long t0 = shadow_ct_now_ms();
+        if (cc_emit_plan_exec_comptime_blocks(buf, n, input_path) != 0) {
+            free(buf);
+            return -1;
+        }
+        shadow_ct_prof("exec_blocks", t0);
     }
     cc_emit_plan_collect_comptime_emits(buf, n);
     cc_emit_plan_clear_comptime_instantiations();
@@ -579,7 +724,9 @@ int shadow_comptime_exec_file(const char* input_path, char** out_stage1_src,
     free(buf);
 
     if (out_stage1_src) {
+        long long t0 = shadow_ct_now_ms();
         char* s1 = shadow_ct_stage1_src(input_path, out_stage1_len);
+        shadow_ct_prof("exec_stage1", t0);
         if (!s1) return -1;
         *out_stage1_src = s1;
     }

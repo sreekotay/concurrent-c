@@ -166,6 +166,10 @@ char* cc_preprocess_comptime_source(const char* input_path);
 /* Link-set face check: 2+ unowned splices of one face, or extract of an
  * owned face whose owner `.ccs` is not in `ccs_paths`. 0 ok, -1 error. */
 int cc_check_link_set_faces(const char* const* ccs_paths, int n);
+/* Rewrite quoted local `.cch` includes of `ccs_path` so on-disk `.h`
+ * files exist before TU workers. Uses the `.ccs` as rewrite root (same
+ * as emit). 0 ok, -1 if a local header could not be lowered. */
+int cc_prefetch_lower_ccs_includes(const char* ccs_path);
 
 char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
                                                        size_t input_len,

@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/file.h>
+#include <fcntl.h>
 #include <dirent.h>
 #include <unistd.h>
 #include <stdarg.h>
@@ -46,6 +49,39 @@
 #include "cccportable.h"
 
 extern long g_cc_pass_error_count;
+
+static int cc__pp_prof_on(void) {
+    static int once = 0, on = 0;
+    if (!once) {
+        const char* e = getenv("CC_SHADOW_PROFILE");
+        if (!e || !e[0] || e[0] == '0') e = getenv("CC_CCC_PROFILE");
+        on = e && e[0] && e[0] != '0';
+        once = 1;
+    }
+    return on;
+}
+
+static long long cc__pp_now_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+static const char* cc__pp_base(const char* path) {
+    const char* s;
+    if (!path || !path[0]) return "?";
+    s = strrchr(path, '/');
+    return s ? s + 1 : path;
+}
+
+static void cc__pp_prof(const char* name, const char* path, long long t0) {
+    if (!cc__pp_prof_on()) return;
+    {
+        long long now = cc__pp_now_ms();
+        fprintf(stderr, "pp_profile: %-16s %4lld ms  wall=%lld  %s\n", name,
+                now - t0, now, cc__pp_base(path));
+    }
+}
 
 /* Dest-trap dedup: per-TU (reset via cc_ufcs_reset_dest_trap_dedup). */
 static char g_ufcs_dest_reported[64][256];
@@ -15606,13 +15642,71 @@ static int cc__cch_includer_owner_ccs_path(const char* abs_cch, char* out, size_
     return 0;
 }
 
+/* Per-process owner path. A miss still walks the directory once; without
+ * this, every `#include` of an unowned face (ui.cch) re-reads every
+ * same-dir `.ccs` and `.cch`. */
+typedef struct {
+    char* face;
+    char* owner; /* NULL = no owner */
+} CCCchOwnerMemo;
+
+static CCCchOwnerMemo* g_cch_owner_memo = NULL;
+static size_t g_cch_owner_memo_count = 0;
+static size_t g_cch_owner_memo_cap = 0;
+
+static CCCchOwnerMemo* cc__cch_owner_memo_find(const char* abs_cch) {
+    size_t i;
+    if (!abs_cch) return NULL;
+    for (i = 0; i < g_cch_owner_memo_count; i++) {
+        if (strcmp(g_cch_owner_memo[i].face, abs_cch) == 0)
+            return &g_cch_owner_memo[i];
+    }
+    return NULL;
+}
+
+static void cc__cch_owner_memo_set(const char* abs_cch, const char* owner) {
+    CCCchOwnerMemo* e = cc__cch_owner_memo_find(abs_cch);
+    char* copy = NULL;
+    if (e) {
+        free(e->owner);
+        e->owner = (owner && owner[0]) ? strdup(owner) : NULL;
+        return;
+    }
+    if (g_cch_owner_memo_count == g_cch_owner_memo_cap) {
+        size_t cap = g_cch_owner_memo_cap ? g_cch_owner_memo_cap * 2 : 8;
+        CCCchOwnerMemo* nv = (CCCchOwnerMemo*)realloc(g_cch_owner_memo,
+                                                      cap * sizeof(*nv));
+        if (!nv) return;
+        g_cch_owner_memo = nv;
+        g_cch_owner_memo_cap = cap;
+    }
+    copy = strdup(abs_cch);
+    if (!copy) return;
+    g_cch_owner_memo[g_cch_owner_memo_count].face = copy;
+    g_cch_owner_memo[g_cch_owner_memo_count].owner =
+        (owner && owner[0]) ? strdup(owner) : NULL;
+    g_cch_owner_memo_count++;
+}
+
 /* Owner `.ccs`: same-stem / chapter prefix, else a same-dir `.ccs`
  * that includes this chapter, else a same-dir face that includes this
  * one and already has an owner (`workspace.cch` → `ui_types.cch`). */
 static int cc__cch_owner_ccs_path(const char* abs_cch, char* out, size_t cap) {
-    if (cc__cch_stem_owner_ccs_path(abs_cch, out, cap)) return 1;
-    if (cc__cch_direct_ccs_owner_path(abs_cch, out, cap)) return 1;
-    return cc__cch_includer_owner_ccs_path(abs_cch, out, cap, 0);
+    CCCchOwnerMemo* hit;
+    char found[PATH_MAX];
+    int ok;
+    if (!abs_cch || !out || cap < 5) return 0;
+    hit = cc__cch_owner_memo_find(abs_cch);
+    if (hit) {
+        if (!hit->owner || !hit->owner[0]) return 0;
+        return snprintf(out, cap, "%s", hit->owner) < (int)cap;
+    }
+    ok = cc__cch_stem_owner_ccs_path(abs_cch, found, sizeof(found)) ||
+         cc__cch_direct_ccs_owner_path(abs_cch, found, sizeof(found)) ||
+         cc__cch_includer_owner_ccs_path(abs_cch, found, sizeof(found), 0);
+    cc__cch_owner_memo_set(abs_cch, ok ? found : "");
+    if (!ok) return 0;
+    return snprintf(out, cap, "%s", found) < (int)cap;
 }
 
 static int cc__cch_has_owner_ccs(const char* abs_cch) {
@@ -17900,6 +17994,7 @@ static int cc__splice_impl_cch_into(char** out, size_t* out_len, size_t* out_cap
     const char* use;
     size_t use_len;
     char ld[PATH_MAX + 64];
+    long long t_splice = cc__pp_now_ms();
     if (cc__read_file_text(child_abs, &body, &body_len) != 0 || !body) {
         free(body);
         return -1;
@@ -17947,12 +18042,6 @@ static int cc__splice_impl_cch_into(char** out, size_t* out_len, size_t* out_cap
         use = rew;
         use_len = strlen(rew);
     }
-    if (cc__cch_root_is_defining_ccs(child_abs)) {
-        /* Owner splice keeps `static` as written. */
-    } else if (!cc__cch_has_owner_ccs(child_abs)) {
-        fprintf(stderr, "cc: note: splicing %s into %s (no owner)\n",
-                child_abs, current_path ? current_path : "?");
-    }
     cc_sb_append_cstr(out, out_len, out_cap, CC_IMPL_CCH_BEGIN_MARK);
     cc_sb_append_cstr(out, out_len, out_cap, child_abs);
     cc_sb_append_cstr(out, out_len, out_cap, "*/\n");
@@ -17968,18 +18057,58 @@ static int cc__splice_impl_cch_into(char** out, size_t* out_len, size_t* out_cap
     cc_sb_append_cstr(out, out_len, out_cap, ld);
     free(rew);
     free(body);
+    cc__pp_prof("splice", child_abs, t_splice);
     return 0;
+}
+
+static int cc__lowered_h_fresh(const char* abs_cch, const char* lowered_h) {
+    struct stat hs, cs, os;
+    char own[PATH_MAX];
+    if (!abs_cch || !lowered_h || stat(lowered_h, &hs) != 0 || hs.st_size == 0)
+        return 0;
+    if (stat(abs_cch, &cs) != 0) return 0;
+    if (hs.st_mtime < cs.st_mtime) return 0;
+    if (cc__cch_owner_ccs_path(abs_cch, own, sizeof(own)) &&
+        stat(own, &os) == 0 && hs.st_mtime < os.st_mtime)
+        return 0;
+    return 1;
+}
+
+static const char* cc__adopt_lowered_h(const char* abs_src, const char* lowered_path) {
+    size_t i;
+    for (i = 0; i < g_lowered_local_header_count; i++) {
+        if (g_lowered_local_headers[i].source_path &&
+            strcmp(g_lowered_local_headers[i].source_path, abs_src) == 0) {
+            g_lowered_local_headers[i].in_progress = 0;
+            g_lowered_local_headers[i].ready = 1;
+            return g_lowered_local_headers[i].lowered_path;
+        }
+    }
+    if (cc__ensure_lowered_local_header_capacity(g_lowered_local_header_count + 1) != 0)
+        return NULL;
+    i = g_lowered_local_header_count++;
+    memset(&g_lowered_local_headers[i], 0, sizeof(g_lowered_local_headers[i]));
+    g_lowered_local_headers[i].source_path = strdup(abs_src);
+    g_lowered_local_headers[i].lowered_path = strdup(lowered_path);
+    if (!g_lowered_local_headers[i].source_path ||
+        !g_lowered_local_headers[i].lowered_path)
+        return NULL;
+    g_lowered_local_headers[i].in_progress = 0;
+    g_lowered_local_headers[i].ready = 1;
+    return g_lowered_local_headers[i].lowered_path;
 }
 
 static const char* cc__lower_local_cch_header(const char* source_path) {
     char abs_src[PATH_MAX];
     char lowered_path[PATH_MAX];
     char lowered_dir[PATH_MAX];
+    char lock_path[PATH_MAX];
     char* input = NULL;
     char* rewritten = NULL;
     char* lowered = NULL;
     size_t input_len = 0;
     size_t lowered_idx = (size_t)-1;
+    int lock_fd = -1;
     if (!source_path || !source_path[0]) return NULL;
     if (!realpath(source_path, abs_src)) return NULL;
     cc__register_included_cch_tree(abs_src);
@@ -17994,6 +18123,7 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
                 return g_lowered_local_headers[i].lowered_path;
         }
     }
+    long long t_lower = cc__pp_now_ms();
     /* A give-up used to leave the include pointing at the `.cch`, so the
      * later parse reported something unrelated.  Fail at this include. */
 #define CC__LOWER_ABANDON_SLOT()                                               \
@@ -18012,6 +18142,7 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
                 abs_src, (step), strerror(errno));                             \
         g_local_cch_lower_failed = 1;                                          \
         CC__LOWER_ABANDON_SLOT();                                              \
+        if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }         \
         return NULL;                                                           \
     } while (0)
     if (cc__build_stable_lowered_header_path(abs_src, lowered_path, sizeof(lowered_path)) != 0)
@@ -18020,6 +18151,17 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
         CC__LOWER_GIVE_UP("dirname");
     if (cc__mkpath_local(lowered_dir) != 0)
         CC__LOWER_GIVE_UP("mkdir -p");
+    snprintf(lock_path, sizeof(lock_path), "%s.lock", lowered_path);
+    lock_fd = open(lock_path, O_CREAT | O_RDWR, 0644);
+    if (lock_fd >= 0) flock(lock_fd, LOCK_EX);
+    if (cc__lowered_h_fresh(abs_src, lowered_path)) {
+        const char* hit = cc__adopt_lowered_h(abs_src, lowered_path);
+        if (hit) {
+            if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
+            cc__pp_prof("lower_reuse", abs_src, t_lower);
+            return hit;
+        }
+    }
     if (cc__read_file_text(abs_src, &input, &input_len) != 0)
         CC__LOWER_GIVE_UP("read");
     if (cc__local_cch_is_impl_grade(abs_src) && !cc__cch_has_owner_ccs(abs_src)) {
@@ -18078,12 +18220,9 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     /* Owner impl bodies carry `?>` / statement `!>` the header subset
      * cannot parse. Guests only need prototypes — strip before lower. */
     if (cc__local_cch_is_impl_grade(abs_src) && cc__cch_has_owner_ccs(abs_src)) {
-        char own[PATH_MAX];
         const char* face = rewritten ? rewritten : input;
         size_t face_n = rewritten ? strlen(rewritten) : input_len;
         char* pre;
-        if (cc__cch_owner_ccs_path(abs_src, own, sizeof(own)))
-            fprintf(stderr, "cc: note: bodies in %s\n", own);
         pre = cc__strip_cch_function_bodies(face, face_n);
         if (pre) {
             free(rewritten);
@@ -18091,9 +18230,13 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
         }
     }
     g_header_lower_preserve_tu_state++;
-    lowered = cc_lower_header_string(rewritten ? rewritten : input,
-                                     rewritten ? strlen(rewritten) : input_len,
-                                     abs_src);
+    {
+        long long t_hs = cc__pp_now_ms();
+        lowered = cc_lower_header_string(rewritten ? rewritten : input,
+                                         rewritten ? strlen(rewritten) : input_len,
+                                         abs_src);
+        cc__pp_prof("header_string", abs_src, t_hs);
+    }
     g_header_lower_preserve_tu_state--;
     /* Never write raw `.cch` into the `.h` — that looks like a successful lower. */
     if (!lowered) CC__LOWER_GIVE_UP("lower");
@@ -18167,6 +18310,8 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     free(input);
     free(rewritten);
     free(lowered);
+    if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
+    cc__pp_prof("lower_cch", abs_src, t_lower);
     return g_lowered_local_headers[lowered_idx].lowered_path;
 }
 
@@ -18471,6 +18616,20 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
         return NULL;
     }
     return out;
+}
+
+int cc_prefetch_lower_ccs_includes(const char* ccs_path) {
+    char* src = NULL;
+    char* rewritten = NULL;
+    size_t n = 0;
+    if (!ccs_path || !ccs_path[0]) return 0;
+    if (cc__read_file_text(ccs_path, &src, &n) != 0 || !src)
+        return -1;
+    rewritten = cc_rewrite_local_cch_includes_to_lowered_headers(src, n,
+                                                                ccs_path);
+    free(src);
+    free(rewritten);
+    return cc_local_header_lower_failed() ? -1 : 0;
 }
 
 int cc_check_link_set_faces(const char* const* ccs_paths, int n) {
