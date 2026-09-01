@@ -6,6 +6,6 @@
 #include "quote_cch_guest_leaf.cch"
 #include "quote_cch_peer_mod.cch"
 
-static int host_mod_tag(void) { return 1; }
+int host_mod_tag(void) { return 1; }
 
 #endif

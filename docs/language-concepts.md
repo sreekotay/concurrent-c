@@ -332,8 +332,15 @@ arm (`CCParallel h = @parallel { work(); } !>;`) is the worker
 `!>.wait()!>`.
 `h.wait()` joins them and publishes their writes. Pointer names copy
 the pointer; other captured names are the frame object and must
-outlive `.wait()`. `h.cancelled` is
+outlive `.wait()`. `h.cancelled` and `h.paused` are
 atomic. `h.cancel()` is `true` when this call stored live→cancelled.
+`h.pause()` / `h.resume()` flip `h.paused` on a live dest; poll
+`h.paused` or `h.paused()`. They do not require `.wait()`.
+The construct honors `paused` at thunk entry, the next
+`@parallel for` half or leaf iteration, wait-for enter, and after
+`@stage` wait (`cc_parallel_honor`). Cancel is a mark and does not
+skip a thunk. It wakes parks on attached fibers. `.wait()` does not
+resume. Pause does not complete a `recv` or `@stage` wait.
 Spawned arms do not inherit `@with_deadline`; they poll `h.cancelled`.
 When several arms share one deadline, name it (`as dl`) and use `dl`,
 or write `@with_deadline(dl)` to make that object current.
@@ -347,7 +354,7 @@ waits that nursery; `n.leave()` consumes the handle without joining).
 | `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; writes exactly one outer name. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. The body always runs. |
 | `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; a span of 0 or 1 is a plain `for`. `return` is `break` then `return` from the function after the join. |
-| `@parallel wait (ts) for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished. A targeting `break` is `ok(false)` and must be bound. `return` drains, then leaves the function. `@stage` is a handshake, not a Result. |
+| `@parallel wait (ts) for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished. `CCParallel h = … !>;` is live during enter; the statement joins. A targeting `break` is `ok(false)` and must be bound. `return` drains, then leaves the function. `@stage` is a handshake, not a Result. |
 
 ```c
 int a = 0, b = 0;

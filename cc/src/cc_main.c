@@ -856,7 +856,7 @@ static int cc__finish_emit_c(const char* orig_in, const char* out_path,
     if (orig_in && orig_in[0]) {
         raw = cc__read_all_file(orig_in, &n);
         if (raw) {
-            if (cc_file_start_pragmas(raw, n, &po, &lo, perr, sizeof(perr)) != 0) {
+            if (cc_file_start_pragmas(raw, n, &po, &lo, NULL, perr, sizeof(perr)) != 0) {
                 fprintf(stderr, "%s: %s\n", orig_in, perr);
                 free(raw);
                 return -1;
@@ -4230,6 +4230,9 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         if (uk == CC_UNIT_KIND_CCS || uk == CC_UNIT_KIND_SHCC ||
             uk == CC_UNIT_KIND_CCH) {
         if (opt->mode == CC_MODE_LINK && opt->bin_out_path) {
+            const char* one[1];
+            one[0] = opt->in_path;
+            if (cc_check_link_set_faces(one, 1) != 0) return -1;
             if (summary_out) {
                 memset(summary_out, 0, sizeof(*summary_out));
                 summary_out->bin_out_path = opt->bin_out_path;
@@ -6060,6 +6063,41 @@ static int run_build_mode(int argc, char** argv) {
             memset(caches, 0, sizeof(caches));
             char chain[64][128];
             memset(chain, 0, sizeof(chain));
+            {
+                char abs_ccs[128][PATH_MAX];
+                const char* ptrs[128];
+                int nc = 0;
+                unsigned char needed[64];
+                unsigned char walk[64];
+                size_t ti, sj;
+                memset(needed, 0, sizeof(needed));
+                memset(walk, 0, sizeof(walk));
+                if (cc__mark_needed_targets(chosen_idx, targets, target_count,
+                                            needed, walk) == 0) {
+                    for (ti = 0; ti < target_count && nc < 128; ti++) {
+                        if (!needed[ti]) continue;
+                        for (sj = 0; sj < targets[ti].src_count && nc < 128;
+                             sj++) {
+                            const char* s = targets[ti].srcs[sj];
+                            size_t sl;
+                            if (!s) continue;
+                            sl = strlen(s);
+                            if (!((sl > 4 && strcmp(s + sl - 4, ".ccs") == 0) ||
+                                  (sl > 5 && strcmp(s + sl - 5, ".shcc") == 0)))
+                                continue;
+                            cc__join_path(build_dir, s, abs_ccs[nc],
+                                          sizeof(abs_ccs[nc]));
+                            ptrs[nc] = abs_ccs[nc];
+                            nc++;
+                        }
+                    }
+                    if (nc > 0 && cc_check_link_set_faces(ptrs, nc) != 0) {
+                        cc_build_free_targets(targets, target_count, def_name);
+                        free(targets);
+                        goto parse_fail;
+                    }
+                }
+            }
             int jobs = cc__resolve_build_jobs(g_build_jobs);
             int r;
             if (jobs <= 1) {
@@ -6325,6 +6363,10 @@ static int run_build_mode(int argc, char** argv) {
 
         int emit_reused = 0, emit_built = 0;
         int obj_reused = 0, obj_built = 0;
+
+        if (mode == CC_MODE_LINK &&
+            cc_check_link_set_faces((const char* const*)inputs, input_count) != 0)
+            goto parse_fail;
 
         char used[64][128]; size_t used_count = 0;
         const char* obj_paths[64];
@@ -7938,6 +7980,9 @@ int main(int argc, char **argv) {
             fprintf(stderr, "cc: linking multiple inputs requires -o <output>\n");
             return 1;
         }
+        if (mode == CC_MODE_LINK &&
+            cc_check_link_set_faces(inputs, input_count) != 0)
+            return 1;
 
         CCConstBinding bindings[128];
         size_t binding_count = 0;

@@ -1,0 +1,38 @@
+/*
+ * Brace-arm cancel wakes a parked recv. Pause does not complete recv.
+ */
+#include <ccc/std/prelude.cch>
+#include <errno.h>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCChan* ch = cc_chan_create(1);
+    if (!ch) return 2;
+    (void)cc_chan_init_elem(ch, sizeof(int));
+
+    int kicked = 0;
+    int saw = 0;
+    CCParallel h = @parallel {
+        @serial {
+            cc_sleep_ms(20);
+            h.cancel() !>;
+            kicked = 1;
+        }
+        @serial {
+            int v = 0;
+            int rc = cc_chan_recv(ch, &v, sizeof(v));
+            saw = (rc == ECANCELED) ? 1 : 0;
+        }
+    } !>;
+    h.wait() !>;
+    cc_chan_free(ch);
+
+    if (saw != 1 || !h.cancelled) {
+        fprintf(stderr, "FAIL cancel-wake saw=%d cancelled=%d\n", saw,
+                h.cancelled);
+        return 1;
+    }
+    printf("parallel_cancel_wake_smoke: OK\n");
+    return 0;
+}

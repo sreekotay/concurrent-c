@@ -1,0 +1,6 @@
+#!ccc ccs
+#include "unowned_faces/per_tu.cch"
+
+int per_tu_a(void) {
+    return per_tu_val();
+}

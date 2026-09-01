@@ -94,6 +94,8 @@ int    sched_v2_fiber_external_wait_active(fiber_v2* f);
  * then clear it on the resume side (from cc__fiber_park_if_impl). */
 void   sched_v2_fiber_set_park_deadline(fiber_v2* f, const struct timespec* d);
 void   sched_v2_fiber_clear_park_deadline(fiber_v2* f);
+void   sched_v2_fiber_set_par_gate(fiber_v2* f, void* gate);
+void*  sched_v2_fiber_par_gate(fiber_v2* f);
 
 /* Deadlock-detector check.
  *

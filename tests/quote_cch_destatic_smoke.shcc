@@ -1,5 +1,5 @@
-/* Extracted owned impl face drops `static` on function decls; the owner
- * splice destatics the definition so a guest that calls destatic_hid links. */
+/* Extracted owned impl face omits static fns. Owner splice keeps static.
+ * Guest calls destatic_pub (non-static). */
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
 CCCommand emit_other = cc_command(a, @slice("./cc/bin/ccc"));
@@ -21,17 +21,27 @@ grep_h_static.arg("static int destatic_hid");
 grep_h_static.arg("out/include/tests/quote_cch_destatic_mod.h");
 rc = grep_h_static.status() !>;
 if (rc == 0) {
-    "extracted .h kept static on destatic_hid".println() !>;
+    "extracted .h kept destatic_hid".println() !>;
     return 1;
 }
 
-CCCommand grep_h_decl = cc_command(a, @slice("grep"));
-grep_h_decl.arg("-q");
-grep_h_decl.arg("int destatic_hid");
-grep_h_decl.arg("out/include/tests/quote_cch_destatic_mod.h");
-rc = grep_h_decl.status() !>;
+CCCommand grep_h_hid = cc_command(a, @slice("grep"));
+grep_h_hid.arg("-q");
+grep_h_hid.arg("destatic_hid");
+grep_h_hid.arg("out/include/tests/quote_cch_destatic_mod.h");
+rc = grep_h_hid.status() !>;
+if (rc == 0) {
+    "extracted .h still names destatic_hid".println() !>;
+    return 1;
+}
+
+CCCommand grep_h_pub = cc_command(a, @slice("grep"));
+grep_h_pub.arg("-q");
+grep_h_pub.arg("int destatic_pub");
+grep_h_pub.arg("out/include/tests/quote_cch_destatic_mod.h");
+rc = grep_h_pub.status() !>;
 if (rc != 0) {
-    "extracted .h missing destatic_hid decl".println() !>;
+    "extracted .h missing destatic_pub decl".println() !>;
     return 1;
 }
 
@@ -75,6 +85,16 @@ if (rc == 0) {
     return 1;
 }
 
+CCCommand grep_other_pub = cc_command(a, @slice("grep"));
+grep_other_pub.arg("-q");
+grep_other_pub.arg("DESTATIC_PUB_BODY");
+grep_other_pub.arg("out/quote_cch_destatic_other.c");
+rc = grep_other_pub.status() !>;
+if (rc == 0) {
+    "other TU spliced destatic_pub body".println() !>;
+    return 1;
+}
+
 CCCommand emit_owner = cc_command(a, @slice("./cc/bin/ccc"));
 emit_owner.arg("--no-cache");
 emit_owner.arg("--emit-c-only");
@@ -93,8 +113,8 @@ grep_owner_static.arg("-q");
 grep_owner_static.arg("static int destatic_hid");
 grep_owner_static.arg("out/quote_cch_destatic_mod.c");
 rc = grep_owner_static.status() !>;
-if (rc == 0) {
-    "owner emit kept static on destatic_hid".println() !>;
+if (rc != 0) {
+    "owner emit dropped static on destatic_hid".println() !>;
     return 1;
 }
 

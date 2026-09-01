@@ -1,0 +1,6 @@
+/* Guest of an owned impl-grade face without the owner `.ccs` in the link. */
+#include "quote_cch_destatic_mod.cch"
+
+int main(void) {
+    return destatic_pub();
+}

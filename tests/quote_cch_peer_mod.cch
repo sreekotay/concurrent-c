@@ -1,6 +1,6 @@
 #ifndef TESTS_QUOTE_CCH_PEER_MOD_CCH
 #define TESTS_QUOTE_CCH_PEER_MOD_CCH
 
-static int peer_mod_val(void) { return 4; }
+int peer_mod_val(void) { return 4; }
 
 #endif

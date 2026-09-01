@@ -1,0 +1,6 @@
+#!ccc ccs
+#include "quote_cch_destatic_mod.cch"
+
+int main(void) {
+    return destatic_hid();
+}

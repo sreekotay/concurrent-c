@@ -356,10 +356,12 @@ static int cc__match(const char* s, size_t n, size_t i, const char* lit) {
 
 int cc_file_start_pragmas(const char* src, size_t n,
                           int* prelude_off, int* linenumbers_off,
+                          int* per_tu,
                           char* err, size_t err_cap) {
     size_t i;
     if (prelude_off) *prelude_off = 0;
     if (linenumbers_off) *linenumbers_off = 0;
+    if (per_tu) *per_tu = 0;
     if (!src) return 0;
     i = cc_unit_header_skip(src, n);
     i = cc__skip_ws_comments(src, n, i);
@@ -377,33 +379,45 @@ int cc_file_start_pragmas(const char* src, size_t n,
         } else if (rest >= 14 && memcmp(q, "(@linenumbers)", 14) == 0) {
             which = 2;
             q += 14;
+        } else if (rest >= 9 && memcmp(q, "(@per_tu)", 9) == 0) {
+            which = 3;
+            q += 9;
         } else {
             break;
         }
         while (*q == ' ' || *q == '\t') q++;
-        if (!(q[0] == 'o' && q[1] == 'f' && q[2] == 'f')) {
-            return cc__seterr(err, err_cap,
-                              which == 1
-                                  ? "#pragma(@prelude) takes 'off'"
-                                  : "#pragma(@linenumbers) takes 'off'");
+        if (which == 3) {
+            if (*q && *q != '\n' && *q != '\r' &&
+                !(*q == '/' && q[1] == '/')) {
+                return cc__seterr(err, err_cap,
+                                  "#pragma(@per_tu) takes no operand");
+            }
+            if (per_tu) *per_tu = 1;
+        } else {
+            if (!(q[0] == 'o' && q[1] == 'f' && q[2] == 'f')) {
+                return cc__seterr(err, err_cap,
+                                  which == 1
+                                      ? "#pragma(@prelude) takes 'off'"
+                                      : "#pragma(@linenumbers) takes 'off'");
+            }
+            q += 3;
+            if (*q && *q != '\n' && *q != '\r' && *q != ' ' && *q != '\t') {
+                return cc__seterr(err, err_cap,
+                                  which == 1
+                                      ? "#pragma(@prelude) takes 'off'"
+                                      : "#pragma(@linenumbers) takes 'off'");
+            }
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q && *q != '\n' && *q != '\r' &&
+                !(*q == '/' && q[1] == '/')) {
+                return cc__seterr(err, err_cap,
+                                  which == 1
+                                      ? "#pragma(@prelude) takes 'off'"
+                                      : "#pragma(@linenumbers) takes 'off'");
+            }
+            if (which == 1 && prelude_off) *prelude_off = 1;
+            if (which == 2 && linenumbers_off) *linenumbers_off = 1;
         }
-        q += 3;
-        if (*q && *q != '\n' && *q != '\r' && *q != ' ' && *q != '\t') {
-            return cc__seterr(err, err_cap,
-                              which == 1
-                                  ? "#pragma(@prelude) takes 'off'"
-                                  : "#pragma(@linenumbers) takes 'off'");
-        }
-        while (*q == ' ' || *q == '\t') q++;
-        if (*q && *q != '\n' && *q != '\r' &&
-            !(*q == '/' && q[1] == '/')) {
-            return cc__seterr(err, err_cap,
-                              which == 1
-                                  ? "#pragma(@prelude) takes 'off'"
-                                  : "#pragma(@linenumbers) takes 'off'");
-        }
-        if (which == 1 && prelude_off) *prelude_off = 1;
-        if (which == 2 && linenumbers_off) *linenumbers_off = 1;
         while (i < n && src[i] != '\n') i++;
         if (i < n) i++;
         i = cc__skip_ws_comments(src, n, i);

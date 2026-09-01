@@ -24,7 +24,7 @@ static void pause_it(Work* wk) {
 }
 
 static void resume_it(Work* wk) {
-    if (!wk || !wk->live || !wk->h.paused)
+    if (!wk || !wk->live || !wk->h.paused())
         return;
     wk->h.resume() !>(e) { (void)e; };
 }

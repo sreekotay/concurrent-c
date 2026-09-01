@@ -75,8 +75,10 @@ if [ "$full" = 1 ]; then
 fi
 
 has_jobs=0
+has_filter=0
 for a in "$@"; do
-  if [ "$a" = "--jobs" ]; then has_jobs=1; break; fi
+  if [ "$a" = "--jobs" ]; then has_jobs=1; fi
+  if [ "$a" = "--filter" ]; then has_filter=1; fi
 done
 
 jobs="${CC_TEST_JOBS:-}"
@@ -187,7 +189,11 @@ bash "$ROOT_DIR/scripts/check_patched_tcc.sh"
 
 # D3.0: exercise the in-process constexpr seam (cc_tcc_eval_const_expr) — a
 # compiler-internal that the .ccs/.c harness can't reach directly.
-if [ -x "./cc/bin/ccc" ]; then
+# `--filter` is a harness slice: skip suite preambles (CVE corpus, fences,
+# emit-cache, CLI, …). Compiler rebuild / tcc-patch check still run above.
+if [ "$has_filter" = 1 ]; then
+  echo "[test] --filter: harness only (skip CVE / fences / cache preambles)"
+elif [ -x "./cc/bin/ccc" ]; then
   if ! ./cc/bin/ccc __eval-const --selftest >/dev/null; then
     echo "[test] const-eval selftest FAILED"
     exit 1

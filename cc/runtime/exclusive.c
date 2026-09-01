@@ -560,6 +560,7 @@ bool cc_cancelled(void);
 typedef struct CCNurseryHost CCNurseryHost;
 CCNurseryHost* cc__runtime_current_nursery(void);
 bool cc_nursery_is_cancelled_host(const CCNurseryHost* n);
+int cc_parallel_current_cancelled(void);
 
 /* Unlink `node` from the condition queue.  Returns 1 if it was still queued. */
 static int cc__exclusive_cond_dequeue(CCExclusiveEntry* e, CCExclusiveWaiter* node) {
@@ -690,7 +691,8 @@ int cc_exclusive_guard_wait_release(CCExclusiveGuard* g) {
         /* No nursery is not cancelled. A bare OS thread is not cancelled. */
         {
             CCNurseryHost* nur = cc__runtime_current_nursery();
-            if ((nur && cc_nursery_is_cancelled_host(nur)) || (dl && dl->cancelled))
+            if ((nur && cc_nursery_is_cancelled_host(nur)) ||
+                (dl && dl->cancelled) || cc_parallel_current_cancelled())
                 return cc__exclusive_cond_leave(e, &node, 0);
         }
         if (dl && dl->deadline.tv_sec != 0 && cc_deadline_expired(dl))

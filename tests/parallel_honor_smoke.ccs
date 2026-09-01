@@ -1,0 +1,75 @@
+/*
+ * cc_parallel_honor yields while paused. Cancel unsticks; it does
+ * not skip the piece.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int kick_pause(CCParallel* h, int* stuck, int* done) {
+    @errhandler(CCError e) { (void)e; return -1; }
+    while (!*stuck)
+        cc_yield();
+    if (!(h->pause() !>))
+        return -1;
+    cc_sleep_ms(20);
+    if (*done)
+        return -2;
+    if (!(h->resume() !>))
+        return -3;
+    return 1;
+}
+
+static int hold_then_run(CCParallel* h, int* stuck) {
+    *stuck = 1;
+    while (!h->paused())
+        cc_yield();
+    cc_parallel_honor(h);
+    return 1;
+}
+
+static int kick_cancel(CCParallel* h, int* stuck) {
+    @errhandler(CCError e) { (void)e; return -1; }
+    while (!*stuck)
+        cc_yield();
+    h->pause() !>;
+    h->cancel() !>;
+    return 2;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    {
+        int stuck = 0;
+        int done = 0;
+        int saw = 0;
+        CCParallel h = @parallel {
+            saw = kick_pause(&h, &stuck, &done);
+            done = hold_then_run(&h, &stuck);
+        } !>;
+        h.wait() !>;
+        if (saw != 1 || done != 1) {
+            fprintf(stderr, "FAIL pause honor saw=%d done=%d\n", saw, done);
+            return 1;
+        }
+    }
+
+    {
+        int stuck = 0;
+        int done = 0;
+        int saw = 0;
+        CCParallel h = @parallel {
+            saw = kick_cancel(&h, &stuck);
+            done = hold_then_run(&h, &stuck);
+        } !>;
+        h.wait() !>;
+        if (done != 1 || saw != 2 || !h.cancelled) {
+            fprintf(stderr, "FAIL cancel unsticks honor saw=%d done=%d\n",
+                    saw, done);
+            return 1;
+        }
+    }
+
+    printf("parallel_honor_smoke: OK\n");
+    return 0;
+}

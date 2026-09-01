@@ -1,0 +1,8 @@
+#!ccc ccs
+#include "unowned_faces/two_splice.cch"
+
+int two_splice_a(void);
+
+int main(void) {
+    return two_splice_a() + two_splice_val() == 4 ? 0 : 1;
+}

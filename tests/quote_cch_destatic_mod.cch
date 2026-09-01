@@ -3,8 +3,8 @@
 
 #include <ccc/std/prelude.cch>
 
-/* Owned impl-grade face. Strip turns the static bodies into decls;
- * destatic drops `static` so a guest TU can call destatic_hid.
+/* Owned impl-grade face. `static` fns stay in the owner splice and are
+ * omitted from the extract. Non-static destatic_pub is the guest entry.
  * Non-static data becomes `extern` in the extract. */
 static int destatic_cell = 4;
 int destatic_table[] = { 1, 2, 3 };
@@ -18,6 +18,11 @@ static int destatic_hid(void) {
     /* DESTATIC_HID_BODY */
     int x = destatic_step(3) !> { return 0; };
     return x + destatic_cell;
+}
+
+int destatic_pub(void) {
+    /* DESTATIC_PUB_BODY */
+    return destatic_hid();
 }
 
 #endif

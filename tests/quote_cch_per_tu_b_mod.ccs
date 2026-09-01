@@ -1,0 +1,8 @@
+#!ccc ccs
+#include "unowned_faces/per_tu.cch"
+
+int per_tu_a(void);
+
+int main(void) {
+    return per_tu_a() + per_tu_val() == 6 ? 0 : 1;
+}

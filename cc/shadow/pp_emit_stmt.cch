@@ -3066,7 +3066,8 @@ static int shadow_emit_par_protos(CEmit* out, AstNode** pars, int n) {
                 if (!g_shadow_pw_sh_typed) {
                     if (!cemit_str(out,
                             "typedef struct { CCTurnstile* gate; "
-                            "CCNurseryHost* nur; CCChan* work; } __cc_pw_sh_t;\n"
+                            "CCNurseryHost* nur; CCChan* work; "
+                            "CCParallel* dest; } __cc_pw_sh_t;\n"
                             "typedef struct { int failed; int i; "
                             "CCError err; } __cc_pw_slot_t;\n"
                             "typedef struct { CCChan* work; void* env; "
@@ -3339,6 +3340,21 @@ static int shadow_par_rewrite_rhs(AstNode* asgn, char* dst, size_t cap) {
     return 1;
 }
 
+static int shadow_par_emit_honor_field(CEmit* dest, const char* pad) {
+    return cemit_fmt(dest, "%sCCParallel* __cc_par_h;\n", pad);
+}
+
+static int shadow_par_emit_honor_check(CEmit* dest, const char* pad) {
+    return cemit_fmt(dest, "%scc_parallel_honor(e->__cc_par_h);\n", pad);
+}
+
+static int shadow_par_emit_honor_pack(CEmit* dest, const char* bi,
+                                      const char* dot, const char* hdest) {
+    if (hdest && hdest[0])
+        return cemit_fmt(dest, "%s%s__cc_par_h = &(%s);\n", bi, dot, hdest);
+    return cemit_fmt(dest, "%s%s__cc_par_h = 0;\n", bi, dot);
+}
+
 static int shadow_par_emit_assign_thunk(int id, int pj_id, const char* lhs_ty,
                                         const char* rhs, char names[][64],
                                         char tys[][160], int ncaps) {
@@ -3352,12 +3368,18 @@ static int shadow_par_emit_assign_thunk(int id, int pj_id, const char* lhs_ty,
     if (!shadow_par_emit_cap_members(h, "        ", names, tys, ncaps))
         return 0;
     if (!cemit_fmt(h, "        %s* out;\n"
-                      "        __cc_pj_ex_%d_t *__cc_pj_ex;\n"
-                      "    } *e = arg;\n"
+                      "        __cc_pj_ex_%d_t *__cc_pj_ex;\n",
+                   lhs_ty, pj_id))
+        return 0;
+    if (!shadow_par_emit_honor_field(h, "        "))
+        return 0;
+    if (!cemit_fmt(h, "    } *e = arg;\n"
                       "    %s* __cc_par_out = e->out;\n",
-                   lhs_ty, pj_id, lhs_ty))
+                   lhs_ty))
         return 0;
     if (!shadow_par_emit_cap_spills(h, "    ", "e", names, tys, ncaps))
+        return 0;
+    if (!shadow_par_emit_honor_check(h, "    "))
         return 0;
     if (!cemit_str(h, "    *__cc_par_out = ")) return 0;
     if (!shadow_refs_rewrite_emit(h, rhs, strlen(rhs), refs, nrefs)) return 0;
@@ -3380,12 +3402,18 @@ static int shadow_par_emit_serial_thunk(int id, int pj_id, const char* lhs_ty,
     if (!shadow_par_emit_cap_members(h, "        ", names, tys, ncaps))
         return 0;
     if (!cemit_fmt(h, "        %s* out;\n"
-                      "        __cc_pj_ex_%d_t *__cc_pj_ex;\n"
-                      "    } *e = arg;\n"
+                      "        __cc_pj_ex_%d_t *__cc_pj_ex;\n",
+                   lhs_ty, pj_id))
+        return 0;
+    if (!shadow_par_emit_honor_field(h, "        "))
+        return 0;
+    if (!cemit_fmt(h, "    } *e = arg;\n"
                       "    %s* __cc_par_out = e->out;\n",
-                   lhs_ty, pj_id, lhs_ty))
+                   lhs_ty))
         return 0;
     if (!shadow_par_emit_cap_spills(h, "    ", "e", names, tys, ncaps))
+        return 0;
+    if (!shadow_par_emit_honor_check(h, "    "))
         return 0;
     if (!dest || !dest[0]) {
         if (!cemit_str(&t, "    (void)__cc_par_out;\n")) {
@@ -3714,6 +3742,56 @@ static int shadow_par_arm_waits_dest(AstNode* s, const char* dest) {
     return 0;
 }
 
+/* Run arm `a` on the caller with names already in scope. Used when the
+ * inline gate denies a spawn so the arm never packs an env or thunk. */
+static int shadow_par_emit_arm_inplace(
+    CEmit* dest, const char* bi, int a, char lhs[][128], char lhs_ty[][96],
+    char rhs[][2048], int via_outs, AstNode* st, ShadowCtx* ctx,
+    int use_cleanup, char grefs[][64], int ngrefs) {
+    if (st && a < st->nbody && st->body[a] &&
+        st->body[a]->kind == AST_SERIAL) {
+        if (via_outs) {
+            CEmit t = {0};
+            int ok;
+            char o[32];
+            if (!lhs[a][0])
+                ok = shadow_par_emit_serial_stmts(st->body[a], &t, ctx, bi,
+                                                  use_cleanup);
+            else {
+                snprintf(o, sizeof(o), "__cc_par_o_%d", a);
+                ok = shadow_par_emit_serial_via(st->body[a], &t, ctx, bi,
+                                                lhs[a], lhs_ty[a], o,
+                                                use_cleanup);
+            }
+            if (!ok) {
+                free(t.buf);
+                return 0;
+            }
+            if (t.buf && t.len &&
+                !shadow_refs_rewrite_emit(dest, t.buf, t.len, grefs, ngrefs)) {
+                free(t.buf);
+                return 0;
+            }
+            free(t.buf);
+            return 1;
+        }
+        return shadow_par_emit_serial_block(st->body[a], dest, ctx, bi,
+                                            use_cleanup);
+    }
+    if (via_outs) {
+        char o[32];
+        snprintf(o, sizeof(o), "__cc_par_o_%d", a);
+        if (!cemit_fmt(dest, "%s*%s = ", bi, o)) return 0;
+        if (!shadow_refs_rewrite_emit(dest, rhs[a], strlen(rhs[a]), grefs,
+                                      ngrefs))
+            return 0;
+        return cemit_str(dest, ";\n");
+    }
+    if (lhs[a][0])
+        return cemit_fmt(dest, "%s%s = %s;\n", bi, lhs[a], rhs[a]);
+    return cemit_fmt(dest, "%s%s;\n", bi, rhs[a]);
+}
+
 static int shadow_par_handle_take_one(CEmit* dest, const char* bi,
                                       const char* hdest, int id) {
     if (!dest || !bi || !hdest || !hdest[0]) return 0;
@@ -3730,6 +3808,7 @@ static int shadow_par_handle_take_one(CEmit* dest, const char* bi,
             "%s} else if (%s.nt < CC_PARALLEL_TASK_MAX) {\n"
             "%s    %s.tasks[%s.nt] = __cc_par_t_%d;\n"
             "%s    %s.envs[%s.nt] = __cc_par_e_%d;\n"
+            "%s    cc_parallel_attach(&(%s), __cc_par_t_%d);\n"
             "%s    %s.nt++;\n"
             "%s} else {\n"
             "%s    cc_parallel_join(__cc_par_t_%d);\n"
@@ -3737,7 +3816,7 @@ static int shadow_par_handle_take_one(CEmit* dest, const char* bi,
             "%s}\n",
             bi, id, bi, id, id, bi, id, bi, id, id, bi, bi, id, bi, id, id, bi,
             id, bi, hdest, bi, hdest, hdest, id, bi, hdest, hdest, id, bi,
-            hdest, bi, bi, id, bi, id, bi);
+            hdest, id, bi, hdest, bi, bi, id, bi, id, bi);
 }
 
 static int shadow_emit_par_spawn_body(
@@ -3763,9 +3842,16 @@ static int shadow_emit_par_spawn_body(
         }
         if (!cemit_fmt(dest,
                        "%s    %s* out;\n"
-                       "%s    __cc_pj_ex_%d_t *__cc_pj_ex;\n"
-                       "%s};\n",
-                       bi, lhs_ty[a], bi, base, bi))
+                       "%s    __cc_pj_ex_%d_t *__cc_pj_ex;\n",
+                       bi, lhs_ty[a], bi, base))
+            return 0;
+        {
+            char pad[96];
+            snprintf(pad, sizeof(pad), "%s    ", bi);
+            if (!shadow_par_emit_honor_field(dest, pad))
+                return 0;
+        }
+        if (!cemit_fmt(dest, "%s};\n", bi))
             return 0;
         if (heap) {
             if (!cemit_fmt(dest,
@@ -3784,27 +3870,36 @@ static int shadow_emit_par_spawn_body(
         if (!heap)
             snprintf(dot, sizeof(dot), "__cc_par_e_%d.", id);
         if (!cemit_fmt(dest, "%sCCTask __cc_par_t_%d;\n", bi, id)) return 0;
-        if (!shadow_par_emit_cap_pack(dest, bi, dot, cap_names[a], ncaps[a],
-                                      via_outs))
-            return 0;
-        if (via_outs) {
-            if (!cemit_fmt(dest, "%s%sout = __cc_par_o_%d;\n", bi, dot, a))
-                return 0;
-        } else if (!lhs[a][0]) {
-            if (!cemit_fmt(dest,
-                           "%sint __cc_par_sink_%d = 0;\n"
-                           "%s%sout = &__cc_par_sink_%d;\n",
-                           bi, id, bi, dot, id))
-                return 0;
-        } else if (!cemit_fmt(dest, "%s%sout = &(%s);\n", bi, dot, lhs[a]))
-            return 0;
-        if (!cemit_fmt(dest, "%s%s__cc_pj_ex = __cc_pj_ex;\n", bi, dot))
-            return 0;
-        /* Inline deny gate: once the runtime classifies this site as
-         * churn, the deny verdict is taken here without the cross-TU
-         * spawn call; the invalid task routes the arm through the same
-         * run-inline join fallback a runtime denial uses. */
+        {
+            int serial = (st && a < st->nbody && st->body[a] &&
+                          st->body[a]->kind == AST_SERIAL);
+            /* Assignment arms on the caller frame: skip pack+spawn on
+             * deny and run `lhs = rhs` at join. Do not run the arm
+             * here — that would finish cheap work before later
+             * siblings are admitted. Serial / via_outs / heap keep
+             * pack + thunk so break/return and take_one stay exact. */
+            int inplace = !heap && !via_outs && !serial;
+        /* Heap / handle dest keeps today's deny→INVALID→join-thunk
+         * shape so take_one / cancel never see an unpacked env. */
         if (heap) {
+            if (!shadow_par_emit_cap_pack(dest, bi, dot, cap_names[a],
+                                          ncaps[a], via_outs))
+                return 0;
+            if (via_outs) {
+                if (!cemit_fmt(dest, "%s%sout = __cc_par_o_%d;\n", bi, dot, a))
+                    return 0;
+            } else if (!lhs[a][0]) {
+                if (!cemit_fmt(dest,
+                               "%sint __cc_par_sink_%d = 0;\n"
+                               "%s%sout = &__cc_par_sink_%d;\n",
+                               bi, id, bi, dot, id))
+                    return 0;
+            } else if (!cemit_fmt(dest, "%s%sout = &(%s);\n", bi, dot, lhs[a]))
+                return 0;
+            if (!cemit_fmt(dest, "%s%s__cc_pj_ex = __cc_pj_ex;\n", bi, dot))
+                return 0;
+            if (!shadow_par_emit_honor_pack(dest, bi, dot, hdest))
+                return 0;
             if (!cemit_fmt(dest,
                     "%sif (cc_parallel_deny_fast(&__cc_par_site_%d, "
                     "__cc_par_thunk_%d))\n"
@@ -3816,15 +3911,68 @@ static int shadow_emit_par_spawn_body(
                 return 0;
             if (!shadow_par_handle_take_one(dest, bi, hdest, id))
                 return 0;
-        } else if (!cemit_fmt(dest,
-                "%sif (cc_parallel_deny_fast(&__cc_par_site_%d, "
-                "__cc_par_thunk_%d))\n"
-                "%s    __cc_par_t_%d = cc__task_invalid();\n"
-                "%selse\n"
-                "%s    __cc_par_t_%d = cc_parallel_spawn(__cc_par_thunk_%d, "
-                "&__cc_par_e_%d);\n",
-                bi, id, id, bi, id, bi, bi, id, id, id))
-            return 0;
+        } else if (inplace) {
+            if (!cemit_fmt(dest, "%sint __cc_par_denied_%d = 0;\n", bi, id))
+                return 0;
+            if (!cemit_fmt(dest,
+                    "%sif (cc_parallel_deny_fast(&__cc_par_site_%d, "
+                    "__cc_par_thunk_%d)) {\n"
+                    "%s    __cc_par_denied_%d = 1;\n"
+                    "%s} else {\n",
+                    bi, id, id, bi, id, bi))
+                return 0;
+            if (!shadow_par_emit_cap_pack(dest, bi, dot, cap_names[a],
+                                          ncaps[a], via_outs))
+                return 0;
+            if (!lhs[a][0]) {
+                if (!cemit_fmt(dest,
+                               "%sint __cc_par_sink_%d = 0;\n"
+                               "%s%sout = &__cc_par_sink_%d;\n",
+                               bi, id, bi, dot, id))
+                    return 0;
+            } else if (!cemit_fmt(dest, "%s%sout = &(%s);\n", bi, dot,
+                                 lhs[a]))
+                return 0;
+            if (!cemit_fmt(dest, "%s%s__cc_pj_ex = __cc_pj_ex;\n", bi, dot))
+                return 0;
+            if (!shadow_par_emit_honor_pack(dest, bi, dot, hdest))
+                return 0;
+            if (!cemit_fmt(dest,
+                    "%s    __cc_par_t_%d = cc_parallel_spawn(__cc_par_thunk_%d, "
+                    "&__cc_par_e_%d);\n"
+                    "%s}\n",
+                    bi, id, id, id, bi))
+                return 0;
+        } else {
+            if (!shadow_par_emit_cap_pack(dest, bi, dot, cap_names[a],
+                                          ncaps[a], via_outs))
+                return 0;
+            if (via_outs) {
+                if (!cemit_fmt(dest, "%s%sout = __cc_par_o_%d;\n", bi, dot, a))
+                    return 0;
+            } else if (!lhs[a][0]) {
+                if (!cemit_fmt(dest,
+                               "%sint __cc_par_sink_%d = 0;\n"
+                               "%s%sout = &__cc_par_sink_%d;\n",
+                               bi, id, bi, dot, id))
+                    return 0;
+            } else if (!cemit_fmt(dest, "%s%sout = &(%s);\n", bi, dot, lhs[a]))
+                return 0;
+            if (!cemit_fmt(dest, "%s%s__cc_pj_ex = __cc_pj_ex;\n", bi, dot))
+                return 0;
+            if (!shadow_par_emit_honor_pack(dest, bi, dot, hdest))
+                return 0;
+            if (!cemit_fmt(dest,
+                    "%sif (cc_parallel_deny_fast(&__cc_par_site_%d, "
+                    "__cc_par_thunk_%d))\n"
+                    "%s    __cc_par_t_%d = cc__task_invalid();\n"
+                    "%selse\n"
+                    "%s    __cc_par_t_%d = cc_parallel_spawn(__cc_par_thunk_%d, "
+                    "&__cc_par_e_%d);\n",
+                    bi, id, id, bi, id, bi, bi, id, id, id))
+                return 0;
+        }
+        }
     }
     {
         int pb, pt;
@@ -3916,7 +4064,30 @@ static int shadow_emit_par_spawn_body(
     }
     for (a = n - 1; a >= spawn0; a--) {
         int id = base + a - spawn0;
-        if (!cemit_fmt(dest,
+        int serial = (st && a < st->nbody && st->body[a] &&
+                      st->body[a]->kind == AST_SERIAL);
+        int inplace = !via_outs && !serial;
+        if (inplace) {
+            if (!cemit_fmt(dest,
+                    "%sif (!__cc_par_denied_%d &&\n"
+                    "%s    __cc_par_t_%d.kind != CC_TASK_KIND_INVALID) {\n"
+                    "%s    cc_parallel_join(__cc_par_t_%d);\n"
+                    "%s} else if (__cc_par_denied_%d) {\n"
+                    "%s    CC_PAR_NOTE_INLINE_ARM();\n",
+                    bi, id, bi, id, bi, id, bi, id, bi))
+                return 0;
+            if (!shadow_par_emit_arm_inplace(dest, bi, a, lhs, lhs_ty, rhs,
+                                             via_outs, st, ctx, use_cleanup,
+                                             grefs, ngrefs))
+                return 0;
+            if (!cemit_fmt(dest,
+                    "%s} else {\n"
+                    "%s    CC_PAR_NOTE_INLINE_ARM();\n"
+                    "%s    (void)__cc_par_thunk_%d(&__cc_par_e_%d);\n"
+                    "%s}\n",
+                    bi, bi, bi, id, id, bi))
+                return 0;
+        } else if (!cemit_fmt(dest,
                 "%sif (__cc_par_t_%d.kind == CC_TASK_KIND_INVALID)\n"
                 "%s    { CC_PAR_NOTE_INLINE_ARM(); "
                 "(void)__cc_par_thunk_%d(&__cc_par_e_%d); }\n"
@@ -4484,6 +4655,26 @@ static int shadow_pw_emit_fin_store(CEmit* out, const char* indent,
     return cemit_fmt(out, "%s%s = __cc_pw_fin;\n", indent, dest);
 }
 
+static int shadow_pw_emit_handle_init(CEmit* out, const char* indent,
+                                      const char* hdest, const char* hdty) {
+    if (!hdest || !hdest[0]) return 1;
+    if (!shadow_pw_emit_dest_decl(out, indent, hdest, hdty)) return 0;
+    return cemit_fmt(out, "%s%s = cc_parallel_empty();\n", indent, hdest);
+}
+
+static int shadow_pw_emit_handle_join(CEmit* out, const char* indent,
+                                      const char* hdest) {
+    if (!hdest || !hdest[0]) return 1;
+    return cemit_fmt(out, "%scc_atomic_store(&(%s).joined, 1);\n",
+                     indent, hdest);
+}
+
+static int shadow_pw_emit_honor_name(CEmit* out, const char* indent,
+                                     const char* hdest) {
+    if (!hdest || !hdest[0]) return 1;
+    return cemit_fmt(out, "%scc_parallel_honor(&(%s));\n", indent, hdest);
+}
+
 static int shadow_pw_push_loop(ShadowCtx* ctx, int is_switch) {
     if (!ctx || (ctx->pw_body != 1 && ctx->pw_body != 2 && !ctx->pf_body))
         return 0;
@@ -5013,6 +5204,16 @@ static int shadow_emit_stage(AstNode* st, CEmit* out, ShadowCtx* ctx,
     shadow_indent_nest(i1, sizeof(i1), indent, 1);
     shadow_stage_call(&call, st, "wait");
     if (!shadow_emit_stmt_ctx(&call, out, ctx, indent, use_cleanup)) return 0;
+    /* Honor after wait returns ok, before the block. Pause does not
+     * complete wait. */
+    if (ctx->pw_body == 2) {
+        if (!cemit_fmt(out, "%scc_parallel_honor(__cc_pw_sh->dest);\n",
+                       indent))
+            return 0;
+    } else if (ctx->pw_hdest[0] &&
+               !shadow_pw_emit_honor_name(out, indent, ctx->pw_hdest)) {
+        return 0;
+    }
     /* Cancelled successors still handshake; the block is suppressible. */
     if (ctx->pw_body == 2) {
         if (!cemit_fmt(out,
@@ -5081,6 +5282,8 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
     const char* rbind;
     const char* dest;
     const char* dty;
+    const char* hdest;
+    const char* hdty = NULL;
 
     shadow_indent_nest(i1, sizeof(i1), indent, 1);
     shadow_indent_nest(i2, sizeof(i2), i1, 1);
@@ -5089,10 +5292,20 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
     shadow_indent_nest(i5, sizeof(i5), i4, 1);
     shadow_par_trim(st->b, lo, sizeof(lo));
     shadow_par_trim(st->c, hi, sizeof(hi));
-    if (!st->par_wake) {
+    hdest = shadow_par_handle_dest(st);
+    if (hdest) {
+        int hk;
+        for (hk = 0; hk < st->ndbody; hk++) {
+            AstNode* d = st->dbody[hk];
+            if (d && d->kind == AST_VAR_DECL && d->b[0] && d->a[0] &&
+                strcmp(d->a, "CCParallel") == 0)
+                hdty = d->a;
+        }
+    }
+    if (!st->par_wake && !hdest) {
         fprintf(stderr,
                 "error: '@parallel wait for' must be joined with "
-                "'!>.wait()!>'\n");
+                "'!>.wait()!>' or bound to CCParallel\n");
         out->err = 1;
         return 0;
     }
@@ -5201,6 +5414,10 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
     if (st->g[0]) shadow_bind_name(st->g, "int", 0);
     saved_pw_body = ctx->pw_body;
     ctx->pw_body = 1;
+    if (hdest && hdest[0])
+        snprintf(ctx->pw_hdest, sizeof(ctx->pw_hdest), "%s", hdest);
+    else
+        ctx->pw_hdest[0] = 0;
     ctx->pw_nstages = nstages;
     for (k = 0; k < nstages && k < 16; k++) ctx->pw_stages[k] = stages[k];
     ctx->pw_fin = shadow_pw_result_dest(st) ? 1 : 0;
@@ -5242,6 +5459,8 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
         int ok;
         if (!shadow_pw_emit_dest_decl(out, indent, dest, dty))
             goto fail;
+        if (!shadow_pw_emit_handle_init(out, indent, hdest, hdty))
+            goto fail;
         if (!cemit_fmt(out, "%s{\n", indent))
             goto fail;
         if (!cemit_fmt(out, "%sint %s;\n", i1, st->a))
@@ -5253,11 +5472,15 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
         if (!cemit_fmt(out, "%sfor (%s = (int)(%s); %s < (int)(%s); %s++) {\n",
                        i1, st->a, lo, st->a, hi, st->a))
             goto fail;
+        if (!shadow_pw_emit_honor_name(out, i2, hdest))
+            goto fail;
         if (seqb.buf && seqb.len && !cemit_buf(out, seqb.buf, seqb.len))
             goto fail;
         if (!cemit_fmt(out, "%s}\n", i1))
             goto fail;
         if (!shadow_pw_emit_fin_store(out, i1, dest))
+            goto fail;
+        if (!shadow_pw_emit_handle_join(out, i1, hdest))
             goto fail;
         ok = cemit_fmt(out, "%s}\n", indent);
         free(seqb.buf);
@@ -5366,7 +5589,8 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
             "    __cc_pw_sh_t *__cc_pw_sh = __cc_pw_e->sh;\n"
             "    __cc_pw_slot_t *__cc_pw_sl = "
             "&__cc_pw_e->slots[__cc_pw_slot];\n"
-            "    int %s = __cc_pw_i;\n",
+            "    int %s = __cc_pw_i;\n"
+            "    cc_parallel_honor(__cc_pw_sh->dest);\n",
             st->a))
         goto fail;
     if (st->g[0] && !cemit_fmt(h, "    int %s = __cc_pw_slot;\n", st->g))
@@ -5428,6 +5652,8 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
     /* Caller: seq denial, else admitter + pool. */
     if (!shadow_pw_emit_dest_decl(out, indent, dest, dty))
         goto fail;
+    if (!shadow_pw_emit_handle_init(out, indent, hdest, hdty))
+        goto fail;
     if (!cemit_fmt(out, "%s{\n", indent))
         goto fail;
     if (!cemit_fmt(out, "%sCCNurseryHost* __cc_pw_n_%d = NULL;\n", i1, id))
@@ -5454,11 +5680,15 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
     if (!cemit_fmt(out, "%sfor (%s = (int)(%s); %s < (int)(%s); %s++) {\n",
                    i2, st->a, lo, st->a, hi, st->a))
         goto fail;
+    if (!shadow_pw_emit_honor_name(out, i3, hdest))
+        goto fail;
     if (st->g[0] && !cemit_fmt(out, "%sint %s = 0;\n", i3, st->g)) goto fail;
     if (seqb.buf && seqb.len && !cemit_buf(out, seqb.buf, seqb.len)) goto fail;
     if (!cemit_fmt(out, "%s}\n", i2))
         return 0;
     if (!shadow_pw_emit_fin_store(out, i2, dest))
+        return 0;
+    if (!shadow_pw_emit_handle_join(out, i2, hdest))
         return 0;
     if (!cemit_fmt(out, "%s} else {\n", i1))
         return 0;
@@ -5506,6 +5736,14 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
         return 0;
     if (!cemit_fmt(out, "%s__cc_pw_sh_%d.nur = __cc_pw_n_%d;\n", i2, id, id))
         return 0;
+    if (hdest && hdest[0]) {
+        if (!cemit_fmt(out, "%s__cc_pw_sh_%d.dest = &(%s);\n", i2, id, hdest))
+            return 0;
+        if (!cemit_fmt(out, "%s%s.n = __cc_pw_n_%d;\n", i2, hdest, id))
+            return 0;
+    } else if (!cemit_fmt(out, "%s__cc_pw_sh_%d.dest = 0;\n", i2, id)) {
+        return 0;
+    }
     /* Pool size is the turnstile depth. get_num_workers() is 0 before
      * sched init — treating that as 1 made every wait-for sequential. */
     if (!cemit_fmt(out, "%s__cc_pw_nw_%d = __cc_pw_ts_%d->cap;\n",
@@ -5554,6 +5792,8 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
     if (!cemit_fmt(out, "%sfor (%s = (int)(%s); %s < (int)(%s); %s++) {\n",
                    i3, st->a, lo, st->a, hi, st->a))
         return 0;
+    if (!shadow_pw_emit_honor_name(out, i4, hdest))
+        return 0;
     if (st->g[0] && !cemit_fmt(out, "%sint %s = 0;\n", i4, st->g)) return 0;
     if (seqb.buf && seqb.len && !cemit_buf(out, seqb.buf, seqb.len))
         return 0;
@@ -5562,6 +5802,8 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
     if (!cemit_fmt(out, "%s}\n", i3))
         return 0;
     if (!shadow_pw_emit_fin_store(out, i3, dest))
+        return 0;
+    if (!shadow_pw_emit_handle_join(out, i3, hdest))
         return 0;
     if (!cemit_fmt(out, "%s} else {\n", i2))
         return 0;
@@ -5622,6 +5864,8 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
     if (!cemit_fmt(out, "%sfor (%s = (int)(%s); %s < (int)(%s); %s++) {\n",
                    i4, st->a, lo, st->a, hi, st->a))
         return 0;
+    if (!shadow_pw_emit_honor_name(out, i5, hdest))
+        return 0;
     if (!cemit_fmt(out, "%sif (cc_nursery_is_cancelled_host(__cc_pw_n_%d)) break;\n",
                    i5, id))
         return 0;
@@ -5635,6 +5879,8 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
         return 0;
     if (!cemit_fmt(out, "%sfor (%s = (int)(%s); %s < (int)(%s); %s++) {\n",
                    i4, st->a, lo, st->a, hi, st->a))
+        return 0;
+    if (!shadow_pw_emit_honor_name(out, i5, hdest))
         return 0;
     if (!cemit_fmt(out, "%sif (cc_nursery_is_cancelled_host(__cc_pw_n_%d)) break;\n",
                    i5, id))
@@ -5730,7 +5976,12 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
         return 0;
     if (!cemit_fmt(out, "%scc_chan_free(__cc_pw_work_%d);\n", i3, id))
         return 0;
+    if (hdest && hdest[0] &&
+        !cemit_fmt(out, "%s%s.n = 0;\n", i3, hdest))
+        return 0;
     if (!cemit_fmt(out, "%scc_nursery_free_host(__cc_pw_n_%d);\n", i3, id))
+        return 0;
+    if (!shadow_pw_emit_handle_join(out, i3, hdest))
         return 0;
     rbind = reh->b[0] ? reh->b : "e";
     /* Nested emit (cache destroy bodies) may have moved ctx->site. */
@@ -5914,14 +6165,23 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
     }
     if (!cemit_fmt(h,
             "        int lo;\n        int hi;\n"
-            "        __cc_pf_ex_%d_t *__cc_pf_ex;\n"
+            "        __cc_pf_ex_%d_t *__cc_pf_ex;\n",
+            id)) {
+        free(body.buf);
+        return 0;
+    }
+    if (!shadow_par_emit_honor_field(h, "        ")) {
+        free(body.buf);
+        return 0;
+    }
+    if (!cemit_fmt(h,
             "    } *e = arg;\n"
             "    __cc_parfor_walk_%d(e->lo, e->hi, arg);\n"
             "    return NULL;\n"
             "}\n"
             "static void __cc_parfor_walk_%d(int lo, int hi, void* env) {\n"
             "    struct {\n",
-            id, id, id)) {
+            id, id)) {
         free(body.buf);
         return 0;
     }
@@ -5931,9 +6191,16 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
     }
     if (!cemit_fmt(h,
             "        int lo;\n        int hi;\n"
-            "        __cc_pf_ex_%d_t *__cc_pf_ex;\n"
-            "    } *e = env;\n",
+            "        __cc_pf_ex_%d_t *__cc_pf_ex;\n",
             id)) {
+        free(body.buf);
+        return 0;
+    }
+    if (!shadow_par_emit_honor_field(h, "        ")) {
+        free(body.buf);
+        return 0;
+    }
+    if (!cemit_str(h, "    } *e = env;\n")) {
         free(body.buf);
         return 0;
     }
@@ -5943,13 +6210,15 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
     }
     if (!cemit_fmt(h,
             "    if (lo >= hi) return;\n"
+            "    cc_parallel_honor(e->__cc_par_h);\n"
             "    if ((hi - lo) <= 1) {\n"
             "        int %s;\n"
             "        for (%s = lo; %s < hi; %s++) {\n"
             "            if (e->__cc_pf_ex) {\n"
             "                int __cc_xk = cc_atomic_load(&e->__cc_pf_ex->xk);\n"
             "                if (__cc_xk) break;\n"
-            "            }\n",
+            "            }\n"
+            "            cc_parallel_honor(e->__cc_par_h);\n",
             st->a, st->a, st->a, st->a)) {
         free(body.buf);
         return 0;
@@ -5966,50 +6235,58 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
             "    }\n"
             "    {\n"
             "        int mid = lo + (hi - lo) / 2;\n"
-            "        struct {\n")) {
+            "        if (!cc_parallel_deny_fast(&__cc_parfor_site_%d, "
+            "__cc_parfor_thunk_%d)) {\n"
+            "            struct {\n",
+            id, id)) {
         free(body.buf);
         return 0;
     }
-    if (!shadow_par_emit_cap_members(h, "            ", names, tys, ncaps)) {
+    if (!shadow_par_emit_cap_members(h, "                ", names, tys,
+                                     ncaps)) {
         free(body.buf);
         return 0;
     }
     if (!cemit_fmt(h,
-            "            int lo;\n            int hi;\n"
-            "            __cc_pf_ex_%d_t *__cc_pf_ex;\n"
-            "        } child;\n"
-            "        CCTask t;\n",
+            "                int lo;\n                int hi;\n"
+            "                __cc_pf_ex_%d_t *__cc_pf_ex;\n"
+            "                CCParallel* __cc_par_h;\n"
+            "            } child;\n"
+            "            CCTask t;\n",
             id)) {
         free(body.buf);
         return 0;
     }
     /* Mangled member-to-member copy: capture names cannot collide. */
     for (k = 0; k < ncaps; k++) {
-        if (!cemit_fmt(h, "        child.__cc_cap_%s = e->__cc_cap_%s;\n",
+        if (!cemit_fmt(h, "            child.__cc_cap_%s = e->__cc_cap_%s;\n",
                        names[k], names[k])) {
             free(body.buf);
             return 0;
         }
     }
     if (!cemit_fmt(h,
-            "        child.lo = mid;\n"
-            "        child.hi = hi;\n"
-            "        child.__cc_pf_ex = e->__cc_pf_ex;\n"
-            "        if (cc_parallel_deny_fast(&__cc_parfor_site_%d, "
-            "__cc_parfor_thunk_%d))\n"
-            "            t = cc__task_invalid();\n"
-            "        else\n"
+            "            child.lo = mid;\n"
+            "            child.hi = hi;\n"
+            "            child.__cc_pf_ex = e->__cc_pf_ex;\n"
+            "            child.__cc_par_h = e->__cc_par_h;\n"
             "            t = cc_parallel_spawn(__cc_parfor_thunk_%d, &child);\n"
-            "        if (t.kind == CC_TASK_KIND_INVALID) {\n"
-            "            CC_PAR_NOTE_INLINE_ARM();\n"
-            "            int %s;\n"
-            "            for (%s = lo; %s < hi; %s++) {\n"
-            "                if (e->__cc_pf_ex) {\n"
-            "                    int __cc_xk = "
+            "            if (t.kind != CC_TASK_KIND_INVALID) {\n"
+            "                __cc_parfor_walk_%d(lo, mid, env);\n"
+            "                cc_parallel_join(t);\n"
+            "                return;\n"
+            "            }\n"
+            "        }\n"
+            "        CC_PAR_NOTE_INLINE_ARM();\n"
+            "        int %s;\n"
+            "        for (%s = lo; %s < hi; %s++) {\n"
+            "            if (e->__cc_pf_ex) {\n"
+            "                int __cc_xk = "
             "cc_atomic_load(&e->__cc_pf_ex->xk);\n"
-            "                    if (__cc_xk) break;\n"
-            "                }\n",
-            id, id, id, st->a, st->a, st->a, st->a)) {
+            "                if (__cc_xk) break;\n"
+            "            }\n"
+            "            cc_parallel_honor(e->__cc_par_h);\n",
+            id, id, st->a, st->a, st->a, st->a)) {
         free(body.buf);
         return 0;
     }
@@ -6021,14 +6298,10 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
     }
     free(body.buf);
     if (!cemit_fmt(h,
-            "            }\n"
-            "            return;\n"
             "        }\n"
-            "        __cc_parfor_walk_%d(lo, mid, env);\n"
-            "        cc_parallel_join(t);\n"
+            "        return;\n"
             "    }\n"
-            "}\n",
-            id))
+            "}\n"))
         return 0;
 
     if (!cemit_fmt(out, "%s{\n", indent)) return 0;
@@ -6053,9 +6326,10 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
     if (!cemit_fmt(out,
             "%s    int lo;\n%s    int hi;\n"
             "%s    __cc_pf_ex_%d_t *__cc_pf_ex;\n"
+            "%s    CCParallel* __cc_par_h;\n"
             "%s} __cc_parfor_e_%d;\n"
             "%s__cc_pf_ex_%d_t __cc_pf_ex_%d;\n",
-            i1, i1, i1, id, i1, id, i1, id, id))
+            i1, i1, i1, id, i1, i1, id, i1, id, id))
         return 0;
     {
         char dot[48];
@@ -6066,8 +6340,9 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
     if (!cemit_fmt(out,
             "%scc__bytes_zero(&__cc_pf_ex_%d, sizeof(__cc_pf_ex_%d));\n"
             "%s__cc_parfor_e_%d.__cc_pf_ex = &__cc_pf_ex_%d;\n"
+            "%s__cc_parfor_e_%d.__cc_par_h = 0;\n"
             "%s__cc_parfor_walk_%d((int)(%s), (int)(%s), &__cc_parfor_e_%d);\n",
-            i1, id, id, i1, id, id, i1, id, lo, hi, id))
+            i1, id, id, i1, id, id, i1, id, i1, id, lo, hi, id))
         return 0;
     {
         const char* rty = (ctx && ctx->soft_ret_ty && ctx->soft_ret_ty[0] &&

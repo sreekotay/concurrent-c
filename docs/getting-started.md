@@ -471,6 +471,8 @@ int a = 0, b = 0;
 `@parallel (pred) { … }` runs the same arms; spawn only if `pred` is true.
 `@parallel wait (ts) for` is the ordered spawn loop: `bool !>(CCError)` —
 `true` if the range finished; a targeting `break` must bind the bool.
+`CCParallel h = @parallel wait (ts) for … !>;` is live during enter;
+tickets may pause or cancel `h`; the statement joins.
 `return` in a parallel construct drains first, then returns from the
 function. Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
 Spec §8.11.

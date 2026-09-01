@@ -11,7 +11,7 @@ static int !>(CCError) cch_face_chapter_step(int x) {
     return cc_ok(x + cch_face_chapter_tab[0]);
 }
 
-static int cch_face_chapter_add(int a, int b) {
+int cch_face_chapter_add(int a, int b) {
     /* FACE_CHAPTER_BODY_MUST_NOT_SPLICE_INTO_FACE */
     int x = cch_face_chapter_step(a) !> { return -1; };
     int y = cch_face_chapter_step(b) !> { return -1; };

@@ -1,0 +1,57 @@
+/*
+ * CCParallel dest on wait-for: live during enter, joined after the
+ * statement. Pause/resume in a stage body; cancel stops enter.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+#define N 4
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    {
+        CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+        CCTurnstile ts@(2, 1, arena) !> @destroy;
+        int i;
+        int xs[N];
+        for (i = 0; i < N; i++) xs[i] = 0;
+        CCParallel h = @parallel wait (ts) for (i in 0..N) {
+            @stage (ts, 0, i) {
+                if (i == 0) {
+                    h.pause() !>;
+                    h.resume() !>;
+                }
+                xs[i] = 1;
+            }
+        } !>;
+        if (!h.joined) {
+            fprintf(stderr, "FAIL wait dest not joined\n");
+            return 1;
+        }
+        for (i = 0; i < N; i++) {
+            if (xs[i] != 1) {
+                fprintf(stderr, "FAIL wait dest xs[%d]\n", i);
+                return 1;
+            }
+        }
+    }
+
+    {
+        CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+        CCTurnstile ts@(2, 1, arena) !> @destroy;
+        int i;
+        CCParallel h = @parallel wait (ts) for (i in 0..8) {
+            if (i == 0)
+                h.cancel() !>;
+        } !>;
+        if (!h.joined || !h.cancelled) {
+            fprintf(stderr, "FAIL wait dest cancel joined=%d cancelled=%d\n",
+                    h.joined, h.cancelled);
+            return 1;
+        }
+    }
+
+    printf("parallel_wait_dest_smoke: OK\n");
+    return 0;
+}

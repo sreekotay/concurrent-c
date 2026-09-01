@@ -1,0 +1,18 @@
+#ifndef TESTS_UNOWNED_FACES_TWO_SPLICE_CCH
+#define TESTS_UNOWNED_FACES_TWO_SPLICE_CCH
+
+#include <ccc/std/prelude.cch>
+
+/* Unowned impl-grade face with a non-static fn. Two TUs in one link set
+ * must fail — make the function static or give the face an owner. */
+static int !>(CCError) two_splice_step(int x) {
+    @errhandler(CCError e) { return cc_err(e); }
+    return cc_ok(x);
+}
+
+int two_splice_val(void) {
+    int x = two_splice_step(2) !> { return 0; };
+    return x;
+}
+
+#endif

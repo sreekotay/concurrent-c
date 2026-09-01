@@ -78,6 +78,11 @@ typedef struct {
 #define TASK_FIBER_V2(t) ((CCTaskFiberV2Internal*)((t)->_data))
 #endif /* CC_TASK_INTERNAL_TYPES_DEFINED */
 
+fiber_v2* cc_task_fiber_v2(CCTask t) {
+    if (t.kind != CC_TASK_KIND_FIBER_V2) return NULL;
+    return TASK_FIBER_V2(&t)->fiber;
+}
+
 /* Spawn task poll functions (defined in scheduler.c) */
 int cc_thread_task_poll_done(struct CCSpawnTask* task);
 void* cc_thread_task_get_result(struct CCSpawnTask* task);

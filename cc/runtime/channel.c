@@ -108,6 +108,7 @@
 
 /* Defined in nursery.c (same translation unit via runtime/concurrent_c.c). */
 CCNurseryHost* cc__runtime_current_nursery(void);
+int cc_parallel_current_cancelled(void);
 /* Thread-local current deadline scope (set by with_deadline lowering). */
 #if defined(__TINYC__)
 #define cc__tls_current_deadline (*(CCDeadline**)&(cc_rt_tls_get()->current_deadline))
@@ -493,6 +494,8 @@ static inline cc_sched_wait_result cc__chan_wait_notified_mark_close(cc__fiber_w
     if (wait_rc == CC_SCHED_WAIT_CLOSED) {
         atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_CLOSE, memory_order_release);
     }
+    if (cc_parallel_current_cancelled())
+        return CC_SCHED_WAIT_CANCELLED;
     return wait_rc;
 }
 
@@ -2247,6 +2250,10 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
                     cc__chan_remove_send_waiter(ch, &node);
                     return ETIMEDOUT;
                 }
+                if (wait_rc == CC_SCHED_WAIT_CANCELLED) {
+                    cc__chan_remove_send_waiter(ch, &node);
+                    return ECANCELED;
+                }
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {
                     atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
@@ -2288,7 +2295,8 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
         while (!cc__chan_closed(ch) && !ch->rx_error_closed && ch->count == ch->cap) {
             /* Check if current nursery is cancelled - unblock so the fiber can exit */
             CCNurseryHost* cur_nursery = cc__runtime_current_nursery();
-            if (cur_nursery && cc_nursery_is_cancelled_host(cur_nursery)) {
+            if ((cur_nursery && cc_nursery_is_cancelled_host(cur_nursery)) ||
+                cc_parallel_current_cancelled()) {
                 return ECANCELED;
             }
             cc__fiber_wait_node node = {0};
@@ -2311,6 +2319,10 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
             if (wait_rc == CC_SCHED_WAIT_TIMEOUT) {
                 cc__chan_remove_send_waiter(ch, &node);
                 return ETIMEDOUT;
+            }
+            if (wait_rc == CC_SCHED_WAIT_CANCELLED) {
+                cc__chan_remove_send_waiter(ch, &node);
+                return ECANCELED;
             }
             int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
             if (notified == CC_CHAN_NOTIFY_SIGNAL) {
@@ -2386,6 +2398,11 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
                     cc__chan_remove_recv_waiter(ch, &node);
                     ch->rv_recv_waiters--;
                     return ETIMEDOUT;
+                }
+                if (wait_rc == CC_SCHED_WAIT_CANCELLED) {
+                    cc__chan_remove_recv_waiter(ch, &node);
+                    ch->rv_recv_waiters--;
+                    return ECANCELED;
                 }
                 if (wait_rc == CC_SCHED_WAIT_CLOSED) {
                     cc__chan_remove_recv_waiter(ch, &node);
@@ -2488,6 +2505,10 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
             if (wait_rc == CC_SCHED_WAIT_TIMEOUT) {
                 cc__chan_remove_recv_waiter(ch, &node);
                 return ETIMEDOUT;
+            }
+            if (wait_rc == CC_SCHED_WAIT_CANCELLED) {
+                cc__chan_remove_recv_waiter(ch, &node);
+                return ECANCELED;
             }
 
             int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
@@ -4371,7 +4392,8 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         /* Check if current nursery is cancelled - unblock so the fiber can exit */
         {
             CCNurseryHost* cur_nursery = cc__runtime_current_nursery();
-            if (cur_nursery && cc_nursery_is_cancelled_host(cur_nursery)) {
+            if ((cur_nursery && cc_nursery_is_cancelled_host(cur_nursery)) ||
+                cc_parallel_current_cancelled()) {
                 pthread_mutex_unlock(&ch->mu);
                 return ECANCELED;
             }
@@ -4600,7 +4622,17 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 }
                 cc__chan_trace_req_recv(ch, "park_wait_begin", &node,
                                         atomic_load_explicit(&node.notified, memory_order_relaxed), 0);
-                (void)cc__chan_wait_notified_mark_close(&node, NULL, "chan_recv_wait_empty", ch);
+                {
+                    cc_sched_wait_result wait_rc =
+                        cc__chan_wait_notified_mark_close(&node, NULL,
+                                                          "chan_recv_wait_empty", ch);
+                    if (wait_rc == CC_SCHED_WAIT_CANCELLED) {
+                        cc_chan_lock(ch);
+                        cc__chan_remove_recv_waiter(ch, &node);
+                        pthread_mutex_unlock(&ch->mu);
+                        return ECANCELED;
+                    }
+                }
                 cc_chan_lock(ch);
                 goto recv_post_park_notified;
             }
@@ -4973,6 +5005,12 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                     pthread_mutex_unlock(&ch->mu);
                     return ETIMEDOUT;
                 }
+                if (wait_rc == CC_SCHED_WAIT_CANCELLED) {
+                    cc_chan_lock(ch);
+                    cc__chan_remove_send_waiter(ch, &node);
+                    pthread_mutex_unlock(&ch->mu);
+                    return ECANCELED;
+                }
                 cc_chan_lock(ch);
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {
@@ -5143,6 +5181,12 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                     cc__chan_remove_recv_waiter(ch, &node);
                     pthread_mutex_unlock(&ch->mu);
                     return ETIMEDOUT;
+                }
+                if (wait_rc == CC_SCHED_WAIT_CANCELLED) {
+                    cc_chan_lock(ch);
+                    cc__chan_remove_recv_waiter(ch, &node);
+                    pthread_mutex_unlock(&ch->mu);
+                    return ECANCELED;
                 }
                 cc_chan_lock(ch);
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);

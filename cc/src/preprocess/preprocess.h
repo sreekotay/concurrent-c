@@ -163,6 +163,10 @@ char* cc_preprocess_comptime_source(const char* input_path);
 // rewrite was needed. Caller must free(). After the call,
 // cc_local_header_lower_failed() is set if any include could not be
 // lowered — treat that as a hard error, even when the return is NULL.
+/* Link-set face check: 2+ unowned splices of one face, or extract of an
+ * owned face whose owner `.ccs` is not in `ccs_paths`. 0 ok, -1 error. */
+int cc_check_link_set_faces(const char* const* ccs_paths, int n);
+
 char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
                                                        size_t input_len,
                                                        const char* input_path);

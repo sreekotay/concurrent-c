@@ -1076,6 +1076,7 @@ typedef struct {
     int pw_loop;          /* inner for/while/do depth (continue targets) */
     int pw_brk;           /* inner loop+switch depth (break targets) */
     char pw_ivar[64];     /* wait-for loop variable */
+    char pw_hdest[64];    /* wait-for CCParallel dest; honor / cancel */
     int pw_fin;           /* sequential path tracks wait-for break */
     AstNode* pw_stages[16]; /* top-level @stage nodes (seq continue) */
     int pw_nstages;

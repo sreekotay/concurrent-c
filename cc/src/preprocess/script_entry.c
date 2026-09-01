@@ -1274,7 +1274,7 @@ char* cc_script_rewrite_source(const char* path,
         char perr[192];
         int po = 0, lo = 0;
         perr[0] = '\0';
-        if (cc_file_start_pragmas(src, len, &po, &lo, perr, sizeof(perr)) != 0) {
+        if (cc_file_start_pragmas(src, len, &po, &lo, NULL, perr, sizeof(perr)) != 0) {
             fprintf(stderr, "%s: %s\n", path ? path : "<shcc>", perr);
             return NULL;
         }

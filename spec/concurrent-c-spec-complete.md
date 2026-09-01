@@ -16,7 +16,7 @@ This specification defines:
 - Lowering to C
 - Script entry (`.shcc`) and the script library partner to the stdlib (§9.5)
 - Translation-unit headers (`#!ccc ccs|cch`, OS shebang for scripts) (§1.7)
-- File-start `#pragma(@prelude) off` / `#pragma(@linenumbers) off` (§1.8)
+- File-start `#pragma(@prelude) off` / `#pragma(@linenumbers) off` / `#pragma(@per_tu)` (§1.8)
 
 The lowering is part of this specification, not an implementation detail. Two conforming implementations must produce lowerings with identical observable behavior. Implementations may emit or inspect the lowered form via `--emit-c-only` (writes lowered C to `out/<stem>.c`) or `--emit-c-inspect` (writes the merged translation unit).
 
@@ -252,9 +252,10 @@ are in scope. One include in one translation unit is either an
 extracted `#include` of the lowered `.h` or a splice of the chapter
 body, not both. A textual include guard does not apply to a splice.
 A file-scope function body has one definition — the owner TU.
-File-scope `static` on those functions is dropped: the extracted `.h`
-is an extern declaration, and the owner splice is the one external
-definition. A file-scope data definition (`int xs[] = {1,2}`) becomes
+File-scope `static` on a function stays `static`: the owner splice
+keeps the keyword and the body, and the extracted `.h` omits that
+function. A file-scope function without `static` has one definition
+in the owner TU; other TUs see a declaration in the extract. A file-scope data definition (`int xs[] = {1,2}`) becomes
 `extern int xs[];` in the extract; the owner splice keeps the
 initializer. `static` data stays `static` in the extract and is not
 repeated in an owner include-graph splice.
@@ -296,6 +297,7 @@ begin with:
 ```
 #pragma(@prelude) off
 #pragma(@linenumbers) off
+#pragma(@per_tu)
 ```
 
 File-start means after the header and after leading blank lines and comments.
@@ -312,6 +314,17 @@ it does not affect compilation.
 `#pragma(@linenumbers) off` omits `#line` and `CC_LN` from the emitted C.
 `--no-line` on the `ccc` command line has the same effect and overrides the
 pragma when both are present.
+
+An unowned impl-grade face whose file-scope functions are all `static`
+may splice into every translation unit as a private copy. A second splice
+of an unowned face that has a non-`static` file-scope function is an
+error — make those functions `static`, or give the face an owner `.ccs`.
+Extract of an owned face whose owner `.ccs` is not in the link set is an
+error.
+
+`#pragma(@per_tu)` is optional. Presence (no `off`) requires every
+file-scope function on that face to be `static`, even when only one
+translation unit includes it.
 
 ---
 
@@ -399,6 +412,7 @@ bugs.
 | `#pragma(@parallel) off` / `on` | Static denial: `@parallel` lowers sequentially (§8.11.8)  | `#pragma(@parallel) off`                   |
 | `#pragma(@prelude) off` | No automatic prolog (§1.8) | `#pragma(@prelude) off` |
 | `#pragma(@linenumbers) off` | Omit `#line` / `CC_LN` from emit (§1.8) | `#pragma(@linenumbers) off` |
+| `#pragma(@per_tu)` | Optional: require all file-scope fns `static` (§1.8) | `#pragma(@per_tu)` |
 
 **Call-site annotation forms** (see §8.2 for precedence):
 
@@ -5388,7 +5402,11 @@ A dest bound to the construct (`CCParallel h = @parallel { … } !>;`) is that h
 
 `h.cancelled` is an atomic flag. A concurrent load with `h.cancel()` is defined. After `h.wait()`, a load of `h.cancelled` is visible to the waiter.
 
-`h.cancel()` is `bool !>(CCIoError)`. `ok(true)` means this call performed the live→cancelled transition on this handle or an adopted descendant. `ok(false)` means the tree was already cancelled or already joined. The first `ok(true)` is the transition; a later call is `ok(false)`. `h.pause()` / `h.resume()` are the same Result shape: `ok(true)` is this call's transition; `ok(false)` is already in that state or already joined.
+`h.paused` is an atomic flag. A concurrent load with `h.pause()` / `h.resume()` is defined. `h.paused()` is that load. Pause and resume run on a live dest — they do not require `.wait()`. After `h.wait()`, a load of `h.paused` is visible to the waiter.
+
+The construct honors `paused` at the seams it emits: the start of a spawned thunk, the next `@parallel for` half, the next leaf iteration, wait-for enter, wait-for ticket entry, and after `@stage` `wait` returns `ok` before the block. `cc_parallel_honor(h)` yields while paused. Cancel is a mark: it does not skip a thunk, and it unsticks a paused honor. An arm already past that seam is in-flight. A body that cares mid-arm still polls. `.wait()` does not resume; a paused dest whose remaining work is still at a seam does not finish until `.resume()` or `.cancel()`. `h.cancel()` wakes parks on fibers attached to the dest (channel send/recv, exclusive wait). Pause does not complete those parks. `resume()` does not complete a parked `wait` or `recv`.
+
+`h.cancel()` is `bool !>(CCIoError)`. `ok(true)` means this call performed the live→cancelled transition on this handle or an adopted descendant. `ok(false)` means the tree was already cancelled or already joined. The first `ok(true)` is the transition; a later call is `ok(false)`. `h.pause()` / `h.resume()` are the same Result shape: `ok(true)` is this call's transition on a live dest; `ok(false)` is already in that state or already joined.
 
 UFCS is the surface: `h.wait()` is `cc_parallel_wait(h)`, and the same for `cancel` / `pause` / `resume`. A void host unwraps in place (`h.wait() !>(e) { (void)e; };`). That lowers. A `void !>(CCError)` wrapper is a seam for `return h.wait()` plus an `@errhandler` that maps `CCIoError` to `cc_ok()` — not a second protocol. When the host is void, the wrapper is unnecessary; kick/drop may cancel and wait a dest that already ended (`wait` of a joined dest is `ok`; `cancel` / `pause` / `resume` of a joined dest are `ok(false)`).
 
@@ -5400,7 +5418,7 @@ Lowering is fork-join: the dest exists before any arm runs. A dest-live one-arm 
 
 A `return` in any arm joins every spawned sibling, then returns from the function. The construct does not wait for a later or earlier arm that has not returned — including an arm that never will (an external hang). If two arms both `return`, which value is taken is not specified. On the sequential denial (`seq` false, or `#pragma(@parallel) off`) it is a normal C `return`: later arms do not run.
 
-Arms must not race. Sharing a location across arms, or reading another arm's destination, is undefined. The dest's `cancelled` flag is the exception: a sibling may load it while `cancel()` stores.
+Arms must not race. Sharing a location across arms, or reading another arm's destination, is undefined. The dest's `cancelled` and `paused` flags are the exception: a sibling may load them while `cancel()` / `pause()` / `resume()` store.
 
 #### 8.11.2 `@serial`
 
@@ -5447,7 +5465,7 @@ Independence is unchanged: reading another arm's destination is undefined on bot
 
 A `for` statement as a direct child of `@parallel { }` is ill-formed. The loop is a form of the keyword, not a statement the brace happens to contain.
 
-Lowering bisects the range: one half is spawned, the other runs on the caller, then the spawn is joined. A span of length 0 or 1 runs as an ordinary sequential `for`. Nested `@parallel for` bisects the same way. If a spawn fails, that half runs on the caller.
+Lowering bisects the range: one half is spawned, the other runs on the caller, then the spawn is joined. A span of length 0 or 1 runs as an ordinary sequential `for`. Nested `@parallel for` bisects the same way. If a spawn fails, that half runs on the caller. Each new half and each leaf iteration calls `cc_parallel_honor` on the dest in the walk env (null when the form has no dest): yield while paused, do not skip the piece.
 
 Iterations must not race. Disjoint writes (`img[y * w + x] = …` for distinct `(x, y)`) are the caller's fact. A `goto` whose target is not a label in the same `for` body is ill-formed.
 
@@ -5476,6 +5494,8 @@ bool fin = @parallel seq (use_par) wait (ts) for (i in 0..n) {
 
 The wait-for form is an expression of type `bool !>(CCError)`. `ok(true)` means the range ran out. `ok(false)` means a `break` that targets this wait-for cancelled the nursery. A ticket error is `err`. `continue` does not produce `false`. `return` leaves the function after drain and does not yield the construct's Result. Assignment join and bisect `@parallel for` remain statements.
 
+`CCParallel h = @parallel wait (ts) for (…) { … } !>;` binds a dest that is live during the enter loop. Tickets may `h.pause()`, `h.resume()`, and `h.cancel()`. `h.n` is the construct's nursery: cancel marks the dest and cancels that nursery so enter stops. The construct runs the loop on the caller and joins before the statement ends; after it, `h` is joined. `!>.wait()!>` remains the consume spelling when there is no dest. A targeting `break` still requires a bool bind.
+
 `@parallel wait (gate) for (i in lo..hi) { … }` runs the loop as an ordered spawn loop. `gate` is the name of a `CCTurnstile` or `CCTurnstileRW` (§8.12) in scope; any other type is ill-formed. Iterations are tickets: the construct calls `enter(i)` on the caller in loop order — the depth cap bounds in-flight iterations — then spawns the body. `leave()` runs after the body on every path. If a spawn is denied, that iteration's body runs on the caller before the next `enter`; the token is never leaked. `wait` without `for`, or with an assignment-join body, is ill-formed.
 
 The optional `seq (cond)` prefix composes: when `cond` is false the same body runs as a plain sequential `for` on the caller, with no `enter`/`leave` and no spawn. The construct also takes this path when it cannot allocate its join scope. Stage `wait`/`pass` still run: on the sequential path `pass` precedes the successor's `wait` in program order, so the gate cell is UNARMED and the wait returns immediately.
@@ -5486,7 +5506,7 @@ An optional `worker (name)` after the range binds `name` as an `int`: the index 
 
 Body statements may raise with `!>`. Errors are stop-starting: a failure stops new tickets from entering, in-flight iterations finish, and after the brace a ticket error re-raises into the innermost `@errhandler` for `CCError`, or into an attached `!>(e) { … }` on the construct. A handler must be in scope on both schedules unless that attached tail is present. A failed `enter` takes no token and joins the same way. `wait` and `pass` are `void !>(CCError)`: a handshake failure is a ticket error and runs that same handler. Because an entered successor is parked in `wait(i+1)` until ticket `i` discharges the stage, an entered ticket must discharge every `@stage` on every path. A success exit `pass`es unpassed stages (waiter wakes `ok`). An error exit `fail`s them: the gate becomes FAILED and a parked `wait` wakes as `err(CANCELLED)`. Ticket `i` errors before or inside a stage; ticket `i+1` already in `wait` does not hang — it wakes with that error, skips the block, `fail`s its own remaining stages, and `leave`s. The predecessor's body error and the successor's cancelled wait are both ticket errors; which one re-raises is not specified. `@defer` and `@errhandler` at the top level of the body are ill-formed; the structural form of the discharge is `@stage`.
 
-`@stage (gate, args…) { … }` is a statement inside a wait-for body, not a Result: it unwraps `gate.wait(args…) !>;`, the block, `gate.pass(args…) !>;`. `gate` is spelled as the receiver the calls apply to — `ts.read`, `ts.write`, a `CCTurnstile` with the stage index in `args` (`@stage (t, k, i)`), or a pointer to either. Each `@stage` is a ticket-scoped handshake on a named gate cell: whichever of `wait` or `pass`/`fail` touches the cell first creates it (ARMED, UNARMED, or FAILED); the other completes the handshake. A successor may therefore `wait` before this ticket reaches the block. Work inside the block may be empty or guarded (`if (chain) { … }`); the handshake still happens. The `@stage` itself is a top-level statement of the wait-for body — nested in `if`, a loop, or another `@stage` is ill-formed. Inside the block the ticket is ordered and exclusive for that stage — loop-carried state reads as it does in the sequential loop. `@stage` outside a wait-for body is ill-formed. A raise inside the block exits the ticket; the error-path `fail` still happens.
+`@stage (gate, args…) { … }` is a statement inside a wait-for body, not a Result: it unwraps `gate.wait(args…) !>;`, the block, `gate.pass(args…) !>;`. `gate` is spelled as the receiver the calls apply to — `ts.read`, `ts.write`, a `CCTurnstile` with the stage index in `args` (`@stage (t, k, i)`), or a pointer to either. Each `@stage` is a ticket-scoped handshake on a named gate cell: whichever of `wait` or `pass`/`fail` touches the cell first creates it (ARMED, UNARMED, or FAILED); the other completes the handshake. A successor may therefore `wait` before this ticket reaches the block. `wait` has two completions: `pass` wakes `ok`; `fail` wakes `err(CANCELLED)`. Pause is not a third completion. Honor after `wait` returns `ok`, before the block; `resume()` does not complete `wait`. Work inside the block may be empty or guarded (`if (chain) { … }`); the handshake still happens. The `@stage` itself is a top-level statement of the wait-for body — nested in `if`, a loop, or another `@stage` is ill-formed. Inside the block the ticket is ordered and exclusive for that stage — loop-carried state reads as it does in the sequential loop. `@stage` outside a wait-for body is ill-formed. A raise inside the block exits the ticket; the error-path `fail` still happens.
 
 The loop-carried case is the point: state that hops from ticket `i` to `i+1` (a chained compression dictionary, a running checksum, an output file position) sits in an `@stage` block in the body and reads exactly as it does in the sequential loop. The parallel run and the denied run produce the same output.
 

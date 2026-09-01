@@ -1,0 +1,13 @@
+#pragma(@per_tu)
+
+#ifndef TESTS_UNOWNED_FACES_PER_TU_NONSTATIC_CCH
+#define TESTS_UNOWNED_FACES_PER_TU_NONSTATIC_CCH
+
+#include <ccc/std/prelude.cch>
+
+int per_tu_pub(void) {
+    @errhandler(CCError e) { (void)e; return 0; }
+    return 1;
+}
+
+#endif

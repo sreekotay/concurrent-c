@@ -1,0 +1,5 @@
+#include "unowned_faces/per_tu_nonstatic.cch"
+
+int main(void) {
+    return per_tu_pub();
+}

@@ -513,14 +513,15 @@ Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
 | `@parallel { h1.wait() !>; h2.wait() !>; }` | Expression arms. No assignment: the expression just runs. |
 | `h1.adopt(h2)` | Cancel tree. `h1.cancel()` is child then parent; `h2.cancel()` is child only. |
 | `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. When there is a kick, the first arm has finished; siblings may still run. `h.wait()` joins and publishes their writes. One assignment arm is ill-formed: this dest is never live on the caller. One expression arm is the worker (spawned); dest is live. Mark the caller `@serial`, or join with `!>.wait()!>`. Pointer names copy the pointer; other names are by reference and must outlive `.wait()`. |
-| `h.cancel()` | `bool !>(CCIoError)`. `true` = this call stored live→cancelled on `h` or an adopted child. |
-| `h.pause()` / `h.resume()` | `bool !>(CCIoError)`. `true` = this call's transition. |
+| `h.cancel()` | `bool !>(CCIoError)`. `true` = this call stored live→cancelled on `h` or an adopted child. Wakes parks on attached fibers. Pause does not complete a `recv`. |
+| `h.pause()` / `h.resume()` | `bool !>(CCIoError)`. `true` = this call's transition on a live dest. Does not require `.wait()`. Construct honors at thunk entry / next for-half / next leaf `i` / wait-for enter / after `@stage` wait. |
+| `h.paused` / `h.paused()` | Atomic flag. Safe to poll from a sibling while `pause()` / `resume()` store. Visible after `h.wait()`. |
 | `h.cancelled` | Atomic flag. Safe to poll from a sibling while `cancel()` stores. Visible after `h.wait()`. |
 | void host | `h.wait() !>(e) { (void)e; };` — UFCS `!>` lowers in void. No Result wrapper. |
 | `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; writes exactly one outer name. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. Body always runs. |
 | `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; span 0 or 1 is a plain `for`. |
-| `@parallel wait (ts) for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished (§8.11.6). |
+| `@parallel wait (ts) for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished. `CCParallel h = … !>;` is live during enter; the statement joins (§8.11.6). |
 | `cache (zs)` | After `wait`: adopt enclosing scratch; instance identity unobservable. |
 | `@stage (ts.read, i) { … }` | Ticket handshake in a wait-for body; pass on every exit. Not a Result. |
 | `break` / `continue` / `return` | Same as `for`. Parallel path drains first. `return` is `break` then `return`. Two returns: unspecified which value (drain still happens). Join: `return` joins sibling arms first. Wait-for `break` is `ok(false)` and must be bound. |
@@ -978,10 +979,16 @@ rewrite to the lowered `.h` path.
 An object-like `#define FLAG` immediately before `#include "foo.cch"`
 stays in this TU; `#ifdef FLAG` inside the extracted `.h` is host cpp,
 including function bodies under that `#ifdef`. File-scope functions in
-a `.cch` live in the owner TU; other TUs see decls. File-scope `static`
-on those functions is dropped so guests link to the owner. A file-scope
-data definition becomes `extern` in the extract; `static` data stays
-in the extract and is not repeated in an owner include-graph splice.
+a `.cch` live in the owner TU; other TUs see decls of non-`static`
+functions. File-scope `static` on a function stays `static` in the
+owner splice and is omitted from the extract. An unowned impl-grade
+face whose file-scope functions are all `static` splices a private copy
+per TU. A non-`static` function on an unowned face may appear in one TU;
+a second TU needs those functions `static` or an owner `.ccs`.
+`#pragma(@per_tu)` is optional and requires all file-scope functions
+`static`. A file-scope data definition becomes
+`extern` in the extract; `static` data stays in the extract and is not
+repeated in an owner include-graph splice.
 A pointer type in a declaration (`Tag *name` in a parameter, file-scope
 declarator, or struct field) that the face does not already name as a
 type is not a guessed `typedef struct Tag Tag`; if exactly one

@@ -43,6 +43,7 @@
 #include "visitor/pass_err_syntax.h"
 #include "visitor/pass_result_unwrap.h"
 #include "visitor/pass_unwrap_destroy.h"
+#include "cccportable.h"
 
 extern long g_cc_pass_error_count;
 
@@ -15807,81 +15808,8 @@ static int cc__static_follows_file_scope_fn(const char* src, size_t n,
     return 0;
 }
 
-/* Drop file-scope `static` on functions. `decls_only` skips leftover
- * bodies so an extracted `.h` does not grow a second external def.
- * Owner splice uses `decls_only == 0`. Data (`static int x`) stays. */
-static char* cc__destatic_file_scope_fns(const char* src, size_t n,
-                                        int decls_only) {
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    size_t i = 0;
-    int brace = 0;
-    int paren = 0;
-    int changed = 0;
-    int at_bol = 1;
-    CCScannerState scan;
-    if (!src || n == 0) return NULL;
-    cc_scanner_init(&scan);
-    while (i < n) {
-        size_t before = i;
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) {
-            size_t k;
-            for (k = before; k < i; k++) {
-                if (src[k] == '\n') at_bol = 1;
-                else if (src[k] != ' ' && src[k] != '\t') at_bol = 0;
-            }
-            cc_sb_append(&out, &out_len, &out_cap, src + before, i - before);
-            continue;
-        }
-        if (at_bol && (src[i] == ' ' || src[i] == '\t')) {
-            cc_sb_append(&out, &out_len, &out_cap, src + i, 1);
-            i++;
-            continue;
-        }
-        if (at_bol && src[i] == '#') {
-            size_t e = i;
-            while (e < n && src[e] != '\n') e++;
-            if (e < n) e++;
-            cc_sb_append(&out, &out_len, &out_cap, src + i, e - i);
-            i = e;
-            at_bol = 1;
-            continue;
-        }
-        if (brace == 0 && paren == 0 && i + 6 <= n &&
-            memcmp(src + i, "static", 6) == 0 &&
-            (i == 0 || !cc_is_ident_char(src[i - 1])) &&
-            (i + 6 >= n || !cc_is_ident_char(src[i + 6]))) {
-            int is_decl = 0;
-            size_t after = i + 6;
-            while (after < n && (src[after] == ' ' || src[after] == '\t'))
-                after++;
-            /* `static inline` stays. Stripping `static` leaves
-             * `inline void foo()` which shadow-lower cannot parse
-             * (pigz_cc put2le / cut_short on the owner splice). */
-            if (!(after + 6 <= n && memcmp(src + after, "inline", 6) == 0 &&
-                  (after + 6 >= n || !cc_is_ident_char(src[after + 6]))) &&
-                cc__static_follows_file_scope_fn(src, n, after, &is_decl) &&
-                (!decls_only || is_decl)) {
-                i = after;
-                changed = 1;
-                at_bol = 0;
-                continue;
-            }
-        }
-        if (src[i] == '{') brace++;
-        else if (src[i] == '}' && brace > 0) brace--;
-        else if (src[i] == '(') paren++;
-        else if (src[i] == ')' && paren > 0) paren--;
-        at_bol = (src[i] == '\n');
-        cc_sb_append(&out, &out_len, &out_cap, src + i, 1);
-        i++;
-    }
-    if (!changed) {
-        free(out);
-        return NULL;
-    }
-    return out;
-}
+/* Extract only: drop a leftover `static` file-scope function (decl after
+ * body strip). `static inline` and `static` data stay. */
 
 static size_t cc__skip_file_scope_item(const char* src, size_t n, size_t i);
 static size_t cc__file_scope_data_eq(const char* src, size_t n, size_t start);
@@ -16039,6 +15967,220 @@ static size_t cc__skip_file_scope_item(const char* src, size_t n, size_t i) {
         i++;
     }
     return n;
+}
+
+static char* cc__omit_static_file_scope_fns(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    int changed = 0;
+    int at_bol = 1;
+    int pp_depth = 0;
+    CCScannerState scan;
+    if (!src || n == 0) return NULL;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t before = i;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) {
+            size_t k;
+            for (k = before; k < i; k++) {
+                if (src[k] == '\n') {
+                    at_bol = 1;
+                } else if (at_bol && src[k] == '#') {
+                    pp_depth += cc__bol_hash_if_delta(src, n, k);
+                    if (pp_depth < 0) pp_depth = 0;
+                    at_bol = 0;
+                } else if (src[k] != ' ' && src[k] != '\t') {
+                    at_bol = 0;
+                }
+            }
+            cc_sb_append(&out, &out_len, &out_cap, src + before, i - before);
+            continue;
+        }
+        if (at_bol && (src[i] == ' ' || src[i] == '\t')) {
+            cc_sb_append(&out, &out_len, &out_cap, src + i, 1);
+            i++;
+            continue;
+        }
+        if (at_bol && src[i] == '#') {
+            size_t e = i;
+            pp_depth += cc__bol_hash_if_delta(src, n, i);
+            if (pp_depth < 0) pp_depth = 0;
+            while (e < n && src[e] != '\n') e++;
+            if (e < n) e++;
+            cc_sb_append(&out, &out_len, &out_cap, src + i, e - i);
+            i = e;
+            at_bol = 1;
+            continue;
+        }
+        if (pp_depth == 0 && i + 6 <= n && memcmp(src + i, "static", 6) == 0 &&
+            (i == 0 || !cc_is_ident_char(src[i - 1])) &&
+            (i + 6 >= n || !cc_is_ident_char(src[i + 6]))) {
+            int is_decl = 0;
+            size_t after = i + 6;
+            while (after < n && (src[after] == ' ' || src[after] == '\t' ||
+                                 src[after] == '\n'))
+                after++;
+            if (!(after + 6 <= n && memcmp(src + after, "inline", 6) == 0 &&
+                  (after + 6 >= n || !cc_is_ident_char(src[after + 6]))) &&
+                cc__static_follows_file_scope_fn(src, n, after, &is_decl)) {
+                i = cc__skip_file_scope_item(src, n, i);
+                changed = 1;
+                at_bol = (i > 0 && src[i - 1] == '\n');
+                continue;
+            }
+        }
+        at_bol = (src[i] == '\n');
+        cc_sb_append(&out, &out_len, &out_cap, src + i, 1);
+        i++;
+    }
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
+static int cc__file_scope_fn_name(const char* src, size_t n, size_t at,
+                                  char* name, size_t cap) {
+    size_t i = at;
+    int paren = 0;
+    CCScannerState scan;
+    if (name && cap) name[0] = 0;
+    if (!src || at >= n) return 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] == '(' && paren == 0) {
+            size_t b = i;
+            while (b > at && (src[b - 1] == ' ' || src[b - 1] == '\t' ||
+                              src[b - 1] == '\n' || src[b - 1] == '\r'))
+                b--;
+            if (b >= 2 && src[b - 2] == '!' && src[b - 1] == '>') {
+                /* `T !>(E)` */
+            } else if (b > at && cc_is_ident_char(src[b - 1])) {
+                size_t s = b;
+                while (s > at && cc_is_ident_char(src[s - 1])) s--;
+                if (name && cap) {
+                    size_t L = b - s;
+                    if (L >= cap) L = cap - 1;
+                    memcpy(name, src + s, L);
+                    name[L] = 0;
+                }
+                return 1;
+            }
+        }
+        if (src[i] == '(') paren++;
+        else if (src[i] == ')' && paren > 0) paren--;
+        else if ((src[i] == '{' || src[i] == ';') && paren == 0) return 0;
+        i++;
+    }
+    return 0;
+}
+
+/* `static` may sit before `T !>(E)` or other specifiers; `at` may land
+ * on `int` of `static int !>(E) f`. Walk back to the declaration start. */
+static int cc__fn_decl_has_static(const char* src, size_t n, size_t at,
+                                  size_t fn_end) {
+    size_t lo = at;
+    size_t q;
+    CCScannerState scan;
+    if (!src || at >= n) return 0;
+    while (lo > 0) {
+        char c = src[lo - 1];
+        if (c == ';' || c == '}') break;
+        if (c == '\n') {
+            size_t j = lo - 1;
+            while (j > 0 && (src[j - 1] == ' ' || src[j - 1] == '\t')) j--;
+            if (j > 0 && src[j - 1] == '#') break;
+            if (j == 0 || src[j - 1] == '\n') break;
+        }
+        lo--;
+    }
+    cc_scanner_init(&scan);
+    q = lo;
+    while (q < fn_end && q < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &q)) continue;
+        if (cc__kw_at(src, n, q, "static")) return 1;
+        if (src[q] == '{') return 0;
+        q++;
+    }
+    return 0;
+}
+
+/* 1 if a file-scope function is not `static` (fills name). */
+static int cc__cch_first_nonstatic_fn(const char* src, size_t n, char* name,
+                                      size_t cap) {
+    size_t i = 0;
+    CCScannerState scan;
+    if (name && cap) name[0] = 0;
+    if (!src || n == 0) return 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t before = i;
+        size_t fn_end = 0;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (i >= n) break;
+        if (src[i] == '#') {
+            while (i < n && src[i] != '\n') i++;
+            if (i < n) i++;
+            continue;
+        }
+        if (cc__file_scope_fn_def_end(src, n, i, &fn_end)) {
+            if (!cc__fn_decl_has_static(src, n, i, fn_end)) {
+                cc__file_scope_fn_name(src, n, i, name, cap);
+                return 1;
+            }
+            i = fn_end;
+            continue;
+        }
+        i = cc__skip_file_scope_item(src, n, i);
+        if (i == before) i++;
+    }
+    return 0;
+}
+
+static int cc__cch_per_tu_nonstatic(const char* abs, const char* src, size_t n) {
+    char nm[96];
+    if (!cc__cch_first_nonstatic_fn(src, n, nm, sizeof(nm))) return 0;
+    fprintf(stderr,
+            "cc: error: #pragma(@per_tu) face %s has non-static "
+            "function %s\n",
+            abs ? abs : "?", nm[0] ? nm : "?");
+    return -1;
+}
+
+static int cc__cch_face_all_static(const char* abs_cch) {
+    char* text = NULL;
+    size_t n = 0;
+    int all;
+    if (!abs_cch || !abs_cch[0]) return 1;
+    if (cc__read_file_text(abs_cch, &text, &n) != 0 || !text) return 1;
+    all = !cc__cch_first_nonstatic_fn(text, n, NULL, 0);
+    free(text);
+    return all;
+}
+
+static int cc__cch_face_per_tu(const char* abs_cch) {
+    char* text = NULL;
+    size_t n = 0;
+    int pt = 0;
+    if (!abs_cch || !abs_cch[0]) return 0;
+    if (cc__read_file_text(abs_cch, &text, &n) != 0 || !text) return 0;
+    (void)cc_file_start_pragmas(text, n, NULL, NULL, &pt, NULL, 0);
+    free(text);
+    return pt;
+}
+
+static int cc__cch_check_per_tu_face(const char* abs_cch) {
+    char* text = NULL;
+    size_t n = 0;
+    int rc;
+    if (!cc__cch_face_per_tu(abs_cch)) return 0;
+    if (cc__read_file_text(abs_cch, &text, &n) != 0 || !text) return 0;
+    rc = cc__cch_per_tu_nonstatic(abs_cch, text, n);
+    free(text);
+    return rc;
 }
 
 /* `=` of a file-scope data definition, or 0. Skips function bodies and
@@ -17805,16 +17947,11 @@ static int cc__splice_impl_cch_into(char** out, size_t* out_len, size_t* out_cap
         use = rew;
         use_len = strlen(rew);
     }
-    /* Owner splice is the one external definition. Drop file-scope
-     * `static` on functions so guests that extracted decls can link. */
     if (cc__cch_root_is_defining_ccs(child_abs)) {
-        char* ds = cc__destatic_file_scope_fns(use, use_len, 0);
-        if (ds) {
-            if (rew) free(rew);
-            rew = ds;
-            use = rew;
-            use_len = strlen(rew);
-        }
+        /* Owner splice keeps `static` as written. */
+    } else if (!cc__cch_has_owner_ccs(child_abs)) {
+        fprintf(stderr, "cc: note: splicing %s into %s (no owner)\n",
+                child_abs, current_path ? current_path : "?");
     }
     cc_sb_append_cstr(out, out_len, out_cap, CC_IMPL_CCH_BEGIN_MARK);
     cc_sb_append_cstr(out, out_len, out_cap, child_abs);
@@ -17941,9 +18078,13 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     /* Owner impl bodies carry `?>` / statement `!>` the header subset
      * cannot parse. Guests only need prototypes — strip before lower. */
     if (cc__local_cch_is_impl_grade(abs_src) && cc__cch_has_owner_ccs(abs_src)) {
+        char own[PATH_MAX];
         const char* face = rewritten ? rewritten : input;
         size_t face_n = rewritten ? strlen(rewritten) : input_len;
-        char* pre = cc__strip_cch_function_bodies(face, face_n);
+        char* pre;
+        if (cc__cch_owner_ccs_path(abs_src, own, sizeof(own)))
+            fprintf(stderr, "cc: note: bodies in %s\n", own);
+        pre = cc__strip_cch_function_bodies(face, face_n);
         if (pre) {
             free(rewritten);
             rewritten = pre;
@@ -17974,13 +18115,13 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
             free(lowered);
             lowered = stripped;
         }
-        /* Strip leaves `static int foo();`. Guests cannot define that.
-         * Drop `static` on those decls so they bind to the owner TU. */
+        /* Strip leaves `static int foo();`. Omit that function — guests
+         * do not see a proto. Exported methods are written without static. */
         {
-            char* ds = cc__destatic_file_scope_fns(lowered, strlen(lowered), 1);
-            if (ds) {
+            char* om = cc__omit_static_file_scope_fns(lowered, strlen(lowered));
+            if (om) {
                 free(lowered);
-                lowered = ds;
+                lowered = om;
             }
         }
         {
@@ -18225,6 +18366,11 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                         return NULL;
                     }
                     if (splice_child && g_rewrite_allow_impl_splice) {
+                        if (cc__cch_check_per_tu_face(child_abs) != 0) {
+                            g_local_cch_lower_failed = 1;
+                            free(out);
+                            return NULL;
+                        }
                         if (cc__impl_cch_was_spliced(child_abs)) {
                             /* Repeat include: the header's guard would make this
                              * inert; keep a blank line so following lines in this
@@ -18325,6 +18471,126 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
         return NULL;
     }
     return out;
+}
+
+int cc_check_link_set_faces(const char* const* ccs_paths, int n) {
+    char owners[64][PATH_MAX];
+    int nown = 0;
+    typedef struct {
+        char face[PATH_MAX];
+        char tus[8][PATH_MAX];
+        int ntu;
+    } CCUnownedSplice;
+    CCUnownedSplice splices[64];
+    int ns = 0;
+    int i, j, k;
+    if (!ccs_paths || n <= 0) return 0;
+    for (i = 0; i < n && nown < 64; i++) {
+        if (!ccs_paths[i] || !ccs_paths[i][0]) continue;
+        if (realpath(ccs_paths[i], owners[nown]))
+            nown++;
+    }
+    for (i = 0; i < n; i++) {
+        char tu[PATH_MAX];
+        char dir[PATH_MAX];
+        char* src = NULL;
+        size_t sn = 0;
+        size_t off = 0;
+        const char* slash;
+        if (!ccs_paths[i] || !ccs_paths[i][0]) continue;
+        if (!realpath(ccs_paths[i], tu))
+            snprintf(tu, sizeof(tu), "%s", ccs_paths[i]);
+        slash = strrchr(tu, '/');
+        if (slash) {
+            size_t dlen = (size_t)(slash - tu);
+            if (dlen + 1 >= sizeof(dir)) dlen = sizeof(dir) - 1;
+            memcpy(dir, tu, dlen);
+            dir[dlen] = 0;
+        } else {
+            snprintf(dir, sizeof(dir), ".");
+        }
+        if (cc__read_file_text(ccs_paths[i], &src, &sn) != 0 || !src)
+            continue;
+        while (off < sn) {
+            size_t line_end = off;
+            char rel[PATH_MAX];
+            char child_path[PATH_MAX];
+            char face[PATH_MAX];
+            char own[PATH_MAX];
+            char own_real[PATH_MAX];
+            while (line_end < sn && src[line_end] != '\n') line_end++;
+            if (cc__quoted_include_path(src + off, line_end - off, rel,
+                                        sizeof(rel)) &&
+                cc__try_quoted_cch_path(dir, rel, child_path, sizeof(child_path),
+                                        face) &&
+                cc__local_cch_is_impl_grade(face)) {
+                if (cc__cch_check_per_tu_face(face) != 0) {
+                    free(src);
+                    return -1;
+                }
+                if (cc__cch_has_owner_ccs(face) &&
+                    cc__cch_owner_ccs_path(face, own, sizeof(own))) {
+                    const char* own_key = realpath(own, own_real) ? own_real
+                                                                  : own;
+                    int is_owner = (strcmp(tu, own_key) == 0);
+                    if (!is_owner) {
+                        int found = 0;
+                        for (k = 0; k < nown; k++) {
+                            if (strcmp(owners[k], own_key) == 0) {
+                                found = 1;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            fprintf(stderr,
+                                    "cc: error: extract of %s needs owner %s "
+                                    "in the link set\n",
+                                    face, own);
+                            free(src);
+                            return -1;
+                        }
+                    }
+                } else if (!cc__cch_face_all_static(face)) {
+                    int slot = -1;
+                    for (j = 0; j < ns; j++) {
+                        if (strcmp(splices[j].face, face) == 0) {
+                            slot = j;
+                            break;
+                        }
+                    }
+                    if (slot < 0 && ns < 64) {
+                        slot = ns++;
+                        snprintf(splices[slot].face, sizeof(splices[slot].face),
+                                 "%s", face);
+                        splices[slot].ntu = 0;
+                    }
+                    if (slot >= 0 && splices[slot].ntu < 8) {
+                        int have = 0;
+                        for (k = 0; k < splices[slot].ntu; k++) {
+                            if (strcmp(splices[slot].tus[k], tu) == 0)
+                                have = 1;
+                        }
+                        if (!have)
+                            snprintf(splices[slot].tus[splices[slot].ntu++],
+                                     sizeof(splices[slot].tus[0]), "%s", tu);
+                    }
+                }
+            }
+            off = (line_end < sn) ? line_end + 1 : line_end;
+        }
+        free(src);
+    }
+    for (j = 0; j < ns; j++) {
+        if (splices[j].ntu < 2) continue;
+        fprintf(stderr,
+                "cc: error: unowned face %s spliced into %d translation units "
+                "(%s, %s); make its file-scope functions static or give it an "
+                "owner .ccs\n",
+                splices[j].face, splices[j].ntu, splices[j].tus[0],
+                splices[j].tus[1]);
+        return -1;
+    }
+    return 0;
 }
 
 char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,

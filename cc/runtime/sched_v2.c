@@ -225,6 +225,7 @@ struct fiber_v2 {
     void* current_deadline_scope;
     CCNurseryHost* saved_nursery;
     CCNurseryHost* admission_nursery;
+    void* par_gate; /* CCParallel*; cancel wakes parks on this fiber */
 
     /* R1 — user-facing async backtrace metadata.
      *
@@ -1014,6 +1015,7 @@ static fiber_v2* fiber_v2_alloc(void) {
             f->last_thread_id = -1;
             f->saved_nursery = NULL;
             f->admission_nursery = NULL;
+            f->par_gate = NULL;
             atomic_store_explicit(&f->done, 0, memory_order_relaxed);
             atomic_store_explicit(&f->wait_ticket, 0, memory_order_relaxed);
             atomic_store_explicit(&f->join_waiter_fiber, NULL, memory_order_relaxed);
@@ -1040,6 +1042,7 @@ static fiber_v2* fiber_v2_alloc(void) {
     f->current_deadline_scope = NULL;
     f->saved_nursery = NULL;
     f->admission_nursery = NULL;
+    f->par_gate = NULL;
     atomic_store_explicit(&f->join_waiter_fiber, NULL, memory_order_relaxed);
     wake_primitive_init(&f->done_wake);
 
@@ -1061,6 +1064,7 @@ static void fiber_v2_free(fiber_v2* f) {
     f->current_deadline_scope = NULL;
     f->saved_nursery = NULL;
     f->admission_nursery = NULL;
+    f->par_gate = NULL;
     /* Clear detector metadata so the next spawn starts clean and the
      * detector never observes stale park_obj/suppress/external-wait state
      * on a pooled fiber. */
@@ -1741,6 +1745,14 @@ void sched_v2_fiber_clear_park_deadline(fiber_v2* f) {
     if (!f) return;
     int was = atomic_exchange_explicit(&f->has_park_deadline, 0, memory_order_release);
     if (was) atomic_fetch_sub_explicit(&g_v2_park_deadlines, 1, memory_order_relaxed);
+}
+
+void sched_v2_fiber_set_par_gate(fiber_v2* f, void* gate) {
+    if (f) f->par_gate = gate;
+}
+
+void* sched_v2_fiber_par_gate(fiber_v2* f) {
+    return f ? f->par_gate : NULL;
 }
 
 /* Walk the all_fibers list and signal any parked fiber whose deadline

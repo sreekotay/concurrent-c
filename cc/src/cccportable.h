@@ -24,10 +24,12 @@ void cc_portable_print_libs(const char* dir);
 int cc_take_cccportable_flag(int argc, char** argv, int* i,
                              const char** dir_out, int* cli_set);
 
-/* File-start `#pragma(@prelude) off` / `#pragma(@linenumbers) off` after the
- * unit header. Returns 0, or -1 and fills err on ill-formed operands. */
+/* File-start `#pragma(@prelude) off` / `#pragma(@linenumbers) off` /
+ * `#pragma(@per_tu)` after the unit header. Returns 0, or -1 and fills
+ * err on ill-formed operands. `per_tu` is presence (no `off`). */
 int cc_file_start_pragmas(const char* src, size_t n,
                           int* prelude_off, int* linenumbers_off,
+                          int* per_tu,
                           char* err, size_t err_cap);
 
 /* Rewrite emitted .c in place: version comment always; strip libc banner
