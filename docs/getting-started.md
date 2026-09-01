@@ -466,6 +466,12 @@ int a = 0, b = 0;
 @parallel for (y in 0..h) {
     row(y);
 } !>.wait()!>;
+
+CCTurnstile ts@(cap, 1, arena) !> @destroy;
+@parallel wait (ts) for (i in 0..n) {
+    int v = work(i);
+    @stage (ts, 0, i) { packed[pos] = v; pos++; }
+} !>.wait()!>;
 ```
 
 `@parallel (pred) { … }` runs the same arms; spawn only if `pred` is true.

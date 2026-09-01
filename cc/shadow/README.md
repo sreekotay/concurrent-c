@@ -125,7 +125,7 @@ splice, `as:` faces, `const char*` helpers, errno `switch`; no `_Generic` /
 ./cc/shadow/shadow_lower.sh examples/recipe_async_await.ccs -o /tmp/async_shadow.c
 ./cc/shadow/shadow_lower.sh examples/recipe_exclusive_named.ccs -o /tmp/exclusive_shadow.c
 ./cc/shadow/shadow_lower.sh examples/recipe_long_lived_store.ccs -o /tmp/long_lived_shadow.c
-./cc/shadow/shadow_lower.sh examples/recipe_fanout_capture.ccs -o /tmp/fanout_shadow.c
+./cc/shadow/shadow_lower.sh examples/recipe_parallel.ccs -o /tmp/parallel_shadow.c
 ./cc/shadow/shadow_lower.sh examples/recipe_http_get.ccs -o /tmp/http_shadow.c
 ./cc/shadow/shadow_lower.sh examples/recipe_tcp_echo.ccs -o /tmp/tcp_shadow.c
 ./cc/shadow/shadow_lower.sh examples/recipe_ordered_parallel.ccs -o /tmp/ordered_shadow.c

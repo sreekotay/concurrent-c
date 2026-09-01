@@ -24,7 +24,7 @@
  *   [x, &y]  — mix
  *
  * `@parallel for` gives each iteration its own index — no list
- * (recipe_fanout_capture.ccs). Named lists elsewhere:
+ * (recipe_parallel.ccs). Named lists elsewhere:
  * recipe_channel_pipeline.ccs `[&sum, rx]`, recipe_worker_pool.ccs
  * `[jobs_rx, done_tx]`, recipe_tcp_echo.ccs `[sock]`,
  * recipe_exclusive_named.ccs `[id]`.
@@ -79,7 +79,7 @@ int main(void) {
      *   () => @unsafe [&counter] ...   — opt-out; the race is on you
      *   channels                       — pass values, don't share state
      *
-     * See recipe_fanout_capture.ccs and recipe_channel_pipeline.ccs.
+     * See recipe_parallel.ccs and recipe_channel_pipeline.ccs.
      */
     return 0;
 }

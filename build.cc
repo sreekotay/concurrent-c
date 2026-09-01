@@ -26,7 +26,8 @@ CC_TARGET recipe_async exe examples/recipe_async_await.ccs
 CC_TARGET recipe_pipeline exe examples/recipe_channel_pipeline.ccs
 CC_TARGET recipe_defer exe examples/recipe_defer_cleanup.ccs
 CC_TARGET recipe_capture exe examples/recipe_explicit_capture.ccs
-CC_TARGET recipe_fanout exe examples/recipe_fanout_capture.ccs
+CC_TARGET recipe_parallel exe examples/recipe_parallel.ccs
+CC_TARGET recipe_turnstile exe examples/recipe_turnstile.ccs
 CC_TARGET recipe_http exe examples/recipe_http_get.ccs
 CC_TARGET recipe_ordered exe examples/recipe_ordered_parallel.ccs
 CC_TARGET recipe_result exe examples/recipe_result_error_handling.ccs

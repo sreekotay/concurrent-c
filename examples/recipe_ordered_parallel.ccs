@@ -1,18 +1,18 @@
 /*
- * Recipe: Ordered Parallel Processing
+ * Recipe: Ordered channel
  *
- * Work completes out of order; output must come out in submit order.
- * There is no sort step and no reorder buffer — the ordered channel
- * awaits each queued handle in FIFO submission order.
+ * Work finishes in any order; a consumer still sees submit order.
+ * The machine is an ordered recv end, not a turnstile and not
+ * `@parallel wait`. There is no sort and no shared write ticket —
+ * each recv awaits the next submitted handle.
  *
- *   producer: for each item → results_tx.send_task(() => work)
- *   consumer: recv on an ordered channel → each recv awaits the next
- *             submitted task → results print 1..N even if work finished
- *             2,1,4,3,...
+ *   producer: results_tx.send_task(() => work)
+ *   consumer: rx.recv → 1..N even if workers finished 2,1,4,3
  *
- * Idiom: send_task + `ordered` recv. Nested nurseries + close() match
- * recipe_channel_pipeline / recipe_worker_pool; only the channel kind
- * and send_task differ. Larger example: real_projects/pigz/pigz_channel.ccs.
+ * Shared / loop-carried writes use `@parallel wait` + `@stage`
+ * (recipe_parallel.ccs). Two named stages: recipe_turnstile.ccs.
+ * Nested nurseries + close() match recipe_channel_pipeline.
+ * Larger: real_projects/pigz/pigz_channel.ccs.
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
@@ -41,7 +41,7 @@ int main(void) {
     int[~CHAN_CAP ordered <] results_rx;
     CCChan* results_ch = cc_channel_pair(&results_tx, &results_rx) !> @destroy;
 
-    println("=== Ordered Parallel Processing ===") !>;
+    println("=== Ordered channel ===") !>;
     println(@string(`Processing ${NUM_ITEMS} items with variable delays...`, @scratch)) !>;
     println("") !>;
 

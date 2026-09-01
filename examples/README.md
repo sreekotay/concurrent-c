@@ -22,16 +22,15 @@ New to Concurrent-C? Work through these in order:
 | 3a | `recipe_variant.ccs` | `@variant` | Tagged data (not Result); construct / `@switch` / `case .arm(bind):` / `?>` / `!>` |
 | 4  | `recipe_ufcs_forms.ccs` | UFCS shape | One dispatch rule × spellings (families, bare-name, fallible chains) |
 | 4a | `recipe_user_generics.ccs` | Generics | `Name::[args]` + `CC_GENERIC_FACTORY` — same rule as Vec/Map |
-| 5  | `recipe_fanout_capture.ccs` | Independent fan-out | `@parallel for`; the index is the per-iteration value |
+| 5  | `recipe_parallel.ccs` | `@parallel` | Join, `@serial`, dest, `@parallel for` (disjoint), `wait` + `@stage` (shared ticket) |
 | 6  | `recipe_explicit_capture.ccs` | Capture semantics | Value vs reference capture, mutation rules |
 | 7  | `recipe_channel_pipeline.ccs` | Communication | Channels, owned close, producer/consumer |
 | 8  | `recipe_async_await.ccs` | Async/Await | `@async` call stacks vs `spawn`, `@await`, composition |
 | 9  | `recipe_timeout.ccs` | Deadlines & cancel | `@with_deadline`; live dest `h.cancel()`; siblings poll `h.cancelled` |
 | 10 | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
-| 11 | `recipe_ordered_parallel.ccs` | Ordered fan-out | `send_task` + ordered recv, FIFO without reorder buffer |
-| 11a | `recipe_parallel.ccs` | `@parallel` | assignment join, `@serial` arms, handle fan-in, `@parallel (pred)`, `@parallel for` |
+| 11 | `recipe_ordered_parallel.ccs` | Ordered channel | `send_task` + FIFO recv — not a turnstile, not `@parallel wait` |
 | 12 | `recipe_exclusive_named.ccs` | Named exclusivity | `CCExclusive`, resolve-once mutex, `acquire_when`, short guard CS |
-| 12a | `recipe_turnstile.ccs` | Pipeline turnstile | `CCTurnstileRW`: depth cap + ordered read/write stages |
+| 12a | `recipe_turnstile.ccs` | Turnstile stages | `@parallel wait` + `@stage (ts.read/write, i)` — no nursery |
 | 12b | `recipe_prepare_commit.ccs` | Prepare / join / hold / commit | Parallel prepares; `.wait()` is the join; hold only around commit; revert who finished |
 | 13 | `recipe_arena_scope.ccs` | Memory | Arena names a lifetime; `@scratch` dies; keep by passing the arena last |
 | 13a | `recipe_walk.ccs` | Walk / buffers | `@for in`; dest-bulk copy/move/fill; no memcpy / malloc |
@@ -50,13 +49,13 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 
 | File | Pattern | Key Concept |
 |------|---------|-------------|
-| `recipe_fanout_capture.ccs` | Fan-out | `@parallel for`; disjoint slots; spawn-loop copy is `recipe_explicit_capture` |
+| `recipe_parallel.ccs` | `@parallel` | Independent join / range; wait-for + `@stage` is the shared write ticket |
 | `recipe_explicit_capture.ccs` | Capture semantics | Value vs reference capture |
 | `recipe_channel_pipeline.ccs` | Producer/consumer | Nested ownership + channel close |
 | `recipe_async_await.ccs` | Async/Await | `@async`, `@await`, `cc_block_on` |
 | `recipe_worker_pool.ccs` | Worker pool | N workers, shared queue |
 | `recipe_exclusive_named.ccs` | Named exclusive | Domain + `mutex(name)` once + `acquire_when` + guard unlock |
-| `recipe_turnstile.ccs` | Pipeline turnstile | Depth cap + `read`/`write` wait/pass; index form `stage(k)` |
+| `recipe_turnstile.ccs` | Turnstile stages | `@parallel wait`; `@stage (ts.read, i)` then `@stage (ts.write, i)` |
 | `recipe_prepare_commit.ccs` | Prepare + commit | `@parallel` join, `hold_sorted`, revert finished sides |
 | `recipe_arena_scope.ccs` | Scoped memory | Named lifetime; keep a product by passing the arena last |
 | `recipe_walk.ccs` | Walk / buffers | Extent walk; `dst.copy` / `move` / `fill`; `clone_into`; vec dest-init |
@@ -69,8 +68,7 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_unwrap_destroy_forms.ccs` | Unwrap matrix | Two ops × modifiers; `@destroy` on successful construction |
 | `recipe_ufcs_forms.ccs` | UFCS matrix | One rule × spellings, including bare-name and fallible chains |
 | `recipe_user_generics.ccs` | User generics | `CC_GENERIC_FACTORY` — same `Name::[args]` rule as Vec/Map |
-| `recipe_ordered_parallel.ccs` | Ordered fan-out | `send_task` + ordered recv, FIFO await |
-| `recipe_parallel.ccs` | `@parallel` | Value join; `@serial` arms; handle `.wait()` fan-in; `@parallel (pred)`; `@parallel for` |
+| `recipe_ordered_parallel.ccs` | Ordered channel | `send_task` + FIFO recv; no shared dest |
 
 ### Python interop (one boundary, two doors)
 

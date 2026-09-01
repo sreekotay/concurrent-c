@@ -668,7 +668,8 @@ Create is Result — `cap < 1`, a dead arena, or depth-channel OOM is
 `wait`/`pass`/`fail` are `void !>(CCError)`: a predecessor that errors
 `fail`s the gate so a parked `wait` wakes with `err`, not `ok`. A closed
 depth channel is an error, not `Ok(false)`.
-Recipe: [recipe_turnstile.ccs](../examples/recipe_turnstile.ccs).
+`@parallel wait (ts) for` owns enter/leave — [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
+Two named stages: [recipe_turnstile.ccs](../examples/recipe_turnstile.ccs).
 
 ---
 
@@ -871,9 +872,8 @@ ccc examples/js/jsdemo.shcc         # CC→JS (guest; Node owns env)
 | Walk / dest-bulk buffers | [recipe_walk.ccs](../examples/recipe_walk.ccs) |
 | Owned or view / reopen | [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs) |
 | Worker pool | [recipe_worker_pool.ccs](../examples/recipe_worker_pool.ccs) |
-| Fan-out / `@parallel for` | [recipe_fanout_capture.ccs](../examples/recipe_fanout_capture.ccs) |
-| Ordered parallel | [recipe_ordered_parallel.ccs](../examples/recipe_ordered_parallel.ccs) |
-| `@parallel` / `@serial` | [recipe_parallel.ccs](../examples/recipe_parallel.ccs) |
+| `@parallel` (join, range, wait-for ticket) | [recipe_parallel.ccs](../examples/recipe_parallel.ccs) |
+| Ordered channel (`send_task` + FIFO recv) | [recipe_ordered_parallel.ccs](../examples/recipe_ordered_parallel.ccs) |
 | Prepare A+B / hold / commit | [recipe_prepare_commit.ccs](../examples/recipe_prepare_commit.ccs) |
 | Channel pipeline | [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs) |
 

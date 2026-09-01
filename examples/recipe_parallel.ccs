@@ -1,37 +1,36 @@
 /*
  * Recipe: @parallel
  *
- * Forms, selected by the token after @parallel:
+ * Lexical fork-join — not a nursery. The token after @parallel
+ * picks the form:
  *
  *   @parallel { a = f(); b = g(); } !>.wait()!>;
- *       Value join. Arms are independent assignments, an
- *       expression with no dest (it just runs), or @serial { … }
- *       that writes one outer name. The first arm runs on
- *       the caller; each remaining arm is spawned. `.wait()`
- *       joins. Binding without `.wait()` leaves siblings in flight.
+ *       Independent arms. Assignment, a bare expression, or
+ *       @serial { … } that writes one outer name. First arm on
+ *       the caller; the rest may spawn. `.wait()` joins.
  *
- *   @parallel (d < k) { a = f(); b = g(); }
- *       Same arms. Spawn if the predicate is true; otherwise run
- *       the assignments in order on the caller. The body always
- *       runs — the predicate is scheduling, not presence.
+ *   @parallel (d < k) { … }
+ *       Same arms. Spawn if the predicate; otherwise run in
+ *       order. The body always runs.
  *
- *   @parallel for (i in lo..hi) { work(i); }
- *       Independent iterations over a half-open integer range.
- *       The lowerer bisects the span; a span of length 0 or 1
- *       is an ordinary for.
+ *   @parallel for (i in lo..hi) { slot[i] = work(i); }
+ *       Independent iterations. Disjoint writes. Bisects; span
+ *       0 or 1 is a plain for. No shared dest.
  *
- * A dest `CCParallel h = @parallel { … } !>;` is live before the
- * arms: cancel/adopt/pause on `h` compose there. `h.wait()` in an
- * arm of `h` is an error. One assignment arm with a dest is an error:
- * this dest is never live on the caller. One expression arm is the
- * worker (spawned); dest is live. Mark the caller `@serial`, or join
- * with `!>.wait()!>`. Pointer names copy the pointer so a
- * dest-live return does not leave a dangling slot; other captured
- * names are the frame object and must outlive `.wait()`.
+ *   @parallel wait (ts) for (i in lo..hi) { … @stage … }
+ *       Ordered tickets on a turnstile. Cap limits how many
+ *       compute at once. Work outside @stage overlaps; the
+ *       stage is the shared write ticket (loop-carried cursor,
+ *       file, checksum). Same body under seq (0).
  *
- * Neither form is a nursery. n.spawn still names a task lifetime.
- * A for statement as a direct child of @parallel { } is a compile
- * error; for inside @serial is ordinary C. Bare { } is not an arm.
+ * Dest `CCParallel h = @parallel { … } !>;` is live before the
+ * arms. Binding does not join. One assignment arm with a dest
+ * is an error. One expression arm is the worker. `h.wait()` in
+ * an arm of `h` is an error.
+ *
+ * Not this file:
+ *   send_task + ordered recv → recipe_ordered_parallel.ccs
+ *   two named stages (read then write) → recipe_turnstile.ccs
  *
  * Tree bench vs Go: perf/compare_parallel_hello.sh
  */
@@ -86,7 +85,29 @@ int main(void) {
         if (par[k] != seq[k])
             return 1;
     }
-    println("range: ok") !>;
+    println("range: ok") !>; /* disjoint slots — not a shared dest */
+
+    {
+        CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+        CCTurnstile ts@(3, 1, arena) !> @destroy;
+        int packed[N];
+        int pos = 0;
+        int i;
+        @parallel wait (ts) for (i in 0..N) {
+            int v = i * i;
+            @stage (ts, 0, i) {
+                packed[pos] = v;
+                pos = pos + 1;
+            }
+        } !>.wait()!>;
+        if (pos != N)
+            return 1;
+        for (i = 0; i < N; i++) {
+            if (packed[i] != i * i)
+                return 1;
+        }
+        println("wait-for: ok") !>;
+    }
 
     int left = 0;
     int right = 0;

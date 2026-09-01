@@ -1,18 +1,18 @@
 #!ccc ccs
 /*
- * Recipe: Pipeline turnstile
+ * Recipe: Turnstile stages
  *
- * Depth cap plus ordered stages. enter(i) takes a depth token; stage
- * wait/pass create a gate cell on first touch. Declare the turnstile
- * before the nursery so join finishes before the depth channel is freed.
+ * Two named tickets on one gate: read, then write, in `i` order.
+ * Cap limits how many tickets compute at once. `@parallel wait`
+ * owns enter/leave — no nursery.
  *
- *   CCTurnstileRW ts@(cap, arena) !> @destroy;
- *   ts.enter(i) !>;
- *   ts.read.wait(i) !>;  …  ts.read.pass(i) !>;
- *   ts.write.wait(i) !>; …  ts.write.pass(i) !>;
- *   ts.leave() !>;
+ *   @parallel wait (ts) for (i in 0..n) {
+ *       @stage (ts.read, i)  { … }
+ *       @stage (ts.write, i) { … }
+ *   } !>.wait()!>;
  *
- * Index form: CCTurnstile t@(cap, n_stages, arena) !> @destroy; t.stage(k).wait(i).
+ * One shared write is `@stage (ts, 0, i)` — recipe_parallel.ccs.
+ * Index form: CCTurnstile t@(cap, n_stages, arena); `@stage (t, k, i)`.
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/stdio.cch>
@@ -20,48 +20,31 @@
 #define N   8
 #define CAP 2
 
-static int g_read_next;
-static int g_write_next;
-static int g_fail;
-
-static void worker(CCTurnstileRW* ts, int i) {
-    @errhandler(CCError e) cc_error_exit(e);
-    ts->read.wait(i) !>;
-    if (g_read_next != i)
-        g_fail = 1;
-    g_read_next = i + 1;
-    ts->read.pass(i) !>;
-
-    ts->write.wait(i) !>;
-    if (g_write_next != i)
-        g_fail = 1;
-    g_write_next = i + 1;
-    ts->write.pass(i) !>;
-
-    ts->leave() !>;
-}
-
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
     CCTurnstileRW ts@(CAP, arena) !> @destroy;
 
-    CCTurnstileRW* tsp = &ts;
+    int read_next = 0;
+    int write_next = 0;
+    int fail = 0;
     int i;
-    {
-        CCNursery nur = cc_nursery_create() !> @destroy;
-        for (i = 0; i < N; i++) {
-            ts.enter(i) !>;
-            nur.spawn(() => [i, tsp] {
-                @errhandler(CCError e) cc_error_exit(e);
-                worker(tsp, i);
-            }) !>;
+    @parallel wait (ts) for (i in 0..N) {
+        @stage (ts.read, i) {
+            if (read_next != i)
+                fail = 1;
+            read_next = i + 1;
         }
-    }
+        @stage (ts.write, i) {
+            if (write_next != i)
+                fail = 1;
+            write_next = i + 1;
+        }
+    } !>.wait()!>;
 
-    if (g_fail || g_read_next != N || g_write_next != N) {
-        eprintln(@string(`FAIL read=${g_read_next} write=${g_write_next} fail=${g_fail}`, @scratch)) !>;
+    if (fail || read_next != N || write_next != N) {
+        eprintln(@string(`FAIL read=${read_next} write=${write_next} fail=${fail}`, @scratch)) !>;
         return 1;
     }
     println("turnstile: 8 tickets, cap 2, read then write in order") !>;

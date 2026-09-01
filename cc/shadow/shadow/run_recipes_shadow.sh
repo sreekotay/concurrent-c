@@ -117,8 +117,9 @@ run_one examples/recipe_worker_pool.ccs \
   "feeder: sent 9 jobs" \
   "done, jobs_done = 9"
 
-run_one examples/recipe_fanout_capture.ccs \
-  "sum = 30 (expected 30)"
+run_one examples/recipe_parallel.ccs \
+  "range: ok" \
+  "wait-for: ok"
 
 run_one examples/recipe_exclusive_named.ccs \
   "shared  = 4000 (expect 4000)" \
@@ -148,7 +149,7 @@ run_one --bin-arg --test examples/recipe_tcp_echo.ccs \
   "server done"
 
 run_one examples/recipe_ordered_parallel.ccs \
-  "=== Ordered Parallel Processing ===" \
+  "=== Ordered channel ===" \
   "[consumer] item 1: 1^2 = 1" \
   "[consumer] item 8: 8^2 = 64" \
   "Done! Results printed in order despite out-of-order completion."

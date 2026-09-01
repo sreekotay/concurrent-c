@@ -317,7 +317,7 @@ the LEFT path (`n.leave(ctx, finish)`), not on wait / `@destroy`.
 
 ## 8. `@parallel` joins independent work
 
-[recipe_parallel.ccs](../examples/recipe_parallel.ccs) · [recipe_fanout_capture.ccs](../examples/recipe_fanout_capture.ccs) · Spec §8.11
+[recipe_parallel.ccs](../examples/recipe_parallel.ccs) · Spec §8.11
 
 `@parallel` is a lexical fork-join. It is not a nursery. The brace and
 `for` forms are `CCParallel !>(CCError)`: create can fail; `.wait()` is
@@ -368,6 +368,15 @@ int a = 0, b = 0;
 
 @parallel for (y in 0..h) {
     row(y);
+} !>.wait()!>;
+
+CCTurnstile ts@(cap, 1, arena) !> @destroy;
+@parallel wait (ts) for (i in 0..n) {
+    int v = work(i);
+    @stage (ts, 0, i) {
+        packed[pos] = v;
+        pos++;
+    }
 } !>.wait()!>;
 ```
 
