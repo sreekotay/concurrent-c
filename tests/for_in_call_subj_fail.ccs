@@ -1,4 +1,4 @@
-/* for-in subject is a name or field path, not a call. */
+/* for-in subject is a name, field path, or view — not a constructor call. */
 #include <ccc/std/prelude.cch>
 
 int main(void) {

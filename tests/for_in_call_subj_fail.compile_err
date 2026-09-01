@@ -1,1 +1,1 @@
-for-in subject must be a name or field path
+for-in subject must be a name, field path, or view

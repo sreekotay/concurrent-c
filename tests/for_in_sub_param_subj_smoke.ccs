@@ -1,0 +1,18 @@
+/* layout.ccs: @for (ch in bytes.sub(i, i + rec_n)) — param + arithmetic. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int count_nl(char[:] bytes, size_t i, size_t rec_n) {
+    int nls = 0;
+    @for (ch in bytes.sub(i, i + rec_n))
+        if (ch == '\n') nls++;
+    return nls;
+}
+
+int main(void) {
+    char[:] s = "ab\ncd\n";
+    if (count_nl(s, 0, s.len) != 2) return 1;
+    if (count_nl(s, 1, 4) != 1) return 2;
+    printf("for_in_sub_param_subj_smoke: OK\n");
+    return 0;
+}
