@@ -9,6 +9,10 @@ Default runtime path:
 
 - `cc/runtime/sched_v2.c` / `sched_v2.h` — global ready queue, workers, sysmon,
   deadlock detection, park/signal/join.
+- `cc/runtime/scheduler.c` — `cc_parallel_spawn` / `cc_par_timed_run`
+  adaptive spawn gate.
+- `cc/include/ccc/cc_sched.cch` — public API; `cc_parallel_deny_fast`,
+  `CC_PAR_NOTE_INLINE_ARM`.
 - `cc/runtime/fiber_sched.c` / `fiber_internal.h` — public `cc__fiber_*` shims.
 - `cc/runtime/fiber_sched_boundary.c` — waitable park/wake boundary used by
   channels and I/O.
@@ -32,6 +36,9 @@ Performance comparison surface:
   challenges; the Named Exclusive Lock challenge
   (`perf/compare_exclusive_named_lock.sh`) exercises the pool-growth
   hold decision under contention
+- `perf/parallel_hello.ccs` — `@parallel` spawn/join pin
+- `perf/parallel_steal_probe.ccs` — adaptive-gate / ready-queue probe
+- `perf/compare_parallel_unbound.sh` — unbound `@parallel` comparison
 
 ## Environment knobs
 
@@ -49,6 +56,10 @@ Scheduler (see also the config table in the scheduler spec):
 - `CC_V2_STATS=1` / `CC_V2_SYSMON_STATS=1` — counters
 - `CC_DEADLOCK_ABORT=0` — deadlock banner without `_exit(124)`
 - `CC_DEADLOCK_PERSIST_MS=N` — override deadlock latch duration (default 1000)
+- `CC_PAR_ADAPT=0` — disable the `@parallel` spawn gate (always spawn). Default on
+- `CC_PAR_CHURN_NS=N` — cheap/heavy leaf line in nanoseconds (default 8000)
+- `CC_PAR_ADAPT_BACKLOG=N` — ready-queue depth at which CHURN denies (default 4)
+- `CC_PAR_ADAPT_DEBUG=1` — dump the `@parallel` site table at exit
 
 Optional diagnostics (when present in the linked runtime):
 

@@ -5496,7 +5496,11 @@ A wait-for whose body can so `break` cannot discard the bool: `bool fin = @paral
 
 #### 8.11.7 Grain and limits
 
-An assignment or `@serial` arm after the first is spawned as a fiber and attached to the dest; `.wait()` joins. `@parallel for` spawns one half of a span at each bisection; a span of length 0 or 1 is a sequential `for`. In-flight `@parallel` fibers are capped at 256 times the number of online processors; further arms and leftover spans run on the caller. That ceiling is an allocation bound, not a grain. The construct does not estimate how much work an arm contains. A caller who knows a cutoff writes it on the join (`@parallel (d < k) { … }`) so the same arms run in parallel above the cut and in order below it.
+An assignment or `@serial` arm after the first is spawned as a fiber and attached to the dest; `.wait()` joins. `@parallel for` spawns one half of a span at each bisection; a span of length 0 or 1 is a sequential `for`. If spawn fails or the adaptive gate refuses the spawn (task kind INVALID), that arm or leftover span runs on the caller. Denied work still runs. The construct does not estimate how much work an arm contains. A caller who knows a cutoff writes it on the join (`@parallel (d < k) { … }`) so the same arms run in parallel above the cut and in order below it.
+
+`@parallel` MAY run arms serially. Progress of one arm must not depend on a sibling of the same construct running concurrently (for example an unbuffered rendezvous between two arms of one `@parallel`). Channels plus a nursery/`spawn` guarantee independent fibers. A hang is diagnosed by the deadlock detector (park reason, parked fiber).
+
+The implementation denies a `cc_parallel_spawn` when the site's leaf arms are cheaper than a spawn and the ready queue is already busy. A site classified as heavy (REAL) is never denied. The gate keys sites by thunk pointer and does not apply to `@parallel wait` / nursery / `cc_nursery_spawn*`.
 
 The range bounds of `@parallel for` are converted to `int`. A span whose length does not fit in `int` is outside this form.
 
