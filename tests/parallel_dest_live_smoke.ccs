@@ -1,0 +1,107 @@
+/*
+ * Dest lifetime: empty is idle; a bound dest is live until wait.
+ * Pause / resume / cancel of idle are ok(false).
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    {
+        CCParallel z = cc_parallel_empty();
+        if (z.live() || z.joined) {
+            fprintf(stderr, "FAIL empty live=%d joined=%d\n", z.live(),
+                    z.joined);
+            return 1;
+        }
+        if (z.pause() !> || z.resume() !> || z.cancel() !>) {
+            fprintf(stderr, "FAIL idle pause/resume/cancel\n");
+            return 1;
+        }
+        {
+            int a = 0;
+            int b = 0;
+            int hit = 0;
+            CCParallel h = @parallel {
+                a = 1;
+                b = 2;
+            } !>;
+            z.adopt(h) !>(e) {
+                (void)e;
+                hit = 1;
+            };
+            if (!hit) {
+                fprintf(stderr, "FAIL adopt idle parent\n");
+                return 1;
+            }
+            hit = 0;
+            h.adopt(z) !>(e) {
+                (void)e;
+                hit = 1;
+            };
+            if (!hit) {
+                fprintf(stderr, "FAIL adopt idle child\n");
+                return 1;
+            }
+            h.wait() !>;
+            if (a + b != 3) {
+                fprintf(stderr, "FAIL idle-adopt join a=%d b=%d\n", a, b);
+                return 1;
+            }
+        }
+    }
+
+    {
+        int a = 0;
+        int b = 0;
+        CCParallel h = @parallel {
+            a = 1;
+            b = 2;
+        } !>;
+        if (!h.live() || h.joined) {
+            fprintf(stderr, "FAIL dest live=%d joined=%d\n", h.live(),
+                    h.joined);
+            return 1;
+        }
+        if (!(h.pause() !>) || !h.live() || !h.paused()) {
+            fprintf(stderr, "FAIL dest pause\n");
+            return 1;
+        }
+        if (!(h.resume() !>) || !h.live()) {
+            fprintf(stderr, "FAIL dest resume\n");
+            return 1;
+        }
+        h.wait() !>;
+        if (h.live() || !h.joined) {
+            fprintf(stderr, "FAIL after wait live=%d joined=%d\n", h.live(),
+                    h.joined);
+            return 1;
+        }
+        if (h.pause() !> || h.resume() !> || h.cancel() !>) {
+            fprintf(stderr, "FAIL after wait pause/resume/cancel\n");
+            return 1;
+        }
+        if (a + b != 3) {
+            fprintf(stderr, "FAIL join a=%d b=%d\n", a, b);
+            return 1;
+        }
+        h = @parallel {
+            a = 4;
+            b = 5;
+        } !>;
+        if (!h.live()) {
+            fprintf(stderr, "FAIL overwrite not live\n");
+            return 1;
+        }
+        h.wait() !>;
+        if (h.live() || a + b != 9) {
+            fprintf(stderr, "FAIL overwrite join live=%d a=%d b=%d\n", h.live(),
+                    a, b);
+            return 1;
+        }
+    }
+
+    printf("parallel_dest_live_smoke: OK\n");
+    return 0;
+}

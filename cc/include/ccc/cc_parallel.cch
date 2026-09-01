@@ -9,7 +9,11 @@
  * `.cancel()` is bool !>(CCIoError): Ok(true) means this call
  * stored live→cancelled on this handle or an adopted descendant.
  * Joined dest: wait is ok; cancel/pause/resume are ok(false).
- * `cancelled` and `paused` are atomic. Spawned arms do not inherit
+ * `h.live()` is planted and not joined. `cc_parallel_empty()` is
+ * idle (`!h.live()`). The construct plants a dest (`cc_parallel_dest`);
+ * seq / pragma-off go idle→joined with no live window. Pause/resume/
+ * cancel of idle are `ok(false)`, same as joined. `cancelled` and
+ * `paused` are atomic. Spawned arms do not inherit
  * the caller's deadline; poll `h.cancelled`. Poll `h.paused` /
  * `h.paused()` the same way — live, before `.wait()`. `.pause()` /
  * `.resume()` flip that flag on a live dest (`ok(true)` is this
@@ -48,6 +52,7 @@
 
 typedef struct CCParallel {
     cc_atomic_int joined;
+    cc_atomic_int planted;
     cc_atomic_int paused;
     cc_atomic_int cancelled;
     int fail;
@@ -70,6 +75,21 @@ CC_DECL_RESULT_SPEC(CCResult_CCParallel_CCError, CCParallel, CCError)
 static inline CCParallel cc_parallel_empty(void) {
     CCParallel h = {0};
     return h;
+}
+
+/* Construct-only: dest bind. Idle is `empty()`. */
+static inline CCParallel cc_parallel_dest(void) {
+    CCParallel h = {0};
+    cc_atomic_store(&h.planted, 1);
+    return h;
+}
+
+/* Planted and not joined. Pause is a flag on a live dest, not a lifetime. */
+static inline bool cc_parallel_live(const CCParallel* h) {
+    if (!h)
+        return false;
+    return cc_atomic_load(&h->planted) != 0 &&
+           cc_atomic_load(&h->joined) == 0;
 }
 
 void !>(CCError) cc_parallel_wait(CCParallel* h);
@@ -96,7 +116,7 @@ static inline int cc__parallel_cancel_one(CCParallel* h) {
     int expected = 0;
     if (!h)
         return 0;
-    if (cc_atomic_load(&h->joined))
+    if (!cc_parallel_live(h))
         return 0;
     if (!cc_atomic_cas(&h->cancelled, &expected, 1))
         return 0;
@@ -129,10 +149,10 @@ static inline void !>(CCError) cc__parallel_adopt(CCParallel* parent,
         return cc_err(CC_ERR_INVALID_ARG, "adopt");
     if (parent == child)
         return cc_err(CC_ERR_INVALID_ARG, "adopt self");
-    if (cc_atomic_load(&parent->joined))
-        return cc_err(CC_ERR_INVALID_ARG, "adopt: parent already joined");
-    if (cc_atomic_load(&child->joined))
-        return cc_err(CC_ERR_INVALID_ARG, "adopt: child already joined");
+    if (!cc_parallel_live(parent))
+        return cc_err(CC_ERR_INVALID_ARG, "adopt: parent not live");
+    if (!cc_parallel_live(child))
+        return cc_err(CC_ERR_INVALID_ARG, "adopt: child not live");
     if (child->parent)
         return cc_err(CC_ERR_INVALID_ARG, "adopt: child already adopted");
     if (cc__parallel_contains(child, parent))
@@ -153,7 +173,7 @@ static inline bool !>(CCIoError) cc_parallel_pause(CCParallel* h) {
     int expected = 0;
     if (!h)
         return cc_err(cc_io_error(CC_IO_INVALID_ARGUMENT));
-    if (cc_atomic_load(&h->joined))
+    if (!cc_parallel_live(h))
         return cc_ok(false);
     if (!cc_atomic_cas(&h->paused, &expected, 1))
         return cc_ok(false);
@@ -164,7 +184,7 @@ static inline bool !>(CCIoError) cc_parallel_resume(CCParallel* h) {
     int expected = 1;
     if (!h)
         return cc_err(cc_io_error(CC_IO_INVALID_ARGUMENT));
-    if (cc_atomic_load(&h->joined))
+    if (!cc_parallel_live(h))
         return cc_ok(false);
     if (!cc_atomic_cas(&h->paused, &expected, 0))
         return cc_ok(false);
@@ -183,7 +203,7 @@ static inline bool cc_parallel_paused(const CCParallel* h) {
 static inline void cc_parallel_honor(const CCParallel* h) {
     if (!h)
         return;
-    while (!cc_atomic_load(&h->joined) && cc_atomic_load(&h->paused) &&
+    while (cc_parallel_live(h) && cc_atomic_load(&h->paused) &&
            !cc_atomic_load(&h->cancelled))
         cc_yield();
 }

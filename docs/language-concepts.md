@@ -334,6 +334,9 @@ arm (`CCParallel h = @parallel { work(); } !>;`) is the worker
 the pointer; other captured names are the frame object and must
 outlive `.wait()`. `h.cancelled` and `h.paused` are
 atomic. `h.cancel()` is `true` when this call stored live→cancelled.
+`h.live()` is planted and not joined. `cc_parallel_empty()` is idle.
+After `h.wait()`, `h.joined` and `!h.live()`. Pause / resume / cancel
+of idle or joined are `ok(false)`.
 `h.pause()` / `h.resume()` flip `h.paused` on a live dest; poll
 `h.paused` or `h.paused()`. They do not require `.wait()`.
 The construct honors `paused` at thunk entry, the next
@@ -350,7 +353,7 @@ waits that nursery; `n.leave()` consumes the handle without joining).
 | Form | Meaning |
 |------|---------|
 | `@parallel { a = f(); b = g(); }` | Independent assignment arms. First on the caller; the rest may spawn. |
-| `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. `h.wait()` joins. Arms may cancel/adopt/pause `h`. `h.wait()` inside an arm of `h` is an error. |
+| `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. `h.live()` until `h.wait()`. Arms may cancel/adopt/pause `h`. `h.wait()` inside an arm of `h` is an error. |
 | `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; writes exactly one outer name. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. The body always runs. |
 | `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; a span of 0 or 1 is a plain `for`. `return` is `break` then `return` from the function after the join. |
