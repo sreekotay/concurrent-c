@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -486,14 +487,24 @@ enum {
 #define CC_PAR_RESAMPLE_MASK 1023u
 
 typedef struct {
-    _Atomic(void*)   fn;
+    /* Leading prefix IS the public CCParSiteGate (cc_sched.cch): the
+     * lowering's inline deny gate reads state/deny_depth through that
+     * type via volatile loads. Keep first, keep in order. */
     _Atomic int      state;
+    _Atomic int      deny_depth; /* snapshot of adapt_backlog, set on CHURN */
+    _Atomic(void*)   fn;
     _Atomic uint32_t heavy_streak;
     _Atomic uint32_t attempts; /* wrapped VIRGIN spawns; caps overhead */
     _Atomic uint64_t min_ns;   /* diagnostics (CC_PAR_ADAPT_DEBUG) */
     _Atomic uint64_t max_ns;
     _Atomic uint32_t samples;  /* diagnostics: accepted clean samples */
 } cc_par_site;
+
+_Static_assert(offsetof(cc_par_site, state) == offsetof(CCParSiteGate, state) &&
+               offsetof(cc_par_site, deny_depth) ==
+                   offsetof(CCParSiteGate, deny_depth) &&
+               sizeof(int) == sizeof(_Atomic int),
+               "cc_par_site prefix must match public CCParSiteGate");
 
 /* Stop wrapping every VIRGIN spawn after this budget (a site whose arms
  * always suspend would pay the trampoline forever); it keeps the 1-in-1k
@@ -567,8 +578,11 @@ static _Atomic uint64_t g_par_adapt_spawns = 0;
 /* Denials issued on this thread; the sampler snapshots it around an arm to
  * reject samples whose bodies absorbed denied (inlined) child arms. Valid
  * because a sample is only accepted when the arm never suspended, and a
- * non-suspending fiber never migrates threads mid-run. */
-static __thread uint64_t tls_par_denials = 0;
+ * non-suspending fiber never migrates threads mid-run.
+ * EXPORTED (cc_sched.cch): the lowering's inline deny gate bumps the same
+ * counter, so inline denials stay visible to the sampler. */
+__thread uint64_t __cc_par_denials = 0;
+#define tls_par_denials __cc_par_denials
 /* Spawn calls issued on this thread; same snapshot discipline. An arm that
  * spawned is a composite (recursive tree node): its duration measures the
  * subtree, not a body. Only leaf arms — the construct's finest grain, the
@@ -643,6 +657,19 @@ static inline cc_par_site* cc_par_site_get(void* (*fn)(void*)) {
     return s;
 }
 
+/* Gate resolver for the lowering's inline deny path (cc_sched.cch).
+ * Never NULL: when the adaptive gate is off or the table is full, hand
+ * back a record whose state never becomes CHURN, so the emitted code
+ * caches a pointer once and its fast path stays branch-predictable. */
+static cc_par_site g_par_site_off; /* state stays VIRGIN forever */
+
+const CCParSiteGate* cc_parallel_site_gate(void* (*fn)(void*)) {
+    if (!fn || !cc_parallel_adapt_on())
+        return (const CCParSiteGate*)&g_par_site_off;
+    cc_par_site* s = cc_par_site_get(fn);
+    return (const CCParSiteGate*)(s ? s : &g_par_site_off);
+}
+
 /* Thread CPU time, not wall time: under saturation the OS deschedules
  * workers mid-arm, and wall time bills the arm for its time off-CPU —
  * measured: "clean" samples averaging 300ms for ns-scale bodies purely
@@ -707,8 +734,13 @@ static void* cc_par_timed_run(void* p) {
          * was a freak, the trickle demotes it just as fast. */
         if (dt < cc_parallel_churn_ns()) {
             atomic_store_explicit(&s->heavy_streak, 0, memory_order_relaxed);
-            atomic_store_explicit(&s->state, CC_PAR_SITE_CHURN,
+            /* deny_depth before state: the inline gate reads state first
+             * and only acts on CHURN, so it must never see CHURN with a
+             * stale zero depth (deny-at-any-depth). */
+            atomic_store_explicit(&s->deny_depth, cc_parallel_adapt_backlog(),
                                   memory_order_relaxed);
+            atomic_store_explicit(&s->state, CC_PAR_SITE_CHURN,
+                                  memory_order_release);
         } else {
             uint32_t k = atomic_fetch_add_explicit(&s->heavy_streak, 1,
                                                    memory_order_relaxed) + 1;
@@ -747,19 +779,32 @@ CCTask cc_parallel_spawn(void* (*fn)(void*), void* arg) {
     if (cc_parallel_adapt_on() && (site = cc_par_site_get(fn)) != NULL) {
         int st = atomic_load_explicit(&site->state, memory_order_relaxed);
         if (st == CC_PAR_SITE_CHURN) {
-            if ((++tls_par_tick & CC_PAR_RESAMPLE_MASK) != 0) {
-                if (sched_v2_ready_depth() >=
-                    (size_t)cc_parallel_adapt_backlog()) {
+            /* The lowering's inline gate (cc_parallel_deny_fast) denies
+             * the churn+deep case before this function is ever called,
+             * except for its own 1-in-1k resample tick. So a churn-site
+             * call arriving here at deny depth IS the resample: admit it
+             * wrapped so a stale verdict keeps receiving contrary
+             * evidence. (Without this, the inline tick would land on
+             * this function's independent tick and resamples would
+             * compound to 1-in-1M — recovery in seconds, not ms.)
+             * Below deny depth: admit unwrapped, the common drain case. */
+            size_t depth = sched_v2_ready_depth();
+            if (depth >= (size_t)cc_parallel_adapt_backlog()) {
+                /* Flood bound: callers without the inline gate (old
+                 * lowerings during the bootstrap transition) arrive here
+                 * on every node; without a ceiling their storms would
+                 * admit wrapped spawns without limit. */
+                if (depth >= 512) {
                     if (g_par_adapt_debug)
                         atomic_fetch_add_explicit(&g_par_adapt_denials, 1,
                                                   memory_order_relaxed);
                     tls_par_denials++;
                     return invalid;
                 }
+                /* wrap below (site stays set) */
+            } else {
                 site = NULL; /* queue shallow: admit unwrapped */
             }
-            /* resample tick: admit wrapped, regardless of depth, so a
-             * stale churn verdict keeps receiving contrary evidence */
         } else if (st == CC_PAR_SITE_REAL) {
             if ((++tls_par_tick & CC_PAR_RESAMPLE_MASK) != 0)
                 site = NULL; /* steady state: unwrapped, never denied */

@@ -155,6 +155,94 @@ int cc_scheduler_stats(CCSchedulerStats* out);
 CCTask cc_parallel_spawn(void* (*fn)(void*), void* arg);
 void cc_parallel_join(CCTask t);
 
+/* ----------------------------------------------------------------------------
+ * Inline deny gate for lowered @parallel spawns.
+ *
+ * cc_parallel_spawn's adaptive gate (scheduler.c) classifies each
+ * @parallel call site by its clean leaf-arm CPU time; churn sites are
+ * denied when the ready queue is busy and the lowering runs the denied
+ * arm inline. Once a site is classified churn, the deny verdict is the
+ * common case by orders of magnitude (millions of denials per admit in a
+ * spawn storm), so paying a cross-TU call returning a 128-byte CCTask
+ * per denial dominates the construct's cost. This gate lets the lowering
+ * take the deny decision inline: one cached-pointer load, one state
+ * load, one depth load.
+ *
+ * The lowering emits, per @parallel construct:
+ *
+ *     static void* __cc_par_site_N;                 // file scope
+ *     ...
+ *     if (cc_parallel_deny_fast(&__cc_par_site_N, __cc_par_thunk_N))
+ *         __cc_par_t_N = cc__task_invalid();        // join runs arm inline
+ *     else
+ *         __cc_par_t_N = cc_parallel_spawn(__cc_par_thunk_N, &__cc_par_e_N);
+ *
+ * Layout contract with the runtime: CCParSiteGate is the leading prefix
+ * of scheduler.c's cc_par_site (whose fields are C11 _Atomic; same size
+ * and alignment as the plain ints here, read via volatile — relaxed
+ * loads). Both sides live in this repo and version together.
+ *
+ * Honesty contract with the sampler: every inline denial increments
+ * __cc_par_denials, the same thread-local counter the runtime's own
+ * denial paths bump — an arm that absorbed a denied (inlined) child is a
+ * composite and its duration sample must be rejected. The 1-in-1k tick
+ * fall-through keeps the resample trickle alive for churn sites under
+ * permanent queue pressure: those calls reach cc_parallel_spawn, which
+ * treats a churn-site call at deny depth as a resample (admit measured).
+ */
+#define CC_PAR_GATE_CHURN 1
+
+typedef struct CCParSiteGate {
+    int state;      /* CC_PAR_GATE_CHURN or not; other values private */
+    int deny_depth; /* ready-queue depth at which churn spawns deny */
+} CCParSiteGate;
+
+/* Resolve the gate record for a thunk. Never NULL: when the adaptive
+ * gate is off or the site table is full, returns a static record that
+ * never reads CHURN, so the caller's cached fast path stays valid. */
+const CCParSiteGate* cc_parallel_site_gate(void* (*fn)(void*));
+
+/* Ready-queue depth cell (set at scheduler init; boots pointing at a
+ * static zero so pre-init reads are safe). */
+extern volatile size_t* __cc_par_depth_addr;
+
+#if defined(CC_PARSER_MODE) || defined(__TINYC__)
+/* Parse-only: host TCC has no _Thread_local; these never execute. */
+extern uint64_t __cc_par_denials;
+static inline int cc_parallel_deny_fast(void** slot, void* (*fn)(void*)) {
+    (void)slot;
+    (void)fn;
+    return 0;
+}
+#else
+extern _Thread_local uint64_t __cc_par_denials;
+
+static inline int cc_parallel_deny_fast(void** slot, void* (*fn)(void*)) {
+    const CCParSiteGate* s = (const CCParSiteGate*)*slot;
+    if (!s) {
+        s = cc_parallel_site_gate(fn);
+        *slot = (void*)s;
+    }
+    if (*(volatile const int*)&s->state != CC_PAR_GATE_CHURN)
+        return 0; /* virgin/real: full runtime path */
+    {
+        static _Thread_local uint32_t __cc_par_tick;
+        if (((++__cc_par_tick) & 1023u) == 0)
+            return 0; /* resample trickle: go measured through the runtime */
+    }
+    if (*__cc_par_depth_addr < (size_t)*(volatile const int*)&s->deny_depth)
+        return 0; /* queue shallow: admit */
+    __cc_par_denials++;
+    return 1;
+}
+#endif
+
+/* Zeroed CCTask (kind == CC_TASK_KIND_INVALID). */
+static inline CCTask cc__task_invalid(void) {
+    CCTask t = {0};
+    return t;
+}
+
 // Sleep for at least ms milliseconds (best-effort).
 int cc_sleep_ms(unsigned int ms);
 

@@ -36,6 +36,14 @@
 #include <mach/mach_time.h>
 #endif
 
+/* Ready-depth cell consumed by the lowering's inline @parallel deny gate
+ * (declared in cc_sched.cch). Boots pointing at a static zero so a read
+ * that somehow precedes scheduler init sees an empty queue (gate stays
+ * open — the safe, admit-everything direction); sched_v2_init_impl
+ * repoints it at the real queue counter. */
+static volatile size_t g_par_depth_boot = 0;
+volatile size_t* __cc_par_depth_addr = &g_par_depth_boot;
+
 /* ============================================================================
  * v2_slock: short-critical-section lock
  *
@@ -2550,6 +2558,10 @@ static void sched_v2_init_impl(void) {
     atomic_store_explicit(&g_v2.running, 1, memory_order_release);
     atomic_store_explicit(&g_v2.idle_workers, 0, memory_order_relaxed);
     v2_queue_init(&g_v2.ready_queue);
+    /* Publish the ready-depth cell for the lowering's inline @parallel
+     * deny gate (cc_sched.cch). _Atomic size_t read as volatile size_t:
+     * same object representation; the gate only needs a relaxed load. */
+    __cc_par_depth_addr = (volatile size_t*)&g_v2.ready_queue.count;
     v2_slock_init(&g_v2.free_list_mu);
     pthread_mutex_init(&g_v2.all_fibers_mu, NULL);
     g_v2.all_fibers = NULL;
