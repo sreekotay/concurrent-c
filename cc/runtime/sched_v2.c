@@ -365,7 +365,17 @@ struct sched_v2_state {
      * A v2_slock costs one uncontended CAS, same as the ready queue's
      * own lock which is taken on every push/pop anyway. */
     v2_slock free_list_mu;
-    fiber_v2* _Atomic free_list;
+    /* Two stacks under one lock, split by whether the record still
+     * carries a pooled coroutine (struct + ~2 MB stack). Alloc prefers
+     * the carrying list. With a single LIFO, a spawn burst that
+     * overflowed the coro-pool cap buried every retained stack under a
+     * layer of bare records; steady state then popped a bare record
+     * (mmap a fresh stack) and freed at the cap (munmap) on EVERY
+     * spawn/join — measured at ~37% of storm CPU — while the pooled
+     * stacks sat idle at the bottom, pinning the cap's worth of memory
+     * to boot. */
+    fiber_v2* _Atomic free_list;      /* records with f->coro != NULL */
+    fiber_v2* _Atomic free_list_bare; /* records with f->coro == NULL */
     pthread_mutex_t all_fibers_mu;
     fiber_v2* all_fibers;
     _Atomic size_t fiber_count;
@@ -958,13 +968,22 @@ static void fiber_v2_entry(mco_coro* co) {
  * ============================================================================ */
 
 static fiber_v2* fiber_v2_alloc(void) {
-    /* Try free list first (see free_list_mu: pop must be ABA-safe). */
+    /* Try the free lists first (see free_list_mu: pop must be ABA-safe).
+     * Prefer a record that still carries a pooled coroutine — popping a
+     * bare one while carrying ones exist costs an mmap now and, at the
+     * coro-pool cap, a munmap on the eventual free. */
     fiber_v2* f = NULL;
-    if (atomic_load_explicit(&g_v2.free_list, memory_order_acquire)) {
+    if (atomic_load_explicit(&g_v2.free_list, memory_order_acquire) ||
+        atomic_load_explicit(&g_v2.free_list_bare, memory_order_acquire)) {
         v2_slock_lock(&g_v2.free_list_mu);
         f = atomic_load_explicit(&g_v2.free_list, memory_order_relaxed);
         if (f) {
             atomic_store_explicit(&g_v2.free_list, f->next, memory_order_relaxed);
+        } else {
+            f = atomic_load_explicit(&g_v2.free_list_bare, memory_order_relaxed);
+            if (f)
+                atomic_store_explicit(&g_v2.free_list_bare, f->next,
+                                      memory_order_relaxed);
         }
         v2_slock_unlock(&g_v2.free_list_mu);
     }
@@ -1068,10 +1087,13 @@ static void fiber_v2_free(fiber_v2* f) {
         }
     }
     /* Push under free_list_mu (see the field comment: the lock-free pop
-     * was ABA-unsafe, and push/pop must share the same discipline). */
+     * was ABA-unsafe, and push/pop must share the same discipline).
+     * Carrying and bare records go to separate stacks so alloc can
+     * prefer the carrying ones (see the field comment). */
+    fiber_v2* _Atomic* list = f->coro ? &g_v2.free_list : &g_v2.free_list_bare;
     v2_slock_lock(&g_v2.free_list_mu);
-    f->next = atomic_load_explicit(&g_v2.free_list, memory_order_relaxed);
-    atomic_store_explicit(&g_v2.free_list, f, memory_order_release);
+    f->next = atomic_load_explicit(list, memory_order_relaxed);
+    atomic_store_explicit(list, f, memory_order_release);
     v2_slock_unlock(&g_v2.free_list_mu);
 }
 
@@ -2689,6 +2711,7 @@ void sched_v2_shutdown(void) {
         f = next;
     }
     atomic_store_explicit(&g_v2.free_list, NULL, memory_order_relaxed);
+    atomic_store_explicit(&g_v2.free_list_bare, NULL, memory_order_relaxed);
     g_v2.all_fibers = NULL;
     g_v2.initialized = 0;
 }
