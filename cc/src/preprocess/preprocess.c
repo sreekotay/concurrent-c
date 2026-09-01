@@ -18061,6 +18061,46 @@ static int cc__splice_impl_cch_into(char** out, size_t* out_len, size_t* out_cap
     return 0;
 }
 
+/* True when `s` still has a `@comptime` directive (not the word in a string). */
+static int cc__text_has_comptime_directive(const char* s, size_t n) {
+    const char* p = s;
+    const char* end = s + n;
+    while (p < end) {
+        const char* line = p;
+        while (p < end && (*p == ' ' || *p == '\t')) p++;
+        if ((size_t)(end - p) >= 9 && memcmp(p, "@comptime", 9) == 0)
+            return 1;
+        p = line;
+        while (p < end && *p != '\n') p++;
+        if (p < end) p++;
+    }
+    return 0;
+}
+
+/* Iterate copies raw `.cch` onto the `.h` path so last-good does not
+ * shadow face edits. That file is not lowered — refuse it. */
+static int cc__lowered_h_is_raw_cch(const char* abs_cch, const char* lowered_h,
+                                    off_t hsz, off_t csz) {
+    char* hb = NULL;
+    char* cb = NULL;
+    size_t hn = 0, cn = 0;
+    int raw = 0;
+    if (cc__read_file_text_uncached(lowered_h, &hb, &hn) != 0 || !hb)
+        return 1;
+    if (cc__text_has_comptime_directive(hb, hn)) {
+        free(hb);
+        return 1;
+    }
+    if (hsz == csz) {
+        if (cc__read_file_text_uncached(abs_cch, &cb, &cn) == 0 && cb &&
+            cn == hn && memcmp(hb, cb, hn) == 0)
+            raw = 1;
+        free(cb);
+    }
+    free(hb);
+    return raw;
+}
+
 static int cc__lowered_h_fresh(const char* abs_cch, const char* lowered_h) {
     struct stat hs, cs, os;
     char own[PATH_MAX];
@@ -18070,6 +18110,8 @@ static int cc__lowered_h_fresh(const char* abs_cch, const char* lowered_h) {
     if (hs.st_mtime < cs.st_mtime) return 0;
     if (cc__cch_owner_ccs_path(abs_cch, own, sizeof(own)) &&
         stat(own, &os) == 0 && hs.st_mtime < os.st_mtime)
+        return 0;
+    if (cc__lowered_h_is_raw_cch(abs_cch, lowered_h, hs.st_size, cs.st_size))
         return 0;
     return 1;
 }
@@ -19491,57 +19533,87 @@ char* cc_harvest_header_comptime_functions(void) {
     return out;
 }
 
+/* Top-level `@comptime { ... }` in one `.cch`. Returns 1 if any block
+ * was appended. */
+static int cc__harvest_cch_comptime_blocks_from(const char* path, char** out,
+                                                size_t* out_len,
+                                                size_t* out_cap) {
+    char* src = NULL;
+    size_t n = 0;
+    size_t i = 0;
+    int any = 0;
+    CCScannerState scan;
+    if (!path || cc__read_file_text(path, &src, &n) != 0) return 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] != '@' || !cc_match_ident_kw(src, n, i + 1, "comptime")) {
+            i++;
+            continue;
+        }
+        size_t start = i;
+        size_t p = cc_skip_ws_and_comments(src, n, i + 1 + strlen("comptime"));
+        size_t body_r = 0;
+        /* Only plain blocks — not if/for/functions. */
+        if (p >= n || src[p] != '{') {
+            i++;
+            continue;
+        }
+        if (!cc_find_matching_brace(src, n, p, &body_r)) {
+            i++;
+            continue;
+        }
+        {
+            int line = 1;
+            char ld[PATH_MAX + 64];
+            for (size_t k = 0; k < start; k++) if (src[k] == '\n') line++;
+            snprintf(ld, sizeof(ld), "#line %d \"%s\"\n", line, path);
+            if (*out_len > 0 && (*out)[*out_len - 1] != '\n')
+                cc_sb_append_cstr(out, out_len, out_cap, "\n");
+            cc_sb_append_cstr(out, out_len, out_cap, ld);
+            cc_sb_append(out, out_len, out_cap, src + start, body_r + 1 - start);
+            cc_sb_append_cstr(out, out_len, out_cap, "\n");
+        }
+        any = 1;
+        i = body_r + 1;
+    }
+    free(src);
+    return any;
+}
+
+static int cc__path_in_included_cch(const char* path) {
+    size_t i;
+    if (!path) return 0;
+    for (i = 0; i < g_included_cch_source_count; i++) {
+        if (g_included_cch_sources[i] &&
+            strcmp(g_included_cch_sources[i], path) == 0)
+            return 1;
+    }
+    return 0;
+}
+
 /* Top-level `@comptime { ... }` in local .cch headers — same harvest model as
  * CC_GENERIC_FACTORY.  lower_header blanks these so the .h stays host-C; the
  * including TU re-runs them so CC_EMIT_AT_COMPTIME_SITE (e.g. static_map's
  * `<name>_get`) lands in the merged .c.  Skips `@comptime if/for` and
- * `@comptime` function definitions (handled elsewhere). */
+ * `@comptime` function definitions (handled elsewhere).
+ * Walk the include tree, not only headers lowered in this process: reuse of
+ * an umbrella `.h` never visits nested `.cch` files. */
 char* cc_harvest_local_header_comptime_blocks(void) {
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     int any = 0;
-    for (size_t h = 0; h < g_lowered_local_header_count; h++) {
-        const char* path = g_lowered_local_headers[h].source_path;
-        char* src = NULL;
-        size_t n = 0;
-        size_t i = 0;
-        CCScannerState scan;
-        if (!path || cc__read_file_text(path, &src, &n) != 0) continue;
-        cc_scanner_init(&scan);
-        while (i < n) {
-            if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-            if (src[i] != '@' || !cc_match_ident_kw(src, n, i + 1, "comptime")) {
-                i++;
-                continue;
-            }
-            size_t start = i;
-            size_t p = cc_skip_ws_and_comments(src, n, i + 1 + strlen("comptime"));
-            size_t body_r = 0;
-            /* Only plain blocks — not if/for/functions. */
-            if (p >= n || src[p] != '{') {
-                i++;
-                continue;
-            }
-            if (!cc_find_matching_brace(src, n, p, &body_r)) {
-                i++;
-                continue;
-            }
-            {
-                int line = 1;
-                char ld[PATH_MAX + 64];
-                for (size_t k = 0; k < start; k++) if (src[k] == '\n') line++;
-                snprintf(ld, sizeof(ld), "#line %d \"%s\"\n", line, path);
-                if (out_len > 0 && out[out_len - 1] != '\n')
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
-                cc_sb_append_cstr(&out, &out_len, &out_cap, ld);
-                cc_sb_append(&out, &out_len, &out_cap,
-                             src + start, body_r + 1 - start);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
-            }
+    size_t h;
+    for (h = 0; h < g_included_cch_source_count; h++) {
+        if (cc__harvest_cch_comptime_blocks_from(g_included_cch_sources[h],
+                                                 &out, &out_len, &out_cap))
             any = 1;
-            i = body_r + 1;
-        }
-        free(src);
+    }
+    for (h = 0; h < g_lowered_local_header_count; h++) {
+        const char* path = g_lowered_local_headers[h].source_path;
+        if (cc__path_in_included_cch(path)) continue;
+        if (cc__harvest_cch_comptime_blocks_from(path, &out, &out_len, &out_cap))
+            any = 1;
     }
     if (!any) { free(out); return NULL; }
     return out;

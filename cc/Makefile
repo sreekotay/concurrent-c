@@ -487,26 +487,14 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COM
 	@mkdir -p $(dir $@) $(OBJDIR)
 	@test -n "$(SHADOW_LOWER_SEED_BIN)" -a -x "$(SHADOW_LOWER_SEED_BIN)" || \
 		(echo "SHADOW_LOWER_SOURCE=ccs needs an existing shadow_lower; run: make SHADOW_LOWER_SOURCE=bootstrap"; exit 1)
-	# Host-cc of emit.c prefers out/include/cc/shadow/*.h over .cch. Sync
-	# face headers from .cch so edits are not shadowed by a stale last-good
-	# copy (same for shadow_build + lit-coerce patch).
+	# Host-cc of emit.c prefers out/include/cc/shadow/*.h over .cch.
+	# Drop those .h files so reuse cannot adopt last-good (newer mtime)
+	# or a raw .cch copy (not lowered; host-cc cannot parse @comptime).
 	@mkdir -p ../out/include/cc/shadow
-	@# Preserve mtimes when content is unchanged (avoids dirtying dependents).
-	@if [ ! -f ../out/include/cc/shadow/shadow_build.h ] || \
-	    ! cmp -s $(SHADOW_BUILD_CCH) ../out/include/cc/shadow/shadow_build.h; then \
-		cp -f $(SHADOW_BUILD_CCH) ../out/include/cc/shadow/shadow_build.h; \
-	fi
-	@for f in ../cc/shadow/pp_*.cch ../cc/shadow/shadow_*.cch; do \
+	@for f in ../cc/shadow/*.cch; do \
 		[ -f "$$f" ] || continue; \
-		b=$$(basename "$$f" .cch).h; \
-		dest=../out/include/cc/shadow/$$b; \
-		if [ ! -f "$$dest" ] || ! cmp -s "$$f" "$$dest"; then \
-			cp -f "$$f" "$$dest"; \
-		fi; \
+		rm -f ../out/include/cc/shadow/$$(basename "$$f" .cch).h; \
 	done
-	@if [ -f ../out/include/cc/shadow/pp_emit_ufcs.h ]; then \
-		python3 ../scripts/patch_ufcs_slice_lit_face.py; \
-	fi
 	# Native self-emit, then host-cc link (same objs as bootstrap).
 	# concurrent_c.o supplies arena_state/FFC (omitted from libshadow_comptime.a).
 	@echo "[shadow_lower] $$(date '+%H:%M:%S') self-emit start ($(SHADOW_LOWER_CCS) --no-cache)"
