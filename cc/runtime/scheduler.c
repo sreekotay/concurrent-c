@@ -470,17 +470,24 @@ static int cc_parallel_nocap(void) {
  *     is busy (the lowering runs denied arms inline on the caller — so
  *     denied work executes immediately and can never strand).
  *   REAL:   clean grain above the threshold. Never denied.
- * Transition asymmetry: any clean cheap sample flips to CHURN at once;
- * flipping CHURN->REAL takes CC_PAR_HEAVY_STREAK consecutive heavy clean
- * samples. Toward-spawning is the starvation-safe direction, so it may
- * be taken on light evidence when VIRGIN, but a churn verdict should not
- * be un-done by one freak heavy sample. */
+ * Transitions want CONSECUTIVE contrary evidence so a single freak
+ * sample cannot flip a verdict in either direction — bimodal sites are
+ * real (e.g. style matching: cheap on a share-cache hit, heavy on a
+ * full match), and an isolated cheap sample from one must not serialize
+ * the whole construct:
+ *   VIRGIN -> REAL  on the first heavy clean sample (the safe
+ *     direction may be taken on light evidence);
+ *   VIRGIN -> CHURN on 2 consecutive cheap (a storm's samples are all
+ *     cheap, so it still classifies within microseconds);
+ *   CHURN <-> REAL  on 3 consecutive contrary clean samples. */
 enum {
     CC_PAR_SITE_VIRGIN = 0,
     CC_PAR_SITE_CHURN = 1,
     CC_PAR_SITE_REAL = 2,
 };
 #define CC_PAR_HEAVY_STREAK 3u
+#define CC_PAR_CHEAP_STREAK 3u
+#define CC_PAR_CHEAP_STREAK_VIRGIN 2u
 /* Resample cadence: 1 in 2^10 spawns/denials stays measured after a
  * verdict, bounding both the steady-state overhead (~0.1%) and the
  * recovery latency of a wrong verdict (~1k spawns). */
@@ -494,6 +501,7 @@ typedef struct {
     _Atomic int      deny_depth; /* snapshot of adapt_backlog, set on CHURN */
     _Atomic(void*)   fn;
     _Atomic uint32_t heavy_streak;
+    _Atomic uint32_t cheap_streak;
     _Atomic uint32_t attempts; /* wrapped VIRGIN spawns; caps overhead */
     _Atomic uint64_t min_ns;   /* diagnostics (CC_PAR_ADAPT_DEBUG) */
     _Atomic uint64_t max_ns;
@@ -538,15 +546,19 @@ static int cc_parallel_adapt_on(void) {
     return newv;
 }
 
-/* Churn threshold: mean arm duration below this classifies the site as
- * churn. Default 32us ~ 20x the measured spawn+join round trip, wide of
- * both edges: hello-style tree arms measure ~1-2us, the steal probe's
- * legitimate arms 3ms. */
+/* Churn threshold: clean arm duration below this reads as churn. The
+ * gate's question is "is spawning this arm a PURE loss?", and spawn+join
+ * costs ~1.5us, so the default sits ~5x over that: an 8us arm gains
+ * little from a fiber, a sub-us storm arm gains nothing. Deliberately
+ * NOT higher — real workloads have arms in the tens of us (per-element
+ * style matching, small work items) where denial silently serializes
+ * legitimate parallelism; when unsure, spawn. Observed edges: hello's
+ * storm leaves 0.1-2us, per-canon style arms 5-20us, coarse arms ms+. */
 static uint64_t cc_parallel_churn_ns(void) {
     long v = atomic_load_explicit(&g_par_churn_ns_cached, memory_order_relaxed);
     if (v >= 0) return (uint64_t)v;
     const char* s = getenv("CC_PAR_CHURN_NS");
-    long newv = 32000;
+    long newv = 8000;
     if (s && s[0]) {
         long n = strtol(s, NULL, 10);
         if (n >= 0 && n <= 1000000000L) newv = n;
@@ -723,25 +735,31 @@ static void* cc_par_timed_run(void* p) {
         while (dt > m && !atomic_compare_exchange_weak_explicit(
                              &s->max_ns, &m, dt, memory_order_relaxed,
                              memory_order_relaxed)) {}
-        /* Fast commit, asymmetric: one cheap clean sample is a churn
-         * verdict on the spot (a wrong one costs one resample interval
-         * of inlining before the trickle overturns it — cheap, and the
-         * safe direction is unaffected: denied arms still run, inline).
-         * Un-doing a churn verdict takes CC_PAR_HEAVY_STREAK consecutive
-         * heavy cleans, so one freak sample can't reopen the floodgate —
-         * except from VIRGIN, where heavy evidence has no verdict to
-         * overturn and commits REAL immediately; if that first sample
-         * was a freak, the trickle demotes it just as fast. */
+        /* See the state enum comment: consecutive contrary evidence in
+         * both directions so isolated freak samples (either way) cannot
+         * flip a verdict; only VIRGIN->REAL commits on one sample, the
+         * starvation-safe direction. */
         if (dt < cc_parallel_churn_ns()) {
             atomic_store_explicit(&s->heavy_streak, 0, memory_order_relaxed);
-            /* deny_depth before state: the inline gate reads state first
-             * and only acts on CHURN, so it must never see CHURN with a
-             * stale zero depth (deny-at-any-depth). */
-            atomic_store_explicit(&s->deny_depth, cc_parallel_adapt_backlog(),
-                                  memory_order_relaxed);
-            atomic_store_explicit(&s->state, CC_PAR_SITE_CHURN,
-                                  memory_order_release);
+            uint32_t k = atomic_fetch_add_explicit(&s->cheap_streak, 1,
+                                                   memory_order_relaxed) + 1;
+            int st = atomic_load_explicit(&s->state, memory_order_relaxed);
+            if (st != CC_PAR_SITE_CHURN &&
+                k >= (st == CC_PAR_SITE_VIRGIN ? CC_PAR_CHEAP_STREAK_VIRGIN
+                                               : CC_PAR_CHEAP_STREAK)) {
+                atomic_store_explicit(&s->cheap_streak, 0,
+                                      memory_order_relaxed);
+                /* deny_depth before state: the inline gate reads state
+                 * first and only acts on CHURN, so it must never see
+                 * CHURN with a stale zero depth (deny-at-any-depth). */
+                atomic_store_explicit(&s->deny_depth,
+                                      cc_parallel_adapt_backlog(),
+                                      memory_order_relaxed);
+                atomic_store_explicit(&s->state, CC_PAR_SITE_CHURN,
+                                      memory_order_release);
+            }
         } else {
+            atomic_store_explicit(&s->cheap_streak, 0, memory_order_relaxed);
             uint32_t k = atomic_fetch_add_explicit(&s->heavy_streak, 1,
                                                    memory_order_relaxed) + 1;
             int st = atomic_load_explicit(&s->state, memory_order_relaxed);
