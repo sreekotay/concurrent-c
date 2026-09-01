@@ -14,7 +14,7 @@
 #     If anything this favors Go: its fork variant spawns ONE goroutine
 #     per node where CC's @parallel spawns both arms.
 #   * seq rows are the same computation with no spawn at all.
-#   * CC defaults only — no CC_PAR_SPAWN_BACKLOG, no knobs.
+#   * CC defaults only.
 #   * RSS is whole-process peak (BSD time -l), so it includes the seq
 #     and cut phases too; the parallel flood dominates it on both sides.
 #

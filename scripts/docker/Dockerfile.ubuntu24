@@ -1,0 +1,31 @@
+# Concurrent-C Ubuntu 24.04 amd64 — reproduce Linux CI / raytext dist emit.
+#
+# Build (from repo root; on Apple Silicon use --platform linux/amd64):
+#   docker build --platform linux/amd64 -f scripts/docker/Dockerfile.ubuntu24 -t ccc-ubuntu24 .
+#
+# Run:
+#   ./scripts/smoke_ubuntu24.sh
+#   RAYTEXT_ROOT=/path/to/raytext ./scripts/smoke_ubuntu24.sh
+#   ./scripts/smoke_ubuntu24.sh --clone-main   # fresh clone like GitHub Actions
+#
+# See scripts/docker/README.md.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    git \
+    make \
+    python3 \
+    rsync \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+
+COPY scripts/docker/ubuntu24_emit_probe.sh /usr/local/bin/ubuntu24_emit_probe.sh
+RUN chmod +x /usr/local/bin/ubuntu24_emit_probe.sh
+
+CMD ["/usr/local/bin/ubuntu24_emit_probe.sh"]

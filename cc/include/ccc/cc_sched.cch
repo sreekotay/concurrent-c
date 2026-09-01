@@ -182,13 +182,8 @@ void cc_parallel_join(CCTask t);
  * and alignment as the plain ints here, read via volatile — relaxed
  * loads). Both sides live in this repo and version together.
  *
- * Honesty contract with the sampler: every inline denial increments
- * __cc_par_denials, the same thread-local counter the runtime's own
- * denial paths bump — an arm that absorbed a denied (inlined) child is a
- * composite and its duration sample must be rejected. The 1-in-1k tick
- * fall-through keeps the resample trickle alive for churn sites under
- * permanent queue pressure: those calls reach cc_parallel_spawn, which
- * treats a churn-site call at deny depth as a resample (admit measured).
+ * A 1-in-1024 fall-through reaches cc_parallel_spawn as a resample.
+ * Inlined arms are counted at the run (CC_PAR_NOTE_INLINE_ARM).
  */
 #define CC_PAR_GATE_CHURN 1
 
@@ -214,6 +209,7 @@ static inline int cc_parallel_deny_fast(void** slot, void* (*fn)(void*)) {
     (void)fn;
     return 0;
 }
+#define CC_PAR_NOTE_INLINE_ARM() ((void)0)
 #else
 extern _Thread_local uint64_t __cc_par_denials;
 
@@ -232,9 +228,12 @@ static inline int cc_parallel_deny_fast(void** slot, void* (*fn)(void*)) {
     }
     if (*__cc_par_depth_addr < (size_t)*(volatile const int*)&s->deny_depth)
         return 0; /* queue shallow: admit */
-    __cc_par_denials++;
     return 1;
 }
+
+/* Count at the run, not the decide. Sampler rejects a timed arm if
+ * this moved — the arm absorbed an inlined child. */
+#define CC_PAR_NOTE_INLINE_ARM() ((void)__cc_par_denials++)
 #endif
 
 /* Zeroed CCTask (kind == CC_TASK_KIND_INVALID). */

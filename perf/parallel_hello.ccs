@@ -2,17 +2,14 @@
  * Surface @parallel tree vs sequential.
  *
  * Same u24 binary reduction as parallel_hello_lowered.ccs and
- * go/parallel_hello.go. `par` is ungated `@parallel { }` (spawn
- * until 256*ncpu in-flight). `cut` is `@parallel (d < CC_PAR_CUT)`
- * — same arms, serial below the cut.
+ * go/parallel_hello.go. `par` is `@parallel { }` (the adaptive gate
+ * classifies the storm as churn and inlines when the queue is busy).
+ * `cut` is `@parallel (d < CC_PAR_CUT)` — same arms, serial below the cut.
  *
  *   CC_PAR_DEPTH    default 20
  *   CC_PAR_SAMPLES  default 5
  *   CC_PAR_CUT      default 8
- *   CC_PAR_BARE     default 1; 0 skips ungated `@parallel { }`
- *                   (the adaptive spawn gate classifies the storm site
- *                   as churn and inlines the flood: depth 24 completes
- *                   in ~0.5s at ~38 MB RSS on defaults)
+ *   CC_PAR_BARE     default 1; 0 skips the ungated `par` row
  *
  * Compare: ./perf/compare_parallel_hello.sh
  */

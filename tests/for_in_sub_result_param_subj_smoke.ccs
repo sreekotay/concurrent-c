@@ -1,0 +1,35 @@
+/* layout.ccs: Result fn, 7 params, last char[:] + bytes.sub(i, i + rec_n). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct { int dummy; } WalkL;
+typedef struct { int dummy; } WalkD;
+typedef struct { int dummy; } WalkM;
+
+static void !>(CCError) walk_nl(WalkL *L, WalkD d, const WalkM *m, size_t from,
+                                size_t n, double max_width, char[:] bytes) {
+    size_t i = 0;
+    size_t rec_n = n;
+    int nls = 0;
+    @errhandler(CCError e) { return cc_err(e); }
+    (void)L;
+    (void)d;
+    (void)m;
+    (void)from;
+    (void)max_width;
+    @for (ch in bytes.sub(i, i + rec_n))
+        if (ch == '\n') nls++;
+    if (nls != 2) return cc_err(CC_ERR_INVALID_ARG, "nls");
+    return cc_ok();
+}
+
+int main(void) {
+    WalkL L = {0};
+    WalkD d = {0};
+    WalkM m = {0};
+    char[:] s = "ab\ncd\n";
+    @errhandler(CCError e) { return 1; }
+    walk_nl(&L, d, &m, 0, s.len, 80.0, s) !>;
+    printf("for_in_sub_result_param_subj_smoke: OK\n");
+    return 0;
+}

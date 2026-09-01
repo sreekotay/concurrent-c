@@ -108,8 +108,10 @@ behavior:
 
 Fibers are pooled to amortize coroutine allocation:
 
-- Free list is a lock-free Treiber stack. Alloc pops with acquire CAS; free
-  pushes with release CAS.
+- Two free lists under `free_list_mu`: `free_list` holds records that still
+  carry a coroutine; `free_list_bare` holds records with no coro. Alloc
+  prefers the coro-carrying list, which avoids mmap/munmap churn when the
+  coro pool is at cap.
 - Coroutine memory survives reuse: free path uninits without releasing the
   stack allocation; next dispatch re-inits in place when possible.
 - Generation bumps on each alloc for ABA-safe wait tickets.
@@ -152,6 +154,85 @@ primitive; so do sysmon and every fiber's `done_wake`.
 
 Coroutine binding is deferred to the first dispatching worker. Concurrent
 `mco_create` calls are capped by the worker count.
+
+## `@parallel` spawn gate
+
+Brace-form and `@parallel for` arms go through `cc_parallel_spawn` /
+`cc_par_timed_run` (`cc/runtime/scheduler.c`). Lowering is
+`cc/shadow/pp_emit_stmt.cch`. The public inline gate is
+`cc_parallel_deny_fast` / `CC_PAR_NOTE_INLINE_ARM` in
+`cc/include/ccc/cc_sched.cch`.
+
+If this site's leaf arms are cheaper than a spawn, the gate does not spawn
+when the ready queue is already busy; otherwise it spawns. A denied spawn
+returns an INVALID task; the join runs the arm inline. Nothing strands.
+REAL work is never denied.
+
+`@parallel wait`, nursery, and `cc_nursery_spawn*` do not go through
+`cc_parallel_spawn`.
+
+`@parallel` arms may run serially. Progress of one arm must not depend on
+a sibling of the same construct running concurrently (for example an
+unbuffered rendezvous between two arms of one `@parallel`). Channels plus
+a nursery/`spawn` guarantee independent fibers. A hang is diagnosed by the
+deadlock detector (park reason, parked fiber).
+
+### Site table
+
+A site is keyed by the construct's thunk function pointer. The table is a
+fixed 256-slot open-addressed insert-only map. Overflow stays virgin and
+always spawns. `CC_PAR_ADAPT=0` always spawns. Identical-code folding may
+merge sites that share a thunk.
+
+### Sample
+
+Only a leaf that runs to completion is a sample. The sampler rejects the
+duration if the arm suspended, issued a nested `cc_parallel_spawn`, or
+absorbed an inlined (denied) child. Duration is thread CPU time
+(`CLOCK_THREAD_CPUTIME_ID`). Sites that never yield a clean sample stay
+virgin and keep spawning. Lowered code counts an inlined arm at the run
+(`CC_PAR_NOTE_INLINE_ARM()`), not only at the decide.
+
+After `CC_PAR_LEARN_ATTEMPTS` (1<<20) wrapped virgin attempts, wrapping
+stops; the site still spawns.
+
+### Verdicts
+
+- **VIRGIN** — no clean sample yet. Spawn, wrapped in a timing trampoline.
+- **CHURN** — cheap leaf (below `CC_PAR_CHURN_NS`, default 8000 ns, about
+  5× spawn+join of ~1.5 µs). Deny when ready-queue depth ≥ deny_depth
+  (default 4, `CC_PAR_ADAPT_BACKLOG`).
+- **REAL** — heavy leaf. Never denied.
+
+One heavy clean sample commits REAL immediately. Virgin plus one cheap
+clean sample commits CHURN. Demoting REAL to CHURN takes 3 consecutive
+cheap clean resamples (`CC_PAR_CHEAP_STREAK`). Classified sites keep a
+sparse resample so a wrong verdict can flip.
+
+### Virgin flood bound
+
+If ready-queue depth ≥ 512 (`CC_PAR_FLOOD_DEPTH`) and the site has never
+had a wrapped arm suspend (`saw_suspend` clear), deny. Sites that have
+suspended keep spawning: inlining a blocking arm can deadlock on a sibling
+that has not started. Join parks latch `saw_suspend` too; that latch does
+not change the churn verdict.
+
+A CHURN site that later starts a sibling-rendezvous can hang the first
+denied pair; resample and `saw_suspend` protect subsequent spawns.
+
+### Inline fast path (native host cc)
+
+Per construct the lowering emits a `static void*` site slot.
+`cc_parallel_deny_fast` reads `CCParSiteGate` `{state, deny_depth}` (layout
+prefix of the runtime site record; `_Static_assert` in `scheduler.c`) and
+`*__cc_par_depth_addr`. CHURN and depth ≥ deny_depth yields an invalid
+task. `cc_parallel_site_gate` never returns NULL: adapt-off and table-full
+return a static never-CHURN record. Emit cache and runtime version
+together.
+
+Under `CC_PARSER_MODE` or `__TINYC__`, `cc_parallel_deny_fast` is a no-op.
+Every spawn hits `cc_parallel_spawn`. CHURN+deep wraps as resample;
+wrapped CHURN admits are capped at depth 512.
 
 ## Worker dispatch
 
@@ -407,6 +488,10 @@ correctness.
 | `CC_V2_SYSMON_STATS=1`           | Enable stat counters without atexit dump.                                                      |
 | `CC_DEADLOCK_ABORT=0`            | Print deadlock banner but do not `_exit(124)`.                                                 |
 | `CC_DEADLOCK_PERSIST_MS=N`       | Override the deadlock latch duration (default 1000).                                           |
+| `CC_PAR_ADAPT=0`                 | Disable the `@parallel` spawn gate (always spawn). Default on.                                 |
+| `CC_PAR_CHURN_NS=N`              | Cheap/heavy leaf line in nanoseconds. Default 8000.                                            |
+| `CC_PAR_ADAPT_BACKLOG=N`         | Ready-queue depth at which CHURN denies. Default 4.                                            |
+| `CC_PAR_ADAPT_DEBUG=1`           | Dump the `@parallel` site table at exit.                                                       |
 
 ### Compile-time constants (`sched_v2.c`)
 
@@ -421,7 +506,9 @@ correctness.
 ## Implementation files
 
 - `cc/runtime/sched_v2.c`, `sched_v2.h` — scheduler core, sysmon, deadlock
-  detector, join, spawn.
+  detector, join, spawn; `free_list` / `free_list_bare`.
+- `cc/runtime/scheduler.c` — `cc_parallel_spawn` / `cc_par_timed_run`
+  adaptive spawn gate.
 - `cc/runtime/fiber_sched.c`, `fiber_internal.h` — public `cc__fiber_*` API
   (park, unpark, current, park-if, sleep); shim over `sched_v2` on the
   default path.
@@ -430,6 +517,8 @@ correctness.
 - `cc/runtime/wake_primitive.h` — OS wait/wake.
 - `cc/runtime/channel.c`, `nursery.c` — consumers of park/signal/spawn/join.
 - `cc/runtime/minicoro.h` — coroutine implementation.
-- `cc/include/ccc/cc_sched.cch` — public API declarations.
+- `cc/include/ccc/cc_sched.cch` — public API; `cc_parallel_deny_fast`,
+  `CC_PAR_NOTE_INLINE_ARM`, `CCParSiteGate`.
+- `cc/shadow/pp_emit_stmt.cch` — `@parallel` lowering (inline gate + spawn).
 
 Operational testing notes live in `docs/scheduler-ops-runbook.md`.

@@ -7,10 +7,7 @@
  * ungated `@parallel { }` trees back to back. Drive the matrix from the
  * environment:
  *
- *   CC_PAR_SPAWN_BACKLOG   0 = no spawn denial; N = deny at queue depth N
- *   CC_V2_JOIN_STEAL       1 = joiner may unlink+run a still-queued child
- *   CC_V2_STEAL_MIN_DEPTH  steal only when the queue is at least this deep
- *
+ * Defaults: adaptive gate on (REAL never denied). CC_PAR_ADAPT=0 disables.
  *   CC_PROBE_VICTIMS   default 64
  *   CC_PROBE_ARM_MS    default 3
  *   CC_PROBE_DEPTH     storm tree depth, default 16

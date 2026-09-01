@@ -530,6 +530,10 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COM
 		$(LDFLAGS) $(LDLIBS) || exit $$?; \
 	echo "[shadow_lower] $$(date '+%H:%M:%S') host-cc done ($$(($$(date +%s)-t0))s)"
 	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
+	@# rm first: overwriting an already-executed binary in place keeps the
+	@# inode, and macOS's cached code-signature then SIGKILLs the new
+	@# contents on next exec. A fresh inode revalidates.
+	@rm -f $(SHADOW_LOWER_SCRIPT)
 	@cp $@ $(SHADOW_LOWER_SCRIPT)
 	@chmod +x $(SHADOW_LOWER_SCRIPT)
 else
@@ -568,6 +572,8 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_BOOT_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_CO
 		$(LDFLAGS) $(LDLIBS) || exit $$?; \
 	echo "[shadow_lower] $$(date '+%H:%M:%S') host-cc bootstrap done ($$(($$(date +%s)-t0))s)"
 	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
+	@# rm first: see the native rule above (macOS signature cache SIGKILL).
+	@rm -f $(SHADOW_LOWER_SCRIPT)
 	@cp $@ $(SHADOW_LOWER_SCRIPT)
 	@chmod +x $(SHADOW_LOWER_SCRIPT)
 	@echo "built $@ from bootstrap $(BOOTSTRAP_VER)"

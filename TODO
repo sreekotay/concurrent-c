@@ -1,5 +1,4 @@
 - typeview: views (cast) generalize, validate, hooks
 - ccfile and io cleanup
-- slices, strings, ptrs ,arenas, etc 
 - @create pointer vs val confusions
-- quick launch fibers pre-run
+see
