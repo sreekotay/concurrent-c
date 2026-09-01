@@ -13,6 +13,7 @@
  * API:
  * - Name_get(v, i)     -> T* (mutable, NULL if out of bounds)
  * - Name_pop(v, out)   -> bool (writes *out if non-empty; false if empty)
+ * - Name_truncate(v, n)-> shrink len to n; n >= len is a no-op
  * - Name_push(v, val)  -> int (0 success, -1 failure)
  */
 #ifndef CC_STD_VEC_H
@@ -115,6 +116,10 @@ static inline int __cc_vec_generic_reserve(__CCVecGeneric *v, size_t n) {
 static inline void __cc_vec_generic_clear(__CCVecGeneric *v) {
     (void)v;
 }
+static inline void __cc_vec_generic_truncate(__CCVecGeneric *v, size_t n) {
+    if (!v) return;
+    if (n < v->len) v->len = n;
+}
 static inline size_t __cc_vec_generic_len(const __CCVecGeneric *v) {
     return v ? v->len : 0;
 }
@@ -153,6 +158,7 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
  * - Name_len(v), Name_cap(v)
  * - Name_begin(v), Name_end(v)
  * - Name_clear(v)
+ * - Name_truncate(v, n)             -> shrink len; n >= len is a no-op
  * - Name_destroy(v)                 -> releases arena backing; from() unbinds
  */
 /* Everything but the slice view. `CC_VEC_DECL_ARENA` adds the erased
@@ -237,6 +243,10 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
                                                                                   \
     static inline void Name##_clear(Name *v) {                                    \
         cc_vec_clear((CCVec *)v);                                                 \
+    }                                                                             \
+                                                                                  \
+    static inline void Name##_truncate(Name *v, size_t n) {                       \
+        cc_vec_truncate((CCVec *)v, n);                                           \
     }                                                                             \
                                                                                   \
     static inline void Name##_destroy(Name *v) {                                  \
@@ -371,6 +381,10 @@ static inline CCVec_size_t cc__CCVec_size_t_new(CCArena __a) {
         return &v->data[i];                                                       \
     }                                                                             \
     static inline void Name##_clear(Name *v) { if (v) v->len = 0; }               \
+    static inline void Name##_truncate(Name *v, size_t n) {                       \
+        if (!v) return;                                                           \
+        if (n < v->len) v->len = n;                                               \
+    }                                                                             \
     static inline size_t Name##_len(const Name *v) { return v ? v->len : 0; }     \
     static inline size_t Name##_cap(const Name *v) { return v ? v->cap : 0; }     \
     static inline T *Name##_begin(Name *v) { return v ? v->data : NULL; }         \

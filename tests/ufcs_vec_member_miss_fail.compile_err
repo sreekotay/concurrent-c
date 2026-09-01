@@ -2,4 +2,4 @@
 # ladder, enumerating the member set derived from the family macro —
 # never by leaking an undeclared composed spelling to the host.
 no UFCS method 'nosuch' for receiver type 'CCVec_double'
-installed methods of CCVec_double: init, as_slice, reserve, push
+installed methods of CCVec_double: init, as_slice, from, reserve, push

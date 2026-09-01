@@ -1,0 +1,30 @@
+/* Owner TU: spliced prior chapter, then extracted face that declares
+ * QuoteOwnerRun. vec_new::[QuoteOwnerRun] must not emit DECL before the
+ * face include (unknown type name). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "quote_cch_vec_owner_prior.cch"
+#include "quote_cch_vec_owner_doc.cch"
+
+static void !>(CCError) quote_owner_touch(void) {
+    return cc_ok();
+}
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    QuoteOwnerRun r;
+    Vec::[QuoteOwnerRun] v;
+    QuoteOwnerPrior p;
+
+    p.x = 1;
+    if (quote_owner_prior_x(&p) != 1) return 1;
+    quote_owner_touch() !>(e) { (void)e; };
+
+    v = vec_new::[QuoteOwnerRun](a);
+    r.n = 3;
+    if (v.push(r) != 0) return 2;
+    if (v.len() != 1 || !v.get_ptr(0) || v.get_ptr(0)->n != 3) return 3;
+
+    printf("ok\n");
+    return 0;
+}

@@ -8596,6 +8596,19 @@ static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* i
                                   mangled, sizeof(mangled)) != 0)
         return -1;
 
+    /* Factory-path Vec::[T] / vec_new::[T] must still plant a type-graph
+     * row so header splice can place CC_VEC_DECL_ARENA after the element. */
+    if (nargs >= 1 &&
+        (strcmp(gname, "Vec") == 0 || strcmp(gname, "CCVec") == 0)) {
+        CCTypeGraph* graph = cc_type_graph_get_global();
+        if (!graph) {
+            graph = cc_type_graph_new();
+            if (graph) cc_type_graph_set_global(graph);
+        }
+        if (graph)
+            cc_type_graph_request_vec(graph, orig_args[0], mangled);
+    }
+
     /* Free-name member call: the member must exist in the instance's
      * emitted definition — miss articulately, listing what does. */
     if (member[0] && !cc_emit_plan_generic_instance_has_member(mangled, member)) {
@@ -8853,6 +8866,10 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
     cc_scanner_init(&scanner);
     
     CCTypeGraph* graph = cc_type_graph_get_global();
+    if (!graph) {
+        graph = cc_type_graph_new();
+        if (graph) cc_type_graph_set_global(graph);
+    }
     CCTypeRegistry* reg = graph ? cc_type_graph_registry(graph) : NULL;
     
     while (i < n) {

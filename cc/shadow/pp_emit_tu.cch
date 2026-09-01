@@ -23,9 +23,13 @@ static int shadow_ty_is_generic_container(const char* ty) {
            strncmp(p, "CCVec_", 6) == 0;
 }
 
-/* Quoted `#include "face.cch"` extracts to a `.h` that names factory
- * monomorphs. Angle includes (prelude) stay first; quote includes wait
- * until those monomorphs are emitted. */
+/* Quoted `#include "face.cch"` extracts to a `.h`. Two categories:
+ * a face that *declares* a factory type-arg / delayed element
+ * (MemReader, RtxRun) is a factory prerequisite — emit it before the
+ * DECL, wherever it sat in the TU. A face that only *names* a
+ * monomorph (QuotePair::[int]) waits until after the factory.
+ * Angle includes (prelude) stay first. Source position relative to an
+ * unrelated typedef (a prior spliced chapter) is not the category. */
 static int shadow_pass_inc_is_quote(const char* line) {
     return line && strchr(line, '"') != NULL;
 }
@@ -83,12 +87,71 @@ static int shadow_ty_is_trivial_ginst_arg(const char* ty) {
         "int", "char", "short", "long", "float", "double", "void", "bool",
         "_Bool", "unsigned", "signed", "size_t", "ssize_t", "intptr_t",
         "uintptr_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
-        "int8_t", "int16_t", "int32_t", "int64_t", NULL
+        "int8_t", "int16_t", "int32_t", "int64_t", "long_long", NULL
     };
     int i;
     if (!ty || !ty[0]) return 1;
     for (i = 0; triv[i]; i++)
         if (strcmp(ty, triv[i]) == 0) return 1;
+    return 0;
+}
+
+/* Typedef already written (hoist / vech) so a factory may name it. */
+static int shadow_alias_was_emitted(AstNode** items, int n, const char* alias) {
+    int i;
+    if (!alias || !alias[0] || !items) return 0;
+    for (i = 0; i < n; i++) {
+        const char* a;
+        if (!items[i]) continue;
+        if (items[i]->kind == AST_TYPEDEF_STRUCT) {
+            a = items[i]->b[0] ? items[i]->b : items[i]->a;
+            if (!a[0] || strcmp(a, alias) != 0) continue;
+            if (strcmp(items[i]->e, "hoist") == 0 ||
+                strcmp(items[i]->e, "vech") == 0)
+                return 1;
+        } else if (items[i]->kind == AST_TYPEDEF_INT) {
+            if (!items[i]->a[0] || strcmp(items[i]->a, alias) != 0)
+                continue;
+            if (strcmp(items[i]->e, "hoist") == 0 ||
+                strcmp(items[i]->e, "vech") == 0)
+                return 1;
+        } else if (items[i]->kind == AST_TYPEDEF_ENUM) {
+            a = items[i]->b[0] ? items[i]->b : items[i]->a;
+            if (!a[0] || strcmp(a, alias) != 0) continue;
+            if (strcmp(items[i]->e, "hoist") == 0 ||
+                strcmp(items[i]->e, "vech") == 0)
+                return 1;
+        }
+    }
+    return 0;
+}
+
+/* Vec/Map factory for a user element must wait until that type is complete.
+ * Trivial C types (char, int, …) stay at the result-specs / phase-1 block.
+ * A TU typedef that was hoisted is also ready. User types that live only in
+ * a quoted header wait until after that include (late ginst pass). */
+static int shadow_ginst_should_delay(const ShadowGenericInst* inst,
+                                     AstNode** items, int n) {
+    int a, na;
+    if (!inst) return 0;
+    if (strcmp(inst->family, "Vec") != 0 &&
+        !shadow_ginst_after_vec(inst->family))
+        return 0;
+    na = inst->nargs;
+    if (na > 0) {
+        for (a = 0; a < na; a++) {
+            const char* t = inst->args[a];
+            if (shadow_ty_is_trivial_ginst_arg(t)) continue;
+            if (shadow_alias_was_emitted(items, n, t)) continue;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(inst->family, "Vec") == 0) {
+        if (shadow_ty_is_trivial_ginst_arg(inst->compact)) return 0;
+        if (shadow_alias_was_emitted(items, n, inst->compact)) return 0;
+        return 1;
+    }
     return 0;
 }
 
@@ -158,29 +221,58 @@ static int shadow_try_read_quoted_cch(const char* rel, const char* from_dir,
     return 0;
 }
 
-/* Quoted include before factory bodies only when it declares a factory
- * type-arg (MemReader for BufReader::[MemReader]). Faces that only name
- * factory products (QuotePair::[int]) wait until after the monomorph. */
+/* 1 when `text` declares a non-trivial arg of `inst` (the factory names
+ * that type). Compact is the element when nargs is 0 (Vec::[RtxRun]). */
+static int shadow_ginst_elem_in_text(const ShadowGenericInst* inst,
+                                     const char* text) {
+    int a, na;
+    if (!inst || !text) return 0;
+    na = inst->nargs;
+    if (na > 0) {
+        for (a = 0; a < na; a++) {
+            const char* arg = inst->args[a];
+            if (shadow_ty_is_trivial_ginst_arg(arg)) continue;
+            if (shadow_text_has_ident(text, arg)) return 1;
+        }
+        return 0;
+    }
+    if (strcmp(inst->family, "Vec") == 0) {
+        if (shadow_ty_is_trivial_ginst_arg(inst->compact)) return 0;
+        return shadow_text_has_ident(text, inst->compact);
+    }
+    if (shadow_ginst_after_vec(inst->family)) {
+        char k[64];
+        char v[64];
+        int klen = shadow_kv_compact_key_len(inst->compact);
+        if (klen <= 0) return 0;
+        if ((size_t)klen >= sizeof(k)) return 0;
+        memcpy(k, inst->compact, (size_t)klen);
+        k[klen] = 0;
+        snprintf(v, sizeof(v), "%s", inst->compact + klen);
+        if (v[0] == '_') memmove(v, v + 1, strlen(v));
+        if (!shadow_ty_is_trivial_ginst_arg(k) &&
+            shadow_text_has_ident(text, k))
+            return 1;
+        if (!shadow_ty_is_trivial_ginst_arg(v) &&
+            shadow_text_has_ident(text, v))
+            return 1;
+    }
+    return 0;
+}
+
+/* Factory prerequisite: the face *declares* a delayed element / type-arg.
+ * Product-only faces (they merely spell Vec::[int]) return 0. */
 static int shadow_quoted_inc_needed_before_ginst(const char* inc_line,
                                                 const char* from_dir) {
-    char rel[256];
+    char rel[512];
     char* text = NULL;
     size_t n = 0;
-    int gi, a, need = 0;
+    int gi, need = 0;
     if (!shadow_quoted_inc_rel(inc_line, rel, sizeof(rel))) return 0;
     if (!shadow_try_read_quoted_cch(rel, from_dir, &text, &n) || !text)
         return 0;
-    for (gi = 0; gi < g_shadow_nginst && !need; gi++) {
-        int na = g_shadow_ginst[gi].nargs;
-        for (a = 0; a < na; a++) {
-            const char* arg = g_shadow_ginst[gi].args[a];
-            if (shadow_ty_is_trivial_ginst_arg(arg)) continue;
-            if (shadow_text_has_ident(text, arg)) {
-                need = 1;
-                break;
-            }
-        }
-    }
+    for (gi = 0; gi < g_shadow_nginst && !need; gi++)
+        need = shadow_ginst_elem_in_text(&g_shadow_ginst[gi], text);
     free(text);
     return need;
 }
@@ -206,6 +298,35 @@ static int shadow_emit_quoted_include_text(CEmit* out, const char* line) {
         }
     }
     return cemit_fmt(out, "%s\n", s);
+}
+
+/* Every factory-prerequisite quote, in item order — not "quotes that
+ * happen to precede the first TU typedef". A spliced prior chapter
+ * (utf8.cch) is a type decl and must not hide document.cch. */
+static int shadow_emit_factory_prereq_quotes(CEmit* out,
+                                             ShadowCtx* line_ctx,
+                                             AstNode** items, int n,
+                                             const char* src_path) {
+    int hi;
+    char from_dir[512];
+    from_dir[0] = 0;
+    if (!out || !items) return 0;
+    if (src_path && src_path[0])
+        shadow_fill_quote_dir(src_path, from_dir, sizeof(from_dir));
+    for (hi = 0; hi < n; hi++) {
+        if (!shadow_raw_is_quoted_include(items[hi])) continue;
+        if (items[hi]->e[0] && strcmp(items[hi]->e, "ginc") == 0)
+            continue;
+        if (!shadow_quoted_inc_needed_before_ginst(
+                items[hi]->a, from_dir[0] ? from_dir : NULL))
+            continue;
+        if (!shadow_emit_line(out, line_ctx, items[hi], ""))
+            return 0;
+        if (!shadow_emit_quoted_include_text(out, items[hi]->a))
+            return 0;
+        snprintf(items[hi]->e, sizeof(items[hi]->e), "ginc");
+    }
+    return 1;
 }
 
 /* True when `alias` is a monomorph type argument of some factory instance
@@ -1722,38 +1843,24 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         }
         if (!cemit_str(out, "\n")) return 0;
     }
-    /* Extracted chapter includes stay in source order (below a TU typedef).
-     * Includes that precede every type decl must go out before factory
-     * bodies — `BufReader::[MemReader]` names a type that lives only in
-     * that `.h`. Do not splice every quoted `.cch` from a `.ccs` to get
-     * this; that inlines helpers and breaks header-line provenance. */
+    /* Faces that declare a factory type-arg / delayed element go out
+     * before the DECL. An earlier spliced chapter (utf8.cch) is a type
+     * decl and is not this category — do not stop at it. Product-only
+     * quotes stay in source order below. Do not splice every quoted
+     * `.cch` from a `.ccs` to get this. */
     if (kind == SHADOW_EMIT_C && g_shadow_nginst > 0) {
-        int hi;
-        for (hi = 0; hi < n; hi++) {
-            if (shadow_item_is_type_decl(items[hi])) break;
-            if (!shadow_raw_is_quoted_include(items[hi])) continue;
-            if (items[hi]->e[0] && strcmp(items[hi]->e, "ginc") == 0)
-                continue;
-            {
-                char from_dir[512];
-                from_dir[0] = 0;
-                if (src_path && src_path[0])
-                    shadow_fill_quote_dir(src_path, from_dir, sizeof(from_dir));
-                if (!shadow_quoted_inc_needed_before_ginst(
-                        items[hi]->a, from_dir[0] ? from_dir : NULL))
-                    continue;
-            }
-            if (!shadow_emit_line(out, &line_ctx, items[hi], ""))
-                return 0;
-            if (!shadow_emit_quoted_include_text(out, items[hi]->a))
-                return 0;
-            snprintf(items[hi]->e, sizeof(items[hi]->e), "ginc");
-        }
+        if (!shadow_emit_factory_prereq_quotes(out, &line_ctx, items, n,
+                                               src_path))
+            return 0;
     }
     /* Family factory bodies after typedef hoist so user types (Counter) are complete.
      * Phase 0: CCSlice + user; 1: Vec; 2: Map / ArrayMap (nested
-     * Map::[K, Vec::[T]] sees CCVec_T). */
+     * Map::[K, Vec::[T]] sees CCVec_T).
+     * User-element Vec/Map stay off this block until the element type is
+     * visible (hoisted typedef, or quoted include — late pass below). */
     int ginst_phase = 0;
+    int ginst_allow_unready = 0;
+    int ginst_late_pass = 0;
 ginst_emit_pass:
     if (cache && (kind == SHADOW_EMIT_C || kind == SHADOW_EMIT_H)) {
         if (kind == SHADOW_EMIT_C && ginst_phase == 1 && g_shadow_nvecs > 0) {
@@ -1781,7 +1888,11 @@ ginst_emit_pass:
         /* Instantiate CC_GENERIC_FACTORY templates / compiled factories. */
         for (int ii = 0; ii < g_shadow_nginst; ii++) {
             ShadowGenericInst* inst = &g_shadow_ginst[ii];
+            if (inst->emitted) continue;
             if (shadow_ginst_phase(inst->family) != ginst_phase)
+                continue;
+            if (!ginst_allow_unready &&
+                shadow_ginst_should_delay(inst, items, n))
                 continue;
             const char* tpl = NULL;
             char args[8][64];
@@ -2164,6 +2275,15 @@ ginst_emit_pass:
                     cc_arena_free(&def_ar);
                     return 0;
                 }
+                if (strcmp(inst->family, "Vec") == 0) {
+                    if (!cemit_fmt(out,
+                                   "#ifndef CC_HEADER_VEC_%s\n"
+                                   "#define CC_HEADER_VEC_%s\n",
+                                   inst->mangled, inst->mangled)) {
+                        cc_arena_free(&def_ar);
+                        return 0;
+                    }
+                }
                 if (!cemit_fmt(out, "/* generic %s */\n", inst->mangled)) {
                     cc_arena_free(&def_ar);
                     return 0;
@@ -2172,10 +2292,17 @@ ginst_emit_pass:
                     cc_arena_free(&def_ar);
                     return 0;
                 }
+                if (strcmp(inst->family, "Vec") == 0) {
+                    if (!cemit_str(out, "#endif\n")) {
+                        cc_arena_free(&def_ar);
+                        return 0;
+                    }
+                }
                 if (!cemit_str(out, "\n\n")) {
                     cc_arena_free(&def_ar);
                     return 0;
                 }
+                inst->emitted = 1;
                 shadow_ginst_ufcs_harvest_body(inst->mangled, body);
             }
             cc_arena_free(&def_ar);
@@ -2211,9 +2338,11 @@ ginst_emit_pass:
             ginst_phase = 2;
             goto ginst_emit_pass;
         }
+        if (ginst_late_pass)
+            goto ginst_after_quotes;
     }
-    /* Quoted faces after monomorphs so `Name::[args]` protos see the type.
-     * Type-arg faces (MemReader) already went out above. */
+    /* Product-naming quotes after monomorphs so `Name::[args]` protos
+     * see the type. Factory-prerequisite faces already went out above. */
     {
         int any_quote = 0;
         int hi;
@@ -2239,6 +2368,15 @@ ginst_emit_pass:
         }
         if (any_quote && !cemit_str(out, "\n")) return 0;
     }
+    /* Delayed Vec/Map: element was not a hoisted TU typedef. Prerequisite
+     * faces are already out (above). Do not use "first typedef" as a proxy. */
+    if (kind == SHADOW_EMIT_C && cache && !ginst_late_pass) {
+        ginst_late_pass = 1;
+        ginst_allow_unready = 1;
+        ginst_phase = 1;
+        goto ginst_emit_pass;
+    }
+ginst_after_quotes:
     /* Detect __spawn_into_call in fn bodies (typed inits / assigns). */
     for (int i = 0; i < n && !need_spawn_into; i++) {
         AstNode* it = items[i];

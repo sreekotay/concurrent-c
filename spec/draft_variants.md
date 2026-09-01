@@ -182,8 +182,12 @@ switches on the active tag and destroys only that arm. Destructor-bearing local
 variants are dropped on normal scope exit and early return.
 
 A whole-variant transition drops the old active arm exactly once before
-installing the replacement. A same-arm transition follows the same drop path.
-If the old arm has no registered destructor, that path is a no-op.
+installing the replacement, when that value has already been constructed.
+Assignment to a local that was only declared is construction — the
+uninitialized slot is not destroyed. A same-arm transition of a live value
+follows the same drop path. If the old arm has no registered destructor, that
+path is a no-op.
+
 Moving an arm with `cc_move` follows the ordinary move rules: the moved source
 arm is empty (generated drop is a no-op), and the variant must be replaced
 before any later read. User use of the moved name is a compile-time error.

@@ -3117,6 +3117,31 @@ size_t cc_emit_plan_compute_container_anchor(const char* src, size_t len) {
                     if (r < le && src[r] == '#') {
                         size_t k = r + 1;
                         while (k < le && (src[k] == ' ' || src[k] == '\t')) k++;
+                        /* Outer `#ifndef CC_HEADER_VEC_*` wraps the factory.
+                         * Skipping that whole region never sees the inner
+                         * VALIDATE ifdef, and AFTER_PRELUDE then falls back
+                         * to the chk typedef (dead arm). */
+                        {
+                            size_t op = 0;
+                            if (k + 5 <= le && memcmp(src + k, "ifdef", 5) == 0 &&
+                                (k + 5 == le || !cc_is_ident_char(src[k + 5])))
+                                op = k + 5;
+                            else if (k + 6 <= le &&
+                                     memcmp(src + k, "ifndef", 6) == 0 &&
+                                     (k + 6 == le || !cc_is_ident_char(src[k + 6])))
+                                op = k + 6;
+                            if (op) {
+                                while (op < le &&
+                                       (src[op] == ' ' || src[op] == '\t'))
+                                    op++;
+                                if (op + 20 <= le &&
+                                    memcmp(src + op, "CC_FRAGMENT_VALIDATE",
+                                           20) == 0 &&
+                                    (op + 20 == le ||
+                                     !cc_is_ident_char(src[op + 20])))
+                                    return ls;
+                            }
+                        }
                         if (k + 2 <= le && memcmp(src + k, "if", 2) == 0 &&
                             (k + 2 == le || !cc_is_ident_char(src[k + 2])))
                             depth++;

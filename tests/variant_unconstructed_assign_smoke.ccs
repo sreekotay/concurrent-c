@@ -1,0 +1,75 @@
+/* First assign to a never-constructed has_drop local must not drop junk.
+ * A later assign still drops the live arm. Scope-exit drops the last. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct Payload { char* p; } Payload;
+
+static int g_drops = 0;
+
+static Payload payload_from(const char* s) {
+    Payload x;
+    x.p = strdup(s);
+    return x;
+}
+
+static void payload_destroy(Payload* x) {
+    if (!x) return;
+    if (x->p) {
+        g_drops++;
+        free(x->p);
+        x->p = NULL;
+    }
+}
+
+@typehooks on Payload {
+    .destroy = cc_type_destroy_call("payload_destroy"),
+};
+
+
+@variant Cell {
+    txt: Payload;
+    num: int64_t;
+};
+
+int main(void) {
+    /* uninit then first store: no junk drop */
+    {
+        Cell arm;
+        arm = { .txt = payload_from("a") };
+        if (g_drops != 0) { printf("first store dropped junk\n"); return 1; }
+    }
+    if (g_drops != 1) { printf("scope-exit drops=%d\n", g_drops); return 2; }
+
+    /* second assign drops the first payload */
+    {
+        Cell arm;
+        arm = { .txt = payload_from("b") };
+        arm = { .num = 1 };
+        if (g_drops != 2) { printf("second assign drops=%d\n", g_drops); return 3; }
+    }
+    if (g_drops != 2) { printf("num arm extra drop\n"); return 4; }
+
+    /* if/else first stores must not drop junk */
+    {
+        Cell arm;
+        if (1) arm = { .txt = payload_from("c") };
+        else arm = { .txt = payload_from("d") };
+    }
+    if (g_drops != 3) { printf("if/else drops=%d\n", g_drops); return 5; }
+
+    /* *p is a live slot: assign still drops */
+    {
+        Cell box = { .num = 0 };
+        Cell *p = &box;
+        *p = { .txt = payload_from("e") };
+    }
+    if (g_drops != 4) { printf("deref assign drops=%d\n", g_drops); return 6; }
+
+    printf("ok\n");
+    return 0;
+}

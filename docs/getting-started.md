@@ -305,6 +305,7 @@ factory is a use-site error — include the header that registers it.
 ```c
 Vec::[int] v@(arena) @destroy;      // CCVec_int; dot UFCS
 v.push(10);
+v.truncate(n);                      // shrink len; n >= len is a no-op
 Map::[int, double] m = map_new::[int, double](arena);
 m->insert(1, 2.5);                  // Map is Name*; arrow UFCS
 ```

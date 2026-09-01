@@ -1,0 +1,15 @@
+#ifndef TESTS_QUOTE_CCH_VEC_OWNER_DOC_CCH
+#define TESTS_QUOTE_CCH_VEC_OWNER_DOC_CCH
+
+/* document.cch shape: user element, then a Vec field. Interface-grade —
+ * owner extracts this to a .h. Factory DECL must wait for that include,
+ * not for "no typedef has appeared yet" (the prior chapter already did). */
+typedef struct QuoteOwnerRun {
+    int n;
+} QuoteOwnerRun;
+
+typedef struct QuoteOwnerDoc {
+    Vec::[QuoteOwnerRun] runs;
+} QuoteOwnerDoc;
+
+#endif

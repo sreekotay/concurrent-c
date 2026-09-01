@@ -22,6 +22,7 @@
 #include "preprocess/variant_lower.h"
 #include "preprocess/unit_header.h"
 #include "preprocess/type_graph.h"
+#include "preprocess/emit_plan.h"
 #include "util/io.h"
 #include "util/text.h"
 #include "visitor/pass_type_syntax.h"
@@ -190,55 +191,154 @@ static int cc__header_vec_prebaked(const char* mangled) {
 }
 
 /* Splice CC_VEC_DECL_ARENA for Vec::[T] uses so the lowered .h is host C
- * without waiting for a TU factory harvest. */
+ * without waiting for a TU factory harvest. Each instance lands after its
+ * element type (and before first use), not as one block at the file top.
+ * Guest extract may have an empty type graph — also scan rewritten text. */
+static int cc__header_vec_already(const char names[][96], size_t n,
+                                  const char* mangled) {
+    size_t i;
+    if (!mangled) return 1;
+    for (i = 0; i < n; i++)
+        if (strcmp(names[i], mangled) == 0) return 1;
+    return 0;
+}
+
+static int cc__header_vec_push(char names[][96], char elems[][64],
+                               size_t *nitems, size_t cap,
+                               const char* mangled, const char* type1) {
+    if (!mangled || !type1 || !nitems || *nitems >= cap) return 0;
+    if (cc__header_vec_prebaked(mangled)) return 0;
+    if (cc__header_vec_already(names, *nitems, mangled)) return 0;
+    snprintf(names[*nitems], 96, "%s", mangled);
+    snprintf(elems[*nitems], 64, "%s", type1);
+    (*nitems)++;
+    return 1;
+}
+
+static void cc__header_scan_ccvec_types(const char* src, size_t n,
+                                        char names[][96], char elems[][64],
+                                        size_t *nitems, size_t cap) {
+    size_t i = 0;
+    if (!src) return;
+    while (i + 6 < n) {
+        size_t e, k, elen;
+        char mangled[96];
+        char elem[64];
+        if ((i > 0 && cc_is_ident_char(src[i - 1])) ||
+            memcmp(src + i, "CCVec_", 6) != 0) {
+            i++;
+            continue;
+        }
+        e = i + 6;
+        while (e < n && cc_is_ident_char(src[e])) e++;
+        k = e;
+        while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
+        /* `CCVec_T_init(` is a call, not a type use. */
+        if (k < n && src[k] == '(') {
+            i = e;
+            continue;
+        }
+        elen = e - (i + 6);
+        if (elen == 0 || elen >= sizeof(elem) || e - i >= sizeof(mangled)) {
+            i = e;
+            continue;
+        }
+        memcpy(mangled, src + i, e - i);
+        mangled[e - i] = 0;
+        memcpy(elem, src + i + 6, elen);
+        elem[elen] = 0;
+        cc__header_vec_push(names, elems, nitems, cap, mangled, elem);
+        i = e;
+    }
+}
+
+static char* cc__header_vec_decl_text(const char* type1, const char* mangled) {
+    char guard[256];
+    char* text = NULL;
+    size_t tlen = 0, tcap = 0;
+    if (!type1 || !mangled) return NULL;
+    snprintf(guard, sizeof(guard), "CC_HEADER_VEC_%s", mangled);
+    cc_sb_append_cstr(&text, &tlen, &tcap,
+                      "/* --- CC auto-generated Vec instance --- */\n#ifndef ");
+    cc_sb_append_cstr(&text, &tlen, &tcap, guard);
+    cc_sb_append_cstr(&text, &tlen, &tcap, "\n#define ");
+    cc_sb_append_cstr(&text, &tlen, &tcap, guard);
+    cc_sb_append_cstr(&text, &tlen, &tcap, "\nCC_VEC_DECL_ARENA(");
+    cc_sb_append_cstr(&text, &tlen, &tcap, type1);
+    cc_sb_append_cstr(&text, &tlen, &tcap, ", ");
+    cc_sb_append_cstr(&text, &tlen, &tcap, mangled);
+    cc_sb_append_cstr(&text, &tlen, &tcap, ")\nstatic inline ");
+    cc_sb_append_cstr(&text, &tlen, &tcap, mangled);
+    cc_sb_append_cstr(&text, &tlen, &tcap, " ");
+    cc_sb_append_cstr(&text, &tlen, &tcap, mangled);
+    cc_sb_append_cstr(&text, &tlen, &tcap,
+                      "_new(CCArena __a) {\n    return ");
+    cc_sb_append_cstr(&text, &tlen, &tcap, mangled);
+    cc_sb_append_cstr(&text, &tlen, &tcap, "_init(__a, 0);\n}\n#endif\n");
+    return text;
+}
+
 static char* cc__splice_header_vec_decls(const char* src, size_t n) {
+    typedef struct { size_t pos; char* text; } CCVecAt;
     CCTypeGraph* g = cc_type_graph_get_global();
-    size_t nv, i, pos = (size_t)-1;
+    size_t nv = 0, i, nfound = 0, nitems = 0;
+    char names[64][96];
+    char elems[64][64];
+    CCVecAt items[64];
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
-    if (!src || !g) return NULL;
-    nv = cc_type_graph_vec_count(g);
-    for (i = 0; i < nv; i++) {
-        const CCTypeInstantiation* inst = cc_type_graph_get_vec(g, i);
+    size_t last = 0;
+    if (!src) return NULL;
+    if (g) {
+        nv = cc_type_graph_vec_count(g);
+        for (i = 0; i < nv && nfound < 64; i++) {
+            const CCTypeInstantiation* inst = cc_type_graph_get_vec(g, i);
+            if (!inst || !inst->mangled_name || !inst->type1) continue;
+            cc__header_vec_push(names, elems, &nfound, 64,
+                                inst->mangled_name, inst->type1);
+        }
+    }
+    cc__header_scan_ccvec_types(src, n, names, elems, &nfound, 64);
+    for (i = 0; i < nfound && nitems < 64; i++) {
         const char* hit;
-        size_t at;
-        if (!inst || !inst->mangled_name || cc__header_vec_prebaked(inst->mangled_name))
-            continue;
-        hit = cc__find_ident_top_level(src, n, inst->mangled_name);
+        size_t decl_end, pos;
+        char* text;
+        if (cc__header_vec_prebaked(names[i])) continue;
+        decl_end = cc_emit_plan_type_decl_end_top_level(src, n, elems[i]);
+        hit = cc__find_ident_top_level(src, n, names[i]);
         if (!hit) hit = (const char*)memmem(src, n, "__CC_VEC(", 9);
-        if (!hit) continue;
-        at = cc__decl_insert_point(src, (size_t)(hit - src));
-        if (pos == (size_t)-1 || at < pos) pos = at;
+        pos = 0;
+        if (hit)
+            pos = cc__decl_insert_point(src, (size_t)(hit - src));
+        if (decl_end > pos) pos = decl_end;
+        if (pos == 0 && !hit) continue;
+        text = cc__header_vec_decl_text(elems[i], names[i]);
+        if (!text) continue;
+        items[nitems].pos = pos;
+        items[nitems].text = text;
+        nitems++;
     }
-    if (pos == (size_t)-1) return NULL;
-    cc_sb_append(&out, &out_len, &out_cap, src, pos);
-    for (i = 0; i < nv; i++) {
-        const CCTypeInstantiation* inst = cc_type_graph_get_vec(g, i);
-        char guard[256];
-        if (!inst || !inst->mangled_name || !inst->type1 ||
-            cc__header_vec_prebaked(inst->mangled_name))
-            continue;
-        snprintf(guard, sizeof(guard), "CC_HEADER_VEC_%s", inst->mangled_name);
-        cc_sb_append_cstr(&out, &out_len, &out_cap,
-                          "/* --- CC auto-generated Vec instance --- */\n#ifndef ");
-        cc_sb_append_cstr(&out, &out_len, &out_cap, guard);
-        cc_sb_append_cstr(&out, &out_len, &out_cap, "\n#define ");
-        cc_sb_append_cstr(&out, &out_len, &out_cap, guard);
-        cc_sb_append_cstr(&out, &out_len, &out_cap, "\nCC_VEC_DECL_ARENA(");
-        cc_sb_append_cstr(&out, &out_len, &out_cap, inst->type1);
-        cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
-        cc_sb_append_cstr(&out, &out_len, &out_cap, inst->mangled_name);
-        cc_sb_append_cstr(&out, &out_len, &out_cap, ")\nstatic inline ");
-        cc_sb_append_cstr(&out, &out_len, &out_cap, inst->mangled_name);
-        cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
-        cc_sb_append_cstr(&out, &out_len, &out_cap, inst->mangled_name);
-        cc_sb_append_cstr(&out, &out_len, &out_cap,
-                          "_new(CCArena __a) {\n    return ");
-        cc_sb_append_cstr(&out, &out_len, &out_cap, inst->mangled_name);
-        cc_sb_append_cstr(&out, &out_len, &out_cap,
-                          "_init(__a, 0);\n}\n#endif\n");
+    if (nitems == 0) return NULL;
+    for (i = 1; i < nitems; i++) {
+        CCVecAt tmp = items[i];
+        size_t b = i;
+        while (b > 0 && items[b - 1].pos > tmp.pos) {
+            items[b] = items[b - 1];
+            b--;
+        }
+        items[b] = tmp;
     }
-    cc_sb_append(&out, &out_len, &out_cap, src + pos, n - pos);
+    for (i = 0; i < nitems; i++) {
+        if (items[i].pos > last)
+            cc_sb_append(&out, &out_len, &out_cap, src + last, items[i].pos - last);
+        if (items[i].text) {
+            cc_sb_append_cstr(&out, &out_len, &out_cap, items[i].text);
+            free(items[i].text);
+        }
+        last = items[i].pos;
+    }
+    if (last < n)
+        cc_sb_append(&out, &out_len, &out_cap, src + last, n - last);
     return out;
 }
 

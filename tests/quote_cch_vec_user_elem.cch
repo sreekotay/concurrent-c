@@ -1,0 +1,22 @@
+#ifndef TESTS_QUOTE_CCH_VEC_USER_ELEM_CCH
+#define TESTS_QUOTE_CCH_VEC_USER_ELEM_CCH
+
+#include <stddef.h>
+
+/* User element, then a Vec of that type. Factory DECL must follow this
+ * typedef, not a result-specs hoist at the top of the extracted .h. */
+typedef struct QuoteVecItem {
+    int n;
+} QuoteVecItem;
+
+typedef struct QuoteVecBox {
+    Vec::[QuoteVecItem] items;
+} QuoteVecBox;
+
+static Vec::[QuoteVecItem] quote_item_vec_new(CCArena a);
+
+static Vec::[QuoteVecItem] quote_item_vec_new(CCArena a) {
+    return vec_new::[QuoteVecItem](a);
+}
+
+#endif

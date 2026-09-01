@@ -1,0 +1,16 @@
+#ifndef TESTS_QUOTE_CCH_VEC_OWNER_PRIOR_CCH
+#define TESTS_QUOTE_CCH_VEC_OWNER_PRIOR_CCH
+
+/* Prior chapter: impl-grade so the owner TU splices it (utf8.cch).
+ * Those typedefs must not hide the next face as a factory prerequisite. */
+typedef struct QuoteOwnerPrior {
+    int x;
+} QuoteOwnerPrior;
+
+static int quote_owner_prior_x(QuoteOwnerPrior *p) {
+    CCArena scratch = cc_arena_heap(64) @destroy;
+    (void)scratch;
+    return p ? p->x : 0;
+}
+
+#endif

@@ -1,0 +1,44 @@
+/* Extracted face: Vec::[QuoteVecItem] DECL follows the element typedef. */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+CCCommand emit = cc_command(a, @slice("./cc/bin/ccc"));
+emit.arg("--no-cache");
+emit.arg("--emit-c-only");
+emit.arg("tests/quote_cch_vec_user_elem_smoke.ccs");
+emit.arg("-o");
+emit.arg("out/quote_cch_vec_user_elem_smoke.c");
+emit.inherit_stdio();
+int rc = emit.status() !>;
+if (rc != 0) {
+    "emit guest failed".println() !>;
+    return 1;
+}
+
+CCCommand grep_col = cc_command(a, @slice("grep"));
+grep_col.arg("-q");
+grep_col.arg("-E");
+grep_col.arg("Vec::\\[|vec_new::\\[");
+grep_col.arg("out/include/tests/quote_cch_vec_user_elem.h");
+rc = grep_col.status() !>;
+if (rc == 0) {
+    "extracted .h still has Vec::[ or vec_new::[".println() !>;
+    return 1;
+}
+
+/* DECL must not precede the element typedef (unknown type name). */
+CCCommand python = cc_command(a, @slice("python3"));
+python.arg("-c");
+python.arg(
+    "p='out/include/tests/quote_cch_vec_user_elem.h'\n"
+    "t=open(p).read()\n"
+    "td=t.find('QuoteVecItem')\n"
+    "d=t.find('CC_VEC_DECL_ARENA(QuoteVecItem')\n"
+    "raise SystemExit(0 if td>=0 and d>td else 1)");
+rc = python.status() !>;
+if (rc != 0) {
+    "Vec DECL is missing or precedes QuoteVecItem".println() !>;
+    return 1;
+}
+
+"ok".println() !>;
+return 0;

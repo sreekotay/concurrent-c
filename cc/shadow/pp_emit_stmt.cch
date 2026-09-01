@@ -1891,6 +1891,7 @@ static void shadow_bind_param_list(const char* params) {
         shadow_normalize_result_param_ty(ps[i].ty, sizeof(ps[i].ty));
         if (strstr(ps[i].ty, "cc_atomic_int") || strstr(ps[i].ty, "atomic"))
             flags |= SHADOW_BIND_ATOMIC;
+        flags |= SHADOW_BIND_CONSTRUCTED;
         shadow_ginst_need_from_type(ps[i].ty);
         (void)shadow_restrict_diagnose_unknown_view(ps[i].ty);
         shadow_bind_name(ps[i].name, ps[i].ty, flags);
@@ -2065,14 +2066,15 @@ static void shadow_collect_bind_declarators(const char* names, const char* ty,
     p = names;
     while (shadow_field_next_name(&p, one, sizeof(one))) {
         char* eq = strchr(one, '=');
+        one_flags = flags;
         if (eq) {
             *eq = 0;
             while (eq > one && (eq[-1] == ' ' || eq[-1] == '\t')) {
                 eq--;
                 *eq = 0;
             }
+            one_flags |= SHADOW_BIND_CONSTRUCTED;
         }
-        one_flags = flags;
         snprintf(one_ty, sizeof(one_ty), "%s", ty);
         if (strchr(one, '*') && !strchr(ty, '*'))
             snprintf(one_ty, sizeof(one_ty), "%s*", ty);
@@ -2180,6 +2182,8 @@ static void shadow_collect_binds_node(AstNode* st) {
             flags |= SHADOW_BIND_ARRAY;
         if (st->kind == AST_VAR_DECL && st->c[0] == '[')
             flags |= SHADOW_BIND_ARRAY;
+        if (st->kind == AST_TYPED_INIT || st->kind == AST_VAL_DESTROY)
+            flags |= SHADOW_BIND_CONSTRUCTED;
         if (strstr(bind_ty, "cc_atomic_int") || strstr(bind_ty, "atomic"))
             flags |= SHADOW_BIND_ATOMIC;
         if (strncmp(bind_ty, "CCSlice_", 8) == 0)
@@ -6664,6 +6668,10 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
     }
     case AST_IF: {
         char cond[2048];
+        int n0 = g_shadow_nbinds;
+        unsigned char in_bits[SHADOW_CONSTR_SNAP];
+        unsigned char then_bits[SHADOW_CONSTR_SNAP];
+        int snap_ok = (n0 > 0 && n0 <= SHADOW_CONSTR_SNAP);
         if (!shadow_emit_cond_text(st, st->a, cond, sizeof(cond), ctx, out))
             return 0;
         if (!shadow_rewrite_bang_exprs(cond, sizeof(cond), ctx)) return 0;
@@ -6671,6 +6679,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
          * mid-`if (cond) #line N` (invalid C). */
         if (!cemit_fmt(out, "%sif (%s)\n", indent, cond)) return 0;
         if (st->nbody < 1) return 0;
+        if (snap_ok) shadow_bind_snap_constructed(in_bits, n0);
         /* Route blocks through AST_BLOCK so vdrop marks push/pop correctly. */
         if (st->body[0]->kind == AST_BLOCK) {
             if (!shadow_emit_stmt_ctx(st->body[0], out, ctx, indent,
@@ -6683,18 +6692,29 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                       use_cleanup))
                 return 0;
         }
+        if (snap_ok) shadow_bind_snap_constructed(then_bits, n0);
         if (st->nbody >= 2) {
+            int ok;
+            if (snap_ok) shadow_bind_load_constructed(in_bits, n0);
             if (!cemit_fmt(out, "%selse\n", indent)) return 0;
             if (st->body[1]->kind == AST_BLOCK || st->body[1]->kind == AST_IF)
-                return shadow_emit_stmt_ctx(st->body[1], out, ctx, indent,
-                                            use_cleanup);
-            {
+                ok = shadow_emit_stmt_ctx(st->body[1], out, ctx, indent,
+                                          use_cleanup);
+            else {
                 char then_ind[80];
                 shadow_indent_nest(then_ind, sizeof(then_ind), indent, 1);
-                return shadow_emit_stmt_ctx(st->body[1], out, ctx, then_ind,
-                                            use_cleanup);
+                ok = shadow_emit_stmt_ctx(st->body[1], out, ctx, then_ind,
+                                          use_cleanup);
             }
+            if (!ok) return 0;
+            if (snap_ok) {
+                unsigned char else_bits[SHADOW_CONSTR_SNAP];
+                shadow_bind_snap_constructed(else_bits, n0);
+                shadow_bind_and_constructed(then_bits, else_bits, n0);
+            }
+            return 1;
         }
+        if (snap_ok) shadow_bind_and_constructed(in_bits, then_bits, n0);
         return 1;
     }
     case AST_BLOCK: {
@@ -8324,10 +8344,21 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         {
             ShadowVariant* vv = vty ? shadow_variant_find(vty) : NULL;
             if (vv && vv->has_drop && (!st->c[0] || strcmp(st->c, "=") == 0)) {
-                int id = ++g_shadow_va_tmp_id;
-                return cemit_fmt(out,
-                        "%s{ %s __cc_vt%d = %s; %s__cc_drop(&(%s)); %s = __cc_vt%d; }\n",
-                        indent, vv->name, id, rhs, vv->name, lhs, lhs, id);
+                int drop_old = 1;
+                if (shadow_extent_is_ident(st->a)) {
+                    ShadowBind* mb = shadow_bind_lookup_mut(st->a);
+                    if (mb && !(mb->flags & SHADOW_BIND_CONSTRUCTED))
+                        drop_old = 0;
+                    if (mb) mb->flags |= SHADOW_BIND_CONSTRUCTED;
+                    if (!drop_old && ctx)
+                        shadow_variant_track_drop(ctx, st->a, vv->name);
+                }
+                if (drop_old) {
+                    int id = ++g_shadow_va_tmp_id;
+                    return cemit_fmt(out,
+                            "%s{ %s __cc_vt%d = %s; %s__cc_drop(&(%s)); %s = __cc_vt%d; }\n",
+                            indent, vv->name, id, rhs, vv->name, lhs, lhs, id);
+                }
             }
         }
         if (shadow_emit_assign_maybe_autoblock(st, out, ctx, indent))

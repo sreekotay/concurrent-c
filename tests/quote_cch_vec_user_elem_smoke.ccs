@@ -1,0 +1,31 @@
+/* Vec::[UserType] in a quoted header / owner TU: factory DECL after the
+ * element type, not at result-specs (unknown type name 'QuoteVecItem'). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "quote_cch_vec_user_elem.cch"
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    QuoteVecBox box;
+    QuoteVecItem it;
+    Vec::[QuoteVecItem] owner;
+
+    box.items = quote_item_vec_new(a);
+    it.n = 7;
+    {
+        /* Field UFCS on the owner still peels as QuoteVecBox. */
+        Vec::[QuoteVecItem]* items = &box.items;
+        if (items->push(it) != 0) return 1;
+        if (items->len() != 1 || !items->get_ptr(0) ||
+            items->get_ptr(0)->n != 7)
+            return 2;
+    }
+
+    owner = vec_new::[QuoteVecItem](a);
+    it.n = 9;
+    if (owner.push(it) != 0) return 3;
+    if (owner.len() != 1 || owner.get_ptr(0)->n != 9) return 4;
+
+    printf("ok\n");
+    return 0;
+}

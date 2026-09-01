@@ -2348,11 +2348,19 @@ static int shadow_variant_arm_match(ShadowVariant* hint, const char* expr,
 static void shadow_variant_track_drop(ShadowCtx* ctx, const char* name,
                                       const char* vty) {
     ShadowVariant* v;
+    int i, from;
     if (!ctx || !name || !name[0] || !vty || !vty[0]) return;
     v = shadow_variant_find(vty);
     if (!v) return;
     shadow_variant_update_drop(v);
     if (!v->has_drop) return;
+    /* if/else first-assigns both track the same outer local. A second
+     * mark would emit two scope-exit drops; Cell__cc_drop copies the
+     * payload and does not clear the original, so the second increment
+     * is a double-free. */
+    from = ctx->nvdrop_marks > 0 ? ctx->vdrop_marks[ctx->nvdrop_marks - 1] : 0;
+    for (i = from; i < ctx->nvdrops; i++)
+        if (strcmp(ctx->vdrops[i].name, name) == 0) return;
     if (ctx->nvdrops >= (int)(sizeof(ctx->vdrops) / sizeof(ctx->vdrops[0]))) {
         shadow_table_full("vdrops", (int)(sizeof(ctx->vdrops) / sizeof(ctx->vdrops[0])),
                           name);
@@ -3534,6 +3542,7 @@ typedef struct {
     char compact[96]; /* arg0_arg1 */
     char args[8][64]; /* per-comma spellings (long_long stays one arg) */
     int nargs;
+    int emitted; /* factory body already written this TU */
 } ShadowGenericInst;
 
 enum { SHADOW_GFAC_CAP = 64 };
@@ -3551,7 +3560,9 @@ enum {
     SHADOW_BIND_ATOMIC = 2,
     SHADOW_BIND_CACHE = 4,
     SHADOW_BIND_WALK = 8,
-    SHADOW_BIND_WALK_MUT = 16
+    SHADOW_BIND_WALK_MUT = 16,
+    /* Value decl with an initializer, a parameter, or a prior store. */
+    SHADOW_BIND_CONSTRUCTED = 32
 };
 typedef struct ShadowBind {
     char name[64];
@@ -6827,6 +6838,46 @@ static void shadow_bind_name(const char* name, const char* ty, int flags) {
     b->flags = flags;
 }
 
+enum { SHADOW_CONSTR_SNAP = 512 };
+
+static void shadow_bind_snap_constructed(unsigned char* dst, int n) {
+    int i;
+    if (!dst) return;
+    if (n > SHADOW_CONSTR_SNAP) n = SHADOW_CONSTR_SNAP;
+    for (i = 0; i < n; i++)
+        dst[i] = (unsigned char)(g_shadow_binds[i] &&
+                                 (g_shadow_binds[i]->flags & SHADOW_BIND_CONSTRUCTED)
+                                     ? 1
+                                     : 0);
+}
+
+static void shadow_bind_load_constructed(const unsigned char* src, int n) {
+    int i;
+    if (!src) return;
+    if (n > SHADOW_CONSTR_SNAP) n = SHADOW_CONSTR_SNAP;
+    for (i = 0; i < n; i++) {
+        if (!g_shadow_binds[i]) continue;
+        if (src[i])
+            g_shadow_binds[i]->flags |= SHADOW_BIND_CONSTRUCTED;
+        else
+            g_shadow_binds[i]->flags &= ~SHADOW_BIND_CONSTRUCTED;
+    }
+}
+
+static void shadow_bind_and_constructed(const unsigned char* a,
+                                        const unsigned char* b, int n) {
+    int i;
+    if (!a || !b) return;
+    if (n > SHADOW_CONSTR_SNAP) n = SHADOW_CONSTR_SNAP;
+    for (i = 0; i < n; i++) {
+        if (!g_shadow_binds[i]) continue;
+        if (a[i] && b[i])
+            g_shadow_binds[i]->flags |= SHADOW_BIND_CONSTRUCTED;
+        else
+            g_shadow_binds[i]->flags &= ~SHADOW_BIND_CONSTRUCTED;
+    }
+}
+
 /* Bind `Type name` / `char[:] name` decls in an opaque dump so UFCS
  * inside `case .arm: { … }` sees locals declared in that case. */
 static int shadow_bind_opaque_is_kw(const char* w) {
@@ -8510,6 +8561,7 @@ static void shadow_ginst_need_ex(const char* family, const char* compact,
                      sizeof(g_shadow_ginst[0].args[0]), "%s", args[a]);
         g_shadow_ginst[g_shadow_nginst].nargs = nargs;
     }
+    g_shadow_ginst[g_shadow_nginst].emitted = 0;
     g_shadow_nginst++;
 }
 

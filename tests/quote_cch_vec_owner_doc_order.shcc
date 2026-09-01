@@ -1,0 +1,34 @@
+/* Factory-prerequisite face after a spliced chapter: DECL follows the
+ * include that declares QuoteOwnerRun, not result-specs. */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+CCCommand emit = cc_command(a, @slice("./cc/bin/ccc"));
+emit.arg("--no-cache");
+emit.arg("--emit-c-only");
+emit.arg("tests/quote_cch_vec_owner_doc.ccs");
+emit.arg("-o");
+emit.arg("out/quote_cch_vec_owner_doc.c");
+emit.inherit_stdio();
+int rc = emit.status() !>;
+if (rc != 0) {
+    "emit owner failed".println() !>;
+    return 1;
+}
+
+CCCommand python = cc_command(a, @slice("python3"));
+python.arg("-c");
+python.arg(
+    "t=open('out/quote_cch_vec_owner_doc.c').read()\n"
+    "d=t.find('CC_VEC_DECL_ARENA(QuoteOwnerRun')\n"
+    "inc=t.find('quote_cch_vec_owner_doc.h')\n"
+    "body=t.find('} QuoteOwnerRun')\n"
+    "anchor=inc if inc>=0 else body\n"
+    "raise SystemExit(0 if d>0 and anchor>=0 and anchor<d else 1)");
+rc = python.status() !>;
+if (rc != 0) {
+    "Vec DECL precedes QuoteOwnerRun face".println() !>;
+    return 1;
+}
+
+"ok".println() !>;
+return 0;

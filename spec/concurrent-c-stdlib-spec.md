@@ -842,6 +842,7 @@ T *Name_get_ptr(Name *vec, size_t index);
 int Name_set(Name *vec, size_t index, T value);
 T *Name_at_grow(Name *vec, size_t index);
 void Name_clear(Name *vec);
+void Name_truncate(Name *vec, size_t n);
 void Name_destroy(Name *vec);
 CCSlice Name_as_slice(const Name *vec);
 uint64_t Name_provenance(const Name *vec);
@@ -865,16 +866,22 @@ unbinds only.
 
 `Name_destroy` on an arena-backed vector releases the prefix allocation
 (`cc_arena_release`) and kills the grower generation. `clear` keeps capacity.
+`truncate(n)` sets `len` to `n` when `n` is smaller than the current length
+and leaves `cap` unchanged. `n` at or above the current length is a no-op.
+A null receiver is a no-op. `clear` is `truncate(0)`. Slice `truncate` is a
+view bound (`n` above `len` is `CC_ERR_INVALID_ARG`); Vec `truncate` is an
+extent shrink.
 
 Vector UFCS maps these method names to the generated family with `&vec`
-(`from`, `init`, `destroy`, `reserve`, `push`, `clear`, `len`, `cap`, …).
+(`from`, `init`, `destroy`, `reserve`, `push`, `clear`, `truncate`, `len`,
+`cap`, …).
 `CCVec_char` and `CCVec_size_t` are predefined. `CC_VEC_FOREACH` iterates in
 increasing index order.
 
 `CC_VEC_DECL_HEAP(T, Name)` declares the heap-backed family with
 `Name Name_init(void)`, `free`,
 `reserve`, `push`, `push_ptr`, `pop`, `get`, `get_ptr`, `at_grow`, `clear`,
-`len`, `cap`, `begin`, `end`, and `data`.
+`truncate`, `len`, `cap`, `begin`, `end`, and `data`.
 
 ### Maps
 

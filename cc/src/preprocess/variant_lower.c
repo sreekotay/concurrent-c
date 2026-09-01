@@ -32,7 +32,9 @@
  *       Result unwrap machinery emits);
  *     - `.kind` is a READ-ONLY pseudo-member (writes are compile errors);
  *     - transition drop: whole-variant assignment drops the old active arm
- *       first when the variant is destructor-bearing;
+ *       first when the variant is destructor-bearing and the LHS has already
+ *       been constructed (a bare `Name x; x = …` is construction, not a
+ *       transition);
  *     - scope-exit drop: destructor-bearing variant locals get an injected
  *       `@defer { Name__cc_drop(&v); };` (rides the existing defer pass).
  *
@@ -3088,6 +3090,110 @@ static int cc__va_step_projections(const char* s, size_t n, const char* path, CC
 /* Uses step: transition drop on whole-variant assignment                */
 /* ==================================================================== */
 
+static int cc__va_simple_ident(const char* s, size_t a, size_t b,
+                               size_t* id_a, size_t* id_b) {
+    cc__va_trim(s, &a, &b);
+    if (b <= a || !cc_is_ident_start(s[a])) return 0;
+    {
+        size_t e = a;
+        size_t r;
+        while (e < b && cc_is_ident_char(s[e])) e++;
+        r = e;
+        while (r < b && isspace((unsigned char)s[r])) r++;
+        if (r < b) return 0;
+        if (id_a) *id_a = a;
+        if (id_b) *id_b = e;
+    }
+    return 1;
+}
+
+/* 1 if `name =` appears as a statement in [from, to). */
+static int cc__va_ident_assigned(const char* s, size_t n, size_t from, size_t to,
+                                 const char* name, size_t nlen) {
+    CCInertScan sc;
+    size_t i;
+    size_t last_boundary = from;
+    int par = 0;
+    if (!s || !name || !nlen || from >= to) return 0;
+    cc_inert_scan_init(&sc, NULL);
+    i = from;
+    while (i < to && i < n) {
+        char c;
+        if (cc_inert_scan_step(&sc, s, n, &i)) continue;
+        c = s[i];
+        if (c == '(') { par++; i++; continue; }
+        if (c == ')') { if (par) par--; if (!par) last_boundary = i + 1; i++; continue; }
+        if (c == '{') { last_boundary = i + 1; i++; continue; }
+        if (c == '}') { last_boundary = i + 1; i++; continue; }
+        if (c == ';' || c == ':') { if (!par) last_boundary = i + 1; i++; continue; }
+        if (c != '=' || par != 0) { i++; continue; }
+        if (i + 1 < n && s[i + 1] == '=') { i += 2; continue; }
+        if (i > 0 && (s[i - 1] == '=' || s[i - 1] == '!' || s[i - 1] == '<' ||
+                      s[i - 1] == '>' || s[i - 1] == '+' || s[i - 1] == '-' ||
+                      s[i - 1] == '*' || s[i - 1] == '/' || s[i - 1] == '%' ||
+                      s[i - 1] == '&' || s[i - 1] == '|' || s[i - 1] == '^')) {
+            i++;
+            continue;
+        }
+        {
+            size_t stmt_a = last_boundary;
+            size_t id_a = 0, id_b = 0;
+            while (stmt_a < i && isspace((unsigned char)s[stmt_a])) stmt_a++;
+            if (cc__va_simple_ident(s, stmt_a, i, &id_a, &id_b) &&
+                id_b - id_a == nlen && memcmp(s + id_a, name, nlen) == 0)
+                return 1;
+        }
+        i++;
+    }
+    return 0;
+}
+
+/* Fields, *p, params, and initialized locals are constructed. A bare
+ * `Name x;` is not, until a later assignment to that ident. */
+static int cc__va_lhs_constructed(const char* s, size_t n,
+                                  size_t lhs_a, size_t lhs_b, size_t eq) {
+    size_t id_a = 0, id_b = 0, nlen;
+    size_t last_kind = 0;
+    size_t last_decl_end = 0;
+    CCInertScan sc;
+    size_t i;
+    if (!cc__va_simple_ident(s, lhs_a, lhs_b, &id_a, &id_b)) return 1;
+    nlen = id_b - id_a;
+    cc_inert_scan_init(&sc, NULL);
+    i = 0;
+    while (i < eq && i < n) {
+        size_t a, b, p, f;
+        int vi;
+        if (cc_inert_scan_step(&sc, s, n, &i)) continue;
+        if (!cc_is_ident_start(s[i])) { i++; continue; }
+        a = i;
+        b = i;
+        while (b < n && cc_is_ident_char(s[b])) b++;
+        vi = cc__va_find(s + a, b - a);
+        if (vi < 0 || !g_va[vi].has_drop) { i = b; continue; }
+        p = cc_skip_ws_and_comments(s, n, b);
+        while (p < n && s[p] == '*')
+            p = cc_skip_ws_and_comments(s, n, p + 1);
+        if (p + nlen <= n && memcmp(s + p, s + id_a, nlen) == 0 &&
+            (p + nlen >= n || !cc_is_ident_char(s[p + nlen]))) {
+            f = cc_skip_ws_and_comments(s, n, p + nlen);
+            if (f < n && s[f] == '=') {
+                last_kind = 2;
+                last_decl_end = f;
+            } else if (f < n && s[f] == ';') {
+                last_kind = 1;
+                last_decl_end = f + 1;
+            } else if (f < n && (s[f] == ',' || s[f] == ')')) {
+                last_kind = 2;
+                last_decl_end = f;
+            }
+        }
+        i = b;
+    }
+    if (last_kind != 1) return 1;
+    return cc__va_ident_assigned(s, n, last_decl_end, eq, s + id_a, nlen);
+}
+
 static int cc__va_step_transitions(const char* s, size_t n, const char* path, CCVaEdits* ed) {
     (void)path;
     int nerr = 0;
@@ -3121,6 +3227,7 @@ static int cc__va_step_transitions(const char* s, size_t n, const char* path, CC
         int form = 0;
         int vi = cc__va_resolve_lvalue(s, n, stmt_a, i, &form);
         if (vi < 0 || !g_va[vi].has_drop) { i++; continue; }
+        if (!cc__va_lhs_constructed(s, n, stmt_a, i, i)) { i++; continue; }
         size_t semi = 0;
         if (!cc__va_find_semi(s, n, i + 1, &semi)) { i++; continue; }
         size_t rhs_a = i + 1, rhs_b = semi;
@@ -3250,14 +3357,20 @@ static int cc__va_step_defers(const char* s, size_t n, const char* path, CCVaEdi
                             (db - da) >= 7 && memcmp(s + da, "__cc_vt", 7) == 0;
                         if (f < n && (s[f] == '=' || s[f] == ';') && !is_transition_temp) {
                             size_t semi = 0;
+                            int inject = (s[f] == '=');
                             if (cc__va_find_semi(s, n, db, &semi) &&
                                 !cc__va_returned_by_value(s, n, semi + 1, s + da, db - da)) {
-                                char* repl = NULL;
-                                size_t rl = 0, rc = 0;
-                                cc_sb_append_fmt(&repl, &rl, &rc,
-                                                 "; @defer { %s__cc_drop(&%.*s); };",
-                                                 g_va[vi].name, (int)(db - da), s + da);
-                                if (!repl || cc__va_edit_add(ed, semi, semi + 1, repl) != 0) nerr++;
+                                if (!inject)
+                                    inject = cc__va_ident_assigned(s, n, semi + 1, n,
+                                                                   s + da, db - da);
+                                if (inject) {
+                                    char* repl = NULL;
+                                    size_t rl = 0, rc = 0;
+                                    cc_sb_append_fmt(&repl, &rl, &rc,
+                                                     "; @defer { %s__cc_drop(&%.*s); };",
+                                                     g_va[vi].name, (int)(db - da), s + da);
+                                    if (!repl || cc__va_edit_add(ed, semi, semi + 1, repl) != 0) nerr++;
+                                }
                             }
                         }
                     }

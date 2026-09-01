@@ -333,6 +333,16 @@ static inline void cc_vec_destroy(CCVec *v) {
 
 #endif
 
+/* Shrink the live extent. `n >= len` and a null receiver are no-ops.
+ * Capacity is unchanged. Slice truncate is a view bound (`n > len` is
+ * an error); this is an extent shrink. */
+static inline void cc_vec_truncate(CCVec *v, size_t n) {
+    if (!v) return;
+    if (n >= v->len) return;
+    v->len = n;
+    cc_vec_sync_len(v);
+}
+
 #define cc_vec_init(v, a, es, ea, cap) \
     (cc_vec_init)((v), CC__ARENA_HANDLE(a), (es), (ea), (cap))
 

@@ -132,6 +132,7 @@ static double CCVec_double_median(CCVec_double* v) {
 
 v.median();           // that function
 v.push(10);           // CCVec_int_push(&v, 10)
+v.truncate(n);        // shrink len; n >= len is a no-op
 mean(u, 6.0);         // plain C
 u.mean(6.0);          // same call
 ```

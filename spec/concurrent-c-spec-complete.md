@@ -6139,6 +6139,9 @@ s.set(i, c);
 s.sub(start, end);
 ```
 
+Vec `truncate(n)` shrinks the live extent and is a no-op when `n` is at
+or above `len`. Slice `truncate` rejects `n` above `len`.
+
 #### 9.2.4 Iteration
 
 A **for-in** subject is a bound name, a field path off a bind
@@ -7022,6 +7025,7 @@ construction. See the stdlib spec for full API reference, rules, and examples.
 // Vec::[T]
 Vec::[T] v@(arena) @destroy;
 v.push(value);
+v.truncate(n);
 T* x = v.get_ptr(index);
 T[:] slice = v.as_slice();
 
