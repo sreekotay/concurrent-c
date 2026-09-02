@@ -18101,16 +18101,37 @@ static int cc__lowered_h_is_raw_cch(const char* abs_cch, const char* lowered_h,
     return raw;
 }
 
+/* Strictly-before mtime compare (nsec when available). Second-granular
+ * st_mtime treats same-second header edits as fresh and reuses stale `.h`. */
+static int cc__stat_mtime_before(const struct stat* a, const struct stat* b) {
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
+    defined(__NetBSD__)
+    if (a->st_mtimespec.tv_sec != b->st_mtimespec.tv_sec)
+        return a->st_mtimespec.tv_sec < b->st_mtimespec.tv_sec;
+    return a->st_mtimespec.tv_nsec < b->st_mtimespec.tv_nsec;
+#elif defined(__linux__)
+    if (a->st_mtim.tv_sec != b->st_mtim.tv_sec)
+        return a->st_mtim.tv_sec < b->st_mtim.tv_sec;
+    return a->st_mtim.tv_nsec < b->st_mtim.tv_nsec;
+#else
+    return a->st_mtime < b->st_mtime;
+#endif
+}
+
 static int cc__lowered_h_fresh(const char* abs_cch, const char* lowered_h) {
     struct stat hs, cs, os;
     char own[PATH_MAX];
     if (!abs_cch || !lowered_h || stat(lowered_h, &hs) != 0 || hs.st_size == 0)
         return 0;
     if (stat(abs_cch, &cs) != 0) return 0;
-    if (hs.st_mtime < cs.st_mtime) return 0;
+    /* Reuse only when the lowered file is strictly newer than its source. */
+    if (cc__stat_mtime_before(&hs, &cs)) return 0;
+    if (!cc__stat_mtime_before(&cs, &hs)) return 0;
     if (cc__cch_owner_ccs_path(abs_cch, own, sizeof(own)) &&
-        stat(own, &os) == 0 && hs.st_mtime < os.st_mtime)
-        return 0;
+        stat(own, &os) == 0) {
+        if (cc__stat_mtime_before(&hs, &os)) return 0;
+        if (!cc__stat_mtime_before(&os, &hs)) return 0;
+    }
     if (cc__lowered_h_is_raw_cch(abs_cch, lowered_h, hs.st_size, cs.st_size))
         return 0;
     return 1;

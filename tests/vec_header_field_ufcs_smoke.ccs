@@ -1,0 +1,49 @@
+/*
+ * Vec fields on a header struct keep Vec UFCS (not the owner type).
+ * d->runs.truncate / r->ins.as_slice — no Vec::[T] * peel.
+ */
+#include <ccc/std/prelude.cch>
+#include "vec_header_field_ufcs.cch"
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    CCArena a = cc_arena_heap(4096) @destroy;
+    Holder h;
+    Holder *p = &h;
+    AnonHolder q;
+    char scratch[8];
+
+    h.xs = vec_new::[int](a);
+    h.buf = vec_from::[char](scratch, 0, sizeof(scratch));
+    q.ys = vec_new::[int](a);
+
+    h.xs.push(1);
+    h.xs.push(2);
+    h.xs.truncate(1);
+    p->xs.push(3);
+    if (h.xs.len != 2 || h.xs.data[0] != 1 || h.xs.data[1] != 3) {
+        fprintf(stderr, "FAIL named xs\n");
+        return 1;
+    }
+
+    p->buf.push('a');
+    {
+        char[:] s = p->buf.as_slice();
+        if (s.len != 1 || s.ptr[0] != 'a') {
+            fprintf(stderr, "FAIL buf as_slice\n");
+            return 1;
+        }
+    }
+
+    q.ys.push(9);
+    q.ys.truncate(0);
+    q.ys.push(8);
+    if (q.ys.len != 1 || q.ys.data[0] != 8) {
+        fprintf(stderr, "FAIL anon ys\n");
+        return 1;
+    }
+
+    printf("vec_header_field_ufcs_smoke: OK\n");
+    return 0;
+}

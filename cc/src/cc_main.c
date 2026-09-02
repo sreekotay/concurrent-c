@@ -2857,6 +2857,21 @@ static int cc__copy_file(const char* src, const char* dst) {
     return 0;
 }
 
+static int cc__stat_mtime_before(const struct stat* a, const struct stat* b) {
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
+    defined(__NetBSD__)
+    if (a->st_mtimespec.tv_sec != b->st_mtimespec.tv_sec)
+        return a->st_mtimespec.tv_sec < b->st_mtimespec.tv_sec;
+    return a->st_mtimespec.tv_nsec < b->st_mtimespec.tv_nsec;
+#elif defined(__linux__)
+    if (a->st_mtim.tv_sec != b->st_mtim.tv_sec)
+        return a->st_mtim.tv_sec < b->st_mtim.tv_sec;
+    return a->st_mtim.tv_nsec < b->st_mtim.tv_nsec;
+#else
+    return a->st_mtime < b->st_mtime;
+#endif
+}
+
 static int cc__deps_require_rebuild(const char* dep_path, const char* obj_path) {
     if (!dep_path || !obj_path) return 1;
     struct stat st_obj;
@@ -2899,7 +2914,7 @@ static int cc__deps_require_rebuild(const char* dep_path, const char* obj_path) 
         struct stat st_dep;
         if (stat(start, &st_dep) != 0) {
             rebuild = 1;
-        } else if (st_dep.st_mtime > st_obj.st_mtime) {
+        } else if (cc__stat_mtime_before(&st_obj, &st_dep)) {
             rebuild = 1;
         }
 

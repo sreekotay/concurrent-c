@@ -1,0 +1,13 @@
+#ifndef TESTS_VEC_HEADER_FIELD_UFCS_CCH
+#define TESTS_VEC_HEADER_FIELD_UFCS_CCH
+
+typedef struct Holder {
+    Vec::[int] xs;
+    Vec::[char] buf;
+} Holder;
+
+typedef struct {
+    Vec::[int] ys;
+} AnonHolder;
+
+#endif
