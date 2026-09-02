@@ -3,6 +3,8 @@
  * after core and before ufcs. Not a standalone TU. */
 #pragma once
 
+#include "pp_tape.h"
+#include "pp_emit_core.h"
 typedef CCSlice (*ShadowUfcsRewriteFn)(CCSlice recv_type, CCSlice method,
                                        CCSlice mode, CCSliceArray argv,
                                        CCSliceArray arg_types, CCArena arena);
@@ -92,8 +94,8 @@ static char* shadow_ufcs_slim_src(const char* src, size_t n, const char* expr,
     size_t on = 0, oc = 0;
     char* types;
     const char* prelude =
-        "#include <ccc/std/prelude.cch>\n"
-        "#include <ccc/cc_ufcs.cch>\n";
+        "#include <ccc/std/prelude.h>\n"
+        "#include <ccc/cc_ufcs.h>\n";
     if (!src || !n || !out_n) return NULL;
     *out_n = 0;
     shadow_ufcs_sb_append(&out, &on, &oc, prelude, strlen(prelude));
@@ -1114,7 +1116,7 @@ static void shadow_as_scan_nested_incs(const char* text, int depth,
         memcpy(rel, lt, n);
         rel[n] = 0;
         /* Prefer .cch facts; strip generated .h suffix.
-         * Do not spell ".cch" in a string literal — header lowerer rewrites
+         * Do not spell ".h" in a string literal — header lowerer rewrites
          * those to ".h" (same constraint as pp_stage2 umbrella check). */
         if (n > 2 && strcmp(rel + n - 2, ".h") == 0) {
             size_t rl;
@@ -1157,7 +1159,7 @@ static void shadow_as_scan_pass_inc(char pass_inc[][256], int npass_inc,
         if (n >= sizeof(rel)) n = sizeof(rel) - 1;
         memcpy(rel, lt, n);
         rel[n] = 0;
-        /* Same no-".cch"-literal rule as nested scan above. */
+        /* Same no-".h"-literal rule as nested scan above. */
         if (n > 2 && strcmp(rel + n - 2, ".h") == 0) {
             size_t rl;
             rel[n - 2] = 0;
@@ -1202,7 +1204,7 @@ static void shadow_as_scan_tapes(TapeCache* cache) {
     }
 }
 
-/* System `.cch` registered when a splice rewrites `<ccc/….cch>` → `.h`
+/* System `.cch` registered when a splice rewrites `<ccc/….h>` → `.h`
  * (those lines sit under `#ifndef` and never become pass_inc). */
 static void shadow_as_scan_included_cch(void) {
     size_t i, n = cc_included_cch_source_count();

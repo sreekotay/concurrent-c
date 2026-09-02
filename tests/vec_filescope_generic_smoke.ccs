@@ -1,0 +1,25 @@
+/*
+ * File-scope / static Vec::[T] lowers (not leftover ::) and takes
+ * value UFCS.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static Vec::[int] g;
+Vec::[int] h;
+
+int main(void) {
+    CCArena a = cc_arena_heap(4096) @destroy;
+    g = vec_new::[int](a);
+    h = vec_new::[int](a);
+    g.reserve(8);
+    g.push(1);
+    g.push(2);
+    h.push(3);
+    if (g.len != 2 || h.len != 1 || g.data[0] != 1 || h.data[0] != 3) {
+        fprintf(stderr, "FAIL filescope glen=%zu hlen=%zu\n", g.len, h.len);
+        return 1;
+    }
+    printf("vec_filescope_generic_smoke: OK\n");
+    return 0;
+}

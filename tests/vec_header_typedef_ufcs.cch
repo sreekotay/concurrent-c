@@ -1,0 +1,6 @@
+#ifndef TESTS_VEC_HEADER_TYPEDEF_UFCS_CCH
+#define TESTS_VEC_HEADER_TYPEDEF_UFCS_CCH
+
+typedef Vec::[int] Ints;
+
+#endif

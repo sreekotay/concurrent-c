@@ -5,6 +5,9 @@
 /* True when a typedef-struct field type is a Map_/ArrayMap_/CCVec_ product
  * (pointer ok). Those DECL macros are emitted after the factory-hoist pass;
  * hoisting the enclosing struct early leaves an unknown type name. */
+#include "pp_emit_core.h"
+#include "pp_ast_core.h"
+#include "pp_tape.h"
 static int shadow_ty_is_generic_container(const char* ty) {
     const char* p;
     char base[128];
@@ -23,7 +26,7 @@ static int shadow_ty_is_generic_container(const char* ty) {
            strncmp(p, "CCVec_", 6) == 0;
 }
 
-/* Quoted `#include "face.cch"` extracts to a `.h`. Two categories:
+/* Quoted `#include "face.h"` extracts to a `.h`. Two categories:
  * a face that *declares* a factory type-arg / delayed element
  * (MemReader, RtxRun) is a factory prerequisite — emit it before the
  * DECL, wherever it sat in the TU. A face that only *names* a
@@ -2241,23 +2244,23 @@ ginst_emit_pass:
                             inst->family);
                     if (strcmp(inst->family, "Vec") == 0)
                         fprintf(stderr,
-                                "  note: include <ccc/std/vec.cch> or "
-                                "<ccc/std/prelude.cch> "
+                                "  note: include <ccc/std/vec.h> or "
+                                "<ccc/std/prelude.h> "
                                 "(CC_GENERIC_FACTORY(Vec))\n");
                     else if (strcmp(inst->family, "Map") == 0)
                         fprintf(stderr,
-                                "  note: include <ccc/std/map_forward.cch> or "
-                                "<ccc/std/prelude.cch> "
+                                "  note: include <ccc/std/map_forward.h> or "
+                                "<ccc/std/prelude.h> "
                                 "(CC_GENERIC_FACTORY(Map))\n");
                     else if (strcmp(inst->family, "ArrayMap") == 0)
                         fprintf(stderr,
-                                "  note: include <ccc/std/array_map.cch> or "
-                                "<ccc/std/prelude.cch> "
+                                "  note: include <ccc/std/array_map.h> or "
+                                "<ccc/std/prelude.h> "
                                 "(CC_GENERIC_FACTORY(ArrayMap))\n");
                     else if (strcmp(inst->family, "CCSlice") == 0)
                         fprintf(stderr,
-                                "  note: include <ccc/cc_slice.cch> or "
-                                "<ccc/std/prelude.cch> "
+                                "  note: include <ccc/cc_slice.h> or "
+                                "<ccc/std/prelude.h> "
                                 "(CC_GENERIC_FACTORY(CCSlice))\n");
                     else
                         fprintf(stderr,
@@ -3357,7 +3360,7 @@ ginst_after_quotes:
                     size_t n = strlen(s);
                     if (n >= 5 && strcmp(s + n - 5, ".cch\"") == 0) {
                         char path[256];
-                        size_t plen = n - 10 - 5; /* after '#include "' before '.cch"' */
+                        size_t plen = n - 10 - 5; /* after '#include "' before '.h"' */
                         if (plen > 0 && plen < sizeof(path)) {
                             memcpy(path, s + 10, plen);
                             path[plen] = 0;
@@ -3367,7 +3370,7 @@ ginst_after_quotes:
                         }
                     }
                 }
-                /* Angle `<….cch>` left on the root tape (spliced header
+                /* Angle `<….h>` left on the root tape (spliced header
                  * `#ifndef` — not pass_inc).  Same rewrite as pass_inc. */
                 if (strncmp(s, "#include <", 10) == 0) {
                     char rew[768];

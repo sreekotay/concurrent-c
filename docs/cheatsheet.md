@@ -349,6 +349,8 @@ v.push(10);                              // dot: Vec is the struct
 v.truncate(n);                           // shrink len; n >= len is a no-op
 vec_new::[int](arena);                   // same instance
 Vec::[char] w = vec_from::[char](p, n, c); // wrap; no grow / no release
+static Vec::[int] g;                     // file-scope; same CCVec_int
+typedef Vec::[int] Ints;                 // header alias keeps push / reserve
 
 Map::[int, double] m = map_new::[int, double](arena);
 Map::[size_t, int] n = map_new::[size_t, int](arena);

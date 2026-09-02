@@ -1,0 +1,25 @@
+/*
+ * A header typedef of Vec::[T] keeps push / reserve UFCS on the alias
+ * (value and pointer). No Vec::[T] * peel.
+ */
+#include <ccc/std/prelude.cch>
+#include "vec_header_typedef_ufcs.cch"
+#include <stdio.h>
+
+static Ints g;
+
+int main(void) {
+    CCArena a = cc_arena_heap(4096) @destroy;
+    Ints *p;
+    g = vec_new::[int](a);
+    g.reserve(8);
+    g.push(1);
+    p = &g;
+    p->push(2);
+    if (g.len != 2 || g.data[0] != 1 || g.data[1] != 2) {
+        fprintf(stderr, "FAIL header typedef Ints len=%zu\n", g.len);
+        return 1;
+    }
+    printf("vec_header_typedef_ufcs_smoke: OK\n");
+    return 0;
+}
