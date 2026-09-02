@@ -516,6 +516,10 @@ static void cmd_add_check(CCCommand *cmd, const char *src, const char *emit,
     cmd->arg(emit);
     cmd->arg(src);
     cmd->cwd(slice_cstr(wave));
+    /* Do not inherit the LSP stdin. cmd.output() otherwise leaves
+     * pipe_stdin off, ccc eats the next Content-Length frame, and the
+     * session dies with "header parse failed". */
+    cmd->stdin_pipe();
 }
 
 static bool file_executable(const char *path) {
@@ -1175,9 +1179,9 @@ static int serve_stdio(void) {
         size_t len = 0;
         char *buf;
         if (!read_lsp_headers(&len)) {
-            if (feof(stdin)) break;
-            fprintf(stderr, "cc-lsp: header parse failed\n");
-            break;
+            if (feof(stdin) || ferror(stdin)) break;
+            fprintf(stderr, "cc-lsp: header parse failed (skipping)\n");
+            continue;
         }
         buf = (char *)cc_arena_alloc(msg, len, 1);
         if (!buf || !read_exact(buf, len)) {
@@ -1188,6 +1192,7 @@ static int serve_stdio(void) {
         msg.reset();
     }
     n.cancel();
+    n.wait() !>;
     docs_kill_all();
     g_nurs.p = NULL;
     return 0;

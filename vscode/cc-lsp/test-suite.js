@@ -158,6 +158,22 @@ test("quoted include + no project junk", async () => {
   }
 });
 
+test("hover during in-flight check still replies", async () => {
+  await withClient(async (c) => {
+    await c.initialize();
+    const uri = fileUri(helloPath);
+    c.didOpen(uri, read(helloPath), 1);
+    const msg = await c.request("textDocument/hover", {
+      textDocument: { uri },
+      position: { line: 0, character: 4 },
+    });
+    assert(msg.result === null, `hover while checking=${JSON.stringify(msg.result)}`);
+    assert(!c.died, `server died during in-flight hover ${JSON.stringify(c.died)}`);
+    const d = await c.waitDiag(uri, 20000);
+    assert(d.diagnostics.length === 0, `hello dirty: ${JSON.stringify(d.diagnostics)}`);
+  });
+});
+
 test("hover returns null", async () => {
   await withClient(async (c) => {
     await c.initialize();
