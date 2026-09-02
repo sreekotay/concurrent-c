@@ -1,0 +1,37 @@
+#ifndef TESTS_VEC_TYPEHOOKS_FIELD_UFCS_CCH
+#define TESTS_VEC_TYPEHOOKS_FIELD_UFCS_CCH
+
+#include <ccc/std/prelude.cch>
+
+typedef struct {
+    int n;
+} ThRun;
+
+typedef struct {
+    int stamp;
+} ThTree;
+
+typedef struct {
+    ThTree tree;
+    Vec::[ThRun] runs;
+    int live;
+} ThDoc;
+
+static void th_doc_destroy(ThDoc* d) {
+    if (d) d->live = 0;
+}
+
+static inline void th_truncate_runs(ThDoc* d, size_t n) {
+    if (!d) return;
+    d->runs.truncate(n);
+}
+
+@typehooks on ThDoc {
+    .destroy = th_doc_destroy,
+};
+
+@typeview on ThDoc {
+    as: tree;
+};
+
+#endif

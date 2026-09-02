@@ -351,7 +351,7 @@ vec_new::[int](arena);                   // same instance
 Vec::[char] w = vec_from::[char](p, n, c); // wrap; no grow / no release
 static Vec::[int] g;                     // file-scope; same CCVec_int
 typedef Vec::[int] Ints;                 // header alias keeps push / reserve
-d->runs.truncate(n);                     // Vec field: method is on the Vec
+d->runs.truncate(n);                     // Vec field (also @typehooks owners)
 
 Map::[int, double] m = map_new::[int, double](arena);
 Map::[size_t, int] n = map_new::[size_t, int](arena);

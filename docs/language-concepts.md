@@ -144,7 +144,9 @@ Generics: `Name::[args]` instantiates a factory (`CC_GENERIC_FACTORY`).
 `Vec::[T]`, `Map::[K,V]`, `ArrayMap::[K,V]`, and non-char `T[:]` are that
 rule — Vec is the struct (`v.push`), Map/ArrayMap sugar is `Name*`
 (`m->insert`). File-scope `Vec::[T]`, a header `typedef Vec::[T] Alias`,
-and a Vec field on a header struct keep that UFCS. Arguments may be types or non-negative decimal integers
+and a Vec field on a header struct keep that UFCS — including `@typehooks`
+owners (`d->runs.truncate(n)` is the Vec, not the outer type). Arguments
+may be types or non-negative decimal integers
 (`SmallVec::[int, 8]`). Recipe:
 [recipe_user_generics.ccs](../examples/recipe_user_generics.ccs).
 

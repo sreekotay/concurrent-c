@@ -1,0 +1,32 @@
+/*
+ * Vec fields on a @typehooks owner keep Vec UFCS (not the owner type).
+ * d->runs.truncate / d->runs.push — no Vec::[T] * peel. Header inlines too.
+ */
+#include <ccc/std/prelude.cch>
+#include "vec_typehooks_field_ufcs.cch"
+#include <stdio.h>
+
+int main(void) {
+    CCArena a = cc_arena_heap(4096) @destroy;
+    ThDoc doc;
+    ThDoc *d = &doc;
+    ThRun r0;
+    ThRun r1;
+
+    doc.tree.stamp = 1;
+    doc.runs = vec_new::[ThRun](a);
+    doc.live = 1;
+    r0.n = 1;
+    r1.n = 2;
+
+    d->runs.push(r0);
+    d->runs.push(r1);
+    th_truncate_runs(d, 1);
+    if (d->runs.len != 1 || d->runs.data[0].n != 1) {
+        fprintf(stderr, "FAIL typehooks Vec field UFCS\n");
+        return 1;
+    }
+
+    printf("vec_typehooks_field_ufcs_smoke: OK\n");
+    return 0;
+}
