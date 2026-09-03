@@ -706,6 +706,8 @@ int shadow_comptime_exec_file(const char* input_path, char** out_stage1_src,
         }
         shadow_ct_prof("exec_prepare", t0);
     }
+    if (shadow_ct_prof_on())
+        fprintf(stderr, "shadow_profile: exec_src_bytes      %zu\n", n);
     cc_emit_plan_clear_generic_factory_registrations();
     cc_emit_plan_clear_comptime_fragments();
     /* Field is_as comes from type-pass registry via cc_reflect_field_*;

@@ -499,16 +499,13 @@ static AstNode* parse_serial_arm(Parser* p) {
             serial_walk_locals(n->body[k], locals, &nloc, 32);
         for (k = 0; k < n->nbody; k++)
             serial_walk_dests(n->body[k], locals, nloc, dests, &nd, 8);
-        if (nd == 0) {
-            parser_fail(p, at, "@serial arm must assign a simple outer name");
-            return NULL;
-        }
         if (nd > 1) {
             parser_fail(p, at,
-                        "@serial arm must assign exactly one simple outer name");
+                        "@serial arm must assign at most one simple outer name");
             return NULL;
         }
-        snprintf(n->a, sizeof(n->a), "%s", dests[0]);
+        if (nd == 1)
+            snprintf(n->a, sizeof(n->a), "%s", dests[0]);
     }
     return n;
 }

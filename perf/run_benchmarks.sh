@@ -73,6 +73,7 @@ BENCHMARKS=(
     "spawn_nursery:perf/spawn_nursery.ccs:Nursery-based spawn throughput"
     "spawn_sequential:perf/spawn_sequential.ccs:Sequential spawn+join throughput"
     "channel_throughput:perf/perf_channel_throughput.ccs:Channel operations throughput"
+    "parallel_handoff:perf/perf_parallel_handoff.ccs:Seq / @parallel for / wait-stage store (no channel)"
     "async_overhead:perf/perf_async_overhead.ccs:Async task creation and execution"
     "gobench_blocking:perf/perf_gobench_blocking_pressure.ccs:GoBench-derived blocking pressure"
     "match_select:perf/perf_match_select.ccs:Multi-channel select performance"

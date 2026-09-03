@@ -584,22 +584,30 @@ static char *cc__cli_grammar_emit(const char *name,
                                   const char *body, size_t body_len,
                                   const char *file, int line,
                                   char *err, size_t err_sz) {
-    CliG g;
+    /* Heap: CliG is ~250KiB (64× CliField). A stack copy under libtcc's
+     * in-process comptime exec SIGSEGVs on ARM32 TinyCC. */
+    CliG *g = (CliG *)calloc(1, sizeof(*g));
     CliBuf buf = {0};
     int i, j;
-    memset(&g, 0, sizeof(g));
-    snprintf(g.name, sizeof(g.name), "%s", name ? name : "Opts");
-    g.body = body ? body : "";
-    g.len = body_len;
-    if (!cli_parse_body(&g)) {
+    char *result;
+    if (!g) {
+        if (err && err_sz) snprintf(err, err_sz, "oom");
+        return NULL;
+    }
+    snprintf(g->name, sizeof(g->name), "%s", name ? name : "Opts");
+    g->body = body ? body : "";
+    g->len = body_len;
+    if (!cli_parse_body(g)) {
         if (err && err_sz) {
             snprintf(err, err_sz, "@grammar(cli) %s (%s:%d): %s",
-                     g.name, file ? file : "?", line, g.err);
+                     g->name, file ? file : "?", line, g->err);
         }
+        free(g);
         return NULL;
     }
     if (!cli_buf_grow(&buf, 4096)) {
         if (err && err_sz) snprintf(err, err_sz, "oom");
+        free(g);
         return NULL;
     }
     buf.data[0] = '\0';
@@ -610,11 +618,11 @@ static char *cc__cli_grammar_emit(const char *name,
                         "#include <stdint.h>\n"
                         "#include <string.h>\n"
                         "typedef struct %s {\n",
-                        g.name, g.name))
+                        g->name, g->name))
         goto oom;
 
-    for (i = 0; i < g.nfields; i++) {
-        CliField *f = &g.fields[i];
+    for (i = 0; i < g->nfields; i++) {
+        CliField *f = &g->fields[i];
         if (f->kind == CK_ALIAS) continue;
         switch (f->kind) {
         case CK_FLAG:
@@ -649,14 +657,14 @@ static char *cc__cli_grammar_emit(const char *name,
             break;
         }
     }
-    if (!cli_buf_printf(&buf, "} %s;\n\n", g.name)) goto oom;
+    if (!cli_buf_printf(&buf, "} %s;\n\n", g->name)) goto oom;
 
     /* spelling tables */
-    for (i = 0; i < g.nfields; i++) {
-        CliField *f = &g.fields[i];
+    for (i = 0; i < g->nfields; i++) {
+        CliField *f = &g->fields[i];
         if (f->nlongs > 0) {
             if (!cli_buf_printf(&buf, "static const char *const %s__cli_long_%s[] = {",
-                                g.name, f->name))
+                                g->name, f->name))
                 goto oom;
             for (j = 0; j < f->nlongs; j++) {
                 if (!cli_buf_printf(&buf, "\"%s\", ", f->longs[j])) goto oom;
@@ -666,7 +674,7 @@ static char *cc__cli_grammar_emit(const char *name,
         if (f->nshort_aliases > 0) {
             if (!cli_buf_printf(&buf,
                                 "static const char *const %s__cli_salias_%s[] = {",
-                                g.name, f->name))
+                                g->name, f->name))
                 goto oom;
             for (j = 0; j < f->nshort_aliases; j++) {
                 if (!cli_buf_printf(&buf, "\"%s\", ", f->short_aliases[j])) goto oom;
@@ -676,21 +684,21 @@ static char *cc__cli_grammar_emit(const char *name,
     }
 
     if (!cli_buf_printf(&buf, "static const CCCliField %s__cli_fields[] = {\n",
-                        g.name))
+                        g->name))
         goto oom;
-    for (i = 0; i < g.nfields; i++) {
-        CliField *f = &g.fields[i];
+    for (i = 0; i < g->nfields; i++) {
+        CliField *f = &g->fields[i];
         const char *longs_expr = "NULL";
         const char *salias_expr = "NULL";
         char longs_buf[128];
         char salias_buf[128];
         char shorts_lit[CLI_MAX_SPELLS + 1];
         if (f->nlongs > 0) {
-            snprintf(longs_buf, sizeof(longs_buf), "%s__cli_long_%s", g.name, f->name);
+            snprintf(longs_buf, sizeof(longs_buf), "%s__cli_long_%s", g->name, f->name);
             longs_expr = longs_buf;
         }
         if (f->nshort_aliases > 0) {
-            snprintf(salias_buf, sizeof(salias_buf), "%s__cli_salias_%s", g.name,
+            snprintf(salias_buf, sizeof(salias_buf), "%s__cli_salias_%s", g->name,
                      f->name);
             salias_expr = salias_buf;
         }
@@ -733,18 +741,18 @@ static char *cc__cli_grammar_emit(const char *name,
                                 f->require_space ? "true" : "false",
                                 desc_lit, vname_lit, def_lit,
                                 f->is_help ? "true" : "false",
-                                g.name, f->name))
+                                g->name, f->name))
                 goto oom;
         }
 
         if (f->kind == CK_OPT_I64 || f->kind == CK_OPT_STRING) {
             if (!cli_buf_printf(&buf, ", .off_present=(unsigned)offsetof(%s,%s_present)",
-                                g.name, f->name))
+                                g->name, f->name))
                 goto oom;
         }
         if (f->kind == CK_MANY_STRING) {
             if (!cli_buf_printf(&buf, ", .off_len=(unsigned)offsetof(%s,%s_len)",
-                                g.name, f->name))
+                                g->name, f->name))
                 goto oom;
         }
         if (!cli_buf_printf(&buf, "},\n")) goto oom;
@@ -753,7 +761,7 @@ static char *cc__cli_grammar_emit(const char *name,
                               "enum { %s__cli_field_count = "
                               "(unsigned)(sizeof(%s__cli_fields)/sizeof(%s__cli_fields[0])) "
                               "};\n\n",
-                        g.name, g.name, g.name))
+                        g->name, g->name, g->name))
         goto oom;
 
     if (!cli_buf_printf(&buf,
@@ -782,15 +790,18 @@ static char *cc__cli_grammar_emit(const char *name,
                         "    return cc_cli_prepare_fields(%s__cli_fields, "
                         "%s__cli_field_count, argc, argv, arena, out, usage_out);\n"
                         "}\n",
-                        g.name, g.name, g.name, g.name, g.name, g.name,
-                        g.name, g.name, g.name, g.name, g.name, g.name, g.name,
-                        g.name))
+                        g->name, g->name, g->name, g->name, g->name, g->name,
+                        g->name, g->name, g->name, g->name, g->name, g->name, g->name,
+                        g->name))
         goto oom;
 
-    return buf.data;
+    result = buf.data;
+    free(g);
+    return result;
 oom:
     free(buf.data);
-    if (err && err_sz) snprintf(err, err_sz, "@grammar(cli) %s: emit oom", g.name);
+    if (err && err_sz) snprintf(err, err_sz, "@grammar(cli) %s: emit oom", g->name);
+    free(g);
     return NULL;
 }
 

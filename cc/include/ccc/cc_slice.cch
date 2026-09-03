@@ -59,7 +59,8 @@ typedef struct {
     /* `char*` so trusted/host `s.ptr[i]` is a byte index (not void-typed). */
     char *ptr;
     size_t len;
-    uint64_t id;   // allocation id | flags
+    /* 64-bit load/store. i386 long long is only 4-aligned; ARM faults. */
+    _Alignas(8) uint64_t id;
 } CCSlice;
 
 /* Header-local byte copy/zero for generated code and stdlib helpers.

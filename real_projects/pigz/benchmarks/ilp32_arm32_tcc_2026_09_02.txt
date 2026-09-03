@@ -1,0 +1,33 @@
+# Linux ARM32 Docker — pigz TCC backend (idiomatic PASS; pigz_cc SKIP)
+# Date: 2026-09-02
+# Host: macOS (Darwin 25), arm64, Docker Desktop, QEMU user-mode linux/arm/v7
+# ABI: gnueabihf / armhf
+# Command: FORCE_TOOLCHAIN=1 CCC_HOST_CC=tcc PIGZ_BENCH_MB=20 PIGZ_BENCH_WORKERS=4 PIGZ_BENCH_RUNS=1 ./scripts/pigz_arm32.sh
+# Volume: ccc-arm32-work
+# Backend: TinyCC (/work/third_party/tcc/tcc) for ccc build + product compiles
+# Method: compare_ilp32.sh — ELF 32-bit, 4 MiB random gunzip round-trip, then
+#         benchmark.sh on Silesia concat (1 run).
+# Note: QEMU user-mode — relative ILP32 only; not comparable to host Darwin
+#       or to the i386 QEMU receipt. gcc-backend receipt: ilp32_arm32_2026_08_30.txt
+#
+# Fixes vs 2026-08-30 FAIL:
+#   - CCArenaPool stack handle 8-aligned (TCC ARM FP is 4-mod-8; 64-bit
+#     freelist CAS faulted). Pool slots align to 8 (CCSlice.id).
+#   - Scheduler __thread cells go through cc_pthread_tls under __TINYC__.
+# pigz_cc: shadow_lower still dies (signal 11); compare skips it.
+
+=== Build ===
+pigz (original cc -O3):  OK — ELF 32-bit LSB pie, ARM, EABI5
+pigz_idiomatic (ccc):    OK — ELF 32-bit LSB executable, ARM, EABI5
+pigz_cc (ccc):           FAIL — cc: shadow_lower failed (signal 11); SKIP pigz_cc
+
+=== Correctness ===
+original pigz round-trip: PASS
+pigz_idiomatic:           PASS (4 MiB urandom + gunzip)
+pigz_cc:                  SKIP (not built)
+sizes: orig=4195609 idiomatic=4195757 bytes
+
+=== Benchmark (20 MB, 1 run) ===
+Implementation                       Comp(s)    Comp(MB/s)       Ratio   Decomp(s)  Decomp(MB/s)
+pigz (pthread)                         0.786          24.3       46.0%       0.297          64.2
+pigz_idiomatic                         0.503          37.9       46.0%         —           —

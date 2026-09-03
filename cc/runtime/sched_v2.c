@@ -1206,6 +1206,22 @@ static int sched_v2_grow_or_defer(void) {
     return 0;
 }
 
+/* No idle worker while the ready queue is non-empty. Still grow when
+ * we are under the eager cap (inline thread #2) or the queue is deeper
+ * than the live pool. Skip otherwise: SPSC rendezvous and 2-arm join
+ * ping-pong have ready<=n and must not CAS grow_pending / poke sysmon
+ * on every handshake. Sysmon's tick is the safety net. */
+static void sched_v2_grow_if_backlogged(void) {
+    int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
+    size_t ready = atomic_load_explicit(&g_v2.ready_queue.count,
+                                        memory_order_relaxed);
+    if (n < g_v2_eager_threads || ready > (size_t)n) {
+        (void)sched_v2_grow_or_defer();
+        return;
+    }
+    V2_STAT_INC(g_v2_wake_no_idle);
+}
+
 static void thread_v2_run_fiber(int tid, fiber_v2* f);
 
 static void sched_v2_enqueue_runnable(fiber_v2* f) {
@@ -1339,13 +1355,11 @@ static void sched_v2_wake(int worker_hint) {
             break;
         }
         if (atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire) <= 0) {
-            if (!sched_v2_grow_or_defer()) {
-                V2_STAT_INC(g_v2_wake_no_idle);
-            }
+            sched_v2_grow_if_backlogged();
             break;
         }
         if (!sched_v2_try_wake_one()) {
-            (void)sched_v2_grow_or_defer();
+            sched_v2_grow_if_backlogged();
             break;
         }
     }

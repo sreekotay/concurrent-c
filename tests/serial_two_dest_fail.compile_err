@@ -1,1 +1,1 @@
-@serial arm must assign exactly one simple outer name
+@serial arm must assign at most one simple outer name

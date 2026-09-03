@@ -2,6 +2,8 @@
 #include "executor.h"
 
 #include <setjmp.h>
+#include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -771,6 +773,137 @@ static char* cc__exec_build_litproj_tu(const char* expr) {
 
 static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t err_sz);
 
+/* TCC-built libtcc on ARM32 SIGSEGVs in tcc_add_symbol (set_elf_sym /
+ * empty symtab). Bind host verbs as compile-string trampolines instead. */
+static int cc__exec_thunks_put(char* buf, size_t cap, size_t* o, const char* fmt, ...) {
+    va_list ap;
+    int n;
+    if (!buf || !o || *o >= cap) return -1;
+    va_start(ap, fmt);
+    n = vsnprintf(buf + *o, cap - *o, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= cap - *o) return -1;
+    *o += (size_t)n;
+    return 0;
+}
+
+static int cc__exec_compile_host_verbs(TCCState* s) {
+    char buf[16384];
+    size_t o = 0;
+#define U(fn) ((unsigned long)(uintptr_t)(fn))
+#define PUT(...) do { if (cc__exec_thunks_put(buf, sizeof(buf), &o, __VA_ARGS__) != 0) return -1; } while (0)
+    PUT("#include <stddef.h>\n");
+    PUT("void cc_emit_raw(int a, const char *p, size_t n){"
+        "((void(*)(int,const char*,size_t))(uintptr_t)%#lx)(a,p,n);}\n",
+        U(cc__host_emit_raw));
+    PUT("void cc_instantiate_vec(const char *e){"
+        "((void(*)(const char*))(uintptr_t)%#lx)(e);}\n",
+        U(cc__host_instantiate_vec));
+    PUT("void cc_instantiate_map(const char *k, const char *v){"
+        "((void(*)(const char*,const char*))(uintptr_t)%#lx)(k,v);}\n",
+        U(cc__host_instantiate_map));
+    PUT("void cc_instantiate_chan(const char *e){"
+        "((void(*)(const char*))(uintptr_t)%#lx)(e);}\n",
+        U(cc__host_instantiate_chan));
+    PUT("int cc_reflect_field_count(const char *t){"
+        "return ((int(*)(const char*))(uintptr_t)%#lx)(t);}\n",
+        U(cc_reflect_field_count));
+    PUT("int cc_reflect_field_name(const char *t, int i, char *b, int z){"
+        "return ((int(*)(const char*,int,char*,int))(uintptr_t)%#lx)(t,i,b,z);}\n",
+        U(cc_reflect_field_name));
+    PUT("int cc_reflect_field_type(const char *t, int i, char *b, int z){"
+        "return ((int(*)(const char*,int,char*,int))(uintptr_t)%#lx)(t,i,b,z);}\n",
+        U(cc_reflect_field_type));
+    PUT("int cc_reflect_field_is_as(const char *t, int i){"
+        "return ((int(*)(const char*,int))(uintptr_t)%#lx)(t,i);}\n",
+        U(cc_reflect_field_is_as));
+    PUT("int cc_result_box_name(const char *ok, const char *er, char *b, int z){"
+        "return ((int(*)(const char*,const char*,char*,int))(uintptr_t)%#lx)(ok,er,b,z);}\n",
+        U(cc_result_box_name));
+    PUT("int cc_reflect_method_count(const char *t){"
+        "return ((int(*)(const char*))(uintptr_t)%#lx)(t);}\n",
+        U(cc_reflect_method_count));
+    PUT("int cc_reflect_method_name(const char *t, int i, char *b, int z){"
+        "return ((int(*)(const char*,int,char*,int))(uintptr_t)%#lx)(t,i,b,z);}\n",
+        U(cc_reflect_method_name));
+    PUT("int cc_reflect_param_count(const char *p){"
+        "return ((int(*)(const char*))(uintptr_t)%#lx)(p);}\n",
+        U(cc_reflect_param_count));
+    PUT("int cc_reflect_param_name(const char *p, int i, char *b, int z){"
+        "return ((int(*)(const char*,int,char*,int))(uintptr_t)%#lx)(p,i,b,z);}\n",
+        U(cc_reflect_param_name));
+    PUT("int cc_reflect_param_type(const char *p, int i, char *b, int z){"
+        "return ((int(*)(const char*,int,char*,int))(uintptr_t)%#lx)(p,i,b,z);}\n",
+        U(cc_reflect_param_type));
+    PUT("int cc_reflect_param_default(const char *p, int i, char *b, int z){"
+        "return ((int(*)(const char*,int,char*,int))(uintptr_t)%#lx)(p,i,b,z);}\n",
+        U(cc_reflect_param_default));
+    PUT("int cc_reflect_params_c_abi(const char *p, char *b, int z){"
+        "return ((int(*)(const char*,char*,int))(uintptr_t)%#lx)(p,b,z);}\n",
+        U(cc_reflect_params_c_abi));
+    PUT("int cc_reflect_method_member(const char *t, int i, char *b, int z){"
+        "return ((int(*)(const char*,int,char*,int))(uintptr_t)%#lx)(t,i,b,z);}\n",
+        U(cc_reflect_method_member));
+    PUT("int cc_reflect_method_params(const char *t, int i, char *b, int z){"
+        "return ((int(*)(const char*,int,char*,int))(uintptr_t)%#lx)(t,i,b,z);}\n",
+        U(cc_reflect_method_params));
+    PUT("int cc_reflect_method_args(const char *t, int i, char *b, int z){"
+        "return ((int(*)(const char*,int,char*,int))(uintptr_t)%#lx)(t,i,b,z);}\n",
+        U(cc_reflect_method_args));
+    PUT("int cc_reflect_method_ret(const char *t, int i, char *b, int z){"
+        "return ((int(*)(const char*,int,char*,int))(uintptr_t)%#lx)(t,i,b,z);}\n",
+        U(cc_reflect_method_ret));
+    PUT("int cc_reflect_method_err(const char *t, int i, char *b, int z){"
+        "return ((int(*)(const char*,int,char*,int))(uintptr_t)%#lx)(t,i,b,z);}\n",
+        U(cc_reflect_method_err));
+    PUT("int cc_reflect_enum_count(const char *e){"
+        "return ((int(*)(const char*))(uintptr_t)%#lx)(e);}\n",
+        U(cc_reflect_enum_count));
+    PUT("int cc_reflect_enum_name(const char *e, int i, char *b, int z){"
+        "return ((int(*)(const char*,int,char*,int))(uintptr_t)%#lx)(e,i,b,z);}\n",
+        U(cc_reflect_enum_name));
+    PUT("int cc_reflect_enum_value(const char *e, int i, long long *o){"
+        "return ((int(*)(const char*,int,long long*))(uintptr_t)%#lx)(e,i,o);}\n",
+        U(cc_reflect_enum_value));
+    PUT("int cc_reflect_kind(const char *t){"
+        "return ((int(*)(const char*))(uintptr_t)%#lx)(t);}\n",
+        U(cc_reflect_kind));
+    PUT("int cc_canonical_name(const char *b, const char **a, int n, char *o, int z){"
+        "return ((int(*)(const char*,const char**,int,char*,int))(uintptr_t)%#lx)(b,a,n,o,z);}\n",
+        U(cc_canonical_name));
+    PUT("int cc_reflect_tagged_count(const char *t){"
+        "return ((int(*)(const char*))(uintptr_t)%#lx)(t);}\n",
+        U(cc_reflect_tagged_count));
+    PUT("int cc_reflect_tagged_name(const char *t, int i, char *b, int z){"
+        "return ((int(*)(const char*,int,char*,int))(uintptr_t)%#lx)(t,i,b,z);}\n",
+        U(cc_reflect_tagged_name));
+    PUT("void cc_emit_raw_at(int a, const char *f, int l, const char *p, size_t n){"
+        "((void(*)(int,const char*,int,const char*,size_t))(uintptr_t)%#lx)(a,f,l,p,n);}\n",
+        U(cc__host_emit_raw_at));
+    PUT("void cc_emit_error(const char *m){"
+        "((void(*)(const char*))(uintptr_t)%#lx)(m);}\n",
+        U(cc_emit_error));
+    PUT("char *cc_grammar_cli_emit(const char *n, const char *b, size_t bl,"
+        " const char *f, int l, const char *s, size_t sl, char *e, size_t ez){"
+        "return ((char*(*)(const char*,const char*,size_t,const char*,int,"
+        "const char*,size_t,char*,size_t))(uintptr_t)%#lx)(n,b,bl,f,l,s,sl,e,ez);}\n",
+        U(cc_grammar_cli_emit));
+    PUT("void cc_emit_warning(const char *m){"
+        "((void(*)(const char*))(uintptr_t)%#lx)(m);}\n",
+        U(cc_emit_warning));
+    PUT("void cc_emit_error_at(const char *f, int l, const char *m){"
+        "((void(*)(const char*,int,const char*))(uintptr_t)%#lx)(f,l,m);}\n",
+        U(cc_emit_error_at));
+    PUT("void cc_emit_warning_at(const char *f, int l, const char *m){"
+        "((void(*)(const char*,int,const char*))(uintptr_t)%#lx)(f,l,m);}\n",
+        U(cc_emit_warning_at));
+#undef PUT
+#undef U
+    return tcc_compile_string(s, buf);
+}
+
+static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t err_sz);
+
 /* Compile + relocate + run the litproj TU, then read back the projected text
  * (__cc_ce_text/__cc_ce_len) and the projectability flag (__cc_ce_ok).
  * Copies the literal into `arena`.  Returns 0 with *out_lit set, -2 if the
@@ -875,9 +1008,10 @@ static int cc__exec_run_tu(const char* tu, char* err_buf, size_t err_sz) {
 }
 
 /* Create a TCC_OUTPUT_MEMORY state configured exactly like the comptime block
- * executor: libtcc lib path, the compiler's CC_INCLUDE_PATH, and the full host
- * verb symbol table.  Shared by @comptime block execution and the in-process
- * compiled-factory path so both run in an identical environment. */
+ * executor: libtcc lib path, the compiler's CC_INCLUDE_PATH, and host verbs
+ * bound as compile-string trampolines (TCC-built libtcc SIGSEGVs in
+ * tcc_add_symbol on ARM32). Shared by @comptime block execution and the
+ * in-process compiled-factory path. */
 static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t err_sz) {
     TCCState* s = tcc_new();
     if (!s) {
@@ -939,40 +1073,14 @@ static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t e
         tcc_delete(s);
         return NULL;
     }
-    tcc_add_symbol(s, "cc_emit_raw", (void*)cc__host_emit_raw);
-    tcc_add_symbol(s, "cc_instantiate_vec", (void*)cc__host_instantiate_vec);
-    tcc_add_symbol(s, "cc_instantiate_map", (void*)cc__host_instantiate_map);
-    tcc_add_symbol(s, "cc_instantiate_chan", (void*)cc__host_instantiate_chan);
-    tcc_add_symbol(s, "cc_reflect_field_count", (void*)cc_reflect_field_count);
-    tcc_add_symbol(s, "cc_reflect_field_name", (void*)cc_reflect_field_name);
-    tcc_add_symbol(s, "cc_reflect_field_type", (void*)cc_reflect_field_type);
-    tcc_add_symbol(s, "cc_reflect_field_is_as", (void*)cc_reflect_field_is_as);
-    tcc_add_symbol(s, "cc_result_box_name", (void*)cc_result_box_name);
-    tcc_add_symbol(s, "cc_reflect_method_count", (void*)cc_reflect_method_count);
-    tcc_add_symbol(s, "cc_reflect_method_name", (void*)cc_reflect_method_name);
-    tcc_add_symbol(s, "cc_reflect_param_count", (void*)cc_reflect_param_count);
-    tcc_add_symbol(s, "cc_reflect_param_name", (void*)cc_reflect_param_name);
-    tcc_add_symbol(s, "cc_reflect_param_type", (void*)cc_reflect_param_type);
-    tcc_add_symbol(s, "cc_reflect_param_default", (void*)cc_reflect_param_default);
-    tcc_add_symbol(s, "cc_reflect_params_c_abi", (void*)cc_reflect_params_c_abi);
-    tcc_add_symbol(s, "cc_reflect_method_member", (void*)cc_reflect_method_member);
-    tcc_add_symbol(s, "cc_reflect_method_params", (void*)cc_reflect_method_params);
-    tcc_add_symbol(s, "cc_reflect_method_args", (void*)cc_reflect_method_args);
-    tcc_add_symbol(s, "cc_reflect_method_ret", (void*)cc_reflect_method_ret);
-    tcc_add_symbol(s, "cc_reflect_method_err", (void*)cc_reflect_method_err);
-    tcc_add_symbol(s, "cc_reflect_enum_count", (void*)cc_reflect_enum_count);
-    tcc_add_symbol(s, "cc_reflect_enum_name", (void*)cc_reflect_enum_name);
-    tcc_add_symbol(s, "cc_reflect_enum_value", (void*)cc_reflect_enum_value);
-    tcc_add_symbol(s, "cc_reflect_kind", (void*)cc_reflect_kind);
-    tcc_add_symbol(s, "cc_canonical_name", (void*)cc_canonical_name);
-    tcc_add_symbol(s, "cc_reflect_tagged_count", (void*)cc_reflect_tagged_count);
-    tcc_add_symbol(s, "cc_reflect_tagged_name", (void*)cc_reflect_tagged_name);
-    tcc_add_symbol(s, "cc_emit_raw_at", (void*)cc__host_emit_raw_at);
-    tcc_add_symbol(s, "cc_emit_error", (void*)cc_emit_error);
-    tcc_add_symbol(s, "cc_grammar_cli_emit", (void*)cc_grammar_cli_emit);
-    tcc_add_symbol(s, "cc_emit_warning", (void*)cc_emit_warning);
-    tcc_add_symbol(s, "cc_emit_error_at", (void*)cc_emit_error_at);
-    tcc_add_symbol(s, "cc_emit_warning_at", (void*)cc_emit_warning_at);
+    if (cc__exec_compile_host_verbs(s) < 0) {
+        if (err_buf && err_sz) {
+            if (sink && sink->buf[0]) snprintf(err_buf, err_sz, "%s", sink->buf);
+            else snprintf(err_buf, err_sz, "comptime host-verb TU compile failed");
+        }
+        tcc_delete(s);
+        return NULL;
+    }
     return s;
 }
 

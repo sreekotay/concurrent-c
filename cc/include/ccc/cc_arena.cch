@@ -83,7 +83,7 @@ struct CCArenaHost {
     size_t capacity;
     cc_atomic_size offset;
     cc_atomic_size live_allocs;
-    uint64_t provenance;      // monotonically increasing arena id
+    _Alignas(8) uint64_t provenance; /* ARM faults a 4-mod-8 64-bit load */
     uint32_t _flags;          // ownership and state flags
     uint16_t block_idx;       // current block index (0 = initial)
     uint16_t block_max;       // budget: 0 = unbounded, 1 = fixed, N = max blocks
@@ -97,7 +97,7 @@ struct CCArenaHost {
     cc_atomic_uint meta_lock;
     size_t cp_loans;              // armed checkpoint handles not yet consumed
     size_t cp_seq;                // LIFO stamp of the latest armed checkpoint
-    uint64_t epoch_floor;         // slices / checkpoints below this are dead (reset)
+    _Alignas(8) uint64_t epoch_floor; /* slices / checkpoints below this are dead */
     CCAttachNode* children;       // lifetime-parent records, newest first
     CCAttachNode* self_rec;       // this host's record in a parent; tombstone on free/adopt/detach
     CCArenaHost* lifetime_parent; // parent whose list holds self_rec; lock it to tombstone
@@ -245,7 +245,8 @@ static inline uint64_t cc__pool_head_pack(void* ptr, uint64_t tag) {
 struct CCArenaPool {
     CCArenaHost* arena;
     size_t elem_size;
-    cc_atomic_u64 freelist;  /* packed (tag:16|ptr:48) on 64-bit; (tag:32|ptr:32) on 32-bit */
+    /* Treiber head is 64-bit CAS. i386 long long is only 4-aligned; ARM faults. */
+    _Alignas(8) cc_atomic_u64 freelist;
     uint32_t _flags;
 };
 
@@ -268,6 +269,41 @@ static inline size_t cc__align_up(size_t value, size_t align) {
     size_t a = cc__align_norm(align);
     return (value + (a - 1)) & ~(a - 1);
 }
+
+/* Pool slots overlay a next-pointer and commonly hold a CCSlice (uint64_t id).
+ * Default arena align is sizeof(void*) — 4 on ILP32 — which is not enough
+ * for ARM faulting 64-bit loads. */
+#define CC__ARENA_POOL_ALIGN ((size_t)8)
+
+static inline size_t cc__arena_pool_align(void) {
+    size_t a = sizeof(void *);
+    if (a < CC__ARENA_POOL_ALIGN)
+        a = CC__ARENA_POOL_ALIGN;
+    return a;
+}
+
+static inline size_t cc__arena_pool_elem_size(size_t sz) {
+    size_t n = (sz > sizeof(void *)) ? sz : sizeof(void *);
+    return cc__align_up(n, cc__arena_pool_align());
+}
+
+/* TCC ARM EABI leaves FP at 4-mod-8, so a bare `CCArenaPool p` puts the
+ * 64-bit freelist CAS on a faulting address. Place the handle at 8. */
+#define CC__ARENA_POOL_HANDLE_BYTES (sizeof(CCArenaPool) + (size_t)7)
+
+static inline CCArenaPool *cc__arena_pool_place(void *raw, size_t nbytes) {
+    uintptr_t p;
+    if (!raw || nbytes < sizeof(CCArenaPool))
+        return NULL;
+    p = ((uintptr_t)raw + (uintptr_t)7) & ~(uintptr_t)7;
+    if (p + sizeof(CCArenaPool) > (uintptr_t)raw + nbytes)
+        return NULL;
+    return (CCArenaPool *)p;
+}
+
+#define cc_arena_pool_handle(name) \
+    unsigned char name##_cc_raw[CC__ARENA_POOL_HANDLE_BYTES]; \
+    CCArenaPool *name = cc__arena_pool_place(name##_cc_raw, sizeof(name##_cc_raw))
 
 /* Align `base + off` to `align` (address, not offset-relative). */
 static inline size_t cc__align_addr_off(uint8_t *base, size_t off, size_t align) {
@@ -1831,8 +1867,8 @@ static inline CCArena cc_arena_attach_buffer(CCArenaHost *h, void *buf, size_t n
 /* Stack-backed arena + pool initialized from it. */
 #define cc_arena_pool_stack(name, elem_size, nbytes) \
     cc_arena_stack(name##_arena, nbytes); \
-    CCArenaPool name; \
-    cc_arena_pool_init(&name, (name##_arena).a, elem_size)
+    cc_arena_pool_handle(name); \
+    cc_arena_pool_init(name, (name##_arena).a, elem_size)
 
 #define CC_ARENA_POOL_STACK(name, elem_size, nbytes) \
     cc_arena_pool_stack(name, elem_size, nbytes)
@@ -2799,7 +2835,7 @@ void cc_slice_debug_assert_arena_epoch(CCSlice slice, const CCArenaHost *arena);
 // Initialize a fixed-size pool on an arena. sz is the size of one element.
 static inline void cc_arena_pool_init(CCArenaPool* p, CCArenaHost* a, size_t sz) {
     p->arena = a;
-    p->elem_size = (sz > sizeof(void*)) ? sz : sizeof(void*);
+    p->elem_size = cc__arena_pool_elem_size(sz);
     cc_atomic_store(&p->freelist, 0);
     p->_flags = 0;
     /* Pool elements must live on the slab chain: the iterator walks it,
@@ -2841,7 +2877,8 @@ static inline CCResult_CCArenaPoolptr_CCError create_pool(CCArenaHost* owner,
     if (!owner || !owner->base)
         return cc_err_CCResult_CCArenaPoolptr_CCError(
             CC_ERROR(CC_ERR_INVALID_ARG, "create_pool: owner arena is dead"));
-    p = cc_arena_alloc_T(CCArenaPool, owner);
+    p = (CCArenaPool *)cc_arena_alloc(owner, sizeof(CCArenaPool),
+                                     cc__arena_pool_align());
     if (!p)
         return cc_err_CCResult_CCArenaPoolptr_CCError(
             CC_ERROR(CC_ERR_OUT_OF_MEMORY, "create_pool: owner cannot back the handle"));
@@ -2907,7 +2944,7 @@ static inline void* cc_arena_pool_alloc_local(CCArenaPool* p) {
                         cc__pool_head_pack(*(void**)item, head >> CC__POOL_TAG_SHIFT));
         return item;
     }
-    return cc_arena_alloc_local_grow(p->arena, p->elem_size, sizeof(void*));
+    return cc_arena_alloc_local_grow(p->arena, p->elem_size, cc__arena_pool_align());
 }
 
 static inline void cc_arena_pool_free_local(CCArenaPool* p, void* ptr) {
@@ -2935,7 +2972,7 @@ static inline void* cc_arena_pool_alloc(CCArenaPool* p) {
         }
         /* head was reloaded by cc_atomic_cas on failure; retry. */
     }
-    return cc_arena_alloc(p->arena, p->elem_size, sizeof(void*));
+    return cc_arena_alloc(p->arena, p->elem_size, cc__arena_pool_align());
 }
 
 // Return an element to the pool for later reuse.
@@ -2976,7 +3013,7 @@ static inline CCArenaPoolIter cc_arena_pool_iter(CCArenaPool* p) {
     CCArenaPoolIter it = {0};
     if (!p || !p->arena) return it;
     it.elem_size = p->elem_size;
-    it.stride = (p->elem_size + sizeof(void*) - 1) & ~(sizeof(void*) - 1);
+    it.stride = cc__align_up(p->elem_size, cc__arena_pool_align());
     it.block = p->arena;
     it.cur = p->arena->base;
     it.end = p->arena->base + CC_ATOMIC_LOAD(&p->arena->offset);

@@ -109,6 +109,7 @@
 /* Defined in nursery.c (same translation unit via runtime/concurrent_c.c). */
 CCNurseryHost* cc__runtime_current_nursery(void);
 int cc_parallel_current_cancelled(void);
+void cc_parallel_abort_if_denied_chan(const char* reason);
 /* Thread-local current deadline scope (set by with_deadline lowering). */
 #if defined(__TINYC__)
 #define cc__tls_current_deadline (*(CCDeadline**)&(cc_rt_tls_get()->current_deadline))
@@ -255,7 +256,20 @@ typedef struct {
     const char* reason;
     void* obj;
     cc__fiber_wait_node* node;
+    int trace_recv_empty;
 } cc__chan_wait_flag_ctx;
+
+/* Park-hook flags. `reason` stays a dump label; do not strcmp it for control
+ * flow. TRACE_EMPTY fires the buffered-empty recv trace. SPIN polls
+ * `notified` a few times before committing to park (rendezvous). */
+enum {
+    CC__CHAN_WAIT_NONE = 0,
+    CC__CHAN_WAIT_TRACE_EMPTY = 1 << 0,
+    CC__CHAN_WAIT_SPIN = 1 << 1,
+};
+
+static inline void cc__chan_spin_hint(void);
+static inline int cc__chan_rv_spin_count(void);
 
 static inline int cc__chan_recv_empty_trace_enabled(void) {
     static _Atomic int cached = -1;
@@ -430,7 +444,7 @@ static void cc__chan_wait_flag_park(void* waitable, CCSchedFiber* fiber, void* i
     (void)fiber;
     (void)io;
     cc__chan_wait_flag_ctx* ctx = (cc__chan_wait_flag_ctx*)waitable;
-    if (ctx->obj && ctx->reason && strcmp(ctx->reason, "chan_recv_wait_empty") == 0) {
+    if (ctx->trace_recv_empty && ctx->obj) {
         cc__chan_trace_recv_empty((CCChan*)ctx->obj, "recv_park", ctx->node,
                                   atomic_load_explicit(ctx->flag, memory_order_relaxed));
     }
@@ -444,7 +458,7 @@ static cc_sched_wait_result cc__chan_wait_flag_park_until(void* waitable, CCSche
     (void)fiber;
     (void)io;
     cc__chan_wait_flag_ctx* ctx = (cc__chan_wait_flag_ctx*)waitable;
-    if (ctx->obj && ctx->reason && strcmp(ctx->reason, "chan_recv_wait_empty") == 0) {
+    if (ctx->trace_recv_empty && ctx->obj) {
         cc__chan_trace_recv_empty((CCChan*)ctx->obj, "recv_park_until", ctx->node,
                                   atomic_load_explicit(ctx->flag, memory_order_relaxed));
     }
@@ -458,9 +472,19 @@ static cc_sched_wait_result cc__chan_wait_flag_park_until(void* waitable, CCSche
 static inline cc_sched_wait_result cc__chan_wait_notified_deadline(cc__fiber_wait_node* node,
                                                                    const struct timespec* abs_deadline,
                                                                    const char* reason,
-                                                                   void* obj) {
+                                                                   void* obj,
+                                                                   int wait_flags) {
     if (atomic_load_explicit(&node->notified, memory_order_acquire) != 0) {
         return CC_SCHED_WAIT_OK;
+    }
+    if (wait_flags & CC__CHAN_WAIT_SPIN) {
+        int spin = cc__chan_rv_spin_count();
+        while (spin-- > 0) {
+            cc__chan_spin_hint();
+            if (atomic_load_explicit(&node->notified, memory_order_acquire) != 0) {
+                return CC_SCHED_WAIT_OK;
+            }
+        }
     }
     cc__chan_wait_flag_ctx ctx = {
         .flag = &node->notified,
@@ -468,6 +492,7 @@ static inline cc_sched_wait_result cc__chan_wait_notified_deadline(cc__fiber_wai
         .reason = reason,
         .obj = obj,
         .node = node,
+        .trace_recv_empty = (wait_flags & CC__CHAN_WAIT_TRACE_EMPTY) ? 1 : 0,
     };
     const cc_sched_waitable_ops ops = {
         .try_complete = cc__chan_wait_flag_try_complete,
@@ -483,14 +508,16 @@ static inline cc_sched_wait_result cc__chan_wait_notified_deadline(cc__fiber_wai
 }
 
 static inline cc_sched_wait_result cc__chan_wait_notified(cc__fiber_wait_node* node, const char* reason, void* obj) {
-    return cc__chan_wait_notified_deadline(node, NULL, reason, obj);
+    return cc__chan_wait_notified_deadline(node, NULL, reason, obj, CC__CHAN_WAIT_NONE);
 }
 
 static inline cc_sched_wait_result cc__chan_wait_notified_mark_close(cc__fiber_wait_node* node,
                                                                      const struct timespec* abs_deadline,
                                                                      const char* reason,
-                                                                     void* obj) {
-    cc_sched_wait_result wait_rc = cc__chan_wait_notified_deadline(node, abs_deadline, reason, obj);
+                                                                     void* obj,
+                                                                     int wait_flags) {
+    cc_parallel_abort_if_denied_chan(reason);
+    cc_sched_wait_result wait_rc = cc__chan_wait_notified_deadline(node, abs_deadline, reason, obj, wait_flags);
     if (wait_rc == CC_SCHED_WAIT_CLOSED) {
         atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_CLOSE, memory_order_release);
     }
@@ -825,8 +852,15 @@ int cc__chan_debug_req_wake_match(void* ch_obj) {
 #ifndef CC_CHAN_LOCK_SPIN_DEFAULT
 #define CC_CHAN_LOCK_SPIN_DEFAULT 64
 #endif
+/* Rendezvous spin-before-park. Default 0: SPSC measurements showed the
+ * waiter arrived first and 32 yields never saw notified flip. Set
+ * CC_CHAN_RV_SPIN to try a budget (arm64 yield ~1-2 cycles). */
+#ifndef CC_CHAN_RV_SPIN_DEFAULT
+#define CC_CHAN_RV_SPIN_DEFAULT 0
+#endif
 
 static _Atomic int g_cc_chan_lock_spin = -1;
+static _Atomic int g_cc_chan_rv_spin = -1;
 
 static inline int cc__chan_lock_spin_count(void) {
     int cached = atomic_load_explicit(&g_cc_chan_lock_spin, memory_order_relaxed);
@@ -844,6 +878,26 @@ static inline int cc__chan_lock_spin_count(void) {
                                                       memory_order_relaxed,
                                                       memory_order_relaxed);
         cached = atomic_load_explicit(&g_cc_chan_lock_spin, memory_order_relaxed);
+    }
+    return cached;
+}
+
+static inline int cc__chan_rv_spin_count(void) {
+    int cached = atomic_load_explicit(&g_cc_chan_rv_spin, memory_order_relaxed);
+    if (cached < 0) {
+        const char* env = getenv("CC_CHAN_RV_SPIN");
+        int v = CC_CHAN_RV_SPIN_DEFAULT;
+        if (env && env[0]) {
+            char* end = NULL;
+            long parsed = strtol(env, &end, 10);
+            if (end != env && parsed >= 0 && parsed <= 1024) v = (int)parsed;
+        }
+        int expected = -1;
+        (void)atomic_compare_exchange_strong_explicit(&g_cc_chan_rv_spin,
+                                                      &expected, v,
+                                                      memory_order_relaxed,
+                                                      memory_order_relaxed);
+        cached = atomic_load_explicit(&g_cc_chan_rv_spin, memory_order_relaxed);
     }
     return cached;
 }
@@ -2244,7 +2298,7 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
                 cc__chan_add_send_waiter(ch, &node);
 
                 pthread_mutex_unlock(&ch->mu);
-                cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node, deadline, "chan_send_wait_rendezvous", ch);
+                cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node, deadline, "chan_send_wait_rendezvous", ch, CC__CHAN_WAIT_SPIN);
                 cc_chan_lock(ch);
                 if (wait_rc == CC_SCHED_WAIT_TIMEOUT) {
                     cc__chan_remove_send_waiter(ch, &node);
@@ -2314,7 +2368,7 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
                 pthread_mutex_unlock(&ch->mu);
                 break;
             }
-            cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node, deadline, "chan_send_wait_full", ch);
+            cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node, deadline, "chan_send_wait_full", ch, CC__CHAN_WAIT_NONE);
             cc_chan_lock(ch);
             if (wait_rc == CC_SCHED_WAIT_TIMEOUT) {
                 cc__chan_remove_send_waiter(ch, &node);
@@ -2391,7 +2445,7 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
                 wake_batch_flush();  /* Flush queued wakes after unlocking. */
 
                 /* Return-aware boundary wait (first migrated call site). */
-                cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node, deadline, "chan_recv_wait_rendezvous", ch);
+                cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node, deadline, "chan_recv_wait_rendezvous", ch, CC__CHAN_WAIT_SPIN);
 
                 cc_chan_lock(ch);
                 if (wait_rc == CC_SCHED_WAIT_TIMEOUT) {
@@ -2498,7 +2552,7 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
                                           atomic_load_explicit(&node.notified, memory_order_relaxed));
                 break;
             }
-            cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node, deadline, "chan_recv_wait_empty", ch);
+            cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node, deadline, "chan_recv_wait_empty", ch, CC__CHAN_WAIT_TRACE_EMPTY);
             cc_chan_lock(ch);
             cc__chan_trace_recv_empty(ch, "recv_post_wait", &node,
                                       atomic_load_explicit(&node.notified, memory_order_relaxed));
@@ -3581,6 +3635,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
         }
 
         /* No receiver; wait */
+        cc_parallel_abort_if_denied_chan("chan_send_wait_rendezvous");
         cc__fiber_wait_node node = {0};
         node.fiber = (fiber && !deadline) ? fiber : NULL;
         node.data = (void*)value;
@@ -3609,7 +3664,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
                 }
                 pthread_mutex_unlock(&ch->mu);
                 if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
-                    (void)cc__chan_wait_notified_mark_close(&node, NULL, "chan_send_wait_rendezvous", ch);
+                    (void)cc__chan_wait_notified_mark_close(&node, NULL, "chan_send_wait_rendezvous", ch, CC__CHAN_WAIT_SPIN);
                 }
                 /* FAST PATH: receiver's direct handoff already popped us and
                  * consumed the data. No post-wake work needs mu -- return
@@ -3708,6 +3763,7 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
         }
 
         /* No sender; wait */
+        cc_parallel_abort_if_denied_chan("chan_recv_wait_rendezvous");
         ch->rv_recv_waiters++;
         cc__fiber_wait_node node = {0};
         node.fiber = (fiber && !deadline) ? fiber : NULL;
@@ -3725,7 +3781,7 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
             if (fiber && !deadline) {
                 pthread_mutex_unlock(&ch->mu);
                 if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
-                    (void)cc__chan_wait_notified_mark_close(&node, NULL, "chan_recv_wait_rendezvous", ch);
+                    (void)cc__chan_wait_notified_mark_close(&node, NULL, "chan_recv_wait_rendezvous", ch, CC__CHAN_WAIT_SPIN);
                 }
                 /* FAST PATH: sender's direct handoff already popped us, stored
                  * data, and decremented rv_recv_waiters / has_recv_waiters
@@ -3991,7 +4047,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                 if (atomic_load_explicit(&ch->has_recv_waiters, memory_order_acquire)) {
                     cc__chan_dekker_wake_recv_before_park(ch);
                 }
-                (void)cc__chan_wait_notified_mark_close(&node, NULL, "chan_send_wait_full", ch);
+                (void)cc__chan_wait_notified_mark_close(&node, NULL, "chan_send_wait_full", ch, CC__CHAN_WAIT_NONE);
                 cc_chan_lock(ch);
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {
@@ -4625,7 +4681,8 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 {
                     cc_sched_wait_result wait_rc =
                         cc__chan_wait_notified_mark_close(&node, NULL,
-                                                          "chan_recv_wait_empty", ch);
+                                                          "chan_recv_wait_empty", ch,
+                                                          CC__CHAN_WAIT_TRACE_EMPTY);
                     if (wait_rc == CC_SCHED_WAIT_CANCELLED) {
                         cc_chan_lock(ch);
                         cc__chan_remove_recv_waiter(ch, &node);
@@ -4998,7 +5055,8 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                  * after sysmon stalled, exit 124. */
                 cc_sched_wait_result wait_rc =
                     cc__chan_wait_notified_mark_close(&node, abs_deadline,
-                                                     "chan_send_wait_full", ch);
+                                                     "chan_send_wait_full", ch,
+                                                     CC__CHAN_WAIT_NONE);
                 if (wait_rc == CC_SCHED_WAIT_TIMEOUT) {
                     cc_chan_lock(ch);
                     cc__chan_remove_send_waiter(ch, &node);
@@ -5175,7 +5233,8 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                  * block when no sender ever shows up. */
                 cc_sched_wait_result wait_rc =
                     cc__chan_wait_notified_mark_close(&node, abs_deadline,
-                                                     "chan_recv_wait_empty", ch);
+                                                     "chan_recv_wait_empty", ch,
+                                                     CC__CHAN_WAIT_TRACE_EMPTY);
                 if (wait_rc == CC_SCHED_WAIT_TIMEOUT) {
                     cc_chan_lock(ch);
                     cc__chan_remove_recv_waiter(ch, &node);

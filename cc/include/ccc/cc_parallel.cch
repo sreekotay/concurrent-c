@@ -4,12 +4,17 @@
  * `@parallel { … }` is CCParallel !>(CCError): create can fail.
  * `.wait()` is the join: it synchronizes-with every arm; captured
  * writes are visible after it returns. Binding the handle does not
- * join. UFCS is the surface (`h.wait()` is `cc_parallel_wait(h)`).
+ * join. `h.close(tx)` arms this dest's EMPTY to close `tx` on both
+ * `.wait()` and `.leave()`. `h.leave()` consumes the handle without
+ * joining (OPEN → LEFT); leftover runs at EMPTY on the LEFT path
+ * only (`h.leave(ctx, finish)`). Mixing wait and leave is a
+ * programming error. UFCS is the surface (`h.wait()` is
+ * `cc_parallel_wait(h)`).
  * A void host unwraps in place: `h.wait() !>(e) { (void)e; };`.
  * `.cancel()` is bool !>(CCIoError): Ok(true) means this call
  * stored live→cancelled on this handle or an adopted descendant.
  * Joined dest: wait is ok; cancel/pause/resume are ok(false).
- * `h.live()` is planted and not joined. `cc_parallel_empty()` is
+ * `h.live()` is planted and not joined or left. `cc_parallel_empty()` is
  * idle (`!h.live()`). The construct plants a dest (`cc_parallel_dest`);
  * seq / pragma-off go idle→joined with no live window. Pause/resume/
  * cancel of idle are `ok(false)`, same as joined. `cancelled` and
@@ -50,17 +55,26 @@
 #define CC_PARALLEL_CHILD_MAX 8
 #endif
 
+#ifndef CC_PARALLEL_CLOSE_MAX
+#define CC_PARALLEL_CLOSE_MAX 8
+#endif
+
 typedef struct CCParallel {
     cc_atomic_int joined;
     cc_atomic_int planted;
     cc_atomic_int paused;
     cc_atomic_int cancelled;
+    cc_atomic_int left;
     int fail;
     int fin;
     int nt;
     int nch;
+    int nclose;
     CCError err;
     CCNurseryHost* n;
+    struct CCChan* closing[CC_PARALLEL_CLOSE_MAX];
+    void (*leftover_fn)(void*);
+    void* leftover_ctx;
     struct CCParallel* parent;
     struct CCParallel* children[CC_PARALLEL_CHILD_MAX];
     CCTask tasks[CC_PARALLEL_TASK_MAX];
@@ -84,18 +98,38 @@ static inline CCParallel cc_parallel_dest(void) {
     return h;
 }
 
-/* Planted and not joined. Pause is a flag on a live dest, not a lifetime. */
+/* Planted and not joined or left. Pause is a flag on a live dest, not a lifetime. */
 static inline bool cc_parallel_live(const CCParallel* h) {
     if (!h)
         return false;
     return cc_atomic_load(&h->planted) != 0 &&
-           cc_atomic_load(&h->joined) == 0;
+           cc_atomic_load(&h->joined) == 0 &&
+           cc_atomic_load(&h->left) == 0;
 }
 
 void !>(CCError) cc_parallel_wait(CCParallel* h);
 void cc_parallel_attach(CCParallel* h, CCTask t);
 void cc_parallel_wake_attached(CCParallel* h);
 int cc_parallel_current_cancelled(void);
+void cc_parallel_deny_enter(CCParallel* dest);
+void cc_parallel_note_denied(void);
+void cc_parallel_deny_leave(void);
+void cc_parallel_deny_leave_dest(CCParallel* dest);
+int cc_parallel_denied_here(void);
+void cc_parallel_abort_if_denied_chan(const char* reason);
+void !>(CCError) cc_parallel_close(CCParallel* h, CCChanTx tx);
+void !>(CCError) cc_parallel_register_leftover(CCParallel* h, void* ctx,
+                                              void (*finish)(void*));
+void cc_parallel_leave1(CCParallel* h);
+void !>(CCError) cc_parallel_leave_with(CCParallel* h, void* ctx,
+                                       void (*finish)(void*));
+
+/* UFCS `h.leave()` / `h.leave(ctx, finish)` and the C twin. */
+#define CC__PARALLEL_LEAVE_PICK(_1, _2, _3, NAME, ...) NAME
+#define cc_parallel_leave(...)                                                 \
+    CC__PARALLEL_LEAVE_PICK(__VA_ARGS__, cc_parallel_leave_with,               \
+                            cc__parallel_leave_needs_0_or_2,                   \
+                            cc_parallel_leave1)(__VA_ARGS__)
 
 static inline int cc__parallel_contains(const CCParallel* root,
                                         const CCParallel* needle) {

@@ -1,0 +1,34 @@
+/*
+ * Dest-live consume (helper / recv in the join) + send after the
+ * handle is live. The worker must be spawned; deny is a hang.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static void consume(int[~ <] rx, int* got) {
+    int v = 0;
+    if (!cc_io_avail(rx.recv(&v)))
+        return;
+    *got = v;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    int[~ >] tx;
+    int[~ <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+    int got = 0;
+    CCParallel h = @parallel {
+        @serial { consume(rx, &got); }
+    } !>;
+    tx.send(9) !>;
+    tx.close();
+    h.wait() !>;
+    if (got != 9) {
+        fprintf(stderr, "FAIL dest-live got=%d\n", got);
+        return 2;
+    }
+    printf("parallel_rendezvous_dest_live_smoke: OK\n");
+    return 0;
+}

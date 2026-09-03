@@ -1,5 +1,5 @@
 /*
- * Recipe: Ordered channel
+ * Recipe: Ordered stream (channel FIFO)
  *
  * Work finishes in any order; a consumer still sees submit order.
  * The machine is an ordered recv end, not a turnstile and not

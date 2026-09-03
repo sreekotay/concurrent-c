@@ -23,8 +23,9 @@ New to Concurrent-C? Work through these in order:
 | 4  | `recipe_ufcs_forms.ccs` | UFCS shape | One dispatch rule × spellings (families, bare-name, fallible chains) |
 | 4a | `recipe_user_generics.ccs` | Generics | `Name::[args]` + `CC_GENERIC_FACTORY` — same rule as Vec/Map |
 | 5  | `recipe_parallel.ccs` | `@parallel` | Join, `@serial`, dest, `@parallel for` (disjoint), `wait` + `@stage` (shared ticket) |
+| 5a | `recipe_parallel_stream.ccs` | On-page stream | Two arms; `tx.close()` next to produce; not a nursery |
 | 6  | `recipe_explicit_capture.ccs` | Capture semantics | Value vs reference capture, mutation rules |
-| 7  | `recipe_channel_pipeline.ccs` | Communication | Channels, owned close, producer/consumer |
+| 7  | `recipe_channel_pipeline.ccs` | EMPTY-close | Nested bag; `n.close(tx)` when the set is not on the page |
 | 8  | `recipe_async_await.ccs` | Async/Await | `@async` call stacks vs `spawn`, `@await`, composition |
 | 9  | `recipe_timeout.ccs` | Deadlines & cancel | `@with_deadline`; live dest `h.cancel()`; siblings poll `h.cancelled` |
 | 10 | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
@@ -50,8 +51,9 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | File | Pattern | Key Concept |
 |------|---------|-------------|
 | `recipe_parallel.ccs` | `@parallel` | Independent join / range; wait-for + `@stage` is the shared write ticket |
+| `recipe_parallel_stream.ccs` | On-page stream | Produce `tx.close()`; consume `recv` until EOF |
 | `recipe_explicit_capture.ccs` | Capture semantics | Value vs reference capture |
-| `recipe_channel_pipeline.ccs` | Producer/consumer | Nested ownership + channel close |
+| `recipe_channel_pipeline.ccs` | EMPTY-close | Nested bag; closer at inner EMPTY |
 | `recipe_async_await.ccs` | Async/Await | `@async`, `@await`, `cc_block_on` |
 | `recipe_worker_pool.ccs` | Worker pool | N workers, shared queue |
 | `recipe_exclusive_named.ccs` | Named exclusive | Domain + `mutex(name)` once + `acquire_when` + guard unlock |
@@ -68,7 +70,7 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_unwrap_destroy_forms.ccs` | Unwrap matrix | Two ops × modifiers; `@destroy` on successful construction |
 | `recipe_ufcs_forms.ccs` | UFCS matrix | One rule × spellings, including bare-name and fallible chains |
 | `recipe_user_generics.ccs` | User generics | `CC_GENERIC_FACTORY` — same `Name::[args]` rule as Vec/Map |
-| `recipe_ordered_parallel.ccs` | Ordered channel | `send_task` + FIFO recv; no shared dest |
+| `recipe_ordered_parallel.ccs` | Ordered stream | `send_task` + FIFO recv; no shared dest |
 
 ### Python interop (one boundary, two doors)
 

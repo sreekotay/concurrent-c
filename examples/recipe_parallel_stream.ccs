@@ -1,0 +1,53 @@
+/*
+ * Recipe: On-page stream
+ *
+ * Consumer never had n. Produce until stop; consume until close.
+ * Close is next to “no more” — not a handle registration.
+ *
+ *   @parallel {
+ *       @serial { …; tx.close(); }
+ *       @serial { while (rx.recv(&v)) use(v); }
+ *   } !>.wait()!>;
+ *
+ * `@serial` may write one outer name, or none (this file).
+ *
+ * Buffered: send usually does not yield. Unbuffered: both arms must
+ * be live (a channel on the join is never denied). Dest-live leave /
+ * EMPTY-close: `h.close(tx)` / `h.leave()`, or the nursery twin
+ * recipe_channel_pipeline.ccs.
+ * Ordered recv (send_task): recipe_ordered_parallel.ccs.
+ * n known, write is the recv: recipe_turnstile.ccs / recipe_parallel.ccs.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    int[~4 >] tx;
+    int[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+
+    cc_atomic_int sum = 0;
+    @parallel {
+        @serial {
+            int i;
+            for (i = 1; i <= 3; i++)
+                tx.send(i) !>;
+            tx.close();
+        }
+        @serial {
+            int v;
+            while (cc_io_avail(rx.recv(&v)))
+                sum.fetch_add(v);
+        }
+    } !>.wait()!>;
+
+    int total = sum.load();
+    if (total != 6) {
+        eprintln(@string(`FAIL sum=${total}`, @scratch)) !>;
+        return 1;
+    }
+    println(@string(`sum = ${total} (expected 6)`, @scratch)) !>;
+    return 0;
+}

@@ -153,16 +153,18 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
     CCArena ts_arena = cc_arena_heap(megabytes(2)) @destroy;
     CCTurnstileRW ts@(CAP, ts_arena) !> @destroy;
 
-    CCArenaPool in_pool;
-    if (cc_arena_pool(&in_pool, (size_t)BLOCK_SIZE) != 0)
+    unsigned char in_pool_raw[CC__ARENA_POOL_HANDLE_BYTES];
+    CCArenaPool *in_pool = cc__arena_pool_place(in_pool_raw, sizeof(in_pool_raw));
+    if (!in_pool || cc_arena_pool(in_pool, (size_t)BLOCK_SIZE) != 0)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "input pool");
-    @defer in_pool.destroy();
+    @defer cc_arena_pool_destroy(in_pool);
 
-    CCArenaPool out_pool;
-    if (cc_arena_pool(&out_pool,
+    unsigned char out_pool_raw[CC__ARENA_POOL_HANDLE_BYTES];
+    CCArenaPool *out_pool = cc__arena_pool_place(out_pool_raw, sizeof(out_pool_raw));
+    if (!out_pool || cc_arena_pool(out_pool,
             sizeof(CompressedResult) + deflate_cap((size_t)BLOCK_SIZE)) != 0)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "output pool");
-    @defer out_pool.destroy();
+    @defer cc_arena_pool_destroy(out_pool);
 
     /* Loop-carried: dictbuf hops through the read stage (a copied tail,
      * not a view); crc through the write stage. zs is warm scratch. */
@@ -184,7 +186,7 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
 
         unsigned char* buf = NULL;
         if (want)
-            buf = read_block(in_fd, &in_pool, off, want) !>;
+            buf = read_block(in_fd, in_pool, off, want) !>;
         CCSlice data = buf
             ? cc_slice_from_parts(buf, want, CC_SLICE_ID_UNTRACKED)
             : cc_slice_empty();
@@ -204,7 +206,7 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
         }
 
         CompressedResult* r =
-            compress_slice(data, dict, is_last, &zs, &out_pool) !>;
+            compress_slice(data, dict, is_last, &zs, out_pool) !>;
 
         @stage (ts.write, i) {
             size_t len = r->original_len;
@@ -214,8 +216,8 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
             write_all(&out_file, r->data) !>;
         }
 
-        if (buf) in_pool.free(buf);
-        out_pool.free(r);
+        if (buf) cc_arena_pool_free(in_pool, buf);
+        cc_arena_pool_free(out_pool, r);
     } !>.wait()!>;
 
     unsigned long isize = (unsigned long)(file_len & 0xffffffffUL);

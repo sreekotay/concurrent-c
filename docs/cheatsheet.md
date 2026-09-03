@@ -509,20 +509,22 @@ Recipe: [recipe_walk.ccs](../examples/recipe_walk.ccs).
 Lexical fork-join — not a nursery. `@parallel { … }` is `CCParallel !>(CCError)`.
 `.wait()` joins. Spec §8.11.
 Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
+Stream (no `n`): [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs).
 
 | Form | Meaning |
 |------|---------|
 | `@parallel { a = f(); b = g(); }` | Independent assignment arms. First on the caller; the rest may spawn. |
 | `@parallel { h1.wait() !>; h2.wait() !>; }` | Expression arms. No assignment: the expression just runs. |
 | `h1.adopt(h2)` | Cancel tree. `h1.cancel()` is child then parent; `h2.cancel()` is child only. |
-| `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. `h.live()` is planted and not joined. `cc_parallel_empty()` is idle. After `h.wait()`, `h.joined` and `!h.live()`. Next kick overwrites `h`. When there is a kick, the first arm has finished; siblings may still run. One assignment arm is ill-formed: this dest is never live on the caller. One expression arm is the worker (spawned); dest is live. Mark the caller `@serial`, or join with `!>.wait()!>`. Pointer names copy the pointer; other names are by reference and must outlive `.wait()`. |
+| `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. `h.live()` is planted and not joined or left. `cc_parallel_empty()` is idle. After `h.wait()`, `h.joined` and `!h.live()`. `h.close(tx)` arms EMPTY to close `tx` on wait and leave. `h.leave()` / `h.leave(ctx, finish)` consume without joining (leftover LEFT-only). Do not mix wait and leave. Next kick overwrites `h`. When there is a kick, the first arm has finished; siblings may still run. One assignment arm is ill-formed: this dest is never live on the caller. One expression arm is the worker (spawned); dest is live. Mark the caller `@serial`, or join with `!>.wait()!>`. Pointer names copy the pointer; other names are by reference and must outlive `.wait()`. |
 | `h.cancel()` | `bool !>(CCIoError)`. `true` = this call stored live→cancelled on `h` or an adopted child. Wakes parks on attached fibers. Pause does not complete a `recv`. |
 | `h.live()` | Planted and not joined. Kick: `if (h.live()) return; h = @parallel { … } !>;`. Pause/resume/cancel of idle or joined are `ok(false)`. |
 | `h.pause()` / `h.resume()` | `bool !>(CCIoError)`. `true` = this call's transition on a live dest. Does not require `.wait()`. Construct honors at thunk entry / next for-half / next leaf `i` / wait-for enter / after `@stage` wait. |
 | `h.paused` / `h.paused()` | Atomic flag. Safe to poll from a sibling while `pause()` / `resume()` store. Visible after `h.wait()`. |
 | `h.cancelled` | Atomic flag. Safe to poll from a sibling while `cancel()` stores. Visible after `h.wait()`. |
 | void host | `h.wait() !>(e) { (void)e; };` — UFCS `!>` lowers in void. No Result wrapper. |
-| `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; writes exactly one outer name. |
+| `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; zero or one outer name. |
+| `@parallel { @serial { …; tx.close(); } @serial { while (recv) } }` | On-page stream. Close next to produce. `.wait()` joins both. A channel on the join is not denied. Not a nursery. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. Body always runs. |
 | `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; span 0 or 1 is a plain `for`. |
 | `@parallel wait (ts) for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished. `CCParallel h = … !>;` is live during enter; the statement joins (§8.11.6). |
@@ -560,6 +562,22 @@ bool fin = @parallel wait (ts) for (i in 0..n) {
     @stage (ts, 0, i) { work(i); }
     if (done) break;           // ok(false); bind the bool
 } !>;
+
+int[~4 >] tx;
+int[~4 <] rx;
+cc_channel_pair(&tx, &rx) !> @destroy;
+@parallel {
+    @serial {
+        for (int i = 1; i <= 3; i++)
+            tx.send(i) !>;
+        tx.close();            // EOF on the page
+    }
+    @serial {
+        int v;
+        while (cc_io_avail(rx.recv(&v)))
+            use(v);
+    }
+} !>.wait()!>;
 ```
 
 `@serial` is only a direct child of `@parallel { }`. Bare `{ }` is not an
@@ -574,37 +592,10 @@ has not returned. `n.spawn` still names a task lifetime.
 `T[~N >]` is a send end and `T[~N <]` is a receive end; `N` is the
 buffer capacity.
 
-```c
-@errhandler(CCError e) cc_error_exit(e);
-
-int[~10 >] tx;
-int[~10 <] rx;
-CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
-
-{
-    CCNursery outer = cc_nursery_create() !> @destroy;
-
-    outer.spawn(() => [rx] {
-        @errhandler(CCError e) cc_error_exit(e);
-        int v;
-        while (cc_io_avail(rx.recv(&v)))
-            printf("got %d\n", v);
-    });
-
-    {
-        CCNursery inner = outer.create_child() !> @destroy;
-        (void)inner.close(tx);          // arm EMPTY to close tx
-        inner.spawn(() => [tx] {
-            @errhandler(CCError e) cc_error_exit(e);
-            for (int i = 0; i < 5; i++)
-                tx.send(i) !>;
-        });
-    }
-}
-```
-
-Consumer outside, producer + `close(tx)` inside. Full recipe:
-[recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs).
+Default pipeline is two `@parallel` arms and `tx.close()` on the produce
+arm — [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs).
+`n.close(tx)` arms EMPTY when the set is not on the page (dest-live /
+leave): [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs).
 
 ---
 
@@ -723,6 +714,14 @@ owner.attach(obj, obj_down);               // destroy record; fires at free/rese
 CCArena child = owner.create_arena(512) !>; // L1 carved from owner: storage-bound
 CCArena kid   = owner.create_arena(0) !>;   // heap-backed: movable
 CCArenaPool* p = owner.create_pool(32) !>;  // pool on owner; no explicit destroy
+
+/* Stack pool: place an 8-aligned handle. Do not declare CCArenaPool by value. */
+cc_arena_pool_handle(pool);
+if (!pool || cc_arena_pool(pool, 32) != 0) ...
+@defer cc_arena_pool_destroy(pool);
+/* `@parallel` capture needs the names spelled (the macro's identifiers are not captured): */
+unsigned char pool_raw[CC__ARENA_POOL_HANDLE_BYTES];
+CCArenaPool *pool = cc__arena_pool_place(pool_raw, sizeof(pool_raw));
 
 CCArena tmp = cc_arena_heap(256) @destroy;
 CCArena tmp2 = cc_arena_heap(256) @destroy;
@@ -877,7 +876,8 @@ ccc examples/js/jsdemo.shcc         # CC→JS (guest; Node owns env)
 | Owned or view / reopen | [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs) |
 | Worker pool | [recipe_worker_pool.ccs](../examples/recipe_worker_pool.ccs) |
 | `@parallel` (join, range, wait-for ticket) | [recipe_parallel.ccs](../examples/recipe_parallel.ccs) |
-| Ordered channel (`send_task` + FIFO recv) | [recipe_ordered_parallel.ccs](../examples/recipe_ordered_parallel.ccs) |
+| On-page stream (`tx.close()` in produce) | [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs) |
+| Ordered stream (`send_task` + FIFO recv) | [recipe_ordered_parallel.ccs](../examples/recipe_ordered_parallel.ccs) |
 | Prepare A+B / hold / commit | [recipe_prepare_commit.ccs](../examples/recipe_prepare_commit.ccs) |
 | Channel pipeline | [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs) |
 

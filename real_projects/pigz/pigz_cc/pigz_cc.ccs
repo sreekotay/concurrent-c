@@ -553,8 +553,10 @@ typedef struct {
     unsigned char dictbuf[DICT_SIZE];
     size_t dict_len;
     unsigned long rolling;
-    CCArenaPool in_pool;
-    CCArenaPool out_pool;
+    unsigned char in_pool_raw[CC__ARENA_POOL_HANDLE_BYTES];
+    unsigned char out_pool_raw[CC__ARENA_POOL_HANDLE_BYTES];
+    CCArenaPool *in_pool;
+    CCArenaPool *out_pool;
     int pools_live;
 } CompressRun;
 
@@ -569,10 +571,12 @@ static void compress_run_init_cksum(CompressRun* run) {
 
 static void !>(CCError) compress_run_open_pools(CompressRun* run, size_t block) {
     size_t out_elem = sizeof(CompressedResult) + deflate_cap(block);
-    if (cc_arena_pool(&run->in_pool, in_pool_elem(block)) != 0)
+    run->in_pool = cc__arena_pool_place(run->in_pool_raw, sizeof(run->in_pool_raw));
+    if (!run->in_pool || cc_arena_pool(run->in_pool, in_pool_elem(block)) != 0)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "input pool");
-    if (cc_arena_pool(&run->out_pool, out_elem) != 0) {
-        run->in_pool.destroy();
+    run->out_pool = cc__arena_pool_place(run->out_pool_raw, sizeof(run->out_pool_raw));
+    if (!run->out_pool || cc_arena_pool(run->out_pool, out_elem) != 0) {
+        cc_arena_pool_destroy(run->in_pool);
         return cc_err(CC_ERR_OUT_OF_MEMORY, "output pool");
     }
     run->pools_live = 1;
@@ -581,8 +585,8 @@ static void !>(CCError) compress_run_open_pools(CompressRun* run, size_t block) 
 
 static void compress_run_close_pools(CompressRun* run) {
     if (!run->pools_live) return;
-    run->out_pool.destroy();
-    run->in_pool.destroy();
+    cc_arena_pool_destroy(run->out_pool);
+    cc_arena_pool_destroy(run->in_pool);
     run->pools_live = 0;
 }
 
@@ -614,9 +618,9 @@ static void !>(CCError) compress_one(CompressRun* run, CCSlice data, bool is_las
         lens = rsync_scan(data, &run->rolling, hits, max_hits);
     }
 
-    CompressedResult* r = compress_block(data, dict, lens, is_last, zs, &run->out_pool) !>;
+    CompressedResult* r = compress_block(data, dict, lens, is_last, zs, run->out_pool) !>;
     emit_result(run, r) !>;
-    run->out_pool.free(r);
+    cc_arena_pool_free(run->out_pool, r);
     return cc_ok();
 }
 
@@ -654,7 +658,7 @@ static void !>(CCError) compress_seekable(CompressRun* run, int in_fd, size_t fi
 
         unsigned char* buf = NULL;
         if (want)
-            buf = read_block(in_fd, &run->in_pool, off, want) !>;
+            buf = read_block(in_fd, run->in_pool, off, want) !>;
         CCSlice data = buf
             ? cc_slice_from_parts(buf, want, CC_SLICE_ID_UNTRACKED)
             : cc_slice_empty();
@@ -672,14 +676,14 @@ static void !>(CCError) compress_seekable(CompressRun* run, int in_fd, size_t fi
         }
 
         CompressedResult* r =
-            compress_block(data, dict, lens, is_last, &zs, &run->out_pool) !>;
+            compress_block(data, dict, lens, is_last, &zs, run->out_pool) !>;
 
         @stage (ts.write, i) {
             emit_result(run, r) !>;
         }
 
-        if (buf) run->in_pool.free(buf);
-        run->out_pool.free(r);
+        if (buf) cc_arena_pool_free(run->in_pool, buf);
+        cc_arena_pool_free(run->out_pool, r);
     } !>.wait()!>;
 
     write_container_trailer(run->out, &run->zip, run->crc, run->total_len,
@@ -703,21 +707,21 @@ static void !>(CCError) compress_stream(CompressRun* run, CCFile* in) {
     size_t pending_len = 0;
     for (;;) {
         check_interrupt() !>;
-        unsigned char* buf = (unsigned char*)run->in_pool.alloc();
+        unsigned char* buf = (unsigned char*)cc_arena_pool_alloc(run->in_pool);
         if (!buf)
             return cc_err(CC_ERR_OUT_OF_MEMORY, "block buf");
         size_t nread = 0;
         bool !>(CCIoError) rb = in->read_buf(buf, g.block, &nread);
         if (rb.is_err()) {
-            run->in_pool.free(buf);
+            cc_arena_pool_free(run->in_pool, buf);
             return cc_err(CC_ERR_IO, "read");
         }
         if (!rb.value() || nread == 0) {
-            run->in_pool.free(buf);
+            cc_arena_pool_free(run->in_pool, buf);
             if (pending) {
                 CCSlice data = cc_slice_from_parts(pending, pending_len, CC_SLICE_ID_UNTRACKED);
                 compress_one(run, data, true, &zs) !>;
-                run->in_pool.free(pending);
+                cc_arena_pool_free(run->in_pool, pending);
                 pending = NULL;
             }
             break;
@@ -725,14 +729,14 @@ static void !>(CCError) compress_stream(CompressRun* run, CCFile* in) {
         if (pending) {
             CCSlice data = cc_slice_from_parts(pending, pending_len, CC_SLICE_ID_UNTRACKED);
             compress_one(run, data, false, &zs) !>;
-            run->in_pool.free(pending);
+            cc_arena_pool_free(run->in_pool, pending);
         }
         pending = buf;
         pending_len = nread;
         if (nread < g.block) {
             CCSlice data = cc_slice_from_parts(pending, pending_len, CC_SLICE_ID_UNTRACKED);
             compress_one(run, data, true, &zs) !>;
-            run->in_pool.free(pending);
+            cc_arena_pool_free(run->in_pool, pending);
             pending = NULL;
             break;
         }

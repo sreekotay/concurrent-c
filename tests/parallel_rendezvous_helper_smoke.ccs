@@ -1,0 +1,37 @@
+/*
+ * Helpers that capture a channel are a rendezvous: the join does not
+ * deny. Inlining consume while produce parks is a silent hang.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static void produce(int[~ >] tx) {
+    tx.send(7) !>;
+    tx.close();
+}
+
+static void consume(int[~ <] rx, int* got) {
+    int v = 0;
+    if (!cc_io_avail(rx.recv(&v)))
+        return;
+    *got = v;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    int[~ >] tx;
+    int[~ <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+    int got = 0;
+    @parallel {
+        @serial { produce(tx); }
+        @serial { consume(rx, &got); }
+    } !>.wait()!>;
+    if (got != 7) {
+        fprintf(stderr, "FAIL helper got=%d\n", got);
+        return 2;
+    }
+    printf("parallel_rendezvous_helper_smoke: OK\n");
+    return 0;
+}

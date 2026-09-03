@@ -64,6 +64,7 @@ BENCHMARKS=(
     "spawn_nursery:spawn_nursery.go:Nursery-based spawn throughput"
     "spawn_sequential:spawn_sequential.go:Sequential spawn+join throughput"
     "channel_throughput:channel_throughput.go:Channel operations throughput"
+    "parallel_handoff:parallel_handoff.go:Seq / chunked goroutines / mutex+cond write gate"
 )
 
 # Collect all results

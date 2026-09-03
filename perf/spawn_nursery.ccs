@@ -42,6 +42,24 @@ int main(void) {
 
     println(@string(` nursery spawns: ${spawns_per_sec} spawns/sec (${elapsed} ms, total=${total_spawns})`, @scratch)) !>;
 
+    {
+        cc_atomic_int par_counter = 0;
+        cc_atomic_int* par_ptr = &par_counter;
+        int i;
+        start = time_now_ms();
+        @parallel for (i in 0..ITERATIONS) {
+            cc_atomic_fetch_add(par_ptr, 1);
+        } !>.wait()!>;
+        elapsed = time_now_ms() - start;
+        int par_total = cc_atomic_load(par_ptr);
+        double par_per_sec = par_total / (elapsed / 1000.0);
+        if (par_total != ITERATIONS) {
+            eprintln(@string(` par for: expected ${ITERATIONS} got ${par_total}`, @scratch)) !>;
+            return 1;
+        }
+        println(@string(` par for: ${par_per_sec} spawns/sec (${elapsed} ms, total=${par_total})`, @scratch)) !>;
+    }
+
     println("spawn_nursery: DONE") !>;
     return 0;
 }

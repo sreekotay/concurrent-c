@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # compare_ilp32.sh — build original pigz, pigz_idiomatic, and pigz_cc on Linux ILP32.
 #
-# Headline compare is pigz.c vs pigz_idiomatic. pigz_cc is built
-# when the backend can; a TinyCC backend may skip it.
+# Builds pigz.c, pigz_idiomatic, and pigz_cc. A failed compile of any
+# one is skipped so the others still bench.
 #
 # Run via host wrapper:
 #   ./scripts/pigz_i386.sh

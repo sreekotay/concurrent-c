@@ -335,9 +335,12 @@ arm (`CCParallel h = @parallel { work(); } !>;`) is the worker
 `!>.wait()!>`.
 `h.wait()` joins them and publishes their writes. Pointer names copy
 the pointer; other captured names are the frame object and must
-outlive `.wait()`. `h.cancelled` and `h.paused` are
+outlive `.wait()`. `h.close(tx)` arms EMPTY to close `tx` on wait and
+leave. `h.leave()` consumes the handle without joining; leftover runs
+at EMPTY on the LEFT path only (`h.leave(ctx, finish)`). Do not mix
+wait and leave. `h.cancelled` and `h.paused` are
 atomic. `h.cancel()` is `true` when this call stored live→cancelled.
-`h.live()` is planted and not joined. `cc_parallel_empty()` is idle.
+`h.live()` is planted and not joined or left. `cc_parallel_empty()` is idle.
 After `h.wait()`, `h.joined` and `!h.live()`. Pause / resume / cancel
 of idle or joined are `ok(false)`.
 `h.pause()` / `h.resume()` flip `h.paused` on a live dest; poll
@@ -352,12 +355,14 @@ When several arms share one deadline, name it (`as dl`) and use `dl`,
 or write `@with_deadline(dl)` to make that object current.
 `n.spawn` names a lifetime that may outlive the spawn point (`@destroy`
 waits that nursery; `n.leave()` consumes the handle without joining).
+A brace join that names or captures a channel is not denied; CPU trees
+still adapt. A denied join that then parks on a channel aborts.
 
 | Form | Meaning |
 |------|---------|
 | `@parallel { a = f(); b = g(); }` | Independent assignment arms. First on the caller; the rest may spawn. |
-| `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. `h.live()` until `h.wait()`. Arms may cancel/adopt/pause `h`. `h.wait()` inside an arm of `h` is an error. |
-| `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; writes exactly one outer name. |
+| `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. `h.live()` until `h.wait()` or `h.leave()`. Arms may cancel/adopt/pause `h`. `h.wait()` inside an arm of `h` is an error. |
+| `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; zero or one outer name. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. The body always runs. |
 | `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; a span of 0 or 1 is a plain `for`. `return` is `break` then `return` from the function after the join. |
 | `@parallel wait (ts) for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished. `CCParallel h = … !>;` is live during enter; the statement joins. A targeting `break` is `ok(false)` and must be bound. `return` drains, then leaves the function. `@stage` is a handshake, not a Result. |

@@ -4404,8 +4404,12 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     }
     if (waitpid(pid, &status, 0) < 0) return -1;
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        fprintf(stderr, "cc: shadow_lower failed (rc=%d)\n",
-                WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+        if (WIFSIGNALED(status))
+            fprintf(stderr, "cc: shadow_lower failed (signal %d)\n",
+                    WTERMSIG(status));
+        else
+            fprintf(stderr, "cc: shadow_lower failed (rc=%d)\n",
+                    WEXITSTATUS(status));
         return -1;
     }
     cc__prof_span_arg("shadow_lower", opt->in_path, t_span);

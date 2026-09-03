@@ -1,0 +1,116 @@
+/*
+ * Parallel handoff vs channel throughput.
+ *
+ * Same N as perf_channel_throughput.ccs. Each row is one store per item
+ * (not send+recv). The channel benches measure a mailbox; these measure
+ * refusing one: seq locals, disjoint @parallel for, wait-for + write
+ * @stage (ordered pack, payload stays on the ticket).
+ *
+ *   CC_HANDOFF_N   default 100000
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define DEFAULT_N 100000
+#define TS_CAP    8
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+static int env_int(const char* key, int fallback) {
+    const char* s = getenv(key);
+    if (!s || !s[0]) return fallback;
+    int v = atoi(s);
+    return v > 0 ? v : fallback;
+}
+
+static void report(const char* name, double elapsed_ms, int n) {
+    @errhandler(CCError e) cc_error_exit(e);
+    double ops = elapsed_ms > 0.0 ? (n / (elapsed_ms / 1000.0)) : 0.0;
+    long ops_i = (long)(ops + 0.5);
+    double ns = elapsed_ms > 0.0 ? (elapsed_ms * 1.0e6 / n) : 0.0;
+    println(@string(` ${name}: ${ops_i} ops/sec (${elapsed_ms} ms, ${ns} ns/item)`,
+                    @scratch)) !>;
+}
+
+static int verify_id(const int* a, int n) {
+    int i;
+    for (i = 0; i < n; i++) {
+        if (a[i] != i)
+            return 0;
+    }
+    return 1;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int n = env_int("CC_HANDOFF_N", DEFAULT_N);
+    int* buf = (int*)malloc((size_t)n * sizeof(int));
+    int i;
+    double t0;
+    double t1;
+
+    if (!buf) {
+        eprintln("perf_parallel_handoff: malloc failed") !>;
+        return 1;
+    }
+
+    println("perf_parallel_handoff: seq / par-for / wait-stage (1 store per item)") !>;
+
+    t0 = time_now_ms();
+    for (i = 0; i < n; i++)
+        buf[i] = i;
+    t1 = time_now_ms();
+    if (!verify_id(buf, n)) {
+        eprintln("perf_parallel_handoff: seq verify failed") !>;
+        free(buf);
+        return 1;
+    }
+    report("seq loop", t1 - t0, n);
+
+    memset(buf, 0xff, (size_t)n * sizeof(int));
+    t0 = time_now_ms();
+    @parallel for (i in 0..n) {
+        buf[i] = i;
+    } !>.wait()!>;
+    t1 = time_now_ms();
+    if (!verify_id(buf, n)) {
+        eprintln("perf_parallel_handoff: par for verify failed") !>;
+        free(buf);
+        return 1;
+    }
+    report("par for", t1 - t0, n);
+
+    {
+        CCArena arena = cc_arena_heap(kilobytes(256)) @destroy;
+        CCTurnstile ts@(TS_CAP, 1, arena) !> @destroy;
+        int pos = 0;
+        memset(buf, 0xff, (size_t)n * sizeof(int));
+        t0 = time_now_ms();
+        @parallel wait (ts) for (i in 0..n) {
+            int v = i;
+            @stage (ts, 0, i) {
+                buf[pos] = v;
+                pos = pos + 1;
+            }
+        } !>.wait()!>;
+        t1 = time_now_ms();
+        if (pos != n || !verify_id(buf, n)) {
+            eprintln("perf_parallel_handoff: wait stage verify failed") !>;
+            free(buf);
+            return 1;
+        }
+        report("wait stage", t1 - t0, n);
+    }
+
+    println("perf_parallel_handoff: DONE") !>;
+    free(buf);
+    return 0;
+}

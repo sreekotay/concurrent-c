@@ -7,6 +7,7 @@ import (
 )
 
 const ITERATIONS = 100000
+const UNBUF_ITERATIONS = 2000000 // 10k was startup-noise; match perf/go/unbuffered_spsc.go
 
 func timeNowMs() float64 {
 	return float64(time.Now().UnixNano()) / 1000000.0
@@ -70,7 +71,7 @@ func benchBuffered() {
 
 func benchUnbuffered() {
 	ch := make(chan int) // unbuffered
-	iterations := ITERATIONS / 10
+	iterations := UNBUF_ITERATIONS
 
 	start := timeNowMs()
 

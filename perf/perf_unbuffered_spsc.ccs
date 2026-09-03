@@ -1,0 +1,56 @@
+/*
+ * SPSC unbuffered rendezvous — the 1P1C row from channel_throughput,
+ * long enough to sample. Same handshake as a 2-arm join: one parks,
+ * the other copies + wakes.
+ *
+ *   CC_UNBUF_ITERS  default 2000000
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+#include <stdlib.h>
+#include <time.h>
+
+#define DEFAULT_ITERS 2000000
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int iters = DEFAULT_ITERS;
+    const char* s = getenv("CC_UNBUF_ITERS");
+    if (s && s[0]) {
+        int v = atoi(s);
+        if (v > 0) iters = v;
+    }
+
+    int[~ >] tx;
+    int[~ <] rx;
+    cc_channel_pair(&tx, &rx);
+
+    double start = time_now_ms();
+    {
+        CCNursery n = @create() !> @destroy;
+        (void)n.close(tx);
+        n.spawn(() => [tx, iters] {
+            int i;
+            for (i = 0; i < iters; i++)
+                tx.send(i);
+        }) !>;
+        n.spawn(() => [rx, iters] {
+            int v;
+            int i;
+            for (i = 0; i < iters; i++)
+                rx.recv(&v);
+        }) !>;
+    }
+    double elapsed = time_now_ms() - start;
+    double pairs_per_sec = iters / (elapsed / 1000.0);
+    double ns = elapsed * 1.0e6 / iters;
+    println(@string(` unbuffered spsc: ${pairs_per_sec} pairs/sec (${elapsed} ms, ${ns} ns/pair, n=${iters})`,
+                    @scratch)) !>;
+    return 0;
+}

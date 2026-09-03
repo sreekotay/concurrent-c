@@ -25,11 +25,14 @@ make pigz_cc   # CC version (requires CC compiler + zlib)
 ./bench_defaults.sh 50 5 pigz,pigz_idiomatic
 ./benchmark.sh 200 8 3           # older: size / pigz -p workers / runs
 
-# 5. Linux i386 (Docker) — pigz.c vs pigz_idiomatic vs pigz_cc
+# 5. Linux ILP32 (Docker) — pigz.c vs pigz_idiomatic vs pigz_cc
 ../../scripts/pigz_i386.sh
+../../scripts/pigz_arm32.sh
 # Optional: PIGZ_BENCH_MB=50 PIGZ_BENCH_WORKERS=8 PIGZ_BENCH_RUNS=3 ../../scripts/pigz_i386.sh
 # TinyCC as the ccc backend (original pigz.c still gcc):
 #   CCC_HOST_CC=tcc ../../scripts/pigz_i386.sh
+#   CCC_HOST_CC=tcc ../../scripts/pigz_arm32.sh
+# Numbers: docs/ilp32-docker.md
 ```
 
 ## Benchmark Data (auto-downloaded, not checked in)
@@ -48,8 +51,7 @@ Receipts (checked in). Reproduce with `./bench_defaults.sh` (optional `BENCH_OUT
 - [All versions, defaults only, 50 MB, 2026-08-19 (gate turnstile)](benchmarks/defaults_all_versions_2026_08_19_gate.txt) — `<bin> <file>`, no `-p` / `CC_WORKERS` / `PIGZ_*`; table marks `chain` vs `indep` dict per binary (then-`pigz_wait`, now `pigz_idiomatic`)
 - [All versions, defaults only, 50 MB, 2026-08-19 (pre-gate)](benchmarks/defaults_all_versions_2026_08_19.txt) — same method, before create-on-first-touch gates
 - [wait-for vs pigz `-p 16`, 200 MB, 2026-08-18](benchmarks/wait_dict_parity_2026_08_18.txt) — chained-dict parity (do not set `CC_WORKERS`; receipt still says `pigz_wait`)
-- [Linux i386 Docker, 20 MB, 2026-08-19](benchmarks/ilp32_i386_2026_08_19.txt) — `pigz.c` vs then-`pigz_wait` vs `pigz_cc` on QEMU (`./scripts/pigz_i386.sh`); summary in [docs/ilp32-docker.md](../../docs/ilp32-docker.md)
-- [Linux ARM32 Docker, 20 MB, 2026-08-19](benchmarks/ilp32_arm32_2026_08_19.txt) — same compare on `linux/arm/v7` (`./scripts/pigz_arm32.sh`)
+- [Linux i386 / ARM32 Docker](../../docs/ilp32-docker.md) — `pigz.c` / `pigz_idiomatic` / `pigz_cc`, gcc or TinyCC backend (`./scripts/pigz_i386.sh`, `./scripts/pigz_arm32.sh`)
 
 ## Architecture Comparison
 

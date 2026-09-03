@@ -1,0 +1,19 @@
+/*
+ * Denied join + channel park aborts. Leftover when the walk misses
+ * (file-scope / macro). Loud dead, not a mute hang.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    int[~ >] tx;
+    int[~ <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+    cc_parallel_deny_enter(NULL);
+    cc_parallel_note_denied();
+    tx.send(1) !>;
+    fprintf(stderr, "FAIL: park did not abort\n");
+    return 2;
+}

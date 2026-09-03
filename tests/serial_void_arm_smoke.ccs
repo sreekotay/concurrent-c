@@ -1,0 +1,21 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int hit = 0;
+    @parallel {
+        @serial {
+            hit = 1;
+        }
+        @serial {
+            printf("serial_void_arm_smoke: side\n");
+        }
+    } !>.wait()!>;
+    if (hit != 1) {
+        fprintf(stderr, "FAIL hit=%d\n", hit);
+        return 1;
+    }
+    printf("serial_void_arm_smoke: OK\n");
+    return 0;
+}

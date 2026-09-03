@@ -38,6 +38,14 @@ typedef struct cc_rt_tls {
     char task_v2_result[48];
     void* excl_ring;         /* cc__excl_evt_ring_t* */
     void* env_pools;         /* closure.c CCEnvPools* (heap, process-lived) */
+    uint64_t par_denials;
+    uint64_t par_spawn_calls;
+    uint32_t par_tick;
+    void* par_site_fn;
+    void* par_site;          /* cc_par_site* */
+    int par_deny_n;
+    void* par_deny_dest[16];
+    unsigned char par_deny_flag[16];
 } cc_rt_tls;
 
 static pthread_key_t cc_rt_tls_key;

@@ -1,13 +1,18 @@
 /*
- * Recipe: Channel Pipeline (Producer/Consumer)
+ * Recipe: EMPTY-close pipeline (nursery bag)
+ *
+ * Default stream (close on the produce arm, no bag) is
+ * recipe_parallel_stream.ccs. This file is dest-live / leave: the
+ * consumer is already in recv; close runs when the *inner* bag hits
+ * EMPTY, not on a line next to send.
  *
  *   inner { producer }              close(tx) — arms EMPTY to close tx
  *   outer { consumer, inner }       consumer sees close → drains → exits
  *
- * Nested nurseries encode the close protocol without any explicit
- * `tx.close()` in @destroy: inner.close(tx) registers the close; inner's
- * @destroy waits for the producer, then EMPTY closes tx; outer's @destroy
- * waits for the consumer after it drains.
+ * Nested nurseries encode the close protocol without `tx.close()` in
+ * the produce body: inner.close(tx) registers the close; inner's
+ * @destroy waits for the producer, then EMPTY closes tx; outer's
+ * @destroy waits for the consumer after it drains.
  *
  * The consumer captures &sum by reference and uses an atomic — only one
  * fiber writes so a plain int would suffice here, but atomic is the

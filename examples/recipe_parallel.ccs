@@ -6,8 +6,8 @@
  *
  *   @parallel { a = f(); b = g(); } !>.wait()!>;
  *       Independent arms. Assignment, a bare expression, or
- *       @serial { … } that writes one outer name. First arm on
- *       the caller; the rest may spawn. `.wait()` joins.
+ *       @serial { … } — ordinary C; zero or one outer name.
+ *       First arm on the caller; the rest may spawn. `.wait()` joins.
  *
  *   @parallel (d < k) { … }
  *       Same arms. Spawn if the predicate; otherwise run in
@@ -29,6 +29,7 @@
  * an arm of `h` is an error.
  *
  * Not this file:
+ *   on-page stream (produce close / consume recv) → recipe_parallel_stream.ccs
  *   send_task + ordered recv → recipe_ordered_parallel.ccs
  *   two named stages (read then write) → recipe_turnstile.ccs
  *

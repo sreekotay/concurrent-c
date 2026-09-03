@@ -3871,19 +3871,58 @@ static int shadow_par_arm_chan_ops(AstNode* s) {
     return op;
 }
 
-/* Complementary send/recv across two arms of one brace join: never deny.
- * Inlining the consumer while the kick parks on send is a silent hang. */
-static int shadow_par_rendezvous_never_deny(AstNode* st) {
+static int shadow_par_ty_is_chan(const char* ty) {
+    if (!ty || !ty[0]) return 0;
+    if (strstr(ty, "CCChanTx") || strstr(ty, "CCChanRx"))
+        return 1;
+    if (strstr(ty, "CCChan*") || strncmp(ty, "CCChan ", 7) == 0)
+        return 1;
+    if (strstr(ty, "[~"))
+        return 1;
+    return 0;
+}
+
+/* Channel in this join: any arm op, or a captured channel (helpers).
+ * Deny of a rendezvous sibling is a silent hang — spawn instead.
+ * CPU trees have no channel and still adapt. */
+static int shadow_par_arm_has_chan_cap(AstNode* arm) {
+    char names[SHADOW_PAR_CAP_MAX][64];
+    char tys[SHADOW_PAR_CAP_MAX][160];
+    int n = 0;
+    int i;
+    if (!arm) return 0;
+    if (arm->kind == AST_SERIAL) {
+        if (!shadow_par_scan_node(arm, NULL, names, tys, &n, SHADOW_PAR_CAP_MAX))
+            return 1;
+    } else if (!shadow_par_scan_text(arm->b, NULL, names, tys, &n,
+                                     SHADOW_PAR_CAP_MAX))
+        return 1;
+    for (i = 0; i < n; i++) {
+        if (shadow_par_ty_is_chan(tys[i]))
+            return 1;
+    }
+    return 0;
+}
+
+static int shadow_par_join_never_deny(AstNode* st, int n,
+                                      int ncaps[],
+                                      char cap_tys[][SHADOW_PAR_CAP_MAX][160]) {
     int a;
-    int send_arm = -1;
-    int recv_arm = -1;
+    int i;
     if (!st) return 0;
     for (a = 0; a < st->nbody; a++) {
-        int op = shadow_par_arm_chan_ops(st->body[a]);
-        if (op & CC__PAR_CH_SEND) send_arm = a;
-        if (op & CC__PAR_CH_RECV) recv_arm = a;
+        if (shadow_par_arm_chan_ops(st->body[a]))
+            return 1;
+        if (shadow_par_arm_has_chan_cap(st->body[a]))
+            return 1;
     }
-    return send_arm >= 0 && recv_arm >= 0 && send_arm != recv_arm;
+    for (a = 0; a < n; a++) {
+        for (i = 0; i < ncaps[a]; i++) {
+            if (shadow_par_ty_is_chan(cap_tys[a][i]))
+                return 1;
+        }
+    }
+    return 0;
 }
 
 static int shadow_emit_par_spawn_body(
@@ -3895,7 +3934,12 @@ static int shadow_emit_par_spawn_body(
     const char* hdest) {
     int a;
     int spawn0 = parallel_dest_expr_worker(st) ? 0 : 1;
-    int never_deny = shadow_par_rendezvous_never_deny(st);
+    int never_deny = shadow_par_join_never_deny(st, n, ncaps, cap_tys);
+    if (hdest && hdest[0]) {
+        if (!cemit_fmt(dest, "%scc_parallel_deny_enter(&(%s));\n", bi, hdest))
+            return 0;
+    } else if (!cemit_fmt(dest, "%scc_parallel_deny_enter(NULL);\n", bi))
+        return 0;
     for (a = spawn0; a < n; a++) {
         int id = base + a - spawn0;
         char dot[48];
@@ -3976,13 +4020,14 @@ static int shadow_emit_par_spawn_body(
                     return 0;
             } else if (!cemit_fmt(dest,
                     "%sif (cc_parallel_deny_fast(&__cc_par_site_%d, "
-                    "__cc_par_thunk_%d))\n"
+                    "__cc_par_thunk_%d)) {\n"
+                    "%s    cc_parallel_note_denied();\n"
                     "%s    __cc_par_t_%d = cc__task_invalid();\n"
-                    "%selse\n"
+                    "%s} else\n"
                     "%s    __cc_par_t_%d = cc_parallel_spawn(__cc_par_thunk_%d, "
                     "__cc_par_e_%d);\n",
-                    bi, id, id, bi, id, bi, bi, id, id, id))
-                return 0;
+                    bi, id, id, bi, bi, id, bi, bi, id, id, id))
+                    return 0;
             if (!shadow_par_handle_take_one(dest, bi, hdest, id))
                 return 0;
         } else if (inplace) {
@@ -3995,8 +4040,9 @@ static int shadow_emit_par_spawn_body(
                     "%sif (cc_parallel_deny_fast(&__cc_par_site_%d, "
                     "__cc_par_thunk_%d)) {\n"
                     "%s    __cc_par_denied_%d = 1;\n"
+                    "%s    cc_parallel_note_denied();\n"
                     "%s} else {\n",
-                    bi, id, id, bi, id, bi))
+                    bi, id, id, bi, id, bi, bi))
                 return 0;
             if (!shadow_par_emit_cap_pack(dest, bi, dot, cap_names[a],
                                           ncaps[a], via_outs))
@@ -4047,12 +4093,13 @@ static int shadow_emit_par_spawn_body(
                     return 0;
             } else if (!cemit_fmt(dest,
                     "%sif (cc_parallel_deny_fast(&__cc_par_site_%d, "
-                    "__cc_par_thunk_%d))\n"
+                    "__cc_par_thunk_%d)) {\n"
+                    "%s    cc_parallel_note_denied();\n"
                     "%s    __cc_par_t_%d = cc__task_invalid();\n"
-                    "%selse\n"
+                    "%s} else\n"
                     "%s    __cc_par_t_%d = cc_parallel_spawn(__cc_par_thunk_%d, "
                     "&__cc_par_e_%d);\n",
-                    bi, id, id, bi, id, bi, bi, id, id, id))
+                    bi, id, id, bi, bi, id, bi, bi, id, id, id))
                 return 0;
         }
         }
@@ -4140,8 +4187,9 @@ static int shadow_emit_par_spawn_body(
         if (!cemit_fmt(dest,
                        "%s    %s.nt = 0;\n"
                        "%s    %s.joined = 1;\n"
+                       "%s    cc_parallel_deny_leave_dest(&(%s));\n"
                        "%s}\n",
-                       bi, hdest, bi, hdest, bi))
+                       bi, hdest, bi, hdest, bi, hdest, bi))
             return 0;
         return 1;
     }
@@ -4179,6 +4227,8 @@ static int shadow_emit_par_spawn_body(
                 bi, id, bi, id, id, bi, bi, id))
             return 0;
     }
+    if (!cemit_fmt(dest, "%scc_parallel_deny_leave();\n", bi))
+        return 0;
     return 1;
 }
 

@@ -402,10 +402,10 @@ typedef struct {
     _Atomic int      deny_depth; /* adapt_backlog, written before CHURN */
     _Atomic(void*)   fn;
     _Atomic uint32_t cheap_streak; /* consecutive cheap while REAL */
-    /* Set when any wrapped arm suspends. Only the virgin flood bound
-     * reads it: a site that blocks must keep spawning until classified,
-     * because inlining a blocking arm can deadlock on a sibling. Join
-     * parks latch this too; they do not affect the churn verdict. */
+    /* Set when any wrapped arm suspends. A site that parks is REAL:
+     * deny of a complementary sibling is a silent hang. The cheap
+     * path must not commit CHURN after this bit, and the virgin
+     * flood bound also reads it. */
     _Atomic uint32_t saw_suspend;
     _Atomic uint32_t attempts; /* wrapped VIRGIN spawns */
     _Atomic uint64_t min_ns;   /* CC_PAR_ADAPT_DEBUG */
@@ -477,10 +477,17 @@ static int cc_parallel_adapt_backlog(void) {
  * moved (the arm absorbed children — not a leaf). Valid because an
  * accepted sample never suspended, so it never migrated. Lowering
  * notes inlined arms via CC_PAR_NOTE_INLINE_ARM. */
+#if defined(__TINYC__)
+#define __cc_par_denials (cc_rt_tls_get()->par_denials)
+#define tls_par_denials __cc_par_denials
+#define tls_par_spawn_calls (cc_rt_tls_get()->par_spawn_calls)
+#define tls_par_tick (cc_rt_tls_get()->par_tick)
+#else
 __thread uint64_t __cc_par_denials = 0;
 #define tls_par_denials __cc_par_denials
 static __thread uint64_t tls_par_spawn_calls = 0;
 static __thread uint32_t tls_par_tick = 0; /* REAL resample */
+#endif
 
 /* CC_PAR_ADAPT_DEBUG=1: dump the site table at exit. */
 static void cc_par_adapt_dump(void) {
@@ -511,8 +518,13 @@ static void cc_par_adapt_dump(void) {
 /* One-entry TLS memo: recursive constructs call with the same thunk
  * millions of times in a row, and the denial fast path runs per node —
  * the hash probe was ~half the denied-spawn cost. */
+#if defined(__TINYC__)
+#define tls_par_site_fn (cc_rt_tls_get()->par_site_fn)
+#define tls_par_site (*(cc_par_site**)&(cc_rt_tls_get()->par_site))
+#else
 static __thread void* tls_par_site_fn = NULL;
 static __thread cc_par_site* tls_par_site = NULL;
+#endif
 
 static cc_par_site* cc_par_site_get_slow(void* (*fn)(void*)) {
     uintptr_t h = (uintptr_t)fn;
@@ -584,8 +596,15 @@ static void* cc_par_timed_run(void* p) {
     /* Leaf only: suspend, nested spawn, or absorbed denial means the
      * duration is a subtree, not a body. Sites that never sample clean
      * stay virgin and keep spawning. */
-    if (sched_v2_current_fiber_suspends() != s0)
+    if (sched_v2_current_fiber_suspends() != s0) {
         atomic_store_explicit(&w.site->saw_suspend, 1, memory_order_relaxed);
+        /* A site that parks (send/recv, join) is REAL: denying the
+         * sibling of a parked arm is the silent hang. Pin before the
+         * cheap-sample path can commit CHURN. */
+        atomic_store_explicit(&w.site->cheap_streak, 0, memory_order_relaxed);
+        atomic_store_explicit(&w.site->state, CC_PAR_SITE_REAL,
+                              memory_order_release);
+    }
     if (sched_v2_current_fiber_suspends() == s0 && tls_par_denials == d0 &&
         tls_par_spawn_calls == c0) {
         cc_par_site* s = w.site;
@@ -605,7 +624,9 @@ static void* cc_par_timed_run(void* p) {
             if (st != CC_PAR_SITE_REAL)
                 atomic_store_explicit(&s->state, CC_PAR_SITE_REAL,
                                       memory_order_relaxed);
-        } else if (st != CC_PAR_SITE_CHURN) {
+        } else if (st != CC_PAR_SITE_CHURN &&
+                   !atomic_load_explicit(&s->saw_suspend,
+                                         memory_order_relaxed)) {
             uint32_t k = 1;
             if (st == CC_PAR_SITE_REAL)
                 k = atomic_fetch_add_explicit(&s->cheap_streak, 1,
