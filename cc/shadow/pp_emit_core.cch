@@ -5135,12 +5135,18 @@ static const char* shadow_meta_cstr(const char* s) {
     return (const char*)h.ptr;
 }
 
-/* Emit-time AstNode text slot write: meta_ar owned; NULL = empty.
+/* After memset of a stack/synthetic AstNode — text slots must not be NULL. */
+static void shadow_ast_slots_empty(AstNode* n) {
+    if (!n) return;
+    n->a = n->b = n->c = n->d = n->e = n->f = n->g = n->h = g_ast_empty;
+}
+
+/* Emit-time AstNode text slot write: meta_ar owned; empty → g_ast_empty.
  * Never mutate *slot bytes in place — rebuild then shadow_slot_set. */
 static void shadow_slot_set(char** slot, const char* s) {
     if (!slot) return;
     if (!s || !s[0]) {
-        *slot = NULL;
+        *slot = g_ast_empty;
         return;
     }
     *slot = (char*)shadow_meta_cstr(s);

@@ -144,7 +144,7 @@ static AstNode* parse_err_syntax_stmt(Parser* p) {
         }
         expr_b = err_at;
     } else {
-        n->a = NULL;
+        n->a = g_ast_empty;
         expr_a = start;
         expr_b = err_at;
         if ((((n->b = ast_arena_span(p, expr_a, expr_b))), p->err)) {

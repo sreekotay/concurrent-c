@@ -1234,7 +1234,7 @@ static int shadow_emit_one_defer(AstNode* d, CEmit* out, ShadowCtx* ctx,
     int k;
     int ok = 1;
     if (!d) return 1;
-    mode = d->c;
+    mode = ast_slot(d->c);
     if (always_only && mode[0]) return 1;
     if (!indent) indent = (ctx && ctx->body_indent) ? ctx->body_indent : "    ";
     outer = indent;

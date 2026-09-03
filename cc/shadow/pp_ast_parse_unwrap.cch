@@ -582,7 +582,7 @@ static AstNode* parse_result_local(Parser* p) {
     n->b = ast_arena_slice(p, err.spell);
     n->c = ast_arena_cstr(p, okty);
     if (dims[0]) n->e = ast_arena_cstr(p, dims);
-    else n->e = NULL;
+    else n->e = g_ast_empty;
     if (p_accept(p, TK_PUNCT, ";")) return n; /* bare decl */
     if (!p_accept(p, TK_PUNCT, "=")) {
         parser_fail(p, p_peek(p), "expected '=' or ';' after result local");

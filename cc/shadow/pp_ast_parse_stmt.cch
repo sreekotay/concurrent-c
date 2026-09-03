@@ -1258,7 +1258,7 @@ static AstNode* parse_return_int(Parser* p) {
                                             "callarg", &cl);
         if (p->err) return NULL;
         if (had_cl) {
-            n->a = NULL;
+            n->a = g_ast_empty;
             if (cl) {
                 spawn_infer_value_caps(p, cl);
                 if (!ast_dbody_push(p, n, cl)) return NULL;
@@ -1266,7 +1266,7 @@ static AstNode* parse_return_int(Parser* p) {
         } else {
             ue = parse_ufcs_expr_range(p, e0, e1);
             if (e0 >= e1)
-                n->a = NULL;
+                n->a = g_ast_empty;
             else if (!({ char __spell_tmp[4096]; int __spell_ok = ast_spell_token_range(p, e0, e1, __spell_tmp, sizeof(__spell_tmp)); if (__spell_ok) n->a = ast_arena_cstr(p, __spell_tmp); __spell_ok; }) &&
                      (((n->a = ast_arena_span(p, e0, e1))), p->err)) {
                 parser_fail(p, p_peek(p), "return expr too long");
@@ -1376,7 +1376,7 @@ static AstNode* parse_if_stmt(Parser* p) {
     int c1 = p->i - 1;
     AstNode* n = ast_new(p, AST_IF);
     if (!n) return NULL;
-    if (c0 >= c1) n->a = NULL;
+    if (c0 >= c1) n->a = g_ast_empty;
     else {
         AstNode* ue = parse_ufcs_expr_range(p, c0, c1);
         if (!({ char __spell_tmp[4096]; int __spell_ok = ast_spell_token_range(p, c0, c1, __spell_tmp, sizeof(__spell_tmp)); if (__spell_ok) n->a = ast_arena_cstr(p, __spell_tmp); __spell_ok; }) &&
@@ -2141,7 +2141,7 @@ static AstNode* parse_for_loop(Parser* p, int cc_for) {
     int h1 = p->i - 1;
     AstNode* n = ast_new(p, AST_FOR);
     if (!n) return NULL;
-    if (h0 >= h1) n->a = NULL;
+    if (h0 >= h1) n->a = g_ast_empty;
     else if ((((n->a = ast_arena_span(p, h0, h1))), p->err)) {
         parser_fail(p, p_peek(p), "for header too long");
         return NULL;
@@ -2631,7 +2631,7 @@ static AstNode* parse_typed_init(Parser* p) {
     else if (dims_txt[0])
         n->c = ast_arena_cstr(p, dims_txt); /* VAR_DECL dims slot */
     else
-        n->c = NULL;
+        n->c = g_ast_empty;
     if (name_i > decl_i) {
         /* Preserve order: `* const *` ≠ `** const`. */
         if (!({ char __spell_tmp[4096]; int __spell_ok = ast_spell_token_range(p, decl_i, name_i, __spell_tmp, sizeof(__spell_tmp)); if (__spell_ok) n->d = ast_arena_cstr(p, __spell_tmp); __spell_ok; }) &&
@@ -2659,7 +2659,7 @@ static AstNode* parse_typed_init(Parser* p) {
         char atmp[4096];
         snprintf(atmp, sizeof(atmp), "%s%s", n->a ? n->a : "", n->d);
         n->a = ast_arena_cstr(p, atmp);
-        n->d = NULL;
+        n->d = g_ast_empty;
     }
     if (has_init) {
         if (dims_txt[0]) n->e = ast_arena_cstr(p, dims_txt);
@@ -3560,7 +3560,7 @@ static AstNode* parse_while(Parser* p) {
     int c1 = p->i - 1;
     AstNode* n = ast_new(p, AST_WHILE);
     if (!n) return NULL;
-    if (c0 >= c1) n->a = NULL;
+    if (c0 >= c1) n->a = g_ast_empty;
     else {
         AstNode* ue = parse_ufcs_expr_range(p, c0, c1);
         if (!({ char __spell_tmp[4096]; int __spell_ok = ast_spell_token_range(p, c0, c1, __spell_tmp, sizeof(__spell_tmp)); if (__spell_ok) n->a = ast_arena_cstr(p, __spell_tmp); __spell_ok; }) &&
@@ -4393,7 +4393,7 @@ static AstNode* parse_call_args(Parser* p) {
     if (!n) return NULL;
     n->a = ast_arena_slice(p, callee.spell);
     if (a0 >= a1) {
-        n->b = NULL;
+        n->b = g_ast_empty;
     } else {
         AstNode* cl = NULL;
         char args[256];
@@ -4604,7 +4604,7 @@ static AstNode* parse_auto_grower(Parser* p) {
         return NULL;
     }
     n->c = ast_arena_cstr(p, init);
-    n->d = NULL;
+    n->d = g_ast_empty;
     n->e = ast_arena_cstr(p, "_Dbare");
     return n;
 }
@@ -4865,7 +4865,7 @@ static AstNode* parse_stmt_inner(Parser* p) {
         p_next(p);
         n = ast_new(p, AST_EXPR_STMT);
         if (!n) return NULL;
-        n->a = NULL;
+        n->a = g_ast_empty;
         return n;
     }
     if (p->soft_stmt) return NULL;

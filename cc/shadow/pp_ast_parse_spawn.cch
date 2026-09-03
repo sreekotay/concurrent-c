@@ -377,13 +377,13 @@ static int parse_call_arg_closure(Parser* p, int c0, int end, char* dst,
         if (formals[0])
             n->a = ast_arena_cstr(p, formals);
         else
-            n->a = NULL;
+            n->a = g_ast_empty;
         /* Call prefix for send_into formal inference (e.g. tx.try_send_into). */
         if (!bare && dst[0])
             n->c = ast_arena_cstr(p, dst);
         else
-            n->c = NULL;
-        n->e = NULL;
+            n->c = g_ast_empty;
+        n->e = g_ast_empty;
         if (is_unsafe) n->f = ast_arena_cstr(p, "unsafe");
         /* Optional explicit captures: `=> [rx, @safe &db, &tx] { … }` */
         if (tok_eq(p_peek(p), TK_PUNCT, "[")) {

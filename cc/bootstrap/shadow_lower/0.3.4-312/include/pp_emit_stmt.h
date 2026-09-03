@@ -446,7 +446,8 @@ static int shadow_walk_expr_inc(AstNode* st, CEmit* out, ShadowCtx* ctx,
     b = shadow_bind_lookup(name);
     if (!b || !(b->flags & SHADOW_BIND_WALK)) return 0;
     memset(&fake, 0, sizeof(fake));
-    snprintf(fake.a, sizeof(fake.a), "%s", name);
+    shadow_ast_slots_empty(&fake);
+    shadow_slot_set(&fake.a, name);
     if (dec) {
         if (!(b->flags & SHADOW_BIND_WALK_MUT)) {
             {
@@ -5293,16 +5294,17 @@ static int shadow_pw_emit_cache_destroys(CEmit* out, ShadowCtx* ctx,
 }
 
 /* One-raw-statement synthetic `@errhandler(CCError __cc_pw_eb) { … }`. */
-static void shadow_pw_make_handler(AstNode* h, AstNode* raw, const char* text) {
+static int shadow_pw_make_handler(AstNode* h, AstNode* raw, const char* text) {
     memset(h, 0, sizeof(*h));
     memset(raw, 0, sizeof(*raw));
+    shadow_ast_slots_empty(h);
+    shadow_ast_slots_empty(raw);
     h->kind = AST_ERRHANDLER;
     do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "CCError"); shadow_slot_set(&h->a, __ast_tmp); } while (0);
     do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "__cc_pw_eb"); shadow_slot_set(&h->b, __ast_tmp); } while (0);
     raw->kind = AST_RAW_LINE;
     shadow_slot_set(&raw->a, text);
-    h->body[0] = raw;
-    h->nbody = 1;
+    return shadow_body_push(h, raw);
 }
 
 /* Synthetic `gate.wait(args) !>` / `gate.pass(args) !>` / `gate.fail(args) !>`
@@ -5314,6 +5316,7 @@ static void shadow_stage_call(AstNode* n, const AstNode* st,
     const char* q = st->a;
     int bare = 1;
     memset(n, 0, sizeof(*n));
+    shadow_ast_slots_empty(n);
     n->kind = AST_UFCS_STMT;
     shadow_slot_set(&n->a, st->a);
     shadow_slot_set(&n->b, meth);
@@ -5474,7 +5477,7 @@ static int shadow_emit_stage_region(AstNode** body, int nbody, CEmit* dest,
              "__cc_stg_failed_%d = 1; "
              "goto __cc_stg_done_%d;",
              id, id, id);
-    shadow_pw_make_handler(&h_body, &h_body_raw, htext);
+    if (!shadow_pw_make_handler(&h_body, &h_body_raw, htext)) return 0;
     ctx->eh = &h_body;
     ctx->ehs[0] = &h_body;
     ctx->nehs = 1;
@@ -5489,7 +5492,7 @@ static int shadow_emit_stage_region(AstNode** body, int nbody, CEmit* dest,
              "__cc_stg_err_%d = __cc_pw_eb; "
              "__cc_stg_failed_%d = 1; }",
              id, id, id);
-    shadow_pw_make_handler(&h_dis, &h_dis_raw, htext);
+    if (!shadow_pw_make_handler(&h_dis, &h_dis_raw, htext)) return 0;
     ctx->eh = &h_dis;
     ctx->ehs[0] = &h_dis;
     for (k = 0; k < nstages; k++) {
@@ -5845,7 +5848,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
              "cc_nursery_cancel_host(__cc_pw_sh->nur); "
              "goto __cc_pw_done_%d;",
              st->a, id);
-    shadow_pw_make_handler(&h_body, &h_body_raw, htext);
+    if (!shadow_pw_make_handler(&h_body, &h_body_raw, htext)) return 0;
     tctx = *ctx;
     tctx.eh = &h_body;
     tctx.ehs[0] = &h_body;
@@ -5887,7 +5890,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
              "__cc_pw_sl->i = %s; "
              "cc_nursery_cancel_host(__cc_pw_sh->nur); }",
              st->a);
-    shadow_pw_make_handler(&h_dis, &h_dis_raw, htext);
+    if (!shadow_pw_make_handler(&h_dis, &h_dis_raw, htext)) return 0;
     tctx.eh = &h_dis;
     tctx.ehs[0] = &h_dis;
     for (k = 0; k < nstages; k++) {
@@ -5972,7 +5975,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
              "__cc_pw_sl->i = %s; "
              "cc_nursery_cancel_host(__cc_pw_sh->nur); }",
              st->a);
-    shadow_pw_make_handler(&h_leave, &h_leave_raw, htext);
+    if (!shadow_pw_make_handler(&h_leave, &h_leave_raw, htext)) return 0;
     tctx.eh = &h_leave;
     tctx.ehs[0] = &h_leave;
     if (!shadow_emit_try_call(h, &tctx, "    ",
@@ -6199,7 +6202,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
              "__cc_pw_ferr_%d = __cc_pw_eb; __cc_pw_fail_%d = 1; "
              "__cc_pw_best_%d = %s; break;",
              id, id, id, st->a);
-    shadow_pw_make_handler(&h_enter, &h_enter_raw, htext);
+    if (!shadow_pw_make_handler(&h_enter, &h_enter_raw, htext)) return 0;
     tctx.eh = &h_enter;
     tctx.ehs[0] = &h_enter;
     snprintf(call, sizeof(call), "cc_turnstile_enter(__cc_pw_ts_%d, %s)", id,
@@ -6243,7 +6246,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
              "__cc_pw_ferr_%d = __cc_pw_eb; __cc_pw_fail_%d = 1; "
              "__cc_pw_best_%d = %s; }",
              id, id, id, id, st->a);
-    shadow_pw_make_handler(&h_leave, &h_leave_raw, htext);
+    if (!shadow_pw_make_handler(&h_leave, &h_leave_raw, htext)) return 0;
     tctx.eh = &h_leave;
     tctx.ehs[0] = &h_leave;
     snprintf(call, sizeof(call), "cc_turnstile_leave(__cc_pw_ts_%d)", id);

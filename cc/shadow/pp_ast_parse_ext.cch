@@ -2140,7 +2140,7 @@ static AstNode* parse_at_stmt(Parser* p) {
             n = ast_new(p, AST_AT_STMT);
             if (!n) return NULL;
             n->a = ast_arena_cstr(p, "typeview");
-            if (unnamed) n->b = NULL;
+            if (unnamed) n->b = g_ast_empty;
             else n->b = ast_arena_slice(p, mode.spell);
             n->c = ast_arena_cstr(p, body);
             n->d = ast_arena_cstr(p, subject);
@@ -2684,7 +2684,7 @@ static AstNode* parse_typedef_enum(Parser* p) {
     p_next(p); /* enum */
     AstNode* n = ast_new(p, AST_TYPEDEF_ENUM);
     if (!n) return NULL;
-    n->a = NULL;
+    n->a = g_ast_empty;
     if (p_peek(p).kind == TK_IDENT) {
         Token tag = p_next(p);
         n->a = ast_arena_slice(p, tag.spell);
@@ -2987,7 +2987,7 @@ static AstNode* parse_switch_loop(Parser* p, int cc_switch) {
         int ok = 1;
         if (!n) return NULL;
         n->a = ast_arena_cstr(p, expr);
-        n->d = NULL;
+        n->d = g_ast_empty;
         if (cc_switch) n->f = ast_arena_cstr(p, "cc_switch");
         /* body is a per-node growable table — not kids_storage (that aliases
          * the enclosing fn list and once emitted a bare `case 0:`). Soft
@@ -3161,7 +3161,7 @@ switch_opaque_body:
                     n->span_off = 0;
                     n->span_len = 0;
                 } else {
-                    n->d = NULL;
+                    n->d = g_ast_empty;
                     n->span_off = start;
                     n->span_len = nlen;
                 }
@@ -3196,7 +3196,7 @@ static AstNode* parse_typedef_struct(Parser* p) {
     p_next(p); /* struct */
     AstNode* st = ast_new(p, AST_TYPEDEF_STRUCT);
     if (!st) return NULL;
-    st->a = NULL;
+    st->a = g_ast_empty;
     if (p_peek(p).kind == TK_IDENT) {
         Token tag = p_next(p);
         st->a = ast_arena_slice(p, tag.spell);

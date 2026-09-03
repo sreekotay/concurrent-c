@@ -443,6 +443,7 @@ static int shadow_walk_expr_inc(AstNode* st, CEmit* out, ShadowCtx* ctx,
     b = shadow_bind_lookup(name);
     if (!b || !(b->flags & SHADOW_BIND_WALK)) return 0;
     memset(&fake, 0, sizeof(fake));
+    shadow_ast_slots_empty(&fake);
     shadow_slot_set(&fake.a, name);
     if (dec) {
         if (!(b->flags & SHADOW_BIND_WALK_MUT)) {
@@ -5293,6 +5294,8 @@ static int shadow_pw_emit_cache_destroys(CEmit* out, ShadowCtx* ctx,
 static int shadow_pw_make_handler(AstNode* h, AstNode* raw, const char* text) {
     memset(h, 0, sizeof(*h));
     memset(raw, 0, sizeof(*raw));
+    shadow_ast_slots_empty(h);
+    shadow_ast_slots_empty(raw);
     h->kind = AST_ERRHANDLER;
     do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "CCError"); shadow_slot_set(&h->a, __ast_tmp); } while (0);
     do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "__cc_pw_eb"); shadow_slot_set(&h->b, __ast_tmp); } while (0);
@@ -5310,6 +5313,7 @@ static void shadow_stage_call(AstNode* n, const AstNode* st,
     const char* q = st->a;
     int bare = 1;
     memset(n, 0, sizeof(*n));
+    shadow_ast_slots_empty(n);
     n->kind = AST_UFCS_STMT;
     shadow_slot_set(&n->a, st->a);
     shadow_slot_set(&n->b, meth);

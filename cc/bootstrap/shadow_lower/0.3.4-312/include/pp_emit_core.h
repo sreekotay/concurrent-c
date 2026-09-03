@@ -5136,15 +5136,49 @@ static const char* shadow_meta_cstr(const char* s) {
     return (const char*)h.ptr;
 }
 
-/* Emit-time AstNode text slot write: meta_ar owned; NULL = empty.
+/* After memset of a stack/synthetic AstNode — text slots must not be NULL. */
+static void shadow_ast_slots_empty(AstNode* n) {
+    if (!n) return;
+    n->a = n->b = n->c = n->d = n->e = n->f = n->g = n->h = g_ast_empty;
+}
+
+/* Emit-time AstNode text slot write: meta_ar owned; empty → g_ast_empty.
  * Never mutate *slot bytes in place — rebuild then shadow_slot_set. */
 static void shadow_slot_set(char** slot, const char* s) {
     if (!slot) return;
     if (!s || !s[0]) {
-        *slot = NULL;
+        *slot = g_ast_empty;
         return;
     }
     *slot = (char*)shadow_meta_cstr(s);
+}
+
+/* Emit-time body push on meta_ar (synthetic nodes). Same grow-by-doubling
+ * as parse-time ast_body_push; old bump rows abandoned. */
+enum { SHADOW_EMIT_BODY_SANITY = 1 << 20 };
+static int shadow_body_push(AstNode* parent, AstNode* child) {
+    int ncap;
+    AstNode** nv;
+    if (!parent || !child) return 0;
+    shadow_meta_ar_ensure();
+    if (!g_shadow_meta_ar_live) return 0;
+    if (parent->nbody >= SHADOW_EMIT_BODY_SANITY) return 0;
+    if (parent->nbody >= parent->body_cap) {
+        ncap = parent->body_cap > 0 ? (parent->body_cap * 2) : 8;
+        if (ncap > SHADOW_EMIT_BODY_SANITY) ncap = SHADOW_EMIT_BODY_SANITY;
+        if (ncap <= parent->body_cap) return 0;
+        nv = (AstNode**)cc_arena_alloc(g_shadow_meta_ar,
+                                       sizeof(AstNode*) * (size_t)ncap,
+                                       _Alignof(AstNode*));
+        if (!nv) return 0;
+        if (parent->body && parent->nbody > 0)
+            memcpy(nv, parent->body,
+                   sizeof(AstNode*) * (size_t)parent->nbody);
+        parent->body = nv;
+        parent->body_cap = ncap;
+    }
+    parent->body[parent->nbody++] = child;
+    return 1;
 }
 
 static int shadow_fields_ensure(void) {

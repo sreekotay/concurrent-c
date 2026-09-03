@@ -51,11 +51,7 @@ static int parse_err_suffix(Parser* p, AstNode* n) {
                !p->err) {
             AstNode* st = parse_stmt(p);
             if (!st) return 0;
-            if (n->nbody >= SHADOW_BODY_CAP) {
-                parser_fail_body_cap(p, p_peek(p), "@err { ... } body");
-                return 0;
-            }
-            n->body[n->nbody++] = st;
+            if (!ast_body_push(p, n, st)) return 0;
         }
         if (!p_accept(p, TK_PUNCT, "}")) {
             parser_fail(p, p_peek(p), "expected '}' after @err { ... }");
@@ -64,11 +60,7 @@ static int parse_err_suffix(Parser* p, AstNode* n) {
     } else if (!tok_eq(p_peek(p), TK_PUNCT, ";")) {
         AstNode* st = parse_stmt(p);
         if (!st) return 0;
-        if (n->nbody >= SHADOW_BODY_CAP) {
-            parser_fail_body_cap(p, p_peek(p), "@err stmt body");
-            return 0;
-        }
-        n->body[n->nbody++] = st;
+        if (!ast_body_push(p, n, st)) return 0;
     }
     if (tok_eq(p_peek(p), TK_PUNCT, ";"))
         p_next(p);
@@ -152,7 +144,7 @@ static AstNode* parse_err_syntax_stmt(Parser* p) {
         }
         expr_b = err_at;
     } else {
-        n->a = NULL;
+        n->a = g_ast_empty;
         expr_a = start;
         expr_b = err_at;
         if ((((n->b = ast_arena_span(p, expr_a, expr_b))), p->err)) {
