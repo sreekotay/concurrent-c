@@ -1498,7 +1498,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 return 0;
             if (items[i]->kind == AST_RESULT_FN && items[i]->a[0]) {
                 shadow_result_name(ok_host, items[i]->b, rname, sizeof(rname));
-                shadow_rfn_register(items[i]->a, rname, items[i]->b);
+                shadow_rfn_register(items[i]->a, rname, items[i]->b,
+                                    items[i]->forced_seq);
             }
         }
         if (items[i]->kind == AST_TYPEDEF_INT && items[i]->c[0] && items[i]->d[0]) {
@@ -2788,7 +2789,7 @@ ginst_after_quotes:
             char ok_host[128];
             shadow_result_ok_buf(ok_host, sizeof(ok_host), it->c);
             shadow_result_name(ok_host, it->b, rname, sizeof(rname));
-            shadow_rfn_register(it->a, rname, it->b);
+            shadow_rfn_register(it->a, rname, it->b, it->forced_seq);
             const char* pref =
                 (strcmp(it->e, "static inline") == 0) ? "static inline "
                 : (strcmp(it->e, "static") == 0)      ? "static "

@@ -42,9 +42,10 @@ static AstNode* parse_fn(Parser* p) {
                rkw != SHADOW_KW_VOID && rkw != SHADOW_KW_CHAR &&
                rkw != SHADOW_KW_BOOL && rkw != SHADOW_KW_SIZE_T)
         return NULL;
-    /* `T!>(E)` is parse_result_fn. `T[:]` / `T[:!]` is a slice return. */
+    /* `T!>(E)` / `T?>(E)` is parse_result_fn. `T[:]` / `T[:!]` is a slice return. */
     if (!has_struct && ti + 1 < p->n &&
-        tok_eq(p->toks[ti + 1], TK_PUNCT, "!>"))
+        (tok_eq(p->toks[ti + 1], TK_PUNCT, "!>") ||
+         tok_eq(p->toks[ti + 1], TK_PUNCT, "?>")))
         return NULL;
     name_i = ti + 1;
     char gret[256];
@@ -1192,7 +1193,10 @@ static AstNode* parse_parallel_head(Parser* p) {
             return NULL;
         }
         n = parse_parallel_for(p, gate, pred);
-        if (n && cache[0]) snprintf(n->h, sizeof(n->h), "%s", cache);
+        if (n && cache[0]) {
+            n->h = ast_arena_cstr(p, cache);
+            if (cache[0] && !n->h) return NULL;
+        }
         return n;
     }
     if (tok_eq(p_peek(p), TK_IDENT, "cache") ||

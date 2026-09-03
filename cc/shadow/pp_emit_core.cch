@@ -1386,7 +1386,8 @@ static const char* shadow_rfn_err(const char* name) {
 
 static int shadow_rfn_discard_ok(const char* name) {
     int i = shadow_rfn_index(name);
-    return i >= 0 && g_shadow_rfns[i].discard_ok;
+    if (i >= 0 && g_shadow_rfns[i].discard_ok) return 1;
+    return shadow_is_optional_print_fn(name);
 }
 
 static int shadow_rfn_ok(const char* name, char* ok, size_t cap) {

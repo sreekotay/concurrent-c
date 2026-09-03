@@ -1406,6 +1406,31 @@ static int peek_result_shape(Parser* p) {
     return peek_result_marker(p) != 0;
 }
 
+/* Console print family: void ?>(CCPrintError) — optional stmt-position discard. */
+static int shadow_is_optional_print_fn(const char* name) {
+    if (!name || !name[0]) return 0;
+    if (strcmp(name, "println") == 0 || strcmp(name, "eprintln") == 0 ||
+        strcmp(name, "fprintln") == 0 || strcmp(name, "print") == 0 ||
+        strcmp(name, "eprint") == 0 || strcmp(name, "fprint") == 0)
+        return 1;
+    if (strcmp(name, "cc_println") == 0 || strcmp(name, "cc_eprintln") == 0 ||
+        strcmp(name, "cc_fprintln") == 0 || strcmp(name, "cc_print") == 0 ||
+        strcmp(name, "cc_eprint") == 0 || strcmp(name, "cc_fprint") == 0)
+        return 1;
+    if (strncmp(name, "cc_slice_", 9) == 0 ||
+        strncmp(name, "cc_string_", 10) == 0 ||
+        strncmp(name, "cc_char_", 8) == 0 ||
+        strncmp(name, "cc_const_char_", 14) == 0) {
+        const char* tail = strrchr(name, '_');
+        if (!tail || tail == name) return 0;
+        tail++;
+        return strcmp(tail, "print") == 0 || strcmp(tail, "println") == 0 ||
+               strcmp(tail, "eprint") == 0 || strcmp(tail, "eprintln") == 0 ||
+               strcmp(tail, "fprint") == 0 || strcmp(tail, "fprintln") == 0;
+    }
+    return 0;
+}
+
 /* After ok base spelling: consume `[:]` / `[:!]` into okty (type-position). */
 static int shadow_parse_result_ok_slice_suffix(Parser* p, char* okty, size_t cap) {
     size_t al;

@@ -125,12 +125,6 @@ static int shadow_emit_println_arg(CEmit* out, ShadowCtx* ctx, const char* arg_e
 
 static int shadow_emit_println(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                const char* indent) {
-    /* Bare `println(...);` — discard Result (no !>/handler). */
-    if (st && strcmp(st->e, "bare") == 0) {
-        const char* fn = st->d[0] == 'e' ? "cc_eprintln" : "cc_println";
-        return shadow_tpl_kv(out, "${indent}(void)${fn}(${args});\n",
-                             "indent", indent, "fn", fn, "args", st->a, NULL);
-    }
     return shadow_emit_println_arg(out, ctx, st->a, indent, st->d[0] == 'e');
 }
 
@@ -152,10 +146,12 @@ static int shadow_emit_println_tpl(AstNode* st, CEmit* out, ShadowCtx* ctx,
         if (!shadow_emit_tpl_build(out, st->a, arena, nested, "__msg"))
             return 0;
     }
-    char call[320];
-    snprintf(call, sizeof(call), "%s(__msg)", fn);
-    if (!shadow_emit_try_call(out, ctx, nested, call, fn, "e", 1))
-        return 0;
+    {
+        char call[320];
+        snprintf(call, sizeof(call), "%s(__msg)", fn);
+        if (!shadow_emit_try_call(out, ctx, nested, call, fn, "e", 1))
+            return 0;
+    }
     if (scratch && !shadow_scratch_cp_pop(ctx, out, nested)) return 0;
     return cemit_fmt(out, "%s}\n", indent);
 }

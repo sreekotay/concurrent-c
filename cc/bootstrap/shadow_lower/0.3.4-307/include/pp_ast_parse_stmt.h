@@ -188,7 +188,8 @@ static AstNode* parse_chan_var(Parser* p) {
         is_ptr = 1;
         bi++;
     }
-    if (bi < p->n && tok_eq(p->toks[bi], TK_PUNCT, "!>")) {
+    if (bi < p->n && (tok_eq(p->toks[bi], TK_PUNCT, "!>") ||
+                      tok_eq(p->toks[bi], TK_PUNCT, "?>"))) {
         int ej = bi + 1;
         is_result = 1;
         slice_to(ok_txt, sizeof(ok_txt), ety.spell);
@@ -420,7 +421,7 @@ static AstNode* parse_chan_var(Parser* p) {
     /* `Ok*` before `!>(Err)` — consume star for both Result and plain elems. */
     if (tok_eq(p_peek(p), TK_PUNCT, "*")) p_next(p); /* * */
     if (is_result) {
-        p_next(p); /* !> */
+        p_next(p); /* !> or ?> */
         if (tok_eq(p_peek(p), TK_PUNCT, "(")) {
             p_next(p); /* ( */
             p_next(p); /* Err */
@@ -815,6 +816,7 @@ static AstNode* parse_result_fn(Parser* p) {
     int ty0, ty1;
     char okty[96];
     int had_const = 0;
+    int discard_ok = 0;
     int specs0 = p->i;
     int j;
     /* Callers may already have consumed `static`/`const` (parse_external
@@ -864,13 +866,21 @@ static AstNode* parse_result_fn(Parser* p) {
             }
         }
     }
-    p_next(p); /* !> */
+    {
+        Token mk = p_peek(p);
+        if (!tok_eq(mk, TK_PUNCT, "!>") && !tok_eq(mk, TK_PUNCT, "?>")) {
+            parser_fail(p, mk, "expected !> or ?> after result ok-type");
+            return NULL;
+        }
+        discard_ok = tok_eq(mk, TK_PUNCT, "?>") ? 1 : 0;
+        p_next(p); /* !> or ?> */
+    }
     Token err;
     if (tok_eq(p_peek(p), TK_PUNCT, "(")) {
         p_next(p);
         err = p_next(p);
         if (err.kind != TK_IDENT) {
-            parser_fail(p, err, "expected error type inside !>(...)");
+            parser_fail(p, err, "expected error type inside !>(...) or ?>(...)");
             return NULL;
         }
         if (!p_accept(p, TK_PUNCT, ")")) {
@@ -880,7 +890,7 @@ static AstNode* parse_result_fn(Parser* p) {
     } else {
         err = p_next(p);
         if (err.kind != TK_IDENT) {
-            parser_fail(p, err, "expected error type after !>");
+            parser_fail(p, err, "expected error type after !> or ?>");
             return NULL;
         }
     }
@@ -924,6 +934,7 @@ static AstNode* parse_result_fn(Parser* p) {
     if (!p_accept(p, TK_PUNCT, ")")) { parser_fail(p, p_peek(p), "expected ')'"); return NULL; }
     AstNode* n = ast_new(p, AST_RESULT_FN);
     if (!n) return NULL;
+    n->forced_seq = discard_ok;
     slice_to(n->a, sizeof(n->a), name.spell);
     slice_to(n->b, sizeof(n->b), err.spell);
     snprintf(n->c, sizeof(n->c), "%s", okty);
@@ -1349,6 +1360,7 @@ static AstNode* parse_block(Parser* p) {
 
 /* Unwrap / spawn extracted — forward decls for control-flow parsers above. */
 static AstNode* parse_println_bang(Parser* p);
+static int peek_println_has_bang(Parser* p);
 static AstNode* parse_stmt_unwrap(Parser* p);
 static AstNode* parse_result_local(Parser* p);
 static AstNode* parse_var_unwrap(Parser* p);
@@ -4840,7 +4852,9 @@ static AstNode* parse_stmt_inner(Parser* p) {
     if (shadow_kw(t) == SHADOW_KW_WHILE) return parse_while(p);
     if (shadow_kw(t) == SHADOW_KW_DO) return parse_do_while(p);
     if (shadow_kw(t) == SHADOW_KW_RETURN) return parse_return_int(p);
-    if (shadow_kw(t) == SHADOW_KW_PRINTLN || shadow_kw(t) == SHADOW_KW_EPRINTLN)
+    if ((shadow_kw(t) == SHADOW_KW_PRINTLN ||
+         shadow_kw(t) == SHADOW_KW_EPRINTLN) &&
+        peek_println_has_bang(p))
         return parse_println_bang(p);
     if (shadow_kw(t) == SHADOW_KW_BREAK || shadow_kw(t) == SHADOW_KW_CONTINUE)
         return parse_break_continue(p);

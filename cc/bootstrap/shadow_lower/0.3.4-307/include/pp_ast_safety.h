@@ -79,6 +79,7 @@ typedef struct {
 typedef struct {
     char name[64];
     char err[64];
+    int discard_ok; /* T?>(E): bare call at stmt position is well-formed */
 } ShadowSafeRfn;
 
 typedef struct {
@@ -3463,8 +3464,22 @@ static int shadow_safe_is_result_fn(ShadowSafeCtx* ctx, const char* name) {
     return 0;
 }
 
+static int shadow_safe_is_result_fn_discard_ok(ShadowSafeCtx* ctx,
+                                               const char* name) {
+    extern int cc_result_fn_registry_is_discard_ok(const char* name,
+                                                   size_t name_len);
+    int i;
+    if (!ctx || !name || !ctx->rfns) return 0;
+    for (i = 0; i < ctx->nrfn; i++) {
+        if (strcmp(ctx->rfns[i].name, name) == 0)
+            return ctx->rfns[i].discard_ok;
+    }
+    if (shadow_is_optional_print_fn(name)) return 1;
+    return cc_result_fn_registry_is_discard_ok(name, strlen(name));
+}
+
 static void shadow_safe_add_result_fn_err(ShadowSafeCtx* ctx, const char* name,
-                                         const char* err_ty) {
+                                         const char* err_ty, int discard_ok) {
     int i;
     if (!ctx || !name || !name[0]) return;
     for (i = 0; i < ctx->nrfn; i++) {
@@ -3472,6 +3487,7 @@ static void shadow_safe_add_result_fn_err(ShadowSafeCtx* ctx, const char* name,
             if (err_ty && err_ty[0] && !ctx->rfns[i].err[0])
                 snprintf(ctx->rfns[i].err, sizeof(ctx->rfns[i].err),
                          "%s", err_ty);
+            if (discard_ok) ctx->rfns[i].discard_ok = 1;
             return;
         }
     }
@@ -3483,6 +3499,7 @@ static void shadow_safe_add_result_fn_err(ShadowSafeCtx* ctx, const char* name,
     snprintf(ctx->rfns[ctx->nrfn].name, sizeof(ctx->rfns[0].name), "%s",
              name);
     ctx->rfns[ctx->nrfn].err[0] = 0;
+    ctx->rfns[ctx->nrfn].discard_ok = discard_ok ? 1 : 0;
     if (err_ty && err_ty[0])
         snprintf(ctx->rfns[ctx->nrfn].err, sizeof(ctx->rfns[0].err), "%s",
                  err_ty);
@@ -3490,7 +3507,7 @@ static void shadow_safe_add_result_fn_err(ShadowSafeCtx* ctx, const char* name,
 }
 static void __attribute__((unused)) shadow_safe_add_result_fn(ShadowSafeCtx* ctx,
                                                               const char* name) {
-    shadow_safe_add_result_fn_err(ctx, name, NULL);
+    shadow_safe_add_result_fn_err(ctx, name, NULL, 0);
 }
 static const char* shadow_safe_result_fn_err(ShadowSafeCtx* ctx,
                                             const char* name);
@@ -3651,7 +3668,7 @@ static const char* shadow_safe_stdlib_err(const char* name) {
         strncmp(name, "cc_string_", 10) == 0 ||
         strncmp(name, "cc_char_", 8) == 0 ||
         strncmp(name, "cc_const_char_", 14) == 0)
-        return "CCError";
+        return "CCPrintError";
     if (strncmp(name, "cc_js_", 6) == 0) return "CCJsError";
     if (strncmp(name, "cc_py_", 6) == 0) return "CCPyError";
     return NULL;
@@ -3910,8 +3927,7 @@ static void shadow_safe_on_unwrap(ShadowSafeCtx* ctx, AstNode* st) {
     if (st->kind == AST_PRINTLN_BANG || st->kind == AST_PRINTLN_TPL) {
         if (st->nbody > 0)
             shadow_safe_check_err_fwds(ctx, st, st->body, st->nbody, NULL);
-        else if (strcmp(st->e, "bare") != 0) {
-            /* `println(...) !>;` needs @errhandler; bare `println(...);` does not. */
+        else {
             if (shadow_safe_diag_eh_e(ctx, st, st->d[0] == 'e'
                                                 ? "cc_eprintln("
                                                 : "cc_println("))
@@ -3944,15 +3960,21 @@ static int shadow_safe_ufcs_result_consumed(const AstNode* st) {
 
 static void shadow_safe_on_unhandled_call(ShadowSafeCtx* ctx, AstNode* st) {
     const char* callee;
+    extern int cc_result_fn_registry_is_discard_ok(const char* name,
+                                                   size_t name_len);
     if (!ctx || !st || ctx->err || !ctx->strict_unhandled) return;
     /* send_task body packs the Result into the task payload. */
     if (ctx->in_send_task) return;
     if (st->kind == AST_UFCS_STMT) {
         if (shadow_safe_ufcs_result_consumed(st)) return;
         if (!shadow_safe_is_result_fn(ctx, st->b)) return;
+        if (shadow_safe_is_result_fn_discard_ok(ctx, st->b)) return;
+        if (cc_result_fn_registry_is_discard_ok(st->b, strlen(st->b))) return;
         callee = st->b;
     } else if (st->kind == AST_CALL_ARGS || st->kind == AST_CALL_NUM) {
         if (!shadow_safe_is_result_fn(ctx, st->a)) return;
+        if (shadow_safe_is_result_fn_discard_ok(ctx, st->a)) return;
+        if (cc_result_fn_registry_is_discard_ok(st->a, strlen(st->a))) return;
         callee = st->a;
     } else {
         return;
@@ -5278,7 +5300,8 @@ static int shadow_safety_check(AstNode** items, int n, TapeCache* cache) {
         }
         if (it->kind == AST_RESULT_FN && it->a[0])
             shadow_safe_add_result_fn_err(&ctx, it->a,
-                                          it->b[0] ? it->b : NULL);
+                                          it->b[0] ? it->b : NULL,
+                                          it->forced_seq);
         fname = NULL;
         params = NULL;
         if (it->kind == AST_FN) {

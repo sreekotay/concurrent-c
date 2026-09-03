@@ -1163,11 +1163,12 @@ static struct {
     char name[64];
     char rname[128];
     char err[64];
+    int discard_ok; /* T?>(E): stmt-position discard allowed */
 } g_shadow_rfns[SHADOW_RFN_CAP];
 static int g_shadow_nrfns;
 
 static void shadow_rfn_register(const char* name, const char* rname,
-                                const char* err) {
+                                const char* err, int discard_ok) {
     int i;
     if (!name || !name[0]) return;
     if (g_shadow_nrfns >= SHADOW_RFN_CAP) {
@@ -1182,6 +1183,7 @@ static void shadow_rfn_register(const char* name, const char* rname,
             if (err && err[0])
                 snprintf(g_shadow_rfns[i].err, sizeof(g_shadow_rfns[i].err),
                          "%s", err);
+            if (discard_ok) g_shadow_rfns[i].discard_ok = 1;
             return;
         }
     }
@@ -1191,6 +1193,7 @@ static void shadow_rfn_register(const char* name, const char* rname,
              sizeof(g_shadow_rfns[0].rname), "%s", rname ? rname : "");
     snprintf(g_shadow_rfns[g_shadow_nrfns].err, sizeof(g_shadow_rfns[0].err),
              "%s", err ? err : "");
+    g_shadow_rfns[g_shadow_nrfns].discard_ok = discard_ok ? 1 : 0;
     g_shadow_nrfns++;
 }
 
@@ -1237,6 +1240,7 @@ static int shadow_rfn_index(const char* name) {
 extern int cc_result_fn_registry_get_err_type(const char* name, size_t name_len,
                                               char* out_buf, size_t out_sz);
 extern int cc_result_fn_registry_contains(const char* name, size_t len);
+extern int cc_result_fn_registry_is_discard_ok(const char* name, size_t name_len);
 extern const char* cc_result_fn_registry_name_at(size_t i);
 extern const char* cc_result_fn_registry_err_type_at(size_t i);
 extern const char* cc_result_fn_registry_result_type_at(size_t i);
@@ -1379,6 +1383,12 @@ static const char* shadow_rfn_err(const char* name) {
     int i = shadow_rfn_index(name);
     if (i >= 0 && g_shadow_rfns[i].err[0]) return g_shadow_rfns[i].err;
     return shadow_rfn_err_from_hdr(name);
+}
+
+static int shadow_rfn_discard_ok(const char* name) {
+    int i = shadow_rfn_index(name);
+    if (i >= 0 && g_shadow_rfns[i].discard_ok) return 1;
+    return shadow_is_optional_print_fn(name);
 }
 
 static int shadow_rfn_ok(const char* name, char* ok, size_t cap) {
@@ -1564,7 +1574,7 @@ static AstNode* shadow_eh_for_call(ShadowCtx* ctx, const char* call) {
                  strncmp(fname, "cc_string_", 10) == 0 ||
                  strncmp(fname, "cc_char_", 8) == 0 ||
                  strncmp(fname, "cc_const_char_", 14) == 0)
-            err = "CCError";
+            err = "CCPrintError";
         /* Script parents: .cch protos are often not AST_RESULT_FN-registered
          * into the rfn table; UFCS still lowers to these free names. */
         else if (strncmp(fname, "cc_js_", 6) == 0)
@@ -6261,6 +6271,7 @@ extern int cc_included_cch_each_fn_param(int (*cb)(const char* name, int argi,
 extern int cc_result_fn_registry_get_err_type(const char* name, size_t name_len,
                                               char* out_buf, size_t out_sz);
 extern int cc_result_fn_registry_contains(const char* name, size_t len);
+extern int cc_result_fn_registry_is_discard_ok(const char* name, size_t name_len);
 extern int cc_result_fn_registry_get_result_type(const char* name,
                                                  size_t name_len, char* out_buf,
                                                  size_t out_sz);

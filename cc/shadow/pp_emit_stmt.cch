@@ -8935,9 +8935,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                            strcmp(strict, "false") == 0 ||
                            strcmp(strict, "off") == 0))
                 on = 0;
-            if (on && strcmp(st->b, "println") != 0 &&
-                strcmp(st->b, "eprintln") != 0 &&
-                strcmp(st->b, "fprintln") != 0) {
+            if (on) {
                 const char* cal = shadow_outer_call_ident(call);
                 char cname[128];
                 size_t clen = 0;

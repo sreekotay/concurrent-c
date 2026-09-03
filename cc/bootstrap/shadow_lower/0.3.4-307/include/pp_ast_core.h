@@ -178,7 +178,8 @@ typedef enum {
     /* CHAN_VAR: a=name b=capacity c=">"|"<" d=elem(ty[*])
      * e: "" | "o" | "t:TOPO" | "o:TOPO" (ordered / schedule) */
     AST_CHAN_VAR,
-    /* RESULT_FN: a=fname, b=err, c=ok, d=param text or "" for void; kids=body */
+    /* RESULT_FN: a=fname, b=err, c=ok, d=param text or "" for void; kids=body
+     * forced_seq: 1 when return is T?>(E) (stmt-position discard ok) */
     AST_RESULT_FN,
     AST_CLOSURE_LIT,   /* () => { }   (expression-level; counted as external) */
     AST_AT_STMT,       /* @ident ... ;  (a = attr name, e.g. defer/async) */
@@ -342,8 +343,9 @@ struct AstNode {
     /* Wait-for `worker (name)` binder — per-ticket pool slot index. */
     char g[64];
     /* Wait-for `cache (name, …)` — enclosing locals adopted as warm
-     * scratch. Comma-separated names; empty is no clause. */
-    char h[256];
+     * scratch. Comma-separated names; NULL/empty is no clause.
+     * Owned by parse_ar (not a fixed AstNode slot). */
+    char* h;
     /* Parsed under `#pragma(@parallel) off`: lower to the sequential
      * denial path only — no thunks, no envs, no scheduler. */
     int forced_seq;
@@ -1262,6 +1264,25 @@ static AstNode* ast_new(Parser* p, AstKind k) {
     return n;
 }
 
+/* NUL-terminated copy on the parse arena (NULL if s empty). Fail-loud OOM. */
+static char* ast_arena_cstr(Parser* p, const char* s) {
+    size_t n;
+    char* d;
+    if (!p || !s || !s[0]) return NULL;
+    if (!cc_arena_is_live(p->parse_ar)) {
+        parser_fail(p, p_peek(p), "parse arena is not live");
+        return NULL;
+    }
+    n = strlen(s);
+    d = (char*)cc_arena_alloc(p->parse_ar, n + 1, 1);
+    if (!d) {
+        parser_fail(p, p_peek(p), "out of memory (ast string slot)");
+        return NULL;
+    }
+    memcpy(d, s, n + 1);
+    return d;
+}
+
 /* Push onto the stable kids bump table. Interior `n->kids` aliases this
  * storage; growing it would dangle every open parent list. */
 static int ast_kids_push(Parser* p, AstNode* child) {
@@ -1369,13 +1390,46 @@ static int peek_result_ok_type_end(Parser* p, int start) {
     return j;
 }
 
-static int peek_result_shape(Parser* p) {
+/* After ok-type (+ optional `*`): 1 = `!>` (required), 2 = `?>` (discard ok). */
+static int peek_result_marker(Parser* p) {
     int j;
     if (!p || p->i >= p->n) return 0;
     j = peek_result_ok_type_end(p, p->i);
     if (j < 0) return 0;
     while (j < p->n && tok_eq(p->toks[j], TK_PUNCT, "*")) j++;
-    return j < p->n && tok_eq(p->toks[j], TK_PUNCT, "!>");
+    if (j >= p->n) return 0;
+    if (tok_eq(p->toks[j], TK_PUNCT, "!>")) return 1;
+    if (tok_eq(p->toks[j], TK_PUNCT, "?>")) return 2;
+    return 0;
+}
+
+static int peek_result_shape(Parser* p) {
+    return peek_result_marker(p) != 0;
+}
+
+/* Console print family: void ?>(CCPrintError) — optional stmt-position discard. */
+static int shadow_is_optional_print_fn(const char* name) {
+    if (!name || !name[0]) return 0;
+    if (strcmp(name, "println") == 0 || strcmp(name, "eprintln") == 0 ||
+        strcmp(name, "fprintln") == 0 || strcmp(name, "print") == 0 ||
+        strcmp(name, "eprint") == 0 || strcmp(name, "fprint") == 0)
+        return 1;
+    if (strcmp(name, "cc_println") == 0 || strcmp(name, "cc_eprintln") == 0 ||
+        strcmp(name, "cc_fprintln") == 0 || strcmp(name, "cc_print") == 0 ||
+        strcmp(name, "cc_eprint") == 0 || strcmp(name, "cc_fprint") == 0)
+        return 1;
+    if (strncmp(name, "cc_slice_", 9) == 0 ||
+        strncmp(name, "cc_string_", 10) == 0 ||
+        strncmp(name, "cc_char_", 8) == 0 ||
+        strncmp(name, "cc_const_char_", 14) == 0) {
+        const char* tail = strrchr(name, '_');
+        if (!tail || tail == name) return 0;
+        tail++;
+        return strcmp(tail, "print") == 0 || strcmp(tail, "println") == 0 ||
+               strcmp(tail, "eprint") == 0 || strcmp(tail, "eprintln") == 0 ||
+               strcmp(tail, "fprint") == 0 || strcmp(tail, "fprintln") == 0;
+    }
+    return 0;
 }
 
 /* After ok base spelling: consume `[:]` / `[:!]` into okty (type-position). */

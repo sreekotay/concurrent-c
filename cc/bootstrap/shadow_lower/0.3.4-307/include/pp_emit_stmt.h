@@ -1727,7 +1727,7 @@ static void shadow_normalize_chan_param_ty(char* ty, size_t cap) {
         snprintf(ty, cap, "CCChanRx");
 }
 
-/* `Ok !>(Err)` → `CCResult_Ok_Err` (param / local type sugar). */
+/* `Ok !>(Err)` / `Ok ?>(Err)` → `CCResult_Ok_Err` (param / local type sugar). */
 static void shadow_normalize_result_param_ty(char* ty, size_t cap) {
     char* bang;
     char ok[128], err[128], rname[256], rest[128];
@@ -1736,6 +1736,7 @@ static void shadow_normalize_result_param_ty(char* ty, size_t cap) {
     int depth;
     if (!ty || !cap) return;
     bang = strstr(ty, "!>(");
+    if (!bang) bang = strstr(ty, "?>(");
     if (!bang) return;
     ol = (size_t)(bang - ty);
     if (ol == 0 || ol >= sizeof(ok)) return;
@@ -4805,7 +4806,7 @@ static int shadow_pw_apply_cache(AstNode* st, AstNode** body, int nbody,
     const char* p;
     char loc[64][64];
     int nloc = 0, k;
-    if (!st || !st->h[0]) return 1;
+    if (!st || !st->h || !st->h[0]) return 1;
     p = st->h;
     for (k = 0; k < nbody; k++)
         shadow_par_serial_walk_locals(body[k], loc, &nloc, 64);
@@ -8937,9 +8938,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                            strcmp(strict, "false") == 0 ||
                            strcmp(strict, "off") == 0))
                 on = 0;
-            if (on && strcmp(st->b, "println") != 0 &&
-                strcmp(st->b, "eprintln") != 0 &&
-                strcmp(st->b, "fprintln") != 0) {
+            if (on) {
                 const char* cal = shadow_outer_call_ident(call);
                 char cname[128];
                 size_t clen = 0;
@@ -8956,6 +8955,8 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     cname[clen] = 0;
                 }
                 if (cname[0] &&
+                    !shadow_rfn_discard_ok(cname) &&
+                    !cc_result_fn_registry_is_discard_ok(cname, clen) &&
                     (shadow_rfn_err(cname) ||
                      cc_result_fn_registry_contains(cname, clen))) {
                     char msg[192];
