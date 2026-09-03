@@ -3185,6 +3185,10 @@ void sched_v2_check_deadlock(void) {
 
 int sched_v2_join(fiber_v2* f, void** out_result) {
     if (!f) return -1;
+    /* A dest list can still hold the kick (this fiber). Parking on
+     * our own done bit never completes. */
+    if (f == sched_v2_current_fiber())
+        return 0;
 
     if (atomic_load_explicit(&f->done, memory_order_acquire)) {
         V2_STAT_INC(g_v2_join_fast);

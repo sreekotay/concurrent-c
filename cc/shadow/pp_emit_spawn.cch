@@ -218,6 +218,8 @@ static int shadow_resolve_at_create(char* expr, size_t cap, const char* ty,
         *out_decl = 1;
     }
     snprintf(expr, cap, "%s(%s", callee, rest);
+    /* Same dest-cast / lit wrap as a written `cc_file_open(path)` call. */
+    shadow_rewrite_slice_lit_call_args(expr, cap);
     return 1;
 }
 

@@ -1,0 +1,10 @@
+#ifndef TESTS_QUOTE_CCH_INCLUDE_ONLY_LEAF_CCH
+#define TESTS_QUOTE_CCH_INCLUDE_ONLY_LEAF_CCH
+
+/* Impl-grade chapter nested under an include-only umbrella. No sibling
+ * `.ccs` — the owner TU includes the umbrella, not this file. */
+int include_only_leaf_add(int a, int b) {
+    return a + b;
+}
+
+#endif

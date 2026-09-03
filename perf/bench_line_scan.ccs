@@ -256,14 +256,8 @@ int main(int argc, char** argv) {
     k_ctx = CC_SLICE_LIT("cc__reparse_source_to_ast_ctx(");
     k_ex = CC_SLICE_LIT("cc__reparse_source_to_ast_ex(");
 
-    FILE* hf = fopen(path, "rb");
-    if (!hf) {
-        eprintln(@string(`bench_line_scan: cannot open ${path}`, @scratch)) !>;
-        return 1;
-    }
-    fseek(hf, 0, SEEK_END);
-    int64_t file_bytes = (int64_t)ftell(hf);
-    fclose(hf);
+    CCFile hf = cc_file_open(path) !> @destroy;
+    int64_t file_bytes = (int64_t)hf.size() !>;
 
     if (!timed_only) {
         println(@string(`bench_line_scan: path=${path} bytes=${(long long)file_bytes} samples=${samples} passes=${passes} mode=${mode} chan_cap=${g_chan_cap}u`, @scratch)) !>;

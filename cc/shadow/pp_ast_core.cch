@@ -188,7 +188,10 @@ typedef enum {
     AST_RETURN_CC,
     /* return <expr> [!>]; — a=expr text; e="bang" when trailing !> unwrap */
     AST_RETURN_EXPR,
-    AST_ERRHANDLER,    /* @errhandler(Type bind) …; a=type b=bind c=handler or ""+body */
+    AST_ERRHANDLER,    /* @errhandler(Type bind) …; a=type b=bind c=handler or ""+body
+                        * e[0]=='s': site `!>(e){…}` (create/@parallel/for-in).
+                        * Site is not a scope handler — bare `!>;` in its body
+                        * uses the enclosing `@errhandler`. */
     AST_PRINTLN_BANG,  /* println("...") !>; — a=string spell including quotes */
     /* println("...") !>(bind) { stmts }; — a=string b=bind, body=handler stmts */
     AST_PRINTLN_BANG_BIND,
@@ -235,7 +238,8 @@ typedef enum {
     /* static char name[] = "lit"; — a=name b=string lit incl quotes */
     AST_STATIC_ARR,
     /* Type[*] name = expr @destroy [ {D} ]; — a=type b=name c=init
-     * d="*"|"", e unused; cleanup from registered destroy / arena_release */
+     * d="*"|"", e=_D|_Dbare|_detach, f="bang" when `!>` precedes @destroy.
+     * Site `!>(e){…}` is AST_ERRHANDLER on dbody. */
     AST_VAL_DESTROY,
     /* for (hdr) { stmts } — a=hdr text, body=stmts.
      * Zip (a, b in s, t) is void Result: e="zip_bang", optional

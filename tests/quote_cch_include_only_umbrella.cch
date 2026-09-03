@@ -1,0 +1,8 @@
+#ifndef TESTS_QUOTE_CCH_INCLUDE_ONLY_UMBRELLA_CCH
+#define TESTS_QUOTE_CCH_INCLUDE_ONLY_UMBRELLA_CCH
+
+/* Include-only umbrella (no file-scope code). Owner `.ccs` must splice
+ * this so the nested impl chapter is not extracted as an unowned leaf. */
+#include "quote_cch_include_only_leaf.cch"
+
+#endif

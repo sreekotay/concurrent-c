@@ -1,0 +1,7 @@
+/* Owner TU includes an include-only umbrella that nests an impl chapter.
+ * Same shape as shadow_lower.ccs → c_pp_spike.cch → pp_ast_core.cch. */
+#include "quote_cch_include_only_umbrella.cch"
+
+int main(void) {
+    return include_only_leaf_add(1, 2) == 3 ? 0 : 1;
+}

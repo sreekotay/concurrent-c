@@ -43,11 +43,13 @@ int main(int argc, char** argv) {
 
     const char* fn = argc > 1 ? argv[1] : "twitter.json";
     int K = argc > 2 ? atoi(argv[2]) : 100, T = argc > 3 ? atoi(argv[3]) : 3;
-    FILE* f = fopen(fn, "rb");
-    if (!f) { eprintln(@string(`cannot open ${fn}`, pa)) !>; return 1; }
-    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-    char* b = (char*)malloc((size_t)n + 1);
-    size_t rd = fread(b, 1, (size_t)n, f); b[rd] = 0; fclose(f);
+    CCFile inf = cc_file_open(fn) !> @destroy;
+    size_t n = inf.size() !>;
+    CCArena file_a = cc_arena_create((size_t)n + 1);
+    CCSlice content = inf.read_all(file_a) !>;
+    char* b = (char*)content.ptr;
+    size_t rd = content.len;
+    b[rd] = 0;
     CCArena ar = cc_arena_create((size_t)n * 4 + (16 << 20));
 
     double best = 1e18;

@@ -796,7 +796,7 @@ static bool write_all(CCSocket* sock, char[:] data) {
 
 static bool redis_conn_flush_out(RedisConn* conn) {
     if (!conn || conn->out_len == 0) return true;
-    char[:] data = cc_slice_from_buffer(conn->out_buf, conn->out_len);
+    char[:] data = conn->out_buf.to_slice_n(conn->out_len);
     conn->out_len = 0;
     return write_all(conn->sock, data);
 }

@@ -323,7 +323,7 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     Temp t = {0};
     t.tag = 1;
-    t.open("/tmp/tv.txt", "w");   /* → t.file.open(...) */
+    t.create("/tmp/tv.txt") !>;
     t.write("hi\n") !>;
     t.close();
     return 0;
@@ -396,10 +396,10 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     Fam_alpha a = {0};
     Fam_beta b = {0};
-    a.open("/tmp/tv_glob_a.txt", "w");
+    a.create("/tmp/tv_glob_a.txt") !>;
     a.write("A\n") !>;
     a.close();
-    b.open("/tmp/tv_glob_b.txt", "w");
+    b.create("/tmp/tv_glob_b.txt") !>;
     b.write("B\n") !>;
     b.close();
     printf("ok\n");
@@ -670,7 +670,7 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     TempFile t = {0} @destroy { t.close(); };  /* close, then unlink, then idempotent embed teardown */
     t.path = @slice("/tmp/tv_together.txt");
-    t.open(t.path, "w");
+    t.create(t.path) !>;
     t.write("hi\n") !>;
     printf("ok\n");
     return 0;
@@ -680,8 +680,11 @@ int main(void) {
 ok
 -->
 
-`as:` retries any UFCS miss on the named embed (`t.open` → `t.file.open`),
-not a CCFile-only method list. Cleanup is
+`as:` retries any UFCS miss on the named embed (`t.write` → `t.file.write`),
+not a CCFile-only method list. Open the embed explicitly:
+`t.create(path) !>` (write+trunc into the embed; Err if it already
+holds a fd) or `CCFile f@(path) !> @destroy` (read via the `.create`
+hook). Cleanup is
 **pre-destroy → `@destroy { }` body → outer destroy hook → value embeds**
 last-declared to first. `file` is a `CCFile` value field with a destroy
 hook, so `cc_file_close(&t.file)` runs in that last step. Bodyless

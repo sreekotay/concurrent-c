@@ -56,8 +56,8 @@ int main(void) {
     AsOuter o = {0};
     o.outer_tag = 1;
     o.mid.mid_tag = 2;
-    o.mid.file = cc_file_create(CC_SLICE_LIT("tmp/as_transitive_smoke.txt")) !>(e) {
-        fprintf(stderr, "create: %s\n", cc_io_error_str(e));
+    o.create("tmp/as_transitive_smoke.txt") !>(e) {
+        fprintf(stderr, "create: %s\n", cc_error_str(e));
         return 1;
     };
 

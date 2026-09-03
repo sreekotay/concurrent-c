@@ -6,10 +6,6 @@
 #include <assert.h>
 #include <stdio.h>
 
-static CCFile !>(CCIoError) file_open_w(const char* path) {
-    return cc_file_create(cc_slice_cstr(path));
-}
-
 int main(void) {
     @errhandler(CCIoError e) {
         fprintf(stderr, "open failed: %s\n", cc_io_error_str(e));
@@ -17,13 +13,15 @@ int main(void) {
     }
 
     {
-        CCFile f = file_open_w("tmp/ccfile_destroy_smoke.txt") !> @destroy;
+        CCFile f = CC_FILE_CLOSED @destroy;
+        f.create("tmp/ccfile_destroy_smoke.txt") !>;
         assert(f.fd >= 0);
         /* scope exit: cc_file_close(&f) via registered hook */
     }
 
     {
-        CCFile g = file_open_w("tmp/ccfile_destroy_smoke.txt") !> @destroy;
+        CCFile g = CC_FILE_CLOSED @destroy;
+        g.create("tmp/ccfile_destroy_smoke.txt") !>;
         assert(g.fd >= 0);
         cc_file_close(&g);          /* manual close first */
         assert(g.fd < 0);

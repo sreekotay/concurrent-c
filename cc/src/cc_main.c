@@ -5204,6 +5204,7 @@ static int cc__runtime_obj_is_stale(const char* runtime_obj_path) {
         "concurrent_c.c", "scheduler.c", "fiber_sched.c", "nursery.c",
         "channel.c", "fiber.c", "exec.c", "closure.c", "task_intptr.c",
         "float_format_zmij.c", "slice_gen.c", "cc_mem_heap.c",
+        "parallel.c", "sched_v2.c", "task.c",
         NULL
     };
     char src_path[PATH_MAX];

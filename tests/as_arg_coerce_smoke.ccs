@@ -25,8 +25,8 @@ int main(void) {
     AsArgWrap w = {0};
     AsArgWrap *p = &w;
     w.tag = 9;
-    w.file = cc_file_create(CC_SLICE_LIT("tmp/as_arg_coerce_smoke.txt")) !>(e) {
-        fprintf(stderr, "create: %s\n", cc_io_error_str(e));
+    w.create("tmp/as_arg_coerce_smoke.txt") !>(e) {
+        fprintf(stderr, "create: %s\n", cc_error_str(e));
         return 1;
     };
 

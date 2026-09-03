@@ -1258,6 +1258,11 @@ int main(int argc, char** argv) {
                  * owning smoke builds and exercises it. */
                 if (ends_with(nm, "_mod.ccs"))
                     continue;
+                /* Owner/guest fixtures for static_inline_impl_extract_smoke
+                 * — no standalone main; guest needs the owner in the link set. */
+                if (strcmp(nm, "static_inline_impl_extract.ccs") == 0 ||
+                    strcmp(nm, "static_inline_impl_extract_guest.ccs") == 0)
+                    continue;
                 if (all_n == all_cap) {
                     int nc = all_cap ? all_cap * 2 : 64;
                     char** np = (char**)realloc(all_paths, (size_t)nc * sizeof(char*));

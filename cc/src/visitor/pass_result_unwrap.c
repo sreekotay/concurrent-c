@@ -21,6 +21,11 @@
 #define cc__append_str cc_sb_append_cstr
 CC_DEFINE_SB_APPEND_FMT
 
+/* Header lower: unwrap is local to the inline. Do not emit TU-level
+ * `__cc_uw_*` — those `_Generic` arms exist only in TUs that collected
+ * the pair. Field accessors work on any CCResult_* the header declared. */
+static int g_ru_header_field_access;
+
 
 /* Extract the callee identifier from a plain `ident(...)` call expression.
  *
@@ -297,6 +302,12 @@ static void cc__ru_emit_uw_err_binder(char** out, size_t* ol, size_t* oc,
      * cc_result.cch + emit-plan Result-arm formatting),
      * so no explicit record() call is needed here — the macro
      * expansion below already side-effects on each evaluation. */
+    if (g_ru_header_field_access) {
+        cc_sb_append_fmt(out, ol, oc,
+                         "__typeof__(cc_error(%s)) %s = cc_error(%s); ",
+                         tmpv, binder, tmpv);
+        return;
+    }
     cc__append_str(out, ol, oc, "__typeof__(");
     cc_sb_append_uw_err_at(out, ol, oc, tmpv, s, call_a, call_b, file, line);
     cc_sb_append_fmt(out, ol, oc, ") %s = ", binder);
@@ -782,6 +793,8 @@ static void cc__ru_emit_is_err(char** out, size_t* ol, size_t* oc,
                                const char* tmpv) {
     if (result_type && result_type[0]) {
         cc_sb_append_fmt(out, ol, oc, "%s_is_err(%s)", result_type, tmpv);
+    } else if (g_ru_header_field_access) {
+        cc_sb_append_fmt(out, ol, oc, "cc_is_err(%s)", tmpv);
     } else {
         cc_sb_append_fmt(out, ol, oc, "__cc_uw_is_err(%s)", tmpv);
     }
@@ -792,6 +805,8 @@ static void cc__ru_emit_value(char** out, size_t* ol, size_t* oc,
                               const char* tmpv) {
     if (result_type && result_type[0]) {
         cc_sb_append_fmt(out, ol, oc, "%s_unwrap(%s)", result_type, tmpv);
+    } else if (g_ru_header_field_access) {
+        cc_sb_append_fmt(out, ol, oc, "cc_value(%s)", tmpv);
     } else {
         cc_sb_append_fmt(out, ol, oc, "__cc_uw_value(%s)", tmpv);
     }
@@ -3349,4 +3364,18 @@ int cc__rewrite_result_unwrap(const CCVisitorCtx* ctx,
     return cc__rewrite_result_unwrap_with_options(ctx, in_src, in_len,
                                                   out_src, out_len,
                                                   0);
+}
+
+int cc__rewrite_result_unwrap_header(const CCVisitorCtx* ctx,
+                                     const char* in_src,
+                                     size_t in_len,
+                                     char** out_src,
+                                     size_t* out_len) {
+    int rc;
+    int saved = g_ru_header_field_access;
+    g_ru_header_field_access = 1;
+    rc = cc__rewrite_result_unwrap_with_options(ctx, in_src, in_len,
+                                                out_src, out_len, 0);
+    g_ru_header_field_access = saved;
+    return rc;
 }

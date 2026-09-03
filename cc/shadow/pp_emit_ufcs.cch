@@ -4629,7 +4629,7 @@ static int shadow_slc_known_arg(const char* callee, int arg_index) {
     if (strcmp(callee, "cc_path_is_dir") == 0) return arg_index == 0;
     if (strcmp(callee, "cc_path_is_file") == 0) return arg_index == 0;
     if (strcmp(callee, "cc_file_open") == 0) return arg_index == 0;
-    if (strcmp(callee, "cc_file_create") == 0) return arg_index == 0;
+    if (strcmp(callee, "cc_file_create") == 0) return arg_index == 1;
     if (strcmp(callee, "cc_file_open_async") == 0) return arg_index == 2;
     if (strcmp(callee, "cc_dir_open") == 0) return arg_index == 1;
     if (strcmp(callee, "cc_glob") == 0) return arg_index == 0;
@@ -4955,13 +4955,26 @@ static void shadow_rewrite_slice_lit_call_args(char* expr, size_t cap) {
                                         /* Nested calls (e.g. cc_is_err(f.write(
                                          * "x"))) must rewrite inner CCSlice
                                          * lit args — outer callee consumes the
-                                         * whole call as one arg. */
+                                         * whole call as one arg. Dest `.cast`
+                                         * wraps a bound char* as cc_slice_cstr. */
                                         char abuf[4096];
+                                        int dest_slc =
+                                            shadow_slc_known_arg(callee, argi) ||
+                                            shadow_slc_header_arg(callee, argi) ||
+                                            (fp && fp->stars == 0 &&
+                                             shadow_slc_type_spelling(fp->base));
                                         if (al + 1 < sizeof(abuf)) {
                                             memcpy(abuf, cur, al);
                                             abuf[al] = 0;
                                             shadow_rewrite_slice_lit_call_args(
                                                 abuf, sizeof(abuf));
+                                            if (dest_slc &&
+                                                !shadow_slc_already_wrapped(
+                                                    abuf, strlen(abuf))) {
+                                                (void)shadow_cast_decl_init(
+                                                    "CCSlice", abuf, abuf,
+                                                    sizeof(abuf));
+                                            }
                                             o += (size_t)snprintf(
                                                 out + o, sizeof(out) - o, "%s",
                                                 abuf);

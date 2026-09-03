@@ -58,10 +58,15 @@ CC_DECL_RESULT_SPEC(CCResult_size_t_CCIoError, size_t, CCIoError)
 #define CCResult_CCFile_CCIoError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_CCFile_CCIoError, CCFile, CCIoError)
 #endif
+#ifndef CCResult_void_CCIoError_DEFINED
+#define CCResult_void_CCIoError_DEFINED 1
+CC_DECL_RESULT_SPEC_VOID(CCResult_void_CCIoError, CCIoError)
+#endif
 
-/* Birth: open is read; create is write+trunc. `@()` is open (1-arg). */
+/* Birth: open is read (`@()` / `.create` hook). write+trunc is
+ * `f.create(path)` — in-place, void, Err if the handle already holds a fd. */
 CCFile !>(CCIoError) cc_file_open(CCSlice path);
-CCFile !>(CCIoError) cc_file_create(CCSlice path);
+void !>(CCIoError) cc_file_create(CCFile *file, CCSlice path);
 int cc_file_open_async(CCExec* ex, CCFile *file, CCSlice path, CCAsyncHandle* h);
 
 /* Close file (ignores errors). Idempotent; does not flush. */

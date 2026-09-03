@@ -157,7 +157,8 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     (void)level;
 
     CCFile in_file = cc_file_open(cc_slice_cstr(in_path)) !>(e) { return 1; } @destroy;
-    CCFile out_file = cc_file_create(cc_slice_cstr(out_path)) !>(e) { return 1; } @destroy;
+    CCFile out_file = CC_FILE_CLOSED @destroy;
+    out_file.create(out_path) !>(e) { return 1; };
 
     size_t inflight_cap = get_inflight_cap();
     CCTask* inflight = (CCTask*)calloc(inflight_cap, sizeof(CCTask));

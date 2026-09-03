@@ -133,7 +133,8 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
 
     CCFile in_file = cc_file_open(in_path) !> @destroy;
     size_t file_len = in_file.size() !>;
-    CCFile out_file = cc_file_create(out_path) !> @destroy;
+    CCFile out_file = CC_FILE_CLOSED @destroy;
+    out_file.create(out_path) !>;
 
     /* Empty file is one zero-length ticket, not a zero-byte .gz. */
     size_t n_sz = file_len ? (file_len + (size_t)BLOCK_SIZE - 1) / (size_t)BLOCK_SIZE : 1;

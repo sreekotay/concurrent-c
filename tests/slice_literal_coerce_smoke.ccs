@@ -8,7 +8,8 @@ int main(void) {
     assert(cc_path_exists("."));
 
     const char *path = "/tmp/cc_slice_literal_coerce_smoke";
-    CCFile f = cc_file_create("/tmp/cc_slice_literal_coerce_smoke") !>(e) {
+    CCFile f = {0};
+    f.create("/tmp/cc_slice_literal_coerce_smoke") !>(e) {
         fprintf(stderr, "create failed\n");
         return 1;
     };
@@ -18,7 +19,7 @@ int main(void) {
     }
     f.close();
 
-    assert(cc_path_exists(cc_slice_cstr(path))); /* non-literal still needs wrap/UFCS */
+    assert(cc_path_exists(path)); /* char* dest-cast → cc_slice_cstr */
     unlink(path);
 
     printf("slice_literal_coerce_smoke: PASS\n");

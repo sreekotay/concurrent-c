@@ -8,7 +8,8 @@ int main(void) {
     const char* msg = "ufcs file smoke\n";
     size_t msg_len = strlen(msg);
     CCSlice data = cc_slice_from_buffer((void*)msg, msg_len);
-    CCFile f = cc_file_create(cc_slice_cstr(path)) !>(e) { return 1; };
+    CCFile f = {0};
+    f.create(path) !>(e) { return 1; };
     CCResult_size_t_CCIoError written;
     CCResult_CCSlice_CCIoError read_back;
     CCArena arena;

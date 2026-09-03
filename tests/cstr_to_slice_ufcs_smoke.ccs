@@ -9,8 +9,10 @@ int main(void) {
     char const *east = "east-const";
     unsigned char *ubytes = (unsigned char *)"ubytes";
 
-    /* Trust-boundary cstr helper (no UFCS). */
-    char[:0] a = cc_slice_cstr(path);
+    /* Dest-cast: bound char* → cc_slice_cstr. Explicit helper still works. */
+    char[:0] a = path;
+    char[:0] a2 = cc_slice_cstr(path);
+    (void)a2;
     char[:0] b = cc_slice_cstr(mut);
     char[:0] c = "literal";
     char[:0] e = cc_slice_cstr(east);

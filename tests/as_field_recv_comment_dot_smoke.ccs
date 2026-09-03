@@ -16,8 +16,8 @@ typedef struct {
 int main(void) {
     AsCommentWrap w = {0};
     w.tag = 3;
-    w.file = cc_file_create(CC_SLICE_LIT("tmp/as_field_recv_comment_dot.txt")) !>(e) {
-        fprintf(stderr, "create: %s\n", cc_io_error_str(e));
+    w.create("tmp/as_field_recv_comment_dot.txt") !>(e) {
+        fprintf(stderr, "create: %s\n", cc_error_str(e));
         return 1;
     };
     CCRes(size_t, CCIoError) wr =

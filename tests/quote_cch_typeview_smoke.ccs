@@ -9,8 +9,8 @@
 int main(void) {
     QuoteTvWrap w = {0};
     w.tag = 7;
-    w.file = cc_file_create(CC_SLICE_LIT("tmp/quote_cch_typeview_smoke.txt")) !>(e) {
-        fprintf(stderr, "create: %s\n", cc_io_error_str(e));
+    w.create("tmp/quote_cch_typeview_smoke.txt") !>(e) {
+        fprintf(stderr, "create: %s\n", cc_error_str(e));
         return 1;
     };
 

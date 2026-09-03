@@ -863,6 +863,152 @@ static int shadow_seen_result_add(char seen_ok[][128], char seen_err[][128],
     return 1;
 }
 
+/* Last `_CC…` starts the error face (`CCError`, `CC_I64ParseError`).
+ * Last `_` alone splits `CC_I64ParseError` into `int64_t_CC` + `I64ParseError`. */
+static const char* shadow_result_err_sep(const char* rest) {
+    const char* last = NULL;
+    const char* p;
+    if (!rest) return NULL;
+    for (p = rest; *p; p++) {
+        if (p[0] != '_' || p[1] != 'C' || p[2] != 'C') continue;
+        if (p[3] == 0 || p[3] == '_' || (p[3] >= 'A' && p[3] <= 'Z'))
+            last = p;
+    }
+    if (last) return last;
+    return strrchr(rest, '_');
+}
+
+static int shadow_seen_add_concrete(char seen_ok[][128], char seen_err[][128],
+                                    int* nseen, const char* concrete) {
+    const char* rest;
+    const char* us;
+    char ok[128], err[128];
+    size_t ol;
+    if (!concrete || strncmp(concrete, "CCResult_", 9) != 0) return 1;
+    rest = concrete + 9;
+    us = shadow_result_err_sep(rest);
+    if (!us || us <= rest) return 1;
+    ol = (size_t)(us - rest);
+    if (ol >= sizeof(ok)) ol = sizeof(ok) - 1;
+    memcpy(ok, rest, ol);
+    ok[ol] = 0;
+    snprintf(err, sizeof(err), "%s", us + 1);
+    return shadow_seen_result_add(seen_ok, seen_err, nseen, ok, err);
+}
+
+/* Header `!>` is a use. Union those Result pairs into this TU's
+ * `__cc_uw_*` even when the .ccs never wrote `!>`. Unique-E still waits
+ * for delayed spec emit (prelude-only `_Generic` at the top). */
+static int shadow_union_path_unwraps(const char* path,
+                                     char seen_ok[][128], char seen_err[][128],
+                                     int* nseen) {
+    FILE* f;
+    long sz;
+    char* buf;
+    size_t i, n;
+    if (!path || !path[0]) return 1;
+    f = fopen(path, "rb");
+    if (!f) return 1;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return 1;
+    }
+    sz = ftell(f);
+    if (sz <= 0 || sz > 8 * 1024 * 1024) {
+        fclose(f);
+        return 1;
+    }
+    rewind(f);
+    buf = (char*)malloc((size_t)sz + 1);
+    if (!buf) {
+        fclose(f);
+        return 0;
+    }
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+        free(buf);
+        fclose(f);
+        return 1;
+    }
+    buf[sz] = 0;
+    fclose(f);
+    if (!strstr(buf, "!>") && !strstr(buf, "?>")) {
+        free(buf);
+        return 1;
+    }
+    n = cc_result_fn_registry_count();
+    for (i = 0; i < n; i++) {
+        const char* fn = cc_result_fn_registry_name_at(i);
+        const char* rn = cc_result_fn_registry_result_type_at(i);
+        if (!fn || !fn[0] || !rn || !rn[0]) continue;
+        if (!strstr(buf, fn)) continue;
+        if (!shadow_seen_add_concrete(seen_ok, seen_err, nseen, rn)) {
+            free(buf);
+            return 0;
+        }
+    }
+    free(buf);
+    return 1;
+}
+
+/* Comptime / typehooks open extra .cch that never appear in the emit
+ * `#include` list. Scanning those unions Result pairs whose Ok type is
+ * not in this TU (CCSlicePacked, CCTurnstile, …) and then DECL's them. */
+static int shadow_inc_mentions_cch(const char* inc, const char* cch_path) {
+    const char* base;
+    const char* dot;
+    const char* hit;
+    char stem[128];
+    size_t n;
+    if (!inc || !cch_path || !cch_path[0]) return 0;
+    base = strrchr(cch_path, '/');
+    base = base ? base + 1 : cch_path;
+    dot = strrchr(base, '.');
+    n = dot ? (size_t)(dot - base) : strlen(base);
+    if (!n || n >= sizeof(stem)) return 0;
+    memcpy(stem, base, n);
+    stem[n] = 0;
+    hit = strstr(inc, stem);
+    if (!hit) return 0;
+    if (hit != inc && hit[-1] != '/' && hit[-1] != '<') return 0;
+    return hit[n] == '.' || hit[n] == '"' || hit[n] == '>';
+}
+
+static int shadow_cch_in_pass_inc(const char* path, char pass_inc[][256],
+                                  int npass_inc) {
+    int i;
+    if (!path || npass_inc <= 0 || !pass_inc) return 0;
+    for (i = 0; i < npass_inc; i++) {
+        if (shadow_inc_mentions_cch(pass_inc[i], path))
+            return 1;
+    }
+    return 0;
+}
+
+static int shadow_union_header_unwraps(char seen_ok[][128], char seen_err[][128],
+                                       int* nseen, char pass_inc[][256],
+                                       int npass_inc) {
+    size_t i, n;
+    shadow_rfn_scan_included_headers();
+    n = cc_included_cch_source_count();
+    for (i = 0; i < n; i++) {
+        const char* p = cc_included_cch_source_path(i);
+        if (!shadow_cch_in_pass_inc(p, pass_inc, npass_inc))
+            continue;
+        if (!shadow_union_path_unwraps(p, seen_ok, seen_err, nseen))
+            return 0;
+    }
+    n = cc_lowered_local_header_count();
+    for (i = 0; i < n; i++) {
+        const char* p = cc_lowered_local_header_source_path(i);
+        if (!shadow_cch_in_pass_inc(p, pass_inc, npass_inc) &&
+            npass_inc > 0)
+            continue;
+        if (!shadow_union_path_unwraps(p, seen_ok, seen_err, nseen))
+            return 0;
+    }
+    return 1;
+}
+
 /* CC_DECL_RESULT_SPEC needs a complete Err type. Do not emit this at the
  * top of the TU — a quoted header that defines E may still be an item. */
 /* Ok/E that stdlib headers already make complete. Seeded `__cc_uw_*`
@@ -900,6 +1046,42 @@ static int shadow_uw_skip_builtin_rname(const char* rname) {
            strcmp(rname, "CCResult_size_t_CCError") == 0 ||
            strcmp(rname, "CCResult_voidptr_CCError") == 0 ||
            strcmp(rname, "CCResult_charptr_CCError") == 0;
+}
+
+/* Keep in sync with cc__stdlib_predeclared_result_specs in result_spec.c.
+ * Headers already CC_DECL these; emit must not re-DECL (ok spelling may
+ * be the mangle, e.g. CCDirIterptr vs CCDirIter*). */
+static int shadow_result_spec_is_header_owned(const char* rname) {
+    static const char* names[] = {
+        "CCResult_CCSlice_CCIoError",
+        "CCResult_size_t_CCIoError",
+        "CCResult_CCDirIterptr_CCIoError",
+        "CCResult_CCDirEntry_CCIoError",
+        "CCResult_bool_CCIoError",
+        "CCResult_bool_CCError",
+        "CCResult_char_CCError",
+        "CCResult_int64_t_CCError",
+        "CCResult_uint64_t_CCError",
+        "CCResult_double_CCError",
+        "CCResult_int64_t_CC_I64ParseError",
+        "CCResult_uint64_t_CC_U64ParseError",
+        "CCResult_double_CC_F64ParseError",
+        "CCResult_bool_CC_BoolParseError",
+        "CCResult_CCFile_CCIoError",
+        "CCResult_void_CCIoError",
+        "CCResult_CCSocket_CCNetError",
+        "CCResult_CCListener_CCNetError",
+        "CCResult_CCHttpResponse_CCHttpErrorInfo",
+        "CCResult_CCParsedUrl_CCHttpError",
+        "CCResult_CCPyptr_CCError",
+        NULL
+    };
+    int i;
+    if (!rname || !rname[0]) return 0;
+    for (i = 0; names[i]; i++) {
+        if (strcmp(rname, names[i]) == 0) return 1;
+    }
+    return 0;
 }
 
 /* `_Generic` needs every association type complete. First emit: prelude
@@ -1039,14 +1221,17 @@ static int shadow_emit_collected_result_specs(CEmit* out,
         if (prelude_only && !is_pre) continue;
         if (unique_only && is_pre) continue;
         shadow_result_name(seen_ok[i], seen_err[i], rname, sizeof(rname));
-        /* Stdlib already defines these (cc_io_error.h / py.cch) without
-         * a compact-name typedef the early spec could use. */
-        if (strcmp(seen_ok[i], "bool") == 0 &&
-            strcmp(seen_err[i], "CCIoError") == 0)
+        /* Header-owned: keep unwrap arms, do not re-DECL. Concrete-name
+         * split yields mangled ok (`CCDirIterptr`) which is not a C type. */
+        if (shadow_result_spec_is_header_owned(rname))
             continue;
-        if (strcmp(seen_ok[i], "CCPyptr") == 0 &&
-            strcmp(seen_err[i], "CCError") == 0)
-            continue;
+        {
+            size_t ol = strlen(seen_ok[i]);
+            if (ol >= 3 && strcmp(seen_ok[i] + ol - 3, "ptr") == 0 &&
+                strcmp(seen_ok[i], "voidptr") != 0 &&
+                strcmp(seen_ok[i], "charptr") != 0)
+                continue;
+        }
         /* Synthesized block: without a directive these physical lines keep
          * counting up from the last user #line and map past the source EOF
          * (test_async_line_map). Later user items re-anchor themselves. */
@@ -1321,19 +1506,9 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             need_chan = 1;
             /* Result-typed channel elems: ensure CCResult_* specs exist. */
             if (strncmp(items[i]->d, "CCResult_", 9) == 0) {
-                const char* rest = items[i]->d + 9;
-                const char* us = strrchr(rest, '_');
-                char ok[64], err[64];
-                if (us && us > rest) {
-                    size_t ol = (size_t)(us - rest);
-                    if (ol >= sizeof(ok)) ol = sizeof(ok) - 1;
-                    memcpy(ok, rest, ol);
-                    ok[ol] = 0;
-                    snprintf(err, sizeof(err), "%s", us + 1);
-                    if (!shadow_seen_result_add(seen_ok, seen_err, &nseen, ok,
-                                                err))
-                        return 0;
-                }
+                if (!shadow_seen_add_concrete(seen_ok, seen_err, &nseen,
+                                              items[i]->d))
+                    return 0;
             }
         }
         if (items[i]->kind == AST_STRUCT || items[i]->kind == AST_FN ||
@@ -1344,24 +1519,17 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 if (kid->kind == AST_CHAN_VAR) {
                     need_chan = 1;
                     if (strncmp(kid->d, "CCResult_", 9) == 0) {
-                        const char* rest = kid->d + 9;
-                        const char* us = strrchr(rest, '_');
-                        char ok[64], err[64];
-                        if (us && us > rest) {
-                            size_t ol = (size_t)(us - rest);
-                            if (ol >= sizeof(ok)) ol = sizeof(ok) - 1;
-                            memcpy(ok, rest, ol);
-                            ok[ol] = 0;
-                            snprintf(err, sizeof(err), "%s", us + 1);
-                            if (!shadow_seen_result_add(seen_ok, seen_err,
-                                                        &nseen, ok, err))
-                                return 0;
-                        }
+                        if (!shadow_seen_add_concrete(seen_ok, seen_err,
+                                                      &nseen, kid->d))
+                            return 0;
                     }
                 }
             }
         }
     }
+    if (!shadow_union_header_unwraps(seen_ok, seen_err, &nseen, pass_inc,
+                                    npass_inc))
+        return 0;
 
     /* Host-cc: builtins + TU-seen Result types (not a handwritten E allowlist). */
     if (kind == SHADOW_EMIT_C) {

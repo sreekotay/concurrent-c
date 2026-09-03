@@ -24,12 +24,12 @@ int main(int argc, char** argv) {
 
     const char* path = argc > 1 ? argv[1] : "examples/serdes/json/twitter.json";
     int K = argc > 2 ? atoi(argv[2]) : 200;
-    FILE* f = fopen(path, "rb");
-    if (!f) { eprintln("no corpus") !>; return 1; }
-    fseek(f, 0, SEEK_END); long fn = ftell(f); fseek(f, 0, SEEK_SET);
-    char* buf = (char*)malloc((size_t)fn + 1);
-    size_t rd = fread(buf, 1, (size_t)fn, f);
-    fclose(f);
+    CCFile inf = cc_file_open(path) !> @destroy;
+    size_t fn = inf.size() !>;
+    CCArena file_a = cc_arena_create((size_t)fn + 1);
+    CCSlice content = inf.read_all(file_a) !>;
+    char* buf = (char*)content.ptr;
+    size_t rd = content.len;
 
     CCArena ar = cc_arena_create((size_t)fn * 24 + (48 << 20));
     CCArena shp = cc_arena_create(16 << 20);

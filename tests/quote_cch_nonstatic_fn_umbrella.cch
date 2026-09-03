@@ -1,0 +1,10 @@
+#ifndef TESTS_QUOTE_CCH_NONSTATIC_FN_UMBRELLA_CCH
+#define TESTS_QUOTE_CCH_NONSTATIC_FN_UMBRELLA_CCH
+
+/* Interface umbrella. The nested leaf has a non-static body and no
+ * owner `.ccs`. */
+static int quote_nonstatic_fn_umbrella_decl(void) { return 1; }
+
+#include "quote_cch_nonstatic_fn_leaf.cch"
+
+#endif

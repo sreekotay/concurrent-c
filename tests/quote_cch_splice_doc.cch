@@ -3,7 +3,7 @@
 
 #include <ccc/std/prelude.cch>
 
-/* document.cch: impl-grade (statement unwrap), no owner .ccs. Listing
+/* document.cch: impl-grade (@errhandler), no owner .ccs. Listing
  * TUs splice this. The leaf names SpliceDoc*; extract must not try to
  * extract this file. */
 typedef struct {

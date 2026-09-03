@@ -9257,7 +9257,10 @@ static int shadow_rname_err_face(const char* rname, char* out, size_t cap) {
     int i;
     size_t n;
     static const char* faces[] = {"CCIoError", "CCError", "CCNetError",
-                                  "CCJsError", "CCPyError", NULL};
+                                  "CCJsError", "CCPyError",
+                                  "CC_I64ParseError", "CC_U64ParseError",
+                                  "CC_F64ParseError", "CC_BoolParseError",
+                                  NULL};
     if (!rname || !rname[0] || !out || !cap) return 0;
     out[0] = 0;
     for (i = 0; i < g_shadow_nrfns; i++) {

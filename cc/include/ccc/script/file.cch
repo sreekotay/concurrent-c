@@ -35,7 +35,8 @@ static inline size_t !>(CCError) cc_file_write_path(CCSlice path, CCSlice data) 
     if (!path.ptr) {
         return cc_err(CC_ERR_INVALID_ARG, "cc_file_write_path: bad path");
     }
-    CCFile file = cc_file_create(path) !>(e) {
+    CCFile file = {0};
+    file.create(path) !>(e) {
         return cc_err(CC_ERROR(CC_ERR_IO, cc_io_error_str(e)));
     };
     size_t n = cc_file_write(&file, data) !>(e) {

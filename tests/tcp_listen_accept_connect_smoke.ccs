@@ -28,10 +28,10 @@ int main(void) {
         return 1;
     }
 
-    CCListener ln = cc_tcp_listen(CC_SLICE_LIT(PORT)) !>(e) {
+    CCListener ln@(PORT) !>(e) {
         fprintf(stderr, "tcp_listen_accept_connect_smoke: listen err=%d\n", (int)e);
         return 1;
-    };
+    } @destroy;
 
     {
         CCNursery n = cc_nursery_create() !> @destroy;
@@ -43,13 +43,10 @@ int main(void) {
         };
         if (client.fd < 0) {
             fprintf(stderr, "tcp_listen_accept_connect_smoke: accept returned invalid fd\n");
-            cc_listener_close(&ln);
             return 3;
         }
         cc_socket_close(&client);
     }
-
-    cc_listener_close(&ln);
 
     {
         int saw_err = 0;

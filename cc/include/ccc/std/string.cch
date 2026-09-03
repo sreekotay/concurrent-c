@@ -146,10 +146,22 @@ typedef enum {
 } CC_BoolParseError;
 
 #ifndef CC_COMPTIME
+#ifndef CCResult_int64_t_CC_I64ParseError_DEFINED
+#define CCResult_int64_t_CC_I64ParseError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_int64_t_CC_I64ParseError, int64_t, CC_I64ParseError)
+#endif
+#ifndef CCResult_uint64_t_CC_U64ParseError_DEFINED
+#define CCResult_uint64_t_CC_U64ParseError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_uint64_t_CC_U64ParseError, uint64_t, CC_U64ParseError)
+#endif
+#ifndef CCResult_double_CC_F64ParseError_DEFINED
+#define CCResult_double_CC_F64ParseError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_double_CC_F64ParseError, double, CC_F64ParseError)
+#endif
+#ifndef CCResult_bool_CC_BoolParseError_DEFINED
+#define CCResult_bool_CC_BoolParseError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_bool_CC_BoolParseError, bool, CC_BoolParseError)
+#endif
 
 /* Stdlib-predeclared CCError result specs (owned by std/slice.cch, which
  * prelude includes first; duplicated here under the same guards so TUs

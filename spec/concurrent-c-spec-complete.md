@@ -221,11 +221,13 @@ pin-era lowerer never sees the magic line. Quoted `#include` of project
 faces still resolves from the original unit's directory (the `#line` path),
 not the cache directory. An included `.ccs` / `.cch` face with a unit
 header is stripped the same way — the bang is not a preprocessor directive.
-A local `.cch` that needs the including unit's pipeline — statement unwrap
-(`!>;`, `!> {`, `!>(e) {`), `@string`, `@errhandler`, and the like — is
-spliced into that unit when the include is written in a `.ccs` or inside
-an already-spliced face. `T !>(E)` on a declaration is result-type syntax
-and does not by itself force a splice. Method-call UFCS in an interface
+A local `.cch` that needs the including unit's pipeline — a non-`static`
+file-scope function definition, `@string`, `@errhandler`, `?>`, and the
+like — is spliced into that unit when the include is written in a `.ccs`
+or inside an already-spliced face. `T !>(E)` on a declaration is result-type
+syntax and does not by itself force a splice. Statement `!>` / `!>(e) {`
+in extractable text (`static inline` helpers) is rewritten in the lowered
+`.h` and does not force a splice. Method-call UFCS in an interface
 header does not force a splice from a `.ccs`. A quoted interface `.cch`
 extracts to a lowered `.h`. The extracted `.h` is host-cc input. A
 member call in an extracted inline that names a declared `Type_method`
@@ -5784,7 +5786,7 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 - Returning the empty slice means "no custom rewrite; fall back to ordinary receiver-type UFCS".
 - `.ufcs_sink` is the last-resort unresolved-method hook. Unresolved methods lower to `callee(&recv, "method", N, arg_wrap(a1), …)`. The sink is destination-aware: wherever a typed destination is visible the callee composes as `<callee>_<mangled dest>` when that function is declared (compose-then-verify; plain callee otherwise). `.ufcs_dynamic` and `.ufcs_dynamic2` are accepted spellings of `.ufcs_sink`.
 - `.niche` donates a bit pattern a valid instance never exhibits, so a `@variant(packed)` arm of this type can carry the discriminant (`spec/draft_variants.md`, packed layout). `cc_type_niche(size, align, offset, width, sentinel)` is the helper.
-- `.cast` is dest-convert. The handler receives the source type, the requested dest type, and `kind` (`implicit` or `explicit`) and returns a callee name, the UFCS pass tag, or empty (hard reject). Implicit sites (decl-init and `=`) ask the dest type only. Dest may insert a wrap; dest must not insert a peel. A slice dest may wrap `CCString` / `CCString*` as `as_slice`, or `CCVec_T` / `CCVec_T*` as `Name_as_slice` when the dest element is `T` (`int[:]` ← `Vec::[int]`; `char[:]` ← `Vec::[char]`). `v.as_slice()` remains the explicit spelling. For-in does not dest-cast: `@for (x in v)` walks the live vec.
+- `.cast` is dest-convert. The handler receives the source type, the requested dest type, and `kind` (`implicit` or `explicit`) and returns a callee name, the UFCS pass tag, or empty (hard reject). Implicit sites (decl-init, `=`, and a by-value slice call argument) ask the dest type only. Dest may insert a wrap; dest must not insert a peel. A slice dest may wrap `CCString` / `CCString*` as `as_slice`, `CCVec_T` / `CCVec_T*` as `Name_as_slice` when the dest element is `T` (`int[:]` ← `Vec::[int]`; `char[:]` ← `Vec::[char]`), or a bound `char*` / `const char*` as `cc_slice_cstr`. `v.as_slice()` remains the explicit spelling. For-in does not dest-cast: `@for (x in v)` walks the live vec.
 - `.len` names the extent (`cc_type_len_field` or `cc_type_len_call`). It returns `size_t` — naked, not Result. The hook checks the minimum (usually nothing). Ordinary sites may read `x.len` / `x.len()`; they may not store it. `T[n]` `.len` is the constexpr bound `n`.
 - `.access` is the compiler-internal walk slot (`cc_type_access_load` or `cc_type_access_call`). It returns `T` / the slot — naked, not Result. Users write `@for (v in s)` / `@for (&v in s) { … } !>;` / `@for (i, v in s)` / `@for (a, b in s, t) { … } !>;`, not `s.access(i)`. A slice header and a `T[n]` bound snapshot `.len` and the data pointer at entry. A grower (`CCVec_*`, `CCString`) snapshots the same way when the body does not grow, shrink, or rebind the subject. If the body can change the subject's extent, the condition re-reads `.len` and a write re-reads before the store; `i >= len` is `CC_ERR_INVALID_ARG` (`"for-in write"`) — that check is the mut walk's Result, not a skip and not `set()`. Point access stays `at` / `set` (Result). A user type joins for-in by registering both arms. `CCSlice` / `CCSlice_*`, `CCVec_*`, and `CCString` register both.
 - `.create` may be registered either as fixed callee strings (`cc_type_create_call(...)`, `cc_type_create_overloads(...)`) or as a callable hook via `cc_type_create_hook(...)`.
@@ -6098,10 +6100,11 @@ p->to_slice_n(n);   /* UFCS: char* → char_to_slice_n, const char* → const_ch
 **Rule (slice string-literal coerce):** A string literal whose destination is
 by-value `CCSlice`, `char[:]`, `char[:0]`, `CCSliceShared`, or `CCSliceUnique`
 — as a call argument or as a local/field initializer — lowers to
-`CC_SLICE_LIT(lit)` (sizeof-static; `len` excludes NUL). Pointer parameters
-(`const char *`, `char *`, including file `mode`) and non-literal `char[N]` /
-`char*` variables are not coerced — wrap variables with `p->to_slice_n(n)` /
-`char_to_slice_n(p, n)` / `cc_slice_cstr(p)`. This is not general `char[N]` UFCS.
+`CC_SLICE_LIT(lit)` (sizeof-static; `len` excludes NUL). A bound `char*` /
+`const char*` dest-casts to a by-value byte slice through `.cast` — the
+insert is `cc_slice_cstr`. Counted `char[N]` is not that insert; wrap those
+with `p->to_slice_n(n)` / `char_to_slice_n(p, n)`. Host C has no dest-cast.
+This is not general `char[N]` UFCS.
 
 #### 9.2.1 Core Methods
 
@@ -6480,8 +6483,9 @@ return cc_script_task_shcc(argc, argv, "tools/cc_perf_check.shcc");
 ```
 
 Path helpers take NUL-terminated borrows (`char[:0]` / `CCSlice` ABI). String
-literals coerce at by-value slice parameters; `char*` / `argv[i]` variables
-use `cc_slice_cstr(p)` or `p->to_slice_n(n)`. `cc_script_repo_root` walks from the
+literals coerce at by-value slice parameters; a bound `char*` dest-casts
+through `.cast` (`cc_slice_cstr`). Counted `char[N]` uses `p->to_slice_n(n)`.
+`cc_script_repo_root` walks from the
 current working directory (and, failing that, from `dirname(argv0)`) looking
 for a Concurrent-C repo marker (`cc/src/cc_main.c`,
 `perf/compiler_baseline.txt`, or `.git`). Returned path slices are
@@ -6787,8 +6791,8 @@ String literals used as slice values have static provenance and are sendable.
 Slice string-literal coerce (§9.2.0) wraps a bare literal at a by-value
 `CCSlice` / `char[:]` / `char[:0]` / `CCSliceShared` / `CCSliceUnique`
 parameter or initializer as `CC_SLICE_LIT(lit)`. Prefer `char[:0] s = "hello";`
-for sentinel borrows. Non-literal `char*` / `char[N]` variables still need
-`p->to_slice_n(n)` / `char_to_slice_n(p, n)` / `cc_slice_cstr(p)`.
+for sentinel borrows. A bound `char*` dest-casts through `.cast`
+(`cc_slice_cstr`). Counted `char[N]` uses `p->to_slice_n(n)`.
 
 **Closures:**
 

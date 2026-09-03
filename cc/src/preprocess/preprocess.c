@@ -15196,11 +15196,14 @@ static int cc__match_local_include_line(const char* line,
 /* ---------------------------------------------------------------------------
  * Implementation-grade local .cch headers.
  *
- * The eager .cch -> .h lowering above is interface-grade: it can rewrite type
- * syntax (`T !>(E)`, `char[:]`, containers) but cannot lower statement-level
- * CC constructs (`@errhandler`, `@defer`, `!>` unwrap statements, `@string`
- * templates), `@variant` declarations/uses, or anything that needs the TU's
- * comptime-executed type registry (packed variant arm sizes/niches).
+ * The eager .cch -> .h lowering above is interface-grade: it rewrites type
+ * syntax (`T !>(E)`, `char[:]`, containers) and statement `!>` / `!>(e) {…}`
+ * in inlines (typed `CCResult_*` accessors or `cc_is_err` / `cc_value`,
+ * never leftover `!>` or TU-level `__cc_uw_*`). It still cannot lower
+ * `@errhandler`, `@defer`, `@string` templates, `@variant` uses, or
+ * anything that needs the TU's comptime-executed type registry (packed
+ * variant arm sizes/niches). Statement `!>` is interface-grade (the
+ * header carries its own spec and rewritten unwrap).
  *
  * A local header that carries such constructs is therefore spliced RAW into
  * the including TU's text at the include site — before comptime preparation
@@ -15284,28 +15287,18 @@ static size_t cc__skip_variant_decl_at(const char* src, size_t n, size_t i) {
     return p;
 }
 
-/* `!>` statement unwrap (`!>;`, `!> {`, `!>(e) {`) vs result-type `T !>(E)`.
- * Both spell `!>(` — the type form is followed by a declarator, the
- * statement form by `{` or `;`. */
-static int cc__bang_unwrap_is_stmt(const char* src, size_t n, size_t i) {
-    size_t j, rp = 0;
-    if (!src || i + 1 >= n || src[i] != '!' || src[i + 1] != '>') return 0;
-    j = i + 2;
-    while (j < n && (src[j] == ' ' || src[j] == '\t' ||
-                     src[j] == '\n' || src[j] == '\r'))
-        j++;
-    if (j >= n || src[j] != '(') return 1;
-    if (!cc_find_matching_paren(src, n, j, &rp)) return 1;
-    j = cc_skip_ws_and_comments(src, n, rp + 1);
-    return (j < n && (src[j] == '{' || src[j] == ';'));
-}
+static int cc__cch_first_nonstatic_fn(const char* src, size_t n, char* name,
+                                      size_t cap);
 
 /* True when header text contains constructs only the full TU pipeline can
  * lower.  Comment/string aware.  `@comptime` blocks/functions,
  * `@typeview` / `@typehooks`, file-scope `@variant` decls, and
  * CC_GENERIC_FACTORY bodies are skipped (the interface pipeline strips
  * and harvests those the way stdlib headers do); `T !>(E)` result-type
- * syntax is allowed. */
+ * syntax is allowed. Statement `!>` / `!>(e) {` is interface-grade:
+ * header lower rewrites it. A non-`static` file-scope function
+ * definition is impl-grade — extract strips those bodies for guests,
+ * so the owner TU must splice them (`utf8.cch`, `ui_types.cch`). */
 static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
     static const char fac_kw[] = "CC_GENERIC_FACTORY";
     static const char fac_kw_ext[] = "CC_GENERIC_FACTORY_EXTEND";
@@ -15314,6 +15307,7 @@ static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
     size_t i = 0;
     CCScannerState scan;
     if (!src || n == 0) return 0;
+    if (cc__cch_first_nonstatic_fn(src, n, NULL, 0)) return 1;
     cc_scanner_init(&scan);
     while (i < n) {
         char c, c2;
@@ -15392,8 +15386,11 @@ static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
         }
         if (c == '?' && c2 == '>') return 1;
         if (c == '!' && c2 == '>') {
-            if (cc__bang_unwrap_is_stmt(src, n, i)) return 1;
-            i += 2; /* `T !>(E)` result-type syntax: interface pipeline handles it */
+            /* Statement `!>` / `!>(e) {…}` is interface-grade: header
+             * lower rewrites it and emits the Result spec in the `.h`.
+             * Bare `!>;` still needs a TU `@errhandler` — that `@` is
+             * already impl-grade. `T !>(E)` is type syntax. */
+            i += 2;
             continue;
         }
         i++;
@@ -15433,6 +15430,41 @@ static void cc__cch_grade_memo_set(const char* abs_src, int grade) {
     if (!g_cch_grade_memo[g_cch_grade_memo_count].path) return;
     g_cch_grade_memo[g_cch_grade_memo_count].grade = grade;
     g_cch_grade_memo_count++;
+}
+
+/* Comments, `#` lines, and whitespace only — no file-scope code.
+ * `c_pp_spike.cch` is this; `quote_cch_nested_impl_via_umbrella.cch`
+ * is not (it has a function). */
+static int cc__cch_text_is_include_only(const char* src, size_t n) {
+    size_t i = 0;
+    CCScannerState scan;
+    if (!src) return 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] == ' ' || src[i] == '\t' || src[i] == '\r') {
+            i++;
+            continue;
+        }
+        if (src[i] == '\n') {
+            scan.at_line_start = 1;
+            i++;
+            continue;
+        }
+        return 0;
+    }
+    return 1;
+}
+
+static int cc__cch_is_include_only(const char* abs_src) {
+    char* src = NULL;
+    size_t n = 0;
+    int only = 0;
+    if (!abs_src || cc__read_file_text(abs_src, &src, &n) != 0 || !src)
+        return 0;
+    only = cc__cch_text_is_include_only(src, n);
+    free(src);
+    return only;
 }
 
 /* Own-text only. A nested impl-grade `#include "leaf.cch"` does not make
@@ -15732,8 +15764,11 @@ static int cc__cch_extract_for_other_tus(const char* abs_cch) {
 
 /* File-scope `foo(...) { ... }` → `foo(...);` so a sibling-backed `.cch`
  * can extract to a host `.h`. Bodies lower in the defining `.ccs`.
+ * `static inline` bodies stay — guests need the definition in the `.h`.
  * Bodies under `#if` / `#ifdef` stay — host cpp of this TU selects them
  * (`#define FLAG` before the include). Inner `#if` in a body keeps it. */
+static int cc__fn_decl_is_static_inline(const char* src, size_t n, size_t at,
+                                        size_t fn_end);
 static int cc__span_has_bol_if(const char* src, size_t lo, size_t hi) {
     size_t i = lo;
     int bol = 1;
@@ -15823,7 +15858,8 @@ static char* cc__strip_cch_function_bodies(const char* src, size_t n) {
             size_t body_r = 0;
             if (cc_find_matching_brace(src, n, i, &body_r)) {
                 int keep = (pp_depth > 0) ||
-                           cc__span_has_bol_if(src, i, body_r + 1);
+                           cc__span_has_bol_if(src, i, body_r + 1) ||
+                           cc__fn_decl_is_static_inline(src, n, i, body_r + 1);
                 if (!keep) {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, ";");
                     i = body_r + 1;
@@ -15938,13 +15974,16 @@ static int cc__file_scope_fn_def_end(const char* src, size_t n, size_t at,
 }
 
 /* Definitions the extract stripped: file-scope function bodies and data
- * with initializers. Not a second header — no include guard, typedefs,
- * or prototypes. `#include` stays; a second include is inert. */
+ * with initializers. `static inline` stays in the extract — do not paste
+ * a second definition into the owner TU. Not a second header — no
+ * include guard, typedefs, or prototypes. `#include` stays; a second
+ * include is inert. */
 static char* cc__cch_keep_owner_defs(const char* src, size_t n) {
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     size_t i = 0;
     int found = 0;
+    int skipped_inline = 0;
     CCScannerState scan;
     if (!src || n == 0) return NULL;
     cc_scanner_init(&scan);
@@ -15969,6 +16008,11 @@ static char* cc__cch_keep_owner_defs(const char* src, size_t n) {
             continue;
         }
         if (cc__file_scope_fn_def_end(src, n, i, &fn_end)) {
+            if (cc__fn_decl_is_static_inline(src, n, i, fn_end)) {
+                skipped_inline = 1;
+                i = fn_end;
+                continue;
+            }
             cc_sb_append(&out, &out_len, &out_cap, src + i, fn_end - i);
             if (fn_end > i && src[fn_end - 1] != '\n')
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
@@ -16009,6 +16053,8 @@ static char* cc__cch_keep_owner_defs(const char* src, size_t n) {
     }
     if (!found) {
         free(out);
+        /* Extract kept every `static inline`; owner `.h` already has them. */
+        if (skipped_inline) return strdup("\n");
         return NULL;
     }
     return out;
@@ -16200,6 +16246,43 @@ static int cc__fn_decl_has_static(const char* src, size_t n, size_t at,
         q++;
     }
     return 0;
+}
+
+static int cc__fn_decl_has_inline(const char* src, size_t n, size_t at,
+                                  size_t fn_end) {
+    size_t lo = at;
+    size_t q;
+    CCScannerState scan;
+    if (!src || at >= n) return 0;
+    while (lo > 0) {
+        char c = src[lo - 1];
+        if (c == ';' || c == '}') break;
+        if (c == '\n') {
+            size_t j = lo - 1;
+            while (j > 0 && (src[j - 1] == ' ' || src[j - 1] == '\t')) j--;
+            if (j > 0 && src[j - 1] == '#') break;
+            if (j == 0 || src[j - 1] == '\n') break;
+        }
+        lo--;
+    }
+    cc_scanner_init(&scan);
+    q = lo;
+    while (q < fn_end && q < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &q)) continue;
+        if (cc__kw_at(src, n, q, "inline") ||
+            cc__kw_at(src, n, q, "__inline") ||
+            cc__kw_at(src, n, q, "__inline__"))
+            return 1;
+        if (src[q] == '{') return 0;
+        q++;
+    }
+    return 0;
+}
+
+static int cc__fn_decl_is_static_inline(const char* src, size_t n, size_t at,
+                                        size_t fn_end) {
+    return cc__fn_decl_has_static(src, n, at, fn_end) &&
+           cc__fn_decl_has_inline(src, n, at, fn_end);
 }
 
 /* 1 if a file-scope function is not `static` (fills name). */
@@ -18161,6 +18244,20 @@ static const char* cc__adopt_lowered_h(const char* abs_src, const char* lowered_
     return g_lowered_local_headers[i].lowered_path;
 }
 
+/* Extracting `c_pp_spike.cch` (include-only) nests `pp_ast_core.cch`.
+ * Those leaves have no sibling `.ccs`; the in-progress umbrella is the
+ * owner-TU context. A coded umbrella (nested-impl-via-umbrella fail)
+ * is not include-only, so this stays 0. */
+static int cc__in_progress_include_only_umbrella(void) {
+    size_t i;
+    for (i = 0; i < g_lowered_local_header_count; i++) {
+        const char* path = g_lowered_local_headers[i].source_path;
+        if (!g_lowered_local_headers[i].in_progress || !path) continue;
+        if (cc__cch_is_include_only(path)) return 1;
+    }
+    return 0;
+}
+
 static const char* cc__lower_local_cch_header(const char* source_path) {
     char abs_src[PATH_MAX];
     char lowered_path[PATH_MAX];
@@ -18227,7 +18324,8 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     }
     if (cc__read_file_text(abs_src, &input, &input_len) != 0)
         CC__LOWER_GIVE_UP("read");
-    if (cc__local_cch_is_impl_grade(abs_src) && !cc__cch_has_owner_ccs(abs_src)) {
+    if (cc__local_cch_is_impl_grade(abs_src) && !cc__cch_has_owner_ccs(abs_src) &&
+        !cc__in_progress_include_only_umbrella()) {
         fprintf(stderr,
                 "cc: error: cannot extract impl-grade header %s "
                 "(move bodies to an owner .ccs — same stem or stem_chapter "
@@ -18280,8 +18378,9 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
             return NULL;
         }
     }
-    /* Owner impl bodies carry `?>` / statement `!>` the header subset
-     * cannot parse. Guests only need prototypes — strip before lower. */
+    /* Owner impl bodies carry `@errhandler` / `@defer` / `?>` the
+     * header subset cannot parse. Guests only need prototypes — strip
+     * before lower. */
     if (cc__local_cch_is_impl_grade(abs_src) && cc__cch_has_owner_ccs(abs_src)) {
         const char* face = rewritten ? rewritten : input;
         size_t face_n = rewritten ? strlen(rewritten) : input_len;
@@ -18559,19 +18658,25 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                     }
                     if (splice_child && !cc__cch_has_owner_ccs(child_abs) &&
                         !g_rewrite_allow_impl_splice) {
-                        /* Unowned impl-grade while extracting an interface
-                         * umbrella: the nested leaf must not sneak through
-                         * as a leftover `.h`. An owner `.ccs` (or an
-                         * already-spliced impl face) still splices below. */
-                        fprintf(stderr,
-                                "cc: error: cannot extract impl-grade "
-                                "header %s (move bodies to an owner "
-                                ".ccs, or #include it from that "
-                                ".ccs)\n",
-                                child_abs);
-                        g_local_cch_lower_failed = 1;
-                        free(out);
-                        return NULL;
+                        /* Unowned impl under an include-only umbrella
+                         * (`c_pp_spike.cch` → `pp_ast_core.cch`): extract
+                         * the leaf to `.h` so the owner TU includes
+                         * lowered C. An umbrella with its own decls still
+                         * fails (nested-impl-via-umbrella). */
+                        if (cc__cch_is_include_only(current_path) ||
+                            cc__in_progress_include_only_umbrella())
+                            splice_child = 0;
+                        else {
+                            fprintf(stderr,
+                                    "cc: error: cannot extract impl-grade "
+                                    "header %s (move bodies to an owner "
+                                    ".ccs, or #include it from that "
+                                    ".ccs)\n",
+                                    child_abs);
+                            g_local_cch_lower_failed = 1;
+                            free(out);
+                            return NULL;
+                        }
                     }
                     if (splice_child && g_rewrite_allow_impl_splice) {
                         if (cc__cch_check_per_tu_face(child_abs) != 0) {

@@ -27,8 +27,7 @@ that function exists).
 | `@destroy` | Same defer, on **successful declaration construction** |
 
 ```c
-FILE* f = fopen(path, "r");
-@defer fclose(f);
+CCFile f = cc_file_open(path) !> @destroy;
 
 /* !> unwraps (or routes E); @destroy runs if construction succeeded */
 CCNursery n = cc_nursery_create() !> @destroy;

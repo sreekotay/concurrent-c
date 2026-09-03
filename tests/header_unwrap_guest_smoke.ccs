@@ -1,0 +1,10 @@
+#include "header_unwrap_inline.cch"
+
+/* This TU never unwraps HdrIdxErr itself. The header inline does. */
+int main(void) {
+    HdrDoc d;
+    d.n = 3;
+    if (hdr_prev_sel(&d, 1) != 1) return 1;
+    if (hdr_prev_sel(&d, 99) != -1) return 1;
+    return 0;
+}

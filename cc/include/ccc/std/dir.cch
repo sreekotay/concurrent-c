@@ -47,8 +47,14 @@ static inline bool cc_dir_entry_is_symlink(const CCDirEntry* e) {
 typedef struct CCDirIter CCDirIter;
 
 /* Result types - use CC_DECL_RESULT_SPEC for canonical names with helper functions */
+#ifndef CCResult_CCDirIterptr_CCIoError_DEFINED
+#define CCResult_CCDirIterptr_CCIoError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_CCDirIterptr_CCIoError, CCDirIter*, CCIoError)
+#endif
+#ifndef CCResult_CCDirEntry_CCIoError_DEFINED
+#define CCResult_CCDirEntry_CCIoError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_CCDirEntry_CCIoError, CCDirEntry, CCIoError)
+#endif
 #ifndef CCResult_CCSliceArray_CCIoError_DEFINED
 #define CCResult_CCSliceArray_CCIoError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_CCSliceArray_CCIoError, CCSliceArray, CCIoError)

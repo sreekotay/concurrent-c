@@ -203,10 +203,12 @@ no UFCS. A string literal whose destination is by-value `CCSlice`, `char[:]`,
 `char[:0]`, `CCSliceShared`, or `CCSliceUnique` — call argument or
 local/field initializer — lowers to `CC_SLICE_LIT(lit)` (sizeof-static;
 `len` excludes NUL). Prefer `char[:0] s = "hi"` for sentinel borrows.
-Pointer parameters and non-literal `char[N]` / `char*` variables are not
-coerced — use `p->to_slice_n(n)` / `char_to_slice_n(p, n)` / `cc_slice_cstr(p)`.
-Host-included C headers may spell the same ABI as `CCSlice`; Concurrent-C
-path and CLI string surfaces are `char[:0]` (NUL-terminated borrow).
+A bound `char*` / `const char*` (and signedness variants) dest-casts to
+a by-value byte slice through `.cast` — the insert is `cc_slice_cstr`
+(NUL-terminated trust boundary). Counted `char[N]` is not that insert;
+use `p->to_slice_n(n)` / `char_to_slice_n(p, n)`. Host C has no dest-cast;
+call `cc_slice_cstr(p)` there. Concurrent-C path and CLI string surfaces
+are `char[:0]` (NUL-terminated borrow).
 Ordinary slice-family sites deny field stores; see `draft_facets.md` §7b.
 `cc_adopt` registers the supplied deleter and produces a unique,
 non-transferable slice. `cc_slice_destroy` invokes that deleter at most once
@@ -597,16 +599,18 @@ Closed is `CC_FILE_CLOSED` (`fd == -1`). `cc_file_close` is idempotent and
 does not flush or sync.
 
 Birth is Result-shaped. `cc_file_open` is read. `cc_file_create` is
-write+trunc. `@()` on `CCFile` is open (one argument):
+write+trunc into an empty handle (`{0}` or `CC_FILE_CLOSED`). An
+already-open fd is Err. `@()` on `CCFile` is open (one argument):
 
 ```c
 CCFile in@(path) !> @destroy;
-CCFile out = cc_file_create(path) !> @destroy;
+CCFile out = CC_FILE_CLOSED @destroy;
+out.create(path) !>;
 ```
 
 ```c
 CCFile !>(CCIoError) cc_file_open(char[:0] path);
-CCFile !>(CCIoError) cc_file_create(char[:0] path);
+void !>(CCIoError) cc_file_create(CCFile *file, char[:0] path);
 void cc_file_close(CCFile *file);
 CCSlice !>(CCIoError) cc_file_read_all(CCFile *file, CCArena arena);
 CCSlice !>(CCIoError) cc_file_read(CCFile *file, CCArena arena, size_t n);
@@ -1517,11 +1521,12 @@ until the nursery is cancelled (or accept fails) and borrow-invokes `on_conn`
 with `CCSocket *` for the duration of that call — copy or
 `n.spawn(async_fn(...))` before returning; serve owns the closure and drops
 it when the loop ends. `cc_socket_set_nodelay` is TCP_NODELAY (0 on success,
--1 on failure). Idiomatic use is unwrap sugar on the greppable `cc_*` names:
+-1 on failure). `CCListener` registers `.create` as `cc_tcp_listen` and
+`.destroy` as `cc_listener_close` (idempotent). Idiomatic use:
 
 ```c
-CCListener ln = cc_tcp_listen(addr) !>;
-CCSocket sock = cc_listener_accept(&ln) !>;
+CCListener ln@(addr) !> @destroy;
+CCSocket sock = ln.accept() !>;
 CCSocket client = cc_tcp_connect(addr, len) !>;
 ```
 

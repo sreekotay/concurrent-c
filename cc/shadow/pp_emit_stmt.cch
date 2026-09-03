@@ -563,6 +563,7 @@ static int shadow_dbody_is_stmt(AstNode* s) {
     if (!s) return 0;
     if (s->kind == AST_UFCS_EXPR || s->kind == AST_UFCS_STMT) return 0;
     if (s->kind == AST_SPAWN_CLOSURE) return 0;
+    if (s->kind == AST_ERRHANDLER) return 0;
     return 1;
 }
 
@@ -7854,8 +7855,18 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         char init[2048];
         char raw[2048];
         int is_ptr = (st->d[0] == '*');
-        int has_bang = 0;
+        int has_bang = (st->f[0] && strstr(st->f, "bang") != NULL);
+        AstNode* site_eh = NULL;
         AstNode* cl = shadow_expr_closure_kid(st);
+        {
+            int k;
+            for (k = 0; k < st->ndbody; k++) {
+                if (st->dbody[k] && st->dbody[k]->kind == AST_ERRHANDLER) {
+                    site_eh = st->dbody[k];
+                    break;
+                }
+            }
+        }
         /* Dest type supplies type formals (block_on) and pointer elems (allocT). */
         const char* formal = st->a[0] ? st->a : NULL;
         snprintf(raw, sizeof(raw), "%s", st->c);
@@ -7921,6 +7932,41 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 is_res = cname[0] &&
                          (shadow_rfn_err(cname) != NULL ||
                           cc_result_fn_registry_contains(cname, clen));
+            }
+            if (site_eh) {
+                const char* bind = site_eh->b[0] ? site_eh->b : "e";
+                char i1[80], i2[80];
+                ShadowTplBind env[7];
+                shadow_indent_nest(i1, sizeof(i1), indent, 1);
+                shadow_indent_nest(i2, sizeof(i2), indent, 2);
+                env[0] = (ShadowTplBind){ "indent", SHADOW_TPL_IDENT, indent };
+                env[1] = (ShadowTplBind){ "i1", SHADOW_TPL_IDENT, i1 };
+                env[2] = (ShadowTplBind){ "i2", SHADOW_TPL_IDENT, i2 };
+                env[3] = (ShadowTplBind){ "ty_lhs", SHADOW_TPL_IDENT, ty_lhs };
+                env[4] = (ShadowTplBind){ "name", SHADOW_TPL_IDENT, st->b };
+                env[5] = (ShadowTplBind){ "call", SHADOW_TPL_EXPR, init };
+                env[6] = (ShadowTplBind){ "bind", SHADOW_TPL_IDENT, bind };
+                if (!shadow_tpl_emit(out, k_tpl_bang_assign_open, env, 7))
+                    return 0;
+                {
+                    int saved_via = ctx ? ctx->err_via_bang : 0;
+                    int uc = ctx && ctx->goto_cleanup;
+                    int k;
+                    if (ctx) ctx->err_via_bang = 1;
+                    if (!shadow_resync_line(out, ctx, i2)) {
+                        if (ctx) ctx->err_via_bang = saved_via;
+                        return 0;
+                    }
+                    for (k = 0; k < site_eh->nbody; k++) {
+                        if (!shadow_emit_stmt_ctx(site_eh->body[k], out, ctx,
+                                                  i2, uc)) {
+                            if (ctx) ctx->err_via_bang = saved_via;
+                            return 0;
+                        }
+                    }
+                    if (ctx) ctx->err_via_bang = saved_via;
+                }
+                return shadow_tpl_emit(out, k_tpl_bang_assign_close, env, 7);
             }
             if (is_res)
                 return shadow_emit_try_assign(out, ctx, indent, ty_lhs, st->b,

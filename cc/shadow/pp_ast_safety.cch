@@ -3431,6 +3431,13 @@ static AstNode* shadow_safe_eh(ShadowSafeCtx* ctx) {
     return ctx->eh_stack[ctx->neh - 1];
 }
 
+/* Site `!>(e){…}` shares AST_ERRHANDLER with `@errhandler` but is not
+ * a scope handler. Bare `!>;` in its body dispatches to the enclosing
+ * `@errhandler` — that is composition, not re-entry. */
+static int shadow_safe_eh_is_site(AstNode* eh) {
+    return eh && eh->kind == AST_ERRHANDLER && eh->e[0] == 's';
+}
+
 static void shadow_safe_push_eh(ShadowSafeCtx* ctx, AstNode* eh) {
     if (!ctx || !eh) return;
     if (ctx->neh >= SHADOW_SAFE_EH_CAP) {
@@ -3799,7 +3806,7 @@ static void shadow_safe_diag_bare_bang_reenter(ShadowSafeCtx* ctx, AstNode* st) 
     if (!ctx || !st || ctx->err) return;
     for (i = 0; i < ctx->neh; i++) {
         AstNode* eh = ctx->eh_stack[i];
-        if (!eh) continue;
+        if (!eh || shadow_safe_eh_is_site(eh)) continue;
         if (shadow_safe_node_in_tree(eh, st) && st != eh) {
             shadow_safe_err_at_col(
                 ctx, st, 1,
@@ -4370,9 +4377,23 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
     case AST_VAL_DESTROY:
         shadow_safe_on_typed_init(ctx, st);
         if (!ctx->err) shadow_safe_check_variant_text(ctx, st, st->c);
-        /* `T x = call() !> @destroy` — bang uses enclosing @errhandler. */
-        if (!ctx->err && st->c[0] && strstr(st->c, "!>") != NULL)
-            shadow_safe_require_eh(ctx, st, NULL);
+        /* `T x = call() !> @destroy` — bang uses enclosing @errhandler.
+         * `T x@(args) !>(e){…} @destroy` parks the site handler on dbody. */
+        {
+            int k;
+            int site = 0;
+            for (k = 0; k < st->ndbody && !site; k++)
+                if (st->dbody[k] && st->dbody[k]->kind == AST_ERRHANDLER)
+                    site = 1;
+            if (!ctx->err && !site &&
+                ((st->c[0] && strstr(st->c, "!>") != NULL) ||
+                 (st->f[0] && strstr(st->f, "bang") != NULL)))
+                shadow_safe_require_eh(ctx, st, NULL);
+            for (k = 0; k < st->ndbody && !ctx->err; k++) {
+                if (st->dbody[k] && st->dbody[k]->kind == AST_ERRHANDLER)
+                    shadow_safe_walk_stmt(ctx, st->dbody[k]);
+            }
+        }
         if (!ctx->err) shadow_safe_walk_attached_closures(ctx, st, 0);
         break;
     case AST_ASSIGN:
@@ -4525,7 +4546,8 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
         break;
     }
     case AST_ERRHANDLER:
-        shadow_safe_push_eh(ctx, st);
+        if (!shadow_safe_eh_is_site(st))
+            shadow_safe_push_eh(ctx, st);
         shadow_safe_walk_list(ctx, st->body, st->nbody);
         break;
     case AST_ERR_SYNTAX:

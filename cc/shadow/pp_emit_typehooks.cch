@@ -1296,6 +1296,7 @@ static int shadow_cast_is_slice_dest(const char* dest) {
         strcmp(dest, "CCSliceUnique") == 0 ||
         strcmp(dest, "CCSliceShared") == 0)
         return 1;
+    if (strncmp(dest, "char[:", 6) == 0) return 1;
     return strncmp(dest, "CCSlice_", 8) == 0 && dest[8] != 0 &&
            strcmp(dest, "CCSlicePacked") != 0;
 }
@@ -1375,6 +1376,9 @@ static int shadow_cast_infer_src(const char* raw, char* src, size_t cap) {
     while (cc_is_ident_char(*p) && n + 1 < sizeof(ident))
         ident[n++] = *p++;
     ident[n] = 0;
+    while (*p == ' ' || *p == '\t' || *p == ')') p++;
+    /* Prefix of a larger expr (`p->to_slice_n(n)`) is not the source type. */
+    if (*p) return 0;
     b = shadow_bind_lookup(ident);
     if (!b || !b->ty[0]) return 0;
     if (took_addr)

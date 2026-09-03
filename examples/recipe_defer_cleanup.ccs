@@ -15,16 +15,14 @@
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/stdio.cch>
-#include <stdio.h>
 
 /* Writes two lines to `path`. If `inject_error` is nonzero, returns an
  * error after the first line — exercising the @defer(err) rollback. */
 void !>(CCError) write_report(const char* path, int inject_error) {
     @errhandler(CCError e) cc_error_exit(e);
-    FILE* f = fopen(path, "w");
-    if (!f) return cc_err(CC_ERR_IO, "fopen failed");
+    CCFile f = CC_FILE_CLOSED @destroy;
+    f.create(path) !>;
 
-    @defer fclose(f);                                   /* always runs */
     @defer(ok) {
         println(@string(`  committed ${path}`, @scratch)) !>;
     }
@@ -32,9 +30,9 @@ void !>(CCError) write_report(const char* path, int inject_error) {
         println(@string(`  rolled back ${path}`, @scratch)) !>;
     }
 
-    if (fputs("line 1\n", f) < 0) return cc_err(CC_ERR_IO, "write 1 failed");
+    f.write("line 1\n") !>;
     if (inject_error) return cc_err(CC_ERR_INVALID_ARG, "injected failure");
-    if (fputs("line 2\n", f) < 0) return cc_err(CC_ERR_IO, "write 2 failed");
+    f.write("line 2\n") !>;
 
     return cc_ok();
 }

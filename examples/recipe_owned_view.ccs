@@ -108,7 +108,7 @@ int main(void) {
     };
 
     char buf[4] = {'n', 'o', 'p', 'e'};
-    char[:] raw = cc_slice_from_buffer(buf, 4);
+    char[:] raw = buf.to_slice_n(4);
     Doc d2 = {0} @destroy;
     d2.from_view(raw) !>(e) {
         println(@string(`untracked refused`, @scratch)) !>;

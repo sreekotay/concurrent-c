@@ -24,7 +24,7 @@ int main(void) {
     CCArena a = @create(kilobytes(64)) @destroy;
     struct AsNtWrap w = {0};
     w.tag = 2;
-    w.file = cc_file_create(CC_SLICE_LIT("tmp/as_nontypedef_struct_smoke.txt")) !>;
+    w.create("tmp/as_nontypedef_struct_smoke.txt") !>;
     assert(w.file.fd >= 0);
     w.close();
     assert(w.file.fd < 0);

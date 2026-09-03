@@ -276,9 +276,8 @@ Nursery = wait → body → free. Nested struct fields with their own hooks run
 after the outer hook.
 
 ```c
-FILE* f = fopen(path, "w");
-if (!f) return cc_err(CC_ERR_IO, "fopen failed");
-@defer fclose(f);                 // always
+CCFile f = CC_FILE_CLOSED @destroy;
+f.create(path) !>;
 @defer(ok)  commit(path);         // success path only
 @defer(err) rollback(path);       // error return only
 
@@ -964,9 +963,11 @@ Jupyter/Colab: `from cc_node import require`).
 #include "leaf.cch"                // local face; nested .cch is fine
 ```
 
-A local `.cch` with statement unwrap (`!>(e) {`) is spliced into the
-including unit only when that unit is a `.ccs` (or an already-spliced
-impl face). `T !>(E)` on a declaration does not force that, and neither
+A local `.cch` with a non-`static` file-scope function body, `@errhandler`,
+`?>`, or other impl-only syntax is spliced into the including unit only
+when that unit is a `.ccs` (or an already-spliced impl face). Statement
+`!>` in a `static inline` extracts (header lower rewrites it). `T !>(E)`
+on a declaration does not force a splice, and neither
 does a `.foo(` in an interface header included from a `.ccs`. A
 `@typehooks` / `@typeview` face still extracts to a lowered `.h`; callers
 keep `char[:]` argument wrap and the proto's Result error type from the

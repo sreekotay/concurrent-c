@@ -45,20 +45,18 @@ static void handle_client(CCSocket sock) {
         println(@string(`client connected: ${peer}`, @scratch)) !>;
     }
 
-    for (;;) {
-        a.reset();
-        char[:] data;
-        if (!cc_io_avail(sock.read(a, 1024, &data))) {
-            println("client disconnected") !>;
-            break;
-        }
+    char[:] data;
+    while (sock.read(a, 1024, &data) !>) {
         println(@string(`echo ${data.len} bytes`, @scratch)) !>;
         size_t written = sock.write(data.ptr, data.len) !>(e) {
             (void)e;
-            break;
+            sock.close();
+            return;
         };
         (void)written;
+        a.reset();
     }
+    println("client disconnected") !>;
     sock.close();
 }
 
@@ -86,7 +84,7 @@ static void run_test_client(void) {
         return;
     };
     if (!ok) got = 0;
-    char[:] got_slice = cc_slice_from_buffer(buf, got);
+    char[:] got_slice = buf.to_slice_n(got);
     println(@string(`test client got ${got} bytes: ${got_slice}`, @scratch)) !>;
     sock.close();
 }
@@ -108,10 +106,10 @@ int main(int argc, char** argv) {
 
     bool test_mode = parse_test_flag(argc, argv);
 
-    CCListener ln = cc_tcp_listen(CC_SLICE_LIT(PORT)) !>(e) {
+    CCListener ln@(PORT) !>(e) {
         println(@string(`listen error: ${e}`, @scratch)) !>;
         return 1;
-    };
+    } @destroy;
     const char* mode = test_mode ? "test" : "demo";
     println(@string(`listening on ${PORT} (${mode} mode)`, @scratch)) !>;
 
@@ -134,7 +132,6 @@ int main(int argc, char** argv) {
     } !>;
     h.wait() !>;
 
-    ln.close();
     println("server done") !>;
     return 0;
 }

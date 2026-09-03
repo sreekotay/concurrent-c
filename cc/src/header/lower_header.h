@@ -3,6 +3,9 @@
  *
  * Converts .cch (CC Header) files to .h (C Header) files by:
  * - Rewriting T!>(E) -> CCResult_T_E + guarded CC_DECL_RESULT_SPEC
+ * - Rewriting expression/statement `!>` / `!>(e) {…}` in inlines (typed
+ *   accessors or `cc_is_err` / `cc_value`; never leftover `!>` or TU-level
+ *   `__cc_uw_*`) and emitting a spec for every unwrap pair in that header
  * - Other CC syntax transformations as needed
  *
  * (The retired T? -> CCOptional_T lowering used to live here;

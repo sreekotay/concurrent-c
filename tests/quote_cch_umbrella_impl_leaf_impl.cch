@@ -3,7 +3,7 @@
 
 #include <ccc/std/prelude.cch>
 
-/* Own-text impl-grade: statement unwrap needs the including unit. */
+/* Own-text impl-grade: `@errhandler` needs the including unit. */
 static int !>(CCError) umbrella_impl_leaf_step(int x) {
     @errhandler(CCError e) { return cc_err(e); }
     return cc_ok(x);

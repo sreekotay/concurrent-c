@@ -452,15 +452,15 @@ static double now_ms(void) {
 }
 
 static int write_ppm(const char* path, const uint8_t* fb, int w, int h) {
-    FILE* f = fopen(path, "wb");
-    if (!f)
+    CCFile f = CC_FILE_CLOSED @destroy;
+    f.create(path) !>(e) { (void)e; return 0; };
+    char hdr[64];
+    int hn = snprintf(hdr, sizeof hdr, "P6\n%d %d\n255\n", w, h);
+    size_t payload = (size_t)w * (size_t)h * 3u;
+    if (hn <= 0 || (size_t)hn >= sizeof hdr)
         return 0;
-    fprintf(f, "P6\n%d %d\n255\n", w, h);
-    if (fwrite(fb, 1, (size_t)w * (size_t)h * 3u, f) != (size_t)w * (size_t)h * 3u) {
-        fclose(f);
-        return 0;
-    }
-    fclose(f);
+    f.write(hdr.to_slice_n((size_t)hn)) !>(e) { (void)e; return 0; };
+    f.write(unsigned_char_to_slice_n(fb, payload)) !>(e) { (void)e; return 0; };
     return 1;
 }
 

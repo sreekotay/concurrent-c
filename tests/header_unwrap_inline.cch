@@ -1,0 +1,30 @@
+#ifndef TESTS_HEADER_UNWRAP_INLINE_CCH
+#define TESTS_HEADER_UNWRAP_INLINE_CCH
+
+#include <ccc/cc_result.cch>
+
+typedef struct {
+    int code;
+} HdrIdxErr;
+
+typedef struct {
+    int n;
+} HdrDoc;
+
+static inline int !>(HdrIdxErr) hdr_idx_at(const HdrDoc* d, int off) {
+    HdrIdxErr e;
+    if (!d || off < 0 || off >= d->n) {
+        e.code = 1;
+        return cc_err(e);
+    }
+    return cc_ok(off);
+}
+
+/* First HdrIdxErr unwrap in this include graph — must carry its own spec
+ * and a rewritten unwrap when this face is lowered as a header. */
+static inline int hdr_prev_sel(const HdrDoc* d, int off) {
+    int v = hdr_idx_at(d, off) !> { return -1; };
+    return v;
+}
+
+#endif

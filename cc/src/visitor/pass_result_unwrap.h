@@ -35,4 +35,14 @@ int cc__rewrite_result_unwrap_with_options(const CCVisitorCtx* ctx,
                                            size_t* out_len,
                                            int skip_statement_bang);
 
+/* Same as `cc__rewrite_result_unwrap`, but emit `cc_is_err` / `cc_value` /
+ * `cc_error` (and typed `CCResult_*_is_err` when the callee is known)
+ * instead of TU-level `__cc_uw_*`. For `.cch` → `.h` so a header unwrap
+ * does not depend on the includer's `_Generic` roster. */
+int cc__rewrite_result_unwrap_header(const CCVisitorCtx* ctx,
+                                     const char* in_src,
+                                     size_t in_len,
+                                     char** out_src,
+                                     size_t* out_len);
+
 #endif /* CC_PASS_RESULT_UNWRAP_H */

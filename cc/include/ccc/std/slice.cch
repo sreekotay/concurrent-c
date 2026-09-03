@@ -349,8 +349,9 @@ static inline int64_t !>(CCError) cc_mul_i64_checked(int64_t a, int64_t b) {
     (CCSlice_materialize_in)((s), CC__ARENA_HANDLE(a))
 
 /* `.cast` on CCSlice / CCSlice_*: dest may wrap a matching owner as
- * `as_slice` (a view header). Dest must not peel. For-in does not use
- * this — a vec walk stays on the live grower. */
+ * `as_slice` (a view header), or a NUL-terminated `char*` as
+ * `cc_slice_cstr`. Dest must not peel. For-in does not use this — a
+ * vec walk stays on the live grower. */
 static inline void cc__slice_cast_trim(const char **p, size_t *n) {
     while (*n && (**p == ' ' || **p == '\t')) {
         (*p)++;
@@ -404,6 +405,37 @@ static inline int cc__slice_cast_is_byte_slice(CCSlice dest) {
     if (n == 7 && cc__slice_cast_bytes_eq(p, "CCSlice", 7)) return 1;
     if (n == 13 && cc__slice_cast_bytes_eq(p, "CCSliceUnique", 13)) return 1;
     if (n == 13 && cc__slice_cast_bytes_eq(p, "CCSliceShared", 13)) return 1;
+    /* Surface spellings before rewrite: char[:], char[:0], char[:!], … */
+    if (n >= 6 && cc__slice_cast_bytes_eq(p, "char[:", 6)) return 1;
+    return 0;
+}
+
+/* NUL-terminated C string pointer — dest-cast inserts cc_slice_cstr.
+ * Counted char[N] is not this (no trailing *). */
+static inline int cc__slice_cast_is_cstr(CCSlice src) {
+    const char *p = (const char *)src.ptr;
+    size_t n = src.len;
+    if (!p || !n) return 0;
+    cc__slice_cast_trim_kw(&p, &n);
+    if (!n || p[n - 1] != '*') return 0;
+    n--;
+    cc__slice_cast_trim(&p, &n);
+    for (;;) {
+        cc__slice_cast_trim(&p, &n);
+        if (n >= 6 && cc__slice_cast_bytes_eq(p + n - 6, " const", 6)) {
+            n -= 6;
+            continue;
+        }
+        if (n >= 9 && cc__slice_cast_bytes_eq(p + n - 9, " volatile", 9)) {
+            n -= 9;
+            continue;
+        }
+        break;
+    }
+    cc__slice_cast_trim(&p, &n);
+    if (n == 4 && cc__slice_cast_bytes_eq(p, "char", 4)) return 1;
+    if (n == 13 && cc__slice_cast_bytes_eq(p, "unsigned char", 13)) return 1;
+    if (n == 11 && cc__slice_cast_bytes_eq(p, "signed char", 11)) return 1;
     return 0;
 }
 
@@ -488,6 +520,8 @@ static inline CCSlice cc_slice_cast_lower_c(CCSlice src, CCSlice dest, CCSlice k
     int typed = 0;
     (void)kind;
     (void)arena;
+    if (cc__slice_cast_is_byte_slice(dest) && cc__slice_cast_is_cstr(src))
+        return cc_slice_from_static((void *)"cc_slice_cstr", 13);
     if (cc__slice_cast_is_byte_slice(dest) && cc__slice_cast_is_string(src))
         return cc_slice_from_static((void *)"cc_string_as_slice", 18);
     if (cc__slice_cast_vec_elem(src, &se, &sn) &&

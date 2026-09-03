@@ -1,0 +1,14 @@
+#!ccc ccs
+#include "static_inline_impl_extract.cch"
+#include <stdio.h>
+
+int main(void) {
+    int p = 2;
+    int v = rail_prev_sel(&p, 3);
+    if (v != 5) {
+        printf("rail=%d\n", v);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

@@ -49,18 +49,27 @@ static MemSample sample_rss(void) {
         s.ok = 1;
     }
 #elif defined(__linux__)
-    FILE *f = fopen("/proc/self/status", "r");
-    char line[256];
-    if (!f) return s;
-    while (fgets(line, sizeof(line), f)) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    CCResult_CCFile_CCIoError fr = cc_file_open(CC_SLICE_LIT("/proc/self/status"));
+    char line_buf[256];
+    CCSlice line;
+    if (cc_is_err(fr)) return s;
+    CCFile f = cc_value(fr);
+    for (;;) {
+        CCResult_bool_CCIoError lr = cc_file_read_line_into(&f, a, &line);
+        if (cc_is_err(lr)) break;
+        if (!cc_value(lr)) break;
+        if (line.len >= sizeof line_buf) continue;
+        memcpy(line_buf, line.ptr, line.len);
+        line_buf[line.len] = 0;
         unsigned long kb = 0;
-        if (sscanf(line, "VmRSS: %lu", &kb) == 1) {
+        if (sscanf(line_buf, "VmRSS: %lu", &kb) == 1) {
             s.rss_bytes = (size_t)kb * 1024;
             s.ok = 1;
             break;
         }
     }
-    fclose(f);
+    cc_file_close(&f);
 #endif
     return s;
 }

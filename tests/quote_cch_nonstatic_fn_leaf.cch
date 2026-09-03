@@ -1,0 +1,10 @@
+#ifndef TESTS_QUOTE_CCH_NONSTATIC_FN_LEAF_CCH
+#define TESTS_QUOTE_CCH_NONSTATIC_FN_LEAF_CCH
+
+/* Impl-grade by a non-`static` file-scope definition alone — no `@`,
+ * no `?>`. Nested from an umbrella extract must fail loud. */
+int quote_nonstatic_fn_add(int a, int b) {
+    return a + b;
+}
+
+#endif

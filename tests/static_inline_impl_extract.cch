@@ -1,0 +1,33 @@
+#ifndef TESTS_STATIC_INLINE_IMPL_EXTRACT_CCH
+#define TESTS_STATIC_INLINE_IMPL_EXTRACT_CCH
+
+#include <ccc/cc_result.cch>
+
+typedef struct {
+    int code;
+} RailIdxErr;
+
+static inline int !>(RailIdxErr) rail_idx_at(int off) {
+    RailIdxErr e;
+    if (off < 0) {
+        e.code = 1;
+        return cc_err(e);
+    }
+    return cc_ok(off);
+}
+
+/* Preview camera + first window. No line_start. */
+static inline int rail_prev_sel(const int *p,
+                                int vis) {
+    /* STATIC_INLINE_IMPL_BODY_MUST_STAY */
+    int v;
+    if (!p || vis < 1) return 0;
+    v = rail_idx_at(*p) !> { return -1; };
+    return v + vis;
+}
+
+int !>(RailIdxErr) rail_step(int x) {
+    return cc_ok(x);
+}
+
+#endif

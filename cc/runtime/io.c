@@ -82,8 +82,17 @@ CCResult_CCFile_CCIoError cc_file_open(CCSlice path) {
     return cc__file_open_flags(path, O_RDONLY, 0);
 }
 
-CCResult_CCFile_CCIoError cc_file_create(CCSlice path) {
-    return cc__file_open_flags(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+CCResult_void_CCIoError cc_file_create(CCFile *file, CCSlice path) {
+    CCResult_CCFile_CCIoError born;
+    if (!file) return cc_err_CCResult_void_CCIoError(cc_io_from_errno(EINVAL));
+    /* `{0}` is fd 0; closed is -1. Either is empty. An already-open fd
+     * would leak if we overwrote it. */
+    if (file->fd > 0)
+        return cc_err_CCResult_void_CCIoError(cc_io_from_errno(EINVAL));
+    born = cc__file_open_flags(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (!born.ok) return cc_err_CCResult_void_CCIoError(born.u.error);
+    *file = born.u.value;
+    return cc_ok_CCResult_void_CCIoError();
 }
 
 void cc_file_close(CCFile *file) {

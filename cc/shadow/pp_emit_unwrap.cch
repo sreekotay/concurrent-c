@@ -1176,12 +1176,36 @@ static const char* shadow_find_bang_live(const char* s) {
 
 /* Collapse generated handler text to one line so Form-P rewrite does not
  * insert extra physical lines (host `#line` would otherwise walk N, N+1,
- * … and land diagnostics on the wrong user line). */
+ * … and land diagnostics on the wrong user line). Drop `#line` first —
+ * flattening would leave mid-line `#` tokens inside `({ … })`. */
+static void shadow_drop_line_dirs(char* s) {
+    char* r;
+    char* w;
+    if (!s) return;
+    r = s;
+    w = s;
+    while (*r) {
+        if (*r == '#') {
+            const char* q = r + 1;
+            while (*q == ' ' || *q == '\t') q++;
+            if (q[0] == 'l' && q[1] == 'i' && q[2] == 'n' && q[3] == 'e' &&
+                (q[4] == ' ' || q[4] == '\t')) {
+                while (*r && *r != '\n') r++;
+                if (*r == '\n') r++;
+                continue;
+            }
+        }
+        *w++ = *r++;
+    }
+    *w = 0;
+}
+
 static void shadow_flatten_ws(char* s) {
     char* r;
     char* w;
     int sp;
     if (!s) return;
+    shadow_drop_line_dirs(s);
     r = s;
     w = s;
     sp = 1;

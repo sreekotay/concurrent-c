@@ -13,11 +13,11 @@ typedef struct QuoteAsTree {
     int n;
 } QuoteAsTree;
 
-void QuoteAsTree_destroy(QuoteAsTree* t) {
+static inline void QuoteAsTree_destroy(QuoteAsTree* t) {
     if (t) t->n = -1;
 }
 
-int QuoteAsTree_write_fd(QuoteAsTree* t, int fd) {
+static inline int QuoteAsTree_write_fd(QuoteAsTree* t, int fd) {
     (void)fd;
     return t ? t->n : -2;
 }
@@ -28,13 +28,13 @@ typedef struct {
     CCArena analysis;
 } QuoteAsDoc;
 
-int QuoteAsDoc_len(QuoteAsDoc* d) {
+static inline int QuoteAsDoc_len(QuoteAsDoc* d) {
     return d ? d->tree.n : 0;
 }
 
 #include "quote_cch_as_field_acc.cch"
 
-void QuoteAsDoc_destroy(QuoteAsDoc* d) {
+static inline void QuoteAsDoc_destroy(QuoteAsDoc* d) {
     if (d) d->tree.n = 99;
 }
 

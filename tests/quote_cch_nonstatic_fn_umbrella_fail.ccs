@@ -1,0 +1,7 @@
+/* Nested non-static function `.cch` without a sibling `.ccs` does not
+ * splice through an extracted umbrella. */
+#include "quote_cch_nonstatic_fn_umbrella.cch"
+
+int main(void) {
+    return quote_nonstatic_fn_umbrella_decl();
+}

@@ -25,9 +25,9 @@ registration. The underlying marker API is `cc_type_register` (see
   `.cast`, `.len`, `.access`, `.ufcs_sink`, and `.niche`. `.ufcs_dynamic` and `.ufcs_dynamic2` are
   accepted spellings of `.ufcs_sink`. `.cast` is dest-convert: the handler
   sees the source type, the requested dest type, and `kind` (`implicit` at
-  decl-init / assign, `explicit` at a written `(T)e`). It returns a callee
-  name, the UFCS pass tag, or empty (hard reject). Implicit sites ask the
-  dest type only. `.len` / `.access` are extent arms: `cc_type_len_field` /
+  decl-init / assign / a by-value slice call argument, `explicit` at a
+  written `(T)e`). It returns a callee name, the UFCS pass tag, or empty
+  (hard reject). Implicit sites ask the dest type only. `.len` / `.access` are extent arms: `cc_type_len_field` /
   `cc_type_len_call` and `cc_type_access_load` / `cc_type_access_call`.
   Ordinary sites may read `x.len`; they may not store it. `.access` is the
   compiler-internal walk load after `i < live len` — users write

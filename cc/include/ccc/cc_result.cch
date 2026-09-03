@@ -236,6 +236,21 @@ CC_DECL_RESULT_SPEC(CCResult_voidptr_CCError, void*, CCError)
 #define CCResult_charptr_CCError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_charptr_CCError, char*, CCError)
 #endif
+/* Seeded unwrap arms (`cc_add_i64_checked`, parse helpers). Must live
+ * here — not only std/slice — so channel TUs that never include slice
+ * still have a complete `_Generic` association type. */
+#ifndef CCResult_int64_t_CCError_DEFINED
+#define CCResult_int64_t_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_int64_t_CCError, int64_t, CCError)
+#endif
+#ifndef CCResult_uint64_t_CCError_DEFINED
+#define CCResult_uint64_t_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_uint64_t_CCError, uint64_t, CCError)
+#endif
+#ifndef CCResult_double_CCError_DEFINED
+#define CCResult_double_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_double_CCError, double, CCError)
+#endif
 
 /* Void ok type: success carries no value, so there is nothing to store and
  * no `unwrap_or`.  Generated, never hand-written — a hand-copied spec is how
@@ -349,12 +364,9 @@ static inline __CCResultGeneric cc_err(int __kind, const char* __msg) {
 }
 #endif
 
-/* `CCIoError`-keyed result types are *not* pre-declared here because
- * `CCIoError` lives in `cc_io_error.cch`, which may or may not be
- * included by a given TU.  When they are used, `preprocess.c` emits
- * the typed `CC_DECL_RESULT_SPEC(CCResult_X_CCIoError, X, CCIoError)`
- * at `insert_pos` in the TU (after the user's `#include` of the
- * defining header), so `X` and `CCIoError` are both in scope. */
+/* `CCIoError` is included at the bottom of this header (include-guard
+ * cycle). Errhandler as-face `_Generic` names that type on every `!>`
+ * that forwards to `@errhandler(CCError)`. */
 
 #endif /* CC_PARSER_MODE */
 
@@ -532,5 +544,10 @@ const char* cc_error_site(void);
 #define CCRes_err(T, E, e) cc_err_CCResult_##T##_##E(e)
 #define CCResPtr_ok(T, E, v) cc_ok_CCResult_##T##ptr_##E(v)
 #define CCResPtr_err(T, E, e) cc_err_CCResult_##T##ptr_##E(e)
+
+/* Errhandler as-face `_Generic` always names CCIoError (Io → CCError
+ * `.base`). Every Result TU must see that type — not only TUs that
+ * include io/channel. Include-guard cycle: this file is already open. */
+#include <ccc/cc_io_error.cch>
 
 #endif /* CC_RESULT_H */

@@ -24,8 +24,12 @@
 #include "preprocess/type_graph.h"
 #include "preprocess/emit_plan.h"
 #include "util/io.h"
+#include "util/result_fn_registry.h"
 #include "util/text.h"
+#include "visitor/pass_err_syntax.h"
+#include "visitor/pass_result_unwrap.h"
 #include "visitor/pass_type_syntax.h"
+#include "visitor/visitor.h"
 
 /* Mangle a type name for use in CCResult_T_E */
 static void cc__mangle_type(const char* src, size_t len, char* out, size_t out_sz) {
@@ -342,6 +346,131 @@ static char* cc__splice_header_vec_decls(const char* src, size_t n) {
     return out;
 }
 
+static int cc__header_strip_result_suffix(char* name) {
+    static const char* suf[] = {
+        "_is_err", "_is_ok", "_unwrap_err", "_unwrap", "_value",
+        "_error", "_DEFINED", NULL
+    };
+    size_t n;
+    int i;
+    if (!name) return 0;
+    n = strlen(name);
+    for (i = 0; suf[i]; i++) {
+        size_t sl = strlen(suf[i]);
+        if (n > sl && strcmp(name + n - sl, suf[i]) == 0) {
+            name[n - sl] = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void cc__header_add_result_from_concrete(CCLowerState* state,
+                                                const char* concrete) {
+    char work[256];
+    const char* rest;
+    const char* us;
+    char ok[128], err[128], mok[128], merr[128];
+    size_t ol;
+    if (!state || !concrete || strncmp(concrete, "CCResult_", 9) != 0) return;
+    snprintf(work, sizeof(work), "%s", concrete);
+    cc__header_strip_result_suffix(work);
+    if (cc_result_spec_table_find_by_name(&state->result_specs, work)) return;
+    rest = work + 9;
+    us = strrchr(rest, '_');
+    if (!us || us <= rest) return;
+    ol = (size_t)(us - rest);
+    if (ol >= sizeof(ok)) ol = sizeof(ok) - 1;
+    memcpy(ok, rest, ol);
+    ok[ol] = 0;
+    snprintf(err, sizeof(err), "%s", us + 1);
+    cc_result_spec_mangle_type(ok, strlen(ok), mok, sizeof(mok));
+    cc_result_spec_mangle_type(err, strlen(err), merr, sizeof(merr));
+    cc_lower_state_add_result(state, ok, strlen(ok), err, strlen(err), mok,
+                              merr);
+}
+
+/* After unwrap rewrite, every CCResult_* the header names must have a
+ * guarded spec in this file — not only T!>(E) on a declarator. */
+static void cc__header_collect_ccresult_idents(const char* src, size_t n,
+                                               CCLowerState* state) {
+    size_t i = 0;
+    CCInertScan scan;
+    if (!src || !state || n == 0) return;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;
+    while (i < n) {
+        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
+        if (i + 9 <= n && memcmp(src + i, "CCResult_", 9) == 0 &&
+            (i == 0 || !cc_is_ident_char(src[i - 1]))) {
+            size_t j = i + 9;
+            char name[256];
+            while (j < n && cc_is_ident_char(src[j])) j++;
+            if (j - i >= sizeof(name)) {
+                i++;
+                continue;
+            }
+            memcpy(name, src + i, j - i);
+            name[j - i] = 0;
+            cc__header_add_result_from_concrete(state, name);
+            i = j;
+            continue;
+        }
+        i++;
+    }
+}
+
+static int cc__header_has_op(const char* src, size_t n, const char* op) {
+    size_t opl;
+    size_t i = 0;
+    CCInertScan scan;
+    if (!src || !op || n < 2) return 0;
+    opl = strlen(op);
+    if (n < opl) return 0;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;
+    while (i + opl <= n) {
+        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
+        if (memcmp(src + i, op, opl) == 0) return 1;
+        i++;
+    }
+    return 0;
+}
+
+/* Registry rows whose callee appears in this header and that header
+ * unwraps — the pair travels with the header even when rewrite uses
+ * field accessors and never spells CCResult_*. */
+static void cc__header_collect_unwrap_fn_pairs(const char* src, size_t n,
+                                               CCLowerState* state) {
+    size_t i, count;
+    if (!src || !state || n == 0) return;
+    if (!cc__header_has_op(src, n, "!>") && !cc__header_has_op(src, n, "?>"))
+        return;
+    count = cc_result_fn_registry_count();
+    for (i = 0; i < count; i++) {
+        const char* fn = cc_result_fn_registry_name_at(i);
+        const char* rn = cc_result_fn_registry_result_type_at(i);
+        if (!fn || !fn[0] || !rn || !rn[0]) continue;
+        if (!cc__find_ident_top_level(src, n, fn)) continue;
+        cc__header_add_result_from_concrete(state, rn);
+    }
+}
+
+/* Same rule as preprocess `cc__bang_unwrap_is_stmt`: `!>(e) {` / `!>;`
+ * is an unwrap, not a type-position `T !>(E)`. */
+static int cc__header_bang_unwrap_is_stmt(const char* src, size_t n, size_t i) {
+    size_t j, rp = 0;
+    if (!src || i + 1 >= n || src[i] != '!' || src[i + 1] != '>') return 0;
+    j = i + 2;
+    while (j < n && (src[j] == ' ' || src[j] == '\t' ||
+                     src[j] == '\n' || src[j] == '\r'))
+        j++;
+    if (j >= n || src[j] != '(') return 1;
+    if (!cc_find_matching_paren(src, n, j, &rp)) return 1;
+    j = cc_skip_ws_and_comments(src, n, rp + 1);
+    return (j < n && (src[j] == '{' || src[j] == ';'));
+}
+
 static char* cc__lower_result_types(const char* src, size_t n, CCLowerState* state) {
     if (!src || n == 0) return NULL;
     
@@ -359,8 +488,13 @@ static char* cc__lower_result_types(const char* src, size_t n, CCLowerState* sta
         char c = src[i];
         char c2 = (i + 1 < n) ? src[i + 1] : 0;
 
-        /* Detect T!>(E) pattern */
+        /* Detect T!>(E) pattern. Statement unwrap (`expr !>(e) {`, `!>;`)
+         * is rewritten later — do not treat the binder as an error type. */
         if (c == '!' && c2 == '>') {
+            if (cc__header_bang_unwrap_is_stmt(src, n, i)) {
+                i += 2;
+                continue;
+            }
             size_t sigil_pos = i;
             size_t j = i + 2;  /* skip '!>' */
             
@@ -629,7 +763,6 @@ static char* cc__rewrite_header_includes(const char* src, size_t n) {
 }
 
 char* cc_lower_header_string(const char* input, size_t input_len, const char* input_path) {
-    (void)input_path;  /* For error messages - not used yet */
     
     if (!input || input_len == 0) return NULL;
     
@@ -657,6 +790,8 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     char* buf_result_ctors = NULL;
     char* buf2 = NULL;
     char* buf_result_fields = NULL;
+    char* buf_unwrap = NULL;
+    char* buf_errsyn = NULL;
     
     /* Pass -1: closer-anchored template dedent, so a header's @emit
        templates carry the same bytes here as in the comptime and main
@@ -795,6 +930,80 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
         cur_len = strlen(buf_result_fields);
     }
 
+    /* Pass 1c: `!>` / `?>` in a header is a use. Rewrite it here (typed
+     * `CCResult_*_is_err` when the callee is known, otherwise `cc_is_err`
+     * field access — never TU-level `__cc_uw_*`) and collect every Result
+     * pair so the spec is spliced before the first mention. */
+    {
+        CCVisitorCtx vctx;
+        memset(&vctx, 0, sizeof(vctx));
+        vctx.input_path = input_path;
+        cc_result_fn_registry_scan_source(cur, cur_len);
+        cc__header_collect_unwrap_fn_pairs(cur, cur_len, &state);
+        if (cc__header_has_op(cur, cur_len, "!>") ||
+            cc__header_has_op(cur, cur_len, "?>")) {
+            char* ru_out = NULL;
+            size_t ru_len = 0;
+            int ru = cc__rewrite_result_unwrap_header(&vctx, cur, cur_len,
+                                                      &ru_out, &ru_len);
+            if (ru < 0) {
+                free(ru_out);
+                free(buf_ded);
+                free(buf0);
+                free(buf_fac);
+                free(buf_inc);
+                free(buf_as);
+                free(buf_types);
+                free(buf_va);
+                free(buf_vec);
+                free(buf_result_ctors);
+                free(buf2);
+                free(buf_result_fields);
+                cc_result_spec_table_free(&state.result_specs);
+                return NULL;
+            }
+            if (ru > 0 && ru_out) {
+                buf_unwrap = ru_out;
+                cur = ru_out;
+                cur_len = ru_len;
+            } else {
+                free(ru_out);
+            }
+        }
+        if (cc_contains_token_top_level(cur, cur_len, "@errhandler") ||
+            cc_contains_token_top_level(cur, cur_len, "@err")) {
+            char* es_out = NULL;
+            size_t es_len = 0;
+            int es = cc__rewrite_err_syntax(&vctx, cur, cur_len, &es_out,
+                                            &es_len);
+            if (es < 0) {
+                free(es_out);
+                free(buf_ded);
+                free(buf0);
+                free(buf_fac);
+                free(buf_inc);
+                free(buf_as);
+                free(buf_types);
+                free(buf_va);
+                free(buf_vec);
+                free(buf_result_ctors);
+                free(buf2);
+                free(buf_result_fields);
+                free(buf_unwrap);
+                cc_result_spec_table_free(&state.result_specs);
+                return NULL;
+            }
+            if (es > 0 && es_out) {
+                buf_errsyn = es_out;
+                cur = es_out;
+                cur_len = es_len;
+            } else {
+                free(es_out);
+            }
+        }
+        cc__header_collect_ccresult_idents(cur, cur_len, &state);
+    }
+
     /* (retired) Pass 2 used to rewrite T? -> CCOptional_T. */
 
     /* Build final output */
@@ -867,6 +1076,8 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     free(buf_result_ctors);
     free(buf2);
     free(buf_result_fields);
+    free(buf_unwrap);
+    free(buf_errsyn);
     cc_result_spec_table_free(&state.result_specs);
     
     return out;

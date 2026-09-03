@@ -132,7 +132,8 @@ static bool open_output_checked(CCFile* file, const char* path) {
         mark_pipeline_error();
         return false;
     }
-    *file = cc_file_create(cc_slice_cstr(path)) !>(e) {
+    *file = CC_FILE_CLOSED;
+    file->create(path) !>(e) {
         eprintln(@string(`Failed to open output: ${path}`, @scratch)) !>;
         mark_pipeline_error();
         return false;

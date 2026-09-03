@@ -1,0 +1,15 @@
+/* Site `!>(e)` on `@(create) @destroy` is not the scope @errhandler.
+ * Bare `!>;` in that body reports through the enclosing handler. */
+#include <ccc/cc_runtime.cch>
+#include <ccc/stdio.cch>
+#include <ccc/std/io.cch>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCFile f@("/dev/null") !>(e) {
+        println(@string(`open failed`, @scratch)) !>;
+        return 1;
+    } @destroy;
+    println("ok") !>;
+    return 0;
+}

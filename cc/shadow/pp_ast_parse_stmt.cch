@@ -1627,17 +1627,23 @@ static AstNode* parse_val_destroy(Parser* p) {
         j = ni + 1;
     } else
         return NULL;
-    /* Must see @destroy / @detach before ';' at depth 0. */
+    /* Must see @destroy / @detach before ';' at depth 0.
+     * `!>` / `!>(e){…}` at depth 0 is the create unwrap — not part of init. */
     depth = 0;
     saw = 0;
     is_detach = 0;
+    int bang_at = -1;
+    int init_end;
     while (j < p->n) {
         Token t = p->toks[j];
         if (tok_eq(t, TK_PUNCT, "(") || tok_eq(t, TK_PUNCT, "{") || tok_eq(t, TK_PUNCT, "["))
             depth++;
         else if (tok_eq(t, TK_PUNCT, ")") || tok_eq(t, TK_PUNCT, "}") || tok_eq(t, TK_PUNCT, "]"))
             depth--;
-        else if (depth == 0 && tok_eq(t, TK_PUNCT, "@") && j + 1 < p->n) {
+        else if (depth == 0 && bang_at < 0 &&
+                 (tok_eq(t, TK_PUNCT, "!>") || tok_eq(t, TK_PUNCT, "?>"))) {
+            bang_at = j;
+        } else if (depth == 0 && tok_eq(t, TK_PUNCT, "@") && j + 1 < p->n) {
             ShadowKwKind ak = shadow_kw(p->toks[j + 1]);
             if (ak == SHADOW_KW_DESTROY || ak == SHADOW_KW_DETACH) {
                 saw = 1;
@@ -1664,6 +1670,7 @@ static AstNode* parse_val_destroy(Parser* p) {
         }
         return NULL;
     }
+    init_end = (bang_at >= 0) ? bang_at : j;
 
     {
         char tytxt[256];
@@ -1702,7 +1709,7 @@ static AstNode* parse_val_destroy(Parser* p) {
                 p_next(p); /* @ */
                 p_next(p); /* ( */
                 c0 = lp;
-                had_cl = parse_call_arg_closure(p, c0, j, tmp, sizeof(tmp),
+                had_cl = parse_call_arg_closure(p, c0, init_end, tmp, sizeof(tmp),
                                                 "create", &create_cl);
                 if (p->err) return NULL;
                 int r;
@@ -1714,13 +1721,13 @@ static AstNode* parse_val_destroy(Parser* p) {
                     else
                         r = snprintf(init, sizeof(init), "__cc_at_create(");
                 } else {
-                    if (!ast_spell_token_range(p, c0, j, tmp, sizeof(tmp)) &&
-                        !span_text(p, c0, j, tmp, sizeof(tmp))) {
+                    if (!ast_spell_token_range(p, c0, init_end, tmp, sizeof(tmp)) &&
+                        !span_text(p, c0, init_end, tmp, sizeof(tmp))) {
                         parser_fail(p, name, "val @destroy/@detach init too long");
                         return NULL;
                     }
                     r = snprintf(init, sizeof(init), "__cc_at_create%s", tmp);
-                    while (p->i < j) p_next(p);
+                    while (p->i < init_end) p_next(p);
                 }
                 /* Prefix can push an exact-fit span past cap — fail loud. */
                 if (r < 0 || (size_t)r >= sizeof(init)) {
@@ -1730,13 +1737,13 @@ static AstNode* parse_val_destroy(Parser* p) {
             } else {
                 p_next(p); /* = */
                 c0 = p->i;
-                had_cl = parse_call_arg_closure(p, c0, j, init, sizeof(init),
+                had_cl = parse_call_arg_closure(p, c0, init_end, init, sizeof(init),
                                                 "create", &create_cl);
                 if (p->err) return NULL;
                 if (!had_cl) {
-                    while (p->i < j) p_next(p);
-                    if (!ast_spell_token_range(p, c0, j, init, sizeof(init)) &&
-                        !span_text(p, c0, j, init, sizeof(init))) {
+                    while (p->i < init_end) p_next(p);
+                    if (!ast_spell_token_range(p, c0, init_end, init, sizeof(init)) &&
+                        !span_text(p, c0, init_end, init, sizeof(init))) {
                         parser_fail(p, name,
                                     "val @destroy/@detach init too long");
                         return NULL;
@@ -1744,9 +1751,10 @@ static AstNode* parse_val_destroy(Parser* p) {
                 }
             }
             {
-        AstNode* ue = (!had_cl) ? parse_ufcs_expr_range(p, at_create ? lp : c0, j) : NULL;
-        p_next(p); /* @ */
-        p_next(p); /* destroy|detach */
+        AstNode* ue = (!had_cl)
+            ? parse_ufcs_expr_range(p, at_create ? lp : c0, init_end)
+            : NULL;
+        if (bang_at >= 0) p->i = bang_at;
         AstNode* n = ast_new(p, AST_VAL_DESTROY);
         if (!n) return NULL;
         snprintf(n->a, sizeof(n->a), "%s", tytxt);
@@ -1766,6 +1774,64 @@ static AstNode* parse_val_destroy(Parser* p) {
             spawn_infer_value_caps(create_cl);
             n->dbody[n->ndbody++] = create_cl;
         }
+        if (bang_at >= 0) {
+            snprintf(n->f, sizeof(n->f), "bang");
+            if (!tok_eq(p_peek(p), TK_PUNCT, "!>") &&
+                !tok_eq(p_peek(p), TK_PUNCT, "?>")) {
+                parser_fail(p, p_peek(p), "expected '!>' after create init");
+                return NULL;
+            }
+            p_next(p); /* !> / ?> */
+            if (p_accept(p, TK_PUNCT, "(")) {
+                Token bind = p_next(p);
+                AstNode* eh;
+                if (bind.kind != TK_IDENT) {
+                    parser_fail(p, bind, "expected bind name in !>(...)");
+                    return NULL;
+                }
+                if (!p_accept(p, TK_PUNCT, ")")) {
+                    parser_fail(p, p_peek(p), "expected ')' after !>(bind");
+                    return NULL;
+                }
+                eh = ast_new(p, AST_ERRHANDLER);
+                if (!eh) return NULL;
+                snprintf(eh->a, sizeof(eh->a), "CCError");
+                slice_to(eh->b, sizeof(eh->b), bind.spell);
+                eh->e[0] = 's';
+                eh->e[1] = 0;
+                if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
+                    p_next(p);
+                    while (!tok_eq(p_peek(p), TK_PUNCT, "}") &&
+                           p_peek(p).kind != TK_EOF && !p->err) {
+                        AstNode* st = parse_stmt(p);
+                        if (!st) return NULL;
+                        if (eh->nbody >= SHADOW_BODY_CAP) {
+                            parser_fail_body_cap(p, p_peek(p),
+                                                 "!>(...) body");
+                            return NULL;
+                        }
+                        eh->body[eh->nbody++] = st;
+                    }
+                    if (!p_accept(p, TK_PUNCT, "}")) {
+                        parser_fail(p, p_peek(p),
+                                    "expected '}' after !>(...) { ... }");
+                        return NULL;
+                    }
+                } else {
+                    AstNode* st = parse_stmt(p);
+                    if (!st) return NULL;
+                    eh->body[0] = st;
+                    eh->nbody = 1;
+                }
+                if (n->ndbody >= SHADOW_DBODY_CAP) {
+                    parser_fail(p, name, "too many create unwrap attachments");
+                    return NULL;
+                }
+                n->dbody[n->ndbody++] = eh;
+            }
+        }
+        p_next(p); /* @ */
+        p_next(p); /* destroy|detach */
         if (is_detach) {
             if (!p_accept(p, TK_PUNCT, ";")) {
                 parser_fail(p, p_peek(p), "expected ';' after @detach");
@@ -2054,6 +2120,8 @@ static int parse_for_zip_bang_tail(Parser* p, AstNode* n) {
         if (!eh) return 0;
         snprintf(eh->a, sizeof(eh->a), "CCError");
         slice_to(eh->b, sizeof(eh->b), bind.spell);
+        eh->e[0] = 's';
+        eh->e[1] = 0;
         if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
             p_next(p);
             while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF &&

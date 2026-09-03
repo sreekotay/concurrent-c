@@ -7,18 +7,18 @@ int main(void) {
     const char* msg = "io smoke ok\n";
     size_t msg_len = strlen(msg);
 
-    CCResult_CCFile_CCIoError born = cc_file_create(cc_slice_cstr(path));
+    CCFile f = {0};
+    CCResult_void_CCIoError born = cc_file_create(&f, cc_slice_cstr(path));
     if (!born.ok) return 1;
-    CCFile f = born.u.value;
 
     CCSlice data = cc_slice_from_buffer((void*)msg, msg_len);
     CCResult_size_t_CCIoError w = cc_file_write(&f, data);
     if (!w.ok || w.u.value != msg_len) { cc_file_close(&f); return 2; }
     cc_file_close(&f);
 
-    born = cc_file_open(cc_slice_cstr(path));
-    if (!born.ok) return 3;
-    f = born.u.value;
+    CCResult_CCFile_CCIoError opened = cc_file_open(cc_slice_cstr(path));
+    if (!opened.ok) return 3;
+    f = opened.u.value;
 
     CCArena arena = cc_arena_heap(kilobytes(4));
     if (!arena.base) { cc_file_close(&f); return 4; }

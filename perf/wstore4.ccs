@@ -749,13 +749,23 @@ static size_t rss_kib(void) {
         return SIZE_MAX;
     return (size_t)(info.resident_size / 1024);
 #else
-    FILE* f = fopen("/proc/self/status", "r");
-    char line[256];
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    CCResult_CCFile_CCIoError fr = cc_file_open(CC_SLICE_LIT("/proc/self/status"));
+    char line_buf[256];
+    CCSlice line;
     size_t v = 0;
-    if (!f) return SIZE_MAX;
-    while (fgets(line, sizeof line, f))
-        if (sscanf(line, "VmRSS: %zu", &v) == 1) break;
-    fclose(f);
+    if (cc_is_err(fr)) return SIZE_MAX;
+    CCFile f = cc_value(fr);
+    for (;;) {
+        CCResult_bool_CCIoError lr = cc_file_read_line_into(&f, a, &line);
+        if (cc_is_err(lr)) break;
+        if (!cc_value(lr)) break;
+        if (line.len >= sizeof line_buf) continue;
+        memcpy(line_buf, line.ptr, line.len);
+        line_buf[line.len] = 0;
+        if (sscanf(line_buf, "VmRSS: %zu", &v) == 1) break;
+    }
+    cc_file_close(&f);
     return v ? v : SIZE_MAX;
 #endif
 }

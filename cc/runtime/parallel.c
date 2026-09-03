@@ -77,6 +77,22 @@ static void cc_parallel_reap(CCParallel* h) {
     h->nt = w;
 }
 
+/* Drop slot i without joining. Shift the tail down. */
+static void cc_parallel_remove_at(CCParallel* h, int i) {
+    CCTask* tasks;
+    void** envs;
+    int k;
+    if (!h || i < 0 || i >= h->nt)
+        return;
+    tasks = cc_parallel_tasks(h);
+    envs = cc_parallel_envs(h);
+    for (k = i; k < h->nt - 1; k++) {
+        tasks[k] = tasks[k + 1];
+        envs[k] = envs[k + 1];
+    }
+    h->nt--;
+}
+
 static void cc_parallel_release_index(CCParallel* h) {
     if (!h)
         return;
@@ -305,6 +321,8 @@ static CCParallelLeaveHost* cc_parallel_leave_pack(CCParallel* h) {
     L->leftover_fn = h->leftover_fn;
     L->leftover_ctx = h->leftover_ctx;
     if (h->nt) {
+        fiber_v2* self = sched_v2_current_fiber();
+        int w = 0;
         L->tasks = (CCTask*)malloc((size_t)h->nt * sizeof(CCTask));
         L->envs = (void**)malloc((size_t)h->nt * sizeof(void*));
         if (!L->tasks || !L->envs) {
@@ -315,10 +333,25 @@ static CCParallelLeaveHost* cc_parallel_leave_pack(CCParallel* h) {
         }
         tasks = cc_parallel_tasks(h);
         envs = cc_parallel_envs(h);
-        memcpy(L->tasks, tasks, (size_t)h->nt * sizeof(CCTask));
-        memcpy(L->envs, envs, (size_t)h->nt * sizeof(void*));
-        for (i = 0; i < h->nt; i++)
+        for (i = 0; i < h->nt; i++) {
+            fiber_v2* f = cc_task_fiber_v2(tasks[i]);
+            if (f && f == self) {
+                cc_parallel_env_free(h, envs[i]);
+                envs[i] = NULL;
+                continue;
+            }
+            L->tasks[w] = tasks[i];
+            L->envs[w] = envs[i];
             envs[i] = NULL;
+            w++;
+        }
+        L->nt = w;
+        if (w == 0) {
+            free(L->tasks);
+            free(L->envs);
+            L->tasks = NULL;
+            L->envs = NULL;
+        }
     }
     for (i = 0; i < h->nclose; i++)
         L->closing[i] = h->closing[i];
@@ -343,10 +376,23 @@ CCResult_void_CCError cc_parallel_wait(CCParallel* h) {
         CCResult_void_CCError wr = cc_nursery_wait_host(h->n);
         if (!wr.ok) return wr;
     }
-    /* The kick may still be admitting. Join the oldest, then reap; do not
-     * walk a snapshot — grow moves the list off the inline pad. */
+    /* The kick may still be admitting. Join the oldest once (join
+     * releases the fiber), drop that slot, then reap other finished
+     * siblings. A second join of the same CCTask parks on a recycled
+     * fiber — often this one. */
     while (h->nt > 0) {
-        cc_parallel_join(cc_parallel_tasks(h)[0]);
+        CCTask* tasks = cc_parallel_tasks(h);
+        void** envs = cc_parallel_envs(h);
+        fiber_v2* f = cc_task_fiber_v2(tasks[0]);
+        fiber_v2* self = sched_v2_current_fiber();
+        if (f && f == self) {
+            cc_parallel_env_free(h, envs[0]);
+            cc_parallel_remove_at(h, 0);
+            continue;
+        }
+        cc_parallel_join(tasks[0]);
+        cc_parallel_env_free(h, envs[0]);
+        cc_parallel_remove_at(h, 0);
         cc_parallel_reap(h);
     }
     cc_parallel_release_index(h);
