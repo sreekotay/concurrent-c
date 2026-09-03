@@ -1,0 +1,21 @@
+/* @typeview r: store denial must cite the assignment line. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    int tag;
+    int secret;
+} Bag;
+
+@typeview on Bag {
+    r: tag;
+}
+
+static int bag_hits(Bag* b) { return b->secret; }
+
+int main(void) {
+    Bag b = {0};
+    b.tag = 3;
+    printf("%d %d\n", b.tag, b.hits());
+    return 0;
+}

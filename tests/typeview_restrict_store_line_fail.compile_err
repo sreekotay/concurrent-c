@@ -1,0 +1,2 @@
+typeview_restrict_store_line_fail.ccs:18:
+does not allow store to field 'tag'

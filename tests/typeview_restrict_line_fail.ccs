@@ -1,0 +1,29 @@
+/* @typeview restrict + UFCS miss diagnostics must cite source lines. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    CCFile file;
+    int tag;
+    int secret;
+} Temp;
+
+@typeview on Temp {
+    as: file;
+    r: tag;
+}
+
+static int temp_ready(Temp* t) { return t->tag; }
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    Temp t = {0};
+    int a = t.ready();   /* ok */
+    int b = t.gone();    /* UFCS miss */
+    int c = t.secret;    /* r: deny load */
+    t.tag = 3;           /* r: deny store */
+    (void)a;
+    (void)b;
+    (void)c;
+    return 0;
+}
