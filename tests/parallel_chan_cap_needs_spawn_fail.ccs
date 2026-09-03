@@ -1,0 +1,20 @@
+#include <ccc/std/prelude.cch>
+
+static void consume(int[~ <] rx, int* got) {
+    int v = 0;
+    rx.recv(&v) !>;
+    *got = v;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int[~ >] tx;
+    int[~ <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+    int got = 0;
+    @parallel {
+        @serial { consume(rx, &got); }
+        @serial { tx.send(1) !>; tx.close(); }
+    } !>.wait()!>;
+    return got;
+}

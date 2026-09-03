@@ -13,7 +13,7 @@ int main(void) {
 
     int kicked = 0;
     int saw = 0;
-    CCParallel h = @parallel {
+    CCParallel h = @parallel spawn {
         @serial {
             cc_sleep_ms(20);
             h.cancel() !>;

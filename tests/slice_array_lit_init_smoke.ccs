@@ -1,0 +1,18 @@
+/* `char[:] xs[] = { "a", "b" }` must wrap each lit (not smash `.len`). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    char[:] cases[] = { "GET", "POST", "HEAD" };
+    if (sizeof(cases) / sizeof(cases[0]) != 3) return 1;
+    if (cases[0].len != 3 || memcmp(cases[0].ptr, "GET", 3) != 0) return 2;
+    if (cases[1].len != 4 || memcmp(cases[1].ptr, "POST", 4) != 0) return 3;
+    if (cases[2].len != 4 || memcmp(cases[2].ptr, "HEAD", 4) != 0) return 4;
+
+    char[:] mix[] = { @slice("ok"), CC_SLICE_LIT("no"), "yes" };
+    if (mix[0].len != 2 || mix[1].len != 2 || mix[2].len != 3) return 5;
+
+    printf("ok\n");
+    return 0;
+}

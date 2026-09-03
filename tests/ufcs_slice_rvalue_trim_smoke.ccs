@@ -1,0 +1,13 @@
+/* Pointer-recv UFCS on a slice rvalue (`sub` then `trim`) binds a temp. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    char[:] line = @slice("  hi  ");
+    char[:] t = line.sub(0, line.len).trim();
+    if (t.len != 2 || memcmp(t.ptr, "hi", 2) != 0) return 1;
+    if (!t.eq(@slice("hi"))) return 2;
+    printf("ok\n");
+    return 0;
+}

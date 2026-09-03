@@ -1,6 +1,6 @@
 /*
  * Dest-live consume (helper / recv in the join) + send after the
- * handle is live. The worker must be spawned; deny is a hang.
+ * handle is live. `@parallel spawn` admits the worker; deny is a hang.
  */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
@@ -19,7 +19,7 @@ int main(void) {
     int[~ <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
     int got = 0;
-    CCParallel h = @parallel {
+    CCParallel h = @parallel spawn {
         @serial { consume(rx, &got); }
     } !>;
     tx.send(9) !>;

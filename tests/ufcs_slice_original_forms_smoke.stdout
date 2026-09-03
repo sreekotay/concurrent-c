@@ -1,0 +1,5 @@
+lenient front=content-length=13 back=content-length=13  |  strict: content-length=13
+lenient front=chunked back=chunked  |  strict: chunked
+lenient front=content-length=13 back=chunked  <-- DESYNC  |  strict: REJECT (ambiguous framing: CL and TE)
+lenient front=content-length=13 back=chunked  <-- DESYNC  |  strict: REJECT (ambiguous framing: CL and TE)
+lenient front=content-length=13 back=content-length=13  |  strict: content-length=13

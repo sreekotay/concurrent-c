@@ -1,6 +1,6 @@
 /*
- * Helpers that capture a channel are a rendezvous: the join does not
- * deny. Inlining consume while produce parks is a silent hang.
+ * Helpers that capture a channel are a rendezvous: `@parallel spawn`
+ * admits both. Inlining consume while produce parks is a silent hang.
  */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
@@ -24,7 +24,7 @@ int main(void) {
     int[~ <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
     int got = 0;
-    @parallel {
+    @parallel spawn {
         @serial { produce(tx); }
         @serial { consume(rx, &got); }
     } !>.wait()!>;

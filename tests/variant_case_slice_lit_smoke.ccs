@@ -1,0 +1,41 @@
+/* `@slice("…")` in `@switch` case arms (return and assignment). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+@variant Cell {
+    a: int;
+    b: int;
+};
+
+static char[:] label_of(Cell c) {
+    @switch (c) {
+        case .a:
+            return @slice("text");
+        case .b:
+            return @slice("num");
+    }
+    return @slice("?");
+}
+
+int main(void) {
+    Cell a = { .a = 1 };
+    Cell b = { .b = 2 };
+    char[:] la = label_of(a);
+    char[:] lb = label_of(b);
+    if (la.len != 4 || memcmp(la.ptr, "text", 4) != 0) return 1;
+    if (lb.len != 3 || memcmp(lb.ptr, "num", 3) != 0) return 2;
+
+    char[:] s = {0};
+    @switch (a) {
+        case .a:
+            s = @slice("got");
+            break;
+        case .b:
+            s = @slice("no");
+            break;
+    }
+    if (s.len != 3 || memcmp(s.ptr, "got", 3) != 0) return 3;
+    printf("ok\n");
+    return 0;
+}

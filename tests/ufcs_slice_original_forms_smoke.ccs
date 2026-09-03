@@ -1,0 +1,87 @@
+#!ccc ccs
+/* Same program as the HTTP-framing demo, written the way it was first written —
+ * exercising the four lowerer forms plus the leftover chain hops:
+ *   1. char[:] xs[] = { "a", "b" }   (silent positional smash)
+ *   2. line.sub(a,b).trim() / .trim().to_i64()  (UFCS rvalue + pointer method)
+ *   3. static char[:] f(...);        (slice sugar in a prototype)
+ *   4. @slice("...") / @string(...).as_slice() inside a case
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+@variant Framing { none: void; content_length: int64_t; chunked: void; };
+
+static char[:] strict_desc(char[:] h, CCArena a);                       /* 3 */
+
+static Framing !>(CCError) framing_of(char[:] headers) {
+    @errhandler(CCError e) { return cc_err(e); }
+    Framing f = { .none = {} };
+    int claims = 0; size_t start = 0;
+    @for (i, ch in headers) {
+        if (ch != '\n') continue;
+        char[:] line = headers.sub(start, i); start = i + 1;
+        if (line.starts_with("Content-Length:")) {
+            char[:] v = line.sub(15, line.len).trim();                  /* 2 */
+            int64_t n = v.to_i64() !>;
+            if (n < 0) return cc_err(CC_ERR_INVALID_ARG, "negative length");
+            if (claims++ && f.kind != Framing_content_length)
+                return cc_err(CC_ERR_INVALID_ARG, "ambiguous framing: CL and TE");
+            f = { .content_length = n };
+        } else if (line.starts_with("Transfer-Encoding:")) {
+            char[:] v = line.sub(18, line.len).trim();                  /* 2 */
+            if (!v.eq_cstr("chunked")) return cc_err(CC_ERR_INVALID_ARG, "unknown transfer-encoding");
+            if (claims++ && f.kind != Framing_chunked)
+                return cc_err(CC_ERR_INVALID_ARG, "ambiguous framing: CL and TE");
+            f = { .chunked = {} };
+        }
+    }
+    return cc_ok(f);
+}
+
+static Framing framing_lenient(char[:] headers, int te_wins) {
+    Framing f = { .none = {} };
+    int64_t cl = -1; int te = 0; size_t start = 0;
+    @for (i, ch in headers) {
+        if (ch != '\n') continue;
+        char[:] line = headers.sub(start, i); start = i + 1;
+        if (line.starts_with("Content-Length:")) cl = line.sub(15, line.len).trim().to_i64() ?> -1;   /* 2 */
+        else if (line.starts_with("Transfer-Encoding:")) te = 1;
+    }
+    if (te && (te_wins || cl < 0)) f = { .chunked = {} };
+    else if (cl >= 0)              f = { .content_length = cl };
+    return f;
+}
+
+static char[:] describe(Framing f, CCArena a) {
+    @switch (f) {
+        case .none:              return @slice("none");                 /* 4 */
+        case .chunked:           return @slice("chunked");              /* 4 */
+        case .content_length(n): return @string(`content-length=${n}`, a).as_slice();
+    }
+    return @slice("?");
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCArena a = cc_arena_heap(kilobytes(16)) @destroy;
+    char[:] cases[] = {                                                  /* 1 */
+        "Host: x\nContent-Length: 13\n",
+        "Host: x\nTransfer-Encoding: chunked\n",
+        "Host: x\nContent-Length: 13\nTransfer-Encoding: chunked\n",
+        "Host: x\nTransfer-Encoding: chunked\nContent-Length: 13\n",
+        "Host: x\nContent-Length: 13\nContent-Length: 13\n",
+    };
+    @for (h in cases) {
+        char[:] front = describe(framing_lenient(h, 0), a);
+        char[:] back  = describe(framing_lenient(h, 1), a);
+        char[:] strict = strict_desc(h, a);
+        const char *flag = front.eq(back) ? "" : "  <-- DESYNC";
+        println(@string(`lenient front=${front} back=${back}${flag}  |  strict: ${strict}`, a)) !>;
+    }
+    return 0;
+}
+
+static char[:] strict_desc(char[:] h, CCArena a) {
+    Framing f = framing_of(h) !>(e) { return @string(`REJECT (${e.message})`, a).as_slice(); };
+    return describe(f, a);
+}

@@ -1,0 +1,26 @@
+/* Forward `char[:]` prototypes must lower (not leftover `[:`). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+static char[:] take(char[:] h, CCArena a);
+char[:] echo(char[:] h);
+
+int main(void) {
+    CCArena a = cc_arena_heap(256) @destroy;
+    char[:] s = take(@slice("hi"), a);
+    if (s.len != 2 || memcmp(s.ptr, "hi", 2) != 0) return 1;
+    char[:] t = echo(@slice("ok"));
+    if (t.len != 2 || memcmp(t.ptr, "ok", 2) != 0) return 2;
+    printf("ok\n");
+    return 0;
+}
+
+static char[:] take(char[:] h, CCArena a) {
+    (void)a;
+    return h;
+}
+
+char[:] echo(char[:] h) {
+    return h;
+}

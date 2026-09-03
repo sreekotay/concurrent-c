@@ -1,0 +1,9 @@
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    int i;
+    @parallel spawn for (i in 0..2) {
+        (void)i;
+    } !>.wait()!>;
+    return 0;
+}

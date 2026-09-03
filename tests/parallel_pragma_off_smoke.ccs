@@ -78,6 +78,30 @@ int main(void) {
         return 1;
     }
 
+    /* Off + channel: one stack by request; not a spawn error. Buffer
+     * so sequential send does not park on the unstarted recv. */
+    {
+        int[~1 >] tx;
+        int[~1 <] rx;
+        CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+        int got = 0;
+        @parallel {
+            @serial {
+                tx.send(7) !>;
+                tx.close();
+            }
+            @serial {
+                int v = 0;
+                if (cc_io_avail(rx.recv(&v)))
+                    got = v;
+            }
+        } !>.wait()!>;
+        if (got != 7) {
+            fprintf(stderr, "FAIL off-chan got=%d\n", got);
+            return 1;
+        }
+    }
+
 #pragma(@parallel) on
 
     /* Restored: the parallel lowering is back. */

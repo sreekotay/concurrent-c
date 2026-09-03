@@ -1,6 +1,6 @@
 /*
- * Complementary send/recv across two brace arms is REAL: the consumer
- * is not denied while the kick parks on an unbuffered send.
+ * Complementary send/recv across two brace arms: `@parallel spawn`
+ * admits both so the consumer is live while the kick parks.
  */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
@@ -13,7 +13,7 @@ int main(void) {
         int[~ <] rx;
         CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
         int got = 0;
-        @parallel {
+        @parallel spawn {
             @serial {
                 tx.send(7) !>;
                 tx.close();
@@ -36,7 +36,7 @@ int main(void) {
         int[~ <] rx;
         CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
         int got = 0;
-        CCParallel h = @parallel {
+        CCParallel h = @parallel spawn {
             @serial {
                 tx.send(9) !>;
                 tx.close();
