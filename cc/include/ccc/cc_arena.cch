@@ -7,7 +7,9 @@
  *   Main — overflow: per-object (`ovf_head`, `block_max==1`) or 64KiB chunks
  *
  * Shared path (`cc_arena_alloc`): tip bump under meta_lock (grow / ovf / live
- * credit share that lock). Single-owner path (`*_local*`): plain loads/stores.
+ * credit share that lock); the counters under it are relaxed, so an
+ * uncontended bump is one acquire CAS and one release store. Single-owner
+ * path (`*_local*`): plain loads/stores.
  * `live()` counts L1 + L2 + Main.
  *
  * A checkpoint is an *active child arena*: `cc_arena_checkpoint` overlays a
@@ -62,12 +64,36 @@ typedef struct CCArenaCheckpoint CCArenaCheckpoint;
 #include <ccc/cc_atomic.cch>
 #include <ccc/cc_result.cch>
 
-/* Internal macros using cc_atomic interface */
-#define CC_ATOMIC_FETCH_ADD(ptr, val) cc_atomic_fetch_add((ptr), (val))
-#define CC_ATOMIC_FETCH_SUB(ptr, val) cc_atomic_fetch_sub((ptr), (val))
-#define CC_ATOMIC_LOAD(ptr) cc_atomic_load((ptr))
-#define CC_ATOMIC_STORE(ptr, val) cc_atomic_store((ptr), (val))
-#define CC_ATOMIC_CAS(ptr, expected_ptr, desired) cc_atomic_cas((ptr), (expected_ptr), (desired))
+/* Internal atomics. Every counter on a host (offset, live_allocs,
+ * overflow_bytes) is mutated only under meta_lock or by the exclusive owner
+ * (`*_local*`), so those accesses are relaxed: the lock's acquire / release
+ * pair is the only ordering. Unlocked reads of the same fields are
+ * diagnostics (remaining / used / live counts) and tolerate a stale value.
+ * The lock word itself is the acquire / release pair; the provenance
+ * counter only needs uniqueness. */
+#define CC_ATOMIC_FETCH_ADD(ptr, val) cc_atomic_fetch_add_relaxed((ptr), (val))
+#define CC_ATOMIC_FETCH_SUB(ptr, val) cc_atomic_fetch_sub_relaxed((ptr), (val))
+#define CC_ATOMIC_LOAD(ptr) cc_atomic_load_relaxed((ptr))
+#define CC_ATOMIC_STORE(ptr, val) cc_atomic_store_relaxed((ptr), (val))
+#define CC_ATOMIC_STORE_RELEASE(ptr, val) cc_atomic_store_release((ptr), (val))
+#define CC_ATOMIC_CAS_ACQUIRE(ptr, expected_ptr, desired) cc_atomic_cas_acquire((ptr), (expected_ptr), (desired))
+
+/* Slab descriptor fields (base, capacity, tail_carved, prev, _flags) are
+ * plain-typed: grow rewrites them under meta_lock, and a few paths read
+ * them unlocked as hints (liveness, which host on the active chain owns a
+ * pointer, the reuse bit) before taking the lock and re-resolving. Those
+ * two sides go through these so a concurrent grow is a defined read of the
+ * old or the new value, never a torn one. Plain moves on x86; a release
+ * store / acquire load on ARM where the publish needs it. */
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__)
+#define CC__ARENA_FIELD_LOAD(ptr) __atomic_load_n((ptr), __ATOMIC_RELAXED)
+#define CC__ARENA_FIELD_LOAD_ACQUIRE(ptr) __atomic_load_n((ptr), __ATOMIC_ACQUIRE)
+#define CC__ARENA_FIELD_PUBLISH(ptr, val) __atomic_store_n((ptr), (val), __ATOMIC_RELEASE)
+#else
+#define CC__ARENA_FIELD_LOAD(ptr) (*(ptr))
+#define CC__ARENA_FIELD_LOAD_ACQUIRE(ptr) (*(ptr))
+#define CC__ARENA_FIELD_PUBLISH(ptr, val) (*(ptr) = (val))
+#endif
 
 // Arena ownership flags (stored in _flags field)
 #define CC_ARENA_FLAG_HEAP_OWNED  0x1  // Arena owns its backing memory (allocated via malloc)
@@ -181,7 +207,7 @@ static inline CCArena cc_arena_handle(CCArenaHost *h) {
 }
 
 static inline int cc_arena_is_live(CCArena a) {
-    return a.p != NULL && a.p->base != NULL;
+    return a.p != NULL && CC__ARENA_FIELD_LOAD(&a.p->base) != NULL;
 }
 
 static inline CCArenaHost *cc_arena_host(CCArena a) {
@@ -435,29 +461,47 @@ static inline void cc__arena_cpu_relax(void) {
 #endif
 }
 
-/* Root-arena meta lock: grow / ovf / chain mutation. Uncontended CAS. */
+/* Root-arena meta lock: tip bump / grow / ovf / chain mutation. Acquire on
+ * the CAS, release on the unlock; nothing else on the host is ordered. */
 static inline void cc__arena_meta_lock(CCArenaHost *arena) {
     unsigned expected = 0;
-    while (!CC_ATOMIC_CAS(&arena->meta_lock, &expected, 1u)) {
+    while (!CC_ATOMIC_CAS_ACQUIRE(&arena->meta_lock, &expected, 1u)) {
         expected = 0;
         cc__arena_cpu_relax();
     }
 }
 
 static inline void cc__arena_meta_unlock(CCArenaHost *arena) {
-    CC_ATOMIC_STORE(&arena->meta_lock, 0u);
+    CC_ATOMIC_STORE_RELEASE(&arena->meta_lock, 0u);
+}
+
+/* live_allocs changes only under meta_lock (or on the exclusive path), so a
+ * locked step is a plain load and store, not a read-modify-write. */
+static inline void cc__arena_live_inc_locked(CCArenaHost *block) {
+    CC_ATOMIC_STORE(&block->live_allocs, CC_ATOMIC_LOAD(&block->live_allocs) + 1);
+}
+static inline void cc__arena_live_dec_locked(CCArenaHost *block) {
+    size_t live = CC_ATOMIC_LOAD(&block->live_allocs);
+    if (live > 0) CC_ATOMIC_STORE(&block->live_allocs, live - 1);
 }
 
 static inline int cc__arena_ptr_in_block(const CCArenaHost* block, const void* ptr) {
     const uint8_t* p = (const uint8_t*)ptr;
+    const uint8_t* base;
+    size_t capacity;
+    size_t carved;
     size_t end;
-    if (!block || !block->base) return 0;
-    end = block->tail_carved < block->capacity ? block->tail_carved : block->capacity;
-    return p >= block->base && p < (block->base + end);
+    if (!block) return 0;
+    base = CC__ARENA_FIELD_LOAD(&block->base);
+    if (!base) return 0;
+    capacity = CC__ARENA_FIELD_LOAD(&block->capacity);
+    carved = CC__ARENA_FIELD_LOAD(&block->tail_carved);
+    end = carved < capacity ? carved : capacity;
+    return p >= base && p < (base + end);
 }
 
 static inline bool cc_arena_valid(const CCArenaHost* arena) {
-    return arena && arena->base != NULL;
+    return arena && CC__ARENA_FIELD_LOAD(&arena->base) != NULL;
 }
 
 /* Walks `prev` without taking meta_lock. Callers that mutate the chain
@@ -466,7 +510,8 @@ static inline bool cc_arena_valid(const CCArenaHost* arena) {
 static inline CCArenaHost* cc__arena_find_block(CCArenaHost* arena, const void* ptr) {
     if (!arena || !ptr) return NULL;
     if (cc__arena_ptr_in_block(arena, ptr)) return arena;
-    for (CCArenaHost* cur = arena->prev; cur; cur = cur->prev) {
+    for (CCArenaHost* cur = CC__ARENA_FIELD_LOAD_ACQUIRE(&arena->prev); cur;
+         cur = CC__ARENA_FIELD_LOAD_ACQUIRE(&cur->prev)) {
         if (cc__arena_ptr_in_block(cur, ptr)) return cur;
     }
     return NULL;
@@ -680,7 +725,7 @@ CC__ARENA_SYS void *cc__arena_alloc_ovf_object(CCArenaHost *arena, size_t size, 
     cc__arena_ovf_push_locked(arena, h);
     /* Requested malloc size — same unit on release / split / realloc. */
     CC_ATOMIC_FETCH_ADD(&arena->overflow_bytes, total);
-    arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW;
+    CC__ARENA_FIELD_PUBLISH(&arena->_flags, arena->_flags | CC_ARENA_FLAG_USED_HEAP_OVERFLOW);
     if (out_epoch) *out_epoch = h->provenance;
     cc__arena_meta_unlock(arena);
     return payload;
@@ -748,7 +793,7 @@ CC__ARENA_SYS void *cc__arena_alloc_ovf_chunked(CCArenaHost *arena, size_t size,
     h->prev = NULL;
     h->provenance = arena->provenance;
     chunk->live++;
-    arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW;
+    CC__ARENA_FIELD_PUBLISH(&arena->_flags, arena->_flags | CC_ARENA_FLAG_USED_HEAP_OVERFLOW);
     if (out_epoch) *out_epoch = h->provenance;
     cc__arena_meta_unlock(arena);
     return payload;
@@ -842,7 +887,7 @@ static inline size_t cc__arena_reuse_class_bytes(unsigned k) {
  * served from a list (a listed block may be only 16-aligned). */
 static inline size_t cc__arena_reuse_round(const CCArenaHost *a, size_t *size, size_t *align) {
     unsigned k;
-    if (!a || !(a->_flags & CC_ARENA_FLAG_REUSE)) return 0;
+    if (!a || !(CC__ARENA_FIELD_LOAD(&a->_flags) & CC_ARENA_FLAG_REUSE)) return 0;
     k = cc__arena_reuse_class(*size);
     if (k >= CC_ARENA_REUSE_CLASSES) return 0;
     if (*align < CC_ARENA_REUSE_ALIGN) *align = CC_ARENA_REUSE_ALIGN;
@@ -936,7 +981,7 @@ static inline void cc__arena_note_live_locked(CCArenaHost *arena, uint8_t *base,
         }
     }
     if (!block) block = cc__arena_find_block(arena, ptr);
-    if (block) CC_ATOMIC_FETCH_ADD(&block->live_allocs, 1);
+    if (block) cc__arena_live_inc_locked(block);
 }
 
 /* Push current slab to prev; install a new root at least max(1.5× old, min_cap, 4096).
@@ -1010,16 +1055,18 @@ CC__ARENA_SYS int cc__arena_grow_locked(CCArenaHost *arena, size_t size, size_t 
     extent->reuse_free = NULL;
     CC_ATOMIC_STORE(&extent->meta_lock, 0u);
 
-    /* Publish extent before swapping root base so note_live/find_block can
-     * locate payloads that raced the tip CAS onto this slab. */
-    arena->prev = extent;
-    arena->base = new_buf;
-    arena->capacity = new_cap;
-    arena->tail_carved = new_cap;
+    /* Publish the extent before swapping the root slab so an unlocked
+     * ownership hint that misses the new root still finds the old slab on
+     * the chain; the swap itself is a release so the hint never reads a
+     * torn descriptor. */
+    CC__ARENA_FIELD_PUBLISH(&arena->prev, extent);
+    CC__ARENA_FIELD_PUBLISH(&arena->base, new_buf);
+    CC__ARENA_FIELD_PUBLISH(&arena->capacity, new_cap);
+    CC__ARENA_FIELD_PUBLISH(&arena->tail_carved, new_cap);
     CC_ATOMIC_STORE(&arena->offset, 0);
     CC_ATOMIC_STORE(&arena->live_allocs, 0);
     arena->block_idx++;
-    arena->_flags |= CC_ARENA_FLAG_HEAP_OWNED;
+    CC__ARENA_FIELD_PUBLISH(&arena->_flags, arena->_flags | CC_ARENA_FLAG_HEAP_OWNED);
 
     return 0;
 }
@@ -1043,7 +1090,7 @@ static inline void *cc__arena_alloc_here_epoch(CCArenaHost *arena, size_t size,
     uint8_t *base = NULL;
     void *ptr;
     unsigned cls = CC_ARENA_REUSE_CLASSES;
-    if (!arena || !arena->base || size == 0) {
+    if (!arena || !CC__ARENA_FIELD_LOAD(&arena->base) || size == 0) {
         return NULL;
     }
     if (cc__arena_reuse_round(arena, &size, &align))
@@ -1365,7 +1412,7 @@ CC__ARENA_SYS void *cc_arena_realloc_host(CCArenaHost *old_arena,
                 CC_ATOMIC_FETCH_SUB(&old_arena->overflow_bytes, saved_acct);
             }
             CC_ATOMIC_FETCH_ADD(&old_arena->overflow_bytes, new_bytes);
-            old_arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW;
+            CC__ARENA_FIELD_PUBLISH(&old_arena->_flags, old_arena->_flags | CC_ARENA_FLAG_USED_HEAP_OVERFLOW);
             cc__arena_meta_unlock(old_arena);
             return new_payload;
         }
@@ -1960,7 +2007,7 @@ CC__ARENA_SYS int cc__arena_release_one(CCArenaHost* arena, void* ptr, size_t si
         if (sized && block == arena && ptr_off + size == cur_off) {
             /* Tip pop: the bytes go back to the bump. */
             CC_ATOMIC_STORE(&block->offset, live == 1 ? 0 : ptr_off);
-            CC_ATOMIC_FETCH_SUB(&block->live_allocs, 1);
+            cc__arena_live_dec_locked(block);
         } else if (sized && cls < CC_ARENA_REUSE_CLASSES && arena->reuse_free &&
                    size >= sizeof(void *)) {
             /* Listed for re-serve; stays counted live so no rewind can
@@ -1968,7 +2015,7 @@ CC__ARENA_SYS int cc__arena_release_one(CCArenaHost* arena, void* ptr, size_t si
             *(void **)ptr = arena->reuse_free[cls];
             arena->reuse_free[cls] = ptr;
         } else {
-            CC_ATOMIC_FETCH_SUB(&block->live_allocs, 1);
+            cc__arena_live_dec_locked(block);
             if (block == arena && live == 1) CC_ATOMIC_STORE(&arena->offset, 0);
         }
         cc__arena_meta_unlock(arena);
@@ -2143,12 +2190,12 @@ static inline CCArenaOwner *cc_arena_owner_new(CCArenaHost *arena, size_t bytes,
     CCArenaOwner *o = NULL;
     uint64_t epoch = 0;
     void *p = NULL;
-    if (!a || !a->base) return NULL;
+    if (!a || !CC__ARENA_FIELD_LOAD(&a->base)) return NULL;
     if (!align) align = sizeof(void *);
     /* Fast path: header and payload both come off the active slab under one
      * lock. Anything else (a full slab, a reuse host, no payload) takes the
      * general paths below. */
-    if (bytes && !(a->_flags & CC_ARENA_FLAG_REUSE)) {
+    if (bytes && !(CC__ARENA_FIELD_LOAD(&a->_flags) & CC_ARENA_FLAG_REUSE)) {
         uint8_t *hb = NULL;
         uint8_t *pb = NULL;
         cc__arena_meta_lock(a);
@@ -2246,7 +2293,7 @@ static inline bool cc_arena_owner_release(CCArenaOwner *o, uint32_t token) {
      * and the header listed under one lock (tip pop when it is the tip,
      * else a hole). Reuse hosts and overflow payloads take the general
      * release, which may list or free. */
-    if (a && o->payload && !(a->_flags & CC_ARENA_FLAG_REUSE)) {
+    if (a && o->payload && !(CC__ARENA_FIELD_LOAD(&a->_flags) & CC_ARENA_FLAG_REUSE)) {
         uint8_t *bp = (uint8_t *)o->payload;
         cc__arena_meta_lock(a);
         if (a->base && bp >= a->base && bp < a->base + a->tail_carved) {
@@ -2258,7 +2305,7 @@ static inline bool cc_arena_owner_release(CCArenaOwner *o, uint32_t token) {
                     CC_ATOMIC_STORE(&a->offset, live == 1 ? 0 : ptr_off);
                 else if (live == 1)
                     CC_ATOMIC_STORE(&a->offset, 0);
-                CC_ATOMIC_FETCH_SUB(&a->live_allocs, 1);
+                cc__arena_live_dec_locked(a);
             }
             o->token = 0;
             o->payload = NULL;
@@ -2359,7 +2406,7 @@ static inline void cc__arena_tail_pop(CCArenaHost *parent, uint8_t *tail_base,
     }
     if (block) {
         size_t live = CC_ATOMIC_LOAD(&block->live_allocs);
-        if (live > 0) CC_ATOMIC_FETCH_SUB(&block->live_allocs, 1);
+        cc__arena_live_dec_locked(block);
         if (CC_ATOMIC_LOAD(&block->offset) == tail_end)
             CC_ATOMIC_STORE(&block->offset, (block == parent && live <= 1) ? 0 : tail_off);
         block->tail_carved = block->capacity;
@@ -2865,7 +2912,7 @@ static inline CCArenaCheckpoint cc_arena_checkpoint(CCArenaHost* arena) {
         nd = (CCAttachNode *)(target->base + node_at);
         target->tail_carved = node_at;
         CC_ATOMIC_STORE(&target->offset, cap);
-        CC_ATOMIC_FETCH_ADD(&target->live_allocs, 1);
+        cc__arena_live_inc_locked(target);
     } else {
         /* No tail worth carving: a heap-rooted child, unless the host is a
          * hard cap (FIXED without overflow) — then stay unarmed. */
@@ -2966,7 +3013,7 @@ CC__ARENA_SYS bool cc_arena_restore(CCArenaCheckpoint checkpoint) {
         }
         if (block) {
             size_t live = CC_ATOMIC_LOAD(&block->live_allocs);
-            if (live > 0) CC_ATOMIC_FETCH_SUB(&block->live_allocs, 1);
+            cc__arena_live_dec_locked(block);
             if (CC_ATOMIC_LOAD(&block->offset) == child->tail_end)
                 CC_ATOMIC_STORE(&block->offset,
                                 (block == parent && live <= 1) ? 0 : child->tail_off);

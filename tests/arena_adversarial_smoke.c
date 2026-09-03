@@ -140,13 +140,19 @@ static int test_release_misuse(void) {
     void *p;
     void *q;
     void *foreign;
+    void *foreign_block;
     uint8_t stack_bytes[64];
     if (!a.base || !b.base) return fail(3, "heaps");
     p = cc_arena_alloc(a, 32, 8);
     q = cc_arena_alloc(a, 32, 8);
     if (!p || !q) return fail(3, "allocs");
-    foreign = malloc(32);
-    if (!foreign) return fail(3, "malloc");
+    /* Release peeks at the bytes before a pointer for an overflow header,
+     * so a foreign pointer must have readable bytes before it: point into
+     * the middle of a heap block, not at its start (TSan's allocator puts
+     * the first block at the edge of a mapping). */
+    foreign_block = malloc(256);
+    if (!foreign_block) return fail(3, "malloc");
+    foreign = (uint8_t *)foreign_block + 128;
 
     if (cc_arena_release(a, foreign)) return fail(3, "foreign refused");
     if (cc_arena_release(b, p)) return fail(3, "wrong arena refused");
@@ -165,7 +171,7 @@ static int test_release_misuse(void) {
     if (!cc_arena_release_sized(a, q, 32)) return fail(3, "real tip release");
     if (cc_atomic_load(&a.a->offset) != 0) return fail(3, "last live rewinds");
     if (cc_arena_release(a, p)) return fail(3, "nothing live: refused");
-    free(foreign);
+    free(foreign_block);
     cc_arena_free(&a);
     cc_arena_free(&b);
     printf("  release misuse OK\n");

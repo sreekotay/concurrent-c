@@ -40,7 +40,10 @@ CCString cc_string_from_slice(CCArena arena, CCSlice slice) {
     return s;
 }
 
-CCString* cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len, CCArena arena) {
+/* Growth path behind the inline cc_string_push_buffer: the bytes did not
+ * fit the current backing (or the handle is unbound, stale, or poisoned).
+ * reserve() promotes, regrows, swaps arenas, or poisons; then copy. */
+CCString* cc__string_push_buffer_grow(CCString *str, const char *buffer, uint32_t len, CCArena arena) {
     char *dst;
     size_t new_len;
     if (!str || cc_string_failed(str)) return NULL;
@@ -56,9 +59,13 @@ CCString* cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len,
     return str;
 }
 
+/* Exported twins of the inline appends (see the face). */
+CCString* cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len, CCArena arena) {
+    return cc__string_push_buffer_inline(str, buffer, len, arena);
+}
+
 CCString* cc_string_push_slice(CCString *str, CCSlice data, CCArena arena) {
-    if (data.len > UINT32_MAX) return NULL;
-    return cc_string_push_buffer(str, (const char *)data.ptr, (uint32_t)data.len, arena);
+    return cc__string_push_slice_inline(str, data, arena);
 }
 
 CCString* cc_string_clear(CCString *str) {

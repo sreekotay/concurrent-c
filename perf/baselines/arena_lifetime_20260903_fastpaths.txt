@@ -1,0 +1,91 @@
+arena_lifetime_bench — 2026-09-03 — Linux x86_64, gcc -O2 (ccc build --release), ROUNDS=5 best-of
+Branch: same lifetime model as arena_lifetime_20260903.txt, plus two fast paths:
+  (1) String append is inline: a fitting append (inline handle with room, or a
+      heap owner whose token matches and whose capacity covers the bytes) is a
+      copy, a length bump and a NUL; only growth calls the runtime. The string
+      face's byte helpers are builtins (memcpy / memset / strlen) on GCC and
+      Clang, so a literal append is a pair of moves.
+  (2) Every counter under meta_lock (offset, live_allocs, overflow_bytes) is a
+      relaxed atomic; the lock is an acquire CAS and a release store; the
+      locked live-count step is a load and a store, not a read-modify-write.
+      Slab descriptor fields that grow rewrites (base, capacity, tail_carved,
+      prev, _flags) are published with release stores and read unlocked
+      through relaxed / acquire loads, so the ownership and liveness hints
+      are defined reads (TSan-clean on the adversarial and storm programs).
+
+Section A — before / after, this tree, same machine (before = Section A of
+arena_lifetime_20260903.txt).
+
+row                                                 before      after
+alloc 64B shared, reset/4096                          28.0       13.8   one acquire CAS + one release store
+alloc 64B local, reset/4096                            4.1        3.3
+checkpoint + restore (empty)                          87.3       56.5
+checkpoint + 3 allocs + restore (@scratch shape)     168.8       88.5
+checkpoint + 3 allocs + restore (1 KiB stack)        162.7       83.2
+nested checkpoint x3 + restore x3                    332.0      174.5
+checkpoint + 2 MiB scratch (child extent) + restore   111.3       60.1
+alloc 64B + release (unsized, last-live)              56.2       25.1
+alloc 64B + release_sized (tip pop)                   58.7       26.1
+alloc 64B x2 + release_sized first (hole)             79.2       40.3
+reuse: alloc x2 + release first + alloc              101.3       59.2
+realloc tip growth 64B steps (in place)               23.4       13.8
+realloc buried 256B -> 320B (copy + release)         130.0       70.6
+vec push 1M ints (tip fit) + destroy                   2.3        2.4
+vec push 1M ints, alloc every 64 (moves)               4.0        4.7
+vec get 1M (token-checked handle)                      1.7        1.7
+vec init + 8 push + destroy (owner churn)             99.6       65.3
+string push_cstr 12B x 1M (one string)                22.1       14.9   see note below
+string promote (24B) + destroy churn                 100.2       65.3
+@string template (2 slots) on @scratch               472.5      356.3
+@string template (2 slots) on arena + destroy        200.4      145.2
+map insert 1k ints + destroy                       30600.5    30653.7   hash-bound; noise
+owner new 64B + release (header rebirth)              87.3       53.7
+token registry birth + kill                           28.6       28.5   untouched
+
+Section B — CC vs the plain-C twin (perf/arena_lifetime_c_baseline.c,
+gcc -O2). Ratio = CC / C.
+
+row                                                    CC ns/op    C ns/op   ratio
+alloc 64B shared, reset/4096                               13.8       15.4    0.9x  (C: malloc+free)
+alloc 64B local, reset/4096                                 3.3        1.4    2.4x  (C: hand bump)
+checkpoint + restore (empty)                               56.5        1.7   33.2x  (C: mark/reset)
+checkpoint + 3 allocs + restore (@scratch shape)           88.5        5.0   17.7x
+checkpoint + 3 allocs + restore (1 KiB stack)              83.2        5.0   16.6x
+nested checkpoint x3 + restore x3                         174.5        4.9   35.6x
+checkpoint + 2 MiB scratch (child extent) + restore        60.1       33.3    1.8x  (C: malloc+free 2 MiB)
+alloc 64B + release (unsized, last-live)                   25.1       15.4    1.6x  (C: malloc+free)
+alloc 64B + release_sized (tip pop)                        26.1       15.5    1.7x
+alloc 64B x2 + release_sized first (hole)                  40.3       15.6    2.6x
+reuse: alloc x2 + release first + alloc                    59.2       15.6    3.8x
+realloc tip growth 64B steps (in place)                    13.8       15.7    0.9x
+realloc buried 256B -> 320B (copy + release)               70.6       76.4    0.9x
+vec push 1M ints (tip fit) + destroy                        2.4        0.7    3.4x  (C: realloc-grown array)
+vec push 1M ints, alloc every 64 (moves)                    4.7        2.3    2.0x
+vec get 1M (token-checked handle)                           1.7        1.7    1.0x
+vec init + 8 push + destroy (owner churn)                  65.3       22.6    2.9x
+string push_cstr 12B x 1M (one string)                     14.9        1.4   10.6x  (C: realloc-grown buffer)
+string promote (24B) + destroy churn                       65.3       16.4    4.0x
+@string template (2 slots) on @scratch                    356.3      112.7    3.2x  (C: snprintf, stack buffer)
+@string template (2 slots) on arena + destroy             145.2      128.2    1.1x  (C: snprintf, malloc'd)
+map insert 1k ints + destroy                            30653.7    15544.9    2.0x
+owner new 64B + release (header rebirth)                   53.7       30.6    1.8x  (C: two mallocs, two frees)
+token registry birth + kill                                28.5        1.6   17.8x  (C: plain counter)
+
+Notes:
+- The shared bump path is now cheaper than glibc's tcache pop. What it
+  still pays over the exclusive path is the lock word: one CAS in, one
+  release store out.
+- Every path that takes the lock once (release, tip pop, hole, reuse pop,
+  tip realloc, owner rebirth) lost 25 to 60 ns: those were the sequentially
+  consistent stores and the read-modify-writes on the live count. Checkpoint
+  cycles take the lock two or three times and lost proportionally.
+- String append: with room in the backing, one append measures about 3 ns
+  in a standalone loop (7 to 8 ns with the byte-loop copy, 22 ns through
+  the runtime call). The benchmark row grows one string to 12 MB on an 8 MiB
+  heap arena, so it is dominated by regrow copies past the slab and by the
+  first touch of the grown extents; the C twin's realloc remaps at that size
+  and copies nothing. The remaining gap on that row is growth policy, not
+  the append.
+- Vec push was already inline and is unchanged. Owner churn dropped with the
+  single-lock header + payload path getting cheaper; the registry birth and
+  kill (about 28 ns of every owner cycle) are untouched.

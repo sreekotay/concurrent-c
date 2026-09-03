@@ -2573,6 +2573,24 @@ GCC/Clang compatibility path uses full-barrier `__sync` operations. If
 `CC_ATOMIC_HAVE_REAL_ATOMICS` is zero, the provided fallback is not
 thread-safe and concurrent use is invalid.
 
+Explicitly ordered forms carry the named order on the C11 path:
+
+```c
+cc_atomic_load_relaxed(ptr);
+cc_atomic_store_relaxed(ptr, value);
+cc_atomic_fetch_add_relaxed(ptr, value);
+cc_atomic_fetch_sub_relaxed(ptr, value);
+cc_atomic_load_acquire(ptr);
+cc_atomic_store_release(ptr, value);
+cc_atomic_cas_acquire(ptr, expected_ptr, desired);
+```
+
+Relaxed forms are for a location that a lock already serializes, where the
+lock's acquire and release are the only ordering needed. `cas_acquire` may
+fail spuriously and is for a retry loop. On the compatibility path a relaxed
+access is a volatile access and the acquire and release forms are full
+barriers; the non-atomic fallback maps every form to its plain counterpart.
+
 `Atomic::[T]` is not a live generic family.
 
 ---
