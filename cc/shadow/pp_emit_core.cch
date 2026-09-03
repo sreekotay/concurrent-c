@@ -4933,7 +4933,7 @@ static void shadow_restrict_check_call_widen(const char* fn, const char* args) {
 static void shadow_restrict_register_builtins(void) {
     (void)shadow_restrict_register_ex("CCSlice", "", "{ r: *; }", 0);
     (void)shadow_restrict_register_ex(
-        "CCString", "", "{ r: ^data, ^inline_buf, ^_inline_word; }", 0);
+        "CCString", "", "{ r: ^own, ^data, ^inline_buf, ^_inline_word; }", 0);
     /* Named pointer: methods, not `.p`. Same body as `cc_box.cch`.
      * Header lowering strips the live `@typeview`; pin after table reset. */
     (void)shadow_restrict_register_ex("CCBox_*", "", "{ as: p; r: ^p; }", 0);

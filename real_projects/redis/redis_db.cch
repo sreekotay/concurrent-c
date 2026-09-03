@@ -223,17 +223,10 @@ fail:
 
 static void db_release_value(RedisDb* db, CCString* value) {
     if (!db || !value) return;
-    if (value->heap_data()) {
-        CCStringHeapHeader* header = cc__string_heap_header(value);
-        db_mem_stats_note_value_release(value->cap());
-        /* Malloc-backed heap string (header->arena is dead). */
-        if (header && !cc_arena_is_live(header->arena)) {
-            free(header);
-            *value = (CCString){0};
-            return;
-        }
-    }
-    value->release(db->value_arena);
+    if (value->heap_data()) db_mem_stats_note_value_release(value->cap());
+    /* The owner header names the arena that holds the bytes; release
+     * goes through it (a dead arena already took the bytes with it). */
+    value->destroy();
 }
 
 /* Replace path for an existing STR-arm payload.  In-place overwrite when

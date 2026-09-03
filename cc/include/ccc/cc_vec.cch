@@ -7,21 +7,20 @@
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_slice.cch>
 
-
+/* Erased vector handle. Arena-backed storage is a `CCArenaOwner` (header in
+ * the arena's slab tier, payload from the strategy); the handle carries the
+ * owner's token so a stale copy — one that outlived a growth move or a
+ * destroy through another copy — mismatches instead of touching bytes that
+ * belong to someone else. `from()` wraps caller storage: no owner, no grow,
+ * no release. */
 typedef struct CCVec {
     void *data;
     size_t len;
-    size_t cap;   /* elements; high bit set ⇒ from-constructed */
+    size_t cap;         /* elements; high bit set ⇒ from-constructed */
+    CCArenaOwner *own;  /* NULL for from() and unbound handles */
+    uint32_t token;     /* owner token at last init/regrow through this handle */
+    uint32_t _pad;
 } CCVec;
-
-/* Prefix on arena-backed allocations only. Cap lives on the handle.
- * from() never plants this — do not subtract from data when the from-bit
- * is set. */
-typedef struct CCVecHeader {
-    CCArena arena;
-    uint64_t provenance;
-    uint32_t gen;
-} CCVecHeader;
 
 #define CC_VEC_FROM ((size_t)1 << (sizeof(size_t) * 8 - 1))
 
@@ -42,19 +41,15 @@ static inline size_t cc_vec_cap(const CCVec *v) {
     return v ? (v->cap & ~CC_VEC_FROM) : 0;
 }
 
-static inline size_t cc__vec_header_bytes(void) {
-    size_t align = CC__VEC_MAX_ALIGN;
-    return (sizeof(CCVecHeader) + align - 1) & ~(align - 1);
-}
-
-static inline CCVecHeader *cc__vec_header(const CCVec *v) {
-    if (!v || !v->data || cc_vec_is_from(v)) return NULL;
-    return (CCVecHeader *)((uint8_t *)v->data - cc__vec_header_bytes());
+/* Live owner behind this handle, or NULL (from-wrap, unbound, stale). */
+static inline CCArenaOwner *cc__vec_owner(const CCVec *v) {
+    if (!v || cc_vec_is_from(v) || !v->own) return NULL;
+    return cc_arena_owner_live(v->own, v->token) ? v->own : NULL;
 }
 
 static inline CCArena cc_vec_arena(const CCVec *v) {
-    CCVecHeader *h = cc__vec_header(v);
-    return h ? h->arena : cc_arena_handle(NULL);
+    CCArenaOwner *o = cc__vec_owner(v);
+    return o ? cc_arena_handle(o->arena) : cc_arena_handle(NULL);
 }
 
 static inline void cc__vec_unbind(CCVec *v) {
@@ -62,20 +57,30 @@ static inline void cc__vec_unbind(CCVec *v) {
     v->data = NULL;
     v->len = 0;
     v->cap = 0;
+    v->own = NULL;
+    v->token = 0;
 }
 
-#ifdef CC_PARSER_MODE
+static inline size_t cc__vec_alloc_size(size_t elem_size, size_t cap) {
+    if (elem_size != 0 && cap > SIZE_MAX / elem_size) return 0;
+    return elem_size * cap;
+}
 
 static inline uint64_t cc_vec_provenance(const CCVec *v) {
-    CCVecHeader *h = cc__vec_header(v);
-    return h ? h->provenance : 0;
+    CCArenaOwner *o = cc__vec_owner(v);
+    return o ? o->provenance : 0;
 }
 
+/* Grower view: epoch + owner token. A from-wrap is untracked. A stale
+ * handle yields an empty slice (fail closed). */
 static inline CCSlice cc_vec_as_slice(const CCVec *v) {
+    CCArenaOwner *o;
     if (!v || !v->data) return cc_slice_empty();
-    return cc_slice_from_parts(v->data,
-                               v->len,
-                               cc_slice_make_id(cc_vec_provenance(v), false, false, false));
+    if (cc_vec_is_from(v))
+        return cc_slice_from_parts(v->data, v->len, CC_SLICE_ID_UNTRACKED);
+    o = cc__vec_owner(v);
+    if (!o) return cc_slice_empty();
+    return cc_slice_from_parts(v->data, v->len, cc_arena_owner_slice_id(o));
 }
 
 static inline void cc_vec_apply_slice(CCVec *v, CCSlice slice) {
@@ -84,17 +89,8 @@ static inline void cc_vec_apply_slice(CCVec *v, CCSlice slice) {
     v->len = slice.len;
 }
 
-static inline int cc_vec_init(CCVec *v,
-                              CCArena arena,
-                              size_t elem_size,
-                              size_t elem_align,
-                              size_t initial_cap) {
-    (void)elem_size;
-    (void)elem_align;
-    (void)initial_cap;
-    if (!v) return -1;
-    cc__vec_unbind(v);
-    return cc_arena_is_live(arena) ? 0 : -1;
+static inline void cc_vec_sync_len(CCVec *v) {
+    (void)v;
 }
 
 static inline int cc_vec_from(CCVec *v, void *ptr, size_t len, size_t cap) {
@@ -108,6 +104,26 @@ static inline int cc_vec_from(CCVec *v, void *ptr, size_t len, size_t cap) {
     v->len = len;
     v->cap = cap | CC_VEC_FROM;
     return 0;
+}
+
+static inline void cc_vec_clear(CCVec *v) {
+    if (!v) return;
+    v->len = 0;
+}
+
+#ifdef CC_PARSER_MODE
+
+static inline int cc_vec_init(CCVec *v,
+                              CCArena arena,
+                              size_t elem_size,
+                              size_t elem_align,
+                              size_t initial_cap) {
+    (void)elem_size;
+    (void)elem_align;
+    (void)initial_cap;
+    if (!v) return -1;
+    cc__vec_unbind(v);
+    return cc_arena_is_live(arena) ? 0 : -1;
 }
 
 static inline int cc_vec_reserve(CCVec *v,
@@ -140,133 +156,73 @@ static inline void *cc_vec_at_grow(CCVec *v,
     return NULL;
 }
 
-static inline void cc_vec_sync_len(CCVec *v) {
-    (void)v;
-}
-
-static inline void cc_vec_clear(CCVec *v) {
-    if (!v) return;
-    v->len = 0;
-}
-
 static inline void cc_vec_destroy(CCVec *v) {
     cc__vec_unbind(v);
 }
 
 #else
 
-static inline uint64_t cc_vec_provenance(const CCVec *v) {
-    CCVecHeader *h = cc__vec_header(v);
-    return h ? h->provenance : 0;
-}
-
-static inline size_t cc__vec_alloc_size(size_t elem_size, size_t cap) {
-    if (elem_size != 0 && cap > (SIZE_MAX - cc__vec_header_bytes()) / elem_size) {
-        return 0;
-    }
-    return cc__vec_header_bytes() + elem_size * cap;
-}
-
-static inline void cc_vec_sync_len(CCVec *v) {
-    (void)v;
-}
-
-static inline CCSlice cc_vec_as_slice(const CCVec *v) {
-    CCVecHeader *h;
-    if (!v || !v->data) return cc_slice_empty();
-    if (cc_vec_is_from(v))
-        return cc_slice_from_parts(v->data, v->len, CC_SLICE_ID_UNTRACKED);
-    h = cc__vec_header(v);
-    if (!h) return cc_slice_empty();
-    return cc_slice_from_parts(v->data, v->len,
-                               cc_slice_make_grower_id(h->provenance, h->gen));
-}
-
-static inline void cc_vec_apply_slice(CCVec *v, CCSlice slice) {
-    if (!v) return;
-    v->data = slice.ptr;
-    v->len = slice.len;
-}
-
-static inline int cc_vec_from(CCVec *v, void *ptr, size_t len, size_t cap) {
-    if (!v) return -1;
-    cc__vec_unbind(v);
-    if (cap & CC_VEC_FROM) return -1;
-    if (len > cap) return -1;
-    if (len && !ptr) return -1;
-    if (cap && !ptr) return -1;
-    v->data = ptr;
-    v->len = len;
-    v->cap = cap | CC_VEC_FROM;
-    return 0;
-}
-
 static inline int cc_vec_init(CCVec *v,
                               CCArena arena,
                               size_t elem_size,
                               size_t elem_align,
                               size_t initial_cap) {
-    CCVecHeader *h;
+    CCArenaOwner *o;
     size_t total;
     size_t cap;
+    size_t align;
     if (!v) return -1;
     cc__vec_unbind(v);
     if (!cc_arena_is_live(arena)) return -1;
 
     cap = initial_cap > 0 ? initial_cap : 8;
-    (void)elem_align;
+    align = elem_align > CC__VEC_MAX_ALIGN ? elem_align : CC__VEC_MAX_ALIGN;
     total = cc__vec_alloc_size(elem_size, cap);
     if (total == 0) return -1;
-    h = (CCVecHeader *)cc_arena_alloc(arena, total, CC__VEC_MAX_ALIGN);
-    if (!h) return -1;
-    h->arena = arena;
-    h->provenance = CC__ARENA_HOST(arena)->provenance;
-    h->gen = cc_slice_gen_birth();
-    v->data = (void *)((uint8_t *)h + cc__vec_header_bytes());
+    o = cc_arena_owner_new(arena, total, align);
+    if (!o) return -1;
+    v->data = o->payload;
     v->len = 0;
     v->cap = cap;
+    v->own = o;
+    v->token = o->token;
     return 0;
 }
 
+/* Grow to `need` elements through the owner. A stale handle (token
+ * mismatch) is refused; the live handle that owns the vector is the only
+ * one that may grow it. */
 static inline int cc_vec_reserve(CCVec *v,
                                  size_t elem_size,
                                  size_t elem_align,
                                  size_t need) {
-    CCVecHeader *h;
-    CCArena arena;
+    CCArenaOwner *o;
     size_t old_cap;
-    size_t old_total;
     size_t new_total;
+    void *p;
+    (void)elem_align;
     if (!v) return -1;
     old_cap = cc_vec_cap(v);
     if (need <= old_cap) return 0;
     if (cc_vec_is_from(v)) return -1;
-    h = cc__vec_header(v);
-    if (!h || !cc_arena_is_live(h->arena)) return -1;
-
-    arena = h->arena;
-    (void)elem_align;
-    old_total = cc__vec_alloc_size(elem_size, old_cap);
+    o = cc__vec_owner(v);
+    if (!o) return -1;
     new_total = cc__vec_alloc_size(elem_size, need);
-    if (old_total == 0 || new_total == 0) return -1;
-    {
-        CCVecHeader *old_h = h;
-        uint32_t old_gen = h->gen;
-        h = (CCVecHeader *)cc_arena_realloc(arena, arena, h, old_total,
-                                            new_total, CC__VEC_MAX_ALIGN);
-        if (!h) return -1;
-        h->arena = arena;
-        h->provenance = CC__ARENA_HOST(arena)->provenance;
-        if (h != old_h) {
-            cc_slice_gen_kill(old_gen);
-            h->gen = cc_slice_gen_birth();
-        } else {
-            h->gen = old_gen;
-        }
-        v->data = (void *)((uint8_t *)h + cc__vec_header_bytes());
-        v->cap = need;
-    }
+    if (new_total == 0) return -1;
+    p = cc_arena_owner_regrow(o, v->token, new_total);
+    if (!p) return -1;
+    v->data = p;
+    v->cap = need;
+    v->token = o->token;
     return 0;
+}
+
+/* Every write path re-checks the token when the handle has an owner, so a
+ * stale copy with spare capacity cannot write into bytes the owner has
+ * already moved away from. One load and compare per push. */
+static inline int cc__vec_writable(const CCVec *v) {
+    if (cc_vec_is_from(v) || !v->own) return v->data != NULL || v->own == NULL;
+    return cc_arena_owner_live(v->own, v->token);
 }
 
 static inline void *cc_vec_push_slot(CCVec *v,
@@ -274,7 +230,7 @@ static inline void *cc_vec_push_slot(CCVec *v,
                                      size_t elem_align) {
     void *slot;
     size_t cap;
-    if (!v) return NULL;
+    if (!v || !cc__vec_writable(v)) return NULL;
     cap = cc_vec_cap(v);
     if (v->len == cap) {
         size_t new_cap = cap ? (cap * 8) / 5 : 8;
@@ -293,7 +249,7 @@ static inline void *cc_vec_at_grow(CCVec *v,
                                    size_t elem_align,
                                    size_t i) {
     size_t cap;
-    if (!v) return NULL;
+    if (!v || !cc__vec_writable(v)) return NULL;
     cap = cc_vec_cap(v);
     if (i >= cap) {
         size_t new_cap = cap ? cap : 8;
@@ -310,24 +266,13 @@ static inline void *cc_vec_at_grow(CCVec *v,
     return (uint8_t *)v->data + (i * elem_size);
 }
 
-static inline void cc_vec_clear(CCVec *v) {
-    if (!v) return;
-    v->len = 0;
-}
-
+/* Release the backing (sized, through the owner) and unbind. A second
+ * destroy through this or any other copy of the handle is a no-op: the
+ * owner's token no longer matches. from() wraps only unbind. */
 static inline void cc_vec_destroy(CCVec *v) {
-    CCVecHeader *h;
     if (!v) return;
-    if (cc_vec_is_from(v) || !v->data) {
-        cc__vec_unbind(v);
-        return;
-    }
-    h = cc__vec_header(v);
-    if (h) {
-        cc_slice_gen_kill(h->gen);
-        if (cc_arena_is_live(h->arena))
-            (void)cc_arena_release(h->arena, h);
-    }
+    if (!cc_vec_is_from(v) && v->own)
+        (void)cc_arena_owner_release(v->own, v->token);
     cc__vec_unbind(v);
 }
 

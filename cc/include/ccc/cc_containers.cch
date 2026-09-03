@@ -64,22 +64,25 @@ static inline uint64_t cc__containers_payload_provenance(void *ptr) {
     return header->provenance;
 }
 
+/* Sized release of a payload's raw block (the header records the request,
+ * so the arena can pop a tip or list a class). A dead arena is a no-op:
+ * the bytes died with it. */
 static inline void cc__containers_release_payload(CCArena arena, void *ptr) {
     CCContainersAllocHeader *header;
     if (!cc_arena_is_live(arena) || !ptr) return;
     header = cc__containers_payload_header(ptr);
-    if (header->raw_alloc) (void)cc_arena_release(arena, header->raw_alloc);
+    if (header->raw_alloc)
+        (void)cc_arena_release_sized(arena, header->raw_alloc,
+                                     cc__containers_alloc_total(header->size_bytes,
+                                                                CCJ_MAX_ALIGN));
 }
 
+/* realloc-shaped bridge for the vendored container core. Fails closed on a
+ * dead arena (NULL): a container whose arena died has no storage to grow
+ * into, and libc must never become its silent backing. */
 static inline void *cc__containers_realloc(void *ctx, void *ptr, size_t size_bytes) {
     CCArena arena = cc_arena_handle((CCArenaHost *)ctx);
-    if (!cc_arena_is_live(arena)) {
-        if (size_bytes == 0) {
-            free(ptr);
-            return NULL;
-        }
-        return realloc(ptr, size_bytes);
-    }
+    if (!cc_arena_is_live(arena)) return NULL;
 
     if (size_bytes == 0) {
         cc__containers_release_payload(arena, ptr);
@@ -124,10 +127,6 @@ static inline void *cc__containers_realloc(void *ctx, void *ptr, size_t size_byt
 static inline void cc__containers_free(void *ctx, void *ptr) {
     CCArena arena = cc_arena_handle((CCArenaHost *)ctx);
     if (!ptr) return;
-    if (!cc_arena_is_live(arena)) {
-        free(ptr);
-        return;
-    }
     cc__containers_release_payload(arena, ptr);
 }
 
