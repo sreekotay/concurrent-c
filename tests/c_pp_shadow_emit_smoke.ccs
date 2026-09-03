@@ -1,6 +1,7 @@
 /* Shadow path: same 2-stage front → .c (from .ccs) or .h (from .cch).
  * Host cc / TCC consume the product (intentional extra parse). */
 #include <ccc/std/prelude.cch>
+#include <ccc/std/map.cch>
 
 @grammar(rules) PpTok {~~~~
     include "../cc/shadow/pp_tok.rules"
@@ -21,8 +22,11 @@
 static const char* FIX = "cc/shadow/shadow";
 
 static void pp_free_macros(Pp* pp) {
-    for (int i = 0; i < pp->nmacros; i++) free(pp->macros[i].body);
+    /* Macro names/bodies/table rows live on pp->arena; abandon only. */
+    if (!pp) return;
+    pp->macros = NULL;
     pp->nmacros = 0;
+    pp->macros_cap = 0;
 }
 
 static char* read_all(const char* path, size_t* out_n) {
@@ -88,6 +92,7 @@ static int lower_file(TapeCache* cache, CCArena arena, const char* name,
     p.toks = tokbuf;
     p.n = pp.nout;
     p.cache = cache;
+    p.parse_ar = arena;
     if (!parse_tu(&p, &items, &n)) {
         if (!p.err_msg[0])
             fprintf(stderr, "%s:1:1: error: parse failed\n", path);

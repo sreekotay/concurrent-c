@@ -84,8 +84,11 @@ static int ends_with(const char* s, const char* suf) {
 }
 
 static void pp_free_macros(Pp* pp) {
-    for (int i = 0; i < pp->nmacros; i++) free(pp->macros[i].body);
+    /* Macro names/bodies/table rows live on pp->arena; abandon only. */
+    if (!pp) return;
+    pp->macros = NULL;
     pp->nmacros = 0;
+    pp->macros_cap = 0;
 }
 
 enum { SHADOW_DEP_CAP = 256 };

@@ -1,6 +1,7 @@
 /* Spike: stage-1 pp-token cache + stage-2 include stitch / object-like macros
  * / typedef-oracle AST for C and Concurrent-C. See cc/shadow/README.md. */
 #include <ccc/std/prelude.cch>
+#include <ccc/std/map.cch>
 
 @grammar(rules) PpTok {~~~~
     include "../cc/shadow/pp_tok.rules"
@@ -18,8 +19,11 @@
 static const char* FIX = "cc/shadow/fixtures";
 
 static void pp_free_macros(Pp* pp) {
-    for (int i = 0; i < pp->nmacros; i++) free(pp->macros[i].body);
+    /* Macro names/bodies/table rows live on pp->arena; abandon only. */
+    if (!pp) return;
+    pp->macros = NULL;
     pp->nmacros = 0;
+    pp->macros_cap = 0;
 }
 
 static int run_file(TapeCache* cache, CCArena arena, const char* name,
@@ -50,6 +54,7 @@ static int run_file(TapeCache* cache, CCArena arena, const char* name,
     p.toks = out_buf;
     p.n = pp.nout;
     p.cache = cache;
+    p.parse_ar = arena;
     if (!parse_tu(&p, items, nitems)) {
         printf("FAIL: parse %s (%s) nout=%d i=%d\n", name, p.err_msg, pp.nout, p.i);
         pp_free_macros(&pp);
@@ -161,7 +166,7 @@ static int test_cc_digraphs(CCArena arena) {
 }
 
 int main(void) {
-    CCArena arena = cc_arena_create(1 << 20);
+    CCArena arena = cc_arena_create(8 << 20);
     TapeCache cache = {0};
     int pass = 1;
 
@@ -200,8 +205,8 @@ int main(void) {
             printf("FAIL: Foo fields %d\n", items[0] ? items[0]->nkids : -1);
             return 1;
         }
-        pass &= expect_kind(items[0]->kids[0], AST_FIELD_INT, "x", NULL);
-        pass &= expect_kind(items[0]->kids[1], AST_FIELD_INT, "y", NULL);
+        pass &= expect_kind(items[0]->kids[0], AST_FIELD_SIMPLE, "int", "x");
+        pass &= expect_kind(items[0]->kids[1], AST_FIELD_SIMPLE, "int", "y");
         pass &= expect_kind(items[1], AST_TYPEDEF_INT, "T", NULL);
         pass &= expect_kind(items[2], AST_PTR_DECL, "T", "x");
         pass &= expect_kind(items[5], AST_MUL_EXPR, "a", "b");

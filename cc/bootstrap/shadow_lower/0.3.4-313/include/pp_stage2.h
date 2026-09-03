@@ -5,11 +5,12 @@
  * `#define` / `#include` that sit inside those arms stay in place (not
  * hoisted, not applied). Spliced include frames keep classic `#ifdef`/
  * `#ifndef` operand eval/skip. Exhaustive directive policy via pp_dir
- * static_map. Requires pp_tape.cch + <ccc/std/static_map.cch>. */
+ * static_map. Requires pp_tape.cch + <ccc/std/static_map.h>. */
 #pragma once
 
 /* ---- closed directive vocabulary (comptime perfect hash) ---------------- */
 
+#include "pp_tape.h"
 typedef enum {
     PP_DIR_NONE = 0,
     PP_DIR_IF,
@@ -40,24 +41,24 @@ typedef struct {
     PpDirSpec value;
 } PpDirEntry;
 
-@comptime {
-    PpDirEntry pp_dir_entries[] = {
-        { "if", { PP_DIR_IF } },
-        { "ifdef", { PP_DIR_IFDEF } },
-        { "ifndef", { PP_DIR_IFNDEF } },
-        { "elif", { PP_DIR_ELIF } },
-        { "else", { PP_DIR_ELSE } },
-        { "endif", { PP_DIR_ENDIF } },
-        { "define", { PP_DIR_DEFINE } },
-        { "undef", { PP_DIR_UNDEF } },
-        { "include", { PP_DIR_INCLUDE } },
-        { "pragma", { PP_DIR_PRAGMA } },
-        { "line", { PP_DIR_LINE } },
-        { "warning", { PP_DIR_WARNING } },
-        { "error", { PP_DIR_ERROR } },
-    };
-    static_map("pp_dir", pp_dir_entries, CC_STATIC_MAP_CASE_SENSITIVE);
-}
+           
+                                   
+                                
+                                      
+                                        
+                                    
+                                    
+                                      
+                                        
+                                      
+                                          
+                                        
+                                    
+                                          
+                                      
+      
+                                                                       
+ 
 
 /* Forward decl for in-header callers; body is TU-spliced from the map above. */
 static const PpDirSpec* pp_dir_get(CCSlice key);
@@ -887,7 +888,7 @@ static int handle_include(Pp* pp) {
          * sees fields, type views, and typehooks — same as `<ccc/…>`.
          * Stay at the #include site. Hoisting quoted locals into pass_inc
          * puts a lowered chapter .h above types the .ccs just defined
-         * (`RtxNode` before `#include "piece_tree_rb.cch"`). */
+         * (`RtxNode` before `#include "piece_tree_rb.h"`). */
         {
             const char* sp = NULL;
             size_t sn = 0;
@@ -959,7 +960,7 @@ static int handle_include(Pp* pp) {
             const char* base = ft->path ? strrchr(ft->path, '/') : NULL;
             int umbrella = 0;
             base = base ? base + 1 : ft->path;
-            /* Stem match only — do not spell "….cch" in a string literal;
+            /* Stem match only — do not spell "….h" in a string literal;
              * header lowerer rewrites those to "….h" and breaks the check. */
             if (base && strncmp(base, "c_pp_spike.", 11) == 0) umbrella = 1;
             if (base && strncmp(base, "shadow_build.", 13) == 0) umbrella = 1;
@@ -976,7 +977,7 @@ static int handle_include(Pp* pp) {
                 else
                     snprintf(angle, sizeof(angle), "%s", base ? base : "");
                 al = strlen(angle);
-                /* Rewrite trailing .c c h → .h without a ".cch" literal. */
+                /* Rewrite trailing .c c h → .h without a ".h" literal. */
                 if (al >= 4 && angle[al - 4] == '.' && angle[al - 3] == 'c' &&
                     angle[al - 2] == 'c' && angle[al - 1] == 'h') {
                     angle[al - 3] = 'h';
