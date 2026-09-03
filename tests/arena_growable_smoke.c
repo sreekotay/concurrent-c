@@ -321,7 +321,7 @@ int main(void) {
                 return 7;
             }
         }
-        if (cc__arena_find_block(a, moved) || !cc__arena_find_block(moved_dst, moved)) {
+        if (cc__arena_find_slab(a, moved) || !cc__arena_find_slab(moved_dst, moved)) {
             printf("FAIL: cross-arena realloc ownership\n");
             return 7;
         }

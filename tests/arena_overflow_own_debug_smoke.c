@@ -16,7 +16,7 @@ int main(void) {
         printf("FAIL: overflow alloc\n");
         return 3;
     }
-    if (cc__arena_find_block(a, spill)) {
+    if (cc__arena_find_slab(a, spill)) {
         printf("FAIL: expected heap overflow, got slab\n");
         return 4;
     }

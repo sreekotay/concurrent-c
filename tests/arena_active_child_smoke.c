@@ -48,7 +48,7 @@ static int test_mark_regrow_promote_pop(void) {
     if (((unsigned char *)grown)[0] != 0x11 || ((unsigned char *)grown)[63] != 0x11)
         return fail(1, "regrow copied the prefix");
     if (cc__arena_owner_host(a.a, s) != a.a->active) return fail(1, "scratch now belongs to the child");
-    if (cc__arena_find_block(a.a, s)) return fail(1, "host must not claim child bytes");
+    if (cc__arena_find_slab(a.a, s)) return fail(1, "host must not claim child bytes");
 
     /* Release of a scratch pointer through the host handle reaches the child. */
     if (!cc_arena_release(a, s)) return fail(1, "release scratch via host");

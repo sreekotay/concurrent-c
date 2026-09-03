@@ -3,23 +3,25 @@
  * obtained. Three storage tiers (cache-shaped):
  *
  *   L1   — root slab (stack frame or heap-owned first block)
- *   L2   — grown heap extents (`prev` chain, 1.5×, min 4096)
+ *   L2   — grown heap slabs (`slab->prev` chain, 1.5×, min 4096)
  *   Main — overflow: per-object (`ovf_head`, `block_max==1`) or 64KiB chunks
  *
- * Shared path (`cc_arena_alloc`): the bump is one CAS on the current slab's
- * word (tip and live count together); grow, overflow, and the freelists
- * take meta_lock. Single-owner path (`*_local*`): plain loads/stores.
- * `live()` counts L1 + L2 + Main.
+ * Each slab is a `CCArenaSlab` record, created with its bytes and never
+ * rewritten; its tip and live count share one word (live:32 | offset:32).
+ * Shared path (`cc_arena_alloc`): the bump is one CAS on that word. Grow
+ * publishes a fresh record; overflow, the freelists, and the lifetime
+ * records take meta_lock. Single-owner path (`*_local*`): plain loads and
+ * stores. `live()` counts L1 + L2 + Main.
  *
- * A checkpoint is an *active child arena*: `cc_arena_checkpoint` overlays a
- * child host on the parent's remaining L1 tail and marks it active. Fresh
- * allocations through the parent handle forward to the innermost active
- * child; realloc / release of a parent-owned pointer stay in the parent.
- * Restore destroys the child (its extents and overflow die with it) and
- * pops the parent's tip back to where the child began. Holes in a child
- * never touch the parent. Result capture/restore lives in
- * `cc_arena_result.cch` (`try_checkpoint` / `try_restore`). C twins here
- * remain for `@scratch`.
+ * A checkpoint is a *mark* on the innermost active host (`CCArenaMark`):
+ * the slab word, an epoch every bump above it carries, and the record-list
+ * head. Restore is one CAS back to the word. The mark becomes a child host
+ * (`cc__arena_promote_locked`) only when scratch outgrows the slab, spills,
+ * needs parent-side storage, or moves a pre-mark object; then fresh
+ * allocations forward to the innermost `active` child, realloc / release of
+ * a pointer act on the host whose bytes hold it, and restore frees the
+ * child. Result capture/restore lives in `cc_arena_result.cch`
+ * (`try_checkpoint` / `try_restore`). C twins here remain for `@scratch`.
  *
  * Release is a signal: containers always release what they own, with the
  * size when they know it (`cc_arena_release_sized`). The strategy decides
@@ -78,13 +80,13 @@ typedef struct CCArenaCheckpoint CCArenaCheckpoint;
 #define CC_ATOMIC_CAS_ACQUIRE(ptr, expected_ptr, desired) cc_atomic_cas_acquire((ptr), (expected_ptr), (desired))
 #define CC_ATOMIC_CAS_ACQ_REL(ptr, expected_ptr, desired) cc_atomic_cas_acq_rel((ptr), (expected_ptr), (desired))
 
-/* Slab descriptor fields (base, capacity, tail_carved, prev, _flags) are
- * plain-typed: grow rewrites them under meta_lock, and a few paths read
- * them unlocked as hints (liveness, which host on the active chain owns a
- * pointer, the reuse bit) before taking the lock and re-resolving. Those
- * two sides go through these so a concurrent grow is a defined read of the
- * old or the new value, never a torn one. Plain moves on x86; a release
- * store / acquire load on ARM where the publish needs it. */
+/* Plain-typed fields that one side publishes under meta_lock (the current
+ * slab record, a slab's tail_carved, the host flags, the mark state, the
+ * freelist heads) and unlocked paths read as hints before taking the lock
+ * and re-resolving. Both sides go through these so a concurrent publish is
+ * a defined read of the old or the new value, never a torn one. Plain
+ * moves on x86; a release store / acquire load on ARM where the publish
+ * needs it. */
 #if (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__)
 #define CC__ARENA_FIELD_LOAD(ptr) __atomic_load_n((ptr), __ATOMIC_RELAXED)
 #define CC__ARENA_FIELD_LOAD_ACQUIRE(ptr) __atomic_load_n((ptr), __ATOMIC_ACQUIRE)
@@ -212,9 +214,9 @@ struct CCArenaHost {
     CCAttachNode* children;       // lifetime-parent records, newest first
     CCAttachNode* self_rec;       // this host's record in a parent; tombstone on free/adopt/detach
     CCArenaHost* lifetime_parent; // parent whose list holds self_rec; lock it to tombstone
-    /* Checkpoint = active child. Fresh allocs through this host forward to
-     * `active` (innermost). Swapped under meta_lock; activation is a
-     * single-owner act on a shared arena. */
+    /* A promoted checkpoint child. Fresh allocs through this host forward
+     * to `active` (innermost). Swapped under meta_lock; the checkpoint act
+     * is single-owner on a shared arena. */
     CCArenaHost* active;
     /* TAIL_CHILD: this child's region is [tail_off, tail_end) of the parent
      * slab whose base is `tail_base`; free pops that slab's offset back to
@@ -325,9 +327,10 @@ static inline CCArena cc__arena_handle_none(void *unused) {
 )(x)
 #endif
 
-/* Checkpoint handle: `arena` is the active child (NULL = unarmed or
- * consumed), `parent` the host it was carved from, `offset` the parent tip
- * the child began at (diagnostic). Restore destroys the child. */
+/* Checkpoint handle: by value, copyable. `id` names the mark; restore
+ * searches the active chain below `parent` for it and never dereferences
+ * `arena`, so a stale or forged handle refuses instead of touching
+ * anything. `offset` is the tip at capture (diagnostic). */
 struct CCArenaCheckpoint {
     CCArenaHost* arena;   /* host the checkpoint was taken through; NULL = unarmed / consumed */
     CCArenaHost* parent;  /* same host; restore searches its active chain for `id` */
@@ -643,9 +646,9 @@ static inline int cc__slab_regrow_tip(CCArenaSlab *s, size_t ptr_off, size_t old
     }
 }
 
-/* `ptr` lies in this slab's own bytes (below a carved tail). `base` and
- * `capacity` never change once the record is published. */
-static inline int cc__arena_ptr_in_block(const CCArenaSlab *s, const void *ptr) {
+/* `ptr` lies in this slab's own bytes (below a promoted child's region).
+ * `base` and `capacity` never change once the record is published. */
+static inline int cc__arena_ptr_in_slab(const CCArenaSlab *s, const void *ptr) {
     const uint8_t *p = (const uint8_t *)ptr;
     size_t carved;
     size_t end;
@@ -663,11 +666,11 @@ static inline bool cc_arena_valid(const CCArenaHost* arena) {
  * immutable once published, so this walk needs no lock; a slab that grew
  * while walking is simply not seen (it cannot hold a pointer the caller
  * already had). */
-static inline CCArenaSlab* cc__arena_find_block(CCArenaHost* arena, const void* ptr) {
+static inline CCArenaSlab* cc__arena_find_slab(CCArenaHost* arena, const void* ptr) {
     CCArenaSlab *s;
     if (!arena || !ptr) return NULL;
     for (s = cc__arena_cur_slab(arena); s; s = s->prev) {
-        if (cc__arena_ptr_in_block(s, ptr)) return s;
+        if (cc__arena_ptr_in_slab(s, ptr)) return s;
     }
     return NULL;
 }
@@ -717,7 +720,7 @@ static inline int cc__arena_in_scratch(const CCArenaHost *h, const void *ptr) {
     const CCArenaSlab *s;
     if (!h || !CC__ARENA_FIELD_LOAD(&((CCArenaHost *)(uintptr_t)(const void *)h)->mark_depth)) return 0;
     s = cc__arena_cur_slab(h);
-    if (!s || !cc__arena_ptr_in_block(s, ptr)) return 0;
+    if (!s || !cc__arena_ptr_in_slab(s, ptr)) return 0;
     return (size_t)((const uint8_t *)ptr - s->base) >= cc__arena_floor(h);
 }
 
@@ -731,7 +734,7 @@ static inline uint64_t cc__arena_epoch_of(const CCArenaHost *h, const void *ptr)
     if (!h) return 0;
     e = h->provenance;
     s = cc__arena_cur_slab(h);
-    if (!s || !cc__arena_ptr_in_block(s, ptr)) return e;
+    if (!s || !cc__arena_ptr_in_slab(s, ptr)) return e;
     for (i = 0; i < h->mark_depth; i++) {
         const CCArenaMark *m = cc__arena_mark_at(h, i);
         if ((size_t)((const uint8_t *)ptr - s->base) >= CC__SLAB_OFF(m->state))
@@ -922,30 +925,6 @@ void cc__arena_ovf_free_stolen(CCArenaOvfHeader *heads,
                                             CCArenaOvfChunk *chunks);
 #endif
 
-
-/* Validate, unlink, and invalidate a *per-object* overflow alloc. */
-static inline bool cc__arena_ovf_take(CCArenaHost *arena, void *payload, void **raw_out) {
-    CCArenaOvfHeader *h;
-    void *raw;
-    if (!arena || !payload) return false;
-    cc__arena_meta_lock(arena);
-    h = cc__arena_ovf_header(payload);
-    if (h->magic != CC_ARENA_OVF_MAGIC || h->arena != arena ||
-        !cc__arena_ovf_check(arena, payload)) {
-        cc__arena_meta_unlock(arena);
-        return false;
-    }
-    raw = cc__arena_ovf_raw(h);
-    cc__arena_ovf_unlink_locked(arena, h);
-    h->magic = CC_ARENA_OVF_MAGIC_DEAD;
-    h->arena = NULL;
-    h->raw_delta = 0;
-    h->next = NULL;
-    h->prev = NULL;
-    cc__arena_meta_unlock(arena);
-    if (raw_out) *raw_out = raw;
-    return true;
-}
 
 /* Per-object overflow — used by cc_arena_malloc (block_max == 1).
  * `out_epoch` is written under the same lock as the header provenance. */
@@ -1207,12 +1186,11 @@ static inline void *cc__arena_alloc_parent_epoch(CCArenaHost *arena, size_t size
                                                 size_t align, uint64_t *out_epoch) {
     if (!arena) return NULL;
     if (CC__ARENA_FIELD_LOAD(&arena->mark_depth)) {
-        CCArenaHost *c = NULL;
+        int promoted = 1;
         cc__arena_meta_lock(arena);
-        if (arena->mark_depth) c = cc__arena_promote_locked(arena);
-        else c = arena;
+        if (arena->mark_depth) promoted = cc__arena_promote_locked(arena) != NULL;
         cc__arena_meta_unlock(arena);
-        if (!c) return NULL;
+        if (!promoted) return NULL;
     }
     return cc__arena_alloc_here_epoch(arena, size, align, out_epoch);
 }
@@ -1398,9 +1376,9 @@ static inline void *cc_arena_alloc_host(CCArenaHost *arena, size_t size, size_t 
  * Host* or handle; pass the binding, not &arena. */
 #define cc_arena_alloc(a, n, al) cc_arena_alloc_host(CC__ARENA_HOST(a), (n), (al))
 
-/* Exclusive-owner grow path: plain bump, unlocked slab grow, then chunk/object
- * overflow. Does not bounce through cc_arena_alloc (no tip CAS / meta_lock on
- * the happy grow path). */
+/* Exclusive-owner grow path: plain bump, then grow (or promote an armed
+ * mark), then chunk / object overflow. Same exclusive-owner rule as
+ * cc_arena_alloc_local. */
 static inline void *cc_arena_alloc_local_grow(CCArenaHost *arena, size_t size, size_t align) {
     void *p = cc_arena_alloc_local(arena, size, align);
     if (p) return p;
@@ -1434,7 +1412,7 @@ static inline CCArenaHost *cc__arena_owner_host(CCArenaHost *a, const void *ptr)
      * only once no slab on the chain holds the pointer, so a child's bytes
      * are never peeked at as if they were an outer host's overflow. */
     for (h = a; h; h = h->active) {
-        if (cc__arena_find_block(h, ptr)) return h;
+        if (cc__arena_find_slab(h, ptr)) return h;
     }
     for (h = a; h; h = h->active) {
         if ((h->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) &&
@@ -1445,7 +1423,7 @@ static inline CCArenaHost *cc__arena_owner_host(CCArenaHost *a, const void *ptr)
 }
 
 /* Single-owner tip realloc: plain offset bump when ptr is the active-slab tip
- * and the new size fits. No find_block walk, no CAS. Returns NULL when the
+ * and the new size fits. No slab walk, no CAS. Returns NULL when the
  * request is not a tip fit (caller uses cc_arena_realloc_local_grow or the
  * concurrent cc_arena_realloc). Same exclusive-owner rule as alloc_local. */
 static inline void *cc_arena_realloc_local(CCArenaHost *arena,
@@ -1545,7 +1523,7 @@ CC__ARENA_SYS void *cc_arena_realloc_host(CCArenaHost *old_arena,
     }
 
     {
-        CCArenaSlab* block = cc__arena_find_block(old_arena, ptr);
+        CCArenaSlab* block = cc__arena_find_slab(old_arena, ptr);
         if (block) {
             int is_cur = (block == cc__arena_cur_slab(old_arena));
             size_t ptr_off = (size_t)((uint8_t *)ptr - block->base);
@@ -2234,15 +2212,16 @@ static inline CCArena cc_arena_attach_buffer(CCArenaHost *h, void *buf, size_t n
 #define CC_ARENA_POOL_STACK(name, elem_size, nbytes) \
     cc_arena_pool_stack(name, elem_size, nbytes)
 
-/* Release inside one host. 1 = released, 0 = owned but refused (not live,
- * beyond the tip, double release, or a size that cannot fit), -1 = not
- * owned here. Slab tier: a sized release at the active tip pops the tip; a
- * sized release of a classed block on a REUSE host lists it (it stays
- * counted live); anything else is a hole. Last live on the root rewinds to
- * zero. Overflow tier: per-object frees, chunk punches a DEAD hole. */
+/* Release on one host's slabs. 1 = released, 0 = owned but refused (not
+ * live, beyond the tip, double release, or a size that cannot fit), -1 =
+ * not on this host's slabs. A sized release at the current tip pops the
+ * tip (never below a mark); a sized release of a classed block on a REUSE
+ * host lists it (it stays counted live) unless it is scratch; anything
+ * else is a hole. The last live object on an unmarked current slab rewinds
+ * it to zero. */
 #ifdef CC__ARENA_SYS
 CC__ARENA_SYS int cc__arena_release_one(CCArenaHost* arena, void* ptr, size_t size, int sized) {
-    CCArenaSlab* block = cc__arena_find_block(arena, ptr);
+    CCArenaSlab* block = cc__arena_find_slab(arena, ptr);
     if (block) {
         /* Slab tier: the whole decision is one CAS on the slab word, so no
          * lock; only listing on a class list takes it. Whether this is the
@@ -3002,7 +2981,7 @@ static inline CCResult_CCArena_CCError cc_arena_adopt(CCArena* parent, CCArena* 
     h = src->a;
     if (h == ph)
         return cc__arena_err(CC_ERR_INVALID_ARG, "cc_arena_adopt: cannot adopt itself");
-    if (cc__arena_find_block(h, parent) || cc__arena_find_block(h, ph))
+    if (cc__arena_find_slab(h, parent) || cc__arena_find_slab(h, ph))
         return cc__arena_err(CC_ERR_INVALID_ARG,
                       "cc_arena_adopt: cycle: parent handle lives inside source");
     if (!cc__arena_l1_heap_owned(h))
@@ -3433,7 +3412,7 @@ static inline CCArenaTier cc_arena_ptr_tier(const CCArenaHost *arena, const void
     const CCArenaSlab *s;
     if (!arena || !ptr) return CC_ARENA_TIER_NONE;
     for (s = cc__arena_cur_slab(arena); s; s = s->prev) {
-        if (cc__arena_ptr_in_block(s, ptr))
+        if (cc__arena_ptr_in_slab(s, ptr))
             return s->block_idx == 0 ? CC_ARENA_TIER_L1 : CC_ARENA_TIER_L2;
     }
     if (cc__arena_ovf_contains(arena, ptr)) return CC_ARENA_TIER_MAIN;
@@ -4019,8 +3998,8 @@ static inline void *cc__arena_realloc_local_grow_impl(CCArenaHost *a, void *p,
                                                      size_t al) {
     return cc_arena_realloc_local_grow(a, p, os, ns, al);
 }
-static inline CCArenaSlab *cc__arena_find_block_impl(CCArenaHost *a, const void *p) {
-    return cc__arena_find_block(a, p);
+static inline CCArenaSlab *cc__arena_find_slab_impl(CCArenaHost *a, const void *p) {
+    return cc__arena_find_slab(a, p);
 }
 static inline int cc__arena_would_fit_impl(const CCArenaHost *a, size_t n, size_t al) {
     return cc_arena_would_fit(a, n, al);
@@ -4035,7 +4014,7 @@ static inline int cc__arena_would_fit_impl(const CCArenaHost *a, size_t n, size_
     cc__arena_realloc_local_impl(CC__ARENA_HOST(a), (p), (os), (ns), (al))
 #define cc_arena_realloc_local_grow(a, p, os, ns, al) \
     cc__arena_realloc_local_grow_impl(CC__ARENA_HOST(a), (p), (os), (ns), (al))
-#define cc__arena_find_block(a, p) cc__arena_find_block_impl(CC__ARENA_HOST(a), (p))
+#define cc__arena_find_slab(a, p) cc__arena_find_slab_impl(CC__ARENA_HOST(a), (p))
 #define cc_arena_would_fit(a, n, al) cc__arena_would_fit_impl(CC__ARENA_HOST(a), (n), (al))
 
 #undef CC__BI_MEMCPY
