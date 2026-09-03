@@ -1,0 +1,7 @@
+#!ccc ccs
+#include "optional_result_face_extract.cch"
+
+int main(void) {
+    if (opt_face_use() != 1) return 1;
+    return 0;
+}

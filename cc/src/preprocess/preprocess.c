@@ -15212,39 +15212,26 @@ static int cc__match_local_include_line(const char* line,
 }
 
 /* ---------------------------------------------------------------------------
- * Implementation-grade local .cch headers.
+ * Local .cch grade: extract surface vs owner-bound constructs.
  *
- * The eager .cch -> .h lowering above is interface-grade: it rewrites type
- * syntax (`T !>(E)`, `char[:]`, containers) and statement `!>` / `!>(e) {…}`
- * in inlines (typed `CCResult_*` accessors or `cc_is_err` / `cc_value`,
- * never leftover `!>` or TU-level `__cc_uw_*`). It still cannot lower
- * `@errhandler`, `@defer`, `@string` templates, `@variant` uses, or
- * anything that needs the TU's comptime-executed type registry (packed
- * variant arm sizes/niches). Statement `!>` is interface-grade (the
- * header carries its own spec and rewritten unwrap).
+ * Guests always get a lowered `.h` when the face has an owner (or is
+ * interface-only). Grade is about that extract surface and whether the
+ * owner must splice definitions — not a file-wide "paste the whole face".
  *
- * A local header that carries such constructs is therefore spliced RAW into
- * the including TU's text at the include site — before comptime preparation
- * and cc_preprocess_canonicalize — bracketed by `#line` provenance in and
- * out, so the full TU pipeline processes it exactly as if the user had
- * pasted it (C header-library semantics: each including TU compiles its own
- * static copy; the header's own include guard keeps repeat inclusion inert).
- * No lowered .h is written for these headers; the include line itself is
- * consumed by the splice. Plain interface headers keep the fast path above.
+ * Interface path (`cc_lower_header_string`): type syntax (`T !>(E)` /
+ * `T ?>(E)`, `char[:]`), statement `!>` / `?>` in inlines, `@typeview` /
+ * `@typehooks`, file-scope `@variant` decls, `@comptime` blocks/fns,
+ * `CC_GENERIC_FACTORY` bodies. Those are stripped or rewritten in the `.h`.
  *
- * Splice is only for a `.ccs` (or an already-spliced impl face) that
- * writes `#include "foo.cch"`. An interface umbrella extracts; nested
- * includes become `#include "foo.h"`. Dumping impl/UFCS descendants into
- * the umbrella's includer is how a TUI TU hits AST_CAP from one
- * `document.cch`. Impl-grade faces need an owner `.ccs`: same-stem
- * `foo.cch` → `foo.ccs`, or a chapter `foo_bar.cch` → `foo.ccs` in the
- * same directory. Other TUs extract decls; `#ifdef` stays in the `.h`
- * so a `#define` in this TU before the include is host cpp. Function
- * bodies under `#if` stay in the extract (listing helpers). Pointer-only
- * names not defined in the face get a `typedef struct Tag Tag`.
- * Method-call UFCS does not force a splice when the include is written
- * in a `.ccs`; it still splices when nested inside an already-spliced
- * impl face (redis_db → redis_mem).
+ * Owner-bound (impl) constructs: non-`static` file-scope function
+ * definitions, and TU-only `@` forms that remain on the extract surface
+ * (`@errhandler` / `@defer` / `@string` in a `static inline`, etc.).
+ * Extract strips non-`static` bodies to prototypes; the owner `.ccs`
+ * splices those definitions back (`owner_defs_only`). Unowned faces that
+ * still need the TU pipeline full-splice (per-TU static copies).
+ *
+ * Owner discovery: same-stem `foo.cch` → `foo.ccs`, or chapter
+ * `foo_bar.cch` → `foo.ccs` in the same directory.
  */
 
 #define CC_IMPL_CCH_BEGIN_MARK "/*cc:impl_cch_begin:"
@@ -15307,50 +15294,48 @@ static size_t cc__skip_variant_decl_at(const char* src, size_t n, size_t i) {
 
 static int cc__cch_first_nonstatic_fn(const char* src, size_t n, char* name,
                                       size_t cap);
+static int cc__file_scope_fn_def_end(const char* src, size_t n, size_t at,
+                                     size_t* end);
+static int cc__fn_decl_has_static(const char* src, size_t n, size_t at,
+                                  size_t fn_end);
+static size_t cc__skip_file_scope_item(const char* src, size_t n, size_t i);
 
-/* True when header text contains constructs only the full TU pipeline can
- * lower.  Comment/string aware.  `@comptime` blocks/functions,
- * `@typeview` / `@typehooks`, file-scope `@variant` decls, and
- * CC_GENERIC_FACTORY bodies are skipped (the interface pipeline strips
- * and harvests those the way stdlib headers do); `T !>(E)` result-type
- * syntax is allowed. Statement `!>` / `!>(e) {` is interface-grade:
- * header lower rewrites it. A non-`static` file-scope function
- * definition is impl-grade — extract strips those bodies for guests,
- * so the owner TU must splice them (`utf8.cch`, `ui_types.cch`). */
-static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
+/* Extract-surface TU-only `@` in [lo, hi). Skips interface forms
+ * (`@comptime` block/fn, `@typeview`/`@typehooks`, `@variant` decl,
+ * `CC_GENERIC_FACTORY`). `!>` / `?>` are not `@`. */
+static int cc__cch_range_has_extract_at(const char* src, size_t lo, size_t hi) {
     static const char fac_kw[] = "CC_GENERIC_FACTORY";
     static const char fac_kw_ext[] = "CC_GENERIC_FACTORY_EXTEND";
     const size_t fac_len = sizeof(fac_kw) - 1;
     const size_t fac_len_ext = sizeof(fac_kw_ext) - 1;
-    size_t i = 0;
+    size_t i = lo;
     CCScannerState scan;
-    if (!src || n == 0) return 0;
-    if (cc__cch_first_nonstatic_fn(src, n, NULL, 0)) return 1;
+    if (!src || lo >= hi) return 0;
     cc_scanner_init(&scan);
-    while (i < n) {
+    while (i < hi) {
         char c, c2;
-        /* Directive-aware: an @-sigil inside a #define body does not by
-         * itself make a header impl-grade (the macro expands into the
-         * user TU, which is where it gets lowered). */
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (cc_scanner_skip_non_code(&scan, src, hi, &i)) continue;
+        if (i >= hi) break;
         c = src[i];
-        c2 = (i + 1 < n) ? src[i + 1] : 0;
+        c2 = (i + 1 < hi) ? src[i + 1] : 0;
         if (c == 'C') {
             size_t mlen = 0;
-            if (i + fac_len_ext <= n && memcmp(src + i, fac_kw_ext, fac_len_ext) == 0 &&
-                (i == 0 || !cc_is_ident_char(src[i - 1])) &&
-                (i + fac_len_ext >= n || !cc_is_ident_char(src[i + fac_len_ext])))
+            if (i + fac_len_ext <= hi && memcmp(src + i, fac_kw_ext, fac_len_ext) == 0 &&
+                (i == lo || !cc_is_ident_char(src[i - 1])) &&
+                (i + fac_len_ext >= hi || !cc_is_ident_char(src[i + fac_len_ext])))
                 mlen = fac_len_ext;
-            else if (i + fac_len <= n && memcmp(src + i, fac_kw, fac_len) == 0 &&
-                     (i == 0 || !cc_is_ident_char(src[i - 1])) &&
-                     (i + fac_len >= n || !cc_is_ident_char(src[i + fac_len])))
+            else if (i + fac_len <= hi && memcmp(src + i, fac_kw, fac_len) == 0 &&
+                     (i == lo || !cc_is_ident_char(src[i - 1])) &&
+                     (i + fac_len >= hi || !cc_is_ident_char(src[i + fac_len])))
                 mlen = fac_len;
             if (mlen) {
-                size_t p = cc_skip_ws_and_comments(src, n, i + mlen);
+                size_t p = cc_skip_ws_and_comments(src, hi, i + mlen);
                 size_t rp = 0, body_r = 0;
-                if (p < n && src[p] == '(' && cc_find_matching_paren(src, n, p, &rp)) {
-                    p = cc_skip_ws_and_comments(src, n, rp + 1);
-                    if (p < n && src[p] == '{' && cc_find_matching_brace(src, n, p, &body_r)) {
+                if (p < hi && src[p] == '(' &&
+                    cc_find_matching_paren(src, hi, p, &rp)) {
+                    p = cc_skip_ws_and_comments(src, hi, rp + 1);
+                    if (p < hi && src[p] == '{' &&
+                        cc_find_matching_brace(src, hi, p, &body_r)) {
                         i = body_r + 1;
                         continue;
                     }
@@ -15359,39 +15344,42 @@ static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
                 continue;
             }
         }
-        if (c == '@' && i + 1 < n && cc_is_ident_start(src[i + 1])) {
-            {
-                size_t after = cc__skip_type_policy_at(src, n, i);
-                if (after) {
-                    i = after;
-                    continue;
-                }
-                after = cc__skip_variant_decl_at(src, n, i);
-                if (after) {
-                    i = after;
-                    continue;
-                }
+        if (c == '@' && i + 1 < hi && cc_is_ident_start(src[i + 1])) {
+            size_t after = cc__skip_type_policy_at(src, hi, i);
+            if (after) {
+                i = after;
+                continue;
             }
-            if (cc_match_ident_kw(src, n, i + 1, "comptime")) {
-                size_t p = cc_skip_ws_and_comments(src, n, i + 1 + (sizeof("comptime") - 1));
+            after = cc__skip_variant_decl_at(src, hi, i);
+            if (after) {
+                i = after;
+                continue;
+            }
+            if (cc_match_ident_kw(src, hi, i + 1, "comptime")) {
+                size_t p = cc_skip_ws_and_comments(
+                    src, hi, i + 1 + (sizeof("comptime") - 1));
                 size_t body_r = 0;
-                if (p < n && (cc_match_ident_kw(src, n, p, "if") ||
-                              cc_match_ident_kw(src, n, p, "for")))
+                if (p < hi && (cc_match_ident_kw(src, hi, p, "if") ||
+                               cc_match_ident_kw(src, hi, p, "for")))
                     return 1;
-                if (p < n && src[p] == '{' && cc_find_matching_brace(src, n, p, &body_r)) {
+                if (p < hi && src[p] == '{' &&
+                    cc_find_matching_brace(src, hi, p, &body_r)) {
                     i = body_r + 1;
                     continue;
                 }
-                /* @comptime function definition: skip signature + body. */
                 {
                     size_t lp = 0, rp = 0;
-                    for (size_t q = p; q < n; q++) {
+                    for (size_t q = p; q < hi; q++) {
                         if (src[q] == ';' || src[q] == '{') break;
-                        if (src[q] == '(') { lp = q; break; }
+                        if (src[q] == '(') {
+                            lp = q;
+                            break;
+                        }
                     }
-                    if (lp && cc_find_matching_paren(src, n, lp, &rp)) {
-                        size_t b = cc_skip_ws_and_comments(src, n, rp + 1);
-                        if (b < n && src[b] == '{' && cc_find_matching_brace(src, n, b, &body_r)) {
+                    if (lp && cc_find_matching_paren(src, hi, lp, &rp)) {
+                        size_t b = cc_skip_ws_and_comments(src, hi, rp + 1);
+                        if (b < hi && src[b] == '{' &&
+                            cc_find_matching_brace(src, hi, b, &body_r)) {
                             i = body_r + 1;
                             continue;
                         }
@@ -15402,18 +15390,64 @@ static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
             }
             return 1;
         }
-        if (c == '?' && c2 == '>') return 1;
-        if (c == '!' && c2 == '>') {
-            /* Statement `!>` / `!>(e) {…}` is interface-grade: header
-             * lower rewrites it and emits the Result spec in the `.h`.
-             * Bare `!>;` still needs a TU `@errhandler` — that `@` is
-             * already impl-grade. `T !>(E)` is type syntax. */
+        if ((c == '?' || c == '!') && c2 == '>') {
             i += 2;
             continue;
         }
         i++;
     }
     return 0;
+}
+
+/* True when the face needs the owner/splice path. Grade is per construct:
+ * non-`static` file-scope defs are owner-bound (bodies skipped here — extract
+ * strips them); TU-only `@` on the extract surface (`static inline`, file
+ * scope) flips impl. `T !>(E)` / `T ?>(E)` and statement `!>` / `?>` are
+ * interface-grade. */
+static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
+    size_t i = 0;
+    int needs_owner = 0;
+    CCScannerState scan;
+    if (!src || n == 0) return 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t before = i;
+        size_t fn_end = 0;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (i >= n) break;
+        if (src[i] == '#') {
+            while (i < n && src[i] != '\n') i++;
+            if (i < n) i++;
+            continue;
+        }
+        if (cc__file_scope_fn_def_end(src, n, i, &fn_end)) {
+            if (!cc__fn_decl_has_static(src, n, i, fn_end)) {
+                /* Owner-bound body: `@errhandler` here is not extract-surface. */
+                needs_owner = 1;
+                i = fn_end;
+                continue;
+            }
+            if (cc__cch_range_has_extract_at(src, i, fn_end)) return 1;
+            i = fn_end;
+            continue;
+        }
+        {
+            size_t e = cc__skip_file_scope_item(src, n, i);
+            if (e > i) {
+                if (cc__cch_range_has_extract_at(src, i, e)) return 1;
+                i = e;
+            }
+        }
+        if (i == before) {
+            if (i + 1 < n && (src[i] == '?' || src[i] == '!') &&
+                src[i + 1] == '>') {
+                i += 2;
+                continue;
+            }
+            i++;
+        }
+    }
+    return needs_owner;
 }
 
 /* Per-process memo of .cch grade, keyed by realpath.  grade: 1 impl-grade,
@@ -18590,10 +18624,10 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                 if (!found)
                     snprintf(child_path, sizeof(child_path), "%s/%s",
                              current_dir, rel_path);
-                /* Implementation-grade headers bypass .h lowering: splice
-                 * their raw source into the stream so the full TU pipeline
-                 * lowers it in context (see the block comment above
-                 * cc__cch_text_is_impl_grade).
+                /* Owned faces extract to `.h` and splice owner-bound defs;
+                 * unowned impl faces full-splice (per-TU). Grade is
+                 * per-construct on the extract surface — see
+                 * cc__cch_text_is_impl_grade.
                  *
                  * Nested UFCS inside an already-spliced impl face still
                  * splices (redis_db → redis_mem). A `.ccs` that includes

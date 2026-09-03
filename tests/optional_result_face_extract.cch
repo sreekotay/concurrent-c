@@ -1,0 +1,22 @@
+#ifndef TESTS_OPTIONAL_RESULT_FACE_EXTRACT_CCH
+#define TESTS_OPTIONAL_RESULT_FACE_EXTRACT_CCH
+
+#include <ccc/cc_result.cch>
+#include <ccc/cc_print_error.cch>
+
+/* T?>(E) must not flip this face to impl-grade — same as T!>(E). */
+typedef struct {
+    int code;
+} OptFaceErr;
+
+static inline void ?>(OptFaceErr) opt_face_ok(void) {
+    return cc_ok();
+}
+
+static inline int opt_face_use(void) {
+    /* OPTIONAL_RESULT_FACE_BODY */
+    opt_face_ok();
+    return 1;
+}
+
+#endif

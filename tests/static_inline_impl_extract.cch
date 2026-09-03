@@ -27,6 +27,10 @@ static inline int rail_prev_sel(const int *p,
 }
 
 int !>(RailIdxErr) rail_step(int x) {
+    /* Owner-bound body: @errhandler here must not appear in the guest .h. */
+    @errhandler(RailIdxErr e) {
+        return cc_err(e);
+    }
     return cc_ok(x);
 }
 

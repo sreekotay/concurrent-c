@@ -24,6 +24,16 @@ if (rc != 0) {
     return 1;
 }
 
+CCCommand grep_eh = cc_command(a, @slice("grep"));
+grep_eh.arg("-q");
+grep_eh.arg("@errhandler");
+grep_eh.arg("out/include/tests/static_inline_impl_extract.h");
+rc = grep_eh.status() !>;
+if (rc == 0) {
+    "guest .h still has @errhandler from owner-bound body".println();
+    return 1;
+}
+
 CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
 build.arg("build");
 build.arg("--no-cache");

@@ -1,0 +1,56 @@
+/* Local .cch with only T?>(E) + static inline: interface extract, no owner. */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+CCCommand emit = cc_command(a, @slice("./cc/bin/ccc"));
+emit.arg("--no-cache");
+emit.arg("--emit-c-only");
+emit.arg("tests/optional_result_face_extract_guest.ccs");
+emit.arg("-o");
+emit.arg("out/optional_result_face_extract_guest.c");
+emit.inherit_stdio();
+int rc = emit.status() !>;
+if (rc != 0) {
+    "emit guest failed (T?>(E) must not force impl-grade)".println();
+    return 1;
+}
+
+CCCommand grep_ty = cc_command(a, @slice("grep"));
+grep_ty.arg("-q");
+grep_ty.arg("CCResult_void_OptFaceErr");
+grep_ty.arg("out/include/tests/optional_result_face_extract.h");
+rc = grep_ty.status() !>;
+if (rc != 0) {
+    "extract missing CCResult_void_OptFaceErr".println();
+    return 1;
+}
+
+CCCommand grep_body = cc_command(a, @slice("grep"));
+grep_body.arg("-q");
+grep_body.arg("OPTIONAL_RESULT_FACE_BODY");
+grep_body.arg("out/include/tests/optional_result_face_extract.h");
+rc = grep_body.status() !>;
+if (rc != 0) {
+    "extract dropped static inline body".println();
+    return 1;
+}
+
+CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
+build.arg("build");
+build.arg("--no-cache");
+build.arg("tests/optional_result_face_extract_guest.ccs");
+build.arg("-o");
+build.arg("out/optional_result_face_extract_smoke");
+build.inherit_stdio();
+rc = build.status() !>;
+if (rc != 0) {
+    "build failed".println();
+    return 1;
+}
+CCCommand run = cc_command(a, @slice("out/optional_result_face_extract_smoke"));
+run.inherit_stdio();
+rc = run.status() !>;
+if (rc != 0) {
+    "run failed".println();
+    return 1;
+}
+return 0;
