@@ -76,17 +76,20 @@ Typed pointers use `cc_arena_alloc_T` / `cc_arena_alloc_T_count` (UFCS:
 `arena.allocT()` / `arena.allocT(n)`). Tracked byte slices use
 `cc_arena_alloc_slice_bytes` (UFCS: `arena.alloc_slice_bytes(n)`); failure
 yields an empty slice. Exhausted allocation with overflow disabled returns
-`NULL` / empty — never a success-looking no-op. Checkpoint/restore is
-rewindable after overflow allocation: `a.try_checkpoint() !>` /
-`cp.try_restore() !>` (or `@destroy` on the handle). Restore rewinds the
-slab prefix and drains overflow minted in a later provenance epoch. A
-mid-slab hole refuses a new capture (`CC_ERR_INVALID_ARG`) until last-live
-root rewind or `cc_arena_reset`. Nested checkpoints restore LIFO;
-`cp.abandon()` consumes the top loan without rewind. Restore refuses
-while attach records exist. Release of an older-epoch overflow object
-does not block a new checkpoint; restore of that handle refuses if
-`ovf_keep` no longer matches. C twins (`cc_arena_checkpoint` /
-`cc_arena_restore`) stay for `@scratch`. `a.create_nursery()` attaches a
+`NULL` / empty — never a success-looking no-op. A checkpoint is an active
+child arena: `a.try_checkpoint() !>` carves a child on `a`'s L1 tail and
+routes fresh allocations through `a` into it; `cp.try_restore() !>` (or
+`@destroy` on the handle) destroys the child, frees whatever it grew, and
+pops `a`'s tip back. Objects `a` already owned regrow and release in `a`,
+never in the child. Holes, overflow, and attached children never refuse a
+capture or a restore. Nested checkpoints restore LIFO while the inner handle
+is live; `cp.abandon()` consumes the handle and keeps the child active. A
+hard-capped `a` with no tail returns an unarmed handle
+(`CC_ERR_INVALID_ARG` from `try_checkpoint`). C twins
+(`cc_arena_checkpoint` / `cc_arena_restore`) stay for `@scratch`.
+Release is a signal: `cc_arena_release_sized(a, p, n)` pops the tip, lists
+the block for reuse (`a.set_reuse(true)`), or leaves a hole; the arena is the
+lifetime either way. `a.create_nursery()` attaches a
 nursery to `a` (`spec/concurrent-c-spec-complete.md` §8.1.1). Normative
 growth, overflow, release, and checkpoint rules are in
 `spec/concurrent-c-spec-complete.md` §5 and `spec/draft_alloc_strategy.md`.
@@ -262,13 +265,11 @@ the declared pointer destination (`T* p = arena.allocT(n)`) or
 explicitly via `arena.allocT::[T](n)`. Both lower to
 `cc_arena_alloc_T` / `cc_arena_alloc_T_count` and return `NULL` on
 exhaustion. An optional `@destroy` on the declaration calls
-`cc_arena_release` at scope exit. Release returns `false` and emits a
-diagnostic when the pointer is not owned by the arena; a successful
-mid-slab release punches a hole and marks the arena non-rewindable
-unless it was the last live root allocation (which rewinds the tip).
-Overflow release never sets that flag; restore of a checkpoint whose
-`ovf_keep` no longer matches refuses. The declaration still states the
-allocation's scope.
+`cc_arena_release` at scope exit. Release returns `false` when the pointer
+is not owned by the arena; a successful mid-slab release is a hole (or a
+listed block on a reuse host), and the last live root allocation rewinds
+the tip. Holes never disable a checkpoint. The declaration still states
+the allocation's scope.
 
 ### Arena-backed slice operations
 
@@ -841,10 +842,15 @@ family at call position only.
 #define CC_VEC_DECL_ARENA(T, Name) /* declares the Name family */
 ```
 
-Each generated `Name` has `T *data`, `size_t len`, and `size_t cap` (element
-count; the high bit marks a `from` wrap). Arena-backed storage keeps arena,
-provenance, and grower generation in a prefix header before `data`. `from`
-does not plant that header. Its public family is:
+Each generated `Name` has `T *data`, `size_t len`, `size_t cap` (element
+count; the high bit marks a `from` wrap), `CCArenaOwner *own`, and
+`uint32_t token`. Arena-backed storage is a `CCArenaOwner`: a header in the
+arena's slab tier (arena, payload, bytes, provenance, token) split from the
+payload. The handle carries the owner's token; every push, indexed write,
+grow, view, and destroy checks it, so a copy of the handle that outlived a
+growth move or a destroy through another copy is refused (`-1` / `NULL` /
+empty view) instead of touching the bytes. `from` has no owner. Its public
+family is:
 
 ```c
 Name Name_init(CCArena arena, size_t initial_cap);
@@ -880,8 +886,11 @@ storage.
 `reserve` / `push` / `at_grow` that would exceed the given cap fail. `destroy`
 unbinds only.
 
-`Name_destroy` on an arena-backed vector releases the prefix allocation
-(`cc_arena_release`) and kills the grower generation. `clear` keeps capacity.
+`Name_destroy` on an arena-backed vector releases the payload through the
+owner (a sized release: a tip pop when it can) and kills the token; the
+owner header stays a live slab allocation listed for rebirth, so no handle
+can ever read reclaimed bytes as a live token. A second destroy through
+any copy is a no-op. `clear` keeps capacity.
 `truncate(n)` sets `len` to `n` when `n` is smaller than the current length
 and leaves `cap` unchanged. `n` at or above the current length is a no-op.
 A null receiver is a no-op. `clear` is `truncate(0)`. Slice `truncate` is a

@@ -699,14 +699,18 @@ cc_arena_stack(tmp, 1024);             // same policy; L1 on the stack; @destroy
 cc_arena_buf(win, frame, sizeof frame); // same sugar; caller L1 (no VLA)
 a.reset();                             // drain epoch; reuse L1
 
-CCArenaCheckpoint cp = a.try_checkpoint() !> @destroy; // consumed loan
-/* …scratch, including Main… */
+CCArenaCheckpoint cp = a.try_checkpoint() !> @destroy; // active child on a's tail
+/* …scratch lands in the child, including its Main… */
 cp.try_restore() !>;                   // or leave the scope: @destroy restores
+
+a.set_reuse(true);                     // sized releases feed size-class lists
+cc_arena_release_sized(a, p, n);       // release is a signal: pop, list, or hole
 ```
 
 Slices (`T[:]`) carry provenance. Views must not outlive their arena.
-A mid-slab hole disables a new capture until last-live rewind or `reset`.
-Restore of a handle whose overflow keep-set was released refuses.
+Objects `a` already owned regrow in `a` during scratch, never in the child.
+Holes never disable a checkpoint. Vec and heap String are owners: a stale
+copy of the handle mismatches the owner token and cannot grow or destroy.
 `a.detach() !>` moves heap-owned mallocs only — a stack or caller L1 is refused.
 Details: [getting-started § Arenas](getting-started.md#arenas-name-a-lifetime).
 

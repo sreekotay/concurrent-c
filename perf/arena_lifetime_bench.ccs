@@ -1,0 +1,366 @@
+/* Arena lifetime microbenchmarks: what a named lifetime costs per operation.
+ *
+ * Rows (ns/op, best of ROUNDS):
+ *   alloc          bump allocation on the shared and exclusive paths
+ *   checkpoint     capture + restore of an active child, empty and with the
+ *                  three-allocation shape a `@scratch` string template makes
+ *   nested         three nested checkpoints and their restores
+ *   release        alloc + unsized release, alloc + sized tip pop, hole
+ *   reuse          alloc + sized release under size-class reuse
+ *   regrow         tip realloc in place, and the copy path when buried
+ *   vec            push (tip fit), push with interleaved allocs (moves),
+ *                  get through a token-checked handle, init/destroy churn
+ *   string         append loop, promote + destroy churn, @scratch template
+ *   map            insert 1k + destroy
+ *   owner          owner new/release churn, token registry birth/kill
+ *
+ * Run: ./cc/bin/ccc build --release perf/arena_lifetime_bench.ccs -o perf/out/arena_lifetime_bench && perf/out/arena_lifetime_bench
+ * Compare across commits with perf/compare_arena_lifetime.sh. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/map.cch>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+
+#ifndef ROUNDS
+#define ROUNDS 5
+#endif
+
+
+static double now_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+static volatile uint64_t sink;
+
+typedef double (*BenchFn)(CCArena a, size_t iters);
+
+static void run(const char *name, BenchFn fn, CCArena a, size_t iters) {
+    double best = 1e30;
+    int r;
+    for (r = 0; r < ROUNDS; r++) {
+        double dt;
+        cc_arena_reset(a);
+        dt = fn(a, iters);
+        if (dt < best) best = dt;
+    }
+    printf("%-46s %10.1f ns/op %10.2f Mop/s\n", name, best * 1e9 / (double)iters,
+           (double)iters / best / 1e6);
+}
+
+/* ---- alloc ---------------------------------------------------------- */
+static double b_alloc_shared(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        sink += (uintptr_t)cc_arena_alloc(a, 64, 8);
+        if ((i & 4095) == 4095) cc_arena_reset(a);
+    }
+    return now_sec() - t0;
+}
+static double b_alloc_local(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        sink += (uintptr_t)cc_arena_alloc_local(a, 64, 8);
+        if ((i & 4095) == 4095) cc_arena_reset(a);
+    }
+    return now_sec() - t0;
+}
+
+/* ---- checkpoint ----------------------------------------------------- */
+static double b_cp_empty(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        CCArenaCheckpoint cp = cc_arena_checkpoint(a);
+        sink += (uintptr_t)cp.arena;
+        cc_arena_restore(cp);
+    }
+    return now_sec() - t0;
+}
+static double b_cp_scratch(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        CCArenaCheckpoint cp = cc_arena_checkpoint(a);
+        sink += (uintptr_t)cc_arena_alloc(a, 40, 8);
+        sink += (uintptr_t)cc_arena_alloc(a, 96, 8);
+        sink += (uintptr_t)cc_arena_alloc(a, 24, 8);
+        cc_arena_restore(cp);
+    }
+    return now_sec() - t0;
+}
+static double b_cp_nested(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        CCArenaCheckpoint c1 = cc_arena_checkpoint(a);
+        CCArenaCheckpoint c2;
+        CCArenaCheckpoint c3;
+        sink += (uintptr_t)cc_arena_alloc(a, 32, 8);
+        c2 = cc_arena_checkpoint(a);
+        sink += (uintptr_t)cc_arena_alloc(a, 32, 8);
+        c3 = cc_arena_checkpoint(a);
+        sink += (uintptr_t)cc_arena_alloc(a, 32, 8);
+        cc_arena_restore(c3);
+        cc_arena_restore(c2);
+        cc_arena_restore(c1);
+    }
+    return now_sec() - t0;
+}
+static double b_cp_grown(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        CCArenaCheckpoint cp = cc_arena_checkpoint(a);
+        sink += (uintptr_t)cc_arena_alloc(a, megabytes(2), 8); /* past the tail: child extent */
+        cc_arena_restore(cp);
+    }
+    return now_sec() - t0;
+}
+
+/* ---- release -------------------------------------------------------- */
+static double b_rel_unsized(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        void *p = cc_arena_alloc(a, 64, 8);
+        sink += (uintptr_t)p;
+        cc_arena_release(a, p);
+    }
+    return now_sec() - t0;
+}
+static double b_rel_sized_tip(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        void *p = cc_arena_alloc(a, 64, 8);
+        sink += (uintptr_t)p;
+        cc_arena_release_sized(a, p, 64);
+    }
+    return now_sec() - t0;
+}
+static double b_rel_hole(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        void *p = cc_arena_alloc(a, 64, 8);
+        void *q = cc_arena_alloc(a, 64, 8);
+        sink += (uintptr_t)q;
+        cc_arena_release_sized(a, p, 64);
+        if ((i & 4095) == 4095) cc_arena_reset(a);
+    }
+    return now_sec() - t0;
+}
+static double b_reuse(CCArena a, size_t n) {
+    size_t i;
+    double t0;
+    cc_arena_set_reuse(a, true);
+    t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        void *p = cc_arena_alloc(a, 40, 8);
+        void *q = cc_arena_alloc(a, 40, 8);
+        sink += (uintptr_t)q;
+        cc_arena_release_sized(a, p, 40);
+        sink += (uintptr_t)cc_arena_alloc(a, 40, 8);
+        if ((i & 2047) == 2047) {
+            cc_arena_reset(a);
+            cc_arena_set_reuse(a, true);
+        }
+    }
+    return now_sec() - t0;
+}
+
+/* ---- regrow --------------------------------------------------------- */
+static double b_regrow_tip(CCArena a, size_t n) {
+    size_t i;
+    void *blk = NULL;
+    size_t sz = 0;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        if ((i % 1000) == 0) {
+            cc_arena_reset(a);
+            blk = cc_arena_alloc(a, 8, 8);
+            sz = 8;
+        }
+        blk = cc_arena_realloc(a, a, blk, sz, sz + 64, 8);
+        sz += 64;
+        sink += (uintptr_t)blk;
+    }
+    return now_sec() - t0;
+}
+static double b_regrow_buried(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        void *blk = cc_arena_alloc(a, 256, 8);
+        sink += (uintptr_t)cc_arena_alloc(a, 8, 8);
+        blk = cc_arena_realloc(a, a, blk, 256, 320, 8);
+        sink += (uintptr_t)blk;
+        if ((i & 1023) == 1023) cc_arena_reset(a);
+    }
+    return now_sec() - t0;
+}
+
+/* ---- vec ------------------------------------------------------------ */
+static double b_vec_push(CCArena a, size_t n) {
+    size_t i;
+    Vec::[int] v = vec_new::[int](a);
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) v.push((int)i);
+    v.destroy();
+    return now_sec() - t0;
+}
+static double b_vec_push_moves(CCArena a, size_t n) {
+    size_t i;
+    Vec::[int] v = vec_new::[int](a);
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        v.push((int)i);
+        if ((i & 63) == 0) sink += (uintptr_t)cc_arena_alloc(a, 16, 8);
+    }
+    v.destroy();
+    return now_sec() - t0;
+}
+static double b_vec_get(CCArena a, size_t n) {
+    size_t i;
+    double t0;
+    Vec::[int] v = vec_new::[int](a);
+    v.reserve(n);
+    for (i = 0; i < n; i++) v.push((int)i);
+    t0 = now_sec();
+    for (i = 0; i < n; i++) sink += (uintptr_t)*v.get(i);
+    {
+        double dt = now_sec() - t0;
+        v.destroy();
+        return dt;
+    }
+}
+static double b_vec_churn(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        Vec::[int] v = vec_new::[int](a);
+        int k;
+        for (k = 0; k < 8; k++) v.push(k);
+        sink += (uintptr_t)v.data;
+        v.destroy();
+    }
+    return now_sec() - t0;
+}
+
+/* ---- string --------------------------------------------------------- */
+static double b_str_append(CCArena a, size_t n) {
+    size_t i;
+    CCString s = cc_string_new();
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) cc_string_push_cstr(&s, "twelve-bytes", a);
+    cc_string_destroy(&s);
+    return now_sec() - t0;
+}
+static double b_str_churn(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        CCString s = cc_string_new();
+        cc_string_push_cstr(&s, "twenty-four-bytes-long!!", a);
+        sink += (uintptr_t)cc_string_data(&s);
+        cc_string_destroy(&s);
+    }
+    return now_sec() - t0;
+}
+static double b_str_template_scratch(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    (void)a;
+    for (i = 0; i < n; i++) {
+        CCString t = @string(`item ${i} of ${sink}`, @scratch);
+        sink += (uintptr_t)cc_string_len(&t);
+    }
+    return now_sec() - t0;
+}
+static double b_str_template_arena(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        CCString t = @string(`item ${i} of ${sink}`, a);
+        sink += (uintptr_t)cc_string_len(&t);
+        cc_string_destroy(&t);
+    }
+    return now_sec() - t0;
+}
+
+/* ---- map ------------------------------------------------------------ */
+static double b_map(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        Map::[int, int] m = map_new::[int, int](a);
+        int k;
+        for (k = 0; k < 1000; k++) m->insert(k, k);
+        sink += (uintptr_t)m->get(500);
+        m->destroy();
+    }
+    return now_sec() - t0;
+}
+
+/* ---- owner ---------------------------------------------------------- */
+static double b_owner(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        CCArenaOwner *o = cc_arena_owner_new(a, 64, 8);
+        sink += (uintptr_t)o->payload;
+        cc_arena_owner_release(o, o->token);
+    }
+    return now_sec() - t0;
+}
+static double b_tokens(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    (void)a;
+    for (i = 0; i < n; i++) {
+        uint32_t t = cc_slice_gen_birth();
+        sink += t;
+        cc_slice_gen_kill(t);
+    }
+    return now_sec() - t0;
+}
+
+int main(void) {
+    CCArena a = cc_arena_heap(megabytes(8));
+    cc_arena_stack(sc, 1024);
+    printf("arena_lifetime_bench (ROUNDS=%d, best of)\n", ROUNDS);
+    printf("%-46s %14s %16s\n", "row", "ns/op", "throughput");
+    run("alloc 64B shared, reset/4096", b_alloc_shared, a, 4096 * 1000);
+    run("alloc 64B local, reset/4096", b_alloc_local, a, 4096 * 1000);
+    run("checkpoint + restore (empty)", b_cp_empty, a, 1000000);
+    run("checkpoint + 3 allocs + restore (@scratch shape)", b_cp_scratch, a, 1000000);
+    run("checkpoint + 3 allocs + restore (1 KiB stack)", b_cp_scratch, sc, 1000000);
+    run("nested checkpoint x3 + restore x3", b_cp_nested, a, 500000);
+    run("checkpoint + 2 MiB scratch (child extent) + restore", b_cp_grown, a, 100000);
+    run("alloc 64B + release (unsized, last-live)", b_rel_unsized, a, 2000000);
+    run("alloc 64B + release_sized (tip pop)", b_rel_sized_tip, a, 2000000);
+    run("alloc 64B x2 + release_sized first (hole)", b_rel_hole, a, 2000000);
+    run("reuse: alloc x2 + release first + alloc", b_reuse, a, 2000000);
+    run("realloc tip growth 64B steps (in place)", b_regrow_tip, a, 1000000);
+    run("realloc buried 256B -> 320B (copy + release)", b_regrow_buried, a, 1000000);
+    run("vec push 1M ints (tip fit) + destroy", b_vec_push, a, 1000000);
+    run("vec push 1M ints, alloc every 64 (moves)", b_vec_push_moves, a, 1000000);
+    run("vec get 1M (token-checked handle)", b_vec_get, a, 1000000);
+    run("vec init + 8 push + destroy (owner churn)", b_vec_churn, a, 500000);
+    run("string push_cstr 12B x 1M (one string)", b_str_append, a, 1000000);
+    run("string promote (24B) + destroy churn", b_str_churn, a, 1000000);
+    run("@string template (2 slots) on @scratch", b_str_template_scratch, a, 1000000);
+    run("@string template (2 slots) on arena + destroy", b_str_template_arena, a, 1000000);
+    run("map insert 1k ints + destroy", b_map, a, 2000);
+    run("owner new 64B + release (header rebirth)", b_owner, a, 2000000);
+    run("token registry birth + kill", b_tokens, a, 4000000);
+    printf("sink=%llu\n", (unsigned long long)sink);
+    cc_arena_free(&sc);
+    cc_arena_free(&a);
+    return 0;
+}

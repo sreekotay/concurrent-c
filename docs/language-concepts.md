@@ -254,16 +254,16 @@ time in Main. Prefer another arena when lifetimes diverge; treat
 arenas with overflow off return `NULL` on exhaustion (never silent success).
 `a.live()` counts every live object on L1 + L2 + Main.
 
-**Checkpoint / restore:** a checkpoint is a consumed loan —
+**Checkpoint / restore:** a checkpoint is an active child arena —
 `a.try_checkpoint() !>` / `cp.try_restore() !>` (or `@destroy` on the handle).
-Restore rewinds the slab prefix and drains Main minted after the checkpoint
-(same contract on heap, stack, and `cc_arena_malloc`). Overflow alloc does
-not disable rewind. A mid-slab hole disables a new capture until last-live
-root rewind or `reset`. Restore refuses (no mutate) if that handle's overflow
-keep-set was released, or if the checkpoint would advance the tip. Dropping
-a handle without consume leaves an outstanding loan (diagnostic on
-free/reset/detach) and does not block a later capture. `a.detach() !>` refuses a
-stack or caller-owned L1.
+Capture carves a child on `a`'s L1 tail; new allocations through `a` land in
+it, while objects `a` already owned regrow and release in `a`. Restore
+destroys the child (its extents and Main included) and pops `a`'s tip back
+(same contract on heap, stack, and `cc_arena_malloc`). Holes, overflow, and
+attached children never refuse a capture or a restore. Restore refuses (no
+mutate) on a consumed handle or while an inner checkpoint is still held;
+`cp.abandon()` keeps the scratch. `a.detach() !>` refuses a stack or
+caller-owned L1 and a host with an active child.
 
 A view must not outlive its storage — no stack/arena borrow into an outliving
 task or channel send. Capturing a non-unique arena slice into a nursery **pins**
