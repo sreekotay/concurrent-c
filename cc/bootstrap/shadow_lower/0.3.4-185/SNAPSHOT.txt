@@ -1,6 +1,0 @@
-source: cc/shadow/shadow_lower.ccs
-emitter: native:/Users/airm5/Documents/code/concurrent-c/out/cc/bin/shadow_lower
-created_utc: 2026-08-20T23:18:47Z
-git_head: 21f57783
-emit_bytes: 120275
-header_count: 27
