@@ -17,17 +17,16 @@ int main(void) {
 
         CCArenaCheckpoint cp = cc_arena_checkpoint(arena);
         assert(cp.arena != NULL && cp.parent == arena.a);
-        /* The child region counts as one live allocation of the parent. */
-        assert(cc_arena_slab_live(arena.a) == 2);
+        /* A mark costs nothing on the slab. */
+        assert(cc_arena_slab_live(arena.a) == 1);
 
         int* a2 = cc_arena_alloc_T_count(int, arena, 4);
         assert(a2 != NULL);
         a2[0] = 22;
-        /* Scratch lands in the child, not the parent's count. */
+        /* Scratch lands above the mark on the same slab. */
         assert(cc_arena_slab_live(arena.a) == 2);
-        assert(cc_arena_slab_live(cp.arena) == 1);
 
-        // Restore: the child dies and the parent tip pops back
+        // Restore: one CAS back to the mark
         assert(cc_arena_restore(cp));
         assert(cc_arena_slab_live(arena.a) == 1);
         assert(cc_arena_slab_offset(arena.a) == cp.offset);

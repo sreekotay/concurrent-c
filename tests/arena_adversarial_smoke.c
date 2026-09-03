@@ -263,6 +263,65 @@ static int test_reuse_regrow(void) {
     return 0;
 }
 
+/* Checkpoint churn with owners and reuse: scratch that fits stays a mark,
+ * scratch that outgrows the slab promotes, and after every restore the
+ * live count is exactly what the mark saw (nothing above it survives, no
+ * header from scratch is listed). */
+static int test_checkpoint_churn(void) {
+    CCArena a = cc_arena_heap(kilobytes(4));
+    size_t live0;
+    size_t r;
+    if (!a.base) return fail(7, "heap");
+    if (!cc_arena_set_reuse(a, true)) return fail(7, "reuse");
+    {
+        U64Vec keep = U64Vec_init(a, 4);
+        size_t i;
+        for (i = 0; i < 4; i++) U64Vec_push(&keep, i);
+        live0 = cc_arena_slab_live(a.a);
+        for (r = 0; r < 64; r++) {
+            CCArenaCheckpoint cp = cc_arena_checkpoint(a);
+            U64Vec v = U64Vec_init(a, 2);
+            CCString s = cc_string_new();
+            size_t n = (r % 3 == 0) ? 900 : 8; /* 900 x 8 bytes outgrows 4 KiB: promotes */
+            if (!cp.arena || !v.data) return fail(7, "churn setup");
+            for (i = 0; i < n; i++) {
+                if (U64Vec_push(&v, i) != 0) return fail(7, "churn push");
+                if ((i & 7) == 0 && !cc_string_push_cstr(&s, "scratch-bytes", a)) return fail(7, "churn string");
+            }
+            if (n == 900 && !a.a->active) return fail(7, "outgrowing scratch promotes");
+            if (n == 8 && a.a->active) return fail(7, "fitting scratch stays a mark");
+            for (i = 0; i < n; i++) {
+                uint64_t *e = U64Vec_get(&v, i);
+                if (!e || *e != i) return fail(7, "scratch vec intact");
+            }
+            if ((r & 1) == 0) { U64Vec_destroy(&v); cc_string_destroy(&s); } /* else: die with the mark */
+            if (!cc_arena_restore(cp)) return fail(7, "churn restore");
+            if (a.a->active || a.a->mark_depth) return fail(7, "restore cleared");
+            if (cc_arena_slab_live(a.a) != live0) {
+                printf("  live=%zu want=%zu round=%zu\n", cc_arena_slab_live(a.a), live0, r);
+                return fail(7, "live count back to the mark");
+            }
+            for (i = 0; i < 4; i++) {
+                uint64_t *e = U64Vec_get(&keep, i);
+                if (!e || *e != i) return fail(7, "pre-mark vec intact");
+            }
+        }
+        {
+            /* No header minted in scratch survives on the owner list. */
+            CCArenaOwner *o;
+            for (o = a.a->owner_free; o; o = o->next_free) {
+                if ((uint8_t *)o >= a.a->slab->base + cc_arena_slab_offset(a.a) &&
+                    (uint8_t *)o < a.a->slab->base + a.a->slab->capacity)
+                    return fail(7, "scratch header listed");
+            }
+        }
+        U64Vec_destroy(&keep);
+    }
+    cc_arena_free(&a);
+    printf("  checkpoint churn OK\n");
+    return 0;
+}
+
 static int test_threads(void) {
     pthread_t th[THREADS];
     int i;
@@ -314,6 +373,7 @@ int main(void) {
     if ((rc = test_release_misuse()) != 0) return rc;
     if ((rc = test_token_registry()) != 0) return rc;
     if ((rc = test_reuse_regrow()) != 0) return rc;
+    if ((rc = test_checkpoint_churn()) != 0) return rc;
     if ((rc = test_threads()) != 0) return rc;
     printf("arena_adversarial_smoke OK\n");
     return 0;

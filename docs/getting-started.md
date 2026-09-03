@@ -349,10 +349,11 @@ alloc and drain). Main is the escape hatch, not the steady-state path.
 Prefer a second arena when lifetimes diverge rather than churning
 `cc_arena_release` on a long-lived one. `a.live()` counts L1 + L2 + Main.
 
-`a.try_checkpoint() !>` carves a child arena on `a`'s tail and routes new
-allocations through `a` into it; `cp.try_restore() !>` (or `@destroy` on the
-handle) destroys the child and pops `a`'s tip back. Things `a` already owned
-keep growing in `a`. Holes and overflow never get in the way of a checkpoint.
+`a.try_checkpoint() !>` marks `a`'s tip; `cp.try_restore() !>` (or `@destroy`
+on the handle) puts it back and everything allocated above the mark is gone.
+Things `a` already owned keep growing in `a`, never above the mark; scratch
+that outgrows the slab quietly becomes a child arena that restore frees.
+Holes and overflow never get in the way of a checkpoint.
 `a.detach() !>` moves a heap-owned arena to the caller and refuses a stack
 or caller-owned L1 (`cc_err`, source unchanged).
 

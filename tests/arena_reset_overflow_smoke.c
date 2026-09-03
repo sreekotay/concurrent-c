@@ -28,15 +28,14 @@ int main(void) {
         return 1;
     }
     {
-        /* Arms as a heap-rooted child (the 128-byte L1 has no tail left);
-         * dropped here, it stays active and dies at reset. */
+        /* Arms as a mark; dropped here, it stays armed and dies at reset. */
         CCArenaCheckpoint cp = cc_arena_checkpoint(a);
         if (cp.arena == NULL) {
             printf("FAIL: checkpoint should work after overflow alloc\n");
             return 1;
         }
-        if (a.a->active != cp.arena) {
-            printf("FAIL: dropped checkpoint child should stay active\n");
+        if (a.a->mark_depth != 1 || !a.a->mark0.armed) {
+            printf("FAIL: dropped checkpoint mark should stay armed\n");
             return 1;
         }
     }

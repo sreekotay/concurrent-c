@@ -76,16 +76,17 @@ Typed pointers use `cc_arena_alloc_T` / `cc_arena_alloc_T_count` (UFCS:
 `arena.allocT()` / `arena.allocT(n)`). Tracked byte slices use
 `cc_arena_alloc_slice_bytes` (UFCS: `arena.alloc_slice_bytes(n)`); failure
 yields an empty slice. Exhausted allocation with overflow disabled returns
-`NULL` / empty — never a success-looking no-op. A checkpoint is an active
-child arena: `a.try_checkpoint() !>` carves a child on `a`'s L1 tail and
-routes fresh allocations through `a` into it; `cp.try_restore() !>` (or
-`@destroy` on the handle) destroys the child, frees whatever it grew, and
-pops `a`'s tip back. Objects `a` already owned regrow and release in `a`,
-never in the child. Holes, overflow, and attached children never refuse a
-capture or a restore. Nested checkpoints restore LIFO while the inner handle
-is live; `cp.abandon()` consumes the handle and keeps the child active. A
-hard-capped `a` with no tail returns an unarmed handle
-(`CC_ERR_INVALID_ARG` from `try_checkpoint`). C twins
+`NULL` / empty — never a success-looking no-op. A checkpoint is a mark on
+`a`: `a.try_checkpoint() !>` records the tip and opens a fresh epoch for
+everything allocated above it; `cp.try_restore() !>` (or `@destroy` on the
+handle) runs the records attached since, then returns the tip to the mark in
+one CAS. Objects `a` already owned regrow and release in `a`, never above the
+mark; when scratch outgrows the slab, spills, or a pre-mark object must move,
+the mark becomes a child arena that restore frees. Holes, overflow, and
+attached children never refuse a capture or a restore. Nested checkpoints
+restore LIFO while the inner handle is live; `cp.abandon()` consumes the
+handle and keeps the scratch. A checkpoint always arms on a live host; a
+hard-capped `a` fails scratch closed once its tail is gone. The C twins
 (`cc_arena_checkpoint` / `cc_arena_restore`) stay for `@scratch`.
 Release is a signal: `cc_arena_release_sized(a, p, n)` pops the tip, lists
 the block for reuse (`a.set_reuse(true)`), or leaves a hole; the arena is the

@@ -1961,9 +1961,9 @@ void cc_arena_reset(CCArena* a);         // drain ovf; unwind extents; restore o
 void cc_arena_destroy(CCArena* a);       // alias for cc_arena_free
 CCArena cc_arena_detach(CCArena* a);     // heap-owned L1 only; empty on refuse
 
-// Checkpoints (an active child arena: capture carves it, restore destroys it)
+// Checkpoints (a mark on the host; a child arena only once scratch outgrows the slab)
 typedef struct CCArenaCheckpoint CCArenaCheckpoint;   // { child, parent, offset }
-CCArenaCheckpoint cc_arena_checkpoint(CCArena a);           // C twin (@scratch); .arena == NULL: unarmed
+CCArenaCheckpoint cc_arena_checkpoint(CCArena a);           // C twin (@scratch); .arena == NULL: dead host
 bool cc_arena_restore(CCArenaCheckpoint checkpoint);         // C twin; false: refuse
 CCArenaCheckpoint !>(CCError) cc_arena_try_checkpoint(CCArena a);
 void !>(CCError) cc_arena_try_restore(CCArenaCheckpoint checkpoint);
@@ -2162,47 +2162,50 @@ extent and root buffers, then clears the handle.
 
 ### Checkpoints
 
-A checkpoint is an **active child arena**. `cc_arena_checkpoint(a)` carves a
-child host on the remaining L1 tail of the innermost active host of `a`
-(record node, host, L1 to the end of the slab), attaches it as a lifetime
-child, and marks it active; the parent's tip parks at the slab end and the
-carved region counts as one live allocation of the parent. When the tail is
-too small the child is heap-rooted (a `CC_ARENA_CHILD_DEFAULT_BYTES` region);
-a hard-capped host (`CC_ARENA_FIXED` with overflow off) with no tail returns
-an unarmed handle (`checkpoint.arena == NULL`) and allocations keep landing
-in the parent. The child inherits the parent's overflow permission and its
-hard cap; otherwise it uses the default slab budget.
+A checkpoint is a **mark** on the innermost active host: the slab word at
+capture, a fresh epoch, and the head of the host's record list. Allocation
+keeps bumping the host's own slab; every allocation above the mark carries
+the mark's epoch. `cc_arena_restore` runs the records attached since the
+mark, then returns the slab word to the mark in one CAS: scratch above the
+mark is gone, views minted above it are stale (their epoch is dead), and
+objects below it are untouched. The tip never drops below a mark: a pre-mark
+object at the tip released during scratch becomes a hole. Marks nest per
+host up to `CC_ARENA_MARK_DEPTH`.
 
-While the child is active:
+A mark becomes a real **child arena** (a promotion) only when scratch
+outgrows the slab or spills to overflow, when a pre-mark object must move
+(a regrow that would cross the mark), when parent-side storage is needed
+(a record for a durable object, the reuse class table), or when marks nest
+deeper than the stack. The range from the outermost mark to the tip becomes
+the child's L1 in place, the host's tip parks at the slab end with the child
+counted once, the inner marks and the records attached since the outermost
+mark move to the child, and the child becomes active:
 
-- A fresh allocation through the parent handle (`cc_arena_alloc`, slices,
-  owners, the local paths) lands in the innermost active child and carries
-  that child's provenance epoch.
-- `cc_arena_realloc(a, a, p, …)` and `cc_arena_release(a, p)` resolve the host
-  on the active chain that owns `p` and act there. A pre-checkpoint owner
-  therefore regrows in pre-checkpoint storage: when its host's tip is the
-  child's region, the regrow takes a fresh extent of that host. A cross-arena
-  realloc names its destination explicitly and moves into the destination's
-  innermost active child.
-- `cc_arena_remaining`, `cc_arena_would_fit`, and `cc_slice_is_from_arena_epoch`
-  consult the active chain.
-- A checkpoint taken through `a` nests inside the active child.
-- `cc_arena_detach` and `cc_arena_adopt` refuse a host with an active child
-  and refuse an active child itself.
+- Fresh allocation through `a` (and through anything that allocates from
+  it: containers, owners, the local paths) lands in the innermost active
+  child and carries the child's epoch. Views minted there go stale at
+  restore.
+- Realloc and release act on the host that owns the pointer: a pre-mark
+  object regrows in host storage (a fresh host slab when the tip is
+  parked), never into scratch.
+- `cc_arena_release` through `a` reaches a pointer owned by `a` or by any
+  active child below it.
+- A checkpoint taken through `a` nests inside the innermost active child.
+- `cc_arena_detach` and `cc_arena_adopt` refuse a host with an armed mark or
+  an active child, and refuse an active child itself.
+- `cc_arena_reset` and `cc_arena_free` tear down marks and active children
+  with everything else.
 
-Restore destroys the child: its extents and overflow are freed, its epoch is
-dead (views minted in it fail the epoch check), and the parent's tip pops
-back to the offset the child began at (a last-live pop rewinds to zero). The
-next allocation through the parent lands at that offset. Holes in the child
-never touch the parent; holes in the parent never touch the child.
+Restore of a promoted mark frees the child (its extents, overflow, and
+epoch) and pops the host's tip back to the mark. Restore is LIFO for
+*armed* handles: it refuses while an inner armed mark is live. Abandon
+disarms the mark and keeps its scratch, which dies with the enclosing
+restore or the host. A checkpoint always arms on a live host; a hard cap
+(`CC_ARENA_FIXED` without overflow) fails scratch closed once its tail is
+gone. Attach records, holes, and overflow never refuse a capture or a
+restore.
 
-Restore is LIFO for **armed** handles: it refuses while an inner checkpoint
-that is still named by a live handle is active. `cp.abandon()` consumes the
-handle and keeps the scratch — the child stays active (later allocations
-keep landing in it) and dies with its parent, and an outer restore tears it
-down as an ordinary child. Scope `@destroy` restores, else abandons. A
-dropped handle leaves the child active until the parent resets or frees.
-`cc_arena_restore` returns false and does not mutate on an unarmed or consumed
+`cc_arena_restore` returns false and does not mutate on a dead, consumed, or abandoned
 handle, a dead parent, a child that is no longer the parent's record (after a
 restore, reset, or free), or an armed inner checkpoint. The child is verified
 through the parent's record list before it is touched, so a stale handle is
@@ -8206,14 +8209,14 @@ fields where safe.
 
 **Growable chained bump allocator:**
 
-A host owns a chain of slab records, newest first. Each record is created with its bytes and never rewritten: `base` and `capacity` are immutable, and `state` packs the tip and the live count into one word (`live:32 | offset:32`). A bump, a tip pop, a last-live rewind, a tip regrow in place, and a checkpoint carve are each one CAS on that word, so the tip and the count can never disagree and none of them needs the lock. The host embeds its first slab; grow allocates a fresh record and publishes it as `slab` with a release store, leaving the previous record exactly as it was, so a bump that raced the grow still lands on the slab it read and is credited there. One slab holds at most `CC_ARENA_SLAB_MAX` (4 GiB) bytes.
+A host owns a chain of slab records, newest first. Each record is created with its bytes and never rewritten: `base` and `capacity` are immutable, and `state` packs the tip and the live count into one word (`live:32 | offset:32`). A bump, a tip pop, a last-live rewind, a tip regrow in place, a checkpoint restore, and a promotion's park are each one CAS on that word, so the tip and the count can never disagree and none of them needs the lock. The host embeds its first slab; grow allocates a fresh record and publishes it as `slab` with a release store, leaving the previous record exactly as it was, so a bump that raced the grow still lands on the slab it read and is credited there. One slab holds at most `CC_ARENA_SLAB_MAX` (4 GiB) bytes.
 
 ```c
 struct CCArenaSlab {
     uint8_t*  base;        // immutable
     size_t    capacity;    // immutable, <= CC_ARENA_SLAB_MAX
     /* atomic */ uint64_t state;   // live:32 | offset:32, every change a CAS
-    size_t    tail_carved; // where a live tail child's region begins (== capacity when none)
+    size_t    tail_carved; // where a promoted child's region begins (== capacity when none)
     CCArenaSlab* prev;     // the slab this one grew from (NULL for L1)
     uint32_t  flags;       // HEAP_OWNED: cc_free(base) at teardown
     uint16_t  block_idx;   // 0 = L1
@@ -8223,7 +8226,11 @@ struct CCArenaHost {
     CCArenaSlab* slab;     // current slab; grow publishes a new record (release), readers acquire
     CCArenaSlab  l1;       // the first slab's record, in the host
     uint64_t provenance;   // monotonic arena id / epoch
-    uint32_t _flags;       // ALLOW/USED_HEAP_OVERFLOW, HOST_INLINE, TAIL_CHILD, REUSE, ...
+    uint64_t epoch_cur;    // epoch fresh bumps carry: provenance, or the innermost mark's
+    CCArenaMark mark0;     // first checkpoint mark (slab word, epoch, record-list head, armed)
+    CCArenaMark* more;     // the next CC_ARENA_MARK_DEPTH-1 marks, from the slab above mark0
+    uint32_t mark_depth;
+    uint32_t _flags;       // ALLOW/USED_HEAP_OVERFLOW, HOST_INLINE, TAIL_CHILD, PROMOTED_CHILD, REUSE, ...
     uint16_t block_max;    // budget: 0 = unbounded, 1 = fixed, N = max
     /* ovf_head / ovf_chunks / overflow_bytes / meta_lock / children / active / owner_free / reuse_free — see cc_arena.cch */
 };
@@ -8246,7 +8253,7 @@ On a bump that does not fit the current slab:
 
 **Reset:** Drain overflow, free every grown slab (buffer and record), make the embedded L1 record current again with `state = 0`, advance provenance.
 
-**Checkpoint/Restore:** A checkpoint is an active child arena. Capture carves a child host on the innermost active host's L1 tail (or heap-roots one when the tail is too small; an uncappable host with no tail returns an unarmed handle), attaches it as a lifetime child, parks the parent tip at the slab end, and sets `active`. Fresh allocations through the parent forward to the innermost active child; realloc and release act on the host that owns the pointer. Restore verifies the child against the parent's record list, refuses while an armed inner checkpoint is active, then frees the child (extents, overflow, epoch) and pops the parent tip back to the child's start offset. Abandon consumes the handle and leaves the child active. Attach records, holes, and overflow never refuse a capture or a restore; reset and free tear down an active child like any other.
+**Checkpoint/Restore:** A checkpoint is a mark on the innermost active host (slab word, epoch, record-list head). Restore runs the records attached since the mark and returns the slab word to the mark in one CAS; the tip never pops below a mark. Promotion turns the marks into a child host only when scratch outgrows the slab, spills, needs parent-side storage, moves a pre-mark object, or nests deeper than the mark stack: the range above the outermost mark becomes the child's L1 in place, the host tip parks at the slab end, and the child becomes active. Restore of a promoted mark frees the child and pops the host tip. LIFO holds for armed handles; abandon disarms and keeps the scratch.
 
 **Per-request pattern:**
 

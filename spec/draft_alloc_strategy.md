@@ -138,40 +138,52 @@ through the source arena.
 
 ## Checkpoint and restore
 
-A checkpoint is an active child arena:
+A checkpoint is a mark on the innermost active host:
 
 ```c
 CCArenaCheckpoint checkpoint = arena.try_checkpoint() !>;
 checkpoint.try_restore() !>; /* or @destroy on the handle */
 ```
 
-Capture carves a child host on the remaining L1 tail of the innermost active
-host (record node, host, then L1 to the end of the slab), attaches it as a
-lifetime child, parks the parent tip at the slab end, and marks it active.
-The carved region counts as one live allocation of the parent and is excluded
-from the parent's ownership tests. When the tail is too small the child is
-heap-rooted; a hard-capped host with no tail returns an unarmed handle. The
-child has its own provenance epoch, slab budget, and overflow, inheriting the
-parent's overflow permission and hard cap.
+Capture records the slab word, takes a fresh epoch that every allocation
+above the mark is stamped with, and remembers the head of the host's record
+list. Allocation keeps bumping the host's own slab. Marks nest per host up to
+`CC_ARENA_MARK_DEPTH`; a deeper one promotes the outer marks.
 
-Fresh allocations through the parent land in the innermost active child.
-Realloc and release resolve the owner on the active chain and act there, so
-a pre-checkpoint object regrows in pre-checkpoint storage (a fresh extent of
-its host when the child holds the tip). A checkpoint taken while a child is
-active nests inside it.
+Restore refuses while an inner mark is still named by a live handle, runs the
+records attached since the mark, then returns the slab word to the mark in one
+CAS. Views minted above the mark fail the epoch check afterwards; pre-mark
+views keep theirs. The tip never drops below a mark: a pre-mark object at the
+tip released during scratch becomes a hole, and the live count returns to the
+mark's count (a pre-mark release during scratch leaves it one high, which can
+only defer a rewind). Abandon disarms the mark and keeps its scratch until the
+enclosing restore or the host's reset or free. `@destroy` restores, else
+abandons. A dropped handle leaves the mark armed.
 
-Restore verifies the child against the parent's record list, refuses while an
-inner checkpoint is still named by a live handle, then frees the child —
-extents, overflow, epoch — and pops the parent tip back to the child's start
-offset (a last-live pop rewinds to zero). Views minted in the child fail the
-epoch check afterwards; pre-checkpoint views keep theirs. Abandon consumes the
-handle and keeps the child active until the parent resets or frees. `@destroy`
-restores, else abandons. A dropped handle leaves the child active. Detach and
-adopt refuse a host with an active child and refuse an active child.
-`cc_arena_reset` tears down an active child with the other records, frees
-outstanding overflow (Main), clears the used-overflow and reuse flags, returns
-to the original L1, resets counts and offset, and advances provenance.
-`cc_arena_detach` refuses a stack or caller-owned L1.
+A mark becomes a child arena, a promotion, only when it must: scratch
+outgrows the slab or spills to overflow, a pre-mark object needs to move (a
+regrow that would cross the mark), parent-side storage is needed (a record
+for a durable object, the reuse class table), or marks nest past the stack.
+The range from the outermost mark to the tip becomes the child's L1 in
+place, the host's tip parks at the slab end with the child counted once, the
+inner marks and the records attached since the outermost mark move to the
+child, and the child becomes active. The child has its own provenance epoch
+(the mark's), slab budget, and overflow, inheriting the parent's overflow
+permission and hard cap. Fresh allocations through the parent land in the
+innermost active child; realloc and release resolve the owner on the active
+chain and act there, so a pre-mark object regrows in host storage (a fresh
+slab of its host while the tip is parked). An owner header, a record, or a
+moved payload belongs to the host whose bytes hold it, whichever handle it
+was created through. A checkpoint taken while a child is active nests inside
+it. Restore of a promoted mark frees the child (extents, overflow, epoch) and
+pops the host tip back to the mark.
+
+Detach and adopt refuse a host with an armed mark or an active child and
+refuse an active child. `cc_arena_reset` tears down marks and active children
+with the other records, frees outstanding overflow (Main), clears the
+used-overflow and reuse flags, returns to the original L1, resets counts and
+offset, and advances provenance. `cc_arena_detach` refuses a stack or
+caller-owned L1.
 
 ## Owners
 

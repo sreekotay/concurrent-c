@@ -37,14 +37,15 @@ int main(void) {
 
     CCArenaCheckpoint cp = cc_arena_checkpoint(arena);
     assert(cp.arena != NULL && cp.parent == arena.a);
-    /* The parent's epoch is untouched; the child has its own. */
+    /* The host's epoch is untouched; scratch above the mark has its own. */
     assert(arena.a->provenance == stable_provenance);
-    assert(cp.arena->provenance != stable_provenance);
+    uint64_t scratch_epoch = arena.a->epoch_cur;
+    assert(scratch_epoch != stable_provenance);
 
     CCString transient = cc_string_new();
     assert(cc_string_push(&transient, "temp-promoted-456", arena) != NULL);
     CCSlice transient_view = cc_string_as_slice(&transient);
-    assert(cc_string_provenance(&transient) == cp.arena->provenance);
+    assert(cc_string_provenance(&transient) == scratch_epoch);
     assert(cc_slice_id_epoch(transient_view.id) != cc_slice_id_epoch(stable_view.id));
     assert(cc_slice_is_from_arena_epoch(transient_view, arena.a)); /* via the active chain */
 

@@ -699,8 +699,8 @@ cc_arena_stack(tmp, 1024);             // same policy; L1 on the stack; @destroy
 cc_arena_buf(win, frame, sizeof frame); // same sugar; caller L1 (no VLA)
 a.reset();                             // drain epoch; reuse L1
 
-CCArenaCheckpoint cp = a.try_checkpoint() !> @destroy; // active child on a's tail
-/* …scratch lands in the child, including its Main… */
+CCArenaCheckpoint cp = a.try_checkpoint() !> @destroy; // a mark on a's tip
+/* …scratch above the mark; a child arena only if it outgrows the slab… */
 cp.try_restore() !>;                   // or leave the scope: @destroy restores
 
 a.set_reuse(true);                     // sized releases feed size-class lists

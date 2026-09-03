@@ -40,14 +40,14 @@ static int test_malloc_ctor_scratch_dies_with_child(void) {
 
     cp = cc_arena_checkpoint(a);
     if (cp.arena == NULL) return fail(1, "checkpoint after overflow alloc");
-    if (cp.arena == a.a || cp.parent != a.a) return fail(1, "child handle shape");
+    if (cp.parent != a.a) return fail(1, "handle shape");
 
     drop = cc_arena_alloc(a, 128, 8);
     if (!drop) return fail(1, "post-checkpoint overflow");
     memset(drop, 0x22, 128);
     /* Scratch overflow belongs to the child, not the parent's list. */
     if (count_ovf_objects(a.a) != 1) return fail(1, "scratch must not join the parent's overflow");
-    if (cc__arena_owner_host(a.a, drop) != cp.arena) return fail(1, "scratch owned by child");
+    if (!a.a->active || cc__arena_owner_host(a.a, drop) != a.a->active) return fail(1, "scratch overflow promoted into a child");
 
     if (!cc_arena_restore(cp)) return fail(1, "restore");
     if (((unsigned char *)keep)[0] != 0x11) return fail(1, "keep-set overflow clobbered");
@@ -101,10 +101,10 @@ static int test_discarded_checkpoint_nests_later_ones(void) {
     if (!cc_arena_release(a, keep)) return fail(7, "release after discarded checkpoint");
     later = cc_arena_checkpoint(a);
     if (later.arena == NULL) return fail(7, "later checkpoint arms inside the active child");
-    if (later.parent != dropped.arena) return fail(7, "later checkpoint nests in the active child");
+    if (later.parent != a.a || later.id == dropped.id) return fail(7, "later checkpoint nests above the dropped mark");
     if (!cc_arena_restore(later)) return fail(7, "restore later");
-    /* The dropped child is still active; it dies with the parent. */
-    if (a.a->active != dropped.arena) return fail(7, "dropped child stays active");
+    /* The dropped mark is still armed; it dies with the parent. */
+    if (a.a->mark_depth != 1 || !a.a->mark0.armed) return fail(7, "dropped mark stays");
     cc_arena_free(&a);
     printf("  discarded checkpoint stays active; later ones nest OK\n");
     return 0;

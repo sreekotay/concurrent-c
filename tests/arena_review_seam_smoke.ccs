@@ -42,11 +42,11 @@ int main(void) {
         cp = cc_arena_checkpoint(a.a);
         if (!cp.arena) return fail(2, "checkpoint");
         if (!cc_arena_release(a.a, p)) return fail(2, "release");
-        if (cc_arena_slab_offset(a.a) != a.a->slab->capacity)
-            return fail(2, "parent tip stays at the child while it is active");
+        if (cc_arena_slab_offset(a.a) != cp.offset)
+            return fail(2, "a pre-mark tip object becomes a hole, the tip stays at the mark");
         if (!cc_arena_restore(cp)) return fail(2, "restore after release");
-        if (cc_arena_slab_offset(a.a) != 0)
-            return fail(2, "last-live pop rewinds to zero");
+        if (cc_arena_slab_offset(a.a) != cp.offset)
+            return fail(2, "restore returns to the mark");
         cc_arena_destroy(&a);
     }
 
@@ -90,8 +90,8 @@ int main(void) {
         cc_arena_destroy(&parent);
     }
 
-    /* Abandon keeps the scratch: the child stays active and dies with the
-     * parent; the handle is consumed. */
+    /* Abandon keeps the scratch: the mark stays, disarmed, and dies with
+     * the enclosing restore; the handle is consumed. */
     {
         CCArena a = cc_arena_heap(kilobytes(1));
         CCArenaCheckpoint outer;
@@ -109,7 +109,7 @@ int main(void) {
         if (!inner.arena) return fail(4, "inner");
         if (!inner.abandon()) return fail(4, "inner abandon");
         if (inner.arena) return fail(4, "abandoned handle not nulled");
-        if (outer.arena->active == NULL) return fail(4, "abandoned inner stays active");
+        if (a.a->mark_depth != 2) return fail(4, "abandoned inner mark stays");
         if (!cc_arena_restore(outer))
             return fail(4, "outer restore tears down the abandoned inner");
         if (a.a->active != NULL) return fail(4, "parent has no active child after restore");

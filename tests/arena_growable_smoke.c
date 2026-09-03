@@ -60,17 +60,18 @@ int main(void) {
         if (!p0) return 3;
         for (int i = 0; i < 4; i++) p0[i] = i;
 
-        // Take checkpoint in block 0: the child is heap-rooted here (a
-        // 64-byte L1 has no tail worth carving)
+        // Take checkpoint in block 0: a mark; the first scratch that does
+        // not fit the 64-byte L1 promotes it to a child
         CCArenaCheckpoint cp = cc_arena_checkpoint(a);
-        if (!cp.arena || cp.parent != a.a) { printf("FAIL: checkpoint child\n"); return 3; }
+        if (!cp.arena || cp.parent != a.a) { printf("FAIL: checkpoint mark\n"); return 3; }
 
         // Force growth: the scratch child (4 KiB L1) grows its own extents
         for (int i = 0; i < 400; i++) {
             if (!cc_arena_alloc_T_count(int, a, 10)) { printf("FAIL: scratch alloc\n"); return 3; }
         }
-        int grown_idx = cp.arena->slab->block_idx;
-        if (grown_idx == 0 && !(cp.arena->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
+        if (!a.a->active) { printf("FAIL: scratch past the tail must promote the mark\n"); return 3; }
+        int grown_idx = a.a->active->slab->block_idx;
+        if (grown_idx == 0 && !(a.a->active->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
             printf("FAIL: expected child growth\n"); return 3;
         }
         if (a.a->slab->block_idx != 0) { printf("FAIL: parent must not grow for scratch\n"); return 3; }
