@@ -131,17 +131,20 @@ static int shadow_tpl_emit(CEmit* out, const char* tpl, const ShadowTplBind* env
             const ShadowTplBind* b;
             if (!shadow_tpl_parse_hole(&p, name, sizeof(name), prefix,
                                       sizeof(prefix), &hint)) {
-                fprintf(stderr,
-                        "error: emit template: malformed hole near '%.32s'\n",
-                        start);
+                {
+                    char __diag[96];
+                    snprintf(__diag, sizeof(__diag),
+                             "emit template: malformed hole near '%.32s'",
+                             start);
+                    shadow_err(NULL, NULL, __diag);
+                }
                 out->err = 1;
                 return 0;
             }
             if (hint == SHADOW_TPL_LINE || strcmp(name, "line") == 0) {
                 b = shadow_tpl_find(env, nenv, "line", 4);
                 if (!b || !b->value) {
-                    fprintf(stderr,
-                            "error: emit template: missing ${line} bind\n");
+                    shadow_err(NULL, NULL, "emit template: missing ${line} bind");
                     out->err = 1;
                     return 0;
                 }
@@ -151,8 +154,7 @@ static int shadow_tpl_emit(CEmit* out, const char* tpl, const ShadowTplBind* env
             if (hint == SHADOW_TPL_FILE || strcmp(name, "file") == 0) {
                 b = shadow_tpl_find(env, nenv, "file", 4);
                 if (!b || !b->value) {
-                    fprintf(stderr,
-                            "error: emit template: missing ${file} bind\n");
+                    shadow_err(NULL, NULL, "emit template: missing ${file} bind");
                     out->err = 1;
                     return 0;
                 }
@@ -161,8 +163,12 @@ static int shadow_tpl_emit(CEmit* out, const char* tpl, const ShadowTplBind* env
             }
             b = shadow_tpl_find(env, nenv, name, strlen(name));
             if (!b) {
-                fprintf(stderr,
-                        "error: emit template: unbound hole '${%s}'\n", name);
+                {
+                    char __diag[96];
+                    snprintf(__diag, sizeof(__diag),
+                             "emit template: unbound hole '${%s}'", name);
+                    shadow_err(NULL, NULL, __diag);
+                }
                 out->err = 1;
                 return 0;
             }
@@ -170,10 +176,14 @@ static int shadow_tpl_emit(CEmit* out, const char* tpl, const ShadowTplBind* env
                 prefix[0]) {
                 const char* pref = "";
                 if (b->kind != SHADOW_TPL_STMTS) {
-                    fprintf(stderr,
-                            "error: emit template: hole '${%s}' needs STMTS "
-                            "bind (got kind %d)\n",
-                            name, b->kind);
+                    {
+                        char __diag[128];
+                        snprintf(__diag, sizeof(__diag),
+                                 "emit template: hole '${%s}' needs STMTS "
+                                 "bind (got kind %d)",
+                                 name, b->kind);
+                        shadow_err(NULL, NULL, __diag);
+                    }
                     out->err = 1;
                     return 0;
                 }
@@ -181,10 +191,14 @@ static int shadow_tpl_emit(CEmit* out, const char* tpl, const ShadowTplBind* env
                     const ShadowTplBind* pb =
                         shadow_tpl_find(env, nenv, prefix, strlen(prefix));
                     if (!pb || !pb->value) {
-                        fprintf(stderr,
-                                "error: emit template: stmts prefix '${%s}' "
-                                "missing\n",
-                                prefix);
+                        {
+                            char __diag[96];
+                            snprintf(__diag, sizeof(__diag),
+                                     "emit template: stmts prefix '${%s}' "
+                                     "missing",
+                                     prefix);
+                            shadow_err(NULL, NULL, __diag);
+                        }
                         out->err = 1;
                         return 0;
                     }
@@ -195,10 +209,14 @@ static int shadow_tpl_emit(CEmit* out, const char* tpl, const ShadowTplBind* env
                 continue;
             }
             if (b->kind != SHADOW_TPL_IDENT && b->kind != SHADOW_TPL_EXPR) {
-                fprintf(stderr,
-                        "error: emit template: hole '${%s}' needs IDENT/EXPR "
-                        "(got kind %d)\n",
-                        name, b->kind);
+                {
+                    char __diag[128];
+                    snprintf(__diag, sizeof(__diag),
+                             "emit template: hole '${%s}' needs IDENT/EXPR "
+                             "(got kind %d)",
+                             name, b->kind);
+                    shadow_err(NULL, NULL, __diag);
+                }
                 out->err = 1;
                 return 0;
             }
@@ -228,7 +246,7 @@ static int shadow_tpl_kv(CEmit* out, const char* tpl, ...) {
         size_t nl;
         if (!name) break;
         if (n >= 48) {
-            fprintf(stderr, "error: shadow_tpl_kv: too many binds\n");
+            shadow_err(NULL, NULL, "shadow_tpl_kv: too many binds");
             out->err = 1;
             va_end(ap);
             return 0;
@@ -314,7 +332,7 @@ static int cemit_fmt(CEmit* e, const char* fmt, ...) {
             continue;
         }
         if (nbind >= 48) {
-            fprintf(stderr, "error: cemit_fmt: too many holes\n");
+            shadow_err(NULL, NULL, "cemit_fmt: too many holes");
             e->err = 1;
             va_end(ap);
             if (tpl != tpl_stack) free(tpl);
@@ -343,8 +361,12 @@ static int cemit_fmt(CEmit* e, const char* fmt, ...) {
             binds[nbind].value = numbufs[nbind];
             p += 3;
         } else {
-            fprintf(stderr,
-                    "error: cemit_fmt: unsupported format near '%%%s'\n", p);
+            {
+                char __diag[96];
+                snprintf(__diag, sizeof(__diag),
+                         "cemit_fmt: unsupported format near '%%%s'", p);
+                shadow_err(NULL, NULL, __diag);
+            }
             e->err = 1;
             va_end(ap);
             if (tpl != tpl_stack) free(tpl);
@@ -395,10 +417,14 @@ static int shadow_tpl_check(const char* id, const char* tpl,
             const ShadowTplBind* b;
             if (!shadow_tpl_parse_hole(&p, name, sizeof(name), prefix,
                                       sizeof(prefix), &hint)) {
-                fprintf(stderr,
-                        "error: emit template '%s': malformed hole near "
-                        "'%.32s'\n",
-                        id ? id : "?", start);
+                {
+                    char __diag[128];
+                    snprintf(__diag, sizeof(__diag),
+                             "emit template '%s': malformed hole near "
+                             "'%.32s'",
+                             id ? id : "?", start);
+                    shadow_err(NULL, NULL, __diag);
+                }
                 return 0;
             }
             if (hint == SHADOW_TPL_LINE || strcmp(name, "line") == 0 ||
@@ -406,34 +432,50 @@ static int shadow_tpl_check(const char* id, const char* tpl,
                 continue;
             b = shadow_tpl_find(schema, nschema, name, strlen(name));
             if (!b) {
-                fprintf(stderr,
-                        "error: emit template '%s': hole '${%s}' not in schema\n",
-                        id ? id : "?", name);
+                {
+                    char __diag[128];
+                    snprintf(__diag, sizeof(__diag),
+                             "emit template '%s': hole '${%s}' not in schema",
+                             id ? id : "?", name);
+                    shadow_err(NULL, NULL, __diag);
+                }
                 return 0;
             }
             if (b->kind == SHADOW_TPL_STMTS || hint == SHADOW_TPL_STMTS ||
                 prefix[0]) {
                 if (b->kind != SHADOW_TPL_STMTS) {
-                    fprintf(stderr,
-                            "error: emit template '%s': '${%s}' schema kind "
-                            "must be STMTS\n",
-                            id ? id : "?", name);
+                    {
+                        char __diag[128];
+                        snprintf(__diag, sizeof(__diag),
+                                 "emit template '%s': '${%s}' schema kind "
+                                 "must be STMTS",
+                                 id ? id : "?", name);
+                        shadow_err(NULL, NULL, __diag);
+                    }
                     return 0;
                 }
                 if (prefix[0] &&
                     !shadow_tpl_find(schema, nschema, prefix, strlen(prefix))) {
-                    fprintf(stderr,
-                            "error: emit template '%s': stmts prefix '%s' not "
-                            "in schema\n",
-                            id ? id : "?", prefix);
+                    {
+                        char __diag[128];
+                        snprintf(__diag, sizeof(__diag),
+                                 "emit template '%s': stmts prefix '%s' not "
+                                 "in schema",
+                                 id ? id : "?", prefix);
+                        shadow_err(NULL, NULL, __diag);
+                    }
                     return 0;
                 }
             } else if (b->kind != SHADOW_TPL_IDENT &&
                        b->kind != SHADOW_TPL_EXPR) {
-                fprintf(stderr,
-                        "error: emit template '%s': '${%s}' schema kind must be "
-                        "IDENT/EXPR\n",
-                        id ? id : "?", name);
+                {
+                    char __diag[128];
+                    snprintf(__diag, sizeof(__diag),
+                             "emit template '%s': '${%s}' schema kind must be "
+                             "IDENT/EXPR",
+                             id ? id : "?", name);
+                    shadow_err(NULL, NULL, __diag);
+                }
                 return 0;
             }
             continue;

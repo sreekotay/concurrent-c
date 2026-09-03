@@ -9573,8 +9573,8 @@ static void cc__add_result_type(const char* ok, size_t ok_len, const char* err, 
 }
 
 /* Rewrite result types:
-   - `T!>(E)` -> `__CC_RESULT(T_mangled, E_mangled)`
-   The '!>' sigil is followed by error type in parentheses.
+   - `T!>(E)` / `T?>(E)` -> `CCResult_T_E` (same mangled box; `?>` decls are discard-ok)
+   The sigil is followed by error type in parentheses.
    This syntax is unambiguous and easy to parse.
    Also collects unique (T, E) pairs for later emission of CC_DECL_RESULT_SPEC calls.
    
@@ -9597,11 +9597,12 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
         char c = src[i];
         char c2 = (i + 1 < n) ? src[i + 1] : 0;
         
-        /* Detect `T!>(E)` pattern: type followed by '!>' followed by '(' error type ')' */
-        if (c == '!' && c2 == '>') {
-            /* Found '!>' sigil - now find the error type in parentheses */
+        /* Detect `T!>(E)` / `T?>(E)`: type followed by '!>' or '?>' and '(' error type ')' */
+        if ((c == '!' && c2 == '>') || (c == '?' && c2 == '>')) {
+            int discard_ok = (c == '?');
+            /* Found result sigil - now find the error type in parentheses */
             size_t sigil_pos = i;
-            size_t j = i + 2;  /* skip '!>' */
+            size_t j = i + 2;  /* skip '!>' / '?>' */
             
             /* Skip whitespace */
             j = cc_skip_ws_and_comments(src, n, j);
@@ -9616,10 +9617,9 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                 scan.col += 2;
                 continue;
             }
-            /* If the non-ws char immediately before `!>` is `)` (a closing
+            /* If the non-ws char immediately before the sigil is `)` (a closing
              * paren of a call or expression), this is the binder form
-             * `CALL !> (e) BODY` of the `!>` statement operator — not a
-             * type annotation.  Let pass_result_unwrap handle it later. */
+             * `CALL !> (e) BODY` / `CALL ?>(e) DEFAULT` — not a type annotation. */
             {
                 size_t bk = cc_rskip_ws_and_comments(src, sigil_pos);
                 if (bk > 0 && src[bk - 1] == ')') {
@@ -9801,7 +9801,8 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                                                                              src + err_start,
                                                                              err_end - err_start,
                                                                              type_name,
-                                                                             strlen(type_name));
+                                                                             strlen(type_name),
+                                                                             discard_ok);
                                         }
                                     }
                                 }
@@ -11598,24 +11599,21 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                left intact for the later result-type lowering pass. */
         }
 
-        /* Detect function returning T!E or T!>(E) - look for pattern: T!E name( or T!>(E) name( 
-           Handle space before ! (e.g., "MyData !> (MyError)" or "MyData*!>(MyError)") */
-        if (c == '!' && c2 != '=' && fn_brace_depth < 0 && i > 0) {
+        /* Detect function returning T!E, T!>(E), or T?>(E) — look for pattern:
+           T!E name(, T!>(E) name(, or T?>(E) name( */
+        if (((c == '!' && c2 != '=') || (c == '?' && c2 == '>')) && fn_brace_depth < 0 && i > 0) {
             /* Skip backwards over whitespace and block comments to find
              * the type (`T / *doc* / !> (E) fn(` still reads `T`). */
             size_t prev_end = cc__rskip_sp_tab_block_comments(src, i);
             char prev = prev_end > 0 ? src[prev_end - 1] : src[0];
-            /* Valid chars before !: identifier chars, closing brackets, pointer star */
+            /* Valid chars before sigil: identifier chars, closing brackets, pointer star */
             if (cc_is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>' || prev == '*') {
-                /* Check for error type after ! - two forms:
-                   1. T!E (simple form)
-                   2. T!>(E) (arrow form with parentheses) */
-                size_t j = i + 1;
+                size_t j;
                 size_t err_start = 0, err_end = 0;
-                
-                /* Check for !> arrow form */
-                if (j < n && src[j] == '>') {
-                    j++; /* skip '>' */
+
+                if (c == '?' && c2 == '>') {
+                    /* T?>(E) — parenthesized error type only */
+                    j = i + 2;
                     j = cc_skip_ws_and_comments(src, n, j);
                     if (j < n && src[j] == '(') {
                         j++; /* skip '(' */
@@ -11627,12 +11625,32 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                         if (j < n && src[j] == ')') j++; /* skip ')' */
                     }
                 } else {
-                    /* Simple !E form */
-                    j = cc_skip_ws_and_comments(src, n, j);
-                    if (j < n && cc_is_ident_start(src[j])) {
-                        err_start = j;
-                        while (j < n && cc_is_ident_char(src[j])) j++;
-                        err_end = j;
+                    /* Check for error type after ! - two forms:
+                       1. T!E (simple form)
+                       2. T!>(E) (arrow form with parentheses) */
+                    j = i + 1;
+
+                    /* Check for !> arrow form */
+                    if (j < n && src[j] == '>') {
+                        j++; /* skip '>' */
+                        j = cc_skip_ws_and_comments(src, n, j);
+                        if (j < n && src[j] == '(') {
+                            j++; /* skip '(' */
+                            j = cc_skip_ws_and_comments(src, n, j);
+                            err_start = j;
+                            while (j < n && cc_is_ident_char(src[j])) j++;
+                            err_end = j;
+                            j = cc_skip_ws_and_comments(src, n, j);
+                            if (j < n && src[j] == ')') j++; /* skip ')' */
+                        }
+                    } else {
+                        /* Simple !E form */
+                        j = cc_skip_ws_and_comments(src, n, j);
+                        if (j < n && cc_is_ident_start(src[j])) {
+                            err_start = j;
+                            while (j < n && cc_is_ident_char(src[j])) j++;
+                            err_end = j;
+                        }
                     }
                 }
                 
@@ -18757,13 +18775,31 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                     if (line_end < n && src[line_end] == '\n') cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
                     /* Owner defs after the extracted parent `.h` so names
                      * that face defines are in scope. The splice is the
-                     * definitions extract stripped, not a second header. */
+                     * definitions extract stripped, not a second header.
+                     * Direct include of an impl-grade chapter (same stem
+                     * owner) uses the same owner-defs path as nested
+                     * include-graph leaves. */
                     if (g_rewrite_allow_impl_splice &&
                         cc__cch_root_is_defining_ccs(found ? child_abs
                                                            : child_path)) {
+                        const char* face = found ? child_abs : child_path;
+                        if (cc__local_cch_is_impl_grade(face) &&
+                            !cc__impl_cch_was_spliced(face)) {
+                            size_t line_no = 1;
+                            size_t k;
+                            for (k = 0; k < i; k++)
+                                if (src[k] == '\n') line_no++;
+                            if (cc__splice_impl_cch_into(&out, &out_len,
+                                                         &out_cap, face,
+                                                         current_path,
+                                                         line_no, 1) != 0) {
+                                g_local_cch_lower_failed = 1;
+                                free(out);
+                                return NULL;
+                            }
+                        }
                         cc__splice_include_graph_impl_leaves(
-                            &out, &out_len, &out_cap,
-                            found ? child_abs : child_path, current_path);
+                            &out, &out_len, &out_cap, face, current_path);
                         if (g_local_cch_lower_failed) {
                             free(out);
                             return NULL;

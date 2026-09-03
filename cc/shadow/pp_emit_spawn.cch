@@ -122,7 +122,8 @@ static int shadow_resolve_at_create(char* expr, size_t cap, const char* ty,
     if (!expr) return 0;
     if (strncmp(expr, "__cc_at_create(", prefix_len) != 0) return 1;
     if (!ty || !ty[0]) {
-        fprintf(stderr, "error: type: @(...) create needs a declared type\n");
+        shadow_err(NULL, g_shadow_expr_site,
+                   "type: @(...) create needs a declared type");
         return 0;
     }
     snprintf(rest, sizeof(rest), "%s", expr + prefix_len);
@@ -200,19 +201,24 @@ static int shadow_resolve_at_create(char* expr, size_t cap, const char* ty,
         }
     }
     if (!callee[0]) {
-        fprintf(stderr, "error: type: '%s%s' has no .create hook\n", ty,
-                is_ptr ? "*" : "");
+        {
+            char __diag[192];
+            snprintf(__diag, sizeof(__diag),
+                     "type: '%s%s' has no .create hook", ty,
+                     is_ptr ? "*" : "");
+            shadow_err(NULL, g_shadow_expr_site, __diag);
+        }
         return 0;
     }
     if (decl) {
         if (is_ptr) {
-            fprintf(stderr,
-                    "error: type: decl-form @create cannot bind a pointer\n");
+            shadow_err(NULL, g_shadow_expr_site,
+                       "type: decl-form @create cannot bind a pointer");
             return 0;
         }
         if (!out_decl) {
-            fprintf(stderr,
-                    "error: type: decl-form @create needs a value binder\n");
+            shadow_err(NULL, g_shadow_expr_site,
+                       "type: decl-form @create needs a value binder");
             return 0;
         }
         *out_decl = 1;
@@ -707,14 +713,14 @@ static int shadow_emit_closure_body(AstNode* cl, CEmit* out, TapeCache* cache) {
     for (int k = 0; k < cl->nbody; k++) {
         if (!shadow_collect_scope_defers(&cl->body[k], 1, defers, &ndefers,
                                          16)) {
-            fprintf(stderr, "error: too many @defer in closure body\n");
+            shadow_err(NULL, cl, "too many @defer in closure body");
             out->err = 1;
             return 0;
         }
         /* Closure-level @destroy (same ledger as fn-level; §5.1 / §4.2.2). */
         if (shadow_stmt_is_destroy(cl->body[k])) {
             if (ndestroys >= 32) {
-                fprintf(stderr, "error: too many @destroy in closure body\n");
+                shadow_err(NULL, cl, "too many @destroy in closure body");
                 out->err = 1;
                 return 0;
             }
@@ -1024,9 +1030,8 @@ static int shadow_emit_closure_def_raw(AstNode* cl, CEmit* out, TapeCache* cache
                                  cname);
                         nrefs++;
                     } else {
-                        fprintf(stderr,
-                                "error: closure reference capture list too "
-                                "long\n");
+                        shadow_err(NULL, cl,
+                                   "closure reference capture list too long");
                         return 0;
                     }
                 }
@@ -1187,14 +1192,18 @@ static int shadow_emit_cancel(AstNode* st, CEmit* out, ShadowCtx* ctx,
     AstNode* d;
     char fl[80];
     if (!st || !st->a[0]) {
-        fprintf(stderr, "error: @cancel_defer requires a name\n");
+        shadow_err(ctx, st, "@cancel_defer requires a name");
         if (out) out->err = 1;
         return 0;
     }
     d = shadow_named_defer_find(ctx, st->a, st->tok_off);
     if (!d || !shadow_named_defer_flag_name(d, fl, sizeof(fl))) {
-        fprintf(stderr, "error: @cancel_defer '%s': no named @defer in scope\n",
-                st->a);
+        {
+            char __diag[192];
+            snprintf(__diag, sizeof(__diag),
+                     "@cancel_defer '%s': no named @defer in scope", st->a);
+            shadow_err(ctx, st, __diag);
+        }
         if (out) out->err = 1;
         return 0;
     }
@@ -1533,7 +1542,7 @@ static int shadow_emit_compound_body(AstNode** body, int nbody, CEmit* out,
     AstNode* life[SHADOW_DEFER_SCOPE_DEFERS];
     ShadowDeferScope* sc;
     if (!ctx || ctx->defer_depth >= SHADOW_DEFER_SCOPE_MAX) {
-        fprintf(stderr, "error: defer scope depth exceeded\n");
+        shadow_err(ctx, ctx ? ctx->site : NULL, "defer scope depth exceeded");
         out->err = 1;
         return 0;
     }
@@ -1548,7 +1557,7 @@ static int shadow_emit_compound_body(AstNode** body, int nbody, CEmit* out,
         if (!body[k]) continue;
         if (body[k]->kind == AST_DEFER || shadow_stmt_is_destroy(body[k])) {
             if (nlife >= SHADOW_DEFER_SCOPE_DEFERS) {
-                fprintf(stderr, "error: too many @defer/@destroy in scope\n");
+                shadow_err(ctx, body[k], "too many @defer/@destroy in scope");
                 out->err = 1;
                 return 0;
             }
@@ -1557,7 +1566,7 @@ static int shadow_emit_compound_body(AstNode** body, int nbody, CEmit* out,
         }
         if (!shadow_collect_adopted_defers(body[k], life, &nlife,
                                           SHADOW_DEFER_SCOPE_DEFERS)) {
-            fprintf(stderr, "error: too many @defer/@destroy in scope\n");
+            shadow_err(ctx, body[k], "too many @defer/@destroy in scope");
             out->err = 1;
             return 0;
         }

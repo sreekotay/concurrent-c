@@ -285,7 +285,7 @@ static AstNode* parse_stmt_unwrap(Parser* p) {
     }
     ue = parse_ufcs_expr_range(p, c0, bang);
     while (p->i < bang) p_next(p);
-    p_next(p); /* !> */
+    p_next(p); /* !> or ?> */
     if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
         p_next(p);
         AstNode* n = ast_new(p, AST_STMT_UNWRAP);
@@ -387,7 +387,9 @@ static AstNode* parse_field_result(Parser* p) {
     j = peek_result_ok_type_end(p, p->i);
     if (j < 0) return NULL;
     while (j < p->n && tok_eq(p->toks[j], TK_PUNCT, "*")) j++;
-    if (j >= p->n || !tok_eq(p->toks[j], TK_PUNCT, "!>")) return NULL;
+    if (j >= p->n || (!tok_eq(p->toks[j], TK_PUNCT, "!>") &&
+                      !tok_eq(p->toks[j], TK_PUNCT, "?>")))
+        return NULL;
     j++;
     if (tok_eq(p->toks[j], TK_PUNCT, "(")) {
         j++;
@@ -438,7 +440,7 @@ static AstNode* parse_field_result(Parser* p) {
             okty[al + 1] = 0;
         }
     }
-    p_next(p); /* !> */
+    p_next(p); /* !> or ?> */
     if (tok_eq(p_peek(p), TK_PUNCT, "(")) {
         p_next(p);
         err = p_next(p);
@@ -481,7 +483,9 @@ static AstNode* parse_result_local(Parser* p) {
     int j = peek_result_ok_type_end(p, p->i);
     if (j < 0) return NULL;
     while (j < p->n && tok_eq(p->toks[j], TK_PUNCT, "*")) j++;
-    if (j >= p->n || !tok_eq(p->toks[j], TK_PUNCT, "!>")) return NULL;
+    if (j >= p->n || (!tok_eq(p->toks[j], TK_PUNCT, "!>") &&
+                      !tok_eq(p->toks[j], TK_PUNCT, "?>")))
+        return NULL;
     j++; /* after !> */
     if (tok_eq(p->toks[j], TK_PUNCT, "(")) {
         j++;
@@ -542,7 +546,7 @@ static AstNode* parse_result_local(Parser* p) {
             okty[al + 1] = 0;
         }
     }
-    p_next(p); /* !> */
+    p_next(p); /* !> or ?> */
     Token err;
     if (tok_eq(p_peek(p), TK_PUNCT, "(")) {
         p_next(p);
@@ -654,7 +658,7 @@ static int parse_unwrap_ufcs_chain_tail(Parser* p, AstNode* n, Token at) {
             return 0;
         }
         if (tok_eq(p_peek(p), TK_PUNCT, "!>")) {
-            p_next(p); /* !> */
+            p_next(p); /* !> or ?> */
             /* Another hop: !>.meth(…). Terminal !> before ;/@destroy ends chain. */
             if (tok_eq(p_peek(p), TK_PUNCT, ".")) continue;
             break;

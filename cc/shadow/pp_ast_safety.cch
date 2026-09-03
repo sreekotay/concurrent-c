@@ -78,6 +78,7 @@ typedef struct {
 typedef struct {
     char name[64];
     char err[64];
+    int discard_ok; /* T?>(E): bare call at stmt position is well-formed */
 } ShadowSafeRfn;
 
 typedef struct {
@@ -156,29 +157,32 @@ static void shadow_safe_add_chan_td(ShadowSafeCtx* ctx, const char* alias,
 static void shadow_safe_err_at_col(ShadowSafeCtx* ctx, AstNode* st, int force_col,
                                    const char* msg) {
     FileTape* ft;
-    int line = 1, col = 1;
     if (!ctx || !msg) return;
     /* Sticky: keep the first (most specific) diagnostic. */
     if (ctx->err) return;
     ctx->err = 1;
-    if (!st || !ctx->cache || !st->file_id) {
-        fprintf(stderr, "error: %s\n", msg);
+    /* force_col overrides tape column for a few oracles; still counts. */
+    if (force_col > 0 && st && ctx->cache && st->file_id) {
+        int line = 1, col = 1;
+        ft = tape_by_id(ctx->cache, st->file_id);
+        if (ft && ft->bytes) {
+            char lfile[1024];
+            offset_to_linecol(ft, st->tok_off, &line, &col);
+            tape_logical_at(ft, st->tok_off, lfile, sizeof(lfile), &line);
+            col = force_col;
+            diag_err_loc(tape_diag_file(ft, st->tok_off, lfile, sizeof(lfile)),
+                         line, col, msg);
+            return;
+        }
+    }
+    if (st && ctx->cache && st->file_id) {
+        Token t = {0};
+        t.file_id = st->file_id;
+        t.offset = st->tok_off;
+        diag_at(ctx->cache, t, msg);
         return;
     }
-    ft = tape_by_id(ctx->cache, st->file_id);
-    if (!ft || !ft->bytes) {
-        fprintf(stderr, "error: %s\n", msg);
-        return;
-    }
-    offset_to_linecol(ft, st->tok_off, &line, &col);
-    {
-        char lfile[1024];
-        tape_logical_at(ft, st->tok_off, lfile, sizeof(lfile), &line);
-        if (force_col > 0) col = force_col;
-        fprintf(stderr, "%s:%d:%d: error: %s\n",
-                tape_diag_file(ft, st->tok_off, lfile, sizeof(lfile)), line, col,
-                msg);
-    }
+    diag_ft(ctx->cache, NULL, 0, msg);
 }
 
 static void shadow_safe_err_at(ShadowSafeCtx* ctx, AstNode* st, const char* msg) {
@@ -465,9 +469,8 @@ static void shadow_safe_commit_moves_in_text(ShadowSafeCtx* ctx, AstNode* st,
         if (srcv->moved) {
             snprintf(msg, sizeof(msg), "use of moved slice '%s'", src);
             shadow_safe_err_at(ctx, st, msg);
-            fprintf(stderr,
-                    "  note: after cc_move(x), the source variable is no longer "
-                    "valid\n");
+            diag_note("after cc_move(x), the source variable is no longer "
+                      "valid");
             return;
         }
         srcv->moved = 1;
@@ -612,10 +615,9 @@ static void shadow_safe_check_type_of_text(ShadowSafeCtx* ctx, AstNode* st,
                      "cc_type_info",
                      (int)n, q, (int)n, q);
             shadow_safe_err_at(ctx, st, msg);
-            fprintf(stderr,
-                    "  hint: register with CC_TYPE_INFO_BEGIN(%.*s) / "
-                    "CC_TYPE_INFO_END, or use a known primitive/Vec\n",
-                    (int)n, q);
+            diag_plainf("  hint: register with CC_TYPE_INFO_BEGIN(%.*s) / "
+                        "CC_TYPE_INFO_END, or use a known primitive/Vec",
+                        (int)n, q);
             return;
         }
         p = q + n;
@@ -785,10 +787,9 @@ static void shadow_safe_check_map_key_text(ShadowSafeCtx* ctx, AstNode* st,
             snprintf(msg, sizeof(msg),
                      "map key type '%s' has no installed hash/eq", kbuf);
             shadow_safe_err_at(ctx, st, msg);
-            fprintf(stderr,
-                    "declare cc_map_key_hash_%s and cc_map_key_eq_%s to "
-                    "install it\n",
-                    kbuf, kbuf);
+            diag_plainf("declare cc_map_key_hash_%s and cc_map_key_eq_%s to "
+                        "install it",
+                        kbuf, kbuf);
             return;
         }
         p = hit + n;
@@ -1038,9 +1039,8 @@ static void shadow_safe_check_moved_use(ShadowSafeCtx* ctx, AstNode* st,
         if (!shadow_safe_text_uses_outside_move(text, v->name)) continue;
         snprintf(msg, sizeof(msg), "use of moved slice '%s'", v->name);
         shadow_safe_err_at(ctx, st, msg);
-        fprintf(stderr,
-                "  note: after cc_move(x), the source variable is no longer "
-                "valid\n");
+        diag_note("after cc_move(x), the source variable is no longer "
+                  "valid");
         return;
     }
 }
@@ -1394,9 +1394,9 @@ static void shadow_safe_check_variant_text(ShadowSafeCtx* ctx, AstNode* st,
                              vt->name);
                 shadow_safe_err_at(ctx, st, msg);
                 if (!vt->is_schema && !vt->is_packed)
-                    fprintf(stderr,
-                            "  note: access inactive or packed union payload via "
-                            "a dominating check, '!>' handler, or '?>' fallback\n");
+                    diag_note("access inactive or packed union payload via "
+                              "a dominating check, '!>' handler, or '?>' "
+                              "fallback");
                 return;
             }
             if (after[0] == '.' && after[1] == 'u' &&
@@ -1416,9 +1416,9 @@ static void shadow_safe_check_variant_text(ShadowSafeCtx* ctx, AstNode* st,
                              vt->name);
                 shadow_safe_err_at(ctx, st, msg);
                 if (!vt->is_schema && !vt->is_packed)
-                    fprintf(stderr,
-                            "  note: access inactive or packed union payload via "
-                            "a dominating check, '!>' handler, or '?>' fallback\n");
+                    diag_note("access inactive or packed union payload via "
+                              "a dominating check, '!>' handler, or '?>' "
+                              "fallback");
                 return;
             }
             use_arrow = 0;
@@ -1499,47 +1499,47 @@ static void shadow_safe_check_variant_text(ShadowSafeCtx* ctx, AstNode* st,
                                     }
                                 }
                                 {
-                                    int line = 1, col = 1;
                                     if (!ctx->err) {
+                                        Token t = {0};
                                         ctx->err = 1;
-                                        offset_to_linecol(ft, off, &line, &col);
+                                        t.file_id = st->file_id;
+                                        t.offset = off;
+                                        diag_at(ctx->cache, t, msg);
                                         {
-                                            char lfile[1024];
-                                            tape_logical_at(ft, off, lfile,
-                                                            sizeof(lfile),
-                                                            &line);
-                                            fprintf(stderr,
-                                                    "%s:%d:%d: error: %s\n",
-                                                    tape_diag_file(ft, off,
-                                                                   lfile,
-                                                                   sizeof(lfile)),
-                                                    line, col, msg);
-                                        }
-                                        fprintf(stderr,
-                                                "note: protect it: 'if (%s.kind == "
-                                                "%s_%s) { ... }' or 'case .%s:' in "
-                                                "a switch on '%s', or handle the "
-                                                "other arms: '%s.%s !> { "
+                                            char __note[384];
+                                            snprintf(
+                                                __note, sizeof(__note),
+                                                "protect it: 'if (%s.kind == "
+                                                "%s_%s) { ... }' or 'case .%s:' "
+                                                "in a switch on '%s', or handle "
+                                                "the other arms: '%s.%s !> { "
                                                 "...diverge... }' / '%s.%s ?> "
-                                                "fallback'\n",
+                                                "fallback'",
                                                 v->name, vt->name, vt->arms[ai],
                                                 vt->arms[ai], v->name, v->name,
                                                 vt->arms[ai], v->name,
                                                 vt->arms[ai]);
+                                            diag_note(__note);
+                                        }
                                         return;
                                     }
                                 }
                             }
                         }
                         shadow_safe_err_at(ctx, st, msg);
-                        fprintf(stderr,
-                                "note: protect it: 'if (%s.kind == %s_%s) { ... }' "
+                        {
+                            char __note[384];
+                            snprintf(
+                                __note, sizeof(__note),
+                                "protect it: 'if (%s.kind == %s_%s) { ... }' "
                                 "or 'case .%s:' in a switch on '%s', or handle "
                                 "the other arms: '%s.%s !> { ...diverge... }' / "
-                                "'%s.%s ?> fallback'\n",
+                                "'%s.%s ?> fallback'",
                                 v->name, vt->name, vt->arms[ai], vt->arms[ai],
                                 v->name, v->name, vt->arms[ai], v->name,
                                 vt->arms[ai]);
+                            diag_note(__note);
+                        }
                         return;
                     }
                 }
@@ -1764,9 +1764,8 @@ static void shadow_safe_on_typed_init(ShadowSafeCtx* ctx, AstNode* st) {
                 }
                 if (srcv->unique) {
                     shadow_safe_err_at(ctx, st, "cannot copy unique slice");
-                    fprintf(stderr,
-                            "  hint: unique slices have move-only semantics; "
-                            "use cc_move(x) to transfer ownership\n");
+                    diag_plain("  hint: unique slices have move-only semantics; "
+                               "use cc_move(x) to transfer ownership");
                     return;
                 }
                 v->unique = srcv->unique;
@@ -1961,9 +1960,8 @@ static void shadow_safe_on_assign(ShadowSafeCtx* ctx, AstNode* st) {
             }
             if (rhs->unique || lhs->unique) {
                 shadow_safe_err_at(ctx, st, "cannot copy unique slice");
-                fprintf(stderr,
-                        "  hint: unique slices have move-only semantics; use "
-                        "cc_move(x) to transfer ownership\n");
+                diag_plain("  hint: unique slices have move-only semantics; use "
+                           "cc_move(x) to transfer ownership");
             }
         }
     }
@@ -2054,9 +2052,8 @@ static void shadow_safe_on_return(ShadowSafeCtx* ctx, AstNode* st) {
         }
         if (v && v->is_slice && v->unique) {
             shadow_safe_err_at(ctx, st, "cannot return unique slice");
-            fprintf(stderr,
-                    "  hint: unique slices (T[:!]) require explicit ownership "
-                    "transfer; use: return cc_move(x)\n");
+            diag_plain("  hint: unique slices (T[:!]) require explicit ownership "
+                       "transfer; use: return cc_move(x)");
         }
         return;
     }
@@ -2082,12 +2079,10 @@ static void shadow_safe_on_deleter(ShadowSafeCtx* ctx, AstNode* st,
         shadow_safe_err_at(
             ctx, st,
             "homemade shared last-drop (refcount field '--' + free); use CCArc");
-        fprintf(stderr,
-                "  note: non-atomic int ref / last-drop races under concurrency "
-                "(CVE-2026-10653 class)\n");
-        fprintf(stderr,
-                "  hint: cc_arc_from_ptr / cc_arc_clone / cc_arc_drop, or don't "
-                "share (redis-style drain/join)\n");
+        diag_note("non-atomic int ref / last-drop races under concurrency "
+                  "(CVE-2026-10653 class)");
+        diag_plain("  hint: cc_arc_from_ptr / cc_arc_clone / cc_arc_drop, or don't "
+                   "share (redis-style drain/join)");
         return;
     }
     if (!shadow_safe_first_arg_ident(args, name, sizeof(name))) {
@@ -2113,9 +2108,8 @@ static void shadow_safe_on_deleter(ShadowSafeCtx* ctx, AstNode* st,
         snprintf(msg, sizeof(msg),
                  "cannot prove free target provenance for '%s'", name);
         shadow_safe_err_at(ctx, st, msg);
-        fprintf(stderr,
-                "  hint: free only heap owners (malloc/calloc) or let the "
-                "arena own cleanup; casts of arena pointers are refused\n");
+        diag_plain("  hint: free only heap owners (malloc/calloc) or let the "
+                   "arena own cleanup; casts of arena pointers are refused");
     }
 }
 
@@ -2143,9 +2137,8 @@ static void shadow_safe_on_arena_epoch(ShadowSafeCtx* ctx, AstNode* st,
                  "from it",
                  op, arena);
         shadow_safe_err_at(ctx, st, msg);
-        fprintf(stderr,
-                "  note: capturing an arena borrow into a spawn pins that "
-                "arena epoch until the nursery scope ends\n");
+        diag_note("capturing an arena borrow into a spawn pins that "
+                  "arena epoch until the nursery scope ends");
         return;
     }
     if (strcmp(op, "cc_arena_reset") == 0 &&
@@ -2155,9 +2148,8 @@ static void shadow_safe_on_arena_epoch(ShadowSafeCtx* ctx, AstNode* st,
                  "borrow is still in scope",
                  arena);
         shadow_safe_err_at(ctx, st, msg);
-        fprintf(stderr,
-                "  note: arena provenance epoch would invalidate live borrows "
-                "(CVE-2017-13245 class)\n");
+        diag_note("arena provenance epoch would invalidate live borrows "
+                  "(CVE-2017-13245 class)");
     }
 }
 
@@ -3069,17 +3061,15 @@ static int shadow_safe_payload_expr_ok(ShadowSafeCtx* ctx, const char* expr) {
 }
 
 static void shadow_safe_emit_channel_stable_hints(const char* payload) {
-    fprintf(stderr,
-            "  note: non-unique slices (arena / stack / untracked "
-            "from_buffer) may dangle after send (channel-stable-borrow)\n"
-            "  hint: include a CCArena in the same message, use unique "
-            "T[:!] / cc_slice_from_static, or use send_into / "
-            "try_send_into\n");
+    diag_note("non-unique slices (arena / stack / untracked "
+              "from_buffer) may dangle after send (channel-stable-borrow)");
+    diag_plain("  hint: include a CCArena in the same message, use unique "
+               "T[:!] / cc_slice_from_static, or use send_into / "
+               "try_send_into");
     /* Match production checker: channel macros copy by value into __cc_tmp. */
     (void)payload;
-    fprintf(stderr,
-            "  note: '__cc_tmp' is the channel send macro's by-value copy of "
-            "the payload\n");
+    diag_note("'__cc_tmp' is the channel send macro's by-value copy of "
+              "the payload");
 }
 
 static void shadow_safe_check_chan_send_payload(ShadowSafeCtx* ctx, AstNode* st,
@@ -3215,7 +3205,6 @@ static void shadow_safe_check_channel_pair_text(ShadowSafeCtx* ctx, AstNode* st,
     ShadowSafeVar* vrx;
     FileTape* ft;
     size_t off;
-    int line = 1, col = 1;
     if (!ctx || !st || !text || ctx->err) return;
     call = strstr(text, "cc_channel_pair(");
     if (!call) return;
@@ -3246,12 +3235,12 @@ static void shadow_safe_check_channel_pair_text(ShadowSafeCtx* ctx, AstNode* st,
     /* Origin at `cc_channel_pair` spelling in the source tape. */
     ctx->err = 1;
     if (!ctx->cache || !st->file_id) {
-        fprintf(stderr, "error: channel: cc_channel_pair\n");
+        diag_ft(ctx->cache, NULL, 0, "channel: cc_channel_pair");
         return;
     }
     ft = tape_by_id(ctx->cache, st->file_id);
     if (!ft || !ft->bytes) {
-        fprintf(stderr, "error: channel: cc_channel_pair\n");
+        diag_ft(ctx->cache, NULL, 0, "channel: cc_channel_pair");
         return;
     }
     off = st->tok_off;
@@ -3264,12 +3253,11 @@ static void shadow_safe_check_channel_pair_text(ShadowSafeCtx* ctx, AstNode* st,
         if (hit && (size_t)(hit - ft->bytes) < ft->len)
             off = (size_t)(hit - ft->bytes);
     }
-    offset_to_linecol(ft, off, &line, &col);
     {
-        char lfile[1024];
-        tape_logical_at(ft, off, lfile, sizeof(lfile), &line);
-        fprintf(stderr, "%s:%d:%d: error: channel: cc_channel_pair\n",
-                tape_diag_file(ft, off, lfile, sizeof(lfile)), line, col);
+        Token t = {0};
+        t.file_id = st->file_id;
+        t.offset = off;
+        diag_at(ctx->cache, t, "channel: cc_channel_pair");
     }
 }
 
@@ -3475,8 +3463,19 @@ static int shadow_safe_is_result_fn(ShadowSafeCtx* ctx, const char* name) {
     return 0;
 }
 
+static int shadow_safe_is_result_fn_discard_ok(ShadowSafeCtx* ctx,
+                                               const char* name) {
+    int i;
+    if (!ctx || !name || !ctx->rfns) return 0;
+    for (i = 0; i < ctx->nrfn; i++) {
+        if (strcmp(ctx->rfns[i].name, name) == 0)
+            return ctx->rfns[i].discard_ok;
+    }
+    return 0;
+}
+
 static void shadow_safe_add_result_fn_err(ShadowSafeCtx* ctx, const char* name,
-                                         const char* err_ty) {
+                                         const char* err_ty, int discard_ok) {
     int i;
     if (!ctx || !name || !name[0]) return;
     for (i = 0; i < ctx->nrfn; i++) {
@@ -3484,6 +3483,7 @@ static void shadow_safe_add_result_fn_err(ShadowSafeCtx* ctx, const char* name,
             if (err_ty && err_ty[0] && !ctx->rfns[i].err[0])
                 snprintf(ctx->rfns[i].err, sizeof(ctx->rfns[i].err),
                          "%s", err_ty);
+            if (discard_ok) ctx->rfns[i].discard_ok = 1;
             return;
         }
     }
@@ -3495,6 +3495,7 @@ static void shadow_safe_add_result_fn_err(ShadowSafeCtx* ctx, const char* name,
     snprintf(ctx->rfns[ctx->nrfn].name, sizeof(ctx->rfns[0].name), "%s",
              name);
     ctx->rfns[ctx->nrfn].err[0] = 0;
+    ctx->rfns[ctx->nrfn].discard_ok = discard_ok ? 1 : 0;
     if (err_ty && err_ty[0])
         snprintf(ctx->rfns[ctx->nrfn].err, sizeof(ctx->rfns[0].err), "%s",
                  err_ty);
@@ -3502,7 +3503,7 @@ static void shadow_safe_add_result_fn_err(ShadowSafeCtx* ctx, const char* name,
 }
 static void __attribute__((unused)) shadow_safe_add_result_fn(ShadowSafeCtx* ctx,
                                                               const char* name) {
-    shadow_safe_add_result_fn_err(ctx, name, NULL);
+    shadow_safe_add_result_fn_err(ctx, name, NULL, 0);
 }
 static const char* shadow_safe_result_fn_err(ShadowSafeCtx* ctx,
                                             const char* name);
@@ -3663,7 +3664,7 @@ static const char* shadow_safe_stdlib_err(const char* name) {
         strncmp(name, "cc_string_", 10) == 0 ||
         strncmp(name, "cc_char_", 8) == 0 ||
         strncmp(name, "cc_const_char_", 14) == 0)
-        return "CCError";
+        return "CCPrintError";
     if (strncmp(name, "cc_js_", 6) == 0) return "CCJsError";
     if (strncmp(name, "cc_py_", 6) == 0) return "CCPyError";
     return NULL;
@@ -3956,15 +3957,21 @@ static int shadow_safe_ufcs_result_consumed(const AstNode* st) {
 
 static void shadow_safe_on_unhandled_call(ShadowSafeCtx* ctx, AstNode* st) {
     const char* callee;
+    extern int cc_result_fn_registry_is_discard_ok(const char* name,
+                                                   size_t name_len);
     if (!ctx || !st || ctx->err || !ctx->strict_unhandled) return;
     /* send_task body packs the Result into the task payload. */
     if (ctx->in_send_task) return;
     if (st->kind == AST_UFCS_STMT) {
         if (shadow_safe_ufcs_result_consumed(st)) return;
         if (!shadow_safe_is_result_fn(ctx, st->b)) return;
+        if (shadow_safe_is_result_fn_discard_ok(ctx, st->b)) return;
+        if (cc_result_fn_registry_is_discard_ok(st->b, strlen(st->b))) return;
         callee = st->b;
     } else if (st->kind == AST_CALL_ARGS || st->kind == AST_CALL_NUM) {
         if (!shadow_safe_is_result_fn(ctx, st->a)) return;
+        if (shadow_safe_is_result_fn_discard_ok(ctx, st->a)) return;
+        if (cc_result_fn_registry_is_discard_ok(st->a, strlen(st->a))) return;
         callee = st->a;
     } else {
         return;
@@ -3972,7 +3979,7 @@ static void shadow_safe_on_unhandled_call(ShadowSafeCtx* ctx, AstNode* st) {
     {
         /* Two-line oracle: emit as one stderr blob with newline. */
         shadow_safe_err_at(ctx, st, "unhandled-result");
-        fprintf(stderr, "call to '%s'\n", callee);
+        diag_plainf("call to '%s'", callee);
     }
 }
 
@@ -4086,11 +4093,9 @@ static void shadow_safe_check_escape_stack_slice(ShadowSafeCtx* ctx,
                 ctx, cl,
                 "cannot capture stack slice or @scratch string in escaping "
                 "closure");
-            fprintf(stderr,
-                    "  note: the closure outlives the stack / @scratch frame\n");
-            fprintf(stderr,
-                    "  hint: pass as parameter, or allocate with an explicit "
-                    "heap/arena\n");
+            diag_note("the closure outlives the stack / @scratch frame");
+            diag_plain("  hint: pass as parameter, or allocate with an explicit "
+                       "heap/arena");
             return;
         }
     }
@@ -5292,7 +5297,8 @@ static int shadow_safety_check(AstNode** items, int n, TapeCache* cache) {
         }
         if (it->kind == AST_RESULT_FN && it->a[0])
             shadow_safe_add_result_fn_err(&ctx, it->a,
-                                          it->b[0] ? it->b : NULL);
+                                          it->b[0] ? it->b : NULL,
+                                          it->forced_seq);
         fname = NULL;
         params = NULL;
         if (it->kind == AST_FN) {

@@ -95,13 +95,13 @@ static int shadow_emit_async_fn(AstNode* it, CEmit* out, TapeCache* cache) {
 
     for (k = 0; k < it->nkids; k++) {
         if (!shadow_collect_spawns(it->kids[k], spawns, &nspawns, 16)) {
-            fprintf(stderr, "error: too many spawns in @async for shadow\n");
+            shadow_err(NULL, it, "too many spawns in @async for shadow");
             out->err = 1;
             shadow_pop_fn_binds(bind_mark);
             return 0;
         }
         if (!shadow_collect_parallels(it->kids[k], pars, &npars, 16)) {
-            fprintf(stderr, "error: too many @parallel in @async for shadow\n");
+            shadow_err(NULL, it, "too many @parallel in @async for shadow");
             out->err = 1;
             shadow_pop_fn_binds(bind_mark);
             return 0;
@@ -194,8 +194,7 @@ static int shadow_emit_async_fn(AstNode* it, CEmit* out, TapeCache* cache) {
             for (k = 0; bind_ok && k < it->nkids; k++) {
                 if (!shadow_collect_scope_defers(&it->kids[k], 1, defers,
                                                  &ndefers, 16)) {
-                    fprintf(stderr,
-                            "error: too many @defer in @async body\n");
+                    shadow_err(NULL, it, "too many @defer in @async body");
                     out->err = 1;
                     bind_ok = 0;
                     break;

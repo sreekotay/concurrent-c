@@ -1,1 +1,1 @@
-closure literals inside #define bodies are not supported
+closure literal(s) from macro expansion are not supported

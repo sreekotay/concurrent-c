@@ -42,9 +42,10 @@ static AstNode* parse_fn(Parser* p) {
                rkw != SHADOW_KW_VOID && rkw != SHADOW_KW_CHAR &&
                rkw != SHADOW_KW_BOOL && rkw != SHADOW_KW_SIZE_T)
         return NULL;
-    /* `T!>(E)` is parse_result_fn. `T[:]` / `T[:!]` is a slice return. */
+    /* `T!>(E)` / `T?>(E)` is parse_result_fn. `T[:]` / `T[:!]` is a slice return. */
     if (!has_struct && ti + 1 < p->n &&
-        tok_eq(p->toks[ti + 1], TK_PUNCT, "!>"))
+        (tok_eq(p->toks[ti + 1], TK_PUNCT, "!>") ||
+         tok_eq(p->toks[ti + 1], TK_PUNCT, "?>")))
         return NULL;
     name_i = ti + 1;
     char gret[256];
@@ -2057,13 +2058,13 @@ static AstNode* parse_at_stmt(Parser* p) {
         (void)col;
         {
             char lfile[1024];
-            fprintf(stderr,
-                    "%s:%d: error: async: `@arena_init(...) { ... }` is retired; "
-                    "use `CCArena a@(buf, size) @destroy` or "
-                    "`cc_arena_buffer(...)` directly\n",
-                    ft ? tape_diag_file(ft, name.offset, lfile, sizeof(lfile))
-                       : "<input>",
-                    line);
+            diag_at_nocol(
+                ft ? tape_diag_file(ft, name.offset, lfile, sizeof(lfile))
+                   : "<input>",
+                line,
+                "async: `@arena_init(...) { ... }` is retired; "
+                "use `CCArena a@(buf, size) @destroy` or "
+                "`cc_arena_buffer(...)` directly");
         }
         p->err = 1;
         snprintf(p->err_msg, sizeof(p->err_msg), "retired @arena_init");
@@ -2454,12 +2455,13 @@ static AstNode* parse_at_stmt(Parser* p) {
                             offset_to_linecol(ft, name.offset, &line, &col);
                         {
                             char lfile[1024];
-                            fprintf(stderr, "%s:%d: error: %s\n",
-                                    ft ? tape_diag_file(ft, name.offset, lfile,
-                                                        sizeof(lfile))
-                                       : "<input>",
-                                    line,
-                                    emsg[0] ? emsg : "comptime constraint violated");
+                            diag_at_nocol(
+                                ft ? tape_diag_file(ft, name.offset, lfile,
+                                                    sizeof(lfile))
+                                   : "<input>",
+                                line,
+                                emsg[0] ? emsg
+                                        : "comptime constraint violated");
                         }
                         p->err = 1;
                         return NULL;
@@ -3603,7 +3605,7 @@ static AstNode* parse_fn_proto(Parser* p) {
 static AstNode* parse_typedef_result(Parser* p) {
     if (shadow_kw(p_peek(p)) != SHADOW_KW_TYPEDEF) return NULL;
     {
-        /* Do not copy Parser (~MB with AST_CAP) onto the stack. */
+        /* Peek without copying Parser. */
         int saved = p->i;
         int ok_shape;
         p->i++;
@@ -4793,9 +4795,12 @@ static int parse_tu(Parser* p, AstNode*** out_items, int* out_n) {
                 parser_fail_expected_decl(p);
             break;
         }
-        if (p->ntu >= AST_CAP) {
-            parser_fail_cap(p, p_peek(p), "TU item table", AST_CAP);
-            break;
+        if (p->ntu >= p->tu_cap) {
+            int need = p->tu_cap > 0 ? p->tu_cap * 2 : 64;
+            if (!parser_ptrtab_grow(p, &p->tu_items, &p->tu_cap, need)) {
+                parser_fail(p, p_peek(p), "out of memory (TU item table)");
+                break;
+            }
         }
         p->tu_items[p->ntu++] = e;
     }

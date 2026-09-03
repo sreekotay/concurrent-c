@@ -178,6 +178,22 @@ static void pp_add_sys_inc(Pp* pp, const char* path) {
     pp->sys_inc[pp->nsys_inc++] = path;
 }
 
+static void pp_fail_locus(Pp* pp, Token at, const char* msg) {
+    if (!pp || !msg) return;
+    snprintf(pp->err_msg, sizeof(pp->err_msg), "%s", msg);
+    pp->err = 1;
+    if (pp->cache && at.file_id) {
+        diag_at(pp->cache, at, pp->err_msg);
+        return;
+    }
+    if (pp->cache && pp->nf > 0 && pp->frames[pp->nf - 1].tape) {
+        diag_ft(pp->cache, pp->frames[pp->nf - 1].tape, at.offset, pp->err_msg);
+        return;
+    }
+    g_shadow_diag_errors++;
+    diag_emit("error", NULL, 0, 0, 1, pp->err_msg);
+}
+
 static int pp_add_passthrough_include(Pp* pp, const char* line) {
     if (!pp || !line || pp->npass_inc >= PASS_INC_CAP) return 0;
     snprintf(pp->pass_inc[pp->npass_inc], sizeof(pp->pass_inc[0]), "%s", line);
@@ -209,15 +225,15 @@ static int pp_define_has_cc_token(const char* line) {
     return 0;
 }
 
-static int pp_add_passthrough_define(Pp* pp, const char* line) {
+static int pp_add_passthrough_define(Pp* pp, Token at, const char* line) {
     if (!pp || !line || !line[0]) return 0;
     if (pp->npass_def >= PASS_INC_CAP) {
-        snprintf(pp->err_msg, sizeof(pp->err_msg),
+        char msg[192];
+        snprintf(msg, sizeof(msg),
                  "stage-2 #define passthrough table full (%d); refusing silent "
                  "drop",
                  PASS_INC_CAP);
-        fprintf(stderr, "error: %s\n", pp->err_msg);
-        pp->err = 1;
+        pp_fail_locus(pp, at, msg);
         return 0;
     }
     /* Keep macro table registration; skip host emit for CC-token bodies. */
@@ -395,13 +411,13 @@ static int pp_expand_disabled(Pp* pp, CCSlice name) {
     return 0;
 }
 
-static int pp_expand_disable_push(Pp* pp, CCSlice name) {
+static int pp_expand_disable_push(Pp* pp, CCSlice name, Token at) {
     if (!pp || !name.ptr || name.len == 0 || name.len >= 128) return 0;
     if (pp->nexpand_disable >= EXPAND_CAP) {
-        snprintf(pp->err_msg, sizeof(pp->err_msg),
+        char msg[192];
+        snprintf(msg, sizeof(msg),
                  "stage-2 macro expand depth exceeded (%d)", EXPAND_CAP);
-        fprintf(stderr, "error: %s\n", pp->err_msg);
-        pp->err = 1;
+        pp_fail_locus(pp, at, msg);
         return 0;
     }
     memcpy(pp->expand_disable[pp->nexpand_disable], name.ptr, name.len);
@@ -436,17 +452,17 @@ static Macro* macro_find(Pp* pp, CCSlice name) {
     return NULL;
 }
 
-static int macro_define(Pp* pp, CCSlice name, Token* body, int nbody) {
+static int macro_define(Pp* pp, Token at, CCSlice name, Token* body, int nbody) {
     if (name.len >= sizeof(pp->macros[0].name)) return 0;
     Macro* m = macro_find(pp, name);
     if (!m) {
         if (pp->nmacros >= MACRO_CAP) {
-            snprintf(pp->err_msg, sizeof(pp->err_msg),
+            char msg[192];
+            snprintf(msg, sizeof(msg),
                      "stage-2 object-macro table full (%d); refusing silent "
                      "drop of #define",
                      MACRO_CAP);
-            fprintf(stderr, "error: %s\n", pp->err_msg);
-            pp->err = 1;
+            pp_fail_locus(pp, at, msg);
             return 0;
         }
         m = &pp->macros[pp->nmacros++];
@@ -467,19 +483,19 @@ static int macro_define(Pp* pp, CCSlice name, Token* body, int nbody) {
     return 1;
 }
 
-static int pp_add_refuse_closure_macro(Pp* pp, CCSlice name) {
+static int pp_add_refuse_closure_macro(Pp* pp, Token at, CCSlice name) {
     int i;
     if (!pp || !name.ptr || name.len == 0 || name.len >= 128) return 0;
     for (i = 0; i < pp->nrefuse_clo; i++) {
         if (spell_eq(name, pp->refuse_clo[i])) return 1;
     }
     if (pp->nrefuse_clo >= REFUSE_CLO_CAP) {
-        snprintf(pp->err_msg, sizeof(pp->err_msg),
+        char msg[192];
+        snprintf(msg, sizeof(msg),
                  "stage-2 refuse-closure macro table full (%d); refusing silent "
                  "drop",
                  REFUSE_CLO_CAP);
-        fprintf(stderr, "error: %s\n", pp->err_msg);
-        pp->err = 1;
+        pp_fail_locus(pp, at, msg);
         return 0;
     }
     memcpy(pp->refuse_clo[pp->nrefuse_clo], name.ptr, name.len);
@@ -498,22 +514,10 @@ static int pp_is_refuse_closure_macro(Pp* pp, CCSlice name) {
 }
 
 static int pp_refuse_closure_macro_at(Pp* pp, Token t) {
-    const char* path = "<input>";
-    if (pp->nf > 0 && pp->frames[pp->nf - 1].tape &&
-        pp->frames[pp->nf - 1].tape->path)
-        path = pp->frames[pp->nf - 1].tape->path;
-    fprintf(stderr,
-            "cc: error: %s: 1 closure literal(s) come from macro "
-            "expansion; closure literals inside #define bodies are "
-            "not supported\n",
-            path);
-    fprintf(stderr,
-            "  hint: define the closure at the use site, or make the "
-            "macro take the closure as a parameter\n");
-    snprintf(pp->err_msg, sizeof(pp->err_msg),
-             "closure literals inside #define bodies are not supported");
-    diag_at(pp->cache, t, pp->err_msg);
-    pp->err = 1;
+    pp_fail_locus(pp, t,
+                  "closure literal(s) from macro expansion are not supported "
+                  "(hint: define at the use site, or pass the closure as a "
+                  "macro parameter)");
     return 0;
 }
 
@@ -1000,9 +1004,9 @@ static int handle_define(Pp* pp) {
      * `#define ENABLED (1)` is object-like — `(` is replacement-list punct. */
     if (pp_raw_peek(pp, &peek) && tok_eq(peek, TK_PUNCT, "(") &&
         peek.offset == id.offset + id.spell.len) {
-        if (captured && !pp_add_passthrough_define(pp, line)) return 0;
+        if (captured && !pp_add_passthrough_define(pp, hash, line)) return 0;
         if (captured && strstr(line, "=>") &&
-            !pp_add_refuse_closure_macro(pp, id.spell))
+            !pp_add_refuse_closure_macro(pp, id, id.spell))
             return 0;
         pp_skip_line(pp);
         return 1;
@@ -1016,8 +1020,8 @@ static int handle_define(Pp* pp) {
     /* Object-like `#define FOO` (empty) and `#define A B` both reach host
      * cpp. Empty used to expand only — then `#define LISTING` before
      * `#include "face.h"` never defined LISTING in the generated C. */
-    if (captured && !pp_add_passthrough_define(pp, line)) return 0;
-    return macro_define(pp, id.spell, body_buf, nb);
+    if (captured && !pp_add_passthrough_define(pp, hash, line)) return 0;
+    return macro_define(pp, id, id.spell, body_buf, nb);
 }
 
 static int handle_directive(Pp* pp) {
@@ -1498,7 +1502,7 @@ static int pp_run(Pp* pp, FileTape* root) {
                 }
                 FileTape* syn =
                     synth_tape_from_tokens(m->body, m->nbody, t.file_id);
-                if (!syn || !pp_expand_disable_push(pp, t.spell)) {
+                if (!syn || !pp_expand_disable_push(pp, t.spell, t)) {
                     free_synth_if(syn);
                     return 0;
                 }

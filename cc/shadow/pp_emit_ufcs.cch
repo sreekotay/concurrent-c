@@ -7,6 +7,9 @@
 static void shadow_rewrite_print_and_string(char* expr, size_t cap);
 static AstNode* shadow_expr_closure_kid(AstNode* st);
 static void shadow_splice_closure_arg(char* expr, size_t cap, AstNode* cl);
+/* Defined below; UFCS oracles pin path:line: error: (no column). */
+static void shadow_ufcs_emit_err_loc(TapeCache* cache, AstNode* st,
+                                     const char* needle, const char* msg);
 
 /* Extract receiver immediately before `.` / `->` at `op`.
  * Accepts ident, a->b.c chains, parenthesized expr, or call ending in `)`. */
@@ -394,13 +397,15 @@ static int shadow_ufcs_try_dyn_sink(const char* recv, const char* meth_name,
                  * keeps the plain-sink fallback: its return may be exactly
                  * the scalar asked for. */
                 if (!g_shadow_ufcs_miss) {
-                    fprintf(stderr,
-                            "error: destination '%s' is not an installed "
-                            "destination of %s\n",
-                            g_shadow_sink_dest, ds->callee);
-                    fprintf(stderr,
-                            "note: installed destinations (mangled): double, "
-                            "int64_t, float, int, long_long\n");
+                    char __diag[256];
+                    snprintf(__diag, sizeof(__diag),
+                             "destination '%s' is not an installed "
+                             "destination of %s",
+                             g_shadow_sink_dest, ds->callee);
+                    shadow_ufcs_emit_err_loc(g_shadow_ufcs_cache,
+                                             g_shadow_ufcs_site, NULL, __diag);
+                    diag_note("installed destinations (mangled): double, "
+                              "int64_t, float, int, long_long");
                     g_shadow_ufcs_miss = 1;
                 }
                 return 0;
@@ -1768,30 +1773,19 @@ static int shadow_ufcs_emit_map_rows(const char* recv, const char* base,
 static void shadow_ufcs_diagnose_hook_compose(const char* recv_ty,
                                              const char* meth,
                                              const char* composed) {
-    const char* path = NULL;
-    int line = 0;
+    char msg[256];
     if (!meth || !meth[0] || !composed || !composed[0] || g_shadow_ufcs_miss)
         return;
     if (!recv_ty || !recv_ty[0]) recv_ty = "?";
-    if (g_shadow_ufcs_cache && g_shadow_ufcs_site)
-        (void)shadow_site_loc(g_shadow_ufcs_cache, g_shadow_ufcs_site, &path,
-                              &line);
-    if ((!path || !path[0]) && g_shadow_ufcs_path[0])
-        path = g_shadow_ufcs_path;
-    if (path && path[0] && line > 0)
-        fprintf(stderr,
-                "%s:%d: error: type: no UFCS method '%s' for receiver type "
-                "'%s'\n",
-                path, line, meth, recv_ty);
-    else if (path && path[0])
-        fprintf(stderr,
-                "%s: error: type: no UFCS method '%s' for receiver type '%s'\n",
-                path, meth, recv_ty);
+    snprintf(msg, sizeof(msg),
+             "type: no UFCS method '%s' for receiver type '%s'", meth, recv_ty);
+    if (g_shadow_expr_cache && g_shadow_expr_site)
+        shadow_ufcs_emit_err_loc(g_shadow_expr_cache, g_shadow_expr_site, NULL,
+                                 msg);
     else
-        fprintf(stderr,
-                "error: type: no UFCS method '%s' for receiver type '%s'\n",
-                meth, recv_ty);
-    fprintf(stderr, "candidate %s (hook compose): not declared\n", composed);
+        shadow_ufcs_emit_err_loc(g_shadow_ufcs_cache, g_shadow_ufcs_site, NULL,
+                                 msg);
+    diag_plainf("candidate %s (hook compose): not declared", composed);
     g_shadow_ufcs_miss = 1;
 }
 
@@ -2083,11 +2077,14 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     if (!walked_fields && pending_rr &&
         !shadow_restrict_is_unnamed(pending_rr) &&
         !shadow_restrict_allows_use(pending_rr, meth_name)) {
-        fprintf(stderr,
-                "error: restricted mode '%s' on '%s' does not allow "
-                "method '%s' (flush-under-hold / capability deny)\n",
-                shadow_restrict_mode_label(pending_rr), pending_rr->base,
-                meth_name);
+        char __diag[256];
+        snprintf(__diag, sizeof(__diag),
+                 "restricted mode '%s' on '%s' does not allow "
+                 "method '%s' (flush-under-hold / capability deny)",
+                 shadow_restrict_mode_label(pending_rr), pending_rr->base,
+                 meth_name);
+        shadow_ufcs_emit_err_loc(g_shadow_ufcs_cache, g_shadow_ufcs_site, NULL,
+                                 __diag);
         g_shadow_restrict_diag = 1;
         g_shadow_ufcs_miss = 1;
         return 0;
@@ -2132,16 +2129,12 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         if (!handle && !is_arrow && type_is_ptr && !recv_addr) {
             const char* show = vty[0] ? vty : (rb && rb->ty[0] ? rb->ty : "?");
             if (!g_shadow_ufcs_miss) {
-                if (g_shadow_ufcs_path[0])
-                    fprintf(stderr,
-                            "%s: error: type: UFCS on pointer type '%s' uses "
-                            "'->', not '.'\n",
-                            g_shadow_ufcs_path, show);
-                else
-                    fprintf(stderr,
-                            "error: type: UFCS on pointer type '%s' uses "
-                            "'->', not '.'\n",
-                            show);
+                char __diag[192];
+                snprintf(__diag, sizeof(__diag),
+                         "type: UFCS on pointer type '%s' uses '->', not '.'",
+                         show);
+                shadow_ufcs_emit_err_loc(g_shadow_ufcs_cache, g_shadow_ufcs_site,
+                                         NULL, __diag);
                 g_shadow_ufcs_miss = 1;
             }
             return 0;
@@ -2150,16 +2143,12 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             (walked_fields || (rb && rb->ty[0]))) {
             const char* show = vty[0] ? vty : (rb && rb->ty[0] ? rb->ty : "?");
             if (!g_shadow_ufcs_miss) {
-                if (g_shadow_ufcs_path[0])
-                    fprintf(stderr,
-                            "%s: error: type: UFCS on value type '%s' uses "
-                            "'.', not '->'\n",
-                            g_shadow_ufcs_path, show);
-                else
-                    fprintf(stderr,
-                            "error: type: UFCS on value type '%s' uses "
-                            "'.', not '->'\n",
-                            show);
+                char __diag[192];
+                snprintf(__diag, sizeof(__diag),
+                         "type: UFCS on value type '%s' uses '.', not '->'",
+                         show);
+                shadow_ufcs_emit_err_loc(g_shadow_ufcs_cache, g_shadow_ufcs_site,
+                                         NULL, __diag);
                 g_shadow_ufcs_miss = 1;
             }
             return 0;
@@ -2364,9 +2353,9 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     } else if (strcmp(meth_name, "access") == 0 &&
                shadow_ty_has_extent(vty[0] ? vty : (rb && rb->ty[0] ? rb->ty : ""),
                                     rb && (rb->flags & SHADOW_BIND_ARRAY))) {
-        fprintf(stderr,
-                "error: .access is compiler-internal; write for (v in s) or "
-                "s.at(i)\n");
+        shadow_ufcs_emit_err_loc(
+            g_shadow_ufcs_cache, g_shadow_ufcs_site, NULL,
+            ".access is compiler-internal; write for (v in s) or s.at(i)");
         g_shadow_ufcs_miss = 1;
         return 0;
     } else if (strcmp(meth_name, "len") == 0 &&
@@ -2717,7 +2706,9 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         }
         if (!et || !et[0]) {
             if (!g_shadow_ufcs_miss) {
-                fprintf(stderr, "error: arena.allocT needs its element type\n");
+                shadow_ufcs_emit_err_loc(g_shadow_ufcs_cache, g_shadow_ufcs_site,
+                                         NULL,
+                                         "arena.allocT needs its element type");
                 g_shadow_ufcs_miss = 1;
             }
             return 0;
@@ -2983,10 +2974,13 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         else if (shadow_ufcs_ty_is_ccslice_fat(vty))
             snprintf(dst, cap, "(%s)", recv); /* already a fat slice */
         else {
-            fprintf(stderr,
-                    "error: .as_slice() on unknown receiver type '%s' "
-                    "(need CCString / declared widen / slice)\n",
-                    vty[0] ? vty : "?");
+            char __diag[192];
+            snprintf(__diag, sizeof(__diag),
+                     ".as_slice() on unknown receiver type '%s' "
+                     "(need CCString / declared widen / slice)",
+                     vty[0] ? vty : "?");
+            shadow_ufcs_emit_err_loc(g_shadow_ufcs_cache, g_shadow_ufcs_site,
+                                     NULL, __diag);
             return 0;
         }
     } else if (is_arrow && strcmp(meth_name, "as_slice") == 0 &&
@@ -3003,10 +2997,13 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         else if (shadow_ufcs_ty_is_ccslice_fat(vty))
             snprintf(dst, cap, "(*(%s))", recv);
         else {
-            fprintf(stderr,
-                    "error: ->as_slice() on unknown receiver type '%s' "
-                    "(need CCString / CCPyObj / declared widen / slice)\n",
-                    vty[0] ? vty : "?");
+            char __diag[192];
+            snprintf(__diag, sizeof(__diag),
+                     "->as_slice() on unknown receiver type '%s' "
+                     "(need CCString / CCPyObj / declared widen / slice)",
+                     vty[0] ? vty : "?");
+            shadow_ufcs_emit_err_loc(g_shadow_ufcs_cache, g_shadow_ufcs_site,
+                                     NULL, __diag);
             return 0;
         }
     } else if (!is_arrow && strcmp(meth_name, "is_inline") == 0 &&
@@ -3603,10 +3600,13 @@ static int shadow_ufcs_try_as_retry_on(const char* recv, const char* meth_name,
                      as->mode);
             rr = shadow_restrict_find_mangled(rmang);
             if (rr && !shadow_restrict_allows_use(rr, meth_name)) {
-                fprintf(stderr,
-                        "error: restricted mode '%s' on '%s' does not allow "
-                        "method '%s' (viewed face)\n",
-                        as->mode, as->target, meth_name);
+                char __diag[256];
+                snprintf(__diag, sizeof(__diag),
+                         "restricted mode '%s' on '%s' does not allow "
+                         "method '%s' (viewed face)",
+                         as->mode, as->target, meth_name);
+                shadow_ufcs_emit_err_loc(g_shadow_ufcs_cache, g_shadow_ufcs_site,
+                                         NULL, __diag);
                 g_shadow_restrict_diag = 1;
                 g_shadow_ufcs_miss = 1;
                 g_shadow_as_retry_depth--;
@@ -3663,10 +3663,13 @@ static int shadow_ufcs_try_as_retry_on(const char* recv, const char* meth_name,
         }
         if (!ok) continue;
         if (nhit) {
-            fprintf(stderr,
-                    "error: as: UFCS '%s' is ambiguous on '%s' "
-                    "(write an explicit field peel)\n",
-                    meth_name, vty);
+            char __diag[192];
+            snprintf(__diag, sizeof(__diag),
+                     "as: UFCS '%s' is ambiguous on '%s' "
+                     "(write an explicit field peel)",
+                     meth_name, vty);
+            shadow_ufcs_emit_err_loc(g_shadow_ufcs_cache, g_shadow_ufcs_site,
+                                     NULL, __diag);
             g_shadow_ufcs_miss = 1;
             g_shadow_as_retry_depth--;
             return 0;
@@ -3703,35 +3706,8 @@ static int shadow_ufcs_is_scalar_ty(const char* vty) {
 
 static void shadow_ufcs_emit_err_loc(TapeCache* cache, AstNode* st,
                                      const char* needle, const char* msg) {
-    const char* path = "<input>";
-    char lfile[1024];
-    int line = 1, col = 1;
-    lfile[0] = 0;
-    if (cache && st && st->file_id) {
-        FileTape* ft = tape_by_id(cache, st->file_id);
-        if (ft && ft->bytes) {
-            size_t off = st->tok_off;
-            if (needle && needle[0] && strlen(needle) >= 2) {
-                size_t nlen = strlen(needle);
-                size_t i;
-                size_t end = ft->len;
-                if (st->tok_off + 1024 < end) end = st->tok_off + 1024;
-                for (i = st->tok_off; i + nlen <= end; i++) {
-                    if (memcmp(ft->bytes + i, needle, nlen) == 0) {
-                        if (nlen >= 2 && shadow_is_id(needle[0]) && i > 0 &&
-                            shadow_is_id(ft->bytes[i - 1]))
-                            continue;
-                        off = i;
-                        break;
-                    }
-                }
-            }
-            offset_to_linecol(ft, off, &line, &col);
-            tape_logical_at(ft, off, lfile, sizeof(lfile), &line);
-            path = tape_diag_file(ft, off, lfile, sizeof(lfile));
-        }
-    }
-    fprintf(stderr, "%s:%d: error: %s\n", path, line, msg);
+    /* UFCS oracles pin `path:line: error:` (no column). */
+    shadow_emit_err_loc(cache, st, needle, 1, msg);
 }
 
 /* Diagnose a typed UFCS miss once; used by structured emit + leftover scan.
@@ -3809,9 +3785,11 @@ static void shadow_ufcs_diagnose_miss_at(const char* recv, const char* meth,
             shadow_ufcs_emit_err_loc(g_shadow_ufcs_cache, g_shadow_ufcs_site,
                                      needle, msg);
         else if (path && path[0] && line > 0)
-            fprintf(stderr, "%s:%d: error: %s\n", path, line, msg);
-        else
-            fprintf(stderr, "error: %s\n", msg);
+            diag_at_nocol(path, line, msg);
+        else {
+            g_shadow_diag_errors++;
+            diag_emit("error", NULL, 0, 0, 1, msg);
+        }
     }
     if (is_scalar) {
         char cand[160];
@@ -3823,23 +3801,20 @@ static void shadow_ufcs_diagnose_miss_at(const char* recv, const char* meth,
         }
         fam[o] = 0;
         snprintf(cand, sizeof(cand), "cc_%s_%s", fam, meth);
-        fprintf(stderr, "candidate %s (scalar family): not declared\n", cand);
+        diag_plainf("candidate %s (scalar family): not declared", cand);
         if (shadow_ufn_exists(meth)) {
             const char* pty = shadow_ufn_first_ty(meth);
-            fprintf(stderr,
-                    "candidate %s (bare): declared, but first parameter '%s' "
-                    "does not take '%s'\n",
-                    meth, pty && pty[0] ? pty : "?", vty);
+            diag_plainf("candidate %s (bare): declared, but first parameter "
+                        "'%s' does not take '%s'",
+                        meth, pty && pty[0] ? pty : "?", vty);
         } else {
-            fprintf(stderr, "candidate %s (bare): no visible declaration\n",
-                    meth);
+            diag_plainf("candidate %s (bare): no visible declaration", meth);
         }
     } else if (shadow_ufn_exists(meth)) {
         const char* pty = shadow_ufn_first_ty(meth);
-        fprintf(stderr,
-                "candidate %s (bare): declared, but first parameter '%s' does "
-                "not take '%s'\n",
-                meth, pty && pty[0] ? pty : "?", vty);
+        diag_plainf("candidate %s (bare): declared, but first parameter '%s' "
+                    "does not take '%s'",
+                    meth, pty && pty[0] ? pty : "?", vty);
     } else if (strncmp(vty, "CCSlice_", 8) == 0 ||
                strncmp(vty, "CCVec_", 6) == 0 ||
                strncmp(vty, "Map_", 4) == 0 ||
@@ -3852,7 +3827,7 @@ static void shadow_ufcs_diagnose_miss_at(const char* recv, const char* meth,
         char snake[160];
         size_t si = 0, ti = 0;
         snprintf(cand, sizeof(cand), "%s_%s", vty, meth);
-        fprintf(stderr, "candidate %s (family spelling): not declared\n", cand);
+        diag_plainf("candidate %s (family spelling): not declared", cand);
         if (strncmp(vty, "CC", 2) == 0 && vty[2] >= 'A' && vty[2] <= 'Z')
             ti = 2;
         for (; vty[ti] && si + 2 < sizeof(snake); ti++) {
@@ -3869,19 +3844,18 @@ static void shadow_ufcs_diagnose_miss_at(const char* recv, const char* meth,
         if (snake[0]) {
             snprintf(cand, sizeof(cand), "%s_%s", snake, meth);
             if (strcmp(cand, meth) != 0)
-                fprintf(stderr,
-                        "candidate %s (family spelling): not declared\n", cand);
+                diag_plainf("candidate %s (family spelling): not declared",
+                            cand);
         }
         if (!shadow_ufn_exists(meth))
-            fprintf(stderr, "candidate %s (bare): no visible declaration\n",
-                    meth);
+            diag_plainf("candidate %s (bare): no visible declaration", meth);
     }
     {
         const char* mem = shadow_family_members_csv(vty);
         if (mem && mem[0])
-            fprintf(stderr, "installed methods of %s: %s\n", vty, mem);
+            diag_plainf("installed methods of %s: %s", vty, mem);
         else
-            fprintf(stderr, "installed methods of %s:\n", vty);
+            diag_plainf("installed methods of %s:", vty);
     }
     g_shadow_ufcs_miss = 1;
 }
@@ -4349,16 +4323,21 @@ static int shadow_emit_ufcs_to_buf(AstNode* st, char* dst, size_t cap,
         if (!shadow_ufcs_factory_member_cand(st->a, vty0, st->b, fam,
                                             sizeof(fam))) {
             /* Match production wording so typo oracles (py_expse) can bind. */
+            char __diag[384];
             snprintf(fam, sizeof(fam), "%s_%s", st->a, st->b);
-            fprintf(stderr,
-                    "error: type: no type-formal member '%s' for receiver type "
-                    "'%s' — `::[...]` binds a member that declares a type formal "
-                    "(allocT, block_on, as_list, as_map, map) or a registered "
-                    "generic factory named '%s'\n",
-                    st->b, st->a[0] ? st->a : "?", fam);
-            if (cc_emit_plan_generic_factory_names_csv(fams, sizeof(fams)) > 0)
-                fprintf(stderr, "  note: registered generic factories: %s\n",
-                        fams);
+            snprintf(__diag, sizeof(__diag),
+                     "type: no type-formal member '%s' for receiver type "
+                     "'%s' — `::[...]` binds a member that declares a type formal "
+                     "(allocT, block_on, as_list, as_map, map) or a registered "
+                     "generic factory named '%s'",
+                     st->b, st->a[0] ? st->a : "?", fam);
+            shadow_ufcs_emit_err_loc(g_shadow_ufcs_cache, st, NULL, __diag);
+            if (cc_emit_plan_generic_factory_names_csv(fams, sizeof(fams)) > 0) {
+                char __note[640];
+                snprintf(__note, sizeof(__note),
+                         "registered generic factories: %s", fams);
+                diag_note(__note);
+            }
             g_shadow_ufcs_miss = 1;
             return 0;
         }
@@ -5165,15 +5144,20 @@ static void shadow_rewrite_as_call_args(char* expr, size_t cap) {
                                                     as = shadow_as_lookup(
                                                         obase, fp->base);
                                                     if (as) {
-                                                        fprintf(stderr,
-                                                                "warning: "
+                                                        {
+                                                            char __warn[256];
+                                                            snprintf(
+                                                                __warn,
+                                                                sizeof(__warn),
                                                                 "explicit cast "
                                                                 "to '%s *' "
                                                                 "from '%s' "
                                                                 "skips as: "
-                                                                "path\n",
+                                                                "path",
                                                                 fp->base,
                                                                 obase);
+                                                            diag_warn(__warn);
+                                                        }
                                                         (void)ca;
                                                     }
                                                 }
