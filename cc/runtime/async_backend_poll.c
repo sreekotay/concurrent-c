@@ -39,8 +39,8 @@ static int wait_poll(int fd, short events, const CCDeadline* d) {
 
 static int backend_read_all(void* ctx, CCFile *file, CCArena arena, CCSlice* out, CCAsyncHandle* h, const CCDeadline* d) {
     (void)ctx;
-    if (!file || !file->handle || !cc_arena_is_live(arena) || !out || !h) return EINVAL;
-    int fd = fileno(file->handle);
+    if (!file || file->fd < 0 || !cc_arena_is_live(arena) || !out || !h) return EINVAL;
+    int fd = file->fd;
     if (fd < 0) return EBADF;
     int nb = set_nonblock(fd); if (nb != 0) return nb;
     struct stat st;
@@ -69,8 +69,8 @@ static int backend_read_all(void* ctx, CCFile *file, CCArena arena, CCSlice* out
 /* EOF is signalled by writing an empty slice (len == 0) — no separate option tag. */
 static int backend_read(void* ctx, CCFile *file, CCArena arena, size_t n, CCSlice* out, CCAsyncHandle* h, const CCDeadline* d) {
     (void)ctx;
-    if (!file || !file->handle || !cc_arena_is_live(arena) || !out || !h) return EINVAL;
-    int fd = fileno(file->handle); if (fd < 0) return EBADF;
+    if (!file || file->fd < 0 || !cc_arena_is_live(arena) || !out || !h) return EINVAL;
+    int fd = file->fd; if (fd < 0) return EBADF;
     int nb = set_nonblock(fd); if (nb != 0) return nb;
     void* buf = cc_arena_alloc(arena, n, 1);
     if (!buf) return ENOMEM;
@@ -98,8 +98,8 @@ static int backend_read(void* ctx, CCFile *file, CCArena arena, size_t n, CCSlic
 
 static int backend_read_line(void* ctx, CCFile *file, CCArena arena, CCSlice* out, CCAsyncHandle* h, const CCDeadline* d) {
     (void)ctx;
-    if (!file || !file->handle || !cc_arena_is_live(arena) || !out || !h) return EINVAL;
-    int fd = fileno(file->handle); if (fd < 0) return EBADF;
+    if (!file || file->fd < 0 || !cc_arena_is_live(arena) || !out || !h) return EINVAL;
+    int fd = file->fd; if (fd < 0) return EBADF;
     int nb = set_nonblock(fd); if (nb != 0) return nb;
     size_t cap = 256;
     char* buf = (char*)cc_arena_alloc(arena, cap, 1);
@@ -130,8 +130,8 @@ static int backend_read_line(void* ctx, CCFile *file, CCArena arena, CCSlice* ou
 
 static int backend_write(void* ctx, CCFile *file, CCSlice data, size_t* out_written, CCAsyncHandle* h, const CCDeadline* d) {
     (void)ctx;
-    if (!file || !file->handle || !h) return EINVAL;
-    int fd = fileno(file->handle); if (fd < 0) return EBADF;
+    if (!file || file->fd < 0 || !h) return EINVAL;
+    int fd = file->fd; if (fd < 0) return EBADF;
     int nb = set_nonblock(fd); if (nb != 0) return nb;
     size_t off = 0;
     while (off < data.len) {
@@ -153,28 +153,42 @@ static int backend_write(void* ctx, CCFile *file, CCSlice data, size_t* out_writ
 }
 
 static int backend_open(void* ctx, CCFile *file, CCSlice path_sl, const char *mode, CCAsyncHandle* h, const CCDeadline* d) {
-    const char *path = path_sl.ptr ? (const char *)path_sl.ptr : NULL;
+    char pbuf[4096];
+    int flags;
+    int fd;
     (void)ctx; (void)d;
-    if (!file || !path || !mode || !h) return EINVAL;
-    FILE* f = fopen(path, mode);
-    if (!f) return errno;
-    int fd = fileno(f);
-    if (fd >= 0) set_nonblock(fd);
-    file->handle = f;
+    if (!file || !path_sl.ptr || !path_sl.len || path_sl.len >= sizeof(pbuf) || !mode || !h)
+        return EINVAL;
+    memcpy(pbuf, path_sl.ptr, path_sl.len);
+    pbuf[path_sl.len] = '\0';
+    if (mode[0] == 'w')
+        flags = (strchr(mode, '+') ? O_RDWR : O_WRONLY) | O_CREAT | O_TRUNC;
+    else if (mode[0] == 'a')
+        flags = (strchr(mode, '+') ? O_RDWR : O_WRONLY) | O_CREAT | O_APPEND;
+    else
+        flags = strchr(mode, '+') ? O_RDWR : O_RDONLY;
+    fd = open(pbuf, flags, 0644);
+    if (fd < 0) return errno;
+    set_nonblock(fd);
+    file->fd = fd;
     CC_ASYNC_HANDLE_ALLOC(h, 1);
-    int err = 0;
-    cc_chan_send(h->done, &err, sizeof(int));
+    {
+        int err = 0;
+        cc_chan_send(h->done, &err, sizeof(int));
+    }
     return 0;
 }
 
 static int backend_close(void* ctx, CCFile *file, CCAsyncHandle* h, const CCDeadline* d) {
     (void)ctx; (void)d;
-    if (!file || !file->handle || !h) return EINVAL;
-    fclose(file->handle);
-    file->handle = NULL;
+    if (!file || file->fd < 0 || !h) return EINVAL;
+    close(file->fd);
+    file->fd = -1;
     CC_ASYNC_HANDLE_ALLOC(h, 1);
-    int err = 0;
-    cc_chan_send(h->done, &err, sizeof(int));
+    {
+        int err = 0;
+        cc_chan_send(h->done, &err, sizeof(int));
+    }
     return 0;
 }
 

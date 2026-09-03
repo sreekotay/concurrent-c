@@ -10,7 +10,7 @@ or back away; the gaps stay either way.
 |---|---|
 | **Join** — `@parallel { … }` | Named siblings. First arm may be the kick (caller). Dest = do not wait here. `@serial` is how an arm is written. |
 | **Range** — `@parallel for` / `wait` + `@stage` | Cut and name tiles. Bare `for`: disjoint slots. `wait` + `@stage`: the names serialize at that gate. `n` is tiles, not results. |
-| **Stream** | Consumer never had `n`. Produce until the source dies; consume until `close`. On-page: two `@parallel` arms and `tx.close()` in produce (`recipe_parallel_stream.ccs`). Ordered FIFO: `send_task`. |
+| **Stream** | Consumer never had `n`. Produce until the source dies; consume until `close`. On-page: two `@parallel spawn` arms and `tx.close()` in produce (`recipe_parallel_stream.ccs`). Ordered FIFO: `send_task`. |
 | **Bag** — nursery | Set is not on the page: late `spawn`, host `send` / retract / `AGAIN`, never-deny fiber. Dest now has the same `leave` / EMPTY pair (`h.close(tx)`, `h.leave()`). The bag remains late admit / host ABI / never-deny. |
 
 Dest, pause, cancel, turnstile cap are knobs, not extra tools.
@@ -141,14 +141,11 @@ success when concurrency was required:
 | Same hang, caller not in the graph / suppressed / no verdict | no (silent) |
 | Wrong result because deny serialized a pipe | no (silent correctness) |
 
-**Policy:** a brace `@parallel` that names a channel op on any arm, or
-captures a channel (helpers, dest-live consume), never denies those
-spawned arms (site REAL). Adapt stays on joins that cannot rendezvous
-(CPU trees). A site that suspends is pinned REAL so a later cheap
-sample cannot demote it. If deny still fires and that join parks on a
-channel, the runtime aborts (named). `#pragma off` / `seq` remain the
-user's sequential schedule. Diagnose (park reason) is the loud hang
-for cases both the walk and the abort miss.
+**Policy:** `@parallel { }` may deny. `@parallel spawn { }` never denies
+spawned arms. A brace join that names a blocking channel op, or captures
+a channel (helpers, dest-live consume), is ill-formed unless it is
+`spawn` or `#pragma(@parallel) off`. Hidden channel leftover: abort if
+that join parks, else the detector. `n.spawn` is the bag.
 
 Do **not** need “always spawn 0.” Arm 0 on the caller is kick / dest-live; when
 siblings are spawned first, a parked `send` on the caller can still schedule
@@ -248,9 +245,12 @@ Do not do these unless we choose the drawing as the taught server/pigz story.
 - Mesh: `real_projects/random_access/ra_dist.ccs`
 - On-page stream: `examples/recipe_parallel_stream.ccs`
 - EMPTY-close stream: `examples/recipe_channel_pipeline.ccs`, `pigz_channel.ccs`
-- Join deny / serial schedule: spec §8.11.7; channel on a brace join
-  is REAL (`tests/parallel_rendezvous_unbuf_smoke.ccs`,
+- Join deny / serial schedule: spec §8.11.7; a visible channel on a
+  brace join is `@parallel spawn` (`tests/parallel_rendezvous_unbuf_smoke.ccs`,
   `parallel_rendezvous_helper_smoke.ccs`,
-  `parallel_rendezvous_dest_live_smoke.ccs`). Denied join + channel
-  park aborts (`parallel_deny_park_abort_smoke.ccs`).
+  `parallel_rendezvous_dest_live_smoke.ccs`). Unmarked is
+  `parallel_chan_needs_spawn_fail.ccs`. Denied join + channel park
+  aborts (`parallel_deny_park_abort_smoke.ccs`). Ungated recursive
+  `@parallel { }` stays CHURN (`parallel_adapt_churn_smoke.ccs`); join
+  must not pin REAL.
 - Dest leave / EMPTY: `tests/parallel_dest_leave_smoke.ccs`

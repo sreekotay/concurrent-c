@@ -20,7 +20,7 @@ cite which family drove it in the rationale.
 | **T6 Shutdown / cancel race** | Use after stop | Nursery owns join; `@destroy` always waits; cancel/deadline are flags on that scope | Raw pthread / workqueue / `kthread_stop` beside the nursery; dishonest `@blocking` |
 | **T7 Shared mutable without owner** | Data race on non-atomic shared state | Channel single-writer; `@scoped` guards | Shared `T*` folklore |
 | **T8 Double free / wrong deleter** | Two owners free; adopt mismatch | Unique slices; move; `@destroy` once | Manual `free` beside `@destroy` |
-| **T9 Wire length vs buffer** | Attacker length > buffer; over-read (Heartbleed-shaped); size wrap → tiny alloc; OOB index write; pointer/length desync | Schema `bytes len`; `cc_*_i64_checked`; Result `at`/`set` (all builds); slice carries `.ptr`+`.len` as one value | Hand `memcpy(dst, p, wire_len)`; bare `size_t a+b`; raw `ptr[i]=` past `len`; writing `.len` on a live slice. Cross-parser HTTP policy is out of corpus |
+| **T9 Wire length vs buffer** | Attacker length > buffer; over-read (Heartbleed-shaped); size wrap → tiny alloc; OOB index write; pointer/length desync | Schema `bytes len`; `cc_*_i64_checked`; Result `at`/`set` (all builds); slice carries `.ptr`+`.len` as one value | Hand `memcpy(dst, p, wire_len)`; bare `size_t a+b`; raw `ptr[i]=` past `len`; writing `.len` on a live slice |
 | **T10 Wrong representation** | Value stored as text/bytes when a sum type is needed; parse/encode tax hides bugs; inactive-arm use | `@variant` + protected projection; raw `.u` ban; schema `one of` (same surface); Result `!>`/`?>` | `@unsafe`; compound-literal `.kind`/`.u` interop; flow-insensitive domination |
 
 ## Scoring hint
@@ -30,4 +30,4 @@ cite which family drove it in the rationale.
 - Prefer **still_expressible** when ordinary CC (including hand parsers / raw buffers) can recreate it — file `needs_language:`.  
 - Prefer **n/a** only for crypto/authz/logic with **no** ownership, wire-framing, or representation angle.  
 
-Do **not** mark Heartbleed-class length-vs-buffer as `n/a` solely because nurseries don’t help — check SERDES first. Omit cross-parser HTTP smuggling from the corpus.
+Do **not** mark Heartbleed-class length-vs-buffer as `n/a` solely because nurseries don’t help — check SERDES first. Dual-header HTTP CL+TE is T10 (CVE-2005-2088), off the Rust axis. Omit obfuscated-TE / tokenizer smuggling.

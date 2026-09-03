@@ -20,8 +20,8 @@ static CCString label(int n, CCArena a) {   // Caller chooses the product lifeti
 }
 
 int main(void) {
-    CCArena arena = cc_arena_heap(kilobytes(4)) @destroy;
-    CCArena keep = cc_arena_heap(kilobytes(1)) @destroy;
+    cc_arena_stack(arena, kilobytes(4));
+    cc_arena_stack(keep, kilobytes(1));
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     for (int i = 1; i <= 3; i++) {
         println(@string(`Processing request ${i} bytes: ${arena.remaining()}`, @scratch)) !>;

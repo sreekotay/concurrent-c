@@ -212,13 +212,12 @@ sparse resample so a wrong verdict can flip.
 ### Virgin flood bound
 
 If ready-queue depth ≥ 512 (`CC_PAR_FLOOD_DEPTH`) and the site has never
-had a wrapped arm suspend (`saw_suspend` clear), deny. Sites that have
-suspended keep spawning: inlining a blocking arm can deadlock on a sibling
-that has not started. Join parks latch `saw_suspend` too; that latch does
-not change the churn verdict.
-
-A CHURN site that later starts a sibling-rendezvous can hang the first
-denied pair; resample and `saw_suspend` protect subsequent spawns.
+had a wrapped arm suspend (`saw_suspend` clear), deny. A parked virgin
+(channel wait) keeps spawning. Join parks latch `saw_suspend` for this
+bound only: they do not commit REAL and they do not block CHURN. A
+recursive `@parallel` joins on every inner node; cheap leaves still
+classify. Meetings use `@parallel spawn`. A denied join that then parks
+on a channel aborts.
 
 ### Inline fast path (native host cc)
 

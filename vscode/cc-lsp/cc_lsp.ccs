@@ -507,6 +507,10 @@ static void cmd_add_check(CCCommand *cmd, const char *src, const char *emit,
                           const char *wave) {
     char outdir[PATH_MAX];
     snprintf(outdir, sizeof(outdir), "%s/out", wave);
+    /* `ccc <file.shcc>` implies `build run`. That execs the -o path
+     * (a .c file) after emit → "execv: Permission denied" at 1:1.
+     * `build` without `run` is emit-only for both .ccs and .shcc. */
+    cmd->arg("build");
     cmd->arg("--emit-c-only");
     cmd->arg("--no-runtime");
     cmd->arg("--no-cache");

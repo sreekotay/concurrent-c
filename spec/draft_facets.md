@@ -221,7 +221,10 @@ type-register rule (trailing `*`). When several patterns match the same name
 with different use-kinds, the longest literal prefix wins; a tie with
 disagreeing kinds is ill-formed.
 
-On owned types, prefer exact names. On open type-families (slices, and other
+On owned types, prefer exact names. Exact positive and deny patterns on a
+concrete type are checked at registration: a typo that matches no field or
+UFCS method is ill-formed (deny typos that subtract nothing are not silent).
+On open type-families (slices, and other
 types extended by third-party UFCS / `as:` faces), globs are the membership
 protocol: the mode owner publishes a pattern contract; extenders join by
 naming into that family. A mode that listed every method would freeze the

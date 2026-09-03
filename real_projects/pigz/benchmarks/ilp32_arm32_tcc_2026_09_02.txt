@@ -15,6 +15,7 @@
 #     freelist CAS faulted). Pool slots align to 8 (CCSlice.id).
 #   - Scheduler __thread cells go through cc_pthread_tls under __TINYC__.
 # pigz_cc: shadow_lower still dies (signal 11); compare skips it.
+# Superseded by ilp32_arm32_tcc_2026_09_03.txt (0.3.4-294 — all three PASS).
 
 === Build ===
 pigz (original cc -O3):  OK — ELF 32-bit LSB pie, ARM, EABI5

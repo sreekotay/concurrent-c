@@ -48,13 +48,17 @@ detail:
 ```c
 #!ccc ccs
 #include <ccc/cc_runtime.cch>
-#include <stdio.h>
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    CCNursery n = cc_nursery_create() !> @destroy;
-    n.spawn(() => printf("Hello from task A!\n"));
-    n.spawn(() => printf("Hello from task B!\n"));
+    cc_arena_stack(a, kilobytes(4));
+    CCStdio io = cc_stdio_create(a);
+    @parallel spawn {
+        @serial { io.println("Hello from task A!") !>; }
+        @serial { io.println("Hello from task B!") !>; }
+    } !>.wait()!>;
     return 0;
 }
 ```

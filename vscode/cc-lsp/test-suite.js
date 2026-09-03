@@ -84,6 +84,28 @@ test("hello.ccs publishes empty", async () => {
   });
 });
 
+test("hello.shcc publishes empty", async () => {
+  const shcc = path.join(repo, "examples", "hello.shcc");
+  await withClient(async (c) => {
+    await c.initialize();
+    const uri = fileUri(shcc);
+    c.didOpen(uri, read(shcc), 1);
+    const d = await c.waitDiag(uri, 20000);
+    assert(d.diagnostics.length === 0, `hello.shcc dirty: ${JSON.stringify(d.diagnostics)}`);
+  });
+});
+
+test("minify.shcc publishes empty", async () => {
+  const shcc = path.join(repo, "examples", "serdes", "json", "tools", "minify.shcc");
+  await withClient(async (c) => {
+    await c.initialize();
+    const uri = fileUri(shcc);
+    c.didOpen(uri, read(shcc), 1);
+    const d = await c.waitDiag(uri, 20000);
+    assert(d.diagnostics.length === 0, `minify.shcc dirty: ${JSON.stringify(d.diagnostics)}`);
+  });
+});
+
 test("didChange broken then clean (debounce)", async () => {
   await withClient(async (c) => {
     await c.initialize();

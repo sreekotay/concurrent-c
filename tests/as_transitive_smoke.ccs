@@ -56,7 +56,10 @@ int main(void) {
     AsOuter o = {0};
     o.outer_tag = 1;
     o.mid.mid_tag = 2;
-    assert(o.open(CC_SLICE_LIT("tmp/as_transitive_smoke.txt"), "w") == 0);
+    o.mid.file = cc_file_create(CC_SLICE_LIT("tmp/as_transitive_smoke.txt")) !>(e) {
+        fprintf(stderr, "create: %s\n", cc_io_error_str(e));
+        return 1;
+    };
 
     /* UFCS through two as: hops */
     CCSlice msg = CC_SLICE_LIT("nested\n");
@@ -74,7 +77,7 @@ int main(void) {
     o.destroy();
     assert(g_outer_delta == 1);
     assert(g_mid_delta == 1);
-    assert(o.mid.file.handle == NULL);
+    assert(o.mid.file.fd < 0);
 
     remove("tmp/as_transitive_smoke.txt");
     printf("ok\n");

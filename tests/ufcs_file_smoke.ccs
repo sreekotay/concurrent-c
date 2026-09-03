@@ -8,14 +8,11 @@ int main(void) {
     const char* msg = "ufcs file smoke\n";
     size_t msg_len = strlen(msg);
     CCSlice data = cc_slice_from_buffer((void*)msg, msg_len);
-    CCFile f = {0};
-    CCFile reader = {0};
+    CCFile f = cc_file_create(cc_slice_cstr(path)) !>(e) { return 1; };
     CCResult_size_t_CCIoError written;
     CCResult_CCSlice_CCIoError read_back;
     CCArena arena;
     CCSlice out;
-
-    if (f.open(cc_slice_cstr(path), "w+") != 0) return 1;
 
     written = f.write(data);
     if (cc_is_err(written)) {
@@ -33,9 +30,7 @@ int main(void) {
     }
     cc_file_close(&f);
 
-    if (reader.open(cc_slice_cstr(path), "rb") != 0) {
-        return 5;
-    }
+    CCFile reader = cc_file_open(cc_slice_cstr(path)) !>(e) { return 5; };
 
     arena = cc_arena_heap(kilobytes(4));
     if (!cc_arena_is_live(arena)) {

@@ -4628,7 +4628,8 @@ static int shadow_slc_known_arg(const char* callee, int arg_index) {
     if (strcmp(callee, "cc_path_exists") == 0) return arg_index == 0;
     if (strcmp(callee, "cc_path_is_dir") == 0) return arg_index == 0;
     if (strcmp(callee, "cc_path_is_file") == 0) return arg_index == 0;
-    if (strcmp(callee, "cc_file_open") == 0) return arg_index == 1;
+    if (strcmp(callee, "cc_file_open") == 0) return arg_index == 0;
+    if (strcmp(callee, "cc_file_create") == 0) return arg_index == 0;
     if (strcmp(callee, "cc_file_open_async") == 0) return arg_index == 2;
     if (strcmp(callee, "cc_dir_open") == 0) return arg_index == 1;
     if (strcmp(callee, "cc_glob") == 0) return arg_index == 0;

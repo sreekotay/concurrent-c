@@ -3601,6 +3601,7 @@ typedef struct ShadowBind {
     int flags;
     char walk_subj[128];
     char walk_idx[64];
+    char walk_peel[64]; /* hoisted elem*; empty = live .access peel */
 } ShadowBind;
 static ShadowBind** g_shadow_binds;
 static int g_shadow_nbinds;

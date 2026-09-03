@@ -47,6 +47,8 @@
 #include <ccc/cc_type.cch>
 #include <ccc/cc_ufcs.cch>
 
+/* Brace width and dest inline pad — not in-flight backpressure.
+ * `@parallel(h)` is the growing form: live index, no TASK_MAX die. */
 #ifndef CC_PARALLEL_TASK_MAX
 #define CC_PARALLEL_TASK_MAX 32
 #endif
@@ -68,6 +70,7 @@ typedef struct CCParallel {
     int fail;
     int fin;
     int nt;
+    int ncap;
     int nch;
     int nclose;
     CCError err;
@@ -79,6 +82,8 @@ typedef struct CCParallel {
     struct CCParallel* children[CC_PARALLEL_CHILD_MAX];
     CCTask tasks[CC_PARALLEL_TASK_MAX];
     void* envs[CC_PARALLEL_TASK_MAX];
+    CCTask* xtasks;
+    void** xenvs;
 } CCParallel;
 
 #ifndef CCResult_CCParallel_CCError_DEFINED
@@ -109,6 +114,8 @@ static inline bool cc_parallel_live(const CCParallel* h) {
 
 void !>(CCError) cc_parallel_wait(CCParallel* h);
 void cc_parallel_attach(CCParallel* h, CCTask t);
+void cc_parallel_admit(CCParallel* h, CCTask t, void* env);
+void cc_parallel_die(const char* msg);
 void cc_parallel_wake_attached(CCParallel* h);
 int cc_parallel_current_cancelled(void);
 void cc_parallel_deny_enter(CCParallel* dest);

@@ -11,7 +11,6 @@
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 #include <zlib.h>
 
 #define BLOCK_SIZE (128 * 1024)
@@ -63,15 +62,18 @@ static void !>(CCError) zs_prepare(ZState* zs) {
     return cc_ok();
 }
 
-static unsigned char* !>(CCError) read_block(int in_fd, CCArenaPool* pool,
+static unsigned char* !>(CCError) read_block(CCFile* in, CCArenaPool* pool,
                                              size_t off, size_t want) {
     unsigned char* buf = (unsigned char*)pool.alloc();
     if (!buf)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "block buf");
-    ssize_t got = pread(in_fd, buf, want, (off_t)off);
-    if (got < 0 || (size_t)got != want) {
+    size_t got = in->read_at(buf, want, (int64_t)off) !>(e) {
         pool->free(buf);
-        return cc_err(CC_ERR_IO, "pread");
+        return cc_err(CC_ERROR(CC_ERR_IO, cc_io_error_str(e)));
+    };
+    if (got != want) {
+        pool->free(buf);
+        return cc_err(CC_ERR_IO, "read_at short");
     }
     return cc_ok(buf);
 }
@@ -129,18 +131,9 @@ static void !>(CCError) write_all(CCFile* f, CCSlice s) {
 void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
     @errhandler(CCError e) { return cc_err(e); }
 
-    CCFile in_file;
-    if (in_file.open(in_path, "rb") != 0)
-        return cc_err(CC_ERR_IO, "Failed to open input");
-    @defer in_file.close();
-
+    CCFile in_file = cc_file_open(in_path) !> @destroy;
     size_t file_len = in_file.size() !>;
-    int in_fd = fileno(in_file.handle);
-
-    CCFile out_file;
-    if (out_file.open(out_path, "wb") != 0)
-        return cc_err(CC_ERR_IO, "Failed to open output");
-    @defer out_file.close();
+    CCFile out_file = cc_file_create(out_path) !> @destroy;
 
     /* Empty file is one zero-length ticket, not a zero-byte .gz. */
     size_t n_sz = file_len ? (file_len + (size_t)BLOCK_SIZE - 1) / (size_t)BLOCK_SIZE : 1;
@@ -186,7 +179,7 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
 
         unsigned char* buf = NULL;
         if (want)
-            buf = read_block(in_fd, in_pool, off, want) !>;
+            buf = read_block(&in_file, in_pool, off, want) !>;
         CCSlice data = buf
             ? cc_slice_from_parts(buf, want, CC_SLICE_ID_UNTRACKED)
             : cc_slice_empty();

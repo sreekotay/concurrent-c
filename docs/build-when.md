@@ -69,6 +69,17 @@ Run these when you changed the **build graph**, **bootstrap seed**, or before pu
 
 `smoke_i386.sh` / `smoke_arm32.sh` mount the repo **read-only** and build in `/work` — they do not replace your host `out/`. Env and latest receipt: [ilp32-docker.md](ilp32-docker.md).
 
+Optional **large-TU emit stress** (after lowerer changes that touch stmt / walk / UFCS emit, or before promoting when the curated smoke passed but pigz-scale risk remains):
+
+| Tier | What | Command / note |
+|------|------|----------------|
+| Gated | `pigz_cc` (~1.3k lines) on ARM32 TCC self-build | `FORCE_TOOLCHAIN=1 CCC_HOST_CC=tcc ./scripts/pigz_arm32.sh` — caught a TCC-built `shadow_lower` crash fixed in 0.3.4-294 (`for_in_mut` / walk-peel lowering) |
+| Host `--full` | redis / pigz_idiomatic / pigz_cc / levenshtein emit | `./scripts/test_shadow_real_projects.sh` (wired from `test.sh --full`) |
+| Candidates | Other big `.ccs` worth spot-checking on `shadow_lower --no-cache` | `npm/cc-python/src/cc_python.ccs` (~4.4k), `real_projects/stylo-cc/engine/stylebench_cc.ccs` (~2k), `vscode/cc-lsp/cc_lsp.ccs` (~1.3k), `real_projects/redis/redis_owner.ccs` (~1.2k), `perf/wstore5.ccs` (~1.5k) |
+| Pattern smokes | `@for (&… in …)` / zip / grower shrink | `tests/for_in_mut_*`, `tests/for_in_mut_walk_peel_smoke.c` |
+
+Sensitive config: **`CCC_HOST_CC=tcc` on ARM32** — TCC host-compiles bootstrap `shadow_lower.c` (`out/cc-tcc/bin/shadow_lower`). Split `CCC_HOST_CC=cc CCC_BACKEND_CC=tcc` isolates product TCC codegen from lowerer host codegen. See [ilp32-docker.md](ilp32-docker.md#pigz-compare).
+
 ## Quick “which binary?”
 
 | Binary | Role | Rebuilt by |

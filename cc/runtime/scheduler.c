@@ -402,10 +402,9 @@ typedef struct {
     _Atomic int      deny_depth; /* adapt_backlog, written before CHURN */
     _Atomic(void*)   fn;
     _Atomic uint32_t cheap_streak; /* consecutive cheap while REAL */
-    /* Set when any wrapped arm suspends. A site that parks is REAL:
-     * deny of a complementary sibling is a silent hang. The cheap
-     * path must not commit CHURN after this bit, and the virgin
-     * flood bound also reads it. */
+    /* Set when any wrapped arm suspends (join or channel). The virgin
+     * flood bound does not deny those sites. Join is not a meeting:
+     * this bit does not commit REAL and does not block CHURN. */
     _Atomic uint32_t saw_suspend;
     _Atomic uint32_t attempts; /* wrapped VIRGIN spawns */
     _Atomic uint64_t min_ns;   /* CC_PAR_ADAPT_DEBUG */
@@ -597,13 +596,10 @@ static void* cc_par_timed_run(void* p) {
      * duration is a subtree, not a body. Sites that never sample clean
      * stay virgin and keep spawning. */
     if (sched_v2_current_fiber_suspends() != s0) {
+        /* Subtree / join: not a leaf sample. Do not pin REAL — a
+         * recursive @parallel joins on every inner node; meetings use
+         * `@parallel spawn`. */
         atomic_store_explicit(&w.site->saw_suspend, 1, memory_order_relaxed);
-        /* A site that parks (send/recv, join) is REAL: denying the
-         * sibling of a parked arm is the silent hang. Pin before the
-         * cheap-sample path can commit CHURN. */
-        atomic_store_explicit(&w.site->cheap_streak, 0, memory_order_relaxed);
-        atomic_store_explicit(&w.site->state, CC_PAR_SITE_REAL,
-                              memory_order_release);
     }
     if (sched_v2_current_fiber_suspends() == s0 && tls_par_denials == d0 &&
         tls_par_spawn_calls == c0) {
@@ -624,9 +620,7 @@ static void* cc_par_timed_run(void* p) {
             if (st != CC_PAR_SITE_REAL)
                 atomic_store_explicit(&s->state, CC_PAR_SITE_REAL,
                                       memory_order_relaxed);
-        } else if (st != CC_PAR_SITE_CHURN &&
-                   !atomic_load_explicit(&s->saw_suspend,
-                                         memory_order_relaxed)) {
+        } else if (st != CC_PAR_SITE_CHURN) {
             uint32_t k = 1;
             if (st == CC_PAR_SITE_REAL)
                 k = atomic_fetch_add_explicit(&s->cheap_streak, 1,
@@ -672,10 +666,9 @@ CCTask cc_parallel_spawn(void* (*fn)(void*), void* arg) {
             if ((++tls_par_tick & CC_PAR_RESAMPLE_MASK) != 0)
                 site = NULL;
         } else {
-            /* VIRGIN: spawn (and wrap to learn). Flood-deny only a
-             * non-blocking site past a depth no coarse construct
-             * reaches — a churn storm, not 64 real arms. Blocking
-             * sites keep spawning (see saw_suspend). */
+            /* VIRGIN: spawn (and wrap to learn). Flood-deny a site
+             * that has never parked, past a depth no coarse construct
+             * reaches. A parked virgin (channel) keeps spawning. */
             if (sched_v2_ready_depth() >= CC_PAR_FLOOD_DEPTH &&
                 !atomic_load_explicit(&site->saw_suspend,
                                       memory_order_relaxed)) {

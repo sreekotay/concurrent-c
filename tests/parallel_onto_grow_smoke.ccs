@@ -1,0 +1,31 @@
+/*
+ * Growing dest: more admits than the brace pad (32). Sequential finishes
+ * reap; overlapping live grows the index. Neither dies at TASK_MAX.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    cc_atomic_int sum = 0;
+    CCParallel h = @parallel spawn {
+        @serial {
+            int i;
+            for (i = 0; i < 40; i++) {
+                @parallel(h) {
+                    sum.fetch_add(1);
+                }
+            }
+        }
+    } !>;
+    h.wait() !>;
+
+    int total = sum.load();
+    if (total != 40) {
+        eprintln(@string(`FAIL sum=${total}`, @scratch)) !>;
+        return 1;
+    }
+    println(@string(`sum = ${total}`, @scratch)) !>;
+    return 0;
+}

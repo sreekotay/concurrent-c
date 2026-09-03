@@ -7,15 +7,18 @@ mark still_expressible entries that safe Rust also leaves open.
 | Verdict | Count | Entries |
 |---------|------:|---------|
 | prevented | 21 | CVE-2017-13245, CVE-2014-0160, CVE-2025-31115, CVE-2008-5038, CVE-2020-12387, CVE-2013-4153, CVE-2026-10653, CVE-2021-22945, CVE-2015-0286, CVE-2013-4559, CVE-2015-7547, CVE-2024-38561, CVE-2025-39945, SHAPE-T2-stack-escape, SHAPE-T8-use-after-move, SHAPE-T7-shared-mut-spawn, SHAPE-T10-inactive-arm, SHAPE-T3-channel-borrow-send, SHAPE-T3-nonarena-borrow-send, SHAPE-T5-ignored-result, SHAPE-T7-pointer-channel-send |
-| mitigated | 4 | CVE-2016-5180, CVE-2023-54235, SHAPE-integer-overflow, SHAPE-T9-raw-index-oob |
+| mitigated | 5 | CVE-2016-5180, CVE-2023-54235, SHAPE-integer-overflow, SHAPE-T9-raw-index-oob, CVE-2005-2088 (off-axis) |
 | still_expressible | 2 | SHAPE-T8-adopt-wrong-deleter (`parity: rust_unsafe`), SHAPE-T7-bare-pointer-channel |
 | n/a | 0 | — |
-| **total** | **27** | |
+| **total** | **28** | |
 
 Of which still_expressible with `parity: rust_unsafe`: **1** (not a claim-A backlog item).
 Claim-A still_expressible (CC miss): **1** (bare `T*` channel send).
 
-Corpus health: all **27** `idiomatic.ccs` demos build and run
+Of the five mitigated, **4** are on the Rust claim-A axis and **1**
+(CVE-2005-2088) is off-axis: safe Rust does not close dual-header CL+TE.
+
+Corpus health: all **28** `idiomatic.ccs` demos build and run
 (`scripts/test_cve_locality.sh`, wired into `scripts/test.sh`).
 
 ## Rust claim-A scorecard
@@ -55,6 +58,12 @@ escapes (raw `free`, hand `memcpy`, `@unsafe`) go in Gap — same pattern as Rus
 | SHAPE-T8-adopt-wrong-deleter | n/a (`unsafe` / `from_raw`) | **still_expressible** | `rust_unsafe` | deleter↔allocator trusted |
 | SHAPE-T10-inactive-arm | enum match / inactive ban | **prevented** (protected projection + raw `.u` ban; schema `one of` shares the surface) | — | `@unsafe`; compound-literal `.kind`/`.u` interop |
 | CVE-2015-0286 | non-exhaustive `match` | **prevented** (exhaustive subject-switch + domination) | — | `@unsafe`; compound-literal `.kind`/`.u` interop |
+
+Off the Rust axis (not in the claim-A counts above):
+
+| Entry | Rust claim A | CC | Parity | Gap |
+|-------|--------------|-----|--------|-----|
+| CVE-2005-2088 | does not close (two `Option`s + precedence) | **mitigated** (`Framing!>(E)` rejects; overwrite still compiles) | — | lenient peer / tokenizer TE |
 
 **Reading:** Checked index, default-on strict Result, and slice `.len`/`.ptr`
 store ban shipped. Claim-A miss left: bare `T*` channel handles.

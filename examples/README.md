@@ -6,7 +6,7 @@ Demonstrations of Concurrent-C features and patterns.
 
 ```bash
 # Build and run any example
-./cc/bin/ccc run examples/hello.ccs      # nursery tour (.ccs)
+./cc/bin/ccc run examples/hello.ccs      # three named siblings (.ccs)
 ./cc/bin/ccc run examples/hello.shcc     # one-liner script (.shcc)
 ```
 
@@ -16,20 +16,20 @@ New to Concurrent-C? Work through these in order:
 
 | # | File | Concept | What you'll learn |
 |---|------|---------|-------------------|
-| 1  | `hello.ccs` | First nursery | `cc_nursery_create`, `n.spawn()`, basic structured concurrency |
+| 1  | `hello.ccs` | First `@parallel` | Three named siblings; `@parallel spawn`; `.wait()` joins |
 | 2  | `recipe_result_error_handling.ccs` | Results & `@errhandler` | `?>` : `E → T`; `!>` : `E →` control flow; `(e)` exposes; bare `!>` routes |
 | 3  | `recipe_unwrap_destroy_forms.ccs` | Unwrap shape | Same two ops × modifiers; `@destroy` on successful construction |
 | 3a | `recipe_variant.ccs` | `@variant` | Tagged data (not Result); construct / `@switch` / `case .arm(bind):` / `?>` / `!>` |
 | 4  | `recipe_ufcs_forms.ccs` | UFCS shape | One dispatch rule × spellings (families, bare-name, fallible chains) |
 | 4a | `recipe_user_generics.ccs` | Generics | `Name::[args]` + `CC_GENERIC_FACTORY` — same rule as Vec/Map |
 | 5  | `recipe_parallel.ccs` | `@parallel` | Join, `@serial`, dest, `@parallel for` (disjoint), `wait` + `@stage` (shared ticket) |
-| 5a | `recipe_parallel_stream.ccs` | On-page stream | Two arms; `tx.close()` next to produce; not a nursery |
-| 6  | `recipe_explicit_capture.ccs` | Capture semantics | Value vs reference capture, mutation rules |
+| 5a | `recipe_parallel_stream.ccs` | On-page stream | `@parallel spawn`; `tx.close()` next to produce; not a nursery |
+| 6  | `recipe_explicit_capture.ccs` | Capture | `@parallel` is the frame (no list); closure lists on `n.spawn` / `send_task` |
 | 7  | `recipe_channel_pipeline.ccs` | EMPTY-close | Nested bag; `n.close(tx)` when the set is not on the page |
 | 8  | `recipe_async_await.ccs` | Async/Await | `@async` call stacks vs `spawn`, `@await`, composition |
 | 9  | `recipe_timeout.ccs` | Deadlines & cancel | `@with_deadline`; live dest `h.cancel()`; siblings poll `h.cancelled` |
 | 10 | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
-| 11 | `recipe_ordered_parallel.ccs` | Ordered channel | `send_task` + FIFO recv — not a turnstile, not `@parallel wait` |
+| 11 | `recipe_ordered_parallel.ccs` | Ordered channel | `send_task` + FIFO recv; `@parallel spawn`; produce `tx.close()` |
 | 12 | `recipe_exclusive_named.ccs` | Named exclusivity | `CCExclusive`, resolve-once mutex, `acquire_when`, short guard CS |
 | 12a | `recipe_turnstile.ccs` | Turnstile stages | `@parallel wait` + `@stage (ts.read/write, i)` — no nursery |
 | 12b | `recipe_prepare_commit.ccs` | Prepare / join / hold / commit | Parallel prepares; `.wait()` is the join; hold only around commit; revert who finished |
@@ -44,15 +44,15 @@ After these, explore the remaining recipes and build system examples.
 ## Overview
 
 ### `hello.ccs`
-Minimal concurrent hello world — shows explicit nursery creation and task spawn.
+Minimal concurrent hello — three named siblings, `.wait()` joins.
 
 ### Recipes (concurrency patterns)
 
 | File | Pattern | Key Concept |
 |------|---------|-------------|
 | `recipe_parallel.ccs` | `@parallel` | Independent join / range; wait-for + `@stage` is the shared write ticket |
-| `recipe_parallel_stream.ccs` | On-page stream | Produce `tx.close()`; consume `recv` until EOF |
-| `recipe_explicit_capture.ccs` | Capture semantics | Value vs reference capture |
+| `recipe_parallel_stream.ccs` | On-page stream | `@parallel spawn`; produce `tx.close()`; consume `recv` until EOF |
+| `recipe_explicit_capture.ccs` | Capture | `@parallel` is the frame (no list); closure lists on `n.spawn` / `send_task` |
 | `recipe_channel_pipeline.ccs` | EMPTY-close | Nested bag; closer at inner EMPTY |
 | `recipe_async_await.ccs` | Async/Await | `@async`, `@await`, `cc_block_on` |
 | `recipe_worker_pool.ccs` | Worker pool | N workers, shared queue |
@@ -70,7 +70,7 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_unwrap_destroy_forms.ccs` | Unwrap matrix | Two ops × modifiers; `@destroy` on successful construction |
 | `recipe_ufcs_forms.ccs` | UFCS matrix | One rule × spellings, including bare-name and fallible chains |
 | `recipe_user_generics.ccs` | User generics | `CC_GENERIC_FACTORY` — same `Name::[args]` rule as Vec/Map |
-| `recipe_ordered_parallel.ccs` | Ordered stream | `send_task` + FIFO recv; no shared dest |
+| `recipe_ordered_parallel.ccs` | Ordered stream | `send_task` + FIFO recv; `@parallel spawn`; produce `tx.close()` |
 
 ### Python interop (one boundary, two doors)
 
@@ -126,7 +126,7 @@ scanner still accepts raw controls. Full ladder:
 
 | File | Demonstrates |
 |------|--------------|
-| `recipe_tcp_echo.ccs` | TCP sockets, listen/accept/read/write |
+| `recipe_tcp_echo.ccs` | Accept until stop; `@parallel(h)` admits each handle onto the dest |
 | `recipe_http_get.ccs` | Parallel HTTP requests with `@parallel for` |
 
 HTTP examples require libcurl (system curl on macOS) and `-DCC_ENABLE_HTTP=1`. The

@@ -16,7 +16,10 @@ typedef struct {
 int main(void) {
     TvFileWrap w = {0};
     w.tag = 7;
-    assert(w.open(CC_SLICE_LIT("tmp/typeview_as_ufcs_smoke.txt"), "w") == 0);
+    w.file = cc_file_create(CC_SLICE_LIT("tmp/typeview_as_ufcs_smoke.txt")) !>(e) {
+        fprintf(stderr, "create: %s\n", cc_io_error_str(e));
+        return 1;
+    };
 
     CCSlice msg = CC_SLICE_LIT("hello-tv\n");
     CCRes(size_t, CCIoError) wr = w.write(msg);

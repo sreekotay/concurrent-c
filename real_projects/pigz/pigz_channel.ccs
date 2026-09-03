@@ -147,19 +147,15 @@ int compress_file(const char* in_path, const char* out_path) {
     char[:0] in_s = cc_slice_cstr(in_path);
     char[:0] out_s = cc_slice_cstr(out_path);
 
-    CCFile in_file;
-    if (in_file.open(in_s, "rb") != 0) {
+    CCFile in_file = cc_file_open(in_s) !>(e) {
         eprintln(@string(`Failed to open input: ${in_path}`, @scratch)) !>;
         return 1;
-    }
-    @defer in_file.close();
+    } @destroy;
 
-    CCFile out_file;
-    if (out_file.open(out_s, "wb") != 0) {
+    CCFile out_file = cc_file_create(out_s) !>(e) {
         eprintln(@string(`Failed to open output: ${out_path}`, @scratch)) !>;
         return 1;
-    }
-    @defer out_file.close();
+    } @destroy;
 
     /* Ordered channel of CompressedResult* (NULL in a slot = compress failed). */
     CompressedResult*[~CHAN_CAP >] results_tx;

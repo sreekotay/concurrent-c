@@ -1,4 +1,5 @@
 # Linux ARM32 Docker — pigz TCC backend (FAIL)
+# Superseded by ilp32_arm32_tcc_2026_09_03.txt (0.3.4-294 — all three PASS).
 # Date: 2026-08-30
 # Seed: shadow_lower last-good 0.3.4-259
 # Host: macOS (Darwin 25), arm64, Docker Desktop, QEMU user-mode linux/arm/v7

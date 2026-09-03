@@ -577,12 +577,12 @@ and clean EOF / `Ok(false)` exit the loop.
 
 ## File and buffered I/O
 
-`<ccc/std/io.cch>` defines `CCFile` and `CCBufWriter`. Buffered reads live in
-`<ccc/std/bufio.cch>` as the generic `BufReader::[Src]`.
+`<ccc/std/io.cch>` defines `CCFile` (a POSIX fd) and `CCBufWriter`. Buffered
+reads live in `<ccc/std/bufio.cch>` as the generic `BufReader::[Src]`.
 
 ```c
 typedef struct {
-    FILE *handle;
+    int fd; /* >= 0 open; -1 closed */
 } CCFile;
 
 typedef struct {
@@ -593,39 +593,58 @@ typedef struct {
 } CCBufWriter;
 ```
 
-The file API is:
+Closed is `CC_FILE_CLOSED` (`fd == -1`). `cc_file_close` is idempotent and
+does not flush or sync.
+
+Birth is Result-shaped. `cc_file_open` is read. `cc_file_create` is
+write+trunc. `@()` on `CCFile` is open (one argument):
 
 ```c
-int cc_file_open(CCFile *file, char[:0] path, const char *mode);
-void cc_file_close(CCFile *file);
-CCResult_CCSlice_CCIoError cc_file_read_all(CCFile *file, CCArena arena);
-CCResult_CCSlice_CCIoError cc_file_read(CCFile *file, CCArena arena, size_t n);
-CCResult_bool_CCIoError cc_file_read_into(CCFile *file, CCArena arena, size_t n, CCSlice *out);
-CCResult_CCSlice_CCIoError cc_file_read_line(CCFile *file, CCArena arena);
-CCResult_bool_CCIoError cc_file_read_line_into(CCFile *file, CCArena arena, CCSlice *out);
-CCResult_size_t_CCIoError cc_file_write(CCFile *file, CCSlice data);
-CCResult_size_t_CCIoError cc_file_read_buf(CCFile *file, void *buf, size_t n);
-CCResult_bool_CCIoError cc_file_read_buf_into(CCFile *file, void *buf, size_t n, size_t *out);
-CCResult_size_t_CCIoError cc_file_write_buf(CCFile *file, const void *buf, size_t n);
-CCResult_size_t_CCIoError cc_file_sync(CCFile *file);
-CCResult_size_t_CCIoError cc_file_seek(CCFile *file, long offset, int whence);
-CCResult_size_t_CCIoError cc_file_tell(CCFile *file);
-CCResult_size_t_CCIoError cc_file_size(CCFile *file);
+CCFile in@(path) !> @destroy;
+CCFile out = cc_file_create(path) !> @destroy;
 ```
 
-`path` is a NUL-terminated borrow (`char[:0]` / `CCSlice` ABI). String
-literals coerce at the call site; `mode` remains `const char *` and is not
-coerced. `cc_file_open` returns zero on success and `-1` on failure. The
-failure's `errno` remains available separately.
-`cc_file_close` ignores close errors. `cc_file_read`, `cc_file_read_line`, and
-`cc_file_read_buf` are arity macros: the value-returning form (no out-parameter)
-returns an empty slice / `0` at EOF; the `_into` form (out-parameter) returns
-`Ok(true)` when it writes an output value and `Ok(false)` at EOF.
-`cc_file_read_line` includes the newline when one is read. `cc_file_write` and
-`cc_file_write_buf` return the number of bytes written. `cc_file_size` returns
-`Ok(0)` for a non-seekable stream and does not change the current position.
+```c
+CCFile !>(CCIoError) cc_file_open(char[:0] path);
+CCFile !>(CCIoError) cc_file_create(char[:0] path);
+void cc_file_close(CCFile *file);
+CCSlice !>(CCIoError) cc_file_read_all(CCFile *file, CCArena arena);
+CCSlice !>(CCIoError) cc_file_read(CCFile *file, CCArena arena, size_t n);
+bool !>(CCIoError) cc_file_read_into(CCFile *file, CCArena arena, size_t n, CCSlice *out);
+CCSlice !>(CCIoError) cc_file_read_line(CCFile *file, CCArena arena);
+bool !>(CCIoError) cc_file_read_line_into(CCFile *file, CCArena arena, CCSlice *out);
+size_t !>(CCIoError) cc_file_write(CCFile *file, CCSlice data);
+size_t !>(CCIoError) cc_file_read_buf(CCFile *file, void *buf, size_t n);
+bool !>(CCIoError) cc_file_read_buf_into(CCFile *file, void *buf, size_t n, size_t *out);
+size_t !>(CCIoError) cc_file_write_buf(CCFile *file, const void *buf, size_t n);
+size_t !>(CCIoError) cc_file_write_some(CCFile *file, CCSlice data);
+size_t !>(CCIoError) cc_file_read_at(CCFile *file, void *buf, size_t n, int64_t offset);
+size_t !>(CCIoError) cc_file_write_at(CCFile *file, CCSlice data, int64_t offset);
+size_t !>(CCIoError) cc_file_sync(CCFile *file);
+size_t !>(CCIoError) cc_file_seek(CCFile *file, long offset, int whence);
+size_t !>(CCIoError) cc_file_tell(CCFile *file);
+size_t !>(CCIoError) cc_file_size(CCFile *file);
+```
 
-`CCFile` UFCS maps file methods to `cc_file_*` and passes `&file`.
+`path` is a length-delimited borrow (`char[:0]` / `CCSlice` ABI). String
+literals coerce at the call site. The runtime copies the path to a NUL
+buffer for `open(2)`.
+`cc_file_read`, `cc_file_read_line`, and `cc_file_read_buf` are arity macros:
+the value-returning form (no out-parameter) returns an empty slice / `0` at
+EOF; the `_into` form returns `Ok(true)` when it writes an output value and
+`Ok(false)` at EOF.
+`cc_file_read_line` does not include the newline; one trailing `\r` is
+stripped. Line bytes are NUL-safe.
+`cc_file_write` and `cc_file_write_at` write every byte or return `Err`.
+`cc_file_write_buf` and `cc_file_write_some` are one `write(2)` (short is
+`Ok(n)`).
+`cc_file_read_at` / `cc_file_write_at` do not move the file offset.
+`cc_file_sync` is `fsync`.
+`cc_file_size` is `Err` for a non-regular file (pipe, socket, …) and does
+not change the current position.
+
+`CCFile` UFCS maps file methods to `cc_file_*` and passes `&file`. Open and
+create are factories (`cc_file_open(path)`), not methods on an existing file.
 
 ## POSIX file map
 
@@ -729,27 +748,18 @@ void cc_async_cancel(CCAsyncHandle *handle);
 
 Submission functions return the channel submission result. Completion writes
 operation results into caller-provided storage and sends the operation's
-completion code through the handle. In particular, `cc_file_open_async`
-completes with the actual `cc_file_open` result, including `-1` on open
-failure; this code is not an errno value.
+completion code through the handle. `cc_file_open_async` is read-open and
+completes with `0` on success and `-1` on failure; this code is not an
+errno value.
 
 ```c
-int cc_file_open_async(CCExec *ex, CCFile *file, char[:0] path, const char *mode, CCAsyncHandle *handle);
-int cc_file_open_async_deadline(CCExec *ex, CCFile *file, char[:0] path, const char *mode, CCAsyncHandle *handle, const CCDeadline *deadline);
+int cc_file_open_async(CCExec *ex, CCFile *file, char[:0] path, CCAsyncHandle *handle);
 int cc_file_close_async(CCExec *ex, CCFile *file, CCAsyncHandle *handle);
-int cc_file_close_async_deadline(CCExec *ex, CCFile *file, CCAsyncHandle *handle, const CCDeadline *deadline);
 int cc_file_read_all_async(CCExec *ex, CCFile *file, CCArena arena, CCSlice *out, CCAsyncHandle *handle);
-int cc_file_read_all_async_deadline(CCExec *ex, CCFile *file, CCArena arena, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
 int cc_file_read_async(CCExec *ex, CCFile *file, CCArena arena, size_t n, CCSlice *out, CCAsyncHandle *handle);
-int cc_file_read_async_deadline(CCExec *ex, CCFile *file, CCArena arena, size_t n, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
 int cc_file_read_line_async(CCExec *ex, CCFile *file, CCArena arena, CCSlice *out, CCAsyncHandle *handle);
-int cc_file_read_line_async_deadline(CCExec *ex, CCFile *file, CCArena arena, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
 int cc_file_write_async(CCExec *ex, CCFile *file, CCSlice data, size_t *out_written, CCAsyncHandle *handle);
-int cc_file_write_async_deadline(CCExec *ex, CCFile *file, CCSlice data, size_t *out_written, CCAsyncHandle *handle, const CCDeadline *deadline);
 ```
-
-Each `*_async` has a matching `*_async_deadline` that takes a `CCDeadline *`
-as the last argument after the handle.
 
 ### Path helpers
 

@@ -366,6 +366,7 @@ bugs.
 | `@err`         | Forward current error to the matching `@errhandler` for that `E`        | `@err(e);`                             |
 | `@with_deadline` | Apply deadline to a block                                             | `@with_deadline(seconds(5)) { … }`     |
 | `@parallel`      | Join independent assignment arms, or walk an index range              | `@parallel { a = f(); b = g(); } !>.wait()!>;` |
+| `@parallel spawn` | Same join; spawned arms are not denied (meeting admit)              | `@parallel spawn { produce(tx); consume(rx); } !>.wait()!>;` |
 | `@parallel (pred)` | Same join; spawn if `pred`, otherwise run the arms in order         | `@parallel (d < k) { a = f(); b = g(); } !>.wait()!>;` |
 | `@parallel for`  | Independent iterations over a half-open integer range                 | `@parallel for (i in 0..n) { … } !>.wait()!>;` |
 | `@parallel seq (cond)` | Same join; `seq` names the denial: run the arms in order         | `@parallel seq (use_par) { a = f(); b = g(); } !>.wait()!>;` |
@@ -401,6 +402,8 @@ bugs.
 | `@comptime if (cond) { }`       | Compile-time conditional                                 | `@comptime if (FEATURE_X) { }`                           |
 | `@errhandler(E e) stmt` / `{ }` | Block-scoped handler for Result error type `E` (§3.1)    | `@errhandler(CCError e) cc_error_exit(e);` |
 | `@parallel { arms }`            | `CCParallel !>(CCError)` join of `name = expr;`, `expr !>;`, or `@serial` arms (§8.11) | `@parallel { a = f(); b = g(); } !>.wait()!>;` |
+| `@parallel spawn { arms }`      | Same join; spawned arms are not denied (§8.11.7)          | `@parallel spawn { produce(tx); consume(rx); } !>.wait()!>;` |
+| `@parallel(h) { stmts }`        | Admit onto dest `h` (statement; value-copy)               | `@parallel(h) { handle(sock); }` |
 | `@parallel (pred) { arms }`     | Same join; spawn if `pred`, else run in order (§8.11.3)   | `@parallel (d < k) { a = f(); b = g(); } !>.wait()!>;` |
 | `@parallel for (i in lo..hi)`   | Independent iterations over a half-open range (§8.11.4)   | `@parallel for (y in 0..h) { row(y); } !>.wait()!>;` |
 | `@parallel seq (cond) { arms }` | Same join; named sequential denial (§8.11.5)              | `@parallel seq (use_par) { a = f(); b = g(); } !>.wait()!>;` |
@@ -471,6 +474,7 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cl
 | Form | Purpose | Example |
 | ---- | ------- | ------- |
 | `@parallel { a = …; b = …; }` | `CCParallel !>(CCError)` join. Always tries to spawn. | `@parallel { left = f(); right = g(); } !>.wait()!>;` |
+| `@parallel spawn { a = …; b = …; }` | Same join; spawned arms are not denied. | `@parallel spawn { produce(tx); consume(rx); } !>.wait()!>;` |
 | `@parallel { @serial { … } … }` | Same join; an arm may be ordinary C (zero or one outer name). | `@parallel { @serial { int t = f(); a = t; } b = g(); } !>.wait()!>;` |
 | `@parallel (pred) { a = …; b = …; }` | Same arms. Spawn if `pred`; otherwise serial. | `@parallel (d < k) { left = f(); right = g(); } !>.wait()!>;` |
 | `@parallel for (i in lo..hi) { }` | Independent iterations over a half-open integer range. Bisects; may sequentialize. | `@parallel for (y in 0..h) { row(y); } !>.wait()!>;` |
@@ -5369,7 +5373,9 @@ void !>(CCError) cc_exclusive_mutex_acquire_when_into(CCExclusiveMutex* m,
 
 `@parallel` names a join of independent work. It is not a nursery. The brace form is `CCParallel !>(CCError)`: create can fail; `.wait()` is the join. The implementation may run some arms or iterations on other workers, or run all of them on the caller. `n.spawn` does not sequentialize; `@parallel` may.
 
-The form is selected by the tokens after `@parallel`: `{` (always try to spawn), `(` or `seq (` (spawn if the predicate, §8.11.3, §8.11.5), `wait (` (ordered spawn loop over a turnstile; an expression of type `bool !>(CCError)`, §8.11.6), or `@for` (bisected range, §8.11.4). Assignment join and `@parallel for` are `CCParallel !>(CCError)`. A statement consumes the Result and waits (`!>.wait()!>;`) or binds the handle (`CCParallel h = … !>;`). A bare construct is an unconsumed Result. The wait-for form is `bool !>(CCError)`.
+The form is selected by the tokens after `@parallel`: `{` (always try to spawn; spawned arms may be denied), `spawn` then `{` (meeting admit: spawned arms are not denied, §8.11.7), `(name) { … }` with no `!>` (admit onto dest `name`; a statement, not a Result), `(` or `seq (` (spawn if the predicate, §8.11.3, §8.11.5), `wait (` (ordered spawn loop over a turnstile; an expression of type `bool !>(CCError)`, §8.11.6), or `@for` (bisected range, §8.11.4). `spawn` is a brace join; combining it with `for` or `wait` is ill-formed. Assignment join and `@parallel for` are `CCParallel !>(CCError)`. A statement consumes the Result and waits (`!>.wait()!>;`) or binds the handle (`CCParallel h = … !>;`). A bare construct is an unconsumed Result. The wait-for form is `bool !>(CCError)`.
+
+`@parallel(h) { stmts }` admits a fiber onto live dest `h`. It is the growing form of dest: a name arrives after the brace. It is a statement: no `!>`, no dest bind. Spawned work is not denied. A later write of a snapshot name in the caller is not this fiber's object (accept `sock`, loop `x`). Pointer and array names copy the pointer. An atomic name is the caller's cell. Occupancy is who is still running. A finished admit is dropped before the next admit; the live index grows if it must (OOM is a programming error). `CC_PARALLEL_TASK_MAX` is brace width and the dest's inline pad, not a cap on this form. `h.wait()` joins the dest's arms and whoever is still admitted. Admit after join or leave is a programming error. The same tokens with `!>` are the predicate join (§8.11.3).
 
 **Captures.** A body or arm may use locals of the enclosing frame. A pointer-typed name is captured by copying the pointer; uses inside the body see that pointer value, and writes through it hit the pointee. An array name copies the decayed element pointer. Every other name is captured by reference: the lowering takes the local's address, and every use denotes the frame's object itself. A write through a reference capture is visible to the frame after `.wait()` and to concurrently running arms or iterations, subject to the construct's independence and ordering rules. Reference-captured objects must outlive `.wait()`. A dest-live handle does not extend those objects' storage; a pointer capture does not require the pointer slot to outlive `.wait()`, only the pointee. The loop index of a `for` form is a per-iteration value, not a capture. These rules are distinct from closure-literal capture lists (§2.2), which copy by value because a closure may escape its frame.
 
@@ -5398,7 +5404,7 @@ CCParallel h2 = @parallel { c = p(); d = q(); } !>;
 
 `h1.adopt(h2)` links a cancel tree. `h1.cancel()` cancels adopted children (newest first), then `h1`. `h2.cancel()` cancels `h2` only. Adopt is not a move: both handles stay live. Self, cycle, a second parent, a joined parent or child, and a full child list are errors.
 
-A dest bound to the construct (`CCParallel h = @parallel { … } !>;`) is that handle before any arm runs. Binding starts the arms and does not join. The construct plants the dest: `h.live()` is true until `h.wait()` sets `h.joined` or `h.leave()` consumes the handle. `cc_parallel_empty()` is idle (`!h.live()`). `#pragma(@parallel) off` goes idle→joined with no live window. Kick is `if (h.live()) return; h = @parallel { … } !>;` — after wait the next bind overwrites `h`. Do not infer lifetime from `h.n` / `h.nt`. When there is a kick, the first arm has finished on the caller when the construct returns `h`. Remaining arms may still be running. `h.wait()` joins them and synchronizes-with every arm: after it returns, those arms' writes to captured objects are visible. `@parallel { … } !>.wait()!>;` waits before the statement completes. A dest bound to a one-arm `@parallel` whose arm is an assignment is ill-formed: this dest is never live on the caller. A dest bound to a one-arm expression (`CCParallel h = @parallel { work(); } !>;`) is well-formed: that arm is the worker (spawned); dest is live on the caller. `@parallel { work(); } !>.wait()!>;` is well-formed. `CCParallel h = @parallel { @serial { a = t; } } !>;` marks the caller strand. Reading another arm's destinations before `.wait()` returns is undefined. Arms may `h.cancel()`, `h.adopt(…)`, `h.pause()`, and `h.resume()`. `h.wait()` in an arm of `h` is ill-formed. The first arm of a multi-arm construct is not a task of `h`: cancel from the caller stops spawned siblings; the caller continues.
+A dest bound to the construct (`CCParallel h = @parallel { … } !>;`) is that handle before any arm runs. Binding starts the arms and does not join. The construct plants the dest: `h.live()` is true until `h.wait()` sets `h.joined` or `h.leave()` consumes the handle. `cc_parallel_empty()` is idle (`!h.live()`). `#pragma(@parallel) off` goes idle→joined with no live window. Kick is `if (h.live()) return; h = @parallel { … } !>;` — after wait the next bind overwrites `h`. Do not infer lifetime from `h.n` / `h.nt`. When there is a kick, the first arm has finished on the caller when the construct returns `h`. Remaining arms may still be running. `h.wait()` joins them and synchronizes-with every arm: after it returns, those arms' writes to captured objects are visible. `@parallel { … } !>.wait()!>;` waits before the statement completes. A dest bound to a one-arm `@parallel` whose arm is an assignment is ill-formed: this dest is never live on the caller. A dest bound to a one-arm expression (`CCParallel h = @parallel { work(); } !>;`) is well-formed: that arm is the worker (spawned); dest is live on the caller. `@parallel { work(); } !>.wait()!>;` is well-formed. `CCParallel h = @parallel { @serial { a = t; } } !>;` is a sequential-block arm (the dest is live while that arm runs). Reading another arm's destinations before `.wait()` returns is undefined. Arms may `h.cancel()`, `h.adopt(…)`, `h.pause()`, and `h.resume()`. `h.wait()` in an arm of `h` is ill-formed. The first arm of a multi-arm construct is not a task of `h`: cancel from the caller stops spawned siblings; the caller continues.
 
 `h.close(tx)` is UFCS for `cc_parallel_close(h, tx)`. It arms this dest's EMPTY to close `tx` after `.wait()`, or on the LEFT path after `.leave()`, before dest storage for the join set is released. Wait-for dest (`h.n` is the construct's nursery) registers on that nursery. `h.leave()` is UFCS for `cc_parallel_leave` and consumes the handle without joining. `h.leave(ctx, finish)` registers one leftover that runs at EMPTY on the LEFT path only, then leaves. Leftover does not run on `.wait()`. A program uses either `.wait()` or `.leave()`. Mixing them is a programming error (the runtime aborts). After `leave` the handle is not live: no `wait`, `close`, `leave`, or `spawn` into it. `leave` on a wait-for dest is a programming error — the construct joins before the statement ends. `leave` is not cancellation; in-flight arms run to completion. There is no dest `.abandon`.
 
@@ -5435,7 +5441,7 @@ T a, b;
 } !>.wait()!>;
 ```
 
-`@serial { … }` is an arm of `@parallel { }`. Its body is ordinary C. It may assign one simple outer name already in scope, or none (a statement arm: close, send, a loop). Locals, `if`, `for`, and inner `{ }` are C scope inside the arm. After the join, an outer write is visible the same way an assignment arm's write is.
+`@serial { … }` is an arm of `@parallel { }`. The block is sequential: those statements are one sibling, in order. Its body is ordinary C. It may assign one simple outer name already in scope, or none (a statement arm: close, send, a loop). Locals, `if`, `for`, and inner `{ }` are C scope inside the arm. After the join, an outer write is visible the same way an assignment arm's write is. The arm may still spawn if it is not the first sibling.
 
 `@serial` is legal only as a direct child of `@parallel { }`. It is not a handle, not an `else`, and not a file- or function-scope statement. It is ill-formed in `@parallel for`, nested inside another `@serial`, without a following `{ … }`, with an empty body, or with two or more distinct simple outer names. An assignment to a field, subscript, or indirection does not count as the outer name.
 
@@ -5520,7 +5526,7 @@ A wait-for whose body can so `break` cannot discard the bool: `bool fin = @paral
 
 An assignment or `@serial` arm after the first is spawned as a fiber and attached to the dest; `.wait()` joins. `@parallel for` spawns one half of a span at each bisection; a span of length 0 or 1 is a sequential `for`. If spawn fails or the adaptive gate refuses the spawn (task kind INVALID), that arm or leftover span runs on the caller. Denied work still runs. The construct does not estimate how much work an arm contains. A caller who knows a cutoff writes it on the join (`@parallel (d < k) { … }`) so the same arms run in parallel above the cut and in order below it.
 
-`@parallel` MAY run arms serially when no arm's progress depends on a sibling running concurrently. A brace `@parallel` that names a channel operation on any arm, or that captures a channel, does not deny the spawned arms (the site is REAL). Complementary `send`/`recv` is that case, including through a helper. A site that suspends is REAL. If a join denies a sibling and then parks on a channel, the implementation aborts (the park names the denied join). Channels plus a nursery/`spawn` also guarantee independent fibers. A hang is diagnosed by the deadlock detector (park reason, parked fiber). A cutoff predicate (`@parallel (d < k)`) is optional: it names a floor the caller already knows. Ungated brace joins still adapt when they cannot rendezvous.
+`@parallel` MAY run arms serially when no arm's progress depends on a sibling running concurrently. `@parallel spawn` does not deny the spawned arms. A brace `@parallel` that names a blocking channel operation on any arm, or that captures a channel, is ill-formed unless it is `spawn` or `#pragma(@parallel) off`. Complementary `send`/`recv` is that case, including through a helper. `close` and `try_send` / `try_recv` are not that case. If a join denies a sibling and then parks on a channel, the implementation aborts (the park names the denied join). A nursery `n.spawn` is a different construct. A hang is diagnosed by the deadlock detector (park reason, parked fiber). A cutoff predicate (`@parallel (d < k)`) is optional: it names a floor the caller already knows. Ungated brace joins still adapt when they cannot rendezvous.
 
 The implementation denies a `cc_parallel_spawn` when the site's leaf arms are cheaper than a spawn and the ready queue is already busy. A site classified as heavy (REAL) is never denied. The gate keys sites by thunk pointer and does not apply to `@parallel wait` / nursery / `cc_nursery_spawn*`. `#pragma(@parallel) off` and `seq` false are the user's sequential schedule.
 
@@ -5780,7 +5786,7 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 - `.niche` donates a bit pattern a valid instance never exhibits, so a `@variant(packed)` arm of this type can carry the discriminant (`spec/draft_variants.md`, packed layout). `cc_type_niche(size, align, offset, width, sentinel)` is the helper.
 - `.cast` is dest-convert. The handler receives the source type, the requested dest type, and `kind` (`implicit` or `explicit`) and returns a callee name, the UFCS pass tag, or empty (hard reject). Implicit sites (decl-init and `=`) ask the dest type only. Dest may insert a wrap; dest must not insert a peel. A slice dest may wrap `CCString` / `CCString*` as `as_slice`, or `CCVec_T` / `CCVec_T*` as `Name_as_slice` when the dest element is `T` (`int[:]` ← `Vec::[int]`; `char[:]` ← `Vec::[char]`). `v.as_slice()` remains the explicit spelling. For-in does not dest-cast: `@for (x in v)` walks the live vec.
 - `.len` names the extent (`cc_type_len_field` or `cc_type_len_call`). It returns `size_t` — naked, not Result. The hook checks the minimum (usually nothing). Ordinary sites may read `x.len` / `x.len()`; they may not store it. `T[n]` `.len` is the constexpr bound `n`.
-- `.access` is the compiler-internal walk slot (`cc_type_access_load` or `cc_type_access_call`). It returns `T` / the slot — naked, not Result. Users write `@for (v in s)` / `@for (&v in s) { … } !>;` / `@for (i, v in s)` / `@for (a, b in s, t) { … } !>;`, not `s.access(i)`. The walk re-reads `.len` every iteration, then calls `.access`. A write through `.access` re-reads `.len`; `i >= len` is `CC_ERR_INVALID_ARG` (`"for-in write"`) — that check is the mut walk's Result, not a skip and not `set()`. Point access stays `at` / `set` (Result). A user type joins for-in by registering both arms. `CCSlice` / `CCSlice_*`, `CCVec_*`, and `CCString` register both.
+- `.access` is the compiler-internal walk slot (`cc_type_access_load` or `cc_type_access_call`). It returns `T` / the slot — naked, not Result. Users write `@for (v in s)` / `@for (&v in s) { … } !>;` / `@for (i, v in s)` / `@for (a, b in s, t) { … } !>;`, not `s.access(i)`. A slice header and a `T[n]` bound snapshot `.len` and the data pointer at entry. A grower (`CCVec_*`, `CCString`) snapshots the same way when the body does not grow, shrink, or rebind the subject. If the body can change the subject's extent, the condition re-reads `.len` and a write re-reads before the store; `i >= len` is `CC_ERR_INVALID_ARG` (`"for-in write"`) — that check is the mut walk's Result, not a skip and not `set()`. Point access stays `at` / `set` (Result). A user type joins for-in by registering both arms. `CCSlice` / `CCSlice_*`, `CCVec_*`, and `CCString` register both.
 - `.create` may be registered either as fixed callee strings (`cc_type_create_call(...)`, `cc_type_create_overloads(...)`) or as a callable hook via `cc_type_create_hook(...)`.
 - Recognized hook fields are `.create`, `.destroy`, `.ufcs`, `.cast`, `.len`, `.access`, `.ufcs_sink`, and `.niche`.
 
@@ -6188,7 +6194,7 @@ typed instances hop those names through `as: base`), `CCVec_*` (`.len` / `data`)
 
 ```c
 @for (i in lo..hi) { ... }   /* sequential range; hi < lo is empty */
-@for (v in s) { ... }        /* walk: re-read s.len, then .access load */
+@for (v in s) { ... }        /* walk: snapshot or live .len, then .access load */
 @for (&v in s) { ... } !>;   /* mut walk: v = … is .access store; write bound is Result */
 @for (&v in s.sub(lo, hi)) { ... } !>;
 @for (i, v in s) { ... }     /* enumerate: i is size_t, v is the load */
@@ -6213,9 +6219,14 @@ locals. `@for (&i in lo..hi)` is ill-formed.
 **Mut walk:** `@for (&v in s) { … } !>;` (or `@for (i, &v in s)`). Type:
 `void !>(CCError)`. The `.access` hook stays naked. `v = x` / `v += x`
 / `++v` store through the same `.access` peel as the load (`s.ptr[i]`,
-`v.data[i]`, `cc_string_data`, `a[i]`). Before that store the walk
-re-reads `.len`; `i >= len` is `CC_ERR_INVALID_ARG` (`"for-in write"`).
-That check is the error — not a skip, not `set()`. Consume with `!>;`
+`v.data[i]`, `cc_string_data`, `a[i]`). A slice header and a `T[n]` bound
+are frozen: the walk snapshots `.len` and the data pointer at entry; a
+write is in range by that trip count. A grower (`CCVec_*`, `CCString`)
+snapshots the same way when the body does not grow, shrink, or rebind the
+subject. If the body can change the subject's extent, the condition
+re-reads `.len` and a write re-reads before the store; `i >= len` is
+`CC_ERR_INVALID_ARG` (`"for-in write"`). That check is the error — not a
+skip, not `set()`. Consume with `!>;`
 (enclosing `@errhandler`) or `!>(e) { … }`. A bare mut walk is an
 unconsumed Result. Field assignment (`v.x =`) is ill-formed — assign
 the binder, or peel the subject. Zip with `&` binders is still zip
@@ -6710,7 +6721,7 @@ Traditional C `for(;;)` is unchanged. For-in subjects and zip failure
 are §9.2.4.
 
 ```c
-@for (v in s) { ... }            // walk: re-read .len, then .access
+@for (v in s) { ... }            // walk: snapshot or live .len, then .access
 @for (&v in s) { ... } !>;       // mut walk: write bound is Result
 @for (i, v in s) { ... }         // enumerate
 @for (a, b in s, t) { ... } !>;  // zip; void !>(CCError)
@@ -6720,13 +6731,16 @@ are §9.2.4.
 **Walk lowering:**
 
 ```c
-/* @for (v in s) { BODY } — condition re-reads .len every iteration */
-for (size_t __i = 0; __i < /* s.len hook */; ++__i) {
-    T v = /* .access load after the bound */;
+/* frozen slice / T[n], or a grower the body does not resize */
+size_t __n = /* s.len at entry */;
+T *__p = /* .access pointer at entry */;
+for (size_t __i = 0; __i < __n; ++__i) {
+    T v = __p[__i];
+    /* v = x → v = (__p[__i] = x); */
     BODY
 }
 
-/* @for (&v in s) { v = x; } !>; — write re-reads .len; i >= len is the Result */
+/* grower whose body can change extent — write re-reads .len */
 for (size_t __i = 0; __i < /* s.len hook */; ++__i) {
     T v = /* .access load */;
     /* v = x → if (__i >= s.len) { e = "for-in write"; goto @errhandler } */

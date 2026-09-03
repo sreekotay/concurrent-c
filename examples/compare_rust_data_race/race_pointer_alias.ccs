@@ -32,7 +32,7 @@
 enum { N_TASKS = 8, N_ITERS = 100000 };
 
 int main(void) {
-    CCArena arena = cc_arena_heap(kilobytes(4)) @destroy;
+    cc_arena_stack(arena, kilobytes(4));
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     int counter = 0;

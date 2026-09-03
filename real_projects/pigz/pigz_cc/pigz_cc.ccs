@@ -132,11 +132,11 @@ static bool open_output_checked(CCFile* file, const char* path) {
         mark_pipeline_error();
         return false;
     }
-    if (file->open(cc_slice_cstr(path), "wb") != 0) {
+    *file = cc_file_create(cc_slice_cstr(path)) !>(e) {
         eprintln(@string(`Failed to open output: ${path}`, @scratch)) !>;
         mark_pipeline_error();
         return false;
-    }
+    };
     return true;
 }
 
@@ -153,7 +153,7 @@ static bool open_output_checked(CCFile* file, const char* path) {
  *   @stage (ts.write, i)
  *       — combine CRC/Adler and write raw deflate in ticket order.
  *
- * Stdin / non-regular files cannot pread and do not know n. Same helpers,
+ * Stdin / non-regular files: size is Err and read_at is not used. Same helpers,
  * sequential while-read (one held block so is_last is known).
  */
 
@@ -212,15 +212,18 @@ static void !>(CCError) check_interrupt(void) {
     return cc_ok();
 }
 
-static unsigned char* !>(CCError) read_block(int in_fd, CCArenaPool* pool,
+static unsigned char* !>(CCError) read_block(CCFile* in, CCArenaPool* pool,
                                              size_t off, size_t want) {
     unsigned char* buf = (unsigned char*)pool.alloc();
     if (!buf)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "block buf");
-    ssize_t got = pread(in_fd, buf, want, (off_t)off);
-    if (got < 0 || (size_t)got != want) {
+    size_t got = in->read_at(buf, want, (int64_t)off) !>(e) {
         pool->free(buf);
-        return cc_err(CC_ERR_IO, "pread");
+        return cc_err(CC_ERROR(CC_ERR_IO, cc_io_error_str(e)));
+    };
+    if (got != want) {
+        pool->free(buf);
+        return cc_err(CC_ERR_IO, "read_at short");
     }
     return cc_ok(buf);
 }
@@ -624,7 +627,7 @@ static void !>(CCError) compress_one(CompressRun* run, CCSlice data, bool is_las
     return cc_ok();
 }
 
-static void !>(CCError) compress_seekable(CompressRun* run, int in_fd, size_t file_len) {
+static void !>(CCError) compress_seekable(CompressRun* run, CCFile* in, size_t file_len) {
     @errhandler(CCError e) { return cc_err(e); }
 
     size_t block = g.block;
@@ -658,7 +661,7 @@ static void !>(CCError) compress_seekable(CompressRun* run, int in_fd, size_t fi
 
         unsigned char* buf = NULL;
         if (want)
-            buf = read_block(in_fd, run->in_pool, off, want) !>;
+            buf = read_block(in, run->in_pool, off, want) !>;
         CCSlice data = buf
             ? cc_slice_from_parts(buf, want, CC_SLICE_ID_UNTRACKED)
             : cc_slice_empty();
@@ -761,29 +764,24 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     g.shift = x2nmodp(g.block, 3);
     g_pipeline_error.store(0);
 
-    CCFile in_file = {0};
     const char* real_in = in_path ? in_path : "/dev/stdin";
-    if (in_file.open(cc_slice_cstr(real_in), "rb") != 0) {
+    CCFile in_file = cc_file_open(cc_slice_cstr(real_in)) !>(e) {
         eprintln(@string(`Failed to open input: ${real_in}`, @scratch)) !>;
         return 1;
-    }
-    @defer in_file.close();
+    } @destroy;
 
-    CCFile out_file = {0};
+    CCFile out_file = CC_FILE_CLOSED @destroy;
     if (!open_output_checked(&out_file, out_path))
         return 1;
-    @defer out_file.close();
 
     CompressRun run = {0};
     run.out = &out_file;
     run.zip = zip_info_from_globals();
     compress_run_init_cksum(&run);
 
-    int in_fd = fileno(in_file.handle);
-    struct stat st;
-    int seekable = (fstat(in_fd, &st) == 0 && S_ISREG(st.st_mode));
-    if (seekable)
-        compress_seekable(&run, in_fd, (size_t)st.st_size) !>;
+    size_t !>(CCIoError) sz = in_file.size();
+    if (cc_is_ok(sz))
+        compress_seekable(&run, &in_file, cc_value(sz)) !>;
     else
         compress_stream(&run, &in_file) !>;
 
@@ -805,16 +803,13 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
     (void)num_workers;
     g_pipeline_error.store(0);
     
-    CCFile in_file = {0};
     const char* real_in = in_path ? in_path : "/dev/stdin";
-    if (in_file.open(cc_slice_cstr(real_in), "rb") != 0) {
+    CCFile in_file = cc_file_open(cc_slice_cstr(real_in)) !>(e) {
         eprintln(@string(`Failed to open input: ${real_in}`, @scratch)) !>;
         return 1;
-    }
-    @defer in_file.close();
+    } @destroy;
 
-    CCFile out_file = {0};
-    bool out_open = false;
+    CCFile out_file = CC_FILE_CLOSED @destroy;
     const char* real_out_path = out_path;
     char real_out_buf[4096];
     if (strcmp(out_path, "/dev/stdout") == 0) {
@@ -835,9 +830,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
         if (!open_output_checked(&out_file, real_out_path)) {
             return 1;
         }
-        out_open = true;
     }
-    @defer { if (out_open) out_file.close(); };
 
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;

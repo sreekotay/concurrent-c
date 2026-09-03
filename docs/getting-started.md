@@ -93,24 +93,26 @@ Create `hello.ccs`:
 ```c
 #!ccc ccs
 #include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
 #include <ccc/stdio.cch>
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
 
-    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    cc_arena_stack(a, kilobytes(4));
     CCStdio io = cc_stdio_create(a);
 
-    CCNursery n = a.create_nursery() !>; // will be destroyed with the arena safely
-    n.spawn(() => [io] {
-        @errhandler(CCError e) cc_error_exit(e);
-        cc_sleep_ms(10);  /* still running when main hits return */
-        io.println("Hello from task A!") !>;
-    });
-    n.spawn(() => [io] {
-        @errhandler(CCError e) cc_error_exit(e);
-        io.println("Hello from task B!") !>;
-    });
+    @parallel spawn {
+        @serial {
+            @errhandler(CCError e) cc_error_exit(e);
+            cc_sleep_ms(10);
+            io.println("Hello from task A!") !>;
+        }
+        @serial {
+            @errhandler(CCError e) cc_error_exit(e);
+            io.println("Hello from task B!") !>;
+        }
+    } !>.wait()!>;
     return 0;
 }
 ```
@@ -119,7 +121,7 @@ int main(void) {
 ccc run hello.ccs
 ```
 
-Typical output (A sleeps 10 ms, so B usually prints first; arena destroy still waits for A):
+Typical output (A sleeps 10 ms, so B usually prints first; `.wait()` joins both):
 
 ```text
 Hello from task B!
@@ -134,15 +136,11 @@ What that program uses:
 | `T!>(E)` | Fallible value. `?>` : `E → T`. `!>` : `E →` control flow |
 | `@destroy` | Cleanup on **successful declaration construction** (`!> @destroy` = unwrap succeeded, then defer) |
 | `CCArena` / `CCStdio` | Arena **names** the window’s lifetime; growth/overflow is storage policy — prefer **`io.println(…)`** (see [Arenas](#arenas-name-a-lifetime)) |
-| `CCNursery` | `a.create_nursery()` — handle lives in `a`; arena `@destroy` waits. `leave` is only for `cc_nursery_create()` |
-| `n.spawn(() => [io] { … })` | UFCS spawn of a closure; capture `io` by value into the task |
+| `@parallel spawn` | Names on the page; spawned siblings are not denied |
+| `.wait()` | Joins those names |
 
-`CCNursery n = a.create_nursery() !>;` is `!>` (unwrap or route `E`).
-There is no `@destroy` on `n` — the handle is a child of `a`. Arena
-`@destroy` walks attached children first (wait/join), then frees slabs.
-That runs when `main` returns, so both tasks finish (A is still asleep)
-before the process exits. The self-owned form is
-`cc_nursery_create() !> @destroy` (or `leave`).
+`io` is the frame object (no capture list). `.wait()` joins before `main`
+returns. A nursery is the bag when the set is not on the page.
 
 A fuller hello (stdio helpers, per-task `@errhandler`, local-then-default
 errors) is in the repo: [examples/hello.ccs](../examples/hello.ccs).
@@ -436,6 +434,9 @@ Tasks are scoped to a `CCNursery`. Three births:
 /* both tasks have finished */
 ```
 
+Use a nursery when the set is not on the page (late `n.spawn`, host, retract).
+Names on the page are `@parallel`.
+
 Lifecycle: OPEN → JOINING/LEFT → EMPTY → DEAD. `wait` / `@destroy` join
 (OPEN → JOINING → EMPTY → DEAD). To consume a self-owned handle without
 joining, `leave` (`n.leave(ctx, finish)` or `n.leave()`; OPEN → LEFT →
@@ -445,14 +446,17 @@ nursery. `leave` is not cancel. Spec §8.1.5.
 
 ### `@parallel`
 
-Independent work. The brace and `for` forms are `CCParallel !>(CCError)`.
-`.wait()` joins. Binding the handle starts the arms and does not join.
-Not a nursery: `n.spawn` names a lifetime. A dest is live before the
-arms (`h.live()` until `h.wait()` or `h.leave()`). `h.close(tx)` arms
-EMPTY; leftover is LEFT-only. A dest bound to one assignment arm is ill-formed. A dest bound
-to one expression is the worker (spawned); dest is live. Mark the
-caller `@serial`, or join with `!>.wait()!>`. `@serial` is a multi-statement
-arm (zero or one outer name).
+Names on the page — not a nursery. The brace and `for` forms are
+`CCParallel !>(CCError)`. `.wait()` joins. Binding the handle starts the
+arms and does not join. A dest is live before the arms (`h.live()` until
+`h.wait()` or `h.leave()`). `h.close(tx)` arms EMPTY; leftover is
+LEFT-only. A dest bound to one assignment arm is ill-formed. A dest bound
+to one expression is the worker (spawned); dest is live. Join with
+`!>.wait()!>`, or bind the dest. `@serial { }` is a sequential block
+that counts as one sibling (zero or one outer name). A meeting
+(blocking send/recv, or a captured channel) is `@parallel spawn { }`:
+spawned arms are not denied. The same shape without `spawn` is
+ill-formed, except under `#pragma(@parallel) off`. `n.spawn` is the bag.
 
 ```c
 int a = 0, b = 0;
@@ -482,46 +486,41 @@ CCTurnstile ts@(cap, 1, arena) !> @destroy;
 tickets may pause or cancel `h`; the statement joins.
 `return` in a parallel construct drains first, then returns from the
 function. Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
+On-page stream: [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs).
 Spec §8.11.
 
 ### Channels
 
 Typed ends `T[~N >]` (send) and `T[~N <]` (recv). Pair them, send/recv with
-UFCS, and let nested nurseries own the close protocol — consumer outside,
-producer + `close(tx)` inside:
+UFCS. When both sides are on the page, two `@parallel spawn` arms and
+`tx.close()` next to produce:
 
 ```c
 @errhandler(CCError e) cc_error_exit(e);
 
-int[~10 >] tx;
-int[~10 <] rx;
+int[~4 >] tx;
+int[~4 <] rx;
 CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
 
-{
-    CCNursery outer = cc_nursery_create() !> @destroy;
-
-    outer.spawn(() => [rx] {
+@parallel spawn {
+    @serial {
+        for (int i = 1; i <= 3; i++)
+            tx.send(i) !>;
+        tx.close();
+    }
+    @serial {
         int v;
         while (cc_io_avail(rx.recv(&v)))
             printf("got %d\n", v);
-    });
-
-    {
-        CCNursery inner = outer.create_child() !> @destroy;
-        (void)inner.close(tx);
-
-        inner.spawn(() => [tx] {
-            for (int i = 0; i < 5; i++)
-                (void)tx.send(i);
-        });
     }
-}
+} !>.wait()!>;
 ```
 
-Runnable version with expected sum:
-[examples/recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs).
-Close/deadlock details and env guards live there and in [Debugging](debugging.md)
-— not required to start writing programs.
+Runnable version:
+[examples/recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs).
+When the set is not on the page, `n.close(tx)` arms EMPTY
+([recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs)).
+Close/deadlock details live there and in [Debugging](debugging.md).
 
 ### Named exclusive
 
@@ -541,11 +540,12 @@ The wait parks a fiber or an OS thread. An expired deadline is
 
 ### Async / await
 
-Prefer `@parallel` for independent value joins (`.wait()` or a bound handle).
-Prefer `n.spawn` for sibling work under a nursery (named lifetime, channels,
-cancel). Prefer `@async` / `@await` when one call stack should suspend
-without inventing a nursery just to join. Drive an async stack from sync
-`main` with `@await` (or `cc_block_on` where appropriate).
+Prefer `@parallel` when the siblings are on the page (`.wait()` or a bound
+handle; meetings use `@parallel spawn`). Prefer `n.spawn` when the set is
+not on the page (late admit, host, retract). Prefer `@async` / `@await`
+when one call stack should suspend without inventing a join. Drive an
+async stack from sync `main` with `@await` (or `cc_block_on` where
+appropriate).
 
 Full recipe: [examples/recipe_async_await.ccs](../examples/recipe_async_await.ccs).
 

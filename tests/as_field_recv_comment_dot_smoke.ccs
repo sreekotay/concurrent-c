@@ -16,7 +16,10 @@ typedef struct {
 int main(void) {
     AsCommentWrap w = {0};
     w.tag = 3;
-    assert(w /*as*/ .open(CC_SLICE_LIT("tmp/as_field_recv_comment_dot.txt"), "w") == 0);
+    w.file = cc_file_create(CC_SLICE_LIT("tmp/as_field_recv_comment_dot.txt")) !>(e) {
+        fprintf(stderr, "create: %s\n", cc_io_error_str(e));
+        return 1;
+    };
     CCRes(size_t, CCIoError) wr =
         w /* don't */ .write(CC_SLICE_LIT("hi\n"));
     assert(cc_is_ok(wr));

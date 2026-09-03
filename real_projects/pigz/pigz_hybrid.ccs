@@ -127,19 +127,15 @@ int compress_file(const char* in_path, const char* out_path) {
     @errhandler(CCError e) { return cc_err_log(e); }
     cc_atomic_store(&g_pipeline_error, 0);
     
-    CCFile in_file;
-    if (in_file.open(cc_slice_cstr(in_path), "rb") != 0) {
+    CCFile in_file = cc_file_open(cc_slice_cstr(in_path)) !>(e) {
         eprintln(@string(`Failed to open input: ${in_path}`, @scratch)) !>;
         return 1;
-    }
-    @defer in_file.close();
+    } @destroy;
 
-    CCFile out_file;
-    if (out_file.open(cc_slice_cstr(out_path), "wb") != 0) {
+    CCFile out_file = cc_file_create(cc_slice_cstr(out_path)) !>(e) {
         eprintln(@string(`Failed to open output: ${out_path}`, @scratch)) !>;
         return 1;
-    }
-    @defer out_file.close();
+    } @destroy;
 
     /* Ordered channel of CompressedResult* (NULL from a task means compress failed). */
     CompressedResult*[~CHAN_CAP >] results_tx;

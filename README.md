@@ -26,19 +26,23 @@ Toolchain:
 ```c
 #!ccc ccs
 #include <ccc/cc_runtime.cch>
-#include <stdio.h>
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    CCNursery n = cc_nursery_create() !> @destroy;
-    n.spawn(() => printf("Hello from task A!\n"));
-    n.spawn(() => printf("Hello from task B!\n"));
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    CCStdio io = cc_stdio_create(a);
+    @parallel spawn {
+        @serial { io.println("Hello from task A!") !>; }
+        @serial { io.println("Hello from task B!") !>; }
+    } !>.wait()!>;
     return 0;
 }
 ```
 
 Script hello (`.shcc`, shebang-friendly): [examples/hello.shcc](examples/hello.shcc).
-Full nursery tour: [examples/hello.ccs](examples/hello.ccs).
+Three named siblings: [examples/hello.ccs](examples/hello.ccs).
 
 ### Docs
 
@@ -243,10 +247,10 @@ Test conventions: `tests/README.md`. Build driver / cache / outputs: [build spec
 **Linux ILP32.** Docker cold smokes on i386 and `linux/arm/v7`
 (gnueabihf / armhf, QEMU on Apple Silicon): curated suite **0 failures**
 with host+backend **gcc** or **TinyCC** (`./scripts/smoke_i386.sh`,
-`./scripts/smoke_arm32.sh`, and `CCC_HOST_CC=tcc` variants — seed
-0.3.4-259). pigz compare on i386 and ARM32: `pigz_idiomatic` /
-`pigz_cc` / original all ELF 32-bit and gunzip-clean. Receipts:
-[docs/ilp32-docker.md](docs/ilp32-docker.md).
+`./scripts/smoke_arm32.sh`, and `CCC_HOST_CC=tcc` variants). pigz compare:
+all three binaries (`pigz`, `pigz_idiomatic`, `pigz_cc`) ELF 32-bit and
+gunzip-clean on i386 and ARM32 with gcc or TinyCC backend (2026-09-03 receipt,
+seed 0.3.4-294). Receipts: [docs/ilp32-docker.md](docs/ilp32-docker.md).
 
 ### Updating TCC
 

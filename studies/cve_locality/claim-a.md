@@ -12,9 +12,10 @@ Counts come from `corpus/*/verdict.md`. Gap means off-surface escape
 
 | | Count |
 |--|------:|
-| Corpus entries | 27 |
+| Corpus entries | 28 |
 | **prevented** (protected surface blocks the shape) | 21 |
 | **mitigated** (idiom dissolves it; C-shaped rewrite still compiles) | 4 |
+| **mitigated** off-axis (Rust does not close the shape) | 1 |
 | **still_expressible** claim-A miss | 1 |
 | **still_expressible** `parity: rust_unsafe` | 1 |
 
@@ -65,6 +66,13 @@ Idiom works; a CC spelling of the bug still compiles:
   hand-rolled completion flag, but escaping-frame analysis covers stack
   slices and not `&`-captured scalars (CVE-2023-54235). That is a real
   CC spelling (outer nursery + `&` to inner-frame state), not a pthread Gap.
+
+**Off the Rust axis:** dual-header HTTP CL+TE
+([CVE-2005-2088](corpus/CVE-2005-2088/)) — `@variant Framing` plus
+must-handle `!>` makes reject the natural path; overwriting the arm
+(TE-wins / CL-wins) still compiles and is the CVE. Safe Rust does not
+reject two `Option`s plus a precedence pick. Tokenizer / obfuscated-TE
+smuggling stays out of corpus.
 
 ## Reading
 

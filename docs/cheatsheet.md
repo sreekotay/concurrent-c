@@ -444,7 +444,8 @@ Growth failure poisons the `CCString`; it never truncates.
 ```
 
 Nested: `outer.create_child()` parents the inner nursery under `outer`.
-Independent value joins use `@parallel` (next), not a nursery.
+Siblings named on the page use `@parallel` (next). The nursery is late
+admit — `n.spawn` is not `@parallel spawn`.
 
 Lifecycle: OPEN → JOINING/LEFT → EMPTY → DEAD. `wait` / `@destroy` keep the
 handle (OPEN → JOINING → EMPTY → DEAD). `leave` consumes it (OPEN → LEFT →
@@ -464,10 +465,12 @@ Use either `@destroy` / `wait` or `leave`, not both. Spec §8.1.5.
 ## Walk (`for in`)
 
 The walk is not “a nicer `s[i]`.” `.len` / `.access` are naked (`size_t`,
-`T`) — the hook is not Result. The walk re-reads `.len` every iteration,
-then `.access`. Copy walk / enumerate / range are void. Mut walk is
-`void !>(CCError)`: a write re-reads `.len`, and `i >= len` is that
-error (`"for-in write"`) — not a skip. Zip is also Result (unequal
+`T`) — the hook is not Result. A slice / `T[n]` snapshots `.len` and the
+data pointer at entry; a grower does the same when the body does not
+resize it. Copy walk / enumerate / range are void. Mut walk is
+`void !>(CCError)`: if the body can change the subject's extent, a write
+re-reads `.len` and `i >= len` is that error (`"for-in write"`) — not a
+skip. Zip is also Result (unequal
 lengths). Point access is `s.at(i) !>`. Ordinary sites may read `.ptr` /
 `.len` / `.id`; they may not store fields. A C string is
 `s.to_c(scratch) !>` (`char[:0]`) or `s.to_cstr(scratch) !>` (`char *`).
@@ -506,25 +509,27 @@ Recipe: [recipe_walk.ccs](../examples/recipe_walk.ccs).
 
 ## `@parallel`
 
-Lexical fork-join — not a nursery. `@parallel { … }` is `CCParallel !>(CCError)`.
-`.wait()` joins. Spec §8.11.
+Lexical fork-join — names on the page, not a nursery. `@parallel { … }` is
+`CCParallel !>(CCError)`. `.wait()` joins. Spec §8.11.
 Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
 Stream (no `n`): [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs).
 
 | Form | Meaning |
 |------|---------|
 | `@parallel { a = f(); b = g(); }` | Independent assignment arms. First on the caller; the rest may spawn. |
+| `@parallel spawn { … }` | Same arms. Spawned siblings are not denied. A blocking send/recv or a captured channel on an unmarked join is ill-formed. |
+| `@parallel(h) { … }` | Growing dest: admit onto `h`. Statement; no `!>`. Snapshot captures. Never deny. Live set; `h.wait()` joins who is still running. |
 | `@parallel { h1.wait() !>; h2.wait() !>; }` | Expression arms. No assignment: the expression just runs. |
 | `h1.adopt(h2)` | Cancel tree. `h1.cancel()` is child then parent; `h2.cancel()` is child only. |
-| `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. `h.live()` is planted and not joined or left. `cc_parallel_empty()` is idle. After `h.wait()`, `h.joined` and `!h.live()`. `h.close(tx)` arms EMPTY to close `tx` on wait and leave. `h.leave()` / `h.leave(ctx, finish)` consume without joining (leftover LEFT-only). Do not mix wait and leave. Next kick overwrites `h`. When there is a kick, the first arm has finished; siblings may still run. One assignment arm is ill-formed: this dest is never live on the caller. One expression arm is the worker (spawned); dest is live. Mark the caller `@serial`, or join with `!>.wait()!>`. Pointer names copy the pointer; other names are by reference and must outlive `.wait()`. |
+| `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. `h.live()` is planted and not joined or left. `cc_parallel_empty()` is idle. After `h.wait()`, `h.joined` and `!h.live()`. `h.close(tx)` arms EMPTY to close `tx` on wait and leave. `h.leave()` / `h.leave(ctx, finish)` consume without joining (leftover LEFT-only). Do not mix wait and leave. Next kick overwrites `h`. When there is a kick, the first arm has finished; siblings may still run. One assignment arm is ill-formed: this dest is never live on the caller. One expression arm is the worker (spawned); dest is live. Join with `!>.wait()!>`, or bind the dest. Pointer names copy the pointer; other names are by reference and must outlive `.wait()`. |
 | `h.cancel()` | `bool !>(CCIoError)`. `true` = this call stored live→cancelled on `h` or an adopted child. Wakes parks on attached fibers. Pause does not complete a `recv`. |
 | `h.live()` | Planted and not joined. Kick: `if (h.live()) return; h = @parallel { … } !>;`. Pause/resume/cancel of idle or joined are `ok(false)`. |
 | `h.pause()` / `h.resume()` | `bool !>(CCIoError)`. `true` = this call's transition on a live dest. Does not require `.wait()`. Construct honors at thunk entry / next for-half / next leaf `i` / wait-for enter / after `@stage` wait. |
 | `h.paused` / `h.paused()` | Atomic flag. Safe to poll from a sibling while `pause()` / `resume()` store. Visible after `h.wait()`. |
 | `h.cancelled` | Atomic flag. Safe to poll from a sibling while `cancel()` stores. Visible after `h.wait()`. |
 | void host | `h.wait() !>(e) { (void)e; };` — UFCS `!>` lowers in void. No Result wrapper. |
-| `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; zero or one outer name. |
-| `@parallel { @serial { …; tx.close(); } @serial { while (recv) } }` | On-page stream. Close next to produce. `.wait()` joins both. A channel on the join is not denied. Not a nursery. |
+| `@serial { …; a = t; }` | Sequential block as one sibling. Ordinary C; zero or one outer name. |
+| `@parallel spawn { @serial { …; tx.close(); } @serial { while (recv) } }` | On-page stream. Close next to produce. `.wait()` joins both. Not a nursery. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. Body always runs. |
 | `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; span 0 or 1 is a plain `for`. |
 | `@parallel wait (ts) for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished. `CCParallel h = … !>;` is live during enter; the statement joins (§8.11.6). |
@@ -534,7 +539,7 @@ Stream (no `n`): [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream
 
 ```c
 int a = 0, b = 0;
-@parallel {                    // always try to spawn
+@parallel {                    // independent names; may deny
     a = f();
     b = g();
 } !>.wait()!>;
@@ -566,7 +571,7 @@ bool fin = @parallel wait (ts) for (i in 0..n) {
 int[~4 >] tx;
 int[~4 <] rx;
 cc_channel_pair(&tx, &rx) !> @destroy;
-@parallel {
+@parallel spawn {              // meeting: both arms live; do not deny
     @serial {
         for (int i = 1; i <= 3; i++)
             tx.send(i) !>;
@@ -583,7 +588,8 @@ cc_channel_pair(&tx, &rx) !> @destroy;
 `@serial` is only a direct child of `@parallel { }`. Bare `{ }` is not an
 arm. `for` as a direct child of `@parallel { }` is an error; `for` inside
 `@serial` is ordinary C. The construct does not wait for a ticket that
-has not returned. `n.spawn` still names a task lifetime.
+has not returned. `@parallel spawn` admits a meeting. `n.spawn` admits
+into a bag. They are not the same word.
 
 ---
 
@@ -592,7 +598,7 @@ has not returned. `n.spawn` still names a task lifetime.
 `T[~N >]` is a send end and `T[~N <]` is a receive end; `N` is the
 buffer capacity.
 
-Default pipeline is two `@parallel` arms and `tx.close()` on the produce
+Default pipeline is two `@parallel spawn` arms and `tx.close()` on the produce
 arm — [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs).
 `n.close(tx)` arms EMPTY when the set is not on the page (dest-live /
 leave): [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs).
@@ -836,8 +842,9 @@ h.wait() !>;                             // required: bind does not join
 
 ## Async / await
 
-Prefer `n.spawn` for sibling work. Prefer `@async` / `@await` for one
-suspendable call stack. Recipe: [recipe_async_await.ccs](../examples/recipe_async_await.ccs).
+Prefer `@parallel` when the siblings are on the page. Prefer `n.spawn`
+when the set is not. Prefer `@async` / `@await` for one suspendable call
+stack. Recipe: [recipe_async_await.ccs](../examples/recipe_async_await.ccs).
 
 ```c
 @async int bump(int value) { return value + 1; }

@@ -82,6 +82,8 @@ BENCHMARKS=(
     "spawn_nursery:perf/spawn_nursery.ccs:spawn_nursery.go:Nursery spawn throughput"
     "spawn_sequential:perf/spawn_sequential.ccs:spawn_sequential.go:Sequential spawn+join"
     "channel_throughput:perf/perf_channel_throughput.ccs:channel_throughput.go:Channel operations"
+    "unbuffered_spsc:perf/perf_unbuffered_spsc.ccs:unbuffered_spsc.go:Unbuffered 1P1C rendezvous"
+    "parallel_handoff:perf/perf_parallel_handoff.ccs:parallel_handoff.go:Seq / par-for / wait-stage store"
 )
 
 echo ""
@@ -108,33 +110,50 @@ for bench_spec in "${BENCHMARKS[@]}"; do
         continue
     fi
 
-    # For channel_throughput, show all three metrics
+    # Multi-row benches: CC needle|Go needle (same job, different spelling).
+    pairs=""
     if [ "$name" = "channel_throughput" ]; then
-        # Get metric names from output
-        metrics=("single-thread" "buffered" "unbuffered")
-        for metric in "${metrics[@]}"; do
-            cc_line=$(echo "$cc_results" | grep "$metric" | head -1)
-            go_line=$(echo "$go_results" | grep "$metric" | head -1)
-            
+        pairs="single-thread|single-thread
+buffered|buffered
+unbuffered|unbuffered"
+    elif [ "$name" = "parallel_handoff" ]; then
+        pairs="seq loop|seq loop
+par for|par chunks
+wait stage|wait stage"
+    fi
+    if [ -n "$pairs" ]; then
+        printf "%-20s\n" "$name"
+        while IFS='|' read -r cc_needle go_needle; do
+            [ -z "$cc_needle" ] && continue
+            cc_line=$(echo "$cc_results" | grep "$cc_needle" | head -1)
+            go_line=$(echo "$go_results" | grep "$go_needle" | head -1)
+
             if [ -n "$cc_line" ] && [ -n "$go_line" ]; then
                 cc_value=$(extract_number "$cc_line")
                 go_value=$(extract_number "$go_line")
                 unit=$(extract_unit "$cc_line")
-                
+                if [ -z "$unit" ]; then
+                    unit=$(echo "$cc_line" | grep -oE '[a-zA-Z/]+/sec' | head -1)
+                fi
+
                 if [ -n "$cc_value" ] && [ -n "$go_value" ] && [ "$go_value" -gt 0 ]; then
                     ratio=$(echo "scale=2; $cc_value / $go_value" | bc -l 2>/dev/null || echo "0")
                     ratio_str=$(printf "%.2f" "$ratio")
                 else
                     ratio_str="N/A"
                 fi
-                
+
                 cc_formatted=$(format_number "$cc_value")
                 go_formatted=$(format_number "$go_value")
-                
+                label="$cc_needle"
+                if [ "$cc_needle" != "$go_needle" ]; then
+                    label="$cc_needle / $go_needle"
+                fi
+
                 printf "  %-18s ${GREEN}%-18s ${BLUE}%-18s ${YELLOW}%-8s${NC}\n" \
-                       "$metric" "${cc_formatted} $unit" "${go_formatted} $unit" "$ratio_str"
+                       "$label" "${cc_formatted} $unit" "${go_formatted} $unit" "$ratio_str"
             fi
-        done
+        done <<< "$pairs"
     else
         # For other benchmarks, just compare the first metric
         cc_line=$(echo "$cc_results" | head -1)

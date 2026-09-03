@@ -1,75 +1,62 @@
 /*
- * Recipe: Closure Capture Semantics
+ * Recipe: Capture
  *
- * Closures in n.spawn(...) capture outer variables. Two modes:
+ * `@parallel` names are the frame. A pointer copies; every other name
+ * is the same object. There is no capture list.
  *
- *   () => body             — value capture (default): each outer variable
- *                            is copied into the closure; the original is
- *                            unaffected; the copy is immutable in the body.
+ * Closure lists are for `n.spawn` / `send_task` (the bag, or work on
+ * a channel). Write a list when implicit is the wrong mode:
  *
- *   () => [&x] body        — reference capture: the closure sees the
- *                            SAME variable. Read-only by default.
- *
- * Mutation through a reference capture is a compile error unless the
- * captured variable is wrapped in a thread-safe type (CCAtomic::[T],
- * CCMutex::[T]) or the closure is marked @unsafe.
- *
- * A list is not ritual. `() => { use(x); }` already value-captures every
- * outer name the body uses (copy at spawn; the copy is immutable). Write
- * a list when implicit is the wrong mode:
- *
- *   [&x]     — share the frame object (this file)
- *   [x]      — same copy as implicit; write it when the name will be
- *              rebound before the task runs (C for-loop index, accept sock)
+ *   [&x]     — share the frame object
+ *   [x]      — copy at admit; write it when the name will be rebound
+ *              (C for-loop index, accept sock)
  *   [x, &y]  — mix
  *
  * `@parallel for` gives each iteration its own index — no list
- * (recipe_parallel.ccs). Named lists elsewhere:
+ * (this file's exclusive twin is recipe_exclusive_named.ccs).
+ * Named lists on the remaining bag recipes:
  * recipe_channel_pipeline.ccs `[&sum, rx]`, recipe_worker_pool.ccs
- * `[jobs_rx, done_tx]`, recipe_tcp_echo.ccs `[sock]`,
- * recipe_exclusive_named.ccs `[id]`.
+ * `[jobs_rx, done_tx]`.
+ * send_task copy-at-submit: recipe_ordered_parallel.ccs `[id]`.
  */
 #include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
 #include <ccc/stdio.cch>
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
-    /* --- value capture (default) --- */
     int snapshot = 42;
-    println("=== value capture ===") !>;
+    println("=== names on the page ===") !>;
     println(@string(`before: snapshot = ${snapshot}`, @scratch)) !>;
-    {
-        CCNursery n = cc_nursery_create() !> @destroy;
-        n.spawn(() => {
+    @parallel spawn {
+        @serial {
             @errhandler(CCError e) cc_error_exit(e);
             int seen = snapshot;
             println(@string(`  task A sees snapshot = ${seen}`, @scratch)) !>;
-        }) !>;
-        n.spawn(() => {
+        }
+        @serial {
             @errhandler(CCError e) cc_error_exit(e);
             int seen = snapshot;
             println(@string(`  task B sees snapshot = ${seen}`, @scratch)) !>;
-        }) !>;
-        /* snapshot++ inside the body would be a compile error:
-         * value-captured variables are immutable. */
-    }
+        }
+    } !>.wait()!>;
     println(@string(`after:  snapshot = ${snapshot} (unchanged)`, @scratch)) !>;
     println("") !>;
 
-    /* --- reference capture (read-only) --- */
     int counter = 100;
-    println("=== reference capture (read-only) ===") !>;
+    println("=== same object ===") !>;
     println(@string(`before: counter = ${counter}`, @scratch)) !>;
-    {
-        CCNursery n = cc_nursery_create() !> @destroy;
-        n.spawn(() => [&counter] {
+    @parallel spawn {
+        @serial {
             @errhandler(CCError e) cc_error_exit(e);
             println(@string(`  task C reads counter = ${counter}`, @scratch)) !>;
-        }) !>;
-        /* counter++ in the body would be a compile error:
-         * mutation of a shared reference requires a safe wrapper. */
-    }
+        }
+        @serial {
+            @errhandler(CCError e) cc_error_exit(e);
+            println(@string(`  task D reads counter = ${counter}`, @scratch)) !>;
+        }
+    } !>.wait()!>;
     println(@string(`after:  counter = ${counter}`, @scratch)) !>;
     println("") !>;
 

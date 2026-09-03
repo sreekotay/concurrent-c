@@ -2,6 +2,7 @@
 #include <ccc/cc_channel.cch>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "sched_v2.h"
 #if defined(__TINYC__)
 #include "cc_pthread_tls.h"
@@ -11,7 +12,7 @@ fiber_v2* cc_task_fiber_v2(CCTask t);
 CCTask cc_fiber_spawn_task(void* (*fn)(void*), void* arg);
 void cc_parallel_join(CCTask t);
 
-static void cc_parallel_die(const char* msg) {
+void cc_parallel_die(const char* msg) {
     fprintf(stderr, "cc_parallel: %s\n", msg);
     abort();
 }
@@ -22,12 +23,135 @@ void cc_parallel_attach(CCParallel* h, CCTask t) {
         sched_v2_fiber_set_par_gate(f, h);
 }
 
+static int cc_parallel_cap(const CCParallel* h) {
+    if (!h)
+        return 0;
+    return h->ncap > 0 ? h->ncap : CC_PARALLEL_TASK_MAX;
+}
+
+static CCTask* cc_parallel_tasks(CCParallel* h) {
+    return h && h->xtasks ? h->xtasks : h->tasks;
+}
+
+static void** cc_parallel_envs(CCParallel* h) {
+    return h && h->xenvs ? h->xenvs : h->envs;
+}
+
+static void cc_parallel_env_free(CCParallel* h, void* env) {
+    char* p = (char*)env;
+    char* base = (char*)h;
+    if (!env)
+        return;
+    /* Brace take-one may record a stack fallback; never free the dest. */
+    if (h && p >= base && p < base + sizeof(*h))
+        return;
+    cc__heap_free(env);
+}
+
+/* Live occupancy: drop finished admits. Brace pad stays; history does not.
+ * Never join the fiber that is admitting (the kick). */
+static void cc_parallel_reap(CCParallel* h) {
+    CCTask* tasks;
+    void** envs;
+    fiber_v2* self;
+    int i, w;
+    if (!h)
+        return;
+    tasks = cc_parallel_tasks(h);
+    envs = cc_parallel_envs(h);
+    self = sched_v2_current_fiber();
+    w = 0;
+    for (i = 0; i < h->nt; i++) {
+        fiber_v2* f = cc_task_fiber_v2(tasks[i]);
+        if (f && f != self && sched_v2_fiber_done(f)) {
+            cc_parallel_join(tasks[i]);
+            cc_parallel_env_free(h, envs[i]);
+            continue;
+        }
+        if (w != i) {
+            tasks[w] = tasks[i];
+            envs[w] = envs[i];
+        }
+        w++;
+    }
+    h->nt = w;
+}
+
+static void cc_parallel_release_index(CCParallel* h) {
+    if (!h)
+        return;
+    if (h->xtasks)
+        free(h->xtasks);
+    if (h->xenvs)
+        free(h->xenvs);
+    h->xtasks = NULL;
+    h->xenvs = NULL;
+    h->ncap = 0;
+}
+
+/* Grow the live index. 32 is the inline pad, not a ceiling. */
+static int cc_parallel_grow(CCParallel* h, int need) {
+    int cap, ncap;
+    CCTask* nt;
+    void** ne;
+    if (!h)
+        return 0;
+    cap = cc_parallel_cap(h);
+    if (need <= cap)
+        return 1;
+    ncap = cap;
+    while (ncap < need) {
+        if (ncap > 1000000000 / 2)
+            return 0;
+        ncap *= 2;
+    }
+    nt = (CCTask*)malloc((size_t)ncap * sizeof(CCTask));
+    ne = (void**)malloc((size_t)ncap * sizeof(void*));
+    if (!nt || !ne) {
+        free(nt);
+        free(ne);
+        return 0;
+    }
+    if (h->nt) {
+        memcpy(nt, cc_parallel_tasks(h), (size_t)h->nt * sizeof(CCTask));
+        memcpy(ne, cc_parallel_envs(h), (size_t)h->nt * sizeof(void*));
+    }
+    if (h->xtasks)
+        free(h->xtasks);
+    if (h->xenvs)
+        free(h->xenvs);
+    h->xtasks = nt;
+    h->xenvs = ne;
+    h->ncap = ncap;
+    return 1;
+}
+
+void cc_parallel_admit(CCParallel* h, CCTask t, void* env) {
+    CCTask* tasks;
+    void** envs;
+    if (!h || !cc_parallel_live(h))
+        cc_parallel_die("admit on idle dest");
+    if (t.kind == CC_TASK_KIND_INVALID)
+        cc_parallel_die("admit denied");
+    cc_parallel_reap(h);
+    if (!cc_parallel_grow(h, h->nt + 1))
+        cc_parallel_die("admit: oom");
+    tasks = cc_parallel_tasks(h);
+    envs = cc_parallel_envs(h);
+    tasks[h->nt] = t;
+    envs[h->nt] = env;
+    cc_parallel_attach(h, t);
+    h->nt++;
+}
+
 void cc_parallel_wake_attached(CCParallel* h) {
+    CCTask* tasks;
     int i;
     if (!h)
         return;
+    tasks = cc_parallel_tasks(h);
     for (i = 0; i < h->nt; i++) {
-        fiber_v2* f = cc_task_fiber_v2(h->tasks[i]);
+        fiber_v2* f = cc_task_fiber_v2(tasks[i]);
         if (f)
             sched_v2_signal(f);
     }
@@ -137,8 +261,8 @@ static void cc_parallel_close_list(struct CCChan** closing, int nclose) {
 }
 
 typedef struct CCParallelLeaveHost {
-    CCTask tasks[CC_PARALLEL_TASK_MAX];
-    void* envs[CC_PARALLEL_TASK_MAX];
+    CCTask* tasks;
+    void** envs;
     struct CCChan* closing[CC_PARALLEL_CLOSE_MAX];
     void (*leftover_fn)(void*);
     void* leftover_ctx;
@@ -152,9 +276,11 @@ static void cc_parallel_leave_empty(CCParallelLeaveHost* L) {
         return;
     for (i = 0; i < L->nt; i++) {
         cc_parallel_join(L->tasks[i]);
-        free(L->envs[i]);
+        cc__heap_free(L->envs[i]);
         L->envs[i] = NULL;
     }
+    free(L->tasks);
+    free(L->envs);
     cc_parallel_close_list(L->closing, L->nclose);
     if (L->leftover_fn)
         L->leftover_fn(L->leftover_ctx);
@@ -169,6 +295,8 @@ static void* cc_parallel_leave_reaper(void* p) {
 static CCParallelLeaveHost* cc_parallel_leave_pack(CCParallel* h) {
     CCParallelLeaveHost* L;
     int i;
+    CCTask* tasks;
+    void** envs;
     L = (CCParallelLeaveHost*)calloc(1, sizeof(*L));
     if (!L)
         return NULL;
@@ -176,13 +304,25 @@ static CCParallelLeaveHost* cc_parallel_leave_pack(CCParallel* h) {
     L->nclose = h->nclose;
     L->leftover_fn = h->leftover_fn;
     L->leftover_ctx = h->leftover_ctx;
-    for (i = 0; i < h->nt; i++) {
-        L->tasks[i] = h->tasks[i];
-        L->envs[i] = h->envs[i];
-        h->envs[i] = NULL;
+    if (h->nt) {
+        L->tasks = (CCTask*)malloc((size_t)h->nt * sizeof(CCTask));
+        L->envs = (void**)malloc((size_t)h->nt * sizeof(void*));
+        if (!L->tasks || !L->envs) {
+            free(L->tasks);
+            free(L->envs);
+            free(L);
+            return NULL;
+        }
+        tasks = cc_parallel_tasks(h);
+        envs = cc_parallel_envs(h);
+        memcpy(L->tasks, tasks, (size_t)h->nt * sizeof(CCTask));
+        memcpy(L->envs, envs, (size_t)h->nt * sizeof(void*));
+        for (i = 0; i < h->nt; i++)
+            envs[i] = NULL;
     }
     for (i = 0; i < h->nclose; i++)
         L->closing[i] = h->closing[i];
+    cc_parallel_release_index(h);
     h->nt = 0;
     h->nclose = 0;
     h->leftover_fn = NULL;
@@ -191,7 +331,6 @@ static CCParallelLeaveHost* cc_parallel_leave_pack(CCParallel* h) {
 }
 
 CCResult_void_CCError cc_parallel_wait(CCParallel* h) {
-    int i;
     if (!h)
         return cc_err_CCResult_void_CCError(
             CC_ERROR(CC_ERR_INVALID_ARG, "cc_parallel_wait"));
@@ -204,11 +343,13 @@ CCResult_void_CCError cc_parallel_wait(CCParallel* h) {
         CCResult_void_CCError wr = cc_nursery_wait_host(h->n);
         if (!wr.ok) return wr;
     }
-    for (i = 0; i < h->nt; i++) {
-        cc_parallel_join(h->tasks[i]);
-        free(h->envs[i]);
-        h->envs[i] = NULL;
+    /* The kick may still be admitting. Join the oldest, then reap; do not
+     * walk a snapshot — grow moves the list off the inline pad. */
+    while (h->nt > 0) {
+        cc_parallel_join(cc_parallel_tasks(h)[0]);
+        cc_parallel_reap(h);
     }
+    cc_parallel_release_index(h);
     h->nt = 0;
     cc_parallel_close_list(h->closing, h->nclose);
     h->nclose = 0;

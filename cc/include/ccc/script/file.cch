@@ -17,41 +17,33 @@
 
 /* Read entire file at path into arena. Arena is last. */
 static inline CCSlice !>(CCError) cc_file_read_path(CCSlice path, CCArena arena) {
-    CCFile file;
-    CCSlice !>(CCIoError) r;
     if (!path.ptr || !cc_arena_is_live(arena)) {
         return cc_err(CC_ERR_INVALID_ARG, "cc_file_read_path: bad args");
     }
-    if (cc_file_open(&file, path, "rb") != 0) {
-        return cc_err(
-            CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_io_from_errno(errno))));
-    }
-    r = cc_file_read_all(&file, arena);
+    CCFile file = cc_file_open(path) !>(e) {
+        return cc_err(CC_ERROR(CC_ERR_IO, cc_io_error_str(e)));
+    };
+    CCSlice data = cc_file_read_all(&file, arena) !>(e) {
+        cc_file_close(&file);
+        return cc_err(CC_ERROR(CC_ERR_IO, cc_io_error_str(e)));
+    };
     cc_file_close(&file);
-    if (cc_is_err(r)) {
-        return cc_err(
-            CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_error(r))));
-    }
-    return cc_ok(cc_value(r));
+    return cc_ok(data);
 }
 
 static inline size_t !>(CCError) cc_file_write_path(CCSlice path, CCSlice data) {
-    CCFile file;
-    size_t !>(CCIoError) r;
     if (!path.ptr) {
         return cc_err(CC_ERR_INVALID_ARG, "cc_file_write_path: bad path");
     }
-    if (cc_file_open(&file, path, "wb") != 0) {
-        return cc_err(
-            CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_io_from_errno(errno))));
-    }
-    r = cc_file_write(&file, data);
+    CCFile file = cc_file_create(path) !>(e) {
+        return cc_err(CC_ERROR(CC_ERR_IO, cc_io_error_str(e)));
+    };
+    size_t n = cc_file_write(&file, data) !>(e) {
+        cc_file_close(&file);
+        return cc_err(CC_ERROR(CC_ERR_IO, cc_io_error_str(e)));
+    };
     cc_file_close(&file);
-    if (cc_is_err(r)) {
-        return cc_err(
-            CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_error(r))));
-    }
-    return cc_ok(cc_value(r));
+    return cc_ok(n);
 }
 
 static inline bool !>(CCError) cc_file_copy(CCSlice src, CCSlice dst, CCArena arena) {

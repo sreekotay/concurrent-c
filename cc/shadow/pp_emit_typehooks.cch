@@ -1673,6 +1673,12 @@ static void shadow_bind_walk_cursor(const char* name, const char* subj,
     snprintf(b->walk_idx, sizeof(b->walk_idx), "%s", idx);
 }
 
+static void shadow_bind_walk_peel(const char* name, const char* peel) {
+    ShadowBind* b = shadow_bind_lookup_mut(name);
+    if (!b || !peel) return;
+    snprintf(b->walk_peel, sizeof(b->walk_peel), "%s", peel);
+}
+
 static int shadow_is_c_ident_char(char c) {
     return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
            (c >= '0' && c <= '9') || c == '_';
@@ -1764,6 +1770,179 @@ static void shadow_extent_load_c(const ShadowExtent* ex, const char* recv,
     else
         snprintf(dst, cap, "((%s*)(%s).%s)[%s]", ex->elem, recv, ex->acc_name,
                  idx);
+}
+
+/* Data pointer for a snapshot peel (same hop as load/store, once). */
+static void shadow_extent_ptr_c(const ShadowExtent* ex, const char* recv,
+                                char* dst, size_t cap) {
+    if (!ex || !dst || !cap) return;
+    dst[0] = 0;
+    if (strcmp(ex->acc_kind, "index") == 0)
+        snprintf(dst, cap, "&(%s)[0]", recv);
+    else if (strcmp(ex->acc_kind, "call") == 0)
+        snprintf(dst, cap, "%s(&(%s))", ex->acc_name, recv);
+    else if (ex->typed_slice)
+        snprintf(dst, cap, "(%s*)(%s).base.%s", ex->elem, recv, ex->acc_name);
+    else
+        snprintf(dst, cap, "(%s*)(%s).%s", ex->elem, recv, ex->acc_name);
+}
+
+/* Slice header / T[n]: writing elements cannot change the bound. */
+static int shadow_extent_is_frozen(const ShadowExtent* ex) {
+    if (!ex || !ex->len_kind[0]) return 0;
+    if (strcmp(ex->len_kind, "sizeof") == 0) return 1;
+    if (ex->typed_slice) return 1;
+    if (strcmp(ex->len_kind, "field") == 0 &&
+        strcmp(ex->acc_kind, "load") == 0 &&
+        strcmp(ex->acc_name, "ptr") == 0)
+        return 1;
+    return 0;
+}
+
+static int shadow_for_recv_at(const char* text, const char* at,
+                              const char* recv) {
+    size_t n;
+    if (!text || !at || !recv || !recv[0]) return 0;
+    n = strlen(recv);
+    if (strncmp(at, recv, n) != 0) return 0;
+    if (shadow_is_c_ident_char(recv[0]) && at > text &&
+        shadow_is_c_ident_char(at[-1]))
+        return 0;
+    if (shadow_is_c_ident_char(at[n])) return 0;
+    return 1;
+}
+
+static int shadow_for_is_observe_field(const char* field) {
+    return field &&
+           (strcmp(field, "len") == 0 || strcmp(field, "data") == 0 ||
+            strcmp(field, "ptr") == 0 || strcmp(field, "base") == 0 ||
+            strcmp(field, "cap") == 0 || strcmp(field, "id") == 0);
+}
+
+/* 1 = body can grow/shrink/rebind `recv` (keep a live write bound). */
+static int shadow_for_text_extent_live(const char* text, const char* recv) {
+    const char* p;
+    size_t n;
+    if (!text || !recv || !recv[0]) return 0;
+    n = strlen(recv);
+    for (p = text; *p; p++) {
+        const char* q;
+        const char* b;
+        int observe = 0;
+        if (!shadow_for_recv_at(text, p, recv)) continue;
+        q = p + n;
+        while (*q == ' ' || *q == '\t') q++;
+        if (q[0] == '.' || (q[0] == '-' && q[1] == '>')) {
+            const char* f = (q[0] == '.') ? q + 1 : q + 2;
+            char field[64];
+            size_t fn = 0;
+            while (*f == ' ' || *f == '\t') f++;
+            while (shadow_is_c_ident_char(f[fn]) && fn + 1 < sizeof(field))
+                fn++;
+            memcpy(field, f, fn);
+            field[fn] = 0;
+            f += fn;
+            while (*f == ' ' || *f == '\t') f++;
+            if (f[0] == '(' || f[0] == '=') return 1;
+            if (shadow_for_is_observe_field(field)) observe = 1;
+        } else if (q[0] == '=' && q[1] != '=')
+            return 1;
+        else if ((q[0] == '+' || q[0] == '-' || q[0] == '*' || q[0] == '/' ||
+                  q[0] == '%' || q[0] == '&' || q[0] == '|' || q[0] == '^') &&
+                 q[1] == '=')
+            return 1;
+        if (observe) {
+            p += n - 1;
+            continue;
+        }
+        b = p;
+        while (b > text && (b[-1] == ' ' || b[-1] == '\t')) b--;
+        if (b > text && b[-1] == '&' && !(b > text + 1 && b[-2] == '&'))
+            return 1;
+        if (b > text && (b[-1] == '(' || b[-1] == ',')) return 1;
+        p += n - 1;
+    }
+    return 0;
+}
+
+static int shadow_for_ufcs_recv_is(const char* recv_text, const char* recv) {
+    const char* p;
+    if (!recv_text || !recv || !recv[0]) return 0;
+    p = recv_text;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!shadow_for_recv_at(p, p, recv)) return 0;
+    p += strlen(recv);
+    while (*p == ' ' || *p == '\t') p++;
+    return *p == 0;
+}
+
+static int shadow_for_node_extent_live(AstNode* st, const char* recv) {
+    int k;
+    if (!st || !recv || !recv[0]) return 0;
+    if (st->kind == AST_UFCS_STMT || st->kind == AST_UFCS_EXPR) {
+        if (shadow_for_ufcs_recv_is(st->a, recv) &&
+            !shadow_for_is_observe_field(st->b))
+            return 1;
+        if (shadow_for_ufcs_recv_is(st->c, recv)) return 1;
+    }
+    if (shadow_for_text_extent_live(st->a, recv)) return 1;
+    if (shadow_for_text_extent_live(st->b, recv)) return 1;
+    if (shadow_for_text_extent_live(st->c, recv)) return 1;
+    if (shadow_for_text_extent_live(st->d, recv)) return 1;
+    if (shadow_for_text_extent_live(st->e, recv)) return 1;
+    for (k = 0; k < st->nbody; k++)
+        if (shadow_for_node_extent_live(st->body[k], recv)) return 1;
+    for (k = 0; k < st->ndbody; k++)
+        if (shadow_for_node_extent_live(st->dbody[k], recv)) return 1;
+    for (k = 0; k < st->nkids; k++)
+        if (shadow_for_node_extent_live(st->kids[k], recv)) return 1;
+    return 0;
+}
+
+static int shadow_for_body_extent_live(AstNode** body, int nbody,
+                                      const char* recv) {
+    int k;
+    if (!body || !recv || !recv[0]) return 0;
+    for (k = 0; k < nbody; k++)
+        if (shadow_for_node_extent_live(body[k], recv)) return 1;
+    return 0;
+}
+
+static int shadow_for_can_snapshot(const ShadowExtent* ex, AstNode** body,
+                                   int nbody, const char* recv,
+                                   const char* subj) {
+    if (shadow_extent_is_frozen(ex)) return 1;
+    if (!ex || strcmp(ex->len_kind, "field") != 0) return 0;
+    if (shadow_for_body_extent_live(body, nbody, recv)) return 0;
+    if (subj && subj[0] && strcmp(subj, recv) != 0 &&
+        shadow_for_body_extent_live(body, nbody, subj))
+        return 0;
+    return 1;
+}
+
+static int shadow_for_emit_ptr(CEmit* out, const char* indent,
+                               const ShadowExtent* ex, const char* recv,
+                               int id, char* pname, size_t pcap) {
+    char ptr_c[384];
+    if (!out || !indent || !ex || !recv || !pname || !pcap) return 0;
+    snprintf(pname, pcap, "__cc_fp_%d", id);
+    shadow_extent_ptr_c(ex, recv, ptr_c, sizeof(ptr_c));
+    return cemit_fmt(out, "%s%s* %s = (%s);\n", indent, ex->elem, pname,
+                     ptr_c);
+}
+
+static int shadow_for_emit_peel(CEmit* out, const char* indent,
+                                const ShadowExtent* ex, const char* recv,
+                                int id, char* nname, size_t ncap, char* pname,
+                                size_t pcap) {
+    char len_c[256];
+    if (!out || !indent || !ex || !recv || !nname || !ncap || !pname || !pcap)
+        return 0;
+    snprintf(nname, ncap, "__cc_fn_%d", id);
+    shadow_extent_len_c(ex, recv, len_c, sizeof(len_c));
+    if (!cemit_fmt(out, "%ssize_t %s = (%s);\n", indent, nname, len_c))
+        return 0;
+    return shadow_for_emit_ptr(out, indent, ex, recv, id, pname, pcap);
 }
 
 /* 0 = C for, 1 = walk, 2 = range, 3 = enumerate, 4 = zip, -1 = ill-formed. */

@@ -89,7 +89,7 @@ int main(void) {
     println("range: ok") !>; /* disjoint slots — not a shared dest */
 
     {
-        CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+        cc_arena_stack(arena, kilobytes(64));
         CCTurnstile ts@(3, 1, arena) !> @destroy;
         int packed[N];
         int pos = 0;

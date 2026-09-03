@@ -543,6 +543,8 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     if (strcmp(stem, "raytracer_weekend_smoke") == 0) return 60;
     /* Emits both Redis variants; ~7s each under -O0 toolchains. */
     if (strcmp(stem, "redis_phase2_lowering_shape_smoke") == 0) return 30;
+    /* Three emit-c-only passes of mut-walk fixtures. */
+    if (strcmp(stem, "for_in_mut_walk_peel_smoke") == 0) return 20;
     /* Many nested ccc -e/-E subprocesses; ~11s alone, can exceed 30s under
      * --jobs contention (each child competes for CPU with the suite). */
     if (strcmp(stem, "script_oneliner_smoke") == 0) return 60;

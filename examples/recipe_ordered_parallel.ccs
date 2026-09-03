@@ -11,7 +11,7 @@
  *
  * Shared / loop-carried writes use `@parallel wait` + `@stage`
  * (recipe_parallel.ccs). Two named stages: recipe_turnstile.ccs.
- * Nested nurseries + close() match recipe_channel_pipeline.
+ * On-page close: produce calls tx.close() (recipe_parallel_stream.ccs).
  * Larger: real_projects/pigz/pigz_channel.ccs.
  */
 #include <ccc/std/prelude.cch>
@@ -46,10 +46,20 @@ int main(void) {
     println("") !>;
 
     cc_atomic_int failed = 0;
-    {
-        CCNursery consumer = cc_nursery_create() !> @destroy;
-
-        consumer.spawn(() => [results_rx, &failed] {
+    @parallel spawn {
+        @serial {
+            @errhandler(CCError e) cc_error_exit(e);
+            int i;
+            for (i = 1; i <= NUM_ITEMS; i++) {
+                int id = i;
+                results_tx.send_task(() => [id] {
+                    return process_item(id);
+                });
+                println(@string(`[producer] submitted task for item ${i}`, @scratch)) !>;
+            }
+            results_tx.close();
+        }
+        @serial {
             @errhandler(CCError e) cc_error_exit(e);
             println("\n[consumer] receiving results in order:") !>;
             int result = 0;
@@ -70,26 +80,8 @@ int main(void) {
                 eprintln(@string(`missing results: got ${got} of ${n}`, @scratch)) !>;
                 failed.store(1);
             }
-        }) !>;
-
-        /* Producer in an inner nursery: @destroy closes results_tx once the
-         * producer returns, so the consumer sees EOF after draining. */
-        {
-            CCNursery producer = consumer.create_child() !> @destroy;
-            producer.close(results_tx) !>;
-
-            producer.spawn(() => [results_tx] {
-                @errhandler(CCError e) cc_error_exit(e);
-                for (int i = 1; i <= NUM_ITEMS; i++) {
-                    int id = i;
-                    results_tx.send_task(() => [id] {
-                        return process_item(id);
-                    });
-                    println(@string(`[producer] submitted task for item ${i}`, @scratch)) !>;
-                }
-            }) !>;
         }
-    }
+    } !>.wait()!>;
 
     println("\nDone! Results printed in order despite out-of-order completion.") !>;
     return failed.load() ? 1 : 0;

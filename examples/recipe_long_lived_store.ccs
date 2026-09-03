@@ -97,14 +97,14 @@ static bool store_delete(Store* store, char[:] key) {
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
+    /* Request scratch is frame-local. Declare it before store.init() — a
+     * !> goto must not skip the stack VLA. Store keeps only anchored copies. */
+    cc_arena_stack(request_arena, kilobytes(1));
+    if (!request_arena.valid()) return 1;
+
     Store store;
     store.init() !>;
     @defer store.free();
-
-    /* Request checkpoints model short-lived input.  The store keeps only the
-     * anchored copies; each checkpoint restore drops request scratch bytes. */
-    CCArena request_arena = cc_arena_heap(kilobytes(1)) @destroy;
-    if (!request_arena.valid()) return 1;
 
     for (int request_id = 0; request_id < 3; request_id++) {
         CCArenaCheckpoint request_scope = request_arena.checkpoint() @destroy;

@@ -108,7 +108,7 @@ static void !>(CCError) run_pair(Store* st, int ia, int ib, int boom) {
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
-    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    cc_arena_stack(arena, kilobytes(64));
     CCExclusive excl = cc_exclusive_create(arena, 0) !> @destroy;
     Store st = {0};
     int hit;

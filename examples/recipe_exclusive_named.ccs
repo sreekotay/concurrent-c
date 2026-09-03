@@ -5,7 +5,7 @@
  * fibers must briefly mutate the same named resource, use a CCExclusive
  * domain:
  *
- *   CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+ *   cc_arena_stack(arena, kilobytes(64));
  *   CCExclusive excl = cc_exclusive_create(arena, 0) !> @destroy;  // 0 → default map
  *   CCExclusiveMutex m = excl.mutex(name);                 // resolve once
  *   CCExclusiveGuard g = m.acquire();
@@ -60,34 +60,24 @@ static void bump_private(int worker_id, int iters) {
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
-    CCArena excl_arena = cc_arena_heap(kilobytes(64)) @destroy;
+    cc_arena_stack(excl_arena, kilobytes(64));
     g_excl = cc_exclusive_create(excl_arena, 0) !>;
 
     println(@string(`=== Named exclusive: ${NUM_WORKERS} workers × ${ITERS} iters ===`, @scratch)) !>;
 
+    int w;
     /* Shared name: all workers serialize on counter name=1. */
-    {
-        CCNursery n = cc_nursery_create() !> @destroy;
-        for (int w = 0; w < NUM_WORKERS; w++) {
-            n.spawn(() => {
-                bump_shared(ITERS);
-            }) !>;
-        }
-    }
+    @parallel for (w in 0..NUM_WORKERS) {
+        bump_shared(ITERS);
+    } !>.wait()!>;
 
     /* Private names: no cross-worker contention. */
-    {
-        CCNursery n = cc_nursery_create() !> @destroy;
-        for (int w = 0; w < NUM_WORKERS; w++) {
-            int id = w;
-            n.spawn(() => [id] {
-                bump_private(id, ITERS);
-            }) !>;
-        }
-    }
+    @parallel for (w in 0..NUM_WORKERS) {
+        bump_private(w, ITERS);
+    } !>.wait()!>;
 
     int64_t private_sum = 0;
-    for (int w = 0; w < NUM_WORKERS; w++) {
+    for (w = 0; w < NUM_WORKERS; w++) {
         private_sum += g_private[w].value;
     }
 

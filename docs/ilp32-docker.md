@@ -26,7 +26,9 @@ CCC_HOST_CC=tcc ./scripts/smoke_i386.sh         # host+backend = TinyCC
 CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh
 ```
 
-## Latest receipt — 2026-08-30
+## Latest receipts
+
+### Runtime smoke — 2026-08-30
 
 **Host:** macOS (Darwin 25), arm64, Docker Desktop, QEMU user-mode  
 **Seed:** `shadow_lower` last-good **0.3.4-259**  
@@ -39,20 +41,36 @@ CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh
 | `./scripts/smoke_arm32.sh` | gcc (`cc`) | gcc | **0 failures** |
 | `CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh` | TinyCC | TinyCC | **0 failures** |
 
+### Pigz compare — 2026-09-03
+
+**Seed:** `shadow_lower` last-good **0.3.4-294**  
+All three binaries (`pigz`, `pigz_idiomatic`, `pigz_cc`) build, 4 MiB-gunzip, and 20 MB bench on i386 and ARM32 with gcc backend and with TinyCC self-build (`CCC_HOST_CC=tcc`). Receipts: [Pigz compare](#pigz-compare) table below.
+
 ## Pigz compare
 
 **Scripts:** `./scripts/pigz_i386.sh`, `./scripts/pigz_arm32.sh` — `pigz.c`, `pigz_idiomatic` (chained dict), `pigz_cc`.  
 **Input:** 20 MB Silesia concat; pigz / `pigz_cc` `-p 4`; `pigz_idiomatic` uses runtime cores (`CC_WORKERS` unset).  
 **Compile:** original pigz `cc -O3`; `.ccs` via `ccc -O --release`. `CCC_HOST_CC=tcc` builds `ccc` and the product backend with TinyCC; `pigz.c` stays gcc.
 
-All three binaries build and 4 MiB-gunzip on i386 and ARM32, gcc or TinyCC backend.
+`pigz_cc` (~1.3k lines) is the gated large-TU emit stress on ARM32 TCC self-build
+(it caught a TCC-built `shadow_lower` crash in 0.3.4-293, fixed in 0.3.4-294).
+Other candidate TUs and when to spot-check them: [build-when.md](build-when.md#verify-cold--second-platform).
+
+All three binaries build and 4 MiB-gunzip on i386 and ARM32 with gcc backend or
+TinyCC self-build (`CCC_HOST_CC=tcc`). Optional split host/backend on ARM32
+(gcc-built lowerer, TCC product backend):
+
+```bash
+FORCE_TOOLCHAIN=1 CCC_HOST_CC=cc CCC_BACKEND_CC=tcc ./scripts/pigz_arm32.sh
+```
 
 QEMU user-mode — relative ILP32 only; not comparable to host Darwin or across arches.
 
-| Backend | i386 dump | ARM32 dump |
-|---------|-----------|------------|
-| gcc (`cc`) | [ilp32_i386_2026_08_30.txt](../real_projects/pigz/benchmarks/ilp32_i386_2026_08_30.txt) | [ilp32_arm32_2026_08_30.txt](../real_projects/pigz/benchmarks/ilp32_arm32_2026_08_30.txt) |
-| TinyCC (`FORCE_TOOLCHAIN=1 CCC_HOST_CC=tcc`) | [ilp32_i386_tcc_2026_08_30.txt](../real_projects/pigz/benchmarks/ilp32_i386_tcc_2026_08_30.txt) | [ilp32_arm32_tcc_2026_09_02.txt](../real_projects/pigz/benchmarks/ilp32_arm32_tcc_2026_09_02.txt) |
+| Config | i386 dump | ARM32 dump |
+|--------|-----------|------------|
+| gcc host + gcc backend | [ilp32_i386_2026_08_30.txt](../real_projects/pigz/benchmarks/ilp32_i386_2026_08_30.txt) | [ilp32_arm32_2026_08_30.txt](../real_projects/pigz/benchmarks/ilp32_arm32_2026_08_30.txt) |
+| TinyCC self-build (`CCC_HOST_CC=tcc`) | [ilp32_i386_tcc_2026_08_30.txt](../real_projects/pigz/benchmarks/ilp32_i386_tcc_2026_08_30.txt) | [ilp32_arm32_tcc_2026_09_03.txt](../real_projects/pigz/benchmarks/ilp32_arm32_tcc_2026_09_03.txt) |
+| gcc host + TCC backend (`CCC_HOST_CC=cc CCC_BACKEND_CC=tcc`) | — | [ilp32_arm32_gcc_host_tcc_backend_2026_09_03.txt](../real_projects/pigz/benchmarks/ilp32_arm32_gcc_host_tcc_backend_2026_09_03.txt) |
 
 ### gcc backend
 
@@ -78,7 +96,7 @@ QEMU user-mode — relative ILP32 only; not comparable to host Darwin or across 
 
 ### TCC backend
 
-`FORCE_TOOLCHAIN=1 CCC_HOST_CC=tcc ./scripts/pigz_i386.sh` / `./scripts/pigz_arm32.sh` — original `pigz.c` still gcc; `ccc` host + product backend = TinyCC.
+`FORCE_TOOLCHAIN=1 CCC_HOST_CC=tcc ./scripts/pigz_i386.sh` / `./scripts/pigz_arm32.sh` — original `pigz.c` still gcc; `ccc` host + product backend = TinyCC. Split host/backend on ARM32: `CCC_HOST_CC=cc CCC_BACKEND_CC=tcc`.
 
 #### i386 (linux/386)
 
@@ -92,12 +110,21 @@ QEMU user-mode — relative ILP32 only; not comparable to host Darwin or across 
 
 #### ARM32 (linux/arm/v7, gnueabihf)
 
-4 MiB urandom + gunzip for `pigz`, `pigz_idiomatic`, and `pigz_cc`. 20 MB, 1 run:
+20 MB, 1 run (`FORCE_TOOLCHAIN=1 CCC_HOST_CC=tcc`, seed 0.3.4-294):
 
-| Implementation | Comp (s) | Comp (MB/s) | Ratio |
-|----------------|----------|-------------|-------|
-| pigz (pthread) | 0.786 | 24.3 | 46.0% |
-| pigz_idiomatic (chained dict) | 0.503 | 37.9 | 46.0% |
+| Implementation | Comp (s) | Comp (MB/s) | Ratio | Decomp (s) | Decomp (MB/s) |
+|----------------|----------|-------------|-------|------------|---------------|
+| pigz (pthread) | 0.945 | 20.2 | 46.0% | 0.293 | 65.1 |
+| pigz_idiomatic (chained dict) | 0.763 | 25.0 | 46.0% | — | — |
+| pigz_cc | 0.654 | 29.2 | 46.0% | 0.397 | 48.0 |
+
+Split config (gcc host, TCC backend), 20 MB, 1 run:
+
+| Implementation | Comp (s) | Comp (MB/s) | Ratio | Decomp (s) | Decomp (MB/s) |
+|----------------|----------|-------------|-------|------------|---------------|
+| pigz (pthread) | 1.081 | 17.6 | 46.0% | 0.333 | 57.3 |
+| pigz_idiomatic (chained dict) | 0.956 | 20.0 | 46.0% | — | — |
+| pigz_cc | 0.730 | 26.1 | 46.0% | 0.505 | 37.8 |
 
 ## i386 (supported)
 
@@ -185,6 +212,7 @@ Optional pigz compare (named volumes `ccc-ilp32-work` / `ccc-arm32-work`):
 CCC_HOST_CC=tcc ./scripts/pigz_i386.sh   # ccc backend = TinyCC; pigz.c still gcc
 ./scripts/pigz_arm32.sh
 CCC_HOST_CC=tcc ./scripts/pigz_arm32.sh
+FORCE_TOOLCHAIN=1 CCC_HOST_CC=cc CCC_BACKEND_CC=tcc ./scripts/pigz_arm32.sh  # split
 ```
 
 Manual equivalent:

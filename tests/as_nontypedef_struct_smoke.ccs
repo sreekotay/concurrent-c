@@ -24,10 +24,10 @@ int main(void) {
     CCArena a = @create(kilobytes(64)) @destroy;
     struct AsNtWrap w = {0};
     w.tag = 2;
-    assert(w.open(CC_SLICE_LIT("tmp/as_nontypedef_struct_smoke.txt"), "w") == 0);
-    assert(w.file.handle != NULL);
+    w.file = cc_file_create(CC_SLICE_LIT("tmp/as_nontypedef_struct_smoke.txt")) !>;
+    assert(w.file.fd >= 0);
     w.close();
-    assert(w.file.handle == NULL);
+    assert(w.file.fd < 0);
     remove("tmp/as_nontypedef_struct_smoke.txt");
     printf("ok\n");
     return 0;

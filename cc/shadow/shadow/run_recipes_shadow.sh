@@ -73,9 +73,9 @@ run_one examples/recipe_arena_scope.ccs \
   "kept req-3"
 
 run_one examples/recipe_explicit_capture.ccs \
-  "=== value capture ===" \
+  "=== names on the page ===" \
   "task A sees snapshot = 42" \
-  "=== reference capture (read-only) ===" \
+  "=== same object ===" \
   "task C reads counter = 100"
 
 # Timing-sensitive: exact iteration counts vary; recipe itself asserts 1..10.

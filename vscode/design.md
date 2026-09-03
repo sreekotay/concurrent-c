@@ -9,7 +9,7 @@ This is the same shape as [cctext](https://github.com/sreekotay/cctext)
 (`DESIGN.md`): one document core, two frontends, a host that does not wait
 on the expensive walk. Here the “document” is the open buffer set, the
 “frontends” are VS Code / Cursor / any LSP client, and the expensive walk
-is `ccc --emit-c-only` (later: in-process shadow parse).
+is `ccc build --emit-c-only` (later: in-process shadow parse).
 
 Phases and feature inventory live in [`roadmap.md`](roadmap.md). This file
 is the locality / epoch / pump contract.
@@ -91,7 +91,7 @@ returning is the yield.
 
 | | start | one wave | live | resume | deny |
 |---|---|---|---|---|---|
-| check | `didOpen` / debounced `didChange` / `didSave` | `ccc --emit-c-only --no-runtime --no-cache` (later: `cc_shadow_parse_buffer`) | `gen` still current | new snapshot, same `uri` | stale `gen` |
+| check | `didOpen` / debounced `didChange` / `didSave` | `ccc build --emit-c-only --no-runtime --no-cache` (later: `cc_shadow_parse_buffer`) | `gen` still current | new snapshot, same `uri` | stale `gen` |
 | hover | `textDocument/hover` | token + static note | — | — | no `ccc` |
 | stdin | process start | one `Content-Length` frame | until EOF | next frame | — |
 

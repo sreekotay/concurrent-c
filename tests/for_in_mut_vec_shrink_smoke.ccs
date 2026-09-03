@@ -1,0 +1,27 @@
+/* A grower the body shrinks keeps the live write bound. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        if (!e.message || !strstr(e.message, "for-in write")) {
+            fprintf(stderr, "fatal: %s\n", e.message ? e.message : "?");
+            return 4;
+        }
+        printf("for_in_mut_vec_shrink_smoke: OK\n");
+        return 0;
+    }
+
+    CCArena arena = cc_arena_heap(kilobytes(4)) @destroy;
+    CCVec::[int] v;
+
+    if (!cc_arena_is_live(arena)) return 2;
+    v = cc_vec_new::[int](arena);
+    if (v.push(1) != 0 || v.push(2) != 0 || v.push(3) != 0) return 3;
+    @for (&x in v) {
+        v.truncate(0);
+        x = 99;
+    } !>;
+    return 5;
+}

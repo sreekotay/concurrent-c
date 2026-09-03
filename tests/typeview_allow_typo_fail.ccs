@@ -1,0 +1,16 @@
+/* Exact allow-list typo must fail at @typeview registration. */
+#include <ccc/std/prelude.cch>
+
+typedef struct Bag {
+    int tag;
+    int secret;
+} Bag;
+
+@typeview on Bag {
+    r: tagg;
+};
+
+int main(void) {
+    Bag b = { .tag = 1, .secret = 0 };
+    return b.tag;
+}

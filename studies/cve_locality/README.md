@@ -19,8 +19,8 @@ This folder is a feedback loop, same spirit as `real_projects/`:
 - **Hits** support the thesis (ownership seams *or* truthful wire *or* data-model sums).  
 - **Misses** are backlog (fuller Send lattice, FFI wrong deleter, …).  
 - **N/A** is for bugs outside idiomatic language seams (crypto/authz, etc.).
-  Prefer **omitting** protocol-product policy bugs (e.g. HTTP smuggling)
-  rather than keeping confusing `n/a` entries.
+  Prefer **omitting** protocol-product policy bugs (e.g. obfuscated-TE
+  tokenizer smuggling) rather than keeping confusing `n/a` entries.
 
 ## Inclusion rules (pre-registered)
 
@@ -38,8 +38,9 @@ Include a CVE if the root cause is primarily one of:
 
 - Crypto breaks, authz/logic bugs, XSS/SQLi with no framing/ownership angle  
 - Speculative execution / side channels  
-- HTTP request smuggling / cross-parser framing policy — ecosystem stack work,
-  not idiomatic CC; do not keep in the corpus  
+- HTTP tokenizer / obfuscated-TE smuggling (HAProxy, Netty) — not a
+  framing-representation question; omit. Dual-header CL+TE
+  (CVE-2005-2088) is in as T10, off the Rust axis.
 
 When in doubt between `still_expressible` and omit/`n/a`: prefer
 `still_expressible` + `needs_language:` only if a **language or general serdes**

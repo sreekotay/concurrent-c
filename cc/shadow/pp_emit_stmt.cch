@@ -257,6 +257,10 @@ static int shadow_emit_walk_set(CEmit* out, ShadowCtx* ctx, const char* indent,
     AstNode* saved_eh = NULL;
     int hoist = 0;
     if (!b || !b->walk_subj[0] || !b->walk_idx[0]) return 0;
+    if (b->walk_peel[0]) {
+        return cemit_fmt(out, "%s%s = ((%s)[%s] = (%s));\n", indent, name,
+                         b->walk_peel, b->walk_idx, val);
+    }
     if (!shadow_for_lookup_extent(b->walk_subj, &ex) ||
         !shadow_extent_can_set(&ex)) {
         fprintf(stderr, "error: for-in `&%s` needs an extent subject\n", name);
@@ -274,10 +278,10 @@ static int shadow_emit_walk_set(CEmit* out, ShadowCtx* ctx, const char* indent,
     }
     hoist = ctx && ctx->eh && shadow_eh_hoist_find(ctx, ctx->eh);
     dest = shadow_eh_raise_bind(ctx, "e");
-    /* Re-read live .len; write through naked .access. Out of range is
-     * the walk's error — not set(), not a skip. A hoisted @errhandler
-     * writes the cell then goto (never returns); otherwise else-skip
-     * the store. */
+    /* Live grower: re-read .len; write through naked .access. Out of
+     * range is the walk's error — not set(), not a skip. A hoisted
+     * @errhandler writes the cell then goto (never returns); otherwise
+     * else-skip the store. Frozen / clean growers bind walk_peel. */
     if (shadow_eh_dest_is_cell(ctx, dest)) {
         if (!cemit_fmt(out,
                        "%s{\n"
@@ -2826,6 +2830,7 @@ static void shadow_emit_call_args_text(AstNode* st, char* dst, size_t cap) {
 enum { SHADOW_PAR_CAP_MAX = 32 };
 
 static CEmit g_shadow_par_helpers;
+static CEmit g_shadow_par_onto_helpers;
 static int g_shadow_par_id = 1;
 static int g_shadow_pw_sh_typed;
 static int g_shadow_stg_id = 1;
@@ -2833,6 +2838,8 @@ static int g_shadow_stg_id = 1;
 static void shadow_par_helpers_reset(void) {
     free(g_shadow_par_helpers.buf);
     memset(&g_shadow_par_helpers, 0, sizeof(g_shadow_par_helpers));
+    free(g_shadow_par_onto_helpers.buf);
+    memset(&g_shadow_par_onto_helpers, 0, sizeof(g_shadow_par_onto_helpers));
     g_shadow_par_id = 1;
     g_shadow_pw_sh_typed = 0;
     g_shadow_stg_id = 1;
@@ -2841,7 +2848,17 @@ static void shadow_par_helpers_reset(void) {
 static int shadow_flush_par_helpers(CEmit* out) {
     int ok = 1;
     if (!out) return 0;
-    if (g_shadow_par_helpers.len && g_shadow_par_helpers.buf) {
+    /* Onto defs first: a kick thunk may call them. */
+    if (g_shadow_par_onto_helpers.len && g_shadow_par_onto_helpers.buf) {
+        if (!cemit_str(out, "\n/* --- @parallel onto thunks --- */\n"))
+            ok = 0;
+        else if (!cemit_buf(out, g_shadow_par_onto_helpers.buf,
+                            g_shadow_par_onto_helpers.len))
+            ok = 0;
+    }
+    free(g_shadow_par_onto_helpers.buf);
+    memset(&g_shadow_par_onto_helpers, 0, sizeof(g_shadow_par_onto_helpers));
+    if (ok && g_shadow_par_helpers.len && g_shadow_par_helpers.buf) {
         if (!cemit_str(out, "\n/* --- @parallel thunks --- */\n"))
             ok = 0;
         else if (!cemit_buf(out, g_shadow_par_helpers.buf,
@@ -3087,6 +3104,10 @@ static int shadow_emit_par_protos(CEmit* out, AstNode** pars, int n) {
                     "static void* __cc_parfor_thunk_%d(void*);\n"
                     "static void* __cc_parfor_site_%d;\n",
                     id, id, id))
+                return 0;
+        } else if (pars[i]->par_onto) {
+            if (!cemit_fmt(out, "static void* __cc_par_onto_%d(void*);\n",
+                           id))
                 return 0;
         } else {
             int a, nspawn = 0;
@@ -4235,8 +4256,153 @@ static int shadow_emit_par_spawn_body(
 static int shadow_pw_emit_dest_decl(CEmit* out, const char* indent,
                                     const char* dest, const char* dty);
 
+/* `@parallel(h) { … }`: never-deny spawn, value-copy captures, admit onto h. */
+/* Snapshot unless the name is already a pointer/array or an atomic
+ * (shared mutable). Loop `x` / accept `sock` must not alias the next
+ * iteration; `sum.fetch_add` still hits the caller's cell. */
+static int shadow_par_onto_is_ref(const char* name) {
+    const ShadowBind* b = shadow_bind_lookup(name);
+    if (!b || !b->ty[0]) return 0;
+    if (b->flags & SHADOW_BIND_ARRAY) return 0;
+    if (shadow_type_is_pointer(b->ty)) return 0;
+    return strncmp(b->ty, "cc_atomic", 9) == 0;
+}
+
+static int shadow_emit_parallel_onto(AstNode* st, CEmit* out, ShadowCtx* ctx,
+                                    const char* indent, int use_cleanup) {
+    AstNode* arm;
+    const char* hdest;
+    int id, nc = 0, nsl = 0, i, w, nrefs;
+    char names[SHADOW_PAR_CAP_MAX][64];
+    char tys[SHADOW_PAR_CAP_MAX][160];
+    char refs[SHADOW_PAR_CAP_MAX][64];
+    char sloc[32][64];
+    char i1[80];
+    CEmit* hh;
+    CEmit tb = {0};
+
+    if (!st || !st->par_onto || !st->a[0] || st->nbody != 1 || !st->body[0])
+        return 0;
+    arm = st->body[0];
+    hdest = st->a;
+    if (st->forced_seq)
+        return shadow_par_emit_serial_block(arm, out, ctx, indent, use_cleanup);
+
+    id = st->d[0] ? atoi(st->d) : g_shadow_par_id++;
+    shadow_par_serial_walk_locals(arm, sloc, &nsl, 32);
+    if (!shadow_par_scan_node(arm, NULL, names, tys, &nc, SHADOW_PAR_CAP_MAX))
+        return 0;
+    w = 0;
+    for (i = 0; i < nc; i++) {
+        int skip = 0, k;
+        if (strcmp(names[i], hdest) == 0) skip = 1;
+        for (k = 0; !skip && k < nsl; k++) {
+            if (strcmp(names[i], sloc[k]) == 0) skip = 1;
+        }
+        if (skip) continue;
+        if (w != i) {
+            memcpy(names[w], names[i], 64);
+            memcpy(tys[w], tys[i], 160);
+        }
+        w++;
+    }
+    nc = w;
+    nrefs = 0;
+    for (i = 0; i < nc; i++) {
+        if (shadow_par_onto_is_ref(names[i])) {
+            memcpy(refs[nrefs], names[i], 64);
+            nrefs++;
+        }
+    }
+
+    hh = &g_shadow_par_onto_helpers;
+    if (!cemit_fmt(hh, "\nstatic void* __cc_par_onto_%d(void* arg) {\n"
+                       "    struct {\n",
+                   id))
+        return 0;
+    for (i = 0; i < nc; i++) {
+        if (shadow_par_onto_is_ref(names[i])) {
+            if (!cemit_fmt(hh, "        %s* __cc_cap_%s;\n", tys[i], names[i]))
+                return 0;
+        } else if (!cemit_fmt(hh, "        %s __cc_cap_%s;\n", tys[i],
+                              names[i]))
+            return 0;
+    }
+    if (!cemit_str(hh, "        CCParallel* __cc_par_h;\n"
+                       "    } *e = arg;\n"))
+        return 0;
+    for (i = 0; i < nc; i++) {
+        if (shadow_par_onto_is_ref(names[i])) {
+            if (!cemit_fmt(hh, "    %s* __cc_ref_%s = e->__cc_cap_%s;\n",
+                           tys[i], names[i], names[i]))
+                return 0;
+        } else if (!cemit_fmt(hh, "    %s %s = e->__cc_cap_%s;\n", tys[i],
+                              names[i], names[i]))
+            return 0;
+    }
+    if (!cemit_str(hh, "    cc_parallel_honor(e->__cc_par_h);\n"))
+        return 0;
+    if (shadow_stmt_uses_scratch(arm)) {
+        if (!cemit_str(hh, "    cc_arena_stack(__cc_str_scratch, 1024);\n"))
+            return 0;
+    }
+    if (!shadow_par_emit_serial_stmts(arm, &tb, ctx, "    ", use_cleanup)) {
+        free(tb.buf);
+        return 0;
+    }
+    if (tb.buf && tb.len &&
+        !shadow_refs_rewrite_emit(hh, tb.buf, tb.len, refs, nrefs)) {
+        free(tb.buf);
+        return 0;
+    }
+    free(tb.buf);
+    if (!cemit_str(hh, "    return NULL;\n}\n"))
+        return 0;
+
+    shadow_indent_nest(i1, sizeof(i1), indent, 1);
+    if (!cemit_fmt(out, "%s{\n"
+                        "%sstruct {\n",
+                   indent, i1))
+        return 0;
+    for (i = 0; i < nc; i++) {
+        if (shadow_par_onto_is_ref(names[i])) {
+            if (!cemit_fmt(out, "%s    %s* __cc_cap_%s;\n", i1, tys[i],
+                           names[i]))
+                return 0;
+        } else if (!cemit_fmt(out, "%s    %s __cc_cap_%s;\n", i1, tys[i],
+                              names[i]))
+            return 0;
+    }
+    if (!cemit_fmt(out,
+            "%s    CCParallel* __cc_par_h;\n"
+            "%s} *__cc_par_e_%d = (void*)cc__heap_alloc(sizeof(*__cc_par_e_%d));\n"
+            "%sCCTask __cc_par_t_%d;\n"
+            "%sif (!__cc_par_e_%d) cc_parallel_die(\"admit: oom\");\n",
+            i1, i1, id, id, i1, id, i1, id))
+        return 0;
+    for (i = 0; i < nc; i++) {
+        if (shadow_par_onto_is_ref(names[i])) {
+            if (!cemit_fmt(out, "%s__cc_par_e_%d->__cc_cap_%s = &(%s);\n", i1,
+                           id, names[i], names[i]))
+                return 0;
+        } else if (!cemit_fmt(out, "%s__cc_par_e_%d->__cc_cap_%s = %s;\n", i1,
+                              id, names[i], names[i]))
+            return 0;
+    }
+    if (!cemit_fmt(out,
+            "%s__cc_par_e_%d->__cc_par_h = &(%s);\n"
+            "%s__cc_par_t_%d = cc_parallel_spawn(__cc_par_onto_%d, __cc_par_e_%d);\n"
+            "%scc_parallel_admit(&(%s), __cc_par_t_%d, __cc_par_e_%d);\n"
+            "%s}\n",
+            i1, id, hdest, i1, id, id, id, i1, hdest, id, id, indent))
+        return 0;
+    return 1;
+}
+
 static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                 const char* indent, int use_cleanup) {
+    if (st && st->par_onto)
+        return shadow_emit_parallel_onto(st, out, ctx, indent, use_cleanup);
     char i1[80];
     char i2[80];
     int n = st->nbody;
@@ -7866,8 +8032,6 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 snprintf(idx, sizeof(idx), "%s", fi.bind[0]);
             else
                 snprintf(idx, sizeof(idx), "__cc_fi_%d", id);
-            shadow_extent_len_c(&ex, recv, len_c, sizeof(len_c));
-            shadow_extent_load_c(&ex, recv, idx, load_c, sizeof(load_c));
             if (val_mut) {
                 if (strcmp(st->e, "zip_bang") != 0) {
                     fprintf(stderr, "error: unconsumed Result\n");
@@ -7884,55 +8048,83 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     return 0;
                 }
             }
-            if (!cemit_fmt(out, "%sfor (size_t %s = 0; %s < (%s); ++%s) {\n",
-                           loop_ind, idx, idx, len_c, idx)) {
-                shadow_pw_pop_loop(ctx, pw, 0);
-                return 0;
-            }
             {
-                char nested[80];
-                int vflags = SHADOW_BIND_WALK;
-                AstNode* saved_eh = ctx ? ctx->eh : NULL;
-                shadow_indent_nest(nested, sizeof(nested), loop_ind, 1);
-                if (!cemit_fmt(out, "%s%s%s %s = %s;\n", nested,
-                               val_mut ? "" : "const ", ex.elem, val, load_c)) {
+                char nname[64];
+                char pname[64];
+                int snap = shadow_for_can_snapshot(&ex, st->body, st->nbody,
+                                                   recv, fi.subj[0]);
+                nname[0] = 0;
+                pname[0] = 0;
+                if (snap) {
+                    if (!shadow_for_emit_peel(out, loop_ind, &ex, recv, id,
+                                              nname, sizeof(nname), pname,
+                                              sizeof(pname))) {
+                        shadow_pw_pop_loop(ctx, pw, 0);
+                        return 0;
+                    }
+                    snprintf(len_c, sizeof(len_c), "%s", nname);
+                    snprintf(load_c, sizeof(load_c), "%s[%s]", pname, idx);
+                } else {
+                    shadow_extent_len_c(&ex, recv, len_c, sizeof(len_c));
+                    shadow_extent_load_c(&ex, recv, idx, load_c,
+                                         sizeof(load_c));
+                }
+                if (!cemit_fmt(out,
+                               "%sfor (size_t %s = 0; %s < (%s); ++%s) {\n",
+                               loop_ind, idx, idx, len_c, idx)) {
                     shadow_pw_pop_loop(ctx, pw, 0);
                     return 0;
                 }
-                nbinds_mark = g_shadow_nbinds;
-                if (in_kind == 3) shadow_bind_name(fi.bind[0], "size_t", 0);
-                if (val_mut) vflags |= SHADOW_BIND_WALK_MUT;
-                shadow_bind_name(val, ex.elem, vflags);
-                if (val_mut) shadow_bind_walk_cursor(val, recv, idx);
-                if (ctx && val_mut) {
-                    int hk;
-                    for (hk = 0; hk < st->ndbody; hk++) {
-                        if (st->dbody[hk] &&
-                            st->dbody[hk]->kind == AST_ERRHANDLER) {
-                            ctx->eh = st->dbody[hk];
-                            break;
+                {
+                    char nested[80];
+                    int vflags = SHADOW_BIND_WALK;
+                    AstNode* saved_eh = ctx ? ctx->eh : NULL;
+                    shadow_indent_nest(nested, sizeof(nested), loop_ind, 1);
+                    if (!cemit_fmt(out, "%s%s%s %s = %s;\n", nested,
+                                   val_mut ? "" : "const ", ex.elem, val,
+                                   load_c)) {
+                        shadow_pw_pop_loop(ctx, pw, 0);
+                        return 0;
+                    }
+                    nbinds_mark = g_shadow_nbinds;
+                    if (in_kind == 3)
+                        shadow_bind_name(fi.bind[0], "size_t", 0);
+                    if (val_mut) vflags |= SHADOW_BIND_WALK_MUT;
+                    shadow_bind_name(val, ex.elem, vflags);
+                    if (val_mut) shadow_bind_walk_cursor(val, recv, idx);
+                    if (val_mut && snap && pname[0])
+                        shadow_bind_walk_peel(val, pname);
+                    if (ctx && val_mut) {
+                        int hk;
+                        for (hk = 0; hk < st->ndbody; hk++) {
+                            if (st->dbody[hk] &&
+                                st->dbody[hk]->kind == AST_ERRHANDLER) {
+                                ctx->eh = st->dbody[hk];
+                                break;
+                            }
                         }
                     }
-                }
-                bind_mark = shadow_push_block_binds(st->body, st->nbody);
-                if (ctx) {
-                    ok = shadow_emit_compound_body(st->body, st->nbody, out, ctx,
-                                                   nested, use_cleanup, 1);
-                } else {
-                    ok = 1;
-                    for (int k = 0; k < st->nbody && ok; k++) {
-                        if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, nested,
-                                                  use_cleanup))
-                            ok = 0;
+                    bind_mark = shadow_push_block_binds(st->body, st->nbody);
+                    if (ctx) {
+                        ok = shadow_emit_compound_body(st->body, st->nbody, out,
+                                                       ctx, nested, use_cleanup,
+                                                       1);
+                    } else {
+                        ok = 1;
+                        for (int k = 0; k < st->nbody && ok; k++) {
+                            if (!shadow_emit_stmt_ctx(st->body[k], out, ctx,
+                                                      nested, use_cleanup))
+                                ok = 0;
+                        }
                     }
+                    shadow_pop_fn_binds(bind_mark);
+                    g_shadow_nbinds = nbinds_mark;
+                    if (ok) ok = cemit_fmt(out, "%s}\n", loop_ind);
+                    if (ctx) ctx->eh = saved_eh;
+                    if (ok && wrap) ok = cemit_fmt(out, "%s}\n", indent);
+                    shadow_pw_pop_loop(ctx, pw, 0);
+                    return ok;
                 }
-                shadow_pop_fn_binds(bind_mark);
-                g_shadow_nbinds = nbinds_mark;
-                if (ok) ok = cemit_fmt(out, "%s}\n", loop_ind);
-                if (ctx) ctx->eh = saved_eh;
-                if (ok && wrap) ok = cemit_fmt(out, "%s}\n", indent);
-                shadow_pw_pop_loop(ctx, pw, 0);
-                return ok;
             }
         }
         if (in_kind == 4) {
@@ -7969,8 +8161,6 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             snprintf(idx, sizeof(idx), "__cc_fi_%d", id);
             shadow_extent_len_c(&ex_a, recv_a, len_a, sizeof(len_a));
             shadow_extent_len_c(&ex_b, recv_b, len_b, sizeof(len_b));
-            shadow_extent_load_c(&ex_a, recv_a, idx, load_a, sizeof(load_a));
-            shadow_extent_load_c(&ex_b, recv_b, idx, load_b, sizeof(load_b));
             if (!cemit_fmt(out,
                            "%s    size_t __cc_zl_%d = (%s);\n"
                            "%s    size_t __cc_zr_%d = (%s);\n"
@@ -8026,64 +8216,107 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 if (ctx) ctx->eh = saved_eh;
             }
             /* Handler that does not return must not walk (shorter OOB). */
-            if (!cemit_fmt(out,
-                           "%s    } else {\n"
-                           "%s    for (size_t %s = 0; %s < __cc_zl_%d; ++%s) "
-                           "{\n",
-                           i1, i1, idx, idx, id, idx)) {
+            if (!cemit_fmt(out, "%s    } else {\n", i1)) {
                 shadow_pw_pop_loop(ctx, pw, 0);
                 return 0;
             }
             {
-                char nested[80];
-                int fa = SHADOW_BIND_WALK;
-                int fb = SHADOW_BIND_WALK;
-                AstNode* saved_eh = ctx ? ctx->eh : NULL;
-                shadow_indent_nest(nested, sizeof(nested), indent, 2);
-                if (!cemit_fmt(out, "%s%s%s %s = %s;\n%s%s%s %s = %s;\n",
-                               nested, fi.mut[0] ? "" : "const ", ex_a.elem,
-                               fi.bind[0], load_a, nested,
-                               fi.mut[1] ? "" : "const ", ex_b.elem, fi.bind[1],
-                               load_b)) {
+                char pa[64];
+                char pb[64];
+                int snap_a = shadow_for_can_snapshot(&ex_a, st->body, st->nbody,
+                                                    recv_a, fi.subj[0]);
+                int snap_b = shadow_for_can_snapshot(&ex_b, st->body, st->nbody,
+                                                    recv_b, fi.subj[1]);
+                pa[0] = 0;
+                pb[0] = 0;
+                if (snap_a) {
+                    if (!shadow_for_emit_ptr(out, i1, &ex_a, recv_a, id, pa,
+                                             sizeof(pa))) {
+                        shadow_pw_pop_loop(ctx, pw, 0);
+                        return 0;
+                    }
+                    snprintf(load_a, sizeof(load_a), "%s[%s]", pa, idx);
+                } else {
+                    shadow_extent_load_c(&ex_a, recv_a, idx, load_a,
+                                         sizeof(load_a));
+                }
+                if (snap_b) {
+                    if (!shadow_for_emit_ptr(out, i1, &ex_b, recv_b, id + 1, pb,
+                                             sizeof(pb))) {
+                        shadow_pw_pop_loop(ctx, pw, 0);
+                        return 0;
+                    }
+                    snprintf(load_b, sizeof(load_b), "%s[%s]", pb, idx);
+                } else {
+                    shadow_extent_load_c(&ex_b, recv_b, idx, load_b,
+                                         sizeof(load_b));
+                }
+                if (!cemit_fmt(out,
+                               "%s    for (size_t %s = 0; %s < __cc_zl_%d; "
+                               "++%s) {\n",
+                               i1, idx, idx, id, idx)) {
                     shadow_pw_pop_loop(ctx, pw, 0);
                     return 0;
                 }
-                nbinds_mark = g_shadow_nbinds;
-                if (fi.mut[0]) fa |= SHADOW_BIND_WALK_MUT;
-                if (fi.mut[1]) fb |= SHADOW_BIND_WALK_MUT;
-                shadow_bind_name(fi.bind[0], ex_a.elem, fa);
-                shadow_bind_name(fi.bind[1], ex_b.elem, fb);
-                if (fi.mut[0]) shadow_bind_walk_cursor(fi.bind[0], recv_a, idx);
-                if (fi.mut[1]) shadow_bind_walk_cursor(fi.bind[1], recv_b, idx);
-                if (ctx && (fi.mut[0] || fi.mut[1])) {
-                    int hk;
-                    for (hk = 0; hk < st->ndbody; hk++) {
-                        if (st->dbody[hk] &&
-                            st->dbody[hk]->kind == AST_ERRHANDLER) {
-                            ctx->eh = st->dbody[hk];
-                            break;
+                {
+                    char nested[80];
+                    int fa = SHADOW_BIND_WALK;
+                    int fb = SHADOW_BIND_WALK;
+                    AstNode* saved_eh = ctx ? ctx->eh : NULL;
+                    shadow_indent_nest(nested, sizeof(nested), indent, 2);
+                    if (!cemit_fmt(out, "%s%s%s %s = %s;\n%s%s%s %s = %s;\n",
+                                   nested, fi.mut[0] ? "" : "const ",
+                                   ex_a.elem, fi.bind[0], load_a, nested,
+                                   fi.mut[1] ? "" : "const ", ex_b.elem,
+                                   fi.bind[1], load_b)) {
+                        shadow_pw_pop_loop(ctx, pw, 0);
+                        return 0;
+                    }
+                    nbinds_mark = g_shadow_nbinds;
+                    if (fi.mut[0]) fa |= SHADOW_BIND_WALK_MUT;
+                    if (fi.mut[1]) fb |= SHADOW_BIND_WALK_MUT;
+                    shadow_bind_name(fi.bind[0], ex_a.elem, fa);
+                    shadow_bind_name(fi.bind[1], ex_b.elem, fb);
+                    if (fi.mut[0])
+                        shadow_bind_walk_cursor(fi.bind[0], recv_a, idx);
+                    if (fi.mut[1])
+                        shadow_bind_walk_cursor(fi.bind[1], recv_b, idx);
+                    if (fi.mut[0] && snap_a && pa[0])
+                        shadow_bind_walk_peel(fi.bind[0], pa);
+                    if (fi.mut[1] && snap_b && pb[0])
+                        shadow_bind_walk_peel(fi.bind[1], pb);
+                    if (ctx && (fi.mut[0] || fi.mut[1])) {
+                        int hk;
+                        for (hk = 0; hk < st->ndbody; hk++) {
+                            if (st->dbody[hk] &&
+                                st->dbody[hk]->kind == AST_ERRHANDLER) {
+                                ctx->eh = st->dbody[hk];
+                                break;
+                            }
                         }
                     }
-                }
-                bind_mark = shadow_push_block_binds(st->body, st->nbody);
-                if (ctx) {
-                    ok = shadow_emit_compound_body(st->body, st->nbody, out, ctx,
-                                                   nested, use_cleanup, 1);
-                } else {
-                    ok = 1;
-                    for (int k = 0; k < st->nbody && ok; k++) {
-                        if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, nested,
-                                                  use_cleanup))
-                            ok = 0;
+                    bind_mark = shadow_push_block_binds(st->body, st->nbody);
+                    if (ctx) {
+                        ok = shadow_emit_compound_body(st->body, st->nbody, out,
+                                                       ctx, nested, use_cleanup,
+                                                       1);
+                    } else {
+                        ok = 1;
+                        for (int k = 0; k < st->nbody && ok; k++) {
+                            if (!shadow_emit_stmt_ctx(st->body[k], out, ctx,
+                                                      nested, use_cleanup))
+                                ok = 0;
+                        }
                     }
-                }
-                shadow_pop_fn_binds(bind_mark);
-                g_shadow_nbinds = nbinds_mark;
-                if (ok) ok = cemit_fmt(out, "%s    }\n%s    }\n%s}\n", i1, i1,
+                    shadow_pop_fn_binds(bind_mark);
+                    g_shadow_nbinds = nbinds_mark;
+                    if (ok)
+                        ok = cemit_fmt(out, "%s    }\n%s    }\n%s}\n", i1, i1,
                                        indent);
-                if (ctx) ctx->eh = saved_eh;
-                shadow_pw_pop_loop(ctx, pw, 0);
-                return ok;
+                    if (ctx) ctx->eh = saved_eh;
+                    shadow_pw_pop_loop(ctx, pw, 0);
+                    return ok;
+                }
             }
         }
         /* Header is raw text. Split C-for so increment UFCS lowers. */

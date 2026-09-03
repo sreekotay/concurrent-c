@@ -192,8 +192,10 @@ zip / range): the compiler pays `i < live .len` and loads. `v` is a copy —
 `v =` and `&v` are ill-formed. `@for (&v in s) { … } !>;` is the mut walk:
 `v = x` stores through the same `.access` peel as the load (slice, vec,
 string, `T[n]`). `.len` / `.access` return the naked bound and slot —
-the hook is not Result. The walk re-reads `.len` each iteration. A write
-re-reads `.len`; `i >= len` is `CC_ERR_INVALID_ARG` (`"for-in write"`).
+the hook is not Result. A slice / `T[n]` snapshots `.len` and the data
+pointer at entry; a grower does the same when the body does not resize
+it. If the body can change the subject's extent, a write re-reads `.len`;
+`i >= len` is `CC_ERR_INVALID_ARG` (`"for-in write"`).
 That check is the mut walk's Result, not a skip. The subject is
 a name, a field path (`t->words`), or a view (`line.sub(start, line.len)` —
 hoisted to a hidden local; mut walk stores through that header). Users do not write `s.access(i)`.
@@ -270,9 +272,11 @@ Same `[…]` family: `T[n]` arrays, `T[~n >]` / `T[~n <]` channels.
 
 [recipe_explicit_capture.ccs](../examples/recipe_explicit_capture.ccs)
 
-Spawn takes a closure. `[x]` copies `x` into the task and the copy is
-immutable. `[&x]` shares the same variable for read-only access; mutation
-requires shipped synchronization or an explicit `@unsafe` closure.
+`@parallel` names are the frame: a pointer copies; every other name is
+the same object. There is no list. Spawn / `send_task` take a closure.
+`[x]` copies `x` into the task and the copy is immutable. `[&x]` shares
+the same variable for read-only access; mutation requires shipped
+synchronization or an explicit `@unsafe` closure.
 
 ```c
 n.spawn(() => [x] { use(x); });   // immutable value copy
@@ -293,11 +297,13 @@ No `T?`. Pick the shape that matches the operation:
 
 ---
 
-## 7. Nurseries join structured work
+## 7. Nurseries are the open bag
 
 [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs) · Spec §8.1
 
-A nursery is a join set with a handle. Lifecycle:
+A nursery is a join set with a handle when the set is not on the page
+(late `n.spawn`, host, retract). Names on the page are `@parallel` (§8).
+Lifecycle:
 
 ```
 OPEN ──spawn*──┬── JOINING ── EMPTY ── DEAD     owner stays (wait / @destroy)
@@ -320,9 +326,11 @@ the LEFT path (`n.leave(ctx, finish)`), not on wait / `@destroy`.
 
 ## 8. `@parallel` joins independent work
 
-[recipe_parallel.ccs](../examples/recipe_parallel.ccs) · Spec §8.11
+[recipe_parallel.ccs](../examples/recipe_parallel.ccs) ·
+[recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs) · Spec §8.11
 
-`@parallel` is a lexical fork-join. It is not a nursery. The brace and
+`@parallel` is a lexical fork-join: the siblings are on the page. It is
+not a nursery. The brace and
 `for` forms are `CCParallel !>(CCError)`: create can fail; `.wait()` is
 the join. A dest is live before the arms. Bare `@parallel { }` is an
 unconsumed Result — bind (`CCParallel h = … !>;`) or `!>.wait()!>;`.
@@ -331,8 +339,7 @@ first arm has finished when the construct returns `h`; siblings may
 still be running. A dest bound to one assignment arm is ill-formed:
 this dest is never live on the caller. A dest bound to one expression
 arm (`CCParallel h = @parallel { work(); } !>;`) is the worker
-(spawned); dest is live. Mark a caller strand `@serial`, or join with
-`!>.wait()!>`.
+(spawned); dest is live. Join with `!>.wait()!>`, or bind the dest.
 `h.wait()` joins them and publishes their writes. Pointer names copy
 the pointer; other captured names are the frame object and must
 outlive `.wait()`. `h.close(tx)` arms EMPTY to close `tx` on wait and
@@ -355,14 +362,20 @@ When several arms share one deadline, name it (`as dl`) and use `dl`,
 or write `@with_deadline(dl)` to make that object current.
 `n.spawn` names a lifetime that may outlive the spawn point (`@destroy`
 waits that nursery; `n.leave()` consumes the handle without joining).
-A brace join that names or captures a channel is not denied; CPU trees
-still adapt. A denied join that then parks on a channel aborts.
+Independent names stay `@parallel { }`. A meeting (blocking send/recv,
+or a captured channel) is `@parallel spawn { }`: spawned arms are not
+denied. The same shape without `spawn` is ill-formed, except under
+`#pragma(@parallel) off`. A denied join that then parks on a channel
+aborts.
 
 | Form | Meaning |
 |------|---------|
 | `@parallel { a = f(); b = g(); }` | Independent assignment arms. First on the caller; the rest may spawn. |
+| `@parallel spawn { … }` | Same arms. Spawned siblings are not denied. |
+| `@parallel(h) { … }` | Growing dest: admit onto `h`. Statement; snapshot; never deny. Live set. |
+| `@parallel spawn { @serial { …; tx.close(); } @serial { while (recv) } }` | On-page stream. Close next to produce. `.wait()` joins both. Not a nursery. |
 | `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. `h.live()` until `h.wait()` or `h.leave()`. Arms may cancel/adopt/pause `h`. `h.wait()` inside an arm of `h` is an error. |
-| `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; zero or one outer name. |
+| `@serial { …; a = t; }` | Sequential block as one sibling. Ordinary C; zero or one outer name. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. The body always runs. |
 | `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; a span of 0 or 1 is a plain `for`. `return` is `break` then `return` from the function after the join. |
 | `@parallel wait (ts) for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished. `CCParallel h = … !>;` is live during enter; the statement joins. A targeting `break` is `ok(false)` and must be bound. `return` drains, then leaves the function. `@stage` is a handshake, not a Result. |

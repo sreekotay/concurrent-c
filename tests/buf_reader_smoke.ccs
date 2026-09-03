@@ -45,7 +45,6 @@ int main(void) {
     }
 
     {
-        CCFile f;
         BufReader::[CCFile] fbr;
         char fbuf[32];
         const char *path = "tests/buf_reader_smoke_input.txt";
@@ -53,8 +52,7 @@ int main(void) {
         if (!w) return 6;
         fputs("alpha\nbeta\n", w);
         fclose(w);
-        if (cc_file_open(&f, cc_slice_cstr(path), "r") != 0) return 7;
-        @defer f.close();
+        CCFile f = cc_file_open(cc_slice_cstr(path)) !>(e) { return 7; } @destroy;
         fbr.init(&f, fbuf, sizeof(fbuf));
         {
             CCResult_CCSlice_CCIoError or = fbr.read_line_dup(a);

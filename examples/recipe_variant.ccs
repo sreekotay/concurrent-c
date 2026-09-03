@@ -113,7 +113,7 @@ static void print_wrapped(const char* label, WrappedCell* w) {
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
-    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    cc_arena_stack(a, kilobytes(4));
 
     /* 1–2. One arm at construction. `.kind` is read-only. */
     Cell n = { .num = 42 };

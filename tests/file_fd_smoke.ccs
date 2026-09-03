@@ -1,0 +1,64 @@
+/* fd-first CCFile: @(path) read birth, create, read_at offset, line dialect,
+ * size Err on a pipe. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+int main(void) {
+    @errhandler(CCIoError e) {
+        fprintf(stderr, "fatal: %s\n", cc_io_error_str(e));
+        return 1;
+    }
+    const char *path = "/tmp/cc_file_fd_smoke.txt";
+    CCArena a = @create(kilobytes(4)) @destroy;
+    char buf[8];
+    size_t at;
+    size_t pos;
+
+    {
+        CCFile out = cc_file_create(path) !> @destroy;
+        out.write(CC_SLICE_LIT("hello\r\nworld\n")) !>;
+        out.sync() !>;
+    }
+
+    {
+        CCFile in@("/tmp/cc_file_fd_smoke.txt") !> @destroy;
+        char[:] line;
+        if (!in.read_line(a, &line) !>) return 2;
+        if (line.len != 5 || memcmp(line.ptr, "hello", 5) != 0) return 3;
+        cc_arena_reset(a);
+        if (!in.read_line(a, &line) !>) return 4;
+        if (line.len != 5 || memcmp(line.ptr, "world", 5) != 0) return 5;
+        cc_arena_reset(a);
+        if (in.read_line(a, &line) !>) return 6;
+    }
+
+    {
+        CCFile f@("/tmp/cc_file_fd_smoke.txt") !> @destroy;
+        f.seek(3, SEEK_SET) !>;
+        at = f.read_at(buf, 2, 0) !>;
+        if (at != 2 || memcmp(buf, "he", 2) != 0) return 7;
+        pos = f.tell() !>;
+        if (pos != 3) return 8;
+        if (f.size() !> != 12) return 9;
+    }
+
+    {
+        int p[2];
+        CCFile pipe_r;
+        if (pipe(p) != 0) return 10;
+        pipe_r.fd = p[0];
+        if (!cc_is_err(cc_file_size(&pipe_r))) {
+            close(p[0]);
+            close(p[1]);
+            return 11;
+        }
+        close(p[0]);
+        close(p[1]);
+    }
+
+    remove(path);
+    printf("ok\n");
+    return 0;
+}

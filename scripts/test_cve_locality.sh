@@ -5,7 +5,7 @@ set -eu
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 CCC="${CCC:-$ROOT_DIR/cc/bin/ccc}"
-EXPECTED=27
+EXPECTED=28
 
 fail() { echo "[test_cve_locality] FAIL: $1" >&2; exit 1; }
 

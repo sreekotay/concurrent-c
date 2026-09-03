@@ -13,10 +13,8 @@ int main(void) {
     const char* path = "/tmp/cc_mmap_file_smoke.txt";
     const char* msg = "mmap helper\n";
     size_t n = strlen(msg);
-    CCFile w = {0};
+    CCFile w = cc_file_create(cc_slice_cstr(path)) !>;
     CCSlice s;
-
-    if (w.open(cc_slice_cstr(path), "w") != 0) return 2;
     if (cc_is_err(w.write(cc_slice_from_buffer((void*)msg, n)))) {
         w.close();
         return 3;

@@ -4,7 +4,7 @@
  * Consumer never had n. Produce until stop; consume until close.
  * Close is next to “no more” — not a handle registration.
  *
- *   @parallel {
+ *   @parallel spawn {
  *       @serial { …; tx.close(); }
  *       @serial { while (rx.recv(&v)) use(v); }
  *   } !>.wait()!>;
@@ -12,7 +12,7 @@
  * `@serial` may write one outer name, or none (this file).
  *
  * Buffered: send usually does not yield. Unbuffered: both arms must
- * be live (a channel on the join is never denied). Dest-live leave /
+ * be live (`spawn` admits them). Dest-live leave /
  * EMPTY-close: `h.close(tx)` / `h.leave()`, or the nursery twin
  * recipe_channel_pipeline.ccs.
  * Ordered recv (send_task): recipe_ordered_parallel.ccs.
@@ -29,7 +29,7 @@ int main(void) {
     CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
 
     cc_atomic_int sum = 0;
-    @parallel {
+    @parallel spawn {
         @serial {
             int i;
             for (i = 1; i <= 3; i++)

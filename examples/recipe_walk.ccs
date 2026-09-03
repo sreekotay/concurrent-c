@@ -26,8 +26,8 @@
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
-    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
-    CCArena keep = cc_arena_heap(kilobytes(1)) @destroy;
+    cc_arena_stack(a, kilobytes(4));
+    cc_arena_stack(keep, kilobytes(1));
 
     /* 1. Arena names the lifetime. Dest-bulk needs a window.
      *    malloc(8);  — undeclared unless <stdlib.h> */
@@ -74,7 +74,7 @@ int main(void) {
     println(@string(`walk n=${n} sum=${sum}`, @scratch)) !>;
 
     /* 6. Mut walk — binder is not an object; `ch =` is .access store.
-     *    Write re-reads .len; i >= len is CC_ERR_INVALID_ARG. */
+     *    A slice snapshots .len; a grower the body resizes re-reads. */
     char[:] word = {'c', 'c'};
     @for (&ch in word) {
         if (ch >= 'a' && ch <= 'z')

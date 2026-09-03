@@ -8,7 +8,7 @@ CC asks two questions repeatedly: What is the smallest fact that actually change
 - **[UFCS](language-concepts.md#3-methods-are-ordinary-functions)** — Attach vocabulary locally without making the operation belong to the type.
 - **[Typeviews](typehooks-typeviews.md#2-typeview--faces-and-allow-lists)** — Same-object authority lenses; narrow what a caller may do without wrappers or new allocation.
 - **[Arenas](language-concepts.md#4-slices-remember-where-bytes-live)** — Name lifetimes and owners; allocation strategy is secondary.
-- **[Walk / extent](cheatsheet.md#walk-for-in)** — The bound is the live extent. Walk it; do not reconstruct `i < .len`. `.len` / `.access` are naked; the mut walk's write-time bound is the Result (`!>`). Slice fields are read-only. `CCString` is an owner: `as_slice()` / dest `char[:] v = s` / `cstr()`, not `.data`. Recipe: [recipe_walk.ccs](../examples/recipe_walk.ccs).
+- **[Walk / extent](cheatsheet.md#walk-for-in)** — Walk the extent; do not reconstruct `i < .len`. A slice (and a grower the body does not resize) snapshots `.len` and the pointer at entry; a grower the body resizes stays live. `.len` / `.access` are naked; the mut walk's write-time bound is the Result (`!>`). Slice fields are read-only. `CCString` is an owner: `as_slice()` / dest `char[:] v = s` / `cstr()`, not `.data`. Recipe: [recipe_walk.ccs](../examples/recipe_walk.ccs).
 - **Named pointers (`CCBox`)** — A named, nullable pointer handle represented as `{ H *p }`. Copies refer to the same object; `p == NULL` is the canonical dead state (never born or consumed). Ordinary sites use `is_live` / `host`, not `.p`.
 - **[Arena-last](cheatsheet.md#keep-pass-the-arena-to-live-on)** — When an operation creates owned output (i.e. allocates memory), make the destination lifetime explicit at that point.
 - **[Results / `!>` / `?>`](language-concepts.md#2-errors-map-to-a-value-or-to-control-flow)** — Make fallible transitions force acknowledgement without forcing local policy. Do not make fallible operations appear infallible; keep errors distinct from successful values.
@@ -17,8 +17,8 @@ CC asks two questions repeatedly: What is the smallest fact that actually change
 - **[Move / dead-state](cheatsheet.md#lifetime-parents-attach--adopt--create_)** — `cc_move` transfers; the source is empty for teardown. User use after the move is a compile error, not a runtime zero-check.
 - **[Single-shot closures](language-concepts.md#5-closures-carry-captures)** — Represent one remaining action or obligation without inventing a larger task object.
 - **[Turnstiles / gates](cheatsheet.md#pipeline-turnstile-ccturnstile)** — Express named local admission predicates; not locks, not DAGs.
-- **[Nurseries](cheatsheet.md#structured-concurrency)** — Open bag: late `spawn`, host, `leave` / EMPTY. On-page stream is `@parallel` + `tx.close()` in produce ([recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs)). EMPTY registration: [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs).
-- **[Tickets](cheatsheet.md#parallel)** — Names for relationships and admission, not counters or schedule positions.
+- **[Tickets / `@parallel`](cheatsheet.md#parallel)** — Names on the page. Join, range, on-page stream (`@parallel spawn` + `tx.close()` in produce). Not a nursery. [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs).
+- **[Nurseries](cheatsheet.md#structured-concurrency)** — Open bag when the set is not on the page: late `n.spawn`, host, `leave` / EMPTY. EMPTY registration: [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs).
 - **Local sigils** — Mark consequential decision boundaries directly in source.
 - **[Top-level owners + views](getting-started.md#locality-owned-or-view)** — Prefer one real owner with non-owning views over manufactured shared ownership.
 

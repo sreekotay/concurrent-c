@@ -184,8 +184,11 @@ A type with both arms is a **for-in subject**. Ordinary sites may read
 `T`) — the hook is not Result. `.access` is the compiler-internal slot
 after `i < live len`. Users write the walk, not `s.access(i)`. Copy
 walk / enumerate / range are void. Mut walk is `void !>(CCError)`: a
-write re-reads `.len`, and `i >= len` is that error (`"for-in write"`),
-not a skip. Zip is also Result (unequal lengths). Point access stays
+write re-reads `.len` when the body can change the subject's extent, and
+`i >= len` is that error (`"for-in write"`),
+not a skip. A slice / `T[n]` snapshots `.len` and the data pointer at
+entry; a grower does the same when the body does not resize it. Zip is
+also Result (unequal lengths). Point access stays
 `s.at(i) !>` / `s.set(i, v) !>`. Slice fields (`.ptr` / `.len` / `.id`)
 are readable and read-only. `CCString` hides the SSO union; use
 `as_slice()` / `cstr()`.

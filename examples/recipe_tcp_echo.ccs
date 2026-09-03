@@ -1,34 +1,30 @@
 /*
- * Recipe: TCP Echo Server (Structured Concurrency)
+ * Recipe: TCP Echo Server
  *
- * Real servers accept in a loop until shutdown; shutdown in production
- * usually comes from closing the listener (signal handler, supervisor).
- * One nursery owns the accept loop AND every live connection — the
- * nursery's @destroy waits for the loop to stop and every spawned
- * handler to drain. Graceful shutdown with no refcount, no join array.
+ * Same machine as pigz_idiomatic: units born at the read until stop.
+ * Accept is the read. handle is the gap (the conn's C while (recv)).
+ * The sock is the sink — no write stage, no n.
  *
- *   nursery n:
- *     [accept loop on main's fiber]
- *     per accept: n.spawn(() => handle_client(sock))
- *     if --test:  n.spawn(() => run_test_client())
+ *   CCParallel h = @parallel spawn {
+ *       @serial {
+ *           do {
+ *               sock = accept();
+ *               @parallel(h) { handle(sock); }   // overlap; value-copy sock
+ *           } while (!test);
+ *       }
+ *       @serial { if (test) run_test_client(); }
+ *   } !>;
+ *   h.wait() !>;
  *
- * Accept loop exit conditions:
- *   1. cc_listener_accept returns an error (listener closed, fd gone) —
- *      this is the real-server path (SIGTERM handler closes the listener).
- *   2. In --test mode, after one connection has been served, so CI can
- *      finish deterministically without external signalling.
- *
- * Test mode (--test):
- *   Spawn an in-process client under the same nursery, do one round-trip,
- *   exit. Fully self-contained — CI runs this recipe with no external
- *   tooling (nc, curl, etc.).
+ * Stop is listener closed / accept error / --test after one conn.
+ * Not a nursery: the set is on the page. Dest `.wait()` joins.
  *
  * Manual run:
  *   ./ccc run examples/recipe_tcp_echo.ccs
  *   (in another shell:)  echo "hello" | nc 127.0.0.1 9000
  *
- * Temp prints use @string(`...`, @scratch). Real arenas remain where IO
- * allocates (peer addr, read buffer, CLI parse).
+ * Temp prints use @string(`...`, @scratch). IO windows (peer addr, read
+ * buffer, CLI parse) use cc_arena_stack — frame scratch, overflow to heap.
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/std/prelude.cch>
@@ -41,7 +37,7 @@
 /* Echo every received chunk until the peer closes. */
 static void handle_client(CCSocket sock) {
     @errhandler(CCError e) cc_error_exit(e);
-    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    cc_arena_stack(a, kilobytes(4));
 
     CCNetError peer_err = CC_NET_OK;
     char[:] peer = sock.peer_addr(a, &peer_err);
@@ -96,11 +92,11 @@ static void run_test_client(void) {
 }
 
 @grammar(cli) TcpEchoOpts {~~~~
-    test: flag --test desc "Self-test: spawn a client, do one round-trip, exit."
+    test: flag --test desc "Self-test: one client sibling, one accept, exit."
 ~~~~}
 
 static bool parse_test_flag(int argc, char** argv) {
-    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    cc_arena_stack(a, kilobytes(4));
     TcpEchoOpts opts = {0};
     /* Pure parse — no usage ritual; unknown flags are just "not test mode". */
     if (!cc_parse_args(TcpEchoOpts, argc, argv, a, &opts)) return false;
@@ -119,28 +115,24 @@ int main(int argc, char** argv) {
     const char* mode = test_mode ? "test" : "demo";
     println(@string(`listening on ${PORT} (${mode} mode)`, @scratch)) !>;
 
-    {
-        CCNursery n = cc_nursery_create() !> @destroy;
-
-        /* Test-mode client: sibling task of the handlers. */
-        if (test_mode) {
-            n.spawn(() => run_test_client()) !>;
+    CCParallel h = @parallel spawn {
+        @serial {
+            do {
+                CCSocket sock = ln.accept() !>(e) {
+                    println(@string(`accept stopped: ${e}`, @scratch)) !>;
+                    break;
+                };
+                @parallel(h) {
+                    handle_client(sock);
+                }
+            } while (!test_mode);
         }
-
-        /* Accept loop on main's fiber. Each accepted socket is handed to a
-         * freshly spawned handler; the nursery's @destroy joins them all. */
-        do {
-            CCSocket sock = ln.accept() !>(e) {
-                /* Real-server shutdown path: listener closed, fd gone,
-                 * peer unreachable, etc. */
-                println(@string(`accept stopped: ${e}`, @scratch)) !>;
-                break;
-            };
-            n.spawn(() => [sock] { handle_client(sock); }) !>;
-        } while (!test_mode);  /* Test mode bails after one connection so CI is deterministic */
-    }
-    /* nursery @destroy: accept loop exited, every handler (and the test
-     * client, if any) have drained. */
+        @serial {
+            if (test_mode)
+                run_test_client();
+        }
+    } !>;
+    h.wait() !>;
 
     ln.close();
     println("server done") !>;

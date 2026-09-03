@@ -6,7 +6,7 @@ Diagnostics LSP **written in Concurrent-C**. Also ships the `.ccs` TextMate gram
 editor  --stdio JSON-RPC-->  cc-lsp (this package)
                                   |
                                   v
-                           ccc --emit-c-only
+                           ccc build --emit-c-only
 ```
 
 Pair with [`../ccs-syntax/`](../ccs-syntax/) for highlighting. See [`../roadmap.md`](../roadmap.md).
@@ -23,7 +23,8 @@ Pair with [`../ccs-syntax/`](../ccs-syntax/) for highlighting. See [`../roadmap.
 
 Diagnostics: `didOpen` / `didSave` kick immediately; `didChange` debounces
 (~150 ms, one waiter per file). `.ccs` and `.cch` both run
-`ccc --emit-c-only` (a header is a unit). The session fiber does not
+`ccc build --emit-c-only` (a header is a unit; `build` without `run`
+so `.shcc` is not auto-executed). The session fiber does not
 wait on `ccc`. Hover is off (the handler returns `null`).
 
 Unsaved buffers are written under `$TMPDIR/cc-lsp-<pid>/` (never next

@@ -5,11 +5,8 @@
 
 #undef cc_file_read_all
 #undef cc_file_read_all_async
-#undef cc_file_read_all_async_deadline
 #undef cc_file_read_async
-#undef cc_file_read_async_deadline
 #undef cc_file_read_line_async
-#undef cc_file_read_line_async_deadline
 #undef cc_file_read_into
 #undef cc_file_read_line_into
 #undef cc_path_join
@@ -19,9 +16,12 @@
 #undef cc_string_push_slice
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #if !defined(__TINYC__)
 CCIoError cc_io_from_errno(int err) {
@@ -50,85 +50,105 @@ CCIoError cc_io_from_errno(int err) {
 }
 #endif
 
-static FILE *cc__file_fp(CCFile *file) {
-    return file ? (FILE *)file->handle : NULL;
+enum { CC__PATH_MAX = 4096 };
+
+static int cc__file_fd(const CCFile *file) {
+    return file ? file->fd : -1;
 }
 
-static size_t cc__fgets_payload_len(const char *buf, size_t cap) {
-    size_t n;
-    for (n = 0; n < cap; n++) {
-        size_t k;
-        if (buf[n] != '\0') continue;
-        k = n + 1;
-        while (k < cap && (unsigned char)buf[k] == (unsigned char)CC__FGETS_FILL) k++;
-        if (k == cap) return n;
+static int cc__path_c(CCSlice path, char *buf, size_t cap) {
+    if (!path.ptr || path.len == 0 || path.len >= cap) return -1;
+    memcpy(buf, path.ptr, path.len);
+    buf[path.len] = '\0';
+    return 0;
+}
+
+static CCResult_CCFile_CCIoError cc__file_open_flags(CCSlice path, int flags, int mode) {
+    char pbuf[CC__PATH_MAX];
+    int fd;
+    CCFile f;
+    if (cc__path_c(path, pbuf, sizeof(pbuf)) != 0) {
+        return cc_err_CCResult_CCFile_CCIoError(cc_io_from_errno(EINVAL));
     }
-    return 0;
+    do {
+        fd = open(pbuf, flags, mode);
+    } while (fd < 0 && errno == EINTR);
+    if (fd < 0) return cc_err_CCResult_CCFile_CCIoError(cc_io_from_errno(errno));
+    f.fd = fd;
+    return cc_ok_CCResult_CCFile_CCIoError(f);
 }
 
-int cc_file_open(CCFile *file, CCSlice path_sl, const char *mode) {
-    const char *path = path_sl.ptr ? (const char *)path_sl.ptr : NULL;
-    if (!file) return -1;
-    file->handle = NULL;
-    if (!path || !mode) return -1;
-    FILE *f = fopen(path, mode);
-    if (!f) return -1;
-    file->handle = (void *)f;
-    return 0;
+CCResult_CCFile_CCIoError cc_file_open(CCSlice path) {
+    return cc__file_open_flags(path, O_RDONLY, 0);
+}
+
+CCResult_CCFile_CCIoError cc_file_create(CCSlice path) {
+    return cc__file_open_flags(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 }
 
 void cc_file_close(CCFile *file) {
-    FILE *fp = cc__file_fp(file);
-    if (!fp) return;
-    fclose(fp);
-    file->handle = NULL;
+    int fd = cc__file_fd(file);
+    if (fd < 0) return;
+    while (close(fd) != 0 && errno == EINTR) {}
+    file->fd = -1;
+}
+
+static CCResult_size_t_CCIoError cc__write_all(int fd, const void *buf, size_t n) {
+    size_t off = 0;
+    const char *p = (const char *)buf;
+    if (fd < 0) return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
+    if (n == 0) return cc_ok_CCResult_size_t_CCIoError(0);
+    if (!buf) return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
+    while (off < n) {
+        ssize_t w = write(fd, p + off, n - off);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
+        }
+        if (w == 0)
+            return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EIO));
+        off += (size_t)w;
+    }
+    return cc_ok_CCResult_size_t_CCIoError(n);
 }
 
 CCResult_CCSlice_CCIoError cc_file_read_all(CCFile *file, CCArena arena) {
-    FILE *fp = cc__file_fp(file);
-    if (!fp || !cc_arena_is_live(arena)) {
+    int fd = cc__file_fd(file);
+    struct stat st;
+    size_t len;
+    size_t off;
+    char *buf;
+    if (fd < 0 || !cc_arena_is_live(arena)) {
         return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(EINVAL));
     }
-
-    if (fseek(fp, 0, SEEK_END) != 0) {
+    if (fstat(fd, &st) != 0) {
         return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(errno));
     }
-    long end = ftell(fp);
-    if (end < 0) {
-        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(errno));
+    if (!S_ISREG(st.st_mode) || st.st_size < 0) {
+        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(ESPIPE));
     }
-    if (fseek(fp, 0, SEEK_SET) != 0) {
-        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(errno));
-    }
-
-    size_t len = (size_t)end;
-    char *buf = (char *)cc_arena_alloc(arena, len + 1, sizeof(char));
+    len = (size_t)st.st_size;
+    buf = (char *)cc_arena_alloc(arena, len + 1, sizeof(char));
     if (!buf) {
         return cc_err_CCResult_CCSlice_CCIoError(cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
     }
-
-    size_t read = fread(buf, 1, len, fp);
-    if (read != len && ferror(fp)) {
-        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(errno));
+    off = 0;
+    while (off < len) {
+        ssize_t n = read(fd, buf + off, len - off);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(errno));
+        }
+        if (n == 0) break;
+        off += (size_t)n;
     }
-    buf[read] = '\0';
-    CCSlice slice = cc_slice_from_parts(buf, read, CC_SLICE_ID_UNTRACKED);
-    return cc_ok_CCResult_CCSlice_CCIoError(slice);
+    buf[off] = '\0';
+    return cc_ok_CCResult_CCSlice_CCIoError(
+        cc_slice_from_parts(buf, off, CC_SLICE_ID_UNTRACKED));
 }
 
 CCResult_size_t_CCIoError cc_file_write(CCFile *file, CCSlice data) {
-    FILE *fp = cc__file_fp(file);
-    size_t written;
-    if (!fp) {
-        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
-    }
-    written = fwrite(data.ptr, 1, data.len, fp);
-    if (written != data.len) {
-        if (ferror(fp)) {
-            return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
-        }
-    }
-    return cc_ok_CCResult_size_t_CCIoError(written);
+    return cc__write_all(cc__file_fd(file), data.ptr, data.len);
 }
 
 CCResult_size_t_CCIoError cc_std_out_write(CCSlice data) {
@@ -151,10 +171,10 @@ CCResult_size_t_CCIoError cc_std_err_write(CCSlice data) {
 
 CCResult_bool_CCIoError cc_file_read_into(CCFile *file, CCArena arena, size_t n,
                                          CCSlice *out) {
-    FILE *fp = cc__file_fp(file);
+    int fd = cc__file_fd(file);
     char *buf;
-    size_t got;
-    if (!fp || !cc_arena_is_live(arena) || n == 0 || !out) {
+    size_t got = 0;
+    if (fd < 0 || !cc_arena_is_live(arena) || n == 0 || !out) {
         return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
     buf = (char *)cc_arena_alloc(arena, n, sizeof(char));
@@ -162,11 +182,17 @@ CCResult_bool_CCIoError cc_file_read_into(CCFile *file, CCArena arena, size_t n,
         return cc_err_CCResult_bool_CCIoError(
             cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
     }
-    got = fread(buf, 1, n, fp);
-    if (got == 0) {
-        if (ferror(fp)) {
+    while (got < n) {
+        ssize_t r = read(fd, buf + got, n - got);
+        if (r < 0) {
+            if (errno == EINTR) continue;
             return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(errno));
         }
+        if (r == 0) break;
+        got += (size_t)r;
+        break; /* one read(2); further bytes stay for the next call */
+    }
+    if (got == 0) {
         *out = cc_slice_empty();
         return cc_ok_CCResult_bool_CCIoError(false);
     }
@@ -176,32 +202,37 @@ CCResult_bool_CCIoError cc_file_read_into(CCFile *file, CCArena arena, size_t n,
 
 CCResult_bool_CCIoError cc_file_read_line_into(CCFile *file, CCArena arena,
                                               CCSlice *out) {
-    FILE *fp = cc__file_fp(file);
+    int fd = cc__file_fd(file);
     CCString line;
-    char buf[8192];
-    if (!fp || !cc_arena_is_live(arena) || !out) {
+    if (fd < 0 || !cc_arena_is_live(arena) || !out) {
         return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
     line = cc_string_new();
     for (;;) {
-        size_t n;
-        memset(buf, CC__FGETS_FILL, sizeof(buf));
-        if (!fgets(buf, (int)sizeof(buf), fp)) {
-            if (ferror(fp)) {
-                return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(errno));
-            }
+        unsigned char c;
+        ssize_t n;
+        do {
+            n = read(fd, &c, 1);
+        } while (n < 0 && errno == EINTR);
+        if (n < 0)
+            return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(errno));
+        if (n == 0) {
             if (line.len == 0) {
                 *out = cc_slice_empty();
                 return cc_ok_CCResult_bool_CCIoError(false);
             }
             break;
         }
-        n = cc__fgets_payload_len(buf, sizeof(buf));
-        if (!cc_string_push_slice(&line, cc_slice_from_buffer(buf, n), arena)) {
+        if (c == '\n') break;
+        if (!cc_string_push_slice(&line, cc_slice_from_buffer(&c, 1), arena)) {
             return cc_err_CCResult_bool_CCIoError(
                 cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
         }
-        if (n > 0 && buf[n - 1] == '\n') break;
+    }
+    {
+        CCSlice cur = cc_string_as_slice(&line);
+        if (cur.len > 0 && ((char *)cur.ptr)[cur.len - 1] == '\r')
+            line.len--;
     }
     *out = cc_string_as_slice(&line);
     return cc_ok_CCResult_bool_CCIoError(true);
@@ -209,75 +240,120 @@ CCResult_bool_CCIoError cc_file_read_line_into(CCFile *file, CCArena arena,
 
 CCResult_bool_CCIoError cc_file_read_buf_into(CCFile *file, void *buf, size_t n,
                                              size_t *out) {
-    FILE *fp = cc__file_fp(file);
-    size_t got;
-    if (!fp || !buf || n == 0 || !out) {
+    int fd = cc__file_fd(file);
+    ssize_t got;
+    if (fd < 0 || !buf || n == 0 || !out) {
         return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
-    got = fread(buf, 1, n, fp);
+    do {
+        got = read(fd, buf, n);
+    } while (got < 0 && errno == EINTR);
+    if (got < 0)
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(errno));
     if (got == 0) {
-        if (ferror(fp)) {
-            return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(errno));
-        }
         *out = 0;
         return cc_ok_CCResult_bool_CCIoError(false);
     }
-    *out = got;
+    *out = (size_t)got;
     return cc_ok_CCResult_bool_CCIoError(true);
 }
 
 CCResult_size_t_CCIoError cc_file_write_buf(CCFile *file, const void *buf,
                                            size_t n) {
-    FILE *fp = cc__file_fp(file);
-    size_t written;
-    if (!fp || !buf) {
+    int fd = cc__file_fd(file);
+    ssize_t written;
+    if (fd < 0 || (n > 0 && !buf)) {
         return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
     }
     if (n == 0) return cc_ok_CCResult_size_t_CCIoError(0);
-    written = fwrite(buf, 1, n, fp);
-    if (written != n && ferror(fp)) {
+    do {
+        written = write(fd, buf, n);
+    } while (written < 0 && errno == EINTR);
+    if (written < 0)
         return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
+    return cc_ok_CCResult_size_t_CCIoError((size_t)written);
+}
+
+CCResult_size_t_CCIoError cc_file_write_some(CCFile *file, CCSlice data) {
+    return cc_file_write_buf(file, data.ptr, data.len);
+}
+
+CCResult_size_t_CCIoError cc_file_read_at(CCFile *file, void *buf, size_t n,
+                                         int64_t offset) {
+    int fd = cc__file_fd(file);
+    ssize_t got;
+    if (fd < 0 || offset < 0 || (n > 0 && !buf)) {
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
     }
-    return cc_ok_CCResult_size_t_CCIoError(written);
+    if (n == 0) return cc_ok_CCResult_size_t_CCIoError(0);
+    do {
+        got = pread(fd, buf, n, (off_t)offset);
+    } while (got < 0 && errno == EINTR);
+    if (got < 0)
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
+    return cc_ok_CCResult_size_t_CCIoError((size_t)got);
+}
+
+CCResult_size_t_CCIoError cc_file_write_at(CCFile *file, CCSlice data,
+                                          int64_t offset) {
+    int fd = cc__file_fd(file);
+    size_t off = 0;
+    const char *p;
+    if (fd < 0 || offset < 0) {
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
+    }
+    if (data.len == 0) return cc_ok_CCResult_size_t_CCIoError(0);
+    if (!data.ptr)
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
+    p = (const char *)data.ptr;
+    while (off < data.len) {
+        ssize_t w = pwrite(fd, p + off, data.len - off, (off_t)offset + (off_t)off);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
+        }
+        if (w == 0)
+            return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EIO));
+        off += (size_t)w;
+    }
+    return cc_ok_CCResult_size_t_CCIoError(data.len);
 }
 
 CCResult_size_t_CCIoError cc_file_sync(CCFile *file) {
-    FILE *fp = cc__file_fp(file);
-    if (!fp) return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
-    if (fflush(fp) != 0)
+    int fd = cc__file_fd(file);
+    if (fd < 0) return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
+    if (fsync(fd) != 0)
         return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
     return cc_ok_CCResult_size_t_CCIoError(0);
 }
 
 CCResult_size_t_CCIoError cc_file_seek(CCFile *file, long offset, int whence) {
-    FILE *fp = cc__file_fp(file);
-    if (!fp) return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
-    if (fseek(fp, offset, whence) != 0)
+    int fd = cc__file_fd(file);
+    if (fd < 0) return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
+    if (lseek(fd, (off_t)offset, whence) < 0)
         return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
     return cc_ok_CCResult_size_t_CCIoError(0);
 }
 
 CCResult_size_t_CCIoError cc_file_tell(CCFile *file) {
-    FILE *fp = cc__file_fp(file);
-    long pos;
-    if (!fp) return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
-    pos = ftell(fp);
+    int fd = cc__file_fd(file);
+    off_t pos;
+    if (fd < 0) return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
+    pos = lseek(fd, 0, SEEK_CUR);
     if (pos < 0)
         return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
     return cc_ok_CCResult_size_t_CCIoError((size_t)pos);
 }
 
 CCResult_size_t_CCIoError cc_file_size(CCFile *file) {
-    FILE *fp = cc__file_fp(file);
-    long cur, end;
-    if (!fp) return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
-    cur = ftell(fp);
-    if (cur < 0) return cc_ok_CCResult_size_t_CCIoError(0);
-    if (fseek(fp, 0, SEEK_END) != 0) return cc_ok_CCResult_size_t_CCIoError(0);
-    end = ftell(fp);
-    (void)fseek(fp, cur, SEEK_SET);
-    if (end < 0) return cc_ok_CCResult_size_t_CCIoError(0);
-    return cc_ok_CCResult_size_t_CCIoError((size_t)end);
+    int fd = cc__file_fd(file);
+    struct stat st;
+    if (fd < 0) return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
+    if (fstat(fd, &st) != 0)
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
+    if (!S_ISREG(st.st_mode) || st.st_size < 0)
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(ESPIPE));
+    return cc_ok_CCResult_size_t_CCIoError((size_t)st.st_size);
 }
 
 CCSlice cc_path_join(CCArena arena, CCSlice a, CCSlice b) {
@@ -369,21 +445,20 @@ int cc_buf_writer_init(CCBufWriter *w, CCFile *f, CCArena arena, size_t cap) {
 }
 
 CCResult_size_t_CCIoError cc_buf_writer_flush(CCBufWriter *w) {
-    FILE *fp;
-    size_t written;
-    if (!w || !w->file || !w->file->handle)
+    CCSlice data;
+    CCResult_size_t_CCIoError wr;
+    if (!w || !w->file || w->file->fd < 0)
         return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
-    fp = (FILE *)w->file->handle;
-    written = fwrite(w->buf, 1, w->len, fp);
-    if (written != w->len && ferror(fp))
-        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
-    w->len = 0;
-    return cc_ok_CCResult_size_t_CCIoError(written);
+    if (w->len == 0) return cc_ok_CCResult_size_t_CCIoError(0);
+    data = cc_slice_from_buffer(w->buf, w->len);
+    wr = cc_file_write(w->file, data);
+    if (wr.ok) w->len = 0;
+    return wr;
 }
 
 CCResult_size_t_CCIoError cc_buf_writer_write(CCBufWriter *w, CCSlice data) {
     size_t off;
-    if (!w || !w->buf || !w->file || !w->file->handle)
+    if (!w || !w->buf || !w->file || w->file->fd < 0)
         return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
     off = 0;
     while (off < data.len) {
@@ -410,10 +485,12 @@ static int cc__async_complete(CCAsyncHandle* h, int err) {
     return cc_chan_send(h->done, &err, sizeof(int));
 }
 
-int cc_file_open_async(CCExec* ex, CCFile *file, CCSlice path, const char *mode, CCAsyncHandle* h) {
+int cc_file_open_async(CCExec* ex, CCFile *file, CCSlice path, CCAsyncHandle* h) {
+    CCResult_CCFile_CCIoError r;
     (void)ex;
-    int err = cc_file_open(file, path, mode);
-    return cc__async_complete(h, err);
+    r = cc_file_open(path);
+    if (r.ok && file) *file = r.u.value;
+    return cc__async_complete(h, r.ok ? 0 : -1);
 }
 
 int cc_file_close_async(CCExec* ex, CCFile *file, CCAsyncHandle* h) {

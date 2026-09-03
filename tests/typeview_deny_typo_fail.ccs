@@ -1,0 +1,16 @@
+/* Exact deny typo under r:* must fail at @typeview registration. */
+#include <ccc/std/prelude.cch>
+
+typedef struct Bag {
+    int secret;
+    int len;
+} Bag;
+
+@typeview on Bag {
+    r: *, ^secert;
+};
+
+int main(void) {
+    Bag b = { .secret = 1, .len = 0 };
+    return b.len;
+}

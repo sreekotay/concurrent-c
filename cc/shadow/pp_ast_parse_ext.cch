@@ -999,6 +999,105 @@ static AstNode* parse_parallel_unwrap_rhs(Parser* p, const char* dest,
     return parse_parallel_finish(p, n);
 }
 
+/* `{ … }` already tokenized — skip a balanced brace for lookahead. */
+static int parallel_skip_braced(Parser* p) {
+    int depth = 0;
+    if (!tok_eq(p_peek(p), TK_PUNCT, "{")) return 0;
+    for (;;) {
+        Token t = p_peek(p);
+        if (t.kind == TK_EOF) return 0;
+        p_next(p);
+        if (tok_eq(t, TK_PUNCT, "{"))
+            depth++;
+        else if (tok_eq(t, TK_PUNCT, "}")) {
+            if (--depth == 0) return 1;
+        }
+    }
+}
+
+/* `@parallel (name) { … }` without `!>` is dest admit. The same tokens
+ * with `!>` stay the predicate join (`@parallel (ready) { … } !>`). */
+static int peek_parallel_onto(Parser* p) {
+    int save = p->i;
+    int onto;
+    if (!tok_eq(p_peek(p), TK_PUNCT, "(")) return 0;
+    p_next(p);
+    if (p_peek(p).kind != TK_IDENT) {
+        p->i = save;
+        return 0;
+    }
+    p_next(p);
+    if (!tok_eq(p_peek(p), TK_PUNCT, ")")) {
+        p->i = save;
+        return 0;
+    }
+    p_next(p);
+    if (!tok_eq(p_peek(p), TK_PUNCT, "{")) {
+        p->i = save;
+        return 0;
+    }
+    if (!parallel_skip_braced(p)) {
+        p->i = save;
+        return 0;
+    }
+    onto = !tok_eq(p_peek(p), TK_PUNCT, "!>");
+    p->i = save;
+    return onto;
+}
+
+static AstNode* parse_parallel_onto(Parser* p) {
+    Token name;
+    AstNode* n;
+    AstNode* ser;
+    if (!p_accept(p, TK_PUNCT, "(")) {
+        parser_fail(p, p_peek(p), "expected '(' after @parallel");
+        return NULL;
+    }
+    name = p_next(p);
+    if (name.kind != TK_IDENT) {
+        parser_fail(p, name, "@parallel(h) dest must be a name");
+        return NULL;
+    }
+    if (!p_accept(p, TK_PUNCT, ")")) {
+        parser_fail(p, p_peek(p), "expected ')' after @parallel dest");
+        return NULL;
+    }
+    if (!tok_eq(p_peek(p), TK_PUNCT, "{")) {
+        parser_fail(p, p_peek(p), "expected '{' after @parallel(h)");
+        return NULL;
+    }
+    p_next(p);
+    n = ast_new(p, AST_PARALLEL);
+    if (!n) return NULL;
+    n->par_onto = 1;
+    n->forced_seq = p->parallel_off;
+    slice_to(n->a, sizeof(n->a), name.spell);
+    ser = ast_new(p, AST_SERIAL);
+    if (!ser) return NULL;
+    while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF &&
+           !p->err) {
+        AstNode* s = parse_stmt(p);
+        if (!s) return NULL;
+        if (ser->nbody >= SHADOW_BODY_CAP) {
+            parser_fail_body_cap(p, p_peek(p), "@parallel(h) body");
+            return NULL;
+        }
+        ser->body[ser->nbody++] = s;
+    }
+    if (!p_accept(p, TK_PUNCT, "}")) {
+        parser_fail(p, p_peek(p), "expected '}' after @parallel(h)");
+        return NULL;
+    }
+    p_accept(p, TK_PUNCT, ";");
+    if (ser->nbody < 1) {
+        parser_fail(p, p_peek(p), "@parallel(h) body is empty");
+        return NULL;
+    }
+    n->body[0] = ser;
+    n->nbody = 1;
+    return n;
+}
+
 static AstNode* parse_parallel_head(Parser* p) {
     char pred[2048];
     char gate[256];
@@ -1010,6 +1109,8 @@ static AstNode* parse_parallel_head(Parser* p) {
         return NULL;
     p_next(p); /* @ */
     p_next(p); /* parallel */
+    if (tok_eq(p_peek(p), TK_PUNCT, "(") && peek_parallel_onto(p))
+        return parse_parallel_onto(p);
     if (tok_eq(p_peek(p), TK_IDENT, "spawn") ||
         shadow_kw(p_peek(p)) == SHADOW_KW_SPAWN) {
         Token sp = p_peek(p);
@@ -1112,7 +1213,10 @@ static AstNode* parse_parallel_head(Parser* p) {
 }
 
 static AstNode* parse_parallel(Parser* p) {
-    return parse_parallel_finish(p, parse_parallel_head(p));
+    AstNode* n = parse_parallel_head(p);
+    if (!n) return NULL;
+    if (n->par_onto) return n;
+    return parse_parallel_finish(p, n);
 }
 
 /* `bool fin = @parallel wait (…) for (…) { … } !>;` */

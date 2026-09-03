@@ -39,11 +39,12 @@ static const LspHover g_hovers[] = {
      "`@with_deadline(dur)` / `@with_deadline(dur) as dl`\n\n"
      "Pushes an ambient deadline for the block. Cooperative: callees must observe it."},
     {"@parallel",
-     "`@parallel { … }` / `@parallel (pred)` / `@parallel for (k in lo..hi)`\n\n"
-     "Scheduling sugar, not a nursery. `@serial` arms run on the parent fiber."},
+     "`@parallel { … }` / `@parallel spawn { … }` / `@parallel(h) { … }` / `@parallel (pred)` / `@parallel for (k in lo..hi)`\n\n"
+     "Independent names. `spawn` admits siblings as fibers. `@parallel(h)` is the growing dest: live admits onto `h`. Not a nursery."},
     {"@serial",
      "`@serial { … }` inside `@parallel`\n\n"
-     "That arm stays on the calling fiber; sibling arms may run concurrently."},
+     "The block is sequential: those statements are one sibling, in order. "
+     "A later `@serial` may still spawn."},
     {"@comptime",
      "`@comptime { … }` runs at compile time (TCC seam). Prefer not to hide policy here."},
     {"@emit",

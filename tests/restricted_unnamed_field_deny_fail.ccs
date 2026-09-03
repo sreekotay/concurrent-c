@@ -7,7 +7,7 @@ typedef struct Box {
 } Box;
 
 @typeview on Box {
-    r: len, bump;
+    r: len;
 };
 
 static int leak(int n, Box* b) {

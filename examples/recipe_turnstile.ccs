@@ -23,7 +23,7 @@
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
-    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    cc_arena_stack(arena, kilobytes(64));
     CCTurnstileRW ts@(CAP, arena) !> @destroy;
 
     int read_next = 0;

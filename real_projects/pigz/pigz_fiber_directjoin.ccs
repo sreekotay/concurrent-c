@@ -156,13 +156,8 @@ static int drain_one(CCFile* out_file, CCTask* t) {
 int compress_file(const char* in_path, const char* out_path, int level) {
     (void)level;
 
-    CCFile in_file;
-    if (cc_file_open(&in_file, cc_slice_cstr(in_path), "rb") != 0) return 1;
-    @defer cc_file_close(&in_file);
-
-    CCFile out_file;
-    if (cc_file_open(&out_file, cc_slice_cstr(out_path), "wb") != 0) return 1;
-    @defer cc_file_close(&out_file);
+    CCFile in_file = cc_file_open(cc_slice_cstr(in_path)) !>(e) { return 1; } @destroy;
+    CCFile out_file = cc_file_create(cc_slice_cstr(out_path)) !>(e) { return 1; } @destroy;
 
     size_t inflight_cap = get_inflight_cap();
     CCTask* inflight = (CCTask*)calloc(inflight_cap, sizeof(CCTask));

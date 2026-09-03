@@ -87,12 +87,7 @@ static ScanStats scan_slurp(const char* path) {
     ScanStats s = {0};
     CCArena a = cc_arena_heap(megabytes(4));
     @defer cc_arena_free(&a);
-    CCFile f;
-    if (cc_file_open(&f, cc_slice_cstr((char*)path), "rb") != 0) {
-        eprintln(@string(`bench_line_scan: open failed: ${path}`, @scratch)) !>;
-        abort();
-    }
-    @defer cc_file_close(&f);
+    CCFile f = cc_file_open(cc_slice_cstr((char*)path)) !> @destroy;
 
     CCSlice !>(CCIoError) rr = cc_file_read_all(&f, a);
     if (cc_is_err(rr)) {
@@ -109,12 +104,7 @@ static ScanStats scan_sync(const char* path) {
     ScanStats s = {0};
     CCArena scratch = cc_arena_heap(megabytes(1));
     @defer cc_arena_free(&scratch);
-    CCFile f;
-    if (cc_file_open(&f, cc_slice_cstr((char*)path), "rb") != 0) {
-        eprintln(@string(`bench_line_scan: open failed: ${path}`, @scratch)) !>;
-        abort();
-    }
-    @defer cc_file_close(&f);
+    CCFile f = cc_file_open(cc_slice_cstr((char*)path)) !> @destroy;
 
     for (;;) {
         CCSlice line = cc_slice_empty();
@@ -162,12 +152,7 @@ static ScanStats scan_chan(const char* path) {
         (void)n.close(tx);
 
         n.spawn(() => [tx, path] {
-            CCFile f;
-            if (cc_file_open(&f, cc_slice_cstr((char*)path), "rb") != 0) {
-                eprintln(@string(`bench_line_scan: open failed: ${path}`, @scratch)) !>;
-                abort();
-            }
-            @defer cc_file_close(&f);
+            CCFile f = cc_file_open(cc_slice_cstr((char*)path)) !> @destroy;
             for (;;) {
                 /* Read into the arena that rides on the channel — no scratch copy. */
                 CCArena line_a = cc_arena_heap(256);

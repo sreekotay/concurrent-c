@@ -1,0 +1,32 @@
+/*
+ * `@parallel(h) { }` admits onto dest h. Captures copy by value so a
+ * loop rebind is not this fiber's object.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    cc_atomic_int sum = 0;
+    CCParallel h = @parallel spawn {
+        @serial {
+            int i;
+            for (i = 1; i <= 3; i++) {
+                int x = i;
+                @parallel(h) {
+                    sum.fetch_add(x);
+                }
+            }
+        }
+    } !>;
+    h.wait() !>;
+
+    int total = sum.load();
+    if (total != 6) {
+        eprintln(@string(`FAIL sum=${total}`, @scratch)) !>;
+        return 1;
+    }
+    println(@string(`sum = ${total}`, @scratch)) !>;
+    return 0;
+}

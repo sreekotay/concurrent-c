@@ -1,0 +1,28 @@
+# Linux ARM32 Docker — gcc host, TinyCC product backend
+# Date: 2026-09-03
+# Host: macOS (Darwin 25), arm64, Docker Desktop, QEMU user-mode linux/arm/v7
+# ABI: gnueabihf / armhf
+# Command: FORCE_TOOLCHAIN=1 CCC_HOST_CC=cc CCC_BACKEND_CC=tcc PIGZ_BENCH_MB=20 PIGZ_BENCH_WORKERS=4 PIGZ_BENCH_RUNS=1 ./scripts/pigz_arm32.sh
+# Volume: ccc-arm32-work
+# Seed: shadow_lower last-good 0.3.4-294 (gcc-built lowerer in out/cc/bin/)
+# Backend: TinyCC for ccc build/run of .ccs; original pigz.c still gcc
+# Method: compare_ilp32.sh — ELF 32-bit, 4 MiB random gunzip round-trip, then
+#         benchmark.sh on Silesia concat (1 run).
+# Note: Split config isolates TCC codegen for products from TCC host-compiling
+#       the bootstrap lowerer. Useful when debugging lowerer crashes.
+
+=== Build ===
+pigz (original cc -O3):  OK — ELF 32-bit LSB pie, ARM, EABI5
+pigz_idiomatic (ccc):    OK — ELF 32-bit LSB executable, ARM, EABI5
+pigz_cc (ccc):           OK — ELF 32-bit LSB executable, ARM, EABI5
+
+=== Correctness ===
+original pigz round-trip: PASS
+pigz_idiomatic:           PASS (4 MiB urandom + gunzip)
+pigz_cc:                  PASS (4 MiB urandom + gunzip)
+
+=== Benchmark (20 MB, 1 run) ===
+Implementation                       Comp(s)    Comp(MB/s)       Ratio   Decomp(s)  Decomp(MB/s)
+pigz (pthread)                         1.081          17.6       46.0%       0.333          57.3
+pigz_idiomatic                         0.956          20.0       46.0%         —           —
+pigz_cc (Concurrent-C)                 0.730          26.1       46.0%       0.505          37.8

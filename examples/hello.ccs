@@ -2,48 +2,46 @@
 /*
  * Hello, Concurrent-C!
  *
- * Three tasks run concurrently. Bind a terminate policy with
- * @errhandler, then use bare !>; at each fallible call — re-bind
- * inside each task (task bodies cannot share main's frame).
+ * Three named siblings. Bind a terminate policy with @errhandler,
+ * then use bare !>; at each fallible call — re-bind inside each arm
+ * (spawned arms cannot share main's frame).
  *
- * Prefer io.println when a CCStdio handle is in scope (capture it into
- * tasks). Task C shows compose-then-default: !>(e) { local; @err(e); }.
- * Report via cc_error_exit / cc_error_log, not println !>; inside
- * the same-E handler.
+ * Prefer io.println when a CCStdio handle is in scope. Task C shows
+ * compose-then-default: !>(e) { local; @err(e); }. Report via
+ * cc_error_exit / cc_error_log, not println !>; inside the same-E
+ * handler.
  *
  * Next: recipe_result_error_handling.ccs.
  */
 #include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
 #include <ccc/stdio.cch>
 #include <unistd.h>
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
 
-    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    cc_arena_stack(a, kilobytes(4));
     CCStdio io = cc_stdio_create(a);
 
-    {
-        CCArena frame = cc_arena_heap(kilobytes(4)) @destroy;
-        CCNursery n = frame.create_nursery() !>;
-
-        n.spawn(() => [io] {
+    @parallel spawn {
+        @serial {
             @errhandler(CCError e) cc_error_exit(e);
             usleep(100000);
             io.println("Hello from task A! (last)") !>;
-        }) !>;
-        n.spawn(() => [io] {
+        }
+        @serial {
             @errhandler(CCError e) cc_error_exit(e);
             io.println("Hello from task B!") !>;
-        }) !>;
-        n.spawn(() => [io] {
+        }
+        @serial {
             @errhandler(CCError e) cc_error_exit(e);
             io.println("Hello from task C!") !>(e) {
                 io.println("Task C failed!") !>;
                 @err(e); //forward to installed error handler
             }; //local handling first, then default
-        }) !>;
-    }   // ← nursery teardown waits here
+        }
+    } !>.wait()!>;
 
     io.println("All tasks completed.") !>;
     return 0;

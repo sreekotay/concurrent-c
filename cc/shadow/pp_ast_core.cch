@@ -347,6 +347,8 @@ struct AstNode {
     int par_wake;
     /* 1 = `@parallel spawn`: meeting admit; spawned arms are not denied. */
     int par_spawn;
+    /* 1 = `@parallel(h) { … }`: admit onto dest `a`; statement, no Result. */
+    int par_onto;
     /* Attachment roles (never mix):
      *   kids  — open parent lists (fn/struct members still being filled)
      *   body  — nested stmt lists (block / if / loop / bang bodies)

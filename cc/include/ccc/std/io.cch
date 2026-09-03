@@ -22,8 +22,14 @@
 #endif
 
 typedef struct {
-    void *handle;
+    int fd; /* >= 0 open; -1 closed. Prefer CC_FILE_CLOSED over {0}. */
 } CCFile;
+
+#define CC_FILE_CLOSED ((CCFile){ -1 })
+
+static inline int cc_file_is_open(const CCFile *file) {
+    return file && file->fd >= 0;
+}
 
 typedef struct {
     CCFile *file;
@@ -48,76 +54,67 @@ CC_DECL_RESULT_SPEC(CCResult_CCSlice_CCIoError, CCSlice, CCIoError)
 #define CCResult_size_t_CCIoError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_size_t_CCIoError, size_t, CCIoError)
 #endif
+#ifndef CCResult_CCFile_CCIoError_DEFINED
+#define CCResult_CCFile_CCIoError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCFile_CCIoError, CCFile, CCIoError)
+#endif
 
-// Open a file (mode like "r", "w", "a"). Returns 0 on success.
-int cc_file_open(CCFile *file, CCSlice path, const char *mode);
-int cc_file_open_async(CCExec* ex, CCFile *file, CCSlice path, const char *mode, CCAsyncHandle* h);
-int cc_file_open_async_deadline(CCExec* ex, CCFile *file, CCSlice path, const char *mode, CCAsyncHandle* h, const CCDeadline* deadline);
+/* Birth: open is read; create is write+trunc. `@()` is open (1-arg). */
+CCFile !>(CCIoError) cc_file_open(CCSlice path);
+CCFile !>(CCIoError) cc_file_create(CCSlice path);
+int cc_file_open_async(CCExec* ex, CCFile *file, CCSlice path, CCAsyncHandle* h);
 
-// Close file (ignores errors).
+/* Close file (ignores errors). Idempotent; does not flush. */
 void cc_file_close(CCFile *file);
 int cc_file_close_async(CCExec* ex, CCFile *file, CCAsyncHandle* h);
-int cc_file_close_async_deadline(CCExec* ex, CCFile *file, CCAsyncHandle* h, const CCDeadline* deadline);
 
 // Read entire file into arena; returns slice view. On error, is_err is set.
 CCSlice !>(CCIoError) cc_file_read_all(CCFile *file, CCArena arena);
 int cc_file_read_all_async(CCExec* ex, CCFile *file, CCArena arena, CCSlice* out, CCAsyncHandle* h);
-int cc_file_read_all_async_deadline(CCExec* ex, CCFile *file, CCArena arena, CCSlice* out, CCAsyncHandle* h, const CCDeadline* deadline);
 
-// Read up to n bytes. Returns:
-// - Ok(true) = got data (stored in *out)
-// - Ok(false) = EOF (no more data)
-// - Err(e) = actual error
-// Usage: while (cc_io_avail(cc_file_read(file, arena, n, &data))) { process(data); }
+/* Read up to n bytes. Returns:
+ * - Ok(true) = got data (stored in *out)
+ * - Ok(false) = EOF (no more data)
+ * - Err(e) = actual error
+ * Usage: while (in.read(a, n, &data) !>) { process(data); } */
 bool !>(CCIoError) cc_file_read_into(CCFile *file, CCArena arena, size_t n, CCSlice *out);
 
 int cc_file_read_async(CCExec* ex, CCFile *file, CCArena arena, size_t n, CCSlice* out, CCAsyncHandle* h);
-int cc_file_read_async_deadline(CCExec* ex, CCFile *file, CCArena arena, size_t n, CCSlice* out, CCAsyncHandle* h, const CCDeadline* deadline);
 
-/* Bytes written by fgets into a buffer that was pre-filled with
- * CC__FGETS_FILL.  fgets always NUL-terminates after the last byte read and
- * leaves the remainder of the buffer untouched — so the terminator is the
- * first '\0' whose tail is still all fill.  strlen is wrong when the line
- * contains embedded NULs (it would truncate and corrupt line boundaries). */
-/* Bytes written by fgets into a buffer that was pre-filled with
- * CC__FGETS_FILL.  fgets always NUL-terminates after the last byte read and
- * leaves the remainder of the buffer untouched — so the terminator is the
- * first '\0' whose tail is still all fill.  strlen is wrong when the line
- * contains embedded NULs (it would truncate and corrupt line boundaries).
- * Staging + fill live in runtime/io.c. */
-enum { CC__FGETS_FILL = 0xFF };
-
-// Read one line (includes delimiter). Returns:
-// - Ok(true) = got line (stored in *out)
-// - Ok(false) = EOF (no more lines)
-// - Err(e) = actual error
-// Usage: while (cc_io_avail(cc_file_read_line(file, arena, &line))) { process(line); }
-//
-// Line bytes are allocated in `arena` (that is why the arena is passed).
+/* Read one line (no `\n`; one trailing `\r` is stripped). NUL-safe.
+ * - Ok(true) = got line (stored in *out)
+ * - Ok(false) = EOF (no more lines)
+ * - Err(e) = actual error
+ * Usage: while (in.read_line(a, &line) !>) { process(line); }
+ *
+ * Line bytes are allocated in `arena`. */
 bool !>(CCIoError) cc_file_read_line_into(CCFile *file, CCArena arena, CCSlice *out);
 
 int cc_file_read_line_async(CCExec* ex, CCFile *file, CCArena arena, CCSlice* out, CCAsyncHandle* h);
-int cc_file_read_line_async_deadline(CCExec* ex, CCFile *file, CCArena arena, CCSlice* out, CCAsyncHandle* h, const CCDeadline* deadline);
 
-// Write all bytes; returns number of bytes written or IoError.
+/* Write every byte or Err. POSIX-short is write_some / write_buf. */
 size_t !>(CCIoError) cc_file_write(CCFile *file, CCSlice data);
 int cc_file_write_async(CCExec* ex, CCFile *file, CCSlice data, size_t* out_written, CCAsyncHandle* h);
-int cc_file_write_async_deadline(CCExec* ex, CCFile *file, CCSlice data, size_t* out_written, CCAsyncHandle* h, const CCDeadline* deadline);
 
 // Read into caller-provided buffer (no allocation). Returns:
 // - Ok(true) = got data (bytes read stored in *out)
 // - Ok(false) = EOF (no more data)
 // - Err(e) = actual error
 // For streaming scenarios where you want to reuse the same buffer.
-// Usage: while (cc_io_avail(cc_file_read_buf(file, buf, n, &got))) { process(buf, got); }
+// Usage: while (f.read_buf(buf, n, &got) !>) { process(buf, got); }
 bool !>(CCIoError) cc_file_read_buf_into(CCFile *file, void *buf, size_t n, size_t *out);
 
-// Write from caller-provided buffer (no slice overhead). Returns bytes written.
-// For streaming scenarios where you want to avoid slice construction.
+/* One write(2). Short is Ok(n). Same as write_some. */
 size_t !>(CCIoError) cc_file_write_buf(CCFile *file, const void *buf, size_t n);
+size_t !>(CCIoError) cc_file_write_some(CCFile *file, CCSlice data);
+/* pread / pwrite. Do not move the file offset. write_at is all or Err. */
+size_t !>(CCIoError) cc_file_read_at(CCFile *file, void *buf, size_t n, int64_t offset);
+size_t !>(CCIoError) cc_file_write_at(CCFile *file, CCSlice data, int64_t offset);
+/* fsync. Destroy does not flush or sync. */
 size_t !>(CCIoError) cc_file_sync(CCFile *file);
 size_t !>(CCIoError) cc_file_seek(CCFile *file, long offset, int whence);
 size_t !>(CCIoError) cc_file_tell(CCFile *file);
+/* Regular files only. Non-seekable (pipe, socket, …) is Err, not Ok(0). */
 size_t !>(CCIoError) cc_file_size(CCFile *file);
 
 /* Canonical file-family wrappers. Methods lower to `cc_file_*`; for the read-style
@@ -223,10 +220,11 @@ int cc_buf_writer_init(CCBufWriter *w, CCFile *f, CCArena arena, size_t cap);
 size_t !>(CCIoError) cc_buf_writer_flush(CCBufWriter *w);
 size_t !>(CCIoError) cc_buf_writer_write(CCBufWriter *w, CCSlice data);
 
-/* cc_file_close is idempotent (nulls handle; no-op when already closed),
- * as a registered destroy hook must be. */
+/* cc_file_close is idempotent (fd = -1; no-op when already closed),
+ * as a registered destroy hook must be. `.create` is read-open. */
 
 @typehooks on CCFile {
+    .create = cc_type_create_call("cc_file_open"),
     .destroy = cc_type_destroy_call("cc_file_close"),
 };
 
@@ -237,16 +235,10 @@ size_t !>(CCIoError) cc_buf_writer_write(CCBufWriter *w, CCSlice data);
 #define cc_file_read_all(f, a) (cc_file_read_all)((f), CC__ARENA_HANDLE(a))
 #define cc_file_read_all_async(ex, f, a, out, h) \
     (cc_file_read_all_async)((ex), (f), CC__ARENA_HANDLE(a), (out), (h))
-#define cc_file_read_all_async_deadline(ex, f, a, out, h, d) \
-    (cc_file_read_all_async_deadline)((ex), (f), CC__ARENA_HANDLE(a), (out), (h), (d))
 #define cc_file_read_async(ex, f, a, n, out, h) \
     (cc_file_read_async)((ex), (f), CC__ARENA_HANDLE(a), (n), (out), (h))
-#define cc_file_read_async_deadline(ex, f, a, n, out, h, d) \
-    (cc_file_read_async_deadline)((ex), (f), CC__ARENA_HANDLE(a), (n), (out), (h), (d))
 #define cc_file_read_line_async(ex, f, a, out, h) \
     (cc_file_read_line_async)((ex), (f), CC__ARENA_HANDLE(a), (out), (h))
-#define cc_file_read_line_async_deadline(ex, f, a, out, h, d) \
-    (cc_file_read_line_async_deadline)((ex), (f), CC__ARENA_HANDLE(a), (out), (h), (d))
 #define cc_file_read_into(f, a, n, out) \
     (cc_file_read_into)((f), CC__ARENA_HANDLE(a), (n), (out))
 #define cc_file_read_line_into(f, a, out) \

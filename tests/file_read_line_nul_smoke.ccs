@@ -6,6 +6,10 @@
 #include <stdlib.h>
 
 int main(void) {
+    @errhandler(CCIoError e) {
+        fprintf(stderr, "open failed: %s\n", cc_io_error_str(e));
+        abort();
+    }
     char path[] = "/tmp/cc_read_line_nul_XXXXXX";
     int fd = mkstemp(path);
     if (fd < 0) abort();
@@ -17,9 +21,7 @@ int main(void) {
     if (write(fd, payload, sizeof(payload)) != (ssize_t)sizeof(payload)) abort();
     close(fd);
 
-    CCFile f = {0};
-    if (cc_file_open(&f, cc_slice_cstr(path), "rb") != 0) abort();
-    @defer cc_file_close(&f);
+    CCFile f = cc_file_open(cc_slice_cstr(path)) !> @destroy;
     unlink(path);
 
     CCArena a = cc_arena_heap(kilobytes(4));
@@ -28,11 +30,11 @@ int main(void) {
     CCSlice line = cc_slice_empty();
     bool !>(CCIoError) got = cc_file_read_line_into(&f, a, &line);
     if (cc_is_err(got) || !cc_value(got)) abort();
-    if (line.len != 8) {
-        fprintf(stderr, "line1 len=%zu want 8\n", line.len);
+    if (line.len != 7) {
+        fprintf(stderr, "line1 len=%zu want 7\n", line.len);
         return 1;
     }
-    if (memcmp(line.ptr, payload, 8) != 0) {
+    if (memcmp(line.ptr, payload, 7) != 0) {
         fprintf(stderr, "line1 bytes mismatch\n");
         return 1;
     }
@@ -40,7 +42,7 @@ int main(void) {
     cc_arena_reset(a);
     got = cc_file_read_line_into(&f, a, &line);
     if (cc_is_err(got) || !cc_value(got)) abort();
-    if (line.len != 5 || memcmp(line.ptr, "next\n", 5) != 0) {
+    if (line.len != 4 || memcmp(line.ptr, "next", 4) != 0) {
         fprintf(stderr, "line2 corrupt (len=%zu)\n", line.len);
         return 1;
     }

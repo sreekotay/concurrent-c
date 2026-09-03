@@ -1,4 +1,4 @@
-/* Mut walk is void !>(CCError): the write-time .len re-check is the error. */
+/* Mut walk is void !>(CCError): consume the write bound. */
 #include <ccc/std/prelude.cch>
 
 int main(void) {

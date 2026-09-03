@@ -25,7 +25,10 @@ int main(void) {
     AsArgWrap w = {0};
     AsArgWrap *p = &w;
     w.tag = 9;
-    assert(w.open(CC_SLICE_LIT("tmp/as_arg_coerce_smoke.txt"), "w") == 0);
+    w.file = cc_file_create(CC_SLICE_LIT("tmp/as_arg_coerce_smoke.txt")) !>(e) {
+        fprintf(stderr, "create: %s\n", cc_io_error_str(e));
+        return 1;
+    };
 
     g_got = NULL;
     takes_file(&w);          /* → takes_file(&w.file) */
