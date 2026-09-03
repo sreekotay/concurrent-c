@@ -47,6 +47,52 @@ vec push 1M ints, alloc every 64 (moves)              9.8       12.2   token reb
 vec init + 8 push + destroy (churn)                  63.1       92.8   owner header + registry birth/kill
 malloc-ctor: 256B overflow alloc + release           83.2       87.7
 
+Section C — plain C twin (perf/arena_lifetime_c_baseline.c, gcc -O2): the
+same shapes with no lifetime model. malloc/free, a hand-rolled bump arena
+with mark/reset, realloc-grown arrays and byte buffers, snprintf, a
+malloc'd open-addressing int table, and a plain counter in place of the
+token registry. Ratio = CC / C.
+
+row                                                    CC ns/op    C ns/op   ratio
+alloc 64B shared, reset/4096                              28.0       15.7    1.8x  (C: malloc+free)
+alloc 64B local, reset/4096                                4.1        1.4    2.9x  (C: hand bump)
+checkpoint + restore (empty)                              87.3        1.6   54.6x  (C: mark/reset)
+checkpoint + 3 allocs + restore (@scratch shape)         168.8        5.0   33.8x
+checkpoint + 3 allocs + restore (1 KiB stack)            162.7        4.9   33.2x
+nested checkpoint x3 + restore x3                        332.0        4.9   67.8x
+checkpoint + 2 MiB scratch (child extent) + restore      111.3       33.4    3.3x  (C: malloc+free 2 MiB)
+alloc 64B + release (unsized, last-live)                  56.2       15.3    3.7x  (C: malloc+free)
+alloc 64B + release_sized (tip pop)                       58.7       15.3    3.8x
+alloc 64B x2 + release_sized first (hole)                 79.2       16.0    4.9x
+reuse: alloc x2 + release first + alloc                  101.3       15.4    6.6x
+realloc tip growth 64B steps (in place)                   23.4       15.9    1.5x
+realloc buried 256B -> 320B (copy + release)             130.0       80.1    1.6x
+vec push 1M ints (tip fit) + destroy                       2.3        0.6    3.8x  (C: realloc-grown array)
+vec push 1M ints, alloc every 64 (moves)                   4.0        2.3    1.7x
+vec get 1M (token-checked handle)                          1.7        1.7    1.0x
+vec init + 8 push + destroy (owner churn)                 99.6       22.8    4.4x
+string push_cstr 12B x 1M (one string)                    22.1        1.8   12.3x  (C: realloc-grown buffer)
+string promote (24B) + destroy churn                     100.2       15.7    6.4x
+@string template (2 slots) on @scratch                   472.5      115.5    4.1x  (C: snprintf, stack buffer)
+@string template (2 slots) on arena + destroy            200.4      132.4    1.5x  (C: snprintf, malloc'd)
+map insert 1k ints + destroy                           30600.5    15506.5    2.0x
+owner new 64B + release (header rebirth)                  87.3       31.2    2.8x  (C: two mallocs, two frees)
+token registry birth + kill                               28.6        1.6   17.9x  (C: plain counter)
+
+Where the C gap comes from (the parts that are not this change):
+- The shared allocation path takes the meta lock and issues sequentially
+  consistent stores on every bump; glibc's malloc fast path is a tcache
+  pop. The exclusive path is a plain bump plus two flag tests.
+- A checkpoint cycle is a host carve, an attach record, a provenance
+  bump on a process-wide counter, and a single-lock unlink and pop. A C
+  mark/reset is one store. This is the price of scratch that cannot rewind
+  under a live object and holes that cannot poison a restore; the old
+  snapshot model paid 68 ns for the same row.
+- String append is an out-of-line runtime call with a strlen and a reserve
+  per push; the C twin inlines to a memcpy. That gap predates this change.
+- Vec push is inlined but checks capacity and the owner token; the C twin
+  is a bounds test and a store.
+
 What the numbers say:
 - Bump allocation is unchanged on the shared path; the exclusive path pays
   about 1.5 ns for the active-chain and reuse-flag tests.
