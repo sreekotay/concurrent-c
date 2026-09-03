@@ -1,7 +1,8 @@
 /* Whitelist AST + parser for the SERDES shadow front.
  * Requires pp_tape.cch + pp_stage2.cch + <ccc/std/static_map.cch>.
- * Nested stmt lists use AstNode.body[] so they do not interleave with a
- * parent's kids_storage (see AST_NURSERY_DESTROY / AST_SPAWN_CLOSURE).
+ * Nested stmt lists use AstNode.body / dbody (growable parse-arena tables)
+ * so they do not interleave with a parent's kids_storage
+ * (see AST_NURSERY_DESTROY / AST_SPAWN_CLOSURE).
  *
  *   pp_ast_core.cch        — keywords, AstNode, Parser, spell helpers
  *   pp_ast_parse_stmt.cch  — statement / expr parsers

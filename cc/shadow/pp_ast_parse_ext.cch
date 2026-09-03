@@ -246,11 +246,7 @@ static AstNode* parse_with_deadline(Parser* p) {
     while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
         AstNode* s = parse_stmt(p);
         if (!s) return NULL;
-        if (n->nbody >= SHADOW_BODY_CAP) {
-            parser_fail_body_cap(p, p_peek(p), "@with_deadline body");
-            return NULL;
-        }
-        n->body[n->nbody++] = s;
+        if (!ast_body_push(p, n, s)) return NULL;
     }
     if (!p_accept(p, TK_PUNCT, "}")) {
         parser_fail(p, p_peek(p), "expected '}' to close @with_deadline");
@@ -479,11 +475,7 @@ static AstNode* parse_serial_arm(Parser* p) {
            !p->err) {
         AstNode* s = parse_stmt(p);
         if (!s) return NULL;
-        if (n->nbody >= SHADOW_BODY_CAP) {
-            parser_fail_body_cap(p, p_peek(p), "@serial body");
-            return NULL;
-        }
-        n->body[n->nbody++] = s;
+        if (!ast_body_push(p, n, s)) return NULL;
     }
     if (!p_accept(p, TK_PUNCT, "}")) {
         parser_fail(p, p_peek(p), "expected '}' to close @serial");
@@ -547,8 +539,7 @@ static AstNode* parse_parallel_block(Parser* p) {
             } else if (parallel_expr_arm(s)) {
                 AstNode* ser = ast_new(p, AST_SERIAL);
                 if (!ser) return NULL;
-                ser->body[0] = s;
-                ser->nbody = 1;
+                if (!ast_body_push(p, ser, s)) return NULL;
                 s = ser;
             } else if (s->kind == AST_FOR) {
                 parser_fail(p, at,
@@ -562,11 +553,7 @@ static AstNode* parse_parallel_block(Parser* p) {
                 return NULL;
             }
         }
-        if (n->nbody >= SHADOW_BODY_CAP) {
-            parser_fail_body_cap(p, p_peek(p), "@parallel body");
-            return NULL;
-        }
-        n->body[n->nbody++] = s;
+        if (!ast_body_push(p, n, s)) return NULL;
     }
     if (!p_accept(p, TK_PUNCT, "}")) {
         parser_fail(p, p_peek(p), "expected '}' to close @parallel");
@@ -689,11 +676,7 @@ static AstNode* parse_parallel_for(Parser* p, const char* gate,
            !p->err) {
         AstNode* s = parse_stmt(p);
         if (!s) return NULL;
-        if (n->nbody >= SHADOW_BODY_CAP) {
-            parser_fail_body_cap(p, p_peek(p), "@parallel for body");
-            return NULL;
-        }
-        n->body[n->nbody++] = s;
+        if (!ast_body_push(p, n, s)) return NULL;
     }
     if (!p_accept(p, TK_PUNCT, "}")) {
         parser_fail(p, p_peek(p), "expected '}' to close @parallel for");
@@ -856,11 +839,7 @@ static int parallel_attach_dest(Parser* p, AstNode* n, const char* name,
     if (!d) return 0;
     if (ty && ty[0]) d->a = ast_arena_cstr(p, ty);
     d->b = ast_arena_cstr(p, name);
-    if (n->ndbody >= SHADOW_DBODY_CAP) {
-        parser_fail(p, p_peek(p), "too many @parallel attachments");
-        return 0;
-    }
-    n->dbody[n->ndbody++] = d;
+    if (!ast_dbody_push(p, n, d)) return 0;
     return 1;
 }
 
@@ -892,11 +871,7 @@ static int parse_parallel_bang_tail(Parser* p, AstNode* n) {
         AstNode* ch = ast_new(p, AST_UFCS_EXPR);
         if (!ch) return 0;
         if (!parse_unwrap_ufcs_chain_tail(p, ch, at)) return 0;
-        if (n->ndbody >= SHADOW_DBODY_CAP) {
-            parser_fail(p, at, "too many @parallel attachments");
-            return 0;
-        }
-        n->dbody[n->ndbody++] = ch;
+        if (!ast_dbody_push(p, n, ch)) return 0;
         if (ch->e && ch->e[0] && strncmp(ast_slot(ch->e), ".wait(", 6) == 0)
             n->par_wake = 1;
         return 1;
@@ -935,11 +910,7 @@ static int parse_parallel_bang_tail(Parser* p, AstNode* n) {
                    !p->err) {
                 AstNode* s = parse_stmt(p);
                 if (!s) return 0;
-                if (eh->nbody >= SHADOW_BODY_CAP) {
-                    parser_fail_body_cap(p, p_peek(p), "@parallel !> body");
-                    return 0;
-                }
-                eh->body[eh->nbody++] = s;
+                if (!ast_body_push(p, eh, s)) return 0;
             }
             if (!p_accept(p, TK_PUNCT, "}")) {
                 parser_fail(p, p_peek(p),
@@ -950,13 +921,9 @@ static int parse_parallel_bang_tail(Parser* p, AstNode* n) {
         } else {
             AstNode* s = parse_stmt(p);
             if (!s) return 0;
-            eh->body[eh->nbody++] = s;
+            if (!ast_body_push(p, eh, s)) return 0;
         }
-        if (n->ndbody >= SHADOW_DBODY_CAP) {
-            parser_fail(p, at, "too many @parallel attachments");
-            return 0;
-        }
-        n->dbody[n->ndbody++] = eh;
+        if (!ast_dbody_push(p, n, eh)) return 0;
         return 1;
     }
     parser_fail(p, at, "expected '!>;' or '!>(e) { ... }' after @parallel");
@@ -1086,11 +1053,7 @@ static AstNode* parse_parallel_onto(Parser* p) {
            !p->err) {
         AstNode* s = parse_stmt(p);
         if (!s) return NULL;
-        if (ser->nbody >= SHADOW_BODY_CAP) {
-            parser_fail_body_cap(p, p_peek(p), "@parallel(h) body");
-            return NULL;
-        }
-        ser->body[ser->nbody++] = s;
+        if (!ast_body_push(p, ser, s)) return NULL;
     }
     if (!p_accept(p, TK_PUNCT, "}")) {
         parser_fail(p, p_peek(p), "expected '}' after @parallel(h)");
@@ -1101,8 +1064,7 @@ static AstNode* parse_parallel_onto(Parser* p) {
         parser_fail(p, p_peek(p), "@parallel(h) body is empty");
         return NULL;
     }
-    n->body[0] = ser;
-    n->nbody = 1;
+    if (!ast_body_push(p, n, ser)) return NULL;
     return n;
 }
 
@@ -1347,11 +1309,7 @@ static AstNode* parse_stage(Parser* p) {
            !p->err) {
         AstNode* s = parse_stmt(p);
         if (!s) return NULL;
-        if (n->nbody >= SHADOW_BODY_CAP) {
-            parser_fail_body_cap(p, p_peek(p), "@stage body");
-            return NULL;
-        }
-        n->body[n->nbody++] = s;
+        if (!ast_body_push(p, n, s)) return NULL;
     }
     if (!p_accept(p, TK_PUNCT, "}")) {
         parser_fail(p, p_peek(p), "expected '}' to close @stage");
@@ -3031,10 +2989,10 @@ static AstNode* parse_switch_loop(Parser* p, int cc_switch) {
         n->a = ast_arena_cstr(p, expr);
         n->d = NULL;
         if (cc_switch) n->f = ast_arena_cstr(p, "cc_switch");
-        /* body[] stays on-node — kids_storage aliases the enclosing fn body
-         * list (same nkstore cursor), which once emitted a bare `case 0:`.
-         * Fat !> switches that exceed SHADOW_BODY_CAP fall back to opaque
-         * tape span below (bang-rewrite on emit). */
+        /* body is a per-node growable table — not kids_storage (that aliases
+         * the enclosing fn list and once emitted a bare `case 0:`). Soft
+         * parse still falls back to opaque tape on structure miss; OOM from
+         * ast_body_push fails loud (no silent opaque fallback). */
         p->soft_stmt = 1;
         p->err = 0;
         while (!tok_eq(p_peek(p), TK_PUNCT, "}") &&
@@ -3077,11 +3035,10 @@ static AstNode* parse_switch_loop(Parser* p, int cc_switch) {
                         ok = 0;
                         break;
                     }
-                    if (n->nbody >= SHADOW_BODY_CAP) {
+                    if (!ast_body_push(p, n, lab)) {
                         ok = 0;
                         break;
                     }
-                    n->body[n->nbody++] = lab;
                 }
                 continue;
             }
@@ -3091,11 +3048,10 @@ static AstNode* parse_switch_loop(Parser* p, int cc_switch) {
                     ok = 0;
                     break;
                 }
-                if (n->nbody >= SHADOW_BODY_CAP) {
+                if (!ast_body_push(p, n, s)) {
                     ok = 0;
                     break;
                 }
-                n->body[n->nbody++] = s;
             }
         }
         p->soft_stmt = saved_soft;
@@ -3104,10 +3060,14 @@ static AstNode* parse_switch_loop(Parser* p, int cc_switch) {
             p->err = saved_err;
             return n;
         }
+        /* Hard fail (OOM etc.) during soft structured parse — keep sticky err. */
+        if (p->err && !saved_err) return NULL;
         /* Structured miss — rewind and take opaque tape body. */
         p->i = body0;
         p->err = 0;
+        n->body = NULL;
         n->nbody = 0;
+        n->body_cap = 0;
     }
 switch_opaque_body:
     /* Char-level brace match so `${…}` inside `@string(\`…\`)` cannot close

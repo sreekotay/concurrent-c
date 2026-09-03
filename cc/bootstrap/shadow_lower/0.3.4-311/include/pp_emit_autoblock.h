@@ -319,9 +319,9 @@ static void shadow_ab_pack_diag(ShadowCtx* ctx, AstNode* st, CEmit* out,
 }
 
 static unsigned shadow_call_site_attrs(AstNode* st) {
-    if (!st || !st->e[0]) return 0;
-    if (strcmp(st->e, "noblock") == 0) return SHADOW_FN_NOBLOCK;
-    if (strcmp(st->e, "blocking") == 0) return SHADOW_FN_BLOCKING;
+    if (!st || !(st->e && st->e[0])) return 0;
+    if (strcmp(ast_slot(st->e), "noblock") == 0) return SHADOW_FN_NOBLOCK;
+    if (strcmp(ast_slot(st->e), "blocking") == 0) return SHADOW_FN_BLOCKING;
     return 0;
 }
 
@@ -761,7 +761,7 @@ static int shadow_ab_try_tail(AstNode* st, ShadowCtx* ctx, CEmit* out,
                               ShadowAbBatch* b) {
     char fn[64], args[288];
     if (!st || !b) return 0;
-    if (st->kind == AST_RETURN_CC && st->b[0]) {
+    if (st->kind == AST_RETURN_CC && st->b && st->b[0]) {
         if (!shadow_parse_call_expr(st->b, fn, sizeof(fn), args, sizeof(args)))
             return 0;
         if (!shadow_call_should_autoblock_args(st, ctx, out, fn, args))
@@ -769,11 +769,11 @@ static int shadow_ab_try_tail(AstNode* st, ShadowCtx* ctx, CEmit* out,
         b->tail_kind = 1;
         snprintf(b->tail_callee, sizeof(b->tail_callee), "%s", fn);
         snprintf(b->tail_args, sizeof(b->tail_args), "%s", args);
-        snprintf(st->d, sizeof(st->d), "ab:skip");
+        shadow_slot_set(&st->d, "ab:skip");
         return 1;
     }
-    if (st->kind == AST_RETURN_EXPR && st->a[0] &&
-        (!st->e[0] || strcmp(st->e, "bang") != 0)) {
+    if (st->kind == AST_RETURN_EXPR && st->a && st->a[0] &&
+        (!(st->e && st->e[0]) || strcmp(ast_slot(st->e), "bang") != 0)) {
         if (!shadow_parse_call_expr(st->a, fn, sizeof(fn), args, sizeof(args)))
             return 0;
         if (!shadow_call_should_autoblock_args(st, ctx, out, fn, args))
@@ -781,11 +781,11 @@ static int shadow_ab_try_tail(AstNode* st, ShadowCtx* ctx, CEmit* out,
         b->tail_kind = 1;
         snprintf(b->tail_callee, sizeof(b->tail_callee), "%s", fn);
         snprintf(b->tail_args, sizeof(b->tail_args), "%s", args);
-        snprintf(st->d, sizeof(st->d), "ab:skip");
+        shadow_slot_set(&st->d, "ab:skip");
         return 1;
     }
-    if (st->kind == AST_ASSIGN && st->b[0] &&
-        (!st->c[0] || strcmp(st->c, "=") == 0)) {
+    if (st->kind == AST_ASSIGN && st->b && st->b[0] &&
+        (!(st->c && st->c[0]) || strcmp(ast_slot(st->c), "=") == 0)) {
         if (!shadow_parse_call_expr(st->b, fn, sizeof(fn), args, sizeof(args)))
             return 0;
         if (!shadow_call_should_autoblock_args(st, ctx, out, fn, args))
@@ -794,7 +794,7 @@ static int shadow_ab_try_tail(AstNode* st, ShadowCtx* ctx, CEmit* out,
         snprintf(b->tail_lhs, sizeof(b->tail_lhs), "%s", st->a);
         snprintf(b->tail_callee, sizeof(b->tail_callee), "%s", fn);
         snprintf(b->tail_args, sizeof(b->tail_args), "%s", args);
-        snprintf(st->d, sizeof(st->d), "ab:skip");
+        shadow_slot_set(&st->d, "ab:skip");
         return 1;
     }
     return 0;
@@ -811,9 +811,9 @@ static void shadow_prescan_autoblock_body(AstNode** body, int nbody,
         }
         if (st->kind == AST_BLOCK) {
             unsigned saved = ctx ? ctx->block_attrs : 0;
-            if (strcmp(st->e, "noblock") == 0)
+            if (strcmp(ast_slot(st->e), "noblock") == 0)
                 ctx->block_attrs |= SHADOW_FN_NOBLOCK;
-            else if (strcmp(st->e, "blocking") == 0)
+            else if (strcmp(ast_slot(st->e), "blocking") == 0)
                 ctx->block_attrs |= SHADOW_FN_BLOCKING;
             shadow_prescan_autoblock_body(st->body, st->nbody, ctx, out);
             if (ctx) ctx->block_attrs = saved;
@@ -824,7 +824,7 @@ static void shadow_prescan_autoblock_body(AstNode** body, int nbody,
             i++;
             continue;
         }
-        if (st->kind == AST_CALL_ARGS && !st->d[0]) {
+        if (st->kind == AST_CALL_ARGS && !(st->d && st->d[0])) {
             ShadowAbBatch batch = {0};
             int j = i;
             batch.id = g_shadow_ab_id;
@@ -844,11 +844,9 @@ static void shadow_prescan_autoblock_body(AstNode** body, int nbody,
                  shadow_ab_try_tail(body[j], ctx, out, &batch))) {
                 if (shadow_emit_ab_batch_helper(out, &batch)) {
                     shadow_ab_batch_save(&batch);
-                    snprintf(batch.items[0].st->d,
-                             sizeof(batch.items[0].st->d), "ab:b:%d", batch.id);
+                    do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "ab:b:%d", batch.id); shadow_slot_set(&batch.items[0].st->d, __ast_tmp); } while (0);
                     for (int k = 1; k < batch.n; k++)
-                        snprintf(batch.items[k].st->d,
-                                 sizeof(batch.items[k].st->d), "ab:skip");
+                        shadow_slot_set(&batch.items[k].st->d, "ab:skip");
                     g_shadow_ab_id++;
                     i = j + (batch.tail_kind ? 1 : 0);
                     continue;
@@ -858,7 +856,7 @@ static void shadow_prescan_autoblock_body(AstNode** body, int nbody,
                 if (shadow_emit_ab_void_helper(out, g_shadow_ab_id,
                                                batch.items[0].callee,
                                                batch.items[0].args)) {
-                    snprintf(st->d, sizeof(st->d), "ab:%d", g_shadow_ab_id++);
+                    do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "ab:%d", g_shadow_ab_id++); shadow_slot_set(&st->d, __ast_tmp); } while (0);
                 }
                 i++;
                 continue;
@@ -882,7 +880,7 @@ static void shadow_prescan_autoblock_body(AstNode** body, int nbody,
                 }
             }
         } else if (st->kind == AST_ASSIGN && !shadow_ab_tag_get(st) &&
-                   st->b[0] && (!st->c[0] || strcmp(st->c, "=") == 0)) {
+                   st->b && st->b[0] && (!(st->c && st->c[0]) || strcmp(ast_slot(st->c), "=") == 0)) {
             char fn[64], args[288];
             char tag[16];
             const ShadowBind* lb;
@@ -939,15 +937,15 @@ static int shadow_emit_call_maybe_autoblock(AstNode* st, CEmit* out,
     int ab_id = -1;
     if (ctx && ctx->defer_emit)
         return cemit_fmt(out, "%s%s;\n", indent, call);
-    if (st->d[0] && strcmp(st->d, "ab:skip") == 0)
+    if (st->d && st->d[0] && strcmp(ast_slot(st->d), "ab:skip") == 0)
         return 1;
-    if (st->d[0] && strncmp(st->d, "ab:b:", 5) == 0) {
-        const ShadowAbBatch* batch = shadow_ab_batch_get(atoi(st->d + 5));
+    if (st->d && st->d[0] && strncmp(ast_slot(st->d), "ab:b:", 5) == 0) {
+        const ShadowAbBatch* batch = shadow_ab_batch_get(st->d ? atoi(st->d + 5) : 0);
         if (batch)
             return shadow_emit_ab_batch_site(out, indent, batch);
     }
-    if (st->d[0] && strncmp(st->d, "ab:", 3) == 0)
-        ab_id = atoi(st->d + 3);
+    if (st->d && st->d[0] && strncmp(ast_slot(st->d), "ab:", 3) == 0)
+        ab_id = st->d ? atoi(st->d + 3) : 0;
     if (ab_id < 0 ||
         shadow_call_edge_for(st, ctx, fn) != SHADOW_CALL_BLOCKING) {
         return cemit_fmt(out, "%s%s;\n", indent, call);
@@ -1006,7 +1004,7 @@ static int shadow_emit_assign_maybe_autoblock(AstNode* st, CEmit* out,
     int id, argc;
     (void)ctx;
     if (!st) return 0;
-    if (st->d[0] && strcmp(st->d, "ab:skip") == 0) return 1;
+    if (st->d && st->d[0] && strcmp(ast_slot(st->d), "ab:skip") == 0) return 1;
     tag = shadow_ab_tag_get(st);
     if (!tag || strncmp(tag, "as:", 3) != 0) return 0;
     id = atoi(tag + 3);

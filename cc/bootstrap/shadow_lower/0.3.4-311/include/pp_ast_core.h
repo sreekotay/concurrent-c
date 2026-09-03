@@ -330,14 +330,19 @@ typedef enum {
 typedef struct AstNode AstNode;
 struct AstNode {
     AstKind kind;
-    /* Long exprs / @string unwrap args / grammar rows (py + templates need >512). */
-    char a[2048];
-    char b[2048];
-    /* Params / long spans — nursery lower_c protos and bang binders. */
-    char c[2048];
-    /* Long raw spans: static-fn / switch / enum bodies (was 256; errno maps overflow). */
-    char d[4096];
-    char e[2048];
+    /* Long exprs / @string unwrap args / grammar rows (py + templates).
+     * Parse-arena owned; NULL = empty. */
+    char* a;
+    char* b;
+    /* Params / long spans — nursery lower_c protos and bang binders.
+     * Parse-arena owned; NULL = empty. */
+    char* c;
+    /* Long raw spans: static-fn / switch / enum bodies.
+     * Parse-arena owned; NULL = empty. */
+    char* d;
+    /* Flags / modes / capture lists / trailing sugar.
+     * Parse-arena owned; NULL = empty. */
+    char* e;
     /* Sixth slot for composite forms (@parallel seq+wait: e=gate, f=seq).
      * Parse-arena owned; NULL = empty. */
     char* f;
@@ -363,12 +368,15 @@ struct AstNode {
      *   dbody — destroy bodies + UFCS/create/closure attachments on a stmt */
     AstNode** kids;
     int nkids;
-    /* On-node (not kids_storage): nested under fn bodies that also use kids.
-     * Cap covers fat Result-fn switches (redis execute / switch_body_cap smoke). */
-    AstNode* body[256];
+    /* Per-node growable tables on parse_ar (not kids_storage — that aliases
+     * open parent lists). Start NULL/0; ast_body_push / ast_dbody_push
+     * double on need (abandoned bump rows are fine for an arena). */
+    AstNode** body;
     int nbody;
-    AstNode* dbody[64];
+    int body_cap;
+    AstNode** dbody;
     int ndbody;
+    int dbody_cap;
     /* Source trivia: gap before this node (comments / blank lines) + line indent.
      * lead spans tape bytes [lead_off, lead_off+lead_len); indent is the
      * whitespace after the last newline in that gap (hand-lower nest base).
@@ -477,20 +485,8 @@ static void parser_fail_cap(Parser* p, Token at, const char* what, int limit) {
     parser_fail(p, at, msg);
 }
 
-/* Cap for body[] (256) / dbody[] (64). `what` names the list, e.g. "block". */
-enum { SHADOW_BODY_CAP = 256, SHADOW_DBODY_CAP = 64 };
-static void parser_fail_body_cap(Parser* p, Token at, const char* what) {
-    char msg[160];
-    snprintf(msg, sizeof(msg), "%s too large for shadow beachhead (cap %d)",
-             what ? what : "body", SHADOW_BODY_CAP);
-    parser_fail(p, at, msg);
-}
-static void parser_fail_dbody_cap(Parser* p, Token at, const char* what) {
-    char msg[160];
-    snprintf(msg, sizeof(msg), "%s too large for shadow beachhead (cap %d)",
-             what ? what : "dbody", SHADOW_DBODY_CAP);
-    parser_fail(p, at, msg);
-}
+/* Runaway guard for per-node body/dbody growth (not a normal size limit). */
+enum { SHADOW_BODY_GROW_SANITY = 1 << 20 };
 
 static void scope_push(Parser* p) {
     if (p->ns >= SCOPE_CAP) {
@@ -1266,6 +1262,9 @@ static AstNode* ast_new(Parser* p, AstKind k) {
     return n;
 }
 
+/* NULL-safe view of an AstNode text slot (NULL = empty). */
+static const char* ast_slot(const char* s) { return s ? s : ""; }
+
 /* NUL-terminated copy on the parse arena (NULL if s empty). Fail-loud OOM. */
 static char* ast_arena_cstr(Parser* p, const char* s) {
     size_t n;
@@ -1303,6 +1302,16 @@ static char* ast_arena_slice(Parser* p, CCSlice s) {
     return d;
 }
 
+/* Exact source span on parse_ar (NULL if empty). No byte cap — OOM fails loud. */
+static char* ast_arena_span(Parser* p, int i0, int i1_excl) {
+    char* probe;
+    if (!p || i0 < 0 || i1_excl > p->n || i0 >= i1_excl) return NULL;
+    probe = span_cstr(p, i0, i1_excl);
+    if (p->err) return NULL;
+    if (!probe || !probe[0]) return NULL;
+    return ast_arena_cstr(p, probe);
+}
+
 /* Push onto the stable kids bump table. Interior `n->kids` aliases this
  * storage; growing it would dangle every open parent list. */
 static int ast_kids_push(Parser* p, AstNode* child) {
@@ -1312,6 +1321,64 @@ static int ast_kids_push(Parser* p, AstNode* child) {
         return 0;
     }
     p->kids_storage[p->nkstore++] = child;
+    return 1;
+}
+
+/* Grow one node's body/dbody pointer table on parse_ar. New alloc + memcpy;
+ * old bump row is abandoned (arena). Does not touch kids_storage. */
+static int ast_node_bodytab_grow(Parser* p, AstNode*** tab, int* n, int* cap,
+                                 const char* what) {
+    int ncap;
+    AstNode** nv;
+    if (!p || !tab || !n || !cap) return 0;
+    if (!cc_arena_is_live(p->parse_ar)) {
+        parser_fail(p, p_peek(p), "parse arena is not live");
+        return 0;
+    }
+    if (*n >= SHADOW_BODY_GROW_SANITY) {
+        parser_fail_cap(p, p_peek(p), what ? what : "AST body",
+                        SHADOW_BODY_GROW_SANITY);
+        return 0;
+    }
+    if (*cap > *n) return 1;
+    ncap = *cap > 0 ? (*cap * 2) : 8;
+    if (ncap > SHADOW_BODY_GROW_SANITY) ncap = SHADOW_BODY_GROW_SANITY;
+    if (ncap <= *cap) {
+        parser_fail_cap(p, p_peek(p), what ? what : "AST body",
+                        SHADOW_BODY_GROW_SANITY);
+        return 0;
+    }
+    nv = (AstNode**)cc_arena_alloc(p->parse_ar, sizeof(AstNode*) * (size_t)ncap,
+                                   _Alignof(AstNode*));
+    if (!nv) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "out of memory (%s)",
+                 what ? what : "AST body");
+        parser_fail(p, p_peek(p), msg);
+        return 0;
+    }
+    if (*tab && *n > 0)
+        memcpy(nv, *tab, sizeof(AstNode*) * (size_t)*n);
+    *tab = nv;
+    *cap = ncap;
+    return 1;
+}
+
+static int ast_body_push(Parser* p, AstNode* parent, AstNode* child) {
+    if (!p || !parent || !child) return 0;
+    if (!ast_node_bodytab_grow(p, &parent->body, &parent->nbody,
+                               &parent->body_cap, "AST body"))
+        return 0;
+    parent->body[parent->nbody++] = child;
+    return 1;
+}
+
+static int ast_dbody_push(Parser* p, AstNode* parent, AstNode* child) {
+    if (!p || !parent || !child) return 0;
+    if (!ast_node_bodytab_grow(p, &parent->dbody, &parent->ndbody,
+                               &parent->dbody_cap, "AST dbody"))
+        return 0;
+    parent->dbody[parent->ndbody++] = child;
     return 1;
 }
 
@@ -1686,8 +1753,8 @@ static int peek_decl_list_semi(Parser* p, int start, int flags) {
 /* Pointer if the type spelling or a per-name `*` carries it. */
 static int ast_field_is_ptr(const AstNode* f) {
     if (!f) return 0;
-    if (f->a[0] && strchr(f->a, '*')) return 1;
-    if (f->b[0] && strchr(f->b, '*')) return 1;
+    if (f->a && f->a[0] && strchr(ast_slot(f->a), '*')) return 1;
+    if (f->b && f->b[0] && strchr(ast_slot(f->b), '*')) return 1;
     return 0;
 }
 

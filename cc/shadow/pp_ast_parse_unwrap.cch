@@ -89,8 +89,7 @@ static AstNode* parse_println_bang(Parser* p) {
         while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
             AstNode* st = parse_stmt(p);
             if (!st) return NULL;
-            if (n->nbody >= SHADOW_BODY_CAP) { parser_fail_body_cap(p, p_peek(p), "!>{} body"); return NULL; }
-            n->body[n->nbody++] = st;
+            if (!ast_body_push(p, n, st)) return NULL;
         }
         if (!p_accept(p, TK_PUNCT, "}") || !p_accept(p, TK_PUNCT, ";")) {
             parser_fail(p, p_peek(p), "expected '};' after !> { ... }");
@@ -121,11 +120,7 @@ static AstNode* parse_println_bang(Parser* p) {
         while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
             AstNode* st = parse_stmt(p);
             if (!st) return NULL;
-            if (n->nbody >= SHADOW_BODY_CAP) {
-                parser_fail_body_cap(p, p_peek(p), "!>(...) body");
-                return NULL;
-            }
-            n->body[n->nbody++] = st;
+            if (!ast_body_push(p, n, st)) return NULL;
         }
         if (!p_accept(p, TK_PUNCT, "}")) {
             parser_fail(p, p_peek(p), "expected '}' to close !>(...) handler");
@@ -310,11 +305,7 @@ static AstNode* parse_stmt_unwrap(Parser* p) {
         while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
             AstNode* st = parse_stmt(p);
             if (!st) return NULL;
-            if (n->nbody >= SHADOW_BODY_CAP) {
-                parser_fail_body_cap(p, p_peek(p), "!> { ... } body");
-                return NULL;
-            }
-            n->body[n->nbody++] = st;
+            if (!ast_body_push(p, n, st)) return NULL;
         }
         if (!p_accept(p, TK_PUNCT, "}")) {
             parser_fail(p, p_peek(p), "expected '}' after !> { ... }");
@@ -343,11 +334,7 @@ static AstNode* parse_stmt_unwrap(Parser* p) {
             while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
                 AstNode* st = parse_stmt(p);
                 if (!st) return NULL;
-                if (n->nbody >= SHADOW_BODY_CAP) {
-                    parser_fail_body_cap(p, p_peek(p), "!>(...) body");
-                    return NULL;
-                }
-                n->body[n->nbody++] = st;
+                if (!ast_body_push(p, n, st)) return NULL;
             }
             if (!p_accept(p, TK_PUNCT, "}")) {
                 parser_fail(p, p_peek(p), "expected '}' after !>(...) { ... }");
@@ -365,8 +352,7 @@ static AstNode* parse_stmt_unwrap(Parser* p) {
         {
             AstNode* st = parse_stmt(p);
             if (!st) return NULL;
-            n->body[0] = st;
-            n->nbody = 1;
+            if (!ast_body_push(p, n, st)) return NULL;
         }
         return n;
     }
@@ -377,8 +363,7 @@ static AstNode* parse_stmt_unwrap(Parser* p) {
         {
             AstNode* st = parse_stmt(p);
             if (!st) return NULL;
-            n->body[0] = st;
-            n->nbody = 1;
+            if (!ast_body_push(p, n, st)) return NULL;
         }
         return n;
     }
@@ -627,13 +612,8 @@ static AstNode* parse_result_local(Parser* p) {
         if (had_cl) {
             n->d = ast_arena_cstr(p, init);
             if (cl) {
-                if (n->ndbody >= SHADOW_DBODY_CAP) {
-                    parser_fail(p, name,
-                                "too many result-local closure attachments");
-                    return NULL;
-                }
                 spawn_infer_value_caps(p, cl);
-                n->dbody[n->ndbody++] = cl;
+                if (!ast_dbody_push(p, n, cl)) return NULL;
             }
             p->i = c1;
         } else {
@@ -906,11 +886,7 @@ static AstNode* parse_var_unwrap(Parser* p) {
                        p_peek(p).kind != TK_EOF && !p->err) {
                     AstNode* st = parse_stmt(p);
                     if (!st) return NULL;
-                    if (n->nbody >= SHADOW_BODY_CAP) {
-                        parser_fail_body_cap(p, p_peek(p), "!> { ... } body");
-                        return NULL;
-                    }
-                    n->body[n->nbody++] = st;
+                    if (!ast_body_push(p, n, st)) return NULL;
                 }
                 if (!p_accept(p, TK_PUNCT, "}")) {
                     parser_fail(p, p_peek(p), "expected '}' after !> { ... }");
@@ -940,8 +916,7 @@ static AstNode* parse_var_unwrap(Parser* p) {
             n->c = ast_arena_cstr(p, "bang_stmt");
             AstNode* st = parse_stmt(p);
             if (!st) return NULL;
-            n->body[0] = st;
-            n->nbody = 1;
+            if (!ast_body_push(p, n, st)) return NULL;
             return n;
         }
         Token bind = p_next(p);
@@ -960,11 +935,7 @@ static AstNode* parse_var_unwrap(Parser* p) {
             while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
                 AstNode* st = parse_stmt(p);
                 if (!st) return NULL;
-                if (n->nbody >= SHADOW_BODY_CAP) {
-                    parser_fail_body_cap(p, p_peek(p), "!>(...) body");
-                    return NULL;
-                }
-                n->body[n->nbody++] = st;
+                if (!ast_body_push(p, n, st)) return NULL;
             }
             if (!p_accept(p, TK_PUNCT, "}")) {
                 parser_fail(p, p_peek(p), "expected '}' after !>(...) { ... }");
@@ -997,8 +968,7 @@ static AstNode* parse_var_unwrap(Parser* p) {
         n->c = ast_arena_cstr(p, "bang_stmt");
         AstNode* st = parse_stmt(p);
         if (!st) return NULL;
-        n->body[0] = st;
-        n->nbody = 1;
+        if (!ast_body_push(p, n, st)) return NULL;
         return n;
     }
 
@@ -1084,11 +1054,7 @@ static int parse_destroy_tail(Parser* p, AstNode* n, char* mode, size_t mode_cap
     while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
         AstNode* s = parse_stmt(p);
         if (!s) return 0;
-        if (n->ndbody >= SHADOW_DBODY_CAP) {
-            parser_fail_dbody_cap(p, p_peek(p), "@destroy body");
-            return 0;
-        }
-        n->dbody[n->ndbody++] = s;
+        if (!ast_dbody_push(p, n, s)) return 0;
     }
     if (!p_accept(p, TK_PUNCT, "}") || !p_accept(p, TK_PUNCT, ";")) {
         parser_fail(p, p_peek(p), "expected '};' after @destroy { ... }");
@@ -1214,11 +1180,7 @@ static AstNode* parse_ptr_unwrap(Parser* p) {
             while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
                 AstNode* st = parse_stmt(p);
                 if (!st) return NULL;
-                if (n->nbody >= SHADOW_BODY_CAP) {
-                    parser_fail_body_cap(p, p_peek(p), "!> handler");
-                    return NULL;
-                }
-                n->body[n->nbody++] = st;
+                if (!ast_body_push(p, n, st)) return NULL;
             }
             if (!p_accept(p, TK_PUNCT, "}")) {
                 parser_fail(p, p_peek(p), "expected '}' after !> handler");
@@ -1233,8 +1195,7 @@ static AstNode* parse_ptr_unwrap(Parser* p) {
             /* !> stmt ;  — single stmt handler without braces */
             AstNode* st = parse_stmt(p);
             if (!st) return NULL;
-            n->body[0] = st;
-            n->nbody = 1;
+            if (!ast_body_push(p, n, st)) return NULL;
             n->d = ast_arena_cstr(p, mode);
             return n;
         }

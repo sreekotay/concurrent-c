@@ -5146,6 +5146,34 @@ static void shadow_slot_set(char** slot, const char* s) {
     *slot = (char*)shadow_meta_cstr(s);
 }
 
+/* Emit-time body push on meta_ar (synthetic nodes). Same grow-by-doubling
+ * as parse-time ast_body_push; old bump rows abandoned. */
+enum { SHADOW_EMIT_BODY_SANITY = 1 << 20 };
+static int shadow_body_push(AstNode* parent, AstNode* child) {
+    int ncap;
+    AstNode** nv;
+    if (!parent || !child) return 0;
+    shadow_meta_ar_ensure();
+    if (!g_shadow_meta_ar_live) return 0;
+    if (parent->nbody >= SHADOW_EMIT_BODY_SANITY) return 0;
+    if (parent->nbody >= parent->body_cap) {
+        ncap = parent->body_cap > 0 ? (parent->body_cap * 2) : 8;
+        if (ncap > SHADOW_EMIT_BODY_SANITY) ncap = SHADOW_EMIT_BODY_SANITY;
+        if (ncap <= parent->body_cap) return 0;
+        nv = (AstNode**)cc_arena_alloc(g_shadow_meta_ar,
+                                       sizeof(AstNode*) * (size_t)ncap,
+                                       _Alignof(AstNode*));
+        if (!nv) return 0;
+        if (parent->body && parent->nbody > 0)
+            memcpy(nv, parent->body,
+                   sizeof(AstNode*) * (size_t)parent->nbody);
+        parent->body = nv;
+        parent->body_cap = ncap;
+    }
+    parent->body[parent->nbody++] = child;
+    return 1;
+}
+
 static int shadow_fields_ensure(void) {
     shadow_meta_ar_ensure();
     if (!g_shadow_meta_ar_live) return 0;

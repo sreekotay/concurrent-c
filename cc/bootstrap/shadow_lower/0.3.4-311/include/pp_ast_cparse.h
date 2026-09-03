@@ -177,40 +177,44 @@ static int shadow_attach_c_flat_field(Parser* p, AstNode* st, const CpFlat* f,
     AstNode* n;
     FileTape* ft;
     size_t nlen;
-    size_t tlen;
     char* name_at;
     ft = tape_by_id(p->cache, p->toks[list_lo < p->n ? list_lo : 0].file_id);
     n = ast_new(p, AST_FIELD_SIMPLE);
     if (!n) return 0;
-    snprintf(n->a, sizeof(n->a), "%s", f->text);
-    snprintf(n->b, sizeof(n->b), "%s", f->name);
+    n->a = ast_arena_cstr(p, f->text);
+    n->b = ast_arena_cstr(p, f->name);
     /* Emit wants a=type, b=declarator. Name-at-end strips (`int x`).
      * Arrays (`int spec_a[6]`) leave `[6]` after the ident — without a
      * split, we marked raw and reprinted the declarator span, dropping
      * the type on comma kids (`spec_b[6];`). Fn-ptrs / nested `{` /
      * flatten-overflow stay raw. */
     nlen = strlen(f->name);
-    tlen = strlen(n->a);
-    name_at = (nlen > 0 && strchr(f->text, '{') == NULL)
+    name_at = (nlen > 0 && n->a && strchr(f->text, '{') == NULL)
                   ? shadow_c_flat_name_at(n->a, f->name)
                   : NULL;
     if (name_at && name_at[nlen] == 0) {
-        n->a[name_at - n->a] = 0;
-        tlen = strlen(n->a);
-        while (tlen > 0 &&
-               (n->a[tlen - 1] == ' ' || n->a[tlen - 1] == '\t'))
-            n->a[--tlen] = 0;
+        char atmp[4096];
+        size_t ty_len = (size_t)(name_at - n->a);
+        if (ty_len >= sizeof(atmp)) ty_len = sizeof(atmp) - 1;
+        memcpy(atmp, n->a, ty_len);
+        atmp[ty_len] = 0;
+        while (ty_len > 0 && (atmp[ty_len - 1] == ' ' || atmp[ty_len - 1] == '\t'))
+            atmp[--ty_len] = 0;
+        n->a = ast_arena_cstr(p, atmp);
     } else if (name_at && shadow_c_flat_array_suffix(name_at + nlen)) {
         char decl[160];
+        char atmp[4096];
+        size_t ty_len = (size_t)(name_at - n->a);
         snprintf(decl, sizeof(decl), "%s", name_at);
-        n->a[name_at - n->a] = 0;
-        tlen = strlen(n->a);
-        while (tlen > 0 &&
-               (n->a[tlen - 1] == ' ' || n->a[tlen - 1] == '\t'))
-            n->a[--tlen] = 0;
-        snprintf(n->b, sizeof(n->b), "%s", decl);
+        if (ty_len >= sizeof(atmp)) ty_len = sizeof(atmp) - 1;
+        memcpy(atmp, n->a, ty_len);
+        atmp[ty_len] = 0;
+        while (ty_len > 0 && (atmp[ty_len - 1] == ' ' || atmp[ty_len - 1] == '\t'))
+            atmp[--ty_len] = 0;
+        n->a = ast_arena_cstr(p, atmp);
+        n->b = ast_arena_cstr(p, decl);
     } else {
-        snprintf(n->e, sizeof(n->e), "raw");
+        n->e = ast_arena_cstr(p, "raw");
     }
     if (ft && ft->bytes && f->end > f->start && (size_t)f->end <= ft->len) {
         n->file_id = p->toks[list_lo < p->n ? list_lo : 0].file_id;
@@ -265,13 +269,13 @@ static int shadow_attach_cparse_field(Parser* p, AstNode* st, const CpFlat* f,
         if (!n) return 0;
         ft = tape_by_id(p->cache, p->toks[list_lo < p->n ? list_lo : 0].file_id);
         if (f->text[0]) {
-            snprintf(n->a, sizeof(n->a), "%s", f->text);
+            n->a = ast_arena_cstr(p, f->text);
             shadow_trim_ppdir(n->a);
-            snprintf(n->e, sizeof(n->e), "ppdir");
+            n->e = ast_arena_cstr(p, "ppdir");
         } else if (ft && ft->bytes && f->end > f->start &&
                    (size_t)f->end <= ft->len) {
             /* Oversized directive: FileTape span, never chopped text. */
-            snprintf(n->e, sizeof(n->e), "raw");
+            n->e = ast_arena_cstr(p, "raw");
             n->file_id = p->toks[list_lo < p->n ? list_lo : 0].file_id;
             n->span_off = (size_t)f->start;
             n->span_len = (size_t)(f->end - f->start);
@@ -560,9 +564,9 @@ static AstNode* shadow_tape_tok_range(Parser* p, int lo, int hi) {
     off1 = last.offset + last.spell.len;
     raw = ast_new(p, AST_RAW_LINE);
     if (!raw) return NULL;
-    snprintf(raw->e, sizeof(raw->e), "tape");
-    snprintf(raw->a, sizeof(raw->a), "%zu", off0);
-    snprintf(raw->b, sizeof(raw->b), "%zu", off1);
+    raw->e = ast_arena_cstr(p, "tape");
+    do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%zu", off0); raw->a = ast_arena_cstr(p, __ast_tmp); } while (0);
+    do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%zu", off1); raw->b = ast_arena_cstr(p, __ast_tmp); } while (0);
     raw->file_id = t0.file_id;
     raw->tok_off = off0;
     return raw;

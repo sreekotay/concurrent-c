@@ -6,8 +6,8 @@
  *   }
  *
  * Was: structured body[64] miss → opaque d[4096] → silent NULL → raw `!>`.
- * Now: body[256] keeps fat !> switches structured; opaque bodies larger
- * than d[] stay on the tape (span_off/span_len) instead of NULL.
+ * Now: per-node growable body tables keep fat !> switches structured;
+ * opaque bodies stay on the tape (span_off/span_len) instead of NULL.
  *
  * Expect PASS:
  *   ./cc/bin/ccc --no-cache build --emit-c-only \

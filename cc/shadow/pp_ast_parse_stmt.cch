@@ -705,12 +705,8 @@ static AstNode* parse_chan_var(Parser* p) {
             }
             if (strcmp(field, "create") != 0)
                 { char __ast_tmp[128]; snprintf(__ast_tmp, sizeof(__ast_tmp), "owned:%s", field); cl->c = ast_arena_cstr(p, __ast_tmp); };
-            if (n->ndbody >= SHADOW_DBODY_CAP) {
-                parser_fail_dbody_cap(p, p->toks[c0], "owned channel closures");
-                return NULL;
-            }
             spawn_infer_value_caps(p, cl);
-            n->dbody[n->ndbody++] = cl;
+            if (!ast_dbody_push(p, n, cl)) return NULL;
             k = c1;
             if (k < owned_end && tok_eq(p->toks[k], TK_PUNCT, ",")) k++;
         }
@@ -1052,11 +1048,7 @@ static AstNode* parse_errhandler(Parser* p) {
         while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
             AstNode* st = parse_stmt(p);
             if (!st) return NULL;
-            if (n->nbody >= SHADOW_BODY_CAP) {
-                parser_fail_body_cap(p, p_peek(p), "@errhandler body");
-                return NULL;
-            }
-            n->body[n->nbody++] = st;
+            if (!ast_body_push(p, n, st)) return NULL;
         }
         if (!p_accept(p, TK_PUNCT, "}")) {
             parser_fail(p, p_peek(p), "expected '}' to close @errhandler");
@@ -1268,13 +1260,8 @@ static AstNode* parse_return_int(Parser* p) {
         if (had_cl) {
             n->a = NULL;
             if (cl) {
-                if (n->ndbody >= SHADOW_DBODY_CAP) {
-                    parser_fail(p, p_peek(p),
-                                "too many return closure attachments");
-                    return NULL;
-                }
                 spawn_infer_value_caps(p, cl);
-                n->dbody[n->ndbody++] = cl;
+                if (!ast_dbody_push(p, n, cl)) return NULL;
             }
         } else {
             ue = parse_ufcs_expr_range(p, e0, e1);
@@ -1318,11 +1305,7 @@ static AstNode* parse_return_int(Parser* p) {
                !p->err) {
             AstNode* st = parse_stmt(p);
             if (!st) return NULL;
-            if (n->nbody >= SHADOW_BODY_CAP) {
-                parser_fail_body_cap(p, p_peek(p), "return !> { ... } body");
-                return NULL;
-            }
-            n->body[n->nbody++] = st;
+            if (!ast_body_push(p, n, st)) return NULL;
         }
         if (!p_accept(p, TK_PUNCT, "}")) {
             parser_fail(p, p_peek(p), "expected '}' after return !> { ... }");
@@ -1336,8 +1319,7 @@ static AstNode* parse_return_int(Parser* p) {
     {
         AstNode* st = parse_stmt(p);
         if (!st) return NULL;
-        n->body[0] = st;
-        n->nbody = 1;
+        if (!ast_body_push(p, n, st)) return NULL;
     }
     return n;
 }
@@ -1350,11 +1332,7 @@ static AstNode* parse_block(Parser* p) {
     while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
         AstNode* st = parse_stmt(p);
         if (!st) return NULL;
-        if (n->nbody >= SHADOW_BODY_CAP) {
-            parser_fail_body_cap(p, p_peek(p), "block");
-            return NULL;
-        }
-        n->body[n->nbody++] = st;
+        if (!ast_body_push(p, n, st)) return NULL;
     }
     if (!p_accept(p, TK_PUNCT, "}")) {
         parser_fail(p, p_peek(p), "expected '}' to close block");
@@ -1410,8 +1388,7 @@ static AstNode* parse_if_stmt(Parser* p) {
     }
     AstNode* body = tok_eq(p_peek(p), TK_PUNCT, "{") ? parse_block(p) : parse_stmt(p);
     if (!body) return NULL;
-    n->body[0] = body;
-    n->nbody = 1;
+    if (!ast_body_push(p, n, body)) return NULL;
     if (shadow_kw(p_peek(p)) == SHADOW_KW_ELSE) {
         p_next(p);
         AstNode* eb;
@@ -1422,8 +1399,7 @@ static AstNode* parse_if_stmt(Parser* p) {
         else
             eb = parse_stmt(p);
         if (!eb) return NULL;
-        n->body[1] = eb;
-        n->nbody = 2;
+        if (!ast_body_push(p, n, eb)) return NULL;
     }
     return n;
 }
@@ -1458,19 +1434,14 @@ static AstNode* parse_defer(Parser* p) {
         if (!blk) return NULL;
         /* Flatten one block into defer body */
         for (int k = 0; k < blk->nbody; k++) {
-            if (n->nbody >= SHADOW_BODY_CAP) {
-                parser_fail_body_cap(p, p_peek(p), "@defer body");
-                return NULL;
-            }
-            n->body[n->nbody++] = blk->body[k];
+            if (!ast_body_push(p, n, blk->body[k])) return NULL;
         }
         p_accept(p, TK_PUNCT, ";"); /* `@defer {…};` */
         return n;
     }
     AstNode* st = parse_stmt(p);
     if (!st) return NULL;
-    n->body[0] = st;
-    n->nbody = 1;
+    if (!ast_body_push(p, n, st)) return NULL;
     return n;
 }
 
@@ -1793,12 +1764,8 @@ static AstNode* parse_val_destroy(Parser* p) {
         if (ue) (void)ast_attach_ufcs_kid(p, n, ue);
         /* Closure on dbody (like UFCS) — not kids_storage (fn may still append). */
         if (create_cl) {
-            if (n->ndbody >= SHADOW_DBODY_CAP) {
-                parser_fail(p, name, "too many create closure attachments");
-                return NULL;
-            }
             spawn_infer_value_caps(p, create_cl);
-            n->dbody[n->ndbody++] = create_cl;
+            if (!ast_dbody_push(p, n, create_cl)) return NULL;
         }
         if (bang_at >= 0) {
             n->f = ast_arena_cstr(p, "bang");
@@ -1831,12 +1798,7 @@ static AstNode* parse_val_destroy(Parser* p) {
                            p_peek(p).kind != TK_EOF && !p->err) {
                         AstNode* st = parse_stmt(p);
                         if (!st) return NULL;
-                        if (eh->nbody >= SHADOW_BODY_CAP) {
-                            parser_fail_body_cap(p, p_peek(p),
-                                                 "!>(...) body");
-                            return NULL;
-                        }
-                        eh->body[eh->nbody++] = st;
+                        if (!ast_body_push(p, eh, st)) return NULL;
                     }
                     if (!p_accept(p, TK_PUNCT, "}")) {
                         parser_fail(p, p_peek(p),
@@ -1846,14 +1808,9 @@ static AstNode* parse_val_destroy(Parser* p) {
                 } else {
                     AstNode* st = parse_stmt(p);
                     if (!st) return NULL;
-                    eh->body[0] = st;
-                    eh->nbody = 1;
+                    if (!ast_body_push(p, eh, st)) return NULL;
                 }
-                if (n->ndbody >= SHADOW_DBODY_CAP) {
-                    parser_fail(p, name, "too many create unwrap attachments");
-                    return NULL;
-                }
-                n->dbody[n->ndbody++] = eh;
+                if (!ast_dbody_push(p, n, eh)) return NULL;
             }
         }
         p_next(p); /* @ */
@@ -1878,11 +1835,7 @@ static AstNode* parse_val_destroy(Parser* p) {
                !p->err) {
             AstNode* s = parse_stmt(p);
             if (!s) return NULL;
-            if (n->nbody >= SHADOW_BODY_CAP) {
-                parser_fail_body_cap(p, p_peek(p), "@destroy body");
-                return NULL;
-            }
-            n->body[n->nbody++] = s;
+            if (!ast_body_push(p, n, s)) return NULL;
         }
         if (!p_accept(p, TK_PUNCT, "}") || !p_accept(p, TK_PUNCT, ";")) {
             parser_fail(p, p_peek(p), "expected '};' after @destroy { ... }");
@@ -1998,11 +1951,7 @@ static AstNode* parse_do_while(Parser* p) {
     while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
         AstNode* s = parse_stmt(p);
         if (!s) return NULL;
-        if (n->nbody >= SHADOW_BODY_CAP) {
-            parser_fail_body_cap(p, p_peek(p), "do body");
-            return NULL;
-        }
-        n->body[n->nbody++] = s;
+        if (!ast_body_push(p, n, s)) return NULL;
     }
     if (!p_accept(p, TK_PUNCT, "}")) {
         parser_fail(p, p_peek(p), "expected '}' to close do");
@@ -2154,11 +2103,7 @@ static int parse_for_zip_bang_tail(Parser* p, AstNode* n) {
                    !p->err) {
                 AstNode* s = parse_stmt(p);
                 if (!s) return 0;
-                if (eh->nbody >= SHADOW_BODY_CAP) {
-                    parser_fail_body_cap(p, p_peek(p), "for-in !> body");
-                    return 0;
-                }
-                eh->body[eh->nbody++] = s;
+                if (!ast_body_push(p, eh, s)) return 0;
             }
             if (!p_accept(p, TK_PUNCT, "}")) {
                 parser_fail(p, p_peek(p), "expected '}' after for-in !>(...)");
@@ -2168,13 +2113,9 @@ static int parse_for_zip_bang_tail(Parser* p, AstNode* n) {
         } else {
             AstNode* s = parse_stmt(p);
             if (!s) return 0;
-            eh->body[eh->nbody++] = s;
+            if (!ast_body_push(p, eh, s)) return 0;
         }
-        if (n->ndbody >= SHADOW_DBODY_CAP) {
-            parser_fail(p, at, "too many for-in attachments");
-            return 0;
-        }
-        n->dbody[n->ndbody++] = eh;
+        if (!ast_dbody_push(p, n, eh)) return 0;
         n->e = ast_arena_cstr(p, "zip_bang");
         return 1;
     }
@@ -2223,11 +2164,7 @@ static AstNode* parse_for_loop(Parser* p, int cc_for) {
                !p->err) {
             AstNode* s = parse_stmt(p);
             if (!s) return NULL;
-            if (n->nbody >= SHADOW_BODY_CAP) {
-                parser_fail_body_cap(p, p_peek(p), "for body");
-                return NULL;
-            }
-            n->body[n->nbody++] = s;
+            if (!ast_body_push(p, n, s)) return NULL;
         }
         if (!p_accept(p, TK_PUNCT, "}")) {
             parser_fail(p, p_peek(p), "expected '}' to close for");
@@ -2236,8 +2173,7 @@ static AstNode* parse_for_loop(Parser* p, int cc_for) {
     } else {
         AstNode* s = parse_stmt(p);
         if (!s) return NULL;
-        n->body[0] = s;
-        n->nbody = 1;
+        if (!ast_body_push(p, n, s)) return NULL;
     }
     if (shadow_for_has_mut_bind(n->a) && shadow_for_hdr_is_range(n->a)) {
         parser_fail(p, p_peek(p),
@@ -2320,11 +2256,7 @@ static AstNode* parse_array_map_foreach(Parser* p) {
                !p->err) {
             AstNode* s = parse_stmt(p);
             if (!s) return NULL;
-            if (n->nbody >= SHADOW_BODY_CAP) {
-                parser_fail_body_cap(p, p_peek(p), "foreach body");
-                return NULL;
-            }
-            n->body[n->nbody++] = s;
+            if (!ast_body_push(p, n, s)) return NULL;
         }
         if (!p_accept(p, TK_PUNCT, "}")) {
             parser_fail(p, p_peek(p), "expected '}' to close CC_ARRAY_MAP_FOREACH");
@@ -2333,8 +2265,7 @@ static AstNode* parse_array_map_foreach(Parser* p) {
     } else {
         AstNode* s = parse_stmt(p);
         if (!s) return NULL;
-        n->body[0] = s;
-        n->nbody = 1;
+        if (!ast_body_push(p, n, s)) return NULL;
     }
     return n;
 }
@@ -2738,14 +2669,10 @@ static AstNode* parse_typed_init(Parser* p) {
         n->e = ast_arena_cstr(p, "!");
     if (ue) (void)ast_attach_ufcs_kid(p, n, ue);
     if (call_cl) {
-        if (n->ndbody >= SHADOW_DBODY_CAP) {
-            parser_fail(p, name, "too many call-arg closure attachments");
-            return NULL;
-        }
         /* `CCClosure1 inc = () => …` — later `inc(x)` may capture `inc`. */
         if (strstr(ast_slot(n->a), "CCClosure")) spawn_note_closure_local(n->b);
         spawn_infer_value_caps(p, call_cl);
-        n->dbody[n->ndbody++] = call_cl;
+        if (!ast_dbody_push(p, n, call_cl)) return NULL;
     }
     return n;
 }
@@ -2835,17 +2762,12 @@ static AstNode* ast_make_ufcs(Parser* p, AstKind kind, int r0, int call_op,
         if (had_cl) {
             n->c = ast_arena_cstr(p, cl_args);
             if (cl) {
-                if (n->ndbody >= SHADOW_DBODY_CAP) {
-                    parser_fail(p, p->toks[a0],
-                                "too many UFCS closure attachments");
-                    return NULL;
-                }
                 spawn_infer_value_caps(p, cl);
                 /* send_task packs Result into the task; tag before emit/safety. */
                 if (strcmp(ast_slot(n->b), "send_task") == 0 ||
                     strcmp(ast_slot(n->b), "send_task_hybrid") == 0)
                     cl->b = ast_arena_cstr(p, n->b);
-                n->dbody[n->ndbody++] = cl;
+                if (!ast_dbody_push(p, n, cl)) return NULL;
             }
         } else {
             if (!({ char __spell_tmp[4096]; int __spell_ok = ast_spell_token_range(p, a0, a1, __spell_tmp, sizeof(__spell_tmp)); if (__spell_ok) n->c = ast_arena_cstr(p, __spell_tmp); __spell_ok; }) &&
@@ -2982,11 +2904,8 @@ static AstNode* parse_ufcs_expr_range(Parser* p, int i0, int i1) {
 /* Attach expr UFCS on dbody — never kids_storage (would interleave with the
  * enclosing fn/block kids list while that list is still being filled). */
 static int ast_attach_ufcs_kid(Parser* p, AstNode* parent, AstNode* ue) {
-    (void)p;
     if (!parent || !ue) return 0;
-    if (parent->ndbody >= SHADOW_DBODY_CAP) return 0;
-    parent->dbody[parent->ndbody++] = ue;
-    return 1;
+    return ast_dbody_push(p, parent, ue);
 }
 
 /* recv.method(args);  or  store->field.method(args);  (+ optional !>;)
@@ -3131,11 +3050,7 @@ static AstNode* parse_ufcs_stmt(Parser* p) {
             while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
                 AstNode* s = parse_stmt(p);
                 if (!s) return NULL;
-                if (n->nbody >= SHADOW_BODY_CAP) {
-                    parser_fail_body_cap(p, p_peek(p), "UFCS !>(bind) body");
-                    return NULL;
-                }
-                n->body[n->nbody++] = s;
+                if (!ast_body_push(p, n, s)) return NULL;
             }
             if (!p_accept(p, TK_PUNCT, "}") || !p_accept(p, TK_PUNCT, ";")) {
                 parser_fail(p, p_peek(p), "expected '};' after UFCS !>(bind) body");
@@ -3245,12 +3160,8 @@ static AstNode* parse_assign_stmt(Parser* p) {
     n->c = ast_arena_slice(p, op.spell);
     if (ue) (void)ast_attach_ufcs_kid(p, n, ue);
     if (cl) {
-        if (n->ndbody >= SHADOW_DBODY_CAP) {
-            parser_fail(p, p_peek(p), "too many assign closure attachments");
-            return NULL;
-        }
         spawn_infer_value_caps(p, cl);
-        n->dbody[n->ndbody++] = cl;
+        if (!ast_dbody_push(p, n, cl)) return NULL;
     }
     return n;
 }
@@ -3292,12 +3203,8 @@ static AstNode* parse_void_cast(Parser* p) {
     if (had_cl) {
         n->a = ast_arena_cstr(p, expr);
         if (cl) {
-            if (n->ndbody >= SHADOW_DBODY_CAP) {
-                parser_fail(p, p_peek(p), "too many (void) closure attachments");
-                return NULL;
-            }
             spawn_infer_value_caps(p, cl);
-            n->dbody[n->ndbody++] = cl;
+            if (!ast_dbody_push(p, n, cl)) return NULL;
         }
     } else {
         p->i = e1;
@@ -3669,11 +3576,7 @@ static AstNode* parse_while(Parser* p) {
                !p->err) {
             AstNode* s = parse_stmt(p);
             if (!s) return NULL;
-            if (n->nbody >= SHADOW_BODY_CAP) {
-                parser_fail_body_cap(p, p_peek(p), "while body");
-                return NULL;
-            }
-            n->body[n->nbody++] = s;
+            if (!ast_body_push(p, n, s)) return NULL;
         }
         if (!p_accept(p, TK_PUNCT, "}")) {
             parser_fail(p, p_peek(p), "expected '}' to close while");
@@ -3684,8 +3587,7 @@ static AstNode* parse_while(Parser* p) {
     {
         AstNode* s = parse_stmt(p);
         if (!s) return NULL;
-        n->body[0] = s;
-        n->nbody = 1;
+        if (!ast_body_push(p, n, s)) return NULL;
         return n;
     }
 }
@@ -4508,17 +4410,13 @@ static AstNode* parse_call_args(Parser* p) {
                 args[--L] = 0;
             n->b = ast_arena_cstr(p, args);
             if (cl) {
-                if (n->ndbody >= SHADOW_DBODY_CAP) {
-                    parser_fail(p, callee, "too many call-arg closure attachments");
-                    return NULL;
-                }
                 /* Tag send_task closures so emit/safety pack Result payloads. */
                 if (spell_eq(callee.spell, "cc_channel_send_task_hybrid"))
                     cl->b = ast_arena_cstr(p, "send_task_hybrid");
                 else if (spell_eq(callee.spell, "cc_channel_send_task"))
                     cl->b = ast_arena_cstr(p, "send_task");
                 spawn_infer_value_caps(p, cl);
-                n->dbody[n->ndbody++] = cl;
+                if (!ast_dbody_push(p, n, cl)) return NULL;
             }
         } else {
             int need_spell = 0;

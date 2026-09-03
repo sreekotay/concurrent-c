@@ -47,11 +47,7 @@ static AstNode* parse_nursery_destroy(Parser* p) {
     while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
         AstNode* s = parse_stmt(p);
         if (!s) return NULL;
-        if (n->nbody >= SHADOW_BODY_CAP) {
-            parser_fail_body_cap(p, p_peek(p), "@destroy body");
-            return NULL;
-        }
-        n->body[n->nbody++] = s;
+        if (!ast_body_push(p, n, s)) return NULL;
     }
     if (!p_accept(p, TK_PUNCT, "}")) {
         parser_fail(p, p_peek(p), "expected '}' to close @destroy");
@@ -411,11 +407,7 @@ static int parse_call_arg_closure(Parser* p, int c0, int end, char* dst,
                    !p->err) {
                 AstNode* s = parse_stmt(p);
                 if (!s) return 0;
-                if (n->nbody >= SHADOW_BODY_CAP) {
-                    parser_fail_body_cap(p, p_peek(p), "() => body");
-                    return 0;
-                }
-                n->body[n->nbody++] = s;
+                if (!ast_body_push(p, n, s)) return 0;
             }
             if (!p_accept(p, TK_PUNCT, "}")) {
                 parser_fail(p, p_peek(p), "expected '}' after () => { ... }");
@@ -466,14 +458,15 @@ static int parse_call_arg_closure(Parser* p, int c0, int end, char* dst,
                         abuf[al] = 0;
                         s->b = ast_arena_cstr(p, abuf);
                     }
-                    n->body[n->nbody++] = s;
+                    if (!ast_body_push(p, n, s)) return 0;
                 } else if (n->nbody < 8) {
                     AstNode* s = ast_new(p, AST_EXPR_STMT);
                     if (!s) return 0;
                     s->a = ast_arena_cstr(p, expr);
-                    n->body[n->nbody++] = s;
+                    if (!ast_body_push(p, n, s)) return 0;
                 } else {
-                    parser_fail_body_cap(p, p_peek(p), "() => expression body");
+                    parser_fail(p, p_peek(p),
+                                "() => expression body already filled");
                     return 0;
                 }
             }

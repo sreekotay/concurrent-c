@@ -235,8 +235,8 @@ into the TCC-heavy driver until the transform boundary is boring.
 - Goldens on every emit/parse change; host `cc -c` on mini products
 - Default `ccc` is native-only (`shadow_lower`); `--frontend=legacy` is removed
 - Grow **emit/lower** whitelist, not a general C parser
-- Nested stmt lists stay on `AstNode.body[]` (do not append into
-  `kids_storage` while a parent list is still open)
+- Nested stmt lists stay on per-node `AstNode.body` / `dbody` tables (do
+  not append into `kids_storage` while a parent list is still open)
 - Fair bench: warm vs warm host-cc (`shadow/bench_vs_ccc.sh`)
 
 ## Direction (zero text mangling on the CC surface)

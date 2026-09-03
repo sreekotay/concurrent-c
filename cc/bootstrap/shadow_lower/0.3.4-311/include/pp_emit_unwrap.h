@@ -20,7 +20,7 @@ static int shadow_emit_try_call(CEmit* out, ShadowCtx* ctx, const char* indent,
             return 0;
         }
         matched = ctx->eh;
-        if (matched && matched->b[0]) bind = matched->b;
+        if (matched && matched->b && matched->b[0]) bind = matched->b;
         bind = shadow_eh_raise_bind(ctx, bind);
     }
     env[0] = (ShadowTplBind){ "indent", SHADOW_TPL_IDENT, indent };
@@ -66,7 +66,7 @@ static int shadow_emit_try_assign(CEmit* out, ShadowCtx* ctx, const char* indent
             return 0;
         }
         matched = ctx->eh;
-        if (matched && matched->b[0]) bind = matched->b;
+        if (matched && matched->b && matched->b[0]) bind = matched->b;
         bind = shadow_eh_raise_bind(ctx, bind);
     }
     if (!shadow_resync_line(&errb, ctx, i2) ||
@@ -107,7 +107,7 @@ static int shadow_emit_bang_eh_for_call(CEmit* out, ShadowCtx* ctx,
         return 0;
     }
     matched = ctx ? ctx->eh : NULL;
-    if (matched && matched->b[0]) bind = matched->b;
+    if (matched && matched->b && matched->b[0]) bind = matched->b;
     bind = shadow_eh_raise_bind(ctx, bind);
     ok = shadow_emit_err_at_bind_tmp(out, ctx, indent, bind, site, rtmp) &&
          shadow_emit_handler(out, ctx, bind, indent);
@@ -125,19 +125,19 @@ static int shadow_emit_println_arg(CEmit* out, ShadowCtx* ctx, const char* arg_e
 
 static int shadow_emit_println(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                const char* indent) {
-    return shadow_emit_println_arg(out, ctx, st->a, indent, st->d[0] == 'e');
+    return shadow_emit_println_arg(out, ctx, st->a, indent, (st->d && st->d[0] == 'e'));
 }
 
 static int shadow_emit_println_tpl(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                    const char* indent) {
-    int is_eprint = st->d[0] == 'e';
+    int is_eprint = (st->d && st->d[0] == 'e');
     const char* fn = is_eprint ? "cc_eprintln" : "cc_println";
-    const char* arena = (!st->c[0] || shadow_arena_is_scratch(st->c))
+    const char* arena = (!(st->c && st->c[0]) || shadow_arena_is_scratch(st->c))
                            ? "__cc_str_scratch"
                            : st->c;
     /* Default / @scratch: reclaim the temp watermark after the call so
      * earlier bound `@string(..., @scratch)` products stay valid. */
-    int scratch = (!st->c[0] || shadow_arena_is_scratch(st->c));
+    int scratch = (!(st->c && st->c[0]) || shadow_arena_is_scratch(st->c));
     char nested[80];
     shadow_indent_nest(nested, sizeof(nested), indent, 1);
     {
@@ -334,13 +334,17 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
      * both the emitted C decl and the destination the resolution sees
      * spell the typed slice (`CCSlice_double`) — sugar must never reach
      * the host compile, and the destination joins UFCS resolution. */
-    if (st->e[0] && strstr(st->e, "[:"))
-        shadow_normalize_slice_sugar_sig(st->e, sizeof(st->e));
+    if (st->e && st->e[0] && strstr(ast_slot(st->e), "[:")) {
+        char etmp[4096];
+        snprintf(etmp, sizeof(etmp), "%s", st->e);
+        shadow_normalize_slice_sugar_sig(etmp, sizeof(etmp));
+        shadow_slot_set(&st->e, etmp);
+    }
     /* Variant `arm ?>` before expr lowering rewrites projection to `.u.arm`. */
-    if ((strcmp(mode, "qmark") == 0 || strncmp(mode, "qmark", 5) == 0) && st->b[0]) {
+    if ((strcmp(mode, "qmark") == 0 || strncmp(mode, "qmark", 5) == 0) && st->b && st->b[0]) {
         char qbuf[2048];
         char fb[1024];
-        const char* qty = (strcmp(mode, "qmark") == 0 && st->d[0]) ? st->d : "int";
+        const char* qty = (strcmp(mode, "qmark") == 0 && st->d && st->d[0]) ? st->d : "int";
         snprintf(fb, sizeof(fb), "%s", st->e);
         shadow_lower_qmark_fallback_text(fb, sizeof(fb));
         snprintf(qbuf, sizeof(qbuf), "%s ?> %s", st->b, fb);
@@ -354,14 +358,14 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
     /* Variant `arm !> {…}` — inactive-arm handler, not Result unwrap. */
     if ((strncmp(mode, "bang_stmt", 9) == 0 ||
          strncmp(mode, "bang_block", 10) == 0) &&
-        st->b[0]) {
+        st->b && st->b[0]) {
         char base[128], arm[64];
         int is_arrow = 0;
         ShadowVariant* v =
             shadow_variant_parse_proj(st->b, base, sizeof(base), arm,
                                      sizeof(arm), &is_arrow);
         if (v) {
-            const char* ty = st->e[0] ? st->e : "int";
+            const char* ty = st->e && st->e[0] ? st->e : "int";
             const char* acc = is_arrow ? "->" : ".";
             char i1[80], i2[80];
             shadow_indent_nest(i1, sizeof(i1), indent, 1);
@@ -431,7 +435,7 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
     const char* ty = "int";
     if ((strcmp(mode, "bang") == 0 || strncmp(mode, "bang_stmt", 9) == 0 ||
          strncmp(mode, "bang_block", 10) == 0) &&
-        st->e[0])
+        st->e && st->e[0])
         ty = st->e;
     else if (shadow_mode_is_bang_chain(mode) && shadow_bang_chain_lhs_ty(mode))
         ty = shadow_bang_chain_lhs_ty(mode);
@@ -456,7 +460,7 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
          * consumed it would extract too early (`js->eval(..)!>.as_i64()!>`
          * must not run eval through the long-long variant). */
         shadow_emit_expr_text(st, call, callbuf, sizeof(callbuf),
-                              (!(shadow_mode_is_bang_chain(mode) && st->e[0]) &&
+                              (!(shadow_mode_is_bang_chain(mode) && st->e && st->e[0]) &&
                                ty && ty[0] && strcmp(ty, "int") != 0) ? ty
                                                                       : NULL);
         /* Belt-and-suspenders: UFCS early-return paths historically skipped
@@ -517,14 +521,14 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
             out->err = 1;
             return 0;
         }
-        if (shadow_mode_is_bang_chain(mode) && st->e[0]) {
+        if (shadow_mode_is_bang_chain(mode) && st->e && st->e[0]) {
             /* Multi-hop: `.a()!>.b()!.c()` → nested Result unwraps + final UFCS.
              * Optional first-hop handler body (from `!>(e){…}.next()!>`). */
-            if (strstr(st->e, "!>") || st->nbody > 0) {
+            if (strstr(ast_slot(st->e), "!>") || st->nbody > 0) {
                 char i1[80], i2[80];
                 const char* p = st->e;
                 int hop = 0;
-                const char* bind0 = st->d[0] ? st->d : "e";
+                const char* bind0 = st->d && st->d[0] ? st->d : "e";
                 shadow_indent_nest(i1, sizeof(i1), indent, 1);
                 shadow_indent_nest(i2, sizeof(i2), indent, 2);
                 if (!cemit_fmt(out, "%s%s %s;\n%s{\n", indent, ty, st->a,
@@ -690,9 +694,9 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
             int js_prod = strstr(call, "cc_js_") != NULL ||
                           strstr(call, "CCJsVal") != NULL;
             snprintf(tmp, sizeof(tmp), "((__r).u.value)%s", st->e);
-            if (strstr(st->e, "as_i64") || strstr(st->e, "as_slice") ||
-                strstr(st->e, "as_f64") || strstr(st->e, "as_bool") ||
-                strstr(st->e, "as_cstr") || strstr(call, "cc_py_") ||
+            if (strstr(ast_slot(st->e), "as_i64") || strstr(ast_slot(st->e), "as_slice") ||
+                strstr(ast_slot(st->e), "as_f64") || strstr(ast_slot(st->e), "as_bool") ||
+                strstr(ast_slot(st->e), "as_cstr") || strstr(call, "cc_py_") ||
                 strstr(src_call, ".get(") || strstr(src_call, "->get("))
                 hop_ty = js_prod ? "CCJsVal" : "CCPyObj";
             else if (js_prod)
@@ -701,7 +705,7 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
             val = chained;
         }
         /* Multi-declarator Form-P: `int a = f() !>, b = 3;` — d holds `, b = 3`. */
-        if (st->d[0] == ',') {
+        if ((st->d && st->d[0] == ',')) {
             if (!shadow_emit_try_assign(out, ctx, indent, ty, st->a, call,
                                         "unwrap", "e", val))
                 return 0;
@@ -712,7 +716,7 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
     }
     if (strncmp(mode, "bang_stmt", 9) == 0 ||
         strncmp(mode, "bang_block", 10) == 0) {
-        const char* bind = st->d[0] ? st->d : "e";
+        const char* bind = st->d && st->d[0] ? st->d : "e";
         char i1[80], i2[80];
         ShadowTplBind env[7];
         shadow_indent_nest(i1, sizeof(i1), indent, 1);
@@ -771,7 +775,7 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
     }
     if (strcmp(mode, "qmark") == 0) {
         char i1[80];
-        const char* qty = st->d[0] ? st->d : "int";
+        const char* qty = st->d && st->d[0] ? st->d : "int";
         shadow_indent_nest(i1, sizeof(i1), indent, 1);
         shadow_bind_name(st->a, qty, 0);
         return cemit_fmt(out,
@@ -954,11 +958,11 @@ static int shadow_emit_err_branch(AstNode* st, CEmit* out, ShadowCtx* ctx,
     shadow_indent_nest(i2, sizeof(i2), indent, 1);
     if (!err_tmp || !err_tmp[0]) err_tmp = "__r";
     if (!shadow_resync_line(out, ctx, i2)) return 0;
-    if (st->nbody > 0 || st->d[0]) {
-        if (st->d[0]) {
+    if (st->nbody > 0 || (st->d && st->d[0])) {
+        if (st->d && st->d[0]) {
             char ty[128];
             char bname[64];
-            const char* sp = strchr(st->d, ' ');
+            const char* sp = strchr(ast_slot(st->d), ' ');
             if (sp) {
                 size_t tl = (size_t)(sp - st->d);
                 if (tl >= sizeof(ty)) tl = sizeof(ty) - 1;
@@ -1046,11 +1050,11 @@ static void shadow_subst_bind_on_node(AstNode* st, const char* from,
                                       const char* to) {
     int i;
     if (!st || !from || !from[0] || !to) return;
-    shadow_subst_ident_word(st->a, sizeof(st->a), from, to);
-    shadow_subst_ident_word(st->b, sizeof(st->b), from, to);
-    shadow_subst_ident_word(st->c, sizeof(st->c), from, to);
-    shadow_subst_ident_word(st->d, sizeof(st->d), from, to);
-    shadow_subst_ident_word(st->e, sizeof(st->e), from, to);
+    shadow_subst_ident_cstr(&st->a, from, to);
+    shadow_subst_ident_cstr(&st->b, from, to);
+    shadow_subst_ident_cstr(&st->c, from, to);
+    shadow_subst_ident_cstr(&st->d, from, to);
+    shadow_subst_ident_cstr(&st->e, from, to);
     shadow_subst_ident_cstr(&st->f, from, to);
     for (i = 0; i < st->nbody; i++)
         shadow_subst_bind_on_node(st->body[i], from, to);
@@ -1070,15 +1074,15 @@ static int shadow_emit_err_delegate(CEmit* out, ShadowCtx* ctx,
         return 0;
     }
     if (ctx->eh->nbody == 0) {
-        const char* h = ctx->eh->c[0] ? ctx->eh->c : "cc_error_exit";
+        const char* h = ctx->eh->c && ctx->eh->c[0] ? ctx->eh->c : "cc_error_exit";
         return cemit_fmt(out, "%s%s(%s);\n", indent, h, local_bind);
     }
     {
         int uc = ctx->goto_cleanup;
         for (k = 0; k < ctx->eh->nbody; k++) {
             eh_copy = *ctx->eh->body[k];
-            if (ctx->eh->b[0] && local_bind[0] &&
-                strcmp(ctx->eh->b, local_bind) != 0)
+            if (ctx->eh->b && ctx->eh->b[0] && local_bind[0] &&
+                strcmp(ast_slot(ctx->eh->b), local_bind) != 0)
                 shadow_subst_bind_on_node(&eh_copy, ctx->eh->b, local_bind);
             if (!shadow_emit_stmt_ctx(&eh_copy, out, ctx, indent, uc))
                 return 0;
@@ -1095,8 +1099,8 @@ static int shadow_emit_err_syntax(AstNode* st, CEmit* out, ShadowCtx* ctx,
     char i1[80];
     const char* call = st->b;
     const char* bind = "e";
-    int has_assign = st->a[0] != 0;
-    int has_colon = strcmp(st->c, "colon") == 0;
+    int has_assign = st->a && st->a[0] != 0;
+    int has_colon = strcmp(ast_slot(st->c), "colon") == 0;
     int lhs_result = has_assign && shadow_lhs_is_result_decl(st->a);
     int lhs_plain = has_assign && shadow_lhs_is_plain_decl(st->a);
 
