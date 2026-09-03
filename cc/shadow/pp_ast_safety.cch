@@ -858,7 +858,7 @@ static int shadow_safe_node_has_refcount_dec(AstNode* st) {
 static int shadow_safe_fn_has_refcount_dec(AstNode* fn) {
     int k;
     if (!fn) return 0;
-    if (fn->kind == AST_STATIC_FN && fn->d[0] && fn->nkids == 0 &&
+    if (fn->kind == AST_STATIC_FN && fn->d && fn->d[0] && fn->nkids == 0 &&
         shadow_safe_text_has_refcount_dec(fn->d))
         return 1;
     for (k = 0; k < fn->nbody; k++)
@@ -913,7 +913,7 @@ static int shadow_safe_node_releases_py_obj(AstNode* st, const char* name) {
     if (!st || !name) return 0;
     /* AST_CALL_ARGS: a=callee, b=args — not one contiguous spelling. */
     if ((st->kind == AST_CALL_ARGS || st->kind == AST_CALL_NUM) &&
-        strcmp(st->a, "cc_py_obj_release") == 0 &&
+        strcmp(ast_slot(st->a), "cc_py_obj_release") == 0 &&
         shadow_safe_args_target_py_obj(st->b, name))
         return 1;
     if (shadow_safe_text_releases_py_obj(st->a, name) ||
@@ -932,7 +932,7 @@ static int shadow_safe_node_releases_py_obj(AstNode* st, const char* name) {
 static int shadow_safe_fn_releases_py_obj(AstNode* fn, const char* name) {
     int k;
     if (!fn || !name || !name[0]) return 0;
-    if (fn->kind == AST_STATIC_FN && fn->d[0] && fn->nkids == 0 &&
+    if (fn->kind == AST_STATIC_FN && fn->d && fn->d[0] && fn->nkids == 0 &&
         shadow_safe_text_releases_py_obj(fn->d, name))
         return 1;
     for (k = 0; k < fn->nbody; k++)
@@ -953,8 +953,8 @@ static int shadow_safe_type_is_slice(const char* ty) {
 /* AST_TYPED_INIT.e == "!" records parse-time `T[:!]` (emit ignores bare !). */
 static int shadow_safe_node_unique_slice(AstNode* st) {
     if (!st) return 0;
-    if (st->e[0] == '!' && st->e[1] == 0) return 1;
-    if (strstr(st->a, "[:!]") != NULL) return 1;
+    if (st->e && st->e[0] == '!' && st->e[1] == 0) return 1;
+    if (strstr(ast_slot(st->a), "[:!]") != NULL) return 1;
     return 0;
 }
 
@@ -1677,7 +1677,7 @@ static void shadow_safe_on_typed_init(ShadowSafeCtx* ctx, AstNode* st) {
     name = st->b;
     expr = st->c;
     /* AST_PTR_INIT stores Type without '*'; TYPED_INIT/VAL_DESTROY use d="*". */
-    stars = (st->d[0] == '*') || (st->kind == AST_PTR_INIT) ||
+    stars = ((st->d && st->d[0] == '*')) || (st->kind == AST_PTR_INIT) ||
             (ty && strchr(ty, '*') != NULL);
     shadow_safe_check_moved_use(ctx, st, expr);
     if (ctx->err) return;
@@ -1686,7 +1686,7 @@ static void shadow_safe_on_typed_init(ShadowSafeCtx* ctx, AstNode* st) {
     if (!v) return;
     if (ty) snprintf(v->ty, sizeof(v->ty), "%s", ty);
     /* `T buf[N] = …` — dims live in e (unless e is the unique `!` marker). */
-    if (st->e[0] == '[') v->is_stack_array = 1;
+    if (st->e && st->e[0] == '[') v->is_stack_array = 1;
     if (ty) shadow_safe_check_map_key_text(ctx, st, ty);
     if (ctx->err) return;
     if (expr) shadow_safe_check_map_key_text(ctx, st, expr);
@@ -1928,7 +1928,7 @@ static void shadow_safe_on_assign(ShadowSafeCtx* ctx, AstNode* st) {
     if (!shadow_safe_plain_ident(st->a, lname, sizeof(lname))) return;
     lhs = shadow_safe_find(ctx, lname);
     if (!lhs || !lhs->is_slice) return;
-    if (strstr(st->b, "cc_move(") != NULL) {
+    if (strstr(ast_slot(st->b), "cc_move(") != NULL) {
         if (!shadow_safe_parse_cc_move(st->b, src, sizeof(src))) {
             shadow_safe_err_at(ctx, st, "unparseable cc_move(...)");
             return;
@@ -2226,7 +2226,7 @@ static void shadow_mark_struct_as_fields(AstNode* st, char names[][64], int nn) 
     if (!st || !names || nn <= 0) return;
     for (i = 0; i < st->nkids; i++) {
         AstNode* f = st->kids[i];
-        if (!f || f->kind != AST_FIELD_SIMPLE || !f->b[0]) continue;
+        if (!f || f->kind != AST_FIELD_SIMPLE || !(f->b && f->b[0])) continue;
         {
             const char* np = f->b;
             char one[64];
@@ -2237,7 +2237,7 @@ static void shadow_mark_struct_as_fields(AstNode* st, char names[][64], int nn) 
                 if (!id[0]) continue;
                 for (k = 0; k < nn; k++) {
                     if (strcmp(id, names[k]) == 0) {
-                        snprintf(f->e, sizeof(f->e), "as");
+                        f->e = (char*)"as";
                         hit = 1;
                         break;
                     }
@@ -2257,7 +2257,7 @@ static void shadow_apply_typeview_as_faces(AstNode** items, int n) {
         if (!it) continue;
         if (it->kids && it->nkids > 0)
             shadow_apply_typeview_as_faces(it->kids, it->nkids);
-        if (it->kind != AST_AT_STMT || strcmp(it->a, "typeview") != 0 || !it->d[0])
+        if (it->kind != AST_AT_STMT || strcmp(ast_slot(it->a), "typeview") != 0 || !(it->d && it->d[0]))
             continue;
         nn = shadow_typeview_body_as_names(it->c, names, 32);
         if (nn <= 0) continue;
@@ -2265,11 +2265,11 @@ static void shadow_apply_typeview_as_faces(AstNode** items, int n) {
             AstNode* st = items[j];
             if (!st) continue;
             if (st->kind == AST_TYPEDEF_STRUCT &&
-                ((st->b[0] && strcmp(st->b, it->d) == 0) ||
-                 (st->a[0] && strcmp(st->a, it->d) == 0)))
+                ((st->b && st->b[0] && strcmp(ast_slot(st->b), it->d) == 0) ||
+                 (st->a && st->a[0] && strcmp(ast_slot(st->a), it->d) == 0)))
                 shadow_mark_struct_as_fields(st, names, nn);
-            else if (st->kind == AST_STRUCT && st->a[0] &&
-                     strcmp(st->a, it->d) == 0)
+            else if (st->kind == AST_STRUCT && st->a && st->a[0] &&
+                     strcmp(ast_slot(st->a), it->d) == 0)
                 shadow_mark_struct_as_fields(st, names, nn);
         }
     }
@@ -2278,7 +2278,7 @@ static void shadow_apply_typeview_as_faces(AstNode** items, int n) {
 static int shadow_safe_register_struct(ShadowSafeCtx* ctx, AstNode* st) {
     ShadowSafeStruct* s;
     int i;
-    if (!ctx || !st || st->kind != AST_TYPEDEF_STRUCT || !st->b[0]) return 0;
+    if (!ctx || !st || st->kind != AST_TYPEDEF_STRUCT || !(st->b && st->b[0])) return 0;
     if (ctx->nstructs >= SHADOW_SAFE_STRUCT_CAP) {
         shadow_safe_err_at(ctx, st,
                            "safety struct table capacity exceeded (64)");
@@ -2290,18 +2290,18 @@ static int shadow_safe_register_struct(ShadowSafeCtx* ctx, AstNode* st) {
     snprintf(s->name, sizeof(s->name), "%s", st->b);
     for (i = 0; i < st->nkids && s->nf < SHADOW_SAFE_FIELD_CAP; i++) {
         AstNode* f = st->kids[i];
-        if (!f || f->kind != AST_FIELD_SIMPLE || !f->a[0]) continue;
+        if (!f || f->kind != AST_FIELD_SIMPLE || !(f->a && f->a[0])) continue;
         /* Anonymous / raw @as cannot be proven as a named embed. */
-        if (strcmp(f->e, "raw") == 0 &&
-            (strstr(f->a, "@as") != NULL || strstr(f->a, "/*@as*/") != NULL)) {
+        if (strcmp(ast_slot(f->e), "raw") == 0 &&
+            (strstr(ast_slot(f->a), "@as") != NULL || strstr(ast_slot(f->a), "/*@as*/") != NULL)) {
             shadow_safe_err_at(ctx, f, "type: anonymous as: field is ill-formed");
             return 0;
         }
-        if (strcmp(f->e, "as") == 0 && !f->b[0]) {
+        if (strcmp(ast_slot(f->e), "as") == 0 && !(f->b && f->b[0])) {
             shadow_safe_err_at(ctx, f, "type: anonymous as: field is ill-formed");
             return 0;
         }
-        if (!f->b[0]) continue;
+        if (!(f->b && f->b[0])) continue;
         {
             const char* np = f->b;
             char one[64];
@@ -2321,7 +2321,7 @@ static int shadow_safe_register_struct(ShadowSafeCtx* ctx, AstNode* st) {
                     }
                 }
                 snprintf(s->fty[s->nf], sizeof(s->fty[0]), "%s", fty);
-                s->is_as[s->nf] = (strcmp(f->e, "as") == 0);
+                s->is_as[s->nf] = (strcmp(ast_slot(f->e), "as") == 0);
                 s->nf++;
             }
         }
@@ -2343,7 +2343,7 @@ static int shadow_safe_register_variant(ShadowSafeCtx* ctx, AstNode* st) {
     ShadowSafeVariant* v;
     const char* p;
     if (!ctx || !st || st->kind != AST_AT_STMT) return 0;
-    if (strcmp(st->a, "variant") != 0 || !st->b[0]) return 0;
+    if (strcmp(ast_slot(st->a), "variant") != 0 || !(st->b && st->b[0])) return 0;
     if (shadow_safe_find_variant(ctx, st->b)) return 0;
     if (ctx->nvariants >= SHADOW_SAFE_VARIANT_CAP) {
         shadow_safe_err_at(ctx, st,
@@ -2353,7 +2353,7 @@ static int shadow_safe_register_variant(ShadowSafeCtx* ctx, AstNode* st) {
     v = &ctx->variants[ctx->nvariants++];
     memset(v, 0, sizeof(*v));
     snprintf(v->name, sizeof(v->name), "%s", st->b);
-    if (st->d[0] && strcmp(st->d, "packed") == 0)
+    if (st->d && st->d[0] && strcmp(ast_slot(st->d), "packed") == 0)
         v->is_packed = 1;
     p = st->c;
     while (p && *p && v->narm < SHADOW_SAFE_VARM_CAP) {
@@ -2890,7 +2890,7 @@ static void shadow_safe_check_as_embeds(ShadowSafeCtx* ctx, AstNode** items,
         AstNode* it = items[i];
         ShadowSafeAsSeen seen[SHADOW_SAFE_AS_SEEN_CAP];
         int nseen = 0;
-        if (!it || it->kind != AST_TYPEDEF_STRUCT || !it->b[0]) continue;
+        if (!it || it->kind != AST_TYPEDEF_STRUCT || !(it->b && it->b[0])) continue;
         shadow_safe_as_walk(ctx, it, it->b, it->b, "", seen, &nseen);
     }
 }
@@ -3336,12 +3336,12 @@ static void shadow_safe_on_ufcs(ShadowSafeCtx* ctx, AstNode* st) {
     if (ctx->err) return;
     /* UFCS channel send: recv.send(payload) — same oracle as cc_channel_send.
      * `!>` / `!>(e){…}` on the UFCS node (st->d starts with bang*) awaits. */
-    if (strcmp(st->b, "send") == 0) {
+    if (strcmp(ast_slot(st->b), "send") == 0) {
         snprintf(args, sizeof(args), "%s, %s", st->a, st->c);
         shadow_safe_check_chan_send_payload(ctx, st, "cc_channel_send", args);
         if (ctx->err) return;
         if (ctx->in_async &&
-            !(st->d[0] && strncmp(st->d, "bang", 4) == 0)) {
+            !(st->d && st->d[0] && strncmp(ast_slot(st->d), "bang", 4) == 0)) {
             shadow_safe_err_at(
                 ctx, st,
                 "async: channel operation 'chan_send' must be awaited in "
@@ -3349,20 +3349,20 @@ static void shadow_safe_on_ufcs(ShadowSafeCtx* ctx, AstNode* st) {
         }
         return;
     }
-    if (strcmp(st->b, "recv") == 0 && ctx->in_async &&
-        !(st->d[0] && strncmp(st->d, "bang", 4) == 0)) {
+    if (strcmp(ast_slot(st->b), "recv") == 0 && ctx->in_async &&
+        !(st->d && st->d[0] && strncmp(ast_slot(st->d), "bang", 4) == 0)) {
         shadow_safe_err_at(
             ctx, st,
             "async: channel operation 'chan_recv' must be awaited in "
             "@async function");
         return;
     }
-    if (strcmp(st->b, "destroy") != 0 && strcmp(st->b, "free") != 0 &&
-        strcmp(st->b, "reset") != 0)
+    if (strcmp(ast_slot(st->b), "destroy") != 0 && strcmp(ast_slot(st->b), "free") != 0 &&
+        strcmp(ast_slot(st->b), "reset") != 0)
         return;
     v = shadow_safe_find(ctx, st->a);
     if (!v) return;
-    if ((strcmp(st->b, "destroy") == 0 || strcmp(st->b, "free") == 0) &&
+    if ((strcmp(ast_slot(st->b), "destroy") == 0 || strcmp(ast_slot(st->b), "free") == 0) &&
         ((v->is_slice && v->arena_view) || v->is_arena_ptr)) {
         snprintf(msg, sizeof(msg),
                  "cannot free/destroy non-owning borrow '%s'", st->a);
@@ -3370,12 +3370,12 @@ static void shadow_safe_on_ufcs(ShadowSafeCtx* ctx, AstNode* st) {
         return;
     }
     if (v->is_arena &&
-        (strcmp(st->b, "reset") == 0 || strcmp(st->b, "free") == 0 ||
-         strcmp(st->b, "destroy") == 0)) {
+        (strcmp(ast_slot(st->b), "reset") == 0 || strcmp(ast_slot(st->b), "free") == 0 ||
+         strcmp(ast_slot(st->b), "destroy") == 0)) {
         snprintf(args, sizeof(args), "&%s", st->a);
-        if (strcmp(st->b, "reset") == 0)
+        if (strcmp(ast_slot(st->b), "reset") == 0)
             shadow_safe_on_arena_epoch(ctx, st, "cc_arena_reset", args);
-        else if (strcmp(st->b, "free") == 0)
+        else if (strcmp(ast_slot(st->b), "free") == 0)
             shadow_safe_on_arena_epoch(ctx, st, "cc_arena_free", args);
         else
             shadow_safe_on_arena_epoch(ctx, st, "cc_arena_destroy", args);
@@ -3384,7 +3384,7 @@ static void shadow_safe_on_ufcs(ShadowSafeCtx* ctx, AstNode* st) {
 
 static int shadow_safe_stmt_diverges(AstNode* st) {
     if (!st) return 0;
-    if (st->kind == AST_EXPR_STMT && st->a[0]) {
+    if (st->kind == AST_EXPR_STMT && st->a && st->a[0]) {
         const char* p = st->a;
         while (*p == ' ' || *p == '\t') p++;
         if (strncmp(p, "goto", 4) == 0) {
@@ -3399,9 +3399,9 @@ static int shadow_safe_stmt_diverges(AstNode* st) {
         st->kind == AST_ERR_FWD)
         return 1;
     if (st->kind == AST_CALL_ARGS || st->kind == AST_CALL_NUM) {
-        if (strcmp(st->a, "exit") == 0 || strcmp(st->a, "abort") == 0 ||
-            strcmp(st->a, "_exit") == 0 || strcmp(st->a, "longjmp") == 0 ||
-            strcmp(st->a, "cc_error_exit") == 0 || strcmp(st->a, "goto") == 0)
+        if (strcmp(ast_slot(st->a), "exit") == 0 || strcmp(ast_slot(st->a), "abort") == 0 ||
+            strcmp(ast_slot(st->a), "_exit") == 0 || strcmp(ast_slot(st->a), "longjmp") == 0 ||
+            strcmp(ast_slot(st->a), "cc_error_exit") == 0 || strcmp(ast_slot(st->a), "goto") == 0)
             return 1;
     }
     if (st->kind == AST_BLOCK && st->nbody > 0)
@@ -3423,7 +3423,7 @@ static AstNode* shadow_safe_eh(ShadowSafeCtx* ctx) {
  * a scope handler. Bare `!>;` in its body dispatches to the enclosing
  * `@errhandler` — that is composition, not re-entry. */
 static int shadow_safe_eh_is_site(AstNode* eh) {
-    return eh && eh->kind == AST_ERRHANDLER && eh->e[0] == 's';
+    return eh && eh->kind == AST_ERRHANDLER && eh->e && eh->e[0] == 's';
 }
 
 static void shadow_safe_push_eh(ShadowSafeCtx* ctx, AstNode* eh) {
@@ -3598,12 +3598,12 @@ static int shadow_safe_diag_eh_e(ShadowSafeCtx* ctx, AstNode* st,
     if (!ety || !ety[0]) return 0;
     for (i = ctx->neh - 1; i >= 0; i--) {
         AstNode* eh = ctx->eh_stack[i];
-        if (eh && eh->a[0] && strcmp(eh->a, ety) == 0) exact++;
+        if (eh && eh->a && eh->a[0] && strcmp(ast_slot(eh->a), ety) == 0) exact++;
     }
     if (exact) return 0;
     for (i = ctx->neh - 1; i >= 0; i--) {
         AstNode* eh = ctx->eh_stack[i];
-        if (!eh || !eh->a[0] || strcmp(eh->a, ety) == 0) continue;
+        if (!eh || !(eh->a && eh->a[0]) || strcmp(ast_slot(eh->a), ety) == 0) continue;
         if (!shadow_safe_as_face_of(ctx, ety, eh->a)) continue;
         if (face_i < 0) {
             face_i = i;
@@ -3717,16 +3717,16 @@ static void shadow_safe_check_err_fwds(ShadowSafeCtx* ctx, AstNode* site,
     for (i = 0; i < nbody && !ctx->err; i++) {
         AstNode* st = body[i];
         if (!st || st->kind != AST_ERR_FWD) continue;
-        if (st->c[0] && strcmp(st->c, "delegate") == 0) continue;
+        if (st->c && st->c[0] && strcmp(ast_slot(st->c), "delegate") == 0) continue;
         if (!binder || !binder[0]) {
             char msg[160];
             snprintf(msg, sizeof(msg),
                      "'@err(%s)' requires an error binder",
-                     st->a[0] ? st->a : "e");
+                     st->a && st->a[0] ? st->a : "e");
             shadow_safe_err_at(ctx, st, msg);
             return;
         }
-        if (st->a[0] && strcmp(st->a, binder) != 0) {
+        if (st->a && st->a[0] && strcmp(ast_slot(st->a), binder) != 0) {
             char msg[192];
             snprintf(msg, sizeof(msg),
                      "@err(%s) forward references unknown binder '%s' "
@@ -3743,11 +3743,11 @@ static void shadow_safe_check_err_fwds(ShadowSafeCtx* ctx, AstNode* site,
         }
         if (!shadow_safe_body_diverges(eh->body, eh->nbody)) {
             /* Named-stmt handlers: exact diverge callees only (no substring). */
-            if (!(eh->c[0] &&
-                  (strcmp(eh->c, "exit") == 0 || strcmp(eh->c, "abort") == 0 ||
-                   strcmp(eh->c, "_exit") == 0 ||
-                   strcmp(eh->c, "cc_error_exit") == 0 ||
-                   strcmp(eh->c, "longjmp") == 0))) {
+            if (!(eh->c && eh->c[0] &&
+                  (strcmp(ast_slot(eh->c), "exit") == 0 || strcmp(ast_slot(eh->c), "abort") == 0 ||
+                   strcmp(ast_slot(eh->c), "_exit") == 0 ||
+                   strcmp(ast_slot(eh->c), "cc_error_exit") == 0 ||
+                   strcmp(ast_slot(eh->c), "longjmp") == 0))) {
                 shadow_safe_err_at(ctx, eh,
                                    "@errhandler body must visibly diverge");
                 return;
@@ -3861,7 +3861,7 @@ static void shadow_safe_on_unwrap(ShadowSafeCtx* ctx, AstNode* st) {
             /* First hop may carry `!>(e){…}`; later bare `!>` need eh. */
             if (st->nbody > 0)
                 shadow_safe_check_bang_body(ctx, st, "bang_block", binder, 1);
-            if (st->nbody == 0 || (st->e[0] && strstr(st->e, "!>")) ) {
+            if (st->nbody == 0 || (st->e && st->e[0] && strstr(ast_slot(st->e), "!>")) ) {
                 if (shadow_safe_diag_eh_e(ctx, st, st->a)) return;
                 shadow_safe_require_eh(ctx, st, NULL);
             }
@@ -3881,7 +3881,7 @@ static void shadow_safe_on_unwrap(ShadowSafeCtx* ctx, AstNode* st) {
     if (st->kind == AST_STMT_UNWRAP) {
         mode = st->c;
         binder = st->d;
-        if (!mode[0]) {
+        if (!mode || !mode[0]) {
             /* `call() !>;` — unique-E / ambiguous @as across in-scope handlers. */
             if (shadow_safe_diag_eh_e(ctx, st, st->a)) return;
             /* `call() !>;` statement position */
@@ -3907,7 +3907,7 @@ static void shadow_safe_on_unwrap(ShadowSafeCtx* ctx, AstNode* st) {
         }
         /* bang_nobind + body is `!> { … }` (inline handler), not bare !>; */
         if (strncmp(mode, "bang_eh", 7) == 0) {
-            if (shadow_safe_diag_eh_e(ctx, st, st->c[0] ? st->c : st->a))
+            if (shadow_safe_diag_eh_e(ctx, st, st->c && st->c[0] ? st->c : st->a))
                 return;
             shadow_safe_require_eh(ctx, st, NULL);
         }
@@ -3915,7 +3915,7 @@ static void shadow_safe_on_unwrap(ShadowSafeCtx* ctx, AstNode* st) {
             if (st->nbody > 0)
                 shadow_safe_check_bang_body(ctx, st, "bang_block", binder, 1);
             else {
-                if (shadow_safe_diag_eh_e(ctx, st, st->c[0] ? st->c : st->a))
+                if (shadow_safe_diag_eh_e(ctx, st, st->c && st->c[0] ? st->c : st->a))
                     return;
                 shadow_safe_require_eh(ctx, st, NULL);
             }
@@ -3927,7 +3927,7 @@ static void shadow_safe_on_unwrap(ShadowSafeCtx* ctx, AstNode* st) {
         if (st->nbody > 0)
             shadow_safe_check_err_fwds(ctx, st, st->body, st->nbody, NULL);
         else {
-            if (shadow_safe_diag_eh_e(ctx, st, st->d[0] == 'e'
+            if (shadow_safe_diag_eh_e(ctx, st, (st->d && st->d[0] == 'e')
                                                 ? "cc_eprintln("
                                                 : "cc_println("))
                 return;
@@ -3944,7 +3944,7 @@ static void shadow_safe_on_unwrap(ShadowSafeCtx* ctx, AstNode* st) {
 static int shadow_safe_fn_returns_result(const AstNode* fn) {
     if (!fn) return 0;
     if (fn->kind == AST_RESULT_FN) return 1;
-    if (fn->kind == AST_ASYNC_FN && strcmp(fn->e, "result") == 0) return 1;
+    if (fn->kind == AST_ASYNC_FN && strcmp(ast_slot(fn->e), "result") == 0) return 1;
     return 0;
 }
 
@@ -3952,7 +3952,7 @@ static int shadow_safe_ufcs_result_consumed(const AstNode* st) {
     const char* d;
     if (!st) return 0;
     d = st->d;
-    if (!d[0]) return 0;
+    if (!d || !d[0]) return 0;
     return strncmp(d, "bang", 4) == 0 || strncmp(d, "qmark", 5) == 0 ||
            strcmp(d, "await") == 0 || strncmp(d, "bang_await", 10) == 0;
 }
@@ -3968,12 +3968,12 @@ static void shadow_safe_on_unhandled_call(ShadowSafeCtx* ctx, AstNode* st) {
         if (shadow_safe_ufcs_result_consumed(st)) return;
         if (!shadow_safe_is_result_fn(ctx, st->b)) return;
         if (shadow_safe_is_result_fn_discard_ok(ctx, st->b)) return;
-        if (cc_result_fn_registry_is_discard_ok(st->b, strlen(st->b))) return;
+        if (cc_result_fn_registry_is_discard_ok(st->b, strlen(ast_slot(st->b)))) return;
         callee = st->b;
     } else if (st->kind == AST_CALL_ARGS || st->kind == AST_CALL_NUM) {
         if (!shadow_safe_is_result_fn(ctx, st->a)) return;
         if (shadow_safe_is_result_fn_discard_ok(ctx, st->a)) return;
-        if (cc_result_fn_registry_is_discard_ok(st->a, strlen(st->a))) return;
+        if (cc_result_fn_registry_is_discard_ok(st->a, strlen(ast_slot(st->a)))) return;
         callee = st->a;
     } else {
         return;
@@ -3993,12 +3993,12 @@ static int shadow_safe_body_mutates_ident(AstNode** body, int n,
         AstNode* st = body[i];
         char lname[64];
         if (!st) continue;
-        if (st->kind == AST_INC && strcmp(st->a, name) == 0) return 1;
+        if (st->kind == AST_INC && strcmp(ast_slot(st->a), name) == 0) return 1;
         if (st->kind == AST_ASSIGN) {
             if (shadow_safe_plain_ident(st->a, lname, sizeof(lname)) &&
                 strcmp(lname, name) == 0)
                 return 1;
-            if (st->a[0] == '*' &&
+            if ((st->a && st->a[0] == '*') &&
                 shadow_safe_plain_ident(st->a + 1, lname, sizeof(lname)) &&
                 strcmp(lname, name) == 0)
                 return 1;
@@ -4113,8 +4113,8 @@ static void shadow_safe_on_spawn(ShadowSafeCtx* ctx, AstNode* st, int escapes) {
     char msg[192];
     int is_unsafe;
     if (!ctx || !st || ctx->err) return;
-    is_unsafe = (strcmp(st->b, "spawn_unsafe") == 0 ||
-                 strcmp(st->b, "spawnhybrid_unsafe") == 0 ||
+    is_unsafe = (strcmp(ast_slot(st->b), "spawn_unsafe") == 0 ||
+                 strcmp(ast_slot(st->b), "spawnhybrid_unsafe") == 0 ||
                  (st->f && strcmp(st->f, "unsafe") == 0));
     /* Task-escaping only for value-captured pointer alias mutation (legacy). */
     if (ctx->in_send_task) escapes = 1;
@@ -4208,8 +4208,8 @@ static void shadow_safe_walk_attached_closures(ShadowSafeCtx* ctx, AstNode* st,
         shadow_safe_check_escape_stack_slice(ctx, cl, escapes);
         if (ctx->err) return;
         prev_st = ctx->in_send_task;
-        if (cl->b[0] && (strcmp(cl->b, "send_task") == 0 ||
-                         strcmp(cl->b, "send_task_hybrid") == 0))
+        if (cl->b && cl->b[0] && (strcmp(ast_slot(cl->b), "send_task") == 0 ||
+                         strcmp(ast_slot(cl->b), "send_task_hybrid") == 0))
             ctx->in_send_task = 1;
         saved_npend = ctx->npending_moves;
         {
@@ -4217,8 +4217,8 @@ static void shadow_safe_walk_attached_closures(ShadowSafeCtx* ctx, AstNode* st,
              * value-captured pointer alias mutation still task-escapes. */
             int mut_esc = escapes;
             if (st->kind == AST_UFCS_STMT &&
-                (strcmp(st->b, "spawn") == 0 ||
-                 strcmp(st->b, "spawnhybrid") == 0))
+                (strcmp(ast_slot(st->b), "spawn") == 0 ||
+                 strcmp(ast_slot(st->b), "spawnhybrid") == 0))
                 mut_esc = 1;
             shadow_safe_on_spawn(ctx, cl, mut_esc);
         }
@@ -4273,7 +4273,7 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
         if (st->kind == AST_TYPED_INIT)
             ty = st->a;
         else if (strcmp(mode, "qmark") == 0)
-            ty = st->d[0] ? st->d : "int";
+            ty = st->d && st->d[0] ? st->d : "int";
         else if (strncmp(mode, "qmark_bind:", 11) == 0)
             ty = mode[11] ? mode + 11 : "int";
         else if (strncmp(mode, "bang_chain:", 11) == 0 && mode[11])
@@ -4299,9 +4299,9 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
     switch (st->kind) {
     case AST_TYPEDEF_CHAN: {
         int role = 0;
-        if (st->c[0] == '>') role = 1;
-        else if (st->c[0] == '<') role = 2;
-        if (st->a[0] && role) shadow_safe_add_chan_td(ctx, st->a, role);
+        if ((st->c && st->c[0] == '>')) role = 1;
+        else if ((st->c && st->c[0] == '<')) role = 2;
+        if (st->a && st->a[0] && role) shadow_safe_add_chan_td(ctx, st->a, role);
         break;
     }
     case AST_CHAN_VAR: {
@@ -4309,8 +4309,8 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
         char name[64];
         size_t ni;
         int role = 0;
-        if (strcmp(st->c, ">") == 0) role = 1;
-        else if (strcmp(st->c, "<") == 0) role = 2;
+        if (strcmp(ast_slot(st->c), ">") == 0) role = 1;
+        else if (strcmp(ast_slot(st->c), "<") == 0) role = 2;
         while (*p) {
             ShadowSafeVar* cv;
             while (*p == ' ' || *p == '\t' || *p == ',') p++;
@@ -4330,8 +4330,8 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
          * Also bind ordinary locals (`int v;`) so send(v+1) can prove POD. */
         int role = shadow_safe_chan_td_role(ctx, st->a);
         ShadowSafeVar* cv;
-        if (st->a[0]) shadow_safe_check_map_key_text(ctx, st, st->a);
-        if (st->b[0] && !ctx->err) {
+        if (st->a && st->a[0]) shadow_safe_check_map_key_text(ctx, st, st->a);
+        if (st->b && st->b[0] && !ctx->err) {
             const char* bp = st->b;
             while (*bp && !ctx->err) {
                 char name[64];
@@ -4352,9 +4352,9 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
                 if (cv) {
                     snprintf(cv->ty, sizeof(cv->ty), "%s", st->a);
                     if (role) cv->is_chan = role;
-                    if (strchr(st->a, '*') || strchr(st->b, '*'))
+                    if (strchr(ast_slot(st->a), '*') || strchr(ast_slot(st->b), '*'))
                         cv->is_ptr = 1;
-                    if (st->c[0] == '[' || this_arr) cv->is_stack_array = 1;
+                    if ((st->c && st->c[0] == '[') || this_arr) cv->is_stack_array = 1;
                 }
             }
         }
@@ -4363,11 +4363,11 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
     case AST_TYPED_INIT:
     case AST_PTR_INIT:
         /* `@create` without `@destroy`/`@detach` — ownership required. */
-        if (!ctx->err && st->c[0] &&
-            (strstr(st->c, "@create") || strstr(st->c, "__cc_at_create"))) {
+        if (!ctx->err && st->c && st->c[0] &&
+            (strstr(ast_slot(st->c), "@create") || strstr(ast_slot(st->c), "__cc_at_create"))) {
             char msg[192];
             int is_ptr = (st->kind == AST_PTR_INIT) ||
-                         (st->d[0] == '*');
+                         ((st->d && st->d[0] == '*'));
             snprintf(msg, sizeof(msg),
                      "type: `%s%s` created with '@(...)' requires explicit "
                      "ownership: use '@destroy' or '@detach'",
@@ -4393,7 +4393,7 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
                 if (st->dbody[k] && st->dbody[k]->kind == AST_ERRHANDLER)
                     site = 1;
             if (!ctx->err && !site &&
-                ((st->c[0] && strstr(st->c, "!>") != NULL) ||
+                ((st->c && st->c[0] && strstr(ast_slot(st->c), "!>") != NULL) ||
                  (st->f && st->f[0] && strstr(st->f, "bang") != NULL)))
                 shadow_safe_require_eh(ctx, st, NULL);
             for (k = 0; k < st->ndbody && !ctx->err; k++) {
@@ -4406,7 +4406,7 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
     case AST_ASSIGN:
         shadow_safe_on_assign(ctx, st);
         /* Detect `v.kind = ...` — .kind is read-only on variants. */
-        if (!ctx->err && st->a[0]) {
+        if (!ctx->err && st->a && st->a[0]) {
             int vi2;
             for (vi2 = 0; vi2 < ctx->nvars && !ctx->err; vi2++) {
                 ShadowSafeVar* sv = ctx->vars[vi2];
@@ -4480,7 +4480,7 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
             if (shadow_safe_plain_ident(st->a, lhs, sizeof(lhs)) &&
                 shadow_safe_is_global(ctx, lhs))
                 escapes = 1;
-            else if (strstr(st->a, ".") != NULL || strstr(st->a, "->") != NULL)
+            else if (strstr(ast_slot(st->a), ".") != NULL || strstr(ast_slot(st->a), "->") != NULL)
                 escapes = 1;
             shadow_safe_walk_attached_closures(ctx, st, escapes);
         }
@@ -4518,8 +4518,8 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
         {
             /* Nursery spawn is scoped — same as the old AST_SPAWN_CLOSURE path. */
             int escapes = 1;
-            if (strcmp(st->b, "spawn") == 0 ||
-                strcmp(st->b, "spawnhybrid") == 0)
+            if (strcmp(ast_slot(st->b), "spawn") == 0 ||
+                strcmp(ast_slot(st->b), "spawnhybrid") == 0)
                 escapes = 0;
             if (!ctx->err)
                 shadow_safe_walk_attached_closures(ctx, st, escapes);
@@ -4529,11 +4529,11 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
         int prev_st = ctx->in_send_task;
         int saved_npend = ctx->npending_moves;
         int is_nursery =
-            strcmp(st->b, "spawn") == 0 || strcmp(st->b, "spawn_unsafe") == 0 ||
-            strcmp(st->b, "spawnhybrid") == 0 ||
-            strcmp(st->b, "spawnhybrid_unsafe") == 0;
-        if (st->b[0] && (strcmp(st->b, "send_task") == 0 ||
-                         strcmp(st->b, "send_task_hybrid") == 0))
+            strcmp(ast_slot(st->b), "spawn") == 0 || strcmp(ast_slot(st->b), "spawn_unsafe") == 0 ||
+            strcmp(ast_slot(st->b), "spawnhybrid") == 0 ||
+            strcmp(ast_slot(st->b), "spawnhybrid_unsafe") == 0;
+        if (st->b && st->b[0] && (strcmp(ast_slot(st->b), "send_task") == 0 ||
+                         strcmp(ast_slot(st->b), "send_task_hybrid") == 0))
             ctx->in_send_task = 1;
         /* Nursery spawn is scoped — stack-slice capture is allowed there. */
         if (!is_nursery)
@@ -4558,22 +4558,22 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
         shadow_safe_walk_list(ctx, st->body, st->nbody);
         break;
     case AST_ERR_SYNTAX:
-        if (st->nbody == 0 && !st->d[0] && !shadow_safe_eh(ctx)) {
+        if (st->nbody == 0 && !(st->d && st->d[0]) && !shadow_safe_eh(ctx)) {
             shadow_safe_err_at(ctx, st,
                                "@err with no local handler requires @errhandler");
             return;
         }
         if (st->nbody > 0) {
             int bi;
-            const char* bind = st->d[0] ? strrchr(st->d, ' ') : NULL;
+            const char* bind = st->d && st->d[0] ? strrchr(st->d, ' ') : NULL;
             if (bind) bind++;
-            else bind = st->d[0] ? st->d : NULL;
+            else bind = st->d && st->d[0] ? st->d : NULL;
             for (bi = 0; bi < st->nbody && !ctx->err; bi++) {
                 AstNode* fwd = st->body[bi];
                 if (!fwd || fwd->kind != AST_ERR_FWD ||
-                    strcmp(fwd->c, "delegate") != 0)
+                    strcmp(ast_slot(fwd->c), "delegate") != 0)
                     continue;
-                if (!bind || !bind[0] || strcmp(fwd->a, bind) != 0 ||
+                if (!bind || !bind[0] || strcmp(ast_slot(fwd->a), bind) != 0 ||
                     !shadow_safe_eh(ctx)) {
                     shadow_safe_err_at(
                         ctx, fwd,
@@ -4601,7 +4601,7 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
          * nursery locals that leave this scope (CVE-2017-13245 idiomatic).
          * PTR_UNWRAP `CCNursery n = … !> @destroy` often never lands in
          * vars[]; scan the block body for nursery destroy sites too. */
-        if (st->kind == AST_NURSERY_DESTROY && st->b[0])
+        if (st->kind == AST_NURSERY_DESTROY && st->b && st->b[0])
             shadow_safe_unpin_nursery(ctx, st->b);
         for (vi = saved_nvars; vi < ctx->nvars; vi++) {
             if (ctx->vars[vi] &&
@@ -4620,7 +4620,7 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
                 nname = s->b;
                 nty = s->a;
             } else if (s->kind == AST_PTR_UNWRAP &&
-                       s->d[0] && strstr(s->d, "_D") != NULL) {
+                       s->d && s->d[0] && strstr(ast_slot(s->d), "_D") != NULL) {
                 nname = s->b;
                 nty = s->a;
             }
@@ -4718,7 +4718,7 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
     }
     case AST_CANCEL_DEFER: {
         int i, found = 0;
-        if (!st->a[0]) {
+        if (!(st->a && st->a[0])) {
             shadow_safe_err_at(ctx, st, "@cancel_defer requires a name");
             return;
         }
@@ -4746,7 +4746,7 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
     case AST_SERIAL:
     case AST_STAGE:
         if (st->kind == AST_DEFER) {
-            if (st->a[0]) {
+            if (st->a && st->a[0]) {
                 int i;
                 for (i = 0; i < ctx->nndefer; i++) {
                     if (ctx->ndefer_scope[i] == ctx->ndefer_block &&
@@ -4768,7 +4768,7 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
                 ctx->ndefer_scope[ctx->nndefer] = ctx->ndefer_block;
                 ctx->nndefer++;
             }
-            if ((strcmp(st->c, "ok") == 0 || strcmp(st->c, "err") == 0) &&
+            if ((strcmp(ast_slot(st->c), "ok") == 0 || strcmp(ast_slot(st->c), "err") == 0) &&
                 !shadow_safe_fn_returns_result(ctx->cur_fn)) {
                 shadow_safe_err_at(
                     ctx, st,
@@ -4782,7 +4782,7 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
          * after the brace — that dispatch needs a handler in scope.
          * Not under `#pragma(@parallel) off`: the sequential lowering has
          * no re-raise edge. */
-        if (st->kind == AST_PARALLEL_FOR && st->e[0] && !st->forced_seq &&
+        if (st->kind == AST_PARALLEL_FOR && st->e && st->e[0] && !st->forced_seq &&
             !shadow_pw_bang_eh(st) && !shadow_safe_eh(ctx)) {
             shadow_safe_err_at_col(
                 ctx, st, 1,
@@ -4806,8 +4806,8 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
          * projection text alone looks unprotected; trust bang/qmark modes.
          * Two-arm complement: the inactive-arm handler / `?>` fallback may
          * project the other arm (spec §5a/§10). */
-        int prot = st->c[0] && (strncmp(st->c, "bang", 4) == 0 ||
-                                strncmp(st->c, "qmark", 5) == 0);
+        int prot = st->c && st->c[0] && (strncmp(ast_slot(st->c), "bang", 4) == 0 ||
+                                strncmp(ast_slot(st->c), "qmark", 5) == 0);
         int complement_pushed = 0;
         char croot[64], carm[32], comp[32];
         shadow_safe_commit_moves_in_text(ctx, st, st->b);
@@ -4838,8 +4838,8 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
         break;
     }
     case AST_PTR_UNWRAP: {
-        int prot = st->d[0] && (strncmp(st->d, "bang", 4) == 0 ||
-                                strncmp(st->d, "qmark", 5) == 0);
+        int prot = st->d && st->d[0] && (strncmp(ast_slot(st->d), "bang", 4) == 0 ||
+                                strncmp(ast_slot(st->d), "qmark", 5) == 0);
         shadow_safe_commit_moves_in_text(ctx, st, st->c);
         if (ctx->err) return;
         shadow_safe_check_moved_use(ctx, st, st->c);
@@ -4853,8 +4853,8 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
         break;
     }
     case AST_STMT_UNWRAP: {
-        int prot = !st->c[0] || strncmp(st->c, "bang", 4) == 0 ||
-                   strncmp(st->c, "qmark", 5) == 0;
+        int prot = !(st->c && st->c[0]) || strncmp(ast_slot(st->c), "bang", 4) == 0 ||
+                   strncmp(ast_slot(st->c), "qmark", 5) == 0;
         shadow_safe_commit_moves_in_text(ctx, st, st->a);
         if (ctx->err) return;
         shadow_safe_check_moved_use(ctx, st, st->a);
@@ -4993,7 +4993,7 @@ static void shadow_safe_walk_fn(ShadowSafeCtx* ctx, AstNode* fn) {
     shadow_safe_walk_list(ctx, fn->body, fn->nbody);
     /* Static fn raw-body fallback: scan opaque text under no case dom
      * except when it embeds a switch (handled only if parsed). */
-    if (fn->kind == AST_STATIC_FN && fn->d[0] && fn->nkids == 0)
+    if (fn->kind == AST_STATIC_FN && fn->d && fn->d[0] && fn->nkids == 0)
         shadow_safe_check_variant_text(ctx, fn, fn->d);
     ctx->nvars = saved_nvars;
     ctx->npin = saved_npin;
@@ -5167,8 +5167,8 @@ static int shadow_safety_check(AstNode** items, int n, TapeCache* cache) {
             it->kind == AST_FN_PROTO || it->kind == AST_RAW_LINE)
             fname = it->kind == AST_RAW_LINE ? it->a : it->b;
         if (!fname || strncmp(fname, pre, pl) != 0) {
-            if (it->kind == AST_RAW_LINE && it->a[0]) {
-                const char* hit = strstr(it->a, pre);
+            if (it->kind == AST_RAW_LINE && it->a && it->a[0]) {
+                const char* hit = strstr(ast_slot(it->a), pre);
                 if (hit && (hit == it->a || !shadow_safe_is_word(hit[-1])))
                     fname = hit;
                 else
@@ -5200,9 +5200,9 @@ static int shadow_safety_check(AstNode** items, int n, TapeCache* cache) {
             it->kind == AST_PTR_INIT || it->kind == AST_VAL_DESTROY ||
             it->kind == AST_SLICE_VAR || it->kind == AST_PTR_DECL ||
             it->kind == AST_STATIC_VAR || it->kind == AST_GLOBAL_ARR) {
-            if (it->b[0]) shadow_safe_add_global(&ctx, it->b);
+            if (it->b && it->b[0]) shadow_safe_add_global(&ctx, it->b);
         } else if (it->kind == AST_CHAN_VAR || it->kind == AST_VAR_INT) {
-            if (it->a[0]) shadow_safe_add_global(&ctx, it->a);
+            if (it->a && it->a[0]) shadow_safe_add_global(&ctx, it->a);
         }
         /* Container instances used in the TU are codegen-registered. */
         {
@@ -5234,10 +5234,10 @@ static int shadow_safety_check(AstNode** items, int n, TapeCache* cache) {
                     AstNode* kid = it->kids[k];
                     char base[96];
                     size_t bn = 0;
-                    if (!kid || !kid->a[0]) continue;
-                    if (strncmp(kid->a, "CCVec_", 6) != 0 &&
-                        strncmp(kid->a, "Map_", 4) != 0 &&
-                        strncmp(kid->a, "ArrayMap_", 9) != 0)
+                    if (!kid || !(kid->a && kid->a[0])) continue;
+                    if (strncmp(ast_slot(kid->a), "CCVec_", 6) != 0 &&
+                        strncmp(ast_slot(kid->a), "Map_", 4) != 0 &&
+                        strncmp(ast_slot(kid->a), "ArrayMap_", 9) != 0)
                         continue;
                     while (kid->a[bn] && kid->a[bn] != '*' &&
                            kid->a[bn] != ' ' && bn + 1 < sizeof(base))
@@ -5250,36 +5250,36 @@ static int shadow_safety_check(AstNode** items, int n, TapeCache* cache) {
         }
         if (it->kind == AST_TYPEDEF_STRUCT) {
             shadow_safe_register_struct(&ctx, it);
-            if (it->b[0]) shadow_safe_add_type_name(&ctx, it->b);
-            if (it->a[0]) shadow_safe_add_type_name(&ctx, it->a);
+            if (it->b && it->b[0]) shadow_safe_add_type_name(&ctx, it->b);
+            if (it->a && it->a[0]) shadow_safe_add_type_name(&ctx, it->a);
         } else if (it->kind == AST_TYPEDEF_INT || it->kind == AST_TYPEDEF_ENUM ||
                    it->kind == AST_TYPEDEF_FN_PTR ||
                    it->kind == AST_TYPEDEF_CHAN) {
-            if (it->kind == AST_TYPEDEF_CHAN && it->a[0]) {
+            if (it->kind == AST_TYPEDEF_CHAN && it->a && it->a[0]) {
                 int role = 0;
-                if (it->c[0] == '>') role = 1;
-                else if (it->c[0] == '<') role = 2;
+                if ((it->c && it->c[0] == '>')) role = 1;
+                else if ((it->c && it->c[0] == '<')) role = 2;
                 shadow_safe_add_type_name(&ctx, it->a);
                 if (role) shadow_safe_add_chan_td(&ctx, it->a, role);
-            } else if (it->kind == AST_TYPEDEF_INT && it->a[0]) {
+            } else if (it->kind == AST_TYPEDEF_INT && it->a && it->a[0]) {
                 shadow_safe_add_type_name(&ctx, it->a);
-                if (it->b[0]) shadow_safe_add_td_alias(&ctx, it->a, it->b);
-            } else if (it->b[0])
+                if (it->b && it->b[0]) shadow_safe_add_td_alias(&ctx, it->a, it->b);
+            } else if (it->b && it->b[0])
                 shadow_safe_add_type_name(&ctx, it->b);
-            else if (it->a[0])
+            else if (it->a && it->a[0])
                 shadow_safe_add_type_name(&ctx, it->a);
             if (it->kind == AST_TYPEDEF_INT) {
-                if (it->a[0]) shadow_safe_check_map_key_text(&ctx, it, it->a);
-                if (it->b[0]) shadow_safe_check_map_key_text(&ctx, it, it->b);
+                if (it->a && it->a[0]) shadow_safe_check_map_key_text(&ctx, it, it->a);
+                if (it->b && it->b[0]) shadow_safe_check_map_key_text(&ctx, it, it->b);
             }
-        } else if (it->kind == AST_STRUCT && it->a[0]) {
+        } else if (it->kind == AST_STRUCT && it->a && it->a[0]) {
             shadow_safe_add_type_name(&ctx, it->a);
         }
-        if (it->kind == AST_AT_STMT && strcmp(it->a, "variant") == 0) {
+        if (it->kind == AST_AT_STMT && strcmp(ast_slot(it->a), "variant") == 0) {
             shadow_safe_register_variant(&ctx, it);
-            if (it->b[0]) shadow_safe_add_type_name(&ctx, it->b);
+            if (it->b && it->b[0]) shadow_safe_add_type_name(&ctx, it->b);
         }
-        if (it->kind == AST_RAW_LINE && it->a[0]) {
+        if (it->kind == AST_RAW_LINE && it->a && it->a[0]) {
             const char* line = it->a;
             while (*line == ' ' || *line == '\t') line++;
             if (strncmp(line, "CC_TYPE_INFO_BEGIN", 17) == 0) {
@@ -5297,9 +5297,9 @@ static int shadow_safety_check(AstNode** items, int n, TapeCache* cache) {
                 }
             }
         }
-        if (it->kind == AST_RESULT_FN && it->a[0])
+        if (it->kind == AST_RESULT_FN && it->a && it->a[0])
             shadow_safe_add_result_fn_err(&ctx, it->a,
-                                          it->b[0] ? it->b : NULL,
+                                          it->b && it->b[0] ? it->b : NULL,
                                           it->forced_seq);
         fname = NULL;
         params = NULL;

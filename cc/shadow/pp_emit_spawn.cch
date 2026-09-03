@@ -232,9 +232,9 @@ static int shadow_resolve_at_create(char* expr, size_t cap, const char* ty,
 /* Expr-level () => / (T x) => closure on dbody (create / typed-init). */
 static int shadow_is_expr_closure(AstNode* kid) {
     if (!kid || kid->kind != AST_SPAWN_CLOSURE) return 0;
-    if (strncmp(kid->b, "callarg", 7) == 0 || strcmp(kid->b, "create") == 0 ||
-        strcmp(kid->b, "send_task") == 0 ||
-        strcmp(kid->b, "send_task_hybrid") == 0)
+    if (strncmp(ast_slot(kid->b), "callarg", 7) == 0 || strcmp(ast_slot(kid->b), "create") == 0 ||
+        strcmp(ast_slot(kid->b), "send_task") == 0 ||
+        strcmp(ast_slot(kid->b), "send_task_hybrid") == 0)
         return 1;
     return 0;
 }
@@ -242,11 +242,11 @@ static int shadow_is_expr_closure(AstNode* kid) {
 /* Legacy spawn expr bodies store the call text in c and use cc_nursery_spawn_fn. */
 static int shadow_closure_needs_codegen(AstNode* st) {
     if (!st || st->kind != AST_SPAWN_CLOSURE) return 0;
-    if (strncmp(st->b, "callarg", 7) == 0 || strcmp(st->b, "create") == 0 ||
-        strcmp(st->b, "send_task") == 0 ||
-        strcmp(st->b, "send_task_hybrid") == 0)
+    if (strncmp(ast_slot(st->b), "callarg", 7) == 0 || strcmp(ast_slot(st->b), "create") == 0 ||
+        strcmp(ast_slot(st->b), "send_task") == 0 ||
+        strcmp(ast_slot(st->b), "send_task_hybrid") == 0)
         return 1;
-    if (st->c[0]) return 0;
+    if (st->c && st->c[0]) return 0;
     return 1;
 }
 
@@ -262,8 +262,8 @@ static void shadow_infer_callarg2_send_into(AstNode* cl) {
     const ShadowChanDecl* ch;
     const ShadowBind* b;
     size_t n;
-    if (!cl || strcmp(cl->b, "callarg2") != 0 || !cl->a[0]) return;
-    if (!strstr(cl->a, "intptr_t")) return;
+    if (!cl || strcmp(ast_slot(cl->b), "callarg2") != 0 || !(cl->a && cl->a[0])) return;
+    if (!strstr(ast_slot(cl->a), "intptr_t")) return;
     ctx = cl->c;
     if (!ctx || !ctx[0]) return;
     meth = strstr(ctx, ".try_send_into");
@@ -317,7 +317,7 @@ static void shadow_infer_callarg2_send_into(AstNode* cl) {
         }
     }
     if (!elem || !elem[0]) return;
-    snprintf(cl->a, sizeof(cl->a), "%s* slot, CCArena arena", elem);
+    do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%s* slot, CCArena arena", elem); shadow_slot_set(&cl->a, __ast_tmp); } while (0);
 }
 
 static AstNode* shadow_expr_closure_kid(AstNode* st) {
@@ -331,8 +331,8 @@ static AstNode* shadow_expr_closure_kid(AstNode* st) {
 
 static int shadow_closure_arity(AstNode* cl) {
     if (!cl) return 0;
-    if (strcmp(cl->b, "callarg1") == 0) return 1;
-    if (strcmp(cl->b, "callarg2") == 0) return 2;
+    if (strcmp(ast_slot(cl->b), "callarg1") == 0) return 1;
+    if (strcmp(ast_slot(cl->b), "callarg2") == 0) return 2;
     return 0;
 }
 
@@ -350,8 +350,8 @@ static void shadow_fmt_closure_make(char* dst, size_t cap, AstNode* cl) {
     const char* id;
     char args[256];
     if (!dst || !cap || !cl) return;
-    id = cl->d[0] ? cl->d : "1";
-    if (cl->e[0] && shadow_caps_call_args(cl->e, args, sizeof(args)) && args[0])
+    id = cl->d && cl->d[0] ? cl->d : "1";
+    if (cl->e && cl->e[0] && shadow_caps_call_args(cl->e, args, sizeof(args)) && args[0])
         snprintf(dst, cap, "cc_closure__N%s_make(%s)", id, args);
     else
         snprintf(dst, cap, "cc_closure__N%s_make()", id);
@@ -708,8 +708,8 @@ static int shadow_emit_closure_body(AstNode* cl, CEmit* out, TapeCache* cache) {
     int bind_mark;
     shadow_pick_body_indent(cl->body, cl->nbody, body_ind, sizeof(body_ind));
     ShadowCtx ctx = { .cache = cache, .body_indent = body_ind };
-    ctx.send_task_ret = (cl->b[0] && (strcmp(cl->b, "send_task") == 0 ||
-                                      strcmp(cl->b, "send_task_hybrid") == 0));
+    ctx.send_task_ret = (cl->b && cl->b[0] && (strcmp(ast_slot(cl->b), "send_task") == 0 ||
+                                      strcmp(ast_slot(cl->b), "send_task_hybrid") == 0));
     for (int k = 0; k < cl->nbody; k++) {
         if (!shadow_collect_scope_defers(&cl->body[k], 1, defers, &ndefers,
                                          16)) {
@@ -832,7 +832,7 @@ static int shadow_emit_closure_body(AstNode* cl, CEmit* out, TapeCache* cache) {
 static int shadow_emit_closure_formals(AstNode* cl, CEmit* out) {
     const char* p;
     int ai = 0;
-    if (!cl || !cl->a[0] || shadow_closure_arity(cl) == 0) return 1;
+    if (!cl || !(cl->a && cl->a[0]) || shadow_closure_arity(cl) == 0) return 1;
     p = cl->a;
     while (*p) {
         char ty[32];
@@ -875,7 +875,7 @@ static int shadow_emit_closure_def(AstNode* cl, CEmit* out, TapeCache* cache) {
 }
 
 static int shadow_emit_closure_def_raw(AstNode* cl, CEmit* out, TapeCache* cache) {
-    const char* id = cl->d[0] ? cl->d : "1";
+    const char* id = cl->d && cl->d[0] ? cl->d : "1";
     const char* caps = cl->e;
     const char* ccty = shadow_closure_cc_ty(cl);
     int arity = shadow_closure_arity(cl);
@@ -1084,7 +1084,7 @@ static int shadow_emit_closure_def_raw(AstNode* cl, CEmit* out, TapeCache* cache
 }
 
 static int shadow_named_defer_flag_name(AstNode* d, char* buf, size_t cap) {
-    if (!d || d->kind != AST_DEFER || !d->a[0] || !buf || cap < 16) return 0;
+    if (!d || d->kind != AST_DEFER || !(d->a && d->a[0]) || !buf || cap < 16) return 0;
     snprintf(buf, cap, "__cc_dc_%zu", d->tok_off);
     return 1;
 }
@@ -1117,7 +1117,7 @@ static int shadow_emit_named_defer_flags(CEmit* out, AstNode** xs, int n,
 }
 
 static int shadow_defer_is_adopted(AstNode* d) {
-    return d && d->kind == AST_DEFER && strcmp(d->e, "arm") == 0;
+    return d && d->kind == AST_DEFER && strcmp(ast_slot(d->e), "arm") == 0;
 }
 
 static int shadow_adopted_defer_flag_name(AstNode* d, char* buf, size_t cap) {
@@ -1136,7 +1136,7 @@ static int shadow_collect_adopted_defers(AstNode* st, AstNode** defers, int* n,
     if (st->kind == AST_BLOCK) return 1;
     if (st->kind == AST_DEFER) {
         if (*n >= cap) return 0;
-        snprintf(st->e, sizeof(st->e), "arm");
+        shadow_slot_set(&st->e, "arm");
         defers[(*n)++] = st;
         return 1;
     }
@@ -1173,15 +1173,15 @@ static AstNode* shadow_named_defer_find(ShadowCtx* ctx, const char* name,
         ShadowDeferScope* sc = &ctx->defer_stack[d];
         for (i = sc->nlife - 1; i >= 0; i--) {
             AstNode* n = sc->life[i];
-            if (n && n->kind == AST_DEFER && n->a[0] &&
-                strcmp(n->a, name) == 0 && n->tok_off < before)
+            if (n && n->kind == AST_DEFER && n->a && n->a[0] &&
+                strcmp(ast_slot(n->a), name) == 0 && n->tok_off < before)
                 return n;
         }
     }
     for (i = ctx->ndefers - 1; i >= 0; i--) {
         AstNode* n = ctx->defers[i];
-        if (n && n->kind == AST_DEFER && n->a[0] &&
-            strcmp(n->a, name) == 0 && n->tok_off < before)
+        if (n && n->kind == AST_DEFER && n->a && n->a[0] &&
+            strcmp(ast_slot(n->a), name) == 0 && n->tok_off < before)
             return n;
     }
     return NULL;
@@ -1191,7 +1191,7 @@ static int shadow_emit_cancel(AstNode* st, CEmit* out, ShadowCtx* ctx,
                               const char* indent) {
     AstNode* d;
     char fl[80];
-    if (!st || !st->a[0]) {
+    if (!st || !(st->a && st->a[0])) {
         shadow_err(ctx, st, "@cancel_defer requires a name");
         if (out) out->err = 1;
         return 0;
@@ -1358,7 +1358,7 @@ static int shadow_emit_scope_life(const ShadowDeferScope* sc, CEmit* out,
         if (before_tok_off != SHADOW_TOK_OFF_ALL &&
             n->tok_off >= (size_t)before_tok_off)
             continue;
-        if (is_def && always_only && n->c[0]) continue;
+        if (is_def && always_only && n->c && n->c[0]) continue;
         if (is_def && shadow_defer_is_adopted(n)) {
             char dreg[80];
             if (!shadow_adopted_defer_flag_name(n, dreg, sizeof(dreg)))
@@ -1670,7 +1670,7 @@ static int shadow_collect_spawns(AstNode* st, AstNode** spawns, int* nspawns,
     if (!st) return 1;
     if (shadow_closure_needs_codegen(st)) {
         if (*nspawns >= cap) return 0;
-        snprintf(st->d, sizeof(st->d), "%d", g_shadow_closure_id++);
+        do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%d", g_shadow_closure_id++); shadow_slot_set(&st->d, __ast_tmp); } while (0);
         spawns[(*nspawns)++] = st;
     }
     for (int k = 0; k < st->nbody; k++) {

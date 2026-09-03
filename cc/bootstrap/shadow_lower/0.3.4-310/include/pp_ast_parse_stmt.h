@@ -9,7 +9,7 @@ static int ast_attach_ufcs_kid(Parser* p, AstNode* parent, AstNode* ue);
 static int parse_call_arg_closure(Parser* p, int c0, int end, char* dst,
                                   size_t cap, const char* tag,
                                   AstNode** out_cl);
-static void spawn_infer_value_caps(AstNode* n);
+static void spawn_infer_value_caps(Parser* p, AstNode* n);
 
 /* int[:] Name ; — soft-miss when followed by `=` (typed/slice init owns it). */
 static AstNode* parse_slice_var(Parser* p) {
@@ -36,7 +36,7 @@ static AstNode* parse_slice_var(Parser* p) {
     }
     AstNode* n = ast_new(p, AST_SLICE_VAR);
     if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), name.spell);
+    n->a = ast_arena_slice(p, name.spell);
     return n;
 }
 
@@ -117,18 +117,18 @@ static AstNode* parse_slice_init(Parser* p) {
             n = ast_new(p, AST_SLICE_INIT);
             if (!n) return NULL;
             if (shadow_kw(p->toks[ty0]) == SHADOW_KW_CHAR && ty1 == ty0 + 1)
-                snprintf(n->a, sizeof(n->a), "char");
+                n->a = ast_arena_cstr(p, "char");
             else {
                 /* Keep C spelling (spaces) for the buffer type; mangle for
                  * CCSlice_* lives in shadow_slice_ty. */
                 if (!ast_spell_token_range(p, ty0, ty1, elem, sizeof(elem)) &&
                     !span_text(p, ty0, ty1, elem, sizeof(elem)))
                     ast_mangle_slice_elem(p, ty0, ty1, elem, sizeof(elem));
-                snprintf(n->a, sizeof(n->a), "%s", elem);
+                n->a = ast_arena_cstr(p, elem);
             }
-            slice_to(n->b, sizeof(n->b), name.spell);
-            snprintf(n->c, sizeof(n->c), "%s", init);
-            if (unique) snprintf(n->e, sizeof(n->e), "!");
+            n->b = ast_arena_slice(p, name.spell);
+            n->c = ast_arena_cstr(p, init);
+            if (unique) n->e = ast_arena_cstr(p, "!");
             return n;
         }
     }
@@ -592,13 +592,13 @@ static AstNode* parse_chan_var(Parser* p) {
         }
         n = ast_new(p, AST_CHAN_VAR);
         if (!n) return NULL;
-        snprintf(n->a, sizeof(n->a), "%s", names);
+        n->a = ast_arena_cstr(p, names);
     }
-    snprintf(n->b, sizeof(n->b), "%s", cap_txt);
+    n->b = ast_arena_cstr(p, cap_txt);
     if (is_owned)
-        snprintf(n->c, sizeof(n->c), "owned");
+        n->c = ast_arena_cstr(p, "owned");
     else
-        slice_to(n->c, sizeof(n->c), dtok.spell);
+        n->c = ast_arena_slice(p, dtok.spell);
     if (is_result) {
         snprintf(elem_txt, sizeof(elem_txt), "CCResult_%s_%s", ok_txt, err_txt);
     } else {
@@ -624,7 +624,7 @@ static AstNode* parse_chan_var(Parser* p) {
             }
         }
     }
-    snprintf(n->d, sizeof(n->d), "%s", elem_txt);
+    n->d = ast_arena_cstr(p, elem_txt);
     /* e: ordered/topo + sync/bp packing for register/emit. */
     {
         char base[64];
@@ -637,15 +637,20 @@ static AstNode* parse_chan_var(Parser* p) {
             snprintf(base, sizeof(base), "o");
         else if (topo_txt[0])
             snprintf(base, sizeof(base), "t:%s", topo_txt);
-        snprintf(n->e, sizeof(n->e), "%s%s%s", base, is_sync ? ";s" : "",
-                 bp_mode == 1 ? ";dn" : bp_mode == 2 ? ";do" : "");
-        if (chan_init[0]) {
-            size_t el = strlen(n->e);
-            if (el + 2 + strlen(chan_init) + 1 < sizeof(n->e))
-                snprintf(n->e + el, sizeof(n->e) - el, ";=%s", chan_init);
-            else {
-                parser_fail(p, name, "channel init too long for meta pack");
-                return NULL;
+        {
+            char pack[4096];
+            snprintf(pack, sizeof(pack), "%s%s%s", base, is_sync ? ";s" : "",
+                     bp_mode == 1 ? ";dn" : bp_mode == 2 ? ";do" : "");
+            if (chan_init[0]) {
+                char pack2[4096];
+                if (snprintf(pack2, sizeof(pack2), "%s;=%s", pack, chan_init) >=
+                    (int)sizeof(pack2)) {
+                    parser_fail(p, name, "channel init too long for meta pack");
+                    return NULL;
+                }
+                n->e = ast_arena_cstr(p, pack2);
+            } else {
+                n->e = ast_arena_cstr(p, pack);
             }
         }
     }
@@ -699,12 +704,12 @@ static AstNode* parse_chan_var(Parser* p) {
                 return NULL;
             }
             if (strcmp(field, "create") != 0)
-                snprintf(cl->c, sizeof(cl->c), "owned:%s", field);
+                { char __ast_tmp[128]; snprintf(__ast_tmp, sizeof(__ast_tmp), "owned:%s", field); cl->c = ast_arena_cstr(p, __ast_tmp); };
             if (n->ndbody >= SHADOW_DBODY_CAP) {
                 parser_fail_dbody_cap(p, p->toks[c0], "owned channel closures");
                 return NULL;
             }
-            spawn_infer_value_caps(cl);
+            spawn_infer_value_caps(p, cl);
             n->dbody[n->ndbody++] = cl;
             k = c1;
             if (k < owned_end && tok_eq(p->toks[k], TK_PUNCT, ",")) k++;
@@ -935,10 +940,10 @@ static AstNode* parse_result_fn(Parser* p) {
     AstNode* n = ast_new(p, AST_RESULT_FN);
     if (!n) return NULL;
     n->forced_seq = discard_ok;
-    slice_to(n->a, sizeof(n->a), name.spell);
-    slice_to(n->b, sizeof(n->b), err.spell);
-    snprintf(n->c, sizeof(n->c), "%s", okty);
-    snprintf(n->d, sizeof(n->d), "%s", param_ty);
+    n->a = ast_arena_slice(p, name.spell);
+    n->b = ast_arena_slice(p, err.spell);
+    n->c = ast_arena_cstr(p, okty);
+    n->d = ast_arena_cstr(p, param_ty);
     if (p_accept(p, TK_PUNCT, ";")) {
         if (decl_attrs | p->pending_fn_attrs)
             shadow_fn_attr_register(n->a, decl_attrs | p->pending_fn_attrs, 0);
@@ -996,8 +1001,8 @@ static AstNode* parse_err_delegate(Parser* p) {
     }
     AstNode* n = ast_new(p, AST_ERR_FWD);
     if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), bind.spell);
-    snprintf(n->c, sizeof(n->c), "delegate");
+    n->a = ast_arena_slice(p, bind.spell);
+    n->c = ast_arena_cstr(p, "delegate");
     return n;
 }
 
@@ -1025,8 +1030,8 @@ static AstNode* parse_errhandler(Parser* p) {
         }
         AstNode* fwd = ast_new(p, AST_ERR_FWD);
         if (!fwd) return NULL;
-        slice_to(fwd->a, sizeof(fwd->a), ty.spell);
-        snprintf(fwd->c, sizeof(fwd->c), "delegate");
+        fwd->a = ast_arena_slice(p, ty.spell);
+        fwd->c = ast_arena_cstr(p, "delegate");
         return fwd;
     }
     Token bind = p_next(p);
@@ -1040,8 +1045,8 @@ static AstNode* parse_errhandler(Parser* p) {
     }
     AstNode* n = ast_new(p, AST_ERRHANDLER);
     if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), ty.spell);
-    slice_to(n->b, sizeof(n->b), bind.spell);
+    n->a = ast_arena_slice(p, ty.spell);
+    n->b = ast_arena_slice(p, bind.spell);
     if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
         p_next(p);
         while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
@@ -1076,7 +1081,7 @@ static AstNode* parse_errhandler(Parser* p) {
         p->err = 1;
         return NULL;
     }
-    slice_to(n->c, sizeof(n->c), handler.spell);
+    n->c = ast_arena_slice(p, handler.spell);
     return n;
 }
 
@@ -1102,8 +1107,8 @@ static AstNode* parse_err_fwd(Parser* p) {
     }
     AstNode* n = ast_new(p, AST_ERR_FWD);
     if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), bind.spell);
-    n->e[0] = 'h'; /* @errhandler(bind) delegation */
+    n->a = ast_arena_slice(p, bind.spell);
+    n->e = ast_arena_cstr(p, "h"); /* @errhandler(bind) delegation */
     return n;
 }
 
@@ -1216,8 +1221,8 @@ static AstNode* parse_return_int(Parser* p) {
         if (!p_accept(p, TK_PUNCT, ";")) { p->err = 1; return NULL; }
         AstNode* n = ast_new(p, AST_RETURN_CC);
         if (!n) return NULL;
-        snprintf(n->a, sizeof(n->a), "%s", spell_eq(which.spell, "cc_ok") ? "ok" : "err");
-        snprintf(n->b, sizeof(n->b), "%s", args);
+        n->a = ast_arena_cstr(p, spell_eq(which.spell, "cc_ok") ? "ok" : "err");
+        n->b = ast_arena_cstr(p, args);
         return n;
     }
     if (t.kind == TK_NUM && p->i + 1 < p->n && tok_eq(p->toks[p->i + 1], TK_PUNCT, ";")) {
@@ -1225,7 +1230,7 @@ static AstNode* parse_return_int(Parser* p) {
         p_next(p); /* ; */
         AstNode* n = ast_new(p, AST_RETURN_INT);
         if (!n) return NULL;
-        slice_to(n->a, sizeof(n->a), num.spell);
+        n->a = ast_arena_slice(p, num.spell);
         return n;
     }
     /* General return expr (ternary, NULL, UFCS, …) [!> …]; */
@@ -1261,22 +1266,22 @@ static AstNode* parse_return_int(Parser* p) {
                                             "callarg", &cl);
         if (p->err) return NULL;
         if (had_cl) {
-            n->a[0] = 0;
+            n->a = NULL;
             if (cl) {
                 if (n->ndbody >= SHADOW_DBODY_CAP) {
                     parser_fail(p, p_peek(p),
                                 "too many return closure attachments");
                     return NULL;
                 }
-                spawn_infer_value_caps(cl);
+                spawn_infer_value_caps(p, cl);
                 n->dbody[n->ndbody++] = cl;
             }
         } else {
             ue = parse_ufcs_expr_range(p, e0, e1);
             if (e0 >= e1)
-                n->a[0] = 0;
-            else if (!ast_spell_token_range(p, e0, e1, n->a, sizeof(n->a)) &&
-                     !span_text(p, e0, e1, n->a, sizeof(n->a))) {
+                n->a = NULL;
+            else if (!({ char __spell_tmp[4096]; int __spell_ok = ast_spell_token_range(p, e0, e1, __spell_tmp, sizeof(__spell_tmp)); if (__spell_ok) n->a = ast_arena_cstr(p, __spell_tmp); __spell_ok; }) &&
+                     (((n->a = ast_arena_span(p, e0, e1))), p->err)) {
                 parser_fail(p, p_peek(p), "return expr too long");
                 return NULL;
             }
@@ -1290,7 +1295,7 @@ static AstNode* parse_return_int(Parser* p) {
     p_next(p); /* !> */
     /* `return expr !>;` — errhandler */
     if (p_accept(p, TK_PUNCT, ";")) {
-        snprintf(n->e, sizeof(n->e), "bang");
+        n->e = ast_arena_cstr(p, "bang");
         return n;
     }
     if (tok_eq(p_peek(p), TK_PUNCT, "(")) {
@@ -1304,11 +1309,11 @@ static AstNode* parse_return_int(Parser* p) {
             parser_fail(p, p_peek(p), "expected ')' after return !>(bind");
             return NULL;
         }
-        slice_to(n->d, sizeof(n->d), bind.spell);
+        n->d = ast_arena_slice(p, bind.spell);
     }
     if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
         p_next(p);
-        snprintf(n->e, sizeof(n->e), "bang_block");
+        n->e = ast_arena_cstr(p, "bang_block");
         while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF &&
                !p->err) {
             AstNode* st = parse_stmt(p);
@@ -1327,7 +1332,7 @@ static AstNode* parse_return_int(Parser* p) {
         return n;
     }
     /* `return expr !>(e) stmt;` or `return expr !> stmt;` */
-    snprintf(n->e, sizeof(n->e), "bang_stmt");
+    n->e = ast_arena_cstr(p, "bang_stmt");
     {
         AstNode* st = parse_stmt(p);
         if (!st) return NULL;
@@ -1374,7 +1379,7 @@ static int parse_closure_formals_text(Parser* p, int lp, int rp, char* dst,
 static int parse_call_arg_closure(Parser* p, int c0, int end, char* dst,
                                   size_t cap, const char* tag,
                                   AstNode** out_cl);
-static void spawn_infer_value_caps(AstNode* n);
+static void spawn_infer_value_caps(Parser* p, AstNode* n);
 static void spawn_note_closure_local(const char* name);
 static void spawn_reset_closure_locals(void);
 
@@ -1393,11 +1398,11 @@ static AstNode* parse_if_stmt(Parser* p) {
     int c1 = p->i - 1;
     AstNode* n = ast_new(p, AST_IF);
     if (!n) return NULL;
-    if (c0 >= c1) n->a[0] = 0;
+    if (c0 >= c1) n->a = NULL;
     else {
         AstNode* ue = parse_ufcs_expr_range(p, c0, c1);
-        if (!ast_spell_token_range(p, c0, c1, n->a, sizeof(n->a)) &&
-            !span_text(p, c0, c1, n->a, sizeof(n->a))) {
+        if (!({ char __spell_tmp[4096]; int __spell_ok = ast_spell_token_range(p, c0, c1, __spell_tmp, sizeof(__spell_tmp)); if (__spell_ok) n->a = ast_arena_cstr(p, __spell_tmp); __spell_ok; }) &&
+            (((n->a = ast_arena_span(p, c0, c1))), p->err)) {
             parser_fail(p, p_peek(p), "if condition too long");
             return NULL;
         }
@@ -1440,12 +1445,12 @@ static AstNode* parse_defer(Parser* p) {
         tok_eq(p->toks[p->i + 2], TK_PUNCT, ")")) {
         p_next(p); /* ( */
         Token mode = p_next(p);
-        slice_to(n->c, sizeof(n->c), mode.spell);
+        n->c = ast_arena_slice(p, mode.spell);
         p_next(p); /* ) */
     } else if (p_peek(p).kind == TK_IDENT && p->i + 1 < p->n &&
                tok_eq(p->toks[p->i + 1], TK_PUNCT, ":")) {
         Token nm = p_next(p);
-        slice_to(n->a, sizeof(n->a), nm.spell);
+        n->a = ast_arena_slice(p, nm.spell);
         p_next(p); /* : */
     }
     if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
@@ -1486,7 +1491,7 @@ static AstNode* parse_cancel_defer(Parser* p) {
     name = p_next(p);
     n = ast_new(p, AST_CANCEL_DEFER);
     if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), name.spell);
+    n->a = ast_arena_slice(p, name.spell);
     if (!p_accept(p, TK_PUNCT, ";")) {
         parser_fail(p, p_peek(p), "expected ';' after @cancel_defer");
         return NULL;
@@ -1511,13 +1516,13 @@ static AstNode* parse_ptr_decl_stmt(Parser* p) {
     AstNode* n = ast_new(p, AST_VAR_DECL);
     if (!n) return NULL;
     if (is_void) {
-        snprintf(n->a, sizeof(n->a), "void*");
+        n->a = ast_arena_cstr(p, "void*");
     } else {
         char base[128];
         slice_to(base, sizeof(base), ty.spell);
-        snprintf(n->a, sizeof(n->a), "%s*", base);
+        do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%s*", base); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
     }
-    slice_to(n->b, sizeof(n->b), name.spell);
+    n->b = ast_arena_slice(p, name.spell);
     return n;
 }
 
@@ -1589,11 +1594,11 @@ static AstNode* parse_ptr_init(Parser* p) {
         n = ast_new(p, AST_PTR_INIT);
         if (!n) return NULL;
         if (is_void)
-            snprintf(n->a, sizeof(n->a), "void");
+            n->a = ast_arena_cstr(p, "void");
         else
-            snprintf(n->a, sizeof(n->a), "%s", tyn);
-        slice_to(n->b, sizeof(n->b), name.spell);
-        if (!span_text(p, c0, p->i, n->c, sizeof(n->c))) {
+            n->a = ast_arena_cstr(p, tyn);
+        n->b = ast_arena_slice(p, name.spell);
+        if ((((n->c = ast_arena_span(p, c0, p->i))), p->err)) {
             parser_fail(p, name, "ptr init expr too long");
             return NULL;
         }
@@ -1608,7 +1613,7 @@ static AstNode* parse_ptr_init(Parser* p) {
 /* T name = expr @destroy / T name@(args) @destroy / @detach. */
 static AstNode* parse_val_destroy(Parser* p) {
     Token ty0tok;
-    int ti, ty_end, ni, name_i, nstars, s;
+    int ti, ty_end, ni, name_i, nstars;
     int at_create = 0;
     int lp = -1;
     int j, depth, saw, is_detach;
@@ -1774,13 +1779,17 @@ static AstNode* parse_val_destroy(Parser* p) {
         if (bang_at >= 0) p->i = bang_at;
         AstNode* n = ast_new(p, AST_VAL_DESTROY);
         if (!n) return NULL;
-        snprintf(n->a, sizeof(n->a), "%s", tytxt);
-        slice_to(n->b, sizeof(n->b), name.spell);
-        snprintf(n->c, sizeof(n->c), "%s", init);
-        n->d[0] = 0;
-        for (s = 0; s < nstars && s + 1 < (int)sizeof(n->d); s++)
-            n->d[s] = '*';
-        if (s < (int)sizeof(n->d)) n->d[s] = 0;
+        n->a = ast_arena_cstr(p, tytxt);
+        n->b = ast_arena_slice(p, name.spell);
+        n->c = ast_arena_cstr(p, init);
+        {
+            char stars[64];
+            int si;
+            for (si = 0; si < nstars && si + 1 < (int)sizeof(stars); si++)
+                stars[si] = '*';
+            stars[si] = 0;
+            n->d = ast_arena_cstr(p, stars);
+        }
         if (ue) (void)ast_attach_ufcs_kid(p, n, ue);
         /* Closure on dbody (like UFCS) — not kids_storage (fn may still append). */
         if (create_cl) {
@@ -1788,11 +1797,11 @@ static AstNode* parse_val_destroy(Parser* p) {
                 parser_fail(p, name, "too many create closure attachments");
                 return NULL;
             }
-            spawn_infer_value_caps(create_cl);
+            spawn_infer_value_caps(p, create_cl);
             n->dbody[n->ndbody++] = create_cl;
         }
         if (bang_at >= 0) {
-            snprintf(n->f, sizeof(n->f), "bang");
+            n->f = ast_arena_cstr(p, "bang");
             if (!tok_eq(p_peek(p), TK_PUNCT, "!>") &&
                 !tok_eq(p_peek(p), TK_PUNCT, "?>")) {
                 parser_fail(p, p_peek(p), "expected '!>' after create init");
@@ -1812,10 +1821,10 @@ static AstNode* parse_val_destroy(Parser* p) {
                 }
                 eh = ast_new(p, AST_ERRHANDLER);
                 if (!eh) return NULL;
-                snprintf(eh->a, sizeof(eh->a), "CCError");
-                slice_to(eh->b, sizeof(eh->b), bind.spell);
-                eh->e[0] = 's';
-                eh->e[1] = 0;
+                eh->a = ast_arena_cstr(p, "CCError");
+                eh->b = ast_arena_slice(p, bind.spell);
+                eh->e = ast_arena_cstr(p, "s");
+
                 if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
                     p_next(p);
                     while (!tok_eq(p_peek(p), TK_PUNCT, "}") &&
@@ -1854,11 +1863,11 @@ static AstNode* parse_val_destroy(Parser* p) {
                 parser_fail(p, p_peek(p), "expected ';' after @detach");
                 return NULL;
             }
-            snprintf(n->e, sizeof(n->e), "_detach");
+            n->e = ast_arena_cstr(p, "_detach");
             return n;
         }
         if (p_accept(p, TK_PUNCT, ";")) {
-            snprintf(n->e, sizeof(n->e), "_Dbare");
+            n->e = ast_arena_cstr(p, "_Dbare");
             return n;
         }
         if (!p_accept(p, TK_PUNCT, "{")) {
@@ -1879,7 +1888,7 @@ static AstNode* parse_val_destroy(Parser* p) {
             parser_fail(p, p_peek(p), "expected '};' after @destroy { ... }");
             return NULL;
         }
-        snprintf(n->e, sizeof(n->e), "_D");
+        n->e = ast_arena_cstr(p, "_D");
         return n;
             }
         }
@@ -1951,7 +1960,7 @@ static AstNode* parse_goto(Parser* p) {
     {
         AstNode* n = ast_new(p, AST_GOTO);
         if (!n) return NULL;
-        slice_to(n->a, sizeof(n->a), lab.spell);
+        n->a = ast_arena_slice(p, lab.spell);
         return n;
     }
 }
@@ -1970,7 +1979,7 @@ static AstNode* parse_label(Parser* p) {
     {
         AstNode* n = ast_new(p, AST_LABEL);
         if (!n) return NULL;
-        slice_to(n->a, sizeof(n->a), t.spell);
+        n->a = ast_arena_slice(p, t.spell);
         return n;
     }
 }
@@ -2015,7 +2024,7 @@ static AstNode* parse_do_while(Parser* p) {
     }
     int c1 = p->i - 1;
     if (c0 < c1) {
-        if (!span_text(p, c0, c1, n->a, sizeof(n->a))) {
+        if ((((n->a = ast_arena_span(p, c0, c1))), p->err)) {
             parser_fail(p, p_peek(p), "do while condition too long");
             return NULL;
         }
@@ -2115,7 +2124,7 @@ static int parse_for_zip_bang_tail(Parser* p, AstNode* n) {
     }
     at = p_next(p);
     if (p_accept(p, TK_PUNCT, ";")) {
-        snprintf(n->e, sizeof(n->e), "zip_bang");
+        n->e = ast_arena_cstr(p, "zip_bang");
         return 1;
     }
     if (!p_accept(p, TK_PUNCT, "(")) {
@@ -2135,10 +2144,10 @@ static int parse_for_zip_bang_tail(Parser* p, AstNode* n) {
         }
         eh = ast_new(p, AST_ERRHANDLER);
         if (!eh) return 0;
-        snprintf(eh->a, sizeof(eh->a), "CCError");
-        slice_to(eh->b, sizeof(eh->b), bind.spell);
-        eh->e[0] = 's';
-        eh->e[1] = 0;
+        eh->a = ast_arena_cstr(p, "CCError");
+        eh->b = ast_arena_slice(p, bind.spell);
+        eh->e = ast_arena_cstr(p, "s");
+
         if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
             p_next(p);
             while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF &&
@@ -2166,7 +2175,7 @@ static int parse_for_zip_bang_tail(Parser* p, AstNode* n) {
             return 0;
         }
         n->dbody[n->ndbody++] = eh;
-        snprintf(n->e, sizeof(n->e), "zip_bang");
+        n->e = ast_arena_cstr(p, "zip_bang");
         return 1;
     }
 }
@@ -2191,8 +2200,8 @@ static AstNode* parse_for_loop(Parser* p, int cc_for) {
     int h1 = p->i - 1;
     AstNode* n = ast_new(p, AST_FOR);
     if (!n) return NULL;
-    if (h0 >= h1) n->a[0] = 0;
-    else if (!span_text(p, h0, h1, n->a, sizeof(n->a))) {
+    if (h0 >= h1) n->a = NULL;
+    else if ((((n->a = ast_arena_span(p, h0, h1))), p->err)) {
         parser_fail(p, p_peek(p), "for header too long");
         return NULL;
     }
@@ -2202,7 +2211,7 @@ static AstNode* parse_for_loop(Parser* p, int cc_for) {
                         "walk loop requires `@for`; use `@for (... in ...)`");
             return NULL;
         }
-        snprintf(n->f, sizeof(n->f), "cc_for");
+        n->f = ast_arena_cstr(p, "cc_for");
     } else if (cc_for) {
         parser_fail(p, p_peek(p),
                     "`@for` requires `for (name in subject)`");
@@ -2294,15 +2303,16 @@ static AstNode* parse_array_map_foreach(Parser* p) {
     }
     n = ast_new(p, AST_FOR);
     if (!n) return NULL;
-    if (snprintf(n->a, sizeof(n->a),
+    {
+        char __ast_tmp[4096];
+        snprintf(__ast_tmp, sizeof(__ast_tmp),
                  "size_t __cc_am_i = 0; "
                  "(%s) && __cc_am_i < (%s)->len && "
                  "(((%s) = (%s)->dense[__cc_am_i].key), "
                  "((%s) = (%s)->dense[__cc_am_i].val), 1); "
                  "++__cc_am_i",
-                 h, h, k, h, v, h) >= (int)sizeof(n->a)) {
-        parser_fail(p, kw, "CC_ARRAY_MAP_FOREACH header too long");
-        return NULL;
+                 h, h, k, h, v, h);
+        n->a = ast_arena_cstr(p, __ast_tmp);
     }
     if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
         p_next(p); /* { */
@@ -2583,10 +2593,10 @@ static AstNode* parse_typed_init(Parser* p) {
         }
         pref[pi] = 0;
         if (pref[0])
-            snprintf(n->a, sizeof(n->a), "%s%s", pref, tytxt);
+            do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%s%s", pref, tytxt); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
         else
-            snprintf(n->a, sizeof(n->a), "%s", tytxt);
-        snprintf(n->b, sizeof(n->b), "%s", names);
+            n->a = ast_arena_cstr(p, tytxt);
+        n->b = ast_arena_cstr(p, names);
         return n;
     }
     Token name = p_next(p);
@@ -2681,51 +2691,51 @@ static AstNode* parse_typed_init(Parser* p) {
         }
         pref[pi] = 0;
         if (pref[0])
-            snprintf(n->a, sizeof(n->a), "%s%s", pref, tytxt);
+            do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%s%s", pref, tytxt); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
         else
-            snprintf(n->a, sizeof(n->a), "%s", tytxt);
+            n->a = ast_arena_cstr(p, tytxt);
     }
-    slice_to(n->b, sizeof(n->b), name.spell);
-    if (has_init) snprintf(n->c, sizeof(n->c), "%s", expr);
+    n->b = ast_arena_slice(p, name.spell);
+    if (has_init) n->c = ast_arena_cstr(p, expr);
     else if (dims_txt[0])
-        snprintf(n->c, sizeof(n->c), "%s", dims_txt); /* VAR_DECL dims slot */
+        n->c = ast_arena_cstr(p, dims_txt); /* VAR_DECL dims slot */
     else
-        n->c[0] = 0;
+        n->c = NULL;
     if (name_i > decl_i) {
         /* Preserve order: `* const *` ≠ `** const`. */
-        if (!ast_spell_token_range(p, decl_i, name_i, n->d, sizeof(n->d)) &&
-            !span_text(p, decl_i, name_i, n->d, sizeof(n->d))) {
+        if (!({ char __spell_tmp[4096]; int __spell_ok = ast_spell_token_range(p, decl_i, name_i, __spell_tmp, sizeof(__spell_tmp)); if (__spell_ok) n->d = ast_arena_cstr(p, __spell_tmp); __spell_ok; }) &&
+            (((n->d = ast_arena_span(p, decl_i, name_i))), p->err)) {
             /* Fall back to stars-then-cv (single post-cv cluster). */
+            char dtmp[256];
             size_t di = 0;
             int s;
-            for (s = 0; s < nstars && di + 1 < sizeof(n->d); s++)
-                n->d[di++] = '*';
-            if (post_cv_const && di + 7 < sizeof(n->d)) {
-                memcpy(n->d + di, " const", 6);
+            for (s = 0; s < nstars && di + 1 < sizeof(dtmp); s++)
+                dtmp[di++] = '*';
+            if (post_cv_const && di + 7 < sizeof(dtmp)) {
+                memcpy(dtmp + di, " const", 6);
                 di += 6;
             }
-            if (post_cv_volatile && di + 10 < sizeof(n->d)) {
-                memcpy(n->d + di, " volatile", 9);
+            if (post_cv_volatile && di + 10 < sizeof(dtmp)) {
+                memcpy(dtmp + di, " volatile", 9);
                 di += 9;
             }
-            n->d[di] = 0;
+            dtmp[di] = 0;
+            n->d = ast_arena_cstr(p, dtmp);
         }
     }
     /* No-init VAR_DECL emit uses a=type (with stars) and c=dims. */
-    if (!has_init && n->d[0]) {
-        size_t al = strlen(n->a);
-        size_t dl = strlen(n->d);
-        if (al + dl + 1 < sizeof(n->a)) {
-            memcpy(n->a + al, n->d, dl + 1);
-            n->d[0] = 0;
-        }
+    if (!has_init && n->d && n->d[0]) {
+        char atmp[4096];
+        snprintf(atmp, sizeof(atmp), "%s%s", n->a ? n->a : "", n->d);
+        n->a = ast_arena_cstr(p, atmp);
+        n->d = NULL;
     }
     if (has_init) {
-        if (dims_txt[0]) snprintf(n->e, sizeof(n->e), "%s", dims_txt);
+        if (dims_txt[0]) n->e = ast_arena_cstr(p, dims_txt);
         else if (slice_unique || decl_slice_unique)
-            snprintf(n->e, sizeof(n->e), "!"); /* safety: T[:!] unique fact */
+            n->e = ast_arena_cstr(p, "!"); /* safety: T[:!] unique fact */
     } else if (slice_unique || decl_slice_unique)
-        snprintf(n->e, sizeof(n->e), "!");
+        n->e = ast_arena_cstr(p, "!");
     if (ue) (void)ast_attach_ufcs_kid(p, n, ue);
     if (call_cl) {
         if (n->ndbody >= SHADOW_DBODY_CAP) {
@@ -2733,8 +2743,8 @@ static AstNode* parse_typed_init(Parser* p) {
             return NULL;
         }
         /* `CCClosure1 inc = () => …` — later `inc(x)` may capture `inc`. */
-        if (strstr(n->a, "CCClosure")) spawn_note_closure_local(n->b);
-        spawn_infer_value_caps(call_cl);
+        if (strstr(ast_slot(n->a), "CCClosure")) spawn_note_closure_local(n->b);
+        spawn_infer_value_caps(p, call_cl);
         n->dbody[n->ndbody++] = call_cl;
     }
     return n;
@@ -2795,8 +2805,8 @@ static AstNode* ast_make_ufcs(Parser* p, AstKind kind, int r0, int call_op,
     if (meth.kind != TK_IDENT) return NULL;
     n = ast_new(p, kind);
     if (!n) return NULL;
-    snprintf(n->a, sizeof(n->a), "%s", recv);
-    slice_to(n->b, sizeof(n->b), meth.spell);
+    n->a = ast_arena_cstr(p, recv);
+    n->b = ast_arena_slice(p, meth.spell);
     targs[0] = 0;
     if (targ0 >= 0 && targ1 > targ0) {
         if (!ast_spell_token_range(p, targ0, targ1, targs, sizeof(targs)) &&
@@ -2806,11 +2816,11 @@ static AstNode* ast_make_ufcs(Parser* p, AstKind kind, int r0, int call_op,
     /* e: arrow + optional member type args (`::T`). */
     if (tok_eq(op, TK_PUNCT, "->")) {
         if (targs[0])
-            snprintf(n->e, sizeof(n->e), "->::%s", targs);
+            do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "->::%s", targs); n->e = ast_arena_cstr(p, __ast_tmp); } while (0);
         else
-            snprintf(n->e, sizeof(n->e), "->");
+            n->e = ast_arena_cstr(p, "->");
     } else if (targs[0]) {
-        snprintf(n->e, sizeof(n->e), "::%s", targs);
+        do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "::%s", targs); n->e = ast_arena_cstr(p, __ast_tmp); } while (0);
     }
     if (a0 < a1) {
         /* Lift `(T x) => {…}` call args (same as assign / (void) / create).
@@ -2823,23 +2833,23 @@ static AstNode* ast_make_ufcs(Parser* p, AstKind kind, int r0, int call_op,
         if (p->err) return NULL;
         p->i = save_i;
         if (had_cl) {
-            snprintf(n->c, sizeof(n->c), "%s", cl_args);
+            n->c = ast_arena_cstr(p, cl_args);
             if (cl) {
                 if (n->ndbody >= SHADOW_DBODY_CAP) {
                     parser_fail(p, p->toks[a0],
                                 "too many UFCS closure attachments");
                     return NULL;
                 }
-                spawn_infer_value_caps(cl);
+                spawn_infer_value_caps(p, cl);
                 /* send_task packs Result into the task; tag before emit/safety. */
-                if (strcmp(n->b, "send_task") == 0 ||
-                    strcmp(n->b, "send_task_hybrid") == 0)
-                    snprintf(cl->b, sizeof(cl->b), "%s", n->b);
+                if (strcmp(ast_slot(n->b), "send_task") == 0 ||
+                    strcmp(ast_slot(n->b), "send_task_hybrid") == 0)
+                    cl->b = ast_arena_cstr(p, n->b);
                 n->dbody[n->ndbody++] = cl;
             }
         } else {
-            if (!ast_spell_token_range(p, a0, a1, n->c, sizeof(n->c)) &&
-                !span_text(p, a0, a1, n->c, sizeof(n->c)))
+            if (!({ char __spell_tmp[4096]; int __spell_ok = ast_spell_token_range(p, a0, a1, __spell_tmp, sizeof(__spell_tmp)); if (__spell_ok) n->c = ast_arena_cstr(p, __spell_tmp); __spell_ok; }) &&
+                (((n->c = ast_arena_span(p, a0, a1))), p->err))
                 return NULL;
             /* Nested UFCS: whole args, or each top-level comma piece. */
             {
@@ -3113,7 +3123,7 @@ static AstNode* parse_ufcs_stmt(Parser* p) {
             }
             char bindn[64];
             slice_to(bindn, sizeof(bindn), bind.spell);
-            snprintf(n->d, sizeof(n->d), "bang_block:%s", bindn);
+            do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "bang_block:%s", bindn); n->d = ast_arena_cstr(p, __ast_tmp); } while (0);
             if (!p_accept(p, TK_PUNCT, "{")) {
                 parser_fail(p, p_peek(p), "expected '{' after UFCS !>(bind)");
                 return NULL;
@@ -3135,11 +3145,11 @@ static AstNode* parse_ufcs_stmt(Parser* p) {
                 /* bang_block:bind → bang_await_block:bind */
                 char tmp[96];
                 snprintf(tmp, sizeof(tmp), "bang_await_block:%s", bindn);
-                snprintf(n->d, sizeof(n->d), "%s", tmp);
+                n->d = ast_arena_cstr(p, tmp);
             }
             return n;
         }
-        snprintf(n->d, sizeof(n->d), await_prefix ? "bang_await" : "bang");
+        do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), await_prefix ? "bang_await" : "bang"); n->d = ast_arena_cstr(p, __ast_tmp); } while (0);
         if (!p_accept(p, TK_PUNCT, ";")) {
             parser_fail(p, p_peek(p), "expected ';' after UFCS !>");
             return NULL;
@@ -3148,7 +3158,7 @@ static AstNode* parse_ufcs_stmt(Parser* p) {
     }
     if (await_prefix && !is_bang) {
         /* `@await tx.send(…);` without `!>` — still mark await for emit. */
-        snprintf(n->d, sizeof(n->d), "await");
+        n->d = ast_arena_cstr(p, "await");
     }
     if (!p_accept(p, TK_PUNCT, ";")) {
         parser_fail(p, p_peek(p), "expected ';' after UFCS call");
@@ -3230,16 +3240,16 @@ static AstNode* parse_assign_stmt(Parser* p) {
     p_next(p); /* ; */
     AstNode* n = ast_new(p, AST_ASSIGN);
     if (!n) return NULL;
-    snprintf(n->a, sizeof(n->a), "%s", lhs);
-    snprintf(n->b, sizeof(n->b), "%s", rhs);
-    slice_to(n->c, sizeof(n->c), op.spell);
+    n->a = ast_arena_cstr(p, lhs);
+    n->b = ast_arena_cstr(p, rhs);
+    n->c = ast_arena_slice(p, op.spell);
     if (ue) (void)ast_attach_ufcs_kid(p, n, ue);
     if (cl) {
         if (n->ndbody >= SHADOW_DBODY_CAP) {
             parser_fail(p, p_peek(p), "too many assign closure attachments");
             return NULL;
         }
-        spawn_infer_value_caps(cl);
+        spawn_infer_value_caps(p, cl);
         n->dbody[n->ndbody++] = cl;
     }
     return n;
@@ -3280,20 +3290,20 @@ static AstNode* parse_void_cast(Parser* p) {
                                     &cl);
     if (p->err) return NULL;
     if (had_cl) {
-        snprintf(n->a, sizeof(n->a), "%s", expr);
+        n->a = ast_arena_cstr(p, expr);
         if (cl) {
             if (n->ndbody >= SHADOW_DBODY_CAP) {
                 parser_fail(p, p_peek(p), "too many (void) closure attachments");
                 return NULL;
             }
-            spawn_infer_value_caps(cl);
+            spawn_infer_value_caps(p, cl);
             n->dbody[n->ndbody++] = cl;
         }
     } else {
         p->i = e1;
         ue = parse_ufcs_expr_range(p, e0, e1);
-        if (!ast_spell_token_range(p, e0, e1, n->a, sizeof(n->a)) &&
-            !span_text(p, e0, e1, n->a, sizeof(n->a))) {
+        if (!({ char __spell_tmp[4096]; int __spell_ok = ast_spell_token_range(p, e0, e1, __spell_tmp, sizeof(__spell_tmp)); if (__spell_ok) n->a = ast_arena_cstr(p, __spell_tmp); __spell_ok; }) &&
+            (((n->a = ast_arena_span(p, e0, e1))), p->err)) {
             parser_fail(p, p_peek(p), "(void) expr too long");
             return NULL;
         }
@@ -3426,8 +3436,8 @@ static AstNode* parse_var_decl(Parser* p) {
             {
                 AstNode* n = ast_new(p, AST_VAR_DECL);
                 if (!n) return NULL;
-                snprintf(n->a, sizeof(n->a), "%s", tytxt);
-                slice_to(n->b, sizeof(n->b), name.spell);
+                n->a = ast_arena_cstr(p, tytxt);
+                n->b = ast_arena_slice(p, name.spell);
                 return n;
             }
         }
@@ -3488,8 +3498,8 @@ static AstNode* parse_var_decl(Parser* p) {
         {
             AstNode* n = ast_new(p, AST_VAR_DECL);
             if (!n) return NULL;
-            snprintf(n->a, sizeof(n->a), "%s", tytxt);
-            snprintf(n->b, sizeof(n->b), "%s", names);
+            n->a = ast_arena_cstr(p, tytxt);
+            n->b = ast_arena_cstr(p, names);
             return n;
         }
     }
@@ -3519,9 +3529,9 @@ static AstNode* parse_var_decl(Parser* p) {
             {
                 AstNode* n = ast_new(p, AST_VAR_DECL);
                 if (!n) return NULL;
-                snprintf(n->a, sizeof(n->a), "%s", tytxt);
-                slice_to(n->b, sizeof(n->b), name.spell);
-                if (uniq) snprintf(n->e, sizeof(n->e), "!");
+                n->a = ast_arena_cstr(p, tytxt);
+                n->b = ast_arena_slice(p, name.spell);
+                if (uniq) n->e = ast_arena_cstr(p, "!");
                 return n;
             }
         }
@@ -3566,9 +3576,9 @@ static AstNode* parse_var_decl(Parser* p) {
                 {
                     AstNode* n = ast_new(p, AST_VAR_DECL);
                     if (!n) return NULL;
-                    snprintf(n->a, sizeof(n->a), "%s", tytxt);
-                    slice_to(n->b, sizeof(n->b), name.spell);
-                    snprintf(n->c, sizeof(n->c), "%s", dims);
+                    n->a = ast_arena_cstr(p, tytxt);
+                    n->b = ast_arena_slice(p, name.spell);
+                    n->c = ast_arena_cstr(p, dims);
                     return n;
                 }
             }
@@ -3618,8 +3628,8 @@ static AstNode* parse_var_decl(Parser* p) {
             {
                 AstNode* n = ast_new(p, AST_VAR_DECL);
                 if (!n) return NULL;
-                snprintf(n->a, sizeof(n->a), "%s", tytxt);
-                snprintf(n->b, sizeof(n->b), "%s", names);
+                n->a = ast_arena_cstr(p, tytxt);
+                n->b = ast_arena_cstr(p, names);
                 return n;
             }
         }
@@ -3643,11 +3653,11 @@ static AstNode* parse_while(Parser* p) {
     int c1 = p->i - 1;
     AstNode* n = ast_new(p, AST_WHILE);
     if (!n) return NULL;
-    if (c0 >= c1) n->a[0] = 0;
+    if (c0 >= c1) n->a = NULL;
     else {
         AstNode* ue = parse_ufcs_expr_range(p, c0, c1);
-        if (!ast_spell_token_range(p, c0, c1, n->a, sizeof(n->a)) &&
-            !span_text(p, c0, c1, n->a, sizeof(n->a))) {
+        if (!({ char __spell_tmp[4096]; int __spell_ok = ast_spell_token_range(p, c0, c1, __spell_tmp, sizeof(__spell_tmp)); if (__spell_ok) n->a = ast_arena_cstr(p, __spell_tmp); __spell_ok; }) &&
+            (((n->a = ast_arena_span(p, c0, c1))), p->err)) {
             parser_fail(p, p_peek(p), "while condition too long");
             return NULL;
         }
@@ -3702,8 +3712,8 @@ static AstNode* parse_static_arr(Parser* p) {
     if (!p_accept(p, TK_PUNCT, ";")) { p->err = 1; return NULL; }
     AstNode* n = ast_new(p, AST_STATIC_ARR);
     if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), name.spell);
-    slice_to(n->b, sizeof(n->b), lit.spell);
+    n->a = ast_arena_slice(p, name.spell);
+    n->b = ast_arena_slice(p, lit.spell);
     return n;
 }
 
@@ -4074,49 +4084,53 @@ static AstNode* parse_static_fn(Parser* p) {
             if (is_slice) {
                 if (is_slice_unique) {
                     if (has_const)
-                        snprintf(n->a, sizeof(n->a), "const %.*s[:!]%s",
+                        do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "const %.*s[:!]%s",
                                  (int)rty.spell.len, rty.spell.ptr,
-                                 is_ptr ? "*" : "");
+                                 is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
                     else
-                        snprintf(n->a, sizeof(n->a), "%.*s[:!]%s",
+                        do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%.*s[:!]%s",
                                  (int)rty.spell.len, rty.spell.ptr,
-                                 is_ptr ? "*" : "");
+                                 is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
                 } else if (has_const) {
-                    snprintf(n->a, sizeof(n->a), "const %.*s[:]%s",
+                    do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "const %.*s[:]%s",
                              (int)rty.spell.len, rty.spell.ptr,
-                             is_ptr ? "*" : "");
+                             is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
                 } else {
-                    snprintf(n->a, sizeof(n->a), "%.*s[:]%s",
+                    do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%.*s[:]%s",
                              (int)rty.spell.len, rty.spell.ptr,
-                             is_ptr ? "*" : "");
+                             is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
                 }
             } else if (gret[0]) {
                 if (has_const)
-                    snprintf(n->a, sizeof(n->a), "const %s%s", gret,
-                             is_ptr ? "*" : "");
+                    do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "const %s%s", gret,
+                             is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
                 else
-                    snprintf(n->a, sizeof(n->a), "%s%s", gret,
-                             is_ptr ? "*" : "");
+                    do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%s%s", gret,
+                             is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
             } else if (has_const) {
-                snprintf(n->a, sizeof(n->a), "const %.*s%s",
+                do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "const %.*s%s",
                          (int)rty.spell.len, rty.spell.ptr,
-                         is_ptr ? "*" : "");
+                         is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
             } else {
-                slice_to(n->a, sizeof(n->a), rty.spell);
                 if (is_ptr) {
-                    size_t al = strlen(n->a);
-                    if (al + 1 < sizeof(n->a)) {
-                        n->a[al] = '*';
-                        n->a[al + 1] = 0;
+                    char atmp[512];
+                    slice_to(atmp, sizeof(atmp), rty.spell);
+                    size_t al = strlen(atmp);
+                    if (al + 1 < sizeof(atmp)) {
+                        atmp[al] = '*';
+                        atmp[al + 1] = 0;
                     }
+                    n->a = ast_arena_cstr(p, atmp);
+                } else {
+                    n->a = ast_arena_slice(p, rty.spell);
                 }
             }
-            slice_to(n->b, sizeof(n->b), name.spell);
-            snprintf(n->c, sizeof(n->c), "%s", params);
+            n->b = ast_arena_slice(p, name.spell);
+            n->c = ast_arena_cstr(p, params);
             if (has_inline)
-                snprintf(n->e, sizeof(n->e), "static inline");
+                n->e = ast_arena_cstr(p, "static inline");
             else
-                snprintf(n->e, sizeof(n->e), "static");
+                n->e = ast_arena_cstr(p, "static");
             {
                 char fname[64];
                 slice_to(fname, sizeof(fname), name.spell);
@@ -4135,9 +4149,9 @@ static AstNode* parse_static_fn(Parser* p) {
         last = p->toks[p->i - 1];
         off0 = t0.offset;
         off1 = last.offset + last.spell.len;
-        snprintf(n->e, sizeof(n->e), "tape");
-        snprintf(n->a, sizeof(n->a), "%zu", off0);
-        snprintf(n->b, sizeof(n->b), "%zu", off1);
+        n->e = ast_arena_cstr(p, "tape");
+        do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%zu", off0); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
+        do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%zu", off1); n->b = ast_arena_cstr(p, __ast_tmp); } while (0);
         n->file_id = t0.file_id;
         n->tok_off = off0;
         {
@@ -4170,63 +4184,67 @@ static AstNode* parse_static_fn(Parser* p) {
             /* Keep sugar in a[]; emit rewrites via shadow_rewrite_slice_types. */
             if (is_slice_unique) {
                 if (has_const)
-                    snprintf(n->a, sizeof(n->a), "const %.*s[:!]%s",
+                    do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "const %.*s[:!]%s",
                              (int)rty.spell.len, rty.spell.ptr,
-                             is_ptr ? "*" : "");
+                             is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
                 else
-                    snprintf(n->a, sizeof(n->a), "%.*s[:!]%s",
+                    do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%.*s[:!]%s",
                              (int)rty.spell.len, rty.spell.ptr,
-                             is_ptr ? "*" : "");
+                             is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
             } else if (has_const) {
-                snprintf(n->a, sizeof(n->a), "const %.*s[:]%s",
-                         (int)rty.spell.len, rty.spell.ptr, is_ptr ? "*" : "");
+                do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "const %.*s[:]%s",
+                         (int)rty.spell.len, rty.spell.ptr, is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
             } else {
-                snprintf(n->a, sizeof(n->a), "%.*s[:]%s", (int)rty.spell.len,
-                         rty.spell.ptr, is_ptr ? "*" : "");
+                do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%.*s[:]%s", (int)rty.spell.len,
+                         rty.spell.ptr, is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
             }
         } else if (is_unsigned && is_long_long) {
             if (has_const)
-                snprintf(n->a, sizeof(n->a), "const unsigned long long%s",
-                         is_ptr ? "*" : "");
+                do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "const unsigned long long%s",
+                         is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
             else
-                snprintf(n->a, sizeof(n->a), "unsigned long long%s",
-                         is_ptr ? "*" : "");
+                do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "unsigned long long%s",
+                         is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
         } else if (is_unsigned_long) {
             if (has_const)
-                snprintf(n->a, sizeof(n->a), "const unsigned long%s",
-                         is_ptr ? "*" : "");
+                do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "const unsigned long%s",
+                         is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
             else
-                snprintf(n->a, sizeof(n->a), "unsigned long%s",
-                         is_ptr ? "*" : "");
+                do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "unsigned long%s",
+                         is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
         } else if (is_unsigned) {
             if (has_const)
-                snprintf(n->a, sizeof(n->a), "const unsigned%s",
-                         is_ptr ? "*" : "");
+                do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "const unsigned%s",
+                         is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
             else
-                snprintf(n->a, sizeof(n->a), "unsigned%s", is_ptr ? "*" : "");
+                do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "unsigned%s", is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
         } else if (is_long_long) {
             if (has_const)
-                snprintf(n->a, sizeof(n->a), "const long long%s", is_ptr ? "*" : "");
+                do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "const long long%s", is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
             else
-                snprintf(n->a, sizeof(n->a), "long long%s", is_ptr ? "*" : "");
+                do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "long long%s", is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
         } else if (gret[0]) {
             if (has_const)
-                snprintf(n->a, sizeof(n->a), "const %s%s", gret,
-                         is_ptr ? "*" : "");
+                do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "const %s%s", gret,
+                         is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
             else
-                snprintf(n->a, sizeof(n->a), "%s%s", gret, is_ptr ? "*" : "");
+                do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%s%s", gret, is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
         } else if (has_const) {
-            snprintf(n->a, sizeof(n->a), "const %.*s%s", (int)rty.spell.len, rty.spell.ptr,
-                     is_ptr ? "*" : "");
+            do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "const %.*s%s", (int)rty.spell.len, rty.spell.ptr,
+                     is_ptr ? "*" : ""); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
         } else {
-            slice_to(n->a, sizeof(n->a), rty.spell);
             if (is_ptr) {
-                size_t al = strlen(n->a);
-                if (al + 1 < sizeof(n->a)) { n->a[al] = '*'; n->a[al + 1] = 0; }
+                char atmp[512];
+                slice_to(atmp, sizeof(atmp), rty.spell);
+                size_t al = strlen(atmp);
+                if (al + 1 < sizeof(atmp)) { atmp[al] = '*'; atmp[al + 1] = 0; }
+                n->a = ast_arena_cstr(p, atmp);
+            } else {
+                n->a = ast_arena_slice(p, rty.spell);
             }
         }
-        slice_to(n->b, sizeof(n->b), name.spell);
-        snprintf(n->c, sizeof(n->c), "%s", params);
+        n->b = ast_arena_slice(p, name.spell);
+        n->c = ast_arena_cstr(p, params);
         {
             char fl[64];
             size_t fo = 0;
@@ -4241,7 +4259,7 @@ static AstNode* parse_static_fn(Parser* p) {
                 fo += (size_t)snprintf(fl + fo, sizeof(fl) - fo,
                                        "%salways_inline", fo ? " " : "");
             (void)fo;
-            if (fl[0]) snprintf(n->e, sizeof(n->e), "%s", fl);
+            if (fl[0]) n->e = ast_arena_cstr(p, fl);
         }
         if (p->pending_fn_attrs) {
             shadow_fn_attr_register(n->b, p->pending_fn_attrs, 1);
@@ -4398,8 +4416,8 @@ static AstNode* parse_expr_stmt(Parser* p) {
     if (j <= e0 || j >= p->n || !tok_eq(p->toks[j], TK_PUNCT, ";")) return NULL;
     n = ast_new(p, AST_EXPR_STMT);
     if (!n) return NULL;
-    if (!ast_spell_token_range(p, e0, j, n->a, sizeof(n->a)) &&
-        !span_text(p, e0, j, n->a, sizeof(n->a))) {
+    if (!({ char __spell_tmp[4096]; int __spell_ok = ast_spell_token_range(p, e0, j, __spell_tmp, sizeof(__spell_tmp)); if (__spell_ok) n->a = ast_arena_cstr(p, __spell_tmp); __spell_ok; }) &&
+        (((n->a = ast_arena_span(p, e0, j))), p->err)) {
         parser_fail(p, p_peek(p), "expression statement too long");
         return NULL;
     }
@@ -4426,8 +4444,8 @@ static AstNode* parse_call_num(Parser* p) {
     p_next(p); /* ; */
     AstNode* n = ast_new(p, AST_CALL_NUM);
     if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), callee.spell);
-    slice_to(n->b, sizeof(n->b), num.spell);
+    n->a = ast_arena_slice(p, callee.spell);
+    n->b = ast_arena_slice(p, num.spell);
     return n;
 }
 
@@ -4471,9 +4489,9 @@ static AstNode* parse_call_args(Parser* p) {
     int after_semi = p->i; /* restore after closure reparse */
     AstNode* n = ast_new(p, AST_CALL_ARGS);
     if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), callee.spell);
+    n->a = ast_arena_slice(p, callee.spell);
     if (a0 >= a1) {
-        n->b[0] = 0;
+        n->b = NULL;
     } else {
         AstNode* cl = NULL;
         char args[256];
@@ -4488,7 +4506,7 @@ static AstNode* parse_call_args(Parser* p) {
             while (L && (args[L - 1] == ' ' || args[L - 1] == '\t' ||
                          args[L - 1] == ','))
                 args[--L] = 0;
-            snprintf(n->b, sizeof(n->b), "%s", args);
+            n->b = ast_arena_cstr(p, args);
             if (cl) {
                 if (n->ndbody >= SHADOW_DBODY_CAP) {
                     parser_fail(p, callee, "too many call-arg closure attachments");
@@ -4496,10 +4514,10 @@ static AstNode* parse_call_args(Parser* p) {
                 }
                 /* Tag send_task closures so emit/safety pack Result payloads. */
                 if (spell_eq(callee.spell, "cc_channel_send_task_hybrid"))
-                    snprintf(cl->b, sizeof(cl->b), "send_task_hybrid");
+                    cl->b = ast_arena_cstr(p, "send_task_hybrid");
                 else if (spell_eq(callee.spell, "cc_channel_send_task"))
-                    snprintf(cl->b, sizeof(cl->b), "send_task");
-                spawn_infer_value_caps(cl);
+                    cl->b = ast_arena_cstr(p, "send_task");
+                spawn_infer_value_caps(p, cl);
                 n->dbody[n->ndbody++] = cl;
             }
         } else {
@@ -4518,11 +4536,10 @@ static AstNode* parse_call_args(Parser* p) {
             }
             {
                 if (!need_spell &&
-                    span_text(p, a0, a1, n->b, sizeof(n->b))) {
+                    (((n->b = ast_arena_span(p, a0, a1))), !p->err)) {
                     /* Plain args — preserve source bytes (string gaps, etc.). */
-                } else if (!ast_spell_token_range(p, a0, a1, n->b,
-                                                  sizeof(n->b)) &&
-                           !span_text(p, a0, a1, n->b, sizeof(n->b))) {
+                } else if (!({ char __spell_tmp[4096]; int __spell_ok = ast_spell_token_range(p, a0, a1, __spell_tmp, sizeof(__spell_tmp)); if (__spell_ok) n->b = ast_arena_cstr(p, __spell_tmp); __spell_ok; }) &&
+                           (((n->b = ast_arena_span(p, a0, a1))), p->err)) {
                     parser_fail(p, callee, "call args too long");
                     return NULL;
                 }
@@ -4530,17 +4547,22 @@ static AstNode* parse_call_args(Parser* p) {
                  * before `)` so a trailing `#endif` cannot glue into `#endif)`.
                  * Do not put this in span_text globally — switch case labels
                  * and unwrap site strings must not grow a trailing newline. */
-                if (!ast_append_trail_before(p, a1 - 1, a1, n->b,
-                                             sizeof(n->b))) {
-                    parser_fail(p, callee, "call args too long");
-                    return NULL;
+                {
+                    char btmp[4096];
+                    snprintf(btmp, sizeof(btmp), "%s", n->b ? n->b : "");
+                    if (!ast_append_trail_before(p, a1 - 1, a1, btmp,
+                                                 sizeof(btmp))) {
+                        parser_fail(p, callee, "call args too long");
+                        return NULL;
+                    }
+                    n->b = ast_arena_cstr(p, btmp);
                 }
             }
             AstNode* ue = parse_ufcs_expr_range(p, a0, a1);
             if (ue) (void)ast_attach_ufcs_kid(p, n, ue);
         }
     }
-    if (is_bang) snprintf(n->d, sizeof(n->d), "bang");
+    if (is_bang) n->d = ast_arena_cstr(p, "bang");
     return n;
 }
 
@@ -4596,9 +4618,9 @@ static AstNode* parse_enum_raw_stmt(Parser* p) {
     }
     n = ast_new(p, AST_RAW_LINE);
     if (!n) return NULL;
-    snprintf(n->e, sizeof(n->e), "tape");
-    snprintf(n->a, sizeof(n->a), "%zu", off0);
-    snprintf(n->b, sizeof(n->b), "%zu", off1);
+    n->e = ast_arena_cstr(p, "tape");
+    do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%zu", off0); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
+    do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%zu", off1); n->b = ast_arena_cstr(p, __ast_tmp); } while (0);
     n->file_id = t0.file_id;
     return n;
 }
@@ -4676,16 +4698,16 @@ static AstNode* parse_auto_grower(Parser* p) {
     }
     n = ast_new(p, AST_VAL_DESTROY);
     if (!n) return NULL;
-    snprintf(n->a, sizeof(n->a), "CCVec_char");
-    slice_to(n->b, sizeof(n->b), name.spell);
+    n->a = ast_arena_cstr(p, "CCVec_char");
+    n->b = ast_arena_slice(p, name.spell);
     if (snprintf(init, sizeof(init), "CCVec_char_init(%s, (%s).len)", arena,
-                 src) < 0 ||
-        (size_t)snprintf(n->c, sizeof(n->c), "%s", init) >= sizeof(n->c)) {
+                 src) < 0) {
         parser_fail(p, name, "@auto init too long");
         return NULL;
     }
-    n->d[0] = 0;
-    snprintf(n->e, sizeof(n->e), "_Dbare");
+    n->c = ast_arena_cstr(p, init);
+    n->d = NULL;
+    n->e = ast_arena_cstr(p, "_Dbare");
     return n;
 }
 
@@ -4761,13 +4783,12 @@ static AstNode* parse_stmt_inner(Parser* p) {
     if (t.kind == TK_IDENT && t.spell.len > 0 && t.spell.ptr[0] == '#') {
         n = ast_new(p, AST_RAW_LINE);
         if (!n) return NULL;
-        if (t.spell.len >= sizeof(n->a)) {
-            parser_fail(p, t, "preprocessor directive line too long");
+        n->a = ast_arena_slice(p, t.spell);
+        if (!n->a && t.spell.len) {
+            parser_fail(p, t, "preprocessor directive line OOM");
             return NULL;
         }
-        memcpy(n->a, t.spell.ptr, t.spell.len);
-        n->a[t.spell.len] = 0;
-        snprintf(n->e, sizeof(n->e), "ppdir");
+        n->e = ast_arena_cstr(p, "ppdir");
         p_next(p);
         return n;
     }
@@ -4792,9 +4813,9 @@ static AstNode* parse_stmt_inner(Parser* p) {
                 n = parse_block(p);
                 if (n) {
                     if (bits & SHADOW_FN_NOBLOCK)
-                        snprintf(n->e, sizeof(n->e), "noblock");
+                        n->e = ast_arena_cstr(p, "noblock");
                     else if (bits & SHADOW_FN_BLOCKING)
-                        snprintf(n->e, sizeof(n->e), "blocking");
+                        n->e = ast_arena_cstr(p, "blocking");
                 }
                 return n;
             }
@@ -4806,9 +4827,9 @@ static AstNode* parse_stmt_inner(Parser* p) {
             n = parse_call_args(p);
             if (n || p->err) {
                 if (n && site & SHADOW_FN_NOBLOCK)
-                    snprintf(n->e, sizeof(n->e), "noblock");
+                    n->e = ast_arena_cstr(p, "noblock");
                 else if (n && site & SHADOW_FN_BLOCKING)
-                    snprintf(n->e, sizeof(n->e), "blocking");
+                    n->e = ast_arena_cstr(p, "blocking");
                 return n;
             }
         }
@@ -4946,7 +4967,7 @@ static AstNode* parse_stmt_inner(Parser* p) {
         p_next(p);
         n = ast_new(p, AST_EXPR_STMT);
         if (!n) return NULL;
-        n->a[0] = 0;
+        n->a = NULL;
         return n;
     }
     if (p->soft_stmt) return NULL;

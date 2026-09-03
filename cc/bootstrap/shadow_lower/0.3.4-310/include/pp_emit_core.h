@@ -1153,7 +1153,7 @@ static int shadow_as_path_to(const char* outer, const char* face, char* path,
                              size_t cap);
 
 static const char* shadow_eh_bind(ShadowCtx* ctx) {
-    if (ctx && ctx->eh && ctx->eh->b[0]) return ctx->eh->b;
+    if (ctx && ctx->eh && ctx->eh->b && ctx->eh->b[0]) return ctx->eh->b;
     return "e";
 }
 
@@ -1548,8 +1548,8 @@ static AstNode* shadow_eh_for_call(ShadowCtx* ctx, const char* call) {
     /* Unparseable callee: prefer CCError (script default), not innermost Io. */
     if (!fname[0] || *p != '(') {
         for (i = ctx->nehs - 1; i >= 0; i--) {
-            if (ctx->ehs[i] && ctx->ehs[i]->a[0] &&
-                strcmp(ctx->ehs[i]->a, "CCError") == 0)
+            if (ctx->ehs[i] && ctx->ehs[i]->a && ctx->ehs[i]->a[0] &&
+                strcmp(ast_slot(ctx->ehs[i]->a), "CCError") == 0)
                 return ctx->ehs[i];
         }
         return ctx->eh;
@@ -1585,8 +1585,8 @@ static AstNode* shadow_eh_for_call(ShadowCtx* ctx, const char* call) {
     if (err && err[0]) {
         /* Pass 1: exact E, inner → outer. Outer exact beats inner face. */
         for (i = ctx->nehs - 1; i >= 0; i--) {
-            if (ctx->ehs[i] && ctx->ehs[i]->a[0] &&
-                strcmp(ctx->ehs[i]->a, err) == 0)
+            if (ctx->ehs[i] && ctx->ehs[i]->a && ctx->ehs[i]->a[0] &&
+                strcmp(ast_slot(ctx->ehs[i]->a), err) == 0)
                 return ctx->ehs[i];
         }
         /* Pass 2: unique as: path; hop count is not a rank. */
@@ -1597,8 +1597,8 @@ static AstNode* shadow_eh_for_call(ShadowCtx* ctx, const char* call) {
             for (i = ctx->nehs - 1; i >= 0; i--) {
                 char path[128];
                 int pr;
-                if (!ctx->ehs[i] || !ctx->ehs[i]->a[0]) continue;
-                if (strcmp(ctx->ehs[i]->a, err) == 0) continue;
+                if (!ctx->ehs[i] || !(ctx->ehs[i]->a && ctx->ehs[i]->a[0])) continue;
+                if (strcmp(ast_slot(ctx->ehs[i]->a), err) == 0) continue;
                 pr = shadow_as_path_to(err, ctx->ehs[i]->a, path, sizeof(path));
                 if (pr != 1) continue;
                 if (face_i < 0) {
@@ -1625,7 +1625,7 @@ static AstNode* shadow_eh_for_call(ShadowCtx* ctx, const char* call) {
         }
         /* Known E, no exact/face match: do not bind the innermost handler
          * (that emits `F e = (__r).u.error` and a host C type error). */
-        if (ctx->eh && ctx->eh->a[0] && strcmp(ctx->eh->a, err) != 0) {
+        if (ctx->eh && ctx->eh->a && ctx->eh->a[0] && strcmp(ast_slot(ctx->eh->a), err) != 0) {
             char have[192];
             char msg[384];
             int hi;
@@ -1633,7 +1633,7 @@ static AstNode* shadow_eh_for_call(ShadowCtx* ctx, const char* call) {
             have[0] = 0;
             for (hi = ctx->nehs - 1; hi >= 0; hi--) {
                 const char* t;
-                if (!ctx->ehs[hi] || !ctx->ehs[hi]->a[0]) continue;
+                if (!ctx->ehs[hi] || !(ctx->ehs[hi]->a && ctx->ehs[hi]->a[0])) continue;
                 t = ctx->ehs[hi]->a;
                 if (hn && hn + 2 < sizeof(have)) {
                     have[hn++] = ',';
@@ -1671,8 +1671,8 @@ static AstNode* shadow_eh_for_call(ShadowCtx* ctx, const char* call) {
     /* Unknown callee: prefer CCError (script default / @as face), not the
      * innermost specialty handler. */
     for (i = ctx->nehs - 1; i >= 0; i--) {
-        if (ctx->ehs[i] && ctx->ehs[i]->a[0] &&
-            strcmp(ctx->ehs[i]->a, "CCError") == 0)
+        if (ctx->ehs[i] && ctx->ehs[i]->a && ctx->ehs[i]->a[0] &&
+            strcmp(ast_slot(ctx->ehs[i]->a), "CCError") == 0)
             return ctx->ehs[i];
     }
     return ctx->eh;
@@ -1701,7 +1701,7 @@ static void shadow_eh_push_node(ShadowCtx* ctx, AstNode* eh) {
     if (ctx->nehs >= SHADOW_EH_STACK_CAP) {
         /* Fail loud — do not overwrite ctx->eh (that looked like a push). */
         shadow_table_full("errhandlers", SHADOW_EH_STACK_CAP,
-                          eh->a[0] ? eh->a : NULL);
+                          eh->a && eh->a[0] ? eh->a : NULL);
         return;
     }
     ctx->ehs_scope[ctx->nehs] = ctx->eh_scope;
@@ -1712,7 +1712,7 @@ static void shadow_eh_push_node(ShadowCtx* ctx, AstNode* eh) {
 static int shadow_eh_diverges(const AstNode* eh) {
     const AstNode* last;
     if (!eh) return 0;
-    if (eh->nbody <= 0) return eh->c[0] != 0;
+    if (eh->nbody <= 0) return eh->c && eh->c[0] != 0;
     last = eh->body[eh->nbody - 1];
     if (!last) return 0;
     return last->kind == AST_RETURN_INT || last->kind == AST_RETURN_CC ||
@@ -1735,7 +1735,7 @@ static int shadow_eh_hoist_register(CEmit* out, ShadowCtx* ctx, AstNode* eh,
     snprintf(ctx->eh_hoist[i].var, sizeof(ctx->eh_hoist[i].var), "__cc_eh_e_%d",
              ctx->eh_hoist_seq);
     ctx->eh_hoist_seq++;
-    ty = eh->a[0] ? eh->a : "CCError";
+    ty = eh->a && eh->a[0] ? eh->a : "CCError";
     return cemit_fmt(out, "%s%s %s;\n", indent ? indent : "    ", ty,
                      ctx->eh_hoist[i].var);
 }
@@ -4947,8 +4947,8 @@ static void shadow_restrict_register_from_items(AstNode** items, int n) {
     for (i = 0; i < n; i++) {
         AstNode* it = items[i];
         if (!it) continue;
-        if (it->kind == AST_AT_STMT && strcmp(it->a, "typeview") == 0 &&
-            it->d[0]) {
+        if (it->kind == AST_AT_STMT && strcmp(ast_slot(it->a), "typeview") == 0 &&
+            it->d && it->d[0]) {
             AstNode* saved_site = g_shadow_expr_site;
             g_shadow_expr_site = it;
             (void)shadow_restrict_register(it->d, it->b, it->c);
@@ -5134,6 +5134,17 @@ static const char* shadow_meta_cstr(const char* s) {
     if (!s || !s[0]) return NULL;
     h = shadow_meta_intern_name(s);
     return (const char*)h.ptr;
+}
+
+/* Emit-time AstNode text slot write: meta_ar owned; NULL = empty.
+ * Never mutate *slot bytes in place — rebuild then shadow_slot_set. */
+static void shadow_slot_set(char** slot, const char* s) {
+    if (!slot) return;
+    if (!s || !s[0]) {
+        *slot = NULL;
+        return;
+    }
+    *slot = (char*)shadow_meta_cstr(s);
 }
 
 static int shadow_fields_ensure(void) {
@@ -5831,21 +5842,21 @@ static int shadow_chan_has_task_send(const char* name) {
 static void shadow_collect_task_sends(AstNode* n) {
     int k;
     if (!n) return;
-    if (n->kind == AST_SPAWN_CLOSURE && n->a[0] &&
-        (strcmp(n->b, "send_task") == 0 ||
-         strcmp(n->b, "send_task_hybrid") == 0)) {
+    if (n->kind == AST_SPAWN_CLOSURE && n->a && n->a[0] &&
+        (strcmp(ast_slot(n->b), "send_task") == 0 ||
+         strcmp(ast_slot(n->b), "send_task_hybrid") == 0)) {
         /* UFCS `tx.send_task` stores tx in a; free-fn callarg keeps formals. */
-        if (!strchr(n->a, ' ') && !strchr(n->a, '*') && !strchr(n->a, ','))
+        if (!strchr(ast_slot(n->a), ' ') && !strchr(ast_slot(n->a), '*') && !strchr(ast_slot(n->a), ','))
             shadow_note_task_send(n->a);
     }
-    if (n->kind == AST_UFCS_STMT && n->a[0] &&
-        (strcmp(n->b, "send_task") == 0 ||
-         strcmp(n->b, "send_task_hybrid") == 0))
+    if (n->kind == AST_UFCS_STMT && n->a && n->a[0] &&
+        (strcmp(ast_slot(n->b), "send_task") == 0 ||
+         strcmp(ast_slot(n->b), "send_task_hybrid") == 0))
         shadow_note_task_send(n->a);
     if (n->kind == AST_CALL_ARGS &&
-        (strcmp(n->a, "cc_channel_send_task") == 0 ||
-         strcmp(n->a, "cc_channel_send_task_hybrid") == 0) &&
-        n->b[0]) {
+        (strcmp(ast_slot(n->a), "cc_channel_send_task") == 0 ||
+         strcmp(ast_slot(n->a), "cc_channel_send_task_hybrid") == 0) &&
+        n->b && n->b[0]) {
         char tx[64];
         const char* p = n->b;
         size_t i = 0;
@@ -9324,8 +9335,8 @@ static void shadow_chan_register_node(AstNode* n) {
     const char* p;
     char name[64];
     size_t ni;
-    if (!n || !n->a[0]) return;
-    if (strcmp(n->c, "owned") == 0) return; /* create_owned, not pair table */
+    if (!n || !(n->a && n->a[0])) return;
+    if (strcmp(ast_slot(n->c), "owned") == 0) return; /* create_owned, not pair table */
     shadow_chan_flags_from_e(n->e, &ordered, topo, sizeof(topo), &is_sync,
                              &bp_mode);
     /* `a` may be comma-separated multi-declarator names. */
@@ -9339,7 +9350,7 @@ static void shadow_chan_register_node(AstNode* n) {
             name[ni++] = *p++;
         name[ni] = 0;
         if (name[0])
-            shadow_chan_register_ex(name, n->b, ordered, n->d[0] ? n->d : NULL,
+            shadow_chan_register_ex(name, n->b, ordered, n->d && n->d[0] ? n->d : NULL,
                                     topo[0] ? topo : NULL, is_sync, bp_mode);
     }
 }
@@ -9528,7 +9539,7 @@ static int shadow_emit_err_at_bind_tmp(CEmit* out, ShadowCtx* ctx,
     int line = 0;
     char esc[512];
     const char* eh_ty =
-        (ctx && ctx->eh && ctx->eh->a[0]) ? ctx->eh->a : "CCError";
+        (ctx && ctx->eh && ctx->eh->a && ctx->eh->a[0]) ? ctx->eh->a : "CCError";
     const char* r = (rtmp && rtmp[0]) ? rtmp : "__r";
     char arms[768];
     size_t ao = 0;
@@ -9602,7 +9613,7 @@ static int shadow_emit_ptr_err_at_bind(CEmit* out, ShadowCtx* ctx,
     char esc[512];
     char site_esc[512];
     const char* eh_ty =
-        (ctx && ctx->eh && ctx->eh->a[0]) ? ctx->eh->a : "CCError";
+        (ctx && ctx->eh && ctx->eh->a && ctx->eh->a[0]) ? ctx->eh->a : "CCError";
     if (ctx && ctx->site)
         (void)shadow_site_loc(ctx->cache, ctx->site, &path, &line);
     if (!path || !path[0]) path = "unknown";

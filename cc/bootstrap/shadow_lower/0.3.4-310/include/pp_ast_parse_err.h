@@ -28,7 +28,7 @@ static int parse_err_suffix(Parser* p, AstNode* n) {
             return 0;
         }
         if (tok_eq(p_peek(p), TK_PUNCT, ")")) {
-            slice_to(n->d, sizeof(n->d), t1.spell);
+            n->d = ast_arena_slice(p, t1.spell);
             p_next(p);
         } else {
             Token bind = p_next(p);
@@ -40,9 +40,9 @@ static int parse_err_suffix(Parser* p, AstNode* n) {
                 parser_fail(p, p_peek(p), "expected ')' after @err(...)");
                 return 0;
             }
-            snprintf(n->d, sizeof(n->d), "%.*s %.*s",
+            do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%.*s %.*s",
                      (int)t1.spell.len, t1.spell.ptr,
-                     (int)bind.spell.len, bind.spell.ptr);
+                     (int)bind.spell.len, bind.spell.ptr); n->d = ast_arena_cstr(p, __ast_tmp); } while (0);
         }
     }
     if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
@@ -116,7 +116,7 @@ static AstNode* parse_err_syntax_stmt(Parser* p) {
 
     int expr_a, expr_b;
     if (eq_lt_bang >= 0) {
-        if (!span_text(p, start, eq_lt_bang, n->a, sizeof(n->a))) {
+        if ((((n->a = ast_arena_span(p, start, eq_lt_bang))), p->err)) {
             parser_fail(p, p->toks[start], "=<! lhs too long");
             return NULL;
         }
@@ -138,24 +138,24 @@ static AstNode* parse_err_syntax_stmt(Parser* p) {
             k++;
         }
         if (colon >= 0) {
-            if (!span_text(p, expr_a, colon, n->b, sizeof(n->b)) ||
-                !span_text(p, colon + 1, err_at, n->e, sizeof(n->e))) {
+            if ((((n->b = ast_arena_span(p, expr_a, colon))), p->err) ||
+                (((n->e = ast_arena_span(p, colon + 1, err_at))), p->err)) {
                 parser_fail(p, p->toks[expr_a], "=<! expr/default too long");
                 return NULL;
             }
-            snprintf(n->c, sizeof(n->c), "colon");
+            n->c = ast_arena_cstr(p, "colon");
         } else {
-            if (!span_text(p, expr_a, err_at, n->b, sizeof(n->b))) {
+            if ((((n->b = ast_arena_span(p, expr_a, err_at))), p->err)) {
                 parser_fail(p, p->toks[expr_a], "=<! expr too long");
                 return NULL;
             }
         }
         expr_b = err_at;
     } else {
-        n->a[0] = 0;
+        n->a = NULL;
         expr_a = start;
         expr_b = err_at;
-        if (!span_text(p, expr_a, expr_b, n->b, sizeof(n->b))) {
+        if ((((n->b = ast_arena_span(p, expr_a, expr_b))), p->err)) {
             parser_fail(p, p->toks[start], "@err expr too long");
             return NULL;
         }

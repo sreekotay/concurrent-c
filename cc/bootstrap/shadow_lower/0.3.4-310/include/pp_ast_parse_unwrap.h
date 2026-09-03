@@ -83,9 +83,9 @@ static AstNode* parse_println_bang(Parser* p) {
         p_next(p);
         AstNode* n = ast_new(p, is_tpl ? AST_PRINTLN_TPL : AST_PRINTLN_BANG);
         if (!n) return NULL;
-        snprintf(n->a, sizeof(n->a), "%s", payload);
-        if (is_tpl && arena[0]) snprintf(n->c, sizeof(n->c), "%s", arena);
-        if (is_eprint) snprintf(n->d, sizeof(n->d), "e");
+        n->a = ast_arena_cstr(p, payload);
+        if (is_tpl && arena[0]) n->c = ast_arena_cstr(p, arena);
+        if (is_eprint) n->d = ast_arena_cstr(p, "e");
         while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
             AstNode* st = parse_stmt(p);
             if (!st) return NULL;
@@ -116,8 +116,8 @@ static AstNode* parse_println_bang(Parser* p) {
         }
         AstNode* n = ast_new(p, AST_PRINTLN_BANG_BIND);
         if (!n) return NULL;
-        snprintf(n->a, sizeof(n->a), "%s", payload);
-        slice_to(n->b, sizeof(n->b), bind.spell);
+        n->a = ast_arena_cstr(p, payload);
+        n->b = ast_arena_slice(p, bind.spell);
         while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
             AstNode* st = parse_stmt(p);
             if (!st) return NULL;
@@ -143,9 +143,9 @@ static AstNode* parse_println_bang(Parser* p) {
     }
     AstNode* n = ast_new(p, is_tpl ? AST_PRINTLN_TPL : AST_PRINTLN_BANG);
     if (!n) return NULL;
-    snprintf(n->a, sizeof(n->a), "%s", payload);
-    if (is_tpl && arena[0]) snprintf(n->c, sizeof(n->c), "%s", arena);
-    if (is_eprint) snprintf(n->d, sizeof(n->d), "e");
+    n->a = ast_arena_cstr(p, payload);
+    if (is_tpl && arena[0]) n->c = ast_arena_cstr(p, arena);
+    if (is_eprint) n->d = ast_arena_cstr(p, "e");
     return n;
 }
 
@@ -245,8 +245,8 @@ static int shadow_unwrap_call_bang(Parser* p, int start) {
 static int unwrap_stmt_bind(Parser* p, AstNode* n, const char* call,
                             const char* lhs, AstNode* ue) {
     if (!n) return 0;
-    snprintf(n->a, sizeof(n->a), "%s", call);
-    if (lhs && lhs[0]) snprintf(n->e, sizeof(n->e), "%s", lhs);
+    n->a = ast_arena_cstr(p, call);
+    if (lhs && lhs[0]) n->e = ast_arena_cstr(p, lhs);
     if (ue && !ast_attach_ufcs_kid(p, n, ue)) {
         parser_fail(p, p_peek(p), "too many UFCS attachments on unwrap");
         return 0;
@@ -306,7 +306,7 @@ static AstNode* parse_stmt_unwrap(Parser* p) {
         p_next(p);
         AstNode* n = ast_new(p, AST_STMT_UNWRAP);
         if (!unwrap_stmt_bind(p, n, call, lhs, ue)) return NULL;
-        snprintf(n->c, sizeof(n->c), "bang_block");
+        n->c = ast_arena_cstr(p, "bang_block");
         while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
             AstNode* st = parse_stmt(p);
             if (!st) return NULL;
@@ -336,10 +336,10 @@ static AstNode* parse_stmt_unwrap(Parser* p) {
         }
         AstNode* n = ast_new(p, AST_STMT_UNWRAP);
         if (!unwrap_stmt_bind(p, n, call, lhs, ue)) return NULL;
-        slice_to(n->d, sizeof(n->d), bind.spell);
+        n->d = ast_arena_slice(p, bind.spell);
         if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
             p_next(p);
-            snprintf(n->c, sizeof(n->c), "bang_block");
+            n->c = ast_arena_cstr(p, "bang_block");
             while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
                 AstNode* st = parse_stmt(p);
                 if (!st) return NULL;
@@ -361,7 +361,7 @@ static AstNode* parse_stmt_unwrap(Parser* p) {
             parser_fail(p, p_peek(p), "expected body after '!> (e)'");
             return NULL;
         }
-        snprintf(n->c, sizeof(n->c), "bang_stmt");
+        n->c = ast_arena_cstr(p, "bang_stmt");
         {
             AstNode* st = parse_stmt(p);
             if (!st) return NULL;
@@ -373,7 +373,7 @@ static AstNode* parse_stmt_unwrap(Parser* p) {
     if (!tok_eq(p_peek(p), TK_PUNCT, ";")) {
         AstNode* n = ast_new(p, AST_STMT_UNWRAP);
         if (!unwrap_stmt_bind(p, n, call, lhs, ue)) return NULL;
-        snprintf(n->c, sizeof(n->c), "bang_stmt");
+        n->c = ast_arena_cstr(p, "bang_stmt");
         {
             AstNode* st = parse_stmt(p);
             if (!st) return NULL;
@@ -389,7 +389,7 @@ static AstNode* parse_stmt_unwrap(Parser* p) {
      * (empty mode falls through to try_call and discards Ok).
      * Bare `call() !>;` must keep mode empty — safety/emit use that for
      * typed @errhandler match, ambiguous @as refuse, and require_eh. */
-    if (lhs[0]) snprintf(n->c, sizeof(n->c), "bang_stmt");
+    if (lhs[0]) n->c = ast_arena_cstr(p, "bang_stmt");
     return n;
 }
 
@@ -486,8 +486,8 @@ static AstNode* parse_field_result(Parser* p) {
     ast_result_name(okty, errty, rname, sizeof(rname));
     AstNode* n = ast_new(p, AST_FIELD_SIMPLE);
     if (!n) return NULL;
-    snprintf(n->a, sizeof(n->a), "%s", rname);
-    slice_to(n->b, sizeof(n->b), name.spell);
+    n->a = ast_arena_cstr(p, rname);
+    n->b = ast_arena_slice(p, name.spell);
     return n;
 }
 
@@ -593,11 +593,11 @@ static AstNode* parse_result_local(Parser* p) {
     }
     AstNode* n = ast_new(p, AST_RESULT_LOCAL);
     if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), name.spell);
-    slice_to(n->b, sizeof(n->b), err.spell);
-    snprintf(n->c, sizeof(n->c), "%s", okty);
-    if (dims[0]) snprintf(n->e, sizeof(n->e), "%s", dims);
-    else n->e[0] = 0;
+    n->a = ast_arena_slice(p, name.spell);
+    n->b = ast_arena_slice(p, err.spell);
+    n->c = ast_arena_cstr(p, okty);
+    if (dims[0]) n->e = ast_arena_cstr(p, dims);
+    else n->e = NULL;
     if (p_accept(p, TK_PUNCT, ";")) return n; /* bare decl */
     if (!p_accept(p, TK_PUNCT, "=")) {
         parser_fail(p, p_peek(p), "expected '=' or ';' after result local");
@@ -625,22 +625,22 @@ static AstNode* parse_result_local(Parser* p) {
                                    &cl);
         if (p->err) return NULL;
         if (had_cl) {
-            snprintf(n->d, sizeof(n->d), "%s", init);
+            n->d = ast_arena_cstr(p, init);
             if (cl) {
                 if (n->ndbody >= SHADOW_DBODY_CAP) {
                     parser_fail(p, name,
                                 "too many result-local closure attachments");
                     return NULL;
                 }
-                spawn_infer_value_caps(cl);
+                spawn_infer_value_caps(p, cl);
                 n->dbody[n->ndbody++] = cl;
             }
             p->i = c1;
         } else {
             AstNode* ue = parse_ufcs_expr_range(p, c0, c1);
             p->i = c1;
-            if (!ast_spell_token_range(p, c0, c1, n->d, sizeof(n->d)) &&
-                !span_text(p, c0, c1, n->d, sizeof(n->d))) {
+            if (!({ char __spell_tmp[4096]; int __spell_ok = ast_spell_token_range(p, c0, c1, __spell_tmp, sizeof(__spell_tmp)); if (__spell_ok) n->d = ast_arena_cstr(p, __spell_tmp); __spell_ok; }) &&
+                (((n->d = ast_arena_span(p, c0, c1))), p->err)) {
                 parser_fail(p, name, "result local init too long");
                 return NULL;
             }
@@ -684,9 +684,9 @@ static int parse_unwrap_ufcs_chain_tail(Parser* p, AstNode* n, Token at) {
     /* Preserve lhs type: e is overwritten with the chain; park type on mode. */
     char saved_ty[128];
     saved_ty[0] = 0;
-    if (n->e[0])
+    if (n->e && n->e[0])
         snprintf(saved_ty, sizeof(saved_ty), "%s", n->e);
-    if (!span_text(p, c0, p->i, n->e, sizeof(n->e))) {
+    if ((((n->e = ast_arena_span(p, c0, p->i))), p->err)) {
         parser_fail(p, at, "!> chain too long");
         return 0;
     }
@@ -695,9 +695,9 @@ static int parse_unwrap_ufcs_chain_tail(Parser* p, AstNode* n, Token at) {
         return 0;
     }
     if (saved_ty[0])
-        snprintf(n->c, sizeof(n->c), "bang_chain:%s", saved_ty);
+        do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "bang_chain:%s", saved_ty); n->c = ast_arena_cstr(p, __ast_tmp); } while (0);
     else
-        snprintf(n->c, sizeof(n->c), "bang_chain");
+        n->c = ast_arena_cstr(p, "bang_chain");
     return 1;
 }
 
@@ -823,14 +823,14 @@ static AstNode* parse_var_unwrap(Parser* p) {
     Token op = p_next(p); /* !> or ?> */
     AstNode* n = ast_new(p, AST_VAR_UNWRAP);
     if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), vname.spell);
-    snprintf(n->b, sizeof(n->b), "%s", call);
+    n->a = ast_arena_slice(p, vname.spell);
+    n->b = ast_arena_cstr(p, call);
     /* e carries the lhs type for bang/bang_block (bang_chain overwrites e). */
-    snprintf(n->e, sizeof(n->e), "%s", tytxt);
+    n->e = ast_arena_cstr(p, tytxt);
 
     if (tok_eq(op, TK_PUNCT, "!>")) {
         if (p_accept(p, TK_PUNCT, ";")) {
-            snprintf(n->c, sizeof(n->c), "bang");
+            n->c = ast_arena_cstr(p, "bang");
             return n;
         }
         /* !>.method(args)[!>.method(args)]*; — unwrap then UFCS hop(s) */
@@ -867,7 +867,7 @@ static AstNode* parse_var_unwrap(Parser* p) {
                               p->i + 1 < p->n &&
                               tok_eq(p->toks[p->i + 1], TK_PUNCT, "|"));
                 if (form_p) {
-                    snprintf(n->c, sizeof(n->c), "bang");
+                    n->c = ast_arena_cstr(p, "bang");
                     if (tok_eq(pk, TK_PUNCT, ",")) {
                         int t0 = p->i;
                         int depth = 0;
@@ -885,7 +885,7 @@ static AstNode* parse_var_unwrap(Parser* p) {
                                 break;
                             p_next(p);
                         }
-                        if (!span_text(p, t0, p->i, n->d, sizeof(n->d))) {
+                        if ((((n->d = ast_arena_span(p, t0, p->i))), p->err)) {
                             parser_fail(p, pk, "multi-declarator after !> too long");
                             return NULL;
                         }
@@ -901,7 +901,7 @@ static AstNode* parse_var_unwrap(Parser* p) {
             /* !> { stmts } [ .chain ]; — bare handler block (no bind). */
             if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
                 p_next(p);
-                snprintf(n->c, sizeof(n->c), "bang_block");
+                n->c = ast_arena_cstr(p, "bang_block");
                 while (!tok_eq(p_peek(p), TK_PUNCT, "}") &&
                        p_peek(p).kind != TK_EOF && !p->err) {
                     AstNode* st = parse_stmt(p);
@@ -927,7 +927,7 @@ static AstNode* parse_var_unwrap(Parser* p) {
                     snprintf(mode, sizeof(mode), "%s", n->c);
                     if (!parse_destroy_tail(p, n, mode, sizeof(mode)))
                         return NULL;
-                    snprintf(n->c, sizeof(n->c), "%s", mode);
+                    n->c = ast_arena_cstr(p, mode);
                     if (strstr(mode, "_D")) return n;
                 }
                 if (!p_accept(p, TK_PUNCT, ";")) {
@@ -937,7 +937,7 @@ static AstNode* parse_var_unwrap(Parser* p) {
                 return n;
             }
             /* !> stmt ; — break/continue/return without binder */
-            snprintf(n->c, sizeof(n->c), "bang_stmt");
+            n->c = ast_arena_cstr(p, "bang_stmt");
             AstNode* st = parse_stmt(p);
             if (!st) return NULL;
             n->body[0] = st;
@@ -953,10 +953,10 @@ static AstNode* parse_var_unwrap(Parser* p) {
             parser_fail(p, p_peek(p), "expected ')' after bind");
             return NULL;
         }
-        slice_to(n->d, sizeof(n->d), bind.spell);
+        n->d = ast_arena_slice(p, bind.spell);
         if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
             p_next(p);
-            snprintf(n->c, sizeof(n->c), "bang_block");
+            n->c = ast_arena_cstr(p, "bang_block");
             while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
                 AstNode* st = parse_stmt(p);
                 if (!st) return NULL;
@@ -979,12 +979,12 @@ static AstNode* parse_var_unwrap(Parser* p) {
              * next stmt (CCPyObj ownership / unwrap_destroy smokes). */
             {
                 char mode[80];
-                char bind[sizeof(n->d)];
+                char bind[2048];
                 snprintf(mode, sizeof(mode), "%s", n->c);
                 snprintf(bind, sizeof(bind), "%s", n->d);
                 if (!parse_destroy_tail(p, n, mode, sizeof(mode))) return NULL;
-                snprintf(n->c, sizeof(n->c), "%s", mode);
-                snprintf(n->d, sizeof(n->d), "%s", bind);
+                n->c = ast_arena_cstr(p, mode);
+                n->d = ast_arena_cstr(p, bind);
                 if (strstr(mode, "_D")) return n; /* consumed `;` */
             }
             if (!p_accept(p, TK_PUNCT, ";")) {
@@ -994,7 +994,7 @@ static AstNode* parse_var_unwrap(Parser* p) {
             return n;
         }
         /* !>(e) stmt ; */
-        snprintf(n->c, sizeof(n->c), "bang_stmt");
+        n->c = ast_arena_cstr(p, "bang_stmt");
         AstNode* st = parse_stmt(p);
         if (!st) return NULL;
         n->body[0] = st;
@@ -1017,12 +1017,12 @@ static AstNode* parse_var_unwrap(Parser* p) {
         p_next(p);
         Token bind = p_next(p);
         p_next(p); /* ) */
-        slice_to(n->d, sizeof(n->d), bind.spell);
+        n->d = ast_arena_slice(p, bind.spell);
         /* Preserve lhs type: mode `qmark_bind:Type` (e holds default). */
-        snprintf(n->c, sizeof(n->c), "qmark_bind:%s", tytxt);
+        do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "qmark_bind:%s", tytxt); n->c = ast_arena_cstr(p, __ast_tmp); } while (0);
     } else {
-        snprintf(n->c, sizeof(n->c), "qmark");
-        snprintf(n->d, sizeof(n->d), "%s", tytxt);
+        n->c = ast_arena_cstr(p, "qmark");
+        n->d = ast_arena_cstr(p, tytxt);
     }
     int d0 = p->i;
     depth = 0;
@@ -1039,7 +1039,7 @@ static AstNode* parse_var_unwrap(Parser* p) {
         parser_fail(p, p_peek(p), "missing default expression after '?>'");
         return NULL;
     }
-    if (!span_text(p, d0, p->i, n->e, sizeof(n->e))) {
+    if ((((n->e = ast_arena_span(p, d0, p->i))), p->err)) {
         parser_fail(p, p_peek(p), "?> default expr too long");
         return NULL;
     }
@@ -1074,7 +1074,7 @@ static int parse_destroy_tail(Parser* p, AstNode* n, char* mode, size_t mode_cap
     if (p_accept(p, TK_PUNCT, ";")) {
         size_t m = strlen(mode);
         if (m + 6 < mode_cap) snprintf(mode + m, mode_cap - m, "_Dbare");
-        snprintf(n->d, sizeof(n->d), "%s", mode);
+        n->d = ast_arena_cstr(p, mode);
         return 1;
     }
     if (!p_accept(p, TK_PUNCT, "{")) {
@@ -1097,7 +1097,7 @@ static int parse_destroy_tail(Parser* p, AstNode* n, char* mode, size_t mode_cap
     {
         size_t m = strlen(mode);
         if (m + 2 < mode_cap) snprintf(mode + m, mode_cap - m, "_D");
-        snprintf(n->d, sizeof(n->d), "%s", mode);
+        n->d = ast_arena_cstr(p, mode);
     }
     return 1;
 }
@@ -1176,12 +1176,12 @@ static AstNode* parse_ptr_unwrap(Parser* p) {
             stars[si++] = '*';
         stars[si] = 0;
         if (has_const)
-            snprintf(n->a, sizeof(n->a), "const %s%s", tbuf, stars);
+            do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "const %s%s", tbuf, stars); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
         else
-            snprintf(n->a, sizeof(n->a), "%s%s", tbuf, stars);
+            do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "%s%s", tbuf, stars); n->a = ast_arena_cstr(p, __ast_tmp); } while (0);
     }
-    slice_to(n->b, sizeof(n->b), name.spell);
-    snprintf(n->c, sizeof(n->c), "%s", call);
+    n->b = ast_arena_slice(p, name.spell);
+    n->c = ast_arena_cstr(p, call);
     char mode[64];
     mode[0] = 0;
 
@@ -1189,7 +1189,7 @@ static AstNode* parse_ptr_unwrap(Parser* p) {
         if (tok_eq(p_peek(p), TK_PUNCT, "@")) {
             /* !> @destroy … — handler = errhandler */
             snprintf(mode, sizeof(mode), "bang_eh");
-            snprintf(n->d, sizeof(n->d), "%s", mode);
+            n->d = ast_arena_cstr(p, mode);
             if (!parse_destroy_tail(p, n, mode, sizeof(mode))) return NULL;
             return n;
         }
@@ -1204,7 +1204,7 @@ static AstNode* parse_ptr_unwrap(Parser* p) {
                 parser_fail(p, p_peek(p), "expected ')' after bind");
                 return NULL;
             }
-            slice_to(n->e, sizeof(n->e), bind.spell);
+            n->e = ast_arena_slice(p, bind.spell);
             snprintf(mode, sizeof(mode), "bang_block");
         } else {
             snprintf(mode, sizeof(mode), "bang_nobind");
@@ -1227,7 +1227,7 @@ static AstNode* parse_ptr_unwrap(Parser* p) {
         } else if (strcmp(mode, "bang_nobind") == 0) {
             /* `!>;` — empty handler (errhandler / abort path). */
             if (p_accept(p, TK_PUNCT, ";")) {
-                snprintf(n->d, sizeof(n->d), "%s", mode);
+                n->d = ast_arena_cstr(p, mode);
                 return n;
             }
             /* !> stmt ;  — single stmt handler without braces */
@@ -1235,10 +1235,10 @@ static AstNode* parse_ptr_unwrap(Parser* p) {
             if (!st) return NULL;
             n->body[0] = st;
             n->nbody = 1;
-            snprintf(n->d, sizeof(n->d), "%s", mode);
+            n->d = ast_arena_cstr(p, mode);
             return n;
         }
-        snprintf(n->d, sizeof(n->d), "%s", mode);
+        n->d = ast_arena_cstr(p, mode);
         if (p_accept(p, TK_PUNCT, ";")) return n;
         if (!tok_eq(p_peek(p), TK_PUNCT, "@")) {
             parser_fail(p, p_peek(p), "expected ';' or @destroy after !> handler");
@@ -1287,7 +1287,7 @@ static AstNode* parse_ptr_unwrap(Parser* p) {
         parser_fail(p, p_peek(p), "missing default expression after '?>'");
         return NULL;
     }
-    if (!span_text(p, d0, p->i, n->e, sizeof(n->e))) {
+    if ((((n->e = ast_arena_span(p, d0, p->i))), p->err)) {
         parser_fail(p, p_peek(p), "?> default too long");
         return NULL;
     }
@@ -1304,7 +1304,7 @@ static AstNode* parse_ptr_unwrap(Parser* p) {
             return NULL;
         }
     }
-    snprintf(n->d, sizeof(n->d), "%s", mode);
+    n->d = ast_arena_cstr(p, mode);
     if (p_accept(p, TK_PUNCT, ";")) return n;
     if (!tok_eq(p_peek(p), TK_PUNCT, "@")) {
         parser_fail(p, p_peek(p), "expected ';' or @destroy after ?> default");

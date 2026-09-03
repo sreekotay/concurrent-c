@@ -73,14 +73,14 @@ static int shadow_emit_async_fn(AstNode* it, CEmit* out, TapeCache* cache) {
     int nspawns = 0;
     int npars = 0;
     if (!it || !out) return 0;
-    snprintf(params, sizeof(params), "%s", it->c[0] ? it->c : "void");
+    snprintf(params, sizeof(params), "%s", it->c && it->c[0] ? it->c : "void");
     shadow_normalize_chan_params(params, sizeof(params));
     np = shadow_parse_params(params, ps, 16);
     id = g_shadow_async_id++;
     snprintf(base, sizeof(base), "__cc_async_%s_%d", it->b, id);
-    is_void = (strcmp(it->a, "void") == 0);
-    is_result_ret = (strncmp(it->a, "CCResult_", 9) == 0) ||
-                    (it->e[0] && strcmp(it->e, "result") == 0);
+    is_void = (strcmp(ast_slot(it->a), "void") == 0);
+    is_result_ret = (strncmp(ast_slot(it->a), "CCResult_", 9) == 0) ||
+                    (it->e && it->e[0] && strcmp(ast_slot(it->e), "result") == 0);
 
     if (!cemit_fmt(out, "typedef struct %s_frame {\n", base)) return 0;
     if (!cemit_str(out, "  int __st;\n  intptr_t __r;\n")) return 0;
@@ -180,7 +180,7 @@ static int shadow_emit_async_fn(AstNode* it, CEmit* out, TapeCache* cache) {
     {
         int bind_ok = 1;
         CEmit body = {0};
-        if (it->d[0] && it->nkids == 0) {
+        if (it->d && it->d[0] && it->nkids == 0) {
             char text[2048];
             shadow_rewrite_ufcs(text, sizeof(text), it->d, NULL);
             shadow_async_rewrite_params(text, sizeof(text), ps, np);
@@ -204,10 +204,10 @@ static int shadow_emit_async_fn(AstNode* it, CEmit* out, TapeCache* cache) {
                 sctx.defers = defers;
                 sctx.ndefers = ndefers;
                 sctx.defer_cleanup = ndefers > 0;
-                sctx.soft_ret_ty = is_void ? "void" : (it->a[0] ? it->a : "int");
+                sctx.soft_ret_ty = is_void ? "void" : (it->a && it->a[0] ? it->a : "int");
                 /* cc_ok/cc_err rewrite keys off rname; without it, Result
                  * bodies default to CCResult_int_CCError (bool!>/… broke). */
-                if (is_result_ret && it->a[0]) sctx.rname = it->a;
+                if (is_result_ret && it->a && it->a[0]) sctx.rname = it->a;
                 sctx.owner_fn_attrs = shadow_fn_attr_lookup(it->b);
                 if (sctx.defer_cleanup) {
                     if (is_void) {

@@ -424,11 +424,11 @@ static void shadow_ufcs_surface(AstNode* u, char* dst, size_t cap) {
     dst[0] = 0;
     uop = shadow_ufcs_e_arrow(u->e) ? "->" : ".";
     uta = shadow_ufcs_e_targs(u->e);
-    if (uta && uta[0] && u->c[0])
+    if (uta && uta[0] && u->c && u->c[0])
         snprintf(dst, cap, "%s%s%s::[%s](%s)", u->a, uop, u->b, uta, u->c);
     else if (uta && uta[0])
         snprintf(dst, cap, "%s%s%s::[%s]()", u->a, uop, u->b, uta);
-    else if (u->c[0])
+    else if (u->c && u->c[0])
         snprintf(dst, cap, "%s%s%s(%s)", u->a, uop, u->b, u->c);
     else
         snprintf(dst, cap, "%s%s%s()", u->a, uop, u->b);
@@ -855,7 +855,7 @@ static int shadow_ufcs_nursery_spawn_parts(const char* recv, const char* meth_na
             for (k = 0; k < g_shadow_ufcs_site->ndbody; k++) {
                 AstNode* kid = g_shadow_ufcs_site->dbody[k];
                 if (kid && kid->kind == AST_SPAWN_CLOSURE &&
-                    strncmp(kid->b, "callarg", 7) == 0)
+                    strncmp(ast_slot(kid->b), "callarg", 7) == 0)
                     has_cl = 1;
             }
         }
@@ -4330,7 +4330,7 @@ static int shadow_emit_ufcs_to_buf(AstNode* st, char* dst, size_t cap,
                      "'%s' — `::[...]` binds a member that declares a type formal "
                      "(allocT, block_on, as_list, as_map, map) or a registered "
                      "generic factory named '%s'",
-                     st->b, st->a[0] ? st->a : "?", fam);
+                     st->b, st->a && st->a[0] ? st->a : "?", fam);
             shadow_ufcs_emit_err_loc(g_shadow_ufcs_cache, st, NULL, __diag);
             if (cc_emit_plan_generic_factory_names_csv(fams, sizeof(fams)) > 0) {
                 char __note[640];
@@ -4344,7 +4344,7 @@ static int shadow_emit_ufcs_to_buf(AstNode* st, char* dst, size_t cap,
     }
     snprintf(recv, sizeof(recv), "%s", st->a);
     args[0] = 0;
-    if (st->c[0]) snprintf(args, sizeof(args), "%s", st->c);
+    if (st->c && st->c[0]) snprintf(args, sizeof(args), "%s", st->c);
     /* `@string(...).println()` — lower the template recv before method emit. */
     if (strncmp(recv, "@string(", 8) == 0)
         shadow_rewrite_print_and_string(recv, sizeof(recv));
@@ -4361,13 +4361,13 @@ static int shadow_emit_ufcs_to_buf(AstNode* st, char* dst, size_t cap,
             continue;
         uop = shadow_ufcs_e_arrow(u->e) ? "->" : ".";
         uta = shadow_ufcs_e_targs(u->e);
-        if (uta && uta[0] && u->c[0])
+        if (uta && uta[0] && u->c && u->c[0])
             snprintf(surface, sizeof(surface), "%s%s%s::[%s](%s)", u->a, uop,
                      u->b, uta, u->c);
         else if (uta && uta[0])
             snprintf(surface, sizeof(surface), "%s%s%s::[%s]()", u->a, uop, u->b,
                      uta);
-        else if (u->c[0])
+        else if (u->c && u->c[0])
             snprintf(surface, sizeof(surface), "%s%s%s(%s)", u->a, uop, u->b,
                      u->c);
         else

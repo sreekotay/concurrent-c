@@ -61,8 +61,8 @@ static int shadow_typedef_struct_embeds_generic_container(const AstNode* it) {
             return 1;
         if (f->kind == AST_FIELD_INT) continue;
         /* raw / other field shapes: best-effort scan of type text */
-        if (f->a[0] && (strstr(f->a, "ArrayMap_") || strstr(f->a, "Map_") ||
-                        strstr(f->a, "CCVec_")))
+        if (f->a && f->a[0] && (strstr(ast_slot(f->a), "ArrayMap_") || strstr(ast_slot(f->a), "Map_") ||
+                        strstr(ast_slot(f->a), "CCVec_")))
             return 1;
     }
     return 0;
@@ -71,8 +71,8 @@ static int shadow_typedef_struct_embeds_generic_container(const AstNode* it) {
 /* Extracted local `.cch` stays an `AST_RAW_LINE` `#include "…h"`. */
 static int shadow_raw_is_quoted_include(const AstNode* it) {
     const char* s;
-    if (!it || it->kind != AST_RAW_LINE || !it->a[0]) return 0;
-    if (it->e[0] && strcmp(it->e, "tape") == 0) return 0;
+    if (!it || it->kind != AST_RAW_LINE || !(it->a && it->a[0])) return 0;
+    if (it->e && it->e[0] && strcmp(ast_slot(it->e), "tape") == 0) return 0;
     s = it->a;
     while (*s == ' ' || *s == '\t') s++;
     return strncmp(s, "#include \"", 10) == 0;
@@ -106,22 +106,22 @@ static int shadow_alias_was_emitted(AstNode** items, int n, const char* alias) {
         const char* a;
         if (!items[i]) continue;
         if (items[i]->kind == AST_TYPEDEF_STRUCT) {
-            a = items[i]->b[0] ? items[i]->b : items[i]->a;
+            a = items[i]->b && items[i]->b[0] ? items[i]->b : items[i]->a;
             if (!a[0] || strcmp(a, alias) != 0) continue;
-            if (strcmp(items[i]->e, "hoist") == 0 ||
-                strcmp(items[i]->e, "vech") == 0)
+            if (strcmp(ast_slot(items[i]->e), "hoist") == 0 ||
+                strcmp(ast_slot(items[i]->e), "vech") == 0)
                 return 1;
         } else if (items[i]->kind == AST_TYPEDEF_INT) {
-            if (!items[i]->a[0] || strcmp(items[i]->a, alias) != 0)
+            if (!(items[i]->a && items[i]->a[0]) || strcmp(ast_slot(items[i]->a), alias) != 0)
                 continue;
-            if (strcmp(items[i]->e, "hoist") == 0 ||
-                strcmp(items[i]->e, "vech") == 0)
+            if (strcmp(ast_slot(items[i]->e), "hoist") == 0 ||
+                strcmp(ast_slot(items[i]->e), "vech") == 0)
                 return 1;
         } else if (items[i]->kind == AST_TYPEDEF_ENUM) {
-            a = items[i]->b[0] ? items[i]->b : items[i]->a;
+            a = items[i]->b && items[i]->b[0] ? items[i]->b : items[i]->a;
             if (!a[0] || strcmp(a, alias) != 0) continue;
-            if (strcmp(items[i]->e, "hoist") == 0 ||
-                strcmp(items[i]->e, "vech") == 0)
+            if (strcmp(ast_slot(items[i]->e), "hoist") == 0 ||
+                strcmp(ast_slot(items[i]->e), "vech") == 0)
                 return 1;
         }
     }
@@ -317,7 +317,7 @@ static int shadow_emit_factory_prereq_quotes(CEmit* out,
         shadow_fill_quote_dir(src_path, from_dir, sizeof(from_dir));
     for (hi = 0; hi < n; hi++) {
         if (!shadow_raw_is_quoted_include(items[hi])) continue;
-        if (items[hi]->e[0] && strcmp(items[hi]->e, "ginc") == 0)
+        if (items[hi]->e && items[hi]->e[0] && strcmp(ast_slot(items[hi]->e), "ginc") == 0)
             continue;
         if (!shadow_quoted_inc_needed_before_ginst(
                 items[hi]->a, from_dir[0] ? from_dir : NULL))
@@ -326,7 +326,7 @@ static int shadow_emit_factory_prereq_quotes(CEmit* out,
             return 0;
         if (!shadow_emit_quoted_include_text(out, items[hi]->a))
             return 0;
-        snprintf(items[hi]->e, sizeof(items[hi]->e), "ginc");
+        shadow_slot_set(&items[hi]->e, "ginc");
     }
     return 1;
 }
@@ -370,8 +370,8 @@ static int shadow_params_mention_type(const char* params, const char* alias) {
 }
 
 static int shadow_typedef_struct_emitted(AstNode* td) {
-    return td && td->e[0] &&
-           (strcmp(td->e, "vech") == 0 || strcmp(td->e, "hoist") == 0);
+    return td && td->e && td->e[0] &&
+           (strcmp(ast_slot(td->e), "vech") == 0 || strcmp(ast_slot(td->e), "hoist") == 0);
 }
 
 /* Incomplete `typedef struct Name Name;` for TU structs named in `text`
@@ -408,9 +408,9 @@ static int shadow_emit_fwd_structs_in_text(AstNode** items, int n,
             const char* alias;
             const char* tag;
             if (!td || td->kind != AST_TYPEDEF_STRUCT) continue;
-            alias = td->b[0] ? td->b : td->a;
-            tag = td->a[0] ? td->a : alias;
-            if (!alias[0]) continue;
+            alias = td->b && td->b[0] ? td->b : td->a;
+            tag = td->a && td->a[0] ? td->a : alias;
+            if (!alias || !alias[0]) continue;
             if (strcmp(alias, id) != 0 && strcmp(tag, id) != 0) continue;
             if (shadow_typedef_struct_emitted(td)) break;
             if (*nseen >= seen_cap) break;
@@ -440,11 +440,11 @@ static int shadow_emit_fwd_all_tu_structs(AstNode** items, int n, CEmit* out) {
         const char* alias;
         const char* tag;
         if (!td || td->kind != AST_TYPEDEF_STRUCT) continue;
-        if (!td->a[0]) continue;
+        if (!(td->a && td->a[0])) continue;
         if (shadow_typedef_struct_emitted(td)) continue;
-        alias = td->b[0] ? td->b : td->a;
+        alias = td->b && td->b[0] ? td->b : td->a;
         tag = td->a;
-        if (!alias[0]) continue;
+        if (!alias || !alias[0]) continue;
         if (strcmp(tag, alias) != 0) {
             if (!cemit_fmt(out, "typedef struct %s %s;\n", tag, alias))
                 return 0;
@@ -465,11 +465,11 @@ static int shadow_reflect_field_info(const AstNode* f, const char** fname,
         *fname = f->a;
         snprintf(fty, fty_cap, "int");
     } else if (f->kind == AST_FIELD_SIMPLE) {
-        if (f->e[0] && strcmp(f->e, "raw") == 0) return 0;
+        if (f->e && f->e[0] && strcmp(ast_slot(f->e), "raw") == 0) return 0;
         *fname = f->b;
         snprintf(fty, fty_cap, "%s", f->a);
         shadow_rewrite_char_slice_types(fty, fty_cap);
-        if (f->e[0] && strcmp(f->e, "as") == 0) *is_as = 1;
+        if (f->e && f->e[0] && strcmp(ast_slot(f->e), "as") == 0) *is_as = 1;
     } else if (f->kind == AST_SLICE_VAR) {
         *fname = f->a;
         snprintf(fty, fty_cap, "%s", shadow_slice_ty("int"));
@@ -493,7 +493,7 @@ static int shadow_harvest_field_reg(AstNode** items, int n) {
         int is_as_arr[64];
         int nf = 0;
         int k;
-        if (!it || it->kind != AST_TYPEDEF_STRUCT || !it->b[0] || it->nkids <= 0)
+        if (!it || it->kind != AST_TYPEDEF_STRUCT || !(it->b && it->b[0]) || it->nkids <= 0)
             continue;
         for (k = 0; k < it->nkids; k++) {
             const char* fname = NULL;
@@ -535,7 +535,7 @@ static int shadow_emit_reflect_field_table(AstNode* it, CEmit* out) {
     char typebuf[64][160];
     char namebuf[64][64];
     int is_as_arr[64];
-    if (!it || !out || !it->b[0] || it->nkids <= 0) return 1;
+    if (!it || !out || !(it->b && it->b[0]) || it->nkids <= 0) return 1;
     alias = it->b;
     if (!cemit_fmt(out, "/* CC reflect fields:%s (is_as from AST; not on struct) */\n",
                    alias))
@@ -615,24 +615,24 @@ static const char* shadow_raw_field_cstr(TapeCache* cache, const AstNode* f,
 /* typedef struct { … } Alias; — shared by prelude + main emit. */
 static int shadow_emit_typedef_struct(AstNode* it, CEmit* out, TapeCache* cache,
                                       ShadowCtx* line_ctx) {
-    if (it->nkids == 0 && it->a[0]) {
-        if (it->b[0] && strcmp(it->a, it->b) != 0)
+    if (it->nkids == 0 && it->a && it->a[0]) {
+        if (it->b && it->b[0] && strcmp(ast_slot(it->a), it->b) != 0)
             shadow_td_alias_register(it->b, it->a);
         if (!cemit_fmt(out, "typedef struct %s %s;\n", it->a, it->b))
             return 0;
         return 1;
     }
-    if (!it->a[0] && it->nkids == 1 &&
+    if (!(it->a && it->a[0]) && it->nkids == 1 &&
         it->kids[0]->kind == AST_FIELD_SIMPLE) {
         AstNode* f = it->kids[0];
         char fty[160];
         snprintf(fty, sizeof(fty), "%s", f->a);
         shadow_rewrite_char_slice_types(fty, sizeof(fty));
-        if (it->b[0] && f->b[0])
+        if (it->b && it->b[0] && f->b && f->b[0])
             shadow_field_register_ex(it->b, f->b, fty[0] ? fty : NULL);
-        if (f->e[0] && strcmp(f->e, "as") == 0 && it->b[0] && f->b[0])
+        if (f->e && f->e[0] && strcmp(ast_slot(f->e), "as") == 0 && it->b && it->b[0] && f->b && f->b[0])
             shadow_as_register(it->b, f->b, fty);
-        if (f->e[0] && strcmp(f->e, "raw") == 0) {
+        if (f->e && f->e[0] && strcmp(ast_slot(f->e), "raw") == 0) {
             if (!cemit_fmt(out, "typedef struct { %s; } %s;\n\n", fty, it->b))
                 return 0;
         } else if (!cemit_fmt(out, "typedef struct { %s %s; } %s;\n\n",
@@ -642,7 +642,7 @@ static int shadow_emit_typedef_struct(AstNode* it, CEmit* out, TapeCache* cache,
         if (!shadow_emit_reflect_field_table(it, out)) return 0;
         return 1;
     }
-    if (it->a[0]) {
+    if (it->a && it->a[0]) {
         if (!cemit_fmt(out, "typedef struct %s {\n", it->a)) return 0;
     } else {
         if (!cemit_str(out, "typedef struct {\n")) return 0;
@@ -652,19 +652,19 @@ static int shadow_emit_typedef_struct(AstNode* it, CEmit* out, TapeCache* cache,
         const char* find = shadow_stmt_indent(f, "    ");
         if (!shadow_emit_line(out, line_ctx, f, find)) return 0;
         if (f->kind == AST_FIELD_INT) {
-            if (it->b[0] && f->a[0]) shadow_field_register(it->b, f->a);
-            if (it->a[0] && f->a[0]) shadow_field_register(it->a, f->a);
+            if (it->b && it->b[0] && f->a && f->a[0]) shadow_field_register(it->b, f->a);
+            if (it->a && it->a[0] && f->a && f->a[0]) shadow_field_register(it->a, f->a);
             if (!cemit_fmt(out, "%sint %s;\n", find, f->a)) return 0;
         } else if (f->kind == AST_FIELD_SIMPLE) {
             char fty[160];
-            if (f->e[0] && strcmp(f->e, "raw") == 0) {
+            if (f->e && f->e[0] && strcmp(ast_slot(f->e), "raw") == 0) {
                 char* heap = NULL;
                 char small[2048];
                 const char* raw =
                     shadow_raw_field_cstr(cache, f, small, sizeof(small), &heap);
                 if (!raw) return 0;
-                if (it->b[0] && raw[0]) shadow_field_register_raw(it->b, raw);
-                if (it->a[0] && raw[0]) shadow_field_register_raw(it->a, raw);
+                if (it->b && it->b[0] && raw[0]) shadow_field_register_raw(it->b, raw);
+                if (it->a && it->a[0] && raw[0]) shadow_field_register_raw(it->a, raw);
                 if (!cemit_str(out, find) || !cemit_str(out, raw) ||
                     !cemit_str(out, ";\n")) {
                     free(heap);
@@ -674,28 +674,28 @@ static int shadow_emit_typedef_struct(AstNode* it, CEmit* out, TapeCache* cache,
             } else {
                 snprintf(fty, sizeof(fty), "%s", f->a);
                 shadow_rewrite_char_slice_types(fty, sizeof(fty));
-                if (it->b[0] && f->b[0])
+                if (it->b && it->b[0] && f->b && f->b[0])
                     shadow_field_register_ex(it->b, f->b, fty[0] ? fty : NULL);
-                if (it->a[0] && f->b[0])
+                if (it->a && it->a[0] && f->b && f->b[0])
                     shadow_field_register_ex(it->a, f->b, fty[0] ? fty : NULL);
-                if (f->e[0] && strcmp(f->e, "as") == 0) {
-                    if (it->b[0] && f->b[0])
+                if (f->e && f->e[0] && strcmp(ast_slot(f->e), "as") == 0) {
+                    if (it->b && it->b[0] && f->b && f->b[0])
                         shadow_as_register(it->b, f->b, fty);
-                    if (it->a[0] && f->b[0])
+                    if (it->a && it->a[0] && f->b && f->b[0])
                         shadow_as_register(it->a, f->b, fty);
                 }
                 if (!cemit_fmt(out, "%s%s %s;\n", find, fty, f->b))
                     return 0;
             }
         } else if (f->kind == AST_SLICE_VAR) {
-            if (it->b[0] && f->a[0]) shadow_field_register(it->b, f->a);
+            if (it->b && it->b[0] && f->a && f->a[0]) shadow_field_register(it->b, f->a);
             if (!cemit_fmt(out, "%s%s %s;\n", find, shadow_slice_ty("int"), f->a))
                 return 0;
         } else if (f->kind == AST_CHAN_VAR) {
             const char* cty = shadow_chan_handle_ty(f);
-            if (it->b[0] && f->a[0])
+            if (it->b && it->b[0] && f->a && f->a[0])
                 shadow_field_register_ex(it->b, f->a, cty);
-            if (it->a[0] && f->a[0])
+            if (it->a && it->a[0] && f->a && f->a[0])
                 shadow_field_register_ex(it->a, f->a, cty);
             if (!cemit_fmt(out, "%s%s %s;\n", find, cty, f->a)) return 0;
         } else if (f->kind == AST_RESULT_LOCAL) {
@@ -703,18 +703,18 @@ static int shadow_emit_typedef_struct(AstNode* it, CEmit* out, TapeCache* cache,
             char ok_host[128];
             shadow_result_ok_buf(ok_host, sizeof(ok_host), f->c);
             shadow_result_name(ok_host, f->b, rname, sizeof(rname));
-            if (it->b[0] && f->a[0])
+            if (it->b && it->b[0] && f->a && f->a[0])
                 shadow_field_register_ex(it->b, f->a, rname);
-            if (it->a[0] && f->a[0])
+            if (it->a && it->a[0] && f->a && f->a[0])
                 shadow_field_register_ex(it->a, f->a, rname);
             if (!cemit_fmt(out, "%s%s %s%s;\n", find, rname, f->a,
-                           f->e[0] ? f->e : ""))
+                           f->e && f->e[0] ? f->e : ""))
                 return 0;
-        } else if (f->kind == AST_RAW_LINE && f->e[0] &&
-                   strcmp(f->e, "ppdir") == 0 && f->a[0]) {
+        } else if (f->kind == AST_RAW_LINE && f->e && f->e[0] &&
+                   strcmp(ast_slot(f->e), "ppdir") == 0 && f->a && f->a[0]) {
             if (!cemit_fmt(out, "%s%s\n", find, f->a)) return 0;
-        } else if (f->kind == AST_RAW_LINE && f->e[0] &&
-                   strcmp(f->e, "raw") == 0) {
+        } else if (f->kind == AST_RAW_LINE && f->e && f->e[0] &&
+                   strcmp(ast_slot(f->e), "raw") == 0) {
             char* heap = NULL;
             char small[2048];
             const char* raw =
@@ -735,7 +735,7 @@ static int shadow_emit_typedef_struct(AstNode* it, CEmit* out, TapeCache* cache,
     }
     if (!cemit_fmt(out, "} %s;\n\n", it->b)) return 0;
     if (!shadow_emit_reflect_field_table(it, out)) return 0;
-    if (it->b[0] &&
+    if (it->b && it->b[0] &&
         !shadow_restrict_emit_named_glob_for(out, "", it->b))
         return 0;
     return 1;
@@ -755,7 +755,7 @@ static int shadow_node_needs_uw(AstNode* n) {
     case AST_VAR_UNWRAP:
         return 1; /* bang/qmark paths use err bind and/or `__cc_uw_*` */
     case AST_UFCS_STMT:
-        if (strcmp(n->d, "bang") == 0 || strncmp(n->d, "bang_block:", 11) == 0)
+        if (strcmp(ast_slot(n->d), "bang") == 0 || strncmp(ast_slot(n->d), "bang_block:", 11) == 0)
             return 1;
         break;
     case AST_PRINTLN_BANG:
@@ -763,28 +763,28 @@ static int shadow_node_needs_uw(AstNode* n) {
         if (n->nbody > 0) return 1;
         break;
     case AST_CALL_ARGS:
-        if (strcmp(n->c, "bang") == 0 || strcmp(n->c, "bang_stmt") == 0 ||
-            strcmp(n->c, "bang_block") == 0)
+        if (strcmp(ast_slot(n->c), "bang") == 0 || strcmp(ast_slot(n->c), "bang_stmt") == 0 ||
+            strcmp(ast_slot(n->c), "bang_block") == 0)
             return 1;
         break;
     case AST_NURSERY_DESTROY:
         return 1;
     case AST_VAL_DESTROY:
         /* `T x = create() !> @destroy` — try_assign + as-face generic. */
-        if (strstr(n->c, "!>") || strstr(n->c, "?>")) return 1;
+        if (strstr(ast_slot(n->c), "!>") || strstr(ast_slot(n->c), "?>")) return 1;
         break;
     case AST_ERR_SYNTAX:
         return 1;
     default:
         break;
     }
-    if (strstr(n->a, "?>") || strstr(n->b, "?>") || strstr(n->c, "?>") ||
-        strstr(n->d, "?>") || strstr(n->e, "?>"))
+    if (strstr(ast_slot(n->a), "?>") || strstr(ast_slot(n->b), "?>") || strstr(ast_slot(n->c), "?>") ||
+        strstr(ast_slot(n->d), "?>") || strstr(ast_slot(n->e), "?>"))
         return 1;
-    if (strstr(n->a, "!>") || strstr(n->b, "!>") || strstr(n->c, "!>") ||
-        strstr(n->d, "!>") || strstr(n->e, "!>"))
+    if (strstr(ast_slot(n->a), "!>") || strstr(ast_slot(n->b), "!>") || strstr(ast_slot(n->c), "!>") ||
+        strstr(ast_slot(n->d), "!>") || strstr(ast_slot(n->e), "!>"))
         return 1;
-    if (strcmp(n->e, "bang") == 0) return 1; /* return expr !> */
+    if (strcmp(ast_slot(n->e), "bang") == 0) return 1; /* return expr !> */
     for (k = 0; k < n->nbody; k++)
         if (shadow_node_needs_uw(n->body[k])) return 1;
     for (k = 0; k < n->ndbody; k++)
@@ -800,21 +800,21 @@ static int shadow_node_needs_uw(AstNode* n) {
 static int shadow_node_needs_result_api(AstNode* n) {
     int k;
     if (!n) return 0;
-    if (strstr(n->a, "cc_is_ok") || strstr(n->a, "cc_is_err") ||
-        strstr(n->a, "cc_unwrap") || strstr(n->a, "cc_value") ||
-        strstr(n->a, "CC_ERROR") || strstr(n->a, "CC_ERR_") ||
-        strstr(n->b, "cc_is_ok") || strstr(n->b, "cc_is_err") ||
-        strstr(n->b, "cc_unwrap") || strstr(n->b, "cc_value") ||
-        strstr(n->b, "CC_ERROR") || strstr(n->b, "CC_ERR_") ||
-        strstr(n->c, "cc_is_ok") || strstr(n->c, "cc_is_err") ||
-        strstr(n->c, "cc_unwrap") || strstr(n->c, "cc_value") ||
-        strstr(n->c, "CC_ERROR") || strstr(n->c, "CC_ERR_") ||
-        strstr(n->d, "cc_is_ok") || strstr(n->d, "cc_is_err") ||
-        strstr(n->d, "cc_unwrap") || strstr(n->d, "cc_value") ||
-        strstr(n->d, "CC_ERROR") || strstr(n->d, "CC_ERR_") ||
-        strstr(n->e, "cc_is_ok") || strstr(n->e, "cc_is_err") ||
-        strstr(n->e, "cc_unwrap") || strstr(n->e, "cc_value") ||
-        strstr(n->e, "CC_ERROR") || strstr(n->e, "CC_ERR_"))
+    if (strstr(ast_slot(n->a), "cc_is_ok") || strstr(ast_slot(n->a), "cc_is_err") ||
+        strstr(ast_slot(n->a), "cc_unwrap") || strstr(ast_slot(n->a), "cc_value") ||
+        strstr(ast_slot(n->a), "CC_ERROR") || strstr(ast_slot(n->a), "CC_ERR_") ||
+        strstr(ast_slot(n->b), "cc_is_ok") || strstr(ast_slot(n->b), "cc_is_err") ||
+        strstr(ast_slot(n->b), "cc_unwrap") || strstr(ast_slot(n->b), "cc_value") ||
+        strstr(ast_slot(n->b), "CC_ERROR") || strstr(ast_slot(n->b), "CC_ERR_") ||
+        strstr(ast_slot(n->c), "cc_is_ok") || strstr(ast_slot(n->c), "cc_is_err") ||
+        strstr(ast_slot(n->c), "cc_unwrap") || strstr(ast_slot(n->c), "cc_value") ||
+        strstr(ast_slot(n->c), "CC_ERROR") || strstr(ast_slot(n->c), "CC_ERR_") ||
+        strstr(ast_slot(n->d), "cc_is_ok") || strstr(ast_slot(n->d), "cc_is_err") ||
+        strstr(ast_slot(n->d), "cc_unwrap") || strstr(ast_slot(n->d), "cc_value") ||
+        strstr(ast_slot(n->d), "CC_ERROR") || strstr(ast_slot(n->d), "CC_ERR_") ||
+        strstr(ast_slot(n->e), "cc_is_ok") || strstr(ast_slot(n->e), "cc_is_err") ||
+        strstr(ast_slot(n->e), "cc_unwrap") || strstr(ast_slot(n->e), "cc_value") ||
+        strstr(ast_slot(n->e), "CC_ERROR") || strstr(ast_slot(n->e), "CC_ERR_"))
         return 1;
     for (k = 0; k < n->nbody; k++)
         if (shadow_node_needs_result_api(n->body[k])) return 1;
@@ -1442,8 +1442,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             if (ft && ft->bytes)
                 shadow_tape_logical_at(ft, items[i]->tok_off, ofile,
                                        sizeof(ofile), &oline);
-            shadow_gfac_add(items[i]->a, atoi(items[i]->b), items[i]->d,
-                            items[i]->c[0] == 'e' /* extend */, ofile, oline);
+            shadow_gfac_add(items[i]->a, atoi(ast_slot(items[i]->b)), items[i]->d,
+                            (items[i]->c && items[i]->c[0] == 'e') /* extend */, ofile, oline);
         }
     }
     /* `Name::[args]` rewritten at parse — drain those instance requests. */
@@ -1496,13 +1496,13 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             if (!shadow_seen_result_add(seen_ok, seen_err, &nseen, ok_host,
                                         items[i]->b))
                 return 0;
-            if (items[i]->kind == AST_RESULT_FN && items[i]->a[0]) {
+            if (items[i]->kind == AST_RESULT_FN && items[i]->a && items[i]->a[0]) {
                 shadow_result_name(ok_host, items[i]->b, rname, sizeof(rname));
                 shadow_rfn_register(items[i]->a, rname, items[i]->b,
                                     items[i]->forced_seq);
             }
         }
-        if (items[i]->kind == AST_TYPEDEF_INT && items[i]->c[0] && items[i]->d[0]) {
+        if (items[i]->kind == AST_TYPEDEF_INT && items[i]->c && items[i]->c[0] && items[i]->d && items[i]->d[0]) {
             if (!shadow_seen_result_add(seen_ok, seen_err, &nseen, items[i]->c,
                                         items[i]->d))
                 return 0;
@@ -1511,7 +1511,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         if (items[i]->kind == AST_CHAN_VAR) {
             need_chan = 1;
             /* Result-typed channel elems: ensure CCResult_* specs exist. */
-            if (strncmp(items[i]->d, "CCResult_", 9) == 0) {
+            if (strncmp(ast_slot(items[i]->d), "CCResult_", 9) == 0) {
                 if (!shadow_seen_add_concrete(seen_ok, seen_err, &nseen,
                                               items[i]->d))
                     return 0;
@@ -1524,7 +1524,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 if (kid->kind == AST_SLICE_VAR) need_slice = 1;
                 if (kid->kind == AST_CHAN_VAR) {
                     need_chan = 1;
-                    if (strncmp(kid->d, "CCResult_", 9) == 0) {
+                    if (strncmp(ast_slot(kid->d), "CCResult_", 9) == 0) {
                         if (!shadow_seen_add_concrete(seen_ok, seen_err,
                                                       &nseen, kid->d))
                             return 0;
@@ -1644,7 +1644,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         for (int vi = 0; vi < n; vi++) {
             const char* vp;
             if (items[vi]->kind != AST_AT_STMT) continue;
-            if (strcmp(items[vi]->a, "variant") != 0) continue;
+            if (strcmp(ast_slot(items[vi]->a), "variant") != 0) continue;
             vp = items[vi]->c;
             while (*vp) {
                 char arm_ty[96];
@@ -1667,8 +1667,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 for (j2 = 0; j2 < n; j2++) {
                     const char* a2;
                     if (items[j2]->kind == AST_TYPEDEF_STRUCT) {
-                        if (strcmp(items[j2]->e, "hoist") == 0) continue;
-                        a2 = items[j2]->b[0] ? items[j2]->b : items[j2]->a;
+                        if (strcmp(ast_slot(items[j2]->e), "hoist") == 0) continue;
+                        a2 = items[j2]->b && items[j2]->b[0] ? items[j2]->b : items[j2]->a;
                         if (!a2[0] || strcmp(a2, arm_ty) != 0) continue;
                         if (!shadow_emit_preamble(items[j2], out, cache))
                             return 0;
@@ -1678,10 +1678,10 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                         if (!shadow_emit_typedef_struct(items[j2], out, cache,
                                                        &line_ctx))
                             return 0;
-                        snprintf(items[j2]->e, sizeof(items[j2]->e), "hoist");
+                        shadow_slot_set(&items[j2]->e, "hoist");
                     } else if (items[j2]->kind == AST_TYPEDEF_INT) {
-                        if (strcmp(items[j2]->e, "vech") == 0) continue;
-                        if (!items[j2]->a[0] || strcmp(items[j2]->a, arm_ty) != 0)
+                        if (strcmp(ast_slot(items[j2]->e), "vech") == 0) continue;
+                        if (!(items[j2]->a && items[j2]->a[0]) || strcmp(ast_slot(items[j2]->a), arm_ty) != 0)
                             continue;
                         if (!shadow_emit_preamble(items[j2], out, cache))
                             return 0;
@@ -1689,7 +1689,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                         if (!cemit_fmt(out, "typedef %s %s;\n",
                                        items[j2]->b, items[j2]->a))
                             return 0;
-                        snprintf(items[j2]->e, sizeof(items[j2]->e), "vech");
+                        shadow_slot_set(&items[j2]->e, "vech");
                     }
                 }
             }
@@ -1703,7 +1703,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             for (int i = 0; i < n; i++) {
                 const char* vp;
                 if (items[i]->kind != AST_AT_STMT) continue;
-                if (strcmp(items[i]->a, "variant") != 0) continue;
+                if (strcmp(ast_slot(items[i]->a), "variant") != 0) continue;
                 vp = items[i]->c;
                 while (*vp) {
                     char arm_ty[96];
@@ -1748,8 +1748,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             AstNode* vit;
             ShadowCtx vctx;
             if (items[i]->kind != AST_AT_STMT) continue;
-            if (strcmp(items[i]->a, "variant") != 0) continue;
-            if (items[i]->e[0] && strcmp(items[i]->e, "hoist") == 0) continue;
+            if (strcmp(ast_slot(items[i]->a), "variant") != 0) continue;
+            if (items[i]->e && items[i]->e[0] && strcmp(ast_slot(items[i]->e), "hoist") == 0) continue;
             vit = items[i];
             if (!shadow_emit_preamble(vit, out, cache)) return 0;
             vit->lead_len = 0;
@@ -1757,18 +1757,18 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             memset(&vctx, 0, sizeof(vctx));
             vctx.cache = cache;
             if (!shadow_emit_stmt_ctx(vit, out, &vctx, "", 0)) return 0;
-            snprintf(vit->e, sizeof(vit->e), "hoist");
+            do { char __ast_tmp[4096]; snprintf(__ast_tmp, sizeof(__ast_tmp), "hoist"); shadow_slot_set(&vit->e, __ast_tmp); } while (0);
         }
         for (int i = 0; i < n; i++) {
             if (items[i]->kind == AST_TYPEDEF_INT) {
                 int needed = 0;
                 int vi;
-                if (items[i]->e[0] && strcmp(items[i]->e, "vech") == 0)
+                if (items[i]->e && items[i]->e[0] && strcmp(ast_slot(items[i]->e), "vech") == 0)
                     continue;
                 /* Result aliases (`typedef Ok!>Err Alias`) — not every INT
                  * typedef. Hoisting `typedef CompressedResult* Ptr` before the
                  * struct leaves an incomplete type (pigz_cc). */
-                if (items[i]->c[0] && items[i]->d[0]) needed = 1;
+                if (items[i]->c && items[i]->c[0] && items[i]->d && items[i]->d[0]) needed = 1;
                 /* Hoist when this alias is a Vec/Map element type name. */
                 for (vi = 0; vi < g_shadow_nvecs && !needed; vi++)
                     if (strcmp(g_shadow_vecs[vi], items[i]->a) == 0) needed = 1;
@@ -1776,20 +1776,20 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 if (!shadow_emit_preamble(items[i], out, cache)) return 0;
                 items[i]->lead_len = 0;
                 if (!shadow_emit_line(out, &line_ctx, items[i], "")) return 0;
-                if (items[i]->c[0] && items[i]->d[0]) {
+                if (items[i]->c && items[i]->c[0] && items[i]->d && items[i]->d[0]) {
                     char rname[256];
                     shadow_result_name(items[i]->c, items[i]->d, rname,
                                        sizeof(rname));
                     if (!cemit_fmt(out, "typedef %s %s;\n", rname, items[i]->a))
                         return 0;
-                } else if (items[i]->b[0]) {
+                } else if (items[i]->b && items[i]->b[0]) {
                     /* ArrayMap_/Map_/CCVec_ aliases need DECL macros first —
                      * hoisting them early leaves RedisDbMap as an unknown
                      * incomplete type. */
-                    if (strncmp(items[i]->b, "ArrayMap_", 9) == 0 ||
-                        strncmp(items[i]->b, "Map_", 4) == 0 ||
-                        strncmp(items[i]->b, "CCVec_", 6) == 0 ||
-                        strncmp(items[i]->b, "CCSlice", 7) == 0)
+                    if (strncmp(ast_slot(items[i]->b), "ArrayMap_", 9) == 0 ||
+                        strncmp(ast_slot(items[i]->b), "Map_", 4) == 0 ||
+                        strncmp(ast_slot(items[i]->b), "CCVec_", 6) == 0 ||
+                        strncmp(ast_slot(items[i]->b), "CCSlice", 7) == 0)
                         continue;
                     if (!cemit_fmt(out, "typedef %s %s;\n", items[i]->b,
                                    items[i]->a))
@@ -1797,7 +1797,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 } else if (!cemit_fmt(out, "typedef int %s;\n", items[i]->a)) {
                     return 0;
                 }
-                snprintf(items[i]->e, sizeof(items[i]->e), "vech");
+                shadow_slot_set(&items[i]->e, "vech");
             }
             if (items[i]->kind == AST_TYPEDEF_STRUCT) {
                 /* Hoist Result Ok/Err arms, and factory-needed structs
@@ -1807,7 +1807,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                  * (`Table !>(CCError)` with a Vec field) and host-cc then
                  * suggested CCSlice_T for the still-unknown CCVec_T. */
                 const char* alias =
-                    items[i]->b[0] ? items[i]->b : items[i]->a;
+                    items[i]->b && items[i]->b[0] ? items[i]->b : items[i]->a;
                 int needed = 0;
                 int needed_result = 0;
                 int j;
@@ -1846,7 +1846,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                         for (j2 = 0; j2 < n; j2++) {
                             const char* a2;
                             if (items[j2]->kind == AST_TYPEDEF_ENUM) {
-                                if (strcmp(items[j2]->e, "hoist") == 0)
+                                if (strcmp(ast_slot(items[j2]->e), "hoist") == 0)
                                     continue;
                                 a2 = items[j2]->b;
                                 if (!a2[0] || strcmp(a2, fty) != 0) continue;
@@ -1856,28 +1856,27 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                                 if (!shadow_emit_line(out, &line_ctx, items[j2],
                                                        ""))
                                     return 0;
-                                if (items[j2]->a[0]) {
+                                if (items[j2]->a && items[j2]->a[0]) {
                                     if (!cemit_fmt(out, "typedef enum %s {\n",
                                                    items[j2]->a))
                                         return 0;
                                 } else if (!cemit_str(out, "typedef enum {\n")) {
                                     return 0;
                                 }
-                                if (items[j2]->d[0] &&
+                                if (items[j2]->d && items[j2]->d[0] &&
                                     !cemit_str(out, items[j2]->d))
                                     return 0;
-                                if (items[j2]->d[0] && !cemit_str(out, "\n"))
+                                if (items[j2]->d && items[j2]->d[0] && !cemit_str(out, "\n"))
                                     return 0;
                                 if (!cemit_fmt(out, "} %s;\n\n", items[j2]->b))
                                     return 0;
-                                snprintf(items[j2]->e, sizeof(items[j2]->e),
-                                         "hoist");
+                                shadow_slot_set(&items[j2]->e, "hoist");
                                 continue;
                             }
                             if (items[j2]->kind != AST_TYPEDEF_STRUCT)
                                 continue;
-                            if (strcmp(items[j2]->e, "hoist") == 0) continue;
-                            a2 = items[j2]->b[0] ? items[j2]->b
+                            if (strcmp(ast_slot(items[j2]->e), "hoist") == 0) continue;
+                            a2 = items[j2]->b && items[j2]->b[0] ? items[j2]->b
                                                  : items[j2]->a;
                             if (strcmp(a2, fty) != 0) continue;
                             if (!shadow_emit_preamble(items[j2], out, cache))
@@ -1889,8 +1888,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                             if (!shadow_emit_typedef_struct(items[j2], out,
                                                             cache, &line_ctx))
                                 return 0;
-                            snprintf(items[j2]->e, sizeof(items[j2]->e),
-                                     "hoist");
+                            shadow_slot_set(&items[j2]->e, "hoist");
                         }
                     }
                 }
@@ -1899,7 +1897,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 if (!shadow_emit_line(out, &line_ctx, items[i], "")) return 0;
                 if (!shadow_emit_typedef_struct(items[i], out, cache, &line_ctx))
                     return 0;
-                snprintf(items[i]->e, sizeof(items[i]->e), "hoist");
+                shadow_slot_set(&items[i]->e, "hoist");
             } else if (items[i]->kind == AST_TYPEDEF_FN_PTR) {
                 char params[512];
                 shadow_fnptr_ty_register(items[i]->b);
@@ -1907,7 +1905,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 items[i]->lead_len = 0;
                 if (!shadow_emit_line(out, &line_ctx, items[i], "")) return 0;
                 snprintf(params, sizeof(params), "%s",
-                         items[i]->c[0] ? items[i]->c : "void");
+                         items[i]->c && items[i]->c[0] ? items[i]->c : "void");
                 if (!cemit_fmt(out, "typedef %s (*%s)(%s);\n",
                                items[i]->a, items[i]->b, params))
                     return 0;
@@ -1923,10 +1921,10 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             const char* alias;
             int needed = 0;
             if (!it || it->kind != AST_TYPEDEF_STRUCT) continue;
-            if (strcmp(it->e, "hoist") == 0 || strcmp(it->e, "vech") == 0)
+            if (strcmp(ast_slot(it->e), "hoist") == 0 || strcmp(ast_slot(it->e), "vech") == 0)
                 continue;
-            alias = it->b[0] ? it->b : it->a;
-            if (!alias[0]) continue;
+            alias = it->b && it->b[0] ? it->b : it->a;
+            if (!alias || !alias[0]) continue;
             for (vi = 0; vi < g_shadow_nvecs; vi++) {
                 if (strcmp(g_shadow_vecs[vi], alias) == 0) {
                     needed = 1;
@@ -1958,7 +1956,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             if (!shadow_emit_typedef_struct(it, out, cache, &line_ctx))
                 return 0;
             /* Skip duplicate emit in the main loop. */
-            snprintf(it->e, sizeof(it->e), "vech");
+            shadow_slot_set(&it->e, "vech");
         }
     }
     /* Factory bodies may land before helpers that live next to a hoisted
@@ -1974,7 +1972,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             AstNode* td = items[i];
             const char* alias;
             if (!td || td->kind != AST_TYPEDEF_STRUCT) continue;
-            alias = td->b[0] ? td->b : td->a;
+            alias = td->b && td->b[0] ? td->b : td->a;
             if (!alias[0] || !shadow_alias_is_factory_type_arg(alias)) continue;
             for (j = 0; j < n; j++) {
                 AstNode* fn = items[j];
@@ -1983,16 +1981,16 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 if (fn->kind == AST_STATIC_FN || fn->kind == AST_FN_PROTO) {
                     const char* pref =
                         (fn->kind == AST_FN_PROTO &&
-                         strcmp(fn->e, "extern") == 0)
+                         strcmp(ast_slot(fn->e), "extern") == 0)
                             ? "extern "
                         : (fn->kind == AST_STATIC_FN)
-                            ? ((fn->e[0] && strcmp(fn->e, "inline") == 0)
+                            ? ((fn->e && fn->e[0] && strcmp(ast_slot(fn->e), "inline") == 0)
                                    ? "static inline "
                                    : "static ")
                             : "";
                     char params_buf[512];
                     char ret_buf[192];
-                    params = fn->c[0] ? fn->c : "void";
+                    params = fn->c && fn->c[0] ? fn->c : "void";
                     if (!shadow_params_mention_type(params, alias)) continue;
                     snprintf(params_buf, sizeof(params_buf), "%s", params);
                     shadow_normalize_chan_params(params_buf,
@@ -2046,16 +2044,16 @@ ginst_emit_pass:
                 int ai;
                 for (ai = 0; ai < n; ai++) {
                     if (items[ai]->kind != AST_TYPEDEF_INT) continue;
-                    if (strcmp(items[ai]->e, "vech") == 0) continue;
-                    if (!items[ai]->a[0] || strcmp(items[ai]->a, t) != 0)
+                    if (strcmp(ast_slot(items[ai]->e), "vech") == 0) continue;
+                    if (!(items[ai]->a && items[ai]->a[0]) || strcmp(ast_slot(items[ai]->a), t) != 0)
                         continue;
-                    if (!items[ai]->b[0] ||
-                        strncmp(items[ai]->b, "CCVec_", 6) != 0)
+                    if (!(items[ai]->b && items[ai]->b[0]) ||
+                        strncmp(ast_slot(items[ai]->b), "CCVec_", 6) != 0)
                         continue;
                     if (!cemit_fmt(out, "typedef %s %s;\n",
                                    items[ai]->b, items[ai]->a))
                         return 0;
-                    snprintf(items[ai]->e, sizeof(items[ai]->e), "vech");
+                    shadow_slot_set(&items[ai]->e, "vech");
                 }
             }
         }
@@ -2567,13 +2565,13 @@ ginst_emit_pass:
             for (hi = 0; hi < n; hi++) {
                 if (shadow_item_is_type_decl(items[hi])) break;
                 if (!shadow_raw_is_quoted_include(items[hi])) continue;
-                if (items[hi]->e[0] && strcmp(items[hi]->e, "ginc") == 0)
+                if (items[hi]->e && items[hi]->e[0] && strcmp(ast_slot(items[hi]->e), "ginc") == 0)
                     continue;
                 if (!shadow_emit_line(out, &line_ctx, items[hi], ""))
                     return 0;
                 if (!shadow_emit_quoted_include_text(out, items[hi]->a))
                     return 0;
-                snprintf(items[hi]->e, sizeof(items[hi]->e), "ginc");
+                shadow_slot_set(&items[hi]->e, "ginc");
                 any_quote = 1;
             }
         }
@@ -2595,9 +2593,9 @@ ginst_after_quotes:
         for (int k = 0; k < it->nkids; k++) {
             AstNode* s = it->kids[k];
             if (!s) continue;
-            if (strstr(s->a, "__spawn_into") || strstr(s->b, "__spawn_into") ||
-                strstr(s->c, "__spawn_into") || strstr(s->d, "__spawn_into") ||
-                strstr(s->e, "__spawn_into")) {
+            if (strstr(ast_slot(s->a), "__spawn_into") || strstr(ast_slot(s->b), "__spawn_into") ||
+                strstr(ast_slot(s->c), "__spawn_into") || strstr(ast_slot(s->d), "__spawn_into") ||
+                strstr(ast_slot(s->e), "__spawn_into")) {
                 need_spawn_into = 1;
                 break;
             }
@@ -2605,9 +2603,9 @@ ginst_after_quotes:
                 for (int b = 0; b < s->nbody; b++) {
                     AstNode* t = s->body[b];
                     if (!t) continue;
-                    if (strstr(t->a, "__spawn_into") || strstr(t->b, "__spawn_into") ||
-                        strstr(t->c, "__spawn_into") || strstr(t->d, "__spawn_into") ||
-                        strstr(t->e, "__spawn_into")) {
+                    if (strstr(ast_slot(t->a), "__spawn_into") || strstr(ast_slot(t->b), "__spawn_into") ||
+                        strstr(ast_slot(t->c), "__spawn_into") || strstr(ast_slot(t->d), "__spawn_into") ||
+                        strstr(ast_slot(t->e), "__spawn_into")) {
                         need_spawn_into = 1;
                         break;
                     }
@@ -2680,18 +2678,18 @@ ginst_after_quotes:
         }
         if (!shadow_emit_preamble(it, out, cache)) return 0;
         it->lead_len = 0;
-        if (it->e[0] && strcmp(it->e, "ginc") == 0)
+        if (it->e && it->e[0] && strcmp(ast_slot(it->e), "ginc") == 0)
             continue;
         if (!shadow_emit_line(out, &line_ctx, it, "")) return 0;
         switch (it->kind) {
         case AST_TYPEDEF_INT:
-            if (strcmp(it->e, "vech") == 0) break; /* hoisted before Vec/Map */
-            if (it->c[0] && it->d[0]) {
+            if (strcmp(ast_slot(it->e), "vech") == 0) break; /* hoisted before Vec/Map */
+            if (it->c && it->c[0] && it->d && it->d[0]) {
                 char rname[256];
                 shadow_result_name(it->c, it->d, rname, sizeof(rname));
                 if (!cemit_fmt(out, "typedef %s %s;\n", rname, it->a))
                     return 0;
-            } else if (it->b[0]) {
+            } else if (it->b && it->b[0]) {
                 shadow_register_mangled_ty(it->b);
                 shadow_ginst_need_from_type(it->b);
                 shadow_td_alias_register(it->a, it->b);
@@ -2702,22 +2700,22 @@ ginst_after_quotes:
             }
             break;
         case AST_TYPEDEF_STRUCT:
-            if (strcmp(it->e, "hoist") == 0 || strcmp(it->e, "vech") == 0)
+            if (strcmp(ast_slot(it->e), "hoist") == 0 || strcmp(ast_slot(it->e), "vech") == 0)
                 break; /* already emitted before Result/Vec macros */
             if (!shadow_emit_typedef_struct(it, out, cache, &line_ctx))
                 return 0;
             break;
         case AST_TYPEDEF_ENUM: {
-            if (strcmp(it->e, "hoist") == 0)
+            if (strcmp(ast_slot(it->e), "hoist") == 0)
                 break; /* already emitted before Result specs */
             /* Enumerators can exceed cemit_fmt's 512 temp — emit in pieces. */
-            if (it->a[0]) {
+            if (it->a && it->a[0]) {
                 if (!cemit_fmt(out, "typedef enum %s {\n", it->a)) return 0;
             } else {
                 if (!cemit_str(out, "typedef enum {\n")) return 0;
             }
-            if (it->d[0] && !cemit_str(out, it->d)) return 0;
-            if (it->d[0] && !cemit_str(out, "\n")) return 0;
+            if (it->d && it->d[0] && !cemit_str(out, it->d)) return 0;
+            if (it->d && it->d[0] && !cemit_str(out, "\n")) return 0;
             if (!cemit_fmt(out, "} %s;\n\n", it->b)) return 0;
             break;
         }
@@ -2727,7 +2725,7 @@ ginst_after_quotes:
             {
                 char params[512];
                 snprintf(params, sizeof(params), "%s",
-                         it->c[0] ? it->c : "void");
+                         it->c && it->c[0] ? it->c : "void");
                 if (!cemit_fmt(out, "typedef %s (*%s)(%s);\n", it->a, it->b,
                                params))
                     return 0;
@@ -2735,7 +2733,7 @@ ginst_after_quotes:
             break;
         case AST_TYPEDEF_CHAN:
             shadow_chan_register_node(it);
-            if (it->c[0] == '<') {
+            if ((it->c && it->c[0] == '<')) {
                 if (!cemit_fmt(out, "typedef CCChanRx %s;\n\n", it->a)) return 0;
             } else {
                 if (!cemit_fmt(out, "typedef CCChanTx %s;\n\n", it->a)) return 0;
@@ -2745,14 +2743,14 @@ ginst_after_quotes:
             char* heap = NULL;
             char small[2048];
             char ret[192];
-            const char* raw = it->c[0] ? it->c : NULL;
+            const char* raw = it->c && it->c[0] ? it->c : NULL;
             const char* params;
             const char* pref =
-                (strcmp(it->e, "extern") == 0) ? "extern "
-                : (strcmp(it->e, "static inline") == 0) ? "static inline "
-                : (strcmp(it->e, "static") == 0) ? "static "
+                (strcmp(ast_slot(it->e), "extern") == 0) ? "extern "
+                : (strcmp(ast_slot(it->e), "static inline") == 0) ? "static inline "
+                : (strcmp(ast_slot(it->e), "static") == 0) ? "static "
                                                        : "";
-            snprintf(ret, sizeof(ret), "%s", it->a[0] ? it->a : "int");
+            snprintf(ret, sizeof(ret), "%s", it->a && it->a[0] ? it->a : "int");
             shadow_rewrite_slice_types(ret, sizeof(ret));
             if (!raw) {
                 raw = shadow_raw_field_cstr(cache, it, small, sizeof(small),
@@ -2791,13 +2789,13 @@ ginst_after_quotes:
             shadow_result_name(ok_host, it->b, rname, sizeof(rname));
             shadow_rfn_register(it->a, rname, it->b, it->forced_seq);
             const char* pref =
-                (strcmp(it->e, "static inline") == 0) ? "static inline "
-                : (strcmp(it->e, "static") == 0)      ? "static "
+                (strcmp(ast_slot(it->e), "static inline") == 0) ? "static inline "
+                : (strcmp(ast_slot(it->e), "static") == 0)      ? "static "
                                                        : "";
             /* Match AstNode.d (4096): multi-line redis Result protos exceed 288. */
             char dparams[4096];
             snprintf(dparams, sizeof(dparams), "%s",
-                     it->d[0] ? it->d : "void");
+                     it->d && it->d[0] ? it->d : "void");
             shadow_rewrite_slice_types(dparams, sizeof(dparams));
             shadow_normalize_chan_params(dparams, sizeof(dparams));
             if (it->nkids == 0) {
@@ -2979,24 +2977,24 @@ ginst_after_quotes:
                                  it->b);
                 }
             }
-            snprintf(ret, sizeof(ret), "%s", it->a[0] ? it->a : "int");
+            snprintf(ret, sizeof(ret), "%s", it->a && it->a[0] ? it->a : "int");
             shadow_rewrite_slice_types(ret, sizeof(ret));
             snprintf(params, sizeof(params), "%s",
-                     it->c[0] ? it->c : "void");
+                     it->c && it->c[0] ? it->c : "void");
             shadow_rewrite_slice_types(params, sizeof(params));
             shadow_rewrite_generic_types_text(params, sizeof(params));
             shadow_normalize_chan_params(params, sizeof(params));
             const char* inl =
-                (it->e[0] && strstr(it->e, "inline")) ? "inline " : "";
+                (it->e && it->e[0] && strstr(ast_slot(it->e), "inline")) ? "inline " : "";
             /* Keep grammar emit's post-`static` placement (CC-parse-safe). */
             const char* unused_attr =
-                (it->e[0] && strstr(it->e, "unused"))
+                (it->e && it->e[0] && strstr(ast_slot(it->e), "unused"))
                     ? "__attribute__((unused)) "
                     : "";
             /* Schema key MPH helpers (`Type__fk_*`) need forced inlining into
              * opaque __fill — plain `inline` leaves an out-of-line call. */
             const char* always_attr =
-                (it->e[0] && strstr(it->e, "always_inline"))
+                (it->e && it->e[0] && strstr(ast_slot(it->e), "always_inline"))
                     ? "__attribute__((always_inline)) "
                     : "";
             /* One-liner wrapper before emitting `{` + newline. */
@@ -3007,9 +3005,9 @@ ginst_after_quotes:
                 char fn[96];
                 int one_mark;
                 shadow_emit_expr_text(c, c->b, args, sizeof(args), NULL);
-                if (strcmp(c->a, "println") == 0)
+                if (strcmp(ast_slot(c->a), "println") == 0)
                     snprintf(fn, sizeof(fn), "cc_println");
-                else if (strcmp(c->a, "eprintln") == 0)
+                else if (strcmp(ast_slot(c->a), "eprintln") == 0)
                     snprintf(fn, sizeof(fn), "cc_eprintln");
                 else
                     snprintf(fn, sizeof(fn), "%s", c->a);
@@ -3033,7 +3031,7 @@ ginst_after_quotes:
                     return 0;
                 break;
             }
-            if (it->d[0] && it->nkids == 0 && strchr(it->d, '\n') == NULL) {
+            if (it->d && it->d[0] && it->nkids == 0 && strchr(ast_slot(it->d), '\n') == NULL) {
                 char body[2048];
                 int one_mark;
                 shadow_rewrite_ufcs(body, sizeof(body), it->d, NULL);
@@ -3052,7 +3050,7 @@ ginst_after_quotes:
                     return 0;
                 break;
             }
-            if (it->d[0] && it->nkids == 0) {
+            if (it->d && it->d[0] && it->nkids == 0) {
                 if (!cemit_fmt(out, "static %s%s%s%s %s(%s) {\n", unused_attr,
                                always_attr, inl, ret, it->b, params))
                     return 0;
@@ -3214,13 +3212,13 @@ ginst_after_quotes:
         case AST_STATIC_VAR: {
             char ty[160];
             const char* pref =
-                (strcmp(it->e, "global") == 0) ? "" : "static ";
+                (strcmp(ast_slot(it->e), "global") == 0) ? "" : "static ";
             snprintf(ty, sizeof(ty), "%s", it->a);
-            if (it->d[0]) {
-                if (it->c[0] == '*') {
+            if (it->d && it->d[0]) {
+                if ((it->c && it->c[0] == '*')) {
                     if (!cemit_fmt(out, "%s%s* %s = %s;\n", pref, ty, it->b, it->d))
                         return 0;
-                } else if (it->c[0] == '[') {
+                } else if ((it->c && it->c[0] == '[')) {
                     if (!cemit_fmt(out, "%s%s %s%s = %s;\n", pref, ty, it->b, it->c,
                                    it->d))
                         return 0;
@@ -3228,9 +3226,9 @@ ginst_after_quotes:
                     if (!cemit_fmt(out, "%s%s %s = %s;\n", pref, ty, it->b, it->d))
                         return 0;
                 }
-            } else if (it->c[0] == '*') {
+            } else if ((it->c && it->c[0] == '*')) {
                 if (!cemit_fmt(out, "%s%s* %s;\n", pref, ty, it->b)) return 0;
-            } else if (it->c[0] == '[') {
+            } else if ((it->c && it->c[0] == '[')) {
                 if (!cemit_fmt(out, "%s%s %s%s;\n", pref, ty, it->b, it->c)) return 0;
             } else {
                 if (!cemit_fmt(out, "%s%s %s;\n", pref, ty, it->b)) return 0;
@@ -3304,7 +3302,7 @@ ginst_after_quotes:
                 ctx.defer_cleanup = ndefers > 0;
                 /* Soft-return cleanup for any return type (void skips retval). */
                 {
-                    const char* rty = it->e[0] ? it->e : "int";
+                    const char* rty = it->e && it->e[0] ? it->e : "int";
                     ctx.soft_ret_ty = rty;
                     ctx.goto_cleanup = (ndestroys > 0 || ndefers > 0);
                 }
@@ -3319,7 +3317,7 @@ ginst_after_quotes:
                             {
                                 char __diag[320];
                                 snprintf(__diag, sizeof(__diag), "closure caps proto failed in '%s' (spawn %d caps='%s')", it->a, s,
-                                    spawns[s]->e[0] ? spawns[s]->e : "");
+                                    spawns[s]->e && spawns[s]->e[0] ? spawns[s]->e : "");
                                 shadow_emit_err_loc(cache, it, NULL, 0, __diag);
                             }
                             bind_ok = 0;
@@ -3355,14 +3353,14 @@ ginst_after_quotes:
                 const char* rty;
                 char params[512];
                 snprintf(rty_buf, sizeof(rty_buf), "%s",
-                         it->e[0] ? it->e : "int");
+                         it->e && it->e[0] ? it->e : "int");
                 shadow_rewrite_slice_types(rty_buf, sizeof(rty_buf));
                 rty = rty_buf;
                 /* Host linkers require `int main`; coerce void main. */
-                if (strcmp(it->a, "main") == 0 && strcmp(rty, "void") == 0)
+                if (strcmp(ast_slot(it->a), "main") == 0 && strcmp(rty, "void") == 0)
                     rty = "int";
                 params[0] = 0;
-                if (it->b[0]) {
+                if (it->b && it->b[0]) {
                     snprintf(params, sizeof(params), "%s", it->b);
                     shadow_rewrite_slice_types(params, sizeof(params));
                     shadow_rewrite_generic_types_text(params, sizeof(params));
@@ -3409,8 +3407,8 @@ ginst_after_quotes:
                     bind_ok = 0;
                 }
                 /* void main coerced to int — ensure a return. */
-                if (bind_ok && strcmp(it->a, "main") == 0 && it->e[0] &&
-                    strcmp(it->e, "void") == 0) {
+                if (bind_ok && strcmp(ast_slot(it->a), "main") == 0 && it->e && it->e[0] &&
+                    strcmp(ast_slot(it->e), "void") == 0) {
                     if (!cemit_fmt(out, "%sreturn 0;\n", body_ind)) bind_ok = 0;
                 }
                 if (bind_ok &&
@@ -3434,8 +3432,8 @@ ginst_after_quotes:
             break;
         }
         case AST_STRUCT: {
-            if (strcmp(it->e, "fwd") == 0) {
-                if (it->d[0]) {
+            if (strcmp(ast_slot(it->e), "fwd") == 0) {
+                if (it->d && it->d[0]) {
                     if (!cemit_fmt(out, "struct %s; %s\n", it->a, it->d)) return 0;
                 } else if (!cemit_fmt(out, "struct %s;\n", it->a)) {
                     return 0;
@@ -3449,7 +3447,7 @@ ginst_after_quotes:
                 if (f->kind == AST_FIELD_INT) {
                     if (!cemit_fmt(out, "%sint %s;\n", find, f->a)) return 0;
                 } else if (f->kind == AST_FIELD_SIMPLE) {
-                    if (f->e[0] && strcmp(f->e, "raw") == 0) {
+                    if (f->e && f->e[0] && strcmp(ast_slot(f->e), "raw") == 0) {
                         char* heap = NULL;
                         char small[2048];
                         const char* raw = shadow_raw_field_cstr(
@@ -3462,8 +3460,8 @@ ginst_after_quotes:
                         }
                         free(heap);
                     } else {
-                        if (f->e[0] && strcmp(f->e, "as") == 0 && it->a[0] &&
-                            f->b[0])
+                        if (f->e && f->e[0] && strcmp(ast_slot(f->e), "as") == 0 && it->a && it->a[0] &&
+                            f->b && f->b[0])
                             shadow_as_register(it->a, f->b, f->a);
                         if (!cemit_fmt(out, "%s%s %s;\n", find, f->a, f->b))
                             return 0;
@@ -3474,15 +3472,15 @@ ginst_after_quotes:
                         return 0;
                 } else if (f->kind == AST_CHAN_VAR) {
                     const char* cty = shadow_chan_handle_ty(f);
-                    if (it->a[0] && f->a[0])
+                    if (it->a && it->a[0] && f->a && f->a[0])
                         shadow_field_register_ex(it->a, f->a, cty);
                     if (!cemit_fmt(out, "%s%s %s;\n", find, cty, f->a))
                         return 0;
-                } else if (f->kind == AST_RAW_LINE && f->e[0] &&
-                           strcmp(f->e, "ppdir") == 0 && f->a[0]) {
+                } else if (f->kind == AST_RAW_LINE && f->e && f->e[0] &&
+                           strcmp(ast_slot(f->e), "ppdir") == 0 && f->a && f->a[0]) {
                     if (!cemit_fmt(out, "%s%s\n", find, f->a)) return 0;
-                } else if (f->kind == AST_RAW_LINE && f->e[0] &&
-                           strcmp(f->e, "raw") == 0) {
+                } else if (f->kind == AST_RAW_LINE && f->e && f->e[0] &&
+                           strcmp(ast_slot(f->e), "raw") == 0) {
                     char* heap = NULL;
                     char small[2048];
                     const char* raw = shadow_raw_field_cstr(
@@ -3509,7 +3507,7 @@ ginst_after_quotes:
                 return 0;
             break;
         case AST_RAW_LINE:
-            if (it->e[0] && strcmp(it->e, "tape") == 0 && cache) {
+            if (it->e && it->e[0] && strcmp(ast_slot(it->e), "tape") == 0 && cache) {
                 /* Opaque stage1 span (grammar matchers) — copy tape bytes. */
                 FileTape* ft = tape_by_id(cache, it->file_id);
                 size_t o0 = 0, o1 = 0;
@@ -3553,8 +3551,8 @@ ginst_after_quotes:
             shadow_map_note_raw(it->a);
             shadow_amap_note_raw(it->a);
             shadow_td_alias_note_raw(it->a);
-            if (it->a[0] && strncmp(it->a, "static void", 11) == 0 &&
-                strstr(it->a, "[]")) {
+            if (it->a && it->a[0] && strncmp(ast_slot(it->a), "static void", 11) == 0 &&
+                strstr(ast_slot(it->a), "[]")) {
                 const char* rest = it->a + 11;
                 while (*rest == ' ' || *rest == '\t') rest++;
                 if (*rest == '*') rest++;
@@ -3605,7 +3603,7 @@ ginst_after_quotes:
         case AST_AT_STMT: {
             /* grammar / variant / … — shared stmt emitter. */
             ShadowCtx at_ctx = { .cache = cache };
-            if (strcmp(it->e, "hoist") == 0) break; /* already emitted */
+            if (strcmp(ast_slot(it->e), "hoist") == 0) break; /* already emitted */
             if (!shadow_emit_stmt_ctx(it, out, &at_ctx, "", 0)) return 0;
             break;
         }
