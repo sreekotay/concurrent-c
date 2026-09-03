@@ -1,0 +1,76 @@
+/*
+ * Console print error domain — separate from CCError / CCIoError.
+ *
+ * Used by println / eprintln / fprint and friends (`void ?>(CCPrintError)`).
+ * Does not typeview-as CCError: diagnostics failures stay out of the general
+ * error handler chain unless explicitly handled.
+ */
+#ifndef CC_PRINT_ERROR_H
+#define CC_PRINT_ERROR_H
+
+#include <stdint.h>
+#include <errno.h>
+
+#include <ccc/cc_result.cch>
+#include <ccc/cc_io_error.cch>
+
+typedef enum {
+    CC_PRINT_EPIPE = 1,
+    CC_PRINT_PARTIAL_WRITE,
+    CC_PRINT_IO,
+    CC_PRINT_INVALID_ARG,
+} CCPrintErrorKind;
+
+typedef struct {
+    CCPrintErrorKind kind;
+    int32_t os_code; /* errno when applicable; 0 otherwise */
+} CCPrintError;
+
+static inline const char* cc_print_error_kind_str(CCPrintErrorKind kind) {
+    switch (kind) {
+        case CC_PRINT_EPIPE:           return "broken pipe";
+        case CC_PRINT_PARTIAL_WRITE:   return "partial write";
+        case CC_PRINT_IO:              return "I/O error";
+        case CC_PRINT_INVALID_ARG:     return "invalid argument";
+        default:                       return "print error";
+    }
+}
+
+static inline const char* cc_print_error_str(CCPrintError e) {
+    return cc_print_error_kind_str(e.kind);
+}
+
+static inline CCPrintError cc_print_error_os(CCPrintErrorKind kind, int os_code) {
+    CCPrintError e;
+    e.kind = kind;
+    e.os_code = (int32_t)os_code;
+    return e;
+}
+
+static inline CCPrintError cc_print_error_from_errno(int err) {
+    CCPrintErrorKind kind = CC_PRINT_IO;
+    switch (err) {
+        case EPIPE:  kind = CC_PRINT_EPIPE; break;
+        case EINVAL: kind = CC_PRINT_INVALID_ARG; break;
+        default:     kind = CC_PRINT_IO; break;
+    }
+    return cc_print_error_os(kind, err);
+}
+
+static inline CCPrintError cc_print_error_from_io(CCIoError io) {
+    CCPrintErrorKind kind = CC_PRINT_IO;
+    switch (io.base.kind) {
+        case CC_ERR_CLOSED:        kind = CC_PRINT_EPIPE; break;
+        case CC_ERR_INVALID_ARG:   kind = CC_PRINT_INVALID_ARG; break;
+        default:                   kind = CC_PRINT_IO; break;
+    }
+    if (io.os_code == EPIPE) kind = CC_PRINT_EPIPE;
+    return cc_print_error_os(kind, io.os_code ? io.os_code : 0);
+}
+
+#ifndef CCResult_void_CCPrintError_DEFINED
+#define CCResult_void_CCPrintError_DEFINED 1
+CC_DECL_RESULT_SPEC_VOID(CCResult_void_CCPrintError, CCPrintError)
+#endif
+
+#endif /* CC_PRINT_ERROR_H */

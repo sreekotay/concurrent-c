@@ -23,9 +23,9 @@ int main(void) {
 
     int total = sum.load();
     if (total != 40) {
-        eprintln(@string(`FAIL sum=${total}`, @scratch)) !>;
+        eprintln(@string(`FAIL sum=${total}`, @scratch));
         return 1;
     }
-    println(@string(`sum = ${total}`, @scratch)) !>;
+    println(@string(`sum = ${total}`, @scratch));
     return 0;
 }

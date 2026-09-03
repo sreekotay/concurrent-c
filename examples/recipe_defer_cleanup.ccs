@@ -24,10 +24,10 @@ void !>(CCError) write_report(const char* path, int inject_error) {
     f.create(path) !>;
 
     @defer(ok) {
-        println(@string(`  committed ${path}`, @scratch)) !>;
+        println(@string(`  committed ${path}`, @scratch));
     }
     @defer(err) {
-        println(@string(`  rolled back ${path}`, @scratch)) !>;
+        println(@string(`  rolled back ${path}`, @scratch));
     }
 
     f.write("line 1\n") !>;
@@ -41,14 +41,14 @@ int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     /* Happy path: fclose runs, then @defer(ok) prints "committed". */
-    println("write_report (ok):") !>;
+    println("write_report (ok):");
     write_report("/tmp/report_ok.txt", 0) !>;
 
     /* Injected failure: fclose still runs, @defer(err) prints "rolled back",
      * @defer(ok) is skipped, error is caught here (not forwarded). */
-    println("write_report (err):") !>;
+    println("write_report (err):");
     write_report("/tmp/report_err.txt", 1) !>(e) {
-        println(@string(`  caught: ${e.message}`, @scratch)) !>;
+        println(@string(`  caught: ${e.message}`, @scratch));
     };
 
     return 0;

@@ -80,61 +80,61 @@ int main(void) {
     v.push(1.0);
     v.push(3.0);
     v.push(8.0);
-    println(@string(`len=${v.len()}`, @scratch)) !>;
+    println(@string(`len=${v.len()}`, @scratch));
 
     /* 2. Declared above — no header edit, no compiler edit. */
-    println(@string(`median=${v.median()}`, @scratch)) !>;
+    println(@string(`median=${v.median()}`, @scratch));
 
     /* 3. Scalar receiver, by value. */
     double d = 10.0;
-    println(@string(`halve=${d.halve()}`, @scratch)) !>;
+    println(@string(`halve=${d.halve()}`, @scratch));
 
     /* 4. Prefer naked print at line start (println/eprint/fprintln…).
      *    f* is fd-first. Member UFCS on data is legal; recipes still put
      *    the print name first. Handles keep the family as methods. */
-    println("printed naked") !>;
-    fprintln(STDERR_FILENO, "printed naked to stderr") !>;
+    println("printed naked");
+    fprintln(STDERR_FILENO, "printed naked to stderr");
     CCStdio io = cc_stdio_create(arena);
-    io.println("printed via a handle") !>;
-    fprintln(STDOUT_FILENO, "also via naked fprintln") !>;
+    io.println("printed via a handle");
+    fprintln(STDOUT_FILENO, "also via naked fprintln");
 
     /* 5. mean() is just a function — prefix is plain C, postfix is
      *    the method; one declaration, both spellings. */
     Stats u = { 12.0, 3 };
-    println(@string(`mean=${u.mean(6.0)}`, @scratch)) !>;
+    println(@string(`mean=${u.mean(6.0)}`, @scratch));
 
     /* 6. System headers participate: fabs comes from math.h. */
     double neg = -2.5;
-    println(@string(`fabs=${neg.fabs()}`, @scratch)) !>;
+    println(@string(`fabs=${neg.fabs()}`, @scratch));
 
     /* 7. Chains: each link is the same one rule on the previous result. */
     double chain = d.halve().twice().halve();
-    println(@string(`chain=${chain}`, @scratch)) !>;
+    println(@string(`chain=${chain}`, @scratch));
 
     /* 8. Typed slices auto-instantiate for any element type. */
     Pt ps[:] = {{1, 2}, {3, 4}, {5, 6}};
     size_t slen = ps.sub(1, 3).len();
     double y = ps.at(1).y;
-    println(@string(`slice=${slen} y=${y}`, @scratch)) !>;
+    println(@string(`slice=${slen} y=${y}`, @scratch));
 
     /* 9. Fallible chains.
      *    !>  — error becomes CODE (body must diverge: return / abort / !>;).
      *    ?>  — error becomes a VALUE (RHS is an expression, not a block). */
     int ok = get(21)!>.twice();
-    println(@string(`ok=${ok}`, @scratch)) !>;
+    println(@string(`ok=${ok}`, @scratch));
 
     /* ?> then an ordinary hop — substitute, then dispatch. */
     int recovered = get(-1) ?> 0;
     int rec = recovered.twice();
-    println(@string(`rec=${rec}`, @scratch)) !>;
+    println(@string(`rec=${rec}`, @scratch));
 
     /* ?>(e) when the fallback expression needs the error value. */
     int mapped = get(-1) ?>(e) (e.message[0] == 'n' ? 0 : -1);
     int mapped2 = mapped.twice();
-    println(@string(`mapped=${mapped2}`, @scratch)) !>;
+    println(@string(`mapped=${mapped2}`, @scratch));
 
     /* !> — error becomes CODE. Diverges out of get_or_die (not into a chain). */
-    println(@string(`die=${get_or_die(-1)}`, @scratch)) !>;
+    println(@string(`die=${get_or_die(-1)}`, @scratch));
 
     return 0;
 }

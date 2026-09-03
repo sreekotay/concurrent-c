@@ -10,7 +10,7 @@ emit_guest.arg("out/static_inline_impl_extract_guest.c");
 emit_guest.inherit_stdio();
 int rc = emit_guest.status() !>;
 if (rc != 0) {
-    "emit guest failed".println() !>;
+    "emit guest failed".println();
     return 1;
 }
 
@@ -20,7 +20,7 @@ grep_hdr.arg("STATIC_INLINE_IMPL_BODY_MUST_STAY");
 grep_hdr.arg("out/include/tests/static_inline_impl_extract.h");
 rc = grep_hdr.status() !>;
 if (rc != 0) {
-    "guest extract dropped static inline body".println() !>;
+    "guest extract dropped static inline body".println();
     return 1;
 }
 
@@ -34,14 +34,14 @@ build.arg("out/static_inline_impl_extract_smoke");
 build.inherit_stdio();
 rc = build.status() !>;
 if (rc != 0) {
-    "build failed".println() !>;
+    "build failed".println();
     return 1;
 }
 CCCommand run = cc_command(a, @slice("out/static_inline_impl_extract_smoke"));
 run.inherit_stdio();
 rc = run.status() !>;
 if (rc != 0) {
-    "run failed".println() !>;
+    "run failed".println();
     return 1;
 }
 return 0;

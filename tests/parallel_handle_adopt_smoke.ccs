@@ -25,21 +25,21 @@ int main(void) {
         if (h1.cancel() !>) {
             /* child then parent */
         } else {
-            eprintln("FAIL parent cancel should hit the tree") !>;
+            eprintln("FAIL parent cancel should hit the tree");
             return 1;
         }
         if (!h2.cancelled || !h1.cancelled) {
-            eprintln(@string(`FAIL parent cancel flags h1=${h1.cancelled} h2=${h2.cancelled}`, @scratch)) !>;
+            eprintln(@string(`FAIL parent cancel flags h1=${h1.cancelled} h2=${h2.cancelled}`, @scratch));
             return 1;
         }
         if (h1.cancel() !>) {
-            eprintln("FAIL second parent cancel") !>;
+            eprintln("FAIL second parent cancel");
             return 1;
         }
         h1.wait() !>;
         h2.wait() !>;
         if (a + b + c + d != 10) {
-            eprintln("FAIL parent-cancel tree still joins") !>;
+            eprintln("FAIL parent-cancel tree still joins");
             return 1;
         }
     }
@@ -59,11 +59,11 @@ int main(void) {
         } !>;
         h1.adopt(h2) !>;
         if (!h2.cancel() !>) {
-            eprintln("FAIL child cancel") !>;
+            eprintln("FAIL child cancel");
             return 1;
         }
         if (!h2.cancelled || h1.cancelled) {
-            eprintln(@string(`FAIL child-only h1=${h1.cancelled} h2=${h2.cancelled}`, @scratch)) !>;
+            eprintln(@string(`FAIL child-only h1=${h1.cancelled} h2=${h2.cancelled}`, @scratch));
             return 1;
         }
         h1.wait() !>;
@@ -84,7 +84,7 @@ int main(void) {
                 hit = 1;
             };
             if (!hit) {
-                eprintln("FAIL self adopt") !>;
+                eprintln("FAIL self adopt");
                 return 1;
             }
         }
@@ -102,7 +102,7 @@ int main(void) {
                 hit = 1;
             };
             if (!hit) {
-                eprintln("FAIL second adopt") !>;
+                eprintln("FAIL second adopt");
                 return 1;
             }
             hit = 0;
@@ -111,7 +111,7 @@ int main(void) {
                 hit = 1;
             };
             if (!hit) {
-                eprintln("FAIL cycle adopt") !>;
+                eprintln("FAIL cycle adopt");
                 return 1;
             }
             h1.wait() !>;
@@ -119,6 +119,6 @@ int main(void) {
         }
     }
 
-    println("parallel_handle_adopt_smoke: OK") !>;
+    println("parallel_handle_adopt_smoke: OK");
     return 0;
 }

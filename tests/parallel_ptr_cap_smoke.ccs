@@ -50,9 +50,9 @@ int main(void) {
     h.wait() !>;
     free(box);
     if (g_sink != 41) {
-        eprintln(@string(`FAIL ptr cap sink=${g_sink}`, @scratch)) !>;
+        eprintln(@string(`FAIL ptr cap sink=${g_sink}`, @scratch));
         return 1;
     }
-    println("parallel_ptr_cap_smoke: OK") !>;
+    println("parallel_ptr_cap_smoke: OK");
     return 0;
 }

@@ -41,8 +41,8 @@ int main(int argc, char** argv) {
     const char* mode = (argc > 1) ? argv[1] : "batch";
     int warm = (argc > 2) ? atoi(argv[2]) : 0;
 
-    println(@string(`fiber_reuse_probe: mode=${mode} N=${N} warm=${warm}`, @scratch)) !>;
-    println(@string(`  (CC_V2_STATS atexit: coro reuse vs fresh)`, @scratch)) !>;
+    println(@string(`fiber_reuse_probe: mode=${mode} N=${N} warm=${warm}`, @scratch));
+    println(@string(`  (CC_V2_STATS atexit: coro reuse vs fresh)`, @scratch));
 
     if (warm > 0)
         serial_n(warm);
@@ -52,6 +52,6 @@ int main(int argc, char** argv) {
     else
         batch_n(N);
 
-    println(@string(`done`, @scratch)) !>;
+    println(@string(`done`, @scratch));
     return 0;
 }

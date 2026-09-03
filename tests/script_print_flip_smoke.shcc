@@ -7,15 +7,15 @@
 CCArena a = @create(kilobytes(4)) @destroy;
 
 CCSlice hi = @slice("hello");
-hi.println() !>;
+hi.println();
 
 CCString world = @string(`world`, a);
-world.println() !>;
+world.println();
 
-"plain".println() !>;
-@string(`tpl=${42}`, a).println() !>;
+"plain".println();
+@string(`tpl=${42}`, a).println();
 
-"err-line".eprintln() !>;
-hi.fprintln(STDERR_FILENO) !>;
+"err-line".eprintln();
+hi.fprintln(STDERR_FILENO);
 
 return 0;

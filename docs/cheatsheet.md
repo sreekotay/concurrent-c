@@ -300,7 +300,7 @@ UFCS path (`Type_destroy`).
 ```c
 n.spawn(() => { … });      // cc_nursery_spawn(n, …)
 tx.send(i) !>;
-io.println("hi") !>;
+io.println("hi");
 v.push(10);                 // CCVec_int_push(&v, 10)
 u.mean(6.0);                // mean(u, 6.0) — bare-name tier
 get(21)!>.twice();          // unwrap, then method on the value
@@ -374,9 +374,9 @@ Prefer `io.println` when a `CCStdio` handle is in scope (`<ccc/stdio.cch>`):
 ```c
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
 CCStdio io = cc_stdio_create(a);
-io.println("hi") !>;
-io.println(@string(`n=${n}`, @scratch)) !>;
-/* also fine: println("hi") !>;  /  msg.println() !>; */
+io.println("hi");
+io.println(@string(`n=${n}`, @scratch));
+/* also fine: println("hi");  /  msg.println(); */
 ```
 
 ---
@@ -400,8 +400,8 @@ CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
 int n = 42;
 CCString msg = @string(`n=${n}; price=$100`, a);       // owned
 char[:] hdr = @string(`:${n}\r\n`);                    // block-scoped borrow
-println(@string(`len=${msg.len()}`, @scratch)) !>;     // throwaway
-println(@string(`bulk=${s.sub(0, 4)}`, @scratch)) !>;  // text slice
+println(@string(`len=${msg.len()}`, @scratch));     // throwaway
+println(@string(`bulk=${s.sub(0, 4)}`, @scratch));  // text slice
 ```
 
 Recipe: [recipe_walk.ccs](../examples/recipe_walk.ccs).
@@ -756,7 +756,7 @@ is `clone_into(s, a)`).
 ```c
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
 
-io.println(@string(`tmp`, @scratch)) !>;     // gone after println
+io.println(@string(`tmp`, @scratch));     // gone after println
 
 CCString keep = @string(`keep me`, a);       // lives on `a`
 CCString out  = cc_script_sh_read_at(keep, a) !>;

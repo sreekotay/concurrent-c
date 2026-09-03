@@ -143,14 +143,14 @@ int main(void) {
         int ok = cc_atomic_load(&st.ok);
         int reverts = cc_atomic_load(&st.reverts);
         if (sum != expect) {
-            eprintln(@string(`FAIL sum=${sum} expected=${expect} ok=${ok} reverts=${reverts}`, @scratch)) !>;
+            eprintln(@string(`FAIL sum=${sum} expected=${expect} ok=${ok} reverts=${reverts}`, @scratch));
             return 1;
         }
         if (ok + reverts < WORKERS) {
-            eprintln(@string(`FAIL no work ok=${ok} reverts=${reverts}`, @scratch)) !>;
+            eprintln(@string(`FAIL no work ok=${ok} reverts=${reverts}`, @scratch));
             return 1;
         }
-        println(@string(`parallel_prepare_commit_stress_smoke: OK ok=${ok} reverts=${reverts} sum=${sum}`, @scratch)) !>;
+        println(@string(`parallel_prepare_commit_stress_smoke: OK ok=${ok} reverts=${reverts} sum=${sum}`, @scratch));
     }
     return 0;
 }

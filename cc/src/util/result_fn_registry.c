@@ -23,12 +23,13 @@ typedef struct {
     char**  names;
     char**  err_types;
     char**  result_types;
+    int*    discard_ok;
     size_t  len;
     size_t  cap;
 } cc_name_meta_map;
 
 static cc_name_set g_result_fns = { NULL, 0, 0 };
-static cc_name_meta_map g_result_fn_meta = { NULL, NULL, NULL, 0, 0 };
+static cc_name_meta_map g_result_fn_meta = { NULL, NULL, NULL, NULL, 0, 0 };
 
 static int cc__is_ident_start(char c) {
     return (c == '_' ||
@@ -85,9 +86,11 @@ static void cc__name_meta_map_clear(cc_name_meta_map* m) {
     free(m->names);
     free(m->err_types);
     free(m->result_types);
+    free(m->discard_ok);
     m->names = NULL;
     m->err_types = NULL;
     m->result_types = NULL;
+    m->discard_ok = NULL;
     m->len = 0;
     m->cap = 0;
 }
@@ -117,10 +120,11 @@ static char* cc__dup_slice(const char* s, size_t len) {
 static void cc__name_meta_map_set(cc_name_meta_map* m,
                                    const char* name, size_t name_len,
                                    const char* err, size_t err_len,
-                                   const char* result, size_t result_len) {
+                                   const char* result, size_t result_len,
+                                   int discard_ok) {
     size_t idx;
     if (!name || name_len == 0) return;
-    if ((!err || err_len == 0) && (!result || result_len == 0)) return;
+    if ((!err || err_len == 0) && (!result || result_len == 0) && !discard_ok) return;
 
     idx = cc__name_meta_map_find(m, name, name_len);
     if (idx != (size_t)-1) {
@@ -131,6 +135,7 @@ static void cc__name_meta_map_set(cc_name_meta_map* m,
         if (result && result_len > 0 && !m->result_types[idx]) {
             m->result_types[idx] = cc__dup_slice(result, result_len);
         }
+        if (discard_ok) m->discard_ok[idx] = 1;
         return;
     }
 
@@ -139,13 +144,15 @@ static void cc__name_meta_map_set(cc_name_meta_map* m,
         char** nn = (char**)realloc(m->names, nc * sizeof(char*));
         char** ne = (char**)realloc(m->err_types, nc * sizeof(char*));
         char** nr = (char**)realloc(m->result_types, nc * sizeof(char*));
-        if (!nn || !ne || !nr) {
-            free(nn); free(ne); free(nr);
+        int* nd = (int*)realloc(m->discard_ok, nc * sizeof(int));
+        if (!nn || !ne || !nr || !nd) {
+            free(nn); free(ne); free(nr); free(nd);
             return;
         }
         m->names = nn;
         m->err_types = ne;
         m->result_types = nr;
+        m->discard_ok = nd;
         m->cap = nc;
     }
     {
@@ -159,6 +166,7 @@ static void cc__name_meta_map_set(cc_name_meta_map* m,
         m->names[m->len] = dn;
         m->err_types[m->len] = de;
         m->result_types[m->len] = dr;
+        m->discard_ok[m->len] = discard_ok ? 1 : 0;
         m->len++;
     }
 }
@@ -213,12 +221,21 @@ void cc_result_fn_registry_add(const char* n, size_t l) {
 
 void cc_result_fn_registry_add_typed(const char* name, size_t name_len,
                                       const char* err_type, size_t err_len,
-                                      const char* result_type, size_t result_len) {
+                                      const char* result_type, size_t result_len,
+                                      int discard_ok) {
     /* Keep the name-only set in sync so slice-7 diagnostics still see this
      * fn even when callers only go through the typed path. */
     cc__name_set_add(&g_result_fns, name, name_len);
     cc__name_meta_map_set(&g_result_fn_meta, name, name_len,
-                           err_type, err_len, result_type, result_len);
+                           err_type, err_len, result_type, result_len,
+                           discard_ok);
+}
+
+int cc_result_fn_registry_is_discard_ok(const char* name, size_t name_len) {
+    size_t idx;
+    idx = cc__name_meta_map_find(&g_result_fn_meta, name, name_len);
+    if (idx == (size_t)-1) return 0;
+    return g_result_fn_meta.discard_ok[idx] != 0;
 }
 
 int cc_result_fn_registry_get_err_type(const char* name, size_t name_len,
@@ -337,7 +354,8 @@ void cc_result_fn_registry_scan_source(const char* src, size_t n) {
                         cc_result_fn_registry_add_typed(src + nm_a, nm_b - nm_a,
                                                          err_type[0] ? err_type : NULL,
                                                          err_type[0] ? strlen(err_type) : 0,
-                                                         result_type, ty_len);
+                                                         result_type, ty_len,
+                                                         0);
                     }
                 }
             }
@@ -345,8 +363,9 @@ void cc_result_fn_registry_scan_source(const char* src, size_t n) {
             continue;
         }
 
-        /* `Ok !>(Err) name(` surface sugar */
-        if (c == '!' && c2 == '>' && i > 0) {
+        /* `Ok !>(Err) name(` / `Ok ?>(Err) name(` surface sugar */
+        if (((c == '!' && c2 == '>') || (c == '?' && c2 == '>')) && i > 0) {
+            int discard_ok = (c == '?');
             size_t j = i + 2;
             j = cc__skip_ws(src, n, j);
             if (j < n && src[j] == '(') {
@@ -404,7 +423,8 @@ void cc_result_fn_registry_scan_source(const char* src, size_t n) {
                                         cc_result_fn_registry_add_typed(
                                             src + nm_a, nm_b - nm_a,
                                             src + err_a, err_b - err_a,
-                                            result_type, (size_t)wrote);
+                                            result_type, (size_t)wrote,
+                                            discard_ok);
                                     }
                                 }
                             }

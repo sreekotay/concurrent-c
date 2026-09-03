@@ -6,10 +6,10 @@
  * then use bare !>; at each fallible call — re-bind inside each arm
  * (spawned arms cannot share main's frame).
  *
- * Prefer io.println when a CCStdio handle is in scope. Task C shows
- * compose-then-default: !>(e) { local; @err(e); }. Report via
- * cc_error_exit / cc_error_log, not println !>; inside the same-E
- * handler.
+ * Prefer io.println when a CCStdio handle is in scope. Diagnostic print is
+ * optional (`T?>(CCPrintError)`): bare println is fine. Task C shows
+ * compose-then-default: !>(e) { local; @err(e); }. Use !> on load-bearing
+ * I/O; report handler failures via cc_error_exit / cc_error_log.
  *
  * Next: recipe_result_error_handling.ccs.
  */
@@ -28,21 +28,21 @@ int main(void) {
         @serial {
             @errhandler(CCError e) cc_error_exit(e);
             usleep(100000);
-            io.println("Hello from task A! (last)") !>;
+            io.println("Hello from task A! (last)");
         }
         @serial {
             @errhandler(CCError e) cc_error_exit(e);
-            io.println("Hello from task B!") !>;
+            io.println("Hello from task B!");
         }
         @serial {
             @errhandler(CCError e) cc_error_exit(e);
             io.println("Hello from task C!") !>(e) {
-                io.println("Task C failed!") !>;
+                io.println("Task C failed!");
                 @err(e); //forward to installed error handler
             }; //local handling first, then default
         }
     } !>.wait()!>;
 
-    io.println("All tasks completed.") !>;
+    io.println("All tasks completed.");
     return 0;
 }

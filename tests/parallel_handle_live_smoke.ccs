@@ -26,12 +26,12 @@ int main(void) {
             b = 2;
         } !>;
         if (h.nch != 1) {
-            eprintln(@string(`FAIL live adopt nch=${h.nch}`, @scratch)) !>;
+            eprintln(@string(`FAIL live adopt nch=${h.nch}`, @scratch));
             return 1;
         }
         h.wait() !>;
         if (a + b != 9) {
-            eprintln("FAIL live join") !>;
+            eprintln("FAIL live join");
             return 1;
         }
     }
@@ -48,11 +48,11 @@ int main(void) {
         } !>;
         h.wait() !>;
         if (!h.cancelled || a != 1) {
-            eprintln("FAIL live self-cancel") !>;
+            eprintln("FAIL live self-cancel");
             return 1;
         }
     }
 
-    println("parallel_handle_live_smoke: OK") !>;
+    println("parallel_handle_live_smoke: OK");
     return 0;
 }

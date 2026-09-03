@@ -121,7 +121,7 @@ int main(void) {
         hit = 1;
     };
     if (!hit) {
-        eprintln("FAIL boom A should error") !>;
+        eprintln("FAIL boom A should error");
         return 1;
     }
     hit = 0;
@@ -130,14 +130,14 @@ int main(void) {
         hit = 1;
     };
     if (!hit) {
-        eprintln("FAIL boom B should error") !>;
+        eprintln("FAIL boom B should error");
         return 1;
     }
 
     if (st.cell[1] != 10 || st.cell[2] != 20) {
-        eprintln(@string(`FAIL cells 1=${st.cell[1]} 2=${st.cell[2]}`, @scratch)) !>;
+        eprintln(@string(`FAIL cells 1=${st.cell[1]} 2=${st.cell[2]}`, @scratch));
         return 1;
     }
-    println("prepare-commit: join, hold, commit; revert on prepare fail") !>;
+    println("prepare-commit: join, hold, commit; revert on prepare fail");
     return 0;
 }

@@ -18,7 +18,7 @@
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println("build_stub example") !>;
-    println("See build.cc for CC_CONST declarations") !>;
+    println("build_stub example");
+    println("See build.cc for CC_CONST declarations");
     return 0;
 }

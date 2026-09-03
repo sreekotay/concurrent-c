@@ -1,0 +1,10 @@
+#include <ccc/cc_runtime.cch>
+
+static int !>(CCError) must_consume(void) {
+    return cc_ok(1);
+}
+
+int main(void) {
+    must_consume();
+    return 0;
+}

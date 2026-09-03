@@ -38,5 +38,5 @@ int ok = xs.len == 4 && ys.len == 4 && qs.len == 3 && fs.len == 2;
 for (size_t i = 0; i < 4 && ok; i++) ok = xv[i] == yv[i];
 ok = ok && qv[0] == 10 && qv[2] == 30;
 ok = ok && fv[0] == 1.5 && fv[1] == 2.5;
-println(@string(`buffer_as_list ok=${ok}`, a)) !>;
+println(@string(`buffer_as_list ok=${ok}`, a));
 return ok ? 0 : 1;

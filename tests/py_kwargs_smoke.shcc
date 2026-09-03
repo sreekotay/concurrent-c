@@ -15,15 +15,15 @@ CCSlice d = m.greet("world")!>.as_slice()!>;
 CCSlice one = m.greet("world", py_kw("greeting", "hello"))!>.as_slice()!>;
 CCSlice many = m.greet("world", py_kw("punct", "?"),
                        py_kw("greeting", "yo"))!>.as_slice()!>;
-println(@string(`${d} | ${one} | ${many}`, a)) !>;
+println(@string(`${d} | ${one} | ${many}`, a));
 
 /* Keywords reach the destination-typed variants too. */
 int64_t n = m.area(3, py_kw("scale", 5)) !>;
-println(@string(`area=${n}`, a)) !>;
+println(@string(`area=${n}`, a));
 
 /* An unknown keyword is an ordinary Python failure. */
 CCPyObj bad = m.greet("world", py_kw("nope", 1)) !>(e) {
-    println(@string(`caught=${e.type_name}`, a)) !>;
+    println(@string(`caught=${e.type_name}`, a));
     return 0;
 } @destroy;
 (void)bad;

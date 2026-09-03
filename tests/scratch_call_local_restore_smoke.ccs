@@ -13,7 +13,7 @@ int main(void) {
     const char* a = "alpha";
     const char* b = "beta";
     CCString kept = @string(`kept:${a}`, @scratch);
-    println(@string(`temp:${b}`, @scratch)) !>;
+    println(@string(`temp:${b}`, @scratch));
     CCSlice sl = cc_string_as_slice(&kept);
     if (sl.len != 10 || memcmp(sl.ptr, "kept:alpha", 10) != 0) {
         fprintf(stderr, "kept string clobbered after call-local scratch temp\n");

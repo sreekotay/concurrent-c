@@ -25,25 +25,25 @@
 
 _Bool iso = !cc_js_dom_available(false);
 if (!cc_js_dom_available(iso)) {
-    "SKIP (need libnode-dev + c++, or node on PATH)".println() !>;
+    "SKIP (need libnode-dev + c++, or node on PATH)".println();
     return 0;
 }
 if (iso)
-    "jsdemo: isolated (hosted unavailable — libnode not found)".println() !>;
+    "jsdemo: isolated (hosted unavailable — libnode not found)".println();
 
 CCJsDom js = cc_js_new(iso, a) !> @destroy;
 
 double v = js.eval("Math.sqrt(2)")!>.as_f64() !>;
-println(@string(`Math.sqrt(2.0) = ${v}`, a)) !>;
+println(@string(`Math.sqrt(2.0) = ${v}`, a));
 
 long long pv = js.eval("Math.pow(2,10)")!>.as_i64() !>;
-println(@string(`Math.pow(2,10) = ${pv}`, a)) !>;
+println(@string(`Math.pow(2,10) = ${pv}`, a));
 
 CCJsDomVal os = js.require("os") !> @destroy;
 char[:] plat = os.platform()!>.as_slice(a) !>;
-println(@string(`os.platform()  = ${plat}`, a)) !>;
+println(@string(`os.platform()  = ${plat}`, a));
 
 char[:] ver = js.eval("process.version")!>.as_slice(a) !>;
-println(@string(`node.version   = ${ver}`, a)) !>;
+println(@string(`node.version   = ${ver}`, a));
 
 return 0;

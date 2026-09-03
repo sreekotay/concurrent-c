@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
             if (!Json_parse(buf, rd, ar)) return 1;
         }
         double dt = now_s() - t0; if (dt < best) best = dt; }
-    println(@string(`gen tape DOM   ${rd*(double)K/best/1e6} MB/s  ${best/K*1e6} us/parse`, pa)) !>;
+    println(@string(`gen tape DOM   ${rd*(double)K/best/1e6} MB/s  ${best/K*1e6} us/parse`, pa));
 
     best = 1e18;
     for (int t = 0; t < 3; t++) { double t0 = now_s();
@@ -53,7 +53,7 @@ int main(int argc, char** argv) {
             if (!Json_dom(buf, rd, reg, ar, &v)) return 1;
         }
         double dt = now_s() - t0; if (dt < best) best = dt; }
-    println(@string(`gen shaped DOM ${rd*(double)K/best/1e6} MB/s  ${best/K*1e6} us/parse  shapes=${reg->nshapes} dicts=${reg->dict_objs}`, pa)) !>;
+    println(@string(`gen shaped DOM ${rd*(double)K/best/1e6} MB/s  ${best/K*1e6} us/parse  shapes=${reg->nshapes} dicts=${reg->dict_objs}`, pa));
 
     /* access: id/text/retweet_count/user.screen_name per tweet */
     {
@@ -61,7 +61,7 @@ int main(int argc, char** argv) {
         CCShapeVal sv;
         if (!Json_dom(buf, rd, reg, ar, &sv)) return 1;
         CCShapeVal* st = cc_shape_get(&sv, "statuses");
-        if (!st) { eprintln("no statuses") !>; return 0; }
+        if (!st) { eprintln("no statuses"); return 0; }
         CCShapeKey kid = cc_shape_key("id"), ktx = cc_shape_key("text"),
                    krc = cc_shape_key("retweet_count"),
                    kus = cc_shape_key("user"), ksn = cc_shape_key("screen_name");
@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
                 }
             }
             double dt = now_s() - t0; if (dt < best) best = dt; }
-        println(@string(`access shaped  ${(double)nlk/best/1e6} Mlookups/s (prepared keys, sum=${sum})`, pa)) !>;
+        println(@string(`access shaped  ${(double)nlk/best/1e6} Mlookups/s (prepared keys, sum=${sum})`, pa));
     }
     return 0;
 }

@@ -469,7 +469,7 @@ static void cc__scan_for_existing_result_types(const char* src, size_t n) {
     }
 }
 
-/* Rewrite result types: T!>(E) -> CCResult_T_E, also collect pairs for declaration emission */
+/* Rewrite result types: T!>(E) / T?>(E) -> CCResult_T_E, also collect pairs for declaration emission */
 char* cc__rewrite_result_types_text(const CCVisitorCtx* ctx, const char* src, size_t n) {
     (void)ctx;
     if (!src || n == 0) return NULL;
@@ -489,16 +489,16 @@ char* cc__rewrite_result_types_text(const CCVisitorCtx* ctx, const char* src, si
         char c = src[i];
         char c2 = (i + 1 < n) ? src[i + 1] : 0;
 
-        /* Detect T!>(E) pattern: type followed by '!>' followed by '(' error type ')' */
-        if (c == '!' && c2 == '>') {
-            /* Found '!>' sigil - now find the error type in parentheses */
+        /* Detect T!>(E) / T?>(E): type followed by '!>' or '?>' and '(' error type ')' */
+        if ((c == '!' && c2 == '>') || (c == '?' && c2 == '>')) {
+            /* Found result sigil - now find the error type in parentheses */
             size_t sigil_pos = i;
-            size_t j = i + 2;  /* skip '!>' */
+            size_t j = i + 2;  /* skip '!>' / '?>' */
 
-            /* If the non-ws char immediately before `!>` is `)` (a closing
+            /* If the non-ws char immediately before the sigil is `)` (a closing
              * paren of a call or expression), this is the binder form
-             * `CALL !> (e) BODY` of the `!>` statement operator, not a
-             * type annotation.  Let pass_result_unwrap handle it later. */
+             * `CALL !> (e) BODY` / `CALL ?>(e) DEFAULT` of a statement /
+             * expression operator, not a type annotation. */
             {
                 size_t bk = sigil_pos;
                 while (bk > 0 && (src[bk - 1] == ' ' || src[bk - 1] == '\t' ||

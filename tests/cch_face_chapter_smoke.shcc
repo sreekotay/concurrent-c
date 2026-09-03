@@ -12,7 +12,7 @@ emit_face.arg("out/cch_face_chapter_face.c");
 emit_face.inherit_stdio();
 int rc = emit_face.status() !>;
 if (rc != 0) {
-    "emit face failed".println() !>;
+    "emit face failed".println();
     return 1;
 }
 
@@ -22,7 +22,7 @@ grep_face_splice.arg("FACE_CHAPTER_BODY_MUST_NOT_SPLICE_INTO_FACE");
 grep_face_splice.arg("out/cch_face_chapter_face.c");
 rc = grep_face_splice.status() !>;
 if (rc == 0) {
-    "face TU spliced chapter body".println() !>;
+    "face TU spliced chapter body".println();
     return 1;
 }
 
@@ -32,7 +32,7 @@ grep_face_impl.arg("impl_cch_begin:.*cch_face_chapter.cch");
 grep_face_impl.arg("out/cch_face_chapter_face.c");
 rc = grep_face_impl.status() !>;
 if (rc == 0) {
-    "face TU impl-inlined chapter".println() !>;
+    "face TU impl-inlined chapter".println();
     return 1;
 }
 
@@ -45,7 +45,7 @@ emit_user.arg("out/cch_face_chapter_user.c");
 emit_user.inherit_stdio();
 rc = emit_user.status() !>;
 if (rc != 0) {
-    "emit user failed".println() !>;
+    "emit user failed".println();
     return 1;
 }
 
@@ -55,7 +55,7 @@ grep_user.arg("FACE_CHAPTER_BODY_MUST_NOT_SPLICE_INTO_FACE");
 grep_user.arg("out/cch_face_chapter_user.c");
 rc = grep_user.status() !>;
 if (rc == 0) {
-    "user TU spliced chapter body".println() !>;
+    "user TU spliced chapter body".println();
     return 1;
 }
 
@@ -68,7 +68,7 @@ emit_owner.arg("out/cch_face_chapter_mod.c");
 emit_owner.inherit_stdio();
 rc = emit_owner.status() !>;
 if (rc != 0) {
-    "emit owner failed".println() !>;
+    "emit owner failed".println();
     return 1;
 }
 
@@ -78,7 +78,7 @@ grep_owner.arg("FACE_CHAPTER_BODY_MUST_NOT_SPLICE_INTO_FACE");
 grep_owner.arg("out/cch_face_chapter_mod.c");
 rc = grep_owner.status() !>;
 if (rc != 0) {
-    "owner TU did not splice chapter body".println() !>;
+    "owner TU did not splice chapter body".println();
     return 1;
 }
 
@@ -93,14 +93,14 @@ build.arg("out/cch_face_chapter_smoke");
 build.inherit_stdio();
 rc = build.status() !>;
 if (rc != 0) {
-    "build failed".println() !>;
+    "build failed".println();
     return 1;
 }
 CCCommand run = cc_command(a, @slice("out/cch_face_chapter_smoke"));
 run.inherit_stdio();
 rc = run.status() !>;
 if (rc != 0) {
-    "run failed".println() !>;
+    "run failed".println();
     return 1;
 }
 return 0;

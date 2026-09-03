@@ -43,7 +43,15 @@ cancelled-resume, never-entered `env_drop`) are defined by the spec emit.
 
 [recipe_result_error_handling.ccs](../examples/recipe_result_error_handling.ccs) · [recipe_unwrap_destroy_forms.ccs](../examples/recipe_unwrap_destroy_forms.ccs) · [hello.ccs](../examples/hello.ccs)
 
-Fallible work returns `T!>(E)`. Consume every result. Two operators; three modifiers:
+Fallible work returns `T!>(E)` or `T?>(E)`. Both share the same ABI and consume
+operators; the marker sets consumption policy:
+
+| Return       | Bare `f();` |
+| ------------ | ----------- |
+| `T!>(E)`     | ill-formed  |
+| `T?>(E)`     | well-formed (optional ignore) |
+
+Two operators; three modifiers:
 
 | | Maps |
 |--|--|
@@ -62,6 +70,7 @@ Fallible work returns `T!>(E)`. Consume every result. Two operators; three modif
 int a = read() ?> 30;
 int b = read() !>;
 int c = read() !>(e) { /* local */ @err(e); };
+log_line(msg);                           // T?>(CCPrintError) — bare ok
 ```
 
 **Anti-pattern — custom `E` to force handling:** Do not pick `T!>(MyError)`
@@ -151,14 +160,14 @@ may be types or non-negative decimal integers
 
 Fallible chain: unwrap (`!>` / `?>`), then the next method sees the value.
 
-**Print** (include `<ccc/stdio.cch>`): prefer **`io.println`** when a `CCStdio` handle is in scope. Naked `println` / data-first `.println()` remain valid. Templates need an arena — prefer `@scratch` for throwaways. Neither `<ccc/std/prelude.cch>` nor `<ccc/cc_runtime.cch>` pulls `<stdio.h>` or `<string.h>` — `#include` them when you call `printf`, `memcmp`, etc.
+**Print** (include `<ccc/stdio.cch>`): prefer **`io.println`** when a `CCStdio` handle is in scope. Naked `println` / data-first `.println()` remain valid. Console print returns `void ?>(CCPrintError)` — bare `println` is well-formed; use `!>` only when failure must propagate. Templates need an arena — prefer `@scratch` for throwaways.
 
 ```c
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
 CCStdio io = cc_stdio_create(a);
-io.println("hi") !>;
-io.println(@string(`n=${n}`, @scratch)) !>;
-/* also fine: println("hi") !>;  /  @string(`…`, @scratch).println() !>; */
+io.println("hi");
+io.println(@string(`n=${n}`, @scratch));
+/* also fine: println("hi");  /  @string(`…`, @scratch).println(); */
 ```
 
 ---
@@ -231,7 +240,7 @@ cc_arena_stack(tmp, 1024);
 char* q = tmp.allocT(32);
 
 /* Scratch — @string arena operand only; bind before return. */
-io.println(@string(`len=${a.remaining()}`, @scratch)) !>;
+io.println(@string(`len=${a.remaining()}`, @scratch));
 
 char[:0] hi = "hi";
 ```

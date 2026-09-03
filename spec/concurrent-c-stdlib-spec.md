@@ -790,15 +790,15 @@ When script `io` is in scope, preferred examples are handle-first. Data-first
 UFCS and naked aliases remain valid (UFCS either way on the chosen receiver):
 
 ```c
-io.println(path) !>;                  /* preferred when io is in scope */
-io.eprintln(line) !>;
-io.println(@string(`n=${n}`, a)) !>;
+io.println(path);                  /* preferred when io is in scope */
+io.eprintln(line);
+io.println(@string(`n=${n}`, a));
 
-path.println() !>;                    /* also OK: UFCS on data */
-"literal".println() !>;               /* lit/cstr → CCSlice → cc_slice_* */
-cstr_ptr.println() !>;
-println(path) !>;                     /* naked alias → cc_println */
-path.fprintln(STDERR_FILENO) !>;
+path.println();                    /* also OK: UFCS on data */
+"literal".println();               /* lit/cstr → CCSlice → cc_slice_* */
+cstr_ptr.println();
+println(path);                     /* naked alias → cc_println */
+path.fprintln(STDERR_FILENO);
 ```
 
 When the *data* is the UFCS receiver, `CCSlice` / `CCString` call
@@ -819,12 +819,14 @@ Guidelines:
   output; do not wrap temps in `cc_println` in new script source.
 - `cc_println` / `cc_eprintln` are lowered-C sugar (driver-injected default
   `@errhandler`, `-E` desugar).
-- Inside a custom `@errhandler` body, discard with a bound receiver
-  (`CCString msg = …; (void)msg.eprintln();`). Do not use `!>` there.
+- Console print returns `void ?>(CCPrintError)` (or `size_t ?>(CCPrintError)`).
+  Bare `println` / `eprintln` is well-formed. Use `!>` only when print failure
+  must propagate; inside a custom `@errhandler(CCPrintError …)` body, report
+  with `cc_error_log` / `cc_error_exit` or an explicit `!>`.
 - `<ccc/std/io.cch>` `cc_std_out_write` / `cc_std_err_write` remain the
   byte-writer API for non-script library code.
 
-Returns are `CCResult_size_t_CCError`. Short names `println` / `eprintln` are
+Returns are optional `CCResult_*_CCPrintError`. Short names `println` / `eprintln` are
 not macros (a function-like macro would expand in member position and destroy
 the postfix spelling): the prefix spelling aliases the declared `cc_println`
 family at call position only.

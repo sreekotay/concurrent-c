@@ -58,7 +58,7 @@ int main(void) {
      * in .len). Dest to double[:] is a missing wrapper — peel stays. */
     char[:] ys = scaled.as_list::[double](arena) !>;
     double* yv = (double*)ys.ptr;
-    println(@string(`scaled=${ys.len} first=${yv[0]} last=${yv[ys.len - 1]}`, @scratch)) !>;
+    println(@string(`scaled=${ys.len} first=${yv[0]} last=${yv[ys.len - 1]}`, @scratch));
 
     /* 3 + 4. An imported module is an object; its attributes are
      *    methods. Arguments marshal by static type — a typed slice
@@ -66,19 +66,19 @@ int main(void) {
     CCPyObj st = py.import("statistics") !> @destroy;
     double xs[:] = {1.0, 2.0, 3.0, 4.0, 42.0};
     double mean = st.mean(xs) !>;
-    println(@string(`mean=${mean}`, @scratch)) !>;
+    println(@string(`mean=${mean}`, @scratch));
 
     /* 5. `!>` links hops: each unwraps, the next dispatches on the
      *    unwrapped value. */
     char[:] ver = py.import("sys")!>.get("version")!>.as_slice()!>;
-    println(@string(`python=${ver.sub(0, 6)}`, @scratch)) !>;
+    println(@string(`python=${ver.sub(0, 6)}`, @scratch));
 
     /* 8. A keyword argument is an ordinary argument that carries the name
      *    it binds to; order among keywords does not matter. */
     CCPyObj main = py.import("__main__") !> @destroy;
     char[:] pad = main.pad(7, py_kw("width", 4), py_kw("fill", "0"))
                       !>.as_slice()!>;
-    println(@string(`pad=${pad}`, @scratch)) !>;
+    println(@string(`pad=${pad}`, @scratch));
 
     /* 7. A failure carries the exception class and, when it crossed
      *    Python frames, the formatted traceback. The handler recovers
@@ -89,12 +89,12 @@ int main(void) {
         `, arena).as_slice()) !>;
 
     CCPyObj bad = py.eval(@slice("boom()")) !>(e) {
-        println(@string(`caught ${e.type_name}`, @scratch)) !>;
-        println(@string(`traceback lines=${e.traceback.len > 0}`, @scratch)) !>;
+        println(@string(`caught ${e.type_name}`, @scratch));
+        println(@string(`traceback lines=${e.traceback.len > 0}`, @scratch));
         return 0;
     } @destroy;
     (void)bad;
 
-    println(@string(`unreachable`, @scratch)) !>;
+    println(@string(`unreachable`, @scratch));
     return 9;
 }

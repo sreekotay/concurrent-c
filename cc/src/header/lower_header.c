@@ -471,6 +471,19 @@ static int cc__header_bang_unwrap_is_stmt(const char* src, size_t n, size_t i) {
     return (j < n && (src[j] == '{' || src[j] == ';'));
 }
 
+/* Expression `CALL ?>(e) DEFAULT` — closing `)` sits immediately before the
+ * sigil. Type form `T ?>(E) name` has a type token there instead. Matches
+ * pass_type_syntax.c's disambiguation for `?>`. */
+static int cc__header_qmark_unwrap_is_expr(const char* src, size_t i) {
+    size_t bk;
+    if (!src || i == 0) return 0;
+    bk = i;
+    while (bk > 0 && (src[bk - 1] == ' ' || src[bk - 1] == '\t' ||
+                      src[bk - 1] == '\r' || src[bk - 1] == '\n'))
+        bk--;
+    return (bk > 0 && src[bk - 1] == ')');
+}
+
 static char* cc__lower_result_types(const char* src, size_t n, CCLowerState* state) {
     if (!src || n == 0) return NULL;
     
@@ -488,15 +501,22 @@ static char* cc__lower_result_types(const char* src, size_t n, CCLowerState* sta
         char c = src[i];
         char c2 = (i + 1 < n) ? src[i + 1] : 0;
 
-        /* Detect T!>(E) pattern. Statement unwrap (`expr !>(e) {`, `!>;`)
-         * is rewritten later — do not treat the binder as an error type. */
-        if (c == '!' && c2 == '>') {
-            if (cc__header_bang_unwrap_is_stmt(src, n, i)) {
+        /* Detect T!>(E) / T?>(E). Statement/expression unwrap (`expr !>(e) {`,
+         * `!>;`, `CALL ?>(e) DEFAULT`) is rewritten later — do not treat the
+         * binder as an error type. Header lower used to handle only `!>`;
+         * leaving `void ?>(E)` for the unwrap pass mis-lowered decls and
+         * hung on stdlib headers (stdio). */
+        if ((c == '!' || c == '?') && c2 == '>') {
+            if (c == '!' && cc__header_bang_unwrap_is_stmt(src, n, i)) {
+                i += 2;
+                continue;
+            }
+            if (c == '?' && cc__header_qmark_unwrap_is_expr(src, i)) {
                 i += 2;
                 continue;
             }
             size_t sigil_pos = i;
-            size_t j = i + 2;  /* skip '!>' */
+            size_t j = i + 2;  /* skip '!>' / '?>' */
             
             /* Skip whitespace */
             while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;

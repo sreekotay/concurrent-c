@@ -11,7 +11,7 @@ emit.arg("out/quote_cch_priv_tag_smoke.c");
 emit.inherit_stdio();
 int rc = emit.status() !>;
 if (rc != 0) {
-    "emit leaf failed".println() !>;
+    "emit leaf failed".println();
     return 1;
 }
 
@@ -21,7 +21,7 @@ grep_stem.arg("#include \"quote_cch_priv_tag_mod.h\"");
 grep_stem.arg("out/include/tests/quote_cch_priv_tag_mod_leaf.h");
 rc = grep_stem.status() !>;
 if (rc != 0) {
-    "extracted leaf missing stem include".println() !>;
+    "extracted leaf missing stem include".println();
     return 1;
 }
 
@@ -31,7 +31,7 @@ grep_priv.arg("quote_cch_priv_tag_mod_priv.h");
 grep_priv.arg("out/include/tests/quote_cch_priv_tag_mod_leaf.h");
 rc = grep_priv.status() !>;
 if (rc == 0) {
-    "extracted leaf included _priv chapter".println() !>;
+    "extracted leaf included _priv chapter".println();
     return 1;
 }
 

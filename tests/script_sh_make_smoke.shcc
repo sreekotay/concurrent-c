@@ -6,13 +6,13 @@
 
 int rc = cc_script_sh(@string(`true`, @scratch));
 if (rc != 0) {
-    "FAIL cc_script_sh true".eprintln() !>;
+    "FAIL cc_script_sh true".eprintln();
     return 1;
 }
 
 rc = cc_script_sh(@string(`false`, @scratch));
 if (rc == 0) {
-    "FAIL cc_script_sh false exited 0".eprintln() !>;
+    "FAIL cc_script_sh false exited 0".eprintln();
     return 1;
 }
 
@@ -21,7 +21,7 @@ CCString got = cc_script_sh_read(q) !>;
 CCSlice sl = got.as_slice();
 char *p = sl.ptr;
 if (sl.len != 11 || !p || memcmp(p, "hello world", 11) != 0) {
-    "FAIL cc_script_sh_read".eprintln() !>;
+    "FAIL cc_script_sh_read".eprintln();
     return 1;
 }
 
@@ -29,8 +29,8 @@ setenv("CCC", "true", 1);
 rc = cc_script_ccc(@string(`--ignored`, @scratch));
 unsetenv("CCC");
 if (rc != 0) {
-    "FAIL cc_script_ccc".eprintln() !>;
+    "FAIL cc_script_ccc".eprintln();
     return 1;
 }
 
-"ok".println() !>;
+"ok".println();

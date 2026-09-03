@@ -63,7 +63,7 @@ int main(void) {
     cc_arena_stack(excl_arena, kilobytes(64));
     g_excl = cc_exclusive_create(excl_arena, 0) !>;
 
-    println(@string(`=== Named exclusive: ${NUM_WORKERS} workers × ${ITERS} iters ===`, @scratch)) !>;
+    println(@string(`=== Named exclusive: ${NUM_WORKERS} workers × ${ITERS} iters ===`, @scratch));
 
     int w;
     /* Shared name: all workers serialize on counter name=1. */
@@ -82,12 +82,12 @@ int main(void) {
     }
 
     int64_t expect = (int64_t)NUM_WORKERS * (int64_t)ITERS;
-    println(@string(`shared  = ${g_shared.value} (expect ${expect})`, @scratch)) !>;
-    println(@string(`private = ${private_sum} (expect ${expect})`, @scratch)) !>;
+    println(@string(`shared  = ${g_shared.value} (expect ${expect})`, @scratch));
+    println(@string(`private = ${private_sum} (expect ${expect})`, @scratch));
 
     g_excl.destroy();
 
     if (g_shared.value != expect || private_sum != expect) return 1;
-    println("OK") !>;
+    println("OK");
     return 0;
 }

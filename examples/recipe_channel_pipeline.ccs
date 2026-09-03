@@ -37,7 +37,7 @@ int main(void) {
             @errhandler(CCError e) cc_error_exit(e);
             int v;
             while (cc_io_avail(rx.recv(&v))) {
-                println(@string(`recv: ${v}`, @scratch)) !>;
+                println(@string(`recv: ${v}`, @scratch));
                 sum.fetch_add(v);
             }
         }) !>;
@@ -50,7 +50,7 @@ int main(void) {
                 @errhandler(CCError e) cc_error_exit(e);
                 for (int i = 1; i <= 3; i++) {
                     tx.send(i) !>;
-                    println(@string(`send: ${i}`, @scratch)) !>;
+                    println(@string(`send: ${i}`, @scratch));
                 }
             }) !>;
         }
@@ -59,6 +59,6 @@ int main(void) {
     /* outer @destroy: wait consumer (saw close, drained, exited) */
 
     int total = sum.load();
-    println(@string(`sum = ${total} (expected 6)`, @scratch)) !>;
+    println(@string(`sum = ${total} (expected 6)`, @scratch));
     return (total == 6) ? 0 : 1;
 }

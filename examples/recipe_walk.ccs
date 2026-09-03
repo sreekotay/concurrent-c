@@ -37,7 +37,7 @@ int main(void) {
     /* 2. Point access — at/set are Result (index may be out of range). */
     buf.set(0, 'A') !>;
     char c0 = buf.at(0) !>;
-    println(@string(`point=${c0}`, @scratch)) !>;
+    println(@string(`point=${c0}`, @scratch));
 
     /* 3. fill / copy / copy_overlap — dest too short is Result.
      *    memcpy(buf.ptr, hi.ptr, 2);  — undeclared unless <string.h>
@@ -50,12 +50,12 @@ int main(void) {
     mid.copy_overlap(hi) !>;
 
     /* Same print: peel vs interpolating a view. */
-    println(@string(`bulk C  = ${buf.ptr[0]}${buf.ptr[1]}${buf.ptr[2]}${buf.ptr[3]}`, @scratch)) !>;
-    println(@string(`bulk CC = ${buf.sub(0, 4)}`, @scratch)) !>;
+    println(@string(`bulk C  = ${buf.ptr[0]}${buf.ptr[1]}${buf.ptr[2]}${buf.ptr[3]}`, @scratch));
+    println(@string(`bulk CC = ${buf.sub(0, 4)}`, @scratch));
 
     /* 4. clone_into — arena last; the copy lives on `keep`. */
     char[:] owned = hi.clone_into(keep) !>;
-    println(@string(`kept=${owned}`, @scratch)) !>;
+    println(@string(`kept=${owned}`, @scratch));
 
     /* 5. Copy walk / enumerate / zip / range. Zip is fallible (`!>`). */
     int n = 0;
@@ -71,7 +71,7 @@ int main(void) {
     } !>;
     @for (i in 0..3)
         sum += (int)i;
-    println(@string(`walk n=${n} sum=${sum}`, @scratch)) !>;
+    println(@string(`walk n=${n} sum=${sum}`, @scratch));
 
     /* 6. Mut walk — binder is not an object; `ch =` is .access store.
      *    A slice snapshots .len; a grower the body resizes re-reads. */
@@ -80,13 +80,13 @@ int main(void) {
         if (ch >= 'a' && ch <= 'z')
             ch -= 32;
     } !>;
-    println(@string(`mut=${word}`, @scratch)) !>;
+    println(@string(`mut=${word}`, @scratch));
 
     /* 7. View — compiler hoists `sub`; store is into the receiver. */
     @for (&ch in word.sub(1, word.len)) {
         ch = 'c';
     } !>;
-    println(@string(`view=${word}`, @scratch)) !>;
+    println(@string(`view=${word}`, @scratch));
 
     /* 8. Vec is an extent. Dest-init T[:] is a snapshot header. */
     CCVec::[int] v = cc_vec_new::[int](a);
@@ -95,12 +95,12 @@ int main(void) {
     int live = 0;
     @for (x in v)
         live += x;
-    println(@string(`vec live=${live} snap=${snap.len}`, @scratch)) !>;
+    println(@string(`vec live=${live} snap=${snap.len}`, @scratch));
 
     /* 9. Peel when a T* must leave. */
     const char *raw = word.ptr;
     (void)raw;
 
-    println("done") !>;
+    println("done");
     return 0;
 }

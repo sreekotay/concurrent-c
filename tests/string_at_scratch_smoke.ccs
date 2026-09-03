@@ -10,10 +10,10 @@ int main(void) {
     double ratio = 1.5;
     CCString s = @string(`r=${ratio}`, @scratch);
     assert(s.as_slice().eq_cstr("r=1.5"));
-    println(s) !>;
+    println(s);
 
     int x = 42;
-    println(@string(`x=${x}`, @scratch(256))) !>;
+    println(@string(`x=${x}`, @scratch(256)));
 
     const char* who = "ada";
     CCString a = @string(`w=${who}`, @scratch);

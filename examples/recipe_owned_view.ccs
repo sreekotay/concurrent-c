@@ -97,33 +97,33 @@ int main(void) {
 
     Doc d = {0} @destroy;
     d.from_view(@slice("hello")) !>;
-    println(@string(`len=${d.len()}`, @scratch)) !>;
+    println(@string(`len=${d.len()}`, @scratch));
 
     d.destroy();
     d.from_view(@slice("ab")) !>;
-    println(@string(`reopen=${d.len()}`, @scratch)) !>;
+    println(@string(`reopen=${d.len()}`, @scratch));
 
     d.from_view(@slice("x")) !>(e) {
-        println(@string(`live refused (len=${d.len()})`, @scratch)) !>;
+        println(@string(`live refused (len=${d.len()})`, @scratch));
     };
 
     char buf[4] = {'n', 'o', 'p', 'e'};
     char[:] raw = buf.to_slice_n(4);
     Doc d2 = {0} @destroy;
     d2.from_view(raw) !>(e) {
-        println(@string(`untracked refused`, @scratch)) !>;
+        println(@string(`untracked refused`, @scratch));
     };
 
-    println(@string(`measure=${measure_len(&d)}`, @scratch)) !>;
+    println(@string(`measure=${measure_len(&d)}`, @scratch));
 
     char[:] note = d.copy_into(d.analysis) !>;
-    println(@string(`analysis=${note.len}`, @scratch)) !>;
+    println(@string(`analysis=${note.len}`, @scratch));
 
     d.replace(@slice("too-long!")) !>(e) {
-        println(@string(`unchanged=${d.len()}`, @scratch)) !>;
+        println(@string(`unchanged=${d.len()}`, @scratch));
     };
 
     d.replace(@slice("")) !>;
-    println(@string(`cleared=${d.len()}`, @scratch)) !>;
+    println(@string(`cleared=${d.len()}`, @scratch));
     return 0;
 }

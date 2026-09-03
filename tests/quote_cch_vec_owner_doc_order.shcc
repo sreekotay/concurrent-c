@@ -11,7 +11,7 @@ emit.arg("out/quote_cch_vec_owner_doc.c");
 emit.inherit_stdio();
 int rc = emit.status() !>;
 if (rc != 0) {
-    "emit owner failed".println() !>;
+    "emit owner failed".println();
     return 1;
 }
 
@@ -26,9 +26,9 @@ python.arg(
     "raise SystemExit(0 if d>0 and anchor>=0 and anchor<d else 1)");
 rc = python.status() !>;
 if (rc != 0) {
-    "Vec DECL precedes QuoteOwnerRun face".println() !>;
+    "Vec DECL precedes QuoteOwnerRun face".println();
     return 1;
 }
 
-"ok".println() !>;
+"ok".println();
 return 0;

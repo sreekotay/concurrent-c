@@ -107,11 +107,11 @@ int main(void) {
     st.rel = cc_shard_domain(excl, cc_shard_mask_make(8));
 
     run_pair(&st, 1, 2, -1, 0) !>(e) {
-        eprintln(@string(`FAIL ok pair: ${e.message}`, @scratch)) !>;
+        eprintln(@string(`FAIL ok pair: ${e.message}`, @scratch));
         return 1;
     };
     if (st.cell[1] != 10 || st.cell[2] != 20 || st.reverts != 0) {
-        eprintln(@string(`FAIL after ok cells 1=${st.cell[1]} 2=${st.cell[2]} reverts=${st.reverts}`, @scratch)) !>;
+        eprintln(@string(`FAIL after ok cells 1=${st.cell[1]} 2=${st.cell[2]} reverts=${st.reverts}`, @scratch));
         return 1;
     }
 
@@ -122,12 +122,12 @@ int main(void) {
             hit = 1;
         };
         if (!hit) {
-            eprintln("FAIL boom A should revert B") !>;
+            eprintln("FAIL boom A should revert B");
             return 1;
         }
     }
     if (st.cell[3] != 0 || st.cell[4] != 0 || st.reverts != 1) {
-        eprintln(@string(`FAIL boom A cells 3=${st.cell[3]} 4=${st.cell[4]} reverts=${st.reverts}`, @scratch)) !>;
+        eprintln(@string(`FAIL boom A cells 3=${st.cell[3]} 4=${st.cell[4]} reverts=${st.reverts}`, @scratch));
         return 1;
     }
 
@@ -138,12 +138,12 @@ int main(void) {
             hit = 1;
         };
         if (!hit) {
-            eprintln("FAIL boom B should revert A") !>;
+            eprintln("FAIL boom B should revert A");
             return 1;
         }
     }
     if (st.cell[5] != 0 || st.cell[6] != 0 || st.reverts != 2) {
-        eprintln(@string(`FAIL boom B cells 5=${st.cell[5]} 6=${st.cell[6]} reverts=${st.reverts}`, @scratch)) !>;
+        eprintln(@string(`FAIL boom B cells 5=${st.cell[5]} 6=${st.cell[6]} reverts=${st.reverts}`, @scratch));
         return 1;
     }
 
@@ -154,15 +154,15 @@ int main(void) {
             hit = 1;
         };
         if (!hit) {
-            eprintln("FAIL commit err should revert both") !>;
+            eprintln("FAIL commit err should revert both");
             return 1;
         }
     }
     if (st.cell[1] != 10 || st.cell[2] != 20 || st.reverts != 4) {
-        eprintln(@string(`FAIL commit err cells 1=${st.cell[1]} 2=${st.cell[2]} reverts=${st.reverts}`, @scratch)) !>;
+        eprintln(@string(`FAIL commit err cells 1=${st.cell[1]} 2=${st.cell[2]} reverts=${st.reverts}`, @scratch));
         return 1;
     }
 
-    println("parallel_prepare_commit_smoke: OK") !>;
+    println("parallel_prepare_commit_smoke: OK");
     return 0;
 }

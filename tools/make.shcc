@@ -57,7 +57,7 @@ static int examples_check() {
 
     int failed = 0;
 
-    "=== Checking examples compile ===".println() !>;
+    "=== Checking examples compile ===".println();
     CCSliceArray files = cc_glob(@slice("examples/*.ccs"), a) !>;
     for (size_t i = 0; i < files.len(); i++) {
         char[:0] path = files.get(i);
@@ -69,15 +69,15 @@ static int examples_check() {
         cmd.arg("/dev/null");
         int rc = cmd.status() !>;
         CCString line = @string(`  ${path}  ${(rc == 0) ? "OK" : "FAIL"}`, a);
-        line.println() !>;
+        line.println();
         if (rc != 0) failed++;
     }
 
     if (failed > 0 || files.len() == 0) {
-        @string(`${failed} example(s) failed`, a).println() !>;
+        @string(`${failed} example(s) failed`, a).println();
         return 1;
     }
-    "All examples OK".println() !>;
+    "All examples OK".println();
     return 0;
 }
 
@@ -95,5 +95,5 @@ static int perf_check() {
     return run_all_flag("--perf");
 }
 
-"make: use @examples_check, @stress_check, @perf_check (or @ to list)".println() !>;
+"make: use @examples_check, @stress_check, @perf_check (or @ to list)".println();
 return 2;

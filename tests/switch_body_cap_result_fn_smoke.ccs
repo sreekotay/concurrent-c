@@ -225,7 +225,7 @@ static bool !>(CCError) execute_fat(int k, char[:] arg) {
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     bool ok = execute_fat(3, cc_slice_cstr("3")) !>;
-    if (ok) println("ok") !>;
-    else println("no") !>;
+    if (ok) println("ok");
+    else println("no");
     return 0;
 }

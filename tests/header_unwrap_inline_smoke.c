@@ -187,6 +187,42 @@ int main(void) {
     rc |= expect_absent(lowered, "__cc_uw_", "tu-level unwrap macros");
     free(lowered);
 
+    /* T?>(E) must lower as a type in headers (same as T!>(E)). Leaving
+     * `void ?>(E)` for the unwrap pass mis-rewrites decls and hangs on
+     * stdlib faces like stdio — regression for that bug. */
+    {
+        char opt_src[512];
+        char opt_h[512];
+        char* opt_lowered = NULL;
+        snprintf(opt_src, sizeof(opt_src), "%s/opt_void.cch", dir);
+        snprintf(opt_h, sizeof(opt_h), "%s/opt_void.h", outdir);
+        if (write_file(opt_src,
+                       "typedef struct { int x; } OptErr;\n"
+                       "static inline void ?>(OptErr) opt_void_ok(void) {\n"
+                       "    return cc_ok();\n"
+                       "}\n"))
+            return 1;
+        snprintf(cmd, sizeof(cmd), "%s --ordered %s %s", tool, outdir, opt_src);
+        if (run_capture(cmd, captured, sizeof(captured), &ec) != 0 || ec != 0) {
+            fprintf(stderr, "FAIL lower_headers opt void (exit %d):\n%s\n",
+                    ec, captured);
+            return 1;
+        }
+        opt_lowered = read_file(opt_h);
+        if (!opt_lowered) {
+            fprintf(stderr, "FAIL read %s\n", opt_h);
+            return 1;
+        }
+        rc |= expect_has(opt_lowered, "CCResult_void_OptErr", "void ?> type");
+        rc |= expect_absent(opt_lowered, "__cc_pu_", "void ?> not unwrap expr");
+        if (strstr(opt_lowered, "?>")) {
+            fprintf(stderr, "FAIL opt void.h still contains ?>\n%s\n",
+                    opt_lowered);
+            rc = 1;
+        }
+        free(opt_lowered);
+    }
+
     if (write_file(guest_c,
                    "#include \"header_unwrap_inline.h\"\n"
                    "int main(void) {\n"

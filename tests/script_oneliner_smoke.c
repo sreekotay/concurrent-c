@@ -76,7 +76,7 @@ int main(void) {
 
     /* 3) predeclared io (+ a via implication) */
     snprintf(cmd, sizeof(cmd),
-             "./cc/bin/ccc -e 'io.println(CC_SLICE_LIT(\"via-io\")) !>;'");
+             "./cc/bin/ccc -e 'io.println(CC_SLICE_LIT(\"via-io\"));'");
     if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
         fprintf(stderr, "FAIL io predecl (exit %d):\n%s\n", ec, out);
         failed = 1;
@@ -160,7 +160,7 @@ int main(void) {
 
     /* 7c) template prose must not trigger predecl `in` (no stdin drain) */
     snprintf(cmd, sizeof(cmd),
-             "./cc/bin/ccc -e 'io.println(@string(`built in a jiffy`)) !>;'");
+             "./cc/bin/ccc -e 'io.println(@string(`built in a jiffy`));'");
     if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
         fprintf(stderr, "FAIL template prose predecl (exit %d):\n%s\n", ec, out);
         failed = 1;
@@ -171,7 +171,7 @@ int main(void) {
     /* 7d) apostrophe in template must not wedge --save duplicate detection */
     snprintf(cmd, sizeof(cmd),
              "./cc/bin/ccc --save-to '%s' --save dont -e "
-             "'io.println(@string(`don'\\''t`)) !>;'",
+             "'io.println(@string(`don'\\''t`));'",
              toolbox);
     if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
         fprintf(stderr, "FAIL save dont (exit %d):\n%s\n", ec, out);

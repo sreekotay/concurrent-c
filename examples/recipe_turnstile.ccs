@@ -44,9 +44,9 @@ int main(void) {
     } !>.wait()!>;
 
     if (fail || read_next != N || write_next != N) {
-        eprintln(@string(`FAIL read=${read_next} write=${write_next} fail=${fail}`, @scratch)) !>;
+        eprintln(@string(`FAIL read=${read_next} write=${write_next} fail=${fail}`, @scratch));
         return 1;
     }
-    println("turnstile: 8 tickets, cap 2, read then write in order") !>;
+    println("turnstile: 8 tickets, cap 2, read then write in order");
     return 0;
 }

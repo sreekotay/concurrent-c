@@ -70,7 +70,7 @@ int main(void) {
     @errhandler(CCError err) { cc_error_log(err); return 1; }
     uint32_t want = sum_seq(0, 0);
     uint32_t got = sum_par(0, 0);
-    println(@string(`tree: want=${want} got=${got}`, @scratch)) !>;
+    println(@string(`tree: want=${want} got=${got}`, @scratch));
     if (got != want)
         return 1;
 
@@ -86,7 +86,7 @@ int main(void) {
         if (par[k] != seq[k])
             return 1;
     }
-    println("range: ok") !>; /* disjoint slots — not a shared dest */
+    println("range: ok"); /* disjoint slots — not a shared dest */
 
     {
         cc_arena_stack(arena, kilobytes(64));
@@ -107,7 +107,7 @@ int main(void) {
             if (packed[i] != i * i)
                 return 1;
         }
-        println("wait-for: ok") !>;
+        println("wait-for: ok");
     }
 
     int left = 0;
@@ -121,7 +121,7 @@ int main(void) {
     } !>.wait()!>;
     if (left + right != 25)
         return 1;
-    println("serial: ok") !>;
+    println("serial: ok");
 
     {
         int p = 0;
@@ -143,7 +143,7 @@ int main(void) {
         } !>.wait()!>;
         if (p + q + r + s != 10)
             return 1;
-        println("handles: ok") !>;
+        println("handles: ok");
     }
 
     {
@@ -166,7 +166,7 @@ int main(void) {
         h.wait() !>;
         if (p + q != 9)
             return 1;
-        println("live dest: ok") !>;
+        println("live dest: ok");
     }
     return 0;
 }

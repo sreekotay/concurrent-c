@@ -11,14 +11,14 @@ build.arg("out/cch_typehooks_extract_face_smoke");
 build.inherit_stdio();
 int rc = build.status() !>;
 if (rc != 0) {
-    "build failed".println() !>;
+    "build failed".println();
     return 1;
 }
 CCCommand run = cc_command(a, @slice("out/cch_typehooks_extract_face_smoke"));
 run.inherit_stdio();
 rc = run.status() !>;
 if (rc != 0) {
-    "run failed".println() !>;
+    "run failed".println();
     return 1;
 }
 return 0;

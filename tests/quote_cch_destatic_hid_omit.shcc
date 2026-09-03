@@ -11,7 +11,7 @@ build.arg("-o");
 build.arg("out/quote_cch_destatic_hid_omit");
 CCProcessOutput out = build.capture(a) !>;
 if (out.success()) {
-    "guest linked destatic_hid".println() !>;
+    "guest linked destatic_hid".println();
     return 1;
 }
 CCCommand grep_hid = cc_command(a, @slice("grep"));
@@ -20,7 +20,7 @@ grep_hid.arg("destatic_hid");
 grep_hid.stdin_slice(out.stdout());
 int rc = grep_hid.status() !>;
 if (rc != 0) {
-    "build failed without naming destatic_hid".println() !>;
+    "build failed without naming destatic_hid".println();
     return 1;
 }
 return 0;

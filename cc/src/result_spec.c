@@ -63,6 +63,7 @@ static const CCStdlibPredeclaredResult cc__stdlib_predeclared_result_specs[] = {
     { "CCResult_bool_CC_BoolParseError",     "bool",     "CC_BoolParseError", "bool",           "CC_BoolParseError" },
     { "CCResult_CCFile_CCIoError",           "CCFile",   "CCIoError",         "CCFile",         "CCIoError" },
     { "CCResult_void_CCIoError",             "void",     "CCIoError",         "void",           "CCIoError" },
+    { "CCResult_void_CCPrintError",          "void",     "CCPrintError",      "void",           "CCPrintError" },
     { "CCResult_CCSocket_CCNetError",        "CCSocket", "CCNetError",        "CCSocket",       "CCNetError" },
     { "CCResult_CCListener_CCNetError",      "CCListener", "CCNetError",      "CCListener",     "CCNetError" },
     { "CCResult_CCHttpResponse_CCHttpErrorInfo", "CCHttpResponse", "CCHttpErrorInfo", "CCHttpResponse", "CCHttpErrorInfo" },

@@ -42,12 +42,12 @@ static void handle_client(CCSocket sock) {
     CCNetError peer_err = CC_NET_OK;
     char[:] peer = sock.peer_addr(a, &peer_err);
     if (peer_err == CC_NET_OK) {
-        println(@string(`client connected: ${peer}`, @scratch)) !>;
+        println(@string(`client connected: ${peer}`, @scratch));
     }
 
     char[:] data;
     while (sock.read(a, 1024, &data) !>) {
-        println(@string(`echo ${data.len} bytes`, @scratch)) !>;
+        println(@string(`echo ${data.len} bytes`, @scratch));
         size_t written = sock.write(data.ptr, data.len) !>(e) {
             (void)e;
             sock.close();
@@ -56,7 +56,7 @@ static void handle_client(CCSocket sock) {
         (void)written;
         a.reset();
     }
-    println("client disconnected") !>;
+    println("client disconnected");
     sock.close();
 }
 
@@ -64,13 +64,13 @@ static void handle_client(CCSocket sock) {
 static void run_test_client(void) {
     @errhandler(CCError e) cc_error_exit(e);
     CCSocket sock = cc_tcp_connect(PORT, sizeof(PORT) - 1) !>(e) {
-        eprintln(@string(`dial error: ${e}`, @scratch)) !>;
+        eprintln(@string(`dial error: ${e}`, @scratch));
         return;
     };
 
     const char msg[] = "hello from test\n";
     size_t nw = sock.write(msg, sizeof(msg) - 1) !>(e) {
-        eprintln(@string(`write error: ${cc_io_error_str(e)}`, @scratch)) !>;
+        eprintln(@string(`write error: ${cc_io_error_str(e)}`, @scratch));
         sock.close();
         return;
     };
@@ -79,13 +79,13 @@ static void run_test_client(void) {
     char buf[64] = {0};
     size_t got = 0;
     bool ok = sock.read_into(buf, sizeof(buf) - 1, &got) !>(e) {
-        eprintln(@string(`read error: ${cc_io_error_str(e)}`, @scratch)) !>;
+        eprintln(@string(`read error: ${cc_io_error_str(e)}`, @scratch));
         sock.close();
         return;
     };
     if (!ok) got = 0;
     char[:] got_slice = buf.to_slice_n(got);
-    println(@string(`test client got ${got} bytes: ${got_slice}`, @scratch)) !>;
+    println(@string(`test client got ${got} bytes: ${got_slice}`, @scratch));
     sock.close();
 }
 
@@ -107,17 +107,17 @@ int main(int argc, char** argv) {
     bool test_mode = parse_test_flag(argc, argv);
 
     CCListener ln@(PORT) !>(e) {
-        println(@string(`listen error: ${e}`, @scratch)) !>;
+        println(@string(`listen error: ${e}`, @scratch));
         return 1;
     } @destroy;
     const char* mode = test_mode ? "test" : "demo";
-    println(@string(`listening on ${PORT} (${mode} mode)`, @scratch)) !>;
+    println(@string(`listening on ${PORT} (${mode} mode)`, @scratch));
 
     CCParallel h = @parallel spawn {
         @serial {
             do {
                 CCSocket sock = ln.accept() !>(e) {
-                    println(@string(`accept stopped: ${e}`, @scratch)) !>;
+                    println(@string(`accept stopped: ${e}`, @scratch));
                     break;
                 };
                 @parallel(h) {
@@ -132,6 +132,6 @@ int main(int argc, char** argv) {
     } !>;
     h.wait() !>;
 
-    println("server done") !>;
+    println("server done");
     return 0;
 }

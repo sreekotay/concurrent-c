@@ -1,0 +1,31 @@
+/*
+ * T?>(E): bare call is well-formed; !> still works.
+ * Pair with optional_result_discard_bare_fail.compile_err (T!>(E) bare fails).
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+static int ?>(CCError) opt_ok(void) {
+    return cc_ok(42);
+}
+
+static int ?>(CCError) opt_err(void) {
+    return cc_err(CC_ERR_INVALID_ARG, "opt_err");
+}
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+
+    opt_ok();
+    opt_err();
+
+    int v = opt_ok() !>;
+    if (v != 42) return 1;
+
+    int w = opt_err() ?> 0;
+    if (w != 0) return 2;
+
+    println("optional_result_discard_smoke: OK");
+    return 0;
+}

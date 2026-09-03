@@ -37,7 +37,7 @@ int main(void) {
                 @errhandler(CCError e) cc_error_exit(e);
                 int job;
                 while (cc_io_avail(jobs_rx.recv(&job))) {
-                    println(@string(`worker: processed job ${job}`, @scratch)) !>;
+                    println(@string(`worker: processed job ${job}`, @scratch));
                     done_tx.send(job) !>;
                 }
             }) !>;
@@ -54,7 +54,7 @@ int main(void) {
                     jobs_tx.send(j) !>;
                 }
                 int n = NUM_JOBS;
-                println(@string(`feeder: sent ${n} jobs`, @scratch)) !>;
+                println(@string(`feeder: sent ${n} jobs`, @scratch));
             }) !>;
         }
         /* feeder @destroy: jobs_tx closed → workers drain and exit. */
@@ -70,6 +70,6 @@ int main(void) {
         jobs_done++;
     }
 
-    println(@string(`done, jobs_done = ${jobs_done}`, @scratch)) !>;
+    println(@string(`done, jobs_done = ${jobs_done}`, @scratch));
     return (jobs_done == NUM_JOBS) ? 0 : 1;
 }

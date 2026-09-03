@@ -10,7 +10,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     which.arg("-c");
     which.arg("command -v node >/dev/null 2>&1");
     int rc = which.status() !>;
-    if (rc != 0) { "SKIP (no node)".println() !>; return 0; }
+    if (rc != 0) { "SKIP (no node)".println(); return 0; }
 }
 
 {
@@ -19,7 +19,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     build.arg("tests/js_dom_prog.ccs");
     build.inherit_stdio();
     int rc = build.status() !>;
-    if (rc != 0) { "build failed".println() !>; return 1; }
+    if (rc != 0) { "build failed".println(); return 1; }
 }
 
 {
@@ -31,7 +31,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
             "CC_JS_HOST_CACHE=tmp/js_dom_cache ./bin/js_dom_prog");
     run.inherit_stdio();
     int rc = run.status() !>;
-    if (rc != 0) { "iso run failed".println() !>; return 1; }
+    if (rc != 0) { "iso run failed".println(); return 1; }
 }
 
 {
@@ -42,7 +42,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     par.arg("f=$(ls tmp/js_dom_cache/cc_js_broker_*.cjs 2>/dev/null | head -1); "
             "test -n \"$f\" && cmp -s \"$f\" pypi/cc-node/cc_node/broker.cjs");
     int rc = par.status() !>;
-    if (rc != 0) { "broker drift (embedded != pypi/cc-node)".println() !>; return 1; }
-    "broker_parity true".println() !>;
+    if (rc != 0) { "broker drift (embedded != pypi/cc-node)".println(); return 1; }
+    "broker_parity true".println();
 }
 return 0;

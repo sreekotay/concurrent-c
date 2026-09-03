@@ -8,12 +8,12 @@
 CCArena a = @create(kilobytes(4)) @destroy;
 
 CCSlice hi = @slice("hello");
-fprintln(STDOUT_FILENO, hi) !>;
-fprintln(STDERR_FILENO, "err-naked") !>;
+fprintln(STDOUT_FILENO, hi);
+fprintln(STDERR_FILENO, "err-naked");
 fprint(STDOUT_FILENO, "no-nl");
-println("") !>; /* newline after fprint */
+println(""); /* newline after fprint */
 
 /* Postfix form still works and must not be rewritten. */
-hi.fprintln(STDERR_FILENO) !>;
+hi.fprintln(STDERR_FILENO);
 
 return 0;

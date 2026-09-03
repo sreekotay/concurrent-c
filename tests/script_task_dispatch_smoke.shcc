@@ -13,9 +13,9 @@
 static int greet(int argc, char **argv) {
     if (argc >= 2 && argv[1]) {
         const char *msg = argv[1];
-        msg.println() !>;
+        msg.println();
     } else {
-        "hi".println() !>;
+        "hi".println();
     }
     return 0;
 }
@@ -24,7 +24,7 @@ static int greet(int argc, char **argv) {
  * @task No-arg demo task
  */
 static int ping(void) {
-    "pong".println() !>;
+    "pong".println();
     return 0;
 }
 
@@ -34,7 +34,7 @@ static int ping(void) {
 static int zebra(int argc, char **argv) {
     (void)argc;
     (void)argv;
-    "z".println() !>;
+    "z".println();
     return 0;
 }
 
@@ -55,4 +55,4 @@ static int helper_not_a_task(int argc, char **argv, const char *extra) {
     return 0;
 }
 
-"default".println() !>;
+"default".println();

@@ -50,6 +50,6 @@ int main(void) {
     /* Sync main drives the whole async stack with one @await. */
     int result = @await pipeline(tx, rx, 41) !>;
 
-    println(@string(`pipeline result: ${result} (expected 42)`, @scratch)) !>;
+    println(@string(`pipeline result: ${result} (expected 42)`, @scratch));
     return (result == 42) ? 0 : 1;
 }

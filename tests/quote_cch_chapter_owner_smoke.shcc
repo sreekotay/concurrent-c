@@ -11,7 +11,7 @@ emit_other.arg("out/quote_cch_chapter_owner_other.c");
 emit_other.inherit_stdio();
 int rc = emit_other.status() !>;
 if (rc != 0) {
-    "emit other failed".println() !>;
+    "emit other failed".println();
     return 1;
 }
 
@@ -21,7 +21,7 @@ grep_other.arg("CHAPTER_OWNER_LEAF_BODY_MUST_NOT_SPLICE");
 grep_other.arg("out/quote_cch_chapter_owner_other.c");
 rc = grep_other.status() !>;
 if (rc == 0) {
-    "other TU spliced chapter leaf".println() !>;
+    "other TU spliced chapter leaf".println();
     return 1;
 }
 
@@ -34,7 +34,7 @@ emit_owner.arg("out/quote_cch_chapter_owner.c");
 emit_owner.inherit_stdio();
 rc = emit_owner.status() !>;
 if (rc != 0) {
-    "emit owner failed".println() !>;
+    "emit owner failed".println();
     return 1;
 }
 
@@ -44,7 +44,7 @@ grep_owner.arg("CHAPTER_OWNER_LEAF_BODY_MUST_NOT_SPLICE");
 grep_owner.arg("out/quote_cch_chapter_owner.c");
 rc = grep_owner.status() !>;
 if (rc != 0) {
-    "owner TU did not splice chapter leaf".println() !>;
+    "owner TU did not splice chapter leaf".println();
     return 1;
 }
 
@@ -58,14 +58,14 @@ build.arg("out/quote_cch_chapter_owner_smoke");
 build.inherit_stdio();
 rc = build.status() !>;
 if (rc != 0) {
-    "build failed".println() !>;
+    "build failed".println();
     return 1;
 }
 CCCommand run = cc_command(a, @slice("out/quote_cch_chapter_owner_smoke"));
 run.inherit_stdio();
 rc = run.status() !>;
 if (rc != 0) {
-    "run failed".println() !>;
+    "run failed".println();
     return 1;
 }
 return 0;

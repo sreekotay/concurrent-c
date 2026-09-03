@@ -82,19 +82,19 @@ int main(int argc, char** argv) {
     CCArena arena = cc_arena_create(64 << 20);
     Feed feed;
     if (!Feed_parse(buf, rd, arena, &feed)) {
-        println("write: corpus is not a Feed — skipped") !>;
+        println("write: corpus is not a Feed — skipped");
         return 0;
     }
 
     char* out = (char*)malloc(rd * 2 + 4096);
     size_t cap = rd * 2 + 4096;
     size_t w = Feed_write(&feed, out, cap);
-    if (!w) { eprintln("write FAIL") !>; return 1; }
+    if (!w) { eprintln("write FAIL"); return 1; }
     /* sanity: reparse round-trip */
     {
         Feed rt;
         if (!Feed_parse(out, w, arena, &rt) || rt.statuses_n != feed.statuses_n) {
-            eprintln("roundtrip FAIL") !>; return 1;
+            eprintln("roundtrip FAIL"); return 1;
         }
     }
     char* hout = (char*)malloc(cap);
@@ -102,7 +102,7 @@ int main(int argc, char** argv) {
     CCSlice hs = hout.to_slice_n(w);
     CCSlice os = out.to_slice_n(w);
     if (hw != w || !hs.eq(os)) {
-        eprintln(@string(`MISMATCH gen=${w} hand=${hw}`, pa)) !>;
+        eprintln(@string(`MISMATCH gen=${w} hand=${hw}`, pa));
         return 1;
     }
 
@@ -113,23 +113,23 @@ int main(int argc, char** argv) {
         double t0 = now_s();
         for (int i = 0; i < K; i++) {
             size_t x = Feed_write(&feed, out, cap);
-            if (x != w) { eprintln("bench FAIL") !>; return 1; }
+            if (x != w) { eprintln("bench FAIL"); return 1; }
         }
         double dt = now_s() - t0;
         if (dt < best) best = dt;
     }
-    println(@string(`json write gen  ${(double)w * K / best / 1e6} MB/s  (${w} bytes/iter, statuses=${feed.statuses_n})`, pa)) !>;
+    println(@string(`json write gen  ${(double)w * K / best / 1e6} MB/s  (${w} bytes/iter, statuses=${feed.statuses_n})`, pa));
     best = 1e30;
     for (int r = 0; r < 5; r++) {
         double t0 = now_s();
         for (int i = 0; i < K; i++) {
             size_t x = hand_write(&feed, hout);
-            if (x != w) { eprintln("bench FAIL") !>; return 1; }
+            if (x != w) { eprintln("bench FAIL"); return 1; }
         }
         double dt = now_s() - t0;
         if (dt < best) best = dt;
     }
-    println(@string(`json write hand ${(double)w * K / best / 1e6} MB/s  (unchecked single-pass)`, pa)) !>;
+    println(@string(`json write hand ${(double)w * K / best / 1e6} MB/s  (unchecked single-pass)`, pa));
     free(buf); free(out); free(hout);
     arena.destroy();
     return 0;

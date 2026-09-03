@@ -42,60 +42,60 @@ int main(void) {
 
     const char* num = "int x = 1'000;";
     if (!C23Tok_match(num, strlen(num))) {
-        eprintln(@string(`FAIL: tok 1'000`, @scratch)) !>;
+        eprintln(@string(`FAIL: tok 1'000`, @scratch));
         return 1;
     }
     const char* u8s = "u8\"hi\"";
     if (!C23Tok_match(u8s, strlen(u8s))) {
-        eprintln(@string(`FAIL: tok u8 string`, @scratch)) !>;
+        eprintln(@string(`FAIL: tok u8 string`, @scratch));
         return 1;
     }
     if (!C23Tok_match("ifdef", 5)) {
-        eprintln(@string(`FAIL: tok ifdef ident`, @scratch)) !>;
+        eprintln(@string(`FAIL: tok ifdef ident`, @scratch));
         return 1;
     }
 
     CCArena a = cc_arena_create(1 << 16);
     g_keeps = 0;
     if (!C23Tok_collect(num, strlen(num), a, on_keep, 0)) {
-        eprintln(@string(`FAIL: tok collect`, @scratch)) !>;
+        eprintln(@string(`FAIL: tok collect`, @scratch));
         return 1;
     }
     /* ident int, ident x, punct =, pp_number 1'000, punct ; */
     if (g_keeps != 5) {
-        eprintln(@string(`FAIL: tok keep count ${g_keeps}`, @scratch)) !>;
+        eprintln(@string(`FAIL: tok keep count ${g_keeps}`, @scratch));
         return 1;
     }
 
     if (!C23Syn_match(k_tu, strlen(k_tu))) {
-        eprintln(@string(`FAIL: syn tu`, @scratch)) !>;
+        eprintln(@string(`FAIL: syn tu`, @scratch));
         return 1;
     }
     const char* bad = "void f(void) { ifdef (x) return; }";
     const char* okif = "void f(void) { if (x) return; }";
     if (C23Syn_match(bad, strlen(bad))) {
-        eprintln(@string(`FAIL: syn ifdef accepted as if`, @scratch)) !>;
+        eprintln(@string(`FAIL: syn ifdef accepted as if`, @scratch));
         return 1;
     }
     if (!C23Syn_match(okif, strlen(okif))) {
-        eprintln(@string(`FAIL: syn if`, @scratch)) !>;
+        eprintln(@string(`FAIL: syn if`, @scratch));
         return 1;
     }
     const char* proto = "void f(void);";
     const char* fptr = "int (*fp)(void);";
     const char* tdef = "typedef int T; T x; T *p;";
     if (!C23Syn_match(proto, strlen(proto))) {
-        eprintln(@string(`FAIL: syn proto`, @scratch)) !>;
+        eprintln(@string(`FAIL: syn proto`, @scratch));
         return 1;
     }
     if (!C23Syn_match(fptr, strlen(fptr))) {
-        eprintln(@string(`FAIL: syn fptr`, @scratch)) !>;
+        eprintln(@string(`FAIL: syn fptr`, @scratch));
         return 1;
     }
     if (!C23Syn_match(tdef, strlen(tdef))) {
-        eprintln(@string(`FAIL: syn typedef-name spec`, @scratch)) !>;
+        eprintln(@string(`FAIL: syn typedef-name spec`, @scratch));
         return 1;
     }
-    println(@string(`c23 serdes tok+syn: OK`, @scratch)) !>;
+    println(@string(`c23 serdes tok+syn: OK`, @scratch));
     return 0;
 }

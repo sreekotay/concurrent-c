@@ -56,8 +56,8 @@ int main(void) {
     cc_arena_stack(a, kilobytes(4));
     CCStdio io = cc_stdio_create(a);
     @parallel spawn {
-        @serial { io.println("Hello from task A!") !>; }
-        @serial { io.println("Hello from task B!") !>; }
+        @serial { io.println("Hello from task A!"); }
+        @serial { io.println("Hello from task B!"); }
     } !>.wait()!>;
     return 0;
 }

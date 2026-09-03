@@ -24,7 +24,7 @@ int main(void) {
     cc_arena_stack(keep, kilobytes(1));
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     for (int i = 1; i <= 3; i++) {
-        println(@string(`Processing request ${i} bytes: ${arena.remaining()}`, @scratch)) !>;
+        println(@string(`Processing request ${i} bytes: ${arena.remaining()}`, @scratch));
 
         /* scratch allocation, reclaimed at cp.restore(); the element
          * type comes from the destination */
@@ -36,6 +36,6 @@ int main(void) {
 
     int n = 3;
     CCString kept = n.label(keep);
-    println(@string(`kept ${kept}`, @scratch)) !>;
+    println(@string(`kept ${kept}`, @scratch));
     return 0;
 }

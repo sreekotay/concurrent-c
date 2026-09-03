@@ -14,7 +14,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     which.arg("-c");
     which.arg("command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1");
     int rc = which.status() !>;
-    if (rc != 0) { "SKIP (need node + python3)".println() !>; return 0; }
+    if (rc != 0) { "SKIP (need node + python3)".println(); return 0; }
 }
 
 {
@@ -25,7 +25,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     build.arg("bin/cc_python_aio.node");
     build.inherit_stdio();
     int rc = build.status() !>;
-    if (rc != 0) { "build failed".println() !>; return 1; }
+    if (rc != 0) { "build failed".println(); return 1; }
 }
 
 {
@@ -34,6 +34,6 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     run.arg("CC_PYTHON_ADDON=$PWD/bin/cc_python_aio.node node tests/cc_python_bridge_aio.js");
     run.inherit_stdio();
     int rc = run.status() !>;
-    if (rc != 0) { "aio suite failed".println() !>; return 1; }
+    if (rc != 0) { "aio suite failed".println(); return 1; }
 }
 return 0;

@@ -1,6 +1,6 @@
 /*
  * Process-level registry of function names whose declared return type is
- * a result type (`T !> (E)` / `CCResult_T_E`).  Populated by the result-type
+ * a result type (`T !> (E)`, `T ?> (E)`, or `CCResult_T_E`).  Populated by the
  * preprocess pass and by scanning included headers; consumed by
  * pass_result_unwrap.c for typed `!>` / `?>` lowering and the slice-7
  * unhandled-result diagnostic.
@@ -37,7 +37,9 @@ void cc_result_fn_registry_clear(void);
  * fn has no recorded value (callers fall back to `__typeof__` / source scan). */
 void cc_result_fn_registry_add_typed(const char* name, size_t name_len,
                                       const char* err_type, size_t err_len,
-                                      const char* result_type, size_t result_len);
+                                      const char* result_type, size_t result_len,
+                                      int discard_ok);
+int  cc_result_fn_registry_is_discard_ok(const char* name, size_t name_len);
 int  cc_result_fn_registry_get_err_type(const char* name, size_t name_len,
                                          char* out_buf, size_t out_sz);
 int  cc_result_fn_registry_get_result_type(const char* name, size_t name_len,
@@ -47,6 +49,7 @@ int  cc_result_fn_registry_get_result_type(const char* name, size_t name_len,
  * them.  Recognizes:
  *   - `CCResult_<Ok>_<Err> name(`
  *   - `Ok !>(Err) name(`  (surface sugar; mangles to CCResult_Ok_Err)
+ *   - `Ok ?>(Err) name(`  (same box; bare `name();` is discard-ok under strict)
  * Safe to call on header bodies that are not spliced into the TU buffer. */
 void cc_result_fn_registry_scan_source(const char* src, size_t n);
 

@@ -549,5 +549,6 @@ const char* cc_error_site(void);
  * `.base`). Every Result TU must see that type — not only TUs that
  * include io/channel. Include-guard cycle: this file is already open. */
 #include <ccc/cc_io_error.cch>
+#include <ccc/cc_print_error.cch>
 
 #endif /* CC_RESULT_H */

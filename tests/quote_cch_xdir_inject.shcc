@@ -9,7 +9,7 @@ emit.arg("out/quote_cch_xdir_smoke.c");
 emit.inherit_stdio();
 int rc = emit.status() !>;
 if (rc != 0) {
-    "emit xdir smoke failed".println() !>;
+    "emit xdir smoke failed".println();
     return 1;
 }
 
@@ -19,7 +19,7 @@ grep_inc.arg("ws.h");
 grep_inc.arg("out/include/tests/quote_cch_xdir_front/draw.h");
 rc = grep_inc.status() !>;
 if (rc != 0) {
-    "extracted draw.h missing include of core ws.h".println() !>;
+    "extracted draw.h missing include of core ws.h".println();
     return 1;
 }
 
@@ -29,7 +29,7 @@ grep_tag.arg("typedef struct QuoteXdirWs QuoteXdirWs");
 grep_tag.arg("out/include/tests/quote_cch_xdir_front/draw.h");
 rc = grep_tag.status() !>;
 if (rc == 0) {
-    "extracted draw.h invented a tagged struct".println() !>;
+    "extracted draw.h invented a tagged struct".println();
     return 1;
 }
 

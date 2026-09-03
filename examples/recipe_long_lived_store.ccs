@@ -121,6 +121,6 @@ int main(void) {
     Map::[char[:], int] entries = store.entries;
     size_t n = entries->len();
     size_t live = store.key_logical_live_bytes();
-    println(@string(`entries=${n} logical_key_bytes=${live} inserted=${store.key_insert_bytes} deleted=${store.key_delete_bytes}`, @scratch)) !>;
+    println(@string(`entries=${n} logical_key_bytes=${live} inserted=${store.key_insert_bytes} deleted=${store.key_delete_bytes}`, @scratch));
     return 0;
 }

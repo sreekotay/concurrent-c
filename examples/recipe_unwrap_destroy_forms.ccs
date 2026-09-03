@@ -42,20 +42,20 @@ int main(void) {
 
     /* 2. Inline single-line `!> { ... }` — early return on NULL, no binder. */
     char* ok_short = maybe_null(0) !> { cc_error_log(CC_ERROR(CC_ERR_NULL, "unexpected null")); return 1; };
-    println(@string(`ok_short=${ok_short}`, @scratch)) !>;
+    println(@string(`ok_short=${ok_short}`, @scratch));
 
     /* 3. Compose then default: local work, then `@err(e)` → @errhandler. */
     char* ok_multi = maybe_null(0)
         !>(e) {
             /* (error path only — success skips the body) */
-            println(@string(`multi: ${e.message}`, @scratch)) !>;
+            println(@string(`multi: ${e.message}`, @scratch));
             @err(e);
         };
-    println(@string(`ok_multi=${ok_multi}`, @scratch)) !>;
+    println(@string(`ok_multi=${ok_multi}`, @scratch));
 
     /* 4. !>(e) {...} @destroy {...} on one line. */
-    char* one_line = maybe_null(0) !>(e) { cc_error_log(e); return 3; } @destroy { println("destroy oneline") !>; };
-    println(@string(`one_line=${one_line}`, @scratch)) !>;
+    char* one_line = maybe_null(0) !>(e) { cc_error_log(e); return 3; } @destroy { println("destroy oneline"); };
+    println(@string(`one_line=${one_line}`, @scratch));
 
     /* 5. Multi-line with both handler and destroy spanning lines. */
     char* multi_dest = maybe_null(0)
@@ -64,21 +64,21 @@ int main(void) {
             return 4;
         }
         @destroy {
-            println("destroy multidest") !>;
+            println("destroy multidest");
         };
-    println(@string(`multi_dest=${multi_dest}`, @scratch)) !>;
+    println(@string(`multi_dest=${multi_dest}`, @scratch));
 
     /* 6. `!> @destroy` — no handler body, defaults to @errhandler. */
-    char* default_eh = maybe_null(0) !> @destroy { println("destroy default_eh") !>; };
-    println(@string(`default_eh=${default_eh}`, @scratch)) !>;
+    char* default_eh = maybe_null(0) !> @destroy { println("destroy default_eh"); };
+    println(@string(`default_eh=${default_eh}`, @scratch));
 
     /* 7. ?> with a default expression. */
     char* with_default = maybe_null(1) ?> "fallback";
-    println(@string(`with_default=${with_default}`, @scratch)) !>;
+    println(@string(`with_default=${with_default}`, @scratch));
 
     /* 8. ?> with @destroy after, single-line. */
-    char* qmark_dest = maybe_null(0) ?> "fallback" @destroy { println("destroy qmark_dest") !>; };
-    println(@string(`qmark_dest=${qmark_dest}`, @scratch)) !>;
+    char* qmark_dest = maybe_null(0) ?> "fallback" @destroy { println("destroy qmark_dest"); };
+    println(@string(`qmark_dest=${qmark_dest}`, @scratch));
 
     /* 9. Bodyless `@destroy;` on builtin-owned types (no user cleanup body). */
     CCNursery n = cc_nursery_create() !> @destroy;
@@ -93,7 +93,7 @@ int main(void) {
 
     /* 10. Same line: `!>(e) STMT @destroy { body }` with a builtin-
      *     owned type — the auto-free runs AFTER the user body. */
-    CCNursery n2 = cc_nursery_create() !>(e) { cc_error_exit(e); } @destroy { println("destroy n2 (user)") !>; };
+    CCNursery n2 = cc_nursery_create() !>(e) { cc_error_exit(e); } @destroy { println("destroy n2 (user)"); };
     (void)n2;
 
     /* 11. Split `@destroy` across lines on a builtin-owned type — both the
@@ -104,10 +104,10 @@ int main(void) {
             return 8;
         }
         @destroy {
-            println("destroy n3 (user)") !>;
+            println("destroy n3 (user)");
         };
     (void)n3;
 
-    println("done") !>;
+    println("done");
     return 0;
 }

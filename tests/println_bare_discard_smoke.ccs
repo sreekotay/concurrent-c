@@ -1,0 +1,25 @@
+/*
+ * Console print is void ?>(CCPrintError): bare println / eprintln / UFCS forms
+ * compile without !>.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+int main(void) {
+    cc_arena_stack(a, kilobytes(4));
+    CCStdio io = cc_stdio_create(a);
+
+    println("naked");
+    eprintln("naked err");
+    @string(`tpl=${42}`, @scratch).println();
+    "literal".println();
+    "err".eprintln();
+
+    io.println("via io");
+    io.eprintln("via io err");
+    io.println(@string(`io tpl=${7}`, a));
+
+    println("println_bare_discard_smoke: OK");
+    return 0;
+}

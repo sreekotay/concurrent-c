@@ -45,7 +45,7 @@ These are normative. Where a construct could be defined more than one way, the r
 3. **Library-owned policy.** The compiler provides compile-time registration,
    emission, and dispatch seams. Libraries own concrete type-family emission,
    linkage, erasure, specialization, and UFCS policy.
-4. **No silent drop.** Every fallible result must be used. The safe forms (`?>`, `!>`) force handling at compile time; the explicit/lowered form traps loudly at runtime. Absence (nullable) may opt into the same unwrap protocol but is not forced into it.
+4. **No silent drop.** Every mandatory fallible result (`T!>(E)`) must be consumed. The safe forms (`?>`, `!>`) force handling at compile time; the explicit/lowered form traps loudly at runtime. Optional results (`T?>(E)`) use the same ABI and the same consume operators but declare that a bare statement `f();` is well-formed — that is an explicit optional ignore at the declaration, not a silent drop. Absence (nullable) may opt into the same unwrap protocol but is not forced into it.
 5. **Local resolution.** Cleanup (`@destroy`/`@defer`), error handlers (inline or block-scoped, declaration-point), and dispatch (receiver type) resolve to a site visible at the use — never a dynamic search. Behaviors therefore compose by stacking, not by interaction.
 6. **Binding is semantic.** *Where* a construct attaches (declaration vs. statement) determines its static guarantees, even when the runtime lowering is identical. `@destroy` is RAII because it binds to the declaration; `@defer` is a statement.
 7. **Cleanup ledgers.** A cleanup ledger has two discharge authorities: the entered frame (always), and external closure `env_drop` (never-entered only).
@@ -80,8 +80,17 @@ pointer, or a Result carrying either. Normative rules in §9.0.
 
 ### 1.2 Result types and unwrapping
 
-A function that can fail returns `T!>(E)`. Three unwrap forms cover the
-full error space — each answers a different question at the call site:
+A function that can fail returns `T!>(E)` or `T?>(E)`. Both spellings lower to
+the same `CCResult_T_E` box and share the consume operators (`?>`, `!>`,
+`@errhandler`). The marker chooses consumption policy:
+
+| Return            | Bare `f();` at statement position |
+| ----------------- | --------------------------------- |
+| `T!>(E)`          | ill-formed                        |
+| `T?>(E)`          | well-formed (optional ignore)     |
+
+Three unwrap forms cover the full error space — each answers a different
+question at the call site:
 
 | Form                | Question                         | Body                |
 | ------------------- | -------------------------------- | ------------------- |
@@ -91,12 +100,14 @@ full error space — each answers a different question at the call site:
 
 ```c
 int !>(CCError) read_timeout(void);
+void ?>(CCPrintError) log_line(CCSlice msg);
 
 @errhandler(CCError e) cc_error_exit(e);         // or { cc_error_log(e); return 1; }
 
 int t1 = read_timeout() ?> 30;                   // default on error
 int t2 = read_timeout() !>(e) return 2;          // inline (must diverge)
 int t3 = read_timeout() !>;                      // forward to @errhandler
+log_line(msg);                                   // optional — bare discard ok
 /* Non-hoisted equivalent of !>; with that binding:
  *   int t3 = read_timeout() !>(e) cc_error_exit(e);
  */
@@ -997,16 +1008,31 @@ tooling concern that consumes the same blocks.
 
 This section defines the fundamental value-level building blocks:
 
-- **§3.1 Results (`T!>(E)`)** — success or failure; statement-level `@err` / `@errhandler`
+- **§3.1 Results (`T!>(E)` / `T?>(E)`)** — success or failure; mandatory vs optional consumption
 - **§3.2 Type Precedence** — how type modifiers bind
 - **§3.3 Arrays and Slices** — fixed arrays and views
 - **§3.4 Slice ABI** — provenance metadata layout
 
 ---
 
-### 3.1 Results (`T!>(E)`)
+### 3.1 Results (`T!>(E)` / `T?>(E)`)
 
-`T!>(E)` represents **success or failure** with an explicit error value. Unwrapping is strictly explicit: every result-typed call is consumed by one of the two operators with cleanly separated roles — `?>` (default-value operator; pure expression RHS) or `!>` (error-handler operator; works at both statement and expression position) — or by an `@err(e);` forward inside a `!>` body, or by the registered `@errhandler` via the bare `call !>;` shorthand. Bare result-typed statements are ill-formed. See **Unwrapping Results** below.
+`T!>(E)` and `T?>(E)` represent **success or failure** with an explicit error
+value. Both lower to the same `CCResult_T_E` tagged union and share the consume
+operators (`?>`, `!>`, `@errhandler`, `@err`). The marker is normative:
+
+- **`T!>(E)` (mandatory).** Every call must be consumed: `?>`, `!>`, assignment
+  to a result-typed destination, `return`, or `(void)` cast. A bare statement
+  `f();` is ill-formed.
+- **`T?>(E)` (optional).** Same ABI and same operators. A bare statement `f();`
+  is well-formed — the declaration opts into optional ignore. Use `!>` when a
+  failure must propagate (for example load-bearing I/O); omit it for diagnostics
+  that must not hijack the ambient handler.
+
+Unwrapping roles: `?>` is the default-value operator (pure expression RHS);
+`!>` is the error-handler operator (statement or expression position); `@err(e);`
+forwards inside a `!>` body; bare `call !>;` dispatches to a matching
+`@errhandler`. See **Unwrapping Results** below.
 
 - **Unified constructor syntax**:
   - **Inferred (preferred inside a function returning `T!>(E)`):**
@@ -1231,7 +1257,7 @@ CCRes(MyData, MyError) my_function(int arg);
     - A call to one of the hardcoded noreturn functions: `exit`, `_Exit`, `_exit`, `abort`, `cc_error_exit`, `longjmp`, `siglongjmp`, `pthread_exit`, `__builtin_unreachable`, `__builtin_trap`
     - A `{ ... }` compound statement whose recursive last statement satisfies this rule.
      A forward-reached or `!>;`-inlined handler whose last statement does not satisfy this rule is a compile error at the `@errhandler` declaration site. The rule applies in `void` functions equally.
-7. A result-typed call that is not consumed by `?>`, `!>`, `@err`, assignment to a result-typed destination, `return`, or a `(void)` cast is ill-formed. `(void)call();` is the one explicit-discard escape hatch.
+7. A **mandatory** result-typed call (`T!>(E)`) that is not consumed by `?>`, `!>`, `@err`, assignment to a result-typed destination, `return`, or a `(void)` cast is ill-formed. `(void)call();` is the one explicit-discard escape hatch for mandatory results. An **optional** result-typed call (`T?>(E)`) may appear as a bare statement `call();` — that is the declared optional-ignore form, not a silent drop.
 8. A `!>` whose call is a bare name with no visible declaration in this unit or an included face is ill-formed. The compiler diagnoses that at the `!>` site and does not emit a Result unwrap.
 
 **Grammar (normative, minus whitespace).**
@@ -6433,15 +6459,15 @@ Data-first UFCS and naked aliases remain valid (UFCS either way on the chosen
 receiver):
 
 ```c
-io.println(path) !>;               /* preferred when io is in scope */
-io.eprintln(line) !>;
-io.println(@string(`n=${n}`, a)) !>;
+io.println(path);               /* preferred when io is in scope */
+io.eprintln(line);
+io.println(@string(`n=${n}`, a));
 
-path.println() !>;                 /* also OK: UFCS on data */
-"literal".println() !>;            /* lit/cstr → CCSlice temp → cc_slice_* */
-println(path) !>;                  /* naked alias → cc_println */
-path.fprintln(STDERR_FILENO) !>;   /* UFCS: data, then fd */
-fprintln(STDERR_FILENO, path) !>;  /* naked: fd first, then data */
+path.println();                 /* also OK: UFCS on data */
+"literal".println();            /* lit/cstr → CCSlice temp → cc_slice_* */
+println(path);                  /* naked alias → cc_println */
+path.fprintln(STDERR_FILENO);   /* UFCS: data, then fd */
+fprintln(STDERR_FILENO, path);  /* naked: fd first, then data */
 ```
 
 When the *data* is the UFCS receiver, `CCSlice` / `CCString` call `cc_slice_*` /
@@ -6449,17 +6475,21 @@ When the *data* is the UFCS receiver, `CCSlice` / `CCString` call `cc_slice_*` /
 temporary then `cc_slice_*`. There is no `cc_char_*` UFCS print family
 (`cc_char_*` / `_Generic` arms are free-sugar / lowered-C only).
 
-Returns are `CCResult_size_t_CCError` (same as `CCStdio.println`). Short names
-`print` / `println` / `eprint` / `eprintln` / `fprint` / `fprintln` are not
-free macros — a function-like `#define println(x)` would steal UFCS
+Console print returns `void ?>(CCPrintError)` (or `size_t ?>(CCPrintError)` when
+the ok payload is the byte count). `CCPrintError` is a separate domain from
+`CCError` — diagnostic print is not load-bearing I/O. Bare `println` /
+`eprintln` at statement position is well-formed. Use `!>` or
+`@errhandler(CCPrintError …)` only when a print failure must propagate; keep
+`!>` on socket, file, and other load-bearing I/O.
+
+Short names `print` / `println` / `eprint` / `eprintln` / `fprint` / `fprintln`
+are not free macros — a function-like `#define println(x)` would steal UFCS
 `x.println()`. The `cc_print*` macros exist as lowered-C sugar (driver inject,
 naked-alias targets, `-E` desugar).
 The injected default `@errhandler(CCError)` prints with
 `(void)cc_eprintln(cc_error_str(e))`. Custom handlers should report via
-`cc_error_log` / `cc_error_exit` (or `!> { abort(); }` on the print Result) —
-bare `eprintln(msg) !>;` inside a matching `@errhandler(E)` is ill-formed
-(same-`E` re-entry, §3.1 invariant 4). Template formatting uses language
-`@string`. Recipe and script source must not discard print Results with `(void)`.
+`cc_error_log` / `cc_error_exit` (or `!> { abort(); }` on the print Result when
+failure must propagate). Template formatting uses language `@string`.
 
 #### 9.5.5 Path, file, process, and temp helpers
 

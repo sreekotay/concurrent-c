@@ -27,38 +27,38 @@ int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     int snapshot = 42;
-    println("=== names on the page ===") !>;
-    println(@string(`before: snapshot = ${snapshot}`, @scratch)) !>;
+    println("=== names on the page ===");
+    println(@string(`before: snapshot = ${snapshot}`, @scratch));
     @parallel spawn {
         @serial {
             @errhandler(CCError e) cc_error_exit(e);
             int seen = snapshot;
-            println(@string(`  task A sees snapshot = ${seen}`, @scratch)) !>;
+            println(@string(`  task A sees snapshot = ${seen}`, @scratch));
         }
         @serial {
             @errhandler(CCError e) cc_error_exit(e);
             int seen = snapshot;
-            println(@string(`  task B sees snapshot = ${seen}`, @scratch)) !>;
+            println(@string(`  task B sees snapshot = ${seen}`, @scratch));
         }
     } !>.wait()!>;
-    println(@string(`after:  snapshot = ${snapshot} (unchanged)`, @scratch)) !>;
-    println("") !>;
+    println(@string(`after:  snapshot = ${snapshot} (unchanged)`, @scratch));
+    println("");
 
     int counter = 100;
-    println("=== same object ===") !>;
-    println(@string(`before: counter = ${counter}`, @scratch)) !>;
+    println("=== same object ===");
+    println(@string(`before: counter = ${counter}`, @scratch));
     @parallel spawn {
         @serial {
             @errhandler(CCError e) cc_error_exit(e);
-            println(@string(`  task C reads counter = ${counter}`, @scratch)) !>;
+            println(@string(`  task C reads counter = ${counter}`, @scratch));
         }
         @serial {
             @errhandler(CCError e) cc_error_exit(e);
-            println(@string(`  task D reads counter = ${counter}`, @scratch)) !>;
+            println(@string(`  task D reads counter = ${counter}`, @scratch));
         }
     } !>.wait()!>;
-    println(@string(`after:  counter = ${counter}`, @scratch)) !>;
-    println("") !>;
+    println(@string(`after:  counter = ${counter}`, @scratch));
+    println("");
 
     /* --- when you need mutation ---
      *   CCAtomic::[int] counter        — lock-free atomic ops

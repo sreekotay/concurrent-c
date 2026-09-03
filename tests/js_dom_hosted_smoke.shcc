@@ -14,7 +14,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
               " && { ldconfig -p 2>/dev/null | grep -q libnode"
               " || test -n \"$CC_LIBNODE\"; }");
     int rc = which.status() !>;
-    if (rc != 0) { "SKIP (need libnode-dev + c++)".println() !>; return 0; }
+    if (rc != 0) { "SKIP (need libnode-dev + c++)".println(); return 0; }
 }
 
 {
@@ -23,13 +23,13 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     build.arg("tests/js_dom_hosted_prog.ccs");
     build.inherit_stdio();
     int rc = build.status() !>;
-    if (rc != 0) { "build failed".println() !>; return 1; }
+    if (rc != 0) { "build failed".println(); return 1; }
 }
 
 {
     CCCommand run = cc_command(a, @slice("./bin/js_dom_hosted_prog"));
     run.inherit_stdio();
     int rc = run.status() !>;
-    if (rc != 0) { "hosted dom run failed".println() !>; return 1; }
+    if (rc != 0) { "hosted dom run failed".println(); return 1; }
 }
 return 0;

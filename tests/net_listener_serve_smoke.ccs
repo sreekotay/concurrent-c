@@ -12,7 +12,7 @@ int main(void) {
 
     const char* addr = "127.0.0.1:18766";
     CCListener ln = cc_tcp_listen(cc_slice_cstr(addr)) !>(e) {
-        eprintln(@string(`listen: ${e}`, @scratch)) !>;
+        eprintln(@string(`listen: ${e}`, @scratch));
         return 1;
     };
     @defer ln.close();
@@ -34,7 +34,7 @@ int main(void) {
         }) !>;
 
         CCSocket conn = cc_tcp_connect(addr, strlen(addr)) !>(e) {
-            eprintln(@string(`connect: ${e}`, @scratch)) !>;
+            eprintln(@string(`connect: ${e}`, @scratch));
             return 1;
         };
         @defer conn.close();

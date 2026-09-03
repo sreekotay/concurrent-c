@@ -6,4 +6,4 @@ CCSlice t = s.sub(6, s.len);
 bool found = false;
 size_t pos = s.index_of(@slice("world"), &found);
 int h = s.has(@slice("world"));
-println(@string(`sub=${t} pos=${pos} found=${(int)found} has=${h}`, a)) !>;
+println(@string(`sub=${t} pos=${pos} found=${(int)found} has=${h}`, a));

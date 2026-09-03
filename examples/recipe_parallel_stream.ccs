@@ -45,9 +45,9 @@ int main(void) {
 
     int total = sum.load();
     if (total != 6) {
-        eprintln(@string(`FAIL sum=${total}`, @scratch)) !>;
+        eprintln(@string(`FAIL sum=${total}`, @scratch));
         return 1;
     }
-    println(@string(`sum = ${total} (expected 6)`, @scratch)) !>;
+    println(@string(`sum = ${total} (expected 6)`, @scratch));
     return 0;
 }

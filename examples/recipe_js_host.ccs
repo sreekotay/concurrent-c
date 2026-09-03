@@ -33,7 +33,7 @@ static void main_js(CCJs *js, void *ctx) {
 
     /* The guest-mode surface, unchanged — UFCS chains and `!>`. */
     double v = js->global()!>.get("Math")!>.sqrt(2.0) !>;
-    println(@string(`Math.sqrt(2)   = ${v}`, @scratch)) !>;
+    println(@string(`Math.sqrt(2)   = ${v}`, @scratch));
 
     /* State persists across runs: the environment is one live Node. */
     js->exec("globalThis.hits = (globalThis.hits ?? 0) + 1") !>;
@@ -41,10 +41,10 @@ static void main_js(CCJs *js, void *ctx) {
     /* The require door: real Node modules, not a subset. */
     char[:] s =
         js->global()!>.__ccRequire("os")!>.platform()!>.as_slice(js->arena) !>;
-    println(@string(`os.platform()  = ${s}`, @scratch)) !>;
+    println(@string(`os.platform()  = ${s}`, @scratch));
 
     long long hits = js->eval("globalThis.hits")!>.as_i64() !>;
-    println(@string(`hits           = ${hits}`, @scratch)) !>;
+    println(@string(`hits           = ${hits}`, @scratch));
 }
 
 int main(void) {

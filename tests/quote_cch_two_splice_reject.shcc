@@ -10,7 +10,7 @@ build.arg("-o");
 build.arg("out/quote_cch_two_splice_reject");
 CCProcessOutput out = build.capture(a) !>;
 if (out.success()) {
-    "two unowned splices linked".println() !>;
+    "two unowned splices linked".println();
     return 1;
 }
 CCCommand grep = cc_command(a, @slice("grep"));
@@ -19,7 +19,7 @@ grep.arg("spliced into");
 grep.stdin_slice(out.stdout());
 int rc = grep.status() !>;
 if (rc != 0) {
-    "build failed without naming the second splice".println() !>;
+    "build failed without naming the second splice".println();
     return 1;
 }
 return 0;

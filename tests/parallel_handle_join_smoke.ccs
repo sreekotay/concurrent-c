@@ -30,7 +30,7 @@ int main(void) {
         h2.wait() !>;
     } !>.wait()!>;
     if (a != 1 || b != 2 || c != 3 || d != 4) {
-        eprintln(@string(`FAIL a=${a} b=${b} c=${c} d=${d}`, @scratch)) !>;
+        eprintln(@string(`FAIL a=${a} b=${b} c=${c} d=${d}`, @scratch));
         return 1;
     }
 
@@ -42,7 +42,7 @@ int main(void) {
             bump(&y, 8);
         } !>.wait()!>;
         if (x != 7 || y != 8) {
-            eprintln(@string(`FAIL expr arms x=${x} y=${y}`, @scratch)) !>;
+            eprintln(@string(`FAIL expr arms x=${x} y=${y}`, @scratch));
             return 1;
         }
     }
@@ -54,6 +54,6 @@ int main(void) {
     } !>;
     both.wait() !>;
 
-    println("parallel_handle_join_smoke: OK") !>;
+    println("parallel_handle_join_smoke: OK");
     return 0;
 }

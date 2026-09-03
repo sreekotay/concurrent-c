@@ -43,8 +43,8 @@ static void fetch_one(int idx, int* status_p, size_t* body_len_p) {
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
-    println(@string(`Fetching ${NUM_URLS} URLs in parallel...`, @scratch)) !>;
-    println("") !>;
+    println(@string(`Fetching ${NUM_URLS} URLs in parallel...`, @scratch));
+    println("");
 
     int status[NUM_URLS] = {0};
     size_t body_len[NUM_URLS] = {0};
@@ -53,19 +53,19 @@ int main(void) {
         fetch_one(i, status, body_len);
     } !>.wait()!>;
 
-    println("\n=== Summary ===") !>;
+    println("\n=== Summary ===");
     int success = 0;
     int network_errors = 0;
     for (i = 0; i < NUM_URLS; i++) {
         if (status[i] == 200) success++;
         else if (status[i] == -1) network_errors++;
         const char* url = g_urls[i];
-        println(@string(`${url}: ${status[i]} (${body_len[i]} bytes)`, @scratch)) !>;
+        println(@string(`${url}: ${status[i]} (${body_len[i]} bytes)`, @scratch));
     }
-    println(@string(`Success: ${success}/${NUM_URLS}`, @scratch)) !>;
+    println(@string(`Success: ${success}/${NUM_URLS}`, @scratch));
 
     if (success == 0) {
-        println("\nSKIP: No network access or all requests failed.") !>;
+        println("\nSKIP: No network access or all requests failed.");
         return 0;
     }
     (void)network_errors;

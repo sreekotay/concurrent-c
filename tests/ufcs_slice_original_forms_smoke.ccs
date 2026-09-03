@@ -76,7 +76,7 @@ int main(void) {
         char[:] back  = describe(framing_lenient(h, 1), a);
         char[:] strict = strict_desc(h, a);
         const char *flag = front.eq(back) ? "" : "  <-- DESYNC";
-        println(@string(`lenient front=${front} back=${back}${flag}  |  strict: ${strict}`, a)) !>;
+        println(@string(`lenient front=${front} back=${back}${flag}  |  strict: ${strict}`, a));
     }
     return 0;
 }

@@ -2,4 +2,4 @@
 CCPy py = cc_py_new(false, a) !> @destroy;
 CCPyObj math = py.import("math") !> @destroy;
 short s = math.sqrt(2.0) !>;
-cc_println(@string(`${s}`, a)) !>;
+cc_println(@string(`${s}`, a));

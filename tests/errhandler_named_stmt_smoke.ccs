@@ -12,9 +12,9 @@ int main(void) {
         CCNursery n = cc_nursery_create() !> @destroy;
         n.spawn(() => {
             @errhandler(CCError e) cc_error_exit(e);
-            println("named-ok") !>;
+            println("named-ok");
         }) !>;
     }
-    println("main-ok") !>;
+    println("main-ok");
     return 0;
 }

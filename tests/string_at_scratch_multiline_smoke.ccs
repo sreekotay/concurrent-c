@@ -18,8 +18,8 @@ int main(void) {
         @scratch);
     assert(a.as_slice().eq_cstr("a=1"));
     assert(b.as_slice().eq_cstr("b=2"));
-    println(a) !>;
-    println(b) !>;
+    println(a);
+    println(b);
     printf("string_at_scratch_multiline_smoke: PASS\n");
     return 0;
 }

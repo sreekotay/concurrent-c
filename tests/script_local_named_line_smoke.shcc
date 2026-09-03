@@ -15,7 +15,7 @@ CCArena a = @create(kilobytes(4)) @destroy;
 int line = 7;
 int nr = 3;
 
-@string(`line=${line} nr=${nr}`, a).println() !>;
+@string(`line=${line} nr=${nr}`, a).println();
 
 char *p = "abc";
 char *line2 = p;

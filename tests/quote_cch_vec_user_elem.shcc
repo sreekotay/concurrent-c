@@ -10,7 +10,7 @@ emit.arg("out/quote_cch_vec_user_elem_smoke.c");
 emit.inherit_stdio();
 int rc = emit.status() !>;
 if (rc != 0) {
-    "emit guest failed".println() !>;
+    "emit guest failed".println();
     return 1;
 }
 
@@ -21,7 +21,7 @@ grep_col.arg("Vec::\\[|vec_new::\\[");
 grep_col.arg("out/include/tests/quote_cch_vec_user_elem.h");
 rc = grep_col.status() !>;
 if (rc == 0) {
-    "extracted .h still has Vec::[ or vec_new::[".println() !>;
+    "extracted .h still has Vec::[ or vec_new::[".println();
     return 1;
 }
 
@@ -36,9 +36,9 @@ python.arg(
     "raise SystemExit(0 if td>=0 and d>td else 1)");
 rc = python.status() !>;
 if (rc != 0) {
-    "Vec DECL is missing or precedes QuoteVecItem".println() !>;
+    "Vec DECL is missing or precedes QuoteVecItem".println();
     return 1;
 }
 
-"ok".println() !>;
+"ok".println();
 return 0;

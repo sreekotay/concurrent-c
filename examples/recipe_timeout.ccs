@@ -47,7 +47,7 @@ int main(void) {
             cc_sleep_ms(10);
         }
     }
-    println(@string(`form 1: ${work_done} iterations before deadline`, @scratch)) !>;
+    println(@string(`form 1: ${work_done} iterations before deadline`, @scratch));
 
     /* --- form 2: `as dl` binds the clock --- */
     int checkpoints = 0;
@@ -57,7 +57,7 @@ int main(void) {
             cc_sleep_ms(10);
         }
     }
-    println(@string(`form 2: ${checkpoints} checkpoints against handle`, @scratch)) !>;
+    println(@string(`form 2: ${checkpoints} checkpoints against handle`, @scratch));
 
     /* --- form 3: clock expires → cancel spawned siblings --- */
     int ticks = 0;
@@ -83,7 +83,7 @@ int main(void) {
         h.wait() !>;
         handle_cancelled = h.cancelled;
     }
-    println(@string(`form 3: ${ticks} sibling ticks; cancel=${saw}`, @scratch)) !>;
+    println(@string(`form 3: ${ticks} sibling ticks; cancel=${saw}`, @scratch));
 
     /* --- form 4: both arms share D; name it --- */
     int a_ticks = 0;
@@ -111,7 +111,7 @@ int main(void) {
         } !>;
         h.wait() !>;
     }
-    println(@string(`form 4: a=${a_ticks} b=${b_ticks} (named dl)`, @scratch)) !>;
+    println(@string(`form 4: a=${a_ticks} b=${b_ticks} (named dl)`, @scratch));
 
     int ok = (work_done  >= 1 && work_done  <= 10)
           && (checkpoints >= 1 && checkpoints <= 10)

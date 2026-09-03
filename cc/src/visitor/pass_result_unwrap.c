@@ -2851,8 +2851,9 @@ static int cc__strict_unhandled_scan(const CCVisitorCtx* ctx,
         i = id_b;
 
         /* Only proceed if this identifier names a registered
-         * result-returning function. */
+         * result-returning function that is not discard-ok. */
         if (!cc_result_fn_registry_contains(s + id_a, id_len)) continue;
+        if (cc_result_fn_registry_is_discard_ok(s + id_a, id_len)) continue;
 
         /* Must be immediately followed (after ws) by '('. */
         size_t after_id = cc_skip_ws_and_comments(s, n, id_b);

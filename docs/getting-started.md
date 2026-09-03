@@ -106,11 +106,11 @@ int main(void) {
         @serial {
             @errhandler(CCError e) cc_error_exit(e);
             cc_sleep_ms(10);
-            io.println("Hello from task A!") !>;
+            io.println("Hello from task A!");
         }
         @serial {
             @errhandler(CCError e) cc_error_exit(e);
-            io.println("Hello from task B!") !>;
+            io.println("Hello from task B!");
         }
     } !>.wait()!>;
     return 0;
@@ -261,7 +261,7 @@ prefer the method form:
 ```c
 n.spawn(() => { … });     // not cc_nursery_spawn(n, …)
 tx.send(i) !>;             // not cc_chan_send(tx, i)
-io.println("hi") !>;       // not cc_stdio_println(&io, "hi")
+io.println("hi");       // not cc_stdio_println(&io, "hi")
 v.push(10);                // == CCVec_int_push(&v, 10)
 u.mean(6.0);               // == mean(u, 6.0)  (bare-name: 1st param fits)
 
@@ -332,7 +332,7 @@ CCArena a = cc_arena_heap(kilobytes(4)) @destroy;  /* names this lifetime */
 CCStdio io = cc_stdio_create(a);
 char* p = a.allocT(64);
 char[:] s = a.alloc_slice_bytes(32);               /* arena provenance */
-io.println(@string(`len=${s.len}`, @scratch)) !>;  /* @scratch: @string arena only */
+io.println(@string(`len=${s.len}`, @scratch));  /* @scratch: @string arena only */
 /* walk: @for (ch in s) { … }; mut: @for (&ch in s) { ch = …; } !>; s.ptr[i] is the Gap */
 ```
 
