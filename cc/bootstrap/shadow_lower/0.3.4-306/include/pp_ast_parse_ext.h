@@ -42,9 +42,10 @@ static AstNode* parse_fn(Parser* p) {
                rkw != SHADOW_KW_VOID && rkw != SHADOW_KW_CHAR &&
                rkw != SHADOW_KW_BOOL && rkw != SHADOW_KW_SIZE_T)
         return NULL;
-    /* `T!>(E)` is parse_result_fn. `T[:]` / `T[:!]` is a slice return. */
+    /* `T!>(E)` / `T?>(E)` is parse_result_fn. `T[:]` / `T[:!]` is a slice return. */
     if (!has_struct && ti + 1 < p->n &&
-        tok_eq(p->toks[ti + 1], TK_PUNCT, "!>"))
+        (tok_eq(p->toks[ti + 1], TK_PUNCT, "!>") ||
+         tok_eq(p->toks[ti + 1], TK_PUNCT, "?>")))
         return NULL;
     name_i = ti + 1;
     char gret[256];
@@ -1192,7 +1193,10 @@ static AstNode* parse_parallel_head(Parser* p) {
             return NULL;
         }
         n = parse_parallel_for(p, gate, pred);
-        if (n && cache[0]) snprintf(n->h, sizeof(n->h), "%s", cache);
+        if (n && cache[0]) {
+            n->h = ast_arena_cstr(p, cache);
+            if (cache[0] && !n->h) return NULL;
+        }
         return n;
     }
     if (tok_eq(p_peek(p), TK_IDENT, "cache") ||
@@ -2057,13 +2061,13 @@ static AstNode* parse_at_stmt(Parser* p) {
         (void)col;
         {
             char lfile[1024];
-            fprintf(stderr,
-                    "%s:%d: error: async: `@arena_init(...) { ... }` is retired; "
-                    "use `CCArena a@(buf, size) @destroy` or "
-                    "`cc_arena_buffer(...)` directly\n",
-                    ft ? tape_diag_file(ft, name.offset, lfile, sizeof(lfile))
-                       : "<input>",
-                    line);
+            diag_at_nocol(
+                ft ? tape_diag_file(ft, name.offset, lfile, sizeof(lfile))
+                   : "<input>",
+                line,
+                "async: `@arena_init(...) { ... }` is retired; "
+                "use `CCArena a@(buf, size) @destroy` or "
+                "`cc_arena_buffer(...)` directly");
         }
         p->err = 1;
         snprintf(p->err_msg, sizeof(p->err_msg), "retired @arena_init");
@@ -2454,12 +2458,13 @@ static AstNode* parse_at_stmt(Parser* p) {
                             offset_to_linecol(ft, name.offset, &line, &col);
                         {
                             char lfile[1024];
-                            fprintf(stderr, "%s:%d: error: %s\n",
-                                    ft ? tape_diag_file(ft, name.offset, lfile,
-                                                        sizeof(lfile))
-                                       : "<input>",
-                                    line,
-                                    emsg[0] ? emsg : "comptime constraint violated");
+                            diag_at_nocol(
+                                ft ? tape_diag_file(ft, name.offset, lfile,
+                                                    sizeof(lfile))
+                                   : "<input>",
+                                line,
+                                emsg[0] ? emsg
+                                        : "comptime constraint violated");
                         }
                         p->err = 1;
                         return NULL;

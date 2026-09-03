@@ -342,8 +342,9 @@ struct AstNode {
     /* Wait-for `worker (name)` binder — per-ticket pool slot index. */
     char g[64];
     /* Wait-for `cache (name, …)` — enclosing locals adopted as warm
-     * scratch. Comma-separated names; empty is no clause. */
-    char h[256];
+     * scratch. Comma-separated names; NULL/empty is no clause.
+     * Owned by parse_ar (not a fixed AstNode slot). */
+    char* h;
     /* Parsed under `#pragma(@parallel) off`: lower to the sequential
      * denial path only — no thunks, no envs, no scheduler. */
     int forced_seq;
@@ -1262,6 +1263,25 @@ static AstNode* ast_new(Parser* p, AstKind k) {
     return n;
 }
 
+/* NUL-terminated copy on the parse arena (NULL if s empty). Fail-loud OOM. */
+static char* ast_arena_cstr(Parser* p, const char* s) {
+    size_t n;
+    char* d;
+    if (!p || !s || !s[0]) return NULL;
+    if (!cc_arena_is_live(p->parse_ar)) {
+        parser_fail(p, p_peek(p), "parse arena is not live");
+        return NULL;
+    }
+    n = strlen(s);
+    d = (char*)cc_arena_alloc(p->parse_ar, n + 1, 1);
+    if (!d) {
+        parser_fail(p, p_peek(p), "out of memory (ast string slot)");
+        return NULL;
+    }
+    memcpy(d, s, n + 1);
+    return d;
+}
+
 /* Push onto the stable kids bump table. Interior `n->kids` aliases this
  * storage; growing it would dangle every open parent list. */
 static int ast_kids_push(Parser* p, AstNode* child) {
@@ -1384,10 +1404,6 @@ static int peek_result_marker(Parser* p) {
 
 static int peek_result_shape(Parser* p) {
     return peek_result_marker(p) != 0;
-}
-
-static int peek_result_discard_ok(Parser* p) {
-    return peek_result_marker(p) == 2;
 }
 
 /* After ok base spelling: consume `[:]` / `[:!]` into okty (type-position). */

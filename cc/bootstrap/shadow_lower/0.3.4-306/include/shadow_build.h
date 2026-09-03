@@ -207,9 +207,9 @@ static int shadow_runtime_o(char* dst, size_t cap) {
         return 1;
     }
     if (shadow_host_is_tcc(cc)) {
-        fprintf(stderr,
-                "error: host TCC needs a TCC-built runtime object\n"
-                "  set SHADOW_RUNTIME_O (ccc build does this) or use CC=cc\n");
+        shadow_err(NULL, NULL,
+                   "host TCC needs a TCC-built runtime object\n"
+                   "  set SHADOW_RUNTIME_O (ccc build does this) or use CC=cc");
         return 0;
     }
     for (i = 0; i < (int)(sizeof(cands) / sizeof(cands[0])); i++) {
@@ -218,7 +218,7 @@ static int shadow_runtime_o(char* dst, size_t cap) {
             return 1;
         }
     }
-    fprintf(stderr, "error: missing concurrent_c.o (make -C cc)\n");
+    shadow_err(NULL, NULL, "missing concurrent_c.o (make -C cc)");
     return 0;
 }
 
@@ -817,9 +817,13 @@ static int shadow_host_compile(const char* c_path, const char* o_path,
             if (m < 0 || (size_t)m >= sizeof(rebuilt)) return -1;
             snprintf(cmd, sizeof(cmd), "%s", rebuilt);
         } else if (!shadow_append_tcc_B(cmd, sizeof(cmd), cc)) {
-            fprintf(stderr,
-                    "error: host TCC '%s' needs -B (missing third_party/tcc)\n",
-                    cc);
+            {
+                char __diag[256];
+                snprintf(__diag, sizeof(__diag),
+                         "host TCC '%s' needs -B (missing third_party/tcc)",
+                         cc);
+                shadow_err(NULL, NULL, __diag);
+            }
             return -1;
         }
     }
@@ -836,7 +840,12 @@ static int shadow_host_compile(const char* c_path, const char* o_path,
         int rc;
         if (fd < 0) {
             if (system(cmd) != 0) {
-                fprintf(stderr, "error: host compile failed\n  %s\n", cmd);
+                {
+                    char __diag[4200];
+                    snprintf(__diag, sizeof(__diag),
+                             "host compile failed\n  %s", cmd);
+                    shadow_err(NULL, NULL, __diag);
+                }
                 return -1;
             }
             return 0;
@@ -848,7 +857,12 @@ static int shadow_host_compile(const char* c_path, const char* o_path,
             close(fd);
             unlink(tmpl);
             if (system(cmd) != 0) {
-                fprintf(stderr, "error: host compile failed\n  %s\n", cmd);
+                {
+                    char __diag[4200];
+                    snprintf(__diag, sizeof(__diag),
+                             "host compile failed\n  %s", cmd);
+                    shadow_err(NULL, NULL, __diag);
+                }
                 return -1;
             }
             return 0;
@@ -891,7 +905,12 @@ static int shadow_host_compile(const char* c_path, const char* o_path,
         close(fd);
         unlink(tmpl);
         if (rc != 0) {
-            fprintf(stderr, "error: host compile failed\n  %s\n", cmd);
+            {
+                char __diag[4200];
+                snprintf(__diag, sizeof(__diag),
+                         "host compile failed\n  %s", cmd);
+                shadow_err(NULL, NULL, __diag);
+            }
             return -1;
         }
     }
@@ -1048,9 +1067,13 @@ static int shadow_host_link(const char* o_path, const char* bin_path,
     }
     if (n < 0 || (size_t)n >= sizeof(cmd)) return -1;
     if (shadow_host_is_tcc(cc) && !shadow_append_tcc_B(cmd, sizeof(cmd), cc)) {
-        fprintf(stderr,
-                "error: host TCC '%s' needs -B (missing third_party/tcc)\n",
-                cc);
+        {
+            char __diag[256];
+            snprintf(__diag, sizeof(__diag),
+                     "host TCC '%s' needs -B (missing third_party/tcc)",
+                     cc);
+            shadow_err(NULL, NULL, __diag);
+        }
         return -1;
     }
     if (g_shadow_host_opts.dry_run) {
@@ -1060,7 +1083,12 @@ static int shadow_host_link(const char* o_path, const char* bin_path,
     if (g_shadow_host_opts.verbose)
         fprintf(stderr, "shadow_lower: %s\n", cmd);
     if (system(cmd) != 0) {
-        fprintf(stderr, "error: host link failed\n  %s\n", cmd);
+        {
+            char __diag[4200];
+            snprintf(__diag, sizeof(__diag),
+                     "host link failed\n  %s", cmd);
+            shadow_err(NULL, NULL, __diag);
+        }
         return -1;
     }
     return 0;
@@ -1277,15 +1305,23 @@ static int shadow_build_host(const char* in_path, const char* bin_path,
         shadow_replay_diag_sidecar(c_path);
     } else {
         if (!emit_buf) {
-            fprintf(stderr, "error: emit cache miss and no emit buffer\n");
+            shadow_err(NULL, NULL, "emit cache miss and no emit buffer");
             return -1;
         }
         if (shadow_mkdir_p(dir) != 0) {
-            fprintf(stderr, "error: cannot mkdir %s\n", dir);
+            {
+                char __diag[512];
+                snprintf(__diag, sizeof(__diag), "cannot mkdir %s", dir);
+                shadow_err(NULL, NULL, __diag);
+            }
             return -1;
         }
         if (shadow_write_file(c_path, emit_buf, emit_len) != 0) {
-            fprintf(stderr, "error: cannot write %s\n", c_path);
+            {
+                char __diag[512];
+                snprintf(__diag, sizeof(__diag), "cannot write %s", c_path);
+                shadow_err(NULL, NULL, __diag);
+            }
             return -1;
         }
         if (cache_ok) {
@@ -1307,7 +1343,11 @@ static int shadow_build_host(const char* in_path, const char* bin_path,
     if (!(cache_ok && reuse_emit && shadow_file_exists(o_path) &&
           shadow_read_u64_file(okey_path, &prev) == 0 && prev == okey)) {
         if (shadow_mkdir_p(dir) != 0) {
-            fprintf(stderr, "error: cannot mkdir %s\n", dir);
+            {
+                char __diag[512];
+                snprintf(__diag, sizeof(__diag), "cannot mkdir %s", dir);
+                shadow_err(NULL, NULL, __diag);
+            }
             return -1;
         }
         {

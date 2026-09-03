@@ -266,7 +266,12 @@ static int shadow_emit_walk_set(CEmit* out, ShadowCtx* ctx, const char* indent,
     }
     if (!shadow_for_lookup_extent(b->walk_subj, &ex) ||
         !shadow_extent_can_set(&ex)) {
-        fprintf(stderr, "error: for-in `&%s` needs an extent subject\n", name);
+        {
+            char __diag[320];
+            snprintf(__diag, sizeof(__diag),
+                     "for-in `&%s` needs an extent subject", name);
+            shadow_err(ctx, ctx ? ctx->site : NULL, __diag);
+        }
         g_shadow_ufcs_miss = 1;
         return 0;
     }
@@ -337,20 +342,21 @@ static int shadow_walk_assign(AstNode* st, CEmit* out, ShadowCtx* ctx,
     if (rest && rest[0] &&
         (rest[0] == '.' || rest[0] == '[' ||
          (rest[0] == '-' && rest[1] == '>'))) {
-        fprintf(stderr,
-                "error: for-in binder '%s' is not an object "
-                "(assign the binder, or peel the subject)\n",
-                name);
+        {
+            char __diag[320];
+            snprintf(__diag, sizeof(__diag), "for-in binder '%s' is not an object (assign the binder, or peel the subject)", name);
+            shadow_err(ctx, st, __diag);
+        }
         g_shadow_ufcs_miss = 1;
         return -1;
     }
     if (rest && rest[0]) return 0;
     if (!(b->flags & SHADOW_BIND_WALK_MUT)) {
-        fprintf(stderr,
-                "error: for-in binder '%s' is const in this loop "
-                "(it is the load); `&%s` stores into the walk, "
-                "a local rebinds\n",
-                name, name);
+        {
+            char __diag[320];
+            snprintf(__diag, sizeof(__diag), "for-in binder '%s' is const in this loop (it is the load); `&%s` stores into the walk, a local rebinds", name, name);
+            shadow_err(ctx, st, __diag);
+        }
         g_shadow_ufcs_miss = 1;
         return -1;
     }
@@ -362,7 +368,11 @@ static int shadow_walk_assign(AstNode* st, CEmit* out, ShadowCtx* ctx,
     }
     op = st->c[0] ? st->c : "=";
     if (!shadow_walk_set_rhs(op, name, rhs, val, sizeof(val))) {
-        fprintf(stderr, "error: for-in `&%s` cannot use '%s'\n", name, op);
+        {
+            char __diag[320];
+            snprintf(__diag, sizeof(__diag), "for-in `&%s` cannot use '%s'", name, op);
+            shadow_err(ctx, st, __diag);
+        }
         g_shadow_ufcs_miss = 1;
         return -1;
     }
@@ -381,16 +391,20 @@ static int shadow_walk_inc(AstNode* st, CEmit* out, ShadowCtx* ctx,
     b = shadow_bind_lookup(name);
     if (!b || !(b->flags & SHADOW_BIND_WALK)) return 0;
     if (rest && rest[0]) {
-        fprintf(stderr, "error: for-in binder '%s' is not an object\n", name);
+        {
+            char __diag[320];
+            snprintf(__diag, sizeof(__diag), "for-in binder '%s' is not an object", name);
+            shadow_err(ctx, st, __diag);
+        }
         g_shadow_ufcs_miss = 1;
         return -1;
     }
     if (!(b->flags & SHADOW_BIND_WALK_MUT)) {
-        fprintf(stderr,
-                "error: for-in binder '%s' is const in this loop "
-                "(it is the load); `&%s` stores into the walk, "
-                "a local rebinds\n",
-                name, name);
+        {
+            char __diag[320];
+            snprintf(__diag, sizeof(__diag), "for-in binder '%s' is const in this loop (it is the load); `&%s` stores into the walk, a local rebinds", name, name);
+            shadow_err(ctx, st, __diag);
+        }
         g_shadow_ufcs_miss = 1;
         return -1;
     }
@@ -435,11 +449,11 @@ static int shadow_walk_expr_inc(AstNode* st, CEmit* out, ShadowCtx* ctx,
     snprintf(fake.a, sizeof(fake.a), "%s", name);
     if (dec) {
         if (!(b->flags & SHADOW_BIND_WALK_MUT)) {
-            fprintf(stderr,
-                    "error: for-in binder '%s' is const in this loop "
-                    "(it is the load); `&%s` stores into the walk, "
-                    "a local rebinds\n",
-                    name, name);
+            {
+                char __diag[320];
+                snprintf(__diag, sizeof(__diag), "for-in binder '%s' is const in this loop (it is the load); `&%s` stores into the walk, a local rebinds", name, name);
+                shadow_err(ctx, st, __diag);
+            }
             g_shadow_ufcs_miss = 1;
             return -1;
         }
@@ -916,7 +930,8 @@ static int shadow_emit_tpl_build_ex(CEmit* out, const char* tpl,
             if (!shadow_tpl_lit_append(&acc, lit0, (size_t)(p - lit0)))
                 return 0;
             if (!vend) {
-                fprintf(stderr, "error: unterminated ${{...}} in @string\n");
+                shadow_err(NULL, g_shadow_expr_site,
+                           "unterminated ${{...}} in @string");
                 out->err = 1;
                 return 0;
             }
@@ -944,7 +959,8 @@ static int shadow_emit_tpl_build_ex(CEmit* out, const char* tpl,
                 !shadow_tpl_lit_flush(&acc))
                 return 0;
             if (!brace) {
-                fprintf(stderr, "error: unterminated $~tag{...} in @string\n");
+                shadow_err(NULL, g_shadow_expr_site,
+                           "unterminated $~tag{...} in @string");
                 out->err = 1;
                 return 0;
             }
@@ -954,7 +970,8 @@ static int shadow_emit_tpl_build_ex(CEmit* out, const char* tpl,
             tag[tl] = 0;
             end = strchr(brace + 1, '}');
             if (!end) {
-                fprintf(stderr, "error: unterminated $~tag{...} in @string\n");
+                shadow_err(NULL, g_shadow_expr_site,
+                           "unterminated $~tag{...} in @string");
                 out->err = 1;
                 return 0;
             }
@@ -988,7 +1005,8 @@ static int shadow_emit_tpl_build_ex(CEmit* out, const char* tpl,
                 !shadow_tpl_lit_flush(&acc))
                 return 0;
             if (!end) {
-                fprintf(stderr, "error: unterminated ${...} in @string template\n");
+                shadow_err(NULL, g_shadow_expr_site,
+                           "unterminated ${...} in @string template");
                 out->err = 1;
                 return 0;
             }
@@ -1109,11 +1127,15 @@ static int shadow_stack_slot_bounded_or_diag(const char* slot) {
     b = shadow_bind_lookup(id);
     if (!b || !b->ty[0]) return 1;
     if (shadow_ty_is_stack_string_bounded(b->ty)) return 1;
-    fprintf(stderr,
-            "error: arena-less @string: interpolation '${%s}' has no "
-            "statically bounded width (allowed: ${int}/${i64}/${u64}/"
-            "${bool}/${char}); pass an arena: @string(`...`, arena)\n",
-            spell);
+    {
+        char __diag[320];
+        snprintf(__diag, sizeof(__diag),
+                 "arena-less @string: interpolation '${%s}' has no "
+                 "statically bounded width (allowed: ${int}/${i64}/${u64}/"
+                 "${bool}/${char}); pass an arena: @string(`...`, arena)",
+                 spell);
+        shadow_err(NULL, g_shadow_expr_site, __diag);
+    }
     g_shadow_string_stack_diag = 1;
     return 0;
 }
@@ -1705,7 +1727,7 @@ static void shadow_normalize_chan_param_ty(char* ty, size_t cap) {
         snprintf(ty, cap, "CCChanRx");
 }
 
-/* `Ok !>(Err)` → `CCResult_Ok_Err` (param / local type sugar). */
+/* `Ok !>(Err)` / `Ok ?>(Err)` → `CCResult_Ok_Err` (param / local type sugar). */
 static void shadow_normalize_result_param_ty(char* ty, size_t cap) {
     char* bang;
     char ok[128], err[128], rname[256], rest[128];
@@ -1714,6 +1736,7 @@ static void shadow_normalize_result_param_ty(char* ty, size_t cap) {
     int depth;
     if (!ty || !cap) return;
     bang = strstr(ty, "!>(");
+    if (!bang) bang = strstr(ty, "?>(");
     if (!bang) return;
     ol = (size_t)(bang - ty);
     if (ol == 0 || ol >= sizeof(ok)) return;
@@ -2615,7 +2638,7 @@ static int shadow_scratch_cp_push(ShadowCtx* ctx, CEmit* out, const char* indent
     int id;
     if (!ctx || !out) return 0;
     if (ctx->scratch_cp_depth >= SHADOW_SCRATCH_CP_MAX) {
-        fprintf(stderr, "error: nested @scratch checkpoint overflow\n");
+        shadow_err(ctx, ctx->site, "nested @scratch checkpoint overflow");
         return 0;
     }
     ctx->scratch_cp_depth++;
@@ -4422,7 +4445,11 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
     int spawn0 = parallel_dest_expr_worker(st) ? 0 : 1;
 
     if (n < 1 || n > 32) {
-        fprintf(stderr, "error: @parallel arm count %d not supported\n", n);
+        {
+            char __diag[320];
+            snprintf(__diag, sizeof(__diag), "@parallel arm count %d not supported", n);
+            shadow_err(ctx, st, __diag);
+        }
         out->err = 1;
         return 0;
     }
@@ -4431,8 +4458,7 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
     if (!st->par_wake) {
         hdest = shadow_par_handle_dest(st);
         if (!hdest) {
-            fprintf(stderr,
-                    "error: unconsumed Result\n");
+            shadow_err(ctx, st, "unconsumed Result");
             out->err = 1;
             return 0;
         }
@@ -4448,8 +4474,7 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 return 0;
         }
         if (n == 1 && st->body[0] && st->body[0]->kind != AST_SERIAL) {
-            fprintf(stderr,
-                    "error: this dest is never live on the caller\n");
+            shadow_err(ctx, st, "this dest is never live on the caller");
             out->err = 1;
             return 0;
         }
@@ -4457,9 +4482,7 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
             int wi;
             for (wi = 0; wi < n; wi++) {
                 if (shadow_par_arm_waits_dest(st->body[wi], hdest)) {
-                    fprintf(stderr,
-                            "error: cannot .wait() the same @parallel handle "
-                            "from an arm of it\n");
+                    shadow_err(ctx, st, "cannot .wait() the same @parallel handle from an arm of it");
                     out->err = 1;
                     return 0;
                 }
@@ -4482,9 +4505,11 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
         } else {
             b = shadow_bind_lookup(lhs[a]);
             if (!b || !b->ty[0]) {
-                fprintf(stderr,
-                        "error: @parallel target '%s' has no known type\n",
-                        lhs[a]);
+                {
+                    char __diag[320];
+                    snprintf(__diag, sizeof(__diag), "@parallel target '%s' has no known type", lhs[a]);
+                    shadow_err(ctx, st, __diag);
+                }
                 out->err = 1;
                 return 0;
             }
@@ -4501,14 +4526,14 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 shadow_par_serial_walk_locals(arm, sloc, &nsl, 32);
                 if (!shadow_par_scan_node(arm, NULL, cap_names[a], cap_tys[a],
                                           &ncaps[a], SHADOW_PAR_CAP_MAX)) {
-                    fprintf(stderr, "error: @parallel capture table full\n");
+                    shadow_err(ctx, st, "@parallel capture table full");
                     out->err = 1;
                     return 0;
                 }
             } else if (!shadow_par_scan_text(arm->b, NULL, cap_names[a],
                                              cap_tys[a], &ncaps[a],
                                              SHADOW_PAR_CAP_MAX)) {
-                fprintf(stderr, "error: @parallel capture table full\n");
+                shadow_err(ctx, st, "@parallel capture table full");
                 out->err = 1;
                 return 0;
             }
@@ -4566,9 +4591,7 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
     }
     if (!st->forced_seq && !st->par_spawn &&
         shadow_par_join_sees_channel(st, n, ncaps, cap_tys)) {
-        fprintf(stderr,
-                "error: @parallel that names or captures a channel "
-                "requires @parallel spawn\n");
+        shadow_err(ctx, st, "@parallel that names or captures a channel requires @parallel spawn");
         out->err = 1;
         return 0;
     }
@@ -4690,11 +4713,14 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
 }
 
 /* Gate name → `CCTurnstile*` expression, by declared type. */
-static int shadow_pw_gate_expr(const char* name, char* dst, size_t cap) {
+static int shadow_pw_gate_expr(AstNode* st, const char* name, char* dst,
+                               size_t cap) {
     const ShadowBind* b = shadow_bind_lookup(name);
     if (!b || !b->ty[0]) {
-        fprintf(stderr, "error: @parallel wait gate '%s' has no known type\n",
-                name);
+        char __diag[320];
+        snprintf(__diag, sizeof(__diag),
+                 "@parallel wait gate '%s' has no known type", name);
+        shadow_err(NULL, st, __diag);
         return 0;
     }
     if (strcmp(b->ty, "CCTurnstile*") == 0)
@@ -4706,10 +4732,12 @@ static int shadow_pw_gate_expr(const char* name, char* dst, size_t cap) {
     else if (strcmp(b->ty, "CCTurnstileRW") == 0)
         snprintf(dst, cap, "(&(%s).core)", name);
     else {
-        fprintf(stderr,
-                "error: @parallel wait gate '%s' must be a CCTurnstile / "
-                "CCTurnstileRW (got '%s')\n",
-                name, b->ty);
+        char __diag[320];
+        snprintf(__diag, sizeof(__diag),
+                 "@parallel wait gate '%s' must be a CCTurnstile / "
+                 "CCTurnstileRW (got '%s')",
+                 name, b->ty);
+        shadow_err(NULL, st, __diag);
         return 0;
     }
     return 1;
@@ -4778,7 +4806,7 @@ static int shadow_pw_apply_cache(AstNode* st, AstNode** body, int nbody,
     const char* p;
     char loc[64][64];
     int nloc = 0, k;
-    if (!st || !st->h[0]) return 1;
+    if (!st || !st->h || !st->h[0]) return 1;
     p = st->h;
     for (k = 0; k < nbody; k++)
         shadow_par_serial_walk_locals(body[k], loc, &nloc, 64);
@@ -4795,10 +4823,11 @@ static int shadow_pw_apply_cache(AstNode* st, AstNode** body, int nbody,
         if (!id[0]) continue;
         if (shadow_par_name_eq(id, st->a) ||
             (st->g[0] && shadow_par_name_eq(id, st->g))) {
-            fprintf(stderr,
-                    "error: cache (name) cannot adopt the loop variable "
-                    "or worker binder '%s'\n",
-                    id);
+            {
+                char __diag[320];
+                snprintf(__diag, sizeof(__diag), "cache (name) cannot adopt the loop variable or worker binder '%s'", id);
+                shadow_err(NULL, st, __diag);
+            }
             return 0;
         }
         for (k = 0; k < nloc; k++) {
@@ -4808,52 +4837,58 @@ static int shadow_pw_apply_cache(AstNode* st, AstNode** body, int nbody,
             }
         }
         if (is_loc) {
-            fprintf(stderr,
-                    "error: cache (name) '%s' is a body local — adopt an "
-                    "enclosing declaration\n",
-                    id);
+            {
+                char __diag[320];
+                snprintf(__diag, sizeof(__diag), "cache (name) '%s' is a body local — adopt an enclosing declaration", id);
+                shadow_err(NULL, st, __diag);
+            }
             return 0;
         }
         if (!shadow_bind_lookup(id)) {
-            fprintf(stderr,
-                    "error: cache (name) '%s' is not a name in the "
-                    "enclosing scope\n",
-                    id);
+            {
+                char __diag[320];
+                snprintf(__diag, sizeof(__diag), "cache (name) '%s' is not a name in the enclosing scope", id);
+                shadow_err(NULL, st, __diag);
+            }
             return 0;
         }
         if (shadow_bind_is_cache(id)) {
-            fprintf(stderr,
-                    "error: cache (name) adopts '%s' once\n", id);
+            {
+                char __diag[320];
+                snprintf(__diag, sizeof(__diag), "cache (name) adopts '%s' once", id);
+                shadow_err(NULL, st, __diag);
+            }
             return 0;
         }
         if (!shadow_cache_decl_for(id)) {
-            fprintf(stderr,
-                    "error: cache (name) '%s' has no declaration in the "
-                    "enclosing scope\n",
-                    id);
+            {
+                char __diag[320];
+                snprintf(__diag, sizeof(__diag), "cache (name) '%s' has no declaration in the enclosing scope", id);
+                shadow_err(NULL, st, __diag);
+            }
             return 0;
         }
         for (k = 0; k < nstages; k++) {
             if (shadow_pw_stage_names(stages[k], id)) {
-                fprintf(stderr,
-                        "error: cache (name) '%s' cannot appear in an "
-                        "@stage block — stage is loop-carried, cache "
-                        "is unobservable instance identity\n",
-                        id);
+                {
+                    char __diag[320];
+                    snprintf(__diag, sizeof(__diag), "cache (name) '%s' cannot appear in an @stage block — stage is loop-carried, cache is unobservable instance identity", id);
+                    shadow_err(NULL, st, __diag);
+                }
                 return 0;
             }
         }
         if (!shadow_par_add_cap(id, st->a, names, tys, ncaps,
                                 SHADOW_PAR_CAP_MAX)) {
-            fprintf(stderr,
-                    "error: @parallel wait for capture table full\n");
+            shadow_err(NULL, st, "@parallel wait for capture table full");
             return 0;
         }
         if (!shadow_bind_or_cache(id)) {
-            fprintf(stderr,
-                    "error: cache (name) '%s' is not a name in the "
-                    "enclosing scope\n",
-                    id);
+            {
+                char __diag[320];
+                snprintf(__diag, sizeof(__diag), "cache (name) '%s' is not a name in the enclosing scope", id);
+                shadow_err(NULL, st, __diag);
+            }
             return 0;
         }
     }
@@ -4900,10 +4935,11 @@ static int shadow_pw_check_gotos_node(AstNode* s, char labs[][64], int nlab) {
             }
         }
         if (!hit) {
-            fprintf(stderr,
-                    "error: goto '%s' crosses a '@parallel' boundary — "
-                    "the target must be a label in the same body\n",
-                    s->a);
+            {
+                char __diag[320];
+                snprintf(__diag, sizeof(__diag), "goto '%s' crosses a '@parallel' boundary — the target must be a label in the same body", s->a);
+                shadow_err(NULL, s, __diag);
+            }
             return 0;
         }
     }
@@ -5345,18 +5381,20 @@ static int shadow_pw_collect_stages(AstNode** body, int nbody,
             }
             for (j = 0; j < it->nbody; j++) {
                 if (shadow_pw_find_stage(it->body[j])) {
-                    fprintf(stderr,
-                            "error: @stage must be a top-level statement of "
-                            "%s\n",
-                            where);
+                    {
+                        char __diag[320];
+                        snprintf(__diag, sizeof(__diag), "@stage must be a top-level statement of %s", where);
+                        shadow_err(NULL, it, __diag);
+                    }
                     return 0;
                 }
             }
         } else if (shadow_pw_find_stage(it)) {
-            fprintf(stderr,
-                    "error: @stage must be a top-level statement of "
-                    "%s\n",
-                    where);
+            {
+                char __diag[320];
+                snprintf(__diag, sizeof(__diag), "@stage must be a top-level statement of %s", where);
+                shadow_err(NULL, it, __diag);
+            }
             return 0;
         }
     }
@@ -5507,8 +5545,7 @@ static int shadow_emit_stage(AstNode* st, CEmit* out, ShadowCtx* ctx,
     char i1[80];
     int k, mark;
     if (!ctx || !ctx->pw_body) {
-        fprintf(stderr,
-                "error: @stage is only valid inside a @parallel body\n");
+        shadow_err(ctx, st, "@stage is only valid inside a @parallel body");
         out->err = 1;
         return 0;
     }
@@ -5614,24 +5651,21 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
         }
     }
     if (!st->par_wake && !hdest) {
-        fprintf(stderr,
-                "error: '@parallel wait for' must be joined with "
-                "'!>.wait()!>' or bound to CCParallel\n");
+        shadow_err(ctx, st, "'@parallel wait for' must be joined with '!>.wait()!>' or bound to CCParallel");
         out->err = 1;
         return 0;
     }
     if (!lo[0] || !hi[0] || !st->a[0]) {
-        fprintf(stderr, "error: malformed @parallel wait for\n");
+        shadow_err(ctx, st, "malformed @parallel wait for");
         out->err = 1;
         return 0;
     }
     if (!ctx) {
-        fprintf(stderr,
-                "error: '@parallel wait for' needs an emit context\n");
+        shadow_err(ctx, st, "'@parallel wait for' needs an emit context");
         out->err = 1;
         return 0;
     }
-    if (!shadow_pw_gate_expr(st->e, tsexpr, sizeof(tsexpr))) {
+    if (!shadow_pw_gate_expr(st, st->e, tsexpr, sizeof(tsexpr))) {
         out->err = 1;
         return 0;
     }
@@ -5653,9 +5687,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
                 reh = ctx->eh;
         }
         if (!reh) {
-            fprintf(stderr,
-                    "error: '@parallel wait for' re-raise requires a CCError "
-                    "'@errhandler' in scope\n");
+            shadow_err(ctx, st, "'@parallel wait for' re-raise requires a CCError '@errhandler' in scope");
             out->err = 1;
             return 0;
         }
@@ -5665,16 +5697,12 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
      * error jump could not honor them anyway. Reject instead of dropping. */
     for (k = 0; k < st->nbody; k++) {
         if (st->body[k]->kind == AST_DEFER) {
-            fprintf(stderr,
-                    "error: @defer at '@parallel wait for' body top level is "
-                    "not supported; discharge it inside a helper function\n");
+            shadow_err(ctx, st, "@defer at '@parallel wait for' body top level is not supported; discharge it inside a helper function");
             out->err = 1;
             return 0;
         }
         if (st->body[k]->kind == AST_ERRHANDLER) {
-            fprintf(stderr,
-                    "error: @errhandler inside '@parallel wait for' body is "
-                    "not supported; declare it outside the loop\n");
+            shadow_err(ctx, st, "@errhandler inside '@parallel wait for' body is not supported; declare it outside the loop");
             out->err = 1;
             return 0;
         }
@@ -5693,7 +5721,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
     for (k = 0; k < st->nbody; k++) {
         if (!shadow_par_scan_node(st->body[k], st->a, names, tys, &ncaps,
                                   SHADOW_PAR_CAP_MAX)) {
-            fprintf(stderr, "error: @parallel wait for capture table full\n");
+            shadow_err(ctx, st, "@parallel wait for capture table full");
             out->err = 1;
             return 0;
         }
@@ -6366,8 +6394,7 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
         return shadow_emit_parallel_wait_for(st, out, ctx, indent,
                                              use_cleanup);
     if (!st->par_wake) {
-        fprintf(stderr,
-                "error: '@parallel for' must be joined with '!>.wait()!>'\n");
+        shadow_err(ctx, st, "'@parallel for' must be joined with '!>.wait()!>'");
         out->err = 1;
         return 0;
     }
@@ -6375,7 +6402,7 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
     shadow_par_trim(st->b, lo, sizeof(lo));
     shadow_par_trim(st->c, hi, sizeof(hi));
     if (!lo[0] || !hi[0] || !st->a[0]) {
-        fprintf(stderr, "error: malformed @parallel for\n");
+        shadow_err(ctx, st, "malformed @parallel for");
         out->err = 1;
         return 0;
     }
@@ -6406,7 +6433,7 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
     for (k = 0; k < st->nbody; k++) {
         if (!shadow_par_scan_node(st->body[k], st->a, names, tys, &ncaps,
                                   SHADOW_PAR_CAP_MAX)) {
-            fprintf(stderr, "error: @parallel for capture table full\n");
+            shadow_err(ctx, st, "@parallel for capture table full");
             out->err = 1;
             return 0;
         }
@@ -6873,8 +6900,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             const char* bind = "e";
             (void)bang;
             if (!ctx) {
-                fprintf(stderr,
-                        "error: 'return … !>;' requires emit context\n");
+                shadow_err(ctx, st, "'return … !>;' requires emit context");
                 out->err = 1;
                 return 0;
             }
@@ -6885,9 +6911,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             matched = ctx->eh;
             if (!matched) {
                 ctx->eh = saved_eh;
-                fprintf(stderr,
-                        "error: 'return … !>;' requires an enclosing "
-                        "'@errhandler' in scope\n");
+                shadow_err(ctx, st, "'return … !>;' requires an enclosing '@errhandler' in scope");
                 out->err = 1;
                 return 0;
             }
@@ -7044,9 +7068,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         int have_desig = (st->d[0] && strstr(st->d, "case .") != NULL);
         int strsw = 0;
         if (have_desig && strcmp(st->f, "cc_switch") != 0) {
-            fprintf(stderr,
-                    "error: variant switch requires `@switch`; "
-                    "use `@switch (v) { case .arm: ... }`\n");
+            shadow_err(ctx, st, "variant switch requires `@switch`; use `@switch (v) { case .arm: ... }`");
             g_shadow_ufcs_miss = 1;
             return 0;
         }
@@ -7074,9 +7096,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                     expr, sizeof(expr));
             if (strsw < 0) return 0;
             if (strsw && strcmp(st->f, "cc_switch") != 0) {
-                fprintf(stderr,
-                        "error: string switch requires `@switch`; "
-                        "use `@switch (name) { case \"GET\": ... }`\n");
+                shadow_err(ctx, st, "string switch requires `@switch`; use `@switch (name) { case \"GET\": ... }`");
                 g_shadow_ufcs_miss = 1;
                 return 0;
             }
@@ -7896,8 +7916,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 return 0;
             if (create_decl) {
                 if (!st->b[0] || is_ptr) {
-                    fprintf(stderr,
-                            "error: type: decl-form @create needs a value binder\n");
+                    shadow_err(ctx, st, "type: decl-form @create needs a value binder");
                     return 0;
                 }
                 if (!shadow_create_insert_binder(init, sizeof(init), st->b))
@@ -8003,8 +8022,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             return 0;
         }
         if (in_kind > 0 && strcmp(st->f, "cc_for") != 0) {
-            fprintf(stderr,
-                    "error: walk loop requires `@for`; use `@for (... in ...)`\n");
+            shadow_err(ctx, st, "walk loop requires `@for`; use `@for (... in ...)`");
             g_shadow_ufcs_miss = 1;
             shadow_pw_pop_loop(ctx, pw, 0);
             return 0;
@@ -8015,7 +8033,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             int id = g_shadow_for_in_seq++;
             if (!shadow_for_split_range(fi.rest, lo_raw, sizeof(lo_raw), hi_raw,
                                         sizeof(hi_raw))) {
-                fprintf(stderr, "error: for-in range needs `lo..hi`\n");
+                shadow_err(ctx, st, "for-in range needs `lo..hi`");
                 g_shadow_ufcs_miss = 1;
                 shadow_pw_pop_loop(ctx, pw, 0);
                 return 0;
@@ -8083,15 +8101,17 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 snprintf(idx, sizeof(idx), "__cc_fi_%d", id);
             if (val_mut) {
                 if (strcmp(st->e, "zip_bang") != 0) {
-                    fprintf(stderr, "error: unconsumed Result\n");
+                    shadow_err(ctx, st, "unconsumed Result");
                     g_shadow_ufcs_miss = 1;
                     shadow_pw_pop_loop(ctx, pw, 0);
                     return 0;
                 }
                 if (!shadow_extent_can_set(&ex)) {
-                    fprintf(stderr,
-                            "error: for-in `&%s` needs an extent subject\n",
-                            val);
+                    {
+                        char __diag[320];
+                        snprintf(__diag, sizeof(__diag), "for-in `&%s` needs an extent subject", val);
+                        shadow_err(ctx, st, __diag);
+                    }
                     g_shadow_ufcs_miss = 1;
                     shadow_pw_pop_loop(ctx, pw, 0);
                     return 0;
@@ -8201,8 +8221,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             }
             if ((fi.mut[0] && !shadow_extent_can_set(&ex_a)) ||
                 (fi.mut[1] && !shadow_extent_can_set(&ex_b))) {
-                fprintf(stderr,
-                        "error: for-in zip `&` needs an extent subject\n");
+                shadow_err(ctx, st, "for-in zip `&` needs an extent subject");
                 g_shadow_ufcs_miss = 1;
                 shadow_pw_pop_loop(ctx, pw, 0);
                 return 0;
@@ -8222,7 +8241,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
              * __cc_uw_is_err/_err_at do not carry CC_ERR_INVALID_ARG.
              * Required `!>;` / `!>(e){…}` (parse). Site handler wins. */
             if (strcmp(st->e, "zip_bang") != 0) {
-                fprintf(stderr, "error: unconsumed Result\n");
+                shadow_err(ctx, st, "unconsumed Result");
                 shadow_pw_pop_loop(ctx, pw, 0);
                 return 0;
             }
@@ -8546,8 +8565,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     return 0;
                 if (create_decl) {
                     if (!st->b[0] || st->d[0]) {
-                        fprintf(stderr,
-                                "error: type: decl-form @create needs a value binder\n");
+                        shadow_err(ctx, st, "type: decl-form @create needs a value binder");
                         return 0;
                     }
                     if (!shadow_create_insert_binder(expr, sizeof(expr), st->b))
@@ -8702,9 +8720,9 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 if (strcmp(g_shadow_as[ai].outer, vty) != 0) continue;
                 if (strchr(g_shadow_as[ai].field, '.')) continue; /* transitive */
                 if (!as_n)
-                    fprintf(stderr, "as: retry also failed\n");
-                fprintf(stderr, "as: field: %s %s\n", g_shadow_as[ai].target,
-                        g_shadow_as[ai].field);
+                    diag_plain("as: retry also failed");
+                diag_plainf("as: field: %s %s", g_shadow_as[ai].target,
+                            g_shadow_as[ai].field);
                 as_n++;
             }
             /* Typed Capital / CC* miss: diagnose. Field/fnptr members stay
@@ -8825,8 +8843,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == '\t')) n--;
                     if (!n) break;
                     if (n >= sizeof(hop_txt)) {
-                        fprintf(stderr,
-                                "error: bang-chain hop too long\n");
+                        shadow_err(ctx, st, "bang-chain hop too long");
                         out->err = 1;
                         return 0;
                     }
@@ -8835,8 +8852,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     nr = snprintf(recv, sizeof(recv), "((__r%d).u.value)%s", hop,
                                   hop_txt);
                     if (nr < 0 || (size_t)nr >= sizeof(recv)) {
-                        fprintf(stderr,
-                                "error: bang-chain hop too long\n");
+                        shadow_err(ctx, st, "bang-chain hop too long");
                         out->err = 1;
                         return 0;
                     }
@@ -8941,18 +8957,14 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     cname[clen] = 0;
                 }
                 if (cname[0] &&
+                    !shadow_rfn_discard_ok(cname) &&
+                    !cc_result_fn_registry_is_discard_ok(cname, clen) &&
                     (shadow_rfn_err(cname) ||
                      cc_result_fn_registry_contains(cname, clen))) {
-                    const char* path = NULL;
-                    int line = 0;
-                    if (ctx && ctx->cache)
-                        (void)shadow_site_loc(ctx->cache, st, &path, &line);
-                    if (path && line > 0)
-                        fprintf(stderr, "%s:%d:1: error: unhandled-result\n",
-                                path, line);
-                    else
-                        fprintf(stderr, "unhandled-result\n");
-                    fprintf(stderr, "call to '%s'\n", st->b);
+                    char msg[192];
+                    snprintf(msg, sizeof(msg),
+                             "unhandled-result\ncall to '%s'", st->b);
+                    shadow_err(ctx, st, msg);
                     if (out) out->err = 1;
                     return 0;
                 }
@@ -9484,15 +9496,12 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     int ai;
                     for (ai = 0; ai < narm; ai++) {
                         if (strcmp(arms[ai], arms[narm]) == 0) {
-                            const char* path = NULL;
-                            char lfile[1024];
-                            int line = 1, col = 1;
+                            size_t off = st->tok_off;
                             int first_line = 1;
-                            lfile[0] = 0;
+                            char msg[320];
                             if (ctx && ctx->cache && st->file_id) {
                                 FileTape* ft = tape_by_id(ctx->cache, st->file_id);
                                 if (ft && ft->bytes) {
-                                    size_t off = st->tok_off;
                                     const char* src = ft->bytes;
                                     size_t slen = ft->len;
                                     size_t i;
@@ -9513,34 +9522,25 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                             seen++;
                                         }
                                     }
-                                    offset_to_linecol(ft, off, &line, &col);
-                                    tape_logical_at(ft, off, lfile, sizeof(lfile),
-                                                    &line);
-                                    path = tape_diag_file(ft, off, lfile,
-                                                          sizeof(lfile));
                                 }
                             }
-                            g_shadow_diag_errors++;
-                            fprintf(stderr,
-                                    "%s:%d:%d: error: @variant '%s': duplicate "
-                                    "arm name '%s' (first declared at line %d)\n",
-                                    path && path[0] ? path : "<input>", line,
-                                    col, st->b, arms[narm], first_line);
+                            snprintf(msg, sizeof(msg),
+                                     "@variant '%s': duplicate arm name '%s' "
+                                     "(first declared at line %d)",
+                                     st->b, arms[narm], first_line);
+                            shadow_err_off(ctx, st, off, msg);
                             out->err = 1;
                             return 0;
                         }
                     }
                 }
                 if (shadow_is_c_keyword(arms[narm])) {
-                    const char* path = NULL;
-                    char lfile[1024];
-                    int line = 1, col = 1;
-                    lfile[0] = 0;
+                    size_t off = st->tok_off;
+                    char msg[320];
                     if (ctx && ctx->cache && st->file_id) {
                         FileTape* ft = tape_by_id(ctx->cache, st->file_id);
                         if (ft && ft->bytes) {
                             /* Point at the arm name inside the variant body. */
-                            size_t off = st->tok_off;
                             const char* hit = strstr(st->c, arms[narm]);
                             if (hit && ft->bytes) {
                                 /* Prefer source occurrence of `arm:` after `{`. */
@@ -9556,19 +9556,13 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                 }
                             }
                             (void)hit;
-                            offset_to_linecol(ft, off, &line, &col);
-                            tape_logical_at(ft, off, lfile, sizeof(lfile),
-                                            &line);
-                            path = tape_diag_file(ft, off, lfile,
-                                                  sizeof(lfile));
                         }
                     }
-                    g_shadow_diag_errors++;
-                    fprintf(stderr,
-                            "%s:%d:%d: error: @variant '%s': arm name '%s' is a "
-                            "C keyword\npick another spelling\n",
-                            path && path[0] ? path : "<input>", line, col, st->b,
-                            arms[narm]);
+                    snprintf(msg, sizeof(msg),
+                             "@variant '%s': arm name '%s' is a C keyword\n"
+                             "pick another spelling",
+                             st->b, arms[narm]);
+                    shadow_err_off(ctx, st, off, msg);
                     out->err = 1;
                     return 0;
                 }
@@ -9596,12 +9590,9 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     strstr(tys[narm], st->b) &&
                     !strchr(tys[narm], '*') && !strstr(tys[narm], "[:")) {
                     char msg[320];
-                    const char* path = "<input>";
-                    char lfile[1024];
-                    int line = 1, col = 1;
-                    lfile[0] = 0;
                     size_t al = strlen(arms[narm]);
                     size_t tl2 = strlen(tys[narm]);
+                    size_t off = st->tok_off;
                     snprintf(msg, sizeof(msg),
                              "@variant '%s': arm '%s' contains '%s' by value — "
                              "recursive arms must go through a pointer or "
@@ -9610,7 +9601,6 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     if (ctx && ctx->cache && st->file_id) {
                         FileTape* ft = tape_by_id(ctx->cache, st->file_id);
                         if (ft && ft->bytes) {
-                            size_t off = st->tok_off;
                             size_t i;
                             for (i = st->tok_off; i + al + 1 + tl2 < ft->len;
                                  i++) {
@@ -9629,16 +9619,9 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                     }
                                 }
                             }
-                            offset_to_linecol(ft, off, &line, &col);
-                            tape_logical_at(ft, off, lfile, sizeof(lfile),
-                                            &line);
-                            path = tape_diag_file(ft, off, lfile,
-                                                  sizeof(lfile));
                         }
                     }
-                    g_shadow_diag_errors++;
-                    fprintf(stderr, "%s:%d:%d: error: %s\n", path, line, col,
-                            msg);
+                    shadow_err_off(ctx, st, off, msg);
                     out->err = 1;
                     return 0;
                 }
@@ -9669,16 +9652,19 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 }
                 shadow_variant_compute_packed(&pv);
                 if (pv.donor_arm < 0) {
-                    fprintf(stderr,
-                            "error: @variant(packed) '%s' cannot be niche-packed\n",
-                            st->b);
+                    {
+                        char __diag[320];
+                        snprintf(__diag, sizeof(__diag), "@variant(packed) '%s' cannot be niche-packed", st->b);
+                        shadow_err(ctx, st, __diag);
+                    }
                     if (narm == 2) {
                         unsigned sz0 = shadow_variant_type_size(tys[0]);
                         unsigned sz1 = shadow_variant_type_size(tys[1]);
-                        fprintf(stderr,
-                                "  arm '%s' (%s, %u bytes) and arm '%s' (%s, %u bytes)\n"
-                                "  neither donates a free niche\n",
-                                arms[0], tys[0], sz0, arms[1], tys[1], sz1);
+                        diag_plainf(
+                            "  arm '%s' (%s, %u bytes) and arm '%s' (%s, %u "
+                            "bytes)\n"
+                            "  neither donates a free niche",
+                            arms[0], tys[0], sz0, arms[1], tys[1], sz1);
                     }
                     out->err = 1;
                     return 0;
@@ -9833,7 +9819,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             size_t o0 = 0, o1 = 0;
             char* endp = NULL;
             if (!ft || !ft->bytes) {
-                fprintf(stderr, "error: stmt raw tape span missing file\n");
+                shadow_err(ctx, st, "stmt raw tape span missing file");
                 out->err = 1;
                 return 0;
             }
@@ -9853,7 +9839,11 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             return cemit_fmt(out, "%s%s\n", indent, st->a);
         return 1;
     default:
-        fprintf(stderr, "error: stmt %s not lowerable\n", ast_kind_name(st->kind));
+        {
+            char __diag[320];
+            snprintf(__diag, sizeof(__diag), "stmt %s not lowerable", ast_kind_name(st->kind));
+            shadow_err(ctx, st, __diag);
+        }
         out->err = 1;
         return 0;
     }
@@ -10158,10 +10148,11 @@ static int shadow_emit_one_destroy(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 if (!cemit_fmt(out, "%s%s(%s);\n", body_ind, reg, name))
                     ok = 0;
             } else {
-                fprintf(stderr,
-                        "error: bodyless @destroy on '%s* %s' needs a "
-                        "registered destroy hook\n",
-                        ty, name);
+                {
+                    char __diag[320];
+                    snprintf(__diag, sizeof(__diag), "bodyless @destroy on '%s* %s' needs a registered destroy hook", ty, name);
+                    shadow_err(ctx, st, __diag);
+                }
                 ok = 0;
             }
         }
@@ -10243,10 +10234,11 @@ static int shadow_emit_one_destroy(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     p = *semi ? semi + 1 : semi;
                 }
             } else if (bare) {
-                fprintf(stderr,
-                        "error: bodyless @destroy on '%s %s' needs a registered "
-                        "destroy hook\n",
-                        ty, name);
+                {
+                    char __diag[320];
+                    snprintf(__diag, sizeof(__diag), "bodyless @destroy on '%s %s' needs a registered destroy hook", ty, name);
+                    shadow_err(ctx, st, __diag);
+                }
                 ok = 0;
             }
         }

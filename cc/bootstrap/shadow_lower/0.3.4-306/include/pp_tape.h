@@ -98,6 +98,13 @@ typedef struct {
 
 /* ---- origins / loud diagnostics ----------------------------------------- */
 
+/* Counter + sink forward decls so tape-index failures can diag before the
+ * full helper block (diag_at needs tape_by_id, defined later). */
+static int g_shadow_diag_errors = 0;
+static void diag_emit(const char* kind, const char* path, int line, int col,
+                      int no_col, const char* msg);
+static void diag_err_loc(const char* path, int line, int col, const char* msg);
+
 static const char* tape_intern_path(FileTape* ft, const char* p, size_t n) {
     char* copy;
     size_t i, np;
@@ -112,16 +119,22 @@ static const char* tape_intern_path(FileTape* ft, const char* p, size_t n) {
     }
     copy = (char*)malloc(n + 1);
     if (!copy) {
-        fprintf(stderr, "error: tape line path intern failed for '%s'\n",
-                ft->path ? ft->path : "<input>");
+        char __diag[320];
+        snprintf(__diag, sizeof(__diag),
+                 "tape line path intern failed for '%s'",
+                 ft->path ? ft->path : "<input>");
+        diag_err_loc(NULL, 0, 0, __diag);
         return NULL;
     }
     memcpy(copy, p, n);
     copy[n] = 0;
     if (TapePathVec_push(&ft->paths, copy) != 0) {
+        char __diag[320];
         free(copy);
-        fprintf(stderr, "error: tape line path table grow failed for '%s'\n",
-                ft->path ? ft->path : "<input>");
+        snprintf(__diag, sizeof(__diag),
+                 "tape line path table grow failed for '%s'",
+                 ft->path ? ft->path : "<input>");
+        diag_err_loc(NULL, 0, 0, __diag);
         return NULL;
     }
     return copy;
@@ -135,8 +148,11 @@ static int tape_line_push(FileTape* ft, size_t off, int logic, int phys,
     r.phys = phys;
     r.file = file ? file : (ft && ft->path ? ft->path : "");
     if (!ft || TapeLineVec_push(&ft->lines, r) != 0) {
-        fprintf(stderr, "error: tape line index grow failed for '%s'\n",
-                ft && ft->path ? ft->path : "<input>");
+        char __diag[320];
+        snprintf(__diag, sizeof(__diag),
+                 "tape line index grow failed for '%s'",
+                 ft && ft->path ? ft->path : "<input>");
+        diag_err_loc(NULL, 0, 0, __diag);
         return 0;
     }
     return 1;
@@ -149,7 +165,7 @@ static int tape_lines_build(FileTape* ft) {
     int phys = 1, logic = 1;
     const char* cur_file;
     if (!ft || !ft->bytes) {
-        fprintf(stderr, "error: tape line index build with no bytes\n");
+        diag_err_loc(NULL, 0, 0, "tape line index build with no bytes");
         return 0;
     }
     bytes = ft->bytes;
@@ -158,8 +174,11 @@ static int tape_lines_build(FileTape* ft) {
     ft->paths = TapePathVec_init();
     cur_file = ft->path ? ft->path : "";
     if (TapeLineVec_reserve(&ft->lines, len / 32 + 8) != 0) {
-        fprintf(stderr, "error: tape line index reserve failed for '%s'\n",
-                ft->path ? ft->path : "<input>");
+        char __diag[320];
+        snprintf(__diag, sizeof(__diag),
+                 "tape line index reserve failed for '%s'",
+                 ft->path ? ft->path : "<input>");
+        diag_err_loc(NULL, 0, 0, __diag);
         return 0;
     }
     if (!tape_line_push(ft, 0, logic, phys, cur_file)) return 0;
@@ -247,14 +266,16 @@ static const TapeLineRec* tape_line_at(const FileTape* ft, size_t off) {
     const TapeLineRec* recs;
     size_t n, lo, hi, q;
     if (!ft) {
-        fprintf(stderr, "error: tape line index query with no tape\n");
+        diag_err_loc(NULL, 0, 0, "tape line index query with no tape");
         return NULL;
     }
     recs = ft->lines.data;
     n = ft->lines.len;
     if (!recs || n == 0) {
-        fprintf(stderr, "error: tape line index empty for '%s'\n",
-                ft->path ? ft->path : "<input>");
+        char __diag[320];
+        snprintf(__diag, sizeof(__diag), "tape line index empty for '%s'",
+                 ft->path ? ft->path : "<input>");
+        diag_err_loc(NULL, 0, 0, __diag);
         return NULL;
     }
     q = (ft->len && off > ft->len) ? ft->len : off;
@@ -367,27 +388,69 @@ static FileTape* tape_by_id(TapeCache* c, int file_id) {
 }
 
 /* Count of error diagnostics printed this process (reset per TU).  A cold
- * emit that printed errors must not be cached — warm would skip the diag. */
-static int g_shadow_diag_errors = 0;
-
+ * emit that printed errors must not be cached — warm would skip the diag.
+ * Single stderr sink: errors bump the counter; notes/warnings/plain lines
+ * do not. Call sites should not fprintf(stderr) for user-facing diags. */
 static void shadow_diag_errors_reset(void) { g_shadow_diag_errors = 0; }
 
 static int shadow_diag_errors(void) { return g_shadow_diag_errors; }
+
+/* kind: "error" | "note" | "warning". no_col or col<=0 → path:line: kind: msg.
+ * line<=0 → kind: msg (no locus). */
+static void diag_emit(const char* kind, const char* path, int line, int col,
+                      int no_col, const char* msg) {
+    if (!msg) return;
+    if (!kind || !kind[0]) kind = "error";
+    if (line <= 0) {
+        fprintf(stderr, "%s: %s\n", kind, msg);
+        return;
+    }
+    if (!path || !path[0]) path = "<input>";
+    if (no_col || col <= 0)
+        fprintf(stderr, "%s:%d: %s: %s\n", path, line, kind, msg);
+    else
+        fprintf(stderr, "%s:%d:%d: %s: %s\n", path, line, col, kind, msg);
+}
+
+/* Continuation / candidate / snippet line — no kind prefix, no counter. */
+static void diag_plain(const char* line) {
+    if (!line) return;
+    fputs(line, stderr);
+    if (!line[0] || line[strlen(line) - 1] != '\n') fputc('\n', stderr);
+}
+
+static void diag_plainf(const char* fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    int n;
+    if (!fmt) return;
+    va_start(ap, fmt);
+    n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    diag_plain(buf);
+}
 
 static void diag_at(TapeCache* cache, Token t, const char* msg) {
     FileTape* ft = tape_by_id(cache, t.file_id);
     g_shadow_diag_errors++;
     if (!ft || !ft->bytes) {
-        fprintf(stderr, "error: %s\n", msg);
+        diag_emit("error", NULL, 0, 0, 1, msg);
         return;
     }
     int line = 1, col = 1;
     char lfile[1024];
     offset_to_linecol(ft, t.offset, &line, &col);
     tape_logical_at(ft, t.offset, lfile, sizeof(lfile), &line);
-    fprintf(stderr, "%s:%d:%d: error: %s\n", tape_diag_file(ft, t.offset, lfile,
-                                                           sizeof(lfile)),
-            line, col, msg);
+    diag_emit("error",
+              tape_diag_file(ft, t.offset, lfile, sizeof(lfile)), line, col, 0,
+              msg);
+}
+
+/* Error at path:line (no column) — UFCS/typeview oracle shape. */
+static void diag_at_nocol(const char* path, int line, const char* msg) {
+    g_shadow_diag_errors++;
+    diag_emit("error", path, line, 0, 1, msg);
 }
 
 /* Stage-failure helper when there is no Token yet — still uses tape span. */
@@ -395,12 +458,51 @@ static void diag_ft(TapeCache* cache, FileTape* ft, size_t off, const char* msg)
     Token t = {0};
     if (!ft) {
         g_shadow_diag_errors++;
-        fprintf(stderr, "error: %s\n", msg);
+        diag_emit("error", NULL, 0, 0, 1, msg);
         return;
     }
     t.file_id = ft->file_id;
     t.offset = off;
     diag_at(cache, t, msg);
+}
+
+/* Note with tape locus — does not increment the error counter. */
+static void diag_note_at(TapeCache* cache, Token t, const char* msg) {
+    FileTape* ft = tape_by_id(cache, t.file_id);
+    if (!ft || !ft->bytes) {
+        diag_emit("note", NULL, 0, 0, 1, msg);
+        return;
+    }
+    int line = 1, col = 1;
+    char lfile[1024];
+    offset_to_linecol(ft, t.offset, &line, &col);
+    tape_logical_at(ft, t.offset, lfile, sizeof(lfile), &line);
+    diag_emit("note", tape_diag_file(ft, t.offset, lfile, sizeof(lfile)), line,
+              col, 0, msg);
+}
+
+static void diag_note(const char* msg) { diag_emit("note", NULL, 0, 0, 1, msg); }
+
+static void diag_note_loc(const char* path, int line, int col, const char* msg)
+    __attribute__((unused));
+static void diag_note_loc(const char* path, int line, int col, const char* msg) {
+    diag_emit("note", path, line, col, col <= 0, msg);
+}
+
+static void diag_warn(const char* msg) {
+    diag_emit("warning", NULL, 0, 0, 1, msg);
+}
+
+/* Error at an explicit path:line:col (or path:line when col<=0). Counts. */
+static void diag_err_loc(const char* path, int line, int col, const char* msg) {
+    g_shadow_diag_errors++;
+    diag_emit("error", path, line, col, col <= 0, msg);
+}
+
+/* Product-C leftover tokens: locus is the *emitted* buffer, not the user tape. */
+static void diag_product(const char* path, size_t line, size_t col,
+                         const char* msg) {
+    diag_err_loc(path && path[0] ? path : "<emit>", (int)line, (int)col, msg);
 }
 
 typedef struct {
@@ -441,12 +543,13 @@ static int tok_build_push(void* env, int id, CCSlice v) {
         Token* nt = (Token*)realloc(b->toks, sizeof(Token) * (size_t)ncap);
         if (!nt) {
             int line = 1, col = 1;
+            char __diag[192];
             offset_to_linecol(b->building, off, &line, &col);
-            fprintf(stderr,
-                    "%s:%d:%d: error: stage1 token buffer realloc failed "
-                    "(%d → %d tokens)\n",
-                    b->building->path ? b->building->path : "<input>", line,
-                    col, b->cap, ncap);
+            snprintf(__diag, sizeof(__diag),
+                     "stage1 token buffer realloc failed (%d → %d tokens)",
+                     b->cap, ncap);
+            diag_err_loc(b->building->path ? b->building->path : "<input>",
+                         line, col, __diag);
             return -1;
         }
         b->toks = nt;
@@ -523,9 +626,11 @@ static FileTape* tape_cache_load_bytes(TapeCache* c, const char* path,
         return hit;
     }
     if (c->n >= TAPE_CACHE_CAP) {
-        fprintf(stderr,
-                "error: tape cache full (%d); cannot load '%s'\n",
-                TAPE_CACHE_CAP, path ? path : "<null>");
+        char __diag[320];
+        snprintf(__diag, sizeof(__diag),
+                 "tape cache full (%d); cannot load '%s'", TAPE_CACHE_CAP,
+                 path ? path : "<null>");
+        diag_err_loc(NULL, 0, 0, __diag);
         free(bytes);
         return NULL;
     }
@@ -567,9 +672,11 @@ static FileTape* tape_cache_load_bytes(TapeCache* c, const char* path,
     TokBuild b = {.toks = ft->toks, .n = 0, .cap = TOK_BUILD_CAP, .building = ft};
     if (!PpTok_collect(ft->bytes, ft->len, CC__ARENA_HANDLE(arena),
                        tok_build_push, &b)) {
-        fprintf(stderr,
-                "error: tokenize failed for '%s' (often arena exhaustion)\n",
-                path ? path : "<null>");
+        char __diag[320];
+        snprintf(__diag, sizeof(__diag),
+                 "tokenize failed for '%s' (often arena exhaustion)",
+                 path ? path : "<null>");
+        diag_err_loc(NULL, 0, 0, __diag);
         file_tape_free(ft);
         return NULL;
     }
@@ -610,8 +717,8 @@ static int shadow_rewrite_restricted_type_sugar(Token* toks, int* pn) {
         int j;
         if (tok_eq(at, TK_PUNCT, "@") && kw.kind == TK_IDENT &&
             tok_eq(kw, TK_IDENT, "restricted")) {
-            fprintf(stderr,
-                    "error: '@restricted' was removed; use '@typeview'\n");
+            diag_err_loc(NULL, 0, 0,
+                         "'@restricted' was removed; use '@typeview'");
             return 0;
         }
         if (!(tok_eq(at, TK_PUNCT, "@") && kw.kind == TK_IDENT &&

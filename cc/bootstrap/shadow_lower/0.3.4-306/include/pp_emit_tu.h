@@ -727,7 +727,8 @@ static int shadow_emit_typedef_struct(AstNode* it, CEmit* out, TapeCache* cache,
             }
             free(heap);
         } else {
-            diag_at(cache, (Token){0}, "struct field not lowerable to C");
+            shadow_emit_err_loc(cache, f, NULL, 0,
+                                "struct field not lowerable to C");
             out->err = 1;
             return 0;
         }
@@ -853,10 +854,12 @@ static int shadow_seen_result_add(char seen_ok[][128], char seen_err[][128],
             return 1;
     }
     if (*nseen >= SHADOW_SEEN_RESULT_CAP) {
-        fprintf(stderr,
-                "error: Result unwrap table full (%d); '%s !>(%s)' is not "
-                "in __cc_uw_*\n",
-                SHADOW_SEEN_RESULT_CAP, ok, err);
+        char __diag[320];
+        snprintf(__diag, sizeof(__diag),
+                 "Result unwrap table full (%d); '%s !>(%s)' is not "
+                 "in __cc_uw_*",
+                 SHADOW_SEEN_RESULT_CAP, ok, err);
+        shadow_err(NULL, g_shadow_expr_site, __diag);
         return 0;
     }
     snprintf(seen_ok[*nseen], 128, "%s", ok);
@@ -1495,7 +1498,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 return 0;
             if (items[i]->kind == AST_RESULT_FN && items[i]->a[0]) {
                 shadow_result_name(ok_host, items[i]->b, rname, sizeof(rname));
-                shadow_rfn_register(items[i]->a, rname, items[i]->b);
+                shadow_rfn_register(items[i]->a, rname, items[i]->b,
+                                    items[i]->forced_seq);
             }
         }
         if (items[i]->kind == AST_TYPEDEF_INT && items[i]->c[0] && items[i]->d[0]) {
@@ -2074,8 +2078,7 @@ ginst_emit_pass:
             char* body = NULL;
             int fi;
             if (!cc_arena_is_live(def_ar)) {
-                fprintf(stderr,
-                        "error: generic factory def arena create failed\n");
+                shadow_emit_err_loc(cache, NULL, NULL, 0, "generic factory def arena create failed");
                 out->err = 1;
                 return 0;
             }
@@ -2212,20 +2215,25 @@ ginst_emit_pass:
                             path_base = tests;
                         else if (slash && slash[1])
                             path_base = slash + 1;
-                        fprintf(stderr,
-                                "%s:%d:%d: error: type: compiled generic "
-                                "factory '%s' %s%s%s\n",
-                                path_base && path_base[0] ? path_base
-                                                          : "<input>",
-                                use_line, use_col, inst->family,
-                                st == CC_GEN_PRODUCE_ENSURE_FAILED
-                                    ? "failed to compile"
-                                    : "produced invalid C for '",
-                                st == CC_GEN_PRODUCE_ENSURE_FAILED
-                                    ? ""
-                                    : inst->mangled,
-                                st == CC_GEN_PRODUCE_ENSURE_FAILED ? "" : "'");
-                        if (err[0]) fprintf(stderr, "  %s\n", err);
+                        {
+                            char __diag[512];
+                            snprintf(__diag, sizeof(__diag),
+                                     "type: compiled generic factory '%s' "
+                                     "%s%s%s",
+                                     inst->family,
+                                     st == CC_GEN_PRODUCE_ENSURE_FAILED
+                                         ? "failed to compile"
+                                         : "produced invalid C for '",
+                                     st == CC_GEN_PRODUCE_ENSURE_FAILED
+                                         ? ""
+                                         : inst->mangled,
+                                     st == CC_GEN_PRODUCE_ENSURE_FAILED ? ""
+                                                                       : "'");
+                            diag_err_loc(path_base && path_base[0] ? path_base
+                                                                  : "<input>",
+                                         use_line, use_col, __diag);
+                        }
+                        if (err[0]) diag_plainf("  %s", err);
                         shadow_gfac_note_handler(inst->family, path);
                         out->err = 1;
                         cc_arena_free(&def_ar);
@@ -2233,11 +2241,15 @@ ginst_emit_pass:
                     }
                     if (!body) body = "";
                     if (cc_emit_plan_take_exec_error()) {
-                        fprintf(stderr,
-                                "%s:%d:%d: error: type: compiled generic "
-                                "factory '%s' reported an error for '%s'\n",
-                                path[0] ? path : "<input>", use_line, use_col,
-                                inst->family, inst->mangled);
+                        {
+                            char __diag[512];
+                            snprintf(__diag, sizeof(__diag),
+                                     "type: compiled generic factory '%s' "
+                                     "reported an error for '%s'",
+                                     inst->family, inst->mangled);
+                            diag_err_loc(path[0] ? path : "<input>", use_line,
+                                         use_col, __diag);
+                        }
                         out->err = 1;
                         cc_arena_free(&def_ar);
                         return 0;
@@ -2255,39 +2267,45 @@ ginst_emit_pass:
                                 path_base = tests;
                             else if (slash && slash[1])
                                 path_base = slash + 1;
-                            fprintf(stderr,
-                                    "%s:%d:%d: error: type: compiled generic "
-                                    "factory '%s' produced invalid C for "
-                                    "'%s'\n",
-                                    path_base && path_base[0] ? path_base
-                                                              : "<input>",
-                                    use_line, use_col, inst->family,
-                                    inst->mangled);
-                            if (frag_line > 0)
-                                fprintf(stderr,
-                                        "note: in generated definition, "
-                                        "line %d\n",
-                                        frag_line);
+                            {
+                                char __diag[512];
+                                snprintf(__diag, sizeof(__diag),
+                                         "type: compiled generic factory '%s' "
+                                         "produced invalid C for '%s'",
+                                         inst->family, inst->mangled);
+                                diag_err_loc(path_base && path_base[0]
+                                                 ? path_base
+                                                 : "<input>",
+                                             use_line, use_col, __diag);
+                            }
+                            if (frag_line > 0) {
+                                char __note[160];
+                                snprintf(__note, sizeof(__note),
+                                         "in generated definition, line %d",
+                                         frag_line);
+                                diag_note(__note);
+                            }
                             if (body[0]) {
                                 const char* nl = strchr(body, '\n');
-                                fprintf(stderr, ">    %d | %.*s\n",
-                                        frag_line > 0 ? frag_line : 1,
-                                        nl ? (int)(nl - body)
-                                           : (int)strlen(body),
-                                        body);
+                                diag_plainf(">    %d | %.*s",
+                                            frag_line > 0 ? frag_line : 1,
+                                            nl ? (int)(nl - body)
+                                               : (int)strlen(body),
+                                            body);
                             }
-                            fprintf(stderr,
-                                    "note: re-run with --emit-c-inspect to "
-                                    "dump the full translation unit\n");
+                            diag_note("re-run with --emit-c-inspect to dump "
+                                      "the full translation unit");
                             shadow_gfac_note_handler(inst->family, path);
                             if (fi < g_shadow_ngfac &&
                                 g_shadow_gfac[fi].origin_file[0]) {
-                                fprintf(stderr,
-                                        "note: in @comptime factory "
-                                        "'__cc_gfac_%s' at %s:%d\n",
-                                        inst->family,
-                                        g_shadow_gfac[fi].origin_file,
-                                        g_shadow_gfac[fi].origin_line);
+                                char __note[320];
+                                snprintf(__note, sizeof(__note),
+                                         "in @comptime factory '__cc_gfac_%s' "
+                                         "at %s:%d",
+                                         inst->family,
+                                         g_shadow_gfac[fi].origin_file,
+                                         g_shadow_gfac[fi].origin_line);
+                                diag_note(__note);
                             }
                         }
                         out->err = 1;
@@ -2307,24 +2325,29 @@ ginst_emit_pass:
                         const char* pb = tests ? tests : path;
                         slash = pb ? strrchr(pb, '/') : NULL;
                         if (!tests && slash && slash[1]) pb = slash + 1;
-                        fprintf(stderr,
-                                "%s:%d:%d: error: type: compiled generic "
-                                "factory '%s' failed to compile: generic '%s' "
-                                "is extended but never defined (needs "
-                                "CC_GENERIC_FACTORY(%s) or "
-                                "cc_generic_register)\n",
-                                pb && pb[0] ? pb : "<input>", use_line,
-                                use_col, inst->family, inst->family,
-                                inst->family);
+                        {
+                            char __diag[512];
+                            snprintf(__diag, sizeof(__diag),
+                                     "type: compiled generic factory '%s' "
+                                     "failed to compile: generic '%s' is "
+                                     "extended but never defined (needs "
+                                     "CC_GENERIC_FACTORY(%s) or "
+                                     "cc_generic_register)",
+                                     inst->family, inst->family, inst->family);
+                            diag_err_loc(pb && pb[0] ? pb : "<input>", use_line,
+                                         use_col, __diag);
+                        }
                         out->err = 1;
                         cc_arena_free(&def_ar);
                         return 0;
                     }
                     body = (char*)cc_arena_alloc(def_ar, tpl_cap, 1);
                     if (!body) {
-                        fprintf(stderr,
-                                "error: generic tpl buffer arena OOM for %s\n",
-                                inst->mangled);
+                        {
+                            char __diag[320];
+                            snprintf(__diag, sizeof(__diag), "generic tpl buffer arena OOM for %s", inst->mangled);
+                            shadow_emit_err_loc(cache, NULL, NULL, 0, __diag);
+                        }
                         out->err = 1;
                         cc_arena_free(&def_ar);
                         return 0;
@@ -2338,20 +2361,26 @@ ginst_emit_pass:
                         const char* pb = tests ? tests : path;
                         slash = pb ? strrchr(pb, '/') : NULL;
                         if (!tests && slash && slash[1]) pb = slash + 1;
-                        fprintf(stderr,
-                                "%s:%d: error: factory '%s': arg(%d) is out of "
-                                "range (%d type argument%s)\n",
-                                pb && pb[0] ? pb : "<input>", use_line,
-                                inst->family, oob_arg, nargs,
-                                nargs == 1 ? "" : "s");
+                        {
+                            char __diag[320];
+                            snprintf(__diag, sizeof(__diag),
+                                     "factory '%s': arg(%d) is out of range "
+                                     "(%d type argument%s)",
+                                     inst->family, oob_arg, nargs,
+                                     nargs == 1 ? "" : "s");
+                            diag_err_loc(pb && pb[0] ? pb : "<input>", use_line,
+                                         0, __diag);
+                        }
                         out->err = 1;
                         cc_arena_free(&def_ar);
                         return 0;
                     }
                     if (irc == 0) {
-                        fprintf(stderr,
-                                "error: generic instantiate failed for %s\n",
-                                inst->mangled);
+                        {
+                            char __diag[320];
+                            snprintf(__diag, sizeof(__diag), "generic instantiate failed for %s", inst->mangled);
+                            shadow_emit_err_loc(cache, NULL, NULL, 0, __diag);
+                        }
                         out->err = 1;
                         cc_arena_free(&def_ar);
                         return 0;
@@ -2360,35 +2389,43 @@ ginst_emit_pass:
                                                         sizeof(verr)) != 0) {
                         slash = path_base ? strrchr(path_base, '/') : NULL;
                         if (slash && slash[1]) path_base = slash + 1;
-                        fprintf(stderr,
-                                "%s:%d:%d: error: type: compiled generic "
-                                "factory '%s' produced invalid C for '%s'\n",
-                                path_base && path_base[0] ? path_base
-                                                          : "<input>",
-                                use_line, use_col, inst->family,
-                                inst->mangled);
-                        if (frag_line > 0)
-                            fprintf(stderr,
-                                    "note: in generated definition, line %d\n",
-                                    frag_line);
+                        {
+                            char __diag[512];
+                            snprintf(__diag, sizeof(__diag),
+                                     "type: compiled generic factory '%s' "
+                                     "produced invalid C for '%s'",
+                                     inst->family, inst->mangled);
+                            diag_err_loc(path_base && path_base[0] ? path_base
+                                                                  : "<input>",
+                                         use_line, use_col, __diag);
+                        }
+                        if (frag_line > 0) {
+                            char __note[160];
+                            snprintf(__note, sizeof(__note),
+                                     "in generated definition, line %d",
+                                     frag_line);
+                            diag_note(__note);
+                        }
                         if (body[0]) {
                             const char* nl = strchr(body, '\n');
-                            fprintf(stderr, ">    %d | %.*s\n",
-                                    frag_line > 0 ? frag_line : 1,
-                                    nl ? (int)(nl - body) : (int)strlen(body),
-                                    body);
+                            diag_plainf(">    %d | %.*s",
+                                        frag_line > 0 ? frag_line : 1,
+                                        nl ? (int)(nl - body)
+                                           : (int)strlen(body),
+                                        body);
                         }
-                        fprintf(stderr,
-                                "note: re-run with --emit-c-inspect to dump "
-                                "the full translation unit\n");
+                        diag_note("re-run with --emit-c-inspect to dump the "
+                                  "full translation unit");
                         if (fi < g_shadow_ngfac &&
                             g_shadow_gfac[fi].origin_file[0]) {
-                            fprintf(stderr,
-                                    "note: in @comptime factory "
-                                    "'__cc_gfac_%s' at %s:%d\n",
-                                    inst->family,
-                                    g_shadow_gfac[fi].origin_file,
-                                    g_shadow_gfac[fi].origin_line);
+                            char __note[320];
+                            snprintf(__note, sizeof(__note),
+                                     "in @comptime factory '__cc_gfac_%s' at "
+                                     "%s:%d",
+                                     inst->family,
+                                     g_shadow_gfac[fi].origin_file,
+                                     g_shadow_gfac[fi].origin_line);
+                            diag_note(__note);
                         }
                         out->err = 1;
                         cc_arena_free(&def_ar);
@@ -2404,43 +2441,47 @@ ginst_emit_pass:
                     const char* slash = pb ? strrchr(pb, '/') : NULL;
                     char fams[512];
                     if (!tests && slash && slash[1]) pb = slash + 1;
-                    fprintf(stderr,
-                            "%s:%d:%d: error: type: no generic factory for "
-                            "'%s'\n",
-                            pb && pb[0] ? pb : "<input>", use_line, use_col,
-                            inst->family);
+                    {
+                        char __diag[320];
+                        snprintf(__diag, sizeof(__diag),
+                                 "type: no generic factory for '%s'",
+                                 inst->family);
+                        diag_err_loc(pb && pb[0] ? pb : "<input>", use_line,
+                                     use_col, __diag);
+                    }
                     if (strcmp(inst->family, "Vec") == 0)
-                        fprintf(stderr,
-                                "  note: include <ccc/std/vec.h> or "
-                                "<ccc/std/prelude.h> "
-                                "(CC_GENERIC_FACTORY(Vec))\n");
+                        diag_note("include <ccc/std/vec.h> or "
+                                  "<ccc/std/prelude.h> "
+                                  "(CC_GENERIC_FACTORY(Vec))");
                     else if (strcmp(inst->family, "Map") == 0)
-                        fprintf(stderr,
-                                "  note: include <ccc/std/map_forward.h> or "
-                                "<ccc/std/prelude.h> "
-                                "(CC_GENERIC_FACTORY(Map))\n");
+                        diag_note("include <ccc/std/map_forward.h> or "
+                                  "<ccc/std/prelude.h> "
+                                  "(CC_GENERIC_FACTORY(Map))");
                     else if (strcmp(inst->family, "ArrayMap") == 0)
-                        fprintf(stderr,
-                                "  note: include <ccc/std/array_map.h> or "
-                                "<ccc/std/prelude.h> "
-                                "(CC_GENERIC_FACTORY(ArrayMap))\n");
+                        diag_note("include <ccc/std/array_map.h> or "
+                                  "<ccc/std/prelude.h> "
+                                  "(CC_GENERIC_FACTORY(ArrayMap))");
                     else if (strcmp(inst->family, "CCSlice") == 0)
-                        fprintf(stderr,
-                                "  note: include <ccc/cc_slice.h> or "
-                                "<ccc/std/prelude.h> "
-                                "(CC_GENERIC_FACTORY(CCSlice))\n");
-                    else
-                        fprintf(stderr,
-                                "  note: define CC_GENERIC_FACTORY(%s) or "
-                                "cc_generic_register(\"%s\", ...)\n",
-                                inst->family, inst->family);
+                        diag_note("include <ccc/cc_slice.h> or "
+                                  "<ccc/std/prelude.h> "
+                                  "(CC_GENERIC_FACTORY(CCSlice))");
+                    else {
+                        char __note[320];
+                        snprintf(__note, sizeof(__note),
+                                 "define CC_GENERIC_FACTORY(%s) or "
+                                 "cc_generic_register(\"%s\", ...)",
+                                 inst->family, inst->family);
+                        diag_note(__note);
+                    }
                     if (cc_emit_plan_generic_factory_names_csv(fams,
                                                                sizeof(fams)) >
-                        0)
-                        fprintf(stderr,
-                                "  note: registered generic factory families: "
-                                "%s\n",
-                                fams);
+                        0) {
+                        char __note[640];
+                        snprintf(__note, sizeof(__note),
+                                 "registered generic factory families: %s",
+                                 fams);
+                        diag_note(__note);
+                    }
                     out->err = 1;
                     cc_arena_free(&def_ar);
                     return 0;
@@ -2748,7 +2789,7 @@ ginst_after_quotes:
             char ok_host[128];
             shadow_result_ok_buf(ok_host, sizeof(ok_host), it->c);
             shadow_result_name(ok_host, it->b, rname, sizeof(rname));
-            shadow_rfn_register(it->a, rname, it->b);
+            shadow_rfn_register(it->a, rname, it->b, it->forced_seq);
             const char* pref =
                 (strcmp(it->e, "static inline") == 0) ? "static inline "
                 : (strcmp(it->e, "static") == 0)      ? "static "
@@ -2765,8 +2806,11 @@ ginst_after_quotes:
                 break;
             }
             if (kind == SHADOW_EMIT_H) {
-                fprintf(stderr, "error: result fn body not allowed in .cch → .h (%s)\n",
-                        it->a);
+                {
+                    char __diag[320];
+                    snprintf(__diag, sizeof(__diag), "result fn body not allowed in .cch → .h (%s)", it->a);
+                    shadow_emit_err_loc(cache, it, NULL, 0, __diag);
+                }
                 out->err = 1;
                 return 0;
             }
@@ -2777,8 +2821,7 @@ ginst_after_quotes:
             int npars = 0;
             for (int k = 0; bind_ok && k < it->nkids; k++) {
                 if (!shadow_collect_parallels(it->kids[k], pars, &npars, 16)) {
-                    fprintf(stderr,
-                            "error: too many @parallel for shadow beachhead\n");
+                    shadow_emit_err_loc(cache, it, NULL, 0, "too many @parallel for shadow beachhead");
                     out->err = 1;
                     bind_ok = 0;
                 }
@@ -2803,7 +2846,7 @@ ginst_after_quotes:
             for (int k = 0; k < it->nkids; k++) {
                 if (!shadow_collect_scope_defers(&it->kids[k], 1, defers,
                                                  &ndefers, 16)) {
-                    fprintf(stderr, "error: too many @defer for shadow beachhead\n");
+                    shadow_emit_err_loc(cache, it, NULL, 0, "too many @defer for shadow beachhead");
                     out->err = 1;
                     bind_ok = 0;
                     break;
@@ -2811,7 +2854,7 @@ ginst_after_quotes:
                 /* Fn-level @destroy only (block-scoped destroys emit at block end). */
                 if (shadow_stmt_is_destroy(it->kids[k])) {
                     if (ndestroys >= 32) {
-                        fprintf(stderr, "error: too many @destroy for shadow beachhead\n");
+                        shadow_emit_err_loc(cache, it, NULL, 0, "too many @destroy for shadow beachhead");
                         out->err = 1;
                         bind_ok = 0;
                         break;
@@ -2906,7 +2949,7 @@ ginst_after_quotes:
             break;
         case AST_ASYNC_FN: {
             if (kind == SHADOW_EMIT_H) {
-                fprintf(stderr, "error: async fn body not allowed in .cch → .h\n");
+                shadow_emit_err_loc(cache, it, NULL, 0, "async fn body not allowed in .cch → .h");
                 out->err = 1;
                 return 0;
             }
@@ -3031,14 +3074,14 @@ ginst_after_quotes:
             for (int k = 0; bind_ok && k < it->nkids; k++) {
                 if (!shadow_collect_scope_defers(&it->kids[k], 1, sdefers,
                                                  &nsdefers, 16)) {
-                    fprintf(stderr, "error: too many @defer for shadow beachhead\n");
+                    shadow_emit_err_loc(cache, it, NULL, 0, "too many @defer for shadow beachhead");
                     out->err = 1;
                     bind_ok = 0;
                     break;
                 }
                 if (shadow_stmt_is_destroy(it->kids[k])) {
                     if (nsdestroys >= 32) {
-                        fprintf(stderr, "error: too many @destroy for shadow beachhead\n");
+                        shadow_emit_err_loc(cache, it, NULL, 0, "too many @destroy for shadow beachhead");
                         out->err = 1;
                         bind_ok = 0;
                         break;
@@ -3046,13 +3089,13 @@ ginst_after_quotes:
                     sdestroys[nsdestroys++] = it->kids[k];
                 }
                 if (!shadow_collect_spawns(it->kids[k], sspawns, &nsspawns, 16)) {
-                    fprintf(stderr, "error: too many spawns for shadow beachhead\n");
+                    shadow_emit_err_loc(cache, it, NULL, 0, "too many spawns for shadow beachhead");
                     out->err = 1;
                     bind_ok = 0;
                     break;
                 }
                 if (!shadow_collect_parallels(it->kids[k], spars, &nspars, 16)) {
-                    fprintf(stderr, "error: too many @parallel for shadow beachhead\n");
+                    shadow_emit_err_loc(cache, it, NULL, 0, "too many @parallel for shadow beachhead");
                     out->err = 1;
                     bind_ok = 0;
                     break;
@@ -3196,8 +3239,11 @@ ginst_after_quotes:
         }
         case AST_FN: {
             if (kind == SHADOW_EMIT_H) {
-                fprintf(stderr, "error: function body not allowed in .cch → .h shadow emit (%s)\n",
-                        it->a);
+                {
+                    char __diag[320];
+                    snprintf(__diag, sizeof(__diag), "function body not allowed in .cch → .h shadow emit (%s)", it->a);
+                    shadow_emit_err_loc(cache, it, NULL, 0, __diag);
+                }
                 out->err = 1;
                 return 0;
             }
@@ -3214,7 +3260,7 @@ ginst_after_quotes:
             for (int k = 0; bind_ok && k < it->nkids; k++) {
                 if (!shadow_collect_scope_defers(&it->kids[k], 1, defers,
                                                  &ndefers, 16)) {
-                    fprintf(stderr, "error: too many @defer for shadow beachhead\n");
+                    shadow_emit_err_loc(cache, it, NULL, 0, "too many @defer for shadow beachhead");
                     out->err = 1;
                     bind_ok = 0;
                     break;
@@ -3222,7 +3268,7 @@ ginst_after_quotes:
                 /* Fn-level @destroy only (block-scoped destroys emit at block end). */
                 if (shadow_stmt_is_destroy(it->kids[k])) {
                     if (ndestroys >= 32) {
-                        fprintf(stderr, "error: too many @destroy for shadow beachhead\n");
+                        shadow_emit_err_loc(cache, it, NULL, 0, "too many @destroy for shadow beachhead");
                         out->err = 1;
                         bind_ok = 0;
                         break;
@@ -3230,13 +3276,13 @@ ginst_after_quotes:
                     destroys[ndestroys++] = it->kids[k];
                 }
                 if (!shadow_collect_spawns(it->kids[k], spawns, &nspawns, 16)) {
-                    fprintf(stderr, "error: too many spawns for shadow beachhead\n");
+                    shadow_emit_err_loc(cache, it, NULL, 0, "too many spawns for shadow beachhead");
                     out->err = 1;
                     bind_ok = 0;
                     break;
                 }
                 if (!shadow_collect_parallels(it->kids[k], pars, &npars, 16)) {
-                    fprintf(stderr, "error: too many @parallel for shadow beachhead\n");
+                    shadow_emit_err_loc(cache, it, NULL, 0, "too many @parallel for shadow beachhead");
                     out->err = 1;
                     bind_ok = 0;
                     break;
@@ -3270,11 +3316,12 @@ ginst_after_quotes:
                         int ar = shadow_closure_arity(spawns[s]);
                         const char* ccty = shadow_closure_cc_ty(spawns[s]);
                         if (!shadow_caps_proto(spawns[s]->e, proto, sizeof(proto))) {
-                            fprintf(stderr,
-                                    "error: closure caps proto failed in '%s' "
-                                    "(spawn %d caps='%s')\n",
-                                    it->a, s,
+                            {
+                                char __diag[320];
+                                snprintf(__diag, sizeof(__diag), "closure caps proto failed in '%s' (spawn %d caps='%s')", it->a, s,
                                     spawns[s]->e[0] ? spawns[s]->e : "");
+                                shadow_emit_err_loc(cache, it, NULL, 0, __diag);
+                            }
                             bind_ok = 0;
                         }
                         else if (ar == 1) {
@@ -3448,7 +3495,8 @@ ginst_after_quotes:
                     }
                     free(heap);
                 } else {
-                    diag_at(cache, (Token){0}, "struct field not lowerable to C");
+                    shadow_emit_err_loc(cache, f ? f : it, NULL, 0,
+                                        "struct field not lowerable to C");
                     out->err = 1;
                     return 0;
                 }
@@ -3467,7 +3515,8 @@ ginst_after_quotes:
                 size_t o0 = 0, o1 = 0;
                 char* endp = NULL;
                 if (!ft || !ft->bytes) {
-                    diag_at(cache, (Token){0}, "raw tape span missing file");
+                    shadow_emit_err_loc(cache, it, NULL, 0,
+                                        "raw tape span missing file");
                     out->err = 1;
                     return 0;
                 }
@@ -3610,8 +3659,11 @@ ginst_after_quotes:
         case AST_LABEL:
         case AST_DO_WHILE:
         case AST_SWITCH:
-            fprintf(stderr, "error: AST node %s is not part of the C-emit shadow subset\n",
-                    ast_kind_name(it->kind));
+            {
+                char __diag[320];
+                snprintf(__diag, sizeof(__diag), "AST node %s is not part of the C-emit shadow subset", ast_kind_name(it->kind));
+                shadow_emit_err_loc(cache, it, NULL, 0, __diag);
+            }
             out->err = 1;
             return 0;
         }
@@ -3669,19 +3721,21 @@ ginst_after_quotes:
                 tl = 2;
             }
             tok[tl] = 0;
-            if (strcmp(tok, "?>") == 0 || strcmp(tok, "!>") == 0)
-                fprintf(stderr,
-                        "%s:%zu:%zu: error: '%s' was not lowered — it must "
-                        "follow a call or identifier, including inside "
-                        "arguments\n",
-                        path, line, col, tok);
-            else
-                fprintf(stderr,
-                        "%s:%zu:%zu: error: Concurrent-C token '%s' was not "
-                        "lowered\n",
-                        path, line, col, tok[0] ? tok : "?");
+            {
+                char msg[320];
+                if (strcmp(tok, "?>") == 0 || strcmp(tok, "!>") == 0)
+                    snprintf(msg, sizeof(msg),
+                             "'%s' was not lowered — it must follow a call or "
+                             "identifier, including inside arguments",
+                             tok);
+                else
+                    snprintf(msg, sizeof(msg),
+                             "Concurrent-C token '%s' was not lowered",
+                             tok[0] ? tok : "?");
+                diag_product(path, line, col, msg);
+            }
             if (le > ls)
-                fprintf(stderr, "  %.*s\n", (int)(le - ls), ls);
+                diag_plainf("  %.*s", (int)(le - ls), ls);
             out->err = 1;
             return 0;
         }

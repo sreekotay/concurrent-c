@@ -598,17 +598,21 @@ static void spawn_caps_add(char* caps, size_t cap, const char* item) {
         size_t n = strlen(caps);
         size_t il = strlen(item);
         if (n + 1 + il >= cap) {
-            fprintf(stderr,
-                    "error: spawn capture list full (cap=%zu); cannot add '%s'\n",
-                    cap, item);
+            char __diag[256];
+            snprintf(__diag, sizeof(__diag),
+                     "spawn capture list full (cap=%zu); cannot add '%s'", cap,
+                     item);
+            diag_err_loc(NULL, 0, 0, __diag);
             return;
         }
         snprintf(caps + n, cap - n, ",%s", item);
     } else {
         if (strlen(item) >= cap) {
-            fprintf(stderr,
-                    "error: spawn capture name too long for buffer (cap=%zu): '%s'\n",
-                    cap, item);
+            char __diag[256];
+            snprintf(__diag, sizeof(__diag),
+                     "spawn capture name too long for buffer (cap=%zu): '%s'",
+                     cap, item);
+            diag_err_loc(NULL, 0, 0, __diag);
             return;
         }
         snprintf(caps, cap, "%s", item);

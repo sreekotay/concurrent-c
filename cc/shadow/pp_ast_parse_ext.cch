@@ -1193,7 +1193,10 @@ static AstNode* parse_parallel_head(Parser* p) {
             return NULL;
         }
         n = parse_parallel_for(p, gate, pred);
-        if (n && cache[0]) snprintf(n->h, sizeof(n->h), "%s", cache);
+        if (n && cache[0]) {
+            n->h = ast_arena_cstr(p, cache);
+            if (cache[0] && !n->h) return NULL;
+        }
         return n;
     }
     if (tok_eq(p_peek(p), TK_IDENT, "cache") ||

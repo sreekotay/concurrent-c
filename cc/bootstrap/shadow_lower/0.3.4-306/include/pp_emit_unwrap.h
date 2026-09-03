@@ -144,6 +144,7 @@ static int shadow_emit_println_tpl(AstNode* st, CEmit* out, ShadowCtx* ctx,
     /* Default / @scratch: reclaim the temp watermark after the call so
      * earlier bound `@string(..., @scratch)` products stay valid. */
     int scratch = (!st->c[0] || shadow_arena_is_scratch(st->c));
+    int bare = st && strcmp(st->e, "bare") == 0;
     char nested[80];
     shadow_indent_nest(nested, sizeof(nested), indent, 1);
     {
@@ -152,10 +153,16 @@ static int shadow_emit_println_tpl(AstNode* st, CEmit* out, ShadowCtx* ctx,
         if (!shadow_emit_tpl_build(out, st->a, arena, nested, "__msg"))
             return 0;
     }
-    char call[320];
-    snprintf(call, sizeof(call), "%s(__msg)", fn);
-    if (!shadow_emit_try_call(out, ctx, nested, call, fn, "e", 1))
-        return 0;
+    if (bare) {
+        if (!shadow_tpl_kv(out, "${indent}(void)${fn}(__msg);\n",
+                           "indent", nested, "fn", fn, NULL))
+            return 0;
+    } else {
+        char call[320];
+        snprintf(call, sizeof(call), "%s(__msg)", fn);
+        if (!shadow_emit_try_call(out, ctx, nested, call, fn, "e", 1))
+            return 0;
+    }
     if (scratch && !shadow_scratch_cp_pop(ctx, out, nested)) return 0;
     return cemit_fmt(out, "%s}\n", indent);
 }
@@ -183,8 +190,13 @@ static int shadow_emit_bang_bind(AstNode* st, CEmit* out, ShadowCtx* ctx,
         } else if (b->kind == AST_ERR_FWD) {
             if (!shadow_emit_handler(out, ctx, b->a, i2)) return 0;
         } else {
-            fprintf(stderr, "error: !>(...) body stmt %s not lowerable yet\n",
-                    ast_kind_name(b->kind));
+            {
+                char __diag[160];
+                snprintf(__diag, sizeof(__diag),
+                         "!>(...) body stmt %s not lowerable yet",
+                         ast_kind_name(b->kind));
+                shadow_err(ctx, b, __diag);
+            }
             out->err = 1;
             return 0;
         }
@@ -295,8 +307,6 @@ static int shadow_bang_naked_call_visible(AstNode* st, ShadowCtx* ctx,
     char callee[64];
     size_t ni = 0;
     const char* p;
-    const char* path = NULL;
-    int line = 0;
     if (!src_call || !src_call[0]) return 1;
     if (strstr(src_call, "CCResult_")) return 1;
     if (strchr(src_call, '.') != NULL || strstr(src_call, "->") != NULL)
@@ -317,14 +327,12 @@ static int shadow_bang_naked_call_visible(AstNode* st, ShadowCtx* ctx,
         return 1;
     if (shadow_ufcs_callee_declared(callee)) return 1;
     if (shadow_rfn_err(callee)) return 1;
-    if (shadow_site_loc(ctx ? ctx->cache : NULL, st, &path, &line) && path)
-        fprintf(stderr,
-                "%s:%d:1: error: type: '!>' on '%s': no visible declaration\n",
-                path, line, callee);
-    else
-        fprintf(stderr,
-                "error: type: '!>' on '%s': no visible declaration\n",
-                callee);
+    {
+        char __diag[192];
+        snprintf(__diag, sizeof(__diag),
+                 "type: '!>' on '%s': no visible declaration", callee);
+        shadow_err(ctx, st, __diag);
+    }
     g_shadow_ufcs_miss = 1;
     return 0;
 }
@@ -504,20 +512,9 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
             else if (call[0] && shadow_ufn_exists(call))
                 ok = 1;
             if (!ok) {
-                const char* path = NULL;
-                int line = 0;
-                if (shadow_site_loc(ctx ? ctx->cache : NULL, st, &path, &line) &&
-                    path) {
-                    fprintf(stderr,
-                            "%s:%d:1: error: type: '!>' links a chain hop here, "
-                            "but the hop's producer could not be typed as a "
-                            "Result\n",
-                            path, line);
-                } else {
-                    fprintf(stderr,
-                            "error: type: '!>' links a chain hop here, but the "
-                            "hop's producer could not be typed as a Result\n");
-                }
+                shadow_err(ctx, st,
+                           "type: '!>' links a chain hop here, but the "
+                           "hop's producer could not be typed as a Result");
                 g_shadow_ufcs_miss = 1;
                 out->err = 1;
                 return 0;
@@ -525,19 +522,9 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
         }
         /* Form P: bare `!>;` at expression position needs @errhandler. */
         if (!ctx || !ctx->eh) {
-            const char* path = NULL;
-            int line = 0;
-            if (shadow_site_loc(ctx ? ctx->cache : NULL, st, &path, &line) &&
-                path) {
-                fprintf(stderr,
-                        "%s:%d:1: error: syntax: '!>;' at expression position "
-                        "requires an enclosing '@errhandler' in scope\n",
-                        path, line);
-            } else {
-                fprintf(stderr,
-                        "error: syntax: '!>;' at expression position requires "
-                        "an enclosing '@errhandler' in scope\n");
-            }
+            shadow_err(ctx, st,
+                       "syntax: '!>;' at expression position requires "
+                       "an enclosing '@errhandler' in scope");
             out->err = 1;
             return 0;
         }
@@ -601,8 +588,7 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     }
                     while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == '\t')) n--;
                     if (n >= sizeof(hop_txt)) {
-                        fprintf(stderr,
-                                "error: bang-chain hop too long\n");
+                        shadow_err(ctx, st, "bang-chain hop too long");
                         out->err = 1;
                         return 0;
                     }
@@ -615,8 +601,7 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
                         nr = snprintf(recv, sizeof(recv), "((__r%d).u.value)%s",
                                       hop, hop_txt);
                     if (nr < 0 || (size_t)nr >= sizeof(recv)) {
-                        fprintf(stderr,
-                                "error: bang-chain hop too long\n");
+                        shadow_err(ctx, st, "bang-chain hop too long");
                         out->err = 1;
                         return 0;
                     }
@@ -835,7 +820,11 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
             "%s}\n",
             i2, st->a, st->e, i1, indent);
     }
-    fprintf(stderr, "error: unknown unwrap mode %s\n", mode);
+    {
+        char __diag[96];
+        snprintf(__diag, sizeof(__diag), "unknown unwrap mode %s", mode);
+        shadow_err(ctx, st, __diag);
+    }
     out->err = 1;
     return 0;
 }
@@ -1072,7 +1061,8 @@ static int shadow_emit_err_delegate(CEmit* out, ShadowCtx* ctx,
     AstNode eh_copy;
     int k;
     if (!ctx || !ctx->eh) {
-        fprintf(stderr, "error: @errhandler delegation with no outer handler\n");
+        shadow_err(ctx, ctx ? ctx->site : NULL,
+                   "@errhandler delegation with no outer handler");
         out->err = 1;
         return 0;
     }
@@ -1118,7 +1108,8 @@ static int shadow_emit_err_syntax(AstNode* st, CEmit* out, ShadowCtx* ctx,
             char vname[64];
             if (!shadow_parse_result_decl_lhs(st->a, rname, sizeof(rname),
                                               vname, sizeof(vname))) {
-                fprintf(stderr, "error: malformed result decl lhs in @err assign\n");
+                shadow_err(ctx, st,
+                           "malformed result decl lhs in @err assign");
                 out->err = 1;
                 return 0;
             }
@@ -1241,7 +1232,6 @@ static int shadow_rewrite_one_bang_site_handler(char* expr, size_t cap,
     const char* body_end;
     int op, ls, rs, clen, n, stmt_semi, i;
     size_t bi, blen;
-    (void)ctx;
     if (!expr || !cap) return 0;
     p = shadow_find_bang_live(expr);
     if (!p) return 0;
@@ -1328,10 +1318,14 @@ static int shadow_rewrite_one_bang_site_handler(char* expr, size_t cap,
                      ls, expr, clen, expr + ls, clen, expr + ls, bind,
                      (int)blen, after, body_end);
     if (n < 0 || (size_t)n >= sizeof(out) || (size_t)n >= cap) {
-        fprintf(stderr,
-                "error: site-handler '!>' rewrite overflowed "
-                "(need %d bytes, dest cap %zu)\n",
-                n, cap);
+        {
+            char __diag[160];
+            snprintf(__diag, sizeof(__diag),
+                     "site-handler '!>' rewrite overflowed "
+                     "(need %d bytes, dest cap %zu)",
+                     n, cap);
+            shadow_err(ctx, ctx ? ctx->site : g_shadow_expr_site, __diag);
+        }
         return -1;
     }
     snprintf(expr, cap, "%s", out);
@@ -1366,9 +1360,9 @@ static int shadow_rewrite_one_bang_expr(char* expr, size_t cap, ShadowCtx* ctx) 
         expr[rs] != '/' && expr[rs] != '%' && expr[rs] != '?')
         return 0;
     if (!ctx || !ctx->eh) {
-        fprintf(stderr,
-                "error: syntax: '!>' at expression position requires an "
-                "enclosing '@errhandler' in scope\n");
+        shadow_err(ctx, ctx ? ctx->site : g_shadow_expr_site,
+                   "syntax: '!>' at expression position requires an "
+                   "enclosing '@errhandler' in scope");
         return -1;
     }
     /* Dispatch by this callee's Result E. Do not reuse ctx->eh_proj from an
@@ -1380,8 +1374,8 @@ static int shadow_rewrite_one_bang_expr(char* expr, size_t cap, ShadowCtx* ctx) 
                         expr[ls + clen - 1] == '\n'))
         clen--;
     if (clen <= 0 || (size_t)clen >= sizeof(callbuf)) {
-        fprintf(stderr,
-                "error: expression-position '!>' callee overflow\n");
+        shadow_err(ctx, ctx ? ctx->site : g_shadow_expr_site,
+                   "expression-position '!>' callee overflow");
         return -1;
     }
     memcpy(callbuf, expr + ls, (size_t)clen);
@@ -1422,10 +1416,14 @@ static int shadow_rewrite_one_bang_expr(char* expr, size_t cap, ShadowCtx* ctx) 
     }
     free(hb.buf);
     if (n < 0 || (size_t)n >= sizeof(out) || (size_t)n >= cap) {
-        fprintf(stderr,
-                "error: expression-position '!>' rewrite overflowed "
-                "(need %d bytes, dest cap %zu)\n",
-                n, cap);
+        {
+            char __diag[160];
+            snprintf(__diag, sizeof(__diag),
+                     "expression-position '!>' rewrite overflowed "
+                     "(need %d bytes, dest cap %zu)",
+                     n, cap);
+            shadow_err(ctx, ctx ? ctx->site : g_shadow_expr_site, __diag);
+        }
         return -1;
     }
     snprintf(expr, cap, "%s", out);

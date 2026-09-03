@@ -138,11 +138,15 @@ static int shadow_ufcs_on_register(CCSymbolTable* t,
                                 g_shadow_ufcs_compile_len, expr_src, expr_len,
                                 &slim_n);
     if (!slim || !slim_n) {
-        fprintf(stderr,
-                "%s: error: failed to isolate @typehooks .ufcs handler for '%s'\n",
-                registration_input_path ? registration_input_path
-                                        : g_shadow_ufcs_path,
-                type_name);
+        {
+            char __diag[256];
+            snprintf(__diag, sizeof(__diag),
+                     "failed to isolate @typehooks .ufcs handler for '%s' (%s)",
+                     type_name,
+                     registration_input_path ? registration_input_path
+                                             : g_shadow_ufcs_path);
+            shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+        }
         free(slim);
         return -1;
     }
@@ -262,10 +266,14 @@ static void shadow_ufcs_hooks_load(const char* path, const char* collect_src,
     if (!g_shadow_ufcs_syms) {
         g_shadow_ufcs_syms = cc_symbols_new();
         if (!g_shadow_ufcs_syms) {
-            fprintf(stderr,
-                    "%s: error: typehooks symbol table alloc failed; refusing "
-                    "silent UFCS invent\n",
-                    path);
+            {
+                char __diag[256];
+                snprintf(__diag, sizeof(__diag),
+                         "typehooks symbol table alloc failed for '%s'; "
+                         "refusing silent UFCS invent",
+                         path);
+                shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+            }
             g_shadow_ufcs_miss = 1;
             return;
         }
@@ -276,8 +284,12 @@ static void shadow_ufcs_hooks_load(const char* path, const char* collect_src,
     if (cc_symbols_collect_type_registrations_ex(
             g_shadow_ufcs_syms, path, collect_src, collect_n, NULL, NULL,
             compile_ufcs ? shadow_ufcs_on_register : NULL, NULL) != 0) {
-        fprintf(stderr, "%s: error: failed to compile @typehooks .ufcs hook\n",
-                path);
+        {
+            char __diag[256];
+            snprintf(__diag, sizeof(__diag),
+                     "failed to compile @typehooks .ufcs hook (%s)", path);
+            shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+        }
         g_shadow_ufcs_miss = 1;
     }
     shadow_ufcs_sync_hooks_from_syms(collect_src);
@@ -478,10 +490,14 @@ static int shadow_ufcs_hook_resolve(const char* ty, const char* method,
         int na = shadow_ufcs_split_args(args, starts, lens, SHADOW_UFCS_HOOK_ARG_MAX);
         int ai;
         if (na < 0) {
-            fprintf(stderr,
-                    "error: type: .ufcs hook for '%s.%s' exceeds %d args; "
-                    "refusing silent truncate\n",
-                    base, method, SHADOW_UFCS_HOOK_ARG_MAX);
+            {
+                char __diag[192];
+                snprintf(__diag, sizeof(__diag),
+                         "type: .ufcs hook for '%s.%s' exceeds %d args; "
+                         "refusing silent truncate",
+                         base, method, SHADOW_UFCS_HOOK_ARG_MAX);
+                shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+            }
             g_shadow_ufcs_miss = 1;
             return 0;
         }
@@ -503,9 +519,13 @@ static int shadow_ufcs_hook_resolve(const char* ty, const char* method,
         memcmp(result.ptr, pass, result.len) == 0)
         return 0;
     if (!result.ptr || result.len == 0) {
-        fprintf(stderr,
-                "error: type: .ufcs hook rejected method '%s' for '%s'\n",
-                method, base);
+        {
+            char __diag[160];
+            snprintf(__diag, sizeof(__diag),
+                     "type: .ufcs hook rejected method '%s' for '%s'",
+                     method, base);
+            shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+        }
         g_shadow_ufcs_miss = 1;
         return 0;
     }
@@ -515,17 +535,25 @@ static int shadow_ufcs_hook_resolve(const char* ty, const char* method,
         if (out_by_value) *out_by_value = 1;
     }
     if (!result.ptr || result.len == 0) {
-        fprintf(stderr,
-                "error: type: .ufcs hook rejected method '%s' for '%s'\n",
-                method, base);
+        {
+            char __diag[160];
+            snprintf(__diag, sizeof(__diag),
+                     "type: .ufcs hook rejected method '%s' for '%s'",
+                     method, base);
+            shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+        }
         g_shadow_ufcs_miss = 1;
         return 0;
     }
     if (result.len + 1 > cap) {
-        fprintf(stderr,
-                "error: type: .ufcs hook rewrite for '%s.%s' overflowed "
-                "callee buffer (%zu); refusing silent invent\n",
-                base, method, cap);
+        {
+            char __diag[192];
+            snprintf(__diag, sizeof(__diag),
+                     "type: .ufcs hook rewrite for '%s.%s' overflowed "
+                     "callee buffer (%zu); refusing silent invent",
+                     base, method, cap);
+            shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+        }
         g_shadow_ufcs_miss = 1;
         return 0;
     }
@@ -550,9 +578,13 @@ static int shadow_as_scan_fld_push(ShadowAsScanFld** v, int* n, int* cap,
         nc = *cap ? *cap * 2 : 8;
         nv = (ShadowAsScanFld*)realloc(*v, (size_t)nc * sizeof(ShadowAsScanFld));
         if (!nv) {
-            fprintf(stderr,
-                    "error: type: field harvest grow failed on '%s.%s'\n",
-                    outer && outer[0] ? outer : "(anonymous)", name);
+            {
+                char __diag[160];
+                snprintf(__diag, sizeof(__diag),
+                         "type: field harvest grow failed on '%s.%s'",
+                         outer && outer[0] ? outer : "(anonymous)", name);
+                shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+            }
             g_shadow_ufcs_miss = 1;
             return 0;
         }
@@ -1429,10 +1461,14 @@ static int shadow_cast_decl_init(const char* dest_ty, const char* raw_rhs,
             }
         }
         if (ptr_rhs && bare) {
-            fprintf(stderr,
-                    "error: type: no implicit convert from '%s' to '%s' "
-                    "(factory alias; dest does not mint)\n",
-                    src[0] ? src : (raw_rhs ? raw_rhs : "?"), dest);
+            {
+                char __diag[256];
+                snprintf(__diag, sizeof(__diag),
+                         "type: no implicit convert from '%s' to '%s' "
+                         "(factory alias; dest does not mint)",
+                         src[0] ? src : (raw_rhs ? raw_rhs : "?"), dest);
+                shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+            }
             g_shadow_ufcs_miss = 1;
             return 0;
         }
@@ -1451,9 +1487,13 @@ static int shadow_cast_decl_init(const char* dest_ty, const char* raw_rhs,
     }
     if (strcmp(handler, "cc_box_cast_lower_c") != 0 &&
         strcmp(handler, "cc_slice_cast_lower_c") != 0) {
-        fprintf(stderr,
-                "error: type: .cast handler '%s' for '%s' is not compiled\n",
-                handler, dest);
+        {
+            char __diag[192];
+            snprintf(__diag, sizeof(__diag),
+                     "type: .cast handler '%s' for '%s' is not compiled",
+                     handler, dest);
+            shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+        }
         g_shadow_ufcs_miss = 1;
         return 0;
     }
@@ -1473,14 +1513,23 @@ static int shadow_cast_decl_init(const char* dest_ty, const char* raw_rhs,
         memcmp(result.ptr, pass, result.len) == 0)
         return 1;
     if (!result.ptr || result.len == 0) {
-        fprintf(stderr,
-                "error: type: .cast hook rejected implicit convert to '%s'\n",
-                dest);
+        {
+            char __diag[160];
+            snprintf(__diag, sizeof(__diag),
+                     "type: .cast hook rejected implicit convert to '%s'",
+                     dest);
+            shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+        }
         g_shadow_ufcs_miss = 1;
         return 0;
     }
     if (result.len + 1 > sizeof(callee)) {
-        fprintf(stderr, "error: type: .cast callee overflow for '%s'\n", dest);
+        {
+            char __diag[128];
+            snprintf(__diag, sizeof(__diag),
+                     "type: .cast callee overflow for '%s'", dest);
+            shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+        }
         g_shadow_ufcs_miss = 1;
         return 0;
     }
@@ -1492,18 +1541,33 @@ static int shadow_cast_decl_init(const char* dest_ty, const char* raw_rhs,
         (shadow_cast_ty_is_string_val(src) || shadow_cast_ty_is_vec_val(src))) {
         if (snprintf(wrap, sizeof(wrap), "%s(&(%s))", callee, expr) >=
             (int)sizeof(wrap)) {
-            fprintf(stderr, "error: type: .cast wrap overflow for '%s'\n", dest);
+            {
+                char __diag[128];
+                snprintf(__diag, sizeof(__diag),
+                         "type: .cast wrap overflow for '%s'", dest);
+                shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+            }
             g_shadow_ufcs_miss = 1;
             return 0;
         }
     } else if (snprintf(wrap, sizeof(wrap), "%s(%s)", callee, expr) >=
                (int)sizeof(wrap)) {
-        fprintf(stderr, "error: type: .cast wrap overflow for '%s'\n", dest);
+        {
+            char __diag[128];
+            snprintf(__diag, sizeof(__diag),
+                     "type: .cast wrap overflow for '%s'", dest);
+            shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+        }
         g_shadow_ufcs_miss = 1;
         return 0;
     }
     if (strlen(wrap) + 1 > expr_cap) {
-        fprintf(stderr, "error: type: .cast wrap overflow for '%s'\n", dest);
+        {
+            char __diag[128];
+            snprintf(__diag, sizeof(__diag),
+                     "type: .cast wrap overflow for '%s'", dest);
+            shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+        }
         g_shadow_ufcs_miss = 1;
         return 0;
     }
@@ -1736,10 +1800,14 @@ static int shadow_walk_expr_addr(const char* text) {
                 continue;
             b = shadow_bind_lookup(name);
             if (b && (b->flags & SHADOW_BIND_WALK)) {
-                fprintf(stderr,
-                        "error: `&%s` is not a location "
-                        "(walk binder is not a C object)\n",
-                        name);
+                {
+                    char __diag[128];
+                    snprintf(__diag, sizeof(__diag),
+                             "`&%s` is not a location "
+                             "(walk binder is not a C object)",
+                             name);
+                    shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+                }
                 g_shadow_ufcs_miss = 1;
                 return 1;
             }
@@ -2047,7 +2115,7 @@ static int shadow_for_parse_in(const char* h, ShadowForIn* fi) {
     n = (size_t)(in - p);
     while (n && (p[n - 1] == ' ' || p[n - 1] == '\t')) n--;
     if (!n || n >= sizeof(rawbind)) {
-        fprintf(stderr, "error: for-in needs `@for (name in subject)`\n");
+        shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, "for-in needs `@for (name in subject)`");
         g_shadow_ufcs_miss = 1;
         return -1;
     }
@@ -2060,28 +2128,32 @@ static int shadow_for_parse_in(const char* h, ShadowForIn* fi) {
     while (n && (fi->rest[n - 1] == ' ' || fi->rest[n - 1] == '\t'))
         fi->rest[--n] = 0;
     if (!fi->rest[0]) {
-        fprintf(stderr, "error: for-in needs `@for (name in subject)`\n");
+        shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, "for-in needs `@for (name in subject)`");
         g_shadow_ufcs_miss = 1;
         return -1;
     }
     fi->nbind = shadow_for_split_csv(rawbind, cells, 2, sizeof(cells[0]));
     if (fi->nbind < 1) {
-        fprintf(stderr, "error: for-in needs `@for (name in subject)`\n");
+        shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, "for-in needs `@for (name in subject)`");
         g_shadow_ufcs_miss = 1;
         return -1;
     }
     for (i = 0; i < fi->nbind; i++) {
         if (!shadow_for_parse_binder(cells[i], fi->bind[i], sizeof(fi->bind[i]),
                                      &fi->mut[i])) {
-            fprintf(stderr, "error: for-in binder '%s' is not a name\n",
-                    cells[i]);
+            {
+                char __diag[128];
+                snprintf(__diag, sizeof(__diag),
+                         "for-in binder '%s' is not a name", cells[i]);
+                shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+            }
             g_shadow_ufcs_miss = 1;
             return -1;
         }
     }
     fi->nsubj = shadow_for_split_csv(fi->rest, fi->subj, 2, sizeof(fi->subj[0]));
     if (fi->nsubj < 1) {
-        fprintf(stderr, "error: for-in needs `@for (name in subject)`\n");
+        shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, "for-in needs `@for (name in subject)`");
         g_shadow_ufcs_miss = 1;
         return -1;
     }
@@ -2091,16 +2163,16 @@ static int shadow_for_parse_in(const char* h, ShadowForIn* fi) {
         else if (*q == ')' || *q == ']' || *q == '}') depth--;
         else if (depth == 0 && q[0] == '.' && q[1] == '.') {
             if (fi->nbind != 1 || fi->nsubj != 1) {
-                fprintf(stderr,
-                        "error: range for-in is `@for (i in lo..hi)`\n");
+                shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site,
+                           "range for-in is `@for (i in lo..hi)`");
                 g_shadow_ufcs_miss = 1;
                 return -1;
             }
             fi->kind = 2;
             if (fi->mut[0]) {
-                fprintf(stderr,
-                        "error: range for-in is `@for (i in lo..hi)` "
-                        "(`&i` is not a slot)\n");
+                shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site,
+                           "range for-in is `@for (i in lo..hi)` "
+                           "(`&i` is not a slot)");
                 g_shadow_ufcs_miss = 1;
                 return -1;
             }
@@ -2113,9 +2185,9 @@ static int shadow_for_parse_in(const char* h, ShadowForIn* fi) {
     }
     if (fi->nbind == 2 && fi->nsubj == 1) {
         if (fi->mut[0]) {
-            fprintf(stderr,
-                    "error: enumerate index cannot be `&` "
-                    "(`for (i, &v in s)`)\n");
+            shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site,
+                       "enumerate index cannot be `&` "
+                       "(`for (i, &v in s)`)");
             g_shadow_ufcs_miss = 1;
             return -1;
         }
@@ -2126,9 +2198,9 @@ static int shadow_for_parse_in(const char* h, ShadowForIn* fi) {
         fi->kind = 4;
         return 4;
     }
-    fprintf(stderr,
-            "error: for-in is `@for (v in s)`, `@for (&v in s) { ... } !>;`, "
-            "`@for (i, v in s)`, or `@for (a, b in s, t) { ... } !>;`\n");
+    shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site,
+               "for-in is `@for (v in s)`, `@for (&v in s) { ... } !>;`, "
+               "`@for (i, v in s)`, or `@for (a, b in s, t) { ... } !>;`");
     g_shadow_ufcs_miss = 1;
     return -1;
 }
@@ -2377,19 +2449,27 @@ static int shadow_for_lookup_extent(const char* name, ShadowExtent* ex) {
     if (!name || !ex) return 0;
     if (!shadow_for_subj_ty(name, subj_ty, sizeof(subj_ty), &array_flag)) {
         if (!shadow_extent_is_ident(name))
-            fprintf(stderr,
-                    "error: for-in subject must be a name, field path, or "
-                    "view (`s`, `t->words`, `s.sub(lo, hi)`)\n");
+            shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site,
+                       "for-in subject must be a name, field path, or "
+                       "view (`s`, `t->words`, `s.sub(lo, hi)`)");
         else
-            fprintf(stderr, "error: for-in subject '%s' has no bound type\n",
-                    name);
+            {
+                char __diag[160];
+                snprintf(__diag, sizeof(__diag),
+                         "for-in subject '%s' has no bound type", name);
+                shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+            }
         g_shadow_ufcs_miss = 1;
         return 0;
     }
     if (!array_flag && strchr(subj_ty, '*')) {
-        fprintf(stderr,
-                "error: T* is not an extent; for (v in %s) is ill-formed\n",
-                name);
+        {
+            char __diag[160];
+            snprintf(__diag, sizeof(__diag),
+                     "T* is not an extent; for (v in %s) is ill-formed",
+                     name);
+            shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+        }
         g_shadow_ufcs_miss = 1;
         return 0;
     }
@@ -2403,8 +2483,13 @@ static int shadow_for_lookup_extent(const char* name, ShadowExtent* ex) {
             if (!key[0]) snprintf(key, sizeof(key), "%s", subj_ty);
         }
         if (!shadow_extent_resolve(key, array_flag, ex)) {
-            fprintf(stderr, "error: '%s' (%s) has no .len/.access extent\n",
-                    name, key[0] ? key : subj_ty);
+            {
+                char __diag[192];
+                snprintf(__diag, sizeof(__diag),
+                         "'%s' (%s) has no .len/.access extent",
+                         name, key[0] ? key : subj_ty);
+                shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+            }
             g_shadow_ufcs_miss = 1;
             return 0;
         }
@@ -2514,8 +2599,12 @@ static int shadow_as_field_miss_path(const char* outer, const char* leaf,
         hit = g_shadow_as[i].field;
     }
     if (hits > 1) {
-        fprintf(stderr, "error: as: ambiguous field '%s' on '%s'\n", leaf,
-                outer);
+        {
+            char __diag[160];
+            snprintf(__diag, sizeof(__diag),
+                     "as: ambiguous field '%s' on '%s'", leaf, outer);
+            shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+        }
         g_shadow_ufcs_miss = 1;
         return -1;
     }
@@ -2656,8 +2745,12 @@ static void shadow_extent_check_len_store(const char* text) {
                  q[1] == '=') ||
                 (g_shadow_restrict_lhs_store &&
                  q[0] != '[' && q[0] != ']' && q[0] != ')' && q[0] != ',')) {
-                fprintf(stderr,
-                        "error: extent '.len' on '%s' is not writable\n", ty);
+                {
+                    char __diag[128];
+                    snprintf(__diag, sizeof(__diag),
+                             "extent '.len' on '%s' is not writable", ty);
+                    shadow_err(NULL, g_shadow_ufcs_site ? g_shadow_ufcs_site : g_shadow_expr_site, __diag);
+                }
                 g_shadow_restrict_diag = 1;
                 return;
             }

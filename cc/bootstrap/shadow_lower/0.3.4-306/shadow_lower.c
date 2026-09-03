@@ -3454,7 +3454,7 @@ static const PpDirSpec* pp_dir_get(CCSlice key) {
     return &pp_dir__values[idx];
 }
 #line 288 "shadow_lower.ccs"
-#line 98 "shadow_lower.ccs"
+#line 100 "shadow_lower.ccs"
 static const char* const shadow_kw__keys[39] = {
     "int",
     "void",

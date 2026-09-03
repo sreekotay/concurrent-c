@@ -17,27 +17,29 @@ int cc_ct_field_reg_put(const char* type_name, const char* const* names,
 /* Fixed emit/parse registries: refuse silent drop (same class as cap_binds). */
 static int g_shadow_table_overflow;
 static void shadow_table_full(const char* table, int cap, const char* item) {
+    char __diag[256];
     if (g_shadow_table_overflow) return;
     if (item && item[0])
-        fprintf(stderr,
-                "error: shadow %s table full (%d); refusing silent drop of '%s'\n",
-                table, cap, item);
+        snprintf(__diag, sizeof(__diag),
+                 "shadow %s table full (%d); refusing silent drop of '%s'",
+                 table, cap, item);
     else
-        fprintf(stderr,
-                "error: shadow %s table full (%d); refusing silent drop\n",
-                table, cap);
+        snprintf(__diag, sizeof(__diag),
+                 "shadow %s table full (%d); refusing silent drop", table, cap);
+    diag_err_loc(NULL, 0, 0, __diag);
     g_shadow_table_overflow = 1;
 }
 static void shadow_table_grow_failed(const char* table, const char* item) {
+    char __diag[256];
     if (g_shadow_table_overflow) return;
     if (item && item[0])
-        fprintf(stderr,
-                "error: shadow %s grow failed; refusing silent drop of '%s'\n",
-                table, item);
+        snprintf(__diag, sizeof(__diag),
+                 "shadow %s grow failed; refusing silent drop of '%s'", table,
+                 item);
     else
-        fprintf(stderr,
-                "error: shadow %s grow failed; refusing silent drop\n",
-                table);
+        snprintf(__diag, sizeof(__diag),
+                 "shadow %s grow failed; refusing silent drop", table);
+    diag_err_loc(NULL, 0, 0, __diag);
     g_shadow_table_overflow = 1;
 }
 static void shadow_table_overflow_reset(void) { g_shadow_table_overflow = 0; }
@@ -176,7 +178,8 @@ typedef enum {
     /* CHAN_VAR: a=name b=capacity c=">"|"<" d=elem(ty[*])
      * e: "" | "o" | "t:TOPO" | "o:TOPO" (ordered / schedule) */
     AST_CHAN_VAR,
-    /* RESULT_FN: a=fname, b=err, c=ok, d=param text or "" for void; kids=body */
+    /* RESULT_FN: a=fname, b=err, c=ok, d=param text or "" for void; kids=body
+     * forced_seq: 1 when return is T?>(E) (stmt-position discard ok) */
     AST_RESULT_FN,
     AST_CLOSURE_LIT,   /* () => { }   (expression-level; counted as external) */
     AST_AT_STMT,       /* @ident ... ;  (a = attr name, e.g. defer/async) */
@@ -340,8 +343,9 @@ struct AstNode {
     /* Wait-for `worker (name)` binder — per-ticket pool slot index. */
     char g[64];
     /* Wait-for `cache (name, …)` — enclosing locals adopted as warm
-     * scratch. Comma-separated names; empty is no clause. */
-    char h[256];
+     * scratch. Comma-separated names; NULL/empty is no clause.
+     * Owned by parse_ar (not a fixed AstNode slot). */
+    char* h;
     /* Parsed under `#pragma(@parallel) off`: lower to the sequential
      * denial path only — no thunks, no envs, no scheduler. */
     int forced_seq;
@@ -459,22 +463,8 @@ static void parser_fail(Parser* p, Token at, const char* msg) {
 }
 
 static void parser_note(Parser* p, Token at, const char* msg) {
-    FileTape* ft;
-    int line = 1, col = 1;
     if (!p || !msg) return;
-    ft = tape_by_id(p->cache, at.file_id);
-    if (!ft || !ft->bytes) {
-        fprintf(stderr, "  note: %s\n", msg);
-        return;
-    }
-    offset_to_linecol(ft, at.offset, &line, &col);
-    {
-        char lfile[1024];
-        tape_logical_at(ft, at.offset, lfile, sizeof(lfile), &line);
-        fprintf(stderr, "%s:%d:%d: note: %s\n",
-                tape_diag_file(ft, at.offset, lfile, sizeof(lfile)), line, col,
-                msg);
-    }
+    diag_note_at(p->cache, at, msg);
 }
 
 /* Named capacity overflow — always includes the numeric limit. */
@@ -1274,6 +1264,25 @@ static AstNode* ast_new(Parser* p, AstKind k) {
     return n;
 }
 
+/* NUL-terminated copy on the parse arena (NULL if s empty). Fail-loud OOM. */
+static char* ast_arena_cstr(Parser* p, const char* s) {
+    size_t n;
+    char* d;
+    if (!p || !s || !s[0]) return NULL;
+    if (!cc_arena_is_live(p->parse_ar)) {
+        parser_fail(p, p_peek(p), "parse arena is not live");
+        return NULL;
+    }
+    n = strlen(s);
+    d = (char*)cc_arena_alloc(p->parse_ar, n + 1, 1);
+    if (!d) {
+        parser_fail(p, p_peek(p), "out of memory (ast string slot)");
+        return NULL;
+    }
+    memcpy(d, s, n + 1);
+    return d;
+}
+
 /* Push onto the stable kids bump table. Interior `n->kids` aliases this
  * storage; growing it would dangle every open parent list. */
 static int ast_kids_push(Parser* p, AstNode* child) {
@@ -1381,13 +1390,21 @@ static int peek_result_ok_type_end(Parser* p, int start) {
     return j;
 }
 
-static int peek_result_shape(Parser* p) {
+/* After ok-type (+ optional `*`): 1 = `!>` (required), 2 = `?>` (discard ok). */
+static int peek_result_marker(Parser* p) {
     int j;
     if (!p || p->i >= p->n) return 0;
     j = peek_result_ok_type_end(p, p->i);
     if (j < 0) return 0;
     while (j < p->n && tok_eq(p->toks[j], TK_PUNCT, "*")) j++;
-    return j < p->n && tok_eq(p->toks[j], TK_PUNCT, "!>");
+    if (j >= p->n) return 0;
+    if (tok_eq(p->toks[j], TK_PUNCT, "!>")) return 1;
+    if (tok_eq(p->toks[j], TK_PUNCT, "?>")) return 2;
+    return 0;
+}
+
+static int peek_result_shape(Parser* p) {
+    return peek_result_marker(p) != 0;
 }
 
 /* After ok base spelling: consume `[:]` / `[:!]` into okty (type-position). */
@@ -2099,10 +2116,12 @@ static int ast_spell_type_tokens(Parser* p, int start, int end, char* dst,
         snprintf(msg, sizeof(msg),
                  "unknown generic name '%s' before '::[...]'", family);
         parser_fail(p, p->toks[start], msg);
-        if (cc_emit_plan_generic_factory_names_csv(fams, sizeof(fams)) > 0)
-            fprintf(stderr,
-                    "  note: registered generic factory families: %s\n",
-                    fams);
+        if (cc_emit_plan_generic_factory_names_csv(fams, sizeof(fams)) > 0) {
+            char __note[640];
+            snprintf(__note, sizeof(__note),
+                     "registered generic factory families: %s", fams);
+            diag_note(__note);
+        }
     }
     return 0;
 }

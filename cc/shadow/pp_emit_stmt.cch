@@ -4803,7 +4803,7 @@ static int shadow_pw_apply_cache(AstNode* st, AstNode** body, int nbody,
     const char* p;
     char loc[64][64];
     int nloc = 0, k;
-    if (!st || !st->h[0]) return 1;
+    if (!st || !st->h || !st->h[0]) return 1;
     p = st->h;
     for (k = 0; k < nbody; k++)
         shadow_par_serial_walk_locals(body[k], loc, &nloc, 64);
