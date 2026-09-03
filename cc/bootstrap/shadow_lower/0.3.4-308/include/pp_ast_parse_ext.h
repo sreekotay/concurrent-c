@@ -641,7 +641,7 @@ static AstNode* parse_parallel_for(Parser* p, const char* gate,
     n->forced_seq = p->parallel_off;
     slice_to(n->a, sizeof(n->a), name.spell);
     if (gate && gate[0]) snprintf(n->e, sizeof(n->e), "%s", gate);
-    if (seq_cond && seq_cond[0]) snprintf(n->f, sizeof(n->f), "%s", seq_cond);
+    if (seq_cond && seq_cond[0]) n->f = ast_arena_cstr(p, seq_cond);
     if (!parallel_split_range(p, rp, n->b, sizeof(n->b), n->c, sizeof(n->c))) {
         parser_fail(p, p_peek(p),
                     "expected `lo..hi` after @parallel for (name in");
@@ -669,7 +669,7 @@ static AstNode* parse_parallel_for(Parser* p, const char* gate,
             parser_fail(p, w, "worker binder must be a simple name");
             return NULL;
         }
-        slice_to(n->g, sizeof(n->g), w.spell);
+        n->g = ast_arena_slice(p, w.spell);
         if (!p_accept(p, TK_PUNCT, ")")) {
             parser_fail(p, p_peek(p), "worker (name) takes a single name");
             return NULL;
@@ -3033,7 +3033,7 @@ static AstNode* parse_switch_loop(Parser* p, int cc_switch) {
         if (!n) return NULL;
         snprintf(n->a, sizeof(n->a), "%s", expr);
         n->d[0] = 0;
-        if (cc_switch) snprintf(n->f, sizeof(n->f), "cc_switch");
+        if (cc_switch) n->f = ast_arena_cstr(p, "cc_switch");
         /* body[] stays on-node — kids_storage aliases the enclosing fn body
          * list (same nkstore cursor), which once emitted a bare `case 0:`.
          * Fat !> switches that exceed SHADOW_BODY_CAP fall back to opaque
@@ -3193,7 +3193,7 @@ switch_opaque_body:
             AstNode* n = ast_new(p, AST_SWITCH);
             if (!n) return NULL;
             snprintf(n->a, sizeof(n->a), "%s", expr);
-            if (cc_switch) snprintf(n->f, sizeof(n->f), "cc_switch");
+            if (cc_switch) n->f = ast_arena_cstr(p, "cc_switch");
             n->file_id = p_peek(p).file_id;
             if (nlen + 1 <= sizeof(n->d)) {
                 memcpy(n->d, bytes + start, nlen);

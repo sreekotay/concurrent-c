@@ -3466,13 +3466,16 @@ static int shadow_safe_is_result_fn(ShadowSafeCtx* ctx, const char* name) {
 
 static int shadow_safe_is_result_fn_discard_ok(ShadowSafeCtx* ctx,
                                                const char* name) {
+    extern int cc_result_fn_registry_is_discard_ok(const char* name,
+                                                   size_t name_len);
     int i;
     if (!ctx || !name || !ctx->rfns) return 0;
     for (i = 0; i < ctx->nrfn; i++) {
         if (strcmp(ctx->rfns[i].name, name) == 0)
             return ctx->rfns[i].discard_ok;
     }
-    return 0;
+    if (shadow_is_optional_print_fn(name)) return 1;
+    return cc_result_fn_registry_is_discard_ok(name, strlen(name));
 }
 
 static void shadow_safe_add_result_fn_err(ShadowSafeCtx* ctx, const char* name,
@@ -3924,8 +3927,7 @@ static void shadow_safe_on_unwrap(ShadowSafeCtx* ctx, AstNode* st) {
     if (st->kind == AST_PRINTLN_BANG || st->kind == AST_PRINTLN_TPL) {
         if (st->nbody > 0)
             shadow_safe_check_err_fwds(ctx, st, st->body, st->nbody, NULL);
-        else if (strcmp(st->e, "bare") != 0) {
-            /* `println(...) !>;` needs @errhandler; bare `println(...);` does not. */
+        else {
             if (shadow_safe_diag_eh_e(ctx, st, st->d[0] == 'e'
                                                 ? "cc_eprintln("
                                                 : "cc_println("))
@@ -4114,7 +4116,7 @@ static void shadow_safe_on_spawn(ShadowSafeCtx* ctx, AstNode* st, int escapes) {
     if (!ctx || !st || ctx->err) return;
     is_unsafe = (strcmp(st->b, "spawn_unsafe") == 0 ||
                  strcmp(st->b, "spawnhybrid_unsafe") == 0 ||
-                 strcmp(st->f, "unsafe") == 0);
+                 (st->f && strcmp(st->f, "unsafe") == 0));
     /* Task-escaping only for value-captured pointer alias mutation (legacy). */
     if (ctx->in_send_task) escapes = 1;
     p = st->e;
@@ -4393,7 +4395,7 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
                     site = 1;
             if (!ctx->err && !site &&
                 ((st->c[0] && strstr(st->c, "!>") != NULL) ||
-                 (st->f[0] && strstr(st->f, "bang") != NULL)))
+                 (st->f && st->f[0] && strstr(st->f, "bang") != NULL)))
                 shadow_safe_require_eh(ctx, st, NULL);
             for (k = 0; k < st->ndbody && !ctx->err; k++) {
                 if (st->dbody[k] && st->dbody[k]->kind == AST_ERRHANDLER)

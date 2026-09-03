@@ -4,6 +4,33 @@
 
 static int parse_destroy_tail(Parser* p, AstNode* n, char* mode, size_t mode_cap);
 
+/* True when println/eprintln(…) is followed by !> (not bare ';'). */
+static int peek_println_has_bang(Parser* p) {
+    int j;
+    int depth;
+    if (!p || p->i >= p->n) return 0;
+    if (shadow_kw(p_peek(p)) != SHADOW_KW_PRINTLN &&
+        shadow_kw(p_peek(p)) != SHADOW_KW_EPRINTLN)
+        return 0;
+    if (p->i + 2 >= p->n || !tok_eq(p->toks[p->i + 1], TK_PUNCT, "("))
+        return 0;
+    j = p->i + 1;
+    depth = 0;
+    while (j < p->n) {
+        Token t = p->toks[j];
+        if (tok_eq(t, TK_PUNCT, "(")) depth++;
+        else if (tok_eq(t, TK_PUNCT, ")")) {
+            depth--;
+            if (depth == 0) {
+                j++;
+                break;
+            }
+        }
+        j++;
+    }
+    return j < p->n && tok_eq(p->toks[j], TK_PUNCT, "!>");
+}
+
 static AstNode* parse_println_bang(Parser* p) {
     ShadowKwKind kw = shadow_kw(p_peek(p));
     if (kw != SHADOW_KW_PRINTLN && kw != SHADOW_KW_EPRINTLN) return NULL;
@@ -46,17 +73,6 @@ static AstNode* parse_println_bang(Parser* p) {
     if (!p_accept(p, TK_PUNCT, ")")) {
         parser_fail(p, p_peek(p), "expected ')' after println arg");
         return NULL;
-    }
-    /* Bare `println(...);` (no !>) — ignore Result / no handler. */
-    if (tok_eq(p_peek(p), TK_PUNCT, ";")) {
-        p_next(p);
-        AstNode* n = ast_new(p, is_tpl ? AST_PRINTLN_TPL : AST_PRINTLN_BANG);
-        if (!n) return NULL;
-        snprintf(n->a, sizeof(n->a), "%s", payload);
-        if (is_tpl && arena[0]) snprintf(n->c, sizeof(n->c), "%s", arena);
-        if (is_eprint) snprintf(n->d, sizeof(n->d), "e");
-        snprintf(n->e, sizeof(n->e), "bare");
-        return n;
     }
     if (!p_accept(p, TK_PUNCT, "!>")) {
         parser_fail(p, p_peek(p), "expected '!>' after println(...)");

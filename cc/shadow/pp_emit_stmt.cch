@@ -4819,7 +4819,7 @@ static int shadow_pw_apply_cache(AstNode* st, AstNode** body, int nbody,
         id[n] = 0;
         if (!id[0]) continue;
         if (shadow_par_name_eq(id, st->a) ||
-            (st->g[0] && shadow_par_name_eq(id, st->g))) {
+            (st->g && st->g[0] && shadow_par_name_eq(id, st->g))) {
             {
                 char __diag[320];
                 snprintf(__diag, sizeof(__diag), "cache (name) cannot adopt the loop variable or worker binder '%s'", id);
@@ -5726,7 +5726,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
     shadow_par_filter_body_locals(st->body, st->nbody, names, tys, &ncaps);
     /* The worker binder is a per-ticket value like the loop var — never a
      * capture. */
-    if (st->g[0]) {
+    if (st->g && st->g[0]) {
         int w = 0;
         for (k = 0; k < ncaps; k++) {
             if (shadow_par_name_eq(names[k], st->g)) continue;
@@ -5747,7 +5747,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
     /* Sequential body (denial path) — real handlers, caller frame. */
     mark = g_shadow_nbinds;
     shadow_bind_name(st->a, "int", 0);
-    if (st->g[0]) shadow_bind_name(st->g, "int", 0);
+    if (st->g && st->g[0]) shadow_bind_name(st->g, "int", 0);
     saved_pw_body = ctx->pw_body;
     ctx->pw_body = 1;
     if (hdest && hdest[0])
@@ -5801,7 +5801,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
             goto fail;
         if (!cemit_fmt(out, "%sint %s;\n", i1, st->a))
             goto fail;
-        if (st->g[0] && !cemit_fmt(out, "%sint %s = 0;\n", i1, st->g))
+        if (st->g && st->g[0] && !cemit_fmt(out, "%sint %s = 0;\n", i1, st->g))
             goto fail;
         if (!shadow_pw_emit_fin_decl(out, i1, dest != NULL))
             goto fail;
@@ -5854,7 +5854,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
     snprintf(tctx.pw_ivar, sizeof(tctx.pw_ivar), "%s", st->a);
     mark = g_shadow_nbinds;
     shadow_bind_name(st->a, "int", 0);
-    if (st->g[0]) shadow_bind_name(st->g, "int", 0);
+    if (st->g && st->g[0]) shadow_bind_name(st->g, "int", 0);
     for (k = 0; k < st->nbody; k++) {
         char saved = st->body[k]->indent[0];
         st->body[k]->indent[0] = 0;
@@ -5929,7 +5929,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
             "    cc_parallel_honor(__cc_pw_sh->dest);\n",
             st->a))
         goto fail;
-    if (st->g[0] && !cemit_fmt(h, "    int %s = __cc_pw_slot;\n", st->g))
+    if (st->g && st->g[0] && !cemit_fmt(h, "    int %s = __cc_pw_slot;\n", st->g))
         goto fail;
     for (k = 0; k < nstages; k++) {
         if (!cemit_fmt(h, "    int __cc_pw_stg_%s = 0;\n", stages[k]->d))
@@ -5994,7 +5994,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
         goto fail;
     if (!cemit_fmt(out, "%sCCNurseryHost* __cc_pw_n_%d = NULL;\n", i1, id))
         goto fail;
-    if (st->f[0]) {
+    if (st->f && st->f[0]) {
         if (!cemit_fmt(out,
                        "%sif ((%s)) { CCResult_CCNursery_CCError __cc_pw_nr_%d = "
                        "cc_nursery_create(); "
@@ -6018,7 +6018,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
         goto fail;
     if (!shadow_pw_emit_honor_name(out, i3, hdest))
         goto fail;
-    if (st->g[0] && !cemit_fmt(out, "%sint %s = 0;\n", i3, st->g)) goto fail;
+    if (st->g && st->g[0] && !cemit_fmt(out, "%sint %s = 0;\n", i3, st->g)) goto fail;
     if (seqb.buf && seqb.len && !cemit_buf(out, seqb.buf, seqb.len)) goto fail;
     if (!cemit_fmt(out, "%s}\n", i2))
         return 0;
@@ -6130,7 +6130,7 @@ static int shadow_emit_parallel_wait_for(AstNode* st, CEmit* out,
         return 0;
     if (!shadow_pw_emit_honor_name(out, i4, hdest))
         return 0;
-    if (st->g[0] && !cemit_fmt(out, "%sint %s = 0;\n", i4, st->g)) return 0;
+    if (st->g && st->g[0] && !cemit_fmt(out, "%sint %s = 0;\n", i4, st->g)) return 0;
     if (seqb.buf && seqb.len && !cemit_buf(out, seqb.buf, seqb.len))
         return 0;
     free(seqb.buf);
@@ -7064,7 +7064,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         int subj_ptr = 0;
         int have_desig = (st->d[0] && strstr(st->d, "case .") != NULL);
         int strsw = 0;
-        if (have_desig && strcmp(st->f, "cc_switch") != 0) {
+        if (have_desig && (!st->f || strcmp(st->f, "cc_switch") != 0)) {
             shadow_err(ctx, st, "variant switch requires `@switch`; use `@switch (v) { case .arm: ... }`");
             g_shadow_ufcs_miss = 1;
             return 0;
@@ -7092,7 +7092,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             strsw = shadow_strsw_try(st, out, ctx, indent, body, sizeof(body),
                                     expr, sizeof(expr));
             if (strsw < 0) return 0;
-            if (strsw && strcmp(st->f, "cc_switch") != 0) {
+            if (strsw && (!st->f || strcmp(st->f, "cc_switch") != 0)) {
                 shadow_err(ctx, st, "string switch requires `@switch`; use `@switch (name) { case \"GET\": ... }`");
                 g_shadow_ufcs_miss = 1;
                 return 0;
@@ -7875,7 +7875,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         char init[2048];
         char raw[2048];
         int is_ptr = (st->d[0] == '*');
-        int has_bang = (st->f[0] && strstr(st->f, "bang") != NULL);
+        int has_bang = (st->f && st->f[0] && strstr(st->f, "bang") != NULL);
         AstNode* site_eh = NULL;
         AstNode* cl = shadow_expr_closure_kid(st);
         {
@@ -8018,7 +8018,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             shadow_pw_pop_loop(ctx, pw, 0);
             return 0;
         }
-        if (in_kind > 0 && strcmp(st->f, "cc_for") != 0) {
+        if (in_kind > 0 && (!st->f || strcmp(st->f, "cc_for") != 0)) {
             shadow_err(ctx, st, "walk loop requires `@for`; use `@for (... in ...)`");
             g_shadow_ufcs_miss = 1;
             shadow_pw_pop_loop(ctx, pw, 0);

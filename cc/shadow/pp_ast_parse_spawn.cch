@@ -388,7 +388,7 @@ static int parse_call_arg_closure(Parser* p, int c0, int end, char* dst,
         else
             n->c[0] = 0;
         n->e[0] = 0;
-        if (is_unsafe) snprintf(n->f, sizeof(n->f), "unsafe");
+        if (is_unsafe) n->f = ast_arena_cstr(p, "unsafe");
         /* Optional explicit captures: `=> [rx, @safe &db, &tx] { … }` */
         if (tok_eq(p_peek(p), TK_PUNCT, "[")) {
             p_next(p);

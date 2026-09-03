@@ -125,12 +125,6 @@ static int shadow_emit_println_arg(CEmit* out, ShadowCtx* ctx, const char* arg_e
 
 static int shadow_emit_println(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                const char* indent) {
-    /* Bare `println(...);` — discard Result (no !>/handler). */
-    if (st && strcmp(st->e, "bare") == 0) {
-        const char* fn = st->d[0] == 'e' ? "cc_eprintln" : "cc_println";
-        return shadow_tpl_kv(out, "${indent}(void)${fn}(${args});\n",
-                             "indent", indent, "fn", fn, "args", st->a, NULL);
-    }
     return shadow_emit_println_arg(out, ctx, st->a, indent, st->d[0] == 'e');
 }
 
@@ -144,7 +138,6 @@ static int shadow_emit_println_tpl(AstNode* st, CEmit* out, ShadowCtx* ctx,
     /* Default / @scratch: reclaim the temp watermark after the call so
      * earlier bound `@string(..., @scratch)` products stay valid. */
     int scratch = (!st->c[0] || shadow_arena_is_scratch(st->c));
-    int bare = st && strcmp(st->e, "bare") == 0;
     char nested[80];
     shadow_indent_nest(nested, sizeof(nested), indent, 1);
     {
@@ -153,11 +146,7 @@ static int shadow_emit_println_tpl(AstNode* st, CEmit* out, ShadowCtx* ctx,
         if (!shadow_emit_tpl_build(out, st->a, arena, nested, "__msg"))
             return 0;
     }
-    if (bare) {
-        if (!shadow_tpl_kv(out, "${indent}(void)${fn}(__msg);\n",
-                           "indent", nested, "fn", fn, NULL))
-            return 0;
-    } else {
+    {
         char call[320];
         snprintf(call, sizeof(call), "%s(__msg)", fn);
         if (!shadow_emit_try_call(out, ctx, nested, call, fn, "e", 1))
@@ -1039,6 +1028,20 @@ static void shadow_subst_ident_word(char* buf, size_t cap,
     snprintf(buf, cap, "%s", tmp);
 }
 
+/* Arena-owned slot: copy → subst → re-intern on meta_ar if changed. */
+static void shadow_subst_ident_cstr(char** slot, const char* from,
+                                    const char* to) {
+    char tmp[512];
+    size_t n;
+    if (!slot || !*slot || !(*slot)[0] || !from || !from[0] || !to) return;
+    n = strlen(*slot);
+    if (n >= sizeof(tmp)) return;
+    memcpy(tmp, *slot, n + 1);
+    shadow_subst_ident_word(tmp, sizeof(tmp), from, to);
+    if (strcmp(tmp, *slot) == 0) return;
+    *slot = (char*)shadow_meta_cstr(tmp);
+}
+
 static void shadow_subst_bind_on_node(AstNode* st, const char* from,
                                       const char* to) {
     int i;
@@ -1048,7 +1051,7 @@ static void shadow_subst_bind_on_node(AstNode* st, const char* from,
     shadow_subst_ident_word(st->c, sizeof(st->c), from, to);
     shadow_subst_ident_word(st->d, sizeof(st->d), from, to);
     shadow_subst_ident_word(st->e, sizeof(st->e), from, to);
-    shadow_subst_ident_word(st->f, sizeof(st->f), from, to);
+    shadow_subst_ident_cstr(&st->f, from, to);
     for (i = 0; i < st->nbody; i++)
         shadow_subst_bind_on_node(st->body[i], from, to);
     for (i = 0; i < st->ndbody; i++)

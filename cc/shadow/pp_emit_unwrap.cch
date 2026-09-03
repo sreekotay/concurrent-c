@@ -1027,6 +1027,20 @@ static void shadow_subst_ident_word(char* buf, size_t cap,
     snprintf(buf, cap, "%s", tmp);
 }
 
+/* Arena-owned slot: copy → subst → re-intern on meta_ar if changed. */
+static void shadow_subst_ident_cstr(char** slot, const char* from,
+                                    const char* to) {
+    char tmp[512];
+    size_t n;
+    if (!slot || !*slot || !(*slot)[0] || !from || !from[0] || !to) return;
+    n = strlen(*slot);
+    if (n >= sizeof(tmp)) return;
+    memcpy(tmp, *slot, n + 1);
+    shadow_subst_ident_word(tmp, sizeof(tmp), from, to);
+    if (strcmp(tmp, *slot) == 0) return;
+    *slot = (char*)shadow_meta_cstr(tmp);
+}
+
 static void shadow_subst_bind_on_node(AstNode* st, const char* from,
                                       const char* to) {
     int i;
@@ -1036,7 +1050,7 @@ static void shadow_subst_bind_on_node(AstNode* st, const char* from,
     shadow_subst_ident_word(st->c, sizeof(st->c), from, to);
     shadow_subst_ident_word(st->d, sizeof(st->d), from, to);
     shadow_subst_ident_word(st->e, sizeof(st->e), from, to);
-    shadow_subst_ident_word(st->f, sizeof(st->f), from, to);
+    shadow_subst_ident_cstr(&st->f, from, to);
     for (i = 0; i < st->nbody; i++)
         shadow_subst_bind_on_node(st->body[i], from, to);
     for (i = 0; i < st->ndbody; i++)

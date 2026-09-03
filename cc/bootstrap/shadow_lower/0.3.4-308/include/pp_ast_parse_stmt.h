@@ -1360,6 +1360,7 @@ static AstNode* parse_block(Parser* p) {
 
 /* Unwrap / spawn extracted — forward decls for control-flow parsers above. */
 static AstNode* parse_println_bang(Parser* p);
+static int peek_println_has_bang(Parser* p);
 static AstNode* parse_stmt_unwrap(Parser* p);
 static AstNode* parse_result_local(Parser* p);
 static AstNode* parse_var_unwrap(Parser* p);
@@ -1791,7 +1792,7 @@ static AstNode* parse_val_destroy(Parser* p) {
             n->dbody[n->ndbody++] = create_cl;
         }
         if (bang_at >= 0) {
-            snprintf(n->f, sizeof(n->f), "bang");
+            n->f = ast_arena_cstr(p, "bang");
             if (!tok_eq(p_peek(p), TK_PUNCT, "!>") &&
                 !tok_eq(p_peek(p), TK_PUNCT, "?>")) {
                 parser_fail(p, p_peek(p), "expected '!>' after create init");
@@ -2201,7 +2202,7 @@ static AstNode* parse_for_loop(Parser* p, int cc_for) {
                         "walk loop requires `@for`; use `@for (... in ...)`");
             return NULL;
         }
-        snprintf(n->f, sizeof(n->f), "cc_for");
+        n->f = ast_arena_cstr(p, "cc_for");
     } else if (cc_for) {
         parser_fail(p, p_peek(p),
                     "`@for` requires `for (name in subject)`");
@@ -4851,7 +4852,9 @@ static AstNode* parse_stmt_inner(Parser* p) {
     if (shadow_kw(t) == SHADOW_KW_WHILE) return parse_while(p);
     if (shadow_kw(t) == SHADOW_KW_DO) return parse_do_while(p);
     if (shadow_kw(t) == SHADOW_KW_RETURN) return parse_return_int(p);
-    if (shadow_kw(t) == SHADOW_KW_PRINTLN || shadow_kw(t) == SHADOW_KW_EPRINTLN)
+    if ((shadow_kw(t) == SHADOW_KW_PRINTLN ||
+         shadow_kw(t) == SHADOW_KW_EPRINTLN) &&
+        peek_println_has_bang(p))
         return parse_println_bang(p);
     if (shadow_kw(t) == SHADOW_KW_BREAK || shadow_kw(t) == SHADOW_KW_CONTINUE)
         return parse_break_continue(p);

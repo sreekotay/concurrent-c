@@ -337,10 +337,12 @@ struct AstNode {
     /* Long raw spans: static-fn / switch / enum bodies (was 256; errno maps overflow). */
     char d[4096];
     char e[2048];
-    /* Sixth slot for composite forms (@parallel seq+wait: e=gate, f=seq). */
-    char f[512];
-    /* Wait-for `worker (name)` binder — per-ticket pool slot index. */
-    char g[64];
+    /* Sixth slot for composite forms (@parallel seq+wait: e=gate, f=seq).
+     * Parse-arena owned; NULL = empty. */
+    char* f;
+    /* Wait-for `worker (name)` binder — per-ticket pool slot index.
+     * Parse-arena owned; NULL = empty. */
+    char* g;
     /* Wait-for `cache (name, …)` — enclosing locals adopted as warm
      * scratch. Comma-separated names; NULL/empty is no clause.
      * Owned by parse_ar (not a fixed AstNode slot). */
@@ -1279,6 +1281,24 @@ static char* ast_arena_cstr(Parser* p, const char* s) {
         return NULL;
     }
     memcpy(d, s, n + 1);
+    return d;
+}
+
+/* Copy a tape/spell slice onto the parse arena (NULL if empty). */
+static char* ast_arena_slice(Parser* p, CCSlice s) {
+    char* d;
+    if (!p || s.len == 0) return NULL;
+    if (!cc_arena_is_live(p->parse_ar)) {
+        parser_fail(p, p_peek(p), "parse arena is not live");
+        return NULL;
+    }
+    d = (char*)cc_arena_alloc(p->parse_ar, s.len + 1, 1);
+    if (!d) {
+        parser_fail(p, p_peek(p), "out of memory (ast string slot)");
+        return NULL;
+    }
+    memcpy(d, s.ptr, s.len);
+    d[s.len] = 0;
     return d;
 }
 

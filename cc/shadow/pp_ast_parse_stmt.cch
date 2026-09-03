@@ -1792,7 +1792,7 @@ static AstNode* parse_val_destroy(Parser* p) {
             n->dbody[n->ndbody++] = create_cl;
         }
         if (bang_at >= 0) {
-            snprintf(n->f, sizeof(n->f), "bang");
+            n->f = ast_arena_cstr(p, "bang");
             if (!tok_eq(p_peek(p), TK_PUNCT, "!>") &&
                 !tok_eq(p_peek(p), TK_PUNCT, "?>")) {
                 parser_fail(p, p_peek(p), "expected '!>' after create init");
@@ -2202,7 +2202,7 @@ static AstNode* parse_for_loop(Parser* p, int cc_for) {
                         "walk loop requires `@for`; use `@for (... in ...)`");
             return NULL;
         }
-        snprintf(n->f, sizeof(n->f), "cc_for");
+        n->f = ast_arena_cstr(p, "cc_for");
     } else if (cc_for) {
         parser_fail(p, p_peek(p),
                     "`@for` requires `for (name in subject)`");

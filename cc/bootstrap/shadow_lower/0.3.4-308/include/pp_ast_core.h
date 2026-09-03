@@ -338,10 +338,12 @@ struct AstNode {
     /* Long raw spans: static-fn / switch / enum bodies (was 256; errno maps overflow). */
     char d[4096];
     char e[2048];
-    /* Sixth slot for composite forms (@parallel seq+wait: e=gate, f=seq). */
-    char f[512];
-    /* Wait-for `worker (name)` binder — per-ticket pool slot index. */
-    char g[64];
+    /* Sixth slot for composite forms (@parallel seq+wait: e=gate, f=seq).
+     * Parse-arena owned; NULL = empty. */
+    char* f;
+    /* Wait-for `worker (name)` binder — per-ticket pool slot index.
+     * Parse-arena owned; NULL = empty. */
+    char* g;
     /* Wait-for `cache (name, …)` — enclosing locals adopted as warm
      * scratch. Comma-separated names; NULL/empty is no clause.
      * Owned by parse_ar (not a fixed AstNode slot). */
@@ -1283,6 +1285,24 @@ static char* ast_arena_cstr(Parser* p, const char* s) {
     return d;
 }
 
+/* Copy a tape/spell slice onto the parse arena (NULL if empty). */
+static char* ast_arena_slice(Parser* p, CCSlice s) {
+    char* d;
+    if (!p || s.len == 0) return NULL;
+    if (!cc_arena_is_live(p->parse_ar)) {
+        parser_fail(p, p_peek(p), "parse arena is not live");
+        return NULL;
+    }
+    d = (char*)cc_arena_alloc(p->parse_ar, s.len + 1, 1);
+    if (!d) {
+        parser_fail(p, p_peek(p), "out of memory (ast string slot)");
+        return NULL;
+    }
+    memcpy(d, s.ptr, s.len);
+    d[s.len] = 0;
+    return d;
+}
+
 /* Push onto the stable kids bump table. Interior `n->kids` aliases this
  * storage; growing it would dangle every open parent list. */
 static int ast_kids_push(Parser* p, AstNode* child) {
@@ -1405,6 +1425,31 @@ static int peek_result_marker(Parser* p) {
 
 static int peek_result_shape(Parser* p) {
     return peek_result_marker(p) != 0;
+}
+
+/* Console print family: void ?>(CCPrintError) — optional stmt-position discard. */
+static int shadow_is_optional_print_fn(const char* name) {
+    if (!name || !name[0]) return 0;
+    if (strcmp(name, "println") == 0 || strcmp(name, "eprintln") == 0 ||
+        strcmp(name, "fprintln") == 0 || strcmp(name, "print") == 0 ||
+        strcmp(name, "eprint") == 0 || strcmp(name, "fprint") == 0)
+        return 1;
+    if (strcmp(name, "cc_println") == 0 || strcmp(name, "cc_eprintln") == 0 ||
+        strcmp(name, "cc_fprintln") == 0 || strcmp(name, "cc_print") == 0 ||
+        strcmp(name, "cc_eprint") == 0 || strcmp(name, "cc_fprint") == 0)
+        return 1;
+    if (strncmp(name, "cc_slice_", 9) == 0 ||
+        strncmp(name, "cc_string_", 10) == 0 ||
+        strncmp(name, "cc_char_", 8) == 0 ||
+        strncmp(name, "cc_const_char_", 14) == 0) {
+        const char* tail = strrchr(name, '_');
+        if (!tail || tail == name) return 0;
+        tail++;
+        return strcmp(tail, "print") == 0 || strcmp(tail, "println") == 0 ||
+               strcmp(tail, "eprint") == 0 || strcmp(tail, "eprintln") == 0 ||
+               strcmp(tail, "fprint") == 0 || strcmp(tail, "fprintln") == 0;
+    }
+    return 0;
 }
 
 /* After ok base spelling: consume `[:]` / `[:!]` into okty (type-position). */
