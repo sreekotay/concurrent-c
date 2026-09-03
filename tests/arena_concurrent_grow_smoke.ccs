@@ -68,7 +68,7 @@ int main(void) {
     gross = cc_arena_committed_gross_bytes(g_arena);
     ovf = cc_arena_overflow_raw_bytes(g_arena);
     {
-        unsigned blocks = (unsigned)g_arena.a->block_idx;
+        unsigned blocks = (unsigned)g_arena.a->slab->block_idx;
 
         if (ok + fail != NTHREADS * ALLOCS_EACH) {
             printf("FAIL: count ok=%d fail=%d\n", ok, fail);
@@ -85,7 +85,7 @@ int main(void) {
         }
 
         cc_arena_reset(g_arena);
-        if (g_arena.a->prev || g_arena.a->ovf_head || cc_arena_overflow_raw_bytes(g_arena)) {
+        if (g_arena.a->slab->prev || g_arena.a->ovf_head || cc_arena_overflow_raw_bytes(g_arena)) {
             printf("FAIL: reset left chain/ovf\n");
             return 1;
         }

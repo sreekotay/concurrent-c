@@ -2583,11 +2583,13 @@ cc_atomic_fetch_sub_relaxed(ptr, value);
 cc_atomic_load_acquire(ptr);
 cc_atomic_store_release(ptr, value);
 cc_atomic_cas_acquire(ptr, expected_ptr, desired);
+cc_atomic_cas_acq_rel(ptr, expected_ptr, desired);
 ```
 
 Relaxed forms are for a location that a lock already serializes, where the
-lock's acquire and release are the only ordering needed. `cas_acquire` may
-fail spuriously and is for a retry loop. On the compatibility path a relaxed
+lock's acquire and release are the only ordering needed. `cas_acquire` and
+`cas_acq_rel` may fail spuriously and are for a retry loop; acq_rel is the
+form for a transition that also publishes what the caller did before it. On the compatibility path a relaxed
 access is a volatile access and the acquire and release forms are full
 barriers; the non-atomic fallback maps every form to its plain counterpart.
 
@@ -8204,35 +8206,45 @@ fields where safe.
 
 **Growable chained bump allocator:**
 
-The arena implementation uses a "swapping chain" pattern. The root `CCArena` struct always holds the current (active) block. On growth, the current block's state is pushed into a heap-allocated extent struct linked via `prev`, and the root is updated with a fresh, larger buffer.
+A host owns a chain of slab records, newest first. Each record is created with its bytes and never rewritten: `base` and `capacity` are immutable, and `state` packs the tip and the live count into one word (`live:32 | offset:32`). A bump, a tip pop, a last-live rewind, a tip regrow in place, and a checkpoint carve are each one CAS on that word, so the tip and the count can never disagree and none of them needs the lock. The host embeds its first slab; grow allocates a fresh record and publishes it as `slab` with a release store, leaving the previous record exactly as it was, so a bump that raced the grow still lands on the slab it read and is credited there. One slab holds at most `CC_ARENA_SLAB_MAX` (4 GiB) bytes.
 
 ```c
-struct CCArena {
-    uint8_t* base;       // current block's buffer
-    size_t   capacity;   // current block's capacity
-    /* atomic */ size_t offset;       // tip in current block
-    /* atomic */ size_t live_allocs;  // for release / tip rewind
-    uint64_t provenance; // monotonic arena id / epoch
-    uint32_t _flags;     // HEAP_OWNED, IS_EXTENT, ALLOW/USED_HEAP_OVERFLOW, NON_REWINDABLE
-    uint16_t block_idx;  // current block generation (0 = initial)
-    uint16_t block_max;  // budget: 0 = unbounded, 1 = fixed, N = max
-    CCArena* prev;       // previous full block (NULL if none)
-    /* ovf_head / ovf_chunks / overflow_bytes / meta_lock / cp_loans — see cc_arena.cch */
+struct CCArenaSlab {
+    uint8_t*  base;        // immutable
+    size_t    capacity;    // immutable, <= CC_ARENA_SLAB_MAX
+    /* atomic */ uint64_t state;   // live:32 | offset:32, every change a CAS
+    size_t    tail_carved; // where a live tail child's region begins (== capacity when none)
+    CCArenaSlab* prev;     // the slab this one grew from (NULL for L1)
+    uint32_t  flags;       // HEAP_OWNED: cc_free(base) at teardown
+    uint16_t  block_idx;   // 0 = L1
+};
+
+struct CCArenaHost {
+    CCArenaSlab* slab;     // current slab; grow publishes a new record (release), readers acquire
+    CCArenaSlab  l1;       // the first slab's record, in the host
+    uint64_t provenance;   // monotonic arena id / epoch
+    uint32_t _flags;       // ALLOW/USED_HEAP_OVERFLOW, HOST_INLINE, TAIL_CHILD, REUSE, ...
+    uint16_t block_max;    // budget: 0 = unbounded, 1 = fixed, N = max
+    /* ovf_head / ovf_chunks / overflow_bytes / meta_lock / children / active / owner_free / reuse_free — see cc_arena.cch */
 };
 ```
+
+The meta lock serializes grow, the overflow lists, the owner and class freelists, active-child swaps, and lifetime-parent records; it never covers the slab word.
 
 **Growth (slow path):**
 
 ```
-On alloc failure in current block:
-  1. If block_max != 1 and block_idx + 1 < block_max (or block_max == 0):
-       allocate extent struct + new buffer (max(1.5× cap, need, 4096)),
-       push prior slab onto prev, install new root tip, retry
-  2. Else if heap overflow is enabled: allocate via overflow path
-  3. Else return NULL
+On a bump that does not fit the current slab:
+  1. Take the lock; retry the bump (another thread may have grown).
+  2. If block_max != 1 and block_idx + 1 < block_max (or block_max == 0):
+       allocate a slab record + buffer (max(1.5× cap, need, 4096), capped at
+       CC_ARENA_SLAB_MAX), chain it to the current record, publish it as the
+       current slab, retry the bump
+  3. Else if heap overflow is enabled: allocate via overflow path
+  4. Else return NULL
 ```
 
-**Reset:** Drain overflow, walk `prev` chain to the original root, free intermediate buffers and extent structs, restore root state, set offset = 0, advance provenance.
+**Reset:** Drain overflow, free every grown slab (buffer and record), make the embedded L1 record current again with `state = 0`, advance provenance.
 
 **Checkpoint/Restore:** A checkpoint is an active child arena. Capture carves a child host on the innermost active host's L1 tail (or heap-roots one when the tail is too small; an uncappable host with no tail returns an unarmed handle), attaches it as a lifetime child, parks the parent tip at the slab end, and sets `active`. Fresh allocations through the parent forward to the innermost active child; realloc and release act on the host that owns the pointer. Restore verifies the child against the parent's record list, refuses while an armed inner checkpoint is active, then frees the child (extents, overflow, epoch) and pops the parent tip back to the child's start offset. Abandon consumes the handle and leaves the child active. Attach records, holes, and overflow never refuse a capture or a restore; reset and free tear down an active child like any other.
 

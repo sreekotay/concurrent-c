@@ -41,12 +41,12 @@ static int test_vec_alias_and_view(void) {
     /* Destroy through the live handle; the stale alias is a no-op; a
      * second destroy of the live handle is a no-op. */
     {
-        size_t live = cc_atomic_load(&a.a->live_allocs);
+        size_t live = cc_arena_slab_live(a.a);
         v.destroy();
-        if (cc_atomic_load(&a.a->live_allocs) != live - 1) return fail(1, "payload released once");
+        if (cc_arena_slab_live(a.a) != live - 1) return fail(1, "payload released once");
         alias.destroy();
         v.destroy();
-        if (cc_atomic_load(&a.a->live_allocs) != live - 1) return fail(1, "no double release");
+        if (cc_arena_slab_live(a.a) != live - 1) return fail(1, "no double release");
     }
     printf("  vec alias / view OK\n");
     return 0;
@@ -79,12 +79,12 @@ static int test_string_alias_view_and_destroy(void) {
     if (!cc_string_failed(&alias)) return fail(2, "stale alias is poisoned by the attempt");
 
     {
-        size_t live = cc_atomic_load(&a.a->live_allocs);
+        size_t live = cc_arena_slab_live(a.a);
         cc_string_destroy(&s);
-        if (cc_atomic_load(&a.a->live_allocs) != live - 1) return fail(2, "payload released once");
+        if (cc_arena_slab_live(a.a) != live - 1) return fail(2, "payload released once");
         cc_string_destroy(&alias);
         cc_string_destroy(&s);
-        if (cc_atomic_load(&a.a->live_allocs) != live - 1) return fail(2, "no double release");
+        if (cc_arena_slab_live(a.a) != live - 1) return fail(2, "no double release");
         if (cc_string_len(&s) != 0 || !cc_string_push(&s, "again", a)) return fail(2, "reusable after destroy");
     }
     printf("  string alias / view / destroy OK\n");
@@ -93,22 +93,22 @@ static int test_string_alias_view_and_destroy(void) {
 
 static int test_string_destroy_sigil_and_release(void) {
     CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
-    size_t live0 = cc_atomic_load(&a.a->live_allocs);
+    size_t live0 = cc_arena_slab_live(a.a);
     {
         CCString s = cc_string_from("a string long enough to promote", a) @destroy;
         if (cc_string_is_inline(&s)) return fail(3, "promoted");
-        if (cc_atomic_load(&a.a->live_allocs) != live0 + 2) return fail(3, "header + payload");
+        if (cc_arena_slab_live(a.a) != live0 + 2) return fail(3, "header + payload");
     }
     /* Scope exit released the payload (tip pop) and listed the header. */
-    if (cc_atomic_load(&a.a->live_allocs) != live0 + 1) return fail(3, "scope destroy released");
+    if (cc_arena_slab_live(a.a) != live0 + 1) return fail(3, "scope destroy released");
     if (!a.a->owner_free) return fail(3, "header listed for rebirth");
     {
         /* The listed header is reborn with a fresh token. */
         CCString t = cc_string_from("another string long enough", a) @destroy;
-        if (cc_atomic_load(&a.a->live_allocs) != live0 + 2) return fail(3, "reborn header, new payload");
+        if (cc_arena_slab_live(a.a) != live0 + 2) return fail(3, "reborn header, new payload");
         if (a.a->owner_free) return fail(3, "list drained");
         cc_string_release(&t, a);     /* legacy two-argument spelling */
-        if (cc_atomic_load(&a.a->live_allocs) != live0 + 1) return fail(3, "release");
+        if (cc_arena_slab_live(a.a) != live0 + 1) return fail(3, "release");
     }
     printf("  string @destroy / release OK\n");
     return 0;
@@ -125,7 +125,7 @@ static int test_map_destroy_and_string_swap(void) {
     }
     if (*m->get(42) != 84) return fail(4, "get");
     m->destroy();
-    if (cc_atomic_load(&a.a->live_allocs) != 0) return fail(4, "map released everything");
+    if (cc_arena_slab_live(a.a) != 0) return fail(4, "map released everything");
 
     /* Arena swap moves a heap string into the new arena's owner. */
     {
@@ -138,7 +138,7 @@ static int test_map_destroy_and_string_swap(void) {
             if (!cc_string_push(&s, "-grow-in-b", b)) return fail(4, "swap grow");
         }
         if (cc_string_owner(&s)->arena != b.a) return fail(4, "owned by b after swap");
-        if (cc_atomic_load(&a.a->live_allocs) != 1) return fail(4, "a keeps only the listed header");
+        if (cc_arena_slab_live(a.a) != 1) return fail(4, "a keeps only the listed header");
         if (strncmp(cc_string_cstr(&s, b), "born in a, long enough-grow-in-b", 32) != 0) return fail(4, "bytes moved");
         cc_string_destroy(&s);
     }

@@ -20,6 +20,7 @@
 #include <ccc/std/map.cch>
 #include <stdio.h>
 #include <string.h>
+#include <pthread.h>
 #include <time.h>
 
 #ifndef ROUNDS
@@ -49,6 +50,38 @@ static void run(const char *name, BenchFn fn, CCArena a, size_t iters) {
     printf("%-46s %10.1f ns/op %10.2f Mop/s\n", name, best * 1e9 / (double)iters,
            (double)iters / best / 1e6);
 }
+
+/* ---- contended: 4 threads on one shared arena ------------------------ */
+enum { CONTEND_THREADS = 4 };
+typedef struct { CCArena a; size_t n; int release; } ContendArg;
+static void *contend_worker(void *p) {
+    ContendArg *c = (ContendArg *)p;
+    size_t i;
+    uint64_t s = 0;
+    for (i = 0; i < c->n; i++) {
+        void *q = cc_arena_alloc(c->a, 64, 8);
+        s += (uintptr_t)q;
+        if (c->release) cc_arena_release_sized(c->a, q, 64);
+    }
+    sink += s;
+    return NULL;
+}
+static double b_contend(CCArena a, size_t n, int release) {
+    pthread_t th[CONTEND_THREADS];
+    ContendArg args[CONTEND_THREADS];
+    int t;
+    double t0 = now_sec();
+    for (t = 0; t < CONTEND_THREADS; t++) {
+        args[t].a = a;
+        args[t].n = n / CONTEND_THREADS;
+        args[t].release = release;
+        pthread_create(&th[t], NULL, contend_worker, &args[t]);
+    }
+    for (t = 0; t < CONTEND_THREADS; t++) pthread_join(th[t], NULL);
+    return now_sec() - t0;
+}
+static double b_alloc_contended(CCArena a, size_t n) { return b_contend(a, n, 0); }
+static double b_alloc_release_contended(CCArena a, size_t n) { return b_contend(a, n, 1); }
 
 /* ---- alloc ---------------------------------------------------------- */
 static double b_alloc_shared(CCArena a, size_t n) {
@@ -336,6 +369,14 @@ int main(void) {
     printf("arena_lifetime_bench (ROUNDS=%d, best of)\n", ROUNDS);
     printf("%-46s %14s %16s\n", "row", "ns/op", "throughput");
     run("alloc 64B shared, reset/4096", b_alloc_shared, a, 4096 * 1000);
+    {
+        /* Contended rows: every thread bumps the same slab word. Aggregate
+         * wall time per operation across the threads. */
+        CCArena big = cc_arena_heap(megabytes(192));
+        run("alloc 64B shared, 4 threads (contended)", b_alloc_contended, big, 2000000);
+        run("alloc + release_sized 64B, 4 threads (contended)", b_alloc_release_contended, big, 2000000);
+        cc_arena_free(&big);
+    }
     run("alloc 64B local, reset/4096", b_alloc_local, a, 4096 * 1000);
     run("checkpoint + restore (empty)", b_cp_empty, a, 1000000);
     run("checkpoint + 3 allocs + restore (@scratch shape)", b_cp_scratch, a, 1000000);

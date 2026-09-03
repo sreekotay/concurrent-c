@@ -80,7 +80,7 @@ static int test_release_during_scratch_does_not_touch_restore(void) {
      * parent release: it neither refuses nor poisons the restore. */
     if (!cc_arena_release(a, keep)) return fail(2, "release keep-set overflow during scratch");
     if (!cc_arena_restore(cp)) return fail(2, "restore after keep-set release");
-    if (cc_atomic_load(&a.a->live_allocs) != 1) return fail(2, "live_allocs after restore");
+    if (cc_arena_slab_live(a.a) != 1) return fail(2, "live_allocs after restore");
     if (!cc_arena_release(a, slab)) return fail(2, "pre-checkpoint slab after restore");
     cc_arena_free(&a);
     printf("  releases during scratch leave restore alone OK\n");
@@ -129,7 +129,7 @@ static int test_lifo_armed_inner_refuses_outer(void) {
     if (cc_arena_restore(cp2)) return fail(8, "consumed inner restore must refuse");
     if (!cc_arena_restore(cp1)) return fail(8, "outer after inner");
     if (cc_arena_restore(cp1)) return fail(8, "consumed outer restore must refuse");
-    if (cc_atomic_load(&a.a->offset) != 32) return fail(8, "parent tip after both restores");
+    if (cc_arena_slab_offset(a.a) != 32) return fail(8, "parent tip after both restores");
     cc_arena_free(&a);
     printf("  LIFO: armed inner pins outer OK\n");
     return 0;

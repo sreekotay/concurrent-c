@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include <time.h>
 
 #ifndef ROUNDS
@@ -56,6 +57,47 @@ static void *bump_alloc(Bump *b, size_t n, size_t align) {
 static Bump g_bump;
 
 /* ---- alloc ---------------------------------------------------------- */
+/* ---- contended: 4 threads on glibc malloc (per-thread tcache) ---------- */
+enum { CONTEND_THREADS = 4 };
+typedef struct { size_t n; int release; void **keep; } ContendArg;
+static void *contend_worker(void *p) {
+    ContendArg *c = (ContendArg *)p;
+    size_t i;
+    uint64_t s = 0;
+    for (i = 0; i < c->n; i++) {
+        void *q = malloc(64);
+        s += (uintptr_t)q;
+        if (c->release) free(q); else c->keep[i] = q;
+    }
+    sink += s;
+    return NULL;
+}
+static double b_contend(size_t n, int release) {
+    pthread_t th[CONTEND_THREADS];
+    ContendArg args[CONTEND_THREADS];
+    int t;
+    double t0;
+    size_t i;
+    for (t = 0; t < CONTEND_THREADS; t++) {
+        args[t].n = n / CONTEND_THREADS;
+        args[t].release = release;
+        args[t].keep = release ? NULL : (void **)malloc(sizeof(void *) * args[t].n);
+    }
+    t0 = now_sec();
+    for (t = 0; t < CONTEND_THREADS; t++) pthread_create(&th[t], NULL, contend_worker, &args[t]);
+    for (t = 0; t < CONTEND_THREADS; t++) pthread_join(th[t], NULL);
+    t0 = now_sec() - t0;
+    for (t = 0; t < CONTEND_THREADS; t++) {
+        if (args[t].keep) {
+            for (i = 0; i < args[t].n; i++) free(args[t].keep[i]);
+            free(args[t].keep);
+        }
+    }
+    return t0;
+}
+static double b_malloc_contended(size_t n) { return b_contend(n, 0); }
+static double b_malloc_free_contended(size_t n) { return b_contend(n, 1); }
+
 static double b_malloc_free(size_t n) {
     size_t i;
     double t0 = now_sec();
@@ -346,6 +388,8 @@ int main(void) {
     printf("arena_lifetime_c_baseline (ROUNDS=%d, best of)\n", ROUNDS);
     printf("%-46s %14s %16s\n", "row", "ns/op", "throughput");
     run("alloc 64B shared, reset/4096", b_malloc_free, 4096 * 1000);            /* C: malloc+free */
+    run("alloc 64B shared, 4 threads (contended)", b_malloc_contended, 2000000); /* C: malloc x4 threads, freed after */
+    run("alloc + release_sized 64B, 4 threads (contended)", b_malloc_free_contended, 2000000); /* C: malloc+free x4 threads */
     run("alloc 64B local, reset/4096", b_bump_alloc, 4096 * 1000);              /* C: hand bump */
     run("checkpoint + restore (empty)", b_mark_reset_empty, 1000000);           /* C: mark/reset */
     run("checkpoint + 3 allocs + restore (@scratch shape)", b_mark_3_reset, 1000000);

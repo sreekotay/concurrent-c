@@ -42,10 +42,10 @@ int main(void) {
         cp = cc_arena_checkpoint(a.a);
         if (!cp.arena) return fail(2, "checkpoint");
         if (!cc_arena_release(a.a, p)) return fail(2, "release");
-        if (cc_atomic_load(&a.a->offset) != a.a->capacity)
+        if (cc_arena_slab_offset(a.a) != a.a->slab->capacity)
             return fail(2, "parent tip stays at the child while it is active");
         if (!cc_arena_restore(cp)) return fail(2, "restore after release");
-        if (cc_atomic_load(&a.a->offset) != 0)
+        if (cc_arena_slab_offset(a.a) != 0)
             return fail(2, "last-live pop rewinds to zero");
         cc_arena_destroy(&a);
     }

@@ -6,7 +6,7 @@ int main(void) {
     // --- cc_arena_stack: declares storage + arena, stack-first growable ---
     {
         cc_arena_stack(a, 64);
-        uint8_t *stack_buf = a.a->base;
+        uint8_t *stack_buf = a.a->slab->base;
         if (!stack_buf) {
             printf("FAIL: cc_arena_stack init\n");
             return 1;
@@ -19,29 +19,29 @@ int main(void) {
             printf("FAIL: stack should allow overflow by default\n");
             return 1;
         }
-        if (a.a->_flags & CC_ARENA_FLAG_HEAP_OWNED) {
+        if ((a.a->slab->flags & CC_ARENA_SLAB_HEAP_OWNED)) {
             printf("FAIL: first slab must not be heap-owned\n");
             return 1;
         }
 
         void *p = cc_arena_alloc(a, 48, 8);
-        if (!p || a.a->base != stack_buf) {
+        if (!p || a.a->slab->base != stack_buf) {
             printf("FAIL: first alloc should stay on stack slab\n");
             return 1;
         }
 
         void *q = cc_arena_alloc(a, 64, 8);
-        if (!q || a.a->block_idx == 0) {
+        if (!q || a.a->slab->block_idx == 0) {
             printf("FAIL: should overflow to heap\n");
             return 1;
         }
 
         cc_arena_reset(a);
-        if (a.a->base != stack_buf || a.a->block_idx != 0 || a.a->prev != NULL) {
+        if (a.a->slab->base != stack_buf || a.a->slab->block_idx != 0 || a.a->slab->prev != NULL) {
             printf("FAIL: reset must restore stack slab\n");
             return 1;
         }
-        if (cc_atomic_load(&a.a->offset) != 0) {
+        if (cc_arena_slab_offset(a.a) != 0) {
             printf("FAIL: offset after reset\n");
             return 1;
         }
@@ -97,7 +97,7 @@ int main(void) {
             printf("FAIL: grow to second slab\n");
             return 3;
         }
-        if (b.a->block_idx != 1) {
+        if (b.a->slab->block_idx != 1) {
             printf("FAIL: expected block_idx 1\n");
             return 3;
         }

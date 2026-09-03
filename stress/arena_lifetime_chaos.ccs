@@ -276,7 +276,7 @@ static int bench_mixed_lifetime_chaos(void) {
         println(@string(`  mixed_lifetime: live=${live} alloc=${ops_alloc} rel=${ops_rel} tip=${ops_tip} bury=${ops_bury} tip_moves=${tip_moves} peak_gross=${peak_gross} peak_ovf=${peak_ovf} peak_rss=${peak_rss_out} (Δ${peak_delta}) $~float_dec(3){now_sec() - t0}s`, @scratch)) !>;
     }
 
-    if (!(a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) && a.a->block_idx == 0) {
+    if (!(a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) && a.a->slab->block_idx == 0) {
         free(slots);
         a.destroy();
         return fail("chaos expected extent growth or overflow on small root");
@@ -314,7 +314,7 @@ static int bench_mixed_lifetime_chaos(void) {
         a.destroy();
         return fail("chaos reset left overflow");
     }
-    if (a.a->block_idx != 0 || a.a->prev != NULL) {
+    if (a.a->slab->block_idx != 0 || a.a->slab->prev != NULL) {
         free(slots);
         a.destroy();
         return fail("chaos reset left extents");
@@ -480,7 +480,7 @@ static int bench_release_scramble(void) {
     }
 
     cc_arena_reset(a);
-    if (a.a->ovf_head || cc_arena_overflow_raw_bytes(a) || a.a->prev || a.a->block_idx != 0) {
+    if (a.a->ovf_head || cc_arena_overflow_raw_bytes(a) || a.a->slab->prev || a.a->slab->block_idx != 0) {
         free(ptrs); free(tags); free(sizes); free(alive);
         a.destroy();
         return fail("scramble reset incomplete");
@@ -615,12 +615,12 @@ static int bench_shared_concurrent_mixed(void) {
     }
 
     cc_arena_reset(g_shared);
-    if (CC_ATOMIC_LOAD(&g_shared.a->offset) != 0 &&
-        CC_ATOMIC_LOAD(&g_shared.a->live_allocs) != 0) {
+    if (cc_arena_slab_offset(g_shared.a) != 0 &&
+        cc_arena_slab_live(g_shared.a) != 0) {
         /* After release-all, live should be 0; offset may be non-zero if
          * NON_REWINDABLE holes remain — reset clears. */
     }
-    if (CC_ATOMIC_LOAD(&g_shared.a->live_allocs) != 0)
+    if (cc_arena_slab_live(g_shared.a) != 0)
         return fail("shared live_allocs nonzero after worker cleanup+reset");
     return 0;
 }

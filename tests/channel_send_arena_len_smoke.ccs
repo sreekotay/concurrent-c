@@ -15,7 +15,7 @@ int main(void) {
     memcpy(p, "arena-len-ok", 12);
 
     /* Offset before detach — designated-init evaluation order is unspecified. */
-    size_t off = (size_t)((uint8_t*)p - (uint8_t*)a.a->base);
+    size_t off = (size_t)((uint8_t*)p - (uint8_t*)a.a->slab->base);
     Chunk c = {0};
     c.offset = off;
     c.len = 12;
@@ -35,7 +35,7 @@ int main(void) {
     if (cc_is_err(recv_res) || !cc_value(recv_res)) return 4;
 
     CCSlice view = cc_arena_slice(got.arena,
-                                  (uint8_t*)got.arena.a->base + got.offset,
+                                  (uint8_t*)got.arena.a->slab->base + got.offset,
                                   got.len);
     if (view.len != 12) return 5;
     if (memcmp(view.ptr, "arena-len-ok", 12) != 0) return 6;

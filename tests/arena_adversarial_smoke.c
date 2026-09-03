@@ -38,11 +38,11 @@ static int test_owner_misuse(void) {
     /* Manual release of the payload out from under the owner: the owner's
      * later release finds the block beyond the tip and refuses, the header
      * still dies once, and the counts stay consistent. */
-    live = cc_atomic_load(&a.a->live_allocs);
+    live = cc_arena_slab_live(a.a);
     if (!cc_arena_release_sized(a, v.data, 4 * sizeof(uint64_t))) return fail(1, "manual payload release");
-    if (cc_atomic_load(&a.a->live_allocs) != live - 1) return fail(1, "payload counted once");
+    if (cc_arena_slab_live(a.a) != live - 1) return fail(1, "payload counted once");
     U64Vec_destroy(&v);
-    if (cc_atomic_load(&a.a->live_allocs) != live - 1) return fail(1, "destroy after manual release does not double count");
+    if (cc_arena_slab_live(a.a) != live - 1) return fail(1, "destroy after manual release does not double count");
     if (cc_arena_owner_live(o, tok)) return fail(1, "token dead");
     if (a.a->owner_free != o) return fail(1, "header listed");
 
@@ -50,7 +50,7 @@ static int test_owner_misuse(void) {
     if (U64Vec_push(&alias, 7) == 0) return fail(1, "stale alias push refused");
     if (U64Vec_as_slice(&alias).len != 0) return fail(1, "stale alias view empty");
     U64Vec_destroy(&alias);
-    if (cc_atomic_load(&a.a->live_allocs) != live - 1) return fail(1, "stale alias destroy no-op");
+    if (cc_arena_slab_live(a.a) != live - 1) return fail(1, "stale alias destroy no-op");
 
     /* The listed header is reborn for a new vec; the old alias still
      * mismatches (fresh token) even though it names the same header. */
@@ -159,17 +159,17 @@ static int test_release_misuse(void) {
     if (cc_arena_release(a, stack_bytes)) return fail(3, "stack pointer refused");
     if (cc_arena_release_sized(a, p, 1000)) return fail(3, "size beyond the tip refused");
     if (cc_arena_release_sized(a, (uint8_t *)q + 8, 64)) return fail(3, "interior pointer with tip-overrunning size refused");
-    if (cc_atomic_load(&a.a->live_allocs) != 2) return fail(3, "refusals leave the count");
+    if (cc_arena_slab_live(a.a) != 2) return fail(3, "refusals leave the count");
     /* Interior pointers inside the live extent cannot be told apart from
      * an allocation by a bump arena; they become holes, never pops. */
     {
-        size_t off = cc_atomic_load(&a.a->offset);
+        size_t off = cc_arena_slab_offset(a.a);
         if (!cc_arena_release_sized(a, (uint8_t *)q + 8, 8)) return fail(3, "interior hole accepted");
-        if (cc_atomic_load(&a.a->offset) != off) return fail(3, "interior release never pops");
-        if (cc_atomic_load(&a.a->live_allocs) != 1) return fail(3, "interior counted as a hole");
+        if (cc_arena_slab_offset(a.a) != off) return fail(3, "interior release never pops");
+        if (cc_arena_slab_live(a.a) != 1) return fail(3, "interior counted as a hole");
     }
     if (!cc_arena_release_sized(a, q, 32)) return fail(3, "real tip release");
-    if (cc_atomic_load(&a.a->offset) != 0) return fail(3, "last live rewinds");
+    if (cc_arena_slab_offset(a.a) != 0) return fail(3, "last live rewinds");
     if (cc_arena_release(a, p)) return fail(3, "nothing live: refused");
     free(foreign_block);
     cc_arena_free(&a);
@@ -236,6 +236,33 @@ static void *grow_worker(void *arg) {
     return NULL;
 }
 
+/* Reuse + in-place regrow: a block grown at the tip to a non-class size
+ * must still be a class-sized range when it is later listed, or the list
+ * hands out bytes that overlap whatever was bumped above it. */
+static int test_reuse_regrow(void) {
+    CCArena a = cc_arena_heap(kilobytes(64));
+    uint8_t *x;
+    uint8_t *y;
+    uint8_t *z;
+    if (!a.base) return fail(6, "heap");
+    if (!cc_arena_set_reuse(a, true)) return fail(6, "reuse");
+    x = (uint8_t *)cc_arena_alloc(a, 16, 8);
+    if (!x) return fail(6, "alloc x");
+    /* Tip regrow in place to 40 bytes: under reuse this is a 64-byte block. */
+    if (cc_arena_realloc(a, a, x, 16, 40, 8) != x) return fail(6, "regrow in place");
+    y = (uint8_t *)cc_arena_alloc(a, 16, 8);
+    if (!y) return fail(6, "alloc y");
+    if (y < x + 64) return fail(6, "y overlaps the regrown class block");
+    if (!cc_arena_release_sized(a, x, 40)) return fail(6, "release x");
+    z = (uint8_t *)cc_arena_alloc(a, 64, 8);
+    if (!z) return fail(6, "alloc z");
+    if (z == x && z + 64 > y) return fail(6, "listed block overlaps y");
+    if (z != x) return fail(6, "released class block was not re-served");
+    cc_arena_free(&a);
+    printf("  reuse regrow OK\n");
+    return 0;
+}
+
 static int test_threads(void) {
     pthread_t th[THREADS];
     int i;
@@ -286,6 +313,7 @@ int main(void) {
     if ((rc = test_checkpoint_misuse()) != 0) return rc;
     if ((rc = test_release_misuse()) != 0) return rc;
     if ((rc = test_token_registry()) != 0) return rc;
+    if ((rc = test_reuse_regrow()) != 0) return rc;
     if ((rc = test_threads()) != 0) return rc;
     printf("arena_adversarial_smoke OK\n");
     return 0;

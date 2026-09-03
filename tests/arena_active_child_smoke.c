@@ -22,13 +22,13 @@ static int test_forward_regrow_pop(void) {
     pre = cc_arena_alloc(a, 64, 8);
     if (!pre) return fail(1, "pre");
     memset(pre, 0x11, 64);
-    off0 = cc_atomic_load(&a.a->offset);
+    off0 = cc_arena_slab_offset(a.a);
 
     cp = cc_arena_checkpoint(a);
     if (!cp.arena || cp.parent != a.a || cp.offset != off0) return fail(1, "checkpoint shape");
     if (a.a->active != cp.arena) return fail(1, "child is active");
     if (!(cp.arena->_flags & CC_ARENA_FLAG_TAIL_CHILD)) return fail(1, "tail child");
-    if (cc_atomic_load(&a.a->offset) != a.a->capacity) return fail(1, "parent tip parked at capacity");
+    if (cc_arena_slab_offset(a.a) != a.a->slab->capacity) return fail(1, "parent tip parked at capacity");
 
     /* Fresh allocation through the parent handle lands in the child. */
     s = cc_arena_alloc(a, 100, 8);
@@ -43,7 +43,7 @@ static int test_forward_regrow_pop(void) {
     grown = cc_arena_realloc(a, a, pre, 64, 200, 8);
     if (!grown) return fail(1, "regrow");
     if (cc__arena_owner_host(a.a, grown) != a.a) return fail(1, "regrow stays with the parent");
-    if (a.a->block_idx != 1) return fail(1, "regrow took a parent extent");
+    if (a.a->slab->block_idx != 1) return fail(1, "regrow took a parent extent");
     if (((unsigned char *)grown)[0] != 0x11 || ((unsigned char *)grown)[63] != 0x11)
         return fail(1, "regrow copied the prefix");
 
@@ -56,9 +56,9 @@ static int test_forward_regrow_pop(void) {
     if (cc_arena_restore(cp)) return fail(1, "consumed handle refuses");
     /* The old root slab is now an extent (the regrow grew the root); the
      * pop returned its offset to where the child began. */
-    if (a.a->prev == NULL || cc_atomic_load(&a.a->prev->offset) != off0)
+    if (a.a->slab->prev == NULL || cc__slab_offset(a.a->slab->prev) != off0)
         return fail(1, "tail popped on the carved slab");
-    if (a.a->prev->tail_carved != a.a->prev->capacity) return fail(1, "carve mark cleared");
+    if (a.a->slab->prev->tail_carved != a.a->slab->prev->capacity) return fail(1, "carve mark cleared");
     after = cc_arena_alloc(a, 8, 8);
     if (!after) return fail(1, "alloc after restore");
     if (cc__arena_owner_host(a.a, after) != a.a) return fail(1, "post-restore alloc is the parent's");
@@ -76,15 +76,15 @@ static int test_pop_on_root(void) {
     if (!a.base) return fail(2, "heap");
     pre = cc_arena_alloc(a, 48, 8);
     if (!pre) return fail(2, "pre");
-    off0 = cc_atomic_load(&a.a->offset);
+    off0 = cc_arena_slab_offset(a.a);
     cp = cc_arena_checkpoint(a);
     if (!cp.arena) return fail(2, "cp");
     if (!cc_arena_alloc(a, 500, 8)) return fail(2, "scratch");
     if (!cc_arena_restore(cp)) return fail(2, "restore");
-    if (cc_atomic_load(&a.a->offset) != off0) return fail(2, "tip popped to the checkpoint offset");
-    if (cc_atomic_load(&a.a->live_allocs) != 1) return fail(2, "child region no longer counted");
+    if (cc_arena_slab_offset(a.a) != off0) return fail(2, "tip popped to the checkpoint offset");
+    if (cc_arena_slab_live(a.a) != 1) return fail(2, "child region no longer counted");
     after = cc_arena_alloc(a, 8, 8);
-    if ((uint8_t *)after != a.a->base + off0) return fail(2, "next alloc at the checkpoint offset");
+    if ((uint8_t *)after != a.a->slab->base + off0) return fail(2, "next alloc at the checkpoint offset");
     cc_arena_free(&a);
     printf("  pop on root OK\n");
     return 0;
@@ -111,7 +111,7 @@ static int test_nested_and_abandon(void) {
     x = cc_arena_alloc(a, 32, 8);
     if (!x || cc__arena_owner_host(a.a, x) != outer.arena->active) return fail(3, "allocs keep landing in the abandoned inner");
     if (!cc_arena_restore(outer)) return fail(3, "outer restore after abandon");
-    if (cc_atomic_load(&a.a->offset) != 0 || a.a->active) return fail(3, "all scratch gone");
+    if (cc_arena_slab_offset(a.a) != 0 || a.a->active) return fail(3, "all scratch gone");
     cc_arena_free(&a);
     printf("  nested / abandon OK\n");
     return 0;
@@ -127,7 +127,7 @@ static int test_reset_and_free_with_active_child(void) {
     if (!cc_arena_alloc(a, 3000, 8)) return fail(4, "scratch grows the child");
     cc_arena_reset(a);
     if (a.a->active || a.a->children) return fail(4, "reset tore down the child");
-    if (cc_atomic_load(&a.a->offset) != 0 || a.a->block_idx != 0) return fail(4, "reset state");
+    if (cc_arena_slab_offset(a.a) != 0 || a.a->slab->block_idx != 0) return fail(4, "reset state");
     if (cc_arena_restore(cp)) return fail(4, "stale handle refuses after reset");
     cp = cc_arena_checkpoint(a);
     if (!cp.arena) return fail(4, "cp after reset");

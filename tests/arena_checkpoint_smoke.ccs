@@ -18,24 +18,24 @@ int main(void) {
         CCArenaCheckpoint cp = cc_arena_checkpoint(arena);
         assert(cp.arena != NULL && cp.parent == arena.a);
         /* The child region counts as one live allocation of the parent. */
-        assert(cc_atomic_load(&arena.a->live_allocs) == 2);
+        assert(cc_arena_slab_live(arena.a) == 2);
 
         int* a2 = cc_arena_alloc_T_count(int, arena, 4);
         assert(a2 != NULL);
         a2[0] = 22;
         /* Scratch lands in the child, not the parent's count. */
-        assert(cc_atomic_load(&arena.a->live_allocs) == 2);
-        assert(cc_atomic_load(&cp.arena->live_allocs) == 1);
+        assert(cc_arena_slab_live(arena.a) == 2);
+        assert(cc_arena_slab_live(cp.arena) == 1);
 
         // Restore: the child dies and the parent tip pops back
         assert(cc_arena_restore(cp));
-        assert(cc_atomic_load(&arena.a->live_allocs) == 1);
-        assert(cc_atomic_load(&arena.a->offset) == cp.offset);
+        assert(cc_arena_slab_live(arena.a) == 1);
+        assert(cc_arena_slab_offset(arena.a) == cp.offset);
 
         int* a3 = cc_arena_alloc_T_count(int, arena, 4);
         assert(a3 != NULL);
         // Lands at the checkpoint offset, at or below the scratch a2 used
-        assert((uint8_t*)a3 == arena.a->base + cp.offset);
+        assert((uint8_t*)a3 == arena.a->slab->base + cp.offset);
         assert((uint8_t*)a3 <= (uint8_t*)a2);
 
         // Allocation before checkpoint should remain valid

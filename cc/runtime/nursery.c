@@ -825,7 +825,7 @@ static int cc__nursery_init_body(CCNurseryHost* n) {
 CCResult_CCNursery_CCError cc_nursery_create_on(CCArena a) {
     CCNurseryHost* n;
     CCArenaHost* h = cc_arena_host(a);
-    if (!h || !h->base)
+    if (!cc_arena_valid(h))
         cc_nursery_die("cc_arena_create_nursery: arena is null or dead");
     n = (CCNurseryHost*)cc_arena_alloc(h, sizeof(CCNurseryHost),
                                    _Alignof(CCNurseryHost));

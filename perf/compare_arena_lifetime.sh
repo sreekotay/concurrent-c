@@ -41,7 +41,7 @@ echo "--- current (CC) ---"
 echo ""
 
 echo "--- plain C ---"
-gcc -O2 -std=c11 -DROUNDS="$ROUNDS" "$SCRIPT_DIR/arena_lifetime_c_baseline.c" -o "$OUT/arena_lifetime_c_baseline"
+gcc -O2 -std=c11 -DROUNDS="$ROUNDS" "$SCRIPT_DIR/arena_lifetime_c_baseline.c" -o "$OUT/arena_lifetime_c_baseline" -lpthread
 "$OUT/arena_lifetime_c_baseline" | tee "$OUT/arena_lifetime_c.txt"
 echo ""
 
