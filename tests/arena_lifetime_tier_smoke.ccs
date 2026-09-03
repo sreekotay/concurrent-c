@@ -88,19 +88,23 @@ static int test_detach_refuses_stack(void) {
     return 0;
 }
 
-static int test_try_checkpoint_refuses_slab_hole(void) {
-    CCArena a = cc_arena_heap(256) @destroy;
+static int test_try_checkpoint_above_slab_hole(void) {
+    @errhandler(CCError e) { (void)e; return fail(4, e.message ? e.message : "err"); }
+    CCArena a = cc_arena_heap(512) @destroy;
     void *x;
     void *y;
-    CCArenaCheckpoint !>(CCError) r;
+    CCArenaCheckpoint cp;
     if (!cc_arena_is_live(a)) return fail(4, "heap ctor");
     x = cc_arena_alloc(a, 16, 8);
     y = cc_arena_alloc(a, 16, 8);
     if (!x || !y) return fail(4, "pair");
     if (!cc_arena_release(a, x)) return fail(4, "hole");
-    r = a.try_checkpoint();
-    if (!cc_is_err(r)) return fail(4, "try_checkpoint must refuse slab hole");
-    printf("  try_checkpoint Result refuse OK\n");
+    cp = a.try_checkpoint() !>;
+    if (!cp.arena) return fail(4, "armed above a hole");
+    if (!cc_arena_alloc(a, 32, 8)) return fail(4, "scratch");
+    cp.try_restore() !>;
+    if (cc_arena_live(a) != 1) return fail(4, "live after restore is y only");
+    printf("  try_checkpoint above hole OK\n");
     return 0;
 }
 
@@ -109,7 +113,7 @@ int main(void) {
     if ((rc = test_l1_live_and_result_loan()) != 0) return rc;
     if ((rc = test_l2_and_main()) != 0) return rc;
     if ((rc = test_detach_refuses_stack()) != 0) return rc;
-    if ((rc = test_try_checkpoint_refuses_slab_hole()) != 0) return rc;
+    if ((rc = test_try_checkpoint_above_slab_hole()) != 0) return rc;
     printf("arena_lifetime_tier_smoke OK\n");
     return 0;
 }

@@ -16,21 +16,27 @@ int main(void) {
         *a1 = 11;
 
         CCArenaCheckpoint cp = cc_arena_checkpoint(arena);
-        assert(cp.live_allocs == 1);
+        assert(cp.arena != NULL && cp.parent == arena.a);
+        /* The child region counts as one live allocation of the parent. */
+        assert(cc_atomic_load(&arena.a->live_allocs) == 2);
 
         int* a2 = cc_arena_alloc_T_count(int, arena, 4);
         assert(a2 != NULL);
         a2[0] = 22;
+        /* Scratch lands in the child, not the parent's count. */
         assert(cc_atomic_load(&arena.a->live_allocs) == 2);
+        assert(cc_atomic_load(&cp.arena->live_allocs) == 1);
 
-        // Restore: allocations after checkpoint should be reclaimed
-        cc_arena_restore(cp);
+        // Restore: the child dies and the parent tip pops back
+        assert(cc_arena_restore(cp));
         assert(cc_atomic_load(&arena.a->live_allocs) == 1);
+        assert(cc_atomic_load(&arena.a->offset) == cp.offset);
 
         int* a3 = cc_arena_alloc_T_count(int, arena, 4);
         assert(a3 != NULL);
-        // Should reuse the same slot as a2
-        assert(a3 == a2);
+        // Lands at the checkpoint offset, at or below the scratch a2 used
+        assert((uint8_t*)a3 == arena.a->base + cp.offset);
+        assert((uint8_t*)a3 <= (uint8_t*)a2);
 
         // Allocation before checkpoint should remain valid
         assert(*a1 == 11);

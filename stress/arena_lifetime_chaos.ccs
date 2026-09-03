@@ -468,12 +468,15 @@ static int bench_release_scramble(void) {
         println(@string(`  release_scramble: n=${RELEASE_SCRAMBLE_N} released=${released} live=${live} peak_gross=${peak_gross} peak_ovf=${peak_ovf} peak_rss=${peak_rss_out} (Δ${peak_delta}) $~float_dec(3){now_sec() - t0}s`, @scratch)) !>;
     }
 
-    if (a.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE) {
-        /* expected after individual releases */
-    } else {
-        free(ptrs); free(tags); free(sizes); free(alive);
-        a.destroy();
-        return fail("expected NON_REWINDABLE after mid-lifetime releases");
+    /* Mid-lifetime holes never disable anything: a checkpoint child can
+     * still be carved (or heap-rooted) and restored above them. */
+    {
+        CCArenaCheckpoint cp = cc_arena_checkpoint(a);
+        if (!cp.arena || !cc_arena_restore(cp)) {
+            free(ptrs); free(tags); free(sizes); free(alive);
+            a.destroy();
+            return fail("checkpoint must arm and restore above mid-lifetime holes");
+        }
     }
 
     cc_arena_reset(a);

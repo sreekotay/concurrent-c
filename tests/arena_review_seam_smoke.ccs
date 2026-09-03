@@ -1,5 +1,7 @@
-/* Seams from the arena review: locked tip, restore LIFO / children / floor,
- * last-release vs loans, REGION_OWNED detach after grow, epoch range. */
+/* Seams from the arena review: REGION_OWNED detach after grow, releases
+ * during scratch, children and checkpoints together, LIFO for armed
+ * handles, abandon, scope destroy of a checkpoint, epoch checks across the
+ * active chain, overlay alignment. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include <string.h>
@@ -28,7 +30,8 @@ int main(void) {
         cc_arena_destroy(&taken);
     }
 
-    /* Last-release with an armed checkpoint must not rewind. */
+    /* Releasing a pre-checkpoint object during scratch is a parent release:
+     * it cannot rewind under the child and never blocks the restore. */
     {
         CCArena a = cc_arena_heap(kilobytes(1));
         void *p;
@@ -39,19 +42,22 @@ int main(void) {
         cp = cc_arena_checkpoint(a.a);
         if (!cp.arena) return fail(2, "checkpoint");
         if (!cc_arena_release(a.a, p)) return fail(2, "release");
-        if ((a.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE) == 0)
-            return fail(2, "loan must punch hole");
-        if (cc_arena_restore(cp)) return fail(2, "restore after hole");
+        if (cc_atomic_load(&a.a->offset) != a.a->capacity)
+            return fail(2, "parent tip stays at the child while it is active");
+        if (!cc_arena_restore(cp)) return fail(2, "restore after release");
+        if (cc_atomic_load(&a.a->offset) != 0)
+            return fail(2, "last-live pop rewinds to zero");
         cc_arena_destroy(&a);
     }
 
-    /* Restore refuses while attach records exist; LIFO nested checkpoints. */
+    /* Children and checkpoints mix; LIFO holds for armed handles. */
     {
         CCArena parent = cc_arena_heap(kilobytes(2));
         CCArenaCheckpoint a_cp;
         CCArenaCheckpoint b_cp;
         CCArena child;
         CCSlice pre;
+        CCSlice mid;
         void *p;
         if (!cc_arena_is_live(parent)) return fail(3, "parent");
         p = cc_arena_alloc(parent, 8, 8);
@@ -61,23 +67,31 @@ int main(void) {
         if (!a_cp.arena) return fail(3, "cp A");
         if (!cc_slice_is_from_arena_epoch(pre, parent.a))
             return fail(3, "pre-checkpoint slice still live");
-        p = cc_arena_alloc(parent, 8, 8);
-        if (!p) return fail(3, "mid");
+        mid = cc_arena_alloc_slice_bytes(parent, 8); /* forwarded: child epoch */
+        if (!mid.ptr) return fail(3, "mid");
+        if (!cc_slice_is_from_arena_epoch(mid, parent.a))
+            return fail(3, "forwarded slice is live through the parent handle");
+        if (!cc_slice_is_from_arena_epoch(mid, a_cp.arena))
+            return fail(3, "forwarded slice is live on the child");
         b_cp = cc_arena_checkpoint(parent.a);
-        if (!b_cp.arena) return fail(3, "cp B");
-        if (cc_arena_restore(a_cp)) return fail(3, "non-LIFO A");
+        if (!b_cp.arena || b_cp.parent != a_cp.arena) return fail(3, "cp B nests in A");
+        if (cc_arena_restore(a_cp)) return fail(3, "outer refuses while inner is armed");
         if (!cc_arena_restore(b_cp)) return fail(3, "LIFO B");
         if (!cc_arena_restore(a_cp)) return fail(3, "A after B");
+        if (cc_slice_is_from_arena_epoch(mid, parent.a))
+            return fail(3, "scratch slice is dead after restore");
         child = parent.create_arena(64) !>;
         if (!cc_arena_is_live(child)) return fail(3, "child");
         {
             CCArenaCheckpoint after = cc_arena_checkpoint(parent.a);
-            if (after.arena) return fail(3, "cp with children must be unarmed");
+            if (!after.arena) return fail(3, "checkpoint arms with children attached");
+            if (!cc_arena_restore(after)) return fail(3, "restore with children attached");
         }
         cc_arena_destroy(&parent);
     }
 
-    /* Abandon consumes the top loan without rewind; non-top refuses. */
+    /* Abandon keeps the scratch: the child stays active and dies with the
+     * parent; the handle is consumed. */
     {
         CCArena a = cc_arena_heap(kilobytes(1));
         CCArenaCheckpoint outer;
@@ -93,11 +107,12 @@ int main(void) {
         if (!drop) return fail(4, "drop");
         inner = cc_arena_checkpoint(a.a);
         if (!inner.arena) return fail(4, "inner");
-        if (outer.abandon()) return fail(4, "non-top abandon");
-        if (!inner.abandon()) return fail(4, "top abandon");
+        if (!inner.abandon()) return fail(4, "inner abandon");
         if (inner.arena) return fail(4, "abandoned handle not nulled");
+        if (outer.arena->active == NULL) return fail(4, "abandoned inner stays active");
         if (!cc_arena_restore(outer))
-            return fail(4, "outer restore after inner abandon");
+            return fail(4, "outer restore tears down the abandoned inner");
+        if (a.a->active != NULL) return fail(4, "parent has no active child after restore");
         (void)drop;
         cc_arena_destroy(&a);
     }
@@ -113,7 +128,7 @@ int main(void) {
         cc_arena_destroy(&owner);
     }
 
-    /* Top-of-stack @destroy after a hole abandons the loan so detach works. */
+    /* Scope destroy of a checkpoint restores even after releases inside. */
     {
         CCArena a = cc_arena_heap(kilobytes(1));
         CCArena taken;
@@ -126,42 +141,34 @@ int main(void) {
             if (!cp.arena) return fail(6, "cp");
             if (!cc_arena_release(a.a, p)) return fail(6, "release");
             cc_arena_checkpoint_destroy(&cp);
+            if (cp.arena) return fail(6, "destroy consumed the handle");
         }
+        if (a.a->active) return fail(6, "no active child after destroy");
         taken = a.detach() !>;
-        if (!cc_arena_is_live(taken)) return fail(6, "detach after destroy-abandon");
+        if (!cc_arena_is_live(taken)) return fail(6, "detach after checkpoint destroy");
         cc_arena_destroy(&taken);
     }
 
-    /* Abandon after a loan-punched hole, then last-live root release with
-     * no extents clears NON_REWINDABLE so a later checkpoint can arm. */
+    /* Detach and adopt refuse while a checkpoint child is active. */
     {
         CCArena a = cc_arena_heap(kilobytes(1));
-        CCArenaCheckpoint armed;
-        void *p;
-        void *q;
-        if (!cc_arena_is_live(a)) return fail(8, "heap");
-        p = cc_arena_alloc(a, 16, 8);
-        if (!p) return fail(8, "alloc");
+        CCArena sink = cc_arena_heap(kilobytes(1));
+        CCArenaCheckpoint cp;
+        if (!cc_arena_is_live(a) || !cc_arena_is_live(sink)) return fail(8, "heap");
+        cp = cc_arena_checkpoint(a.a);
+        if (!cp.arena) return fail(8, "cp");
         {
-            CCArenaCheckpoint cp = cc_arena_checkpoint(a.a);
-            if (!cp.arena) return fail(8, "cp");
-            if (!cc_arena_release(a.a, p)) return fail(8, "release in loan");
-            if ((a.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE) == 0)
-                return fail(8, "loan last-live punches hole");
-            cc_arena_checkpoint_destroy(&cp);
+            CCArena !>(CCError) dr = a.detach();
+            if (cc_is_ok(dr)) return fail(8, "detach must refuse with an active child");
         }
-        if (a.a->cp_loans != 0) return fail(8, "loan drained");
-        if ((a.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE) == 0)
-            return fail(8, "flag stays until full rewind");
-        q = cc_arena_alloc(a, 16, 8);
-        if (!q) return fail(8, "alloc after abandon");
-        if (!cc_arena_release(a.a, q)) return fail(8, "full rewind release");
-        if (a.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE)
-            return fail(8, "no-extent last-live must clear hole");
-        armed = cc_arena_checkpoint(a.a);
-        if (!armed.arena) return fail(8, "checkpoint after recover");
-        cc_arena_checkpoint_destroy(&armed);
-        cc_arena_destroy(&a);
+        if (cc_is_ok(sink.adopt(&a))) return fail(8, "adopt must refuse with an active child");
+        if (!cc_arena_restore(cp)) return fail(8, "restore");
+        {
+            CCArena taken = a.detach() !>;
+            if (!cc_arena_is_live(taken)) return fail(8, "detach after restore");
+            cc_arena_destroy(&taken);
+        }
+        cc_arena_destroy(&sink);
     }
 
     /* Overlay aligns up inside the caller region — no silent dead handle. */

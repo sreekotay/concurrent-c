@@ -60,20 +60,24 @@ int main(void) {
         if (!p0) return 3;
         for (int i = 0; i < 4; i++) p0[i] = i;
 
-        // Take checkpoint in block 0
+        // Take checkpoint in block 0: the child is heap-rooted here (a
+        // 64-byte L1 has no tail worth carving)
         CCArenaCheckpoint cp = cc_arena_checkpoint(a);
-        if (cp.block_idx != 0) { printf("FAIL: cp block_idx should be 0\n"); return 3; }
+        if (!cp.arena || cp.parent != a.a) { printf("FAIL: checkpoint child\n"); return 3; }
 
-        // Force growth past block 0
-        for (int i = 0; i < 50; i++) {
-            cc_arena_alloc_T_count(int, a, 10);
+        // Force growth: the scratch child (4 KiB L1) grows its own extents
+        for (int i = 0; i < 400; i++) {
+            if (!cc_arena_alloc_T_count(int, a, 10)) { printf("FAIL: scratch alloc\n"); return 3; }
         }
-        int grown_idx = a.a->block_idx;
-        if (grown_idx == 0) { printf("FAIL: expected growth\n"); return 3; }
+        int grown_idx = cp.arena->block_idx;
+        if (grown_idx == 0 && !(cp.arena->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
+            printf("FAIL: expected child growth\n"); return 3;
+        }
+        if (a.a->block_idx != 0) { printf("FAIL: parent must not grow for scratch\n"); return 3; }
 
-        // Restore checkpoint - should unwind all grown blocks
-        cc_arena_restore(cp);
-        if (a.a->block_idx != 0) { printf("FAIL: restore didn't unwind to block 0, got %d\n", a.a->block_idx); return 3; }
+        // Restore destroys the child and everything it grew
+        if (!cc_arena_restore(cp)) { printf("FAIL: restore\n"); return 3; }
+        if (a.a->block_idx != 0) { printf("FAIL: parent block_idx after restore %d\n", a.a->block_idx); return 3; }
         if (cc_atomic_load(&a.a->live_allocs) != 1) {
             printf("FAIL: restore live_allocs want 1 got %zu\n",
                    (size_t)cc_atomic_load(&a.a->live_allocs));
@@ -84,7 +88,7 @@ int main(void) {
         for (int i = 0; i < 4; i++) {
             if (p0[i] != i) { printf("FAIL: data corrupted after restore\n"); return 3; }
         }
-        printf("  checkpoint/restore: unwound from block_idx=%d to 0 OK\n", grown_idx);
+        printf("  checkpoint/restore: child grew to block_idx=%d and died OK\n", grown_idx);
         cc_arena_free(&a);
     }
 
@@ -284,14 +288,17 @@ int main(void) {
             printf("FAIL: overflow byte accounting after release\n");
             return 7;
         }
-        /* Current-epoch overflow release does not disable checkpoint. */
+        /* Overflow release never disables a checkpoint. */
         {
             CCArenaCheckpoint cp = cc_arena_checkpoint(a);
             if (cp.arena == NULL) {
-                printf("FAIL: checkpoint should work after current-epoch overflow release\n");
+                printf("FAIL: checkpoint should work after overflow release\n");
                 return 7;
             }
-            cc_arena_restore(cp);
+            if (!cc_arena_restore(cp)) {
+                printf("FAIL: restore after overflow release\n");
+                return 7;
+            }
         }
 
         void *moved_src = cc_arena_alloc(a, 64, 8);
@@ -332,13 +339,17 @@ int main(void) {
         free(foreign);
 
         cc_arena_reset(a);
-        if (a.a->_flags & (CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE)) {
-            printf("FAIL: reset should clear non-rewindable flags\n");
+        if (a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) {
+            printf("FAIL: reset should clear the used-overflow flag\n");
             return 7;
         }
-        if (cc_arena_checkpoint(a).arena == NULL) {
-            printf("FAIL: checkpoint should work again after reset\n");
-            return 7;
+        {
+            CCArenaCheckpoint cp = cc_arena_checkpoint(a);
+            if (cp.arena == NULL) {
+                printf("FAIL: checkpoint should work again after reset\n");
+                return 7;
+            }
+            cc_arena_restore(cp);
         }
         cc_arena_free(&a);
         printf("  release + explicit heap overflow + checkpoint gating OK\n");

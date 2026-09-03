@@ -1,0 +1,157 @@
+/* Owner headers with tokens under the containers: a handle copy that
+ * outlived a destroy or a growth move mismatches instead of touching the
+ * bytes; a leftover view of a moved grower fails closed at `at` / `set`;
+ * destroy is idempotent through any copy. CCString gains @destroy. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+static int fail(int code, const char *msg) {
+    printf("FAIL: %s\n", msg);
+    return code;
+}
+
+static int test_vec_alias_and_view(void) {
+    CCArena a = cc_arena_heap(kilobytes(8)) @destroy;
+    Vec::[int] v = vec_new::[int](a);
+    Vec::[int] alias;
+    CCSlice view;
+    int i;
+    if (!cc_arena_is_live(a) || !v.data) return fail(1, "init");
+    for (i = 0; i < 4; i++) {
+        if (v.push(i) != 0) return fail(1, "push");
+    }
+    alias = v;                       /* hand-C copy: same owner, same token */
+    view = v.as_slice().base;
+    if (!cc_slice_is_grower_id(view.id)) return fail(1, "grower view");
+    if (cc_slice_id_gen(view.id) != v.token) return fail(1, "view carries the owner token");
+    if (cc_is_err(view.at(3))) return fail(1, "fresh view reads");
+
+    /* Force a move: bury the payload, then grow past capacity. */
+    (void)cc_arena_alloc(a, 64, 8);
+    for (i = 4; i < 64; i++) {
+        if (v.push(i) != 0) return fail(1, "grow push");
+    }
+    if (v.token == alias.token) return fail(1, "a move rebirths the token");
+    if (!cc_is_err(view.at(0))) return fail(1, "leftover view fails closed after the move");
+    if (alias.push(99) == 0) return fail(1, "stale alias cannot grow");
+    if (alias.as_slice().base.len != 0) return fail(1, "stale alias views as empty");
+    if (v.len() != 64 || *v.get(63) != 63) return fail(1, "live handle intact");
+
+    /* Destroy through the live handle; the stale alias is a no-op; a
+     * second destroy of the live handle is a no-op. */
+    {
+        size_t live = cc_atomic_load(&a.a->live_allocs);
+        v.destroy();
+        if (cc_atomic_load(&a.a->live_allocs) != live - 1) return fail(1, "payload released once");
+        alias.destroy();
+        v.destroy();
+        if (cc_atomic_load(&a.a->live_allocs) != live - 1) return fail(1, "no double release");
+    }
+    printf("  vec alias / view OK\n");
+    return 0;
+}
+
+static int test_string_alias_view_and_destroy(void) {
+    CCArena a = cc_arena_heap(kilobytes(8)) @destroy;
+    CCString s = cc_string_new();
+    CCString alias;
+    CCSlice view;
+    int i;
+    if (!cc_string_push(&s, "twelve-bytes", a)) return fail(2, "promote");
+    if (cc_string_is_inline(&s)) return fail(2, "heap form");
+    if (s.tag < CC_ARENA_OWNER_TOKEN_MIN) return fail(2, "tag is a token");
+    alias = s;
+    view = s.as_slice();
+    if (!cc_slice_is_grower_id(view.id) || cc_slice_id_gen(view.id) != s.tag)
+        return fail(2, "string view carries the token");
+    if (cc_is_err(view.at(0))) return fail(2, "fresh view reads");
+    (void)cc_arena_alloc(a, 64, 8);   /* bury */
+    for (i = 0; i < 20; i++) {
+        if (!cc_string_push(&s, "-more-bytes", a)) return fail(2, "grow");
+    }
+    if (s.tag == alias.tag) return fail(2, "move rebirths the token");
+    if (!cc_is_err(view.at(0))) return fail(2, "leftover string view fails closed");
+    if (cc_string_data(&alias) != NULL || cc_string_as_slice(&alias).len != 0 ||
+        cc_string_cap(&alias) != 0)
+        return fail(2, "stale alias reads as empty");
+    if (cc_string_push(&alias, "x", a) != NULL) return fail(2, "stale alias cannot grow");
+    if (!cc_string_failed(&alias)) return fail(2, "stale alias is poisoned by the attempt");
+
+    {
+        size_t live = cc_atomic_load(&a.a->live_allocs);
+        cc_string_destroy(&s);
+        if (cc_atomic_load(&a.a->live_allocs) != live - 1) return fail(2, "payload released once");
+        cc_string_destroy(&alias);
+        cc_string_destroy(&s);
+        if (cc_atomic_load(&a.a->live_allocs) != live - 1) return fail(2, "no double release");
+        if (cc_string_len(&s) != 0 || !cc_string_push(&s, "again", a)) return fail(2, "reusable after destroy");
+    }
+    printf("  string alias / view / destroy OK\n");
+    return 0;
+}
+
+static int test_string_destroy_sigil_and_release(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    size_t live0 = cc_atomic_load(&a.a->live_allocs);
+    {
+        CCString s = cc_string_from("a string long enough to promote", a) @destroy;
+        if (cc_string_is_inline(&s)) return fail(3, "promoted");
+        if (cc_atomic_load(&a.a->live_allocs) != live0 + 2) return fail(3, "header + payload");
+    }
+    /* Scope exit released the payload (tip pop) and listed the header. */
+    if (cc_atomic_load(&a.a->live_allocs) != live0 + 1) return fail(3, "scope destroy released");
+    if (!a.a->owner_free) return fail(3, "header listed for rebirth");
+    {
+        /* The listed header is reborn with a fresh token. */
+        CCString t = cc_string_from("another string long enough", a) @destroy;
+        if (cc_atomic_load(&a.a->live_allocs) != live0 + 2) return fail(3, "reborn header, new payload");
+        if (a.a->owner_free) return fail(3, "list drained");
+        cc_string_release(&t, a);     /* legacy two-argument spelling */
+        if (cc_atomic_load(&a.a->live_allocs) != live0 + 1) return fail(3, "release");
+    }
+    printf("  string @destroy / release OK\n");
+    return 0;
+}
+
+static int test_map_destroy_and_string_swap(void) {
+    CCArena a = cc_arena_heap(kilobytes(16)) @destroy;
+    CCArena b = cc_arena_heap(kilobytes(16)) @destroy;
+    Map::[int, int] m = map_new::[int, int](a);
+    int i;
+    if (!m) return fail(4, "map");
+    for (i = 0; i < 100; i++) {
+        if (m->insert(i, i * 2) != 0) return fail(4, "insert");
+    }
+    if (*m->get(42) != 84) return fail(4, "get");
+    m->destroy();
+    if (cc_atomic_load(&a.a->live_allocs) != 0) return fail(4, "map released everything");
+
+    /* Arena swap moves a heap string into the new arena's owner. */
+    {
+        CCString s = cc_string_new();
+        CCArenaOwner *o1;
+        if (!cc_string_push(&s, "born in a, long enough", a)) return fail(4, "born");
+        o1 = cc_string_owner(&s);
+        if (!o1 || o1->arena != a.a) return fail(4, "owned by a");
+        for (i = 0; i < 10; i++) {
+            if (!cc_string_push(&s, "-grow-in-b", b)) return fail(4, "swap grow");
+        }
+        if (cc_string_owner(&s)->arena != b.a) return fail(4, "owned by b after swap");
+        if (cc_atomic_load(&a.a->live_allocs) != 1) return fail(4, "a keeps only the listed header");
+        if (strncmp(cc_string_cstr(&s, b), "born in a, long enough-grow-in-b", 32) != 0) return fail(4, "bytes moved");
+        cc_string_destroy(&s);
+    }
+    printf("  map destroy / string swap OK\n");
+    return 0;
+}
+
+int main(void) {
+    int rc;
+    if ((rc = test_vec_alias_and_view()) != 0) return rc;
+    if ((rc = test_string_alias_view_and_destroy()) != 0) return rc;
+    if ((rc = test_string_destroy_sigil_and_release()) != 0) return rc;
+    if ((rc = test_map_destroy_and_string_swap()) != 0) return rc;
+    printf("arena_owner_token_smoke OK\n");
+    return 0;
+}

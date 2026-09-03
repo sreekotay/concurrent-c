@@ -31,8 +31,12 @@ int main(void) {
 
     assert(*a1 == 42);
 
+    /* Restore popped the parent tip back to where the checkpoint began:
+     * the next allocation lands at that offset, below the scratch a2 used. */
     int* a3 = cc_arena_alloc_T_count(int, arena, 8);
-    assert(a3 == a2);
+    assert(a3 != NULL);
+    assert((uint8_t*)a3 == arena.a->base + cp.offset);
+    assert((uint8_t*)a3 <= (uint8_t*)a2);
 
     printf("ufcs_generic_cc_prefix_smoke: OK\n");
     return 0;

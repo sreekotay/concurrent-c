@@ -27,13 +27,18 @@ int main(void) {
         printf("FAIL: expected ovf_head link\n");
         return 1;
     }
-    if (a.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE) {
-        printf("FAIL: overflow alloc must stay rewindable\n");
-        return 1;
-    }
-    if (cc_arena_checkpoint(a).arena == NULL) {
-        printf("FAIL: checkpoint should work after overflow alloc\n");
-        return 1;
+    {
+        /* Arms as a heap-rooted child (the 128-byte L1 has no tail left);
+         * dropped here, it stays active and dies at reset. */
+        CCArenaCheckpoint cp = cc_arena_checkpoint(a);
+        if (cp.arena == NULL) {
+            printf("FAIL: checkpoint should work after overflow alloc\n");
+            return 1;
+        }
+        if (a.a->active != cp.arena) {
+            printf("FAIL: dropped checkpoint child should stay active\n");
+            return 1;
+        }
     }
 
     cc_arena_reset(a);
@@ -46,13 +51,24 @@ int main(void) {
         printf("FAIL: overflow bytes after reset\n");
         return 1;
     }
-    if (a.a->_flags & (CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE)) {
+    if (a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) {
         printf("FAIL: flags after reset\n");
         return 1;
     }
-    if (cc_arena_checkpoint(a).arena == NULL) {
-        printf("FAIL: checkpoint should work after reset\n");
+    if (a.a->active != NULL) {
+        printf("FAIL: reset must tear down the active child\n");
         return 1;
+    }
+    {
+        CCArenaCheckpoint cp = cc_arena_checkpoint(a);
+        if (cp.arena == NULL) {
+            printf("FAIL: checkpoint should work after reset\n");
+            return 1;
+        }
+        if (!cc_arena_restore(cp)) {
+            printf("FAIL: restore after reset\n");
+            return 1;
+        }
     }
     printf("arena_reset_overflow_smoke OK\n");
     return 0;

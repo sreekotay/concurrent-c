@@ -43,26 +43,33 @@ static void test_direct_release(ArenaFactory make_arena) {
 
     assert(cc_arena_release(arena, p));
     assert(cc_atomic_load(&arena.a->live_allocs) == 0);
-    /* Last-live root release rewinds and stays epoch/checkpointable. */
-    assert((arena.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE) == 0);
+    /* Last-live root release rewinds; a checkpoint child arms and restores. */
     {
         CCArenaCheckpoint cp = cc_arena_checkpoint(arena);
-        assert(cp.arena == arena.a);
+        assert(cp.arena != NULL && cp.parent == arena.a);
+        assert(cc_arena_restore(cp));
     }
 
     void *q = cc_arena_alloc(arena, 32, 8);
     assert(q == p);
     assert(cc_atomic_load(&arena.a->live_allocs) == 1);
 
-    /* Non-last release: hole stays; flip to count/release mode. */
+    /* Non-last release: a hole. Holes never disable a checkpoint. */
     void *r = cc_arena_alloc(arena, 32, 8);
     assert(r != NULL);
     assert(cc_arena_release(arena, q));
     assert(cc_atomic_load(&arena.a->live_allocs) == 1);
-    assert((arena.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE) != 0);
     {
         CCArenaCheckpoint cp = cc_arena_checkpoint(arena);
-        assert(cp.arena == NULL);
+        assert(cp.arena != NULL);
+        assert(cc_arena_restore(cp));
+    }
+    /* Sized release at the tip pops it; the hole below stays until reset. */
+    {
+        size_t off = cc_atomic_load(&arena.a->offset);
+        assert(cc_arena_release_sized(arena, r, 32));
+        assert(cc_atomic_load(&arena.a->offset) == 0); /* last live: full rewind */
+        (void)off;
     }
 
     cc_arena_free(&arena);
@@ -73,7 +80,8 @@ static void test_vec_release_on_growth(ArenaFactory make_arena) {
 
     IntVec v = IntVec_init(arena, 2);
     assert(v.data != NULL);
-    assert(cc_atomic_load(&arena.a->live_allocs) == 1);
+    /* Owner header + payload. */
+    assert(cc_atomic_load(&arena.a->live_allocs) == 2);
 
     assert(IntVec_push(&v, 10) == 0);
     assert(IntVec_push(&v, 20) == 0);
@@ -81,9 +89,15 @@ static void test_vec_release_on_growth(ArenaFactory make_arena) {
 
     assert(v.data != NULL);
     assert(IntVec_len(&v) == 3);
-    /* Tip-in-place realloc may keep the same pointer; either way only one
-     * live slab allocation remains after growth. */
+    /* Tip-in-place regrow keeps the pointer; a move releases the old
+     * payload (sized). Either way header + one payload stay live. */
+    assert(cc_atomic_load(&arena.a->live_allocs) == 2);
+
+    /* Destroy releases the payload (tip pop) and lists the header: the
+     * header stays a live slab allocation until the arena resets. */
+    IntVec_destroy(&v);
     assert(cc_atomic_load(&arena.a->live_allocs) == 1);
+    assert(arena.a->owner_free != NULL);
 
     cc_arena_free(&arena);
 }
@@ -95,12 +109,17 @@ static void test_string_release_on_growth(ArenaFactory make_arena) {
     assert(cc_atomic_load(&arena.a->live_allocs) == 0);
 
     assert(cc_string_push(&s, "ab", arena) != NULL);
-    assert(cc_string_push(&s, "cdefghijklmnop", arena) != NULL); /* forces growth */
+    assert(cc_string_is_inline(&s));
+    assert(cc_string_push(&s, "cdefghijklmnop", arena) != NULL); /* promotes */
 
     assert(cc_string_data(&s) != NULL);
     assert(strcmp(cc_string_cstr(&s, arena), "abcdefghijklmnop") == 0);
-    /* Tip-in-place realloc may keep the same pointer; live count stays 1. */
-    assert(cc_atomic_load(&arena.a->live_allocs) == 1);
+    /* Owner header + payload. */
+    assert(cc_atomic_load(&arena.a->live_allocs) == 2);
+
+    cc_string_destroy(&s);
+    assert(cc_string_len(&s) == 0 && cc_string_data(&s) == NULL);
+    assert(cc_atomic_load(&arena.a->live_allocs) == 1); /* header listed for rebirth */
 
     cc_arena_free(&arena);
 }
