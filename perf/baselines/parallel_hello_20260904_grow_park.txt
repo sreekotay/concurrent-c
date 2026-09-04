@@ -1,0 +1,28 @@
+# perf/parallel_hello.ccs snapshot
+# date: 2026-09-04T18:09:28Z
+# host: Darwin 25.5.0 arm64  ncpu=10
+# cc:   f4c3e3c4
+# bin:  perf/out/parallel_hello_cc (--release)
+# cmd:  CC_PAR_DEPTH=24 CC_PAR_SAMPLES=3 CC_PAR_BARE=1 CC_V2_STATS=1 \
+#       /usr/bin/time -l ./perf/out/parallel_hello_cc
+#
+# Grow policy on this binary: recruit only when rate or depth fires and
+# the episode is not run-to-park (park fraction). CPU-bound tree still
+# walks the pool; RSS stays the in-flight-cap band.
+#
+# Refresh:
+#   ./cc/bin/ccc build --release perf/parallel_hello.ccs -o perf/out/parallel_hello_cc
+#   CC_PAR_DEPTH=24 CC_PAR_SAMPLES=3 CC_PAR_BARE=1 CC_V2_STATS=1 \
+#     /usr/bin/time -l ./perf/out/parallel_hello_cc
+#
+# Prior same-machine ungated row (depth 24, 1 sample, older runtime):
+#   seq 31 ms   par 2199 ms   cut 7.1 ms   RSS 128 MB
+
+depth=24 samples=3 cut=8 CC_PAR_BARE=1
+
+  seq   28.9 ms
+  par    206 ms     # ungated @parallel { }
+  cut    7.9 ms     # @parallel (d < 8)   3.7x seq
+
+  peak_rss           126 MB
+  grow               eager<=2 stall=8 parked=221 final_threads=10/10
