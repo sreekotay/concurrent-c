@@ -199,9 +199,11 @@ uint64_t cc_arena_owner_slice_id(const CCArenaOwner *o);
 
 An owner is a header in the owning host's slab tier — arena, payload, bytes,
 alignment, provenance, token — split from its payload, which the strategy
-supplies. A released header goes on that host's owner list and is reborn with
-a fresh token by the next owner minted there; it is never returned to the
-bump while the arena lives. Tokens come from the slice generation registry,
+supplies. A header minted together with its payload pops with it when the
+payload still ends the slab (one CAS, nothing listed). Otherwise the released
+header goes on that host's owner list and is reborn with a fresh token by the
+next owner minted there; a listed header is never returned to the bump while
+the arena lives. Tokens come from the slice generation registry,
 so a view id and a handle carry the same token. `regrow` keeps the token on a
 tip fit and rebirths it on a move; `release` kills it. Every operation that
 takes a token refuses when the header's token differs, so a handle that

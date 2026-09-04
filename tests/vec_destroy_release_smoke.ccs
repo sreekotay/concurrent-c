@@ -27,8 +27,10 @@ int main(void) {
     }
     v.destroy();
     after = arena.live();
-    if (after != before + 1 || arena.a->owner_free == NULL) {
-        fprintf(stderr, "FAIL: destroy did not release the payload (%zu -> %zu -> %zu)\n",
+    /* Header and payload were minted together and end the slab: destroy
+     * pops both in one CAS and lists nothing. */
+    if (after != before || arena.a->owner_free != NULL) {
+        fprintf(stderr, "FAIL: destroy did not release header + payload (%zu -> %zu -> %zu)\n",
                 before, mid, after);
         return 4;
     }

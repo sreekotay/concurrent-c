@@ -6,7 +6,7 @@
  * demand. Births are batched per thread: a thread claims one 64-token word
  * at a time (one fetch_add on the shared cursor, one CAS that sets every
  * free bit of that word), then hands those tokens out with no shared
- * access at all. A kill clears its bit with a CAS; a page is published with
+ * access at all. A kill clears its bit with one fetch_and; a page is published with
  * a CAS (a losing publisher frees its copy). A claimed token that is never
  * handed out stays set (at most 63 per thread that exits mid-word); it is
  * never queried, since only handed-out tokens reach is_live. Tokens start
@@ -101,15 +101,11 @@ uint32_t cc_slice_gen_birth(void) {
 void cc_slice_gen_kill(uint32_t gen) {
     cc_atomic_u64 *w;
     uint64_t bit;
-    uint64_t cur;
     if (gen < CC__GEN_MIN || gen > (uint32_t)CC__GEN_MAX) return;
     w = cc__gen_word(gen, 0);
     if (!w) return;
     bit = 1ull << (gen & 63u);
-    cur = cc_atomic_load(w);
-    while (cur & bit) {
-        if (cc_atomic_cas(w, &cur, cur & ~bit)) return;
-    }
+    (void)cc_atomic_fetch_and(w, ~bit);
 }
 
 int cc_slice_gen_is_live(uint32_t gen) {

@@ -623,6 +623,25 @@ static inline int cc__slab_release(CCArenaSlab *s, size_t ptr_off, size_t size, 
     }
 }
 
+/* Give back an owner header and its payload in one CAS: [hdr_off,
+ * hdr_off + total) must end at the tip of the current slab and lie at or
+ * above `floor`; both credits are dropped. 1 = popped, 0 = not the tip (the
+ * caller releases the payload alone and lists the header). */
+static inline int cc__slab_release2(CCArenaSlab *s, size_t hdr_off, size_t total, size_t floor) {
+    uint64_t st = CC_ATOMIC_LOAD(&s->state);
+    for (;;) {
+        size_t off = CC__SLAB_OFF(st);
+        size_t live = CC__SLAB_LIVE(st);
+        size_t new_off;
+        uint64_t neu;
+        if (live < 2 || hdr_off + total != off || hdr_off < floor) return 0;
+        new_off = (live == 2 && floor == 0) ? 0 : hdr_off;
+        neu = CC__SLAB_PACK(new_off, live - 2);
+        if (CC_ATOMIC_CAS_ACQ_REL(&s->state, &st, neu)) return 1;
+        st = CC_ATOMIC_LOAD(&s->state);
+    }
+}
+
 /* A dying tail child's region [tail_off, tail_end) goes back: the tip
  * returns to tail_off when the region still ends the slab (to zero when it
  * was the current slab's last live object), and the region's live credit
@@ -2593,6 +2612,27 @@ static inline bool cc_arena_owner_release(CCArenaOwner *o, uint32_t token) {
     if (a && o->payload && !(CC__ARENA_FIELD_LOAD(&a->_flags) & CC_ARENA_FLAG_REUSE)) {
         uint8_t *bp = (uint8_t *)o->payload;
         CCArenaSlab *s;
+        /* Fastest path, no lock: the header sits right below its payload
+         * (minted together) and the payload ends the current slab, so both
+         * pop in one CAS and nothing is listed. The common birth / death
+         * rhythm of a container is exactly this shape. */
+        s = cc__arena_cur_slab(a);
+        if (s) {
+            uint8_t *hp = (uint8_t *)o;
+            uintptr_t e = ((uintptr_t)hp + sizeof(CCArenaOwner) + (o->align - 1)) & ~(uintptr_t)(o->align - 1);
+            size_t carved = CC__ARENA_FIELD_LOAD(&s->tail_carved);
+            if ((uintptr_t)bp == e && hp >= s->base && bp + o->bytes <= s->base + carved) {
+                size_t bytes = o->bytes;
+                o->token = 0;
+                o->payload = NULL;
+                o->bytes = 0;
+                if (cc__slab_release2(s, (size_t)(hp - s->base), (size_t)(bp + bytes - hp),
+                                      cc__arena_floor(a)))
+                    return true;
+                o->payload = bp; /* not the tip: the general path below */
+                o->bytes = bytes;
+            }
+        }
         cc__arena_meta_lock(a);
         s = a->slab;
         if (s && bp >= s->base && bp < s->base + s->tail_carved) {

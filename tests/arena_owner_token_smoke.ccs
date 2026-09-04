@@ -99,16 +99,31 @@ static int test_string_destroy_sigil_and_release(void) {
         if (cc_string_is_inline(&s)) return fail(3, "promoted");
         if (cc_arena_slab_live(a.a) != live0 + 2) return fail(3, "header + payload");
     }
-    /* Scope exit released the payload (tip pop) and listed the header. */
-    if (cc_arena_slab_live(a.a) != live0 + 1) return fail(3, "scope destroy released");
-    if (!a.a->owner_free) return fail(3, "header listed for rebirth");
+    /* Scope exit popped header and payload together: they were minted
+     * together and ended the slab, so nothing is listed. */
+    if (cc_arena_slab_live(a.a) != live0) return fail(3, "scope destroy released header + payload");
+    if (a.a->owner_free) return fail(3, "nothing listed after a tip pop");
     {
-        /* The listed header is reborn with a fresh token. */
         CCString t = cc_string_from("another string long enough", a) @destroy;
-        if (cc_arena_slab_live(a.a) != live0 + 2) return fail(3, "reborn header, new payload");
-        if (a.a->owner_free) return fail(3, "list drained");
+        if (cc_arena_slab_live(a.a) != live0 + 2) return fail(3, "fresh header, new payload");
         cc_string_release(&t, a);     /* legacy two-argument spelling */
-        if (cc_arena_slab_live(a.a) != live0 + 1) return fail(3, "release");
+        if (cc_arena_slab_live(a.a) != live0) return fail(3, "release pops both");
+    }
+    {
+        /* A payload buried under a later allocation cannot pop: it becomes
+         * a hole and the header is listed; the next owner is reborn on it
+         * with a fresh token and mints only a payload. */
+        CCString t = cc_string_from("a buried string long enough", a);
+        void *blocker = cc_arena_alloc(a, 16, 8);
+        if (!blocker) return fail(3, "blocker");
+        cc_string_destroy(&t);
+        if (cc_arena_slab_live(a.a) != live0 + 2) return fail(3, "listed header + blocker stay counted");
+        if (!a.a->owner_free) return fail(3, "header listed for rebirth");
+        {
+            CCString u = cc_string_from("reborn on the listed header", a) @destroy;
+            if (cc_arena_slab_live(a.a) != live0 + 3) return fail(3, "reborn header, new payload");
+            if (a.a->owner_free) return fail(3, "list drained");
+        }
     }
     printf("  string @destroy / release OK\n");
     return 0;
@@ -138,7 +153,7 @@ static int test_map_destroy_and_string_swap(void) {
             if (!cc_string_push(&s, "-grow-in-b", b)) return fail(4, "swap grow");
         }
         if (cc_string_owner(&s)->arena != b.a) return fail(4, "owned by b after swap");
-        if (cc_arena_slab_live(a.a) != 1) return fail(4, "a keeps only the listed header");
+        if (cc_arena_slab_live(a.a) != 0) return fail(4, "a released header and payload together");
         if (strncmp(cc_string_cstr(&s, b), "born in a, long enough-grow-in-b", 32) != 0) return fail(4, "bytes moved");
         cc_string_destroy(&s);
     }

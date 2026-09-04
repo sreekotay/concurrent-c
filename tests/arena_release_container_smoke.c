@@ -93,11 +93,16 @@ static void test_vec_release_on_growth(ArenaFactory make_arena) {
      * payload (sized). Either way header + one payload stay live. */
     assert(cc_arena_slab_live(arena.a) == 2);
 
-    /* Destroy releases the payload (tip pop) and lists the header: the
-     * header stays a live slab allocation until the arena resets. */
+    /* Destroy: a payload that regrew in place still sits right after its
+     * header and ends the slab, so header and payload pop together and
+     * nothing is listed. A payload that moved leaves the header behind,
+     * listed for rebirth and still counted live. */
     IntVec_destroy(&v);
-    assert(cc_arena_slab_live(arena.a) == 1);
-    assert(arena.a->owner_free != NULL);
+    {
+        size_t live = cc_arena_slab_live(arena.a);
+        assert(live <= 1);
+        assert((live == 1) == (arena.a->owner_free != NULL));
+    }
 
     cc_arena_free(&arena);
 }
@@ -119,7 +124,8 @@ static void test_string_release_on_growth(ArenaFactory make_arena) {
 
     cc_string_destroy(&s);
     assert(cc_string_len(&s) == 0 && cc_string_data(&s) == NULL);
-    assert(cc_arena_slab_live(arena.a) == 1); /* header listed for rebirth */
+    assert(cc_arena_slab_live(arena.a) == 0); /* header + payload popped together */
+    assert(arena.a->owner_free == NULL);
 
     cc_arena_free(&arena);
 }

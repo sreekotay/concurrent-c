@@ -370,7 +370,7 @@ static double b_vec_churn(CCArena a, size_t n) {
 /* ---- string --------------------------------------------------------- */
 static double b_str_append(CCArena a, size_t n) {
     size_t i;
-    CCString s = cc_string_new();
+    CCString s = cc_string_with_capacity(a, 12 * n + 1); /* the append, not the growth policy */
     double t0 = now_sec();
     for (i = 0; i < n; i++) cc_string_push_cstr(&s, "twelve-bytes", a);
     cc_string_destroy(&s);
@@ -483,7 +483,7 @@ int main(void) {
     run("vec push 1M ints, alloc every 64 (moves)", b_vec_push_moves, a, 1000000);
     run("vec get 1M (token-checked handle)", b_vec_get, a, 1000000);
     run("vec init + 8 push + destroy (owner churn)", b_vec_churn, a, 500000);
-    run("string push_cstr 12B x 1M (one string)", b_str_append, a, 1000000);
+    run("string push_cstr 12B x 1M (one string, reserved)", b_str_append, a, 1000000);
     run("string promote (24B) + destroy churn", b_str_churn, a, 1000000);
     run("@string template (2 slots) call-local on @scratch", b_str_template_scratch, a, 1000000);
     run("@string template (2 slots) on arena + destroy", b_str_template_arena, a, 1000000);

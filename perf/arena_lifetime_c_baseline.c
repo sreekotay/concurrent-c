@@ -337,7 +337,10 @@ static void str_push(Str *s, const char *src, size_t n) {
 static double b_str_append(size_t n) {
     size_t i;
     Str s = {0, 0, 0};
-    double t0 = now_sec();
+    double t0;
+    s.cap = 12 * n + 1;
+    s.data = (char *)malloc(s.cap);
+    t0 = now_sec();
     for (i = 0; i < n; i++) str_push(&s, "twelve-bytes", 12);
     free(s.data);
     return now_sec() - t0;
@@ -469,7 +472,7 @@ int main(void) {
     run("vec push 1M ints, alloc every 64 (moves)", b_vec_push_moves, 1000000);
     run("vec get 1M (token-checked handle)", b_vec_get, 1000000);
     run("vec init + 8 push + destroy (owner churn)", b_vec_churn, 500000);
-    run("string push_cstr 12B x 1M (one string)", b_str_append, 1000000);
+    run("string push_cstr 12B x 1M (one string, reserved)", b_str_append, 1000000);
     run("string promote (24B) + destroy churn", b_str_churn, 1000000);
     run("@string template (2 slots) call-local on @scratch", b_snprintf_stack, 1000000);   /* C: snprintf on stack */
     run("@string template (2 slots) on arena + destroy", b_snprintf_malloc, 1000000);
