@@ -462,7 +462,11 @@ static inline CCArrayMapCore *cc_array_map_core_init_count(CCArena arena,
         size_t dense_cap;                                                             \
         size_t bucket_mask; /* buckets_cap - 1; 0 ⇒ no table */                      \
         size_t tomb_count;                                                            \
+        size_t self_bytes;                                                            \
+        size_t slot_bytes;                                                            \
     } Name;                                                                           \
+    _Static_assert(offsetof(Name, slot_bytes) == offsetof(CCArrayMapCore, slot_bytes),\
+                   #Name " must match CCArrayMapCore through slot_bytes");            \
                                                                                       \
     static inline size_t Name##__hashv(const void *k) {                               \
         return (size_t)(HASH_FN(*(const K *)k));                                      \
