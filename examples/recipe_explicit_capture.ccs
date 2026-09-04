@@ -14,9 +14,8 @@
  *
  * `@parallel for` gives each iteration its own index — no list
  * (this file's exclusive twin is recipe_exclusive_named.ccs).
- * Named lists on the remaining bag recipes:
- * recipe_channel_pipeline.ccs `[&sum, rx]`, recipe_worker_pool.ccs
- * `[jobs_rx, done_tx]`.
+ * Named lists on the remaining bag recipe:
+ * recipe_channel_pipeline.ccs `[&sum, rx]`.
  * send_task copy-at-submit: recipe_ordered_parallel.ccs `[id]`.
  */
 #include <ccc/cc_runtime.cch>

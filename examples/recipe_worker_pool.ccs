@@ -1,15 +1,14 @@
 /*
- * Recipe: Worker Pool
+ * Recipe: Worker Pool (dest)
  *
  *   jobs_ch: feeder → N workers (bounded queue)
  *   done_ch: workers → main (completion ledger, no shared counter)
  *
- * Nested nurseries drive the close protocol:
- *   feeder.close(jobs_tx) arms EMPTY to close jobs when the feeder nursery
- *   joins; workers drain jobs_rx and exit.
- *   worker nursery @destroy → joins all workers before main drains done_rx.
+ * N is on the page. Dest-attach the workers, feed, close jobs next to
+ * the last send, `.wait()` joins. Meeting: `@parallel spawn`.
  *
- * Temp prints use @string(`...`, @scratch) — no hand-rolled arena.
+ * Host grow / retract / AGAIN / leave: thrdqueue.ccs (still a bag).
+ * Nursery EMPTY-close twin: recipe_channel_pipeline.ccs.
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/stdio.cch>
@@ -17,8 +16,17 @@
 #define NUM_WORKERS 3
 #define NUM_JOBS    9
 
+static void worker(int[~ <] jobs_rx, int[~ >] done_tx) {
+    @errhandler(CCError e) cc_error_exit(e);
+    int job;
+    while (cc_io_avail(jobs_rx.recv(&job))) {
+        println(@string(`worker: processed job ${job}`, @scratch));
+        done_tx.send(job) !>;
+    }
+}
+
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    @errhandler(CCError err) { cc_error_log(err); return 1; }
 
     int[~4 >]        jobs_tx;
     int[~4 <]        jobs_rx;
@@ -28,47 +36,31 @@ int main(void) {
     CCChan* jobs_ch = cc_channel_pair(&jobs_tx, &jobs_rx) !> @destroy;
     CCChan* done_ch = cc_channel_pair(&done_tx, &done_rx) !> @destroy;
 
-    {
-        CCNursery workers = cc_nursery_create() !> @destroy;
-
-        /* Workers: pull jobs, report each completion on done_tx. */
-        for (int w = 0; w < NUM_WORKERS; w++) {
-            workers.spawn(() => [jobs_rx, done_tx] {
-                @errhandler(CCError e) cc_error_exit(e);
-                int job;
-                while (cc_io_avail(jobs_rx.recv(&job))) {
-                    println(@string(`worker: processed job ${job}`, @scratch));
-                    done_tx.send(job) !>;
+    CCParallel h = @parallel spawn {
+        @serial {
+            int w;
+            @for (w in 0..NUM_WORKERS) {
+                @parallel(h) {
+                    worker(jobs_rx, done_tx);
                 }
-            }) !>;
+            }
+            int j;
+            @for (j in 1..(NUM_JOBS + 1)) {
+                jobs_tx.send(j) !>;
+            }
+            jobs_tx.close();
+            int n = NUM_JOBS;
+            println(@string(`feeder: sent ${n} jobs`, @scratch));
         }
+    } !>;
+    h.wait() !>;
 
-        /* Feeder in an inner nursery: its @destroy closes jobs_tx once feeder returns. */
-        {
-            CCNursery feeder = workers.create_child() !> @destroy;
-            feeder.close(jobs_tx) !>;
-
-            feeder.spawn(() => [jobs_tx] {
-                @errhandler(CCError e) cc_error_exit(e);
-                for (int j = 1; j <= NUM_JOBS; j++) {
-                    jobs_tx.send(j) !>;
-                }
-                int n = NUM_JOBS;
-                println(@string(`feeder: sent ${n} jobs`, @scratch));
-            }) !>;
-        }
-        /* feeder @destroy: jobs_tx closed → workers drain and exit. */
-    }
-    /* workers @destroy: all workers joined. */
-
-    /* Close done_tx so the drain loop terminates. */
     done_tx.close();
 
     int jobs_done = 0;
     int v;
-    while (cc_io_avail(done_rx.recv(&v))) {
+    while (cc_io_avail(done_rx.recv(&v)))
         jobs_done++;
-    }
 
     println(@string(`done, jobs_done = ${jobs_done}`, @scratch));
     return (jobs_done == NUM_JOBS) ? 0 : 1;

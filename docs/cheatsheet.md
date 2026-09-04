@@ -890,7 +890,7 @@ ccc examples/js/jsdemo.shcc         # CC→JS (guest; Node owns env)
 | `@variant` tagged data | [recipe_variant.ccs](../examples/recipe_variant.ccs) · [spec](../spec/draft_variants.md) · [§2a](language-concepts.md#2a-data-alternatives-are-variant) |
 | Walk / dest-bulk buffers | [recipe_walk.ccs](../examples/recipe_walk.ccs) |
 | Owned or view / reopen | [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs) |
-| Worker pool | [recipe_worker_pool.ccs](../examples/recipe_worker_pool.ccs) |
+| Worker pool (dest; N on the page) | [recipe_worker_pool.ccs](../examples/recipe_worker_pool.ccs) |
 | `@parallel` (join, range, wait-for ticket) | [recipe_parallel.ccs](../examples/recipe_parallel.ccs) |
 | On-page stream (`tx.close()` in produce) | [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs) |
 | Dest EMPTY-close (consumer already in recv) | [recipe_parallel_empty.ccs](../examples/recipe_parallel_empty.ccs) |

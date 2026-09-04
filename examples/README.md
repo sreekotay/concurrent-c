@@ -29,7 +29,7 @@ New to Concurrent-C? Work through these in order:
 | 7  | `recipe_channel_pipeline.ccs` | EMPTY-close | Nested bag; `n.close(tx)` when the set is not on the page |
 | 8  | `recipe_async_await.ccs` | Async/Await | `@async` call stacks vs `spawn`, `@await`, composition |
 | 9  | `recipe_timeout.ccs` | Deadlines & cancel | `@with_deadline`; live dest `h.cancel()`; siblings poll `h.cancelled` |
-| 10 | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
+| 10 | `recipe_worker_pool.ccs` | Dest pool | N workers + queue; close jobs next to last send; `.wait()` joins |
 | 11 | `recipe_ordered_parallel.ccs` | Ordered channel | `send_task` + FIFO recv; `@parallel spawn`; produce `tx.close()` |
 | 12 | `recipe_exclusive_named.ccs` | Named exclusivity | `CCExclusive`, resolve-once mutex, `acquire_when`, short guard CS |
 | 12a | `recipe_turnstile.ccs` | Turnstile stages | `@parallel wait` + `@stage (ts.read/write, i)` — no nursery |
@@ -57,7 +57,7 @@ Minimal concurrent hello — three named siblings, `.wait()` joins.
 | `recipe_explicit_capture.ccs` | Capture | `@parallel` is the frame (no list); closure lists on `n.spawn` / `send_task` |
 | `recipe_channel_pipeline.ccs` | EMPTY-close | Nested bag; closer at inner EMPTY |
 | `recipe_async_await.ccs` | Async/Await | `@async`, `@await`, `cc_block_on` |
-| `recipe_worker_pool.ccs` | Worker pool | N workers, shared queue |
+| `recipe_worker_pool.ccs` | Dest pool | N workers, shared queue; host grow/retract is `thrdqueue` |
 | `recipe_exclusive_named.ccs` | Named exclusive | Domain + `mutex(name)` once + `acquire_when` + guard unlock |
 | `recipe_turnstile.ccs` | Turnstile stages | `@parallel wait`; `@stage (ts.read, i)` then `@stage (ts.write, i)` |
 | `recipe_prepare_commit.ccs` | Prepare + commit | `@parallel` join, `hold_sorted`, revert finished sides |
