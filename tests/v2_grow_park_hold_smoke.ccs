@@ -1,0 +1,88 @@
+/*
+ * Pool growth holds on a run-to-park spawn wave and still recruits for
+ * CPU-bound fibers that do not park.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_nursery.cch>
+#include <ccc/cc_channel.cch>
+#include <stdio.h>
+#include <time.h>
+
+int cc__sched_worker_pool_size(void);
+int cc__sched_worker_pool_cap(void);
+
+#define PARK_FIBERS 64
+#define CPU_FIBERS 8
+
+static void sleep_ms(int ms) {
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+}
+
+static void burn_ms(int ms) {
+    struct timespec start, now;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (;;) {
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long elapsed = (now.tv_sec - start.tv_sec) * 1000 +
+                       (now.tv_nsec - start.tv_nsec) / 1000000;
+        if (elapsed >= ms) break;
+    }
+}
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    CCChanTx tx;
+    CCChanRx rx;
+    if (cc_chan_pair_create(0, CC_CHAN_MODE_BLOCK, false, sizeof(int), &tx, &rx) != 0) {
+        return 2;
+    }
+
+    int parked_pool = 0;
+    {
+        CCNursery n = @create() !> @destroy;
+        for (int i = 0; i < PARK_FIBERS; i++) {
+            n.spawn(() => [rx] {
+                int v = 0;
+                rx.recv(&v) !>;
+            }) !>;
+        }
+        sleep_ms(20);
+        parked_pool = cc__sched_worker_pool_size();
+        if (parked_pool > 3) {
+            fprintf(stderr,
+                    "FAIL v2_grow_park_hold: park wave recruited %d workers\n",
+                    parked_pool);
+            return 10;
+        }
+        for (int i = 0; i < PARK_FIBERS; i++) {
+            tx.send(1) !>;
+        }
+    }
+
+    {
+        CCNursery n = @create() !> @destroy;
+        for (int i = 0; i < CPU_FIBERS; i++) {
+            n.spawn(() => {
+                burn_ms(40);
+            }) !>;
+        }
+        sleep_ms(10);
+        int cpu_pool = cc__sched_worker_pool_size();
+        int cap = cc__sched_worker_pool_cap();
+        int want = parked_pool + 2;
+        if (want > cap) want = cap;
+        if (want > CPU_FIBERS) want = CPU_FIBERS;
+        if (cpu_pool < want) {
+            fprintf(stderr,
+                    "FAIL v2_grow_park_hold: CPU burn stayed at %d workers (want >= %d, cap %d)\n",
+                    cpu_pool, want, cap);
+            return 11;
+        }
+    }
+
+    printf("v2_grow_park_hold_smoke: PASS\n");
+    return 0;
+}

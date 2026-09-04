@@ -47,6 +47,8 @@ void*  sched_v2_current_deadline_scope(void);
 void*  sched_v2_deadline_scope_push(void* d);
 void   sched_v2_deadline_scope_pop(void* prev);
 int    sched_v2_current_worker_id(void); /* -1 if not on a V2 worker thread */
+int    sched_v2_live_workers(void);      /* current pool size (ratchet) */
+int    sched_v2_max_workers(void);       /* worker cap */
 void   sched_v2_shutdown(void);
 
 /* Ready-queue depth (relaxed). The spawn gate denies CHURN sites and

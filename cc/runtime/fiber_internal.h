@@ -82,6 +82,8 @@ void cc_external_wait_leave(void);
 
 /* Channel direct-handoff helpers — implemented in fiber_sched.c */
 int  cc__sched_current_worker_id(void);
+int  cc__sched_worker_pool_size(void);
+int  cc__sched_worker_pool_cap(void);
 void cc__chan_debug_dump_state(void* ch_obj, const char* prefix);
 
 /* Convenience macro to park with source location */

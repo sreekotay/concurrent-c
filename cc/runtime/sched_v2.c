@@ -342,6 +342,10 @@ typedef struct {
      * is the identity channel between sysmon and the worker — no separate
      * "detached" flag is needed. */
     _Atomic uint64_t generation;
+    /* Parks executed while this slot was running a fiber. Per-slot so
+     * the park path is an uncontended relaxed increment; sysmon sums
+     * the live prefix when a grow episode is armed. */
+    _Atomic uint64_t parks;
     wake_primitive wake;
 } thread_v2;
 
@@ -729,17 +733,21 @@ static _Atomic int g_v2_running_workers = 0;
  * window length unreliable and a healthy pool lands too few pops per
  * window for the rate test to separate signal from jitter.
  *
- * Per recheck, sysmon samples (ready_queue.pops, v2_now_ns) against the
- * previous sample and computes the drain rate. With depth =
+ * Per recheck, sysmon samples (ready_queue.pops, slot park sums,
+ * v2_now_ns) against the episode baseline. With depth =
  * ready_queue.count and n = num_threads, grow one worker iff:
  *   - the pool's aggregate drain rate is below one pop per worker per
- *     g_v2_grow_rate_us (workers blocked or barely moving), OR
- *   - depth >= 2*n (real backlog relative to pool size).
- * Otherwise hold: a shallow, briskly-draining queue is the signature of
- * churn (e.g. contended-lock wake cycles) where extra workers only add
- * cache-line traffic. Both triggers scale with pool size, and the rate
- * is normalized by measured elapsed time, so the decision is stable
- * against kernel timeout jitter in the recheck sleep itself.
+ *     g_v2_grow_rate_us (workers blocked or running long CPU arms), OR
+ *   - depth >= 2*n (backlog relative to pool size),
+ * AND the episode is not run-to-park: parks since baseline do not
+ * exceed half the pops. A high park fraction is recv/accept or lock
+ * wait multiplexing — extra workers add traffic. A low park fraction
+ * with a slow drain is CPU-bound work still occupying workers.
+ * Otherwise hold: a shallow, briskly-draining queue is park/wake
+ * churn; a deep, high-park queue is a nursery accept/request wave.
+ * Both rate and depth scale with pool size; the rate is normalized
+ * by measured elapsed time, so the decision is stable against kernel
+ * timeout jitter in the recheck sleep itself.
  *
  * An episode ends on a full pool, an admission gate, or true slack:
  * every worker idle and the ready queue empty, or one spare worker
@@ -791,6 +799,7 @@ static _Atomic uint64_t g_v2_grow_stall = 0;      /* recheck: pops slow   */
 static _Atomic uint64_t g_v2_grow_backlog = 0;    /* recheck: deep queue  */
 static _Atomic uint64_t g_v2_grow_escalate = 0;   /* slow-tick escalation */
 static _Atomic uint64_t g_v2_grow_held = 0;       /* recheck decided hold */
+static _Atomic uint64_t g_v2_grow_parked = 0;     /* hold: run-to-park     */
 
 /* Coro-pool high-water cap (tunable via CC_V2_CORO_POOL_MAX).
  *
@@ -1136,6 +1145,7 @@ static void sched_v2_init_worker_slot(int id) {
      * stays at 0 and the mismatch triggers exit. */
     atomic_store_explicit(&g_v2.threads[id].generation, 0,
                           memory_order_release);
+    atomic_store_explicit(&g_v2.threads[id].parks, 0, memory_order_relaxed);
     wake_primitive_init(&g_v2.threads[id].wake);
 }
 
@@ -1686,6 +1696,13 @@ void sched_v2_park(void) {
     if (!f) return;
 
     V2_STAT_INC(g_v2_parks);
+    {
+        int tid = tls_v2_thread_id;
+        if (tid >= 0 && tid < V2_MAX_THREADS) {
+            atomic_fetch_add_explicit(&g_v2.threads[tid].parks, 1,
+                                      memory_order_relaxed);
+        }
+    }
     f->yield_kind = V2_YIELD_PARK;
     mco_result res = mco_yield(co);
     if (res != MCO_SUCCESS) {
@@ -2101,6 +2118,31 @@ static int sched_v2_detect_num_threads(void) {
     return (int)n;
 }
 
+static uint64_t sched_v2_park_sum(void) {
+    int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
+    uint64_t s = 0;
+    for (int i = 0; i < n; i++) {
+        s += atomic_load_explicit(&g_v2.threads[i].parks, memory_order_relaxed);
+    }
+    return s;
+}
+
+/* Run-to-park multiplexing: more than half the episode's pops parked.
+ * dp_pops == 0 is CPU saturation between pops, not a park wave. */
+static int sched_v2_grow_run_to_park(uint64_t dp_pops, uint64_t dp_parks) {
+    return dp_pops > 0 && dp_parks * 2ull > dp_pops;
+}
+
+int sched_v2_live_workers(void) {
+    sched_v2_ensure_init();
+    return atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
+}
+
+int sched_v2_max_workers(void) {
+    sched_v2_ensure_init();
+    return g_v2.max_threads;
+}
+
 static int sched_v2_count_idle_workers(void) {
     int n = atomic_load_explicit(&g_v2.num_threads, memory_order_relaxed);
     int idle = 0;
@@ -2235,6 +2277,7 @@ static void* sched_v2_sysmon_main(void* arg) {
     const int STALL_DIAG_TICKS = 2000 / V2_SYSMON_INTERVAL_MS;
     /* Pool-growth recheck state (see g_v2_grow_pending block comment). */
     uint64_t grow_base_pops = 0;
+    uint64_t grow_base_parks = 0;
     uint64_t grow_base_ns = 0;
     int grow_have_baseline = 0;
     uint64_t grow_slack_since_ns = 0;
@@ -2282,6 +2325,7 @@ static void* sched_v2_sysmon_main(void* arg) {
             } else {
                 uint64_t pops = atomic_load_explicit(&g_v2.ready_queue.pops,
                                                      memory_order_relaxed);
+                uint64_t parks = sched_v2_park_sum();
                 uint64_t now = v2_now_ns();
                 if (!grow_have_baseline) {
                     /* One baseline per demand episode, captured on the
@@ -2289,29 +2333,36 @@ static void* sched_v2_sysmon_main(void* arg) {
                      * would be clobbered by every push at saturation).
                      * The rate below is cumulative since episode start. */
                     grow_base_pops = pops;
+                    grow_base_parks = parks;
                     grow_base_ns = now;
                     grow_have_baseline = 1;
                 } else {
                     uint64_t dp = pops - grow_base_pops;
+                    uint64_t dpark = parks - grow_base_parks;
                     uint64_t dt = now - grow_base_ns;
                     /* Need a long-enough sample for the rate to mean
                      * anything; an early/spurious wake defers the decision
                      * to the next recheck. */
                     if (dt >= 10000ull) {
+                        int run_to_park = sched_v2_grow_run_to_park(dp, dpark);
+                        int rate_slow = (dp * (uint64_t)g_v2_grow_rate_us
+                                         * 1000ull < (uint64_t)n * dt);
+                        int depth_hit = (g_v2_grow_depth_mult > 0 &&
+                                         depth >= (size_t)(g_v2_grow_depth_mult * n));
                         /* Grow on rate: cumulative drain rate below one
                          * pop per worker per grow_rate_us. Computed as
                          * dp/dt < n/(rate_us*1000), cross-multiplied to
-                         * stay in integers. */
-                        if (dp * (uint64_t)g_v2_grow_rate_us * 1000ull
-                                < (uint64_t)n * dt) {
+                         * stay in integers. Depth is the same backlog
+                         * test, gated on run-to-park so an accept or
+                         * request wave does not walk ncpu. */
+                        if (rate_slow && !run_to_park) {
                             V2_STAT_INC(g_v2_grow_stall);
                             (void)sched_v2_try_expand_pool();
-                        } else if (g_v2_grow_depth_mult > 0 &&
-                                   depth >= (size_t)(g_v2_grow_depth_mult * n)) {
-                            /* Draining briskly, but backlog is deep
-                             * relative to the pool. */
+                        } else if (depth_hit && !run_to_park) {
                             V2_STAT_INC(g_v2_grow_backlog);
                             (void)sched_v2_try_expand_pool();
+                        } else if (run_to_park && (rate_slow || depth_hit)) {
+                            V2_STAT_INC(g_v2_grow_parked);
                         } else {
                             V2_STAT_INC(g_v2_grow_held);
                         }
@@ -2573,7 +2624,7 @@ static void sched_v2_atexit_dump_stats(void) {
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_recheck, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_wake, memory_order_relaxed));
     fprintf(stderr, "[sched_v2 stats] grow (eager<=%d recheck=%dus rate=%dus/pop/worker depth_x=%d esc=%d): requests=%llu "
-                    "stall=%llu backlog=%llu escalate=%llu held=%llu final_threads=%d/%d\n",
+                    "stall=%llu backlog=%llu escalate=%llu held=%llu parked=%llu final_threads=%d/%d\n",
             g_v2_eager_threads, g_v2_grow_recheck_us, g_v2_grow_rate_us,
             g_v2_grow_depth_mult, g_v2_grow_escalate_ticks,
             (unsigned long long)atomic_load_explicit(&g_v2_grow_requests, memory_order_relaxed),
@@ -2581,6 +2632,7 @@ static void sched_v2_atexit_dump_stats(void) {
             (unsigned long long)atomic_load_explicit(&g_v2_grow_backlog, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_grow_escalate, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_grow_held, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_grow_parked, memory_order_relaxed),
             atomic_load_explicit(&g_v2.num_threads, memory_order_relaxed),
             g_v2.max_threads);
     fprintf(stderr, "[sched_v2 stats] spin_before_park=%d: hit=%llu miss=%llu\n",

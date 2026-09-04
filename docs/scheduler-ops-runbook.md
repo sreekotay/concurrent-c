@@ -101,18 +101,25 @@ instead of sleeping its normal 20ms tick. Its slow-tick jobs (worker
 eviction, park deadlines, deadlock detection, safety-net wake) are gated on
 real elapsed time, so they keep their ~20ms cadence during fast rechecks.
 
-Sysmon captures one (queue pops, timestamp) baseline per demand episode and
-tracks the cumulative drain rate. Per recheck it grows one worker iff:
+Sysmon captures one (queue pops, slot park sums, timestamp) baseline per
+demand episode and tracks the cumulative drain rate. Per recheck it grows
+one worker iff a rate or depth trigger fires **and** the episode is not
+run-to-park:
 
 - **rate** — aggregate drain rate is below one pop per worker per
-  `CC_V2_GROW_RATE_US` (default 100us): workers blocked or barely moving; or
+  `CC_V2_GROW_RATE_US` (default 100us): workers blocked or running long
+  CPU arms; or
 - **depth** — ready-queue depth >= `CC_V2_GROW_DEPTH_X` (default 2) times
-  the current pool size; 0 disables the depth trigger.
+  the current pool size; 0 disables the depth trigger;
+- **run-to-park** — parks since the baseline exceed half the pops. Recv,
+  accept, and lock-wait multiplexing look like stall or backlog; extra
+  workers add traffic. A low park fraction with a slow drain is CPU-bound
+  work still occupying workers.
 
-The two knobs are independent: the rate is normalized by elapsed time since
-the episode baseline, so a faster recheck cadence changes only reaction
-latency, not the measurement. Lowering `CC_V2_GROW_RATE_US` raises the
-drain-rate bar and biases toward growth.
+The rate and depth knobs are independent: the rate is normalized by elapsed
+time since the episode baseline, so a faster recheck cadence changes only
+reaction latency, not the measurement. Lowering `CC_V2_GROW_RATE_US` raises
+the drain-rate bar and biases toward growth.
 
 Otherwise it holds. The episode ends (flag cleared, re-armed by the next
 qualifying push) when the pool is at cap, admission is gated, or there is
@@ -122,12 +129,11 @@ is saturation (CPU-bound arms still running), not slack; a single park
 between long arms is not slack either. The episode stays armed so the
 rate trigger can keep recruiting.
 
-Why holding is correct: CPU-bound fibers don't park, so they generate a
-near-zero pop rate and recruit via the rate trigger; a high pop rate only
-comes from park/wake churn (e.g. contended locks), where extra workers only
-add cache-line traffic. `CC_V2_GROW_RATE_US` has a wide flat optimum
-(50–200us measured equivalent; at 25us and below recruitment starts to
-leak on contended-lock workloads).
+CPU-bound fibers don't park, so they generate a near-zero pop rate and
+recruit via the rate trigger. A high pop rate is park/wake churn
+(contended locks) or a nursery request wave; both hold. `CC_V2_GROW_RATE_US`
+has a wide flat optimum (50–200us measured equivalent; at 25us and below
+recruitment starts to leak on contended-lock workloads).
 
 `CC_V2_GROW_ESCALATE_TICKS` (default 0 = off) is opt-in insurance: after N
 consecutive slow ticks with a non-empty queue and nobody idle, grow one
@@ -136,13 +142,14 @@ worker per slow tick regardless of the rate test.
 With `CC_V2_STATS=1` the dump includes a growth line:
 
 ```
-[sched_v2 stats] grow (eager<=2 recheck=25us rate=100us/pop/worker depth_x=2 esc=0): requests=... stall=... backlog=... escalate=... held=... final_threads=4/8
+[sched_v2 stats] grow (eager<=2 recheck=25us rate=100us/pop/worker depth_x=2 esc=0): requests=... stall=... backlog=... escalate=... held=... parked=... final_threads=4/8
 ```
 
 - `requests` — pushes that armed the grow-pending flag (one per episode)
 - `stall` / `backlog` — rechecks that grew via the rate / depth trigger
 - `escalate` — workers added by slow-tick escalation
 - `held` — rechecks that decided not to grow
+- `parked` — rechecks that would have grown but the episode was run-to-park
 - `final_threads` — pool size at exit / cap
 
 A contended-lock workload that holds at a small `final_threads` with a large

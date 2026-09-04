@@ -348,14 +348,18 @@ below the eager cap (default 2). Beyond that the push arms a one-shot
 grow-pending flag and sysmon decides.
 
 While grow-pending is set, sysmon rechecks on a short cadence (default
-25 µs). It grows one worker when:
+25 µs). It grows one worker when both:
 
 - the cumulative drain rate since the episode baseline is below one pop
   per worker per 100 µs (workers blocked or running long CPU arms), or
-- ready-queue depth is at least twice the live pool.
+  ready-queue depth is at least twice the live pool; and
+- parks since the baseline do not exceed half the pops.
 
-Otherwise it holds. A high pop rate on a shallow queue is park/wake churn;
-extra workers add traffic, not progress.
+A high park fraction is run-to-park multiplexing (recv, accept, named
+exclusive wait). Extra workers add traffic, not progress. A low park
+fraction with a slow drain is CPU-bound work still occupying workers.
+
+Otherwise it holds. A high pop rate on a shallow queue is park/wake churn.
 
 An episode ends when the pool is at cap, admission is gated, or there is
 true slack: every worker idle and the ready queue empty, or a spare

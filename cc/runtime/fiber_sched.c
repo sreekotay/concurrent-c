@@ -226,6 +226,9 @@ static inline fiber_v2* cc__untag_v2_fiber_local(cc__fiber* f) {
     return (fiber_v2*)((uintptr_t)f & ~CC_FIBER_V2_TAG_LOCAL);
 }
 int    sched_v2_in_context(void);
+int    sched_v2_current_worker_id(void);
+int    sched_v2_live_workers(void);
+int    sched_v2_max_workers(void);
 fiber_v2* sched_v2_current_fiber(void);
 void   sched_v2_park(void);
 void   sched_v2_yield(void);
@@ -694,6 +697,14 @@ static __thread unsigned tls_external_wait_depth = 0;
  * is not a worker.  V1 workers no longer exist; delegate to V2 directly. */
 int cc__sched_current_worker_id(void) {
     return sched_v2_current_worker_id();
+}
+
+int cc__sched_worker_pool_size(void) {
+    return sched_v2_live_workers();
+}
+
+int cc__sched_worker_pool_cap(void) {
+    return sched_v2_max_workers();
 }
 
 /* V1 retired: cc__fiber_set_worker_affinity used to pin the current fiber
