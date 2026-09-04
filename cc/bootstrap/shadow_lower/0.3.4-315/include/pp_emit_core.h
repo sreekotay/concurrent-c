@@ -1570,10 +1570,24 @@ static AstNode* shadow_eh_for_call(ShadowCtx* ctx, const char* call) {
                  strcmp(fname, "cc_eprint") == 0 ||
                  strcmp(fname, "cc_fprintln") == 0 ||
                  strcmp(fname, "cc_fprint") == 0 ||
+                 /* UFCS: `io.println(x)` → `cc_stdio_println(&io, x)`. */
+                 strcmp(fname, "cc_stdio_println") == 0 ||
+                 strcmp(fname, "cc_stdio_eprintln") == 0 ||
+                 strcmp(fname, "cc_stdio_print") == 0 ||
+                 strcmp(fname, "cc_stdio_eprint") == 0 ||
+                 strcmp(fname, "cc_stdio_fprintln") == 0 ||
+                 strcmp(fname, "cc_stdio_fprint") == 0 ||
                  strncmp(fname, "cc_slice_", 9) == 0 ||
                  strncmp(fname, "cc_string_", 10) == 0 ||
                  strncmp(fname, "cc_char_", 8) == 0 ||
-                 strncmp(fname, "cc_const_char_", 14) == 0)
+                 strncmp(fname, "cc_const_char_", 14) == 0 ||
+                 strncmp(fname, "cc__stdio_", 10) == 0 ||
+                 strncmp(fname, "cc__print", 9) == 0 ||
+                 strncmp(fname, "cc__println", 11) == 0 ||
+                 strncmp(fname, "cc__eprint", 10) == 0 ||
+                 strncmp(fname, "cc__eprintln", 12) == 0 ||
+                 strncmp(fname, "cc__fprint", 10) == 0 ||
+                 strncmp(fname, "cc__fprintln", 12) == 0)
             err = "CCPrintError";
         /* Script parents: .cch protos are often not AST_RESULT_FN-registered
          * into the rfn table; UFCS still lowers to these free names. */

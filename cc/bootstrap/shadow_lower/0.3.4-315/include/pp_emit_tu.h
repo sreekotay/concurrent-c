@@ -1026,7 +1026,10 @@ static int shadow_result_pair_is_prelude(const char* ok, const char* err) {
                                 "CCPyptr", NULL};
     int i;
     if (!ok || !ok[0] || !err || !err[0]) return 0;
-    if (strcmp(err, "CCError") != 0 && strcmp(err, "CCIoError") != 0)
+    /* CCPrintError: console println/eprintln (`void ?>(CCPrintError)`).
+     * Same early-arm need as CCError — bang before any Result fn. */
+    if (strcmp(err, "CCError") != 0 && strcmp(err, "CCIoError") != 0 &&
+        strcmp(err, "CCPrintError") != 0)
         return 0;
     for (i = 0; oks[i]; i++) {
         if (strcmp(ok, oks[i]) == 0) return 1;
@@ -1074,6 +1077,7 @@ static int shadow_result_spec_is_header_owned(const char* rname) {
         "CCResult_bool_CC_BoolParseError",
         "CCResult_CCFile_CCIoError",
         "CCResult_void_CCIoError",
+        "CCResult_void_CCPrintError",
         "CCResult_CCSocket_CCNetError",
         "CCResult_CCListener_CCNetError",
         "CCResult_CCHttpResponse_CCHttpErrorInfo",
@@ -1187,6 +1191,9 @@ static int shadow_emit_unwrap_generics(CEmit* out, char seen_ok[][128],
         shadow_result_name(seen_ok[si], seen_err[si], rname, sizeof(rname));
         if (shadow_uw_skip_builtin_rname(rname)) continue;
         apath[0] = 0;
+        /* `__cc_uw_err_at` is the ambient-CCError path (hoist cells). Keep
+         * CCPrintError out: it does not as: to CCError; PrintError bangs use
+         * field bind via `@errhandler(CCPrintError)` / `!>(e)`. */
         if (strcmp(seen_err[si], "CCError") == 0) {
             if (!cemit_fmt(out,
                     ", %s: (cc_rt_diag_record_unwrap_site(__f__, __l__), "
@@ -1604,6 +1611,16 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                                                 "void", "CCError"))
                         return 0;
                 }
+                /* Console println/eprintln → `void ?>(CCPrintError)`. Without
+                 * an early arm, bang before any Result fn hits the pointer
+                 * default: ok=0 still looks non-NULL and `!>` is skipped
+                 * (scratch_soft_return_restore_smoke). Spec lives in
+                 * cc_print_error.h (header-owned). */
+                {
+                    if (!shadow_seen_result_add(seen_ok, seen_err, &nseen,
+                                                "void", "CCPrintError"))
+                        return 0;
+                }
                 /* cc_command_status / process APIs → CCResult_int_CCIoError.
                  * Without this arm, __cc_uw_is_err hits the pointer default and
                  * spawn failures silently look like success (script bang). */
@@ -1615,6 +1632,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 }
                 if (need_io &&
                     !cemit_str(out, "#include <ccc/cc_io_error.h>\n"))
+                    return 0;
+                if (!cemit_str(out, "#include <ccc/cc_print_error.h>\n"))
                     return 0;
                 /* as: Io→CCError arms `CCResult_*_CCIoError` in `__cc_uw_*`.
                  * Declare those specs (and int64_t+CCError) before the
