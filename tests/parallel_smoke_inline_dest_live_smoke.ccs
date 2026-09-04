@@ -1,0 +1,29 @@
+/*
+ * @smoke_inline: #pragma(@parallel) off. Finish runs on the caller
+ * before the next statement. h.live() is false (idle→joined). A write
+ * after the bind is not plant — the arm already read n.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    int n = 3;
+    int saw = 0;
+#pragma(@parallel) off
+    CCParallel h = @parallel {
+        @serial { saw = n; }
+    } !>;
+    n = 99;
+    if (h.live()) {
+        fprintf(stderr, "FAIL smoke_inline still live\n");
+        return 1;
+    }
+    if (saw != 3) {
+        fprintf(stderr, "FAIL smoke_inline saw=%d (write after kick)\n", saw);
+        return 1;
+    }
+    printf("parallel_smoke_inline_dest_live_smoke: OK\n");
+    return 0;
+}

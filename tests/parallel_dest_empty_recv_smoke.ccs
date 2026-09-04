@@ -1,0 +1,104 @@
+/*
+ * Dest EMPTY when the consumer is already in recv and the producer
+ * set is a different dest. Same-dest sibling close is too late —
+ * that is the produce arm (recipe_parallel_stream.ccs).
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int drain_sum(CCChanRx rx) {
+    int sum = 0;
+    int v;
+    while (cc_io_avail(rx.recv(&v)))
+        sum += v;
+    return sum;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    {
+        int[~4 >] tx;
+        int[~4 <] rx;
+        CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+        cc_atomic_int sum = 0;
+        CCParallel cons = @parallel spawn {
+            @serial {
+                sum.store(drain_sum(rx));
+            }
+        } !>;
+        {
+            CCParallel prod = @parallel spawn {
+                @serial {
+                    int i;
+                    for (i = 1; i <= 3; i++)
+                        tx.send(i) !>;
+                }
+            } !> @destroy;
+            prod.close(tx) !>;
+        }
+        cons.wait() !>;
+        if (sum.load() != 6) {
+            fprintf(stderr, "FAIL wait EMPTY sum=%d\n", sum.load());
+            return 2;
+        }
+    }
+
+    {
+        int[~4 >] tx;
+        int[~4 <] rx;
+        CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+        cc_atomic_int sum = 0;
+        CCParallel cons = @parallel spawn {
+            @serial {
+                sum.store(drain_sum(rx));
+            }
+        } !>;
+        CCParallel prod = @parallel spawn {
+            @serial {
+                int i;
+                for (i = 1; i <= 3; i++)
+                    tx.send(i) !>;
+            }
+        } !>;
+        prod.close(tx) !>;
+        prod.leave();
+        cons.wait() !>;
+        if (sum.load() != 6) {
+            fprintf(stderr, "FAIL leave EMPTY sum=%d\n", sum.load());
+            return 3;
+        }
+    }
+
+    {
+        int[~4 >] tx;
+        int[~4 <] rx;
+        CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+        cc_atomic_int sum = 0;
+        CCParallel cons = @parallel spawn {
+            @serial {
+                sum.store(drain_sum(rx));
+            }
+        } !>;
+        CCParallel prod = @parallel spawn {
+            @serial {
+                tx.send(1) !>;
+            }
+        } !>;
+        prod.close(tx) !>;
+        @parallel(prod) {
+            @errhandler(CCError e) cc_error_exit(e);
+            tx.send(2) !>;
+            tx.send(3) !>;
+        }
+        prod.wait() !>;
+        cons.wait() !>;
+        if (sum.load() != 6) {
+            fprintf(stderr, "FAIL dest-attach EMPTY sum=%d\n", sum.load());
+            return 4;
+        }
+    }
+
+    printf("parallel_dest_empty_recv_smoke: OK\n");
+    return 0;
+}

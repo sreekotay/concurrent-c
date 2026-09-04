@@ -518,7 +518,10 @@ CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
 
 Runnable version:
 [examples/recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs).
-When the set is not on the page, `n.close(tx)` arms EMPTY
+When the consumer is already in `recv` and the producer set is another dest,
+`h.close(tx)` arms dest EMPTY
+([recipe_parallel_empty.ccs](../examples/recipe_parallel_empty.ccs)).
+The nursery twin is `n.close(tx)`
 ([recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs)).
 Close/deadlock details live there and in [Debugging](debugging.md).
 

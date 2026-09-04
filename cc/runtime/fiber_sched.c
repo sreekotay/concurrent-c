@@ -1053,10 +1053,13 @@ void cc__fiber_suspend_until_ready(_Atomic int* flag, int expected,
     cc_external_wait_leave();
 }
 
+/* Cancel-aware park. This is an *internal* wait (channel dest-cancel,
+ * nursery cancel). Do not mark it external — that would exempt the fiber
+ * from the deadlock detector. I/O kqueue parks wrap with
+ * cc_external_wait_enter/leave. */
 int cc__fiber_suspend_until_ready_or_cancel(_Atomic int* flag, int expected,
                                             const char* reason, const char* file, int line) {
     (void)file; (void)line;
-    cc_external_wait_enter();
     CCNurseryHost* cur_nursery = cc__runtime_current_nursery();
     if (sched_v2_in_context()) {
         sched_v2_set_park_reason(reason);
@@ -1064,14 +1067,12 @@ int cc__fiber_suspend_until_ready_or_cancel(_Atomic int* flag, int expected,
             if ((cur_nursery && cc_nursery_is_cancelled_host(cur_nursery)) ||
                 cc_parallel_current_cancelled()) {
                 sched_v2_set_park_reason(NULL);
-                cc_external_wait_leave();
                 return ECANCELED;
             }
             sched_v2_park();
         }
         sched_v2_set_park_reason(NULL);
     }
-    cc_external_wait_leave();
     return 0;
 }
 
@@ -1091,7 +1092,6 @@ int cc__fiber_suspend_until_ready_or_cancel_until(_Atomic int* flag, int expecte
     (void)file; (void)line;
     if (!abs_deadline) return cc__fiber_suspend_until_ready_or_cancel(flag, expected, reason, file, line);
 
-    cc_external_wait_enter();
     CCNurseryHost* cur_nursery = cc__runtime_current_nursery();
     if (sched_v2_in_context()) {
         fiber_v2* self = sched_v2_current_fiber();
@@ -1100,12 +1100,10 @@ int cc__fiber_suspend_until_ready_or_cancel_until(_Atomic int* flag, int expecte
             if ((cur_nursery && cc_nursery_is_cancelled_host(cur_nursery)) ||
                 cc_parallel_current_cancelled()) {
                 sched_v2_set_park_reason(NULL);
-                cc_external_wait_leave();
                 return ECANCELED;
             }
             if (cc__fiber_deadline_expired(abs_deadline)) {
                 sched_v2_set_park_reason(NULL);
-                cc_external_wait_leave();
                 return ETIMEDOUT;
             }
             if (self) sched_v2_fiber_set_park_deadline(self, abs_deadline);
@@ -1114,7 +1112,6 @@ int cc__fiber_suspend_until_ready_or_cancel_until(_Atomic int* flag, int expecte
         }
         sched_v2_set_park_reason(NULL);
     }
-    cc_external_wait_leave();
     return 0;
 }
 

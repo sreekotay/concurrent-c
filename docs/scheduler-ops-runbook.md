@@ -115,8 +115,12 @@ latency, not the measurement. Lowering `CC_V2_GROW_RATE_US` raises the
 drain-rate bar and biases toward growth.
 
 Otherwise it holds. The episode ends (flag cleared, re-armed by the next
-qualifying push) when the queue drains, the pool reaches its maximum size,
-or `CC_V2_TARGET_ACTIVE` gates admission.
+qualifying push) when the pool is at cap, admission is gated, or there is
+true slack: every worker idle and the queue empty, or a spare worker plus
+an empty queue persisting ~200 µs. An empty queue with every worker busy
+is saturation (CPU-bound arms still running), not slack; a single park
+between long arms is not slack either. The episode stays armed so the
+rate trigger can keep recruiting.
 
 Why holding is correct: CPU-bound fibers don't park, so they generate a
 near-zero pop rate and recruit via the rate trigger; a high pop rate only

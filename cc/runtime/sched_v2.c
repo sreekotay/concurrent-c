@@ -741,13 +741,19 @@ static _Atomic int g_v2_running_workers = 0;
  * is normalized by measured elapsed time, so the decision is stable
  * against kernel timeout jitter in the recheck sleep itself.
  *
+ * An episode ends on a full pool, an admission gate, or true slack:
+ * every worker idle and the ready queue empty, or one spare worker
+ * plus an empty queue persisting for SCHED_V2_GROW_SLACK_NS (a single
+ * park between CPU-bound arms is not slack). depth==0 with nobody idle
+ * is saturation — keep sampling so the rate trigger can recruit.
+ * The env knobs below are test overrides; defaults settle from the
+ * workload.
+ *
  * An optional slow-tick escalation (CC_V2_GROW_ESCALATE_TICKS, default
  * off) can additionally grow on sustained backlog regardless of rate;
  * see g_v2_grow_escalate_ticks.
  *
- * The pool remains a ratchet: workers are never culled. Set
- * CC_V2_EAGER_THREADS to the core count to restore legacy fully-inline
- * growth. */
+ * The pool remains a ratchet: workers are never culled. */
 static int g_v2_eager_threads = 2;
 static int g_v2_grow_recheck_us = 25;
 /* Hold threshold, in "microseconds per pop per worker": the pool is
@@ -776,6 +782,9 @@ static int g_v2_grow_depth_mult = 2;
  * pool. Kept as opt-in insurance for a workload that pops briskly AND
  * scales with workers, should one appear. */
 static int g_v2_grow_escalate_ticks = 0;
+/* Dwell before a spare worker + empty queue counts as slack. One
+ * recheck of idle is a park between long arms, not spare capacity. */
+#define SCHED_V2_GROW_SLACK_NS 200000ull
 static _Atomic int g_v2_grow_pending = 0;
 static _Atomic uint64_t g_v2_grow_requests = 0;   /* producer defers      */
 static _Atomic uint64_t g_v2_grow_stall = 0;      /* recheck: pops slow   */
@@ -2228,6 +2237,7 @@ static void* sched_v2_sysmon_main(void* arg) {
     uint64_t grow_base_pops = 0;
     uint64_t grow_base_ns = 0;
     int grow_have_baseline = 0;
+    uint64_t grow_slack_since_ns = 0;
     int slow_prev_backlog = 0;
     uint64_t last_slow_ns = 0;
     v2_mach_tb_init_once();
@@ -2251,11 +2261,24 @@ static void* sched_v2_sysmon_main(void* arg) {
                             atomic_load_explicit(&g_v2_running_workers,
                                                  memory_order_acquire)
                                 < g_v2_target_active);
-            if (depth == 0 || n >= g_v2.max_threads || !admit_ok) {
-                /* Demand resolved, pool full, or admission-capped: episode
-                 * over. A producer re-arms the flag if demand returns. */
+            int idle = atomic_load_explicit(&g_v2.idle_workers,
+                                            memory_order_acquire);
+            int slack_now = (depth == 0 && idle > 0);
+            uint64_t slack_now_ns = 0;
+            int slack_done = 0;
+            if (slack_now) {
+                slack_now_ns = v2_now_ns();
+                if (grow_slack_since_ns == 0)
+                    grow_slack_since_ns = slack_now_ns;
+                slack_done = (idle >= n) ||
+                    (slack_now_ns - grow_slack_since_ns >= SCHED_V2_GROW_SLACK_NS);
+            } else {
+                grow_slack_since_ns = 0;
+            }
+            if (n >= g_v2.max_threads || !admit_ok || slack_done) {
                 atomic_store_explicit(&g_v2_grow_pending, 0, memory_order_release);
                 grow_have_baseline = 0;
+                grow_slack_since_ns = 0;
             } else {
                 uint64_t pops = atomic_load_explicit(&g_v2.ready_queue.pops,
                                                      memory_order_relaxed);
@@ -2297,6 +2320,7 @@ static void* sched_v2_sysmon_main(void* arg) {
             }
         } else {
             grow_have_baseline = 0;
+            grow_slack_since_ns = 0;
         }
 
         /* Everything below assumes ~one V2_SYSMON_INTERVAL_MS between

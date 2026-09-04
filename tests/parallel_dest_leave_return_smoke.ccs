@@ -1,0 +1,37 @@
+/*
+ * Dest-live leave, then return: the plant frame is dead. The heap env
+ * and leave reaper already outlive that frame. A file-scope dest cell
+ * is the worker's result — not an outer `int` on start_and_leave.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static cc_atomic_int g_val = 0;
+
+static void start_and_leave(void) {
+    @errhandler(CCError e) { cc_error_log(e); }
+    CCParallel h = @parallel spawn {
+        @serial {
+            cc_sleep_ms(20);
+            g_val.store(41);
+        }
+    } !>;
+    h.leave();
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    start_and_leave();
+    int i;
+    for (i = 0; i < 2000; i++) {
+        if (g_val.load() == 41)
+            break;
+        cc_sleep_ms(1);
+    }
+    if (g_val.load() != 41) {
+        fprintf(stderr, "FAIL leave-return val=%d\n", g_val.load());
+        return 1;
+    }
+    printf("parallel_dest_leave_return_smoke: OK\n");
+    return 0;
+}

@@ -976,7 +976,7 @@ static int shadow_inc_mentions_cch(const char* inc, const char* cch_path) {
     return hit[n] == '.' || hit[n] == '"' || hit[n] == '>';
 }
 
-static int shadow_cch_in_pass_inc(const char* path, char pass_inc[][256],
+static int shadow_cch_in_pass_inc(const char* path, char** pass_inc,
                                   int npass_inc) {
     int i;
     if (!path || npass_inc <= 0 || !pass_inc) return 0;
@@ -988,7 +988,7 @@ static int shadow_cch_in_pass_inc(const char* path, char pass_inc[][256],
 }
 
 static int shadow_union_header_unwraps(char seen_ok[][128], char seen_err[][128],
-                                       int* nseen, char pass_inc[][256],
+                                       int* nseen, char** pass_inc,
                                        int npass_inc) {
     size_t i, n;
     shadow_rfn_scan_included_headers();
@@ -1304,8 +1304,8 @@ static int shadow_emit_collected_result_specs(CEmit* out,
 }
 
 static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
-                       ShadowEmitKind kind, char pass_inc[][256], int npass_inc,
-                       char pass_def[][512], int npass_def,
+                       ShadowEmitKind kind, char** pass_inc, int npass_inc,
+                       char** pass_def, int npass_def,
                        const char* src_path) {
     memset(out, 0, sizeof(*out));
     shadow_chan_reset();

@@ -113,6 +113,9 @@ run_one examples/recipe_variant.ccs \
 run_one examples/recipe_channel_pipeline.ccs \
   "sum = 6 (expected 6)"
 
+run_one examples/recipe_parallel_empty.ccs \
+  "sum = 6 (expected 6)"
+
 run_one examples/recipe_worker_pool.ccs \
   "feeder: sent 9 jobs" \
   "done, jobs_done = 9"

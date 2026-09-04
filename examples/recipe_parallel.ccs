@@ -30,6 +30,7 @@
  *
  * Not this file:
  *   on-page stream (produce close / consume recv) → recipe_parallel_stream.ccs
+ *   dest EMPTY-close (consumer already in recv) → recipe_parallel_empty.ccs
  *   send_task + ordered recv → recipe_ordered_parallel.ccs
  *   two named stages (read then write) → recipe_turnstile.ccs
  *

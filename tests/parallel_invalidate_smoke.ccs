@@ -1,6 +1,6 @@
 /*
- * Destroy / invalidate: cancel the tree, then join. Not h.wait() !>.
- * A parked recv unsticks. Idle / already-joined is a no-op.
+ * invalidate is cancel then wait — spelled, not @destroy.
+ * @destroy waits (no cancel). A parked recv needs cancel first.
  */
 #include <ccc/std/prelude.cch>
 #include <errno.h>
@@ -36,16 +36,16 @@ int main(void) {
                     int rc = cc_chan_recv(ch, &v, sizeof(v));
                     saw = (rc == ECANCELED) ? 1 : 0;
                 }
-            } !>;
+            } !> @destroy;
             if (!h.live()) {
-                fprintf(stderr, "FAIL dest-live not live before destroy\n");
+                fprintf(stderr, "FAIL dest-live not live before cancel\n");
                 cc_chan_free(ch);
                 return 1;
             }
-            h.invalidate();
+            h.cancel() !>;
         }
         if (!saw) {
-            fprintf(stderr, "FAIL invalidate did not wake recv\n");
+            fprintf(stderr, "FAIL cancel+destroy did not wake recv\n");
             cc_chan_free(ch);
             return 1;
         }

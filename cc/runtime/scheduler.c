@@ -706,6 +706,15 @@ CCTask cc_parallel_spawn(void* (*fn)(void*), void* arg) {
     return t;
 }
 
+CCTask cc_parallel_spawn_admit(void* (*fn)(void*), void* arg) {
+    CCTask invalid;
+    memset(&invalid, 0, sizeof(invalid));
+    if (!fn)
+        return invalid;
+    tls_par_spawn_calls++;
+    return cc_fiber_spawn_task(fn, arg);
+}
+
 void cc_parallel_join(CCTask t) {
     (void)cc_block_on_intptr(t);
 }

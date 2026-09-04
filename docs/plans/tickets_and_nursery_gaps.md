@@ -145,7 +145,9 @@ success when concurrency was required:
 spawned arms. A brace join that names a blocking channel op, or captures
 a channel (helpers, dest-live consume), is ill-formed unless it is
 `spawn` or `#pragma(@parallel) off`. Hidden channel leftover: abort if
-that join parks, else the detector. `n.spawn` is the bag.
+that join parks, else the detector. Meeting admit does not take
+`deny_fast` / flood-deny; a failed admit aborts (`cc_parallel_die`) —
+it does not inline the sibling after the kick. `n.spawn` is the bag.
 
 Do **not** need “always spawn 0.” Arm 0 on the caller is kick / dest-live; when
 siblings are spawned first, a parked `send` on the caller can still schedule
@@ -159,45 +161,48 @@ detector should say so. Prefer detect→REAL over relying on that shape.
 count, `try_send`, 3+ arm pairwise analysis, `#pragma off` / `seq` (user chose
 sequential).
 
-### 3. One `@stage` per planted name
+### 3. One `@stage` per planted name — not a gap
 
-`@stage` is once for name `i` at gate `k`. Nesting it in a `while` is
-ill-formed. A conn that must **re-take** a named gate per request needs a new
-`i` or a manual `t.wait(k, seq)` / `pass`. The conn’s byte loop does not.
+`@stage` is once per `(name, gate)` in that ticket’s body. A new unit is a
+new name. Keep-alive is a C `while (recv)` — it does not restage the same
+name. `i-1` then `i` is publish order when you plant a range, not a
+hardcoded name table.
 
-### 4. Graph, not a gate
+### 4. Graph, not a gate — not a gap
 
-Any-to-any hops (`random_access` locales) are not `k+1`. Named exclusives and
-channels between shards stay a mesh. Prepare-commit’s named holds are a set.
-Neither is owner-N:1 (that is write).
+A mesh is a mesh (`random_access` hops, shard exclusives, prepare-commit
+holds). It is not owner-N:1 and does not need a `k+1` face. Channels and
+named exclusives stay the spelling.
 
 ### 5. EMPTY-close as a registration
 
 On-page stream is closed: produce calls `tx.close()`; `.wait()` joins both
 (`recipe_parallel_stream.ccs`). That is not a registration.
 
-Nursery `n.close(tx)` still arms **EMPTY**: last child dead, possibly on a
+Nursery `n.close(tx)` arms **EMPTY**: last child dead, possibly on a
 worker, on both `wait` and `leave`, without the owner sitting in `wait` to
-close by hand. Spec §8.1.4. Dest has no EMPTY. `h.wait()` joins this dest’s
-`n` + `tasks[]` only. Adopt is cancel-only: `h1.adopt(h2)` does not make
-`h1.wait()` wait `h2`.
+close by hand. Spec §8.1.4. Dest `h.close(tx)` is the same pair on a dest
+(§8.11). `h.wait()` joins this dest’s `n` + `tasks[]` only. Adopt is
+cancel-only: `h1.adopt(h2)` does not make `h1.wait()` wait `h2`.
 
 | Spelling | Status |
 |---|---|
 | Produce arm `tx.close()` | Taught default. No dest API. |
 | `n.close(tx)` + EMPTY | Bag. Dest-live / leave / leftover. |
-| `h.close(tx)` + dest EMPTY / `.leave()` | Same pair as nursery §8.1.4. Leftover LEFT-only. No `.abandon`. Wait-for dest refuses `leave` (construct joins). |
+| `h.close(tx)` + dest EMPTY / `.leave()` | Same pair. Consumer already in `recv`; producer set is another dest (`recipe_parallel_empty.ccs`). Leftover LEFT-only. No `.abandon`. Wait-for dest refuses `leave` (construct joins). |
 
-Need the bag row when the consumer is already in `recv` and the producer
-set is not this dest’s arms (inner bag empties, or you already left).
-Waiting the producer dest first deadlocks.
+EMPTY closes **this** dest’s join set. A sibling consumer on the same dest
+does not unblock there. Waiting a dest that still owns the parked consumer
+does not fire that close.
 
-### 6. Dedicated prefetch that is not “ticket `i` reads chunk `i`”
+### 6. Dedicated prefetch — not a gap
 
-Ticket read-ahead: whoever sits in gate 0 *is* the reader. A slave that must
-keep the disk busy when **no** name is at `read` (pigz `load_read` double
-buffer, host `send`) is another person. Optional; decompress-of-one-gzip does
-not require it.
+`CCTurnstileRW` is only `read`/`write` names on `stages[0]`/`[1]`. The
+turnstile is `n_stages` gates. Read-ahead is a ticket at the read gate while
+another name is in compute or write (`cap >= 2`, or `n_stages >= 3`). Whoever
+sits in that gate *is* the reader. A slave that reads when **no** name is
+there (pigz `load_read` double buffer) is another person — optional host
+IO, not a missing face.
 
 ## What the consumer still does not know
 
@@ -212,7 +217,8 @@ Do not do these unless we choose the drawing as the taught server/pigz story.
 - Teach the sandwich in `docs/cheatsheet.md` / `recipe_parallel.ccs`: gap =
   overlap, stage = loop-carried, N:1 = write, read optional.
 - On-page stream taught: `recipe_parallel_stream.ccs`, cheatsheet `@parallel`
-  + Channels. EMPTY twin remains `recipe_channel_pipeline.ccs`.
+  + Channels. Dest EMPTY: `recipe_parallel_empty.ccs`. Nursery twin:
+  `recipe_channel_pipeline.ccs`.
 - Dest `.leave` / EMPTY are the nursery pair on a dest (`h.close` /
   `h.leave`). Adopt is still cancel-only. The bag keeps late admit /
   host ABI / never-deny.
@@ -244,13 +250,16 @@ Do not do these unless we choose the drawing as the taught server/pigz story.
 - Bag + host: `real_projects/curl_dns_port/thrdqueue.ccs`
 - Mesh: `real_projects/random_access/ra_dist.ccs`
 - On-page stream: `examples/recipe_parallel_stream.ccs`
-- EMPTY-close stream: `examples/recipe_channel_pipeline.ccs`, `pigz_channel.ccs`
+- Dest EMPTY-close: `examples/recipe_parallel_empty.ccs`,
+  `tests/parallel_dest_empty_recv_smoke.ccs`
+- Nursery EMPTY-close: `examples/recipe_channel_pipeline.ccs`, `pigz_channel.ccs`
 - Join deny / serial schedule: spec §8.11.7; a visible channel on a
   brace join is `@parallel spawn` (`tests/parallel_rendezvous_unbuf_smoke.ccs`,
   `parallel_rendezvous_helper_smoke.ccs`,
   `parallel_rendezvous_dest_live_smoke.ccs`). Unmarked is
   `parallel_chan_needs_spawn_fail.ccs`. Denied join + channel park
-  aborts (`parallel_deny_park_abort_smoke.ccs`). Ungated recursive
+  aborts (`parallel_deny_park_abort_smoke.ccs`). Meeting admit does
+  not inline (`tests/parallel_spawn_admit_shape_smoke.c`). Ungated recursive
   `@parallel { }` stays CHURN (`parallel_adapt_churn_smoke.ccs`); join
   must not pin REAL.
 - Dest leave / EMPTY: `tests/parallel_dest_leave_smoke.ccs`

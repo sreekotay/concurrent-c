@@ -776,6 +776,21 @@ void cc__io_wait_forget_fd(int fd) {
 #endif
 }
 
+/* kqueue/poll parks wait on an external progress source. The cancel-aware
+ * suspend itself is an internal park (used by channels too); mark this
+ * fiber external so the deadlock detector does not treat I/O as a stall. */
+static int cc__io_wait_suspend_ready(_Atomic int* flag,
+                                     const struct timespec* abs_deadline) {
+    int wait_err;
+    cc_external_wait_enter();
+    wait_err = abs_deadline
+        ? CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL_UNTIL(flag, 0, abs_deadline,
+                                                       "io_ready")
+        : CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL(flag, 0, "io_ready");
+    cc_external_wait_leave();
+    return wait_err;
+}
+
 int cc__io_watcher_wait(cc__io_owned_watcher* watcher, short events) {
     return cc__io_watcher_wait_deadline(watcher, events, NULL);
 }
@@ -843,9 +858,7 @@ int cc__io_watcher_wait_deadline(cc__io_owned_watcher* watcher,
             }
         }
         cc__fiber_set_park_obj(slot);
-        int wait_err = abs_deadline
-            ? CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL_UNTIL(&slot->ready, 0, abs_deadline, "io_ready")
-            : CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL(&slot->ready, 0, "io_ready");
+        int wait_err = cc__io_wait_suspend_ready(&slot->ready, abs_deadline);
         cc__fiber_set_park_obj(NULL);
         if (persistent_read) {
             (void)atomic_exchange_explicit(&slot->ready, 0, memory_order_acq_rel);
@@ -1068,9 +1081,7 @@ int cc__io_wait_fd_deadline(int fd, short events, const struct timespec* abs_dea
             }
         }
         cc__fiber_set_park_obj(slot);
-        int wait_err = abs_deadline
-            ? CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL_UNTIL(&slot->ready, 0, abs_deadline, "io_ready")
-            : CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL(&slot->ready, 0, "io_ready");
+        int wait_err = cc__io_wait_suspend_ready(&slot->ready, abs_deadline);
         cc__fiber_set_park_obj(NULL);
         atomic_store_explicit(&slot->active, 0, memory_order_release);
         slot->fiber = NULL;
@@ -1111,9 +1122,7 @@ int cc__io_wait_fd_deadline(int fd, short events, const struct timespec* abs_dea
     cc__io_waiter_notify();
 
     cc__fiber_set_park_obj(waiter);
-    int wait_err = abs_deadline
-        ? CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL_UNTIL(&waiter->ready, 0, abs_deadline, "io_ready")
-        : CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL(&waiter->ready, 0, "io_ready");
+    int wait_err = cc__io_wait_suspend_ready(&waiter->ready, abs_deadline);
     cc__fiber_set_park_obj(NULL);
 
     atomic_store_explicit(&waiter->cancelled, 1, memory_order_release);

@@ -449,9 +449,9 @@ static void cc__chan_wait_flag_park(void* waitable, CCSchedFiber* fiber, void* i
                                   atomic_load_explicit(ctx->flag, memory_order_relaxed));
     }
     cc__fiber_set_park_obj(ctx->obj);
-    /* Dest cancel signals this fiber without setting `notified`. A single
-     * PARK_IF treats that as a spurious wake and the recv loop parks
-     * again; wait-until-ready-or-cancel unsticks. */
+    /* Dest cancel signals this fiber without setting `notified`. Loop until
+     * the flag changes or dest/nursery cancel; this is an internal park
+     * (do not mark external_wait — that hides channel deadlocks). */
     (void)CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL(
         ctx->flag, ctx->expected,
         ctx->reason ? ctx->reason : "chan_wait_notified");

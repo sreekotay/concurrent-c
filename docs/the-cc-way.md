@@ -17,7 +17,7 @@ CC asks two questions repeatedly: What is the smallest fact that actually change
 - **[Move / dead-state](cheatsheet.md#lifetime-parents-attach--adopt--create_)** — `cc_move` transfers; the source is empty for teardown. User use after the move is a compile error, not a runtime zero-check.
 - **[Single-shot closures](language-concepts.md#5-closures-carry-captures)** — Represent one remaining action or obligation without inventing a larger task object.
 - **[Turnstiles / gates](cheatsheet.md#pipeline-turnstile-ccturnstile)** — Express named local admission predicates; not locks, not DAGs.
-- **[Tickets / `@parallel`](cheatsheet.md#parallel)** — Names on the page. Join, range, on-page stream (`@parallel spawn` + `tx.close()` in produce). Not a nursery. [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs).
+- **[Tickets / `@parallel`](cheatsheet.md#parallel)** — Names on the page. Join, range, on-page stream (`@parallel spawn` + `tx.close()` in produce). Dest EMPTY when the consumer is already in `recv`: [recipe_parallel_empty.ccs](../examples/recipe_parallel_empty.ccs). Not a nursery. [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs).
 - **[Nurseries](cheatsheet.md#structured-concurrency)** — Open bag when the set is not on the page: late `n.spawn`, host, `leave` / EMPTY. EMPTY registration: [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs).
 - **Local sigils** — Mark consequential decision boundaries directly in source.
 - **[Top-level owners + views](getting-started.md#locality-owned-or-view)** — Prefer one real owner with non-owning views over manufactured shared ownership.

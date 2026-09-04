@@ -27,6 +27,8 @@ fiber handoff goes through the ready queue.
 
 Worker count defaults to `sysconf(_SC_NPROCESSORS_ONLN)`, capped at
 `V2_MAX_THREADS` (256), overridable via `CC_V2_THREADS` (or `CC_WORKERS`).
+The live pool starts at one worker and grows on demand up to that cap;
+workers are never culled. See Worker pool growth.
 
 ### Correctness goals
 
@@ -323,9 +325,11 @@ the outer park cycle.
 Called from producers (signal, spawn, I/O thread, sysmon):
 
 1. `seq_cst` fence paired with the worker's idle fence.
-2. If `idle_workers == 0`, return.
-3. While ready work and idle workers remain, claim one idle worker and
+2. While ready work remains, claim one idle worker and
    `wake_primitive_wake_one`.
+3. If no idle worker remains, arm deferred pool growth when the ready
+   queue is deeper than the live pool (or the pool is still below the
+   eager cap). See Worker pool growth.
 4. If `CC_V2_TARGET_ACTIVE` is set and `running_workers >= target`, stop.
 
 ### Wake skip depth (`CC_V2_WAKE_SKIP_DEPTH`)
@@ -333,6 +337,35 @@ Called from producers (signal, spawn, I/O thread, sysmon):
 Enqueue skips the external wake when pre-push depth is already
 `>= wake_skip_depth` (default 4). Sysmon's every-tick unconditional wake
 bounds the latency of a skipped wake to one sysmon interval.
+
+## Worker pool growth
+
+The pool starts at one worker and grows on demand up to the worker cap.
+Workers are never culled.
+
+A push that finds no idle worker creates a thread inline while the pool is
+below the eager cap (default 2). Beyond that the push arms a one-shot
+grow-pending flag and sysmon decides.
+
+While grow-pending is set, sysmon rechecks on a short cadence (default
+25 µs). It grows one worker when:
+
+- the cumulative drain rate since the episode baseline is below one pop
+  per worker per 100 µs (workers blocked or running long CPU arms), or
+- ready-queue depth is at least twice the live pool.
+
+Otherwise it holds. A high pop rate on a shallow queue is park/wake churn;
+extra workers add traffic, not progress.
+
+An episode ends when the pool is at cap, admission is gated, or there is
+true slack: every worker idle and the ready queue empty, or a spare
+worker plus an empty queue that persists (~200 µs). An empty queue with
+every worker busy is saturation, not slack; a single park between
+CPU-bound arms is not slack either. The episode stays armed so the rate
+trigger can keep recruiting.
+
+`CC_V2_EAGER_THREADS`, `CC_V2_GROW_RECHECK_US`, `CC_V2_GROW_RATE_US`,
+`CC_V2_GROW_DEPTH_X`, and `CC_V2_GROW_ESCALATE_TICKS` are test overrides.
 
 ## Deadline-aware park
 
@@ -378,7 +411,10 @@ Single thread, interval `V2_SYSMON_INTERVAL_MS` (20 ms). Per tick:
 3. **Deadlock check.** See below.
 4. **Safety-net wake.** If `ready_queue.count > 0 && idle_workers > 0`,
    `sched_v2_wake(-1)`.
-5. **Stall diagnostics.** If at least one fiber is queued, running, or
+5. **Pool growth.** While grow-pending is set, sysmon rechecks on a short
+   cadence instead of the 20 ms tick and may add one worker (see Worker
+   pool growth). Slow-tick jobs stay gated on elapsed time.
+6. **Stall diagnostics.** If at least one fiber is queued, running, or
    parked and progress counters stall for ~2 s, print a diagnostic
    snapshot. Idle leftover pool slots after a join are not waiters.
    Fibers parked only in `external_wait` / deadlock-suppress, or a host
@@ -474,8 +510,13 @@ correctness.
 
 | Variable                         | Effect                                                                                         |
 | -------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `CC_V2_THREADS=N`                | Fix worker count (default: online CPUs, capped at 256).                                        |
+| `CC_V2_THREADS=N`                | Worker-pool cap (default: online CPUs, capped at 256).                                         |
 | `CC_WORKERS=N`                   | Alias for `CC_V2_THREADS` when the latter is unset.                                            |
+| `CC_V2_EAGER_THREADS=N`          | Test: inline create up to N workers on the push path. Default 2.                               |
+| `CC_V2_GROW_RECHECK_US=N`        | Test: sysmon grow-episode cadence. Default 25.                                                 |
+| `CC_V2_GROW_RATE_US=N`           | Test: µs/pop/worker below which the rate trigger grows. Default 100.                           |
+| `CC_V2_GROW_DEPTH_X=N`           | Test: grow when ready depth ≥ N× pool size. 0 disables. Default 2.                             |
+| `CC_V2_GROW_ESCALATE_TICKS=N`    | Test: grow on N consecutive slow ticks of queued work + no idle. 0 off.                        |
 | `CC_V2_TARGET_ACTIVE=N`          | Cap concurrently active (non-parked) workers. 0 disables.                                      |
 | `CC_V2_PARK_EXTRAS_AT_STARTUP=1` | Non-primary workers park at startup rather than all draining the first enqueue.                |
 | `CC_V2_SPIN_BEFORE_PARK=N`       | Queue poll iterations before `__ulock_wait` / futex wait. 0 disables.                          |

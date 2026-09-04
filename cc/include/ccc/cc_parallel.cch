@@ -8,9 +8,9 @@
  * `.wait()` and `.leave()`. `h.leave()` consumes the handle without
  * joining (OPEN → LEFT); leftover runs at EMPTY on the LEFT path
  * only (`h.leave(ctx, finish)`). Mixing wait and leave is a
- * programming error. `@destroy` / `h.invalidate()` cancels the
- * tree and joins (not `h.wait() !>`). Idle, joined, or left is a
- * no-op. UFCS is the surface (`h.wait()` is
+ * programming error. `@destroy` waits (nursery law). It does not
+ * cancel. `h.invalidate()` cancels the tree, then waits. Idle,
+ * joined, or left is a no-op. UFCS is the surface (`h.wait()` is
  * `cc_parallel_wait(h)`).
  * A void host unwraps in place: `h.wait() !>(e) { (void)e; };`.
  * `.cancel()` is bool !>(CCIoError): Ok(true) means this call
@@ -120,6 +120,15 @@ static inline bool cc_parallel_live(const CCParallel* h) {
 
 void !>(CCError) cc_parallel_wait(CCParallel* h);
 void cc_parallel_invalidate(CCParallel* h);
+
+/* `@destroy`: wait, no cancel. Join error is not dropped. */
+static inline void cc_parallel_destroy(CCParallel* h) {
+    CCResult_void_CCError w;
+    if (!h || !cc_parallel_live(h))
+        return;
+    w = cc_parallel_wait(h);
+    if (!w.ok) cc_error_exit(w.u.error);
+}
 void cc_parallel_attach(CCParallel* h, CCTask t);
 void !>(CCError) cc_parallel_admit_ok(CCParallel* h);
 void cc_parallel_admit(CCParallel* h, CCTask t, void* env);
@@ -274,7 +283,7 @@ static inline CCSlice cc_parallel_lower_c(CCSlice recv_type,
 }
 
 @typehooks on CCParallel {
-    .destroy = cc_type_destroy_call("cc_parallel_invalidate"),
+    .destroy = cc_type_destroy_call("cc_parallel_destroy"),
     .ufcs = cc_parallel_lower_c,
 };
 

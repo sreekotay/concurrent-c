@@ -69,10 +69,12 @@ static PpDirKind pp_dir_of(CCSlice spell) {
 
 /* ---- stage-2: splice + object-like macros + guards ---------------------- */
 
-enum { FRAME_CAP = 32, EXPAND_CAP = 64,
+enum { EXPAND_CAP = 64,
        REFUSE_CLO_CAP = 32, PP_NEST_CAP = 32, PP_SKIP_SPAN_CAP = 4096,
        /* Soft sanity only — grow fails loud past this; not a fixed table. */
-       MACRO_SANITY_CAP = 1 << 20 };
+       MACRO_SANITY_CAP = 1 << 20,
+       FRAME_SANITY_CAP = 1 << 16,
+       PASS_INC_SANITY_CAP = 1 << 20 };
 
 typedef struct {
     char* name;    /* arena cstr (pp->arena) */
@@ -99,7 +101,7 @@ typedef struct {
     size_t len;
 } PpSkipSpan;
 
-enum { PASS_INC_CAP = 64, SYS_INC_CAP = 16, CPP_DIR_CAP = 256 };
+enum { SYS_INC_CAP = 16, CPP_DIR_CAP = 256 };
 
 typedef struct {
     TapeCache* cache;
@@ -109,8 +111,10 @@ typedef struct {
      * cache; <...> are not spliced into the AST stream (passthrough emit). */
     const char* sys_inc[SYS_INC_CAP];
     int nsys_inc;
-    Frame frames[FRAME_CAP];
+    /* Include / macro-expand frames: growable stack on pp->arena. */
+    Frame* frames;
     int nf;
+    int frames_cap;
     /* Object-like macros: growable table + name/body on pp->arena. */
     Macro* macros;
     int nmacros;
@@ -138,12 +142,15 @@ typedef struct {
     int nexpand_disable;
     int err;
     char err_msg[192]; /* set on capacity / hard failures (also printed) */
-    /* Top-level #include <...> and ordinary quote-.h lines (not spliced). */
-    char pass_inc[PASS_INC_CAP][256];
+    /* Top-level #include <...> and ordinary quote-.h lines (not spliced).
+     * Pointer table + arena cstrs; grow fails loud (no 256-byte truncate). */
+    char** pass_inc;
     int npass_inc;
+    int pass_inc_cap;
     /* Top-level #define lines preserved for .h API surface. */
-    char pass_def[PASS_INC_CAP][512];
+    char** pass_def;
     int npass_def;
+    int pass_def_cap;
     /* Sticky root-tape cpp lines (`#if`/`#ifdef`/`#define` inside arms, …)
      * injected into the AST token stream (cpp-transparency). */
     char cpp_dir[CPP_DIR_CAP][512];
@@ -190,7 +197,8 @@ static void pp_fail_locus(Pp* pp, Token at, const char* msg) {
         diag_at(pp->cache, at, pp->err_msg);
         return;
     }
-    if (pp->cache && pp->nf > 0 && pp->frames[pp->nf - 1].tape) {
+    if (pp->cache && pp->frames && pp->nf > 0 &&
+        pp->frames[pp->nf - 1].tape) {
         diag_ft(pp->cache, pp->frames[pp->nf - 1].tape, at.offset, pp->err_msg);
         return;
     }
@@ -198,10 +206,82 @@ static void pp_fail_locus(Pp* pp, Token at, const char* msg) {
     diag_emit("error", NULL, 0, 0, 1, pp->err_msg);
 }
 
-static int pp_add_passthrough_include(Pp* pp, const char* line) {
-    if (!pp || !line || pp->npass_inc >= PASS_INC_CAP) return 0;
-    snprintf(pp->pass_inc[pp->npass_inc], sizeof(pp->pass_inc[0]), "%s", line);
-    pp->npass_inc++;
+/* Grow a char* table on pp->arena (abandon old bump row). First alloc 8,
+ * then double. Sanity-capped at PASS_INC_SANITY_CAP (no truncate). */
+static int pp_cstr_table_grow(Pp* pp, Token at, char*** tab, int* tcap, int n,
+                              const char* what) {
+    int ncap;
+    char** ntab;
+    if (!pp || !tab || !tcap) return 0;
+    if (!cc_arena_is_live(pp->arena)) {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "stage-2 %s: pp arena is not live",
+                 what ? what : "table");
+        pp_fail_locus(pp, at, msg);
+        return 0;
+    }
+    if (*tcap >= PASS_INC_SANITY_CAP) {
+        char msg[192];
+        snprintf(msg, sizeof(msg),
+                 "stage-2 %s sanity cap (%d); refusing silent grow",
+                 what ? what : "table", PASS_INC_SANITY_CAP);
+        pp_fail_locus(pp, at, msg);
+        return 0;
+    }
+    ncap = *tcap > 0 ? *tcap * 2 : 8;
+    if (ncap > PASS_INC_SANITY_CAP) ncap = PASS_INC_SANITY_CAP;
+    if (ncap <= n) {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "stage-2 %s grow underflow",
+                 what ? what : "table");
+        pp_fail_locus(pp, at, msg);
+        return 0;
+    }
+    ntab = (char**)cc_arena_alloc(pp->arena, sizeof(char*) * (size_t)ncap,
+                                 _Alignof(char*));
+    if (!ntab) {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "stage-2 %s alloc failed",
+                 what ? what : "table");
+        pp_fail_locus(pp, at, msg);
+        return 0;
+    }
+    if (*tab && n > 0) memcpy(ntab, *tab, sizeof(char*) * (size_t)n);
+    memset(ntab + n, 0, sizeof(char*) * (size_t)(ncap - n));
+    *tab = ntab;
+    *tcap = ncap;
+    return 1;
+}
+
+static char* pp_arena_dup_cstr(Pp* pp, Token at, const char* s) {
+    size_t n;
+    char* d;
+    if (!pp || !s) return NULL;
+    if (!cc_arena_is_live(pp->arena)) {
+        pp_fail_locus(pp, at, "stage-2 passthrough: pp arena is not live");
+        return NULL;
+    }
+    n = strlen(s);
+    d = (char*)cc_arena_alloc(pp->arena, n + 1, 1);
+    if (!d) {
+        pp_fail_locus(pp, at, "stage-2 passthrough line alloc failed");
+        return NULL;
+    }
+    memcpy(d, s, n);
+    d[n] = 0;
+    return d;
+}
+
+static int pp_add_passthrough_include(Pp* pp, Token at, const char* line) {
+    char* copy;
+    if (!pp || !line || !line[0]) return 0;
+    if (pp->npass_inc >= pp->pass_inc_cap &&
+        !pp_cstr_table_grow(pp, at, &pp->pass_inc, &pp->pass_inc_cap,
+                            pp->npass_inc, "include passthrough table"))
+        return 0;
+    copy = pp_arena_dup_cstr(pp, at, line);
+    if (!copy) return 0;
+    pp->pass_inc[pp->npass_inc++] = copy;
     return 1;
 }
 
@@ -230,20 +310,17 @@ static int pp_define_has_cc_token(const char* line) {
 }
 
 static int pp_add_passthrough_define(Pp* pp, Token at, const char* line) {
+    char* copy;
     if (!pp || !line || !line[0]) return 0;
-    if (pp->npass_def >= PASS_INC_CAP) {
-        char msg[192];
-        snprintf(msg, sizeof(msg),
-                 "stage-2 #define passthrough table full (%d); refusing silent "
-                 "drop",
-                 PASS_INC_CAP);
-        pp_fail_locus(pp, at, msg);
-        return 0;
-    }
     /* Keep macro table registration; skip host emit for CC-token bodies. */
     if (pp_define_has_cc_token(line)) return 1;
-    snprintf(pp->pass_def[pp->npass_def], sizeof(pp->pass_def[0]), "%s", line);
-    pp->npass_def++;
+    if (pp->npass_def >= pp->pass_def_cap &&
+        !pp_cstr_table_grow(pp, at, &pp->pass_def, &pp->pass_def_cap,
+                            pp->npass_def, "#define passthrough table"))
+        return 0;
+    copy = pp_arena_dup_cstr(pp, at, line);
+    if (!copy) return 0;
+    pp->pass_def[pp->npass_def++] = copy;
     return 1;
 }
 
@@ -702,8 +779,48 @@ static int join_path(const char* dir, CCSlice rel, char* dst, size_t dst_cap) {
     return 1;
 }
 
-static int pp_push_tape(Pp* pp, FileTape* ft) {
-    if (pp->nf >= FRAME_CAP) return 0;
+/* Grow frames[] on pp->arena (abandon old bump row). First alloc 8, then
+ * double. Sanity-capped at FRAME_SANITY_CAP with a hard fail (no truncate). */
+static int frame_table_grow(Pp* pp, Token at) {
+    int ncap;
+    Frame* ntab;
+    if (!pp) return 0;
+    if (!cc_arena_is_live(pp->arena)) {
+        pp_fail_locus(pp, at, "stage-2 include frame stack: pp arena is not live");
+        return 0;
+    }
+    if (pp->frames_cap >= FRAME_SANITY_CAP) {
+        char msg[192];
+        snprintf(msg, sizeof(msg),
+                 "stage-2 include frame stack sanity cap (%d); refusing silent "
+                 "grow of #include / macro expand",
+                 FRAME_SANITY_CAP);
+        pp_fail_locus(pp, at, msg);
+        return 0;
+    }
+    ncap = pp->frames_cap > 0 ? pp->frames_cap * 2 : 8;
+    if (ncap > FRAME_SANITY_CAP) ncap = FRAME_SANITY_CAP;
+    if (ncap <= pp->nf) {
+        pp_fail_locus(pp, at, "stage-2 include frame stack grow underflow");
+        return 0;
+    }
+    ntab = cc_arena_alloc_T_count(Frame, pp->arena, ncap);
+    if (!ntab) {
+        pp_fail_locus(pp, at, "stage-2 include frame stack alloc failed");
+        return 0;
+    }
+    if (pp->frames && pp->nf > 0)
+        memcpy(ntab, pp->frames, sizeof(Frame) * (size_t)pp->nf);
+    memset(ntab + pp->nf, 0, sizeof(Frame) * (size_t)(ncap - pp->nf));
+    pp->frames = ntab; /* prior row abandoned on arena */
+    pp->frames_cap = ncap;
+    return 1;
+}
+
+static int pp_push_tape(Pp* pp, FileTape* ft, Token at) {
+    if (!pp || !ft) return 0;
+    if (pp->nf >= pp->frames_cap && !frame_table_grow(pp, at))
+        return 0;
     pp->frames[pp->nf++] = (Frame){ .tape = ft, .i = 0, .blue_paint = 0 };
     return 1;
 }
@@ -714,7 +831,7 @@ static int pp_push_tape(Pp* pp, FileTape* ft) {
  * land at nf==1 and be treated as the cpp-transparent root tape. */
 static int pp_raw_peek(Pp* pp, Token* out) {
     Frame* fr;
-    if (!pp || pp->nf <= 0 || !out) return 0;
+    if (!pp || !pp->frames || pp->nf <= 0 || !out) return 0;
     fr = &pp->frames[pp->nf - 1];
     if (!fr->tape || fr->i >= fr->tape->ntoks) return 0;
     *out = fr->tape->toks[fr->i];
@@ -857,7 +974,7 @@ static int handle_include(Pp* pp) {
         }
         char line[256];
         snprintf(line, sizeof(line), "#include <%s>", angle);
-        if (!pp_add_passthrough_include(pp, line)) return 0;
+        if (!pp_add_passthrough_include(pp, hash, line)) return 0;
         /* Warm stage-1 cache if resolvable; do not splice into AST. */
         for (int i = 0; i < pp->nsys_inc; i++) {
             char full[512];
@@ -1020,7 +1137,7 @@ static int handle_include(Pp* pp) {
             }
         }
         pp_skip_line(pp);
-        return pp_push_tape(pp, ft);
+        return pp_push_tape(pp, ft, hdr);
     }
 }
 
@@ -1509,7 +1626,11 @@ static int pp_run(Pp* pp, FileTape* root) {
     pp->ncpp_dir = 0;
     pp->nrefuse_clo = 0;
     pp_skip_spans_reset();
-    if (!pp_push_tape(pp, root)) return 0;
+    {
+        Token root_at = {0};
+        if (root && root->ntoks > 0) root_at = root->toks[0];
+        if (!pp_push_tape(pp, root, root_at)) return 0;
+    }
 
     while (pp->nf > 0) {
         Frame* fr = &pp->frames[pp->nf - 1];
@@ -1561,7 +1682,7 @@ static int pp_run(Pp* pp, FileTape* root) {
                     free_synth_if(syn);
                     return 0;
                 }
-                if (!pp_push_tape(pp, syn)) {
+                if (!pp_push_tape(pp, syn, t)) {
                     pp_expand_disable_pop(pp);
                     free_synth_if(syn);
                     return 0;

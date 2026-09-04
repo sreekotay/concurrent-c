@@ -336,7 +336,8 @@ the LEFT path (`n.leave(ctx, finish)`), not on wait / `@destroy`.
 ## 8. `@parallel` joins independent work
 
 [recipe_parallel.ccs](../examples/recipe_parallel.ccs) ·
-[recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs) · Spec §8.11
+[recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs) ·
+[recipe_parallel_empty.ccs](../examples/recipe_parallel_empty.ccs) · Spec §8.11
 
 `@parallel` is a lexical fork-join: the siblings are on the page. It is
 not a nursery. The brace and
@@ -352,19 +353,23 @@ arm (`CCParallel h = @parallel { work(); } !>;`) is the worker
 an outer assign does not make it the kick. Join with `!>.wait()!>`, or bind the dest.
 `h.wait()` joins them and publishes their writes. Pointer names copy
 the pointer; other captured names are the frame object and must
-outlive `.wait()`. `h.close(tx)` arms EMPTY to close `tx` on wait and
-leave. `h.leave()` consumes the handle without joining; leftover runs
-at EMPTY on the LEFT path only (`h.leave(ctx, finish)`). Do not mix
-wait and leave. `h.cancelled` and `h.paused` are
+outlive `.wait()`. Dest-live plant snapshots read-only captures at
+the kick; a write after the bind is not that arm's object. A name
+the arm assigns, an atomic, and a `CCParallel` dest stay the frame
+object — admit onto a snapshot is not this dest. `h.close(tx)` arms
+EMPTY to close `tx` on wait and leave. EMPTY is this dest's join set — a
+sibling consumer on the same dest does not unblock there
+([recipe_parallel_empty.ccs](../examples/recipe_parallel_empty.ccs)). `h.leave()` consumes the
+handle without joining; leftover runs at EMPTY on the LEFT path only
+(`h.leave(ctx, finish)`). Do not mix wait and leave. Leave of dest-live
+assignment names is a frame hold — use a dest cell that outlives the
+plant, or wait. `h.cancelled` and `h.paused` are
 atomic. `h.cancel()` is `true` when this call stored live→cancelled.
 `h.live()` is planted and not joined or left — handle lifetime, not
 “the work is running” and not “results are ready.” After a kick the
-wave can be done and `h.live()` is still true. `@destroy` /
-`h.invalidate()` cancels the tree and joins; it is not `h.wait() !>`.
-Dest-live plant
-snapshots read-only captures at the kick; a write after the bind is
-not that arm's object. A `CCParallel` dest and an atomic stay the
-frame object — admit onto a snapshot is not this dest. Outputs without `.wait()` use a dest cell
+wave can be done and `h.live()` is still true. `@destroy` waits; it
+does not cancel. `h.invalidate()` cancels the tree and joins; it is
+not `@destroy`. Outputs without `.wait()` use a dest cell
 (atomic / `h.cancelled` / `@stage`): write the payload, then publish
 with that cell as the last store. Dest-live spawn failure or oom aborts; it does not run
 the worker on this stack. `#pragma(@parallel) off` is the
@@ -388,7 +393,8 @@ Independent names stay `@parallel { }`. A meeting (blocking send/recv,
 or a captured channel) is `@parallel spawn { }`: spawned arms are not
 denied. The same shape without `spawn` is ill-formed, except under
 `#pragma(@parallel) off`. A denied join that then parks on a channel
-aborts.
+aborts. `@parallel spawn` / dest-live / dest-attach do not inline a
+failed admit — they abort.
 
 | Form | Meaning |
 |------|---------|

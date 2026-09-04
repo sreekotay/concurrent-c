@@ -24,6 +24,7 @@ New to Concurrent-C? Work through these in order:
 | 4a | `recipe_user_generics.ccs` | Generics | `Name::[args]` + `CC_GENERIC_FACTORY` — same rule as Vec/Map |
 | 5  | `recipe_parallel.ccs` | `@parallel` | Join, `@serial`, dest, `@parallel for` (disjoint), `wait` + `@stage` (shared ticket) |
 | 5a | `recipe_parallel_stream.ccs` | On-page stream | `@parallel spawn`; `tx.close()` next to produce; not a nursery |
+| 5b | `recipe_parallel_empty.ccs` | Dest EMPTY-close | Consumer already in `recv`; inner dest `h.close(tx)` + `@destroy` / `leave` |
 | 6  | `recipe_explicit_capture.ccs` | Capture | `@parallel` is the frame (no list); closure lists on `n.spawn` / `send_task` |
 | 7  | `recipe_channel_pipeline.ccs` | EMPTY-close | Nested bag; `n.close(tx)` when the set is not on the page |
 | 8  | `recipe_async_await.ccs` | Async/Await | `@async` call stacks vs `spawn`, `@await`, composition |
@@ -52,6 +53,7 @@ Minimal concurrent hello — three named siblings, `.wait()` joins.
 |------|---------|-------------|
 | `recipe_parallel.ccs` | `@parallel` | Independent join / range; wait-for + `@stage` is the shared write ticket |
 | `recipe_parallel_stream.ccs` | On-page stream | `@parallel spawn`; produce `tx.close()`; consume `recv` until EOF |
+| `recipe_parallel_empty.ccs` | Dest EMPTY-close | Consumer already in `recv`; `h.close(tx)` on the producer dest |
 | `recipe_explicit_capture.ccs` | Capture | `@parallel` is the frame (no list); closure lists on `n.spawn` / `send_task` |
 | `recipe_channel_pipeline.ccs` | EMPTY-close | Nested bag; closer at inner EMPTY |
 | `recipe_async_await.ccs` | Async/Await | `@async`, `@await`, `cc_block_on` |

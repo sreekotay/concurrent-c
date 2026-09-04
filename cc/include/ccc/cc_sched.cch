@@ -150,9 +150,14 @@ void cc_thread_task_free(struct CCSpawnTask* task);
 // Snapshot scheduler stats; returns 0 on success.
 int cc_scheduler_stats(CCSchedulerStats* out);
 
-/* @parallel spawn/join. Spawn refuses (INVALID) when in-flight @parallel
- * fibers reach 256 * online processors. n.spawn is uncapped. */
+/* @parallel spawn/join. `cc_parallel_spawn` may refuse (INVALID) when
+ * the adaptive gate denies; the lowering inlines that arm. Meeting
+ * admit (`@parallel spawn`, dest-live, dest-attach) uses
+ * `cc_parallel_spawn_admit`: no adapt deny. Remaining INVALID is
+ * real spawn failure — the lowering dies; it does not inline.
+ * `n.spawn` is uncapped. */
 CCTask cc_parallel_spawn(void* (*fn)(void*), void* arg);
+CCTask cc_parallel_spawn_admit(void* (*fn)(void*), void* arg);
 void cc_parallel_join(CCTask t);
 
 /* ----------------------------------------------------------------------------

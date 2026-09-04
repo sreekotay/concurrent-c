@@ -1170,7 +1170,7 @@ static void shadow_as_scan_nested_incs(const char* text, int depth,
 }
 
 /* Resolve #include <ccc/…> / "…" from pass_inc lines and scan for @as/hooks. */
-static void shadow_as_scan_pass_inc(char pass_inc[][256], int npass_inc,
+static void shadow_as_scan_pass_inc(char** pass_inc, int npass_inc,
                                    const char* from_dir) {
     int i;
     for (i = 0; i < npass_inc; i++) {

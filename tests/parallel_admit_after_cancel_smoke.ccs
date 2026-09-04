@@ -1,0 +1,28 @@
+/*
+ * Cancel stops dest admit. Same refuse as n.spawn after n.cancel():
+ * CC_ERR_CANCELLED, not a silent attach. Dest-attach emit unwraps
+ * cc_parallel_admit_ok into the enclosing handler before spawn.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    CCParallel h = @parallel spawn {
+        @serial { (void)0; }
+    } !>;
+    h.cancel() !>;
+
+    cc_parallel_admit_ok(&h) !>(e) {
+        if (e.kind != CC_ERR_CANCELLED) {
+            cc_error_log(e);
+            return 1;
+        }
+        h.wait() !>;
+        printf("parallel_admit_after_cancel_smoke: OK\n");
+        return 0;
+    };
+    fprintf(stderr, "FAIL admit-after-cancel did not refuse\n");
+    return 2;
+}

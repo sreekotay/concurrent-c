@@ -512,6 +512,7 @@ Lexical fork-join — names on the page, not a nursery. `@parallel { … }` is
 `CCParallel !>(CCError)`. `.wait()` joins. Spec §8.11.
 Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
 Stream (no `n`): [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs).
+EMPTY-close (consumer already in recv): [recipe_parallel_empty.ccs](../examples/recipe_parallel_empty.ccs).
 
 | Form | Meaning |
 |------|---------|
@@ -520,7 +521,7 @@ Stream (no `n`): [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream
 | `@parallel(h) { … }` | Growing dest: admit onto `h`. Statement; no `!>`. Snapshot captures. Never deny. Live set; `h.wait()` joins who is still running. |
 | `@parallel { h1.wait() !>; h2.wait() !>; }` | Expression arms. No assignment: the expression just runs. |
 | `h1.adopt(h2)` | Cancel tree. `h1.cancel()` is child then parent; `h2.cancel()` is child only. |
-| `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. `h.live()` is planted and not joined or left. `cc_parallel_empty()` is idle. After `h.wait()`, `h.joined` and `!h.live()`. `h.close(tx)` arms EMPTY to close `tx` on wait and leave. `h.leave()` / `h.leave(ctx, finish)` consume without joining (leftover LEFT-only). Do not mix wait and leave. Next kick overwrites `h`. When there is a kick, the first arm has finished; siblings may still run. One assignment arm is ill-formed: this dest is never live on the caller. One expression arm is the worker (spawned); dest is live. Join with `!>.wait()!>`, or bind the dest. Pointer names copy the pointer; other names are by reference and must outlive `.wait()`. |
+| `CCParallel h = @parallel { … } !>;` | Starts arms; does not join. `h.live()` is planted and not joined or left. `cc_parallel_empty()` is idle. After `h.wait()`, `h.joined` and `!h.live()`. `h.close(tx)` arms EMPTY to close `tx` on wait and leave. `h.leave()` / `h.leave(ctx, finish)` consume without joining (leftover LEFT-only). Do not mix wait and leave. Next kick overwrites `h`. When there is a kick, the first arm has finished; siblings may still run. One assignment arm is ill-formed: this dest is never live on the caller. One expression arm is the worker (spawned); dest is live. Join with `!>.wait()!>`, or bind the dest. Pointer names copy the pointer; assigned names stay the frame and must outlive `.wait()`. Dest-live plant snapshots read-only names. `@destroy` waits (no cancel). `h.invalidate()` cancels then waits. `h.leave()` does not join — dest-live assignment names are a frame hold. |
 | `h.cancel()` | `bool !>(CCIoError)`. `true` = this call stored live→cancelled on `h` or an adopted child. Wakes parks on attached fibers. Pause does not complete a `recv`. |
 | `h.live()` | Planted and not joined. Kick: `if (h.live()) return; h = @parallel { … } !>;`. Pause/resume/cancel of idle or joined are `ok(false)`. |
 | `h.pause()` / `h.resume()` | `bool !>(CCIoError)`. `true` = this call's transition on a live dest. Does not require `.wait()`. Construct honors at thunk entry / next for-half / next leaf `i` / wait-for enter / after `@stage` wait. |
@@ -529,6 +530,7 @@ Stream (no `n`): [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream
 | void host | `h.wait() !>(e) { (void)e; };` — UFCS `!>` lowers in void. No Result wrapper. |
 | `@serial { …; a = t; }` | Sequential block as one sibling. Ordinary C; zero or one outer name. |
 | `@parallel spawn { @serial { …; tx.close(); } @serial { while (recv) } }` | On-page stream. Close next to produce. `.wait()` joins both. Not a nursery. |
+| `prod.close(tx)` + `prod` wait / leave | Dest EMPTY. Consumer already in `recv` on another dest. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. Body always runs. |
 | `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; span 0 or 1 is a plain `for`. |
 | `@parallel wait (ts) for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished. `CCParallel h = … !>;` is live during enter; the statement joins (§8.11.6). |
@@ -599,8 +601,11 @@ buffer capacity.
 
 Default pipeline is two `@parallel spawn` arms and `tx.close()` on the produce
 arm — [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs).
-`n.close(tx)` arms EMPTY when the set is not on the page (dest-live /
-leave): [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs).
+`h.close(tx)` arms dest EMPTY when the consumer is already in `recv` and the
+producer set is another dest:
+[recipe_parallel_empty.ccs](../examples/recipe_parallel_empty.ccs).
+`n.close(tx)` is the nursery twin:
+[recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs).
 
 ---
 
@@ -883,6 +888,7 @@ ccc examples/js/jsdemo.shcc         # CC→JS (guest; Node owns env)
 | Worker pool | [recipe_worker_pool.ccs](../examples/recipe_worker_pool.ccs) |
 | `@parallel` (join, range, wait-for ticket) | [recipe_parallel.ccs](../examples/recipe_parallel.ccs) |
 | On-page stream (`tx.close()` in produce) | [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs) |
+| Dest EMPTY-close (consumer already in recv) | [recipe_parallel_empty.ccs](../examples/recipe_parallel_empty.ccs) |
 | Ordered stream (`send_task` + FIFO recv) | [recipe_ordered_parallel.ccs](../examples/recipe_ordered_parallel.ccs) |
 | Prepare A+B / hold / commit | [recipe_prepare_commit.ccs](../examples/recipe_prepare_commit.ccs) |
 | Channel pipeline | [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs) |

@@ -2,9 +2,10 @@
  * Recipe: EMPTY-close pipeline (nursery bag)
  *
  * Default stream (close on the produce arm, no bag) is
- * recipe_parallel_stream.ccs. This file is dest-live / leave: the
- * consumer is already in recv; close runs when the *inner* bag hits
- * EMPTY, not on a line next to send.
+ * recipe_parallel_stream.ccs. Dest twin: recipe_parallel_empty.ccs.
+ * This file is dest-live / leave: the consumer is already in recv;
+ * close runs when the *inner* bag hits EMPTY, not on a line next to
+ * send.
  *
  *   inner { producer }              close(tx) — arms EMPTY to close tx
  *   outer { consumer, inner }       consumer sees close → drains → exits
