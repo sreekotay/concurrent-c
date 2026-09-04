@@ -96,22 +96,37 @@ hole and leaves the chunk allocated until reset/restore.
 bool cc_arena_release(CCArena arena, void *ptr);
 ```
 
-The caller passes a live pointer owned through that arena. A pointer in an arena
-slab decrements that slab's live-allocation count. Releasing the last live
-allocation in the current slab resets its bump offset, making the slab reusable.
-A recognized double release or live-count mismatch returns `false` and reports
-a diagnostic.
+```c
+bool cc_arena_release_sized(CCArena arena, void *ptr, size_t size);
+bool cc_arena_set_reuse(CCArena arena, bool enabled);
+```
+
+Release is a signal: the caller says the object is over, the strategy decides
+what the bytes become. The caller passes a live pointer owned through that
+arena (or any active child of it), with the size when it knows it. A pointer
+in an arena slab decrements that slab's live-allocation count. A sized
+release of the active tip pops the tip. On a reuse host, a sized release of
+a block that fits a size class (16 bytes to 32 KiB, doubling) lists it for a
+later request of that class; a listed block stays counted live, and a later
+request of the class at 16-byte alignment or less takes it instead of
+bumping. Any other slab release is a hole until reset. Releasing the last
+live allocation on the root slab rewinds its bump offset to zero. Enabling
+reuse allocates the class table from the host; disabling drops the lists.
+
+A pointer the arena does not own is refused (`false`) and nothing changes:
+a foreign pointer, a pointer at or past the tip (already popped or from a
+restored child), a size that cannot fit below the tip, or a slab with no
+live allocations. The bump tier carries no per-object header, so a second
+hole release of the same block is indistinguishable from the first; owners
+carry a token for that case.
 
 When heap overflow is enabled, a pointer outside the arena's slab chain takes
 the overflow-header path. The caller must pass a live overflow allocation
 obtained through the same arena.
 
-A mid-slab release (any successful slab release that is not the last live
-allocation on the root slab) makes the current arena epoch non-rewindable.
-Overflow release does not. Restore of a checkpoint whose `ovf_keep` no
-longer matches the live overflow count for that epoch refuses. Whole-arena
-`cc_arena_reset`, `cc_arena_free`, and `cc_arena_destroy` remain distinct
-lifecycle operations.
+A hole never makes anything non-rewindable: checkpoints, children, and
+detach are unaffected by releases. Whole-arena `cc_arena_reset`,
+`cc_arena_free`, and `cc_arena_destroy` remain distinct lifecycle operations.
 
 `cc_arena_realloc` preserves the shared prefix of the old and new sizes. When
 a slab allocation sits at the active bump tip (`ptr + old_size` equals the
@@ -123,47 +138,94 @@ through the source arena.
 
 ## Checkpoint and restore
 
-Checkpoint and restore operate while the slab prefix is intact (no mid-slab
-hole). Overflow keep-set puncture is detected at restore, not by disabling
-a later `checkpoint()`:
+A checkpoint is a mark on the innermost active host:
 
 ```c
 CCArenaCheckpoint checkpoint = arena.try_checkpoint() !>;
 checkpoint.try_restore() !>; /* or @destroy on the handle */
 ```
 
-A rewindable checkpoint records the active block, offset, root-slab
-`live_allocs`, live overflow count for that epoch (`ovf_keep`), and current
-provenance epoch, then advances the arena to a fresh provenance epoch for
-subsequent allocations and seals the active overflow chunk. Restore discards
-newer growth blocks, writes back the saved offset and live count, restores
-provenance, and frees overflow whose header epoch does not match the
-checkpoint. Slices minted from the later epoch become stale; pre-checkpoint
-slices retain the restored epoch.
+Capture records the slab word, takes a fresh epoch that every allocation
+above the mark is stamped with, and remembers the head of the host's record
+list. Allocation keeps bumping the host's own slab. Marks nest per host up to
+`CC_ARENA_MARK_DEPTH`; a deeper one promotes the outer marks. An arena its
+caller owns outright uses `cc_arena_checkpoint_local` / `cc_arena_restore_local`
+(the `alloc_local` contract): no lock, a plain store on restore.
 
-After a mid-slab hole, `cc_arena_checkpoint` returns a null checkpoint with
-`checkpoint.arena == NULL`; `try_checkpoint` returns `CC_ERR_INVALID_ARG`.
-`cc_arena_restore` returns false and does not mutate on a null handle, a slab
-hole, an `ovf_keep` mismatch (keep-set object released), or a checkpoint that
-would advance the tip. Last-live root release may clear a slab hole; it does
-not make a punctured keep-set restorable. A checkpoint is a consumed loan:
-`@destroy` restores. Dropping a handle without consume leaves an outstanding
-loan (diagnostic on free/reset/detach) and does not block a later capture.
-`cc_arena_reset` frees outstanding overflow (Main), clears the
-non-rewindable and used-overflow flags, returns to the original L1, resets
-allocation counts and offset, advances provenance, and enables checkpointing
-for the new epoch. `cc_arena_detach` refuses a stack or caller-owned L1.
+Restore refuses while an inner mark is still named by a live handle, runs the
+records attached since the mark, then returns the slab word to the mark in one
+CAS. Views minted above the mark fail the epoch check afterwards; pre-mark
+views keep theirs. The tip never drops below a mark: a pre-mark object at the
+tip released during scratch becomes a hole, and the live count returns to the
+mark's count (a pre-mark release during scratch leaves it one high, which can
+only defer a rewind). Abandon disarms the mark and keeps its scratch until the
+enclosing restore or the host's reset or free. `@destroy` restores, else
+abandons. A dropped handle leaves the mark armed.
+
+A mark becomes a child arena, a promotion, only when it must: scratch
+outgrows the slab or spills to overflow, a pre-mark object needs to move (a
+regrow that would cross the mark), parent-side storage is needed (a record
+for a durable object, the reuse class table), or marks nest past the stack.
+The range from the outermost mark to the tip becomes the child's L1 in
+place, the host's tip parks at the slab end with the child counted once, the
+inner marks and the records attached since the outermost mark move to the
+child, and the child becomes active. The child has its own provenance epoch
+(the mark's), slab budget, and overflow, inheriting the parent's overflow
+permission and hard cap. Fresh allocations through the parent land in the
+innermost active child; realloc and release resolve the owner on the active
+chain and act there, so a pre-mark object regrows in host storage (a fresh
+slab of its host while the tip is parked). An owner header, a record, or a
+moved payload belongs to the host whose bytes hold it, whichever handle it
+was created through. A checkpoint taken while a child is active nests inside
+it. Restore of a promoted mark frees the child (extents, overflow, epoch) and
+pops the host tip back to the mark.
+
+Detach and adopt refuse a host with an armed mark or an active child and
+refuse an active child. `cc_arena_reset` tears down marks and active children
+with the other records, frees outstanding overflow (Main), clears the
+used-overflow and reuse flags, returns to the original L1, resets counts and
+offset, and advances provenance. `cc_arena_detach` refuses a stack or
+caller-owned L1.
+
+## Owners
+
+```c
+CCArenaOwner *cc_arena_owner_new(CCArena arena, size_t bytes, size_t align);
+bool  cc_arena_owner_live(const CCArenaOwner *o, uint32_t token);
+void *cc_arena_owner_regrow(CCArenaOwner *o, uint32_t token, size_t bytes);
+bool  cc_arena_owner_release(CCArenaOwner *o, uint32_t token);
+uint64_t cc_arena_owner_slice_id(const CCArenaOwner *o);
+```
+
+An owner is a header in the owning host's slab tier — arena, payload, bytes,
+alignment, provenance, token — split from its payload, which the strategy
+supplies. A header minted together with its payload pops with it when the
+payload still ends the slab (one CAS, nothing listed). Otherwise the released
+header goes on that host's owner list and is reborn with a fresh token by the
+next owner minted there; a listed header is never returned to the bump while
+the arena lives. Tokens come from the slice generation registry,
+so a view id and a handle carry the same token. `regrow` keeps the token on a
+tip fit and rebirths it on a move; `release` kills it. Every operation that
+takes a token refuses when the header's token differs, so a handle that
+outlived a move or another handle's release mismatches instead of touching
+bytes that belong to someone else.
 
 ## Arena-backed containers
 
-Arena-backed containers retain `CCArena*` in their existing APIs and use the
-release path automatically:
+Arena-backed containers keep `CCArena` in their existing APIs and always
+release what they own, with the size:
 
-- `CCVec` and `CCString` release replaced backing allocations during growth.
-- Arena-backed maps release replaced table storage during resize.
-- Map destruction releases both table storage and the arena-backed map handle.
-- `clear` may retain capacity; destruction releases backing allocations.
-- `Vec` `from` wraps caller storage and does not grow or release.
+- `CCVec` and heap `CCString` are owners: the handle carries the owner's
+  token; growth regrows through the owner; every push, indexed write, view,
+  and destroy checks the token.
+- Arena-backed maps release replaced table storage during resize, and map
+  destruction releases both the table and the arena-backed handle. The
+  map handle is a pointer that names released storage afterwards.
+- `clear` keeps capacity; destruction releases the payload.
+- `Vec` `from` wraps caller storage and has no owner.
+- `CCString` registers `@destroy`; its two-argument `release` is kept and
+  ignores the arena argument.
 
-Container growth therefore keeps only the current backing allocation live when
-the arena's release accounting can reclaim the replaced allocation.
+Container growth keeps only the current payload live when the strategy can
+reclaim the replaced one (a tip pop or a listed block); otherwise the old
+payload is a hole until reset.

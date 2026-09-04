@@ -4,7 +4,9 @@
  * Design:
  * - 1.6x growth factor
  * - Initial capacity of 8 (skips 2→4 dance for common cases)
- * - Growth allocates in arena; realloc releases the replaced backing
+ * - Backing is a CCArenaOwner: growth regrows through the owner (tip fit in
+ *   place, else move + sized release of the old backing); the handle carries
+ *   the owner token, so a stale copy cannot grow, view, or destroy it
  * - destroy() releases arena-backed storage; from() wraps and does neither
  * - Fails gracefully when arena exhausted
  *
@@ -171,26 +173,25 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
         T *data;                                                                  \
         size_t len;                                                               \
         size_t cap;                                                               \
+        CCArenaOwner *own;                                                        \
+        uint32_t token;                                                           \
+        uint32_t _pad;                                                            \
     } Name;                                                                       \
                                                                                   \
     static inline Name Name##_init(CCArena arena, size_t initial_cap) {          \
-        Name v = {NULL, 0, 0};                                                    \
+        Name v = {NULL, 0, 0, NULL, 0, 0};                                        \
         if (cc_vec_init((CCVec *)&v, arena, sizeof(T), _Alignof(T),                \
                         initial_cap > 0 ? initial_cap : CC_VEC_INITIAL_CAP)        \
             != 0) {                                                               \
-            v.data = NULL;                                                        \
-            v.len = 0;                                                            \
-            v.cap = 0;                                                            \
+            cc__vec_unbind((CCVec *)&v);                                          \
         }                                                                         \
         return v;                                                                 \
     }                                                                             \
                                                                                   \
     static inline Name Name##_from(T *p, size_t len, size_t cap) {                \
-        Name v = {NULL, 0, 0};                                                    \
+        Name v = {NULL, 0, 0, NULL, 0, 0};                                        \
         if (cc_vec_from((CCVec *)&v, (void *)p, len, cap) != 0) {                  \
-            v.data = NULL;                                                        \
-            v.len = 0;                                                            \
-            v.cap = 0;                                                            \
+            cc__vec_unbind((CCVec *)&v);                                          \
         }                                                                         \
         return v;                                                                 \
     }                                                                             \

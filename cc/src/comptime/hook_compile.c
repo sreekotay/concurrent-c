@@ -14,6 +14,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -768,8 +771,29 @@ static int cc__cache_dir(char* out, size_t out_sz) {
     return cc__mkdir_p(out);
 }
 
-/* Toolchain fingerprint: cc binary mtime+size, computed once.  Ensures the
-   cache invalidates when the host compiler changes underneath us. */
+/* Path of the running binary (the one that dlopens hook batches), or -1. */
+static int cc__self_exe_path(char* out, size_t cap) {
+#if defined(__APPLE__)
+    uint32_t sz = (uint32_t)cap;
+    return _NSGetExecutablePath(out, &sz) == 0 ? 0 : -1;
+#elif defined(__linux__)
+    ssize_t n = readlink("/proc/self/exe", out, cap - 1);
+    if (n <= 0) return -1;
+    out[n] = '\0';
+    return 0;
+#else
+    (void)out; (void)cap;
+    return -1;
+#endif
+}
+
+/* Toolchain fingerprint: host cc mtime+size, plus this binary's own
+   mtime+size, computed once. The host cc part invalidates the cache when
+   the compiler that built a dylib changes; the self part invalidates it
+   when this toolchain was rebuilt, because a hook batch inlines the
+   stdlib headers (arena hosts, slices, strings) and shares those struct
+   layouts with the process that loads it. A dylib built against an
+   earlier header layout would not fail to load; it would corrupt. */
 static uint64_t cc__toolchain_fingerprint(void) {
     static uint64_t cached = 0;
     static int      computed = 0;
@@ -777,12 +801,17 @@ static uint64_t cc__toolchain_fingerprint(void) {
     computed = 1;
     const char* cc_bin = cc__hook_host_cc();
     struct stat st;
+    char self_path[4096];
     if (stat(cc_bin, &st) == 0) {
         cached = cc__hash64_fnv(&st.st_mtime, sizeof(st.st_mtime), 0);
         cached = cc__hash64_fnv(&st.st_size,  sizeof(st.st_size),  cached);
     } else {
         /* Stable fallback so missing CC still produces a usable key. */
         cached = cc__hash64_fnv(cc_bin, strlen(cc_bin), 0);
+    }
+    if (cc__self_exe_path(self_path, sizeof(self_path)) == 0 && stat(self_path, &st) == 0) {
+        cached = cc__hash64_fnv(&st.st_mtime, sizeof(st.st_mtime), cached);
+        cached = cc__hash64_fnv(&st.st_size,  sizeof(st.st_size),  cached);
     }
     return cached;
 }

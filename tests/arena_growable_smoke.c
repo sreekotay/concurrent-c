@@ -13,7 +13,7 @@ int main(void) {
             printf("FAIL: expected default block_max=%u\n", CC_ARENA_DEFAULT_BLOCK_MAX);
             return 1;
         }
-        if (a.a->block_idx != 0) { printf("FAIL: expected block_idx=0\n"); return 1; }
+        if (a.a->slab->block_idx != 0) { printf("FAIL: expected block_idx=0\n"); return 1; }
 
         // Allocate enough to force several growths / overflow past the budget
         for (int i = 0; i < 100; i++) {
@@ -22,11 +22,11 @@ int main(void) {
             for (int j = 0; j < 10; j++) p[j] = i * 10 + j;
         }
 
-        if (a.a->block_idx == 0 && !(a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
+        if (a.a->slab->block_idx == 0 && !(a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
             printf("FAIL: expected growth or overflow\n");
             return 1;
         }
-        printf("  growth: block_idx=%d overflow=%d OK\n", a.a->block_idx,
+        printf("  growth: block_idx=%d overflow=%d OK\n", a.a->slab->block_idx,
                (a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) ? 1 : 0);
         cc_arena_free(&a);
     }
@@ -39,13 +39,13 @@ int main(void) {
         for (int i = 0; i < 50; i++) {
             cc_arena_alloc_T_count(int, a, 10);
         }
-        int saved_idx = a.a->block_idx;
+        int saved_idx = a.a->slab->block_idx;
         if (saved_idx == 0) { printf("FAIL: no growth before reset\n"); return 2; }
 
         cc_arena_reset(a);
-        if (a.a->block_idx != 0) { printf("FAIL: block_idx not 0 after reset\n"); return 2; }
-        if (a.a->prev != NULL) { printf("FAIL: prev not NULL after reset\n"); return 2; }
-        if (cc_atomic_load(&a.a->offset) != 0) { printf("FAIL: offset not 0 after reset\n"); return 2; }
+        if (a.a->slab->block_idx != 0) { printf("FAIL: block_idx not 0 after reset\n"); return 2; }
+        if (a.a->slab->prev != NULL) { printf("FAIL: prev not NULL after reset\n"); return 2; }
+        if (cc_arena_slab_offset(a.a) != 0) { printf("FAIL: offset not 0 after reset\n"); return 2; }
         printf("  reset: unwound from block_idx=%d OK\n", saved_idx);
         cc_arena_free(&a);
     }
@@ -60,23 +60,28 @@ int main(void) {
         if (!p0) return 3;
         for (int i = 0; i < 4; i++) p0[i] = i;
 
-        // Take checkpoint in block 0
+        // Take checkpoint in block 0: a mark; the first scratch that does
+        // not fit the 64-byte L1 promotes it to a child
         CCArenaCheckpoint cp = cc_arena_checkpoint(a);
-        if (cp.block_idx != 0) { printf("FAIL: cp block_idx should be 0\n"); return 3; }
+        if (!cp.arena || cp.parent != a.a) { printf("FAIL: checkpoint mark\n"); return 3; }
 
-        // Force growth past block 0
-        for (int i = 0; i < 50; i++) {
-            cc_arena_alloc_T_count(int, a, 10);
+        // Force growth: the scratch child (4 KiB L1) grows its own extents
+        for (int i = 0; i < 400; i++) {
+            if (!cc_arena_alloc_T_count(int, a, 10)) { printf("FAIL: scratch alloc\n"); return 3; }
         }
-        int grown_idx = a.a->block_idx;
-        if (grown_idx == 0) { printf("FAIL: expected growth\n"); return 3; }
+        if (!a.a->active) { printf("FAIL: scratch past the tail must promote the mark\n"); return 3; }
+        int grown_idx = a.a->active->slab->block_idx;
+        if (grown_idx == 0 && !(a.a->active->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
+            printf("FAIL: expected child growth\n"); return 3;
+        }
+        if (a.a->slab->block_idx != 0) { printf("FAIL: parent must not grow for scratch\n"); return 3; }
 
-        // Restore checkpoint - should unwind all grown blocks
-        cc_arena_restore(cp);
-        if (a.a->block_idx != 0) { printf("FAIL: restore didn't unwind to block 0, got %d\n", a.a->block_idx); return 3; }
-        if (cc_atomic_load(&a.a->live_allocs) != 1) {
+        // Restore destroys the child and everything it grew
+        if (!cc_arena_restore(cp)) { printf("FAIL: restore\n"); return 3; }
+        if (a.a->slab->block_idx != 0) { printf("FAIL: parent block_idx after restore %d\n", a.a->slab->block_idx); return 3; }
+        if (cc_arena_slab_live(a.a) != 1) {
             printf("FAIL: restore live_allocs want 1 got %zu\n",
-                   (size_t)cc_atomic_load(&a.a->live_allocs));
+                   (size_t)cc_arena_slab_live(a.a));
             return 3;
         }
 
@@ -84,7 +89,7 @@ int main(void) {
         for (int i = 0; i < 4; i++) {
             if (p0[i] != i) { printf("FAIL: data corrupted after restore\n"); return 3; }
         }
-        printf("  checkpoint/restore: unwound from block_idx=%d to 0 OK\n", grown_idx);
+        printf("  checkpoint/restore: child grew to block_idx=%d and died OK\n", grown_idx);
         cc_arena_free(&a);
     }
 
@@ -106,13 +111,13 @@ int main(void) {
         }
 
         if (alloc_count >= 10000) { printf("FAIL: budget not enforced\n"); return 4; }
-        if (a.a->block_idx + 1 < a.a->block_max) { printf("FAIL: budget not reached\n"); return 4; }
+        if (a.a->slab->block_idx + 1 < a.a->block_max) { printf("FAIL: budget not reached\n"); return 4; }
         if (a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) {
             printf("FAIL: overflow should stay off\n");
             return 4;
         }
         printf("  budget: exhausted after %d allocs, block_idx=%d/%d OK\n",
-               alloc_count, a.a->block_idx, a.a->block_max);
+               alloc_count, a.a->slab->block_idx, a.a->block_max);
         cc_arena_free(&a);
     }
 
@@ -133,11 +138,11 @@ int main(void) {
             printf("FAIL: expected tier-3 overflow after slab budget\n");
             return 41;
         }
-        if (a.a->block_idx + 1 > CC_ARENA_DEFAULT_BLOCK_MAX) {
-            printf("FAIL: grew past default budget (%u)\n", a.a->block_idx);
+        if (a.a->slab->block_idx + 1 > CC_ARENA_DEFAULT_BLOCK_MAX) {
+            printf("FAIL: grew past default budget (%u)\n", a.a->slab->block_idx);
             return 41;
         }
-        printf("  default budget→overflow: block_idx=%d OK\n", a.a->block_idx);
+        printf("  default budget→overflow: block_idx=%d OK\n", a.a->slab->block_idx);
         cc_arena_free(&a);
     }
 
@@ -167,13 +172,13 @@ int main(void) {
             return 6;
         }
         a = cc_arena_handle((CCArenaHost *)buf);
-        uint8_t *l1 = a.a->base;
+        uint8_t *l1 = a.a->slab->base;
         a.a->block_max = 0;
         if (a.a->block_max != 0) {
             printf("FAIL: expected unbounded block_max\n");
             return 6;
         }
-        if (a.a->_flags & CC_ARENA_FLAG_HEAP_OWNED) {
+        if ((a.a->slab->flags & CC_ARENA_SLAB_HEAP_OWNED)) {
             printf("FAIL: initial buffer should not be heap-owned\n");
             return 6;
         }
@@ -183,14 +188,14 @@ int main(void) {
             printf("FAIL: stack-first arena should grow to heap\n");
             return 6;
         }
-        if (a.a->block_idx == 0) {
+        if (a.a->slab->block_idx == 0) {
             printf("FAIL: expected growth off stack block\n");
             return 6;
         }
         memset(p, 0xab, 128);
 
         cc_arena_reset(a);
-        if (a.a->base != l1 || a.a->block_idx != 0 || a.a->prev != NULL) {
+        if (a.a->slab->base != l1 || a.a->slab->block_idx != 0 || a.a->slab->prev != NULL) {
             printf("FAIL: reset should restore stack block\n");
             return 6;
         }
@@ -284,14 +289,17 @@ int main(void) {
             printf("FAIL: overflow byte accounting after release\n");
             return 7;
         }
-        /* Current-epoch overflow release does not disable checkpoint. */
+        /* Overflow release never disables a checkpoint. */
         {
             CCArenaCheckpoint cp = cc_arena_checkpoint(a);
             if (cp.arena == NULL) {
-                printf("FAIL: checkpoint should work after current-epoch overflow release\n");
+                printf("FAIL: checkpoint should work after overflow release\n");
                 return 7;
             }
-            cc_arena_restore(cp);
+            if (!cc_arena_restore(cp)) {
+                printf("FAIL: restore after overflow release\n");
+                return 7;
+            }
         }
 
         void *moved_src = cc_arena_alloc(a, 64, 8);
@@ -313,7 +321,7 @@ int main(void) {
                 return 7;
             }
         }
-        if (cc__arena_find_block(a, moved) || !cc__arena_find_block(moved_dst, moved)) {
+        if (cc__arena_find_slab(a, moved) || !cc__arena_find_slab(moved_dst, moved)) {
             printf("FAIL: cross-arena realloc ownership\n");
             return 7;
         }
@@ -332,13 +340,17 @@ int main(void) {
         free(foreign);
 
         cc_arena_reset(a);
-        if (a.a->_flags & (CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE)) {
-            printf("FAIL: reset should clear non-rewindable flags\n");
+        if (a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) {
+            printf("FAIL: reset should clear the used-overflow flag\n");
             return 7;
         }
-        if (cc_arena_checkpoint(a).arena == NULL) {
-            printf("FAIL: checkpoint should work again after reset\n");
-            return 7;
+        {
+            CCArenaCheckpoint cp = cc_arena_checkpoint(a);
+            if (cp.arena == NULL) {
+                printf("FAIL: checkpoint should work again after reset\n");
+                return 7;
+            }
+            cc_arena_restore(cp);
         }
         cc_arena_free(&a);
         printf("  release + explicit heap overflow + checkpoint gating OK\n");

@@ -99,10 +99,11 @@ are contents, and contents die at reset — their handles live in the slabs
 being rewound, exactly like every unhooked allocation. The arena stays
 live and may attach again afterward.
 
-Checkpoint restore refuses while any attach record is linked. Lifetime
-parents and restore do not mix: attach-then-restore and
-checkpoint-then-attach both refuse until the children are gone. Reset
-and free still walk children.
+A checkpoint is itself an attached child (the active one): its record is
+walked at reset and free like any other, and restore is the child's own
+free. Attach records never refuse a capture or a restore. A checkpoint
+child's record lives inside the child's region and is unlinked when the
+child dies; a heap-rooted child's record is released back to the parent.
 
 Records are hints; the object's own live/dead state is authoritative.
 

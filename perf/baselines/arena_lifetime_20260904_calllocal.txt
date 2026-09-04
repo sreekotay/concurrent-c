@@ -1,0 +1,114 @@
+arena_lifetime_bench — 2026-09-04 — Linux x86_64 (4 cores), gcc -O2 (ccc build --release), ROUNDS=9 best-of
+Branch: call-local @scratch reclaim in the lowerer (bfe3a8f, seed 0.3.4-300).
+Previous receipt: arena_lifetime_20260903_lazy.txt.
+
+What changed:
+- The "@string template (2 slots) on @scratch" row bound the product
+  (`CCString t = @string(..., @scratch)`) and never released it, so after
+  about 30 iterations every string was a malloc-backed overflow record held
+  until the function returned. Its number was malloc plus overflow
+  bookkeeping and page faults, and it moved between 360 and 1300 ns/op
+  with heap state. The row is now the call-local shape
+  (`consume(@string(..., @scratch))`) and is named accordingly.
+- The lowerer reclaims a call-local scratch template around any consuming
+  statement (call, assignment, UFCS call, `!>` unwrap), not only println:
+  one checkpoint before the temp, one restore after the call. Before this
+  change the call-local shape leaked the same way as the bound one.
+- Contended rows vary run to run on this 4-core box (89 to 120 ns for the
+  bump, 215 to 273 for bump plus release); the raw 4-thread CAS floor
+  measured on the same box is 40 ns for one bump and 62 for bump plus
+  release. The C twin's contended rows are glibc's thread-local cache and
+  share nothing.
+
+Section — CC vs the plain-C twin (perf/arena_lifetime_c_baseline.c,
+gcc -O2). Ratio = CC / C.
+
+row                                                     ns/op       throughput
+alloc 64B shared, reset/4096                         12.2 ns/op      81.83 Mop/s
+alloc 64B shared, 4 threads (contended)             120.1 ns/op       8.32 Mop/s
+alloc + release_sized 64B, 4 threads (contended)      272.9 ns/op       3.67 Mop/s
+alloc 64B local, reset/4096                           4.5 ns/op     220.22 Mop/s
+checkpoint + restore (empty)                         39.2 ns/op      25.49 Mop/s
+checkpoint + 3 allocs + restore (@scratch shape)       70.6 ns/op      14.16 Mop/s
+checkpoint + 3 allocs + restore (1 KiB stack)        68.8 ns/op      14.53 Mop/s
+nested checkpoint x3 + restore x3                   161.0 ns/op       6.21 Mop/s
+checkpoint + 2 MiB scratch (child extent) + restore       46.5 ns/op      21.52 Mop/s
+alloc 64B + release (unsized, last-live)             24.6 ns/op      40.67 Mop/s
+alloc 64B + release_sized (tip pop)                  24.7 ns/op      40.51 Mop/s
+alloc 64B x2 + release_sized first (hole)            36.4 ns/op      27.50 Mop/s
+reuse: alloc x2 + release first + alloc              56.9 ns/op      17.57 Mop/s
+realloc tip growth 64B steps (in place)              13.7 ns/op      73.22 Mop/s
+realloc buried 256B -> 320B (copy + release)         60.3 ns/op      16.59 Mop/s
+vec push 1M ints (tip fit) + destroy                  1.9 ns/op     530.86 Mop/s
+vec push 1M ints, alloc every 64 (moves)              4.1 ns/op     246.02 Mop/s
+vec get 1M (token-checked handle)                     1.6 ns/op     614.05 Mop/s
+vec init + 8 push + destroy (owner churn)            76.1 ns/op      13.14 Mop/s
+string push_cstr 12B x 1M (one string)                7.4 ns/op     135.10 Mop/s
+string promote (24B) + destroy churn                 77.0 ns/op      12.98 Mop/s
+@string template (2 slots) call-local on @scratch      165.7 ns/op       6.03 Mop/s
+@string template (2 slots) on arena + destroy       158.5 ns/op       6.31 Mop/s
+map insert 1k ints + destroy                      32390.0 ns/op       0.03 Mop/s
+owner new 64B + release (header rebirth)             59.8 ns/op      16.71 Mop/s
+token registry birth + kill                          27.4 ns/op      36.45 Mop/s
+sink=4858655217414837608
+
+--- plain C ---
+arena_lifetime_c_baseline (ROUNDS=9, best of)
+row                                                     ns/op       throughput
+alloc 64B shared, reset/4096                         15.1 ns/op      66.13 Mop/s
+alloc 64B shared, 4 threads (contended)               9.7 ns/op     102.98 Mop/s
+alloc + release_sized 64B, 4 threads (contended)        4.1 ns/op     244.95 Mop/s
+alloc 64B local, reset/4096                           1.4 ns/op     706.50 Mop/s
+checkpoint + restore (empty)                          1.6 ns/op     609.12 Mop/s
+checkpoint + 3 allocs + restore (@scratch shape)        5.0 ns/op     201.00 Mop/s
+checkpoint + 3 allocs + restore (1 KiB stack)         5.0 ns/op     201.09 Mop/s
+nested checkpoint x3 + restore x3                     4.9 ns/op     202.81 Mop/s
+checkpoint + 2 MiB scratch (child extent) + restore       53.4 ns/op      18.71 Mop/s
+alloc 64B + release (unsized, last-live)             16.2 ns/op      61.70 Mop/s
+alloc 64B + release_sized (tip pop)                  16.3 ns/op      61.35 Mop/s
+alloc 64B x2 + release_sized first (hole)            16.2 ns/op      61.75 Mop/s
+reuse: alloc x2 + release first + alloc              16.2 ns/op      61.89 Mop/s
+realloc tip growth 64B steps (in place)              24.3 ns/op      41.14 Mop/s
+realloc buried 256B -> 320B (copy + release)         84.7 ns/op      11.81 Mop/s
+vec push 1M ints (tip fit) + destroy                  0.6 ns/op    1687.52 Mop/s
+vec push 1M ints, alloc every 64 (moves)              1.8 ns/op     567.35 Mop/s
+vec get 1M (token-checked handle)                     1.6 ns/op     616.54 Mop/s
+vec init + 8 push + destroy (owner churn)            22.3 ns/op      44.86 Mop/s
+string push_cstr 12B x 1M (one string)                1.3 ns/op     788.73 Mop/s
+string promote (24B) + destroy churn                 15.0 ns/op      66.59 Mop/s
+@string template (2 slots) call-local on @scratch      110.2 ns/op       9.08 Mop/s
+@string template (2 slots) on arena + destroy       125.9 ns/op       7.94 Mop/s
+map insert 1k ints + destroy                      15416.0 ns/op       0.06 Mop/s
+owner new 64B + release (header rebirth)             30.9 ns/op      32.39 Mop/s
+token registry birth + kill                           1.6 ns/op     615.25 Mop/s
+sink=4325437737940317604
+
+--- CC vs plain C (ns/op) ---
+row                                                    CC          C    ratio
+alloc 64B shared, reset/4096                         12.2       15.1     0.8x
+alloc 64B shared, 4 threads (contended)             120.1        9.7    12.4x
+alloc + release_sized 64B, 4 threads (contende      272.9        4.1    66.6x
+alloc 64B local, reset/4096                           4.5        1.4     3.2x
+checkpoint + restore (empty)                         39.2        1.6    24.5x
+checkpoint + 3 allocs + restore (@scratch shap       70.6        5.0    14.1x
+checkpoint + 3 allocs + restore (1 KiB stack)        68.8        5.0    13.8x
+nested checkpoint x3 + restore x3                   161.0        4.9    32.9x
+checkpoint + 2 MiB scratch (child extent) + re       46.5       53.4     0.9x
+alloc 64B + release (unsized, last-live)             24.6       16.2     1.5x
+alloc 64B + release_sized (tip pop)                  24.7       16.3     1.5x
+alloc 64B x2 + release_sized first (hole)            36.4       16.2     2.2x
+reuse: alloc x2 + release first + alloc              56.9       16.2     3.5x
+realloc tip growth 64B steps (in place)              13.7       24.3     0.6x
+realloc buried 256B -> 320B (copy + release)         60.3       84.7     0.7x
+vec push 1M ints (tip fit) + destroy                  1.9        0.6     3.2x
+vec push 1M ints, alloc every 64 (moves)              4.1        1.8     2.3x
+vec get 1M (token-checked handle)                     1.6        1.6     1.0x
+vec init + 8 push + destroy (owner churn)            76.1       22.3     3.4x
+string push_cstr 12B x 1M (one string)                7.4        1.3     5.7x
+string promote (24B) + destroy churn                 77.0       15.0     5.1x
+@string template (2 slots) call-local on @scra      165.7      110.2     1.5x
+@string template (2 slots) on arena + destroy       158.5      125.9     1.3x
+map insert 1k ints + destroy                      32390.0    15416.0     2.1x
+owner new 64B + release (header rebirth)             59.8       30.9     1.9x
+token registry birth + kill                          27.4        1.6    17.1x
+

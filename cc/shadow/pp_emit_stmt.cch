@@ -2631,7 +2631,8 @@ static int shadow_emit_return_cc(AstNode* st, CEmit* out, ShadowCtx* ctx,
 }
 
 /* Call-local @scratch checkpoint push/pop. Named __cc_scratch_cpN so nested
- * sites stay distinct under soft-return restore (inner→outer). */
+ * sites stay distinct under soft-return restore (inner→outer). The scratch
+ * arena is owned by its function, so the owner-only pair applies. */
 static int shadow_scratch_cp_push(ShadowCtx* ctx, CEmit* out, const char* indent) {
     int id;
     if (!ctx || !out) return 0;
@@ -2644,7 +2645,7 @@ static int shadow_scratch_cp_push(ShadowCtx* ctx, CEmit* out, const char* indent
     if (!indent) indent = "    ";
     return cemit_fmt(out,
                      "%sCCArenaCheckpoint __cc_scratch_cp%d = "
-                     "cc_arena_checkpoint(__cc_str_scratch);\n",
+                     "cc_arena_checkpoint_local(__cc_str_scratch);\n",
                      indent, id);
 }
 
@@ -2654,7 +2655,7 @@ static int shadow_scratch_cp_pop(ShadowCtx* ctx, CEmit* out, const char* indent)
     id = ctx->scratch_cp_depth;
     ctx->scratch_cp_depth--;
     if (!indent) indent = "    ";
-    return cemit_fmt(out, "%scc_arena_restore(__cc_scratch_cp%d);\n", indent, id);
+    return cemit_fmt(out, "%scc_arena_restore_local(__cc_scratch_cp%d);\n", indent, id);
 }
 
 /* Early exit: restore every open call-local scratch cp (emit-time depth
@@ -2665,11 +2666,38 @@ static int shadow_emit_scratch_cps_restore(ShadowCtx* ctx, CEmit* out,
     if (!ctx || ctx->scratch_cp_depth <= 0) return 1;
     if (!indent) indent = "    ";
     for (i = ctx->scratch_cp_depth; i >= 1; i--) {
-        if (!cemit_fmt(out, "%scc_arena_restore(__cc_scratch_cp%d);\n", indent,
+        if (!cemit_fmt(out, "%scc_arena_restore_local(__cc_scratch_cp%d);\n", indent,
                        i))
             return 0;
     }
     return 1;
+}
+
+/* Call-local @scratch reclaim for any consuming statement. A statement
+ * that builds a `@string(..., @scratch)` temp and binds nothing (a call, an
+ * unwrap, a UFCS call, an assignment) checkpoints the shared scratch before
+ * the temp and restores after the call, the way println does. Declarations
+ * are the bound form and keep their bytes. The node being wrapped is
+ * remembered so the nested emit of the same statement takes its normal
+ * path; statements inside it (a bang body) wrap on their own. */
+static int shadow_text_uses_scratch(const char* s);
+static AstNode* g_shadow_scratch_wrapped = NULL;
+
+static int shadow_stmt_is_call_local_scratch(AstNode* st) {
+    if (!st) return 0;
+    switch (st->kind) {
+    case AST_EXPR_STMT:
+    case AST_STMT_UNWRAP:
+    case AST_UFCS_STMT:
+    case AST_CALL_ARGS:
+    case AST_CALL_NUM:
+    case AST_ASSIGN:
+        break;
+    default:
+        return 0;
+    }
+    return shadow_text_uses_scratch(st->a) || shadow_text_uses_scratch(st->b) ||
+           shadow_text_uses_scratch(st->c);
 }
 
 static int shadow_refs_name_at(const char* id, size_t n, char refs[][64],
@@ -6889,6 +6917,22 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
     g_shadow_ufcs_site = st;
     g_shadow_expr_site = st;
     if (!st) return 0;
+    if (ctx && st != g_shadow_scratch_wrapped &&
+        shadow_stmt_is_call_local_scratch(st)) {
+        AstNode* prev = g_shadow_scratch_wrapped;
+        char nested[80];
+        int ok;
+        if (!indent) indent = "    ";
+        shadow_indent_nest(nested, sizeof(nested), indent, 1);
+        if (!cemit_fmt(out, "%s{\n", indent)) return 0;
+        if (!shadow_scratch_cp_push(ctx, out, nested)) return 0;
+        g_shadow_scratch_wrapped = st;
+        ok = shadow_emit_stmt_ctx(st, out, ctx, nested, use_cleanup);
+        g_shadow_scratch_wrapped = prev;
+        if (!ok) return 0;
+        if (!shadow_scratch_cp_pop(ctx, out, nested)) return 0;
+        return cemit_fmt(out, "%s}\n", indent);
+    }
     /* `@defer` is a statement: stamp the enclosing-scope watermark so
      * `if (c) @defer …` has a then-arm (a no-op here steals the next line). */
     if (st->kind == AST_DEFER) {

@@ -75,13 +75,16 @@
             (void *)(h->arena.a)                                                      \
         );                                                                           \
         if (!result.other_ptr) {                                                     \
-            (void)cc_arena_release(arena, h);                                        \
+            (void)cc_arena_release_sized(arena, h, sizeof(Name));                    \
             return NULL;                                                             \
         }                                                                            \
         h->impl = result.new_cntr;                                                   \
         return h;                                                                    \
     }                                                                                \
                                                                                      \
+    /* Ends the map: table and handle are released through the arena. The   \
+     * caller's pointer is dead afterwards (it names released storage);       \
+     * scope-sigil destroy nulls it, hand C must not destroy twice. */        \
     static inline void Name##_destroy(Name *h) {                                     \
         if (!h) return;                                                              \
         ccj_map_cleanup(                                                             \
@@ -93,7 +96,7 @@
             cc__containers_free,                                                     \
             (void *)(h->arena.a)                                                      \
         );                                                                           \
-        (void)cc_arena_release(h->arena, h);                                         \
+        (void)cc_arena_release_sized(h->arena, h, sizeof(Name));                     \
     }                                                                                \
                                                                                      \
     static inline int Name##_insert(Name *h, K key, V val) {                         \

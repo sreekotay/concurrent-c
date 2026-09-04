@@ -40,7 +40,10 @@ CCString cc_string_from_slice(CCArena arena, CCSlice slice) {
     return s;
 }
 
-CCString* cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len, CCArena arena) {
+/* Growth path behind the inline cc_string_push_buffer: the bytes did not
+ * fit the current backing (or the handle is unbound, stale, or poisoned).
+ * reserve() promotes, regrows, swaps arenas, or poisons; then copy. */
+CCString* cc__string_push_buffer_grow(CCString *str, const char *buffer, uint32_t len, CCArena arena) {
     char *dst;
     size_t new_len;
     if (!str || cc_string_failed(str)) return NULL;
@@ -56,9 +59,13 @@ CCString* cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len,
     return str;
 }
 
+/* Exported twins of the inline appends (see the face). */
+CCString* cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len, CCArena arena) {
+    return cc__string_push_buffer_inline(str, buffer, len, arena);
+}
+
 CCString* cc_string_push_slice(CCString *str, CCSlice data, CCArena arena) {
-    if (data.len > UINT32_MAX) return NULL;
-    return cc_string_push_buffer(str, (const char *)data.ptr, (uint32_t)data.len, arena);
+    return cc__string_push_slice_inline(str, data, arena);
 }
 
 CCString* cc_string_clear(CCString *str) {
@@ -70,22 +77,25 @@ CCString* cc_string_clear(CCString *str) {
     return str;
 }
 
+/* Heap views are grower views: epoch + owner token, so a view left over
+ * from before a growth move mismatches at `at` / `set`. Inline views are
+ * untracked (the bytes live in the handle). */
 CCSlice cc_string_as_slice(const CCString *str) {
     const char *data;
     if (!str || cc_string_failed(str)) return cc_slice_empty();
     data = cc_string_data_const(str);
     if (!data) return cc_slice_empty();
-    return cc_slice_from_parts(
-        (void *)data,
-        str->len,
-        cc_slice_make_id(cc_string_provenance(str), false, false, false));
+    if (cc_string_is_inline(str))
+        return cc_slice_from_parts((void *)data, str->len, CC_SLICE_ID_UNTRACKED);
+    return cc_slice_from_parts((void *)data, str->len,
+                               cc_arena_owner_slice_id(cc_string_owner(str)));
 }
 
 const char *cc_string_cstr(CCString *str, CCArena arena) {
     char *data;
     if (!str || cc_string_failed(str)) return NULL;
-    if (str->len + 1 > str->cap) {
-        data = cc_string_reserve(str, str->len + 1, arena);
+    if ((size_t)str->len + 1 > cc_string_cap(str)) {
+        data = cc_string_reserve(str, (size_t)str->len + 1, arena);
         if (!data) return NULL;
     } else {
         data = cc_string_data(str);
@@ -96,11 +106,11 @@ const char *cc_string_cstr(CCString *str, CCArena arena) {
 }
 
 uint64_t cc_string_provenance(const CCString *str) {
-    CCStringHeapHeader *header;
+    CCArenaOwner *o;
     if (!str) return 0;
     if (cc_string_is_inline(str)) return CC_SLICE_ID_UNTRACKED;
-    header = cc__string_heap_header(str);
-    return header ? header->provenance : 0;
+    o = cc_string_owner(str);
+    return o ? o->provenance : 0;
 }
 
 void cc__string_stack_overflow_abort(size_t need, size_t cap) {

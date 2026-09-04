@@ -26,7 +26,7 @@ int main(void) {
         n++;
     }
     {
-        unsigned blocks = (unsigned)a.a->block_idx;
+        unsigned blocks = (unsigned)a.a->slab->block_idx;
         if (blocks < 1) {
             printf("FAIL: expected slab growth (block_idx=%u)\n", blocks);
             return 1;

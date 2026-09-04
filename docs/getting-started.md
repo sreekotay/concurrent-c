@@ -349,11 +349,11 @@ alloc and drain). Main is the escape hatch, not the steady-state path.
 Prefer a second arena when lifetimes diverge rather than churning
 `cc_arena_release` on a long-lived one. `a.live()` counts L1 + L2 + Main.
 
-`a.try_checkpoint() !>` / `cp.try_restore() !>` work after overflow alloc:
-the handle is a consumed loan (`@destroy` restores). Restore rewinds slabs
-and frees Main minted in the later epoch. A mid-slab hole disables a new
-capture until last-live rewind or `reset`. Restore of a handle whose
-overflow keep-set was released refuses (does not pretend to succeed).
+`a.try_checkpoint() !>` marks `a`'s tip; `cp.try_restore() !>` (or `@destroy`
+on the handle) puts it back and everything allocated above the mark is gone.
+Things `a` already owned keep growing in `a`, never above the mark; scratch
+that outgrows the slab quietly becomes a child arena that restore frees.
+Holes and overflow never get in the way of a checkpoint.
 `a.detach() !>` moves a heap-owned arena to the caller and refuses a stack
 or caller-owned L1 (`cc_err`, source unchanged).
 

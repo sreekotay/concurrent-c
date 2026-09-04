@@ -53,16 +53,16 @@ int main(void) {
     CCArena a = cc_arena_create_buffer(slot, sizeof(slot), CC_ARENA_GROWABLE);
     if (!a.base) { printf("FAIL: create_buffer returned empty\n"); return 1; }
     if (a.a != (CCArenaHost *)slot_start) { printf("FAIL: host should overlay slot\n"); return 1; }
-    if (a.a->base <= slot_start || a.a->base >= slot_start + SLOT_CAP) {
+    if (a.a->slab->base <= slot_start || a.a->slab->base >= slot_start + SLOT_CAP) {
         printf("FAIL: L1 should be inside the slot after the host\n"); return 1;
     }
     if (a.a->block_max != 0) { printf("FAIL: block_max should be 0 (growable), got %u\n", a.a->block_max); return 1; }
-    if (a.a->_flags & CC_ARENA_FLAG_HEAP_OWNED) { printf("FAIL: slot root must not be heap-owned\n"); return 1; }
+    if ((a.a->slab->flags & CC_ARENA_SLAB_HEAP_OWNED)) { printf("FAIL: slot root must not be heap-owned\n"); return 1; }
 
     /* Step 1: the request struct in slot L1 — simulates RedisRequest. */
     FakeReq *req = (FakeReq*)cc_arena_alloc(a, sizeof(*req), _Alignof(FakeReq));
     if (!req) { printf("FAIL: struct alloc\n"); return 2; }
-    if ((uint8_t*)req < a.a->base || (uint8_t*)req >= slot_start + SLOT_CAP) {
+    if ((uint8_t*)req < a.a->slab->base || (uint8_t*)req >= slot_start + SLOT_CAP) {
         printf("FAIL: first alloc must land in the slot L1\n"); return 2;
     }
     req->a = 0xDEADBEEFBADF00DULL;
@@ -86,8 +86,8 @@ int main(void) {
     if ((uint8_t*)argv1 >= slot_start && (uint8_t*)argv1 < slot_start + SLOT_CAP) {
         printf("FAIL: big argv should be in a heap slab, not in the slot\n"); return 4;
     }
-    if (a.a->block_idx == 0) { printf("FAIL: block_idx should be > 0 after growth\n"); return 4; }
-    if (a.a->prev == NULL) { printf("FAIL: prev extent chain should be populated\n"); return 4; }
+    if (a.a->slab->block_idx == 0) { printf("FAIL: block_idx should be > 0 after growth\n"); return 4; }
+    if (a.a->slab->prev == NULL) { printf("FAIL: prev extent chain should be populated\n"); return 4; }
     memset(argv1, 0x77, big_n);
 
     /* Step 4: struct at offset 0 is still intact.  This is the key

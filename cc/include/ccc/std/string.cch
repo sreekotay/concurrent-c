@@ -32,14 +32,20 @@ CC_VEC_DECL_ARENA(char, CCVec_char)
 #endif
 #endif /* !CC_COMPTIME */
 
+/* Two forms in sixteen bytes. Inline: the bytes live in the handle and
+ * `tag` is the inline capacity. Heap: `own` names a `CCArenaOwner` (header
+ * in the arena's slab tier, payload from the strategy) and `tag` is the
+ * owner's token — a copy of the handle that outlived a growth move or a
+ * destroy through another copy mismatches and reads as empty. Capacity of
+ * the heap form lives in the owner. */
 typedef struct CCString {
     union {
-        char *data;
+        CCArenaOwner *own;
         char inline_buf[sizeof(void *)];
         uintptr_t _inline_word;
     };
     uint32_t len;
-    uint32_t cap;
+    uint32_t tag;   /* inline: CC_STRING_INLINE_CAP; heap: owner token (>= 16); 0: unbound */
 } CCString;
 
 #ifndef CC_STRING_INLINE_CAP
@@ -49,12 +55,6 @@ typedef struct CCString {
 #if UINTPTR_MAX == UINT64_MAX
 _Static_assert(sizeof(CCString) == 16, "CCString should stay compact on 64-bit targets");
 #endif
-
-typedef struct CCStringHeapHeader {
-    CCArena arena;
-    uint64_t provenance;
-    uint32_t gen;
-} CCStringHeapHeader;
 
 /* Sticky failure poison.
  *
@@ -82,46 +82,65 @@ static inline void cc__string_poison(CCString *str) {
     if (str) str->len = CC_STRING_LEN_POISON;
 }
 
+/* Byte helpers. This face does not include string.h. Same split as
+ * cc_arena.cch (its CC__BI_* names are undefined again at the end of that
+ * header): a builtin on GCC / Clang so a constant-length append is a pair
+ * of moves; the runtime's cc_mem* names (from cc_mem.cch, which cc_arena.cch
+ * includes on those paths) under TCC, comptime, and the runtime build. */
+#if defined(CC_COMPTIME) || defined(__TINYC__) || defined(CC_ARENA_IMPL)
+#define CC__STR_MEMCPY cc_memcpy
+#define CC__STR_MEMSET cc_memset
+#else
+#define CC__STR_MEMCPY __builtin_memcpy
+#define CC__STR_MEMSET __builtin_memset
+#endif
 static inline void cc__mem_copy(void *dst, const void *src, size_t n) {
-    unsigned char *d = (unsigned char *)dst;
-    const unsigned char *s = (const unsigned char *)src;
-    size_t i;
-    for (i = 0; i < n; i++) d[i] = s[i];
+    if (n) CC__STR_MEMCPY(dst, src, n);
 }
 static inline void cc__mem_zero(void *dst, size_t n) {
-    unsigned char *d = (unsigned char *)dst;
-    size_t i;
-    for (i = 0; i < n; i++) d[i] = 0;
+    if (n) CC__STR_MEMSET(dst, 0, n);
+}
+static inline size_t cc__cstr_len(const char *s) {
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__)
+    return __builtin_strlen(s);
+#else
+    size_t n = 0;
+    while (s[n]) n++;
+    return n;
+#endif
 }
 
 /* Declared niche for @variant(packed) (spec/draft_variants.md §11).
  *
  * CCString's first word is SSO (inline bytes OR a pointer), so no sentinel
- * over word 0 is sound.  The niche instead lives in the `cap` field: a valid
- * CCString never has `cap == CC_STRING_CAP_NICHE`.  Inline cap is
- * CC_STRING_INLINE_CAP (8); heap cap is a real allocation size grown by
- * doubling from CC_STRING_INLINE_CAP (cc_string_reserve), so every non-zero
- * cap is a power of two <= UINT32_MAX.  0xFFFFFFFF is not a power of two and
- * is therefore unreachable — reserving it as a niche costs no struct space and
- * is distinct from the `len == UINT32_MAX` poison sentinel (cc_string_failed
- * stays a len test, orthogonal to the cap niche). */
+ * over word 0 is sound.  The niche lives in the `tag` field: a valid CCString
+ * never has `tag == CC_STRING_CAP_NICHE`.  The inline tag is
+ * CC_STRING_INLINE_CAP (8); a heap tag is an owner token, which the
+ * generation registry issues in [16, CC_SLICE_ID_GEN_MAX] — strictly below
+ * 0xFFFFFFFF.  Reserving that value as a niche costs no struct space and is
+ * distinct from the `len == UINT32_MAX` poison sentinel (cc_string_failed
+ * stays a len test, orthogonal to the tag niche). */
 #define CC_STRING_CAP_NICHE UINT32_MAX
 #if UINTPTR_MAX == UINT64_MAX
-_Static_assert(offsetof(CCString, cap) == 12,
-               "CCString cap niche assumes cap at byte offset 12 on 64-bit targets");
-_Static_assert(sizeof(((CCString *)0)->cap) == 4, "CCString cap is 4 bytes wide");
+_Static_assert(offsetof(CCString, tag) == 12,
+               "CCString tag niche assumes tag at byte offset 12 on 64-bit targets");
+_Static_assert(sizeof(((CCString *)0)->tag) == 4, "CCString tag is 4 bytes wide");
 _Static_assert(CC_STRING_INLINE_CAP != CC_STRING_CAP_NICHE,
-               "the inline cap must never collide with the niche sentinel");
+               "the inline tag must never collide with the niche sentinel");
+_Static_assert(CC_STRING_INLINE_CAP < CC_ARENA_OWNER_TOKEN_MIN,
+               "an owner token must never read as the inline tag");
 #endif
 
 
-/* Register the cap-field niche so a @variant(packed) arm of type CCString
- * donates it to carry the discriminant.  See spec §11. */
+/* Register the tag-field niche so a @variant(packed) arm of type CCString
+ * donates it to carry the discriminant.  See spec §11. `.destroy` releases
+ * heap storage through the owner: `CCString s = … @destroy`. */
 @typehooks on CCString {
     .niche = cc_type_niche(/*size*/16, /*align*/8, /*offset*/12,
     /*width*/4, /*sentinel*/0xFFFFFFFF),
     .len = cc_type_len_field("len"),
     .access = cc_type_access_call("cc_string_data"),
+    .destroy = cc_type_destroy_call("cc_string_destroy"),
 };
 
 // ------------------------- Parse error enums ------------------------------
@@ -283,7 +302,7 @@ static inline CCSlice cc_slice_concat_many(CCArena arena, const CCSlice *parts, 
 
 static inline CCString cc_string_new(void) {
     CCString s = {0};
-    s.cap = CC_STRING_INLINE_CAP;
+    s.tag = CC_STRING_INLINE_CAP;
     return s;
 }
 #ifdef CC_COMPTIME
@@ -291,6 +310,7 @@ static inline CCString cc_string_new(void) {
  * (after the cc_string_push/from macros they depend on). */
 static inline CCString cc_string_with_capacity(CCArena arena, size_t cap);
 static inline CCString cc_string_from_slice(CCArena arena, CCSlice slice);
+static inline CCString* cc__string_push_buffer_grow(CCString *str, const char *buffer, uint32_t len, CCArena arena);
 static inline CCString* cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len, CCArena arena);
 static inline CCString* cc_string_push_slice(CCString *str, CCSlice data, CCArena arena);
 static inline CCString* cc_string_clear(CCString *str);
@@ -300,6 +320,10 @@ static inline uint64_t cc_string_provenance(const CCString *str);
 #else
 CCString cc_string_with_capacity(CCArena arena, size_t cap);
 CCString cc_string_from_slice(CCArena arena, CCSlice slice);
+CCString* cc__string_push_buffer_grow(CCString *str, const char *buffer, uint32_t len, CCArena arena);
+/* Exported twins of the inline appends below, for code compiled against an
+ * earlier face that links the symbols (cached comptime hook batches). New
+ * call sites reach the inline path through the macros at the end. */
 CCString* cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len, CCArena arena);
 CCString* cc_string_push_slice(CCString *str, CCSlice data, CCArena arena);
 CCString* cc_string_clear(CCString *str);
@@ -323,18 +347,35 @@ static inline size_t cc_string_len(const CCString *str) {
     if (!str || cc_string_failed(str)) return 0;
     return str->len;
 }
-static inline size_t cc_string_cap(const CCString *str) {
-    return str ? str->cap : 0;
+static inline bool cc_string_is_inline(const CCString *str) {
+    return str && str->tag > 0 && str->tag <= CC_STRING_INLINE_CAP;
 }
 
-static inline bool cc_string_is_inline(const CCString *str) {
-    return str && str->cap > 0 && str->cap <= CC_STRING_INLINE_CAP;
+/* Heap form with a live owner. A heap tag whose owner no longer carries
+ * that token is a stale handle: it reads as empty and cannot grow. */
+static inline bool cc_string_is_heap(const CCString *str) {
+    return str && str->tag >= CC_ARENA_OWNER_TOKEN_MIN && str->tag != CC_STRING_CAP_NICHE;
+}
+
+static inline CCArenaOwner *cc_string_owner(const CCString *str) {
+    if (!cc_string_is_heap(str) || !str->own) return NULL;
+    return cc_arena_owner_live(str->own, str->tag) ? str->own : NULL;
+}
+
+static inline size_t cc_string_cap(const CCString *str) {
+    CCArenaOwner *o;
+    if (!str) return 0;
+    if (cc_string_is_inline(str)) return CC_STRING_INLINE_CAP;
+    o = cc_string_owner(str);
+    return o ? o->bytes : 0;
 }
 
 static inline const char *cc_string_data_const(const CCString *str) {
+    CCArenaOwner *o;
     if (!str) return NULL;
     if (cc_string_is_inline(str)) return str->inline_buf;
-    return str->data;
+    o = cc_string_owner(str);
+    return o ? (const char *)o->payload : NULL;
 }
 
 static inline char *cc_string_data(CCString *str) {
@@ -342,54 +383,48 @@ static inline char *cc_string_data(CCString *str) {
 }
 
 static inline const char *cc_string_heap_data_const(const CCString *str) {
-    if (!str) return NULL;
-    return cc_string_is_inline(str) ? NULL : str->data;
+    CCArenaOwner *o = cc_string_owner(str);
+    return o ? (const char *)o->payload : NULL;
 }
 
 static inline char *cc_string_heap_data(CCString *str) {
     return (char *)cc_string_heap_data_const((const CCString *)str);
 }
 
-static inline CCStringHeapHeader *cc__string_heap_header_from_data(const void *data) {
-    if (!data) return NULL;
-    return (CCStringHeapHeader *)((uint8_t *)data - sizeof(CCStringHeapHeader));
-}
-
-static inline CCStringHeapHeader *cc__string_heap_header(const CCString *str) {
-    if (!str || cc_string_is_inline(str) || !str->data) return NULL;
-    return cc__string_heap_header_from_data(str->data);
-}
-
 static inline CCArena cc_string_arena(const CCString *str) {
-    CCStringHeapHeader *header = cc__string_heap_header(str);
-    return header ? header->arena : cc_arena_handle(NULL);
+    CCArenaOwner *o = cc_string_owner(str);
+    return o ? cc_arena_handle(o->arena) : cc_arena_handle(NULL);
 }
 
-/* Grow heap storage to at least `need` bytes. When the string already owns
- * heap storage in a different arena, this is an arena swap: realloc moves
- * the buffer to `arena` and updates the header owner/provenance. */
+/* Grow storage to at least `need` bytes. Inline strings that outgrow the
+ * handle promote to an owner in `arena`. A heap string already owned in
+ * `arena` regrows in place through its owner (tip fit keeps the pointer;
+ * a move rebirths the token). A heap string owned elsewhere is copied into
+ * a fresh owner in `arena` and the old owner released (arena swap). A
+ * stale handle is poisoned. */
 static inline char *cc_string_reserve(CCString *str, size_t need, CCArena arena) {
     size_t new_cap;
+    size_t cur_cap;
     char saved[CC_STRING_INLINE_CAP];
     size_t saved_len;
-    CCStringHeapHeader *header;
-    CCArena old_arena;
-    size_t old_total;
-    size_t new_total;
+    CCArenaOwner *o;
     if (!str) return NULL;
     if (cc_string_failed(str)) return NULL;
     if (need > UINT32_MAX) { cc__string_poison(str); return NULL; }
     if (cc_string_is_inline(str) && need <= CC_STRING_INLINE_CAP) return cc_string_data(str);
-    if (!cc_string_is_inline(str) && cc_string_heap_data(str) && need <= str->cap) return cc_string_data(str);
+    o = cc_string_owner(str);
+    if (cc_string_is_heap(str) && !o) { cc__string_poison(str); return NULL; }
+    if (o && need <= o->bytes) return (char *)o->payload;
     if (!cc_arena_is_live(arena)) { cc__string_poison(str); return NULL; }
     if (need <= CC_STRING_INLINE_CAP) {
-        if (str->cap == 0) {
-            str->cap = CC_STRING_INLINE_CAP;
+        if (str->tag == 0) {
+            str->tag = CC_STRING_INLINE_CAP;
             cc__mem_zero(str->inline_buf, sizeof(str->inline_buf));
         }
         return cc_string_data(str);
     }
-    new_cap = str->cap ? str->cap : CC_STRING_INLINE_CAP;
+    cur_cap = o ? o->bytes : CC_STRING_INLINE_CAP;
+    new_cap = cur_cap ? cur_cap : CC_STRING_INLINE_CAP;
     if (new_cap < CC_STRING_INLINE_CAP) new_cap = CC_STRING_INLINE_CAP;
     while (new_cap < need) {
         size_t next = (new_cap * 8) / 5;
@@ -397,78 +432,57 @@ static inline char *cc_string_reserve(CCString *str, size_t need, CCArena arena)
         new_cap = next;
     }
     if (new_cap > UINT32_MAX) { cc__string_poison(str); return NULL; }
-    if (cc_string_is_inline(str) || !cc_string_heap_data(str)) {
-        saved_len = str->len + 1;
+    if (!o) {
+        /* Promote: inline (or unbound) bytes move into a fresh owner. */
+        CCArenaOwner *fresh;
+        saved_len = (size_t)str->len + 1;
+        if (str->tag == 0) saved_len = 0;
         if (saved_len > sizeof(saved)) saved_len = sizeof(saved);
         cc__mem_zero(saved, sizeof(saved));
         if (saved_len > 0) cc__mem_copy(saved, str->inline_buf, saved_len);
-        new_total = sizeof(CCStringHeapHeader) + new_cap;
-        header = (CCStringHeapHeader *)cc_arena_alloc(arena, new_total, _Alignof(CCStringHeapHeader));
-        if (!header) { cc__string_poison(str); return NULL; }
-        header->arena = arena;
-        header->provenance = CC__ARENA_HOST(arena)->provenance;
-        header->gen = cc_slice_gen_birth();
-        str->data = (char *)(header + 1);
-        str->cap = (uint32_t)new_cap;
-        if (saved_len > 0) cc__mem_copy(str->data, saved, saved_len);
-        return cc_string_heap_data(str);
+        fresh = cc_arena_owner_new(arena, new_cap, 8);
+        if (!fresh) { cc__string_poison(str); return NULL; }
+        if (saved_len > 0) cc__mem_copy(fresh->payload, saved, saved_len);
+        str->own = fresh;
+        str->tag = fresh->token;
+        return (char *)fresh->payload;
     }
-    header = cc__string_heap_header(str);
-    if (!header || !cc_arena_is_live(header->arena)) { cc__string_poison(str); return NULL; }
-    old_arena = header->arena;
-    old_total = sizeof(CCStringHeapHeader) + str->cap;
-    new_total = sizeof(CCStringHeapHeader) + new_cap;
+    if (o->arena == CC__ARENA_HOST(arena) || cc__arena_innermost(CC__ARENA_HOST(arena)) == o->arena) {
+        char *p = (char *)cc_arena_owner_regrow(o, str->tag, new_cap);
+        if (!p) { cc__string_poison(str); return NULL; }
+        str->tag = o->token;
+        return p;
+    }
     {
-        CCStringHeapHeader *old_h = header;
-        uint32_t old_gen = header->gen;
-        header = (CCStringHeapHeader *)cc_arena_realloc(
-            old_arena, arena, header, old_total, new_total,
-            _Alignof(CCStringHeapHeader));
-        if (!header) { cc__string_poison(str); return NULL; }
-        header->arena = arena;
-        header->provenance = CC__ARENA_HOST(arena)->provenance;
-        if (header != old_h) {
-            cc_slice_gen_kill(old_gen);
-            header->gen = cc_slice_gen_birth();
-        } else {
-            header->gen = old_gen;
-        }
-        str->data = (char *)(header + 1);
-    }
-    str->cap = (uint32_t)new_cap;
-    return str->data;
-}
-
-/* Frees out-of-line storage only; does not zero *str. Prefer release(). */
-static inline void cc_string_release_heap(CCString *str) {
-    CCStringHeapHeader *header;
-    if (!str) return;
-    if (cc_string_is_inline(str)) return;
-    if (!cc_string_heap_data(str)) return;
-    header = cc__string_heap_header(str);
-    if (header) {
-        cc_slice_gen_kill(header->gen);
-        if (cc_arena_is_live(header->arena))
-            (void)cc_arena_release(header->arena, header);
+        /* Arena swap: the string moves to `arena`. */
+        CCArenaOwner *fresh = cc_arena_owner_new(arena, new_cap, 8);
+        size_t keep = (size_t)str->len + 1;
+        if (!fresh) { cc__string_poison(str); return NULL; }
+        if (keep > o->bytes) keep = o->bytes;
+        if (keep) cc__mem_copy(fresh->payload, o->payload, keep);
+        (void)cc_arena_owner_release(o, str->tag);
+        str->own = fresh;
+        str->tag = fresh->token;
+        return (char *)fresh->payload;
     }
 }
 
-/* End ownership of heap backing (via arena_release) and zero *str.
- * clear() only sets len=0 and keeps ptr/cap — unsafe before arena->reset()
- * when the string spilled into that arena. After release, push* may reuse
- * the (empty) struct; a dedicated encode arena still needs reset to reclaim
- * bump space. */
-static inline void cc_string_release(CCString *str, CCArena arena) {
-    CCStringHeapHeader *header;
-    CCArena owner;
+/* End ownership of heap backing through the owner (sized release, token
+ * killed) and zero *str. A stale handle (the owner already released
+ * through another copy, or reborn by a later regrow) touches nothing.
+ * clear() only sets len=0 and keeps the backing. */
+static inline void cc_string_destroy(CCString *str) {
     if (!str) return;
-    if (!cc_string_is_inline(str) && cc_string_heap_data(str)) {
-        header = cc__string_heap_header(str);
-        owner = (header && cc_arena_is_live(header->arena)) ? header->arena : arena;
-        if (header && cc_arena_is_live(owner))
-            (void)cc_arena_release(owner, header);
-    }
+    if (cc_string_is_heap(str) && str->own)
+        (void)cc_arena_owner_release(str->own, str->tag);
     *str = (CCString){0};
+}
+
+/* Two-argument spelling kept for call sites that name the arena; the owner
+ * already knows it, so `arena` is not consulted. */
+static inline void cc_string_release(CCString *str, CCArena arena) {
+    (void)arena;
+    cc_string_destroy(str);
 }
 
 static inline CCSlice cc__string_persist_slice(CCArena arena, const CCString *str) {
@@ -515,8 +529,39 @@ static inline bool !>(CCError) CCString_materialize_in(CCString *s, CCArena aren
 }
 #endif /* !CC_COMPTIME */
 
+/* Append `len` bytes. The bytes fit the current backing in the common case
+ * (an inline handle with room, or a heap owner whose token still matches and
+ * whose capacity covers the new length plus the NUL): that is a copy, a
+ * length bump and a NUL, all inline. Everything else (growth, promotion,
+ * arena swap, a stale or poisoned handle) is the growth path, which decides
+ * and reports. `arena` is only consulted there. */
+static inline CCString* cc__string_push_buffer_inline(CCString *str, const char *buffer, uint32_t len, CCArena arena) {
+    if (str && !cc_string_failed(str)) {
+        size_t new_len = (size_t)str->len + (size_t)len;
+        char *dst = NULL;
+        if (cc_string_is_inline(str)) {
+            if (new_len < CC_STRING_INLINE_CAP) dst = str->inline_buf;
+        } else if (cc_string_is_heap(str)) {
+            CCArenaOwner *o = str->own;
+            if (o && o->token == str->tag && new_len < o->bytes) dst = (char *)o->payload;
+        }
+        if (dst) {
+            if (buffer && len) cc__mem_copy(dst + str->len, buffer, (size_t)len);
+            str->len = (uint32_t)new_len;
+            dst[new_len] = '\0';
+            return str;
+        }
+    }
+    return cc__string_push_buffer_grow(str, buffer, len, arena);
+}
+
+static inline CCString* cc__string_push_slice_inline(CCString *str, CCSlice data, CCArena arena) {
+    if (data.len > UINT32_MAX) return NULL;
+    return cc__string_push_buffer_inline(str, (const char *)data.ptr, (uint32_t)data.len, arena);
+}
+
 static inline CCString* cc_string_push_char(CCString *str, char c, CCArena arena) {
-    return cc_string_push_buffer(str, &c, 1, arena);
+    return cc__string_push_buffer_inline(str, &c, 1, arena);
 }
 
 static inline CCString* cc__string_append_u64_impl(CCString *str, uint64_t v, CCArena arena) {
@@ -556,14 +601,14 @@ static inline CCString* cc_string_push_f32(CCString *str, float v, CCArena arena
     char buf[64];
     char *end = cc_zmij_f32_to_string(v, buf);
     if (!end || end < buf || (size_t)(end - buf) > sizeof(buf)) return NULL;
-    return cc_string_push_buffer(str, buf, (uint32_t)(end - buf), arena);
+    return cc__string_push_buffer_inline(str, buf, (uint32_t)(end - buf), arena);
 }
 
 static inline CCString* cc_string_push_f64(CCString *str, double v, CCArena arena) {
     char buf[64];
     char *end = cc_zmij_f64_to_string(v, buf);
     if (!end || end < buf || (size_t)(end - buf) > sizeof(buf)) return NULL;
-    return cc_string_push_buffer(str, buf, (uint32_t)(end - buf), arena);
+    return cc__string_push_buffer_inline(str, buf, (uint32_t)(end - buf), arena);
 }
 
 static inline CCString* cc_string_push_float(CCString *str, double v, CCArena arena) {
@@ -573,10 +618,9 @@ static inline CCString* cc_string_push_float(CCString *str, double v, CCArena ar
 static inline CCString* cc_string_push_cstr(CCString *str, const char *cstr, CCArena arena) {
     size_t len;
     if (!cstr) return str;
-    len = 0;
-    while (cstr[len]) len++;
+    len = cc__cstr_len(cstr);
     if (len > UINT32_MAX) return NULL;
-    return cc_string_push_buffer(str, cstr, (uint32_t)len, arena);
+    return cc__string_push_buffer_inline(str, cstr, (uint32_t)len, arena);
 }
 
 static inline CCSlice cc_string_apply_policy(CCStringPolicy policy, CCArena arena, CCSlice tag, CCSlice value) {
@@ -591,7 +635,7 @@ static inline CCString* cc_string_push_policy(CCString *str,
                                               CCArena arena,
                                               CCSlice tag,
                                               CCSlice value) {
-    return cc_string_push_slice(str, cc_string_apply_policy(policy, arena, tag, value), arena);
+    return cc__string_push_slice_inline(str, cc_string_apply_policy(policy, arena, tag, value), arena);
 }
 
 static inline CCString cc__string_from_signed_impl(CCArena arena, long long v) {
@@ -815,11 +859,11 @@ static inline CCSlice cc__string_slot_from_bool(bool v, CCArena arena) {
 }
 
 static inline CCString* cc__string_slot_push_from_string(CCString *str, CCString s, CCArena arena) {
-    return cc_string_push_slice(str, cc_string_as_slice(&s), arena);
+    return cc__string_push_slice_inline(str, cc_string_as_slice(&s), arena);
 }
 
 static inline CCString* cc__string_slot_push_from_string_ptr(CCString *str, const CCString *s, CCArena arena) {
-    return cc_string_push_slice(str, cc_string_as_slice(s), arena);
+    return cc__string_push_slice_inline(str, cc_string_as_slice(s), arena);
 }
 
 static inline CCString* cc__string_slot_push_from_bool(CCString *str, bool v, CCArena arena) {
@@ -904,7 +948,7 @@ static inline CCSlice cc__concat_from_string_ptr(const CCString *str, CCArena ar
 )((data), CC__ARENA_HANDLE(arena))
 
 #define cc__string_slot_push(str, data, arena) _Generic((data), \
-    CCSlice: cc_string_push_slice, \
+    CCSlice: cc__string_push_slice_inline, \
     char *: cc_string_push_cstr, \
     const char *: cc_string_push_cstr, \
     CCString: cc__string_slot_push_from_string, \
@@ -980,7 +1024,7 @@ static inline CCString cc_string_from_slice(CCArena arena, CCSlice slice) {
     (void)cc_string_push(&s, slice, arena); /* failure poisons s */
     return s;
 }
-static inline CCString* cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len, CCArena arena) {
+static inline CCString* cc__string_push_buffer_grow(CCString *str, const char *buffer, uint32_t len, CCArena arena) {
     char *dst;
     size_t new_len;
     if (!str || cc_string_failed(str)) return NULL;
@@ -993,9 +1037,11 @@ static inline CCString* cc_string_push_buffer(CCString *str, const char *buffer,
     dst[str->len] = '\0';
     return str;
 }
+static inline CCString* cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len, CCArena arena) {
+    return cc__string_push_buffer_inline(str, buffer, len, arena);
+}
 static inline CCString* cc_string_push_slice(CCString *str, CCSlice data, CCArena arena) {
-    if (data.len > UINT32_MAX) return NULL;
-    return cc_string_push_buffer(str, (const char *)data.ptr, (uint32_t)data.len, arena);
+    return cc__string_push_slice_inline(str, data, arena);
 }
 /* Empty in place: len=0, keep capacity and any arena heap pointer.
  * Not a detach — do not arena->reset() while a cleared string still
@@ -1009,11 +1055,11 @@ static inline CCString* cc_string_clear(CCString *str) {
     return str;
 }
 static inline uint64_t cc_string_provenance(const CCString *str) {
-    CCStringHeapHeader *header;
+    CCArenaOwner *o;
     if (!str) return 0;
     if (cc_string_is_inline(str)) return CC_SLICE_ID_UNTRACKED;
-    header = cc__string_heap_header(str);
-    return header ? header->provenance : 0;
+    o = cc_string_owner(str);
+    return o ? o->provenance : 0;
 }
 static inline CCSlice cc_string_as_slice(const CCString *str) {
     const char *data;
@@ -1022,20 +1068,14 @@ static inline CCSlice cc_string_as_slice(const CCString *str) {
     if (!data) return cc_slice_empty();
     if (cc_string_is_inline(str))
         return cc_slice_from_parts((void *)data, str->len, CC_SLICE_ID_UNTRACKED);
-    {
-        CCStringHeapHeader *header = cc__string_heap_header(str);
-        if (!header)
-            return cc_slice_from_parts((void *)data, str->len, CC_SLICE_ID_UNTRACKED);
-        return cc_slice_from_parts((void *)data, str->len,
-                                   cc_slice_make_grower_id(header->provenance,
-                                                          header->gen));
-    }
+    return cc_slice_from_parts((void *)data, str->len,
+                               cc_arena_owner_slice_id(cc_string_owner(str)));
 }
 static inline const char *cc_string_cstr(CCString *str, CCArena arena) {
     char *data;
     if (!str || cc_string_failed(str)) return NULL;
-    if (str->len + 1 > str->cap) {
-        data = cc_string_reserve(str, str->len + 1, arena);
+    if ((size_t)str->len + 1 > cc_string_cap(str)) {
+        data = cc_string_reserve(str, (size_t)str->len + 1, arena);
         if (!data) return NULL;
     } else {
         data = cc_string_data(str);
@@ -1175,9 +1215,9 @@ bool !>(CC_BoolParseError) cc_slice_parse_bool(CCSlice s);
 /* Peel handle / handle* / host. Last-good @string temps are still
  * `CCArena*`; call sites pass `CCArena` by value. */
 #define cc_string_push_buffer(s, b, n, a) \
-    (cc_string_push_buffer)((s), (b), (n), CC__ARENA_HANDLE(a))
+    cc__string_push_buffer_inline((s), (b), (n), CC__ARENA_HANDLE(a))
 #define cc_string_push_slice(s, d, a) \
-    (cc_string_push_slice)((s), (d), CC__ARENA_HANDLE(a))
+    cc__string_push_slice_inline((s), (d), CC__ARENA_HANDLE(a))
 #define cc_string_push_cstr(s, p, a) \
     (cc_string_push_cstr)((s), (p), CC__ARENA_HANDLE(a))
 #define cc_string_push_char(s, c, a) \

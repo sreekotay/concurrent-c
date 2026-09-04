@@ -420,7 +420,8 @@ Multiline backticks **dedent** to the closing backtick's margin.
 function or closure shares one stack arena (not per line). Bind the
 product (`CCString line =` `` @string(`…`, @scratch) ``) before a
 consuming call. `return f(@string(…))` breaks `@destroy` return-rewrite;
-a call-local `@string` is reclaimed after that call. To keep a product,
+a call-local `@string` (a call statement, assignment, or `!>` unwrap;
+not a declaration initializer) is reclaimed after that call. To keep a product,
 pass the arena it should live on (see [Keep](#keep-pass-the-arena-to-live-on)).
 A newline before `@scratch` is fine. Do not `scratch.destroy()`. Do not
 capture, send, or `return` a `@scratch` product (`@scratch string escapes
@@ -699,14 +700,18 @@ cc_arena_stack(tmp, 1024);             // same policy; L1 on the stack; @destroy
 cc_arena_buf(win, frame, sizeof frame); // same sugar; caller L1 (no VLA)
 a.reset();                             // drain epoch; reuse L1
 
-CCArenaCheckpoint cp = a.try_checkpoint() !> @destroy; // consumed loan
-/* …scratch, including Main… */
+CCArenaCheckpoint cp = a.try_checkpoint() !> @destroy; // a mark on a's tip
+/* …scratch above the mark; a child arena only if it outgrows the slab… */
 cp.try_restore() !>;                   // or leave the scope: @destroy restores
+
+a.set_reuse(true);                     // sized releases feed size-class lists
+cc_arena_release_sized(a, p, n);       // release is a signal: pop, list, or hole
 ```
 
 Slices (`T[:]`) carry provenance. Views must not outlive their arena.
-A mid-slab hole disables a new capture until last-live rewind or `reset`.
-Restore of a handle whose overflow keep-set was released refuses.
+Objects `a` already owned regrow in `a` during scratch, never in the child.
+Holes never disable a checkpoint. Vec and heap String are owners: a stale
+copy of the handle mismatches the owner token and cannot grow or destroy.
 `a.detach() !>` moves heap-owned mallocs only — a stack or caller L1 is refused.
 Details: [getting-started § Arenas](getting-started.md#arenas-name-a-lifetime).
 

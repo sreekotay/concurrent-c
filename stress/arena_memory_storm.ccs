@@ -185,14 +185,14 @@ static int bench_budget_overflow_reset(void) {
 
     if (!(a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW))
         return fail("expected overflow after slab budget");
-    if (a.a->block_idx + 1 > CC_ARENA_DEFAULT_BLOCK_MAX)
+    if (a.a->slab->block_idx + 1 > CC_ARENA_DEFAULT_BLOCK_MAX)
         return fail("grew past default block_max");
 
     ovf_bytes = cc_arena_overflow_raw_bytes(a);
     gross_before = cc_arena_committed_gross_bytes(a);
     {
         ssize_t rss_delta = (rss0.ok && rss1.ok) ? (ssize_t)rss1.rss_bytes - (ssize_t)rss0.rss_bytes : (ssize_t)-1;
-        println(@string(`  storm: allocs=${STORM_ALLOCS} live~=${live} slabs=${a.a->block_idx + 1} ovf=${ovf_bytes} gross=${gross_before} rss_delta=${rss_delta} $~float_dec(3){t1 - t0}s`, @scratch));
+        println(@string(`  storm: allocs=${STORM_ALLOCS} live~=${live} slabs=${a.a->slab->block_idx + 1} ovf=${ovf_bytes} gross=${gross_before} rss_delta=${rss_delta} $~float_dec(3){t1 - t0}s`, @scratch));
     }
 
     cc_arena_reset(a);
@@ -205,7 +205,7 @@ static int bench_budget_overflow_reset(void) {
 
     if (a.a->ovf_head != NULL || cc_arena_overflow_raw_bytes(a) != 0)
         return fail("reset did not drain overflow");
-    if (a.a->block_idx != 0 || a.a->prev != NULL)
+    if (a.a->slab->block_idx != 0 || a.a->slab->prev != NULL)
         return fail("reset did not unwind slabs");
     if (gross_after > ROOT_BYTES + 64 * 1024 && gross_after > MAX_RESIDUAL_GROSS)
         return fail("gross still huge after reset");
@@ -243,7 +243,7 @@ static int bench_reset_pingpong(void) {
             a.destroy();
             return fail("pingpong reset left overflow");
         }
-        if (a.a->block_idx != 0 || a.a->prev != NULL) {
+        if (a.a->slab->block_idx != 0 || a.a->slab->prev != NULL) {
             a.destroy();
             return fail("pingpong reset left extents");
         }
@@ -283,7 +283,7 @@ static int bench_mixed_align_storm(void) {
         ((unsigned char *)p)[0] = (unsigned char)i;
         live += n;
     }
-    println(@string(`  mixed_align: live~=${live} slabs=${a.a->block_idx + 1} ovf=${cc_arena_overflow_raw_bytes(a)} gross=${cc_arena_committed_gross_bytes(a)} $~float_dec(3){now_sec() - t0}s`, @scratch));
+    println(@string(`  mixed_align: live~=${live} slabs=${a.a->slab->block_idx + 1} ovf=${cc_arena_overflow_raw_bytes(a)} gross=${cc_arena_committed_gross_bytes(a)} $~float_dec(3){now_sec() - t0}s`, @scratch));
     a.destroy();
     return 0;
 }
@@ -339,13 +339,13 @@ static int bench_stack_spill(void) {
         }
         live += n;
     }
-    println(@string(`  stack_spill: live~=${live} slabs=${s.a->block_idx + 1} ovf=${cc_arena_overflow_raw_bytes(s)} gross=${cc_arena_committed_gross_bytes(s)}`, @scratch));
-    if (s.a->block_idx == 0 && !(s.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
+    println(@string(`  stack_spill: live~=${live} slabs=${s.a->slab->block_idx + 1} ovf=${cc_arena_overflow_raw_bytes(s)} gross=${cc_arena_committed_gross_bytes(s)}`, @scratch));
+    if (s.a->slab->block_idx == 0 && !(s.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
         s.destroy();
         return fail("stack should have grown or overflowed");
     }
     cc_arena_reset(s);
-    if (s.a->base != s_cc_stack_buf) {
+    if (s.a->slab->base != s_cc_stack_buf) {
         s.destroy();
         return fail("stack reset did not restore stack buf");
     }

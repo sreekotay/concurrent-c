@@ -63,6 +63,7 @@ Run an individual benchmark directly:
 |-----------|------------------|
 | `exclusive_named_lock.ccs` | Named exclusive sections: Zipf lock-by-name product throughput (directory+lock+scheduler) and single-caller serial fast-path cost. Compare via `compare_exclusive_named_lock.sh`. |
 | `arena_contention_storm.ccs` | Per-fiber private-arena allocation throughput. |
+| `arena_lifetime_bench.ccs` | Per-operation cost of the lifetime model: bump alloc (uncontended; 4 threads on one arena; 4 threads with one arena each; the raw 4-thread CAS floor), checkpoint capture/restore (empty, `@scratch` shape, nested, grown; the owner-only `_local` pair), unsized vs sized release, size-class reuse, tip vs buried regrow, Vec push/get/churn through owner tokens, String append/promote/call-local scratch template, Map insert/destroy, owner header and token registry churn. `arena_lifetime_c_baseline.c` is the plain-C twin (malloc/free, hand bump arena with mark/reset, realloc-grown arrays, snprintf). `compare_arena_lifetime.sh [ref]` prints CC vs C with ratios, and current vs a ref's headers; receipts in `baselines/arena_lifetime_*.txt`. |
 | `cancellation_avalanche.ccs` | Teardown speed and cleanup correctness for blocked task trees. |
 | `mpmc_worker_pool.ccs` | Buffered producer -> worker-pool throughput and work distribution. |
 

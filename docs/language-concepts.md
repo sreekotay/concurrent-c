@@ -225,7 +225,7 @@ Recipe: [recipe_walk.ccs](../examples/recipe_walk.ccs).
 | `cc_arena_heap(n) @destroy` | Named lifetime; L1 heap `n`, L2 up to 4 slabs (~1.5×), then **Main** overflow | request / window |
 | `cc_arena_stack(name, n)` | Same lifetime; L1 on the stack; `@destroy` at scope exit | hot-path / frame scratch |
 | `cc_arena_buf(name, ptr, n)` | Same sugar as stack; caller L1 (no VLA) | existing buffer / `#define` scratch |
-| `@scratch` | Arena operand of `@string` only — not a named `CCArena` | bind the `CCString`, or call-local print |
+| `@scratch` | Arena operand of `@string` only — not a named `CCArena` | bind the `CCString`, or pass it call-local (reclaimed after the call) |
 
 ```c
 /* Heap — owns the root; @destroy frees slabs + overflow. */
@@ -254,16 +254,18 @@ time in Main. Prefer another arena when lifetimes diverge; treat
 arenas with overflow off return `NULL` on exhaustion (never silent success).
 `a.live()` counts every live object on L1 + L2 + Main.
 
-**Checkpoint / restore:** a checkpoint is a consumed loan —
+**Checkpoint / restore:** a checkpoint is a mark on `a` —
 `a.try_checkpoint() !>` / `cp.try_restore() !>` (or `@destroy` on the handle).
-Restore rewinds the slab prefix and drains Main minted after the checkpoint
-(same contract on heap, stack, and `cc_arena_malloc`). Overflow alloc does
-not disable rewind. A mid-slab hole disables a new capture until last-live
-root rewind or `reset`. Restore refuses (no mutate) if that handle's overflow
-keep-set was released, or if the checkpoint would advance the tip. Dropping
-a handle without consume leaves an outstanding loan (diagnostic on
-free/reset/detach) and does not block a later capture. `a.detach() !>` refuses a
-stack or caller-owned L1.
+Capture records the tip and opens an epoch for everything allocated above
+it; restore returns the tip to the mark in one CAS, and views minted above it
+go stale. Objects `a` already owned regrow and release in `a`, never above
+the mark. Scratch that outgrows the slab, spills, or forces a pre-mark object
+to move turns the mark into a child arena that restore frees (its extents
+and Main included), same contract on heap, stack, and `cc_arena_malloc`.
+Holes, overflow, and attached children never refuse a capture or a restore.
+Restore refuses (no mutate) on a consumed handle or while an inner checkpoint
+is still held; `cp.abandon()` keeps the scratch. `a.detach() !>` refuses a
+stack or caller-owned L1 and a host with an armed checkpoint.
 
 A view must not outlive its storage — no stack/arena borrow into an outliving
 task or channel send. Capturing a non-unique arena slice into a nursery **pins**

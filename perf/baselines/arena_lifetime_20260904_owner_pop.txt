@@ -1,0 +1,132 @@
+arena_lifetime_bench — 2026-09-04 — Linux x86_64 (4 cores), gcc -O2 (ccc build --release), ROUNDS=9 best-of
+Branch: owner header and payload pop together; one-op token kill.
+Previous receipt: arena_lifetime_20260904_tokens.txt.
+
+What changed:
+- cc_arena_owner_release: when the header sits right below its payload
+  (they were minted together by one bump) and the payload ends the current
+  slab, both pop in one CAS with no lock and nothing is listed. The next
+  owner_new then finds no listed header and mints header + payload with
+  one CAS again. A buried payload still becomes a hole with the header
+  listed for rebirth (covered by arena_owner_token_smoke).
+- cc_slice_gen_kill is one fetch_and instead of a load + CAS loop
+  (cc_atomic_fetch_and added to every atomics branch).
+- The string append row reserves its capacity on both sides so it measures
+  the append, not the growth policy and first touch of 12 MiB. The inline
+  append is 11 instructions; the remaining 2 ns over C is the owner-token
+  check and the inline / heap branch.
+
+Where the rows landed (ns/op, previous receipt in brackets):
+  owner new 64B + release (header rebirth)         35.9  [46.7]  C malloc+free 30.9
+  vec init + 8 push + destroy (owner churn)        56.1  [65.4]
+  string promote (24B) + destroy churn             50.5  [66.9]
+  string push_cstr 12B x 1M (one string, reserved)  3.3  [7.0 unreserved]  C 1.2
+  token registry birth + kill                      11.5  [12.5]
+
+Section — CC vs the plain-C twin (perf/arena_lifetime_c_baseline.c,
+gcc -O2). Ratio = CC / C.
+
+row                                                     ns/op       throughput
+alloc 64B shared, reset/4096                         12.2 ns/op      82.09 Mop/s
+alloc 64B shared, 4 threads (contended)             110.1 ns/op       9.08 Mop/s
+alloc + release_sized 64B, 4 threads (contended)      205.7 ns/op       4.86 Mop/s
+alloc 64B, 4 threads, one arena each, reset/4096        3.4 ns/op     291.32 Mop/s
+alloc + release_sized 64B, 4 threads, one arena each        6.7 ns/op     149.53 Mop/s
+raw CAS bump on one word, 4 threads (floor)          48.3 ns/op      20.70 Mop/s
+alloc 64B local, reset/4096                           3.7 ns/op     273.48 Mop/s
+checkpoint + restore (empty)                         34.4 ns/op      29.08 Mop/s
+checkpoint + 3 allocs + restore (@scratch shape)       62.0 ns/op      16.12 Mop/s
+checkpoint + 3 allocs + restore (1 KiB stack)        63.8 ns/op      15.67 Mop/s
+nested checkpoint x3 + restore x3                   113.9 ns/op       8.78 Mop/s
+checkpoint_local + restore_local (empty, owned)        7.9 ns/op     125.87 Mop/s
+checkpoint_local + 3 alloc_local + restore_local (owned)       19.2 ns/op      52.08 Mop/s
+checkpoint + 2 MiB scratch (child extent) + restore       37.5 ns/op      26.65 Mop/s
+alloc 64B + release (unsized, last-live)             24.8 ns/op      40.31 Mop/s
+alloc 64B + release_sized (tip pop)                  24.7 ns/op      40.45 Mop/s
+alloc 64B x2 + release_sized first (hole)            36.4 ns/op      27.50 Mop/s
+reuse: alloc x2 + release first + alloc              57.5 ns/op      17.39 Mop/s
+realloc tip growth 64B steps (in place)              15.3 ns/op      65.31 Mop/s
+realloc buried 256B -> 320B (copy + release)         62.2 ns/op      16.08 Mop/s
+vec push 1M ints (tip fit) + destroy                  3.1 ns/op     327.57 Mop/s
+vec push 1M ints, alloc every 64 (moves)              3.7 ns/op     267.22 Mop/s
+vec get 1M (token-checked handle)                     1.6 ns/op     611.22 Mop/s
+vec init + 8 push + destroy (owner churn)            56.1 ns/op      17.83 Mop/s
+string push_cstr 12B x 1M (one string, reserved)        3.3 ns/op     305.99 Mop/s
+string promote (24B) + destroy churn                 50.5 ns/op      19.81 Mop/s
+@string template (2 slots) call-local on @scratch      136.8 ns/op       7.31 Mop/s
+@string template (2 slots) on arena + destroy       142.9 ns/op       7.00 Mop/s
+map insert 1k ints + destroy                      34176.2 ns/op       0.03 Mop/s
+owner new 64B + release (header rebirth)             35.9 ns/op      27.89 Mop/s
+token registry birth + kill                          11.5 ns/op      86.72 Mop/s
+sink=6703096174034522984
+
+--- plain C ---
+arena_lifetime_c_baseline (ROUNDS=9, best of)
+row                                                     ns/op       throughput
+alloc 64B shared, reset/4096                         14.3 ns/op      70.16 Mop/s
+alloc 64B shared, 4 threads (contended)               9.4 ns/op     106.56 Mop/s
+alloc + release_sized 64B, 4 threads (contended)        4.1 ns/op     242.09 Mop/s
+alloc 64B, 4 threads, one arena each, reset/4096        0.5 ns/op    2060.22 Mop/s
+alloc + release_sized 64B, 4 threads, one arena each        0.3 ns/op    3084.09 Mop/s
+raw CAS bump on one word, 4 threads (floor)          37.2 ns/op      26.91 Mop/s
+alloc 64B local, reset/4096                           1.4 ns/op     705.76 Mop/s
+checkpoint + restore (empty)                          1.6 ns/op     606.41 Mop/s
+checkpoint + 3 allocs + restore (@scratch shape)        5.0 ns/op     200.83 Mop/s
+checkpoint + 3 allocs + restore (1 KiB stack)         5.0 ns/op     200.94 Mop/s
+nested checkpoint x3 + restore x3                     4.9 ns/op     202.12 Mop/s
+checkpoint_local + restore_local (empty, owned)        1.5 ns/op     682.00 Mop/s
+checkpoint_local + 3 alloc_local + restore_local (owned)        5.0 ns/op     200.74 Mop/s
+checkpoint + 2 MiB scratch (child extent) + restore       54.6 ns/op      18.32 Mop/s
+alloc 64B + release (unsized, last-live)             15.5 ns/op      64.57 Mop/s
+alloc 64B + release_sized (tip pop)                  15.5 ns/op      64.69 Mop/s
+alloc 64B x2 + release_sized first (hole)            15.4 ns/op      64.78 Mop/s
+reuse: alloc x2 + release first + alloc              15.4 ns/op      65.12 Mop/s
+realloc tip growth 64B steps (in place)              24.3 ns/op      41.14 Mop/s
+realloc buried 256B -> 320B (copy + release)         85.9 ns/op      11.64 Mop/s
+vec push 1M ints (tip fit) + destroy                  0.6 ns/op    1659.41 Mop/s
+vec push 1M ints, alloc every 64 (moves)              1.8 ns/op     569.54 Mop/s
+vec get 1M (token-checked handle)                     1.6 ns/op     611.82 Mop/s
+vec init + 8 push + destroy (owner churn)            21.2 ns/op      47.08 Mop/s
+string push_cstr 12B x 1M (one string, reserved)        1.2 ns/op     852.50 Mop/s
+string promote (24B) + destroy churn                 15.0 ns/op      66.72 Mop/s
+@string template (2 slots) call-local on @scratch      111.2 ns/op       8.99 Mop/s
+@string template (2 slots) on arena + destroy       127.5 ns/op       7.84 Mop/s
+map insert 1k ints + destroy                      15073.7 ns/op       0.07 Mop/s
+owner new 64B + release (header rebirth)             30.9 ns/op      32.33 Mop/s
+token registry birth + kill                           1.6 ns/op     608.18 Mop/s
+sink=5865711066228399524
+
+--- CC vs plain C (ns/op) ---
+row                                                    CC          C    ratio
+alloc 64B shared, reset/4096                         12.2       14.3     0.9x
+alloc 64B shared, 4 threads (contended)             110.1        9.4    11.7x
+alloc + release_sized 64B, 4 threads (contende      205.7        4.1    50.2x
+alloc 64B, 4 threads, one arena each, reset/40        3.4        0.5     6.8x
+alloc + release_sized 64B, 4 threads, one aren        6.7        0.3    22.3x
+raw CAS bump on one word, 4 threads (floor)          48.3       37.2     1.3x
+alloc 64B local, reset/4096                           3.7        1.4     2.6x
+checkpoint + restore (empty)                         34.4        1.6    21.5x
+checkpoint + 3 allocs + restore (@scratch shap       62.0        5.0    12.4x
+checkpoint + 3 allocs + restore (1 KiB stack)        63.8        5.0    12.8x
+nested checkpoint x3 + restore x3                   113.9        4.9    23.2x
+checkpoint_local + restore_local (empty, owned        7.9        1.5     5.3x
+checkpoint_local + 3 alloc_local + restore_loc       19.2        5.0     3.8x
+checkpoint + 2 MiB scratch (child extent) + re       37.5       54.6     0.7x
+alloc 64B + release (unsized, last-live)             24.8       15.5     1.6x
+alloc 64B + release_sized (tip pop)                  24.7       15.5     1.6x
+alloc 64B x2 + release_sized first (hole)            36.4       15.4     2.4x
+reuse: alloc x2 + release first + alloc              57.5       15.4     3.7x
+realloc tip growth 64B steps (in place)              15.3       24.3     0.6x
+realloc buried 256B -> 320B (copy + release)         62.2       85.9     0.7x
+vec push 1M ints (tip fit) + destroy                  3.1        0.6     5.2x
+vec push 1M ints, alloc every 64 (moves)              3.7        1.8     2.1x
+vec get 1M (token-checked handle)                     1.6        1.6     1.0x
+vec init + 8 push + destroy (owner churn)            56.1       21.2     2.6x
+string push_cstr 12B x 1M (one string, reserve        3.3        1.2     2.8x
+string promote (24B) + destroy churn                 50.5       15.0     3.4x
+@string template (2 slots) call-local on @scra      136.8      111.2     1.2x
+@string template (2 slots) on arena + destroy       142.9      127.5     1.1x
+map insert 1k ints + destroy                      34176.2    15073.7     2.3x
+owner new 64B + release (header rebirth)             35.9       30.9     1.2x
+token registry birth + kill                          11.5        1.6     7.2x
+

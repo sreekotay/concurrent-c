@@ -20,14 +20,14 @@ int main(void) {
         return 1;
     }
     memset(p, 0xab, 64);
-    off_after_first = cc_atomic_load(&a.a->offset);
+    off_after_first = cc_arena_slab_offset(a.a);
 
     grown = cc_arena_realloc(a, a, p, 64, 128, 8);
     if (grown != p) {
         printf("FAIL: tip grow should be in-place (got %p want %p)\n", grown, (void *)p);
         return 1;
     }
-    if (cc_atomic_load(&a.a->offset) != off_after_first + 64) {
+    if (cc_arena_slab_offset(a.a) != off_after_first + 64) {
         printf("FAIL: tip grow offset\n");
         return 1;
     }
@@ -46,7 +46,7 @@ int main(void) {
         printf("FAIL: tip shrink should be in-place\n");
         return 1;
     }
-    if (cc_atomic_load(&a.a->offset) != (size_t)((unsigned char *)p - a.a->base) + 32) {
+    if (cc_arena_slab_offset(a.a) != (size_t)((unsigned char *)p - a.a->slab->base) + 32) {
         printf("FAIL: tip shrink offset\n");
         return 1;
     }
@@ -88,13 +88,13 @@ int main(void) {
             return 1;
         }
         memset(lp, 0xcd, 64);
-        loff = *(size_t *)&loc.a->offset;
+        loff = cc_arena_slab_offset(loc.a);
         lgrown = cc_arena_realloc_local(loc.a, lp, 64, 128, 8);
         if (lgrown != lp) {
             printf("FAIL: realloc_local tip grow in-place\n");
             return 1;
         }
-        if (*(size_t *)&loc.a->offset != loff + 64) {
+        if (cc_arena_slab_offset(loc.a) != loff + 64) {
             printf("FAIL: realloc_local tip offset\n");
             return 1;
         }

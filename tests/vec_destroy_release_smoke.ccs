@@ -1,10 +1,13 @@
-/* Arena Vec destroy releases the prefix allocation. */
+/* Arena Vec destroy releases the payload through its owner; the owner
+ * header stays a live slab allocation, listed for rebirth, so a stale copy
+ * of the handle can never read reclaimed bytes as a live token. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     Vec::[int] v;
+    Vec::[int] w;
     size_t before;
     size_t mid;
     size_t after;
@@ -17,18 +20,27 @@ int main(void) {
         return 2;
     }
     mid = arena.live();
-    if (mid <= before) {
-        fprintf(stderr, "FAIL: init did not allocate (%zu -> %zu)\n",
+    if (mid != before + 2) {
+        fprintf(stderr, "FAIL: init did not allocate header + payload (%zu -> %zu)\n",
                 before, mid);
         return 3;
     }
     v.destroy();
     after = arena.live();
-    if (after != before) {
-        fprintf(stderr, "FAIL: destroy did not release (%zu -> %zu -> %zu)\n",
+    /* Header and payload were minted together and end the slab: destroy
+     * pops both in one CAS and lists nothing. */
+    if (after != before || arena.a->owner_free != NULL) {
+        fprintf(stderr, "FAIL: destroy did not release header + payload (%zu -> %zu -> %zu)\n",
                 before, mid, after);
         return 4;
     }
+    /* A second vector is reborn on the listed header: no new header. */
+    w = cc_vec_new::[int](arena);
+    if (w.push(3) != 0 || arena.live() != before + 2 || arena.a->owner_free != NULL) {
+        fprintf(stderr, "FAIL: header not reborn (%zu)\n", arena.live());
+        return 6;
+    }
+    w.destroy();
     if (v.len() != 0 || v.cap() != 0 || v.data() != NULL) {
         fprintf(stderr, "FAIL: destroy did not unbind\n");
         return 5;

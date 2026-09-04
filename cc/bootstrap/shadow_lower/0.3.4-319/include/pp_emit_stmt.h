@@ -2634,7 +2634,8 @@ static int shadow_emit_return_cc(AstNode* st, CEmit* out, ShadowCtx* ctx,
 }
 
 /* Call-local @scratch checkpoint push/pop. Named __cc_scratch_cpN so nested
- * sites stay distinct under soft-return restore (inner→outer). */
+ * sites stay distinct under soft-return restore (inner→outer). The scratch
+ * arena is owned by its function, so the owner-only pair applies. */
 static int shadow_scratch_cp_push(ShadowCtx* ctx, CEmit* out, const char* indent) {
     int id;
     if (!ctx || !out) return 0;
@@ -2647,7 +2648,7 @@ static int shadow_scratch_cp_push(ShadowCtx* ctx, CEmit* out, const char* indent
     if (!indent) indent = "    ";
     return cemit_fmt(out,
                      "%sCCArenaCheckpoint __cc_scratch_cp%d = "
-                     "cc_arena_checkpoint(__cc_str_scratch);\n",
+                     "cc_arena_checkpoint_local(__cc_str_scratch);\n",
                      indent, id);
 }
 
@@ -2657,7 +2658,7 @@ static int shadow_scratch_cp_pop(ShadowCtx* ctx, CEmit* out, const char* indent)
     id = ctx->scratch_cp_depth;
     ctx->scratch_cp_depth--;
     if (!indent) indent = "    ";
-    return cemit_fmt(out, "%scc_arena_restore(__cc_scratch_cp%d);\n", indent, id);
+    return cemit_fmt(out, "%scc_arena_restore_local(__cc_scratch_cp%d);\n", indent, id);
 }
 
 /* Early exit: restore every open call-local scratch cp (emit-time depth
@@ -2668,11 +2669,38 @@ static int shadow_emit_scratch_cps_restore(ShadowCtx* ctx, CEmit* out,
     if (!ctx || ctx->scratch_cp_depth <= 0) return 1;
     if (!indent) indent = "    ";
     for (i = ctx->scratch_cp_depth; i >= 1; i--) {
-        if (!cemit_fmt(out, "%scc_arena_restore(__cc_scratch_cp%d);\n", indent,
+        if (!cemit_fmt(out, "%scc_arena_restore_local(__cc_scratch_cp%d);\n", indent,
                        i))
             return 0;
     }
     return 1;
+}
+
+/* Call-local @scratch reclaim for any consuming statement. A statement
+ * that builds a `@string(..., @scratch)` temp and binds nothing (a call, an
+ * unwrap, a UFCS call, an assignment) checkpoints the shared scratch before
+ * the temp and restores after the call, the way println does. Declarations
+ * are the bound form and keep their bytes. The node being wrapped is
+ * remembered so the nested emit of the same statement takes its normal
+ * path; statements inside it (a bang body) wrap on their own. */
+static int shadow_text_uses_scratch(const char* s);
+static AstNode* g_shadow_scratch_wrapped = NULL;
+
+static int shadow_stmt_is_call_local_scratch(AstNode* st) {
+    if (!st) return 0;
+    switch (st->kind) {
+    case AST_EXPR_STMT:
+    case AST_STMT_UNWRAP:
+    case AST_UFCS_STMT:
+    case AST_CALL_ARGS:
+    case AST_CALL_NUM:
+    case AST_ASSIGN:
+        break;
+    default:
+        return 0;
+    }
+    return shadow_text_uses_scratch(st->a) || shadow_text_uses_scratch(st->b) ||
+           shadow_text_uses_scratch(st->c);
 }
 
 static int shadow_refs_name_at(const char* id, size_t n, char refs[][64],
@@ -3184,15 +3212,85 @@ static void shadow_par_cap_ty(const ShadowBind* b, char* dst, size_t cap) {
 }
 
 /* Dest-live plant: non-NULL while packing/thunking a dest-bound arm.
- * Snapshots like n.spawn — dest and atomics stay the frame object.
- * Immediate-wait joins leave this NULL (legacy refs). */
+ * Read-only names snapshot at the kick; writes / `&name` / atomics stay
+ * the frame object. Immediate-wait joins leave this NULL (legacy refs). */
 static AstNode* g_par_plant_arm;
+
+static int shadow_par_text_addr_takes(const char* text, const char* name) {
+    const char* p = text ? text : "";
+    size_t nlen;
+    if (!name || !name[0]) return 0;
+    nlen = strlen(name);
+    while (*p) {
+        if (*p == '"' || *p == '\'') {
+            char q = *p++;
+            while (*p && *p != q) {
+                if (*p == '\\' && p[1]) p++;
+                p++;
+            }
+            if (*p == q) p++;
+            continue;
+        }
+        if (*p == '&') {
+            const char* s = p + 1;
+            while (*s == ' ' || *s == '\t') s++;
+            if (strncmp(s, name, nlen) == 0) {
+                char e = s[nlen];
+                if (!((e >= 'A' && e <= 'Z') || (e >= 'a' && e <= 'z') ||
+                      (e >= '0' && e <= '9') || e == '_'))
+                    return 1;
+            }
+        }
+        p++;
+    }
+    return 0;
+}
+
+static int shadow_par_arm_addr_takes(AstNode* s, const char* name) {
+    int k;
+    if (!s || !name) return 0;
+    if (shadow_par_text_addr_takes(s->a, name) ||
+        shadow_par_text_addr_takes(s->b, name) ||
+        shadow_par_text_addr_takes(s->c, name))
+        return 1;
+    for (k = 0; k < s->nbody; k++)
+        if (shadow_par_arm_addr_takes(s->body[k], name)) return 1;
+    for (k = 0; k < s->ndbody; k++)
+        if (shadow_par_arm_addr_takes(s->dbody[k], name)) return 1;
+    if (s->kids) {
+        for (k = 0; k < s->nkids; k++)
+            if (shadow_par_arm_addr_takes(s->kids[k], name)) return 1;
+    }
+    return 0;
+}
+
+static int shadow_par_arm_assigns(AstNode* s, const char* name) {
+    int k;
+    if (!s || !name) return 0;
+    if (s->kind == AST_INC && strcmp(ast_slot(s->a), name) == 0)
+        return 1;
+    if (s->kind == AST_ASSIGN) {
+        const char* lhs = ast_slot(s->a);
+        if (strcmp(lhs, name) == 0) return 1;
+        if (lhs[0] == '*' && strcmp(lhs + 1, name) == 0) return 1;
+    }
+    for (k = 0; k < s->nbody; k++)
+        if (shadow_par_arm_assigns(s->body[k], name)) return 1;
+    for (k = 0; k < s->ndbody; k++)
+        if (shadow_par_arm_assigns(s->dbody[k], name)) return 1;
+    if (s->kids) {
+        for (k = 0; k < s->nkids; k++)
+            if (shadow_par_arm_assigns(s->kids[k], name)) return 1;
+    }
+    return 0;
+}
 
 /* Reference capture (spec §8.11 Captures). A T* copies the pointer —
  * `&p` is the kick-frame slot, dead after a dest-live return. Arrays
  * already decay to that pointer value. Dest-live plant snapshots every
- * name at pack except a CCParallel dest and an atomic. Immediate-wait
- * joins capture by reference. */
+ * other read-only name at pack (the kick's arguments). A name the arm
+ * assigns or address-takes, an atomic, and a CCParallel dest stay the
+ * frame object. Immediate-wait joins capture by reference. */
 static int shadow_par_cap_is_ref(const char* name) {
     const ShadowBind* b = shadow_bind_lookup(name);
     if (!b) return 1;
@@ -3202,6 +3300,8 @@ static int shadow_par_cap_is_ref(const char* name) {
     if (strncmp(b->ty, "cc_atomic", 9) == 0) return 1;
     /* Dest identity: admit onto a snapshot is not this dest. */
     if (strcmp(b->ty, "CCParallel") == 0) return 1;
+    if (shadow_par_arm_addr_takes(g_par_plant_arm, name)) return 1;
+    if (shadow_par_arm_assigns(g_par_plant_arm, name)) return 1;
     return 0;
 }
 
@@ -4101,7 +4201,7 @@ static int shadow_emit_par_spawn_body(
                 return 0;
             if (never_deny) {
                 if (!cemit_fmt(dest,
-                        "%s__cc_par_t_%d = cc_parallel_spawn(__cc_par_thunk_%d, "
+                        "%s__cc_par_t_%d = cc_parallel_spawn_admit(__cc_par_thunk_%d, "
                         "__cc_par_e_%d);\n",
                         bi, id, id, id))
                     return 0;
@@ -4148,10 +4248,12 @@ static int shadow_emit_par_spawn_body(
             if (!shadow_par_emit_honor_pack(dest, bi, dot, hdest))
                 return 0;
             if (!cemit_fmt(dest,
-                    "%s    __cc_par_t_%d = cc_parallel_spawn(__cc_par_thunk_%d, "
+                    "%s    __cc_par_t_%d = %s(__cc_par_thunk_%d, "
                     "&__cc_par_e_%d);\n"
                     "%s}\n",
-                    bi, id, id, id, bi))
+                    bi, id,
+                    never_deny ? "cc_parallel_spawn_admit" : "cc_parallel_spawn",
+                    id, id, bi))
                 return 0;
         } else {
             if (!shadow_par_emit_cap_pack(dest, bi, dot, cap_names[a],
@@ -4174,7 +4276,7 @@ static int shadow_emit_par_spawn_body(
                 return 0;
             if (never_deny) {
                 if (!cemit_fmt(dest,
-                        "%s__cc_par_t_%d = cc_parallel_spawn(__cc_par_thunk_%d, "
+                        "%s__cc_par_t_%d = cc_parallel_spawn_admit(__cc_par_thunk_%d, "
                         "&__cc_par_e_%d);\n",
                         bi, id, id, id))
                     return 0;
@@ -4295,6 +4397,16 @@ static int shadow_emit_par_spawn_body(
         int serial = (st && a < st->nbody && st->body[a] &&
                       st->body[a]->kind == AST_SERIAL);
         int inplace = !via_outs && !serial;
+        if (st && st->par_spawn) {
+            if (!cemit_fmt(dest,
+                    "%sif (__cc_par_t_%d.kind == CC_TASK_KIND_INVALID)\n"
+                    "%s    cc_parallel_die(\"@parallel spawn failed\");\n"
+                    "%selse\n"
+                    "%s    cc_parallel_join(__cc_par_t_%d);\n",
+                    bi, id, bi, bi, bi, id))
+                return 0;
+            continue;
+        }
         if (inplace) {
             if (!cemit_fmt(dest,
                     "%sif (!__cc_par_denied_%d &&\n"
@@ -4491,7 +4603,7 @@ static int shadow_emit_parallel_onto(AstNode* st, CEmit* out, ShadowCtx* ctx,
     }
     if (!cemit_fmt(out,
             "%s__cc_par_e_%d->__cc_par_h = &(%s);\n"
-            "%s__cc_par_t_%d = cc_parallel_spawn(__cc_par_onto_%d, __cc_par_e_%d);\n"
+            "%s__cc_par_t_%d = cc_parallel_spawn_admit(__cc_par_onto_%d, __cc_par_e_%d);\n"
             "%scc_parallel_admit(&(%s), __cc_par_t_%d, __cc_par_e_%d);\n"
             "%s}\n",
             i1, id, hdest, i1, id, id, id, i1, hdest, id, id, indent))
@@ -6808,6 +6920,22 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
     g_shadow_ufcs_site = st;
     g_shadow_expr_site = st;
     if (!st) return 0;
+    if (ctx && st != g_shadow_scratch_wrapped &&
+        shadow_stmt_is_call_local_scratch(st)) {
+        AstNode* prev = g_shadow_scratch_wrapped;
+        char nested[80];
+        int ok;
+        if (!indent) indent = "    ";
+        shadow_indent_nest(nested, sizeof(nested), indent, 1);
+        if (!cemit_fmt(out, "%s{\n", indent)) return 0;
+        if (!shadow_scratch_cp_push(ctx, out, nested)) return 0;
+        g_shadow_scratch_wrapped = st;
+        ok = shadow_emit_stmt_ctx(st, out, ctx, nested, use_cleanup);
+        g_shadow_scratch_wrapped = prev;
+        if (!ok) return 0;
+        if (!shadow_scratch_cp_pop(ctx, out, nested)) return 0;
+        return cemit_fmt(out, "%s}\n", indent);
+    }
     /* `@defer` is a statement: stamp the enclosing-scope watermark so
      * `if (c) @defer …` has a then-arm (a no-op here steals the next line). */
     if (st->kind == AST_DEFER) {
