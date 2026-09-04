@@ -113,7 +113,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     } @destroy;
 
     CCFile out_file = CC_FILE_CLOSED @destroy;
-    out_file.create(out_path) !>(e) {
+    out_file.create(cc_slice_cstr(out_path)) !>(e) {
         eprintln(@string(`Failed to open output: ${out_path}`, @scratch));
         return 1;
     };
@@ -135,20 +135,20 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;
 
+    {
     CCNursery consumer = @create() !> @destroy;
     consumer.spawn(() => [out_ptr, res_rx] {
         CompressedResult* r;
         while (cc_chan_recv(res_rx.raw, &r, sizeof(r)) == 0) {
             if (r) {
-                cc_file_write(out_ptr, r->data);
-                cc_arena_free(&r->arena);
+                (void)out_ptr->write(r->data);
+                r->arena.free();
             }
         }
     }) !>;
 
-    CCNursery producer = @create(consumer) !> @destroy {
-        chan_close(res_tx);
-    };
+    CCNursery producer = consumer.create_child() !> @destroy;
+    (void)producer.close(res_tx);
     producer.spawn(() => [in_ptr, res_tx] {
         CCNursery workers = @create() !> @destroy;
 
@@ -188,6 +188,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
         }
         workers.wait() !>;
     }) !>;
+    }
 
     cc_file_sync(&out_file);
     return 0;
@@ -212,10 +213,10 @@ int main(int argc, char *argv[]) {
         long long bin = (long long)cc_atomic_load(&g_bytes_in);
         long long bout = (long long)cc_atomic_load(&g_bytes_out);
         int blocks = cc_atomic_load(&g_blocks_done);
-        println(@string(`Compressed ${in_path} -> ${out_name} (UNORDERED - output corrupt)`,
-                        @scratch)) !>;
-        println(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
-                        @scratch)) !>;
+        @string(`Compressed ${in_path} -> ${out_name} (UNORDERED - output corrupt)`,
+                @scratch).println();
+        @string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
+                @scratch).println();
     }
 
     return ret;

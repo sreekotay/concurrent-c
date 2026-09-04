@@ -12,6 +12,7 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
 #include <ccc/stdio.cch>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "ra.h"

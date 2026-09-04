@@ -107,17 +107,20 @@ static CompressedResult* compress_owned_block(Block* blk) {
 }
 
 static bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
-    CCResult_size_t_CCIoError wr = cc_file_write(f, data);
-    if (cc_is_err(wr)) {
-        CCIoError err = cc_unwrap_err_as(wr, CCIoError);
-        eprintln(@string(`${what} failed kind=${err.base.kind} os=${err.os_code}`, @scratch));
-        cc_atomic_store(&g_pipeline_error, 1);
+    @errhandler(CCError e) {
+        cc_error_log(e);
+        g_pipeline_error.store(1);
         return false;
     }
-    size_t n = cc_unwrap_as(wr, size_t);
+    size_t n = f->write(data) !>(e) {
+        eprintln(@string(`${what} failed kind=${e.base.kind} os=${e.os_code}`,
+                         @scratch));
+        g_pipeline_error.store(1);
+        return false;
+    };
     if (n != data.len) {
         eprintln(@string(`${what} short write ${n}/${data.len}`, @scratch));
-        cc_atomic_store(&g_pipeline_error, 1);
+        g_pipeline_error.store(1);
         return false;
     }
     return true;
@@ -133,7 +136,7 @@ int compress_file(const char* in_path, const char* out_path) {
     } @destroy;
 
     CCFile out_file = CC_FILE_CLOSED @destroy;
-    out_file.create(out_path) !>(e) {
+    out_file.create(cc_slice_cstr(out_path)) !>(e) {
         eprintln(@string(`Failed to open output: ${out_path}`, @scratch));
         return 1;
     };
@@ -148,7 +151,8 @@ int compress_file(const char* in_path, const char* out_path) {
     CCFile* out_ptr = &out_file;
 
     /* Keep the consumer outside the producer scope so results_tx closes when the
-     * producer task exits, not later during nursery teardown. */
+     * producer nursery hits EMPTY, not from a @destroy body that races send. */
+    {
     CCNursery consumer = @create() !> @destroy;
     consumer.spawn(() => [out_ptr, results_rx] {
         CompressedResult* item = NULL;
@@ -157,7 +161,7 @@ int compress_file(const char* in_path, const char* out_path) {
             if (!item) {
                 eprintln(@string(`compress task failed (OOM or zlib error)`, @scratch));
                 cc_atomic_store(&g_pipeline_error, 1);
-                results_rx.close_with(cc_io_error(CC_IO_OTHER));
+                results_rx.close(cc_io_error(CC_IO_OTHER));
                 break;
             }
             if (item->seq != expect_seq) {
@@ -173,9 +177,8 @@ int compress_file(const char* in_path, const char* out_path) {
         }
     }) !>;
 
-    CCNursery producer = @create(consumer) !> @destroy {
-        results_tx.close();
-    };
+    CCNursery producer = consumer.create_child() !> @destroy;
+    (void)producer.close(results_tx);
     producer.spawn(() => [in_ptr, results_tx] {
         long seq = 0;
         while (true) {
@@ -210,6 +213,7 @@ int compress_file(const char* in_path, const char* out_path) {
             if (is_last) break;
         }
     }) !>;
+    }
 
     (void)out_file.sync();
     if (cc_atomic_load(&g_pipeline_error)) return 1;

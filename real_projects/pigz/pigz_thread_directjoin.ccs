@@ -125,30 +125,23 @@ void* compress_task_wrapper(void* arg) {
     Block* blk = (Block*)arg;
     CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
     cc_arena_free(&blk->arena);
-
-    typedef struct { CompressedResult* __result; } __result_t;
-    __result_t* storage = (__result_t*)cc_task_result_ptr(sizeof(__result_t));
-    if (!storage) {
-        storage = (__result_t*)malloc(sizeof(__result_t));
-        if (!storage) return NULL;
-    }
-    storage->__result = cc_is_err(res) ? NULL : cc_unwrap_as(res, CompressedResult*);
     uint64_t tt1 = ns_now();
     cc_atomic_fetch_add(&g_task_exec_ns, tt1 - tt0);
     cc_atomic_fetch_add(&g_task_exec_count, 1);
-    return storage;
+    /* Return the payload pointer. Do not pack `__result_t` / `__result` —
+     * shadow_lower treats that as send_task sugar and drops the return. */
+    return cc_is_err(res) ? NULL : (void*)cc_unwrap_as(res, CompressedResult*);
 }
 
 static int drain_one(CCFile* out_file, CCTask* t) {
     uint64_t tj0 = ns_now();
-    void* cap = (void*)cc_block_on_intptr(*t);
+    CompressedResult* r = (CompressedResult*)cc_block_on_intptr(*t);
     uint64_t tj1 = ns_now();
-    CompressedResult* r = cap ? *(CompressedResult**)cap : NULL;
     if (r) {
         uint64_t tw0 = ns_now();
-        cc_file_write(out_file, r->data);
+        (void)out_file->write(r->data);
         uint64_t tw1 = ns_now();
-        cc_arena_free(&r->arena);
+        r->arena.free();
         g_write_ns += (tw1 - tw0);
     }
     g_join_ns += (tj1 - tj0);
@@ -161,7 +154,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
 
     CCFile in_file = cc_file_open(cc_slice_cstr(in_path)) !>(e) { return 1; } @destroy;
     CCFile out_file = CC_FILE_CLOSED @destroy;
-    out_file.create(out_path) !>(e) { return 1; };
+    out_file.create(cc_slice_cstr(out_path)) !>(e) { return 1; };
 
     size_t inflight_cap = get_inflight_cap();
     CCTask* inflight = (CCTask*)calloc(inflight_cap, sizeof(CCTask));
@@ -235,20 +228,20 @@ int main(int argc, char *argv[]) {
         long long bout = (long long)cc_atomic_load(&g_bytes_out);
         int blocks = cc_atomic_load(&g_blocks_done);
         println(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
-                        @scratch)) !>;
+                        @scratch));
         if (getenv("PIGZ_PHASE_STATS")) {
             println(@string(`PhaseStats(thread_directjoin): spawns=${g_blocks_spawned} joins=${g_blocks_joined}`,
-                            @scratch)) !>;
+                            @scratch));
             println(@string(`  spawn: ${(double)g_spawn_ns / 1000000.0} ms total (${g_blocks_spawned ? (double)g_spawn_ns / 1000.0 / (double)g_blocks_spawned : 0.0} us/block)`,
-                            @scratch)) !>;
+                            @scratch));
             println(@string(`  join:  ${(double)g_join_ns / 1000000.0} ms total (${g_blocks_joined ? (double)g_join_ns / 1000.0 / (double)g_blocks_joined : 0.0} us/block)`,
-                            @scratch)) !>;
+                            @scratch));
             println(@string(`  write: ${(double)g_write_ns / 1000000.0} ms total (${g_blocks_joined ? (double)g_write_ns / 1000.0 / (double)g_blocks_joined : 0.0} us/block)`,
-                            @scratch)) !>;
+                            @scratch));
             uint64_t task_ns = cc_atomic_load(&g_task_exec_ns);
             uint64_t task_n = cc_atomic_load(&g_task_exec_count);
             println(@string(`  task:  ${(double)task_ns / 1000000.0} ms total (${task_n ? (double)task_ns / 1000.0 / (double)task_n : 0.0} us/task)`,
-                            @scratch)) !>;
+                            @scratch));
         }
     }
     return ret;

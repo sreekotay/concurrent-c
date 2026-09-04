@@ -131,13 +131,9 @@ void* compress_task_wrapper(void* arg) {
     cc_atomic_fetch_add(&g_compress_ns, (long long)(done_ns - start_ns));
     cc_atomic_fetch_add(&g_end_to_end_ns, (long long)(done_ns - spawn_ns));
 
-    /* cc_task_result_ptr returns NULL for OS thread tasks; use malloc instead */
-    typedef struct { CompressedResult* __result; } __result_t;
-    __result_t* storage = (__result_t*)cc_task_result_ptr(sizeof(__result_t));
-    if (!storage) storage = (__result_t*)malloc(sizeof(__result_t));
-    if (!storage) return NULL;
-    storage->__result = cc_is_err(res) ? NULL : cc_unwrap_as(res, CompressedResult*);
-    return storage;
+    /* Return the payload pointer. Do not pack `__result_t` / `__result` —
+     * shadow_lower treats that as send_task sugar and drops the return. */
+    return cc_is_err(res) ? NULL : (void*)cc_unwrap_as(res, CompressedResult*);
 }
 
 static void print_stats(const char* label) {
@@ -165,7 +161,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     } @destroy;
 
     CCFile out_file = CC_FILE_CLOSED @destroy;
-    out_file.create(out_path) !>(e) {
+    out_file.create(cc_slice_cstr(out_path)) !>(e) {
         eprintln(@string(`Failed to open output: ${out_path}`, @scratch)); return 1;
     };
 
@@ -177,21 +173,23 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;
 
+    {
     CCNursery consumer = @create() !> @destroy;
     consumer.spawn(() => [out_ptr, tasks_rx] {
-        void* result;
-        while (ordered_recv(tasks_rx, &result) == 1) {
-            CompressedResult* r = (CompressedResult*)result;
+        CCTask task;
+        int rc;
+        while ((rc = cc_chan_recv(tasks_rx.raw, &task, sizeof(task))) == 0) {
+            CompressedResult* r = (CompressedResult*)cc_block_on_intptr(task);
             if (r) {
-                cc_file_write(out_ptr, r->data);
-                cc_arena_free(&r->arena);
+                (void)out_ptr->write(r->data);
+                r->arena.free();
             }
         }
+        (void)rc;
     }) !>;
 
-    CCNursery producer = @create(consumer) !> @destroy {
-        chan_close(tasks_tx);
-    };
+    CCNursery producer = consumer.create_child() !> @destroy;
+    (void)producer.close(tasks_tx);
     producer.spawn(() => [in_ptr, tasks_tx] {
         long seq = 0;
         while (true) {
@@ -222,6 +220,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             if (is_last) break;
         }
     }) !>;
+    }
 
     cc_file_sync(&out_file);
     return 0;
@@ -252,8 +251,8 @@ int main(int argc, char *argv[]) {
         long long bin = (long long)cc_atomic_load(&g_bytes_in);
         long long bout = (long long)cc_atomic_load(&g_bytes_out);
         eprintln(@string(`Compressed ${in_path} -> ${out_name}`, @scratch));
-        eprintln(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
-                          @scratch)) !>;
+        @string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
+                @scratch).eprintln();
         print_stats("pthread tasks");
     }
     return rc;
