@@ -95,6 +95,64 @@ static double b_contend(size_t n, int release) {
     }
     return t0;
 }
+/* One hand bump arena per thread: the shape the CC per-thread rows use. */
+typedef struct { size_t n; int release; } OwnArg;
+static void *own_worker(void *p) {
+    OwnArg *c = (OwnArg *)p;
+    uint8_t *base = (uint8_t *)malloc(48u << 20);
+    size_t off = 0;
+    size_t i;
+    uint64_t s = 0;
+    for (i = 0; i < c->n; i++) {
+        void *q = base + off;
+        off += 64;
+        *(volatile uint64_t *)q = (uint64_t)i; /* touch the block so the bump is not hoisted away */
+        s += (uintptr_t)q;
+        if (c->release) off -= 64;
+        else if ((i & 4095) == 4095) off = 0;
+    }
+    sink += s;
+    free(base);
+    return NULL;
+}
+static double b_own(size_t n, int release) {
+    pthread_t th[CONTEND_THREADS];
+    OwnArg args[CONTEND_THREADS];
+    int t;
+    double t0 = now_sec();
+    for (t = 0; t < CONTEND_THREADS; t++) {
+        args[t].n = n / CONTEND_THREADS;
+        args[t].release = release;
+        pthread_create(&th[t], NULL, own_worker, &args[t]);
+    }
+    for (t = 0; t < CONTEND_THREADS; t++) pthread_join(th[t], NULL);
+    return now_sec() - t0;
+}
+static double b_alloc_own(size_t n) { return b_own(n, 0); }
+static double b_alloc_release_own(size_t n) { return b_own(n, 1); }
+/* Physics floor: four threads CAS-bumping one word (same code as the CC bench). */
+static _Alignas(64) uint64_t raw_word;
+static void *raw_worker(void *p) {
+    size_t n = *(size_t *)p;
+    size_t i;
+    uint64_t s = 0;
+    for (i = 0; i < n; i++) {
+        uint64_t e = __atomic_load_n(&raw_word, __ATOMIC_RELAXED);
+        while (!__atomic_compare_exchange_n(&raw_word, &e, e + 64, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {}
+        s += e;
+    }
+    sink += s;
+    return NULL;
+}
+static double b_raw_cas(size_t n) {
+    pthread_t th[CONTEND_THREADS];
+    size_t per = n / CONTEND_THREADS;
+    int t;
+    double t0 = now_sec();
+    for (t = 0; t < CONTEND_THREADS; t++) pthread_create(&th[t], NULL, raw_worker, &per);
+    for (t = 0; t < CONTEND_THREADS; t++) pthread_join(th[t], NULL);
+    return now_sec() - t0;
+}
 static double b_malloc_contended(size_t n) { return b_contend(n, 0); }
 static double b_malloc_free_contended(size_t n) { return b_contend(n, 1); }
 
@@ -390,6 +448,9 @@ int main(void) {
     run("alloc 64B shared, reset/4096", b_malloc_free, 4096 * 1000);            /* C: malloc+free */
     run("alloc 64B shared, 4 threads (contended)", b_malloc_contended, 2000000); /* C: malloc x4 threads, freed after */
     run("alloc + release_sized 64B, 4 threads (contended)", b_malloc_free_contended, 2000000); /* C: malloc+free x4 threads */
+    run("alloc 64B, 4 threads, one arena each, reset/4096", b_alloc_own, 2000000);               /* C: hand bump per thread */
+    run("alloc + release_sized 64B, 4 threads, one arena each", b_alloc_release_own, 2000000);
+    run("raw CAS bump on one word, 4 threads (floor)", b_raw_cas, 2000000);
     run("alloc 64B local, reset/4096", b_bump_alloc, 4096 * 1000);              /* C: hand bump */
     run("checkpoint + restore (empty)", b_mark_reset_empty, 1000000);           /* C: mark/reset */
     run("checkpoint + 3 allocs + restore (@scratch shape)", b_mark_3_reset, 1000000);
