@@ -270,3 +270,21 @@ TCC changes to `origin/mob`.
 
 Upgrade loop: update submodule → `tcc-patch-apply` → fix → `tcc-patch-regen` →
 push submodule to `origin/mob` → `tcc-update-check`.
+
+
+### CC Adverserial Projcts
+Upstream fail candidates identified and registers prior to work.
+
+- throughput pipelines with pigz; (Adler)
+- scheduler pathologies; (Neckbeard)
+- shared mutable server state with Redis; (antirez)
+- historical safety failures through the CVE study; (CVE)
+- tiny scripting; (.shcc)
+- specialization/code generation; (levenshtein.py)
+- ordinary C lowering (bootsrap with only TCC on ILP32)
+- foreign-language hosting/export with Python/JS; (node, py3)
+- embarassingly parallel (raytracer)
+- C/brownfield integration; (libcurl)
+- C/brownfield (no toolchain) integration w/concurrency; (rlsw-cc)
+- large interactive state with cctext; (fast, low RSS, multiGB, workspace)
+- persistent incremental dependency/invalidation in foreign runtin; (Stylo)
