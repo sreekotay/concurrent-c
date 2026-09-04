@@ -408,7 +408,7 @@ int main(void) {
     run("vec init + 8 push + destroy (owner churn)", b_vec_churn, 500000);
     run("string push_cstr 12B x 1M (one string)", b_str_append, 1000000);
     run("string promote (24B) + destroy churn", b_str_churn, 1000000);
-    run("@string template (2 slots) on @scratch", b_snprintf_stack, 1000000);   /* C: snprintf on stack */
+    run("@string template (2 slots) call-local on @scratch", b_snprintf_stack, 1000000);   /* C: snprintf on stack */
     run("@string template (2 slots) on arena + destroy", b_snprintf_malloc, 1000000);
     run("map insert 1k ints + destroy", b_map, 2000);
     run("owner new 64B + release (header rebirth)", b_owner, 2000000);

@@ -1,0 +1,69 @@
+/* Call-local `@string(..., @scratch)` reclaims after any consuming call, not
+ * only println: an expression statement, an assignment, and an unwrap with a
+ * bang body that soft-returns. Bound products survive; the scratch watermark
+ * is back where it started after each site. A declaration is the bound form
+ * and keeps its bytes. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+static size_t g_seen;
+static size_t g_rem_after_soft;
+
+static void eat(CCString s) { g_seen += cc_string_len(&s); }
+static size_t take(CCString s) { return cc_string_len(&s); }
+static int !>(CCError) maybe(CCString s, int fail) {
+    if (fail) return cc_err(CC_ERR_INVALID_ARG, "nope");
+    return cc_ok((int)cc_string_len(&s));
+}
+
+static int soft(void) {
+    size_t rem0 = cc_arena_remaining(__cc_str_scratch);
+    int i;
+    for (i = 0; i < 3; i++) {
+        maybe(@string(`soft ${i}`, @scratch), i == 2) !> {
+            g_rem_after_soft = cc_arena_remaining(__cc_str_scratch);
+            return 7;
+        };
+    }
+    (void)rem0;
+    return 0;
+}
+
+int main(void) {
+    @errhandler(CCError e) { (void)e; printf("FAIL: unexpected error\n"); return 1; }
+    CCString kept = @string(`kept:alpha`, @scratch);
+    size_t rem0 = cc_arena_remaining(__cc_str_scratch);
+    size_t total = 0;
+    size_t i;
+
+    for (i = 0; i < 200; i++) eat(@string(`expr ${i} of ${rem0}`, @scratch));
+    if (cc_arena_remaining(__cc_str_scratch) != rem0) { printf("FAIL: expr stmt leaked\n"); return 1; }
+
+    for (i = 0; i < 200; i++) total += take(@string(`assign ${i} of ${rem0}`, @scratch));
+    if (cc_arena_remaining(__cc_str_scratch) != rem0) { printf("FAIL: assignment leaked\n"); return 1; }
+
+    for (i = 0; i < 200; i++) {
+        int n = maybe(@string(`unwrap ${i}`, @scratch), 0) !>;
+        total += (size_t)n;
+    }
+    /* a declaration is the bound form: it keeps its bytes for the function */
+    if (cc_arena_remaining(__cc_str_scratch) == rem0) { printf("FAIL: bound form must not restore\n"); return 1; }
+    rem0 = cc_arena_remaining(__cc_str_scratch);
+
+    for (i = 0; i < 200; i++) {
+        maybe(@string(`stmt ${i}`, @scratch), 0) !>;
+    }
+    if (cc_arena_remaining(__cc_str_scratch) != rem0) { printf("FAIL: unwrap stmt leaked\n"); return 1; }
+
+    if (soft() != 7) { printf("FAIL: soft return\n"); return 1; }
+    if (g_rem_after_soft == 0) { printf("FAIL: soft body did not run\n"); return 1; }
+
+    {
+        CCSlice sl = cc_string_as_slice(&kept);
+        if (sl.len != 10 || memcmp(sl.ptr, "kept:alpha", 10) != 0) { printf("FAIL: kept clobbered\n"); return 1; }
+    }
+    if (g_seen == 0 || total == 0) { printf("FAIL: calls did not run\n"); return 1; }
+    printf("scratch_call_local_generic_restore_smoke: PASS\n");
+    return 0;
+}

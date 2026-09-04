@@ -420,7 +420,8 @@ Multiline backticks **dedent** to the closing backtick's margin.
 function or closure shares one stack arena (not per line). Bind the
 product (`CCString line =` `` @string(`…`, @scratch) ``) before a
 consuming call. `return f(@string(…))` breaks `@destroy` return-rewrite;
-a call-local `@string` is reclaimed after that call. To keep a product,
+a call-local `@string` (a call statement, assignment, or `!>` unwrap;
+not a declaration initializer) is reclaimed after that call. To keep a product,
 pass the arena it should live on (see [Keep](#keep-pass-the-arena-to-live-on)).
 A newline before `@scratch` is fine. Do not `scratch.destroy()`. Do not
 capture, send, or `return` a `@scratch` product (`@scratch string escapes

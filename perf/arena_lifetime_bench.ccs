@@ -305,14 +305,17 @@ static double b_str_churn(CCArena a, size_t n) {
     }
     return now_sec() - t0;
 }
+/* Call-local: the temp is consumed by the call and the shared function
+ * scratch is reclaimed after it (checkpoint + restore per call). A bound
+ * `CCString t = @string(..., @scratch)` keeps its bytes for the function
+ * and is the wrong shape for a loop. */
+static size_t consume(CCString s) { return cc_string_len(&s); }
 static double b_str_template_scratch(CCArena a, size_t n) {
     size_t i;
     double t0 = now_sec();
     (void)a;
-    for (i = 0; i < n; i++) {
-        CCString t = @string(`item ${i} of ${sink}`, @scratch);
-        sink += (uintptr_t)cc_string_len(&t);
-    }
+    for (i = 0; i < n; i++)
+        sink += (uintptr_t)consume(@string(`item ${i} of ${sink}`, @scratch));
     return now_sec() - t0;
 }
 static double b_str_template_arena(CCArena a, size_t n) {
@@ -395,7 +398,7 @@ int main(void) {
     run("vec init + 8 push + destroy (owner churn)", b_vec_churn, a, 500000);
     run("string push_cstr 12B x 1M (one string)", b_str_append, a, 1000000);
     run("string promote (24B) + destroy churn", b_str_churn, a, 1000000);
-    run("@string template (2 slots) on @scratch", b_str_template_scratch, a, 1000000);
+    run("@string template (2 slots) call-local on @scratch", b_str_template_scratch, a, 1000000);
     run("@string template (2 slots) on arena + destroy", b_str_template_arena, a, 1000000);
     run("map insert 1k ints + destroy", b_map, a, 2000);
     run("owner new 64B + release (header rebirth)", b_owner, a, 2000000);
