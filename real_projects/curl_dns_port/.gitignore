@@ -5,6 +5,7 @@ curl_c/
 out/
 prefix/
 tmp/
+bin/
 
 # Download artifacts
 *.tar.gz

@@ -193,6 +193,31 @@ static int test_detach_blocked(void) {
     return 0;
 }
 
+/* Work finishes, then destroy(join). Eight blocking hybrids; two idle
+ * workers never reached the exclusive-after-park smash. */
+static int test_join_many_blocked(void) {
+    struct curl_thrdq *q = NULL;
+    static int items[8];
+    int i, rc;
+
+    atomic_store(&g_inflight, 0);
+    atomic_store(&g_done, 0);
+    rc = Curl_thrdq_create(&q, "join8", 0, 0, 8, 2000, free_nop,
+                           process_sleep, NULL, NULL);
+    if (rc != CC_CURLE_OK || !q)
+        return fail("join_many_blocked: create");
+    for (i = 0; i < 8; i++) {
+        items[i] = i;
+        if (Curl_thrdq_send(q, &items[i], "x", 0) != CC_CURLE_OK)
+            return fail("join_many_blocked: send");
+    }
+    if (!wait_atomic(&g_done, 8, 2.0))
+        return fail("join_many_blocked: workers did not finish");
+    Curl_thrdq_destroy(q, true);
+    printf("thrdqueue_smoke: join_many_blocked OK (n=8)\n");
+    return 0;
+}
+
 static struct curl_thrdq *g_recv_q;
 static atomic_int g_saw_recv_error;
 
@@ -420,6 +445,8 @@ int main(void) {
     if (test_join_blocked())
         return 1;
     if (test_detach_blocked())
+        return 1;
+    if (test_join_many_blocked())
         return 1;
     if (test_recv_aborted())
         return 1;

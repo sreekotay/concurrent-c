@@ -1903,16 +1903,17 @@ int sched_v2_fiber_external_wait_active(fiber_v2* f) {
  * ============================================================================ */
 
 int sched_v2_in_context(void) {
-    return mco_running() != NULL || tls_v2_current_fiber != NULL;
+    /* mco_running() only. tls_v2_current_fiber can be a stale fiber
+     * from another worker (macOS arm64 + opt). Park already ignores it;
+     * exclusive lock used the TLS fallback and SIGBUS'd on a dead entry. */
+    return mco_running() != NULL;
 }
 
 fiber_v2* sched_v2_current_fiber(void) {
     mco_coro* co = mco_running();
-    if (co) {
-        fiber_v2* f = (fiber_v2*)mco_get_user_data(co);
-        if (f) return f;
-    }
-    return tls_v2_current_fiber;
+    if (!co)
+        return NULL;
+    return (fiber_v2*)mco_get_user_data(co);
 }
 
 CCNurseryHost* sched_v2_current_nursery(void) {
@@ -2851,7 +2852,7 @@ size_t sched_v2_ready_depth(void) {
 }
 
 uint32_t sched_v2_current_fiber_suspends(void) {
-    fiber_v2* f = tls_v2_current_fiber;
+    fiber_v2* f = sched_v2_current_fiber();
     return f ? atomic_load_explicit(&f->suspends, memory_order_relaxed) : 0;
 }
 
@@ -2860,7 +2861,7 @@ void sched_v2_fiber_release(fiber_v2* f) {
 }
 
 void* sched_v2_current_result_buf(size_t size) {
-    fiber_v2* f = tls_v2_current_fiber;
+    fiber_v2* f = sched_v2_current_fiber();
     if (!f || size > sizeof(f->result_buf)) return NULL;
     return f->result_buf;
 }
