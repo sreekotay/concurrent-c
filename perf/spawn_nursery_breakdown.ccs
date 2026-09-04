@@ -90,7 +90,7 @@ static double bench_syntax_once(void) {
 
     int total = cc_atomic_load(counter_ptr);
     if (total != g_total_spawns) {
-        eprintln(@string(`syntax benchmark count mismatch: got=${total} expected=${g_total_spawns}`, @scratch)) !>;
+        eprintln(@string(`syntax benchmark count mismatch: got=${total} expected=${g_total_spawns}`, @scratch));
         abort();
     }
     return time_now_ms() - start;
@@ -104,7 +104,7 @@ static Breakdown bench_manual_once(int use_nursery_env) {
     for (int batch = 0; batch < total_batches(); batch++) {
         CCNursery n = cc_nursery_create() !>;
         if (!cc_nursery_is_live(n)) {
-            eprintln("cc_nursery_create failed") !>;
+            eprintln("cc_nursery_create failed");
             abort();
         }
 
@@ -116,7 +116,7 @@ static Breakdown bench_manual_once(int use_nursery_env) {
                 ? (CapturedEnv*)cc_nursery_closure_env_alloc(n, sizeof(CapturedEnv), _Alignof(CapturedEnv))
                 : (CapturedEnv*)malloc(sizeof(CapturedEnv));
             if (!env) {
-                eprintln("closure env alloc failed") !>;
+                eprintln("closure env alloc failed");
                 abort();
             }
             env->counter_ptr = &counter;
@@ -144,7 +144,7 @@ static Breakdown bench_manual_once(int use_nursery_env) {
 
     int total = cc_atomic_load(&counter);
     if (total != g_total_spawns) {
-        eprintln(@string(`manual benchmark count mismatch: got=${total} expected=${g_total_spawns}`, @scratch)) !>;
+        eprintln(@string(`manual benchmark count mismatch: got=${total} expected=${g_total_spawns}`, @scratch));
         abort();
     }
     return out;
@@ -194,11 +194,11 @@ static void print_breakdown(const char* label, Breakdown b) {
     double pct_spawn = b.total_ms > 0.0 ? (100.0 * b.spawn_ms / b.total_ms) : 0.0;
     double pct_wait = b.total_ms > 0.0 ? (100.0 * b.wait_ms / b.total_ms) : 0.0;
 
-    println(@string(`${label}`, @scratch)) !>;
-    println(@string(` total: ${b.total_ms} ms (${ops} spawns/sec)`, @scratch)) !>;
-    println(@string(` construct: ${b.construct_ms} ms (${pct_construct}%)`, @scratch)) !>;
-    println(@string(` spawn: ${b.spawn_ms} ms (${pct_spawn}%)`, @scratch)) !>;
-    println(@string(` wait/free: ${b.wait_ms} ms (${pct_wait}%)`, @scratch)) !>;
+    println(@string(`${label}`, @scratch));
+    println(@string(` total: ${b.total_ms} ms (${ops} spawns/sec)`, @scratch));
+    println(@string(` construct: ${b.construct_ms} ms (${pct_construct}%)`, @scratch));
+    println(@string(` spawn: ${b.spawn_ms} ms (${pct_spawn}%)`, @scratch));
+    println(@string(` wait/free: ${b.wait_ms} ms (${pct_wait}%)`, @scratch));
 }
 
 int main(void) {
@@ -209,22 +209,22 @@ int main(void) {
     if (g_total_spawns < g_batch_size) g_total_spawns = g_batch_size;
     g_total_spawns = (g_total_spawns / g_batch_size) * g_batch_size;
 
-    println(@string(`spawn_nursery_breakdown: total=${g_total_spawns} batch=${g_batch_size} samples=${g_samples}`, @scratch)) !>;
+    println(@string(`spawn_nursery_breakdown: total=${g_total_spawns} batch=${g_batch_size} samples=${g_samples}`, @scratch));
 
     double syntax_ms = median_syntax_ms();
     Breakdown heap = median_breakdown(0);
     Breakdown nursery = median_breakdown(1);
 
-    println("syntax captured") !>;
-    println(@string(` total: ${syntax_ms} ms (${g_total_spawns / (syntax_ms / 1000.0)} spawns/sec)`, @scratch)) !>;
+    println("syntax captured");
+    println(@string(` total: ${syntax_ms} ms (${g_total_spawns / (syntax_ms / 1000.0)} spawns/sec)`, @scratch));
     print_breakdown("manual heap captured", heap);
     print_breakdown("manual nursery captured", nursery);
 
-    println("nursery env vs heap env") !>;
-    println(@string(` total: ${heap.total_ms > 0.0 ? (100.0 * nursery.total_ms / heap.total_ms) : 0.0}%`, @scratch)) !>;
-    println(@string(` construct: ${heap.construct_ms > 0.0 ? (100.0 * nursery.construct_ms / heap.construct_ms) : 0.0}%`, @scratch)) !>;
-    println(@string(` spawn: ${heap.spawn_ms > 0.0 ? (100.0 * nursery.spawn_ms / heap.spawn_ms) : 0.0}%`, @scratch)) !>;
-    println(@string(` wait/free: ${heap.wait_ms > 0.0 ? (100.0 * nursery.wait_ms / heap.wait_ms) : 0.0}%`, @scratch)) !>;
-    println("spawn_nursery_breakdown: DONE") !>;
+    println("nursery env vs heap env");
+    println(@string(` total: ${heap.total_ms > 0.0 ? (100.0 * nursery.total_ms / heap.total_ms) : 0.0}%`, @scratch));
+    println(@string(` construct: ${heap.construct_ms > 0.0 ? (100.0 * nursery.construct_ms / heap.construct_ms) : 0.0}%`, @scratch));
+    println(@string(` spawn: ${heap.spawn_ms > 0.0 ? (100.0 * nursery.spawn_ms / heap.spawn_ms) : 0.0}%`, @scratch));
+    println(@string(` wait/free: ${heap.wait_ms > 0.0 ? (100.0 * nursery.wait_ms / heap.wait_ms) : 0.0}%`, @scratch));
+    println("spawn_nursery_breakdown: DONE");
     return 0;
 }

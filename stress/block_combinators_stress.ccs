@@ -43,7 +43,7 @@ cc_atomic_int g_total_completed = 0;
 
 /* Test cc_block_all with many batches */
 int test_block_all(void) {
-    println(@string(`  block_all: ${NUM_BATCHES} batches x ${BATCH_SIZE} tasks`, @scratch)) !>;
+    println(@string(`  block_all: ${NUM_BATCHES} batches x ${BATCH_SIZE} tasks`, @scratch));
 
     int total_sum = 0;
 
@@ -59,7 +59,7 @@ int test_block_all(void) {
         /* Run all concurrently */
         int err = cc_block_all(BATCH_SIZE, tasks, results);
         if (err != 0) {
-            println(@string(`  block_all: batch ${batch} failed with err=${err}`, @scratch)) !>;
+            println(@string(`  block_all: batch ${batch} failed with err=${err}`, @scratch));
             return 1;
         }
 
@@ -70,13 +70,13 @@ int test_block_all(void) {
         }
     }
 
-    println(@string(`  block_all: completed, total_sum=${total_sum}`, @scratch)) !>;
+    println(@string(`  block_all: completed, total_sum=${total_sum}`, @scratch));
     return 0;
 }
 
 /* Test cc_block_race with many races */
 int test_block_race(void) {
-    println(@string(`  block_race: ${NUM_RACES} races x ${RACE_SIZE} tasks`, @scratch)) !>;
+    println(@string(`  block_race: ${NUM_RACES} races x ${RACE_SIZE} tasks`, @scratch));
 
     int winners_sum = 0;
 
@@ -93,7 +93,7 @@ int test_block_race(void) {
         intptr_t result;
         int err = cc_block_race(RACE_SIZE, tasks, &winner, &result);
         if (err != 0) {
-            println(@string(`  block_race: race ${race} failed with err=${err}`, @scratch)) !>;
+            println(@string(`  block_race: race ${race} failed with err=${err}`, @scratch));
             return 1;
         }
 
@@ -101,13 +101,13 @@ int test_block_race(void) {
         cc_atomic_fetch_add(&g_total_completed, 1);
     }
 
-    println(@string(`  block_race: completed, winners_sum=${winners_sum}`, @scratch)) !>;
+    println(@string(`  block_race: completed, winners_sum=${winners_sum}`, @scratch));
     return 0;
 }
 
 /* Test cc_block_any with tasks that may fail */
 int test_block_any(void) {
-    println(@string(`  block_any: testing success-seeking behavior`, @scratch)) !>;
+    println(@string(`  block_any: testing success-seeking behavior`, @scratch));
 
     int success_count = 0;
     int fail_count = 0;
@@ -133,14 +133,14 @@ int test_block_any(void) {
         cc_atomic_fetch_add(&g_total_completed, 1);
     }
 
-    println(@string(`  block_any: success=${success_count}, fail=${fail_count}`, @scratch)) !>;
+    println(@string(`  block_any: success=${success_count}, fail=${fail_count}`, @scratch));
     /* Most rounds should find a success since 2/4 tasks succeed */
     return (success_count > 30) ? 0 : 1;
 }
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    println(@string(`block_combinators_stress: starting`, @scratch)) !>;
+    println(@string(`block_combinators_stress: starting`, @scratch));
 
     int err = 0;
 
@@ -154,6 +154,6 @@ int main(void) {
     if (err != 0) return err;
 
     int completed = cc_atomic_load(&g_total_completed);
-    println(@string(`block_combinators_stress: total completed=${completed}`, @scratch)) !>;
+    println(@string(`block_combinators_stress: total completed=${completed}`, @scratch));
     return 0;
 }

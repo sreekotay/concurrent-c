@@ -137,21 +137,21 @@ for (size_t pass = 0; pass < 2; pass++) {
             CCString msg = @string(
                 `lint_scanners: NEW hand-rolled scanner state in ${path} (${n} markers) — use util/text.h or CCInertScan`,
                 &a);
-            msg.eprintln() !>;
+            msg.eprintln();
             fail = 1;
         } else if (n > b) {
             CCString msg = @string(
                 `lint_scanners: ${path} grew scanner-state markers (${b} -> ${n}) — use util/text.h or CCInertScan`,
                 &a);
-            msg.eprintln() !>;
+            msg.eprintln();
             fail = 1;
         }
     }
 }
 
 if (fail != 0) {
-    "lint_scanners: FAILED (see PASS_CLEANUP_PLAN.md phase 4)".eprintln() !>;
+    "lint_scanners: FAILED (see PASS_CLEANUP_PLAN.md phase 4)".eprintln();
     return 1;
 }
-"lint_scanners: OK".println() !>;
+"lint_scanners: OK".println();
 return 0;

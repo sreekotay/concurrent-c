@@ -47,7 +47,7 @@ CCChan* g_ch;
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    println(@string(`unbuffered_rendezvous: ${NUM_PAIRS} pairs x ${MSGS_PER_PAIR} msgs`, @scratch)) !>;
+    println(@string(`unbuffered_rendezvous: ${NUM_PAIRS} pairs x ${MSGS_PER_PAIR} msgs`, @scratch));
 
     g_ch = cc_channel_pair(&g_tx, &g_rx);
 
@@ -66,7 +66,7 @@ int main(void) {
 
     int err = cc_block_all(task_count, tasks, results);
     if (err != 0) {
-        println(@string(`ERROR: cc_block_all failed with err=${err}`, @scratch)) !>;
+        println(@string(`ERROR: cc_block_all failed with err=${err}`, @scratch));
         g_ch.free();
         return 1;
     }
@@ -80,22 +80,22 @@ int main(void) {
     int chk_recv = cc_atomic_load(&g_checksum_received);
     int expected = NUM_PAIRS * MSGS_PER_PAIR;
 
-    println(@string(`unbuffered_rendezvous: sent=${sent}, received=${received} (expected=${expected})`, @scratch)) !>;
-    println(@string(`unbuffered_rendezvous: checksum sent=${chk_sent}, received=${chk_recv}`, @scratch)) !>;
+    println(@string(`unbuffered_rendezvous: sent=${sent}, received=${received} (expected=${expected})`, @scratch));
+    println(@string(`unbuffered_rendezvous: checksum sent=${chk_sent}, received=${chk_recv}`, @scratch));
 
     if (sent != expected) {
-        println(@string(`ERROR: sent count mismatch`, @scratch)) !>;
+        println(@string(`ERROR: sent count mismatch`, @scratch));
         return 1;
     }
     if (received != expected) {
-        println(@string(`ERROR: received count mismatch`, @scratch)) !>;
+        println(@string(`ERROR: received count mismatch`, @scratch));
         return 2;
     }
     if (chk_sent != chk_recv) {
-        println(@string(`ERROR: checksum mismatch (data corruption)`, @scratch)) !>;
+        println(@string(`ERROR: checksum mismatch (data corruption)`, @scratch));
         return 3;
     }
 
-    println(@string(`unbuffered_rendezvous: PASS`, @scratch)) !>;
+    println(@string(`unbuffered_rendezvous: PASS`, @scratch));
     return 0;
 }

@@ -33,7 +33,7 @@ int main(void) {
     /* Single worker maximizes join handoff determinism. */
     setenv("CC_WORKERS", "1", 1);
 
-    println(@string(`join_handoff_storm: iterations=${ITERATIONS} depth=${DEPTH}`, @scratch)) !>;
+    println(@string(`join_handoff_storm: iterations=${ITERATIONS} depth=${DEPTH}`, @scratch));
 
     for (int iter = 0; iter < ITERATIONS; iter++) {
         cc_atomic_store(&g_completed, 0);
@@ -45,11 +45,11 @@ int main(void) {
         int got = cc_atomic_load(&g_completed);
         int expected = DEPTH;
         if (got != expected) {
-            eprintln(@string(`FAIL: iter ${iter}: completed ${got}/${expected}`, @scratch)) !>;
+            eprintln(@string(`FAIL: iter ${iter}: completed ${got}/${expected}`, @scratch));
             return 1;
         }
     }
 
-    println(@string(`join_handoff_storm: PASS`, @scratch)) !>;
+    println(@string(`join_handoff_storm: PASS`, @scratch));
     return 0;
 }

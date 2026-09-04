@@ -7,9 +7,9 @@
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
-    CCDeadline* caller = NULL;
-    CCDeadline* spawned = NULL;
-    @with_deadline(millis(200)) as dl {
+        CCDeadline* caller = NULL;
+        CCDeadline* spawned = NULL;
+        @with_deadline(millis(200)) as dl {
         CCParallel h = @parallel {
             caller = cc_current_deadline();
             @serial {

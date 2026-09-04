@@ -22,7 +22,7 @@ static double time_now_ms(void) {
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println("spawn_nursery_direct: measuring nursery spawn throughput (direct calls)") !>;
+    println("spawn_nursery_direct: measuring nursery spawn throughput (direct calls)");
 
     double start = time_now_ms();
 
@@ -43,8 +43,8 @@ int main(void) {
     int total_spawns = cc_atomic_load(&global_counter);
     double spawns_per_sec = total_spawns / (elapsed / 1000.0);
 
-    println(@string(` nursery spawns: ${spawns_per_sec} spawns/sec (${elapsed} ms, total=${total_spawns})`, @scratch)) !>;
+    println(@string(` nursery spawns: ${spawns_per_sec} spawns/sec (${elapsed} ms, total=${total_spawns})`, @scratch));
 
-    println("spawn_nursery_direct: DONE") !>;
+    println("spawn_nursery_direct: DONE");
     return 0;
 }

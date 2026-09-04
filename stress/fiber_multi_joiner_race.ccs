@@ -33,7 +33,7 @@ void* waiter_task(void* arg) {
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`fiber_multi_joiner_race: ${ITERATIONS} iterations, ${NUM_WAITERS} waiters each`, @scratch)) !>;
+    println(@string(`fiber_multi_joiner_race: ${ITERATIONS} iterations, ${NUM_WAITERS} waiters each`, @scratch));
     
     for (int iter = 0; iter < ITERATIONS; iter++) {
         cc_atomic_store(&completed, 0);
@@ -51,15 +51,15 @@ int main(void) {
         /* All waiters should have completed */
         int c = cc_atomic_load(&completed);
         if (c != NUM_WAITERS) {
-            eprintln(@string(`FAIL: iter ${iter}: only ${c}/${NUM_WAITERS} waiters completed`, @scratch)) !>;
+            eprintln(@string(`FAIL: iter ${iter}: only ${c}/${NUM_WAITERS} waiters completed`, @scratch));
             return 1;
         }
         
         if ((iter + 1) % 100 == 0) {
-            println(@string(`  completed ${iter + 1}/${ITERATIONS}`, @scratch)) !>;
+            println(@string(`  completed ${iter + 1}/${ITERATIONS}`, @scratch));
         }
     }
     
-    println(@string(`fiber_multi_joiner_race: PASS`, @scratch)) !>;
+    println(@string(`fiber_multi_joiner_race: PASS`, @scratch));
     return 0;
 }

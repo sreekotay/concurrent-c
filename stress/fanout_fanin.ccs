@@ -18,7 +18,7 @@ cc_atomic_i64 g_sum = 0;
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`fanout_fanin: ${NUM_WORKERS} workers, ${NUM_ITEMS} items`, @scratch)) !>;
+    println(@string(`fanout_fanin: ${NUM_WORKERS} workers, ${NUM_ITEMS} items`, @scratch));
 
     /* Use unbuffered channels to avoid fiber wake issues with buffered channels */
     int[~ >] work_tx;
@@ -83,6 +83,6 @@ int main(void) {
 
     int collected = cc_atomic_load(&g_collected);
     long long sum = cc_atomic_load(&g_sum);
-    println(@string(`fanout_fanin: collected ${collected}, sum ${sum} (expected ${expected})`, @scratch)) !>;
+    println(@string(`fanout_fanin: collected ${collected}, sum ${sum} (expected ${expected})`, @scratch));
     return (collected == NUM_ITEMS && sum == expected) ? 0 : 1;
 }

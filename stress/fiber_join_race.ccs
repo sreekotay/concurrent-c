@@ -27,8 +27,8 @@ static void* trivial_task(void* arg) {
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`fiber_join_race: testing join/completion race condition`, @scratch)) !>;
-    println(@string(`  iterations=${ITERATIONS}, batch_size=${BATCH_SIZE}`, @scratch)) !>;
+    println(@string(`fiber_join_race: testing join/completion race condition`, @scratch));
+    println(@string(`  iterations=${ITERATIONS}, batch_size=${BATCH_SIZE}`, @scratch));
     
     int completed = 0;
     
@@ -47,10 +47,10 @@ int main(void) {
         
         /* Progress indicator every 1000 */
         if (completed % 1000 == 0) {
-            println(@string(`  completed ${completed}/${ITERATIONS}`, @scratch)) !>;
+            println(@string(`  completed ${completed}/${ITERATIONS}`, @scratch));
         }
     }
     
-    println(@string(`fiber_join_race: PASS (${completed} spawns completed)`, @scratch)) !>;
+    println(@string(`fiber_join_race: PASS (${completed} spawns completed)`, @scratch));
     return 0;
 }

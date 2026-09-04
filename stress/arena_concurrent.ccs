@@ -43,11 +43,11 @@ void arena_worker(int worker_id) {
 /* Test concurrent allocations */
 int test_concurrent_alloc(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`  concurrent_alloc: ${NUM_WORKERS} workers x ${ALLOCS_PER_WORKER} allocs`, @scratch)) !>;
+    println(@string(`  concurrent_alloc: ${NUM_WORKERS} workers x ${ALLOCS_PER_WORKER} allocs`, @scratch));
 
     /* Initialize arena */
     if (cc_arena_init_region(g_arena_buffer, ARENA_SIZE, CC_ARENA_FIXED) != 0) {
-        println(@string(`ERROR: arena init failed`, @scratch)) !>;
+        println(@string(`ERROR: arena init failed`, @scratch));
         return 1;
     }
     g_arena = cc_arena_handle((CCArenaHost *)g_arena_buffer);
@@ -74,11 +74,11 @@ int test_concurrent_alloc(void) {
     int bytes = cc_atomic_load(&g_bytes_written);
     int expected_allocs = NUM_WORKERS * ALLOCS_PER_WORKER;
 
-    println(@string(`  concurrent_alloc: success=${success}, failed=${failed}, bytes=${bytes}`, @scratch)) !>;
+    println(@string(`  concurrent_alloc: success=${success}, failed=${failed}, bytes=${bytes}`, @scratch));
 
     /* Most allocations should succeed (may fail near capacity) */
     if (success + failed != expected_allocs) {
-        println(@string(`ERROR: alloc count mismatch`, @scratch)) !>;
+        println(@string(`ERROR: alloc count mismatch`, @scratch));
         return 2;
     }
 
@@ -88,7 +88,7 @@ int test_concurrent_alloc(void) {
 /* Test arena reset under concurrent access */
 int test_reset_during_use(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`  reset_during_use: testing arena reset safety`, @scratch)) !>;
+    println(@string(`  reset_during_use: testing arena reset safety`, @scratch));
 
     cc_arena_reset(g_arena);
 
@@ -136,7 +136,7 @@ int test_reset_during_use(void) {
     }
 
     int success = cc_atomic_load(&g_successful_allocs);
-    println(@string(`  reset_during_use: ${success} successful allocs (some lost to resets, expected)`, @scratch)) !>;
+    println(@string(`  reset_during_use: ${success} successful allocs (some lost to resets, expected)`, @scratch));
 
     /* Just verify no crashes - some allocs will be "lost" due to reset */
     return 0;
@@ -144,7 +144,7 @@ int test_reset_during_use(void) {
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    println(@string(`arena_concurrent: starting`, @scratch)) !>;
+    println(@string(`arena_concurrent: starting`, @scratch));
 
     int err = 0;
 
@@ -154,6 +154,6 @@ int main(void) {
     err = test_reset_during_use();
     if (err != 0) return err;
 
-    println(@string(`arena_concurrent: PASS`, @scratch)) !>;
+    println(@string(`arena_concurrent: PASS`, @scratch));
     return 0;
 }

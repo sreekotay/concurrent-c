@@ -30,11 +30,20 @@ int main(void) {
 
     CCClosure0 cancelled_child = cc_closure0_make(cancelled_child_task, NULL, NULL);
     CCNursery child_from_cancelled_parent =
-        cc_nursery_spawn_child_closure0(parent, cancelled_child) !>;
+        cc_nursery_spawn_child_closure0(parent, cancelled_child) !>(e) {
+            if (e.kind != CC_ERR_CANCELLED) {
+                cc_error_log(e);
+                parent.free();
+                return 1;
+            }
+            parent.free();
+            assert(g_cancelled_child_runs == 0);
+            return 0;
+        };
     child_from_cancelled_parent.wait() !>;
     child_from_cancelled_parent.free();
     parent.free();
-    assert(g_cancelled_child_runs == 0);
+    return 2;
 
     return 0;
 }

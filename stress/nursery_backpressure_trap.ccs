@@ -19,8 +19,8 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     setvbuf(stdout, NULL, _IONBF, 0);
 
-    println(@string(`=================================================================`, @scratch)) !>;
-    println(@string(`NURSERY BACKPRESSURE TRAP: Can cancellation break backpressure?`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch));
+    println(@string(`NURSERY BACKPRESSURE TRAP: Can cancellation break backpressure?`, @scratch));
     println(@string(`=================================================================
 `, @scratch)) !>;
 
@@ -30,7 +30,7 @@ int main(void) {
 
     // 1. Fill the channel to create backpressure
     tx.send(1);
-    println(@string(`Channel is full. Next send will block.`, @scratch)) !>;
+    println(@string(`Channel is full. Next send will block.`, @scratch));
 
     {
         CCNursery __cc_nursery138 = @create() !> @destroy;
@@ -38,24 +38,24 @@ int main(void) {
         // 2. Spawn a fiber that will block on send
         CCChanTx t = tx;
         __cc_nursery138.spawn(() => [t] {
-            println(@string(`[Fiber] Attempting to send to full channel (will block)...`, @scratch)) !>;
+            println(@string(`[Fiber] Attempting to send to full channel (will block)...`, @scratch));
             int rc = cc_chan_send(t.raw, (int[]){2}, sizeof(int));
-            println(@string(`[Fiber] Send returned with code: ${rc} (expected EPIPE=32 or ECANCELED=89)`, @scratch)) !>;
+            println(@string(`[Fiber] Send returned with code: ${rc} (expected EPIPE=32 or ECANCELED=89)`, @scratch));
         }) !>;
 
         // 3. Wait a bit to ensure the fiber is actually blocked
         cc_sleep_ms(500);
 
         // 4. Close the channel to break backpressure
-        println(@string(`[Main] Closing channel to unblock fiber...`, @scratch)) !>;
+        println(@string(`[Main] Closing channel to unblock fiber...`, @scratch));
         t.close();
-        println(@string(`[Main] Channel closed. Nursery will exit when fiber completes.`, @scratch)) !>;
+        println(@string(`[Main] Channel closed. Nursery will exit when fiber completes.`, @scratch));
     
     }
 
     println(@string(`
 RESULT: PASS - The nursery successfully joined the blocked fiber!`, @scratch)) !>;
-    println(@string(`=================================================================`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch));
 
     return 0;
 }

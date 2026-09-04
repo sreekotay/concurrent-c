@@ -266,7 +266,7 @@ int main(int argc, char* argv[]) {
     @errhandler(CCError e) { return cc_err_log(e); }
 
     if (argc < 2) {
-        eprintln(@string(`Usage: ${argv[0]} <file>`, @scratch)) !>;
+        eprintln(@string(`Usage: ${argv[0]} <file>`, @scratch));
         return 1;
     }
 
@@ -280,8 +280,8 @@ int main(int argc, char* argv[]) {
     long long bin = (long long)g_bytes_in.load();
     long long bout = (long long)g_bytes_out.load();
     int blocks = g_blocks_done.load();
-    println(@string(`Compressed ${in_path} -> ${out_name}`, @scratch)) !>;
+    println(@string(`Compressed ${in_path} -> ${out_name}`, @scratch));
     println(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
-                    @scratch)) !>;
+                    @scratch));
     return 0;
 }

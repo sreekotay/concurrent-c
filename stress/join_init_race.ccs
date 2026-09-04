@@ -36,7 +36,7 @@ void* observer_task(void* arg) {
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`join_init_race: ${ITERATIONS} iterations`, @scratch)) !>;
+    println(@string(`join_init_race: ${ITERATIONS} iterations`, @scratch));
     
     for (int iter = 0; iter < ITERATIONS; iter++) {
         cc_atomic_store(&target_done, 0);
@@ -53,15 +53,15 @@ int main(void) {
         
         int obs = cc_atomic_load(&observers_done);
         if (obs != NUM_OBSERVERS) {
-            eprintln(@string(`FAIL: iter ${iter}: only ${obs}/${NUM_OBSERVERS} observers done`, @scratch)) !>;
+            eprintln(@string(`FAIL: iter ${iter}: only ${obs}/${NUM_OBSERVERS} observers done`, @scratch));
             return 1;
         }
         
         if ((iter + 1) % 200 == 0) {
-            println(@string(`  completed ${iter + 1}/${ITERATIONS}`, @scratch)) !>;
+            println(@string(`  completed ${iter + 1}/${ITERATIONS}`, @scratch));
         }
     }
     
-    println(@string(`join_init_race: PASS`, @scratch)) !>;
+    println(@string(`join_init_race: PASS`, @scratch));
     return 0;
 }

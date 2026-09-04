@@ -21,7 +21,7 @@ static double time_now_ms(void) {
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    println("spawn_sequential: measuring sequential spawn+join throughput") !>;
+    println("spawn_sequential: measuring sequential spawn+join throughput");
 
     double start = time_now_ms();
     int total = 0;
@@ -34,8 +34,8 @@ int main(void) {
     double elapsed = time_now_ms() - start;
     double spawns_per_sec = ITERATIONS / (elapsed / 1000.0);
 
-    println(@string(` sequential spawns: ${spawns_per_sec} spawns/sec (${elapsed} ms, sum=${total})`, @scratch)) !>;
+    println(@string(` sequential spawns: ${spawns_per_sec} spawns/sec (${elapsed} ms, sum=${total})`, @scratch));
 
-    println("spawn_sequential: DONE") !>;
+    println("spawn_sequential: DONE");
     return 0;
 }

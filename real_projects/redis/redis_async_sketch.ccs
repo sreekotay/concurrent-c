@@ -456,13 +456,13 @@ int main(int argc, char** argv) {
     CCExclusive excl = cc_exclusive_create(excl_arena, mask.count * 2u) !> @destroy;
 
     if (!maps.init(excl, mask)) {
-        eprintln("redis_async_sketch: maps.init failed") !>;
+        eprintln("redis_async_sketch: maps.init failed");
         return 1;
     }
     @defer maps.destroy();
 
     CCListener ln = cc_tcp_listen(cc_slice_cstr(addr)) !>(e) {
-        eprintln(@string(`listen: ${e}`, @scratch)) !>;
+        eprintln(@string(`listen: ${e}`, @scratch));
         return 1;
     };
     @defer ln.close();

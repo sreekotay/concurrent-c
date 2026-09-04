@@ -34,7 +34,7 @@ static int scale_n(int quick, int full, int soak) {
 void result_ok(const char *name, int pass) {
     @errhandler(CCError e) { cc_error_log(e); return; }
     const char *ok_str = pass ? "true" : "false";
-    println(@string(`RESULT ok_${name} ${ok_str}`, @scratch)) !>;
+    println(@string(`RESULT ok_${name} ${ok_str}`, @scratch));
 }
 
 static CCJsDomVal !>(CCJsError) add1(long long add, const CCJsDomVal *args,
@@ -70,7 +70,7 @@ int main(void) {
 
     const char *scale = getenv("CHAOS_SCALE");
     const char *scale_label = scale && scale[0] ? scale : "quick";
-    println(@string(`=== cc_embed_stress scale=${scale_label} ===`, @scratch)) !>;
+    println(@string(`=== cc_embed_stress scale=${scale_label} ===`, @scratch));
 
     int all = 1;
     int i, ok;
@@ -80,7 +80,7 @@ int main(void) {
     N = scale_n(50, 400, 2000);
     ok = 1;
     if (!cc_js_dom_available(true)) {
-        println(@string(`RESULT skip_js_ta_hail true`, @scratch)) !>;
+        println(@string(`RESULT skip_js_ta_hail true`, @scratch));
     } else {
         CCArena a = cc_arena_heap(megabytes(4)) @destroy;
         CCJsDom js = cc_js_new(true, a) !> @destroy;
@@ -98,7 +98,7 @@ int main(void) {
             cc_js_dom_val_release(&ta);
         }
         result_ok("js_ta_hail", ok);
-        println(@string(`RESULT js_ta_hail_n ${N}`, @scratch)) !>;
+        println(@string(`RESULT js_ta_hail_n ${N}`, @scratch));
         all = ok && all;
     }
 
@@ -106,7 +106,7 @@ int main(void) {
     N = scale_n(50, 400, 2000);
     ok = 1;
     if (!cc_js_dom_available(true)) {
-        println(@string(`RESULT skip_js_cb_blizzard true`, @scratch)) !>;
+        println(@string(`RESULT skip_js_cb_blizzard true`, @scratch));
     } else {
         CCArena a = cc_arena_heap(megabytes(2)) @destroy;
         CCJsDom js = cc_js_new(true, a) !> @destroy;
@@ -117,7 +117,7 @@ int main(void) {
             if (got != (long long)i + 1) ok = 0;
         }
         result_ok("js_cb_blizzard", ok);
-        println(@string(`RESULT js_cb_blizzard_n ${N}`, @scratch)) !>;
+        println(@string(`RESULT js_cb_blizzard_n ${N}`, @scratch));
         all = ok && all;
     }
 
@@ -125,12 +125,12 @@ int main(void) {
     N = scale_n(50, 400, 2000);
     ok = 1;
     if (!cc_js_dom_available(false)) {
-        println(@string(`RESULT skip_js_cb_hosted true`, @scratch)) !>;
+        println(@string(`RESULT skip_js_cb_hosted true`, @scratch));
     } else {
         CCArena a = cc_arena_heap(megabytes(2)) @destroy;
         CCResult_CCJsDom_CCJsError mk = cc_js_new(false, a);
         if (!mk.ok) {
-            println(@string(`RESULT skip_js_cb_hosted true`, @scratch)) !>;
+            println(@string(`RESULT skip_js_cb_hosted true`, @scratch));
         } else {
             CCJsDom js = mk.u.value;
             {
@@ -144,7 +144,7 @@ int main(void) {
             }
             cc_js_dom_close(&js);
             result_ok("js_cb_hosted", ok);
-            println(@string(`RESULT js_cb_hosted_n ${N}`, @scratch)) !>;
+            println(@string(`RESULT js_cb_hosted_n ${N}`, @scratch));
             all = ok && all;
         }
     }
@@ -153,7 +153,7 @@ int main(void) {
     N = scale_n(40, 200, 800);
     ok = 1;
     if (!cc_js_dom_available(true)) {
-        println(@string(`RESULT skip_js_ta_cb_compose true`, @scratch)) !>;
+        println(@string(`RESULT skip_js_ta_cb_compose true`, @scratch));
     } else {
         CCArena a = cc_arena_heap(megabytes(4)) @destroy;
         CCJsDom js = cc_js_new(true, a) !> @destroy;
@@ -170,7 +170,7 @@ int main(void) {
             if (got != (long long)i + 1) ok = 0;
         }
         result_ok("js_ta_cb_compose", ok);
-        println(@string(`RESULT js_ta_cb_compose_n ${N}`, @scratch)) !>;
+        println(@string(`RESULT js_ta_cb_compose_n ${N}`, @scratch));
         all = ok && all;
     }
 
@@ -184,7 +184,7 @@ int main(void) {
         if (ND > MAX_D) ND = MAX_D;
         ok = 1;
         if (!cc_js_dom_available(true)) {
-            println(@string(`RESULT skip_js_domain_destroy_survivors true`, @scratch)) !>;
+            println(@string(`RESULT skip_js_domain_destroy_survivors true`, @scratch));
         } else {
             CCArena a = cc_arena_heap(megabytes(8)) @destroy;
             CCJsDom domains[MAX_D];
@@ -275,9 +275,9 @@ int main(void) {
             if (survivors_ok != (ND + 1) / 2) ok = 0;
             if (doomed_closed != ND / 2) ok = 0;
             result_ok("js_domain_destroy_survivors", ok);
-            println(@string(`RESULT js_domain_destroy_survivors_n ${ND}`, @scratch)) !>;
-            println(@string(`RESULT js_domain_destroy_survivors_ok ${survivors_ok}`, @scratch)) !>;
-            println(@string(`RESULT js_domain_destroy_doomed_closed ${doomed_closed}`, @scratch)) !>;
+            println(@string(`RESULT js_domain_destroy_survivors_n ${ND}`, @scratch));
+            println(@string(`RESULT js_domain_destroy_survivors_ok ${survivors_ok}`, @scratch));
+            println(@string(`RESULT js_domain_destroy_doomed_closed ${doomed_closed}`, @scratch));
             all = ok && all;
         }
     }
@@ -286,12 +286,12 @@ int main(void) {
     N = scale_n(20, 100, 400);
     ok = 1;
     if (!cc_js_dom_available(false)) {
-        println(@string(`RESULT skip_js_hosted_promise true`, @scratch)) !>;
+        println(@string(`RESULT skip_js_hosted_promise true`, @scratch));
     } else {
         CCArena a = cc_arena_heap(megabytes(2)) @destroy;
         CCResult_CCJsDom_CCJsError mk = cc_js_new(false, a);
         if (!mk.ok) {
-            println(@string(`RESULT skip_js_hosted_promise true`, @scratch)) !>;
+            println(@string(`RESULT skip_js_hosted_promise true`, @scratch));
         } else {
             CCJsDom js = mk.u.value;
             for (i = 0; i < N && ok; i++) {
@@ -309,7 +309,7 @@ int main(void) {
             }
             cc_js_dom_close(&js);
             result_ok("js_hosted_promise", ok);
-            println(@string(`RESULT js_hosted_promise_n ${N}`, @scratch)) !>;
+            println(@string(`RESULT js_hosted_promise_n ${N}`, @scratch));
             all = ok && all;
         }
     }
@@ -318,7 +318,7 @@ int main(void) {
     N = scale_n(4, 16, 32);
     ok = 1;
     if (!cc_py_proc_available()) {
-        println(@string(`RESULT skip_py_proc_fanout true`, @scratch)) !>;
+        println(@string(`RESULT skip_py_proc_fanout true`, @scratch));
     } else {
         CCArena a = cc_arena_heap(megabytes(4)) @destroy;
         for (i = 0; i < N && ok; i++) {
@@ -347,7 +347,7 @@ int main(void) {
             cc_py_close(&py);
         }
         result_ok("py_proc_fanout", ok);
-        println(@string(`RESULT py_proc_fanout_n ${N}`, @scratch)) !>;
+        println(@string(`RESULT py_proc_fanout_n ${N}`, @scratch));
         all = ok && all;
     }
 
@@ -355,13 +355,13 @@ int main(void) {
     N = scale_n(30, 200, 800);
     ok = 1;
     if (!cc_py_available()) {
-        println(@string(`RESULT skip_py_clone_hail true`, @scratch)) !>;
+        println(@string(`RESULT skip_py_clone_hail true`, @scratch));
     } else {
         CCArena a = cc_arena_heap(megabytes(2)) @destroy;
         CCPy first = cc_py_new(false, a) !>;
         CCResult_CCPy_CCPyError r2 = cc_py_new(false, a);
         if (r2.is_err()) {
-            println(@string(`RESULT skip_py_clone_hail true`, @scratch)) !>;
+            println(@string(`RESULT skip_py_clone_hail true`, @scratch));
             cc_py_close(&first);
         } else {
             CCPy second = CCResult_CCPy_CCPyError_value(r2);
@@ -386,7 +386,7 @@ int main(void) {
             cc_py_close(&second);
             cc_py_close(&first);
             result_ok("py_clone_hail", ok);
-            println(@string(`RESULT py_clone_hail_n ${N}`, @scratch)) !>;
+            println(@string(`RESULT py_clone_hail_n ${N}`, @scratch));
             all = ok && all;
         }
     }
@@ -394,7 +394,7 @@ int main(void) {
     /* ---- Wave A: ull inbound + as_list bounds ---- */
     ok = 1;
     if (!cc_py_available()) {
-        println(@string(`RESULT skip_py_ull_bounds true`, @scratch)) !>;
+        println(@string(`RESULT skip_py_ull_bounds true`, @scratch));
     } else {
         CCArena a = cc_arena_heap(kilobytes(256)) @destroy;
         CCPy py = cc_py_new(false, a) !>;
@@ -428,6 +428,6 @@ int main(void) {
     }
 
     const char *clean_exit = all ? "true" : "false";
-    println(@string(`RESULT clean_exit ${clean_exit}`, @scratch)) !>;
+    println(@string(`RESULT clean_exit ${clean_exit}`, @scratch));
     return all ? 0 : 1;
 }

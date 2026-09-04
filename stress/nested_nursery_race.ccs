@@ -15,7 +15,7 @@ cc_atomic_int g = 0;  /* Must be atomic - accessed from multiple fibers */
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`nested_nursery_race: testing nested nursery pattern`, @scratch)) !>;
+    println(@string(`nested_nursery_race: testing nested nursery pattern`, @scratch));
     
     for (int i = 0; i < ITERATIONS; i++) {
         int x = i;
@@ -37,10 +37,10 @@ int main(void) {
         }
         
         if ((i + 1) % 100 == 0) {
-            println(@string(`  completed ${i + 1}/${ITERATIONS} (g=${cc_atomic_load(&g)})`, @scratch)) !>;
+            println(@string(`  completed ${i + 1}/${ITERATIONS} (g=${cc_atomic_load(&g)})`, @scratch));
         }
     }
     
-    println(@string(`nested_nursery_race: PASS (${ITERATIONS} iterations)`, @scratch)) !>;
+    println(@string(`nested_nursery_race: PASS (${ITERATIONS} iterations)`, @scratch));
     return 0;
 }

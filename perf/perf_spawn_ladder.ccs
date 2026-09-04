@@ -94,7 +94,7 @@ static double bench_nursery_api_once(void) {
     for (int batch = 0; batch < total_batches(); batch++) {
         CCNursery n = cc_nursery_create() !>;
         if (!cc_nursery_is_live(n)) {
-            eprintln("cc_nursery_create failed") !>;
+            eprintln("cc_nursery_create failed");
             abort();
         }
         for (int i = 0; i < g_batch_size; i++) {
@@ -116,7 +116,7 @@ static double bench_raw_batch_once(void) {
             tasks[i] = cc_fiber_spawn_task(noop_task, NULL);
         }
         if (cc_block_all(g_batch_size, tasks, results) != 0) {
-            eprintln("cc_block_all failed") !>;
+            eprintln("cc_block_all failed");
             abort();
         }
     }
@@ -167,7 +167,7 @@ static double median_ops(double (*fn)(void)) {
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     if (cc_scheduler_init() != 0) {
-        eprintln("cc_scheduler_init failed") !>;
+        eprintln("cc_scheduler_init failed");
         return 1;
     }
 
@@ -177,7 +177,7 @@ int main(void) {
     if (g_total_spawns < g_batch_size) g_total_spawns = g_batch_size;
     g_total_spawns = (g_total_spawns / g_batch_size) * g_batch_size;
 
-    println(@string(`perf_spawn_ladder: total=${g_total_spawns} batch=${g_batch_size} samples=${g_samples}`, @scratch)) !>;
+    println(@string(`perf_spawn_ladder: total=${g_total_spawns} batch=${g_batch_size} samples=${g_samples}`, @scratch));
 
     (void)bench_nursery_spawn_once();
 
@@ -188,17 +188,17 @@ int main(void) {
     double raw_join_loop = median_ops(bench_raw_join_loop_once);
     double direct_fiber_batch = median_ops(bench_direct_fiber_batch_once);
 
-    println(@string(` empty nursery batches: ${empty_nursery} batch-ops/sec`, @scratch)) !>;
-    println(@string(` nursery spawn+join: ${nursery_spawn} spawns/sec`, @scratch)) !>;
-    println(@string(` nursery api direct: ${nursery_api} spawns/sec`, @scratch)) !>;
-    println(@string(` raw fiber block_all: ${raw_batch} spawns/sec`, @scratch)) !>;
-    println(@string(` raw fiber join loop: ${raw_join_loop} spawns/sec`, @scratch)) !>;
-    println(@string(` direct fiber batch: ${direct_fiber_batch} spawns/sec`, @scratch)) !>;
-    println(@string(` nursery syntax vs api: ${nursery_api > 0.0 ? (nursery_spawn / nursery_api) * 100.0 : 0.0}%`, @scratch)) !>;
-    println(@string(` nursery vs block_all: ${raw_batch > 0.0 ? (nursery_spawn / raw_batch) * 100.0 : 0.0}%`, @scratch)) !>;
-    println(@string(` nursery vs join loop: ${raw_join_loop > 0.0 ? (nursery_spawn / raw_join_loop) * 100.0 : 0.0}%`, @scratch)) !>;
-    println(@string(` nursery vs direct: ${direct_fiber_batch > 0.0 ? (nursery_spawn / direct_fiber_batch) * 100.0 : 0.0}%`, @scratch)) !>;
-    println("perf_spawn_ladder: DONE") !>;
+    println(@string(` empty nursery batches: ${empty_nursery} batch-ops/sec`, @scratch));
+    println(@string(` nursery spawn+join: ${nursery_spawn} spawns/sec`, @scratch));
+    println(@string(` nursery api direct: ${nursery_api} spawns/sec`, @scratch));
+    println(@string(` raw fiber block_all: ${raw_batch} spawns/sec`, @scratch));
+    println(@string(` raw fiber join loop: ${raw_join_loop} spawns/sec`, @scratch));
+    println(@string(` direct fiber batch: ${direct_fiber_batch} spawns/sec`, @scratch));
+    println(@string(` nursery syntax vs api: ${nursery_api > 0.0 ? (nursery_spawn / nursery_api) * 100.0 : 0.0}%`, @scratch));
+    println(@string(` nursery vs block_all: ${raw_batch > 0.0 ? (nursery_spawn / raw_batch) * 100.0 : 0.0}%`, @scratch));
+    println(@string(` nursery vs join loop: ${raw_join_loop > 0.0 ? (nursery_spawn / raw_join_loop) * 100.0 : 0.0}%`, @scratch));
+    println(@string(` nursery vs direct: ${direct_fiber_batch > 0.0 ? (nursery_spawn / direct_fiber_batch) * 100.0 : 0.0}%`, @scratch));
+    println("perf_spawn_ladder: DONE");
 
     cc_scheduler_shutdown();
     return 0;

@@ -37,9 +37,9 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     setvbuf(stdout, NULL, _IONBF, 0);
     
-    println(@string(`=================================================================`, @scratch)) !>;
-    println(@string(`CANCELLATION RACE STORM: Hunting for Zombie Fibers`, @scratch)) !>;
-    println(@string(`Spawners: ${NUM_SPAWNERS} | Spawns per iter: ${SPAWNS_PER_ITER} | Iters: ${NUM_ITERS}`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch));
+    println(@string(`CANCELLATION RACE STORM: Hunting for Zombie Fibers`, @scratch));
+    println(@string(`Spawners: ${NUM_SPAWNERS} | Spawns per iter: ${SPAWNS_PER_ITER} | Iters: ${NUM_ITERS}`, @scratch));
     println(@string(`=================================================================
 `, @scratch)) !>;
 
@@ -88,11 +88,11 @@ Failed to create nursery!`, @scratch)) !>;
             println(@string(`
 
 !!! FAILURE DETECTED !!!`, @scratch)) !>;
-            println(@string(`Iteration: ${iter}`, @scratch)) !>;
-            println(@string(`Fibers started:  ${started}`, @scratch)) !>;
-            println(@string(`Fibers finished: ${finished}`, @scratch)) !>;
-            println(@string(`Zombie count:    ${started - finished}`, @scratch)) !>;
-            println(@string(`=================================================================`, @scratch)) !>;
+            println(@string(`Iteration: ${iter}`, @scratch));
+            println(@string(`Fibers started:  ${started}`, @scratch));
+            println(@string(`Fibers finished: ${finished}`, @scratch));
+            println(@string(`Zombie count:    ${started - finished}`, @scratch));
+            println(@string(`=================================================================`, @scratch));
             return 1;
         }
     }
@@ -100,7 +100,7 @@ Failed to create nursery!`, @scratch)) !>;
     println(@string(`
 
 RESULT: PASS - No zombie fibers detected after ${NUM_ITERS} iterations.`, @scratch)) !>;
-    println(@string(`=================================================================`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch));
 
     return 0;
 }

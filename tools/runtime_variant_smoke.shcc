@@ -84,7 +84,7 @@ for (int i = 0; i < 4; i++) {
     CCSlice text = out.stdout_data;
     if (rc != 0 || !text.ptr) {
         CCString em = @string(`FAIL runtime-variant-smoke: ${label} exited ${rc}`, a);
-        em.eprintln() !>;
+        em.eprintln();
         if (text.ptr && text.len) fwrite(text.ptr, 1, text.len, stderr);
         return 1;
     }
@@ -99,7 +99,7 @@ for (int i = 0; i < 4; i++) {
     char* sum = strstr(buf, "  runtime: ");
     if (!sum) {
         CCString em = @string(`FAIL runtime-variant-smoke: ${label} printed no runtime summary`, a);
-        em.eprintln() !>;
+        em.eprintln();
         fwrite(buf, 1, n, stderr);
         return 1;
     }
@@ -108,7 +108,7 @@ for (int i = 0; i < 4; i++) {
     char* close = open ? strchr(open, ')') : NULL;
     if (!open || !close) {
         CCString em = @string(`FAIL runtime-variant-smoke: ${label} summary unparsable`, a);
-        em.eprintln() !>;
+        em.eprintln();
         return 1;
     }
 
@@ -130,7 +130,7 @@ for (int i = 0; i < 4; i++) {
     if (!strstr(p, "obj/runtime/concurrent_c.o") || strcmp(s, "reused") != 0) {
         CCString em = @string(
             `FAIL runtime-variant-smoke: unflagged build used ${p} (${s}), want the prebuilt reused`, &a);
-        em.eprintln() !>;
+        em.eprintln();
         return 1;
     }
 }
@@ -142,7 +142,7 @@ for (int i = 1; i < 4; i++) {
     if (!strstr(p, "runtime-")) {
         CCString em = @string(
             `FAIL runtime-variant-smoke: ${label} used ${p}, want a per-variant object`, &a);
-        em.eprintln() !>;
+        em.eprintln();
         return 1;
     }
 }
@@ -156,7 +156,7 @@ for (int i = 1; i < 4; i++) {
     if (strcmp(s1, "compiled") != 0 || strcmp(s2, "reused") != 0 || strcmp(p1, p2) != 0) {
         CCString em = @string(
             `FAIL runtime-variant-smoke: same flags gave ${p1} (${s1}) then ${p2} (${s2})`, &a);
-        em.eprintln() !>;
+        em.eprintln();
         return 1;
     }
 }
@@ -167,7 +167,7 @@ for (int i = 1; i < 4; i++) {
     const char* p3 = paths[3];
     if (strcmp(p1, p3) == 0) {
         CCString em = @string(`FAIL runtime-variant-smoke: different flags shared ${p1}`, a);
-        em.eprintln() !>;
+        em.eprintln();
         return 1;
     }
 }
@@ -184,10 +184,10 @@ for (int i = 1; i < 4; i++) {
     if (!strstr(rbuf, PROBE_A)) {
         const char* rp = recipe_path;
         CCString em = @string(`FAIL runtime-variant-smoke: ${PROBE_A} missing from ${rp}`, a);
-        em.eprintln() !>;
+        em.eprintln();
         return 1;
     }
 }
 
-"OK runtime-variant-smoke".println() !>;
+"OK runtime-variant-smoke".println();
 return 0;

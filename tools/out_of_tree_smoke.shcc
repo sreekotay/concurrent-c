@@ -16,7 +16,7 @@
 char tmpl[] = "/tmp/cc_oot.XXXXXX";
 char* dir = mkdtemp(tmpl);
 if (!dir) {
-    "FAIL out-of-tree-smoke: mkdtemp".eprintln() !>;
+    "FAIL out-of-tree-smoke: mkdtemp".eprintln();
     return 1;
 }
 
@@ -56,7 +56,7 @@ rmdir(dir);
 
 if (rc != 0) {
     CCString em = @string(`FAIL out-of-tree-smoke: ccc run exited ${rc}`, a);
-    em.eprintln() !>;
+    em.eprintln();
     if (actual.ptr && actual.len)
         fwrite(actual.ptr, 1, actual.len, stderr);
     return 1;
@@ -64,15 +64,15 @@ if (rc != 0) {
 
 if (actual.len != expected.len ||
     (actual.len && memcmp(actual.ptr, expected.ptr, actual.len) != 0)) {
-    "FAIL out-of-tree-smoke: stdout mismatch".eprintln() !>;
-    "--- expected ---".eprintln() !>;
+    "FAIL out-of-tree-smoke: stdout mismatch".eprintln();
+    "--- expected ---".eprintln();
     if (expected.ptr && expected.len)
         fwrite(expected.ptr, 1, expected.len, stderr);
-    "--- actual ---".eprintln() !>;
+    "--- actual ---".eprintln();
     if (actual.ptr && actual.len)
         fwrite(actual.ptr, 1, actual.len, stderr);
     return 1;
 }
 
-"OK out-of-tree-smoke".println() !>;
+"OK out-of-tree-smoke".println();
 return 0;

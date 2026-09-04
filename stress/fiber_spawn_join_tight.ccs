@@ -23,7 +23,7 @@ void* instant_task(void* arg) {
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`fiber_spawn_join_tight: ${ITERATIONS} iterations`, @scratch)) !>;
+    println(@string(`fiber_spawn_join_tight: ${ITERATIONS} iterations`, @scratch));
     
     for (int iter = 0; iter < ITERATIONS; iter++) {
         CCNursery n = cc_nursery_create() !>;
@@ -32,16 +32,16 @@ int main(void) {
         n.free();
         
         if ((iter + 1) % 10000 == 0) {
-            println(@string(`  completed ${iter + 1}/${ITERATIONS} (counter=${cc_atomic_load(&counter)})`, @scratch)) !>;
+            println(@string(`  completed ${iter + 1}/${ITERATIONS} (counter=${cc_atomic_load(&counter)})`, @scratch));
         }
     }
     
     int c = cc_atomic_load(&counter);
     if (c != ITERATIONS) {
-        eprintln(@string(`FAIL: counter=${c}, expected=${ITERATIONS}`, @scratch)) !>;
+        eprintln(@string(`FAIL: counter=${c}, expected=${ITERATIONS}`, @scratch));
         return 1;
     }
     
-    println(@string(`fiber_spawn_join_tight: PASS`, @scratch)) !>;
+    println(@string(`fiber_spawn_join_tight: PASS`, @scratch));
     return 0;
 }

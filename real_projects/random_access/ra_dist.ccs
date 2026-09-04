@@ -329,7 +329,7 @@ int main(int argc, char** argv) {
     else
         mode = "dist";
     if (strcmp(mode, "dist") != 0 && strcmp(mode, "dist-atomic") != 0) {
-        io.println("mode must be dist|dist-atomic") !>;
+        io.println("mode must be dist|dist-atomic");
         return 2;
     }
 
@@ -337,15 +337,15 @@ int main(int argc, char** argv) {
     nloc = env_int("LOCALES", 2);
     workers = env_int("WORKERS", 1);
     if (bits < RA_MIN_BITS || bits > RA_MAX_BITS) {
-        io.println(@string(`TABLE_BITS must be ${lo}..${hi}`, @scratch)) !>;
+        io.println(@string(`TABLE_BITS must be ${lo}..${hi}`, @scratch));
         return 2;
     }
     if (nloc < 1 || nloc > RA_MAX_LOCALES || !ra_is_pow2(nloc)) {
-        io.println(@string(`LOCALES must be a power of 2 in 1..${maxl}`, @scratch)) !>;
+        io.println(@string(`LOCALES must be a power of 2 in 1..${maxl}`, @scratch));
         return 2;
     }
     if (workers < 1 || workers > RA_MAX_WORKERS) {
-        io.println(@string(`WORKERS must be 1..${maxw}`, @scratch)) !>;
+        io.println(@string(`WORKERS must be 1..${maxw}`, @scratch));
         return 2;
     }
 
@@ -354,6 +354,6 @@ int main(int argc, char** argv) {
                       &seconds) !>;
     gups = (seconds > 0.0) ? ((double)nupdate / seconds / 1.0e9) : 0.0;
     frac = (nupdate > 0) ? ((double)errors / (double)nupdate) : 0.0;
-    io.println(@string(`gups impl=cc mode=${mode} table_bits=${bits} nupdate=${nupdate} seconds=${seconds} locales=${nloc} workers=${workers} errors=${errors} error_frac=${frac} gups=${gups}`, @scratch)) !>;
+    io.println(@string(`gups impl=cc mode=${mode} table_bits=${bits} nupdate=${nupdate} seconds=${seconds} locales=${nloc} workers=${workers} errors=${errors} error_frac=${frac} gups=${gups}`, @scratch));
     return (errors <= nupdate / 100) ? 0 : 1;
 }

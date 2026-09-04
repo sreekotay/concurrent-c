@@ -40,8 +40,8 @@ void recursive_nursery(int depth) {
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     setvbuf(stdout, NULL, _IONBF, 0);
-    println(@string(`=================================================================`, @scratch)) !>;
-    println(@string(`NURSERY TORTURE: Nesting ${TORTURE_DEPTH} levels deep`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch));
+    println(@string(`NURSERY TORTURE: Nesting ${TORTURE_DEPTH} levels deep`, @scratch));
     println(@string(`=================================================================
 `, @scratch)) !>;
 
@@ -50,8 +50,8 @@ int main(void) {
     double duration = time_now_ms() - start;
 
     int final_count = cc_atomic_load(&g_count);
-    println(@string(`Completed: ${final_count}/${TORTURE_DEPTH} levels`, @scratch)) !>;
-    println(@string(`Total Time: $~float_dec(2){duration} ms ($~float_dec(4){duration / TORTURE_DEPTH} ms per level)`, @scratch)) !>;
+    println(@string(`Completed: ${final_count}/${TORTURE_DEPTH} levels`, @scratch));
+    println(@string(`Total Time: $~float_dec(2){duration} ms ($~float_dec(4){duration / TORTURE_DEPTH} ms per level)`, @scratch));
 
     if (final_count == TORTURE_DEPTH) {
         println(@string(`
@@ -60,7 +60,7 @@ RESULT: PASS - Nurseries scale linearly to extreme depths!`, @scratch)) !>;
         println(@string(`
 RESULT: FAIL - Lost some fibers in the abyss.`, @scratch)) !>;
     }
-    println(@string(`=================================================================`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch));
 
     return 0;
 }

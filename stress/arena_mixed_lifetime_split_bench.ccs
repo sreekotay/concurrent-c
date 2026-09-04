@@ -99,7 +99,7 @@ int main(void) {
     }
     for (i = 0; i < n / 2; i++) ephemeral[order[i]] = 1;
 
-    println(@string(`mixed_lifetime(cc arena_split): n=${n} scratch_root=${scratch_root} keep_root=${keep_root} seed=${seed}`, @scratch)) !>;
+    println(@string(`mixed_lifetime(cc arena_split): n=${n} scratch_root=${scratch_root} keep_root=${keep_root} seed=${seed}`, @scratch));
 
     m0 = stress_mem_sample();
     rss0 = m0.ok ? m0.current : 0;
@@ -194,7 +194,7 @@ int main(void) {
     cgroup_peak = m1.cgroup_ok ? m1.cgroup_peak : 0;
 
     size_t hwm_out = m1.hwm_ok ? m1.hwm : 0;
-    println(@string(`RESULT lang=cc strategy=arena_split n=${n} freed=${freed} peak_live=${peak_live} total_root=${total_root} scratch_root=${scratch_root} keep_root=${keep_root} eph=${n_eph} keep=${n_keep} scratch_gross=${scratch_gross} keep_gross=${keep_gross} alloc_ms=$~float_dec(3){alloc_ms} midfree_ms=$~float_dec(3){midfree_ms} grow_ms=$~float_dec(3){grow_ms} reclaim_ms=$~float_dec(3){reclaim_ms} total_ms=$~float_dec(3){total_ms} rss_peak_delta=${(ssize_t)best_peak - (ssize_t)rss0} rss_end_delta=${(ssize_t)rss1 - (ssize_t)rss0} hwm=${hwm_out} cgroup_peak=${cgroup_peak} sink=${(size_t)sink}`, @scratch)) !>;
+    println(@string(`RESULT lang=cc strategy=arena_split n=${n} freed=${freed} peak_live=${peak_live} total_root=${total_root} scratch_root=${scratch_root} keep_root=${keep_root} eph=${n_eph} keep=${n_keep} scratch_gross=${scratch_gross} keep_gross=${keep_gross} alloc_ms=$~float_dec(3){alloc_ms} midfree_ms=$~float_dec(3){midfree_ms} grow_ms=$~float_dec(3){grow_ms} reclaim_ms=$~float_dec(3){reclaim_ms} total_ms=$~float_dec(3){total_ms} rss_peak_delta=${(ssize_t)best_peak - (ssize_t)rss0} rss_end_delta=${(ssize_t)rss1 - (ssize_t)rss0} hwm=${hwm_out} cgroup_peak=${cgroup_peak} sink=${(size_t)sink}`, @scratch));
 
     free(ptrs);
     free(sizes);

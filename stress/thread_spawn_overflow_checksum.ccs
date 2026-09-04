@@ -69,7 +69,7 @@ int main(void) {
 
     for (int iter = 0; iter < ITERATIONS; iter++) {
         CCTask* spawned = (CCTask*)malloc(sizeof(CCTask) * TASKS_PER_ITER);
-        if (!spawned) { eprintln(@string(`OOM`, @scratch)) !>; return 2; }
+        if (!spawned) { eprintln(@string(`OOM`, @scratch)); return 2; }
 
         for (int i = 0; i < TASKS_PER_ITER; i++) {
             spawned[i] = cc_thread_spawn(tiny_work, (void*)(uintptr_t)(i + 1));
@@ -81,7 +81,7 @@ int main(void) {
         }
 
         if (actual != expected) {
-            eprintln(@string(`FAIL iter ${iter}: checksum actual=0x${(unsigned long)actual} expected=0x${(unsigned long)expected} (bug #1: cc_thread_spawn silent drop)`, @scratch)) !>;
+            eprintln(@string(`FAIL iter ${iter}: checksum actual=0x${(unsigned long)actual} expected=0x${(unsigned long)expected} (bug #1: cc_thread_spawn silent drop)`, @scratch));
             fails++;
             if (fails >= 3) { free(spawned); return 1; }
         }
@@ -89,6 +89,6 @@ int main(void) {
     }
 
     if (fails > 0) return 1;
-    println(@string(`thread_spawn_overflow_checksum: OK (${ITERATIONS} iters x ${TASKS_PER_ITER} tasks, cap=4)`, @scratch)) !>;
+    println(@string(`thread_spawn_overflow_checksum: OK (${ITERATIONS} iters x ${TASKS_PER_ITER} tasks, cap=4)`, @scratch));
     return 0;
 }

@@ -29,7 +29,7 @@ cc_atomic_int g_total_sum = 0;
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`worker_pool_heavy: ${NUM_WORKERS} workers, ${NUM_JOBS} jobs`, @scratch)) !>;
+    println(@string(`worker_pool_heavy: ${NUM_WORKERS} workers, ${NUM_JOBS} jobs`, @scratch));
 
     /* Use unbuffered channels */
     Job[~ >] jobs_tx;
@@ -95,6 +95,6 @@ int main(void) {
     int result_count = cc_atomic_load(&g_result_count);
     int total_sum = cc_atomic_load(&g_total_sum);
 
-    println(@string(`worker_pool_heavy: ${result_count} results, sum ${total_sum} (expected ${expected})`, @scratch)) !>;
+    println(@string(`worker_pool_heavy: ${result_count} results, sum ${total_sum} (expected ${expected})`, @scratch));
     return (result_count == NUM_JOBS && total_sum == expected) ? 0 : 1;
 }

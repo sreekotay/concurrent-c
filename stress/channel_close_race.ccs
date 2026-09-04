@@ -32,7 +32,7 @@ void sender(int[~10 >] tx, int id, int trace, int trace_every) {
         if (trace && trace_every > 0) {
             ops++;
             if ((ops % trace_every) == 0) {
-                println(@string(`[send ${id}] ops=${ops} rc=${rc}`, @scratch)) !>;
+                println(@string(`[send ${id}] ops=${ops} rc=${rc}`, @scratch));
             }
         }
         if (rc != 0) break; // Channel closed
@@ -49,7 +49,7 @@ void receiver(int[~10 <] rx, int id, int trace, int trace_every) {
         if (trace && trace_every > 0) {
             ops++;
             if ((ops % trace_every) == 0) {
-                println(@string(`[recv ${id}] ops=${ops} rc=${rc}`, @scratch)) !>;
+                println(@string(`[recv ${id}] ops=${ops} rc=${rc}`, @scratch));
             }
         }
         if (rc != 0) break; // Channel closed
@@ -73,9 +73,9 @@ int main(void) {
     int trace = env_int_or("CC_STRESS_TRACE", 0);
     int trace_every = env_int_or("CC_STRESS_TRACE_EVERY", 1000);
 
-    println(@string(`=================================================================`, @scratch)) !>;
-    println(@string(`CHANNEL CLOSE RACE: ${num_fibers * 2} fibers | ${num_iters} iterations`, @scratch)) !>;
-    println(@string(`Targeting atomic teardown and immediate eviction...`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch));
+    println(@string(`CHANNEL CLOSE RACE: ${num_fibers * 2} fibers | ${num_iters} iterations`, @scratch));
+    println(@string(`Targeting atomic teardown and immediate eviction...`, @scratch));
     println(@string(`=================================================================
 `, @scratch)) !>;
 
@@ -122,22 +122,22 @@ Iteration ${iter}/${num_iters}...`, @scratch)) !>;
             println(@string(`
 
 !!! FAILURE DETECTED !!!`, @scratch)) !>;
-            println(@string(`Iteration: ${iter}`, @scratch)) !>;
-            println(@string(`Sends: ${s_att} attempted, ${s_fin} finished (${s_att - s_fin} hanging)`, @scratch)) !>;
-            println(@string(`Recvs: ${r_att} attempted, ${r_fin} finished (${r_att - r_fin} hanging)`, @scratch)) !>;
+            println(@string(`Iteration: ${iter}`, @scratch));
+            println(@string(`Sends: ${s_att} attempted, ${s_fin} finished (${s_att - s_fin} hanging)`, @scratch));
+            println(@string(`Recvs: ${r_att} attempted, ${r_fin} finished (${r_att - r_fin} hanging)`, @scratch));
             return 1;
         }
         if (verbose) {
             println(@string(`
   Sends: ${s_att} attempted, ${s_fin} finished`, @scratch)) !>;
-            println(@string(`  Recvs: ${r_att} attempted, ${r_fin} finished`, @scratch)) !>;
+            println(@string(`  Recvs: ${r_att} attempted, ${r_fin} finished`, @scratch));
         }
     }
 
     println(@string(`
 
 RESULT: PASS - All ${num_iters} iterations survived the chaos close.`, @scratch)) !>;
-    println(@string(`=================================================================`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch));
 
     return 0;
 }

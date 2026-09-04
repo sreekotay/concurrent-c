@@ -153,7 +153,7 @@ static char[:] !>(CCError) reply_arena_alloc_slice(CCArena reply_arena, size_t n
 
 static void redis_diag_fprintln(CCString* line, CCArena scratch) {
     (void)scratch;
-    line->eprintln() !>;
+    line->eprintln();
 }
 
 static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
@@ -991,7 +991,7 @@ static void* owner_reply_entry(void* env, intptr_t slot_i, intptr_t arena_i) {
         bool preload_ok = false;
         preload_ok = db_preload_keys_ok(&db, preload_keys);
         if (!preload_ok) {
-            eprintln("redis_owner: preload failed") !>;
+            eprintln("redis_owner: preload failed");
             return 1;
         }
         size_t preload_key_count = (size_t)preload_keys;
@@ -1186,7 +1186,7 @@ int main(int argc, char** argv) {
 
     CCListener* ln_ptr = &ln;
 
-    eprintln(@string(`redis_owner listening on ${addr}`, @scratch)) !>;
+    eprintln(@string(`redis_owner listening on ${addr}`, @scratch));
 
     {
         CCNursery server = cc_nursery_create() !> @destroy;
@@ -1201,7 +1201,7 @@ int main(int argc, char** argv) {
             while (true) {
                 CCSocket client = ln_ptr->accept() !>(e) {
                     if (!server.is_cancelled()) {
-                        eprintln(@string(`redis_owner accept error: ${(int)e}`, @scratch)) !>;
+                        eprintln(@string(`redis_owner accept error: ${(int)e}`, @scratch));
                     }
                     break;
                 };

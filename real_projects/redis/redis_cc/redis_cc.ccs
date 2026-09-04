@@ -28,6 +28,6 @@ int main(int argc, char** argv) {
     (void)argv;
 
     print_roadmap();
-    println(@string(`Representative command: ${redis_command_name(REDIS_CMD_SET)}`, @scratch)) !>;
+    println(@string(`Representative command: ${redis_command_name(REDIS_CMD_SET)}`, @scratch));
     return 0;
 }

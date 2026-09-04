@@ -110,7 +110,7 @@ static double time_once(sum_fn fn, uint32_t expect, int on_fiber) {
     uint32_t r = on_fiber ? run_on_fiber(fn) : fn(0, 0);
     double t1 = now_ms();
     if (r != expect) {
-        eprintln(@string(`mismatch: got=${r} expect=${expect}`, @scratch)) !>;
+        eprintln(@string(`mismatch: got=${r} expect=${expect}`, @scratch));
         abort();
     }
     return t1 - t0;
@@ -157,12 +157,12 @@ int main(void) {
         vs_par = par_ms > 0.0 ? seq_ms / par_ms : 0.0;
     }
 
-    println(@string(`parallel_hello (@parallel): depth=${g_depth} cut=${g_cut} samples=${g_samples} (par on fiber)`, @scratch)) !>;
-    println(@string(` seq ${expect} ${seq_ms} ms`, @scratch)) !>;
+    println(@string(`parallel_hello (@parallel): depth=${g_depth} cut=${g_cut} samples=${g_samples} (par on fiber)`, @scratch));
+    println(@string(` seq ${expect} ${seq_ms} ms`, @scratch));
     if (bare)
-        println(@string(` par ${expect} ${par_ms} ms vs_seq ${vs_par}x (@parallel { })`, @scratch)) !>;
+        println(@string(` par ${expect} ${par_ms} ms vs_seq ${vs_par}x (@parallel { })`, @scratch));
     else
-        println("  par  skipped  (CC_PAR_BARE=0)") !>;
-    println(@string(` cut ${expect} ${cut_ms} ms vs_seq ${vs_cut}x (@parallel (d<${g_cut}))`, @scratch)) !>;
+        println("  par  skipped  (CC_PAR_BARE=0)");
+    println(@string(` cut ${expect} ${cut_ms} ms vs_seq ${vs_cut}x (@parallel (d<${g_cut}))`, @scratch));
     return 0;
 }

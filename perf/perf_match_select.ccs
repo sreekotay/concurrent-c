@@ -43,7 +43,7 @@ static void bench_single_channel(void) {
     double elapsed = time_now_ms() - start;
     double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
     
-    println(@string(` single channel recv: ${ops_per_sec} ops/sec (${elapsed} ms)`, @scratch)) !>;
+    println(@string(` single channel recv: ${ops_per_sec} ops/sec (${elapsed} ms)`, @scratch));
     
     tx.close();
 }
@@ -84,7 +84,7 @@ static void bench_two_channel_one_ready(void) {
     double elapsed = time_now_ms() - start;
     double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
     
-    println(@string(` 2-channel select (1 ready): ${ops_per_sec} ops/sec (${elapsed} ms)`, @scratch)) !>;
+    println(@string(` 2-channel select (1 ready): ${ops_per_sec} ops/sec (${elapsed} ms)`, @scratch));
     
     tx1.close();
     tx2.close();
@@ -130,7 +130,7 @@ static void bench_two_channel_alternating(void) {
     double elapsed = time_now_ms() - start;
     double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
     
-    println(@string(` 2-channel select (alternating): ${ops_per_sec} ops/sec (${elapsed} ms)`, @scratch)) !>;
+    println(@string(` 2-channel select (alternating): ${ops_per_sec} ops/sec (${elapsed} ms)`, @scratch));
     
     tx1.close();
     tx2.close();
@@ -186,7 +186,7 @@ static void bench_four_channel(void) {
     double elapsed = time_now_ms() - start;
     double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
     
-    println(@string(` 4-channel select (round-robin): ${ops_per_sec} ops/sec (${elapsed} ms)`, @scratch)) !>;
+    println(@string(` 4-channel select (round-robin): ${ops_per_sec} ops/sec (${elapsed} ms)`, @scratch));
     
     tx1.close();
     tx2.close();
@@ -199,13 +199,13 @@ static void bench_four_channel(void) {
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    println("perf_match_select: measuring cc_chan_match_select performance") !>;
+    println("perf_match_select: measuring cc_chan_match_select performance");
     
     bench_single_channel();
     bench_two_channel_one_ready();
     bench_two_channel_alternating();
     bench_four_channel();
     
-    println("perf_match_select: DONE") !>;
+    println("perf_match_select: DONE");
     return 0;
 }

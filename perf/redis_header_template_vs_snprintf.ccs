@@ -127,31 +127,31 @@ int main(void) {
     fill_values(values, value_count);
     verify_same_output(values, value_count);
 
-    println("=================================================================") !>;
-    println("REDIS HEADER TEMPLATE VS SNPRINTF") !>;
-    println(@string(`Iterations: ${iterations} | Trials: ${trials} | Distinct lens: ${value_count}`, @scratch)) !>;
-    println("=================================================================") !>;
+    println("=================================================================");
+    println("REDIS HEADER TEMPLATE VS SNPRINTF");
+    println(@string(`Iterations: ${iterations} | Trials: ${trials} | Distinct lens: ${value_count}`, @scratch));
+    println("=================================================================");
 
     for (int trial = 1; trial <= trials; trial++) {
         double cc_ms = run_cc_template_loop(values, value_count, iterations);
         double snprintf_ms = run_snprintf_loop(values, value_count, iterations);
         if (trial == 1 || cc_ms < best_cc) best_cc = cc_ms;
         if (trial == 1 || snprintf_ms < best_snprintf) best_snprintf = snprintf_ms;
-        println(@string(`  Trial ${trial}:  cc_template=${cc_ms} ms  snprintf=${snprintf_ms} ms`, @scratch)) !>;
+        println(@string(`  Trial ${trial}:  cc_template=${cc_ms} ms  snprintf=${snprintf_ms} ms`, @scratch));
     }
 
-    println("") !>;
-    println(@string(` Best cc_template: ${best_cc} ms (${(double)iterations / best_cc * 1000.0} hdr/sec)`, @scratch)) !>;
-    println(@string(`  Best snprintf:    ${best_snprintf} ms  (${(double)iterations / best_snprintf * 1000.0} hdr/sec)`, @scratch)) !>;
-    println(@string(` Sink: len=${(size_t)g_len_sink} byte=${(unsigned)g_byte_sink}`, @scratch)) !>;
+    println("");
+    println(@string(` Best cc_template: ${best_cc} ms (${(double)iterations / best_cc * 1000.0} hdr/sec)`, @scratch));
+    println(@string(`  Best snprintf:    ${best_snprintf} ms  (${(double)iterations / best_snprintf * 1000.0} hdr/sec)`, @scratch));
+    println(@string(` Sink: len=${(size_t)g_len_sink} byte=${(unsigned)g_byte_sink}`, @scratch));
 
     if (best_cc <= best_snprintf) {
-        println("RESULT: PASS - CC template loop is not slower than snprintf.") !>;
+        println("RESULT: PASS - CC template loop is not slower than snprintf.");
     } else {
         double slowdown = ((best_cc - best_snprintf) / best_snprintf) * 100.0;
-        println(@string(`RESULT: FAIL - CC template loop is ${slowdown}% slower than snprintf.`, @scratch)) !>;
+        println(@string(`RESULT: FAIL - CC template loop is ${slowdown}% slower than snprintf.`, @scratch));
     }
-    println("=================================================================") !>;
+    println("=================================================================");
 
     free(values);
     return 0;

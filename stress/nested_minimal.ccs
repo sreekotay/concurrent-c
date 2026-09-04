@@ -9,35 +9,35 @@ cc_atomic_int g = 0;
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`nested_minimal: single iteration`, @scratch)) !>;
+    println(@string(`nested_minimal: single iteration`, @scratch));
     
     {
         CCNursery __cc_nursery133 = @create() !> @destroy;
 
         __cc_nursery133.spawn (() => [] {
-            println(@string(`  fiber1: starting`, @scratch)) !>;
+            println(@string(`  fiber1: starting`, @scratch));
             {
                 CCNursery __cc_nursery134 = @create() !> @destroy;
 
                 __cc_nursery134.spawn (() => [] {
-                    println(@string(`  fiber2: running`, @scratch)) !>;
+                    println(@string(`  fiber2: running`, @scratch));
                     cc_atomic_store(&g, 42);
                 }) !>;
             
             }
-            println(@string(`  fiber1: done`, @scratch)) !>;
+            println(@string(`  fiber1: done`, @scratch));
         }) !>;
     
     }
     
     int val = cc_atomic_load(&g);
-    println(@string(`nested_minimal: g=${val} (expected 42)`, @scratch)) !>;
+    println(@string(`nested_minimal: g=${val} (expected 42)`, @scratch));
     
     if (val == 42) {
-        println(@string(`nested_minimal: PASS`, @scratch)) !>;
+        println(@string(`nested_minimal: PASS`, @scratch));
         return 0;
     } else {
-        println(@string(`nested_minimal: FAIL`, @scratch)) !>;
+        println(@string(`nested_minimal: FAIL`, @scratch));
         return 1;
     }
 }

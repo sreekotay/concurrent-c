@@ -59,7 +59,7 @@ int main(void) {
     double t0 = 0;
     volatile size_t sink = 0;
 
-    println(@string(`arena_memory_bench(cc): tip=${tip_rounds}x${tip_steps} bulk=${bulk_n} ovf=${ovf_n} block_max=${block_max}`, @scratch)) !>;
+    println(@string(`arena_memory_bench(cc): tip=${tip_rounds}x${tip_steps} bulk=${bulk_n} ovf=${ovf_n} block_max=${block_max}`, @scratch));
 
     {
         CCArena tip = cc_arena_heap(tip_root);
@@ -149,6 +149,6 @@ int main(void) {
     churn_ms = now_ms() - t0;
 
     size_t sink_out = (size_t)sink;
-    println(@string(`RESULT lang=cc block_max=${block_max} tip_ms=$~float_dec(3){tip_ms} tip_moves=${moves} bulk_ms=$~float_dec(3){bulk_ms} bulk_gross=${bulk_gross} bulk_ovf=${bulk_ovf} ovf_ms=${ovf_ms} ovf_gross=${ovf_gross} ovf_bytes=${ovf_bytes} reset_ms=${reset_ms} churn_ms=${churn_ms} sink=${sink_out}`, @scratch)) !>;
+    println(@string(`RESULT lang=cc block_max=${block_max} tip_ms=$~float_dec(3){tip_ms} tip_moves=${moves} bulk_ms=$~float_dec(3){bulk_ms} bulk_gross=${bulk_gross} bulk_ovf=${bulk_ovf} ovf_ms=${ovf_ms} ovf_gross=${ovf_gross} ovf_bytes=${ovf_bytes} reset_ms=${reset_ms} churn_ms=${churn_ms} sink=${sink_out}`, @scratch));
     return 0;
 }

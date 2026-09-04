@@ -19,7 +19,7 @@ int main(void) {
     setenv("CC_WORKERS", "1", 1);
 
     int total = SENDERS * MSGS_PER_SENDER;
-    println(@string(`park_unpark_storm: senders=${SENDERS} msgs=${MSGS_PER_SENDER} total=${total}`, @scratch)) !>;
+    println(@string(`park_unpark_storm: senders=${SENDERS} msgs=${MSGS_PER_SENDER} total=${total}`, @scratch));
 
     int[~ >] tx;
     int[~ <] rx;
@@ -57,6 +57,6 @@ int main(void) {
     ch.free();
 
     int got = cc_atomic_load(&g_received);
-    println(@string(`park_unpark_storm: received ${got}/${total}`, @scratch)) !>;
+    println(@string(`park_unpark_storm: received ${got}/${total}`, @scratch));
     return (got == total) ? 0 : 1;
 }

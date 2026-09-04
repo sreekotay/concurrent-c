@@ -6,12 +6,15 @@
 #include <ccc/stdio.cch>
 #include <stdlib.h>
 
+static void !>(CCError) boom(void) {
+    return cc_err(CC_ERR_INVALID_ARG, "boom");
+}
+
 int main(void) {
-    CCArena arena = cc_arena_heap(kilobytes(1)) @destroy;
     @errhandler(CCError e) {
-        eprintln(@string(`fatal: ${e.message}`, arena));
+        boom() !>;
         return 1;
     }
-    println("ok");
+    boom() !>;
     return 0;
 }

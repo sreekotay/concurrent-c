@@ -43,9 +43,9 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     setvbuf(stdout, NULL, _IONBF, 0);
     
-    println("=================================================================") !>;
-    println(@string(`WORK STEALING EFFICIENCY: ${NUM_TASKS} tasks`, @scratch)) !>;
-    println("=================================================================") !>;
+    println("=================================================================");
+    println(@string(`WORK STEALING EFFICIENCY: ${NUM_TASKS} tasks`, @scratch));
+    println("=================================================================");
 
     // 1. Balanced Spawn: Distribute from main
     cc_atomic_store(&g_completed, 0);
@@ -59,7 +59,7 @@ int main(void) {
     
     }
     double balanced_ms = time_now_ms() - start;
-    println(@string(`Balanced Spawn (from main): ${balanced_ms} ms`, @scratch)) !>;
+    println(@string(`Balanced Spawn (from main): ${balanced_ms} ms`, @scratch));
 
     // 2. Imbalanced Spawn: All tasks spawned from inside ONE fiber
     cc_atomic_store(&g_completed, 0);
@@ -71,17 +71,17 @@ int main(void) {
     
     }
     double imbalanced_ms = time_now_ms() - start;
-    println(@string(`Imbalanced Spawn (from fiber): ${imbalanced_ms} ms`, @scratch)) !>;
+    println(@string(`Imbalanced Spawn (from fiber): ${imbalanced_ms} ms`, @scratch));
 
     double overhead = (imbalanced_ms - balanced_ms) / balanced_ms * 100.0;
-    println(@string(`\nWork Stealing Overhead: ${overhead}%`, @scratch)) !>;
+    println(@string(`\nWork Stealing Overhead: ${overhead}%`, @scratch));
     
     if (overhead < 50.0) {
-        println("RESULT: SUCCESS - Your work stealer is a beast!") !>;
+        println("RESULT: SUCCESS - Your work stealer is a beast!");
     } else {
-        println("RESULT: FAIL - Significant overhead when work is localized.") !>;
+        println("RESULT: FAIL - Significant overhead when work is localized.");
     }
-    println("=================================================================") !>;
+    println("=================================================================");
 
     return 0;
 }

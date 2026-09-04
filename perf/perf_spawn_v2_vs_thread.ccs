@@ -106,13 +106,13 @@ int main(void) {
         expected ^= (uintptr_t)tiny_work((void*)(uintptr_t)(i + 1));
     }
 
-    println(@string(`perf_spawn_v2_vs_thread: tasks=${tasks} runs=${runs}`, @scratch)) !>;
+    println(@string(`perf_spawn_v2_vs_thread: tasks=${tasks} runs=${runs}`, @scratch));
 
     for (int i = 0; i < runs; i++) {
         uintptr_t checksum = 0;
         thread_ms[i] = run_thread_once(tasks, &checksum);
         if (checksum != expected) {
-            eprintln(@string(`thread checksum mismatch: got=${(unsigned long long)checksum} expected=${(unsigned long long)expected}`, @scratch)) !>;
+            eprintln(@string(`thread checksum mismatch: got=${(unsigned long long)checksum} expected=${(unsigned long long)expected}`, @scratch));
             return 3;
         }
     }
@@ -121,7 +121,7 @@ int main(void) {
         uintptr_t checksum = 0;
         v2_ms[i] = run_v2_once(tasks, &checksum);
         if (checksum != expected) {
-            eprintln(@string(`v2 checksum mismatch: got=${(unsigned long long)checksum} expected=${(unsigned long long)expected}`, @scratch)) !>;
+            eprintln(@string(`v2 checksum mismatch: got=${(unsigned long long)checksum} expected=${(unsigned long long)expected}`, @scratch));
             return 4;
         }
     }
@@ -136,10 +136,10 @@ int main(void) {
     double thread_tps = (double)tasks / (thread_median_ms / 1000.0);
     double v2_tps = (double)tasks / (v2_median_ms / 1000.0);
 
-    println(@string(` cc_thread_spawn median: ${thread_median_ms} ms ${thread_us} us/task ${thread_tps} tasks/sec`, @scratch)) !>;
-    println(@string(` cc_fiber_spawn_task_v2 median: ${v2_median_ms} ms ${v2_us} us/task ${v2_tps} tasks/sec`, @scratch)) !>;
-    println(@string(` v2 / thread throughput: ${thread_tps > 0.0 ? (v2_tps / thread_tps) * 100.0 : 0.0}%`, @scratch)) !>;
-    println(@string(` v2 delta: ${v2_us - thread_us} us/task`, @scratch)) !>;
+    println(@string(` cc_thread_spawn median: ${thread_median_ms} ms ${thread_us} us/task ${thread_tps} tasks/sec`, @scratch));
+    println(@string(` cc_fiber_spawn_task_v2 median: ${v2_median_ms} ms ${v2_us} us/task ${v2_tps} tasks/sec`, @scratch));
+    println(@string(` v2 / thread throughput: ${thread_tps > 0.0 ? (v2_tps / thread_tps) * 100.0 : 0.0}%`, @scratch));
+    println(@string(` v2 delta: ${v2_us - thread_us} us/task`, @scratch));
 
     free(thread_ms);
     free(v2_ms);

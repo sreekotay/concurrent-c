@@ -47,7 +47,7 @@ static void bench_buffered(void) {
     double elapsed = time_now_ms() - start;
     double ops_per_sec = (ITERATIONS * 2.0) / (elapsed / 1000.0);  /* send + recv */
     
-    println(@string(` buffered (cap=1000): ${ops_per_sec} ops/sec (${elapsed} ms for ${ITERATIONS} pairs)`, @scratch)) !>;
+    println(@string(` buffered (cap=1000): ${ops_per_sec} ops/sec (${elapsed} ms for ${ITERATIONS} pairs)`, @scratch));
 }
 
 /* Unbuffered channel: rendezvous */
@@ -82,7 +82,7 @@ static void bench_unbuffered(void) {
     double elapsed = time_now_ms() - start;
     double ops_per_sec = (iterations * 2.0) / (elapsed / 1000.0);
     
-    println(@string(` unbuffered (rendezvous): ${ops_per_sec} ops/sec (${elapsed} ms for ${iterations} pairs)`, @scratch)) !>;
+    println(@string(` unbuffered (rendezvous): ${ops_per_sec} ops/sec (${elapsed} ms for ${iterations} pairs)`, @scratch));
 }
 
 /* Single-threaded throughput (no contention) */
@@ -104,19 +104,19 @@ static void bench_single_thread(void) {
     double elapsed = time_now_ms() - start;
     double ops_per_sec = (ITERATIONS * 2.0) / (elapsed / 1000.0);
     
-    println(@string(` single-thread (no contention): ${ops_per_sec} ops/sec (${elapsed} ms)`, @scratch)) !>;
+    println(@string(` single-thread (no contention): ${ops_per_sec} ops/sec (${elapsed} ms)`, @scratch));
     
     tx.close();
 }
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    println("perf_channel_throughput: measuring channel performance") !>;
+    println("perf_channel_throughput: measuring channel performance");
     
     bench_single_thread();
     bench_buffered();
     bench_unbuffered();
     
-    println("perf_channel_throughput: DONE") !>;
+    println("perf_channel_throughput: DONE");
     return 0;
 }

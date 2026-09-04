@@ -72,13 +72,13 @@ int main(int argc, char** argv) {
     CCString addr = @string(`127.0.0.1:${port}`, @scratch);
 
     CCListener ln = cc_tcp_listen(addr.as_slice()) !>(e) {
-        eprintln(@string(`ping_server listen error: ${e}`, @scratch)) !>;
+        eprintln(@string(`ping_server listen error: ${e}`, @scratch));
         return 1;
     };
     int one = 1;
     (void)setsockopt(ln.fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
-    println(@string(`ping_server listening on ${addr}`, @scratch)) !>;
+    println(@string(`ping_server listening on ${addr}`, @scratch));
     fflush(stdout);
 
     CCListener* ln_ptr = &ln;

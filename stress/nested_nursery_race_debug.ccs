@@ -10,7 +10,7 @@ cc_atomic_int* gptr = &g;
 
 void* inner_task(void* arg) {
     int iter = (int)(intptr_t)arg;
-    eprintln(@string(`DEBUG: iter ${iter} - inner fiber`, @scratch)) !>;
+    eprintln(@string(`DEBUG: iter ${iter} - inner fiber`, @scratch));
     fflush(stderr);
     cc_atomic_fetch_add(gptr, 1);
     return NULL;
@@ -19,46 +19,46 @@ void* inner_task(void* arg) {
 void* outer_task(void* arg) {
     @errhandler(CCError e) cc_error_exit(e);
     int iter = (int)(intptr_t)arg;
-    eprintln(@string(`DEBUG: iter ${iter} - outer fiber start`, @scratch)) !>;
+    eprintln(@string(`DEBUG: iter ${iter} - outer fiber start`, @scratch));
     fflush(stderr);
     
     /* Create inner nursery using C API */
     CCNursery inner = cc_nursery_create() !>;
     cc_nursery_spawn(inner, inner_task, (void*)(intptr_t)iter);
-    eprintln(@string(`DEBUG: iter ${iter} - inner spawned, waiting`, @scratch)) !>;
+    eprintln(@string(`DEBUG: iter ${iter} - inner spawned, waiting`, @scratch));
     fflush(stderr);
     cc_nursery_wait(inner);
-    eprintln(@string(`DEBUG: iter ${iter} - inner done`, @scratch)) !>;
+    eprintln(@string(`DEBUG: iter ${iter} - inner done`, @scratch));
     fflush(stderr);
     inner.free();
     
-    eprintln(@string(`DEBUG: iter ${iter} - outer fiber done`, @scratch)) !>;
+    eprintln(@string(`DEBUG: iter ${iter} - outer fiber done`, @scratch));
     fflush(stderr);
     return NULL;
 }
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    eprintln(@string(`DEBUG: starting`, @scratch)) !>;
+    eprintln(@string(`DEBUG: starting`, @scratch));
     fflush(stderr);
     
     for (int i = 0; i < 10; i++) {
-        eprintln(@string(`DEBUG: iter ${i} - outer nursery start`, @scratch)) !>;
+        eprintln(@string(`DEBUG: iter ${i} - outer nursery start`, @scratch));
         fflush(stderr);
         
         CCNursery outer = cc_nursery_create() !>;
         cc_nursery_spawn(outer, outer_task, (void*)(intptr_t)i);
-        eprintln(@string(`DEBUG: iter ${i} - outer spawned, waiting`, @scratch)) !>;
+        eprintln(@string(`DEBUG: iter ${i} - outer spawned, waiting`, @scratch));
         fflush(stderr);
         cc_nursery_wait(outer);
-        eprintln(@string(`DEBUG: iter ${i} - outer done`, @scratch)) !>;
+        eprintln(@string(`DEBUG: iter ${i} - outer done`, @scratch));
         fflush(stderr);
         outer.free();
         
-        eprintln(@string(`DEBUG: iter ${i} - outer nursery done`, @scratch)) !>;
+        eprintln(@string(`DEBUG: iter ${i} - outer nursery done`, @scratch));
         fflush(stderr);
     }
     
-    eprintln(@string(`DEBUG: PASS (g=${cc_atomic_load(&g)})`, @scratch)) !>;
+    eprintln(@string(`DEBUG: PASS (g=${cc_atomic_load(&g)})`, @scratch));
     return 0;
 }

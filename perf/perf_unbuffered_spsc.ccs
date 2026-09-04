@@ -51,6 +51,6 @@ int main(void) {
     double pairs_per_sec = iters / (elapsed / 1000.0);
     double ns = elapsed * 1.0e6 / iters;
     println(@string(` unbuffered spsc: ${pairs_per_sec} pairs/sec (${elapsed} ms, ${ns} ns/pair, n=${iters})`,
-                    @scratch)) !>;
+                    @scratch));
     return 0;
 }

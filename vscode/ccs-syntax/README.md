@@ -50,11 +50,11 @@ int main(void) {
 
     n.spawn(() => [io] {
         @errhandler(CCError e) cc_error_exit(e);
-        io.println("Hello from task A!") !>;
+        io.println("Hello from task A!");
     });
     n.spawn(() => [io] {
         @errhandler(CCError e) cc_error_exit(e);
-        io.println("Hello from task B!") !>;
+        io.println("Hello from task B!");
     });
     return 0;
 }

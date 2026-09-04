@@ -173,7 +173,7 @@ static double run_zipf(int workers, int iters, int spins, int keys) {
     for (int k = 0; k < keys; k++) sum += g_rows[k].value;
     int64_t expect = (int64_t)workers * (int64_t)iters;
     if (sum != expect) {
-        eprintln(@string(`ZIPF CHECK FAIL: got=${(long long)sum} expect=${(long long)expect}`, @scratch)) !>;
+        eprintln(@string(`ZIPF CHECK FAIL: got=${(long long)sum} expect=${(long long)expect}`, @scratch));
         abort();
     }
     return t1 - t0;
@@ -193,7 +193,7 @@ static double run_serial_fastpath(int64_t iters) {
     double t1 = time_now_ms();
 
     if (g_rows[0].value != iters) {
-        eprintln(@string(`FASTPATH CHECK FAIL: got=${(long long)g_rows[0].value} expect=${(long long)iters}`, @scratch)) !>;
+        eprintln(@string(`FASTPATH CHECK FAIL: got=${(long long)g_rows[0].value} expect=${(long long)iters}`, @scratch));
         abort();
     }
     return t1 - t0;
@@ -229,9 +229,9 @@ int main(void) {
     g_excl = cc_exclusive_create(excl_arena, 0) !>;
     @defer cc_exclusive_destroy(&g_excl);
 
-    println("exclusive_named_lock lang=cc") !>;
-    println(@string(`  workers=${workers} iters/worker=${iters} timed_trials=${trials} warmup=1 cs_spins=${spins} keys=${keys} zipf_s=${g_zipf_s}`, @scratch)) !>;
-    println(@string(`  total_lock_ops/trial=${(long long)workers * (long long)iters}`, @scratch)) !>;
+    println("exclusive_named_lock lang=cc");
+    println(@string(`  workers=${workers} iters/worker=${iters} timed_trials=${trials} warmup=1 cs_spins=${spins} keys=${keys} zipf_s=${g_zipf_s}`, @scratch));
+    println(@string(`  total_lock_ops/trial=${(long long)workers * (long long)iters}`, @scratch));
     println("  note=zipf locks BY NAME each iter (directory+lock+scheduler "
             "product, spawn+join, no start-gun); serial_fastpath is one "
             "resolved mutex, one caller, spins=0, no scheduler. Timed trials "
@@ -249,7 +249,7 @@ int main(void) {
     for (int t = 0; t < trials; t++) {
         z_samples[t] = run_zipf(workers, iters, spins, keys);
         f_samples[t] = run_serial_fastpath(total_ops);
-        println(@string(` trial ${t + 1}: zipf_ms=${z_samples[t]} serial_fastpath_ms=${f_samples[t]}`, @scratch)) !>;
+        println(@string(` trial ${t + 1}: zipf_ms=${z_samples[t]} serial_fastpath_ms=${f_samples[t]}`, @scratch));
     }
 
     double z_med = median_ms(z_samples, trials);
@@ -258,7 +258,7 @@ int main(void) {
     double z_ops = (z_med > 0) ? (ops / (z_med / 1000.0)) : 0;
     double f_ops = (f_med > 0) ? (ops / (f_med / 1000.0)) : 0;
 
-    println(@string(`RESULT lang=cc zipf_median_ms=${z_med} zipf_ops_s=${z_ops} serial_fastpath_median_ms=${f_med} serial_fastpath_ops_s=${f_ops}`, @scratch)) !>;
+    println(@string(`RESULT lang=cc zipf_median_ms=${z_med} zipf_ops_s=${z_ops} serial_fastpath_median_ms=${f_med} serial_fastpath_ops_s=${f_ops}`, @scratch));
 
     /* @defer cc_exclusive_destroy above */
     g_excl.p = NULL;

@@ -40,7 +40,7 @@ static uint64_t now_ns(void) {
 }
 
 static void bench_abort(const char* msg) {
-    eprintln(@string(`reply_path_threaded_bench: ${msg}`, @scratch)) !>;
+    eprintln(@string(`reply_path_threaded_bench: ${msg}`, @scratch));
     exit(1);
 }
 
@@ -164,14 +164,14 @@ int main(void) {
     uint64_t local_ns = run_local_threaded();
     uint64_t chan_value_ns = run_chan_threaded();
 
-    println(@string(`# Reply Path Threaded Benchmark`, @scratch)) !>;
-    println(@string(``, @scratch)) !>;
-    println(@string(`- items: \`${BENCH_ITEMS}\``, @scratch)) !>;
-    println(@string(`- depth: \`${BENCH_DEPTH}\``, @scratch)) !>;
-    println(@string(`- reply_size: \`${sizeof(BenchWireReply)}\``, @scratch)) !>;
-    println(@string(``, @scratch)) !>;
-    println(@string(`| Path | ns/item | M items/sec | vs local |`, @scratch)) !>;
-    println(@string(`|---|---:|---:|---:|`, @scratch)) !>;
+    println(@string(`# Reply Path Threaded Benchmark`, @scratch));
+    println(@string(``, @scratch));
+    println(@string(`- items: \`${BENCH_ITEMS}\``, @scratch));
+    println(@string(`- depth: \`${BENCH_DEPTH}\``, @scratch));
+    println(@string(`- reply_size: \`${sizeof(BenchWireReply)}\``, @scratch));
+    println(@string(``, @scratch));
+    println(@string(`| Path | ns/item | M items/sec | vs local |`, @scratch));
+    println(@string(`|---|---:|---:|---:|`, @scratch));
     println(@string(`| \`local_ready_queue<BenchWireReply>\` | ${ns_per_item(local_ns)} | ${million_items_per_sec(local_ns)} | 1.000x |`,
                     @scratch)) !>;
     println(@string(`| \`cc_chan<BenchWireReply>\` | ${ns_per_item(chan_value_ns)} | ${million_items_per_sec(chan_value_ns)} | ${(double)chan_value_ns / (double)local_ns}x |`,

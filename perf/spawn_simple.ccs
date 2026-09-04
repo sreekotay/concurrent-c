@@ -18,7 +18,7 @@ static double time_now_ms(void) {
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println("spawn_simple: measuring simple spawn throughput") !>;
+    println("spawn_simple: measuring simple spawn throughput");
 
     double start = time_now_ms();
 
@@ -35,8 +35,8 @@ int main(void) {
     int total_spawns = global_counter;
     double spawns_per_sec = total_spawns / (elapsed / 1000.0);
 
-    println(@string(` simple spawns: ${spawns_per_sec} spawns/sec (${elapsed} ms, total=${total_spawns})`, @scratch)) !>;
+    println(@string(` simple spawns: ${spawns_per_sec} spawns/sec (${elapsed} ms, total=${total_spawns})`, @scratch));
 
-    println("spawn_simple: DONE") !>;
+    println("spawn_simple: DONE");
     return 0;
 }

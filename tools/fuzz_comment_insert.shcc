@@ -323,10 +323,10 @@ if (fz_file_exists(cache_path)) {
     }
     {
         CCString m = @string(`fuzz_comment: corpus cache hit (${g_ncorpus} files)`, a);
-        m.println() !>;
+        m.println();
     }
 } else {
-    "fuzz_comment: probing corpus (one-time; cached under scratch dir)".println() !>;
+    "fuzz_comment: probing corpus (one-time; cached under scratch dir)".println();
     CCSliceArray files = cc_glob(@slice("tests/*.ccs"), a) !>;
     static const char* SIDECARS[] = {
         ".args", ".exit", ".stdin", ".env", ".ldflags",
@@ -416,12 +416,12 @@ if (fz_file_exists(cache_path)) {
     {
         CCString m = @string(
             `fuzz_comment: probe done: ${g_ncorpus} in corpus, ${skipped} skipped, ${probed} probed`, &a);
-        m.println() !>;
+        m.println();
     }
 }
 
 if (g_ncorpus == 0) {
-    "fuzz_comment: empty corpus — nothing to fuzz".eprintln() !>;
+    "fuzz_comment: empty corpus — nothing to fuzz".eprintln();
     return 2;
 }
 
@@ -493,6 +493,6 @@ long findings = f_compile + f_diff + f_timeout + f_crash;
     CCString m = @string(
         `fuzz_comment: seed=${(long)seed} iterations=${iters} no_position=${no_pos} findings=${findings} (compile_or_run_fail=${f_compile}, output_diff=${f_diff}, timeout=${f_timeout}, crash=${f_crash})`,
         &a);
-    m.println() !>;
+    m.println();
 }
 return findings > 0 ? 1 : 0;

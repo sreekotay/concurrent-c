@@ -53,10 +53,10 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     setvbuf(stdout, NULL, _IONBF, 0);
 
-    println("=================================================================") !>;
-    println(@string(`CC PER-FIBER ARENA: ${NUM_FIBERS} fibers x ${ALLOCS_PER_FIBER} allocs`, @scratch)) !>;
-    println(@string(`Total allocations: ${NUM_FIBERS * ALLOCS_PER_FIBER}`, @scratch)) !>;
-    println("=================================================================") !>;
+    println("=================================================================");
+    println(@string(`CC PER-FIBER ARENA: ${NUM_FIBERS} fibers x ${ALLOCS_PER_FIBER} allocs`, @scratch));
+    println(@string(`Total allocations: ${NUM_FIBERS * ALLOCS_PER_FIBER}`, @scratch));
+    println("=================================================================");
 
     double start = time_now_ms();
     {
@@ -79,12 +79,12 @@ int main(void) {
     int success = cc_atomic_load(&g_success);
     int fail = cc_atomic_load(&g_fail);
 
-    println("Results:") !>;
-    println(@string(` Success: ${success}`, @scratch)) !>;
-    println(@string(` Fail: ${fail}`, @scratch)) !>;
-    println(@string(` Time: ${duration} ms`, @scratch)) !>;
-    println(@string(` Throughput: ${(double)success / duration / 1000.0} M allocs/sec`, @scratch)) !>;
-    println("=================================================================") !>;
+    println("Results:");
+    println(@string(` Success: ${success}`, @scratch));
+    println(@string(` Fail: ${fail}`, @scratch));
+    println(@string(` Time: ${duration} ms`, @scratch));
+    println(@string(` Throughput: ${(double)success / duration / 1000.0} M allocs/sec`, @scratch));
+    println("=================================================================");
 
     return 0;
 }

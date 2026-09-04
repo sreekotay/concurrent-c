@@ -49,10 +49,10 @@ int main(int argc, char** argv) {
     int buffer_size = 8;  /* Default like pigz */
     if (argc > 1) buffer_size = atoi(argv[1]);
     
-    println("MPMC Worker Pool Benchmark") !>;
-    println("==========================") !>;
-    println(@string(`Workers: ${NUM_WORKERS}, Items: ${NUM_ITEMS}, Buffer: ${buffer_size}`, @scratch)) !>;
-    println(@string(`Work per item: ${WORK_ITERATIONS} iterations\n`, @scratch)) !>;
+    println("MPMC Worker Pool Benchmark");
+    println("==========================");
+    println(@string(`Workers: ${NUM_WORKERS}, Items: ${NUM_ITEMS}, Buffer: ${buffer_size}`, @scratch));
+    println(@string(`Work per item: ${WORK_ITERATIONS} iterations\n`, @scratch));
     
     /* Reset counters */
     for (int i = 0; i < NUM_WORKERS; i++) {
@@ -116,13 +116,13 @@ int main(int argc, char** argv) {
     double elapsed = time_ms() - t0;
     
     /* Report results */
-    println("Results:") !>;
-    println("--------") !>;
-    println(@string(`Total time: ${elapsed} ms`, @scratch)) !>;
-    println(@string(`Throughput: ${NUM_ITEMS / (elapsed / 1000.0)} items/sec`, @scratch)) !>;
-    println("") !>;
+    println("Results:");
+    println("--------");
+    println(@string(`Total time: ${elapsed} ms`, @scratch));
+    println(@string(`Throughput: ${NUM_ITEMS / (elapsed / 1000.0)} items/sec`, @scratch));
+    println("");
     
-    println("Work Distribution:") !>;
+    println("Work Distribution:");
     int total = 0;
     int max_count = 0, min_count = NUM_ITEMS;
     for (int i = 0; i < NUM_WORKERS; i++) {
@@ -131,22 +131,22 @@ int main(int argc, char** argv) {
         if (count > max_count) max_count = count;
         if (count < min_count) min_count = count;
         int pct = (count * 100) / NUM_ITEMS;
-        println(@string(` Worker ${i}: ${count} items (${pct}%)`, @scratch)) !>;
+        println(@string(` Worker ${i}: ${count} items (${pct}%)`, @scratch));
         /* Simple bar */
-        println(" |") !>;
-        for (int b = 0; b < pct / 2; b++) println("#") !>;
-        println("") !>;
+        println(" |");
+        for (int b = 0; b < pct / 2; b++) println("#");
+        println("");
     }
     
     int expected = NUM_ITEMS / NUM_WORKERS;
     int imbalance = (max_count - min_count) * 100 / expected;
-    println(@string(`\nTotal: ${total} (expected ${NUM_ITEMS})`, @scratch)) !>;
-    println(@string(`Imbalance: ${imbalance}% (max=${max_count}, min=${min_count}, expected=${expected})`, @scratch)) !>;
+    println(@string(`\nTotal: ${total} (expected ${NUM_ITEMS})`, @scratch));
+    println(@string(`Imbalance: ${imbalance}% (max=${max_count}, min=${min_count}, expected=${expected})`, @scratch));
     
     /* Estimate parallelism */
     double serial_time = NUM_ITEMS * WORK_ITERATIONS * 0.00001; /* rough estimate */
     double speedup = serial_time / elapsed * 1000;
-    println(@string(`Estimated parallelism: ${speedup > NUM_WORKERS ? NUM_WORKERS : speedup}x`, @scratch)) !>;
+    println(@string(`Estimated parallelism: ${speedup > NUM_WORKERS ? NUM_WORKERS : speedup}x`, @scratch));
     
     return 0;
 }

@@ -27,7 +27,7 @@ void* fan_task(void* arg) {
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`fanout_join_race: fan_size=${FAN_SIZE}, iterations=${ITERATIONS}`, @scratch)) !>;
+    println(@string(`fanout_join_race: fan_size=${FAN_SIZE}, iterations=${ITERATIONS}`, @scratch));
     
     /* Expected sum: 0 + 1 + 2 + ... + (FAN_SIZE-1) = FAN_SIZE*(FAN_SIZE-1)/2 */
     int expected_sum = FAN_SIZE * (FAN_SIZE - 1) / 2;
@@ -46,15 +46,15 @@ int main(void) {
         int s = cc_atomic_load(&sum);
         
         if (s != expected_sum) {
-            eprintln(@string(`FAIL: iter ${iter}: sum=${s}, expected=${expected_sum}`, @scratch)) !>;
+            eprintln(@string(`FAIL: iter ${iter}: sum=${s}, expected=${expected_sum}`, @scratch));
             return 1;
         }
         
         if ((iter + 1) % 10 == 0) {
-            println(@string(`  completed ${iter + 1}/${ITERATIONS} (sum=${s})`, @scratch)) !>;
+            println(@string(`  completed ${iter + 1}/${ITERATIONS} (sum=${s})`, @scratch));
         }
     }
     
-    println(@string(`fanout_join_race: PASS`, @scratch)) !>;
+    println(@string(`fanout_join_race: PASS`, @scratch));
     return 0;
 }

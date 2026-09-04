@@ -13,7 +13,7 @@ int main(void) {
     CCString a = @string(`a=${x}`,
         @scratch);
     println(@string(`tmp=${y}`,
-        @scratch)) !>;
+        @scratch));
     CCString b = @string(`b=${y}`,
         @scratch);
     assert(a.as_slice().eq_cstr("a=1"));

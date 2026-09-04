@@ -37,7 +37,7 @@ typedef struct {
 static inline void report_io_error(const char* what, CCIoError err) {
     @errhandler(CCError e) { cc_error_log(e); return; }
     eprintln(@string(`Error: ${what} (kind=${err.base.kind} os=${err.os_code})`,
-                     @scratch)) !>;
+                     @scratch));
 }
 
 static inline void mark_pipeline_error(void) {
@@ -52,12 +52,12 @@ static inline bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) 
     }
     size_t n = f->write(data) !>(e) {
         eprintln(@string(`${what} failed kind=${e.base.kind} os=${e.os_code}`,
-                         @scratch)) !>;
+                         @scratch));
         g_pipeline_error.store(1);
         return false;
     };
     if (n != data.len) {
-        eprintln(@string(`${what} short write ${n}/${data.len}`, @scratch)) !>;
+        eprintln(@string(`${what} short write ${n}/${data.len}`, @scratch));
         g_pipeline_error.store(1);
         return false;
     }
@@ -72,7 +72,7 @@ static inline bool sync_file_or_fail(CCFile* f, const char* what) {
     }
     size_t ignored = f->sync() !>(e) {
         eprintln(@string(`${what} failed kind=${e.base.kind} os=${e.os_code}`,
-                         @scratch)) !>;
+                         @scratch));
         g_pipeline_error.store(1);
         return false;
     };
@@ -89,7 +89,7 @@ static bool copy_path_checked(char* dst, size_t dst_cap, const char* src, const 
     CCString s = @string(`${src}`, @scratch);
     if (s.failed()) {
         @errhandler(CCError e) { cc_error_log(e); mark_pipeline_error(); return false; }
-        eprintln(@string(`Error: ${what} path too long: ${src}`, @scratch)) !>;
+        eprintln(@string(`Error: ${what} path too long: ${src}`, @scratch));
         mark_pipeline_error();
         return false;
     }
@@ -97,7 +97,7 @@ static bool copy_path_checked(char* dst, size_t dst_cap, const char* src, const 
     size_t n = c ? strlen(c) : 0;
     if (n >= dst_cap) {
         @errhandler(CCError e) { cc_error_log(e); mark_pipeline_error(); return false; }
-        eprintln(@string(`Error: ${what} path too long: ${src}`, @scratch)) !>;
+        eprintln(@string(`Error: ${what} path too long: ${src}`, @scratch));
         mark_pipeline_error();
         return false;
     }
@@ -110,14 +110,14 @@ static bool build_suffixed_path(char* dst, size_t dst_cap, const char* path, con
     CCString s = @string(`${path}${suffix}`, @scratch);
     if (s.failed()) {
         @errhandler(CCError e) { cc_error_log(e); return false; }
-        eprintln(@string(`pigz_cc: output path too long: ${path}${suffix}`, @scratch)) !>;
+        eprintln(@string(`pigz_cc: output path too long: ${path}${suffix}`, @scratch));
         return false;
     }
     const char* c = cc_string_cstr(&s, __cc_str_scratch);
     size_t n = c ? strlen(c) : 0;
     if (n >= dst_cap) {
         @errhandler(CCError e) { cc_error_log(e); return false; }
-        eprintln(@string(`pigz_cc: output path too long: ${path}${suffix}`, @scratch)) !>;
+        eprintln(@string(`pigz_cc: output path too long: ${path}${suffix}`, @scratch));
         return false;
     }
     memcpy(dst, c, n + 1);
@@ -128,13 +128,13 @@ static bool open_output_checked(CCFile* file, const char* path) {
     if (!file || !path) return false;
     @errhandler(CCError e) { cc_error_log(e); mark_pipeline_error(); return false; }
     if (!g.force && !path_is_stdout(path) && access(path, F_OK) == 0) {
-        eprintln(@string(`pigz_cc: ${path} exists -- use -f to overwrite`, @scratch)) !>;
+        eprintln(@string(`pigz_cc: ${path} exists -- use -f to overwrite`, @scratch));
         mark_pipeline_error();
         return false;
     }
     *file = CC_FILE_CLOSED;
     file->create(path) !>(e) {
-        eprintln(@string(`Failed to open output: ${path}`, @scratch)) !>;
+        eprintln(@string(`Failed to open output: ${path}`, @scratch));
         mark_pipeline_error();
         return false;
     };
@@ -767,7 +767,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
     const char* real_in = in_path ? in_path : "/dev/stdin";
     CCFile in_file = cc_file_open(cc_slice_cstr(real_in)) !>(e) {
-        eprintln(@string(`Failed to open input: ${real_in}`, @scratch)) !>;
+        eprintln(@string(`Failed to open input: ${real_in}`, @scratch));
         return 1;
     } @destroy;
 
@@ -806,7 +806,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
     
     const char* real_in = in_path ? in_path : "/dev/stdin";
     CCFile in_file = cc_file_open(cc_slice_cstr(real_in)) !>(e) {
-        eprintln(@string(`Failed to open input: ${real_in}`, @scratch)) !>;
+        eprintln(@string(`Failed to open input: ${real_in}`, @scratch));
         return 1;
     } @destroy;
 
@@ -916,7 +916,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                     }
                     if (!recv_res.value()) break;
                     if (in_chunk.data.len > (size_t)UINT_MAX) {
-                        eprintln(@string(`Error: inflate chunk exceeds uInt`, @scratch)) !>;
+                        eprintln(@string(`Error: inflate chunk exceeds uInt`, @scratch));
                         mark_pipeline_error();
                         cc_channel_close_err(compressed_ch, EIO);
                         in_chunk.arena.free();
@@ -931,7 +931,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                         CCArena out_arena = cc_arena_heap(BLOCK_SIZE + 256) @destroy;
                         unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, out_arena, BLOCK_SIZE);
                         if (!out_buf) {
-                            eprintln(@string(`Error: failed to allocate decompression output chunk`, @scratch)) !>;
+                            eprintln(@string(`Error: failed to allocate decompression output chunk`, @scratch));
                             mark_pipeline_error();
                             cc_channel_close_err(compressed_ch, EIO);
                             cc_channel_close_err(decompressed_ch, EIO);
@@ -944,7 +944,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                         
                         int ret = inflate(&strm, Z_NO_FLUSH);
                         if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
-                            eprintln(@string(`Decompression error: ${ret}`, @scratch)) !>;
+                            eprintln(@string(`Decompression error: ${ret}`, @scratch));
                             mark_pipeline_error();
                             cc_channel_close_err(compressed_ch, EIO);
                             cc_channel_close_err(decompressed_ch, EIO);
@@ -967,7 +967,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                                 break;
                             }
                             if (!send_res.value()) {
-                                eprintln(@string(`Error: decompressed output channel closed early`, @scratch)) !>;
+                                eprintln(@string(`Error: decompressed output channel closed early`, @scratch));
                                 mark_pipeline_error();
                                 cc_channel_close_err(decompressed_ch, EIO);
                                 out_chunk.arena.free();
@@ -994,7 +994,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                 CCArena chunk_arena = cc_arena_heap(BLOCK_SIZE + 256) @destroy;
                 unsigned char* buf = cc_arena_alloc_T_count(unsigned char, chunk_arena, BLOCK_SIZE);
                 if (!buf) {
-                    eprintln(@string(`Error: failed to allocate compressed input chunk`, @scratch)) !>;
+                    eprintln(@string(`Error: failed to allocate compressed input chunk`, @scratch));
                     mark_pipeline_error();
                     cc_channel_close_err(compressed_ch, EIO);
                     break;
@@ -1026,7 +1026,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                     break;
                 }
                 if (!send_res.value()) {
-                    eprintln(@string(`Error: compressed input channel closed early`, @scratch)) !>;
+                    eprintln(@string(`Error: compressed input channel closed early`, @scratch));
                     mark_pipeline_error();
                     cc_channel_close_err(compressed_ch, EIO);
                     chunk.arena.free();
@@ -1045,7 +1045,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
         // pigz-style: percentage saved = (out - in) / out
         double ratio = out_total > 0 ? 100.0 * (double)(out_total - in_total) / (double)out_total : 0.0;
         println(@string(`${in_total} ${out_total} ${ratio}% ${in_path ? in_path : "<stdin>"}`,
-                        @scratch)) !>;
+                        @scratch));
     }
 
     if (!g.test && !g.list) {
@@ -1069,13 +1069,13 @@ int process_path(char[:0] path, int num_workers, int level, int strategy) {
     const char* path_cstr = (const char*)path.ptr;
     struct stat st;
     if (stat(path_cstr, &st) != 0) {
-        eprintln(@string(`pigz_cc: ${path_cstr}: ${strerror(errno)}`, @scratch)) !>;
+        eprintln(@string(`pigz_cc: ${path_cstr}: ${strerror(errno)}`, @scratch));
         return 1;
     }
 
     if (S_ISDIR(st.st_mode)) {
         if (!g.recursive) {
-            eprintln(@string(`pigz_cc: ${path_cstr} is a directory -- ignored`, @scratch)) !>;
+            eprintln(@string(`pigz_cc: ${path_cstr} is a directory -- ignored`, @scratch));
             return 0;
         }
 
@@ -1093,7 +1093,7 @@ int process_path(char[:0] path, int num_workers, int level, int strategy) {
                     if (cc_is_err(entry_res)) {
                         CCIoError err = cc_unwrap_err_as(entry_res, CCIoError);
                         if (err.base.kind == CC_IO_OTHER && err.os_code == 0) break; // EOF
-                        eprintln(@string(`pigz_cc: ${path_cstr}: error reading directory`, @scratch)) !>;
+                        eprintln(@string(`pigz_cc: ${path_cstr}: error reading directory`, @scratch));
                         ret = 1;
                         break;
                     }
@@ -1107,7 +1107,7 @@ int process_path(char[:0] path, int num_workers, int level, int strategy) {
                 }
                 return ret;
             } else {
-                eprintln(@string(`pigz_cc: ${path_cstr}: failed to open directory`, @scratch)) !>;
+                eprintln(@string(`pigz_cc: ${path_cstr}: failed to open directory`, @scratch));
                 return 1;
             }
         }
@@ -1128,14 +1128,14 @@ int process_path(char[:0] path, int num_workers, int level, int strategy) {
         size_t slen = strlen(g.sufx);
         if (len > slen && strcmp(path_cstr + len - slen, g.sufx) == 0) {
             if (len - slen >= sizeof(output_file)) {
-                eprintln(@string(`pigz_cc: output path too long: ${path_cstr}`, @scratch)) !>;
+                eprintln(@string(`pigz_cc: output path too long: ${path_cstr}`, @scratch));
                 return 1;
             }
             memcpy(output_file, path_cstr, len - slen);
             output_file[len - slen] = '\0';
         } else {
             if (!g.force) {
-                if (g.verbosity > 0) eprintln(@string(`pigz_cc: ${path_cstr} does not have ${g.sufx} suffix -- skipped`, @scratch)) !>;
+                if (g.verbosity > 0) eprintln(@string(`pigz_cc: ${path_cstr} does not have ${g.sufx} suffix -- skipped`, @scratch));
                 return 0;
             }
             if (!build_suffixed_path(output_file, sizeof(output_file), path_cstr, ".out")) {
@@ -1147,7 +1147,7 @@ int process_path(char[:0] path, int num_workers, int level, int strategy) {
         size_t len = path.len;
         size_t slen = strlen(g.sufx);
         if (!g.force && len > slen && strcmp(path_cstr + len - slen, g.sufx) == 0) {
-            if (g.verbosity > 0) eprintln(@string(`pigz_cc: ${path_cstr} already has ${g.sufx} suffix -- skipped`, @scratch)) !>;
+            if (g.verbosity > 0) eprintln(@string(`pigz_cc: ${path_cstr} already has ${g.sufx} suffix -- skipped`, @scratch));
             return 0;
         }
         if (!build_suffixed_path(output_file, sizeof(output_file), path_cstr, g.sufx)) {
@@ -1284,15 +1284,15 @@ int main(int argc, char *argv[]) {
     pigz_apply_opts(&opts, &num_workers, &user_set_num_workers, &block_kb,
                     &max_mem_mb, &show_version);
     if (show_version) {
-        eprintln(@string(`pigz_cc 1.0`, @scratch)) !>;
-        if (g.verbosity > 1) eprintln(@string(`zlib ${zlibVersion()}`, @scratch)) !>;
+        eprintln(@string(`pigz_cc 1.0`, @scratch));
+        if (g.verbosity > 1) eprintln(@string(`zlib ${zlibVersion()}`, @scratch));
         return 0;
     }
 
     g.max_mem = (size_t)max_mem_mb * 1024 * 1024;
     g.block = (size_t)(block_kb < 32 ? 32 : block_kb) * 1024;
     if (g.block > (size_t)UINT_MAX || deflate_cap(g.block) > (size_t)UINT_MAX) {
-        eprintln(@string(`pigz_cc: -b block exceeds zlib uInt`, @scratch)) !>;
+        eprintln(@string(`pigz_cc: -b block exceeds zlib uInt`, @scratch));
         return 1;
     }
     ZopfliInitOptions(&g.zopts);
@@ -1331,7 +1331,7 @@ int main(int argc, char *argv[]) {
     if (g.verbosity > 0 && bytes_in > 0) {
         double pct = 100.0 * ((double)bytes_out / (double)bytes_in);
         eprintln(@string(`Total: ${bytes_in} -> ${bytes_out} bytes (${pct}%), ${blocks} blocks, ${worker_count} workers`,
-                         @scratch)) !>;
+                         @scratch));
     }
 
     return ret;

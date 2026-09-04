@@ -231,7 +231,7 @@ int main(int argc, char* argv[]) {
     @errhandler(CCError e) { return cc_err_log(e); }
 
     if (argc < 2) {
-        @string(`Usage: ${argv[0]} <file>`, @scratch).eprintln() !>;
+        @string(`Usage: ${argv[0]} <file>`, @scratch).eprintln();
         return 1;
     }
 
@@ -241,6 +241,6 @@ int main(int argc, char* argv[]) {
         return cc_err_log(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "output path"));
 
     compress_file(in_path, out_name.as_slice()) !>;
-    @string(`Compressed ${in_path} -> ${out_name}`, @scratch).println() !>;
+    @string(`Compressed ${in_path} -> ${out_name}`, @scratch).println();
     return 0;
 }

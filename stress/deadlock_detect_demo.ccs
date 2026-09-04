@@ -19,27 +19,27 @@
 
 @async int producer(CCChanTx tx) {
     @errhandler(CCIoError e) { (void)e; return -1; }
-    println(@string(`Producer: about to send...`, @scratch)) !>;
+    println(@string(`Producer: about to send...`, @scratch));
     int val = 42;
     @await tx.send(val) !>;
-    println(@string(`Producer: sent!`, @scratch)) !>;
+    println(@string(`Producer: sent!`, @scratch));
     return 1;
 }
 
 @async int consumer(CCChanRx rx) {
     @errhandler(CCIoError e) { (void)e; return -1; }
-    println(@string(`Consumer: about to recv...`, @scratch)) !>;
+    println(@string(`Consumer: about to recv...`, @scratch));
     int v = 0;
     @await rx.recv(&v) !>;
-    println(@string(`Consumer: received ${v}`, @scratch)) !>;
+    println(@string(`Consumer: received ${v}`, @scratch));
     return v;
 }
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`Deadlock Detection Test`, @scratch)) !>;
-    println(@string(`========================`, @scratch)) !>;
-    println(@string(`This test creates an intentional deadlock.`, @scratch)) !>;
+    println(@string(`Deadlock Detection Test`, @scratch));
+    println(@string(`========================`, @scratch));
+    println(@string(`This test creates an intentional deadlock.`, @scratch));
     println(@string(`Set CC_DEADLOCK_DETECT=0 to disable detection.
 `, @scratch)) !>;
     
@@ -63,7 +63,7 @@ int main(void) {
     }
     
     /* Never reached - deadlock above */
-    println(@string(`Completed!`, @scratch)) !>;
+    println(@string(`Completed!`, @scratch));
     ch.free();
     return 0;
 }

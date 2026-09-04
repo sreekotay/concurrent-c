@@ -27,7 +27,7 @@ cc_atomic_int g_output_sum = 0;
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`pipeline_long: 5 stages, ${NUM_ITEMS} items`, @scratch)) !>;
+    println(@string(`pipeline_long: 5 stages, ${NUM_ITEMS} items`, @scratch));
 
     g_ch0 = cc_channel_pair(&g_tx0, &g_rx0);
     g_ch1 = cc_channel_pair(&g_tx1, &g_rx1);
@@ -105,6 +105,6 @@ int main(void) {
 
     int out_count = cc_atomic_load(&g_output_count);
     int out_sum = cc_atomic_load(&g_output_sum);
-    println(@string(`pipeline_long: output ${out_count} items, sum ${out_sum} (expected ${expected_sum})`, @scratch)) !>;
+    println(@string(`pipeline_long: output ${out_count} items, sum ${out_sum} (expected ${expected_sum})`, @scratch));
     return (out_count == NUM_ITEMS && out_sum == expected_sum) ? 0 : 1;
 }

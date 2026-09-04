@@ -22,11 +22,21 @@
 static const char* FIX = "cc/shadow/shadow";
 
 static void pp_free_macros(Pp* pp) {
-    /* Macro names/bodies/table rows live on pp->arena; abandon only. */
+    /* Macro names/bodies, include frames, and passthrough lines live on
+     * pp->arena; abandon only. */
     if (!pp) return;
     pp->macros = NULL;
     pp->nmacros = 0;
     pp->macros_cap = 0;
+    pp->frames = NULL;
+    pp->nf = 0;
+    pp->frames_cap = 0;
+    pp->pass_inc = NULL;
+    pp->npass_inc = 0;
+    pp->pass_inc_cap = 0;
+    pp->pass_def = NULL;
+    pp->npass_def = 0;
+    pp->pass_def_cap = 0;
 }
 
 static char* read_all(const char* path, size_t* out_n) {

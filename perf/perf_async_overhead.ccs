@@ -41,7 +41,7 @@ static void bench_trivial_async(void) {
     double elapsed = time_now_ms() - start;
     double tasks_per_sec = ITERATIONS / (elapsed / 1000.0);
     
-    println(@string(` trivial async (no yields): ${tasks_per_sec} tasks/sec (${elapsed} ms, sum=${sum})`, @scratch)) !>;
+    println(@string(` trivial async (no yields): ${tasks_per_sec} tasks/sec (${elapsed} ms, sum=${sum})`, @scratch));
 }
 
 /* Benchmark async with computation */
@@ -57,7 +57,7 @@ static void bench_compute_async(void) {
     double elapsed = time_now_ms() - start;
     double tasks_per_sec = ITERATIONS / (elapsed / 1000.0);
     
-    println(@string(` compute async (100 iterations): ${tasks_per_sec} tasks/sec (${elapsed} ms)`, @scratch)) !>;
+    println(@string(` compute async (100 iterations): ${tasks_per_sec} tasks/sec (${elapsed} ms)`, @scratch));
 }
 
 /* Benchmark cc_block_all overhead */
@@ -86,7 +86,7 @@ static void bench_block_all(void) {
     double elapsed = time_now_ms() - start;
     double tasks_per_sec = ITERATIONS / (elapsed / 1000.0);
     
-    println(@string(` cc_block_all (batch=${batch_size}): ${tasks_per_sec} tasks/sec (${elapsed} ms, sum=${sum})`, @scratch)) !>;
+    println(@string(` cc_block_all (batch=${batch_size}): ${tasks_per_sec} tasks/sec (${elapsed} ms, sum=${sum})`, @scratch));
 }
 
 /* Benchmark spawn overhead (baseline comparison) */
@@ -111,18 +111,18 @@ static void bench_spawn_overhead(void) {
     double elapsed = time_now_ms() - start;
     double spawns_per_sec = ITERATIONS / (elapsed / 1000.0);
     
-    println(@string(` spawn (baseline): ${spawns_per_sec} spawns/sec (${elapsed} ms, count=${cc_atomic_load(counter_ptr)})`, @scratch)) !>;
+    println(@string(` spawn (baseline): ${spawns_per_sec} spawns/sec (${elapsed} ms, count=${cc_atomic_load(counter_ptr)})`, @scratch));
 }
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    println("perf_async_overhead: measuring async task performance") !>;
+    println("perf_async_overhead: measuring async task performance");
     
     bench_trivial_async();
     bench_compute_async();
     bench_block_all();
     bench_spawn_overhead();
     
-    println("perf_async_overhead: DONE") !>;
+    println("perf_async_overhead: DONE");
     return 0;
 }

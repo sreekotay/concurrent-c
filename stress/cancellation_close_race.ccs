@@ -27,7 +27,7 @@ cc_atomic_int g_close_errors = 0;
 
 /* Test 1: cc_block_race cancellation under load */
 int test_race_cancellation(void) {
-    println(@string(`  race_cancellation: ${NUM_ROUNDS} rounds x ${TASKS_PER_ROUND} tasks`, @scratch)) !>;
+    println(@string(`  race_cancellation: ${NUM_ROUNDS} rounds x ${TASKS_PER_ROUND} tasks`, @scratch));
     
     for (int round = 0; round < NUM_ROUNDS; round++) {
         CCTaskIntptr tasks[TASKS_PER_ROUND];
@@ -41,7 +41,7 @@ int test_race_cancellation(void) {
         int err = cc_block_race(TASKS_PER_ROUND, tasks, &winner, &result);
         
         if (err != 0) {
-            println(@string(`  race_cancellation: round ${round} failed err=${err}`, @scratch)) !>;
+            println(@string(`  race_cancellation: round ${round} failed err=${err}`, @scratch));
             return 1;
         }
         
@@ -49,14 +49,14 @@ int test_race_cancellation(void) {
         cc_atomic_fetch_add(&g_cancelled, TASKS_PER_ROUND - 1);
     }
     
-    println(@string(`  race_cancellation: completed=${cc_atomic_load(&g_completed)}, cancelled=${cc_atomic_load(&g_cancelled)}`, @scratch)) !>;
+    println(@string(`  race_cancellation: completed=${cc_atomic_load(&g_completed)}, cancelled=${cc_atomic_load(&g_cancelled)}`, @scratch));
     return 0;
 }
 
 /* Test 2: Channel close while recv is waiting */
 int test_close_while_recv(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`  close_while_recv: testing close() interrupts blocking recv`, @scratch)) !>;
+    println(@string(`  close_while_recv: testing close() interrupts blocking recv`, @scratch));
     
     cc_atomic_store(&g_close_errors, 0);
     
@@ -90,14 +90,14 @@ int test_close_while_recv(void) {
     }
     
     int close_errors = cc_atomic_load(&g_close_errors);
-    println(@string(`  close_while_recv: recv-after-close errors=${close_errors} (expected ~10)`, @scratch)) !>;
+    println(@string(`  close_while_recv: recv-after-close errors=${close_errors} (expected ~10)`, @scratch));
     return (close_errors >= 5) ? 0 : 1;
 }
 
 /* Test 3: Concurrent close - multiple threads closing same channel */
 int test_concurrent_close(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`  concurrent_close: multiple threads racing to close`, @scratch)) !>;
+    println(@string(`  concurrent_close: multiple threads racing to close`, @scratch));
     
     for (int round = 0; round < NUM_ROUNDS; round++) {
         int[~4 >] tx;
@@ -117,13 +117,13 @@ int test_concurrent_close(void) {
         ch.free();
     }
     
-    println(@string(`  concurrent_close: ${NUM_ROUNDS} rounds completed`, @scratch)) !>;
+    println(@string(`  concurrent_close: ${NUM_ROUNDS} rounds completed`, @scratch));
     return 0;
 }
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    println(@string(`cancellation_close_race: starting`, @scratch)) !>;
+    println(@string(`cancellation_close_race: starting`, @scratch));
     
     int err = 0;
     
@@ -136,6 +136,6 @@ int main(void) {
     err = test_concurrent_close();
     if (err != 0) return err;
     
-    println(@string(`cancellation_close_race: PASS`, @scratch)) !>;
+    println(@string(`cancellation_close_race: PASS`, @scratch));
     return 0;
 }

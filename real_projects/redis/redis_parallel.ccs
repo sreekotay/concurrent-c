@@ -528,13 +528,13 @@ int main(int argc, char** argv) {
     CCExclusive excl = cc_exclusive_create(excl_arena, mask.count * 2u) !> @destroy;
 
     if (!db_init(&db, excl, mask)) {
-        eprintln("redis_parallel: db_init failed") !>;
+        eprintln("redis_parallel: db_init failed");
         return 1;
     }
     @defer db_free(&db);
 
     CCListener ln = cc_tcp_listen(cc_slice_cstr(addr)) !>(e) {
-        eprintln(@string(`listen: ${e}`, @scratch)) !>;
+        eprintln(@string(`listen: ${e}`, @scratch));
         return 1;
     };
     @defer ln.close();

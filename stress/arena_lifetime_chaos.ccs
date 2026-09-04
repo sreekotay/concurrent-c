@@ -78,7 +78,7 @@ static double now_sec(void) {
 
 int fail(const char *msg) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    eprintln(@string(`FAIL: ${msg}`, @scratch)) !>;
+    eprintln(@string(`FAIL: ${msg}`, @scratch));
     return 1;
 }
 
@@ -153,7 +153,7 @@ static int bench_mixed_lifetime_chaos(void) {
 
     rss_begin(&rss);
     t0 = now_sec();
-    println(@string(`  mixed_lifetime: ops=${CHAOS_OPS} slots=${SLOTS} root=${ROOT_CHAOS}`, @scratch)) !>;
+    println(@string(`  mixed_lifetime: ops=${CHAOS_OPS} slots=${SLOTS} root=${ROOT_CHAOS}`, @scratch));
 
     for (i = 0; i < CHAOS_OPS; i++) {
         uint32_t r = lcg(&rng);
@@ -273,7 +273,7 @@ static int bench_mixed_lifetime_chaos(void) {
     {
         size_t peak_rss_out = rss.ok ? rss.peak_rss : 0;
         ssize_t peak_delta = rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1;
-        println(@string(`  mixed_lifetime: live=${live} alloc=${ops_alloc} rel=${ops_rel} tip=${ops_tip} bury=${ops_bury} tip_moves=${tip_moves} peak_gross=${peak_gross} peak_ovf=${peak_ovf} peak_rss=${peak_rss_out} (Δ${peak_delta}) $~float_dec(3){now_sec() - t0}s`, @scratch)) !>;
+        println(@string(`  mixed_lifetime: live=${live} alloc=${ops_alloc} rel=${ops_rel} tip=${ops_tip} bury=${ops_bury} tip_moves=${tip_moves} peak_gross=${peak_gross} peak_ovf=${peak_ovf} peak_rss=${peak_rss_out} (Δ${peak_delta}) $~float_dec(3){now_sec() - t0}s`, @scratch));
     }
 
     if (!(a.a->_flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) && a.a->block_idx == 0) {
@@ -333,7 +333,7 @@ static int bench_mixed_lifetime_chaos(void) {
         ssize_t residual = (rss.ok && end.ok) ? (ssize_t)end.current - (ssize_t)rss.start_rss : (ssize_t)-1;
         size_t end_hwm = end.hwm_ok ? end.hwm : 0;
         size_t end_cgroup = end.cgroup_ok ? end.cgroup_peak : rss.cgroup_peak;
-        println(@string(`  mixed_lifetime: after_free rss=${end_rss} residual_vs_start=${residual} hwm=${end_hwm} cgroup_peak=${end_cgroup}`, @scratch)) !>;
+        println(@string(`  mixed_lifetime: after_free rss=${end_rss} residual_vs_start=${residual} hwm=${end_hwm} cgroup_peak=${end_cgroup}`, @scratch));
 #if !defined(__APPLE__)
         /* Soft RSS: Linux often returns pages; macOS phys_footprint retains.
          * Integrity + gross/ovf already fail-closed above. */
@@ -465,7 +465,7 @@ static int bench_release_scramble(void) {
     {
         size_t peak_rss_out = rss.ok ? rss.peak_rss : 0;
         ssize_t peak_delta = rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1;
-        println(@string(`  release_scramble: n=${RELEASE_SCRAMBLE_N} released=${released} live=${live} peak_gross=${peak_gross} peak_ovf=${peak_ovf} peak_rss=${peak_rss_out} (Δ${peak_delta}) $~float_dec(3){now_sec() - t0}s`, @scratch)) !>;
+        println(@string(`  release_scramble: n=${RELEASE_SCRAMBLE_N} released=${released} live=${live} peak_gross=${peak_gross} peak_ovf=${peak_ovf} peak_rss=${peak_rss_out} (Δ${peak_delta}) $~float_dec(3){now_sec() - t0}s`, @scratch));
     }
 
     if (a.a->_flags & CC_ARENA_FLAG_NON_REWINDABLE) {
@@ -491,7 +491,7 @@ static int bench_release_scramble(void) {
         ssize_t residual = (rss.ok && end.ok) ? (ssize_t)end.current - (ssize_t)rss.start_rss : (ssize_t)-1;
         size_t end_hwm = end.hwm_ok ? end.hwm : 0;
         size_t end_cgroup = end.cgroup_ok ? end.cgroup_peak : rss.cgroup_peak;
-        println(@string(`  release_scramble: after_free rss=${end_rss} residual_vs_start=${residual} hwm=${end_hwm} cgroup_peak=${end_cgroup}`, @scratch)) !>;
+        println(@string(`  release_scramble: after_free rss=${end_rss} residual_vs_start=${residual} hwm=${end_hwm} cgroup_peak=${end_cgroup}`, @scratch));
     }
     return 0;
 }
@@ -604,7 +604,7 @@ static int bench_shared_concurrent_mixed(void) {
         int ops = cc_atomic_load(&g_shared_ops);
         size_t peak_rss_out = rss.ok ? rss.peak_rss : 0;
         ssize_t peak_delta = rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1;
-        println(@string(`  shared_concurrent(fixed): workers=${CONC_WORKERS} ops=${ops} fail=${fails} live_gross=${cc_arena_committed_gross_bytes(g_shared)} peak_rss=${peak_rss_out} (Δ${peak_delta}) $~float_dec(3){now_sec() - t0}s`, @scratch)) !>;
+        println(@string(`  shared_concurrent(fixed): workers=${CONC_WORKERS} ops=${ops} fail=${fails} live_gross=${cc_arena_committed_gross_bytes(g_shared)} peak_rss=${peak_rss_out} (Δ${peak_delta}) $~float_dec(3){now_sec() - t0}s`, @scratch));
         if (fails != 0)
             return fail("shared concurrent integrity/release failure");
         if (ops != CONC_WORKERS * CONC_OPS_EACH)
@@ -669,7 +669,7 @@ static int bench_tip_vs_churn_release(void) {
     }
 
     ssize_t peak_rss_delta = rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1;
-    println(@string(`  tip_vs_churn_release: tip_sz=${tip_sz} moves=${moves} (expect >0 once buried) gross=${cc_arena_committed_gross_bytes(a)} peak_rss_delta=${peak_rss_delta} $~float_dec(3){now_sec() - t0}s`, @scratch)) !>;
+    println(@string(`  tip_vs_churn_release: tip_sz=${tip_sz} moves=${moves} (expect >0 once buried) gross=${cc_arena_committed_gross_bytes(a)} peak_rss_delta=${peak_rss_delta} $~float_dec(3){now_sec() - t0}s`, @scratch));
     if (moves == 0) {
         a.destroy();
         return fail("expected tip moves after ephemeral bury+release");
@@ -685,7 +685,7 @@ int main(void) {
         size_t start_rss = rss0.ok ? rss0.current : 0;
         size_t start_hwm = rss0.hwm_ok ? rss0.hwm : 0;
         size_t start_cgroup = rss0.cgroup_ok ? rss0.cgroup_peak : 0;
-        println(@string(`arena_lifetime_chaos: start_rss=${start_rss} hwm=${start_hwm} cgroup_peak=${start_cgroup}`, @scratch)) !>;
+        println(@string(`arena_lifetime_chaos: start_rss=${start_rss} hwm=${start_hwm} cgroup_peak=${start_cgroup}`, @scratch));
     }
 
     if (bench_mixed_lifetime_chaos()) return 1;
@@ -700,7 +700,7 @@ int main(void) {
         ssize_t end_delta = (rss0.ok && rss1.ok) ? (ssize_t)rss1.current - (ssize_t)rss0.current : (ssize_t)-1;
         size_t end_hwm = rss1.hwm_ok ? rss1.hwm : 0;
         size_t end_cgroup = rss1.cgroup_ok ? rss1.cgroup_peak : 0;
-        println(@string(`arena_lifetime_chaos: PASS end_rss=${end_rss} delta=${end_delta} hwm=${end_hwm} cgroup_peak=${end_cgroup} best_peak=${peak}`, @scratch)) !>;
+        println(@string(`arena_lifetime_chaos: PASS end_rss=${end_rss} delta=${end_delta} hwm=${end_hwm} cgroup_peak=${end_cgroup} best_peak=${peak}`, @scratch));
 #if !defined(__APPLE__)
         if (rss0.ok && rss1.ok) {
             size_t resid = rss1.current > rss0.current ? rss1.current - rss0.current : 0;

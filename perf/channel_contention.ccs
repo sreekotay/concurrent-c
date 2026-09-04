@@ -82,7 +82,7 @@ static void trace_worker_state_ensure(int roles) {
     g_role_samples = (int*)realloc(g_role_samples, sizeof(int) * roles);
     g_role_worker_hits = (int*)realloc(g_role_worker_hits, sizeof(int) * roles * TRACE_MAX_WORKERS);
     if (!g_role_last_worker || !g_role_switches || !g_role_samples || !g_role_worker_hits) {
-        eprintln("channel_contention: trace allocation failed") !>;
+        eprintln("channel_contention: trace allocation failed");
         abort();
     }
     g_trace_role_capacity = roles;
@@ -175,7 +175,7 @@ static void trace_worker_summary(const char* phase, int trial, int producers, in
         CCString role_name = role < g_trace_consumer_base
             ? @string(`p${role + 1}`, @scratch)
             : @string(`c${role - g_trace_consumer_base + 1}`, @scratch);
-        eprintln(@string(`CC_TRACE_WORKERS phase=${phase} trial=${trial} role=${role_name} samples=${g_role_samples[role]} switches=${g_role_switches[role]} active_workers=${active_workers} dominant=${best_worker} dominant_hits=${best_hits} last=${g_role_last_worker[role]}`, @scratch)) !>;
+        eprintln(@string(`CC_TRACE_WORKERS phase=${phase} trial=${trial} role=${role_name} samples=${g_role_samples[role]} switches=${g_role_switches[role]} active_workers=${active_workers} dominant=${best_worker} dominant_hits=${best_hits} last=${g_role_last_worker[role]}`, @scratch));
     }
 }
 
@@ -183,9 +183,9 @@ static void trace_trial_marker(const char* phase, int trial, const char* event, 
     @errhandler(CCError e) cc_error_exit(e);
     if (!trace_contention_trials_enabled()) return;
     if (elapsed_ms >= 0.0) {
-        eprintln(@string(`CC_TRACE_TRIAL phase=${phase} trial=${trial} event=${event} elapsed_ms=${elapsed_ms}`, @scratch)) !>;
+        eprintln(@string(`CC_TRACE_TRIAL phase=${phase} trial=${trial} event=${event} elapsed_ms=${elapsed_ms}`, @scratch));
     } else {
-        eprintln(@string(`CC_TRACE_TRIAL phase=${phase} trial=${trial} event=${event}`, @scratch)) !>;
+        eprintln(@string(`CC_TRACE_TRIAL phase=${phase} trial=${trial} event=${event}`, @scratch));
     }
 }
 
@@ -265,10 +265,10 @@ int main(void) {
     int producers = bench_producers();
     int consumers = bench_consumers();
 
-    println("=================================================================") !>;
-    println("SHARED CHANNEL CONTENTION TEST") !>;
-    println(@string(`Messages: ${messages} | Trials: ${trials} | Contention: ${producers}x${consumers}`, @scratch)) !>;
-    println("=================================================================") !>;
+    println("=================================================================");
+    println("SHARED CHANNEL CONTENTION TEST");
+    println(@string(`Messages: ${messages} | Trials: ${trials} | Contention: ${producers}x${consumers}`, @scratch));
+    println("=================================================================");
 
     double* baseline_times = (double*)calloc((size_t)trials, sizeof(double));
     double* contention_times = (double*)calloc((size_t)trials, sizeof(double));
@@ -277,7 +277,7 @@ int main(void) {
     for (int trial = 1; trial <= trials; trial++) {
         baseline_times[trial - 1] = run_shared_case("baseline", trial, 1, 1);
         contention_times[trial - 1] = run_shared_case("contention", trial, producers, consumers);
-        println(@string(` Trial ${trial}: baseline=${baseline_times[trial - 1]} ms contention=${contention_times[trial - 1]} ms`, @scratch)) !>;
+        println(@string(` Trial ${trial}: baseline=${baseline_times[trial - 1]} ms contention=${contention_times[trial - 1]} ms`, @scratch));
     }
 
     double best_baseline = baseline_times[0];
@@ -289,11 +289,11 @@ int main(void) {
 
     double interference = (best_contention - best_baseline) / best_baseline * 100.0;
 
-    println("") !>;
-    println(@string(` Best baseline: ${best_baseline} ms (${(double)messages * 1000.0 / best_baseline} msgs/sec)`, @scratch)) !>;
-    println(@string(` Best contention: ${best_contention} ms (${(double)messages * 1000.0 / best_contention} msgs/sec)`, @scratch)) !>;
-    println("") !>;
-    println(@string(`Interference: ${interference}% (best-of-${trials})`, @scratch)) !>;
+    println("");
+    println(@string(` Best baseline: ${best_baseline} ms (${(double)messages * 1000.0 / best_baseline} msgs/sec)`, @scratch));
+    println(@string(` Best contention: ${best_contention} ms (${(double)messages * 1000.0 / best_contention} msgs/sec)`, @scratch));
+    println("");
+    println(@string(`Interference: ${interference}% (best-of-${trials})`, @scratch));
 
     free(baseline_times);
     free(contention_times);

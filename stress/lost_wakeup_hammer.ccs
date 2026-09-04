@@ -58,9 +58,9 @@ int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     srand(time(NULL));
 
-    println(@string(`=================================================================`, @scratch)) !>;
-    println(@string(`LOST WAKEUP HAMMER: ${NUM_FIBERS * 2} fibers | ${OPS_PER_FIBER} ops each`, @scratch)) !>;
-    println(@string(`Targeting unbuffered channel rendezvous contention...`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch));
+    println(@string(`LOST WAKEUP HAMMER: ${NUM_FIBERS * 2} fibers | ${OPS_PER_FIBER} ops each`, @scratch));
+    println(@string(`Targeting unbuffered channel rendezvous contention...`, @scratch));
     println(@string(`=================================================================
 `, @scratch)) !>;
 
@@ -104,9 +104,9 @@ Progress: ${current}/${TOTAL_OPS} operations...`, @scratch)) !>;
                     println(@string(`
 
 !!! HANG DETECTED !!!`, @scratch)) !>;
-                    println(@string(`Possible Lost Wakeup bug in channel selection.`, @scratch)) !>;
-                    println(@string(`Sends completed: ${cc_atomic_load(&g_sends_completed)}`, @scratch)) !>;
-                    println(@string(`Recvs completed: ${current}`, @scratch)) !>;
+                    println(@string(`Possible Lost Wakeup bug in channel selection.`, @scratch));
+                    println(@string(`Sends completed: ${cc_atomic_load(&g_sends_completed)}`, @scratch));
+                    println(@string(`Recvs completed: ${current}`, @scratch));
                     exit(1);
                 }
             } else {
@@ -120,7 +120,7 @@ Progress: ${current}/${TOTAL_OPS} operations...`, @scratch)) !>;
     println(@string(`
 
 RESULT: PASS - All ${TOTAL_OPS} operations completed without a hang.`, @scratch)) !>;
-    println(@string(`=================================================================`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch));
 
     return 0;
 }

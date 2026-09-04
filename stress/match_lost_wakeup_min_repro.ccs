@@ -66,7 +66,7 @@ void tx_fiber(int[~ >] tx) {
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     setvbuf(stdout, NULL, _IONBF, 0);
-    println(@string(`match_lost_wakeup: 1+1 fibers x ${OPS} ops (unbuffered, select/1case)`, @scratch)) !>;
+    println(@string(`match_lost_wakeup: 1+1 fibers x ${OPS} ops (unbuffered, select/1case)`, @scratch));
 
     int[~ >] tx_h;
     int[~ <] rx_h;

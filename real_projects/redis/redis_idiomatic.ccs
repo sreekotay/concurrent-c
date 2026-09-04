@@ -930,7 +930,7 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
 
 /* !> binders on CCIoError results project the as: CCError face into `e`. */
 static void redis_client_drop_log(const char* phase, CCError e) {
-    eprintln(@string(`redis_idiomatic: client drop: ${phase}: ${cc_error_str(e)}`, @scratch)) !>;
+    eprintln(@string(`redis_idiomatic: client drop: ${phase}: ${cc_error_str(e)}`, @scratch));
 }
 
 static bool redis_conn_write_err_now(RedisConn* conn, CCError e) {
@@ -960,16 +960,16 @@ static bool db_setup(RedisDb* db, size_t shard_count, const char* shard_src) {
         return 0;
     }
     if (!db_init(db, 1024, shard_count)) {
-        eprintln("redis_idiomatic: db_init failed (out of memory?)") !>;
+        eprintln("redis_idiomatic: db_init failed (out of memory?)");
         return 0;
     }
     const char* src = shard_src ? shard_src : "auto from ncpu";
     size_t nshards = db->shard_count;
-    eprintln(@string(`redis_idiomatic: shards=${nshards} (${src})`, @scratch)) !>;
+    eprintln(@string(`redis_idiomatic: shards=${nshards} (${src})`, @scratch));
     int preload_keys = db_preload_key_count();
     if (preload_keys > 0) {
         if (!db_preload_keys_ok(db, preload_keys)) {
-            eprintln("redis_idiomatic: preload failed") !>;
+            eprintln("redis_idiomatic: preload failed");
             return 0;
         }
         size_t preload_key_count = (size_t)preload_keys;
@@ -1078,7 +1078,7 @@ int main(int argc, char** argv) {
         char* end = NULL;
         long parsed = strtol(argv[1], &end, 10);
         if (end == argv[1] || (end && *end != 0) || parsed <= 0 || parsed > 65535) {
-            eprintln(@string(`invalid port: ${argv[1]}`, @scratch)) !>;
+            eprintln(@string(`invalid port: ${argv[1]}`, @scratch));
             return 1;
         }
         port = (int)parsed;
@@ -1087,7 +1087,7 @@ int main(int argc, char** argv) {
     CCString addr = @string(`127.0.0.1:${port}`, @scratch);
 
     CCListener ln = cc_tcp_listen(addr.as_slice()) !>(e) {
-        eprintln(@string(`listen error: ${e}`, @scratch)) !>;
+        eprintln(@string(`listen error: ${e}`, @scratch));
         return 1;
     };
     @defer ln.close();

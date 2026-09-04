@@ -33,8 +33,8 @@ void torture_nesting(int depth) {
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    println(@string(`=================================================================`, @scratch)) !>;
-    println(@string(`NURSERY TORTURE: Nesting ${TORTURE_DEPTH} levels of nurseries`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch));
+    println(@string(`NURSERY TORTURE: Nesting ${TORTURE_DEPTH} levels of nurseries`, @scratch));
     println(@string(`=================================================================
 `, @scratch)) !>;
 
@@ -45,11 +45,11 @@ int main(void) {
 Final Result: ${total}/${TORTURE_DEPTH} levels completed.`, @scratch)) !>;
 
     if (total == TORTURE_DEPTH) {
-        println(@string(`RESULT: PASS - The runtime handled extreme nesting!`, @scratch)) !>;
+        println(@string(`RESULT: PASS - The runtime handled extreme nesting!`, @scratch));
     } else {
-        println(@string(`RESULT: FAIL - Some levels were lost or the runtime crashed.`, @scratch)) !>;
+        println(@string(`RESULT: FAIL - Some levels were lost or the runtime crashed.`, @scratch));
     }
-    println(@string(`=================================================================`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch));
 
     return 0;
 }

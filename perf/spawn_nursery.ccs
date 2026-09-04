@@ -16,7 +16,7 @@ static double time_now_ms(void) {
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println("spawn_nursery: measuring nursery spawn throughput") !>;
+    println("spawn_nursery: measuring nursery spawn throughput");
 
     double start = time_now_ms();
 
@@ -40,7 +40,7 @@ int main(void) {
     int total_spawns = cc_atomic_load(counter_ptr);
     double spawns_per_sec = total_spawns / (elapsed / 1000.0);
 
-    println(@string(` nursery spawns: ${spawns_per_sec} spawns/sec (${elapsed} ms, total=${total_spawns})`, @scratch)) !>;
+    println(@string(` nursery spawns: ${spawns_per_sec} spawns/sec (${elapsed} ms, total=${total_spawns})`, @scratch));
 
     {
         cc_atomic_int par_counter = 0;
@@ -54,12 +54,12 @@ int main(void) {
         int par_total = cc_atomic_load(par_ptr);
         double par_per_sec = par_total / (elapsed / 1000.0);
         if (par_total != ITERATIONS) {
-            eprintln(@string(` par for: expected ${ITERATIONS} got ${par_total}`, @scratch)) !>;
+            eprintln(@string(` par for: expected ${ITERATIONS} got ${par_total}`, @scratch));
             return 1;
         }
-        println(@string(` par for: ${par_per_sec} spawns/sec (${elapsed} ms, total=${par_total})`, @scratch)) !>;
+        println(@string(` par for: ${par_per_sec} spawns/sec (${elapsed} ms, total=${par_total})`, @scratch));
     }
 
-    println("spawn_nursery: DONE") !>;
+    println("spawn_nursery: DONE");
     return 0;
 }

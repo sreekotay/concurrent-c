@@ -31,7 +31,7 @@ cc_atomic_int g_received = 0;
  */
 int test_consumer_outside(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`  consumer_outside: ${PRODUCERS} producers x ${ITEMS_PER_PRODUCER} items`, @scratch)) !>;
+    println(@string(`  consumer_outside: ${PRODUCERS} producers x ${ITEMS_PER_PRODUCER} items`, @scratch));
     
     cc_atomic_store(&g_sent, 0);
     cc_atomic_store(&g_received, 0);
@@ -79,7 +79,7 @@ int test_consumer_outside(void) {
     
     int sent = cc_atomic_load(&g_sent);
     int recv = cc_atomic_load(&g_received);
-    println(@string(`  consumer_outside: sent=${sent}, received=${recv}`, @scratch)) !>;
+    println(@string(`  consumer_outside: sent=${sent}, received=${recv}`, @scratch));
     
     return (sent == recv && sent == PRODUCERS * ITEMS_PER_PRODUCER) ? 0 : 1;
 }
@@ -89,7 +89,7 @@ int test_consumer_outside(void) {
  */
 int test_block_all_compute(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    println(@string(`  block_all_compute: 10 rounds x 8 tasks`, @scratch)) !>;
+    println(@string(`  block_all_compute: 10 rounds x 8 tasks`, @scratch));
     
     int total_sum = 0;
     
@@ -102,7 +102,7 @@ int test_block_all_compute(void) {
         intptr_t results[8];
         int err = cc_block_all(8, tasks, results);
         if (err != 0) {
-            println(@string(`  block_all_compute: round ${round} failed err=${err}`, @scratch)) !>;
+            println(@string(`  block_all_compute: round ${round} failed err=${err}`, @scratch));
             return 1;
         }
         
@@ -111,7 +111,7 @@ int test_block_all_compute(void) {
         }
     }
     
-    println(@string(`  block_all_compute: total_sum=${total_sum}`, @scratch)) !>;
+    println(@string(`  block_all_compute: total_sum=${total_sum}`, @scratch));
     return 0;
 }
 
@@ -120,7 +120,7 @@ int test_block_all_compute(void) {
  */
 int test_block_race_compute(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    println(@string(`  block_race_compute: 10 races x 4 tasks`, @scratch)) !>;
+    println(@string(`  block_race_compute: 10 races x 4 tasks`, @scratch));
     
     for (int round = 0; round < 10; round++) {
         CCTaskIntptr tasks[4];
@@ -132,30 +132,30 @@ int test_block_race_compute(void) {
         intptr_t result;
         int err = cc_block_race(4, tasks, &winner, &result);
         if (err != 0) {
-            println(@string(`  block_race_compute: round ${round} failed err=${err}`, @scratch)) !>;
+            println(@string(`  block_race_compute: round ${round} failed err=${err}`, @scratch));
             return 1;
         }
     }
     
-    println(@string(`  block_race_compute: PASS`, @scratch)) !>;
+    println(@string(`  block_race_compute: PASS`, @scratch));
     return 0;
 }
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    println(@string(`spawn_async_mixed: starting`, @scratch)) !>;
+    println(@string(`spawn_async_mixed: starting`, @scratch));
     
     int err = 0;
     
     err = test_consumer_outside();
-    if (err != 0) { println(@string(`FAIL: consumer_outside`, @scratch)) !>; return err; }
+    if (err != 0) { println(@string(`FAIL: consumer_outside`, @scratch)); return err; }
     
     err = test_block_all_compute();
-    if (err != 0) { println(@string(`FAIL: block_all_compute`, @scratch)) !>; return err; }
+    if (err != 0) { println(@string(`FAIL: block_all_compute`, @scratch)); return err; }
     
     err = test_block_race_compute();
-    if (err != 0) { println(@string(`FAIL: block_race_compute`, @scratch)) !>; return err; }
+    if (err != 0) { println(@string(`FAIL: block_race_compute`, @scratch)); return err; }
     
-    println(@string(`spawn_async_mixed: PASS`, @scratch)) !>;
+    println(@string(`spawn_async_mixed: PASS`, @scratch));
     return 0;
 }

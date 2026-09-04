@@ -114,13 +114,13 @@ static bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
     CCResult_size_t_CCIoError wr = cc_file_write(f, data);
     if (cc_is_err(wr)) {
         CCIoError err = cc_unwrap_err_as(wr, CCIoError);
-        eprintln(@string(`${what} failed kind=${err.base.kind} os=${err.os_code}`, @scratch)) !>;
+        eprintln(@string(`${what} failed kind=${err.base.kind} os=${err.os_code}`, @scratch));
         cc_atomic_store(&g_pipeline_error, 1);
         return false;
     }
     size_t n = cc_unwrap_as(wr, size_t);
     if (n != data.len) {
-        eprintln(@string(`${what} short write ${n}/${data.len}`, @scratch)) !>;
+        eprintln(@string(`${what} short write ${n}/${data.len}`, @scratch));
         cc_atomic_store(&g_pipeline_error, 1);
         return false;
     }
@@ -140,7 +140,7 @@ static int pthread_task_recv(CCChanRx rx, CompressedResult** out) {
     if (rc == EPIPE) return 0;
     if (rc != 0) return -1;
     if (task.kind != CC_TASK_KIND_SPAWN) {
-        eprintln(@string(`pthread_task_recv: expected SPAWN task, kind=${(int)task.kind}`, @scratch)) !>;
+        eprintln(@string(`pthread_task_recv: expected SPAWN task, kind=${(int)task.kind}`, @scratch));
         return -1;
     }
     *out = (CompressedResult*)cc_block_on_intptr(task);
@@ -152,13 +152,13 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     cc_atomic_store(&g_pipeline_error, 0);
     
     CCFile in_file = cc_file_open(cc_slice_cstr(in_path)) !>(e) {
-        eprintln(@string(`Failed to open input: ${in_path}`, @scratch)) !>;
+        eprintln(@string(`Failed to open input: ${in_path}`, @scratch));
         return 1;
     } @destroy;
 
     CCFile out_file = CC_FILE_CLOSED @destroy;
     out_file.create(out_path) !>(e) {
-        eprintln(@string(`Failed to open output: ${out_path}`, @scratch)) !>;
+        eprintln(@string(`Failed to open output: ${out_path}`, @scratch));
         return 1;
     };
 
@@ -178,13 +178,13 @@ int compress_file(const char* in_path, const char* out_path, int level) {
         int rc;
         while ((rc = pthread_task_recv(tasks_rx, &r)) == 1) {
             if (!r) {
-                eprintln(@string(`compress task failed (OOM or zlib error)`, @scratch)) !>;
+                eprintln(@string(`compress task failed (OOM or zlib error)`, @scratch));
                 cc_atomic_store(&g_pipeline_error, 1);
                 tasks_rx.close_with(cc_io_error(CC_IO_OTHER));
                 break;
             }
             if (r->seq != expect_seq) {
-                eprintln(@string(`ORDER: expected=${expect_seq} got=${r->seq}`, @scratch)) !>;
+                eprintln(@string(`ORDER: expected=${expect_seq} got=${r->seq}`, @scratch));
                 cc_atomic_store(&g_pipeline_error, 1);
             }
             expect_seq++;
@@ -233,7 +233,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             
             CCTask task = cc_thread_spawn(compress_task_wrapper, blk);
             if (task.kind != CC_TASK_KIND_SPAWN) {
-                eprintln(@string(`cc_thread_spawn failed seq=${blk->seq}`, @scratch)) !>;
+                eprintln(@string(`cc_thread_spawn failed seq=${blk->seq}`, @scratch));
                 cc_arena_free(&blk->arena);
                 cc_atomic_store(&g_pipeline_error, 1);
                 break;
@@ -256,7 +256,7 @@ int main(int argc, char *argv[]) {
     @errhandler(CCError e) { return cc_err_log(e); }
 
     if (argc < 2) {
-        eprintln(@string(`Usage: ${argv[0]} <file>`, @scratch)) !>;
+        eprintln(@string(`Usage: ${argv[0]} <file>`, @scratch));
         return 1;
     }
 
@@ -271,9 +271,9 @@ int main(int argc, char *argv[]) {
         long long bin = (long long)cc_atomic_load(&g_bytes_in);
         long long bout = (long long)cc_atomic_load(&g_bytes_out);
         int blocks = cc_atomic_load(&g_blocks_done);
-        println(@string(`Compressed ${in_path} -> ${out_name}`, @scratch)) !>;
+        println(@string(`Compressed ${in_path} -> ${out_name}`, @scratch));
         println(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
-                        @scratch)) !>;
+                        @scratch));
     }
 
     return ret;

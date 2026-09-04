@@ -82,7 +82,7 @@ int main(int argc, char **argv) {
     double bytes = m.render(xv, yv, out_path) !>;
     double ms = now_ms() - t0;
 
-    if (bytes <= 0) { eprintln("render produced no output") !>; return 1; }
-    println(@string(`n=${n} render=${ms} ms ${out_path} (${bytes} bytes)`, @scratch)) !>;
+    if (bytes <= 0) { eprintln("render produced no output"); return 1; }
+    println(@string(`n=${n} render=${ms} ms ${out_path} (${bytes} bytes)`, @scratch));
     return 0;
 }

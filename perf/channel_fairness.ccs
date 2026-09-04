@@ -29,21 +29,21 @@ cc_atomic_int g_worker_counts[NUM_WORKERS];
 
 void print_distribution(const char* label) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`\n=== ${label} ===`, @scratch)) !>;
-    println("Distribution:") !>;
+    println(@string(`\n=== ${label} ===`, @scratch));
+    println("Distribution:");
     int total = 0;
     for (int i = 0; i < NUM_WORKERS; i++) {
         int count = cc_atomic_load(&g_worker_counts[i]);
         total += count;
         float pct = 100.0f * count / NUM_ITEMS;
-        println(@string(` Worker ${i}: ${count} items (${pct}%)`, @scratch)) !>;
-        println(" |") !>;
+        println(@string(` Worker ${i}: ${count} items (${pct}%)`, @scratch));
+        println(" |");
         int bar_len = (count * 40) / NUM_ITEMS;
-        for (int j = 0; j < bar_len; j++) println("#") !>;
-        for (int j = bar_len; j < 40; j++) println(" ") !>;
-        println("|") !>;
+        for (int j = 0; j < bar_len; j++) println("#");
+        for (int j = bar_len; j < 40; j++) println(" ");
+        println("|");
     }
-    println(@string(` Total: ${total} (expected ${NUM_ITEMS})`, @scratch)) !>;
+    println(@string(` Total: ${total} (expected ${NUM_ITEMS})`, @scratch));
     
     int expected_per_worker = NUM_ITEMS / NUM_WORKERS;
     int max_count = 0, min_count = NUM_ITEMS;
@@ -53,7 +53,7 @@ void print_distribution(const char* label) {
         if (count < min_count) min_count = count;
     }
     float imbalance = (float)(max_count - min_count) / expected_per_worker * 100;
-    println(@string(` Imbalance: ${imbalance}% (max=${max_count}, min=${min_count}, expected~${expected_per_worker})`, @scratch)) !>;
+    println(@string(` Imbalance: ${imbalance}% (max=${max_count}, min=${min_count}, expected~${expected_per_worker})`, @scratch));
 }
 
 /* Test 1: Large buffer - demonstrates unfairness */
@@ -141,27 +141,27 @@ void run_test_small_buffer(void) {
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    println("Channel Fairness Benchmark") !>;
-    println("==========================") !>;
-    println("Demonstrates fiber scheduler fairness issue.") !>;
-    println(@string(`\n${NUM_WORKERS} workers competing for ${NUM_ITEMS} items.`, @scratch)) !>;
-    println(@string(`Fair distribution: ~${NUM_ITEMS / NUM_WORKERS} items/worker.`, @scratch)) !>;
+    println("Channel Fairness Benchmark");
+    println("==========================");
+    println("Demonstrates fiber scheduler fairness issue.");
+    println(@string(`\n${NUM_WORKERS} workers competing for ${NUM_ITEMS} items.`, @scratch));
+    println(@string(`Fair distribution: ~${NUM_ITEMS / NUM_WORKERS} items/worker.`, @scratch));
     
     run_test_large_buffer();
     run_test_small_buffer();
     
-    println("") !>;
-    println("Root Cause:") !>;
-    println("-----------") !>;
-    println("When chan_send wakes a waiting receiver, the sender") !>;
-    println("continues running without yielding. With large buffers,") !>;
-    println("the producer fills the buffer before workers wake,") !>;
-    println("then one worker drains everything.") !>;
-    println("") !>;
-    println("Fix Options:") !>;
-    println("1. chan_send yields to woken waiter (immediate fairness)") !>;
-    println("2. FIFO wake + preemptive scheduling (OS-level fairness)") !>;
-    println("3. Work-stealing with fair queue (runtime change)") !>;
+    println("");
+    println("Root Cause:");
+    println("-----------");
+    println("When chan_send wakes a waiting receiver, the sender");
+    println("continues running without yielding. With large buffers,");
+    println("the producer fills the buffer before workers wake,");
+    println("then one worker drains everything.");
+    println("");
+    println("Fix Options:");
+    println("1. chan_send yields to woken waiter (immediate fairness)");
+    println("2. FIFO wake + preemptive scheduling (OS-level fairness)");
+    println("3. Work-stealing with fair queue (runtime change)");
     
     return 0;
 }

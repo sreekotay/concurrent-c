@@ -18,7 +18,7 @@ CCArena a = cc_arena_heap(megabytes(2)) @destroy;
 char tmpl[] = "/tmp/cc_oot_mod.XXXXXX";
 char* dir = mkdtemp(tmpl);
 if (!dir) {
-    "FAIL out-of-tree-module-smoke: mkdtemp".eprintln() !>;
+    "FAIL out-of-tree-module-smoke: mkdtemp".eprintln();
     return 1;
 }
 
@@ -30,7 +30,7 @@ snprintf(dst_path, sizeof(dst_path), "%s/ic_mod.ccs", dir);
         @slice("tests/out_of_tree_module_mod.ccs"),
         char_to_slice_n(dst_path, strlen(dst_path)), &a);
     if (!cp.ok) {
-        "FAIL out-of-tree-module-smoke: copy".eprintln() !>;
+        "FAIL out-of-tree-module-smoke: copy".eprintln();
         rmdir(dir);
         return 1;
     }
@@ -48,7 +48,7 @@ unlink("bin/ic_counter.node"); /* stale from a prior run */
     if (rc != 0) {
         CCString em = @string(
             `FAIL out-of-tree-module-smoke: ccc build exited ${rc}`, &a);
-        em.eprintln() !>;
+        em.eprintln();
         if (out.stdout_data.ptr && out.stdout_data.len)
             fwrite(out.stdout_data.ptr, 1, out.stdout_data.len, stderr);
         unlink(dst_path);
@@ -58,12 +58,12 @@ unlink("bin/ic_counter.node"); /* stale from a prior run */
 
 /* Checkout `ccc` places the artifact under the repo's bin/. */
 if (access("bin/ic_counter.node", F_OK) != 0) {
-    "FAIL out-of-tree-module-smoke: missing bin/ic_counter.node".eprintln() !>;
+    "FAIL out-of-tree-module-smoke: missing bin/ic_counter.node".eprintln();
     unlink(dst_path);
     return 1;
 }
 
 unlink(dst_path);
 unlink("bin/ic_counter.node");
-"OK out-of-tree-module-smoke".println() !>;
+"OK out-of-tree-module-smoke".println();
 return 0;

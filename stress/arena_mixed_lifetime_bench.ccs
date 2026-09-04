@@ -74,7 +74,7 @@ int main(void) {
     order = (size_t *)malloc(n * sizeof(size_t));
     if (!ptrs || !sizes || !alive || !order) return 1;
 
-    println(@string(`mixed_lifetime(cc arena+release): n=${n} root=${root} seed=${seed}`, @scratch)) !>;
+    println(@string(`mixed_lifetime(cc arena+release): n=${n} root=${root} seed=${seed}`, @scratch));
 
     m0 = stress_mem_sample();
     rss0 = m0.ok ? m0.current : 0;
@@ -173,7 +173,7 @@ int main(void) {
     cgroup_peak = m1.cgroup_ok ? m1.cgroup_peak : 0;
 
     size_t hwm_out = m1.hwm_ok ? m1.hwm : 0;
-    println(@string(`RESULT lang=cc strategy=arena_release n=${n} freed=${freed} peak_live=${peak_live} root=${root} peak_gross=${peak_gross} peak_ovf=${peak_ovf} alloc_ms=$~float_dec(3){alloc_ms} midfree_ms=$~float_dec(3){midfree_ms} grow_ms=$~float_dec(3){grow_ms} reclaim_ms=$~float_dec(3){reclaim_ms} total_ms=$~float_dec(3){total_ms} rss_peak_delta=${(ssize_t)best_peak - (ssize_t)rss0} rss_end_delta=${(ssize_t)rss1 - (ssize_t)rss0} hwm=${hwm_out} cgroup_peak=${cgroup_peak} sink=${(size_t)sink}`, @scratch)) !>;
+    println(@string(`RESULT lang=cc strategy=arena_release n=${n} freed=${freed} peak_live=${peak_live} root=${root} peak_gross=${peak_gross} peak_ovf=${peak_ovf} alloc_ms=$~float_dec(3){alloc_ms} midfree_ms=$~float_dec(3){midfree_ms} grow_ms=$~float_dec(3){grow_ms} reclaim_ms=$~float_dec(3){reclaim_ms} total_ms=$~float_dec(3){total_ms} rss_peak_delta=${(ssize_t)best_peak - (ssize_t)rss0} rss_end_delta=${(ssize_t)rss1 - (ssize_t)rss0} hwm=${hwm_out} cgroup_peak=${cgroup_peak} sink=${(size_t)sink}`, @scratch));
 
     free(ptrs);
     free(sizes);

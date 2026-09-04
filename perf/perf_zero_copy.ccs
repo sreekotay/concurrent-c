@@ -49,7 +49,7 @@ static void bench_int(void) {
     double elapsed = time_now_ms() - start;
     double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
     
-    println(@string(` int (4 bytes): ${ops_per_sec} ops/sec (${elapsed} ms)`, @scratch)) !>;
+    println(@string(` int (4 bytes): ${ops_per_sec} ops/sec (${elapsed} ms)`, @scratch));
     tx.close();
 }
 
@@ -72,7 +72,7 @@ static void bench_small(void) {
     double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
     double mb_per_sec = (ITERATIONS * sizeof(Small) / 1048576.0) / (elapsed / 1000.0);
     
-    println(@string(` Small (${sizeof(Small)}u bytes): ${ops_per_sec} ops/sec, ${mb_per_sec} MB/sec`, @scratch)) !>;
+    println(@string(` Small (${sizeof(Small)}u bytes): ${ops_per_sec} ops/sec, ${mb_per_sec} MB/sec`, @scratch));
     tx.close();
 }
 
@@ -96,7 +96,7 @@ static void bench_medium(void) {
     double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
     double mb_per_sec = (ITERATIONS * sizeof(Medium) / 1048576.0) / (elapsed / 1000.0);
     
-    println(@string(` Medium (${sizeof(Medium)}u bytes): ${ops_per_sec} ops/sec, ${mb_per_sec} MB/sec`, @scratch)) !>;
+    println(@string(` Medium (${sizeof(Medium)}u bytes): ${ops_per_sec} ops/sec, ${mb_per_sec} MB/sec`, @scratch));
     tx.close();
 }
 
@@ -121,22 +121,22 @@ static void bench_large(void) {
     double ops_per_sec = iterations / (elapsed / 1000.0);
     double mb_per_sec = (iterations * sizeof(Large) / 1048576.0) / (elapsed / 1000.0);
     
-    println(@string(` Large (${sizeof(Large)}u bytes): ${ops_per_sec} ops/sec, ${mb_per_sec} MB/sec`, @scratch)) !>;
+    println(@string(` Large (${sizeof(Large)}u bytes): ${ops_per_sec} ops/sec, ${mb_per_sec} MB/sec`, @scratch));
     tx.close();
 }
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    println("perf_zero_copy: measuring channel throughput by payload size") !>;
+    println("perf_zero_copy: measuring channel throughput by payload size");
     
     bench_int();
     bench_small();
     bench_medium();
     bench_large();
     
-    println(" Note: For true zero-copy, use recv() -> send_take() pipeline") !>;
-    println(" with unique slices from channel receives.") !>;
+    println(" Note: For true zero-copy, use recv() -> send_take() pipeline");
+    println(" with unique slices from channel receives.");
     
-    println("perf_zero_copy: DONE") !>;
+    println("perf_zero_copy: DONE");
     return 0;
 }

@@ -476,13 +476,13 @@ fm_mkdir_p("tools/fuzz_findings");
     }
 }
 if (g_ncorpus == 0) {
-    "fuzz_mutate: empty corpus".eprintln() !>;
+    "fuzz_mutate: empty corpus".eprintln();
     return 2;
 }
 {
     CCString m = @string(
         `fuzz_mutate: corpus ${g_ncorpus} files (${g_ncomptime} comptime-biased)`, &a);
-    m.println() !>;
+    m.println();
 }
 
 /* ---- fuzz loop ---- */
@@ -594,6 +594,6 @@ long findings = f_signal + f_timeout + f_internal + f_badc;
     CCString m = @string(
         `fuzz_mutate: seed=${(long)seed} iterations=${iters} pass=${passes} findings=${findings} (signal=${f_signal}, timeout=${f_timeout}, internal=${f_internal}, accept_bad_c=${f_badc}) unique_sigs=${(long)g_nsigs} dup=${dup_findings}`,
         &a);
-    m.println() !>;
+    m.println();
 }
 return findings > 0 ? 1 : 0;

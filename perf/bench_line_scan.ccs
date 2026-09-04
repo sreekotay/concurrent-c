@@ -91,7 +91,7 @@ static ScanStats scan_slurp(const char* path) {
 
     CCSlice !>(CCIoError) rr = cc_file_read_all(&f, a);
     if (cc_is_err(rr)) {
-        eprintln("bench_line_scan: read_all failed") !>;
+        eprintln("bench_line_scan: read_all failed");
         abort();
     }
     tally_blob(cc_value(rr), &s);
@@ -110,7 +110,7 @@ static ScanStats scan_sync(const char* path) {
         CCSlice line = cc_slice_empty();
         bool !>(CCIoError) got = cc_file_read_line_into(&f, scratch, &line);
         if (cc_is_err(got)) {
-            eprintln("bench_line_scan: read_line failed") !>;
+            eprintln("bench_line_scan: read_line failed");
             abort();
         }
         if (!cc_value(got)) break;
@@ -137,7 +137,7 @@ static ScanStats scan_chan(const char* path) {
                                         /*is_sync=*/false, CC_CHAN_TOPO_DEFAULT,
                                         /*is_ordered=*/false, &tx, &rx);
     if (!ch) {
-        eprintln(@string(`bench_line_scan: channel_pair failed (cap=${cap})`, @scratch)) !>;
+        eprintln(@string(`bench_line_scan: channel_pair failed (cap=${cap})`, @scratch));
         abort();
     }
     @defer ch.free();
@@ -214,7 +214,7 @@ static void report_mode(const char* name, double* samples, int n, double slurp_m
     double mb = (file_bytes * (double)passes) / (1024.0 * 1024.0);
     double mb_s = med > 0 ? mb / (med / 1000.0) : 0;
     double rel = slurp_med > 0 ? med / slurp_med : 0;
-    println(@string(`  ${name}  median ${med} ms  ${mb_s} MB/s  ${rel}x slurp  (lines=${st.lines} ctx=${st.ctx} ex=${st.ex})`, @scratch)) !>;
+    println(@string(`  ${name}  median ${med} ms  ${mb_s} MB/s  ${rel}x slurp  (lines=${st.lines} ctx=${st.ctx} ex=${st.ex})`, @scratch));
 }
 
 int main(int argc, char** argv) {
@@ -249,7 +249,7 @@ int main(int argc, char** argv) {
     int want_sync = !strcmp(mode, "all") || !strcmp(mode, "sync");
     int want_chan = !strcmp(mode, "all") || !strcmp(mode, "chan");
     if (!want_slurp && !want_sync && !want_chan) {
-        eprintln("bench_line_scan: mode must be all|slurp|sync|chan") !>;
+        eprintln("bench_line_scan: mode must be all|slurp|sync|chan");
         return 2;
     }
 
@@ -260,10 +260,10 @@ int main(int argc, char** argv) {
     int64_t file_bytes = (int64_t)hf.size() !>;
 
     if (!timed_only) {
-        println(@string(`bench_line_scan: path=${path} bytes=${(long long)file_bytes} samples=${samples} passes=${passes} mode=${mode} chan_cap=${g_chan_cap}u`, @scratch)) !>;
+        println(@string(`bench_line_scan: path=${path} bytes=${(long long)file_bytes} samples=${samples} passes=${passes} mode=${mode} chan_cap=${g_chan_cap}u`, @scratch));
         if (want_chan)
-            println(@string(`chan: buffered depth=${g_chan_cap}u LineMsg slots`, @scratch)) !>;
-        println(@string(`work: line count + count(\"${(const char*)k_ctx.ptr}\") + count(\"${(const char*)k_ex.ptr}\")`, @scratch)) !>;
+            println(@string(`chan: buffered depth=${g_chan_cap}u LineMsg slots`, @scratch));
+        println(@string(`work: line count + count(\"${(const char*)k_ctx.ptr}\") + count(\"${(const char*)k_ex.ptr}\")`, @scratch));
     }
 
     /*
@@ -283,7 +283,7 @@ int main(int argc, char** argv) {
             ScanStats a = scan_sync(path);
             if (!have_ref) { ref = a; have_ref = 1; }
             else if (!stats_eq(ref, a)) {
-                eprintln("bench_line_scan: FAIL sync mismatch") !>;
+                eprintln("bench_line_scan: FAIL sync mismatch");
                 return 1;
             }
         }
@@ -291,16 +291,16 @@ int main(int argc, char** argv) {
             ScanStats b = scan_chan(path);
             if (!have_ref) { ref = b; have_ref = 1; }
             else if (!stats_eq(ref, b)) {
-                eprintln("bench_line_scan: FAIL chan mismatch") !>;
+                eprintln("bench_line_scan: FAIL chan mismatch");
                 return 1;
             }
         }
-        println(@string(`check: lines=${(long long)ref.lines} ctx=${(long long)ref.ctx} ex=${(long long)ref.ex} reparse_sites=${(long long)(ref.ctx + ref.ex - 1)}`, @scratch)) !>;
+        println(@string(`check: lines=${(long long)ref.lines} ctx=${(long long)ref.ctx} ex=${(long long)ref.ex} reparse_sites=${(long long)(ref.ctx + ref.ex - 1)}`, @scratch));
     }
 
     /* samples=0: verify only (for vs_bash cold check). */
     if (samples == 0) {
-        println("bench_line_scan: DONE") !>;
+        println("bench_line_scan: DONE");
         return 0;
     }
 
@@ -321,11 +321,11 @@ int main(int argc, char** argv) {
         if (want_sync) sync_s[i] = time_mode(scan_sync, path, passes, &last);
         if (want_chan) chan_s[i] = time_mode(scan_chan, path, passes, &last);
         if (!timed_only) {
-            println(@string(` sample ${i + 1}:`, @scratch)) !>;
-            if (want_slurp) println(@string(` slurp=${slurp_s[i]}`, @scratch)) !>;
-            if (want_sync) println(@string(` sync=${sync_s[i]}`, @scratch)) !>;
-            if (want_chan) println(@string(` chan=${chan_s[i]}`, @scratch)) !>;
-            println(" ms") !>;
+            println(@string(` sample ${i + 1}:`, @scratch));
+            if (want_slurp) println(@string(` slurp=${slurp_s[i]}`, @scratch));
+            if (want_sync) println(@string(` sync=${sync_s[i]}`, @scratch));
+            if (want_chan) println(@string(` chan=${chan_s[i]}`, @scratch));
+            println(" ms");
         }
     }
 
@@ -336,13 +336,13 @@ int main(int argc, char** argv) {
         sort_doubles(slurp_s, samples);
         slurp_med = slurp_s[samples / 2];
     }
-    println("---") !>;
+    println("---");
     if (want_slurp)
         report_mode("slurp", slurp_s, samples, slurp_med, ref, file_bytes, passes);
     if (want_sync)
         report_mode("sync", sync_s, samples, slurp_med, ref, file_bytes, passes);
     if (want_chan)
         report_mode("chan", chan_s, samples, slurp_med, ref, file_bytes, passes);
-    println("bench_line_scan: DONE") !>;
+    println("bench_line_scan: DONE");
     return 0;
 }

@@ -65,8 +65,8 @@ static double report_ns(const char *mode, long long per) {
     @errhandler(CCError e) cc_error_exit(e);
     double m = median(g_ms, g_samples);
     double ns = m * 1e6 / (double)per;
-    println(@string(` ${mode} ${m} ms ${ns} ns/call`, @scratch)) !>;
-    println(@string(`RESULT scalar ${mode} ns_per_call ${ns}`, @scratch)) !>;
+    println(@string(` ${mode} ${m} ms ${ns} ns/call`, @scratch));
+    println(@string(`RESULT scalar ${mode} ns_per_call ${ns}`, @scratch));
     return ns;
 }
 
@@ -94,8 +94,8 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    println(@string(`js_fn_baseline iters=${iters} samples=${g_samples}`, @scratch)) !>;
-    println("scalar (ns/call)") !>;
+    println(@string(`js_fn_baseline iters=${iters} samples=${g_samples}`, @scratch));
+    println("scalar (ns/call)");
 
     want = want_sum(7, iters);
     for (s = 0; s < g_samples; s++) {
@@ -103,7 +103,7 @@ int main(int argc, char **argv) {
         long long r = add_k_c(7, iters);
         g_ms[s] = now_ms() - t0;
         if (r != want) {
-            eprintln(@string(`MISMATCH c_native: want=${want} got=${r}`, @scratch)) !>;
+            eprintln(@string(`MISMATCH c_native: want=${want} got=${r}`, @scratch));
             return 1;
         }
     }
@@ -140,7 +140,7 @@ int main(int argc, char **argv) {
             got = r;
         }
         if (got != want) {
-            eprintln(@string(`MISMATCH js_call: want=${want} got=${got}`, @scratch)) !>;
+            eprintln(@string(`MISMATCH js_call: want=${want} got=${got}`, @scratch));
             return 1;
         }
         ns_js = report_ns("js_call", iters);
@@ -153,12 +153,12 @@ int main(int argc, char **argv) {
             got = r;
         }
         if (got != want) {
-            eprintln(@string(`MISMATCH js_fn: want=${want} got=${got}`, @scratch)) !>;
+            eprintln(@string(`MISMATCH js_fn: want=${want} got=${got}`, @scratch));
             return 1;
         }
         ns_fn = report_ns("js_fn", iters);
-        println(@string(` js_fn ratio js_fn/js_call ${ns_js > 0 ? ns_fn / ns_js : 0.0}x`, @scratch)) !>;
-        println(@string(`RESULT ratio js_fn_over_js_call ${ns_js > 0 ? ns_fn / ns_js : 0.0}`, @scratch)) !>;
+        println(@string(` js_fn ratio js_fn/js_call ${ns_js > 0 ? ns_fn / ns_js : 0.0}x`, @scratch));
+        println(@string(`RESULT ratio js_fn_over_js_call ${ns_js > 0 ? ns_fn / ns_js : 0.0}`, @scratch));
     }
 
     return 0;

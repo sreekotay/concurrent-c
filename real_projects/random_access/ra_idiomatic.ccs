@@ -163,18 +163,18 @@ int main(int argc, char** argv) {
     else
         mode = "smp";
     if (strcmp(mode, "smp") != 0 && strcmp(mode, "smp-atomic") != 0) {
-        io.println("mode must be smp|smp-atomic") !>;
+        io.println("mode must be smp|smp-atomic");
         return 2;
     }
 
     bits = env_int("TABLE_BITS", env_truth("RA_SMOKE") ? 16 : 26);
     workers = env_int("WORKERS", 4);
     if (bits < RA_MIN_BITS || bits > RA_MAX_BITS) {
-        io.println(@string(`TABLE_BITS must be ${lo}..${hi}`, @scratch)) !>;
+        io.println(@string(`TABLE_BITS must be ${lo}..${hi}`, @scratch));
         return 2;
     }
     if (workers < 1 || workers > RA_MAX_WORKERS) {
-        io.println(@string(`WORKERS must be 1..${maxw}`, @scratch)) !>;
+        io.println(@string(`WORKERS must be 1..${maxw}`, @scratch));
         return 2;
     }
 
@@ -182,6 +182,6 @@ int main(int argc, char** argv) {
     errors = run_smp(bits, workers, strcmp(mode, "smp-atomic") == 0, &seconds) !>;
     gups = (seconds > 0.0) ? ((double)nupdate / seconds / 1.0e9) : 0.0;
     frac = (nupdate > 0) ? ((double)errors / (double)nupdate) : 0.0;
-    io.println(@string(`gups impl=cc mode=${mode} table_bits=${bits} nupdate=${nupdate} seconds=${seconds} workers=${workers} errors=${errors} error_frac=${frac} gups=${gups}`, @scratch)) !>;
+    io.println(@string(`gups impl=cc mode=${mode} table_bits=${bits} nupdate=${nupdate} seconds=${seconds} workers=${workers} errors=${errors} error_frac=${frac} gups=${gups}`, @scratch));
     return (errors <= nupdate / 100) ? 0 : 1;
 }

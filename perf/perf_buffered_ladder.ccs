@@ -58,7 +58,7 @@ static double bench_loop_local_once(void) {
     }
     double elapsed = time_now_ms() - start;
     if (checksum_a < 0 || checksum_b < 0) {
-        eprintln(@string(`impossible checksums=${(long long)checksum_a},${(long long)checksum_b}`, @scratch)) !>;
+        eprintln(@string(`impossible checksums=${(long long)checksum_a},${(long long)checksum_b}`, @scratch));
     }
     return (g_iterations * 2.0) / (elapsed / 1000.0);
 }
@@ -75,7 +75,7 @@ static double bench_loop_two_fiber_once(void) {
                 local += i;
             }
             if (local < 0) {
-                eprintln(@string(`impossible local=${(long long)local}`, @scratch)) !>;
+                eprintln(@string(`impossible local=${(long long)local}`, @scratch));
             }
         }) !>;
         __cc_nursery165.spawn(() => {
@@ -84,7 +84,7 @@ static double bench_loop_two_fiber_once(void) {
                 local += i;
             }
             if (local < 0) {
-                eprintln(@string(`impossible local=${(long long)local}`, @scratch)) !>;
+                eprintln(@string(`impossible local=${(long long)local}`, @scratch));
             }
         }) !>;
     
@@ -109,7 +109,7 @@ static double bench_chan_single_once(void) {
     }
     double elapsed = time_now_ms() - start;
     if (checksum < 0) {
-        eprintln(@string(`impossible checksum=${(long long)checksum}`, @scratch)) !>;
+        eprintln(@string(`impossible checksum=${(long long)checksum}`, @scratch));
     }
     tx_h.close();
     return (g_iterations * 2.0) / (elapsed / 1000.0);
@@ -140,7 +140,7 @@ static double bench_chan_two_fiber_once(void) {
                 checksum += v;
             }
             if (checksum < 0) {
-                eprintln(@string(`impossible checksum=${(long long)checksum}`, @scratch)) !>;
+                eprintln(@string(`impossible checksum=${(long long)checksum}`, @scratch));
             }
         }) !>;
     
@@ -162,7 +162,7 @@ int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     g_iterations = env_int_or("CC_BUF_ITERS", DEFAULT_ITERATIONS);
     g_samples = env_int_or("CC_BUF_SAMPLES", DEFAULT_SAMPLES);
-    println(@string(`perf_buffered_ladder: cap=${CHANNEL_CAPACITY} iters=${g_iterations} samples=${g_samples}`, @scratch)) !>;
+    println(@string(`perf_buffered_ladder: cap=${CHANNEL_CAPACITY} iters=${g_iterations} samples=${g_samples}`, @scratch));
     (void)bench_chan_two_fiber_once(); /* warmup */
 
     double loop_local = median_ops(bench_loop_local_once);
@@ -170,20 +170,20 @@ int main(void) {
     double chan_single = median_ops(bench_chan_single_once);
     double chan_two_fiber = median_ops(bench_chan_two_fiber_once);
 
-    println(@string(` local loop only: ${loop_local} ops/sec`, @scratch)) !>;
-    println(@string(` two-fiber loop only: ${loop_two_fiber} ops/sec`, @scratch)) !>;
-    println(@string(` channel single-thread pair: ${chan_single} ops/sec`, @scratch)) !>;
-    println(@string(` channel buffered 2-fiber: ${chan_two_fiber} ops/sec`, @scratch)) !>;
+    println(@string(` local loop only: ${loop_local} ops/sec`, @scratch));
+    println(@string(` two-fiber loop only: ${loop_two_fiber} ops/sec`, @scratch));
+    println(@string(` channel single-thread pair: ${chan_single} ops/sec`, @scratch));
+    println(@string(` channel buffered 2-fiber: ${chan_two_fiber} ops/sec`, @scratch));
 
-    println(" overhead vs local loop:") !>;
-    println(@string(` two-fiber loop: ${(loop_two_fiber / loop_local) * 100.0}%`, @scratch)) !>;
-    println(@string(` chan single: ${(chan_single / loop_local) * 100.0}%`, @scratch)) !>;
-    println(@string(` chan 2-fiber: ${(chan_two_fiber / loop_local) * 100.0}%`, @scratch)) !>;
-    println(" overhead vs two-fiber loop:") !>;
-    println(@string(` chan single: ${(chan_single / loop_two_fiber) * 100.0}%`, @scratch)) !>;
-    println(@string(` chan 2-fiber: ${(chan_two_fiber / loop_two_fiber) * 100.0}%`, @scratch)) !>;
-    println(@string(` buffered vs single-thread channel: ${(chan_two_fiber / chan_single) * 100.0}%`, @scratch)) !>;
+    println(" overhead vs local loop:");
+    println(@string(` two-fiber loop: ${(loop_two_fiber / loop_local) * 100.0}%`, @scratch));
+    println(@string(` chan single: ${(chan_single / loop_local) * 100.0}%`, @scratch));
+    println(@string(` chan 2-fiber: ${(chan_two_fiber / loop_local) * 100.0}%`, @scratch));
+    println(" overhead vs two-fiber loop:");
+    println(@string(` chan single: ${(chan_single / loop_two_fiber) * 100.0}%`, @scratch));
+    println(@string(` chan 2-fiber: ${(chan_two_fiber / loop_two_fiber) * 100.0}%`, @scratch));
+    println(@string(` buffered vs single-thread channel: ${(chan_two_fiber / chan_single) * 100.0}%`, @scratch));
 
-    println("perf_buffered_ladder: DONE") !>;
+    println("perf_buffered_ladder: DONE");
     return 0;
 }

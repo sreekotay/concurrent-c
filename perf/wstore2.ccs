@@ -644,7 +644,7 @@ static void workload(Work* w) {
     double t_end = now_us() + w->seconds * 1e6;
     double t_next = now_us() + 1e6;
     memset(val, 'v', sizeof val);
-    println("#      t_s      keys logical_KiB commit_KiB rss_KiB drains dropped reinsert  waves rehash") !>;
+    println("#      t_s      keys logical_KiB commit_KiB rss_KiB drains dropped reinsert  waves rehash");
     for (long i = 0; ; i++) {
         double t = now_us();
         int64_t now;
@@ -699,7 +699,7 @@ static void workload(Work* w) {
                     ? @string(`?`, @scratch)
                     : @string(`${rss}`, @scratch);
                 size_t keys = s->map->len() + (s->rehashing ? s->old_map->len() : 0);
-                println(@string(`  ${(t - (t_end - w->seconds * 1e6)) / 1e6} ${keys} ${shard_logical(s) / 1024} ${shard_committed(s) / 1024} ${rss_str} ${s->drains} ${s->dropped} ${s->reinserted} ${s->waves} ${s->rehashes}`, @scratch)) !>;
+                println(@string(`  ${(t - (t_end - w->seconds * 1e6)) / 1e6} ${keys} ${shard_logical(s) / 1024} ${shard_committed(s) / 1024} ${rss_str} ${s->drains} ${s->dropped} ${s->reinserted} ${s->waves} ${s->rehashes}`, @scratch));
             }
             fflush(stdout);
         }
@@ -720,7 +720,7 @@ int main(int argc, char** argv) {
 
     shard_init(&s, theta, wave, sweep) !>;
     @defer shard_free(&s);
-    println(@string(`# wstore2 seconds=${seconds} sweep=${sweep} theta=${theta} wave_recs=${wave} wheel=100ms x64, 1s x64, 60s x60`, @scratch)) !>;
+    println(@string(`# wstore2 seconds=${seconds} sweep=${sweep} theta=${theta} wave_recs=${wave} wheel=100ms x64, 1s x64, 60s x60`, @scratch));
 
     w.s = &s;
     w.seconds = seconds;
@@ -736,7 +736,7 @@ int main(int argc, char** argv) {
             sweep_kick(sp);
         }) !>;
     }
-    println(@string(`# ops=${w.ops}  drains=${s.drains} drained_recs=${s.drained_recs} dropped=${s.dropped} reinserted=${s.reinserted} rehashes=${s.rehashes}`, @scratch)) !>;
-    println(@string(`# waves=${s.waves} mean=${s.waves ? s.wave_sum_us / s.waves : 0} us max=${s.wave_max_us} us (budget ${wave} recs)`, @scratch)) !>;
+    println(@string(`# ops=${w.ops}  drains=${s.drains} drained_recs=${s.drained_recs} dropped=${s.dropped} reinserted=${s.reinserted} rehashes=${s.rehashes}`, @scratch));
+    println(@string(`# waves=${s.waves} mean=${s.waves ? s.wave_sum_us / s.waves : 0} us max=${s.wave_max_us} us (budget ${wave} recs)`, @scratch));
     return 0;
 }

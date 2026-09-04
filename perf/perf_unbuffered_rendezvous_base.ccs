@@ -80,7 +80,7 @@ static double run_once(void) {
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    println(@string(`perf_unbuffered_rendezvous_base: producers=${PRODUCERS} consumers=${CONSUMERS} iters=${ITERS_PER_PRODUCER}`, @scratch)) !>;
+    println(@string(`perf_unbuffered_rendezvous_base: producers=${PRODUCERS} consumers=${CONSUMERS} iters=${ITERS_PER_PRODUCER}`, @scratch));
 
     (void)run_once();
 
@@ -89,13 +89,13 @@ int main(void) {
     for (int i = 0; i < SAMPLES; i++) {
         elapsed_ms[i] = run_once();
         ops_sec[i] = (TOTAL_MESSAGES * 2.0) / (elapsed_ms[i] / 1000.0);
-        println(@string(` run ${i + 1}: ${ops_sec[i]} ops/sec (${elapsed_ms[i]} ms)`, @scratch)) !>;
+        println(@string(` run ${i + 1}: ${ops_sec[i]} ops/sec (${elapsed_ms[i]} ms)`, @scratch));
     }
 
     sort_doubles(ops_sec, SAMPLES);
     sort_doubles(elapsed_ms, SAMPLES);
     int mid = SAMPLES / 2;
-    println(@string(` median: ${ops_sec[mid]} ops/sec (${elapsed_ms[mid]} ms)`, @scratch)) !>;
-    println("perf_unbuffered_rendezvous_base: DONE") !>;
+    println(@string(` median: ${ops_sec[mid]} ops/sec (${elapsed_ms[mid]} ms)`, @scratch));
+    println("perf_unbuffered_rendezvous_base: DONE");
     return 0;
 }

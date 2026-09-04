@@ -83,7 +83,7 @@ BENCHMARKS=(
     "spawn_sequential:perf/spawn_sequential.ccs:spawn_sequential.go:Sequential spawn+join"
     "channel_throughput:perf/perf_channel_throughput.ccs:channel_throughput.go:Channel operations"
     "unbuffered_spsc:perf/perf_unbuffered_spsc.ccs:unbuffered_spsc.go:Unbuffered 1P1C rendezvous"
-    "parallel_handoff:perf/perf_parallel_handoff.ccs:parallel_handoff.go:Seq / par-for / wait-stage store"
+    "parallel_handoff:perf/perf_parallel_handoff.ccs:parallel_handoff.go:Seq / P-way chunks / wait-stage store"
 )
 
 echo ""
@@ -118,7 +118,7 @@ buffered|buffered
 unbuffered|unbuffered"
     elif [ "$name" = "parallel_handoff" ]; then
         pairs="seq loop|seq loop
-par for|par chunks
+par chunks|par chunks
 wait stage|wait stage"
     fi
     if [ -n "$pairs" ]; then

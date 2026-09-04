@@ -266,7 +266,7 @@ static void calib_report(const char* name, double (*fn)(void)) {
         xs[i] = fn();
     sort_doubles(xs, g_samples);
     double med = xs[g_samples / 2];
-    println(@string(` ${name} med ${med} ms ${med * 1e6 / (double)CALIB_N} ns/op (N=${CALIB_N})`, @scratch)) !>;
+    println(@string(` ${name} med ${med} ms ${med * 1e6 / (double)CALIB_N} ns/op (N=${CALIB_N})`, @scratch));
 }
 
 typedef uint32_t (*sum_fn)(uint32_t, uint32_t);
@@ -319,7 +319,7 @@ static double time_once(sum_fn fn, uint32_t expect) {
     uint32_t r = fn(0, 0);
     double t1 = now_ms();
     if (r != expect) {
-        eprintln(@string(`mismatch: got=${r} expect=${expect}`, @scratch)) !>;
+        eprintln(@string(`mismatch: got=${r} expect=${expect}`, @scratch));
         abort();
     }
     return t1 - t0;
@@ -331,7 +331,7 @@ static double time_once_fiber(sum_fn fn, uint32_t expect) {
     uint32_t r = run_on_fiber(fn);
     double t1 = now_ms();
     if (r != expect) {
-        eprintln(@string(`mismatch: got=${r} expect=${expect}`, @scratch)) !>;
+        eprintln(@string(`mismatch: got=${r} expect=${expect}`, @scratch));
         abort();
     }
     return t1 - t0;
@@ -355,16 +355,16 @@ static void bench(const char* name, sum_fn fn, uint32_t expect) {
     }
     sort_doubles(samples, g_samples);
     double med = samples[g_samples / 2];
-    println(@string(`  ${name}  min ${samples[0]}  med ${med}  mean ${sum / (double)g_samples}  max ${samples[g_samples - 1]}  ms`, @scratch)) !>;
+    println(@string(`  ${name}  min ${samples[0]}  med ${med}  mean ${sum / (double)g_samples}  max ${samples[g_samples - 1]}  ms`, @scratch));
     if (spawns)
-        println(@string(`  spawns=${spawns} joins=${joins}  ${med * 1e6 / (double)spawns} ns/spawn`, @scratch)) !>;
+        println(@string(`  spawns=${spawns} joins=${joins}  ${med * 1e6 / (double)spawns} ns/spawn`, @scratch));
     {
         CCString row = @string(`   [`, @scratch);
         for (int i = 0; i < g_samples; i++) {
             CCString part = @string(`${i ? " " : ""}${samples[i]}`, @scratch);
             row = @string(`${row}${part}`, @scratch);
         }
-        println(@string(`${row}]`, @scratch)) !>;
+        println(@string(`${row}]`, @scratch));
     }
 }
 
@@ -386,16 +386,16 @@ static void bench_fiber(const char* name, sum_fn fn, uint32_t expect) {
     }
     sort_doubles(samples, g_samples);
     double med = samples[g_samples / 2];
-    println(@string(`  ${name}  min ${samples[0]}  med ${med}  mean ${sum / (double)g_samples}  max ${samples[g_samples - 1]}  ms`, @scratch)) !>;
+    println(@string(`  ${name}  min ${samples[0]}  med ${med}  mean ${sum / (double)g_samples}  max ${samples[g_samples - 1]}  ms`, @scratch));
     if (spawns)
-        println(@string(`  spawns=${spawns} joins=${joins}  ${med * 1e6 / (double)spawns} ns/spawn`, @scratch)) !>;
+        println(@string(`  spawns=${spawns} joins=${joins}  ${med * 1e6 / (double)spawns} ns/spawn`, @scratch));
     {
         CCString row = @string(`   [`, @scratch);
         for (int i = 0; i < g_samples; i++) {
             CCString part = @string(`${i ? " " : ""}${samples[i]}`, @scratch);
             row = @string(`${row}${part}`, @scratch);
         }
-        println(@string(`${row}]`, @scratch)) !>;
+        println(@string(`${row}]`, @scratch));
     }
 }
 
@@ -434,21 +434,21 @@ int main(void) {
     g_samples = (int)env_u32("CC_PAR_SAMPLES", 5);
     if (g_samples < 1) g_samples = 1;
 
-    println(@string(`parallel_hello_lowered grain sweep: depth=${g_depth} samples=${g_samples} (fork on fiber)`, @scratch)) !>;
-    println("  spawn while d < grain; below that, sequential") !>;
+    println(@string(`parallel_hello_lowered grain sweep: depth=${g_depth} samples=${g_samples} (fork on fiber)`, @scratch));
+    println("  spawn while d < grain; below that, sequential");
 
     g_spawn_until = 0;
     uint32_t expect = sum_seq(0, 0);
     unsigned long long dummy = 0;
     double seq_ms = median_of(sum_seq, expect, 0, &dummy);
-    println(@string(` seq ${expect} ${seq_ms} ms`, @scratch)) !>;
-    println(" grain spawns fork_ms vs_seq") !>;
+    println(@string(` seq ${expect} ${seq_ms} ms`, @scratch));
+    println(" grain spawns fork_ms vs_seq");
 
     for (int g = 0; g < ngrain; g++) {
         g_spawn_until = grains[g];
         unsigned long long spawns = 0;
         double fork_ms = median_of(sum_fork, expect, 1, &spawns);
-        println(@string(` ${grains[g]} ${spawns} ${fork_ms} ${seq_ms > 0.0 ? seq_ms / fork_ms : 0.0}x`, @scratch)) !>;
+        println(@string(` ${grains[g]} ${spawns} ${fork_ms} ${seq_ms > 0.0 ? seq_ms / fork_ms : 0.0}x`, @scratch));
     }
     return 0;
 }

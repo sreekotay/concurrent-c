@@ -33,7 +33,7 @@ static double half2(const double x1) { return x1 / 2.0; }
 static double vsum(double x1, ...) { return x1 + 0.5; }
 
 /* Keyword-preceded free calls are calls, not declarations. */
-static CCResult_size_t_CCError say_ret(void) {
+static CCResult_void_CCPrintError say_ret(void) {
     return println("ret line");
 }
 
@@ -60,7 +60,7 @@ int main(void) {
 
     /* Keyword positions: return / else / after a paren. */
     {
-        CCResult_size_t_CCError r = say_ret();
+        CCResult_void_CCPrintError r = say_ret();
         assert(r.ok);
         if (g_sink_hits == 0) assert(0);
         else println("else line");

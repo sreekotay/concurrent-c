@@ -23,13 +23,13 @@ usual forms.
 begins with `@string`, the wrap is:
 
 ```c
-cc_println(EXPR) !>;
+cc_println(EXPR);
 ```
 
 Otherwise:
 
 ```c
-cc_println(@string(`${EXPR}`)) !>;
+cc_println(@string(`${EXPR}`));
 ```
 
 (so `-E '1+2'` still stringifies, while `-E '@string(`hi`, a)'` does not
@@ -84,11 +84,11 @@ binder form (§3.1).
 `-n` wraps the (possibly `-E`-wrapped) body in a loop over standard-input
 lines via `CCStdio.read_line`. Each iteration binds `line` (without its
 trailing newline) and increments `nr`. `line`'s storage is for the current
-iteration only. `-p` is `-n` with `line.println() !>;` appended to the loop body, so
+iteration only. `-p` is `-n` with `line.println();` appended to the loop body, so
 `continue` skips the print and `break` ends the loop.
 
 ```text
-... | ccc -n -e 'if (nr == 1) line.println() !>;'
+... | ccc -n -e 'if (nr == 1) line.println();'
 ... | ccc -p -e '/* transform line */'
 ... | ccc -n -E 'nr'
 ```
@@ -115,13 +115,13 @@ remain valid (UFCS either way). Cstr / string-literal *data* receivers coerce
 to `CCSlice` then `cc_slice_*` (no `cc_char_*` UFCS family):
 
 ```c
-io.println(path) !>;
-io.eprintln(line) !>;
-io.println(@string(`n=${n}`, a)) !>;
-path.println() !>;                 /* also OK */
-"literal".println() !>;
-println(path) !>;                  /* naked alias */
-path.fprint(STDERR_FILENO) !>;
+io.println(path);
+io.eprintln(line);
+io.println(@string(`n=${n}`, a));
+path.println();                 /* also OK */
+"literal".println();
+println(path);                  /* naked alias */
+path.fprint(STDERR_FILENO);
 ```
 
 Short names `println` / `eprintln` are not free macros — a function-like

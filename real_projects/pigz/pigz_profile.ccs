@@ -115,13 +115,13 @@ static bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
     CCResult_size_t_CCIoError wr = cc_file_write(f, data);
     if (cc_is_err(wr)) {
         CCIoError err = cc_unwrap_err_as(wr, CCIoError);
-        eprintln(@string(`${what} failed kind=${err.base.kind} os=${err.os_code}`, @scratch)) !>;
+        eprintln(@string(`${what} failed kind=${err.base.kind} os=${err.os_code}`, @scratch));
         cc_atomic_store(&g_pipeline_error, 1);
         return false;
     }
     size_t n = cc_unwrap_as(wr, size_t);
     if (n != data.len) {
-        eprintln(@string(`${what} short write ${n}/${data.len}`, @scratch)) !>;
+        eprintln(@string(`${what} short write ${n}/${data.len}`, @scratch));
         cc_atomic_store(&g_pipeline_error, 1);
         return false;
     }
@@ -173,11 +173,11 @@ static void print_stats(const char* label) {
     double qw = (double)cc_atomic_load(&g_queue_wait_ns) / 1000.0 / (double)blocks;
     double comp = (double)cc_atomic_load(&g_compress_ns) / 1000.0 / (double)blocks;
     double e2e = (double)cc_atomic_load(&g_end_to_end_ns) / 1000.0 / (double)blocks;
-    println(@string(`\n=== pigz block timing: ${label} (${blocks} blocks) ===`, @scratch)) !>;
-    println(@string(`queue_wait avg:   ${qw} us`, @scratch)) !>;
-    println(@string(`compress avg:     ${comp} us`, @scratch)) !>;
-    println(@string(`end_to_end avg:   ${e2e} us`, @scratch)) !>;
-    println(@string(`===`, @scratch)) !>;
+    println(@string(`\n=== pigz block timing: ${label} (${blocks} blocks) ===`, @scratch));
+    println(@string(`queue_wait avg:   ${qw} us`, @scratch));
+    println(@string(`compress avg:     ${comp} us`, @scratch));
+    println(@string(`end_to_end avg:   ${e2e} us`, @scratch));
+    println(@string(`===`, @scratch));
 }
 
 int compress_file(const char* in_path, const char* out_path, int level) {
@@ -188,13 +188,13 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     cc_atomic_store(&g_end_to_end_ns, 0);
 
     CCFile in_file = cc_file_open(cc_slice_cstr(in_path)) !>(e) {
-        eprintln(@string(`Failed to open input: ${in_path}`, @scratch)) !>;
+        eprintln(@string(`Failed to open input: ${in_path}`, @scratch));
         return 1;
     } @destroy;
 
     CCFile out_file = CC_FILE_CLOSED @destroy;
     out_file.create(out_path) !>(e) {
-        eprintln(@string(`Failed to open output: ${out_path}`, @scratch)) !>;
+        eprintln(@string(`Failed to open output: ${out_path}`, @scratch));
         return 1;
     };
 
@@ -272,7 +272,7 @@ int main(int argc, char *argv[]) {
     @errhandler(CCError e) { return cc_err_log(e); }
 
     if (argc < 2) {
-        eprintln(@string(`Usage: ${argv[0]} <file>`, @scratch)) !>;
+        eprintln(@string(`Usage: ${argv[0]} <file>`, @scratch));
         return 1;
     }
 
@@ -292,7 +292,7 @@ int main(int argc, char *argv[]) {
         long blocks = cc_atomic_load(&g_blocks_done);
         long long bin = (long long)cc_atomic_load(&g_bytes_in);
         long long bout = (long long)cc_atomic_load(&g_bytes_out);
-        eprintln(@string(`Compressed ${in_path} -> ${out_name}`, @scratch)) !>;
+        eprintln(@string(`Compressed ${in_path} -> ${out_name}`, @scratch));
         eprintln(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
                           @scratch)) !>;
         print_stats("fiber tasks");

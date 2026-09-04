@@ -30,7 +30,7 @@ static double time_now_ms(void) {
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    println("spawn_fiber_direct: measuring direct fiber spawn throughput") !>;
+    println("spawn_fiber_direct: measuring direct fiber spawn throughput");
 
     double start = time_now_ms();
 
@@ -46,8 +46,8 @@ int main(void) {
     int total_spawns = cc_atomic_load(&global_counter);
     double spawns_per_sec = total_spawns / (elapsed / 1000.0);
 
-    println(@string(` fiber spawns: ${spawns_per_sec} spawns/sec (${elapsed} ms, total=${total_spawns})`, @scratch)) !>;
+    println(@string(` fiber spawns: ${spawns_per_sec} spawns/sec (${elapsed} ms, total=${total_spawns})`, @scratch));
 
-    println("spawn_fiber_direct: DONE") !>;
+    println("spawn_fiber_direct: DONE");
     return 0;
 }

@@ -22,7 +22,7 @@ cc_atomic_int g_out_sum = 0;
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     for (int iter = 0; iter < REPEATS; iter++) {
-        if (iter % 100 == 0) eprintln(@string(`iter ${iter}/${REPEATS}`, @scratch)) !>;
+        if (iter % 100 == 0) eprintln(@string(`iter ${iter}/${REPEATS}`, @scratch));
 
         g_ch0 = cc_channel_pair(&g_tx0, &g_rx0);
         g_ch1 = cc_channel_pair(&g_tx1, &g_rx1);
@@ -68,13 +68,13 @@ int main(void) {
         int c = cc_atomic_load(&g_out_count);
         int s = cc_atomic_load(&g_out_sum);
         if (c != NUM_ITEMS || s != expected) {
-            eprintln(@string(`FAIL iter ${iter}: count=${c} sum=${s} (expected ${NUM_ITEMS}/${expected})`, @scratch)) !>;
+            eprintln(@string(`FAIL iter ${iter}: count=${c} sum=${s} (expected ${NUM_ITEMS}/${expected})`, @scratch));
             return 1;
         }
 
         g_ch0.free(); g_ch1.free(); g_ch2.free();
         g_ch3.free(); g_ch4.free();
     }
-    println(@string(`pipeline_repeat: ${REPEATS} iterations OK`, @scratch)) !>;
+    println(@string(`pipeline_repeat: ${REPEATS} iterations OK`, @scratch));
     return 0;
 }

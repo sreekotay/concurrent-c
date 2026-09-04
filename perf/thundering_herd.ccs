@@ -33,9 +33,9 @@ int main(void) {
     CCChanRx rx = rx_h;
     CCChanTx tx = tx_h;
 
-    println("=================================================================") !>;
-    println(@string(`THUNDERING HERD TEST: Wake-up latency with ${NUM_WAITERS} waiters`, @scratch)) !>;
-    println("=================================================================") !>;
+    println("=================================================================");
+    println(@string(`THUNDERING HERD TEST: Wake-up latency with ${NUM_WAITERS} waiters`, @scratch));
+    println("=================================================================");
 
     for (int sample = 1; sample <= NUM_SAMPLES; sample++) {
         cc_atomic_store(&g_count, 0);
@@ -59,7 +59,7 @@ int main(void) {
                 cc_yield();
             }
             double latency_ms = time_now_ms() - start;
-            println(@string(`Sample ${sample}: Latency to wake 1st waiter: ${latency_ms} ms`, @scratch)) !>;
+            println(@string(`Sample ${sample}: Latency to wake 1st waiter: ${latency_ms} ms`, @scratch));
             
             // Now flush the rest so we can repeat
             for (int i = 1; i < NUM_WAITERS; i++) {

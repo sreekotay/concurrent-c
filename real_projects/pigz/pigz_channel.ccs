@@ -120,12 +120,12 @@ static bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
     }
     size_t n = f->write(data) !>(e) {
         eprintln(@string(`${what} failed kind=${e.base.kind} os=${e.os_code}`,
-                         @scratch)) !>;
+                         @scratch));
         g_pipeline_error.store(1);
         return false;
     };
     if (n != data.len) {
-        eprintln(@string(`${what} short write ${n}/${data.len}`, @scratch)) !>;
+        eprintln(@string(`${what} short write ${n}/${data.len}`, @scratch));
         g_pipeline_error.store(1);
         return false;
     }
@@ -148,13 +148,13 @@ int compress_file(const char* in_path, const char* out_path) {
     char[:0] out_s = cc_slice_cstr(out_path);
 
     CCFile in_file = cc_file_open(in_s) !>(e) {
-        eprintln(@string(`Failed to open input: ${in_path}`, @scratch)) !>;
+        eprintln(@string(`Failed to open input: ${in_path}`, @scratch));
         return 1;
     } @destroy;
 
     CCFile out_file = CC_FILE_CLOSED @destroy;
     out_file.create(out_s) !>(e) {
-        eprintln(@string(`Failed to open output: ${out_path}`, @scratch)) !>;
+        eprintln(@string(`Failed to open output: ${out_path}`, @scratch));
         return 1;
     };
 
@@ -182,14 +182,14 @@ int compress_file(const char* in_path, const char* out_path) {
                     break;
                 if (!item) {
                     eprintln(@string(`compress task failed (OOM or zlib error)`,
-                                     @scratch)) !>;
+                                     @scratch));
                     g_pipeline_error.store(1);
                     results_rx.close();
                     break;
                 }
                 if (item->seq != expect_seq) {
                     eprintln(@string(`ORDER: expected=${expect_seq} got=${item->seq}`,
-                                     @scratch)) !>;
+                                     @scratch));
                     g_pipeline_error.store(1);
                 }
                 expect_seq++;
@@ -255,7 +255,7 @@ int main(int argc, char* argv[]) {
     @errhandler(CCError e) { return cc_err_log(e); }
 
     if (argc < 2) {
-        eprintln(@string(`Usage: ${argv[0]} <file>`, @scratch)) !>;
+        eprintln(@string(`Usage: ${argv[0]} <file>`, @scratch));
         return 1;
     }
 
@@ -269,15 +269,15 @@ int main(int argc, char* argv[]) {
         long long bin = (long long)g_bytes_in.load();
         long long bout = (long long)g_bytes_out.load();
         int blocks = g_blocks_done.load();
-        println(@string(`Compressed ${in_path} -> ${out_name}`, @scratch)) !>;
+        println(@string(`Compressed ${in_path} -> ${out_name}`, @scratch));
         println(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
-                        @scratch)) !>;
+                        @scratch));
         unsigned long long read_ns = g_read_ns.load();
         unsigned long long c_ns = g_compress_ns.load();
         unsigned long long recv_ns = g_recv_ns.load();
         unsigned long long w_ns = g_write_ns.load();
         println(@string(`phases(sum): read=${read_ns / 1000000}ms compress=${c_ns / 1000000}ms recv+join=${recv_ns / 1000000}ms write=${w_ns / 1000000}ms`,
-                        @scratch)) !>;
+                        @scratch));
     }
 
     return ret;

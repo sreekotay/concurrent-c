@@ -27,7 +27,7 @@
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
-    println(@string(`block_race_timing: ${ITERATIONS} iterations (correctness test)`, @scratch)) !>;
+    println(@string(`block_race_timing: ${ITERATIONS} iterations (correctness test)`, @scratch));
     
     int a_wins = 0;
     int b_wins = 0;
@@ -45,7 +45,7 @@ int main(void) {
         
         if (err != 0) {
             errors++;
-            eprintln(@string(`  iter ${iter}: ERROR err=${err}`, @scratch)) !>;
+            eprintln(@string(`  iter ${iter}: ERROR err=${err}`, @scratch));
             continue;
         }
         
@@ -53,24 +53,24 @@ int main(void) {
         if (winner == 0) {
             if (result != 42) {
                 errors++;
-                eprintln(@string(`  iter ${iter}: winner=0 but result=${(int)result} (expected 42)`, @scratch)) !>;
+                eprintln(@string(`  iter ${iter}: winner=0 but result=${(int)result} (expected 42)`, @scratch));
             } else {
                 a_wins++;
             }
         } else if (winner == 1) {
             if (result != 99) {
                 errors++;
-                eprintln(@string(`  iter ${iter}: winner=1 but result=${(int)result} (expected 99)`, @scratch)) !>;
+                eprintln(@string(`  iter ${iter}: winner=1 but result=${(int)result} (expected 99)`, @scratch));
             } else {
                 b_wins++;
             }
         } else {
             errors++;
-            eprintln(@string(`  iter ${iter}: invalid winner=${winner}`, @scratch)) !>;
+            eprintln(@string(`  iter ${iter}: invalid winner=${winner}`, @scratch));
         }
         
         if ((iter + 1) % 10 == 0) {
-            println(@string(`  completed ${iter + 1}/${ITERATIONS} (a=${a_wins}, b=${b_wins}, err=${errors})`, @scratch)) !>;
+            println(@string(`  completed ${iter + 1}/${ITERATIONS} (a=${a_wins}, b=${b_wins}, err=${errors})`, @scratch));
         }
     }
     
@@ -78,10 +78,10 @@ int main(void) {
 Results: task_a_wins=${a_wins}, task_b_wins=${b_wins}, errors=${errors}`, @scratch)) !>;
     
     if (errors > 0) {
-        eprintln(@string(`FAIL: ${errors} errors`, @scratch)) !>;
+        eprintln(@string(`FAIL: ${errors} errors`, @scratch));
         return 1;
     }
     
-    println(@string(`block_race_timing: PASS (correctness verified)`, @scratch)) !>;
+    println(@string(`block_race_timing: PASS (correctness verified)`, @scratch));
     return 0;
 }

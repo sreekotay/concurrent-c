@@ -36,7 +36,7 @@ void heartbeat_fiber() {
     setvbuf(stdout, NULL, _IONBF, 0);
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    println(@string(`[Heartbeat] Started`, @scratch)) !>;
+    println(@string(`[Heartbeat] Started`, @scratch));
     struct timespec ts = { .tv_sec = 0, .tv_nsec = HEARTBEAT_INTERVAL_MS * 1000000L };
     while (!cc_cancelled()) {
         nanosleep(&ts, NULL);
@@ -45,9 +45,9 @@ void heartbeat_fiber() {
         double ms = (double)(now.tv_sec - t0.tv_sec) * 1000.0
                   + (double)(now.tv_nsec - t0.tv_nsec) / 1e6;
         int n = atomic_fetch_add(&g_heartbeats, 1) + 1;
-        println(@string(`[Heartbeat] Tick ${n} @ $~float_dec(1){ms}ms`, @scratch)) !>;
+        println(@string(`[Heartbeat] Tick ${n} @ $~float_dec(1){ms}ms`, @scratch));
     }
-    println(@string(`[Heartbeat] Cancelled, exiting`, @scratch)) !>;
+    println(@string(`[Heartbeat] Cancelled, exiting`, @scratch));
 }
 
 /* A "Kidnapper" fiber that uses a RAW blocking syscall (sleep) */
@@ -55,12 +55,12 @@ void kidnapper_fiber(int id) {
     @errhandler(CCError e) { cc_error_log(e); return; }
     setvbuf(stdout, NULL, _IONBF, 0);
     atomic_fetch_add(&g_kidnappers_active, 1);
-    println(@string(`[Kidnapper ${id}] Kidnapping an OS thread for 2 seconds...`, @scratch)) !>;
+    println(@string(`[Kidnapper ${id}] Kidnapping an OS thread for 2 seconds...`, @scratch));
     
     // Do the work (blocking syscall)
     sleep(2); 
     
-    println(@string(`[Kidnapper ${id}] Released OS thread`, @scratch)) !>;
+    println(@string(`[Kidnapper ${id}] Released OS thread`, @scratch));
     atomic_fetch_sub(&g_kidnappers_active, 1);
     atomic_fetch_add(&g_kidnappers_done, 1);
     
@@ -75,9 +75,9 @@ int main(void) {
     // Ensure we have a fixed number of workers for the test
     setenv("CC_V2_THREADS", "16", 1);
     
-    println(@string(`=================================================================`, @scratch)) !>;
-    println(@string(`KIDNAPPING CHALLENGE: Can the CC Scheduler survive rude IO?`, @scratch)) !>;
-    println(@string(`Workers: 16 | Kidnappers: ${NUM_KIDNAPPERS}`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch));
+    println(@string(`KIDNAPPING CHALLENGE: Can the CC Scheduler survive rude IO?`, @scratch));
+    println(@string(`Workers: 16 | Kidnappers: ${NUM_KIDNAPPERS}`, @scratch));
     println(@string(`=================================================================
 `, @scratch)) !>;
 
@@ -99,11 +99,11 @@ int main(void) {
             cc_sleep_ms(1000);
             int beats = atomic_load(&g_heartbeats);
             int active = atomic_load(&g_kidnappers_active);
-            println(@string(`T+${i+1}s: Heartbeats=${beats} | Active Kidnappers=${active}`, @scratch)) !>;
+            println(@string(`T+${i+1}s: Heartbeats=${beats} | Active Kidnappers=${active}`, @scratch));
         }
 
         // 5. Cancel the nursery - signals all fibers to stop
-        println(@string(`Cancelling nursery...=========================================`, @scratch)) !>;
+        println(@string(`Cancelling nursery...=========================================`, @scratch));
         __cc_nursery148.cancel();
     
     }
@@ -113,17 +113,17 @@ int main(void) {
     int final_active = atomic_load(&g_kidnappers_active);
     println(@string(`
 =================================================================`, @scratch)) !>;
-    println(@string(`FINAL RESULTS`, @scratch)) !>;
-    println(@string(`Total Heartbeats:       ${final_beats}`, @scratch)) !>;
-    println(@string(`Kidnappers Completed:   ${final_done} / ${NUM_KIDNAPPERS}`, @scratch)) !>;
-    println(@string(`Kidnappers Still Active:${final_active}`, @scratch)) !>;
+    println(@string(`FINAL RESULTS`, @scratch));
+    println(@string(`Total Heartbeats:       ${final_beats}`, @scratch));
+    println(@string(`Kidnappers Completed:   ${final_done} / ${NUM_KIDNAPPERS}`, @scratch));
+    println(@string(`Kidnappers Still Active:${final_active}`, @scratch));
     
     if (final_beats > (TEST_DURATION_SEC * (1000/HEARTBEAT_INTERVAL_MS)) * 0.8) {
-        println(@string(`RESULT: PASS - The scheduler survived the kidnapping!`, @scratch)) !>;
+        println(@string(`RESULT: PASS - The scheduler survived the kidnapping!`, @scratch));
     } else {
-        println(@string(`RESULT: FAIL - The scheduler was bricked by blocking IO.`, @scratch)) !>;
+        println(@string(`RESULT: FAIL - The scheduler was bricked by blocking IO.`, @scratch));
     }
-    println(@string(`=================================================================`, @scratch)) !>;
+    println(@string(`=================================================================`, @scratch));
 
     return 0;
 }

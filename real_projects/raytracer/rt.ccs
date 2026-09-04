@@ -495,7 +495,7 @@ int main(void) {
     nworld = build_world(world);
     fb = (uint8_t*)malloc((size_t)w * (size_t)h * 3u);
     if (!fb) {
-        eprintln("rt: out of memory") !>;
+        eprintln("rt: out of memory");
         return 1;
     }
     job_store.fb = fb;
@@ -522,7 +522,7 @@ int main(void) {
     sum = checksum_rgb(fb, (size_t)w * (size_t)h * 3u);
     ppm = getenv("RT_PPM");
     if (ppm && ppm[0] && !write_ppm(ppm, fb, w, h)) {
-        eprintln(@string(`rt: failed to write ${ppm}`, @scratch)) !>;
+        eprintln(@string(`rt: failed to write ${ppm}`, @scratch));
         free(fb);
         return 1;
     }

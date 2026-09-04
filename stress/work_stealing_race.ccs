@@ -43,12 +43,12 @@ void* burst_task(void* arg) {
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`work_stealing_race: burst=${BURST_SIZE}, iterations=${ITERATIONS}`, @scratch)) !>;
+    println(@string(`work_stealing_race: burst=${BURST_SIZE}, iterations=${ITERATIONS}`, @scratch));
     
     /* Allocate task_ids array dynamically */
     task_ids = (cc_atomic_int*)calloc(BURST_SIZE, sizeof(cc_atomic_int));
     if (!task_ids) {
-        eprintln(@string(`FAIL: could not allocate task_ids`, @scratch)) !>;
+        eprintln(@string(`FAIL: could not allocate task_ids`, @scratch));
         return 1;
     }
     
@@ -71,22 +71,22 @@ int main(void) {
         int d = cc_atomic_load(&duplicates);
         
         if (c != BURST_SIZE) {
-            eprintln(@string(`FAIL: iter ${iter}: only ${c}/${BURST_SIZE} tasks completed`, @scratch)) !>;
+            eprintln(@string(`FAIL: iter ${iter}: only ${c}/${BURST_SIZE} tasks completed`, @scratch));
             return 1;
         }
         
         if (d > 0) {
-            eprintln(@string(`FAIL: iter ${iter}: ${d} duplicate executions (RACE!)`, @scratch)) !>;
+            eprintln(@string(`FAIL: iter ${iter}: ${d} duplicate executions (RACE!)`, @scratch));
             return 1;
         }
         
         /* Progress reporting: show every 20 iterations, or at least once if ITERATIONS < 20 */
         if ((iter + 1) % 20 == 0 || (iter + 1 == ITERATIONS && ITERATIONS < 20)) {
-            println(@string(`  completed ${iter + 1}/${ITERATIONS}`, @scratch)) !>;
+            println(@string(`  completed ${iter + 1}/${ITERATIONS}`, @scratch));
         }
     }
     
     free(task_ids);
-    println(@string(`work_stealing_race: PASS`, @scratch)) !>;
+    println(@string(`work_stealing_race: PASS`, @scratch));
     return 0;
 }

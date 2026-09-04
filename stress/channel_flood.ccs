@@ -21,7 +21,7 @@ int main(void) {
     int[~ <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
 
-    println(@string(`channel_flood: ${num_producers} producers x ${msgs_per} msgs = ${total_msgs} total`, @scratch)) !>;
+    println(@string(`channel_flood: ${num_producers} producers x ${msgs_per} msgs = ${total_msgs} total`, @scratch));
 
     {
         CCNursery __cc_nursery114 = @create() !> @destroy;
@@ -55,6 +55,6 @@ int main(void) {
     ch.free();
 
     int recv_count = cc_atomic_load(&g_received);
-    println(@string(`channel_flood: received ${recv_count}/${total_msgs}`, @scratch)) !>;
+    println(@string(`channel_flood: received ${recv_count}/${total_msgs}`, @scratch));
     return (recv_count == total_msgs) ? 0 : 1;
 }

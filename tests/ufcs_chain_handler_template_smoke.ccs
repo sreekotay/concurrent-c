@@ -15,14 +15,18 @@ static CCResult_int_CCError cc_int_step(int v) { return mk(v + 1); }
 
 int main(void) {
     @errhandler(CCError e) { fprintf(stderr, "eh: %s\n", e.message); return 1; }
+    @errhandler(CCPrintError pe) {
+        fprintf(stderr, "print: %s\n", cc_print_error_str(pe));
+        return 1;
+    }
     CCArena a = cc_arena_heap(kilobytes(16));
 
     @string(`top ${1 + 1}`, a).println();
 
-    mk(-1) !>(e) { @string(`stmt ${e.message}`, a).println() !>; };
+    mk(-1) !>(e) { @string(`stmt ${e.message}`, a).println(); };
 
     int r = mk(-1)
-        !>(e) { @string(`link ${e.message}`, a).println() !>; return 0; }
+        !>(e) { @string(`link ${e.message}`, a).println(); return 0; }
         .step()!>.twice();
     printf("unreachable %d\n", r);
     return 9;

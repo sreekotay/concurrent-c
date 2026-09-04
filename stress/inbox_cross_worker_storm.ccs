@@ -18,7 +18,7 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
     setenv("CC_WORKERS", "4", 1);
 
-    println(@string(`inbox_cross_worker_storm: outer=${OUTER_TASKS} inner=${INNER_TASKS}`, @scratch)) !>;
+    println(@string(`inbox_cross_worker_storm: outer=${OUTER_TASKS} inner=${INNER_TASKS}`, @scratch));
 
     {
         CCNursery __cc_nursery125 = @create() !> @destroy;
@@ -44,6 +44,6 @@ int main(void) {
 
     int expected = OUTER_TASKS * INNER_TASKS;
     int got = cc_atomic_load(&g_total);
-    println(@string(`inbox_cross_worker_storm: completed ${got}/${expected}`, @scratch)) !>;
+    println(@string(`inbox_cross_worker_storm: completed ${got}/${expected}`, @scratch));
     return (got == expected) ? 0 : 1;
 }

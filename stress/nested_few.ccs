@@ -10,7 +10,7 @@ cc_atomic_int g = 0;
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
-    println(@string(`nested_few: ${ITERATIONS} iterations`, @scratch)) !>;
+    println(@string(`nested_few: ${ITERATIONS} iterations`, @scratch));
     
     for (int i = 0; i < ITERATIONS; i++) {
         int x = i;
@@ -31,6 +31,6 @@ int main(void) {
         }
     }
     
-    println(@string(`nested_few: PASS (g=${cc_atomic_load(&g)})`, @scratch)) !>;
+    println(@string(`nested_few: PASS (g=${cc_atomic_load(&g)})`, @scratch));
     return 0;
 }

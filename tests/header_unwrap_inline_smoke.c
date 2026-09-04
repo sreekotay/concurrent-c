@@ -194,7 +194,7 @@ int main(void) {
         char opt_src[512];
         char opt_h[512];
         char* opt_lowered = NULL;
-        snprintf(opt_src, sizeof(opt_src), "%s/opt_void.cch", dir);
+        snprintf(opt_src, sizeof(opt_src), "%s/opt_void." "cch", dir);
         snprintf(opt_h, sizeof(opt_h), "%s/opt_void.h", outdir);
         if (write_file(opt_src,
                        "typedef struct { int x; } OptErr;\n"
