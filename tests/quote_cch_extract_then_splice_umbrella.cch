@@ -1,0 +1,9 @@
+#ifndef TESTS_QUOTE_CCH_EXTRACT_THEN_SPLICE_UMBRELLA_CCH
+#define TESTS_QUOTE_CCH_EXTRACT_THEN_SPLICE_UMBRELLA_CCH
+
+/* Interface umbrella (no bodies). Nested owned leaf extracts. */
+int extract_then_splice_umbrella_ok(void);
+
+#include "quote_cch_extract_then_splice_fail.cch"
+
+#endif

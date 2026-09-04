@@ -1,0 +1,1 @@
+tests/quote_cch_nonstatic_fn_leaf.cch:6:5: error: face: 'quote_nonstatic_fn_add' is a non-static body with no owner .ccs

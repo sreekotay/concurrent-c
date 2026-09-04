@@ -34,6 +34,7 @@
           "patterns": [
             { "include": "#template_strings" },
             { "include": "#strings" },
+            { "include": "#comments" },
             { "include": "#numbers" }
           ]
         }

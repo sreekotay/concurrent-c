@@ -1,0 +1,1 @@
+quote_cch_extract_then_splice_fail.cch:1:1: error: face: 'quote_cch_extract_then_splice_fail.cch' already extracted in this TU; a splice would redefine

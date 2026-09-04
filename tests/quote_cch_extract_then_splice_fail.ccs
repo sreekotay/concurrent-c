@@ -1,0 +1,8 @@
+/* Same-stem owner extracts the leaf through an interface umbrella, then
+ * a spliced impl chapter full-splices that leaf. */
+#include "quote_cch_extract_then_splice_umbrella.cch"
+#include "quote_cch_extract_then_splice_chapter.cch"
+
+int main(void) {
+    return extract_then_splice_step() + extract_then_splice_chapter_add(0, 0);
+}

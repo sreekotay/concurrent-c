@@ -1,1 +1,1 @@
-cannot extract impl-grade header
+tests/quote_cch_nested_impl_unowned_leaf.cch:8:24: error: face: 'nested_impl_unowned_step' needs an owner .ccs

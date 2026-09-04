@@ -1,0 +1,14 @@
+#ifndef TESTS_QUOTE_CCH_EXTRACT_THEN_SPLICE_FAIL_CCH
+#define TESTS_QUOTE_CCH_EXTRACT_THEN_SPLICE_FAIL_CCH
+
+/* Same-stem owned leaf. The umbrella extract publishes this type; a
+ * later full splice in the owner TU would redefine it. */
+typedef struct {
+    int n;
+} ExtractThenSpliceRail;
+
+int extract_then_splice_step(void) {
+    return 1;
+}
+
+#endif

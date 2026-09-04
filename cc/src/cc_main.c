@@ -4447,7 +4447,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         if (opt->mode == CC_MODE_LINK && opt->bin_out_path) {
             const char* one[1];
             one[0] = opt->in_path;
-            if (cc_check_link_set_faces(one, 1) != 0) return -1;
+            if (cc_check_link_set_faces(one, 1) != 0) return 1;
             if (summary_out) {
                 memset(summary_out, 0, sizeof(*summary_out));
                 summary_out->bin_out_path = opt->bin_out_path;

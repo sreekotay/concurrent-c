@@ -1,0 +1,12 @@
+#ifndef TESTS_QUOTE_CCH_EXTRACT_THEN_SPLICE_CHAPTER_CCH
+#define TESTS_QUOTE_CCH_EXTRACT_THEN_SPLICE_CHAPTER_CCH
+
+/* Unowned impl chapter: splices into the owner TU, then full-splices
+ * the already-extracted same-stem leaf. */
+int extract_then_splice_chapter_add(int a, int b) {
+    return a + b;
+}
+
+#include "quote_cch_extract_then_splice_fail.cch"
+
+#endif
