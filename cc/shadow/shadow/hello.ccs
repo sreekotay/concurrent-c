@@ -7,22 +7,22 @@ int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
 
     CCNursery n = cc_nursery_create() !> @destroy {
-        println("All tasks completed.") !>;
+        println("All tasks completed.");
     };
 
     n.spawn(() => {
         @errhandler(CCError e) cc_error_exit(e);
         usleep(100000);
-        println("Hello from task A! (last)") !>;
+        println("Hello from task A! (last)");
     });
     n.spawn(() => {
         @errhandler(CCError e) cc_error_exit(e);
-        println("Hello from task B!") !>;
+        println("Hello from task B!");
     });
     n.spawn(() => {
         @errhandler(CCError e) cc_error_exit(e);
         println("Hello from task C!") !>(e) {
-            println("Task C failed!") !>;
+            println("Task C failed!");
             @err(e);
         };
     });

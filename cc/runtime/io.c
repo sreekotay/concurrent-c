@@ -163,8 +163,9 @@ CCResult_size_t_CCIoError cc_file_write(CCFile *file, CCSlice data) {
 CCResult_size_t_CCIoError cc_std_out_write(CCSlice data) {
     if (!data.ptr || data.len == 0) return cc_ok_CCResult_size_t_CCIoError(0);
     size_t written = fwrite(data.ptr, 1, data.len, stdout);
-    if (written != data.len && ferror(stdout)) {
-        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
+    if (written != data.len) {
+        int err = ferror(stdout) && errno ? errno : EIO;
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(err));
     }
     return cc_ok_CCResult_size_t_CCIoError(written);
 }
@@ -172,8 +173,9 @@ CCResult_size_t_CCIoError cc_std_out_write(CCSlice data) {
 CCResult_size_t_CCIoError cc_std_err_write(CCSlice data) {
     if (!data.ptr || data.len == 0) return cc_ok_CCResult_size_t_CCIoError(0);
     size_t written = fwrite(data.ptr, 1, data.len, stderr);
-    if (written != data.len && ferror(stderr)) {
-        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
+    if (written != data.len) {
+        int err = ferror(stderr) && errno ? errno : EIO;
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(err));
     }
     return cc_ok_CCResult_size_t_CCIoError(written);
 }

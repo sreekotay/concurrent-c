@@ -23,6 +23,10 @@
 #include "fiber_sched_boundary.h"
 #include "sched_v2.h"
 
+#ifndef CC__NURSERY_SPAWN_CANCELLED
+#define CC__NURSERY_SPAWN_CANCELLED (-1000)
+#endif
+
 static CCResult_void_CCError cc__nursery_errno(int err, const char* msg);
 
 /* ============================================================================
@@ -629,6 +633,10 @@ static int cc__nursery_spawn_errno(CCNurseryHost* n, void* (*fn)(void*), void* a
         pthread_mutex_unlock(&n->mu);
         return EINVAL;
     }
+    if (cc_nursery_is_cancelled_host(n)) {
+        pthread_mutex_unlock(&n->mu);
+        return CC__NURSERY_SPAWN_CANCELLED;
+    }
     if (worker_frees) {
         atomic_fetch_add_explicit(&n->alive_count, 1, memory_order_relaxed);
     }
@@ -770,6 +778,12 @@ static CCResult_void_CCError cc__nursery_errno(int err, const char* msg) {
         return cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_OUT_OF_MEMORY, msg));
     if (err == EINVAL)
         return cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_INVALID_ARG, msg));
+    if (err == CC__NURSERY_SPAWN_CANCELLED
+#ifdef ECANCELED
+        || err == ECANCELED
+#endif
+        )
+        return cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_CANCELLED, msg));
     return cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_INTERNAL, msg));
 }
 

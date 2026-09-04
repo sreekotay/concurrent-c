@@ -34,8 +34,8 @@ int main(void) {
     CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
     CCStdio io = cc_stdio_create(a);
     @parallel spawn {
-        @serial { io.println("Hello from task A!") !>; }
-        @serial { io.println("Hello from task B!") !>; }
+        @serial { io.println("Hello from task A!"); }
+        @serial { io.println("Hello from task B!"); }
     } !>.wait()!>;
     return 0;
 }

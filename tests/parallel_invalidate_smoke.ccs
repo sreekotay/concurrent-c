@@ -1,0 +1,78 @@
+/*
+ * Destroy / invalidate: cancel the tree, then join. Not h.wait() !>.
+ * A parked recv unsticks. Idle / already-joined is a no-op.
+ */
+#include <ccc/std/prelude.cch>
+#include <errno.h>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    {
+        CCParallel z = cc_parallel_empty();
+        z.invalidate();
+        if (z.live() || z.joined) {
+            fprintf(stderr, "FAIL idle invalidate live=%d joined=%d\n",
+                    z.live(), z.joined);
+            return 1;
+        }
+    }
+
+    {
+        CCParallel idle = cc_parallel_empty() @destroy;
+        (void)idle;
+    }
+
+    {
+        CCChan* ch = cc_chan_create(1);
+        if (!ch) return 2;
+        (void)cc_chan_init_elem(ch, sizeof(int));
+        int saw = 0;
+        {
+            CCParallel h = @parallel spawn {
+                @serial {
+                    int v = 0;
+                    int rc = cc_chan_recv(ch, &v, sizeof(v));
+                    saw = (rc == ECANCELED) ? 1 : 0;
+                }
+            } !>;
+            if (!h.live()) {
+                fprintf(stderr, "FAIL dest-live not live before destroy\n");
+                cc_chan_free(ch);
+                return 1;
+            }
+            h.invalidate();
+        }
+        if (!saw) {
+            fprintf(stderr, "FAIL invalidate did not wake recv\n");
+            cc_chan_free(ch);
+            return 1;
+        }
+        cc_chan_free(ch);
+    }
+
+    {
+        int a = 0;
+        int b = 0;
+        CCParallel h = @parallel {
+            a = 1;
+            b = 2;
+        } !>;
+        h.invalidate();
+        if (h.live() || !h.joined || !h.cancelled) {
+            fprintf(stderr, "FAIL after invalidate live=%d joined=%d cancelled=%d\n",
+                    h.live(), h.joined, h.cancelled);
+            return 1;
+        }
+        h.invalidate();
+        h.wait() !>;
+        if (a + b != 3) {
+            fprintf(stderr, "FAIL invalidate join a=%d b=%d\n", a, b);
+            return 1;
+        }
+    }
+
+    printf("parallel_invalidate_smoke: OK\n");
+    return 0;
+}

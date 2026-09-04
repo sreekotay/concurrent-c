@@ -449,8 +449,12 @@ static void cc__chan_wait_flag_park(void* waitable, CCSchedFiber* fiber, void* i
                                   atomic_load_explicit(ctx->flag, memory_order_relaxed));
     }
     cc__fiber_set_park_obj(ctx->obj);
-    CC_FIBER_PARK_IF(ctx->flag, ctx->expected,
-                     ctx->reason ? ctx->reason : "chan_wait_notified");
+    /* Dest cancel signals this fiber without setting `notified`. A single
+     * PARK_IF treats that as a spurious wake and the recv loop parks
+     * again; wait-until-ready-or-cancel unsticks. */
+    (void)CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL(
+        ctx->flag, ctx->expected,
+        ctx->reason ? ctx->reason : "chan_wait_notified");
 }
 
 static cc_sched_wait_result cc__chan_wait_flag_park_until(void* waitable, CCSchedFiber* fiber, void* io,
@@ -463,10 +467,16 @@ static cc_sched_wait_result cc__chan_wait_flag_park_until(void* waitable, CCSche
                                   atomic_load_explicit(ctx->flag, memory_order_relaxed));
     }
     cc__fiber_set_park_obj(ctx->obj);
-    return CC_FIBER_PARK_IF_UNTIL(ctx->flag, ctx->expected, abs_deadline,
-                                  ctx->reason ? ctx->reason : "chan_wait_notified")
-               ? CC_SCHED_WAIT_TIMEOUT
-               : CC_SCHED_WAIT_PARKED;
+    {
+        int rc = CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL_UNTIL(
+            ctx->flag, ctx->expected, abs_deadline,
+            ctx->reason ? ctx->reason : "chan_wait_notified");
+        if (rc == ECANCELED)
+            return CC_SCHED_WAIT_CANCELLED;
+        if (rc == ETIMEDOUT)
+            return CC_SCHED_WAIT_TIMEOUT;
+        return CC_SCHED_WAIT_PARKED;
+    }
 }
 
 static inline cc_sched_wait_result cc__chan_wait_notified_deadline(cc__fiber_wait_node* node,

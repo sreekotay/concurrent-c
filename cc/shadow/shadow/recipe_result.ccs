@@ -49,23 +49,23 @@ int main(void) {
 
     /* (1) !>; — forwards to @errhandler if the composition fails. */
     int total = get_total_wait_time() !>;
-    println(@string(`total wait time: ${total} seconds`, @scratch)) !>;
+    println(@string(`total wait time: ${total} seconds`, @scratch));
 
     /* (2) ?> — substitutes a default; never propagates. */
     int missing = read_config_value("unknown_key") ?> -1;
-    println(@string(`missing key fell back to: ${missing}`, @scratch)) !>;
+    println(@string(`missing key fell back to: ${missing}`, @scratch));
 
     /* (3) ?>(e) — default computed from the error value. */
     int bad = read_config_value("") ?>(e) (e.kind == CC_ERR_INVALID_ARG ? 0 : -1);
-    println(@string(`invalid key mapped to: ${bad}`, @scratch)) !>;
+    println(@string(`invalid key mapped to: ${bad}`, @scratch));
 
     /* (4) Compose then default — local work, then `@err(e)` → @errhandler.
      *    (Success path: known key. Flip to "" to exercise the forward.) */
     int shown = read_config_value("timeout") !>(e) {
-        println(@string(`compose local: ${e.message}`, @scratch)) !>;
+        println(@string(`compose local: ${e.message}`, @scratch));
         @err(e);
     };
-    println(@string(`compose ok: timeout=${shown}`, @scratch)) !>;
+    println(@string(`compose ok: timeout=${shown}`, @scratch));
 
     return 0;
 }

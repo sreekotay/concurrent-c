@@ -2,6 +2,8 @@
  * Structured concurrency nursery (minimal stub).
  * Tracks spawned tasks and joins them at close. Cancellation is cooperative
  * via a shared flag; spawned functions should poll cc_nursery_is_cancelled().
+ * `n.spawn` after `n.cancel()` fails `CC_ERR_CANCELLED`. Already-admitted
+ * children stay; they poll / parks wake.
  */
 #ifndef CC_NURSERY_H
 #define CC_NURSERY_H

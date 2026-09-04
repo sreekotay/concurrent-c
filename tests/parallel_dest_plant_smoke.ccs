@@ -1,0 +1,35 @@
+/*
+ * Dest-live plant: read-only n is an argument of the kick. A write
+ * after the bind is not this arm's object. h.live() stays true until
+ * wait — it is not "results ready."
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    int n = 3;
+    int saw = 0;
+    int kick = 0;
+    CCParallel h = @parallel spawn {
+        kick = 1;
+        saw = n;
+    } !>;
+    if (!h.live()) {
+        fprintf(stderr, "FAIL dest-live plant not live\n");
+        return 1;
+    }
+    n = 99;
+    h.wait() !>;
+    if (h.live()) {
+        fprintf(stderr, "FAIL dest-live plant live after wait\n");
+        return 1;
+    }
+    if (kick != 1 || saw != 3) {
+        fprintf(stderr, "FAIL dest-live plant kick=%d saw=%d\n", kick, saw);
+        return 1;
+    }
+    printf("parallel_dest_plant_smoke: OK\n");
+    return 0;
+}

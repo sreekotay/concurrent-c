@@ -1294,7 +1294,14 @@ char* cc_script_rewrite_source(const char* path,
         "/* .shcc entry: auto prelude */\n"
         "#include <ccc/script/prelude.cch>\n"
         "\n";
+    /* Print bangs (`io.println() !>;`) are `void !>(CCPrintError)` and do
+     * not as: to CCError — keep a typed handler so selection does not fall
+     * through to a host C type error on the CCError hoist cell. */
     static const char default_eh[] =
+        "    @errhandler(CCPrintError pe) {\n"
+        "        (void)cc_eprintln(cc_print_error_str(pe));\n"
+        "        return 1;\n"
+        "    }\n"
         "    @errhandler(CCError e) {\n"
         "        (void)cc_eprintln(cc_error_str(e));\n"
         "        return 1;\n"
@@ -1414,7 +1421,11 @@ char* cc_script_rewrite_source(const char* path,
              * `\n`), so without it `@errhandler` sticks to `{` on one line
              * and later statements fail to parse. */
             static const char task_eh[] =
-                "\n    @errhandler(CCError e) {\n"
+                "\n    @errhandler(CCPrintError pe) {\n"
+                "        (void)cc_eprintln(cc_print_error_str(pe));\n"
+                "        return 1;\n"
+                "    }\n"
+                "    @errhandler(CCError e) {\n"
                 "        (void)cc_eprintln(cc_error_str(e));\n"
                 "        return 1;\n"
                 "    }\n"

@@ -326,7 +326,8 @@ OPEN ──spawn*──┬── JOINING ── EMPTY ── DEAD     owner stay
 
 Self-owned: `cc_nursery_create() !> @destroy` (or `leave`). Arena birth:
 `a.create_nursery()` — handle lives in `a`; arena walk joins (no `leave`).
-`n.spawn` admits children; `n.cancel()` is cooperative. Use either
+`n.spawn` admits children; `n.cancel()` stops admit (`CC_ERR_CANCELLED`)
+and is cooperative for children already queued. Use either
 `@destroy` / `wait` or `leave`, not both. Leftover at EMPTY runs only on
 the LEFT path (`n.leave(ctx, finish)`), not on wait / `@destroy`.
 
@@ -347,7 +348,8 @@ first arm has finished when the construct returns `h`; siblings may
 still be running. A dest bound to one assignment arm is ill-formed:
 this dest is never live on the caller. A dest bound to one expression
 arm (`CCParallel h = @parallel { work(); } !>;`) is the worker
-(spawned); dest is live. Join with `!>.wait()!>`, or bind the dest.
+(spawned); dest is live. One-arm `@serial` is that worker too —
+an outer assign does not make it the kick. Join with `!>.wait()!>`, or bind the dest.
 `h.wait()` joins them and publishes their writes. Pointer names copy
 the pointer; other captured names are the frame object and must
 outlive `.wait()`. `h.close(tx)` arms EMPTY to close `tx` on wait and
@@ -355,7 +357,19 @@ leave. `h.leave()` consumes the handle without joining; leftover runs
 at EMPTY on the LEFT path only (`h.leave(ctx, finish)`). Do not mix
 wait and leave. `h.cancelled` and `h.paused` are
 atomic. `h.cancel()` is `true` when this call stored live→cancelled.
-`h.live()` is planted and not joined or left. `cc_parallel_empty()` is idle.
+`h.live()` is planted and not joined or left — handle lifetime, not
+“the work is running” and not “results are ready.” After a kick the
+wave can be done and `h.live()` is still true. `@destroy` /
+`h.invalidate()` cancels the tree and joins; it is not `h.wait() !>`.
+Dest-live plant
+snapshots read-only captures at the kick; a write after the bind is
+not that arm's object. A `CCParallel` dest and an atomic stay the
+frame object — admit onto a snapshot is not this dest. Outputs without `.wait()` use a dest cell
+(atomic / `h.cancelled` / `@stage`): write the payload, then publish
+with that cell as the last store. Dest-live spawn failure or oom aborts; it does not run
+the worker on this stack. `#pragma(@parallel) off` is the
+one-core test (`@smoke_inline`): finish can run before the next
+statement. `cc_parallel_empty()` is idle.
 After `h.wait()`, `h.joined` and `!h.live()`. Pause / resume / cancel
 of idle or joined are `ok(false)`.
 `h.pause()` / `h.resume()` flip `h.paused` on a live dest; poll

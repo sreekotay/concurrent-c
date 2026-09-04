@@ -142,6 +142,15 @@ static int cc_parallel_grow(CCParallel* h, int need) {
     return 1;
 }
 
+CCResult_void_CCError cc_parallel_admit_ok(CCParallel* h) {
+    if (!h || !cc_parallel_live(h))
+        cc_parallel_die("admit on idle dest");
+    if (cc_atomic_load(&h->cancelled))
+        return cc_err_CCResult_void_CCError(
+            CC_ERROR(CC_ERR_CANCELLED, "admit after cancel"));
+    return cc_ok_CCResult_void_CCError();
+}
+
 void cc_parallel_admit(CCParallel* h, CCTask t, void* env) {
     CCTask* tasks;
     void** envs;
@@ -361,6 +370,13 @@ static CCParallelLeaveHost* cc_parallel_leave_pack(CCParallel* h) {
     h->leftover_fn = NULL;
     h->leftover_ctx = NULL;
     return L;
+}
+
+void cc_parallel_invalidate(CCParallel* h) {
+    if (!h || !cc_parallel_live(h))
+        return;
+    (void)cc__parallel_cancel_tree(h);
+    (void)cc_parallel_wait(h);
 }
 
 CCResult_void_CCError cc_parallel_wait(CCParallel* h) {

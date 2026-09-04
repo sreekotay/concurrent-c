@@ -8,7 +8,9 @@
  * `.wait()` and `.leave()`. `h.leave()` consumes the handle without
  * joining (OPEN → LEFT); leftover runs at EMPTY on the LEFT path
  * only (`h.leave(ctx, finish)`). Mixing wait and leave is a
- * programming error. UFCS is the surface (`h.wait()` is
+ * programming error. `@destroy` / `h.invalidate()` cancels the
+ * tree and joins (not `h.wait() !>`). Idle, joined, or left is a
+ * no-op. UFCS is the surface (`h.wait()` is
  * `cc_parallel_wait(h)`).
  * A void host unwraps in place: `h.wait() !>(e) { (void)e; };`.
  * `.cancel()` is bool !>(CCIoError): Ok(true) means this call
@@ -25,11 +27,15 @@
  * call's transition). The construct honors `paused` at the seams
  * it emits: thunk entry, the next `@parallel for` half, the next
  * leaf iteration. `cc_parallel_honor(h)` yields while paused.
- * Cancel is a mark: it does not skip a thunk, and it unsticks a
- * paused honor. A body still polls if it cares mid-arm. `.wait()`
- * does not resume. Cancel wakes parks on fibers attached to the
- * dest (channel send/recv, exclusive wait). Pause does not complete
- * those parks. Wait-for dest is live during enter; the construct
+ * Dest-live workers do not run on the caller: spawn failure or env
+ * oom is `cc_parallel_die`. `#pragma(@parallel) off` is the sequential
+ * dest-live test. Cancel is a mark: it stops admit. `n.spawn` and dest-attach after
+ * cancel fail `CC_ERR_CANCELLED` (enclosing `@errhandler`; dest-attach
+ * is still a statement, no `!>` in source). It does not skip a thunk,
+ * and it unsticks a paused honor. Already-admitted stay; a body still
+ * polls if it cares mid-arm. `.wait()` does not resume. Cancel wakes
+ * parks on fibers attached to the dest (channel send/recv, exclusive
+ * wait). Pause does not complete those parks. Wait-for dest is live during enter; the construct
  * joins before the statement ends (`h.n` is the nursery). Honor at
  * enter, ticket entry, and after `@stage` wait before the block.
  * `.adopt(child)` links a cancel tree: parent cancel walks children
@@ -113,7 +119,9 @@ static inline bool cc_parallel_live(const CCParallel* h) {
 }
 
 void !>(CCError) cc_parallel_wait(CCParallel* h);
+void cc_parallel_invalidate(CCParallel* h);
 void cc_parallel_attach(CCParallel* h, CCTask t);
+void !>(CCError) cc_parallel_admit_ok(CCParallel* h);
 void cc_parallel_admit(CCParallel* h, CCTask t, void* env);
 void cc_parallel_die(const char* msg);
 void cc_parallel_wake_attached(CCParallel* h);
@@ -266,6 +274,7 @@ static inline CCSlice cc_parallel_lower_c(CCSlice recv_type,
 }
 
 @typehooks on CCParallel {
+    .destroy = cc_type_destroy_call("cc_parallel_invalidate"),
     .ufcs = cc_parallel_lower_c,
 };
 

@@ -31,6 +31,7 @@
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_type.cch>
 #include <ccc/cc_io_error.cch>
+#include <ccc/cc_print_error.cch>
 #include <ccc/std/io.cch>
 #include <ccc/std/slice.cch>
 #include <ccc/std/string.cch>

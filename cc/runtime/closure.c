@@ -148,10 +148,12 @@ CCResult_CCNursery_CCError cc_nursery_spawn_child_closure0(CCNursery parent, CCC
             CC_ERROR(CC_ERR_INVALID_ARG, "cc_nursery_spawn_child_closure0: null fn"));
     r = cc_nursery_create_child(parent);
     if (!r.ok) return r;
-    if (!cc_nursery_spawn_closure0(r.u.value, c).ok) {
-        cc_nursery_free(r.u.value);
-        return cc_err_CCResult_CCNursery_CCError(
-            CC_ERROR(CC_ERR_INTERNAL, "cc_nursery_spawn_child_closure0: spawn failed"));
+    {
+        CCResult_void_CCError s = cc_nursery_spawn_closure0(r.u.value, c);
+        if (!s.ok) {
+            cc_nursery_free(r.u.value);
+            return cc_err_CCResult_CCNursery_CCError(s.u.error);
+        }
     }
     return r;
 }
@@ -202,10 +204,12 @@ CCResult_CCNursery_CCError cc_nursery_spawn_child_closure1(CCNursery parent, CCC
             CC_ERROR(CC_ERR_INVALID_ARG, "cc_nursery_spawn_child_closure1: null fn"));
     r = cc_nursery_create_child(parent);
     if (!r.ok) return r;
-    if (!cc_nursery_spawn_closure1(r.u.value, c, arg0).ok) {
-        cc_nursery_free(r.u.value);
-        return cc_err_CCResult_CCNursery_CCError(
-            CC_ERROR(CC_ERR_INTERNAL, "cc_nursery_spawn_child_closure1: spawn failed"));
+    {
+        CCResult_void_CCError s = cc_nursery_spawn_closure1(r.u.value, c, arg0);
+        if (!s.ok) {
+            cc_nursery_free(r.u.value);
+            return cc_err_CCResult_CCNursery_CCError(s.u.error);
+        }
     }
     return r;
 }
@@ -259,10 +263,12 @@ CCResult_CCNursery_CCError cc_nursery_spawn_child_closure2(CCNursery parent, CCC
             CC_ERROR(CC_ERR_INVALID_ARG, "cc_nursery_spawn_child_closure2: null fn"));
     r = cc_nursery_create_child(parent);
     if (!r.ok) return r;
-    if (!cc_nursery_spawn_closure2(r.u.value, c, arg0, arg1).ok) {
-        cc_nursery_free(r.u.value);
-        return cc_err_CCResult_CCNursery_CCError(
-            CC_ERROR(CC_ERR_INTERNAL, "cc_nursery_spawn_child_closure2: spawn failed"));
+    {
+        CCResult_void_CCError s = cc_nursery_spawn_closure2(r.u.value, c, arg0, arg1);
+        if (!s.ok) {
+            cc_nursery_free(r.u.value);
+            return cc_err_CCResult_CCNursery_CCError(s.u.error);
+        }
     }
     return r;
 }

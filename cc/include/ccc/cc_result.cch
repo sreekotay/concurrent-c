@@ -547,8 +547,8 @@ const char* cc_error_site(void);
 
 /* Errhandler as-face `_Generic` always names CCIoError (Io → CCError
  * `.base`). Every Result TU must see that type — not only TUs that
- * include io/channel. Include-guard cycle: this file is already open. */
+ * include io/channel. Include-guard cycle: this file is already open.
+ * Do not include cc_print_error here: it needs a complete CCIoError. */
 #include <ccc/cc_io_error.cch>
-#include <ccc/cc_print_error.cch>
 
 #endif /* CC_RESULT_H */

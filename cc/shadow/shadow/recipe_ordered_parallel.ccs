@@ -31,7 +31,7 @@ static int process_item(int id) {
     usleep(delay_us);
     int result = id * id;
     int delay_ms = delay_us / 1000;
-    println(@string(`  [worker] completed item ${id} (delay=${delay_ms}ms)`, @scratch)) !>;
+    println(@string(`  [worker] completed item ${id} (delay=${delay_ms}ms)`, @scratch));
     return result;
 }
 
@@ -42,9 +42,9 @@ int main(void) {
     int[~CHAN_CAP ordered <] results_rx;
     CCChan* results_ch = cc_channel_pair(&results_tx, &results_rx) !> @destroy;
 
-    println("=== Ordered Parallel Processing ===") !>;
-    println(@string(`Processing ${NUM_ITEMS} items with variable delays...`, @scratch)) !>;
-    println("") !>;
+    println("=== Ordered Parallel Processing ===");
+    println(@string(`Processing ${NUM_ITEMS} items with variable delays...`, @scratch));
+    println("");
 
     cc_atomic_int failed = 0;
     {
@@ -52,14 +52,14 @@ int main(void) {
 
         consumer.spawn(() => [results_rx, &failed] {
             @errhandler(CCError e) cc_error_exit(e);
-            println("\n[consumer] receiving results in order:") !>;
+            println("\n[consumer] receiving results in order:");
             int result = 0;
             int expect = 1;
             while (cc_io_avail(results_rx.recv(&result))) {
                 int want = expect * expect;
-                println(@string(`[consumer] item ${expect}: ${expect}^2 = ${result}`, @scratch)) !>;
+                println(@string(`[consumer] item ${expect}: ${expect}^2 = ${result}`, @scratch));
                 if (result != want) {
-                    eprintln(@string(`ORDER/VALUE: expected ${want} got ${result}`, @scratch)) !>;
+                    eprintln(@string(`ORDER/VALUE: expected ${want} got ${result}`, @scratch));
                     failed.store(1);
                     break;
                 }
@@ -68,7 +68,7 @@ int main(void) {
             if (expect != NUM_ITEMS + 1) {
                 int got = expect - 1;
                 int n = NUM_ITEMS;
-                eprintln(@string(`missing results: got ${got} of ${n}`, @scratch)) !>;
+                eprintln(@string(`missing results: got ${got} of ${n}`, @scratch));
                 failed.store(1);
             }
         });
@@ -86,12 +86,12 @@ int main(void) {
                     results_tx.send_task(() => [id] {
                         return process_item(id);
                     });
-                    println(@string(`[producer] submitted task for item ${i}`, @scratch)) !>;
+                    println(@string(`[producer] submitted task for item ${i}`, @scratch));
                 }
             });
         }
     }
 
-    println("\nDone! Results printed in order despite out-of-order completion.") !>;
+    println("\nDone! Results printed in order despite out-of-order completion.");
     return failed.load() ? 1 : 0;
 }
