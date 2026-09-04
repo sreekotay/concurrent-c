@@ -2631,7 +2631,8 @@ static int shadow_emit_return_cc(AstNode* st, CEmit* out, ShadowCtx* ctx,
 }
 
 /* Call-local @scratch checkpoint push/pop. Named __cc_scratch_cpN so nested
- * sites stay distinct under soft-return restore (inner→outer). */
+ * sites stay distinct under soft-return restore (inner→outer). The scratch
+ * arena is owned by its function, so the owner-only pair applies. */
 static int shadow_scratch_cp_push(ShadowCtx* ctx, CEmit* out, const char* indent) {
     int id;
     if (!ctx || !out) return 0;
@@ -2644,7 +2645,7 @@ static int shadow_scratch_cp_push(ShadowCtx* ctx, CEmit* out, const char* indent
     if (!indent) indent = "    ";
     return cemit_fmt(out,
                      "%sCCArenaCheckpoint __cc_scratch_cp%d = "
-                     "cc_arena_checkpoint(__cc_str_scratch);\n",
+                     "cc_arena_checkpoint_local(__cc_str_scratch);\n",
                      indent, id);
 }
 
@@ -2654,7 +2655,7 @@ static int shadow_scratch_cp_pop(ShadowCtx* ctx, CEmit* out, const char* indent)
     id = ctx->scratch_cp_depth;
     ctx->scratch_cp_depth--;
     if (!indent) indent = "    ";
-    return cemit_fmt(out, "%scc_arena_restore(__cc_scratch_cp%d);\n", indent, id);
+    return cemit_fmt(out, "%scc_arena_restore_local(__cc_scratch_cp%d);\n", indent, id);
 }
 
 /* Early exit: restore every open call-local scratch cp (emit-time depth
@@ -2665,7 +2666,7 @@ static int shadow_emit_scratch_cps_restore(ShadowCtx* ctx, CEmit* out,
     if (!ctx || ctx->scratch_cp_depth <= 0) return 1;
     if (!indent) indent = "    ";
     for (i = ctx->scratch_cp_depth; i >= 1; i--) {
-        if (!cemit_fmt(out, "%scc_arena_restore(__cc_scratch_cp%d);\n", indent,
+        if (!cemit_fmt(out, "%scc_arena_restore_local(__cc_scratch_cp%d);\n", indent,
                        i))
             return 0;
     }
