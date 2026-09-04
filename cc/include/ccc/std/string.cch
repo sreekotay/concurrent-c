@@ -88,6 +88,7 @@ static inline void cc__string_poison(CCString *str) {
  * of moves; the runtime's cc_mem* names (from cc_mem.cch, which cc_arena.cch
  * includes on those paths) under TCC, comptime, and the runtime build. */
 #if defined(CC_COMPTIME) || defined(__TINYC__) || defined(CC_ARENA_IMPL)
+#include <ccc/cc_mem.cch>
 #define CC__STR_MEMCPY cc_memcpy
 #define CC__STR_MEMSET cc_memset
 #else
