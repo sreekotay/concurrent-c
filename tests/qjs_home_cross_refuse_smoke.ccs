@@ -1,0 +1,39 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/quickjs.cch>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    if (!a.valid()) return 1;
+    if (!cc_qjs_available()) {
+        puts("SKIP (get QuickJS from upstream)");
+        return 0;
+    }
+
+    CCQjs first = cc_qjs_new(a) !> @destroy;
+    CCQjs second = cc_qjs_new(a) !> @destroy;
+    first.exec("function id(x) { return x; }") !>;
+    CCQjsVal f = first.eval("id") !> @destroy;
+    CCQjsVal alien = second.eval("({n: 1})") !> @destroy;
+
+    CCResult_CCQjsVal_CCQjsError bad = f.invoke(alien);
+    if (!bad.is_err() ||
+        strstr(bad.u.error.base.message, "different runtime") == NULL) {
+        fprintf(stderr, "expected home refuse, got err=%d msg=%s\n",
+                bad.is_err() ? 1 : 0,
+                bad.is_err() ? bad.u.error.base.message : "(ok)");
+        return 2;
+    }
+
+    CCQjsVal local = first.eval("({n: 2})") !> @destroy;
+    CCQjsVal okv = f.invoke(local) !> @destroy;
+    (void)okv;
+    puts("ok");
+    return 0;
+}

@@ -51,3 +51,6 @@ venv/
 
 # VS Code / Cursor extension packages
 *.vsix
+
+# Upstream QuickJS — attach locally; CC does not vendor it
+/quickjs/

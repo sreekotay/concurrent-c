@@ -95,6 +95,8 @@ Python dependency), one marshalling ruleset, and one benchmark
 `examples/js/jsdemo.shcc` is the guest-module script (Node loads CC).
 In-process hosting: `recipe_js_host.ccs`; N isolated domains:
 `recipe_js_isolated.ccs`.
+`examples/qjs/qjsdemo.shcc` is the in-process QuickJS embed
+([`docs/quickjs.md`](../docs/quickjs.md)).
 
 ```bash
 ./cc/bin/ccc examples/js/jsdemo.shcc    # build js_demo.node + Math.sqrt/… via node

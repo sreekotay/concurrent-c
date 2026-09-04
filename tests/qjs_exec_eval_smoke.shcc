@@ -1,0 +1,23 @@
+#include <ccc/script/quickjs.cch>
+
+if (!cc_qjs_available()) {
+    "SKIP (get QuickJS from upstream)".println();
+    return 0;
+}
+
+CCQjs js = cc_qjs_new(a) !> @destroy;
+
+js.exec("function triple(x) { return x * 3; }") !>;
+CCQjsVal v = js.eval("triple(14)") !> @destroy;
+int64_t n = v.as_i64() !>;
+println(@string(`triple=${n}`, a));
+
+double d = js.eval("2.5 * triple(2)") !>;
+long long big = js.eval("2 ** 40") !>;
+println(@string(`typed=${d} ${big}`, a));
+
+CCQjsVal bad = js.eval("(() => { throw new Error('nope'); })()") !>(e) {
+    println(@string(`caught=${e.name}`, a));
+    return 0;
+} @destroy;
+(void)bad;

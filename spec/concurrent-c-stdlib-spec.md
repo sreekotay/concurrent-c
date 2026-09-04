@@ -3115,3 +3115,57 @@ same computation run in-process.
   not a growth of this one
 - Deep container conversion (object/array graphs ↔ CC collections)
 - Implicit cross-home use or implicit moves
+
+## QuickJS interop
+
+Status: draft — in-process embed. The engine is a project dependency from
+upstream; this header does not vendor or download it. No child process, no
+Node-API.
+
+### Model
+
+`CCQjs` is one `JSRuntime` + `JSContext`. `CCQjsVal` is a JS value anchored
+to that handle. Failures are `CCQjsError` with a `CCError` face. Unresolved
+methods on a value are property-get + `JS_Call`; a typed destination extracts
+and releases the intermediate. `eval` is the handle's dynamic member so
+`double v = js.eval("1+1") !>` resolves through the same dest-typed sink.
+
+```c
+#include <ccc/script/quickjs.cch>
+
+CCQjs js = cc_qjs_new(a) !> @destroy;
+CCQjsVal Math = js.eval("Math") !> @destroy;
+double v = Math.sqrt(2.0) !>;
+```
+
+`cc_qjs_available()` is the loader. It looks for `CC_LIBQJS` (an already-built
+adapter `.so`), then `CC_QUICKJS_SRC`, then `./quickjs`,
+`./third_party/quickjs`, `./vendor/quickjs` when those directories contain
+`quickjs.h` and `quickjs.c`. A source tree is compiled once into
+`~/.cache/concurrent-c/qjs/` (override `CC_QJS_CACHE`). Absence names how to
+attach [bellard/quickjs](https://github.com/bellard/quickjs) or
+[quickjs-ng](https://github.com/quickjs-ng/quickjs). The adapter compiles
+`JS_NewClassID` as two-arg when `QJS_VERSION_MAJOR` is defined (ng),
+one-arg otherwise.
+
+A second handle is a second runtime — there is no isolated-process flag.
+
+### JS binds a CC object
+
+`js.own::[T](value)` copies `T` into the handle arena and binds a JS object
+to that slot. The source is consumed. Methods are that type's UFCS members
+(scalar args and returns). The JS finalizer poisons the opaque; it does not
+free `T`. Handle close (then the caller's arena) releases every slot
+together.
+
+Per-object reclaim is a later language hoist of the generational store in
+`perf/wstore5.ccs`, not this header.
+
+Cross-home value arguments refuse by name. `f.invoke(args…)` calls the value
+itself.
+
+### Out of scope
+
+- Process isolation, Node-API, `.node` loading, `require` / npm
+- Per-object GC free of CC bytes
+- Folding this into the `CCJs` probe order

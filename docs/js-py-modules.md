@@ -65,6 +65,23 @@ ccc examples/py/pydemo.shcc
 # or:  ccc run examples/recipe_py_interop.ccs
 ```
 
+**QuickJS** — how it works: [`docs/quickjs.md`](quickjs.md)
+([`qjsdemo.shcc`](../examples/qjs/qjsdemo.shcc)). In-process only; attach
+[bellard/quickjs](https://github.com/bellard/quickjs) or
+[quickjs-ng](https://github.com/quickjs-ng/quickjs) (`./quickjs`,
+`CC_QUICKJS_SRC`, or `CC_LIBQJS`). `js.own::[T](value)` binds a CC object
+in the handle arena.
+
+```c
+#include <ccc/script/quickjs.cch>
+
+CCQjs js = cc_qjs_new(a) !> @destroy;
+CCQjsVal Math = js.eval("Math") !> @destroy;
+double v = Math.sqrt(2.0) !>;
+```
+
+Probe with `cc_qjs_available()` when you want a clean skip without QuickJS.
+
 Probe with `cc_py_available()` when you want a clean skip without libpython.
 `cc_py_new(true, a)` opens a **process-isolated** child (probe:
 `cc_py_proc_available()`); objects stay remote handles / scalars — never

@@ -6,6 +6,7 @@
 - **[cccportable](cccportable.md)** — Consumer host-C snapshot: `portable-install`, `--cccportable` / `CCCPORTABLE`, `#pragma(@prelude)` / `#pragma(@linenumbers)`
 - **[Backwards compatibility](backwards_compatibility.md)** — Unit headers, version pins, bootstrap seeds
 - **[JS / Python interop](js-py-modules.md)** — hosting (`pydemo.shcc`) and native module export
+- **[QuickJS](quickjs.md)** — in-process embed (`qjsdemo.shcc`); engine is a project dependency
 - **[When to run what](build-when.md)** — Install vs checkout vs stdlib vs lowerer vs ship vs cold smoke
 - **[Language Concepts](language-concepts.md)** — Defer, results, UFCS, `@variant`, arenas (lifetime vs alloc policy) / provenance, walks, closures
 - **[@typehooks / @typeview](typehooks-typeviews.md)** — Tutorial: lifecycle hooks, extent / `for in`, is-a faces, allow-list views

@@ -1,0 +1,13 @@
+#include <ccc/script/quickjs.cch>
+
+if (!cc_qjs_available()) {
+    "SKIP (get QuickJS from upstream)".println();
+    return 0;
+}
+
+CCQjs js = cc_qjs_new(a) !> @destroy;
+CCQjsVal bad = js.eval("(function () { throw new TypeError('boom'); })()") !>(e) {
+    println(@string(`name=${e.name} stack=${e.stack.len > 0}`, a));
+    return 0;
+} @destroy;
+(void)bad;

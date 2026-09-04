@@ -1,0 +1,1699 @@
+/* Stage 2: include splice, object-like macros, #ifdef/#ifndef guards,
+ * angle + ordinary quote-.h passthrough. On the root tape, `#if`/`#ifdef`/
+ * `#ifndef`/`#elif`/`#else`/`#endif` are cpp-transparent: every arm is
+ * lowered and the directive lines are emitted verbatim for the host cpp.
+ * `#define` / `#include` that sit inside those arms stay in place (not
+ * hoisted, not applied). Spliced include frames keep classic `#ifdef`/
+ * `#ifndef` operand eval/skip. Exhaustive directive policy via pp_dir
+ * static_map. Requires pp_tape.cch + <ccc/std/static_map.h>. */
+#pragma once
+
+/* ---- closed directive vocabulary (comptime perfect hash) ---------------- */
+
+#include "pp_tape.h"
+typedef enum {
+    PP_DIR_NONE = 0,
+    PP_DIR_IF,
+    PP_DIR_IFDEF,
+    PP_DIR_IFNDEF,
+    PP_DIR_ELIF,
+    PP_DIR_ELSE,
+    PP_DIR_ENDIF,
+    PP_DIR_DEFINE,
+    PP_DIR_UNDEF,
+    PP_DIR_INCLUDE,
+    /* Passthrough-by-design: drop from the AST token stream; host / .h emit
+     * does not need these from spliced bodies (pragma once is emitted for
+     * SHADOW_EMIT_H; #line/#warning are non-semantic for lower). */
+    PP_DIR_PRAGMA,
+    PP_DIR_LINE,
+    PP_DIR_WARNING,
+    /* Hard diagnostic with operand text. */
+    PP_DIR_ERROR
+} PpDirKind;
+
+typedef struct {
+    PpDirKind kind;
+} PpDirSpec;
+
+typedef struct {
+    const char* key;
+    PpDirSpec value;
+} PpDirEntry;
+
+           
+                                   
+                                
+                                      
+                                        
+                                    
+                                    
+                                      
+                                        
+                                      
+                                          
+                                        
+                                    
+                                          
+                                      
+      
+                                                                       
+ 
+
+/* Forward decl for in-header callers; body is TU-spliced from the map above. */
+static const PpDirSpec* pp_dir_get(CCSlice key);
+
+static PpDirKind pp_dir_of(CCSlice spell) {
+    const PpDirSpec* s = pp_dir_get(spell);
+    return s ? s->kind : PP_DIR_NONE;
+}
+
+/* ---- stage-2: splice + object-like macros + guards ---------------------- */
+
+enum { EXPAND_CAP = 64,
+       REFUSE_CLO_CAP = 32, PP_NEST_CAP = 32, PP_SKIP_SPAN_CAP = 4096,
+       /* Soft sanity only — grow fails loud past this; not a fixed table. */
+       MACRO_SANITY_CAP = 1 << 20,
+       FRAME_SANITY_CAP = 1 << 16,
+       PASS_INC_SANITY_CAP = 1 << 20 };
+
+typedef struct {
+    char* name;    /* arena cstr (pp->arena) */
+    Token* body;   /* arena copies of spells (borrow into defining file bytes) */
+    int nbody;
+} Macro;
+
+typedef struct {
+    FileTape* tape;
+    int i;         /* next index in tape->toks */
+    int blue_paint; /* 1 = this synth frame disables its macro name */
+} Frame;
+
+/* Include-frame (#if nest) state. Root tape stays cpp-transparent. */
+typedef struct {
+    int taken;       /* already emitted a true arm */
+    int else_seen;
+    int passthrough; /* host predefined — emit both arms for host cpp */
+} PpIfNest;
+
+typedef struct {
+    int file_id;
+    size_t off;
+    size_t len;
+} PpSkipSpan;
+
+enum { SYS_INC_CAP = 16, CPP_DIR_CAP = 256 };
+
+typedef struct {
+    TapeCache* cache;
+    CCArena arena;
+    const char* search_dir; /* directory prefix for "..." includes */
+    /* Angle-include search roots (e.g. cc/include). Used to warm stage-1
+     * cache; <...> are not spliced into the AST stream (passthrough emit). */
+    const char* sys_inc[SYS_INC_CAP];
+    int nsys_inc;
+    /* Include / macro-expand frames: growable stack on pp->arena. */
+    Frame* frames;
+    int nf;
+    int frames_cap;
+    /* Object-like macros: growable table + name/body on pp->arena. */
+    Macro* macros;
+    int nmacros;
+    int macros_cap;
+    /* Function-like `#define` names whose bodies contain `=>` — inert until
+     * invoked; refuse at the use site (not at `#define`). */
+    char refuse_clo[REFUSE_CLO_CAP][128];
+    int nrefuse_clo;
+    /* emit buffer: post-expand tokens for the AST */
+    Token* out;
+    int nout;
+    int out_cap;
+    /* When set, pp_emit reallocs out[] on full; otherwise fail-loud at cap.
+     * Stack-backed test buffers must leave this 0. */
+    int out_grow;
+    int skip_depth; /* nested #if/#ifdef/#ifndef skip depth */
+    /* Root-tape `#if`/`#ifdef`/`#ifndef` nest (cpp-transparent; host cpp
+     * selects). `#define`/`#include` inside stay in place. */
+    int root_if_depth;
+    /* Include-frame nest with taken/else/passthrough (nf > 1 only). */
+    PpIfNest if_nest[PP_NEST_CAP];
+    int nif_nest;
+    /* Object-like expand blue-paint stack (C: disable name while expanding). */
+    char expand_disable[EXPAND_CAP][128];
+    int nexpand_disable;
+    int err;
+    char err_msg[192]; /* set on capacity / hard failures (also printed) */
+    /* Top-level #include <...> and ordinary quote-.h lines (not spliced).
+     * Pointer table + arena cstrs; grow fails loud (no 256-byte truncate). */
+    char** pass_inc;
+    int npass_inc;
+    int pass_inc_cap;
+    /* Top-level #define lines preserved for .h API surface. */
+    char** pass_def;
+    int npass_def;
+    int pass_def_cap;
+    /* Sticky root-tape cpp lines (`#if`/`#ifdef`/`#define` inside arms, …)
+     * injected into the AST token stream (cpp-transparency). */
+    char cpp_dir[CPP_DIR_CAP][512];
+    int ncpp_dir;
+} Pp;
+
+/* Skip spans for lead-trivia emit (do not blank shared FileTape bytes). */
+static PpSkipSpan g_pp_skip_spans[PP_SKIP_SPAN_CAP];
+static int g_pp_nskip_spans;
+
+static void pp_skip_spans_reset(void) { g_pp_nskip_spans = 0; }
+
+static int pp_skip_span_overlaps(int file_id, size_t off, size_t len) {
+    int i;
+    size_t end = off + len;
+    for (i = 0; i < g_pp_nskip_spans; i++) {
+        PpSkipSpan* s = &g_pp_skip_spans[i];
+        size_t send;
+        if (s->file_id != file_id) continue;
+        send = s->off + s->len;
+        if (off < send && end > s->off) return 1;
+    }
+    return 0;
+}
+
+static void pp_record_skip_token(FileTape* ft, Token t) {
+    if (!ft || !t.spell.len || g_pp_nskip_spans >= PP_SKIP_SPAN_CAP) return;
+    g_pp_skip_spans[g_pp_nskip_spans].file_id = ft->file_id;
+    g_pp_skip_spans[g_pp_nskip_spans].off = t.offset;
+    g_pp_skip_spans[g_pp_nskip_spans].len = t.spell.len;
+    g_pp_nskip_spans++;
+}
+
+static void pp_add_sys_inc(Pp* pp, const char* path) {
+    if (!pp || !path || pp->nsys_inc >= SYS_INC_CAP) return;
+    pp->sys_inc[pp->nsys_inc++] = path;
+}
+
+static void pp_fail_locus(Pp* pp, Token at, const char* msg) {
+    if (!pp || !msg) return;
+    snprintf(pp->err_msg, sizeof(pp->err_msg), "%s", msg);
+    pp->err = 1;
+    if (pp->cache && at.file_id) {
+        diag_at(pp->cache, at, pp->err_msg);
+        return;
+    }
+    if (pp->cache && pp->frames && pp->nf > 0 &&
+        pp->frames[pp->nf - 1].tape) {
+        diag_ft(pp->cache, pp->frames[pp->nf - 1].tape, at.offset, pp->err_msg);
+        return;
+    }
+    g_shadow_diag_errors++;
+    diag_emit("error", NULL, 0, 0, 1, pp->err_msg);
+}
+
+/* Grow a char* table on pp->arena (abandon old bump row). First alloc 8,
+ * then double. Sanity-capped at PASS_INC_SANITY_CAP (no truncate). */
+static int pp_cstr_table_grow(Pp* pp, Token at, char*** tab, int* tcap, int n,
+                              const char* what) {
+    int ncap;
+    char** ntab;
+    if (!pp || !tab || !tcap) return 0;
+    if (!cc_arena_is_live(pp->arena)) {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "stage-2 %s: pp arena is not live",
+                 what ? what : "table");
+        pp_fail_locus(pp, at, msg);
+        return 0;
+    }
+    if (*tcap >= PASS_INC_SANITY_CAP) {
+        char msg[192];
+        snprintf(msg, sizeof(msg),
+                 "stage-2 %s sanity cap (%d); refusing silent grow",
+                 what ? what : "table", PASS_INC_SANITY_CAP);
+        pp_fail_locus(pp, at, msg);
+        return 0;
+    }
+    ncap = *tcap > 0 ? *tcap * 2 : 8;
+    if (ncap > PASS_INC_SANITY_CAP) ncap = PASS_INC_SANITY_CAP;
+    if (ncap <= n) {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "stage-2 %s grow underflow",
+                 what ? what : "table");
+        pp_fail_locus(pp, at, msg);
+        return 0;
+    }
+    ntab = (char**)cc_arena_alloc(pp->arena, sizeof(char*) * (size_t)ncap,
+                                 _Alignof(char*));
+    if (!ntab) {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "stage-2 %s alloc failed",
+                 what ? what : "table");
+        pp_fail_locus(pp, at, msg);
+        return 0;
+    }
+    if (*tab && n > 0) memcpy(ntab, *tab, sizeof(char*) * (size_t)n);
+    memset(ntab + n, 0, sizeof(char*) * (size_t)(ncap - n));
+    *tab = ntab;
+    *tcap = ncap;
+    return 1;
+}
+
+static char* pp_arena_dup_cstr(Pp* pp, Token at, const char* s) {
+    size_t n;
+    char* d;
+    if (!pp || !s) return NULL;
+    if (!cc_arena_is_live(pp->arena)) {
+        pp_fail_locus(pp, at, "stage-2 passthrough: pp arena is not live");
+        return NULL;
+    }
+    n = strlen(s);
+    d = (char*)cc_arena_alloc(pp->arena, n + 1, 1);
+    if (!d) {
+        pp_fail_locus(pp, at, "stage-2 passthrough line alloc failed");
+        return NULL;
+    }
+    memcpy(d, s, n);
+    d[n] = 0;
+    return d;
+}
+
+static int pp_add_passthrough_include(Pp* pp, Token at, const char* line) {
+    char* copy;
+    if (!pp || !line || !line[0]) return 0;
+    if (pp->npass_inc >= pp->pass_inc_cap &&
+        !pp_cstr_table_grow(pp, at, &pp->pass_inc, &pp->pass_inc_cap,
+                            pp->npass_inc, "include passthrough table"))
+        return 0;
+    copy = pp_arena_dup_cstr(pp, at, line);
+    if (!copy) return 0;
+    pp->pass_inc[pp->npass_inc++] = copy;
+    return 1;
+}
+
+static int pp_define_has_cc_token(const char* line) {
+    const char* p;
+    if (!line) return 0;
+    /* Concurrent-C surface tokens must not reach the host .c product. */
+    if (strstr(line, "!>") || strstr(line, "?>") || strstr(line, "=>"))
+        return 1;
+    p = line;
+    while ((p = strchr(p, '@')) != NULL) {
+        if (strncmp(p, "@variant", 8) == 0 || strncmp(p, "@create", 7) == 0 ||
+            strncmp(p, "@destroy", 8) == 0 || strncmp(p, "@defer", 6) == 0 ||
+            strncmp(p, "@async", 6) == 0 || strncmp(p, "@await", 6) == 0 ||
+            strncmp(p, "@errhandler", 11) == 0 || strncmp(p, "@err", 4) == 0 ||
+            strncmp(p, "@comptime", 9) == 0 || strncmp(p, "@string", 7) == 0 ||
+            strncmp(p, "@scratch", 8) == 0 || strncmp(p, "@emit", 5) == 0 ||
+            strncmp(p, "@with_deadline", 14) == 0 ||
+            strncmp(p, "@parallel", 9) == 0 ||
+            strncmp(p, "@typeview", 9) == 0 ||
+            strncmp(p, "@typehooks", 10) == 0)
+            return 1;
+        p++;
+    }
+    return 0;
+}
+
+static int pp_add_passthrough_define(Pp* pp, Token at, const char* line) {
+    char* copy;
+    if (!pp || !line || !line[0]) return 0;
+    /* Keep macro table registration; skip host emit for CC-token bodies. */
+    if (pp_define_has_cc_token(line)) return 1;
+    if (pp->npass_def >= pp->pass_def_cap &&
+        !pp_cstr_table_grow(pp, at, &pp->pass_def, &pp->pass_def_cap,
+                            pp->npass_def, "#define passthrough table"))
+        return 0;
+    copy = pp_arena_dup_cstr(pp, at, line);
+    if (!copy) return 0;
+    pp->pass_def[pp->npass_def++] = copy;
+    return 1;
+}
+
+/* Logical line containing `tok` (stage-1 already spliced '\\' joins). */
+static int pp_capture_dir_line(Pp* pp, Token tok, char* dst, size_t cap) {
+    Frame* fr;
+    FileTape* ft;
+    size_t i, j, n;
+    if (!pp || !dst || !cap || pp->nf <= 0) return 0;
+    fr = &pp->frames[pp->nf - 1];
+    ft = fr->tape;
+    if (!ft || !ft->bytes) return 0;
+    i = tok.offset;
+    while (i > 0 && ft->bytes[i - 1] != '\n') i--;
+    j = i;
+    while (j < ft->len && ft->bytes[j] != '\n' && ft->bytes[j] != '\r') j++;
+    n = j - i;
+    if (n >= cap) n = cap - 1;
+    memcpy(dst, ft->bytes + i, n);
+    dst[n] = 0;
+    return 1;
+}
+
+static int spell_eq(CCSlice s, const char* lit) {
+    size_t n = strlen(lit);
+    return s.len == n && memcmp(s.ptr, lit, n) == 0;
+}
+
+static int at_bol(FileTape* ft, Token t) {
+    /* Directive bol: only spaces/tabs may precede `#` on the physical line
+     * (C allows indented directives). Synthetic frames have no bytes. */
+    size_t i;
+    if (!ft->bytes || ft->len == 0) return 0;
+    i = t.offset;
+    while (i > 0 && ft->bytes[i - 1] != '\n') {
+        char c = ft->bytes[i - 1];
+        if (c != ' ' && c != '\t') return 0;
+        i--;
+    }
+    return 1;
+}
+
+static Macro* macro_find(Pp* pp, CCSlice name); /* used by #if operand eval */
+static int pp_raw_peek(Pp* pp, Token* out);
+static int pp_raw_next(Pp* pp, Token* out);
+
+static int pp_fail_dir(Pp* pp, Token at, const char* msg) {
+    if (!pp) return 0;
+    snprintf(pp->err_msg, sizeof(pp->err_msg), "%s", msg ? msg : "preprocess error");
+    diag_at(pp->cache, at, pp->err_msg);
+    pp->err = 1;
+    return 0;
+}
+
+/* Evaluate a stage-2 `#if` / `#elif` operand. Returns 1 and sets *truth on
+ * success; returns 0 when the form is outside the closed set (caller must
+ * hard-error — never guess the true arm). Closed set: 0/1, IDENT→0|1,
+ * defined(IDENT), !defined(IDENT). `#if !IDENT` is not accepted. */
+static int pp_eval_if_operand(Pp* pp, int* truth) {
+    Token t0;
+    if (!truth) return 0;
+    *truth = 0;
+    if (!pp_raw_peek(pp, &t0)) return 0;
+    /* #if 0 / #if 1 */
+    if (t0.kind == TK_NUM) {
+        pp_raw_next(pp, &t0);
+        if (spell_eq(t0.spell, "1")) {
+            *truth = 1;
+            return 1;
+        }
+        if (spell_eq(t0.spell, "0")) {
+            *truth = 0;
+            return 1;
+        }
+        return 0;
+    }
+    /* #if ! defined ( IDENT )  /  #if defined ( IDENT ) */
+    {
+        int neg = 0;
+        Token t;
+        if (tok_eq(t0, TK_PUNCT, "!")) {
+            neg = 1;
+            pp_raw_next(pp, &t0);
+            if (!pp_raw_peek(pp, &t0)) return 0;
+        }
+        if (t0.kind == TK_IDENT && spell_eq(t0.spell, "defined")) {
+            Token id;
+            pp_raw_next(pp, &t0); /* defined */
+            if (!pp_raw_peek(pp, &t) || !tok_eq(t, TK_PUNCT, "(")) return 0;
+            pp_raw_next(pp, &t); /* ( */
+            if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT) return 0;
+            if (!pp_raw_peek(pp, &t) || !tok_eq(t, TK_PUNCT, ")")) return 0;
+            pp_raw_next(pp, &t); /* ) */
+            *truth = macro_find(pp, id.spell) ? 1 : 0;
+            if (neg) *truth = !*truth;
+            return 1;
+        }
+        /* After `!`, only `defined(IDENT)` is in the closed set. */
+        if (neg) return 0;
+    }
+    /* #if IDENT  — object-like body must be a single 0/1 token. */
+    if (t0.kind == TK_IDENT) {
+        Macro* m;
+        pp_raw_next(pp, &t0);
+        m = macro_find(pp, t0.spell);
+        if (m && m->nbody == 1 && m->body[0].kind == TK_NUM) {
+            if (spell_eq(m->body[0].spell, "1")) {
+                *truth = 1;
+                return 1;
+            }
+            if (spell_eq(m->body[0].spell, "0")) {
+                *truth = 0;
+                return 1;
+            }
+        }
+        return 0;
+    }
+    return 0;
+}
+
+/* Host/compiler predefineds stage-2 does not own — do not eval; passthrough. */
+static int pp_is_host_predefined(CCSlice name) {
+    if (!name.ptr || name.len < 2) return 0;
+    if (name.ptr[0] == '_' && name.ptr[1] == '_') return 1;
+    if (spell_eq(name, "_WIN32") || spell_eq(name, "_WIN64") ||
+        spell_eq(name, "_MSC_VER"))
+        return 1;
+    return 0;
+}
+
+/* True when IDENT is a host predefined not registered in the macro table. */
+static int pp_is_unowned_predefined(Pp* pp, CCSlice name) {
+    if (macro_find(pp, name)) return 0;
+    return pp_is_host_predefined(name);
+}
+
+static int pp_if_nest_push(Pp* pp, int taken, int passthrough) {
+    PpIfNest* n;
+    if (!pp || pp->nif_nest >= PP_NEST_CAP) {
+        if (pp) {
+            snprintf(pp->err_msg, sizeof(pp->err_msg),
+                     "stage-2 #if nest too deep (%d)", PP_NEST_CAP);
+            pp->err = 1;
+        }
+        return 0;
+    }
+    n = &pp->if_nest[pp->nif_nest++];
+    n->taken = taken ? 1 : 0;
+    n->else_seen = 0;
+    n->passthrough = passthrough ? 1 : 0;
+    return 1;
+}
+
+static void pp_if_nest_pop(Pp* pp) {
+    if (pp && pp->nif_nest > 0) pp->nif_nest--;
+}
+
+static PpIfNest* pp_if_nest_top(Pp* pp) {
+    if (!pp || pp->nif_nest <= 0) return NULL;
+    return &pp->if_nest[pp->nif_nest - 1];
+}
+
+static int pp_expand_disabled(Pp* pp, CCSlice name) {
+    int i;
+    if (!pp || !name.ptr) return 0;
+    for (i = 0; i < pp->nexpand_disable; i++) {
+        if (spell_eq(name, pp->expand_disable[i])) return 1;
+    }
+    return 0;
+}
+
+static int pp_expand_disable_push(Pp* pp, CCSlice name, Token at) {
+    if (!pp || !name.ptr || name.len == 0 || name.len >= 128) return 0;
+    if (pp->nexpand_disable >= EXPAND_CAP) {
+        char msg[192];
+        snprintf(msg, sizeof(msg),
+                 "stage-2 macro expand depth exceeded (%d)", EXPAND_CAP);
+        pp_fail_locus(pp, at, msg);
+        return 0;
+    }
+    memcpy(pp->expand_disable[pp->nexpand_disable], name.ptr, name.len);
+    pp->expand_disable[pp->nexpand_disable][name.len] = 0;
+    pp->nexpand_disable++;
+    return 1;
+}
+
+static void pp_expand_disable_pop(Pp* pp) {
+    if (pp && pp->nexpand_disable > 0) pp->nexpand_disable--;
+}
+
+/* Grow macros[] on pp->arena (abandon old bump row). First alloc 8, then
+ * double. Sanity-capped at MACRO_SANITY_CAP with a hard fail (no truncate). */
+static int macro_table_grow(Pp* pp, Token at) {
+    int ncap;
+    Macro* ntab;
+    if (!pp) return 0;
+    if (!cc_arena_is_live(pp->arena)) {
+        pp_fail_locus(pp, at, "stage-2 object-macro table: pp arena is not live");
+        return 0;
+    }
+    if (pp->macros_cap >= MACRO_SANITY_CAP) {
+        char msg[192];
+        snprintf(msg, sizeof(msg),
+                 "stage-2 object-macro table sanity cap (%d); refusing silent "
+                 "grow of #define",
+                 MACRO_SANITY_CAP);
+        pp_fail_locus(pp, at, msg);
+        return 0;
+    }
+    ncap = pp->macros_cap > 0 ? pp->macros_cap * 2 : 8;
+    if (ncap > MACRO_SANITY_CAP) ncap = MACRO_SANITY_CAP;
+    if (ncap <= pp->nmacros) {
+        pp_fail_locus(pp, at, "stage-2 object-macro table grow underflow");
+        return 0;
+    }
+    ntab = cc_arena_alloc_T_count(Macro, pp->arena, ncap);
+    if (!ntab) {
+        pp_fail_locus(pp, at, "stage-2 object-macro table alloc failed");
+        return 0;
+    }
+    if (pp->macros && pp->nmacros > 0)
+        memcpy(ntab, pp->macros, sizeof(Macro) * (size_t)pp->nmacros);
+    memset(ntab + pp->nmacros, 0,
+           sizeof(Macro) * (size_t)(ncap - pp->nmacros));
+    pp->macros = ntab; /* prior row abandoned on arena */
+    pp->macros_cap = ncap;
+    return 1;
+}
+
+static int macro_undef(Pp* pp, CCSlice name) {
+    int i;
+    if (!pp || !name.ptr || !pp->macros) return 1;
+    for (i = 0; i < pp->nmacros; i++) {
+        if (!pp->macros[i].name || !spell_eq(name, pp->macros[i].name))
+            continue;
+        /* Name/body live on pp->arena — abandon; swap-with-last. */
+        pp->macros[i] = pp->macros[pp->nmacros - 1];
+        memset(&pp->macros[pp->nmacros - 1], 0, sizeof(pp->macros[0]));
+        pp->nmacros--;
+        return 1;
+    }
+    return 1; /* missing undef is a no-op (C) */
+}
+
+static Macro* macro_find(Pp* pp, CCSlice name) {
+    int i;
+    if (!pp || !pp->macros) return NULL;
+    for (i = 0; i < pp->nmacros; i++) {
+        if (pp->macros[i].name && spell_eq(name, pp->macros[i].name))
+            return &pp->macros[i];
+    }
+    return NULL;
+}
+
+static int macro_define(Pp* pp, Token at, CCSlice name, Token* body, int nbody) {
+    Macro* m;
+    char* nm;
+    if (!pp || !name.ptr || name.len == 0) return 0;
+    if (!cc_arena_is_live(pp->arena)) {
+        pp_fail_locus(pp, at, "stage-2 #define: pp arena is not live");
+        return 0;
+    }
+    m = macro_find(pp, name);
+    if (!m) {
+        if (pp->nmacros >= pp->macros_cap && !macro_table_grow(pp, at))
+            return 0;
+        m = &pp->macros[pp->nmacros++];
+        memset(m, 0, sizeof(*m));
+        nm = (char*)cc_arena_alloc(pp->arena, name.len + 1, 1);
+        if (!nm) {
+            pp->nmacros--;
+            pp_fail_locus(pp, at, "stage-2 #define: macro name alloc failed");
+            return 0;
+        }
+        memcpy(nm, name.ptr, name.len);
+        nm[name.len] = 0;
+        m->name = nm;
+    } else {
+        /* Redefine: abandon prior body on arena. */
+        m->body = NULL;
+        m->nbody = 0;
+    }
+    if (nbody > 0) {
+        m->body = cc_arena_alloc_T_count(Token, pp->arena, nbody);
+        if (!m->body) {
+            pp_fail_locus(pp, at, "stage-2 #define: macro body alloc failed");
+            return 0;
+        }
+        memcpy(m->body, body, sizeof(Token) * (size_t)nbody);
+        m->nbody = nbody;
+    }
+    return 1;
+}
+
+static int pp_add_refuse_closure_macro(Pp* pp, Token at, CCSlice name) {
+    int i;
+    if (!pp || !name.ptr || name.len == 0 || name.len >= 128) return 0;
+    for (i = 0; i < pp->nrefuse_clo; i++) {
+        if (spell_eq(name, pp->refuse_clo[i])) return 1;
+    }
+    if (pp->nrefuse_clo >= REFUSE_CLO_CAP) {
+        char msg[192];
+        snprintf(msg, sizeof(msg),
+                 "stage-2 refuse-closure macro table full (%d); refusing silent "
+                 "drop",
+                 REFUSE_CLO_CAP);
+        pp_fail_locus(pp, at, msg);
+        return 0;
+    }
+    memcpy(pp->refuse_clo[pp->nrefuse_clo], name.ptr, name.len);
+    pp->refuse_clo[pp->nrefuse_clo][name.len] = 0;
+    pp->nrefuse_clo++;
+    return 1;
+}
+
+static int pp_is_refuse_closure_macro(Pp* pp, CCSlice name) {
+    int i;
+    if (!pp || !name.ptr) return 0;
+    for (i = 0; i < pp->nrefuse_clo; i++) {
+        if (spell_eq(name, pp->refuse_clo[i])) return 1;
+    }
+    return 0;
+}
+
+static int pp_refuse_closure_macro_at(Pp* pp, Token t) {
+    pp_fail_locus(pp, t,
+                  "closure literal(s) from macro expansion are not supported "
+                  "(hint: define at the use site, or pass the closure as a "
+                  "macro parameter)");
+    return 0;
+}
+
+static int pp_emit(Pp* pp, Token t) {
+    if (pp->nout >= pp->out_cap) {
+        if (!pp->out_grow) {
+            snprintf(pp->err_msg, sizeof(pp->err_msg),
+                     "stage2 token buffer full (%d tokens)", pp->out_cap);
+            diag_at(pp->cache, t, pp->err_msg);
+            pp->err = 1;
+            return 0;
+        }
+        int ncap = pp->out_cap > 0 ? pp->out_cap * 2 : 4096;
+        if (ncap < pp->nout + 1) ncap = pp->nout + 1;
+        Token* nbuf = (Token*)realloc(pp->out, sizeof(Token) * (size_t)ncap);
+        if (!nbuf) {
+            snprintf(pp->err_msg, sizeof(pp->err_msg),
+                     "stage2 token buffer realloc failed (%d → %d tokens)",
+                     pp->out_cap, ncap);
+            diag_at(pp->cache, t, pp->err_msg);
+            pp->err = 1;
+            return 0;
+        }
+        pp->out = nbuf;
+        pp->out_cap = ncap;
+    }
+    pp->out[pp->nout++] = t;
+    return 1;
+}
+
+/* Unquoted include path from a TK_STR spell (quotes optional). */
+static void pp_quote_include_path(CCSlice spell, const char** out_p, size_t* out_n) {
+    const char* p = spell.ptr;
+    size_t n = spell.len;
+    *out_p = p;
+    *out_n = n;
+    if (!p || n == 0) return;
+    if (n >= 2 && ((p[0] == '"' && p[n - 1] == '"') ||
+                   (p[0] == '<' && p[n - 1] == '>'))) {
+        *out_p = p + 1;
+        *out_n = n - 2;
+    }
+}
+
+/* Splice only CC faces (.c c h / .c c s / .inc). Detect suffixes by
+ * bytes — do not spell those extensions in a string literal; header
+ * lowerer rewrites a trailing .c c h quote to .h and would break the
+ * check. Ordinary C headers (.h and anything else) passthrough. */
+static int pp_quote_include_is_cc_face(CCSlice spell) {
+    const char* p;
+    size_t n;
+    pp_quote_include_path(spell, &p, &n);
+    if (!p || n < 4) return 0;
+    if (p[n - 4] != '.') return 0;
+    if (p[n - 3] == 'c' && p[n - 2] == 'c' && p[n - 1] == 'h') return 1;
+    if (p[n - 3] == 'c' && p[n - 2] == 'c' && p[n - 1] == 's') return 1;
+    if (p[n - 3] == 'i' && p[n - 2] == 'n' && p[n - 1] == 'c') return 1;
+    return 0;
+}
+
+static int pp_quote_include_passthrough_line(CCSlice spell, char* dst, size_t cap) {
+    const char* p;
+    size_t n;
+    int w;
+    pp_quote_include_path(spell, &p, &n);
+    if (!p || n == 0 || !dst || cap < 16) return 0;
+    w = snprintf(dst, cap, "#include \"%.*s\"", (int)n, p);
+    return w > 0 && (size_t)w < cap;
+}
+
+static int pp_inject_include_at_hash(Pp* pp, Token hdr, const char* line) {
+    char* slot;
+    Token syn;
+    size_t dir_off;
+    FileTape* hft;
+    if (!pp || !line || !line[0]) return 0;
+    if (pp->ncpp_dir >= CPP_DIR_CAP)
+        return pp_fail_dir(pp, hdr, "too many injected #include lines");
+    slot = pp->cpp_dir[pp->ncpp_dir];
+    snprintf(slot, sizeof(pp->cpp_dir[0]), "%s", line);
+    memset(&syn, 0, sizeof(syn));
+    syn.kind = TK_IDENT;
+    syn.spell.ptr = slot;
+    syn.spell.len = strlen(slot);
+    syn.file_id = hdr.file_id;
+    dir_off = hdr.offset;
+    hft = (pp->nf > 0) ? pp->frames[pp->nf - 1].tape : NULL;
+    if (hft && hft->bytes) {
+        while (dir_off > 0 && hft->bytes[dir_off - 1] != '\n')
+            dir_off--;
+    }
+    syn.offset = dir_off;
+    pp->ncpp_dir++;
+    return pp_emit(pp, syn);
+}
+
+static int join_path(const char* dir, CCSlice rel, char* dst, size_t dst_cap) {
+    /* String token spell may include surrounding quotes (KEEP_string) or not. */
+    const char* p;
+    size_t n;
+    size_t dlen;
+    if (!rel.ptr || rel.len == 0) return 0;
+    p = rel.ptr;
+    n = rel.len;
+    if (n >= 2 && ((p[0] == '"' && p[n - 1] == '"') ||
+                   (p[0] == '<' && p[n - 1] == '>'))) {
+        p++;
+        n -= 2;
+    }
+    if (n == 0) return 0;
+    /* Absolute / already-rooted paths (prepare may emit these for lowered
+     * local headers) — use as-is. */
+    if (p[0] == '/' || (n > 1 && p[1] == ':')) {
+        if (n + 1 > dst_cap) return 0;
+        memcpy(dst, p, n);
+        dst[n] = 0;
+        return 1;
+    }
+    dlen = dir ? strlen(dir) : 0;
+    if (dlen + 1 + n + 1 > dst_cap) return 0;
+    if (dlen) {
+        memcpy(dst, dir, dlen);
+        if (dir[dlen - 1] != '/') dst[dlen++] = '/';
+    }
+    memcpy(dst + dlen, p, n);
+    dst[dlen + n] = 0;
+    return 1;
+}
+
+/* Grow frames[] on pp->arena (abandon old bump row). First alloc 8, then
+ * double. Sanity-capped at FRAME_SANITY_CAP with a hard fail (no truncate). */
+static int frame_table_grow(Pp* pp, Token at) {
+    int ncap;
+    Frame* ntab;
+    if (!pp) return 0;
+    if (!cc_arena_is_live(pp->arena)) {
+        pp_fail_locus(pp, at, "stage-2 include frame stack: pp arena is not live");
+        return 0;
+    }
+    if (pp->frames_cap >= FRAME_SANITY_CAP) {
+        char msg[192];
+        snprintf(msg, sizeof(msg),
+                 "stage-2 include frame stack sanity cap (%d); refusing silent "
+                 "grow of #include / macro expand",
+                 FRAME_SANITY_CAP);
+        pp_fail_locus(pp, at, msg);
+        return 0;
+    }
+    ncap = pp->frames_cap > 0 ? pp->frames_cap * 2 : 8;
+    if (ncap > FRAME_SANITY_CAP) ncap = FRAME_SANITY_CAP;
+    if (ncap <= pp->nf) {
+        pp_fail_locus(pp, at, "stage-2 include frame stack grow underflow");
+        return 0;
+    }
+    ntab = cc_arena_alloc_T_count(Frame, pp->arena, ncap);
+    if (!ntab) {
+        pp_fail_locus(pp, at, "stage-2 include frame stack alloc failed");
+        return 0;
+    }
+    if (pp->frames && pp->nf > 0)
+        memcpy(ntab, pp->frames, sizeof(Frame) * (size_t)pp->nf);
+    memset(ntab + pp->nf, 0, sizeof(Frame) * (size_t)(ncap - pp->nf));
+    pp->frames = ntab; /* prior row abandoned on arena */
+    pp->frames_cap = ncap;
+    return 1;
+}
+
+static int pp_push_tape(Pp* pp, FileTape* ft, Token at) {
+    if (!pp || !ft) return 0;
+    if (pp->nf >= pp->frames_cap && !frame_table_grow(pp, at))
+        return 0;
+    pp->frames[pp->nf++] = (Frame){ .tape = ft, .i = 0, .blue_paint = 0 };
+    return 1;
+}
+
+/* Peek/pop raw from top frame only (no expand, no auto-pop).
+ * Exhausted frames are popped by pp_run. Auto-popping here would drop an
+ * includer whose `#include` was the last line, so the spliced body would
+ * land at nf==1 and be treated as the cpp-transparent root tape. */
+static int pp_raw_peek(Pp* pp, Token* out) {
+    Frame* fr;
+    if (!pp || !pp->frames || pp->nf <= 0 || !out) return 0;
+    fr = &pp->frames[pp->nf - 1];
+    if (!fr->tape || fr->i >= fr->tape->ntoks) return 0;
+    *out = fr->tape->toks[fr->i];
+    return 1;
+}
+
+static int pp_raw_next(Pp* pp, Token* out) {
+    if (!pp_raw_peek(pp, out)) return 0;
+    pp->frames[pp->nf - 1].i++;
+    return 1;
+}
+
+/* Byte offset of the first char of the physical line containing `off`. */
+static size_t pp_line_start(FileTape* ft, size_t off) {
+    if (!ft || !ft->bytes || off > ft->len) return 0;
+    while (off > 0 && ft->bytes[off - 1] != '\n') off--;
+    return off;
+}
+
+/* Skip remaining tokens on the current directive line only.
+ * Anchor to the last-consumed token's line — not the next peek. After
+ * `#include "x"` the next peek is already the following line; using that
+ * as line0 would skip the next declaration. */
+static int pp_skip_line(Pp* pp) {
+    Token t;
+    Frame* fr;
+    size_t line0;
+    if (pp->nf <= 0) return 0;
+    fr = &pp->frames[pp->nf - 1];
+    if (!fr->tape || !fr->tape->bytes || fr->tape->len == 0) {
+        /* Synth / empty tape: no line structure; nothing more to skip. */
+        return 1;
+    }
+    if (fr->i > 0)
+        line0 = pp_line_start(fr->tape, fr->tape->toks[fr->i - 1].offset);
+    else if (pp_raw_peek(pp, &t))
+        line0 = pp_line_start(fr->tape, t.offset);
+    else
+        return 1;
+    while (pp_raw_peek(pp, &t)) {
+        fr = &pp->frames[pp->nf - 1];
+        if (!fr->tape || !fr->tape->bytes) break;
+        if (pp_line_start(fr->tape, t.offset) != line0) break;
+        pp_raw_next(pp, &t);
+    }
+    return 1;
+}
+
+/* Inject one root-tape cpp-conditional directive line into the AST stream. */
+static int pp_emit_cpp_dir_line(Pp* pp, Token at) {
+    Token syn;
+    char* slot;
+    if (!pp) return 0;
+    if (pp->ncpp_dir >= CPP_DIR_CAP)
+        return pp_fail_dir(pp, at, "too many #if/#elif/#else/#endif lines");
+    slot = pp->cpp_dir[pp->ncpp_dir];
+    if (!pp_capture_dir_line(pp, at, slot, sizeof(pp->cpp_dir[0])))
+        return pp_fail_dir(pp, at, "cannot capture preprocessor directive line");
+    memset(&syn, 0, sizeof(syn));
+    syn.kind = TK_IDENT;
+    syn.spell.ptr = slot;
+    syn.spell.len = strlen(slot);
+    syn.file_id = at.file_id;
+    syn.offset = at.offset;
+    pp->ncpp_dir++;
+    return pp_emit(pp, syn);
+}
+
+/* Kept for experiments; product skip path records spans instead of blanking
+ * shared FileTape bytes (path-keyed cache). */
+static void __attribute__((unused)) pp_blank_token_src(FileTape* ft, Token t) {
+    size_t off, end, k;
+    if (!ft || !ft->bytes || !t.spell.len) return;
+    off = t.offset;
+    if (off >= ft->len) return;
+    end = off + t.spell.len;
+    if (end > ft->len) end = ft->len;
+    for (k = off; k < end; k++) {
+        if (ft->bytes[k] != '\n') ft->bytes[k] = ' ';
+    }
+}
+
+static int handle_directive(Pp* pp);
+
+/* Macro expansion frames: Token array with no source bytes (not cached). */
+static FileTape* synth_tape_from_tokens(Token* body, int nbody, int file_id) {
+    FileTape* ft = (FileTape*)calloc(1, sizeof(FileTape));
+    if (!ft) return NULL;
+    ft->toks = (Token*)malloc(sizeof(Token) * (size_t)(nbody > 0 ? nbody : 1));
+    if (!ft->toks) { free(ft); return NULL; }
+    if (nbody > 0) memcpy(ft->toks, body, sizeof(Token) * (size_t)nbody);
+    ft->ntoks = nbody;
+    ft->file_id = file_id;
+    ft->bytes = NULL;
+    ft->len = 0;
+    ft->path = NULL;
+    return ft;
+}
+
+static void free_synth_if(FileTape* ft) {
+    if (!ft) return;
+    if (!ft->path && !ft->bytes) {
+        free(ft->toks);
+        free(ft);
+    }
+}
+
+static int handle_include(Pp* pp) {
+    Token hdr;
+    Token hash;
+    Frame* ifr;
+    if (!pp || pp->nf <= 0) return 0;
+    ifr = &pp->frames[pp->nf - 1];
+    if (ifr->i < 2) return 0;
+    hash = ifr->tape->toks[ifr->i - 2];
+    if (!pp_raw_next(pp, &hdr)) return 0;
+    /* object-like expand of HEADER */
+    if (hdr.kind == TK_IDENT) {
+        Macro* m = macro_find(pp, hdr.spell);
+        if (m && m->nbody == 1) hdr = m->body[0];
+    }
+    /* #include <path> — tokenize as < ident (/ ident)* . ident > */
+    if (tok_eq(hdr, TK_PUNCT, "<")) {
+        char angle[240];
+        size_t al = 0;
+        Token t;
+        while (pp_raw_next(pp, &t)) {
+            if (tok_eq(t, TK_PUNCT, ">")) break;
+            if (al + t.spell.len >= sizeof(angle)) return 0;
+            memcpy(angle + al, t.spell.ptr, t.spell.len);
+            al += t.spell.len;
+        }
+        angle[al] = 0;
+        if (pp->skip_depth == 0 &&
+            ((pp->nf == 1 && pp->root_if_depth > 0) ||
+             (pp_if_nest_top(pp) && pp_if_nest_top(pp)->passthrough))) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            pp_skip_line(pp);
+            return 1;
+        }
+        char line[256];
+        snprintf(line, sizeof(line), "#include <%s>", angle);
+        if (!pp_add_passthrough_include(pp, hash, line)) return 0;
+        /* Warm stage-1 cache if resolvable; do not splice into AST. */
+        for (int i = 0; i < pp->nsys_inc; i++) {
+            char full[512];
+            snprintf(full, sizeof(full), "%s/%s", pp->sys_inc[i], angle);
+            FileTape* warm = tape_cache_load(pp->cache, full, pp->arena);
+            if (warm) break;
+        }
+        pp_skip_line(pp);
+        return 1;
+    }
+    if (hdr.kind != TK_STR) { pp_skip_line(pp); return 0; }
+    /* Ordinary C headers: passthrough to host-cc. Do not open — missing
+     * .h is a host -I problem, not a lowerer error (curl_setup.h). */
+    if (!pp_quote_include_is_cc_face(hdr.spell)) {
+        char line[256];
+        if (pp->skip_depth == 0 &&
+            ((pp->nf == 1 && pp->root_if_depth > 0) ||
+             (pp_if_nest_top(pp) && pp_if_nest_top(pp)->passthrough))) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (!pp_quote_include_passthrough_line(hdr.spell, line, sizeof(line)))
+            return 0;
+        /* Host still sees the `.h`. Extracted project faces stay CC faces:
+         * warm the original tape (quote dir / including dir) so harvest
+         * sees fields, type views, and typehooks — same as `<ccc/…>`.
+         * Stay at the #include site. Hoisting quoted locals into pass_inc
+         * puts a lowered chapter .h above types the .ccs just defined
+         * (`RtxNode` before `#include "piece_tree_rb.h"`). */
+        {
+            const char* sp = NULL;
+            size_t sn = 0;
+            char rel[256];
+            char face_path[512];
+            char from_dir[512];
+            FileTape* cur;
+            pp_quote_include_path(hdr.spell, &sp, &sn);
+            if (sn >= sizeof(rel)) sn = sizeof(rel) - 1;
+            if (sp && sn) memcpy(rel, sp, sn);
+            rel[sn] = 0;
+            from_dir[0] = 0;
+            cur = (pp->nf > 0) ? pp->frames[pp->nf - 1].tape : NULL;
+            if (cur && cur->path && cur->path[0])
+                shadow_dir_of(cur->path, from_dir, sizeof(from_dir));
+            else if (pp->search_dir && pp->search_dir[0])
+                snprintf(from_dir, sizeof(from_dir), "%s", pp->search_dir);
+            if (rel[0] &&
+                shadow_project_face_path(rel, from_dir[0] ? from_dir : NULL,
+                                         face_path, sizeof(face_path)))
+                (void)tape_cache_load(pp->cache, face_path, pp->arena);
+        }
+        pp_skip_line(pp);
+        return pp_inject_include_at_hash(pp, hdr, line);
+    }
+    /* #include "..." CC faces (.c c h / .c c s / .inc) — splice
+     * (mid-struct / local fixtures). Prefer the directory of the including
+     * tape, then the TU search_dir. Missing face is a hard error.
+     * Exception: tool umbrellas (c_pp_spike / shadow_build) passthrough to
+     * lowered .h — splicing them pulls the whole serdes tree into the AST
+     * and breaks shadow_lower self-emit. Comptime maps are harvested by
+     * shadow_comptime_exec_file before stage2. */
+    {
+        char path[512];
+        char from_dir[512];
+        FileTape* cur;
+        FileTape* ft = NULL;
+        const char* try_dirs[2];
+        int di;
+        from_dir[0] = 0;
+        cur = (pp->nf > 0) ? pp->frames[pp->nf - 1].tape : NULL;
+        if (cur && !shadow_quote_dir_from_bytes(cur->bytes, cur->len, from_dir,
+                                               sizeof(from_dir))) {
+            if (cur->path) {
+                snprintf(from_dir, sizeof(from_dir), "%s", cur->path);
+                {
+                    char* slash = strrchr(from_dir, '/');
+                    if (slash) *slash = 0;
+                    else snprintf(from_dir, sizeof(from_dir), ".");
+                }
+            }
+        }
+        try_dirs[0] = from_dir[0] ? from_dir : NULL;
+        try_dirs[1] = pp->search_dir;
+        for (di = 0; di < 2; di++) {
+            if (!try_dirs[di]) continue;
+            if (!join_path(try_dirs[di], hdr.spell, path, sizeof(path)))
+                continue;
+            ft = tape_cache_load(pp->cache, path, pp->arena);
+            if (ft) break;
+        }
+        if (!ft) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "cannot open #include %.*s",
+                     (int)hdr.spell.len, hdr.spell.ptr);
+            return pp_fail_dir(pp, hdr, msg);
+        }
+        {
+            const char* base = ft->path ? strrchr(ft->path, '/') : NULL;
+            int umbrella = 0;
+            base = base ? base + 1 : ft->path;
+            /* Stem match only — do not spell "….h" in a string literal;
+             * header lowerer rewrites those to "….h" and breaks the check. */
+            if (base && strncmp(base, "c_pp_spike.", 11) == 0) umbrella = 1;
+            if (base && strncmp(base, "shadow_build.", 13) == 0) umbrella = 1;
+            if (umbrella) {
+                char angle[240];
+                char line[256];
+                const char* ex;
+                size_t al;
+                Token syn;
+                char* slot;
+                angle[0] = 0;
+                if (ft->path && (ex = strstr(ft->path, "examples/")) != NULL)
+                    snprintf(angle, sizeof(angle), "%s", ex);
+                else
+                    snprintf(angle, sizeof(angle), "%s", base ? base : "");
+                al = strlen(angle);
+                /* Rewrite trailing .c c h → .h without a ".h" literal. */
+                if (al >= 4 && angle[al - 4] == '.' && angle[al - 3] == 'c' &&
+                    angle[al - 2] == 'c' && angle[al - 1] == 'h') {
+                    angle[al - 3] = 'h';
+                    angle[al - 2] = 0;
+                }
+                /* Inject at this stream position (not pass_inc preamble) so
+                 * @grammar helpers are declared before the umbrella .h uses
+                 * them — same order as the source / legacy emit. */
+                snprintf(line, sizeof(line), "#include <%s>", angle);
+                if (pp->ncpp_dir >= CPP_DIR_CAP)
+                    return pp_fail_dir(pp, hdr, "too many injected #include lines");
+                slot = pp->cpp_dir[pp->ncpp_dir];
+                snprintf(slot, sizeof(pp->cpp_dir[0]), "%s", line);
+                memset(&syn, 0, sizeof(syn));
+                syn.kind = TK_IDENT;
+                syn.spell.ptr = slot;
+                syn.spell.len = strlen(slot);
+                syn.file_id = hdr.file_id;
+                /* Point at the `#` of the directive, not the path string —
+                 * spell lives in cpp_dir, so offset+spell.len is not a tape
+                 * span (see shadow_attach_lead injected-token EOL rule). */
+                {
+                    size_t dir_off = hdr.offset;
+                    FileTape* hft =
+                        (pp->nf > 0) ? pp->frames[pp->nf - 1].tape : NULL;
+                    if (hft && hft->bytes) {
+                        while (dir_off > 0 && hft->bytes[dir_off - 1] != '\n')
+                            dir_off--;
+                    }
+                    syn.offset = dir_off;
+                }
+                pp->ncpp_dir++;
+                for (di = 0; di < pp->nsys_inc; di++) {
+                    char full[512];
+                    snprintf(full, sizeof(full), "%s/%s", pp->sys_inc[di],
+                             angle);
+                    if (tape_cache_load(pp->cache, full, pp->arena)) break;
+                }
+                pp_skip_line(pp);
+                return pp_emit(pp, syn);
+            }
+        }
+        pp_skip_line(pp);
+        return pp_push_tape(pp, ft, hdr);
+    }
+}
+
+static int handle_define(Pp* pp) {
+    Frame* fr;
+    Token hash;
+    Token id;
+    char line[512];
+    Token body_buf[256];
+    int nb = 0;
+    Token peek;
+    int captured = 0;
+    PpIfNest* nest;
+
+    if (pp->nf <= 0) return 0;
+    fr = &pp->frames[pp->nf - 1];
+    /* handle_directive already consumed `#` + `define`; recover `#` for capture. */
+    if (fr->i < 2) return 0;
+    hash = fr->tape->toks[fr->i - 2];
+    nest = pp_if_nest_top(pp);
+    /* Inside a root-tape or passthrough `#if` tree: emit the `#define` in place
+     * and do not apply it. Host cpp picks the arm; applying both sides
+     * (or hoisting to pass_def) chooses a value the source did not. */
+    if (pp->skip_depth == 0 &&
+        ((pp->nf == 1 && pp->root_if_depth > 0) ||
+         (nest && nest->passthrough))) {
+        if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+        pp_skip_line(pp);
+        return 1;
+    }
+    if (pp->skip_depth == 0)
+        captured = pp_capture_dir_line(pp, hash, line, sizeof(line));
+
+    if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT) return 0;
+    /* Function-like only when `(` is adjacent to the name (ISO).
+     * `#define ENABLED (1)` is object-like — `(` is replacement-list punct. */
+    if (pp_raw_peek(pp, &peek) && tok_eq(peek, TK_PUNCT, "(") &&
+        peek.offset == id.offset + id.spell.len) {
+        if (captured && !pp_add_passthrough_define(pp, hash, line)) return 0;
+        if (captured && strstr(line, "=>") &&
+            !pp_add_refuse_closure_macro(pp, id, id.spell))
+            return 0;
+        pp_skip_line(pp);
+        return 1;
+    }
+    while (pp_raw_peek(pp, &peek)) {
+        fr = &pp->frames[pp->nf - 1];
+        if (at_bol(fr->tape, peek)) break;
+        pp_raw_next(pp, &peek);
+        if (nb < 256) body_buf[nb++] = peek;
+    }
+    /* Object-like `#define FOO` (empty) and `#define A B` both reach host
+     * cpp. Empty used to expand only — then `#define LISTING` before
+     * `#include "face.h"` never defined LISTING in the generated C. */
+    if (captured && !pp_add_passthrough_define(pp, hash, line)) return 0;
+    return macro_define(pp, id, id.spell, body_buf, nb);
+}
+
+static int handle_directive(Pp* pp) {
+    Token hash, name;
+    char unk[128];
+    if (!pp_raw_next(pp, &hash)) return 0;
+    if (!pp_raw_peek(pp, &name)) return 1;
+    if (name.kind != TK_IDENT) {
+        /* Grammar/schema `#'$'` / `#':'` at bol (indent allowed): `#` then a
+         * char-lit. Not a CPP directive — emit `#` for the grammar seam. */
+        if (name.kind == TK_CHR) return pp_emit(pp, hash);
+        /* Unit header (`#!ccc ccs|cch` or an OS shebang). The driver strips
+         * the main TU; included faces still arrive with line 1 intact. */
+        if (tok_eq(name, TK_PUNCT, "!")) {
+            pp_skip_line(pp);
+            return 1;
+        }
+        return pp_fail_dir(pp, hash, "expected preprocessor directive name after '#'");
+    }
+    pp_raw_next(pp, &name);
+
+    PpDirKind dir = pp_dir_of(name.spell);
+
+    /* Inside a skipped arm: only structural nesting (#if/#ifdef/#ifndef /
+     * #endif/#else/#elif) matters. Other known dirs are dropped; unknown
+     * names are also dropped here so skipped dead code cannot fail the TU. */
+    if (pp->skip_depth > 0 && dir != PP_DIR_IF && dir != PP_DIR_IFDEF &&
+        dir != PP_DIR_IFNDEF && dir != PP_DIR_ELIF && dir != PP_DIR_ELSE &&
+        dir != PP_DIR_ENDIF) {
+        pp_skip_line(pp);
+        return 1;
+    }
+
+    switch (dir) {
+    case PP_DIR_ENDIF: {
+        PpIfNest* nest = pp_if_nest_top(pp);
+        if (nest && nest->passthrough) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            pp_if_nest_pop(pp);
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (pp->skip_depth > 0) {
+            pp->skip_depth--;
+            if (pp->skip_depth == 0) pp_if_nest_pop(pp);
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (pp->nf == 1) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            if (pp->root_if_depth > 0) pp->root_if_depth--;
+            pp_skip_line(pp);
+            return 1;
+        }
+        /* Closing a taken include-frame arm. */
+        if (nest) pp_if_nest_pop(pp);
+        pp_skip_line(pp);
+        return 1;
+    }
+    case PP_DIR_ELSE: {
+        PpIfNest* nest = pp_if_nest_top(pp);
+        if (nest && nest->passthrough) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (pp->skip_depth > 1) {
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (pp->nf == 1) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (!nest)
+            return pp_fail_dir(pp, name, "#else without matching #if");
+        if (nest->else_seen)
+            return pp_fail_dir(pp, name, "duplicate #else");
+        nest->else_seen = 1;
+        if (nest->taken) {
+            /* Already took a true arm — else stays skipped. */
+            pp->skip_depth = 1;
+        } else {
+            /* False if so far — else becomes active. */
+            pp->skip_depth = 0;
+            nest->taken = 1;
+        }
+        pp_skip_line(pp);
+        return 1;
+    }
+    case PP_DIR_ELIF: {
+        int truth = 0;
+        PpIfNest* nest = pp_if_nest_top(pp);
+        if (nest && nest->passthrough) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (pp->skip_depth > 1) {
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (pp->nf == 1) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (!nest)
+            return pp_fail_dir(pp, name, "#elif without matching #if");
+        if (nest->else_seen)
+            return pp_fail_dir(pp, name, "#elif after #else");
+        if (nest->taken) {
+            /* Already took a true arm — stay skipped; do not evaluate. */
+            pp->skip_depth = 1;
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (!pp_eval_if_operand(pp, &truth)) {
+            pp_skip_line(pp);
+            return pp_fail_dir(
+                pp, name,
+                "unsupported #elif operand (need 0/1, IDENT→0|1, or "
+                "defined(IDENT) / !defined(IDENT))");
+        }
+        if (truth) {
+            pp->skip_depth = 0;
+            nest->taken = 1;
+        } else {
+            pp->skip_depth = 1;
+        }
+        pp_skip_line(pp);
+        return 1;
+    }
+    case PP_DIR_IFNDEF: {
+        Token id;
+        if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT)
+            return pp_fail_dir(pp, name, "expected identifier after #ifndef");
+        if (pp->skip_depth > 0) {
+            pp->skip_depth++;
+            pp_skip_line(pp);
+            return 1;
+        }
+        /* Root tape: emit `#ifndef` and lower every arm (host cpp selects). */
+        if (pp->nf == 1) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            pp->root_if_depth++;
+            pp_skip_line(pp);
+            return 1;
+        }
+        /* Host predefined we do not own → passthrough both arms. */
+        if (pp_is_unowned_predefined(pp, id.spell)) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            if (!pp_if_nest_push(pp, 0, 1)) return 0;
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (macro_find(pp, id.spell)) {
+            if (!pp_if_nest_push(pp, 0, 0)) return 0;
+            pp->skip_depth = 1;
+        } else {
+            if (!pp_if_nest_push(pp, 1, 0)) return 0;
+        }
+        pp_skip_line(pp);
+        return 1;
+    }
+    case PP_DIR_IFDEF: {
+        Token id;
+        if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT)
+            return pp_fail_dir(pp, name, "expected identifier after #ifdef");
+        if (pp->skip_depth > 0) {
+            pp->skip_depth++;
+            pp_skip_line(pp);
+            return 1;
+        }
+        /* Root tape: emit `#ifdef` and lower every arm (host cpp selects). */
+        if (pp->nf == 1) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            pp->root_if_depth++;
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (pp_is_unowned_predefined(pp, id.spell)) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            if (!pp_if_nest_push(pp, 0, 1)) return 0;
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (!macro_find(pp, id.spell)) {
+            if (!pp_if_nest_push(pp, 0, 0)) return 0;
+            pp->skip_depth = 1;
+        } else {
+            if (!pp_if_nest_push(pp, 1, 0)) return 0;
+        }
+        pp_skip_line(pp);
+        return 1;
+    }
+    case PP_DIR_IF: {
+        int truth = 0;
+        Token peek0, peek1, peek2;
+        /* Peek `defined ( PREDEF )` / `! defined ( PREDEF )` for passthrough. */
+        if (pp->skip_depth == 0 && pp->nf > 1 &&
+            pp_raw_peek(pp, &peek0)) {
+            int neg = 0;
+            int at = 0;
+            Token id;
+            if (tok_eq(peek0, TK_PUNCT, "!")) {
+                neg = 1;
+                at = 1;
+            }
+            if (pp->frames[pp->nf - 1].i + at < pp->frames[pp->nf - 1].tape->ntoks)
+                peek1 = pp->frames[pp->nf - 1].tape->toks[pp->frames[pp->nf - 1].i + at];
+            else
+                peek1 = (Token){0};
+            if (peek1.kind == TK_IDENT && spell_eq(peek1.spell, "defined") &&
+                pp->frames[pp->nf - 1].i + at + 3 <
+                    pp->frames[pp->nf - 1].tape->ntoks) {
+                peek2 = pp->frames[pp->nf - 1].tape
+                            ->toks[pp->frames[pp->nf - 1].i + at + 1];
+                id = pp->frames[pp->nf - 1].tape
+                         ->toks[pp->frames[pp->nf - 1].i + at + 2];
+                if (tok_eq(peek2, TK_PUNCT, "(") && id.kind == TK_IDENT &&
+                    pp_is_unowned_predefined(pp, id.spell)) {
+                    if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+                    if (!pp_if_nest_push(pp, 0, 1)) return 0;
+                    pp_skip_line(pp);
+                    return 1;
+                }
+            }
+            (void)neg;
+        }
+        if (pp->skip_depth > 0) {
+            pp->skip_depth++;
+            pp_skip_line(pp);
+            return 1;
+        }
+        /* Root tape: emit `#if` and lower every arm (host cpp selects). */
+        if (pp->nf == 1) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            pp->root_if_depth++;
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (!pp_eval_if_operand(pp, &truth)) {
+            pp_skip_line(pp);
+            return pp_fail_dir(
+                pp, name,
+                "unsupported #if operand (need 0/1, IDENT→0|1, or "
+                "defined(IDENT) / !defined(IDENT); never guess the true arm)");
+        }
+        if (truth) {
+            if (!pp_if_nest_push(pp, 1, 0)) return 0;
+        } else {
+            if (!pp_if_nest_push(pp, 0, 0)) return 0;
+            pp->skip_depth = 1;
+        }
+        pp_skip_line(pp);
+        return 1;
+    }
+    case PP_DIR_UNDEF: {
+        Token id;
+        PpIfNest* nest = pp_if_nest_top(pp);
+        if (pp->skip_depth > 0) {
+            pp_skip_line(pp);
+            return 1;
+        }
+        if ((pp->nf == 1 && pp->root_if_depth > 0) ||
+            (nest && nest->passthrough)) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT)
+            return pp_fail_dir(pp, name, "expected identifier after #undef");
+        (void)macro_undef(pp, id.spell);
+        pp_skip_line(pp);
+        return 1;
+    }
+    case PP_DIR_PRAGMA: {
+        /* `#pragma(@parallel) off|on` — positional scheduling toggle.
+         * Stage2 consumes directives before the parser runs, so the
+         * toggle is injected as a marker token the parser flips on in
+         * stream order. Never reaches host cc (`@` is not a pp-token). */
+        char line[512];
+        if (pp_capture_dir_line(pp, name, line, sizeof(line))) {
+            const char* q = line;
+            while (*q && *q != '#') q++;
+            if (*q == '#') q++;
+            while (*q == ' ' || *q == '\t') q++;
+            if (strncmp(q, "pragma", 6) == 0) {
+                int state = -1;
+                q += 6;
+                while (*q == ' ' || *q == '\t') q++;
+                if (strncmp(q, "(@parallel)", 11) == 0) {
+                    const char* r;
+                    q += 11;
+                    while (*q == ' ' || *q == '\t') q++;
+                    if (strncmp(q, "off", 3) == 0) { state = 1; r = q + 3; }
+                    else if (strncmp(q, "on", 2) == 0) { state = 0; r = q + 2; }
+                    else r = q;
+                    if (state >= 0) {
+                        while (*r == ' ' || *r == '\t') r++;
+                        if (*r) state = -1;
+                    }
+                    if (state < 0) {
+                        pp_fail_dir(pp, name,
+                                    "#pragma(@parallel) takes 'off' or 'on'");
+                        return 0;
+                    }
+                } else if (strncmp(q, "(@prelude)", 10) == 0) {
+                    const char* r;
+                    q += 10;
+                    while (*q == ' ' || *q == '\t') q++;
+                    if (strncmp(q, "off", 3) == 0) { state = 2; r = q + 3; }
+                    else r = q;
+                    if (state == 2) {
+                        while (*r == ' ' || *r == '\t') r++;
+                        if (*r) state = -1;
+                    } else {
+                        state = -1;
+                    }
+                    if (state < 0) {
+                        pp_fail_dir(pp, name, "#pragma(@prelude) takes 'off'");
+                        return 0;
+                    }
+                } else if (strncmp(q, "(@linenumbers)", 14) == 0) {
+                    const char* r;
+                    q += 14;
+                    while (*q == ' ' || *q == '\t') q++;
+                    if (strncmp(q, "off", 3) == 0) { state = 3; r = q + 3; }
+                    else r = q;
+                    if (state == 3) {
+                        while (*r == ' ' || *r == '\t') r++;
+                        if (*r) state = -1;
+                    } else {
+                        state = -1;
+                    }
+                    if (state < 0) {
+                        pp_fail_dir(pp, name,
+                                    "#pragma(@linenumbers) takes 'off'");
+                        return 0;
+                    }
+                }
+                if (state >= 0) {
+                    Token syn;
+                    char* spell =
+                        state == 1 ? (char*)"__cc_pragma_parallel_off" :
+                        state == 0 ? (char*)"__cc_pragma_parallel_on" :
+                        state == 2 ? (char*)"__cc_pragma_prelude_off" :
+                                     (char*)"__cc_pragma_linenumbers_off";
+                    memset(&syn, 0, sizeof(syn));
+                    syn.kind = TK_IDENT;
+                    syn.spell.ptr = spell;
+                    syn.spell.len = strlen(syn.spell.ptr);
+                    syn.file_id = name.file_id;
+                    syn.offset = name.offset;
+                    pp_skip_line(pp);
+                    return pp_emit(pp, syn);
+                }
+            }
+        }
+        pp_skip_line(pp);
+        return 1;
+    }
+    case PP_DIR_LINE:
+    case PP_DIR_WARNING:
+        /* Passthrough-by-design: not spliced into the AST stream. */
+        pp_skip_line(pp);
+        return 1;
+    case PP_DIR_ERROR: {
+        char msg[160];
+        Token t;
+        size_t n = 0;
+        msg[0] = 0;
+        while (pp_raw_peek(pp, &t)) {
+            Frame* fr = &pp->frames[pp->nf - 1];
+            size_t line0, line1;
+            if (!fr->tape || !fr->tape->bytes) break;
+            line0 = pp_line_start(fr->tape, name.offset);
+            line1 = pp_line_start(fr->tape, t.offset);
+            if (line1 != line0) break;
+            pp_raw_next(pp, &t);
+            if (n && n + 1 < sizeof(msg)) msg[n++] = ' ';
+            if (t.spell.ptr && t.spell.len &&
+                n + t.spell.len < sizeof(msg) - 1) {
+                memcpy(msg + n, t.spell.ptr, t.spell.len);
+                n += t.spell.len;
+                msg[n] = 0;
+            }
+        }
+        if (!msg[0]) snprintf(msg, sizeof(msg), "#error");
+        return pp_fail_dir(pp, name, msg);
+    }
+    case PP_DIR_DEFINE:
+        return handle_define(pp);
+    case PP_DIR_INCLUDE:
+        return handle_include(pp);
+    case PP_DIR_NONE:
+    default:
+        break;
+    }
+
+    {
+        char msg[192];
+        size_t n = name.spell.len < sizeof(unk) - 1 ? name.spell.len
+                                                   : sizeof(unk) - 1;
+        memcpy(unk, name.spell.ptr, n);
+        unk[n] = 0;
+        snprintf(msg, sizeof(msg),
+                 "unknown preprocessor directive '#%s' (stage-2 policy: "
+                 "implement, passthrough-by-design, or hard error — never "
+                 "silent drop)",
+                 unk);
+        return pp_fail_dir(pp, name, msg);
+    }
+}
+
+/* Full preprocess into out[] */
+static int pp_run(Pp* pp, FileTape* root) {
+    pp->nf = 0;
+    pp->nout = 0;
+    pp->skip_depth = 0;
+    pp->root_if_depth = 0;
+    pp->nif_nest = 0;
+    pp->nexpand_disable = 0;
+    pp->err = 0;
+    pp->err_msg[0] = 0;
+    pp->npass_inc = 0;
+    pp->npass_def = 0;
+    pp->ncpp_dir = 0;
+    pp->nrefuse_clo = 0;
+    pp_skip_spans_reset();
+    {
+        Token root_at = {0};
+        if (root && root->ntoks > 0) root_at = root->toks[0];
+        if (!pp_push_tape(pp, root, root_at)) return 0;
+    }
+
+    while (pp->nf > 0) {
+        Frame* fr = &pp->frames[pp->nf - 1];
+        if (fr->i >= fr->tape->ntoks) {
+            FileTape* done = fr->tape;
+            if (fr->blue_paint) pp_expand_disable_pop(pp);
+            pp->nf--;
+            free_synth_if(done);
+            continue;
+        }
+        Token t = fr->tape->toks[fr->i];
+        if (at_bol(fr->tape, t) && tok_eq(t, TK_PUNCT, "#")) {
+            if (!handle_directive(pp)) return 0;
+            continue;
+        }
+        if (pp->skip_depth > 0) {
+            /* Drop from the token stream; record span so lead replay cannot
+             * re-inject the arm (shared tapes are not blanked). */
+            pp_record_skip_token(fr->tape, t);
+            fr->i++;
+            continue;
+        }
+        fr->i++;
+        if (t.kind == TK_IDENT) {
+            /* Use-site: function-like macro body had `=>` — refuse now. */
+            if (pp_is_refuse_closure_macro(pp, t.spell)) {
+                Token nxt;
+                if (fr->i < fr->tape->ntoks)
+                    nxt = fr->tape->toks[fr->i];
+                else
+                    nxt = (Token){0};
+                if (tok_eq(nxt, TK_PUNCT, "("))
+                    return pp_refuse_closure_macro_at(pp, t);
+            }
+            Macro* m = macro_find(pp, t.spell);
+            if (m && !pp_expand_disabled(pp, t.spell)) {
+                if (m->nbody == 0) continue;
+                /* Object-like body with `=>` — refuse on expansion. */
+                {
+                    int bi;
+                    for (bi = 0; bi < m->nbody; bi++) {
+                        if (tok_eq(m->body[bi], TK_PUNCT, "=>"))
+                            return pp_refuse_closure_macro_at(pp, t);
+                    }
+                }
+                FileTape* syn =
+                    synth_tape_from_tokens(m->body, m->nbody, t.file_id);
+                if (!syn || !pp_expand_disable_push(pp, t.spell, t)) {
+                    free_synth_if(syn);
+                    return 0;
+                }
+                if (!pp_push_tape(pp, syn, t)) {
+                    pp_expand_disable_pop(pp);
+                    free_synth_if(syn);
+                    return 0;
+                }
+                pp->frames[pp->nf - 1].blue_paint = 1;
+                continue;
+            }
+        }
+        if (!pp_emit(pp, t)) return 0;
+    }
+    return !pp->err;
+}
+

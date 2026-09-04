@@ -1,0 +1,19 @@
+#include <ccc/script/quickjs.cch>
+
+typedef struct Counter { long long n; } Counter;
+static long long Counter_bump(Counter *self, long long by = 1) {
+    return self->n += by;
+}
+
+if (!cc_qjs_available()) {
+    "SKIP (get QuickJS from upstream)".println();
+    return 0;
+}
+
+CCQjs js = cc_qjs_new(a) !> @destroy;
+Counter c = { .n = 0 };
+CCQjsVal o = js.own::[Counter](cc_move(c)) !> @destroy;
+long long n = o.bump(4) !>;
+js.set("c", o) !>;
+long long n2 = js.eval("c.bump(6)")!>.as_i64() !>;
+println(@string(`n=${n} n2=${n2}`, a));

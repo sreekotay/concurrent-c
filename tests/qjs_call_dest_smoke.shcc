@@ -1,0 +1,12 @@
+#include <ccc/script/quickjs.cch>
+
+if (!cc_qjs_available()) {
+    "SKIP (get QuickJS from upstream)".println();
+    return 0;
+}
+
+CCQjs js = cc_qjs_new(a) !> @destroy;
+CCQjsVal Math = js.eval("Math") !> @destroy;
+double v = Math.sqrt(2.0) !>;
+double pv = Math.pow(2.0, 10) !>;
+println(@string(`sqrt=${v > 1.4 && v < 1.5} pow=${pv}`, a));
