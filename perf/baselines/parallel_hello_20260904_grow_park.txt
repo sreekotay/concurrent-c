@@ -1,7 +1,7 @@
 # perf/parallel_hello.ccs snapshot
-# date: 2026-09-04T18:09:28Z
+# date: 2026-09-04T23:00:00Z
 # host: Darwin 25.5.0 arm64  ncpu=10
-# cc:   f4c3e3c4
+# cc:   a7eda6bd
 # bin:  perf/out/parallel_hello_cc (--release)
 # cmd:  CC_PAR_DEPTH=24 CC_PAR_SAMPLES=3 CC_PAR_BARE=1 CC_V2_STATS=1 \
 #       /usr/bin/time -l ./perf/out/parallel_hello_cc
@@ -15,14 +15,15 @@
 #   CC_PAR_DEPTH=24 CC_PAR_SAMPLES=3 CC_PAR_BARE=1 CC_V2_STATS=1 \
 #     /usr/bin/time -l ./perf/out/parallel_hello_cc
 #
-# Prior same-machine ungated row (depth 24, 1 sample, older runtime):
-#   seq 31 ms   par 2199 ms   cut 7.1 ms   RSS 128 MB
+# Prior same-day row (18:09, f4c3e3c4):
+#   seq 28.9 ms   par 206 ms   cut 7.9 ms   RSS 126 MB
+#   grow stall=8 parked=221 final_threads=10/10
 
 depth=24 samples=3 cut=8 CC_PAR_BARE=1
 
-  seq   28.9 ms
-  par    206 ms     # ungated @parallel { }
-  cut    7.9 ms     # @parallel (d < 8)   3.7x seq
+  seq   28.7 ms
+  par    251 ms     # ungated @parallel { }
+  cut    8.8 ms     # @parallel (d < 8)   3.3x seq
 
-  peak_rss           126 MB
-  grow               eager<=2 stall=8 parked=221 final_threads=10/10
+  peak_rss            35 MB
+  grow               eager<=2 stall=8 parked=0 final_threads=10/10

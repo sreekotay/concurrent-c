@@ -307,35 +307,7 @@ No `T?`. Pick the shape that matches the operation:
 
 ---
 
-## 7. Nurseries are the open bag
-
-[recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs) · Spec §8.1
-
-A nursery is a join set with a handle when the set is not on the page
-(late `n.spawn`, host, retract). Names on the page are `@parallel` (§8).
-Lifecycle:
-
-```
-OPEN ──spawn*──┬── JOINING ── EMPTY ── DEAD     owner stays (wait / @destroy)
-               └── LEFT    ── EMPTY ── DEAD     owner gone (leave)
-```
-
-| Call | Path |
-|------|------|
-| `wait` / `@destroy` | OPEN → JOINING → EMPTY → DEAD |
-| `leave()` / `leave(ctx, finish)` | OPEN → LEFT → EMPTY → DEAD |
-| `close(tx)` | arms EMPTY to close `tx` on both paths — not teardown |
-
-Self-owned: `cc_nursery_create() !> @destroy` (or `leave`). Arena birth:
-`a.create_nursery()` — handle lives in `a`; arena walk joins (no `leave`).
-`n.spawn` admits children; `n.cancel()` stops admit (`CC_ERR_CANCELLED`)
-and is cooperative for children already queued. Use either
-`@destroy` / `wait` or `leave`, not both. Leftover at EMPTY runs only on
-the LEFT path (`n.leave(ctx, finish)`), not on wait / `@destroy`.
-
----
-
-## 8. `@parallel` joins independent work
+## 7. `@parallel` joins independent work
 
 [recipe_parallel.ccs](../examples/recipe_parallel.ccs) ·
 [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs) ·
@@ -442,6 +414,34 @@ error; `for` inside `@serial` is ordinary C.
 the function. The construct does not wait for a ticket that has not
 returned. If two arms or iterations both `return`, which value is taken
 is not specified. Sequential `seq` / `#pragma(@parallel) off` is ordinary C.
+
+---
+
+## 8. Nurseries are the open bag
+
+[recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs) · Spec §8.1
+
+A nursery is a join set with a handle when the set is not on the page
+(late `n.spawn`, host, retract). Names on the page are `@parallel` (§7).
+Lifecycle:
+
+```
+OPEN ──spawn*──┬── JOINING ── EMPTY ── DEAD     owner stays (wait / @destroy)
+               └── LEFT    ── EMPTY ── DEAD     owner gone (leave)
+```
+
+| Call | Path |
+|------|------|
+| `wait` / `@destroy` | OPEN → JOINING → EMPTY → DEAD |
+| `leave()` / `leave(ctx, finish)` | OPEN → LEFT → EMPTY → DEAD |
+| `close(tx)` | arms EMPTY to close `tx` on both paths — not teardown |
+
+Self-owned: `cc_nursery_create() !> @destroy` (or `leave`). Arena birth:
+`a.create_nursery()` — handle lives in `a`; arena walk joins (no `leave`).
+`n.spawn` admits children; `n.cancel()` stops admit (`CC_ERR_CANCELLED`)
+and is cooperative for children already queued. Use either
+`@destroy` / `wait` or `leave`, not both. Leftover at EMPTY runs only on
+the LEFT path (`n.leave(ctx, finish)`), not on wait / `@destroy`.
 
 ---
 

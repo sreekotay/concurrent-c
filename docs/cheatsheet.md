@@ -433,6 +433,10 @@ Growth failure poisons the `CCString`; it never truncates.
 
 ## Structured concurrency
 
+Names on the page are `@parallel` (next). The nursery is the bag when the
+set is not on the page (late `n.spawn`, host, retract). `n.spawn` is not
+`@parallel spawn`.
+
 ```c
 @errhandler(CCError e) cc_error_exit(e);
 {
@@ -444,8 +448,6 @@ Growth failure poisons the `CCString`; it never truncates.
 ```
 
 Nested: `outer.create_child()` parents the inner nursery under `outer`.
-Siblings named on the page use `@parallel` (next). The nursery is late
-admit — `n.spawn` is not `@parallel spawn`.
 
 Lifecycle: OPEN → JOINING/LEFT → EMPTY → DEAD. `wait` / `@destroy` keep the
 handle (OPEN → JOINING → EMPTY → DEAD). `leave` consumes it (OPEN → LEFT →

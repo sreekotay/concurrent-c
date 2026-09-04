@@ -47,7 +47,7 @@ make pigz_cc   # CC version (requires CC compiler + zlib)
 
 Receipts (checked in). Reproduce with `./bench_defaults.sh` (optional `BENCH_OUT=benchmarks/latest.txt`):
 
-- [Latest (defaults, 50 MB, 2026-08-28)](benchmarks/latest.txt) — `pigz_idiomatic` / `pigz_channel` names; pigz_cc size-matches pigz; hybrid/pthread omitted (0-byte .gz)
+- [Latest (defaults, 50 MB, 2026-09-04)](benchmarks/latest.txt) — `pigz_idiomatic` / `pigz_channel` names; pigz_cc size-matches pigz; hybrid/pthread omitted (0-byte .gz)
 - [All versions, defaults only, 50 MB, 2026-08-19 (gate turnstile)](benchmarks/defaults_all_versions_2026_08_19_gate.txt) — `<bin> <file>`, no `-p` / `CC_WORKERS` / `PIGZ_*`; table marks `chain` vs `indep` dict per binary (then-`pigz_wait`, now `pigz_idiomatic`)
 - [All versions, defaults only, 50 MB, 2026-08-19 (pre-gate)](benchmarks/defaults_all_versions_2026_08_19.txt) — same method, before create-on-first-touch gates
 - [wait-for vs pigz `-p 16`, 200 MB, 2026-08-18](benchmarks/wait_dict_parity_2026_08_18.txt) — chained-dict parity (do not set `CC_WORKERS`; receipt still says `pigz_wait`)

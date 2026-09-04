@@ -1,0 +1,45 @@
+# channel benches snapshot
+# date: 2026-09-04T23:00:53Z
+# host: Darwin 25.5.0 arm64  ncpu=10
+# cc:   a7eda6bd
+# bins: perf/out/perf_channel_throughput --release
+#       perf/out/channel_contention --release
+#
+# Refresh:
+#   ./cc/bin/ccc build --release perf/perf_channel_throughput.ccs -o perf/out/perf_channel_throughput
+#   ./cc/bin/ccc build --release perf/channel_contention.ccs -o perf/out/channel_contention
+#   ./perf/out/perf_channel_throughput
+#   ./perf/out/channel_contention
+
+=== perf_channel_throughput ===
+perf_channel_throughput: measuring channel performance
+ single-thread (no contention): 172860837.32929993 ops/sec (1.1570000648498535 ms)
+ buffered (cap=1000): 198412671.75655574 ops/sec (1.008000135421753 ms for 100000 pairs)
+ unbuffered (rendezvous): 11661977.575632809 ops/sec (342.99500012397766 ms for 2000000 pairs)
+perf_channel_throughput: DONE
+
+=== channel_contention ===
+=================================================================
+SHARED CHANNEL CONTENTION TEST
+Messages: 1000000 | Trials: 15 | Contention: 8x8
+=================================================================
+ Trial 1: baseline=14.16599988937378 ms contention=20.002999782562256 ms
+ Trial 2: baseline=12.71500015258789 ms contention=17.658999919891357 ms
+ Trial 3: baseline=13.030999898910522 ms contention=14.48799991607666 ms
+ Trial 4: baseline=14.532000064849854 ms contention=19.493000030517578 ms
+ Trial 5: baseline=12.583000183105469 ms contention=14.208999872207642 ms
+ Trial 6: baseline=15.992000102996826 ms contention=24.509999990463257 ms
+ Trial 7: baseline=12.723000049591064 ms contention=14.216000080108643 ms
+ Trial 8: baseline=11.851999998092651 ms contention=13.077999830245972 ms
+ Trial 9: baseline=11.894999980926514 ms contention=15.296000003814697 ms
+ Trial 10: baseline=10.901000022888184 ms contention=16.311000108718872 ms
+ Trial 11: baseline=12.668999910354614 ms contention=14.041999816894531 ms
+ Trial 12: baseline=10.23200011253357 ms contention=13.444000005722046 ms
+ Trial 13: baseline=12.45300006866455 ms contention=12.617000102996826 ms
+ Trial 14: baseline=10.399999856948853 ms contention=15.059000015258789 ms
+ Trial 15: baseline=11.437000036239624 ms contention=16.223000049591064 ms
+
+ Best baseline: 10.23200011253357 ms (97732602.52167723 msgs/sec)
+ Best contention: 12.617000102996826 ms (79258143.12726185 msgs/sec)
+
+Interference: 23.309225608214945% (best-of-15)

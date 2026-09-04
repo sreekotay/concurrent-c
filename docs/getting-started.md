@@ -416,37 +416,13 @@ worked example (out of tree):
 
 ## Concurrency
 
-### Nurseries
-
-Tasks are scoped to a `CCNursery`. Three births:
-`a.create_nursery()` (handle in `a`; arena `@destroy` waits; no `leave`),
-`parent.create_child()` (cancel/deadline snapshot), and
-`cc_nursery_create()` (self-owned malloc). The last two join with
-`@destroy` or `leave`:
-
-```c
-@errhandler(CCError e) cc_error_exit(e);
-{
-    CCNursery n = cc_nursery_create() !> @destroy;
-    n.spawn(() => task1());
-    n.spawn(() => task2());
-}
-/* both tasks have finished */
-```
-
-Use a nursery when the set is not on the page (late `n.spawn`, host, retract).
-Names on the page are `@parallel`.
-
-Lifecycle: OPEN → JOINING/LEFT → EMPTY → DEAD. `wait` / `@destroy` join
-(OPEN → JOINING → EMPTY → DEAD). To consume a self-owned handle without
-joining, `leave` (`n.leave(ctx, finish)` or `n.leave()`; OPEN → LEFT →
-EMPTY → DEAD). `close(tx)` arms EMPTY to close `tx` on both paths. EMPTY
-closes registered channels, runs leftover if the path was LEFT, and frees the
-nursery. `leave` is not cancel. Spec §8.1.5.
+Names on the page are `@parallel`. A dest is live before the arms. The
+nursery is the bag when the set is not on the page (late `n.spawn`, host,
+retract).
 
 ### `@parallel`
 
-Names on the page — not a nursery. The brace and `for` forms are
+Lexical fork-join — not a nursery. The brace and `for` forms are
 `CCParallel !>(CCError)`. `.wait()` joins. Binding the handle starts the
 arms and does not join. A dest is live before the arms (`h.live()` until
 `h.wait()` or `h.leave()`). `h.close(tx)` arms EMPTY; leftover is
@@ -485,9 +461,48 @@ CCTurnstile ts@(cap, 1, arena) !> @destroy;
 `CCParallel h = @parallel wait (ts) for … !>;` is live during enter;
 tickets may pause or cancel `h`; the statement joins.
 `return` in a parallel construct drains first, then returns from the
-function. Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
+function.
+
+Dest-live — bind, then admit or wait. `@parallel(h)` grows a live dest
+([recipe_tcp_echo.ccs](../examples/recipe_tcp_echo.ccs)):
+
+```c
+CCParallel h = @parallel {
+    work();
+} !>;                    // dest is live; bind does not join
+@parallel(h) { more(); } // late admit onto h
+h.wait() !>;
+```
+
+Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
 On-page stream: [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs).
 Spec §8.11.
+
+### Nurseries
+
+Use a nursery when the set is not on the page (late `n.spawn`, host, retract).
+Three births: `a.create_nursery()` (handle in `a`; arena `@destroy` waits;
+no `leave`), `parent.create_child()` (cancel/deadline snapshot), and
+`cc_nursery_create()` (self-owned malloc). The last two join with
+`@destroy` or `leave`:
+
+```c
+@errhandler(CCError e) cc_error_exit(e);
+{
+    CCNursery n = cc_nursery_create() !> @destroy;
+    n.spawn(() => task1());
+    n.spawn(() => task2());
+}
+/* both tasks have finished */
+```
+
+Lifecycle: OPEN → JOINING/LEFT → EMPTY → DEAD. `wait` / `@destroy` join
+(OPEN → JOINING → EMPTY → DEAD). To consume a self-owned handle without
+joining, `leave` (`n.leave(ctx, finish)` or `n.leave()`; OPEN → LEFT →
+EMPTY → DEAD). `close(tx)` arms EMPTY to close `tx` on both paths. EMPTY
+closes registered channels, runs leftover if the path was LEFT, and frees the
+nursery. `leave` is not cancel. Spec §8.1.5.
+Recipe: [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs).
 
 ### Channels
 
@@ -570,7 +585,8 @@ Work the recipes in order — they are the intended tutorial:
 
 [examples/README.md — Learning Path](../examples/README.md#learning-path-recommended-order)
 
-In short: `hello` → results / unwrap / UFCS → generics (`recipe_user_generics`) → captures → channels → async →
+In short: `hello` → results / unwrap / UFCS → generics (`recipe_user_generics`) →
+`@parallel` / dest → captures → on-page stream / dest EMPTY → nursery bag → async →
 timeouts / worker pool → arenas → [owned or view](../examples/recipe_owned_view.ccs) / defer. Then networking
 (`recipe_tcp_echo.ccs`, `recipe_http_get.ccs`) and build-system examples under
 `examples/`.
