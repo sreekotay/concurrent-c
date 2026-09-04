@@ -4,7 +4,7 @@
 #ifndef REDIS_IDIOMATIC_MEM_CCH
 #define REDIS_IDIOMATIC_MEM_CCH
 
-#include <ccc/cc_mem.cch>
+#include <stdio.h>
 #include <sys/resource.h>
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -154,7 +154,7 @@ static void redis_mem_emit_gap(const RedisDb* db, const char* phase) {
     int64_t gap = 0;
     if (!redis_mem_process_footprint_B(&footprint, &source)) return;
     gap = (int64_t)footprint - (int64_t)logical;
-cc_eprintf(
+fprintf(stderr,
             "redis_idiomatic: mem_gap phase=%s footprint_B=%llu source=%s logical_B=%zu "
             "gap_B=%lld map_B=%zu key_B=%zu value_B=%zu arenas_gross_B=%zu workers=%zu "
             "fiber_reserve_hint_B=%llu note=runtime+fibers+overflow+frag+untracked\n",
@@ -178,7 +178,7 @@ static void redis_mem_report_impl(const RedisDb* db, const char* tag) {
     int have_mach_footprint = 0;
     memset(&ru, 0, sizeof(ru));
     if (getrusage(RUSAGE_SELF, &ru) == 0) {
-    cc_eprintf(
+    fprintf(stderr,
                 "redis_idiomatic: mem[%s] getrusage maxrss=%ld (%s)\n",
                 tag ? tag : "?",
                 (long)ru.ru_maxrss,
@@ -197,7 +197,7 @@ static void redis_mem_report_impl(const RedisDb* db, const char* tag) {
             KERN_SUCCESS) {
             mach_phys_footprint = (uint64_t)vm_info.phys_footprint;
             have_mach_footprint = 1;
-        cc_eprintf(
+        fprintf(stderr,
                     "redis_idiomatic: mem[%s] mach resident=%llu phys_footprint=%llu\n",
                     tag ? tag : "?",
                     (unsigned long long)vm_info.resident_size,
@@ -205,7 +205,7 @@ static void redis_mem_report_impl(const RedisDb* db, const char* tag) {
         }
     }
 #endif
-cc_eprintf(
+fprintf(stderr,
             "redis_idiomatic: mem[%s] worker_hint=%zu sched_workers=%zu (fiber stacks: VM reserve "
             "~2MiB each, commit on touch; see cc/runtime/fiber_sched.c MCO_USE_VMEM_ALLOCATOR)\n",
             tag ? tag : "?",
@@ -215,7 +215,7 @@ cc_eprintf(
         size_t n = redis_db_map_len(db);
         size_t cap = redis_db_map_buckets(db);
         size_t map_alloc = redis_db_map_live_bytes(db);
-    cc_eprintf(
+    fprintf(stderr,
                 "redis_idiomatic: mem[%s] map shards=%zu len=%zu buckets=%zu "
                 "live_bytes=%zu (sharded array_map)\n",
                 tag ? tag : "?",
@@ -223,7 +223,7 @@ cc_eprintf(
                 n,
                 cap,
                 map_alloc);
-    cc_eprintf(
+    fprintf(stderr,
                 "redis_idiomatic: mem[%s] model: map/value shared + per-shard key arenas; "
                 "fixed root+overflow; keys/values releasable individually\n",
                 tag ? tag : "?");
@@ -238,7 +238,7 @@ cc_eprintf(
             if (logical_live > 0) {
                 double ratio = (double)mach_phys_footprint / (double)logical_live;
                 int64_t gap = (int64_t)mach_phys_footprint - (int64_t)logical_live;
-            cc_eprintf(
+            fprintf(stderr,
                         "redis_idiomatic: mem[%s] accounting: mach_phys_footprint=%llu B "
                         "logical_db_live=%zu B (ratio %.1fx; gap=%lld B ≈ runtime+fibers+libc; "
                         "map_live_bytes=%zu B)\n",
@@ -249,7 +249,7 @@ cc_eprintf(
                         (long long)gap,
                         map_alloc);
             } else {
-            cc_eprintf(
+            fprintf(stderr,
                         "redis_idiomatic: mem[%s] accounting: mach_phys_footprint=%llu B "
                         "logical_db_live=0 (empty db; map_live_bytes=%zu B)\n",
                         tag ? tag : "?",
@@ -275,16 +275,17 @@ static void redis_mem_report(const RedisDb* db, const char* tag) {
     redis_mem_emit_gap(db, tag);
 }
 
-/* Print each bump slab's capacity for `a`, newest (current root) first, then each
- * older extent via ->prev.  Matches cc_arena_slab_chain_bytes (sum of these). */
-static void redis_db_fprint_arena_slab_chain_detail(const char* tag, const char* pool, CCArena a) {
-    const CCArenaHost* cur = a.a;
-    cc_eprintf("redis_idiomatic: mem[%s] arena_%s_slab_sizes_B (root_first", tag ? tag : "db", pool);
-    while (cur && cur->base) {
-        cc_eprintf(" %zu", cur->capacity);
-        cur = cur->prev;
-    }
-    cc_eprintf(") sum=%zu\n", cc_arena_slab_chain_bytes(a));
+/* Public committed-backing line. Slabs live on CCArenaSlab, not the host. */
+static void redis_db_fprint_arena_committed(const char* tag, const char* pool, CCArena a) {
+    fprintf(stderr,
+            "redis_idiomatic: mem[%s] arena_%s slab_chain_B=%zu overflow_B=%zu "
+            "ext_meta_B=%zu gross_B=%zu\n",
+            tag ? tag : "db",
+            pool,
+            cc_arena_slab_chain_bytes(a),
+            cc_arena_overflow_raw_bytes(a),
+            cc_arena_extent_struct_bytes(a),
+            cc_arena_committed_gross_bytes(a));
 }
 
 static void db_dump_mem_stats(RedisDb* db, const char* tag) {
@@ -295,7 +296,7 @@ static void db_dump_mem_stats(RedisDb* db, const char* tag) {
                                           CC_ATOMIC_LOAD(&g_db_mem_stats.value_release_bytes));
     size_t map_count = redis_db_map_len(db);
     size_t map_buckets = redis_db_map_buckets(db);
-cc_eprintf(
+fprintf(stderr,
             "redis_idiomatic: mem[%s] entries=%zu buckets=%zu keys allocs=%zu bytes=%zu live=%zu | "
             "values allocs=%zu bytes=%zu live=%zu | map_live=%zu | total_live=%zu\n",
             tag ? tag : "db",
@@ -313,7 +314,7 @@ cc_eprintf(
         size_t si;
         size_t k_slab = 0, k_ovf = 0, k_ext = 0, k_gross = 0;
         /* Arena roots (B): must match db_init() map/key/value heap-overflow roots. */
-    cc_eprintf(
+    fprintf(stderr,
                 "redis_idiomatic: mem[%s] arena_initial_root_B map=%u(heap_overflow) "
                 "key=%u(heap_overflow×%zu shards) value=%u(heap_overflow)\n",
                 tag ? tag : "db",
@@ -321,16 +322,17 @@ cc_eprintf(
                 1024u,
                 db->shard_count,
                 1024u);
-        redis_db_fprint_arena_slab_chain_detail(tag, "map", db->map_arena);
+        redis_db_fprint_arena_committed(tag, "map", db->map_arena);
         for (si = 0; db->shards && si < db->shard_count; ++si) {
-            CCString pool = @string(`key${si}`, @scratch);
-            redis_db_fprint_arena_slab_chain_detail(tag, cc_string_cstr(&pool, __cc_str_scratch), db->shards[si].key_arena);
+            char pool[24];
+            snprintf(pool, sizeof(pool), "key%zu", si);
+            redis_db_fprint_arena_committed(tag, pool, db->shards[si].key_arena);
             k_slab += cc_arena_slab_chain_bytes(db->shards[si].key_arena);
             k_ovf += cc_arena_overflow_raw_bytes(db->shards[si].key_arena);
             k_ext += cc_arena_extent_struct_bytes(db->shards[si].key_arena);
             k_gross += cc_arena_committed_gross_bytes(db->shards[si].key_arena);
         }
-        redis_db_fprint_arena_slab_chain_detail(tag, "value", db->value_arena);
+        redis_db_fprint_arena_committed(tag, "value", db->value_arena);
         size_t m_slab = cc_arena_slab_chain_bytes(db->map_arena);
         size_t m_ovf = cc_arena_overflow_raw_bytes(db->map_arena);
         size_t m_ext = cc_arena_extent_struct_bytes(db->map_arena);
@@ -339,7 +341,7 @@ cc_eprintf(
         size_t v_ovf = cc_arena_overflow_raw_bytes(db->value_arena);
         size_t v_ext = cc_arena_extent_struct_bytes(db->value_arena);
         size_t v_gross = cc_arena_committed_gross_bytes(db->value_arena);
-    cc_eprintf(
+    fprintf(stderr,
                 "redis_idiomatic: mem[%s] arena_committed_B "
                 "map slabs=%zu ovf=%zu ext_meta=%zu gross=%zu | "
                 "key(sum) slabs=%zu ovf=%zu ext_meta=%zu gross=%zu | "

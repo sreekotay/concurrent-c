@@ -192,7 +192,7 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
 @grammar(schema) RespGCmd {~~~~
     use Resp
     one of [
-        framed [ #'*' argc: int Resp.number "\r\n" args: items RespGArg argc cap 16 ]
+        framed [ #'*' argc: int Resp.number "\r\n" args: items RespGArg argc cap 32 ]
         plain  [ text: Resp.line "\r\n" ]
     ]
 ~~~~}

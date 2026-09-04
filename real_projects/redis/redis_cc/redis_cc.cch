@@ -69,9 +69,10 @@ typedef enum RedisReplyKind {
 
 /* Owner-fiber argv AFTER the command word (redis_owner). Idiomatic has
  * no argc cap: schema `items` without `cap N` + a parse arena. Owner
- * still static-asserts REDIS_ARGV_MAX + 1 == RespGCmd_args_cap. */
+ * still static-asserts REDIS_ARGV_MAX + 1 == RespGCmd_args_cap.
+ * 31 payload slots (32 wire argv) covers smoke MGET + 20 keys. */
 #ifndef REDIS_ARGV_MAX
-#define REDIS_ARGV_MAX 15
+#define REDIS_ARGV_MAX 31
 #endif
 
 typedef struct RedisRequest {

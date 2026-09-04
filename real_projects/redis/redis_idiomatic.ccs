@@ -26,6 +26,10 @@
  * I/O / decode drops the connection. Command errors are -ERR and the
  * client stays up. Unknown command is decode-adjacent: -ERR then close.
  *
+ * Serve is `recipe_tcp_echo`: one dest, serial accept, `@parallel(h)`
+ * per conn. Close the listener to stop; `.wait()` joins. Nursery is
+ * the dest's lowered admit, not the page.
+ *
  * Build: `make redis_idiomatic`.  Tiny peer: `redis_async_sketch.ccs`.
  */
 
@@ -538,6 +542,18 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
     return enc->write_reply(&r);
 }
 
+static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
+    @switch (val) {
+    case .str(s):
+        return enc->bulk(s.as_slice());
+    case .num(n): {
+        char[:] text = @string(`${n}`);
+        return enc->bulk(text);
+    }
+    }
+    return enc->err("corrupt value cell");
+}
+
 /* --- exec under hold: leaf → Conn; arrays stay WIRE --------------------- */
 
 @noblock static bool !>(CCIoError) exec(RedisDb* db, RedisCmd* cmd,
@@ -551,21 +567,11 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
     @switch (op) {
     case REDIS_OP_GET: {
         RedisEntry* cell;
-        RedisValue* val;
         if (!payload_ok(cmd->argc, 1, 1, 0))
             return enc->err("wrong number of arguments");
         cell = db_lookup_live(db, keys[0], &clock);
         if (!cell) return enc->null();
-        val = &cell->val;
-        @switch (val) {
-        case .str(s):
-            return enc->bulk(s.as_slice());
-        case .num(n): {
-            char[:] text = @string(`${n}`);
-            return enc->bulk(text);
-        }
-        }
-        return enc->err("corrupt value cell");
+        return enc_redis_value(enc, &cell->val);
     }
     case REDIS_OP_SET:
         /* Clone under hold (sketch/go). Prep/install races under load. */
@@ -721,23 +727,11 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
         enc->array_len(nkeys) !>;
         @for (i in 0..nkeys) {
             RedisEntry* cell = db_lookup_live(db, keys[i], &clock);
-            RedisValue* val;
             if (!cell) {
                 enc->null() !>;
                 continue;
             }
-            val = &cell->val;
-            @switch (val) {
-            case .str:
-                enc->bulk(val->str.as_slice()) !>;
-                break;
-            case .num: {
-                int64_t n = val->num;
-                char[:] text = @string(`${n}`);
-                enc->bulk(text) !>;
-                break;
-            }
-            }
+            enc_redis_value(enc, &cell->val) !>;
         }
         return cc_ok(true);
     }
@@ -930,7 +924,9 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
 
 /* !> binders on CCIoError results project the as: CCError face into `e`. */
 static void redis_client_drop_log(const char* phase, CCError e) {
-    eprintln(@string(`redis_idiomatic: client drop: ${phase}: ${cc_error_str(e)}`, @scratch));
+    fprintf(stderr, "redis_idiomatic: client drop: %s: %s\n",
+            phase ? phase : "?",
+            cc_error_str(e));
 }
 
 static bool redis_conn_write_err_now(RedisConn* conn, CCError e) {
@@ -974,7 +970,7 @@ static bool db_setup(RedisDb* db, size_t shard_count, const char* shard_src) {
         }
         size_t preload_key_count = (size_t)preload_keys;
         eprintln(@string(`redis_idiomatic: preloaded ${preload_key_count} keys`,
-                         @scratch)) !>;
+                         @scratch));
         db_dump_mem_stats(db, "post-preload");
         redis_mem_emit_gap(db, "post-preload");
     }
@@ -1070,6 +1066,14 @@ static void handle_client(CCSocket client, RedisDb* db, CCShardDomain* shards) {
     }
 }
 
+/* SIGTERM/INT close the listener so accept returns and the dest can wait. */
+static CCListener* g_redis_ln;
+
+static void redis_on_stop_signal(int sig) {
+    (void)sig;
+    if (g_redis_ln) g_redis_ln->close();
+}
+
 int main(int argc, char** argv) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
@@ -1107,20 +1111,26 @@ int main(int argc, char** argv) {
     /* stderr: startup banners must not sit in stdout block-buffering when
      * the process is redirected (smoke / sanitize / monitored runs). */
     eprintln(@string(`redis_idiomatic listening on ${addr} shards=${nshards}`,
-                     @scratch)) !>;
+                     @scratch));
 
-    CCNursery server = cc_nursery_create() !> @destroy;
-    server.cancel_on_signals(SIGINT, SIGTERM) !>;
-
-    server.spawn(() => [@safe &db, @safe &ln, @safe &shards, server] {
-        ln.serve(server, (CCSocket* accepted) => [@safe &db, @safe &shards, server] {
-            CCSocket client = *accepted;
-            (void)client.set_nodelay(1);
-            server.spawn(() => [@safe &db, @safe &shards, client] {
-                handle_client(client, &db, &shards);
-            }) !>;
-        });
-    }) !>;
+    g_redis_ln = &ln;
+    signal(SIGINT, redis_on_stop_signal);
+    signal(SIGTERM, redis_on_stop_signal);
+    CCParallel h = @parallel spawn {
+        @serial {
+            while (1) {
+                CCSocket !>(CCNetError) accepted = ln.accept();
+                if (accepted.is_err()) break;
+                CCSocket client = accepted.value();
+                (void)client.set_nodelay(1);
+                @parallel(h) {
+                    handle_client(client, &db, &shards);
+                }
+            }
+        }
+    } !>;
+    h.wait() !>;
+    g_redis_ln = NULL;
 
     return 0;
 }

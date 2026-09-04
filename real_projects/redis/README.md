@@ -56,7 +56,8 @@ The intended git boundary is:
 
 Default (`redis_idiomatic`) shape:
 
-1. accept via `ln.serve` + one sync fiber per connection
+1. accept on one dest (`@parallel spawn` + `@parallel(h)` per conn;
+   `recipe_tcp_echo`). Close the listener to stop.
 2. RESP decode on the connection side (grammar; argv borrows read buffer)
 3. execute under a per-shard named exclusive (`CCExclusive`; shard count =
    next power of two of online CPUs — no user tuning). Optional

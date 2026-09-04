@@ -540,8 +540,8 @@ int main(int argc, char** argv) {
     @defer ln.close();
 
     size_t nshards = db.maps.count();
-    println(@string(`redis-parallel on ${addr} shards=${nshards}`,
-                    @scratch)) !>;
+    @string(`redis-parallel on ${addr} shards=${nshards}`,
+            @scratch).println();
 
     /* !> @destroy joins (wait-then-free); cancel unparks accept. */
     CCNursery server = cc_nursery_create() !> @destroy;

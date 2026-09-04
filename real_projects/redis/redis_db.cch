@@ -15,6 +15,7 @@
  * Include AFTER redis_cc/redis_cc.cch (types) and redis_reply.cch
  * (Resp write schemas + reply_* builders db_* speak).
  */
+#pragma(@per_tu)
 #ifndef REDIS_DB_CCH
 #define REDIS_DB_CCH
 
@@ -56,6 +57,8 @@ typedef struct RedisDbShard {
 } RedisDbShard;
 
 enum { REDIS_DB_MAX_SHARDS = 64 };
+/* ~1MiB/shard: ~50k×16B keys before a new slab. FLUSH tears and rebuilds. */
+enum { REDIS_DB_KEY_ARENA_ROOT = 1024 * 1024 };
 
 typedef struct RedisDb {
     CCArena map_arena;
@@ -171,8 +174,7 @@ static bool db_init(RedisDb* db, size_t bucket_count, size_t shard_count) {
     if (shard_count == 0 || shard_count > (size_t)REDIS_DB_MAX_SHARDS) return false;
     if ((shard_count & (shard_count - 1u)) != 0) return false;
     const size_t map_value_heap_root = 1024;
-    /* ~1MiB/shard root: ~50k×16B keys before a new slab; grows as needed. */
-    const size_t key_arena_root = megabytes(1);
+    const size_t key_arena_root = (size_t)REDIS_DB_KEY_ARENA_ROOT;
     memset(db, 0, sizeof(*db));
     db->shard_count = shard_count;
     db->shard_mask = shard_count - 1u;
@@ -223,10 +225,18 @@ fail:
 
 static void db_release_value(RedisDb* db, CCString* value) {
     if (!db || !value) return;
-    if (value->heap_data()) db_mem_stats_note_value_release(value->cap());
+    if (cc_string_heap_data(value)) db_mem_stats_note_value_release(cc_string_cap(value));
     /* The owner header names the arena that holds the bytes; release
      * goes through it (a dead arena already took the bytes with it). */
-    value->destroy();
+    cc_string_destroy(value);
+}
+
+/* Drop the live value in place (maps do not run V destructors). `.num`
+ * owns nothing. Do not pair this with a later `*val = { ... }` — that
+ * assignment already drops the old arm. */
+static void db_release_entry_value(RedisDb* db, RedisValue* val) {
+    if (!db || !val) return;
+    if (val->kind == .str) db_release_value(db, &val->str);
 }
 
 /* Replace path for an existing STR-arm payload.  In-place overwrite when
@@ -409,8 +419,6 @@ static void !>(CCError) db_expires_set(RedisDb* db, char[:] key, int64_t when) {
  * to the key arena (overflow malloc).  Expires may share the entries key word
  * or own a separate clone — free the clone only when distinct. */
 static void db_remove_entry(RedisDb* db, char[:] key, RedisEntry* cell) {
-    RedisValue* val = &cell->val;
-    CCString doomed = val->str ?> cc_string_new();  /* num arms own no bytes */
     CCSlicePackedView view;
     CCSlicePacked kh = db_key_packed_borrow(&view, key);
     size_t h = cc_map_hash_slice_packed(kh);
@@ -432,13 +440,14 @@ static void db_remove_entry(RedisDb* db, char[:] key, RedisEntry* cell) {
             (void)sh->expires->del_at(xdi, xb);
         }
     }
+    /* Drop the value before del_at: swap-remove invalidates `cell`. */
+    db_release_entry_value(db, &cell->val);
     if (!sh->entries->del_at(edi, eb)) return;
     entry_w = entry_key.w;
     db_mem_stats_note_key_release(key.len);
     db_release_key_packed(db, &entry_key);
     if (exp_key.w && exp_key.w != entry_w)
         db_release_key_packed(db, &exp_key);
-    db_release_value(db, &doomed);
 }
 
 /* THE read path: every command that touches a key goes through here so
@@ -500,9 +509,7 @@ static void !>(CCError) db_insert_new_entry(RedisDb* db, char[:] key,
     RedisEntry entry;
     entry.val = val;
     db_insert_value(db, owned_key, entry) !>(e) {
-        RedisValue* pv = &entry.val;
-        CCString doomed = pv->str ?> cc_string_new();
-        db_release_value(db, &doomed);
+        db_release_entry_value(db, &entry.val);
         db_release_key_packed(db, &owned_key);
         return cc_err(e);
     };
@@ -666,11 +673,9 @@ static RedisReply !>(CCError) db_append(RedisDb* db,
 /* INCR/DECR/INCRBY/DECRBY.  Existing entries keep their TTL (value edit);
  * a fresh entry starts at `delta` with no TTL.  The hot path (existing num
  * cell) is projection + checked add + num->num transition: no text parse,
- * no re-encode.  A str cell parses once in the `?>` fallback, then the
- * one-line transition installs the num arm — its CCString is released
- * first with the same value-arena accounting as before (int64 carries no
- * destructor, so the manual release IS the drop).  Error paths leave the
- * cell untouched. */
+ * no re-encode.  A str cell parses once in the `?>` fallback; the
+ * assignment drops the old arm.  Account the heap string first — drop
+ * does not know about memlog.  Error paths leave the cell untouched. */
 static RedisReply !>(CCError) db_incrby(RedisDb* db, char[:] key, int64_t delta, DbCmdClock* clock) {
     @errhandler(CCError e) { return cc_err(e); }
     if (!db || !db->shards) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
@@ -692,8 +697,8 @@ static RedisReply !>(CCError) db_incrby(RedisDb* db, char[:] key, int64_t delta,
             return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR increment or decrement would overflow"));
         };
         if (val->kind == .str) {
-            CCString doomed = val->str;
-            db_release_value(db, &doomed);
+            CCString* old = &val->str;
+            if (cc_string_heap_data(old)) db_mem_stats_note_value_release(cc_string_cap(old));
         }
         *val = { .num = value };
     } else {
@@ -838,10 +843,10 @@ static RedisReply db_dbsize(RedisDb* db, DbCmdClock* clock) {
     return reply_integer(n);
 }
 
-/* FLUSHDB/FLUSHALL (one logical DB, so they are the same operation): a
- * mass-DEL.  Values and heap keys are released with the usual accounting,
- * then maps are cleared.  Dense at_ptr/key_ptr so release hits the live cell
- * (same discipline as get_ptr — not a by-value FOREACH alias). */
+/* FLUSHDB/FLUSHALL (one logical DB, so they are the same operation).
+ * Maps do not drop V: walk live cells and destroy values in place, account
+ * keys, clear both tables, then tear the key arena (slab keys are logical
+ * until this; DEL is the individual-release path). */
 static RedisReply db_flush(RedisDb* db) {
     size_t si;
     if (!db || !db->shards) return reply_simple("OK");
@@ -854,26 +859,16 @@ static RedisReply db_flush(RedisDb* db) {
         for (i = 0; i < n; ++i) {
             CCSlicePacked* k = sh->entries->key_ptr(i);
             RedisEntry* cell = sh->entries->at_ptr(i);
-            CCSlicePacked entry_key;
-            CCSlicePacked exp_key = cc_slice_packed_empty();
-            uintptr_t entry_w;
             if (!k || !cell) continue;
-            entry_key = *k;
-            entry_w = entry_key.w;
-            if (sh->expires) {
-                CCSlicePacked* xk = sh->expires->find_key_ptr(entry_key);
-                if (xk) exp_key = *xk;
-            }
             db_mem_stats_note_key_release(k->len());
-            RedisValue* val = &cell->val;
-            CCString doomed = val->str ?> cc_string_new();  /* num arms own no bytes */
-            db_release_value(db, &doomed);
-            db_release_key_packed(db, &entry_key);
-            if (exp_key.w && exp_key.w != entry_w)
-                db_release_key_packed(db, &exp_key);
+            db_release_entry_value(db, &cell->val);
         }
         sh->entries->clear();
         if (sh->expires) sh->expires->clear();
+        sh->key_arena.destroy();
+        if (!db_init_key_arena(&sh->key_arena, (size_t)REDIS_DB_KEY_ARENA_ROOT)) {
+            return reply_error("ERR flush failed to rebuild key arena");
+        }
     }
     return reply_simple("OK");
 }
@@ -1003,8 +998,8 @@ static bool !>(CCError) db_preload_keys(RedisDb* db, int count) {
     if (!db || count <= 0) return cc_ok(true);
     static const char preload_value[] = "0";
     for (int i = 0; i < count; ++i) {
-        char[:] key = @string(`key:${i}`, @scratch);
-        if (!key.ptr || key.len == 0) {
+        char[:] key = @string(`key:${i}`);
+        if (key.len == 0) {
             return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "preload key encode failed"));
         }
         db_set(db,
