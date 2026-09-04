@@ -1,7 +1,7 @@
 /*
  * redis_idiomatic.ccs — default Concurrent-C Redis (complete).
  *
- * Same control flow as redis_async_sketch.ccs:
+ * Command path matches the sketch / redis.go:
  *   parse → hold → execute(ConnEnc) encodes → release → flush
  * Full RedisDb / expiry / command surface underneath.
  *
@@ -27,8 +27,7 @@
  * client stays up. Unknown command is decode-adjacent: -ERR then close.
  *
  * Serve is `recipe_tcp_echo`: one dest, serial accept, `@parallel(h)`
- * per conn. Close the listener to stop; `.wait()` joins. Nursery is
- * the dest's lowered admit, not the page.
+ * per conn. Close the listener to stop; `.wait()` joins.
  *
  * Build: `make redis_idiomatic`.  Tiny peer: `redis_async_sketch.ccs`.
  */
@@ -1075,7 +1074,7 @@ static void redis_on_stop_signal(int sig) {
 }
 
 int main(int argc, char** argv) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    @errhandler(CCError err) { cc_error_log(err); return 1; }
 
     int port = 6380;
     if (argc > 1) {
@@ -1090,8 +1089,8 @@ int main(int argc, char** argv) {
 
     CCString addr = @string(`127.0.0.1:${port}`, @scratch);
 
-    CCListener ln = cc_tcp_listen(addr.as_slice()) !>(e) {
-        eprintln(@string(`listen error: ${e}`, @scratch));
+    CCListener ln = cc_tcp_listen(addr.as_slice()) !>(err) {
+        eprintln(@string(`listen error: ${err}`, @scratch));
         return 1;
     };
     @defer ln.close();
@@ -1119,9 +1118,10 @@ int main(int argc, char** argv) {
     CCParallel h = @parallel spawn {
         @serial {
             while (1) {
-                CCSocket !>(CCNetError) accepted = ln.accept();
-                if (accepted.is_err()) break;
-                CCSocket client = accepted.value();
+                CCSocket client = ln.accept() !>(stop) {
+                    (void)stop;
+                    break;
+                };
                 (void)client.set_nodelay(1);
                 @parallel(h) {
                     handle_client(client, &db, &shards);

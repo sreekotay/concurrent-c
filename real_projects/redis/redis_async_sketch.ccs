@@ -21,6 +21,8 @@
  *   Mid-MGET encode failure after array_len is buffered ships a truncated
  *   RESP array. Connection dies on Err — not worth two-phase encode here.
  *
+ * Serve is `recipe_tcp_echo`: one dest, serial accept, `@parallel(h)`
+ * per conn. Close the listener to stop; `.wait()` joins.
  * Full server (same I/O shape, full command surface): redis_idiomatic.ccs.
  *
  * Build: `make redis_async_sketch`
@@ -445,8 +447,16 @@ static void handle_client(CCSocket client, CCShardMap* maps) {
     }
 }
 
+/* SIGTERM/INT close the listener so accept returns and the dest can wait. */
+static CCListener* g_sketch_ln;
+
+static void sketch_on_stop_signal(int sig) {
+    (void)sig;
+    if (g_sketch_ln) g_sketch_ln->close();
+}
+
 int main(int argc, char** argv) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    @errhandler(CCError err) { cc_error_log(err); return 1; }
 
     const char* addr = argc > 1 ? argv[1] : k_listen;
     CCShardMap maps = {0};
@@ -461,8 +471,8 @@ int main(int argc, char** argv) {
     }
     @defer maps.destroy();
 
-    CCListener ln = cc_tcp_listen(cc_slice_cstr(addr)) !>(e) {
-        eprintln(@string(`listen: ${e}`, @scratch));
+    CCListener ln = cc_tcp_listen(cc_slice_cstr(addr)) !>(err) {
+        eprintln(@string(`listen: ${err}`, @scratch));
         return 1;
     };
     @defer ln.close();
@@ -471,18 +481,24 @@ int main(int argc, char** argv) {
     @string(`redis-async-sketch on ${addr} shards=${nshards}`,
             @scratch).println();
 
-    /* !> @destroy joins (wait-then-free); cancel unparks accept. */
-    CCNursery server = cc_nursery_create() !> @destroy;
-    server.cancel_on_signals(SIGINT, SIGTERM) !>;
-
-    server.spawn(() => [@safe &maps, @safe &ln, server] {
-        ln.serve(server, (CCSocket* accepted) => [@safe &maps, server] {
-            CCSocket client = *accepted;
-            (void)client.set_nodelay(1);
-            server.spawn(() => [@safe &maps, client] {
-                handle_client(client, &maps);
-            }) !>;
-        });
-    }) !>;
+    g_sketch_ln = &ln;
+    signal(SIGINT, sketch_on_stop_signal);
+    signal(SIGTERM, sketch_on_stop_signal);
+    CCParallel h = @parallel spawn {
+        @serial {
+            while (1) {
+                CCSocket client = ln.accept() !>(stop) {
+                    (void)stop;
+                    break;
+                };
+                (void)client.set_nodelay(1);
+                @parallel(h) {
+                    handle_client(client, &maps);
+                }
+            }
+        }
+    } !>;
+    h.wait() !>;
+    g_sketch_ln = NULL;
     return 0;
 }

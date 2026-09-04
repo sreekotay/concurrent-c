@@ -8,7 +8,7 @@ The supported Concurrent-C Redis variants are:
   (hold → encode into Conn → flush) over full RedisDb. Shared reply helpers
   in `redis_reply.cch`. Benchmark target for `./bench_robust.sh`.
 - `redis_async_sketch.ccs` — tiny command surface peer of `redis.go`
-  (`ln.serve` + Conn encode). Teaching peer of the complete server.
+  (dest accept + Conn encode). Teaching peer of the complete server.
   Default listen `127.0.0.1:6381`. Not the bench target.
 - `redis_parallel.ccs` — throwaway sketch sibling: same tiny surface,
   MGET is `@parallel wait` (per-key `hold_one`, snapshot, ordered
@@ -57,7 +57,7 @@ The intended git boundary is:
 Default (`redis_idiomatic`) shape:
 
 1. accept on one dest (`@parallel spawn` + `@parallel(h)` per conn;
-   `recipe_tcp_echo`). Close the listener to stop.
+   `recipe_tcp_echo`). Close the listener to stop. `.wait()` joins.
 2. RESP decode on the connection side (grammar; argv borrows read buffer)
 3. execute under a per-shard named exclusive (`CCExclusive`; shard count =
    next power of two of online CPUs — no user tuning). Optional

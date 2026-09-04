@@ -33,7 +33,7 @@ $(REDIS_SRC_DIR)/src/redis-benchmark: $(REDIS_SRC_DIR)/src/redis-server
 
 upstream: $(REDIS_SRC_DIR)/src/redis-server $(REDIS_SRC_DIR)/src/redis-cli $(REDIS_SRC_DIR)/src/redis-benchmark
 
-# Default: full RedisDb + sketch I/O (ln.serve, Conn.out encode, sync fiber).
+# Default: full RedisDb + sketch I/O (dest accept, Conn.out encode).
 $(OUT_DIR)/redis_idiomatic: redis_idiomatic.ccs redis_cc/redis_cc.cch redis_db.cch redis_reply.cch redis_mem.cch redis_glob.cch redis_resp.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_idiomatic.ccs --release --cc-flags "$(REDIS_IDIOMATIC_DEFS)"
 
@@ -65,7 +65,7 @@ $(OUT_DIR)/redis_idiomatic_debug: redis_idiomatic.ccs redis_cc/redis_cc.cch redi
 $(OUT_DIR)/redis_cc: redis_cc/redis_cc.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_cc/redis_cc.ccs --release
 
-# Tiny command surface (redis.go); sync fiber + ln.serve + Conn encode.
+# Tiny command surface (redis.go); dest accept + Conn encode.
 $(OUT_DIR)/redis_async_sketch: redis_async_sketch.ccs | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_async_sketch.ccs --release
 
