@@ -6,7 +6,8 @@
 #include "cc_mem.c"
 #endif
 
-cc_atomic_u64 cc_arena_prov_counter = 1;
+/* Moves only in whole CC__ARENA_EPOCH_BLOCK steps (hosts draw blocks); epoch 0 is never handed out. */
+cc_atomic_u64 cc_arena_prov_counter = 256;
 
 /* ffc.h (fast_float C port): one-TU definition for lazy number accessors /
  * schema float binds. Header-only API via <ccc/vendor/ffc.h>. */

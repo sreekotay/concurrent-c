@@ -148,7 +148,9 @@ checkpoint.try_restore() !>; /* or @destroy on the handle */
 Capture records the slab word, takes a fresh epoch that every allocation
 above the mark is stamped with, and remembers the head of the host's record
 list. Allocation keeps bumping the host's own slab. Marks nest per host up to
-`CC_ARENA_MARK_DEPTH`; a deeper one promotes the outer marks.
+`CC_ARENA_MARK_DEPTH`; a deeper one promotes the outer marks. An arena its
+caller owns outright uses `cc_arena_checkpoint_local` / `cc_arena_restore_local`
+(the `alloc_local` contract): no lock, a plain store on restore.
 
 Restore refuses while an inner mark is still named by a live handle, runs the
 records attached since the mark, then returns the slab word to the mark in one

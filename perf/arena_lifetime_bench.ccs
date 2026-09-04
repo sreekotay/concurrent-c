@@ -126,6 +126,30 @@ static double b_cp_scratch(CCArena a, size_t n) {
     }
     return now_sec() - t0;
 }
+/* Owner-only pair: no meta lock, plain-store restore, epoch from the host
+ * block. The shape @scratch lowers to. */
+static double b_cp_local_empty(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        CCArenaCheckpoint cp = cc_arena_checkpoint_local(a);
+        sink += (uintptr_t)cp.arena;
+        cc_arena_restore_local(cp);
+    }
+    return now_sec() - t0;
+}
+static double b_cp_local_scratch(CCArena a, size_t n) {
+    size_t i;
+    double t0 = now_sec();
+    for (i = 0; i < n; i++) {
+        CCArenaCheckpoint cp = cc_arena_checkpoint_local(a);
+        sink += (uintptr_t)cc_arena_alloc_local(a, 32, 8);
+        sink += (uintptr_t)cc_arena_alloc_local(a, 48, 8);
+        sink += (uintptr_t)cc_arena_alloc_local(a, 16, 8);
+        cc_arena_restore_local(cp);
+    }
+    return now_sec() - t0;
+}
 static double b_cp_nested(CCArena a, size_t n) {
     size_t i;
     double t0 = now_sec();
@@ -385,6 +409,8 @@ int main(void) {
     run("checkpoint + 3 allocs + restore (@scratch shape)", b_cp_scratch, a, 1000000);
     run("checkpoint + 3 allocs + restore (1 KiB stack)", b_cp_scratch, sc, 1000000);
     run("nested checkpoint x3 + restore x3", b_cp_nested, a, 500000);
+    run("checkpoint_local + restore_local (empty, owned)", b_cp_local_empty, a, 1000000);
+    run("checkpoint_local + 3 alloc_local + restore_local (owned)", b_cp_local_scratch, a, 1000000);
     run("checkpoint + 2 MiB scratch (child extent) + restore", b_cp_grown, a, 100000);
     run("alloc 64B + release (unsized, last-live)", b_rel_unsized, a, 2000000);
     run("alloc 64B + release_sized (tip pop)", b_rel_sized_tip, a, 2000000);

@@ -395,6 +395,8 @@ int main(void) {
     run("checkpoint + 3 allocs + restore (@scratch shape)", b_mark_3_reset, 1000000);
     run("checkpoint + 3 allocs + restore (1 KiB stack)", b_mark_3_reset, 1000000);
     run("nested checkpoint x3 + restore x3", b_mark_nested, 500000);
+    run("checkpoint_local + restore_local (empty, owned)", b_mark_reset_empty, 1000000); /* C: mark/reset */
+    run("checkpoint_local + 3 alloc_local + restore_local (owned)", b_mark_3_reset, 1000000);
     run("checkpoint + 2 MiB scratch (child extent) + restore", b_mark_big_reset, 100000);
     run("alloc 64B + release (unsized, last-live)", b_malloc_free, 2000000);
     run("alloc 64B + release_sized (tip pop)", b_malloc_free, 2000000);

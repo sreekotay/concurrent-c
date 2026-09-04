@@ -109,6 +109,7 @@ typedef struct CCArenaCheckpoint CCArenaCheckpoint;
 #define CC_ARENA_FLAG_TAIL_CHILD          0x400 // checkpoint child overlaid on the parent's L1 tail; free pops the parent tip
 #define CC_ARENA_FLAG_REUSE               0x800 // size-class freelists: sized release feeds later allocs of the same class
 #define CC_ARENA_FLAG_PROMOTED_CHILD      0x1000 // host malloced by a checkpoint promotion; its mark 0 is the host itself
+#define CC_ARENA_FLAG_MARKS_FIXED         0x2000 // `more` is storage that lives and dies with the host (heap region, child malloc, stack frame): never scratch, never dropped
 
 /* Size-class reuse tier (CC_ARENA_FLAG_REUSE). Class k holds blocks of
  * exactly `16 << k` bytes at 16-byte alignment; requests round up to the
@@ -180,6 +181,11 @@ typedef struct CCArenaMark {
 #ifndef CC_ARENA_MARK_DEPTH
 #define CC_ARENA_MARK_DEPTH 3
 #endif
+/* Bytes of the nested-mark array (`more`). */
+#define CC__ARENA_MARKS_BYTES (sizeof(CCArenaMark) * (size_t)(CC_ARENA_MARK_DEPTH - 1))
+/* Epochs come in blocks: a host draws 256 from the global counter at a
+ * time and hands them out itself, so a checkpoint touches no shared line. */
+#define CC__ARENA_EPOCH_BLOCK 256u
 
 struct CCArenaHost {
     /* Current slab: fresh bumps land here. Grow publishes a new record with
@@ -191,11 +197,16 @@ struct CCArenaHost {
     /* Epoch fresh bumps are stamped with: `provenance`, or the innermost
      * mark's. Written under meta_lock by checkpoint / restore. */
     uint64_t epoch_cur;
+    /* Next epoch this host hands out; at a block edge ((next & 255) == 0)
+     * the next draw takes a fresh block from cc_arena_prov_counter. */
+    uint64_t epoch_next;
     /* Mark stack: the first mark lives here, so the common single scratch
-     * costs no allocation; the rest (`CC_ARENA_MARK_DEPTH - 1`) come from
-     * the host's own slab at the first nested checkpoint, above the first
-     * mark, and go with it. The outermost mark's offset is the scratch
-     * floor: bytes at or past it on the current slab are scratch. */
+     * costs no allocation. The rest (`CC_ARENA_MARK_DEPTH - 1`) live beside
+     * the host when it has room of its own (MARKS_FIXED: heap region,
+     * promoted child, stack frame); otherwise they come from the host's own
+     * slab at the first nested checkpoint, above the first mark, and go
+     * with it. The outermost mark's offset is the scratch floor: bytes at
+     * or past it on the current slab are scratch. */
     CCArenaMark mark0;
     CCArenaMark *more;
     uint32_t mark_depth;
@@ -336,6 +347,8 @@ struct CCArenaCheckpoint {
     CCArenaHost* parent;  /* same host; restore searches its active chain for `id` */
     size_t offset;        /* tip at capture */
     uint64_t id;          /* mark identity (its epoch) */
+    uint32_t idx;         /* mark index on the host at capture; a hint, `id` decides */
+    uint32_t _pad;
 };
 
 /* Storage tier of a live allocation. L1 is the original root (block_idx 0);
@@ -704,6 +717,18 @@ static inline CCArenaMark *cc__arena_mark_at(const CCArenaHost *h, unsigned i) {
     return i == 0 ? &w->mark0 : &w->more[i - 1];
 }
 
+/* A fresh epoch for `h`, from its current block; a new block is one
+ * fetch_add of CC__ARENA_EPOCH_BLOCK on the global counter (which only ever
+ * moves in whole blocks, so block edges are aligned and epoch 0 is never
+ * handed out). Caller holds h's meta_lock or is the single owner. */
+static inline uint64_t cc__arena_epoch_fresh(CCArenaHost *h) {
+    uint64_t e = h->epoch_next;
+    if ((e & (uint64_t)(CC__ARENA_EPOCH_BLOCK - 1u)) == 0)
+        e = CC_ATOMIC_FETCH_ADD(&cc_arena_prov_counter, CC__ARENA_EPOCH_BLOCK);
+    h->epoch_next = e + 1;
+    return e;
+}
+
 /* Scratch floor of `h`: the outermost mark's offset on the current slab,
  * 0 when no mark is armed (then nothing is scratch and a last-live pop may
  * rewind to zero). Unlocked readers use it as a hint; the checkpoint act
@@ -1047,7 +1072,7 @@ static inline void *cc__arena_alloc_heap_overflow(CCArenaHost *arena, size_t siz
     /* Concurrent overflow allocs RMW _flags under meta_lock; sample ALLOW and
      * block_max under the same lock so TSan does not see a plain load race. */
     cc__arena_meta_lock(arena);
-    int allow = (arena->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) != 0;
+    int allow = (CC__ARENA_FIELD_LOAD(&arena->_flags) & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) != 0;
     int single_block = (arena->block_max == 1);
     cc__arena_meta_unlock(arena);
     if (!allow) return NULL;
@@ -1075,7 +1100,8 @@ static inline int cc_arena_buffer(CCArenaHost *arena, void *buffer, size_t capac
     arena->l1.flags = 0;  // caller owns initial storage
     arena->l1.block_idx = 0;
     arena->slab = &arena->l1;
-    arena->provenance = CC_ATOMIC_FETCH_ADD(&cc_arena_prov_counter, 1);
+    arena->epoch_next = 0;
+    arena->provenance = cc__arena_epoch_fresh(arena);
     arena->epoch_cur = arena->provenance;
     arena->more = NULL;
     arena->mark_depth = 0;
@@ -1415,7 +1441,7 @@ static inline CCArenaHost *cc__arena_owner_host(CCArenaHost *a, const void *ptr)
         if (cc__arena_find_slab(h, ptr)) return h;
     }
     for (h = a; h; h = h->active) {
-        if ((h->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) &&
+        if ((CC__ARENA_FIELD_LOAD(&h->_flags) & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) &&
             cc__arena_ovf_check(h, (void *)(uintptr_t)ptr))
             return h;
     }
@@ -1555,7 +1581,7 @@ CC__ARENA_SYS void *cc_arena_realloc_host(CCArenaHost *old_arena,
         }
     }
 
-    if (old_arena->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) {
+    if (CC__ARENA_FIELD_LOAD(&old_arena->_flags) & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) {
         CCArenaOvfHeader *h;
         cc__arena_meta_lock(old_arena);
         if (!cc__arena_ovf_check(old_arena, ptr)) {
@@ -2029,6 +2055,7 @@ static inline size_t gigabytes(size_t n) {
 #ifdef CC__ARENA_SYS
 CC__ARENA_SYS CCResult_CCArena_CCError cc_arena_try_heap(size_t bytes) {
     size_t total;
+    size_t marks_at;
     void *raw;
     CCArenaHost *h;
     if (bytes == 0) bytes = 1;
@@ -2036,7 +2063,9 @@ CC__ARENA_SYS CCResult_CCArena_CCError cc_arena_try_heap(size_t bytes) {
         return cc__arena_err(CC_ERR_INVALID_ARG,
                              "cc_arena_heap: one slab holds at most 4 GiB (larger objects spill to overflow)");
     total = CC_ARENA_REGION_BYTES(bytes);
-    raw = cc_malloc(total);
+    /* The nested marks sit past the L1 end in the same malloc. */
+    marks_at = (total + (size_t)15) & ~(size_t)15;
+    raw = cc_malloc(marks_at + CC__ARENA_MARKS_BYTES);
     if (!raw)
         return cc__arena_err(CC_ERR_OUT_OF_MEMORY, "cc_arena_heap: out of memory");
     if (cc_arena_init_region(raw, total, CC_ARENA_DEFAULT_BLOCK_MAX) != 0) {
@@ -2044,8 +2073,9 @@ CC__ARENA_SYS CCResult_CCArena_CCError cc_arena_try_heap(size_t bytes) {
         return cc__arena_err(CC_ERR_INVALID_ARG, "cc_arena_heap: buffer init failed");
     }
     h = (CCArenaHost *)raw;
+    h->more = (CCArenaMark *)(void *)((uint8_t *)raw + marks_at);
     h->_flags |= CC_ARENA_FLAG_HEAP_OWNED | CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW
-                 | CC_ARENA_FLAG_REGION_OWNED;
+                 | CC_ARENA_FLAG_REGION_OWNED | CC_ARENA_FLAG_MARKS_FIXED;
     return cc__arena_ok(cc_arena_handle(h));
 }
 #else
@@ -2166,6 +2196,19 @@ static inline CCArena cc_arena_attach_stack(CCArenaHost *h, void *buf, size_t n)
     return cc_arena_handle(h);
 }
 
+/* attach_stack with the nested marks in caller storage (the frame), so a
+ * nested checkpoint never carves them from the slab. `marks` holds
+ * CC_ARENA_MARK_DEPTH - 1 entries and outlives the host. */
+static inline CCArena cc_arena_attach_stack_marks(CCArenaHost *h, void *buf, size_t n,
+                                                  CCArenaMark *marks) {
+    CCArena a = cc_arena_attach_stack(h, buf, n);
+    if (a.a && marks) {
+        a.a->more = marks;
+        a.a->_flags |= CC_ARENA_FLAG_MARKS_FIXED;
+    }
+    return a;
+}
+
 /* 2-arg `@create(buf, cap)` / `name@(buf, cap)`: frame host, caller L1,
  * FIXED (no grow). `@destroy` reclaims L2/Main if overflow is later
  * enabled. Null/empty → dead handle; first alloc fails. */
@@ -2184,11 +2227,13 @@ static inline CCArena cc_arena_attach_buffer(CCArenaHost *h, void *buf, size_t n
  * near SIZE_MAX refuses (dead handle) instead of wrapping the VLA. */
 #define cc_arena_stack(name, nbytes) \
     CCArenaHost name##_cc_stack_host; \
+    CCArenaMark name##_cc_stack_marks[CC_ARENA_MARK_DEPTH > 1 ? CC_ARENA_MARK_DEPTH - 1 : 1]; \
     uint8_t name##_cc_stack_raw[cc__arena_stack_raw_bytes((size_t)(nbytes))]; \
     uint8_t *name##_cc_stack_buf = (uint8_t *)( \
         ((uintptr_t)(name##_cc_stack_raw) + (uintptr_t)15) & ~(uintptr_t)15); \
-    CCArena name = cc_arena_attach_stack(&name##_cc_stack_host, \
-        name##_cc_stack_buf, cc__arena_stack_cap((size_t)(nbytes))) @destroy; \
+    CCArena name = cc_arena_attach_stack_marks(&name##_cc_stack_host, \
+        name##_cc_stack_buf, cc__arena_stack_cap((size_t)(nbytes)), \
+        name##_cc_stack_marks) @destroy; \
     if ((name).a) (name).a->_flags |= CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW
 
 /* Caller-provided region — same @destroy + overflow-flag sugar as
@@ -2269,7 +2314,7 @@ CC__ARENA_SYS int cc__arena_release_one(CCArenaHost* arena, void* ptr, size_t si
  * land on another host's bytes). */
 CC__ARENA_SYS int cc__arena_release_ovf(CCArenaHost* arena, void* ptr) {
     cc__arena_meta_lock(arena);
-    if (arena->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) {
+    if (CC__ARENA_FIELD_LOAD(&arena->_flags) & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) {
         CCArenaOvfHeader *h;
         if (!cc__arena_ovf_check(arena, ptr)) {
             cc__arena_meta_unlock(arena);
@@ -3040,10 +3085,10 @@ CC__ARENA_SYS void cc_arena_reset(CCArenaHost *arena) {
     CC__ARENA_FIELD_PUBLISH(&arena->owner_free, (CCArenaOwner *)NULL);
     CC__ARENA_FIELD_PUBLISH(&arena->reuse_free, (void **)NULL); /* table lived in the rewound slab */
     CC_ATOMIC_STORE(&arena->overflow_bytes, 0);
-    arena->provenance = CC_ATOMIC_FETCH_ADD(&cc_arena_prov_counter, 1);
+    arena->provenance = cc__arena_epoch_fresh(arena);
     arena->epoch_cur = arena->provenance;
     arena->mark_depth = 0;
-    arena->more = NULL; /* it lived in the rewound slab */
+    if (!(arena->_flags & CC_ARENA_FLAG_MARKS_FIXED)) arena->more = NULL; /* it lived in the rewound slab */
     arena->_flags &= ~(CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_WALKING
                        | CC_ARENA_FLAG_REUSE);
     cc__arena_meta_unlock(arena);
@@ -3086,7 +3131,8 @@ CC__ARENA_SYS CCArenaHost *cc__arena_promote_locked(CCArenaHost *parent) {
     if (!s || parent->mark_depth == 0) return NULL;
     floor = CC__SLAB_OFF(parent->mark0.state);
     cap = s->capacity;
-    child = (CCArenaHost *)cc_malloc(sizeof(CCArenaHost) + sizeof(CCAttachNode));
+    child = (CCArenaHost *)cc_malloc(sizeof(CCArenaHost) + sizeof(CCAttachNode)
+                                     + CC__ARENA_MARKS_BYTES);
     if (!child) return NULL;
     CC__BI_MEMSET(child, 0, sizeof(*child));
     nd = (CCAttachNode *)(void *)(child + 1);
@@ -3111,7 +3157,7 @@ CC__ARENA_SYS CCArenaHost *cc__arena_promote_locked(CCArenaHost *parent) {
     child->epoch_cur = parent->epoch_cur;
     child->self_armed = parent->mark0.armed;
     child->_flags = CC_ARENA_FLAG_HOST_OWNED | CC_ARENA_FLAG_TAIL_CHILD
-                  | CC_ARENA_FLAG_PROMOTED_CHILD
+                  | CC_ARENA_FLAG_PROMOTED_CHILD | CC_ARENA_FLAG_MARKS_FIXED
                   | (parent->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW);
     child->block_max = (parent->block_max == CC_ARENA_FIXED)
                            ? CC_ARENA_FIXED : CC_ARENA_DEFAULT_BLOCK_MAX;
@@ -3119,12 +3165,11 @@ CC__ARENA_SYS CCArenaHost *cc__arena_promote_locked(CCArenaHost *parent) {
     child->tail_end = cap;
     child->tail_base = s->base;
     CC_ATOMIC_STORE(&child->meta_lock, 0u);
-    /* Inner marks move over, rebased to the child's L1; the outermost is
-     * the child. The `more` array sits above the outermost mark, so its
-     * bytes are the child's now: the child keeps using it, one entry in.
+    /* Inner marks move over, rebased to the child's L1, into the child's
+     * own mark array (after its attach node); the outermost is the child.
      * A mark's record cut that pointed at the outermost cut now means
      * "none". */
-    child->more = parent->more ? parent->more + 1 : NULL;
+    child->more = (CCArenaMark *)(void *)(nd + 1);
     for (i = 1; i < parent->mark_depth; i++) {
         CCArenaMark m = *cc__arena_mark_at(parent, i);
         m.state = CC__SLAB_PACK(CC__SLAB_OFF(m.state) - floor, CC__SLAB_LIVE(m.state));
@@ -3132,7 +3177,7 @@ CC__ARENA_SYS CCArenaHost *cc__arena_promote_locked(CCArenaHost *parent) {
         *cc__arena_mark_at(child, i - 1) = m;
     }
     child->mark_depth = parent->mark_depth - 1;
-    parent->more = NULL;
+    if (!(parent->_flags & CC_ARENA_FLAG_MARKS_FIXED)) parent->more = NULL; /* it was scratch */
     /* Records attached since the outermost mark are scratch: they move,
      * in order, to the child's list. */
     link = &parent->children;
@@ -3188,6 +3233,8 @@ static inline CCArenaCheckpoint cc_arena_checkpoint(CCArenaHost* arena) {
     cp.parent = NULL;
     cp.offset = 0;
     cp.id = 0;
+    cp.idx = 0;
+    cp._pad = 0;
     if (!arena || !arena->slab) return cp;
     target = cc__arena_innermost(arena);
     cc__arena_meta_lock(target);
@@ -3222,9 +3269,10 @@ static inline CCArenaCheckpoint cc_arena_checkpoint(CCArenaHost* arena) {
         }
     }
     st = cc__slab_state(target->slab);
+    cp.idx = target->mark_depth;
     m = cc__arena_mark_at(target, target->mark_depth++);
     m->state = st;
-    m->epoch = CC_ATOMIC_FETCH_ADD(&cc_arena_prov_counter, 1);
+    m->epoch = cc__arena_epoch_fresh(target);
     m->children_at = target->children;
     m->armed = 1;
     target->epoch_cur = m->epoch;
@@ -3262,7 +3310,7 @@ static inline CCArenaHost *cc__arena_mark_locate(CCArenaHost *from, uint64_t id,
  * live. Records attached since the mark run first (newest first), then
  * the slab word returns to the mark's snapshot in one CAS. */
 #ifdef CC__ARENA_SYS
-CC__ARENA_SYS bool cc_arena_restore(CCArenaCheckpoint checkpoint) {
+CC__ARENA_SYS bool cc__arena_restore_slow(CCArenaCheckpoint checkpoint) {
     CCArenaHost *h;
     int idx = -1;
     CCArenaMark m;
@@ -3305,14 +3353,101 @@ CC__ARENA_SYS bool cc_arena_restore(CCArenaCheckpoint checkpoint) {
     }
     h->mark_depth = (uint32_t)idx;
     h->epoch_cur = idx ? cc__arena_mark_at(h, idx - 1)->epoch : h->provenance;
-    if (idx == 0) h->more = NULL; /* it sat above the first mark */
+    if (idx == 0 && !(h->_flags & CC_ARENA_FLAG_MARKS_FIXED)) h->more = NULL; /* it sat above the first mark */
     cc__arena_meta_unlock(h);
     return true;
 }
 #else
-bool cc_arena_restore(CCArenaCheckpoint checkpoint);
+bool cc__arena_restore_slow(CCArenaCheckpoint checkpoint);
 #endif
 
+
+/* Rewind to the mark. The common case, the mark still on the host it was
+ * taken on with nothing promoted, armed inside, or attached since, is one
+ * CAS under the meta lock here; anything else (a promoted child, a moved
+ * mark, records to run) goes to cc__arena_restore_slow, which walks the
+ * active chain by `id`. */
+static inline bool cc_arena_restore(CCArenaCheckpoint cp) {
+    CCArenaHost *h = cp.parent;
+    if (!cp.arena || !h || !cp.id || !h->slab) return false;
+    if (cp.idx < CC__ARENA_FIELD_LOAD(&h->mark_depth) && !CC__ARENA_FIELD_LOAD(&h->active)) {
+        CCArenaMark *m;
+        cc__arena_meta_lock(h);
+        m = cc__arena_mark_at(h, cp.idx);
+        if (cp.idx < h->mark_depth && !h->active && m->epoch == cp.id && m->armed &&
+            h->children == m->children_at && !cc__arena_armed_inside(h, (int)cp.idx)) {
+            CCArenaSlab *s = h->slab;
+            uint64_t st = cc__slab_state(s);
+            while (!CC_ATOMIC_CAS_ACQ_REL(&s->state, &st, m->state)) st = cc__slab_state(s);
+            h->mark_depth = cp.idx;
+            h->epoch_cur = cp.idx ? cc__arena_mark_at(h, cp.idx - 1)->epoch : h->provenance;
+            if (cp.idx == 0 && !(h->_flags & CC_ARENA_FLAG_MARKS_FIXED)) h->more = NULL;
+            cc__arena_meta_unlock(h);
+            return true;
+        }
+        cc__arena_meta_unlock(h);
+    }
+    return cc__arena_restore_slow(cp);
+}
+
+/* Owner-only checkpoint: the same contract as cc_arena_alloc_local (no
+ * other thread touches this host while it is in use). No meta lock: the
+ * mark is written in place and the epoch comes from the host's block. A
+ * full mark stack, or a host without a mark array, goes through
+ * cc_arena_checkpoint, which may promote. */
+static inline CCArenaCheckpoint cc_arena_checkpoint_local(CCArenaHost *arena) {
+    CCArenaCheckpoint cp;
+    CCArenaHost *h;
+    CCArenaMark *m;
+    uint64_t st;
+    unsigned d;
+    cp.arena = NULL;
+    cp.parent = NULL;
+    cp.offset = 0;
+    cp.id = 0;
+    cp.idx = 0;
+    cp._pad = 0;
+    if (!arena || !arena->slab) return cp;
+    h = cc__arena_innermost(arena);
+    if (!h->slab || (h->_flags & CC_ARENA_FLAG_WALKING)) return cp;
+    d = h->mark_depth;
+    if (d >= CC_ARENA_MARK_DEPTH || (d >= 1 && !h->more))
+        return cc_arena_checkpoint(arena);
+    st = CC_ATOMIC_LOAD(&h->slab->state);
+    m = cc__arena_mark_at(h, d);
+    m->state = st;
+    m->epoch = cc__arena_epoch_fresh(h);
+    m->children_at = h->children;
+    m->armed = 1;
+    h->mark_depth = d + 1;
+    h->epoch_cur = m->epoch;
+    cp.arena = arena;
+    cp.parent = arena;
+    cp.offset = CC__SLAB_OFF(st);
+    cp.id = m->epoch;
+    cp.idx = d;
+    return cp;
+}
+
+/* Owner-only restore: a plain store of the slab word when the mark is still
+ * on this host with nothing promoted, armed inside, or attached since. Any
+ * other state takes the shared cc_arena_restore. */
+static inline bool cc_arena_restore_local(CCArenaCheckpoint cp) {
+    CCArenaHost *h = cp.parent;
+    if (!cp.arena || !h || !cp.id || !h->slab) return false;
+    if (cp.idx < h->mark_depth && !h->active) {
+        CCArenaMark *m = cc__arena_mark_at(h, cp.idx);
+        if (m->epoch == cp.id && m->armed && h->children == m->children_at &&
+            !cc__arena_armed_inside(h, (int)cp.idx)) {
+            CC_ATOMIC_STORE(&h->slab->state, m->state);
+            h->mark_depth = cp.idx;
+            h->epoch_cur = cp.idx ? cc__arena_mark_at(h, cp.idx - 1)->epoch : h->provenance;
+            if (cp.idx == 0 && !(h->_flags & CC_ARENA_FLAG_MARKS_FIXED)) h->more = NULL;
+            return true;
+        }
+    }
+    return cc_arena_restore(cp);
+}
 
 /* Pointer-taking UFCS wrapper: `cp.restore()` lowers to
    cc_arena_checkpoint_restore(&cp) via the smart snake_case generic
@@ -3890,6 +4025,9 @@ static inline size_t cc__arena_remaining_impl(const CCArenaHost *a) {
 static inline CCArenaCheckpoint cc__arena_checkpoint_impl(CCArenaHost *a) {
     return cc_arena_checkpoint(a);
 }
+static inline CCArenaCheckpoint cc__arena_checkpoint_local_impl(CCArenaHost *a) {
+    return cc_arena_checkpoint_local(a);
+}
 static inline CCSlice cc__arena_alloc_slice_bytes_impl(CCArenaHost *a, size_t len) {
     return cc_arena_alloc_slice_bytes(a, len);
 }
@@ -3948,6 +4086,7 @@ static inline void cc__arena_pool_init_impl(CCArenaPool *p, CCArenaHost *a, size
 #define cc_arena_attach(a, o, d) cc__arena_attach_impl(CC__ARENA_HOST(a), o, d)
 #define cc_arena_remaining(a) cc__arena_remaining_impl(CC__ARENA_HOST(a))
 #define cc_arena_checkpoint(a) cc__arena_checkpoint_impl(CC__ARENA_HOST(a))
+#define cc_arena_checkpoint_local(a) cc__arena_checkpoint_local_impl(CC__ARENA_HOST(a))
 #define cc_arena_alloc_slice_bytes(a, len) cc__arena_alloc_slice_bytes_impl(CC__ARENA_HOST(a), len)
 #define cc_arena_alloc_slice(a, e, c, al) cc__arena_alloc_slice_impl(CC__ARENA_HOST(a), e, c, al)
 #define cc_arena_valid(a) cc__arena_valid_impl(CC__ARENA_HOST(a))

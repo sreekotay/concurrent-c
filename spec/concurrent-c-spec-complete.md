@@ -2170,7 +2170,19 @@ mark, then returns the slab word to the mark in one CAS: scratch above the
 mark is gone, views minted above it are stale (their epoch is dead), and
 objects below it are untouched. The tip never drops below a mark: a pre-mark
 object at the tip released during scratch becomes a hole. Marks nest per
-host up to `CC_ARENA_MARK_DEPTH`.
+host up to `CC_ARENA_MARK_DEPTH`. The nested marks live beside the host
+when it has storage of its own (a heap host's region, a promoted child's
+allocation, a `cc_arena_stack` frame); other hosts carve them from the slab
+above the first mark at the first nested checkpoint. Epochs come from a
+per-host block of 256 drawn from the global counter, so a checkpoint touches
+no shared line.
+
+`cc_arena_checkpoint_local` / `cc_arena_restore_local` are the owner-only
+pair, under the same contract as `cc_arena_alloc_local`: no other thread
+touches the host while it is in use. They take no lock and restore with a
+plain store of the slab word. A full mark stack, a promoted child, an armed
+inner mark, or records attached since the mark fall through to the shared
+pair. `@scratch` lowers to the owner-only pair.
 
 A mark becomes a real **child arena** (a promotion) only when scratch
 outgrows the slab or spills to overflow, when a pre-mark object must move
@@ -8227,8 +8239,9 @@ struct CCArenaHost {
     CCArenaSlab  l1;       // the first slab's record, in the host
     uint64_t provenance;   // monotonic arena id / epoch
     uint64_t epoch_cur;    // epoch fresh bumps carry: provenance, or the innermost mark's
+    uint64_t epoch_next;   // next epoch of this host's block of 256; a block edge draws a new block
     CCArenaMark mark0;     // first checkpoint mark (slab word, epoch, record-list head, armed)
-    CCArenaMark* more;     // the next CC_ARENA_MARK_DEPTH-1 marks, from the slab above mark0
+    CCArenaMark* more;     // the next CC_ARENA_MARK_DEPTH-1 marks: beside the host (MARKS_FIXED) or from the slab above mark0
     uint32_t mark_depth;
     uint32_t _flags;       // ALLOW/USED_HEAP_OVERFLOW, HOST_INLINE, TAIL_CHILD, PROMOTED_CHILD, REUSE, ...
     uint16_t block_max;    // budget: 0 = unbounded, 1 = fixed, N = max

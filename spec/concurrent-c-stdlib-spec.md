@@ -87,7 +87,9 @@ attached children never refuse a capture or a restore. Nested checkpoints
 restore LIFO while the inner handle is live; `cp.abandon()` consumes the
 handle and keeps the scratch. A checkpoint always arms on a live host; a
 hard-capped `a` fails scratch closed once its tail is gone. The C twins
-(`cc_arena_checkpoint` / `cc_arena_restore`) stay for `@scratch`.
+(`cc_arena_checkpoint` / `cc_arena_restore`) stay; `@scratch` lowers to the
+owner-only `cc_arena_checkpoint_local` / `cc_arena_restore_local`, which take
+no lock because the function scratch arena has one owner.
 Release is a signal: `cc_arena_release_sized(a, p, n)` pops the tip, lists
 the block for reuse (`a.set_reuse(true)`), or leaves a hole; the arena is the
 lifetime either way. `a.create_nursery()` attaches a
