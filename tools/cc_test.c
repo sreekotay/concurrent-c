@@ -917,7 +917,7 @@ static int run_one_test(const char* stem,
         free(err_buf);
         arg_runs_clear(&runs);
         free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
-        if (bad) return 1;
+        if (bad) { fprintf(stderr, "[FAIL] %s: compile_err expectation not met\n", stem); return 1; }
         fprintf(stderr, "[OK] %s\n", stem);
         return 0;
     }

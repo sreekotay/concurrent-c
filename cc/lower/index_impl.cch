@@ -2788,6 +2788,16 @@ static void cc__load_includes_of(CcIndex* ix, const CcTape* tape) {
         CcIncludeRef* r = refs.get_ptr(i);
         CCString searched = cc_string_new();
         CCSlice found;
+        if (cc__has_suffix(r->path, ".h")) {
+            /* `<x.h>` names a lowered header when `x.cch` is on the path: index
+             * its source. Otherwise it is a C header and stays C. */
+            CcIncludeRef src = *r;
+            size_t pl = r->path.len;
+            src.path = cc__cat2(ix, cc__ix_dupn(ix, r->path.ptr, pl - 2), ".cch");
+            found = cc__resolve_include(ix, tape->path, &src, &searched);
+            if (found.len) cc__load_header(ix, found);
+            continue;
+        }
         if (!cc__has_suffix(r->path, ".cch")) continue; /* C headers stay C */
         found = cc__resolve_include(ix, tape->path, r, &searched);
         if (!found.len) {

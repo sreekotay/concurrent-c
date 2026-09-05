@@ -220,11 +220,13 @@ static bool rl_diverges(CcLowerer* L, const CcStmt* s) {
         case .goto_: return true;
         case .break_: return true;
         case .continue_: return true;
+        case .err_fwd: return true;    /* `@err(e);` jumps to the handler */
         default: return rl_diverges_b(L, s);
     }
 }
 
 static CcStmt* rl_body(RFn* fn, CcStmt* s);
+static void rl_hoist_nested(RFn* fn, CcStmt* s);
 
 static void rl_register_handler(RFn* fn, const CcErrhandler* eh, CcSpan sp) {
     CcLowerer* L = fn->L;
@@ -246,17 +248,133 @@ static void rl_register_handler(RFn* fn, const CcErrhandler* eh, CcSpan sp) {
     }
 }
 
-/* The handler for an error of type `err_canon` (empty: unknown), innermost
- * first; NULL when none is in scope. */
-static RHandler* rl_pick_handler(RFn* fn, CCSlice err_canon) {
+/* ---- handler lookup ------------------------------------------------------- */
+
+/* The `as:` walk from error type `from` to `to`: the face fields to read,
+ * innermost face first. A face whose type is `to` ends the walk; another
+ * struct type continues it. `seen` guards cycles (a type met twice on the
+ * walk sets `*cycle`); `*n_found` counts every complete path so a second
+ * one is reported as ambiguous. Lifetime: everything in the lowerer arena. */
+static bool rl_as_search(CcLowerer* L, CCSlice from, CCSlice to, CcNameList* path, CcNameList* seen,
+                         int* n_found, bool* cycle) {
+    CcIndex* ix = rl_ix(L);
+    CcNameList faces = cc__view_faces(ix, from);
+    size_t n = faces.len();
+    size_t i;
+    size_t ns = seen->len();
+    CcRecordType st;
+    CcFieldList* fieldv;
+    size_t nf;
+    bool set = false;
+    if (!n) return false;
+    for (i = 0; i < ns; i++) {
+        CCSlice sn = *seen->get_ptr(i);
+        if (cc_slice_eq(&sn, from)) { *cycle = true; return false; }
+    }
+    if (!cc__struct_of(ix, from, 0, &st)) return false;
+    seen->push(from);
+    fieldv = &st.fields;
+    nf = fieldv->len();
+    for (i = 0; i < n; i++) {
+        CCSlice face = *faces.get_ptr(i);
+        size_t k;
+        for (k = 0; k < nf; k++) {
+            CcField* f = fieldv->get_ptr(k);
+            CCSlice fty;
+            if (!f->name.len || !cc_slice_eq(&f->name, face)) continue;
+            if (!f->type) continue;
+            if (f->type->k.kind == CcTypeK_pointer) continue;   /* a value embed, never a pointer */
+            fty = rl_ix_canon(L, f->type);
+            if (cc_slice_eq(&fty, to)) {
+                (*n_found)++;
+                if (!set) { path->push(face); set = true; }
+            } else {
+                CcNameList sub = vec_new::[CCSlice](L->arena);
+                if (rl_as_search(L, fty, to, &sub, seen, n_found, cycle) && !set) {
+                    size_t j;
+                    size_t nsub = sub.len();
+                    path->push(face);
+                    for (j = 0; j < nsub; j++) {
+                        CCSlice step = *sub.get_ptr(j);
+                        path->push(step);
+                    }
+                    set = true;
+                }
+            }
+        }
+    }
+    seen->truncate(ns);
+    return set;
+}
+
+/* The handler for an error of type `err_canon` (empty: unknown). An exact
+ * match wins, innermost first. Otherwise every handler in scope is tried
+ * through the error type's `as:` faces: exactly one handler type may be
+ * reachable, and `*path` receives the faces to read. NULL after the
+ * diagnostic (`bare` when no handler is in scope at all). */
+static RHandler* rl_pick_handler(RFn* fn, CCSlice err_canon, CcSpan sp, const char* bare, CcNameList* path) {
+    CcLowerer* L = fn->L;
     RHandlerList* hs = &fn->handlers;
     size_t n = hs->len();
     size_t i;
+    RHandler* best = NULL;
+    CcNameList best_path = vec_new::[CCSlice](L->arena);
+    bool ambiguous = false;
+    bool saw_cycle = false;
+    *path = vec_new::[CCSlice](L->arena);
+    if (!n) {
+        CCString m = @string(`${bare}`, L->arena);
+        lw_error(L, sp, m);
+        return NULL;
+    }
     for (i = n; i > 0; i--) {
         RHandler* h = *hs->get_ptr(i - 1);
         if (!err_canon.len || !h->err_canon.len || cc_slice_eq(&h->err_canon, err_canon)) return h;
     }
-    return n ? *hs->get_ptr(n - 1) : NULL;
+    /* innermost scope with a reachable handler wins; two distinct handler
+     * types reachable at that scope are ambiguous (hop count is no rank) */
+    for (i = n; i > 0; i--) {
+        RHandler* h = *hs->get_ptr(i - 1);
+        CcNameList p = vec_new::[CCSlice](L->arena);
+        CcNameList seen = vec_new::[CCSlice](L->arena);
+        int n_found = 0;
+        bool cycle = false;
+        if (best && h->depth < best->depth) break;
+        if (rl_as_search(L, err_canon, h->err_canon, &p, &seen, &n_found, &cycle)) {
+            if (n_found > 1) ambiguous = true;
+            if (!best) { best = h; best_path = p; }
+            else if (!cc_slice_eq(&best->err_canon, h->err_canon)) ambiguous = true;
+        } else if (cycle) {
+            saw_cycle = true;
+        }
+    }
+    if (ambiguous) {
+        CCString m = @string(`ambiguous '@errhandler' for error type '${err_canon}': multiple as: faces match in-scope handlers`, L->arena);
+        lw_error(L, sp, m);
+        return NULL;
+    }
+    if (best) { *path = best_path; return best; }
+    if (saw_cycle) {
+        CCString m = @string(`cyclic as: path while matching '@errhandler' for error type '${err_canon}'`, L->arena);
+        lw_error(L, sp, m);
+        return NULL;
+    }
+    {
+        CCString m = @string(`no matching '@errhandler' for error type '${err_canon}'`, L->arena);
+        lw_error(L, sp, m);
+    }
+    return NULL;
+}
+
+/* `<err>` read through the faces of an `as:` path. */
+static CcExpr* rl_project(CcLowerer* L, CcExpr* err, CcNameList* path, CcSpan sp) {
+    size_t n = path->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice face = *path->get_ptr(i);
+        err = lw_member_s(L, err, face, sp);
+    }
+    return err;
 }
 
 static CCSlice rl_cell_name(CcLowerer* L, uint32_t id) {
@@ -353,22 +471,29 @@ static CcStmt* rl_scaffold(RFn* fn, CcExpr* uw, CcExpr* target, CcSpan sp) {
     /* __typeof__(inner) __r = inner; */
     lw_push(blk, lw_decl_stmt(L, rl_typeof(L, inner, sp), rl_lit("__r"), inner, sp));
     if (form == 1) {
-        RHandler* h = rl_pick_handler(fn, rt ? rl_ix_canon(L, rt->result_err) : cc_slice_empty());
+        CcNameList path;
+        RHandler* h = rl_pick_handler(fn, rt ? rl_ix_canon(L, rt->result_err) : cc_slice_empty(), sp,
+                                      "'!>' has no @errhandler in scope; write '!> { ... }' or add @errhandler(E e) { ... } above",
+                                      &path);
         CcStmt* on_err = lw_block(L, sp);
-        if (!h) {
-            CCString m = @string(`'!>' has no @errhandler in scope; write '!> { ... }' or add @errhandler(E e) { ... } above`, L->arena);
-            lw_error(L, sp, m);
-            return NULL;
-        }
+        CcExpr* err;
+        if (!h) return NULL;
+        err = rl_project(L, rl_r_error(L, sp), &path, sp);
         lw_push(on_err, rl_record_site(L, sp));
-        if (h->hoisted) rl_push_jump(fn, on_err, h, rl_r_error(L, sp), sp);
-        else lw_push(on_err, rl_inline_handler(fn, h, rl_r_error(L, sp), sp));
+        if (h->hoisted) rl_push_jump(fn, on_err, h, err, sp);
+        else lw_push(on_err, rl_inline_handler(fn, h, err, sp));
         lw_push(blk, lw_if(L, lw_not(L, rl_r_ok(L, sp), sp), on_err, NULL, sp));
         if (target && !value_is_void) lw_push(blk, lw_expr_stmt(L, lw_assign(L, target, rl_r_value(L, sp), sp), sp));
         return blk;
     }
     if (form == 2) {
         CcStmt* on_err = lw_block(L, sp);
+        if (target && !value_is_void && (!body || !rl_diverges(L, body))) {
+            /* the target would be left unassigned past the body */
+            CCString m = @string(`expression-position '!>' body must diverge (return, goto, @err, or a call that does not return)`, L->arena);
+            lw_error(L, sp, m);
+            return NULL;
+        }
         if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_typeof_error(L, sp), binder, rl_r_error(L, sp), sp));
         if (body) {
             CcStmt* lowered = rl_body(fn, body);
@@ -468,6 +593,7 @@ static bool rl_expr_stmt_unwrap(RFn* fn, CcStmt* s, CcExpr* e, CcStmtList* out) 
 }
 
 static void rl_stmts(RFn* fn, CcStmtList* list) {
+    bool after_err_fwd = false;
     CcLowerer* L = fn->L;
     CcStmtList out = vec_new::[CcStmtRef](L->arena);
     size_t n = list->len();
@@ -482,6 +608,12 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
         CcStmt* s = *list->get_ptr(i);
         bool handled = false;
         CcStmt* pushed = NULL;
+        size_t before = out.len();
+        if (after_err_fwd) {
+            CCString m = @string(`unreachable code after '@err(e);'`, L->arena);
+            lw_error(L, s->span, m);
+            after_err_fwd = false;
+        }
         @switch (s->k) {
             case .errhandler(eh): rl_register_handler(fn, &eh, s->span); handled = true; break;
             case .decl(ds): handled = rl_decl_unwrap(fn, s, ds.d, &out); break;
@@ -492,11 +624,11 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
                 break;
             }
             case .err_fwd(ef): {
-                RHandler* h = rl_pick_handler(fn, cc_slice_empty());
+                CcNameList path;
+                RHandler* h = rl_pick_handler(fn, cc_slice_empty(), s->span, "'@err' has no @errhandler in scope", &path);
                 CcStmt* blk = lw_block(L, s->span);
                 if (!h) {
-                    CCString m = @string(`'@err' has no @errhandler in scope`, L->arena);
-                    lw_error(L, s->span, m);
+                    /* diagnosed by the lookup */
                 } else if (!h->hoisted) {
                     CCString m = @string(`'@err' needs an @errhandler whose body returns or exits; this one falls through`, L->arena);
                     lw_error(L, s->span, m);
@@ -505,6 +637,7 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
                     pushed = blk;
                 }
                 handled = true;
+                after_err_fwd = true;
                 break;
             }
             default: break;
@@ -513,6 +646,14 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
         if (!handled) {
             CcStmt* rs = rl_stmt(fn, s);
             out.push(rs);
+        }
+        {
+            size_t after = out.len();
+            size_t k;
+            for (k = before; k < after; k++) {
+                CcStmt* os = *out.get_ptr(k);
+                rl_hoist_nested(fn, os);
+            }
         }
     }
     fn->depth--;
@@ -583,6 +724,120 @@ static CcStmt* rl_body(RFn* fn, CcStmt* s) {
     }
     if (single) return rl_stmt_single(fn, s);
     return rl_stmt(fn, s);
+}
+
+/* ---- unwraps in expression position ---------------------------------------- */
+
+/* `f() !>`, `f() !> (e) { diverge }` and `f() ?> v` inside an expression
+ * become a statement expression, `({ __typeof__(f()) __r = f(); ...;
+ * __r.u.value; })`, so the call is evaluated where it stands (arguments,
+ * conditions, loop tests). The node is rewritten in place; the original
+ * unwrap lives on in a copy the scaffold reads. */
+static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
+    CcLowerer* L = fn->L;
+    CcSpan sp = e->span;
+    CcExpr* uw = cc_arena_alloc(L->arena, sizeof(CcExpr), _Alignof(CcExpr));
+    CcExpr* inner = NULL;
+    CCSlice binder = cc_slice_empty();
+    CcStmt* body = NULL;
+    CcExpr* fallback = NULL;
+    int form = 0;
+    CcStmt* blk;
+    CcTypeInfo* rt;
+    bool value_is_void = false;
+    CcStmtExpr se;
+    *uw = *e;
+    @switch (uw->k) {
+        case .unwrap(u): inner = u.a; form = 1; break;
+        case .unwrap_body(ub): inner = ub.a; binder = ub.binder; body = ub.body; form = 2; break;
+        case .unwrap_or(uo): inner = uo.a; binder = uo.binder; fallback = uo.fallback; form = 3; break;
+        case .unwrap_destroy: {
+            CCString m = @string(`'!> @destroy' is not lowered by the clean lowerer yet`, L->arena);
+            lw_error(L, sp, m);
+            return false;
+        }
+        default: return false;
+    }
+    if (!inner) return false;
+    rt = rl_result_of_call(L, inner);
+    if (rt && rt->result_value) value_is_void = CcType_is_void(rt->result_value);
+    blk = lw_block(L, sp);
+    lw_push(blk, lw_decl_stmt(L, rl_typeof(L, inner, sp), rl_lit("__r"), inner, sp));
+    if (form == 1) {
+        CcNameList path;
+        RHandler* h = rl_pick_handler(fn, rt ? rl_ix_canon(L, rt->result_err) : cc_slice_empty(), sp,
+                                      "'!>' has no @errhandler in scope; write '!> { ... }' or add @errhandler(E e) { ... } above",
+                                      &path);
+        CcStmt* on_err = lw_block(L, sp);
+        CcExpr* err;
+        if (!h) return false;
+        err = rl_project(L, rl_r_error(L, sp), &path, sp);
+        lw_push(on_err, rl_record_site(L, sp));
+        if (h->hoisted) rl_push_jump(fn, on_err, h, err, sp);
+        else lw_push(on_err, rl_inline_handler(fn, h, err, sp));
+        lw_push(blk, lw_if(L, lw_not(L, rl_r_ok(L, sp), sp), on_err, NULL, sp));
+    } else if (form == 2) {
+        CcStmt* on_err = lw_block(L, sp);
+        if (!body || !rl_diverges(L, body)) {
+            CCString m = @string(`expression-position '!>' body must diverge (return, goto, @err, or a call that does not return)`, L->arena);
+            lw_error(L, sp, m);
+            return false;
+        }
+        if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_typeof_error(L, sp), binder, rl_r_error(L, sp), sp));
+        {
+            CcStmt* lowered = rl_body(fn, body);
+            lw_push(on_err, lowered);
+        }
+        lw_push(blk, lw_if(L, lw_not(L, rl_r_ok(L, sp), sp), on_err, NULL, sp));
+    } else {
+        if (!fallback) return false;
+        if (value_is_void) {
+            CcStmt* on_err = lw_block(L, sp);
+            if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_typeof_error(L, sp), binder, rl_r_error(L, sp), sp));
+            lw_push(on_err, lw_expr_stmt(L, lw_paren(L, fallback, sp), sp));
+            lw_push(blk, lw_if(L, lw_not(L, rl_r_ok(L, sp), sp), on_err, NULL, sp));
+        } else if (binder.len) {
+            /* __typeof__(__r.u.value) __v; if (__r.ok) __v = __r.u.value; else { E e = __r.u.error; __v = (fallback); } __v; */
+            CcStmt* on_ok = lw_block(L, sp);
+            CcStmt* on_err = lw_block(L, sp);
+            lw_push(blk, lw_decl_stmt(L, rl_typeof(L, rl_r_value(L, sp), sp), rl_lit("__v"), NULL, sp));
+            lw_push(on_ok, lw_expr_stmt(L, lw_assign(L, lw_ident(L, rl_lit("__v"), sp), rl_r_value(L, sp), sp), sp));
+            lw_push(on_err, lw_decl_stmt(L, rl_typeof_error(L, sp), binder, rl_r_error(L, sp), sp));
+            lw_push(on_err, lw_expr_stmt(L, lw_assign(L, lw_ident(L, rl_lit("__v"), sp), lw_paren(L, fallback, sp), sp), sp));
+            lw_push(blk, lw_if(L, rl_r_ok(L, sp), on_ok, on_err, sp));
+            lw_push(blk, lw_expr_stmt(L, lw_ident(L, rl_lit("__v"), sp), sp));
+            se.block = blk;
+            e->k = { .stmt_expr = se };
+            return true;
+        } else {
+            lw_push(blk, lw_expr_stmt(L, lw_ternary(L, rl_r_ok(L, sp), rl_r_value(L, sp), lw_paren(L, fallback, sp), sp), sp));
+            se.block = blk;
+            e->k = { .stmt_expr = se };
+            return true;
+        }
+    }
+    if (!value_is_void) lw_push(blk, lw_expr_stmt(L, rl_r_value(L, sp), sp));
+    se.block = blk;
+    e->k = { .stmt_expr = se };
+    return true;
+}
+
+static bool rl_nested_visit(CcExpr* e, void* env) {
+    RFn* fn = (RFn*)env;
+    if (!rl_is_unwrap(e)) return true;
+    if (!rl_scaffold_expr(fn, e)) return false;
+    return true;   /* into the scaffold: unwraps nested in the call itself */
+}
+
+/* Every unwrap left in the expressions of `s` (its own and, harmlessly
+ * again, those of statements nested in it, which their own list lowered
+ * already) becomes a statement expression under the handlers in scope. */
+static void rl_hoist_nested(RFn* fn, CcStmt* s) {
+    CcVisitor v;
+    memset(&v, 0, sizeof(v));
+    v.expr = rl_nested_visit;
+    v.env = fn;
+    CcStmt_walk(s, v);
 }
 
 /* Any unwrap left inside an expression is a diagnostic. */
