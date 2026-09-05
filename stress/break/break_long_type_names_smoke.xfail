@@ -1,0 +1,1 @@
+typedef names are capped at 127 characters ('typedef name capacity exceeded'); the cap is diagnosed but a 150-character name is legal C

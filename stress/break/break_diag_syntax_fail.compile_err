@@ -1,0 +1,2 @@
+# a plain C syntax error after CC syntax lands on the user's line and column
+break_diag_syntax_fail.ccs:11:5

@@ -1,0 +1,18 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+int main(void) {
+    cc_arena_stack(a, kilobytes(4));
+    CCStdio io = cc_stdio_create(a);
+    int x = 5;
+    int y = 6;
+    CCString s = @string(`first ${x}
+second ${y}
+third line
+fourth line`, a);
+    io.println(s);
+    int bad = 1
+    io.println("after");
+    return 0;
+}

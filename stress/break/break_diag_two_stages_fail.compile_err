@@ -1,0 +1,4 @@
+# every error is reported, not only the first stage's
+break_diag_two_stages_fail.ccs:7:
+break_diag_two_stages_fail.ccs:8:
+nosuchvar2

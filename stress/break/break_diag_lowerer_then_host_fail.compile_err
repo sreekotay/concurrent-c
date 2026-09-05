@@ -1,0 +1,3 @@
+# a lowerer diagnostic does not hide the host compiler's
+CCPrintError
+undecl_after

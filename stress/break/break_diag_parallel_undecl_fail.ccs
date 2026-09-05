@@ -1,0 +1,16 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+int main(void) {
+    cc_arena_stack(a, kilobytes(4));
+    CCStdio io = cc_stdio_create(a);
+    @parallel spawn {
+        @serial {
+            io.println("A");
+            int q = undecl_in_spawn;
+            (void)q;
+        }
+    } !>.wait()!>;
+    return 0;
+}

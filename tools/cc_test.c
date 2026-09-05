@@ -19,6 +19,11 @@ static int file_exists(const char* path) {
     fclose(f);
     return 1;
 }
+static int dir_exists(const char* path) {
+    struct stat st;
+    return path && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+static void test_dir_from_path(const char* path, char* out, size_t cap);
 
 static int ensure_out_dir(void) {
     if (mkdir("out", 0777) == -1) {
@@ -216,21 +221,36 @@ static int run_one_test(const char* stem, const char* input_path, int compile_fa
                         int build_timeout_sec,
                         int run_timeout_sec);
 
+/* `<stem>.xfail` beside a test: the expectation files describe the behaviour
+ * the compiler should have and does not yet. A failing run is reported as
+ * XFAIL and does not count; a passing run is XPASS and counts as a failure
+ * until the sidecar is deleted, so the marker never outlives the bug. */
 static int run_one_test_maybe_profile(const char* stem, const char* input_path,
                                       int compile_fail, int verbose,
                                       const char* out_dir, const char* bin_dir,
                                       int use_cache, int opt_o0,
                                       int build_timeout_sec, int run_timeout_sec) {
-    long long t0;
+    long long t0 = 0;
     int rc;
-    if (!g_cc_test_profile)
-        return run_one_test(stem, input_path, compile_fail, verbose, out_dir,
-                            bin_dir, use_cache, opt_o0, build_timeout_sec,
-                            run_timeout_sec);
-    t0 = now_ms_monotonic();
+    char tdir[512];
+    char xf[640];
+    int xfail;
+    test_dir_from_path(input_path, tdir, sizeof(tdir));
+    snprintf(xf, sizeof(xf), "%s/%s.xfail", tdir, stem);
+    xfail = file_exists(xf);
+    if (g_cc_test_profile) t0 = now_ms_monotonic();
     rc = run_one_test(stem, input_path, compile_fail, verbose, out_dir, bin_dir,
                       use_cache, opt_o0, build_timeout_sec, run_timeout_sec);
-    fprintf(stderr, "[TIME] %s %lldms\n", stem, now_ms_monotonic() - t0);
+    if (g_cc_test_profile)
+        fprintf(stderr, "[TIME] %s %lldms\n", stem, now_ms_monotonic() - t0);
+    if (xfail) {
+        if (rc != 0) {
+            fprintf(stderr, "[XFAIL] %s (expected; see %s)\n", stem, xf);
+            return 0;
+        }
+        fprintf(stderr, "[XPASS] %s: passes now; delete %s\n", stem, xf);
+        return 1;
+    }
     return rc;
 }
 
@@ -322,6 +342,7 @@ static int test_is_heavy(const char* stem, const char* path) {
     if (str_contains(stem, "stress")) return 1;
     if (str_contains(stem, "lostwake")) return 1;
     if (str_contains(stem, "_race")) return 1;
+    if (path && str_contains(path, "stress/break/")) return 0;
     if (path && str_contains(path, "/stress")) return 1;
     return 0;
 }
@@ -1232,6 +1253,9 @@ int main(int argc, char** argv) {
             dstack[dstack_n++] = strdup((p)); \
         } while (0)
         PUSH_DIR("tests");
+        /* stress/break: programs that must compile and run, and diagnostics
+         * that must land on the user's line. Same sidecars as tests/. */
+        if (dir_exists("stress/break")) PUSH_DIR("stress/break");
         while (dstack_n > 0) {
             char* dir = dstack[--dstack_n];
             DIR* d = opendir(dir);

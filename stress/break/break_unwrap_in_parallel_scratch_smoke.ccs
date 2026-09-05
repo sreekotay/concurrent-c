@@ -1,0 +1,26 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+#include <stdio.h>
+/* !> inside a @parallel arm, consuming a call-local @scratch template. */
+static int !>(CCError) measure(CCString s) {
+    if (cc_string_len(&s) == 0) return cc_err(CC_ERR_INVALID_ARG, "empty");
+    return cc_ok((int)cc_string_len(&s));
+}
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    cc_arena_stack(a, kilobytes(4));
+    int left = 0, right = 0;
+    int x = 3;
+    @parallel spawn {
+        @serial {
+            int v = measure(@string(`left ${x}`, @scratch)) !>;
+            left = v;
+        }
+        @serial {
+            int w = measure(@string(`right side ${x}`, @scratch)) !>;
+            right = w;
+        }
+    } !>.wait()!>;
+    printf("left=%d right=%d\n", left, right);
+    return 0;
+}

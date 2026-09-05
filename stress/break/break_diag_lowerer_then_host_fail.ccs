@@ -1,0 +1,10 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    println("hello") !>;
+    int z = undecl_after;
+    return z;
+}

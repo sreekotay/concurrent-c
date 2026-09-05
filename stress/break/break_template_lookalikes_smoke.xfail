@@ -1,0 +1,1 @@
+the @grammar scanner does not skip template literals: '@grammar(rules) Fake {' inside a backtick string is parsed as a grammar declaration
