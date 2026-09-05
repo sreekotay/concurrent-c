@@ -79,15 +79,26 @@ same macro so tool binaries get the bodies, which is why `arena_state.o` is
 filtered out of `libshadow_comptime.a` (`cc/Makefile:212-217`) to avoid an
 ODR clash with `concurrent_c.o`.
 
-**Cache keys.** The emit key folds the source, its `.cch` includes, the
-toolchain id and flags. Two gaps: `shadow_obj_cache_key` folds the *name* of
-a PATH-resolved `cc` but the *bytes* of an absolute one
-(`shadow_build.cch:370-373`), so `CC=cc` does not miss after a compiler
-upgrade; and `shadow_toolchain_content_fp` folds `libshadow_comptime.a` and
-`libtcc.a` by relative path (`:229-231`), so from an application directory
-both fold as absent. `--no-cache` still writes `emit.c` and `tu.o`; it only
-suppresses `emit.key` (`:1334-1339`). Unreadable dependencies drop out of
-the key silently (`cc_main.c:2525, 2670, 2674`).
+**Cache keys.** Six caches, every one keyed by content: the bytes of the
+inputs and the bytes of the toolchain, never an mtime. One helper,
+`cc_toolchain_content_fp()` in `preprocess.c`, folds the running binary,
+`.ccc-bin`, `shadow_lower` and `lower_headers` (found from the repository
+root) and the toolchain version, memoized per process; every key below
+folds it. Same-second, same-size edits are the test
+(`tests/cache_key_same_second_smoke.ccs`).
+
+| Cache | Key |
+|---|---|
+| Lowered local headers (`out/include/**/*.h`, `$TMPDIR/cc-lowered-<uid>/`) | `<h>.key` sidecar: header bytes, owner `.ccs` bytes, every quoted `.cch` it includes transitively, toolchain |
+| Include expansion (`~/.cache/concurrent-c/incexp`) | input bytes, host cc, `.ccc-bin`, repo root, toolchain; deps sidecar holds a content hash per expanded file |
+| Driver TU emit (`out/.cc-build/<build>__<target>__<unit>.meta`) | source bytes, `cc_depends`, transitive `.cch` bytes, `.ccc-bin` and `shadow_lower` bytes, version, flags, env, consts |
+| Driver object (`.obj` meta) | emit key (raw C: source bytes), target, flags, env, host fingerprint, plus the `.d` check |
+| `shadow_lower` emit / object / link (`out/.cc-build/native/<key>/`) | emit: source bytes + toolchain, deps validated by content (`emit.deps.key`); object: emit key + host cc bytes (resolved through PATH) + flags + the emitted C's bytes; link (`bin.key`, `bin.sum`): object bytes, runtime object bytes, link flags, and the binary's own bytes |
+| Comptime hook dylibs (`~/.cache/concurrent-c/comptime-hooks`) | TU bytes, argv, host cc, toolchain |
+
+`--no-cache` still writes `emit.c` and `tu.o`; it only suppresses the keys.
+A dependency that cannot be read folds a sentinel with its path, so a file
+that appears later changes the key.
 
 **The seed bootstrap.** `shadow_lower` is written in Concurrent-C, so a cold
 clone builds it from the committed seed: the Makefile sed-patches the seed

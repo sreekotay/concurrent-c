@@ -15129,6 +15129,88 @@ static void cc__register_included_cch_imports(const char* source_path) {
     free(src);
 }
 
+/* ---- Cache keying ------------------------------------------------------ */
+
+uint64_t cc_fnv1a64_bytes(uint64_t h, const void* data, size_t n) {
+    const unsigned char* p = (const unsigned char*)data;
+    size_t i;
+    for (i = 0; i < n; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static uint64_t cc__key_str(uint64_t h, const char* s) {
+    if (!s) s = "";
+    return cc_fnv1a64_bytes(h, s, strlen(s) + 1);
+}
+
+/* Missing files fold a sentinel with the path, so a file that appears
+ * later changes the key. */
+uint64_t cc_fold_file_content_u64(uint64_t h, const char* path) {
+    FILE* f = path && path[0] ? fopen(path, "rb") : NULL;
+    unsigned char buf[64 * 1024];
+    size_t n;
+    h = cc__key_str(h, path);
+    if (!f) return cc__key_str(h, "\x01<absent>");
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) h = cc_fnv1a64_bytes(h, buf, n);
+    fclose(f);
+    return h;
+}
+
+static int cc__key_self_exe_path(char* out, size_t cap) {
+#if defined(__APPLE__)
+    uint32_t sz = (uint32_t)cap;
+    return _NSGetExecutablePath(out, &sz) == 0 ? 0 : -1;
+#elif defined(__linux__)
+    ssize_t n = readlink("/proc/self/exe", out, cap - 1);
+    if (n <= 0) return -1;
+    out[n] = '\0';
+    return 0;
+#else
+    (void)out; (void)cap;
+    return -1;
+#endif
+}
+
+uint64_t cc_toolchain_content_fp(void) {
+    static uint64_t cached;
+    static int computed;
+    uint64_t h = 1469598103934665603ULL;
+    char self_path[PATH_MAX];
+    char cwd[PATH_MAX];
+    char root[PATH_MAX];
+    char bin[PATH_MAX];
+    const char* ver;
+    if (computed) return cached;
+    h = cc__key_str(h, "\x03toolchain-fp:v1");
+    if (cc__key_self_exe_path(self_path, sizeof(self_path)) == 0)
+        h = cc_fold_file_content_u64(h, self_path);
+    else
+        h = cc__key_str(h, "\x01<self-absent>");
+    root[0] = 0;
+    if (getcwd(cwd, sizeof(cwd)) && cc_path_find_repo_root(cwd, root, sizeof(root)) && root[0]) {
+        snprintf(bin, sizeof(bin), "%s/cc/bin/.ccc-bin", root);
+        if (!cc__key_self_exe_path(self_path, sizeof(self_path)) || strcmp(self_path, bin) != 0)
+            h = cc_fold_file_content_u64(h, bin);
+        snprintf(bin, sizeof(bin), "%s/out/cc/bin/shadow_lower", root);
+        if (strcmp(self_path, bin) != 0)
+            h = cc_fold_file_content_u64(h, bin);
+        snprintf(bin, sizeof(bin), "%s/out/cc/bin/lower_headers", root);
+        if (strcmp(self_path, bin) != 0)
+            h = cc_fold_file_content_u64(h, bin);
+    } else {
+        h = cc__key_str(h, "\x01<no-repo-root>");
+    }
+    ver = getenv("CCC_VERSION");
+    h = cc__key_str(h, "\x03" "ccc_version:");
+    h = cc__key_str(h, ver && ver[0] ? ver : "<unknown>");
+    cached = h;
+    computed = 1;
+    return h;
+}
+
 static int cc__write_file_text(const char* path, const char* buf, size_t len) {
     char tmp[PATH_MAX];
     FILE* f = NULL;
@@ -18616,37 +18698,112 @@ static int cc__lowered_h_is_raw_cch(const char* abs_cch, const char* lowered_h,
     return raw;
 }
 
-/* Strictly-before mtime compare (nsec when available). Second-granular
- * st_mtime treats same-second header edits as fresh and reuses stale `.h`. */
-static int cc__stat_mtime_before(const struct stat* a, const struct stat* b) {
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
-    defined(__NetBSD__)
-    if (a->st_mtimespec.tv_sec != b->st_mtimespec.tv_sec)
-        return a->st_mtimespec.tv_sec < b->st_mtimespec.tv_sec;
-    return a->st_mtimespec.tv_nsec < b->st_mtimespec.tv_nsec;
-#elif defined(__linux__)
-    if (a->st_mtim.tv_sec != b->st_mtim.tv_sec)
-        return a->st_mtim.tv_sec < b->st_mtim.tv_sec;
-    return a->st_mtim.tv_nsec < b->st_mtim.tv_nsec;
-#else
-    return a->st_mtime < b->st_mtime;
-#endif
+
+/* Fold the quoted `.cch` includes of `abs_cch`, recursively, resolved
+ * beside the including file. Each is folded once per key computation. */
+static uint64_t cc__lowered_h_fold_includes(uint64_t h, const char* abs_cch,
+                                            char seen[][PATH_MAX], int* nseen,
+                                            int depth) {
+    char* text = NULL;
+    size_t n = 0;
+    size_t i = 0;
+    char dir[PATH_MAX];
+    int k;
+    if (depth > 32 || !abs_cch) return h;
+    for (k = 0; k < *nseen; k++)
+        if (strcmp(seen[k], abs_cch) == 0) return h;
+    if (*nseen < 256) snprintf(seen[(*nseen)++], PATH_MAX, "%s", abs_cch);
+    if (cc__read_file_text_uncached(abs_cch, &text, &n) != 0 || !text) return h;
+    if (cc__dirname_local(abs_cch, dir, sizeof(dir)) != 0) dir[0] = 0;
+    while (i < n) {
+        size_t ls = i;
+        size_t p;
+        while (i < n && text[i] != '\n') i++;
+        p = ls;
+        while (p < i && (text[p] == ' ' || text[p] == '\t')) p++;
+        if (p < i && text[p] == '#') {
+            p++;
+            while (p < i && (text[p] == ' ' || text[p] == '\t')) p++;
+            if (p + 7 <= i && memcmp(text + p, "include", 7) == 0) {
+                p += 7;
+                while (p < i && (text[p] == ' ' || text[p] == '\t')) p++;
+                if (p < i && text[p] == '"') {
+                    size_t q = p + 1;
+                    while (q < i && text[q] != '"') q++;
+                    if (q < i && q > p + 1) {
+                        char rel[PATH_MAX];
+                        char child[PATH_MAX];
+                        size_t rl = q - (p + 1);
+                        if (rl >= sizeof(rel)) rl = sizeof(rel) - 1;
+                        memcpy(rel, text + p + 1, rl);
+                        rel[rl] = 0;
+                        if (rl > 4 && strcmp(rel + rl - 4, ".cch") == 0) {
+                            if (rel[0] == '/')
+                                snprintf(child, sizeof(child), "%s", rel);
+                            else
+                                snprintf(child, sizeof(child), "%s/%s", dir[0] ? dir : ".", rel);
+                            h = cc_fold_file_content_u64(h, child);
+                            h = cc__lowered_h_fold_includes(h, child, seen, nseen, depth + 1);
+                        }
+                    }
+                }
+            }
+        }
+        if (i < n) i++;
+    }
+    free(text);
+    return h;
+}
+
+/* The key a lowered `.h` was produced under: the header's bytes, its owner
+ * `.ccs` (whose declarations the face lowering reads), every quoted `.cch`
+ * it includes transitively, and the toolchain that lowered it. Stored
+ * beside the `.h` as `<h>.key`; a mismatch re-lowers. */
+static uint64_t cc__lowered_h_key(const char* abs_cch) {
+    static char seen[256][PATH_MAX];
+    int nseen = 0;
+    char own[PATH_MAX];
+    uint64_t h = 1469598103934665603ULL;
+    h = cc__key_str(h, "\x03lowered-h:v1");
+    h = cc_fold_file_content_u64(h, abs_cch);
+    if (cc__cch_owner_ccs_path(abs_cch, own, sizeof(own)))
+        h = cc_fold_file_content_u64(h, own);
+    else
+        h = cc__key_str(h, "\x01<no-owner>");
+    h = cc__lowered_h_fold_includes(h, abs_cch, seen, &nseen, 0);
+    h ^= cc_toolchain_content_fp();
+    return h;
+}
+
+static void cc__lowered_h_key_path(const char* lowered_h, char* out, size_t cap) {
+    snprintf(out, cap, "%s.key", lowered_h);
+}
+
+static int cc__lowered_h_key_write(const char* lowered_h, uint64_t key) {
+    char kp[PATH_MAX];
+    char text[40];
+    cc__lowered_h_key_path(lowered_h, kp, sizeof(kp));
+    snprintf(text, sizeof(text), "%016llx\n", (unsigned long long)key);
+    return cc__write_file_text(kp, text, strlen(text));
 }
 
 static int cc__lowered_h_fresh(const char* abs_cch, const char* lowered_h) {
-    struct stat hs, cs, os;
-    char own[PATH_MAX];
+    struct stat hs, cs;
+    char kp[PATH_MAX];
+    char text[64];
+    FILE* f;
+    unsigned long long stored = 0;
     if (!abs_cch || !lowered_h || stat(lowered_h, &hs) != 0 || hs.st_size == 0)
         return 0;
     if (stat(abs_cch, &cs) != 0) return 0;
-    /* Reuse only when the lowered file is strictly newer than its source. */
-    if (cc__stat_mtime_before(&hs, &cs)) return 0;
-    if (!cc__stat_mtime_before(&cs, &hs)) return 0;
-    if (cc__cch_owner_ccs_path(abs_cch, own, sizeof(own)) &&
-        stat(own, &os) == 0) {
-        if (cc__stat_mtime_before(&hs, &os)) return 0;
-        if (!cc__stat_mtime_before(&os, &hs)) return 0;
-    }
+    cc__lowered_h_key_path(lowered_h, kp, sizeof(kp));
+    f = fopen(kp, "r");
+    if (!f) return 0;
+    text[0] = 0;
+    if (!fgets(text, sizeof(text), f)) { fclose(f); return 0; }
+    fclose(f);
+    if (sscanf(text, "%llx", &stored) != 1) return 0;
+    if ((uint64_t)stored != cc__lowered_h_key(abs_cch)) return 0;
     if (cc__lowered_h_is_raw_cch(abs_cch, lowered_h, hs.st_size, cs.st_size))
         return 0;
     return 1;
@@ -18896,6 +19053,12 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
      * uncompilable. */
     if (cc__write_file_text(lowered_path, lowered, strlen(lowered)) != 0)
         CC__LOWER_GIVE_UP("write");
+    /* The key is computed after the write so the owner .ccs memo and the
+     * include tree reflect what this lowering read. A key that cannot be
+     * written leaves no key, which re-lowers next time: never a stale hit. */
+    if (cc__lowered_h_key_write(lowered_path, cc__lowered_h_key(abs_src)) != 0)
+        fprintf(stderr, "cc: warning: cannot write %s.key; the header will be re-lowered on every build\n",
+                lowered_path);
 #undef CC__LOWER_GIVE_UP
 #undef CC__LOWER_ABANDON_SLOT
     g_lowered_local_headers[lowered_idx].in_progress = 0;
@@ -20556,10 +20719,8 @@ static uint64_t cc__incexp_fold_file_sig(uint64_t h, const char* path) {
         h = cc__incexp_fnv64(path ? path : "", path ? strlen(path) : 0, h);
         return h;
     }
-    h = cc__incexp_fnv64(path, strlen(path), h);
-    h = cc__incexp_fnv64(&st.st_mtime, sizeof(st.st_mtime), h);
-    h = cc__incexp_fnv64(&st.st_size, sizeof(st.st_size), h);
-    return h;
+    /* Bytes, not mtime: two edits in one second must not share a key. */
+    return cc_fold_file_content_u64(h, path);
 }
 
 static uint64_t cc__incexp_disk_key(const char* input_path, const char* repo_root) {
@@ -20576,29 +20737,30 @@ static uint64_t cc__incexp_disk_key(const char* input_path, const char* repo_roo
         h = cc__incexp_fnv64(repo_root, strlen(repo_root), h);
     }
     /* Flag bits that change expand command / grammar splice behavior. */
-    h = cc__incexp_fnv64("|v=3|incexp", 12, h);
+    h = cc__incexp_fnv64("|v=4|incexp", 12, h);
+    {
+        uint64_t tc = cc_toolchain_content_fp();
+        h = cc__incexp_fnv64(&tc, sizeof(tc), h);
+    }
     return h;
 }
 
-/* Verify a deps sidecar: each line is "mtime_sec\tsize\tpath". */
+/* Verify a deps sidecar: each line is "content_hash\tpath". */
 static int cc__incexp_deps_fresh(const char* deps_path) {
     FILE* f = fopen(deps_path, "r");
     char line[2048];
     if (!f) return 0;
     while (fgets(line, sizeof(line), f)) {
-        long long mtime = 0, size = 0;
+        unsigned long long sum = 0;
         char path[1600];
-        struct stat st;
         size_t n = strlen(line);
         while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
         if (n == 0) continue;
-        if (sscanf(line, "%lld\t%lld\t%1599[^\n]", &mtime, &size, path) != 3) {
+        if (sscanf(line, "%llx\t%1599[^\n]", &sum, path) != 2) {
             fclose(f);
             return 0;
         }
-        if (stat(path, &st) != 0 ||
-            (long long)st.st_mtime != mtime ||
-            (long long)st.st_size != size) {
+        if (cc_fold_file_content_u64(1469598103934665603ULL, path) != (uint64_t)sum) {
             fclose(f);
             return 0;
         }
@@ -20699,8 +20861,9 @@ static void cc__incexp_disk_store(const char* cache_dir, uint64_t key,
         for (size_t k = 0; k < path_n; ++k) {
             struct stat st;
             if (!paths[k] || stat(paths[k], &st) != 0) continue;
-            fprintf(df, "%lld\t%lld\t%s\n",
-                    (long long)st.st_mtime, (long long)st.st_size, paths[k]);
+            fprintf(df, "%016llx\t%s\n",
+                    (unsigned long long)cc_fold_file_content_u64(1469598103934665603ULL, paths[k]),
+                    paths[k]);
         }
         fclose(bf); bf = NULL;
         fclose(df); df = NULL;
