@@ -119,6 +119,12 @@ static CcType* rl_type_arg(const CcExpr* e) {
     }
 }
 
+/* A `CC_ERR_*` code: the first operand of the two-argument cc_err form. */
+static bool rl_is_err_code(const CcExpr* e) {
+    CCSlice nm = rl_ident_name(e);
+    return nm.len > 7 && memcmp(nm.ptr, "CC_ERR_", 7) == 0;
+}
+
 static bool rl_is_string(const CcExpr* e) {
     @switch (e->k) {
         case .string: return true;
@@ -151,8 +157,8 @@ static void rl_ctor(RFn* fn, CcExpr* e, bool is_ok, CcExprList args) {
         payload = NULL;   /* cc_ok(void) */
     } else if (n == 1) {
         payload = *args.get_ptr(0);
-    } else if (n == 2 && !is_ok && rl_is_string(*args.get_ptr(1))) {
-        /* cc_err(CC_ERR_X, "msg") → cc_err_SPEC(CC_ERROR(CC_ERR_X, "msg")) */
+    } else if (n == 2 && !is_ok && (rl_is_string(*args.get_ptr(1)) || rl_is_err_code(*args.get_ptr(0)))) {
+        /* cc_err(CC_ERR_X, msg) → cc_err_SPEC(CC_ERROR(CC_ERR_X, msg)) */
         payload = lw_call2(L, rl_lit("CC_ERROR"), *args.get_ptr(0), *args.get_ptr(1), e->span);
     } else if (n == 0 && is_ok) {
         payload = NULL;

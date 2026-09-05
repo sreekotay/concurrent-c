@@ -33,6 +33,12 @@ typedef struct Walker {
     /* called at every UFCS call site with the receiver's type (NULL when
      * unknown) and the resolution (NULL with `reason` when none) */
     void (*on_ufcs)(struct Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice type_name, CCSlice reason);
+    /* called on entering (enter true) and leaving every statement, with
+     * the scope of the statements before it; a step that rewrites the
+     * statement does so on entry, before the walk reads it */
+    void (*on_stmt)(struct Walker* w, CcStmt* s, bool enter);
+    /* called at every file-scope declaration before it is walked */
+    void (*on_decl)(struct Walker* w, CcDecl* d);
     void* env;
 } Walker;
 
@@ -906,7 +912,9 @@ static void tw_block_stmts(Walker* w, CcStmtList stmts) {
         CcStmt* t = *stmts.get_ptr(i);
         CcDecl* d;
         if (stmt_is_decl(t, &d)) {
+            if (w->on_stmt) w->on_stmt(w, t, true);
             tw_decl_local(w, d);
+            if (w->on_stmt) w->on_stmt(w, t, false);
         } else {
             /* bindings that outlive the statement: a macro's declarations,
              * `CCParallel h = at-parallel {...}` */
@@ -949,6 +957,7 @@ static void tw_arms(Walker* w, Vec::[CcParallelArm] arms) {
 static void tw_stmt(Walker* w, CcStmt* s) {
     StmtView v;
     if (!s) return;
+    if (w->on_stmt) w->on_stmt(w, s, true);
     view_stmt(&v, s);
     sc_push(w);
     if (v.dcl) tw_decl_local(w, v.dcl);
@@ -974,6 +983,7 @@ static void tw_stmt(Walker* w, CcStmt* s) {
     if (v.has_else) tw_stmt_list_scoped(w, v.else_stmts);
     tw_stmt(w, v.else_body);
     tw_expr(w, v.par_tail);
+    if (w->on_stmt) w->on_stmt(w, s, false);
     sc_pop(w);
 }
 
@@ -1017,6 +1027,7 @@ static void tw_unit(Walker* w) {
     size_t n = declv->len();
     for (i = 0; i < n; i++) {
         CcDecl* d = *declv->get_ptr(i);
+        if (w->on_decl) w->on_decl(w, d);
         @switch (d->k) {
             case .func(f): tw_func_decl(w, f); break;
             case .comptime_fn(cf): tw_func_decl(w, cf.fn); break;

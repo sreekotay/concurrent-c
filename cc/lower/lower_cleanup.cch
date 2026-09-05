@@ -222,8 +222,10 @@ static CCSlice cl_base_canon(CcLowerer* L, CcType* t) {
 
 /* The destroy chain of `subject` (an lvalue of type `canon`): the type's own
  * hook on its address, then, last member first, the chain of every value
- * member whose type has one, recursively. Returns how many calls it added. */
-static int cl_destroy_chain(CcLowerer* L, CCSlice canon, CcExpr* subject, CcStmt* into, CcSpan sp, int depth) {
+ * member whose type has one, recursively. Returns how many calls it added.
+ * `convention` admits a visible `Type_destroy(Type*)` as a hook; a variant
+ * drop helper counts registered hooks only. */
+static int cl_destroy_chain2(CcLowerer* L, CCSlice canon, CcExpr* subject, CcStmt* into, CcSpan sp, int depth, bool convention) {
     CcIndex* ix = L->ix;
     CcTypeInfo* ti = canon.len ? ix->type_get(canon) : NULL;
     CcRecordType st;
@@ -235,7 +237,7 @@ static int cl_destroy_chain(CcLowerer* L, CCSlice canon, CcExpr* subject, CcStmt
     if (ti && ti->destroy_fn.len) {
         lw_push(into, lw_expr_stmt(L, lw_call1(L, ti->destroy_fn, cl_addr(L, subject, sp), sp), sp));
         n++;
-    } else if (canon.len) {
+    } else if (canon.len && convention) {
         /* the naming convention: a visible `Type_destroy(Type*)` is the hook */
         CCString conv = @string(`${canon}_destroy`, L->arena);
         CCSlice fname = lw_keep(L, &conv);
@@ -255,9 +257,14 @@ static int cl_destroy_chain(CcLowerer* L, CCSlice canon, CcExpr* subject, CcStmt
         if (!f->name.len || !f->type || f->is_pp) continue;
         if (f->type->k.kind == CcTypeK_pointer || f->type->k.kind == CcTypeK_array) continue;
         fty = cl_base_canon(L, f->type);
-        n += cl_destroy_chain(L, fty, lw_member_s(L, subject, f->name, sp), into, sp, depth + 1);
+        n += cl_destroy_chain2(L, fty, lw_member_s(L, subject, f->name, sp), into, sp, depth + 1, convention);
     }
     return n;
+}
+
+/* The chain with the naming convention: what `@destroy` and `x.destroy()` run. */
+static int cl_destroy_chain(CcLowerer* L, CCSlice canon, CcExpr* subject, CcStmt* into, CcSpan sp, int depth) {
+    return cl_destroy_chain2(L, canon, subject, into, sp, depth, true);
 }
 
 /* `pre(&x);` when the type registers a pre-destroy phase. */
