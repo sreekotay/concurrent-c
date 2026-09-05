@@ -280,3 +280,22 @@ differential report.
 
 M0 and M1 carry no risk to the shipping compiler and are where work
 starts.
+
+## 6. Working with the branch
+
+- `make -C cc` builds the C11 reference tools (`cclex`, `ccparse`,
+  `cclower`, `ccindex`); `make -C cc lower-cc` builds the Concurrent-C ones
+  (`cclex_cc`, `ccparse_cc`, `cclower_cc`) with the current compiler.
+- Gates, each byte-for-byte against the reference over the corpus
+  (`tests examples cc/include stress real_projects`): `cclex_cc --roundtrip`
+  and `--dump`; `ccparse_cc --check` and `--dump` with
+  `--known-types` from `ccparse_cc --collect-types` over `cc/include`;
+  `cclower_cc --identity` and `--print` (the C and the `.map`).
+- `ccc --lowerer=clean FILE` (or `CC_LOWERER=clean`) lowers through
+  `cclower_cc` into `out/.cc-build/clean/` and finishes in the driver's
+  raw-C path; `scripts/lowerer_diff.sh [--filter S]` runs `cc_test` on
+  both lowerers and prints the pass/fail matrix. The pass-on-shadow,
+  fail-on-clean rows are the work list of the current milestone.
+- Every shape the current compiler refuses in the lowerer's own sources is
+  a `stress/break` entry with an `.xfail`; the port avoids it until the
+  clean lowerer lands the fix, then the marker goes.
