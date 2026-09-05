@@ -18,6 +18,7 @@ typedef struct CcLowerOpts {
     bool line_directives;       /* #pragma(@linenumbers) */
     bool parallel_off;          /* #pragma(@parallel) off */
     bool per_tu;                /* #pragma(@per_tu) */
+    bool strict_unhandled;      /* a bare call to a Result function is an error (CC_STRICT_RESULT_UNWRAP, default on) */
 } CcLowerOpts;
 
 typedef struct CcLowerer {

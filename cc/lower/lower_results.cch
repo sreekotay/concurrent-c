@@ -19,6 +19,7 @@ typedef struct RHandler {
     CcStmt* body;
     bool hoisted;
     size_t depth;
+    CcSpan span;                /* the `@errhandler` statement */
 } RHandler;
 typedef RHandler* RHandlerRef;              /* a Vec of the struct itself would hoist the struct above the prelude */
 typedef Vec::[RHandlerRef] RHandlerList;
@@ -32,6 +33,8 @@ typedef struct RFn {
     RHandlerList hoisted;
     size_t depth;
     bool nested_unwrap;         /* a `!>` in expression position was seen */
+    RHandler* defining;         /* the handler whose body is being lowered, or NULL */
+    CcNameList binders;         /* error binders in scope (`!> (e) {`, `@errhandler(E e)`), innermost last */
 } RFn;
 
 static CCSlice rl_lit(const char* s) { return cc_slice_from_buffer((char*)s, strlen(s)); }
@@ -238,9 +241,18 @@ static void rl_register_handler(RFn* fn, const CcErrhandler* eh, CcSpan sp) {
     h->binder = eh->binder;
     h->hoisted = rl_diverges(L, eh->body);
     h->depth = fn->depth;
-    (void)sp;
+    h->span = sp;
     /* the body's own unwraps and `@err`s see the handlers above this one */
-    h->body = rl_body(fn, eh->body);
+    {
+        RHandler* outer = fn->defining;
+        CcNameList* bs = &fn->binders;
+        size_t nb = bs->len();
+        fn->defining = h;
+        if (h->binder.len) bs->push(h->binder);
+        h->body = rl_body(fn, eh->body);
+        bs->truncate(nb);
+        fn->defining = outer;
+    }
     hs->push(h);
     if (h->hoisted) {
         RHandlerList* ho = &fn->hoisted;
@@ -249,6 +261,22 @@ static void rl_register_handler(RFn* fn, const CcErrhandler* eh, CcSpan sp) {
 }
 
 /* ---- handler lookup ------------------------------------------------------- */
+
+static CCSlice rl_call_name(const CcExpr* e);
+static CCString rl_spec_arg(CcLowerer* L, CcType* t);
+
+/* "@" a "@" b: messages that name `@err` / `@errhandler` are assembled, so
+ * no `@word` sits in a literal for the current engine to trip on. */
+static CCString rl_at2(CcLowerer* L, const char* a, const char* b) {
+    CCString m = cc_string_new();
+    cc_string_push_cstr(&m, "@", L->arena);
+    cc_string_push_cstr(&m, a, L->arena);
+    if (b) {
+        cc_string_push_cstr(&m, "@", L->arena);
+        cc_string_push_cstr(&m, b, L->arena);
+    }
+    return m;
+}
 
 /* The `as:` walk from error type `from` to `to`: the face fields to read,
  * innermost face first. A face whose type is `to` ends the walk; another
@@ -312,7 +340,8 @@ static bool rl_as_search(CcLowerer* L, CCSlice from, CCSlice to, CcNameList* pat
  * through the error type's `as:` faces: exactly one handler type may be
  * reachable, and `*path` receives the faces to read. NULL after the
  * diagnostic (`bare` when no handler is in scope at all). */
-static RHandler* rl_pick_handler(RFn* fn, CCSlice err_canon, CcSpan sp, const char* bare, CcNameList* path) {
+static RHandler* rl_pick_handler(RFn* fn, CCSlice err_canon, CcSpan sp, CCSlice bare, CcNameList* path,
+                                 const CcExpr* inner, CcTypeInfo* rt) {
     CcLowerer* L = fn->L;
     RHandlerList* hs = &fn->handlers;
     size_t n = hs->len();
@@ -322,6 +351,19 @@ static RHandler* rl_pick_handler(RFn* fn, CCSlice err_canon, CcSpan sp, const ch
     bool ambiguous = false;
     bool saw_cycle = false;
     *path = vec_new::[CCSlice](L->arena);
+    if (fn->defining && (!err_canon.len || cc_slice_eq(&fn->defining->err_canon, err_canon))) {
+        bool shadowed = false;
+        /* a nearer handler of that type inside the body takes it instead */
+        for (i = n; i > 0; i--) {
+            RHandler* h = *hs->get_ptr(i - 1);
+            if (h->depth > fn->defining->depth && (!err_canon.len || cc_slice_eq(&h->err_canon, err_canon))) shadowed = true;
+        }
+        if (!shadowed) {
+            CCString m = @string(`bare '!>;' inside matching '@errhandler' would re-enter it; handle the Result here with '!> (e) { ... }' or '?>'`, L->arena);
+            lw_error(L, sp, m);
+            return NULL;
+        }
+    }
     if (!n) {
         CCString m = @string(`${bare}`, L->arena);
         lw_error(L, sp, m);
@@ -360,10 +402,74 @@ static RHandler* rl_pick_handler(RFn* fn, CCSlice err_canon, CcSpan sp, const ch
         return NULL;
     }
     {
+        /* `'f' is 'int !>(CCError)'; in-scope '@errhandler' is 'OtherErr'` */
         CCString m = @string(`no matching '@errhandler' for error type '${err_canon}'`, L->arena);
+        CCString scope = cc_string_new();
+        for (i = 0; i < n; i++) {
+            RHandler* h = *hs->get_ptr(i);
+            if (i) cc_string_push_cstr(&scope, ", ", L->arena);
+            cc_string_push_slice(&scope, h->err_canon, L->arena);
+        }
+        if (inner && rt && rt->result_value) {
+            CCSlice callee = rl_call_name(inner);
+            CCString ret = rl_spec_arg(L, rt->result_value);
+            CCString detail = @string(`: '${callee}' is '${ret} !>(${err_canon})'; in-scope '@errhandler' is '${scope}'`, L->arena);
+            cc_string_push_slice(&m, detail.as_slice(), L->arena);
+        } else {
+            CCString detail = @string(`; in-scope '@errhandler' is '${scope}'`, L->arena);
+            cc_string_push_slice(&m, detail.as_slice(), L->arena);
+        }
         lw_error(L, sp, m);
     }
     return NULL;
+}
+
+/* The name a call spells, for messages: `f` in `f(x)`; empty otherwise. */
+static CCSlice rl_call_name(const CcExpr* e) {
+    if (!e) return cc_slice_empty();
+    @switch (e->k) {
+        case .call(c): return c.callee ? rl_ident_name(c.callee) : cc_slice_empty();
+        default: return cc_slice_empty();
+    }
+}
+
+/* `!>` on something that is not a call to a Result function: said at the
+ * operator, not left for the host compiler. */
+static bool rl_check_unwrap_operand(CcLowerer* L, const CcExpr* inner, CcTypeInfo* rt, CcSpan sp) {
+    CCSlice callee;
+    if (rt) return true;
+    callee = rl_call_name(inner);
+    if (callee.len) {
+        CcSym* sym = rl_ix_sym(L, callee);
+        if (!sym) {
+            CCString m = @string(`type: '!>' on '${callee}': no visible declaration`, L->arena);
+            lw_error(L, sp, m);
+            return false;
+        }
+        if (sym->kind == CC_SYM_FUNC) {
+            CCString m = @string(`'!>' on '${callee}': it does not return a Result ('!>' needs a 'T !>(E)' call on its left)`, L->arena);
+            lw_error(L, sp, m);
+            return false;
+        }
+        return true;   /* a macro or a variable: the host decides */
+    }
+    {
+        bool is_name = false;
+        @switch (inner->k) {
+            case .ident: is_name = true; break;
+            case .number: is_name = true; break;
+            case .string: is_name = true; break;
+            case .chr: is_name = true; break;
+            default: break;
+        }
+        if (is_name) {
+            /* a plain variable or literal: nothing to unwrap */
+            CCString m = @string(`'!>' needs a Result on its left: a call to a 'T !>(E)' function`, L->arena);
+            lw_error(L, sp, m);
+            return false;
+        }
+    }
+    return true;   /* a method call, a conditional, a parenthesized call: the host types `__typeof__` */
 }
 
 /* `<err>` read through the faces of an `as:` path. */
@@ -466,18 +572,25 @@ static CcStmt* rl_scaffold(RFn* fn, CcExpr* uw, CcExpr* target, CcSpan sp) {
     }
     if (!inner) return NULL;
     rt = rl_result_of_call(L, inner);
+    if (!rl_check_unwrap_operand(L, inner, rt, sp)) return NULL;
     if (rt && rt->result_value) value_is_void = CcType_is_void(rt->result_value);
     blk = lw_block(L, sp);
     /* __typeof__(inner) __r = inner; */
     lw_push(blk, lw_decl_stmt(L, rl_typeof(L, inner, sp), rl_lit("__r"), inner, sp));
     if (form == 1) {
         CcNameList path;
-        RHandler* h = rl_pick_handler(fn, rt ? rl_ix_canon(L, rt->result_err) : cc_slice_empty(), sp,
-                                      "'!>' has no @errhandler in scope; write '!> { ... }' or add @errhandler(E e) { ... } above",
-                                      &path);
+        CCString bare_value = @string(`'!>;' at expression position requires an enclosing '${"@"}errhandler' in scope`, L->arena);
+        CCString bare_stmt = rl_at2(L, "err with no local handler requires ", "errhandler: a bare unwrap statement forwards the error to one");
+        CCSlice bare = target ? bare_value.as_slice() : bare_stmt.as_slice();
+        RHandler* h = rl_pick_handler(fn, rt ? rl_ix_canon(L, rt->result_err) : cc_slice_empty(), sp, bare, &path, inner, rt);
         CcStmt* on_err = lw_block(L, sp);
         CcExpr* err;
         if (!h) return NULL;
+        if (target && !value_is_void && !h->hoisted) {
+            CCString m = rl_at2(L, "errhandler body must visibly diverge when used as an expression-position '!>;' delegate", NULL);
+            lw_error(L, h->span, m);
+            return NULL;
+        }
         err = rl_project(L, rl_r_error(L, sp), &path, sp);
         lw_push(on_err, rl_record_site(L, sp));
         if (h->hoisted) rl_push_jump(fn, on_err, h, err, sp);
@@ -490,13 +603,18 @@ static CcStmt* rl_scaffold(RFn* fn, CcExpr* uw, CcExpr* target, CcSpan sp) {
         CcStmt* on_err = lw_block(L, sp);
         if (target && !value_is_void && (!body || !rl_diverges(L, body))) {
             /* the target would be left unassigned past the body */
-            CCString m = @string(`expression-position '!>' body must diverge (return, goto, @err, or a call that does not return)`, L->arena);
+            CCString m = @string(`expression-position '!>' body must diverge (return, goto, ${"@"}err, or a call that does not return)`, L->arena);
             lw_error(L, sp, m);
             return NULL;
         }
         if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_typeof_error(L, sp), binder, rl_r_error(L, sp), sp));
         if (body) {
-            CcStmt* lowered = rl_body(fn, body);
+            CcNameList* bs = &fn->binders;
+            size_t nb = bs->len();
+            CcStmt* lowered;
+            if (binder.len) bs->push(binder);
+            lowered = rl_body(fn, body);
+            bs->truncate(nb);
             lw_push(on_err, lowered);
         }
         lw_push(blk, lw_if(L, lw_not(L, rl_r_ok(L, sp), sp), on_err, NULL, sp));
@@ -610,14 +728,21 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
         CcStmt* pushed = NULL;
         size_t before = out.len();
         if (after_err_fwd) {
-            CCString m = @string(`unreachable code after '@err(e);'`, L->arena);
+            CCString m = @string(`unreachable code after '${"@"}err(e);'`, L->arena);
             lw_error(L, s->span, m);
             after_err_fwd = false;
         }
         @switch (s->k) {
             case .errhandler(eh): rl_register_handler(fn, &eh, s->span); handled = true; break;
             case .decl(ds): handled = rl_decl_unwrap(fn, s, ds.d, &out); break;
-            case .expr(es): handled = rl_expr_stmt_unwrap(fn, s, es.e, &out); break;
+            case .expr(es):
+                handled = rl_expr_stmt_unwrap(fn, s, es.e, &out);
+                if (!handled && L->opts.strict_unhandled && es.e && rl_result_of_call(L, es.e)) {
+                    CCSlice callee = rl_call_name(es.e);
+                    CCString m = @string(`unhandled-result: call to '${callee}' returns a result-typed value; consume with '?>', '!>', '${"@"}err', assign to a result-typed destination, 'return', or cast to '(void)' to explicitly discard`, L->arena);
+                    lw_error(L, s->span, m);
+                }
+                break;
             case .unwrap(us): {
                 pushed = rl_scaffold(fn, us.e, NULL, s->span);
                 handled = true;
@@ -625,13 +750,36 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
             }
             case .err_fwd(ef): {
                 CcNameList path;
-                RHandler* h = rl_pick_handler(fn, cc_slice_empty(), s->span, "'@err' has no @errhandler in scope", &path);
+                RHandler* h = NULL;
                 CcStmt* blk = lw_block(L, s->span);
+                CCSlice nm = ef.err ? rl_ident_name(ef.err) : cc_slice_empty();
+                bool bound = !nm.len;
+                if (nm.len) {
+                    CcNameList* bs = &fn->binders;
+                    size_t nb = bs->len();
+                    size_t bi;
+                    for (bi = 0; bi < nb; bi++) {
+                        CCSlice b = *bs->get_ptr(bi);
+                        if (cc_slice_eq(&b, nm)) bound = true;
+                    }
+                    if (!bound) {
+                        CcNameList* bsl = &fn->binders;
+                        size_t nbl = bsl->len();
+                        CCSlice want = nbl ? *bsl->get_ptr(nbl - 1) : rl_lit("none in scope");
+                        CCString m = @string(`${"@"}err(${nm}) forward references unknown binder '${nm}' (expected '${want}')`, L->arena);
+                        lw_error(L, s->span, m);
+                    }
+                }
+                if (bound) {
+                    CCString bare_fwd = rl_at2(L, "err with no local handler requires ", "errhandler");
+                    CCSlice bare = bare_fwd.as_slice();
+                    h = rl_pick_handler(fn, cc_slice_empty(), s->span, bare, &path, NULL, NULL);
+                }
                 if (!h) {
-                    /* diagnosed by the lookup */
+                    /* diagnosed above or by the lookup */
                 } else if (!h->hoisted) {
-                    CCString m = @string(`'@err' needs an @errhandler whose body returns or exits; this one falls through`, L->arena);
-                    lw_error(L, s->span, m);
+                    CCString m = rl_at2(L, "errhandler body must visibly diverge (end with return/break/continue/goto, ", "err(e);, or a call to exit/abort/longjmp/etc.)");
+                    lw_error(L, h->span, m);
                 } else {
                     rl_push_jump(fn, blk, h, lw_paren(L, ef.err, s->span), s->span);
                     pushed = blk;
@@ -760,17 +908,23 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
     }
     if (!inner) return false;
     rt = rl_result_of_call(L, inner);
+    if (!rl_check_unwrap_operand(L, inner, rt, sp)) return false;
     if (rt && rt->result_value) value_is_void = CcType_is_void(rt->result_value);
     blk = lw_block(L, sp);
     lw_push(blk, lw_decl_stmt(L, rl_typeof(L, inner, sp), rl_lit("__r"), inner, sp));
     if (form == 1) {
         CcNameList path;
-        RHandler* h = rl_pick_handler(fn, rt ? rl_ix_canon(L, rt->result_err) : cc_slice_empty(), sp,
-                                      "'!>' has no @errhandler in scope; write '!> { ... }' or add @errhandler(E e) { ... } above",
-                                      &path);
+        CCString bare_value = @string(`'!>;' at expression position requires an enclosing '${"@"}errhandler' in scope`, L->arena);
+        CCSlice bare = bare_value.as_slice();
+        RHandler* h = rl_pick_handler(fn, rt ? rl_ix_canon(L, rt->result_err) : cc_slice_empty(), sp, bare, &path, inner, rt);
         CcStmt* on_err = lw_block(L, sp);
         CcExpr* err;
         if (!h) return false;
+        if (!value_is_void && !h->hoisted) {
+            CCString m = rl_at2(L, "errhandler body must visibly diverge when used as an expression-position '!>;' delegate", NULL);
+            lw_error(L, h->span, m);
+            return false;
+        }
         err = rl_project(L, rl_r_error(L, sp), &path, sp);
         lw_push(on_err, rl_record_site(L, sp));
         if (h->hoisted) rl_push_jump(fn, on_err, h, err, sp);
@@ -779,13 +933,18 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
     } else if (form == 2) {
         CcStmt* on_err = lw_block(L, sp);
         if (!body || !rl_diverges(L, body)) {
-            CCString m = @string(`expression-position '!>' body must diverge (return, goto, @err, or a call that does not return)`, L->arena);
+            CCString m = @string(`expression-position '!>' body must diverge (return, goto, ${"@"}err, or a call that does not return)`, L->arena);
             lw_error(L, sp, m);
             return false;
         }
         if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_typeof_error(L, sp), binder, rl_r_error(L, sp), sp));
         {
-            CcStmt* lowered = rl_body(fn, body);
+            CcNameList* bs = &fn->binders;
+            size_t nb = bs->len();
+            CcStmt* lowered;
+            if (binder.len) bs->push(binder);
+            lowered = rl_body(fn, body);
+            bs->truncate(nb);
             lw_push(on_err, lowered);
         }
         lw_push(blk, lw_if(L, lw_not(L, rl_r_ok(L, sp), sp), on_err, NULL, sp));
@@ -863,6 +1022,7 @@ static void rl_function(CcLowerer* L, CcDecl* d, CcFuncDecl* f) {
     fn.ret = rl_ret_result(L, f->type);
     fn.handlers = vec_new::[RHandlerRef](L->arena);
     fn.hoisted = vec_new::[RHandlerRef](L->arena);
+    fn.binders = vec_new::[CCSlice](L->arena);
     /* 1. cc_ok / cc_err */
     memset(&v, 0, sizeof(v));
     v.expr = rl_ctor_visit;
