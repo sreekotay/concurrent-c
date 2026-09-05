@@ -240,9 +240,16 @@ LOWER_LIB := $(OBJDIR)/liblower.a
 LOWER_CFLAGS := -std=c11 -Wall -Wextra -Werror -O2 -g
 CCLEX_OBJ := $(OBJDIR)/lower/lex_test.o
 CCLEX_BINARY := $(OUT_BINDIR)/cclex
-LOWER_DEPS := $(LOWER_OBJS:.o=.d) $(CCLEX_OBJ:.o=.d)
+CCPARSE_OBJ := $(OBJDIR)/lower/parse_test.o
+CCPARSE_BINARY := $(OUT_BINDIR)/ccparse
+CCLOWER_OBJ := $(OBJDIR)/lower/print_test.o
+CCLOWER_BINARY := $(OUT_BINDIR)/cclower
+CCINDEX_OBJ := $(OBJDIR)/lower/index_test.o
+CCINDEX_BINARY := $(OUT_BINDIR)/ccindex
+LOWER_TOOLS := $(CCLEX_BINARY) $(CCPARSE_BINARY) $(CCLOWER_BINARY) $(CCINDEX_BINARY)
+LOWER_DEPS := $(LOWER_OBJS:.o=.d) $(CCLEX_OBJ:.o=.d) $(CCPARSE_OBJ:.o=.d) $(CCLOWER_OBJ:.o=.d) $(CCINDEX_OBJ:.o=.d)
 
-all: $(CCC_SCRIPT) $(WRAPPER) $(SHADOW_LOWER_WRAPPER) $(RUNTIME_DYLIB) $(LOWER_HEADERS_STAMP) $(LOWER_LIB) $(CCLEX_BINARY)
+all: $(CCC_SCRIPT) $(WRAPPER) $(SHADOW_LOWER_WRAPPER) $(RUNTIME_DYLIB) $(LOWER_HEADERS_STAMP) $(LOWER_LIB) $(LOWER_TOOLS)
 
 # Patched-TCC guard: a fresh clone (or a changed patch set) gets the CC
 # hooks applied into the submodule working tree BEFORE any CC object that
@@ -447,9 +454,21 @@ $(LOWER_LIB): $(LOWER_OBJS)
 $(CCLEX_BINARY): $(CCLEX_OBJ) $(LOWER_LIB)
 	@mkdir -p $(dir $@)
 	$(CC) $(LOWER_CFLAGS) -o $@ $(CCLEX_OBJ) $(LOWER_LIB)
-.PHONY: lower cclex
+$(CCPARSE_BINARY): $(CCPARSE_OBJ) $(LOWER_LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(LOWER_CFLAGS) -o $@ $(CCPARSE_OBJ) $(LOWER_LIB)
+$(CCLOWER_BINARY): $(CCLOWER_OBJ) $(LOWER_LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(LOWER_CFLAGS) -o $@ $(CCLOWER_OBJ) $(LOWER_LIB)
+$(CCINDEX_BINARY): $(CCINDEX_OBJ) $(LOWER_LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(LOWER_CFLAGS) -o $@ $(CCINDEX_OBJ) $(LOWER_LIB)
+.PHONY: lower cclex ccparse cclower ccindex
 lower: $(LOWER_LIB)
 cclex: $(CCLEX_BINARY)
+ccparse: $(CCPARSE_BINARY)
+cclower: $(CCLOWER_BINARY)
+ccindex: $(CCINDEX_BINARY)
 
 # shadow_lower self-build:
 #   SHADOW_LOWER_SOURCE=bootstrap (default) — host-cc last-good snapshot
@@ -666,7 +685,7 @@ clean-cache:
 	rm -rf $(CURDIR)/../out/ccc-cache
 
 clean:
-	rm -f $(WRAPPER) $(REAL_BINARY) $(LOWER_HEADERS_BINARY) $(CCLEX_BINARY)
+	rm -f $(WRAPPER) $(REAL_BINARY) $(LOWER_HEADERS_BINARY) $(LOWER_TOOLS)
 	rm -rf $(OBJDIR)
 	rm -rf $(OUT_INCLUDE)
 	rm -rf $(OUT_RUNTIME)
