@@ -1,0 +1,91 @@
+/* Every cache keys by content. Two edits of the same size inside one
+ * second must each produce a fresh result: the lowered header, the include
+ * expansion, the emitted C, the object and the linked binary all miss.
+ * Runs `cc/bin/ccc` from the repository root, like c_pp_shadow_emit_smoke. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static int write_text(const char* path, const char* text) {
+    FILE* f = fopen(path, "w");
+    if (!f) return -1;
+    fputs(text, f);
+    return fclose(f);
+}
+
+static int last_int(const char* path) {
+    FILE* f = fopen(path, "r");
+    char line[256];
+    char last[256];
+    last[0] = 0;
+    if (!f) return -1;
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] != '\n') snprintf(last, sizeof(last), "%s", line);
+    }
+    fclose(f);
+    return last[0] ? atoi(last) : -1;
+}
+
+static int run_ccc(const char* dir, const char* stem) {
+    char cmd[1024];
+    char out[512];
+    snprintf(out, sizeof(out), "%s/%s.out", dir, stem);
+    snprintf(cmd, sizeof(cmd), "cc/bin/ccc run %s/%s.ccs > %s 2>&1", dir, stem, out);
+    if (system(cmd) != 0) {
+        char show[1024];
+        int rc;
+        snprintf(show, sizeof(show), "cat %s", out);
+        rc = system(show);
+        (void)rc;
+        return -1;
+    }
+    return last_int(out);
+}
+
+int main(void) {
+    char dir[] = "out/.cc-build/cachekey-XXXXXX";
+    char path[512];
+    char text[512];
+    int v;
+    if (!mkdtemp(dir)) { perror("mkdtemp"); return 1; }
+
+    /* x.ccs includes a.cch which includes b.cch; the value lives in b. */
+    snprintf(path, sizeof(path), "%s/a.cch", dir);
+    write_text(path,
+               "#ifndef A_CCH\n#define A_CCH\n#include \"b.cch\"\n"
+               "static inline int a_value(void) { return B_VALUE + 1; }\n#endif\n");
+    snprintf(path, sizeof(path), "%s/x.ccs", dir);
+    write_text(path,
+               "#include <ccc/std/prelude.cch>\n#include \"a.cch\"\n#include <stdio.h>\n"
+               "int main(void) { printf(\"%d\\n\", a_value()); return 0; }\n");
+    for (v = 11; v <= 14; v++) {
+        int got;
+        snprintf(path, sizeof(path), "%s/b.cch", dir);
+        snprintf(text, sizeof(text), "#ifndef B_CCH\n#define B_CCH\n#define B_VALUE %d\n#endif\n", v);
+        write_text(path, text);
+        got = run_ccc(dir, "x");
+        if (got != v + 1) {
+            printf("FAIL: header edit B_VALUE=%d printed %d, expected %d\n", v, got, v + 1);
+            return 2;
+        }
+    }
+
+    /* Same-size edits of the translation unit itself. */
+    for (v = 21; v <= 23; v++) {
+        int got;
+        snprintf(path, sizeof(path), "%s/y.ccs", dir);
+        snprintf(text, sizeof(text),
+                 "#include <ccc/std/prelude.cch>\n#include <stdio.h>\n"
+                 "int main(void) { printf(\"%%d\\n\", %d); return 0; }\n", v);
+        write_text(path, text);
+        got = run_ccc(dir, "y");
+        if (got != v) {
+            printf("FAIL: unit edit %d printed %d\n", v, got);
+            return 3;
+        }
+    }
+    printf("cache_key_same_second_smoke: PASS\n");
+    return 0;
+}

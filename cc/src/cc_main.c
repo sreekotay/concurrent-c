@@ -3321,9 +3321,12 @@ static int cc__build_one_target_objs(int idx,
                 }
                 h = cc__fold_cc_depends(h, src_abs);
                 h = cc__fold_cch_includes(h, src_abs, t_cc_flags);
+                /* mtime and size above are second-granular: fold the bytes. */
+                h = cc__fold_file_content(h, src_abs);
                 h = cc__fold_ccc_driver(h);
                 h = cc__fold_shadow_lower(h);
                 h = cc__fold_toolchain_id(h);
+                h = cc__fnv1a64_i64(h, (long long)cc_toolchain_content_fp());
                 emit_key = h;
                 uint64_t prev = 0;
                 if (file_exists(c_out) && cc__read_u64_file(meta_path, &prev) == 0 && prev == emit_key) {
@@ -3355,6 +3358,7 @@ static int cc__build_one_target_objs(int idx,
                     h = cc__fnv1a64_str(h, src_abs);
                     h = cc__fnv1a64_i64(h, in_sig.mtime_sec);
                     h = cc__fnv1a64_i64(h, in_sig.size);
+                    h = cc__fold_file_content(h, src_abs);
                 } else {
                     h = cc__fnv1a64_i64(h, (long long)emit_key);
                 }

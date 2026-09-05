@@ -237,8 +237,30 @@ static uint64_t shadow_toolchain_content_fp(const char* self_path) {
     h = shadow_fnv1a64_str(h, "\x03" "toolchain:");
     h = shadow_fnv1a64_str(h, self_path ? self_path : "");
     h = shadow_fold_file_content(h, self_path);
-    h = shadow_fold_file_content(h, "out/cc/obj/libshadow_comptime.a");
-    h = shadow_fold_file_content(h, "third_party/tcc/libtcc.a");
+    /* The libraries live beside this binary's tree (out/cc/bin/shadow_lower
+     * → repository root three levels up), not beside the caller's cwd:
+     * from an application directory a relative spelling folds as absent. */
+    {
+        char root[1024];
+        char lib[1200];
+        const char* p = self_path ? self_path : "";
+        size_t n = strlen(p);
+        int ups = 0;
+        while (n > 0 && ups < 3) {
+            n--;
+            if (p[n] == '/') ups++;
+        }
+        if (ups == 3 && n < sizeof(root)) {
+            memcpy(root, p, n);
+            root[n] = 0;
+        } else {
+            snprintf(root, sizeof(root), ".");
+        }
+        snprintf(lib, sizeof(lib), "%s/out/cc/obj/libshadow_comptime.a", root);
+        h = shadow_fold_file_content(h, lib);
+        snprintf(lib, sizeof(lib), "%s/third_party/tcc/libtcc.a", root);
+        h = shadow_fold_file_content(h, lib);
+    }
     {
         const char* ver = getenv("CCC_VERSION");
         h = shadow_fnv1a64_str(h, "\x03" "ccc_version:");
@@ -362,14 +384,44 @@ static ShadowHostOpts g_shadow_host_opts;
 /* Obj key: emit key + host compiler content bytes + flag fingerprint.
  * Must fold every host-compile input (cc_flags, release/debug, no_runtime)
  * so warm tu.o is never reused across incompatible builds. */
+/* Resolve a bare host compiler name through PATH so its bytes can be
+ * folded; an absolute name is returned as is. Empty when not found. */
+static void shadow_host_cc_resolve(const char* host_cc, char* out, size_t cap) {
+    const char* path = getenv("PATH");
+    out[0] = 0;
+    if (!host_cc || !host_cc[0]) return;
+    if (strchr(host_cc, '/')) {
+        snprintf(out, cap, "%s", host_cc);
+        return;
+    }
+    while (path && *path) {
+        const char* e = strchr(path, ':');
+        size_t n = e ? (size_t)(e - path) : strlen(path);
+        char cand[1024];
+        if (n > 0 && n < sizeof(cand) - 2) {
+            snprintf(cand, sizeof(cand), "%.*s/%s", (int)n, path, host_cc);
+            if (access(cand, X_OK) == 0) {
+                snprintf(out, cap, "%s", cand);
+                return;
+            }
+        }
+        if (!e) break;
+        path = e + 1;
+    }
+}
+
 static uint64_t shadow_obj_cache_key(uint64_t emit_key, const char* host_cc) {
     uint64_t h = emit_key;
+    char resolved[1024];
     h = shadow_fnv1a64_str(h, "\x04" "hostcc:");
     h = shadow_fnv1a64_str(h, host_cc ? host_cc : "cc");
-    /* Absolute host cc: fold bytes. PATH-resolved "cc" keeps the name only
-     * (same limitation as before; prefer CC=/abs/path for strict identity). */
-    if (host_cc && host_cc[0] == '/')
-        h = shadow_fold_file_content(h, host_cc);
+    /* The host compiler's bytes, whether named absolutely or found on PATH:
+     * a compiler upgrade under the same name must miss. */
+    shadow_host_cc_resolve(host_cc ? host_cc : "cc", resolved, sizeof(resolved));
+    if (resolved[0])
+        h = shadow_fold_file_content(h, resolved);
+    else
+        h = shadow_fnv1a64_str(h, "\x01" "<hostcc-unresolved>");
     h = shadow_fnv1a64_str(h, getenv("CFLAGS"));
     h = shadow_fnv1a64_str(h, getenv("CPPFLAGS"));
     h = shadow_fnv1a64_str(h, "-std=c11-D_DEFAULT_SOURCE-ffunction-sections-fdata-sections");
@@ -1253,18 +1305,45 @@ static void shadow_emit_cache_invalidate(const char* in_path,
     unlink(c_path);
 }
 
-/* True when bin exists and is not older than tu.o / runtime.o. */
-static int shadow_bin_fresh(const char* bin_path, const char* o_path,
-                            const char* runtime_o) {
-    ShadowFileSig bin, obj, rt;
+/* Link identity: the object key, the runtime object's bytes and the link
+ * flags. Stored as bin.key beside tu.o, with bin.sum = the linked binary's
+ * bytes, so a binary another build wrote to the same path, or a same-second
+ * relink, is never mistaken for this one. mtimes play no part. */
+static uint64_t shadow_bin_cache_key(uint64_t okey, const char* o_path,
+                                     const char* runtime_o) {
+    uint64_t h = okey;
+    h = shadow_fnv1a64_str(h, "\x05" "link:");
+    /* The object's bytes, not its key: a header edit recompiles tu.o under
+     * the same object key (the emitted C only names the header). */
+    h = shadow_fold_file_content(h, o_path);
+    if (runtime_o && runtime_o[0])
+        h = shadow_fold_file_content(h, runtime_o);
+    else
+        h = shadow_fnv1a64_str(h, "<no-runtime>");
+    h = shadow_fnv1a64_str(h, g_shadow_host_opts.ld_flags);
+    h = shadow_fnv1a64_i64(h, g_shadow_host_opts.no_runtime ? 1 : 0);
+    return h;
+}
+
+static int shadow_bin_fresh(const char* dir, const char* bin_path, uint64_t bkey) {
+    ShadowFileSig bin;
+    char key_path[600], sum_path[600];
+    uint64_t prev = 0, sum = 0;
     if (shadow_stat_sig(bin_path, &bin) != 0 || bin.size <= 0) return 0;
-    if (shadow_stat_sig(o_path, &obj) != 0) return 0;
-    if (bin.mtime_sec < obj.mtime_sec) return 0;
-    if (runtime_o && runtime_o[0]) {
-        if (shadow_stat_sig(runtime_o, &rt) != 0) return 0;
-        if (bin.mtime_sec < rt.mtime_sec) return 0;
-    }
-    return 1;
+    snprintf(key_path, sizeof(key_path), "%s/bin.key", dir);
+    snprintf(sum_path, sizeof(sum_path), "%s/bin.sum", dir);
+    if (shadow_read_u64_file(key_path, &prev) != 0 || prev != bkey) return 0;
+    if (shadow_read_u64_file(sum_path, &sum) != 0) return 0;
+    return shadow_fold_file_content(1469598103934665603ULL, bin_path) == sum;
+}
+
+static void shadow_bin_cache_note(const char* dir, const char* bin_path, uint64_t bkey) {
+    char key_path[600], sum_path[600];
+    snprintf(key_path, sizeof(key_path), "%s/bin.key", dir);
+    snprintf(sum_path, sizeof(sum_path), "%s/bin.sum", dir);
+    (void)shadow_write_u64_file(key_path, bkey);
+    (void)shadow_write_u64_file(sum_path,
+                                shadow_fold_file_content(1469598103934665603ULL, bin_path));
 }
 
 /* Host build from emit buffer or existing cached emit.c.
@@ -1291,7 +1370,6 @@ static int shadow_build_host(const char* in_path, const char* bin_path,
         return -1;
 
     ekey = shadow_emit_cache_key(in_path, self_path);
-    okey = shadow_obj_cache_key(ekey, shadow_host_cc());
     shadow_cache_dir(ekey, dir, sizeof(dir));
     snprintf(c_path, sizeof(c_path), "%s/emit.c", dir);
     snprintf(o_path, sizeof(o_path), "%s/tu.o", dir);
@@ -1340,6 +1418,11 @@ static int shadow_build_host(const char* in_path, const char* bin_path,
         }
     }
 
+    /* The object and link keys fold the emitted C itself: the emit key
+     * names the source, but a header edit re-emits under the same key. */
+    okey = shadow_obj_cache_key(ekey, shadow_host_cc());
+    okey = shadow_fnv1a64_str(okey, "\x04" "emit.c:");
+    okey = shadow_fold_file_content(okey, c_path);
     if (!(cache_ok && reuse_emit && shadow_file_exists(o_path) &&
           shadow_read_u64_file(okey_path, &prev) == 0 && prev == okey)) {
         if (shadow_mkdir_p(dir) != 0) {
@@ -1362,18 +1445,21 @@ static int shadow_build_host(const char* in_path, const char* bin_path,
         (void)shadow_write_u64_file(okey_path, okey);
     }
 
-    /* Emit/obj reuse still used to relink every process. Skip when the
-     * binary is already newer than tu.o and runtime.o. */
-    if (cache_ok && shadow_bin_fresh(bin_path, o_path, runtime_o))
-        return 0;
+    /* Emit/obj reuse still used to relink every process. Skip only when
+     * the binary on disk is the one this object and runtime produced. */
     {
-        long long t_ld = shadow_now_ms();
+        uint64_t bkey = shadow_bin_cache_key(okey, o_path, runtime_o);
+        long long t_ld;
+        if (cache_ok && shadow_bin_fresh(dir, bin_path, bkey))
+            return 0;
+        t_ld = shadow_now_ms();
         if (shadow_host_link(o_path, bin_path, runtime_o, c_path, in_path) != 0) {
             unlink(ekey_path);
             unlink(okey_path);
             return -1;
         }
         shadow_prof_span("host_link", t_ld);
+        if (cache_ok) shadow_bin_cache_note(dir, bin_path, bkey);
     }
     return 0;
 }

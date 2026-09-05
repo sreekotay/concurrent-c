@@ -853,6 +853,11 @@ static uint64_t cc__toolchain_fingerprint(void) {
         cached = cc__hash64_fnv(&st.st_mtime, sizeof(st.st_mtime), cached);
         cached = cc__hash64_fnv(&st.st_size,  sizeof(st.st_size),  cached);
     }
+    /* mtime and size are second-granular; the bytes decide. */
+    {
+        uint64_t tc = cc_toolchain_content_fp();
+        cached = cc__hash64_fnv(&tc, sizeof(tc), cached);
+    }
     return cached;
 }
 

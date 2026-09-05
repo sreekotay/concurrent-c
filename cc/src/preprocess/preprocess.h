@@ -2,6 +2,7 @@
 #define CC_PREPROCESS_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 typedef struct CCSymbolTable CCSymbolTable;
 typedef struct CCTypeRegistry CCTypeRegistry;
@@ -115,6 +116,18 @@ void cc_ct_free_tagged_fns(char** names, size_t n);
 // plain C that TCC can parse. Writes to a temporary file path (returned via
 // out_path), nul-terminated. Returns 0 on success; caller must unlink the
 // temp file when done.
+/* Cache keying. Every on-disk cache the toolchain keeps (lowered headers,
+ * include expansion, TU emit, objects, comptime hook dylibs) folds
+ * cc_toolchain_content_fp() into its key: the bytes of the running
+ * executable, of the driver (.ccc-bin) and of the lowerer (shadow_lower)
+ * when they can be found from the repository root, and the toolchain
+ * version. Bytes, not mtimes: a rebuild in the same second with the same
+ * size must miss; a rebuild with identical bytes must hit. Memoized per
+ * process. Inputs are keyed by content with cc_fold_file_content_u64. */
+uint64_t cc_fnv1a64_bytes(uint64_t h, const void* data, size_t n);
+uint64_t cc_fold_file_content_u64(uint64_t h, const char* path);
+uint64_t cc_toolchain_content_fp(void);
+
 int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_sz);
 
 // Preprocess source string to output string (no temp files).
