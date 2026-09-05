@@ -362,7 +362,7 @@ happens not to contain a banned `@token`, `!>`, `[:]` or `::`.
 ### 5.9 Shapes an AST needs that the engine refuses
 
 Writing a tree of `@variant` nodes with `Vec` children and a template
-printer (`stress/break/break_ast_cc_way_smoke.ccs`) trips sixteen distinct
+printer (`stress/break/break_ast_cc_way_smoke.ccs`) trips seventeen distinct
 defects, each pinned by a sibling `break_*` test with an `.xfail` marker:
 
 | Shape | What happens today | Test |
@@ -383,6 +383,7 @@ defects, each pinned by a sibling `break_*` test with an `.xfail` marker:
 | a `@switch` nested inside a case | the inner `.arm` labels resolve against the outer subject | `break_nested_switch_inner_arms` |
 | `a.label` on an ordinary struct inside a case, `label` an arm of the subject | rewritten as a projection of the subject | `break_field_named_like_arm` |
 | `"... @create"` as a string initializer | taken for the constructor sugar | `break_create_word_in_string` |
+| `typedef FaceNode* FaceNodeRef;` in a second face | the extractor counts the typedef as a definition of `FaceNode`, so a third face fails to extract | `break_face_ptr_typedef` |
 
 Every one is a text-engine property (name-keyed type tracking, splice
 points chosen by textual position, paren-counting through literals, fixed

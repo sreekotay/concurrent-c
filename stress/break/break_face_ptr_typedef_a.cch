@@ -1,0 +1,6 @@
+#ifndef BREAK_FACE_PTR_TYPEDEF_A
+#define BREAK_FACE_PTR_TYPEDEF_A
+#include <ccc/std/prelude.cch>
+typedef struct FaceNode { int v; } FaceNode;
+static int FaceNode_value(FaceNode* n);
+#endif

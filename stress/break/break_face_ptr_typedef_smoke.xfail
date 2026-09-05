@@ -1,0 +1,1 @@
+the face extractor takes the identifier after 'typedef' as a defined name, so 'typedef FaceNode* FaceNodeRef;' makes the second face a definer of FaceNode and extraction of the third face fails ('FaceNode is defined in ... and ...'); moving the pointer typedef beside the struct works
