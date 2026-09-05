@@ -139,8 +139,10 @@ trap 'rm -rf "$WORKDIR"' EXIT
 N=${#NAMES[@]}
 TIMES=()
 OUTS=()
+GUNZIPS=()
 for ((b = 0; b < N; b++)); do
     OUTS[$b]=0
+    GUNZIPS[$b]=ok
     for ((r = 0; r < RUNS; r++)); do
         TIMES[$((b * RUNS + r))]="?"
     done
@@ -169,6 +171,8 @@ emit "# Input: testdata/text_${SIZE_MB}mb.bin ($bytes bytes), Silesia concat"
 emit "# Method: $RUNS interleaved rounds, page-cached input, invoke \`<bin> <file>\`"
 emit "#         no -p / -k / -i; CC_WORKERS, CC_THREADS, PIGZ_* unset"
 emit "#         each program picks its own width. gunzip -t after each run."
+emit "#         Compressor stderr is not mixed into this table (pigz_cc Total:)."
+emit "#         A bad .gz marks that binary fail and continues the matrix."
 emit "#         Fresh work copy per invoke so pigz's delete-source default"
 emit "#         does not consume the corpus."
 emit ""
@@ -190,16 +194,22 @@ for ((r = 0; r < RUNS; r++)); do
         cp "$INPUT" "$work"
         rm -f "$work.gz"
         t0=$(python3 -c 'import time; print(time.perf_counter())')
-        "${BINS[$b]}" "$work" >/dev/null
+        "${BINS[$b]}" "$work" >/dev/null 2>"$WORKDIR/${NAMES[$b]}.err"
         t1=$(python3 -c 'import time; print(time.perf_counter())')
         elapsed=$(python3 -c "print(f'{$t1 - $t0:.3f}')")
         TIMES[$((b * RUNS + r))]="$elapsed"
         gz="$work.gz"
         if [ ! -f "$gz" ]; then
             echo "Error: ${NAMES[$b]} did not write $gz" >&2
-            exit 1
+            GUNZIPS[$b]=fail
+            TIMES[$((b * RUNS + r))]="?"
+            row+=$(printf ' %10s' "fail")
+            continue
         fi
-        gunzip -t "$gz"
+        if ! gunzip -t "$gz" >/dev/null 2>"$WORKDIR/${NAMES[$b]}.gunzip"; then
+            echo "gunzip -t failed: ${NAMES[$b]} (see $WORKDIR/${NAMES[$b]}.gunzip)" >&2
+            GUNZIPS[$b]=fail
+        fi
         OUTS[$b]=$(wc -c < "$gz" | tr -d ' ')
         rm -f "$work" "$gz"
         row+=$(printf ' %10s' "$elapsed")
@@ -214,7 +224,7 @@ emit "$(printf '%-18s %-6s %7s %8s %8s %12s %8s' \
 
 while IFS= read -r line; do
     emit "$line"
-done < <(python3 - "$N" "$RUNS" "${NAMES[@]}" -- "${DICTS[@]}" -- "${OUTS[@]}" -- "${TIMES[@]}" <<'PY'
+done < <(python3 - "$N" "$RUNS" "${NAMES[@]}" -- "${DICTS[@]}" -- "${OUTS[@]}" -- "${GUNZIPS[@]}" -- "${TIMES[@]}" <<'PY'
 import sys
 args = sys.argv[1:]
 n = int(args[0]); runs = int(args[1])
@@ -228,15 +238,22 @@ for a in rest:
     else:
         cur.append(a)
 parts.append(cur)
-names, dicts, outs, times = parts
+names, dicts, outs, gunzips, times = parts
 for b in range(n):
-    xs = [float(times[b * runs + r]) for r in range(runs)]
+    xs = []
+    for r in range(runs):
+        t = times[b * runs + r]
+        if t not in ("?", "fail"):
+            xs.append(float(t))
+    if not xs:
+        print(f"{names[b]:<18} {dicts[b]:<6} {'-':>7} {'-':>8} {'-':>8} {int(outs[b]):12d} {gunzips[b]:>8}")
+        continue
     xs.sort()
     best = xs[0]
     mean = sum(xs) / len(xs)
     mid = len(xs) // 2
     med = xs[mid] if len(xs) % 2 else 0.5 * (xs[mid - 1] + xs[mid])
-    print(f"{names[b]:<18} {dicts[b]:<6} {best:7.3f} {med:8.3f} {mean:8.3f} {int(outs[b]):12d} {'ok':>8}")
+    print(f"{names[b]:<18} {dicts[b]:<6} {best:7.3f} {med:8.3f} {mean:8.3f} {int(outs[b]):12d} {gunzips[b]:>8}")
 PY
 )
 

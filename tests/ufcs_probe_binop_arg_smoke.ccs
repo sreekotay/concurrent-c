@@ -1,0 +1,24 @@
+/* Invent `S_probe` when the first UFCS arg is a binop (`off + 2`) and a
+ * second call sits in an `&&` condition. Both are leftover-text peel, not
+ * one AST_UFCS node (leading `!`, trailing `&&`). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stddef.h>
+
+typedef struct {
+    int x;
+} S;
+
+int S_probe(const S *s, size_t off, size_t *lo, size_t *hi) {
+    *lo = off;
+    *hi = off + 2;
+    return s->x;
+}
+
+int main(void) {
+    S d = {1};
+    size_t lo = 0, hi = 0, off = 3;
+    if (!d.probe(off + 2, &lo, &hi)) printf("no\n");
+    if (d.probe(off, &lo, &hi) && lo == off && hi == off + 2) printf("yes\n");
+    return 0;
+}
