@@ -74,6 +74,12 @@ static CcTypeInfo* rl_ret_result(CcLowerer* L, CcType* fn_type) {
     if (!ret) return NULL;
     @switch (ret->k) {
         case .result(r): return rl_ix_result(L, r.value, r.err, r.optional);
+        case .named(nm): {
+            /* `CCResult_int_CCError f(void)`: the spec name written out */
+            CcIndex* ix = L->ix;
+            CcTypeInfo* ti = ix->type_get(nm.name);
+            return (ti && ti->is_result) ? ti : NULL;
+        }
         default: return NULL;
     }
 }
@@ -264,6 +270,12 @@ static void rl_register_handler(RFn* fn, const CcErrhandler* eh, CcSpan sp) {
 
 static CCSlice rl_call_name(const CcExpr* e);
 static CCString rl_spec_arg(CcLowerer* L, CcType* t);
+static CcExpr* rl_r(CcLowerer* L, CcSpan sp);
+static CcExpr* rl_r_ok(CcLowerer* L, CcSpan sp);
+static CcExpr* rl_r_value(CcLowerer* L, CcSpan sp);
+static CcExpr* rl_r_error(CcLowerer* L, CcSpan sp);
+static CcType* rl_typeof_error(CcLowerer* L, CcSpan sp);
+static CCString lw_spell_expr(CcLowerer* L, const CcExpr* e);
 
 /* "@" a "@" b: messages that name `@err` / `@errhandler` are assembled, so
  * no `@word` sits in a literal for the current engine to trip on. */
@@ -433,25 +445,37 @@ static CCSlice rl_call_name(const CcExpr* e) {
     }
 }
 
-/* `!>` on something that is not a call to a Result function: said at the
- * operator, not left for the host compiler. */
-static bool rl_check_unwrap_operand(CcLowerer* L, const CcExpr* inner, CcTypeInfo* rt, CcSpan sp) {
+static bool rl_sym_returns_pointer(const CcSym* sym) {
+    if (!sym || !sym->type) return false;
+    @switch (sym->type->k) {
+        case .func(ft): return ft.ret && ft.ret->k.kind == CcTypeK_pointer;
+        default: return false;
+    }
+}
+
+/* What `!>` unwraps: 1 a Result (or a call the host types), 2 a pointer
+ * (NULL is the error: the null unwrap), 0 nothing, said at the operator
+ * rather than left for the host compiler. */
+static int rl_unwrap_mode(CcLowerer* L, const CcExpr* inner, CcTypeInfo* rt, CcSpan sp) {
     CCSlice callee;
-    if (rt) return true;
+    if (rt) return 1;
     callee = rl_call_name(inner);
     if (callee.len) {
         CcSym* sym = rl_ix_sym(L, callee);
         if (!sym) {
             CCString m = @string(`type: '!>' on '${callee}': no visible declaration`, L->arena);
             lw_error(L, sp, m);
-            return false;
+            return 0;
         }
         if (sym->kind == CC_SYM_FUNC) {
-            CCString m = @string(`'!>' on '${callee}': it does not return a Result ('!>' needs a 'T !>(E)' call on its left)`, L->arena);
-            lw_error(L, sp, m);
-            return false;
+            if (rl_sym_returns_pointer(sym)) return 2;
+            {
+                CCString m = @string(`'!>' on '${callee}': it does not return a Result or a pointer ('!>' needs a 'T !>(E)' call, or a pointer call whose NULL is the error, on its left)`, L->arena);
+                lw_error(L, sp, m);
+            }
+            return 0;
         }
-        return true;   /* a macro or a variable: the host decides */
+        return 1;   /* a macro or a variable: the host decides */
     }
     {
         bool is_name = false;
@@ -466,11 +490,40 @@ static bool rl_check_unwrap_operand(CcLowerer* L, const CcExpr* inner, CcTypeInf
             /* a plain variable or literal: nothing to unwrap */
             CCString m = @string(`'!>' needs a Result on its left: a call to a 'T !>(E)' function`, L->arena);
             lw_error(L, sp, m);
-            return false;
+            return 0;
         }
     }
-    return true;   /* a method call, a conditional, a parenthesized call: the host types `__typeof__` */
+    return 1;   /* a method call, a conditional, a parenthesized call: the host types `__typeof__` */
 }
+
+/* The null unwrap's error: `CC_ERROR(CC_ERR_NULL, "NULL returned from <call> at <file>:<line>")`. */
+static CcExpr* rl_null_error(CcLowerer* L, const CcExpr* inner, CcSpan sp) {
+    CCString spelled = lw_spell_expr(L, inner);
+    CCSlice sp_s = spelled.as_slice();
+    CcLoc loc = rl_loc(L, sp);
+    CCString t = cc_string_new();
+    size_t i;
+    cc_string_push_cstr(&t, "CC_ERROR(CC_ERR_NULL, \"NULL returned from ", L->arena);
+    for (i = 0; i < sp_s.len; i++) {
+        char c = sp_s.ptr[i];
+        if (c == '\\' || c == '"') cc_string_push_char(&t, '\\', L->arena);
+        if (c == '\n') { cc_string_push_cstr(&t, "\\n", L->arena); continue; }
+        cc_string_push_char(&t, c, L->arena);
+    }
+    cc_string_push_cstr(&t, " at ", L->arena);
+    cc_string_push_slice(&t, loc.path, L->arena);
+    cc_string_push_char(&t, ':', L->arena);
+    cc_string_push_uint(&t, (uint64_t)loc.line, L->arena);
+    cc_string_push_cstr(&t, "\")", L->arena);
+    return lw_text(L, t, sp);
+}
+
+/* The scaffold's reads of `__r`, by mode: a Result has `.ok` / `.u.value` /
+ * `.u.error`; a pointer is its own ok test and value, and its error is made. */
+static CcExpr* rl_r_ok2(CcLowerer* L, CcSpan sp, bool ptr) { return ptr ? rl_r(L, sp) : rl_r_ok(L, sp); }
+static CcExpr* rl_r_value2(CcLowerer* L, CcSpan sp, bool ptr) { return ptr ? rl_r(L, sp) : rl_r_value(L, sp); }
+static CcExpr* rl_r_error2(CcLowerer* L, CcSpan sp, bool ptr, const CcExpr* inner) { return ptr ? rl_null_error(L, inner, sp) : rl_r_error(L, sp); }
+static CcType* rl_typeof_error2(CcLowerer* L, CcSpan sp, bool ptr) { return ptr ? lw_named_type(L, rl_lit("CCError"), sp) : rl_typeof_error(L, sp); }
 
 /* `<err>` read through the faces of an `as:` path. */
 static CcExpr* rl_project(CcLowerer* L, CcExpr* err, CcNameList* path, CcSpan sp) {
@@ -559,6 +612,7 @@ static CcStmt* rl_scaffold(RFn* fn, CcExpr* uw, CcExpr* target, CcSpan sp) {
     CcStmt* blk;
     CcTypeInfo* rt;
     bool value_is_void = false;
+    bool ptr = false;   /* the null unwrap: a pointer call, NULL is the error */
     @switch (uw->k) {
         case .unwrap(u): inner = u.a; form = 1; break;
         case .unwrap_body(ub): inner = ub.a; binder = ub.binder; body = ub.body; form = 2; break;
@@ -572,8 +626,13 @@ static CcStmt* rl_scaffold(RFn* fn, CcExpr* uw, CcExpr* target, CcSpan sp) {
     }
     if (!inner) return NULL;
     rt = rl_result_of_call(L, inner);
-    if (!rl_check_unwrap_operand(L, inner, rt, sp)) return NULL;
+    {
+        int mode = rl_unwrap_mode(L, inner, rt, sp);
+        if (!mode) return NULL;
+        ptr = mode == 2;
+    }
     if (rt && rt->result_value) value_is_void = CcType_is_void(rt->result_value);
+    L->unwraps_used = true;
     blk = lw_block(L, sp);
     /* __typeof__(inner) __r = inner; */
     lw_push(blk, lw_decl_stmt(L, rl_typeof(L, inner, sp), rl_lit("__r"), inner, sp));
@@ -582,7 +641,7 @@ static CcStmt* rl_scaffold(RFn* fn, CcExpr* uw, CcExpr* target, CcSpan sp) {
         CCString bare_value = @string(`'!>;' at expression position requires an enclosing '${"@"}errhandler' in scope`, L->arena);
         CCString bare_stmt = rl_at2(L, "err with no local handler requires ", "errhandler: a bare unwrap statement forwards the error to one");
         CCSlice bare = target ? bare_value.as_slice() : bare_stmt.as_slice();
-        RHandler* h = rl_pick_handler(fn, rt ? rl_ix_canon(L, rt->result_err) : cc_slice_empty(), sp, bare, &path, inner, rt);
+        RHandler* h = rl_pick_handler(fn, rt ? rl_ix_canon(L, rt->result_err) : (ptr ? rl_lit("CCError") : cc_slice_empty()), sp, bare, &path, inner, rt);
         CcStmt* on_err = lw_block(L, sp);
         CcExpr* err;
         if (!h) return NULL;
@@ -591,12 +650,12 @@ static CcStmt* rl_scaffold(RFn* fn, CcExpr* uw, CcExpr* target, CcSpan sp) {
             lw_error(L, h->span, m);
             return NULL;
         }
-        err = rl_project(L, rl_r_error(L, sp), &path, sp);
+        err = rl_project(L, rl_r_error2(L, sp, ptr, inner), &path, sp);
         lw_push(on_err, rl_record_site(L, sp));
         if (h->hoisted) rl_push_jump(fn, on_err, h, err, sp);
         else lw_push(on_err, rl_inline_handler(fn, h, err, sp));
-        lw_push(blk, lw_if(L, lw_not(L, rl_r_ok(L, sp), sp), on_err, NULL, sp));
-        if (target && !value_is_void) lw_push(blk, lw_expr_stmt(L, lw_assign(L, target, rl_r_value(L, sp), sp), sp));
+        lw_push(blk, lw_if(L, lw_not(L, rl_r_ok2(L, sp, ptr), sp), on_err, NULL, sp));
+        if (target && !value_is_void) lw_push(blk, lw_expr_stmt(L, lw_assign(L, target, rl_r_value2(L, sp, ptr), sp), sp));
         return blk;
     }
     if (form == 2) {
@@ -607,7 +666,7 @@ static CcStmt* rl_scaffold(RFn* fn, CcExpr* uw, CcExpr* target, CcSpan sp) {
             lw_error(L, sp, m);
             return NULL;
         }
-        if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_typeof_error(L, sp), binder, rl_r_error(L, sp), sp));
+        if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_typeof_error2(L, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
         if (body) {
             CcNameList* bs = &fn->binders;
             size_t nb = bs->len();
@@ -617,30 +676,30 @@ static CcStmt* rl_scaffold(RFn* fn, CcExpr* uw, CcExpr* target, CcSpan sp) {
             bs->truncate(nb);
             lw_push(on_err, lowered);
         }
-        lw_push(blk, lw_if(L, lw_not(L, rl_r_ok(L, sp), sp), on_err, NULL, sp));
-        if (target && !value_is_void) lw_push(blk, lw_expr_stmt(L, lw_assign(L, target, rl_r_value(L, sp), sp), sp));
+        lw_push(blk, lw_if(L, lw_not(L, rl_r_ok2(L, sp, ptr), sp), on_err, NULL, sp));
+        if (target && !value_is_void) lw_push(blk, lw_expr_stmt(L, lw_assign(L, target, rl_r_value2(L, sp, ptr), sp), sp));
         return blk;
     }
     /* form 3: ?> fallback */
     if (!fallback) return NULL;
     if (!target || value_is_void) {
         CcStmt* on_err = lw_block(L, sp);
-        if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_typeof_error(L, sp), binder, rl_r_error(L, sp), sp));
+        if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_typeof_error2(L, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
         lw_push(on_err, lw_expr_stmt(L, lw_paren(L, fallback, sp), sp));
-        lw_push(blk, lw_if(L, lw_not(L, rl_r_ok(L, sp), sp), on_err, NULL, sp));
+        lw_push(blk, lw_if(L, lw_not(L, rl_r_ok2(L, sp, ptr), sp), on_err, NULL, sp));
         return blk;
     }
     if (binder.len) {
         CcStmt* on_ok = lw_block(L, sp);
         CcStmt* on_err = lw_block(L, sp);
-        lw_push(on_ok, lw_expr_stmt(L, lw_assign(L, target, rl_r_value(L, sp), sp), sp));
-        lw_push(on_err, lw_decl_stmt(L, rl_typeof_error(L, sp), binder, rl_r_error(L, sp), sp));
+        lw_push(on_ok, lw_expr_stmt(L, lw_assign(L, target, rl_r_value2(L, sp, ptr), sp), sp));
+        lw_push(on_err, lw_decl_stmt(L, rl_typeof_error2(L, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
         lw_push(on_err, lw_expr_stmt(L, lw_assign(L, target, lw_paren(L, fallback, sp), sp), sp));
-        lw_push(blk, lw_if(L, rl_r_ok(L, sp), on_ok, on_err, sp));
+        lw_push(blk, lw_if(L, rl_r_ok2(L, sp, ptr), on_ok, on_err, sp));
         return blk;
     }
     lw_push(blk, lw_expr_stmt(L, lw_assign(L, target,
-                lw_ternary(L, rl_r_ok(L, sp), rl_r_value(L, sp), lw_paren(L, fallback, sp), sp), sp), sp));
+                lw_ternary(L, rl_r_ok2(L, sp, ptr), rl_r_value2(L, sp, ptr), lw_paren(L, fallback, sp), sp), sp), sp));
     return blk;
 }
 
@@ -675,10 +734,24 @@ static bool rl_decl_unwrap(RFn* fn, CcStmt* s, CcDecl* d, CcStmtList* out) {
     if (!is_var || !v.init) return false;
     init_expr = v.init->expr;
     if (!rl_is_unwrap(init_expr)) return false;
-    if (v.destroy) {
-        CCString m = @string(`'@destroy' is not lowered by the clean lowerer yet`, L->arena);
-        lw_error(L, s->span, m);
-        return true;
+    {
+        /* `T x = e !> @destroy [{ D }];`: the unwrap of `e`, and x is marked
+         * for the cleanup step; a failed `e` never reaches the mark */
+        CcExpr* plain = NULL;
+        @switch (init_expr->k) {
+            case .unwrap_destroy(ud): {
+                CcUnwrap u;
+                u.a = ud.a;
+                plain = cc_arena_alloc(L->arena, sizeof(CcExpr), _Alignof(CcExpr));
+                *plain = *init_expr;
+                plain->k = { .unwrap = u };
+                v.destroy = true;
+                v.destroy_body = ud.destroy_body;
+                break;
+            }
+            default: break;
+        }
+        if (plain) init_expr = plain;
     }
     blk = rl_scaffold(fn, init_expr, lw_ident(L, v.name, s->span), s->span);
     if (!blk) return true;
@@ -893,6 +966,7 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
     CcStmt* blk;
     CcTypeInfo* rt;
     bool value_is_void = false;
+    bool ptr = false;   /* the null unwrap: a pointer call, NULL is the error */
     CcStmtExpr se;
     *uw = *e;
     @switch (uw->k) {
@@ -908,15 +982,20 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
     }
     if (!inner) return false;
     rt = rl_result_of_call(L, inner);
-    if (!rl_check_unwrap_operand(L, inner, rt, sp)) return false;
+    {
+        int mode = rl_unwrap_mode(L, inner, rt, sp);
+        if (!mode) return false;
+        ptr = mode == 2;
+    }
     if (rt && rt->result_value) value_is_void = CcType_is_void(rt->result_value);
+    L->unwraps_used = true;
     blk = lw_block(L, sp);
     lw_push(blk, lw_decl_stmt(L, rl_typeof(L, inner, sp), rl_lit("__r"), inner, sp));
     if (form == 1) {
         CcNameList path;
         CCString bare_value = @string(`'!>;' at expression position requires an enclosing '${"@"}errhandler' in scope`, L->arena);
         CCSlice bare = bare_value.as_slice();
-        RHandler* h = rl_pick_handler(fn, rt ? rl_ix_canon(L, rt->result_err) : cc_slice_empty(), sp, bare, &path, inner, rt);
+        RHandler* h = rl_pick_handler(fn, rt ? rl_ix_canon(L, rt->result_err) : (ptr ? rl_lit("CCError") : cc_slice_empty()), sp, bare, &path, inner, rt);
         CcStmt* on_err = lw_block(L, sp);
         CcExpr* err;
         if (!h) return false;
@@ -925,11 +1004,11 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
             lw_error(L, h->span, m);
             return false;
         }
-        err = rl_project(L, rl_r_error(L, sp), &path, sp);
+        err = rl_project(L, rl_r_error2(L, sp, ptr, inner), &path, sp);
         lw_push(on_err, rl_record_site(L, sp));
         if (h->hoisted) rl_push_jump(fn, on_err, h, err, sp);
         else lw_push(on_err, rl_inline_handler(fn, h, err, sp));
-        lw_push(blk, lw_if(L, lw_not(L, rl_r_ok(L, sp), sp), on_err, NULL, sp));
+        lw_push(blk, lw_if(L, lw_not(L, rl_r_ok2(L, sp, ptr), sp), on_err, NULL, sp));
     } else if (form == 2) {
         CcStmt* on_err = lw_block(L, sp);
         if (!body || !rl_diverges(L, body)) {
@@ -937,7 +1016,7 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
             lw_error(L, sp, m);
             return false;
         }
-        if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_typeof_error(L, sp), binder, rl_r_error(L, sp), sp));
+        if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_typeof_error2(L, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
         {
             CcNameList* bs = &fn->binders;
             size_t nb = bs->len();
@@ -947,35 +1026,35 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
             bs->truncate(nb);
             lw_push(on_err, lowered);
         }
-        lw_push(blk, lw_if(L, lw_not(L, rl_r_ok(L, sp), sp), on_err, NULL, sp));
+        lw_push(blk, lw_if(L, lw_not(L, rl_r_ok2(L, sp, ptr), sp), on_err, NULL, sp));
     } else {
         if (!fallback) return false;
         if (value_is_void) {
             CcStmt* on_err = lw_block(L, sp);
-            if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_typeof_error(L, sp), binder, rl_r_error(L, sp), sp));
+            if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_typeof_error2(L, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
             lw_push(on_err, lw_expr_stmt(L, lw_paren(L, fallback, sp), sp));
-            lw_push(blk, lw_if(L, lw_not(L, rl_r_ok(L, sp), sp), on_err, NULL, sp));
+            lw_push(blk, lw_if(L, lw_not(L, rl_r_ok2(L, sp, ptr), sp), on_err, NULL, sp));
         } else if (binder.len) {
             /* __typeof__(__r.u.value) __v; if (__r.ok) __v = __r.u.value; else { E e = __r.u.error; __v = (fallback); } __v; */
             CcStmt* on_ok = lw_block(L, sp);
             CcStmt* on_err = lw_block(L, sp);
-            lw_push(blk, lw_decl_stmt(L, rl_typeof(L, rl_r_value(L, sp), sp), rl_lit("__v"), NULL, sp));
-            lw_push(on_ok, lw_expr_stmt(L, lw_assign(L, lw_ident(L, rl_lit("__v"), sp), rl_r_value(L, sp), sp), sp));
-            lw_push(on_err, lw_decl_stmt(L, rl_typeof_error(L, sp), binder, rl_r_error(L, sp), sp));
+            lw_push(blk, lw_decl_stmt(L, rl_typeof(L, rl_r_value2(L, sp, ptr), sp), rl_lit("__v"), NULL, sp));
+            lw_push(on_ok, lw_expr_stmt(L, lw_assign(L, lw_ident(L, rl_lit("__v"), sp), rl_r_value2(L, sp, ptr), sp), sp));
+            lw_push(on_err, lw_decl_stmt(L, rl_typeof_error2(L, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
             lw_push(on_err, lw_expr_stmt(L, lw_assign(L, lw_ident(L, rl_lit("__v"), sp), lw_paren(L, fallback, sp), sp), sp));
-            lw_push(blk, lw_if(L, rl_r_ok(L, sp), on_ok, on_err, sp));
+            lw_push(blk, lw_if(L, rl_r_ok2(L, sp, ptr), on_ok, on_err, sp));
             lw_push(blk, lw_expr_stmt(L, lw_ident(L, rl_lit("__v"), sp), sp));
             se.block = blk;
             e->k = { .stmt_expr = se };
             return true;
         } else {
-            lw_push(blk, lw_expr_stmt(L, lw_ternary(L, rl_r_ok(L, sp), rl_r_value(L, sp), lw_paren(L, fallback, sp), sp), sp));
+            lw_push(blk, lw_expr_stmt(L, lw_ternary(L, rl_r_ok2(L, sp, ptr), rl_r_value2(L, sp, ptr), lw_paren(L, fallback, sp), sp), sp));
             se.block = blk;
             e->k = { .stmt_expr = se };
             return true;
         }
     }
-    if (!value_is_void) lw_push(blk, lw_expr_stmt(L, rl_r_value(L, sp), sp));
+    if (!value_is_void) lw_push(blk, lw_expr_stmt(L, rl_r_value2(L, sp, ptr), sp));
     se.block = blk;
     e->k = { .stmt_expr = se };
     return true;
@@ -1048,6 +1127,21 @@ static void rl_function(CcLowerer* L, CcDecl* d, CcFuncDecl* f) {
             for (k = 0; k < m; k++) {
                 CcStmt* bs = *body_stmts->get_ptr(k);
                 with_cells.push(bs);
+            }
+            {
+                /* a void function falling off its end must not run the handlers */
+                CcStmt* last = m ? *body_stmts->get_ptr(m - 1) : NULL;
+                bool is_void = fn.ret == NULL;
+                if (is_void) {
+                    CcType* rt = NULL;
+                    @switch (f->type->k) {
+                        case .func(ft): rt = ft.ret; break;
+                        default: break;
+                    }
+                    is_void = rt && CcType_is_void(rt);
+                }
+                if (is_void && (!last || !rl_diverges(L, last)))
+                    with_cells.push(cc_stmt_return(NULL, d->span, L->arena));
             }
             for (i = 0; i < n; i++) {
                 RHandler* h = *ho->get_ptr(i);
@@ -1221,7 +1315,7 @@ static void rl_emit_specs(CcLowerer* L) {
         CcTypeInfo* ti = *specs->get_ptr(i);
         if (ti->is_result && !ti->result_from_header && ti->result_value && ti->result_err) n_own++;
     }
-    if (!n_own) return;
+    if (!n_own && !L->unwraps_used) return;
     /* the leading includes */
     {
         size_t k;

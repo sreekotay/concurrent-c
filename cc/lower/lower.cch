@@ -27,7 +27,8 @@ typedef struct CcLowerer {
     CcIndex* ix;
     CcUnit* unit;
     CcLowerOpts opts;
-    uint32_t next_temp;         /* __cc_r_N, __cc_eh_N: one counter per unit */
+    uint32_t next_temp;
+    bool unwraps_used;          /* a scaffold was emitted: the unit needs <ccc/cc_result.h> */         /* __cc_r_N, __cc_eh_N: one counter per unit */
 } CcLowerer;
 
 static CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds);
@@ -35,6 +36,7 @@ static CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiag
 /* L.lower_unit(): the whole pipeline, in order. Each step is callable alone. */
 static void CcLowerer_lower_unit(CcLowerer* L);
 static void CcLowerer_results(CcLowerer* L);      /* Result types, cc_ok/cc_err, !> ?> forms, @errhandler, @err */
+static void CcLowerer_cleanup(CcLowerer* L);      /* @defer, @cancel_defer, @destroy: scope-exit runs and soft returns */
 
 /* Helpers shared by the steps. */
 static uint32_t CcLowerer_temp_id(CcLowerer* L);                          /* the next N */
