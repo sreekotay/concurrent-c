@@ -1,6 +1,6 @@
-# Track B — natural timer pressure (scaffold)
+# Track B — natural timer pressure
 
-**Status:** pins filled — implementation next.
+**Status:** CC + Rust hosts implemented against pinned libuv; txiki reference optional.
 
 ## Goal
 
@@ -24,25 +24,39 @@ See [`../PINNED.md`](../PINNED.md):
 | txiki.js (`saghul/txiki.js`) | `75b8cdf3f54380c239eed7f613e75dfe01b79334` |
 | libuv (txiki submodule) | `aabb7651de73ec2f1a74361ca3430eed1a62e402` |
 
-Upstream timer kernel to mirror: `src/timers.c` + `src/js/polyfills/timers.js`
-(`TJSTimer`: `uv_timer_t` + `JSValue func` + close-after-fire).
+Upstream timer kernel mirrored: `src/timers.c` (`uv_timer_t` + `JSValue` Dup + close-after-fire).
 
-## Slice definition (later)
+## Run
 
-1. Extract timer module + shutdown hooks from pinned txiki.
-2. Shared workload: [`workload/timers.js`](workload/timers.js).
-3. Three implementations:
-   - `c/` — upstream txiki reference build instructions
-   - `cc/` — Concurrent-C port
-   - `rust/` — Rust + libuv (or txiki-compatible) binding
-4. Oracle: txiki upstream timer tests + study checkpoints.
-
-## Slots
-
-```text
-track_b/c/      # empty — reference build notes land here
-track_b/cc/     # empty — CC timer host later
-track_b/rust/   # empty — Rust twin later
+```sh
+export CC_QUICKJS_SRC=/path/to/pinned/quickjs-ng
+./studies/quickjs_lifetime/scripts/run_track_b.sh
 ```
 
-Do not add libuv integration in this scaffold slice.
+Builds pinned libuv into `deps/` (gitignored), runs CC then Rust on
+[`workload/timers.js`](workload/timers.js). Set `TXIKI_BIN` for an upstream
+reference (see [`c/README.md`](c/README.md)).
+
+## Layout
+
+| Path | Role |
+|------|------|
+| `cc/timers_host.ccs` | libuv timer host + JS globals |
+| `cc/driver.ccs` | load workload, run loop, oracle |
+| `rust/` | rquickjs twin + `uv_ffi.c` |
+| `c/` | txiki reference build notes |
+| `workload/timers.js` | shared natural workload |
+| `results/` | local receipts (gitignored) |
+
+## Lifetime shape (containment check)
+
+```text
+setTimeout(fn)
+  → DupValue(fn)          # JS claim
+  → uv_timer_init/start   # handle lifetime
+clearTimeout / fire / shutdown
+  → FreeValue(fn)         # drop claim
+  → uv_close              # end handle (async free in close cb)
+```
+
+Stdlib `quickjs.cch` gained only `cc_qjs_execute_pending_job` (Promise drain).

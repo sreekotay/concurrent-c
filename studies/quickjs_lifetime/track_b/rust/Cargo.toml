@@ -1,0 +1,15 @@
+[package]
+name = "quickjs_lifetime_track_b"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+rquickjs = { version = "0.12.2", default-features = true, features = ["array-buffer"] }
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+lto = false
+codegen-units = 16

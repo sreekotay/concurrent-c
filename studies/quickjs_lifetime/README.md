@@ -14,10 +14,10 @@ This folder is a feedback loop in the same spirit as
    Impose an awkward but fixed foreign lifetime protocol and ask whether
    CC can contain it. Rust/rquickjs receives the same contract.
 
-2. **Track B — natural runtime pressure (scaffold)**  
+2. **Track B — natural runtime pressure**  
    Take a real QuickJS-shaped subsystem (txiki.js timers + libuv) where
    long-lived claims arise from the work, and ask whether the CC port
-   still reads like that work. Implementation comes later.
+   still reads like that work. See [`track_b/`](track_b/).
 
 The hostile test asks whether CC can absorb somebody else’s ontology.  
 The natural test asks whether CC invents unnecessary ontology of its own.
@@ -28,7 +28,7 @@ The natural test asks whether CC invents unnecessary ontology of its own.
 |-----------|-----|-------|
 | Engine | quickjs-ng | Same commit for CC and Rust — see [`PINNED.md`](PINNED.md) |
 | Rust binding | rquickjs | Against that engine |
-| Track B (later) | txiki.js + libuv | Not implemented in this slice |
+| Track B | txiki.js + libuv | [`track_b/`](track_b/) — CC + Rust hosts |
 
 No implementation gets a different QuickJS build, GC policy, compiler
 flags, or workload merely because it performs better under one
@@ -59,14 +59,21 @@ exists — not “destroy the JS object.”
 ```text
 1. hostile retain/release/weak API     ← Track A stage 1
 2. hostile callback registry           ← Track A stage 2
-3. txiki-style timers                  ← Track B (later)
-4. timers + shutdown                   ← Track B (later)
+3. txiki-style timers                  ← Track B
+4. timers + shutdown                   ← Track B
 5. one async I/O primitive             ← later
 6. sockets/fetch/workers               ← only if earlier stages remain interesting
 ```
 
 Every stage keeps its own results. Do not discard an earlier loss because
 a later design change fixes it.
+
+## How to run Track B
+
+```sh
+export CC_QUICKJS_SRC=/path/to/pinned/quickjs-ng
+./studies/quickjs_lifetime/scripts/run_track_b.sh
+```
 
 ## Preregistered outcomes
 
@@ -87,8 +94,9 @@ All of these are legitimate conclusions before implementation:
 | [`PINNED.md`](PINNED.md) | Version pins |
 | [`PROTOCOL.md`](PROTOCOL.md) | Checkpoint / oracle / receipt format |
 | [`track_a/`](track_a/) | Hostile contract, CC + Rust, workload, shape review |
-| [`track_b/`](track_b/) | Timer scaffold only |
-| [`scripts/run_track_a.sh`](scripts/run_track_a.sh) | Build, run, oracle compare |
+| [`track_b/`](track_b/) | Timer hosts (CC + Rust) + txiki reference notes |
+| [`scripts/run_track_a.sh`](scripts/run_track_a.sh) | Track A build / oracle |
+| [`scripts/run_track_b.sh`](scripts/run_track_b.sh) | Track B build / oracle |
 
 ## How to run Track A
 
