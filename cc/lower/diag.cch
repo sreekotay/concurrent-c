@@ -1,0 +1,59 @@
+/* Diagnostics: one message type, one sink.
+ *
+ * `CcDiag` is one message and the error arm of every `T!>(CcDiag)` in the
+ * lowerer: a step that cannot continue returns the diagnostic that says
+ * why, at the position that caused it. `CcDiags` collects the messages a
+ * unit produces (errors that do not stop the step, warnings, notes) and
+ * prints them sorted by position with a caret snippet.
+ *
+ * Lifetimes: a `CcDiag` owns nothing; its strings live in the arena the
+ * producing step was given. The sink lives in the unit's arena. */
+#ifndef CC_LOWER_DIAG_CCH
+#define CC_LOWER_DIAG_CCH
+#include <ccc/std/prelude.cch>
+#include <ccc/std/vec.cch>
+#include <stdio.h>
+
+typedef enum CcSeverity { CC_SEV_NOTE, CC_SEV_WARNING, CC_SEV_ERROR } CcSeverity;
+
+/* A user-coordinate position. `path` is the spelling the user can open. */
+typedef struct CcLoc {
+    CCSlice path;
+    uint32_t line;      /* 1-based; 0 = unknown */
+    uint32_t col;       /* 1-based; 0 = unknown */
+} CcLoc;
+
+typedef struct CcDiag {
+    CcSeverity sev;
+    CcLoc at;
+    CCSlice msg;        /* one line, user vocabulary: "no method 'len' on 'Pair'" */
+    CCSlice note;       /* optional second line: what would fix it; empty when none */
+} CcDiag;
+
+/* Constructors. The message is a template into `a`. */
+CcDiag CcDiag_error(CcLoc at, CCSlice msg);
+CcDiag CcDiag_warning(CcLoc at, CCSlice msg);
+CcDiag CcDiag_note(CcLoc at, CCSlice msg);
+/* d.with_note(note): same diagnostic with a note attached. */
+CcDiag CcDiag_with_note(CcDiag d, CCSlice note);
+
+/* The sink. */
+typedef struct CcDiags {
+    Vec::[CcDiag] items;
+    uint32_t n_errors;
+    CCArena arena;      /* owns items and the strings pushed through push_fmt */
+} CcDiags;
+
+CcDiags CcDiags_new(CCArena a);
+/* ds.push(d): record; counts errors. */
+void CcDiags_push(CcDiags* ds, CcDiag d);
+/* ds.has_errors() */
+bool CcDiags_has_errors(const CcDiags* ds);
+/* ds.print(out, source): sorted by (path, line, col); `source` returns the
+ * text of a path for the caret snippet, or an empty slice when unknown. */
+typedef CCSlice (*CcSourceFn)(CCSlice path, void* ctx);
+void CcDiags_print(const CcDiags* ds, FILE* out, CcSourceFn source, void* ctx);
+
+@typeview Read on CcDiags { r: *; };
+
+#endif

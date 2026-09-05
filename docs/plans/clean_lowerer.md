@@ -167,15 +167,61 @@ text pipeline goes. Cache keys fold the content of every input the
 lowerer read, including the compiler binary and the runtime objects by
 content, never by name.
 
-**Implementation language: C11.** The current lowerer is written in
-Concurrent-C and needs a committed pre-lowered seed to build, which is the
-single largest source of fragility in the tree (section 2 of the audit).
-A C11 lowerer builds from `cc` alone. Self-hosting can return later as a
-test of the language, not as the build path.
+**Implementation language: Concurrent-C, written the CC way.** The
+lowerer is a CC program (`cc/lower/*.ccs`, faces in `cc/lower/*.cch`),
+in the idiom of [`docs/the-cc-way.md`](../the-cc-way.md):
+
+- **Arenas name lifetimes.** One arena per unit holds the tape, the AST
+  and the index for that unit; it dies with the unit. Each pass takes the
+  arena its products must outlive as its last parameter. Small, short
+  results (a mangled name, a candidate list, one `#line` string) come
+  from a `cc_arena_stack(name, N)` in the function that needs them, which
+  overflows to the heap without ceremony when a name is longer than
+  planned: no fixed `char[N]`, ever.
+- **`@variant` for every node.** Tokens, types, expressions, statements
+  and declarations are tagged data with one arm per kind, recursive arms
+  through pointers; `@switch` with `case .arm(bind):` is the only way a
+  pass reads them, so a new kind is a compile error in every pass that
+  does not handle it.
+- **Containers, not linked lists.** `Vec::[T]` for children, `Map::[CCSlice, T]`
+  for the index; `@for` to walk them.
+- **`@string` templates for every emitted string.** Mangled names, `#line`
+  directives, diagnostics and the printed C are templates into the arena
+  that owns the product, never `snprintf` into a buffer.
+- **Results for everything that can fail.** `T!>(CcDiag)` from every
+  parse, resolve and lower step; `!>` forwards, `?>` picks a recovery;
+  no function returns `NULL` or `-1` to mean both "nothing" and "could
+  not". A pass that cannot continue says so at the position that caused
+  it.
+- **UFCS for the API.** `tok.text()`, `unit.parse(a)`, `ix.method(recv, name)`,
+  `node.span()`: methods are declared as `Type_method(Type*, ..., arena)`
+  and read as calls on the value.
+- **Typeviews for clarity.** Each pass sees the face it needs
+  (`@typeview Read on CcUnit { r: *; }` for the printer and the checks;
+  the lowering pass gets the writable face), and the AST's `as:` faces
+  let a `CcExpr*` be used where the span or the kind is all that matters.
+
+The seed question the C11 argument raised is answered the other way: a
+lowerer that pins every line and never clips is what makes a committed
+pre-lowered seed trustworthy. Until the clean lowerer lowers itself it is
+built by the current compiler, in the shapes that compiler accepts
+(`stress/break/break_ast_cc_way_smoke.ccs` is the list, each shape it
+avoids pinned by a sibling `break_*` test); once it lowers its own sources
+its emitted C is committed as the seed and the current lowerer's seed
+retires.
+
+**The C11 spine as reference.** A C11 lexer, parser, printer and index
+were written first against the 2000-file corpus to fix the grammar and the
+identity round-trip (`cc/lower/lex.c`, `parse.c`, `print.c`, `index.c`,
+each with a corpus gate: `cclex --roundtrip`, `ccparse`, `cclower
+--identity`, `ccindex`). They are the algorithmic reference and the gate
+the CC port must pass; they are not the shipped lowerer and are deleted
+when the port passes their gates.
 
 **Size.** The essential lowerer is small: lexer 1k, parser 4k to 5k,
 index 1k, lowering 5k to 6k, printer 1k, diagnostics 1k, driver glue 1k.
-Fifteen to twenty thousand lines against about 150k today.
+Fifteen to twenty thousand lines against about 150k today; the CC forms
+(variants, templates, Results, `@for`) take a third off the C11 count.
 
 ## 4. Compatibility strategy
 

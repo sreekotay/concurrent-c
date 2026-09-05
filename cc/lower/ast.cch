@@ -1,0 +1,595 @@
+/* The AST: tagged data with one arm per kind.
+ *
+ * Every node is a small header (kind-independent facts: the span of tokens
+ * it covers) around a `@variant` whose arms carry only what that kind has.
+ * A pass reads a node with `@switch (n->k) { case .arm(x): ... }`, so a
+ * kind a pass does not handle is a compile error in that pass, and a
+ * field that does not belong to a kind cannot be read by mistake.
+ *
+ * Children are pointers into the unit's arena (recursive arms must be), and
+ * lists are `Vec::[T]` in the same arena. Names are slices of the source
+ * or of the arena; two names compare by content. Nothing here is freed
+ * one node at a time: the unit's arena dies with the unit.
+ *
+ * Spans are token indices into the unit's tape, `[first, last]` inclusive;
+ * a node the lowering creates copies the span of the node it replaces, so
+ * the printer pins its lines to the user's line. */
+#ifndef CC_LOWER_AST_CCH
+#define CC_LOWER_AST_CCH
+#include "lex.cch"
+
+typedef struct CcExpr CcExpr;
+typedef struct CcStmt CcStmt;
+typedef struct CcDecl CcDecl;
+typedef struct CcType CcType;
+typedef struct CcInit CcInit;
+typedef CcExpr* CcExprRef;    /* CcExprList: a pointer element must be a typedef today */
+typedef CcStmt* CcStmtRef;
+typedef CcDecl* CcDeclRef;
+typedef CcType* CcTypeRef;
+typedef CcInit* CcInitRef;
+typedef Vec::[CcExprRef] CcExprList;
+typedef Vec::[CcStmtRef] CcStmtList;
+typedef Vec::[CcDeclRef] CcDeclList;
+typedef Vec::[CcTypeRef] CcTypeList;
+typedef Vec::[CcInitRef] CcInitList;
+
+typedef struct CcSpan { uint32_t first; uint32_t last; } CcSpan;
+CcSpan CcSpan_join(CcSpan a, CcSpan b);         /* a.join(b) */
+bool   CcSpan_is_empty(CcSpan s);
+
+/* ---- Specifiers, qualifiers, attributes ------------------------------ */
+
+enum {  /* storage and function specifiers on a declaration: CcDecl.specs */
+    CC_SPEC_STATIC = 1u << 0, CC_SPEC_EXTERN = 1u << 1, CC_SPEC_TYPEDEF = 1u << 2,
+    CC_SPEC_INLINE = 1u << 3, CC_SPEC_NORETURN = 1u << 4, CC_SPEC_THREAD = 1u << 5,
+    CC_SPEC_REGISTER = 1u << 6, CC_SPEC_AUTO = 1u << 7,
+    /* Concurrent-C function facts */
+    CC_SPEC_ASYNC = 1u << 8, CC_SPEC_BLOCKING = 1u << 9, CC_SPEC_NONBLOCKING = 1u << 10,
+    CC_SPEC_LATENCY_SENSITIVE = 1u << 11, CC_SPEC_COMPTIME = 1u << 12
+};
+enum {  /* qualifiers on one level of a type: CcType.quals */
+    CC_QUAL_CONST = 1u << 0, CC_QUAL_VOLATILE = 1u << 1, CC_QUAL_RESTRICT = 1u << 2, CC_QUAL_ATOMIC = 1u << 3
+};
+
+/* `__attribute__((...))`, `[[...]]`, `_Alignas(...)`, `@typeview(Name)`,
+ * and CC parameter attributes (`@arena`, `@print`, `@discardable`), kept as
+ * name + verbatim argument tokens. */
+typedef struct CcAttr {
+    CcSpan span;
+    CCSlice name;
+    CcSpan args;            /* the tokens inside the parentheses; empty when none */
+} CcAttr;
+
+/* ---- Types ------------------------------------------------------------ */
+
+typedef struct CcParam {
+    CcSpan span;
+    CcType* type;
+    CCSlice name;           /* empty for an unnamed parameter */
+    Vec::[CcAttr] attrs;
+} CcParam;
+
+typedef struct CcField {
+    CcSpan span;
+    CcType* type;
+    CCSlice name;           /* empty for an anonymous member */
+    CcExpr* bits;           /* `: n` bit-field width, or NULL */
+    bool is_pp;             /* a preprocessor line inside the member list: pp_tok only */
+    uint32_t pp_tok;
+} CcField;
+
+typedef struct CcEnumerator {
+    CcSpan span;
+    CCSlice name;
+    CcExpr* value;          /* `= v`, or NULL */
+    bool is_pp;
+    uint32_t pp_tok;
+} CcEnumerator;
+
+typedef struct CcNamedType {    /* `int`, `unsigned long`, `struct Foo`, `MyType` */
+    CCSlice name;               /* canonical spelling: "unsigned long", "struct Foo", "MyType" */
+    bool struct_kw; bool union_kw; bool enum_kw;
+} CcNamedType;
+typedef struct CcPointerType { CcType* pointee; } CcPointerType;
+typedef struct CcArrayType {
+    CcType* elem;
+    CcExpr* size;               /* NULL for `T[]` */
+    bool is_static;             /* `T[static n]` */
+    bool is_star;               /* `T[*]` */
+} CcArrayType;
+typedef struct CcFuncType {
+    CcType* ret;
+    Vec::[CcParam] params;
+    bool variadic;
+    bool has_prototype;         /* `(void)`/`(int)` vs `()` */
+} CcFuncType;
+typedef struct CcRecordType {   /* struct or union definition or forward reference */
+    CCSlice tag;                /* empty for anonymous */
+    Vec::[CcField] fields;
+    bool is_union;
+    bool is_definition;         /* `{ ... }` present */
+} CcRecordType;
+typedef struct CcEnumType {
+    CCSlice tag;
+    Vec::[CcEnumerator] items;
+    bool is_definition;
+} CcEnumType;
+typedef struct CcTypeofType { CcExpr* expr; CcType* type; } CcTypeofType;   /* one of the two */
+typedef struct CcResultType {   /* `T!>(E)` / `T?>(E)` */
+    CcType* value;
+    CcType* err;
+    bool optional;              /* `?>`: a call may be discarded */
+} CcResultType;
+typedef struct CcSliceType {    /* `T[:]`, `T[n:]`, `T[:0]`, `T[:!]` */
+    CcType* elem;
+    CcExpr* fixed;              /* `T[n:]` */
+    bool unique;
+    bool sentinel;
+} CcSliceType;
+typedef struct CcChanType {     /* `T[<:cap]` / `T[>:cap]` / `T[<:cap,"N:1"]` */
+    CcType* elem;
+    CcExpr* cap;
+    CCSlice topology;           /* "1:1", "N:1"; empty when unspecified */
+    char dir;                   /* '<' receive, '>' send, 0 both */
+    bool ordered;
+} CcChanType;
+typedef struct CcGenericType {  /* `Vec::[T]`, `Map::[K, V]` */
+    CCSlice family;
+    CcTypeList args;
+} CcGenericType;
+typedef struct CcScopedType {   /* `@scoped(T)` */
+    CcType* inner;
+} CcScopedType;
+
+@variant CcTypeK {
+    named:   CcNamedType;
+    pointer: CcPointerType;
+    array:   CcArrayType;
+    func:    CcFuncType;
+    record:  CcRecordType;
+    enumt:   CcEnumType;
+    typeof_: CcTypeofType;
+    atomic:  CcPointerType;     /* `_Atomic(T)`: pointee is T */
+    result:  CcResultType;
+    slice:   CcSliceType;
+    chan:    CcChanType;
+    generic: CcGenericType;
+    scoped:  CcScopedType;
+    auto_:   void;              /* `auto` (C23 / CC inference) */
+};
+
+struct CcType {
+    CcSpan span;
+    uint32_t quals;             /* CC_QUAL_* on this level */
+    Vec::[CcAttr] attrs;
+    CcTypeK k;
+};
+
+/* ---- Expressions ------------------------------------------------------ */
+
+typedef enum CcOp {
+    CC_OP_NONE = 0,
+    CC_OP_ADD, CC_OP_SUB, CC_OP_MUL, CC_OP_DIV, CC_OP_MOD, CC_OP_SHL, CC_OP_SHR,
+    CC_OP_LT, CC_OP_GT, CC_OP_LE, CC_OP_GE, CC_OP_EQ, CC_OP_NE,
+    CC_OP_AND, CC_OP_XOR, CC_OP_OR, CC_OP_LAND, CC_OP_LOR,
+    CC_OP_NEG, CC_OP_POS, CC_OP_NOT, CC_OP_BITNOT, CC_OP_DEREF, CC_OP_ADDR,
+    CC_OP_PREINC, CC_OP_PREDEC, CC_OP_POSTINC, CC_OP_POSTDEC, CC_OP_SIZEOF, CC_OP_ALIGNOF,
+    CC_OP_ASSIGN, CC_OP_ADD_ASSIGN, CC_OP_SUB_ASSIGN, CC_OP_MUL_ASSIGN, CC_OP_DIV_ASSIGN,
+    CC_OP_MOD_ASSIGN, CC_OP_SHL_ASSIGN, CC_OP_SHR_ASSIGN, CC_OP_AND_ASSIGN, CC_OP_XOR_ASSIGN,
+    CC_OP_OR_ASSIGN
+} CcOp;
+CCSlice CcOp_spelling(CcOp op);         /* "+", "<<=", "sizeof" */
+
+typedef struct CcLiteral { uint32_t tok; uint32_t n_toks; } CcLiteral;   /* NUMBER/CHAR; STRING: adjacent literals */
+typedef struct CcUnary { CcOp op; CcExpr* a; } CcUnary;
+typedef struct CcBinary { CcOp op; CcExpr* a; CcExpr* b; } CcBinary;      /* also assignment ops */
+typedef struct CcTernary { CcExpr* c; CcExpr* a; CcExpr* b; } CcTernary;
+typedef struct CcCall { CcExpr* callee; CcExprList args; } CcCall;
+typedef struct CcIndexExpr { CcExpr* a; CcExpr* i; } CcIndexExpr;
+typedef struct CcMember { CcExpr* a; CCSlice name; bool arrow; } CcMember;
+typedef struct CcCast { CcType* type; CcExpr* a; } CcCast;
+typedef struct CcSizeofType { CcOp op; CcType* type; } CcSizeofType;       /* sizeof(T) / _Alignof(T) */
+typedef struct CcCompound { CcType* type; CcInit* init; } CcCompound;       /* (T){ ... } */
+typedef struct CcGenericSelArm { CcSpan span; CcType* type; CcExpr* expr; bool is_default; } CcGenericSelArm;
+typedef struct CcGenericSel { CcExpr* control; Vec::[CcGenericSelArm] arms; } CcGenericSel;
+typedef struct CcStmtExpr { CcStmt* block; } CcStmtExpr;                  /* ({ ... }) */
+typedef struct CcComma { CcExpr* a; CcExpr* b; } CcComma;
+/* Concurrent-C */
+typedef struct CcUfcs {         /* recv.method(args) / recv->method(args) / recv.method::[T](args) */
+    CcExpr* recv;
+    CCSlice method;
+    bool arrow;
+    CcTypeList targs;
+    CcExprList args;
+} CcUfcs;
+typedef struct CcTypeScoped {   /* Type.fn(args) */
+    CcType* type;
+    CCSlice fn;
+    CcExprList args;
+} CcTypeScoped;
+typedef struct CcGenericFn {    /* name::[T...](args), e.g. vec_new::[int](a) */
+    CCSlice name;
+    CcTypeList targs;
+    CcExprList args;
+} CcGenericFn;
+typedef struct CcUnwrap { CcExpr* a; } CcUnwrap;                          /* e !> (handler is the @errhandler in scope) */
+typedef struct CcUnwrapBody {   /* e !> body  /  e !>(err) body */
+    CcExpr* a;
+    CCSlice binder;             /* empty when no `(err)` */
+    CcStmt* body;               /* a block or a single statement; must diverge in expression position */
+} CcUnwrapBody;
+typedef struct CcUnwrapOr {     /* e ?> default  /  e ?>(err) default */
+    CcExpr* a;
+    CCSlice binder;
+    CcExpr* fallback;
+} CcUnwrapOr;
+typedef struct CcUnwrapDestroy { /* e !> @destroy [{ D }]  (initializer form) */
+    CcExpr* a;
+    CcStmt* destroy_body;       /* NULL: the type's destroy hook */
+} CcUnwrapDestroy;
+typedef struct CcTplPart {      /* one literal run or one `${expr}` / `$~tag{expr}` slot */
+    CcSpan span;
+    CCSlice text;               /* literal run: the bytes, escapes still as written */
+    CcExpr* slot;               /* NULL for a literal run */
+    CCSlice tag;                /* `$~tag{...}`; empty for `${...}` */
+} CcTplPart;
+typedef struct CcTemplate {     /* @string(`...`, arena) / @string(policy, `...`, arena) / @string(expr, arena) */
+    CcExpr* policy;             /* NULL when absent */
+    Vec::[CcTplPart] parts;     /* empty for the direct form */
+    CcExpr* direct;             /* @string(expr, arena): the expression; NULL for the literal form */
+    CcExpr* arena;              /* the arena operand; a `scratch` node for @scratch; NULL for the bounded stack form */
+} CcTemplate;
+typedef struct CcSliceLit { uint32_t tok; } CcSliceLit;                   /* @slice("...") */
+typedef struct CcScratch { CcExpr* bytes; } CcScratch;                    /* @scratch / @scratch(N) */
+typedef struct CcCapture { CcSpan span; CCSlice name; bool by_ref; bool is_move; } CcCapture;
+typedef struct CcClosure {      /* (params) => [captures] body */
+    Vec::[CcParam] params;
+    Vec::[CcCapture] captures;
+    CcStmt* body;               /* a block, or an expression statement for `=> expr` */
+    bool is_unsafe;
+    bool is_async;
+} CcClosure;
+typedef struct CcAwait { CcExpr* a; } CcAwait;
+typedef struct CcComptimeExpr { CcExpr* a; } CcComptimeExpr;              /* @comptime(e) */
+typedef struct CcCreate {       /* @create(args) / name@(args) */
+    CCSlice var;                /* name@(args): the declared name; empty for @create */
+    CcExprList args;
+} CcCreate;
+typedef struct CcEmit { CcTemplate tpl; } CcEmit;                         /* @emit(`...`, arena) */
+typedef struct CcVariantLit {   /* { .arm = v } / .arm(args) / .arm as a value */
+    CCSlice arm;
+    CcExprList args;
+} CcVariantLit;
+typedef struct CcCallMode { CCSlice mode; CcExpr* a; } CcCallMode;        /* @blocking e / @nonblocking e */
+typedef struct CcRange { CcExpr* lo; CcExpr* hi; } CcRange;               /* lo..hi */
+typedef struct CcPpExpr { uint32_t tok; } CcPpExpr;                       /* a preprocessor line in an argument list */
+typedef struct CcTypeArg { CcType* type; } CcTypeArg;                     /* a type in argument position */
+
+@variant CcExprK {
+    ident:       CCSlice;
+    number:      CcLiteral;
+    chr:         CcLiteral;
+    string:      CcLiteral;
+    paren:       CcUnary;       /* op = CC_OP_NONE */
+    unary:       CcUnary;
+    binary:      CcBinary;
+    assign:      CcBinary;
+    ternary:     CcTernary;
+    call:        CcCall;
+    index:       CcIndexExpr;
+    member:      CcMember;
+    cast:        CcCast;
+    sizeof_type: CcSizeofType;
+    compound:    CcCompound;
+    generic_sel: CcGenericSel;
+    stmt_expr:   CcStmtExpr;
+    comma:       CcComma;
+    ufcs:        CcUfcs;
+    type_scoped: CcTypeScoped;
+    generic_fn:  CcGenericFn;
+    unwrap:      CcUnwrap;
+    unwrap_body: CcUnwrapBody;
+    unwrap_or:   CcUnwrapOr;
+    unwrap_destroy: CcUnwrapDestroy;
+    template:    CcTemplate;
+    slice_lit:   CcSliceLit;
+    scratch:     CcScratch;
+    closure:     CcClosure;
+    await:       CcAwait;
+    comptime:    CcComptimeExpr;
+    create:      CcCreate;
+    emit:        CcEmit;
+    variant_lit: CcVariantLit;
+    call_mode:   CcCallMode;
+    range:       CcRange;
+    pp:          CcPpExpr;
+    type_arg:    CcTypeArg;
+};
+
+struct CcExpr {
+    CcSpan span;
+    CcExprK k;
+};
+
+/* ---- Initializers ----------------------------------------------------- */
+
+typedef struct CcDesignator {
+    CCSlice field;              /* `.field`; empty for an index designator */
+    CcExpr* index;              /* `[i]` */
+    CcExpr* index_hi;           /* `[lo ... hi]` */
+} CcDesignator;
+
+struct CcInit {
+    CcSpan span;
+    Vec::[CcDesignator] designators;    /* empty for positional */
+    CcExpr* expr;               /* scalar, or NULL when `items` is the `{ ... }` list */
+    CcInitList items;
+    bool is_list;
+    bool is_pp;
+    uint32_t pp_tok;
+};
+
+/* ---- Statements ------------------------------------------------------- */
+
+typedef struct CcExprStmt { CcExpr* e; } CcExprStmt;                      /* e == NULL for `;` */
+typedef struct CcDeclStmt { CcDecl* d; } CcDeclStmt;
+typedef struct CcBlock { CcStmtList stmts; } CcBlock;
+typedef struct CcIf { CcExpr* cond; CcStmt* then; CcStmt* els; } CcIf;    /* els may be NULL */
+typedef struct CcWhile { CcExpr* cond; CcStmt* body; } CcWhile;           /* also do-while */
+typedef struct CcFor {
+    CcDecl* init_decl;          /* one of init_decl / init_expr, or neither */
+    CcExpr* init_expr;
+    CcExpr* cond;
+    CcExpr* step;
+    CcStmt* body;
+} CcFor;
+typedef struct CcSwitch { CcExpr* subject; CcStmt* body; bool is_variant; } CcSwitch;   /* @switch sets is_variant */
+typedef struct CcCase {         /* case e: / case lo ... hi: / case .arm(bind): / default: */
+    CcExpr* lo;
+    CcExpr* hi;
+    CCSlice arm;                /* `.arm` */
+    CCSlice bind;               /* `(bind)` */
+    bool is_default;
+    CcStmt* inner;              /* the labelled statement, or NULL */
+} CcCase;
+typedef struct CcReturn { CcExpr* value; } CcReturn;                      /* NULL for bare return */
+typedef struct CcGoto { CCSlice label; } CcGoto;
+typedef struct CcLabel { CCSlice name; CcStmt* inner; } CcLabel;
+typedef struct CcAsm { CcSpan tokens; } CcAsm;
+/* Concurrent-C */
+typedef struct CcDefer { CCSlice name; char on; CcStmt* body; } CcDefer;  /* on: 0 always, 'o' ok, 'e' err */
+typedef struct CcCancelDefer { CCSlice name; } CcCancelDefer;
+typedef struct CcErrhandler { CcType* err_type; CCSlice binder; CcStmt* body; } CcErrhandler;
+typedef struct CcErrFwd { CcExpr* err; } CcErrFwd;                        /* @err(e); */
+typedef struct CcUnwrapStmt { CcExpr* e; } CcUnwrapStmt;                  /* e !>;  e !> body; */
+typedef struct CcForIn {        /* for (x in xs) / @for (&x in xs) / @for (a, b in xs, ys) / for (i in lo..hi) */
+    CCSlice bind;
+    CCSlice bind2;
+    CcExprList iterables; /* one or two; a `range` node for lo..hi */
+    bool by_ref;
+    bool is_at_for;
+    CcStmt* body;
+} CcForIn;
+typedef struct CcParallelArm {
+    CcSpan span;
+    CCSlice target;             /* `a = expr;`; empty for `expr !>;` and @serial */
+    CcExpr* expr;               /* NULL for @serial */
+    CcStmt* serial;             /* the @serial block */
+    bool unwrap;
+} CcParallelArm;
+typedef struct CcParallel {     /* @parallel [spawn] [(pred)] [seq (cond)] { arms } [tail]; CCParallel h = @parallel { ... } */
+    Vec::[CcParallelArm] arms;
+    bool spawn;
+    CcExpr* pred;
+    CcExpr* seq;
+    CCSlice bind;               /* `CCParallel h = ...` */
+    CcType* bind_type;
+    CcExpr* tail;               /* `!>.wait()!>` chain after the block, or NULL */
+} CcParallel;
+typedef struct CcParallelFor {  /* @parallel [seq (c)] [wait (ts)] for (i in lo..hi) [worker (w)] [cache (a, b)] body */
+    CcForIn loop;
+    CcExpr* seq;
+    CcExpr* wait;
+    CCSlice worker;
+    CcExprList cache;
+} CcParallelFor;
+typedef struct CcParallelDest { CcExpr* dest; CcStmtList stmts; } CcParallelDest;   /* @parallel(h) { } */
+typedef struct CcStage { CcExpr* gate; CcExprList args; CcStmtList stmts; } CcStage;
+typedef struct CcWithDeadline { CcExpr* deadline; CCSlice as; CcStmtList stmts; } CcWithDeadline;
+typedef struct CcWith { CCSlice key; CcExpr* value; CcStmtList stmts; } CcWith;      /* @with(arena = a) { } */
+typedef struct CcClosing {      /* @closing(tx, ...) { } / @closing(tx) spawn(...) */
+    CcExprList channels;
+    CcStmtList stmts;
+    CcExpr* spawn;              /* the spawn call form */
+} CcClosing;
+typedef struct CcSpawnBlock { CcStmtList stmts; bool is_nursery; CcExprList closing; } CcSpawnBlock;
+typedef struct CcModeBlock { CCSlice mode; CcStmtList stmts; } CcModeBlock;   /* @nonblocking { } */
+typedef struct CcComptimeIf { CcExpr* cond; CcStmtList then; CcStmtList els; } CcComptimeIf;
+typedef struct CcComptimeFor { CCSlice bind; CcExpr* over; CcStmtList stmts; } CcComptimeFor;
+
+@variant CcStmtK {
+    expr:          CcExprStmt;
+    decl:          CcDeclStmt;
+    block:         CcBlock;
+    if_:           CcIf;
+    while_:        CcWhile;
+    do_:           CcWhile;
+    for_:          CcFor;
+    switch_:       CcSwitch;
+    case_:         CcCase;
+    return_:       CcReturn;
+    break_:        void;
+    continue_:     void;
+    goto_:         CcGoto;
+    label:         CcLabel;
+    asm_:          CcAsm;
+    defer:         CcDefer;
+    cancel_defer:  CcCancelDefer;
+    errhandler:    CcErrhandler;
+    err_fwd:       CcErrFwd;
+    unwrap:        CcUnwrapStmt;
+    for_in:        CcForIn;
+    parallel:      CcParallel;
+    parallel_for:  CcParallelFor;
+    parallel_dest: CcParallelDest;
+    serial:        CcBlock;
+    stage:         CcStage;
+    with_deadline: CcWithDeadline;
+    with:          CcWith;
+    closing:       CcClosing;
+    spawn_block:   CcSpawnBlock;
+    mode_block:    CcModeBlock;
+    unsafe:        CcBlock;
+    comptime_if:   CcComptimeIf;
+    comptime_block: CcBlock;
+    comptime_for:  CcComptimeFor;
+};
+
+struct CcStmt {
+    CcSpan span;
+    CcStmtK k;
+};
+
+/* ---- Declarations ----------------------------------------------------- */
+
+typedef struct CcVarDecl {      /* T name [= init] [@destroy [{ D }]] [@detach]; one declarator per node */
+    CcType* type;
+    CCSlice name;
+    CcInit* init;
+    bool destroy;
+    CcStmt* destroy_body;
+    bool detach;
+} CcVarDecl;
+typedef struct CcFuncDecl {     /* T name(params) body-or-; */
+    CcType* type;               /* the func type: ret + params */
+    CCSlice name;
+    CcStmt* body;               /* NULL for a prototype */
+} CcFuncDecl;
+typedef struct CcTypedefDecl { CcType* type; CCSlice name; } CcTypedefDecl;
+typedef struct CcTaggedDecl { CcType* type; } CcTaggedDecl;              /* struct/union/enum definition or forward, alone */
+typedef struct CcStaticAssert { CcExpr* cond; uint32_t msg_tok; } CcStaticAssert;
+typedef struct CcPpDecl {
+    uint32_t tok;
+    CcSpan skipped;             /* a `#if 0` / `__cplusplus` region kept verbatim, unparsed; empty otherwise */
+} CcPpDecl;
+typedef struct CcViewItem {     /* `name`, `^name`, `out_*`, `(Type)name` */
+    CcSpan span;
+    CCSlice name;
+    bool deny;
+    CcType* cast;
+} CcViewItem;
+typedef struct CcHookEntry {    /* .destroy = fn / .ufcs = { ... } / as: a, b; / r: x, y; */
+    CcSpan span;
+    CCSlice key;
+    CcExpr* value;
+    CcStmt* body;
+    Vec::[CcViewItem] items;
+} CcHookEntry;
+typedef struct CcTypehooks { CcType* target; Vec::[CcHookEntry] entries; } CcTypehooks;
+typedef struct CcTypeview {     /* @typeview [Name] on T { ... }; */
+    CCSlice view;               /* empty for the unnamed view */
+    CcType* target;             /* may be a glob: `Fam_*` */
+    Vec::[CcHookEntry] entries;
+} CcTypeview;
+typedef struct CcVariantArm { CcSpan span; CCSlice name; CcType* payload; } CcVariantArm;   /* payload NULL for `void` */
+typedef struct CcVariantDecl { CCSlice name; Vec::[CcVariantArm] arms; bool packed; } CcVariantDecl;
+typedef struct CcGrammarDecl { CCSlice name; CCSlice engine; CCSlice body; } CcGrammarDecl;   /* fenced body, opaque */
+typedef struct CcFactoryDecl {  /* CC_GENERIC_FACTORY(Name[, arity]) { body } / _EXTEND */
+    CCSlice name;
+    CcExpr* arity;
+    bool extend;
+    CcStmt* body;
+} CcFactoryDecl;
+typedef struct CcComptimeFn { CcFuncDecl fn; } CcComptimeFn;
+typedef struct CcComptimeDeclIf { CcExpr* cond; CcDeclList then; CcDeclList els; } CcComptimeDeclIf;
+typedef struct CcScopedTypeDecl { CCSlice name; CcType* type; } CcScopedTypeDecl;   /* @scoped type Name::[T]; */
+typedef struct CcPragmaCc { CCSlice name; CCSlice value; } CcPragmaCc;    /* #pragma(@parallel) off */
+typedef struct CcLinkDecl { CCSlice lib; } CcLinkDecl;
+typedef struct CcTaskDoc { CcSpan comment; } CcTaskDoc;
+typedef struct CcMacroCall { CcExpr* call; bool semi; } CcMacroCall;      /* NAME(args) at file scope */
+typedef struct CcTopStmt { CcStmt* s; } CcTopStmt;                        /* a statement at file scope (.shcc) */
+
+@variant CcDeclK {
+    var:             CcVarDecl;
+    func:            CcFuncDecl;
+    typedef_:        CcTypedefDecl;
+    tagged:          CcTaggedDecl;
+    static_assert_:  CcStaticAssert;
+    pp:              CcPpDecl;
+    empty:           void;
+    typehooks:       CcTypehooks;
+    typeview:        CcTypeview;
+    variant:         CcVariantDecl;
+    grammar:         CcGrammarDecl;
+    factory:         CcFactoryDecl;
+    comptime_fn:     CcComptimeFn;
+    comptime_block:  CcBlock;
+    comptime_if:     CcComptimeDeclIf;
+    scoped_type:     CcScopedTypeDecl;
+    pragma_cc:       CcPragmaCc;
+    link:            CcLinkDecl;
+    task_doc:        CcTaskDoc;
+    macro_call:      CcMacroCall;
+    stmt:            CcTopStmt;
+};
+
+struct CcDecl {
+    CcSpan span;
+    uint32_t specs;             /* CC_SPEC_* */
+    Vec::[CcAttr] attrs;
+    CcDeclK k;
+};
+
+/* ---- Translation unit ------------------------------------------------- */
+
+typedef struct CcUnit {
+    CCArena arena;              /* owns the tape, every node, every list, every name */
+    CcTape tape;
+    CcDeclList decls;
+    bool has_shebang;
+    Vec::[CCSlice] typedef_names;   /* file-scope typedef names, for the declaration/expression ambiguity */
+    Vec::[CCSlice] assumed_types;   /* identifiers parsed as type names on faith; the index confirms them */
+} CcUnit;
+
+/* ---- Constructors and accessors --------------------------------------- */
+
+/* Every constructor allocates in `a` and takes the span of the construct. */
+CcType* cc_type_named(CCSlice name, CcSpan span, CCArena a);
+CcType* cc_type_pointer(CcType* pointee, CcSpan span, CCArena a);
+CcType* cc_type_result(CcType* value, CcType* err, bool optional, CcSpan span, CCArena a);
+CcExpr* cc_expr_ident(CCSlice name, CcSpan span, CCArena a);
+CcExpr* cc_expr_call(CcExpr* callee, CcSpan span, CCArena a);      /* args pushed after: e->call.args.push(x) */
+CcExpr* cc_expr_member(CcExpr* a, CCSlice name, bool arrow, CcSpan span, CCArena arena);
+CcExpr* cc_expr_unary(CcOp op, CcExpr* a, CcSpan span, CCArena arena);
+CcExpr* cc_expr_binary(CcOp op, CcExpr* a, CcExpr* b, CcSpan span, CCArena arena);
+CcStmt* cc_stmt_expr(CcExpr* e, CcSpan span, CCArena a);
+CcStmt* cc_stmt_block(CcSpan span, CCArena a);
+CcStmt* cc_stmt_if(CcExpr* cond, CcStmt* then, CcStmt* els, CcSpan span, CCArena a);
+CcStmt* cc_stmt_return(CcExpr* value, CcSpan span, CCArena a);
+CcStmt* cc_stmt_goto(CCSlice label, CcSpan span, CCArena a);
+CcStmt* cc_stmt_label(CCSlice name, CcStmt* inner, CcSpan span, CCArena a);
+CcDecl* cc_decl_var(CcType* type, CCSlice name, CcInit* init, CcSpan span, CCArena a);
+
+/* Kind names in the user's vocabulary, for diagnostics: "unwrap", "@parallel for". */
+CCSlice CcExpr_kind_name(const CcExpr* e);
+CCSlice CcStmt_kind_name(const CcStmt* s);
+CCSlice CcDecl_kind_name(const CcDecl* d);
+CCSlice CcType_kind_name(const CcType* t);
+
+/* t.is_named("CCArena"), t.is_pointer(), t.is_result(): the questions the
+ * index and the lowerings ask most; each is one `@switch` in ast.ccs. */
+bool CcType_is_named(const CcType* t, const char* name);
+bool CcType_is_pointer(const CcType* t);
+bool CcType_is_result(const CcType* t);
+bool CcType_is_void(const CcType* t);
+
+/* u.loc(span): user coordinates of a span's first token. */
+CcLoc CcUnit_loc(const CcUnit* u, CcSpan span);
+/* u.text(span): the source bytes a span covers, without leading trivia. */
+CCSlice CcUnit_text(const CcUnit* u, CcSpan span);
+
+/* Passes that only read the tree take this face. */
+@typeview Read on CcUnit { r: *; };
+
+#endif

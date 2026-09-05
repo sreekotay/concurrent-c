@@ -1,0 +1,49 @@
+/* Parser: tape → CcUnit.
+ *
+ * Recursive descent over the tape, C11 plus the Concurrent-C forms in
+ * ast.cch. Errors are diagnostics on the sink with the token's position;
+ * the parser recovers at the next `;` or `}` at the same depth so one file
+ * reports every error. The unit is returned even with errors; the driver
+ * refuses to lower a unit whose sink has errors.
+ *
+ * Lifetimes: the unit owns its arena; the caller frees the unit by freeing
+ * the arena the unit was created in (`unit.arena`). */
+#ifndef CC_LOWER_PARSE_CCH
+#define CC_LOWER_PARSE_CCH
+#include "ast.cch"
+
+typedef enum CcUnitMode {
+    CC_UNIT_SOURCE,     /* .ccs: declarations, definitions */
+    CC_UNIT_HEADER,     /* .cch: declarations; bodies of static inline functions are parsed */
+    CC_UNIT_SCRIPT      /* .shcc: top-level statements allowed */
+} CcUnitMode;
+
+typedef struct CcParseOpts {
+    CcUnitMode mode;
+    Vec::[CCSlice] known_types;     /* typedef names from headers already indexed */
+} CcParseOpts;
+
+/* Parse `src` as `path`. The unit's arena is `a`; the tape is lexed into it. */
+CcUnit* cc_parse_unit(CCSlice path, CCSlice src, CcParseOpts opts, CcDiags* ds, CCArena a);
+
+/* Parse one expression in isolation (a template slot, a `@comptime` value). */
+CcExpr* !>(CcDiag) cc_parse_expr(CCSlice text, CcLoc at, CcUnit* u);
+
+/* u.dump(out): an S-expression rendering with spans, for tests. */
+void CcUnit_dump(const CcUnit* u, FILE* out);
+
+/* A generic walk: `visit` is called on every node, parents first, with the
+ * closure environment the caller captured. Returning false skips the
+ * node's children. */
+typedef struct CcVisitor {
+    bool (*type)(CcType* t, void* env);
+    bool (*expr)(CcExpr* e, void* env);
+    bool (*stmt)(CcStmt* s, void* env);
+    bool (*decl)(CcDecl* d, void* env);
+    void* env;
+} CcVisitor;
+void CcUnit_walk(CcUnit* u, CcVisitor v);
+void CcStmt_walk(CcStmt* s, CcVisitor v);
+void CcExpr_walk(CcExpr* e, CcVisitor v);
+
+#endif
