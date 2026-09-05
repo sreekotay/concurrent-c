@@ -1,0 +1,26 @@
+/* `#'\xHH'` inside schema `rules [...]` — scanner must skip the full
+ * hex escape, not fail as `bad #'c'`. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+@grammar(schema) QPath {~~~~
+    rules [
+        pchar: complement charset [#' ' #'\x3F' #'\r' #'\n']
+        pth: keep [#'/' any pchar]
+    ]
+    path: pth
+~~~~}
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(1)) @destroy;
+    QPath ok = {0};
+    QPath bad = {0};
+    if (!cc_parse(QPath, "/index.html", strlen("/index.html"), a, &ok))
+        return 1;
+    if (ok.path.len < 2 || ok.path.ptr[0] != '/') return 2;
+    if (cc_parse(QPath, "/a?b", strlen("/a?b"), a, &bad))
+        return 3;
+    printf("ok\n");
+    return 0;
+}

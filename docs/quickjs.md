@@ -3,7 +3,6 @@
 Header: [`ccc/script/quickjs.cch`](../cc/include/ccc/script/quickjs.cch).
 Demo: [`examples/qjs/qjsdemo.shcc`](../examples/qjs/qjsdemo.shcc).
 Normative surface: [stdlib spec — QuickJS interop](../spec/concurrent-c-stdlib-spec.md#quickjs-interop).
-Adversarial lifetime study → [`studies/quickjs_lifetime/`](../studies/quickjs_lifetime/).
 
 CC owns `main`. QuickJS is a guest in the same process. The header is
 userspace — no compiler or runtime special case — same posture as

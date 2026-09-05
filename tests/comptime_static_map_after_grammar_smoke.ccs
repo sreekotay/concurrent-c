@@ -1,0 +1,43 @@
+/* Grammar comptime markers sit earlier than user typedefs. static_map
+ * tables must splice after the complete value type, and the comptime TU
+ * must see file-scope enums used as initializers. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/static_map.cch>
+#include <stdio.h>
+
+@grammar(rules) Marker {~~~~
+    Marker: [#'x']
+~~~~}
+
+typedef enum KindTag {
+    KIND_A = 1,
+    KIND_B = 2,
+} KindTag;
+
+typedef struct KindSpec {
+    KindTag kind;
+} KindSpec;
+
+typedef struct KindEntry {
+    const char* key;
+    KindSpec value;
+} KindEntry;
+
+@comptime {
+    KindEntry entries[] = {
+        { "a", { KIND_A } },
+        { "b", { KIND_B } },
+    };
+    static_map("kinds", entries, CC_STATIC_MAP_CASE_SENSITIVE);
+}
+
+int main(void) {
+    const KindSpec* a = kinds_get(CC_SLICE_LIT("a"));
+    const KindSpec* b = kinds_get(CC_SLICE_LIT("b"));
+    if (!a || a->kind != KIND_A) return 1;
+    if (!b || b->kind != KIND_B) return 2;
+    if (kinds_get(CC_SLICE_LIT("z"))) return 3;
+    if (!cc_match(Marker, "x", 1)) return 4;
+    printf("ok\n");
+    return 0;
+}

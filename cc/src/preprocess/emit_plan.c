@@ -2210,10 +2210,86 @@ int cc_emit_plan_take_exec_error(void) {
     return had;
 }
 
+/* One top-level typedef/struct/enum at a time so a later, larger extract
+ * (grammar types spliced into src) cannot re-inject decls already in the
+ * comptime prelude. */
+static void cc__exec_append_type_decls(const char* types) {
+    const char* p;
+    const char* start;
+    int depth;
+    int in_str;
+    char qch;
+    if (!types || !types[0]) return;
+    p = types;
+    start = p;
+    depth = 0;
+    in_str = 0;
+    qch = 0;
+    while (*p) {
+        if (in_str) {
+            if (*p == '\\' && p[1]) {
+                p += 2;
+                continue;
+            }
+            if (*p == qch) in_str = 0;
+            p++;
+            continue;
+        }
+        if (*p == '"' || *p == '\'') {
+            qch = *p;
+            in_str = 1;
+            p++;
+            continue;
+        }
+        if (*p == '{') depth++;
+        else if (*p == '}') {
+            if (depth) depth--;
+        } else if (*p == ';' && depth == 0) {
+            const char* t = start;
+            int is_enum = 0;
+            while (*t == ' ' || *t == '\t' || *t == '\n' || *t == '\r') t++;
+            if (strncmp(t, "typedef", 7) == 0 &&
+                !(t[7] == '_' || (t[7] >= 'A' && t[7] <= 'Z') ||
+                  (t[7] >= 'a' && t[7] <= 'z') ||
+                  (t[7] >= '0' && t[7] <= '9'))) {
+                t += 7;
+                while (*t == ' ' || *t == '\t' || *t == '\n' || *t == '\r')
+                    t++;
+            }
+            if (strncmp(t, "enum", 4) == 0 &&
+                !(t[4] == '_' || (t[4] >= 'A' && t[4] <= 'Z') ||
+                  (t[4] >= 'a' && t[4] <= 'z') ||
+                  (t[4] >= '0' && t[4] <= '9')))
+                is_enum = 1;
+            if (is_enum) {
+                size_t n = (size_t)(p - start + 1);
+                char* piece = (char*)malloc(n + 1);
+                if (piece) {
+                    memcpy(piece, start, n);
+                    piece[n] = '\0';
+                    cc_comptime_fn_registry_append_prelude(piece);
+                    free(piece);
+                }
+            }
+            p++;
+            while (*p == '\n' || *p == '\r' || *p == ' ' || *p == '\t') p++;
+            start = p;
+            continue;
+        }
+        p++;
+    }
+}
+
 int cc_emit_plan_exec_comptime_blocks(const char* src, size_t len, const char* input_path) {
+    char* types;
     cc__exec_failed = 0;
     cc__diag_input_path = input_path;
     cc_emit_plan_set_reflect_source(src, len);
+    /* File-scope typedef/enum/struct so isolated comptime TUs see
+     * MIME_HTML / CmdKind used as static_map initializers. */
+    types = src ? cc_ct_extract_type_decls_prelude(src, len) : NULL;
+    cc__exec_append_type_decls(types);
+    free(types);
     if (cc_comptime_fn_registry_scan(src, len) < 0) {
         const char* err = cc_comptime_fn_registry_scan_error();
         fprintf(stderr, "%s: error: %s\n",
@@ -2283,6 +2359,70 @@ static size_t cc__emit_find_logical_line(const char* src, size_t len,
     return fallback < len ? fallback : len;
 }
 
+/* `static const ValueType name__values[` — type name before the table. */
+static int cc__emit_frag_value_type(const char* text, char* ty, size_t tycap) {
+    const char* hit;
+    const char* name_s;
+    const char* te;
+    const char* ts;
+    size_t n;
+    if (!text || !ty || !tycap) return 0;
+    ty[0] = 0;
+    hit = strstr(text, "__values[");
+    if (!hit) return 0;
+    name_s = hit;
+    while (name_s > text &&
+           ((name_s[-1] >= '0' && name_s[-1] <= '9') ||
+            (name_s[-1] >= 'A' && name_s[-1] <= 'Z') ||
+            (name_s[-1] >= 'a' && name_s[-1] <= 'z') ||
+            name_s[-1] == '_'))
+        name_s--;
+    if (name_s == hit) return 0;
+    te = name_s;
+    while (te > text && (te[-1] == ' ' || te[-1] == '\t')) te--;
+    ts = te;
+    while (ts > text &&
+           ((ts[-1] >= '0' && ts[-1] <= '9') ||
+            (ts[-1] >= 'A' && ts[-1] <= 'Z') ||
+            (ts[-1] >= 'a' && ts[-1] <= 'z') ||
+            ts[-1] == '_'))
+        ts--;
+    n = (size_t)(te - ts);
+    if (!n || n + 1 >= tycap) return 0;
+    memcpy(ty, ts, n);
+    ty[n] = 0;
+    if (strcmp(ty, "const") == 0 || strcmp(ty, "static") == 0) return 0;
+    return 1;
+}
+
+/* End of a complete `typedef … { … } Name;` — never the incomplete
+ * `typedef struct Name Name;`. */
+static size_t cc__emit_complete_typedef_end(const char* src, size_t len,
+                                           const char* name) {
+    char close[96];
+    const char* p;
+    size_t nlen;
+    size_t last = 0;
+    if (!src || !name || !name[0] || !len) return 0;
+    nlen = strlen(name);
+    if (nlen + 4 >= sizeof(close)) return 0;
+    snprintf(close, sizeof(close), "} %s;", name);
+    p = src;
+    while ((p = strstr(p, close)) != NULL) {
+        last = (size_t)(p - src) + strlen(close);
+        p += nlen;
+    }
+    if (!last) {
+        snprintf(close, sizeof(close), "}%s;", name);
+        p = src;
+        while ((p = strstr(p, close)) != NULL) {
+            last = (size_t)(p - src) + strlen(close);
+            p += nlen;
+        }
+    }
+    return last <= len ? last : 0;
+}
+
 /* `__ccs<digits>` dummy: `=0` with optional spaces, then `};` (file-scope
  * `enum{__ccsN=0};`) or `,` (enumerator inside `enum { }`). Emit may insert
  * spaces around `=` when reprinting tokens. */
@@ -2349,7 +2489,9 @@ static size_t cc__emit_resolve_anchor_pos(CCEmitAnchor anchor, size_t site_pos,
             }
         }
         /* Serdes stage1 markers use un-harvested body_l; exec fragments record
-         * harvested site_pos. Fall back to the nearest `__ccs<digits>` anchor. */
+         * harvested site_pos. Fall back to the nearest `__ccs<digits>` anchor
+         * so generated callees stay before `main`. After resolve, static_map
+         * tables bump past a complete value typedef if this landing is early. */
         if (!hit && src) {
             size_t logic_pos =
                 (site_line > 0)
@@ -2467,6 +2609,16 @@ void cc_emit_plan_build_comptime_schedule(const char* src, size_t len,
                                                          cc__comptime_frags[i].site_line,
                                                          src, len, input_path,
                                                          insert_pos, container_pos);
+        if (cc__comptime_frags[i].anchor == CC_EMIT_AT_COMPTIME_SITE) {
+            char vty[96];
+            size_t after;
+            if (cc__emit_frag_value_type(cc__comptime_frags[i].text, vty,
+                                         sizeof(vty))) {
+                after = cc__emit_complete_typedef_end(src, len, vty);
+                if (after > out->pos[out->n])
+                    out->pos[out->n] = after;
+            }
+        }
         out->frag_index[out->n] = i;
         out->n++;
     }

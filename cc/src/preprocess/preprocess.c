@@ -18215,6 +18215,19 @@ static int cc__face_extracted_this_rewrite(const char* abs_src) {
     return 0;
 }
 
+static void cc__face_unmark_extracted_this_rewrite(const char* abs_src) {
+    size_t i, j;
+    if (!abs_src) return;
+    for (i = 0; i < g_extracted_this_rewrite_count; i++) {
+        if (strcmp(g_extracted_this_rewrite[i], abs_src) != 0) continue;
+        free(g_extracted_this_rewrite[i]);
+        for (j = i + 1; j < g_extracted_this_rewrite_count; j++)
+            g_extracted_this_rewrite[j - 1] = g_extracted_this_rewrite[j];
+        g_extracted_this_rewrite_count--;
+        return;
+    }
+}
+
 static void cc__face_mark_extracted_this_rewrite(const char* abs_src) {
     if (!abs_src || !abs_src[0] || cc__face_extracted_this_rewrite(abs_src))
         return;
@@ -18385,6 +18398,41 @@ static void cc__face_mark_extracted_nested_includes(const char* abs_src) {
                     cc__face_mark_extracted_this_rewrite(child_abs);
                     cc__face_mark_extracted_nested_includes(child_abs);
                 }
+            }
+        }
+        i = (line_end < n) ? line_end + 1 : line_end;
+    }
+    free(src);
+}
+
+/* Probe extract of a leftover-UFCS helper is not the product: the owner
+ * TU splices instead. Drop this face and its nested quoted includes so
+ * that splice is not a redefine. */
+static void cc__face_unmark_extracted_tree(const char* abs_src) {
+    char dir[PATH_MAX];
+    char* src = NULL;
+    size_t n = 0, i = 0;
+    if (!abs_src) return;
+    cc__face_unmark_extracted_this_rewrite(abs_src);
+    if (cc__dirname_local(abs_src, dir, sizeof(dir)) != 0) return;
+    if (cc__read_file_text(abs_src, &src, &n) != 0 || !src) {
+        free(src);
+        return;
+    }
+    while (i < n) {
+        size_t line_end = i, path_s = 0, path_e = 0;
+        while (line_end < n && src[line_end] != '\n') line_end++;
+        if (cc__match_local_include_line(src + i, line_end - i, &path_s,
+                                        &path_e)) {
+            char rel[PATH_MAX], child_path[PATH_MAX], child_abs[PATH_MAX];
+            size_t rel_len = path_e - path_s;
+            if (rel_len >= 4 && rel_len < sizeof(rel) &&
+                strncmp(src + i + path_e - 4, ".cch", 4) == 0) {
+                memcpy(rel, src + i + path_s, rel_len);
+                rel[rel_len] = '\0';
+                if (cc__try_quoted_cch_path(dir, rel, child_path,
+                                           sizeof(child_path), child_abs))
+                    cc__face_unmark_extracted_tree(child_abs);
             }
         }
         i = (line_end < n) ? line_end + 1 : line_end;
@@ -18987,8 +19035,10 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                                 splice_child = 1;
                             else if (cc__read_file_text(lp, &hb, &hn) == 0 &&
                                      hb &&
-                                     cc__lowered_header_needs_ufcs_splice(hb, hn))
+                                     cc__lowered_header_needs_ufcs_splice(hb, hn)) {
+                                cc__face_unmark_extracted_tree(child_abs);
                                 splice_child = 1;
+                            }
                             free(hb);
                         }
                         else if (ufcs && !cc__cch_has_owner_ccs(child_abs)) {
@@ -19005,8 +19055,10 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                                 char* hb = NULL;
                                 size_t hn = 0;
                                 if (cc__read_file_text(lp, &hb, &hn) == 0 && hb &&
-                                    cc__lowered_header_needs_ufcs_splice(hb, hn))
+                                    cc__lowered_header_needs_ufcs_splice(hb, hn)) {
+                                    cc__face_unmark_extracted_tree(child_abs);
                                     splice_child = 1;
+                                }
                                 free(hb);
                             }
                         }

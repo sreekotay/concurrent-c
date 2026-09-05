@@ -1,0 +1,68 @@
+/* Nullable-pointer `!>` on UFCS `.cstr(arena)` — both binder forms.
+ * Spec §3.1: pointer-typed EXPR, failure is NULL, `!>(e)` binds CC_ERR_NULL;
+ * `(e)` is optional when the handler does not use the error. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int test_nobind_null(void) {
+    char tiny[8];
+    CCArena a = cc_arena_fixed_buffer(tiny, sizeof(tiny));
+    CCString s = @string(`this will not fit in eight bytes at all`, a);
+    const char* p = s.cstr(a) !> {
+        printf("nobind_null\n");
+        return 0;
+    };
+    printf("UNEXPECTED nobind p=%s\n", p ? p : "(null)");
+    return 1;
+}
+
+static int test_bind_null(void) {
+    char tiny[8];
+    CCArena a = cc_arena_fixed_buffer(tiny, sizeof(tiny));
+    CCString s = @string(`this will not fit in eight bytes at all`, a);
+    const char* p = s.cstr(a) !>(e) {
+        int is_null_kind = (e.kind == CC_ERR_NULL);
+        int has_src = e.message != NULL && strstr(e.message, "cstr") != NULL;
+        printf("bind_null is_null_kind=%d has_src=%d\n", is_null_kind, has_src);
+        return 0;
+    };
+    printf("UNEXPECTED bind p=%s\n", p ? p : "(null)");
+    return 1;
+}
+
+/* `!>(e)` with an unused binder — must compile and take the NULL arm. */
+static int test_unused_binder_null(void) {
+    char tiny[8];
+    CCArena a = cc_arena_fixed_buffer(tiny, sizeof(tiny));
+    CCString s = @string(`this will not fit in eight bytes at all`, a);
+    const char* p = s.cstr(a) !>(e) {
+        printf("unused_binder_null\n");
+        return 0;
+    };
+    printf("UNEXPECTED unused p=%s\n", p ? p : "(null)");
+    return 1;
+}
+
+int main(void) {
+    cc_arena_stack(a, 256);
+    CCString ok = @string(`hello`, a);
+
+    const char* p1 = ok.cstr(a) !> {
+        printf("UNEXPECTED nobind ok\n");
+        return 1;
+    };
+    printf("p1=%s\n", p1);
+
+    const char* p2 = ok.cstr(a) !>(e) {
+        printf("UNEXPECTED bind ok %s\n", e.message);
+        return 1;
+    };
+    printf("p2=%s\n", p2);
+
+    if (test_nobind_null()) return 1;
+    if (test_bind_null()) return 1;
+    if (test_unused_binder_null()) return 1;
+    return 0;
+}

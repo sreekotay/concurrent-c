@@ -7287,12 +7287,15 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             char synth[8192];
             size_t syn_n = 0;
             int k;
+            char subj_keep[320];
             shadow_emit_expr_text(st, st->a, expr, sizeof(expr), NULL);
+            snprintf(subj_keep, sizeof(subj_keep), "%s", expr);
             synth[0] = 0;
             for (k = 0; k < st->nbody; k++) {
                 AstNode* kid = st->body[k];
                 size_t al;
                 if (!kid || kid->kind != AST_RAW_LINE || !(kid->a && kid->a[0])) continue;
+                if (strstr(ast_slot(kid->a), "case .")) have_desig = 1;
                 al = strlen(ast_slot(kid->a));
                 if (syn_n + al + 2 >= sizeof(synth)) break;
                 memcpy(synth + syn_n, kid->a, al);
@@ -7301,6 +7304,31 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 synth[syn_n] = 0;
             }
             snprintf(body, sizeof(body), "%s", synth);
+            if (have_desig && (!st->f || strcmp(st->f, "cc_switch") != 0)) {
+                shadow_err(ctx, st, "variant switch requires `@switch`; use `@switch (v) { case .arm: ... }`");
+                g_shadow_ufcs_miss = 1;
+                return 0;
+            }
+            if (g_shadow_nvariants && have_desig) {
+                v = shadow_variant_for_subject(expr, &subj_ptr);
+                if (shadow_variant_diag_switch(ctx, st, out, expr, synth, v))
+                    return 0;
+                if (v) {
+                    char kinded[320];
+                    if (v->is_packed) {
+                        if (subj_ptr)
+                            snprintf(kinded, sizeof(kinded), "%s__cc_kind(%s)",
+                                     v->name, expr);
+                        else
+                            snprintf(kinded, sizeof(kinded),
+                                     "%s__cc_kind(&(%s))", v->name, expr);
+                    } else if (subj_ptr)
+                        snprintf(kinded, sizeof(kinded), "(%s)->kind", expr);
+                    else
+                        snprintf(kinded, sizeof(kinded), "(%s).kind", expr);
+                    snprintf(expr, sizeof(expr), "%s", kinded);
+                }
+            }
             strsw = shadow_strsw_try(st, out, ctx, indent, body, sizeof(body),
                                     expr, sizeof(expr));
             if (strsw < 0) return 0;
@@ -7317,41 +7345,167 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             {
                 /* After strsw rewrite, body holds rewritten labels joined by
                  * newline in the same order as RAW_LINE case/default kids. */
+                const char* saved_vty = ctx ? ctx->switch_vty : NULL;
                 char* cursor = strsw ? body : NULL;
+                int bind_brace = 0;
+                int bind_n0 = -1;
+                if (ctx && v) ctx->switch_vty = v->name;
                 for (k = 0; k < st->nbody; k++) {
                     AstNode* kid = st->body[k];
                     if (!kid) continue;
                     if (kid->kind == AST_RAW_LINE) {
+                        if (bind_brace && kid->a && kid->a[0]) {
+                            const char* lab = ast_slot(kid->a);
+                            while (*lab == ' ' || *lab == '\t') lab++;
+                            if ((strncmp(lab, "case", 4) == 0 &&
+                                 !shadow_is_id(lab[4])) ||
+                                (strncmp(lab, "default", 7) == 0 &&
+                                 !shadow_is_id(lab[7]))) {
+                                if (!cemit_fmt(out, "%s}\n", nested)) {
+                                    if (ctx) ctx->switch_vty = saved_vty;
+                                    return 0;
+                                }
+                                if (bind_n0 >= 0) {
+                                    g_shadow_nbinds = bind_n0;
+                                    bind_n0 = -1;
+                                }
+                                bind_brace = 0;
+                            }
+                        }
                         if (strsw && cursor) {
                             char* nl = strchr(cursor, '\n');
                             char line[512];
                             size_t llen;
                             if (nl) {
                                 llen = (size_t)(nl - cursor);
-                                if (llen + 1 >= sizeof(line)) return 0;
+                                if (llen + 1 >= sizeof(line)) {
+                                    if (ctx) ctx->switch_vty = saved_vty;
+                                    return 0;
+                                }
                                 memcpy(line, cursor, llen);
                                 line[llen] = 0;
-                                if (!cemit_fmt(out, "%s%s\n", nested, line))
+                                if (!cemit_fmt(out, "%s%s\n", nested, line)) {
+                                    if (ctx) ctx->switch_vty = saved_vty;
                                     return 0;
+                                }
                                 cursor = nl + 1;
                             } else {
-                                if (!cemit_fmt(out, "%s%s\n", nested, cursor))
+                                if (!cemit_fmt(out, "%s%s\n", nested, cursor)) {
+                                    if (ctx) ctx->switch_vty = saved_vty;
                                     return 0;
+                                }
                                 cursor = NULL;
                             }
                         } else {
                             char line[768];
                             snprintf(line, sizeof(line), "%s", kid->a);
+                            if (v) {
+                                /* `case .arm(bind):` — label + dominated
+                                 * payload bind (opaque wraps the dump body;
+                                 * structured emits the bind as the next
+                                 * switch-scope stmt). */
+                                const char* lp = line;
+                                const char* q;
+                                const char* arm;
+                                const char* ae;
+                                const char* bp;
+                                const char* be;
+                                int ma;
+                                while (*lp == ' ' || *lp == '\t') lp++;
+                                if (strncmp(lp, "case", 4) == 0 &&
+                                    !shadow_is_id(lp[4])) {
+                                    q = lp + 4;
+                                    while (*q == ' ' || *q == '\t') q++;
+                                    if (*q == '.') {
+                                        arm = q + 1;
+                                        while (*arm == ' ' || *arm == '\t')
+                                            arm++;
+                                        ae = arm;
+                                        while (*ae && shadow_is_id(*ae)) ae++;
+                                        bp = ae;
+                                        while (*bp == ' ' || *bp == '\t') bp++;
+                                        if (*bp == '(') {
+                                            bp++;
+                                            while (*bp == ' ' || *bp == '\t')
+                                                bp++;
+                                            be = bp;
+                                            while (*be && shadow_is_id(*be))
+                                                be++;
+                                            ma = shadow_variant_arm_index(
+                                                v, arm, (size_t)(ae - arm));
+                                            if (ma >= 0 && be > bp &&
+                                                !v->is_void[ma]) {
+                                                char bind[64];
+                                                char proj[256];
+                                                size_t bl =
+                                                    (size_t)(be - bp);
+                                                if (bl >= sizeof(bind))
+                                                    bl = sizeof(bind) - 1;
+                                                memcpy(bind, bp, bl);
+                                                bind[bl] = 0;
+                                                shadow_variant_arm_bind_proj(
+                                                    proj, sizeof(proj), v, ma,
+                                                    subj_keep, subj_ptr);
+                                                bind_n0 = g_shadow_nbinds;
+                                                shadow_bind_name(
+                                                    bind, v->tys[ma],
+                                                    SHADOW_BIND_CONSTRUCTED);
+                                                if (!cemit_fmt(
+                                                        out, "%scase %s_%s:\n",
+                                                        nested, v->name,
+                                                        v->arms[ma])) {
+                                                    if (ctx)
+                                                        ctx->switch_vty =
+                                                            saved_vty;
+                                                    return 0;
+                                                }
+                                                if (!cemit_fmt(out, "%s{\n",
+                                                               nested)) {
+                                                    if (ctx)
+                                                        ctx->switch_vty =
+                                                            saved_vty;
+                                                    return 0;
+                                                }
+                                                if (!cemit_fmt(
+                                                        out, "%s%s %s = %s;\n",
+                                                        nested, v->tys[ma],
+                                                        bind, proj)) {
+                                                    if (ctx)
+                                                        ctx->switch_vty =
+                                                            saved_vty;
+                                                    return 0;
+                                                }
+                                                bind_brace = 1;
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
+                                shadow_rewrite_variant_expr(line, sizeof(line),
+                                                           v->name);
+                            }
                             shadow_rewrite_at_slice(line, sizeof(line));
-                            if (!cemit_fmt(out, "%s%s\n", nested, line))
+                            if (!cemit_fmt(out, "%s%s\n", nested, line)) {
+                                if (ctx) ctx->switch_vty = saved_vty;
                                 return 0;
+                            }
                         }
                         continue;
                     }
                     if (!shadow_emit_stmt_ctx(kid, out, ctx, nested,
-                                              use_cleanup))
+                                              use_cleanup)) {
+                        if (ctx) ctx->switch_vty = saved_vty;
                         return 0;
+                    }
                 }
+                if (bind_brace) {
+                    if (!cemit_fmt(out, "%s}\n", nested)) {
+                        if (ctx) ctx->switch_vty = saved_vty;
+                        return 0;
+                    }
+                    if (bind_n0 >= 0) g_shadow_nbinds = bind_n0;
+                }
+                if (ctx) ctx->switch_vty = saved_vty;
             }
             return cemit_fmt(out, "%s}\n", indent);
         }
@@ -8803,7 +8957,8 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             if (shadow_variant_diag_ctor(ctx, st, out, vty, expr, NULL))
                 return 0;
             if (shadow_variant_diag_bare_desig(ctx, st, out, expr)) return 0;
-            shadow_rewrite_variant_expr(expr, sizeof(expr), vty);
+            shadow_rewrite_variant_expr(expr, sizeof(expr),
+                                       shadow_active_vty(ctx, vty));
         }
         /* e=="!" is a safety-only unique marker from `T[:!]`, not a C declarator. */
         if (st->e && st->e[0] && !(st->e[0] == '!' && st->e[1] == 0)) {
@@ -9272,8 +9427,8 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             shadow_variant_diag_ctor(ctx, st, out, vty, rhs, st->a))
             return 0;
         if (shadow_variant_diag_bare_desig(ctx, st, out, rhs)) return 0;
-        shadow_rewrite_variant_expr(lhs, sizeof(lhs), vty);
-        shadow_rewrite_variant_expr(rhs, sizeof(rhs), vty);
+        shadow_rewrite_variant_expr(lhs, sizeof(lhs), shadow_active_vty(ctx, vty));
+        shadow_rewrite_variant_expr(rhs, sizeof(rhs), shadow_active_vty(ctx, vty));
         {
             ShadowVariant* vv = vty ? shadow_variant_find(vty) : NULL;
             if (vv && vv->has_drop && (!(st->c && st->c[0]) || strcmp(ast_slot(st->c), "=") == 0)) {
@@ -9679,12 +9834,12 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         }
         if (strcmp(ast_slot(st->a), "variant") == 0 && st->b && st->b[0] && st->c && st->c[0]) {
             /* `@variant[(packed)] Name { arm: Type; … }` → Kind enum + layout. */
-            char arms[8][64];
-            char tys[8][96];
+            char arms[SHADOW_VARIANT_MAX_ARMS][64];
+            char tys[SHADOW_VARIANT_MAX_ARMS][96];
             int narm = 0;
             int is_packed = (st->d && st->d[0] && strcmp(ast_slot(st->d), "packed") == 0);
             const char* p = st->c;
-            while (*p && narm < 8) {
+            while (*p && narm < SHADOW_VARIANT_MAX_ARMS) {
                 while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '{' ||
                        *p == '}')
                     p++;
@@ -9841,6 +9996,21 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 if (*p == ';') p++;
                 narm++;
             }
+            {
+                const char* q = p;
+                while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r' ||
+                       *q == '{' || *q == '}')
+                    q++;
+                if (*q && *q != '/' && narm >= SHADOW_VARIANT_MAX_ARMS) {
+                    char msg[160];
+                    snprintf(msg, sizeof(msg),
+                             "@variant '%s': too many arms (max %d)",
+                             st->b, SHADOW_VARIANT_MAX_ARMS);
+                    shadow_err(ctx, st, msg);
+                    out->err = 1;
+                    return 0;
+                }
+            }
             if (narm <= 0)
                 return cemit_fmt(out, "%s/* @variant %s */\n", indent, st->b);
             if (!cemit_fmt(out, "%stypedef enum { ", indent)) return 0;
@@ -9958,7 +10128,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                         indent, st->b, st->b))
                     return 0;
                 {
-                    int is_void[8];
+                    int is_void[SHADOW_VARIANT_MAX_ARMS];
                     int npayload = 0;
                     for (int i = 0; i < narm; i++) {
                         is_void[i] = (strcmp(tys[i], "void") == 0);

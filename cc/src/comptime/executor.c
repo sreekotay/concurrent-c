@@ -1424,8 +1424,25 @@ static void cc__frag_err_capture(void* opaque, const char* msg) {
  * which requires the validation TU to CARRY that context, since an unknown type
  * name reports as "expected" too (`T *self` with `T` undeclared parses as an
  * identifier followed by `*`).  See cc__frag_context_prelude. */
+static int cc__frag_got_ident(const char* msg) {
+    const char* p = strstr(msg, "(got '");
+    const char* q;
+    if (!p) return 0;
+    p += 6;
+    q = p;
+    if (!cc_is_ident_start(*q)) return 0;
+    while (cc_is_ident_char(*q)) q++;
+    return q > p && *q == '\'';
+}
+
 static int cc__frag_msg_is_syntax(const char* msg) {
     if (!msg || !msg[0]) return 0;
+    /* `static UnknownType name(` — TCC has no decl-spec, so it says
+     * "';' expected (got 'name')". Same hole as `T *self` in the comment
+     * below; the prelude cannot name every library typedef a factory
+     * mentions. A real missing semicolon is `got '}'` / `got ','`. */
+    if (strstr(msg, "';' expected (got '") && cc__frag_got_ident(msg))
+        return 0;
     return strstr(msg, "expected") != NULL ||
            strstr(msg, "stray") != NULL ||
            strstr(msg, "unterminated") != NULL ||
@@ -1433,6 +1450,146 @@ static int cc__frag_msg_is_syntax(const char* msg) {
            strstr(msg, "_Generic") != NULL ||
            strstr(msg, "controlling expression") != NULL ||
            strstr(msg, "incompatible types") != NULL;
+}
+
+/* Factory fragments may still carry `T !>(E)` / `T ?>(E)` — the product TU
+ * lowers that sugar after splice.  A fragment that starts with real C
+ * (e.g. `static uint32_t …`) lets TCC reach the sigil and report "stray '!'",
+ * which looks like a factory defect.  One that starts on an unknown type
+ * fails earlier and is filtered out.  Rewrite a heap copy so this check is
+ * about C syntax. */
+static int cc__frag_skip_inert(const char* s, size_t n, size_t* i) {
+    if (*i >= n) return 0;
+    if (s[*i] == '"' || s[*i] == '\'') {
+        char q = s[(*i)++];
+        while (*i < n && s[*i] != q) {
+            if (s[*i] == '\\' && *i + 1 < n) *i += 2;
+            else (*i)++;
+        }
+        if (*i < n) (*i)++;
+        return 1;
+    }
+    if (s[*i] == '/' && *i + 1 < n && s[*i + 1] == '/') {
+        *i += 2;
+        while (*i < n && s[*i] != '\n') (*i)++;
+        return 1;
+    }
+    if (s[*i] == '/' && *i + 1 < n && s[*i + 1] == '*') {
+        *i += 2;
+        while (*i + 1 < n && !(s[*i] == '*' && s[*i + 1] == '/')) (*i)++;
+        if (*i + 1 < n) *i += 2;
+        return 1;
+    }
+    return 0;
+}
+
+static void cc__frag_mangle_ty(const char* s, size_t n, char* out, size_t cap) {
+    size_t i = 0, o = 0, part = 0;
+    if (!out || cap == 0) return;
+    out[0] = '\0';
+    while (i < n && o + 1 < cap) {
+        while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r'))
+            i++;
+        if (i >= n) break;
+        if (part && o + 1 < cap) out[o++] = '_';
+        if (s[i] == '*') {
+            if (o + 3 < cap) { memcpy(out + o, "ptr", 3); o += 3; }
+            i++;
+            part = 1;
+            continue;
+        }
+        if (!cc_is_ident_start(s[i])) { i++; continue; }
+        while (i < n && cc_is_ident_char(s[i]) && o + 1 < cap) out[o++] = s[i++];
+        part = 1;
+    }
+    out[o] = '\0';
+}
+
+static size_t cc__frag_rskip_ws(const char* s, size_t e) {
+    while (e > 0 && (s[e - 1] == ' ' || s[e - 1] == '\t' ||
+                     s[e - 1] == '\n' || s[e - 1] == '\r'))
+        e--;
+    return e;
+}
+
+static size_t cc__frag_type_start(const char* s, size_t ty_end) {
+    size_t i = cc__frag_rskip_ws(s, ty_end);
+    while (i > 0) {
+        size_t p = i;
+        if (s[p - 1] == '*') { i--; continue; }
+        if (s[p - 1] == ' ' || s[p - 1] == '\t') { i--; continue; }
+        if (cc_is_ident_char(s[p - 1])) {
+            while (i > 0 && cc_is_ident_char(s[i - 1])) i--;
+            /* Stop before storage / qualifier keywords. */
+            if ((i + 6 == p && memcmp(s + i, "static", 6) == 0) ||
+                (i + 6 == p && memcmp(s + i, "inline", 6) == 0) ||
+                (i + 6 == p && memcmp(s + i, "extern", 6) == 0) ||
+                (i + 7 == p && memcmp(s + i, "typedef", 7) == 0) ||
+                (i + 8 == p && memcmp(s + i, "volatile", 8) == 0))
+                return p;
+            continue;
+        }
+        break;
+    }
+    return i;
+}
+
+static char* cc__frag_lower_result_sugar(const char* fragment) {
+    size_t n, i = 0, last = 0;
+    char* out = NULL;
+    size_t ol = 0, oc = 0;
+    if (!fragment || !fragment[0]) return NULL;
+    n = strlen(fragment);
+    while (i < n) {
+        size_t sigil, j, lp, rp, ty_end, ty_start, err_a, err_b;
+        char mok[128], merr[128];
+        int nest;
+        if (cc__frag_skip_inert(fragment, n, &i)) continue;
+        if (i + 1 >= n ||
+            !((fragment[i] == '!' || fragment[i] == '?') && fragment[i + 1] == '>')) {
+            i++;
+            continue;
+        }
+        sigil = i;
+        j = i + 2;
+        while (j < n && (fragment[j] == ' ' || fragment[j] == '\t')) j++;
+        if (j >= n || fragment[j] != '(') { i = sigil + 2; continue; }
+        {
+            size_t bk = cc__frag_rskip_ws(fragment, sigil);
+            if (bk > 0 && fragment[bk - 1] == ')') { i = sigil + 2; continue; }
+        }
+        lp = j;
+        nest = 0;
+        rp = 0;
+        for (j = lp; j < n; j++) {
+            if (fragment[j] == '(') nest++;
+            else if (fragment[j] == ')') {
+                nest--;
+                if (nest == 0) { rp = j; break; }
+            }
+        }
+        if (!rp) { i = sigil + 2; continue; }
+        ty_end = cc__frag_rskip_ws(fragment, sigil);
+        ty_start = cc__frag_type_start(fragment, ty_end);
+        err_a = lp + 1;
+        while (err_a < rp && (fragment[err_a] == ' ' || fragment[err_a] == '\t'))
+            err_a++;
+        err_b = cc__frag_rskip_ws(fragment, rp);
+        if (ty_start >= ty_end || err_a >= err_b) { i = rp + 1; continue; }
+        cc__frag_mangle_ty(fragment + ty_start, ty_end - ty_start, mok, sizeof(mok));
+        cc__frag_mangle_ty(fragment + err_a, err_b - err_a, merr, sizeof(merr));
+        if (!mok[0] || !merr[0]) { i = rp + 1; continue; }
+        cc_sb_append(&out, &ol, &oc, fragment + last, ty_start - last);
+        cc_sb_append_cstr(&out, &ol, &oc, "CCResult_");
+        cc_sb_append_cstr(&out, &ol, &oc, mok);
+        cc_sb_append_cstr(&out, &ol, &oc, "_");
+        cc_sb_append_cstr(&out, &ol, &oc, merr);
+        last = rp + 1;
+        i = rp + 1;
+    }
+    if (last == 0) { free(out); return NULL; }
+    if (last < n) cc_sb_append(&out, &ol, &oc, fragment + last, n - last);
+    return out;
 }
 
 /* Declare every `CCResult_*` name the fragment mentions.
@@ -1483,6 +1640,9 @@ int cc_comptime_validate_c_fragment(const char* fragment,
     if (!fragment || !fragment[0]) return 0;
     if (getenv("CC_NO_FRAGMENT_VALIDATE")) return 0;
 
+    char* lowered = cc__frag_lower_result_sugar(fragment);
+    if (lowered) fragment = lowered;
+
     /* The file's own types go in ahead of the fragment.  A generated
      * definition that names a user type is the normal case — a factory exists
      * to write code about a type — and without them `T *self` parses as an
@@ -1498,7 +1658,7 @@ int cc_comptime_validate_c_fragment(const char* fragment,
     size_t pre = sizeof(CC__FRAG_PRELUDE) - 1;
     size_t fl = strlen(fragment);
     char* tu = (char*)malloc(pre + tylen + fl + 2);
-    if (!tu) { free(types); return 0; }  /* OOM: don't block on a missing check */
+    if (!tu) { free(types); free(lowered); return 0; }  /* OOM: don't block on a missing check */
     {
         /* `#line 1 "<generic-fragment>"` closes the prelude, so the type block
          * goes BEFORE it and fragment line numbers stay 1-based. */
@@ -1515,7 +1675,7 @@ int cc_comptime_validate_c_fragment(const char* fragment,
     free(types);
 
     TCCState* s = tcc_new();
-    if (!s) { free(tu); return 0; }
+    if (!s) { free(tu); free(lowered); return 0; }
     CCFragErrSink sink;
     sink.buf[0] = '\0';
     sink.got = 0;
@@ -1528,24 +1688,27 @@ int cc_comptime_validate_c_fragment(const char* fragment,
         const char* libdir = cc__exec_lib_dir(dirbuf, sizeof(dirbuf));
         if (libdir) { tcc_set_lib_path(s, libdir); tcc_add_library_path(s, libdir); }
     }
-    if (tcc_set_output_type(s, TCC_OUTPUT_MEMORY) < 0) { tcc_delete(s); free(tu); return 0; }
+    if (tcc_set_output_type(s, TCC_OUTPUT_MEMORY) < 0) {
+        tcc_delete(s); free(tu); free(lowered); return 0;
+    }
 
     int compiled = tcc_compile_string(s, tu);
     tcc_delete(s);
     free(tu);
 
-    if (compiled >= 0) return 0;                 /* clean parse */
+    if (compiled >= 0) { free(lowered); return 0; } /* clean parse */
     /* Only the fragment is on trial.  The context prepended above is
      * best-effort — a type definition it carries may itself name something the
      * validation TU has never seen — and an error inside it says nothing about
      * the generated code.  Errors there report against `<string>`; the
      * fragment's own report against `<generic-fragment>`, which the `#line`
      * directive establishes. */
-    if (!strstr(sink.buf, "<generic-fragment>")) return 0;
-    if (!cc__frag_msg_is_syntax(sink.buf)) return 0;  /* missing context: skip */
+    if (!strstr(sink.buf, "<generic-fragment>")) { free(lowered); return 0; }
+    if (!cc__frag_msg_is_syntax(sink.buf)) { free(lowered); return 0; }
 
     if (err_buf && err_sz) snprintf(err_buf, err_sz, "%s", sink.buf);
     if (out_frag_line) *out_frag_line = sink.line;
+    free(lowered);
     return -1;
 }
 

@@ -1,0 +1,37 @@
+/* `!> { … }` (no binder) inside `@switch` `case .arm:` — must lower, not
+ * leave a leftover `!>` in the host C. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+@variant Arm {
+    ok: void;
+    bad: void;
+};
+
+static bool !>(CCError) boom(int fail) {
+    if (fail) return cc_err(CC_ERR_INTERNAL, "boom");
+    return cc_ok(true);
+}
+
+static int run(Arm a, int fail) {
+    @switch (a) {
+    case .ok:
+        boom(fail) !> { return 2; };
+        return 1;
+    case .bad:
+        boom(fail) !> { return 4; };
+        return 3;
+    }
+    return 0;
+}
+
+int main(void) {
+    Arm a = { .ok = {} };
+    if (run(a, 0) != 1) return 1;
+    if (run(a, 1) != 2) return 2;
+    a = { .bad = {} };
+    if (run(a, 0) != 3) return 3;
+    if (run(a, 1) != 4) return 4;
+    printf("ok\n");
+    return 0;
+}

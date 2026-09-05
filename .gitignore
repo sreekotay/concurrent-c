@@ -54,14 +54,3 @@ venv/
 
 # Upstream QuickJS — attach locally; CC does not vendor it
 /quickjs/
-
-# QuickJS lifetime study — local receipts + Rust build (keep results/.gitkeep)
-studies/quickjs_lifetime/track_a/results/**
-!studies/quickjs_lifetime/track_a/results/.gitkeep
-studies/quickjs_lifetime/track_a/rust/target/
-studies/quickjs_lifetime/track_a/rust/bin/
-studies/quickjs_lifetime/track_b/deps/
-studies/quickjs_lifetime/track_b/results/**
-!studies/quickjs_lifetime/track_b/results/.gitkeep
-studies/quickjs_lifetime/track_b/**/target/
-studies/quickjs_lifetime/track_b/rust/bin/

@@ -1246,6 +1246,23 @@ static int shadow_rewrite_one_bang_site_handler(char* expr, size_t cap,
     while (expr[rs] == ' ' || expr[rs] == '\t' || expr[rs] == '\n' ||
            expr[rs] == '\r')
         rs++;
+    if (expr[rs] == '{') {
+        /* `call() !> { … }` — no binder. Same Result unwrap as `!>(e){…}`
+         * without naming the error. Pointer `ptr !> { }` lowers via AST. */
+        after = expr + rs;
+        bind[0] = 0;
+        {
+            int dep = 0;
+            body_end = after;
+            do {
+                if (*body_end == '{') dep++;
+                else if (*body_end == '}') dep--;
+                if (*body_end) body_end++;
+            } while (*body_end && dep > 0);
+            if (dep != 0) return 0;
+        }
+        goto site_handler_after_body;
+    }
     if (expr[rs] != '(') return 0;
     after = expr + rs + 1;
     while (*after == ' ' || *after == '\t') after++;
@@ -1276,6 +1293,7 @@ static int shadow_rewrite_one_bang_site_handler(char* expr, size_t cap,
     } else {
         return 0;
     }
+site_handler_after_body:
     ls = shadow_expr_lhs_start(expr, op);
     if (ls < 0) return 0;
     clen = op - ls;
@@ -1310,19 +1328,33 @@ static int shadow_rewrite_one_bang_site_handler(char* expr, size_t cap,
                 stmt_semi = 1;
         }
     }
-    if (stmt_semi)
-        n = snprintf(out, sizeof(out),
-                     "%.*s{ __typeof__(%.*s) __r = (%.*s); if (!__r.ok) { "
-                     "__typeof__(__r.u.error) %s = __r.u.error; %.*s } }%s",
-                     ls, expr, clen, expr + ls, clen, expr + ls, bind,
-                     (int)blen, after, body_end);
-    else
+    if (stmt_semi) {
+        if (bind[0])
+            n = snprintf(out, sizeof(out),
+                         "%.*s{ __typeof__(%.*s) __r = (%.*s); if (!__r.ok) { "
+                         "__typeof__(__r.u.error) %s = __r.u.error; %.*s } }%s",
+                         ls, expr, clen, expr + ls, clen, expr + ls, bind,
+                         (int)blen, after, body_end);
+        else
+            n = snprintf(out, sizeof(out),
+                         "%.*s{ __typeof__(%.*s) __r = (%.*s); if (!__r.ok) { "
+                         "%.*s } }%s",
+                         ls, expr, clen, expr + ls, clen, expr + ls,
+                         (int)blen, after, body_end);
+    } else if (bind[0]) {
         n = snprintf(out, sizeof(out),
                      "%.*s({ __typeof__(%.*s) __r = (%.*s); if (!__r.ok) { "
                      "__typeof__(__r.u.error) %s = __r.u.error; %.*s } "
                      "__r.u.value; })%s",
                      ls, expr, clen, expr + ls, clen, expr + ls, bind,
                      (int)blen, after, body_end);
+    } else {
+        n = snprintf(out, sizeof(out),
+                     "%.*s({ __typeof__(%.*s) __r = (%.*s); if (!__r.ok) { "
+                     "%.*s } __r.u.value; })%s",
+                     ls, expr, clen, expr + ls, clen, expr + ls,
+                     (int)blen, after, body_end);
+    }
     if (n < 0 || (size_t)n >= sizeof(out) || (size_t)n >= cap) {
         {
             char __diag[160];

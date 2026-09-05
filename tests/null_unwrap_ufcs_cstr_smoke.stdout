@@ -1,0 +1,5 @@
+p1=hello
+p2=hello
+nobind_null
+bind_null is_null_kind=1 has_src=1
+unused_binder_null

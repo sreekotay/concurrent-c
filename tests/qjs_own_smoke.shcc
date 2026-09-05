@@ -15,5 +15,5 @@ Counter c = { .n = 0 };
 CCQjsVal o = js.own::[Counter](cc_move(c)) !> @destroy;
 long long n = o.bump(4) !>;
 js.set("c", o) !>;
-long long n2 = js.eval("c.bump(6)")!>.as_i64() !>;
+long long n2 = js.eval("c.bump(6)") !>;
 println(@string(`n=${n} n2=${n2}`, a));

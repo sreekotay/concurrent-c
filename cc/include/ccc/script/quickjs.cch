@@ -1557,11 +1557,13 @@ static inline int !>(CCQjsError) cc_qjs_callm_int(CCQjs *js, const char *method,
     return cc_ok((int)v.u.value);
 }
 
-/* ---- own::[T]: JS binds a CC object; bytes live in the handle arena ---- */
+/* ---- js.own::[T]: JS binds a CC object; bytes live in the handle arena.
+ * Family is `qjs_own` so `CCQjs.own` matches snake(Qjs)_own, same as
+ * `CCPy.expose` → `py_expose`. */ 
 
-CC_GENERIC_FACTORY(own, 1) {
-    /* Isolated factory compile does not see file-scope macros. One line
-     * so harvest does not treat `\` as a body cut. */
+CC_GENERIC_FACTORY(qjs_own, 1) {
+    /* Isolated factory TU is prelude + this block. One line so harvest
+     * does not treat `\` as a body cut. */
 #define CC__QJS_OWN_KIND(ty) (!(ty) || !(ty)[0] ? -1 : strcmp((ty), "void") == 0 ? 0 : (strcmp((ty), "double") == 0 || strcmp((ty), "float") == 0) ? 1 : (strcmp((ty), "_Bool") == 0 || strcmp((ty), "bool") == 0) ? 2 : (strcmp((ty), "int") == 0 || strcmp((ty), "long") == 0 || strcmp((ty), "long long") == 0 || strcmp((ty), "int64_t") == 0 || strcmp((ty), "int32_t") == 0) ? 3 : -1)
     CCString s = cc_string_new();
     char T[192];

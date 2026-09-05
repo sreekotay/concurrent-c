@@ -996,6 +996,93 @@ static int shadow_ufcs_ty_is_ccslice_fat(const char* vty) {
 
 static void shadow_ufcs_vty_base(const char* vty, char* out, size_t cap);
 
+/* Field-path Map UFCS: spell `Map::[K,V*]`, fix `Map_K_void*` → `Map_K_voidptr`, peel header `*`. */
+static void shadow_ufcs_field_map_vty_base(char* fty, size_t cap) {
+    char spelled[128];
+    char* hit;
+    size_t n;
+    if (!fty || !fty[0] || !cap) return;
+    if (shadow_spell_generic_type_text(fty, spelled, sizeof(spelled)))
+        snprintf(fty, cap, "%s", spelled);
+    if (strncmp(fty, "Map_", 4) == 0 || strncmp(fty, "ArrayMap_", 9) == 0) {
+        for (;;) {
+            hit = strstr(fty, "_void*");
+            if (!hit || (hit > fty + 4 && hit[-1] == 'r'))
+                break;
+            {
+                char buf[128];
+                size_t pre = (size_t)(hit - fty);
+                snprintf(buf, sizeof(buf), "%.*s_voidptr%s", (int)pre, fty,
+                         hit + 5);
+                snprintf(fty, cap, "%s", buf);
+            }
+        }
+    }
+    n = strlen(fty);
+    while (n && (fty[n - 1] == ' ' || fty[n - 1] == '\t'))
+        n--;
+    if (n > 1 && fty[n - 1] == '*')
+        n--;
+    fty[n] = 0;
+}
+
+/* Ok half of `CCResult_Ok_Err`. Split on `_CC` + capital (err type). */
+static int shadow_ccresult_ok_type(const char* box, char* out, size_t cap) {
+    const char* p;
+    const char* split;
+    size_t n;
+    if (!box || !out || !cap) return 0;
+    out[0] = 0;
+    if (strncmp(box, "CCResult_", 9) != 0) return 0;
+    p = box + 9;
+    split = strstr(p, "_CC");
+    if (split && split[3] >= 'A' && split[3] <= 'Z')
+        n = (size_t)(split - p);
+    else
+        n = strlen(p);
+    if (!n || n >= cap) return 0;
+    memcpy(out, p, n);
+    out[n] = 0;
+    return 1;
+}
+
+/* Producer call → Result ok type. Registry on each `name(` in the text,
+ * else a `CCResult_*` token already in the call. No embedding names. */
+static int shadow_result_ok_from_call(const char* call, char* out, size_t cap) {
+    const char* p;
+    if (!call || !out || !cap) return 0;
+    out[0] = 0;
+    p = call;
+    while (*p) {
+        char name[128];
+        char box[256];
+        size_t n = 0;
+        const char* q;
+        if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+              *p == '_')) {
+            p++;
+            continue;
+        }
+        while (((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+                (*p >= '0' && *p <= '9') || *p == '_') &&
+               n + 1 < sizeof(name))
+            name[n++] = *p++;
+        name[n] = 0;
+        q = p;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q != '(') continue;
+        if (strcmp(name, "__typeof__") == 0 || strcmp(name, "sizeof") == 0 ||
+            strcmp(name, "typeof") == 0)
+            continue;
+        if (cc_result_fn_registry_get_result_type(name, n, box, sizeof(box)) &&
+            shadow_ccresult_ok_type(box, out, cap))
+            return 1;
+    }
+    p = strstr(call, "CCResult_");
+    if (p && shadow_ccresult_ok_type(p, out, cap)) return 1;
+    return 0;
+}
+
 /* Camel `CCJsVal` → snake `cc_js_val` (digits copied, stars stop). */
 static void shadow_ufcs_cc_snake(const char* r, char* out, size_t cap) {
     size_t ci = 3, ti;
@@ -2038,11 +2125,7 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                                 snprintf(fty, sizeof(fty), "%s", resolved);
                         }
                         if (strchr(fty, '*')) fptr = 1;
-                        {
-                            size_t L = strlen(fty);
-                            while (L && (fty[L - 1] == '*' || fty[L - 1] == ' '))
-                                fty[--L] = 0;
-                        }
+                        shadow_ufcs_field_map_vty_base(fty, sizeof(fty));
                         path_is_ptr = fptr;
                         snprintf(outer, sizeof(outer), "%s", fty);
                         snprintf(vty, sizeof(vty), "%s", fty);
@@ -2060,12 +2143,7 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             }
             walked_fields = 1;
             if (strchr(fty, '*')) fptr = 1;
-            /* Strip trailing * from field type for family spelling. */
-            {
-                size_t L = strlen(fty);
-                while (L && (fty[L - 1] == '*' || fty[L - 1] == ' '))
-                    fty[--L] = 0;
-            }
+            shadow_ufcs_field_map_vty_base(fty, sizeof(fty));
             path_is_ptr = fptr;
             snprintf(outer, sizeof(outer), "%s", fty);
             snprintf(vty, sizeof(vty), "%s", fty);
@@ -2939,17 +3017,6 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             snprintf(dst, cap, "%s(&%s, %s)", hdrm, recv, a);
         else
             snprintf(dst, cap, "%s(&%s)", hdrm, recv);
-    } else if (!is_arrow &&
-               (strcmp(meth_name, "as_i64") == 0 ||
-                strcmp(meth_name, "as_f64") == 0 ||
-                strcmp(meth_name, "as_slice_into") == 0) &&
-               strstr(recv, "__r") != NULL) {
-        /* Chain temp with no bind and no typed hint: the Python extractor
-         * is the legacy default for untyped hop temps. */
-        if (a[0])
-            snprintf(dst, cap, "cc_py_obj_%s(&%s, %s)", meth_name, recv, a);
-        else
-            snprintf(dst, cap, "cc_py_obj_%s(&%s)", meth_name, recv);
     } else if (!is_arrow && strcmp(meth_name, "as_slice") == 0 &&
                !shadow_ufcs_ty_uses_name_meth(vty)) {
         /* Header-declared widen first: cc_<snake>_as_slice for whatever
@@ -3142,19 +3209,23 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                        strncmp(vty, "Map_", 4) == 0 ||
                        strncmp(vty, "ArrayMap_", 9) == 0 ||
                        strncmp(vty, "Pair_", 5) == 0)) {
+            char vbase[128];
+            const char* tag;
             /* Same oracle as every other typed instance: header ##_ or a
              * visible Type_meth. Scheduling the factory does not invent. */
-            if (!shadow_family_accepts(vty, meth_name))
+            shadow_ufcs_vty_base(vty, vbase, sizeof(vbase));
+            tag = vbase[0] ? vbase : vty;
+            if (!shadow_family_accepts(tag, meth_name))
                 return 0;
             if (a[0]) {
                 if (ptr_recv)
-                    snprintf(dst, cap, "%s_%s(%s, %s)", vty, meth_name, recv, a);
+                    snprintf(dst, cap, "%s_%s(%s, %s)", tag, meth_name, recv, a);
                 else
-                    snprintf(dst, cap, "%s_%s(&%s, %s)", vty, meth_name, recv, a);
+                    snprintf(dst, cap, "%s_%s(&%s, %s)", tag, meth_name, recv, a);
             } else if (ptr_recv) {
-                snprintf(dst, cap, "%s_%s(%s)", vty, meth_name, recv);
+                snprintf(dst, cap, "%s_%s(%s)", tag, meth_name, recv);
             } else {
-                snprintf(dst, cap, "%s_%s(&%s)", vty, meth_name, recv);
+                snprintf(dst, cap, "%s_%s(&%s)", tag, meth_name, recv);
             }
             return 1;
         }

@@ -1,0 +1,168 @@
+/*
+ * Microbench: @string templates vs snprintf (staticd path-join question).
+ *
+ *   ../../out/cc/bin/ccc -O -o out/bench_string_tpl bench_string_tpl.ccs --release
+ *   ./out/bench_string_tpl [iters_per_trial] [trials]
+ *   ../../out/cc/bin/ccc --emit-c-only --no-line -o /tmp/bench_string_tpl.c bench_string_tpl.ccs
+ *
+ * A: path join via @string + cstr (bump arena; reset every 256 ops — Conn.arena shape)
+ * B: path join via snprintf into stack char[4096]
+ * C: Content-Length header via @string vs snprintf
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+static const char* k_root = "./fixtures";
+static const char* k_rel = "/index.html";
+static const size_t k_body_len = 12345;
+static const int k_reset_every = 256; /* amortize; staticd resets once per response */
+
+static double now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1e9 + (double)ts.tv_nsec;
+}
+
+static void sort_d(double* a, int n) {
+    for (int i = 0; i < n - 1; i++)
+        for (int j = i + 1; j < n; j++)
+            if (a[j] < a[i]) { double t = a[i]; a[i] = a[j]; a[j] = t; }
+}
+
+static void report_med(const char* name, double* samples, int trials, long long iters) {
+    sort_d(samples, trials);
+    double med = samples[trials / 2];
+    double lo = samples[0], hi = samples[trials - 1];
+    printf("%-28s  med %7.2f ns/op  (min %.2f max %.2f)  [%d trials × %lld]\n",
+           name, med, lo, hi, trials, iters);
+}
+
+int main(int argc, char** argv) {
+    long long iters = 2000000;
+    int trials = 7;
+    if (argc > 1) iters = atoll(argv[1]);
+    if (argc > 2) trials = atoi(argv[2]);
+    if (iters < 1) iters = 1;
+    if (trials < 1) trials = 1;
+    if (trials > 31) trials = 31;
+
+    printf("bench_string_tpl iters=%lld trials=%d root=%s rel=%s reset_every=%d\n",
+           iters, trials, k_root, k_rel, k_reset_every);
+
+    double a_s[32], b_s[32], c1_s[32], c2_s[32];
+    unsigned long long sink_all = 0;
+
+    /* one discarded warm-up pass covering all shapes */
+    {
+        CCArena arena = cc_arena_create(kilobytes(64));
+        size_t n = k_body_len;
+        for (long long i = 0; i < 50000; i++) {
+            CCString path = @string(`${k_root}${k_rel}`, arena);
+            sink_all += (unsigned long long)path.len() + (unsigned long long)(unsigned char)path.cstr(arena)[0];
+            CCString line = @string(`Content-Length: ${n}\r\n`, arena);
+            sink_all += (unsigned long long)line.len();
+            char buf[4096];
+            sink_all += (unsigned long long)snprintf(buf, sizeof(buf), "%s%s", k_root, k_rel);
+            char hbuf[64];
+            sink_all += (unsigned long long)snprintf(hbuf, sizeof(hbuf), "Content-Length: %zu\r\n", n);
+            if ((i & (k_reset_every - 1)) == 0) arena.reset();
+        }
+        arena.destroy();
+    }
+
+    for (int t = 0; t < trials; t++) {
+        /* A: @string path */
+        {
+            CCArena arena = cc_arena_create(kilobytes(64));
+            unsigned long long sink = 0;
+            double t0 = now_ns();
+            for (long long i = 0; i < iters; i++) {
+                CCString path = @string(`${k_root}${k_rel}`, arena);
+                const char* c = path.cstr(arena);
+                sink += (unsigned long long)(c ? (unsigned char)c[0] : 0)
+                      + (unsigned long long)path.len();
+                if ((i & (k_reset_every - 1)) == 0) arena.reset();
+            }
+            a_s[t] = (now_ns() - t0) / (double)iters;
+            sink_all += sink;
+            arena.destroy();
+        }
+        /* B: snprintf path */
+        {
+            unsigned long long sink = 0;
+            double t0 = now_ns();
+            for (long long i = 0; i < iters; i++) {
+                char buf[4096];
+                int n = snprintf(buf, sizeof(buf), "%s%s", k_root, k_rel);
+                sink += (unsigned long long)(unsigned char)buf[0]
+                      + (unsigned long long)(n > 0 ? n : 0);
+            }
+            b_s[t] = (now_ns() - t0) / (double)iters;
+            sink_all += sink;
+        }
+        /* C1: @string header */
+        {
+            CCArena arena = cc_arena_create(kilobytes(64));
+            unsigned long long sink = 0;
+            size_t n = k_body_len;
+            double t0 = now_ns();
+            for (long long i = 0; i < iters; i++) {
+                CCString line = @string(`Content-Length: ${n}\r\n`, arena);
+                char[:] s = line.as_slice();
+                sink += (unsigned long long)(s.len ? (unsigned char)s.ptr[0] : 0)
+                      + (unsigned long long)s.len;
+                if ((i & (k_reset_every - 1)) == 0) arena.reset();
+            }
+            c1_s[t] = (now_ns() - t0) / (double)iters;
+            sink_all += sink;
+            arena.destroy();
+        }
+        /* C2: snprintf header */
+        {
+            unsigned long long sink = 0;
+            size_t n = k_body_len;
+            double t0 = now_ns();
+            for (long long i = 0; i < iters; i++) {
+                char buf[64];
+                int len = snprintf(buf, sizeof(buf), "Content-Length: %zu\r\n", n);
+                sink += (unsigned long long)(unsigned char)buf[0]
+                      + (unsigned long long)(len > 0 ? len : 0);
+            }
+            c2_s[t] = (now_ns() - t0) / (double)iters;
+            sink_all += sink;
+        }
+    }
+
+    report_med("A @string path+cstr", a_s, trials, iters);
+    report_med("B snprintf path stack", b_s, trials, iters);
+    report_med("C1 @string CL header", c1_s, trials, iters);
+    report_med("C2 snprintf CL header", c2_s, trials, iters);
+    printf("sink=%llu\n", (unsigned long long)sink_all);
+
+    /* sanity: A and B produce the same path bytes */
+    {
+        CCArena arena = cc_arena_create(kilobytes(1));
+        CCString path = @string(`${k_root}${k_rel}`, arena);
+        char expect[4096];
+        snprintf(expect, sizeof(expect), "%s%s", k_root, k_rel);
+        if (!path.as_slice().eq_cstr(expect)) {
+            eprintln(@string(`MISMATCH A vs B: got=${path} expect=${expect}`, @scratch));
+            return 1;
+        }
+        char hdr_expect[64];
+        snprintf(hdr_expect, sizeof(hdr_expect), "Content-Length: %zu\r\n", k_body_len);
+        size_t n = k_body_len;
+        CCString line = @string(`Content-Length: ${n}\r\n`, @scratch);
+        if (!line.as_slice().eq_cstr(hdr_expect)) {
+            eprintln(@string(`MISMATCH C: got=${line}`, @scratch));
+            return 1;
+        }
+        println("parity: OK");
+        arena.destroy();
+    }
+    return 0;
+}

@@ -6,6 +6,7 @@
   down 3
   carved child: bound + nested walk OK
   heap child move OK
+  sized heap child OK
   scope arena adopt OK
   reset walk:
   down 4

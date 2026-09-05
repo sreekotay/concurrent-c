@@ -9,7 +9,7 @@ enum {
     SHADOW_SAFE_PIN_CAP = 24,
     SHADOW_SAFE_EH_CAP = 16,
     SHADOW_SAFE_VARIANT_CAP = 32,
-    SHADOW_SAFE_VARM_CAP = 16,
+    SHADOW_SAFE_VARM_CAP = 256,
     SHADOW_SAFE_TYPE_CAP = 128,
     SHADOW_SAFE_DOM_CAP = 16,
     SHADOW_SAFE_CHAN_TD_CAP = 32,
@@ -2416,7 +2416,7 @@ static void shadow_safe_register_schema_variants(ShadowSafeCtx* ctx) {
 /* Harvested `@variant` from included `.cch` (extract leaves enum+union C
  * in the `.h`). Safety and emit share this table — register-only, no
  * second typedef. */
-enum { SHADOW_HARVEST_VARIANT_CAP = 32, SHADOW_HARVEST_ARM_CAP = 8 };
+enum { SHADOW_HARVEST_VARIANT_CAP = 32, SHADOW_HARVEST_ARM_CAP = 256 };
 typedef struct {
     char name[64];
     char arms[SHADOW_HARVEST_ARM_CAP][64];

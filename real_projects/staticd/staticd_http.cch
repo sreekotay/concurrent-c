@@ -1,0 +1,164 @@
+/*
+ * Mechanical HTTP/1.1 helpers for staticd: date tape, one Range, header CI.
+ * Policy (403, MIME, encode) stays in staticd.ccs.
+ *
+ * Include after <ccc/std/prelude.cch>.
+ */
+#ifndef STATICD_HTTP_CCH
+#define STATICD_HTTP_CCH
+
+#include <string.h>
+#include <time.h>
+
+/* IMF-fixdate — tape only. Calendar (month → tm, timegm) is below. */
+@grammar(schema) HttpDate {~~~~
+    rules [
+        digit: charset [#'0' - #'9']
+        dd: keep [digit digit]
+        yyyy: keep [digit digit digit digit]
+        wd: ["Sun" | "Mon" | "Tue" | "Wed" | "Thu" | "Fri" | "Sat"]
+        mon: keep ["Jan" | "Feb" | "Mar" | "Apr" | "May" | "Jun"
+                  | "Jul" | "Aug" | "Sep" | "Oct" | "Nov" | "Dec"]
+    ]
+    wd ", " day: int dd " " month: mon " " year: int yyyy
+       " " hour: int dd ":" minute: int dd ":" sec: int dd " GMT"
+~~~~}
+
+/* `bytes=N-M` / `N-` / `-N`. Comma leftover → parse miss → ignore Range. */
+@grammar(schema) ByteRange {~~~~
+    rules [
+        digit: charset [#'0' - #'9']
+        digits: keep [any digit]
+    ]
+    "bytes=" lo: digits #'-' hi: digits
+~~~~}
+
+static int ci_eq(char[:] s, const char* lit) {
+    size_t n = strlen(lit), i;
+    if (s.len != n) return 0;
+    for (i = 0; i < n; i++) {
+        char a = s.ptr[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+        if (a != lit[i]) return 0;
+    }
+    return 1;
+}
+
+static int hdr_val(char[:] line, const char* name, char[:]* val) {
+    size_t n = strlen(name), i;
+    if (line.len < n + 1) return 0;
+    for (i = 0; i < n; i++) {
+        char a = line.ptr[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+        if (a != name[i]) return 0;
+    }
+    if (line.ptr[n] != ':') return 0;
+    i = n + 1;
+    while (i < line.len && (line.ptr[i] == ' ' || line.ptr[i] == '\t')) i++;
+    *val = line.sub(i, line.len);
+    return 1;
+}
+
+static const char k_wd[7][4] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+static const char k_mo[12][4] = {
+    "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"
+};
+
+static CCString http_fmt_date(time_t t, CCArena a) {
+    struct tm tm;
+    char[:] wd;
+    char[:] mo;
+    int y, d0, d1, h0, h1, mi0, mi1, se0, se1;
+    CCString s;
+    gmtime_r(&t, &tm);
+    wd = cc_slice_from_buffer((void*)k_wd[tm.tm_wday], 3);
+    mo = cc_slice_from_buffer((void*)k_mo[tm.tm_mon], 3);
+    y = tm.tm_year + 1900;
+    d0 = tm.tm_mday / 10;
+    d1 = tm.tm_mday % 10;
+    h0 = tm.tm_hour / 10;
+    h1 = tm.tm_hour % 10;
+    mi0 = tm.tm_min / 10;
+    mi1 = tm.tm_min % 10;
+    se0 = tm.tm_sec / 10;
+    se1 = tm.tm_sec % 10;
+    s = @string(`${wd}, ${d0}${d1} ${mo} ${y} ${h0}${h1}:${mi0}${mi1}:${se0}${se1} GMT`, a);
+    return s;
+}
+
+static int http_parse_date(char[:] s, CCArena a, time_t* out) {
+    HttpDate d;
+    int m;
+    struct tm tm;
+    if (!cc_parse(HttpDate, s.ptr, s.len, a, &d)) return 0;
+    if (d.month.len != 3) return 0;
+    for (m = 0; m < 12; m++)
+        if (memcmp(d.month.ptr, k_mo[m], 3) == 0) break;
+    if (m == 12 || d.day < 1 || d.day > 31) return 0;
+    memset(&tm, 0, sizeof(tm));
+    tm.tm_mday = d.day;
+    tm.tm_mon = m;
+    tm.tm_year = d.year - 1900;
+    tm.tm_hour = d.hour;
+    tm.tm_min = d.minute;
+    tm.tm_sec = d.sec;
+    *out = timegm(&tm);
+    return *out != (time_t)-1;
+}
+
+static int digits_u(char[:] s, size_t* out) {
+    size_t i, v = 0;
+    if (!s.len) return 0;
+    for (i = 0; i < s.len; i++) {
+        if (s.ptr[i] < '0' || s.ptr[i] > '9') return 0;
+        v = v * 10 + (size_t)(s.ptr[i] - '0');
+    }
+    *out = v;
+    return 1;
+}
+
+/* 1 = apply, 0 = ignore, -1 = 416. Tape already rejected commas / junk. */
+static int range_parse(char[:] v, size_t n, CCArena a, size_t* off, size_t* len) {
+    ByteRange r;
+    size_t start, end;
+    if (!cc_parse(ByteRange, v.ptr, v.len, a, &r)) return 0;
+    if (!r.lo.len && !r.hi.len) return 0;
+    if (!r.lo.len) {
+        if (!digits_u(r.hi, &end) || n == 0) return -1;
+        if (end > n) end = n;
+        *off = n - end;
+        *len = end;
+        return 1;
+    }
+    if (!digits_u(r.lo, &start) || start >= n) return start >= n ? -1 : 0;
+    if (!r.hi.len) end = n - 1;
+    else {
+        if (!digits_u(r.hi, &end)) return 0;
+        if (end >= n) end = n - 1;
+    }
+    if (end < start) return -1;
+    *off = start;
+    *len = end - start + 1;
+    return 1;
+}
+
+/* Extension after the last '.' past the last '/'; empty → no ext. */
+static char[:] path_ext(char[:] path) {
+    size_t i;
+    size_t dot = path.len;
+    for (i = path.len; i > 0; i--) {
+        char ch = path.ptr[i - 1];
+        if (ch == '.') {
+            dot = i - 1;
+            break;
+        }
+        if (ch == '/') break;
+    }
+    if (dot >= path.len) {
+        char[:] empty = {0};
+        return empty;
+    }
+    return path.sub(dot, path.len);
+}
+
+#endif /* STATICD_HTTP_CCH */

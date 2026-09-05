@@ -2545,9 +2545,22 @@ static int ss_rules_section(SS* s) {   /* at '[' */
             continue;
         }
         if (c == '#' && s->p + 1 < s->n && s->b[s->p + 1] == '\'') {
+            /* Same escapes as rg_escchar: \n/\t/\r/\0/\\ /\' /\" and \xHH. */
             s->p += 2;
-            if (s->p < s->n && s->b[s->p] == '\\') s->p++;
-            if (s->p < s->n) s->p++;
+            if (s->p < s->n && s->b[s->p] == '\\') {
+                s->p++;
+                if (s->p < s->n && (s->b[s->p] == 'x' || s->b[s->p] == 'X')) {
+                    s->p++;
+                    if (s->p < s->n && gr_hex_nibble((unsigned char)s->b[s->p]) >= 0)
+                        s->p++;
+                    if (s->p < s->n && gr_hex_nibble((unsigned char)s->b[s->p]) >= 0)
+                        s->p++;
+                } else if (s->p < s->n) {
+                    s->p++;
+                }
+            } else if (s->p < s->n) {
+                s->p++;
+            }
             if (!(s->p < s->n && s->b[s->p] == '\'')) return ss_fail(s, start, "bad #'c' in rules [...]");
             s->p++;
             continue;

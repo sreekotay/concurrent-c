@@ -1,0 +1,22 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct Conn {
+    CCArena arena;
+    CCString out;
+} Conn;
+
+static void flush(Conn* c) {
+    c->arena.reset();
+    c->out.release(c->arena);
+}
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    Conn c = {0};
+    c.out = cc_string_new();
+    flush(&c);
+    printf("conn_field_release_ufcs_smoke: PASS\n");
+    return 0;
+}

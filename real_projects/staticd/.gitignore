@@ -1,0 +1,11 @@
+out/
+run/
+vendor/
+*.o
+.DS_Store
+benchmarks/smoke_latest.txt
+# Generated fixture bodies are large; keep manifest checked in.
+fixtures/*.bin
+fixtures/*.html
+fixtures/*.js
+!fixtures/manifest.txt

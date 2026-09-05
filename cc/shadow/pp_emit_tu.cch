@@ -2530,6 +2530,12 @@ ginst_emit_pass:
                 }
                 inst->emitted = 1;
                 shadow_ginst_ufcs_harvest_body(inst->mangled, body);
+                /* Same as preprocess.c on a spliced factory def: the
+                 * generated `T !>(E) name(` is not an AST_RESULT_FN, so
+                 * `T x = name() !> @destroy` would skip unwrap and assign
+                 * the Result. Scan now so VAL_DESTROY sees it. */
+                if (body && body[0])
+                    cc_result_fn_registry_scan_source(body, strlen(body));
             }
             cc_arena_free(&def_ar);
         }

@@ -1,0 +1,40 @@
+/* @variant arms past the old shadow beachhead cap of 8. Last arm must
+ * remain switchable — silent truncate used to drop it. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+@variant Tone {
+    a: void;
+    b: void;
+    c: void;
+    d: void;
+    e: void;
+    f: void;
+    g: void;
+    h: void;
+    i: void;
+};
+
+static int classify(Tone t) {
+    @switch (t) {
+    case .a: return 1;
+    case .b: return 2;
+    case .c: return 3;
+    case .d: return 4;
+    case .e: return 5;
+    case .f: return 6;
+    case .g: return 7;
+    case .h: return 8;
+    case .i: return 9;
+    }
+    return -1;
+}
+
+int main(void) {
+    Tone t = { .i = {} };
+    if (classify(t) != 9) return 1;
+    t = { .a = {} };
+    if (classify(t) != 1) return 2;
+    printf("ok\n");
+    return 0;
+}

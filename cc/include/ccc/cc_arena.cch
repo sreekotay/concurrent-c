@@ -1446,8 +1446,13 @@ static inline void *cc_arena_alloc_local_grow(CCArenaHost *arena, size_t size, s
     return cc__arena_alloc_heap_overflow(arena, size, align, NULL);
 }
 
+#ifdef CC__ARENA_SYS
+CC__ARENA_SYS bool cc_arena_release(CCArenaHost* arena, void* ptr);
+CC__ARENA_SYS bool cc_arena_release_sized(CCArenaHost* arena, void* ptr, size_t size);
+#else
 bool cc_arena_release(CCArenaHost* arena, void* ptr);
 bool cc_arena_release_sized(CCArenaHost* arena, void* ptr, size_t size);
+#endif
 
 /* The host on the active chain from `a` whose slabs or overflow own `ptr`,
  * or NULL. Diagnostic walk without meta_lock; the caller serializes. */

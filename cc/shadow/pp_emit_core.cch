@@ -1134,6 +1134,8 @@ typedef struct {
     int eh_hoist_seq;
     int eh_in_trailer; /* emitting hoisted body — return skips local unwind */
     int eh_in_cleanup; /* @defer / @destroy epilogue — not the owning fn */
+    /* Subject @variant while emitting structured `@switch` case stmts. */
+    const char* switch_vty;
 } ShadowCtx;
 
 enum { SHADOW_SCRATCH_CP_MAX = 16 };
@@ -1816,12 +1818,14 @@ static int g_shadow_ntd;
 enum { SHADOW_SLICE_CAP = 64 };
 static char g_shadow_slices[SHADOW_SLICE_CAP][64];
 static int g_shadow_nslices;
-/* `@variant Name` — arm names, packed layout, drop hooks. */
+/* `@variant Name` — arm names, packed layout, drop hooks.
+ * Cap matches CC_VA_MAX_ARMS (variant_lower.c / spec). Never truncate. */
+enum { SHADOW_VARIANT_MAX_ARMS = 256 };
 typedef struct {
     char name[64];
-    char arms[8][64];
-    char tys[8][96];
-    int is_void[8];
+    char arms[SHADOW_VARIANT_MAX_ARMS][64];
+    char tys[SHADOW_VARIANT_MAX_ARMS][96];
+    int is_void[SHADOW_VARIANT_MAX_ARMS];
     int narm;
     int is_packed;
     int donor_arm;
@@ -2039,6 +2043,14 @@ static void shadow_rewrite_generic_types_text(char* text, size_t cap) {
                                             ia++;
                                             continue;
                                         }
+                                        if (*ia == '*') {
+                                            if (ci + 3 < sizeof(compact)) {
+                                                memcpy(compact + ci, "ptr", 3);
+                                                ci += 3;
+                                            }
+                                            ia++;
+                                            continue;
+                                        }
                                         compact[ci++] = *ia++;
                                     }
                                 }
@@ -2053,6 +2065,14 @@ static void shadow_rewrite_generic_types_text(char* text, size_t cap) {
                                 ci && shadow_mangle_ident_char(compact[ci - 1]) &&
                                 shadow_mangle_ident_char(*a))
                                 compact[ci++] = '_';
+                            continue;
+                        }
+                        if (*a == '*') {
+                            if (ci + 3 < sizeof(compact)) {
+                                memcpy(compact + ci, "ptr", 3);
+                                ci += 3;
+                            }
+                            a++;
                             continue;
                         }
                         compact[ci++] = *a++;
@@ -2339,7 +2359,11 @@ static void shadow_variant_register_full(const char* name, char arms[][64],
     memset(v, 0, sizeof(*v));
     snprintf(v->name, sizeof(v->name), "%s", name);
 upd:
-    v->narm = narm > 8 ? 8 : narm;
+    if (narm > SHADOW_VARIANT_MAX_ARMS) {
+        shadow_table_full("variant arms", SHADOW_VARIANT_MAX_ARMS, name);
+        return;
+    }
+    v->narm = narm;
     v->is_packed = is_packed ? 1 : 0;
     for (a = 0; a < v->narm; a++) {
         snprintf(v->arms[a], sizeof(v->arms[0]), "%s", arms[a]);
@@ -2352,7 +2376,7 @@ upd:
 
 static void __attribute__((unused)) shadow_variant_register(const char* name, char arms[][64],
                                     const int* is_void, int narm) {
-    char tys[8][96];
+    char tys[SHADOW_VARIANT_MAX_ARMS][96];
     memset(tys, 0, sizeof(tys));
     shadow_variant_register_full(name, arms, tys, is_void, narm, 0);
 }
@@ -3040,6 +3064,12 @@ static void shadow_rewrite_switch_case_bindings(char* body, size_t cap,
 /* Rewrite variant designators / arm projections in leftover expr text.
  * `{ .num = 42 }` → `{ .kind = Name_num, .u.num = 42 }` when Name known;
  * `.kind == .num` → `.kind == Name_num`; `v.num` → `v.u.num` for arms. */
+static const char* shadow_active_vty(ShadowCtx* ctx, const char* vty) {
+    if (vty && vty[0] && shadow_variant_find(vty)) return vty;
+    if (ctx && ctx->switch_vty && ctx->switch_vty[0]) return ctx->switch_vty;
+    return vty;
+}
+
 static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty) {
     ShadowVariant* v;
     char out[SHADOW_VARIANT_REWRITE_BUF];
@@ -6878,14 +6908,15 @@ static void shadow_grammar_variant_install(void) {
     for (i = 0; i < ni; i++) {
         const char* name = cc_variant_schema_pending_name(i);
         int narm = cc_variant_schema_pending_narms(i);
-        char arms[8][64];
-        char tys[8][96];
-        int is_void[8];
+        char arms[SHADOW_VARIANT_MAX_ARMS][64];
+        char tys[SHADOW_VARIANT_MAX_ARMS][96];
+        int is_void[SHADOW_VARIANT_MAX_ARMS];
         if (!name || !name[0] || narm <= 0) continue;
+        if (narm > SHADOW_VARIANT_MAX_ARMS) continue;
         if (shadow_variant_find(name)) continue;
         memset(tys, 0, sizeof(tys));
         memset(is_void, 0, sizeof(is_void));
-        for (a = 0; a < narm && a < 8; a++) {
+        for (a = 0; a < narm; a++) {
             snprintf(arms[a], sizeof(arms[0]), "%s",
                      cc_variant_schema_pending_arm(i, a));
             is_void[a] = cc_variant_schema_pending_arm_is_void(i, a);

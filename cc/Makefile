@@ -482,27 +482,34 @@ SHADOW_LOWER_BOOT_DEPS := $(BOOTSTRAP_DIR)/shadow_lower.c \
 	$(CPARSE_LIB)
 
 ifeq ($(SHADOW_LOWER_SOURCE),ccs)
+# Prefer an installed `ccc` (prefix / PATH). It extracts quoted `.cch` faces
+# into out/include/cc/shadow/*.h, then the seed lowerer emits the driver.
+# In-tree `.ccc-bin` is the fallback when nothing is installed.
+CCC_EXTRACT ?= $(shell command -v ccc 2>/dev/null)
+ifeq ($(CCC_EXTRACT),)
+  CCC_EXTRACT := $(abspath $(REAL_BINARY))
+endif
 $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COMPTIME_LIB) \
 	$(TCC_LIB_DEP) $(RUNTIME_DYLIB) $(OBJDIR)/runtime/concurrent_c.o
 	@mkdir -p $(dir $@) $(OBJDIR)
 	@test -n "$(SHADOW_LOWER_SEED_BIN)" -a -x "$(SHADOW_LOWER_SEED_BIN)" || \
 		(echo "SHADOW_LOWER_SOURCE=ccs needs an existing shadow_lower; run: make SHADOW_LOWER_SOURCE=bootstrap"; exit 1)
-	# Host-cc of emit.c prefers out/include/cc/shadow/*.h over .cch.
-	# Drop those .h files so reuse cannot adopt last-good (newer mtime)
-	# or a raw .cch copy (not lowered; host-cc cannot parse @comptime).
+	@test -n "$(CCC_EXTRACT)" -a -x "$(CCC_EXTRACT)" || \
+		(echo "SHADOW_LOWER_SOURCE=ccs needs ccc on PATH or bin/.ccc-bin"; exit 1)
+	# Host-cc of emit.c #includes out/include/cc/shadow/*.h (umbrella
+	# passthrough). Drop last-good so extract cannot adopt the pin.
 	@mkdir -p ../out/include/cc/shadow
 	@for f in ../cc/shadow/*.cch; do \
 		[ -f "$$f" ] || continue; \
 		rm -f ../out/include/cc/shadow/$$(basename "$$f" .cch).h; \
 	done
-	# Native self-emit, then host-cc link (same objs as bootstrap).
 	# concurrent_c.o supplies arena_state/FFC (omitted from libshadow_comptime.a).
-	@echo "[shadow_lower] $$(date '+%H:%M:%S') self-emit start ($(SHADOW_LOWER_CCS) --no-cache)"
+	@echo "[shadow_lower] $$(date '+%H:%M:%S') extract+emit start ($(SHADOW_LOWER_CCS) via $(CCC_EXTRACT) --emit-c-only)"
 	@t0=$$(date +%s); \
 	CC_INCLUDE_PATH="$(abspath $(OUT_INCLUDE)):$(abspath include)" \
-	$(SHADOW_LOWER_SEED_BIN) $(SHADOW_LOWER_CCS) -o $(OBJDIR)/shadow_lower.emit.c --no-cache \
-		--cc-flags="-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1" || exit $$?; \
-	echo "[shadow_lower] $$(date '+%H:%M:%S') self-emit done ($$(($$(date +%s)-t0))s, $$(wc -c < $(OBJDIR)/shadow_lower.emit.c | tr -d ' ') bytes)"
+	$(CCC_EXTRACT) --emit-c-only --no-cache $(SHADOW_LOWER_CCS) \
+		-o $(OBJDIR)/shadow_lower.emit.c || exit $$?; \
+	echo "[shadow_lower] $$(date '+%H:%M:%S') extract+emit done ($$(($$(date +%s)-t0))s, $$(wc -c < $(OBJDIR)/shadow_lower.emit.c | tr -d ' ') bytes)"
 	@if grep -qE '^de#line' $(OBJDIR)/shadow_lower.emit.c; then \
 		echo "error: emit contains de#line (injected-token lead bug)"; exit 1; \
 	fi

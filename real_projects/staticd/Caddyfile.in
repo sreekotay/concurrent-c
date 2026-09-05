@@ -1,0 +1,9 @@
+# Optional Caddy peer (INCLUDE_CADDY=1). HTTP only on :8083.
+{
+    auto_https off
+    admin off
+}
+:8083 {
+    root * FIXTURES_ROOT
+    file_server
+}

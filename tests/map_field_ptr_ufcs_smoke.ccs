@@ -1,0 +1,28 @@
+/*
+ * Map sugar UFCS on a field receiver drops the ptr suffix for pointer values.
+ *
+ * Local:  m->insert  → Map_int64_t_voidptr_insert   (correct)
+ * Field:  h.by_id->insert → Map_int64_t_void_insert  (missing ptr — undeclared)
+ *
+ * Same pattern: Map::[CCSliceHdr, Entry*] in wstore2 (Map_…_Entry_len vs Entryptr).
+ * Workaround: CC_MAP_DECL_ARENA + CC_MAP_DECL_UFCS with a hand name.
+ */
+#include <ccc/std/prelude.cch>
+
+typedef struct Host {
+    Map::[int64_t, void*] by_id;
+} Host;
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    Host h = {0};
+    int x = 7;
+
+    Map::[int64_t, void*] local = map_new::[int64_t, void*](arena);
+    local->insert(1, &x);       /* OK */
+
+    h.by_id = map_new::[int64_t, void*](arena);
+    h.by_id->insert(2, &x);     /* BAD: emits Map_int64_t_void_insert */
+
+    return 0;
+}

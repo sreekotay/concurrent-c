@@ -124,7 +124,7 @@ over the rule grammar, not separate grammar dialects.
 parse and write projections. The schema IR (terms, keys, body, variants)
 grows from the same stack-rooted arena as the used rules grammar; schema
 size is not a fixed cap. Identifier and field spellings stay bounded.
-`one of` still shares the `@variant` arm table (32 arms). A product schema lowers named primitive, slice,
+`one of` still shares the `@variant` arm table (256 arms). A product schema lowers named primitive, slice,
 byte, nested-schema, and repeated-item fields into a generated C struct.
 A `bytes` field is a `CCSliceHdr` (`{ptr,len}` wire borrow). A kept string /
 line field remains a `CCSlice` (provenance and optional codec materialize).

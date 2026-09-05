@@ -2153,6 +2153,15 @@ static void shadow_compact_type_args_text(const char* args, char* compact,
             args++;
             continue;
         }
+        if (c == '*' && depth == 0) {
+            if (ci + 3 < cap) {
+                memcpy(compact + ci, "ptr", 3);
+                ci += 3;
+            }
+            if (cj + 1 < sizeof(cur)) cur[cj++] = '*';
+            args++;
+            continue;
+        }
         if (c == '[' || c == '(' || c == '{') depth++;
         else if ((c == ']' || c == ')' || c == '}') && depth > 0)
             depth--;
