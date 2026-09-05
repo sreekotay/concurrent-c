@@ -299,7 +299,10 @@ CCResult_CCListener_CCNetError cc_tcp_listen(CCSlice addr) {
         return cc_err_CCResult_CCListener_CCNetError(err);
     }
 
-    if (listen(fd, 128) < 0) {
+    /* Kernel SYN queue, not dest occupancy. The kernel clamps to its own
+     * somaxconn (128 on stock Darwin; 4096 on Linux 5.4+), so asking for
+     * the platform maximum never asks for less than it will grant. */
+    if (listen(fd, SOMAXCONN) < 0) {
         err = errno_to_net_error(errno);
         close(fd);
         return cc_err_CCResult_CCListener_CCNetError(err);
