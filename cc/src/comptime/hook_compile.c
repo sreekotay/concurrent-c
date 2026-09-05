@@ -636,14 +636,54 @@ static int cc__build_compile_argv(CCArgvBuilder* argv,
             }
         }
     }
-    if (repo_root && repo_root[0]) {
-        snprintf(tmp, sizeof(tmp), "-I%s/cc/include", repo_root);
-        if (cc__argv_push(argv, tmp) != 0) return -1;
-        snprintf(tmp, sizeof(tmp), "-I%s/out/include", repo_root);
-        if (cc__argv_push(argv, tmp) != 0) return -1;
-    } else if (input_dir && input_dir[0]) {
-        snprintf(tmp, sizeof(tmp), "-I%s", input_dir);
-        if (cc__argv_push(argv, tmp) != 0) return -1;
+    /* Prefix install: ccc sets CC_INCLUDE_PATH to $PREFIX/include so
+     * `<ccc/std/prelude.h>` resolves out of tree. Checkout -I stays for
+     * in-repo hook compile when the env is unset. */
+    {
+        const char* inc = getenv("CC_INCLUDE_PATH");
+        int have_env = inc && inc[0];
+        if (have_env) {
+            char buf[4096];
+            char* save = NULL;
+            snprintf(buf, sizeof(buf), "%s", inc);
+            for (char* tok = strtok_r(buf, ":", &save); tok;
+                 tok = strtok_r(NULL, ":", &save)) {
+                char probe[2100];
+                if (!tok[0]) continue;
+                /* Skip TinyCC's libc headers — host clang conflicts on
+                 * __atomic_is_lock_free if those ride along as -I. */
+                if (snprintf(probe, sizeof(probe), "%s/ccc/std/prelude.h",
+                             tok) >= (int)sizeof(probe))
+                    return -1;
+                if (access(probe, R_OK) != 0) {
+                    snprintf(probe, sizeof(probe), "%s/ccc/cc_ufcs.h", tok);
+                    if (access(probe, R_OK) != 0) continue;
+                }
+                if (snprintf(tmp, sizeof(tmp), "-I%s", tok) >= (int)sizeof(tmp))
+                    return -1;
+                if (cc__argv_push(argv, tmp) != 0) return -1;
+            }
+        }
+        if (repo_root && repo_root[0]) {
+            snprintf(tmp, sizeof(tmp), "-I%s/cc/include", repo_root);
+            if (cc__argv_push(argv, tmp) != 0) return -1;
+            snprintf(tmp, sizeof(tmp), "-I%s/out/include", repo_root);
+            if (cc__argv_push(argv, tmp) != 0) return -1;
+        }
+        if (input_dir && input_dir[0]) {
+            const char* mark = strstr(input_dir, "/include/ccc");
+            if (mark) {
+                size_t n = (size_t)(mark - input_dir) + (sizeof("/include") - 1);
+                if (n + 3 >= sizeof(tmp)) return -1;
+                memcpy(tmp, "-I", 2);
+                memcpy(tmp + 2, input_dir, n);
+                tmp[2 + n] = '\0';
+                if (cc__argv_push(argv, tmp) != 0) return -1;
+            } else if (!have_env) {
+                snprintf(tmp, sizeof(tmp), "-I%s", input_dir);
+                if (cc__argv_push(argv, tmp) != 0) return -1;
+            }
+        }
     }
     if (cc__argv_push(argv, "-o") != 0) return -1;
     if (cc__argv_push(argv, dylib_path) != 0) return -1;
