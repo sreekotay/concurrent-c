@@ -30,6 +30,7 @@
 #include "print_impl.cch"
 #include "lower_impl.cch"
 #include <errno.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -91,7 +92,30 @@ typedef struct Loaded {
     CcUnit* unit;
     CCSlice src;
     const char* path;
+    CcLowerer lw;               /* --lower: the lowerer, for the headers it recorded */
+    bool lowered;
 } Loaded;
+
+/* --root DIR: the repository root quoted `.cch` includes are made relative to;
+ * --h-root DIR: where their lowered `.h` files go (`DIR/<rel>.h`). */
+static CCSlice g_root;
+static const char* g_h_root;
+
+/* mkdir -p for the directory part of `path`. */
+static bool mkdir_parents(const char* path) {
+    char buf[4096];
+    size_t n = strlen(path);
+    size_t i;
+    if (n >= sizeof(buf)) return false;
+    memcpy(buf, path, n + 1);
+    for (i = 1; i < n; i++) {
+        if (buf[i] != '/') continue;
+        buf[i] = 0;
+        if (mkdir(buf, 0777) != 0 && errno != EEXIST) return false;
+        buf[i] = '/';
+    }
+    return true;
+}
 
 static bool load(Loaded* L, const char* path, CcNameList known, CCArena a) {
     CcParseOpts opts;
@@ -434,13 +458,33 @@ static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena 
         const char* strict = getenv("CC_STRICT_RESULT_UNWRAP");
         lo.strict_unhandled = !(strict && strcmp(strict, "0") == 0);
     }
+    lo.repo_root = g_root;
     lw = cc_lowerer_new(L->unit, ix, lo, &L->ds);
     lw.lower_unit();
+    L->lw = lw;
+    L->lowered = true;
     return true;
 }
 
+/* Copies of the headers the lowering recorded, in the caller's arena. */
+static void note_headers(Loaded* L, CcNameList* more, CCArena keep) {
+    Vec::[CCSlice]* hs = &L->lw.headers;
+    size_t n = hs->len();
+    size_t i;
+    if (!L->lowered || !more) return;
+    for (i = 0; i < n; i++) {
+        CCSlice h = *hs->get_ptr(i);
+        char* copy = cc_arena_alloc(keep, h.len + 1, 1);
+        CCSlice kept;
+        memcpy(copy, h.ptr, h.len);
+        copy[h.len] = 0;
+        kept = cc_slice_from_buffer(copy, h.len);
+        more->push(kept);
+    }
+}
+
 static int run_print(const char* path, CcNameList known, const char* out_path, bool line_directives,
-                     bool header_mode, bool lower) {
+                     bool header_mode, bool lower, CcNameList* more_headers, CCArena keep) {
     CCArena a = cc_arena_heap(megabytes(256)) @destroy;
     Loaded L;
     CcPrintOpts po;
@@ -448,9 +492,11 @@ static int run_print(const char* path, CcNameList known, const char* out_path, b
     int problems;
     uint32_t n_parse_errors;
     CCSlice text;
+    memset(&L, 0, sizeof(L));
     if (lower) { if (!load_lowered(&L, path, known, a)) return 2; }
     else if (!load(&L, path, known, a)) return 2;
     if (lower && L.ds.has_errors()) { print_diags(&L); return 1; }
+    note_headers(&L, more_headers, keep);
     n_parse_errors = L.ds.n_errors;
     po.identity = false;
     po.line_directives = line_directives;
@@ -486,7 +532,7 @@ static void usage(void) {
     fprintf(stderr,
             "usage: cclower --identity [--known-types F] FILE...\n"
             "       cclower --print [--known-types F] [--no-line] [--header] [-o OUT] FILE\n"
-            "       cclower --lower [--known-types F] [-I DIR]... [-o OUT] FILE\n"
+            "       cclower --lower [--known-types F] [-I DIR]... [--root DIR --h-root DIR] [-o OUT] FILE\n"
             "       cclower --is-plain-c [--known-types F] FILE\n");
     exit(2);
 }
@@ -505,6 +551,7 @@ int main(int argc, char** argv) {
     int i;
     int rc = 0;
     int n_files = 0;
+    CcNameList todo = vec_new::[CCSlice](tool);
     bool custom_dirs = false;
     g_include_dirs = vec_new::[CCSlice](tool);
     g_include_dirs.push(CC_SLICE_LIT("cc/include"));
@@ -516,6 +563,8 @@ int main(int argc, char** argv) {
             i++;
             continue;
         }
+        if (strcmp(argv[i], "--root") == 0 && i + 1 < argc) { g_root = cc_slice_from_buffer(argv[i + 1], strlen(argv[i + 1])); i++; continue; }
+        if (strcmp(argv[i], "--h-root") == 0 && i + 1 < argc) { g_h_root = argv[i + 1]; i++; continue; }
         if (strcmp(argv[i], "--identity") == 0) mode = M_IDENTITY;
         else if (strcmp(argv[i], "--print") == 0) mode = M_PRINT;
         else if (strcmp(argv[i], "--lower") == 0) { mode = M_PRINT; lower = true; }
@@ -529,17 +578,50 @@ int main(int argc, char** argv) {
     if (mode == M_NONE) usage();
     if (known_path) read_known_types(known_path, &known, tool);
     for (i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--known-types") == 0 || strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "-I") == 0) { i++; continue; }
+        if (strcmp(argv[i], "--known-types") == 0 || strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "-I") == 0 ||
+            strcmp(argv[i], "--root") == 0 || strcmp(argv[i], "--h-root") == 0) { i++; continue; }
         if (argv[i][0] == '-' && argv[i][1]) continue;
         n_files++;
         switch (mode) {
         case M_IDENTITY: rc |= run_identity(argv[i], known); break;
-        case M_PRINT: rc |= run_print(argv[i], known, out_path, line_directives, header_mode, lower); break;
+        case M_PRINT: rc |= run_print(argv[i], known, out_path, line_directives, header_mode, lower, &todo, tool); break;
         case M_PLAIN: rc |= run_is_plain_c(argv[i], known); break;
         default: break;
         }
         fflush(stdout);
     }
     if (!n_files) usage();
+    /* the local headers the lowered units include, each lowered once in
+     * header mode to <h-root>/<rel>.h; headers they include join the list */
+    if (lower && g_h_root && g_root.len) {
+        CcNameList seen = vec_new::[CCSlice](tool);
+        for (;;) {
+            size_t nt = todo.len();
+            CCSlice h;
+            size_t k;
+            size_t ns = seen.len();
+            bool dup = false;
+            CCSlice rel;
+            CCString out;
+            if (!nt) break;
+            h = *todo.get_ptr(nt - 1);
+            todo.truncate(nt - 1);
+            for (k = 0; k < ns; k++) {
+                CCSlice sk = *seen.get_ptr(k);
+                if (cc_slice_eq(&sk, h)) dup = true;
+            }
+            if (dup) continue;
+            seen.push(h);
+            if (!(h.len > g_root.len && memcmp(h.ptr, g_root.ptr, g_root.len) == 0 && h.ptr[g_root.len] == '/')) continue;
+            rel = cc_slice_from_buffer((char*)h.ptr + g_root.len + 1, h.len - g_root.len - 1 - 4);
+            out = @string(`${g_h_root}/${rel}.h`, tool);
+            {
+                const char* out_c = cc_string_cstr(&out, tool);
+                const char* h_c = (const char*)h.ptr;   /* NUL-terminated by note_headers */
+                if (!mkdir_parents(out_c)) { fprintf(stderr, "cclower: cannot create the directory of %s\n", out_c); rc |= 2; continue; }
+                rc |= run_print(h_c, known, out_c, line_directives, true, true, &todo, tool);
+            }
+        }
+    }
     return rc;
 }

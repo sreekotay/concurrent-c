@@ -19,6 +19,7 @@ typedef struct CcLowerOpts {
     bool parallel_off;          /* #pragma(@parallel) off */
     bool per_tu;                /* #pragma(@per_tu) */
     bool strict_unhandled;      /* a bare call to a Result function is an error (CC_STRICT_RESULT_UNWRAP, default on) */
+    CCSlice repo_root;          /* quoted `.cch` includes become `<rel.h>` relative to it; empty: left as written */
 } CcLowerOpts;
 
 typedef struct CcLowerer {
@@ -28,7 +29,8 @@ typedef struct CcLowerer {
     CcUnit* unit;
     CcLowerOpts opts;
     uint32_t next_temp;
-    bool unwraps_used;          /* a scaffold was emitted: the unit needs <ccc/cc_result.h> */         /* __cc_r_N, __cc_eh_N: one counter per unit */
+    bool unwraps_used;          /* a scaffold was emitted: the unit needs <ccc/cc_result.h> */
+    Vec::[CCSlice] headers;     /* quoted local `.cch` headers this unit includes, resolved; lifetime: the arena */         /* __cc_r_N, __cc_eh_N: one counter per unit */
 } CcLowerer;
 
 static CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds);
@@ -37,6 +39,7 @@ static CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiag
 static void CcLowerer_lower_unit(CcLowerer* L);
 static void CcLowerer_results(CcLowerer* L);      /* Result types, cc_ok/cc_err, !> ?> forms, @errhandler, @err */
 static void CcLowerer_cleanup(CcLowerer* L);      /* @defer, @cancel_defer, @destroy: scope-exit runs and soft returns */
+static void CcLowerer_includes(CcLowerer* L);     /* `#include "x.cch"` -> `#include <rel/x.h>`, the header recorded for lowering */
 
 /* Helpers shared by the steps. */
 static uint32_t CcLowerer_temp_id(CcLowerer* L);                          /* the next N */

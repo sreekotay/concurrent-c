@@ -292,10 +292,14 @@ starts.
   `--known-types` from `ccparse_cc --collect-types` over `cc/include`;
   `cclower_cc --identity` and `--print` (the C and the `.map`).
 - `ccc --lowerer=clean FILE` (or `CC_LOWERER=clean`) lowers through
-  `cclower_cc` into `out/.cc-build/clean/` and finishes in the driver's
-  raw-C path; `scripts/lowerer_diff.sh [--filter S]` runs `cc_test` on
-  both lowerers and prints the pass/fail matrix. The pass-on-shadow,
-  fail-on-clean rows are the work list of the current milestone.
+  `cclower_cc --lower` into `out/.cc-build/clean/` and finishes in the
+  driver's raw-C path. A quoted `#include "x.cch"` becomes
+  `#include <rel/x.h>` (relative to the repository root) and the header is
+  lowered in header mode to `out/.cc-build/clean/<rel>.h`, transitively;
+  the tool takes the roots as `--root DIR --h-root DIR`.
+  `scripts/lowerer_diff.sh [--filter S]` runs `cc_test` on both lowerers
+  and prints the pass/fail matrix. The pass-on-shadow, fail-on-clean rows
+  are the work list of the current milestone.
 - Every shape the current compiler refuses in the lowerer's own sources is
   a `stress/break` entry with an `.xfail`; the port avoids it until the
   clean lowerer lands the fix, then the marker goes.

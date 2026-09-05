@@ -1355,15 +1355,17 @@ static void rl_emit_specs(CcLowerer* L) {
             bool is_pp = false;
             bool is_include = false;
             uint32_t tok = 0;
+            CCSlice raw_text = cc_slice_empty();
             @switch (dd->k) {
                 case .pp(pd): is_pp = true; tok = pd.tok; break;
                 case .empty: is_pp = true; break;
                 case .pragma_cc: is_pp = true; break;
+                case .raw(rt): is_pp = true; raw_text = rt; break;   /* a rewritten `#include <rel.h>` */
                 default: break;
             }
             if (!is_pp) break;
             {
-                CCSlice tt = tp_text_of(L, tok);
+                CCSlice tt = raw_text.len ? raw_text : tp_text_of(L, tok);
                 if (tt.len > 8 && memcmp(tt.ptr, "#include", 8) == 0) is_include = true;
                 if (is_include) {
                     inc_at = k + 1;
