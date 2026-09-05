@@ -362,7 +362,7 @@ happens not to contain a banned `@token`, `!>`, `[:]` or `::`.
 ### 5.9 Shapes an AST needs that the engine refuses
 
 Writing a tree of `@variant` nodes with `Vec` children and a template
-printer (`stress/break/break_ast_cc_way_smoke.ccs`) trips thirteen distinct
+printer (`stress/break/break_ast_cc_way_smoke.ccs`) trips sixteen distinct
 defects, each pinned by a sibling `break_*` test with an `.xfail` marker:
 
 | Shape | What happens today | Test |
@@ -380,6 +380,9 @@ defects, each pinned by a sibling `break_*` test with an `.xfail` marker:
 | `n->k = { .shared = a }` with `shared` an arm of two variants | the braced assignment is left un-lowered | `break_variant_shared_arm_assign` |
 | `Vec::[int] xs` declared inside a `@switch` case body | the generic spelling is not lowered | `break_generic_in_switch_body` |
 | `static bool f(Vec::[int]* xs);` prototype | the generic parameter in a prototype is never lowered | `break_generic_ptr_param_proto` |
+| a `@switch` nested inside a case | the inner `.arm` labels resolve against the outer subject | `break_nested_switch_inner_arms` |
+| `a.label` on an ordinary struct inside a case, `label` an arm of the subject | rewritten as a projection of the subject | `break_field_named_like_arm` |
+| `"... @create"` as a string initializer | taken for the constructor sugar | `break_create_word_in_string` |
 
 Every one is a text-engine property (name-keyed type tracking, splice
 points chosen by textual position, paren-counting through literals, fixed
