@@ -1,0 +1,3431 @@
+#pragma(@per_tu)
+/* Declaration index: bodies for index.cch.
+ *
+ * Everything the index knows comes from declarations: the unit's own, the
+ * `.cch` headers it includes (parsed with the same parser in header mode),
+ * `@typehooks` registrations, `*_DECL_UFCS(Name)` registrations, and the
+ * declarations that file-scope macro invocations and generic factories
+ * produce (their `#define` bodies and `@emit` templates are expanded here
+ * and parsed as synthetic header units). There is no table of stdlib
+ * type, function or method names in this file.
+ *
+ * Text handling: names the index keeps are slices into its arena, always
+ * NUL-terminated (cc__ix_dupn), so the C string routines the macro
+ * expander and the manglers use read them directly. */
+#ifndef CC_LOWER_INDEX_IMPL_CCH
+#define CC_LOWER_INDEX_IMPL_CCH
+#include "index.cch"
+#include "parse_decls.cch"
+#include "parse_walk.cch"
+#include <errno.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define CC_INDEX_MAX_EXPANSION_DEPTH 4
+
+/* ---- small helpers ----------------------------------------------------- */
+
+static CCSlice cc__ix_s(const char* s) { return cc_slice_from_buffer((char*)s, strlen(s)); }
+
+/* Arena copy, NUL-terminated. */
+static CCSlice cc__ix_dupn(CcIndex* ix, const char* s, size_t n) {
+    char* out = cc_arena_alloc(ix->arena, n + 1, 1);
+    if (n) memcpy(out, s, n);
+    out[n] = 0;
+    return cc_slice_from_buffer(out, n);
+}
+static CCSlice cc__ix_dup(CcIndex* ix, const char* s) { return cc__ix_dupn(ix, s, strlen(s)); }
+static CCSlice cc__ix_copy(CcIndex* ix, CCSlice s) { return cc__ix_dupn(ix, s.ptr, s.len); }
+/* A NUL-terminated C string for a slice (an arena copy). */
+static const char* cc__ix_cstr(CcIndex* ix, CCSlice s) { return cc__ix_dupn(ix, s.ptr, s.len).ptr; }
+/* The bytes of a string builder as a NUL-terminated arena slice. */
+static CCSlice cc__ix_finish(CcIndex* ix, CCString* sb) {
+    CCSlice v = cc_string_as_slice(sb);
+    return cc__ix_dupn(ix, v.ptr, v.len);
+}
+
+static bool cc__eq(CCSlice a, CCSlice b) { return a.len == b.len && (a.len == 0 || memcmp(a.ptr, b.ptr, a.len) == 0); }
+static bool cc__eqc(CCSlice a, const char* c) {
+    size_t n = strlen(c);
+    return a.len == n && (n == 0 || memcmp(a.ptr, c, n) == 0);
+}
+static bool cc__has_prefix(CCSlice s, const char* p) {
+    size_t n = strlen(p);
+    return s.len >= n && memcmp(s.ptr, p, n) == 0;
+}
+static bool cc__has_prefix_s(CCSlice s, CCSlice p) { return s.len >= p.len && (p.len == 0 || memcmp(s.ptr, p.ptr, p.len) == 0); }
+static bool cc__has_suffix(CCSlice s, const char* p) {
+    size_t n = strlen(p);
+    return s.len >= n && memcmp(s.ptr + s.len - n, p, n) == 0;
+}
+static CCSlice cc__skip(CCSlice s, size_t n) { return cc_slice_from_buffer(s.ptr + n, s.len - n); }
+
+static bool cc__ix_ident_start(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
+static bool cc__ix_ident_char(int c) { return cc__ix_ident_start(c) || (c >= '0' && c <= '9'); }
+
+/* memmem without _GNU_SOURCE. */
+static bool cc__ix_contains(const char* hay, size_t n, const char* needle) {
+    size_t m = strlen(needle);
+    size_t i;
+    if (m == 0) return true;
+    for (i = 0; i + m <= n; i++)
+        if (hay[i] == needle[0] && memcmp(hay + i, needle, m) == 0) return true;
+    return false;
+}
+
+static size_t cc__ntoks(const CcUnit* u) {
+    CcTape* tp = (CcTape*)&u->tape;   /* the vec accessors take a mutable receiver */
+    return tp->toks.len();
+}
+
+static const CcToken* cc__tok(const CcUnit* u, uint32_t i) {
+    CcTape* tp;
+    if (!u) return NULL;
+    tp = (CcTape*)&u->tape;
+    if (i >= tp->toks.len()) return NULL;
+    return tp->toks.get_ptr(i);
+}
+
+static bool cc__tok_is_text(const CcUnit* u, uint32_t i, const char* s) {
+    const CcToken* t = cc__tok(u, i);
+    return t && cc__eqc(t->text, s);
+}
+
+static bool cc__tok_is_punct(const CcToken* t, CcPunct pc) { return t->kind == CC_TK_PUNCT && t->punct == pc; }
+
+static CcLoc cc__span_loc(const CcUnit* u, CcSpan sp) {
+    CcLoc l;
+    const CcToken* t = cc__tok(u, sp.first);
+    if (!t) {
+        l.path = u ? u->tape.path : cc_slice_empty();
+        l.line = 0;
+        l.col = 0;
+        return l;
+    }
+    return u->loc(sp);
+}
+
+static CcLoc CcSym_loc(const CcSym* s) {
+    CcLoc l;
+    l.path = cc_slice_empty();
+    l.line = 0;
+    l.col = 0;
+    if (!s || !s->decl || !s->unit) return l;
+    return cc__span_loc(s->unit, s->decl->span);
+}
+
+/* The text of a token range, joined with a single space wherever the
+ * source had whitespace. */
+static void cc__span_text_buf(CcIndex* ix, CCString* sb, const CcUnit* u, uint32_t first, uint32_t last) {
+    uint32_t i;
+    size_t n = cc__ntoks(u);
+    for (i = first; i <= last && i < n; i++) {
+        const CcToken* t = cc__tok(u, i);
+        if (t->kind == CC_TK_EOF) break;
+        if (i > first && t->after_space) sb->push_char(' ', ix->arena);
+        sb->push_slice(t->text, ix->arena);
+    }
+}
+
+static CCSlice cc__span_text(CcIndex* ix, const CcUnit* u, uint32_t first, uint32_t last) {
+    CCString sb = cc_string_new();
+    cc__span_text_buf(ix, &sb, u, first, last);
+    return cc__ix_finish(ix, &sb);
+}
+
+/* Unquote a string literal token's text ("abc" -> abc; prefixes and simple
+ * escapes handled). */
+static CCSlice cc__unquote(CcIndex* ix, CCSlice text) {
+    CCString sb = cc_string_new();
+    size_t i = 0;
+    size_t len = text.len;
+    while (i < len && text.ptr[i] != '"') i++;
+    if (i < len) i++;
+    for (; i < len && text.ptr[i] != '"'; i++) {
+        if (text.ptr[i] == '\\' && i + 1 < len) {
+            i++;
+            if (text.ptr[i] == 'n') sb.push_char('\n', ix->arena);
+            else if (text.ptr[i] == 't') sb.push_char('\t', ix->arena);
+            else sb.push_char(text.ptr[i], ix->arena);
+        } else {
+            sb.push_char(text.ptr[i], ix->arena);
+        }
+    }
+    return cc__ix_finish(ix, &sb);
+}
+
+/* The type a declaration node declares, for the kinds that have one. */
+static CcType* cc__decl_type_of(const CcDecl* d) {
+    if (!d) return NULL;
+    @switch (d->k) {
+        case .var(v): return v.type;
+        case .func(f): return f.type;
+        case .typedef_(td): return td.type;
+        case .tagged(tg): return tg.type;
+        case .typehooks(th): return th.target;
+        case .typeview(tv): return tv.target;
+        case .scoped_type(st): return st.type;
+        default: return NULL;
+    }
+}
+
+static CCSlice cc__decl_name_of(const CcDecl* d) {
+    if (!d) return cc_slice_empty();
+    @switch (d->k) {
+        case .var(v): return v.name;
+        case .func(f): return f.name;
+        case .typedef_(td): return td.name;
+        case .comptime_fn(cf): return cf.fn.name;
+        default: return cc_slice_empty();
+    }
+}
+
+static void cc__diag_error(CcIndex* ix, CcLoc at, CCSlice msg) {
+    CcDiag d = CcDiag_error(at, msg);
+    d.len = 0;
+    d.phys_line = 0;
+    ix->ds->push(d);
+}
+
+/* ---- symbol table ------------------------------------------------------ */
+
+static CcSym* cc__sym_find_kind(const CcIndex* ix, CCSlice name, int kind) {
+    CcIndex* w = (CcIndex*)ix;
+    CcSymRef* slot = w->sym_heads->get_ptr(name);
+    CcSym* s;
+    if (!slot) return NULL;
+    for (s = *slot; s; s = s->same_name)
+        if (kind == 0 || (int)s->kind == kind) return s;
+    return NULL;
+}
+
+static CcSym* cc__sym_find_cstr(const CcIndex* ix, const char* name, int kind) {
+    return cc__sym_find_kind(ix, cc__ix_s(name), kind);
+}
+
+static CcSym* !>(CcDiag) CcIndex_sym(CcIndex* ix, CCSlice name) {
+    CcSym* s = cc__sym_find_kind(ix, name, 0);
+    if (s) return cc_ok(s);
+    {
+        CcLoc at;
+        CCString sb = cc_string_new();
+        CcDiag d;
+        at.path = cc_slice_empty();
+        at.line = 0;
+        at.col = 0;
+        sb.push_cstr("undeclared name '", ix->arena);
+        sb.push_slice(name, ix->arena);
+        sb.push_char('\'', ix->arena);
+        d = CcDiag_error(at, cc__ix_finish(ix, &sb));
+        d.len = 0;
+        d.phys_line = 0;
+        return cc_err(d);
+    }
+}
+
+/* A function-shaped callee: a declared function or a macro. */
+static CcSym* cc__callee_sym(const CcIndex* ix, CCSlice name) {
+    CcSym* s = cc__sym_find_kind(ix, name, CC_SYM_FUNC);
+    if (s) return s;
+    s = cc__sym_find_kind(ix, name, CC_SYM_MACRO);
+    if (s && s->macro && s->macro->function_like) return s;
+    return NULL;
+}
+
+static CcSym* cc__sym_add(CcIndex* ix, CCSlice name, CcSymKind kind, CcDecl* decl, CcUnit* u,
+                          CcType* type, bool is_header, bool is_definition) {
+    CcSym* s = cc__sym_find_kind(ix, name, (int)kind);
+    CcSymRef* head;
+    if (s) {
+        /* A later declaration wins only when it carries more information:
+         * a definition after a prototype, a struct body after a forward
+         * declaration. */
+        if (is_definition && !s->is_definition) {
+            s->decl = decl;
+            s->unit = u;
+            s->type = type;
+            s->is_header = is_header;
+            s->is_definition = true;
+        }
+        return s;
+    }
+    s = cc_arena_alloc(ix->arena, sizeof(CcSym), _Alignof(CcSym));
+    memset(s, 0, sizeof(*s));
+    s->name = cc__ix_copy(ix, name);
+    s->kind = kind;
+    s->decl = decl;
+    s->unit = u;
+    s->type = type;
+    s->is_header = is_header;
+    s->is_definition = is_definition;
+    head = ix->sym_heads->get_ptr(s->name);
+    s->same_name = head ? *head : NULL;
+    ix->sym_heads->insert(s->name, s);
+    {
+        CcSymList* symv = &ix->syms;
+        symv->push(s);
+    }
+    return s;
+}
+
+/* ---- type table -------------------------------------------------------- */
+
+static CcTypeInfo* cc__type_find(const CcIndex* ix, CCSlice name) {
+    CcIndex* w = (CcIndex*)ix;
+    CcTypeInfoRef* slot = w->type_map->get_ptr(name);
+    return slot ? *slot : NULL;
+}
+
+static CcTypeInfo* !>(CcDiag) CcIndex_type(CcIndex* ix, CCSlice canonical) {
+    CcTypeInfo* t = cc__type_find(ix, canonical);
+    if (t) return cc_ok(t);
+    {
+        CcLoc at;
+        CCString sb = cc_string_new();
+        CcDiag d;
+        at.path = cc_slice_empty();
+        at.line = 0;
+        at.col = 0;
+        sb.push_cstr("unknown type '", ix->arena);
+        sb.push_slice(canonical, ix->arena);
+        sb.push_char('\'', ix->arena);
+        d = CcDiag_error(at, cc__ix_finish(ix, &sb));
+        d.len = 0;
+        d.phys_line = 0;
+        return cc_err(d);
+    }
+}
+
+static void cc__type_resolve_hooks(CcIndex* ix, CcTypeInfo* info);
+static void cc__type_instantiate(CcIndex* ix, CcTypeInfo* info);
+static bool cc__infer_family(CcIndex* ix, CcTypeInfo* t);
+
+static CcTypeInfo* CcIndex_type_get(CcIndex* ix, CCSlice canonical) {
+    CcTypeInfo* t = cc__type_find(ix, canonical);
+    if (t) return t;
+    t = cc_arena_alloc(ix->arena, sizeof(CcTypeInfo), _Alignof(CcTypeInfo));
+    memset(t, 0, sizeof(*t));
+    t->name = cc__ix_copy(ix, canonical);
+    t->sym = cc__sym_find_kind(ix, canonical, CC_SYM_TYPE);
+    t->methods = vec_new::[CcMethodRef](ix->arena);
+    t->targs = vec_new::[CcTypeRef](ix->arena);
+    ix->type_map->insert(t->name, t);
+    {
+        CcTypeInfoList* infov = &ix->types;
+        infov->push(t);
+    }
+    cc__type_resolve_hooks(ix, t);
+    if (!t->sym && cc__infer_family(ix, t)) cc__type_instantiate(ix, t);
+    return t;
+}
+
+/* ---- primitive spellings and mangling ---------------------------------- */
+
+static bool cc__word_is(const char* s, size_t len, const char* k) {
+    return len == strlen(k) && memcmp(s, k, len) == 0;
+}
+
+/* Canonical spelling of a run of C primitive type keywords: "unsigned long
+ * int" -> "unsigned long", "long int" -> "long", "int unsigned" ->
+ * "unsigned int". Anything that is not entirely primitive keywords comes
+ * back unchanged (with whitespace collapsed). */
+static CCSlice cc__canon_primitive(CcIndex* ix, CCSlice spelling) {
+    int n_long = 0;
+    bool is_unsigned = false, is_signed = false, is_short = false, is_char = false;
+    bool is_float = false, is_double = false, is_void = false, is_bool = false, other = false;
+    int n = 0;
+    CCString words = cc_string_new();
+    size_t i = 0;
+    while (i < spelling.len) {
+        const char* s;
+        size_t len;
+        while (i < spelling.len && (spelling.ptr[i] == ' ' || spelling.ptr[i] == '\t' || spelling.ptr[i] == '\n')) i++;
+        if (i >= spelling.len) break;
+        s = spelling.ptr + i;
+        while (i < spelling.len && spelling.ptr[i] != ' ' && spelling.ptr[i] != '\t' && spelling.ptr[i] != '\n') i++;
+        len = (size_t)(spelling.ptr + i - s);
+        /* qualifiers are about the object, not the type's identity */
+        if (cc__word_is(s, len, "const") || cc__word_is(s, len, "volatile") || cc__word_is(s, len, "restrict") ||
+            cc__word_is(s, len, "__restrict"))
+            continue;
+        n++;
+        if (words.len()) words.push_char(' ', ix->arena);
+        words.push_buffer(s, (uint32_t)len, ix->arena);
+        if (cc__word_is(s, len, "long")) n_long++;
+        else if (cc__word_is(s, len, "unsigned")) is_unsigned = true;
+        else if (cc__word_is(s, len, "signed")) is_signed = true;
+        else if (cc__word_is(s, len, "short")) is_short = true;
+        else if (cc__word_is(s, len, "char")) is_char = true;
+        else if (cc__word_is(s, len, "int")) ;
+        else if (cc__word_is(s, len, "float")) is_float = true;
+        else if (cc__word_is(s, len, "double")) is_double = true;
+        else if (cc__word_is(s, len, "void")) is_void = true;
+        else if (cc__word_is(s, len, "_Bool") || cc__word_is(s, len, "bool")) is_bool = true;
+        else other = true;
+    }
+    if (other || n == 0) return cc__ix_finish(ix, &words);
+    if (is_void) return cc__ix_s("void");
+    if (is_bool) return cc__ix_s("bool");
+    if (is_float) return cc__ix_s("float");
+    if (is_double) return cc__ix_s(n_long ? "long double" : "double");
+    if (is_char) return cc__ix_s(is_unsigned ? "unsigned char" : is_signed ? "signed char" : "char");
+    if (is_short) return cc__ix_s(is_unsigned ? "unsigned short" : "short");
+    if (n_long >= 2) return cc__ix_s(is_unsigned ? "unsigned long long" : "long long");
+    if (n_long == 1) return cc__ix_s(is_unsigned ? "unsigned long" : "long");
+    return cc__ix_s(is_unsigned ? "unsigned int" : "int");
+}
+
+/* Is the spelling made only of C primitive type keywords? */
+static bool cc__primitive_words(CCSlice s) {
+    size_t i = 0;
+    int n = 0;
+    while (i < s.len) {
+        const char* w;
+        size_t len;
+        while (i < s.len && s.ptr[i] == ' ') i++;
+        if (i >= s.len) break;
+        w = s.ptr + i;
+        while (i < s.len && s.ptr[i] != ' ') i++;
+        len = (size_t)(s.ptr + i - w);
+        if (!(cc__word_is(w, len, "long") || cc__word_is(w, len, "unsigned") || cc__word_is(w, len, "signed") ||
+              cc__word_is(w, len, "short") || cc__word_is(w, len, "char") || cc__word_is(w, len, "int") ||
+              cc__word_is(w, len, "float") || cc__word_is(w, len, "double") || cc__word_is(w, len, "void") ||
+              cc__word_is(w, len, "_Bool") || cc__word_is(w, len, "bool")))
+            return false;
+        n++;
+    }
+    return n > 0;
+}
+
+static void cc__push_sep(CcIndex* ix, CCString* sb) {
+    size_t n = sb->len();
+    if (n && cc_string_data(sb)[n - 1] != '_') sb->push_char('_', ix->arena);
+}
+
+static CCSlice cc__trim_underscores(CcIndex* ix, CCString* sb) {
+    CCSlice v = cc_string_as_slice(sb);
+    size_t n = v.len;
+    while (n && v.ptr[n - 1] == '_') n--;
+    return cc__ix_dupn(ix, v.ptr, n);
+}
+
+/* Identifier-safe token for a canonical type spelling: spaces -> `_`,
+ * `*` -> `ptr`, other punctuation -> `_`, trailing `_` trimmed. This is the
+ * recipe of GENERIC_MANGLING.md and of the current Result spec mangler. */
+static CCSlice cc__mangle(CcIndex* ix, CCSlice s) {
+    CCString sb = cc_string_new();
+    size_t i;
+    size_t n = s.len;
+    for (i = 0; i < n; i++) {
+        char c = s.ptr[i];
+        if (c == ' ' || c == '\t' || c == '\n') {
+            size_t k = i + 1;
+            while (k < n && (s.ptr[k] == ' ' || s.ptr[k] == '\t')) k++;
+            if (k < n && s.ptr[k] == '*') continue;
+            cc__push_sep(ix, &sb);
+        } else if (c == '*') {
+            sb.push_cstr("ptr", ix->arena);
+        } else if (c == '[' && i + 2 < n && s.ptr[i + 1] == ':' && s.ptr[i + 2] == ']') {
+            sb.push_cstr("slice", ix->arena);
+            i += 2;
+        } else if (cc__ix_ident_char((unsigned char)c)) {
+            sb.push_char(c, ix->arena);
+        } else {
+            cc__push_sep(ix, &sb);
+        }
+    }
+    return cc__trim_underscores(ix, &sb);
+}
+
+static CCSlice CcIndex_snake(CcIndex* ix, CCSlice type_name) {
+    CCString sb = cc_string_new();
+    size_t n = type_name.len;
+    size_t i;
+    size_t body_start = 0;
+    const char* t = type_name.ptr;
+    if (n > 2 && t[0] == 'C' && t[1] == 'C' && t[2] >= 'A' && t[2] <= 'Z') {
+        sb.push_cstr("cc_", ix->arena);
+        body_start = 2;
+    }
+    for (i = body_start; i < n; i++) {
+        char c = t[i];
+        bool upper = c >= 'A' && c <= 'Z';
+        if (c == ' ' || c == '\t') {
+            cc__push_sep(ix, &sb);
+            continue;
+        }
+        if (upper && i > body_start) cc__push_sep(ix, &sb);
+        sb.push_char(upper ? (char)(c + ('a' - 'A')) : c, ix->arena);
+    }
+    return cc__trim_underscores(ix, &sb);
+}
+
+/* ---- canonical type spelling ------------------------------------------- */
+
+static bool cc__is_char_family(CCSlice canon) {
+    return cc__eqc(canon, "char") || cc__eqc(canon, "unsigned char") || cc__eqc(canon, "signed char");
+}
+
+static CCSlice cc__type_arg_spelling(CcIndex* ix, const CcType* t);
+static CCSlice cc__macro_expand(CcIndex* ix, const CcMacroDef* m, CcNameList* args);
+static CcUnit* cc__parse_text(CcIndex* ix, CCSlice path, CCSlice text, CcUnitMode mode, CcDiags* ds);
+
+/* The instance prefix a generic family uses: the family name, except that
+ * the stdlib's `Vec` family names its instances `CCVec_<T>` (vec.cch: "The
+ * concrete C name is CCVec_<T>"). Nothing else in the index maps a family
+ * name; see INDEX_GAPS.md for the proposal to make that a declaration. */
+static CCSlice cc__family_prefix(CCSlice family) {
+    if (cc__eqc(family, "Vec")) return cc__ix_s("CCVec");
+    return family;
+}
+
+static CCSlice cc__cat2(CcIndex* ix, CCSlice a, const char* b) {
+    CCString sb = cc_string_new();
+    sb.push_slice(a, ix->arena);
+    sb.push_cstr(b, ix->arena);
+    return cc__ix_finish(ix, &sb);
+}
+
+static CCSlice cc__cat3(CcIndex* ix, const char* a, CCSlice b, const char* c) {
+    CCString sb = cc_string_new();
+    sb.push_cstr(a, ix->arena);
+    sb.push_slice(b, ix->arena);
+    sb.push_cstr(c, ix->arena);
+    return cc__ix_finish(ix, &sb);
+}
+
+/* "a" + "b" as one name: the `Name_method` compositions. */
+static CCSlice cc__join(CcIndex* ix, CCSlice a, const char* sep, CCSlice b) {
+    CCString sb = cc_string_new();
+    sb.push_slice(a, ix->arena);
+    sb.push_cstr(sep, ix->arena);
+    sb.push_slice(b, ix->arena);
+    return cc__ix_finish(ix, &sb);
+}
+
+static CCSlice cc__canon_named(CcIndex* ix, CcNamedType n) {
+    CCSlice nm = n.name.len ? n.name : cc__ix_s("?");
+    if (n.struct_kw && !cc__has_prefix(nm, "struct ")) return cc__cat3(ix, "struct ", nm, "");
+    if (n.union_kw && !cc__has_prefix(nm, "union ")) return cc__cat3(ix, "union ", nm, "");
+    if (n.enum_kw && !cc__has_prefix(nm, "enum ")) return cc__cat3(ix, "enum ", nm, "");
+    return cc__canon_primitive(ix, nm);
+}
+
+static CCSlice cc__canon_record(CcIndex* ix, CcRecordType rc) {
+    if (rc.tag.len) return cc__cat3(ix, rc.is_union ? "union " : "struct ", rc.tag, "");
+    return cc__ix_s(rc.is_union ? "union <anonymous>" : "struct <anonymous>");
+}
+
+static CCSlice cc__canon_enum(CcIndex* ix, CcEnumType en) {
+    if (en.tag.len) return cc__cat3(ix, "enum ", en.tag, "");
+    return cc__ix_s("enum <anonymous>");
+}
+
+static CCSlice cc__canon_slice(CcIndex* ix, CcSliceType sl) {
+    CCSlice base = CcIndex_canon(ix, sl.elem);
+    CCSlice name;
+    CcTypeInfo* info;
+    if (cc__is_char_family(base)) return cc__ix_s(sl.unique ? "CCSliceUnique" : "CCSlice");
+    name = cc__cat3(ix, "CCSlice_", cc__mangle(ix, base), "");
+    info = CcIndex_type_get(ix, name);
+    if (!info->family.len) {
+        CcTypeList* targv = &info->targs;
+        info->family = cc__ix_s("CCSlice");
+        targv->push(sl.elem);
+    }
+    cc__type_instantiate(ix, info);
+    return name;
+}
+
+static CCSlice cc__canon_chan(CcIndex* ix, CcChanType ch) {
+    CCSlice base = CcIndex_canon(ix, ch.elem);
+    CCString sb = cc_string_new();
+    sb.push_cstr(ch.dir == '<' ? "CCChanRx_" : "CCChanTx_", ix->arena);
+    sb.push_slice(cc__mangle(ix, base), ix->arena);
+    return cc__ix_finish(ix, &sb);
+}
+
+static CCSlice cc__canon_generic(CcIndex* ix, CcGenericType g) {
+    CCString sb = cc_string_new();
+    CcTypeList* tlist = &g.args;
+    size_t i;
+    size_t n = tlist->len();
+    CCSlice name;
+    CcTypeInfo* info;
+    CCSlice family = g.family.len ? g.family : cc__ix_s("?");
+    sb.push_slice(cc__family_prefix(family), ix->arena);
+    for (i = 0; i < n; i++) {
+        CcType* at = *tlist->get_ptr(i);
+        sb.push_char('_', ix->arena);
+        sb.push_slice(cc__mangle(ix, cc__type_arg_spelling(ix, at)), ix->arena);
+    }
+    name = cc__ix_finish(ix, &sb);
+    info = CcIndex_type_get(ix, name);
+    if (!info->family.len) {
+        CcTypeList* targv = &info->targs;
+        info->family = cc__ix_copy(ix, g.family);
+        for (i = 0; i < n; i++) { CcType* at2 = *tlist->get_ptr(i); targv->push(at2); }
+    }
+    cc__type_instantiate(ix, info);
+    return name;
+}
+
+/* NAME(args) as a type: expand the macro when it is known and read the type back */
+static CCSlice cc__canon_macro_type(CcIndex* ix, const CcType* t, CcGenericType mg) {
+    CcSym* ms = mg.family.len ? cc__sym_find_kind(ix, mg.family, CC_SYM_MACRO) : NULL;
+    if (ms && ms->macro && ms->macro->function_like) {
+        CcNameList args = vec_new::[CCSlice](ix->arena);
+        CcTypeList* tlist = &mg.args;
+        size_t i;
+        size_t n = tlist->len();
+        CCSlice text;
+        CcDiags scratch = CcDiags_new(ix->arena);
+        CcUnit* u;
+        for (i = 0; i < n; i++) { CCSlice asp = cc__type_arg_spelling(ix, *tlist->get_ptr(i)); args.push(asp); }
+        text = cc__cat2(ix, cc__macro_expand(ix, ms->macro, &args), " __cc_probe;");
+        u = cc__parse_text(ix, cc__ix_s("<macro type>"), text, CC_UNIT_HEADER, &scratch);
+        {
+            CcDeclList* declv = &u->decls;
+            if (!scratch.n_errors && declv->len() == 1) {
+                CcType* dt = cc__decl_type_of(*declv->get_ptr(0));
+                if (dt && dt != t) return CcIndex_canon(ix, dt);
+            }
+        }
+    }
+    return cc__cat2(ix, mg.family.len ? mg.family : cc__ix_s("?"), "(...)");
+}
+
+static CCSlice cc__canon_scoped(CcIndex* ix, CcScopedType sc) {
+    if (!sc.inner) return cc__ix_s("?");
+    @switch (sc.inner->k) {
+        case .named(n): return n.name.len ? n.name : cc__ix_s("?");
+        case .generic(g): return g.family.len ? g.family : cc__ix_s("?");
+        default: return cc__ix_s("?");
+    }
+}
+
+static CCSlice CcIndex_canon(CcIndex* ix, const CcType* t) {
+    if (!t) return cc__ix_s("?");
+    @switch (t->k) {
+        case .named(n): return cc__canon_named(ix, n);
+        case .pointer(pt): return cc__cat2(ix, CcIndex_canon(ix, pt.pointee), "*");
+        case .array(ar): return cc__cat2(ix, CcIndex_canon(ix, ar.elem), "[]");
+        case .func(fn): return cc__cat2(ix, CcIndex_canon(ix, fn.ret), "(*)()");
+        case .record(rc): return cc__canon_record(ix, rc);
+        case .enumt(en): return cc__canon_enum(ix, en);
+        case .typeof_(tf): return tf.type ? CcIndex_canon(ix, tf.type) : cc__ix_s("__typeof__");
+        case .atomic(at): return CcIndex_canon(ix, at.pointee);
+        case .result(rs): return CcIndex_result(ix, rs.value, rs.err, rs.optional)->name;
+        case .slice(sl): return cc__canon_slice(ix, sl);
+        case .chan(ch): return cc__canon_chan(ix, ch);
+        case .generic(g): return cc__canon_generic(ix, g);
+        case .macro(mg): return cc__canon_macro_type(ix, t, mg);
+        case .valarg: return cc__type_arg_spelling(ix, t);
+        case .scoped(sc): return cc__canon_scoped(ix, sc);
+        case .auto_: return cc__ix_s("?");
+    }
+    return cc__ix_s("?");
+}
+
+static CCSlice cc__value_spelling(CcIndex* ix, const CcType* t) {
+    CCSlice* slot = ix->value_spellings->get_ptr((uint64_t)(uintptr_t)t);
+    return slot ? *slot : cc_slice_empty();
+}
+
+/* A value argument (`SmallVec::[int, 8]`): its source text, read when the
+ * unit was added. A nested instance (`Map::[int, Vec::[int]]`) arrives
+ * here as a value: read it as a type. */
+static CCSlice cc__valarg_spelling(CcIndex* ix, const CcType* t) {
+    CCSlice text = cc__value_spelling(ix, t);
+    if (text.len && cc__ix_contains(text.ptr, text.len, "::[")) {
+        CcDiags scratch = CcDiags_new(ix->arena);
+        CcUnit* u = cc__parse_text(ix, cc__ix_s("<type argument>"), cc__cat2(ix, text, " __cc_probe;"), CC_UNIT_HEADER, &scratch);
+        CcDeclList* declv = &u->decls;
+        if (!scratch.n_errors && declv->len() == 1) {
+            CcType* dt = cc__decl_type_of(*declv->get_ptr(0));
+            if (dt && dt->k.kind != CcTypeK_valarg) return CcIndex_canon(ix, dt);
+        }
+    }
+    return text.len ? text : cc__ix_s("value");
+}
+
+/* A type argument as the factory receives it: a C spelling. A numeric
+ * argument (`SmallVec::[int, 8]`) is its digits. */
+static CCSlice cc__type_arg_spelling(CcIndex* ix, const CcType* t) {
+    if (!t) return cc__ix_s("?");
+    @switch (t->k) {
+        case .named(n): return cc__canon_primitive(ix, n.name.len ? n.name : cc__ix_s("?"));
+        case .valarg: return cc__valarg_spelling(ix, t);
+        case .slice(sl):
+            if (cc__is_char_family(CcIndex_canon(ix, sl.elem))) return cc__ix_s("CCSlice");
+            break;
+        default: break;
+    }
+    return CcIndex_canon(ix, t);
+}
+
+/* ---- Result specs -------------------------------------------------------- */
+
+static CcTypeInfo* CcIndex_result(CcIndex* ix, CcType* value, CcType* err, bool optional) {
+    CCSlice mv = cc__mangle(ix, CcIndex_canon(ix, value));
+    CCSlice me = cc__mangle(ix, CcIndex_canon(ix, err));
+    CCSlice name;
+    CcTypeInfo* info;
+    bool listed = false;
+    {
+        CCString sb = cc_string_new();
+        sb.push_cstr("CCResult_", ix->arena);
+        sb.push_slice(mv, ix->arena);
+        sb.push_char('_', ix->arena);
+        sb.push_slice(me, ix->arena);
+        name = cc__ix_finish(ix, &sb);
+    }
+    info = CcIndex_type_get(ix, name);
+    if (!info->is_result) {
+        info->is_result = true;
+        info->result_value = value;
+        info->result_err = err;
+        info->result_optional = optional;
+    } else if (optional) {
+        info->result_optional = true;
+    }
+    {
+        CcTypeInfoList* specv = &ix->result_specs;
+        size_t i;
+        size_t n = specv->len();
+        for (i = 0; i < n; i++)
+            if (*specv->get_ptr(i) == info) listed = true;
+        if (!listed) specv->push(info);
+    }
+    cc__type_instantiate(ix, info);
+    return info;
+}
+
+/* A CcType for a C spelling seen in a macro argument ("CCDirIter*", "int"). */
+static CcType* cc__type_from_text(CcIndex* ix, CCSlice text) {
+    size_t n = text.len;
+    CcSpan sp;
+    CcType* t;
+    sp.first = 0;
+    sp.last = 0;
+    while (n && (text.ptr[n - 1] == ' ' || text.ptr[n - 1] == '\t')) n--;
+    if (n && text.ptr[n - 1] == '*')
+        return cc_type_pointer(cc__type_from_text(ix, cc__ix_dupn(ix, text.ptr, n - 1)), sp, ix->arena);
+    t = cc_type_named(cc__canon_primitive(ix, cc__ix_dupn(ix, text.ptr, n)), sp, ix->arena);
+    {
+        CcNamedType nt;
+        nt.name = cc__canon_primitive(ix, cc__ix_dupn(ix, text.ptr, n));
+        nt.struct_kw = cc__has_prefix(text, "struct ");
+        nt.union_kw = cc__has_prefix(text, "union ");
+        nt.enum_kw = cc__has_prefix(text, "enum ");
+        t->k = { .named = nt };
+    }
+    return t;
+}
+
+static void cc__result_declared(CcIndex* ix, CcUnit* u, CcDecl* d, bool is_header, CCSlice name,
+                                CCSlice value_text, bool has_value, CCSlice err_text) {
+    CcTypeInfo* info = CcIndex_type_get(ix, name);
+    CcLoc loc = cc__span_loc(u, d->span);
+    info->is_result = true;
+    if (!info->result_value) info->result_value = has_value ? cc__type_from_text(ix, value_text) : NULL;
+    if (!info->result_err) info->result_err = cc__type_from_text(ix, err_text);
+    if (is_header) info->result_from_header = true;
+    info->result_decl_unit = u;
+    info->result_decl_line = loc.line;
+}
+
+/* ---- `#define` parsing and expansion ----------------------------------- */
+
+/* Body text of a PP line with continuations joined and comments removed. */
+static CCSlice cc__pp_clean(CcIndex* ix, CCSlice text) {
+    CCString sb = cc_string_new();
+    size_t i = 0;
+    size_t len = text.len;
+    const char* p = text.ptr;
+    while (i < len) {
+        char c = p[i];
+        if (c == '\\' && i + 1 < len && (p[i + 1] == '\n' || (p[i + 1] == '\r' && i + 2 < len && p[i + 2] == '\n'))) {
+            i += p[i + 1] == '\r' ? 3 : 2;
+            sb.push_char(' ', ix->arena);
+            continue;
+        }
+        if (c == '/' && i + 1 < len && p[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < len && !(p[i] == '*' && p[i + 1] == '/')) i++;
+            i += 2;
+            sb.push_char(' ', ix->arena);
+            continue;
+        }
+        if (c == '/' && i + 1 < len && p[i + 1] == '/') {
+            while (i < len && p[i] != '\n') i++;
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            char q = c;
+            sb.push_char(c, ix->arena);
+            i++;
+            while (i < len && p[i] != q) {
+                if (p[i] == '\\' && i + 1 < len) { sb.push_char(p[i], ix->arena); i++; }
+                sb.push_char(p[i], ix->arena);
+                i++;
+            }
+            if (i < len) { sb.push_char(p[i], ix->arena); i++; }
+            continue;
+        }
+        sb.push_char(c, ix->arena);
+        i++;
+    }
+    return cc__ix_finish(ix, &sb);
+}
+
+static CcMacroDef* cc__parse_define(CcIndex* ix, CcUnit* u, CcDecl* d, uint32_t tok) {
+    const CcToken* t = cc__tok(u, tok);
+    const char* p;
+    const char* name_s;
+    CcMacroDef* m;
+    if (!t) return NULL;
+    p = cc__pp_clean(ix, t->text).ptr;
+    if (*p != '#') return NULL;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (strncmp(p, "define", 6) != 0) return NULL;
+    p += 6;
+    if (!(*p == ' ' || *p == '\t')) return NULL;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!cc__ix_ident_start((unsigned char)*p)) return NULL;
+    name_s = p;
+    while (cc__ix_ident_char((unsigned char)*p)) p++;
+    m = cc_arena_alloc(ix->arena, sizeof(CcMacroDef), _Alignof(CcMacroDef));
+    memset(m, 0, sizeof(*m));
+    m->name = cc__ix_dupn(ix, name_s, (size_t)(p - name_s));
+    m->params = vec_new::[CCSlice](ix->arena);
+    m->decl = d;
+    m->unit = u;
+    if (*p == '(') {
+        CcNameList* paramv = &m->params;
+        p++;
+        m->function_like = true;
+        for (;;) {
+            const char* s;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == ')') { p++; break; }
+            if (!*p) break;
+            if (strncmp(p, "...", 3) == 0) {
+                m->variadic = true;
+                p += 3;
+                continue;
+            }
+            s = p;
+            while (cc__ix_ident_char((unsigned char)*p)) p++;
+            if (p == s) { p++; continue; }
+            paramv->push(cc__ix_dupn(ix, s, (size_t)(p - s)));
+            while (*p == ' ' || *p == '\t') p++;
+            if (strncmp(p, "...", 3) == 0) { m->variadic = true; p += 3; }
+            if (*p == ',') p++;
+        }
+    }
+    while (*p == ' ' || *p == '\t') p++;
+    m->body = cc__ix_dup(ix, p);
+    return m;
+}
+
+static int cc__macro_param_index(const CcMacroDef* m, const char* s, size_t n) {
+    CcNameList* paramv = (CcNameList*)&m->params;
+    size_t i;
+    size_t np = paramv->len();
+    for (i = 0; i < np; i++) {
+        CCSlice pn = *paramv->get_ptr(i);
+        if (pn.len == n && memcmp(pn.ptr, s, n) == 0) return (int)i;
+    }
+    return -1;
+}
+
+static CCSlice cc__stringify(CcIndex* ix, CCSlice val) {
+    CCString sb = cc_string_new();
+    size_t i;
+    sb.push_char('"', ix->arena);
+    for (i = 0; i < val.len; i++) {
+        char c = val.ptr[i];
+        if (c == '"' || c == '\\') sb.push_char('\\', ix->arena);
+        sb.push_char(c, ix->arena);
+    }
+    sb.push_char('"', ix->arena);
+    return cc__ix_finish(ix, &sb);
+}
+
+/* Expand a function-like macro body with the given argument texts. `#x`
+ * stringifies, `a ## b` pastes, `__VA_ARGS__` is the rest of the list. */
+static CCSlice cc__macro_expand(CcIndex* ix, const CcMacroDef* m, CcNameList* args) {
+    CcNameList pieces = vec_new::[CCSlice](ix->arena);
+    CcIntList glue = vec_new::[int](ix->arena);    /* 0 = space, 1 = paste */
+    const char* p = m->body.ptr;
+    size_t nargs = args->len();
+    size_t np = m->params.len();
+    CCString out = cc_string_new();
+    size_t i;
+    bool paste_next = false;
+    bool stringify_next = false;
+    while (*p) {
+        const char* s;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        s = p;
+        if (p[0] == '#' && p[1] == '#') {
+            p += 2;
+            paste_next = true;
+            continue;
+        }
+        if (p[0] == '#' && m->function_like) {
+            p++;
+            stringify_next = true;
+            continue;
+        }
+        if (cc__ix_ident_start((unsigned char)*p)) {
+            int pi;
+            CCSlice val;
+            while (cc__ix_ident_char((unsigned char)*p)) p++;
+            pi = cc__macro_param_index(m, s, (size_t)(p - s));
+            if (pi >= 0 && (size_t)pi < nargs) {
+                val = *args->get_ptr((size_t)pi);
+            } else if (pi >= 0) {
+                val = cc__ix_s("");
+            } else if ((size_t)(p - s) == 11 && memcmp(s, "__VA_ARGS__", 11) == 0) {
+                CCString va = cc_string_new();
+                size_t k;
+                for (k = np; k < nargs; k++) {
+                    if (k > np) va.push_cstr(", ", ix->arena);
+                    { CCSlice ak = *args->get_ptr(k); va.push_slice(ak, ix->arena); }
+                }
+                val = cc__ix_finish(ix, &va);
+            } else {
+                val = cc__ix_dupn(ix, s, (size_t)(p - s));
+            }
+            if (stringify_next) {
+                val = cc__stringify(ix, val);
+                stringify_next = false;
+            }
+            pieces.push(val);
+            glue.push(paste_next ? 1 : 0);
+            paste_next = false;
+            continue;
+        }
+        if (*p == '"' || *p == '\'') {
+            char q = *p++;
+            while (*p && *p != q) {
+                if (*p == '\\' && p[1]) p++;
+                p++;
+            }
+            if (*p) p++;
+        } else {
+            /* one punctuation character (multi-character operators stay
+             * adjacent because pieces are joined with a space only where the
+             * body had one) */
+            const char* q = p + 1;
+            while (*q && !(*q == ' ' || *q == '\t') && !cc__ix_ident_char((unsigned char)*q) && *q != '"' &&
+                   *q != '\'' && *q != '#')
+                q++;
+            p = q;
+        }
+        pieces.push(cc__ix_dupn(ix, s, (size_t)(p - s)));
+        glue.push(paste_next ? 1 : 0);
+        paste_next = false;
+    }
+    {
+        size_t n = pieces.len();
+        for (i = 0; i < n; i++) {
+            if (i > 0 && *glue.get_ptr(i) == 0) out.push_char(' ', ix->arena);
+            { CCSlice piece = *pieces.get_ptr(i); out.push_slice(piece, ix->arena); }
+        }
+    }
+    return cc__ix_finish(ix, &out);
+}
+
+/* ---- synthetic units: expansions parsed as headers --------------------- */
+
+
+static CcIncludeRefList cc__scan_includes(CcIndex* ix, const CcTape* tape);
+static CCSlice cc__resolve_include(CcIndex* ix, CCSlice from_path, const CcIncludeRef* r, CCString* searched);
+static void cc__load_header(CcIndex* ix, CCSlice path);
+
+static CcNameList CcIndex_known_types(CcIndex* ix) {
+    return ix->typedef_names;
+}
+
+static CcUnit* cc__parse_text(CcIndex* ix, CCSlice path, CCSlice text, CcUnitMode mode, CcDiags* ds) {
+    CcParseOpts po;
+    po.mode = mode;
+    po.known_types = ix->typedef_names;
+    return cc_parse_unit(path, text, po, ds, ix->arena);
+}
+
+static CCSlice cc__ix_diag_source(CCSlice path, void* ctx) {
+    (void)path;
+    return *(CCSlice*)ctx;
+}
+
+/* Parse `text` (an expansion) as a header unit and index it. Parse errors
+ * inside an expansion are counted, not reported: the expansion is stdlib
+ * text the user did not write, and a construct the parser does not model
+ * there is a parser gap, not a user error. */
+static void cc__index_expansion(CcIndex* ix, CCSlice label, CCSlice text, bool is_header) {
+    CcDiags scratch = CcDiags_new(ix->arena);
+    CcUnit* u;
+    if (ix->expansion_depth >= CC_INDEX_MAX_EXPANSION_DEPTH) return;
+    ix->n_expansions++;
+    if (cc__ix_contains(text.ptr, text.len, "#include")) {
+        /* a factory template may include a lowered header (`<ccc/std/map.h>`):
+         * its source is the `.cch` of the same name */
+        CcDiags lexd = CcDiags_new(ix->arena);
+        CcTape tape = cc_lex(label, text, &lexd, ix->arena);
+        CcIncludeRefList refs = cc__scan_includes(ix, &tape);
+        size_t i;
+        size_t n = refs.len();
+        for (i = 0; i < n; i++) {
+            CcIncludeRef* r = refs.get_ptr(i);
+            CCString searched = cc_string_new();
+            CCSlice found;
+            size_t pl = r->path.len;
+            if (!(pl > 2 && r->path.ptr[pl - 2] == '.' && r->path.ptr[pl - 1] == 'h' && cc__has_prefix(r->path, "ccc/"))) continue;
+            r->path = cc__cat2(ix, cc__ix_dupn(ix, r->path.ptr, pl - 2), ".cch");
+            found = cc__resolve_include(ix, label, r, &searched);
+            if (found.len) cc__load_header(ix, found);
+        }
+    }
+    u = cc__parse_text(ix, label, text, CC_UNIT_HEADER, &scratch);
+    ix->n_expansion_errors += scratch.n_errors;
+    if (scratch.n_errors && getenv("CC_INDEX_DEBUG_EXPANSIONS")) {
+        fprintf(stderr, "--- expansion %.*s\n%.*s\n", (int)label.len, label.ptr, (int)text.len, text.ptr);
+        scratch.print(stderr, cc__ix_diag_source, &text);
+    }
+    ix->expansion_depth++;
+    CcIndex_add_unit(ix, u, is_header);
+    ix->expansion_depth--;
+}
+
+/* ---- file-scope macro invocations -------------------------------------- */
+
+/* Split the arguments of `NAME(a, b, c)` in a token range into texts.
+ * Returns false when the range does not start with `NAME(`; `out_name`
+ * is set whenever the range starts with an identifier. */
+static bool cc__call_args(CcIndex* ix, const CcUnit* u, CcSpan sp, CcNameList* out_args, CCSlice* out_name) {
+    uint32_t i = sp.first;
+    int depth = 0;
+    uint32_t arg_first;
+    const CcToken* t = cc__tok(u, i);
+    *out_name = cc_slice_empty();
+    if (!t || t->kind != CC_TK_IDENT) return false;
+    *out_name = cc__ix_copy(ix, t->text);
+    i++;
+    t = cc__tok(u, i);
+    if (!t || !cc__tok_is_punct(t, CC_P_LPAREN)) return false;
+    i++;
+    arg_first = i;
+    for (; i <= sp.last; i++) {
+        t = cc__tok(u, i);
+        if (!t || t->kind == CC_TK_EOF) break;
+        if (t->kind == CC_TK_PUNCT) {
+            if (t->punct == CC_P_LPAREN || t->punct == CC_P_LBRACKET || t->punct == CC_P_LBRACE) depth++;
+            else if (t->punct == CC_P_RPAREN || t->punct == CC_P_RBRACKET || t->punct == CC_P_RBRACE) {
+                if (depth == 0) {
+                    if (i > arg_first || out_args->len())
+                        out_args->push(i > arg_first ? cc__span_text(ix, u, arg_first, i - 1) : cc__ix_s(""));
+                    break;
+                }
+                depth--;
+            } else if (t->punct == CC_P_COMMA && depth == 0) {
+                out_args->push(i > arg_first ? cc__span_text(ix, u, arg_first, i - 1) : cc__ix_s(""));
+                arg_first = i + 1;
+            }
+        }
+    }
+    return true;
+}
+
+static CCSlice cc__expansion_label(CcIndex* ix, const CcUnit* u, CcSpan sp, CCSlice name) {
+    CcLoc loc = cc__span_loc(u, sp);
+    CCString sb = cc_string_new();
+    uint32_t line = loc.line;
+    if (loc.path.len) sb.push_slice(loc.path, ix->arena); else sb.push_char('?', ix->arena);
+    sb.push_char(':', ix->arena);
+    cc_string_push_uint(&sb, line, ix->arena);
+    sb.push_cstr(" <", ix->arena);
+    sb.push_slice(name, ix->arena);
+    sb.push_cstr(" expansion>", ix->arena);
+    return cc__ix_finish(ix, &sb);
+}
+
+static void cc__macro_call(CcIndex* ix, CcUnit* u, CcDecl* d, bool is_header) {
+    CcNameList args = vec_new::[CCSlice](ix->arena);
+    CCSlice name;
+    size_t nargs;
+    CcSym* ms;
+    CcMacroDef* m;
+    cc__call_args(ix, u, d->span, &args, &name);
+    if (!name.len) return;
+    nargs = args.len();
+    if (cc__eqc(name, "CC_DECL_RESULT_SPEC") && nargs == 3) {
+        cc__result_declared(ix, u, d, is_header, *args.get_ptr(0), *args.get_ptr(1), true, *args.get_ptr(2));
+    } else if (cc__eqc(name, "CC_DECL_RESULT_SPEC_VOID") && nargs == 2) {
+        cc__result_declared(ix, u, d, is_header, *args.get_ptr(0), cc_slice_empty(), false, *args.get_ptr(1));
+    } else if (cc__has_suffix(name, "_DECL_UFCS") && nargs == 1) {
+        CcTypeInfo* info = CcIndex_type_get(ix, *args.get_ptr(0));
+        info->ufcs_registered_by = name;
+    }
+    ms = cc__sym_find_kind(ix, name, CC_SYM_MACRO);
+    if (!ms || !ms->macro) return;
+    m = ms->macro;
+    if (!m->function_like) return;
+    if (nargs < m->params.len()) return;
+    {
+        CCSlice label = cc__expansion_label(ix, u, d->span, name);
+        if (cc__has_prefix(name, "CC_DECL_RESULT_SPEC") && nargs >= 1) {
+            CcTypeInfo* info = cc__type_find(ix, *args.get_ptr(0));
+            if (info) info->instantiated = true; /* this expansion declares the methods */
+        }
+        cc__index_expansion(ix, label, cc__macro_expand(ix, m, &args), is_header);
+    }
+}
+
+static CCSlice CcIndex_expand_call(CcIndex* ix, const CcUnit* u, CcSpan sp) {
+    CcNameList args = vec_new::[CCSlice](ix->arena);
+    CCSlice name;
+    CcSym* ms;
+    cc__call_args(ix, u, sp, &args, &name);
+    if (!name.len) return cc_slice_empty();
+    ms = cc__sym_find_kind(ix, name, CC_SYM_MACRO);
+    if (!ms || !ms->macro || !ms->macro->function_like || args.len() < ms->macro->params.len()) return cc_slice_empty();
+    return cc__macro_expand(ix, ms->macro, &args);
+}
+
+/* ---- generic factories ---------------------------------------------------- */
+
+
+static bool cc__bound(CcSlotBindList* binds, CCSlice name) {
+    size_t i;
+    size_t n = binds->len();
+    for (i = 0; i < n; i++)
+        if (cc__eq(binds->get_ptr(i)->local, name)) return true;
+    return false;
+}
+
+/* The declarations of a block, by name, for the binding scan. */
+static bool cc__block_declares(CcStmtList* stmtv, CCSlice name) {
+    size_t j;
+    size_t n = stmtv->len();
+    for (j = 0; j < n; j++) {
+        CcStmt* ds = *stmtv->get_ptr(j);
+        @switch (ds->k) {
+            case .decl(dd): if (cc__eq(cc__decl_name_of(dd.d), name)) return true; break;
+            default: break;
+        }
+    }
+    return false;
+}
+
+static int cc__slot_arg_number(CcIndex* ix, const CcUnit* u, CcSpan sp) {
+    uint32_t k;
+    int argn = -1;
+    for (k = sp.first; k <= sp.last; k++) {
+        const CcToken* t = cc__tok(u, k);
+        if (!t || t->kind != CC_TK_IDENT) continue;
+        if (cc__eqc(t->text, "arg") && cc__tok_is_text(u, k + 1, "(")) {
+            const CcToken* nt = cc__tok(u, k + 2);
+            if (nt && nt->kind == CC_TK_NUMBER) argn = atoi(cc__ix_cstr(ix, nt->text));
+        } else if (cc__eqc(t->text, "type_args") && cc__tok_is_text(u, k + 1, ".") &&
+                   cc__tok_is_text(u, k + 2, "items") && cc__tok_is_text(u, k + 3, "[")) {
+            const CcToken* nt = cc__tok(u, k + 4);
+            if (nt && nt->kind == CC_TK_NUMBER) argn = atoi(cc__ix_cstr(ix, nt->text));
+        }
+    }
+    return argn;
+}
+
+static void cc__factory_bindings(CcIndex* ix, const CcUnit* u, const CcStmt* body, CcSlotBindList* out);
+
+static void cc__factory_bindings_stmt(CcIndex* ix, const CcUnit* u, CcStmtList* stmtv, CcStmt* s, CcSlotBindList* out) {
+    uint32_t k;
+    int argn;
+    CcNameList locals = vec_new::[CCSlice](ix->arena);
+    CcStmt* inner_block = NULL;
+    CcDecl* sd = NULL;
+    @switch (s->k) {
+        case .block: inner_block = s; break;
+        case .decl(dd): sd = dd.d; break;
+        default: break;
+    }
+    if (inner_block) {
+        cc__factory_bindings(ix, u, inner_block, out);
+        return;
+    }
+    argn = cc__slot_arg_number(ix, u, s->span);
+    if (argn < 0) return;
+    if (sd && cc__decl_name_of(sd).len) locals.push(cc__decl_name_of(sd));
+    for (k = s->span.first; k <= s->span.last; k++) {
+        const CcToken* t = cc__tok(u, k);
+        if (!t || t->kind != CC_TK_IDENT) continue;
+        if (cc__bound(out, t->text)) continue;
+        /* a local declared earlier in the body */
+        if (cc__block_declares(stmtv, t->text)) locals.push(cc__ix_copy(ix, t->text));
+    }
+    {
+        size_t j;
+        size_t nl = locals.len();
+        for (j = 0; j < nl; j++) {
+            CcSlotBind b;
+            b.local = *locals.get_ptr(j);
+            b.arg = argn;
+            out->push(b);
+        }
+    }
+}
+
+/* Which factory local holds which type argument: `CCSlice t = arg(0);`,
+ * `memcpy(k, arg(0).ptr, ...)`. Every local named in a statement that
+ * mentions `arg(N)` or `type_args.items[N]` is bound to N. */
+static void cc__factory_bindings(CcIndex* ix, const CcUnit* u, const CcStmt* body, CcSlotBindList* out) {
+    CcStmtList stmts;           /* the list header by value: a case binding does not outlive its case */
+    CcStmtList* stmtv = &stmts;
+    bool is_block = false;
+    size_t i;
+    size_t n;
+    if (!body) return;
+    @switch (body->k) {
+        case .block(b): stmts = b.stmts; is_block = true; break;
+        default: return;
+    }
+    if (!is_block) return;
+    n = stmtv->len();
+    for (i = 0; i < n; i++) cc__factory_bindings_stmt(ix, u, stmtv, *stmtv->get_ptr(i), out);
+}
+
+static CCSlice cc__bind_lookup(CcSlotBindList* binds, const char* inner, size_t inner_len, CcNameList* args, bool* found) {
+    size_t i = binds->len();
+    *found = false;
+    while (i--) {
+        CcSlotBind* bd = binds->get_ptr(i);
+        if (bd->local.len == inner_len && memcmp(bd->local.ptr, inner, inner_len) == 0) {
+            *found = true;
+            if (bd->arg >= 0 && (size_t)bd->arg < args->len()) return *args->get_ptr((size_t)bd->arg);
+            return cc_slice_empty();
+        }
+    }
+    return cc_slice_empty();
+}
+
+/* Substitute the `${...}` slots of a template's text for an instance. */
+static CCSlice cc__template_instance(CcIndex* ix, const char* text, size_t len, CcTypeInfo* info,
+                                     CcSlotBindList* binds, CcNameList* args) {
+    CCString sb = cc_string_new();
+    size_t i = 0;
+    size_t nargs = args->len();
+    while (i < len) {
+        if (text[i] == '$' && i + 1 < len && text[i + 1] == '{') {
+            size_t j = i + 2;
+            size_t depth = 1;
+            size_t s;
+            const char* inner;
+            size_t inner_len;
+            while (j < len && depth) {
+                if (text[j] == '{') depth++;
+                else if (text[j] == '}') depth--;
+                if (depth) j++;
+            }
+            s = i + 2;
+            inner = text + s;
+            inner_len = j - s;
+            while (inner_len && (inner[0] == ' ' || inner[0] == '\t')) { inner++; inner_len--; }
+            while (inner_len && (inner[inner_len - 1] == ' ' || inner[inner_len - 1] == '\t')) inner_len--;
+            if (inner_len == 7 && memcmp(inner, "mangled", 7) == 0) {
+                sb.push_slice(info->name, ix->arena);
+            } else if (inner_len > 4 && memcmp(inner, "arg(", 4) == 0) {
+                int n = atoi(inner + 4);
+                if (n >= 0 && (size_t)n < nargs) { CCSlice an = *args->get_ptr((size_t)n); sb.push_slice(an, ix->arena); }
+                else sb.push_buffer(inner, (uint32_t)inner_len, ix->arena);
+            } else if (inner_len > 16 && memcmp(inner, "type_args.items[", 16) == 0) {
+                int n = atoi(inner + 16);
+                if (n >= 0 && (size_t)n < nargs) { CCSlice an2 = *args->get_ptr((size_t)n); sb.push_slice(an2, ix->arena); }
+                else sb.push_buffer(inner, (uint32_t)inner_len, ix->arena);
+            } else {
+                bool found;
+                CCSlice val = cc__bind_lookup(binds, inner, inner_len, args, &found);
+                if (found) {
+                    sb.push_slice(val, ix->arena);
+                } else {
+                    /* a slot that is the whole line holds computed text (`${fwd}`):
+                     * drop it; inside a line it is a name the factory computed
+                     * (`${hash}`): keep the slot's spelling as an identifier */
+                    size_t ls = i;
+                    size_t le = j + 1;
+                    bool alone = true;
+                    while (ls > 0 && text[ls - 1] != '\n') { if (text[ls - 1] != ' ' && text[ls - 1] != '\t') alone = false; ls--; }
+                    while (le < len && text[le] != '\n') { if (text[le] != ' ' && text[le] != '\t') alone = false; le++; }
+                    if (!alone) sb.push_buffer(inner, (uint32_t)inner_len, ix->arena);
+                }
+            }
+            i = j + 1;
+            continue;
+        }
+        sb.push_char(text[i], ix->arena);
+        i++;
+    }
+    return cc__ix_finish(ix, &sb);
+}
+
+/* Is `text` the mangled spelling of a type the index can name: a declared
+ * type, a primitive, a `...ptr` of one, or a nested family instance? */
+static CcType* cc__unmangle_arg(CcIndex* ix, CCSlice text, int depth);
+
+static bool cc__split_args(CcIndex* ix, CCSlice rest, size_t arity, CcTypeList* out, int depth) {
+    size_t k;
+    if (arity == 1) {
+        CcType* t = cc__unmangle_arg(ix, rest, depth);
+        if (!t) return false;
+        out->push(t);
+        return true;
+    }
+    for (k = 0; k < rest.len; k++) {
+        CcType* first;
+        CcTypeList tail;
+        size_t i;
+        size_t nt;
+        if (rest.ptr[k] != '_') continue;
+        first = cc__unmangle_arg(ix, cc__ix_dupn(ix, rest.ptr, k), depth);
+        if (!first) continue;
+        tail = vec_new::[CcTypeRef](ix->arena);
+        if (!cc__split_args(ix, cc__ix_dupn(ix, rest.ptr + k + 1, rest.len - k - 1), arity - 1, &tail, depth)) continue;
+        out->push(first);
+        nt = tail.len();
+        for (i = 0; i < nt; i++) { CcType* tt = *tail.get_ptr(i); out->push(tt); }
+        return true;
+    }
+    return false;
+}
+
+static size_t cc__factory_arity(CcIndex* ix, const CcDecl* d, const CcUnit* fu) {
+    CcExpr* arity = NULL;
+    @switch (d->k) {
+        case .factory(fa): arity = fa.arity; break;
+        default: break;
+    }
+    if (!arity || !fu) return 1;
+    @switch (arity->k) {
+        case .number(nl): {
+            const CcToken* t = cc__tok(fu, nl.tok);
+            if (t) return (size_t)atoi(cc__ix_cstr(ix, t->text));
+            return 1;
+        }
+        default: return 1;
+    }
+}
+
+static CCSlice cc__factory_name(const CcDecl* d) {
+    @switch (d->k) {
+        case .factory(fa): return fa.name;
+        default: return cc_slice_empty();
+    }
+}
+
+static bool cc__factory_is_extend(const CcDecl* d) {
+    @switch (d->k) {
+        case .factory(fa): return fa.extend;
+        default: return false;
+    }
+}
+
+static CcStmt* cc__factory_body(const CcDecl* d) {
+    @switch (d->k) {
+        case .factory(fa): return fa.body;
+        default: return NULL;
+    }
+}
+
+static bool cc__is_c_typedef_name(CCSlice text) {
+    size_t i;
+    if (!(text.len > 2 && text.ptr[text.len - 2] == '_' && text.ptr[text.len - 1] == 't')) return false;
+    for (i = 0; i < text.len; i++)
+        if (text.ptr[i] == ' ') return false;
+    return true;
+}
+
+static CcType* cc__unmangle_arg(CcIndex* ix, CCSlice text, int depth) {
+    size_t n = text.len;
+    size_t f;
+    CcSpan sp;
+    CcDeclList* factv = &ix->factories;
+    CcUnitList* funitv = &ix->factory_units;
+    size_t nf = factv->len();
+    sp.first = 0;
+    sp.last = 0;
+    if (!n || depth > 4) return NULL;
+    /* a declared or primitive type name */
+    if (cc__sym_find_kind(ix, text, CC_SYM_TYPE) || cc__primitive_words(text) ||
+        cc__is_c_typedef_name(text) /* a C typedef (<stdint.h>, <stddef.h>) */ ||
+        cc__eqc(text, "long_long") || cc__eqc(text, "unsigned_long") || cc__eqc(text, "unsigned_char") ||
+        cc__eqc(text, "unsigned_int") || cc__eqc(text, "unsigned_long_long") || cc__eqc(text, "unsigned_short")) {
+        CCSlice sp2 = cc__ix_copy(ix, text);
+        /* only a multi-word primitive spelling (`long_long`) has `_` for a space */
+        if (!cc__sym_find_kind(ix, text, CC_SYM_TYPE) && !cc__is_c_typedef_name(text)) {
+            size_t q;
+            for (q = 0; q < sp2.len; q++) if (sp2.ptr[q] == '_') sp2.ptr[q] = ' ';
+        }
+        return cc_type_named(cc__canon_primitive(ix, sp2), sp, ix->arena);
+    }
+    /* a nested instance: Family_args (before the `ptr` reading, so that
+     * `Map_int_intptr` is Map::[int, int*] and not Map::[int, int]*) */
+    for (f = 0; f < nf; f++) {
+        CcDecl* d = *factv->get_ptr(f);
+        CCSlice fname = cc__factory_name(d);
+        CCSlice prefix = fname.len ? cc__family_prefix(fname) : cc_slice_empty();
+        size_t arity;
+        CcTypeList args;
+        if (!prefix.len || cc__factory_is_extend(d) || !cc__has_prefix_s(text, prefix) || text.len <= prefix.len ||
+            text.ptr[prefix.len] != '_')
+            continue;
+        arity = cc__factory_arity(ix, d, *funitv->get_ptr(f));
+        args = vec_new::[CcTypeRef](ix->arena);
+        if (!cc__split_args(ix, cc__skip(text, prefix.len + 1), arity, &args, depth + 1)) continue;
+        {
+            CcType* g = cc_type_named(fname, sp, ix->arena);
+            CcGenericType gt;
+            gt.family = fname;
+            gt.args = args;
+            g->k = { .generic = gt };
+            return g;
+        }
+    }
+    if (n > 3 && memcmp(text.ptr + n - 3, "ptr", 3) == 0) {
+        CcType* base = cc__unmangle_arg(ix, cc__ix_dupn(ix, text.ptr, n - 3), depth + 1);
+        if (base) return cc_type_pointer(base, sp, ix->arena);
+    }
+    return NULL;
+}
+
+/* `CCVec_int` spelled directly (not through `Vec::[int]`): find the family
+ * whose instance prefix it carries and read the type arguments back. */
+static bool cc__infer_family(CcIndex* ix, CcTypeInfo* t) {
+    CcType* g = cc__unmangle_arg(ix, t->name, 0);
+    if (!g) return false;
+    @switch (g->k) {
+        case .generic(gt): {
+            CcTypeList* targv = &t->targs;
+            CcTypeList* tlist = (CcTypeList*)&gt.args;
+            size_t i;
+            size_t n = tlist->len();
+            t->family = gt.family;
+            for (i = 0; i < n; i++) { CcType* at3 = *tlist->get_ptr(i); targv->push(at3); }
+            return true;
+        }
+        default: return false;
+    }
+}
+
+static CCSlice cc__instance_label(CcIndex* ix, const char* head, CCSlice family, const char* mid, CCSlice name) {
+    CCString sb = cc_string_new();
+    sb.push_cstr(head, ix->arena);
+    sb.push_slice(family, ix->arena);
+    sb.push_cstr(mid, ix->arena);
+    sb.push_slice(name, ix->arena);
+    sb.push_char('>', ix->arena);
+    return cc__ix_finish(ix, &sb);
+}
+
+/* Every template in a factory declaration that mentions `${mangled}`,
+ * instantiated and indexed. */
+static void cc__instantiate_templates(CcIndex* ix, CcTypeInfo* info, CcDecl* d, CcUnit* fu, const char* head, const char* mid,
+                                      CcNameList* args) {
+    CcSlotBindList binds = vec_new::[CcSlotBind](ix->arena);
+    uint32_t i;
+    cc__factory_bindings(ix, fu, cc__factory_body(d), &binds);
+    for (i = d->span.first; i <= d->span.last; i++) {
+        const CcToken* t = cc__tok(fu, i);
+        const char* text;
+        if (!t || t->kind != CC_TK_TEMPLATE) continue;
+        if (t->text.len < 2) continue;
+        text = t->text.ptr + 1;
+        if (!cc__ix_contains(text, t->text.len - 2, "${mangled}")) continue;
+        cc__index_expansion(ix, cc__instance_label(ix, head, info->family, mid, info->name),
+                            cc__template_instance(ix, text, t->text.len - 2, info, &binds, args), false);
+    }
+}
+
+static void cc__instantiate_result(CcIndex* ix, CcTypeInfo* info) {
+    /* `CCResult_T_E` gets its methods from the spec macro, as the TU
+     * emission of the spec will. */
+    CcSym* ms = cc__sym_find_cstr(ix, "CC_DECL_RESULT_SPEC", CC_SYM_MACRO);
+    CcSym* mv = cc__sym_find_cstr(ix, "CC_DECL_RESULT_SPEC_VOID", CC_SYM_MACRO);
+    CcNameList a = vec_new::[CCSlice](ix->arena);
+    if (!info->result_err) return;
+    info->instantiated = true;
+    if (!info->result_value || cc__eqc(CcIndex_canon(ix, info->result_value), "void")) {
+        if (!mv || !mv->macro) return;
+        a.push(info->name);
+        a.push(CcIndex_canon(ix, info->result_err));
+        cc__index_expansion(ix, cc__cat3(ix, "<CC_DECL_RESULT_SPEC_VOID(", info->name, ") expansion>"),
+                            cc__macro_expand(ix, mv->macro, &a), false);
+    } else {
+        if (!ms || !ms->macro) return;
+        a.push(info->name);
+        a.push(CcIndex_canon(ix, info->result_value));
+        a.push(CcIndex_canon(ix, info->result_err));
+        cc__index_expansion(ix, cc__cat3(ix, "<CC_DECL_RESULT_SPEC(", info->name, ") expansion>"),
+                            cc__macro_expand(ix, ms->macro, &a), false);
+    }
+}
+
+/* Expand the family's factory for one instance: every template in the
+ * factory body that mentions `${mangled}` is instantiated and indexed. */
+static void cc__type_instantiate(CcIndex* ix, CcTypeInfo* info) {
+    size_t f;
+    size_t i;
+    CcDecl* factory = NULL;
+    CcUnit* fu = NULL;
+    CcNameList args = vec_new::[CCSlice](ix->arena);
+    CcDeclList* factv = &ix->factories;
+    CcUnitList* funitv = &ix->factory_units;
+    CcTypeList* targv = &info->targs;
+    size_t nf = factv->len();
+    size_t nt;
+    if (info->instantiated) return;
+    if (info->is_result) {
+        cc__instantiate_result(ix, info);
+        return;
+    }
+    if (!info->family.len) return;
+    for (f = 0; f < nf; f++) {
+        CcDecl* d = *factv->get_ptr(f);
+        if (cc__eq(cc__factory_name(d), info->family) && !cc__factory_is_extend(d)) {
+            factory = d;
+            fu = *funitv->get_ptr(f);
+            break;
+        }
+    }
+    info->instantiated = true;
+    if (!factory) return;
+    if (cc__sym_find_kind(ix, info->name, CC_SYM_TYPE)) return; /* hand-declared instance suppresses the splice */
+    nt = targv->len();
+    for (i = 0; i < nt; i++) { CCSlice asp2 = cc__type_arg_spelling(ix, *targv->get_ptr(i)); args.push(asp2); }
+    cc__instantiate_templates(ix, info, factory, fu, "<CC_GENERIC_FACTORY(", ") instance ", &args);
+    /* extensions */
+    for (f = 0; f < nf; f++) {
+        CcDecl* d = *factv->get_ptr(f);
+        if (cc__eq(cc__factory_name(d), info->family) && cc__factory_is_extend(d))
+            cc__instantiate_templates(ix, info, d, *funitv->get_ptr(f), "<CC_GENERIC_FACTORY_EXTEND(", ") instance ", &args);
+    }
+}
+
+/* ---- expression helpers for hook bodies -------------------------------- */
+
+static CcStmtList cc__empty_stmts(void) { return vec_new::[CcStmtRef](cc_arena_handle(NULL)); }
+static CcExprList cc__empty_exprs(void) { return vec_new::[CcExprRef](cc_arena_handle(NULL)); }
+
+/* The operand children of an expression in the reference's order (a, b, c,
+ * then the argument list): the shape the hook-body readers walk. */
+typedef struct CcKids {
+    CcExpr* a;
+    CcExpr* b;
+    CcExpr* c;
+    CcExprList args;
+    bool has_args;
+} CcKids;
+
+static CcKids cc__expr_kids(const CcExpr* e) {
+    CcKids k;
+    k.a = NULL;
+    k.b = NULL;
+    k.c = NULL;
+    k.has_args = false;
+    if (!e) return k;
+    @switch (e->k) {
+        case .paren(pa): k.a = pa.a; break;
+        case .unary(un): k.a = un.a; break;
+        case .binary(bi): k.a = bi.a; k.b = bi.b; break;
+        case .assign(as): k.a = as.a; k.b = as.b; break;
+        case .ternary(te): k.a = te.c; k.b = te.a; k.c = te.b; break;
+        case .call(cl): k.a = cl.callee; k.args = cl.args; k.has_args = true; break;
+        case .index(ix2): k.a = ix2.a; k.b = ix2.i; break;
+        case .member(mb): k.a = mb.a; break;
+        case .cast(ca): k.a = ca.a; break;
+        case .generic_sel(gs): k.a = gs.control; break;
+        case .comma(cm): k.a = cm.a; k.b = cm.b; break;
+        case .ufcs(uf): k.a = uf.recv; k.args = uf.args; k.has_args = true; break;
+        case .type_scoped(ts): k.args = ts.args; k.has_args = true; break;
+        case .generic_fn(gf): k.args = gf.args; k.has_args = true; break;
+        case .unwrap(uw): k.a = uw.a; break;
+        case .unwrap_body(ub): k.a = ub.a; break;
+        case .unwrap_or(uo): k.a = uo.a; k.b = uo.fallback; break;
+        case .unwrap_destroy(ud): k.a = ud.a; break;
+        case .await_(aw): k.a = aw.a; break;
+        case .comptime(ce): k.a = ce.a; break;
+        case .create(cr): k.args = cr.args; k.has_args = true; break;
+        case .emit(em): k.args = em.args; k.has_args = true; break;
+        case .variant_lit(vl): k.args = vl.args; k.has_args = true; break;
+        case .call_mode(cmd): k.a = cmd.a; break;
+        case .range(rg): k.a = rg.lo; k.b = rg.hi; break;
+        default: break;
+    }
+    return k;
+}
+
+static bool cc__expr_is_ident(const CcExpr* e, CCSlice* name) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .ident(nm): *name = nm; return true;
+        default: return false;
+    }
+}
+
+/* The template parts of a @string expression; empty for other kinds. */
+static bool cc__expr_template_parts(const CcExpr* e, CcTplPartList* out) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .template(tp): *out = tp.parts; return true;
+        default: return false;
+    }
+}
+
+static bool cc__expr_mentions(const CcExpr* e, CCSlice name) {
+    CcKids k;
+    CCSlice nm;
+    CcTplPartList parts;
+    size_t i;
+    if (!e) return false;
+    if (cc__expr_is_ident(e, &nm) && cc__eq(nm, name)) return true;
+    k = cc__expr_kids(e);
+    if (cc__expr_mentions(k.a, name) || cc__expr_mentions(k.b, name) || cc__expr_mentions(k.c, name)) return true;
+    if (k.has_args) {
+        size_t n = k.args.len();
+        for (i = 0; i < n; i++)
+            if (cc__expr_mentions(*k.args.get_ptr(i), name)) return true;
+    }
+    if (cc__expr_template_parts(e, &parts)) {
+        size_t n = parts.len();
+        for (i = 0; i < n; i++) {
+            CcTplPart* pt = parts.get_ptr(i);
+            if (pt->slot && cc__expr_mentions(pt->slot, name)) return true;
+        }
+    }
+    return false;
+}
+
+/* A string literal's text, the literal run of a template before its first
+ * slot, or the text of @slice("..."): the literal an expression carries
+ * directly. */
+static bool cc__expr_own_string(CcIndex* ix, const CcUnit* u, const CcExpr* e, CCSlice* out) {
+    @switch (e->k) {
+        case .string(lit): {
+            const CcToken* t = cc__tok(u, lit.tok);
+            if (!t) return false;
+            *out = cc__unquote(ix, t->text);
+            return true;
+        }
+        case .slice_lit(sl): {
+            const CcToken* t = cc__tok(u, sl.tok);
+            if (!t) return false;
+            *out = cc__unquote(ix, t->text);
+            return true;
+        }
+        case .template(tp): {
+            CcTplPartList parts = tp.parts;
+            if (parts.len()) {
+                CcTplPart* pt = parts.get_ptr(0);
+                if (!pt->slot) { *out = cc__ix_copy(ix, pt->text); return true; }
+            }
+            return false;
+        }
+        default: return false;
+    }
+}
+
+/* The first string literal in an expression (also the literal run of a
+ * template before its first slot, and the text of @slice("...")). Empty
+ * when there is none. */
+static CCSlice cc__expr_string(CcIndex* ix, const CcUnit* u, const CcExpr* e) {
+    CCSlice s;
+    CcKids k;
+    size_t i;
+    if (!e) return cc_slice_empty();
+    if (cc__expr_own_string(ix, u, e, &s)) return s;
+    k = cc__expr_kids(e);
+    s = cc__expr_string(ix, u, k.a);
+    if (s.ptr) return s;
+    s = cc__expr_string(ix, u, k.b);
+    if (s.ptr) return s;
+    s = cc__expr_string(ix, u, k.c);
+    if (s.ptr) return s;
+    if (k.has_args) {
+        size_t n = k.args.len();
+        for (i = 0; i < n; i++) {
+            s = cc__expr_string(ix, u, *k.args.get_ptr(i));
+            if (s.ptr) return s;
+        }
+    }
+    return cc_slice_empty();
+}
+
+/* The callee name of a call of an identifier; empty otherwise. */
+static CCSlice cc__callee_name(const CcExpr* e) {
+    if (!e) return cc_slice_empty();
+    @switch (e->k) {
+        case .call(cl): {
+            CCSlice nm;
+            if (cc__expr_is_ident(cl.callee, &nm)) return nm;
+            return cc_slice_empty();
+        }
+        case .paren(pa): return cc__callee_name(pa.a);
+        default: return cc_slice_empty();
+    }
+}
+
+static bool cc__expr_calls_prefix(const CcExpr* e, const char* prefix) {
+    CCSlice c;
+    CcKids k;
+    size_t i;
+    if (!e) return false;
+    c = cc__callee_name(e);
+    if (c.ptr && cc__has_prefix(c, prefix)) return true;
+    k = cc__expr_kids(e);
+    if (cc__expr_calls_prefix(k.a, prefix) || cc__expr_calls_prefix(k.b, prefix) || cc__expr_calls_prefix(k.c, prefix)) return true;
+    if (k.has_args) {
+        size_t n = k.args.len();
+        for (i = 0; i < n; i++)
+            if (cc__expr_calls_prefix(*k.args.get_ptr(i), prefix)) return true;
+    }
+    return false;
+}
+
+static const CcExpr* cc__strip_parens(const CcExpr* e) {
+    for (;;) {
+        const CcExpr* inner = NULL;
+        if (!e) return NULL;
+        @switch (e->k) {
+            case .paren(pa): inner = pa.a; break;
+            default: return e;
+        }
+        e = inner;
+    }
+}
+
+/* `mode ? a : b`: the branch for the plain call, when the condition
+ * mentions the mode parameter. */
+static const CcExpr* cc__mode_ternary_else(const CcExpr* e, CCSlice mode_param) {
+    if (!e || !mode_param.len) return NULL;
+    @switch (e->k) {
+        case .ternary(te):
+            if (cc__expr_mentions(te.c, mode_param)) return te.b;
+            return NULL;
+        default: return NULL;
+    }
+}
+
+/* ---- `.ufcs` hook bodies as rules ------------------------------------- */
+
+typedef struct CcHookCtx {
+    CcIndex* ix;
+    const CcUnit* unit;
+    CCSlice method_param;
+    CCSlice mode_param;
+    CcHookReg* reg;
+} CcHookCtx;
+
+static void cc__hook_add_rule(CcHookCtx* c, CCSlice method, const CcExpr* ret) {
+    CCSlice callee = cc__expr_string(c->ix, c->unit, ret);
+    CcUfcsRule r;
+    CcUfcsRuleList* rulev;
+    if (!callee.ptr) {
+        c->reg->ufcs_opaque = true;
+        return;
+    }
+    r.method = cc__ix_copy(c->ix, method);
+    r.callee = callee;
+    r.by_value = cc__expr_calls_prefix(ret, "cc_ufcs_emit_value");
+    rulev = &c->reg->rules;
+    rulev->push(r);
+}
+
+/* The statement classes the rule reader distinguishes. */
+typedef enum CcHookStmtKind { HS_OTHER, HS_RETURN, HS_BLOCK, HS_IF, HS_SWITCH, HS_CASE } CcHookStmtKind;
+
+static CcHookStmtKind cc__hook_stmt_kind(const CcStmt* s) {
+    if (!s) return HS_OTHER;
+    @switch (s->k) {
+        case .return_: return HS_RETURN;
+        case .block: return HS_BLOCK;
+        case .if_: return HS_IF;
+        case .switch_: return HS_SWITCH;
+        case .case_: return HS_CASE;
+        default: return HS_OTHER;
+    }
+}
+
+static const CcExpr* cc__return_value(const CcStmt* s) {
+    @switch (s->k) {
+        case .return_(r): return r.value;
+        default: return NULL;
+    }
+}
+
+static CcStmtList cc__block_stmts(const CcStmt* s) {
+    @switch (s->k) {
+        case .block(b): return b.stmts;
+        case .comptime_block(b): return b.stmts;
+        default: return cc__empty_stmts();
+    }
+}
+
+static const CcExpr* cc__if_cond(const CcStmt* s) {
+    @switch (s->k) {
+        case .if_(i): return i.cond;
+        default: return NULL;
+    }
+}
+
+static const CcStmt* cc__if_then(const CcStmt* s) {
+    @switch (s->k) {
+        case .if_(i): return i.then;
+        default: return NULL;
+    }
+}
+
+static const CcStmt* cc__if_else(const CcStmt* s) {
+    @switch (s->k) {
+        case .if_(i): return i.els;
+        default: return NULL;
+    }
+}
+
+static const CcExpr* cc__switch_subject(const CcStmt* s) {
+    @switch (s->k) {
+        case .switch_(sw): return sw.subject;
+        default: return NULL;
+    }
+}
+
+static const CcStmt* cc__switch_body(const CcStmt* s) {
+    @switch (s->k) {
+        case .switch_(sw): return sw.body;
+        default: return NULL;
+    }
+}
+
+static CcCase cc__case_of(const CcStmt* s) {
+    CcCase blank;
+    @switch (s->k) {
+        case .case_(c): return c;
+        default: break;
+    }
+    memset(&blank, 0, sizeof blank);
+    return blank;
+}
+
+/* The expression a branch returns for the plain (non-`mode`) call: the
+ * last unconditional `return` of the branch; a `mode ? a : b` returns `b`. */
+static const CcExpr* cc__branch_result(CcHookCtx* c, const CcStmt* s) {
+    const CcExpr* found = NULL;
+    CcHookStmtKind kind = cc__hook_stmt_kind(s);
+    if (!s) return NULL;
+    if (kind == HS_RETURN) {
+        const CcExpr* e = cc__strip_parens(cc__return_value(s));
+        const CcExpr* els = cc__mode_ternary_else(e, c->mode_param);
+        if (els) return els;
+        return e;
+    }
+    if (kind == HS_BLOCK) {
+        CcStmtList stmts = cc__block_stmts(s);
+        size_t i;
+        size_t n = stmts.len();
+        for (i = 0; i < n; i++) {
+            const CcStmt* t = *stmts.get_ptr(i);
+            CcHookStmtKind tk = cc__hook_stmt_kind(t);
+            if (tk == HS_IF && c->mode_param.len && cc__expr_mentions(cc__if_cond(t), c->mode_param)) {
+                const CcStmt* els = cc__if_else(t);
+                if (els) found = cc__branch_result(c, els);
+                continue;
+            }
+            if (tk == HS_RETURN) return cc__branch_result(c, t);
+            if (tk == HS_BLOCK) {
+                const CcExpr* r = cc__branch_result(c, t);
+                if (r) found = r;
+            }
+        }
+    }
+    return found;
+}
+
+static void cc__hook_default(CcHookCtx* c, const CcExpr* e) {
+    CCSlice callee;
+    CCSlice nm;
+    const CcExpr* els;
+    e = cc__strip_parens(e);
+    if (!e) return;
+    els = cc__mode_ternary_else(e, c->mode_param);
+    if (els) e = els;
+    callee = cc__callee_name(e);
+    if (callee.ptr && cc__eqc(callee, "cc_slice_empty")) {
+        c->reg->ufcs_rejects = true;
+        return;
+    }
+    if (callee.ptr && cc__eqc(callee, "cc_ufcs_pass")) return;
+    if (cc__expr_is_ident(e, &nm) && cc__eqc(nm, "CC_UFCS_PASS_TAG")) return;
+    if (cc__expr_mentions(e, c->method_param)) {
+        CCSlice prefix = cc__expr_string(c->ix, c->unit, e);
+        if (prefix.ptr) {
+            c->reg->ufcs_prefix = prefix;
+            c->reg->ufcs_prefix_by_value = cc__expr_calls_prefix(e, "cc_ufcs_emit_value");
+            return;
+        }
+    }
+    c->reg->ufcs_opaque = true;
+}
+
+static void cc__hook_walk(CcHookCtx* c, const CcStmt* s);
+
+static void cc__hook_walk_if(CcHookCtx* c, const CcStmt* s) {
+    const CcExpr* cond = cc__if_cond(s);
+    CCSlice lit = cc__expr_string(c->ix, c->unit, cond);
+    if (lit.ptr && cc__expr_mentions(cond, c->method_param)) {
+        const CcExpr* r = cc__branch_result(c, cc__if_then(s));
+        if (r) cc__hook_add_rule(c, lit, r);
+        else c->reg->ufcs_opaque = true;
+        if (cc__if_else(s)) cc__hook_walk(c, cc__if_else(s));
+        return;
+    }
+    if (c->mode_param.len && cc__expr_mentions(cond, c->mode_param)) {
+        if (cc__if_else(s)) cc__hook_walk(c, cc__if_else(s));
+        return;
+    }
+    /* a guard that is not about the method (`if (!p)`): look inside */
+    cc__hook_walk(c, cc__if_then(s));
+    if (cc__if_else(s)) cc__hook_walk(c, cc__if_else(s));
+}
+
+static void cc__hook_walk_switch(CcHookCtx* c, const CcStmt* s) {
+    const CcStmt* body = cc__switch_body(s);
+    CcNameList pending = vec_new::[CCSlice](c->ix->arena);
+    CcStmtList stmts;
+    size_t i;
+    size_t n;
+    if (!cc__expr_mentions(cc__switch_subject(s), c->method_param) || !body || cc__hook_stmt_kind(body) != HS_BLOCK) {
+        c->reg->ufcs_opaque = true;
+        return;
+    }
+    stmts = cc__block_stmts(body);
+    n = stmts.len();
+    for (i = 0; i < n; i++) {
+        const CcStmt* t = *stmts.get_ptr(i);
+        const CcStmt* inner = t;
+        bool is_default = false;
+        CcHookStmtKind ik;
+        while (inner && cc__hook_stmt_kind(inner) == HS_CASE) {
+            CcCase cs = cc__case_of(inner);
+            if (cs.is_default) is_default = true;
+            else {
+                CCSlice lit = cc__expr_string(c->ix, c->unit, cs.lo);
+                if (lit.ptr) pending.push(lit);
+            }
+            inner = cs.inner;
+        }
+        if (!inner) continue;
+        ik = cc__hook_stmt_kind(inner);
+        if (ik == HS_RETURN || ik == HS_BLOCK) {
+            const CcExpr* r = cc__branch_result(c, inner);
+            size_t k;
+            if (r) {
+                size_t np = pending.len();
+                for (k = 0; k < np; k++) cc__hook_add_rule(c, *pending.get_ptr(k), r);
+                if (is_default) cc__hook_default(c, r);
+            } else {
+                c->reg->ufcs_opaque = true;
+            }
+            pending.clear();
+        }
+    }
+}
+
+static void cc__hook_walk(CcHookCtx* c, const CcStmt* s) {
+    CcHookStmtKind kind = cc__hook_stmt_kind(s);
+    if (!s) return;
+    if (kind == HS_BLOCK) {
+        CcStmtList stmts = cc__block_stmts(s);
+        size_t i;
+        size_t n = stmts.len();
+        for (i = 0; i < n; i++) cc__hook_walk(c, *stmts.get_ptr(i));
+        return;
+    }
+    if (kind == HS_IF) { cc__hook_walk_if(c, s); return; }
+    if (kind == HS_SWITCH) { cc__hook_walk_switch(c, s); return; }
+    if (kind == HS_RETURN) { cc__hook_default(c, cc__return_value(s)); return; }
+}
+
+/* The parameter names of a closure or a function type: the second and
+ * third are the method and the mode. */
+static void cc__param_names(CcParamList* paramv, CCSlice* second, CCSlice* third) {
+    size_t n = paramv->len();
+    *second = cc_slice_empty();
+    *third = cc_slice_empty();
+    if (n > 1) *second = paramv->get_ptr(1)->name;
+    if (n > 2) *third = paramv->get_ptr(2)->name;
+}
+
+/* Read the handler (a named function or a closure) into rules. */
+static void cc__hook_read_ufcs(CcIndex* ix, const CcUnit* u, CcHookReg* reg) {
+    CcHookCtx c;
+    const CcExpr* v = cc__strip_parens(reg->ufcs_value);
+    CCSlice fname;
+    memset(&c, 0, sizeof c);
+    c.ix = ix;
+    c.reg = reg;
+    c.method_param = cc_slice_empty();
+    c.mode_param = cc_slice_empty();
+    if (!v) return;
+    @switch (v->k) {
+        case .closure(cl): {
+            CcParamList params = cl.params;
+            c.unit = u;
+            cc__param_names(&params, &c.method_param, &c.mode_param);
+            if (!c.method_param.len) { reg->ufcs_opaque = true; return; }
+            cc__hook_walk(&c, cl.body);
+            return;
+        }
+        default: break;
+    }
+    if (cc__expr_is_ident(v, &fname)) {
+        CcSym* fs = cc__sym_find_kind(ix, fname, CC_SYM_FUNC);
+        CcStmt* body = NULL;
+        CcType* ft = NULL;
+        if (fs && fs->decl) {
+            @switch (fs->decl->k) {
+                case .func(f): body = f.body; ft = f.type; break;
+                case .comptime_fn(cf): body = cf.fn.body; ft = cf.fn.type; break;
+                default: break;
+            }
+        }
+        if (!fs || !body || !ft) { reg->ufcs_opaque = true; return; }
+        c.unit = fs->unit;
+        @switch (ft->k) {
+            case .func(fn): {
+                CcParamList params = fn.params;
+                cc__param_names(&params, &c.method_param, &c.mode_param);
+                break;
+            }
+            default: break;
+        }
+        if (!c.method_param.len) { reg->ufcs_opaque = true; return; }
+        cc__hook_walk(&c, body);
+        return;
+    }
+    reg->ufcs_opaque = true;
+}
+
+/* ---- @typehooks ---------------------------------------------------------- */
+
+static bool cc__expr_is_closure(const CcExpr* e) { return e && e->k.kind == CcExprK_closure; }
+
+static CcExprList cc__call_arglist(const CcExpr* e, bool* ok) {
+    *ok = false;
+    @switch (e->k) {
+        case .call(cl): *ok = true; return cl.args;
+        default: return cc__empty_exprs();
+    }
+}
+
+static void cc__hook_create(CcIndex* ix, const CcUnit* u, CcHookReg* reg, const CcExpr* value) {
+    CCSlice nm;
+    if (cc__expr_is_ident(value, &nm)) reg->create_fn = nm;
+    else if (cc__expr_is_closure(value)) reg->create_fn = cc__ix_s("<lambda>");
+    else {
+        bool ok;
+        CcExprList args = cc__call_arglist(value, &ok);
+        size_t i;
+        size_t n = ok ? args.len() : 0;
+        int cnt = 0;
+        for (i = 0; i < n; i++) {
+            CCSlice s = cc__expr_string(ix, u, *args.get_ptr(i));
+            if (!s.ptr) continue;
+            if (cnt == 0) reg->create_fn = s;
+            else if (cnt == 1) reg->create_fn2 = s;
+            cnt++;
+        }
+    }
+}
+
+static void cc__hook_destroy(CcIndex* ix, const CcUnit* u, CcHookReg* reg, const CcExpr* value, CCSlice callee) {
+    CCSlice nm;
+    if (cc__expr_is_ident(value, &nm)) reg->destroy_fn = nm;
+    else if (cc__expr_is_closure(value)) reg->destroy_fn = cc__ix_s("<lambda>");
+    else if (callee.ptr && cc__eqc(callee, "cc_type_destroy_hooks")) {
+        bool ok;
+        CcExprList args = cc__call_arglist(value, &ok);
+        if (ok && args.len() >= 2) {
+            CCSlice a = cc__expr_string(ix, u, *args.get_ptr(0));
+            CCSlice b = cc__expr_string(ix, u, *args.get_ptr(1));
+            if (a.ptr) reg->pre_destroy_fn = a;
+            if (b.ptr) reg->destroy_fn = b;
+        }
+    } else if (callee.ptr && cc__eqc(callee, "cc_type_pre_destroy_call")) {
+        CCSlice a = cc__expr_string(ix, u, value);
+        if (a.ptr) reg->pre_destroy_fn = a;
+    } else {
+        CCSlice a = cc__expr_string(ix, u, value);
+        if (a.ptr) reg->destroy_fn = a;
+    }
+}
+
+static void cc__hook_entry(CcIndex* ix, const CcUnit* u, CcHookReg* reg, CCSlice field, const CcExpr* value) {
+    CCSlice f = field;
+    CCSlice callee;
+    CCSlice nm;
+    if (f.len && f.ptr[0] == '.') f = cc__skip(f, 1);
+    if (!value) return;
+    callee = cc__callee_name(value);
+    if (cc__eqc(f, "create")) {
+        cc__hook_create(ix, u, reg, value);
+    } else if (cc__eqc(f, "destroy")) {
+        cc__hook_destroy(ix, u, reg, value, callee);
+    } else if (cc__eqc(f, "pre_destroy")) {
+        CCSlice a = cc__expr_is_ident(value, &nm) ? nm : cc__expr_string(ix, u, value);
+        if (a.ptr) reg->pre_destroy_fn = a;
+    } else if (cc__eqc(f, "ufcs")) {
+        reg->ufcs_value = (CcExpr*)value;
+        reg->ufcs_fn = cc__expr_is_ident(value, &nm) ? nm : cc__ix_s("<lambda>");
+        cc__hook_read_ufcs(ix, u, reg);
+    } else if (cc__eqc(f, "len")) reg->has_len = true;
+    else if (cc__eqc(f, "access")) reg->has_access = true;
+    else if (cc__eqc(f, "cast")) reg->has_cast = true;
+    else if (cc__eqc(f, "niche")) reg->has_niche = true;
+    else if (cc__has_prefix(f, "ufcs_sink") || cc__has_prefix(f, "ufcs_dynamic")) {
+        CCSlice a = cc__expr_is_ident(value, &nm) ? nm : cc__expr_string(ix, u, value);
+        reg->has_sink = true;
+        if (a.ptr) reg->sink_fn = a;
+    }
+}
+
+static CcHookReg* cc__hook_new(CcIndex* ix, CcUnit* u, CcDecl* d, CCSlice subject) {
+    CcHookReg* reg = cc_arena_alloc(ix->arena, sizeof(CcHookReg), _Alignof(CcHookReg));
+    size_t n = subject.len;
+    size_t i;
+    CcHookRegList* hookv = &ix->hooks;
+    CcTypeInfoList* infov = &ix->types;
+    size_t ni;
+    memset(reg, 0, sizeof(*reg));
+    reg->subject = cc__ix_copy(ix, subject);
+    reg->decl = d;
+    reg->unit = u;
+    reg->rules = vec_new::[CcUfcsRule](ix->arena);
+    if (cc__eqc(subject, "*")) {
+        reg->any = true;
+        reg->base = cc__ix_s("");
+    } else if (n > 2 && subject.ptr[n - 1] == '*' && subject.ptr[n - 2] == '_') {
+        reg->family = true;
+        reg->base = cc__ix_dupn(ix, subject.ptr, n - 1); /* keep the `_` */
+    } else if (n > 1 && subject.ptr[n - 1] == '*') {
+        reg->ptr = true;
+        reg->base = cc__ix_dupn(ix, subject.ptr, n - 1);
+    } else {
+        reg->base = reg->subject;
+    }
+    hookv->push(reg);
+    /* registrations may arrive after the types they govern were created */
+    ni = infov->len();
+    for (i = 0; i < ni; i++) cc__type_resolve_hooks(ix, *infov->get_ptr(i));
+    return reg;
+}
+
+/* The subject text of a `@typehooks` / `@typeview` declaration: the tokens
+ * between `on` and `{`. */
+static CCSlice cc__hook_subject_text(CcIndex* ix, const CcUnit* u, CcSpan sp) {
+    CCString sb = cc_string_new();
+    uint32_t i = sp.first;
+    const CcToken* t;
+    for (; i <= sp.last; i++) {
+        t = cc__tok(u, i);
+        if (!t) break;
+        if (t->kind == CC_TK_IDENT && cc__eqc(t->text, "on")) { i++; break; }
+    }
+    for (; i <= sp.last; i++) {
+        t = cc__tok(u, i);
+        if (!t || cc__tok_is_punct(t, CC_P_LBRACE)) break;
+        if (sb.len() && t->after_space && t->kind == CC_TK_IDENT) sb.push_char(' ', ix->arena);
+        sb.push_slice(t->text, ix->arena);
+    }
+    return cc__ix_finish(ix, &sb);
+}
+
+static void cc__typehooks_decl(CcIndex* ix, CcUnit* u, CcDecl* d, CcHookEntryList entries) {
+    CCSlice subject = cc__hook_subject_text(ix, u, d->span);
+    CcHookReg* reg;
+    size_t i;
+    size_t n = entries.len();
+    if (!subject.len) {
+        cc__diag_error(ix, cc__span_loc(u, d->span), cc__ix_s("@" "typehooks without a subject type"));
+        return;
+    }
+    reg = cc__hook_new(ix, u, d, subject);
+    for (i = 0; i < n; i++) {
+        CcHookEntry* e = entries.get_ptr(i);
+        if (e->key.len) cc__hook_entry(ix, u, reg, e->key, e->value);
+    }
+}
+
+/* `(void)cc_type_register("Name", (CCTypeHooks){ .ufcs = f, ... })` inside
+ * a @comptime block: the marker form of the same registration. */
+static const CcExpr* cc__strip_parens_casts(const CcExpr* e) {
+    for (;;) {
+        const CcExpr* inner = NULL;
+        if (!e) return NULL;
+        @switch (e->k) {
+            case .paren(pa): inner = pa.a; break;
+            case .cast(ca): inner = ca.a; break;
+            default: return e;
+        }
+        e = inner;
+    }
+}
+
+static CcInit* cc__compound_init(const CcExpr* e) {
+    if (!e) return NULL;
+    @switch (e->k) {
+        case .compound(cl): return cl.init;
+        default: return NULL;
+    }
+}
+
+static void cc__comptime_register_expr(CcIndex* ix, CcUnit* u, const CcExpr* e) {
+    CCSlice c;
+    CCSlice name;
+    const CcExpr* hooks;
+    CcInit* in;
+    CcHookReg* reg;
+    bool ok;
+    CcExprList args;
+    CcInitList items;
+    size_t i;
+    size_t n;
+    e = cc__strip_parens_casts(e);
+    if (!e) return;
+    c = cc__callee_name(e);
+    if (!c.ptr || !(cc__eqc(c, "cc_type_register") || cc__eqc(c, "cc_type_define"))) return;
+    args = cc__call_arglist(e, &ok);
+    if (!ok || args.len() < 2) return;
+    name = cc__expr_string(ix, u, *args.get_ptr(0));
+    hooks = cc__strip_parens(*args.get_ptr(1));
+    if (!name.ptr) return;
+    in = cc__compound_init(hooks);
+    if (!in) return;
+    reg = cc__hook_new(ix, u, NULL, name);
+    items = in->items;
+    n = items.len();
+    for (i = 0; i < n; i++) {
+        CcInit* it = *items.get_ptr(i);
+        CcDesignatorList* desv = &it->designators;
+        if (desv->len() && desv->get_ptr(0)->field.len && it->expr)
+            cc__hook_entry(ix, u, reg, desv->get_ptr(0)->field, it->expr);
+    }
+}
+
+static void cc__comptime_register_walk(CcIndex* ix, CcUnit* u, const CcStmt* s) {
+    CcStmtList stmts;
+    size_t i;
+    size_t n;
+    bool is_block = false;
+    const CcExpr* e = NULL;
+    if (!s) return;
+    @switch (s->k) {
+        case .block: is_block = true; break;
+        case .comptime_block: is_block = true; break;
+        case .expr(es): e = es.e; break;
+        default: return;
+    }
+    if (is_block) {
+        stmts = cc__block_stmts(s);
+        n = stmts.len();
+        for (i = 0; i < n; i++) cc__comptime_register_walk(ix, u, *stmts.get_ptr(i));
+        return;
+    }
+    if (e) cc__comptime_register_expr(ix, u, e);
+}
+
+static void cc__comptime_register_list(CcIndex* ix, CcUnit* u, CcStmtList stmts) {
+    size_t i;
+    size_t n = stmts.len();
+    for (i = 0; i < n; i++) cc__comptime_register_walk(ix, u, *stmts.get_ptr(i));
+}
+
+/* `struct Point` and `Point` name the same subject for a registration. */
+static CCSlice cc__strip_tag(CCSlice name) {
+    if (cc__has_prefix(name, "struct ")) return cc__skip(name, 7);
+    if (cc__has_prefix(name, "union ")) return cc__skip(name, 6);
+    if (cc__has_prefix(name, "enum ")) return cc__skip(name, 5);
+    return name;
+}
+
+/* Specificity of a registration for a name: exact beats pointer-subject
+ * beats family beats `*`; -1 when it does not match. */
+static int cc__hook_score(const CcHookReg* r, CCSlice name) {
+    if (r->any) return 0;
+    if (r->family) return cc__has_prefix_s(name, r->base) && name.len > r->base.len ? 1 + (int)r->base.len : -1;
+    if (r->ptr) return cc__eq(name, r->base) ? 2000 : -1;
+    return cc__eq(name, r->base) ? 3000 : -1;
+}
+
+static int cc__hook_rank(const CcHookReg* r) {
+    return r->any ? 0 : r->family ? 1 + (int)r->base.len : r->ptr ? 2000 : 3000;
+}
+
+/* Narrowest registration whose subject matches `name`; `want_ufcs` asks
+ * for one carrying a `.ufcs` entry. */
+static CcHookReg* cc__hook_match(const CcIndex* ix, CCSlice name, bool want_ufcs) {
+    CcHookReg* best = NULL;
+    int best_score = -1;
+    CcHookRegList* hookv = (CcHookRegList*)&ix->hooks;
+    size_t i;
+    size_t n = hookv->len();
+    name = cc__strip_tag(name);
+    for (i = 0; i < n; i++) {
+        CcHookReg* r = *hookv->get_ptr(i);
+        int score;
+        if (want_ufcs && !r->ufcs_fn.len) continue;
+        score = cc__hook_score(r, name);
+        if (score < 0) continue;
+        if (score >= best_score) { /* later registration of equal specificity wins (user after stdlib) */
+            best_score = score;
+            best = r;
+        }
+    }
+    return best;
+}
+
+static CCSlice cc__suffix_callee(CcIndex* ix, const CcTypeInfo* info, CCSlice fn) {
+    if (fn.len && fn.ptr[0] == '_') return cc__join(ix, info->name, "", fn);
+    return fn;
+}
+
+static void cc__type_resolve_hooks(CcIndex* ix, CcTypeInfo* info) {
+    CcHookReg* r = cc__hook_match(ix, info->name, false);
+    CcHookReg* create = NULL;
+    CcHookReg* destroy = NULL;
+    CcHookRegList* hookv = &ix->hooks;
+    size_t i;
+    size_t n = hookv->len();
+    CCSlice name = cc__strip_tag(info->name);
+    info->hooks = r;
+    /* create / destroy come from the narrowest registration that has them */
+    for (i = 0; i < n; i++) {
+        CcHookReg* h = *hookv->get_ptr(i);
+        int score = cc__hook_score(h, name);
+        if (score < 0) continue;
+        if (h->create_fn.len && (!create || score >= cc__hook_rank(create))) create = h;
+        if ((h->destroy_fn.len || h->pre_destroy_fn.len) && (!destroy || score >= cc__hook_rank(destroy))) destroy = h;
+    }
+    info->create_fn = create ? cc__suffix_callee(ix, info, create->create_fn) : cc_slice_empty();
+    info->destroy_fn = destroy ? cc__suffix_callee(ix, info, destroy->destroy_fn) : cc_slice_empty();
+    info->pre_destroy_fn = destroy ? cc__suffix_callee(ix, info, destroy->pre_destroy_fn) : cc_slice_empty();
+}
+
+/* ---- noreturn ------------------------------------------------------------- */
+
+static bool cc__attrs_noreturn(CcAttrList* attrv) {
+    size_t i;
+    size_t n = attrv->len();
+    for (i = 0; i < n; i++) {
+        CcAttr* a = attrv->get_ptr(i);
+        if (!a->name.len) continue;
+        if (cc__eqc(a->name, "_Noreturn") || cc__eqc(a->name, "noreturn")) return true;
+        if (a->value.len && cc__eqc(a->value, "noreturn")) return true;
+        if (a->value.len && cc__eqc(a->value, "__noreturn__")) return true;
+    }
+    return false;
+}
+
+static bool CcSym_noreturn(const CcSym* s) {
+    const CcDecl* d;
+    uint32_t i;
+    CCSlice dname;
+    if (!s || !s->decl) return false;
+    d = s->decl;
+    if (d->specs & CC_SPEC_NORETURN) return true;
+    if (cc__attrs_noreturn((CcAttrList*)&d->attrs)) return true;
+    if (!s->unit) return false;
+    dname = cc__decl_name_of(d);
+    /* specifier tokens before the name: `_Noreturn`, `noreturn`, or a macro
+     * whose definition spells one (CC_NORETURN) */
+    for (i = d->span.first; i <= d->span.last; i++) {
+        const CcToken* t = cc__tok(s->unit, i);
+        if (!t || t->kind == CC_TK_EOF) break;
+        if (t->kind != CC_TK_IDENT) continue;
+        if (dname.len && cc__eq(t->text, dname)) break;
+        if (cc__eqc(t->text, "_Noreturn") || cc__eqc(t->text, "noreturn")) return true;
+    }
+    return false;
+}
+
+/* The macro form (`CC_NORETURN`) needs the macro table: the index sets
+ * CC_SPEC_NORETURN on the declaration when it adds the symbol, so the plain
+ * query above answers it afterwards. */
+static bool cc__sym_noreturn_ix(const CcIndex* ix, const CcSym* s) {
+    const CcDecl* d;
+    uint32_t i;
+    CCSlice dname;
+    if (CcSym_noreturn(s)) return true;
+    if (!s || !s->decl || !s->unit) return false;
+    d = s->decl;
+    dname = cc__decl_name_of(d);
+    for (i = d->span.first; i <= d->span.last; i++) {
+        const CcToken* t = cc__tok(s->unit, i);
+        CcSym* ms;
+        const CcMacroDef* m;
+        if (!t || t->kind == CC_TK_EOF) break;
+        if (t->kind != CC_TK_IDENT) continue;
+        if (dname.len && cc__eq(t->text, dname)) break;
+        if (t->text.len >= 128) continue;
+        ms = cc__sym_find_kind(ix, t->text, CC_SYM_MACRO);
+        if (!ms) continue;
+        for (m = ms->macro; m; m = m->alt)
+            if (m->body.len && (cc__ix_contains(m->body.ptr, m->body.len, "noreturn") ||
+                                cc__ix_contains(m->body.ptr, m->body.len, "_Noreturn")))
+                return true;
+    }
+    return false;
+}
+
+/* ---- adding units ---------------------------------------------------------- */
+
+static void cc__add_typedef_name(CcIndex* ix, CCSlice name) {
+    CcNameList* namev = &ix->typedef_names;
+    size_t i;
+    size_t n = namev->len();
+    for (i = 0; i < n; i++)
+        if (cc__eq(*namev->get_ptr(i), name)) return;
+    namev->push(cc__ix_copy(ix, name));
+}
+
+static void cc__index_tag_type(CcIndex* ix, CcUnit* u, CcDecl* d, CcType* t, bool is_header);
+
+static void cc__index_record(CcIndex* ix, CcUnit* u, CcDecl* d, CcType* t, CcRecordType rc, bool is_header) {
+    CcFieldList* fieldv = &rc.fields;
+    size_t i;
+    size_t n = fieldv->len();
+    if (rc.tag.len) {
+        CCSlice tag = cc__cat3(ix, rc.is_union ? "union " : "struct ", rc.tag, "");
+        cc__sym_add(ix, tag, CC_SYM_TYPE, d, u, t, is_header, n != 0);
+    }
+    /* nested definitions in fields */
+    for (i = 0; i < n; i++) {
+        CcField* f = fieldv->get_ptr(i);
+        if (f->type && (f->type->k.kind == CcTypeK_record || f->type->k.kind == CcTypeK_enumt))
+            cc__index_tag_type(ix, u, d, f->type, is_header);
+    }
+}
+
+static void cc__index_enum(CcIndex* ix, CcUnit* u, CcDecl* d, CcType* t, CcEnumType en, bool is_header) {
+    CcEnumeratorList* itemv = &en.items;
+    size_t i;
+    size_t n = itemv->len();
+    if (en.tag.len) {
+        CCSlice tag = cc__cat3(ix, "enum ", en.tag, "");
+        cc__sym_add(ix, tag, CC_SYM_TYPE, d, u, t, is_header, n != 0);
+    }
+    for (i = 0; i < n; i++) {
+        CcEnumerator* e = itemv->get_ptr(i);
+        if (e->name.len) cc__sym_add(ix, e->name, CC_SYM_ENUMERATOR, d, u, t, is_header, true);
+    }
+}
+
+static void cc__index_tag_type(CcIndex* ix, CcUnit* u, CcDecl* d, CcType* t, bool is_header) {
+    if (!t) return;
+    @switch (t->k) {
+        case .record(rc): cc__index_record(ix, u, d, t, rc, is_header); break;
+        case .enumt(en): cc__index_enum(ix, u, d, t, en, is_header); break;
+        case .pointer(pt): cc__index_tag_type(ix, u, d, pt.pointee, is_header); break;
+        case .array(ar): cc__index_tag_type(ix, u, d, ar.elem, is_header); break;
+        default: break;
+    }
+}
+
+static void cc__index_decl(CcIndex* ix, CcUnit* u, CcDecl* d, bool is_header);
+
+static void cc__index_func(CcIndex* ix, CcUnit* u, CcDecl* d, CcFuncDecl f, bool is_header) {
+    if (f.name.len) {
+        CcSym* s = cc__sym_add(ix, f.name, CC_SYM_FUNC, d, u, f.type, is_header, f.body != NULL);
+        if (s->decl == d && cc__sym_noreturn_ix(ix, s)) d->specs |= CC_SPEC_NORETURN;
+    }
+    if (f.type) {
+        @switch (f.type->k) {
+            case .func(fn): cc__index_tag_type(ix, u, d, fn.ret, is_header); break;
+            default: break;
+        }
+    }
+}
+
+static bool cc__typedef_is_definition(CcType* t) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .record(rc): { CcFieldList* fieldv = &rc.fields; return fieldv->len() != 0; }
+        default: return true;
+    }
+}
+
+static void cc__index_typedef(CcIndex* ix, CcUnit* u, CcDecl* d, CcTypedefDecl td, bool is_header) {
+    if (td.name.len) {
+        cc__sym_add(ix, td.name, CC_SYM_TYPE, d, u, td.type, is_header, cc__typedef_is_definition(td.type));
+        cc__add_typedef_name(ix, td.name);
+    }
+    cc__index_tag_type(ix, u, d, td.type, is_header);
+}
+
+static void cc__index_pp(CcIndex* ix, CcUnit* u, CcDecl* d, uint32_t tok, bool is_header) {
+    CcMacroDef* m = cc__parse_define(ix, u, d, tok);
+    if (m) {
+        CcSym* s = cc__sym_add(ix, m->name, CC_SYM_MACRO, d, u, NULL, is_header, m->body.len != 0);
+        if (!s->macro) s->macro = m;
+        else {
+            CcMacroDef* a = s->macro;
+            while (a->alt) a = a->alt;
+            a->alt = m;
+        }
+    }
+}
+
+static void cc__index_named_type(CcIndex* ix, CcUnit* u, CcDecl* d, CCSlice name, CcType* type, bool is_header) {
+    if (name.len) {
+        cc__sym_add(ix, name, CC_SYM_TYPE, d, u, type, is_header, true);
+        cc__add_typedef_name(ix, name);
+    }
+}
+
+static void cc__index_factory(CcIndex* ix, CcUnit* u, CcDecl* d) {
+    CcDeclList* factv = &ix->factories;
+    CcUnitList* funitv = &ix->factory_units;
+    factv->push(d);
+    funitv->push(u);
+}
+
+static void cc__index_decl_list(CcIndex* ix, CcUnit* u, CcDeclList list, bool is_header) {
+    size_t i;
+    size_t n = list.len();
+    for (i = 0; i < n; i++) cc__index_decl(ix, u, *list.get_ptr(i), is_header);
+}
+
+/* `@typeview Mode on T { ... }` names the value view `T_Restrict_Mode`
+ * (spec/draft_facets.md): an alias of T for method lookup */
+static void cc__index_typeview(CcIndex* ix, CcUnit* u, CcDecl* d, CcTypeview tv, bool is_header) {
+    if (tv.view.len && tv.target) {
+        CCString sb = cc_string_new();
+        CCSlice alias;
+        sb.push_slice(cc__strip_tag(CcIndex_canon(ix, tv.target)), ix->arena);
+        sb.push_cstr("_Restrict_", ix->arena);
+        sb.push_slice(tv.view, ix->arena);
+        alias = cc__ix_finish(ix, &sb);
+        cc__sym_add(ix, alias, CC_SYM_TYPE, d, u, tv.target, is_header, true);
+        cc__add_typedef_name(ix, alias);
+    }
+}
+
+static void cc__index_decl(CcIndex* ix, CcUnit* u, CcDecl* d, bool is_header) {
+    if (!d) return;
+    @switch (d->k) {
+        case .var(v):
+            if (v.name.len) cc__sym_add(ix, v.name, CC_SYM_VAR, d, u, v.type, is_header, v.init != NULL);
+            cc__index_tag_type(ix, u, d, v.type, is_header);
+            return;
+        case .func(f): cc__index_func(ix, u, d, f, is_header); return;
+        case .comptime_fn(cf): cc__index_func(ix, u, d, cf.fn, is_header); return;
+        case .typedef_(td): cc__index_typedef(ix, u, d, td, is_header); return;
+        case .tagged(tg): cc__index_tag_type(ix, u, d, tg.type, is_header); return;
+        case .pp(pd): cc__index_pp(ix, u, d, pd.tok, is_header); return;
+        case .typehooks(th): cc__typehooks_decl(ix, u, d, th.entries); return;
+        case .variant(vd): cc__index_named_type(ix, u, d, vd.name, NULL, is_header); return;
+        case .scoped_type(st): cc__index_named_type(ix, u, d, st.name, st.type, is_header); return;
+        case .factory: cc__index_factory(ix, u, d); return;
+        case .comptime_if(ci):
+            cc__index_decl_list(ix, u, ci.then, is_header);
+            cc__index_decl_list(ix, u, ci.els, is_header);
+            return;
+        case .comptime_block(b): cc__comptime_register_list(ix, u, b.stmts); return;
+        case .macro_call: cc__macro_call(ix, u, d, is_header); return;
+        case .typeview(tv): cc__index_typeview(ix, u, d, tv, is_header); return;
+        default: return;
+    }
+}
+
+/* `SmallVec::[int, 8]`: a value argument's spelling is read from the
+ * unit's tokens once, while the unit is known, and kept by node. */
+typedef struct CcValueCtx { CcIndex* ix; CcUnit* u; } CcValueCtx;
+
+static bool cc__value_on_type(CcType* t, void* env) {
+    CcValueCtx* c = (CcValueCtx*)env;
+    CcExpr* e = NULL;
+    @switch (t->k) {
+        case .valarg(vt): e = vt.expr; break;
+        default: return true;
+    }
+    if (e && !cc__value_spelling(c->ix, t).ptr) {
+        if (e->span.first <= e->span.last && e->span.last < cc__ntoks(c->u))
+            c->ix->value_spellings->insert((uint64_t)(uintptr_t)t, cc__span_text(c->ix, c->u, e->span.first, e->span.last));
+    }
+    return true;
+}
+
+static void CcIndex_add_unit(CcIndex* ix, CcUnit* u, bool is_header) {
+    size_t i;
+    size_t n;
+    {
+        CcVisitor v;
+        CcValueCtx c;
+        memset(&v, 0, sizeof v);
+        c.ix = ix;
+        c.u = u;
+        v.env = &c;
+        v.type = cc__value_on_type;
+        u->walk(v);
+    }
+    {
+        CcUnitList* unitv = &ix->units;
+        CcIntList* hdrv = &ix->unit_is_header;
+        unitv->push(u);
+        hdrv->push(is_header ? 1 : 0);
+    }
+    {
+        CcDeclList* declv = &u->decls;
+        n = declv->len();
+        for (i = 0; i < n; i++) cc__index_decl(ix, u, *declv->get_ptr(i), is_header);
+    }
+    /* the parser's forward-referenced type names are typedef names for later units */
+    {
+        CcNameList* namev = &u->typedef_names;
+        n = namev->len();
+        for (i = 0; i < n; i++) cc__add_typedef_name(ix, *namev->get_ptr(i));
+    }
+}
+
+static CcIndex* cc_index_new(CcNameList include_dirs, CCSlice quote_dir, CcDiags* ds, CCArena a) {
+    CcIndex* ix = cc_arena_alloc(a, sizeof(CcIndex), _Alignof(CcIndex));
+    memset(ix, 0, sizeof(*ix));
+    ix->arena = a;
+    ix->ds = ds;
+    ix->units = vec_new::[CcUnitRef](a);
+    ix->unit_is_header = vec_new::[int](a);
+    ix->sym_heads = map_new::[CCSlice, CcSymRef](a);
+    ix->type_map = map_new::[CCSlice, CcTypeInfoRef](a);
+    ix->result_specs = vec_new::[CcTypeInfoRef](a);
+    ix->syms = vec_new::[CcSymRef](a);
+    ix->types = vec_new::[CcTypeInfoRef](a);
+    ix->hooks = vec_new::[CcHookRegRef](a);
+    ix->factories = vec_new::[CcDeclRef](a);
+    ix->factory_units = vec_new::[CcUnitRef](a);
+    ix->typedef_names = vec_new::[CCSlice](a);
+    ix->loaded_paths = vec_new::[CCSlice](a);
+    ix->loading_paths = vec_new::[CCSlice](a);
+    ix->value_spellings = map_new::[uint64_t, CCSlice](a);
+    ix->include_dirs = include_dirs;
+    ix->quote_dir = quote_dir;
+    return ix;
+}
+
+/* ---- includes ---------------------------------------------------------------- */
+
+/* `#include <x>` / `#include "x"` lines of a lexed file. */
+static CcIncludeRefList cc__scan_includes(CcIndex* ix, const CcTape* tape) {
+    CcIncludeRefList refs = vec_new::[CcIncludeRef](ix->arena);
+    CcTape* tp = (CcTape*)tape;
+    size_t i;
+    size_t n = tp->toks.len();
+    for (i = 0; i < n; i++) {
+        const CcToken* t = tp->toks.get_ptr(i);
+        const char* p;
+        const char* end;
+        const char* s;
+        char close;
+        CcIncludeRef r;
+        if (t->kind != CC_TK_PP) continue;
+        p = t->text.ptr;
+        end = p + t->text.len;
+        if (*p != '#') continue;
+        p++;
+        while (p < end && (*p == ' ' || *p == '\t')) p++;
+        if ((size_t)(end - p) < 7 || memcmp(p, "include", 7) != 0) continue;
+        p += 7;
+        while (p < end && (*p == ' ' || *p == '\t')) p++;
+        if (p >= end || !(*p == '<' || *p == '"')) continue;
+        close = *p == '<' ? '>' : '"';
+        s = ++p;
+        while (p < end && *p != close) p++;
+        if (p >= end) continue;
+        r.path = cc__ix_dupn(ix, s, (size_t)(p - s));
+        r.quoted = close == '"';
+        r.tok = (uint32_t)i;
+        refs.push(r);
+    }
+    return refs;
+}
+
+static CCSlice cc__dirname(CcIndex* ix, CCSlice path) {
+    size_t i = path.len;
+    while (i > 0 && path.ptr[i - 1] != '/') i--;
+    if (i == 0) return cc__ix_s(".");
+    if (i == 1) return cc__ix_s("/");
+    return cc__ix_dupn(ix, path.ptr, i - 1);
+}
+
+static bool cc__file_exists(CcIndex* ix, CCSlice path) {
+    FILE* f = fopen(cc__ix_cstr(ix, path), "rb");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
+
+static CCSlice cc__path_join(CcIndex* ix, CCSlice dir, CCSlice rel) {
+    CCString sb = cc_string_new();
+    sb.push_slice(dir, ix->arena);
+    sb.push_char('/', ix->arena);
+    sb.push_slice(rel, ix->arena);
+    return cc__ix_finish(ix, &sb);
+}
+
+static CCSlice cc__resolve_include(CcIndex* ix, CCSlice from_path, const CcIncludeRef* r, CCString* searched) {
+    CCSlice cand;
+    CcNameList* dirv = &ix->include_dirs;
+    size_t i;
+    size_t n = dirv->len();
+    if (r->path.len && r->path.ptr[0] == '/') return cc__file_exists(ix, r->path) ? r->path : cc_slice_empty();
+    if (r->quoted) {
+        cand = cc__path_join(ix, cc__dirname(ix, from_path), r->path);
+        if (cc__file_exists(ix, cand)) return cand;
+        searched->push_char(' ', ix->arena);
+        searched->push_slice(cand, ix->arena);
+        if (ix->quote_dir.len) {
+            cand = cc__path_join(ix, ix->quote_dir, r->path);
+            if (cc__file_exists(ix, cand)) return cand;
+            searched->push_char(' ', ix->arena);
+            searched->push_slice(cand, ix->arena);
+        }
+    }
+    for (i = 0; i < n; i++) {
+        cand = cc__path_join(ix, *dirv->get_ptr(i), r->path);
+        if (cc__file_exists(ix, cand)) return cand;
+        searched->push_char(' ', ix->arena);
+        searched->push_slice(cand, ix->arena);
+    }
+    return cc_slice_empty();
+}
+
+static CCSlice cc__canonical_path(CcIndex* ix, CCSlice path) {
+    char buf[PATH_MAX];
+    if (realpath(cc__ix_cstr(ix, path), buf)) return cc__ix_dup(ix, buf);
+    return cc__ix_copy(ix, path);
+}
+
+static bool cc__path_listed(CcNameList* pathv, CCSlice path) {
+    size_t i;
+    size_t n = pathv->len();
+    for (i = 0; i < n; i++)
+        if (cc__eq(*pathv->get_ptr(i), path)) return true;
+    return false;
+}
+
+static CCSlice cc__read_file(CcIndex* ix, CCSlice path, bool* ok) {
+    FILE* fp = fopen(cc__ix_cstr(ix, path), "rb");
+    long n;
+    char* buf;
+    *ok = false;
+    if (!fp) return cc_slice_empty();
+    fseek(fp, 0, SEEK_END);
+    n = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (n < 0) n = 0;
+    buf = cc_arena_alloc(ix->arena, (size_t)n + 1, 1);
+    if (n > 0 && fread(buf, 1, (size_t)n, fp) != (size_t)n) { fclose(fp); return cc_slice_empty(); }
+    buf[n] = 0;
+    fclose(fp);
+    *ok = true;
+    return cc_slice_from_buffer(buf, (size_t)n);
+}
+
+static void cc__load_includes_of(CcIndex* ix, const CcTape* tape);
+
+static void cc__load_header(CcIndex* ix, CCSlice path) {
+    CCSlice canon = cc__canonical_path(ix, path);
+    CCSlice src;
+    bool ok;
+    CcUnit* u;
+    CcParseOpts po;
+    CcNameList* loadedv = &ix->loaded_paths;
+    CcNameList* loadingv = &ix->loading_paths;
+    if (cc__path_listed(loadedv, canon)) return;
+    if (cc__path_listed(loadingv, canon)) return; /* include cycle */
+    loadingv->push(canon);
+    src = cc__read_file(ix, path, &ok);
+    if (!ok) {
+        CcLoc loc;
+        loc.path = path;
+        loc.line = 0;
+        loc.col = 0;
+        cc__diag_error(ix, loc, cc__cat3(ix, "cannot read header: ", cc__ix_s(strerror(errno)), ""));
+        loadedv->push(canon);
+        return;
+    }
+    {
+        /* the includes first, so the parser sees every typedef name from
+         * them; the scan lexes on a scratch sink, the parse reports */
+        CcDiags scratch = CcDiags_new(ix->arena);
+        CcTape tape = cc_lex(path, src, &scratch, ix->arena);
+        cc__load_includes_of(ix, &tape);
+    }
+    po.mode = CC_UNIT_HEADER;
+    po.known_types = ix->typedef_names;
+    u = cc_parse_unit(path, src, po, ix->ds, ix->arena);
+    CcIndex_add_unit(ix, u, true);
+    loadedv->push(canon);
+}
+
+static void cc__load_includes_of(CcIndex* ix, const CcTape* tape) {
+    CcIncludeRefList refs = cc__scan_includes(ix, tape);
+    size_t i;
+    size_t n = refs.len();
+    for (i = 0; i < n; i++) {
+        CcIncludeRef* r = refs.get_ptr(i);
+        CCString searched = cc_string_new();
+        CCSlice found;
+        if (!cc__has_suffix(r->path, ".cch")) continue; /* C headers stay C */
+        found = cc__resolve_include(ix, tape->path, r, &searched);
+        if (!found.len) {
+            CCString sb = cc_string_new();
+            sb.push_cstr("include not found: ", ix->arena);
+            sb.push_char(r->quoted ? '"' : '<', ix->arena);
+            sb.push_slice(r->path, ix->arena);
+            sb.push_char(r->quoted ? '"' : '>', ix->arena);
+            sb.push_cstr(" (searched:", ix->arena);
+            if (searched.len()) sb.push_slice(cc_string_as_slice(&searched), ix->arena);
+            else sb.push_cstr(" nothing", ix->arena);
+            sb.push_char(')', ix->arena);
+            cc__diag_error(ix, tape->loc(r->tok), cc__ix_finish(ix, &sb));
+            continue;
+        }
+        cc__load_header(ix, found);
+    }
+}
+
+static void CcIndex_preload_includes(CcIndex* ix, const CcTape* tape, CcParseOpts opts) {
+    (void)opts;
+    cc__load_includes_of(ix, tape);
+}
+
+static void CcIndex_load_includes(CcIndex* ix, CcUnit* u, CcParseOpts opts) {
+    (void)opts;
+    cc__load_includes_of(ix, &u->tape);
+}
+
+/* ---- method resolution ------------------------------------------------------- */
+
+/* The function type of a symbol, when it is a function with one. */
+static bool cc__sym_func_type(const CcSym* s, CcFuncType* out) {
+    if (!s || s->kind != CC_SYM_FUNC || !s->type) return false;
+    @switch (s->type->k) {
+        case .func(fn): *out = fn; return true;
+        default: return false;
+    }
+}
+
+static bool cc__first_param_is_pointer(const CcSym* callee) {
+    CcFuncType fn;
+    CcParamList params;
+    CcParam* p0;
+    if (!cc__sym_func_type(callee, &fn)) return false;
+    params = fn.params;
+    if (params.len() == 0) return false;
+    p0 = params.get_ptr(0);
+    if (!p0->type) return false;
+    return p0->type->k.kind == CcTypeK_pointer;
+}
+
+static CcMethod* cc__method_new(CcIndex* ix, CcTypeInfo* info, CCSlice method, CCSlice callee, const char* source,
+                                CCSlice origin, CcSym* sym, bool by_value_hint) {
+    CcMethod* m = cc_arena_alloc(ix->arena, sizeof(CcMethod), _Alignof(CcMethod));
+    CcMethodList* methv = &info->methods;
+    memset(m, 0, sizeof(*m));
+    m->method = cc__ix_copy(ix, method);
+    m->callee = callee;
+    m->source = cc__ix_s(source);
+    m->origin = origin;
+    m->sym = sym;
+    m->recv_by_ptr = by_value_hint ? false : cc__first_param_is_pointer(sym);
+    methv->push(m);
+    return m;
+}
+
+static void cc__push_loc(CcIndex* ix, CCString* sb, CcLoc l) {
+    uint32_t line = l.line;
+    if (l.path.len) sb->push_slice(l.path, ix->arena); else sb->push_char('?', ix->arena);
+    sb->push_char(':', ix->arena);
+    cc_string_push_uint(sb, line, ix->arena);
+}
+
+static CCSlice cc__sym_origin(CcIndex* ix, const CcSym* s) {
+    CCString sb = cc_string_new();
+    CcLoc l = CcSym_loc(s);
+    if (!s) return cc__ix_s("");
+    if (s->kind == CC_SYM_MACRO) {
+        sb.push_cstr("macro ", ix->arena);
+        sb.push_slice(s->name, ix->arena);
+        sb.push_cstr(" (", ix->arena);
+        cc__push_loc(ix, &sb, l);
+        sb.push_char(')', ix->arena);
+        return cc__ix_finish(ix, &sb);
+    }
+    cc__push_loc(ix, &sb, l);
+    return cc__ix_finish(ix, &sb);
+}
+
+/* The fields of a struct type node, when it is a struct with a body. */
+static bool cc__record_fields(const CcType* t, CcRecordType* out) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .record(rc): *out = rc; return true;
+        default: return false;
+    }
+}
+
+static bool cc__named_name(const CcType* t, CCSlice* out) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .named(n): *out = n.name; return true;
+        default: return false;
+    }
+}
+
+/* The struct definition behind a type name: through typedefs and tags.
+ * `out` receives the record; false when there is none. */
+static bool cc__struct_of(CcIndex* ix, CCSlice name, int depth, CcRecordType* out) {
+    CcSym* s;
+    const CcType* t;
+    CcRecordType rc;
+    CCSlice nm;
+    if (depth > 8) return false;
+    s = cc__sym_find_kind(ix, name, CC_SYM_TYPE);
+    if (!s || !s->type) return false;
+    t = s->type;
+    if (cc__record_fields(t, &rc)) {
+        CcFieldList* fieldv = &rc.fields;
+        if (fieldv->len()) { *out = rc; return true; }
+        if (rc.tag.len) {
+            CcSym* tag = cc__sym_find_kind(ix, cc__cat3(ix, rc.is_union ? "union " : "struct ", rc.tag, ""), CC_SYM_TYPE);
+            CcRecordType trc;
+            if (tag && tag->type && cc__record_fields(tag->type, &trc)) {
+                CcFieldList* tfieldv = &trc.fields;
+                if (tfieldv->len()) { *out = trc; return true; }
+            }
+        }
+        return false;
+    }
+    if (cc__named_name(t, &nm) && nm.len) return cc__struct_of(ix, nm, depth + 1, out);
+    return false;
+}
+
+/* The `as:` faces of every `@typeview` whose subject matches `name`. */
+static void cc__view_faces_of(CcIndex* ix, CcUnit* u, CcDecl* d, CcTypeview tv, CCSlice name, CcNameList* faces) {
+    CCSlice subj = cc__hook_subject_text(ix, u, d->span);
+    bool matches;
+    CcHookEntryList* entryv = &tv.entries;
+    size_t k;
+    size_t n = entryv->len();
+    if (subj.len && subj.ptr[subj.len - 1] == '*' && subj.len > 1 && subj.ptr[subj.len - 2] == '_')
+        matches = name.len > subj.len - 1 && memcmp(name.ptr, subj.ptr, subj.len - 1) == 0;
+    else
+        matches = cc__eq(name, subj);
+    if (!matches) return;
+    for (k = 0; k < n; k++) {
+        CcHookEntry* e = entryv->get_ptr(k);
+        CcViewItemList* itemv = &e->items;
+        size_t j;
+        size_t ni = itemv->len();
+        if (!cc__eqc(e->key, "as")) continue;
+        for (j = 0; j < ni; j++) {
+            CcViewItem* vi = itemv->get_ptr(j);
+            if (vi->name.len) faces->push(vi->name);
+        }
+    }
+}
+
+/* `@typeview on Subject { as: field; }` faces of a type: the field names. */
+static CcNameList cc__view_faces(CcIndex* ix, CCSlice name) {
+    CcNameList faces = vec_new::[CCSlice](ix->arena);
+    CcUnitList* unitv = &ix->units;
+    size_t i;
+    size_t nu = unitv->len();
+    name = cc__strip_tag(name);
+    for (i = 0; i < nu; i++) {
+        CcUnit* u = *unitv->get_ptr(i);
+        CcDeclList* declv = &u->decls;
+        size_t k;
+        size_t nd = declv->len();
+        for (k = 0; k < nd; k++) {
+            CcDecl* d = *declv->get_ptr(k);
+            @switch (d->k) {
+                case .typeview(tv): cc__view_faces_of(ix, u, d, tv, name, &faces); break;
+                default: break;
+            }
+        }
+    }
+    return faces;
+}
+
+static CcMethod* cc__resolve(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, int depth);
+
+static bool cc__decl_is_typedef(const CcDecl* d) {
+    if (!d) return false;
+    return d->k.kind == CcDeclK_typedef_;
+}
+
+/* Follow typedef aliases from `a` looking for `b`. */
+static bool cc__alias_reaches(CcIndex* ix, CCSlice a, CCSlice b) {
+    int depth;
+    CCSlice x = a;
+    for (depth = 0; x.ptr && depth < 8; depth++) {
+        CcSym* s = cc__sym_find_kind(ix, x, CC_SYM_TYPE);
+        if (!s || !s->type || !s->decl || !cc__decl_is_typedef(s->decl)) break;
+        x = CcIndex_canon(ix, s->type);
+        if (cc__eq(x, b)) return true;
+    }
+    return false;
+}
+
+static bool cc__is_arith(CCSlice a) {
+    static const char* const arith[] = {"char", "signed char", "unsigned char", "short", "unsigned short", "int",
+                                        "unsigned int", "long", "unsigned long", "long long", "unsigned long long",
+                                        "float", "double", "long double", "bool", "size_t", "ssize_t", "ptrdiff_t",
+                                        "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t",
+                                        "uint64_t", "intptr_t", "uintptr_t", NULL};
+    int i;
+    for (i = 0; arith[i]; i++)
+        if (cc__eqc(a, arith[i])) return true;
+    return false;
+}
+
+/* Do two canonical spellings name one type: the same name, a typedef of
+ * the other (`Point` / `struct Point`), or two arithmetic types (a C call
+ * converts the receiver)? */
+static bool cc__same_type(CcIndex* ix, CCSlice a, CCSlice b) {
+    if (cc__eq(a, b)) return true;
+    if (cc__alias_reaches(ix, a, b)) return true;
+    if (cc__alias_reaches(ix, b, a)) return true;
+    /* both arithmetic: the call converts */
+    return cc__is_arith(a) && cc__is_arith(b);
+}
+
+static CcType* cc__peel_ptr_atomic(CcType* t) {
+    for (;;) {
+        CcType* inner = NULL;
+        if (!t) return NULL;
+        @switch (t->k) {
+            case .pointer(pt): inner = pt.pointee; break;
+            case .atomic(at): inner = at.pointee; break;
+            default: return t;
+        }
+        t = inner;
+    }
+}
+
+/* The receiver type an `as:` face or a typedef alias delegates to. */
+static CcMethod* cc__resolve_via(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, int depth,
+                                 CcType* target, CCSlice how) {
+    CCSlice tn;
+    CcTypeInfo* ti;
+    CcMethod* m;
+    CCString sb = cc_string_new();
+    if (!target) return NULL;
+    target = cc__peel_ptr_atomic(target);
+    tn = CcIndex_canon(ix, target);
+    if (cc__eq(tn, recv->name)) return NULL;
+    ti = CcIndex_type_get(ix, tn);
+    m = cc__resolve(ix, ti, method, tried, ta, depth + 1);
+    if (!m) return NULL;
+    sb.push_slice(how, ix->arena);
+    sb.push_char(' ', ix->arena);
+    sb.push_slice(tn, ix->arena);
+    sb.push_cstr("; ", ix->arena);
+    if (m->origin.ptr) sb.push_slice(m->origin, ix->arena);
+    return cc__method_new(ix, recv, method, m->callee, cc__ix_cstr(ix, m->source), cc__ix_finish(ix, &sb), m->sym, !m->recv_by_ptr);
+}
+
+static void cc__tried(CCString* tried, CCArena ta, CCSlice name, const char* note) {
+    tried->push_char(' ', ta);
+    tried->push_slice(name, ta);
+    if (note) tried->push_cstr(note, ta);
+}
+
+static void cc__tried2(CCString* tried, CCArena ta, CCSlice name, const char* a, CCSlice mid, const char* b) {
+    tried->push_char(' ', ta);
+    tried->push_slice(name, ta);
+    tried->push_cstr(a, ta);
+    tried->push_slice(mid, ta);
+    tried->push_cstr(b, ta);
+}
+
+static CCSlice cc__hook_origin(CcIndex* ix, const CcHookReg* hook, const CcSym* cs) {
+    CCString sb = cc_string_new();
+    sb.push_cstr("@" "typehooks on ", ix->arena);
+    sb.push_slice(hook->subject, ix->arena);
+    sb.push_cstr(" .ufcs = ", ix->arena);
+    sb.push_slice(hook->ufcs_fn, ix->arena);
+    if (cs) {
+        sb.push_cstr(" -> ", ix->arena);
+        sb.push_slice(cc__sym_origin(ix, cs), ix->arena);
+    }
+    return cc__ix_finish(ix, &sb);
+}
+
+/* 1. @typehooks .ufcs: literal rules, then a composed prefix. `stop` is set
+ * when the hook answered (a rule or prefix matched, declared or not). */
+static CcMethod* cc__resolve_hook(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, bool* stop) {
+    CcHookReg* hook = cc__hook_match(ix, recv->name, true);
+    CcUfcsRuleList* rulev;
+    size_t i;
+    CcSym* cs;
+    *stop = false;
+    if (!hook) return NULL;
+    rulev = &hook->rules;
+    i = rulev->len();
+    while (i--) {
+        CcUfcsRule* r = rulev->get_ptr(i);
+        if (!cc__eq(r->method, method)) continue;
+        *stop = true;
+        cs = cc__callee_sym(ix, r->callee);
+        if (cs) return cc__method_new(ix, recv, method, r->callee, "typehooks", cc__hook_origin(ix, hook, cs), cs, r->by_value);
+        cc__tried2(tried, ta, r->callee, " (hook ", hook->ufcs_fn, ": not declared)");
+        return NULL;
+    }
+    if (hook->ufcs_prefix.len) {
+        CCSlice composed = cc__join(ix, hook->ufcs_prefix, "", method);
+        *stop = true;
+        cs = cc__callee_sym(ix, composed);
+        if (cs) return cc__method_new(ix, recv, method, composed, "typehooks", cc__hook_origin(ix, hook, cs), cs, hook->ufcs_prefix_by_value);
+        cc__tried2(tried, ta, composed, " (hook ", hook->ufcs_fn, ": not declared)");
+        return NULL;
+    }
+    /* rejecting (empty slice) or opaque handlers fall through to the composed names */
+    return NULL;
+}
+
+/* 1b. `x.destroy()` on a type with a destroy hook: the hook's callee
+ * (the spec: `Type_destroy` when that function exists, else the chain) */
+static CcMethod* cc__resolve_destroy(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta) {
+    CcSym* cs;
+    if (!(cc__eqc(method, "destroy") && recv->destroy_fn.len && recv->destroy_fn.ptr[0] != '<')) return NULL;
+    if (cc__callee_sym(ix, cc__cat2(ix, recv->name, "_destroy"))) return NULL;
+    cs = cc__callee_sym(ix, recv->destroy_fn);
+    if (cs) return cc__method_new(ix, recv, method, recv->destroy_fn, "typehooks",
+                                  cc__cat3(ix, "@" "typehooks .destroy -> ", cc__sym_origin(ix, cs), ""), cs, false);
+    cc__tried(tried, ta, recv->destroy_fn, " (.destroy hook: not declared)");
+    return NULL;
+}
+
+/* 2. *_DECL_UFCS(Name) registration: Name_<method> */
+static CcMethod* cc__resolve_registered(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta) {
+    CCSlice composed;
+    CcSym* cs;
+    if (!recv->ufcs_registered_by.len) return NULL;
+    composed = cc__join(ix, recv->name, "_", method);
+    cs = cc__callee_sym(ix, composed);
+    if (cs) {
+        CCString sb = cc_string_new();
+        sb.push_slice(recv->ufcs_registered_by, ix->arena);
+        sb.push_char('(', ix->arena);
+        sb.push_slice(recv->name, ix->arena);
+        sb.push_cstr(") -> ", ix->arena);
+        sb.push_slice(cc__sym_origin(ix, cs), ix->arena);
+        return cc__method_new(ix, recv, method, composed, "DECL_UFCS", cc__ix_finish(ix, &sb), cs, false);
+    }
+    cc__tried2(tried, ta, composed, " (", recv->ufcs_registered_by, ")");
+    return NULL;
+}
+
+/* 3. Type_method (a Result spec's methods are this, from the spec macro);
+ * a tagged receiver composes with its tag (`struct Point` -> Point_sum) */
+static CcMethod* cc__resolve_type_method(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, CCSlice base_name) {
+    CCSlice composed = cc__join(ix, base_name, "_", method);
+    CcSym* cs = cc__callee_sym(ix, composed);
+    if (cs) {
+        const char* source = recv->is_result ? "Result" : recv->family.len ? "Type_method (factory instance)" : "Type_method";
+        return cc__method_new(ix, recv, method, composed, source, cc__sym_origin(ix, cs), cs, false);
+    }
+    if (!recv->ufcs_registered_by.len) cc__tried(tried, ta, composed, NULL);
+    return NULL;
+}
+
+/* 4. cc_<snake>_method / <snake>_method (a bare type also tries the cc_ prefix) */
+static CcMethod* cc__resolve_snake(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, CCSlice base_name) {
+    CCSlice snake = CcIndex_snake(ix, base_name);
+    CCSlice composed = cc__join(ix, snake, "_", method);
+    CcSym* cs;
+    if (!cc__eq(composed, cc__join(ix, base_name, "_", method))) {
+        cs = cc__callee_sym(ix, composed);
+        if (cs) return cc__method_new(ix, recv, method, composed, cc__has_prefix(snake, "cc_") ? "cc_snake_method" : "snake_method",
+                                      cc__sym_origin(ix, cs), cs, false);
+        cc__tried(tried, ta, composed, NULL);
+    }
+    if (!cc__has_prefix(snake, "cc_")) {
+        composed = cc__join(ix, cc__cat3(ix, "cc_", snake, ""), "_", method);
+        cs = cc__callee_sym(ix, composed);
+        if (cs) return cc__method_new(ix, recv, method, composed, "cc_snake_method", cc__sym_origin(ix, cs), cs, false);
+        cc__tried(tried, ta, composed, NULL);
+    }
+    return NULL;
+}
+
+/* 5. the bare-name tier: a declared `method(T, ...)` is callable as `x.method(...)` */
+static CcMethod* cc__resolve_bare(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta) {
+    CcSym* cs = cc__sym_find_kind(ix, method, CC_SYM_FUNC);
+    CcFuncType fn;
+    CcParamList params;
+    CcType* p0;
+    CcType* base;
+    if (!cs || !cc__sym_func_type(cs, &fn)) return NULL;
+    params = fn.params;
+    if (params.len() == 0 || !params.get_ptr(0)->type) return NULL;
+    p0 = params.get_ptr(0)->type;
+    base = p0->k.kind == CcTypeK_pointer ? cc__peel_ptr_atomic(p0) : p0;
+    if (p0->k.kind == CcTypeK_pointer) {
+        @switch (p0->k) {
+            case .pointer(pt): base = pt.pointee; break;
+            default: break;
+        }
+    }
+    if (base && (cc__same_type(ix, CcIndex_canon(ix, base), recv->name) ||
+                 (p0->k.kind == CcTypeK_pointer && cc__eqc(CcIndex_canon(ix, base), "void"))))
+        return cc__method_new(ix, recv, method, method, "bare_name", cc__sym_origin(ix, cs), cs, false);
+    cc__tried2(tried, ta, method, " (first parameter is ", CcIndex_canon(ix, p0), ")");
+    return NULL;
+}
+
+/* 6. a typedef alias uses the aliased type's methods */
+static CcMethod* cc__resolve_alias(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, int depth) {
+    CcType* t;
+    int kind;
+    if (!(recv->sym && recv->sym->kind == CC_SYM_TYPE && recv->sym->decl && recv->sym->type)) return NULL;
+    kind = (int)recv->sym->decl->k.kind;
+    if (kind != (int)CcDeclK_typedef_ && kind != (int)CcDeclK_typeview) return NULL;
+    t = recv->sym->type;
+    if (t->k.kind == CcTypeK_named || t->k.kind == CcTypeK_pointer || t->k.kind == CcTypeK_generic ||
+        t->k.kind == CcTypeK_slice || t->k.kind == CcTypeK_result || t->k.kind == CcTypeK_chan)
+        return cc__resolve_via(ix, recv, method, tried, ta, depth, t, cc__ix_s("via typedef"));
+    return NULL;
+}
+
+/* 7. `@typeview as:` faces: retry through an embedded field */
+static CcMethod* cc__resolve_faces(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, int depth) {
+    CcNameList faces = cc__view_faces(ix, recv->name);
+    size_t n = faces.len();
+    size_t i;
+    CcRecordType st;
+    CcFieldList* fieldv;
+    size_t nf;
+    if (!n || !cc__struct_of(ix, recv->name, 0, &st)) return NULL;
+    fieldv = &st.fields;
+    nf = fieldv->len();
+    for (i = 0; i < n; i++) {
+        size_t k;
+        for (k = 0; k < nf; k++) {
+            CcField* f = fieldv->get_ptr(k);
+            CcMethod* m;
+            if (!f->name.len || !cc__eq(f->name, *faces.get_ptr(i))) continue;
+            m = cc__resolve_via(ix, recv, method, tried, ta, depth, f->type, cc__cat3(ix, "via @" "typeview as: ", f->name, " ->"));
+            if (m) return m;
+        }
+    }
+    return NULL;
+}
+
+/* 8. `.ufcs_sink`: the last resort of a dynamic family */
+static CcMethod* cc__resolve_sink(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta) {
+    CcHookRegList* hookv = &ix->hooks;
+    size_t i;
+    size_t n = hookv->len();
+    CcHookReg* best = NULL;
+    CcSym* cs;
+    for (i = 0; i < n; i++) {
+        CcHookReg* h = *hookv->get_ptr(i);
+        if (!h->sink_fn.len) continue;
+        if (h->any || (h->family && cc__has_prefix_s(recv->name, h->base) && recv->name.len > h->base.len) ||
+            (!h->family && cc__eq(recv->name, h->base)))
+            best = h;
+    }
+    if (!best) return NULL;
+    cs = cc__callee_sym(ix, best->sink_fn);
+    if (cs) {
+        CCString sb = cc_string_new();
+        sb.push_cstr("@" "typehooks on ", ix->arena);
+        sb.push_slice(best->subject, ix->arena);
+        sb.push_cstr(" .ufcs_sink = ", ix->arena);
+        sb.push_slice(best->sink_fn, ix->arena);
+        sb.push_cstr(" -> ", ix->arena);
+        sb.push_slice(cc__sym_origin(ix, cs), ix->arena);
+        return cc__method_new(ix, recv, method, best->sink_fn, "ufcs_sink", cc__ix_finish(ix, &sb), cs, false);
+    }
+    cc__tried(tried, ta, best->sink_fn, " (.ufcs_sink: not declared)");
+    return NULL;
+}
+
+static CcMethod* cc__resolve(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, int depth) {
+    CcMethod* m;
+    bool stop;
+    CCSlice base_name;
+    CcMethodList* methv = &recv->methods;
+    size_t i;
+    size_t n = methv->len();
+    if (depth > 6) return NULL;
+    for (i = 0; i < n; i++) {
+        m = *methv->get_ptr(i);
+        if (cc__eq(m->method, method)) return m;
+    }
+    m = cc__resolve_hook(ix, recv, method, tried, ta, &stop);
+    if (m || stop) return m;
+    m = cc__resolve_destroy(ix, recv, method, tried, ta);
+    if (m) return m;
+    m = cc__resolve_registered(ix, recv, method, tried, ta);
+    if (m) return m;
+    base_name = cc__strip_tag(recv->name);
+    m = cc__resolve_type_method(ix, recv, method, tried, ta, base_name);
+    if (m) return m;
+    m = cc__resolve_snake(ix, recv, method, tried, ta, base_name);
+    if (m) return m;
+    m = cc__resolve_bare(ix, recv, method, tried, ta);
+    if (m) return m;
+    m = cc__resolve_alias(ix, recv, method, tried, ta, depth);
+    if (m) return m;
+    m = cc__resolve_faces(ix, recv, method, tried, ta, depth);
+    if (m) return m;
+    return cc__resolve_sink(ix, recv, method, tried, ta);
+}
+
+static CcMethod* cc__method_plain(CcIndex* ix, CCSlice method, CCSlice callee, const char* source, CCSlice origin, CcSym* sym, bool by_value) {
+    CcMethod* m = cc_arena_alloc(ix->arena, sizeof(CcMethod), _Alignof(CcMethod));
+    memset(m, 0, sizeof(*m));
+    m->method = method;
+    m->callee = callee;
+    m->source = cc__ix_s(source);
+    m->origin = origin;
+    m->sym = sym;
+    m->recv_by_ptr = by_value ? false : cc__first_param_is_pointer(sym);
+    return m;
+}
+
+static CcMethodList CcIndex_methods_of(CcIndex* ix, CcTypeInfo* info) {
+    CcMethodList list = vec_new::[CcMethodRef](ix->arena);
+    CcHookReg* hook = cc__hook_match(ix, info->name, true);
+    CCSlice prefix_type = cc__cat2(ix, info->name, "_");
+    CCSlice prefix_snake = cc__cat2(ix, CcIndex_snake(ix, info->name), "_");
+    CcSymList* symv = &ix->syms;
+    size_t i;
+    size_t n;
+    if (hook) {
+        CcUfcsRuleList* rulev = &hook->rules;
+        size_t nr = rulev->len();
+        i = nr;
+        while (i--) {
+            CcUfcsRule* r = rulev->get_ptr(i);
+            list.push(cc__method_plain(ix, r->method, r->callee, "typehooks", cc__hook_origin(ix, hook, NULL),
+                                       cc__callee_sym(ix, r->callee), r->by_value));
+        }
+    }
+    n = symv->len();
+    for (i = 0; i < n; i++) {
+        CcSym* s = *symv->get_ptr(i);
+        CCSlice rest;
+        const char* source = NULL;
+        bool have = false;
+        if (s->kind != CC_SYM_FUNC && s->kind != CC_SYM_MACRO) continue;
+        if (s->kind == CC_SYM_MACRO && !(s->macro && s->macro->function_like)) continue;
+        if (hook && hook->ufcs_prefix.len && cc__has_prefix_s(s->name, hook->ufcs_prefix)) {
+            rest = cc__skip(s->name, hook->ufcs_prefix.len);
+            source = "typehooks";
+            have = true;
+        } else if (cc__has_prefix_s(s->name, prefix_type)) {
+            rest = cc__skip(s->name, prefix_type.len);
+            source = info->is_result ? "Result" : info->ufcs_registered_by.len ? "DECL_UFCS" : "Type_method";
+            have = true;
+        } else if (!cc__eq(prefix_snake, prefix_type) && cc__has_prefix_s(s->name, prefix_snake)) {
+            rest = cc__skip(s->name, prefix_snake.len);
+            source = cc__has_prefix(prefix_snake, "cc_") ? "cc_snake_method" : "snake_method";
+            have = true;
+        }
+        if (!have || !rest.len) continue;
+        list.push(cc__method_plain(ix, cc__ix_copy(ix, rest), s->name, source, cc__sym_origin(ix, s), s, false));
+    }
+    return list;
+}
+
+static CcMethod* !>(CcDiag) CcIndex_method(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCArena a) {
+    CCString tried = cc_string_new();
+    CcMethod* m = cc__resolve(ix, recv, method, &tried, a, 0);
+    if (m) return cc_ok(m);
+    {
+        CCString sb = cc_string_new();
+        CcMethodList have = CcIndex_methods_of(ix, recv);
+        size_t n = have.len();
+        size_t i;
+        size_t shown = 0;
+        CcLoc at;
+        CcDiag d;
+        sb.push_cstr("no method '", a);
+        sb.push_slice(method, a);
+        sb.push_cstr("' for receiver type '", a);
+        sb.push_slice(recv->name, a);
+        sb.push_cstr("'; tried:", a);
+        if (tried.len()) sb.push_slice(cc_string_as_slice(&tried), a);
+        else sb.push_cstr(" nothing", a);
+        if (n) {
+            sb.push_cstr("; the type has:", a);
+            for (i = 0; i < n && shown < 24; i++) {
+                size_t k;
+                bool dup = false;
+                CcMethod* hm = *have.get_ptr(i);
+                for (k = 0; k < i; k++) {
+                    CcMethod* hk = *have.get_ptr(k);
+                    if (cc__eq(hk->method, hm->method)) dup = true;
+                }
+                if (dup) continue;
+                sb.push_char(' ', a);
+                sb.push_slice(hm->method, a);
+                shown++;
+            }
+            if (shown < n) sb.push_cstr(" ...", a);
+        }
+        at.path = cc_slice_empty();
+        at.line = 0;
+        at.col = 0;
+        d = CcDiag_error(at, cc_string_persist_slice(a, &sb));
+        d.len = 0;
+        d.phys_line = 0;
+        return cc_err(d);
+    }
+}
+
+/* ---- arena parameter ------------------------------------------------------ */
+
+static int CcIndex_arena_param(CcIndex* ix, CcSym* f) {
+    CcFuncType fn;
+    CcParamList params;
+    size_t i;
+    size_t n;
+    (void)ix;
+    if (!cc__sym_func_type(f, &fn)) return -1;
+    params = fn.params;
+    n = params.len();
+    for (i = 0; i < n; i++) {
+        CcParam* p = params.get_ptr(i);
+        CcAttrList* attrv = &p->attrs;
+        size_t k;
+        size_t na = attrv->len();
+        for (k = 0; k < na; k++)
+            if (cc__eqc(attrv->get_ptr(k)->name, "arena")) return (int)i;
+    }
+    if (n) {
+        CcParam* last = params.get_ptr(n - 1);
+        if (last->type && CcType_is_named(last->type, "CCArena")) return (int)(n - 1);
+    }
+    return -1;
+}
+
+#endif
