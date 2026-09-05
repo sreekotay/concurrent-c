@@ -1,0 +1,27 @@
+/* Gate: the AST support layer builds and the closed switches name every arm. */
+#include "ast_impl.cch"
+#include <stdio.h>
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    CcSpan s = { 1, 3 };
+    CcExpr* x = cc_expr_ident(CC_SLICE_LIT("x"), s, a);
+    CcExpr* one = cc_expr_ident(CC_SLICE_LIT("one"), s, a);
+    CcExpr* sum = cc_expr_binary(CC_OP_ADD, x, one, s, a);
+    CcExpr* call = cc_expr_call(cc_expr_ident(CC_SLICE_LIT("f"), s, a), s, a);
+    CcType* t = cc_type_result(cc_type_named(CC_SLICE_LIT("int"), s, a),
+                               cc_type_named(CC_SLICE_LIT("CCError"), s, a), false, s, a);
+    CcStmt* ret = cc_stmt_return(sum, s, a);
+    CcDecl* d = cc_decl_var(cc_type_pointer(t, s, a), CC_SLICE_LIT("p"), NULL, s, a);
+    CCSlice n1 = sum->kind_name();
+    CCSlice n2 = call->kind_name();
+    CCSlice n3 = ret->kind_name();
+    CCSlice n4 = d->kind_name();
+    CCSlice n5 = t->kind_name();
+    CCSlice op = CcOp_spelling(CC_OP_SHL_ASSIGN);
+    printf("%.*s %.*s %.*s %.*s %.*s %.*s %d %d %d\n",
+           (int)n1.len, n1.ptr, (int)n2.len, n2.ptr, (int)n3.len, n3.ptr,
+           (int)n4.len, n4.ptr, (int)n5.len, n5.ptr, (int)op.len, op.ptr,
+           (int)t->is_result(), (int)t->is_pointer(), (int)CcType_is_void(t));
+    return 0;
+}

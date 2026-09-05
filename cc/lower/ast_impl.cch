@@ -1,0 +1,411 @@
+/* AST support: constructors, kind names, predicates, span and location
+ * helpers. Every constructor allocates in the arena it is given and copies
+ * the span it is handed; nothing here reads the tape except CcUnit_text
+ * and CcUnit_loc. */
+#ifndef CC_LOWER_AST_IMPL_CCH
+#define CC_LOWER_AST_IMPL_CCH
+#include "ast.cch"
+#include <string.h>
+
+CcSpan CcSpan_join(CcSpan a, CcSpan b) {
+    CcSpan r;
+    r.first = a.first < b.first ? a.first : b.first;
+    r.last = a.last > b.last ? a.last : b.last;
+    return r;
+}
+
+bool CcSpan_is_empty(CcSpan s) {
+    return s.last < s.first;
+}
+
+/* ---- Constructors ----------------------------------------------------- */
+
+static CcType* cc__type_blank(CcSpan span, CCArena a) {
+    CcType* t = cc_arena_alloc(a, sizeof(CcType), _Alignof(CcType));
+    memset(t, 0, sizeof(*t));
+    t->span = span;
+    t->attrs = vec_new::[CcAttr](a);
+    return t;
+}
+
+CcType* cc_type_named(CCSlice name, CcSpan span, CCArena a) {
+    CcType* t = cc__type_blank(span, a);
+    CcNamedType n;
+    n.name = name;
+    n.struct_kw = false;
+    n.union_kw = false;
+    n.enum_kw = false;
+    t->k = { .named = n };
+    return t;
+}
+
+CcType* cc_type_pointer(CcType* pointee, CcSpan span, CCArena a) {
+    CcType* t = cc__type_blank(span, a);
+    CcPointerType p;
+    p.pointee = pointee;
+    t->k = { .pointer = p };
+    return t;
+}
+
+CcType* cc_type_result(CcType* value, CcType* err, bool optional, CcSpan span, CCArena a) {
+    CcType* t = cc__type_blank(span, a);
+    CcResultType r;
+    r.value = value;
+    r.err = err;
+    r.optional = optional;
+    t->k = { .result = r };
+    return t;
+}
+
+static CcExpr* cc__expr_blank(CcSpan span, CCArena a) {
+    CcExpr* e = cc_arena_alloc(a, sizeof(CcExpr), _Alignof(CcExpr));
+    memset(e, 0, sizeof(*e));
+    e->span = span;
+    return e;
+}
+
+CcExpr* cc_expr_ident(CCSlice name, CcSpan span, CCArena a) {
+    CcExpr* e = cc__expr_blank(span, a);
+    e->k = { .ident = name };
+    return e;
+}
+
+CcExpr* cc_expr_call(CcExpr* callee, CcSpan span, CCArena a) {
+    CcExpr* e = cc__expr_blank(span, a);
+    CcCall c;
+    c.callee = callee;
+    c.args = vec_new::[CcExprRef](a);
+    e->k = { .call = c };
+    return e;
+}
+
+CcExpr* cc_expr_member(CcExpr* a, CCSlice name, bool arrow, CcSpan span, CCArena arena) {
+    CcExpr* e = cc__expr_blank(span, arena);
+    CcMember m;
+    m.a = a;
+    m.name = name;
+    m.arrow = arrow;
+    e->k = { .member = m };
+    return e;
+}
+
+CcExpr* cc_expr_unary(CcOp op, CcExpr* a, CcSpan span, CCArena arena) {
+    CcExpr* e = cc__expr_blank(span, arena);
+    CcUnary u;
+    u.op = op;
+    u.a = a;
+    e->k = { .unary = u };
+    return e;
+}
+
+CcExpr* cc_expr_binary(CcOp op, CcExpr* a, CcExpr* b, CcSpan span, CCArena arena) {
+    CcExpr* e = cc__expr_blank(span, arena);
+    CcBinary bin;
+    bin.op = op;
+    bin.a = a;
+    bin.b = b;
+    e->k = { .binary = bin };
+    return e;
+}
+
+static CcStmt* cc__stmt_blank(CcSpan span, CCArena a) {
+    CcStmt* s = cc_arena_alloc(a, sizeof(CcStmt), _Alignof(CcStmt));
+    memset(s, 0, sizeof(*s));
+    s->span = span;
+    return s;
+}
+
+CcStmt* cc_stmt_expr(CcExpr* e, CcSpan span, CCArena a) {
+    CcStmt* s = cc__stmt_blank(span, a);
+    CcExprStmt x;
+    x.e = e;
+    s->k = { .expr = x };
+    return s;
+}
+
+CcStmt* cc_stmt_block(CcSpan span, CCArena a) {
+    CcStmt* s = cc__stmt_blank(span, a);
+    CcBlock b;
+    b.stmts = vec_new::[CcStmtRef](a);
+    s->k = { .block = b };
+    return s;
+}
+
+CcStmt* cc_stmt_if(CcExpr* cond, CcStmt* then, CcStmt* els, CcSpan span, CCArena a) {
+    CcStmt* s = cc__stmt_blank(span, a);
+    CcIf i;
+    i.cond = cond;
+    i.then = then;
+    i.els = els;
+    s->k = { .if_ = i };
+    return s;
+}
+
+CcStmt* cc_stmt_return(CcExpr* value, CcSpan span, CCArena a) {
+    CcStmt* s = cc__stmt_blank(span, a);
+    CcReturn r;
+    r.value = value;
+    s->k = { .return_ = r };
+    return s;
+}
+
+CcStmt* cc_stmt_goto(CCSlice label, CcSpan span, CCArena a) {
+    CcStmt* s = cc__stmt_blank(span, a);
+    CcGoto g;
+    g.label = label;
+    s->k = { .goto_ = g };
+    return s;
+}
+
+CcStmt* cc_stmt_label(CCSlice name, CcStmt* inner, CcSpan span, CCArena a) {
+    CcStmt* s = cc__stmt_blank(span, a);
+    CcLabel l;
+    l.name = name;
+    l.inner = inner;
+    s->k = { .label = l };
+    return s;
+}
+
+CcDecl* cc_decl_var(CcType* type, CCSlice name, CcInit* init, CcSpan span, CCArena a) {
+    CcDecl* d = cc_arena_alloc(a, sizeof(CcDecl), _Alignof(CcDecl));
+    CcVarDecl v;
+    memset(d, 0, sizeof(*d));
+    d->span = span;
+    d->attrs = vec_new::[CcAttr](a);
+    v.type = type;
+    v.name = name;
+    v.init = init;
+    v.destroy = false;
+    v.destroy_body = NULL;
+    v.detach = false;
+    d->k = { .var = v };
+    return d;
+}
+
+/* ---- Names ------------------------------------------------------------ */
+
+CCSlice CcOp_spelling(CcOp op) {
+    switch (op) {
+    case CC_OP_ADD: return CC_SLICE_LIT("+");
+    case CC_OP_SUB: return CC_SLICE_LIT("-");
+    case CC_OP_MUL: return CC_SLICE_LIT("*");
+    case CC_OP_DIV: return CC_SLICE_LIT("/");
+    case CC_OP_MOD: return CC_SLICE_LIT("%");
+    case CC_OP_SHL: return CC_SLICE_LIT("<<");
+    case CC_OP_SHR: return CC_SLICE_LIT(">>");
+    case CC_OP_LT: return CC_SLICE_LIT("<");
+    case CC_OP_GT: return CC_SLICE_LIT(">");
+    case CC_OP_LE: return CC_SLICE_LIT("<=");
+    case CC_OP_GE: return CC_SLICE_LIT(">=");
+    case CC_OP_EQ: return CC_SLICE_LIT("==");
+    case CC_OP_NE: return CC_SLICE_LIT("!=");
+    case CC_OP_AND: return CC_SLICE_LIT("&");
+    case CC_OP_XOR: return CC_SLICE_LIT("^");
+    case CC_OP_OR: return CC_SLICE_LIT("|");
+    case CC_OP_LAND: return CC_SLICE_LIT("&&");
+    case CC_OP_LOR: return CC_SLICE_LIT("||");
+    case CC_OP_NEG: return CC_SLICE_LIT("-");
+    case CC_OP_POS: return CC_SLICE_LIT("+");
+    case CC_OP_NOT: return CC_SLICE_LIT("!");
+    case CC_OP_BITNOT: return CC_SLICE_LIT("~");
+    case CC_OP_DEREF: return CC_SLICE_LIT("*");
+    case CC_OP_ADDR: return CC_SLICE_LIT("&");
+    case CC_OP_PREINC: return CC_SLICE_LIT("++");
+    case CC_OP_PREDEC: return CC_SLICE_LIT("--");
+    case CC_OP_POSTINC: return CC_SLICE_LIT("++");
+    case CC_OP_POSTDEC: return CC_SLICE_LIT("--");
+    case CC_OP_SIZEOF: return CC_SLICE_LIT("sizeof");
+    case CC_OP_ALIGNOF: return CC_SLICE_LIT("_Alignof");
+    case CC_OP_ASSIGN: return CC_SLICE_LIT("=");
+    case CC_OP_ADD_ASSIGN: return CC_SLICE_LIT("+=");
+    case CC_OP_SUB_ASSIGN: return CC_SLICE_LIT("-=");
+    case CC_OP_MUL_ASSIGN: return CC_SLICE_LIT("*=");
+    case CC_OP_DIV_ASSIGN: return CC_SLICE_LIT("/=");
+    case CC_OP_MOD_ASSIGN: return CC_SLICE_LIT("%=");
+    case CC_OP_SHL_ASSIGN: return CC_SLICE_LIT("<<=");
+    case CC_OP_SHR_ASSIGN: return CC_SLICE_LIT(">>=");
+    case CC_OP_AND_ASSIGN: return CC_SLICE_LIT("&=");
+    case CC_OP_XOR_ASSIGN: return CC_SLICE_LIT("^=");
+    case CC_OP_OR_ASSIGN: return CC_SLICE_LIT("|=");
+    case CC_OP_NONE: return CC_SLICE_LIT("");
+    }
+    return CC_SLICE_LIT("?op");
+}
+
+/* Kind names in the user's vocabulary. Each is one closed switch: a new
+ * arm is a compile error here until it has a name. The "@" is a separate
+ * literal: see stress/break/break_at_word_in_switch_literal_smoke. */
+CCSlice CcExpr_kind_name(const CcExpr* e) {
+    @switch (e->k) {
+        case .ident: return CC_SLICE_LIT("ident");
+        case .number: return CC_SLICE_LIT("number");
+        case .chr: return CC_SLICE_LIT("char");
+        case .string: return CC_SLICE_LIT("string");
+        case .paren: return CC_SLICE_LIT("paren");
+        case .unary: return CC_SLICE_LIT("unary");
+        case .binary: return CC_SLICE_LIT("binary");
+        case .assign: return CC_SLICE_LIT("assign");
+        case .ternary: return CC_SLICE_LIT("ternary");
+        case .call: return CC_SLICE_LIT("call");
+        case .index: return CC_SLICE_LIT("index");
+        case .member: return CC_SLICE_LIT("member");
+        case .cast: return CC_SLICE_LIT("cast");
+        case .sizeof_type: return CC_SLICE_LIT("sizeof type");
+        case .compound: return CC_SLICE_LIT("compound literal");
+        case .generic_sel: return CC_SLICE_LIT("_Generic");
+        case .stmt_expr: return CC_SLICE_LIT("statement expression");
+        case .comma: return CC_SLICE_LIT("comma");
+        case .ufcs: return CC_SLICE_LIT("UFCS call");
+        case .type_scoped: return CC_SLICE_LIT("Type.fn call");
+        case .generic_fn: return CC_SLICE_LIT("generic call");
+        case .unwrap: return CC_SLICE_LIT("!>");
+        case .unwrap_body: return CC_SLICE_LIT("!> body");
+        case .unwrap_or: return CC_SLICE_LIT("?>");
+        case .unwrap_destroy: return CC_SLICE_LIT("!> @destroy");
+        case .template: return CC_SLICE_LIT("@" "string");
+        case .slice_lit: return CC_SLICE_LIT("@" "slice");
+        case .scratch: return CC_SLICE_LIT("@" "scratch");
+        case .closure: return CC_SLICE_LIT("closure");
+        case .await: return CC_SLICE_LIT("@" "await");
+        case .comptime: return CC_SLICE_LIT("@" "comptime()");
+        case .create: return CC_SLICE_LIT("@" "create");
+        case .emit: return CC_SLICE_LIT("@" "emit");
+        case .variant_lit: return CC_SLICE_LIT("variant literal");
+        case .call_mode: return CC_SLICE_LIT("call mode");
+        case .range: return CC_SLICE_LIT("range");
+        case .pp: return CC_SLICE_LIT("preprocessor line");
+        case .type_arg: return CC_SLICE_LIT("type argument");
+    }
+    return CC_SLICE_LIT("?expr");
+}
+
+CCSlice CcStmt_kind_name(const CcStmt* s) {
+    @switch (s->k) {
+        case .expr: return CC_SLICE_LIT("expression");
+        case .decl: return CC_SLICE_LIT("declaration");
+        case .block: return CC_SLICE_LIT("block");
+        case .if_: return CC_SLICE_LIT("if");
+        case .while_: return CC_SLICE_LIT("while");
+        case .do_: return CC_SLICE_LIT("do");
+        case .for_: return CC_SLICE_LIT("for");
+        case .switch_: return CC_SLICE_LIT("switch");
+        case .case_: return CC_SLICE_LIT("case");
+        case .return_: return CC_SLICE_LIT("return");
+        case .break_: return CC_SLICE_LIT("break");
+        case .continue_: return CC_SLICE_LIT("continue");
+        case .goto_: return CC_SLICE_LIT("goto");
+        case .label: return CC_SLICE_LIT("label");
+        case .asm_: return CC_SLICE_LIT("asm");
+        case .defer: return CC_SLICE_LIT("@" "defer");
+        case .cancel_defer: return CC_SLICE_LIT("@" "cancel_defer");
+        case .errhandler: return CC_SLICE_LIT("@" "errhandler");
+        case .err_fwd: return CC_SLICE_LIT("@" "err");
+        case .unwrap: return CC_SLICE_LIT("!> statement");
+        case .for_in: return CC_SLICE_LIT("for in");
+        case .parallel: return CC_SLICE_LIT("@" "parallel");
+        case .parallel_for: return CC_SLICE_LIT("@parallel for");
+        case .parallel_dest: return CC_SLICE_LIT("@" "parallel(dest)");
+        case .serial: return CC_SLICE_LIT("@" "serial");
+        case .stage: return CC_SLICE_LIT("@" "stage");
+        case .with_deadline: return CC_SLICE_LIT("@" "with_deadline");
+        case .with: return CC_SLICE_LIT("@" "with");
+        case .closing: return CC_SLICE_LIT("@" "closing");
+        case .spawn_block: return CC_SLICE_LIT("@" "spawn");
+        case .mode_block: return CC_SLICE_LIT("mode block");
+        case .unsafe: return CC_SLICE_LIT("unsafe");
+        case .comptime_if: return CC_SLICE_LIT("@comptime if");
+        case .comptime_block: return CC_SLICE_LIT("@comptime block");
+        case .comptime_for: return CC_SLICE_LIT("@comptime for");
+    }
+    return CC_SLICE_LIT("?stmt");
+}
+
+CCSlice CcDecl_kind_name(const CcDecl* d) {
+    @switch (d->k) {
+        case .var: return CC_SLICE_LIT("variable");
+        case .func: return CC_SLICE_LIT("function");
+        case .typedef_: return CC_SLICE_LIT("typedef");
+        case .tagged: return CC_SLICE_LIT("tag declaration");
+        case .static_assert_: return CC_SLICE_LIT("_Static_assert");
+        case .pp: return CC_SLICE_LIT("preprocessor line");
+        case .empty: return CC_SLICE_LIT("empty declaration");
+        case .typehooks: return CC_SLICE_LIT("@" "typehooks");
+        case .typeview: return CC_SLICE_LIT("@" "typeview");
+        case .variant: return CC_SLICE_LIT("@" "variant");
+        case .grammar: return CC_SLICE_LIT("@" "grammar");
+        case .factory: return CC_SLICE_LIT("CC_GENERIC_FACTORY");
+        case .comptime_fn: return CC_SLICE_LIT("@comptime function");
+        case .comptime_block: return CC_SLICE_LIT("@comptime block");
+        case .comptime_if: return CC_SLICE_LIT("@comptime if");
+        case .scoped_type: return CC_SLICE_LIT("@scoped type");
+        case .pragma_cc: return CC_SLICE_LIT("#pragma(@)");
+        case .link: return CC_SLICE_LIT("@" "link");
+        case .task_doc: return CC_SLICE_LIT("@task doc");
+        case .macro_call: return CC_SLICE_LIT("macro call");
+        case .stmt: return CC_SLICE_LIT("statement");
+    }
+    return CC_SLICE_LIT("?decl");
+}
+
+CCSlice CcType_kind_name(const CcType* t) {
+    @switch (t->k) {
+        case .named: return CC_SLICE_LIT("type");
+        case .pointer: return CC_SLICE_LIT("pointer");
+        case .array: return CC_SLICE_LIT("array");
+        case .func: return CC_SLICE_LIT("function type");
+        case .record: return CC_SLICE_LIT("struct");
+        case .enumt: return CC_SLICE_LIT("enum");
+        case .typeof_: return CC_SLICE_LIT("typeof");
+        case .atomic: return CC_SLICE_LIT("_Atomic");
+        case .result: return CC_SLICE_LIT("result type");
+        case .slice: return CC_SLICE_LIT("slice type");
+        case .chan: return CC_SLICE_LIT("channel type");
+        case .generic: return CC_SLICE_LIT("generic type");
+        case .scoped: return CC_SLICE_LIT("@scoped type");
+        case .auto_: return CC_SLICE_LIT("@" "auto");
+    }
+    return CC_SLICE_LIT("?type");
+}
+
+/* ---- Predicates ------------------------------------------------------- */
+
+bool CcType_is_named(const CcType* t, const char* name) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .named(n): return cc_slice_eq_cstr(&n.name, name);
+        default: return false;
+    }
+}
+
+bool CcType_is_pointer(const CcType* t) {
+    if (!t) return false;
+    return t->k.kind == CcTypeK_pointer;
+}
+
+bool CcType_is_result(const CcType* t) {
+    if (!t) return false;
+    return t->k.kind == CcTypeK_result;
+}
+
+bool CcType_is_void(const CcType* t) {
+    return CcType_is_named(t, "void");
+}
+
+/* ---- Unit ------------------------------------------------------------- */
+
+CcLoc CcUnit_loc(const CcUnit* u, CcSpan span) {
+    const CcTape* t = &u->tape;
+    return t->loc(span.first);
+}
+
+CCSlice CcUnit_text(const CcUnit* u, CcSpan span) {
+    const CcTape* t = &u->tape;
+    const CcToken* first = t->at(span.first);
+    const CcToken* last = t->at(span.last);
+    const char* lo = first->text.ptr;
+    const char* hi = last->text.ptr + last->text.len;
+    if (CcSpan_is_empty(span) || hi < lo) return CC_SLICE_LIT("");
+    return cc_slice_from_buffer((char*)lo, (size_t)(hi - lo));
+}
+
+#endif
