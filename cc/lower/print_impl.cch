@@ -1663,9 +1663,13 @@ static void pr_d_pp(Pr* p, const CcDecl* d, const CcPpDecl* pd, int indent) {
     }
     if (!CcSpan_is_empty(pd->skipped) || d->span.last > pd->tok || d->span.first < pd->tok)
         pr_span_c(p, d->span, "preprocessor line");
-    else if (pd->tok < p->n && p->t[pd->tok].kind == CC_TK_PP)
+    else if (pd->tok < p->n && p->t[pd->tok].kind == CC_TK_PP) {
+        /* `#!ccc ...` is the unit header, not a directive: nothing in C.
+         * The pin still advances so the next line is attributed. */
+        CCSlice text = p->t[pd->tok].text;
+        if (text.len >= 2 && text.ptr[0] == '#' && text.ptr[1] == '!') return;
         pr_tok_text(p, pd->tok);
-    else
+    } else
         pr_span_c(p, d->span, "preprocessor line");
 }
 
@@ -1701,6 +1705,7 @@ static void pr_decl(Pr* p, const CcDecl* d) {
         case .stmt(ts): pr_d_stmt(p, d, ts.s); break;
         case .macro_call(mc): pr_d_macro_call(p, d, mc.call); break;
         case .empty: pr_str(p, ";"); break;
+        case .pragma_cc: break;   /* `#pragma(@parallel) off` and kin steer the lowering; nothing in C */
         default: pr_d_unknown(p, d); break;
     }
     p->indent = indent;
