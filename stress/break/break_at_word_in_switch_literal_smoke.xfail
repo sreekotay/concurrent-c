@@ -1,0 +1,1 @@
+the @switch lowering re-scans its case bodies for @-tokens and splits the string literal ('missing terminating " character'); the same literal in a plain function is fine, and "@" "errhandler" (adjacent literals) survives

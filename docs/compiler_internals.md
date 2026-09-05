@@ -362,7 +362,7 @@ happens not to contain a banned `@token`, `!>`, `[:]` or `::`.
 ### 5.9 Shapes an AST needs that the engine refuses
 
 Writing a tree of `@variant` nodes with `Vec` children and a template
-printer (`stress/break/break_ast_cc_way_smoke.ccs`) trips seven distinct
+printer (`stress/break/break_ast_cc_way_smoke.ccs`) trips eight distinct
 defects, each pinned by a sibling `break_*` test with an `.xfail` marker:
 
 | Shape | What happens today | Test |
@@ -374,6 +374,7 @@ defects, each pinned by a sibling `break_*` test with an `.xfail` marker:
 | a pointer local named `xs` in one function | `c.xs.push` in another function is typed as a pointer: local types are keyed by bare name per file | `break_local_scope_leak` |
 | `@string(\`${n}(\`, a)` | the argument scanner counts parentheses inside the backtick text | `break_template_lone_paren` |
 | `return cc_ok(@string(\`(${l} ${r})\`, a))` | the emitted expression is clipped at about 330 characters | `break_template_in_return_ok` |
+| `"@errhandler"` inside a `@switch` case body | the switch lowering re-scans its bodies for `@`-tokens and splits the string literal | `break_at_word_in_switch_literal` |
 
 Every one is a text-engine property (name-keyed type tracking, splice
 points chosen by textual position, paren-counting through literals, fixed
