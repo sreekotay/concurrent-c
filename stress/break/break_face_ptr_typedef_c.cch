@@ -1,0 +1,5 @@
+#ifndef BREAK_FACE_PTR_TYPEDEF_C
+#define BREAK_FACE_PTR_TYPEDEF_C
+#include "break_face_ptr_typedef_a.cch"
+static int face_twice(FaceNode* n);
+#endif

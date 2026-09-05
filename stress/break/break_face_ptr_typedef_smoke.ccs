@@ -1,0 +1,16 @@
+/* Two faces mention `FaceNode*`; one also typedefs a pointer to it. The
+ * type has exactly one definer, in the first face. */
+#include "break_face_ptr_typedef_b.cch"
+#include "break_face_ptr_typedef_c.cch"
+#include <stdio.h>
+
+static int FaceNode_value(FaceNode* n) { return n->v; }
+static FaceNodeRef face_pick(FaceNodeRef a, FaceNodeRef b) { return a->v > b->v ? a : b; }
+static int face_twice(FaceNode* n) { return 2 * n->value(); }
+
+int main(void) {
+    FaceNode x = { 3 };
+    FaceNode y = { 5 };
+    printf("%d\n", face_twice(face_pick(&x, &y)));
+    return 0;
+}
