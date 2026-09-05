@@ -493,8 +493,8 @@ static void visit_ufcs(Walker* w, CcExpr* e, CcUfcs uf) {
     CcMethod* m = NULL;
     CCSlice tn = cc_slice_empty();
     CCSlice reason = cc_slice_empty();
-    /* the parser spells `@parallel ... wait (ts)` and the join's `!>.wait()` tail
-     * as UFCS nodes on the ident `@parallel`: not user call sites */
+    /* the parser spells the parallel join's wait and its trailing wait call
+     * as UFCS nodes on an at-word identifier: not user call sites */
     {
         CcExpr* root = chain_root(uf.recv);
         CCSlice rn;
@@ -886,7 +886,7 @@ static void tw_block_stmts(Walker* w, CcStmtList stmts) {
             tw_decl_local(w, d);
         } else {
             /* bindings that outlive the statement: a macro's declarations,
-             * `CCParallel h = @parallel {...}` */
+             * `CCParallel h = at-parallel {...}` */
             CCSlice bn;
             CcType* bt;
             if (stmt_is_expr(t)) declare_from_macro_stmt(w, t);
