@@ -221,7 +221,7 @@ static CCSlice cl_base_canon(CcLowerer* L, CcType* t) {
 }
 
 /* The destroy chain of `subject` (an lvalue of type `canon`): the type's own
- * hook on its address, then, in declaration order, the chain of every value
+ * hook on its address, then, last member first, the chain of every value
  * member whose type has one, recursively. Returns how many calls it added. */
 static int cl_destroy_chain(CcLowerer* L, CCSlice canon, CcExpr* subject, CcStmt* into, CcSpan sp, int depth) {
     CcIndex* ix = L->ix;
@@ -248,8 +248,9 @@ static int cl_destroy_chain(CcLowerer* L, CCSlice canon, CcExpr* subject, CcStmt
     if (!cc__struct_of(ix, canon, 0, &st)) return n;
     fieldv = &st.fields;
     nf = fieldv->len();
-    for (k = 0; k < nf; k++) {
-        CcField* f = fieldv->get_ptr(k);
+    /* members go in reverse declaration order, the last constructed first */
+    for (k = nf; k > 0; k--) {
+        CcField* f = fieldv->get_ptr(k - 1);
         CCSlice fty;
         if (!f->name.len || !f->type || f->is_pp) continue;
         if (f->type->k.kind == CcTypeK_pointer || f->type->k.kind == CcTypeK_array) continue;
