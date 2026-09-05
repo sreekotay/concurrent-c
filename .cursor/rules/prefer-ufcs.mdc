@@ -18,7 +18,7 @@ c->lit("$-1\r\n");
 // avoid (same APIs)
 cc_shard_map_count(&db.maps);
 cc_shard_map_hold_one(maps, si);
-cc_shard_hold_release(&hold);
+cc_excl_hold_release(&hold);
 cc_shard_get(sh, key);
 conn_lit(c, "$-1\r\n");
 ```

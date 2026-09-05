@@ -103,7 +103,7 @@ tutorial, idiomatic, and production code — and race their upstreams
   Multi-locale: `compare_dist.sh` / `ra_dist.ccs`.
 - [**stylo-cc**](real_projects/stylo-cc/) — a Concurrent-C styling engine
   raced against actual Servo Stylo on a frozen StyleBench workload. Exact
-  11-property style dumps gate correctness; dated receipts and the
+  property style dumps gate correctness; dated receipts and the
   remaining implementation differences are documented in the project.
 - [**The Neckbeard Challenges**](perf/run_neckbeard_challenges.sh) — six
   cross-language robustness gauntlets (syscall kidnapping, wake storms,
@@ -114,6 +114,8 @@ tutorial, idiomatic, and production code — and race their upstreams
   reconstructions under idiomatic CC, pre-registered rules, misses
   counted as backlog: **21 prevented, 4 mitigated, 2 still expressible**
   — every demo builds and runs (`scripts/test_cve_locality.sh`).
+
+Specimens are picked from problems that already have an owner.
 
 Compiler internals: [architecture](cc/docs/ARCHITECTURE.md), [shadow_lower ops / layout](cc/shadow/README.md), [bootstrap](cc/bootstrap/shadow_lower/README.md), [debug vars](cc/src/diag/DEBUG_VARS.md).
 
@@ -273,7 +275,7 @@ push submodule to `origin/mob` → `tcc-update-check`.
 
 
 ### CC Adverserial Projcts
-Upstream fail candidates identified and registers prior to work.
+Work selection process: upstream fail candidates identified and registered prior to work.
 
 - throughput pipelines with pigz; (Adler)
 - scheduler pathologies; (Neckbeard)

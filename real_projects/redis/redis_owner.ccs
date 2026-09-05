@@ -26,7 +26,7 @@
  *
  * Build: `make redis_owner`.  Compare vs default: `./bench_lock_cmp.sh`
  * (labels: owner vs idiomatic).  Default server is `redis_idiomatic.ccs`
- * (sketch I/O + full RedisDb, shard holds).
+ * (sketch I/O + full RedisDb, `CCExclHold` on shards).
  *
  * Memory: always emits parseable `mem_gap` at phase stamps (post-preload,
  * owner-ready, CC.MEMLOG [phase]).  Gap = process footprint − (map+key+value

@@ -111,7 +111,7 @@ static bool !>(CCIoError) conn_flush(Conn* c) {
     return cc_ok(true);
 }
 
-/* Encode-only: never flush/socket — safe under a shard hold.
+/* Encode-only: never flush/socket — safe under an exclusive hold.
  * Format on @scratch (stack), then one append into Conn.out. */
 static bool !>(CCError) conn_write(Conn* c, char[:] data) {
     if (!c || !c->arena.p)

@@ -334,7 +334,7 @@ static bool !>(CCError) execute(DB* db, Cmd* c,
 }
 ```
 
-Under a shard hold, handlers receive only encode access. Ship (`flush` /
+Under an exclusive hold (`CCExclHold`), handlers receive only encode access. Ship (`flush` /
 socket) stays on the outer `Conn*` after release. Flush-under-hold does not
 parse at the restricted receiver; neither does reaching `sock` directly.
 

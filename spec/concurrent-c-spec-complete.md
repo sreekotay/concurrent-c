@@ -5465,7 +5465,7 @@ void !>(CCError) cc_exclusive_mutex_acquire_when_into(CCExclusiveMutex* m,
 - `g.signal()` / `g.broadcast()` — wake condition waiters (while holding)
 - `shards.index(hash)` — `CCShardMask` routing
 - `d.hold(si)` / `d.hold_one(si)` / `d.hold_sorted(names, n)` / `d.hold_all()`
-- `h.held()` / `h.release()` / `h.destroy()` — shard hold (`@destroy` is release)
+- `h.held()` / `h.release()` / `h.destroy()` — exclusive hold (`CCExclHold`; `@destroy` is release)
 
 ---
 

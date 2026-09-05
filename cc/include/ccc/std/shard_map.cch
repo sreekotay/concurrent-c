@@ -18,8 +18,8 @@
  *
  * Cell ownership (read once):
  *   put(k, v)     copies key+value into the shard arena (views OK as inputs)
- *   get(k)        interior pointer — only under the shard hold; do not stash
- *   get_into(...) clones into a caller arena — safe after the shard hold
+ *   get(k)        interior pointer — only under an exclusive hold; do not stash
+ *   get_into(...) clones into a caller arena — safe after the hold releases
  *   contains(k)   presence only (no value pointer)
  *   delete(k)     frees the packed key and value in the shard arena
  *
@@ -85,7 +85,7 @@ static inline size_t cc_shard_len(const CCShard* m) {
     return CCShardMapTable_len(m->data);
 }
 
-/* Interior pointer — only under the shard hold; do not stash past release. */
+/* Interior pointer — only under an exclusive hold; do not stash past release. */
 static inline CCString* cc_shard_get(CCShard* m, CCSlice key) {
     CCSlicePackedView view;
     CCSlicePacked pk;
