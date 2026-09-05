@@ -1,12 +1,13 @@
 /*
  * Console print + flipped UFCS stdio (`println`, `eprintln`, `CCStdio`, …).
  *
- *   CCStdio io@(a) @destroy;
+ * Scripts: driver predecls supply `stdin` (BufReader) and `arena`; use
+ *   stdin.read_line(&line) !> / stdin.read_all(arena) !> and naked println.
+ *
+ * Explicit CCStdio handle (`.ccs` or declared in a script):
+ *   CCStdio io@(arena) @destroy;
  *   char[:] in = io.read_all() !>;
- *   msg.println();                    // void ?>(CCPrintError) — bare discard ok
- *   "literal".println();
- *   @string(`n=${n}`, a).println();
- *   msg.fprintln(STDERR_FILENO);      // UFCS: data first, then fd
+ *   msg.println();
  *
  * Naked aliases (call position; sink-oriented for f*):
  *   println(msg);

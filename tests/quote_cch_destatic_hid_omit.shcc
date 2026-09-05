@@ -1,20 +1,20 @@
 /* Guest + owner in the link set: destatic_hid is static in the owner and
  * omitted from the extract. The call must not compile. */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
-CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
+CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
 build.arg("build");
 build.arg("--no-cache");
 build.arg("tests/quote_cch_destatic_hid_fail_mod.ccs");
 build.arg("tests/quote_cch_destatic_mod.ccs");
 build.arg("-o");
 build.arg("out/quote_cch_destatic_hid_omit");
-CCProcessOutput out = build.capture(a) !>;
+CCProcessOutput out = build.capture(arena) !>;
 if (out.success()) {
     "guest linked destatic_hid".println();
     return 1;
 }
-CCCommand grep_hid = cc_command(a, @slice("grep"));
+CCCommand grep_hid = cc_command(arena, @slice("grep"));
 grep_hid.arg("-q");
 grep_hid.arg("destatic_hid");
 grep_hid.stdin_slice(out.stdout());

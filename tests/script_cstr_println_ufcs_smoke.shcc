@@ -1,10 +1,10 @@
 #!/usr/bin/env -S ./cc/bin/ccc
 /*
  * UFCS println/eprintln on string literals and char* / const char*.
- * Model: coerce to CCSlice, then cc_slice_println (not a cc_char_* family).
+ * Model: coerce to CCSlice, then cc_slice_println (not arena cc_char_* family).
  */
 
-CCArena a = @create(kilobytes(4)) @destroy;
+CCArena arena = @create(kilobytes(4)) @destroy;
 
 "literal".println();
 
@@ -15,7 +15,7 @@ p.println();
 char *mut = (char *)"mut";
 mut->println();
 
-@string(`tpl=${1}`, a).println();
+@string(`tpl=${1}`, arena).println();
 
 "err".eprintln();
 

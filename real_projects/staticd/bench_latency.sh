@@ -2,7 +2,7 @@
 # Latency-first matrix: page-cache fixtures, shuffle server order, median
 # over REPEATS (first round discarded as warmup when REPEATS>1).
 #
-#   ./bench_latency.sh              # directional: 3s, 3 rounds, 3 files
+#   ./bench_latency.sh              # directional: 1s, 3 rounds, 3 files
 #   FULL=1 ./bench_latency.sh       # receipt: 30s, 5 rounds, 5 files
 #   SMOKE=1 ./bench_latency.sh      # 2s, 4kb.html @ c=10
 #
@@ -39,7 +39,7 @@ elif [[ "$FULL" == "1" ]]; then
     FILES="${FILES:-1kb.bin 4kb.html 64kb.js 1mb.bin 10mb.bin}"
 else
     REPEATS="${REPEATS:-3}"
-    DURATION="${DURATION:-3}"
+    DURATION="${DURATION:-1}"
     WARMUP="${WARMUP:-1}"
     CONCURRENCY="${CONCURRENCY:-1 10 100}"
     FILES="${FILES:-4kb.html 1mb.bin 10mb.bin}"

@@ -30,10 +30,10 @@ typedef Map::[char[:], double] Metrics;
 static int regressions = 0;
 static int warnings = 0;
 
-static Metrics !>(CCError) load_metrics(char[:0] path, CCArena* a) {
+static Metrics !>(CCError) load_metrics(char[:0] path, CCArena* arena) {
     @errhandler(CCError e) { return cc_err(e); }
-    CCSlice bytes = cc_file_read_path(path, a) !>;
-    Metrics m = map_new::[char[:], double](a);
+    CCSlice bytes = cc_file_read_path(path, arena) !>;
+    Metrics m = map_new::[char[:], double](arena);
     size_t i = 0;
     while (i < bytes.len) {
         while (i < bytes.len && (bytes.ptr[i] == ' ' || bytes.ptr[i] == '\t' ||
@@ -53,13 +53,13 @@ static Metrics !>(CCError) load_metrics(char[:0] path, CCArena* a) {
         while (line_len > 0 && bytes.ptr[line + line_len - 1] == '\r')
             line_len--;
         if (line_len == 0) continue;
-        /* Metric grammar expects a trailing newline. */
-        char* buf = (char*)cc_arena_alloc(a, line_len + 1, 1);
+        /* Metric grammar expects arena trailing newline. */
+        char* buf = (char*)cc_arena_alloc(arena, line_len + 1, 1);
         if (!buf) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "load_metrics: line alloc"));
         memcpy(buf, bytes.ptr + line, line_len);
         buf[line_len] = '\n';
         Metric row;
-        if (!Metric_parse(buf, line_len + 1, a, &row))
+        if (!Metric_parse(buf, line_len + 1, arena, &row))
             return cc_err(CC_ERROR(CC_ERR_PARSE, "load_metrics: bad metric line"));
         double v = row.val.to_f64() !>;
         m.insert(row.name, v);
@@ -67,91 +67,91 @@ static Metrics !>(CCError) load_metrics(char[:0] path, CCArena* a) {
     return cc_ok(m);
 }
 
-static void check_eq(CCArena* a, Metrics base, Metrics cur, char[:] name) {
+static void check_eq(CCArena* arena, Metrics base, Metrics cur, char[:] name) {
     @errhandler(CCError e) {
-        CCString em = @string(`${cc_error_str(e)}`, a);
+        CCString em = @string(`${cc_error_str(e)}`, arena);
         (void)em.eprintln();
         return;
     }
     double* b = base.get_ptr(name);
     double* n = cur.get_ptr(name);
     if (!b || !n) {
-        CCString s = @string(`  ${name}  SKIP    (missing)`, a);
+        CCString s = @string(`  ${name}  SKIP    (missing)`, arena);
         s.println();
         return;
     }
     if (*n == *b) {
-        CCString s = @string(`  ${name}  OK      (=${*n})`, a);
+        CCString s = @string(`  ${name}  OK      (=${*n})`, arena);
         s.println();
     } else if (*n < *b) {
-        CCString s = @string(`  ${name}  IMPROVED (${*b} -> ${*n})`, a);
+        CCString s = @string(`  ${name}  IMPROVED (${*b} -> ${*n})`, arena);
         s.println();
     } else {
-        CCString s = @string(`  ${name}  FAIL    (baseline=${*b} current=${*n})`, a);
+        CCString s = @string(`  ${name}  FAIL    (baseline=${*b} current=${*n})`, arena);
         s.println();
         regressions++;
     }
 }
 
-static void check_le(CCArena* a, Metrics base, Metrics cur, char[:] name) {
+static void check_le(CCArena* arena, Metrics base, Metrics cur, char[:] name) {
     @errhandler(CCError e) {
-        CCString em = @string(`${cc_error_str(e)}`, a);
+        CCString em = @string(`${cc_error_str(e)}`, arena);
         (void)em.eprintln();
         return;
     }
     double* b = base.get_ptr(name);
     double* n = cur.get_ptr(name);
     if (!b || !n) {
-        CCString s = @string(`  ${name}  SKIP    (missing)`, a);
+        CCString s = @string(`  ${name}  SKIP    (missing)`, arena);
         s.println();
         return;
     }
     if (*n < *b) {
-        CCString s = @string(`  ${name}  IMPROVED (${*b} -> ${*n})`, a);
+        CCString s = @string(`  ${name}  IMPROVED (${*b} -> ${*n})`, arena);
         s.println();
     } else if (*n == *b) {
-        CCString s = @string(`  ${name}  OK      (=${*n})`, a);
+        CCString s = @string(`  ${name}  OK      (=${*n})`, arena);
         s.println();
     } else {
         double inc = *n - *b;
-        CCString s = @string(`  ${name}  FAIL    (baseline=${*b} current=${*n}, increase=${inc})`, a);
+        CCString s = @string(`  ${name}  FAIL    (baseline=${*b} current=${*n}, increase=${inc})`, arena);
         s.println();
         regressions++;
     }
 }
 
-static void check_loc(CCArena* a, Metrics base, Metrics cur, char[:] name) {
+static void check_loc(CCArena* arena, Metrics base, Metrics cur, char[:] name) {
     @errhandler(CCError e) {
-        CCString em = @string(`${cc_error_str(e)}`, a);
+        CCString em = @string(`${cc_error_str(e)}`, arena);
         (void)em.eprintln();
         return;
     }
     double* b = base.get_ptr(name);
     double* n = cur.get_ptr(name);
     if (!b || !n) {
-        CCString s = @string(`  ${name}  SKIP    (missing)`, a);
+        CCString s = @string(`  ${name}  SKIP    (missing)`, arena);
         s.println();
         return;
     }
     if (*n <= *b) {
-        CCString s = @string(`  ${name}  OK      (=${*n} vs baseline ${*b})`, a);
+        CCString s = @string(`  ${name}  OK      (=${*n} vs baseline ${*b})`, arena);
         s.println();
         return;
     }
     double pct = (*n - *b) * 100.0 / *b;
     if (pct > 25.0) {
-        CCString s = @string(`  ${name}  NOTICE  (=${*n} vs baseline ${*b}, +${pct}%)`, a);
+        CCString s = @string(`  ${name}  NOTICE  (=${*n} vs baseline ${*b}, +${pct}%)`, arena);
         s.println();
         warnings++;
     } else {
-        CCString s = @string(`  ${name}  OK      (=${*n} vs baseline ${*b}, +${pct}%)`, a);
+        CCString s = @string(`  ${name}  OK      (=${*n} vs baseline ${*b}, +${pct}%)`, arena);
         s.println();
     }
 }
 
-static void check_wall(CCArena* a, Metrics base, Metrics cur) {
+static void check_wall(CCArena* arena, Metrics base, Metrics cur) {
     @errhandler(CCError e) {
-        CCString em = @string(`${cc_error_str(e)}`, a);
+        CCString em = @string(`${cc_error_str(e)}`, arena);
         (void)em.eprintln();
         return;
     }
@@ -159,19 +159,19 @@ static void check_wall(CCArena* a, Metrics base, Metrics cur) {
     double* b = base.get_ptr(name);
     double* n = cur.get_ptr(name);
     if (!b || !n) {
-        CCString s = @string(`  ${name}  SKIP    (missing)`, a);
+        CCString s = @string(`  ${name}  SKIP    (missing)`, arena);
         s.println();
         return;
     }
     double pct = (*n - *b) * 100.0 / *b;
     if (pct <= 5.0) {
-        CCString s = @string(`  ${name}  OK      (=${*n}s vs baseline ${*b}s, ${pct}%)`, a);
+        CCString s = @string(`  ${name}  OK      (=${*n}s vs baseline ${*b}s, ${pct}%)`, arena);
         s.println();
     } else if (pct <= 30.0) {
-        CCString s = @string(`  ${name}  INFO    (=${*n}s vs baseline ${*b}s, ${pct}% — OS-noise band)`, a);
+        CCString s = @string(`  ${name}  INFO    (=${*n}s vs baseline ${*b}s, ${pct}% — OS-noise band)`, arena);
         s.println();
     } else {
-        CCString s = @string(`  ${name}  NOTICE  (=${*n}s vs baseline ${*b}s, ${pct}% — large jump)`, a);
+        CCString s = @string(`  ${name}  NOTICE  (=${*n}s vs baseline ${*b}s, ${pct}% — large jump)`, arena);
         s.println();
         warnings++;
     }
@@ -179,10 +179,10 @@ static void check_wall(CCArena* a, Metrics base, Metrics cur) {
 
 /* --- script body --- */
 
-CCArena a = @create(megabytes(4)) @destroy;
+CCArena arena = @create(megabytes(4)) @destroy;
 PerfCheckOpts opts = {0};
 {
-    bool go = cc_prepare_args(PerfCheckOpts, argc, argv, &a, &opts, stderr) !>;
+    bool go = cc_prepare_args(PerfCheckOpts, argc, argv, &arena, &opts, stderr) !>;
     if (!go) return 0; /* --help (if present) */
 }
 bool update = opts.update;
@@ -194,83 +194,83 @@ else if (opts.metrics_len > 0)
     current_path_arg = opts.metrics[0];
 
 char[:0] root = cc_script_repo_root(
-    argv[0] ? char_to_slice(argv[0]) : cc_slice_empty(), &a) !>;
-char[:0] baseline = cc_script_path_join(root, @slice("perf/compiler_baseline.txt"), &a);
+    argv[0] ? char_to_slice(argv[0]) : cc_slice_empty(), &arena) !>;
+char[:0] baseline = cc_script_path_join(root, @slice("perf/compiler_baseline.txt"), &arena);
 
 if (!cc_script_path_exists(baseline)) {
-    CCString s = @string(`perf check: no baseline at ${baseline}`, a);
+    CCString s = @string(`perf check: no baseline at ${baseline}`, arena);
     s.eprintln();
-    s = @string(`perf check: run ./scripts/capture_baseline.sh first`, a);
+    s = @string(`perf check: run ./scripts/capture_baseline.sh first`, arena);
     s.eprintln();
     return 1;
 }
 
-/* Always allocate a temp path; --current overrides it for compare-only runs. */
-CCTempFile tmp = cc_temp_file(&a) !> @destroy;
+/* Always allocate arena temp path; --current overrides it for compare-only runs. */
+CCTempFile tmp = cc_temp_file(&arena) !> @destroy;
 char[:0] current_path = tmp.path;
 if (current_path_arg.ptr) {
     current_path = current_path_arg;
 } else {
     {
-        CCString s = @string(`perf check: capturing current metrics (this takes ~60s)...`, a);
+        CCString s = @string(`perf check: capturing current metrics (this takes ~60s)...`, arena);
         s.println();
     }
-    char[:0] capture = cc_script_path_join(root, @slice("scripts/capture_baseline.sh"), &a);
-    cc_sh_run(capture, current_path, &a) !>;
+    char[:0] capture = cc_script_path_join(root, @slice("scripts/capture_baseline.sh"), &arena);
+    cc_sh_run(capture, current_path, &arena) !>;
 }
 
 if (update) {
-    cc_file_copy(current_path, baseline, &a) !>;
+    cc_file_copy(current_path, baseline, &arena) !>;
     {
-        CCString s = @string(`perf check: baseline updated. New contents:`, a);
+        CCString s = @string(`perf check: baseline updated. New contents:`, arena);
         s.println();
     }
-    cc_script_print_file(baseline, &a);
+    cc_script_print_file(baseline, &arena);
     return 0;
 }
 
-Metrics base = load_metrics(baseline, &a) !>;
-Metrics cur = load_metrics(current_path, &a) !>;
+Metrics base = load_metrics(baseline, &arena) !>;
+Metrics cur = load_metrics(current_path, &arena) !>;
 
 "".println();
 {
-    CCString s = @string(`perf check: comparing current vs baseline (${baseline})`, a);
+    CCString s = @string(`perf check: comparing current vs baseline (${baseline})`, arena);
     s.println();
 }
 
 "".println();
 "Static metrics (must equal baseline):".println();
-check_eq(&a, base, cur, @slice("reparse_sites_visit_codegen"));
+check_eq(&arena, base, cur, @slice("reparse_sites_visit_codegen"));
 
 "".println();
-"LOC metrics (growth > +25% prints a notice):".println();
-check_loc(&a, base, cur, @slice("loc_visit_codegen"));
-check_loc(&a, base, cur, @slice("loc_closure_pass"));
-check_loc(&a, base, cur, @slice("loc_visitor_dir"));
+"LOC metrics (growth > +25% prints arena notice):".println();
+check_loc(&arena, base, cur, @slice("loc_visit_codegen"));
+check_loc(&arena, base, cur, @slice("loc_closure_pass"));
+check_loc(&arena, base, cur, @slice("loc_visitor_dir"));
 
 "".println();
 "Dynamic metrics (must be <= baseline):".println();
-check_eq(&a, base, cur, @slice("suite_tests"));
-check_le(&a, base, cur, @slice("reparses_phase3"));
-check_le(&a, base, cur, @slice("reparses_statement_lowering"));
-check_le(&a, base, cur, @slice("reparses_async_lowering"));
-check_le(&a, base, cur, @slice("reparses_final_ufcs"));
-check_le(&a, base, cur, @slice("reparses_total"));
+check_eq(&arena, base, cur, @slice("suite_tests"));
+check_le(&arena, base, cur, @slice("reparses_phase3"));
+check_le(&arena, base, cur, @slice("reparses_statement_lowering"));
+check_le(&arena, base, cur, @slice("reparses_async_lowering"));
+check_le(&arena, base, cur, @slice("reparses_final_ufcs"));
+check_le(&arena, base, cur, @slice("reparses_total"));
 
 "".println();
 "Wall-clock (informational only — too noisy on developer machines to gate on):".println();
-check_wall(&a, base, cur);
+check_wall(&arena, base, cur);
 
 "".println();
 if (regressions > 0) {
-    CCString s = @string(`perf check: FAIL — ${regressions} regression(s), ${warnings} warning(s)`, a);
+    CCString s = @string(`perf check: FAIL — ${regressions} regression(s), ${warnings} warning(s)`, arena);
     s.println();
-    s = @string(`perf check: if intentional, re-run with --update`, a);
+    s = @string(`perf check: if intentional, re-run with --update`, arena);
     s.println();
     return 1;
 }
 if (warnings > 0) {
-    CCString s = @string(`perf check: OK with ${warnings} warning(s) (no regressions)`, a);
+    CCString s = @string(`perf check: OK with ${warnings} warning(s) (no regressions)`, arena);
     s.println();
 } else {
     "perf check: OK".println();

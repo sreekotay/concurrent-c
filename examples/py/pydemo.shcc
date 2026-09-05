@@ -1,7 +1,7 @@
 #!/usr/bin/env -S ./cc/bin/ccc
 #include <ccc/script/py.cch>
 
-CCPy py = cc_py_new(false, a) !> @destroy;
+CCPy py = cc_py_new(false, arena) !> @destroy;
 
 /* Unresolved methods on CCPyObj dispatch dynamically: the method
  * identifier becomes the Python attribute; arguments marshal by static
@@ -11,17 +11,17 @@ CCPy py = cc_py_new(false, a) !> @destroy;
  * or @destroy appears. */
 CCPyObj math = py.import("math") !> @destroy;
 double v = math.sqrt(2.0) !>;
-println(@string(`math.sqrt(2.0) = ${v}`, a));
+println(@string(`math.sqrt(2.0) = ${v}`, arena));
 
 double pv = math.pow(2.0, 10) !>;
-println(@string(`math.pow(2,10) = ${pv}`, a));
+println(@string(`math.pow(2,10) = ${pv}`, arena));
 
 CCPyObj stats = py.import("statistics") !> @destroy;
 double xs[:] = {1.0, 2.0, 3.0, 4.0, 42.0};
 double mv = stats.mean(xs) !>;
-println(@string(`statistics.mean = ${mv}`, a));
+println(@string(`statistics.mean = ${mv}`, arena));
 
 /* `!>` links hops: each unwraps, then the next dispatches on the
  * unwrapped value; as_slice defaults to the handle's scratch arena. */
 char[:] vs = py.import("sys")!>.get("version")!>.as_slice()!>;
-println(@string(`sys.version    = ${vs}`, a));
+println(@string(`sys.version    = ${vs}`, arena));

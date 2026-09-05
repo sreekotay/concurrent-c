@@ -932,7 +932,11 @@ static int cc__build_compile_and_load(const char* input_path,
         if (input_path) {
             size_t pl = strlen(input_path);
             if (pl >= 4 && strcmp(input_path + pl - 4, ".cch") == 0) {
+                /* Keep the TU include/declare index. Isolated header
+                 * lower would reset it to this file's imports only. */
+                cc_header_lower_preserve_tu_begin();
                 pp_src = cc_lower_header_string(blanked_src, strlen(blanked_src), input_path);
+                cc_header_lower_preserve_tu_end();
                 source_is_header = (pp_src != NULL);
             }
         }

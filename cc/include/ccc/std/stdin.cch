@@ -1,0 +1,156 @@
+/*
+ * Stdin as a Duplex-compatible source + BufReader::[CCStdin] script helpers.
+ *
+ * Script predecl (token `stdin`): a BufReader value named `stdin` over fd 0.
+ *   bool more = stdin.read_line(&line) !>;
+ *   char[:] input = stdin.read_all(arena) !>;
+ *
+ * Uses read(2) on fd 0 so the BufReader binding does not collide with libc's
+ * FILE *stdin when shadowed by a local named `stdin`.
+ */
+#ifndef CC_STD_STDIN_H
+#define CC_STD_STDIN_H
+
+#include <errno.h>
+#include <unistd.h>
+
+#include <ccc/cc_io_error.cch>
+#include <ccc/cc_result.cch>
+#include <ccc/cc_slice.cch>
+#include <ccc/std/string.cch>
+
+typedef struct CCStdin {
+    CCArena line_arena;
+} CCStdin;
+
+static inline void cc_stdin_init(CCStdin *src, CCArena arena) {
+    if (src) src->line_arena = arena;
+}
+
+static inline bool !>(CCIoError) cc_stdin_read_buf_into(CCStdin *src, char *buf,
+                                                         size_t max, size_t *out) {
+    ssize_t n;
+    (void)src;
+    if (!buf || !out || !max) {
+        return cc_err(cc_io_error(CC_IO_INVALID_ARGUMENT));
+    }
+    for (;;) {
+        n = read(0, buf, max);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return cc_err(cc_io_from_errno(errno));
+        }
+        break;
+    }
+    if (n == 0) {
+        *out = 0;
+        return cc_ok(false);
+    }
+    *out = (size_t)n;
+    return cc_ok(true);
+}
+
+#define CC_BUFIO_EXTRA_GENERIC CCStdin *: cc_stdin_read_buf_into,
+#include <ccc/std/bufio.cch>
+
+CC_GENERIC_FACTORY_EXTEND(BufReader, 1) {
+    if (arg(0).len != 7 || memcmp(arg(0).ptr, "CCStdin", 7) != 0) return;
+    return @emit(`
+static inline size_t cc__stdin_br_pending_${mangled}(const ${mangled} *br) {
+    if (!br || br->end < br->pos) return 0;
+    return br->end - br->pos;
+}
+static inline bool !>(CCError) ${mangled}_read_line_into(${mangled} *br, CCSlice *out) {
+    CCString line = cc_string_new();
+    int got = 0;
+    CCArena arena;
+    if (!br || !br->src || !out) {
+        return cc_err(CC_ERR_INVALID_ARG, "stdin.read_line: bad args");
+    }
+    arena = br->src->line_arena;
+    if (!cc_arena_is_live(arena)) {
+        return cc_err(CC_ERR_INVALID_ARG, "stdin.read_line: no arena");
+    }
+    for (;;) {
+        unsigned char c;
+        ssize_t n;
+        size_t pending = cc__stdin_br_pending_${mangled}(br);
+        if (pending) {
+            c = (unsigned char)br->buf[br->pos++];
+            if (br->pos >= br->end) { br->pos = 0; br->end = 0; }
+        } else {
+            n = read(0, &c, 1);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                return cc_err(CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_io_from_errno(errno))));
+            }
+            if (n == 0) break;
+        }
+        got = 1;
+        if (c == (unsigned char)10) break;
+        if (c == (unsigned char)13) {
+            unsigned char c2;
+            n = read(0, &c2, 1);
+            if (n > 0 && c2 != (unsigned char)10) {
+                if (!cc_string_push_char(&line, (char)c2, arena))
+                    return cc_err(CC_ERR_OUT_OF_MEMORY, "stdin.read_line: alloc");
+            }
+            break;
+        }
+        if (!cc_string_push_char(&line, (char)c, arena))
+            return cc_err(CC_ERR_OUT_OF_MEMORY, "stdin.read_line: alloc");
+    }
+    if (!got) { *out = cc_slice_empty(); return cc_ok(false); }
+    *out = cc_string_persist_slice(arena, &line);
+    if (line.len > 0 && (!out->ptr || out->len != line.len))
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "stdin.read_line: persist");
+    return cc_ok(true);
+}
+static inline CCSlice !>(CCError) ${mangled}_read_all(${mangled} *br, CCArena arena) {
+    size_t total_cap = 4096, total_len = 0;
+    char *total;
+    if (!br || !cc_arena_is_live(arena))
+        return cc_err(CC_ERR_INVALID_ARG, "stdin.read_all: bad args");
+    total = (char *)cc_arena_alloc(arena, total_cap, 1);
+    if (!total) return cc_err(CC_ERR_OUT_OF_MEMORY, "stdin.read_all: alloc");
+    for (;;) {
+        size_t pending = cc__stdin_br_pending_${mangled}(br);
+        if (pending) {
+            while (total_len + pending > total_cap) {
+                size_t new_cap = total_cap * 2;
+                char *new_buf = (char *)cc_arena_alloc(arena, new_cap, 1);
+                if (!new_buf) return cc_err(CC_ERR_OUT_OF_MEMORY, "stdin.read_all: grow");
+                cc__bytes_copy(new_buf, total, total_len);
+                total = new_buf; total_cap = new_cap;
+            }
+            cc__bytes_copy(total + total_len, br->buf + br->pos, pending);
+            total_len += pending;
+            br->pos = br->end;
+            continue;
+        }
+        { char buf[4096]; ssize_t n = read(0, buf, sizeof(buf));
+          if (n < 0) {
+              if (errno == EINTR) continue;
+              return cc_err(CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_io_from_errno(errno))));
+          }
+          if (n == 0) break;
+          while (total_len + (size_t)n > total_cap) {
+              size_t new_cap = total_cap * 2;
+              char *new_buf = (char *)cc_arena_alloc(arena, new_cap, 1);
+              if (!new_buf) return cc_err(CC_ERR_OUT_OF_MEMORY, "stdin.read_all: grow");
+              cc__bytes_copy(new_buf, total, total_len);
+              total = new_buf; total_cap = new_cap;
+          }
+          cc__bytes_copy(total + total_len, buf, (size_t)n);
+          total_len += (size_t)n; }
+    }
+    return cc_ok(cc_slice_from_parts(total, total_len, CC_SLICE_ID_UNTRACKED));
+}
+#define ${mangled}_read_all(br, a) \
+    (${mangled}_read_all)((br), CC__ARENA_HANDLE(a))
+`, arena);
+}
+
+/* `read_line(&line)` arity lives in postlude.cch — not this decl header. */
+
+#endif /* CC_STD_STDIN_H */

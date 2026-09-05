@@ -1294,7 +1294,7 @@ char* cc_script_rewrite_source(const char* path,
         "/* .shcc entry: auto prelude */\n"
         "#include <ccc/script/prelude.cch>\n"
         "\n";
-    /* Print bangs (`io.println() !>;`) are `void !>(CCPrintError)` and do
+    /* Print bangs (`println() !>;`) are `void !>(CCPrintError)` and do
      * not as: to CCError — keep a typed handler so selection does not fall
      * through to a host C type error on the CCError hoist cell. */
     static const char default_eh[] =

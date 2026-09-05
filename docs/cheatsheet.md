@@ -513,6 +513,7 @@ Recipe: [recipe_walk.ccs](../examples/recipe_walk.ccs).
 
 Lexical fork-join — names on the page, not a nursery. `@parallel { … }` is
 `CCParallel !>(CCError)`. `.wait()` joins. Spec §8.11.
+Bare `@parallel { … } !>;` unwraps and discards the handle.
 Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
 Stream (no `n`): [recipe_parallel_stream.ccs](../examples/recipe_parallel_stream.ccs).
 EMPTY-close (consumer already in recv): [recipe_parallel_empty.ccs](../examples/recipe_parallel_empty.ccs).
@@ -875,10 +876,18 @@ int main(void) {
 ## `.shcc` scripts
 
 Same language as `.ccs`; script prelude + synthetic `main` when you omit
-`main`. Ambient `a` / `io` / `in` / `args` when those names appear.
+`main`. Ambient `stdin` / `arena` / `args` when those names appear.
 `ccc tool.shcc` is an implicit run. See
 [getting-started § `.shcc`](getting-started.md#shcc-scripts) and
 [spec §9.5](../spec/concurrent-c-spec-complete.md#95-script-library-shcc--cccscript).
+
+```c
+char[:] line;
+while (stdin.read_line(&line) !>) { line.println(); }
+
+char[:] all = stdin.read_all(arena) !>;
+println(@string(`n=${args.len()}`, arena));
+```
 
 ```bash
 ccc examples/py/pydemo.shcc         # CC hosts Python
@@ -971,7 +980,7 @@ Jupyter/Colab: `from cc_node import require`).
 ```c
 #include <ccc/cc_runtime.cch>      // nurseries, channels, core
 #include <ccc/std/prelude.cch>     // kilobytes, vec/map/dir, … — not <stdio.h> / <string.h>
-#include <ccc/stdio.cch>    // CCStdio / io.println
+#include <ccc/stdio.cch>    // CCStdio; println / eprintln aliases
 #include <ccc/script/prelude.cch>  // forced in for .shcc (<stdio.h> + std prelude); not <string.h>
 #include <ccc/cc_atomic.cch>       // portable atomics
 #include <stdio.h>                 // printf, … — include when you use C stdio

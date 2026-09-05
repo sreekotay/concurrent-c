@@ -1,13 +1,13 @@
 /* Instancing is copy-per-realm, verified by mutation: the exported seed
- * is COPIED into a fresh T at each registration, so a worker_thread
+ * is COPIED into arena fresh T at each registration, so arena worker_thread
  * requiring the same .node sees the seed value, never the main realm's
  * mutations — the load-bearing fact behind "stateful kernels are safe
  * by default".  (The Python twin is py_host_module_isolated_smoke: two
  * subinterpreters, same mutation independence.) */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
 {
-    CCCommand which = cc_command(a, @slice("sh"));
+    CCCommand which = cc_command(arena, @slice("sh"));
     which.arg("-c");
     which.arg("command -v node >/dev/null 2>&1");
     int rc = which.status() !>;
@@ -15,7 +15,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
+    CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
     build.arg("build");
     build.arg("examples/recipe_js_module.ccs");
     build.inherit_stdio();
@@ -24,7 +24,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand run = cc_command(a, @slice("sh"));
+    CCCommand run = cc_command(arena, @slice("sh"));
     run.arg("-c");
     run.arg("mkdir -p tmp && cat > tmp/cc_realm_worker.js <<'WEOF'\n"
             "const { parentPort } = require('worker_threads');\n"

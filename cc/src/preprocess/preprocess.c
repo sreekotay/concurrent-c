@@ -12940,6 +12940,27 @@ static int g_local_cch_lower_failed = 0;
 /* TU extract of a quoted .cch must not wipe include/declare/result indexes
  * the caller already ingested. `lower_headers` batch still resets. */
 static int g_header_lower_preserve_tu_state = 0;
+static char g_ufcs_header_path_stash[PATH_MAX];
+static int g_ufcs_header_path_stashed;
+
+void cc_header_lower_preserve_tu_begin(void) {
+    if (!g_ufcs_header_path_stashed) {
+        snprintf(g_ufcs_header_path_stash, sizeof(g_ufcs_header_path_stash),
+                 "%s", g_ufcs_header_path);
+        g_ufcs_header_path_stashed = 1;
+    }
+    g_header_lower_preserve_tu_state++;
+}
+
+void cc_header_lower_preserve_tu_end(void) {
+    if (g_header_lower_preserve_tu_state > 0)
+        g_header_lower_preserve_tu_state--;
+    if (g_header_lower_preserve_tu_state == 0 && g_ufcs_header_path_stashed) {
+        snprintf(g_ufcs_header_path, sizeof(g_ufcs_header_path), "%s",
+                 g_ufcs_header_path_stash);
+        g_ufcs_header_path_stashed = 0;
+    }
+}
 
 static char** g_included_cch_sources = NULL;
 static size_t g_included_cch_source_count = 0;
@@ -20397,7 +20418,9 @@ char* cc_rewrite_header_type_syntax_shared(const char* src,
          * from the previous header in this `lower_headers` process (readdir
          * order is not stable across hosts), then register imports — not this
          * file — so Exclusive/Vec callees resolve without treating same-file
-         * wrappers as UFCS targets. */
+         * wrappers as UFCS targets. Mid-TU hook compile must not take this
+         * branch (`cc_header_lower_preserve_tu_begin`) or it drops the TU's
+         * registered headers and invent cannot see `cc_parallel_wait`. */
         cc_reset_included_cch_sources();
         g_ufcs_header_path[0] = 0;
         if (input_path && input_path[0]) {

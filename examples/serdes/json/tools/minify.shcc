@@ -8,10 +8,9 @@
  * Side-by-side with: examples/serdes/json/tools/minify.py
  * Suite: tests/script_minify_smoke.shcc (symlink) + .stdin/.stdout
  */
-@auto(in) out(a) @destroy;
-bool instr = false;
-bool esc = false;
-
+char[:] in = stdin.read_all(arena) !>;
+@auto(in) out(arena) @destroy;
+bool instr = false, esc = false;
 @for (ch in in) {
     if (instr) {
         out.push(ch);
@@ -25,7 +24,5 @@ bool esc = false;
         if (ch == '"') instr = true;
     }
 }
-
-io.write_all(out.as_slice()) !>;
-
-/* prelude + synthetic-main predecls (a/io/in); default @errhandler */
+println(out.as_slice()) !>;
+/* prelude + synthetic-main predecls (arena/stdin); default @errhandler */

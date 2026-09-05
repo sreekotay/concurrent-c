@@ -1,7 +1,7 @@
 #include <stdio.h>
 #!/usr/bin/env -S ./cc/bin/ccc --as=shcc version=0.3
 /*
- * Smoke: make.shcc runners take an @string line (quotes keep a word).
+ * Smoke: make.shcc runners take an @string line (quotes keep arena word).
  */
 
 int rc = cc_script_sh(@string(`true`, @scratch));

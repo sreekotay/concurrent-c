@@ -755,30 +755,60 @@ static char* cc__strip_comptime_blocks_header(const char* src, size_t n) {
 static char* cc__rewrite_header_includes(const char* src, size_t n) {
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
-    size_t last_emit = 0;
     size_t i = 0;
+    int changed = 0;
     if (!src || n == 0) return NULL;
 
     while (i < n) {
-        if (i + 5 <= n && strncmp(src + i, ".cch\"", 5) == 0) {
-            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
-            cc_sb_append_cstr(&out, &out_len, &out_cap, ".h\"");
-            i += 5;
-            last_emit = i;
-            continue;
+        size_t line_end = i;
+        while (line_end < n && src[line_end] != '\n') line_end++;
+        {
+            size_t p = i;
+            int is_include = 0;
+            while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+            if (p < line_end && src[p] == '#') {
+                p++;
+                while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+                if (p + 7 <= line_end && strncmp(src + p, "include", 7) == 0) {
+                    p += 7;
+                    while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+                    if (p < line_end && (src[p] == '<' || src[p] == '"'))
+                        is_include = 1;
+                }
+            }
+            if (is_include) {
+                size_t j = i;
+                while (j < line_end) {
+                    if (j + 5 <= line_end && strncmp(src + j, ".cch\"", 5) == 0) {
+                        cc_sb_append(&out, &out_len, &out_cap, src + i, j - i);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, ".h\"");
+                        j += 5;
+                        i = j;
+                        changed = 1;
+                        continue;
+                    }
+                    if (j + 5 <= line_end && strncmp(src + j, ".cch>", 5) == 0) {
+                        cc_sb_append(&out, &out_len, &out_cap, src + i, j - i);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, ".h>");
+                        j += 5;
+                        i = j;
+                        changed = 1;
+                        continue;
+                    }
+                    j++;
+                }
+            }
         }
-        if (i + 5 <= n && strncmp(src + i, ".cch>", 5) == 0) {
-            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
-            cc_sb_append_cstr(&out, &out_len, &out_cap, ".h>");
-            i += 5;
-            last_emit = i;
-            continue;
-        }
-        i++;
+        cc_sb_append(&out, &out_len, &out_cap, src + i, line_end - i);
+        if (line_end < n && src[line_end] == '\n')
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+        i = (line_end < n) ? line_end + 1 : line_end;
     }
 
-    if (last_emit == 0) return NULL;
-    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
     return out;
 }
 

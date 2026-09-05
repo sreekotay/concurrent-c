@@ -1,14 +1,14 @@
 #include <ccc/script/py.cch>
-CCPy p1 = cc_py_new(&a) !> @destroy;
-CCPy p2 = cc_py_new(&a) !>(e) { println(@string(`no second interp`, a)); return 0; };
+CCPy p1 = cc_py_new(&arena) !> @destroy;
+CCPy p2 = cc_py_new(&arena) !>(e) { println(@string(`no second interp`, arena)); return 0; };
 p1.exec(@slice("import cc.host\nmark='one'\nb1=cc.host.bump(1)\n")) !>;
 p2.exec(@slice("import cc.host\nmark='two'\nb2=cc.host.bump(10)\n")) !>;
 CCPyObj m1 = p1.import("__main__") !> @destroy;
 CCPyObj m2 = p2.import("__main__") !> @destroy;
 CCSlice k1 = m1.get("mark")!>.as_slice()!>;
 CCSlice k2 = m2.get("mark")!>.as_slice()!>;
-println(@string(`mark1=${k1} mark2=${k2}`, a));
+println(@string(`mark1=${k1} mark2=${k2}`, arena));
 int64_t v1 = m1.get("b1")!>.as_i64()!>;
 int64_t v2 = m2.get("b2")!>.as_i64()!>;
-println(@string(`bump1=${v1} bump2=${v2}`, a));
+println(@string(`bump1=${v1} bump2=${v2}`, arena));
 return 0;

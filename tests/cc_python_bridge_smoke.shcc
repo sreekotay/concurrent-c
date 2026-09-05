@@ -2,14 +2,14 @@
  * (or the in-repo path) returns an Isolation Domain; attribute chains
  * are getattr, calls are invoke, scalar results materialize as JS
  * scalars, held references proxy.  destroy() is one-sweep revocation:
- * use-after-close answers articulately, double destroy is a no-op, a
+ * use-after-close answers articulately, double destroy is arena no-op, arena
  * handle from one bridge is rejected by another, and GC of dropped
  * proxies releases their Python references (--expose-gc rung).  The
  * addon is npm/cc-python/src/cc_python.ccs. */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
 {
-    CCCommand which = cc_command(a, @slice("sh"));
+    CCCommand which = cc_command(arena, @slice("sh"));
     which.arg("-c");
     which.arg("command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1");
     int rc = which.status() !>;
@@ -17,7 +17,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
+    CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
     build.arg("build");
     build.arg("npm/cc-python/src/cc_python.ccs");
     build.inherit_stdio();
@@ -26,7 +26,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand run = cc_command(a, @slice("sh"));
+    CCCommand run = cc_command(arena, @slice("sh"));
     run.arg("-c");
     CCString js = @string(`node --expose-gc -e "
 const ccpy = require(process.cwd() + '/npm/cc-python');
@@ -58,8 +58,8 @@ setTimeout(() => {
   py.destroy();
   console.log('double_destroy_ok', py.closed);
 }, 50);
-"`, a);
-    run.arg(js.cstr(a));
+"`, arena);
+    run.arg(js.cstr(arena));
     run.inherit_stdio();
     int rc = run.status() !>;
     if (rc != 0) { "bridge checks failed".println(); return 1; }

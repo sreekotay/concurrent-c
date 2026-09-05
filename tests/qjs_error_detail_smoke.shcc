@@ -5,9 +5,9 @@ if (!cc_qjs_available()) {
     return 0;
 }
 
-CCQjs js = cc_qjs_new(a) !> @destroy;
+CCQjs js = cc_qjs_new(arena) !> @destroy;
 CCQjsVal bad = js.eval("(function () { throw new TypeError('boom'); })()") !>(e) {
-    println(@string(`name=${e.name} stack=${e.stack.len > 0}`, a));
+    println(@string(`name=${e.name} stack=${e.stack.len > 0}`, arena));
     return 0;
 } @destroy;
 (void)bad;

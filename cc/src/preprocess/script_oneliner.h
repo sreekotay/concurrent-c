@@ -9,9 +9,8 @@
  */
 
 typedef struct {
-    int want_a;
-    int want_io;
-    int want_in;
+    int want_arena;
+    int want_stdin;
     int want_args;
     int want_line;
     int want_nr;
@@ -27,12 +26,12 @@ void cc_script_oneliner_scan_predecls(const char* src, size_t len,
                                       CCScriptOnelinerPredecls* out);
 
 /* Clear want_* when src already declares that name (avoids redefinition when
- * -e baked predecls, or the script wrote an explicit CCArena a / …). */
+ * -e baked predecls, or the script wrote an explicit CCArena arena / …). */
 void cc_script_oneliner_suppress_existing_decls(const char* src, size_t len,
                                                 CCScriptOnelinerPredecls* p);
 
 /*
- * Token-gated a/io/in/args block (synthetic .shcc main / -e body).
+ * Token-gated arena/stdin/args block (synthetic .shcc main / -e body).
  * allow_args=0 clears args. indent prepended per line (e.g. "    ").
  * Returns malloc'd text (empty if nothing to inject); never NULL on success.
  */

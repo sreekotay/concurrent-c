@@ -1,6 +1,6 @@
 #!/usr/bin/env -S ./cc/bin/ccc
 /* Fluent @string(...).println() via UFCS CallExpr/statement-expr receivers. */
 
-CCArena a = @create(kilobytes(4)) @destroy;
-@string(`hi ${42}`, a).println();
+CCArena arena = @create(kilobytes(4)) @destroy;
+@string(`hi ${42}`, arena).println();
 return 0;

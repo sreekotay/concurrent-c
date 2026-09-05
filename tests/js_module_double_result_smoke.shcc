@@ -1,14 +1,14 @@
-/* The wider marshal gamut through one staged addon: a double method and a
+/* The wider marshal gamut through one staged addon: arena double method and arena
  * `double !>(CCError)` method (the predeclared-Result collision the
- * Python twin pins), a string return, BigInt out at 2^60 and a BigInt
+ * Python twin pins), arena string return, BigInt out at 2^60 and arena BigInt
  * argument, arity and unexpected-keyword and wrong-type reports, both
- * fallible shapes, and the keyword-bag / js_pos escape for a trailing
+ * fallible shapes, and the keyword-bag / js_pos escape for arena trailing
  * CCJsVal.  The module is js_module_double_result_mod.ccs; the node
  * driver is js_module_double_result_run.js. */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
 {
-    CCCommand which = cc_command(a, @slice("sh"));
+    CCCommand which = cc_command(arena, @slice("sh"));
     which.arg("-c");
     which.arg("command -v node >/dev/null 2>&1");
     int rc = which.status() !>;
@@ -18,7 +18,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 /* No staging: `js_module::[Counter]` names the artifact, so building the
  * fixture where it lives produces bin/gamut_counter.node. */
 {
-    CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
+    CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
     build.arg("build");
     build.arg("tests/js_module_double_result_mod.ccs");
     build.inherit_stdio();
@@ -27,7 +27,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand run = cc_command(a, @slice("node"));
+    CCCommand run = cc_command(arena, @slice("node"));
     run.arg("tests/js_module_double_result_run.js");
     run.inherit_stdio();
     int rc = run.status() !>;

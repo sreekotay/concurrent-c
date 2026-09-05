@@ -186,6 +186,12 @@ char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src,
 char* cc_rewrite_naked_print_aliases(const char* src, size_t n);
 void cc_reset_included_cch_sources(void);
 
+/* Nested header-lower (hook compile) must not wipe the TU include list.
+ * `lower_headers` still resets; quoted local `.cch` already increments
+ * the same flag around `cc_lower_header_string`. */
+void cc_header_lower_preserve_tu_begin(void);
+void cc_header_lower_preserve_tu_end(void);
+
 /* Enumerate .cch paths registered for this TU (harvest / include rewrite).
  * Paths are absolute; valid until the next cc_reset_included_cch_sources. */
 size_t cc_included_cch_source_count(void);

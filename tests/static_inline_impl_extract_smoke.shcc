@@ -1,7 +1,7 @@
 /* Owned impl-grade face: guest extract must keep `static inline` bodies. */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
-CCCommand emit_guest = cc_command(a, @slice("./cc/bin/ccc"));
+CCCommand emit_guest = cc_command(arena, @slice("./cc/bin/ccc"));
 emit_guest.arg("--no-cache");
 emit_guest.arg("--emit-c-only");
 emit_guest.arg("tests/static_inline_impl_extract_guest.ccs");
@@ -14,7 +14,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_hdr = cc_command(a, @slice("grep"));
+CCCommand grep_hdr = cc_command(arena, @slice("grep"));
 grep_hdr.arg("-q");
 grep_hdr.arg("STATIC_INLINE_IMPL_BODY_MUST_STAY");
 grep_hdr.arg("out/include/tests/static_inline_impl_extract.h");
@@ -24,7 +24,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_eh = cc_command(a, @slice("grep"));
+CCCommand grep_eh = cc_command(arena, @slice("grep"));
 grep_eh.arg("-q");
 grep_eh.arg("@errhandler");
 grep_eh.arg("out/include/tests/static_inline_impl_extract.h");
@@ -34,7 +34,7 @@ if (rc == 0) {
     return 1;
 }
 
-CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
+CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
 build.arg("build");
 build.arg("--no-cache");
 build.arg("tests/static_inline_impl_extract_guest.ccs");
@@ -47,7 +47,7 @@ if (rc != 0) {
     "build failed".println();
     return 1;
 }
-CCCommand run = cc_command(a, @slice("out/static_inline_impl_extract_smoke"));
+CCCommand run = cc_command(arena, @slice("out/static_inline_impl_extract_smoke"));
 run.inherit_stdio();
 rc = run.status() !>;
 if (rc != 0) {

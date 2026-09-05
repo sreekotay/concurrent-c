@@ -26,7 +26,7 @@ elif [[ "${1:-}" == "--full" || "${FULL:-0}" == "1" ]]; then
     DATE=$(date -u +%Y_%m_%d)
     FULL=1 BENCH_OUT="${BENCH_OUT:-benchmarks/staticd_${DATE}.txt}" ./bench_latency.sh
 else
-    echo "=== directional latency (3s) ==="
+    echo "=== directional latency (1s) ==="
     DATE=$(date -u +%Y_%m_%d)
     BENCH_OUT="${BENCH_OUT:-benchmarks/staticd_${DATE}.txt}" ./bench_latency.sh
 fi

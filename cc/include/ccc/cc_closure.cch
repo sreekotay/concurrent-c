@@ -79,6 +79,7 @@ typedef struct {
    
    To validate this suppression is safe:
    1. Run tests/tsan_closure_make_stress.c with TSan enabled
+      (clang -Iout/include after `make cc`; not raw .cch)
    2. If TSan reports races, investigate: either the suppression is masking a real
       race, or TSAN_IGNORE_LOCAL_WRITE usage needs adjustment
    3. Expected: No TSan errors (suppression is safe for thread-local stack writes) */

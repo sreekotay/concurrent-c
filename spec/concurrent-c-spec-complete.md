@@ -319,7 +319,7 @@ never reach the host compiler.
 
 `#pragma(@prelude) off` injects no automatic prolog: a script unit does not
 receive `<ccc/script/prelude.cch>`, the default `@errhandler`, or token-gated
-`a` / `io` / `in` / `args`. Synthetic `main` still wraps top-level statements.
+`stdin` / `arena` / `args`. Synthetic `main` still wraps top-level statements.
 Emitted C omits the automatic `<stddef.h>` / `<stdint.h>` / `<stdlib.h>`
 includes. A one-line provenance comment naming the `ccc` version may remain;
 it does not affect compilation.
@@ -5473,7 +5473,7 @@ void !>(CCError) cc_exclusive_mutex_acquire_when_into(CCExclusiveMutex* m,
 
 `@parallel` names a join of independent work. It is not a nursery. The brace form is `CCParallel !>(CCError)`: create can fail; `.wait()` is the join. The implementation may run some arms or iterations on other workers, or run all of them on the caller. `n.spawn` does not sequentialize; `@parallel` may.
 
-The form is selected by the tokens after `@parallel`: `{` (always try to spawn; spawned arms may be denied), `spawn` then `{` (meeting admit: spawned arms are not denied, §8.11.7), `(name) { … }` with no `!>` (admit onto dest `name`; a statement, not a Result), `(` or `seq (` (spawn if the predicate, §8.11.3, §8.11.5), `wait (` (ordered spawn loop over a turnstile; an expression of type `bool !>(CCError)`, §8.11.6), or `@for` (bisected range, §8.11.4). `spawn` is a brace join; combining it with `for` or `wait` is ill-formed. Assignment join and `@parallel for` are `CCParallel !>(CCError)`. A statement consumes the Result and waits (`!>.wait()!>;`) or binds the handle (`CCParallel h = … !>;`). A bare construct is an unconsumed Result. The wait-for form is `bool !>(CCError)`.
+The form is selected by the tokens after `@parallel`: `{` (always try to spawn; spawned arms may be denied), `spawn` then `{` (meeting admit: spawned arms are not denied, §8.11.7), `(name) { … }` with no `!>` (admit onto dest `name`; a statement, not a Result), `(` or `seq (` (spawn if the predicate, §8.11.3, §8.11.5), `wait (` (ordered spawn loop over a turnstile; an expression of type `bool !>(CCError)`, §8.11.6), or `@for` (bisected range, §8.11.4). `spawn` is a brace join; combining it with `for` or `wait` is ill-formed. Assignment join and `@parallel for` are `CCParallel !>(CCError)`. A statement consumes the Result and waits (`!>.wait()!>;`) or binds the handle (`CCParallel h = … !>;`). A bare construct is an unconsumed Result. `!>;` with neither a dest bind nor `.wait()` unwraps the Result and discards the handle. The wait-for form is `bool !>(CCError)`.
 
 `@parallel(h) { stmts }` admits a fiber onto live dest `h`. It is the growing form of dest: a name arrives after the brace. It is a statement: no `!>`, no dest bind. Spawned work is not denied. A later write of a snapshot name in the caller is not this fiber's object (accept `sock`, loop `x`). Pointer and array names copy the pointer. An atomic name is the caller's cell. Occupancy is who is still running. A finished admit is dropped before the next admit; the live index grows if it must (OOM is a programming error). `CC_PARALLEL_TASK_MAX` is brace width and the dest's inline pad, not a cap on this form. `h.wait()` joins the dest's arms and whoever is still admitted. Admit after join or leave is a programming error. Admit after cancel fails (`CC_ERR_CANCELLED`); dest-attach unwraps into the enclosing `@errhandler`. The same tokens with `!>` are the predicate join (§8.11.3).
 
@@ -6408,15 +6408,15 @@ Concurrent-C pipeline:
    `@errhandler(CCError)` in the same scope overrides the default for
    `CCError`. `CCIoError` Results reach this handler via `@typeview` `as: base`;
    Io constructors fill the face message so the print is not blank.
-5. Token-gated script predecls `a` / `io` / `in` / `args` (same bindings as
+5. Token-gated script predecls `stdin` / `arena` / `args` (same bindings as
    one-liner mode; see `draft_script_oneliners.md` §1.1) are injected into
    the synthetic `main` wrap only — the top-level statement body — when the
    identifier appears as a code token there and that body does not already
-   declare the name. Injected shapes: `a` is a 1 MiB arena; `io` is
-   `CCStdio` on a private `__cc_io_arena` (not `a`); `in` is `char[:]` from
-   `io.read_all() !>`; `args` is `CCSlice` over `argv + 1`. `in` implies
-   `io`; `io` implies its arena (and thus `a` only when `a` is also
-   referenced). `@task` bodies are not predeclared and declare these names
+   declare the name. Injected shapes: `arena` is `arena@(megabytes(1))
+   @destroy`; `stdin` is a `BufReader` over process stdin (`stdin.read_line
+   (&line) !>`, `stdin.read_all(arena) !>` for slurp); `args` is `CCSlice`
+   over `argv + 1`. Using `line` or `nr` implies `stdin`; one-liner `-n`/`-p`
+   force `stdin`. `@task` bodies are not predeclared and declare these names
    explicitly when needed. One-liner `-n`/`-p` locals `line` / `nr` are not
    ambient file predecls.
 6. An explicit top-level `main` together with any MAIN-classified top-level
@@ -6502,7 +6502,7 @@ headers below. Scripts do not `#include` the prelude; the driver injects it.
 
 | Header | Role |
 | ------ | ---- |
-| `<ccc/stdio.cch>` | `CCStdio` reads; console print (`io.println` / data UFCS / naked aliases) |
+| `<ccc/stdio.cch>` | Console print (`println` / data UFCS / naked aliases); `CCStdio` when a handle is bound explicitly |
 | `<ccc/std/cli.cch>` | `@grammar(cli)` comptime engine and argv runtime (`cc_parse_args` / `cc_prepare_args` / `cc_print_usage`). `.shcc` gets this from the script prelude; `.ccs` includes it before `@grammar(cli)`. |
 | `<ccc/std/json.cch>` | RFC 8259 JSON codecs (`jstr` / `jstr_enc`). Opt-in; factories are `JsonRfc` / `JsonKeep` / `JsonDom` (`<ccc/std/json*.rules>`). Product schemas stay in the TU. |
 | `<ccc/script/pathx.cch>` | Repo-root discovery and `char[:0]` path join |
@@ -6514,33 +6514,31 @@ Arena parameters follow the stdlib convention: **arena last** on allocating
 APIs. Fallible script helpers return `T !>(CCError)` (or the corresponding
 `CCResult_*_CCError` form) unless noted.
 
-#### 9.5.4 `CCStdio` and console print
+#### 9.5.4 Stdin reads and console print
+
+Script predecls supply `stdin` (a `BufReader` over process stdin) and `arena`
+(a 1 MiB `@destroy` arena). Line-at-a-time filters use `stdin.read_line
+(&line) !>`; slurp with `stdin.read_all(arena) !>`. Console output uses naked
+`println` / `eprintln` and data-first UFCS — not `io.println`:
 
 ```c
-CCArena a@(megabytes(1)) @destroy;
-CCStdio io@(a) @destroy;
+char[:] line;
+while (stdin.read_line(&line) !>) {
+    line.println();
+}
 
-char[:] in = io.read_all() !>;
-io.write_all(out.as_slice()) !>;
-```
-
-`CCStdio` binds an arena for growing reads (`read_all` / `read_line`) and
-offers `write_all` / `println` / `eprintln` that take a `CCSlice` or
-`CCString`. When script `io` is in scope, preferred examples are handle-first.
-Data-first UFCS and naked aliases remain valid (UFCS either way on the chosen
-receiver):
-
-```c
-io.println(path);               /* preferred when io is in scope */
-io.eprintln(line);
-io.println(@string(`n=${n}`, a));
-
-path.println();                 /* also OK: UFCS on data */
+char[:] slurp = stdin.read_all(arena) !>;
+println(@string(`bytes=${slurp.len()}`, arena));
+path.println();                 /* UFCS on data */
 "literal".println();            /* lit/cstr → CCSlice temp → cc_slice_* */
 println(path);                  /* naked alias → cc_println */
 path.fprintln(STDERR_FILENO);   /* UFCS: data, then fd */
 fprintln(STDERR_FILENO, path);  /* naked: fd first, then data */
 ```
+
+`<ccc/stdio.cch>` also defines `CCStdio` for programs that bind an explicit
+handle (`CCStdio io@(arena) @destroy; io.read_all() !>;`). Script predecls do
+not inject `io` or a magic arena name.
 
 When the *data* is the UFCS receiver, `CCSlice` / `CCString` call `cc_slice_*` /
 `cc_string_*`; C string and string-literal receivers coerce to a `CCSlice`
@@ -6621,7 +6619,7 @@ orchestration:
 - **Parse:** `@grammar(schema|rules)` (and SERDES where appropriate) over
   file or stdin bytes; `@grammar(cli)` / `cc_prepare_args` over argv.
 - **Format:** `@string(\`…${expr}…\`)` into a `CCString` / slice, then
-  `CCStdio` or file write.
+  `println` / file write.
 - **Glue:** path join, temp files, `cc_sh_run` / `cc_script_sh` — thin
   wrappers over `<ccc/std/>` process, dir, and I/O APIs.
 
@@ -6630,11 +6628,9 @@ Example (stdin transform):
 ```c
 #!/usr/bin/env -S ./cc/bin/ccc --as=shcc
 
-CCArena a@(megabytes(1)) @destroy;
-CCStdio io@(a) @destroy;
-char[:] in = io.read_all() !>;
+char[:] in = stdin.read_all(arena) !>;
 /* … transform into out … */
-io.write_all(out.as_slice()) !>;
+println(out);
 ```
 
 Example (parse → map → report) uses the same prelude, a top-level `@grammar`

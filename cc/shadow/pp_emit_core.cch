@@ -3744,7 +3744,11 @@ static const char* g_shadow_ufcs_compile_src;
 static size_t g_shadow_ufcs_compile_len;
 static char g_shadow_ufcs_path[1024];
 enum { SHADOW_UFCS_SEEN_CAP = 128 };
-static char g_shadow_ufcs_seen[SHADOW_UFCS_SEEN_CAP][256];
+typedef struct ShadowUfcsSeen {
+    char path[256];
+    int ufcs_compiled;
+} ShadowUfcsSeen;
+static ShadowUfcsSeen g_shadow_ufcs_seen[SHADOW_UFCS_SEEN_CAP];
 static int g_shadow_ufcs_nseen;
 /* Current structured UFCS site — hook-compose miss uses these for file:line. */
 static TapeCache* g_shadow_ufcs_cache;
@@ -5520,16 +5524,37 @@ static int shadow_family_header_read(const char* suffix, char** out,
                                      size_t* out_len) {
     char cand[512];
     const char* env;
-    FILE* f;
+    FILE* f = NULL;
     long sz;
     char* buf;
     size_t n;
+    int want_cch;
     if (!suffix || !out || !out_len) return 0;
     *out = NULL;
     *out_len = 0;
+    want_cch = (strlen(suffix) > 4 &&
+                strcmp(suffix + strlen(suffix) - 4, ".cch") == 0);
+    /* Prefer CC_INCLUDE_PATH for `.cch` (live sources). Checkout-relative
+     * probes and lowered `out/include` only carry `.h` bodies. */
+    if (want_cch && (env = getenv("CC_INCLUDE_PATH")) && env[0]) {
+        char paths[1024];
+        char* p;
+        char* sep;
+        snprintf(paths, sizeof(paths), "%s", env);
+        p = paths;
+        while (p && *p && !f) {
+            sep = strchr(p, ':');
+            if (sep) *sep = 0;
+            if (*p && !strstr(p, "/out/include") && !strstr(p, "out/include/")) {
+                snprintf(cand, sizeof(cand), "%s/ccc/%s", p, suffix);
+                f = fopen(cand, "rb");
+            }
+            p = sep ? sep + 1 : NULL;
+        }
+    }
     snprintf(cand, sizeof(cand), "cc/include/ccc/%s", suffix);
-    f = fopen(cand, "rb");
-    if (!f) {
+    if (!f) f = fopen(cand, "rb");
+    if (!f && !want_cch) {
         snprintf(cand, sizeof(cand), "out/include/ccc/%s", suffix);
         f = fopen(cand, "rb");
     }

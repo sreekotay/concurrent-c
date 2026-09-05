@@ -12,7 +12,7 @@ int cc_path_is_shcc(const char* path);
  *   - force-include <ccc/script/prelude.cch>
  *   - if no top-level main: split the body so TU-scope items stay outside
  *     synthetic main, and hoist statements / runtime-init decls into
- *     `int main` (default @errhandler + token-gated a/io/in/args predecls
+ *     `int main` (default @errhandler + token-gated stdin/arena/args predecls
  *     inside that main; same predecls inside each @task body)
  *   - TU-scope: # directives, @grammar / @comptime, typedef, struct/enum/
  *     union type defs, function definitions and prototypes

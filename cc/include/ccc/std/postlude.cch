@@ -1,0 +1,44 @@
+/*
+ * Stdlib appendix included last from prelude.cch.
+ *
+ * Decl headers lower to .h and drop @typehooks. Handlers that need a compiled
+ * `.ufcs` hook live here so slim hook compile sees a named function only —
+ * not the factory / type dump of the decl header.
+ *
+ * Hook TCC defines CC_UFCS_SLIM before including prelude so this file is not
+ * pulled in twice (prelude + extracted handler).
+ */
+#ifndef CC_STD_POSTLUDE_H
+#define CC_STD_POSTLUDE_H
+
+#include <ccc/cc_ufcs.cch>
+
+static inline CCSlice cc_bufreader_ccstdin_ufcs(CCSlice recv_type, CCSlice method,
+                                                CCSlice mode, CCSliceArray argv,
+                                                CCSliceArray arg_types,
+                                                CCArena arena) {
+    (void)recv_type;
+    (void)mode;
+    (void)arg_types;
+    (void)arena;
+    if (CCSlice_eq_cstr(&method, "read_line")) {
+        /* Plain callee — value recv still takes `&stdin`. emit_value_cstr
+         * would pass the BufReader by value into a pointer parameter. */
+        if (argv.len == 1)
+            return cc_slice_from_static(
+                (void *)"BufReader_CCStdin_read_line_into",
+                sizeof("BufReader_CCStdin_read_line_into") - 1);
+        if (argv.len == 0)
+            return cc_slice_from_static(
+                (void *)"BufReader_CCStdin_read_line",
+                sizeof("BufReader_CCStdin_read_line") - 1);
+        return cc_slice_empty();
+    }
+    return cc_ufcs_pass();
+}
+
+@typehooks on BufReader_CCStdin {
+    .ufcs = cc_bufreader_ccstdin_ufcs,
+};
+
+#endif /* CC_STD_POSTLUDE_H */

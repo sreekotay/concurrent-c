@@ -6,7 +6,7 @@
 
 static int add(int x, int y) { return x + y; }
 
-CCArena a = @create(kilobytes(4)) @destroy;
+CCArena arena = @create(kilobytes(4)) @destroy;
 int v = add(2, 3);
 if (v != 5) return 1;
 return 0;

@@ -1,12 +1,12 @@
-/* Isolated JS domains from CC: builds tests/js_dom_prog.ccs — a full
- * node child per cc_js_new(true, a) handle, the same line-JSON broker
+/* Isolated JS domains from CC: builds tests/js_dom_prog.ccs — arena full
+ * node child per cc_js_new(true, arena) handle, the same line-JSON broker
  * as concurrent-c-node — and runs it.  Also pins the embedded broker
  * against pypi/cc-node/cc_node/broker.cjs: the two are the SAME wire,
- * and drift between them would be a silent fork of the protocol. */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+ * and drift between them would be arena silent fork of the protocol. */
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
 {
-    CCCommand which = cc_command(a, @slice("sh"));
+    CCCommand which = cc_command(arena, @slice("sh"));
     which.arg("-c");
     which.arg("command -v node >/dev/null 2>&1");
     int rc = which.status() !>;
@@ -14,7 +14,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
+    CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
     build.arg("build");
     build.arg("tests/js_dom_prog.ccs");
     build.inherit_stdio();
@@ -25,7 +25,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 {
     /* A fresh cache dir for this run: the one broker file in it IS the
      * embedded copy the current binary writes — no mtime archaeology. */
-    CCCommand run = cc_command(a, @slice("sh"));
+    CCCommand run = cc_command(arena, @slice("sh"));
     run.arg("-c");
     run.arg("rm -rf tmp/js_dom_cache && "
             "CC_JS_HOST_CACHE=tmp/js_dom_cache ./bin/js_dom_prog");
@@ -37,7 +37,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 {
     /* Broker parity: the embedded copy must be byte-identical to the
      * package's broker.cjs — drift would silently fork the wire. */
-    CCCommand par = cc_command(a, @slice("sh"));
+    CCCommand par = cc_command(arena, @slice("sh"));
     par.arg("-c");
     par.arg("f=$(ls tmp/js_dom_cache/cc_js_broker_*.cjs 2>/dev/null | head -1); "
             "test -n \"$f\" && cmp -s \"$f\" pypi/cc-node/cc_node/broker.cjs");

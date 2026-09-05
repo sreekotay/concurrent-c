@@ -8,6 +8,8 @@ callees, and standard-library UFCS families.
 The standard library provides these headers under `<ccc/std/...>`:
 
 - `prelude.cch`
+- `postlude.cch` (included last from `prelude.cch`; compiled `.ufcs` hooks)
+- `stdin.cch` (script `BufReader` over fd 0; `read_line` arity hook is in `postlude.cch`)
 - `slice.cch`
 - `slice_packed.cch`
 - `string.cch`
@@ -43,9 +45,11 @@ turnstile lives in `<ccc/cc_turnstile.cch>` (also via prelude); see
 `cc_grammar`, `cc_shape`, `cc_type`, `cc_slice`, `cc_result`, `cc_channel`,
 `cc_nursery`, `cc_exec`, `cc_turnstile`) and these stdlib headers: `slice`, `string`,
 `slice_packed`, `io` (which includes `bufio` and `async_io`), `vec`,
-`map_forward`, `array_map`, `shard_map`, `dir`, `process`, `exec`, and
-`future`. Include networking, DNS, TLS, HTTP, CLI, JSON, task, hash, `static_map`,
-and `map.cch` / `map_impl.cch` explicitly when needed. Channels, nursery,
+`map_forward`, `array_map`, `shard_map`, `dir`, `process`, `exec`,
+`future`, and `postlude`. Include networking, DNS, TLS, HTTP, CLI, JSON, task, hash, `static_map`,
+and `map.cch` / `map_impl.cch` explicitly when needed. `postlude.cch` holds
+`@typehooks` that need a compiled `.ufcs` hook; decl headers stay collect-only.
+`stdin.cch` is included from `<ccc/script/prelude.cch>`, not from the std prelude. Channels, nursery,
 arenas, results, exclusive sections, and the turnstile are defined in
 `spec/concurrent-c-spec-complete.md`; this document names them only where a
 stdlib header uses them.
@@ -788,20 +792,19 @@ helpers implement POSIX path syntax only: `cc_path_sep()` is `/`, and
 
 ## Script console print
 
-`<ccc/stdio.cch>` (not `<ccc/std/…>`) defines
-`CCStdio` for arena-backed stdin reads and line-oriented console writes.
-When script `io` is in scope, preferred examples are handle-first. Data-first
-UFCS and naked aliases remain valid (UFCS either way on the chosen receiver):
+`<ccc/stdio.cch>` (not `<ccc/std/…>`) defines console print aliases and
+`CCStdio` for programs that bind an explicit handle. `.shcc` predecls supply
+`stdin` (`BufReader` over process stdin) and `arena`; scripts use naked
+`println` / `eprintln` and data-first UFCS — not `io.println`:
 
 ```c
-io.println(path);                  /* preferred when io is in scope */
-io.eprintln(line);
-io.println(@string(`n=${n}`, a));
+println(path);                  /* naked alias → cc_println */
+eprintln(line);
+println(@string(`n=${n}`, arena));
 
-path.println();                    /* also OK: UFCS on data */
-"literal".println();               /* lit/cstr → CCSlice → cc_slice_* */
+path.println();                 /* UFCS on data */
+"literal".println();            /* lit/cstr → CCSlice → cc_slice_* */
 cstr_ptr.println();
-println(path);                     /* naked alias → cc_println */
 path.fprintln(STDERR_FILENO);
 ```
 
@@ -816,10 +819,11 @@ call unchanged.
 
 Guidelines:
 
-- Prefer `io.println(data)` / `io.eprintln(data)` when `io` is in scope.
-- Data-first and naked forms remain valid; choose `println` / `eprintln` /
-  `fprintln` for the sink.
-- Prefer `io.println(@string(…))` (or data-first on the temp) for formatted
+- Prefer naked `println(data)` / `eprintln(data)` in scripts; bind `CCStdio`
+  explicitly when a handle-first style is clearer.
+- Data-first UFCS remains valid; choose `println` / `eprintln` / `fprintln`
+  for the sink.
+- Prefer `println(@string(…, arena))` (or data-first on the temp) for formatted
   output; do not wrap temps in `cc_println` in new script source.
 - `cc_println` / `cc_eprintln` are lowered-C sugar (driver-injected default
   `@errhandler`, `-E` desugar).

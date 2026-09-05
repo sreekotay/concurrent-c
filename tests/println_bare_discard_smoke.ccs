@@ -7,8 +7,8 @@
 #include <ccc/stdio.cch>
 
 int main(void) {
-    cc_arena_stack(a, kilobytes(4));
-    CCStdio io = cc_stdio_create(a);
+    cc_arena_stack(arena, kilobytes(4));
+    CCStdio io = cc_stdio_create(arena);
 
     println("naked");
     eprintln("naked err");
@@ -18,7 +18,7 @@ int main(void) {
 
     io.println("via io");
     io.eprintln("via io err");
-    io.println(@string(`io tpl=${7}`, a));
+    io.println(@string(`io tpl=${7}`, arena));
 
     println("println_bare_discard_smoke: OK");
     return 0;

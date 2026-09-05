@@ -1,9 +1,9 @@
-/* Leading block comment may hold a semicolon; @destroy on the next
+/* Leading block comment may hold arena semicolon; @destroy on the next
  * statement must still lower. (Was task #53: comment-blind stmt-start
  * walk in builtin-owned @destroy rewrite.) */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 {
-    CCCommand which = cc_command(a, @slice("sh"));
+    CCCommand which = cc_command(arena, @slice("sh"));
     which.arg("-c");
     which.arg("true");
     int rc = which.status() !>;

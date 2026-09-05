@@ -1,7 +1,7 @@
-/* All-static unowned face: two TUs splice a private copy (no pragma). */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+/* All-static unowned face: two TUs splice arena private copy (no pragma). */
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
-CCCommand emit_a = cc_command(a, @slice("./cc/bin/ccc"));
+CCCommand emit_a = cc_command(arena, @slice("./cc/bin/ccc"));
 emit_a.arg("--no-cache");
 emit_a.arg("--emit-c-only");
 emit_a.arg("tests/quote_cch_per_tu_a_mod.ccs");
@@ -10,11 +10,11 @@ emit_a.arg("out/quote_cch_per_tu_a.c");
 emit_a.inherit_stdio();
 int rc = emit_a.status() !>;
 if (rc != 0) {
-    "emit a failed".println();
+    "emit arena failed".println();
     return 1;
 }
 
-CCCommand grep_static = cc_command(a, @slice("grep"));
+CCCommand grep_static = cc_command(arena, @slice("grep"));
 grep_static.arg("-q");
 grep_static.arg("static int per_tu_val");
 grep_static.arg("out/quote_cch_per_tu_a.c");
@@ -24,7 +24,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
+CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
 build.arg("build");
 build.arg("--no-cache");
 build.arg("tests/quote_cch_per_tu_a_mod.ccs");
@@ -37,7 +37,7 @@ if (rc != 0) {
     "build failed".println();
     return 1;
 }
-CCCommand run = cc_command(a, @slice("out/quote_cch_per_tu_smoke"));
+CCCommand run = cc_command(arena, @slice("out/quote_cch_per_tu_smoke"));
 run.inherit_stdio();
 rc = run.status() !>;
 if (rc != 0) {

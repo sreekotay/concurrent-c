@@ -1,14 +1,14 @@
-/* `as_list::[T]` reads a contiguous buffer exporter with one memcpy.
+/* `as_list::[T]` reads arena contiguous buffer exporter with one memcpy.
  *
  * The result must be indistinguishable from the per-element walk — same
- * values, same element count — so this compares the exporter path against a
- * plain list of the same values. The wrong-dtype case matters most: a
+ * values, same element count — so this compares the exporter path against arena
+ * plain list of the same values. The wrong-dtype case matters most: arena
  * float32 array asked for as double must NOT be reinterpreted raw; it falls
  * back to per-element conversion, because bytes only move when both sides
  * agree on what they mean. */
 #include <ccc/script/py.cch>
 
-CCPy py = cc_py_new(false, a) !> @destroy;
+CCPy py = cc_py_new(false, arena) !> @destroy;
 
 py.exec(@slice(
     "import array\n"
@@ -24,11 +24,11 @@ CCPyObj ld = m.get("lst_d") !> @destroy;
 CCPyObj bq = m.get("buf_q") !> @destroy;
 CCPyObj bf = m.get("buf_f") !> @destroy;
 
-CCSlice xs = bd.as_list::[double](a) !>;
-CCSlice ys = ld.as_list::[double](a) !>;
-CCSlice qs = bq.as_list::[int64_t](a) !>;
+CCSlice xs = bd.as_list::[double](arena) !>;
+CCSlice ys = ld.as_list::[double](arena) !>;
+CCSlice qs = bq.as_list::[int64_t](arena) !>;
 /* float32 exporter, double destination: per-element fallback, not raw. */
-CCSlice fs = bf.as_list::[double](a) !>;
+CCSlice fs = bf.as_list::[double](arena) !>;
 
 char *xp = xs.ptr, *yp = ys.ptr, *fp = fs.ptr,
      *qp = qs.ptr;
@@ -38,5 +38,5 @@ int ok = xs.len == 4 && ys.len == 4 && qs.len == 3 && fs.len == 2;
 for (size_t i = 0; i < 4 && ok; i++) ok = xv[i] == yv[i];
 ok = ok && qv[0] == 10 && qv[2] == 30;
 ok = ok && fv[0] == 1.5 && fv[1] == 2.5;
-println(@string(`buffer_as_list ok=${ok}`, a));
+println(@string(`buffer_as_list ok=${ok}`, arena));
 return ok ? 0 : 1;

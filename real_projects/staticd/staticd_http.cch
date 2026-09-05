@@ -86,6 +86,34 @@ static CCString http_fmt_date(time_t t, CCArena a) {
     return s;
 }
 
+/* IMF-fixdate is 1s resolution — format once per second / mtime. */
+static time_t g_date_t = (time_t)-1;
+static char g_date[32];
+static time_t g_lm_t = (time_t)-1;
+static char g_lm[32];
+
+static char[:] http_stamp(time_t t, time_t* slot, char* buf, CCArena a) {
+    if (t != *slot || !buf[0]) {
+        CCString s = http_fmt_date(t, a);
+        char[:] sl = s.as_slice();
+        size_t n = sl.len;
+        if (n > 29) n = 29;
+        if (sl.ptr && n) memcpy(buf, sl.ptr, n);
+        buf[n] = 0;
+        *slot = t;
+        return cc_slice_from_buffer(buf, n);
+    }
+    return cc_slice_from_buffer(buf, 29);
+}
+
+static char[:] http_date_now(CCArena a) {
+    return http_stamp(time(NULL), &g_date_t, g_date, a);
+}
+
+static char[:] http_last_modified(time_t t, CCArena a) {
+    return http_stamp(t, &g_lm_t, g_lm, a);
+}
+
 static int http_parse_date(char[:] s, CCArena a, time_t* out) {
     HttpDate d;
     int m;

@@ -647,28 +647,24 @@ static inline bool !>(CCIoError) cc_channel_try_send_into_typed_call(CCChanTx tx
 #define cc_channel_recv_task_raw3(ch, out_value, value_size) cc_channel_raw_recv_task((ch), (out_value), (value_size))
 #define cc_channel_recv_task(...) CC__CHANNEL_SELECT_2_OR_3(__VA_ARGS__, cc_channel_recv_task_raw3, cc_channel_recv_task_typed)(__VA_ARGS__)
 
-static inline bool cc__channel_lower_c_eq(CCSlice s, const char *cstr) {
-    return cc_slice_eq_cstr(&s, cstr);
-}
-
 static inline CCSlice cc_channel_tx_lower_c(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena arena) {
     (void)recv_type;
     (void)argv;
     (void)arg_types;
-    if (cc__channel_lower_c_eq(method, "send")) {
-        if (cc__channel_lower_c_eq(mode, "await")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_task");
+    if (CCSlice_eq_cstr(&method, "send")) {
+        if (CCSlice_eq_cstr(&mode, "await")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_task");
         return cc_ufcs_emit_value_cstr(arena, "cc_channel_send");
     }
-    if (cc__channel_lower_c_eq(method, "try_send")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_try_send");
-    if (cc__channel_lower_c_eq(method, "send_into")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_into");
-    if (cc__channel_lower_c_eq(method, "try_send_into")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_try_send_into");
-    if (cc__channel_lower_c_eq(method, "set_recv_signal")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_set_recv_signal");
-    if (cc__channel_lower_c_eq(method, "send_take")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_take");
-    if (cc__channel_lower_c_eq(method, "send_task")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_task");
-    if (cc__channel_lower_c_eq(method, "send_task_hybrid")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_task_hybrid");
-    if (cc__channel_lower_c_eq(method, "close")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_close");
-    if (cc__channel_lower_c_eq(method, "cancel")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_cancel");
-    if (cc__channel_lower_c_eq(method, "free")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_free");
+    if (CCSlice_eq_cstr(&method, "try_send")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_try_send");
+    if (CCSlice_eq_cstr(&method, "send_into")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_into");
+    if (CCSlice_eq_cstr(&method, "try_send_into")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_try_send_into");
+    if (CCSlice_eq_cstr(&method, "set_recv_signal")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_set_recv_signal");
+    if (CCSlice_eq_cstr(&method, "send_take")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_take");
+    if (CCSlice_eq_cstr(&method, "send_task")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_task");
+    if (CCSlice_eq_cstr(&method, "send_task_hybrid")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_task_hybrid");
+    if (CCSlice_eq_cstr(&method, "close")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_close");
+    if (CCSlice_eq_cstr(&method, "cancel")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_cancel");
+    if (CCSlice_eq_cstr(&method, "free")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_free");
     return cc_slice_empty();
 }
 
@@ -676,14 +672,14 @@ static inline CCSlice cc_channel_rx_lower_c(CCSlice recv_type, CCSlice method, C
     (void)recv_type;
     (void)argv;
     (void)arg_types;
-    if (cc__channel_lower_c_eq(method, "recv")) {
-        if (cc__channel_lower_c_eq(mode, "await")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_recv_task");
+    if (CCSlice_eq_cstr(&method, "recv")) {
+        if (CCSlice_eq_cstr(&mode, "await")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_recv_task");
         return cc_ufcs_emit_value_cstr(arena, "cc_channel_recv");
     }
-    if (cc__channel_lower_c_eq(method, "try_recv")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_try_recv");
-    if (cc__channel_lower_c_eq(method, "close")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_close");
-    if (cc__channel_lower_c_eq(method, "cancel")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_cancel");
-    if (cc__channel_lower_c_eq(method, "free")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_free");
+    if (CCSlice_eq_cstr(&method, "try_recv")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_try_recv");
+    if (CCSlice_eq_cstr(&method, "close")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_close");
+    if (CCSlice_eq_cstr(&method, "cancel")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_cancel");
+    if (CCSlice_eq_cstr(&method, "free")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_free");
     return cc_slice_empty();
 }
 

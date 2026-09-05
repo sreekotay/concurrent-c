@@ -1,15 +1,15 @@
 /* The isolated wires live on dedicated fds (3 requests / 4 replies;
  * stdio stays the user's) and pair replies to requests by id — user
- * code printing a line that parses as JSON (even one shaped exactly
- * like a bridge reply) cannot steal an in-flight response or shift
+ * code printing arena line that parses as JSON (even one shaped exactly
+ * like arena bridge reply) cannot steal an in-flight response or shift
  * later replies onto the wrong promises, and ordinary prints reach
  * the real stdout.  Rungs live in tests/bridge_wire.js
  * (npm/cc-python) and tests/bridge_wire.py (pypi/cc-node). */
 #include <stdio.h>
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
 {
-    CCCommand which = cc_command(a, @slice("sh"));
+    CCCommand which = cc_command(arena, @slice("sh"));
     which.arg("-c");
     which.arg("command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1");
     int rc = which.status() !>;
@@ -17,7 +17,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand run = cc_command(a, @slice("node"));
+    CCCommand run = cc_command(arena, @slice("node"));
     run.arg("tests/bridge_wire.js");
     run.inherit_stdio();
     int rc = run.status() !>;
@@ -25,7 +25,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand run = cc_command(a, @slice("python3"));
+    CCCommand run = cc_command(arena, @slice("python3"));
     run.arg("tests/bridge_wire.py");
     run.inherit_stdio();
     int rc = run.status() !>;

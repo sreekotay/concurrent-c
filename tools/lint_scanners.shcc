@@ -6,8 +6,8 @@
  * preprocess.c's CCScannerState, template_scan.c.  Every other in_bc /
  * in_block_comment local is legacy debt (PASS_CLEANUP_PLAN phase 4).
  *
- * Counts matching lines per file (same as `grep -cE`) and fails when a
- * file exceeds its baseline or a new file appears.  Shrinking? Lower the
+ * Counts matching lines per file (same as `grep -cE`) and fails when arena
+ * file exceeds its baseline or arena new file appears.  Shrinking? Lower the
  * baseline in the same commit — the ratchet only turns one way.
  *
  *   ./tools/lint_scanners.shcc
@@ -48,7 +48,7 @@ static const ScannerBaseline BASELINE[] = {
 };
 
 static int is_word_char(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+    return (c >= 'arena' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
            (c >= '0' && c <= '9') || c == '_';
 }
 
@@ -85,8 +85,8 @@ static int count_markers(CCSlice bytes) {
 }
 
 /* Glob may emit `cc/src//foo.c` when `**` matches empty — collapse slashes. */
-static CCSlice norm_path(CCSlice path, CCArena* a) {
-    char* buf = (char*)cc_arena_alloc(a, path.len + 1, 1);
+static CCSlice norm_path(CCSlice path, CCArena* arena) {
+    char* buf = (char*)cc_arena_alloc(arena, path.len + 1, 1);
     size_t o = 0;
     if (!buf) return cc_slice_empty();
     for (size_t i = 0; i < path.len; i++) {
@@ -108,41 +108,41 @@ static int baseline_get(CCSlice path) {
     return -1;
 }
 
-CCArena a = @create(megabytes(8)) @destroy;
+CCArena arena = @create(megabytes(8)) @destroy;
 
 /* File/glob Results are CCIoError; handler matches via as: → CCError. */
 @errhandler(CCError e) {
     CCString em = @string(
-        `lint_scanners: ${cc_io_error_str(cc_io_error(e))} (kind=${(int)e.kind})`, &a);
+        `lint_scanners: ${cc_io_error_str(cc_io_error(e))} (kind=${(int)e.kind})`, &arena);
     (void)em.eprintln();
     return 1;
 }
 
-CCSlice root = cc_script_repo_root(@slice(""), &a) !>;
+CCSlice root = cc_script_repo_root(@slice(""), &arena) !>;
 cc_dir_chdir(root) !>;
 
 int fail = 0;
-CCSliceArray c_files = cc_glob(@slice("cc/src/**/*.c"), a) !>;
-CCSliceArray h_files = cc_glob(@slice("cc/src/**/*.h"), a) !>;
+CCSliceArray c_files = cc_glob(@slice("cc/src/**/*.c"), arena) !>;
+CCSliceArray h_files = cc_glob(@slice("cc/src/**/*.h"), arena) !>;
 
 for (size_t pass = 0; pass < 2; pass++) {
     CCSliceArray files = (pass == 0) ? c_files : h_files;
     for (size_t i = 0; i < files.len(); i++) {
-        CCSlice path = norm_path(files.get(i), &a);
-        CCSlice bytes = cc_file_read_path(path, &a) !>;
+        CCSlice path = norm_path(files.get(i), &arena);
+        CCSlice bytes = cc_file_read_path(path, &arena) !>;
         int n = count_markers(bytes);
         if (n == 0) continue;
         int b = baseline_get(path);
         if (b < 0) {
             CCString msg = @string(
                 `lint_scanners: NEW hand-rolled scanner state in ${path} (${n} markers) — use util/text.h or CCInertScan`,
-                &a);
+                &arena);
             msg.eprintln();
             fail = 1;
         } else if (n > b) {
             CCString msg = @string(
                 `lint_scanners: ${path} grew scanner-state markers (${b} -> ${n}) — use util/text.h or CCInertScan`,
-                &a);
+                &arena);
             msg.eprintln();
             fail = 1;
         }

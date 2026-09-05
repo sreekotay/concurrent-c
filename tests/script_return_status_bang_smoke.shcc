@@ -7,14 +7,14 @@
  */
 
 static int run_ccc_version(void) {
-    CCArena a = @create(megabytes(1)) @destroy;
+    CCArena arena = @create(megabytes(1)) @destroy;
     @errhandler(CCIoError e) {
         (void)e;
         return 1;
     }
-    CCCommand cmd = cc_command(a, @slice("./cc/bin/ccc"));
+    CCCommand cmd = cc_command(arena, @slice("./cc/bin/ccc"));
     cmd.arg("--version");
-    /* Value-receiver UFCS for inherit_stdio (mutates a probe, not the run). */
+    /* Value-receiver UFCS for inherit_stdio (mutates arena probe, not the run). */
     CCCommand probe = cmd;
     (void)probe.inherit_stdio();
     /* Capture so suite stdout stays quiet. */

@@ -43,6 +43,9 @@
 #include "exec.cch"
 #include "async_io.cch"
 #include "future.cch"
+#ifndef CC_UFCS_SLIM
+#include "postlude.cch"
+#endif
 
 #endif // CC_STD_PRELUDE_H
 

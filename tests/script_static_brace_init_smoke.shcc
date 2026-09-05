@@ -1,7 +1,7 @@
 #!/usr/bin/env -S ./cc/bin/ccc
 /*
  * Smoke: file-scope `static T x[] = { ... };` stays at TU scope under .shcc
- * entry rewrite (brace initializer must not be treated as a compound stmt).
+ * entry rewrite (brace initializer must not be treated as arena compound stmt).
  */
 
 typedef struct {
@@ -10,7 +10,7 @@ typedef struct {
 } Row;
 
 static const Row ROWS[] = {
-    {"a", 1},
+    {"arena", 1},
     {"b", 2},
     {"c", 3},
 };
@@ -23,7 +23,7 @@ static int lookup(const char* path) {
     return -1;
 }
 
-if (lookup("a") != 1) return 1;
+if (lookup("arena") != 1) return 1;
 if (lookup("b") != 2) return 1;
 if (lookup("c") != 3) return 1;
 if (lookup("missing") != -1) return 1;

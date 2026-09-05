@@ -1,4 +1,4 @@
-/* Isolated domains: a full CPython child per domain over the mirrored
+/* Isolated domains: arena full CPython child per domain over the mirrored
  * cc-node wire — numpy in every domain (no subinterpreter refusal),
  * two pythons computing in parallel via py.task (relative timing),
  * default calls sync like in-process, async JS callbacks through
@@ -6,10 +6,10 @@
  * rejects in-flight task() calls, parent survives), handle hygiene,
  * and articulate revocation.  Rungs live in cc_python_bridge_proc.js;
  * the child side is npm/cc-python/broker.py (stdlib-only). */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
 {
-    CCCommand which = cc_command(a, @slice("sh"));
+    CCCommand which = cc_command(arena, @slice("sh"));
     which.arg("-c");
     which.arg("command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 "
               "&& python3 -c 'import numpy' >/dev/null 2>&1");
@@ -18,7 +18,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand run = cc_command(a, @slice("sh"));
+    CCCommand run = cc_command(arena, @slice("sh"));
     run.arg("-c");
     run.arg("node tests/cc_python_bridge_proc.js");
     run.inherit_stdio();

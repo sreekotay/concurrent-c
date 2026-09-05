@@ -32,7 +32,7 @@ Otherwise:
 cc_println(@string(`${EXPR}`));
 ```
 
-(so `-E '1+2'` still stringifies, while `-E '@string(`hi`, a)'` does not
+(so `-E '1+2'` still stringifies, while `-E '@string(`hi`, arena)'` does not
 nest templates). `-e` and `-E` are mutually exclusive.
 
 `-e -` reads the program text from standard input to end-of-file; the
@@ -53,39 +53,49 @@ In a `-e` / `-E` program body and in a `.shcc` unit’s synthetic `main` wrap
 declaration is emitted only when its identifier appears as a code token in
 that body (comments and string/character literals are ignored) and the body
 does not already declare the name. `@task` bodies never receive these
-predecls; they declare `a` / `io` / `in` / `args` explicitly when needed.
+predecls; they declare `stdin` / `arena` / `args` explicitly when needed.
 
-| Name | Type | Declaration |
-| ---- | ---- | ----------- |
-| `a` | `CCArena` | `a@(megabytes(1)) @destroy` |
-| `io` | `CCStdio` | private `__cc_io_arena` + `io@(__cc_io_arena) @destroy` |
-| `in` | `char[:]` | `io.read_all() !>` |
+| Name | Type | Declaration / binding |
+| ---- | ---- | --------------------- |
+| `arena` | `CCArena` | `arena@(megabytes(1)) @destroy` |
+| `stdin` | `BufReader` over process stdin | driver-injected reader; `stdin.read_line(&line) !>`, `stdin.read_all(arena) !>` |
 | `args` | `CCSlice` | `{ .ptr = (char *)(argv + 1), .len = (size_t)(argc > 1 ? argc - 1 : 0) }` |
 | `line` | `char[:]` | current input line (`-n` / `-p` only; loop-local) |
 | `nr` | `size_t` | 1-based line counter (`-n` / `-p` only; loop-local) |
 
-Using `in` implies `io`; using `io` implies its private arena (and `a` only
-when `a` is also referenced). Using `line` or `nr` implies `io`. `-E`, `-n`,
-and `-p` force `io` (and `a` when needed).
+Using `line` or `nr` implies `stdin`. `-n` and `-p` force `stdin`. A slurp
+that names `stdin.read_all(arena)` requires both `stdin` and `arena` as
+tokens (or explicit declarations of those names).
 
-The predeclared arena `a` is fixed at 1 MiB initial capacity (arena growth on
-overflow still applies where the allocator allows it). Large `in = read_all()`
-payloads can exhaust it; use an explicit arena or a file unit when that
-limit is too tight.
+The predeclared arena `arena` is fixed at 1 MiB initial capacity (arena growth
+on overflow still applies where the allocator allows it). Large
+`stdin.read_all(arena)` payloads can exhaust it; use an explicit larger
+arena or a file unit when that limit is too tight.
 
 Predeclared names are ambient plumbing: each has exactly one reasonable
-initialization and no failure path the program manages (`in`'s `!>` under
-the injected default handler is the register's posture, not management).
-Error binders are never predeclared: error access stays the explicit `(e)`
-binder form (§3.1).
+initialization and no failure path the program manages (unwraps under the
+injected default handler are the register's posture, not management). Error
+binders are never predeclared: error access stays the explicit `(e)` binder
+form (§3.1).
 
 ### 1.2 `-n` and `-p`: line loops
 
 `-n` wraps the (possibly `-E`-wrapped) body in a loop over standard-input
-lines via `CCStdio.read_line`. Each iteration binds `line` (without its
+lines via `stdin.read_line`. Each iteration binds `line` (without its
 trailing newline) and increments `nr`. `line`'s storage is for the current
-iteration only. `-p` is `-n` with `line.println();` appended to the loop body, so
-`continue` skips the print and `break` ends the loop.
+iteration only. `-p` is `-n` with `line.println();` appended to the loop
+body, so `continue` skips the print and `break` ends the loop.
+
+The desugared loop has the shape:
+
+```c
+size_t nr = 0;
+char[:] line;
+while (stdin.read_line(&line) !>) {
+    nr += 1;
+    /* body */
+}
+```
 
 ```text
 ... | ccc -n -e 'if (nr == 1) line.println();'
@@ -110,23 +120,22 @@ default by type match.
 
 ### 1.4 Console print
 
-When `io` is in scope, prefer handle-first UFCS. Data-first and naked aliases
-remain valid (UFCS either way). Cstr / string-literal *data* receivers coerce
-to `CCSlice` then `cc_slice_*` (no `cc_char_*` UFCS family):
+Scripts use naked console APIs and data-first UFCS — not `io.println`. Cstr /
+string-literal *data* receivers coerce to `CCSlice` then `cc_slice_*` (no
+`cc_char_*` UFCS family):
 
 ```c
-io.println(path);
-io.eprintln(line);
-io.println(@string(`n=${n}`, a));
+println(path);
+eprintln(line);
+println(@string(`n=${n}`, arena));
 path.println();                 /* also OK */
 "literal".println();
-println(path);                  /* naked alias */
 path.fprint(STDERR_FILENO);
 ```
 
 Short names `println` / `eprintln` are not free macros — a function-like
 `#define println(x)` would steal UFCS `x.println()`. Returns are
-`CCResult_size_t_CCError` (same as `CCStdio.println`). The macros
+`CCResult_size_t_CCError` (same family as `CCStdio.println`). The macros
 `cc_print` / `cc_println` / `cc_eprint` / `cc_eprintln` are lowered-C only
 (driver inject, `-E` desugar in §1).
 

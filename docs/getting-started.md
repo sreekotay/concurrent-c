@@ -614,7 +614,7 @@ What the driver does for a `.shcc` unit:
   `.ccs` / `.shcc` units `#include` C headers they use)
 - If there is no top-level `main`, wraps top-level statements in a synthetic
   `main` with a default `@errhandler(CCError)`
-- May inject ambient `a` / `io` / `in` / `args` into that wrap when you use those names
+- May inject ambient `stdin` / `arena` / `args` into that wrap when you use those names (`stdin.read_line(&line) !>`, `stdin.read_all(arena) !>`; `println` for output)
 - Treats a bare `ccc path/to/tool.shcc …` as **run** (shebang-friendly)
 
 ```bash

@@ -66,6 +66,7 @@ wait_port() {
 start_staticd() {
     [[ -x "$STATICD_BIN" ]] || { echo "missing $STATICD_BIN" >&2; exit 1; }
     "$STATICD_BIN" --listen "127.0.0.1:${STATICD_PORT}" --root "$FIX" \
+        --header 'Access-Control-Allow-Origin: *' \
         >"$TMPDIR_RUN/staticd.log" 2>&1 &
     PIDS+=($!)
     wait_port "$STATICD_PORT" staticd
@@ -167,6 +168,25 @@ check_server() {
             exit 1
         fi
         echo "  ok OPTIONS -> 204 $allow"
+
+        local qcode qclen acao
+        qcode=$(curl -sS -o /dev/null -w '%{http_code}' \
+            "http://127.0.0.1:${port}/4kb.html?cache=1")
+        qclen=$(curl -sS -D- -o /dev/null \
+            "http://127.0.0.1:${port}/4kb.html?cache=1" \
+            | awk 'BEGIN{IGNORECASE=1} /^Content-Length:/ {print $2}' | tr -d '\r')
+        if [[ "$qcode" != "200" || "$qclen" != "4096" ]]; then
+            echo "FAIL $name query status=$qcode clen=$qclen" >&2
+            exit 1
+        fi
+        echo "  ok query strip -> 200 clen=$qclen"
+        acao=$(curl -sS -D- -o /dev/null "http://127.0.0.1:${port}/4kb.html" \
+            | awk 'BEGIN{IGNORECASE=1} /^Access-Control-Allow-Origin:/ {print}' | tr -d '\r')
+        if [[ "$acao" != *'*'* ]]; then
+            echo "FAIL $name missing CORS header ($acao)" >&2
+            exit 1
+        fi
+        echo "  ok --header -> $acao"
     fi
 }
 
@@ -181,5 +201,52 @@ if [[ "$INCLUDE_STATICD" == "1" ]]; then check_server staticd "$STATICD_PORT"; f
 if [[ "$INCLUDE_NGINX" == "1" ]]; then check_server nginx "$NGINX_PORT"; fi
 if [[ "$INCLUDE_DARKHTTPD" == "1" ]]; then check_server darkhttpd "$DARKHTTPD_PORT"; fi
 if [[ "$INCLUDE_CADDY" == "1" ]]; then check_server caddy "$CADDY_PORT"; fi
+
+if [[ "$INCLUDE_STATICD" == "1" ]]; then
+    list_port=$((STATICD_PORT + 10))
+    www="$TMPDIR_RUN/www"
+    mkdir -p "$www/sub"
+    printf 'home\n' > "$www/home.html"
+    printf 'hi\n' > "$www/sub/a.txt"
+    "$STATICD_BIN" --listen "127.0.0.1:${list_port}" --root "$www" \
+        --list --index home.html \
+        --header 'X-Staticd: 1' --header 'X-Extra: yes' \
+        >"$TMPDIR_RUN/staticd-list.log" 2>&1 &
+    PIDS+=($!)
+    wait_port "$list_port" staticd-list
+    lcode=$(curl -sS -o "$TMPDIR_RUN/list.html" -w '%{http_code}' \
+        "http://127.0.0.1:${list_port}/sub/")
+    lbody=$(cat "$TMPDIR_RUN/list.html")
+    if [[ "$lcode" != "200" || "$lbody" != *a.txt* || "$lbody" != *href=\"/sub/a.txt\"* ]]; then
+        echo "FAIL staticd listing status=$lcode body=$lbody" >&2
+        exit 1
+    fi
+    echo "  ok --list /sub/ -> 200"
+    icode=$(curl -sS -o "$TMPDIR_RUN/home.body" -w '%{http_code}' \
+        "http://127.0.0.1:${list_port}/")
+    ibody=$(cat "$TMPDIR_RUN/home.body")
+    if [[ "$icode" != "200" || "$ibody" != home ]]; then
+        echo "FAIL staticd --index status=$icode body=$ibody" >&2
+        exit 1
+    fi
+    echo "  ok --index home.html -> /"
+    # default server has fixtures/index.html; a dir without index is 403
+    mkdir -p "$FIX/empty_dir_probe"
+    dcode=$(curl -sS -o /dev/null -w '%{http_code}' \
+        "http://127.0.0.1:${STATICD_PORT}/empty_dir_probe/")
+    rmdir "$FIX/empty_dir_probe" 2>/dev/null || true
+    if [[ "$dcode" != "403" ]]; then
+        echo "FAIL staticd dir without --list status=$dcode (want 403)" >&2
+        exit 1
+    fi
+    echo "  ok dir without --list -> 403"
+    xhdr=$(curl -sS -D- -o /dev/null "http://127.0.0.1:${list_port}/" \
+        | awk 'BEGIN{IGNORECASE=1} /^X-Staticd:|^X-Extra:/ {print}' | tr -d '\r')
+    if [[ "$xhdr" != *X-Staticd* || "$xhdr" != *X-Extra* ]]; then
+        echo "FAIL staticd repeat --header ($xhdr)" >&2
+        exit 1
+    fi
+    echo "  ok repeat --header"
+fi
 
 echo "correctness: PASS"

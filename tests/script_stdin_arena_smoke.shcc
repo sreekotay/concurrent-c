@@ -1,0 +1,16 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * The implicit `stdin` binds an arena of its own, so it does not depend on the
+ * script's `arena`. Predecls are emitted above the script body: a shared arena
+ * would put that reference above this file's own declaration and fail to compile.
+ *
+ * The script's arena stays independently usable, including for @string temps.
+ */
+
+CCArena arena = @create(kilobytes(4)) @destroy;
+
+"via-stdin".println();
+
+@string(`arena works: ${41 + 1}`, arena).println();
+
+return 0;

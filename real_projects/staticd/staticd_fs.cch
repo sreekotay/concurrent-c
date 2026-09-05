@@ -1,0 +1,378 @@
+/*
+ * Jail, map cache, directory listing. Policy (403 vs list, encode) stays
+ * in staticd.ccs. Include after <ccc/std/mmap.cch> and K_PATH_MAX.
+ *
+ * openat + O_NOFOLLOW — not cc_dir_open (path-based, not jailed).
+ */
+#ifndef STATICD_FS_CCH
+#define STATICD_FS_CCH
+
+#include <string.h>
+#include <stdlib.h>
+#include <time.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <errno.h>
+#include <pthread.h>
+#include <dirent.h>
+#include <stdint.h>
+
+#define FILE_CACHE_N   8
+#define FILE_CACHE_TTL 1
+#define FILE_CACHE_KEY 128
+#define K_LIST_MAX     256
+#define K_LIST_NAME    128
+
+typedef struct FileHold {
+    CCMappedFile mapped;
+    time_t mtime;
+    int slot;
+} FileHold;
+
+static char[:] path_without_query(char[:] raw) {
+    @for (i, ch in raw) {
+        if (ch == '?')
+            return raw.sub(0, i);
+    }
+    return raw;
+}
+
+/* Reject empty / `.` / `..` segments. ReqLine `pth` is already AbsPath shape. */
+static int path_is_safe(char[:] path) {
+    size_t start = 0;
+    @for (i, ch in path) {
+        if (ch != '/') continue;
+        {
+            size_t n = i - start;
+            if (i > 0 && n == 0) return 0;
+            if (n == 1 && path.ptr[start] == '.') return 0;
+            if (n == 2 && path.ptr[start] == '.' && path.ptr[start + 1] == '.')
+                return 0;
+            start = i + 1;
+        }
+    }
+    {
+        size_t n = path.len - start;
+        if (n == 1 && path.ptr[start] == '.') return 0;
+        if (n == 2 && path.ptr[start] == '.' && path.ptr[start + 1] == '.')
+            return 0;
+    }
+    return 1;
+}
+
+static CCMappedFile !>(CCIoError) map_at(int root_fd, const char* rel, time_t* mtime) {
+    CCMappedFile m = {0};
+    struct stat st;
+    void* p;
+    int fd;
+    if (!rel || !rel[0] || rel[0] == '/')
+        return cc_err(cc_io_from_errno(EINVAL));
+    fd = openat(root_fd, rel, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return cc_err(cc_io_from_errno(errno));
+    if (fstat(fd, &st) != 0) {
+        int e = errno;
+        close(fd);
+        return cc_err(cc_io_from_errno(e));
+    }
+    if (!S_ISREG(st.st_mode) || st.st_size < 0) {
+        close(fd);
+        return cc_err(cc_io_from_errno(EINVAL));
+    }
+    *mtime = st.st_mtime;
+    if (st.st_size == 0) {
+        close(fd);
+        return cc_ok(m);
+    }
+    p = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (p == MAP_FAILED) return cc_err(cc_io_from_errno(errno));
+    m.ptr = p;
+    m.len = (size_t)st.st_size;
+    return cc_ok(m);
+}
+
+/* until slides on hit (idle 1s). Serve stale while refs > 0. */
+typedef struct FileSlot {
+    char rel[FILE_CACHE_KEY];
+    time_t mtime;
+    time_t until;
+    int refs;
+    CCMappedFile mapped;
+} FileSlot;
+
+static FileSlot g_fc[FILE_CACHE_N];
+static pthread_mutex_t g_fc_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static int fc_find(const char* rel) {
+    @for (i in 0..FILE_CACHE_N) {
+        if (g_fc[i].rel[0] && strcmp(g_fc[i].rel, rel) == 0)
+            return (int)i;
+    }
+    return -1;
+}
+
+static void fc_unmap(int i) {
+    g_fc[i].mapped.destroy();
+    g_fc[i] = (FileSlot){0};
+}
+
+static int fc_evict(time_t now) {
+    int idle = -1;
+    @for (i in 0..FILE_CACHE_N) {
+        if (g_fc[i].refs > 0) continue;
+        if (!g_fc[i].rel[0]) return (int)i;
+        if (now > g_fc[i].until) {
+            fc_unmap((int)i);
+            return (int)i;
+        }
+        if (idle < 0) idle = (int)i;
+    }
+    if (idle >= 0) {
+        fc_unmap(idle);
+        return idle;
+    }
+    return -1;
+}
+
+static void fc_sweep(time_t now) {
+    @for (i in 0..FILE_CACHE_N) {
+        if (g_fc[i].rel[0] && g_fc[i].refs == 0 && now > g_fc[i].until)
+            fc_unmap((int)i);
+    }
+}
+
+static void file_hold_drop(FileHold* h) {
+    if (!h) return;
+    if (h->slot < 0) {
+        cc_file_unmap(&h->mapped);
+    } else {
+        pthread_mutex_lock(&g_fc_mu);
+        if (h->slot < FILE_CACHE_N && g_fc[h->slot].refs > 0) {
+            g_fc[h->slot].refs--;
+            if (g_fc[h->slot].refs == 0 && time(NULL) > g_fc[h->slot].until)
+                fc_unmap(h->slot);
+        }
+        pthread_mutex_unlock(&g_fc_mu);
+    }
+    h->slot = -1;
+    h->mapped = (CCMappedFile){0};
+}
+
+static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
+    FileHold h = { .slot = -1 };
+    CCMappedFile m;
+    time_t now;
+    int i;
+    size_t n;
+
+    if (!rel || !rel[0] || rel[0] == '/')
+        return cc_err(cc_io_from_errno(EINVAL));
+    n = strlen(rel);
+    if (n >= FILE_CACHE_KEY) {
+        m = map_at(root_fd, rel, &h.mtime) !>(e) { return cc_err(e); };
+        h.mapped = m;
+        return cc_ok(h);
+    }
+
+    now = time(NULL);
+    pthread_mutex_lock(&g_fc_mu);
+    fc_sweep(now);
+    i = fc_find(rel);
+    if (i >= 0 && (now <= g_fc[i].until || g_fc[i].refs > 0)) {
+        g_fc[i].refs++;
+        g_fc[i].until = now + FILE_CACHE_TTL;
+        h.mtime = g_fc[i].mtime;
+        h.slot = i;
+        h.mapped = g_fc[i].mapped;
+        pthread_mutex_unlock(&g_fc_mu);
+        return cc_ok(h);
+    }
+    pthread_mutex_unlock(&g_fc_mu);
+
+    m = map_at(root_fd, rel, &h.mtime) !>(e) { return cc_err(e); };
+
+    pthread_mutex_lock(&g_fc_mu);
+    now = time(NULL);
+    fc_sweep(now);
+    i = fc_find(rel);
+    if (i >= 0 && (now <= g_fc[i].until || g_fc[i].refs > 0)) {
+        g_fc[i].refs++;
+        g_fc[i].until = now + FILE_CACHE_TTL;
+        h.mtime = g_fc[i].mtime;
+        h.slot = i;
+        h.mapped = g_fc[i].mapped;
+        pthread_mutex_unlock(&g_fc_mu);
+        m.destroy();
+        return cc_ok(h);
+    }
+    if (i >= 0 && g_fc[i].refs == 0)
+        fc_unmap(i);
+    else
+        i = fc_evict(now);
+    if (i < 0) {
+        pthread_mutex_unlock(&g_fc_mu);
+        h.mapped = m;
+        return cc_ok(h);
+    }
+    memcpy(g_fc[i].rel, rel, n + 1);
+    g_fc[i].mtime = h.mtime;
+    g_fc[i].until = now + FILE_CACHE_TTL;
+    g_fc[i].refs = 1;
+    g_fc[i].mapped = m;
+    h.slot = i;
+    h.mapped = m;
+    pthread_mutex_unlock(&g_fc_mu);
+    return cc_ok(h);
+}
+
+static int try_file(int root_fd, const char* rel, FileHold* out) {
+    FileHold h;
+    if (!rel || !rel[0] || rel[0] == '/') return 0;
+    h = file_hold(root_fd, rel) !>(e) {
+        (void)e;
+        return 0;
+    };
+    *out = h;
+    return 1;
+}
+
+static int join_index(char* dst, size_t cap, const char* rel, const char* index) {
+    size_t n = rel ? strlen(rel) : 0;
+    size_t il = index ? strlen(index) : 0;
+    if (!il) return 0;
+    while (n > 0 && rel[n - 1] == '/') n--;
+    if (n == 0) {
+        if (il + 1 > cap) return 0;
+        memcpy(dst, index, il + 1);
+        return 1;
+    }
+    if (n + 1 + il + 1 > cap) return 0;
+    memcpy(dst, rel, n);
+    dst[n] = '/';
+    memcpy(dst + n + 1, index, il + 1);
+    return 1;
+}
+
+static int fs_dir_open(int root_fd, const char* rel) {
+    const char* drel = (rel && rel[0]) ? rel : ".";
+    return openat(root_fd, drel, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+}
+
+typedef struct DirEnt {
+    char name[K_LIST_NAME];
+    int is_dir;
+    uint64_t size;
+} DirEnt;
+
+static int dirent_cmp(const void* a, const void* b) {
+    const DirEnt* x = (const DirEnt*)a;
+    const DirEnt* y = (const DirEnt*)b;
+    if (x->is_dir != y->is_dir) return y->is_dir - x->is_dir;
+    return strcmp(x->name, y->name);
+}
+
+static void html_push(CCString* s, CCArena a, char[:] raw) {
+    @for (ch in raw) {
+        if (ch == '&') s->append("&amp;", a);
+        else if (ch == '<') s->append("&lt;", a);
+        else if (ch == '>') s->append("&gt;", a);
+        else if (ch == '"') s->append("&quot;", a);
+        else {
+            char one[1] = { ch };
+            s->append(cc_slice_from_buffer(one, 1), a);
+        }
+    }
+}
+
+static CCString !>(CCError) dir_listing(int dfd, char[:] url, CCArena a) {
+    DIR* dp;
+    struct dirent* de;
+    DirEnt ents[K_LIST_MAX];
+    size_t n = 0;
+    int truncated = 0;
+    CCString html = cc_string_new();
+    int root = (url.len == 1 && url.ptr[0] == '/');
+
+    dp = fdopendir(dfd);
+    if (!dp) {
+        close(dfd);
+        return cc_err(CC_ERR_IO, "fdopendir");
+    }
+    @defer closedir(dp);
+
+    while ((de = readdir(dp)) != NULL) {
+        struct stat st;
+        size_t nl;
+        if (de->d_name[0] == '.' && (de->d_name[1] == 0
+                || (de->d_name[1] == '.' && de->d_name[2] == 0)))
+            continue;
+        nl = strlen(de->d_name);
+        if (!nl || nl >= K_LIST_NAME) continue;
+        if (fstatat(dirfd(dp), de->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0)
+            continue;
+        if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode)) continue;
+        if (n >= K_LIST_MAX) {
+            truncated = 1;
+            break;
+        }
+        memcpy(ents[n].name, de->d_name, nl + 1);
+        ents[n].is_dir = S_ISDIR(st.st_mode);
+        ents[n].size = S_ISREG(st.st_mode) ? (uint64_t)st.st_size : 0;
+        n++;
+    }
+    qsort(ents, n, sizeof(ents[0]), dirent_cmp);
+
+    html.append("<html><head><title>Index of ", a);
+    html_push(&html, a, url);
+    html.append("</title></head><body><h1>Index of ", a);
+    html_push(&html, a, url);
+    html.append("</h1><pre>\n", a);
+    if (!root) {
+        size_t pn = url.len;
+        char[:] parent;
+        while (pn > 1 && url.ptr[pn - 1] == '/') pn--;
+        while (pn > 0 && url.ptr[pn - 1] != '/') pn--;
+        parent = pn ? url.sub(0, pn) : cc_slice_cstr("/");
+        html.append("<a href=\"", a);
+        html_push(&html, a, parent);
+        html.append("\">../</a>\n", a);
+    }
+    @for (i in 0..n) {
+        DirEnt e = ents[i];
+        char[:] name = cc_slice_cstr(e.name);
+        char[:] slash = e.is_dir ? cc_slice_cstr("/") : cc_slice_empty();
+        size_t un = url.len;
+        CCString href;
+        uint64_t sz = e.size;
+        while (un > 1 && url.ptr[un - 1] == '/') un--;
+        if (un == 1 && url.ptr[0] == '/')
+            href = @string(`/${name}${slash}`, a);
+        else {
+            char[:] base = url.sub(0, un);
+            href = @string(`${base}/${name}${slash}`, a);
+        }
+        html.append("<a href=\"", a);
+        html_push(&html, a, href);
+        html.append("\">", a);
+        html_push(&html, a, name);
+        if (e.is_dir) html.append("/", a);
+        html.append("</a>", a);
+        if (e.is_dir)
+            html.append("\n", a);
+        else {
+            CCString line = @string(`    ${sz}\n`, a);
+            html.append(line, a);
+        }
+        if (html.failed())
+            return cc_err(CC_ERR_OUT_OF_MEMORY, "listing oom");
+    }
+    if (truncated)
+        html.append("… truncated\n", a);
+    html.append("</pre></body></html>\n", a);
+    if (html.failed())
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "listing oom");
+    return cc_ok(html);
+}
+
+#endif /* STATICD_FS_CCH */

@@ -17,15 +17,15 @@ if (!cc_qjs_available()) {
     return 0;
 }
 
-CCQjs js = cc_qjs_new(a) !> @destroy;
+CCQjs js = cc_qjs_new(arena) !> @destroy;
 
 CCQjsVal Math = js.eval("Math") !> @destroy;
 double v = Math.sqrt(2.0) !>;
-println(@string(`Math.sqrt(2.0) = ${v}`, a));
+println(@string(`Math.sqrt(2.0) = ${v}`, arena));
 
 double pv = Math.pow(2.0, 10) !>;
-println(@string(`Math.pow(2,10) = ${pv}`, a));
+println(@string(`Math.pow(2,10) = ${pv}`, arena));
 
 CCQjsVal jv = js.eval("JSON.stringify({ok:1})") !> @destroy;
 char[:] vs = jv.as_slice() !>;
-println(@string(`json           = ${vs}`, a));
+println(@string(`json           = ${vs}`, arena));

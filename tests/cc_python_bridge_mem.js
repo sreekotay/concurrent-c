@@ -100,7 +100,7 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
       const py = ccpy.create();
       const m = py.import('math');
       compute = compute && m.floor(9.9) === 9;
-      py.destroy();
+      await py.destroy();
     }
     await gcNow();
     out('domain_churn_compute', compute);

@@ -1,8 +1,8 @@
 /* C seq vs CC seq vs CC @parallel for on the weekend smoke image.
  * Full C / CC / Go race: real_projects/raytracer/compare.sh */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
-CCCommand sh = cc_command(a, @slice("sh"));
+CCCommand sh = cc_command(arena, @slice("sh"));
 sh.arg("real_projects/raytracer/smoke.sh");
 sh.inherit_stdio();
 int rc = sh.status() !>;

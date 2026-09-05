@@ -1,11 +1,11 @@
 /* Aggregated export directives: two `@comptime cc_js_export(...)` sites
  * in one TU become one registration, each type namespaced under its
  * snake-case name, the artifact named by the MODULE — the directive's explicit
- * first argument ("pair") — never by a class or a file name. */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+ * first argument ("pair") — never by arena class or arena file name. */
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
 {
-    CCCommand which = cc_command(a, @slice("sh"));
+    CCCommand which = cc_command(arena, @slice("sh"));
     which.arg("-c");
     which.arg("command -v node >/dev/null 2>&1");
     int rc = which.status() !>;
@@ -13,7 +13,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
+    CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
     build.arg("build");
     build.arg("tests/js_module_multi_export_mod.ccs");
     build.inherit_stdio();
@@ -22,7 +22,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand run = cc_command(a, @slice("sh"));
+    CCCommand run = cc_command(arena, @slice("sh"));
     run.arg("-c");
     CCString js = @string(`node -e "
 const m = require(process.cwd() + '/bin/pair.node');
@@ -31,8 +31,8 @@ console.log('bump', m.pair_counter.bump(4));
 console.log('bump_default', m.pair_counter.bump());
 console.log('half', m.pair_halver.half(10));
 console.log('flat_hidden', typeof m.bump === 'undefined');
-"`, a);
-    run.arg(js.cstr(a));
+"`, arena);
+    run.arg(js.cstr(arena));
     run.inherit_stdio();
     int rc = run.status() !>;
     if (rc != 0) { "import failed".println(); return 1; }

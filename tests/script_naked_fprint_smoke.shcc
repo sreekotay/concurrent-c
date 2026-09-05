@@ -5,7 +5,7 @@
  * Member UFCS stays data.fprintln(fd).
  */
 
-CCArena a = @create(kilobytes(4)) @destroy;
+CCArena arena = @create(kilobytes(4)) @destroy;
 
 CCSlice hi = @slice("hello");
 fprintln(STDOUT_FILENO, hi);

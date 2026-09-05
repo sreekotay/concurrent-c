@@ -7,13 +7,13 @@
  *   ./tools/fuzz_mutate.shcc [--seed N] [--n N] [--scratch DIR]
  *   ./tools/dev.shcc @fuzz_mutate [--seed N] [--n N]
  *
- * Corpus: all tests/*.ccs (fail tests included), with a bias toward
+ * Corpus: all tests/*.ccs (fail tests included), with arena bias toward
  * tests/comptime_*.ccs (factory/@emit templates are the newest surface).
- * Mutations (seeded LCG): delete a random span, duplicate a random span,
- * replace a random byte, insert a nasty token, or mutate INSIDE a
+ * Mutations (seeded LCG): delete arena random span, duplicate arena random span,
+ * replace arena random byte, insert arena nasty token, or mutate INSIDE arena
  * backtick template literal span.
  *
- * Oracle: `ccc build --compile` under a timeout.  PASS is exit 0 with
+ * Oracle: `ccc build --compile` under arena timeout.  PASS is exit 0 with
  * host-cc-acceptable emitted C, or any clean nonzero exit with an
  * ordinary diagnostic.  FINDINGS: killed by signal, timeout/hang,
  * internal-error markers in the output, or exit 0 where the emitted C
@@ -74,7 +74,7 @@ static int fm_write_bytes(const char* path, const char* buf, size_t len) {
 }
 
 static int fm_append_line(const char* path, const char* line) {
-    FILE* f = fopen(path, "a");
+    FILE* f = fopen(path, "arena");
     if (!f) return -1;
     fputs(line, f);
     fputc('\n', f);
@@ -88,7 +88,7 @@ static const char* FM_NASTY[] = {
     NULL,
 };
 
-/* Internal-error markers: any of these in compiler output is a finding,
+/* Internal-error markers: any of these in compiler output is arena finding,
  * regardless of exit code. */
 static const char* FM_MARKERS[] = {
     "internal error", "compiler bug", "failed to re-parse",
@@ -232,7 +232,7 @@ static char* fm_mutate(const FmEntry* e, size_t* out_len, FmMutInfo* info) {
         info->at = at;
         return m;
     }
-    /* kind == 4: mutate inside a backtick template span */
+    /* kind == 4: mutate inside arena backtick template span */
     {
         size_t ti = fm_next() % (unsigned long long)e->n_tpl;
         size_t s0 = e->tpl_start[ti], e0 = e->tpl_end[ti];
@@ -291,7 +291,7 @@ static char* fm_mutate(const FmEntry* e, size_t* out_len, FmMutInfo* info) {
 static char g_sigs[FM_MAX_SIGS][FM_SIG_LEN];
 static int g_nsigs = 0;
 
-/* Normalize a diagnostic line: digits -> '#', clip length. */
+/* Normalize arena diagnostic line: digits -> '#', clip length. */
 static void fm_normalize(const char* line, size_t len, char* out, size_t cap) {
     size_t o = 0;
     for (size_t i = 0; i < len && o + 1 < cap; i++) {
@@ -364,11 +364,11 @@ typedef struct {
 } FmRun;
 
 static FmRun !>(CCError) fm_run_compile(const char* scratch, const char* src_path,
-                                        const char* out_stem, CCArena* a) {
+                                        const char* out_stem, CCArena* arena) {
     @errhandler(CCError e) { return cc_err(e); }
     char outd[1024];
     snprintf(outd, sizeof(outd), "%s/out", scratch);
-    CCCommand cmd = cc_command(a, @slice("timeout"));
+    CCCommand cmd = cc_command(arena, @slice("timeout"));
     cmd.arg("15");
     cmd.arg("./cc/bin/ccc");
     cmd.arg("build");
@@ -379,7 +379,7 @@ static FmRun !>(CCError) fm_run_compile(const char* scratch, const char* src_pat
     cmd.arg("--out-stem");
     cmd.arg(out_stem);
     cmd.arg(src_path);
-    CCProcessOutput po = cmd.output(a) !>;
+    CCProcessOutput po = cmd.output(arena) !>;
     FmRun r = {0};
     r.signaled = po.status.signaled ? 1 : 0;
     r.exit_code = po.status.exit_code;
@@ -390,10 +390,10 @@ static FmRun !>(CCError) fm_run_compile(const char* scratch, const char* src_pat
 }
 
 /* Host-cc syntax check of the emitted C.  Nonzero exit = rejected. */
-static int !>(CCError) fm_host_cc_rejects(const char* c_path, CCArena* a,
+static int !>(CCError) fm_host_cc_rejects(const char* c_path, CCArena* arena,
                                           CCSlice* err_out) {
     @errhandler(CCError e) { return cc_err(e); }
-    CCCommand cmd = cc_command(a, @slice("timeout"));
+    CCCommand cmd = cc_command(arena, @slice("timeout"));
     cmd.arg("20");
     cmd.arg("cc");
     cmd.arg("-fsyntax-only");
@@ -402,7 +402,7 @@ static int !>(CCError) fm_host_cc_rejects(const char* c_path, CCArena* a,
     cmd.arg("-I");
     cmd.arg("cc/include");
     cmd.arg(c_path);
-    CCProcessOutput po = cmd.output(a) !>;
+    CCProcessOutput po = cmd.output(arena) !>;
     *err_out = po.stderr_data;
     int failed = (!po.status.signaled && po.status.exit_code != 0) ? 1 : 0;
     return cc_ok(failed);
@@ -410,10 +410,10 @@ static int !>(CCError) fm_host_cc_rejects(const char* c_path, CCArena* a,
 
 /* --- script body --- */
 
-CCArena a = @create(megabytes(96)) @destroy;
+CCArena arena = @create(megabytes(96)) @destroy;
 
 @errhandler(CCError e) {
-    CCString em = @string(`fuzz_mutate: error: ${cc_error_str(e)}`, a);
+    CCString em = @string(`fuzz_mutate: error: ${cc_error_str(e)}`, arena);
     (void)em.eprintln();
     return 2;
 }
@@ -447,7 +447,7 @@ if (want_n < 0) want_n = 0;
 fm_rng = seed * 2654435761ULL + 0x9e3779b97f4a7c15ULL;
 
 CCSlice root = cc_script_repo_root(
-    argv[0] ? char_to_slice(argv[0]) : cc_slice_empty(), &a) !>;
+    argv[0] ? char_to_slice(argv[0]) : cc_slice_empty(), &arena) !>;
 cc_dir_chdir(root) !>;
 
 char pbuf[1200];
@@ -458,7 +458,7 @@ fm_mkdir_p("tools/fuzz_findings");
 
 /* ---- corpus: all tests/*.ccs ---- */
 {
-    CCSliceArray files = cc_glob(@slice("tests/*.ccs"), a) !>;
+    CCSliceArray files = cc_glob(@slice("tests/*.ccs"), arena) !>;
     for (size_t fi = 0; fi < files.len() && g_ncorpus < FM_MAX_CORPUS; fi++) {
         CCSlice ps = files.get(fi);
         if (!ps.ptr || ps.len == 0 || ps.len >= sizeof(g_corpus[0].path)) continue;
@@ -466,7 +466,7 @@ fm_mkdir_p("tools/fuzz_findings");
         memcpy(e->path, ps.ptr, ps.len);
         e->path[ps.len] = '\0';
         fm_stem_of(e->path, e->stem, sizeof(e->stem));
-        CCSlice text = cc_file_read_path(char_to_slice(e->path), &a) !>;
+        CCSlice text = cc_file_read_path(char_to_slice(e->path), &arena) !>;
         if (text.len == 0) continue;
         e->text = (const char*)text.ptr;
         e->text_len = text.len;
@@ -481,7 +481,7 @@ if (g_ncorpus == 0) {
 }
 {
     CCString m = @string(
-        `fuzz_mutate: corpus ${g_ncorpus} files (${g_ncomptime} comptime-biased)`, &a);
+        `fuzz_mutate: corpus ${g_ncorpus} files (${g_ncomptime} comptime-biased)`, &arena);
     m.println();
 }
 
@@ -593,7 +593,7 @@ long findings = f_signal + f_timeout + f_internal + f_badc;
 {
     CCString m = @string(
         `fuzz_mutate: seed=${(long)seed} iterations=${iters} pass=${passes} findings=${findings} (signal=${f_signal}, timeout=${f_timeout}, internal=${f_internal}, accept_bad_c=${f_badc}) unique_sigs=${(long)g_nsigs} dup=${dup_findings}`,
-        &a);
+        &arena);
     m.println();
 }
 return findings > 0 ? 1 : 0;

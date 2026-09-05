@@ -13,7 +13,7 @@
 #include <string.h>
 #include <unistd.h>
 
-CCArena a = cc_arena_heap(megabytes(2)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(2)) @destroy;
 
 char tmpl[] = "/tmp/cc_oot_mod.XXXXXX";
 char* dir = mkdtemp(tmpl);
@@ -28,7 +28,7 @@ snprintf(dst_path, sizeof(dst_path), "%s/ic_mod.ccs", dir);
 {
     CCResult_bool_CCError cp = cc_file_copy(
         @slice("tests/out_of_tree_module_mod.ccs"),
-        char_to_slice_n(dst_path, strlen(dst_path)), &a);
+        char_to_slice_n(dst_path, strlen(dst_path)), &arena);
     if (!cp.ok) {
         "FAIL out-of-tree-module-smoke: copy".eprintln();
         rmdir(dir);
@@ -36,18 +36,18 @@ snprintf(dst_path, sizeof(dst_path), "%s/ic_mod.ccs", dir);
     }
 }
 
-unlink("bin/ic_counter.node"); /* stale from a prior run */
+unlink("bin/ic_counter.node"); /* stale from arena prior run */
 
 {
-    CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
+    CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
     build.arg("build");
     build.arg(dst_path); /* absolute path outside the tree */
     build.stderr_to_stdout();
-    CCProcessOutput out = build.output(&a) !>;
+    CCProcessOutput out = build.output(&arena) !>;
     int rc = out.exit_code();
     if (rc != 0) {
         CCString em = @string(
-            `FAIL out-of-tree-module-smoke: ccc build exited ${rc}`, &a);
+            `FAIL out-of-tree-module-smoke: ccc build exited ${rc}`, &arena);
         em.eprintln();
         if (out.stdout_data.ptr && out.stdout_data.len)
             fwrite(out.stdout_data.ptr, 1, out.stdout_data.len, stderr);

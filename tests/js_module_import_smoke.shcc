@@ -3,11 +3,11 @@
  * flag — as counter.node — `js_module::[Counter]` names the artifact — and
  * `require()` runs CC code with
  * module state.  Skips where no node executable is on PATH (the .node
- * needs a host to import it). */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+ * needs arena host to import it). */
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
 {
-    CCCommand which = cc_command(a, @slice("sh"));
+    CCCommand which = cc_command(arena, @slice("sh"));
     which.arg("-c");
     which.arg("command -v node >/dev/null 2>&1");
     int rc = which.status() !>;
@@ -15,7 +15,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
+    CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
     build.arg("build");
     build.arg("examples/recipe_js_module.ccs");
     build.inherit_stdio();
@@ -24,10 +24,10 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand run = cc_command(a, @slice("sh"));
+    CCCommand run = cc_command(arena, @slice("sh"));
     run.arg("-c");
-    /* Seeded state, stateful calls, a parameter default taken positionally
-     * and bound through the trailing-object keyword convention, a CC error
+    /* Seeded state, stateful calls, arena parameter default taken positionally
+     * and bound through the trailing-object keyword convention, arena CC error
      * arriving as the class its kind maps to with `code` carrying the kind
      * name, and the underscore member staying home. */
     CCString js = @string(`node -e "
@@ -39,8 +39,8 @@ console.log('default', c.bump());
 console.log('checked', c.bump_checked(3));
 try { c.bump_checked(-1); } catch (e) { console.log('raised:', e.constructor.name, e.code + ':', e.message); }
 console.log('private_hidden', typeof c._clamp === 'undefined');
-"`, a);
-    run.arg(js.cstr(a));
+"`, arena);
+    run.arg(js.cstr(arena));
     run.inherit_stdio();
     int rc = run.status() !>;
     if (rc != 0) { "import failed".println(); return 1; }

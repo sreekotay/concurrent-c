@@ -859,9 +859,9 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --verbose           Print invoked commands\n");
     fprintf(stderr, "One-liners:\n");
     fprintf(stderr, "  -e PROGRAM          Compile/run PROGRAM as an unnamed .shcc unit\n");
-    fprintf(stderr, "  -E EXPR             Like -e, wrapped as io.println(@string(`${EXPR}`)) !>;\n");
+    fprintf(stderr, "  -E EXPR             Like -e, wrapped as cc_println(@string(`${EXPR}`));\n");
     fprintf(stderr, "  -n                  With -e/-E: loop over stdin lines (binds line, nr)\n");
-    fprintf(stderr, "  -p                  -n plus io.println(line) !>; after the body\n");
+    fprintf(stderr, "  -p                  -n plus line.println() !>; after the body\n");
     fprintf(stderr, "  --save NAME         With -e/-E: append desugared @task NAME to the toolbox\n");
     fprintf(stderr, "  --save-to PATH      Toolbox path override (default: ./tools/toolbox.shcc or ~/.ccc/toolbox.shcc)\n");
     fprintf(stderr, "  --doc TEXT          Summary text for --save (else first program line)\n");

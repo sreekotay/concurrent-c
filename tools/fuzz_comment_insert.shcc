@@ -1,13 +1,13 @@
 #!/usr/bin/env -S ./cc/bin/ccc
 /*
- * Behavior-preservation fuzzer: inserting a block comment `/⁎x⁎/` at any
- * code position must not change a program's behavior.  Stress-tests the
+ * Behavior-preservation fuzzer: inserting arena block comment `/⁎x⁎/` at any
+ * code position must not change arena program's behavior.  Stress-tests the
  * comment-discipline consolidation (comments inert across text passes).
  *
  *   ./tools/fuzz_comment_insert.shcc [--seed N] [--n N] [--scratch DIR]
  *   ./tools/dev.shcc @fuzz_comment [--seed N] [--n N]
  *
- * Corpus: tests/*.ccs with a .stdout twin that build+run green and
+ * Corpus: tests/*.ccs with arena .stdout twin that build+run green and
  * deterministically at baseline (probed once, cached under the scratch
  * dir).  Insertion points are code positions only — never inside
  * strings/chars/comments/preprocessor directives (CCInertScan is the
@@ -15,8 +15,8 @@
  * blocks (tracked here; the scanner does not know those), and never
  * splitting an identifier, number, `@sigil`, or multi-char operator.
  *
- * A divergence (compile failure, differing output, timeout, crash) is a
- * FINDING: the mutant and a one-line summary are saved under
+ * A divergence (compile failure, differing output, timeout, crash) is arena
+ * FINDING: the mutant and arena one-line summary are saved under
  * tools/fuzz_findings/.  Exit 0 = no findings, 1 = findings, 2 = usage.
  */
 
@@ -62,18 +62,18 @@ static void fz_mkdir_p(const char* path) {
 /* ---- insertion-point rules ---- */
 
 static int fz_identch(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+    return (c >= 'arena' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
            (c >= '0' && c <= '9') || c == '_' || c == '$' || c == '.';
 }
 
-/* Multi-char operators a comment must not split.  Includes the CC sigils
+/* Multi-char operators arena comment must not split.  Includes the CC sigils
  * (`!>`, `?>`, `::[`, `[:`, `[~`) alongside the C compound operators. */
 static const char* FZ_OPS[] = {
     "<<=", ">>=", "...", "::[", "=<!",
     /* `=<!` is one token (err-syntax assignment).  Splitting it produced
-     * `comment_err_syntax_smoke_off509`, which was filed as a compiler bug and
-     * is not one: `b = <! always_ok()` fails identically with a plain space.
-     * A comment inside a token need not be inert — a comment between two plus
+     * `comment_err_syntax_smoke_off509`, which was filed as arena compiler bug and
+     * is not one: `b = <! always_ok()` fails identically with arena plain space.
+     * A comment inside arena token need not be inert — arena comment between two plus
      * signs does not have to still read as `++` — so what needs to be complete
      * is this operator list. */
     "!>", "?>", "=>", "->", "::", "<<", ">>", "<=", ">=", "==", "!=",
@@ -167,13 +167,13 @@ typedef struct {
 } FzRun;
 
 static FzRun !>(CCError) fz_run_build_run(const char* scratch, const char* src_path,
-                                          int timeout_sec, CCArena* a) {
+                                          int timeout_sec, CCArena* arena) {
     @errhandler(CCError e) { return cc_err(e); }
     char outd[1024], bind[1024], tmo[32];
     snprintf(outd, sizeof(outd), "%s/out", scratch);
     snprintf(bind, sizeof(bind), "%s/bin", scratch);
     snprintf(tmo, sizeof(tmo), "%d", timeout_sec);
-    CCCommand cmd = cc_command(a, @slice("timeout"));
+    CCCommand cmd = cc_command(arena, @slice("timeout"));
     cmd.arg(tmo);
     cmd.arg("./cc/bin/ccc");
     cmd.arg("build");
@@ -183,7 +183,7 @@ static FzRun !>(CCError) fz_run_build_run(const char* scratch, const char* src_p
     cmd.arg("--bin-dir");
     cmd.arg(bind);
     cmd.arg(src_path);
-    CCProcessOutput po = cmd.output(a) !>;
+    CCProcessOutput po = cmd.output(arena) !>;
     FzRun r = {0};
     r.signaled = po.status.signaled ? 1 : 0;
     r.exit_code = po.status.exit_code;
@@ -227,7 +227,7 @@ static int fz_seen_before(int entry, size_t off) {
 }
 
 static int fz_append_line(const char* path, const char* line) {
-    FILE* f = fopen(path, "a");
+    FILE* f = fopen(path, "arena");
     if (!f) return -1;
     fputs(line, f);
     fputc('\n', f);
@@ -245,10 +245,10 @@ static int fz_write_bytes(const char* path, const char* buf, size_t len) {
 
 /* --- script body --- */
 
-CCArena a = @create(megabytes(64)) @destroy;
+CCArena arena = @create(megabytes(64)) @destroy;
 
 @errhandler(CCError e) {
-    CCString em = @string(`fuzz_comment: error: ${cc_error_str(e)}`, a);
+    CCString em = @string(`fuzz_comment: error: ${cc_error_str(e)}`, arena);
     (void)em.eprintln();
     return 2;
 }
@@ -282,7 +282,7 @@ if (want_n < 0) want_n = 0;
 fz_rng = seed * 2654435761ULL + 0x9e3779b97f4a7c15ULL;
 
 CCSlice root = cc_script_repo_root(
-    argv[0] ? char_to_slice(argv[0]) : cc_slice_empty(), &a) !>;
+    argv[0] ? char_to_slice(argv[0]) : cc_slice_empty(), &arena) !>;
 cc_dir_chdir(root) !>;
 
 char pbuf[1200];
@@ -299,7 +299,7 @@ snprintf(cache_path, sizeof(cache_path), "%s/corpus_cache_v2.txt", scratch);
 /* ---- corpus: load cache or probe ---- */
 
 if (fz_file_exists(cache_path)) {
-    CCSlice cbytes = cc_file_read_path(char_to_slice(cache_path), &a) !>;
+    CCSlice cbytes = cc_file_read_path(char_to_slice(cache_path), &arena) !>;
     size_t i = 0;
     while (i < cbytes.len && g_ncorpus < FZ_MAX_CORPUS) {
         size_t st = i;
@@ -313,8 +313,8 @@ if (fz_file_exists(cache_path)) {
         fz_stem_of(e->path, e->stem, sizeof(e->stem));
         snprintf(pbuf, sizeof(pbuf), "%s/baseline/%s.out", scratch, e->stem);
         if (!fz_file_exists(e->path) || !fz_file_exists(pbuf)) continue;
-        CCSlice text = cc_file_read_path(char_to_slice(e->path), &a) !>;
-        CCSlice bout = cc_file_read_path(char_to_slice(pbuf), &a) !>;
+        CCSlice text = cc_file_read_path(char_to_slice(e->path), &arena) !>;
+        CCSlice bout = cc_file_read_path(char_to_slice(pbuf), &arena) !>;
         e->text = (const char*)text.ptr;
         e->text_len = text.len;
         e->base_out = (const char*)bout.ptr;
@@ -322,12 +322,12 @@ if (fz_file_exists(cache_path)) {
         g_ncorpus++;
     }
     {
-        CCString m = @string(`fuzz_comment: corpus cache hit (${g_ncorpus} files)`, a);
+        CCString m = @string(`fuzz_comment: corpus cache hit (${g_ncorpus} files)`, arena);
         m.println();
     }
 } else {
     "fuzz_comment: probing corpus (one-time; cached under scratch dir)".println();
-    CCSliceArray files = cc_glob(@slice("tests/*.ccs"), a) !>;
+    CCSliceArray files = cc_glob(@slice("tests/*.ccs"), arena) !>;
     static const char* SIDECARS[] = {
         ".args", ".exit", ".stdin", ".env", ".ldflags",
         ".requires_async", ".compile_err", ".stderr", ".build_stderr", NULL,
@@ -397,8 +397,8 @@ if (fz_file_exists(cache_path)) {
             cc_arena_destroy(&pa);
             continue;
         }
-        CCSlice text = cc_file_read_path(char_to_slice(e->path), &a) !>;
-        CCSlice bout = cc_file_read_path(char_to_slice(pbuf), &a) !>;
+        CCSlice text = cc_file_read_path(char_to_slice(e->path), &arena) !>;
+        CCSlice bout = cc_file_read_path(char_to_slice(pbuf), &arena) !>;
         e->text = (const char*)text.ptr;
         e->text_len = text.len;
         e->base_out = (const char*)bout.ptr;
@@ -415,7 +415,7 @@ if (fz_file_exists(cache_path)) {
     }
     {
         CCString m = @string(
-            `fuzz_comment: probe done: ${g_ncorpus} in corpus, ${skipped} skipped, ${probed} probed`, &a);
+            `fuzz_comment: probe done: ${g_ncorpus} in corpus, ${skipped} skipped, ${probed} probed`, &arena);
         m.println();
     }
 }
@@ -492,7 +492,7 @@ long findings = f_compile + f_diff + f_timeout + f_crash;
 {
     CCString m = @string(
         `fuzz_comment: seed=${(long)seed} iterations=${iters} no_position=${no_pos} findings=${findings} (compile_or_run_fail=${f_compile}, output_diff=${f_diff}, timeout=${f_timeout}, crash=${f_crash})`,
-        &a);
+        &arena);
     m.println();
 }
 return findings > 0 ? 1 : 0;

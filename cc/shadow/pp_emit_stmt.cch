@@ -4641,7 +4641,8 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
     if (!st->par_wake) {
         hdest = shadow_par_handle_dest(st);
         if (!hdest) {
-            shadow_err(ctx, st, "unconsumed Result");
+            shadow_err(ctx, st,
+                       "@parallel {…} !>; discards the handle; bind CCParallel h = … !>; or !>.wait()!>");
             out->err = 1;
             return 0;
         }

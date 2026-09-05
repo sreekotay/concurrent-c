@@ -2,20 +2,18 @@
 /*
  * `line` and `nr` are the -n/-p loop bindings, never ambient in a file .shcc.
  * A script declaring its own local of either name must not pull in an implicit
- * `CCStdio io`: the predecl is emitted above the script body, so an injected
- * `io = @create(a)` landed ahead of this file's own arena and failed to
- * compile, blaming a line past the end of the file.
+ * `stdin` BufReader: the predecl is emitted above the script body.
  *
  * Covers the identifiers in plain code and inside a ${...} template hole,
  * which the predecl scan also walks as code.
  */
 
-CCArena a = @create(kilobytes(4)) @destroy;
+CCArena arena = @create(kilobytes(4)) @destroy;
 
 int line = 7;
 int nr = 3;
 
-@string(`line=${line} nr=${nr}`, a).println();
+@string(`line=${line} nr=${nr}`, arena).println();
 
 char *p = "abc";
 char *line2 = p;

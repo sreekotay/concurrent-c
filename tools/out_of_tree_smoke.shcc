@@ -1,6 +1,6 @@
 #!/usr/bin/env -S ./cc/bin/ccc
 /*
- * Regression: compile/run a .ccs that lives outside the repo tree.
+ * Regression: compile/run arena .ccs that lives outside the repo tree.
  * Guards cc_path_find_repo_root → header include resolution (without this,
  * `!>` on pointer-returning runtime funcs can silently fall back to
  * Result-style lowering).
@@ -20,7 +20,7 @@ if (!dir) {
     return 1;
 }
 
-CCArena a = @create(megabytes(2)) @destroy;
+CCArena arena = @create(megabytes(2)) @destroy;
 
 char dst_path[512];
 snprintf(dst_path, sizeof(dst_path), "%s/out_of_tree.ccs", dir);
@@ -28,7 +28,7 @@ snprintf(dst_path, sizeof(dst_path), "%s/out_of_tree.ccs", dir);
 /* File ops + cmd.output (CCIoError) share one CCError handler via as:. */
 @errhandler(CCError e) {
     CCString em = @string(
-        `FAIL out-of-tree-smoke: ${cc_io_error_str(cc_io_error(e))} (kind=${(int)e.kind})`, &a);
+        `FAIL out-of-tree-smoke: ${cc_io_error_str(cc_io_error(e))} (kind=${(int)e.kind})`, &arena);
     (void)em.eprintln();
     unlink(dst_path);
     rmdir(dir);
@@ -36,17 +36,17 @@ snprintf(dst_path, sizeof(dst_path), "%s/out_of_tree.ccs", dir);
 }
 
 cc_file_copy(@slice("tests/unwrap_destroy_closure_smoke.ccs"),
-             char_to_slice(dst_path), &a) !>;
+             char_to_slice(dst_path), &arena) !>;
 
 char[:] expected =
-    cc_file_read_path(@slice("tests/unwrap_destroy_closure_smoke.stdout"), &a) !>;
+    cc_file_read_path(@slice("tests/unwrap_destroy_closure_smoke.stdout"), &arena) !>;
 
-CCCommand cmd = cc_command(a, @slice("./cc/bin/ccc"));
+CCCommand cmd = cc_command(arena, @slice("./cc/bin/ccc"));
 cmd.arg("run");
 cmd.arg(dst_path);
 cmd.stderr_to_stdout(); /* match prior Make recipe: 2>&1 */
 
-CCProcessOutput out = cmd.output(&a) !>;
+CCProcessOutput out = cmd.output(&arena) !>;
 
 int rc = out.exit_code();
 CCSlice actual = out.stdout_data;
@@ -55,7 +55,7 @@ unlink(dst_path);
 rmdir(dir);
 
 if (rc != 0) {
-    CCString em = @string(`FAIL out-of-tree-smoke: ccc run exited ${rc}`, a);
+    CCString em = @string(`FAIL out-of-tree-smoke: ccc run exited ${rc}`, arena);
     em.eprintln();
     if (actual.ptr && actual.len)
         fwrite(actual.ptr, 1, actual.len, stderr);

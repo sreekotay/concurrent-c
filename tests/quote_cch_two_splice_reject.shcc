@@ -1,19 +1,19 @@
 /* Two TUs including the same unowned impl-grade face. */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
-CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
+CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
 build.arg("build");
 build.arg("--no-cache");
 build.arg("tests/quote_cch_two_splice_a_mod.ccs");
 build.arg("tests/quote_cch_two_splice_b_mod.ccs");
 build.arg("-o");
 build.arg("out/quote_cch_two_splice_reject");
-CCProcessOutput out = build.capture(a) !>;
+CCProcessOutput out = build.capture(arena) !>;
 if (out.success()) {
     "two unowned splices linked".println();
     return 1;
 }
-CCCommand grep = cc_command(a, @slice("grep"));
+CCCommand grep = cc_command(arena, @slice("grep"));
 grep.arg("-q");
 grep.arg("spliced into");
 grep.stdin_slice(out.stdout());

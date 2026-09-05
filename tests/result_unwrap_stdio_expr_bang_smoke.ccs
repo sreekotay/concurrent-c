@@ -16,8 +16,8 @@ int main(void) {
         fprintf(stderr, "fatal: %s\n", e.message);
         return 1;
     }
-    CCArena a = @create(megabytes(1)) @destroy;
-    CCStdio io = @create(a) @destroy;
+    CCArena arena = @create(megabytes(1)) @destroy;
+    CCStdio io = @create(arena) @destroy;
 
     CCSlice direct = cc_stdio_read_all(&io) !>;
     (void)direct;

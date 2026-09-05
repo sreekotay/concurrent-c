@@ -1,8 +1,8 @@
-/* Factory-prerequisite face after a spliced chapter: DECL follows the
+/* Factory-prerequisite face after arena spliced chapter: DECL follows the
  * include that declares QuoteOwnerRun, not result-specs. */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
-CCCommand emit = cc_command(a, @slice("./cc/bin/ccc"));
+CCCommand emit = cc_command(arena, @slice("./cc/bin/ccc"));
 emit.arg("--no-cache");
 emit.arg("--emit-c-only");
 emit.arg("tests/quote_cch_vec_owner_doc.ccs");
@@ -15,7 +15,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand python = cc_command(a, @slice("python3"));
+CCCommand python = cc_command(arena, @slice("python3"));
 python.arg("-c");
 python.arg(
     "t=open('out/quote_cch_vec_owner_doc.c').read()\n"

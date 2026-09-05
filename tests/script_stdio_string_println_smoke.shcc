@@ -3,8 +3,8 @@
  * Smoke: flipped println/eprintln on CCString and slice (UFCS on the data).
  */
 
-CCArena a = @create(kilobytes(64)) @destroy;
-CCString s = @string(`stdio-string-ok`, a);
+CCArena arena = @create(kilobytes(64)) @destroy;
+CCString s = @string(`stdio-string-ok`, arena);
 s.println();
 s.eprintln();
 @slice("slice-ok").println();

@@ -1,14 +1,17 @@
 /*
  * Auto-included by the driver for every .shcc translation unit.
- * Default @errhandler is injected by the script entry rewrite (Concurrent-C
- * surface that must not pass through .cch → .h lowering).
+ * Default @errhandler and token-gated predecls (`stdin`, `arena`, `args`) are
+ * injected by the script entry rewrite (Concurrent-C surface that must not
+ * pass through .cch → .h lowering).
  */
 #ifndef CC_SCRIPT_PRELUDE_H
 #define CC_SCRIPT_PRELUDE_H
 
 #include <stdio.h>
 #include <ccc/std/prelude.cch>
+#include <ccc/std/stdin.cch>
 #include <ccc/stdio.cch>
+#undef stdin /* script predecl: BufReader over fd 0, not libc FILE *stdin */
 #include <ccc/std/cli.cch>
 #include <ccc/script/pathx.cch>
 #include <ccc/script/file.cch>

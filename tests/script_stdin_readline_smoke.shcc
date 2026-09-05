@@ -1,0 +1,10 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * `stdin.read_line(&line)` is 1-arg UFCS onto read_line_into — invent cannot
+ * pick that arity. The compiled hook lives in postlude.cch.
+ */
+char[:] line;
+while (stdin.read_line(&line) !>) {
+    line.println() !>;
+}
+return 0;

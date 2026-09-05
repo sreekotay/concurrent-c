@@ -1,7 +1,7 @@
 /* Extracted face must spell Name::[args] to host C (no leftover ::). */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
-CCCommand emit = cc_command(a, @slice("./cc/bin/ccc"));
+CCCommand emit = cc_command(arena, @slice("./cc/bin/ccc"));
 emit.arg("--no-cache");
 emit.arg("--emit-c-only");
 emit.arg("tests/quote_cch_generic_face_smoke.ccs");
@@ -14,7 +14,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_col = cc_command(a, @slice("grep"));
+CCCommand grep_col = cc_command(arena, @slice("grep"));
 grep_col.arg("-q");
 grep_col.arg("-F");
 grep_col.arg("::[");
@@ -25,7 +25,7 @@ if (rc == 0) {
     return 1;
 }
 
-CCCommand grep_pair = cc_command(a, @slice("grep"));
+CCCommand grep_pair = cc_command(arena, @slice("grep"));
 grep_pair.arg("-q");
 grep_pair.arg("QuotePair_int_int");
 grep_pair.arg("out/include/tests/quote_cch_generic_face.h");
@@ -35,7 +35,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_vec = cc_command(a, @slice("grep"));
+CCCommand grep_vec = cc_command(arena, @slice("grep"));
 grep_vec.arg("-q");
 grep_vec.arg("CCVec_char");
 grep_vec.arg("out/include/tests/quote_cch_generic_face.h");

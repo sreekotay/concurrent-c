@@ -2,14 +2,14 @@
  * contract: JS namespaces the "counters" group under one require while
  * "solo_stats" (one class) stays flat; Python mirrors both shapes
  * (import counters → counters.counter / counters.stats; import
- * solo_stats → flat); the loaded name selects the module and a wrong
+ * solo_stats → flat); the loaded name selects the module and arena wrong
  * name refuses listing what the artifact holds; symbol-selected names
  * hardlink while basename-selected extras are real copies (dlopen
  * dedupes by inode); groups never share instances. */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
 {
-    CCCommand which = cc_command(a, @slice("sh"));
+    CCCommand which = cc_command(arena, @slice("sh"));
     which.arg("-c");
     which.arg("command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1");
     int rc = which.status() !>;
@@ -17,7 +17,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
+    CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
     build.arg("build");
     build.arg("tests/dual_multi_export_mod.ccs");
     build.inherit_stdio();
@@ -26,7 +26,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand run = cc_command(a, @slice("sh"));
+    CCCommand run = cc_command(arena, @slice("sh"));
     run.arg("-c");
     CCString js = @string(`node -e "
 const m = require(process.cwd() + '/bin/counters.node');
@@ -39,15 +39,15 @@ const solo = require(process.cwd() + '/bin/solo_stats.node');
 console.log('solo_flat', typeof solo.mean === 'function');
 solo.add(10);
 console.log('solo_independent', solo.mean() === 10 && m.stats.mean() === 4);
-"`, a);
-    run.arg(js.cstr(a));
+"`, arena);
+    run.arg(js.cstr(arena));
     run.inherit_stdio();
     int rc = run.status() !>;
     if (rc != 0) { "node run failed".println(); return 1; }
 }
 
 {
-    CCCommand run = cc_command(a, @slice("sh"));
+    CCCommand run = cc_command(arena, @slice("sh"));
     run.arg("-c");
     run.arg("cd bin && python3 -c \""
             "import counters, solo_stats, os\n"
@@ -67,8 +67,8 @@ console.log('solo_independent', solo.mean() === 10 && m.stats.mean() === 4);
 
 {
     /* A name that is none of the artifact's modules refuses, naming
-     * what it holds — never a guessed registration. */
-    CCCommand run = cc_command(a, @slice("sh"));
+     * what it holds — never arena guessed registration. */
+    CCCommand run = cc_command(arena, @slice("sh"));
     run.arg("-c");
     run.arg("cp bin/counters.node bin/impostor.node && "
             "node -e \"try { require(process.cwd() + '/bin/impostor.node'); "

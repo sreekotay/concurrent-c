@@ -1,1 +1,1 @@
-unconsumed Result
+@parallel {…} !>; discards the handle; bind CCParallel h = … !>; or !>.wait()!>

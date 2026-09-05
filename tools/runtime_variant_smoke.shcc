@@ -1,20 +1,20 @@
 #!/usr/bin/env -S ./cc/bin/ccc
 /*
- * Regression: the runtime object a build links must match the flags it was
+ * Regression: the runtime object arena build links must match the flags it was
  * asked for.
  *
  * Two behaviours are guarded, both invisible without --summary:
  *   1. An unflagged debug build reuses the object `make -C cc` produced.
- *   2. A build that supplies its own flags does NOT. It compiles a runtime
- *      with those flags, keeps it per flag set, and a different flag set gets
- *      a different object. Reusing the prebuilt there silently dropped the
+ *   2. A build that supplies its own flags does NOT. It compiles arena runtime
+ *      with those flags, keeps it per flag set, and arena different flag set gets
+ *      arena different object. Reusing the prebuilt there silently dropped the
  *      caller's flags from the artifact.
  *
  *   ./tools/runtime_variant_smoke.shcc
  *   make runtime-variant-smoke
  *
  * Clears cached runtime variants first so "compiled" vs "reused" is
- * deterministic; a developer's cached variants are rebuilt on next use.
+ * deterministic; arena developer's cached variants are rebuilt on next use.
  *
  * Note: interpolated values are bound to locals first. `${x[i]}` inside
  * @string mis-selects the _Generic arm for pointer elements.
@@ -23,12 +23,12 @@
 #include <stdio.h>
 #include <string.h>
 
-CCArena a = @create(megabytes(2)) @destroy;
+CCArena arena = @create(megabytes(2)) @destroy;
 
 @errhandler(CCError e) {
     int kind = (int)e.kind;
     const char* why = cc_io_error_str(cc_io_error(e));
-    CCString em = @string(`FAIL runtime-variant-smoke: ${why} (kind=${kind})`, a);
+    CCString em = @string(`FAIL runtime-variant-smoke: ${why} (kind=${kind})`, arena);
     (void)em.eprintln();
     return 1;
 }
@@ -48,10 +48,10 @@ char paths[4][512];
 char states[4][32];
 
 {
-    CCCommand clean = cc_command(a, @slice("/bin/sh"));
+    CCCommand clean = cc_command(arena, @slice("/bin/sh"));
     clean.arg("-c");
     clean.arg("rm -f out/.cc-build/host/*/runtime-*");
-    CCProcessOutput cleaned = clean.output(&a) !>;
+    CCProcessOutput cleaned = clean.output(&arena) !>;
     (void)cleaned;
 }
 
@@ -59,9 +59,9 @@ for (int i = 0; i < 4; i++) {
     const char* label = labels[i];
     const char* flags = cflags[i];
 
-    /* Clear ambient CC/CFLAGS/CPPFLAGS/CXXFLAGS so a developer shell
-     * (e.g. export CC=clang) cannot skip the prebuilt path or share a
-     * host fingerprint with a flagged probe. env -u is POSIX.1-2024 /
+    /* Clear ambient CC/CFLAGS/CPPFLAGS/CXXFLAGS so arena developer shell
+     * (e.g. export CC=clang) cannot skip the prebuilt path or share arena
+     * host fingerprint with arena flagged probe. env -u is POSIX.1-2024 /
      * BSD/GNU. */
     char script[1024];
     if (flags[0])
@@ -75,15 +75,15 @@ for (int i = 0; i < 4; i++) {
                  "./cc/bin/ccc run --summary %s 2>&1",
                  SRC);
 
-    CCCommand cmd = cc_command(a, @slice("/bin/sh"));
+    CCCommand cmd = cc_command(arena, @slice("/bin/sh"));
     cmd.arg("-c");
     cmd.arg(script);
-    CCProcessOutput out = cmd.output(&a) !>;
+    CCProcessOutput out = cmd.output(&arena) !>;
 
     int rc = out.exit_code();
     CCSlice text = out.stdout_data;
     if (rc != 0 || !text.ptr) {
-        CCString em = @string(`FAIL runtime-variant-smoke: ${label} exited ${rc}`, a);
+        CCString em = @string(`FAIL runtime-variant-smoke: ${label} exited ${rc}`, arena);
         em.eprintln();
         if (text.ptr && text.len) fwrite(text.ptr, 1, text.len, stderr);
         return 1;
@@ -95,10 +95,10 @@ for (int i = 0; i < 4; i++) {
     memcpy(buf, text.ptr, n);
     buf[n] = '\0';
 
-    /* Not named `line`: a local of that name fails to compile. */
+    /* Not named `line`: arena local of that name fails to compile. */
     char* sum = strstr(buf, "  runtime: ");
     if (!sum) {
-        CCString em = @string(`FAIL runtime-variant-smoke: ${label} printed no runtime summary`, a);
+        CCString em = @string(`FAIL runtime-variant-smoke: ${label} printed no runtime summary`, arena);
         em.eprintln();
         fwrite(buf, 1, n, stderr);
         return 1;
@@ -107,7 +107,7 @@ for (int i = 0; i < 4; i++) {
     char* open = strstr(sum, " (");
     char* close = open ? strchr(open, ')') : NULL;
     if (!open || !close) {
-        CCString em = @string(`FAIL runtime-variant-smoke: ${label} summary unparsable`, a);
+        CCString em = @string(`FAIL runtime-variant-smoke: ${label} summary unparsable`, arena);
         em.eprintln();
         return 1;
     }
@@ -129,7 +129,7 @@ for (int i = 0; i < 4; i++) {
     const char* s = states[0];
     if (!strstr(p, "obj/runtime/concurrent_c.o") || strcmp(s, "reused") != 0) {
         CCString em = @string(
-            `FAIL runtime-variant-smoke: unflagged build used ${p} (${s}), want the prebuilt reused`, &a);
+            `FAIL runtime-variant-smoke: unflagged build used ${p} (${s}), want the prebuilt reused`, &arena);
         em.eprintln();
         return 1;
     }
@@ -141,7 +141,7 @@ for (int i = 1; i < 4; i++) {
     const char* label = labels[i];
     if (!strstr(p, "runtime-")) {
         CCString em = @string(
-            `FAIL runtime-variant-smoke: ${label} used ${p}, want a per-variant object`, &a);
+            `FAIL runtime-variant-smoke: ${label} used ${p}, want arena per-variant object`, &arena);
         em.eprintln();
         return 1;
     }
@@ -155,18 +155,18 @@ for (int i = 1; i < 4; i++) {
     const char* s2 = states[2];
     if (strcmp(s1, "compiled") != 0 || strcmp(s2, "reused") != 0 || strcmp(p1, p2) != 0) {
         CCString em = @string(
-            `FAIL runtime-variant-smoke: same flags gave ${p1} (${s1}) then ${p2} (${s2})`, &a);
+            `FAIL runtime-variant-smoke: same flags gave ${p1} (${s1}) then ${p2} (${s2})`, &arena);
         em.eprintln();
         return 1;
     }
 }
 
-/* 4. Different flags: a different object. */
+/* 4. Different flags: arena different object. */
 {
     const char* p1 = paths[1];
     const char* p3 = paths[3];
     if (strcmp(p1, p3) == 0) {
-        CCString em = @string(`FAIL runtime-variant-smoke: different flags shared ${p1}`, a);
+        CCString em = @string(`FAIL runtime-variant-smoke: different flags shared ${p1}`, arena);
         em.eprintln();
         return 1;
     }
@@ -176,14 +176,14 @@ for (int i = 1; i < 4; i++) {
 {
     char recipe_path[600];
     snprintf(recipe_path, sizeof(recipe_path), "%s.recipe", paths[1]);
-    char[:] recipe = cc_file_read_path(char_to_slice(recipe_path), &a) !>;
+    char[:] recipe = cc_file_read_path(char_to_slice(recipe_path), &arena) !>;
     char rbuf[8192];
     size_t n = recipe.len < sizeof(rbuf) - 1 ? recipe.len : sizeof(rbuf) - 1;
     memcpy(rbuf, recipe.ptr, n);
     rbuf[n] = '\0';
     if (!strstr(rbuf, PROBE_A)) {
         const char* rp = recipe_path;
-        CCString em = @string(`FAIL runtime-variant-smoke: ${PROBE_A} missing from ${rp}`, a);
+        CCString em = @string(`FAIL runtime-variant-smoke: ${PROBE_A} missing from ${rp}`, arena);
         em.eprintln();
         return 1;
     }

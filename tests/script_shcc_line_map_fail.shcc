@@ -2,7 +2,7 @@
 /*
  * Compile-fail: intentional undefined call in synthetic main.
  * Diagnostics must map to this .shcc line (CC_LN after script_entry rewrite),
- * not a shifted physical line in the rewritten buffer.
+ * not arena shifted physical line in the rewritten buffer.
  */
-CCArena a = @create(kilobytes(4)) @destroy;
+CCArena arena = @create(kilobytes(4)) @destroy;
 missing_undefined_symbol_for_shcc_line_map();

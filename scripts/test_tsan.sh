@@ -78,8 +78,15 @@ run_test() {
     
     if [[ "$test_file" == *.c ]]; then
         local bin="/tmp/tsan_${name}"
-        # Compile first (no timeout needed)
-        if ! output=$(clang -fsanitize=thread -g -Icc/include "$test_file" -lpthread -o "$bin" 2>&1); then
+        # Host C: lowered stdlib in out/include (`.cch` still carries
+        # `@typeview` / `@typehooks`; header lowering strips those).
+        local inc="$ROOT_DIR/out/include"
+        if [[ ! -f "$inc/ccc/cc_closure.h" ]]; then
+            echo -e "${RED}COMPILE FAIL${NC}"
+            echo "need lowered headers (run make cc) to compile $test_file"
+            return 1
+        fi
+        if ! output=$(clang -fsanitize=thread -g -I"$inc" "$test_file" -lpthread -o "$bin" 2>&1); then
             echo -e "${RED}COMPILE FAIL${NC}"
             echo "$output"
             rm -f "$bin"

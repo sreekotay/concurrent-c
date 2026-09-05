@@ -1,7 +1,7 @@
 /* Extracted face: Vec::[QuoteVecItem] DECL follows the element typedef. */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
-CCCommand emit = cc_command(a, @slice("./cc/bin/ccc"));
+CCCommand emit = cc_command(arena, @slice("./cc/bin/ccc"));
 emit.arg("--no-cache");
 emit.arg("--emit-c-only");
 emit.arg("tests/quote_cch_vec_user_elem_smoke.ccs");
@@ -14,7 +14,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_col = cc_command(a, @slice("grep"));
+CCCommand grep_col = cc_command(arena, @slice("grep"));
 grep_col.arg("-q");
 grep_col.arg("-E");
 grep_col.arg("Vec::\\[|vec_new::\\[");
@@ -26,7 +26,7 @@ if (rc == 0) {
 }
 
 /* DECL must not precede the element typedef (unknown type name). */
-CCCommand python = cc_command(a, @slice("python3"));
+CCCommand python = cc_command(arena, @slice("python3"));
 python.arg("-c");
 python.arg(
     "p='out/include/tests/quote_cch_vec_user_elem.h'\n"

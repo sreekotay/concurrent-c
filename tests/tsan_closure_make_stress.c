@@ -4,10 +4,10 @@
  * Validates that cc_closure*_make only touch thread-local stack state.
  * With TSan enabled, this should report NO races.
  *
- * Run with:
- *   clang -fsanitize=thread -g -Icc/include tests/tsan_closure_make_stress.c -lpthread
+ * Run with (after `make cc`, so out/include has lowered headers):
+ *   clang -fsanitize=thread -g -Iout/include tests/tsan_closure_make_stress.c -lpthread
  */
-#include <ccc/cc_closure.cch>
+#include <ccc/cc_closure.h>
 
 #include <pthread.h>
 #include <stdint.h>

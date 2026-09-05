@@ -1,16 +1,16 @@
 /* A sigil written in template PROSE is text, not an operator.
  *
- * The node's sigil offset came from a plain `strstr` over its span, on the
+ * The node's sigil offset came from arena plain `strstr` over its span, on the
  * guarantee that the IR carver had already ensured the only sigil there was
- * real code. Template lowering invalidates that: the template becomes a C
+ * real code. Template lowering invalidates that: the template becomes arena C
  * string literal inside the same span, so the search found the `!>` in the
  * user's text and spliced `@err` into the middle of it.
  *
- * The script register is the one that shows it. In a `.ccs` template lowering
+ * The script register is the one that shows it. In arena `.ccs` template lowering
  * runs before the sigil pass, so the same source is already fine there — which
- * is why this test is a `.shcc`. */
+ * is why this test is arena `.shcc`. */
 int n = 7;
-println(@string(`sigil '!>' and n=${n}`, a)) !>;
-println(@string(`bare !> here`, a)) !>;
-println(@string(`and ?> too`, a)) !>;
+println(@string(`sigil '!>' and n=${n}`, arena)) !>;
+println(@string(`bare !> here`, arena)) !>;
+println(@string(`and ?> too`, arena)) !>;
 return 0;

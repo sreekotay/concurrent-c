@@ -74,24 +74,25 @@ int main(void) {
         failed |= expect_substr(out, "-e", "argv0");
     }
 
-    /* 3) predeclared io (+ a via implication) */
+    /* 3) predeclared stdin (+ private arena via setup) */
     snprintf(cmd, sizeof(cmd),
-             "./cc/bin/ccc -e 'io.println(CC_SLICE_LIT(\"via-io\"));'");
+             "./cc/bin/ccc -e '\"via-stdin\".println();'");
     if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
-        fprintf(stderr, "FAIL io predecl (exit %d):\n%s\n", ec, out);
+        fprintf(stderr, "FAIL stdin predecl (exit %d):\n%s\n", ec, out);
         failed = 1;
     } else {
-        failed |= expect_substr(out, "via-io", "io predecl");
+        failed |= expect_substr(out, "via-stdin", "stdin predecl");
     }
 
-    /* 4) predeclared in */
+    /* 4) predeclared stdin.read_all */
     snprintf(cmd, sizeof(cmd),
-             "printf 'in-data' | ./cc/bin/ccc -e 'io.write_all(in) !>;'");
+             "printf 'in-data' | ./cc/bin/ccc -e "
+             "'char[:] in = stdin.read_all(arena) !>; in.println() !>;'");
     if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
-        fprintf(stderr, "FAIL in predecl (exit %d):\n%s\n", ec, out);
+        fprintf(stderr, "FAIL stdin read_all (exit %d):\n%s\n", ec, out);
         failed = 1;
     } else {
-        failed |= expect_substr(out, "in-data", "in predecl");
+        failed |= expect_substr(out, "in-data", "stdin read_all");
     }
 
     /* 5) args predecl */
@@ -158,9 +159,9 @@ int main(void) {
         failed |= expect_substr(out, "non-keyword", "keyword save");
     }
 
-    /* 7c) template prose must not trigger predecl `in` (no stdin drain) */
+    /* 7c) template prose must not trigger predecl `stdin` (no stdin drain) */
     snprintf(cmd, sizeof(cmd),
-             "./cc/bin/ccc -e 'io.println(@string(`built in a jiffy`));'");
+             "./cc/bin/ccc -e 'println(@string(`built in a jiffy`));'");
     if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
         fprintf(stderr, "FAIL template prose predecl (exit %d):\n%s\n", ec, out);
         failed = 1;
@@ -171,7 +172,7 @@ int main(void) {
     /* 7d) apostrophe in template must not wedge --save duplicate detection */
     snprintf(cmd, sizeof(cmd),
              "./cc/bin/ccc --save-to '%s' --save dont -e "
-             "'io.println(@string(`don'\\''t`));'",
+             "'println(@string(`don'\\''t`));'",
              toolbox);
     if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
         fprintf(stderr, "FAIL save dont (exit %d):\n%s\n", ec, out);
@@ -188,7 +189,7 @@ int main(void) {
         failed |= expect_substr(out, "already exists", "duplicate after template");
     }
 
-    /* 8) -E expr print */
+    /* 8) -E expr print — token-gated; does not force stdin */
     snprintf(cmd, sizeof(cmd), "./cc/bin/ccc -E '1 + 2'");
     if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
         fprintf(stderr, "FAIL -E (exit %d):\n%s\n", ec, out);
@@ -199,7 +200,7 @@ int main(void) {
 
     /* 8b) -E with nested @string template (no backtick nesting in wrap) */
     snprintf(cmd, sizeof(cmd),
-             "./cc/bin/ccc -E '@string(`hi-tpl`, a)'");
+             "./cc/bin/ccc -E '@string(`hi-tpl`, arena)'");
     if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
         fprintf(stderr, "FAIL -E @string (exit %d):\n%s\n", ec, out);
         failed = 1;

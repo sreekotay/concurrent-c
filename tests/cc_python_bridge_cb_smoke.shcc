@@ -1,17 +1,17 @@
-/* JS callbacks crossing into Python, both flavors: a JS function
- * argument becomes a Python callable (sync calls reenter on main; lane
+/* JS callbacks crossing into Python, both flavors: arena JS function
+ * argument becomes arena Python callable (sync calls reenter on main; lane
  * calls release the GIL, hop through the tsfn, and wait), throws map to
  * exceptions and rejections with their message, Promise returns are
  * refused articulately, callbacks nest sync bridge calls and submit
  * (never await) tasks, retained callables fire on later calls on either
- * thread, and a callback can revoke its own bridge mid-task without
+ * thread, and arena callback can revoke its own bridge mid-task without
  * deadlock.  Rungs live in cc_python_bridge_cb.js; the addon is
  * npm/cc-python/src/cc_python.ccs (own artifact name — sibling bridge
  * smokes relink their own). */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
 {
-    CCCommand which = cc_command(a, @slice("sh"));
+    CCCommand which = cc_command(arena, @slice("sh"));
     which.arg("-c");
     which.arg("command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1");
     int rc = which.status() !>;
@@ -19,7 +19,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
+    CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
     build.arg("build");
     build.arg("npm/cc-python/src/cc_python.ccs");
     build.arg("-o");
@@ -30,7 +30,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand run = cc_command(a, @slice("sh"));
+    CCCommand run = cc_command(arena, @slice("sh"));
     run.arg("-c");
     run.arg("CC_PYTHON_ADDON=$PWD/bin/cc_python_cb.node node tests/cc_python_bridge_cb.js");
     run.inherit_stdio();

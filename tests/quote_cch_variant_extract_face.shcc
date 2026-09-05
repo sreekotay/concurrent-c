@@ -1,8 +1,8 @@
-/* Extracted guest .h is enum+union C — not a leftover @variant sigil,
+/* Extracted guest .h is enum+union C — not arena leftover @variant sigil,
  * and not an impl-grade splice of the face. */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
-CCCommand emit = cc_command(a, @slice("./cc/bin/ccc"));
+CCCommand emit = cc_command(arena, @slice("./cc/bin/ccc"));
 emit.arg("--no-cache");
 emit.arg("--emit-c-only");
 emit.arg("tests/quote_cch_variant_extract_smoke.ccs");
@@ -15,7 +15,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_sigil = cc_command(a, @slice("grep"));
+CCCommand grep_sigil = cc_command(arena, @slice("grep"));
 grep_sigil.arg("-q");
 grep_sigil.arg("@variant QuoteVaCell");
 grep_sigil.arg("out/include/tests/quote_cch_variant_extract.h");
@@ -25,7 +25,7 @@ if (rc == 0) {
     return 1;
 }
 
-CCCommand grep_kind = cc_command(a, @slice("grep"));
+CCCommand grep_kind = cc_command(arena, @slice("grep"));
 grep_kind.arg("-q");
 grep_kind.arg("QuoteVaCellKind");
 grep_kind.arg("out/include/tests/quote_cch_variant_extract.h");
@@ -35,7 +35,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_splice = cc_command(a, @slice("grep"));
+CCCommand grep_splice = cc_command(arena, @slice("grep"));
 grep_splice.arg("-q");
 grep_splice.arg("impl_cch_begin:.*quote_cch_variant_extract.cch");
 grep_splice.arg("out/quote_cch_variant_extract_smoke.c");

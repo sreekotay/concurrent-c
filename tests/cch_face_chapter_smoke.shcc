@@ -1,9 +1,9 @@
-/* Public face includes an impl-grade chapter; a different same-dir
+/* Public face includes an impl-grade chapter; arena different same-dir
  * `.ccs` includes that chapter and owns the bodies. The face TU
  * extracts decls and must not also splice the chapter. */
-CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
-CCCommand emit_face = cc_command(a, @slice("./cc/bin/ccc"));
+CCCommand emit_face = cc_command(arena, @slice("./cc/bin/ccc"));
 emit_face.arg("--no-cache");
 emit_face.arg("--emit-c-only");
 emit_face.arg("tests/cch_face_chapter_face_mod.ccs");
@@ -16,7 +16,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_face_splice = cc_command(a, @slice("grep"));
+CCCommand grep_face_splice = cc_command(arena, @slice("grep"));
 grep_face_splice.arg("-q");
 grep_face_splice.arg("FACE_CHAPTER_BODY_MUST_NOT_SPLICE_INTO_FACE");
 grep_face_splice.arg("out/cch_face_chapter_face.c");
@@ -26,7 +26,7 @@ if (rc == 0) {
     return 1;
 }
 
-CCCommand grep_face_impl = cc_command(a, @slice("grep"));
+CCCommand grep_face_impl = cc_command(arena, @slice("grep"));
 grep_face_impl.arg("-q");
 grep_face_impl.arg("impl_cch_begin:.*cch_face_chapter.cch");
 grep_face_impl.arg("out/cch_face_chapter_face.c");
@@ -36,7 +36,7 @@ if (rc == 0) {
     return 1;
 }
 
-CCCommand emit_user = cc_command(a, @slice("./cc/bin/ccc"));
+CCCommand emit_user = cc_command(arena, @slice("./cc/bin/ccc"));
 emit_user.arg("--no-cache");
 emit_user.arg("--emit-c-only");
 emit_user.arg("tests/cch_face_chapter_user_mod.ccs");
@@ -49,7 +49,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_user = cc_command(a, @slice("grep"));
+CCCommand grep_user = cc_command(arena, @slice("grep"));
 grep_user.arg("-q");
 grep_user.arg("FACE_CHAPTER_BODY_MUST_NOT_SPLICE_INTO_FACE");
 grep_user.arg("out/cch_face_chapter_user.c");
@@ -59,7 +59,7 @@ if (rc == 0) {
     return 1;
 }
 
-CCCommand emit_owner = cc_command(a, @slice("./cc/bin/ccc"));
+CCCommand emit_owner = cc_command(arena, @slice("./cc/bin/ccc"));
 emit_owner.arg("--no-cache");
 emit_owner.arg("--emit-c-only");
 emit_owner.arg("tests/cch_face_chapter_mod.ccs");
@@ -72,7 +72,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand grep_owner = cc_command(a, @slice("grep"));
+CCCommand grep_owner = cc_command(arena, @slice("grep"));
 grep_owner.arg("-q");
 grep_owner.arg("FACE_CHAPTER_BODY_MUST_NOT_SPLICE_INTO_FACE");
 grep_owner.arg("out/cch_face_chapter_mod.c");
@@ -82,7 +82,7 @@ if (rc != 0) {
     return 1;
 }
 
-CCCommand build = cc_command(a, @slice("./cc/bin/ccc"));
+CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
 build.arg("build");
 build.arg("--no-cache");
 build.arg("tests/cch_face_chapter_mod.ccs");
@@ -96,7 +96,7 @@ if (rc != 0) {
     "build failed".println();
     return 1;
 }
-CCCommand run = cc_command(a, @slice("out/cch_face_chapter_smoke"));
+CCCommand run = cc_command(arena, @slice("out/cch_face_chapter_smoke"));
 run.inherit_stdio();
 rc = run.status() !>;
 if (rc != 0) {

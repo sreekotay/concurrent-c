@@ -2280,7 +2280,11 @@ typedef struct CcPython {
 } CcPython;
 
 static CCJsVal !>(CCError) CcPython_create(CcPython *self, CCJs *js) {
-    CCArena ar = cc_arena_heap(megabytes(4));
+    /* L1 is the domain + a handful of boxes. The arena lives until JS
+     * GC of napi Externals (V8 delays those finalizers under churn), so
+     * a 4 MiB window made sequential create/destroy look like a leak on
+     * GHA. Heavy domains still grow (L2 / Main overflow). */
+    CCArena ar = cc_arena_heap(kilobytes(64));
     CcPyDom *d;
     static char owner_err[256];
     (void)self;
