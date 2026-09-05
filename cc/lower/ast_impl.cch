@@ -346,6 +346,7 @@ static CCSlice CcDecl_kind_name(const CcDecl* d) {
         case .task_doc: return CC_SLICE_LIT("@task doc");
         case .macro_call: return CC_SLICE_LIT("macro call");
         case .stmt: return CC_SLICE_LIT("statement");
+        case .raw: return CC_SLICE_LIT("raw C");
     }
     return CC_SLICE_LIT("?decl");
 }

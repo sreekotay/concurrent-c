@@ -611,6 +611,8 @@ static bool decl_is_cc(const CcDecl* d) {
         case .empty: return false;
         case .macro_call: return false;
         case .stmt: return false;
+        case .raw: return false;
+        case .pragma_cc: return false;
         default: return true;
     }
 }
@@ -1673,6 +1675,54 @@ static void pr_d_pp(Pr* p, const CcDecl* d, const CcPpDecl* pd, int indent) {
         pr_span_c(p, d->span, "preprocessor line");
 }
 
+/* `#line N "path"` at the start of a raw line: the host view it installs. */
+static bool pr_raw_line_directive(CCSlice line, CCSlice* path, uint32_t* ln) {
+    size_t i = 0;
+    uint32_t v = 0;
+    size_t q0;
+    if (line.len < 8 || memcmp(line.ptr, "#line", 5) != 0) return false;
+    i = 5;
+    while (i < line.len && (line.ptr[i] == ' ' || line.ptr[i] == '\t')) i++;
+    if (i >= line.len || line.ptr[i] < '0' || line.ptr[i] > '9') return false;
+    while (i < line.len && line.ptr[i] >= '0' && line.ptr[i] <= '9') { v = v * 10 + (uint32_t)(line.ptr[i] - '0'); i++; }
+    while (i < line.len && (line.ptr[i] == ' ' || line.ptr[i] == '\t')) i++;
+    if (i >= line.len || line.ptr[i] != '"') return false;
+    q0 = ++i;
+    while (i < line.len && line.ptr[i] != '"') i++;
+    if (i >= line.len) return false;
+    *path = cc_slice_from_buffer((char*)line.ptr + q0, i - q0);
+    *ln = v;
+    return true;
+}
+
+/* Verbatim C from a lowering: printed as its own lines, each attributed to
+ * what the host sees (the text pins itself with its own `#line`s, which move
+ * the host view like a copied user directive); the printer places no
+ * directive of its own inside it. The construct after it re-pins. */
+static void pr_d_raw(Pr* p, CCSlice text) {
+    size_t i = 0;
+    if (!p->at_line_start) pr_nl(p);
+    while (i < text.len) {
+        size_t j = i;
+        CCSlice line;
+        CCSlice dpath;
+        uint32_t dline = 0;
+        while (j < text.len && text.ptr[j] != '\n') j++;
+        line = cc_slice_from_buffer((char*)text.ptr + i, j - i);
+        if (p->host_known) pr_map_push(p, p->host_path, p->host_line);
+        else pr_map_push(p, p->pin_path, p->pin_line);
+        p->at_line_start = false;
+        out_push(p, line.ptr, line.len);
+        if (pr_raw_line_directive(line, &dpath, &dline)) {
+            p->host_reset_pending = true;
+            p->host_reset_path = dpath;
+            p->host_reset_line = dline;
+        }
+        pr_nl(p);
+        i = j + 1;
+    }
+}
+
 static void pr_d_stmt(Pr* p, const CcDecl* d, const CcStmt* body) {
     if (body) pr_stmt_text(p, body);
     else pr_span_c(p, d->span, "statement");
@@ -1706,6 +1756,7 @@ static void pr_decl(Pr* p, const CcDecl* d) {
         case .macro_call(mc): pr_d_macro_call(p, d, mc.call); break;
         case .empty: pr_str(p, ";"); break;
         case .pragma_cc: break;   /* `#pragma(@parallel) off` and kin steer the lowering; nothing in C */
+        case .raw(rt): pr_d_raw(p, rt); break;
         default: pr_d_unknown(p, d); break;
     }
     p->indent = indent;

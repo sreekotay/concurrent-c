@@ -1275,6 +1275,9 @@ static void dump_decl_d(Dump* d, const CcDecl* dc, int depth) {
             dump_expr(d, mc.call, depth + 1);
             break;
         }
+        case .raw:
+            dump_pos(d, dc->span);
+            break;
         case .stmt(ts):
             dump_specs(d, dc->specs);
             dump_pos(d, dc->span);

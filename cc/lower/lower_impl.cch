@@ -1,0 +1,240 @@
+#pragma(@per_tu)
+/* Lowering: the pipeline and the node builders the steps share. Every
+ * builder takes the span of the construct it stands in for. */
+#ifndef CC_LOWER_LOWER_IMPL_CCH
+#define CC_LOWER_LOWER_IMPL_CCH
+#include "lower.cch"
+#include "ast_impl.cch"
+#include "parse_walk.cch"
+#include "print_impl.cch"
+#include "index_impl.cch"
+#include <string.h>
+
+static CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds) {
+    CcLowerer L;
+    memset(&L, 0, sizeof(L));
+    L.arena = u->arena;
+    L.ds = ds;
+    L.ix = ix;
+    L.unit = u;
+    L.opts = opts;
+    L.next_temp = 0;
+    return L;
+}
+
+static uint32_t CcLowerer_temp_id(CcLowerer* L) { return L->next_temp++; }
+
+/* A TU-only construct so the extractor sees an implementation header
+ * (without one, a header of plain C bodies is taken for an interface and
+ * refuses the per-TU modules it includes). Never called. */
+static CCString cc__lower_impl_marker(CcLowerer* L) {
+    CCString s = @string(`lower`, L->arena);
+    return s;
+}
+
+/* ---- diagnostics ------------------------------------------------------ */
+
+static void lw_error(CcLowerer* L, CcSpan span, CCString msg) {
+    CcUnit* u = L->unit;
+    CcLoc loc = u->loc(span);
+    CcDiag d = CcDiag_error(loc, cc_string_persist_slice(L->arena, &msg));
+    CcDiags* ds = L->ds;
+    ds->push(d);
+}
+
+/* ---- node builders ---------------------------------------------------- */
+
+/* A persisted copy of a built string, as a slice the nodes can keep. */
+static CCSlice lw_keep(CcLowerer* L, CCString* s) {
+    return cc_string_persist_slice(L->arena, s);
+}
+
+static CcExpr* lw_ident(CcLowerer* L, CCSlice name, CcSpan sp) {
+    return cc_expr_ident(name, sp, L->arena);
+}
+
+/* Any C text as an expression operand: printed verbatim. */
+static CcExpr* lw_text(CcLowerer* L, CCString text, CcSpan sp) {
+    return cc_expr_ident(lw_keep(L, &text), sp, L->arena);
+}
+
+/* The argument list of a call node, and the statement list of a block:
+ * projections are lowered only inside a @switch on the node, so each
+ * accessor is one. */
+static CcExprList* lw_call_args(CcExpr* c) {
+    CcExprList* args = NULL;
+    @switch (c->k) {
+        case .call: args = &c->k.call.args; break;
+        default: break;
+    }
+    return args;
+}
+
+static CcStmtList* lw_block_stmts(CcStmt* b) {
+    CcStmtList* list = NULL;
+    @switch (b->k) {
+        case .block: list = &b->k.block.stmts; break;
+        default: break;
+    }
+    return list;
+}
+
+static CcExpr* lw_call0(CcLowerer* L, CCSlice fn, CcSpan sp) {
+    return cc_expr_call(lw_ident(L, fn, sp), sp, L->arena);
+}
+
+static CcExpr* lw_call1(CcLowerer* L, CCSlice fn, CcExpr* a, CcSpan sp) {
+    CcExpr* c = lw_call0(L, fn, sp);
+    CcExprList* args = lw_call_args(c);
+    args->push(a);
+    return c;
+}
+
+static CcExpr* lw_call2(CcLowerer* L, CCSlice fn, CcExpr* a, CcExpr* b, CcSpan sp) {
+    CcExpr* c = lw_call1(L, fn, a, sp);
+    CcExprList* args = lw_call_args(c);
+    args->push(b);
+    return c;
+}
+
+static CcExpr* lw_member(CcLowerer* L, CcExpr* a, const char* name, CcSpan sp) {
+    return cc_expr_member(a, cc_slice_from_buffer((char*)name, strlen(name)), false, sp, L->arena);
+}
+
+static CcExpr* lw_not(CcLowerer* L, CcExpr* a, CcSpan sp) {
+    return cc_expr_unary(CC_OP_NOT, a, sp, L->arena);
+}
+
+static CcExpr* lw_assign(CcLowerer* L, CcExpr* lhs, CcExpr* rhs, CcSpan sp) {
+    CcExpr* e = cc__expr_blank(sp, L->arena);
+    CcBinary b;
+    b.op = CC_OP_ASSIGN;
+    b.a = lhs;
+    b.b = rhs;
+    e->k = { .assign = b };
+    return e;
+}
+
+static CcExpr* lw_paren(CcLowerer* L, CcExpr* a, CcSpan sp) {
+    CcExpr* e = cc__expr_blank(sp, L->arena);
+    CcUnary u;
+    u.op = CC_OP_NONE;
+    u.a = a;
+    e->k = { .paren = u };
+    return e;
+}
+
+static CcExpr* lw_ternary(CcLowerer* L, CcExpr* c, CcExpr* a, CcExpr* b, CcSpan sp) {
+    CcExpr* e = cc__expr_blank(sp, L->arena);
+    CcTernary t;
+    t.c = c;
+    t.a = a;
+    t.b = b;
+    e->k = { .ternary = t };
+    return e;
+}
+
+static CcType* lw_named_type(CcLowerer* L, CCSlice name, CcSpan sp) {
+    return cc_type_named(name, sp, L->arena);
+}
+
+static CcStmt* lw_expr_stmt(CcLowerer* L, CcExpr* e, CcSpan sp) {
+    return cc_stmt_expr(e, sp, L->arena);
+}
+
+static CcStmt* lw_block(CcLowerer* L, CcSpan sp) {
+    return cc_stmt_block(sp, L->arena);
+}
+
+static void lw_push(CcStmt* block, CcStmt* s) {
+    CcStmtList* list = lw_block_stmts(block);
+    list->push(s);
+}
+
+static CcStmt* lw_if(CcLowerer* L, CcExpr* cond, CcStmt* then, CcStmt* els, CcSpan sp) {
+    return cc_stmt_if(cond, then, els, sp, L->arena);
+}
+
+static CcStmt* lw_goto(CcLowerer* L, CCSlice label, CcSpan sp) {
+    return cc_stmt_goto(label, sp, L->arena);
+}
+
+static CcStmt* lw_label(CcLowerer* L, CCSlice name, CcStmt* inner, CcSpan sp) {
+    return cc_stmt_label(name, inner, sp, L->arena);
+}
+
+/* `T name = init;` (init may be NULL) as a statement. */
+static CcStmt* lw_decl_stmt(CcLowerer* L, CcType* type, CCSlice name, CcExpr* init, CcSpan sp) {
+    CcInit* in = NULL;
+    CcDecl* d;
+    CcStmt* s;
+    CcDeclStmt ds;
+    if (init) {
+        in = cc_arena_alloc(L->arena, sizeof(CcInit), _Alignof(CcInit));
+        memset(in, 0, sizeof(*in));
+        in->span = sp;
+        in->designators = vec_new::[CcDesignator](L->arena);
+        in->items = vec_new::[CcInitRef](L->arena);
+        in->expr = init;
+    }
+    d = cc_decl_var(type, name, in, sp, L->arena);
+    s = cc__stmt_blank(sp, L->arena);
+    ds.d = d;
+    s->k = { .decl = ds };
+    return s;
+}
+
+/* Verbatim C at file scope. */
+static CcDecl* lw_raw_decl(CcLowerer* L, CCString text, CcSpan sp) {
+    CcDecl* d = cc_arena_alloc(L->arena, sizeof(CcDecl), _Alignof(CcDecl));
+    CCSlice t = lw_keep(L, &text);
+    memset(d, 0, sizeof(*d));
+    d->span = sp;
+    d->attrs = vec_new::[CcAttr](L->arena);
+    d->k = { .raw = t };
+    return d;
+}
+
+/* The C spelling of an expression, for `__typeof__(...)` and messages. */
+static CCString lw_spell_expr(CcLowerer* L, const CcExpr* e) {
+    return CcExpr_spell(e, &L->unit->tape, L->arena);
+}
+
+/* ---- the pipeline ----------------------------------------------------- */
+
+#include "lower_results.cch"
+
+/* The banner every lowered TU starts with: the generator, and the two
+ * headers whose names lowered code spells without asking. */
+static void lw_banner(CcLowerer* L) {
+    CcDeclList* decls = &L->unit->decls;
+    CcDeclList with = vec_new::[CcDeclRef](L->arena);
+    size_t n = decls->len();
+    size_t i;
+    CcSpan sp;
+    CcDecl* raw;
+    CCString text = @string(`/* generated by Concurrent-C (ccc / cclower) */
+#include <stddef.h>
+#include <stdint.h>
+`, L->arena);
+    sp.first = 0;
+    sp.last = 0;
+    if (n) {
+        CcDecl* d0 = *decls->get_ptr(0);
+        sp = d0->span;
+    }
+    raw = lw_raw_decl(L, text, sp);
+    with.push(raw);
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *decls->get_ptr(i);
+        with.push(d);
+    }
+    *decls = with;
+}
+
+static void CcLowerer_lower_unit(CcLowerer* L) {
+    CcLowerer_results(L);
+    lw_banner(L);
+}
+
+#endif
