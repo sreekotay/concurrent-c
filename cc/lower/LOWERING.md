@@ -1,0 +1,185 @@
+# Lowering shapes
+
+The C each Concurrent-C construct lowers to. The runtime and stdlib do not
+change, so these are the shapes the current lowerer emits, written down so
+the clean lowerer reproduces the behaviour without reproducing the code.
+Every generated line is pinned to the user's line of the construct with a
+`#line`; the printer does that from the spans, so nothing here emits
+`#line` by hand.
+
+## Results
+
+**Result types.** `T!>(E)` is `CCResult_T_E`, `T?>(E)` the same type with
+the optional-discard property recorded in the index. Canonical spelling
+mangles the value type: `int`, `size_t`, `void`, `CCSlice`, `voidptr` for
+`void*`, `charptr` for `char*`, `unsigned_charptr`, `CCPyptr`, `intptr_t`.
+Each spec the TU uses and no included header declares is emitted once at
+the top of the product, after the includes:
+
+```c
+#line 1 "<cc:result-specs>"
+#ifndef CCResult_int_CCError_DEFINED
+#define CCResult_int_CCError_DEFINED 1
+#ifdef CC_DECL_RESULT_SPEC
+CC_DECL_RESULT_SPEC(CCResult_int_CCError, int, CCError)
+#else
+typedef struct { int ok; union { int value; CCError error; } u; } CCResult_int_CCError;
+static inline CCResult_int_CCError cc_ok_CCResult_int_CCError(int v) { CCResult_int_CCError r; r.ok = 1; r.u.value = v; return r; }
+static inline CCResult_int_CCError cc_err_CCResult_int_CCError(CCError e) { CCResult_int_CCError r; r.ok = 0; r.u.error = e; return r; }
+#endif
+#endif
+```
+
+`void` value uses `CC_DECL_RESULT_SPEC_VOID(name, E)` and a `cc_ok_...(void)`.
+
+**Constructors.** In a function declared `T!>(E)`: `cc_ok(v)` →
+`cc_ok_CCResult_T_E(v)`, `cc_ok(void)` → `cc_ok_CCResult_void_E()`,
+`cc_err(e)` → `cc_err_CCResult_T_E(e)`, `cc_err(CC_ERR_X, "msg")` →
+`cc_err_CCResult_T_E(CC_ERROR(CC_ERR_X, "msg"))`. Explicit forms
+`cc_ok(T, v)`, `cc_ok(T, E, v)`, `cc_err(T, e)`, `cc_err(T, E, e)` name
+the spec directly. When the error value's type is not `E`, it is projected
+through the `as:` face graph; the current shape is a `_Generic` ladder over
+the declared faces:
+
+```c
+cc_err_CCResult_int_CCError(({ __typeof__(e) __cc_ep = (e); _Generic(__cc_ep, CCError: __cc_ep, CCIoError: (*(CCError*)(void*)&__cc_ep), default: __cc_ep); }))
+```
+
+The clean lowerer emits the same projection but builds the ladder from the
+faces the index found on the declarations, not from a fixed list.
+
+**Statement `e !>;` with an `@errhandler(E h)` in scope** (initializer form
+`int total = e !>;` shown; the expression-statement form has no `total`):
+
+```c
+int total;
+{
+    __typeof__(get_total_wait_time()) __r = get_total_wait_time();
+    if (!__r.ok) {
+        cc_rt_diag_record_unwrap_site("recipe.ccs", "49");
+        __cc_eh_e_0 = _Generic((__r).u.error, CCError: (__r).u.error, CCIoError: (*(CCError*)(void*)&(__r).u.error), default: (__r).u.error);
+        goto __cc_eh_0;
+    }
+    total = (__r).u.value;
+}
+```
+
+The handler is hoisted to the end of the function body as a label, with the
+error cell declared at the top of the function:
+
+```c
+    CCError __cc_eh_e_0;              /* at function top */
+    ...
+    return 0;
+__cc_eh_0:;
+    {
+        CCError e = __cc_eh_e_0;
+        cc_error_log(e);
+        return 1;
+    }
+```
+
+A handler whose statement does not diverge (no `return`, `goto`, `exit`,
+`abort`, `cc_error_exit`, `longjmp`; `_Noreturn` on the declaration decides,
+with the index) is emitted inline at the unwrap site instead of hoisted.
+One cell and label per handler; handlers are selected by the Result's error
+type `E`, innermost first; no handler for `E` in scope is an error at the
+`!>` naming `E` and the handlers that are in scope.
+
+**`e !> body` and `e !>(err) body`:**
+
+```c
+int timeout;
+{
+    __typeof__(read_config_value("timeout")) __r = read_config_value("timeout");
+    if (!__r.ok) {
+        __typeof__(__r.u.error) e = __r.u.error;   /* only with a binder */
+        <body>                                      /* must diverge at expression position */
+    }
+    timeout = __r.u.value;
+}
+```
+
+`@err(e);` inside the body is `__cc_eh_e_N = (e); goto __cc_eh_N;` for the
+handler matching `e`'s type.
+
+**`e ?> default` and `e ?>(err) default`:**
+
+```c
+int missing;
+{
+    __typeof__(read_config_value("k")) __r = read_config_value("k");
+    missing = !__cc_uw_is_err(__r) ? __cc_uw_value(__r) : (-1);
+}
+```
+
+```c
+int bad;
+{
+    __typeof__(read_config_value("")) __r = read_config_value("");
+    if (__r.ok) { bad = __r.u.value; }
+    else { __typeof__(__r.u.error) e = __r.u.error; bad = (<default>); }
+}
+```
+
+`__cc_uw_is_err`, `__cc_uw_value` and `__cc_uw_err_at` are `_Generic`
+ladders over every Result spec the TU uses, emitted after the specs; the
+clean lowerer uses `__r.ok` / `__r.u.value` directly and drops the ladders.
+
+**`?>` discard.** A call whose declared type is `T?>(E)` used as a bare
+expression statement is `(void)f(...)`; used with `!>` it is the ordinary
+unwrap.
+
+**`e !> @destroy;` and `@destroy { D }` on a declaration:** the unwrap as
+above; then the variable is registered for destruction at scope exit with
+the type's destroy hook from the index (`cc_arena_destroy`, a
+`@typehooks .destroy`, the block `D`). Destruction runs in reverse order at
+every exit of the scope: fallthrough, `return`, `break`, `continue`,
+`goto` out of the scope, and the handler `goto`. `@detach` suppresses it.
+
+**`@defer stmt`, `@defer(ok) stmt`, `@defer(err) stmt`:** same scope-exit
+machinery; `(ok)` runs only on a `return cc_ok(...)` or fallthrough of a
+Result function, `(err)` only on `return cc_err(...)` or a handler exit.
+`@cancel_defer name;` clears the named entry. The current lowerer keeps a
+per-function `__cc_defer_hw` high-water counter and a cleanup label
+(`goto_cleanup`); the clean lowerer emits the deferred statements inline
+at each exit, in reverse order, which is what the `#line` pinning needs.
+
+**Result methods.** `r.is_ok()` → `(r).ok`, `r.is_err()` → `!(r).ok`,
+`r.value()` → `((r).ok ? (r).u.value : (cc_error_exit_result(...), (r).u.value))`,
+`r.error()` symmetric, `r.unwrap_or(d)` → `((r).ok ? (r).u.value : (d))`.
+These come from the index as the method set of every `CCResult_*` type.
+
+## Scratch and templates
+
+`@string(\`text ${x} more\`, arena)`:
+
+```c
+({ CCArena __cc_tpl_arena = CC__ARENA_HANDLE(arena);
+   CCString __cc_tpl = cc_string_new();
+   cc_string_push_buffer(&__cc_tpl, "text ", 5, __cc_tpl_arena);
+   cc__string_slot_push(&__cc_tpl, (x), __cc_tpl_arena);
+   cc_string_push_buffer(&__cc_tpl, " more", 5, __cc_tpl_arena);
+   __cc_tpl; })
+```
+
+printed one push per line. `@scratch` as the arena is the function's
+`cc_arena_stack(__cc_str_scratch, N)` declared at the top of the function
+(N = max `@scratch(N)`, default 1024). A statement that consumes a
+`@scratch` template in a call and binds nothing is wrapped:
+
+```c
+{
+    CcArenaCheckpoint __cc_scratch_cp1 = cc_arena_checkpoint_local(__cc_str_scratch);
+    <statement>
+    cc_arena_restore_local(__cc_scratch_cp1);
+}
+```
+
+with the restore also emitted before every exit from inside the statement.
+
+## Print
+
+`println(x)` is `cc_println(x)`; the alias list is the set of functions
+declared with the print attribute in `stdio.cch`. A bare `println(...)`
+statement is a discarded optional Result.
