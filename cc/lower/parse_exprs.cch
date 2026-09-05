@@ -1,0 +1,1808 @@
+#pragma(@per_tu)
+/* Parser section 3: expressions, templates, closures and initializers.
+ *
+ * Precedence climbing over the C operators, then the postfix tails that
+ * Concurrent-C adds (`!>` in its four forms, `?>`, UFCS and generic calls),
+ * the `@word` operands (`@string`, `@emit`, `@slice`, `@scratch`, `@await`,
+ * `@comptime(...)`, `@create`), closures, variant literals and call modes.
+ * A template literal is split into literal runs and `${...}` slots here;
+ * each slot is parsed by a sub-parser over its own tape that shares the
+ * enclosing parser's scope stack.
+ *
+ * Every node is built as a payload local and installed with one
+ * `e->k = { .arm = payload }`; lists are filled in locals first. */
+#ifndef CC_LOWER_PARSE_EXPRS_CCH
+#define CC_LOWER_PARSE_EXPRS_CCH
+#include "parse_fwd.cch"
+
+static CcExpr* parse_postfix(P* p, CcExpr* e);
+static CcExpr* parse_primary(P* p);
+static CcExpr* parse_closure(P* p, uint32_t first, bool is_unsafe, bool is_async);
+static CcExpr* parse_legacy_err_tail(P* p, CcExpr* lhs);
+
+/* ---- small helpers ----------------------------------------------------- */
+
+static CcExpr* expr_error(P* p) {
+    return cc_expr_ident(CC_SLICE_LIT("<error>"), span2(p->i, p->i), p->arena);
+}
+
+/* e is an identifier: its name. */
+static bool expr_ident_name(const CcExpr* e, CCSlice* out) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .ident(nm): *out = nm; return true;
+        default: return false;
+    }
+}
+
+/* e is a bare `x !>`: its operand. */
+static bool expr_unwrap_operand(const CcExpr* e, CcExpr** out) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .unwrap(u): *out = u.a; return true;
+        default: return false;
+    }
+}
+
+/* e is `name = rhs`: the name and the right-hand side. */
+static bool expr_assign_to_ident(const CcExpr* e, CCSlice* name, CcExpr** rhs) {
+    CcBinary bin;
+    bool is_assign = false;
+    if (!e) return false;
+    @switch (e->k) {
+        case .assign(b): bin = b; is_assign = true; break;
+        default: break;
+    }
+    if (!is_assign || bin.op != CC_OP_ASSIGN) return false;
+    if (!expr_ident_name(bin.a, name)) return false;
+    *rhs = bin.b;
+    return true;
+}
+
+/* e is a call: its callee; else e itself. */
+static const CcExpr* expr_callee_or_self(const CcExpr* e) {
+    if (!e) return e;
+    @switch (e->k) {
+        case .call(c): return c.callee;
+        default: return e;
+    }
+}
+
+static bool expr_is_literal(const CcExpr* e) {
+    return e->k.kind == CcExprK_number || e->k.kind == CcExprK_chr || e->k.kind == CcExprK_string;
+}
+
+static bool expr_is_unwrap_form(const CcExpr* e) {
+    return e->k.kind == CcExprK_unwrap || e->k.kind == CcExprK_unwrap_body || e->k.kind == CcExprK_unwrap_or;
+}
+
+/* "expected {what}, found {token}" at the cursor. `what` may hold parentheses. */
+static void err_expected(P* p, const char* what) {
+    CCSlice found = tok_desc(p, p->i);
+    CCString m = @string(`expected ${what}, found ${found}`, p->arena);
+    err_here(p, m);
+}
+
+/* The token's own text as a message operand (`'x'` is the keyword). */
+static CCSlice tok_text(P* p, uint32_t i) {
+    return p->t[i < p->n ? i : p->n - 1].text;
+}
+
+static CcExpr* mk_literal_tok(P* p, uint32_t tok, uint32_t n_toks, CcSpan span, bool is_char) {
+    CcExpr* e = cc__expr_blank(span, p->arena);
+    CcLiteral l;
+    l.tok = tok;
+    l.n_toks = n_toks;
+    if (is_char) e->k = { .chr = l };
+    else e->k = { .number = l };
+    return e;
+}
+
+static CcExpr* mk_string(P* p, uint32_t tok, uint32_t n_toks, CcSpan span) {
+    CcExpr* e = cc__expr_blank(span, p->arena);
+    CcLiteral l;
+    l.tok = tok;
+    l.n_toks = n_toks;
+    e->k = { .string = l };
+    return e;
+}
+
+static CcExpr* mk_type_arg(P* p, CcType* ty, CcSpan span) {
+    CcExpr* e = cc__expr_blank(span, p->arena);
+    CcTypeArg ta;
+    ta.type = ty;
+    e->k = { .type_arg = ta };
+    return e;
+}
+
+static CcExpr* mk_stmt_expr(P* p, CcStmt* block, CcSpan span) {
+    CcExpr* e = cc__expr_blank(span, p->arena);
+    CcStmtExpr se;
+    se.block = block;
+    e->k = { .stmt_expr = se };
+    return e;
+}
+
+static CcExpr* mk_pp_expr(P* p, uint32_t tok, CcSpan span) {
+    CcExpr* e = cc__expr_blank(span, p->arena);
+    CcPpExpr pp;
+    pp.tok = tok;
+    {
+        CcExprK kk;
+        kk = { .pp = pp };
+        e->k = kk;
+    }
+    return e;
+}
+
+/* ---- operators --------------------------------------------------------- */
+
+static bool binop_of(const CcToken* t, int* prec, CcOp* op) {
+    if (t->kind != CC_TK_PUNCT) return false;
+    switch (t->punct) {
+    case CC_P_OROR: *prec = 1; *op = CC_OP_LOR; return true;
+    case CC_P_ANDAND: *prec = 2; *op = CC_OP_LAND; return true;
+    case CC_P_PIPE: *prec = 3; *op = CC_OP_OR; return true;
+    case CC_P_CARET: *prec = 4; *op = CC_OP_XOR; return true;
+    case CC_P_AMP: *prec = 5; *op = CC_OP_AND; return true;
+    case CC_P_EQEQ: *prec = 6; *op = CC_OP_EQ; return true;
+    case CC_P_NE: *prec = 6; *op = CC_OP_NE; return true;
+    case CC_P_LT: *prec = 7; *op = CC_OP_LT; return true;
+    case CC_P_GT: *prec = 7; *op = CC_OP_GT; return true;
+    case CC_P_LE: *prec = 7; *op = CC_OP_LE; return true;
+    case CC_P_GE: *prec = 7; *op = CC_OP_GE; return true;
+    case CC_P_SHL: *prec = 8; *op = CC_OP_SHL; return true;
+    case CC_P_SHR: *prec = 8; *op = CC_OP_SHR; return true;
+    case CC_P_PLUS: *prec = 9; *op = CC_OP_ADD; return true;
+    case CC_P_MINUS: *prec = 9; *op = CC_OP_SUB; return true;
+    case CC_P_STAR: *prec = 10; *op = CC_OP_MUL; return true;
+    case CC_P_SLASH: *prec = 10; *op = CC_OP_DIV; return true;
+    case CC_P_PERCENT: *prec = 10; *op = CC_OP_MOD; return true;
+    default: return false;
+    }
+}
+
+static bool assignop_of(const CcToken* t, CcOp* op) {
+    if (t->kind != CC_TK_PUNCT) return false;
+    switch (t->punct) {
+    case CC_P_ASSIGN: *op = CC_OP_ASSIGN; return true;
+    case CC_P_STAR_ASSIGN: *op = CC_OP_MUL_ASSIGN; return true;
+    case CC_P_SLASH_ASSIGN: *op = CC_OP_DIV_ASSIGN; return true;
+    case CC_P_PERCENT_ASSIGN: *op = CC_OP_MOD_ASSIGN; return true;
+    case CC_P_PLUS_ASSIGN: *op = CC_OP_ADD_ASSIGN; return true;
+    case CC_P_MINUS_ASSIGN: *op = CC_OP_SUB_ASSIGN; return true;
+    case CC_P_SHL_ASSIGN: *op = CC_OP_SHL_ASSIGN; return true;
+    case CC_P_SHR_ASSIGN: *op = CC_OP_SHR_ASSIGN; return true;
+    case CC_P_AMP_ASSIGN: *op = CC_OP_AND_ASSIGN; return true;
+    case CC_P_CARET_ASSIGN: *op = CC_OP_XOR_ASSIGN; return true;
+    case CC_P_PIPE_ASSIGN: *op = CC_OP_OR_ASSIGN; return true;
+    default: return false;
+    }
+}
+
+/* ---- expression, assignment, conditional --------------------------------- */
+
+static CcExpr* parse_expr(P* p) {
+    CcExpr* e = parse_assign(p);
+    while (at_p(p, CC_P_COMMA)) {
+        CcComma c;
+        CcExpr* x;
+        adv(p);
+        c.a = e;
+        c.b = parse_assign(p);
+        x = cc__expr_blank(span_from(p, e->span.first), p->arena);
+        x->k = { .comma = c };
+        e = x;
+    }
+    return e;
+}
+
+/* Legacy `=<! expr [: default] @err ...`: the right-hand side after `=<!`,
+ * mapped onto the !> / ?> nodes. */
+static bool at_legacy_bang(P* p) {
+    return at_p(p, CC_P_ASSIGN) && tok_is_p(tk(p, 1), CC_P_LT) && tok_is_p(tk(p, 2), CC_P_BANG) &&
+           adjacent(p, p->i) && adjacent(p, p->i + 1);
+}
+
+static CcExpr* parse_legacy_bang_rhs(P* p) {
+    CcExpr* rhs;
+    adv(p); adv(p); adv(p); /* = < ! */
+    rhs = parse_cond(p);
+    if (at_p(p, CC_P_COLON)) {
+        CcUnwrapOr uo;
+        CcExpr* e;
+        adv(p);
+        uo.a = rhs;
+        uo.binder = cc_slice_empty();
+        uo.fallback = parse_cond(p);
+        e = cc__expr_blank(span_from(p, rhs->span.first), p->arena);
+        e->k = { .unwrap_or = uo };
+        rhs = e;
+    }
+    if (at_word(p, "err")) rhs = parse_legacy_err_tail(p, rhs);
+    else if (!expr_is_unwrap_form(rhs)) {
+        const char* at_err = "@err";
+        CCSlice eq = punct_text(CC_P_ASSIGN);
+        CCSlice lt = punct_text(CC_P_LT);
+        CCSlice bang = punct_text(CC_P_BANG);
+        CCSlice found = tok_desc(p, p->i);
+        CCString m = @string(`expected a trailing '${at_err}' after '${eq}${lt}${bang}', found ${found}`, p->arena);
+        err_here(p, m);
+    }
+    return rhs;
+}
+
+static CcExpr* mk_assign(P* p, CcOp op, CcExpr* a, CcExpr* b) {
+    CcExpr* e = cc__expr_blank(span_from(p, a->span.first), p->arena);
+    CcBinary bin;
+    bin.op = op;
+    bin.a = a;
+    bin.b = b;
+    e->k = { .assign = bin };
+    return e;
+}
+
+static CcExpr* parse_assign(P* p) {
+    CcExpr* lhs = parse_cond(p);
+    CcOp op;
+    if (at_p(p, CC_P_ASSIGN) && tok_is_word(p, p->i + 1, "parallel") && !p->bind_stmt) {
+        /* `lvalue = @parallel { ... } tail;`: a @parallel statement assigning its join */
+        CcStmt* ps;
+        adv(p);
+        ps = parse_parallel(p);
+        @switch (ps->k) {
+            case .parallel(pa):
+                pa.target = lhs;
+                ps->k = { .parallel = pa };
+                break;
+            case .parallel_for(pf):
+                pf.target = lhs;
+                ps->k = { .parallel_for = pf };
+                break;
+            default:
+                {
+                    const char* at_parallel = "@" "parallel";
+                    CCString m = @string(`only a '${at_parallel} { ... }' block can be assigned to a join target`, p->arena);
+                    err_at(p, ps->span.first, m);
+                }
+                break;
+        }
+        ps->span.first = lhs->span.first;
+        p->bind_stmt = ps;
+        return lhs;
+    }
+    if (at_p(p, CC_P_ASSIGN) && tok_is_p(tk(p, 1), CC_P_LBRACE)) {
+        /* `x = { .f = v };`: an initializer list assigned to an existing object */
+        CcCompound cl;
+        CcExpr* c;
+        adv(p);
+        cl.type = NULL;
+        cl.init = parse_initializer(p);
+        c = cc__expr_blank(cl.init->span, p->arena);
+        c->k = { .compound = cl };
+        return mk_assign(p, CC_OP_ASSIGN, lhs, c);
+    }
+    if (at_legacy_bang(p)) {
+        CcExpr* rhs = parse_legacy_bang_rhs(p);
+        return mk_assign(p, CC_OP_ASSIGN, lhs, rhs);
+    }
+    if (assignop_of(&p->t[p->i], &op)) {
+        CcExpr* rhs;
+        adv(p);
+        rhs = parse_assign(p);
+        return mk_assign(p, op, lhs, rhs);
+    }
+    return lhs;
+}
+
+static CcExpr* parse_binary(P* p, int min_prec) {
+    CcExpr* left = parse_unary(p);
+    for (;;) {
+        int prec;
+        CcOp op;
+        CcExpr* right;
+        if (!binop_of(&p->t[p->i], &prec, &op) || prec < min_prec) break;
+        adv(p);
+        right = parse_binary(p, prec + 1);
+        left = cc_expr_binary(op, left, right, span_from(p, left->span.first), p->arena);
+    }
+    return left;
+}
+
+static CcExpr* parse_cond(P* p) {
+    CcExpr* c = parse_binary(p, 1);
+    if (at_p(p, CC_P_QUESTION)) {
+        CcTernary t;
+        CcExpr* e;
+        uint32_t q = p->i;
+        adv(p);
+        t.c = c;
+        t.a = NULL;
+        if (!at_p(p, CC_P_COLON)) t.a = parse_expr(p); /* GNU `a ?: b` leaves the middle NULL */
+        expect_close(p, CC_P_COLON, "conditional expression", q);
+        t.b = parse_cond(p);
+        e = cc__expr_blank(span_from(p, c->span.first), p->arena);
+        e->k = { .ternary = t };
+        return e;
+    }
+    return c;
+}
+
+/* ---- unary ---------------------------------------------------------------- */
+
+/* Is `(` at `i` the start of a cast or compound literal? */
+static bool paren_is_type(P* p, uint32_t i) {
+    uint32_t j = i + 1;
+    const CcToken* t = &p->t[j];
+    if (is_type_start(p, j)) {
+        /* `(Type)` alone is ambiguous with `(name)` only for typedef names;
+         * a typedef name in scope is a type. */
+        return true;
+    }
+    if (t->kind == CC_TK_IDENT && kw_of(p, j) == KW_NONE && !name_is_var(p, tok_name(p, j))) {
+        uint32_t k = j + 1;
+        uint32_t close;
+        /* `(MACRO(args))expr`: a cast through a macro that expands to a type */
+        if (tok_is_p(&p->t[k], CC_P_LPAREN) && !tok_is_p(&p->t[k + 1], CC_P_RPAREN)) {
+            uint32_t inner = match_close(p, k) + 1;
+            const CcToken* after;
+            int stars = 0;
+            while (tok_is_p(&p->t[inner], CC_P_STAR)) { inner++; stars++; }
+            if (!tok_is_p(&p->t[inner], CC_P_RPAREN)) return false;
+            after = &p->t[inner + 1];
+            if (after->kind == CC_TK_IDENT) return kw_of(p, inner + 1) == KW_NONE || kw_of(p, inner + 1) == KW_SIZEOF;
+            if (after->kind == CC_TK_NUMBER || after->kind == CC_TK_CHAR || after->kind == CC_TK_STRING) return true;
+            return stars && after->kind == CC_TK_PUNCT &&
+                   (after->punct == CC_P_LPAREN || after->punct == CC_P_AMP || after->punct == CC_P_STAR);
+        }
+        /* `(Name::[T])`, `(Name*)`, `(Name[:])` */
+        if (tok_is_p(&p->t[k], CC_P_COLONCOLON) && tok_is_p(&p->t[k + 1], CC_P_LBRACKET)) return true;
+        if (tok_is_p(&p->t[k], CC_P_STAR)) {
+            while (tok_is_p(&p->t[k], CC_P_STAR) || (p->t[k].kind == CC_TK_IDENT && kw_of(p, k) == KW_CONST)) k++;
+            return tok_is_p(&p->t[k], CC_P_RPAREN) || tok_is_p(&p->t[k], CC_P_LBRACKET);
+        }
+        if (tok_is_p(&p->t[k], CC_P_LBRACKET))
+            return tok_is_p(&p->t[k + 1], CC_P_COLON) || tok_is_p(&p->t[k + 1], CC_P_TILDE) ||
+                   (p->t[k + 1].kind == CC_TK_NUMBER && tok_is_p(&p->t[k + 2], CC_P_COLON)) ||
+                   tok_is_p(&p->t[k + 1], CC_P_RBRACKET);
+        if (!tok_is_p(&p->t[k], CC_P_RPAREN)) return false;
+        close = k;
+        t = &p->t[close + 1];
+        if (tok_is_p(t, CC_P_LBRACE)) return true; /* compound literal */
+        if (t->kind == CC_TK_IDENT) {
+            Kw kw = kw_of(p, close + 1);
+            return kw == KW_NONE || kw == KW_SIZEOF || kw == KW_ALIGNOF;
+        }
+        if (t->kind == CC_TK_NUMBER || t->kind == CC_TK_CHAR || t->kind == CC_TK_STRING || t->kind == CC_TK_AT_WORD) return true;
+        if (t->kind == CC_TK_PUNCT)
+            return t->punct == CC_P_LPAREN || t->punct == CC_P_BANG || t->punct == CC_P_TILDE || t->punct == CC_P_DOT;
+    }
+    return false;
+}
+
+static CcExpr* unary_node(P* p, CcOp op, uint32_t first, CcExpr* a) {
+    return cc_expr_unary(op, a, span_from(p, first), p->arena);
+}
+
+static CcExpr* mk_cast(P* p, CcType* ty, CcExpr* a, uint32_t first) {
+    CcExpr* e = cc__expr_blank(span_from(p, first), p->arena);
+    CcCast c;
+    c.type = ty;
+    c.a = a;
+    e->k = { .cast = c };
+    return e;
+}
+
+/* `(` in unary position: a closure, a cast, a compound literal, or NULL
+ * when it is a parenthesised primary (the switch body stays small: a plain
+ * switch of a few KiB is clipped today, see stress/break). */
+static CcExpr* parse_unary_paren(P* p, uint32_t first) {
+    if (tok_is_p(&p->t[match_close(p, p->i) + 1], CC_P_FAT_ARROW)) return parse_closure(p, first, false, false);
+    if (paren_is_type(p, p->i)) {
+        uint32_t open = p->i;
+        CcType* ty;
+        adv(p);
+        ty = parse_type_name(p);
+        expect_close(p, CC_P_RPAREN, "cast", open);
+        if (at_p(p, CC_P_LBRACE)) {
+            CcCompound cl;
+            CcExpr* e;
+            cl.type = ty;
+            cl.init = parse_initializer(p);
+            e = cc__expr_blank(span_from(p, first), p->arena);
+            e->k = { .compound = cl };
+            return parse_postfix(p, e);
+        } else {
+            CcExpr* a = parse_unary(p);
+            return mk_cast(p, ty, a, first);
+        }
+    }
+    return NULL;
+}
+
+static CcExpr* parse_unary(P* p) {
+    const CcToken* t = &p->t[p->i];
+    uint32_t first = p->i;
+    if (t->kind == CC_TK_PUNCT) {
+        switch (t->punct) {
+        case CC_P_INC: adv(p); return unary_node(p, CC_OP_PREINC, first, parse_unary(p));
+        case CC_P_DEC: adv(p); return unary_node(p, CC_OP_PREDEC, first, parse_unary(p));
+        case CC_P_AMP: adv(p); return unary_node(p, CC_OP_ADDR, first, parse_unary(p));
+        case CC_P_STAR: adv(p); return unary_node(p, CC_OP_DEREF, first, parse_unary(p));
+        case CC_P_PLUS: adv(p); return unary_node(p, CC_OP_POS, first, parse_unary(p));
+        case CC_P_MINUS: adv(p); return unary_node(p, CC_OP_NEG, first, parse_unary(p));
+        case CC_P_TILDE: adv(p); return unary_node(p, CC_OP_BITNOT, first, parse_unary(p));
+        case CC_P_BANG: adv(p); return unary_node(p, CC_OP_NOT, first, parse_unary(p));
+        case CC_P_ANDAND: { /* GNU &&label */
+            CcExpr* inner;
+            adv(p);
+            inner = unary_node(p, CC_OP_ADDR, first, parse_unary(p));
+            return unary_node(p, CC_OP_ADDR, first, inner);
+        }
+        case CC_P_LPAREN: {
+            CcExpr* e = parse_unary_paren(p, first);
+            if (e) return e;
+            break;
+        }
+        default: break;
+        }
+    } else if (t->kind == CC_TK_IDENT) {
+        Kw k = kw_of(p, p->i);
+        if (k == KW_SIZEOF || k == KW_ALIGNOF || k == KW_ALIGNOF2 || k == KW_ALIGNOF3 || k == KW_ALIGNOF4) {
+            CcOp op = k == KW_SIZEOF ? CC_OP_SIZEOF : CC_OP_ALIGNOF;
+            adv(p);
+            if (at_p(p, CC_P_LPAREN) && paren_is_type(p, p->i) && !tok_is_p(&p->t[match_close(p, p->i) + 1], CC_P_LBRACE)) {
+                uint32_t open = p->i;
+                CcSizeofType st;
+                CcExpr* e;
+                adv(p);
+                st.op = op;
+                st.type = parse_type_name(p);
+                expect_close(p, CC_P_RPAREN, op == CC_OP_SIZEOF ? "sizeof" : "_Alignof", open);
+                e = cc__expr_blank(span_from(p, first), p->arena);
+                e->k = { .sizeof_type = st };
+                return e;
+            }
+            return unary_node(p, op, first, parse_unary(p));
+        }
+        if (k == KW_EXTENSION) { adv(p); return parse_unary(p); }
+        if (k == KW_NONE && tok_is_p(tk(p, 1), CC_P_LPAREN) && !name_is_var(p, tok_name(p, p->i)) &&
+            !name_is_type(p, tok_name(p, p->i)) && is_type_start(p, p->i + 2) &&
+            (kw_of(p, p->i + 2) != KW_NONE || tok_is_p(tk(p, 3), CC_P_STAR) || tok_is_p(tk(p, 3), CC_P_RPAREN))) {
+            /* `constcast(T *)x`: a macro cast; the type inside the parentheses, the operand after */
+            uint32_t close = match_close(p, p->i + 1);
+            const CcToken* after = &p->t[close + 1];
+            if ((after->kind == CC_TK_IDENT && kw_of(p, close + 1) == KW_NONE) || after->kind == CC_TK_NUMBER ||
+                (after->kind == CC_TK_PUNCT && (after->punct == CC_P_LPAREN || after->punct == CC_P_AMP || after->punct == CC_P_STAR))) {
+                CcType* mt = cc__type_blank(span2(first, first), p->arena);
+                CcGenericType g;
+                CcTypeList margs = vec_new::[CcTypeRef](p->arena);
+                CcExpr* a;
+                g.family = tok_name(p, p->i);
+                adv(p); adv(p);
+                margs.push(parse_type_name(p));
+                g.args = margs;
+                expect_close(p, CC_P_RPAREN, "macro cast", first + 1);
+                mt->span = span_from(p, first);
+                mt->k = { .macro = g };
+                a = parse_unary(p);
+                return mk_cast(p, mt, a, first);
+            }
+        }
+    } else if (t->kind == CC_TK_AT_WORD) {
+        if (at_word(p, "await")) {
+            CcAwait aw;
+            CcExpr* e;
+            adv(p);
+            aw.a = parse_unary(p);
+            e = cc__expr_blank(span_from(p, first), p->arena);
+            e->k = { .await_ = aw };
+            return e;
+        }
+        if ((at_word(p, "blocking") || at_word(p, "nonblocking") || at_word(p, "noblock")) && !tok_is_p(tk(p, 1), CC_P_LBRACE)) {
+            CcCallMode cm;
+            CcExpr* e;
+            cm.mode = slice_skip(t->text, 1);
+            adv(p);
+            cm.a = parse_unary(p);
+            e = cc__expr_blank(span_from(p, first), p->arena);
+            e->k = { .call_mode = cm };
+            return e;
+        }
+    }
+    return parse_postfix(p, parse_primary(p));
+}
+
+/* ---- unwrap tails ------------------------------------------------------------ */
+
+/* Does a statement body follow (`{`, an identifier, an @word other than
+ * the lifetime sugar)? */
+static bool body_follows(P* p) {
+    const CcToken* t = &p->t[p->i];
+    return tok_is_p(t, CC_P_LBRACE) || t->kind == CC_TK_IDENT ||
+           (t->kind == CC_TK_AT_WORD && !at_word(p, "detach") && !at_word(p, "destroy"));
+}
+
+static CcExpr* mk_unwrap_body(P* p, CcExpr* lhs, CCSlice binder, uint32_t first) {
+    CcUnwrapBody ub;
+    CcExpr* e;
+    ub.a = lhs;
+    ub.binder = binder;
+    scope_push(p->syms);
+    if (binder.len) declare_var(p, binder);
+    if (at_p(p, CC_P_LBRACE)) ub.body = parse_block(p);
+    else ub.body = parse_stmt(p);
+    scope_pop(p->syms);
+    p->consumed_terminator = last_tok(p);
+    e = cc__expr_blank(span_from(p, first), p->arena);
+    e->k = { .unwrap_body = ub };
+    return e;
+}
+
+static CcExpr* mk_unwrap(P* p, CcExpr* lhs, uint32_t first) {
+    CcUnwrap u;
+    CcExpr* e;
+    u.a = lhs;
+    e = cc__expr_blank(span_from(p, first), p->arena);
+    {
+        CcExprK kk;
+        kk = { .unwrap = u };
+        e->k = kk;
+    }
+    return e;
+}
+
+static void err_literal_lhs(P* p, CcPunct pc, const CcExpr* lhs) {
+    CCSlice op = punct_text(pc);
+    CCSlice kind = CcExpr_kind_name(lhs);
+    CCString m = @string(`'${op}' needs a Result on its left, not a ${kind} literal`, p->arena);
+    err_here(p, m);
+}
+
+/* After `!>`: bare unwrap, `!> body`, `!>(e) body`, `!> @destroy [{ D }]`. */
+static CcExpr* parse_unwrap_tail(P* p, CcExpr* lhs) {
+    uint32_t first = lhs->span.first;
+    CCSlice binder = cc_slice_empty();
+    if (expr_is_literal(lhs)) err_literal_lhs(p, CC_P_UNWRAP, lhs);
+    adv(p); /* !> */
+    if (at_p(p, CC_P_LPAREN) && !(tk(p, 1)->kind == CC_TK_IDENT && tok_is_p(tk(p, 2), CC_P_RPAREN))) {
+        if (tok_is_p(tk(p, 1), CC_P_RPAREN)) {
+            {
+                const char* op_unwrap = "!>";
+                CCString m = @string(`'${op_unwrap}()' needs a name to bind the error: write '${op_unwrap}(e) body'`, p->arena);
+                err_at(p, p->i + 1, m);
+            }
+        } else {
+            CCSlice found = tok_desc(p, p->i + 1);
+            const char* op_unwrap = "!>";
+            CCString m = @string(`'${op_unwrap}(...)' binds the error to a name, found ${found}`, p->arena);
+            err_at(p, p->i + 1, m);
+        }
+        skip_balanced(p);
+    }
+    if (at_p(p, CC_P_LPAREN) && tk(p, 1)->kind == CC_TK_IDENT && tok_is_p(tk(p, 2), CC_P_RPAREN)) {
+        const CcToken* after = tk(p, 3);
+        bool term = after->kind == CC_TK_EOF ||
+                    (after->kind == CC_TK_PUNCT && (after->punct == CC_P_SEMI || after->punct == CC_P_COMMA ||
+                                                    after->punct == CC_P_RPAREN || after->punct == CC_P_RBRACKET ||
+                                                    after->punct == CC_P_RBRACE || after->punct == CC_P_COLON));
+        if (!term) {
+            binder = tok_name(p, p->i + 1);
+            adv(p); adv(p); adv(p);
+        }
+    }
+    if (at_word(p, "destroy")) {
+        CcUnwrapDestroy ud;
+        CcExpr* e;
+        ud.a = lhs;
+        ud.destroy_body = NULL;
+        adv(p);
+        if (at_p(p, CC_P_LBRACE)) ud.destroy_body = parse_block(p);
+        e = cc__expr_blank(span_from(p, first), p->arena);
+        e->k = { .unwrap_destroy = ud };
+        return e;
+    }
+    if (body_follows(p)) return mk_unwrap_body(p, lhs, binder, first);
+    if (binder.len) {
+        CCSlice found = tok_desc(p, p->i);
+        const char* op_unwrap = "!>";
+        CCString m = @string(`'${op_unwrap}(${binder})' binds the error for a body, but no body follows: found ${found}`, p->arena);
+        err_here(p, m);
+    }
+    return mk_unwrap(p, lhs, first);
+}
+
+/* `(` ... `)` holding an error binder: `(e)`, or `(E e)` with a type. Sets
+ * *type_out (NULL for the bare name form) and returns the name (empty when
+ * none). Positioned after `)`. A `T name` pair is told apart by lookahead:
+ * the last token inside is a plain identifier preceded by a type token. */
+static CCSlice parse_paren_binder(P* p, CcType** type_out, const char* what) {
+    uint32_t open = p->i;
+    uint32_t close = match_close(p, open);
+    CCSlice binder = cc_slice_empty();
+    *type_out = NULL;
+    adv(p); /* ( */
+    if (at_ident(p) && tok_is_p(tk(p, 1), CC_P_RPAREN)) {
+        binder = tok_name(p, p->i);
+        adv(p);
+    } else if (at_p(p, CC_P_RPAREN)) {
+        CCSlice rp = punct_text(CC_P_RPAREN);
+        CCString m = @string(`expected the error binder in ${what}, found '${rp}'`, p->arena);
+        err_here(p, m);
+    } else {
+        uint32_t b = close - 1;
+        bool named = false;
+        if (close > open + 2 && p->t[b].kind == CC_TK_IDENT && kw_of(p, b) == KW_NONE && !name_is_type(p, tok_name(p, b))) {
+            const CcToken* before = &p->t[b - 1];
+            Kw bk = kw_of(p, b - 1);
+            named = tok_is_p(before, CC_P_STAR) || tok_is_p(before, CC_P_RBRACKET) ||
+                    (before->kind == CC_TK_IDENT &&
+                     (bk == KW_NONE || bk == KW_INT || bk == KW_LONG || bk == KW_CHAR || bk == KW_SHORT ||
+                      bk == KW_DOUBLE || bk == KW_FLOAT || bk == KW_UNSIGNED || bk == KW_SIGNED || bk == KW_BOOL ||
+                      bk == KW_VOID || bk == KW_INT128));
+        }
+        *type_out = parse_type_name(p);
+        if (named) {
+            if (p->i <= b) p->i = b;
+            binder = tok_name(p, b);
+            if (p->i == b) adv(p);
+        }
+    }
+    expect_close(p, CC_P_RPAREN, what, open);
+    return binder;
+}
+
+/* Legacy postfix `expr @err`, `expr @err(E e) body`, `expr @err body`:
+ * the same nodes as `!>`. */
+static CcExpr* parse_legacy_err_tail(P* p, CcExpr* lhs) {
+    uint32_t first = lhs->span.first;
+    CCSlice binder = cc_slice_empty();
+    adv(p); /* @err */
+    if (at_p(p, CC_P_LPAREN)) {
+        CcType* bt = NULL;
+        const char* lit_w = "@err(...) binder";
+        binder = parse_paren_binder(p, &bt, lit_w);
+    }
+    if (body_follows(p)) return mk_unwrap_body(p, lhs, binder, first);
+    if (binder.len) {
+        CCSlice found = tok_desc(p, p->i);
+        const char* at_err = "@err";
+        CCString m = @string(`'${at_err}(${binder})' binds the error for a body, but no body follows: found ${found}`, p->arena);
+        err_here(p, m);
+    }
+    return mk_unwrap(p, lhs, first);
+}
+
+/* After `?>`: `?> default` / `?>(e) default`. */
+static CcExpr* parse_unwrap_or_tail(P* p, CcExpr* lhs) {
+    uint32_t first = lhs->span.first;
+    CcUnwrapOr uo;
+    CcExpr* e;
+    uo.a = lhs;
+    uo.binder = cc_slice_empty();
+    uo.fallback = NULL;
+    if (expr_is_literal(lhs)) err_literal_lhs(p, CC_P_UNWRAP_OR, lhs);
+    adv(p); /* ?> */
+    if (at_p(p, CC_P_LPAREN) && !p->t[p->i].after_space && !(tk(p, 1)->kind == CC_TK_IDENT && tok_is_p(tk(p, 2), CC_P_RPAREN))) {
+        if (tok_is_p(tk(p, 1), CC_P_RPAREN)) {
+            {
+                const char* op_unwrap_or = "?>";
+                CCString m = @string(`'${op_unwrap_or}()' needs a name to bind the error: write '${op_unwrap_or}(e) default'`, p->arena);
+                err_at(p, p->i + 1, m);
+            }
+        } else {
+            CCSlice found = tok_desc(p, p->i + 1);
+            const char* op_unwrap_or = "?>";
+            CCString m = @string(`'${op_unwrap_or}(...)' binds the error to a name, found ${found}`, p->arena);
+            err_at(p, p->i + 1, m);
+        }
+        skip_balanced(p);
+    }
+    if (at_p(p, CC_P_LPAREN) && tk(p, 1)->kind == CC_TK_IDENT && tok_is_p(tk(p, 2), CC_P_RPAREN)) {
+        const CcToken* after = tk(p, 3);
+        bool term = after->kind == CC_TK_EOF ||
+                    (after->kind == CC_TK_PUNCT && (after->punct == CC_P_SEMI || after->punct == CC_P_COMMA ||
+                                                    after->punct == CC_P_RPAREN || after->punct == CC_P_RBRACKET ||
+                                                    after->punct == CC_P_RBRACE));
+        if (!term) {
+            uo.binder = tok_name(p, p->i + 1);
+            adv(p); adv(p); adv(p);
+        }
+    }
+    scope_push(p->syms);
+    if (uo.binder.len) declare_var(p, uo.binder);
+    if (at_p(p, CC_P_SEMI) || at_p(p, CC_P_RPAREN) || at_p(p, CC_P_COMMA) || at_eof(p)) {
+        CCSlice op = punct_text(CC_P_UNWRAP_OR);
+        CCSlice found = tok_desc(p, p->i);
+        CCString m = @string(`expected a default value on the right of '${op}', found ${found}`, p->arena);
+        err_here(p, m);
+    } else {
+        uo.fallback = parse_cond(p);
+    }
+    scope_pop(p->syms);
+    e = cc__expr_blank(span_from(p, first), p->arena);
+    e->k = { .unwrap_or = uo };
+    return e;
+}
+
+/* ---- postfix ------------------------------------------------------------------- */
+
+/* `x.m(args)`, `p->m(args)`, `Type.fn(args)`, with an optional `::[T...]`. */
+static CcExpr* parse_method_call(P* p, CcExpr* e, CCSlice name, bool arrow, uint32_t first) {
+    CCSlice recv_name;
+    bool type_scoped = false;
+    CcType* recv_type = NULL;
+    CcTypeList targs = vec_new::[CcTypeRef](p->arena);
+    CcExprList args = vec_new::[CcExprRef](p->arena);
+    CcExpr* x;
+    if (!arrow) {
+        if (expr_ident_name(e, &recv_name) && name_is_type(p, recv_name)) {
+            type_scoped = true;
+            recv_type = cc_type_named(recv_name, e->span, p->arena);
+        } else {
+            @switch (e->k) {
+                case .type_arg(ta):
+                    type_scoped = true;
+                    recv_type = ta.type;
+                    break;
+                default: break;
+            }
+        }
+    }
+    if (at_p(p, CC_P_COLONCOLON)) {
+        uint32_t open = p->i + 1;
+        adv(p); adv(p);
+        while (!at_p(p, CC_P_RBRACKET) && !at_eof(p)) {
+            CcType* ta = parse_type_name(p);
+            targs.push(ta);
+            if (!accept_p(p, CC_P_COMMA)) break;
+        }
+        expect_close(p, CC_P_RBRACKET, "generic argument list", open);
+        if (!at_p(p, CC_P_LPAREN)) {
+            CCSlice found = tok_desc(p, p->i);
+            CCSlice cc = punct_text(CC_P_COLONCOLON);
+            CCString m = @string(`expected '(' after '${name}${cc}[...]' to make the UFCS call, found ${found}`, p->arena);
+            err_here(p, m);
+            x = cc__expr_blank(span_from(p, first), p->arena);
+            if (type_scoped) {
+                CcTypeScoped ts;
+                ts.type = recv_type;
+                ts.fn = name;
+                ts.args = args;
+                x->k = { .type_scoped = ts };
+            } else {
+                CcUfcs u;
+                u.recv = e;
+                u.method = name;
+                u.arrow = arrow;
+                u.targs = targs;
+                u.args = args;
+                x->k = { .ufcs = u };
+            }
+            return x;
+        }
+    }
+    parse_args(p, &args, "call");
+    x = cc__expr_blank(span_from(p, first), p->arena);
+    if (type_scoped) {
+        CcTypeScoped ts;
+        ts.type = recv_type;
+        ts.fn = name;
+        ts.args = args;
+        x->k = { .type_scoped = ts };
+    } else {
+        CcUfcs u;
+        u.recv = e;
+        u.method = name;
+        u.arrow = arrow;
+        u.targs = targs;
+        u.args = args;
+        x->k = { .ufcs = u };
+    }
+    return x;
+}
+
+/* `.name` / `->name` after e: a member, or a UFCS / Type.fn call; *stop
+ * when no name follows (e is returned unchanged). */
+static CcExpr* parse_postfix_member(P* p, CcExpr* e, uint32_t first, bool* stop) {
+    *stop = false;
+    bool arrow = tok_is_p(&p->t[p->i], CC_P_ARROW);
+    CCSlice name;
+    adv(p);
+    if (!at_ident(p)) {
+        const char* op = arrow ? "->" : ".";
+        CCSlice found = tok_desc(p, p->i);
+        CCString m = @string(`expected a member name after '${op}', found ${found}`, p->arena);
+        err_here(p, m);
+        *stop = true;
+        return e;
+    }
+    name = tok_name(p, p->i);
+    adv(p);
+    /* `x.m(args)` and `p->m(args)` are both UFCS sites; `arrow` records
+     * the spelling. Whether `m` is really a field (a function pointer
+     * call, plain C) is the index's question, not the parser's. */
+    if (at_p(p, CC_P_LPAREN) || at_p2(p, CC_P_COLONCOLON, CC_P_LBRACKET)) return parse_method_call(p, e, name, arrow, first);
+    return cc_expr_member(e, name, arrow, span_from(p, first), p->arena);
+}
+
+/* `e(args)`: a call node (a generic spelling inside a switch case is not
+ * lowered today, so this lives outside parse_postfix's switch). */
+static CcExpr* parse_postfix_call(P* p, CcExpr* e, uint32_t first) {
+    CcExprList args = vec_new::[CcExprRef](p->arena);
+    CcCall c;
+    CcExpr* x;
+    parse_args(p, &args, "call");
+    c.callee = e;
+    c.args = args;
+    x = cc__expr_blank(span_from(p, first), p->arena);
+    x->k = { .call = c };
+    return x;
+}
+
+static CcExpr* parse_postfix(P* p, CcExpr* e) {
+    for (;;) {
+        const CcToken* t = &p->t[p->i];
+        uint32_t first = e->span.first;
+        bool stop;
+        if (t->kind == CC_TK_AT_WORD && at_word(p, "err") && !p->in_slot) {
+            CcExpr* x = parse_legacy_err_tail(p, e);
+            if (x->k.kind == CcExprK_unwrap_body) return x;
+            e = x;
+            continue;
+        }
+        if (t->kind != CC_TK_PUNCT) break;
+        switch (t->punct) {
+        case CC_P_LBRACKET: {
+            CcIndexExpr ix;
+            CcExpr* x;
+            uint32_t open = p->i;
+            adv(p);
+            ix.a = e;
+            ix.i = parse_expr(p);
+            expect_close(p, CC_P_RBRACKET, "index", open);
+            x = cc__expr_blank(span_from(p, first), p->arena);
+            x->k = { .index = ix };
+            e = x;
+            continue;
+        }
+        case CC_P_LPAREN:
+            e = parse_postfix_call(p, e, first);
+            continue;
+        case CC_P_DOT: case CC_P_ARROW: {
+            e = parse_postfix_member(p, e, first, &stop);
+            if (stop) return e;
+            continue;
+        }
+        case CC_P_INC: adv(p); e = unary_node(p, CC_OP_POSTINC, first, e); continue;
+        case CC_P_DEC: adv(p); e = unary_node(p, CC_OP_POSTDEC, first, e); continue;
+        case CC_P_UNWRAP: {
+            CcExpr* x = parse_unwrap_tail(p, e);
+            if (x->k.kind == CcExprK_unwrap_body) return x;
+            e = x;
+            continue;
+        }
+        case CC_P_UNWRAP_OR:
+            return parse_unwrap_or_tail(p, e);
+        default: break;
+        }
+        break;
+    }
+    return e;
+}
+
+/* Argument list at `(`: expressions, with types allowed as arguments
+ * (offsetof, cc_ok(T, v)) and preprocessor lines between arguments. */
+static void parse_args(P* p, CcExprList* out, const char* what) {
+    uint32_t open = p->i;
+    adv(p);
+    while (!at_p(p, CC_P_RPAREN) && !at_eof(p)) {
+        CcExpr* a;
+        if (p->t[p->i].kind == CC_TK_PP) {
+            uint32_t last;
+            bool skipped;
+            uint32_t at = p->i;
+            pp_note(p, at, &last, &skipped);
+            out->push(mk_pp_expr(p, at, span2(at, last)));
+            continue;
+        }
+        if (is_type_start(p, p->i)) {
+            Kw k = kw_of(p, p->i);
+            bool type_arg = true;
+            if (k == KW_NONE && p->t[p->i].kind == CC_TK_IDENT) {
+                const CcToken* n1 = tk(p, 1);
+                type_arg = tok_is_p(n1, CC_P_COMMA) || tok_is_p(n1, CC_P_RPAREN) || tok_is_p(n1, CC_P_STAR) ||
+                           (tok_is_p(n1, CC_P_LBRACKET) && (tok_is_p(tk(p, 2), CC_P_COLON) || tok_is_p(tk(p, 2), CC_P_TILDE) || tok_is_p(tk(p, 2), CC_P_RBRACKET))) ||
+                           (tok_is_p(n1, CC_P_COLONCOLON) && tok_is_p(tk(p, 2), CC_P_LBRACKET) &&
+                            !tok_is_p(&p->t[match_close(p, p->i + 2) + 1], CC_P_LPAREN) &&
+                            !tok_is_p(&p->t[match_close(p, p->i + 2) + 1], CC_P_DOT));
+            } else if (k == KW_ATTRIBUTE || k == KW_ATTRIBUTE2 || k == KW_EXTENSION) type_arg = false;
+            if (type_arg) {
+                uint32_t first = p->i;
+                CcType* ty = parse_type_name(p);
+                a = mk_type_arg(p, ty, span_from(p, first));
+                a = parse_postfix(p, a);
+                out->push(a);
+                if (!accept_p(p, CC_P_COMMA)) break;
+                continue;
+            }
+        }
+        if (at_p(p, CC_P_LBRACE)) {
+            /* `repeat8({ stmts })`: a brace block handed to a macro */
+            CcStmt* b = parse_block(p);
+            a = mk_stmt_expr(p, b, b->span);
+        } else a = parse_assign(p);
+        out->push(a);
+        if (p->t[p->i].kind == CC_TK_PP) continue;
+        if (!accept_p(p, CC_P_COMMA)) break;
+    }
+    expect_close(p, CC_P_RPAREN, what, open);
+}
+
+/* Closure at `(` or at a lone parameter name: `(params) => [captures] body`. */
+static CcExpr* parse_closure(P* p, uint32_t first, bool is_unsafe, bool is_async) {
+    CcClosure cl;
+    CcFuncType fn;
+    CcExpr* e;
+    size_t i;
+    size_t n;
+    fn.ret = NULL;
+    fn.params = vec_new::[CcParam](p->arena);
+    fn.variadic = false;
+    fn.has_prototype = false;
+    cl.is_unsafe = is_unsafe;
+    cl.is_async = is_async;
+    cl.captures = vec_new::[CcCapture](p->arena);
+    cl.body = NULL;
+    if (at_ident(p)) {
+        /* `x => body`: one untyped parameter without parentheses */
+        Vec::[CcParam] ps = vec_new::[CcParam](p->arena);
+        CcParam pa;
+        pa.span = span2(p->i, p->i);
+        pa.type = NULL;
+        pa.name = tok_name(p, p->i);
+        pa.attrs = vec_new::[CcAttr](p->arena);
+        pa.default_value = NULL;
+        pa.is_pp = false;
+        pa.pp_tok = 0;
+        adv(p);
+        ps.push(pa);
+        fn.params = ps;
+        fn.has_prototype = true;
+    } else parse_params(p, &fn);
+    cl.params = fn.params;
+    scope_push(p->syms);
+    n = cl.params.len();
+    for (i = 0; i < n; i++) {
+        CcParam* q = cl.params.get_ptr(i);
+        if (q->name.len) declare_var(p, q->name);
+    }
+    if (!accept_p(p, CC_P_FAT_ARROW)) {
+        {
+            CCSlice op = punct_text(CC_P_FAT_ARROW);
+            CCSlice found = tok_desc(p, p->i);
+            CCString m = @string(`expected '${op}' after the closure parameters, found ${found}`, p->arena);
+            err_here(p, m);
+        }
+        scope_pop(p->syms);
+        e = cc__expr_blank(span_from(p, first), p->arena);
+        e->k = { .closure = cl };
+        return e;
+    }
+    if (at_p(p, CC_P_LBRACKET)) {
+        uint32_t open = p->i;
+        Vec::[CcCapture] caps = vec_new::[CcCapture](p->arena);
+        adv(p);
+        while (!at_p(p, CC_P_RBRACKET) && !at_eof(p)) {
+            CcCapture c;
+            uint32_t cfirst = p->i;
+            c.is_safe = false;
+            c.by_ref = false;
+            c.is_move = false;
+            c.init = NULL;
+            if (at_word(p, "safe")) { c.is_safe = true; adv(p); }
+            if (accept_p(p, CC_P_AMP)) c.by_ref = true;
+            if (!at_ident(p)) {
+                err_expected(p, "a captured variable name in the closure capture list");
+                break;
+            }
+            c.name = tok_name(p, p->i);
+            adv(p);
+            if (accept_p(p, CC_P_ASSIGN)) c.init = parse_assign(p);
+            c.span = span_from(p, cfirst);
+            caps.push(c);
+            if (!accept_p(p, CC_P_COMMA)) break;
+        }
+        expect_close(p, CC_P_RBRACKET, "closure capture list", open);
+        cl.captures = caps;
+    }
+    if (at_p(p, CC_P_LBRACE)) {
+        cl.body = parse_block(p);
+    } else {
+        CcExpr* x = parse_assign(p);
+        cl.body = cc_stmt_expr(x, x->span, p->arena);
+    }
+    scope_pop(p->syms);
+    e = cc__expr_blank(span_from(p, first), p->arena);
+    e->k = { .closure = cl };
+    return e;
+}
+
+/* ---- templates ------------------------------------------------------------------- */
+
+/* Physical position of byte `at` inside the template token `tok`. */
+static void tpl_pos(P* p, uint32_t tok, const char* at, uint32_t* line, uint32_t* col) {
+    const CcToken* t = &p->t[tok];
+    const char* q = (const char*)t->text.ptr;
+    uint32_t ln = t->line;
+    uint32_t cl = t->col;
+    for (; q < at; q++) {
+        if (*q == '\n') { ln++; cl = 1; }
+        else cl++;
+    }
+    *line = ln;
+    *col = cl;
+}
+
+/* Lex a slot's bytes as their own tape. The tokens are slices of the
+ * enclosing file, positioned in its coordinates, and the tape carries the
+ * file's source, path and #line marks so `loc` works unchanged. (The
+ * lexer's own diagnostics, for a malformed byte inside the slot, carry
+ * slot-relative positions.) */
+static CcTape* slot_lex(P* p, const char* start, uint32_t len, uint32_t base_line, uint32_t base_col) {
+    CcTape* st = cc_arena_alloc(p->arena, sizeof(CcTape), _Alignof(CcTape));
+    CCSlice text = cc_slice_from_buffer((char*)start, len);
+    Vec::[CcToken]* toks;
+    size_t i;
+    size_t n;
+    *st = cc_lex(p->tape->path, text, p->ds, p->arena);
+    toks = &st->toks;
+    n = toks->len();
+    for (i = 0; i < n; i++) {
+        CcToken* t = toks->get_ptr(i);
+        if (t->line == 1) t->col += base_col - 1;
+        t->line += base_line - 1;
+    }
+    st->src = p->tape->src;
+    st->path = p->tape->path;
+    st->marks = p->tape->marks;
+    return st;
+}
+
+static CcExpr* parse_slot_with(P* parent, CcTape** tape_out, const char* start, uint32_t len,
+                               uint32_t base_line, uint32_t base_col) {
+    P q = *parent;
+    CcExpr* e;
+    CcTape* st = slot_lex(parent, start, len, base_line, base_col);
+    Vec::[CcToken]* toks = &st->toks;
+    q.tape = st;
+    q.t = toks->data();
+    q.n = (uint32_t)toks->len();
+    q.i = 0;
+    q.in_slot = true;
+    q.tpl_ok = false;
+    q.consumed_terminator = 0xFFFFFFFFu;
+    q.bind_stmt = NULL;
+    *tape_out = st;
+    if (at_eof(&q)) {
+        const char* sl = "${}";
+        CCString m = @string(`empty ${sl} slot in the template`, parent->arena);
+        err_here(&q, m);
+        return expr_error(&q);
+    }
+    e = parse_expr(&q);
+    if (!at_eof(&q)) {
+        CCSlice found = tok_desc(&q, q.i);
+        CCString m = @string(`unexpected ${found} after the slot expression`, parent->arena);
+        err_here(&q, m);
+    }
+    return e;
+}
+
+/* Find the `}` closing a slot whose text starts at `i` (just after `${`),
+ * skipping nested braces and quoted literals. Returns the index of the
+ * closing brace or `end` when unterminated. */
+static uint32_t slot_close(const char* s, uint32_t i, uint32_t end) {
+    int depth = 1;
+    while (i < end) {
+        char c = s[i];
+        if (c == '"' || c == '\'') {
+            char q = c;
+            i++;
+            while (i < end && s[i] != q) { if (s[i] == '\\') i++; i++; }
+            i++;
+            continue;
+        }
+        if (c == '{' || c == '(' || c == '[') depth++;
+        else if (c == '}' || c == ')' || c == ']') { depth--; if (depth == 0 && c == '}') return i; }
+        i++;
+    }
+    return end;
+}
+
+static CcTplPart tpl_part(uint32_t tok, const char* s, uint32_t off, uint32_t len) {
+    CcTplPart pt;
+    pt.span = span2(tok, tok);
+    pt.text = cc_slice_from_buffer((char*)s + off, len);
+    pt.slot = NULL;
+    pt.tag = cc_slice_empty();
+    pt.is_verbatim = false;
+    pt.tape = NULL;
+    return pt;
+}
+
+/* Split the template token `tok` into literal runs and slots. Returns
+ * false when the token is not a complete template or a slot is
+ * unterminated (each also reported). */
+static bool parse_template_parts(P* p, uint32_t tok, CcTplPartList* out) {
+    const CcToken* t = &p->t[tok];
+    const char* s = (const char*)t->text.ptr;
+    uint32_t i = 1;
+    uint32_t end = t->text.len >= 1 ? (uint32_t)t->text.len - 1 : 0; /* between the backticks */
+    uint32_t run = i;
+    bool ok = true;
+    size_t before = out->len();
+    if (t->text.len < 2) return false;
+    while (i < end) {
+        char c = s[i];
+        if (c == '\\') { i += 2; continue; }
+        if (c == '$' && i + 1 < end && (s[i + 1] == '{' || s[i + 1] == '~')) {
+            uint32_t slot_start = i;
+            uint32_t body;
+            uint32_t close;
+            CCSlice tag = cc_slice_empty();
+            if (s[i + 1] == '~') {
+                uint32_t j = i + 2;
+                while (j < end && ((s[j] >= 'a' && s[j] <= 'z') || (s[j] >= 'A' && s[j] <= 'Z') || (s[j] >= '0' && s[j] <= '9') || s[j] == '_')) j++;
+                if (j == i + 2 || j >= end || s[j] != '{') { i++; continue; } /* not a tagged slot: literal */
+                tag = cc_slice_from_buffer((char*)s + i + 2, j - (i + 2));
+                body = j + 1;
+            } else body = i + 2;
+            if (run < slot_start) out->push(tpl_part(tok, s, run, slot_start - run));
+            if (tag.len == 0 && body < end && s[body] == '{') {
+                /* `${{ verbatim }}` */
+                uint32_t j = body + 1;
+                while (j + 1 < end && !(s[j] == '}' && s[j + 1] == '}')) j++;
+                if (j + 1 >= end) {
+                    uint32_t line = tok_line(p, tok);
+                    CcTplPart v;
+                    const char* sl = "${{";
+                    CCString m = @string(`unterminated ${sl} verbatim span in the template on line ${line}`, p->arena);
+                    err_at(p, tok, m);
+                    v = tpl_part(tok, s, body + 1, end - (body + 1));
+                    v.is_verbatim = true;
+                    out->push(v);
+                    run = end; i = end;
+                    ok = false;
+                    break;
+                }
+                {
+                    CcTplPart v = tpl_part(tok, s, body + 1, j - (body + 1));
+                    v.is_verbatim = true;
+                    out->push(v);
+                }
+                i = j + 2;
+                run = i;
+                continue;
+            }
+            close = slot_close(s, body, end);
+            if (close >= end) {
+                uint32_t line = tok_line(p, tok);
+                const char* sl = "${";
+                CCString m = @string(`unterminated ${sl} slot in the template on line ${line}`, p->arena);
+                err_at(p, tok, m);
+                run = end; i = end;
+                ok = false;
+                break;
+            }
+            {
+                CcTplPart pt = tpl_part(tok, s, body, close - body);
+                uint32_t bl;
+                uint32_t bc;
+                pt.tag = tag;
+                tpl_pos(p, tok, s + body, &bl, &bc);
+                pt.slot = parse_slot_with(p, &pt.tape, s + body, close - body, bl, bc);
+                out->push(pt);
+            }
+            i = close + 1;
+            run = i;
+            continue;
+        }
+        i++;
+    }
+    if (run < end) out->push(tpl_part(tok, s, run, end - run));
+    if (out->len() == before) out->push(tpl_part(tok, s, 1, 0));
+    return ok;
+}
+
+/* A bare template literal argument (`...`), as opposed to a nested @string. */
+static bool expr_is_bare_template(P* p, const CcExpr* e) {
+    return e->k.kind == CcExprK_template && e->span.first == e->span.last &&
+           p->t[e->span.first].kind == CC_TK_TEMPLATE;
+}
+
+static CcTemplate template_of(const CcExpr* e) {
+    CcTemplate empty;
+    empty.policy = NULL;
+    empty.direct = NULL;
+    empty.arena = NULL;
+    @switch (e->k) {
+        case .template(t): return t;
+        default: break;
+    }
+    return empty;
+}
+
+static CcExpr* template_literal(P* p) {
+    CcTemplate tp;
+    CcExpr* e;
+    Vec::[CcTplPart] parts = vec_new::[CcTplPart](p->arena);
+    parse_template_parts(p, p->i, &parts);
+    tp.policy = NULL;
+    tp.parts = parts;
+    tp.direct = NULL;
+    tp.arena = NULL;
+    e = cc__expr_blank(span2(p->i, p->i), p->arena);
+    e->k = { .template = tp };
+    adv(p);
+    return e;
+}
+
+/* `@string(...)`: classify the arguments into policy / template / arena. */
+static CcExpr* parse_at_string(P* p) {
+    uint32_t first = p->i;
+    CcTemplate tp;
+    CcExpr* e;
+    CcExprList args = vec_new::[CcExprRef](p->arena);
+    size_t i;
+    size_t n;
+    size_t ti = (size_t)-1;
+    bool save = p->tpl_ok;
+    tp.policy = NULL;
+    tp.parts = vec_new::[CcTplPart](p->arena);
+    tp.direct = NULL;
+    tp.arena = NULL;
+    adv(p);
+    if (!at_p(p, CC_P_LPAREN)) {
+        {
+            const char* lit_w = "'(' after @string";
+            err_expected(p, lit_w);
+        }
+        e = cc__expr_blank(span_from(p, first), p->arena);
+        e->k = { .template = tp };
+        return e;
+    }
+    p->tpl_ok = true;
+    {
+        const char* lit_w = "@string";
+        parse_args(p, &args, lit_w);
+    }
+    p->tpl_ok = save;
+    n = args.len();
+    for (i = 0; i < n; i++) {
+        CcExpr* a = *args.get_ptr(i);
+        if (expr_is_bare_template(p, a)) { ti = i; break; }
+    }
+    if (n == 0) {
+        {
+            const char* at_string = "@string";
+            CCString m = @string(`${at_string} needs a template or a value: ${at_string}(template, arena) / ${at_string}(expr, arena)`, p->arena);
+            err_at(p, first, m);
+        }
+    } else if (ti == (size_t)-1) {
+        /* direct form: @string(expr[, arena]) */
+        tp.direct = *args.get_ptr(0);
+        if (n >= 2) tp.arena = *args.get_ptr(1);
+        if (n > 2) {
+            CcExpr* extra = *args.get_ptr(2);
+            {
+                const char* at_string = "@string";
+                CCString m = @string(`${at_string}(expr, arena) takes at most two arguments`, p->arena);
+                err_at(p, extra->span.first, m);
+            }
+        }
+    } else {
+        CcTemplate lit = template_of(*args.get_ptr(ti));
+        tp.parts = lit.parts;
+        if (ti >= 1) tp.policy = *args.get_ptr(0);
+        if (ti > 1) {
+            CcExpr* extra = *args.get_ptr(1);
+            {
+                const char* at_string = "@string";
+                CCString m = @string(`${at_string} takes at most one policy before the template`, p->arena);
+                err_at(p, extra->span.first, m);
+            }
+        }
+        if (ti + 1 < n) tp.arena = *args.get_ptr(ti + 1);
+        if (ti + 2 < n) {
+            CcExpr* extra = *args.get_ptr(ti + 2);
+            {
+                const char* at_string = "@string";
+                CCString m = @string(`${at_string} takes at most one arena after the template`, p->arena);
+                err_at(p, extra->span.first, m);
+            }
+        }
+    }
+    e = cc__expr_blank(span_from(p, first), p->arena);
+    e->k = { .template = tp };
+    return e;
+}
+
+static CcExpr* parse_at_emit(P* p) {
+    uint32_t first = p->i;
+    CcEmit em;
+    CcExpr* e;
+    CcExprList args = vec_new::[CcExprRef](p->arena);
+    size_t i;
+    size_t n;
+    bool save = p->tpl_ok;
+    em.tpl.policy = NULL;
+    em.tpl.parts = vec_new::[CcTplPart](p->arena);
+    em.tpl.direct = NULL;
+    em.tpl.arena = NULL;
+    em.args = args;
+    adv(p);
+    if (!at_p(p, CC_P_LPAREN)) {
+        {
+            const char* lit_w = "'(' after @emit";
+            err_expected(p, lit_w);
+        }
+        e = cc__expr_blank(span_from(p, first), p->arena);
+        e->k = { .emit = em };
+        return e;
+    }
+    p->tpl_ok = true;
+    {
+        const char* lit_w = "@emit";
+        parse_args(p, &args, lit_w);
+    }
+    p->tpl_ok = save;
+    em.args = args;
+    n = args.len();
+    for (i = 0; i < n; i++) {
+        CcExpr* a = *args.get_ptr(i);
+        if (expr_is_bare_template(p, a)) {
+            CcTemplate lit = template_of(a);
+            em.tpl.parts = lit.parts;
+            if (i + 1 < n) em.tpl.arena = *args.get_ptr(i + 1);
+            break;
+        }
+    }
+    if (i == n) {
+        const char* at_emit = "@emit";
+        CCString m = @string(`${at_emit} needs a template literal argument`, p->arena);
+        err_at(p, first, m);
+    }
+    e = cc__expr_blank(span_from(p, first), p->arena);
+    e->k = { .emit = em };
+    return e;
+}
+
+/* ---- primary --------------------------------------------------------------------- */
+
+static CcExpr* parse_generic_sel(P* p) {
+    uint32_t first = p->i;
+    uint32_t open;
+    CcGenericSel gs;
+    Vec::[CcGenericSelArm] arms = vec_new::[CcGenericSelArm](p->arena);
+    CcExpr* e;
+    gs.control = NULL;
+    gs.arms = arms;
+    adv(p);
+    open = p->i;
+    if (!expect_p(p, CC_P_LPAREN, "_Generic")) {
+        e = cc__expr_blank(span_from(p, first), p->arena);
+        e->k = { .generic_sel = gs };
+        return e;
+    }
+    gs.control = parse_assign(p);
+    while (accept_p(p, CC_P_COMMA) || p->t[p->i].kind == CC_TK_PP) {
+        CcGenericSelArm arm;
+        uint32_t afirst = p->i;
+        arm.type = NULL;
+        arm.expr = NULL;
+        arm.is_default = false;
+        arm.is_pp = false;
+        arm.pp_tok = 0;
+        if (p->t[p->i].kind == CC_TK_PP) {
+            uint32_t last;
+            bool skipped;
+            arm.is_pp = true;
+            arm.pp_tok = p->i;
+            pp_note(p, p->i, &last, &skipped);
+            arm.span = span2(afirst, last);
+            arms.push(arm);
+            if (at_p(p, CC_P_RPAREN)) break;
+            if (!at_p(p, CC_P_COMMA) && !at_kw(p, KW_DEFAULT) && !is_type_start(p, p->i)) break;
+            if (at_p(p, CC_P_COMMA)) continue;
+            arm.is_pp = false;
+            arm.pp_tok = 0;
+            afirst = p->i;
+        }
+        if (at_p(p, CC_P_RPAREN)) break;
+        if (accept_kw(p, KW_DEFAULT)) arm.is_default = true;
+        else arm.type = parse_type_name(p);
+        if (!expect_p(p, CC_P_COLON, "the _Generic association")) break;
+        arm.expr = parse_assign(p);
+        arm.span = span_from(p, afirst);
+        arms.push(arm);
+    }
+    expect_close(p, CC_P_RPAREN, "_Generic", open);
+    gs.arms = arms;
+    e = cc__expr_blank(span_from(p, first), p->arena);
+    e->k = { .generic_sel = gs };
+    return e;
+}
+
+static CcExpr* parse_primary_ident(P* p) {
+    const CcToken* t = &p->t[p->i];
+    uint32_t first = p->i;
+    Kw k = kw_of(p, p->i);
+    if (k == KW_GENERIC) return parse_generic_sel(p);
+    if (at_kw(p, KW_ASYNC) && tok_is_p(tk(p, 1), CC_P_LPAREN)) {
+        uint32_t close = match_close(p, p->i + 1);
+        if (tok_is_p(&p->t[close + 1], CC_P_FAT_ARROW)) {
+            adv(p);
+            return parse_closure(p, first, false, true);
+        }
+    }
+    if (k != KW_NONE && k != KW_BUILTIN_VA_LIST) {
+        if (is_type_start(p, p->i)) {
+            /* a type where an expression is expected: `sizeof`-less type argument use */
+            CcType* ty = parse_type_name(p);
+            return mk_type_arg(p, ty, span_from(p, first));
+        }
+        {
+            CCSlice word = t->text;
+            CCString m = @string(`expected an expression, found the keyword '${word}'`, p->arena);
+            err_here(p, m);
+        }
+        return expr_error(p);
+    }
+    if (tok_is_p(tk(p, 1), CC_P_COLONCOLON) && tok_is_p(tk(p, 2), CC_P_LBRACKET)) {
+        CCSlice nm = tok_name(p, p->i);
+        CcType* g;
+        adv(p);
+        g = parse_generic_args(p, nm, first);
+        if (at_p(p, CC_P_LPAREN)) {
+            CcGenericFn gf;
+            CcExprList args = vec_new::[CcExprRef](p->arena);
+            CcExpr* e;
+            gf.name = nm;
+            gf.targs = vec_new::[CcTypeRef](p->arena);
+            @switch (g->k) {
+                case .generic(gt): gf.targs = gt.args; break;
+                default: break;
+            }
+            parse_args(p, &args, "generic call");
+            gf.args = args;
+            e = cc__expr_blank(span_from(p, first), p->arena);
+            e->k = { .generic_fn = gf };
+            return e;
+        }
+        return mk_type_arg(p, g, span_from(p, first));
+    }
+    if (tok_is_p(tk(p, 1), CC_P_FAT_ARROW)) return parse_closure(p, first, false, false);
+    {
+        CcExpr* e = cc_expr_ident(tok_name(p, p->i), span2(first, first), p->arena);
+        adv(p);
+        return e;
+    }
+}
+
+static CcExpr* parse_primary_string(P* p) {
+    uint32_t first = p->i;
+    uint32_t n_toks = 0;
+    for (;;) {
+        if (p->t[p->i].kind == CC_TK_STRING) { n_toks++; adv(p); continue; }
+        /* `"%" PRIu64 "\n"`: a macro that expands to a string literal inside the run */
+        if (at_ident(p) && kw_of(p, p->i) == KW_NONE && !name_is_var(p, tok_name(p, p->i)) && !name_is_type(p, tok_name(p, p->i)) &&
+            (tk(p, 1)->kind == CC_TK_STRING || tok_is_p(tk(p, 1), CC_P_RPAREN) || tok_is_p(tk(p, 1), CC_P_COMMA) ||
+             tok_is_p(tk(p, 1), CC_P_SEMI)) && name_is_all_caps(tok_name(p, p->i))) {
+            n_toks++;
+            adv(p);
+            continue;
+        }
+        break;
+    }
+    return mk_string(p, first, n_toks, span_from(p, first));
+}
+
+static CcExpr* parse_primary_at(P* p) {
+    const CcToken* t = &p->t[p->i];
+    uint32_t first = p->i;
+    if (at_word(p, "string")) return parse_at_string(p);
+    if (at_word(p, "emit")) return parse_at_emit(p);
+    if (at_word(p, "slice")) {
+        CcSliceLit sl;
+        CcExprList args = vec_new::[CcExprRef](p->arena);
+        CcExpr* e;
+        sl.tok = 0;
+        adv(p);
+        if (!at_p(p, CC_P_LPAREN)) {
+            {
+                const char* lit_w = "'(' after @slice";
+                err_expected(p, lit_w);
+            }
+            e = cc__expr_blank(span_from(p, first), p->arena);
+            e->k = { .slice_lit = sl };
+            return e;
+        }
+        {
+            const char* lit_w = "@slice";
+            parse_args(p, &args, lit_w);
+        }
+        if (args.len() == 1) {
+            CcExpr* a = *args.get_ptr(0);
+            if (a->k.kind == CcExprK_string) sl.tok = a->span.first;
+        }
+        if (sl.tok == 0) {
+            const char* at_slice = "@slice";
+            CCString m = @string(`${at_slice} takes exactly one string literal: ${at_slice}("...")`, p->arena);
+            err_at(p, first, m);
+        }
+        e = cc__expr_blank(span_from(p, first), p->arena);
+        e->k = { .slice_lit = sl };
+        return e;
+    }
+    if (at_word(p, "scratch")) {
+        CcScratch sc;
+        CcExpr* e;
+        sc.bytes = NULL;
+        adv(p);
+        if (at_p(p, CC_P_LPAREN)) {
+            uint32_t open = p->i;
+            adv(p);
+            sc.bytes = parse_expr(p);
+            {
+                const char* lit_w = "@scratch(N)";
+                expect_close(p, CC_P_RPAREN, lit_w, open);
+            }
+        }
+        e = cc__expr_blank(span_from(p, first), p->arena);
+        e->k = { .scratch = sc };
+        return e;
+    }
+    if (at_word(p, "create")) {
+        CcCreate cr;
+        CcExprList args = vec_new::[CcExprRef](p->arena);
+        CcExpr* e;
+        cr.var = cc_slice_empty();
+        adv(p);
+        if (!at_p(p, CC_P_LPAREN)) {
+            {
+                const char* lit_w = "'(' after @" "create";
+                err_expected(p, lit_w);
+            }
+            cr.args = args;
+            e = cc__expr_blank(span_from(p, first), p->arena);
+            e->k = { .create = cr };
+            return e;
+        }
+        {
+            const char* lit_w = "@" "create";
+            parse_args(p, &args, lit_w);
+        }
+        cr.args = args;
+        e = cc__expr_blank(span_from(p, first), p->arena);
+        e->k = { .create = cr };
+        return e;
+    }
+    if (at_word(p, "comptime") && tok_is_p(tk(p, 1), CC_P_LPAREN)) {
+        uint32_t open = p->i + 1;
+        CcComptimeExpr ce;
+        CcExpr* e;
+        adv(p); adv(p);
+        ce.a = parse_expr(p);
+        {
+            const char* lit_w = "@comptime(...)";
+            expect_close(p, CC_P_RPAREN, lit_w, open);
+        }
+        e = cc__expr_blank(span_from(p, first), p->arena);
+        e->k = { .comptime = ce };
+        return e;
+    }
+    if (at_word(p, "unsafe") && tok_is_p(tk(p, 1), CC_P_LPAREN)) {
+        adv(p);
+        return parse_closure(p, first, true, false);
+    }
+    if (at_word(p, "destroy") || at_word(p, "detach")) {
+        CCSlice word = t->text;
+        CCString m = @string(`'${word}' is only allowed after a declaration initializer`, p->arena);
+        err_here(p, m);
+        return expr_error(p);
+    }
+    if (at_word(p, "parallel")) {
+        {
+            const char* at_parallel = "@" "parallel";
+            const char* op_unwrap = "!>";
+            CCString m = @string(`${at_parallel} is a statement; bind its join with 'CCParallel h = ${at_parallel} { ... } ${op_unwrap};'`, p->arena);
+            err_here(p, m);
+        }
+        return expr_error(p);
+    }
+    {
+        CCSlice word = t->text;
+        const char* at_word = "@word";
+        CCString m = @string(`unknown ${at_word} '${word}' in an expression`, p->arena);
+        err_here(p, m);
+    }
+    return expr_error(p);
+}
+
+/* A primary starting with a punctuator: `(`-forms and `.arm` variant
+ * literals; NULL when it is not one of them. */
+static CcExpr* parse_primary_punct(P* p) {
+    const CcToken* t = &p->t[p->i];
+    uint32_t first = p->i;
+    if (t->punct == CC_P_LPAREN) {
+        uint32_t close;
+        if (tok_is_p(tk(p, 1), CC_P_LBRACE)) {
+            CcStmt* b;
+            adv(p);
+            b = parse_block(p);
+            expect_close(p, CC_P_RPAREN, "statement expression", first);
+            return mk_stmt_expr(p, b, span_from(p, first));
+        }
+        close = match_close(p, p->i);
+        if (tok_is_p(&p->t[close + 1], CC_P_FAT_ARROW)) return parse_closure(p, first, false, false);
+        {
+            CcUnary pa;
+            CcExpr* e;
+            adv(p);
+            pa.op = CC_OP_NONE;
+            pa.a = parse_expr(p);
+            expect_close(p, CC_P_RPAREN, "parenthesised expression", first);
+            e = cc__expr_blank(span_from(p, first), p->arena);
+            e->k = { .paren = pa };
+            return e;
+        }
+    }
+    if (t->punct == CC_P_DOT && tk(p, 1)->kind == CC_TK_IDENT) {
+        CcVariantLit vl;
+        CcExprList args = vec_new::[CcExprRef](p->arena);
+        CcExpr* e;
+        adv(p);
+        vl.arm = tok_name(p, p->i);
+        adv(p);
+        if (at_p(p, CC_P_LPAREN)) parse_args(p, &args, "variant literal");
+        vl.args = args;
+        e = cc__expr_blank(span_from(p, first), p->arena);
+        e->k = { .variant_lit = vl };
+        return e;
+    }
+    return NULL;
+}
+
+static CcExpr* parse_primary(P* p) {
+    const CcToken* t = &p->t[p->i];
+    uint32_t first = p->i;
+    switch (t->kind) {
+    case CC_TK_IDENT: return parse_primary_ident(p);
+    case CC_TK_NUMBER: case CC_TK_CHAR: {
+        CcExpr* e = mk_literal_tok(p, first, 1, span2(first, first), t->kind == CC_TK_CHAR);
+        adv(p);
+        return e;
+    }
+    case CC_TK_STRING: return parse_primary_string(p);
+    case CC_TK_TEMPLATE: {
+        if (!p->tpl_ok) {
+            const char* at_string = "@string";
+            const char* at_emit = "@emit";
+            CCString m = @string(`a template literal must be the argument of ${at_string}(...) or ${at_emit}(...)`, p->arena);
+            err_here(p, m);
+        }
+        return template_literal(p);
+    }
+    case CC_TK_PUNCT: {
+        CcExpr* e = parse_primary_punct(p);
+        if (e) return e;
+        break;
+    }
+    case CC_TK_AT_WORD: return parse_primary_at(p);
+    case CC_TK_AT:
+        {
+            CCString m = @string(`a bare '@' belongs in 'T name@(args)'; expected an expression`, p->arena);
+            err_here(p, m);
+        }
+        return expr_error(p);
+    case CC_TK_PP:
+        { CCString m = @string(`a preprocessor line cannot appear inside an expression`, p->arena); err_here(p, m); }
+        return expr_error(p);
+    case CC_TK_ERROR:
+        adv(p);
+        return expr_error(p);
+    default: break;
+    }
+    err_expected(p, "an expression");
+    return expr_error(p);
+}
+
+/* ---- initializers ------------------------------------------------------------------- */
+
+static CcInit* init_blank(P* p, CcSpan span) {
+    CcInit* in = cc_arena_alloc(p->arena, sizeof(CcInit), _Alignof(CcInit));
+    memset(in, 0, sizeof(*in));
+    in->span = span;
+    in->designators = vec_new::[CcDesignator](p->arena);
+    in->items = vec_new::[CcInitRef](p->arena);
+    return in;
+}
+
+static CcInit* parse_initializer(P* p) {
+    uint32_t first = p->i;
+    CcInit* in = init_blank(p, span2(first, first));
+    if (at_p(p, CC_P_LBRACE)) {
+        uint32_t open = p->i;
+        CcInitList items = vec_new::[CcInitRef](p->arena);
+        in->is_list = true;
+        adv(p);
+        while (!at_p(p, CC_P_RBRACE) && !at_eof(p)) {
+            CcInit* item;
+            uint32_t ifirst = p->i;
+            if (p->t[p->i].kind == CC_TK_PP) {
+                uint32_t last;
+                bool skipped;
+                item = init_blank(p, span2(ifirst, ifirst));
+                item->is_pp = true;
+                item->pp_tok = p->i;
+                pp_note(p, p->i, &last, &skipped);
+                item->span = span2(ifirst, last);
+                items.push(item);
+                continue;
+            }
+            /* designators: `.f`, `[i]`, `[lo ... hi]`, chained, then `=`;
+             * a bare `.arm` is a variant literal, not a designator */
+            {
+                Vec::[CcDesignator] desig = vec_new::[CcDesignator](p->arena);
+                uint32_t j = p->i;
+                bool is_desig = false;
+                for (;;) {
+                    if (tok_is_p(&p->t[j], CC_P_DOT) && p->t[j + 1].kind == CC_TK_IDENT) j += 2;
+                    else if (tok_is_p(&p->t[j], CC_P_LBRACKET)) j = match_close(p, j) + 1;
+                    else break;
+                }
+                if (j > p->i && (tok_is_p(&p->t[j], CC_P_ASSIGN) || tok_is_p(&p->t[j - 1], CC_P_RBRACKET))) is_desig = true;
+                if (is_desig) {
+                    for (;;) {
+                        CcDesignator ds;
+                        ds.field = cc_slice_empty();
+                        ds.index = NULL;
+                        ds.index_hi = NULL;
+                        if (at_p(p, CC_P_DOT) && tk(p, 1)->kind == CC_TK_IDENT) {
+                            adv(p);
+                            ds.field = tok_name(p, p->i);
+                            adv(p);
+                        } else if (at_p(p, CC_P_LBRACKET)) {
+                            uint32_t bopen = p->i;
+                            adv(p);
+                            ds.index = parse_cond(p);
+                            if (accept_p(p, CC_P_ELLIPSIS)) ds.index_hi = parse_cond(p);
+                            expect_close(p, CC_P_RBRACKET, "designator", bopen);
+                        } else break;
+                        desig.push(ds);
+                    }
+                    if (!accept_p(p, CC_P_ASSIGN)) {
+                        /* GNU obsolete `field:` form is not supported; `[i]` without `=` neither */
+                        err_expected(p, "'=' after the designator");
+                    }
+                }
+                item = parse_initializer(p);
+                item->designators = desig;
+                item->span = span_from(p, ifirst);
+            }
+            items.push(item);
+            if (p->t[p->i].kind == CC_TK_PP) continue;
+            if (!accept_p(p, CC_P_COMMA)) break;
+        }
+        expect_close(p, CC_P_RBRACE, "initializer list", open);
+        in->items = items;
+        in->span = span_from(p, first);
+        return in;
+    }
+    in->expr = parse_assign(p);
+    in->span = span_from(p, first);
+    return in;
+}
+
+#endif

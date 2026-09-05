@@ -1,0 +1,1339 @@
+#pragma(@per_tu)
+/* Parser section 4: statements.
+ *
+ * C statements, the Concurrent-C statement forms (`@defer`, `@errhandler`,
+ * `@parallel` and its arms, `@for` / for-in, the block forms `@with`,
+ * `@stage`, `@closing`, `@spawn`, `@nonblocking { }`, `@comptime` in
+ * statement position) and the declaration/statement split in a block. A
+ * declaration in statement position is parsed by section 5 through
+ * `parse_declaration`; a preprocessor line in statement position is the
+ * declaration node section 5 makes for it, wrapped as a statement. */
+#ifndef CC_LOWER_PARSE_STMTS_CCH
+#define CC_LOWER_PARSE_STMTS_CCH
+#include "parse_fwd.cch"
+#include "parse_exprs.cch"
+
+/* ---- small helpers ------------------------------------------------------ */
+
+static CcStmt* stmt_decl_wrap(P* p, CcDecl* d) {
+    CcStmt* s = cc__stmt_blank(d->span, p->arena);
+    CcDeclStmt ds;
+    ds.d = d;
+    s->k = { .decl = ds };
+    return s;
+}
+
+static CcStmt* mk_empty_stmt(P* p, CcSpan span) {
+    return cc_stmt_expr(NULL, span, p->arena);
+}
+
+static CcStmt* mk_unwrap_or_expr_stmt(P* p, CcExpr* e, CcSpan span) {
+    if (e->k.kind == CcExprK_unwrap || e->k.kind == CcExprK_unwrap_body) {
+        CcStmt* s = cc__stmt_blank(span, p->arena);
+        CcUnwrapStmt us;
+        us.e = e;
+        {
+            CcStmtK kk;
+            kk = { .unwrap = us };
+            s->k = kk;
+        }
+        return s;
+    }
+    return cc_stmt_expr(e, span, p->arena);
+}
+
+/* A preprocessor line in statement position: section 5's node for it. */
+static CcStmt* pp_stmt(P* p) {
+    uint32_t start = p->i;
+    CcDeclList dl = vec_new::[CcDeclRef](p->arena);
+    parse_declaration(p, &dl, false);
+    if (dl.len() >= 1 && p->i > start) return stmt_decl_wrap(p, *dl.get_ptr(0));
+    /* the declaration parser did not take the line: say so rather than loop */
+    { CCString m = @string(`internal: the preprocessor line was not consumed by the declaration parser`, p->arena); err_here(p, m); }
+    if (p->i == start) adv(p);
+    return mk_empty_stmt(p, span2(start, start));
+}
+
+/* Statement-position `@word`s that open a declaration (section 5). */
+static bool stmt_at_cc_decl_word(P* p) {
+    if (p->t[p->i].kind != CC_TK_AT_WORD) return false;
+    if (at_word(p, "typeview")) return !tok_is_p(tk(p, 1), CC_P_LPAREN);
+    return at_word(p, "typehooks") || at_word(p, "variant") || at_word(p, "grammar") || at_word(p, "scoped") ||
+           at_word(p, "link") || (at_word(p, "comptime") && !tok_is_p(tk(p, 1), CC_P_LPAREN));
+}
+
+/* One or more declarations as statements: one node, or a brace-less block
+ * holding one decl statement per declarator. */
+static CcStmt* parse_decl_stmt(P* p, uint32_t first) {
+    CcDeclList dl = vec_new::[CcDeclRef](p->arena);
+    size_t k;
+    size_t n;
+    CcStmt* s;
+    CcStmtList stmts;
+    parse_declaration(p, &dl, false);
+    if (p->bind_stmt) { s = p->bind_stmt; p->bind_stmt = NULL; return s; }
+    n = dl.len();
+    if (n == 1) return stmt_decl_wrap(p, *dl.get_ptr(0));
+    stmts = vec_new::[CcStmtRef](p->arena);
+    for (k = 0; k < n; k++) {
+        CcDecl* dk = *dl.get_ptr(k);
+        stmts.push(stmt_decl_wrap(p, dk));
+    }
+    s = cc_stmt_block(span_from(p, first), p->arena);
+    {
+        CcBlock b;
+        b.stmts = stmts;
+        s->k = { .block = b };
+    }
+    return s;
+}
+
+static bool stmt_is_block(const CcStmt* s) {
+    return s && s->k.kind == CcStmtK_block;
+}
+
+/* A block written with braces (as opposed to the brace-less block that
+ * groups preprocessor lines around a body). */
+static bool block_has_braces(P* p, const CcStmt* s) {
+    return stmt_is_block(s) && tok_is_p(&p->t[s->span.first], CC_P_LBRACE);
+}
+
+static CcStmtList block_stmts(const CcStmt* s) {
+    CcStmtList none;
+    @switch (s->k) {
+        case .block(b): return b.stmts;
+        default: break;
+    }
+    memset(&none, 0, sizeof(none));
+    return none;
+}
+
+static void block_set_stmts(CcStmt* s, CcStmtList stmts) {
+    CcBlock b;
+    b.stmts = stmts;
+    s->k = { .block = b };
+}
+
+/* The body of if/else/while/for/do. A body wrapped in `#if ... #endif`
+ * lines becomes a brace-less block holding the lines and the statements. */
+static CcStmt* parse_body_stmt(P* p) {
+    CcStmt* b;
+    CcStmtList stmts;
+    int depth = 0;
+    bool parsed = false;
+    uint32_t first = p->i;
+    if (p->t[p->i].kind != CC_TK_PP) return parse_stmt(p);
+    b = cc_stmt_block(span2(first, first), p->arena);
+    stmts = vec_new::[CcStmtRef](p->arena);
+    for (;;) {
+        if (p->t[p->i].kind == CC_TK_PP) {
+            int v;
+            PpKind k = pp_classify(pp_body(p, p->i), &v);
+            if (k == PP_IF) depth++;
+            else if (k == PP_ENDIF) depth--;
+            stmts.push(pp_stmt(p));
+            if (depth <= 0 && parsed) break;
+            continue;
+        }
+        if (at_eof(p) || at_p(p, CC_P_RBRACE)) break;
+        if (at_kw(p, KW_ELSE) && depth > 0) break;
+        stmts.push(parse_stmt(p));
+        parsed = true;
+        if (depth <= 0) break;
+    }
+    block_set_stmts(b, stmts);
+    b->span = span_from(p, first);
+    return b;
+}
+
+static void end_stmt(P* p, const char* what, uint32_t start) {
+    if (!expect_semi(p, what)) sync(p, start);
+}
+
+/* Body block into *out (the block's statements, braces dropped). */
+static void parse_body_into(P* p, CcStmtList* out, const char* what) {
+    CcStmt* b;
+    if (!at_p(p, CC_P_LBRACE)) {
+        CCSlice found = tok_desc(p, p->i);
+        CCString m = @string(`expected '{' to open the ${what} body, found ${found}`, p->arena);
+        err_here(p, m);
+        return;
+    }
+    b = parse_block(p);
+    *out = block_stmts(b);
+}
+
+static CcExpr* parse_paren_expr(P* p, const char* what) {
+    uint32_t open = p->i;
+    CcExpr* e;
+    if (!expect_p(p, CC_P_LPAREN, what)) return NULL;
+    e = parse_expr(p);
+    expect_close(p, CC_P_RPAREN, what, open);
+    return e;
+}
+
+static void parse_paren_list(P* p, CcExprList* out, const char* what) {
+    uint32_t open = p->i;
+    if (!at_p(p, CC_P_LPAREN)) {
+        CCSlice found = tok_desc(p, p->i);
+        CCString m = @string(`expected '(' after ${what}, found ${found}`, p->arena);
+        err_here(p, m);
+        return;
+    }
+    adv(p);
+    while (!at_p(p, CC_P_RPAREN) && !at_eof(p)) {
+        CcExpr* e = parse_assign(p);
+        out->push(e);
+        if (!accept_p(p, CC_P_COMMA)) break;
+    }
+    expect_close(p, CC_P_RPAREN, what, open);
+}
+
+/* The join of a `@parallel` block / for-in walk, for its `!>` tail. */
+static CcExpr* join_ident(P* p, uint32_t first) {
+    return cc_expr_ident(CC_SLICE_LIT("@parallel"), span2(first, first), p->arena);
+}
+
+/* ---- for / for-in ---------------------------------------------------------- */
+
+static void for_in_blank(CcForIn* fi, CCArena a) {
+    fi->bind = cc_slice_empty();
+    fi->bind2 = cc_slice_empty();
+    fi->iterables = vec_new::[CcExprRef](a);
+    fi->by_ref = false;
+    fi->by_ref2 = false;
+    fi->is_at_for = false;
+    fi->body = NULL;
+    fi->tail = NULL;
+}
+
+/* Parse a for-in header at the first binder into `fi`, positioned after `)`. */
+static void parse_for_in_header(P* p, CcForIn* fi, uint32_t open) {
+    CcExprList its = vec_new::[CcExprRef](p->arena);
+    if (accept_p(p, CC_P_AMP)) fi->by_ref = true;
+    if (!at_ident(p)) err_expected(p, "the loop variable in the for-in header");
+    else { fi->bind = tok_name(p, p->i); adv(p); }
+    if (accept_p(p, CC_P_COMMA)) {
+        if (accept_p(p, CC_P_AMP)) fi->by_ref2 = true;
+        if (!at_ident(p)) err_expected(p, "the second loop variable in the for-in header");
+        else { fi->bind2 = tok_name(p, p->i); adv(p); }
+    }
+    if (!accept_kw(p, KW_IN)) err_expected(p, "'in' in the for-in header");
+    for (;;) {
+        CcExpr* it;
+        if (at_p(p, CC_P_LPAREN) && (is_type_start(p, p->i + 1) || tok_is_p(tk(p, 1), CC_P_RPAREN))) {
+            /* a parenthesised parameter list as a comptime sequence */
+            CcType* ft = cc__type_blank(span2(p->i, p->i), p->arena);
+            CcFuncType fn;
+            uint32_t tfirst = p->i;
+            fn.ret = NULL;
+            fn.params = vec_new::[CcParam](p->arena);
+            fn.variadic = false;
+            fn.has_prototype = false;
+            parse_params(p, &fn);
+            ft->span = span_from(p, tfirst);
+            {
+                CcTypeK kk;
+                kk = { .func = fn };
+                ft->k = kk;
+            }
+            it = mk_type_arg(p, ft, ft->span);
+        } else it = parse_assign(p);
+        if (at_p(p, CC_P_DOTDOT)) {
+            CcRange r;
+            CcExpr* re;
+            adv(p);
+            r.lo = it;
+            r.hi = parse_assign(p);
+            re = cc__expr_blank(span_from(p, it->span.first), p->arena);
+            re->k = { .range = r };
+            it = re;
+        }
+        its.push(it);
+        if (!accept_p(p, CC_P_COMMA)) break;
+    }
+    fi->iterables = its;
+    expect_close(p, CC_P_RPAREN, "for-in header", open);
+}
+
+/* `(` [&]IDENT [, [&]IDENT] in  — lookahead for a for-in header at `i` */
+static bool for_in_ahead(P* p, uint32_t i) {
+    uint32_t j = i;
+    if (tok_is_p(&p->t[j], CC_P_AMP)) j++;
+    if (p->t[j].kind != CC_TK_IDENT) return false;
+    j++;
+    if (is_kw(p, j, KW_IN)) return true;
+    if (!tok_is_p(&p->t[j], CC_P_COMMA)) return false;
+    j++;
+    if (tok_is_p(&p->t[j], CC_P_AMP)) j++;
+    if (p->t[j].kind != CC_TK_IDENT) return false;
+    return is_kw(p, j + 1, KW_IN);
+}
+
+static void declare_for_in_binders(P* p, const CcForIn* fi) {
+    if (fi->bind.len) declare_var(p, fi->bind);
+    if (fi->bind2.len) declare_var(p, fi->bind2);
+}
+
+static CcStmt* parse_for(P* p, bool is_at_for) {
+    uint32_t first = p->i;
+    uint32_t open;
+    CcStmt* s;
+    adv(p); /* for / @for */
+    open = p->i;
+    if (!at_p(p, CC_P_LPAREN)) {
+        const char* kw = is_at_for ? "@for" : "for";
+        CCSlice found = tok_desc(p, p->i);
+        CCString m = @string(`expected '(' after '${kw}', found ${found}`, p->arena);
+        CcFor f;
+        err_here(p, m);
+        f.init_decl = NULL;
+        f.init_expr = NULL;
+        f.cond = NULL;
+        f.step = NULL;
+        f.body = NULL;
+        f.more = vec_new::[CcStmtRef](p->arena);
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .for_ = f };
+        return s;
+    }
+    if (for_in_ahead(p, p->i + 1)) {
+        CcForIn fi;
+        for_in_blank(&fi, p->arena);
+        fi.is_at_for = is_at_for;
+        adv(p);
+        parse_for_in_header(p, &fi, open);
+        scope_push(p->syms);
+        declare_for_in_binders(p, &fi);
+        fi.body = parse_stmt(p);
+        scope_pop(p->syms);
+        if (stmt_is_block(fi.body) && (at_p(p, CC_P_UNWRAP) || at_p(p, CC_P_UNWRAP_OR))) {
+            /* `} !>;` / `} !>(e) { ... }`: the walk's Result, unwrapped */
+            fi.tail = parse_postfix(p, join_ident(p, first));
+            accept_p(p, CC_P_SEMI);
+        }
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .for_in = fi };
+        return s;
+    }
+    if (is_at_for) {
+        const char* at_for = "@for";
+        CCString m = @string(`${at_for} needs a for-in header: ${at_for} ([&]x in xs)`, p->arena);
+        err_here(p, m);
+    }
+    {
+        CcFor f;
+        f.init_decl = NULL;
+        f.init_expr = NULL;
+        f.cond = NULL;
+        f.step = NULL;
+        f.body = NULL;
+        f.more = vec_new::[CcStmtRef](p->arena);
+        adv(p);
+        scope_push(p->syms);
+        if (!at_p(p, CC_P_SEMI)) {
+            if (at_declaration_start(p)) {
+                CcDeclList dl = vec_new::[CcDeclRef](p->arena);
+                CcStmtList more = vec_new::[CcStmtRef](p->arena);
+                size_t k;
+                size_t n;
+                parse_declaration(p, &dl, false);
+                n = dl.len();
+                if (n) f.init_decl = *dl.get_ptr(0);
+                for (k = 1; k < n; k++) {
+                    CcDecl* dk = *dl.get_ptr(k);
+                    more.push(stmt_decl_wrap(p, dk));
+                }
+                f.more = more;
+            } else {
+                f.init_expr = parse_expr(p);
+                expect_p(p, CC_P_SEMI, "the for header");
+            }
+        } else adv(p);
+        if (!at_p(p, CC_P_SEMI)) f.cond = parse_expr(p);
+        expect_p(p, CC_P_SEMI, "the for header");
+        if (!at_p(p, CC_P_RPAREN)) f.step = parse_expr(p);
+        expect_close(p, CC_P_RPAREN, "for header", open);
+        f.body = parse_body_stmt(p);
+        scope_pop(p->syms);
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .for_ = f };
+        return s;
+    }
+}
+
+/* ---- @parallel ---------------------------------------------------------------- */
+
+static bool parse_worker_clause(P* p, CCSlice* worker) {
+    if (!(at_kw(p, KW_WORKER) && tok_is_p(tk(p, 1), CC_P_LPAREN))) return false;
+    adv(p); adv(p);
+    if (at_ident(p)) { *worker = tok_name(p, p->i); adv(p); }
+    else err_expected(p, "the worker binder name in worker (w)");
+    expect_p(p, CC_P_RPAREN, "worker (w)");
+    return true;
+}
+
+/* `@parallel ...` at the `@parallel` token. */
+static CcStmt* parse_parallel(P* p) {
+    uint32_t first = p->i;
+    CcStmt* s;
+    bool spawn = false;
+    CcExpr* pred = NULL;
+    CcExpr* seq = NULL;
+    CcExpr* wait = NULL;
+    CCSlice worker = cc_slice_empty();
+    CcExprList cache = vec_new::[CcExprRef](p->arena);
+    adv(p);
+    /* `@parallel(h) { }`: no space before the parenthesis */
+    if (at_p(p, CC_P_LPAREN) && !p->t[p->i].after_space) {
+        CcParallelDest pd;
+        pd.stmts = vec_new::[CcStmtRef](p->arena);
+        const char* lit_w = "@parallel(dest)";
+        pd.dest = parse_paren_expr(p, lit_w);
+        {
+            const char* lit_w = "@parallel(dest)";
+            parse_body_into(p, &pd.stmts, lit_w);
+        }
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .parallel_dest = pd };
+        return s;
+    }
+    for (;;) {
+        if (accept_kw(p, KW_SPAWN)) { spawn = true; continue; }
+        if (at_p(p, CC_P_LPAREN)) {
+            uint32_t open = p->i;
+            adv(p);
+            if (at_p(p, CC_P_RPAREN)) {
+                const char* at_parallel = "@" "parallel";
+                CCString m = @string(`${at_parallel} (pred) needs a predicate expression between the parentheses`, p->arena);
+                err_here(p, m);
+            }
+            else pred = parse_expr(p);
+            {
+                const char* lit_w = "@parallel (pred)";
+                expect_close(p, CC_P_RPAREN, lit_w, open);
+            }
+            continue;
+        }
+        if (at_kw(p, KW_SEQ) && tok_is_p(tk(p, 1), CC_P_LPAREN)) { adv(p); seq = parse_paren_expr(p, "seq (cond)"); continue; }
+        if (at_kw(p, KW_WAIT) && tok_is_p(tk(p, 1), CC_P_LPAREN)) { adv(p); wait = parse_paren_expr(p, "wait (ts)"); continue; }
+        if (at_kw(p, KW_CACHE) && tok_is_p(tk(p, 1), CC_P_LPAREN)) { const char* lit_w = "cache (...)"; adv(p); parse_paren_list(p, &cache, lit_w); continue; }
+        if (parse_worker_clause(p, &worker)) continue;
+        break;
+    }
+    if (at_kw(p, KW_FOR) || at_word(p, "for")) {
+        uint32_t open = p->i + 1;
+        CcParallelFor pf;
+        for_in_blank(&pf.loop, p->arena);
+        pf.loop.is_at_for = p->t[p->i].kind == CC_TK_AT_WORD;
+        pf.spawn = spawn;
+        pf.pred = pred;
+        pf.seq = seq;
+        pf.wait = wait;
+        pf.worker = worker;
+        pf.cache = cache;
+        pf.bind = cc_slice_empty();
+        pf.bind_type = NULL;
+        pf.target = NULL;
+        pf.tail = NULL;
+        adv(p);
+        const char* w_for = "@parallel for";
+        if (!expect_p(p, CC_P_LPAREN, w_for)) {
+            s = cc__stmt_blank(span_from(p, first), p->arena);
+            s->k = { .parallel_for = pf };
+            return s;
+        }
+        if (!for_in_ahead(p, p->i)) {
+            const char* at_parallel = "@" "parallel";
+            CCString m = @string(`${at_parallel} for needs a for-in header: for (i in lo..hi)`, p->arena);
+            err_here(p, m);
+        }
+        parse_for_in_header(p, &pf.loop, open);
+        /* trailing clauses after the header */
+        for (;;) {
+            if (parse_worker_clause(p, &pf.worker)) continue;
+            if (at_kw(p, KW_CACHE) && tok_is_p(tk(p, 1), CC_P_LPAREN)) { const char* lit_w = "cache (...)"; adv(p); parse_paren_list(p, &pf.cache, lit_w); continue; }
+            break;
+        }
+        scope_push(p->syms);
+        declare_for_in_binders(p, &pf.loop);
+        if (pf.worker.len) declare_var(p, pf.worker);
+        if (at_p(p, CC_P_LBRACE)) pf.loop.body = parse_block(p);
+        else pf.loop.body = parse_stmt(p);
+        scope_pop(p->syms);
+        /* tail: `!>.wait()!>` and friends, applied to the join */
+        if (at_p(p, CC_P_UNWRAP) || at_p(p, CC_P_UNWRAP_OR) || at_p(p, CC_P_DOT)) pf.tail = parse_postfix(p, join_ident(p, first));
+        accept_p(p, CC_P_SEMI);
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .parallel_for = pf };
+        return s;
+    }
+    {
+        /* arms */
+        uint32_t open = p->i;
+        CcParallel pa;
+        Vec::[CcParallelArm] arms = vec_new::[CcParallelArm](p->arena);
+        pa.arms = arms;
+        pa.spawn = spawn;
+        pa.pred = pred;
+        pa.seq = seq;
+        pa.wait = wait;
+        pa.worker = worker;
+        pa.cache = cache;
+        pa.bind = cc_slice_empty();
+        pa.bind_type = NULL;
+        pa.target = NULL;
+        pa.tail = NULL;
+        if (!at_p(p, CC_P_LBRACE)) {
+            {
+                const char* lit_w = "'{' to open the @parallel arms";
+                err_expected(p, lit_w);
+            }
+            s = cc__stmt_blank(span_from(p, first), p->arena);
+            s->k = { .parallel = pa };
+            return s;
+        }
+        adv(p);
+        scope_push(p->syms);
+        while (!at_p(p, CC_P_RBRACE) && !at_eof(p)) {
+            CcParallelArm arm;
+            uint32_t afirst = p->i;
+            arm.target = cc_slice_empty();
+            arm.expr = NULL;
+            arm.serial = NULL;
+            arm.unwrap = false;
+            if (p->t[p->i].kind == CC_TK_PP) {
+                uint32_t last;
+                bool skipped;
+                pp_note(p, p->i, &last, &skipped);
+                continue;
+            }
+            if (accept_p(p, CC_P_SEMI)) continue;
+            if (at_word(p, "serial")) {
+                CcStmt* ser;
+                CcBlock sb;
+                sb.stmts = vec_new::[CcStmtRef](p->arena);
+                adv(p);
+                {
+                    const char* lit_w = "@serial";
+                    parse_body_into(p, &sb.stmts, lit_w);
+                }
+                ser = cc__stmt_blank(span_from(p, afirst), p->arena);
+                ser->k = { .serial = sb };
+                arm.serial = ser;
+            } else {
+                CcStmt* st = parse_stmt(p);
+                CcExpr* operand = NULL;
+                CcExpr* rhs = NULL;
+                CCSlice target = cc_slice_empty();
+                bool is_unwrap = false;
+                bool classified = false;
+                @switch (st->k) {
+                    case .unwrap(us):
+                        if (expr_unwrap_operand(us.e, &operand)) { is_unwrap = true; classified = true; }
+                        break;
+                    case .expr(es):
+                        if (es.e && !es.body) {
+                            if (expr_assign_to_ident(es.e, &target, &rhs)) classified = true;
+                            else { rhs = es.e; classified = true; }
+                        }
+                        break;
+                    default: break;
+                }
+                if (is_unwrap) { arm.unwrap = true; arm.expr = operand; }
+                else if (classified) { arm.target = target; arm.expr = rhs; }
+                /* any other statement (a loop, a declaration) is an arm of its own */
+                else arm.serial = st;
+            }
+            arm.span = span_from(p, afirst);
+            arms.push(arm);
+            if (p->i == afirst) sync(p, afirst);
+        }
+        scope_pop(p->syms);
+        {
+            const char* lit_w = "@parallel arms";
+            expect_close(p, CC_P_RBRACE, lit_w, open);
+        }
+        pa.arms = arms;
+        /* tail: `!>.wait()!>` and friends, applied to the join */
+        if (at_p(p, CC_P_UNWRAP) || at_p(p, CC_P_UNWRAP_OR) || at_p(p, CC_P_DOT)) pa.tail = parse_postfix(p, join_ident(p, first));
+        accept_p(p, CC_P_SEMI);
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .parallel = pa };
+        return s;
+    }
+}
+
+/* ---- case labels ----------------------------------------------------------------- */
+
+static CcStmt* parse_case(P* p) {
+    uint32_t first = p->i;
+    CcCase c;
+    CcStmt* s;
+    c.lo = NULL;
+    c.hi = NULL;
+    c.arm = cc_slice_empty();
+    c.bind = cc_slice_empty();
+    c.is_default = false;
+    c.inner = NULL;
+    if (accept_kw(p, KW_DEFAULT)) c.is_default = true;
+    else {
+        adv(p); /* case */
+        if (at_p(p, CC_P_DOT) && tk(p, 1)->kind == CC_TK_IDENT && !tok_is_p(tk(p, 2), CC_P_DOT)) {
+            adv(p);
+            c.arm = tok_name(p, p->i);
+            adv(p);
+            if (at_p(p, CC_P_LPAREN)) {
+                uint32_t open = p->i;
+                adv(p);
+                if (at_ident(p)) { c.bind = tok_name(p, p->i); declare_var(p, c.bind); adv(p); }
+                else {
+                    CCSlice arm = c.arm;
+                    CCSlice found = tok_desc(p, p->i);
+                    CCString m = @string(`expected the binder name in case .${arm}(bind), found ${found}`, p->arena);
+                    err_here(p, m);
+                }
+                expect_close(p, CC_P_RPAREN, "case arm binder", open);
+            }
+        } else {
+            c.lo = parse_cond(p);
+            if (accept_p(p, CC_P_ELLIPSIS)) c.hi = parse_cond(p);
+        }
+    }
+    if (!accept_p(p, CC_P_COLON)) {
+        const char* what = c.is_default ? "default" : "case";
+        CCSlice found = tok_desc(p, p->i);
+        CCString m = @string(`expected ':' after the ${what} label, found ${found}`, p->arena);
+        err_here(p, m);
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .case_ = c };
+        return s;
+    }
+    if (!at_p(p, CC_P_RBRACE) && !at_eof(p)) c.inner = parse_stmt(p);
+    s = cc__stmt_blank(span_from(p, first), p->arena);
+    s->k = { .case_ = c };
+    return s;
+}
+
+/* ---- @word statements ------------------------------------------------------------- */
+
+static CcStmt* parse_defer(P* p) {
+    uint32_t first = p->i;
+    CcDefer d;
+    CcStmt* s;
+    d.name = cc_slice_empty();
+    d.on = 0;
+    d.body = NULL;
+    adv(p);
+    if (at_p(p, CC_P_LPAREN) && !p->t[p->i].after_space && tk(p, 1)->kind == CC_TK_IDENT && tok_is_p(tk(p, 2), CC_P_RPAREN)) {
+        if (CcToken_is_ident(tk(p, 1), "ok")) d.on = 'o';
+        else if (CcToken_is_ident(tk(p, 1), "err")) d.on = 'e';
+        else {
+            CCSlice word = tok_text(p, p->i + 1);
+            const char* at_defer = "@defer";
+            CCString m = @string(`${at_defer} takes (ok) or (err), not (${word})`, p->arena);
+            err_at(p, p->i + 1, m);
+        }
+        adv(p); adv(p); adv(p);
+    }
+    if (at_ident(p) && tok_is_p(tk(p, 1), CC_P_COLON) && kw_of(p, p->i) == KW_NONE) {
+        d.name = tok_name(p, p->i);
+        adv(p); adv(p);
+    }
+    d.body = parse_stmt(p);
+    s = cc__stmt_blank(span_from(p, first), p->arena);
+    s->k = { .defer = d };
+    return s;
+}
+
+static CcStmt* mk_err_fwd(P* p, CcExpr* e, uint32_t first) {
+    CcErrFwd ef;
+    CcStmt* s;
+    ef.err = e;
+    s = cc__stmt_blank(span_from(p, first), p->arena);
+    s->k = { .err_fwd = ef };
+    return s;
+}
+
+static CcStmt* parse_errhandler(P* p) {
+    uint32_t first = p->i;
+    CcErrhandler eh;
+    CcStmt* s;
+    eh.err_type = NULL;
+    eh.binder = cc_slice_empty();
+    eh.body = NULL;
+    adv(p);
+    if (!at_p(p, CC_P_LPAREN)) {
+        {
+            const char* lit_w = "@errhandler";
+            expect_p(p, CC_P_LPAREN, lit_w);
+        }
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .errhandler = eh };
+        return s;
+    }
+    {
+        const char* lit_w = "@errhandler(E e)";
+        eh.binder = parse_paren_binder(p, &eh.err_type, lit_w);
+    }
+    if (!eh.err_type) {
+        const char* at_errhandler = "@errhandler";
+        CCString m = @string(`expected the error type in ${at_errhandler}(E e)`, p->arena);
+        err_at(p, first + 2, m);
+    }
+    scope_push(p->syms);
+    if (eh.binder.len) declare_var(p, eh.binder);
+    eh.body = parse_stmt(p);
+    scope_pop(p->syms);
+    s = cc__stmt_blank(span_from(p, first), p->arena);
+    s->k = { .errhandler = eh };
+    return s;
+}
+
+/* `@with(arena = a) { }`: one `key = value` binding. */
+static CcStmt* parse_with(P* p) {
+    uint32_t first = p->i;
+    CcWith w;
+    CcStmt* s;
+    CcExprList xs = vec_new::[CcExprRef](p->arena);
+    bool ok = false;
+    w.key = cc_slice_empty();
+    w.value = NULL;
+    w.stmts = vec_new::[CcStmtRef](p->arena);
+    adv(p);
+    {
+        const char* lit_w = "@with";
+        parse_paren_list(p, &xs, lit_w);
+    }
+    if (xs.len() == 1) {
+        CcExpr* x = *xs.get_ptr(0);
+        ok = expr_assign_to_ident(x, &w.key, &w.value);
+    }
+    if (!ok) {
+        const char* at_with = "@with";
+        CCString m = @string(`${at_with} takes one binding: ${at_with}(arena = a) { ... }`, p->arena);
+        err_at(p, first, m);
+    }
+    {
+        const char* lit_w = "@with";
+        parse_body_into(p, &w.stmts, lit_w);
+    }
+    s = cc__stmt_blank(span_from(p, first), p->arena);
+    s->k = { .with = w };
+    return s;
+}
+
+static CcStmt* parse_comptime_stmt(P* p) {
+    uint32_t first = p->i;
+    const CcToken* n1 = tk(p, 1);
+    CcStmt* s;
+    if (is_kw(p, p->i + 1, KW_IF)) {
+        CcComptimeIf ci;
+        ci.then = vec_new::[CcStmtRef](p->arena);
+        ci.els = vec_new::[CcStmtRef](p->arena);
+        adv(p); adv(p);
+        {
+            const char* lit_w = "@comptime if";
+            ci.cond = parse_paren_expr(p, lit_w);
+        }
+        ci.then.push(parse_stmt(p));
+        if (accept_kw(p, KW_ELSE)) ci.els.push(parse_stmt(p));
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        {
+            CcStmtK kk;
+            kk = { .comptime_if = ci };
+            s->k = kk;
+        }
+        return s;
+    }
+    if (is_kw(p, p->i + 1, KW_FOR)) {
+        uint32_t open;
+        CcComptimeFor cf;
+        CcForIn fi;
+        cf.bind = cc_slice_empty();
+        cf.over = NULL;
+        cf.stmts = vec_new::[CcStmtRef](p->arena);
+        adv(p); adv(p);
+        open = p->i;
+        const char* w_for = "@comptime for";
+        if (!expect_p(p, CC_P_LPAREN, w_for)) {
+            s = cc__stmt_blank(span_from(p, first), p->arena);
+            s->k = { .comptime_for = cf };
+            return s;
+        }
+        if (!for_in_ahead(p, p->i)) {
+            const char* at_comptime = "@comptime";
+            CCString m = @string(`${at_comptime} for needs a for-in header: ${at_comptime} for (m in seq)`, p->arena);
+            err_here(p, m);
+        }
+        for_in_blank(&fi, p->arena);
+        parse_for_in_header(p, &fi, open);
+        cf.bind = fi.bind;
+        if (fi.iterables.len()) cf.over = *fi.iterables.get_ptr(0);
+        if (fi.bind2.len || fi.iterables.len() > 1 || fi.by_ref) {
+            const char* at_comptime = "@comptime";
+            CCString m = @string(`${at_comptime} for takes one binder over one sequence: ${at_comptime} for (m in seq)`, p->arena);
+            err_at(p, first, m);
+        }
+        scope_push(p->syms);
+        declare_for_in_binders(p, &fi);
+        if (at_p(p, CC_P_LBRACE)) {
+            const char* lit_w = "@comptime for";
+            parse_body_into(p, &cf.stmts, lit_w);
+        }
+        else cf.stmts.push(parse_stmt(p));
+        scope_pop(p->syms);
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .comptime_for = cf };
+        return s;
+    }
+    if (tok_is_p(n1, CC_P_LBRACE)) {
+        CcBlock b;
+        b.stmts = vec_new::[CcStmtRef](p->arena);
+        adv(p);
+        {
+            const char* lit_w = "@comptime";
+            parse_body_into(p, &b.stmts, lit_w);
+        }
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        {
+            CcStmtK kk;
+            kk = { .comptime_block = b };
+            s->k = kk;
+        }
+        return s;
+    }
+    if (tok_is_p(n1, CC_P_LPAREN)) {
+        /* @comptime(expr) as an expression statement */
+        CcExpr* e = parse_expr(p);
+        end_stmt(p, "the expression statement", first);
+        return cc_stmt_expr(e, span_from(p, first), p->arena);
+    }
+    /* `@comptime stmt`: a single comptime statement */
+    {
+        CcBlock b;
+        b.stmts = vec_new::[CcStmtRef](p->arena);
+        adv(p);
+        b.stmts.push(parse_stmt(p));
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        {
+            CcStmtK kk;
+            kk = { .comptime_block = b };
+            s->k = kk;
+        }
+        return s;
+    }
+}
+
+static CcStmt* parse_at_stmt(P* p) {
+    uint32_t first = p->i;
+    const CcToken* t = &p->t[p->i];
+    CcStmt* s;
+    if (at_word(p, "defer")) return parse_defer(p);
+    if (at_word(p, "cancel_defer")) {
+        CcCancelDefer cd;
+        cd.name = cc_slice_empty();
+        adv(p);
+        if (at_ident(p)) { cd.name = tok_name(p, p->i); adv(p); }
+        else {
+            const char* lit_w = "the @defer name after @cancel_defer";
+            err_expected(p, lit_w);
+        }
+        {
+            const char* lit_w = "@cancel_defer";
+            end_stmt(p, lit_w, first);
+        }
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .cancel_defer = cd };
+        return s;
+    }
+    if (at_word(p, "errhandler") && tok_is_p(tk(p, 1), CC_P_LPAREN) && tk(p, 2)->kind == CC_TK_IDENT &&
+        tok_is_p(tk(p, 3), CC_P_RPAREN) && tok_is_p(tk(p, 4), CC_P_SEMI)) {
+        /* legacy `@errhandler(e);`: forward e to the handler, like `@err(e);` */
+        CcExpr* e;
+        adv(p);
+        const char* lit_w = "@errhandler(e)";
+        e = parse_paren_expr(p, lit_w);
+        {
+            const char* lit_w = "@errhandler(e)";
+            end_stmt(p, lit_w, first);
+        }
+        return mk_err_fwd(p, e, first);
+    }
+    if (at_word(p, "errhandler")) return parse_errhandler(p);
+    if (at_word(p, "err")) {
+        CcExpr* e;
+        adv(p);
+        const char* lit_w = "@err(e)";
+        e = parse_paren_expr(p, lit_w);
+        {
+            const char* lit_w = "@err(e)";
+            end_stmt(p, lit_w, first);
+        }
+        return mk_err_fwd(p, e, first);
+    }
+    if (at_word(p, "parallel")) return parse_parallel(p);
+    if (at_word(p, "serial")) {
+        CcBlock b;
+        {
+            const char* at_serial = "@serial";
+            const char* at_parallel = "@" "parallel";
+            CCString m = @string(`'${at_serial}' is an arm of ${at_parallel} { ... } and cannot stand alone`, p->arena);
+            err_here(p, m);
+        }
+        b.stmts = vec_new::[CcStmtRef](p->arena);
+        adv(p);
+        {
+            const char* lit_w = "@serial";
+            parse_body_into(p, &b.stmts, lit_w);
+        }
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .serial = b };
+        return s;
+    }
+    if (at_word(p, "stage")) {
+        CcExprList xs = vec_new::[CcExprRef](p->arena);
+        CcStage st;
+        size_t k;
+        size_t n;
+        st.gate = NULL;
+        st.args = vec_new::[CcExprRef](p->arena);
+        st.stmts = vec_new::[CcStmtRef](p->arena);
+        adv(p);
+        {
+            const char* lit_w = "@stage";
+            parse_paren_list(p, &xs, lit_w);
+        }
+        n = xs.len();
+        if (n) st.gate = *xs.get_ptr(0);
+        else {
+            const char* at_stage = "@stage";
+            CCString m = @string(`${at_stage} needs a gate: ${at_stage} (gate, args...) { ... }`, p->arena);
+            err_at(p, first, m);
+        }
+        for (k = 1; k < n; k++) {
+            CcExpr* xk = *xs.get_ptr(k);
+            st.args.push(xk);
+        }
+        {
+            const char* lit_w = "@stage";
+            parse_body_into(p, &st.stmts, lit_w);
+        }
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .stage = st };
+        return s;
+    }
+    if (at_word(p, "with_deadline")) {
+        CcWithDeadline wd;
+        wd.as = cc_slice_empty();
+        wd.stmts = vec_new::[CcStmtRef](p->arena);
+        adv(p);
+        {
+            const char* lit_w = "@with_deadline";
+            wd.deadline = parse_paren_expr(p, lit_w);
+        }
+        scope_push(p->syms);
+        if (accept_kw(p, KW_AS)) {
+            if (at_ident(p)) { wd.as = tok_name(p, p->i); declare_var(p, wd.as); adv(p); }
+            else {
+                const char* lit_w = "the handle name after 'as' in @with_deadline";
+                err_expected(p, lit_w);
+            }
+        }
+        {
+            const char* lit_w = "@with_deadline";
+            parse_body_into(p, &wd.stmts, lit_w);
+        }
+        scope_pop(p->syms);
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .with_deadline = wd };
+        return s;
+    }
+    if (at_word(p, "with")) return parse_with(p);
+    if (at_word(p, "closing")) {
+        CcClosing cl;
+        cl.channels = vec_new::[CcExprRef](p->arena);
+        cl.stmts = vec_new::[CcStmtRef](p->arena);
+        cl.spawn = NULL;
+        adv(p);
+        {
+            const char* lit_w = "@closing";
+            parse_paren_list(p, &cl.channels, lit_w);
+        }
+        if (at_p(p, CC_P_LBRACE)) {
+            const char* lit_w = "@closing";
+            parse_body_into(p, &cl.stmts, lit_w);
+        }
+        else {
+            cl.spawn = parse_expr(p);
+            {
+                const char* lit_w = "@closing(tx) spawn(...)";
+                end_stmt(p, lit_w, first);
+            }
+        }
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .closing = cl };
+        return s;
+    }
+    if (at_word(p, "spawn") || at_word(p, "nursery")) {
+        CcSpawnBlock sb;
+        sb.stmts = vec_new::[CcStmtRef](p->arena);
+        sb.is_nursery = at_word(p, "nursery");
+        sb.closing = vec_new::[CcExprRef](p->arena);
+        adv(p);
+        if (accept_kw(p, KW_CLOSING)) parse_paren_list(p, &sb.closing, "closing");
+        parse_body_into(p, &sb.stmts, sb.is_nursery ? "nursery" : "spawn");
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .spawn_block = sb };
+        return s;
+    }
+    if ((at_word(p, "nonblocking") || at_word(p, "blocking") || at_word(p, "noblock")) && tok_is_p(tk(p, 1), CC_P_LBRACE)) {
+        CcModeBlock mb;
+        const char* what = at_word(p, "blocking") ? "blocking" : at_word(p, "noblock") ? "noblock" : "nonblocking";
+        mb.mode = slice_skip(t->text, 1);
+        mb.stmts = vec_new::[CcStmtRef](p->arena);
+        adv(p);
+        parse_body_into(p, &mb.stmts, what);
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .mode_block = mb };
+        return s;
+    }
+    if (at_word(p, "switch")) {
+        CcSwitch sw;
+        sw.is_variant = true;
+        adv(p);
+        {
+            const char* lit_w = "@switch";
+            sw.subject = parse_paren_expr(p, lit_w);
+        }
+        sw.body = parse_stmt(p);
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .switch_ = sw };
+        return s;
+    }
+    if (at_word(p, "for")) return parse_for(p, true);
+    if (at_word(p, "comptime")) return parse_comptime_stmt(p);
+    if (at_word(p, "destroy") || at_word(p, "detach")) {
+        CCSlice word = t->text;
+        CCString m = @string(`'${word}' is only allowed after a declaration initializer`, p->arena);
+        err_here(p, m);
+        sync(p, first);
+        return mk_empty_stmt(p, span_from(p, first));
+    }
+    if (stmt_at_cc_decl_word(p)) return parse_decl_stmt(p, first);
+    if (at_word(p, "match") || at_word(p, "arena") || at_word(p, "arena_init") || at_word(p, "restricted") ||
+        at_word(p, "spawn_async") || at_word(p, "cache")) {
+        CCSlice word = t->text;
+        CCString m = @string(`'${word}' is not part of the language`, p->arena);
+        err_here(p, m);
+        sync(p, first);
+        return mk_empty_stmt(p, span_from(p, first));
+    }
+    /* expression statement starting with an @word (@await, @string, ...) */
+    if (!(at_word(p, "await") || at_word(p, "blocking") || at_word(p, "nonblocking") || at_word(p, "noblock") ||
+          at_word(p, "string") || at_word(p, "emit") || at_word(p, "slice") || at_word(p, "scratch") ||
+          at_word(p, "create") || at_word(p, "unsafe"))) {
+        CCSlice word = t->text;
+        const char* at_word = "@word";
+        CCString m = @string(`unknown ${at_word} '${word}'`, p->arena);
+        err_here(p, m);
+        sync(p, first);
+        return mk_empty_stmt(p, span_from(p, first));
+    }
+    {
+        CcExpr* e = parse_expr(p);
+        end_stmt(p, "the expression statement", first);
+        return mk_unwrap_or_expr_stmt(p, e, span_from(p, first));
+    }
+}
+
+/* ---- statements ------------------------------------------------------------------------ */
+
+static CcStmt* parse_if(P* p) {
+    uint32_t first = p->i;
+    CcIf s;
+    CcStmt* st;
+    adv(p);
+    s.cond = parse_paren_expr(p, "if");
+    s.then = parse_body_stmt(p);
+    s.els = NULL;
+    {
+        /* `#ifdef X ... else ...`: preprocessor lines between the body and its else
+         * join the then-body as a brace-less block */
+        uint32_t j = p->i;
+        while (p->t[j].kind == CC_TK_PP) j++;
+        if (j > p->i && is_kw(p, j, KW_ELSE)) {
+            CcStmt* b = s.then;
+            CcStmtList stmts;
+            if (!stmt_is_block(b) || block_has_braces(p, b)) {
+                b = cc_stmt_block(s.then ? s.then->span : span2(p->i, p->i), p->arena);
+                stmts = vec_new::[CcStmtRef](p->arena);
+                if (s.then) stmts.push(s.then);
+                s.then = b;
+            } else stmts = block_stmts(b);
+            while (p->t[p->i].kind == CC_TK_PP) stmts.push(pp_stmt(p));
+            block_set_stmts(b, stmts);
+            b->span.last = last_tok(p);
+        }
+    }
+    if (accept_kw(p, KW_ELSE)) s.els = parse_body_stmt(p);
+    st = cc__stmt_blank(span_from(p, first), p->arena);
+    st->k = { .if_ = s };
+    return st;
+}
+
+static CcStmt* parse_while_stmt(P* p) {
+    uint32_t first = p->i;
+    CcStmt* s;
+    CcWhile w;
+    adv(p);
+    w.cond = parse_paren_expr(p, "while");
+    w.body = parse_body_stmt(p);
+    s = cc__stmt_blank(span_from(p, first), p->arena);
+    s->k = { .while_ = w };
+    return s;
+}
+
+static CcStmt* parse_do_stmt(P* p) {
+    uint32_t first = p->i;
+    CcStmt* s;
+    CcWhile w;
+    adv(p);
+    w.cond = NULL;
+    w.body = parse_body_stmt(p);
+    if (!accept_kw(p, KW_WHILE)) err_expected(p, "'while' after the do body");
+    else w.cond = parse_paren_expr(p, "do-while");
+    end_stmt(p, "the do-while statement", first);
+    s = cc__stmt_blank(span_from(p, first), p->arena);
+    s->k = { .do_ = w };
+    return s;
+}
+
+static CcStmt* parse_switch_stmt(P* p) {
+    uint32_t first = p->i;
+    CcStmt* s;
+    CcSwitch sw;
+    sw.is_variant = false;
+    adv(p);
+    sw.subject = parse_paren_expr(p, "switch");
+    sw.body = parse_stmt(p);
+    s = cc__stmt_blank(span_from(p, first), p->arena);
+    s->k = { .switch_ = sw };
+    return s;
+}
+
+static CcStmt* parse_goto_stmt(P* p) {
+    uint32_t first = p->i;
+    CcStmt* s;
+    CcGoto g;
+    g.label = cc_slice_empty();
+    g.target = NULL;
+    adv(p);
+    if (at_ident(p)) { g.label = tok_name(p, p->i); adv(p); }
+    else if (at_p(p, CC_P_STAR)) g.target = parse_expr(p); /* GNU computed goto */
+    else err_expected(p, "a label after goto");
+    end_stmt(p, "goto", first);
+    s = cc__stmt_blank(span_from(p, first), p->arena);
+    s->k = { .goto_ = g };
+    return s;
+}
+
+static CcStmt* parse_asm_stmt(P* p) {
+    uint32_t first = p->i;
+    CcStmt* s;
+    CcAsm a;
+    adv(p);
+    while (at_ident(p) && kw_of(p, p->i) != KW_NONE) adv(p); /* volatile, goto, inline */
+    if (at_p(p, CC_P_LPAREN)) skip_balanced(p);
+    else err_expected(p, "'(' after asm");
+    end_stmt(p, "the asm statement", first);
+    a.tokens = span_from(p, first);
+    s = cc__stmt_blank(a.tokens, p->arena);
+    s->k = { .asm_ = a };
+    return s;
+}
+
+static CcStmt* parse_break_continue(P* p, bool is_break) {
+    uint32_t first = p->i;
+    CcStmt* s;
+    adv(p);
+    end_stmt(p, is_break ? "break" : "continue", first);
+    s = cc__stmt_blank(span_from(p, first), p->arena);
+    if (is_break) s->k = { .break_ = {} };
+    else s->k = { .continue_ = {} };
+    return s;
+}
+
+static CcStmt* parse_return_stmt(P* p) {
+    uint32_t first = p->i;
+    CcExpr* v = NULL;
+    adv(p);
+    if (!at_p(p, CC_P_SEMI)) v = parse_expr(p);
+    end_stmt(p, "return", first);
+    return cc_stmt_return(v, span_from(p, first), p->arena);
+}
+
+static CcStmt* parse_unsafe_block(P* p) {
+    uint32_t first = p->i;
+    CcBlock b;
+    CcStmt* s;
+    b.stmts = vec_new::[CcStmtRef](p->arena);
+    adv(p);
+    parse_body_into(p, &b.stmts, "unsafe");
+    s = cc__stmt_blank(span_from(p, first), p->arena);
+    s->k = { .unsafe = b };
+    return s;
+}
+
+/* A statement introduced by a C keyword; *handled false when `k` opens no
+ * statement (a declaration, or an ordinary identifier). An if-chain, not
+ * a switch: a plain switch body of a few KiB is clipped today. */
+static CcStmt* parse_keyword_stmt(P* p, Kw k, bool* handled) {
+    *handled = true;
+    if (k == KW_IF) return parse_if(p);
+    if (k == KW_WHILE) return parse_while_stmt(p);
+    if (k == KW_DO) return parse_do_stmt(p);
+    if (k == KW_FOR) return parse_for(p, false);
+    if (k == KW_SWITCH) return parse_switch_stmt(p);
+    if (k == KW_CASE || k == KW_DEFAULT) return parse_case(p);
+    if (k == KW_BREAK) return parse_break_continue(p, true);
+    if (k == KW_CONTINUE) return parse_break_continue(p, false);
+    if (k == KW_RETURN) return parse_return_stmt(p);
+    if (k == KW_GOTO) return parse_goto_stmt(p);
+    if (k == KW_ASM || k == KW_ASM2 || k == KW_ASM3) return parse_asm_stmt(p);
+    if (k == KW_UNSAFE && tok_is_p(tk(p, 1), CC_P_LBRACE)) return parse_unsafe_block(p);
+    if (k == KW_ELSE) {
+        CCString m = @string(`'else' without a matching 'if'`, p->arena);
+        err_here(p, m);
+        adv(p);
+        return parse_stmt(p);
+    }
+    *handled = false;
+    return NULL;
+}
+
+static CcStmt* parse_stmt(P* p) {
+    const CcToken* t = &p->t[p->i];
+    uint32_t first = p->i;
+    CcStmt* s;
+    p->bind_stmt = NULL;
+    if (t->kind == CC_TK_PP) return pp_stmt(p);
+    if (t->kind == CC_TK_EOF) {
+        err_expected(p, "a statement");
+        return mk_empty_stmt(p, span2(first, first));
+    }
+    if (t->kind == CC_TK_ERROR) {
+        adv(p);
+        return mk_empty_stmt(p, span2(first, first));
+    }
+    if (t->kind == CC_TK_PUNCT) {
+        if (t->punct == CC_P_SEMI) { adv(p); return mk_empty_stmt(p, span2(first, first)); }
+        if (t->punct == CC_P_LBRACE) return parse_block(p);
+    }
+    if (t->kind == CC_TK_AT_WORD) return parse_at_stmt(p);
+    if (t->kind == CC_TK_IDENT) {
+        Kw k = kw_of(p, p->i);
+        bool handled;
+        s = parse_keyword_stmt(p, k, &handled);
+        if (handled) return s;
+        if (k == KW_NONE && tok_is_p(tk(p, 1), CC_P_COLON) && !tok_is_p(tk(p, 2), CC_P_COLON)) {
+            CcLabel l;
+            Vec::[CcAttr] la = vec_new::[CcAttr](p->arena);
+            l.name = tok_name(p, p->i);
+            l.inner = NULL;
+            adv(p); adv(p);
+            parse_attrs(p, &la);
+            if (!at_p(p, CC_P_RBRACE) && !at_eof(p)) l.inner = parse_stmt(p);
+            s = cc__stmt_blank(span_from(p, first), p->arena);
+            s->k = { .label = l };
+            return s;
+        }
+    }
+    if (at_declaration_start(p)) return parse_decl_stmt(p, first);
+    if (at_ident(p) && kw_of(p, p->i) == KW_NONE && tok_is_p(tk(p, 1), CC_P_LBRACE) && !name_is_var(p, tok_name(p, p->i)) &&
+        !name_is_type(p, tok_name(p, p->i))) {
+        /* `try { ... }`: a macro statement with a body */
+        CcExprStmt es;
+        es.e = cc_expr_ident(tok_name(p, p->i), span2(first, first), p->arena);
+        adv(p);
+        es.body = parse_block(p);
+        s = cc__stmt_blank(span_from(p, first), p->arena);
+        s->k = { .expr = es };
+        return s;
+    }
+    {
+        CcExpr* e = parse_expr(p);
+        CCSlice callee;
+        bool macro_call = false;
+        if (p->bind_stmt) { s = p->bind_stmt; p->bind_stmt = NULL; s->span = span_from(p, first); return s; }
+        if (e->k.kind == CcExprK_call) macro_call = expr_ident_name(expr_callee_or_self(e), &callee);
+        if (macro_call && at_p(p, CC_P_LBRACE) && !name_is_var(p, callee)) {
+            /* `FOREACH(m, k, v) { ... }`: a macro loop with a body */
+            CcExprStmt es;
+            es.e = e;
+            es.body = parse_block(p);
+            s = cc__stmt_blank(span_from(p, first), p->arena);
+            s->k = { .expr = es };
+            return s;
+        }
+        if (macro_call && !name_is_var(p, callee) && !name_is_type(p, callee) &&
+            p->t[p->i].at_line_start && tok_is_p(&p->t[p->i - 1], CC_P_RPAREN) &&
+            (p->t[p->i].kind == CC_TK_PP || p->t[p->i].kind == CC_TK_IDENT || p->t[p->i].kind == CC_TK_AT_WORD ||
+             at_p(p, CC_P_RBRACE) || at_p(p, CC_P_STAR) || at_p(p, CC_P_AMP))) {
+            /* `MACRO(args)` alone on its line, the callee undeclared, and the next line unable to
+             * continue the expression: a macro statement without `;` (yyjson's repeatN_incr) */
+            return cc_stmt_expr(e, span_from(p, first), p->arena);
+        }
+        end_stmt(p, "the expression statement", first);
+        return mk_unwrap_or_expr_stmt(p, e, span_from(p, first));
+    }
+}
+
+/* Append the statement(s) starting here to `list`; a declaration with
+ * several declarators contributes one decl statement each. */
+static void parse_stmt_into(P* p, CcStmtList* list) {
+    uint32_t start = p->i;
+    if (p->t[p->i].kind == CC_TK_PP) {
+        list->push(pp_stmt(p));
+        return;
+    }
+    if (p->t[p->i].kind != CC_TK_AT_WORD && at_declaration_start(p)) {
+        CcDeclList dl = vec_new::[CcDeclRef](p->arena);
+        size_t k;
+        size_t n;
+        p->bind_stmt = NULL;
+        parse_declaration(p, &dl, false);
+        if (p->bind_stmt) { list->push(p->bind_stmt); p->bind_stmt = NULL; }
+        else {
+            n = dl.len();
+            for (k = 0; k < n; k++) {
+                CcDecl* dk = *dl.get_ptr(k);
+                list->push(stmt_decl_wrap(p, dk));
+            }
+        }
+    } else {
+        CcStmt* s = parse_stmt(p);
+        list->push(s);
+    }
+    if (p->i == start) sync(p, start);
+}
+
+static CcStmt* parse_block(P* p) {
+    uint32_t open = p->i;
+    CcStmt* b = cc_stmt_block(span2(open, open), p->arena);
+    CcStmtList stmts = vec_new::[CcStmtRef](p->arena);
+    if (!at_p(p, CC_P_LBRACE)) {
+        err_expected(p, "'{'");
+        return b;
+    }
+    adv(p);
+    scope_push(p->syms);
+    while (!at_p(p, CC_P_RBRACE) && !at_eof(p)) parse_stmt_into(p, &stmts);
+    scope_pop(p->syms);
+    expect_close(p, CC_P_RBRACE, "block", open);
+    block_set_stmts(b, stmts);
+    b->span = span_from(p, open);
+    return b;
+}
+
+#endif

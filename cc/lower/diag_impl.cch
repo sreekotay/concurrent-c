@@ -18,6 +18,7 @@ static CcDiag cc__diag_make(CcSeverity sev, CcLoc at, CCSlice msg) {
     return d;
 }
 
+static CcDiag CcDiag_with_len(CcDiag d, uint32_t len) { d.len = len; return d; }
 static CcDiag CcDiag_error(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_ERROR, at, msg); }
 static CcDiag CcDiag_warning(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_WARNING, at, msg); }
 static CcDiag CcDiag_note(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_NOTE, at, msg); }
@@ -144,16 +145,20 @@ static void CcDiags_print(const CcDiags* ds, FILE* out, CcSourceFn source, void*
         }
         if (source && d->at.line) {
             CCSlice text = source(d->at.path, ctx);
-            CCSlice snippet = cc__nth_line(text, d->at.line);
-            if (snippet.len) {
+            CCSlice snippet = cc__nth_line(text, d->phys_line ? d->phys_line : d->at.line);
+            /* An empty line (end of file) still gets its caret. */
+            {
                 const char* sp = (const char*)snippet.ptr;
                 cc__print_slice(out, snippet);
                 fputc('\n', out);
                 if (d->at.col) {
+                    uint32_t k;
                     /* Keep tabs so the caret lines up under the source. */
                     for (uint32_t c = 1; c < d->at.col; c++)
                         fputc(c - 1 < snippet.len && sp[c - 1] == '\t' ? '\t' : ' ', out);
-                    fputs("^\n", out);
+                    fputc('^', out);
+                    for (k = 1; k < d->len; k++) fputc('~', out);
+                    fputc('\n', out);
                 }
             }
         }

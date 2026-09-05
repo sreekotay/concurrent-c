@@ -302,9 +302,12 @@ static bool adjacent(P* p, uint32_t i) { return i + 1 < p->n && p->t[i + 1].lead
 /* The message is built by the caller with @string into p->arena. */
 static void err_at(P* p, uint32_t tok, CCString msg) {
     CcTape* tp = p->tape;
-    CcLoc loc = tp->loc(tok < p->n ? tok : p->n - 1);
-    CcDiag d = CcDiag_error(loc, msg.as_slice());
+    uint32_t i = tok < p->n ? tok : p->n - 1;
+    CcLoc loc = tp->loc(i);
+    CcDiag d = CcDiag_error(loc, cc_string_persist_slice(p->arena, &msg));
     CcDiags* ds = p->ds;
+    d.len = (uint32_t)p->t[i].text.len;
+    d.phys_line = p->t[i].line;
     ds->push(d);
 }
 
