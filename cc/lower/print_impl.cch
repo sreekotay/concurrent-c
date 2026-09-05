@@ -1606,9 +1606,8 @@ static void pr_d_var(Pr* p, const CcDecl* d, const CcVarDecl* v) {
 
 static void pr_d_func(Pr* p, const CcDecl* d, const CcFuncDecl* f, int indent) {
     bool keep_body = f->body != NULL;
-    if (keep_body && p->opts.header_mode &&
-        !((d->specs & CC_SPEC_STATIC) && (d->specs & CC_SPEC_INLINE)))
-        keep_body = false;
+    if (keep_body && p->opts.header_mode && !(d->specs & CC_SPEC_STATIC))
+        keep_body = false;   /* a non-static body belongs to the owner TU */
     pr_specs(p, d->specs, decl_spec_quals(f->type));
     pr_attrs(p, &d->attrs, false);
     pt_type(p, f->type, f->name);

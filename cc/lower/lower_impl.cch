@@ -19,6 +19,7 @@ static CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiag
     L.unit = u;
     L.opts = opts;
     L.next_temp = 0;
+    L.headers = vec_new::[CCSlice](u->arena);
     return L;
 }
 
@@ -256,7 +257,67 @@ static void lw_drop_cc_only(CcLowerer* L) {
     *decls = with;
 }
 
+/* `#include "x.cch"` names a local header: the C includes its lowered
+ * `<rel/x.h>` (relative to the repository root, under the host's include
+ * path), and the header is recorded so the tool lowers it too. Angle
+ * includes are the driver's business. */
+static void CcLowerer_includes(CcLowerer* L) {
+    CcIndex* ix = L->ix;
+    CcIncludeRefList refs;
+    size_t n;
+    size_t i;
+    CcDeclList* decls = &L->unit->decls;
+    size_t nd = decls->len();
+    if (!L->opts.repo_root.len) return;
+    refs = cc__scan_includes(ix, &L->unit->tape);
+    n = refs.len();
+    for (i = 0; i < n; i++) {
+        CcIncludeRef* r = refs.get_ptr(i);
+        CCString searched = cc_string_new();
+        CCSlice found;
+        CCSlice rel;
+        size_t k;
+        if (!r->quoted) continue;
+        if (!(r->path.len > 4 && memcmp(r->path.ptr + r->path.len - 4, ".cch", 4) == 0)) continue;
+        found = cc__resolve_include(ix, L->unit->tape.path, r, &searched);
+        if (!found.len) continue;   /* the index reported it */
+        found = cc__canonical_path(ix, found);
+        if (found.len > L->opts.repo_root.len && memcmp(found.ptr, L->opts.repo_root.ptr, L->opts.repo_root.len) == 0 &&
+            found.ptr[L->opts.repo_root.len] == '/')
+            rel = cc_slice_from_buffer((char*)found.ptr + L->opts.repo_root.len + 1, found.len - L->opts.repo_root.len - 1);
+        else {
+            CcSpan at;
+            CCString m = @string(`local header '${r->path}' resolves outside the repository root (${found}); the clean lowerer cannot place its lowered form`, L->arena);
+            at.first = r->tok;
+            at.last = r->tok;
+            lw_error(L, at, m);
+            continue;
+        }
+        for (k = 0; k < nd; k++) {
+            CcDecl* d = *decls->get_ptr(k);
+            bool hit = false;
+            @switch (d->k) {
+                case .pp(pd): hit = pd.tok == r->tok; break;
+                default: break;
+            }
+            if (hit) {
+                CCSlice stem = cc_slice_from_buffer((char*)rel.ptr, rel.len - 4);
+                CCString line = @string(`#include <${stem}.h>
+`, L->arena);
+                CcDecl* raw = lw_raw_decl(L, line, d->span);
+                *decls->get_ptr(k) = raw;
+                break;
+            }
+        }
+        {
+            Vec::[CCSlice]* hs = &L->headers;
+            hs->push(found);
+        }
+    }
+}
+
 static void CcLowerer_lower_unit(CcLowerer* L) {
+    CcLowerer_includes(L);
     CcLowerer_results(L);
     CcLowerer_cleanup(L);
     lw_drop_cc_only(L);   /* after the steps: the index reads faces off the unit's declarations */
