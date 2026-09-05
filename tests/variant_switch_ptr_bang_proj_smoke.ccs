@@ -1,0 +1,58 @@
+/* redis `db_get`: pointer `@switch` on `@variant(packed) { str: CCString;
+ * num }`, `val->str.as_slice()` in one arm, arena alloc `!>` in the other.
+ * `!>` forces a structured switch (stmt AST on body[]); safety must still
+ * dominate the projection or emit-c-only of redis_idiomatic fails. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+
+@variant(packed) RedisValue {
+    str: CCString;
+    num: int64_t;
+};
+
+typedef struct {
+    RedisValue val;
+} RedisEntry;
+
+static char[:] !>(CCError) reply_arena_alloc_slice(CCArena reply_arena, size_t n) {
+    char[:] s = reply_arena.alloc_slice_bytes(n);
+    if (n > 0 && !s.ptr)
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply encode OOM"));
+    return cc_ok(s);
+}
+
+static char[:] !>(CCError) db_get(RedisEntry* cell, CCArena reply_arena) {
+    @errhandler(CCError e) { return cc_err(e); }
+    if (!cell) return cc_ok(cc_slice_empty());
+    RedisValue* val = &cell->val;
+    @switch (val) {
+        case .str: return cc_ok(val->str.as_slice());
+        case .num: {
+            int64_t n = val->num;
+            char[:] text = @string(`${n}`);
+            char[:] bytes = reply_arena_alloc_slice(reply_arena, text.len) !>;
+            memcpy((char*)bytes.ptr, text.ptr, text.len);
+            return cc_ok(bytes);
+        }
+    }
+    return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "corrupt value cell"));
+}
+
+int main(void) {
+    CCArena arena = cc_arena_create(4096);
+    CCString hello = cc_string_from("hello", arena);
+    RedisValue vs = { .str = hello };
+    RedisValue vn = { .num = 42 };
+    RedisEntry a;
+    RedisEntry b;
+    a.val = vs;
+    b.val = vn;
+    char[:] s = db_get(&a, arena) !> { return 1; };
+    if (s.len != 5 || memcmp(s.ptr, "hello", 5) != 0) return 2;
+    char[:] text = db_get(&b, arena) !> { return 3; };
+    if (text.len != 2 || memcmp(text.ptr, "42", 2) != 0) return 4;
+    printf("ok\n");
+    return 0;
+}

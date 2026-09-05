@@ -1549,6 +1549,30 @@ static void shadow_safe_check_variant_text(ShadowSafeCtx* ctx, AstNode* st,
     }
 }
 
+/* RAW_LINE label `case .arm:` / `case .arm(bind):` / `case Name_arm:`. */
+static int shadow_safe_case_label_arm(ShadowSafeCtx* ctx, const char* root,
+                                     const char* lab, char* arm, size_t acap) {
+    const char* c;
+    const char* after;
+    const char* colon;
+    size_t tlen;
+    size_t i;
+    if (!ctx || !root || !lab || !arm || !acap) return 0;
+    if (shadow_safe_find_kw(lab, "default")) return 0;
+    c = shadow_safe_find_kw(lab, "case");
+    if (!c) return 0;
+    after = c + 4;
+    colon = strchr(after, ':');
+    tlen = colon ? (size_t)(colon - after) : strlen(after);
+    for (i = 0; i < tlen; i++) {
+        if (after[i] == '(') {
+            tlen = i;
+            break;
+        }
+    }
+    return shadow_safe_arm_from_tag(ctx, root, after, tlen, arm, acap);
+}
+
 /* Per-case domination over opaque switch body text. */
 static void shadow_safe_check_switch_variant_body(ShadowSafeCtx* ctx, AstNode* st,
                                                  const char* root,
@@ -4672,8 +4696,33 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
         if (ctx->err) return;
         shadow_safe_check_type_of_text(ctx, st, st->d);
         if (ctx->err) return;
-        /* Structured switches keep case/stmt nodes on body[]. */
-        shadow_safe_walk_list(ctx, st->body, st->nbody);
+        /* Structured switches keep case/stmt nodes on body[]. Opaque
+         * domination lives on st->d; body[] walk must re-apply the
+         * current `case .arm:` or `val->str` is an unprotected proj. */
+        if (st->nbody > 0 && shadow_safe_switch_root(st->a, root, sizeof(root))) {
+            int i;
+            int pushed = 0;
+            for (i = 0; i < st->nbody && !ctx->err; i++) {
+                AstNode* kid = st->body[i];
+                char arm[32];
+                if (kid && kid->kind == AST_RAW_LINE && kid->a && kid->a[0]) {
+                    if (pushed) {
+                        shadow_safe_dom_pop(ctx);
+                        pushed = 0;
+                    }
+                    if (shadow_safe_case_label_arm(ctx, root, kid->a, arm,
+                                                   sizeof(arm))) {
+                        shadow_safe_dom_push(ctx, root, arm);
+                        pushed = 1;
+                    }
+                    continue;
+                }
+                if (kid) shadow_safe_walk_stmt(ctx, kid);
+            }
+            if (pushed) shadow_safe_dom_pop(ctx);
+        } else {
+            shadow_safe_walk_list(ctx, st->body, st->nbody);
+        }
         break;
     }
     case AST_FOR: {
