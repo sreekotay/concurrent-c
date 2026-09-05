@@ -911,6 +911,26 @@ static inline bool cc__arena_ovf_check(CCArenaHost *arena, void *payload) {
     return false;
 }
 
+/* True when `ptr` is a payload this host minted on overflow. Walks the
+ * lists — does not peek `ptr - sizeof(header)`. That peek SIGBUS-es when
+ * `ptr` is a large mmap (create_heap_arena sized L1) whose preceding page
+ * is not mapped. Release still uses the peek: it only runs after a slab
+ * miss on a pointer the caller already treated as this arena's bytes. */
+static inline bool cc__arena_ovf_owns(const CCArenaHost *arena, const void *ptr) {
+    const CCArenaOvfHeader *h;
+    const CCArenaOvfChunk *c;
+    if (!arena || !ptr) return false;
+    for (h = arena->ovf_head; h; h = h->next) {
+        if ((const void *)(h + 1) == ptr) return true;
+    }
+    for (c = arena->ovf_chunks; c; c = c->next) {
+        const uint8_t *data = (const uint8_t *)(c + 1);
+        if ((const uint8_t *)ptr >= data && (const uint8_t *)ptr < data + c->capacity)
+            return true;
+    }
+    return false;
+}
+
 /* Caller must hold meta_lock. */
 static inline void cc__arena_ovf_push_locked(CCArenaHost *arena, CCArenaOvfHeader *h) {
     h->prev = NULL;
@@ -1458,15 +1478,15 @@ bool cc_arena_release_sized(CCArenaHost* arena, void* ptr, size_t size);
  * or NULL. Diagnostic walk without meta_lock; the caller serializes. */
 static inline CCArenaHost *cc__arena_owner_host(CCArenaHost *a, const void *ptr) {
     CCArenaHost *h;
-    /* Slabs first across the whole chain: an overflow header is looked for
-     * only once no slab on the chain holds the pointer, so a child's bytes
-     * are never peeked at as if they were an outer host's overflow. */
+    /* Slabs first across the whole chain. Overflow is a list walk, not a
+     * header peek: a heap child's host is its own malloc and is not on
+     * any parent slab; peeking before it SIGBUS-es on a large mmap. */
     for (h = a; h; h = h->active) {
         if (cc__arena_find_slab(h, ptr)) return h;
     }
     for (h = a; h; h = h->active) {
         if ((CC__ARENA_FIELD_LOAD(&h->_flags) & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) &&
-            cc__arena_ovf_check(h, (void *)(uintptr_t)ptr))
+            cc__arena_ovf_owns(h, ptr))
             return h;
     }
     return NULL;
