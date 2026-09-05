@@ -1,0 +1,1 @@
+the braced assignment is left un-lowered when the arm name belongs to two @variants; a typed local 'V1 kk = { .shared = a }; n->k = kk;' works
