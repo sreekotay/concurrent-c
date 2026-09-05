@@ -4023,6 +4023,22 @@ static inline void* cc_arena_pool_iter_next(CCArenaPoolIter* it) {
 @typehooks on * {
     .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
 };
+
+/* The atomic scalars (`cc_atomic_int`, `cc_atomic_u64`, ...): `x.load()`,
+ * `x.store(v)`, `x.fetch_add(v)`, `x.cas(&expected, desired)` and the
+ * ordered variants are the `cc_atomic_<method>(&x, ...)` operations of
+ * cc_atomic.cch, one composed name per method. */
+static inline CCSlice cc_ufcs_atomic_lower_c(CCSlice recv_type, CCSlice method, CCSlice mode,
+                                             CCSliceArray argv, CCSliceArray arg_types, CCArena arena) {
+    (void)recv_type;
+    (void)mode;
+    (void)argv;
+    (void)arg_types;
+    return cc_slice_concat2(CC_SLICE_LIT("cc_atomic_"), method, CC__ARENA_HOST(arena));
+}
+@typehooks on cc_atomic_* {
+    .ufcs = cc_ufcs_atomic_lower_c,
+};
 @typehooks on CCSliceUnique* {
     .ufcs = cc_ufcs_generic_cc_slice_family_c,
 };

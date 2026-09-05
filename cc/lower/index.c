@@ -2090,7 +2090,9 @@ static CcMethod *cc__method_new(CcIndex *ix, CcTypeInfo *info, CcName method, Cc
     m->source = source;
     m->origin = origin;
     m->sym = sym;
-    m->recv_by_ptr = by_value_hint ? 0 : cc__first_param_is_pointer(sym);
+    /* a function-like macro from a hook has no parameters to read: a hook's
+     * callee is address-style unless it said by value */
+    m->recv_by_ptr = by_value_hint ? 0 : (sym && sym->kind == CC_SYM_MACRO) ? 1 : cc__first_param_is_pointer(sym);
     m->next = info->methods;
     info->methods = m;
     return m;
