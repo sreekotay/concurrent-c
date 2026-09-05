@@ -1,0 +1,24 @@
+/* A local `Vec::[int]* xs` in one function must not change how `c.xs` is
+ * typed in another function. Names are scoped. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/vec.cch>
+#include <ccc/stdio.cch>
+
+typedef struct C { Vec::[int] xs; } C;
+
+static int total(C* c) {
+    Vec::[int]* xs = &c->xs;
+    int k = 0;
+    @for (x in *xs) { k += x; }
+    return k;
+}
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    C c;
+    c.xs = vec_new::[int](a);
+    c.xs.push(2);
+    c.xs.push(3);
+    println(@string(`${total(&c)}`, @scratch));
+    return 0;
+}

@@ -1,0 +1,35 @@
+/* `@for (x in c->xs)` where `c` is a `case .arm(c)` binding. The same loop
+ * over a function parameter lowers; the case binding must too. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/vec.cch>
+#include <ccc/stdio.cch>
+
+typedef struct Call { Vec::[int] xs; } Call;
+
+@variant V {
+    num: int;
+    call: Call*;
+};
+
+static int total(V* v) {
+    @switch (v) {
+        case .num(n): return n;
+        case .call(c): {
+            int k = 0;
+            @for (x in c->xs) { k += x; }
+            return k;
+        }
+    }
+    return -1;
+}
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    Call c;
+    c.xs = vec_new::[int](a);
+    c.xs.push(2);
+    c.xs.push(3);
+    V v = { .call = &c };
+    println(@string(`${total(&v)}`, @scratch));
+    return 0;
+}

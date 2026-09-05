@@ -1,0 +1,1 @@
+the @for is left in the emitted C ('stray @ in program') when its subject goes through a case binding; an index loop over c->xs.len() works

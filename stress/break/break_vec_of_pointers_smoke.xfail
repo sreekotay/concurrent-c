@@ -1,0 +1,1 @@
+the generic instance for a pointer element is not emitted ('unknown type name CCVec_Leafptr'); a typedef of the pointer type works, and even then the @for element is typed as an opaque value so 'p->v' is refused

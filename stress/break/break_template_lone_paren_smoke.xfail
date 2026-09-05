@@ -1,0 +1,1 @@
+the template argument scanner counts parentheses inside the backtick text, so a lone '(' or ')' leaves a stray backtick in the emitted C

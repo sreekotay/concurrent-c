@@ -1,0 +1,32 @@
+/* The receiver of `n->call.args.push(x)` is the field `args`, not the
+ * variant `n`. Type the path, not the first identifier. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/vec.cch>
+#include <ccc/stdio.cch>
+
+typedef struct Call { Vec::[int] args; } Call;
+
+@variant Node {
+    num: int;
+    call: Call;
+};
+
+static void !>(CCError) add_arg(Node* n, int x) {
+    if (n->kind == Node_call) {
+        n->call.args.push(x);
+        return cc_ok();
+    }
+    return cc_err(CC_ERR_INVALID_ARG, "not a call");
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    Node n = { .call = { .args = vec_new::[int](a) } };
+    add_arg(&n, 4) !>;
+    add_arg(&n, 5) !>;
+    int len = 0;
+    if (n.kind == Node_call) len = (int)n.call.args.len();
+    println(@string(`${len}`, @scratch));
+    return 0;
+}
