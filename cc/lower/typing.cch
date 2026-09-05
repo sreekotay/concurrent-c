@@ -207,6 +207,29 @@ static CcType* field_of_record(CcRecordType st, CCSlice field) {
     return NULL;
 }
 
+static CcType* field_type(Walker* w, CcType* recv, CCSlice field);
+
+/* The C-member-first rule: `x.m()` is a plain C call when `m` is a field of
+ * function or function-pointer type; a data field named like a method
+ * (Vec's `len`) does not hide the method. */
+static bool field_is_callable(Walker* w, CcType* recv, CCSlice field) {
+    CcType* ft = field_type(w, recv, field);
+    CcType* t;
+    if (!ft) return false;
+    t = peel(unalias_local(w, peel(ft)));
+    if (!t) return false;
+    if (t->k.kind == CcTypeK_func) return true;
+    if (t->k.kind == CcTypeK_pointer) {
+        CcPointerType pt;
+        @switch (t->k) {
+            case .pointer(x): pt = x; break;
+            default: return false;
+        }
+        return pt.pointee && peel(pt.pointee)->k.kind == CcTypeK_func;
+    }
+    return false;
+}
+
 static CcType* field_type(Walker* w, CcType* recv, CCSlice field) {
     CcRecordType st;
     if (!struct_of_type(w, unalias_local(w, peel(recv)), 0, &st)) return NULL;
@@ -347,7 +370,7 @@ static CcType* type_of_call(Walker* w, CcCall cl) {
         CCSlice reason;
         CcMethod* m;
         if (!rt) return NULL;
-        if (field_type(w, rt, nm)) return NULL;
+        if (field_is_callable(w, rt, nm)) return NULL;
         m = resolve_site(w, rt, nm, &tn, &reason);
         if (m && m->sym) return return_type_of_sym(m->sym);
     }
@@ -502,7 +525,7 @@ static void visit_ufcs(Walker* w, CcExpr* e, CcUfcs uf) {
     }
     rt = type_of_expr(w, uf.recv);
     /* the C-member-first rule: `x.cb()` where `cb` is a field is a C call */
-    if (rt && field_type(w, rt, uf.method)) return;
+    if (rt && field_is_callable(w, rt, uf.method)) return;
     if (rt) m = resolve_site(w, rt, uf.method, &tn, &reason);
     if (w->on_ufcs) w->on_ufcs(w, e, uf, rt, m, tn, reason);
 }
@@ -512,7 +535,7 @@ static void visit_ufcs(Walker* w, CcExpr* e, CcUfcs uf) {
 static void visit_ufcs_maybe_field(Walker* w, CcExpr* e, CcUfcs uf) {
     if (uf.arrow && uf.recv && uf.method.len) {
         CcType* rt = type_of_expr(w, uf.recv);
-        if (rt && field_type(w, rt, uf.method)) return;
+        if (rt && field_is_callable(w, rt, uf.method)) return;
     }
     visit_ufcs(w, e, uf);
 }

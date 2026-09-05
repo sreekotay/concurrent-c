@@ -1244,6 +1244,11 @@ static CCSlice cc__template_instance(CcIndex* ix, const char* text, size_t len, 
                 int n = atoi(inner + 4);
                 if (n >= 0 && (size_t)n < nargs) { CCSlice an = *args->get_ptr((size_t)n); sb.push_slice(an, ix->arena); }
                 else sb.push_buffer(inner, (uint32_t)inner_len, ix->arena);
+            } else if (inner_len > 12 && memcmp(inner, "arg_mangled(", 12) == 0) {
+                /* the identifier-safe spelling of a type argument */
+                int n = atoi(inner + 12);
+                if (n >= 0 && (size_t)n < nargs) { CCSlice an = *args->get_ptr((size_t)n); sb.push_slice(cc__mangle(ix, an), ix->arena); }
+                else sb.push_buffer(inner, (uint32_t)inner_len, ix->arena);
             } else if (inner_len > 16 && memcmp(inner, "type_args.items[", 16) == 0) {
                 int n = atoi(inner + 16);
                 if (n >= 0 && (size_t)n < nargs) { CCSlice an2 = *args->get_ptr((size_t)n); sb.push_slice(an2, ix->arena); }

@@ -45,6 +45,29 @@ static void gn_note(GStep* st, CcTypeInfo* info, int depth) {
     st->order.push(info->name);
 }
 
+/* Does the instance's constructor return a pointer to it? `cc__<name>_new`
+ * (the factory's wrapper) or `<name>_init` (the declaration macro's). */
+static bool gn_instance_is_pointer(CcLowerer* L, CCSlice name) {
+    CcIndex* ix = L->ix;
+    const char* suffixes[2];
+    const char* prefixes[2];
+    int i;
+    suffixes[0] = "_new"; prefixes[0] = "cc__";
+    suffixes[1] = "_init"; prefixes[1] = "";
+    for (i = 0; i < 2; i++) {
+        CCString nm = @string(`${prefixes[i]}${name}${suffixes[i]}`, L->arena);
+        CCSlice fname = lw_keep(L, &nm);
+        CcSym* sym = ix->sym(fname) ?> NULL;
+        while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+        if (!sym || !sym->type) continue;
+        @switch (sym->type->k) {
+            case .func(ft): return ft.ret && ft.ret->k.kind == CcTypeK_pointer;
+            default: break;
+        }
+    }
+    return false;
+}
+
 static bool gn_type_visit(CcType* t, void* env) {
     GStep* st = (GStep*)env;
     CcIndex* ix = st->L->ix;
@@ -61,7 +84,16 @@ static bool gn_type_visit(CcType* t, void* env) {
         gn_note(st, info, 0);
         memset(&nt, 0, sizeof(nt));
         nt.name = name;
-        t->k = { .named = nt };
+        if (gn_instance_is_pointer(st->L, name)) {
+            /* a family whose constructor returns `Instance*` (Map, ArrayMap):
+             * the spelled type is the pointer */
+            CcType* base = cc_type_named(name, t->span, st->L->arena);
+            CcPointerType pt;
+            pt.pointee = base;
+            t->k = { .pointer = pt };
+        } else {
+            t->k = { .named = nt };
+        }
     }
     return false;
 }
@@ -213,6 +245,7 @@ static CCSlice gn_computed_slot(CcLowerer* L, const CcToken* t, CcSlotBindList* 
             while (inner_len && (inner[inner_len - 1] == ' ' || inner[inner_len - 1] == '\t')) inner_len--;
             if (!(inner_len == 7 && memcmp(inner, "mangled", 7) == 0) &&
                 !(inner_len > 4 && memcmp(inner, "arg(", 4) == 0) &&
+                !(inner_len > 12 && memcmp(inner, "arg_mangled(", 12) == 0) &&
                 !(inner_len > 16 && memcmp(inner, "type_args.items[", 16) == 0)) {
                 cc__bind_lookup(binds, inner, inner_len, args, &found);
                 if (!found) return cc_slice_from_buffer((char*)inner, inner_len);

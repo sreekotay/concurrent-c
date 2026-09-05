@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <ccc/cc_arena.cch>
+#include <ccc/std/map_forward.cch>   /* the key hash / equality table */
 
 /* Sugar: ArrayMap::[K,V] / array_map_new::[K,V] / array_map_new_count::[K,V]. */
 #ifdef __CC_ARRAY_MAP
@@ -608,58 +609,8 @@ static inline CCArrayMapCore *cc_array_map_core_init_count(CCArena arena,
 #include <string.h>
 #endif
 CC_GENERIC_FACTORY(ArrayMap, 2) {
-    char k[80], v[80], hash[96], eq[96], fwd[256];
-    char newfn[96], newcfn[96], compact[80];
-    size_t kn = arg(0).len < sizeof(k) - 1 ? arg(0).len : sizeof(k) - 1;
-    size_t vn = arg(1).len < sizeof(v) - 1 ? arg(1).len : sizeof(v) - 1;
-    int user_key = 0;
-    memcpy(k, arg(0).ptr, kn);
-    k[kn] = 0;
-    memcpy(v, arg(1).ptr, vn);
-    v[vn] = 0;
-    fwd[0] = 0;
-    compact[0] = 0;
-    if (mangled.len > 9 && memcmp(mangled.ptr, "ArrayMap_", 9) == 0) {
-        size_t cl = mangled.len - 9;
-        if (cl >= sizeof(compact)) cl = sizeof(compact) - 1;
-        memcpy(compact, mangled.ptr + 9, cl);
-        compact[cl] = 0;
-    }
-    snprintf(newfn, sizeof(newfn), "array_map_new_%s", compact);
-    snprintf(newcfn, sizeof(newcfn), "array_map_new_count_%s", compact);
-    if (strcmp(k, "int") == 0) {
-        snprintf(hash, sizeof(hash), "cc_map_hash_i32");
-        snprintf(eq, sizeof(eq), "cc_map_eq_i32");
-    } else if (strcmp(k, "CCSliceHdr") == 0) {
-        snprintf(hash, sizeof(hash), "cc_map_hash_slice_hdr");
-        snprintf(eq, sizeof(eq), "cc_map_eq_slice_hdr");
-    } else if (strcmp(k, "CCSlicePacked") == 0) {
-        snprintf(hash, sizeof(hash), "cc_map_hash_slice_packed");
-        snprintf(eq, sizeof(eq), "cc_map_eq_slice_packed");
-    } else if (strcmp(k, "CCSlice") == 0 || strcmp(k, "charslice") == 0) {
-        snprintf(hash, sizeof(hash), "cc_map_hash_slice");
-        snprintf(eq, sizeof(eq), "cc_map_eq_slice");
-    } else if (strstr(k, "slice") != NULL || strstr(k, "Slice") != NULL) {
-        snprintf(hash, sizeof(hash), "cc_map_hash_slice");
-        snprintf(eq, sizeof(eq), "cc_map_eq_slice");
-    } else if (strstr(k, "64") != NULL) {
-        snprintf(hash, sizeof(hash), "cc_map_hash_u64");
-        snprintf(eq, sizeof(eq), "cc_map_eq_u64");
-    } else if (strcmp(k, "size_t") == 0 || strcmp(k, "ptrdiff_t") == 0 ||
-               strcmp(k, "long") == 0 || strcmp(k, "long_long") == 0 ||
-               strcmp(k, "unsigned_long") == 0 ||
-               strcmp(k, "unsigned_long_long") == 0) {
-        snprintf(hash, sizeof(hash), "cc_map_hash_u64");
-        snprintf(eq, sizeof(eq), "cc_map_eq_u64");
-    } else {
-        snprintf(hash, sizeof(hash), "cc_map_key_hash_%s", k);
-        snprintf(eq, sizeof(eq), "cc_map_key_eq_%s", k);
-        user_key = 1;
-    }
-    if (user_key)
-        snprintf(fwd, sizeof(fwd),
-                 "static size_t %s(%s);\nstatic int %s(%s, %s);\n",
-                 hash, k, eq, k, k);
+    /* A pure template: the key's hash and equality come from the table in
+     * map_forward.cch, or are declared for the user to define. */
     return @emit(`
 #ifdef CC_FRAGMENT_VALIDATE
 typedef struct ${mangled}_chk { char _; } ${mangled}_chk;
@@ -667,20 +618,28 @@ static inline ${mangled}_chk* ${mangled}_chk_p(void *a) {
     (void)a; return (${mangled}_chk*)0;
 }
 #else
-${fwd}
-CC_ARRAY_MAP_DECL(${k}, ${v}, ${mangled}, ${hash}, ${eq})
-static inline ${mangled}* cc__${newfn}(CCArena __a) {
+#ifdef CC_MAP_HASH_${arg_mangled(0)}
+#define ${mangled}_key_hash CC_MAP_HASH_${arg_mangled(0)}
+#define ${mangled}_key_eq CC_MAP_EQ_${arg_mangled(0)}
+#else
+static size_t cc_map_key_hash_${arg_mangled(0)}(${arg(0)});
+static int cc_map_key_eq_${arg_mangled(0)}(${arg(0)}, ${arg(0)});
+#define ${mangled}_key_hash cc_map_key_hash_${arg_mangled(0)}
+#define ${mangled}_key_eq cc_map_key_eq_${arg_mangled(0)}
+#endif
+CC_ARRAY_MAP_DECL(${arg(0)}, ${arg(1)}, ${mangled}, ${mangled}_key_hash, ${mangled}_key_eq)
+static inline ${mangled}* cc__array_map_new_${arg_mangled(0)}_${arg_mangled(1)}(CCArena __a) {
     return ${mangled}_init(__a);
 }
-#define ${newfn}(ar) cc__${newfn}(CC__ARENA_HANDLE(ar))
+#define array_map_new_${arg_mangled(0)}_${arg_mangled(1)}(ar) cc__array_map_new_${arg_mangled(0)}_${arg_mangled(1)}(CC__ARENA_HANDLE(ar))
 static inline ${mangled}* cc__${mangled}_new(CCArena __a) {
     return ${mangled}_init(__a);
 }
 #define ${mangled}_new(ar) cc__${mangled}_new(CC__ARENA_HANDLE(ar))
-static inline ${mangled}* cc__${newcfn}(CCArena __a, size_t __n) {
+static inline ${mangled}* cc__array_map_new_count_${arg_mangled(0)}_${arg_mangled(1)}(CCArena __a, size_t __n) {
     return ${mangled}_init_count(__a, __n);
 }
-#define ${newcfn}(ar, n) cc__${newcfn}(CC__ARENA_HANDLE(ar), (n))
+#define array_map_new_count_${arg_mangled(0)}_${arg_mangled(1)}(ar, n) cc__array_map_new_count_${arg_mangled(0)}_${arg_mangled(1)}(CC__ARENA_HANDLE(ar), (n))
 #endif
 `, arena);
 }
