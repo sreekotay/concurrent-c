@@ -207,6 +207,7 @@ static CCString lw_spell_expr(CcLowerer* L, const CcExpr* e) {
 
 /* ---- the pipeline ----------------------------------------------------- */
 
+#include "lower_ufcs.cch"
 #include "lower_results.cch"
 #include "lower_cleanup.cch"
 
@@ -318,6 +319,7 @@ static void CcLowerer_includes(CcLowerer* L) {
 
 static void CcLowerer_lower_unit(CcLowerer* L) {
     CcLowerer_includes(L);
+    CcLowerer_ufcs(L);      /* before Results: an unwrap needs the plain call to type its Result */
     CcLowerer_results(L);
     CcLowerer_cleanup(L);
     lw_drop_cc_only(L);   /* after the steps: the index reads faces off the unit's declarations */

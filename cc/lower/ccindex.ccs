@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "typing.cch"
 
 #define SL(s) (int)(s).len, (const char*)(s).ptr
 
@@ -36,10 +37,6 @@ typedef struct Session {
 } Session;
 
 static CcNameList g_include_dirs;
-
-static CCSlice cstr_slice(const char* s) { return cc_slice_from_buffer((char*)s, strlen(s)); }
-
-static bool slice_eq(CCSlice a, CCSlice b) { return a.len == b.len && (a.len == 0 || memcmp(a.ptr, b.ptr, a.len) == 0); }
 
 static CCSlice read_whole_file(const char* path, CCArena a, bool* ok) {
     FILE* fp = fopen(path, "rb");
@@ -126,12 +123,6 @@ static CCSlice unit_label(const CcUnit* u) {
 }
 
 /* The symbol of any kind with this name, or NULL. */
-static CcSym* sym_any(CcIndex* ix, CCSlice name) {
-    CcSym* !>(CcDiag) r = ix->sym(name);
-    if (r.is_ok()) return r.value();
-    return NULL;
-}
-
 /* ---- --dump ------------------------------------------------------------ */
 
 /* "ret(p1, p2, ...)" for a function symbol. */
@@ -297,8 +288,6 @@ static void dump_index(Session* s) {
 }
 
 /* ---- receiver typing for UFCS sites: typing.cch ------------------------ */
-
-#include "typing.cch"
 
 typedef struct Site {
     CCSlice type;       /* canonical receiver type; empty when unknown */
