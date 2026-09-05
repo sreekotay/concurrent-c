@@ -1,0 +1,96 @@
+/* Lexer: bytes → tokens with byte-exact trivia.
+ *
+ * Every token carries the text it was lexed from and the trivia (spaces,
+ * newlines, comments) before it, as slices of the source, so the token
+ * stream reproduces the file byte for byte. Positions are physical (line
+ * and column in the file as read) plus the `#line`-rebased logical line
+ * the diagnostics use.
+ *
+ * Lifetimes: a `CcTape` and every slice in it live in the arena `cc_lex`
+ * is given; the source text must outlive the tape (it is not copied). */
+#ifndef CC_LOWER_LEX_CCH
+#define CC_LOWER_LEX_CCH
+#include "diag.cch"
+
+typedef enum CcTokKind {
+    CC_TK_EOF,
+    CC_TK_IDENT,     /* identifier or keyword: keywords are identifiers to the lexer */
+    CC_TK_AT_WORD,   /* @parallel, @string, @scratch ... text includes the '@' */
+    CC_TK_AT,        /* a lone '@' */
+    CC_TK_NUMBER,
+    CC_TK_CHAR,
+    CC_TK_STRING,
+    CC_TK_TEMPLATE,  /* a whole backtick literal; parts are split by the parser */
+    CC_TK_PUNCT,
+    CC_TK_PP,        /* a preprocessor line, whole, including continuations */
+    CC_TK_ERROR      /* an unterminated literal or a byte the lexer cannot place */
+} CcTokKind;
+
+typedef enum CcPunct {
+    CC_P_NONE,
+    /* C */
+    CC_P_LBRACE, CC_P_RBRACE, CC_P_LPAREN, CC_P_RPAREN, CC_P_LBRACKET, CC_P_RBRACKET,
+    CC_P_SEMI, CC_P_COMMA, CC_P_DOT, CC_P_ARROW, CC_P_ELLIPSIS,
+    CC_P_PLUS, CC_P_MINUS, CC_P_STAR, CC_P_SLASH, CC_P_PERCENT,
+    CC_P_AMP, CC_P_PIPE, CC_P_CARET, CC_P_TILDE, CC_P_BANG,
+    CC_P_LT, CC_P_GT, CC_P_LE, CC_P_GE, CC_P_EQEQ, CC_P_NE,
+    CC_P_ANDAND, CC_P_OROR, CC_P_SHL, CC_P_SHR, CC_P_INC, CC_P_DEC,
+    CC_P_ASSIGN, CC_P_PLUS_ASSIGN, CC_P_MINUS_ASSIGN, CC_P_STAR_ASSIGN, CC_P_SLASH_ASSIGN,
+    CC_P_PERCENT_ASSIGN, CC_P_AMP_ASSIGN, CC_P_PIPE_ASSIGN, CC_P_CARET_ASSIGN,
+    CC_P_SHL_ASSIGN, CC_P_SHR_ASSIGN, CC_P_QUESTION, CC_P_COLON, CC_P_HASH, CC_P_HASHHASH,
+    /* Concurrent-C */
+    CC_P_UNWRAP,     /* !> */
+    CC_P_UNWRAP_OR,  /* ?> */
+    CC_P_FAT_ARROW,  /* => */
+    CC_P_COLONCOLON, /* :: */
+    CC_P_DOTDOT,     /* .. */
+    CC_P_BACKTICK,   /* only inside a template part boundary */
+    CC_P_DOLLAR
+} CcPunct;
+
+typedef struct CcToken {
+    CcTokKind kind;
+    CcPunct punct;          /* when kind == CC_TK_PUNCT */
+    CCSlice text;           /* the token's bytes in the source */
+    CCSlice lead;           /* trivia before it: whitespace and comments, byte-exact */
+    uint32_t line;          /* physical line, 1-based */
+    uint32_t col;           /* physical column, 1-based, in bytes */
+    bool at_line_start;     /* only trivia precedes it on its line */
+    bool after_space;       /* lead is non-empty */
+} CcToken;
+
+/* tok.is(p), tok.is_ident("static"), tok.is_at("@parallel") */
+bool CcToken_is(const CcToken* t, CcPunct p);
+bool CcToken_is_ident(const CcToken* t, const char* word);
+bool CcToken_is_at(const CcToken* t, const char* word);
+
+/* A `#line N "path"` seen in the input, rebasing logical positions from
+ * the physical line after it. */
+typedef struct CcLineMark {
+    uint32_t phys_line;     /* the line after the directive */
+    uint32_t logical_line;
+    CCSlice path;           /* empty: unchanged */
+} CcLineMark;
+
+typedef struct CcTape {
+    CCSlice path;           /* as given: the spelling diagnostics use */
+    CCSlice src;            /* the whole file; every token slice points into it */
+    Vec::[CcToken] toks;    /* ends with one CC_TK_EOF whose lead is the trailing trivia */
+    Vec::[CcLineMark] marks;
+    uint32_t n_errors;      /* CC_TK_ERROR tokens; each also reported to the sink */
+} CcTape;
+
+/* Lex `src`. Every unplaceable byte is a CC_TK_ERROR token and a
+ * diagnostic on `ds`; lexing continues so one file reports every error. */
+CcTape cc_lex(CCSlice path, CCSlice src, CcDiags* ds, CCArena a);
+
+/* tape.loc(i): user coordinates of token i, through the #line marks. */
+CcLoc CcTape_loc(const CcTape* t, uint32_t i);
+/* tape.line_text(phys_line): the physical line, for caret snippets. */
+CCSlice CcTape_line_text(const CcTape* t, uint32_t phys_line);
+/* tape.at(i): the token; i past the end is the EOF token. */
+const CcToken* CcTape_at(const CcTape* t, uint32_t i);
+
+@typeview Read on CcTape { r: *; };
+
+#endif

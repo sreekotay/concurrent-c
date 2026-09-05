@@ -1,0 +1,62 @@
+/* Lowering: a unit with Concurrent-C nodes → the same unit with C nodes.
+ *
+ * One step per construct family, each rewriting nodes in place. Every node
+ * a step creates copies the span of the node it replaces, so the printer
+ * pins the generated lines to the user's line. Steps consult the index for
+ * every fact about a name; none carries a table of names. The exact C
+ * each construct produces is written down in LOWERING.md.
+ *
+ * Steps after an erroring step still run so a file reports every error it
+ * has; the driver refuses to print C when the sink has errors. */
+#ifndef CC_LOWER_LOWER_CCH
+#define CC_LOWER_LOWER_CCH
+#include "index.cch"
+
+typedef struct CcLowerOpts {
+    bool line_directives;       /* #pragma(@linenumbers) */
+    bool parallel_off;          /* #pragma(@parallel) off */
+    bool per_tu;                /* #pragma(@per_tu) */
+    CCSlice unit_path;          /* spelling in cc_rt_diag_record_unwrap_site(path, "line") */
+} CcLowerOpts;
+
+/* An active @errhandler, @defer or scratch arena while a function is lowered. */
+typedef struct CcHandler { CcStmt* stmt; CcTypeInfo* err; uint32_t id; } CcHandler;   /* __cc_eh_<id> */
+typedef struct CcDeferEntry { CcStmt* stmt; uint32_t depth; } CcDeferEntry;
+
+/* The function being lowered: the enclosing Result type for inferred
+ * cc_ok/cc_err, the handler stack, the defer scopes, the scratch arena. */
+typedef struct CcFnCtx {
+    CcDecl* fn;
+    CcTypeInfo* ret_result;     /* NULL when the function does not return a Result */
+    Vec::[CcHandler] handlers;  /* innermost last */
+    Vec::[CcDeferEntry] defers; /* innermost last */
+    bool uses_scratch;          /* declare __cc_str_scratch */
+    uint32_t scratch_bytes;     /* max @scratch(N), default 1024 */
+} CcFnCtx;
+
+typedef struct CcLowerer {
+    CCArena arena;              /* the unit's arena: generated nodes live with the unit */
+    CcDiags* ds;
+    CcIndex* ix;
+    CcUnit* unit;
+    CcLowerOpts opts;
+    uint32_t next_temp;         /* __cc_r_N, __cc_eh_N: one counter per unit */
+} CcLowerer;
+
+CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds);
+
+/* L.lower_unit(): the whole pipeline, in order. Each step is callable alone. */
+void CcLowerer_lower_unit(CcLowerer* L);
+void CcLowerer_results(CcLowerer* L);      /* Result types, cc_ok/cc_err, !> ?> forms, @errhandler, @err, @destroy, @defer */
+void CcLowerer_ufcs(CcLowerer* L);         /* x.m(), Type.fn(), generics, @typehooks, @variant, @typeview */
+void CcLowerer_strings(CcLowerer* L);      /* @string templates, @scratch, @slice, slices */
+void CcLowerer_concurrency(CcLowerer* L);  /* closures, spawn, channels, @parallel, deadlines, @closing */
+void CcLowerer_async(CcLowerer* L);        /* @async / @await */
+void CcLowerer_comptime(CcLowerer* L);     /* @comptime seam, @grammar, factories */
+
+/* Helpers shared by the steps. */
+CCSlice CcLowerer_temp(CcLowerer* L, CCSlice prefix);                    /* fresh "__cc_<prefix>_N" */
+CcExpr* CcLowerer_call(CcLowerer* L, CcSpan span, CCSlice fn);          /* a call node with an ident callee; push args after */
+CcStmt* CcLowerer_block(CcLowerer* L, CcSpan span);
+
+#endif

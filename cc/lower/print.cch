@@ -1,0 +1,51 @@
+/* Printer: CcUnit → C text with `#line` at every change, plus a source map.
+ *
+ * Identity mode replays every token with its trivia and must reproduce the
+ * input byte for byte (the M1 gate). Lowered mode prints nodes; wherever
+ * the next line's user line differs from the one implied by the previous
+ * line, a `#line N "path"` is emitted first, and every emitted line is
+ * recorded as (emit line → user path, line, column delta) so host
+ * diagnostics map back. Long constructs print one operand per line; there
+ * are no one-line statement expressions.
+ *
+ * Lifetimes: the product and the map live in the arena the caller passes,
+ * which must outlive the host compile that reads them. */
+#ifndef CC_LOWER_PRINT_CCH
+#define CC_LOWER_PRINT_CCH
+#include "index.cch"
+
+typedef struct CcSrcMapEntry {
+    uint32_t emit_line;
+    CCSlice path;
+    uint32_t line;
+    int32_t col_delta;          /* user col = emit col + col_delta on that line */
+} CcSrcMapEntry;
+
+typedef struct CcSrcMap {
+    Vec::[CcSrcMapEntry] entries;   /* ascending emit_line */
+} CcSrcMap;
+/* map.user_loc(emit_line, emit_col) */
+CcLoc CcSrcMap_user_loc(const CcSrcMap* m, uint32_t emit_line, uint32_t emit_col);
+
+typedef struct CcPrintOpts {
+    bool identity;              /* replay tokens verbatim */
+    bool line_directives;       /* honour #pragma(@linenumbers): off drops #line, keeps the map */
+    CCSlice path;               /* spelling for #line: what the host compiler can open */
+    bool header_mode;           /* printing a lowered .cch as .h */
+} CcPrintOpts;
+
+typedef struct CcProduct {
+    CCString text;
+    CcSrcMap map;
+} CcProduct;
+
+/* Print the unit. Identity mode fails (with the first token it could not
+ * place) rather than emitting a byte it did not read. */
+CcProduct !>(CcDiag) cc_print_unit(const CcUnit* u, const CcIndex* ix, CcPrintOpts opts, CCArena a);
+
+/* Pieces, for tests and for lowerings that need a spelling: t.spell(a). */
+CCString CcType_spell(const CcType* t, CCSlice declarator, CCArena a);    /* "int (*name)(void)" */
+CCString CcExpr_spell(const CcExpr* e, CCArena a);
+CCString CcStmt_spell(const CcStmt* s, CCArena a);
+
+#endif
