@@ -1116,7 +1116,8 @@ static CcType *cc__unmangle_arg(CcIndex *ix, const char *text, int depth) {
         CcType *t = cc_type_new(ix->arena, CC_T_NAMED, sp);
         const char *sp2 = cc_arena_strdup(ix->arena, text);
         char *q;
-        if (!cc__sym_find_kind(ix, text, CC_SYM_TYPE))
+        /* only a multi-word primitive spelling (`long_long`) has `_` for a space */
+        if (!cc__sym_find_kind(ix, text, CC_SYM_TYPE) && !(n > 2 && strcmp(text + n - 2, "_t") == 0))
             for (q = (char *)sp2; *q; q++) if (*q == '_') *q = ' ';
         t->name = cc__in(ix, cc__canon_primitive(ix, sp2));
         return t;
