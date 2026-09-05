@@ -1,0 +1,17 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+/* Inside a @switch case, `a.label` on an ordinary struct is rewritten as a
+ * projection of the subject variant when `label` is one of its arms
+ * ("'Arm' has no member named 'u'"). Outside the switch it is fine. */
+@variant K { expr: int; label: int; };
+typedef struct Arm { int expr; int label; int other; } Arm;
+static int go(K* k) {
+    Arm a;
+    a.expr = 0; a.label = 0; a.other = 0;
+    @switch (k) {
+        case .expr(v): a.expr = v; break;
+        case .label(v): a.label = v; break;
+    }
+    return a.expr + a.label;
+}
+int main(void) { K k = { .label = 4 }; printf("%d\n", go(&k)); return 0; }

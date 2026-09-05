@@ -1,0 +1,1 @@
+the '@create' spelled inside a string literal initializer is taken for the constructor sugar ('created with @(...) requires explicit ownership'); splitting the literal works

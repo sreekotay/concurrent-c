@@ -1,0 +1,10 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+/* `@create` inside a string literal that initializes a declaration is
+ * taken for the constructor sugar: "created with '@(...)' requires
+ * explicit ownership". Splitting the literal ("@" "create") works. */
+int main(void) {
+    const char* w = "expected '(' after @create";
+    printf("%s\n", w);
+    return 0;
+}

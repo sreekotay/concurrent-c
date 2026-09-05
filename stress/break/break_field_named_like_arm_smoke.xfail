@@ -1,0 +1,1 @@
+inside a @switch case, 'a.label' on an ordinary struct is rewritten as a projection of the subject variant because 'label' is one of its arms ('Arm has no member named u'); the same access outside the switch is fine
