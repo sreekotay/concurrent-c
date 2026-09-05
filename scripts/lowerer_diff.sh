@@ -14,10 +14,11 @@ mkdir -p "$OUT"
 run() {  # name env-assignment
   local name=$1; shift
   env "$@" out/tools/cc_test --quick "${ARGS[@]}" > "$OUT/$name.log" 2>&1 || true
-  # one line per test: OK or FAIL (XFAIL counts as ok for the diff)
+  # one line per test: ok (OK, or XFAIL after its FAIL line) or fail
   grep -oE '^\[(OK|FAIL|XFAIL|XPASS)\] [A-Za-z0-9_./-]+' "$OUT/$name.log" \
-    | sed -E 's/^\[(OK|XFAIL)\] /ok /; s/^\[(FAIL|XPASS)\] /fail /' \
-    | awk '{ print $2, $1 }' | sort -u > "$OUT/$name.tsv"
+    | awk '{ st = ($1 == "[OK]" || $1 == "[XFAIL]") ? "ok" : "fail";
+             if (!($2 in seen) || st == "ok") r[$2] = st; seen[$2] = 1 }
+           END { for (t in r) print t, r[t] }' | sort > "$OUT/$name.tsv"
 }
 ARGS=("$@")
 run shadow CC_LOWERER=shadow
