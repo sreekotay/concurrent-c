@@ -73,6 +73,9 @@ typedef struct CCParallel {
     cc_atomic_int paused;
     cc_atomic_int cancelled;
     cc_atomic_int left;
+    /* Guards the live index (tasks / envs / nt / ncap / xtasks / xenvs).
+     * Admit may come from any fiber while another fiber is in wait. */
+    cc_atomic_int lock;
     int fail;
     int fin;
     int nt;

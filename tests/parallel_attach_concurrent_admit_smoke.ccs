@@ -1,0 +1,80 @@
+/*
+ * Admit is safe from any fiber, concurrent with wait. Many admitters grow
+ * one dest while the frame is already joining it; every body runs once.
+ * The accept shape (one arm admits while the frame waits) is the second
+ * block. Before the live-index lock either could realloc / compact the
+ * index under the other and double-join a recycled fiber.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+#define ADMITTERS 32
+#define PER_ADMITTER 128
+#define ACCEPT_CHILDREN 2000
+
+static cc_atomic_int g_ran;
+static cc_atomic_int g_accept_ran;
+static CCParallel g_h; /* the shared dest: admitted onto from many fibers */
+
+static void body(int k) {
+    (void)k;
+    cc_atomic_fetch_add(&g_ran, 1);
+}
+
+static void admitter(int base) {
+    int j;
+    for (j = 0; j < PER_ADMITTER; j++) {
+        int k = base + j;
+        @parallel(g_h) {
+            body(k);
+        }
+    }
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    {
+        g_h = @parallel spawn {
+            @serial {
+                int a;
+                @for (a in 0..ADMITTERS) {
+                    int base = a * PER_ADMITTER;
+                    @parallel(g_h) {
+                        admitter(base);
+                    }
+                }
+            }
+        } !>;
+        g_h.wait() !>;
+        int want = ADMITTERS * PER_ADMITTER;
+        int got = cc_atomic_load(&g_ran);
+        if (got != want) {
+            fprintf(stderr, "FAIL concurrent admit ran=%d want=%d\n", got, want);
+            return 1;
+        }
+    }
+
+    {
+        CCParallel h = @parallel spawn {
+            @serial {
+                int i;
+                @for (i in 0..ACCEPT_CHILDREN) {
+                    @parallel(h) {
+                        cc_atomic_fetch_add(&g_accept_ran, 1);
+                    }
+                }
+            }
+        } !>;
+        h.wait() !>;
+        int got = cc_atomic_load(&g_accept_ran);
+        if (got != ACCEPT_CHILDREN) {
+            fprintf(stderr, "FAIL accept-shape ran=%d want=%d\n", got,
+                    ACCEPT_CHILDREN);
+            return 1;
+        }
+    }
+
+    printf("parallel_attach_concurrent_admit_smoke: OK\n");
+    return 0;
+}
