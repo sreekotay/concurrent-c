@@ -1,0 +1,242 @@
+/* cclex: exercise the lexer on real files. Same modes and output as the
+ * C11 tool (lex_test.c), so the two can be diffed.
+ *
+ *   cclex --roundtrip FILE...   every byte belongs to exactly one token; the
+ *                               concatenation of lead + text must be the
+ *                               file. Also rejects CC_TK_ERROR tokens and a
+ *                               NUMBER containing `..`. Exit 1 on any failure.
+ *   cclex --dump FILE           one token per line: `line:col kind text`
+ *   cclex --loc FILE OFF        logical location of byte offset OFF */
+#include "lex.cch"
+#include "diag_impl.cch"
+#include "lex_impl.cch"
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static const char* kind_name(CcTokKind k) {
+    switch (k) {
+    case CC_TK_EOF: return "EOF";
+    case CC_TK_IDENT: return "IDENT";
+    case CC_TK_AT_WORD: return "AT_WORD";
+    case CC_TK_AT: return "AT";
+    case CC_TK_NUMBER: return "NUMBER";
+    case CC_TK_CHAR: return "CHAR";
+    case CC_TK_STRING: return "STRING";
+    case CC_TK_TEMPLATE: return "TEMPLATE";
+    case CC_TK_PUNCT: return "PUNCT";
+    case CC_TK_PP: return "PP";
+    case CC_TK_ERROR: return "ERROR";
+    }
+    return "?";
+}
+
+/* One lexed file: the tool's unit. */
+typedef struct LexRun {
+    CCSlice path;
+    CCSlice src;
+    CcDiags ds;
+    CcTape tape;
+    bool ok;
+} LexRun;
+
+static LexRun lex_path(const char* path_c, CCArena a) {
+    LexRun run;
+    run.path = cc_slice_cstr(path_c);
+    run.src = cc_slice_empty();
+    run.ds = CcDiags_new(a);
+    run.ok = false;
+    CCFile f = cc_file_open(run.path) !>(e) {
+        fprintf(stderr, "cclex: %s: %s\n", path_c, cc_io_error_str(e));
+        return run;
+    };
+    run.src = cc_file_read_all(&f, a) !>(e) {
+        f.close();
+        fprintf(stderr, "cclex: %s: %s\n", path_c, cc_io_error_str(e));
+        return run;
+    };
+    f.close();
+    run.tape = cc_lex(run.path, run.src, &run.ds, a);
+    run.ok = true;
+    return run;
+}
+
+/* The diag printer's source callback: this run's text for its own path. */
+static CCSlice run_source(CCSlice path, void* ctx) {
+    LexRun* run = (LexRun*)ctx;
+    if (path.eq(run->path)) return run->src;
+    return cc_slice_empty();
+}
+
+/* Escape a token's text so it fits on one output line. */
+static void print_escaped(CCSlice text) {
+    const unsigned char* s = (const unsigned char*)text.ptr;
+    for (size_t i = 0; i < text.len; i++) {
+        unsigned char c = s[i];
+        switch (c) {
+        case '\n': fputs("\\n", stdout); break;
+        case '\r': fputs("\\r", stdout); break;
+        case '\t': fputs("\\t", stdout); break;
+        case '\\': fputs("\\\\", stdout); break;
+        default:
+            if (c < 0x20 || c == 0x7f) printf("\\x%02x", c);
+            else fputc(c, stdout);
+        }
+    }
+}
+
+static bool has_dotdot(CCSlice text) {
+    const char* s = (const char*)text.ptr;
+    for (size_t i = 1; i < text.len; i++)
+        if (s[i - 1] == '.' && s[i] == '.') return true;
+    return false;
+}
+
+static uint32_t offset_of(const LexRun* run, CCSlice s) {
+    return (uint32_t)((const char*)s.ptr - (const char*)run->src.ptr);
+}
+
+static bool check_tokens(LexRun* run, bool* had_error_tok) {
+    CcTape* tp = &run->tape;
+    uint32_t n = (uint32_t)tp->toks.len();
+    uint32_t len = (uint32_t)run->src.len;
+    const char* path = (const char*)run->path.ptr;
+    bool ok = true;
+    if (n == 0 || tp->toks.get_ptr(n - 1)->kind != CC_TK_EOF) {
+        printf("MISMATCH %s: token stream does not end in EOF\n", path);
+        return false;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        const CcToken* t = tp->toks.get_ptr(i);
+        uint32_t lead_off = offset_of(run, t->lead);
+        uint32_t off = offset_of(run, t->text);
+        uint32_t expect = 0;
+        if (i > 0) {
+            const CcToken* prev = tp->toks.get_ptr(i - 1);
+            expect = offset_of(run, prev->text) + (uint32_t)prev->text.len;
+        }
+        if (lead_off != expect || lead_off + t->lead.len != off || off + t->text.len > len) {
+            printf("MISMATCH %s at byte %u (token %u: lead %u+%u, text %u+%u)\n", path,
+                   (unsigned)expect, (unsigned)i, (unsigned)lead_off, (unsigned)t->lead.len,
+                   (unsigned)off, (unsigned)t->text.len);
+            return false;
+        }
+        if (t->kind == CC_TK_ERROR) {
+            *had_error_tok = true;
+            ok = false;
+        }
+        if (t->kind == CC_TK_NUMBER && has_dotdot(t->text)) {
+            printf("BADNUM %s at byte %u: NUMBER text contains `..`: ", path, (unsigned)off);
+            print_escaped(t->text);
+            putchar('\n');
+            ok = false;
+        }
+    }
+    const CcToken* eof = tp->toks.get_ptr(n - 1);
+    if (offset_of(run, eof->text) != len || eof->text.len != 0) {
+        printf("MISMATCH %s at byte %u: EOF token does not end at the file end (%u)\n", path,
+               (unsigned)offset_of(run, eof->text), (unsigned)len);
+        return false;
+    }
+    return ok;
+}
+
+static bool roundtrip(const char* path) {
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    LexRun run = lex_path(path, a);
+    if (!run.ok) return false;
+    bool ok = true, had_error_tok = false;
+    CcTape* tp = &run.tape;
+    CCString out = cc_string_new();
+    @for (t in tp->toks) {
+        out.push_slice(t.lead, a);
+        out.push_slice(t.text, a);
+    }
+    CCSlice got = out.as_slice();
+    if (got.len != run.src.len || !got.eq(run.src)) {
+        const char* x = (const char*)got.ptr;
+        const char* y = (const char*)run.src.ptr;
+        size_t n = 0;
+        while (n < got.len && n < run.src.len && x[n] == y[n]) n++;
+        printf("MISMATCH %s at byte %zu\n", path, n);
+        ok = false;
+    } else if (!check_tokens(&run, &had_error_tok)) {
+        ok = false;
+    }
+    if (had_error_tok) printf("ERROR %s: stream contains CC_TK_ERROR tokens\n", path);
+    if (run.ds.items.len()) {
+        fflush(stdout);
+        run.ds.print(stderr, run_source, &run);
+    }
+    if (run.ds.has_errors()) ok = false;
+    if (ok) printf("ok %s\n", path);
+    return ok;
+}
+
+static int dump(const char* path) {
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    LexRun run = lex_path(path, a);
+    if (!run.ok) return 1;
+    CcTape* tp = &run.tape;
+    @for (t in tp->toks) {
+        printf("%u:%u %s", (unsigned)t.line, (unsigned)t.col, kind_name(t.kind));
+        if (t.kind == CC_TK_PUNCT) printf("(%s)", cc__punct_text(t.punct));
+        putchar(' ');
+        print_escaped(t.text);
+        putchar('\n');
+    }
+    @for (m in tp->marks) {
+        printf("mark off=%u phys=%u logical=%u path=", (unsigned)m.off, (unsigned)m.phys_line,
+               (unsigned)m.logical_line);
+        if (m.path.len) fwrite(m.path.ptr, 1, m.path.len, stdout);
+        else fputs("(file)", stdout);
+        putchar('\n');
+    }
+    fflush(stdout);
+    run.ds.print(stderr, run_source, &run);
+    return run.ds.has_errors() ? 1 : 0;
+}
+
+static int loc(const char* path, const char* off_text) {
+    char* end;
+    unsigned long off;
+    errno = 0;
+    off = strtoul(off_text, &end, 10);
+    if (errno || *end || end == off_text) {
+        fprintf(stderr, "cclex: bad offset '%s'\n", off_text);
+        return 2;
+    }
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    LexRun run = lex_path(path, a);
+    if (!run.ok) return 1;
+    if (off > run.src.len) {
+        fprintf(stderr, "cclex: offset %lu past end of %s (%u bytes)\n", off, path, (unsigned)run.src.len);
+        return 2;
+    }
+    CcLoc l = cc__tape_loc_of(&run.tape, (uint32_t)off);
+    printf("%.*s:%u:%u\n", (int)l.path.len, (const char*)l.path.ptr, (unsigned)l.line, (unsigned)l.col);
+    run.ds.print(stderr, run_source, &run);
+    return 0;
+}
+
+static int usage(void) {
+    fprintf(stderr, "usage: cclex --roundtrip FILE...\n"
+                    "       cclex --dump FILE\n"
+                    "       cclex --loc FILE OFF\n");
+    return 2;
+}
+
+int main(int argc, char** argv) {
+    if (argc < 3) return usage();
+    if (strcmp(argv[1], "--roundtrip") == 0) {
+        int failed = 0;
+        for (int i = 2; i < argc; i++)
+            if (!roundtrip(argv[i])) failed++;
+        if (failed) fprintf(stderr, "cclex: %d of %d files failed\n", failed, argc - 2);
+        return failed ? 1 : 0;
+    }
+    if (strcmp(argv[1], "--dump") == 0 && argc == 3) return dump(argv[2]);
+    if (strcmp(argv[1], "--loc") == 0 && argc == 4) return loc(argv[2], argv[3]);
+    return usage();
+}

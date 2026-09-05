@@ -1,0 +1,661 @@
+/* Lexer: bodies for lex.cch. Included by the unit that owns the tape (a
+ * tool `.ccs`), after the face and after diag_impl.cch.
+ *
+ * Invariant: every byte of the input belongs to exactly one token, as its
+ * lead or as its text, and the CC_TK_EOF token carries the trailing trivia;
+ * lead + text over all tokens is the file. Bad input never stops the lexer:
+ * it becomes a CC_TK_ERROR token with a diagnostic and lexing resumes after
+ * it. */
+#ifndef CC_LOWER_LEX_IMPL_CCH
+#define CC_LOWER_LEX_IMPL_CCH
+#include "lex.cch"
+#include <stdio.h>
+#include <stdlib.h>
+
+typedef struct CcLexer {
+    CCArena a;
+    CcDiags* ds;
+    const unsigned char* bytes;  /* the source; `len` bytes, not NUL-terminated */
+    uint32_t len;
+    uint32_t pos;
+    Vec::[uint32_t] line_starts; /* byte offset of each physical line start; [0] == 0 */
+    CcTape tape;                 /* grows in place; returned by value */
+    CCSlice cur_path;            /* logical path in effect; empty = the file's own */
+    bool at_line_start;          /* only trivia since the previous newline */
+    bool comment_to_eof;         /* trivia stopped at an unterminated block comment */
+} CcLexer;
+
+static void cc__lex_oom(const char* what, size_t n) {
+    fprintf(stderr, "cc: out of memory: lexer %s (%zu entries)\n", what, n);
+    abort();
+}
+
+/* ---- bytes ----------------------------------------------------------- */
+
+static unsigned cc__at(const CcLexer* L, uint32_t i) {
+    return i < L->len ? (unsigned)L->bytes[i] : 0u;
+}
+
+/* [off, end) of the source, as a slice of it. */
+static CCSlice cc__view(const CcLexer* L, uint32_t off, uint32_t end) {
+    CCSlice whole = L->tape.src;
+    return cc_slice_sub(whole, off, end);
+}
+
+/* A copy of `n` bytes that lives as long as the tape. */
+static CCSlice cc__keep(CcLexer* L, const unsigned char* p, size_t n) {
+    if (n == 0) return cc_slice_empty();
+    char* q = (char*)cc_arena_alloc(L->a, n, 1);
+    if (!q) cc__lex_oom("path bytes", n);
+    for (size_t i = 0; i < n; i++) q[i] = (char)p[i];
+    return cc_slice_from_buffer(q, n);
+}
+
+/* ---- character classes ----------------------------------------------- */
+
+static bool cc__is_digit(unsigned c) { return c >= '0' && c <= '9'; }
+static bool cc__is_alpha(unsigned c) { return (c | 0x20) >= 'a' && (c | 0x20) <= 'z'; }
+/* Bytes >= 0x80 are UTF-8 pieces of extended identifier characters, as GCC
+ * and clang accept them. */
+static bool cc__is_ident_start(unsigned c) { return cc__is_alpha(c) || c == '_' || c >= 0x80; }
+static bool cc__is_ident_cont(unsigned c) { return cc__is_ident_start(c) || cc__is_digit(c) || c == '$'; }
+static bool cc__is_hspace(unsigned c) { return c == ' ' || c == '\t' || c == '\v' || c == '\f' || c == '\r'; }
+static bool cc__is_blank(unsigned c) { return c == ' ' || c == '\t'; }
+
+/* ---- physical positions ---------------------------------------------- */
+
+/* Index of the last line start <= off. */
+static uint32_t cc__line_index(CcLexer* L, uint32_t off) {
+    uint32_t n_lines = (uint32_t)L->line_starts.len();
+    uint32_t lo = 0, hi = n_lines;   /* a UFCS call in a second declarator does not lower today */
+    while (hi - lo > 1) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (*L->line_starts.get_ptr(mid) <= off) lo = mid; else hi = mid;
+    }
+    return lo;
+}
+
+static void cc__phys(CcLexer* L, uint32_t off, uint32_t* line, uint32_t* col) {
+    uint32_t li = cc__line_index(L, off);
+    *line = li + 1;
+    *col = off - *L->line_starts.get_ptr(li) + 1;
+}
+
+/* ---- logical positions ----------------------------------------------- */
+
+/* User coordinates of byte `off`, whose physical position is (pline, pcol):
+ * the last mark at or before it rebases the line and names the path. */
+static CcLoc cc__tape_rebase(const CcTape* t, uint32_t off, uint32_t pline, uint32_t pcol) {
+    CcTape* tp = (CcTape*)t;
+    CcLoc loc;
+    uint32_t n = (uint32_t)tp->marks.len();
+    loc.path = t->path;
+    loc.line = pline;
+    loc.col = pcol;
+    if (n && tp->marks.get_ptr(0)->off <= off) {
+        uint32_t lo = 0, hi = n;
+        while (hi - lo > 1) {
+            uint32_t mid = lo + (hi - lo) / 2;
+            if (tp->marks.get_ptr(mid)->off <= off) lo = mid; else hi = mid;
+        }
+        const CcLineMark* m = tp->marks.get_ptr(lo);
+        loc.line = m->logical_line + (pline - m->phys_line);
+        if (m->path.len) loc.path = m->path;
+    }
+    return loc;
+}
+
+/* Physical position of byte `off` of a finished tape, by scanning: the tape
+ * keeps no line table; tokens carry their own positions. */
+static void cc__tape_phys(const CcTape* t, uint32_t off, uint32_t* line, uint32_t* col) {
+    const char* p = (const char*)t->src.ptr;
+    uint32_t ln = 1, start = 0;
+    for (uint32_t i = 0; i < off; i++) {
+        if (p[i] == '\n') { ln++; start = i + 1; }
+    }
+    *line = ln;
+    *col = off - start + 1;
+}
+
+/* User coordinates of byte `off` (off <= src.len). Tools use this for a
+ * position that is not a token; diagnostics on tokens go through tape.loc(i). */
+static CcLoc cc__tape_loc_of(const CcTape* t, uint32_t off) {
+    uint32_t pline, pcol;
+    if (off > (uint32_t)t->src.len) {
+        fprintf(stderr, "cc: tape: offset %u past end of %.*s (%u bytes)\n", (unsigned)off,
+                (int)t->path.len, (const char*)t->path.ptr, (unsigned)t->src.len);
+        abort();
+    }
+    cc__tape_phys(t, off, &pline, &pcol);
+    return cc__tape_rebase(t, off, pline, pcol);
+}
+
+static CcLoc cc__lex_loc(CcLexer* L, uint32_t off) {
+    uint32_t pline, pcol;
+    cc__phys(L, off, &pline, &pcol);
+    return cc__tape_rebase(&L->tape, off, pline, pcol);
+}
+
+/* ---- diagnostics ----------------------------------------------------- */
+
+static void cc__lex_error(CcLexer* L, uint32_t off, CCSlice msg) {
+    L->ds->push(CcDiag_error(cc__lex_loc(L, off), msg));
+}
+
+static CCSlice cc__stray_byte_msg(CcLexer* L, unsigned c) {
+    static const char digits[] = "0123456789abcdef";
+    char hex[3];
+    hex[0] = digits[(c >> 4) & 0xf];
+    hex[1] = digits[c & 0xf];
+    hex[2] = 0;
+    const char* code = hex;
+    CCString s = @string(`stray byte 0x${code}`, L->a);
+    return cc_string_persist_slice(L->a, &s);
+}
+
+/* ---- marks ----------------------------------------------------------- */
+
+/* `off` is the first byte of the line after the directive. */
+static void cc__add_mark(CcLexer* L, uint32_t off, uint32_t logical_line, CCSlice path) {
+    CcLineMark m;
+    m.off = off;
+    m.phys_line = cc__line_index(L, off) + 1;
+    m.logical_line = logical_line;
+    m.path = path;
+    CcTape* tp = &L->tape;
+    if (tp->marks.push(m) != 0) cc__lex_oom("mark", tp->marks.len());
+    L->cur_path = path;
+}
+
+/* Parse `N` and an optional `"path"` (or, when `bare_ok`, an unquoted path
+ * running to the end of the text) from a directive tail [s, e). Returns true
+ * and fills the outputs when the text starts with a line number. `*path_out`
+ * is left as the path in effect when none is given. A quoted path keeps its
+ * bytes except that `\\` and `\"` are unescaped. */
+static bool cc__parse_mark_tail(CcLexer* L, const unsigned char* s, const unsigned char* e, bool bare_ok,
+                                uint32_t diag_off, uint32_t* n_out, CCSlice* path_out) {
+    unsigned long long n = 0;
+    const unsigned char* p = s;
+    while (p < e && cc__is_blank(*p)) p++;
+    if (p >= e || !cc__is_digit(*p)) return false;
+    while (p < e && cc__is_digit(*p)) {
+        n = n * 10 + (unsigned)(*p - '0');
+        if (n > UINT32_MAX) {
+            cc__lex_error(L, diag_off, CC_SLICE_LIT("line number too large"));
+            return false;
+        }
+        p++;
+    }
+    while (p < e && cc__is_blank(*p)) p++;
+    if (p < e && *p == '"') {
+        const unsigned char* q = p + 1;
+        size_t cap = (size_t)(e - q);
+        char* buf = (char*)cc_arena_alloc(L->a, cap ? cap : 1, 1);
+        size_t k = 0;
+        if (!buf) cc__lex_oom("path bytes", cap);
+        while (q < e && *q != '"') {
+            if (*q == '\\' && q + 1 < e && (q[1] == '\\' || q[1] == '"')) q++;
+            buf[k++] = (char)*q;
+            q++;
+        }
+        if (q >= e) {
+            cc__lex_error(L, diag_off + (uint32_t)(p - s), CC_SLICE_LIT("unterminated path in line directive"));
+            return false;
+        }
+        *path_out = cc_slice_from_buffer(buf, k);
+    } else if (bare_ok && p < e) {
+        const unsigned char* q = e;
+        while (q > p && cc__is_blank(q[-1])) q--;
+        *path_out = cc__keep(L, p, (size_t)(q - p));
+    }
+    *n_out = (uint32_t)n;
+    return true;
+}
+
+/* A block comment at [start, end) (end just past its closing delimiter), on
+ * one physical line: record a CC_LN mark if it is one. The path may be
+ * quoted or bare (`CC_LN 22 /abs/path.shcc`, as the driver emits it). */
+static void cc__comment_mark(CcLexer* L, uint32_t start, uint32_t end) {
+    const unsigned char* s = L->bytes + start + 2;
+    const unsigned char* e = L->bytes + end - 2;
+    const unsigned char* p = s;
+    uint32_t n;
+    CCSlice path = L->cur_path;
+    uint32_t next_line;
+    while (p < e && cc__is_blank(*p)) p++;
+    if ((size_t)(e - p) < 6) return;
+    if (p[0] != 'C' || p[1] != 'C' || p[2] != '_' || p[3] != 'L' || p[4] != 'N' || !cc__is_blank(p[5])) return;
+    if (!cc__parse_mark_tail(L, p + 5, e, true, start, &n, &path)) return;
+    next_line = end;
+    while (next_line < L->len && L->bytes[next_line] != '\n') next_line++;
+    if (next_line < L->len) next_line++;
+    cc__add_mark(L, next_line, n, path);
+}
+
+/* A preprocessor line at [start, end): record a `#line N "p"` / `# N "p"`
+ * mark if it is one. `next` is the first byte of the following line. */
+static void cc__pp_mark(CcLexer* L, uint32_t start, uint32_t end, uint32_t next) {
+    cc_arena_stack(scratch, 512);
+    size_t cap = end > start + 1 ? (size_t)(end - start - 1) : 1;
+    unsigned char* spliced = (unsigned char*)cc_arena_alloc(scratch, cap, 1);
+    size_t k = 0;
+    uint32_t n;
+    CCSlice path = L->cur_path;
+    if (!spliced) cc__lex_oom("spliced directive", cap);
+    for (uint32_t i = start + 1; i < end; i++) {
+        unsigned c = L->bytes[i];
+        if (c == '\\' && i + 1 < end && L->bytes[i + 1] == '\n') { i++; continue; }
+        if (c == '\\' && i + 2 < end && L->bytes[i + 1] == '\r' && L->bytes[i + 2] == '\n') { i += 2; continue; }
+        spliced[k++] = (unsigned char)c;
+    }
+    const unsigned char* s = spliced;
+    const unsigned char* e = spliced + k;
+    const unsigned char* p = s;
+    while (p < e && cc__is_blank(*p)) p++;
+    if ((size_t)(e - p) >= 4 && p[0] == 'l' && p[1] == 'i' && p[2] == 'n' && p[3] == 'e' &&
+        (e - p == 4 || !cc__is_ident_cont(p[4])))
+        p += 4;
+    if (cc__parse_mark_tail(L, p, e, false, start, &n, &path))
+        cc__add_mark(L, next, n, path);
+}
+
+/* ---- trivia ---------------------------------------------------------- */
+
+/* Advance over whitespace, comments and line splices. Sets at_line_start
+ * when a newline is crossed. Stops at an unterminated block comment with
+ * comment_to_eof set. */
+static void cc__skip_trivia(CcLexer* L) {
+    uint32_t i = L->pos;
+    if (i == 0 && L->len >= 3 && L->bytes[0] == 0xEF && L->bytes[1] == 0xBB && L->bytes[2] == 0xBF)
+        i = 3; /* UTF-8 byte order mark */
+    for (;;) {
+        unsigned c = cc__at(L, i);
+        if (i >= L->len) break;
+        if (c == '\n') { i++; L->at_line_start = true; continue; }
+        if (cc__is_hspace(c)) { i++; continue; }
+        if (c == '\\') {
+            if (cc__at(L, i + 1) == '\n') { i += 2; continue; }
+            if (cc__at(L, i + 1) == '\r' && cc__at(L, i + 2) == '\n') { i += 3; continue; }
+            break;
+        }
+        if (c == '/' && cc__at(L, i + 1) == '/') {
+            i += 2;
+            while (i < L->len && L->bytes[i] != '\n') {
+                if (L->bytes[i] == '\\' && cc__at(L, i + 1) == '\n') { i += 2; continue; }
+                if (L->bytes[i] == '\\' && cc__at(L, i + 1) == '\r' && cc__at(L, i + 2) == '\n') { i += 3; continue; }
+                i++;
+            }
+            continue;
+        }
+        if (c == '/' && cc__at(L, i + 1) == '*') {
+            uint32_t start = i, j = i + 2;
+            bool crossed_newline = false;
+            for (;;) {
+                if (j >= L->len) { L->pos = start; L->comment_to_eof = true; return; }
+                if (L->bytes[j] == '*' && cc__at(L, j + 1) == '/') { j += 2; break; }
+                if (L->bytes[j] == '\n') crossed_newline = true;
+                j++;
+            }
+            if (crossed_newline) L->at_line_start = true;
+            else cc__comment_mark(L, start, j);
+            i = j;
+            continue;
+        }
+        break;
+    }
+    L->pos = i;
+}
+
+/* ---- punctuators ----------------------------------------------------- */
+
+/* Indexed by CcPunct. */
+static const char* const cc__punct_texts[] = {
+    "",
+    /* C */
+    "{", "}", "(", ")", "[", "]",
+    ";", ",", ".", "->", "...",
+    "+", "-", "*", "/", "%",
+    "&", "|", "^", "~", "!",
+    "<", ">", "<=", ">=", "==", "!=",
+    "&&", "||", "<<", ">>", "++", "--",
+    "=", "+=", "-=", "*=", "/=",
+    "%=", "&=", "|=", "^=",
+    "<<=", ">>=", "?", ":", "#", "##",
+    /* Concurrent-C */
+    "!>", "?>", "=>", "::", "..", "`", "$",
+};
+#define CC_P__COUNT (sizeof(cc__punct_texts) / sizeof(cc__punct_texts[0]))
+_Static_assert(CC_P__COUNT == (size_t)CC_P_DOLLAR + 1, "punct text table matches CcPunct");
+
+/* Text of a punctuator; "" for CC_P_NONE, NULL out of range. */
+static const char* cc__punct_text(CcPunct p) {
+    if ((unsigned)p >= CC_P__COUNT) return NULL;
+    return cc__punct_texts[p];
+}
+
+static uint32_t cc__punct_len(const char* s) {
+    uint32_t n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+/* Longest punctuator starting at `pos`; CC_P_NONE when none matches. A
+ * backtick always starts a template, so CC_P_BACKTICK never matches. */
+static CcPunct cc__match_punct(const CcLexer* L, uint32_t pos, uint32_t* len_out) {
+    for (uint32_t want = 3; want >= 1; want--) {
+        if (pos + want > L->len) continue;
+        for (unsigned p = 1; p < CC_P__COUNT; p++) {
+            const char* t = cc__punct_texts[p];
+            if (p == CC_P_BACKTICK || cc__punct_len(t) != want) continue;
+            bool same = true;
+            for (uint32_t k = 0; k < want; k++) {
+                if (L->bytes[pos + k] != (unsigned char)t[k]) { same = false; break; }
+            }
+            if (same) { *len_out = want; return (CcPunct)p; }
+        }
+    }
+    return CC_P_NONE;
+}
+
+/* ---- scanners -------------------------------------------------------- */
+
+static uint32_t cc__scan_number(const CcLexer* L, uint32_t i) {
+    i++; /* first digit, or the `.` before one */
+    for (;;) {
+        unsigned c = cc__at(L, i);
+        if ((c == 'e' || c == 'E' || c == 'p' || c == 'P') && (cc__at(L, i + 1) == '+' || cc__at(L, i + 1) == '-')) { i += 2; continue; }
+        if (cc__is_alpha(c) || cc__is_digit(c) || c == '_') { i++; continue; }
+        if (c == '.' && cc__at(L, i + 1) != '.') { i++; continue; }
+        break;
+    }
+    return i;
+}
+
+/* End of the physical line containing `start` (the newline excluded, and a
+ * `\r` before it too, so CR LF stays whole in the following trivia). */
+static uint32_t cc__line_end(const CcLexer* L, uint32_t start) {
+    uint32_t i = start;
+    while (i < L->len && L->bytes[i] != '\n') i++;
+    if (i > start + 1 && L->bytes[i - 1] == '\r') i--;
+    return i;
+}
+
+/* Quoted literal starting at the opening quote `i` (prefix already
+ * consumed). Returns the end offset, or 0 when unterminated. */
+static uint32_t cc__scan_quoted(const CcLexer* L, uint32_t i, unsigned quote) {
+    i++;
+    for (;;) {
+        if (i >= L->len) return 0;
+        unsigned c = L->bytes[i];
+        if (c == '\\') {
+            if (i + 1 >= L->len) return 0;
+            if (L->bytes[i + 1] == '\n') { i += 2; continue; }
+            if (L->bytes[i + 1] == '\r' && cc__at(L, i + 2) == '\n') { i += 3; continue; }
+            i += 2;
+            continue;
+        }
+        if (c == '\n') return 0;
+        i++;
+        if (c == quote) return i;
+    }
+}
+
+static uint32_t cc__scan_template(const CcLexer* L, uint32_t i) {
+    i++;
+    for (;;) {
+        if (i >= L->len) return 0;
+        unsigned c = L->bytes[i];
+        if (c == '\\') { if (i + 1 >= L->len) return 0; i += 2; continue; }
+        i++;
+        if (c == '`') return i;
+    }
+}
+
+/* Whole preprocessor line from the `#` at `i`; returns the end of its text
+ * and stores the first byte of the following line in `*next`. */
+static uint32_t cc__scan_pp(const CcLexer* L, uint32_t i, uint32_t* next) {
+    bool in_string = false;
+    for (;;) {
+        unsigned c = cc__at(L, i);
+        if (i >= L->len) break;
+        if (c == '\n') break;
+        if (c == '\\') {
+            if (cc__at(L, i + 1) == '\n') { i += 2; continue; }
+            if (cc__at(L, i + 1) == '\r' && cc__at(L, i + 2) == '\n') { i += 3; continue; }
+            i += in_string ? 2 : 1;
+            if (i > L->len) i = L->len;
+            continue;
+        }
+        if (c == '"') { in_string = !in_string; i++; continue; }
+        if (!in_string && c == '/' && cc__at(L, i + 1) == '*') {
+            uint32_t j = i + 2;
+            while (j < L->len && !(L->bytes[j] == '*' && cc__at(L, j + 1) == '/')) j++;
+            if (j >= L->len) break; /* unterminated: the directive ends at this line */
+            i = j + 2;
+            continue;
+        }
+        if (!in_string && c == '/' && cc__at(L, i + 1) == '/') {
+            while (i < L->len && L->bytes[i] != '\n') {
+                if (L->bytes[i] == '\\' && cc__at(L, i + 1) == '\n') { i += 2; continue; }
+                if (L->bytes[i] == '\\' && cc__at(L, i + 1) == '\r' && cc__at(L, i + 2) == '\n') { i += 3; continue; }
+                i++;
+            }
+            break;
+        }
+        i++;
+    }
+    *next = i < L->len ? i + 1 : L->len;
+    if (i > L->pos && L->bytes[i - 1] == '\r') i--;
+    return i;
+}
+
+/* ---- tokens ---------------------------------------------------------- */
+
+static void cc__push_tok(CcLexer* L, CcTokKind kind, CcPunct punct, uint32_t lead_off, uint32_t off, uint32_t end) {
+    CcToken t;
+    t.kind = kind;
+    t.punct = punct;
+    t.text = cc__view(L, off, end);
+    t.lead = cc__view(L, lead_off, off);
+    cc__phys(L, off, &t.line, &t.col);
+    t.at_line_start = L->at_line_start;
+    t.after_space = off > lead_off;
+    CcTape* tp = &L->tape;
+    if (tp->toks.push(t) != 0) cc__lex_oom("token", tp->toks.len());
+    if (kind == CC_TK_ERROR) tp->n_errors++;
+    L->at_line_start = false;
+    L->pos = end;
+}
+
+static void cc__lex_one(CcLexer* L) {
+    uint32_t lead_off = L->pos, i, end, plen;
+    unsigned c;
+    CcPunct p;
+    cc__skip_trivia(L);
+    i = L->pos;
+    if (L->comment_to_eof) {
+        L->comment_to_eof = false;
+        cc__lex_error(L, i, CC_SLICE_LIT("unterminated comment"));
+        cc__push_tok(L, CC_TK_ERROR, CC_P_NONE, lead_off, i, L->len);
+        return;
+    }
+    if (i >= L->len) {
+        cc__push_tok(L, CC_TK_EOF, CC_P_NONE, lead_off, L->len, L->len);
+        return;
+    }
+    c = L->bytes[i];
+
+    if (c == '#' && L->at_line_start) {
+        uint32_t next;
+        end = cc__scan_pp(L, i, &next);
+        cc__pp_mark(L, i, end, next);
+        cc__push_tok(L, CC_TK_PP, CC_P_NONE, lead_off, i, end);
+        return;
+    }
+
+    /* String and character literals, with an optional encoding prefix. */
+    {
+        uint32_t q = i;
+        bool quoted = true;
+        if (c == '"' || c == '\'') q = i;
+        else if ((c == 'L' || c == 'u' || c == 'U') && (cc__at(L, i + 1) == '"' || cc__at(L, i + 1) == '\'')) q = i + 1;
+        else if (c == 'u' && cc__at(L, i + 1) == '8' && (cc__at(L, i + 2) == '"' || cc__at(L, i + 2) == '\'')) q = i + 2;
+        else quoted = false;
+        if (quoted) {
+            unsigned quote = L->bytes[q];
+            end = cc__scan_quoted(L, q, quote);
+            if (!end) {
+                end = cc__line_end(L, q);
+                cc__lex_error(L, i, quote == '"' ? CC_SLICE_LIT("unterminated string literal")
+                                                 : CC_SLICE_LIT("unterminated character literal"));
+                cc__push_tok(L, CC_TK_ERROR, CC_P_NONE, lead_off, i, end);
+                return;
+            }
+            cc__push_tok(L, quote == '"' ? CC_TK_STRING : CC_TK_CHAR, CC_P_NONE, lead_off, i, end);
+            return;
+        }
+    }
+
+    if (c == '`') {
+        end = cc__scan_template(L, i);
+        if (!end) {
+            cc__lex_error(L, i, CC_SLICE_LIT("unterminated template literal"));
+            cc__push_tok(L, CC_TK_ERROR, CC_P_NONE, lead_off, i, L->len);
+            return;
+        }
+        cc__push_tok(L, CC_TK_TEMPLATE, CC_P_NONE, lead_off, i, end);
+        return;
+    }
+
+    if (cc__is_ident_start(c) || (c == '$' && cc__is_ident_cont(cc__at(L, i + 1)))) {
+        end = i + 1;
+        while (cc__is_ident_cont(cc__at(L, end))) end++;
+        cc__push_tok(L, CC_TK_IDENT, CC_P_NONE, lead_off, i, end);
+        return;
+    }
+
+    if (c == '@') {
+        if (cc__is_ident_start(cc__at(L, i + 1))) {
+            end = i + 2;
+            while (cc__is_ident_cont(cc__at(L, end))) end++;
+            cc__push_tok(L, CC_TK_AT_WORD, CC_P_NONE, lead_off, i, end);
+        } else {
+            cc__push_tok(L, CC_TK_AT, CC_P_NONE, lead_off, i, i + 1);
+        }
+        return;
+    }
+
+    if (cc__is_digit(c) || (c == '.' && cc__is_digit(cc__at(L, i + 1)))) {
+        end = cc__scan_number(L, i);
+        cc__push_tok(L, CC_TK_NUMBER, CC_P_NONE, lead_off, i, end);
+        return;
+    }
+
+    p = cc__match_punct(L, i, &plen);
+    if (p != CC_P_NONE) {
+        cc__push_tok(L, CC_TK_PUNCT, p, lead_off, i, i + plen);
+        return;
+    }
+
+    cc__lex_error(L, i, cc__stray_byte_msg(L, c));
+    cc__push_tok(L, CC_TK_ERROR, CC_P_NONE, lead_off, i, i + 1);
+}
+
+CcTape cc_lex(CCSlice path, CCSlice src, CcDiags* ds, CCArena a) {
+    CcLexer L;
+    if (src.len >= UINT32_MAX) {
+        fprintf(stderr, "cc: %.*s: file of %zu bytes is too large to lex (offsets are 32-bit)\n",
+                (int)path.len, (const char*)path.ptr, (size_t)src.len);
+        abort();
+    }
+    L.a = a;
+    L.ds = ds;
+    L.bytes = (const unsigned char*)src.ptr;
+    L.len = (uint32_t)src.len;
+    L.pos = 0;
+    L.line_starts = vec_new::[uint32_t](a);
+    L.tape.path = path;
+    L.tape.src = src;
+    L.tape.toks = vec_new::[CcToken](a);
+    L.tape.marks = vec_new::[CcLineMark](a);
+    L.tape.n_errors = 0;
+    L.cur_path = cc_slice_empty();
+    L.at_line_start = true;
+    L.comment_to_eof = false;
+
+    /* Physical line table first: token positions and diagnostics need it. */
+    if (L.line_starts.push(0u) != 0) cc__lex_oom("line", 1);
+    for (uint32_t i = 0; i < L.len; i++) {
+        if (L.bytes[i] != '\n') continue;
+        if (L.line_starts.push(i + 1) != 0) cc__lex_oom("line", L.line_starts.len());
+    }
+
+    for (;;) {
+        cc__lex_one(&L);
+        CcTape* tp = &L.tape;
+        size_t n_toks = tp->toks.len();   /* a UFCS call nested in a UFCS argument does not lower today */
+        const CcToken* last = tp->toks.get_ptr(n_toks - 1);
+        if (last->kind == CC_TK_EOF) break;
+    }
+    return L.tape;
+}
+
+/* ---- tape ------------------------------------------------------------ */
+
+const CcToken* CcTape_at(const CcTape* t, uint32_t i) {
+    CcTape* tp = (CcTape*)t;   /* the vec accessors take a mutable receiver */
+    size_t n = tp->toks.len();
+    if (i >= n) i = (uint32_t)(n - 1);
+    return tp->toks.get_ptr(i);
+}
+
+CcLoc CcTape_loc(const CcTape* t, uint32_t i) {
+    const CcToken* tok = CcTape_at(t, i);
+    uint32_t off = (uint32_t)((const char*)tok->text.ptr - (const char*)t->src.ptr);
+    return cc__tape_rebase(t, off, tok->line, tok->col);
+}
+
+CCSlice CcTape_line_text(const CcTape* t, uint32_t phys_line) {
+    const char* p = (const char*)t->src.ptr;
+    size_t len = t->src.len;
+    size_t start = 0, i = 0;
+    uint32_t n = 1;
+    if (phys_line == 0) return cc_slice_empty();
+    while (n < phys_line) {
+        while (i < len && p[i] != '\n') i++;
+        if (i >= len) return cc_slice_empty();
+        i++;
+        start = i;
+        n++;
+    }
+    while (i < len && p[i] != '\n') i++;
+    if (i > start && p[i - 1] == '\r') i--;
+    return cc_slice_sub(t->src, start, i);
+}
+
+/* ---- token helpers --------------------------------------------------- */
+
+static bool cc__text_is(CCSlice text, const char* word, size_t skip) {
+    const char* p = (const char*)text.ptr;
+    size_t n = 0;
+    while (word[n]) n++;
+    if (text.len != n + skip) return false;
+    for (size_t k = 0; k < n; k++) {
+        if (p[skip + k] != word[k]) return false;
+    }
+    return true;
+}
+
+bool CcToken_is(const CcToken* t, CcPunct p) {
+    return t->kind == CC_TK_PUNCT && t->punct == p;
+}
+
+bool CcToken_is_ident(const CcToken* t, const char* word) {
+    return t->kind == CC_TK_IDENT && cc__text_is(t->text, word, 0);
+}
+
+bool CcToken_is_at(const CcToken* t, const char* word) {
+    return t->kind == CC_TK_AT_WORD && cc__text_is(t->text, word, 1);
+}
+
+#endif

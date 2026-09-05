@@ -1,0 +1,29 @@
+/* A UFCS call nested in a UFCS argument, assigned to a `const T*`
+ * destination: `const Item* last = tp->xs.get_ptr(tp->xs.len() - 1);`.
+ * The same line with a non-const destination lowers. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/vec.cch>
+#include <stdio.h>
+
+typedef struct Item { int v; } Item;
+typedef struct Bag {
+    CCSlice name;
+    Vec::[Item] xs;
+} Bag;
+
+static int last_value(Bag* tp) {
+    const Item* last = tp->xs.get_ptr(tp->xs.len() - 1);
+    return last->v;
+}
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    Bag bag;
+    Item it;
+    bag.name = CC_SLICE_LIT("t");
+    bag.xs = vec_new::[Item](a);
+    it.v = 9;
+    bag.xs.push(it);
+    printf("%d\n", last_value(&bag));
+    return 0;
+}

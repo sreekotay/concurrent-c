@@ -1,0 +1,1 @@
+with a 'const Item*' destination the inner '.len()' is left un-lowered ('called object is not a function'); with 'Item*' the same line lowers
