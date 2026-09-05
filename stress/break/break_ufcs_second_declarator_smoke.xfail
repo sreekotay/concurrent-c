@@ -1,0 +1,1 @@
+the UFCS call in the second declarator's initializer is left as written in the emitted C ('called object is not a function'); only the first declarator of a declaration is lowered

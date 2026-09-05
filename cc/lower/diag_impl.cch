@@ -1,0 +1,163 @@
+/* Diagnostics: bodies for diag.cch. Included by the unit that owns the
+ * sink (a tool `.ccs`), after the face. */
+#ifndef CC_LOWER_DIAG_IMPL_CCH
+#define CC_LOWER_DIAG_IMPL_CCH
+#include "diag.cch"
+#include <stdio.h>
+#include <stdlib.h>
+
+/* ---- constructors ---------------------------------------------------- */
+
+static CcDiag cc__diag_make(CcSeverity sev, CcLoc at, CCSlice msg) {
+    CcDiag d;
+    d.sev = sev;
+    d.at = at;
+    d.msg = msg;
+    d.note = cc_slice_empty();
+    return d;
+}
+
+CcDiag CcDiag_error(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_ERROR, at, msg); }
+CcDiag CcDiag_warning(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_WARNING, at, msg); }
+CcDiag CcDiag_note(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_NOTE, at, msg); }
+
+CcDiag CcDiag_with_note(CcDiag d, CCSlice note) {
+    d.note = note;
+    return d;
+}
+
+/* ---- sink ------------------------------------------------------------ */
+
+CcDiags CcDiags_new(CCArena a) {
+    CcDiags ds;
+    ds.items = vec_new::[CcDiag](a);
+    ds.n_errors = 0;
+    ds.arena = a;
+    return ds;
+}
+
+void CcDiags_push(CcDiags* ds, CcDiag d) {
+    if (ds->items.push(d) != 0) {
+        size_t n_items = ds->items.len();
+        fprintf(stderr, "cc: out of memory: diagnostic sink (%zu messages)\n", n_items);
+        abort();
+    }
+    if (d.sev == CC_SEV_ERROR) ds->n_errors++;
+}
+
+bool CcDiags_has_errors(const CcDiags* ds) { return ds->n_errors > 0; }
+
+/* ---- print ----------------------------------------------------------- */
+
+/* Byte order, then length; the empty (unknown) path sorts first. */
+static int cc__slice_order(CCSlice a, CCSlice b) {
+    const unsigned char* pa = (const unsigned char*)a.ptr;
+    const unsigned char* pb = (const unsigned char*)b.ptr;
+    size_t n = a.len < b.len ? a.len : b.len;
+    for (size_t i = 0; i < n; i++) {
+        if (pa[i] != pb[i]) return pa[i] < pb[i] ? -1 : 1;
+    }
+    if (a.len != b.len) return a.len < b.len ? -1 : 1;
+    return 0;
+}
+
+/* (path, line, col), then arrival order, so equal positions keep the order
+ * the producer chose (an error before its note). */
+static int cc__diag_before(const CcDiag* a, uint32_t ia, const CcDiag* b, uint32_t ib) {
+    int c = cc__slice_order(a->at.path, b->at.path);
+    if (c) return c < 0;
+    if (a->at.line != b->at.line) return a->at.line < b->at.line;
+    if (a->at.col != b->at.col) return a->at.col < b->at.col;
+    return ia < ib;
+}
+
+static const char* cc__sev_name(CcSeverity sev) {
+    switch (sev) {
+    case CC_SEV_NOTE: return "note";
+    case CC_SEV_WARNING: return "warning";
+    case CC_SEV_ERROR: return "error";
+    }
+    return "error";
+}
+
+static void cc__print_slice(FILE* out, CCSlice s) {
+    if (s.len) fwrite(s.ptr, 1, s.len, out);
+}
+
+/* The physical line `line` of `text` (1-based), without its newline. */
+static CCSlice cc__nth_line(CCSlice text, uint32_t line) {
+    const char* p = (const char*)text.ptr;
+    size_t start = 0;
+    size_t i = 0;
+    uint32_t n = 1;
+    if (line == 0) return cc_slice_empty();
+    while (n < line) {
+        while (i < text.len && p[i] != '\n') i++;
+        if (i >= text.len) return cc_slice_empty();
+        i++;
+        start = i;
+        n++;
+    }
+    while (i < text.len && p[i] != '\n') i++;
+    if (i > start && p[i - 1] == '\r') i--;
+    return cc_slice_sub(text, start, i);
+}
+
+void CcDiags_print(const CcDiags* ds, FILE* out, CcSourceFn source, void* ctx) {
+    CcDiags* sink = (CcDiags*)ds;   /* the vec accessors take a mutable receiver */
+    uint32_t n = (uint32_t)sink->items.len();
+    if (n == 0) return;
+    cc_arena_stack(tmp, 512);
+    uint32_t* order = (uint32_t*)cc_arena_alloc(tmp, (size_t)n * sizeof(uint32_t), _Alignof(uint32_t));
+    if (!order) {
+        fprintf(stderr, "cc: out of memory: diagnostic sort (%u entries)\n", (unsigned)n);
+        abort();
+    }
+    /* Insertion sort: a unit produces few diagnostics. */
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t j = i;
+        const CcDiag* di = sink->items.get_ptr(i);
+        while (j > 0) {
+            const CcDiag* dj = sink->items.get_ptr(order[j - 1]);
+            if (!cc__diag_before(di, i, dj, order[j - 1])) break;
+            order[j] = order[j - 1];
+            j--;
+        }
+        order[j] = i;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        const CcDiag* d = sink->items.get_ptr(order[i]);
+        if (d->at.path.len) cc__print_slice(out, d->at.path);
+        else fputs("<unknown>", out);
+        if (d->at.line) {
+            fprintf(out, ":%u", (unsigned)d->at.line);
+            if (d->at.col) fprintf(out, ":%u", (unsigned)d->at.col);
+        }
+        fprintf(out, ": %s: ", cc__sev_name(d->sev));
+        cc__print_slice(out, d->msg);
+        fputc('\n', out);
+        if (d->note.len) {
+            fputs("  note: ", out);
+            cc__print_slice(out, d->note);
+            fputc('\n', out);
+        }
+        if (source && d->at.line) {
+            CCSlice text = source(d->at.path, ctx);
+            CCSlice snippet = cc__nth_line(text, d->at.line);
+            if (snippet.len) {
+                const char* sp = (const char*)snippet.ptr;
+                cc__print_slice(out, snippet);
+                fputc('\n', out);
+                if (d->at.col) {
+                    /* Keep tabs so the caret lines up under the source. */
+                    for (uint32_t c = 1; c < d->at.col; c++)
+                        fputc(c - 1 < snippet.len && sp[c - 1] == '\t' ? '\t' : ' ', out);
+                    fputs("^\n", out);
+                }
+            }
+        }
+    }
+    fflush(out);
+}
+
+#endif
