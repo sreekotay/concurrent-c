@@ -1,0 +1,34 @@
+/* Field-path UFCS through a struct declared on one line in a quoted .cch. */
+#include "quote_cch_one_line_struct.cch"
+#include <stdio.h>
+
+static void fill(OneLineBag* bag, CCArena a) {
+    bag->items = vec_new::[int](a);
+    bag->items.push(4);
+    bag->items.push(5);
+    bag->name = cc_string_from("bag", a);
+}
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    OneLineBag bag;
+    OneLineAnon anon;
+    TwoPerLine two;
+    fill(&bag, a);
+    anon.n = 1;
+    anon.tag = cc_string_from("anon", a);
+    two.a = cc_string_from("x", a);
+    two.b = cc_string_from("yy", a);
+    two.k = 0;
+    OneLineIndex ix;
+    OneLineRow row = { 9 };
+    ix.rows = map_new::[CCSlice, OneLineRowRef](a);
+    ix.counts = map_new::[CCSlice, int](a);
+    ix.rows->insert(CC_SLICE_LIT("r"), &row);
+    ix.counts->insert(CC_SLICE_LIT("r"), 3);
+    OneLineRowRef* got = ix.rows->get_ptr(CC_SLICE_LIT("r"));
+    printf("%d %d %d %d %d %d %d\n", (int)bag.items.len(), (int)bag.name.len(),
+           (int)anon.tag.len(), (int)two.a.len(), (int)two.b.len(),
+           got && *got ? (*got)->v : -1, (int)ix.counts->len());
+    return 0;
+}

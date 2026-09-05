@@ -1,0 +1,24 @@
+#ifndef TESTS_QUOTE_CCH_ONE_LINE_STRUCT_CCH
+#define TESTS_QUOTE_CCH_ONE_LINE_STRUCT_CCH
+#include <ccc/std/prelude.cch>
+#include <ccc/std/vec.cch>
+#include <ccc/std/map.cch>
+
+/* Struct bodies on one line, and two fields per line: the field scan of an
+ * included header must register every member, not one per source line. */
+typedef struct OneLineBag { Vec::[int] items; CCString name; } OneLineBag;
+typedef struct { int n; CCString tag; } OneLineAnon;
+typedef struct TwoPerLine {
+    CCString a; CCString b;
+    int k;
+} TwoPerLine;
+
+/* A Map field in a header struct: the header only needs the tag (the
+ * field is a pointer); the including TU emits the instance. The value
+ * type may itself be declared after the struct. */
+typedef struct OneLineRow OneLineRow;
+typedef OneLineRow* OneLineRowRef;
+typedef struct OneLineIndex { Map::[CCSlice, OneLineRowRef] rows; Map::[CCSlice, int] counts; } OneLineIndex;
+struct OneLineRow { int v; };
+
+#endif

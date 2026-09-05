@@ -300,6 +300,31 @@ static int shadow_emit_quoted_include_text(CEmit* out, const char* line) {
     return cemit_fmt(out, "%s\n", s);
 }
 
+/* Map-like instances are pointers in struct fields, so a header that
+ * names one (`Map::[K,V] syms;`) only needs the tag. Forward every
+ * registered Map / ArrayMap instance once, before the first quoted
+ * include; the definition follows the include as usual. */
+static int g_shadow_map_fwd_done;
+static int shadow_emit_map_fwd_typedefs(CEmit* out) {
+    int i;
+    int any = 0;
+    if (g_shadow_map_fwd_done) return 1;
+    g_shadow_map_fwd_done = 1;
+    for (i = 0; i < g_shadow_nginst; i++) {
+        ShadowGenericInst* inst = &g_shadow_ginst[i];
+        if (inst->emitted) continue;
+        if (strcmp(inst->family, "Map") != 0 &&
+            strcmp(inst->family, "ArrayMap") != 0)
+            continue;
+        if (!cemit_fmt(out, "typedef struct %s %s;\n", inst->mangled,
+                       inst->mangled))
+            return 0;
+        any = 1;
+    }
+    if (any && !cemit_str(out, "\n")) return 0;
+    return 1;
+}
+
 /* Every factory-prerequisite quote, in item order — not "quotes that
  * happen to precede the first TU typedef". A spliced prior chapter
  * (utf8.cch) is a type decl and must not hide document.cch. */
@@ -320,6 +345,7 @@ static int shadow_emit_factory_prereq_quotes(CEmit* out,
         if (!shadow_quoted_inc_needed_before_ginst(
                 items[hi]->a, from_dir[0] ? from_dir : NULL))
             continue;
+        if (!shadow_emit_map_fwd_typedefs(out)) return 0;
         if (!shadow_emit_line(out, line_ctx, items[hi], ""))
             return 0;
         if (!shadow_emit_quoted_include_text(out, items[hi]->a))
@@ -1309,6 +1335,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                        const char* src_path) {
     memset(out, 0, sizeof(*out));
     shadow_chan_reset();
+    g_shadow_map_fwd_done = 0;
     shadow_grammar_ufcs_install();
     shadow_grammar_variant_install();
     /* Extracted `.cch` @variant is C in the `.h`; register arms so
@@ -2581,6 +2608,8 @@ ginst_emit_pass:
         for (int i = 0; i < npass_inc; i++) {
             if (!shadow_pass_inc_is_quote(pass_inc[i])) continue;
             any_quote = 1;
+            if (kind == SHADOW_EMIT_C && !shadow_emit_map_fwd_typedefs(out))
+                return 0;
             if (!shadow_emit_one_pass_inc(out, pass_inc[i], kind, NULL))
                 return 0;
         }
@@ -2590,6 +2619,7 @@ ginst_emit_pass:
                 if (!shadow_raw_is_quoted_include(items[hi])) continue;
                 if (items[hi]->e && items[hi]->e[0] && strcmp(ast_slot(items[hi]->e), "ginc") == 0)
                     continue;
+                if (!shadow_emit_map_fwd_typedefs(out)) return 0;
                 if (!shadow_emit_line(out, &line_ctx, items[hi], ""))
                     return 0;
                 if (!shadow_emit_quoted_include_text(out, items[hi]->a))

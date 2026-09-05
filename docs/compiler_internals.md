@@ -369,6 +369,14 @@ points chosen by textual position, paren-counting through literals, fixed
 expression buffers); none is a language rule. The AST probe passes with a
 local binding or an index loop in place of each shape.
 
+Two more came from moving the same types into a quoted `.cch`, and both
+are fixed in place in `pp_emit_typehooks.cch` because the clean lowerer's
+own faces need them (`tests/quote_cch_one_line_struct_smoke.ccs`): the
+header field scan read one field per source line, so a struct written on
+one line registered no fields and `c.items.push(x)` had no receiver type;
+and a `Map::[K,V]` field in a header struct never registered the instance
+the TU must emit, so the host compiler saw an unknown `Map_K_V`.
+
 ---
 
 ## 6. Comptime, type hooks, generics, header lowering
