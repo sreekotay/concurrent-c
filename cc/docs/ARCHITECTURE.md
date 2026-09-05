@@ -48,6 +48,7 @@ by policy; that is not a second lowering IR.
 | If you want to … | Read |
 |------------------|------|
 | Why this shape | §2 (constraints) + §3 (layers) + §4 (ADRs) |
+| What the pipeline actually does today, where it is fragile, what it hard-codes | [`docs/compiler_internals.md`](../../docs/compiler_internals.md) |
 | What each source file owns | [cc/shadow/README.md](../../cc/shadow/README.md) Layout |
 | Bootstrap / promote | [bootstrap README](../bootstrap/shadow_lower/README.md) |
 | What's still missing | [Own C parser](../../docs/c-parser.md); shadow_lower README **Next gaps** |
