@@ -154,7 +154,13 @@ static inline int cc_emit_cstr(CCEmitAnchor anchor, const char* c_fragment) {
  *   - The implicit params are auto-voided, so a body that ignores one needn't
  *     write `(void)...`.
  *   - `arg(i)` is shorthand for `type_args.items[i]` (C type spelling such as
- *     `long long`, or a decimal integer literal, as a string slice).
+ *     `long long`, or a decimal integer literal, as a string slice);
+ *     `arg_mangled(i)` is that argument's identifier-safe spelling, the one
+ *     the concrete name is built from (`long long` -> long_long, `Pair*` ->
+ *     Pairptr): what a template names a macro or a function after. A body
+ *     that is one `@emit` template over `${mangled}`, `${arg(i)}` and
+ *     `${arg_mangled(i)}` is a pure template the compiler fills without
+ *     running it; the C preprocessor makes any remaining choice.
  *   - The optional arity `CC_GENERIC_FACTORY(Name, N)` injects the standard guard
  *     `if (type_args.len < N || !mangled.ptr) return cc_slice_empty();`; omit it
  *     (`CC_GENERIC_FACTORY(Name)`) to do your own argument checking.

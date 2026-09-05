@@ -7598,7 +7598,14 @@ The factory body has implicit parameters and returns the definition text via
 
 **Sugar ergonomics.** The implicit parameters are auto-voided, so a body that
 ignores one needn't write `(void)…`. `arg(i)` is shorthand for
-`type_args.items[i]` (available inside factory bodies). The optional integer
+`type_args.items[i]` (available inside factory bodies), and `arg_mangled(i)`
+is that argument's identifier-safe spelling, the one the concrete name is
+built from (`long long` → `long_long`, `Pair*` → `Pairptr`, `T[:]` →
+`Tslice`): what a template names a macro or a function after. A factory
+whose `@emit` template mentions only `${mangled}`, `${arg(i)}`,
+`${arg_mangled(i)}` and locals bound to those is a pure template: the
+compiler fills it from the type arguments without running the body, and
+the C preprocessor makes any remaining choice. The optional integer
 arity in `CC_GENERIC_FACTORY(Name, N)` injects the standard guard
 `if (type_args.len < N || !mangled.ptr) return cc_slice_empty();` so the body
 needn't repeat it; omit it (`CC_GENERIC_FACTORY(Name)`) to do your own argument
