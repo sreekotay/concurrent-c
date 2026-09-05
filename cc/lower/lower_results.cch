@@ -703,6 +703,17 @@ static CcStmt* rl_scaffold(RFn* fn, CcExpr* uw, CcExpr* target, CcSpan sp) {
     return blk;
 }
 
+/* The call an unwrap form wraps. */
+static CcExpr* rl_unwrap_operand(const CcExpr* e) {
+    @switch (e->k) {
+        case .unwrap(u): return u.a;
+        case .unwrap_body(ub): return ub.a;
+        case .unwrap_or(uo): return uo.a;
+        case .unwrap_destroy(ud): return ud.a;
+        default: return NULL;
+    }
+}
+
 static bool rl_is_unwrap(const CcExpr* e) {
     if (!e) return false;
     @switch (e->k) {
@@ -764,10 +775,30 @@ static bool rl_decl_unwrap(RFn* fn, CcStmt* s, CcDecl* d, CcStmtList* out) {
 
 /* `<lhs> = <unwrap>;` and `<unwrap>;` as expression statements. */
 static bool rl_expr_stmt_unwrap(RFn* fn, CcStmt* s, CcExpr* e, CcStmtList* out) {
+    CcLowerer* L = fn->L;
     CcExpr* target = NULL;
     CcExpr* uw = NULL;
     CcStmt* blk;
     if (!e) return false;
+    {
+        /* `e !> @destroy { D };` with nothing to hold the value: a temporary does */
+        bool is_destroy = false;
+        @switch (e->k) {
+            case .unwrap_destroy: is_destroy = true; break;
+            default: break;
+        }
+        if (is_destroy) {
+            CCString nm = @string(`__cc_d${CcLowerer_temp_id(L)}`, L->arena);
+            CCSlice name = lw_keep(L, &nm);
+            CcStmt* ds = lw_decl_stmt(L, rl_typeof(L, rl_unwrap_operand(e), s->span), name, e, s->span);
+            CcDecl* dd = NULL;
+            @switch (ds->k) {
+                case .decl(x): dd = x.d; break;
+                default: break;
+            }
+            return dd ? rl_decl_unwrap(fn, ds, dd, out) : false;
+        }
+    }
     if (rl_is_unwrap(e)) uw = e;
     else {
         @switch (e->k) {
