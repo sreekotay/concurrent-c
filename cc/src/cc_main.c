@@ -851,6 +851,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
     fprintf(stderr, "  -j[N], --jobs[=N]   Parallel CC_TARGET build (default 4; 0/omit N → ncpu)\n");
     fprintf(stderr, "  --frontend=native   Front end (native only; also: CC_FRONTEND=native)\n");
+    fprintf(stderr, "  --lowerer=clean     Lower with the clean lowerer (out/cc/bin/cclower_cc; also: CC_LOWERER=clean)\n");
     fprintf(stderr, "  --version, --v, -V  Print version (MAJOR.MINOR.PATCH-SEED)\n");
     fprintf(stderr, "  --as=ccs|cch|shcc   Unit kind (else first-line header, else suffix)\n");
     fprintf(stderr, "  version=X           Pin lowerer: MAJOR.MINOR (usual), or tighter / >=X / >X / <=X / <X, or both (>=A,<B)\n");
@@ -3839,6 +3840,160 @@ static int cc__find_shadow_lower(char* dst, size_t cap) {
     return -1;
 }
 
+/* ---- The clean lowerer (`--lowerer=clean`, CC_LOWERER=clean) ----------
+ * Emits C through out/cc/bin/cclower_cc (parse, index, print with #line and
+ * a source map) instead of shadow_lower, then re-enters the raw-C path for
+ * the host compile and link. A missing tool is an error, never a fallback. */
+static int g_lowerer_clean = 0;
+
+static int cc__set_lowerer_name(const char* v) {
+    if (!v || !v[0] || strcmp(v, "shadow") == 0 || strcmp(v, "native") == 0) { g_lowerer_clean = 0; return 0; }
+    if (strcmp(v, "clean") == 0) { g_lowerer_clean = 1; return 0; }
+    fprintf(stderr, "cc: --lowerer must be clean or shadow (got %s)\n", v);
+    return -1;
+}
+
+static int cc__find_clean_tool(const char* name, char* dst, size_t cap) {
+    char shadow[PATH_MAX];
+    char dir[PATH_MAX];
+    if (g_repo_root[0]) {
+        if ((size_t)snprintf(dst, cap, "%s/out/cc/bin/%s", g_repo_root, name) < cap && access(dst, X_OK) == 0) return 0;
+        if ((size_t)snprintf(dst, cap, "%s/bin/%s", g_repo_root, name) < cap && access(dst, X_OK) == 0) return 0;
+    }
+    if (cc__find_shadow_lower(shadow, sizeof(shadow)) != 0) return -1;
+    snprintf(dir, sizeof(dir), "%s", shadow);
+    cc__dirname_inplace(dir);
+    if ((size_t)snprintf(dst, cap, "%s/%s", dir, name) >= cap) return -1;
+    return access(dst, X_OK) == 0 ? 0 : -1;
+}
+
+static void cc__clean_collect_cch(const char* dir, FILE* out, int depth) {
+    DIR* d = opendir(dir);
+    struct dirent* e;
+    if (!d || depth > 8) { if (d) closedir(d); return; }
+    while ((e = readdir(d)) != NULL) {
+        char path[PATH_MAX];
+        struct stat st;
+        size_t n;
+        if (e->d_name[0] == '.') continue;
+        if ((size_t)snprintf(path, sizeof(path), "%s/%s", dir, e->d_name) >= sizeof(path)) continue;
+        if (stat(path, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) { cc__clean_collect_cch(path, out, depth + 1); continue; }
+        n = strlen(path);
+        if (n > 4 && strcmp(path + n - 4, ".cch") == 0) fprintf(out, "%s\n", path);
+    }
+    closedir(d);
+}
+
+static int cc__run_argv(char* const argv[]) {
+    pid_t pid = fork();
+    int status;
+    if (pid < 0) return -1;
+    if (pid == 0) { execv(argv[0], argv); _exit(127); }
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+/* The typedef names of the standard headers, for the clean parser's
+ * declaration/expression ambiguity until the index provides them. Keyed by
+ * content (the parser tool and every .cch under cc/include). */
+static int cc__clean_known_types(char* dst, size_t cap) {
+    char ccparse[PATH_MAX], dir[PATH_MAX], list[PATH_MAX], key_path[PATH_MAX], tmp[PATH_MAX], tmp1[PATH_MAX];
+    uint64_t h = 1469598103934665603ULL, prev = 0;
+    FILE* f;
+    char line[PATH_MAX];
+    if (!g_repo_root[0]) { fprintf(stderr, "cc: clean lowerer: no repository root for cc/include\n"); return -1; }
+    if (cc__find_clean_tool("ccparse_cc", ccparse, sizeof(ccparse)) != 0) {
+        fprintf(stderr, "cc: clean lowerer not built (out/cc/bin/ccparse_cc missing): run `make -C cc lower-cc`\n");
+        return -1;
+    }
+    snprintf(dir, sizeof(dir), "%s/.cc-build/clean", g_out_root);
+    (void)cc__mkdir_p(dir);
+    snprintf(list, sizeof(list), "%s/stdlib_cch.txt", dir);
+    snprintf(dst, cap, "%s/known_types.txt", dir);
+    snprintf(key_path, sizeof(key_path), "%s/known_types.key", dir);
+    f = fopen(list, "w");
+    if (!f) return -1;
+    snprintf(tmp, sizeof(tmp), "%s/cc/include", g_repo_root);
+    cc__clean_collect_cch(tmp, f, 0);
+    fclose(f);
+    h = cc__fold_file_content(h, ccparse);
+    h = cc__fnv1a64_i64(h, (long long)cc_toolchain_content_fp());
+    f = fopen(list, "r");
+    if (!f) return -1;
+    while (fgets(line, sizeof(line), f)) {
+        size_t n = strlen(line);
+        while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+        if (n) h = cc__fold_file_content(h, line);
+    }
+    fclose(f);
+    if (file_exists(dst) && cc__read_u64_file(key_path, &prev) == 0 && prev == h) return 0;
+    /* Two passes: the second sees the names the first collected. */
+    snprintf(tmp1, sizeof(tmp1), "%s/known_types.pass1", dir);
+    snprintf(tmp, sizeof(tmp), "%s/known_types.tmp", dir);
+    unlink(tmp1);
+    unlink(tmp);
+    {
+        int pass;
+        for (pass = 0; pass < 2; pass++) {
+            /* argv: ccparse --quiet [--known-types pass1] --collect-types out FILES... */
+            char* argv[4096];
+            int argc = 0;
+            FILE* lf = fopen(list, "r");
+            char* names[4096];
+            int nn = 0, rc, k;
+            if (!lf) return -1;
+            argv[argc++] = ccparse;
+            argv[argc++] = (char*)"--quiet";
+            if (pass == 1) { argv[argc++] = (char*)"--known-types"; argv[argc++] = tmp1; }
+            argv[argc++] = (char*)"--collect-types";
+            argv[argc++] = pass == 0 ? tmp1 : tmp;
+            while (fgets(line, sizeof(line), lf) && argc < 4090) {
+                size_t n = strlen(line);
+                while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+                if (!n) continue;
+                names[nn] = strdup(line);
+                argv[argc++] = names[nn++];
+            }
+            fclose(lf);
+            argv[argc] = NULL;
+            rc = cc__run_argv(argv);
+            for (k = 0; k < nn; k++) free(names[k]);
+            /* diagnostics from stdlib headers the clean parser does not accept yet are not fatal here */
+            (void)rc;
+        }
+    }
+    if (rename(tmp, dst) != 0) { fprintf(stderr, "cc: clean lowerer: cannot write %s\n", dst); return -1; }
+    (void)cc__write_u64_file(key_path, h);
+    return 0;
+}
+
+/* Lower `in_path` to C with the clean lowerer into `c_out`. */
+static int cc__run_clean_lowerer(const char* in_path, const char* c_out) {
+    char tool[PATH_MAX], known[PATH_MAX];
+    char* argv[10];
+    int argc = 0, rc;
+    if (cc__find_clean_tool("cclower_cc", tool, sizeof(tool)) != 0) {
+        fprintf(stderr, "cc: clean lowerer not built (out/cc/bin/cclower_cc missing): run `make -C cc lower-cc`\n");
+        return -1;
+    }
+    if (cc__clean_known_types(known, sizeof(known)) != 0) return -1;
+    argv[argc++] = tool;
+    argv[argc++] = (char*)"--print";
+    argv[argc++] = (char*)in_path;
+    argv[argc++] = (char*)"--known-types";
+    argv[argc++] = known;
+    argv[argc++] = (char*)"-o";
+    argv[argc++] = (char*)c_out;
+    argv[argc] = NULL;
+    rc = cc__run_argv(argv);
+    if (rc != 0) {
+        fprintf(stderr, "cc: clean lowerer failed (rc=%d) on %s\n", rc, in_path);
+        return -1;
+    }
+    return 0;
+}
+
 /* Append build.cc CC_CONST bindings as host -D flags. CLI -D names are skipped
  * because build-mode already folded them into opt->cc_flags. */
 static int cc__append_build_cc_defines(char* buf, size_t cap, size_t* cflen,
@@ -4445,6 +4600,30 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                             &uk, pin, uerr, sizeof(uerr)) != 0) {
             fprintf(stderr, "%s\n", uerr);
             return -1;
+        }
+        if (g_lowerer_clean && (uk == CC_UNIT_KIND_CCS || uk == CC_UNIT_KIND_SHCC || uk == CC_UNIT_KIND_CCH)) {
+            /* Clean lowerer: emit C beside the cache, then continue as raw C
+             * (include rewrite, host compile, link happen in the driver). */
+            char dir[PATH_MAX], clean_c[PATH_MAX], stem[128];
+            CCBuildOptions o2;
+            if (uk == CC_UNIT_KIND_CCH) {
+                fprintf(stderr, "cc: the clean lowerer does not lower header units yet (%s)\n", opt->in_path);
+                return -1;
+            }
+            cc__stem_from_path(opt->in_path, stem, sizeof(stem));
+            snprintf(dir, sizeof(dir), "%s/.cc-build/clean", g_out_root);
+            (void)cc__mkdir_p(dir);
+            snprintf(clean_c, sizeof(clean_c), "%s/%s.%016llx.c", dir, stem,
+                     (unsigned long long)cc__fold_file_content(1469598103934665603ULL, opt->in_path));
+            if (cc__run_clean_lowerer(opt->in_path, clean_c) != 0) return -1;
+            if (opt->mode == CC_MODE_EMIT_C) {
+                if (cc__materialize_host_c(clean_c, opt->c_out_path) != 0) return -1;
+                if (summary_out) { memset(summary_out, 0, sizeof(*summary_out)); summary_out->c_out_path = opt->c_out_path; summary_out->did_emit_c = 1; }
+                return 0;
+            }
+            o2 = *opt;
+            o2.in_path = clean_c;
+            return compile_with_build(&o2, summary_out);
         }
         if (uk == CC_UNIT_KIND_CCS || uk == CC_UNIT_KIND_SHCC ||
             uk == CC_UNIT_KIND_CCH) {
@@ -5588,6 +5767,7 @@ static int run_build_mode(int argc, char** argv) {
         if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-g") == 0) { opt_debug = 1; continue; }
         if (strcmp(argv[i], "--summary") == 0) { summary = 1; continue; }
         if (strcmp(argv[i], "--no-cache") == 0) { no_cache = 1; continue; }
+        if (strncmp(argv[i], "--lowerer=", 10) == 0) { if (cc__set_lowerer_name(argv[i] + 10) != 0) return 2; continue; }
         if (strcmp(argv[i], "--frontend") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "cc: --frontend requires native\n");
@@ -7744,6 +7924,7 @@ int main(int argc, char **argv) {
     }
     /* Version may appear with --frontend=… ahead of it; scan once. */
     if (cc__scan_frontend_flags(argc, argv) != 0) return 2;
+    if (getenv("CC_LOWERER") && cc__set_lowerer_name(getenv("CC_LOWERER")) != 0) return 2;
     {
         int vi;
         for (vi = 1; vi < argc; vi++) {
@@ -8173,6 +8354,7 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--keep-c") == 0) { keep_c = 1; continue; }
         if (strcmp(argv[i], "--verbose") == 0) { verbose = 1; continue; }
         if (strcmp(argv[i], "--no-cache") == 0) { no_cache = 1; continue; }
+        if (strncmp(argv[i], "--lowerer=", 10) == 0) { if (cc__set_lowerer_name(argv[i] + 10) != 0) return 2; continue; }
         if (strcmp(argv[i], "--frontend") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "cc: --frontend requires native\n");
