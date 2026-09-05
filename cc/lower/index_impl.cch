@@ -2541,7 +2541,14 @@ static void cc__index_decl(CcIndex* ix, CcUnit* u, CcDecl* d, bool is_header) {
         case .tagged(tg): cc__index_tag_type(ix, u, d, tg.type, is_header); return;
         case .pp(pd): cc__index_pp(ix, u, d, pd.tok, is_header); return;
         case .typehooks(th): cc__typehooks_decl(ix, u, d, th.entries); return;
-        case .variant(vd): cc__index_named_type(ix, u, d, vd.name, NULL, is_header); return;
+        case .variant(vd): {
+            CcDeclList* vv = &ix->variants;
+            CcUnitList* vu = &ix->variant_units;
+            cc__index_named_type(ix, u, d, vd.name, NULL, is_header);
+            vv->push(d);
+            vu->push(u);
+            return;
+        }
         case .scoped_type(st): cc__index_named_type(ix, u, d, st.name, st.type, is_header); return;
         case .factory: cc__index_factory(ix, u, d); return;
         case .comptime_if(ci):
@@ -2620,6 +2627,8 @@ static CcIndex* cc_index_new(CcNameList include_dirs, CCSlice quote_dir, CcDiags
     ix->hooks = vec_new::[CcHookRegRef](a);
     ix->factories = vec_new::[CcDeclRef](a);
     ix->factory_units = vec_new::[CcUnitRef](a);
+    ix->variants = vec_new::[CcDeclRef](a);
+    ix->variant_units = vec_new::[CcUnitRef](a);
     ix->typedef_names = vec_new::[CCSlice](a);
     ix->loaded_paths = vec_new::[CCSlice](a);
     ix->loading_paths = vec_new::[CCSlice](a);

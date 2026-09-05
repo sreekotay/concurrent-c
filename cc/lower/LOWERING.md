@@ -150,6 +150,93 @@ at each exit, in reverse order, which is what the `#line` pinning needs.
 `r.error()` symmetric, `r.unwrap_or(d)` → `((r).ok ? (r).u.value : (d))`.
 These come from the index as the method set of every `CCResult_*` type.
 
+## Variants
+
+**Declaration.** `@variant V { a: A; b: B; c: void; }` is the tag enum and
+the tagged union; a void arm has no union member, and a variant whose arms
+are all void has no union:
+
+```c
+typedef enum { V_a, V_b, V_c } VKind;
+typedef struct V { VKind kind; union { A a; B b; } u; } V;
+```
+
+When an arm type carries a registered destroy chain (a `@typehooks`
+`.destroy`, or a value member with one; the `Type_destroy` naming
+convention does not count here), the drop helper follows the typedef and is
+the variant's own destroy hook, so `@destroy`, `x.destroy()` and the
+chains of enclosing structs run it:
+
+```c
+static inline void V__cc_drop(V* __v) {
+    switch (__v->kind) {
+    case V_a: { a_destroy(&__v->u.a); } break;
+    default: break;
+    }
+}
+```
+
+**Construction.** A designated initializer naming one arm gets its tag;
+the arm value moves under `.u`; a void arm keeps only the tag; `.kind =`
+passes through. The same shape serves a declaration, a compound literal,
+and an initializer nested in a struct or array initializer:
+
+```c
+V v = { .kind = V_a, .u.a = make_a() };
+V w = { .kind = V_c };
+h = (Hold){ .cell = { .kind = V_b, .u.b = 9 } };
+```
+
+A bare `.arm` resolves to `V_arm` from the type of what it is compared
+with or assigned to (`x.kind == .a`, `VKind k = .a`, `k = .b`).
+
+**Transition.** `x = { .b = e };` and `x = (V){ .b = e };` on a variant
+with a drop helper build the new value first, drop the old arm, then
+store; on a variant without one they are the plain assignment:
+
+```c
+{ V __cc_vt1 = (V){ .kind = V_b, .u.b = e }; V__cc_drop(&(x)); x = __cc_vt1; }
+```
+
+A local of a variant with a drop helper is a `@destroy` site for the
+cleanup step; one declared without a value starts with a tag past the
+arms, `V x = { .kind = (VKind)2 };`, so its first store and its scope
+exit drop nothing.
+
+**Projection.** `x.a` is `x.u.a` where a dominating check protects it: the
+case of a checked switch on `x`, or the then-branch of `if (x.kind ==
+.a)` / `if (x.kind == V_a)` (either operand order). With its own handler or
+fallback it needs none:
+
+```c
+int64_t n = ({ if ((x).kind != V_a) { return -1; } (x).u.a; });
+int64_t m = ({ __typeof__((x).u.a) __cc_pj1; if ((x).kind == V_a) { __cc_pj1 = (x).u.a; } else { __cc_pj1 = (fallback); } __cc_pj1; });
+```
+
+In the handler body and the fallback of a two-armed variant the other
+arm is protected. Anything else is a diagnostic at the `.`: an
+unprotected projection, a write to `.kind`, a reach into `.u`.
+
+**Checked switch.** `@switch (x)` on a value or pointer switches on the
+tag; `case .a:` is `case V_a:`; `case .a(bind):` opens a block that
+declares the binding from the subject and holds the statements up to the
+next label. Every arm must appear unless a `default:` forfeits the check;
+`switch (x.kind)` with `V_a` labels is checked the same way.
+
+```c
+switch ((r->del).kind) {
+    case Del_text: {
+        Buf buf = (r->del).u.text;
+        ...
+    }
+    case Del_pieces:
+        ...
+}
+```
+
+`@variant(packed)` is not lowered by the clean lowerer yet: the
+declaration is a diagnostic.
+
 ## Scratch and templates
 
 `@string(\`text ${x} more\`, arena)`:
