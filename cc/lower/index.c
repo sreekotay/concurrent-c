@@ -2282,6 +2282,11 @@ static CcMethod *cc__resolve(CcIndex *ix, CcTypeInfo *recv, CcName method, CcBuf
         const char *source = recv->is_result ? "Result" : recv->family ? "Type_method (factory instance)" : "Type_method";
         return cc__method_new(ix, recv, method, composed, source, cc__sym_origin(ix, cs), cs, 0);
     }
+    if (recv->is_result && (strcmp(method, "is_ok") == 0 || strcmp(method, "is_err") == 0 || strcmp(method, "value") == 0 ||
+                            strcmp(method, "error") == 0 || strcmp(method, "unwrap_or") == 0)) {
+        /* the spec macro defines these; a spec the unit itself emits has no symbol yet */
+        return cc__method_new(ix, recv, method, composed, "Result", "the Result spec", NULL, 1);
+    }
     if (!recv->ufcs_registered_by) cc_buf_printf(tried, " %s", composed);
 
     /* 4. cc_<snake>_method / <snake>_method (a bare type also tries the cc_ prefix) */

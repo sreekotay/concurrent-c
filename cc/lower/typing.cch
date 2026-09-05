@@ -8,6 +8,14 @@
 #define CC_LOWER_TYPING_CCH
 #include "index.cch"
 
+static CCSlice cstr_slice(const char* s) { return cc_slice_from_buffer((char*)s, strlen(s)); }
+static bool slice_eq(CCSlice a, CCSlice b) { return a.len == b.len && (a.len == 0 || memcmp(a.ptr, b.ptr, a.len) == 0); }
+static CcSym* sym_any(CcIndex* ix, CCSlice name) {
+    CcSym* !>(CcDiag) r = ix->sym(name);
+    if (r.is_ok()) return r.value();
+    return NULL;
+}
+
 /* ---- receiver typing for UFCS sites ------------------------------------ */
 
 typedef struct Scope Scope;

@@ -1,0 +1,144 @@
+#pragma(@per_tu)
+/* Clean lowerer, step: UFCS. `x.m(args)` and `p->m(args)` become the call
+ * the index resolves for the receiver's type, `callee(<recv>, args)`, with
+ * the receiver passed to fit the callee's first parameter: by address when
+ * the callee takes a pointer and the receiver is a value, itself when both
+ * agree, dereferenced when the callee takes a value and the receiver is a
+ * pointer. `Type.fn(args)` is the declared `Type_fn(args)`. What the
+ * index cannot type or resolve is a diagnostic at the site carrying its
+ * resolution ladder; nothing is guessed. Lifetime: the lowerer arena. */
+#ifndef CC_LOWER_UFCS_CCH
+#define CC_LOWER_UFCS_CCH
+#include "lower.cch"
+#include "typing.cch"
+
+static int cl_destroy_chain(CcLowerer* L, CCSlice canon, CcExpr* subject, CcStmt* into, CcSpan sp, int depth);
+
+typedef struct UStep {
+    CcLowerer* L;
+    int n_sites;
+} UStep;
+
+static bool uf_type_is_pointer(Walker* w, CcType* rt) {
+    CcType* t = peel(unalias_local(w, peel(rt)));
+    if (!t) return false;
+    return t->k.kind == CcTypeK_pointer || t->k.kind == CcTypeK_array;
+}
+
+/* A receiver that is not a simple name is parenthesized before `&` / `*`. */
+static CcExpr* uf_wrap(CcLowerer* L, CcExpr* recv, CcSpan sp) {
+    bool simple = false;
+    @switch (recv->k) {
+        case .ident: simple = true; break;
+        case .member: simple = true; break;
+        case .index: simple = true; break;
+        case .call: simple = true; break;
+        case .paren: simple = true; break;
+        default: break;
+    }
+    return simple ? recv : lw_paren(L, recv, sp);
+}
+
+static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice tn, CCSlice reason) {
+    UStep* st = (UStep*)w->env;
+    CcLowerer* L = st->L;
+    CcSpan sp = e->span;
+    CcExpr* recv_arg;
+    CcCall call;
+    bool recv_ptr;
+    st->n_sites++;
+    if (uf.targs.len()) {
+        CCString msg = @string(`'.${uf.method}::[...]' (a method with type arguments) is not lowered by the clean lowerer yet`, L->arena);
+        lw_error(L, sp, msg);
+        return;
+    }
+    if (!rt) {
+        CCSlice kind = uf.recv ? CcExpr_kind_name(uf.recv) : cc_slice_empty();
+        CCString msg = @string(`type: cannot type the receiver of '.${uf.method}' (a ${kind}); declare it with a type the index can see`, L->arena);
+        lw_error(L, sp, msg);
+        return;
+    }
+    if (!m) {
+        CCString msg = @string(`type: ${reason}`, L->arena);
+        lw_error(L, sp, msg);
+        return;
+    }
+    recv_ptr = uf.arrow || uf_type_is_pointer(w, rt);
+    if (cc_slice_eq_cstr(&uf.method, "destroy") && cc_slice_eq_cstr(&m->source, "typehooks") && !uf.args.len()) {
+        /* `x.destroy()` is the whole chain: the hook, then the value members' */
+        CcStmt* blk = lw_block(L, sp);
+        CcExpr* subject = recv_ptr ? cc_expr_unary(CC_OP_DEREF, uf_wrap(L, uf.recv, sp), sp, L->arena) : uf.recv;
+        CcStmtExpr se;
+        cl_destroy_chain(L, tn, subject, blk, sp, 0);
+        se.block = blk;
+        e->k = { .stmt_expr = se };
+        return;
+    }
+    if (m->recv_by_ptr) recv_arg = recv_ptr ? uf.recv : cc_expr_unary(CC_OP_ADDR, uf_wrap(L, uf.recv, sp), sp, L->arena);
+    else recv_arg = recv_ptr ? cc_expr_unary(CC_OP_DEREF, uf_wrap(L, uf.recv, sp), sp, L->arena) : uf.recv;
+    call.callee = lw_ident(L, m->callee, sp);
+    call.args = vec_new::[CcExprRef](L->arena);
+    call.args.push(recv_arg);
+    {
+        CcExprList* args = &uf.args;
+        size_t n = args->len();
+        size_t i;
+        for (i = 0; i < n; i++) {
+            CcExpr* a = *args->get_ptr(i);
+            call.args.push(a);
+        }
+    }
+    e->k = { .call = call };
+    (void)tn;
+}
+
+/* `Type.fn(args)` -> `Type_fn(args)`, when that function is declared. */
+static bool uf_type_scoped_visit(CcExpr* e, void* env) {
+    UStep* st = (UStep*)env;
+    CcLowerer* L = st->L;
+    CcTypeScoped ts;
+    bool hit = false;
+    @switch (e->k) {
+        case .type_scoped(x): ts = x; hit = true; break;
+        default: break;
+    }
+    if (!hit) return true;
+    {
+        CcIndex* ix = L->ix;
+        CCSlice tn = ts.type ? ix->canon(ts.type) : cc_slice_empty();
+        CCString nm = @string(`${tn}_${ts.fn}`, L->arena);
+        CCSlice fname = lw_keep(L, &nm);
+        CcSym* sym = ix->sym(fname) ?> NULL;
+        CcCall call;
+        if (!tn.len || !sym) {
+            CCString msg = @string(`type: no function '${fname}' for '${tn}.${ts.fn}(...)'`, L->arena);
+            lw_error(L, e->span, msg);
+            return true;
+        }
+        call.callee = lw_ident(L, fname, e->span);
+        call.args = ts.args;
+        e->k = { .call = call };
+    }
+    return true;
+}
+
+static void CcLowerer_ufcs(CcLowerer* L) {
+    Walker w;
+    UStep st;
+    CcVisitor v;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_ufcs = uf_rewrite;
+    w.env = &st;
+    tw_unit(&w);
+    memset(&v, 0, sizeof(v));
+    v.expr = uf_type_scoped_visit;
+    v.env = &st;
+    CcUnit_walk(L->unit, v);
+}
+
+#endif

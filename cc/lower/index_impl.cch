@@ -3151,6 +3151,11 @@ static CcMethod* cc__resolve_registered(CcIndex* ix, CcTypeInfo* recv, CCSlice m
     return NULL;
 }
 
+/* The methods every Result spec defines (by value). */
+static bool cc__is_result_method(CCSlice m) {
+    return cc__eqc(m, "is_ok") || cc__eqc(m, "is_err") || cc__eqc(m, "value") || cc__eqc(m, "error") || cc__eqc(m, "unwrap_or");
+}
+
 /* 3. Type_method (a Result spec's methods are this, from the spec macro);
  * a tagged receiver composes with its tag (`struct Point` -> Point_sum) */
 static CcMethod* cc__resolve_type_method(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, CCSlice base_name) {
@@ -3159,6 +3164,10 @@ static CcMethod* cc__resolve_type_method(CcIndex* ix, CcTypeInfo* recv, CCSlice 
     if (cs) {
         const char* source = recv->is_result ? "Result" : recv->family.len ? "Type_method (factory instance)" : "Type_method";
         return cc__method_new(ix, recv, method, composed, source, cc__sym_origin(ix, cs), cs, false);
+    }
+    if (recv->is_result && cc__is_result_method(method)) {
+        /* the spec macro defines these; a spec the unit itself emits has no symbol yet */
+        return cc__method_new(ix, recv, method, composed, "Result", cc__ix_s("the Result spec"), NULL, true);
     }
     if (!recv->ufcs_registered_by.len) cc__tried(tried, ta, composed, NULL);
     return NULL;
