@@ -1,0 +1,1 @@
+the receiver type of a multi-segment path is taken from the first identifier ('no UFCS method push for receiver type Node'); binding 'Call* c = &n->call' first works

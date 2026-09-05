@@ -1,0 +1,26 @@
+/* A struct holding `Vec::[Ref]` where `Ref` is a typedef of a pointer to a
+ * type defined later. The instance only needs the typedef, which precedes it. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/vec.cch>
+#include <ccc/stdio.cch>
+
+typedef struct Node Node;
+typedef Node* NodeRef;
+
+typedef struct Call { Vec::[NodeRef] args; } Call;
+
+@variant Node {
+    num: int;
+    call: Call;
+};
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    Node leaf = { .num = 7 };
+    Node n = { .call = { .args = vec_new::[NodeRef](a) } };
+    if (n.kind == Node_call) n.call.args.push(&leaf);
+    int len = 0;
+    if (n.kind == Node_call) len = (int)n.call.args.len();
+    println(@string(`${len}`, @scratch));
+    return 0;
+}

@@ -348,6 +348,27 @@ passes it, and the user gets the host compiler's "has no member named
 'foo'". The same applies to any CC sugar inside an opaque span that
 happens not to contain a banned `@token`, `!>`, `[:]` or `::`.
 
+### 5.9 Shapes an AST needs that the engine refuses
+
+Writing a tree of `@variant` nodes with `Vec` children and a template
+printer (`stress/break/break_ast_cc_way_smoke.ccs`) trips seven distinct
+defects, each pinned by a sibling `break_*` test with an `.xfail` marker:
+
+| Shape | What happens today | Test |
+|-------|--------------------|------|
+| `Vec::[T*]` | no instance is emitted for a pointer element; with a typedef, `@for` types the element as an opaque value and refuses `p->v` | `break_vec_of_pointers` |
+| `Vec::[Ref]` field in a struct declared before `Ref`'s pointee | the instance is spliced after the pointee's definition, after the struct that needs it | `break_vec_field_before_elem_def` |
+| `n->call.args.push(x)` | receiver type is taken from the first identifier of the path (`Node`) | `break_ufcs_through_arm_field` |
+| `@for (x in c->xs)` with `c` a `case .arm(c)` binding | the `@for` is left in the C (`stray '@'`) | `break_for_in_case_binding` |
+| a pointer local named `xs` in one function | `c.xs.push` in another function is typed as a pointer: local types are keyed by bare name per file | `break_local_scope_leak` |
+| `@string(\`${n}(\`, a)` | the argument scanner counts parentheses inside the backtick text | `break_template_lone_paren` |
+| `return cc_ok(@string(\`(${l} ${r})\`, a))` | the emitted expression is clipped at about 330 characters | `break_template_in_return_ok` |
+
+Every one is a text-engine property (name-keyed type tracking, splice
+points chosen by textual position, paren-counting through literals, fixed
+expression buffers); none is a language rule. The AST probe passes with a
+local binding or an index loop in place of each shape.
+
 ---
 
 ## 6. Comptime, type hooks, generics, header lowering

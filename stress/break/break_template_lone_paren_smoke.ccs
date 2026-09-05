@@ -1,0 +1,13 @@
+/* Template text may contain an unbalanced parenthesis: it is text, not an
+ * argument list. Build a call spelling in two halves. */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    CCSlice n = CC_SLICE_LIT("f");
+    CCString open = @string(`${n}(`, a);
+    CCString whole = @string(`${open}x)`, a);
+    println(@string(`${whole}`, @scratch));
+    return 0;
+}

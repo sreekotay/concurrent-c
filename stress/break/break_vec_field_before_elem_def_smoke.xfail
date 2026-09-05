@@ -1,0 +1,1 @@
+the generic instance is spliced after the definition of Node, which is after the struct that uses it ('unknown type name CCVec_NodeRef'); the splice point must follow the typedef the instance names, not the type behind the pointer

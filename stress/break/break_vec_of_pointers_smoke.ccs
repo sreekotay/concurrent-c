@@ -1,0 +1,18 @@
+/* `Vec::[T*]` is an ordinary instance: the element type is a pointer. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/vec.cch>
+#include <ccc/stdio.cch>
+
+typedef struct Leaf { int v; } Leaf;
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    Leaf x = { 1 }, y = { 2 };
+    Vec::[Leaf*] v = vec_new::[Leaf*](a);
+    v.push(&x);
+    v.push(&y);
+    int sum = 0;
+    @for (p in v) sum += p->v;
+    println(@string(`${v.len()} ${sum}`, @scratch));
+    return 0;
+}

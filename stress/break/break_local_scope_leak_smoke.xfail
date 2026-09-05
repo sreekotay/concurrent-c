@@ -1,0 +1,1 @@
+the pointer local 'xs' in total() makes 'c.xs.push' in main() be typed as a pointer ('UFCS on pointer type CCVec_int uses ->, not .'); local types are keyed by bare name across the whole file
