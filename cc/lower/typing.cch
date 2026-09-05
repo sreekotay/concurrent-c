@@ -1,0 +1,1001 @@
+#pragma(@per_tu)
+/* Receiver typing for UFCS call sites, shared by the index tool (which
+ * records sites) and the clean lowerer (which rewrites them). A walk over
+ * a unit keeps a scope of the locals in view and types each receiver
+ * expression from them, the index's symbols and the struct layouts;
+ * every UFCS node reaches `on_ufcs` with its type and resolution. */
+#ifndef CC_LOWER_TYPING_CCH
+#define CC_LOWER_TYPING_CCH
+#include "index.cch"
+
+/* ---- receiver typing for UFCS sites ------------------------------------ */
+
+typedef struct Scope Scope;
+struct Scope {
+    Scope* up;
+    CcNameList names;
+    CcTypeList types;
+};
+
+typedef struct Walker {
+    CCArena arena;              /* synthesized types and scopes live here */
+    CcIndex* ix;
+    CcUnit* unit;
+    Scope* scope;
+    /* called at every UFCS call site with the receiver's type (NULL when
+     * unknown) and the resolution (NULL with `reason` when none) */
+    void (*on_ufcs)(struct Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice type_name, CCSlice reason);
+    void* env;
+} Walker;
+
+static void sc_push(Walker* w) {
+    Scope* sc = cc_arena_alloc(w->arena, sizeof(Scope), _Alignof(Scope));
+    sc->up = w->scope;
+    sc->names = vec_new::[CCSlice](w->arena);
+    sc->types = vec_new::[CcTypeRef](w->arena);
+    w->scope = sc;
+}
+
+static void sc_pop(Walker* w) { w->scope = w->scope->up; }
+
+static void sc_declare(Walker* w, CCSlice name, CcType* type) {
+    CcNameList* namev;
+    CcTypeList* typev;
+    if (!name.len || !w->scope) return;
+    namev = &w->scope->names;
+    typev = &w->scope->types;
+    namev->push(name);
+    typev->push(type);
+}
+
+static CcType* sc_lookup(Walker* w, CCSlice name) {
+    Scope* sc;
+    for (sc = w->scope; sc; sc = sc->up) {
+        CcNameList* namev = &sc->names;
+        CcTypeList* typev = &sc->types;
+        size_t i = namev->len();
+        while (i--)
+            if (slice_eq(*namev->get_ptr(i), name)) return *typev->get_ptr(i);
+    }
+    return NULL;
+}
+
+static CcType* type_of_expr(Walker* w, CcExpr* e);
+
+static CcType* peel(CcType* t) {
+    for (;;) {
+        CcType* inner = NULL;
+        if (!t) return NULL;
+        @switch (t->k) {
+            case .pointer(pt): inner = pt.pointee; break;
+            case .atomic(at): inner = at.pointee; break;
+            case .array(ar): inner = ar.elem; break;
+            default: return t;
+        }
+        t = inner;
+    }
+}
+
+static bool type_named_name(CcType* t, CCSlice* out) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .named(n): *out = n.name; return true;
+        default: return false;
+    }
+}
+
+/* A local typedef name resolves to the type it aliases. */
+static CcType* unalias_local(Walker* w, CcType* t) {
+    int depth = 0;
+    CCSlice nm;
+    while (t && type_named_name(t, &nm) && nm.len && depth++ < 8) {
+        CCString sb = cc_string_new();
+        CcType* a;
+        sb.push_cstr("typedef ", w->arena);
+        sb.push_slice(nm, w->arena);
+        a = sc_lookup(w, cc_string_persist_slice(w->arena, &sb));
+        if (!a) break;
+        t = a;
+    }
+    return t;
+}
+
+static CcSpan span0(void) {
+    CcSpan sp;
+    sp.first = 0;
+    sp.last = 0;
+    return sp;
+}
+
+static CcType* named(Walker* w, const char* name) {
+    return cc_type_named(cstr_slice(name), span0(), w->arena);
+}
+
+static CcType* synth_pointer(Walker* w, CcType* base) {
+    return cc_type_pointer(base, span0(), w->arena);
+}
+
+static CcType* synth_slice(Walker* w, CcType* base) {
+    CcType* t = cc_type_named(CC_SLICE_LIT("?"), span0(), w->arena);
+    CcSliceType sl;
+    sl.elem = base;
+    sl.fixed = NULL;
+    sl.unique = false;
+    sl.sentinel = false;
+    t->k = { .slice = sl };
+    return t;
+}
+
+static bool type_record(CcType* t, CcRecordType* out) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .record(rc): *out = rc; return true;
+        default: return false;
+    }
+}
+
+/* The struct definition a type resolves to (typedef chains and tags). */
+static bool struct_of_type(Walker* w, CcType* t, int depth, CcRecordType* out) {
+    CcIndex* ix = w->ix;
+    CcSym* sym;
+    CcRecordType rc;
+    CCSlice nm;
+    int kind;
+    if (!t || depth > 8) return false;
+    t = peel(t);
+    if (!t) return false;
+    if (type_record(t, &rc)) {
+        CcFieldList* fieldv = &rc.fields;
+        if (fieldv->len()) { *out = rc; return true; }
+        if (rc.tag.len) {
+            CCString sb = cc_string_new();
+            CcRecordType trc;
+            sb.push_cstr(rc.is_union ? "union " : "struct ", w->arena);
+            sb.push_slice(rc.tag, w->arena);
+            sym = sym_any(ix, cc_string_persist_slice(w->arena, &sb));
+            if (sym && sym->type && type_record(sym->type, &trc)) {
+                CcFieldList* tfieldv = &trc.fields;
+                if (tfieldv->len()) { *out = trc; return true; }
+            }
+        }
+        return false;
+    }
+    kind = (int)t->k.kind;
+    if (type_named_name(t, &nm) && nm.len) {
+        CCSlice cn = ix->canon(t);
+        sym = sym_any(ix, cn);
+        if (!sym || sym->kind != CC_SYM_TYPE) return false;
+        if (sym->type == t) return false;
+        return struct_of_type(w, sym->type, depth + 1, out);
+    }
+    if (kind == (int)CcTypeK_generic || kind == (int)CcTypeK_slice) {
+        CCSlice cn = ix->canon(t);
+        sym = sym_any(ix, cn);
+        if (sym && sym->kind == CC_SYM_TYPE && sym->type && sym->type != t) return struct_of_type(w, sym->type, depth + 1, out);
+    }
+    return false;
+}
+
+static CcType* field_of_record(CcRecordType st, CCSlice field) {
+    CcFieldList* fieldv = &st.fields;
+    size_t i;
+    size_t n = fieldv->len();
+    for (i = 0; i < n; i++) {
+        CcField* f = fieldv->get_ptr(i);
+        if (f->name.len && slice_eq(f->name, field)) return f->type;
+        if (!f->name.len && f->type) {
+            CcRecordType inner;
+            if (type_record(f->type, &inner)) {
+                CcFieldList* innerv = &inner.fields;
+                size_t k;
+                size_t m = innerv->len();
+                for (k = 0; k < m; k++) {
+                    CcField* g = innerv->get_ptr(k);
+                    if (g->name.len && slice_eq(g->name, field)) return g->type;
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+static CcType* field_type(Walker* w, CcType* recv, CCSlice field) {
+    CcRecordType st;
+    if (!struct_of_type(w, unalias_local(w, peel(recv)), 0, &st)) return NULL;
+    return field_of_record(st, field);
+}
+
+static CcType* return_type_of_sym(CcSym* sym) {
+    if (!sym || sym->kind != CC_SYM_FUNC || !sym->type) return NULL;
+    @switch (sym->type->k) {
+        case .func(fn): return fn.ret;
+        default: return NULL;
+    }
+}
+
+static bool is_typeof_without_type(CcType* t) {
+    @switch (t->k) {
+        case .typeof_(tf): return !tf.type;
+        default: return false;
+    }
+}
+
+static CcMethod* resolve_site(Walker* w, CcType* recv_type, CCSlice method, CCSlice* type_name, CCSlice* reason) {
+    CcIndex* ix = w->ix;
+    CcType* t = peel(unalias_local(w, peel(recv_type)));
+    CcTypeInfo* info;
+    *type_name = cc_slice_empty();
+    *reason = cc_slice_empty();
+    if (!t) return NULL;
+    if (is_typeof_without_type(t)) return NULL;
+    *type_name = ix->canon(t);
+    info = ix->type_get(*type_name);
+    {
+        CcMethod* !>(CcDiag) r = ix->method(info, method, w->arena);
+        if (r.is_ok()) return r.value();
+        {
+            CcDiag d = r.error();
+            *reason = d.msg;
+        }
+    }
+    return NULL;
+}
+
+/* The tokens the tool reads are always the unit's: a slot expression inside
+ * a template indexes its own tape, and the reference reads the unit's file
+ * with that span anyway; the two agree on that. */
+static const CcToken* unit_tok(Walker* w, uint32_t i) {
+    CcTape* tp = &w->unit->tape;
+    size_t n = tp->toks.len();
+    if (i >= n) i = (uint32_t)(n - 1);
+    return tp->toks.get_ptr(i);
+}
+
+static CcType* type_of_number(Walker* w, CcLiteral lit) {
+    const CcToken* t = unit_tok(w, lit.tok);
+    CCSlice txt = t->text;
+    bool hex = txt.len > 1 && txt.ptr[0] == '0' && (txt.ptr[1] == 'x' || txt.ptr[1] == 'X');
+    size_t k;
+    for (k = 0; k < txt.len; k++) {
+        char c = txt.ptr[k];
+        if (c == '.' || (!hex && (c == 'e' || c == 'E')))
+            return named(w, (txt.ptr[txt.len - 1] == 'f' || txt.ptr[txt.len - 1] == 'F') ? "float" : "double");
+    }
+    return named(w, "int");
+}
+
+static CcType* type_of_ident(Walker* w, CCSlice name) {
+    CcType* t = sc_lookup(w, name);
+    CcSym* sym;
+    if (t) return t;
+    sym = sym_any(w->ix, name);
+    if (sym && sym->kind == CC_SYM_VAR) return sym->type;
+    return NULL;
+}
+
+static CcType* type_of_unary(Walker* w, CcUnary un) {
+    if (un.op == CC_OP_ADDR) return synth_pointer(w, type_of_expr(w, un.a));
+    if (un.op == CC_OP_DEREF) {
+        CcType* t = type_of_expr(w, un.a);
+        if (!t) return NULL;
+        @switch (t->k) {
+            case .pointer(pt): return pt.pointee;
+            case .array(ar): return ar.elem;
+            default: return NULL;
+        }
+    }
+    return type_of_expr(w, un.a);
+}
+
+static CcType* elem_of_indexable(CcType* t) {
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .pointer(pt): return pt.pointee;
+        case .array(ar): return ar.elem;
+        case .slice(sl): return sl.elem;
+        default: return NULL;
+    }
+}
+
+static CcExpr* strip_parens_expr(CcExpr* e) {
+    for (;;) {
+        CcExpr* inner = NULL;
+        if (!e) return NULL;
+        @switch (e->k) {
+            case .paren(pa): inner = pa.a; break;
+            default: return e;
+        }
+        e = inner;
+    }
+}
+
+static bool expr_ident(CcExpr* e, CCSlice* name) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .ident(nm): *name = nm; return true;
+        default: return false;
+    }
+}
+
+static bool expr_arrow_member(CcExpr* e, CcExpr** recv, CCSlice* name) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .member(mb):
+            if (mb.arrow && mb.name.len) { *recv = mb.a; *name = mb.name; return true; }
+            return false;
+        default: return false;
+    }
+}
+
+static CcType* type_of_call(Walker* w, CcCall cl) {
+    CcExpr* c = strip_parens_expr(cl.callee);
+    CCSlice nm;
+    CcExpr* recv;
+    if (expr_ident(c, &nm)) return return_type_of_sym(sym_any(w->ix, nm));
+    if (expr_arrow_member(c, &recv, &nm)) {
+        /* `p->m(args)`: a method call unless the struct has a field `m` */
+        CcType* rt = type_of_expr(w, recv);
+        CCSlice tn;
+        CCSlice reason;
+        CcMethod* m;
+        if (!rt) return NULL;
+        if (field_type(w, rt, nm)) return NULL;
+        m = resolve_site(w, rt, nm, &tn, &reason);
+        if (m && m->sym) return return_type_of_sym(m->sym);
+    }
+    return NULL;
+}
+
+static CcType* type_of_type_scoped(Walker* w, CcTypeScoped ts) {
+    CCSlice tn;
+    CCString sb = cc_string_new();
+    if (!ts.type) return NULL;
+    tn = w->ix->canon(ts.type);
+    sb.push_slice(tn, w->arena);
+    sb.push_char('_', w->arena);
+    sb.push_slice(ts.fn, w->arena);
+    return return_type_of_sym(sym_any(w->ix, cc_string_persist_slice(w->arena, &sb)));
+}
+
+static CcType* type_of_ufcs(Walker* w, CcUfcs uf) {
+    CcType* rt = type_of_expr(w, uf.recv);
+    CCSlice tn;
+    CCSlice reason;
+    CcMethod* m = rt ? resolve_site(w, rt, uf.method, &tn, &reason) : NULL;
+    if (m && m->sym) return return_type_of_sym(m->sym);
+    return NULL;
+}
+
+static bool type_result_value(CcType* t, CcType** value) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .result(rs): *value = rs.value; return true;
+        default: return false;
+    }
+}
+
+static CcType* type_of_unwrapped(Walker* w, CcExpr* a) {
+    CcType* t = type_of_expr(w, a);
+    CcType* value;
+    if (t && type_result_value(t, &value)) return value;
+    if (t) {
+        /* a Result spelled by its mangled name (`CCResult_int_CCError mk(int)`) */
+        CcTypeInfo* !>(CcDiag) r = w->ix->type(w->ix->canon(peel(t)));
+        if (r.is_ok()) {
+            CcTypeInfo* info = r.value();
+            if (info->is_result) return info->result_value ? info->result_value : named(w, "void");
+        }
+    }
+    return NULL;
+}
+
+static CcType* type_of_expr(Walker* w, CcExpr* e) {
+    if (!e) return NULL;
+    @switch (e->k) {
+        case .ident(nm): return type_of_ident(w, nm);
+        case .paren(pa): return type_of_expr(w, pa.a);
+        case .cast(ca): return ca.type;
+        case .compound(cl): return cl.type;
+        case .string: return synth_pointer(w, named(w, "char"));
+        case .number(lit): return type_of_number(w, lit);
+        case .unary(un): return type_of_unary(w, un);
+        case .assign(as): return type_of_expr(w, as.a);
+        case .ternary(te): return type_of_expr(w, te.a);
+        case .comma(cm): return type_of_expr(w, cm.b);
+        case .member(mb): {
+            CcType* t = type_of_expr(w, mb.a);
+            if (!t) return NULL;
+            return field_type(w, t, mb.name);
+        }
+        case .index(ix2): return elem_of_indexable(type_of_expr(w, ix2.a));
+        case .call(cl): return type_of_call(w, cl);
+        case .type_scoped(ts): return type_of_type_scoped(w, ts);
+        case .ufcs(uf): return type_of_ufcs(w, uf);
+        case .unwrap(uw): return type_of_unwrapped(w, uw.a);
+        case .unwrap_body(ub): return type_of_unwrapped(w, ub.a);
+        case .unwrap_or(uo): return type_of_unwrapped(w, uo.a);
+        case .unwrap_destroy(ud): return type_of_unwrapped(w, ud.a);
+        case .template(tp): return tp.arena ? named(w, "CCString") : synth_slice(w, named(w, "char"));
+        case .slice_lit: return synth_slice(w, named(w, "char"));
+        case .await_(aw): return type_of_expr(w, aw.a);
+        case .call_mode(cmd): return type_of_expr(w, cmd.a);
+        case .comptime(ce): return type_of_expr(w, ce.a);
+        default: return NULL;
+    }
+}
+
+static void tw_stmt(Walker* w, CcStmt* s);
+static void tw_expr(Walker* w, CcExpr* e);
+
+static void tw_init(Walker* w, CcInit* in) {
+    CcInitList* itemsv;
+    size_t i;
+    size_t n;
+    if (!in) return;
+    if (in->expr) tw_expr(w, in->expr);
+    itemsv = &in->items;
+    n = itemsv->len();
+    for (i = 0; i < n; i++) tw_init(w, *itemsv->get_ptr(i));
+}
+
+/* A local typedef: kept in scope with a marker name so a receiver of that
+ * type resolves through the aliased type. */
+static void declare_local_typedef(Walker* w, CcTypedefDecl td) {
+    CCString sb = cc_string_new();
+    sb.push_cstr("typedef ", w->arena);
+    sb.push_slice(td.name, w->arena);
+    sc_declare(w, cc_string_persist_slice(w->arena, &sb), td.type);
+}
+
+static void tw_decl_local(Walker* w, CcDecl* d) {
+    if (!d) return;
+    @switch (d->k) {
+        case .var(v):
+            sc_declare(w, v.name, v.type);
+            tw_init(w, v.init);
+            if (v.destroy_body) tw_stmt(w, v.destroy_body);
+            return;
+        case .func(f):
+            if (f.body) tw_stmt(w, f.body);
+            return;
+        case .typedef_(td): declare_local_typedef(w, td); return;
+        default: return;
+    }
+}
+
+/* The root identifier of a receiver chain, through parens, unwraps and UFCS. */
+static CcExpr* chain_root(CcExpr* root) {
+    for (;;) {
+        CcExpr* inner = NULL;
+        if (!root) return NULL;
+        @switch (root->k) {
+            case .paren(pa): inner = pa.a; break;
+            case .unwrap(uw): inner = uw.a; break;
+            case .unwrap_or(uo): inner = uo.a; break;
+            case .unwrap_body(ub): inner = ub.a; break;
+            case .ufcs(uf): inner = uf.recv; break;
+            default: return root;
+        }
+        root = inner;
+    }
+}
+
+static void visit_ufcs(Walker* w, CcExpr* e, CcUfcs uf) {
+    CcType* rt;
+    CcMethod* m = NULL;
+    CCSlice tn = cc_slice_empty();
+    CCSlice reason = cc_slice_empty();
+    /* the parser spells `@parallel ... wait (ts)` and the join's `!>.wait()` tail
+     * as UFCS nodes on the ident `@parallel`: not user call sites */
+    {
+        CcExpr* root = chain_root(uf.recv);
+        CCSlice rn;
+        if (root && expr_ident(root, &rn) && rn.len && rn.ptr[0] == '@') return;
+    }
+    rt = type_of_expr(w, uf.recv);
+    /* the C-member-first rule: `x.cb()` where `cb` is a field is a C call */
+    if (rt && field_type(w, rt, uf.method)) return;
+    if (rt) m = resolve_site(w, rt, uf.method, &tn, &reason);
+    if (w->on_ufcs) w->on_ufcs(w, e, uf, rt, m, tn, reason);
+}
+
+/* `p->m(args)` arrives as a UFCS node with `arrow` set. It is a site unless
+ * the struct really has a field `m` (a function-pointer call: plain C). */
+static void visit_ufcs_maybe_field(Walker* w, CcExpr* e, CcUfcs uf) {
+    if (uf.arrow && uf.recv && uf.method.len) {
+        CcType* rt = type_of_expr(w, uf.recv);
+        if (rt && field_type(w, rt, uf.method)) return;
+    }
+    visit_ufcs(w, e, uf);
+}
+
+static bool stmt_expr_call_of_ident(CcStmt* t, CcExpr** call) {
+    CcExpr* e = NULL;
+    CCSlice nm;
+    @switch (t->k) {
+        case .expr(es): e = es.e; break;
+        default: return false;
+    }
+    if (!e) return false;
+    @switch (e->k) {
+        case .call(cl):
+            if (expr_ident(cl.callee, &nm)) { *call = e; return true; }
+            return false;
+        default: return false;
+    }
+}
+
+static bool stmt_var_decl(CcStmt* t, CCSlice* name, CcType** type) {
+    CcDecl* d = NULL;
+    @switch (t->k) {
+        case .decl(dd): d = dd.d; break;
+        default: return false;
+    }
+    if (!d) return false;
+    @switch (d->k) {
+        case .var(v): *name = v.name; *type = v.type; return true;
+        default: return false;
+    }
+}
+
+/* A statement-level macro invocation (`cc_arena_stack(a, n);`) may declare
+ * locals: expand it and read the declarations out of the expansion. A
+ * macro whose expansion invokes other macros is followed a few levels. */
+static void declare_from_macro_text(Walker* w, CCSlice text, int depth) {
+    CcDiags scratch = CcDiags_new(w->arena);
+    CcUnit* u;
+    CCString sb = cc_string_new();
+    CcDeclList* declv;
+    CcStmt* body = NULL;
+    CcStmtList stmts;
+    size_t i;
+    size_t n;
+    if (depth > 4) return;
+    sb.push_cstr("void __cc_probe(void) {\n", w->arena);
+    sb.push_slice(text, w->arena);
+    sb.push_cstr(";\n}\n", w->arena);
+    {
+        CcParseOpts po;
+        CcIndex* ix = w->ix;
+        CCSlice label = cc_slice_from_buffer((char*)"<macro statement>", strlen("<macro statement>"));
+        po.mode = CC_UNIT_SOURCE;
+        po.known_types = ix->known_types();
+        u = cc_parse_unit(label, cc_string_persist_slice(w->arena, &sb), po, &scratch, w->arena);
+    }
+    declv = &u->decls;
+    if (declv->len() != 1) return;
+    {
+        CcDecl* d = *declv->get_ptr(0);
+        @switch (d->k) {
+            case .func(f): body = f.body; break;
+            default: return;
+        }
+    }
+    if (!body) return;
+    @switch (body->k) {
+        case .block(b): stmts = b.stmts; break;
+        default: return;
+    }
+    n = stmts.len();
+    for (i = 0; i < n; i++) {
+        CcStmt* t = *stmts.get_ptr(i);
+        CCSlice vname;
+        CcType* vtype;
+        CcExpr* call;
+        if (stmt_var_decl(t, &vname, &vtype)) sc_declare(w, vname, vtype);
+        if (stmt_expr_call_of_ident(t, &call)) {
+            CCSlice inner = w->ix->expand_call(u, t->span);
+            if (inner.len) declare_from_macro_text(w, inner, depth + 1);
+        }
+    }
+}
+
+static void declare_from_macro_stmt(Walker* w, CcStmt* s) {
+    CcExpr* call;
+    CCSlice text;
+    if (!stmt_expr_call_of_ident(s, &call)) return;
+    text = w->ix->expand_call(w->unit, call->span);
+    if (text.len) declare_from_macro_text(w, text, 0);
+}
+
+static void tw_exprs(Walker* w, CcExprList list) {
+    size_t i;
+    size_t n = list.len();
+    for (i = 0; i < n; i++) tw_expr(w, *list.get_ptr(i));
+}
+
+static void tw_template(Walker* w, CcTemplate tp) {
+    CcTplPartList parts = tp.parts;
+    size_t i;
+    size_t n = parts.len();
+    tw_expr(w, tp.policy);
+    for (i = 0; i < n; i++) tw_expr(w, parts.get_ptr(i)->slot);
+    tw_expr(w, tp.arena);
+}
+
+static void tw_scoped_body(Walker* w, CcStmt* body) {
+    if (!body) return;
+    sc_push(w);
+    tw_stmt(w, body);
+    sc_pop(w);
+}
+
+static void tw_closure(Walker* w, CcClosure cl) {
+    CcParamList params = cl.params;
+    size_t i;
+    size_t n = params.len();
+    sc_push(w);
+    for (i = 0; i < n; i++) {
+        CcParam* p = params.get_ptr(i);
+        sc_declare(w, p->name, p->type);
+    }
+    if (cl.body) tw_stmt(w, cl.body);
+    sc_pop(w);
+}
+
+static void tw_unwrap_body(Walker* w, CcUnwrapBody ub) {
+    tw_expr(w, ub.a);
+    if (ub.body) {
+        sc_push(w);
+        if (ub.binder.len && ub.a) {
+            CcType* t = type_of_expr(w, ub.a);
+            CcType* err = NULL;
+            if (t) {
+                @switch (t->k) {
+                    case .result(rs): err = rs.err; break;
+                    default: break;
+                }
+            }
+            sc_declare(w, ub.binder, err);
+        }
+        tw_stmt(w, ub.body);
+        sc_pop(w);
+    }
+}
+
+static void tw_generic_sel(Walker* w, CcGenericSel gs) {
+    Vec::[CcGenericSelArm] arms = gs.arms;
+    size_t i;
+    size_t n = arms.len();
+    tw_expr(w, gs.control);
+    for (i = 0; i < n; i++) tw_expr(w, arms.get_ptr(i)->expr);
+}
+
+static void tw_expr_b(Walker* w, CcExpr* e);
+
+static void tw_expr(Walker* w, CcExpr* e) {
+    if (!e) return;
+    @switch (e->k) {
+        case .ufcs(uf): visit_ufcs_maybe_field(w, e, uf); tw_expr(w, uf.recv); tw_exprs(w, uf.args); return;
+        case .closure(cl): tw_closure(w, cl); return;
+        case .paren(pa): tw_expr(w, pa.a); return;
+        case .unary(un): tw_expr(w, un.a); return;
+        case .binary(bi): tw_expr(w, bi.a); tw_expr(w, bi.b); return;
+        case .assign(as): tw_expr(w, as.a); tw_expr(w, as.b); return;
+        case .ternary(te): tw_expr(w, te.c); tw_expr(w, te.a); tw_expr(w, te.b); return;
+        case .call(cl): tw_expr(w, cl.callee); tw_exprs(w, cl.args); return;
+        case .index(ix2): tw_expr(w, ix2.a); tw_expr(w, ix2.i); return;
+        case .member(mb): tw_expr(w, mb.a); return;
+        case .cast(ca): tw_expr(w, ca.a); return;
+        case .compound(cl): tw_init(w, cl.init); return;
+        case .generic_sel(gs): tw_generic_sel(w, gs); return;
+        case .stmt_expr(se): tw_scoped_body(w, se.block); return;
+        case .comma(cm): tw_expr(w, cm.a); tw_expr(w, cm.b); return;
+        default: tw_expr_b(w, e); return;
+    }
+}
+
+static void tw_expr_b(Walker* w, CcExpr* e) {
+    @switch (e->k) {
+        case .type_scoped(ts): tw_exprs(w, ts.args); return;
+        case .generic_fn(gf): tw_exprs(w, gf.args); return;
+        case .unwrap(uw): tw_expr(w, uw.a); return;
+        case .unwrap_body(ub): tw_unwrap_body(w, ub); return;
+        case .unwrap_or(uo): tw_expr(w, uo.a); tw_expr(w, uo.fallback); return;
+        case .unwrap_destroy(ud): tw_expr(w, ud.a); tw_scoped_body(w, ud.destroy_body); return;
+        case .template(tp): tw_template(w, tp); return;
+        case .scratch(sc): tw_expr(w, sc.bytes); return;
+        case .await_(aw): tw_expr(w, aw.a); return;
+        case .comptime(ce): tw_expr(w, ce.a); return;
+        case .create(cr): tw_exprs(w, cr.args); return;
+        case .emit(em): tw_exprs(w, em.args); tw_template(w, em.tpl); return;
+        case .variant_lit(vl): tw_exprs(w, vl.args); return;
+        case .call_mode(cmd): tw_expr(w, cmd.a); return;
+        case .range(rg): tw_expr(w, rg.lo); tw_expr(w, rg.hi); return;
+        default: return;
+    }
+}
+
+/* The reference walks statements by field, not by kind: this is the view
+ * of a statement in those fields. */
+typedef struct StmtView {
+    CcDecl* dcl;                /* fields named like an arm of CcStmtK are renamed: shape 17 */
+    CcExpr* init_expr;
+    CcExpr* e1;
+    CcExpr* e2;
+    CcExprList exprs;
+    CcExpr* par_pred;
+    CcExpr* par_seq;
+    CcExpr* par_wait;
+    CcExprList par_cache;
+    CcExpr* par_dest;
+    CcExpr* closing_spawn;
+    Vec::[CcParallelArm] arms;
+    CcStmtList stmts;
+    CcStmtList then_stmts;
+    CcStmtList else_stmts;
+    CcStmt* body;
+    CcStmt* else_body;
+    CcExpr* par_tail;
+    CCSlice name;
+    CCSlice name2;
+    CcType* type;
+    bool has_exprs; bool has_cache; bool has_arms; bool has_stmts; bool has_then; bool has_else;
+    bool is_decl; bool is_expr; bool is_errh; bool is_for_in; bool is_with_deadline; bool is_parallel; bool is_block;
+} StmtView;
+
+static void view_for_in(StmtView* v, CcForIn fi) {
+    v->is_for_in = true;
+    v->exprs = fi.iterables;
+    v->has_exprs = true;
+    if (fi.iterables.len()) v->e2 = *fi.iterables.get_ptr(0);
+    v->name = fi.bind;
+    v->name2 = fi.bind2;
+    v->body = fi.body;
+    v->par_tail = fi.tail;
+}
+
+static void view_parallel(StmtView* v, CcParallel pa) {
+    v->is_parallel = true;
+    v->name = pa.bind;
+    v->type = pa.bind_type;
+    v->par_pred = pa.pred;
+    v->par_seq = pa.seq;
+    v->par_wait = pa.wait;
+    v->par_cache = pa.cache;
+    v->has_cache = true;
+    v->arms = pa.arms;
+    v->has_arms = true;
+    v->par_tail = pa.tail;
+}
+
+static void view_parallel_for(StmtView* v, CcParallelFor pf) {
+    v->is_parallel = true;
+    /* the reference keeps one name: the join bind when written, else the loop binder */
+    v->name = pf.bind.len ? pf.bind : pf.loop.bind;
+    v->type = pf.bind.len ? pf.bind_type : NULL;
+    v->exprs = pf.loop.iterables;
+    v->has_exprs = true;
+    if (pf.loop.iterables.len()) v->e2 = *pf.loop.iterables.get_ptr(0);
+    v->par_pred = pf.pred;
+    v->par_seq = pf.seq;
+    v->par_wait = pf.wait;
+    v->par_cache = pf.cache;
+    v->has_cache = true;
+    v->body = pf.loop.body;
+    v->par_tail = pf.tail;
+}
+
+static void view_stmt_b(StmtView* v, CcStmt* s);
+
+static void view_spawn_block(StmtView* v, CcSpawnBlock sb2) {
+    v->exprs = sb2.closing;
+    v->has_exprs = true;
+    v->stmts = sb2.stmts;
+    v->has_stmts = true;
+}
+
+static void view_stmt(StmtView* v, CcStmt* s) {
+    memset(v, 0, sizeof(*v));
+    v->name = cc_slice_empty();
+    v->name2 = cc_slice_empty();
+    @switch (s->k) {
+        case .expr(es): v->is_expr = true; v->e1 = es.e; v->body = es.body; return;
+        case .decl(dd): v->is_decl = true; v->dcl = dd.d; return;
+        case .block(b): v->is_block = true; v->stmts = b.stmts; v->has_stmts = true; return;
+        case .if_(i): v->e1 = i.cond; v->body = i.then; v->else_body = i.els; return;
+        case .while_(wh): v->e1 = wh.cond; v->body = wh.body; return;
+        case .do_(dw): v->e1 = dw.cond; v->body = dw.body; return;
+        case .for_(f):
+            v->dcl = f.init_decl; v->init_expr = f.init_expr; v->e1 = f.cond; v->e2 = f.step;
+            v->body = f.body; v->stmts = f.more; v->has_stmts = true;
+            return;
+        case .switch_(sw): v->e1 = sw.subject; v->body = sw.body; return;
+        case .case_(c): v->e1 = c.lo; v->e2 = c.hi; v->body = c.inner; return;
+        case .return_(r): v->e1 = r.value; return;
+        case .label(l): v->body = l.inner; return;
+        case .defer(df): v->body = df.body; return;
+        case .errhandler(eh): v->is_errh = true; v->name = eh.binder; v->type = eh.err_type; v->body = eh.body; return;
+        case .err_fwd(ef): {
+            CCSlice nm;
+            v->is_errh = true;
+            v->e1 = ef.err;
+            if (expr_ident(ef.err, &nm)) v->name = nm;
+            return;
+        }
+        case .unwrap(us): v->e1 = us.e; return;
+        default: view_stmt_b(v, s); return;
+    }
+}
+
+static void view_stmt_b(StmtView* v, CcStmt* s) {
+    @switch (s->k) {
+        case .for_in(fi): view_for_in(v, fi); return;
+        case .parallel(pa): view_parallel(v, pa); return;
+        case .parallel_for(pf): view_parallel_for(v, pf); return;
+        case .parallel_dest(pd): v->par_dest = pd.dest; v->stmts = pd.stmts; v->has_stmts = true; return;
+        case .serial(b): v->stmts = b.stmts; v->has_stmts = true; return;
+        case .stage(st): v->e1 = st.gate; v->exprs = st.args; v->has_exprs = true; v->stmts = st.stmts; v->has_stmts = true; return;
+        case .with_deadline(wd): v->is_with_deadline = true; v->e1 = wd.deadline; v->name = wd.as; v->stmts = wd.stmts; v->has_stmts = true; return;
+        case .with(wi): v->e1 = wi.value; v->stmts = wi.stmts; v->has_stmts = true; return;
+        case .closing(cl): v->exprs = cl.channels; v->has_exprs = true; v->closing_spawn = cl.spawn; v->stmts = cl.stmts; v->has_stmts = true; return;
+        case .spawn_block(sb2): view_spawn_block(v, sb2); return;
+        case .mode_block(mb): v->stmts = mb.stmts; v->has_stmts = true; return;
+        case .unsafe(b): v->stmts = b.stmts; v->has_stmts = true; return;
+        case .comptime_if(ci): v->e1 = ci.cond; v->then_stmts = ci.then; v->has_then = true; v->else_stmts = ci.els; v->has_else = true; return;
+        case .comptime_block(b): v->stmts = b.stmts; v->has_stmts = true; return;
+        case .comptime_for(cf): {
+            v->name = cf.bind;
+            v->stmts = cf.stmts;
+            v->has_stmts = true;
+            v->has_exprs = false;
+            v->e1 = cf.over;
+            return;
+        }
+        default: return;
+    }
+}
+
+static bool stmt_is_decl(CcStmt* t, CcDecl** out) {
+    @switch (t->k) {
+        case .decl(dd): *out = dd.d; return true;
+        default: return false;
+    }
+}
+
+static bool stmt_is_expr(CcStmt* t) { return t->k.kind == CcStmtK_expr; }
+
+static bool stmt_parallel_bind(CcStmt* t, CCSlice* name, CcType** type) {
+    @switch (t->k) {
+        case .parallel(pa): *name = pa.bind; *type = pa.bind_type; return pa.bind.len != 0;
+        case .parallel_for(pf):
+            *name = pf.bind.len ? pf.bind : pf.loop.bind;
+            *type = pf.bind.len ? pf.bind_type : NULL;
+            return name->len != 0;
+        default: return false;
+    }
+}
+
+/* Declarations in a block are visible to the statements after them: one
+ * scope for the whole block, entered by the caller. */
+static void tw_block_stmts(Walker* w, CcStmtList stmts) {
+    size_t i;
+    size_t n = stmts.len();
+    for (i = 0; i < n; i++) {
+        CcStmt* t = *stmts.get_ptr(i);
+        CcDecl* d;
+        if (stmt_is_decl(t, &d)) {
+            tw_decl_local(w, d);
+        } else {
+            /* bindings that outlive the statement: a macro's declarations,
+             * `CCParallel h = @parallel {...}` */
+            CCSlice bn;
+            CcType* bt;
+            if (stmt_is_expr(t)) declare_from_macro_stmt(w, t);
+            if (stmt_parallel_bind(t, &bn, &bt)) sc_declare(w, bn, bt);
+            tw_stmt(w, t);
+        }
+    }
+}
+
+static void tw_stmt_list_scoped(Walker* w, CcStmtList stmts) {
+    sc_push(w);
+    tw_block_stmts(w, stmts);
+    sc_pop(w);
+}
+
+static void declare_for_in(Walker* w, StmtView* v) {
+    CcType* it = v->exprs.len() ? type_of_expr(w, *v->exprs.get_ptr(0)) : type_of_expr(w, v->e2);
+    CcType* elem = elem_of_indexable(it);
+    if (v->name2.len) {
+        sc_declare(w, v->name, named(w, "size_t"));
+        sc_declare(w, v->name2, elem);
+    } else {
+        sc_declare(w, v->name, elem);
+    }
+}
+
+static void tw_arms(Walker* w, Vec::[CcParallelArm] arms) {
+    size_t i;
+    size_t n = arms.len();
+    for (i = 0; i < n; i++) {
+        CcParallelArm* arm = arms.get_ptr(i);
+        tw_expr(w, arm->expr);
+        tw_stmt(w, arm->serial);
+    }
+}
+
+static void tw_stmt(Walker* w, CcStmt* s) {
+    StmtView v;
+    if (!s) return;
+    view_stmt(&v, s);
+    sc_push(w);
+    if (v.dcl) tw_decl_local(w, v.dcl);
+    if (v.is_expr) declare_from_macro_stmt(w, s);
+    if (v.is_errh) sc_declare(w, v.name, v.type);
+    if (v.is_for_in) declare_for_in(w, &v);
+    if (v.is_with_deadline && v.name.len) sc_declare(w, v.name, NULL);
+    if (v.is_parallel && v.name.len) sc_declare(w, v.name, v.type);
+    tw_expr(w, v.init_expr);
+    tw_expr(w, v.e1);
+    tw_expr(w, v.e2);
+    if (v.has_exprs) tw_exprs(w, v.exprs);
+    tw_expr(w, v.par_pred);
+    tw_expr(w, v.par_seq);
+    tw_expr(w, v.par_wait);
+    if (v.has_cache) tw_exprs(w, v.par_cache);
+    tw_expr(w, v.par_dest);
+    tw_expr(w, v.closing_spawn);
+    if (v.has_arms) tw_arms(w, v.arms);
+    if (v.is_block || (v.has_stmts && v.stmts.len())) tw_block_stmts(w, v.stmts);
+    if (v.has_then) tw_stmt_list_scoped(w, v.then_stmts);
+    tw_stmt(w, v.body);
+    if (v.has_else) tw_stmt_list_scoped(w, v.else_stmts);
+    tw_stmt(w, v.else_body);
+    tw_expr(w, v.par_tail);
+    sc_pop(w);
+}
+
+static void tw_func_decl(Walker* w, CcFuncDecl f) {
+    sc_push(w);
+    if (f.type) {
+        @switch (f.type->k) {
+            case .func(fn): {
+                CcParamList params = fn.params;
+                size_t k;
+                size_t n = params.len();
+                for (k = 0; k < n; k++) {
+                    CcParam* p = params.get_ptr(k);
+                    sc_declare(w, p->name, p->type);
+                }
+                break;
+            }
+            default: break;
+        }
+    }
+    tw_stmt(w, f.body);
+    sc_pop(w);
+}
+
+static void tw_entries(Walker* w, CcHookEntryList entries) {
+    size_t i;
+    size_t n = entries.len();
+    sc_push(w);
+    for (i = 0; i < n; i++) {
+        CcHookEntry* e = entries.get_ptr(i);
+        tw_expr(w, e->value);
+        tw_stmt(w, e->body);
+    }
+    sc_pop(w);
+}
+
+static void tw_unit(Walker* w) {
+    CcUnit* u = w->unit;
+    CcDeclList* declv = &u->decls;
+    size_t i;
+    size_t n = declv->len();
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *declv->get_ptr(i);
+        @switch (d->k) {
+            case .func(f): tw_func_decl(w, f); break;
+            case .comptime_fn(cf): tw_func_decl(w, cf.fn); break;
+            case .var(vd): sc_push(w); tw_init(w, vd.init); sc_pop(w); break;
+            case .typehooks(th): tw_entries(w, th.entries); break;
+            case .comptime_block(b): tw_stmt_list_scoped(w, b.stmts); break;
+            case .factory(fa): tw_scoped_body(w, fa.body); break;
+            default: break;
+        }
+    }
+}
+
+#endif
