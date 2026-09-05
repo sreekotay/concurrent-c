@@ -138,7 +138,7 @@ int main(void) {
         free(spawn_c);
         return 1;
     }
-    if (strstr(spawn_c, "CC_PAR_NOTE_INLINE_ARM()")) {
+    if (strstr(spawn_c, "CC_PAR_NOTE_INLINE_ARM(")) {
         fprintf(stderr, "FAIL spawn join still inlines on INVALID\n");
         free(spawn_c);
         return 1;

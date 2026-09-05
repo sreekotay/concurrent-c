@@ -477,16 +477,16 @@ static int cc_parallel_adapt_backlog(void) {
  * accepted sample never suspended, so it never migrated. Lowering
  * notes inlined arms via CC_PAR_NOTE_INLINE_ARM. */
 #if defined(__TINYC__)
-#define __cc_par_denials (cc_rt_tls_get()->par_denials)
-#define tls_par_denials __cc_par_denials
-#define tls_par_spawn_calls (cc_rt_tls_get()->par_spawn_calls)
-#define tls_par_tick (cc_rt_tls_get()->par_tick)
+CCParTls* cc__par_tls(void) {
+    cc_rt_tls* t = cc_rt_tls_get();
+    return t ? &t->par : NULL;
+}
 #else
-__thread uint64_t __cc_par_denials = 0;
-#define tls_par_denials __cc_par_denials
-static __thread uint64_t tls_par_spawn_calls = 0;
-static __thread uint32_t tls_par_tick = 0; /* REAL resample */
+_Thread_local CCParTls __cc_par_tls;
 #endif
+#define tls_par_denials (cc__par_tls()->denials)
+#define tls_par_spawn_calls (cc__par_tls()->spawn_calls)
+#define tls_par_tick (cc__par_tls()->real_tick) /* REAL resample */
 
 /* CC_PAR_ADAPT_DEBUG=1: dump the site table at exit. */
 static void cc_par_adapt_dump(void) {

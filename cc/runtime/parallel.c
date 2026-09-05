@@ -254,80 +254,40 @@ int cc_parallel_current_cancelled(void) {
     return cc_atomic_load(&h->cancelled) != 0;
 }
 
-#define CC_PAR_DENY_STACK 16
-
-#if defined(__TINYC__)
-#define cc_par_deny_n (cc_rt_tls_get()->par_deny_n)
-#define cc_par_deny_dest (cc_rt_tls_get()->par_deny_dest)
-#define cc_par_deny_flag (cc_rt_tls_get()->par_deny_flag)
-#else
-static __thread int cc_par_deny_n;
-static __thread CCParallel* cc_par_deny_dest[CC_PAR_DENY_STACK];
-static __thread unsigned char cc_par_deny_flag[CC_PAR_DENY_STACK];
-#endif
-
-void cc_parallel_deny_enter(CCParallel* dest) {
-#if defined(__TINYC__)
-    if (!cc_rt_tls_get())
+/* Denied-sibling stack lives in CCParTls (cc_sched.cch; block defined
+ * in scheduler.c). enter / note_denied / deny_leave are header inline;
+ * the dest pop loops, so it stays here. */
+void cc__par_deny_leave_dest(CCParTls* pt, CCParallel* dest) {
+    int i, n;
+    if (!pt)
+        pt = cc__par_tls();
+    if (!pt || !dest)
         return;
-#endif
-    if (cc_par_deny_n >= CC_PAR_DENY_STACK)
+    n = pt->deny_n;
+    if (n <= 0 || n > CC_PAR_DENY_STACK)
         return;
-    cc_par_deny_dest[cc_par_deny_n] = dest;
-    cc_par_deny_flag[cc_par_deny_n] = 0;
-    cc_par_deny_n++;
-}
-
-void cc_parallel_note_denied(void) {
-#if defined(__TINYC__)
-    if (!cc_rt_tls_get())
-        return;
-#endif
-    if (cc_par_deny_n <= 0)
-        return;
-    cc_par_deny_flag[cc_par_deny_n - 1] = 1;
-}
-
-void cc_parallel_deny_leave(void) {
-#if defined(__TINYC__)
-    if (!cc_rt_tls_get())
-        return;
-#endif
-    if (cc_par_deny_n <= 0)
-        return;
-    if (cc_par_deny_dest[cc_par_deny_n - 1] == NULL)
-        cc_par_deny_n--;
-}
-
-void cc_parallel_deny_leave_dest(CCParallel* dest) {
-    int i;
-#if defined(__TINYC__)
-    if (!cc_rt_tls_get())
-        return;
-#endif
-    if (!dest || cc_par_deny_n <= 0)
-        return;
-    for (i = cc_par_deny_n - 1; i >= 0; i--) {
-        if (cc_par_deny_dest[i] == dest) {
+    for (i = n - 1; i >= 0; i--) {
+        if (pt->deny_dest[i] == dest) {
             int k;
-            for (k = i; k < cc_par_deny_n - 1; k++) {
-                cc_par_deny_dest[k] = cc_par_deny_dest[k + 1];
-                cc_par_deny_flag[k] = cc_par_deny_flag[k + 1];
+            for (k = i; k < n - 1; k++) {
+                pt->deny_dest[k] = pt->deny_dest[k + 1];
+                pt->deny_flag[k] = pt->deny_flag[k + 1];
             }
-            cc_par_deny_n--;
+            pt->deny_n = n - 1;
             return;
         }
     }
 }
 
 int cc_parallel_denied_here(void) {
-#if defined(__TINYC__)
-    if (!cc_rt_tls_get())
+    CCParTls* pt = cc__par_tls();
+    int n;
+    if (!pt)
         return 0;
-#endif
-    if (cc_par_deny_n <= 0)
+    n = pt->deny_n;
+    if (n <= 0 || n > CC_PAR_DENY_STACK)
         return 0;
-    return cc_par_deny_flag[cc_par_deny_n - 1] != 0;
+    return pt->deny_flag[n - 1] != 0;
 }
 
 void cc_parallel_abort_if_denied_chan(const char* reason) {
@@ -446,7 +406,7 @@ CCResult_void_CCError cc_parallel_wait(CCParallel* h) {
             CC_ERROR(CC_ERR_INVALID_ARG, "cc_parallel_wait"));
     if (cc_atomic_load(&h->left))
         cc_parallel_die("wait after leave");
-    cc_parallel_deny_leave_dest(h);
+    cc_parallel_deny_leave_dest(cc__par_tls(), h);
     if (cc_atomic_load(&h->joined))
         return cc_ok_CCResult_void_CCError();
     if (h->n) {
@@ -536,7 +496,7 @@ void cc_parallel_leave1(CCParallel* h) {
         cc_parallel_die("double leave");
     if (!cc_parallel_live(h))
         cc_parallel_die("leave of idle dest");
-    cc_parallel_deny_leave_dest(h);
+    cc_parallel_deny_leave_dest(cc__par_tls(), h);
     /* Snapshot and go dead under one hold: no admit lands between them. */
     cc_par_lock(h);
     cc_atomic_store(&h->left, 1);

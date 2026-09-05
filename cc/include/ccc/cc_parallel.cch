@@ -138,10 +138,8 @@ void cc_parallel_admit(CCParallel* h, CCTask t, void* env);
 void cc_parallel_die(const char* msg);
 void cc_parallel_wake_attached(CCParallel* h);
 int cc_parallel_current_cancelled(void);
-void cc_parallel_deny_enter(CCParallel* dest);
-void cc_parallel_note_denied(void);
-void cc_parallel_deny_leave(void);
-void cc_parallel_deny_leave_dest(CCParallel* dest);
+/* Denied-sibling stack helpers (cc_parallel_deny_enter / note_denied /
+ * deny_leave / deny_leave_dest) take the CCParTls block: cc_sched.cch. */
 int cc_parallel_denied_here(void);
 void cc_parallel_abort_if_denied_chan(const char* reason);
 void !>(CCError) cc_parallel_close(CCParallel* h, CCChanTx tx);

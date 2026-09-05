@@ -3186,7 +3186,9 @@ static int shadow_emit_par_protos(CEmit* out, AstNode** pars, int n) {
                                           gtys, &ng) &&
                     shadow_par_go_fmt_params(params, sizeof(params), glhs, glty,
                                              nlhs, gnames, gtys, ng)) {
-                    if (!cemit_fmt(out, "static void __cc_par_go_%d(%s);\n",
+                    if (!cemit_fmt(out,
+                                   "static __attribute__((noinline)) void "
+                                   "__cc_par_go_%d(%s);\n",
                                    id, params))
                         return 0;
                 }
@@ -3974,7 +3976,7 @@ static int shadow_par_handle_take_one(CEmit* dest, const char* bi,
             "%sif (__cc_par_t_%d.kind == CC_TASK_KIND_INVALID ||\n"
             "%s    __cc_par_e_%d == &__cc_par_stk_%d) {\n"
             "%s    if (__cc_par_t_%d.kind == CC_TASK_KIND_INVALID)\n"
-            "%s        { CC_PAR_NOTE_INLINE_ARM(); "
+            "%s        { CC_PAR_NOTE_INLINE_ARM(__cc_pt); "
             "(void)__cc_par_thunk_%d(__cc_par_e_%d); }\n"
             "%s    else\n"
             "%s        cc_parallel_join(__cc_par_t_%d);\n"
@@ -4105,10 +4107,15 @@ static int shadow_emit_par_spawn_body(
     int spawn0 = parallel_dest_expr_worker(st) ? 0 : 1;
     int dest_live = (hdest && hdest[0] && st && !st->par_wake);
     int never_deny = (st && st->par_spawn) || dest_live;
+    /* One TLS lookup per construct: every gate helper takes the block. */
+    if (!cemit_fmt(dest, "%sCCParTls* __cc_pt = cc__par_tls();\n", bi))
+        return 0;
     if (hdest && hdest[0]) {
-        if (!cemit_fmt(dest, "%scc_parallel_deny_enter(&(%s));\n", bi, hdest))
+        if (!cemit_fmt(dest, "%scc_parallel_deny_enter(__cc_pt, &(%s));\n",
+                       bi, hdest))
             return 0;
-    } else if (!cemit_fmt(dest, "%scc_parallel_deny_enter(NULL);\n", bi))
+    } else if (!cemit_fmt(dest, "%scc_parallel_deny_enter(__cc_pt, NULL);\n",
+                          bi))
         return 0;
     for (a = spawn0; a < n; a++) {
         int id = base + a - spawn0;
@@ -4203,9 +4210,9 @@ static int shadow_emit_par_spawn_body(
                         bi, id, id, id))
                     return 0;
             } else if (!cemit_fmt(dest,
-                    "%sif (cc_parallel_deny_fast(&__cc_par_site_%d, "
+                    "%sif (cc_parallel_deny_fast(__cc_pt, &__cc_par_site_%d, "
                     "__cc_par_thunk_%d)) {\n"
-                    "%s    cc_parallel_note_denied();\n"
+                    "%s    cc_parallel_note_denied(__cc_pt);\n"
                     "%s    __cc_par_t_%d = cc__task_invalid();\n"
                     "%s} else\n"
                     "%s    __cc_par_t_%d = cc_parallel_spawn(__cc_par_thunk_%d, "
@@ -4221,10 +4228,10 @@ static int shadow_emit_par_spawn_body(
                 if (!cemit_fmt(dest, "%s{\n", bi))
                     return 0;
             } else if (!cemit_fmt(dest,
-                    "%sif (cc_parallel_deny_fast(&__cc_par_site_%d, "
+                    "%sif (cc_parallel_deny_fast(__cc_pt, &__cc_par_site_%d, "
                     "__cc_par_thunk_%d)) {\n"
                     "%s    __cc_par_denied_%d = 1;\n"
-                    "%s    cc_parallel_note_denied();\n"
+                    "%s    cc_parallel_note_denied(__cc_pt);\n"
                     "%s} else {\n",
                     bi, id, id, bi, id, bi, bi))
                 return 0;
@@ -4278,9 +4285,9 @@ static int shadow_emit_par_spawn_body(
                         bi, id, id, id))
                     return 0;
             } else if (!cemit_fmt(dest,
-                    "%sif (cc_parallel_deny_fast(&__cc_par_site_%d, "
+                    "%sif (cc_parallel_deny_fast(__cc_pt, &__cc_par_site_%d, "
                     "__cc_par_thunk_%d)) {\n"
-                    "%s    cc_parallel_note_denied();\n"
+                    "%s    cc_parallel_note_denied(__cc_pt);\n"
                     "%s    __cc_par_t_%d = cc__task_invalid();\n"
                     "%s} else\n"
                     "%s    __cc_par_t_%d = cc_parallel_spawn(__cc_par_thunk_%d, "
@@ -4371,7 +4378,7 @@ static int shadow_emit_par_spawn_body(
                     return 0;
             } else if (!cemit_fmt(dest,
                     "%s    if (__cc_par_t_%d.kind == CC_TASK_KIND_INVALID)\n"
-                    "%s        { CC_PAR_NOTE_INLINE_ARM(); "
+                    "%s        { CC_PAR_NOTE_INLINE_ARM(__cc_pt); "
                     "(void)__cc_par_thunk_%d(__cc_par_e_%d); }\n"
                     "%s    else\n"
                     "%s        cc_parallel_join(__cc_par_t_%d);\n"
@@ -4383,7 +4390,7 @@ static int shadow_emit_par_spawn_body(
         if (!cemit_fmt(dest,
                        "%s    %s.nt = 0;\n"
                        "%s    %s.joined = 1;\n"
-                       "%s    cc_parallel_deny_leave_dest(&(%s));\n"
+                       "%s    cc_parallel_deny_leave_dest(__cc_pt, &(%s));\n"
                        "%s}\n",
                        bi, hdest, bi, hdest, bi, hdest, bi))
             return 0;
@@ -4410,7 +4417,7 @@ static int shadow_emit_par_spawn_body(
                     "%s    __cc_par_t_%d.kind != CC_TASK_KIND_INVALID) {\n"
                     "%s    cc_parallel_join(__cc_par_t_%d);\n"
                     "%s} else if (__cc_par_denied_%d) {\n"
-                    "%s    CC_PAR_NOTE_INLINE_ARM();\n",
+                    "%s    CC_PAR_NOTE_INLINE_ARM(__cc_pt);\n",
                     bi, id, bi, id, bi, id, bi, id, bi))
                 return 0;
             if (!shadow_par_emit_arm_inplace(dest, bi, a, lhs, lhs_ty, rhs,
@@ -4419,21 +4426,21 @@ static int shadow_emit_par_spawn_body(
                 return 0;
             if (!cemit_fmt(dest,
                     "%s} else {\n"
-                    "%s    CC_PAR_NOTE_INLINE_ARM();\n"
+                    "%s    CC_PAR_NOTE_INLINE_ARM(__cc_pt);\n"
                     "%s    (void)__cc_par_thunk_%d(&__cc_par_e_%d);\n"
                     "%s}\n",
                     bi, bi, bi, id, id, bi))
                 return 0;
         } else if (!cemit_fmt(dest,
                 "%sif (__cc_par_t_%d.kind == CC_TASK_KIND_INVALID)\n"
-                "%s    { CC_PAR_NOTE_INLINE_ARM(); "
+                "%s    { CC_PAR_NOTE_INLINE_ARM(__cc_pt); "
                 "(void)__cc_par_thunk_%d(&__cc_par_e_%d); }\n"
                 "%selse\n"
                 "%s    cc_parallel_join(__cc_par_t_%d);\n",
                 bi, id, bi, id, id, bi, bi, id))
             return 0;
     }
-    if (!cemit_fmt(dest, "%scc_parallel_deny_leave();\n", bi))
+    if (!cemit_fmt(dest, "%scc_parallel_deny_leave(__cc_pt);\n", bi))
         return 0;
     return 1;
 }
@@ -4838,8 +4845,13 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
             CEmit* h = &g_shadow_par_helpers;
             char grefs[SHADOW_PAR_CAP_MAX][64];
             int ngrefs = shadow_par_ref_list(gnames, ng, grefs);
+            /* noinline: the helper exists so the predicate-false serial
+             * path does not carry the spawn machinery (gate block
+             * pointer, task, env) in the caller's frame. Inlined, that
+             * costs the serial recursion an extra callee-saved pair. */
             if (!cemit_fmt(h,
-                    "\nstatic void __cc_par_go_%d(%s) {\n"
+                    "\nstatic __attribute__((noinline)) void "
+                    "__cc_par_go_%d(%s) {\n"
                     "    __cc_pj_ex_%d_t *__cc_pj_ex = "
                     "(__cc_pj_ex_%d_t*)__cc_pj_exv;\n",
                     base, params, base, base))
@@ -6764,8 +6776,9 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
             "        return;\n"
             "    }\n"
             "    {\n"
+            "        CCParTls* __cc_pt = cc__par_tls();\n"
             "        int mid = lo + (hi - lo) / 2;\n"
-            "        if (!cc_parallel_deny_fast(&__cc_parfor_site_%d, "
+            "        if (!cc_parallel_deny_fast(__cc_pt, &__cc_parfor_site_%d, "
             "__cc_parfor_thunk_%d)) {\n"
             "            struct {\n",
             id, id)) {
@@ -6807,7 +6820,7 @@ static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
             "                return;\n"
             "            }\n"
             "        }\n"
-            "        CC_PAR_NOTE_INLINE_ARM();\n"
+            "        CC_PAR_NOTE_INLINE_ARM(__cc_pt);\n"
             "        int %s;\n"
             "        for (%s = lo; %s < hi; %s++) {\n"
             "            if (e->__cc_pf_ex) {\n"

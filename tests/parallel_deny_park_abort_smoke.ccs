@@ -11,8 +11,9 @@ int main(void) {
     int[~ >] tx;
     int[~ <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
-    cc_parallel_deny_enter(NULL);
-    cc_parallel_note_denied();
+    CCParTls* pt = cc__par_tls();
+    cc_parallel_deny_enter(pt, NULL);
+    cc_parallel_note_denied(pt);
     tx.send(1) !>;
     fprintf(stderr, "FAIL: park did not abort\n");
     return 2;

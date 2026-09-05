@@ -193,7 +193,7 @@ duration if the arm suspended, issued a nested `cc_parallel_spawn`, or
 absorbed an inlined (denied) child. Duration is thread CPU time
 (`CLOCK_THREAD_CPUTIME_ID`). Sites that never yield a clean sample stay
 virgin and keep spawning. Lowered code counts an inlined arm at the run
-(`CC_PAR_NOTE_INLINE_ARM()`), not only at the decide.
+(`CC_PAR_NOTE_INLINE_ARM`), not only at the decide.
 
 After `CC_PAR_LEARN_ATTEMPTS` (1<<20) wrapped virgin attempts, wrapping
 stops; the site still spawns.
@@ -231,7 +231,19 @@ task. `cc_parallel_site_gate` never returns NULL: adapt-off and table-full
 return a static never-CHURN record. Emit cache and runtime version
 together.
 
-Under `CC_PARSER_MODE` or `__TINYC__`, `cc_parallel_deny_fast` is a no-op.
+Per-thread gate state (denied-sibling stack, inlined-arm count, resample
+tick) is one thread-local `CCParTls` block. A construct fetches it once
+(`cc__par_tls()`) and passes the pointer to `cc_parallel_deny_enter`,
+`cc_parallel_deny_fast`, `cc_parallel_note_denied`,
+`CC_PAR_NOTE_INLINE_ARM`, and `cc_parallel_deny_leave`. The block is per
+thread, not per fiber; the denied-sibling stack is a diagnostic and every
+index into it is bounds-checked. Each helper also accepts the call without
+the block argument and fetches the block itself; arity selects the shape,
+so lowered code from either generation of the emitter compiles against
+one header.
+
+Under `CC_PARSER_MODE` or `__TINYC__`, `cc_parallel_deny_fast` is a no-op
+and `cc__par_tls()` is a runtime call into the pthread-keyed bundle.
 Every spawn hits `cc_parallel_spawn`. CHURN+deep wraps as resample;
 wrapped CHURN admits are capped at depth 512.
 
