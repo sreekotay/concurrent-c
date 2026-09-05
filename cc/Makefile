@@ -231,7 +231,18 @@ OUT_INCLUDE := ../out/include
 OUT_RUNTIME := ../out/runtime
 LOWER_HEADERS_STAMP := $(OUT_INCLUDE)/.headers_lowered.stamp
 
-all: $(CCC_SCRIPT) $(WRAPPER) $(SHADOW_LOWER_WRAPPER) $(RUNTIME_DYLIB) $(LOWER_HEADERS_STAMP)
+# Clean lowerer (lower/): plain C11, libc only, no dependency on the rest of
+# the tree. Library from every lower/*.c except the *_test.c tools; cclex is
+# the lexer's round-trip / dump tool.
+LOWER_SRCS := $(filter-out %_test.c,$(wildcard lower/*.c))
+LOWER_OBJS := $(LOWER_SRCS:%.c=$(OBJDIR)/%.o)
+LOWER_LIB := $(OBJDIR)/liblower.a
+LOWER_CFLAGS := -std=c11 -Wall -Wextra -Werror -O2 -g
+CCLEX_OBJ := $(OBJDIR)/lower/lex_test.o
+CCLEX_BINARY := $(OUT_BINDIR)/cclex
+LOWER_DEPS := $(LOWER_OBJS:.o=.d) $(CCLEX_OBJ:.o=.d)
+
+all: $(CCC_SCRIPT) $(WRAPPER) $(SHADOW_LOWER_WRAPPER) $(RUNTIME_DYLIB) $(LOWER_HEADERS_STAMP) $(LOWER_LIB) $(CCLEX_BINARY)
 
 # Patched-TCC guard: a fresh clone (or a changed patch set) gets the CC
 # hooks applied into the submodule working tree BEFORE any CC object that
@@ -423,6 +434,22 @@ $(CPARSE_LIB): $(OBJDIR)/cparse/cparse.o $(OBJDIR)/cparse/expand.o
 	@mkdir -p $(dir $@)
 	@rm -f $@
 	ar rcs $@ $^
+
+# Clean lowerer library and tools. The shorter stem makes this pattern win
+# over the generic $(OBJDIR)/%.o rule, so these objects never see $(CFLAGS).
+$(OBJDIR)/lower/%.o: lower/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(LOWER_CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
+$(LOWER_LIB): $(LOWER_OBJS)
+	@mkdir -p $(dir $@)
+	@rm -f $@
+	ar rcs $@ $^
+$(CCLEX_BINARY): $(CCLEX_OBJ) $(LOWER_LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(LOWER_CFLAGS) -o $@ $(CCLEX_OBJ) $(LOWER_LIB)
+.PHONY: lower cclex
+lower: $(LOWER_LIB)
+cclex: $(CCLEX_BINARY)
 
 # shadow_lower self-build:
 #   SHADOW_LOWER_SOURCE=bootstrap (default) — host-cc last-good snapshot
@@ -639,7 +666,7 @@ clean-cache:
 	rm -rf $(CURDIR)/../out/ccc-cache
 
 clean:
-	rm -f $(WRAPPER) $(REAL_BINARY) $(LOWER_HEADERS_BINARY)
+	rm -f $(WRAPPER) $(REAL_BINARY) $(LOWER_HEADERS_BINARY) $(CCLEX_BINARY)
 	rm -rf $(OBJDIR)
 	rm -rf $(OUT_INCLUDE)
 	rm -rf $(OUT_RUNTIME)
@@ -660,4 +687,4 @@ $(OBJDIR)/src/comptime/hook_compile.o: $(EMIT_TPL_PRELUDE)
 .PHONY: all clean
 
 # Auto-generated dependency files for objects (includes runtime/concurrent_c.c -> runtime/*.c).
--include $(DEPS)
+-include $(DEPS) $(LOWER_DEPS)
