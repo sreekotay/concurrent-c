@@ -262,11 +262,13 @@ differential report.
   highest-count construct family and the worst diagnostics today.
 - **M3 UFCS.** The declaration index, method-set resolution, type hooks,
   `Type.fn`, generics and factories, `@variant`. A generic instance's C
-  fragment is the family factory's `@emit` template when the index can
-  fill every slot; a factory whose body computes part of the fragment
-  (the stdlib Vec, Map and ArrayMap factories today) needs the body run,
-  which is M7's comptime seam. Until then such an instance is a
-  diagnostic at the site, never a guessed fragment.
+  fragment is the family factory's `@emit` template, filled from the type
+  arguments (`${mangled}`, `${arg(i)}`, `${arg_mangled(i)}`); the stdlib
+  factories are such pure templates, with the C preprocessor making any
+  remaining choice, so the runtime and stdlib hold no privilege. A factory
+  whose body computes part of the fragment needs the body run, which is
+  M7's comptime seam; until then such an instance is a diagnostic at the
+  site, never a guessed fragment.
 - **M4 Strings.** Templates, `@scratch`, slices, print family, `@slice`.
 - **M5 Concurrency.** Closures and captures, spawn, channels, `@parallel`
   in all forms, deadlines, exclusive and turnstile.
