@@ -1018,9 +1018,8 @@ packed slice and the value into a `CCString` in that shard’s arena.
 ```c
 CCShardMap maps;
 maps.init(excl, mask);                 // cc_shard_map_init(&maps, excl, mask)
-CCShardHold h = maps.hold_all();       // or hold_one / hold_sorted
-@defer h.release();                    // idempotent; no-op if !h.held()
-if (!h.held()) { /* admission failed */ }
+CCExclHold h = maps.hold(si) @destroy; // hold == hold_one; or hold_sorted / hold_all
+if (!h.held()) { /* admission failed — release is a no-op */ }
 
 CCShard* sh = maps.shard(si);
 sh->put(key, val);                     // bool; false on OOM
@@ -1039,8 +1038,8 @@ key+value. Failed `init` / `put` returns `false` — never a silent empty map
 write.
 
 **Rule (UFCS):** Map methods follow `cc_shard_map_<method>`
-(`init`, `destroy`, `reset`, `len`, `count`, `shard`, `hold_one`,
-`hold_sorted`, `hold_all`). Cell methods follow `cc_shard_<method>`
+(`init`, `destroy`, `reset`, `len`, `count`, `shard`, `hold`,
+`hold_one`, `hold_sorted`, `hold_all`). Cell methods follow `cc_shard_<method>`
 (`put`, `get`, `get_into`, `contains`, `delete`, `len`).
 
 Prefer raw `ArrayMap` when the value type is not `CCString` or when the
@@ -3142,7 +3141,9 @@ double v = Math.sqrt(2.0) !>;
 adapter `.so`), then `CC_QUICKJS_SRC`, then `./quickjs`,
 `./third_party/quickjs`, `./vendor/quickjs` when those directories contain
 `quickjs.h` and `quickjs.c`. A source tree is compiled once into
-`~/.cache/concurrent-c/qjs/` (override `CC_QJS_CACHE`). Absence names how to
+`~/.cache/concurrent-c/qjs/<src_id>/` (override root with `CC_QJS_CACHE`;
+`<src_id>` is git `HEAD` when available, else an absolute-path hash).
+Absence names how to
 attach [bellard/quickjs](https://github.com/bellard/quickjs) or
 [quickjs-ng](https://github.com/quickjs-ng/quickjs). The adapter compiles
 `JS_NewClassID` as two-arg when `QJS_VERSION_MAJOR` is defined (ng),

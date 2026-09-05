@@ -8,9 +8,9 @@
  *   cc_arena_stack(arena, kilobytes(64));
  *   CCExclusive excl = cc_exclusive_create(arena, 0) !> @destroy;  // 0 → default map
  *   CCExclusiveMutex m = excl.mutex(name);                 // resolve once
- *   CCExclusiveGuard g = m.acquire();
+ *   CCExclusiveGuard g = m.acquire() @destroy;             // release at scope exit
  *   ... short critical section (do not @await) ...
- *   g.release();                              // idempotent (local held bit)
+ *   // or: g.release();  — idempotent (local held bit)
  *
  * Conditioned acquire — park inside the primitive until pred is true
  * under the name. Caller is not holding on the way in. Parks a fiber

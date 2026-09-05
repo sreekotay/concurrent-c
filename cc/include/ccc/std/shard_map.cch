@@ -6,15 +6,15 @@
  *
  *   CCShardMap maps;
  *   maps.init(excl, mask);
- *   CCShardHold h = maps.hold_all();
- *   @defer h.release();          // always pair with acquire
- *   if (!h.held()) …;            // admission failed — release is a no-op
+ *   CCExclHold h = maps.hold(si) @destroy;  // hold == hold_one
+ *   if (!h.held()) …;                       // admission failed — release is a no-op
+ *   // or: hold_one / hold_sorted / hold_all; @defer h.release() is the twin
  *   CCShard* sh = maps.shard(si);
  *   sh->put(k, v);   // copies into the shard arena
  *
- * Hold contract (see cc_exclusive.cch): release() is idempotent and a
- * no-op when held() is false (n == 0). Safe to @defer release before the
- * held() check; failed admission is not a double-unlock.
+ * Hold contract (see cc_exclusive.cch): release() / destroy() / @destroy
+ * are idempotent and a no-op when held() is false (n == 0). Failed
+ * admission is not a double-unlock.
  *
  * Cell ownership (read once):
  *   put(k, v)     copies key+value into the shard arena (views OK as inputs)
@@ -169,7 +169,7 @@ static inline bool cc_shard_delete(CCShard* m, CCSlice key) {
 /* ---- Sharded map (cells + domain as:) ---- */
 
 typedef struct CCShardMap {
-    /* Hold API: maps.hold_one / hold_sorted / hold_all (UFCS via as-face). */
+    /* Hold API: maps.hold / hold_one / hold_sorted / hold_all (as-face). */
     CCShardDomain domain;
     CCShard* shards;
     CCArena root; /* storage for shards[] */
@@ -256,27 +256,31 @@ static inline size_t cc_shard_map_len(const CCShardMap* m) {
 
 /* Hold forwards — same as domain as: UFCS; named so the snake ladder
  * resolves when as: retry is not on the peel path. */
-static inline CCShardHold cc_shard_map_hold_one(CCShardMap* m, uint64_t si) {
+static inline CCExclHold cc_shard_map_hold_one(CCShardMap* m, uint64_t si) {
     if (!m) {
-        CCShardHold h = {0};
+        CCExclHold h = {0};
         return h;
     }
     return cc_shard_domain_hold_one(&m->domain, si);
 }
 
-static inline CCShardHold cc_shard_map_hold_sorted(CCShardMap* m,
+static inline CCExclHold cc_shard_map_hold(CCShardMap* m, uint64_t si) {
+    return cc_shard_map_hold_one(m, si);
+}
+
+static inline CCExclHold cc_shard_map_hold_sorted(CCShardMap* m,
                                                   const uint64_t* names,
                                                   size_t count) {
     if (!m) {
-        CCShardHold h = {0};
+        CCExclHold h = {0};
         return h;
     }
     return cc_shard_domain_hold_sorted(&m->domain, names, count);
 }
 
-static inline CCShardHold cc_shard_map_hold_all(CCShardMap* m) {
+static inline CCExclHold cc_shard_map_hold_all(CCShardMap* m) {
     if (!m) {
-        CCShardHold h = {0};
+        CCExclHold h = {0};
         return h;
     }
     return cc_shard_domain_hold_all(&m->domain);

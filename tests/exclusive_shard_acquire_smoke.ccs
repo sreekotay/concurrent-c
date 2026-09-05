@@ -51,11 +51,11 @@ int main(void) {
 
     if (shared != 2) return 10;
 
-    /* CCShardHold / CCShardDomain wraps guards[] + n. */
+    /* CCExclHold / CCShardDomain wraps guards[] + n. */
     {
         CCShardMask mask8 = cc_shard_mask_make(8);
         CCShardDomain d = cc_shard_domain(excl, mask8);
-        CCShardHold hold = d.hold_sorted(names, 4);
+        CCExclHold hold = d.hold_sorted(names, 4);
         if (!hold.held() || hold.n != 3) return 14;
         hold.release();
         if (hold.held()) return 15;

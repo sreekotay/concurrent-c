@@ -45,13 +45,13 @@ typedef enum Op { OP_A = 0, OP_B, OP_C } Op;
 
     switch (op) {
     case OP_A: {
-        CCShardHold hold = shards->hold_one(0);
+        CCExclHold hold = shards->hold_one(0);
         @defer hold.release();
         if (!hold.held()) return enc->err("admission");
         return enc->ok();
     }
     case OP_B: {
-        CCShardHold hold = shards->hold_all();
+        CCExclHold hold = shards->hold_all();
         @defer hold.release();
         if (!hold.held()) return enc->err("admission");
         return enc->ok();

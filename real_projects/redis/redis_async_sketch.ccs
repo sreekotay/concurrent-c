@@ -14,8 +14,9 @@
  *   I/O / decode  → drop the connection (write -ERR on the first cmd if we can)
  *   command error → -ERR on the wire, client stays up
  *   encode OOM    → Err; connection dies (mid-MGET may already have array_len)
- *   CCShardHold   → @defer hold.release(); if (!held()) … — release is a
- *                   no-op when n==0. return exec(...) runs before that defer.
+ *   CCExclHold   → maps.hold(si) @destroy (hold == hold_one); release
+ *                   at scope exit. if (!held()) … — no-op when n==0.
+ *                   return exec(...) still runs the destroy ledger.
  *
  * Caveats (sketch-ok):
  *   Mid-MGET encode failure after array_len is buffered ships a truncated
@@ -300,8 +301,7 @@ static bool !>(CCError) execute(CCShardMap* maps, Cmd* c, ConnEnc conn) {
     if (h == HOLD_KEY) {
         if (c->argc < 2) return conn->err("wrong number of arguments");
         si = shard_of(maps, c->args[1]);
-        CCShardHold hold = maps->hold_one((uint64_t)si);
-        @defer hold.release();
+        CCExclHold hold = maps->hold((uint64_t)si) @destroy;
         if (!hold.held()) return conn->err("shard admission failed");
         return exec(maps, c, name, si, conn);
     }
@@ -310,14 +310,12 @@ static bool !>(CCError) execute(CCShardMap* maps, Cmd* c, ConnEnc conn) {
         size_t nnames;
         if (c->argc < 2) return conn->err("wrong number of arguments");
         nnames = unique_shards(maps, c, names, (size_t)K_MAX_SHARDS);
-        CCShardHold hold = maps->hold_sorted(names, nnames);
-        @defer hold.release();
+        CCExclHold hold = maps->hold_sorted(names, nnames) @destroy;
         if (!hold.held()) return conn->err("shard admission failed");
         return exec(maps, c, name, 0, conn);
     }
     {
-        CCShardHold hold = maps->hold_all();
-        @defer hold.release();
+        CCExclHold hold = maps->hold_all() @destroy;
         if (!hold.held()) return conn->err("shard admission failed");
         return exec(maps, c, name, 0, conn);
     }

@@ -70,6 +70,17 @@ int main(void) {
     }
     if (g_drops != 4) { printf("deref assign drops=%d\n", g_drops); return 6; }
 
+    /* T* alias assign is not an owned Cell — no Cell__cc_drop(&(p)). */
+    {
+        int before = g_drops;
+        Cell box = { .num = 0 };
+        Cell* p;
+        p = &box;
+        if (p->kind != Cell_num) { printf("alias kind\n"); return 7; }
+        if (g_drops != before) { printf("alias assign dropped\n"); return 8; }
+    }
+    if (g_drops != 4) { printf("alias scope drops=%d\n", g_drops); return 9; }
+
     printf("ok\n");
     return 0;
 }

@@ -548,7 +548,8 @@ When several fibers must briefly mutate the same named resource,
 that name, use `acquire_when` (Result; cancel is not a zeroed guard):
 
 ```c
-CCExclusiveGuard g = excl->acquire_when(name, pred, env) !> @destroy;
+CCExclusiveGuard g = excl.acquire(name) @destroy;          /* release at scope exit */
+CCExclusiveGuard w = excl.acquire_when(name, pred, env) !> @destroy;
 ```
 
 The holder that makes `pred` true calls `h.signal()` while still holding.

@@ -5301,7 +5301,9 @@ copies of the result; it may be `NULL` when the builder does not allocate.
 
 **Rule (idempotent release):** `g.release()` is idempotent. After the first release, the guard's entry pointer is cleared to `NULL`; a second `release()` or `destroy()` on the same guard is a local no-op and does not touch the lock word. This is intentional so end-of-hold cleanup does not read as a double-unlock bug in review.
 
-`g.destroy()` and `@destroy` on a guard are aliases for `g.release()`.
+`g.destroy()` and bodyless `@destroy` on a guard are aliases for `g.release()`.
+`CCExclHold` is the same: `h.release()` / `h.destroy()` / `@destroy` are
+idempotent; `n == 0` is a no-op.
 
 An acquire blocks until the caller owns the named entry. Uncontended acquire is an inlined compare-and-swap on the entry lock word; contended acquire uses a slow path that may park the current fiber.
 
@@ -5353,8 +5355,9 @@ CCShardMask m = cc_shard_mask_make(8);             /* exact pow2, else {0,0} */
 ```
 
 This is the Concurrent-C concurrent-map spine: N maps (or map pairs) + exclusive
-names `0..N-1` + `shards.index(key_hash)`. Hold policy (one key / key set /
-all shards) stays at the application layer.
+names `0..N-1` + `shards.index(key_hash)`. `CCShardDomain` + `CCExclHold` is
+that policy as one object: `hold(si)` (alias of `hold_one`) / `hold_sorted` /
+`hold_all`, then `held()`. `@destroy` on the hold is release.
 
 #### 8.10.5 Explicit mutex free
 
@@ -5458,9 +5461,11 @@ void !>(CCError) cc_exclusive_mutex_acquire_when_into(CCExclusiveMutex* m,
 - `m.acquire()` — acquire resolved mutex
 - `m.acquire_when(pred, env)` / `m.acquire_when_into(pred, env, slot, arena, builder)`
 - `m.free()` — explicit reclaim
-- `g.release()` / `g.destroy()` — release guard
+- `g.release()` / `g.destroy()` — release guard (`@destroy` is the same)
 - `g.signal()` / `g.broadcast()` — wake condition waiters (while holding)
 - `shards.index(hash)` — `CCShardMask` routing
+- `d.hold(si)` / `d.hold_one(si)` / `d.hold_sorted(names, n)` / `d.hold_all()`
+- `h.held()` / `h.release()` / `h.destroy()` — shard hold (`@destroy` is release)
 
 ---
 

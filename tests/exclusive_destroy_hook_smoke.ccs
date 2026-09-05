@@ -1,0 +1,58 @@
+/*
+ * Bodyless @destroy on CCExclusiveGuard / CCExclHold is release.
+ * A second acquire of the same name after the scope must not hang.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_exclusive.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "%s\n", e.message ? e.message : "error");
+        return 1;
+    }
+    CCArena arena = @create(kilobytes(16)) @destroy;
+    CCExclusive excl = cc_exclusive_create(arena, 0) !> @destroy;
+    CCShardMask mask = cc_shard_mask_make(8);
+    CCShardDomain d = cc_shard_domain(excl, mask);
+    int x = 0;
+
+    {
+        CCExclusiveGuard g = excl.acquire(1) @destroy;
+        x++;
+    }
+    {
+        CCExclusiveGuard g = excl.acquire(1) @destroy;
+        x++;
+        g.release();
+        g.destroy();
+    }
+
+    {
+        CCExclHold h = d.hold(3) @destroy;
+        if (!h.held() || h.n != 1) return 2;
+        x++;
+    }
+    {
+        CCExclHold h = d.hold_one(3) @destroy;
+        if (!h.held()) return 3;
+        x++;
+    }
+
+    {
+        CCExclHold miss = d.hold(99) @destroy;
+        if (miss.held()) return 4;
+    }
+    {
+        CCExclHold h = d.hold_all() @destroy;
+        if (!h.held() || h.n != 8) return 5;
+        x++;
+    }
+
+    if (x != 5) {
+        fprintf(stderr, "FAIL x=%d\n", x);
+        return 6;
+    }
+    printf("exclusive_destroy_hook_smoke: OK\n");
+    return 0;
+}

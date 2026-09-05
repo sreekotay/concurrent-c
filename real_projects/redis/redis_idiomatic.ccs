@@ -15,9 +15,9 @@
  *   Conn.out       → encode coalesce (cc_arena_stack 8K L1, then overflow);
  *                    flush after the window (never socket I/O under hold)
  *   RedisConnEnc   → @typeview Encode (no sock/flush)
- *   CCShardHold    → acquire inside execute (same shape as redis.go /
- *                    redis_async_sketch); encode under hold; release before
- *                    the next command / flush
+ *   CCExclHold    → shards.hold(si) @destroy inside execute (same
+ *                    shape as the sketch); encode under hold; release at
+ *                    scope exit before the next command / flush
  *
  * Shape (go + sketch): parse → execute(hold → exec → encode) → flush.
  * One string-switch maps the folded name to RedisOp; hold groups then one
@@ -875,11 +875,9 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
     case REDIS_OP_TTL:
     case REDIS_OP_PTTL:
     case REDIS_OP_PERSIST: {
-        CCShardHold hold;
         if (cmd->argc < 2) return enc->err("wrong number of arguments");
-        hold = shards->hold_one(
-            (uint64_t)db_shard_index_for_key(db, cmd->args[1]));
-        @defer hold.release();
+        CCExclHold hold = shards->hold(
+            (uint64_t)db_shard_index_for_key(db, cmd->args[1])) @destroy;
         if (!hold.held()) return enc->err("shard admission failed");
         return exec(db, cmd, enc, op);
     }
@@ -892,13 +890,11 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
         size_t stride = (op == REDIS_OP_MSET) ? 2u : 1u;
         size_t nkeys;
         size_t nnames;
-        CCShardHold hold;
         if (cmd->argc < 2) return enc->err("wrong number of arguments");
         nkeys = cmd->argc - 1;
         nnames = unique_shards(db, cmd->args + 1, nkeys, stride, names,
                                (size_t)REDIS_DB_MAX_SHARDS);
-        hold = shards->hold_sorted(names, nnames);
-        @defer hold.release();
+        CCExclHold hold = shards->hold_sorted(names, nnames) @destroy;
         if (!hold.held()) return enc->err("shard admission failed");
         return exec(db, cmd, enc, op);
     }
@@ -908,8 +904,7 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
     case REDIS_OP_FLUSHALL:
     case REDIS_OP_KEYS:
     case REDIS_OP_CC_MEMLOG: {
-        CCShardHold hold = shards->hold_all();
-        @defer hold.release();
+        CCExclHold hold = shards->hold_all() @destroy;
         if (!hold.held()) return enc->err("shard admission failed");
         return exec(db, cmd, enc, op);
     }

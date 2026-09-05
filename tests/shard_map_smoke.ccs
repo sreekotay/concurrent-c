@@ -13,7 +13,7 @@ int main(void) {
     CCShardMask mask = cc_shard_mask_make(4);
     CCShardMap maps = {0};
     CCShard* sh;
-    CCShardHold hold;
+    CCExclHold hold;
     CCString owned;
     CCString* v;
     cc_arena_stack(scratch, 512);

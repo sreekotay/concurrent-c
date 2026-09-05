@@ -6,9 +6,9 @@
  *   // or: excl = cc_exclusive_create(arena, 256) !>;              // hint → pow2
  *   // UFCS: arena.create_exclusive(0) !>
  *   CCExclusiveMutex m = excl.mutex(name);  // resolve once
- *   CCExclusiveGuard g = m.acquire();
+ *   CCExclusiveGuard g = m.acquire() @destroy;  // release at scope exit
  *   ... short critical section (do not @await) ...
- *   g.release();   // idempotent; also g.destroy() / @destroy
+ *   // or: g.release();  — idempotent; g.destroy() is the same verb
  *   m.free();      // user-explicit: drop name from map, return entry to pool
  *
  * Multi-name (deadlock-safe — always ascending by name):
@@ -42,13 +42,14 @@
  *   CCShardMask shards = cc_shard_mask_auto(64);
  *   size_t i = shards.index(hash);   // UFCS: cc_shard_mask_index(&shards, hash)
  *
- * Shard hold bundle (guards[] + n). CCShardMap embeds CCShardDomain via as:
- * so `maps.hold_all()` / `hold_one` / `hold_sorted` UFCS to these helpers:
+ * Exclusive hold bundle (guards[] + n). CCShardMap embeds CCShardDomain via as:
+ * so `maps.hold()` / `hold_one` / `hold_sorted` / `hold_all` UFCS to these helpers:
  *
  *   CCShardDomain d = cc_shard_domain(excl, shards);
- *   CCShardHold h = d.hold_one(si);
- *   @defer h.release();           // always pair acquire + defer
- *   if (!h.held()) …;             // admission failed (release is no-op)
+ *   CCExclHold h = d.hold(si) @destroy;   // hold == hold_one
+ *   if (!h.held()) …;                      // admission failed (release is no-op)
+ *   // or: d.hold_one(si) / hold_sorted(names, n) / hold_all()
+ *   // @defer h.release() is the explicit twin of @destroy
  *   …
  *
  * Same shape for hold_sorted / hold_all. Prefer acquire/release over
@@ -76,7 +77,8 @@
  * The lock word is the first field of the runtime entry, so a guard is a
  * single entry pointer and the inline paths cast it directly.
  *
- * Each CCExclusive is its own name space. Later: name@(args) / guard @destroy.
+ * Each CCExclusive is its own name space. Guard and exclusive hold register
+ * `.destroy` so bodyless `@destroy` is release.
  */
 #ifndef CCC_CC_EXCLUSIVE_CCH
 #define CCC_CC_EXCLUSIVE_CCH
@@ -485,15 +487,15 @@ static inline size_t cc_shard_mask_index(const CCShardMask* m, uint64_t hash) {
     return (size_t)hash & m->mask;
 }
 
-/* ---- Shard hold bundle (exclusive names 0..count-1) ----
+/* ---- Exclusive hold bundle (N names; shard domain uses 0..count-1) ----
  *
  * Wraps the guards[] + n ceremony.  Pair a CCExclusive with a CCShardMask
  * (or count); routing keys → shard ids stays in the caller. */
 
-typedef struct CCShardHold {
+typedef struct CCExclHold {
     CCExclusiveGuard gs[CC_EXCLUSIVE_ACQUIRE_MULTI_MAX];
     size_t n; /* 0 = not held / admission failed */
-} CCShardHold;
+} CCExclHold;
 
 typedef struct CCShardDomain {
     CCExclusiveHost* excl;
@@ -508,24 +510,24 @@ static inline CCShardDomain cc_shard_domain(CCExclusive excl,
     return d;
 }
 
-static inline bool cc_shard_hold_held(const CCShardHold* h) {
+static inline bool cc_excl_hold_held(const CCExclHold* h) {
     return h != NULL && h->n > 0;
 }
 
 /* Idempotent: no-op when !held() (n==0) or after a prior release. */
-static inline void cc_shard_hold_release(CCShardHold* h) {
+static inline void cc_excl_hold_release(CCExclHold* h) {
     if (!h || h->n == 0) return;
     cc_exclusive_guard_release_n(h->gs, h->n);
     h->n = 0;
 }
 
-static inline void cc_shard_hold_destroy(CCShardHold* h) {
-    cc_shard_hold_release(h);
+static inline void cc_excl_hold_destroy(CCExclHold* h) {
+    cc_excl_hold_release(h);
 }
 
-static inline CCShardHold cc_shard_domain_hold_one(CCShardDomain* d,
+static inline CCExclHold cc_shard_domain_hold_one(CCShardDomain* d,
                                                   uint64_t si) {
-    CCShardHold h = {0};
+    CCExclHold h = {0};
     if (!d || !d->excl || d->mask.count == 0) return h;
     if (si >= (uint64_t)d->mask.count) return h;
     h.gs[0] = cc_exclusive_acquire_host(d->excl, si);
@@ -533,18 +535,23 @@ static inline CCShardHold cc_shard_domain_hold_one(CCShardDomain* d,
     return h;
 }
 
-static inline CCShardHold cc_shard_domain_hold_sorted(CCShardDomain* d,
+/* `d.hold(si)` — one shard. Sorted / all stay hold_sorted / hold_all. */
+static inline CCExclHold cc_shard_domain_hold(CCShardDomain* d, uint64_t si) {
+    return cc_shard_domain_hold_one(d, si);
+}
+
+static inline CCExclHold cc_shard_domain_hold_sorted(CCShardDomain* d,
                                                      const uint64_t* names,
                                                      size_t count) {
-    CCShardHold h = {0};
+    CCExclHold h = {0};
     if (!d || !d->excl || !names || count == 0) return h;
     h.n = cc_exclusive_acquire_sorted_host(d->excl, names, count, h.gs,
                                            (size_t)CC_EXCLUSIVE_ACQUIRE_MULTI_MAX);
     return h;
 }
 
-static inline CCShardHold cc_shard_domain_hold_all(CCShardDomain* d) {
-    CCShardHold h = {0};
+static inline CCExclHold cc_shard_domain_hold_all(CCShardDomain* d) {
+    CCExclHold h = {0};
     if (!d || !d->excl || d->mask.count == 0) return h;
     h.n = cc_exclusive_acquire_range_host(d->excl, 0, (uint64_t)d->mask.count,
                                           h.gs,
@@ -558,6 +565,12 @@ static inline CCShardHold cc_shard_domain_hold_all(CCShardDomain* d) {
 
 @typehooks on CCExclusive {
     .destroy = cc_type_destroy_call("cc_exclusive_destroy"),
+};
+@typehooks on CCExclusiveGuard {
+    .destroy = cc_type_destroy_call("cc_exclusive_guard_destroy"),
+};
+@typehooks on CCExclHold {
+    .destroy = cc_type_destroy_call("cc_excl_hold_destroy"),
 };
 
 #endif /* CCC_CC_EXCLUSIVE_CCH */

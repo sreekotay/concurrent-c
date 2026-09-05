@@ -635,9 +635,12 @@ Short critical sections on a `uint64_t` name. Do not `@await` under the hold.
 
 ```c
 CCExclusive excl = cc_exclusive_create(arena, 0) !> @destroy;
-CCExclusiveGuard g = excl.acquire(name);
+CCExclusiveGuard g = excl.acquire(name) @destroy;
 … mutate …
-g.release();
+/* or g.release(); — same idempotent verb */
+
+CCExclHold h = maps.hold(si) @destroy;   /* hold == hold_one */
+if (!h.held()) { /* admission failed */ }
 
 /* Park until pred is true *under* the name. Not a condvar-on-held-guard. */
 CCExclusiveGuard w = excl.acquire_when(name, pred, env) !> @destroy;

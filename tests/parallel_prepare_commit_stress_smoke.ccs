@@ -92,7 +92,7 @@ static void !>(CCError) run_pair(Store* st, int ia, int ib, int boom) {
     names[0] = (uint64_t)sa;
     names[1] = (uint64_t)sb;
     {
-        CCShardHold h = st->rel.hold_sorted(names, 2);
+        CCExclHold h = st->rel.hold_sorted(names, 2);
         @defer h.release();
         if (!h.held())
             return cc_err(CC_ERR_INVALID_ARG, "hold");

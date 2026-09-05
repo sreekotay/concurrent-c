@@ -299,7 +299,7 @@ static size_t unique_shards(DB* db, Cmd* c, uint64_t* names, size_t cap) {
     return n;
 }
 
-static void !>(CCError) require_held(CCShardHold* hold) {
+static void !>(CCError) require_held(CCExclHold* hold) {
     if (!hold || !hold->held())
         return cc_err(CC_ERR_INVALID_ARG, "shard admission failed");
     return cc_ok();
@@ -329,7 +329,7 @@ static bool !>(CCError) exec_mget_parallel(DB* db, Cmd* c, ConnEnc conn) {
         char[:] copy = {0};
 
         {
-            CCShardHold hold = maps->hold_one((uint64_t)si);
+            CCExclHold hold = maps->hold_one((uint64_t)si);
             @defer hold.release();
             require_held(&hold) !>;
             CCShard* sh = maps->shard(si);
@@ -385,7 +385,7 @@ static bool !>(CCError) execute(DB* db, Cmd* c,
         size_t si;
         if (c->argc < 2) return conn->err("wrong number of arguments");
         si = shard_of(db, c->args[1]);
-        CCShardHold hold = maps->hold_one((uint64_t)si);
+        CCExclHold hold = maps->hold_one((uint64_t)si);
         @defer hold.release();
         if (!hold.held()) return conn->err("shard admission failed");
         return exec_key(db, c, si, conn);
@@ -395,13 +395,13 @@ static bool !>(CCError) execute(DB* db, Cmd* c,
         size_t nnames;
         if (c->argc < 2) return conn->err("wrong number of arguments");
         nnames = unique_shards(db, c, names, (size_t)K_MAX_SHARDS);
-        CCShardHold hold = maps->hold_sorted(names, nnames);
+        CCExclHold hold = maps->hold_sorted(names, nnames);
         @defer hold.release();
         if (!hold.held()) return conn->err("shard admission failed");
         return exec_keys(db, c, conn);
     }
     {
-        CCShardHold hold = maps->hold_all();
+        CCExclHold hold = maps->hold_all();
         @defer hold.release();
         if (!hold.held()) return conn->err("shard admission failed");
         return exec_all(db, c, conn);
