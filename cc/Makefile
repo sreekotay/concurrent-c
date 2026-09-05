@@ -478,6 +478,8 @@ ccindex: $(CCINDEX_BINARY)
 lower-cc: $(SHADOW_LOWER_WRAPPER) $(LOWER_HEADERS_STAMP)
 	bin/ccc build lower/cclex.ccs -o $(OUT_BINDIR)/cclex_cc
 	bin/ccc build lower/ccparse.ccs -o $(OUT_BINDIR)/ccparse_cc
+	bin/ccc build lower/cclower.ccs -o $(OUT_BINDIR)/cclower_cc
+	bin/ccc build lower/ccindex.ccs -o $(OUT_BINDIR)/ccindex_cc
 
 # shadow_lower self-build:
 #   SHADOW_LOWER_SOURCE=bootstrap (default) — host-cc last-good snapshot

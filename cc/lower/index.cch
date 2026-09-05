@@ -1,8 +1,12 @@
 /* Declaration index: what the lowerer knows about names, from declarations.
  *
  * Built from the unit itself and every `.cch` it includes (each parsed in
- * header mode with the same parser, once per path). It answers the
- * questions the lowerings ask, so no lowering carries a table of names:
+ * header mode with the same parser, once per canonical path), from
+ * `@typehooks` registrations, `*_DECL_UFCS(Name)` registrations, and the
+ * declarations that file-scope macro invocations and generic factories
+ * produce (their `#define` bodies and `@emit` templates are expanded here
+ * and parsed as synthetic header units). It answers the questions the
+ * lowerings ask, so no lowering carries a table of names:
  *   - is `f` a function, what does it return, is that a Result, of what?
  *   - is `T` a type, a typedef of what, a struct with which fields?
  *   - which method does `x.m()` resolve to for a receiver of type `T`
@@ -11,62 +15,174 @@
  *   - which argument of `f` is its arena?
  *   - may a call to `f` be discarded (`T?>(E)`)?
  *   - which Result specs must this unit emit, and which come from headers?
- * Missing knowledge is a diagnostic at the use site, never a guess.
+ * Missing knowledge is a diagnostic at the use site, never a guess. There
+ * is no table of stdlib type, function or method names here.
  *
- * Lifetimes: the index and the header units it parses live in the arena
- * `cc_index_new` is given, which outlives the unit being lowered. */
+ * Lifetimes: the index, the header units it parses and every name it
+ * spells live in the arena `cc_index_new` is given, which outlives the
+ * unit being lowered. */
 #ifndef CC_LOWER_INDEX_CCH
 #define CC_LOWER_INDEX_CCH
 #include "parse.cch"
 #include <ccc/std/map.cch>
 
+typedef Vec::[CCSlice] CcNameList;     /* a prototype parameter must spell the list through a typedef */
+typedef Vec::[CcField] CcFieldList;    /* likewise inside a @switch case body */
+typedef Vec::[CcEnumerator] CcEnumeratorList;
+typedef Vec::[CcHookEntry] CcHookEntryList;
+typedef Vec::[CcViewItem] CcViewItemList;
+typedef Vec::[CcDesignator] CcDesignatorList;
+typedef Vec::[CcUnitRef] CcUnitList;
+typedef Vec::[int] CcIntList;
+
+/* Internal records of the implementation, declared here so their list
+ * instances are named where the extractor sees them. */
+typedef struct CcIncludeRef {   /* an `#include` line of a lexed file */
+    CCSlice path;
+    bool quoted;
+    uint32_t tok;               /* the PP token, for the diagnostic position */
+} CcIncludeRef;
+typedef Vec::[CcIncludeRef] CcIncludeRefList;
+typedef struct CcSlotBind {     /* a factory local bound to a type argument */
+    CCSlice local;
+    int arg;
+} CcSlotBind;
+typedef Vec::[CcSlotBind] CcSlotBindList;
+
 typedef enum CcSymKind { CC_SYM_FUNC = 1, CC_SYM_VAR, CC_SYM_TYPE, CC_SYM_ENUMERATOR, CC_SYM_MACRO } CcSymKind;
 
-typedef struct CcSym {
+typedef struct CcMacroDef CcMacroDef;
+typedef struct CcSym CcSym;
+typedef struct CcHookReg CcHookReg;
+typedef CcSym* CcSymRef;
+typedef Vec::[CcSymRef] CcSymList;
+typedef CcMacroDef* CcMacroDefRef;
+typedef CcHookReg* CcHookRegRef;
+typedef Vec::[CcHookRegRef] CcHookRegList;
+
+/* A `#define`, as text: object-like or function-like, with its alternates
+ * (the same name defined again under another `#if` branch). Bodies are
+ * expanded for file-scope invocations so macro-made declarations
+ * (CC_DECL_RESULT_SPEC, CC_DECL_SLICE, CC_MAP_DECL_ARENA ...) are indexed
+ * like written ones. */
+struct CcMacroDef {
+    CCSlice name;
+    bool function_like;
+    bool variadic;
+    Vec::[CCSlice] params;      /* function-like: parameter names */
+    CCSlice body;               /* body text, continuations joined, comments stripped; NUL-terminated */
+    CcDecl* decl;
+    CcUnit* unit;
+    CcMacroDef* alt;            /* next definition of the same name */
+};
+
+struct CcSym {
     CCSlice name;
     CcSymKind kind;
     CcDecl* decl;               /* the declaring node, in this unit or a header unit */
     CcUnit* unit;
     CcType* type;               /* function type / variable type / aliased type */
-} CcSym;
-typedef CcSym* CcSymRef;
+    bool is_header;             /* declared by an included header (or a macro expansion of one) */
+    bool is_definition;         /* function with a body / struct with fields / macro with a body */
+    CcMacroDef* macro;          /* CC_SYM_MACRO: the parsed `#define` (all alternates) */
+    CcSym* same_name;           /* the symbol of another kind with this name, older first */
+};
+
+/* One rule read out of a `.ufcs` hook body: `if (method == "m") return
+ * emit("callee")`, `case "m": return @slice("callee")`. */
+typedef struct CcUfcsRule {
+    CCSlice method;
+    CCSlice callee;
+    bool by_value;              /* returned through cc_ufcs_emit_value* */
+} CcUfcsRule;
+typedef Vec::[CcUfcsRule] CcUfcsRuleList;
+
+/* A `@typehooks on Subject { ... }` registration. Subjects: an exact type
+ * ("CCArena"), a pointer subject ("MyRes*"), a trailing-`*` family
+ * ("Map_*"), or `*`. Empty slices mean "none". */
+struct CcHookReg {
+    CCSlice subject;            /* as written */
+    CCSlice base;               /* subject without the trailing `*` (or `_*`) */
+    bool any;                   /* `*` */
+    bool family;                /* `Base_*` */
+    bool ptr;                   /* `Base*` */
+    CcDecl* decl;
+    CcUnit* unit;
+    CCSlice create_fn;          /* first create overload; "_new" style suffixes are kept as written */
+    CCSlice create_fn2;
+    CCSlice destroy_fn;
+    CCSlice pre_destroy_fn;
+    CCSlice ufcs_fn;            /* handler name, or "<lambda>" */
+    CcExpr* ufcs_value;         /* the .ufcs expression */
+    Vec::[CcUfcsRule] rules;    /* literal rules read from the handler body, latest first */
+    CCSlice ufcs_prefix;        /* `return concat("prefix_", method)`: composed callee prefix */
+    bool ufcs_prefix_by_value;
+    bool ufcs_rejects;          /* default path returns the empty slice: no composition after the rules */
+    bool ufcs_opaque;           /* handler body could not be read as rules (computed names) */
+    bool has_len; bool has_access; bool has_cast; bool has_niche; bool has_sink;
+    CCSlice sink_fn;            /* .ufcs_sink callee: unresolved methods lower to sink(&recv, "m", n, args...) */
+};
 
 /* One entry of a type's method set. `callee` is the C function; `recv_by_ptr`
  * says whether the receiver is passed as `&recv`. `source` says where the
- * mapping came from, for diagnostics. */
+ * mapping came from, `origin` where it was read, for diagnostics. */
 typedef struct CcMethod {
     CCSlice method;
     CCSlice callee;
     bool recv_by_ptr;
-    CCSlice source;             /* "@typehooks on T", "CC_MAP_DECL_UFCS", "Type_method", "cc_snake_method", "as: field" */
-    CcSym* sym;
+    CCSlice source;             /* "typehooks", "DECL_UFCS", "Type_method", "cc_snake_method", "snake_method", "Result", "bare_name", "ufcs_sink" */
+    CCSlice origin;             /* the hook, registration or declaration site */
+    CcSym* sym;                 /* the callee's declaration */
 } CcMethod;
+typedef CcMethod* CcMethodRef;
+typedef Vec::[CcMethodRef] CcMethodList;
 
 typedef struct CcTypeInfo {
     CCSlice name;               /* canonical: "CCString", "Map_int_int", "CCResult_int_CCError" */
     CcSym* sym;
-    Vec::[CcMethod] methods;
+    Vec::[CcMethodRef] methods; /* resolved so far (cache) */
     CCSlice destroy_fn;         /* @typehooks .destroy; empty when none */
     CCSlice create_fn;
     CCSlice pre_destroy_fn;
-    Vec::[CCSlice] faces;       /* `as:` fields, in declaration order */
-    bool is_result;
+    CcHookReg* hooks;           /* the narrowest @typehooks registration that matches, or NULL */
+    CCSlice family;             /* generic family for an instance ("Map" for Map_int_int); empty otherwise */
+    CcTypeList targs;           /* the instance's type arguments */
+    CCSlice ufcs_registered_by; /* "CC_MAP_DECL_UFCS" when a *_DECL_UFCS(Name) names this type */
+    bool instantiated;          /* the family factory / spec macro has been expanded for it */
+    bool is_result;             /* CCResult_T_E */
     CcType* result_value;
     CcType* result_err;
     bool result_optional;
     bool result_from_header;    /* spec declared by a header: do not re-emit */
+    CcUnit* result_decl_unit;   /* the unit whose CC_DECL_RESULT_SPEC declared it, or NULL */
+    uint32_t result_decl_line;
 } CcTypeInfo;
 typedef CcTypeInfo* CcTypeInfoRef;
+typedef Vec::[CcTypeInfoRef] CcTypeInfoList;
 
 typedef struct CcIndex {
     CCArena arena;
     CcDiags* ds;
-    Vec::[CcUnit*] units;       /* the unit plus each header unit, include order */
-    Map::[CCSlice, CcSymRef] syms;
-    Map::[CCSlice, CcTypeInfoRef] types;
+    Vec::[CcUnitRef] units;     /* the unit plus each header unit, include order */
+    Vec::[int] unit_is_header;  /* parallel to units */
+    Map::[CCSlice, CcSymRef] sym_heads;     /* name -> newest symbol of that name (chain: same_name) */
+    Map::[CCSlice, CcTypeInfoRef] type_map;
     Vec::[CcTypeInfoRef] result_specs;      /* first-use order */
-    Vec::[CCSlice] include_dirs;
-    CCSlice quote_dir;
+    /* Bookkeeping for dumps and for the resolution steps. */
+    Vec::[CcSymRef] syms;       /* every symbol, in declaration order */
+    Vec::[CcTypeInfoRef] types; /* every type info, in creation order */
+    Vec::[CcHookRegRef] hooks;  /* every @typehooks registration, in declaration order */
+    Vec::[CcDeclRef] factories; /* CC_GENERIC_FACTORY declarations */
+    Vec::[CcUnitRef] factory_units;
+    Vec::[CCSlice] typedef_names;   /* for the parser's known_types */
+    Vec::[CCSlice] loaded_paths;    /* canonical paths of loaded headers */
+    Vec::[CCSlice] loading_paths;   /* headers whose includes are being loaded (cycle guard) */
+    Map::[uint64_t, CCSlice] value_spellings;   /* a value type argument node -> its source text */
+    Vec::[CCSlice] include_dirs;    /* search path for <...> and "..." */
+    CCSlice quote_dir;              /* directory of the unit for "..." includes; empty when none */
+    int expansion_depth;        /* nesting of macro / factory expansions being indexed */
+    uint32_t n_expansions;
+    uint32_t n_expansion_errors;    /* parse errors inside expansions (not reported as diagnostics) */
 } CcIndex;
 
 static CcIndex* cc_index_new(Vec::[CCSlice] include_dirs, CCSlice quote_dir, CcDiags* ds, CCArena a);
@@ -78,24 +194,48 @@ static void CcIndex_add_unit(CcIndex* ix, CcUnit* u, bool is_header);
  * the lowerer does not reason about stay C. A `.cch` that cannot be found
  * or read is an error at the include line. */
 static void CcIndex_load_includes(CcIndex* ix, CcUnit* u, CcParseOpts opts);
+/* Same, from a lexed file that is not parsed yet: lets the driver load the
+ * headers of a unit before parsing the unit itself, so the parser sees
+ * every typedef name from the headers. */
+static void CcIndex_preload_includes(CcIndex* ix, const CcTape* tape, CcParseOpts opts);
+/* ix.known_types(): every typedef name the index knows, for CcParseOpts.known_types. */
+static Vec::[CCSlice] CcIndex_known_types(CcIndex* ix);
 
 /* Lookups. A miss is a Result error carrying the position-less reason;
  * the caller attaches the use site. */
 static CcSym*      !>(CcDiag) CcIndex_sym(CcIndex* ix, CCSlice name);
 static CcTypeInfo* !>(CcDiag) CcIndex_type(CcIndex* ix, CCSlice canonical);
-/* ix.canon(t): canonical spelling of a type node, into `a`:
+/* ix.type_get(canonical): the type info, created on first use (with its
+ * hooks, family instantiation and registrations resolved). */
+static CcTypeInfo* CcIndex_type_get(CcIndex* ix, CCSlice canonical);
+/* ix.canon(t): canonical spelling of a type node, into the index arena:
  * "int", "unsigned long", "struct Foo", "CCString", "CCResult_int_CCError",
  * "Map_int_int", "CCSlice" for char[:]. */
-static CCSlice CcIndex_canon(CcIndex* ix, const CcType* t, CCArena a);
-/* ix.method(recv, name): the method, or an error whose note lists the near
- * misses, ready for the use site. */
+static CCSlice CcIndex_canon(CcIndex* ix, const CcType* t);
+/* ix.method(recv, name, a): the method, or an error whose message lists
+ * what was tried and what the type has, ready for the use site. */
 static CcMethod* !>(CcDiag) CcIndex_method(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCArena a);
+/* ix.methods_of(info): every method the type has, from every source, for
+ * dumps and for the candidates list. */
+static CcMethodList CcIndex_methods_of(CcIndex* ix, CcTypeInfo* info);
 /* ix.result(value, err, optional): register the spec and return its info;
  * the printer emits every entry not declared by a header, once. */
 static CcTypeInfo* CcIndex_result(CcIndex* ix, CcType* value, CcType* err, bool optional);
 /* ix.arena_param(f): which parameter of `f` is its arena (attribute on the
  * declaration, or the trailing CCArena parameter); -1 when none. */
 static int CcIndex_arena_param(CcIndex* ix, CcSym* f);
+/* ix.expand_call(u, sp): expand a function-like macro invocation
+ * `NAME(args)` spanning `sp` in `u` with its `#define`; an empty slice when
+ * NAME is not a known function-like macro. Lets a caller learn what a
+ * statement-level macro (`cc_arena_stack(a, n)`) declares. */
+static CCSlice CcIndex_expand_call(CcIndex* ix, const CcUnit* u, CcSpan sp);
+/* ix.snake(type_name): `cc_<snake>` spelling: "CCJsVal" -> "cc_js_val", "RedisConn" -> "redis_conn". */
+static CCSlice CcIndex_snake(CcIndex* ix, CCSlice type_name);
+/* s.loc(): logical location of a symbol's declaration. */
+static CcLoc CcSym_loc(const CcSym* s);
+/* s.noreturn(): does a call to this function never return (`_Noreturn`,
+ * `noreturn` attribute, a macro that spells one)? */
+static bool CcSym_noreturn(const CcSym* s);
 
 @typeview Read on CcIndex { r: *; };
 

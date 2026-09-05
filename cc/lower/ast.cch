@@ -605,6 +605,7 @@ typedef struct CcUnit {
     Vec::[CCSlice] typedef_names;   /* file-scope typedef names, for the declaration/expression ambiguity */
     Vec::[CCSlice] assumed_types;   /* identifiers parsed as type names on faith; the index confirms them */
 } CcUnit;
+typedef CcUnit* CcUnitRef;    /* beside the definition: a pointer typedef names its pointee to the extractor */
 
 /* ---- Constructors and accessors --------------------------------------- */
 
