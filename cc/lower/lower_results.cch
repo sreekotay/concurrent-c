@@ -1367,6 +1367,7 @@ static void rl_emit_specs(CcLowerer* L) {
             {
                 CCSlice tt = raw_text.len ? raw_text : tp_text_of(L, tok);
                 if (tt.len > 8 && memcmp(tt.ptr, "#include", 8) == 0) is_include = true;
+                if (raw_text.len) inc_at = k + 1;   /* a lowering's own prelude block */
                 if (is_include) {
                     inc_at = k + 1;
                     if (cc_slice_find_cstr(tt, "cc_result") || cc_slice_find_cstr(tt, "cc_runtime") || cc_slice_find_cstr(tt, "prelude"))

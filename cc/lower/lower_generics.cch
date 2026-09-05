@@ -1,0 +1,355 @@
+#pragma(@per_tu)
+/* Clean lowerer, step: generic instances. `Vec::[T]` in a type position is
+ * its instance name (`CCVec_int`); `snake(Family)_member::[args](call-args)`
+ * is `<Instance>_member(call-args)`; and every instance the unit mentions
+ * gets the family factory's expansion, as the index instantiated it, spliced
+ * after the leading includes under a guard, type arguments' instances first.
+ * A hand-declared instance (a header's `CC_VEC_DECL_ARENA(...)`) suppresses
+ * the splice. Lifetime: the lowerer arena. */
+#ifndef CC_LOWER_GENERICS_CCH
+#define CC_LOWER_GENERICS_CCH
+#include "lower.cch"
+
+typedef struct GStep {
+    CcLowerer* L;
+    CcNameList order;           /* instance names in emission order */
+} GStep;
+
+static bool gn_seen(GStep* st, CCSlice name) {
+    CcNameList* o = &st->order;
+    size_t n = o->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice s = *o->get_ptr(i);
+        if (cc_slice_eq(&s, name)) return true;
+    }
+    return false;
+}
+
+/* Note an instance for emission, its type arguments' instances first. */
+static void gn_note(GStep* st, CcTypeInfo* info, int depth) {
+    CcIndex* ix = st->L->ix;
+    CcTypeList* targv;
+    size_t n;
+    size_t i;
+    if (!info || !info->family.len || depth > 8) return;
+    if (gn_seen(st, info->name)) return;
+    targv = &info->targs;
+    n = targv->len();
+    for (i = 0; i < n; i++) {
+        CcType* at = *targv->get_ptr(i);
+        CCSlice an = ix->canon(at);
+        CcTypeInfo* ai = ix->type_get(an);
+        gn_note(st, ai, depth + 1);
+    }
+    st->order.push(info->name);
+}
+
+static bool gn_type_visit(CcType* t, void* env) {
+    GStep* st = (GStep*)env;
+    CcIndex* ix = st->L->ix;
+    bool is_generic = false;
+    @switch (t->k) {
+        case .generic: is_generic = true; break;
+        default: break;
+    }
+    if (!is_generic) return true;
+    {
+        CCSlice name = ix->canon(t);      /* instantiates on first use */
+        CcTypeInfo* info = ix->type_get(name);
+        CcNamedType nt;
+        gn_note(st, info, 0);
+        memset(&nt, 0, sizeof(nt));
+        nt.name = name;
+        t->k = { .named = nt };
+    }
+    return false;
+}
+
+/* `snake(Family)`: lowercased, `_` before an uppercase letter that follows a lowercase one. */
+static CCSlice gn_snake(CcLowerer* L, CCSlice fam) {
+    CCString sb = cc_string_new();
+    size_t i;
+    for (i = 0; i < fam.len; i++) {
+        char c = fam.ptr[i];
+        if (c >= 'A' && c <= 'Z') {
+            if (i > 0 && fam.ptr[i - 1] >= 'a' && fam.ptr[i - 1] <= 'z') cc_string_push_char(&sb, '_', L->arena);
+            cc_string_push_char(&sb, (char)(c - 'A' + 'a'), L->arena);
+        } else {
+            cc_string_push_char(&sb, c, L->arena);
+        }
+    }
+    return lw_keep(L, &sb);
+}
+
+static bool gn_expr_visit(CcExpr* e, void* env) {
+    GStep* st = (GStep*)env;
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CcGenericFn gf;
+    bool hit = false;
+    CCSlice name;
+    CcDeclList* factv;
+    size_t nf;
+    size_t f;
+    @switch (e->k) {
+        case .generic_fn(x): gf = x; hit = true; break;
+        default: break;
+    }
+    if (!hit) return true;
+    name = gf.name;
+    if (name.len > 3 && memcmp(name.ptr, "cc_", 3) == 0) name = cc_slice_from_buffer((char*)name.ptr + 3, name.len - 3);
+    factv = &ix->factories;
+    nf = factv->len();
+    for (f = 0; f < nf; f++) {
+        CcDecl* d = *factv->get_ptr(f);
+        CCSlice fam = cc__factory_name(d);
+        CCSlice snake;
+        if (!fam.len || cc__factory_is_extend(d)) continue;
+        snake = gn_snake(L, fam);
+        if (name.len > snake.len + 1 && memcmp(name.ptr, snake.ptr, snake.len) == 0 && name.ptr[snake.len] == '_') {
+            CCSlice member = cc_slice_from_buffer((char*)name.ptr + snake.len + 1, name.len - snake.len - 1);
+            CcType tmp;
+            CcGenericType g;
+            CCSlice mangled;
+            CcTypeInfo* info;
+            CCString callee;
+            CcCall call;
+            memset(&tmp, 0, sizeof(tmp));
+            tmp.span = e->span;
+            g.family = fam;
+            g.args = gf.targs;
+            tmp.k = { .generic = g };
+            mangled = ix->canon(&tmp);
+            info = ix->type_get(mangled);
+            gn_note(st, info, 0);
+            callee = @string(`${mangled}_${member}`, L->arena);
+            call.callee = lw_ident(L, lw_keep(L, &callee), e->span);
+            call.args = gf.args;
+            e->k = { .call = call };
+            return true;
+        }
+    }
+    {
+        CCString fams = cc_string_new();
+        for (f = 0; f < nf; f++) {
+            CcDecl* d = *factv->get_ptr(f);
+            CCSlice fam = cc__factory_name(d);
+            if (!fam.len || cc__factory_is_extend(d)) continue;
+            if (cc_string_len(&fams)) cc_string_push_cstr(&fams, ", ", L->arena);
+            cc_string_push_slice(&fams, fam, L->arena);
+        }
+        {
+            CCString m = @string(`'${gf.name}::[...]' matches no registered generic family (registered: ${fams})`, L->arena);
+            lw_error(L, e->span, m);
+        }
+    }
+    return true;
+}
+
+/* Is the instance declared by hand (a header's declaration macro), not by
+ * the factory expansion? */
+static bool gn_hand_declared(CcLowerer* L, CCSlice name) {
+    CcIndex* ix = L->ix;
+    CcSym* s = ix->sym(name) ?> NULL;
+    while (s && s->kind != CC_SYM_TYPE) s = s->same_name;
+    if (!s || !s->unit) return false;
+    {
+        CCSlice p = s->unit->tape.path;
+        return !(p.len > 20 && memcmp(p.ptr, "<CC_GENERIC_FACTORY", 19) == 0);
+    }
+}
+
+static CCString gn_upper(CcLowerer* L, CCSlice s) {
+    CCString sb = cc_string_new();
+    size_t i;
+    for (i = 0; i < s.len; i++) {
+        char c = s.ptr[i];
+        cc_string_push_char(&sb, (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c, L->arena);
+    }
+    return sb;
+}
+
+/* The `@emit` template of a factory declaration: the template token that
+ * follows `@emit (`. NULL when the factory has none. */
+static const CcToken* gn_emit_template(CcUnit* fu, CcDecl* d) {
+    uint32_t i;
+    for (i = d->span.first; i <= d->span.last; i++) {
+        const CcToken* t = cc__tok(fu, i);
+        const CcToken* p1;
+        const CcToken* p2;
+        if (!t || t->kind != CC_TK_TEMPLATE || i < 2) continue;
+        p1 = cc__tok(fu, i - 1);
+        p2 = cc__tok(fu, i - 2);
+        if (p1 && p2 && p1->kind == CC_TK_PUNCT && p1->punct == CC_P_LPAREN && p2->kind == CC_TK_AT_WORD &&
+            p2->text.len == 5 && memcmp(p2->text.ptr, "@emit", 5) == 0)
+            return t;
+    }
+    return NULL;
+}
+
+/* A slot the index cannot fill: not `${mangled}`, `${arg(i)}`, a type
+ * argument or a factory local bound to one. Returns its spelling, empty
+ * when every slot is fillable. */
+static CCSlice gn_computed_slot(CcLowerer* L, const CcToken* t, CcSlotBindList* binds, CcNameList* args) {
+    const char* text = t->text.ptr + 1;
+    size_t len = t->text.len - 2;
+    size_t i = 0;
+    while (i < len) {
+        if (text[i] == '$' && i + 1 < len && text[i + 1] == '{') {
+            size_t j = i + 2;
+            size_t depth = 1;
+            const char* inner;
+            size_t inner_len;
+            bool found = false;
+            while (j < len && depth) {
+                if (text[j] == '{') depth++;
+                else if (text[j] == '}') depth--;
+                if (depth) j++;
+            }
+            inner = text + i + 2;
+            inner_len = j - (i + 2);
+            while (inner_len && (inner[0] == ' ' || inner[0] == '\t')) { inner++; inner_len--; }
+            while (inner_len && (inner[inner_len - 1] == ' ' || inner[inner_len - 1] == '\t')) inner_len--;
+            if (!(inner_len == 7 && memcmp(inner, "mangled", 7) == 0) &&
+                !(inner_len > 4 && memcmp(inner, "arg(", 4) == 0) &&
+                !(inner_len > 16 && memcmp(inner, "type_args.items[", 16) == 0)) {
+                cc__bind_lookup(binds, inner, inner_len, args, &found);
+                if (!found) return cc_slice_from_buffer((char*)inner, inner_len);
+            }
+            i = j + 1;
+            continue;
+        }
+        i++;
+    }
+    (void)L;
+    return cc_slice_empty();
+}
+
+/* The expansion text of one instance: the family factory's `@emit`
+ * template (then each extension's), filled by the index's rules. Empty,
+ * after the diagnostic, when a slot needs the factory body run. */
+static CCString gn_instance_text(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool* ok) {
+    CcIndex* ix = L->ix;
+    CcDeclList* factv = &ix->factories;
+    CcUnitList* funitv = &ix->factory_units;
+    size_t nf = factv->len();
+    size_t f;
+    CCString text = cc_string_new();
+    CcNameList args = vec_new::[CCSlice](L->arena);
+    CcTypeList* targv = &info->targs;
+    size_t nt = targv->len();
+    size_t i;
+    CCString up = gn_upper(L, info->family);
+    CCString guard = @string(`CC_HEADER_${up}_${info->name}`, L->arena);
+    CCString head = @string(`#ifndef ${guard}
+#define ${guard}
+`, L->arena);
+    *ok = true;
+    for (i = 0; i < nt; i++) { CcType* at = *targv->get_ptr(i); CCSlice asp = cc__type_arg_spelling(ix, at); args.push(asp); }
+    cc_string_push_slice(&text, head.as_slice(), L->arena);
+    cc_string_push_cstr(&text, "/" "* generic ", L->arena);
+    cc_string_push_slice(&text, info->name, L->arena);
+    cc_string_push_cstr(&text, " *" "/\n", L->arena);
+    /* the base factory first, then the extensions, in declaration order */
+    for (f = 0; f < 2 * nf; f++) {
+        size_t fi = f < nf ? f : f - nf;
+        bool want_extend = f >= nf;
+        CcDecl* d = *factv->get_ptr(fi);
+        CcUnit* fu = *funitv->get_ptr(fi);
+        const CcToken* t;
+        CcSlotBindList binds;
+        CCSlice computed;
+        if (!cc_slice_eq(&info->family, cc__factory_name(d))) continue;
+        if (cc__factory_is_extend(d) != want_extend) continue;
+        t = gn_emit_template(fu, d);
+        if (!t) continue;
+        binds = vec_new::[CcSlotBind](L->arena);
+        cc__factory_bindings(ix, fu, cc__factory_body(d), &binds);
+        computed = gn_computed_slot(L, t, &binds, &args);
+        if (computed.len) {
+            CCString m = @string(`instance '${info->name}' of generic family '${info->family}' needs its factory run: the emitted fragment computes '${computed}'; the clean lowerer does not run factory bodies yet`, L->arena);
+            lw_error(L, sp, m);
+            *ok = false;
+            return text;
+        }
+        {
+            CCSlice frag = cc__template_instance(ix, t->text.ptr + 1, t->text.len - 2, info, &binds, &args);
+            cc_string_push_slice(&text, frag, L->arena);
+            if (frag.len && frag.ptr[frag.len - 1] != '\n') cc_string_push_char(&text, '\n', L->arena);
+        }
+    }
+    cc_string_push_cstr(&text, "#endif\n", L->arena);
+    return text;
+}
+
+static void CcLowerer_generics(CcLowerer* L) {
+    GStep st;
+    CcVisitor v;
+    CcIndex* ix = L->ix;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    st.order = vec_new::[CCSlice](L->arena);
+    memset(&v, 0, sizeof(v));
+    v.type = gn_type_visit;
+    v.expr = gn_expr_visit;
+    v.env = &st;
+    CcUnit_walk(L->unit, v);
+    {
+        CcNameList* o = &st.order;
+        size_t n = o->len();
+        size_t i;
+        CCString all = cc_string_new();
+        bool any = false;
+        for (i = 0; i < n; i++) {
+            CCSlice name = *o->get_ptr(i);
+            CcTypeInfo* info = ix->type_get(name);
+            CCString one;
+            bool ok;
+            CcSpan sp0;
+            sp0.first = 0;
+            sp0.last = 0;
+            if (gn_hand_declared(L, name)) continue;
+            one = gn_instance_text(L, info, sp0, &ok);
+            if (!ok) continue;
+            cc_string_push_slice(&all, one.as_slice(), L->arena);
+            any = true;
+        }
+        if (!any) return;
+        /* after the leading includes */
+        {
+            CcDeclList* decls = &L->unit->decls;
+            size_t nd = decls->len();
+            size_t at = 0;
+            size_t k;
+            CcDeclList with = vec_new::[CcDeclRef](L->arena);
+            CcSpan sp;
+            for (k = 0; k < nd; k++) {
+                CcDecl* dd = *decls->get_ptr(k);
+                bool is_pp = false;
+                @switch (dd->k) {
+                    case .pp: is_pp = true; break;
+                    case .empty: is_pp = true; break;
+                    case .pragma_cc: is_pp = true; break;
+                    case .raw: is_pp = true; break;
+                    default: break;
+                }
+                if (!is_pp) break;
+                at = k + 1;
+            }
+            sp.first = 0;
+            sp.last = 0;
+            if (at < nd) { CcDecl* da = *decls->get_ptr(at); sp = da->span; }
+            else if (nd) { CcDecl* dl = *decls->get_ptr(nd - 1); sp = dl->span; }
+            for (k = 0; k < nd; k++) {
+                CcDecl* dk = *decls->get_ptr(k);
+                if (k == at) with.push(lw_raw_decl(L, all, sp));
+                with.push(dk);
+            }
+            if (at >= nd) with.push(lw_raw_decl(L, all, sp));
+            *decls = with;
+        }
+    }
+}
+
+#endif

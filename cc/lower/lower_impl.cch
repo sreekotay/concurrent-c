@@ -207,6 +207,7 @@ static CCString lw_spell_expr(CcLowerer* L, const CcExpr* e) {
 
 /* ---- the pipeline ----------------------------------------------------- */
 
+#include "lower_generics.cch"
 #include "lower_ufcs.cch"
 #include "lower_results.cch"
 #include "lower_cleanup.cch"
@@ -251,6 +252,7 @@ static void lw_drop_cc_only(CcLowerer* L) {
         @switch (d->k) {
             case .typeview: drop = true; break;
             case .typehooks: drop = true; break;
+            case .factory: drop = true; break;
             default: break;
         }
         if (!drop) with.push(d);
@@ -319,6 +321,7 @@ static void CcLowerer_includes(CcLowerer* L) {
 
 static void CcLowerer_lower_unit(CcLowerer* L) {
     CcLowerer_includes(L);
+    CcLowerer_generics(L);  /* before UFCS: a local of `Vec::[T]` is typed by its instance name */
     CcLowerer_ufcs(L);      /* before Results: an unwrap needs the plain call to type its Result */
     CcLowerer_results(L);
     CcLowerer_cleanup(L);

@@ -40,6 +40,7 @@ static void CcLowerer_lower_unit(CcLowerer* L);
 static void CcLowerer_results(CcLowerer* L);      /* Result types, cc_ok/cc_err, !> ?> forms, @errhandler, @err */
 static void CcLowerer_cleanup(CcLowerer* L);      /* @defer, @cancel_defer, @destroy: scope-exit runs and soft returns */
 static void CcLowerer_includes(CcLowerer* L);
+static void CcLowerer_generics(CcLowerer* L);     /* `Vec::[T]` -> `CCVec_T` and the factory expansion spliced once */
 static void CcLowerer_ufcs(CcLowerer* L);         /* `x.m(args)` -> the resolved `callee(&x, args)`; `Type.fn(args)` -> `Type_fn(args)` */     /* `#include "x.cch"` -> `#include <rel/x.h>`, the header recorded for lowering */
 
 /* Helpers shared by the steps. */
