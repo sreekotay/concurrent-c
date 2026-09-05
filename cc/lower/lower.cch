@@ -43,20 +43,20 @@ typedef struct CcLowerer {
     uint32_t next_temp;         /* __cc_r_N, __cc_eh_N: one counter per unit */
 } CcLowerer;
 
-CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds);
+static CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds);
 
 /* L.lower_unit(): the whole pipeline, in order. Each step is callable alone. */
-void CcLowerer_lower_unit(CcLowerer* L);
-void CcLowerer_results(CcLowerer* L);      /* Result types, cc_ok/cc_err, !> ?> forms, @errhandler, @err, @destroy, @defer */
-void CcLowerer_ufcs(CcLowerer* L);         /* x.m(), Type.fn(), generics, @typehooks, @variant, @typeview */
-void CcLowerer_strings(CcLowerer* L);      /* @string templates, @scratch, @slice, slices */
-void CcLowerer_concurrency(CcLowerer* L);  /* closures, spawn, channels, @parallel, deadlines, @closing */
-void CcLowerer_async(CcLowerer* L);        /* @async / @await */
-void CcLowerer_comptime(CcLowerer* L);     /* @comptime seam, @grammar, factories */
+static void CcLowerer_lower_unit(CcLowerer* L);
+static void CcLowerer_results(CcLowerer* L);      /* Result types, cc_ok/cc_err, !> ?> forms, @errhandler, @err, @destroy, @defer */
+static void CcLowerer_ufcs(CcLowerer* L);         /* x.m(), Type.fn(), generics, @typehooks, @variant, @typeview */
+static void CcLowerer_strings(CcLowerer* L);      /* @string templates, @scratch, @slice, slices */
+static void CcLowerer_concurrency(CcLowerer* L);  /* closures, spawn, channels, @parallel, deadlines, @closing */
+static void CcLowerer_async(CcLowerer* L);        /* @async / @await */
+static void CcLowerer_comptime(CcLowerer* L);     /* @comptime seam, @grammar, factories */
 
 /* Helpers shared by the steps. */
-CCSlice CcLowerer_temp(CcLowerer* L, CCSlice prefix);                    /* fresh "__cc_<prefix>_N" */
-CcExpr* CcLowerer_call(CcLowerer* L, CcSpan span, CCSlice fn);          /* a call node with an ident callee; push args after */
-CcStmt* CcLowerer_block(CcLowerer* L, CcSpan span);
+static CCSlice CcLowerer_temp(CcLowerer* L, CCSlice prefix);                    /* fresh "__cc_<prefix>_N" */
+static CcExpr* CcLowerer_call(CcLowerer* L, CcSpan span, CCSlice fn);          /* a call node with an ident callee; push args after */
+static CcStmt* CcLowerer_block(CcLowerer* L, CcSpan span);
 
 #endif

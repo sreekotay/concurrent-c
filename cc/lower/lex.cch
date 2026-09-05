@@ -60,9 +60,9 @@ typedef struct CcToken {
 } CcToken;
 
 /* tok.is(p), tok.is_ident("static"), tok.is_at("@parallel") */
-bool CcToken_is(const CcToken* t, CcPunct p);
-bool CcToken_is_ident(const CcToken* t, const char* word);
-bool CcToken_is_at(const CcToken* t, const char* word);
+static bool CcToken_is(const CcToken* t, CcPunct p);
+static bool CcToken_is_ident(const CcToken* t, const char* word);
+static bool CcToken_is_at(const CcToken* t, const char* word);
 
 /* A `#line N "path"` seen in the input, rebasing logical positions from
  * the physical line after it. */
@@ -83,14 +83,14 @@ typedef struct CcTape {
 
 /* Lex `src`. Every unplaceable byte is a CC_TK_ERROR token and a
  * diagnostic on `ds`; lexing continues so one file reports every error. */
-CcTape cc_lex(CCSlice path, CCSlice src, CcDiags* ds, CCArena a);
+static CcTape cc_lex(CCSlice path, CCSlice src, CcDiags* ds, CCArena a);
 
 /* tape.loc(i): user coordinates of token i, through the #line marks. */
-CcLoc CcTape_loc(const CcTape* t, uint32_t i);
+static CcLoc CcTape_loc(const CcTape* t, uint32_t i);
 /* tape.line_text(phys_line): the physical line, for caret snippets. */
-CCSlice CcTape_line_text(const CcTape* t, uint32_t phys_line);
+static CCSlice CcTape_line_text(const CcTape* t, uint32_t phys_line);
 /* tape.at(i): the token; i past the end is the EOF token. */
-const CcToken* CcTape_at(const CcTape* t, uint32_t i);
+static const CcToken* CcTape_at(const CcTape* t, uint32_t i);
 
 @typeview Read on CcTape { r: *; };
 

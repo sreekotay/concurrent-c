@@ -1,0 +1,53 @@
+/* Gate: the parser state face lowers; scopes and keywords behave. */
+#include "lex_impl.cch"
+#include "diag_impl.cch"
+#include "parse_state.cch"
+#include <stdio.h>
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(256)) @destroy;
+    CcDiags ds = CcDiags_new(a);
+    CcUnit* u = cc_arena_alloc(a, sizeof(CcUnit), _Alignof(CcUnit));
+    CcParseOpts opts;
+    CCSlice src = CC_SLICE_LIT("/* @tag:fast */ static int x = (1 + 2);\n#if 0\nint dead;\n#endif\n");
+    P p;
+    memset(u, 0, sizeof(*u));
+    u->arena = a;
+    u->tape = cc_lex(CC_SLICE_LIT("gate.ccs"), src, &ds, a);
+    u->typedef_names = vec_new::[CCSlice](a);
+    u->assumed_types = vec_new::[CCSlice](a);
+    opts.mode = CC_UNIT_SOURCE;
+    opts.known_types = vec_new::[CCSlice](a);
+    opts.known_types.push(CC_SLICE_LIT("CCArena"));
+    p = parser_new(u, opts, &ds, a);
+    {
+        Vec::[CcAttr] attrs = vec_new::[CcAttr](a);
+        bool k_static = at_kw(&p, KW_STATIC);
+        bool k_int;
+        CCSlice v;
+        collect_trivia_attrs(&p, 0, &attrs);
+        adv(&p);
+        k_int = at_kw(&p, KW_INT);
+        adv(&p);
+        declare_var(&p, tok_name(&p, p.i));
+        scope_push(p.syms);
+        declare_type(&p, CC_SLICE_LIT("Inner"));
+        v = attrs.len() ? attrs.get_ptr(0)->value : CC_SLICE_LIT("none");
+        printf("%d %d %d %d %d %.*s ", (int)k_static, (int)k_int, (int)name_is_var(&p, CC_SLICE_LIT("x")),
+               (int)name_is_type(&p, CC_SLICE_LIT("CCArena")), (int)name_is_type(&p, CC_SLICE_LIT("Inner")),
+               (int)v.len, v.ptr);
+        scope_pop(p.syms);
+        printf("%d ", (int)name_is_type(&p, CC_SLICE_LIT("Inner")));
+        /* skip to the `#if 0` line and note it */
+        while (!at_eof(&p) && p.t[p.i].kind != CC_TK_PP) adv(&p);
+        {
+            uint32_t last = 0;
+            bool skipped = false;
+            size_t depth;
+            pp_note(&p, p.i, &last, &skipped);
+            depth = p.pp.len();
+            printf("%d %zu\n", (int)skipped, depth);
+        }
+    }
+    return ds.has_errors() ? 1 : 0;
+}
