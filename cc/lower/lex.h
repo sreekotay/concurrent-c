@@ -69,8 +69,8 @@ typedef struct CcToken {
     uint8_t after_space;   /* lead_len > 0 */
 } CcToken;
 
-/* A `#line N "path"` (or `# N "path"`) directive, or a `/*CC_LN N "path"*/`
- * marker, rebases logical positions for everything after it. */
+/* A `#line N "path"` (or `# N "path"`) directive, or a `CC_LN N "path"`
+ * block-comment marker, rebases logical positions for everything after it. */
 typedef struct CcLineMark {
     uint32_t off;          /* first byte of the line after the directive */
     uint32_t phys_line;    /* physical line number of that byte */
