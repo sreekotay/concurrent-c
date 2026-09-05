@@ -1,0 +1,43 @@
+#pragma(@per_tu)
+/* Forward declarations across the parser's sections. The sections are
+ * mutually recursive (a declaration holds a function body; an expression
+ * holds a cast type); each file includes this one and defines its half.
+ *   parse_types.cch  : types, specifiers, declarators, struct/enum bodies, parameters
+ *   parse_exprs.cch  : expressions, templates, closures, initializers
+ *   parse_stmts.cch  : statements
+ *   parse_decls.cch  : declarations, the unit, cc_parse_unit
+ *   parse_walk.cch   : CcUnit_walk / CcStmt_walk / CcExpr_walk, CcUnit_dump, cc_parse_expr */
+#ifndef CC_LOWER_PARSE_FWD_CCH
+#define CC_LOWER_PARSE_FWD_CCH
+#include "parse_state.cch"
+
+/* parse_types.cch */
+static CcType* parse_type_name(P* p);                                  /* a type-name (abstract declarator allowed) */
+static CcType* parse_type_or_value_arg(P* p);                          /* one `::[...]` argument: a type, or a value as CcTypeArg */
+static CcType* parse_generic_args(P* p, CCSlice family, uint32_t first); /* after `Family` at `::[` */
+static bool    is_type_start(P* p, uint32_t i);                        /* token i begins a type (keyword, known typedef, struct/enum, @typeview(...)) */
+static bool    second_is_type(P* p, uint32_t i);                       /* token i is an unknown identifier followed by a declarator: a type on faith */
+static bool    unknown_ident_is_type(P* p, uint32_t i);                /* the heuristic for a never-declared identifier in type position */
+static void    parse_params(P* p, CcFuncType* fn);                     /* `(` params `)` into fn */
+
+/* parse_decls.cch */
+static bool parse_declaration(P* p, CcDeclList* out, bool file_scope); /* one declaration (may push several: `int a, b;`); false when not a declaration */
+static bool at_declaration_start(P* p);                                /* statement position: does a declaration start here? */
+
+/* parse_exprs.cch */
+static CcExpr* parse_expr(P* p);
+static CcExpr* parse_assign(P* p);
+static CcExpr* parse_cond(P* p);
+static CcExpr* parse_unary(P* p);
+static CcInit* parse_initializer(P* p);
+static void    parse_args(P* p, CcExprList* out, const char* what);    /* `(` args `)` */
+static bool    parse_template_parts(P* p, uint32_t tok, Vec::[CcTplPart]* out); /* split a CC_TK_TEMPLATE token */
+
+/* parse_stmts.cch */
+static CcStmt* parse_stmt(P* p);
+static CcStmt* parse_block(P* p);
+static CcStmt* parse_at_stmt(P* p);
+static CcStmt* parse_parallel(P* p);
+static void    parse_stmt_into(P* p, CcStmtList* list);
+
+#endif
