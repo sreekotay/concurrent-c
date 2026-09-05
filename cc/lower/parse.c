@@ -2035,9 +2035,9 @@ static CcExpr *parse_unwrap_tail(P *p, CcExpr *lhs) {
     adv(p); /* !> */
     if (at_p(p, CC_P_LPAREN) && !(tk(p, 1)->kind == CC_TK_IDENT && tok_is_p(tk(p, 2), CC_P_RPAREN))) {
         if (tok_is_p(tk(p, 1), CC_P_RPAREN))
-            err_at(p, p->i + 1, "'!>()' needs a name to bind the error: write '!>(e) body'");
+            err_at(p, p->i + 1, "expected identifier in '!> (...)': '!>()' needs a name to bind the error, write '!>(e) body'");
         else
-            err_at(p, p->i + 1, "'!>(...)' binds the error to a name, found %s", tok_desc(p, p->i + 1));
+            err_at(p, p->i + 1, "expected identifier in '!> (...)', found %s", tok_desc(p, p->i + 1));
         skip_balanced(p);
     }
     if (at_p(p, CC_P_LPAREN) && tk(p, 1)->kind == CC_TK_IDENT && tok_is_p(tk(p, 2), CC_P_RPAREN)) {
@@ -2046,7 +2046,11 @@ static CcExpr *parse_unwrap_tail(P *p, CcExpr *lhs) {
                    (after->kind == CC_TK_PUNCT && (after->punct == CC_P_SEMI || after->punct == CC_P_COMMA ||
                                                    after->punct == CC_P_RPAREN || after->punct == CC_P_RBRACKET ||
                                                    after->punct == CC_P_RBRACE || after->punct == CC_P_COLON));
-        if (!term) {
+        if (term) {
+            /* `f() !>(e);`: a binder with nothing to bind it for */
+            err_here(p, "expected body after '!> (%s)'", tok_name(p, p->i + 1));
+            adv(p); adv(p); adv(p);
+        } else {
             binder = tok_name(p, p->i + 1);
             adv(p); adv(p); adv(p);
         }
@@ -2064,7 +2068,7 @@ static CcExpr *parse_unwrap_tail(P *p, CcExpr *lhs) {
         int body = tok_is_p(t, CC_P_LBRACE) || t->kind == CC_TK_IDENT ||
                    (t->kind == CC_TK_AT_WORD && !at_word(p, "detach") && !at_word(p, "destroy"));
         if (!body && binder) {
-            err_here(p, "'!>(%s)' binds the error for a body, but no body follows (found %s)", binder, tok_desc(p, p->i));
+            err_here(p, "expected body after '!> (%s)': found %s", binder, tok_desc(p, p->i));
             body = 0;
         }
         if (body) {
@@ -2147,9 +2151,9 @@ static CcExpr *parse_unwrap_or_tail(P *p, CcExpr *lhs) {
     adv(p); /* ?> */
     if (at_p(p, CC_P_LPAREN) && !p->t[p->i].after_space && !(tk(p, 1)->kind == CC_TK_IDENT && tok_is_p(tk(p, 2), CC_P_RPAREN))) {
         if (tok_is_p(tk(p, 1), CC_P_RPAREN))
-            err_at(p, p->i + 1, "'?>()' needs a name to bind the error: write '?>(e) default'");
+            err_at(p, p->i + 1, "expected identifier in '?>(...)': '?>()' needs a name to bind the error, write '?>(e) default'");
         else
-            err_at(p, p->i + 1, "'?>(...)' binds the error to a name, found %s", tok_desc(p, p->i + 1));
+            err_at(p, p->i + 1, "expected identifier in '?>(...)', found %s", tok_desc(p, p->i + 1));
         skip_balanced(p);
     }
     if (at_p(p, CC_P_LPAREN) && tk(p, 1)->kind == CC_TK_IDENT && tok_is_p(tk(p, 2), CC_P_RPAREN)) {
@@ -2166,8 +2170,12 @@ static CcExpr *parse_unwrap_or_tail(P *p, CcExpr *lhs) {
     scope_push(p->syms);
     if (e->binder) declare_var(p, e->binder);
     if (at_p(p, CC_P_SEMI) || at_p(p, CC_P_RPAREN) || at_p(p, CC_P_COMMA) || at_eof(p))
-        err_here(p, "expected a default value on the right of '?>', found %s", tok_desc(p, p->i));
-    else
+        err_here(p, "missing default expression after '?>', found %s", tok_desc(p, p->i));
+    else if (at_p(p, CC_P_LBRACE) || at_kw(p, KW_RETURN) || at_kw(p, KW_CONTINUE) || at_kw(p, KW_BREAK) || at_kw(p, KW_GOTO)) {
+        err_here(p, "'?>' RHS must be a value expression; use '!>' for error-handling logic");
+        if (at_p(p, CC_P_LBRACE)) skip_balanced(p);
+        else while (!at_eof(p) && !at_p(p, CC_P_SEMI) && !at_p(p, CC_P_RPAREN) && !at_p(p, CC_P_COMMA) && !at_p(p, CC_P_RBRACE)) adv(p);
+    } else
         e->b = parse_cond(p);
     scope_pop(p->syms);
     e->span = span_from(p, first);

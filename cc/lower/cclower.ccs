@@ -430,6 +430,10 @@ static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena 
     lo.line_directives = true;
     lo.parallel_off = false;
     lo.per_tu = false;
+    {
+        const char* strict = getenv("CC_STRICT_RESULT_UNWRAP");
+        lo.strict_unhandled = !(strict && strcmp(strict, "0") == 0);
+    }
     lw = cc_lowerer_new(L->unit, ix, lo, &L->ds);
     lw.lower_unit();
     return true;

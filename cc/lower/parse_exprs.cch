@@ -569,13 +569,13 @@ static CcExpr* parse_unwrap_tail(P* p, CcExpr* lhs) {
         if (tok_is_p(tk(p, 1), CC_P_RPAREN)) {
             {
                 const char* op_unwrap = "!>";
-                CCString m = @string(`'${op_unwrap}()' needs a name to bind the error: write '${op_unwrap}(e) body'`, p->arena);
+                CCString m = @string(`expected identifier in '${op_unwrap} (...)': '${op_unwrap}()' needs a name to bind the error, write '${op_unwrap}(e) body'`, p->arena);
                 err_at(p, p->i + 1, m);
             }
         } else {
             CCSlice found = tok_desc(p, p->i + 1);
             const char* op_unwrap = "!>";
-            CCString m = @string(`'${op_unwrap}(...)' binds the error to a name, found ${found}`, p->arena);
+            CCString m = @string(`expected identifier in '${op_unwrap} (...)', found ${found}`, p->arena);
             err_at(p, p->i + 1, m);
         }
         skip_balanced(p);
@@ -586,7 +586,14 @@ static CcExpr* parse_unwrap_tail(P* p, CcExpr* lhs) {
                     (after->kind == CC_TK_PUNCT && (after->punct == CC_P_SEMI || after->punct == CC_P_COMMA ||
                                                     after->punct == CC_P_RPAREN || after->punct == CC_P_RBRACKET ||
                                                     after->punct == CC_P_RBRACE || after->punct == CC_P_COLON));
-        if (!term) {
+        if (term) {
+            /* `f() !>(e);`: a binder with nothing to bind it for */
+            CCSlice nm = tok_name(p, p->i + 1);
+            const char* op_unwrap = "!>";
+            CCString m = @string(`expected body after '${op_unwrap} (${nm})'`, p->arena);
+            err_here(p, m);
+            adv(p); adv(p); adv(p);
+        } else {
             binder = tok_name(p, p->i + 1);
             adv(p); adv(p); adv(p);
         }
@@ -606,7 +613,7 @@ static CcExpr* parse_unwrap_tail(P* p, CcExpr* lhs) {
     if (binder.len) {
         CCSlice found = tok_desc(p, p->i);
         const char* op_unwrap = "!>";
-        CCString m = @string(`'${op_unwrap}(${binder})' binds the error for a body, but no body follows: found ${found}`, p->arena);
+        CCString m = @string(`expected body after '${op_unwrap} (${binder})': found ${found}`, p->arena);
         err_here(p, m);
     }
     return mk_unwrap(p, lhs, first);
@@ -687,13 +694,13 @@ static CcExpr* parse_unwrap_or_tail(P* p, CcExpr* lhs) {
         if (tok_is_p(tk(p, 1), CC_P_RPAREN)) {
             {
                 const char* op_unwrap_or = "?>";
-                CCString m = @string(`'${op_unwrap_or}()' needs a name to bind the error: write '${op_unwrap_or}(e) default'`, p->arena);
+                CCString m = @string(`expected identifier in '${op_unwrap_or}(...)': '${op_unwrap_or}()' needs a name to bind the error, write '${op_unwrap_or}(e) default'`, p->arena);
                 err_at(p, p->i + 1, m);
             }
         } else {
             CCSlice found = tok_desc(p, p->i + 1);
             const char* op_unwrap_or = "?>";
-            CCString m = @string(`'${op_unwrap_or}(...)' binds the error to a name, found ${found}`, p->arena);
+            CCString m = @string(`expected identifier in '${op_unwrap_or}(...)', found ${found}`, p->arena);
             err_at(p, p->i + 1, m);
         }
         skip_balanced(p);
@@ -714,8 +721,15 @@ static CcExpr* parse_unwrap_or_tail(P* p, CcExpr* lhs) {
     if (at_p(p, CC_P_SEMI) || at_p(p, CC_P_RPAREN) || at_p(p, CC_P_COMMA) || at_eof(p)) {
         CCSlice op = punct_text(CC_P_UNWRAP_OR);
         CCSlice found = tok_desc(p, p->i);
-        CCString m = @string(`expected a default value on the right of '${op}', found ${found}`, p->arena);
+        CCString m = @string(`missing default expression after '${op}', found ${found}`, p->arena);
         err_here(p, m);
+    } else if (at_p(p, CC_P_LBRACE) || at_kw(p, KW_RETURN) || at_kw(p, KW_CONTINUE) || at_kw(p, KW_BREAK) || at_kw(p, KW_GOTO)) {
+        CCSlice op = punct_text(CC_P_UNWRAP_OR);
+        CCSlice bang = punct_text(CC_P_UNWRAP);
+        CCString m = @string(`'${op}' RHS must be a value expression; use '${bang}' for error-handling logic`, p->arena);
+        err_here(p, m);
+        if (at_p(p, CC_P_LBRACE)) skip_balanced(p);
+        else while (!at_eof(p) && !at_p(p, CC_P_SEMI) && !at_p(p, CC_P_RPAREN) && !at_p(p, CC_P_COMMA) && !at_p(p, CC_P_RBRACE)) adv(p);
     } else {
         uo.fallback = parse_cond(p);
     }
