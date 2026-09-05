@@ -24,13 +24,13 @@ typedef struct CcParseOpts {
 } CcParseOpts;
 
 /* Parse `src` as `path`. The unit's arena is `a`; the tape is lexed into it. */
-CcUnit* cc_parse_unit(CCSlice path, CCSlice src, CcParseOpts opts, CcDiags* ds, CCArena a);
+static CcUnit* cc_parse_unit(CCSlice path, CCSlice src, CcParseOpts opts, CcDiags* ds, CCArena a);
 
 /* Parse one expression in isolation (a template slot, a `@comptime` value). */
-CcExpr* !>(CcDiag) cc_parse_expr(CCSlice text, CcLoc at, CcUnit* u);
+static CcExpr* !>(CcDiag) cc_parse_expr(CCSlice text, CcLoc at, CcUnit* u);
 
 /* u.dump(out): an S-expression rendering with spans, for tests. */
-void CcUnit_dump(const CcUnit* u, FILE* out);
+static void CcUnit_dump(const CcUnit* u, FILE* out);
 
 /* A generic walk: `visit` is called on every node, parents first, with the
  * closure environment the caller captured. Returning false skips the
@@ -42,8 +42,8 @@ typedef struct CcVisitor {
     bool (*decl)(CcDecl* d, void* env);
     void* env;
 } CcVisitor;
-void CcUnit_walk(CcUnit* u, CcVisitor v);
-void CcStmt_walk(CcStmt* s, CcVisitor v);
-void CcExpr_walk(CcExpr* e, CcVisitor v);
+static void CcUnit_walk(CcUnit* u, CcVisitor v);
+static void CcStmt_walk(CcStmt* s, CcVisitor v);
+static void CcExpr_walk(CcExpr* e, CcVisitor v);
 
 #endif

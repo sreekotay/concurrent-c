@@ -69,33 +69,33 @@ typedef struct CcIndex {
     CCSlice quote_dir;
 } CcIndex;
 
-CcIndex* cc_index_new(Vec::[CCSlice] include_dirs, CCSlice quote_dir, CcDiags* ds, CCArena a);
+static CcIndex* cc_index_new(Vec::[CCSlice] include_dirs, CCSlice quote_dir, CcDiags* ds, CCArena a);
 
 /* ix.add_unit(u, is_header): declarations only for headers. */
-void CcIndex_add_unit(CcIndex* ix, CcUnit* u, bool is_header);
+static void CcIndex_add_unit(CcIndex* ix, CcUnit* u, bool is_header);
 /* ix.load_includes(u, opts): resolve the `#include` lines naming `.cch`
  * files, parse each once, add them. System headers are not read: C names
  * the lowerer does not reason about stay C. A `.cch` that cannot be found
  * or read is an error at the include line. */
-void CcIndex_load_includes(CcIndex* ix, CcUnit* u, CcParseOpts opts);
+static void CcIndex_load_includes(CcIndex* ix, CcUnit* u, CcParseOpts opts);
 
 /* Lookups. A miss is a Result error carrying the position-less reason;
  * the caller attaches the use site. */
-CcSym*      !>(CcDiag) CcIndex_sym(CcIndex* ix, CCSlice name);
-CcTypeInfo* !>(CcDiag) CcIndex_type(CcIndex* ix, CCSlice canonical);
+static CcSym*      !>(CcDiag) CcIndex_sym(CcIndex* ix, CCSlice name);
+static CcTypeInfo* !>(CcDiag) CcIndex_type(CcIndex* ix, CCSlice canonical);
 /* ix.canon(t): canonical spelling of a type node, into `a`:
  * "int", "unsigned long", "struct Foo", "CCString", "CCResult_int_CCError",
  * "Map_int_int", "CCSlice" for char[:]. */
-CCSlice CcIndex_canon(CcIndex* ix, const CcType* t, CCArena a);
+static CCSlice CcIndex_canon(CcIndex* ix, const CcType* t, CCArena a);
 /* ix.method(recv, name): the method, or an error whose note lists the near
  * misses, ready for the use site. */
-CcMethod* !>(CcDiag) CcIndex_method(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCArena a);
+static CcMethod* !>(CcDiag) CcIndex_method(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCArena a);
 /* ix.result(value, err, optional): register the spec and return its info;
  * the printer emits every entry not declared by a header, once. */
-CcTypeInfo* CcIndex_result(CcIndex* ix, CcType* value, CcType* err, bool optional);
+static CcTypeInfo* CcIndex_result(CcIndex* ix, CcType* value, CcType* err, bool optional);
 /* ix.arena_param(f): which parameter of `f` is its arena (attribute on the
  * declaration, or the trailing CCArena parameter); -1 when none. */
-int CcIndex_arena_param(CcIndex* ix, CcSym* f);
+static int CcIndex_arena_param(CcIndex* ix, CcSym* f);
 
 @typeview Read on CcIndex { r: *; };
 

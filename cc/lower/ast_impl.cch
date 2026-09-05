@@ -1,3 +1,4 @@
+#pragma(@per_tu)
 /* AST support: constructors, kind names, predicates, span and location
  * helpers. Every constructor allocates in the arena it is given and copies
  * the span it is handed; nothing here reads the tape except CcUnit_text
@@ -7,14 +8,14 @@
 #include "ast.cch"
 #include <string.h>
 
-CcSpan CcSpan_join(CcSpan a, CcSpan b) {
+static CcSpan CcSpan_join(CcSpan a, CcSpan b) {
     CcSpan r;
     r.first = a.first < b.first ? a.first : b.first;
     r.last = a.last > b.last ? a.last : b.last;
     return r;
 }
 
-bool CcSpan_is_empty(CcSpan s) {
+static bool CcSpan_is_empty(CcSpan s) {
     return s.last < s.first;
 }
 
@@ -28,7 +29,7 @@ static CcType* cc__type_blank(CcSpan span, CCArena a) {
     return t;
 }
 
-CcType* cc_type_named(CCSlice name, CcSpan span, CCArena a) {
+static CcType* cc_type_named(CCSlice name, CcSpan span, CCArena a) {
     CcType* t = cc__type_blank(span, a);
     CcNamedType n;
     n.name = name;
@@ -39,7 +40,7 @@ CcType* cc_type_named(CCSlice name, CcSpan span, CCArena a) {
     return t;
 }
 
-CcType* cc_type_pointer(CcType* pointee, CcSpan span, CCArena a) {
+static CcType* cc_type_pointer(CcType* pointee, CcSpan span, CCArena a) {
     CcType* t = cc__type_blank(span, a);
     CcPointerType p;
     p.pointee = pointee;
@@ -47,7 +48,7 @@ CcType* cc_type_pointer(CcType* pointee, CcSpan span, CCArena a) {
     return t;
 }
 
-CcType* cc_type_result(CcType* value, CcType* err, bool optional, CcSpan span, CCArena a) {
+static CcType* cc_type_result(CcType* value, CcType* err, bool optional, CcSpan span, CCArena a) {
     CcType* t = cc__type_blank(span, a);
     CcResultType r;
     r.value = value;
@@ -64,13 +65,13 @@ static CcExpr* cc__expr_blank(CcSpan span, CCArena a) {
     return e;
 }
 
-CcExpr* cc_expr_ident(CCSlice name, CcSpan span, CCArena a) {
+static CcExpr* cc_expr_ident(CCSlice name, CcSpan span, CCArena a) {
     CcExpr* e = cc__expr_blank(span, a);
     e->k = { .ident = name };
     return e;
 }
 
-CcExpr* cc_expr_call(CcExpr* callee, CcSpan span, CCArena a) {
+static CcExpr* cc_expr_call(CcExpr* callee, CcSpan span, CCArena a) {
     CcExpr* e = cc__expr_blank(span, a);
     CcCall c;
     c.callee = callee;
@@ -79,7 +80,7 @@ CcExpr* cc_expr_call(CcExpr* callee, CcSpan span, CCArena a) {
     return e;
 }
 
-CcExpr* cc_expr_member(CcExpr* a, CCSlice name, bool arrow, CcSpan span, CCArena arena) {
+static CcExpr* cc_expr_member(CcExpr* a, CCSlice name, bool arrow, CcSpan span, CCArena arena) {
     CcExpr* e = cc__expr_blank(span, arena);
     CcMember m;
     m.a = a;
@@ -89,7 +90,7 @@ CcExpr* cc_expr_member(CcExpr* a, CCSlice name, bool arrow, CcSpan span, CCArena
     return e;
 }
 
-CcExpr* cc_expr_unary(CcOp op, CcExpr* a, CcSpan span, CCArena arena) {
+static CcExpr* cc_expr_unary(CcOp op, CcExpr* a, CcSpan span, CCArena arena) {
     CcExpr* e = cc__expr_blank(span, arena);
     CcUnary u;
     u.op = op;
@@ -98,7 +99,7 @@ CcExpr* cc_expr_unary(CcOp op, CcExpr* a, CcSpan span, CCArena arena) {
     return e;
 }
 
-CcExpr* cc_expr_binary(CcOp op, CcExpr* a, CcExpr* b, CcSpan span, CCArena arena) {
+static CcExpr* cc_expr_binary(CcOp op, CcExpr* a, CcExpr* b, CcSpan span, CCArena arena) {
     CcExpr* e = cc__expr_blank(span, arena);
     CcBinary bin;
     bin.op = op;
@@ -115,7 +116,7 @@ static CcStmt* cc__stmt_blank(CcSpan span, CCArena a) {
     return s;
 }
 
-CcStmt* cc_stmt_expr(CcExpr* e, CcSpan span, CCArena a) {
+static CcStmt* cc_stmt_expr(CcExpr* e, CcSpan span, CCArena a) {
     CcStmt* s = cc__stmt_blank(span, a);
     CcExprStmt x;
     x.e = e;
@@ -123,7 +124,7 @@ CcStmt* cc_stmt_expr(CcExpr* e, CcSpan span, CCArena a) {
     return s;
 }
 
-CcStmt* cc_stmt_block(CcSpan span, CCArena a) {
+static CcStmt* cc_stmt_block(CcSpan span, CCArena a) {
     CcStmt* s = cc__stmt_blank(span, a);
     CcBlock b;
     b.stmts = vec_new::[CcStmtRef](a);
@@ -131,7 +132,7 @@ CcStmt* cc_stmt_block(CcSpan span, CCArena a) {
     return s;
 }
 
-CcStmt* cc_stmt_if(CcExpr* cond, CcStmt* then, CcStmt* els, CcSpan span, CCArena a) {
+static CcStmt* cc_stmt_if(CcExpr* cond, CcStmt* then, CcStmt* els, CcSpan span, CCArena a) {
     CcStmt* s = cc__stmt_blank(span, a);
     CcIf i;
     i.cond = cond;
@@ -141,7 +142,7 @@ CcStmt* cc_stmt_if(CcExpr* cond, CcStmt* then, CcStmt* els, CcSpan span, CCArena
     return s;
 }
 
-CcStmt* cc_stmt_return(CcExpr* value, CcSpan span, CCArena a) {
+static CcStmt* cc_stmt_return(CcExpr* value, CcSpan span, CCArena a) {
     CcStmt* s = cc__stmt_blank(span, a);
     CcReturn r;
     r.value = value;
@@ -149,7 +150,7 @@ CcStmt* cc_stmt_return(CcExpr* value, CcSpan span, CCArena a) {
     return s;
 }
 
-CcStmt* cc_stmt_goto(CCSlice label, CcSpan span, CCArena a) {
+static CcStmt* cc_stmt_goto(CCSlice label, CcSpan span, CCArena a) {
     CcStmt* s = cc__stmt_blank(span, a);
     CcGoto g;
     g.label = label;
@@ -157,7 +158,7 @@ CcStmt* cc_stmt_goto(CCSlice label, CcSpan span, CCArena a) {
     return s;
 }
 
-CcStmt* cc_stmt_label(CCSlice name, CcStmt* inner, CcSpan span, CCArena a) {
+static CcStmt* cc_stmt_label(CCSlice name, CcStmt* inner, CcSpan span, CCArena a) {
     CcStmt* s = cc__stmt_blank(span, a);
     CcLabel l;
     l.name = name;
@@ -166,7 +167,7 @@ CcStmt* cc_stmt_label(CCSlice name, CcStmt* inner, CcSpan span, CCArena a) {
     return s;
 }
 
-CcDecl* cc_decl_var(CcType* type, CCSlice name, CcInit* init, CcSpan span, CCArena a) {
+static CcDecl* cc_decl_var(CcType* type, CCSlice name, CcInit* init, CcSpan span, CCArena a) {
     CcDecl* d = cc_arena_alloc(a, sizeof(CcDecl), _Alignof(CcDecl));
     CcVarDecl v;
     memset(d, 0, sizeof(*d));
@@ -184,7 +185,7 @@ CcDecl* cc_decl_var(CcType* type, CCSlice name, CcInit* init, CcSpan span, CCAre
 
 /* ---- Names ------------------------------------------------------------ */
 
-CCSlice CcOp_spelling(CcOp op) {
+static CCSlice CcOp_spelling(CcOp op) {
     switch (op) {
     case CC_OP_ADD: return CC_SLICE_LIT("+");
     case CC_OP_SUB: return CC_SLICE_LIT("-");
@@ -235,7 +236,7 @@ CCSlice CcOp_spelling(CcOp op) {
 /* Kind names in the user's vocabulary. Each is one closed switch: a new
  * arm is a compile error here until it has a name. The "@" is a separate
  * literal: see stress/break/break_at_word_in_switch_literal_smoke. */
-CCSlice CcExpr_kind_name(const CcExpr* e) {
+static CCSlice CcExpr_kind_name(const CcExpr* e) {
     @switch (e->k) {
         case .ident: return CC_SLICE_LIT("ident");
         case .number: return CC_SLICE_LIT("number");
@@ -279,7 +280,7 @@ CCSlice CcExpr_kind_name(const CcExpr* e) {
     return CC_SLICE_LIT("?expr");
 }
 
-CCSlice CcStmt_kind_name(const CcStmt* s) {
+static CCSlice CcStmt_kind_name(const CcStmt* s) {
     @switch (s->k) {
         case .expr: return CC_SLICE_LIT("expression");
         case .decl: return CC_SLICE_LIT("declaration");
@@ -320,7 +321,7 @@ CCSlice CcStmt_kind_name(const CcStmt* s) {
     return CC_SLICE_LIT("?stmt");
 }
 
-CCSlice CcDecl_kind_name(const CcDecl* d) {
+static CCSlice CcDecl_kind_name(const CcDecl* d) {
     @switch (d->k) {
         case .var: return CC_SLICE_LIT("variable");
         case .func: return CC_SLICE_LIT("function");
@@ -347,7 +348,7 @@ CCSlice CcDecl_kind_name(const CcDecl* d) {
     return CC_SLICE_LIT("?decl");
 }
 
-CCSlice CcType_kind_name(const CcType* t) {
+static CCSlice CcType_kind_name(const CcType* t) {
     @switch (t->k) {
         case .named: return CC_SLICE_LIT("type");
         case .pointer: return CC_SLICE_LIT("pointer");
@@ -369,7 +370,7 @@ CCSlice CcType_kind_name(const CcType* t) {
 
 /* ---- Predicates ------------------------------------------------------- */
 
-bool CcType_is_named(const CcType* t, const char* name) {
+static bool CcType_is_named(const CcType* t, const char* name) {
     if (!t) return false;
     @switch (t->k) {
         case .named(n): return cc_slice_eq_cstr(&n.name, name);
@@ -377,28 +378,28 @@ bool CcType_is_named(const CcType* t, const char* name) {
     }
 }
 
-bool CcType_is_pointer(const CcType* t) {
+static bool CcType_is_pointer(const CcType* t) {
     if (!t) return false;
     return t->k.kind == CcTypeK_pointer;
 }
 
-bool CcType_is_result(const CcType* t) {
+static bool CcType_is_result(const CcType* t) {
     if (!t) return false;
     return t->k.kind == CcTypeK_result;
 }
 
-bool CcType_is_void(const CcType* t) {
+static bool CcType_is_void(const CcType* t) {
     return CcType_is_named(t, "void");
 }
 
 /* ---- Unit ------------------------------------------------------------- */
 
-CcLoc CcUnit_loc(const CcUnit* u, CcSpan span) {
+static CcLoc CcUnit_loc(const CcUnit* u, CcSpan span) {
     const CcTape* t = &u->tape;
     return t->loc(span.first);
 }
 
-CCSlice CcUnit_text(const CcUnit* u, CcSpan span) {
+static CCSlice CcUnit_text(const CcUnit* u, CcSpan span) {
     const CcTape* t = &u->tape;
     const CcToken* first = t->at(span.first);
     const CcToken* last = t->at(span.last);

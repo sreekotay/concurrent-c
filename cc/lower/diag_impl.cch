@@ -1,3 +1,4 @@
+#pragma(@per_tu)
 /* Diagnostics: bodies for diag.cch. Included by the unit that owns the
  * sink (a tool `.ccs`), after the face. */
 #ifndef CC_LOWER_DIAG_IMPL_CCH
@@ -17,18 +18,18 @@ static CcDiag cc__diag_make(CcSeverity sev, CcLoc at, CCSlice msg) {
     return d;
 }
 
-CcDiag CcDiag_error(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_ERROR, at, msg); }
-CcDiag CcDiag_warning(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_WARNING, at, msg); }
-CcDiag CcDiag_note(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_NOTE, at, msg); }
+static CcDiag CcDiag_error(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_ERROR, at, msg); }
+static CcDiag CcDiag_warning(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_WARNING, at, msg); }
+static CcDiag CcDiag_note(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_NOTE, at, msg); }
 
-CcDiag CcDiag_with_note(CcDiag d, CCSlice note) {
+static CcDiag CcDiag_with_note(CcDiag d, CCSlice note) {
     d.note = note;
     return d;
 }
 
 /* ---- sink ------------------------------------------------------------ */
 
-CcDiags CcDiags_new(CCArena a) {
+static CcDiags CcDiags_new(CCArena a) {
     CcDiags ds;
     ds.items = vec_new::[CcDiag](a);
     ds.n_errors = 0;
@@ -36,7 +37,7 @@ CcDiags CcDiags_new(CCArena a) {
     return ds;
 }
 
-void CcDiags_push(CcDiags* ds, CcDiag d) {
+static void CcDiags_push(CcDiags* ds, CcDiag d) {
     if (ds->items.push(d) != 0) {
         size_t n_items = ds->items.len();
         fprintf(stderr, "cc: out of memory: diagnostic sink (%zu messages)\n", n_items);
@@ -45,7 +46,7 @@ void CcDiags_push(CcDiags* ds, CcDiag d) {
     if (d.sev == CC_SEV_ERROR) ds->n_errors++;
 }
 
-bool CcDiags_has_errors(const CcDiags* ds) { return ds->n_errors > 0; }
+static bool CcDiags_has_errors(const CcDiags* ds) { return ds->n_errors > 0; }
 
 /* ---- print ----------------------------------------------------------- */
 
@@ -103,7 +104,7 @@ static CCSlice cc__nth_line(CCSlice text, uint32_t line) {
     return cc_slice_sub(text, start, i);
 }
 
-void CcDiags_print(const CcDiags* ds, FILE* out, CcSourceFn source, void* ctx) {
+static void CcDiags_print(const CcDiags* ds, FILE* out, CcSourceFn source, void* ctx) {
     CcDiags* sink = (CcDiags*)ds;   /* the vec accessors take a mutable receiver */
     uint32_t n = (uint32_t)sink->items.len();
     if (n == 0) return;

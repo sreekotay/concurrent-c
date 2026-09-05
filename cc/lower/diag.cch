@@ -31,11 +31,11 @@ typedef struct CcDiag {
 } CcDiag;
 
 /* Constructors. The message is a template into `a`. */
-CcDiag CcDiag_error(CcLoc at, CCSlice msg);
-CcDiag CcDiag_warning(CcLoc at, CCSlice msg);
-CcDiag CcDiag_note(CcLoc at, CCSlice msg);
+static CcDiag CcDiag_error(CcLoc at, CCSlice msg);
+static CcDiag CcDiag_warning(CcLoc at, CCSlice msg);
+static CcDiag CcDiag_note(CcLoc at, CCSlice msg);
 /* d.with_note(note): same diagnostic with a note attached. */
-CcDiag CcDiag_with_note(CcDiag d, CCSlice note);
+static CcDiag CcDiag_with_note(CcDiag d, CCSlice note);
 
 /* The sink. */
 typedef struct CcDiags {
@@ -44,15 +44,15 @@ typedef struct CcDiags {
     CCArena arena;      /* owns items and the strings pushed through push_fmt */
 } CcDiags;
 
-CcDiags CcDiags_new(CCArena a);
+static CcDiags CcDiags_new(CCArena a);
 /* ds.push(d): record; counts errors. */
-void CcDiags_push(CcDiags* ds, CcDiag d);
+static void CcDiags_push(CcDiags* ds, CcDiag d);
 /* ds.has_errors() */
-bool CcDiags_has_errors(const CcDiags* ds);
+static bool CcDiags_has_errors(const CcDiags* ds);
 /* ds.print(out, source): sorted by (path, line, col); `source` returns the
  * text of a path for the caret snippet, or an empty slice when unknown. */
 typedef CCSlice (*CcSourceFn)(CCSlice path, void* ctx);
-void CcDiags_print(const CcDiags* ds, FILE* out, CcSourceFn source, void* ctx);
+static void CcDiags_print(const CcDiags* ds, FILE* out, CcSourceFn source, void* ctx);
 
 @typeview Read on CcDiags { r: *; };
 

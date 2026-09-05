@@ -35,8 +35,8 @@ typedef Vec::[CcTypeRef] CcTypeList;
 typedef Vec::[CcInitRef] CcInitList;
 
 typedef struct CcSpan { uint32_t first; uint32_t last; } CcSpan;
-CcSpan CcSpan_join(CcSpan a, CcSpan b);         /* a.join(b) */
-bool   CcSpan_is_empty(CcSpan s);
+static CcSpan CcSpan_join(CcSpan a, CcSpan b);         /* a.join(b) */
+static bool   CcSpan_is_empty(CcSpan s);
 
 /* ---- Specifiers, qualifiers, attributes ------------------------------ */
 
@@ -58,6 +58,7 @@ enum {  /* qualifiers on one level of a type: CcType.quals */
 typedef struct CcAttr {
     CcSpan span;
     CCSlice name;
+    CCSlice value;          /* the single identifier argument (`unused`, `packed`, a @tag name); empty otherwise */
     CcSpan args;            /* the tokens inside the parentheses; empty when none */
 } CcAttr;
 
@@ -179,7 +180,7 @@ typedef enum CcOp {
     CC_OP_MOD_ASSIGN, CC_OP_SHL_ASSIGN, CC_OP_SHR_ASSIGN, CC_OP_AND_ASSIGN, CC_OP_XOR_ASSIGN,
     CC_OP_OR_ASSIGN
 } CcOp;
-CCSlice CcOp_spelling(CcOp op);         /* "+", "<<=", "sizeof" */
+static CCSlice CcOp_spelling(CcOp op);         /* "+", "<<=", "sizeof" */
 
 typedef struct CcLiteral { uint32_t tok; uint32_t n_toks; } CcLiteral;   /* NUMBER/CHAR; STRING: adjacent literals */
 typedef struct CcUnary { CcOp op; CcExpr* a; } CcUnary;
@@ -555,39 +556,39 @@ typedef struct CcUnit {
 /* ---- Constructors and accessors --------------------------------------- */
 
 /* Every constructor allocates in `a` and takes the span of the construct. */
-CcType* cc_type_named(CCSlice name, CcSpan span, CCArena a);
-CcType* cc_type_pointer(CcType* pointee, CcSpan span, CCArena a);
-CcType* cc_type_result(CcType* value, CcType* err, bool optional, CcSpan span, CCArena a);
-CcExpr* cc_expr_ident(CCSlice name, CcSpan span, CCArena a);
-CcExpr* cc_expr_call(CcExpr* callee, CcSpan span, CCArena a);      /* args pushed after: e->call.args.push(x) */
-CcExpr* cc_expr_member(CcExpr* a, CCSlice name, bool arrow, CcSpan span, CCArena arena);
-CcExpr* cc_expr_unary(CcOp op, CcExpr* a, CcSpan span, CCArena arena);
-CcExpr* cc_expr_binary(CcOp op, CcExpr* a, CcExpr* b, CcSpan span, CCArena arena);
-CcStmt* cc_stmt_expr(CcExpr* e, CcSpan span, CCArena a);
-CcStmt* cc_stmt_block(CcSpan span, CCArena a);
-CcStmt* cc_stmt_if(CcExpr* cond, CcStmt* then, CcStmt* els, CcSpan span, CCArena a);
-CcStmt* cc_stmt_return(CcExpr* value, CcSpan span, CCArena a);
-CcStmt* cc_stmt_goto(CCSlice label, CcSpan span, CCArena a);
-CcStmt* cc_stmt_label(CCSlice name, CcStmt* inner, CcSpan span, CCArena a);
-CcDecl* cc_decl_var(CcType* type, CCSlice name, CcInit* init, CcSpan span, CCArena a);
+static CcType* cc_type_named(CCSlice name, CcSpan span, CCArena a);
+static CcType* cc_type_pointer(CcType* pointee, CcSpan span, CCArena a);
+static CcType* cc_type_result(CcType* value, CcType* err, bool optional, CcSpan span, CCArena a);
+static CcExpr* cc_expr_ident(CCSlice name, CcSpan span, CCArena a);
+static CcExpr* cc_expr_call(CcExpr* callee, CcSpan span, CCArena a);      /* args pushed after: e->call.args.push(x) */
+static CcExpr* cc_expr_member(CcExpr* a, CCSlice name, bool arrow, CcSpan span, CCArena arena);
+static CcExpr* cc_expr_unary(CcOp op, CcExpr* a, CcSpan span, CCArena arena);
+static CcExpr* cc_expr_binary(CcOp op, CcExpr* a, CcExpr* b, CcSpan span, CCArena arena);
+static CcStmt* cc_stmt_expr(CcExpr* e, CcSpan span, CCArena a);
+static CcStmt* cc_stmt_block(CcSpan span, CCArena a);
+static CcStmt* cc_stmt_if(CcExpr* cond, CcStmt* then, CcStmt* els, CcSpan span, CCArena a);
+static CcStmt* cc_stmt_return(CcExpr* value, CcSpan span, CCArena a);
+static CcStmt* cc_stmt_goto(CCSlice label, CcSpan span, CCArena a);
+static CcStmt* cc_stmt_label(CCSlice name, CcStmt* inner, CcSpan span, CCArena a);
+static CcDecl* cc_decl_var(CcType* type, CCSlice name, CcInit* init, CcSpan span, CCArena a);
 
 /* Kind names in the user's vocabulary, for diagnostics: "unwrap", "@parallel for". */
-CCSlice CcExpr_kind_name(const CcExpr* e);
-CCSlice CcStmt_kind_name(const CcStmt* s);
-CCSlice CcDecl_kind_name(const CcDecl* d);
-CCSlice CcType_kind_name(const CcType* t);
+static CCSlice CcExpr_kind_name(const CcExpr* e);
+static CCSlice CcStmt_kind_name(const CcStmt* s);
+static CCSlice CcDecl_kind_name(const CcDecl* d);
+static CCSlice CcType_kind_name(const CcType* t);
 
 /* t.is_named("CCArena"), t.is_pointer(), t.is_result(): the questions the
  * index and the lowerings ask most; each is one `@switch` in ast.ccs. */
-bool CcType_is_named(const CcType* t, const char* name);
-bool CcType_is_pointer(const CcType* t);
-bool CcType_is_result(const CcType* t);
-bool CcType_is_void(const CcType* t);
+static bool CcType_is_named(const CcType* t, const char* name);
+static bool CcType_is_pointer(const CcType* t);
+static bool CcType_is_result(const CcType* t);
+static bool CcType_is_void(const CcType* t);
 
 /* u.loc(span): user coordinates of a span's first token. */
-CcLoc CcUnit_loc(const CcUnit* u, CcSpan span);
+static CcLoc CcUnit_loc(const CcUnit* u, CcSpan span);
 /* u.text(span): the source bytes a span covers, without leading trivia. */
-CCSlice CcUnit_text(const CcUnit* u, CcSpan span);
+static CCSlice CcUnit_text(const CcUnit* u, CcSpan span);
 
 /* Passes that only read the tree take this face. */
 @typeview Read on CcUnit { r: *; };
