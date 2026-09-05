@@ -1,0 +1,1988 @@
+#pragma(@per_tu)
+/* Printer: bodies for print.cch. Included by the unit that owns the tape
+ * (a tool `.ccs`), after the parser's implementation headers.
+ *
+ * Identity mode replays every token's leading trivia and text from the
+ * tape in top-level declaration order, so the output equals the input when
+ * the declaration spans tile the token array. Every token the tree does
+ * not reach is a diagnostic, as is a gap or an overlap between consecutive
+ * top-level spans.
+ *
+ * Lowered mode prints C from the node structure. Text reaches the product
+ * through three primitives so line accounting stays exact: synthesized
+ * text (pr_str), raw source bytes (pr_raw: token text, comments, and the
+ * verbatim spans of constructs that lowering does not handle yet), and
+ * newlines (pr_nl). The printer keeps two logical positions. The `pin` is
+ * the user's (file, line) that the text being emitted came from; every
+ * statement, declaration, field and comment sets it from its first byte.
+ * The `host` is the (file, line) the host compiler will attribute the
+ * next physical line to, given the `#line` directives emitted so far.
+ * When a physical line starts and the two differ, a `#line` re-pins the
+ * host. Raw bytes copied from the source move the pin along with the
+ * source line at every newline they contain, so a multi-line verbatim
+ * span or comment needs no directive inside it (none could be placed
+ * inside a token or a comment anyway): a directive is placed only before
+ * the first byte of a raw chunk, and chunks are whole tokens or whole
+ * trivia pieces. The source map gets one entry per emitted physical line,
+ * directive lines included. */
+#ifndef CC_LOWER_PRINT_IMPL_CCH
+#define CC_LOWER_PRINT_IMPL_CCH
+#include "print.cch"
+#include "lex_impl.cch"
+#include "ast_impl.cch"
+#include <stdio.h>
+#include <string.h>
+
+#define PR_INDENT "    "
+#define PR_MAX_UNCOVERED_REPORTS 25
+
+/* Generic spellings the case bodies below need: a generic inside a
+ * @switch case does not lower today, and a prototype parameter cannot
+ * spell `Vec::[T]*` (stress/break). */
+typedef Vec::[CcSrcMapEntry] CcSrcMapEntries;
+typedef Vec::[uint32_t] CcLineStarts;
+typedef Vec::[CcLineMark] CcLineMarks;
+typedef Vec::[CcAttr] CcAttrVec;
+typedef Vec::[CcField] CcFieldVec;
+typedef Vec::[CcEnumerator] CcEnumeratorVec;
+typedef Vec::[CcGenericSelArm] CcGenericSelArmVec;
+typedef Vec::[CcDesignator] CcDesignatorVec;
+
+typedef struct Pr {
+    CCString* out;
+    CCArena arena;
+    const CcTape* tape;
+    CcToken* t;               /* the tape's tokens */
+    uint32_t n;               /* token count, the last is EOF */
+    const char* src;
+    uint32_t len;
+    CcLineStarts lines;       /* byte offset of each physical line start */
+    CcLineMarks* marks;
+    CcDiags* ds;              /* NULL: problems are not reported (spellings) */
+    CcPrintOpts opts;         /* copy with `path` defaulted */
+    CcSrcMap* map;
+    uint32_t emit_line;       /* 1-based physical line being filled */
+    size_t line_start;        /* out length at the start of emit_line */
+    bool at_line_start;       /* nothing emitted on emit_line yet */
+    /* pin: where the text being emitted came from */
+    CCSlice pin_path;
+    uint32_t pin_line;
+    /* host: what the host compiler will attribute the next line to */
+    CCSlice host_path;
+    uint32_t host_line;
+    bool host_known;
+    bool host_reset_pending;  /* a user `#line` was copied: apply after its newline */
+    CCSlice host_reset_path;
+    uint32_t host_reset_line;
+    uint32_t col_line;        /* emit_line whose col_delta has been recorded */
+    int indent;               /* indentation level of the construct being printed */
+    uint32_t trailing_tok;    /* index + 1 of the token whose leading trivia starts with a
+                                 comment already printed as a trailing comment; 0 = none */
+    uint32_t trailing_len;    /* bytes of that trivia already printed */
+    uint32_t last_lead_tok;   /* index + 1 of the token whose leading trivia was last replayed */
+    int n_span_reports;
+} Pr;
+
+/* ---- tokens as offsets ---------------------------------------------------- */
+
+static uint32_t tok_off(const Pr* p, uint32_t i) {
+    return (uint32_t)(p->t[i].text.ptr - p->src);
+}
+static uint32_t tok_len(const Pr* p, uint32_t i) { return (uint32_t)p->t[i].text.len; }
+static uint32_t lead_off(const Pr* p, uint32_t i) {
+    return (uint32_t)(p->t[i].lead.ptr - p->src);
+}
+static uint32_t lead_len(const Pr* p, uint32_t i) { return (uint32_t)p->t[i].lead.len; }
+static bool tok_is_punct(const Pr* p, uint32_t i, CcPunct pc) {
+    return i < p->n && p->t[i].kind == CC_TK_PUNCT && p->t[i].punct == pc;
+}
+
+/* ---- positions ------------------------------------------------------------ */
+
+static uint32_t pr_line_index(Pr* p, uint32_t off) {
+    CcLineStarts* lines = &p->lines;
+    uint32_t lo = 0;
+    uint32_t hi = (uint32_t)lines->len();
+    while (hi - lo > 1) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (*lines->get_ptr(mid) <= off) lo = mid; else hi = mid;
+    }
+    return lo;
+}
+
+static uint32_t pr_phys_line(Pr* p, uint32_t off) { return pr_line_index(p, off) + 1; }
+
+/* User coordinates of byte `off`, through the #line marks. */
+static CcLoc pr_loc(Pr* p, uint32_t off) {
+    CcLineStarts* lines = &p->lines;
+    uint32_t li = pr_line_index(p, off);
+    uint32_t pcol = off - *lines->get_ptr(li) + 1;
+    return cc__tape_rebase(p->tape, off, li + 1, pcol);
+}
+
+static CCSlice pr_path_of(const Pr* p, CcLoc loc) {
+    CCSlice lp = loc.path;
+    if (lp.len == 0 || cc_slice_eq(&lp, p->tape->path)) return p->opts.path;
+    return lp;
+}
+
+static void pr_set_pin(Pr* p, uint32_t off) {
+    CcLoc loc;
+    if (off > p->len) off = p->len;
+    loc = pr_loc(p, off);
+    p->pin_path = pr_path_of(p, loc);
+    p->pin_line = loc.line;
+}
+
+static void pr_set_pin_tok(Pr* p, uint32_t tok) {
+    if (tok < p->n) pr_set_pin(p, tok_off(p, tok));
+}
+
+/* ---- diagnostics ------------------------------------------------------------ */
+
+static void msg_cstr(Pr* p, CCString* m, const char* s) { cc_string_push_cstr(m, s, p->arena); }
+static void msg_uint(Pr* p, CCString* m, uint32_t v) { cc_string_push_uint(m, (uint64_t)v, p->arena); }
+static void msg_int(Pr* p, CCString* m, int v) { cc_string_push_int(m, (int64_t)v, p->arena); }
+static void msg_slice(Pr* p, CCString* m, CCSlice s) { cc_string_push_slice(m, s, p->arena); }
+static void msg_tok(Pr* p, CCString* m, uint32_t i) {
+    if (i < p->n) cc_string_push_slice(m, p->t[i].text, p->arena);
+}
+
+static void pr_diag_off(Pr* p, uint32_t off, uint32_t len, CCSlice msg) {
+    CcLoc loc;
+    CcDiag d;
+    if (!p->ds) return;
+    if (off > p->len) off = p->len;
+    loc = pr_loc(p, off);
+    d = CcDiag_error(loc, msg);
+    d.len = len;
+    d.phys_line = pr_phys_line(p, off);
+    p->ds->push(d);
+}
+
+/* The message under construction, persisted into the arena. */
+static void pr_diag_msg(Pr* p, uint32_t off, uint32_t len, CCString* m) {
+    CCSlice s = cc_string_persist_slice(p->arena, m);
+    pr_diag_off(p, off, len, s);
+}
+
+static bool pr_span_ok(Pr* p, CcSpan s, CCSlice what) {
+    uint32_t n = p->n;
+    if (s.first <= s.last && s.last + 1 < n) return true;
+    if (p->n_span_reports++ < PR_MAX_UNCOVERED_REPORTS) {
+        uint32_t off = s.first < n ? tok_off(p, s.first) : p->len;
+        CCString m = cc_string_new();
+        msg_slice(p, &m, what);
+        msg_cstr(p, &m, " node has an invalid token span [");
+        msg_uint(p, &m, s.first);
+        msg_cstr(p, &m, "..");
+        msg_uint(p, &m, s.last);
+        msg_cstr(p, &m, "] (file has ");
+        msg_uint(p, &m, n);
+        msg_cstr(p, &m, " tokens)");
+        pr_diag_msg(p, off, 0, &m);
+    }
+    return false;
+}
+
+static void pr_diag_internal(Pr* p, const char* what, uint32_t a, uint32_t b) {
+    CCString m = cc_string_new();
+    msg_cstr(p, &m, "internal: ");
+    msg_cstr(p, &m, what);
+    msg_cstr(p, &m, " range [");
+    msg_uint(p, &m, a);
+    msg_cstr(p, &m, ", +");
+    msg_uint(p, &m, b);
+    msg_cstr(p, &m, ") is outside the file");
+    pr_diag_msg(p, 0, 0, &m);
+}
+
+static uint32_t span_off(const Pr* p, CcSpan s) {
+    return s.first < p->n ? tok_off(p, s.first) : 0;
+}
+
+/* ---- emission primitives ------------------------------------------------ */
+
+static void out_push(Pr* p, const char* s, size_t n) {
+    if (n) cc_string_push_buffer(p->out, s, (uint32_t)n, p->arena);
+}
+static void out_cstr(Pr* p, const char* s) { cc_string_push_cstr(p->out, s, p->arena); }
+static void out_char(Pr* p, char c) { cc_string_push_char(p->out, c, p->arena); }
+static size_t out_len(const Pr* p) { return cc_string_len(p->out); }
+
+static void pr_map_push(Pr* p, CCSlice path, uint32_t line) {
+    CcSrcMapEntry e;
+    CcSrcMapEntries* ents;
+    if (!p->map) return;
+    ents = &p->map->entries;
+    e.emit_line = p->emit_line;
+    e.path = path;
+    e.line = line;
+    e.col_delta = 0;
+    ents->push(e);
+}
+
+static void pr_push_quoted_path(Pr* p, CCSlice path) {
+    const char* s = path.ptr;
+    size_t n = path.len;
+    size_t i;
+    if (n == 0) { out_cstr(p, "<input>"); return; }
+    for (i = 0; i < n; i++) {
+        if (s[i] == '"' || s[i] == '\\') out_char(p, '\\');
+        out_char(p, s[i]);
+    }
+}
+
+/* Emit `#line` for the pin; the current line is empty. */
+static void pr_directive(Pr* p) {
+    out_cstr(p, "#line ");
+    cc_string_push_uint(p->out, (uint64_t)p->pin_line, p->arena);
+    out_cstr(p, " \"");
+    pr_push_quoted_path(p, p->pin_path);
+    out_cstr(p, "\"\n");
+    pr_map_push(p, p->pin_path, p->pin_line);
+    p->emit_line++;
+    p->line_start = out_len(p);
+    p->host_path = p->pin_path;
+    p->host_line = p->pin_line;
+    p->host_known = true;
+}
+
+static bool pr_same_path(CCSlice a, CCSlice b) {
+    return cc_slice_eq(&a, b);
+}
+
+static bool pr_host_drifted(const Pr* p) {
+    return !p->host_known || p->host_line != p->pin_line || !pr_same_path(p->host_path, p->pin_path);
+}
+
+/* Called before the first byte of content on a physical line. */
+static void pr_line_begin(Pr* p, bool allow_directive) {
+    if (!p->at_line_start) return;
+    if (allow_directive && p->opts.line_directives && p->pin_line && pr_host_drifted(p))
+        pr_directive(p);
+    pr_map_push(p, p->pin_path, p->pin_line);
+    p->at_line_start = false;
+}
+
+static void pr_nl(Pr* p) {
+    if (p->at_line_start) {
+        /* an empty line: still attributed, so re-pin it when the host drifted
+         * (a multi-line source statement printed on fewer lines) */
+        if (p->opts.line_directives && p->pin_line && pr_host_drifted(p))
+            pr_directive(p);
+        pr_map_push(p, p->pin_path, p->pin_line);
+    }
+    out_char(p, '\n');
+    p->emit_line++;
+    p->line_start = out_len(p);
+    p->at_line_start = true;
+    if (p->host_reset_pending) {
+        p->host_reset_pending = false;
+        p->host_known = true;
+        p->host_path = p->host_reset_path;
+        p->host_line = p->host_reset_line;
+    } else if (p->host_known) {
+        p->host_line++;
+    }
+}
+
+/* Synthesized text without newlines. */
+static void pr_str(Pr* p, const char* s) {
+    if (!*s) return;
+    pr_line_begin(p, true);
+    out_cstr(p, s);
+}
+
+static void pr_slice(Pr* p, CCSlice s) {
+    if (s.len == 0) return;
+    pr_line_begin(p, true);
+    out_push(p, s.ptr, s.len);
+}
+
+static void pr_indent(Pr* p, int n) {
+    int i;
+    pr_line_begin(p, true);
+    for (i = 0; i < n; i++) out_cstr(p, PR_INDENT);
+}
+
+/* Copy `len` bytes of the source starting at `off`. Only the first byte may
+ * trigger a `#line`; later line starts inside the chunk move the pin to the
+ * source line they continue. */
+static void pr_raw(Pr* p, uint32_t off, uint32_t len) {
+    const char* s;
+    uint32_t i = 0;
+    if (!len) return;
+    if (off > p->len || len > p->len - off) {
+        pr_diag_internal(p, "raw", off, len);
+        return;
+    }
+    s = p->src + off;
+    while (i < len) {
+        uint32_t j = i;
+        while (j < len && s[j] != '\n') j++;
+        if (j > i) {
+            pr_line_begin(p, i == 0);
+            out_push(p, s + i, j - i);
+        }
+        if (j == len) break;
+        pr_nl(p);
+        if (off + j + 1 < p->len) pr_set_pin(p, off + j + 1);
+        i = j + 1;
+    }
+}
+
+/* Find the lexer's line mark that follows a `#line` token, if any. */
+static const CcLineMark* pr_mark_after(Pr* p, uint32_t tok) {
+    uint32_t end = tok_off(p, tok) + tok_len(p, tok);
+    CcLineMarks* marks = p->marks;
+    size_t n = marks->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        const CcLineMark* mk = marks->get_ptr(i);
+        uint32_t m = mk->off;
+        if (m >= end && m <= end + 2) return mk;
+        if (m > end + 2) break;
+    }
+    return NULL;
+}
+
+/* The text of one token (no trivia). A user `#line` copied verbatim rebases
+ * the host as well, so the host stays in step with the tape's rebasing. */
+static void pr_tok_text(Pr* p, uint32_t tok) {
+    if (tok >= p->n) {
+        CCString m = cc_string_new();
+        msg_cstr(p, &m, "internal: token index ");
+        msg_uint(p, &m, tok);
+        msg_cstr(p, &m, " out of range");
+        pr_diag_msg(p, p->len, 0, &m);
+        return;
+    }
+    if (p->t[tok].kind == CC_TK_PP) {
+        const CcLineMark* mk = pr_mark_after(p, tok);
+        if (mk) {
+            CcLoc loc;
+            loc.path = mk->path;
+            loc.line = mk->logical_line;
+            loc.col = 0;
+            p->host_reset_pending = true;
+            p->host_reset_path = pr_path_of(p, loc);
+            p->host_reset_line = mk->logical_line;
+        }
+    }
+    pr_raw(p, tok_off(p, tok), tok_len(p, tok));
+}
+
+/* ---- trivia replay ---------------------------------------------------------- */
+
+/* If a comment starts at src[i], its end (exclusive); else i. */
+static uint32_t trivia_comment_end(const char* src, uint32_t i, uint32_t end) {
+    if (i + 1 < end && src[i] == '/' && src[i + 1] == '/') {
+        i += 2;
+        while (i < end && src[i] != '\n') i++;
+        return i;
+    }
+    if (i + 1 < end && src[i] == '/' && src[i + 1] == '*') {
+        i += 2;
+        while (i + 1 < end && !(src[i] == '*' && src[i + 1] == '/')) i++;
+        return i + 1 < end ? i + 2 : end;
+    }
+    return i;
+}
+
+/* Leading trivia verbatim, as pieces: each comment, each newline and each
+ * whitespace run is its own chunk, so a `#line` can be placed after a
+ * newline between tokens (never inside a comment) when the host drifted. */
+static void pr_trivia_raw(Pr* p, uint32_t off, uint32_t len) {
+    const char* src = p->src;
+    uint32_t i = off;
+    uint32_t end = off + len;
+    if (off > p->len || len > p->len - off) {
+        pr_diag_internal(p, "trivia", off, len);
+        return;
+    }
+    while (i < end) {
+        uint32_t j = trivia_comment_end(src, i, end);
+        if (j > i) { pr_raw(p, i, j - i); i = j; continue; }
+        if (src[i] == '\n') {
+            pr_nl(p);
+            if (i + 1 < p->len) pr_set_pin(p, i + 1);
+            i++;
+            continue;
+        }
+        j = i;
+        while (j < end && src[j] != '\n' && !(src[j] == '/' && j + 1 < end && (src[j + 1] == '/' || src[j + 1] == '*'))) j++;
+        pr_raw(p, i, j - i);
+        i = j;
+    }
+}
+
+/* Tokens first..last verbatim: the first without its leading trivia. */
+static void pr_span(Pr* p, CcSpan s, CCSlice what) {
+    uint32_t i;
+    if (!pr_span_ok(p, s, what)) return;
+    for (i = s.first; i <= s.last; i++) {
+        if (i > s.first) pr_trivia_raw(p, lead_off(p, i), lead_len(p, i));
+        pr_tok_text(p, i);
+    }
+}
+
+static void pr_span_c(Pr* p, CcSpan s, const char* what) {
+    pr_span(p, s, cc_slice_from_buffer((char*)what, strlen(what)));
+}
+
+/* Replay the comments and blank lines of a token's leading trivia at
+ * `indent`. Runs of newlines collapse to at most one blank line; the
+ * newline the printer already emitted after the previous item counts as
+ * the first of the run. */
+static void pr_lead(Pr* p, uint32_t tok, int indent) {
+    const char* src = p->src;
+    uint32_t off, end, i;
+    int run = 0;
+    int emitted;
+    if (tok >= p->n) return;
+    if (p->last_lead_tok == tok + 1) return; /* a split declaration shares this token */
+    p->last_lead_tok = tok + 1;
+    off = lead_off(p, tok);
+    end = off + lead_len(p, tok);
+    i = off;
+    if (p->trailing_tok == tok + 1) i = off + p->trailing_len;
+    emitted = p->at_line_start ? 1 : 0;
+    while (i < end) {
+        char c = src[i];
+        uint32_t j;
+        if (c == '\n') {
+            run++;
+            if ((run < 2 ? run : 2) > emitted) {
+                pr_set_pin(p, i); /* the blank line is the one this newline ends */
+                pr_nl(p);
+                emitted++;
+            }
+            i++;
+            continue;
+        }
+        j = trivia_comment_end(src, i, end);
+        if (j > i) {
+            if (p->at_line_start) {
+                pr_set_pin(p, i);
+                pr_indent(p, indent);
+            } else {
+                pr_str(p, " ");
+            }
+            pr_raw(p, i, j - i);
+            run = 0;
+            emitted = 0;
+            i = j;
+            continue;
+        }
+        i++; /* whitespace */
+    }
+}
+
+/* Print the comments that follow the item just printed on its own line
+ * (the start of the next token's leading trivia), so `a; // note` keeps
+ * its note on the line. */
+static void pr_trailing(Pr* p, uint32_t tok) {
+    const char* src = p->src;
+    uint32_t off, end, i;
+    uint32_t consumed = 0;
+    if (tok >= p->n) return;
+    off = lead_off(p, tok);
+    end = off + lead_len(p, tok);
+    i = off;
+    while (i < end) {
+        char c = src[i];
+        uint32_t j;
+        if (c == ' ' || c == '\t' || c == '\r') { i++; continue; }
+        j = trivia_comment_end(src, i, end);
+        if (j == i) break;
+        if (memchr(src + i, '\n', j - i)) break; /* spans lines: leave it for the lead replay */
+        pr_str(p, " ");
+        pr_raw(p, i, j - i);
+        i = j;
+        consumed = i - off;
+    }
+    if (consumed) {
+        p->trailing_tok = tok + 1;
+        p->trailing_len = consumed;
+    }
+}
+
+/* Position for a statement or declaration: replay its leading trivia, pin
+ * its line, indent (or separate from a same-line comment), and record the
+ * column delta for the source map. */
+static void pr_item_start(Pr* p, CcSpan span, int indent) {
+    pr_lead(p, span.first, indent);
+    pr_set_pin_tok(p, span.first);
+    if (p->at_line_start) pr_indent(p, indent);
+    else pr_str(p, " ");
+    pr_line_begin(p, true);
+    if (p->map && p->col_line != p->emit_line && span.first < p->n && span.last < p->n) {
+        CcSrcMapEntries* ents = &p->map->entries;
+        size_t ne = ents->len();
+        if (ne) {
+            CcSrcMapEntry* last = ents->get_ptr(ne - 1);
+            if (last->emit_line == p->emit_line) {
+                const CcToken* t0 = &p->t[span.first];
+                const CcToken* t1 = &p->t[span.last];
+                p->col_line = p->emit_line;
+                if (t0->line == t1->line) {
+                    CcLoc loc = pr_loc(p, tok_off(p, span.first));
+                    int32_t emitted_col = (int32_t)(out_len(p) - p->line_start) + 1;
+                    last->col_delta = emitted_col - (int32_t)loc.col;
+                }
+            }
+        }
+    }
+}
+
+/* ---- CC-ness ---------------------------------------------------------------- */
+
+#define CC_SPEC_CC_MASK (CC_SPEC_ASYNC | CC_SPEC_BLOCKING | CC_SPEC_NONBLOCKING | CC_SPEC_LATENCY_SENSITIVE | CC_SPEC_COMPTIME)
+
+static bool type_is_cc(const CcType* t) {
+    @switch (t->k) {
+        case .result: return true;
+        case .slice: return true;
+        case .chan: return true;
+        case .generic: return true;
+        case .macro: return true;
+        case .valarg: return true;
+        case .scoped: return true;
+        case .auto_: return true;
+        default: return false;
+    }
+}
+
+static bool expr_is_cc(const CcExpr* e) {
+    @switch (e->k) {
+        case .ufcs: return true;
+        case .type_scoped: return true;
+        case .generic_fn: return true;
+        case .unwrap: return true;
+        case .unwrap_body: return true;
+        case .unwrap_or: return true;
+        case .unwrap_destroy: return true;
+        case .template: return true;
+        case .slice_lit: return true;
+        case .scratch: return true;
+        case .closure: return true;
+        case .await_: return true;
+        case .comptime: return true;
+        case .create: return true;
+        case .emit: return true;
+        case .variant_lit: return true;
+        case .call_mode: return true;
+        case .range: return true;
+        default: return false;
+    }
+}
+
+static bool stmt_is_cc(const CcStmt* s) {
+    @switch (s->k) {
+        case .expr: return false;
+        case .decl: return false;
+        case .block: return false;
+        case .if_: return false;
+        case .while_: return false;
+        case .do_: return false;
+        case .for_: return false;
+        case .switch_(sw): return sw.is_variant;
+        case .case_(c): return c.arm.len != 0;
+        case .return_: return false;
+        case .break_: return false;
+        case .continue_: return false;
+        case .goto_: return false;
+        case .label: return false;
+        case .asm_: return false;
+        default: return true;
+    }
+}
+
+static bool decl_is_cc(const CcDecl* d) {
+    if ((d->specs & CC_SPEC_CC_MASK) != 0) return true;
+    @switch (d->k) {
+        case .var(v): return v.destroy || v.detach;
+        case .func(f): return f.destroy || f.detach;
+        case .typedef_: return false;
+        case .tagged: return false;
+        case .static_assert_: return false;
+        case .pp: return false;
+        case .empty: return false;
+        case .macro_call: return false;
+        case .stmt: return false;
+        default: return true;
+    }
+}
+
+/* ---- node accessors ----------------------------------------------------------- */
+
+static bool expr_is_pp(const CcExpr* e) {
+    return e != NULL && e->k.kind == CcExprK_pp;
+}
+
+static uint32_t expr_pp_tok(const CcExpr* e) {
+    @switch (e->k) {
+        case .pp(x): return x.tok;
+        default: return 0;
+    }
+}
+
+static bool expr_is_paren(const CcExpr* e) {
+    return e != NULL && e->k.kind == CcExprK_paren;
+}
+
+static bool stmt_is_case(const CcStmt* s) { return s != NULL && s->k.kind == CcStmtK_case_; }
+static bool stmt_is_label(const CcStmt* s) { return s != NULL && s->k.kind == CcStmtK_label; }
+static bool stmt_is_if(const CcStmt* s) { return s != NULL && s->k.kind == CcStmtK_if_; }
+
+/* The statements of a block, as a view of the node's list (a copy of the
+ * vector header: the case binding is a copy, so its address must not
+ * escape); an empty list for any other statement. */
+static CcStmtList stmt_block_stmts(const CcStmt* s) {
+    CcStmtList empty;
+    memset(&empty, 0, sizeof(empty));
+    @switch (s->k) {
+        case .block(b): return b.stmts;
+        default: return empty;
+    }
+}
+
+/* The type a derived type is built from: pointee, element or return type. */
+static const CcType* type_child(const CcType* t) {
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .pointer(pt): return pt.pointee;
+        case .array(ar): return ar.elem;
+        case .func(fn): return fn.ret;
+        default: return NULL;
+    }
+}
+
+static bool type_is_derived(const CcType* t) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .pointer: return true;
+        case .array: return true;
+        case .func: return true;
+        default: return false;
+    }
+}
+
+static bool type_is_pointer_kind(const CcType* t) {
+    return t != NULL && t->k.kind == CcTypeK_pointer;
+}
+
+static const CcType* type_base(const CcType* t) {
+    while (t && type_is_derived(t) && type_child(t)) t = type_child(t);
+    return t;
+}
+
+/* The type a Concurrent-C wrapper is built around: the value of a Result,
+ * the element of a slice or channel, the inner type of `@scoped(T)`. */
+static const CcType* type_wrapped(const CcType* t) {
+    @switch (t->k) {
+        case .result(rs): return rs.value;
+        case .slice(sl): return sl.elem;
+        case .chan(ch): return ch.elem;
+        case .scoped(sc): return sc.inner;
+        default: return NULL;
+    }
+}
+
+/* The qualifiers written among a declaration's specifiers live on the
+ * specifier type, the innermost type under every declarator and wrapper.
+ * A C base type prints them itself; a Concurrent-C base is printed from
+ * its span, which starts after them, so they are printed before it. */
+static uint32_t decl_spec_quals(const CcType* t) {
+    const CcType* base = type_base(t);
+    const CcType* st = base;
+    if (!base || !type_is_cc(base)) return 0;
+    for (;;) {
+        const CcType* next = type_is_derived(st) ? type_child(st) : type_wrapped(st);
+        if (!next) break;
+        st = next;
+    }
+    return st->quals & ~base->quals;
+}
+
+/* ---- forward declarations ---------------------------------------------------- */
+
+static void pr_expr_p(Pr* p, const CcExpr* e, int min_prec);
+static void pr_expr_node(Pr* p, const CcExpr* e);
+static void pt_type(Pr* p, const CcType* t, CCSlice name);
+static void pr_stmt_line(Pr* p, const CcStmt* s);
+static void pr_stmt_text(Pr* p, const CcStmt* s);
+static void pr_block(Pr* p, const CcStmt* s);
+static void pr_items(Pr* p, CcStmtList l);
+static void pr_decl(Pr* p, const CcDecl* d);
+static void pr_init(Pr* p, const CcInit* in);
+
+/* A preprocessor line that sits inside a construct printed on one line
+ * (an argument list, an initializer, a member list): on a line of its own,
+ * then the construct resumes pinned to the token after it. */
+static void pr_pp_inside(Pr* p, uint32_t tok, CcSpan span) {
+    uint32_t last = tok;
+    if (!p->at_line_start) pr_nl(p);
+    pr_set_pin_tok(p, tok);
+    pr_tok_text(p, tok);
+    /* an inactive `#if` region is kept as the directive's span: verbatim */
+    if (span.first <= tok && span.last > tok && span.last + 1 < p->n) {
+        uint32_t i;
+        for (i = tok + 1; i <= span.last; i++) {
+            pr_trivia_raw(p, lead_off(p, i), lead_len(p, i));
+            pr_tok_text(p, i);
+        }
+        last = span.last;
+    }
+    pr_nl(p);
+    if (last + 1 < p->n) pr_set_pin_tok(p, last + 1);
+}
+
+/* Whether a `,` follows the span in the source; lists that carry
+ * preprocessor lines keep the user's comma placement. */
+static bool src_comma_after(const Pr* p, CcSpan s) {
+    return tok_is_punct(p, s.last + 1, CC_P_COMMA);
+}
+
+/* ---- attributes, specifiers ------------------------------------------------ */
+
+static void pr_attrs(Pr* p, const CcAttrVec* attrs, bool leading_space) {
+    CcAttrVec* v = (CcAttrVec*)attrs;
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        const CcAttr* a = v->get_ptr(i);
+        if (leading_space) pr_str(p, " ");
+        pr_span_c(p, a->span, "attribute");
+        if (!leading_space) pr_str(p, " ");
+    }
+}
+
+static void pr_quals(Pr* p, uint32_t q, bool trailing_space) {
+    static const uint32_t bits[4] = { CC_QUAL_CONST, CC_QUAL_VOLATILE, CC_QUAL_RESTRICT, CC_QUAL_ATOMIC };
+    static const char* const words[4] = { "const", "volatile", "restrict", "_Atomic" };
+    size_t i;
+    bool first = true;
+    for (i = 0; i < 4; i++) {
+        if (!(q & bits[i])) continue;
+        if (!first) pr_str(p, " ");
+        pr_str(p, words[i]);
+        first = false;
+    }
+    if (!first && trailing_space) pr_str(p, " ");
+}
+
+/* Storage and function specifiers, then the qualifiers written among the
+ * declaration specifiers that the base type's own spelling does not carry. */
+static void pr_specs(Pr* p, uint32_t specs, uint32_t quals) {
+    static const uint32_t bits[8] = {
+        CC_SPEC_TYPEDEF, CC_SPEC_EXTERN, CC_SPEC_STATIC, CC_SPEC_THREAD,
+        CC_SPEC_AUTO, CC_SPEC_REGISTER, CC_SPEC_INLINE, CC_SPEC_NORETURN
+    };
+    static const char* const words[8] = {
+        "typedef", "extern", "static", "_Thread_local", "auto", "register", "inline", "_Noreturn"
+    };
+    size_t i;
+    for (i = 0; i < 8; i++)
+        if (specs & bits[i]) { pr_str(p, words[i]); pr_str(p, " "); }
+    pr_quals(p, quals, true);
+}
+
+/* ---- types -------------------------------------------------------------------- */
+
+static void pt_params(Pr* p, const CcFuncType* fn) {
+    CcParamList* params = (CcParamList*)&fn->params;
+    size_t n = params->len();
+    size_t i;
+    pr_str(p, "(");
+    if (n == 0 && !fn->variadic) {
+        pr_str(p, fn->has_prototype ? "void" : "");
+    }
+    for (i = 0; i < n; i++) {
+        const CcParam* pa = params->get_ptr(i);
+        if (i) pr_str(p, ", ");
+        if (!pa->type) { pr_str(p, "..."); continue; }
+        if (pa->default_value) { pr_span_c(p, pa->span, "parameter"); continue; }
+        pt_type(p, pa->type, pa->name);
+        pr_attrs(p, &pa->attrs, true);
+    }
+    if (fn->variadic) {
+        if (n) pr_str(p, ", ");
+        pr_str(p, "...");
+    }
+    pr_str(p, ")");
+}
+
+/* The part of a declarator before the name (pointers, opening parens). */
+static void pt_prefix(Pr* p, const CcType* t) {
+    const CcType* child = type_child(t);
+    if (!t || !type_is_derived(t) || !child) return;
+    pt_prefix(p, child);
+    if (type_is_pointer_kind(t)) {
+        if (type_is_derived(child)) {
+            if (!type_is_pointer_kind(child)) pr_str(p, "(");
+        }
+        pr_str(p, "*");
+        pr_quals(p, t->quals, true);
+    }
+}
+
+static void pt_suffix_array(Pr* p, uint32_t quals, const CcArrayType* ar) {
+    pr_str(p, "[");
+    if (ar->is_static) pr_str(p, "static ");
+    pr_quals(p, quals, true);
+    if (ar->is_star) pr_str(p, "*");
+    else if (ar->size) pr_expr_p(p, ar->size, 1);
+    pr_str(p, "]");
+}
+
+static void pt_suffix_pointer(Pr* p, const CcType* child) {
+    if (type_is_derived(child) && !type_is_pointer_kind(child)) pr_str(p, ")");
+}
+
+/* The part after the name (array sizes, parameter lists, closing parens). */
+static void pt_suffix(Pr* p, const CcType* t) {
+    const CcType* child = type_child(t);
+    if (!t || !type_is_derived(t) || !child) return;
+    @switch (t->k) {
+        case .pointer(pt): pt_suffix_pointer(p, pt.pointee); break;
+        case .array(ar): pt_suffix_array(p, t->quals, &ar); break;
+        case .func(fn): pt_params(p, &fn); break;
+        default: break;
+    }
+    pt_suffix(p, child);
+}
+
+/* `pr_lead` + pin on the closing brace of a body, then `}` at `outer`. */
+static void pt_close_brace(Pr* p, uint32_t rb, int outer) {
+    if (tok_is_punct(p, rb, CC_P_RBRACE)) {
+        pr_lead(p, rb, outer + 1);
+        pr_set_pin_tok(p, rb);
+    }
+    if (p->at_line_start) pr_indent(p, outer);
+    else pr_str(p, " ");
+    pr_str(p, "}");
+}
+
+static void pt_struct_body(Pr* p, const CcType* t, const CcRecordType* rc) {
+    CcFieldVec* fields = (CcFieldVec*)&rc->fields;
+    size_t n = fields->len();
+    size_t i;
+    int outer = p->indent;
+    uint32_t rb = t->span.last;
+    pr_str(p, " {");
+    pr_nl(p);
+    p->indent = outer + 1;
+    for (i = 0; i < n; i++) {
+        const CcField* f = fields->get_ptr(i);
+        if (f->is_pp) { pr_pp_inside(p, f->pp_tok, f->span); continue; }
+        pr_item_start(p, f->span, p->indent);
+        if (f->type) pt_type(p, f->type, f->name);
+        else if (f->name.len) pr_slice(p, f->name);
+        if (f->bits) {
+            pr_str(p, " : ");
+            pr_expr_p(p, f->bits, 2);
+        }
+        pr_attrs(p, &f->attrs, true);
+        pr_str(p, ";");
+        pr_trailing(p, f->span.last + 1);
+        pr_nl(p);
+    }
+    p->indent = outer;
+    pt_close_brace(p, rb, outer);
+}
+
+static void pt_enum_body(Pr* p, const CcType* t, const CcEnumType* en) {
+    CcEnumeratorVec* items = (CcEnumeratorVec*)&en->items;
+    size_t n = items->len();
+    size_t i;
+    int outer = p->indent;
+    bool has_pp = false;
+    uint32_t rb = t->span.last;
+    pr_str(p, " {");
+    pr_nl(p);
+    p->indent = outer + 1;
+    for (i = 0; i < n; i++) if (items->get_ptr(i)->is_pp) has_pp = true;
+    for (i = 0; i < n; i++) {
+        const CcEnumerator* e = items->get_ptr(i);
+        if (e->is_pp) { pr_pp_inside(p, e->pp_tok, e->span); continue; }
+        pr_item_start(p, e->span, p->indent);
+        pr_slice(p, e->name);
+        if (e->value) {
+            pr_str(p, " = ");
+            pr_expr_p(p, e->value, 2);
+        }
+        if (has_pp ? src_comma_after(p, e->span) : i + 1 < n) pr_str(p, ",");
+        pr_trailing(p, e->span.last + 1);
+        pr_nl(p);
+    }
+    p->indent = outer;
+    pt_close_brace(p, rb, outer);
+}
+
+static void pt_base_named(Pr* p, const CcType* t, const CcNamedType* nm) {
+    if (nm->name.len) pr_slice(p, nm->name);
+    else pr_str(p, "int");
+    pr_attrs(p, &t->attrs, true);
+}
+
+static void pt_base_record(Pr* p, const CcType* t, const CcRecordType* rc) {
+    pr_str(p, rc->is_union ? "union" : "struct");
+    pr_attrs(p, &t->attrs, true);
+    if (rc->tag.len) { pr_str(p, " "); pr_slice(p, rc->tag); }
+    if (rc->is_definition) pt_struct_body(p, t, rc);
+}
+
+static void pt_base_enum(Pr* p, const CcType* t, const CcEnumType* en) {
+    pr_str(p, "enum");
+    pr_attrs(p, &t->attrs, true);
+    if (en->tag.len) { pr_str(p, " "); pr_slice(p, en->tag); }
+    if (en->is_definition) pt_enum_body(p, t, en);
+}
+
+static void pt_base_typeof(Pr* p, const CcTypeofType* tf) {
+    pr_str(p, "__typeof__(");
+    if (tf->expr) pr_expr_p(p, tf->expr, 0);
+    else if (tf->type) pt_type(p, tf->type, cc_slice_empty());
+    pr_str(p, ")");
+}
+
+static void pt_base_atomic(Pr* p, const CcType* inner) {
+    pr_str(p, "_Atomic(");
+    pt_type(p, inner, cc_slice_empty());
+    pr_str(p, ")");
+}
+
+/* A derived type without a base: nothing to name. */
+static void pt_base_derived(Pr* p, const CcType* t) {
+    CCSlice kind = CcType_kind_name(t);
+    CCString m = cc_string_new();
+    msg_slice(p, &m, kind);
+    msg_cstr(p, &m, " type has no base type");
+    pr_diag_msg(p, span_off(p, t->span), 0, &m);
+    pr_span(p, t->span, kind);
+}
+
+/* The specifier part: qualifiers and the base type. */
+static void pt_base(Pr* p, const CcType* t) {
+    if (!t) { pr_str(p, "int"); return; }
+    if (type_is_cc(t)) { pr_span(p, t->span, CcType_kind_name(t)); return; }
+    pr_quals(p, t->quals, true);
+    @switch (t->k) {
+        case .named(nm): pt_base_named(p, t, &nm); break;
+        case .record(rc): pt_base_record(p, t, &rc); break;
+        case .enumt(en): pt_base_enum(p, t, &en); break;
+        case .typeof_(tf): pt_base_typeof(p, &tf); break;
+        case .atomic(at): pt_base_atomic(p, at.pointee); break;
+        case .pointer: pt_base_derived(p, t); break;
+        case .array: pt_base_derived(p, t); break;
+        case .func: pt_base_derived(p, t); break;
+        default: pt_base_derived(p, t); break;
+    }
+}
+
+/* Type with a declarator: `int (*name)[3]`, or abstract when name is empty. */
+static void pt_type(Pr* p, const CcType* t, CCSlice name) {
+    const CcType* base = type_base(t);
+    pt_base(p, base);
+    if (name.len || t != base) pr_str(p, " ");
+    pt_prefix(p, t);
+    if (name.len) pr_slice(p, name);
+    pt_suffix(p, t);
+}
+
+/* ---- expressions ------------------------------------------------------------ */
+
+enum {
+    PREC_COMMA = 0, PREC_ASSIGN = 1, PREC_TERNARY = 2, PREC_LOR = 3, PREC_LAND = 4,
+    PREC_OR = 5, PREC_XOR = 6, PREC_AND = 7, PREC_EQ = 8, PREC_REL = 9, PREC_SHIFT = 10,
+    PREC_ADD = 11, PREC_MUL = 12, PREC_UNARY = 13, PREC_POSTFIX = 14, PREC_PRIMARY = 15
+};
+
+static int binop_prec(CcOp op) {
+    switch (op) {
+    case CC_OP_MUL: case CC_OP_DIV: case CC_OP_MOD: return PREC_MUL;
+    case CC_OP_ADD: case CC_OP_SUB: return PREC_ADD;
+    case CC_OP_SHL: case CC_OP_SHR: return PREC_SHIFT;
+    case CC_OP_LT: case CC_OP_GT: case CC_OP_LE: case CC_OP_GE: return PREC_REL;
+    case CC_OP_EQ: case CC_OP_NE: return PREC_EQ;
+    case CC_OP_AND: return PREC_AND;
+    case CC_OP_XOR: return PREC_XOR;
+    case CC_OP_OR: return PREC_OR;
+    case CC_OP_LAND: return PREC_LAND;
+    case CC_OP_LOR: return PREC_LOR;
+    default: return PREC_ASSIGN;
+    }
+}
+
+static void pr_op(Pr* p, CcOp op) {
+    CCSlice s = CcOp_spelling(op);
+    if (s.len == 0) pr_str(p, "?op?");
+    else pr_slice(p, s);
+}
+
+static bool is_postfix_op(CcOp op) { return op == CC_OP_POSTINC || op == CC_OP_POSTDEC; }
+
+static int expr_prec(const CcExpr* e) {
+    if (expr_is_cc(e)) return PREC_PRIMARY;
+    @switch (e->k) {
+        case .comma: return PREC_COMMA;
+        case .assign: return PREC_ASSIGN;
+        case .ternary: return PREC_TERNARY;
+        case .binary(b): return binop_prec(b.op);
+        case .unary(u): return is_postfix_op(u.op) ? PREC_POSTFIX : PREC_UNARY;
+        case .cast: return PREC_UNARY;
+        case .sizeof_type: return PREC_UNARY;
+        case .call: return PREC_POSTFIX;
+        case .index: return PREC_POSTFIX;
+        case .member: return PREC_POSTFIX;
+        case .compound: return PREC_POSTFIX;
+        default: return PREC_PRIMARY;
+    }
+}
+
+static void pr_args(Pr* p, const CcExprList* l) {
+    CcExprList* v = (CcExprList*)l;
+    size_t n = v->len();
+    size_t i;
+    bool has_pp = false;
+    for (i = 0; i < n; i++)
+        if (expr_is_pp(*v->get_ptr(i))) has_pp = true;
+    for (i = 0; i < n; i++) {
+        const CcExpr* e = *v->get_ptr(i);
+        if (!e) continue;
+        if (expr_is_pp(e)) { pr_pp_inside(p, expr_pp_tok(e), e->span); continue; }
+        pr_expr_p(p, e, PREC_ASSIGN);
+        if (has_pp) {
+            if (src_comma_after(p, e->span))
+                pr_str(p, i + 1 < n && expr_is_pp(*v->get_ptr(i + 1)) ? "," : ", ");
+        } else if (i + 1 < n) {
+            pr_str(p, ", ");
+        }
+    }
+}
+
+/* `- -x`, `+ +x`, `- --x`, `& &x`: the operand must not fuse with the operator. */
+static CcOp expr_prefix_op(const CcExpr* operand) {
+    @switch (operand->k) {
+        case .unary(u): return is_postfix_op(u.op) ? CC_OP_NONE : u.op;
+        default: return CC_OP_NONE;
+    }
+}
+
+static bool unary_needs_space_guard(CcOp outer, const CcExpr* operand) {
+    CcOp inner = expr_prefix_op(operand);
+    if (inner == CC_OP_NONE) return false;
+    switch (outer) {
+    case CC_OP_NEG: return inner == CC_OP_NEG || inner == CC_OP_PREDEC;
+    case CC_OP_POS: return inner == CC_OP_POS || inner == CC_OP_PREINC;
+    case CC_OP_ADDR: return inner == CC_OP_ADDR;
+    default: return false;
+    }
+}
+
+static void pr_e_ident(Pr* p, const CcExpr* e, CCSlice name) {
+    if (name.len) pr_slice(p, name);
+    else pr_tok_text(p, e->span.first);
+}
+
+static void pr_e_string(Pr* p, const CcLiteral* lit) {
+    uint32_t n = lit->n_toks ? lit->n_toks : 1;
+    uint32_t k;
+    for (k = 0; k < n; k++) {
+        if (k) pr_str(p, " ");
+        pr_tok_text(p, lit->tok + k);
+    }
+}
+
+static void pr_e_paren(Pr* p, const CcExpr* inner) {
+    pr_str(p, "(");
+    if (inner) pr_expr_p(p, inner, PREC_COMMA);
+    pr_str(p, ")");
+}
+
+static void pr_e_unary(Pr* p, const CcExpr* e, const CcUnary* u) {
+    if (!u->a) { pr_span_c(p, e->span, "unary"); return; }
+    if (is_postfix_op(u->op)) {
+        pr_expr_p(p, u->a, PREC_POSTFIX);
+        pr_op(p, u->op);
+    } else if (u->op == CC_OP_SIZEOF || u->op == CC_OP_ALIGNOF) {
+        pr_op(p, u->op);
+        if (!expr_is_paren(u->a)) pr_str(p, " ");
+        pr_expr_p(p, u->a, PREC_UNARY);
+    } else {
+        pr_op(p, u->op);
+        if (unary_needs_space_guard(u->op, u->a)) {
+            pr_str(p, "(");
+            pr_expr_p(p, u->a, PREC_COMMA);
+            pr_str(p, ")");
+        } else {
+            pr_expr_p(p, u->a, PREC_UNARY);
+        }
+    }
+}
+
+static void pr_e_binary(Pr* p, const CcExpr* e, const CcBinary* b) {
+    int prec = binop_prec(b->op);
+    if (!b->a || !b->b) { pr_span_c(p, e->span, "binary"); return; }
+    pr_expr_p(p, b->a, prec);
+    pr_str(p, " ");
+    pr_op(p, b->op);
+    pr_str(p, " ");
+    pr_expr_p(p, b->b, prec + 1);
+}
+
+static void pr_e_assign(Pr* p, const CcExpr* e, const CcBinary* b) {
+    if (!b->a || !b->b) { pr_span_c(p, e->span, "assignment"); return; }
+    pr_expr_p(p, b->a, PREC_UNARY);
+    pr_str(p, " ");
+    pr_op(p, b->op);
+    pr_str(p, " ");
+    pr_expr_p(p, b->b, PREC_ASSIGN);
+}
+
+static void pr_e_ternary(Pr* p, const CcExpr* e, const CcTernary* t) {
+    if (!t->c || !t->b) { pr_span_c(p, e->span, "conditional"); return; }
+    pr_expr_p(p, t->c, PREC_LOR);
+    pr_str(p, " ? ");
+    if (t->a) pr_expr_p(p, t->a, PREC_COMMA); /* GNU `a ?: b` has no middle */
+    pr_str(p, t->a ? " : " : ": ");
+    pr_expr_p(p, t->b, PREC_TERNARY);
+}
+
+static void pr_e_call(Pr* p, const CcExpr* e, const CcCall* c) {
+    if (!c->callee) { pr_span_c(p, e->span, "call"); return; }
+    pr_expr_p(p, c->callee, PREC_POSTFIX);
+    pr_str(p, "(");
+    pr_args(p, &c->args);
+    pr_str(p, ")");
+}
+
+static void pr_e_index(Pr* p, const CcExpr* e, const CcIndexExpr* ix) {
+    if (!ix->a || !ix->i) { pr_span_c(p, e->span, "index"); return; }
+    pr_expr_p(p, ix->a, PREC_POSTFIX);
+    pr_str(p, "[");
+    pr_expr_p(p, ix->i, PREC_COMMA);
+    pr_str(p, "]");
+}
+
+static void pr_e_member(Pr* p, const CcExpr* e, const CcMember* m) {
+    if (!m->a) { pr_span_c(p, e->span, "member"); return; }
+    pr_expr_p(p, m->a, PREC_POSTFIX);
+    pr_str(p, m->arrow ? "->" : ".");
+    pr_slice(p, m->name);
+}
+
+static void pr_e_cast(Pr* p, const CcExpr* e, const CcCast* c) {
+    if (!c->a || !c->type) { pr_span_c(p, e->span, "cast"); return; }
+    pr_str(p, "(");
+    pt_type(p, c->type, cc_slice_empty());
+    pr_str(p, ")");
+    if (expr_is_paren(c->a)) {
+        pr_expr_node(p, c->a);
+    } else {
+        pr_str(p, "(");
+        pr_expr_p(p, c->a, PREC_COMMA);
+        pr_str(p, ")");
+    }
+}
+
+static void pr_e_sizeof_type(Pr* p, const CcSizeofType* st) {
+    pr_str(p, st->op == CC_OP_ALIGNOF ? "_Alignof(" : "sizeof(");
+    if (st->type) pt_type(p, st->type, cc_slice_empty());
+    pr_str(p, ")");
+}
+
+static void pr_e_compound(Pr* p, const CcCompound* cl) {
+    pr_str(p, "(");
+    if (cl->type) pt_type(p, cl->type, cc_slice_empty());
+    pr_str(p, ")");
+    if (cl->init) pr_init(p, cl->init);
+    else pr_str(p, "{}");
+}
+
+static void pr_e_generic_sel(Pr* p, const CcGenericSel* gs) {
+    CcGenericSelArmVec* arms = (CcGenericSelArmVec*)&gs->arms;
+    size_t n = arms->len();
+    size_t i;
+    pr_str(p, "_Generic(");
+    if (gs->control) pr_expr_p(p, gs->control, PREC_ASSIGN);
+    for (i = 0; i < n; i++) {
+        const CcGenericSelArm* arm = arms->get_ptr(i);
+        if (!arm->type && expr_is_pp(arm->expr)) {
+            pr_pp_inside(p, expr_pp_tok(arm->expr), arm->expr->span);
+            continue;
+        }
+        pr_str(p, ", ");
+        if (arm->type) pt_type(p, arm->type, cc_slice_empty());
+        else pr_str(p, "default");
+        pr_str(p, ": ");
+        if (arm->expr) pr_expr_p(p, arm->expr, PREC_ASSIGN);
+    }
+    pr_str(p, ")");
+}
+
+static void pr_e_stmt_expr(Pr* p, const CcStmt* body) {
+    int outer = p->indent;
+    pr_str(p, "({");
+    if (body && stmt_is_block(body)) {
+        uint32_t rb = body->span.last;
+        pr_nl(p);
+        p->indent = outer + 1;
+        pr_items(p, stmt_block_stmts(body));
+        p->indent = outer;
+        if (tok_is_punct(p, rb, CC_P_RBRACE)) {
+            pr_lead(p, rb, outer + 1);
+            pr_set_pin_tok(p, rb);
+        }
+        if (p->at_line_start) pr_indent(p, outer);
+        else pr_str(p, " ");
+    } else if (body) {
+        pr_str(p, " ");
+        pr_stmt_text(p, body);
+        pr_str(p, " ");
+    }
+    pr_str(p, "})");
+}
+
+static void pr_e_type_arg(Pr* p, const CcExpr* e, const CcType* t) {
+    if (t) pt_type(p, t, cc_slice_empty());
+    else pr_span_c(p, e->span, "type argument");
+}
+
+static void pr_e_comma(Pr* p, const CcExpr* e, const CcComma* c) {
+    if (!c->a || !c->b) { pr_span_c(p, e->span, "comma"); return; }
+    pr_expr_p(p, c->a, PREC_COMMA);
+    pr_str(p, ", ");
+    pr_expr_p(p, c->b, PREC_ASSIGN);
+}
+
+static void pr_e_unknown(Pr* p, const CcExpr* e) {
+    CCString m = cc_string_new();
+    msg_cstr(p, &m, "printer: unknown expression kind ");
+    msg_int(p, &m, (int)e->k.kind);
+    pr_diag_msg(p, span_off(p, e->span), 0, &m);
+    pr_span_c(p, e->span, "expression");
+}
+
+static void pr_expr_node_b(Pr* p, const CcExpr* e);
+
+static void pr_expr_node(Pr* p, const CcExpr* e) {
+    if (expr_is_cc(e)) { pr_span(p, e->span, CcExpr_kind_name(e)); return; }
+    @switch (e->k) {
+        case .ident(name): pr_e_ident(p, e, name); break;
+        case .number(lit): pr_tok_text(p, lit.tok); break;
+        case .chr(lit): pr_tok_text(p, lit.tok); break;
+        case .string(lit): pr_e_string(p, &lit); break;
+        case .paren(pa): pr_e_paren(p, pa.a); break;
+        case .unary(u): pr_e_unary(p, e, &u); break;
+        case .binary(b): pr_e_binary(p, e, &b); break;
+        case .assign(b): pr_e_assign(p, e, &b); break;
+        case .ternary(t): pr_e_ternary(p, e, &t); break;
+        case .call(c): pr_e_call(p, e, &c); break;
+        default: pr_expr_node_b(p, e); break;
+    }
+}
+
+static void pr_expr_node_b(Pr* p, const CcExpr* e) {
+    @switch (e->k) {
+        case .index(ix): pr_e_index(p, e, &ix); break;
+        case .member(m): pr_e_member(p, e, &m); break;
+        case .cast(c): pr_e_cast(p, e, &c); break;
+        case .sizeof_type(st): pr_e_sizeof_type(p, &st); break;
+        case .compound(cl): pr_e_compound(p, &cl); break;
+        case .generic_sel(gs): pr_e_generic_sel(p, &gs); break;
+        case .stmt_expr(se): pr_e_stmt_expr(p, se.block); break;
+        case .comma(c): pr_e_comma(p, e, &c); break;
+        case .pp(x): pr_pp_inside(p, x.tok, e->span); break;
+        case .type_arg(ta): pr_e_type_arg(p, e, ta.type); break;
+        default: pr_e_unknown(p, e); break;
+    }
+}
+
+static void pr_expr_p(Pr* p, const CcExpr* e, int min_prec) {
+    bool paren;
+    if (!e) return;
+    paren = expr_prec(e) < min_prec;
+    if (paren) pr_str(p, "(");
+    pr_expr_node(p, e);
+    if (paren) pr_str(p, ")");
+}
+
+/* ---- initializers -------------------------------------------------------------- */
+
+static void pr_designators(Pr* p, const CcInit* item) {
+    CcDesignatorVec* dv = (CcDesignatorVec*)&item->designators;
+    size_t n = dv->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        const CcDesignator* ds = dv->get_ptr(i);
+        if (ds->field.len) {
+            pr_str(p, ".");
+            pr_slice(p, ds->field);
+        } else {
+            pr_str(p, "[");
+            if (ds->index) pr_expr_p(p, ds->index, PREC_TERNARY);
+            if (ds->index_hi) {
+                pr_str(p, " ... ");
+                pr_expr_p(p, ds->index_hi, PREC_TERNARY);
+            }
+            pr_str(p, "]");
+        }
+    }
+    if (n) pr_str(p, " = ");
+}
+
+static void pr_init(Pr* p, const CcInit* in) {
+    CcInitList* items;
+    size_t n;
+    size_t i;
+    bool has_pp = false;
+    if (!in) return;
+    if (!in->is_list) {
+        if (in->expr) pr_expr_p(p, in->expr, PREC_ASSIGN);
+        return;
+    }
+    items = (CcInitList*)&in->items;
+    n = items->len();
+    if (n == 0) { pr_str(p, "{}"); return; }
+    for (i = 0; i < n; i++) {
+        const CcInit* it = *items->get_ptr(i);
+        if (it && it->is_pp) has_pp = true;
+    }
+    pr_str(p, "{ ");
+    for (i = 0; i < n; i++) {
+        const CcInit* item = *items->get_ptr(i);
+        if (!item) continue;
+        if (item->is_pp) { pr_pp_inside(p, item->pp_tok, item->span); continue; }
+        pr_designators(p, item);
+        pr_init(p, item);
+        if (has_pp) {
+            if (src_comma_after(p, item->span)) {
+                const CcInit* next = i + 1 < n ? *items->get_ptr(i + 1) : NULL;
+                pr_str(p, next && next->is_pp ? "," : ", ");
+            }
+        } else if (i + 1 < n) {
+            pr_str(p, ", ");
+        }
+    }
+    pr_str(p, " }");
+}
+
+/* ---- statements ------------------------------------------------------------------ */
+
+/* Print a loop/if body after its header. Returns true when it ended with `}`. */
+static bool pr_body(Pr* p, const CcStmt* body) {
+    int outer = p->indent;
+    if (!body) { pr_str(p, ";"); return false; }
+    if (stmt_is_block(body) && !stmt_is_cc(body)) {
+        pr_str(p, " ");
+        pr_block(p, body);
+        return true;
+    }
+    pr_nl(p);
+    p->indent = outer + 1;
+    pr_stmt_line(p, body);
+    p->indent = outer;
+    return false;
+}
+
+static void pr_labelled_inner(Pr* p, const CcStmt* inner, bool same_indent) {
+    int outer = p->indent;
+    if (!inner) return;
+    if (stmt_is_case(inner) || stmt_is_label(inner)) {
+        pr_str(p, " ");
+        pr_stmt_text(p, inner);
+        return;
+    }
+    if (stmt_is_block(inner) && !stmt_is_cc(inner)) {
+        pr_str(p, " ");
+        pr_block(p, inner);
+        return;
+    }
+    pr_nl(p);
+    p->indent = same_indent ? outer : outer + 1;
+    pr_stmt_line(p, inner);
+    p->indent = outer;
+}
+
+static void pr_s_expr(Pr* p, const CcExpr* e) {
+    if (e) pr_expr_p(p, e, PREC_COMMA);
+    pr_str(p, ";");
+}
+
+static void pr_s_decl(Pr* p, const CcStmt* s, const CcDecl* d) {
+    if (d) pr_decl(p, d);
+    else pr_span_c(p, s->span, "declaration");
+}
+
+static void pr_s_if(Pr* p, const CcIf* x, int indent) {
+    bool brace;
+    pr_str(p, "if (");
+    pr_expr_p(p, x->cond, PREC_COMMA);
+    pr_str(p, ")");
+    brace = pr_body(p, x->then);
+    if (x->els) {
+        if (brace) pr_str(p, " else");
+        else { pr_nl(p); pr_indent(p, indent); pr_str(p, "else"); }
+        if (stmt_is_if(x->els) && !stmt_is_cc(x->els)) {
+            pr_str(p, " ");
+            pr_stmt_text(p, x->els);
+        } else {
+            pr_body(p, x->els);
+        }
+    }
+}
+
+static void pr_s_while(Pr* p, const CcWhile* w) {
+    pr_str(p, "while (");
+    pr_expr_p(p, w->cond, PREC_COMMA);
+    pr_str(p, ")");
+    pr_body(p, w->body);
+}
+
+static void pr_s_do(Pr* p, const CcWhile* w, int indent) {
+    bool brace;
+    pr_str(p, "do");
+    brace = pr_body(p, w->body);
+    if (!brace) { pr_nl(p); pr_indent(p, indent); }
+    else pr_str(p, " ");
+    pr_str(p, "while (");
+    pr_expr_p(p, w->cond, PREC_COMMA);
+    pr_str(p, ");");
+}
+
+static void pr_s_for(Pr* p, const CcFor* f) {
+    pr_str(p, "for (");
+    if (f->init_decl) {
+        pr_decl(p, f->init_decl);
+    } else {
+        if (f->init_expr) pr_expr_p(p, f->init_expr, PREC_COMMA);
+        pr_str(p, ";");
+    }
+    if (f->cond) { pr_str(p, " "); pr_expr_p(p, f->cond, PREC_COMMA); }
+    pr_str(p, ";");
+    if (f->step) { pr_str(p, " "); pr_expr_p(p, f->step, PREC_COMMA); }
+    pr_str(p, ")");
+    pr_body(p, f->body);
+}
+
+static void pr_s_switch(Pr* p, const CcSwitch* sw) {
+    pr_str(p, "switch (");
+    pr_expr_p(p, sw->subject, PREC_COMMA);
+    pr_str(p, ")");
+    pr_body(p, sw->body);
+}
+
+static void pr_s_case(Pr* p, const CcCase* c) {
+    if (c->is_default) {
+        pr_str(p, "default:");
+    } else {
+        pr_str(p, "case ");
+        pr_expr_p(p, c->lo, PREC_TERNARY);
+        if (c->hi) { pr_str(p, " ... "); pr_expr_p(p, c->hi, PREC_TERNARY); }
+        pr_str(p, ":");
+    }
+    pr_labelled_inner(p, c->inner, false);
+}
+
+static void pr_s_label(Pr* p, const CcLabel* l) {
+    pr_slice(p, l->name);
+    pr_str(p, ":");
+    if (!l->inner) pr_str(p, ";");
+    else pr_labelled_inner(p, l->inner, true);
+}
+
+static void pr_s_return(Pr* p, const CcExpr* value) {
+    pr_str(p, "return");
+    if (value) { pr_str(p, " "); pr_expr_p(p, value, PREC_COMMA); }
+    pr_str(p, ";");
+}
+
+/* `g->label` is read here, outside the switch: inside a case the member
+ * name `label` is taken for the statement arm of that name. */
+static void pr_s_goto(Pr* p, const CcGoto* g) {
+    pr_str(p, "goto ");
+    pr_slice(p, g->label);
+    pr_str(p, ";");
+}
+
+static void pr_s_unknown(Pr* p, const CcStmt* s) {
+    CCString m = cc_string_new();
+    msg_cstr(p, &m, "printer: unknown statement kind ");
+    msg_int(p, &m, (int)s->k.kind);
+    pr_diag_msg(p, span_off(p, s->span), 0, &m);
+    pr_span_c(p, s->span, "statement");
+}
+
+static void pr_stmt_text_b(Pr* p, const CcStmt* s, int indent);
+
+static void pr_stmt_text(Pr* p, const CcStmt* s) {
+    int indent = p->indent;
+    if (stmt_is_cc(s)) { pr_span(p, s->span, CcStmt_kind_name(s)); return; }
+    @switch (s->k) {
+        case .expr(x): pr_s_expr(p, x.e); break;
+        case .decl(x): pr_s_decl(p, s, x.d); break;
+        case .block: pr_block(p, s); break;
+        case .if_(x): pr_s_if(p, &x, indent); break;
+        case .while_(x): pr_s_while(p, &x); break;
+        case .do_(x): pr_s_do(p, &x, indent); break;
+        case .for_(x): pr_s_for(p, &x); break;
+        case .switch_(x): pr_s_switch(p, &x); break;
+        default: pr_stmt_text_b(p, s, indent); break;
+    }
+    p->indent = indent;
+}
+
+static void pr_stmt_text_b(Pr* p, const CcStmt* s, int indent) {
+    (void)indent;
+    @switch (s->k) {
+        case .case_(x): pr_s_case(p, &x); break;
+        case .label(x): pr_s_label(p, &x); break;
+        case .return_(x): pr_s_return(p, x.value); break;
+        case .break_: pr_str(p, "break;"); break;
+        case .continue_: pr_str(p, "continue;"); break;
+        case .goto_(x): pr_s_goto(p, &x); break;
+        case .asm_: pr_span_c(p, s->span, "asm"); break;
+        default: pr_s_unknown(p, s); break;
+    }
+}
+
+/* A statement on its own line at p->indent (trivia, pin, indentation). */
+static void pr_stmt_line(Pr* p, const CcStmt* s) {
+    int indent = p->indent;
+    if (!s) return;
+    pr_item_start(p, s->span, indent);
+    pr_stmt_text(p, s);
+    p->indent = indent;
+}
+
+/* The items of a block at p->indent; statements after a case label are
+ * indented one level deeper. */
+static void pr_items(Pr* p, CcStmtList l) {
+    int base = p->indent;
+    int in_case = 0;
+    size_t n = l.len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        const CcStmt* st = *l.get_ptr(i);
+        if (!st) continue;
+        if (stmt_is_case(st)) in_case = 1;
+        p->indent = stmt_is_case(st) || stmt_is_label(st) ? base : base + in_case;
+        pr_stmt_line(p, st);
+        pr_trailing(p, st->span.last + 1);
+        pr_nl(p);
+    }
+    p->indent = base;
+}
+
+/* `{` items `}` starting at the current position, closing at p->indent. */
+static void pr_block(Pr* p, const CcStmt* s) {
+    int outer = p->indent;
+    uint32_t rb = s->span.last;
+    pr_str(p, "{");
+    pr_nl(p);
+    p->indent = outer + 1;
+    pr_items(p, stmt_block_stmts(s));
+    p->indent = outer;
+    pt_close_brace(p, rb, outer);
+}
+
+/* ---- declarations ------------------------------------------------------------------ */
+
+static void pr_d_var(Pr* p, const CcDecl* d, const CcVarDecl* v) {
+    pr_specs(p, d->specs, decl_spec_quals(v->type));
+    pr_attrs(p, &d->attrs, false);
+    pt_type(p, v->type, v->name);
+    if (v->init) {
+        pr_str(p, " = ");
+        pr_init(p, v->init);
+    }
+    pr_str(p, ";");
+}
+
+static void pr_d_func(Pr* p, const CcDecl* d, const CcFuncDecl* f, int indent) {
+    bool keep_body = f->body != NULL;
+    if (keep_body && p->opts.header_mode &&
+        !((d->specs & CC_SPEC_STATIC) && (d->specs & CC_SPEC_INLINE)))
+        keep_body = false;
+    pr_specs(p, d->specs, decl_spec_quals(f->type));
+    pr_attrs(p, &d->attrs, false);
+    pt_type(p, f->type, f->name);
+    if (!keep_body) {
+        pr_str(p, ";");
+    } else if (stmt_is_block(f->body) && !stmt_is_cc(f->body)) {
+        pr_str(p, " ");
+        pr_block(p, f->body);
+    } else {
+        pr_nl(p);
+        p->indent = indent + 1;
+        pr_stmt_line(p, f->body);
+        p->indent = indent;
+    }
+}
+
+static void pr_d_typedef(Pr* p, const CcDecl* d, const CcTypedefDecl* td) {
+    pr_str(p, "typedef ");
+    pr_specs(p, d->specs & ~(uint32_t)CC_SPEC_TYPEDEF, decl_spec_quals(td->type));
+    pr_attrs(p, &d->attrs, false);
+    pt_type(p, td->type, td->name);
+    pr_str(p, ";");
+}
+
+/* The tag type is the specifier type itself, so its qualifiers print here
+ * and again with the type, as the reference does. */
+static void pr_d_tagged(Pr* p, const CcDecl* d, const CcType* t) {
+    pr_specs(p, d->specs, t ? t->quals : 0u);
+    pr_attrs(p, &d->attrs, false);
+    pt_type(p, t, cc_slice_empty());
+    pr_str(p, ";");
+}
+
+static void pr_d_static_assert(Pr* p, const CcStaticAssert* sa) {
+    pr_str(p, "_Static_assert(");
+    pr_expr_p(p, sa->cond, PREC_ASSIGN);
+    if (sa->msg_tok < p->n && p->t[sa->msg_tok].kind == CC_TK_STRING) {
+        pr_str(p, ", ");
+        pr_tok_text(p, sa->msg_tok);
+    }
+    pr_str(p, ");");
+}
+
+static void pr_d_pp(Pr* p, const CcDecl* d, const CcPpDecl* pd, int indent) {
+    if (!p->at_line_start && out_len(p) > p->line_start) {
+        /* a directive must start its line; a same-line comment before it moves up */
+        const char* data = cc_string_data_const(p->out);
+        size_t k = p->line_start;
+        size_t end = out_len(p);
+        bool only_space = true;
+        for (; k < end; k++)
+            if (data[k] != ' ' && data[k] != '\t') { only_space = false; break; }
+        if (!only_space) { pr_nl(p); pr_indent(p, indent); }
+    }
+    if (!CcSpan_is_empty(pd->skipped) || d->span.last > pd->tok || d->span.first < pd->tok)
+        pr_span_c(p, d->span, "preprocessor line");
+    else if (pd->tok < p->n && p->t[pd->tok].kind == CC_TK_PP)
+        pr_tok_text(p, pd->tok);
+    else
+        pr_span_c(p, d->span, "preprocessor line");
+}
+
+static void pr_d_stmt(Pr* p, const CcDecl* d, const CcStmt* body) {
+    if (body) pr_stmt_text(p, body);
+    else pr_span_c(p, d->span, "statement");
+}
+
+static void pr_d_macro_call(Pr* p, const CcDecl* d, const CcExpr* call) {
+    if (call) pr_expr_p(p, call, PREC_COMMA);
+    else pr_span_c(p, d->span, "macro invocation");
+    if (tok_is_punct(p, d->span.last, CC_P_SEMI)) pr_str(p, ";");
+}
+
+static void pr_d_unknown(Pr* p, const CcDecl* d) {
+    CCString m = cc_string_new();
+    msg_cstr(p, &m, "printer: unknown declaration kind ");
+    msg_int(p, &m, (int)d->k.kind);
+    pr_diag_msg(p, span_off(p, d->span), 0, &m);
+    pr_span_c(p, d->span, "declaration");
+}
+
+static void pr_decl(Pr* p, const CcDecl* d) {
+    int indent = p->indent;
+    if (decl_is_cc(d)) { pr_span(p, d->span, CcDecl_kind_name(d)); return; }
+    @switch (d->k) {
+        case .var(v): pr_d_var(p, d, &v); break;
+        case .func(f): pr_d_func(p, d, &f, indent); break;
+        case .typedef_(td): pr_d_typedef(p, d, &td); break;
+        case .tagged(tg): pr_d_tagged(p, d, tg.type); break;
+        case .static_assert_(sa): pr_d_static_assert(p, &sa); break;
+        case .pp(pd): pr_d_pp(p, d, &pd, indent); break;
+        case .stmt(ts): pr_d_stmt(p, d, ts.s); break;
+        case .macro_call(mc): pr_d_macro_call(p, d, mc.call); break;
+        case .empty: pr_str(p, ";"); break;
+        default: pr_d_unknown(p, d); break;
+    }
+    p->indent = indent;
+}
+
+/* ---- identity mode and coverage ------------------------------------------------------ */
+
+typedef struct Cov {
+    Pr* p;
+    uint8_t* marks;
+} Cov;
+
+static void cov_mark(Cov* c, CcSpan s, CCSlice what) {
+    uint32_t i;
+    if (!pr_span_ok(c->p, s, what)) return;
+    for (i = s.first; i <= s.last; i++) c->marks[i] = 1;
+}
+
+static bool cov_decl(CcDecl* d, void* env) { cov_mark((Cov*)env, d->span, CcDecl_kind_name(d)); return true; }
+static bool cov_stmt(CcStmt* s, void* env) { cov_mark((Cov*)env, s->span, CcStmt_kind_name(s)); return true; }
+static bool cov_expr(CcExpr* e, void* env) { cov_mark((Cov*)env, e->span, CcExpr_kind_name(e)); return true; }
+static bool cov_type(CcType* t, void* env) { cov_mark((Cov*)env, t->span, CcType_kind_name(t)); return true; }
+
+static void id_push_tok(Pr* p, uint32_t i) {
+    out_push(p, p->src + lead_off(p, i), lead_len(p, i) + tok_len(p, i));
+}
+
+static void id_report_overlap(Pr* p, const CcDecl* d, CcSpan s, uint32_t expected) {
+    CCString m = cc_string_new();
+    msg_cstr(p, &m, "top-level ");
+    msg_slice(p, &m, CcDecl_kind_name(d));
+    msg_cstr(p, &m, " overlaps the previous declaration by ");
+    msg_uint(p, &m, expected - s.first);
+    msg_cstr(p, &m, " token(s)");
+    pr_diag_msg(p, tok_off(p, s.first), tok_len(p, s.first), &m);
+}
+
+static void id_report_gap(Pr* p, CcSpan s, uint32_t expected) {
+    CCString m = cc_string_new();
+    msg_cstr(p, &m, "gap of ");
+    msg_uint(p, &m, s.first - expected);
+    msg_cstr(p, &m, " token(s) between top-level declarations before '");
+    msg_tok(p, &m, s.first);
+    msg_cstr(p, &m, "'");
+    pr_diag_msg(p, tok_off(p, expected), tok_len(p, expected), &m);
+}
+
+static void id_report_tail_gap(Pr* p, uint32_t expected, uint32_t n) {
+    CCString m = cc_string_new();
+    msg_cstr(p, &m, "gap of ");
+    msg_uint(p, &m, n - 1 - expected);
+    msg_cstr(p, &m, " token(s) after the last top-level declaration");
+    pr_diag_msg(p, tok_off(p, expected), tok_len(p, expected), &m);
+}
+
+static void id_report_uncovered(Pr* p, uint32_t i) {
+    CCString m = cc_string_new();
+    msg_cstr(p, &m, "token not covered by the tree: '");
+    msg_tok(p, &m, i);
+    msg_cstr(p, &m, "'");
+    pr_diag_msg(p, tok_off(p, i), tok_len(p, i), &m);
+}
+
+static void id_report_more(Pr* p, uint32_t more) {
+    CCString m = cc_string_new();
+    msg_uint(p, &m, more);
+    msg_cstr(p, &m, " more token(s) not covered by the tree");
+    pr_diag_msg(p, p->len, 0, &m);
+}
+
+static void pr_identity(Pr* p, const CcUnit* u) {
+    CcDeclList* dl = (CcDeclList*)&u->decls;
+    size_t nd = dl->len();
+    uint32_t n = p->n;
+    uint32_t expected = 0;
+    uint32_t i;
+    uint32_t n_uncovered = 0;
+    uint32_t reported = 0;
+    Cov cov;
+    CcVisitor v;
+    size_t k;
+
+    for (k = 0; k < nd; k++) {
+        const CcDecl* d = *dl->get_ptr(k);
+        CcSpan s;
+        if (!d) continue;
+        s = d->span;
+        if (!pr_span_ok(p, s, CcDecl_kind_name(d))) continue;
+        if (s.first < expected) {
+            if (s.last < expected) continue; /* a declarator split off `int a, b;` */
+            id_report_overlap(p, d, s, expected);
+            s.first = expected;
+        } else if (s.first > expected) {
+            id_report_gap(p, s, expected);
+            for (i = expected; i < s.first; i++) id_push_tok(p, i);
+        }
+        for (i = s.first; i <= s.last; i++) id_push_tok(p, i);
+        expected = s.last + 1;
+    }
+    if (n && expected < n - 1) {
+        id_report_tail_gap(p, expected, n);
+        for (i = expected; i < n - 1; i++) id_push_tok(p, i);
+    }
+    if (n) {
+        out_push(p, p->src + lead_off(p, n - 1), lead_len(p, n - 1));
+    }
+
+    /* Coverage: every token must be inside the span of some node. */
+    cov.p = p;
+    cov.marks = (uint8_t*)cc_arena_alloc(p->arena, n ? n : 1, 1);
+    memset(cov.marks, 0, n ? n : 1);
+    v.type = cov_type;
+    v.expr = cov_expr;
+    v.stmt = cov_stmt;
+    v.decl = cov_decl;
+    v.env = &cov;
+    CcUnit_walk((CcUnit*)u, v);
+    for (i = 0; n && i + 1 < n; i++) {
+        if (cov.marks[i]) continue;
+        n_uncovered++;
+        if (reported < PR_MAX_UNCOVERED_REPORTS) {
+            id_report_uncovered(p, i);
+            reported++;
+        }
+    }
+    if (n_uncovered > reported) id_report_more(p, n_uncovered - reported);
+}
+
+/* ---- lowered unit ---------------------------------------------------------------------- */
+
+static void pr_init_ctx(Pr* p, CCString* out, const CcTape* tape, CCArena a, CcDiags* ds,
+                        CcSrcMap* map, CcPrintOpts opts) {
+    CcTape* tp = (CcTape*)tape;
+    Vec::[CcToken]* toks = &tp->toks;
+    uint32_t i;
+    memset(p, 0, sizeof(*p));
+    p->out = out;
+    p->arena = a;
+    p->tape = tape;
+    p->t = toks->data();
+    p->n = (uint32_t)toks->len();
+    p->src = (const char*)tape->src.ptr;
+    p->len = (uint32_t)tape->src.len;
+    p->marks = &tp->marks;
+    p->lines = vec_new::[uint32_t](a);
+    p->lines.push(0u);
+    for (i = 0; i < p->len; i++)
+        if (p->src[i] == '\n') p->lines.push(i + 1);
+    p->ds = ds;
+    p->opts = opts;
+    if (p->opts.path.len == 0) p->opts.path = tape->path.len ? tape->path : CC_SLICE_LIT("<input>");
+    p->map = map;
+    p->emit_line = 1;
+    p->line_start = cc_string_len(out);
+    p->at_line_start = true;
+    p->pin_path = p->opts.path;
+    if (p->len || p->n) pr_set_pin(p, 0);
+}
+
+static void pr_unit(Pr* p, const CcUnit* u) {
+    CcDeclList* dl = (CcDeclList*)&u->decls;
+    size_t nd = dl->len();
+    size_t k;
+    if (p->opts.header_mode) {
+        pr_str(p, "#pragma once");
+        pr_nl(p);
+    }
+    for (k = 0; k < nd; k++) {
+        const CcDecl* d = *dl->get_ptr(k);
+        if (!d) continue;
+        p->indent = 0;
+        pr_item_start(p, d->span, 0);
+        pr_decl(p, d);
+        pr_trailing(p, d->span.last + 1);
+        pr_nl(p);
+    }
+    if (p->n) pr_lead(p, p->n - 1, 0);
+    if (!p->at_line_start) pr_nl(p);
+}
+
+/* Identity mode: the first byte where the replay differs from the input,
+ * as a diagnostic at that byte. */
+static CcDiag pr_identity_mismatch(Pr* p, size_t at) {
+    uint32_t off = at > p->len ? p->len : (uint32_t)at;
+    CcLoc loc = pr_loc(p, off);
+    CCString m = cc_string_new();
+    CcDiag d;
+    msg_cstr(p, &m, "identity output differs from the input at byte ");
+    msg_uint(p, &m, (uint32_t)at);
+    d = CcDiag_error(loc, cc_string_persist_slice(p->arena, &m));
+    d.len = 0;
+    d.phys_line = pr_phys_line(p, off);
+    return d;
+}
+
+static CcProduct !>(CcDiag) cc_print_unit(const CcUnit* u, const CcIndex* ix, CcPrintOpts opts, CcDiags* ds, CCArena a) {
+    CcProduct pr;
+    Pr p;
+    (void)ix;
+    pr.text = cc_string_new();
+    pr.map.entries = vec_new::[CcSrcMapEntry](a);
+    pr_init_ctx(&p, &pr.text, &u->tape, a, ds, opts.identity ? NULL : &pr.map, opts);
+    if (opts.identity) {
+        size_t n_out;
+        size_t len = (size_t)p.len;
+        const char* data;
+        pr_identity(&p, u);
+        n_out = cc_string_len(&pr.text);
+        data = cc_string_data_const(&pr.text);
+        if (n_out != len || (len && memcmp(data, p.src, len) != 0)) {
+            size_t i = 0;
+            size_t lim = n_out < len ? n_out : len;
+            while (i < lim && data[i] == p.src[i]) i++;
+            return cc_err(pr_identity_mismatch(&p, i));
+        }
+    } else {
+        pr_unit(&p, u);
+    }
+    return cc_ok(pr);
+}
+
+static CcLoc CcSrcMap_user_loc(const CcSrcMap* m, uint32_t emit_line, uint32_t emit_col) {
+    CcSrcMapEntries* ents = (CcSrcMapEntries*)&m->entries;
+    size_t n = ents->len();
+    size_t lo = 0;
+    size_t hi = n;
+    CcLoc loc;
+    loc.path = cc_slice_empty();
+    loc.line = 0;
+    loc.col = 0;
+    if (n == 0) return loc;
+    if (ents->get_ptr(0)->emit_line > emit_line) return loc;
+    while (hi - lo > 1) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (ents->get_ptr(mid)->emit_line <= emit_line) lo = mid; else hi = mid;
+    }
+    {
+        const CcSrcMapEntry* e = ents->get_ptr(lo);
+        if (e->emit_line != emit_line) return loc;
+        loc.path = e->path;
+        loc.line = e->line;
+        loc.col = emit_col ? (uint32_t)((int32_t)emit_col - e->col_delta) : 0;
+    }
+    return loc;
+}
+
+/* ---- spellings -------------------------------------------------------------------- */
+
+static CcPrintOpts spell_opts(const CcTape* tape) {
+    CcPrintOpts o;
+    o.identity = false;
+    o.line_directives = false;
+    o.path = tape->path;
+    o.header_mode = false;
+    return o;
+}
+
+static CCString CcType_spell(const CcType* t, CCSlice declarator, const CcTape* tape, CCArena a) {
+    CCString s = cc_string_new();
+    Pr p;
+    pr_init_ctx(&p, &s, tape, a, NULL, NULL, spell_opts(tape));
+    p.at_line_start = false;
+    pt_type(&p, t, declarator);
+    return s;
+}
+
+static CCString CcExpr_spell(const CcExpr* e, const CcTape* tape, CCArena a) {
+    CCString s = cc_string_new();
+    Pr p;
+    pr_init_ctx(&p, &s, tape, a, NULL, NULL, spell_opts(tape));
+    p.at_line_start = false;
+    pr_expr_p(&p, e, PREC_COMMA);
+    return s;
+}
+
+static CCString CcStmt_spell(const CcStmt* s, const CcTape* tape, CCArena a) {
+    CCString out = cc_string_new();
+    Pr p;
+    pr_init_ctx(&p, &out, tape, a, NULL, NULL, spell_opts(tape));
+    p.last_lead_tok = s->span.first + 1; /* quote the construct, not the comments before it */
+    pr_stmt_line(&p, s);
+    return out;
+}
+
+#endif
