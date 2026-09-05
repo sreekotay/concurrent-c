@@ -836,8 +836,9 @@ static CcStmt* parse_at_stmt(P* p) {
         adv(p);
         if (at_ident(p)) { cd.name = tok_name(p, p->i); adv(p); }
         else {
-            const char* lit_w = "the @defer name after @cancel_defer";
-            err_expected(p, lit_w);
+            CCSlice found = tok_desc(p, p->i);
+            CCString m = @string(`${"@"}cancel_defer requires a name, found ${found}`, p->arena);
+            err_here(p, m);
         }
         {
             const char* lit_w = "@cancel_defer";

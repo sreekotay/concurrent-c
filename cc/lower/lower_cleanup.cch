@@ -1,0 +1,561 @@
+#pragma(@per_tu)
+/* Clean lowerer, step: scope-exit cleanup. `@defer stmt;`, `@defer(ok|err)`,
+ * named `@defer n: stmt;` with `@cancel_defer n;`, and `T x = e @destroy
+ * [{ D }];` lower to per-site reach flags and cleanup runs at every exit
+ * of the site's scope: the end of its block, a `break` / `continue` that
+ * leaves it, and every `return`, which becomes a soft return through the
+ * function's cleanup epilogue. Lifetime: every node in the lowerer arena. */
+#ifndef CC_LOWER_CLEANUP_CCH
+#define CC_LOWER_CLEANUP_CCH
+#include "lower.cch"
+
+typedef struct CSite {
+    uint32_t id;                /* `__cc_defer_on_<id>`: 1 once the site is reached, 0 again when cancelled */
+    CcStmt* body;               /* the deferred statement / the `@destroy { D }` body; NULL when only the hook */
+    CCSlice var;                /* `@destroy`: the variable */
+    CcStmt* pre;                /* `@destroy`: the type's pre-destroy call, before the body; NULL when none */
+    CcStmt* chain;              /* `@destroy`: the type's destroy hook, then each value embed's, recursively; NULL when none */
+    char on;                    /* 0 always, 'o' on an ok return, 'e' on an error return */
+    CCSlice name;               /* named `@defer`; empty otherwise */
+    CcSpan span;
+} CSite;
+typedef CSite* CSiteRef;                    /* a Vec of the struct itself would hoist the struct above the prelude */
+typedef Vec::[CSiteRef] CSiteList;
+
+typedef struct CScope CScope;
+struct CScope {
+    CScope* parent;
+    CSiteList sites;            /* registration order */
+    int kind;                   /* 0 block, 1 loop body, 2 switch body, 3 function body */
+    bool virtual_;              /* a single-statement body: no list to hang cleanup on */
+};
+
+typedef struct CFn {
+    CcLowerer* L;
+    CcDecl* fn;
+    CcType* ret;                /* NULL for void */
+    bool ret_is_result;
+    CScope* scope;              /* innermost */
+    uint32_t next_site;
+    bool any;                   /* a site somewhere in the function: returns go through the epilogue */
+} CFn;
+
+static CCSlice cl_lit(const char* s) { return cc_slice_from_buffer((char*)s, strlen(s)); }
+
+static CCSlice cl_flag_name(CcLowerer* L, uint32_t id) {
+    CCString s = @string(`__cc_defer_on_${id}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+static CcExpr* cl_addr(CcLowerer* L, CcExpr* a, CcSpan sp) {
+    return cc_expr_unary(CC_OP_ADDR, a, sp, L->arena);
+}
+
+/* `__cc_defer_on_N = v;` */
+static CcStmt* cl_set_flag(CcLowerer* L, uint32_t id, const char* v, CcSpan sp) {
+    CCString t = @string(`${v}`, L->arena);
+    return lw_expr_stmt(L, lw_assign(L, lw_ident(L, cl_flag_name(L, id), sp), lw_text(L, t, sp), sp), sp);
+}
+
+static CcStmt* cl_stmt(CFn* fn, CcStmt* s);
+static void cl_stmts(CFn* fn, CcStmtList* list, int kind);
+
+/* The variable declaration a declaration statement carries, when it is one. */
+static bool cl_var_of(CcDecl* d, CcVarDecl* out) {
+    @switch (d->k) {
+        case .var(v): *out = v; return true;
+        default: return false;
+    }
+}
+
+/* ---- sites ---------------------------------------------------------------- */
+
+static CSite* cl_site_new(CFn* fn, CcSpan sp) {
+    CcLowerer* L = fn->L;
+    CSite* site = cc_arena_alloc(L->arena, sizeof(CSite), _Alignof(CSite));
+    CSiteList* sites = &fn->scope->sites;
+    memset(site, 0, sizeof(*site));
+    site->id = ++fn->next_site;
+    site->span = sp;
+    sites->push(site);
+    return site;
+}
+
+static CSite* cl_find_named(CFn* fn, CCSlice name) {
+    CScope* sc;
+    for (sc = fn->scope; sc; sc = sc->parent) {
+        CSiteList* sites = &sc->sites;
+        size_t n = sites->len();
+        size_t i;
+        for (i = n; i > 0; i--) {
+            CSite* site = *sites->get_ptr(i - 1);
+            if (site->name.len && cc_slice_eq(&site->name, name)) return site;
+        }
+    }
+    return NULL;
+}
+
+/* `if (__cc_defer_on_N [&& <ok test>]) { [pre(&x);] body; [destroy(&x);] }` */
+static CcStmt* cl_cleanup_of(CFn* fn, CSite* site) {
+    CcLowerer* L = fn->L;
+    CcSpan sp = site->span;
+    CcStmt* run = lw_block(L, sp);
+    CcExpr* cond = lw_ident(L, cl_flag_name(L, site->id), sp);
+    if (site->on) {
+        CcExpr* ok = lw_member(L, lw_ident(L, cl_lit("__cc_retval"), sp), "ok", sp);
+        CcExpr* test = site->on == 'o' ? ok : lw_not(L, ok, sp);
+        cond = cc_expr_binary(CC_OP_LAND, cond, test, sp, L->arena);
+    }
+    if (site->pre) lw_push(run, site->pre);
+    if (site->body) lw_push(run, site->body);
+    if (site->chain) lw_push(run, site->chain);
+    return lw_if(L, cond, run, NULL, sp);
+}
+
+/* The cleanups of one scope, last site first. */
+static void cl_scope_cleanups(CFn* fn, CScope* sc, CcStmt* into) {
+    CSiteList* sites = &sc->sites;
+    size_t n = sites->len();
+    size_t i;
+    for (i = n; i > 0; i--) {
+        CSite* site = *sites->get_ptr(i - 1);
+        lw_push(into, cl_cleanup_of(fn, site));
+    }
+}
+
+/* Cleanups of every scope from the innermost out to `stop` (inclusive when
+ * `with_stop`), innermost first: what a jump out of them must run. */
+static void cl_unwind(CFn* fn, CScope* stop, bool with_stop, CcStmt* into) {
+    CScope* sc;
+    for (sc = fn->scope; sc; sc = sc->parent) {
+        if (sc == stop && !with_stop) break;
+        cl_scope_cleanups(fn, sc, into);
+        if (sc == stop) break;
+    }
+}
+
+static CScope* cl_nearest(CFn* fn, bool loops_only) {
+    CScope* sc;
+    for (sc = fn->scope; sc; sc = sc->parent) {
+        if (sc->kind == 1) return sc;
+        if (sc->kind == 2 && !loops_only) return sc;
+        if (sc->kind == 3) return NULL;
+    }
+    return NULL;
+}
+
+static bool cl_any_sites_upto(CFn* fn, CScope* stop, bool with_stop) {
+    CScope* sc;
+    for (sc = fn->scope; sc; sc = sc->parent) {
+        CSiteList* sites = &sc->sites;
+        if (sc == stop && !with_stop) break;
+        if (sites->len()) return true;
+        if (sc == stop) break;
+    }
+    return false;
+}
+
+static CScope* cl_function_scope(CFn* fn) {
+    CScope* sc;
+    for (sc = fn->scope; sc; sc = sc->parent)
+        if (sc->kind == 3) return sc;
+    return NULL;
+}
+
+/* ---- registration --------------------------------------------------------- */
+
+static CcStmt* cl_register_defer(CFn* fn, const CcDefer* d, CcSpan sp) {
+    CcLowerer* L = fn->L;
+    CSite* site;
+    if (fn->scope->virtual_) {
+        CCString m = @string(`'${"@"}defer' as the whole body of a loop or switch has no block to run at; add braces`, L->arena);
+        lw_error(L, sp, m);
+        return lw_block(L, sp);
+    }
+    if (d->on && !fn->ret_is_result) {
+        CCString m = @string(`${"@"}defer(ok|err) is only valid in a Result-returning function`, L->arena);
+        lw_error(L, sp, m);
+        return lw_block(L, sp);
+    }
+    if (d->on && fn->scope->kind != 3) {
+        CCString m = @string(`${"@"}defer(ok|err) at block scope is not lowered by the clean lowerer yet; move it to function scope`, L->arena);
+        lw_error(L, sp, m);
+        return lw_block(L, sp);
+    }
+    if (d->name.len && cl_find_named(fn, d->name)) {
+        CCString m = @string(`redeclaration of named ${"@"}defer '${d->name}'`, L->arena);
+        lw_error(L, sp, m);
+        return lw_block(L, sp);
+    }
+    site = cl_site_new(fn, sp);
+    site->body = d->body ? cl_stmt(fn, d->body) : NULL;
+    site->on = d->on;
+    site->name = d->name;
+    return cl_set_flag(L, site->id, "1", sp);
+}
+
+static CcStmt* cl_cancel_defer(CFn* fn, const CcCancelDefer* cd, CcSpan sp) {
+    CcLowerer* L = fn->L;
+    CSite* site;
+    if (!cd->name.len) {
+        CCString m = @string(`${"@"}cancel_defer requires a name`, L->arena);
+        lw_error(L, sp, m);
+        return lw_block(L, sp);
+    }
+    site = cl_find_named(fn, cd->name);
+    if (!site) {
+        CCString m = @string(`${"@"}cancel_defer '${cd->name}': no named ${"@"}defer in scope`, L->arena);
+        lw_error(L, sp, m);
+        return lw_block(L, sp);
+    }
+    return cl_set_flag(L, site->id, "0", sp);
+}
+
+/* The canonical name of a type without its pointer stars. */
+static CCSlice cl_base_canon(CcLowerer* L, CcType* t) {
+    CcIndex* ix = L->ix;
+    CCSlice canon = ix->canon(t);
+    size_t n = canon.len;
+    while (n && (canon.ptr[n - 1] == '*' || canon.ptr[n - 1] == ' ')) n--;
+    return cc_slice_from_buffer((char*)canon.ptr, n);
+}
+
+/* The destroy chain of `subject` (an lvalue of type `canon`): the type's own
+ * hook on its address, then, in declaration order, the chain of every value
+ * member whose type has one, recursively. Returns how many calls it added. */
+static int cl_destroy_chain(CcLowerer* L, CCSlice canon, CcExpr* subject, CcStmt* into, CcSpan sp, int depth) {
+    CcIndex* ix = L->ix;
+    CcTypeInfo* ti = canon.len ? ix->type_get(canon) : NULL;
+    CcRecordType st;
+    CcFieldList* fieldv;
+    size_t nf;
+    size_t k;
+    int n = 0;
+    if (depth > 6) return 0;
+    if (ti && ti->destroy_fn.len) {
+        lw_push(into, lw_expr_stmt(L, lw_call1(L, ti->destroy_fn, cl_addr(L, subject, sp), sp), sp));
+        n++;
+    } else if (canon.len) {
+        /* the naming convention: a visible `Type_destroy(Type*)` is the hook */
+        CCString conv = @string(`${canon}_destroy`, L->arena);
+        CCSlice fname = lw_keep(L, &conv);
+        CcSym* sym = ix->sym(fname) ?> NULL;
+        if (sym && sym->kind == CC_SYM_FUNC) {
+            lw_push(into, lw_expr_stmt(L, lw_call1(L, fname, cl_addr(L, subject, sp), sp), sp));
+            n++;
+        }
+    }
+    if (!cc__struct_of(ix, canon, 0, &st)) return n;
+    fieldv = &st.fields;
+    nf = fieldv->len();
+    for (k = 0; k < nf; k++) {
+        CcField* f = fieldv->get_ptr(k);
+        CCSlice fty;
+        if (!f->name.len || !f->type || f->is_pp) continue;
+        if (f->type->k.kind == CcTypeK_pointer || f->type->k.kind == CcTypeK_array) continue;
+        fty = cl_base_canon(L, f->type);
+        n += cl_destroy_chain(L, fty, lw_member_s(L, subject, f->name, sp), into, sp, depth + 1);
+    }
+    return n;
+}
+
+/* `pre(&x);` when the type registers a pre-destroy phase. */
+static CcStmt* cl_pre_destroy(CcLowerer* L, CCSlice canon, CcExpr* subject, CcSpan sp) {
+    CcIndex* ix = L->ix;
+    CcTypeInfo* ti = canon.len ? ix->type_get(canon) : NULL;
+    if (!ti || !ti->pre_destroy_fn.len) return NULL;
+    return lw_expr_stmt(L, lw_call1(L, ti->pre_destroy_fn, cl_addr(L, subject, sp), sp), sp);
+}
+
+/* `T x = e @destroy [{ D }];` -> the declaration, then the site's flag. */
+static void cl_register_destroy(CFn* fn, CcStmt* s, CcDecl* d, CcVarDecl v, CcStmtList* out) {
+    CcLowerer* L = fn->L;
+    CSite* site;
+    CCSlice canon;
+    CcStmt* chain;
+    CcStmt* pre;
+    bool is_pointer;
+    if (fn->scope->virtual_) {
+        CCString m = @string(`'${"@"}destroy' as the whole body of a loop or switch has no block to run at; add braces`, L->arena);
+        lw_error(L, s->span, m);
+        out->push(s);
+        return;
+    }
+    canon = cl_base_canon(L, v.type);
+    is_pointer = v.type && v.type->k.kind == CcTypeK_pointer;
+    chain = lw_block(L, s->span);
+    {
+        /* a pointer variable is the address already: its own hook takes it, and
+         * its members are reached through it */
+        CcExpr* subject = lw_ident(L, v.name, s->span);
+        int n;
+        if (is_pointer) subject = cc_expr_unary(CC_OP_DEREF, subject, s->span, L->arena);
+        n = cl_destroy_chain(L, canon, subject, chain, s->span, 0);
+        pre = cl_pre_destroy(L, canon, subject, s->span);
+        if (!n) chain = NULL;
+    }
+    if (!chain && !pre && !v.destroy_body) {
+        CCSlice full = L->ix->canon(v.type);
+        CCString m = @string(`'${"@"}destroy' on '${v.name}': type '${full}' has no destroy hook, no value member with one, and no '{ ... }' body`, L->arena);
+        lw_error(L, s->span, m);
+        out->push(s);
+        return;
+    }
+    site = cl_site_new(fn, s->span);
+    site->var = v.name;
+    site->pre = pre;
+    site->chain = chain;
+    site->body = v.destroy_body ? cl_stmt(fn, v.destroy_body) : NULL;
+    v.destroy = false;
+    v.destroy_body = NULL;
+    d->k = { .var = v };
+    out->push(s);
+    out->push(cl_set_flag(L, site->id, "1", s->span));
+}
+
+/* ---- exits ------------------------------------------------------------------ */
+
+/* `return e;` -> `{ __cc_retval = e; <unwind to the function scope>; goto __cc_cleanup; }` */
+static CcStmt* cl_soft_return(CFn* fn, CcStmt* s, CcExpr* value) {
+    CcLowerer* L = fn->L;
+    CcSpan sp = s->span;
+    CcStmt* blk = lw_block(L, sp);
+    if (fn->ret && value)
+        lw_push(blk, lw_expr_stmt(L, lw_assign(L, lw_ident(L, cl_lit("__cc_retval"), sp), value, sp), sp));
+    else if (value)
+        lw_push(blk, lw_expr_stmt(L, value, sp));   /* `return f();` in a void function */
+    cl_unwind(fn, cl_function_scope(fn), false, blk);
+    lw_push(blk, lw_goto(L, cl_lit("__cc_cleanup"), sp));
+    return blk;
+}
+
+/* `break;` / `continue;` -> `{ <unwind to the loop or switch>; break; }` when
+ * a site sits in between. */
+static CcStmt* cl_soft_jump(CFn* fn, CcStmt* s, bool is_continue) {
+    CcLowerer* L = fn->L;
+    CScope* target = cl_nearest(fn, is_continue);
+    CcStmt* blk;
+    if (!target) return s;
+    if (!cl_any_sites_upto(fn, target, true)) return s;
+    blk = lw_block(L, s->span);
+    cl_unwind(fn, target, true, blk);
+    lw_push(blk, s);
+    return blk;
+}
+
+/* ---- the walk ----------------------------------------------------------------- */
+
+/* A statement in body position: a block gets its own scope of `kind`; a
+ * single statement under a loop or switch gets a virtual one so a `break`
+ * inside it stops there. */
+static CcStmt* cl_body(CFn* fn, CcStmt* s, int kind) {
+    if (!s) return s;
+    {
+        bool is_block = false;
+        @switch (s->k) {
+            case .block: is_block = true; break;
+            default: break;
+        }
+        if (is_block) {
+            CcStmtList* list = lw_block_stmts(s);
+            if (list) cl_stmts(fn, list, kind);
+            return s;
+        }
+    }
+    if (kind == 0) return cl_stmt(fn, s);
+    {
+        CScope sc;
+        CScope* outer = fn->scope;
+        CcStmt* r;
+        memset(&sc, 0, sizeof(sc));
+        sc.parent = outer;
+        sc.sites = vec_new::[CSiteRef](fn->L->arena);
+        sc.kind = kind;
+        sc.virtual_ = true;
+        fn->scope = &sc;
+        r = cl_stmt(fn, s);
+        fn->scope = outer;
+        return r;
+    }
+}
+
+static CcStmt* cl_stmt(CFn* fn, CcStmt* s) {
+    CcLowerer* L = fn->L;
+    if (!s) return s;
+    @switch (s->k) {
+        case .block: {
+            CcStmtList* list = lw_block_stmts(s);
+            if (list) cl_stmts(fn, list, 0);
+            return s;
+        }
+        case .if_: s->k.if_.then = cl_body(fn, s->k.if_.then, 0); s->k.if_.els = cl_body(fn, s->k.if_.els, 0); return s;
+        case .while_: s->k.while_.body = cl_body(fn, s->k.while_.body, 1); return s;
+        case .do_: s->k.do_.body = cl_body(fn, s->k.do_.body, 1); return s;
+        case .for_: s->k.for_.body = cl_body(fn, s->k.for_.body, 1); return s;
+        case .switch_: s->k.switch_.body = cl_body(fn, s->k.switch_.body, 2); return s;
+        case .case_: s->k.case_.inner = cl_stmt(fn, s->k.case_.inner); return s;
+        case .label: s->k.label.inner = cl_stmt(fn, s->k.label.inner); return s;
+        case .return_(r): return fn->any ? cl_soft_return(fn, s, r.value) : s;
+        case .break_: return cl_soft_jump(fn, s, false);
+        case .continue_: return cl_soft_jump(fn, s, true);
+        case .defer(d): return cl_register_defer(fn, &d, s->span);
+        case .cancel_defer(cd): return cl_cancel_defer(fn, &cd, s->span);
+        case .decl(ds): {
+            /* `if (c) T x = e @destroy;` has no scope for x past the if */
+            CcVarDecl v;
+            bool is_var = cl_var_of(ds.d, &v);
+            if (is_var && v.destroy) {
+                CCString m = @string(`'${"@"}destroy' needs a block around its declaration here`, L->arena);
+                lw_error(L, s->span, m);
+            }
+            (void)L;
+            return s;
+        }
+        default: return s;
+    }
+}
+
+static void cl_stmts(CFn* fn, CcStmtList* list, int kind) {
+    CcLowerer* L = fn->L;
+    CScope sc;
+    CScope* outer = fn->scope;
+    CcStmtList out = vec_new::[CcStmtRef](L->arena);
+    size_t n = list->len();
+    size_t i;
+    memset(&sc, 0, sizeof(sc));
+    sc.parent = outer;
+    sc.sites = vec_new::[CSiteRef](L->arena);
+    sc.kind = kind;
+    fn->scope = &sc;
+    for (i = 0; i < n; i++) {
+        CcStmt* s = *list->get_ptr(i);
+        bool done = false;
+        @switch (s->k) {
+            case .decl(ds): {
+                CcVarDecl v;
+                bool is_var = cl_var_of(ds.d, &v);
+                if (is_var && v.destroy) { cl_register_destroy(fn, s, ds.d, v, &out); done = true; }
+                break;
+            }
+            default: break;
+        }
+        if (!done) {
+            CcStmt* r = cl_stmt(fn, s);
+            out.push(r);
+        }
+    }
+    fn->scope = outer;
+    {
+        CSiteList* sites = &sc.sites;
+        size_t ns = sites->len();
+        CcStmtList with = vec_new::[CcStmtRef](L->arena);
+        size_t k;
+        CcSpan sp0;
+        CcSpan spn;
+        size_t no = out.len();
+        sp0.first = 0; sp0.last = 0;
+        spn = sp0;
+        if (no) {
+            CcStmt* f0 = *out.get_ptr(0);
+            CcStmt* fl = *out.get_ptr(no - 1);
+            sp0 = f0->span;
+            spn = fl->span;
+        }
+        /* flags first: every exit of the scope reads them */
+        if (kind == 3 && fn->any && fn->ret)
+            with.push(lw_decl_stmt(L, fn->ret, cl_lit("__cc_retval"), NULL, sp0));
+        for (k = 0; k < ns; k++) {
+            CSite* site = *sites->get_ptr(k);
+            CCString zero = @string(`0`, L->arena);
+            with.push(lw_decl_stmt(L, lw_named_type(L, cl_lit("int"), site->span), cl_flag_name(L, site->id), lw_text(L, zero, site->span), site->span));
+        }
+        for (k = 0; k < no; k++) {
+            CcStmt* os = *out.get_ptr(k);
+            with.push(os);
+        }
+        if (kind == 3 && fn->any) {
+            /* the epilogue: reached by every soft return and by falling off the end */
+            CcStmt* tail = lw_block(L, spn);
+            cl_scope_cleanups(fn, &sc, tail);
+            if (fn->ret) lw_push(tail, cc_stmt_return(lw_ident(L, cl_lit("__cc_retval"), spn), spn, L->arena));
+            else lw_push(tail, cc_stmt_return(NULL, spn, L->arena));
+            with.push(lw_label(L, cl_lit("__cc_cleanup"), NULL, spn));
+            with.push(tail);
+        } else if (ns) {
+            CcStmt* tail = lw_block(L, spn);
+            cl_scope_cleanups(fn, &sc, tail);
+            with.push(tail);
+        }
+        *list = with;
+    }
+}
+
+/* ---- the pre-scan: does the function register anything? ------------------------ */
+
+typedef struct CScan { bool sites; bool cancels; } CScan;
+
+static bool cl_scan_stmt(CcStmt* s, void* env) {
+    CScan* sc = (CScan*)env;
+    bool* any = &sc->sites;
+    @switch (s->k) {
+        case .defer: *any = true; break;
+        case .cancel_defer: sc->cancels = true; break;
+        case .decl(ds): {
+            CcVarDecl v;
+            if (cl_var_of(ds.d, &v) && v.destroy) *any = true;
+            break;
+        }
+        default: break;
+    }
+    return true;
+}
+
+/* ---- the step -------------------------------------------------------------------- */
+
+static void cl_function(CcLowerer* L, CcDecl* d, CcFuncDecl* f) {
+    CFn fn;
+    CcVisitor v;
+    CcStmtList* body;
+    CcType* ret = NULL;
+    CScan scan;
+    if (!f->body) return;
+    body = lw_block_stmts(f->body);
+    if (!body) return;
+    memset(&scan, 0, sizeof(scan));
+    memset(&v, 0, sizeof(v));
+    v.stmt = cl_scan_stmt;
+    v.env = &scan;
+    CcStmt_walk(f->body, v);
+    if (!scan.sites && !scan.cancels) return;   /* a cancel with no site: visited for its diagnostic */
+    @switch (f->type->k) {
+        case .func(ft): ret = ft.ret; break;
+        default: break;
+    }
+    memset(&fn, 0, sizeof(fn));
+    fn.L = L;
+    fn.fn = d;
+    fn.ret = (ret && !CcType_is_void(ret)) ? ret : NULL;
+    fn.any = scan.sites;
+    if (fn.ret) {
+        CcIndex* ix = L->ix;
+        CCSlice canon = ix->canon(fn.ret);
+        CcTypeInfo* ti = ix->type_get(canon);
+        fn.ret_is_result = ti && ti->is_result;
+    }
+    cl_stmts(&fn, body, 3);
+}
+
+static void CcLowerer_cleanup(CcLowerer* L) {
+    CcDeclList* decls = &L->unit->decls;
+    size_t n = decls->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *decls->get_ptr(i);
+        @switch (d->k) {
+            case .func(f): cl_function(L, d, &f); break;
+            default: break;
+        }
+    }
+}
+
+#endif

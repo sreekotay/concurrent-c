@@ -207,6 +207,7 @@ static CCString lw_spell_expr(CcLowerer* L, const CcExpr* e) {
 /* ---- the pipeline ----------------------------------------------------- */
 
 #include "lower_results.cch"
+#include "lower_cleanup.cch"
 
 /* The banner every lowered TU starts with: the generator, and the two
  * headers whose names lowered code spells without asking. */
@@ -247,6 +248,7 @@ static void lw_drop_cc_only(CcLowerer* L) {
         bool drop = false;
         @switch (d->k) {
             case .typeview: drop = true; break;
+            case .typehooks: drop = true; break;
             default: break;
         }
         if (!drop) with.push(d);
@@ -256,6 +258,7 @@ static void lw_drop_cc_only(CcLowerer* L) {
 
 static void CcLowerer_lower_unit(CcLowerer* L) {
     CcLowerer_results(L);
+    CcLowerer_cleanup(L);
     lw_drop_cc_only(L);   /* after the steps: the index reads faces off the unit's declarations */
     lw_banner(L);
 }

@@ -3348,7 +3348,7 @@ static CcStmt *parse_at_stmt(P *p) {
         s = cc_stmt_new(p->a, CC_S_CANCEL_DEFER, span2(first, first));
         adv(p);
         if (at_ident(p)) { s->name = tok_name(p, p->i); adv(p); }
-        else err_here(p, "expected the @defer name after @cancel_defer, found %s", tok_desc(p, p->i));
+        else err_here(p, "@cancel_defer requires a name, found %s", tok_desc(p, p->i));
         end_stmt(p, "@cancel_defer", first);
         s->span = span_from(p, first);
         return s;
