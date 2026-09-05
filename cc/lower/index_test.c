@@ -486,20 +486,15 @@ static void visit_ufcs(Walker *w, CcExpr *e) {
     CC_LIST_PUSH(&w->s->arena, &w->sites, site);
 }
 
-/* `p->m(args)`: the parser keeps it as a call of a member; it is a UFCS
- * site unless the struct really has a field `m`. */
-static void visit_arrow_call(Walker *w, CcExpr *call) {
-    CcExpr *mem = call->a;
-    CcExpr probe;
+/* `p->m(args)` arrives as a UFCS node with `arrow` set. It is a site unless
+ * the struct really has a field `m` (a function-pointer call: plain C). */
+static void visit_ufcs_maybe_field(Walker *w, CcExpr *e) {
     CcType *rt;
-    if (!mem || mem->kind != CC_E_MEMBER || !mem->arrow || !mem->name) return;
-    rt = type_of_expr(w, mem->a);
-    if (rt && field_type(w, rt, mem->name)) return;
-    probe = *call;
-    probe.kind = CC_E_UFCS;
-    probe.a = mem->a;
-    probe.name = mem->name;
-    visit_ufcs(w, &probe);
+    if (e->arrow && e->a && e->name) {
+        rt = type_of_expr(w, e->a);
+        if (rt && field_type(w, rt, e->name)) return;
+    }
+    visit_ufcs(w, e);
 }
 
 /* A statement-level macro invocation (`cc_arena_stack(a, n);`) may declare
@@ -543,8 +538,7 @@ static void walk_expr(Walker *w, CcExpr *e) {
     CcGenericSelArm *g;
     CcTplPart *pt;
     if (!e) return;
-    if (e->kind == CC_E_UFCS) visit_ufcs(w, e);
-    if (e->kind == CC_E_CALL) visit_arrow_call(w, e);
+    if (e->kind == CC_E_UFCS) visit_ufcs_maybe_field(w, e);
     if (e->kind == CC_E_CLOSURE) {
         scope_push(w);
         for (i = 0; i < e->params.n; i++) scope_declare(w, e->params.items[i]->name, e->params.items[i]->type);
