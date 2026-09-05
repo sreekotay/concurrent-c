@@ -18,7 +18,7 @@ typedef struct CcSrcMapEntry {
     uint32_t emit_line;
     CCSlice path;
     uint32_t line;
-    int32_t col_delta;          /* user col = emit col + col_delta on that line */
+    int32_t col_delta;          /* emit col - user col for text copied verbatim; 0 when unknown */
 } CcSrcMapEntry;
 
 typedef struct CcSrcMap {
@@ -39,13 +39,19 @@ typedef struct CcProduct {
     CcSrcMap map;
 } CcProduct;
 
-/* Print the unit. Identity mode fails (with the first token it could not
- * place) rather than emitting a byte it did not read. */
-static CcProduct !>(CcDiag) cc_print_unit(const CcUnit* u, const CcIndex* ix, CcPrintOpts opts, CCArena a);
+/* Print the unit. Every problem the printer finds (a token no node
+ * reaches, a gap or an overlap between top-level spans, a node with an
+ * invalid span) is an error on `ds`, at the token that caused it. Identity
+ * mode fails, at the first byte that differs, rather than passing off text
+ * that is not the input; lowered mode returns the product beside its
+ * diagnostics, so the driver decides. */
+static CcProduct !>(CcDiag) cc_print_unit(const CcUnit* u, const CcIndex* ix, CcPrintOpts opts, CcDiags* ds, CCArena a);
 
-/* Pieces, for tests and for lowerings that need a spelling: t.spell(a). */
-static CCString CcType_spell(const CcType* t, CCSlice declarator, CCArena a);    /* "int (*name)(void)" */
-static CCString CcExpr_spell(const CcExpr* e, CCArena a);
-static CCString CcStmt_spell(const CcStmt* s, CCArena a);
+/* Pieces, for tests and for lowerings that need a spelling: t.spell(name,
+ * tape, a). Literal tokens are read from `tape`, the one the node's span
+ * indexes (the unit's, or a template slot's own). */
+static CCString CcType_spell(const CcType* t, CCSlice declarator, const CcTape* tape, CCArena a);    /* "int (*name)(void)" */
+static CCString CcExpr_spell(const CcExpr* e, const CcTape* tape, CCArena a);
+static CCString CcStmt_spell(const CcStmt* s, const CcTape* tape, CCArena a);
 
 #endif
