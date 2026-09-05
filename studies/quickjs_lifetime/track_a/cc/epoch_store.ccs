@@ -1,0 +1,230 @@
+/*
+ * epoch_store.ccs — study-local simple generation store (wstore5 spine).
+ *
+ * Single current bucket. ep_rotate parks it and starts a fresh gen.
+ * Keep this file as the "simple" backend; see epoch_wheel.ccs for the ring.
+ */
+#pragma once
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_arena.cch>
+#include <string.h>
+#include <stdint.h>
+#include <stddef.h>
+
+#ifndef EP_RECLAIM_CAP
+#define EP_RECLAIM_CAP 64
+#endif
+
+#ifndef EP_GEN_L1
+#define EP_GEN_L1 (2u * 1024u * 1024u)
+#endif
+
+typedef struct EpSlot EpSlot;
+typedef struct EpBucket EpBucket;
+typedef struct EpReclaimQ EpReclaimQ;
+typedef struct EpStore EpStore;
+
+enum {
+    EP_KIND_NONE = 0,
+    EP_KIND_CLAIM = 1,
+    EP_KIND_REG = 2
+};
+
+struct EpSlot {
+    EpBucket *bucket;
+    EpSlot *live_next;
+    EpSlot *live_prev;
+    uint8_t live;
+    uint8_t kind; /* EP_KIND_* — for mid-gen compact */
+    uint8_t pad[6];
+};
+
+struct EpBucket {
+    CCArena recs;
+    EpSlot *live_head;
+    EpSlot *live_tail;
+    EpSlot *free_head;
+    size_t live_n;
+    size_t born;
+    uint32_t gen;
+};
+
+struct EpReclaimQ {
+    CCArena q[EP_RECLAIM_CAP];
+    int n;
+    size_t parks;
+    size_t destroys;
+    size_t compacts;
+    size_t compact_moved;
+};
+
+struct EpStore {
+    CCArena owner;
+    EpBucket cur;
+    EpReclaimQ rq;
+    int ready;
+};
+
+static CCArena ep_arena_none(void) {
+    CCArena a;
+    memset(&a, 0, sizeof a);
+    return a;
+}
+
+static void ep_bucket_reset(EpBucket *b) {
+    b->recs = ep_arena_none();
+    b->live_head = NULL;
+    b->live_tail = NULL;
+    b->free_head = NULL;
+    b->live_n = 0;
+    b->born = 0;
+    b->gen = 0;
+}
+
+static int ep_bucket_ensure(EpBucket *b) {
+    CCResult_CCArena_CCError ar;
+    if (!b) return -1;
+    if (b->recs.valid()) return 0;
+    ar = cc_arena_try_heap(EP_GEN_L1);
+    if (!ar.ok) return -1;
+    b->recs = ar.u.value;
+    return 0;
+}
+
+static void ep_live_link(EpBucket *b, EpSlot *e) {
+    e->live_next = NULL;
+    e->live_prev = b->live_tail;
+    if (b->live_tail) b->live_tail->live_next = e;
+    else b->live_head = e;
+    b->live_tail = e;
+    b->live_n++;
+    e->live = 1;
+    e->bucket = b;
+}
+
+static void ep_live_unlink(EpBucket *b, EpSlot *e) {
+    if (e->live_prev) e->live_prev->live_next = e->live_next;
+    else if (b->live_head == e) b->live_head = e->live_next;
+    if (e->live_next) e->live_next->live_prev = e->live_prev;
+    else if (b->live_tail == e) b->live_tail = e->live_prev;
+    e->live_next = NULL;
+    e->live_prev = NULL;
+    if (b->live_n) b->live_n--;
+    e->live = 0;
+}
+
+static void ep_rq_init(EpReclaimQ *rq) {
+    memset(rq, 0, sizeof(*rq));
+}
+
+static int ep_bucket_try_park(EpReclaimQ *rq, EpBucket *b) {
+    if (!rq || !b || b->live_n) return 0;
+    if (!b->recs.valid()) return 1;
+    if (rq->n >= EP_RECLAIM_CAP) {
+        CCArena a = b->recs;
+        b->recs = ep_arena_none();
+        a.destroy();
+        rq->destroys++;
+    } else {
+        rq->q[rq->n++] = b->recs;
+        b->recs = ep_arena_none();
+        rq->parks++;
+    }
+    b->free_head = NULL;
+    b->born = 0;
+    return 1;
+}
+
+static void ep_rq_reclaim(EpReclaimQ *rq) {
+    int i;
+    if (!rq) return;
+    for (i = 0; i < rq->n; i++) {
+        if (rq->q[i].valid()) {
+            rq->q[i].destroy();
+            rq->destroys++;
+        }
+        rq->q[i] = ep_arena_none();
+    }
+    rq->n = 0;
+}
+
+static void *ep_bucket_alloc(EpBucket *b, size_t nbytes, size_t align) {
+    EpSlot *e;
+    char *raw;
+    size_t need;
+    if (ep_bucket_ensure(b) != 0) return NULL;
+    need = nbytes;
+    if (need < sizeof(EpSlot)) need = sizeof(EpSlot);
+    raw = (char *)b->recs.alloc_local_grow(need, align);
+    if (!raw) return NULL;
+    e = (EpSlot *)raw;
+    memset(e, 0, sizeof(*e));
+    b->born++;
+    ep_live_link(b, e);
+    return e;
+}
+
+static void ep_slot_release(EpSlot *e) {
+    EpBucket *b;
+    if (!e || !e->live) return;
+    b = e->bucket;
+    if (!b) {
+        /* flat backend: no bucket */
+        e->live = 0;
+        return;
+    }
+    ep_live_unlink(b, e);
+    e->live_next = NULL;
+    e->live_prev = NULL;
+}
+
+/* ---- simple store: one current generation ---- */
+
+static int ep_store_init(EpStore *st, CCArena owner) {
+    if (!st || !owner.valid()) return -1;
+    memset(st, 0, sizeof(*st));
+    st->owner = owner;
+    ep_rq_init(&st->rq);
+    ep_bucket_reset(&st->cur);
+    st->cur.gen = 1;
+    st->ready = 1;
+    return 0;
+}
+
+static void *ep_alloc(EpStore *st, size_t nbytes, size_t align) {
+    if (!st || !st->ready) return NULL;
+    return ep_bucket_alloc(&st->cur, nbytes, align);
+}
+
+static void ep_release(EpStore *st, EpSlot *e) {
+    (void)st;
+    ep_slot_release(e);
+}
+
+static void ep_rotate(EpStore *st) {
+    uint32_t g;
+    if (!st || !st->ready) return;
+    (void)ep_bucket_try_park(&st->rq, &st->cur);
+    g = st->cur.gen + 1;
+    if (!g) g = 1;
+    ep_bucket_reset(&st->cur);
+    st->cur.gen = g;
+}
+
+static void ep_reclaim(EpStore *st) {
+    if (!st) return;
+    ep_rq_reclaim(&st->rq);
+}
+
+static void ep_store_destroy(EpStore *st) {
+    if (!st || !st->ready) return;
+    (void)ep_bucket_try_park(&st->rq, &st->cur);
+    ep_reclaim(st);
+    if (st->cur.recs.valid()) {
+        st->cur.recs.destroy();
+        st->rq.destroys++;
+        st->cur.recs = ep_arena_none();
+    }
+    st->ready = 0;
+}

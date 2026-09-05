@@ -3,6 +3,7 @@
 Header: [`ccc/script/quickjs.cch`](../cc/include/ccc/script/quickjs.cch).
 Demo: [`examples/qjs/qjsdemo.shcc`](../examples/qjs/qjsdemo.shcc).
 Normative surface: [stdlib spec — QuickJS interop](../spec/concurrent-c-stdlib-spec.md#quickjs-interop).
+Adversarial lifetime study → [`studies/quickjs_lifetime/`](../studies/quickjs_lifetime/).
 
 CC owns `main`. QuickJS is a guest in the same process. The header is
 userspace — no compiler or runtime special case — same posture as
@@ -96,9 +97,14 @@ path). Order:
 
 A source tree is compiled once (`-std=gnu11 -fPIC -shared`, plus
 `libregexp.c` / `libunicode.c` / `cutils.c` / `dtoa.c` when present;
-not `libbf.c`) into `~/.cache/concurrent-c/qjs/libccqjs_<tag>.so`.
-Override the cache with `CC_QJS_CACHE`. The tag hashes the tree and the
-host compiler, so an engine bump rebuilds.
+not `libbf.c`) into
+`~/.cache/concurrent-c/qjs/<src_id>/libccqjs_<tag>.so`.
+`<src_id>` is the engine tree’s git `HEAD` (12 hex) when that tree is a
+git checkout, otherwise a short hash of its absolute path — so switching
+`CC_QUICKJS_SRC` / pins does not require wiping the cache. Override the
+root with `CC_QJS_CACHE`. The per-`.so` tag still folds adapter text,
+host compiler, path, size/mtime, and a cheap content fingerprint of
+`VERSION` + `quickjs.h`, so an engine bump rebuilds.
 
 ## Memory
 

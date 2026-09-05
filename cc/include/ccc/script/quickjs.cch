@@ -292,20 +292,6 @@ static unsigned long cc__qjs_hash_file(unsigned long h, const char *path) {
     return h;
 }
 
-static const char *cc__qjs_arch(void) {
-#if defined(__aarch64__) || defined(__arm64__)
-    return "aarch64";
-#elif defined(__x86_64__) || defined(_M_X64)
-    return "x86_64";
-#elif defined(__i386__) || defined(_M_IX86)
-    return "i386";
-#elif defined(__arm__)
-    return "arm";
-#else
-    return "unknown";
-#endif
-}
-
 static int cc__qjs_mkdirs(const char *path) {
     char buf[384];
     size_t i;
@@ -320,13 +306,149 @@ static int cc__qjs_mkdirs(const char *path) {
     return 0;
 }
 
-static int cc__qjs_cache_dir(char *out, size_t cap) {
+static const char *cc__qjs_arch(void) {
+#if defined(__aarch64__) || defined(__arm64__)
+    return "aarch64";
+#elif defined(__x86_64__) || defined(_M_X64)
+    return "x86_64";
+#elif defined(__i386__) || defined(_M_IX86)
+    return "i386";
+#elif defined(__arm__)
+    return "arm";
+#else
+    return "unknown";
+#endif
+}
+
+/* Content fingerprint — catches in-place checkouts where size/mtime lie. */
+static unsigned long cc__qjs_hash_file_bytes(unsigned long h, const char *path,
+                                            size_t maxn) {
+    FILE *f;
+    unsigned char buf[1024];
+    size_t n, total = 0;
+    if (!path) return h * 33 + 1;
+    f = fopen(path, "rb");
+    if (!f) return h * 33 + 2;
+    while (total < maxn && (n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        size_t i;
+        if (total + n > maxn) n = maxn - total;
+        for (i = 0; i < n; i++) h = h * 33 + buf[i];
+        total += n;
+    }
+    fclose(f);
+    h = h * 33 + (unsigned long)total;
+    return h;
+}
+
+static int cc__qjs_abs_src(const char *src, char *out, size_t cap) {
+    char tmp[PATH_MAX];
+    if (!src || !src[0] || cap < 2) return -1;
+    if (realpath(src, tmp)) {
+        snprintf(out, cap, "%s", tmp);
+        return 0;
+    }
+    snprintf(out, cap, "%s", src);
+    return 0;
+}
+
+/* Resolve .git directory (handles worktree gitdir files). */
+static int cc__qjs_gitdir(const char *src, char *gitdir, size_t cap) {
+    char path[512], line[512];
+    struct stat st;
+    FILE *f;
+    size_t n;
+    snprintf(path, sizeof(path), "%.400s/.git", src);
+    if (stat(path, &st) != 0) return -1;
+    if (S_ISDIR(st.st_mode)) {
+        snprintf(gitdir, cap, "%s", path);
+        return 0;
+    }
+    f = fopen(path, "r");
+    if (!f) return -1;
+    if (!fgets(line, (int)sizeof(line), f)) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    n = strlen(line);
+    while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+    if (strncmp(line, "gitdir: ", 8) != 0) return -1;
+    if (line[8] == '/') {
+        snprintf(gitdir, cap, "%s", line + 8);
+        return 0;
+    }
+    snprintf(gitdir, cap, "%.300s/%.180s", src, line + 8);
+    return 0;
+}
+
+/* Write up to 12 hex chars of HEAD into out; return 0 on success. */
+static int cc__qjs_git_head(const char *src, char *out, size_t cap) {
+    char gitdir[512], head_path[560], ref_path[640], line[256];
+    FILE *f;
+    size_t n;
+    if (cap < 9) return -1;
+    if (cc__qjs_gitdir(src, gitdir, sizeof(gitdir)) != 0) return -1;
+    snprintf(head_path, sizeof(head_path), "%.500s/HEAD", gitdir);
+    f = fopen(head_path, "r");
+    if (!f) return -1;
+    if (!fgets(line, (int)sizeof(line), f)) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    n = strlen(line);
+    while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+    if (strncmp(line, "ref: ", 5) == 0) {
+        snprintf(ref_path, sizeof(ref_path), "%.500s/%.120s", gitdir, line + 5);
+        f = fopen(ref_path, "r");
+        if (!f) return -1;
+        if (!fgets(line, (int)sizeof(line), f)) {
+            fclose(f);
+            return -1;
+        }
+        fclose(f);
+        n = strlen(line);
+        while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+    }
+    if (n < 8) return -1;
+    if (n > 12) n = 12;
+    if (n >= cap) n = cap - 1;
+    memcpy(out, line, n);
+    out[n] = 0;
+    return 0;
+}
+
+/* Locale id: git HEAD prefix, else abs-path hash. Isolates pin switches. */
+static void cc__qjs_src_id(const char *src, char *out, size_t cap) {
+    char abs[PATH_MAX];
+    if (cap < 10) {
+        if (cap) out[0] = 0;
+        return;
+    }
+    if (cc__qjs_git_head(src, out, cap) == 0) return;
+    if (cc__qjs_abs_src(src, abs, sizeof(abs)) != 0) {
+        snprintf(out, cap, "unknown");
+        return;
+    }
+    snprintf(out, cap, "p%08lx", cc__qjs_hash(abs));
+}
+
+static int cc__qjs_cache_root(char *out, size_t cap) {
     const char *base = getenv("CC_QJS_CACHE");
     const char *home;
     if (base && base[0]) snprintf(out, cap, "%.360s", base);
     else if ((home = getenv("HOME")) && home[0])
         snprintf(out, cap, "%.320s/.cache/concurrent-c/qjs", home);
     else snprintf(out, cap, "/tmp/cc-qjs");
+    return cc__qjs_mkdirs(out);
+}
+
+/* Per-source locale: <root>/<src_id>/ — no manual wipe when switching pins. */
+static int cc__qjs_cache_dir_for_src(const char *src, char *out, size_t cap) {
+    char root[320], id[24];
+    if (cc__qjs_cache_root(root, sizeof(root)) != 0) return -1;
+    cc__qjs_src_id(src, id, sizeof(id));
+    snprintf(out, cap, "%.300s/%.20s", root, id);
     return cc__qjs_mkdirs(out);
 }
 
@@ -406,6 +528,11 @@ static void cc__qjs_read_ver(const char *src, char *ver, size_t cap) {
 static unsigned long cc__qjs_tag(const char *src) {
     unsigned long h = cc__qjs_hash(cc__qjs_adapter_text);
     const char *cc = getenv("CC");
+    char abs[PATH_MAX], id[24], p[512];
+    static const char *files[] = {
+        "quickjs.c", "quickjs.h", "libregexp.c", "libunicode.c",
+        "cutils.c", "dtoa.c", "libbf.c", "VERSION", 0};
+    int i;
     h = h * 33 + cc__qjs_hash(cc__qjs_arch());
 #if defined(__APPLE__)
     h = h * 33 + cc__qjs_hash("darwin");
@@ -413,18 +540,21 @@ static unsigned long cc__qjs_tag(const char *src) {
     h = h * 33 + cc__qjs_hash("unix");
 #endif
     h = h * 33 + cc__qjs_hash(cc && cc[0] ? cc : "cc");
-    h = cc__qjs_hash_file(h, src);
-    {
-        char p[512];
-        static const char *files[] = {
-            "quickjs.c", "quickjs.h", "libregexp.c", "libunicode.c",
-            "cutils.c", "dtoa.c", "libbf.c", "VERSION", 0};
-        int i;
-        for (i = 0; files[i]; i++) {
-            snprintf(p, sizeof(p), "%.400s/%.80s", src, files[i]);
-            h = cc__qjs_hash_file(h, p);
-        }
+    if (cc__qjs_abs_src(src, abs, sizeof(abs)) == 0)
+        h = h * 33 + cc__qjs_hash(abs);
+    else
+        h = cc__qjs_hash_file(h, src);
+    cc__qjs_src_id(src, id, sizeof(id));
+    h = h * 33 + cc__qjs_hash(id);
+    for (i = 0; files[i]; i++) {
+        snprintf(p, sizeof(p), "%.400s/%.80s", src, files[i]);
+        h = cc__qjs_hash_file(h, p);
     }
+    /* Cheap content check on the two files that always define the engine. */
+    snprintf(p, sizeof(p), "%.400s/VERSION", src);
+    h = cc__qjs_hash_file_bytes(h, p, 256);
+    snprintf(p, sizeof(p), "%.400s/quickjs.h", src);
+    h = cc__qjs_hash_file_bytes(h, p, 4096);
     return h;
 }
 
@@ -435,7 +565,7 @@ static int cc__qjs_compile(const char *src, const char *so) {
     FILE *probe;
     int rc;
     if (!cc || !cc[0]) cc = "cc";
-    if (cc__qjs_cache_dir(dir, sizeof(dir)) != 0) {
+    if (cc__qjs_cache_dir_for_src(src, dir, sizeof(dir)) != 0) {
         snprintf(cc__qjs_errbuf, sizeof(cc__qjs_errbuf),
                  "qjs: cache dir is not writable");
         return -1;
@@ -568,7 +698,7 @@ static int cc__qjs_load(void) {
                  "CC_QUICKJS_SRC / CC_LIBQJS");
         return cc__qjs_load_rc = -1;
     }
-    if (cc__qjs_cache_dir(dir, sizeof(dir)) != 0) {
+    if (cc__qjs_cache_dir_for_src(src, dir, sizeof(dir)) != 0) {
         snprintf(cc__qjs_errbuf, sizeof(cc__qjs_errbuf),
                  "qjs: cache dir is not writable");
         return cc__qjs_load_rc = -1;
