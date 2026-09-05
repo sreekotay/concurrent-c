@@ -261,7 +261,12 @@ differential report.
   forms, `?>`, `@errhandler`, `@err`, `@destroy`, `@defer`. This is the
   highest-count construct family and the worst diagnostics today.
 - **M3 UFCS.** The declaration index, method-set resolution, type hooks,
-  `Type.fn`, generics and factories, `@variant`.
+  `Type.fn`, generics and factories, `@variant`. A generic instance's C
+  fragment is the family factory's `@emit` template when the index can
+  fill every slot; a factory whose body computes part of the fragment
+  (the stdlib Vec, Map and ArrayMap factories today) needs the body run,
+  which is M7's comptime seam. Until then such an instance is a
+  diagnostic at the site, never a guessed fragment.
 - **M4 Strings.** Templates, `@scratch`, slices, print family, `@slice`.
 - **M5 Concurrency.** Closures and captures, spawn, channels, `@parallel`
   in all forms, deadlines, exclusive and turnstile.
