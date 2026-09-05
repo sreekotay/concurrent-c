@@ -101,6 +101,10 @@ static CcExpr* lw_member(CcLowerer* L, CcExpr* a, const char* name, CcSpan sp) {
     return cc_expr_member(a, cc_slice_from_buffer((char*)name, strlen(name)), false, sp, L->arena);
 }
 
+static CcExpr* lw_member_s(CcLowerer* L, CcExpr* a, CCSlice name, CcSpan sp) {
+    return cc_expr_member(a, name, false, sp, L->arena);
+}
+
 static CcExpr* lw_not(CcLowerer* L, CcExpr* a, CcSpan sp) {
     return cc_expr_unary(CC_OP_NOT, a, sp, L->arena);
 }
@@ -232,8 +236,27 @@ static void lw_banner(CcLowerer* L) {
     *decls = with;
 }
 
+/* Declarations the index consumed and C never sees: `@typeview`. */
+static void lw_drop_cc_only(CcLowerer* L) {
+    CcDeclList* decls = &L->unit->decls;
+    CcDeclList with = vec_new::[CcDeclRef](L->arena);
+    size_t n = decls->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *decls->get_ptr(i);
+        bool drop = false;
+        @switch (d->k) {
+            case .typeview: drop = true; break;
+            default: break;
+        }
+        if (!drop) with.push(d);
+    }
+    *decls = with;
+}
+
 static void CcLowerer_lower_unit(CcLowerer* L) {
     CcLowerer_results(L);
+    lw_drop_cc_only(L);   /* after the steps: the index reads faces off the unit's declarations */
     lw_banner(L);
 }
 

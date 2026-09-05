@@ -2030,6 +2030,18 @@ static void cc__load_includes_of(CcIndex *ix, const CcLexFile *f, const CcIndexO
     for (i = 0; i < n; i++) {
         CcBuf searched;
         const char *found;
+        if (cc__has_suffix(refs[i].path, ".h")) {
+            /* `<x.h>` names a lowered header when `x.cch` is on the path: index
+             * its source. Otherwise it is a C header and stays C. */
+            CcIncludeRef src = refs[i];
+            size_t pl = strlen(refs[i].path);
+            src.path = cc_arena_printf(ix->arena, "%.*s.cch", (int)(pl - 2), refs[i].path);
+            cc_buf_init(&searched);
+            found = cc__resolve_include(ix, f->path, &src, opts, &searched);
+            cc_buf_free(&searched);
+            if (found) cc__load_header(ix, found, opts, popts);
+            continue;
+        }
         if (!cc__has_suffix(refs[i].path, ".cch")) continue; /* C headers stay C */
         cc_buf_init(&searched);
         found = cc__resolve_include(ix, f->path, &refs[i], opts, &searched);
