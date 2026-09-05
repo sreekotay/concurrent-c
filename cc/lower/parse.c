@@ -2215,11 +2215,15 @@ static CcExpr *parse_postfix(P *p, CcExpr *e) {
             }
             name = tok_name(p, p->i);
             adv(p);
-            if (!arrow && (at_p(p, CC_P_LPAREN) || at_p2(p, CC_P_COLONCOLON, CC_P_LBRACKET))) {
+            /* `x.m(args)` and `p->m(args)` are both UFCS sites; `arrow` records
+             * the spelling. Whether `m` is really a field (a function pointer
+             * call, plain C) is the index's question, not the parser's. */
+            if (at_p(p, CC_P_LPAREN) || at_p2(p, CC_P_COLONCOLON, CC_P_LBRACKET)) {
                 CcExpr *x;
-                int type_scoped = (e->kind == CC_E_IDENT && name_is_type(p, e->name)) || e->kind == CC_E_TYPE_ARG;
+                int type_scoped = !arrow && ((e->kind == CC_E_IDENT && name_is_type(p, e->name)) || e->kind == CC_E_TYPE_ARG);
                 x = cc_expr_new(p->a, type_scoped ? CC_E_TYPE_SCOPED : CC_E_UFCS, span2(first, first));
                 x->name = name;
+                x->arrow = arrow;
                 if (type_scoped) {
                     if (e->kind == CC_E_TYPE_ARG) x->type = e->type;
                     else x->type = type_named(p, e->name, e->span.first), x->type->span = e->span;

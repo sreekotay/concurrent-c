@@ -263,7 +263,7 @@ struct CcExpr {
     CcOp op;                  /* UNARY / BINARY / ASSIGN */
     CcExpr *a, *b, *c;        /* operands: unary a; binary a,b; ternary a,b,c; call a=callee; index a,b; member a; cast a; ufcs a=recv */
     CcName name;              /* IDENT; MEMBER field; UFCS/TYPE_SCOPED/GENERIC_FN method or function; VARIANT_LIT arm; CALL_MODE mode ("blocking"...) */
-    int arrow;                /* MEMBER: a->name */
+    int arrow;                /* MEMBER: a->name; UFCS: recv->method(args) */
     CcExprList args;          /* CALL / UFCS / TYPE_SCOPED / GENERIC_FN / CREATE / VARIANT_LIT / SLICE_LIT */
     CcTypeList targs;         /* UFCS / GENERIC_FN: ::[T...] */
     CcType *type;             /* CAST / SIZEOF_TYPE / COMPOUND / TYPE_SCOPED receiver type */
