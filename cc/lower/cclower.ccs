@@ -28,6 +28,7 @@
 #include "parse_decls.cch"
 #include "parse_walk.cch"
 #include "print_impl.cch"
+#include "lower_impl.cch"
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -373,8 +374,69 @@ static bool write_product(const char* out_path, CCSlice text, CcSrcMap* map, CCA
     return ok;
 }
 
+/* --lower: parse with the index's typedef names, lower, print. */
+/* `-I DIR` search path for the index (default: cc/include); lifetime: the tool arena */
+static CcNameList g_include_dirs;
+
+static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena a) {
+    CcParseOpts opts;
+    bool ok;
+    CcIndex* ix;
+    CcLowerOpts lo;
+    CcLowerer lw;
+    CCSlice pathsl = cc_slice_from_buffer((char*)path, strlen(path));
+    L->arena = a;
+    L->ds = CcDiags_new(a);
+    L->path = path;
+    L->src = read_whole_file(path, a, &ok);
+    if (!ok) {
+        fprintf(stderr, "cclower: cannot read %s: %s\n", path, strerror(errno));
+        return false;
+    }
+    {
+        /* quoted includes resolve against the unit's own directory */
+        size_t slash = pathsl.len;
+        CCSlice qdir = cc_slice_empty();
+        while (slash > 0 && pathsl.ptr[slash - 1] != '/') slash--;
+        if (slash) qdir = cc_slice_from_buffer((char*)pathsl.ptr, slash - 1);
+        ix = cc_index_new(g_include_dirs, qdir, &L->ds, a);
+    }
+    opts.mode = mode_for(path);
+    opts.known_types = known;
+    {
+        CcDiags scratch = CcDiags_new(a);
+        CcTape tape = cc_lex(pathsl, L->src, &scratch, a);
+        ix->preload_includes(&tape, opts);
+    }
+    {
+        CcNameList all = vec_new::[CCSlice](a);
+        CcNameList from_ix = ix->known_types();
+        size_t i;
+        size_t n = known.len();
+        size_t m = from_ix.len();
+        for (i = 0; i < n; i++) {
+            CCSlice nm = *known.get_ptr(i);
+            all.push(nm);
+        }
+        for (i = 0; i < m; i++) {
+            CCSlice nm = *from_ix.get_ptr(i);
+            all.push(nm);
+        }
+        opts.known_types = all;
+    }
+    L->unit = cc_parse_unit(pathsl, L->src, opts, &L->ds, a);
+    ix->add_unit(L->unit, opts.mode == CC_UNIT_HEADER);
+    if (L->ds.has_errors()) return true;   /* parse errors: print nothing but the diagnostics */
+    lo.line_directives = true;
+    lo.parallel_off = false;
+    lo.per_tu = false;
+    lw = cc_lowerer_new(L->unit, ix, lo, &L->ds);
+    lw.lower_unit();
+    return true;
+}
+
 static int run_print(const char* path, CcNameList known, const char* out_path, bool line_directives,
-                     bool header_mode) {
+                     bool header_mode, bool lower) {
     CCArena a = cc_arena_heap(megabytes(256)) @destroy;
     Loaded L;
     CcPrintOpts po;
@@ -382,7 +444,9 @@ static int run_print(const char* path, CcNameList known, const char* out_path, b
     int problems;
     uint32_t n_parse_errors;
     CCSlice text;
-    if (!load(&L, path, known, a)) return 2;
+    if (lower) { if (!load_lowered(&L, path, known, a)) return 2; }
+    else if (!load(&L, path, known, a)) return 2;
+    if (lower && L.ds.has_errors()) { print_diags(&L); return 1; }
     n_parse_errors = L.ds.n_errors;
     po.identity = false;
     po.line_directives = line_directives;
@@ -418,6 +482,7 @@ static void usage(void) {
     fprintf(stderr,
             "usage: cclower --identity [--known-types F] FILE...\n"
             "       cclower --print [--known-types F] [--no-line] [--header] [-o OUT] FILE\n"
+            "       cclower --lower [--known-types F] [-I DIR]... [-o OUT] FILE\n"
             "       cclower --is-plain-c [--known-types F] FILE\n");
     exit(2);
 }
@@ -432,12 +497,24 @@ int main(int argc, char** argv) {
     const char* out_path = NULL;
     bool line_directives = true;
     bool header_mode = false;
+    bool lower = false;
     int i;
     int rc = 0;
     int n_files = 0;
+    bool custom_dirs = false;
+    g_include_dirs = vec_new::[CCSlice](tool);
+    g_include_dirs.push(CC_SLICE_LIT("cc/include"));
     for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-I") == 0 && i + 1 < argc) {
+            CCSlice dir = cc_slice_from_buffer(argv[i + 1], strlen(argv[i + 1]));
+            if (!custom_dirs) { g_include_dirs.clear(); custom_dirs = true; }
+            g_include_dirs.push(dir);
+            i++;
+            continue;
+        }
         if (strcmp(argv[i], "--identity") == 0) mode = M_IDENTITY;
         else if (strcmp(argv[i], "--print") == 0) mode = M_PRINT;
+        else if (strcmp(argv[i], "--lower") == 0) { mode = M_PRINT; lower = true; }
         else if (strcmp(argv[i], "--is-plain-c") == 0) mode = M_PLAIN;
         else if (strcmp(argv[i], "--known-types") == 0 && i + 1 < argc) known_path = argv[++i];
         else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) out_path = argv[++i];
@@ -448,12 +525,12 @@ int main(int argc, char** argv) {
     if (mode == M_NONE) usage();
     if (known_path) read_known_types(known_path, &known, tool);
     for (i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--known-types") == 0 || strcmp(argv[i], "-o") == 0) { i++; continue; }
+        if (strcmp(argv[i], "--known-types") == 0 || strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "-I") == 0) { i++; continue; }
         if (argv[i][0] == '-' && argv[i][1]) continue;
         n_files++;
         switch (mode) {
         case M_IDENTITY: rc |= run_identity(argv[i], known); break;
-        case M_PRINT: rc |= run_print(argv[i], known, out_path, line_directives, header_mode); break;
+        case M_PRINT: rc |= run_print(argv[i], known, out_path, line_directives, header_mode, lower); break;
         case M_PLAIN: rc |= run_is_plain_c(argv[i], known); break;
         default: break;
         }

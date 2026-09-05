@@ -586,6 +586,7 @@ typedef struct CcTopStmt { CcStmt* s; } CcTopStmt;                        /* a s
     task_doc:        CcTaskDoc;
     macro_call:      CcMacroCall;
     stmt:            CcTopStmt;
+    raw:             CCSlice;       /* verbatim C text from a lowering (spec blocks, #line pins); nothing else creates it */
 };
 
 struct CcDecl {

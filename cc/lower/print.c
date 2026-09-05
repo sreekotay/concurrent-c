@@ -432,7 +432,8 @@ static int stmt_is_cc(const CcStmt *s) {
            (s->kind == CC_S_SWITCH && s->is_variant_switch);
 }
 static int decl_is_cc(const CcDecl *d) {
-    return (d->kind >= CC_D_TYPEHOOKS && d->kind != CC_D_MACRO_CALL && d->kind != CC_D_STMT) ||
+    return (d->kind >= CC_D_TYPEHOOKS && d->kind != CC_D_MACRO_CALL && d->kind != CC_D_STMT &&
+            d->kind != CC_D_PRAGMA_CC) ||
            d->destroy || d->detach ||
            (d->specs & CC_F_CC_MASK) != 0;
 }
@@ -1300,15 +1301,21 @@ static void pr_decl(Pr *p, const CcDecl *d) {
         }
         if (d->pp_skipped_region || d->span.last > d->tok || d->span.first < d->tok)
             pr_span(p, d->span, "preprocessor line");
-        else if (d->tok < p->f->n_toks && p->f->toks[d->tok].kind == CC_TK_PP)
+        else if (d->tok < p->f->n_toks && p->f->toks[d->tok].kind == CC_TK_PP) {
+            /* `#!ccc ...` is the unit header, not a directive: nothing in C.
+             * The pin still advances so the next line is attributed. */
+            const CcToken *t = &p->f->toks[d->tok];
+            if (t->len >= 2 && p->f->src[t->off] == '#' && p->f->src[t->off + 1] == '!') break;
             pr_tok_text(p, d->tok);
-        else
+        } else
             pr_span(p, d->span, "preprocessor line");
         break;
     case CC_D_STMT:
         if (d->body) pr_stmt_text(p, d->body);
         else pr_span(p, d->span, "statement");
         break;
+    case CC_D_PRAGMA_CC:
+        break;   /* `#pragma(@parallel) off` and kin steer the lowering; nothing in C */
     case CC_D_MACRO_CALL:
         if (d->expr) pr_expr_p(p, d->expr, PREC_COMMA);
         else pr_span(p, d->span, "macro invocation");

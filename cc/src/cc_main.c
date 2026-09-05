@@ -3970,17 +3970,21 @@ static int cc__clean_known_types(char* dst, size_t cap) {
 
 /* Lower `in_path` to C with the clean lowerer into `c_out`. */
 static int cc__run_clean_lowerer(const char* in_path, const char* c_out) {
-    char tool[PATH_MAX], known[PATH_MAX];
-    char* argv[10];
+    char tool[PATH_MAX], known[PATH_MAX], incdir[PATH_MAX];
+    char* argv[12];
     int argc = 0, rc;
     if (cc__find_clean_tool("cclower_cc", tool, sizeof(tool)) != 0) {
         fprintf(stderr, "cc: clean lowerer not built (out/cc/bin/cclower_cc missing): run `make -C cc lower-cc`\n");
         return -1;
     }
     if (cc__clean_known_types(known, sizeof(known)) != 0) return -1;
+    if (!g_repo_root[0]) { fprintf(stderr, "cc: clean lowerer: no repository root for cc/include\n"); return -1; }
+    snprintf(incdir, sizeof(incdir), "%s/cc/include", g_repo_root);
     argv[argc++] = tool;
-    argv[argc++] = (char*)"--print";
+    argv[argc++] = (char*)"--lower";
     argv[argc++] = (char*)in_path;
+    argv[argc++] = (char*)"-I";
+    argv[argc++] = incdir;
     argv[argc++] = (char*)"--known-types";
     argv[argc++] = known;
     argv[argc++] = (char*)"-o";
