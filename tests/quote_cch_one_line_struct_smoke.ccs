@@ -27,8 +27,13 @@ int main(void) {
     ix.rows->insert(CC_SLICE_LIT("r"), &row);
     ix.counts->insert(CC_SLICE_LIT("r"), 3);
     OneLineRowRef* got = ix.rows->get_ptr(CC_SLICE_LIT("r"));
-    printf("%d %d %d %d %d %d %d\n", (int)bag.items.len(), (int)bag.name.len(),
-           (int)anon.tag.len(), (int)two.a.len(), (int)two.b.len(),
-           got && *got ? (*got)->v : -1, (int)ix.counts->len());
+    size_t n_items = bag.items.len();
+    size_t n_name = bag.name.len();
+    size_t n_tag = anon.tag.len();
+    size_t n_a = two.a.len();
+    size_t n_b = two.b.len();
+    size_t n_counts = ix.counts->len();
+    printf("%zu %zu %zu %zu %zu %d %zu\n", n_items, n_name, n_tag, n_a, n_b,
+           got && *got ? (*got)->v : -1, n_counts);
     return 0;
 }
