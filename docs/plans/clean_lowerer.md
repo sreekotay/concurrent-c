@@ -268,8 +268,15 @@ differential report.
 - **M6 Async.** Poll-task bodies as today; the state machine after parity.
 - **M7 Compile time and TU.** Comptime seam on AST spans, `@grammar`,
   header mode, `.shcc`, unit headers and pragmas.
-- **M8 Switch-over.** Default flip, delete `cc/shadow`, the text engine,
-  the seeds and the promote scripts, and the four cleanup documents.
+- **M8 Self-lowering and switch-over.** The gate is a fixed point: the
+  current compiler builds the clean lowerer; that binary lowers its own
+  sources; the host compiler builds the result; that second binary lowers
+  the same sources again and the two products are byte-identical. Only the
+  second product becomes the seed. With that, `cc_test`, examples, real
+  projects and `stress/break` green on the clean lowerer as the default,
+  delete `cc/shadow`, the text engine, the old seeds and promote scripts,
+  and the four cleanup documents. Nothing merges to the default branch
+  as the shipped lowerer before this gate passes.
 
 M0 and M1 carry no risk to the shipping compiler and are where work
 starts.
