@@ -54,14 +54,17 @@ typedef enum CcTypeKind {
     CC_T_FUNC,        /* T (params)    base = return, params */
     CC_T_STRUCT,      /* struct/union [tag] { fields } or forward reference; fields NULL when not a definition */
     CC_T_ENUM,        /* enum [tag] { enumerators } */
-    CC_T_TYPEOF,      /* __typeof__(expr) / typeof(T) */
+    CC_T_TYPEOF,      /* __typeof__(expr) / typeof(T); also a comptime reflection member used as a type (`m.ret r = ...`) */
     CC_T_ATOMIC,      /* _Atomic(T) */
     /* Concurrent-C */
     CC_T_RESULT,      /* T!>(E) / T?>(E)    base = T, err = E, optional = ?> */
     CC_T_SLICE,       /* T[:] T[n:] T[:!] T[:0] T[:0!]   base = T, fixed = n or NULL, unique, sentinel */
     CC_T_CHAN,        /* T[~cap topo dir]   base = T, cap = expr or NULL, topology text, dir = '<' or '>' , ordered */
     CC_T_GENERIC,     /* Name::[args]       name, args */
-    CC_T_SCOPED       /* @scoped type T::[..]  (declaration form; see CC_D_SCOPED_TYPE) */
+    CC_T_SCOPED,      /* @scoped type T::[..]  (declaration form; see CC_D_SCOPED_TYPE) */
+    CC_T_AUTO,        /* @auto(src)  in `@auto(src) name(arena) @destroy;`: typeof_expr = src */
+    CC_T_MACRO,       /* NAME(args) used as a type (a macro expanding to a type, e.g. CCRes(T, E)): name, args */
+    CC_T_VALUE        /* a value in a generic / macro type argument list (`SmallVec::[int, 8]`): value */
 } CcTypeKind;
 
 /* Storage class, qualifiers and function specifiers, as bits. */
@@ -76,7 +79,10 @@ enum {
 
 /* An attribute as written: `__attribute__((...))`, `_Alignas(...)`, `as: name`,
  * `@tag:NAME`, or a CC declaration attribute. Kept as its token span plus a
- * parsed name so lowering can look for the ones it knows. */
+ * parsed name so lowering can look for the ones it knows. Two more spellings
+ * the corpus needs: a macro used as a specifier (`static_inline void f()`:
+ * name = the macro's name, value NULL) and a preprocessor line between
+ * specifiers (name = "#", span = the line). */
 typedef struct CcAttr {
     CcSpan span;
     CcName name;        /* "__attribute__", "_Alignas", "as", "tag", ... */
@@ -90,6 +96,8 @@ typedef struct CcField {
     CcName name;        /* NULL for an anonymous struct/union member */
     CcExpr *bit_width;  /* NULL unless a bit-field */
     CcAttr *attrs;
+    int is_pp;          /* a preprocessor line inside the member list: pp_tok, nothing else set */
+    uint32_t pp_tok;
     struct CcField *next;
 } CcField;
 
@@ -97,6 +105,9 @@ typedef struct CcEnumerator {
     CcSpan span;
     CcName name;
     CcExpr *value;      /* NULL when implicit */
+    int is_pp;          /* a preprocessor line inside the enumerator list: pp_tok, nothing else set */
+    uint32_t pp_tok;
+    CcStmt *comptime;   /* a `@comptime for` / `@comptime if` inside the list that emits enumerators */
     struct CcEnumerator *next;
 } CcEnumerator;
 
@@ -107,6 +118,8 @@ struct CcParam {
     CcExpr *default_value; /* CC: `int x = 1` parameter default, else NULL */
     CcAttr *attrs;
     int is_variadic;
+    int is_pp;          /* a preprocessor line inside the parameter list: pp_tok, nothing else set */
+    uint32_t pp_tok;
 };
 
 struct CcType {
@@ -144,6 +157,12 @@ struct CcType {
     CcName topology;    /* "1:1", "N:1", NULL */
     int dir;            /* '<' or '>' */
     int ordered;
+    int sync;           /* T[~ ... sync ...]: blocking channel */
+    CcName chan_policy; /* T[~cap dir, Policy]: the drop policy name, or NULL */
+    int owned;          /* T[~cap owned { hooks }]: owned channel; chan_hooks is the hook initializer list */
+    CcInit *chan_hooks;
+    /* CC_T_VALUE */
+    CcExpr *value;
     /* CC_T_GENERIC */
     CcTypeList args;
     CcAttr *attrs;
@@ -168,7 +187,7 @@ typedef enum CcExprKind {
     CC_E_SIZEOF_TYPE, /* sizeof(T) / _Alignof(T) */
     CC_E_COMPOUND,    /* (T){ init } */
     CC_E_GENERIC_SEL, /* _Generic(e, T: e, default: e) */
-    CC_E_STMT_EXPR,   /* ({ stmts }) GNU */
+    CC_E_STMT_EXPR,   /* ({ stmts }) GNU; also a bare `{ stmts }` block handed to a macro argument (`repeat8({ ... })`) */
     CC_E_COMMA,       /* a, b */
     /* Concurrent-C */
     CC_E_UFCS,        /* recv.method(args) or recv.method::[targs](args); recv NULL for a bare `.method` is not allowed */
@@ -177,11 +196,13 @@ typedef enum CcExprKind {
     CC_E_UNWRAP,      /* e !>          (statement or expression position; handler = errhandler) */
     CC_E_UNWRAP_BODY, /* e !> body  /  e !>(e) body   body is a CcStmt (block or single) */
     CC_E_UNWRAP_OR,   /* e ?> default  /  e ?>(e) default */
-    CC_E_UNWRAP_DESTROY, /* e !> @destroy [{ D }]  (declaration initializer form) */
+    CC_E_UNWRAP_DESTROY, /* e !> @destroy [{ D }]  (declaration initializer form; the enclosing CcDecl also
+                            gets destroy = 1 and destroy_body = the block, so lifetime sugar has one home) */
     CC_E_TEMPLATE,    /* @string(`...`, arena) / @string(policy, `...`, arena) / @string(`...`) / @string(expr, arena) */
     CC_E_SLICE_LIT,   /* @slice("...") */
     CC_E_SCRATCH,     /* @scratch / @scratch(N) as an arena operand */
-    CC_E_CLOSURE,     /* (params) => [captures] body   ; body is a block or an expression */
+    CC_E_CLOSURE,     /* (params) => [captures] body   ; body is a CC_S_BLOCK, or a CC_S_EXPR statement wrapping
+                         the expression body (`x => x + 1`); a lone untyped parameter needs no parentheses */
     CC_E_AWAIT,       /* @await e */
     CC_E_COMPTIME,    /* @comptime(e) value position */
     CC_E_CREATE,      /* @create(args) / name@(args) constructor sugar; callee type from context */
@@ -189,7 +210,9 @@ typedef enum CcExprKind {
     CC_E_VARIANT_LIT, /* .arm(args) / .arm  as a value (variant construction) */
     CC_E_CALL_MODE,   /* @blocking e / @nonblocking e / @noblock e (call-site mode) */
     CC_E_MOVE,        /* cc_move(x) is an ordinary call; this kind is reserved */
-    CC_E_RANGE        /* lo..hi (only inside for-in / @parallel for headers) */
+    CC_E_RANGE,       /* lo..hi (only inside for-in / @parallel for headers) */
+    CC_E_PP,          /* a preprocessor line inside an argument / _Generic arm list: tok */
+    CC_E_TYPE_ARG     /* a type in argument position: offsetof(T, m), cc_ok(T, v), cc_unwrap_as(r, T): type */
 } CcExprKind;
 
 typedef enum CcOp {
@@ -209,8 +232,11 @@ typedef struct CcTplPart {
     CcSpan span;              /* within the template token; span.first == span.last == the template token */
     uint32_t off, len;        /* byte range of the part inside the file */
     int is_slot;
+    int is_verbatim;          /* `${{ raw }}` span: a literal run whose bytes carry no escapes */
     CcName tag;               /* $~tag{...} */
     CcExpr *expr;             /* parsed slot expression (parsed from the slot text) */
+    CcLexFile *file;          /* the slot's own token array: `expr` spans index it; its
+                                 offsets, src and line table are the enclosing file's */
     struct CcTplPart *next;
 } CcTplPart;
 
@@ -219,12 +245,15 @@ typedef struct CcCapture {
     CcName name;
     int by_ref;               /* [&x] */
     int is_safe;              /* [@safe &x] */
+    CcExpr *init;             /* [p = &x]: an init-capture, else NULL */
     struct CcCapture *next;
 } CcCapture;
 
 typedef struct CcGenericSelArm {
     CcType *type;             /* NULL for default */
     CcExpr *expr;
+    int is_pp;                /* a preprocessor line between arms: pp_tok, nothing else set */
+    uint32_t pp_tok;
     struct CcGenericSelArm *next;
 } CcGenericSelArm;
 
@@ -275,12 +304,15 @@ struct CcInit {
     CcExpr *expr;             /* scalar initializer, or NULL when `list` is used */
     CcInitList list;          /* { ... } */
     int is_list;
+    int is_pp;                /* a preprocessor line inside an initializer list: pp_tok, nothing else set */
+    uint32_t pp_tok;
 };
 
 /* ---- Statements ------------------------------------------------------- */
 
 typedef enum CcStmtKind {
-    CC_S_EXPR = 1,    /* e; (e may be NULL for `;`) */
+    CC_S_EXPR = 1,    /* e; (e may be NULL for `;`); a macro loop `FOREACH(m, k, v) { ... }` / `try { ... }` keeps
+                         its block in `body` (has_braces) */
     CC_S_DECL,        /* a declaration in statement position: decl */
     CC_S_BLOCK,       /* { stmts } */
     CC_S_IF,          /* if (cond) then [else] */
@@ -301,7 +333,8 @@ typedef enum CcStmtKind {
     CC_S_ERRHANDLER,  /* @errhandler(E e) stmt-or-block */
     CC_S_ERR_FWD,     /* @err(e); */
     CC_S_UNWRAP,      /* e !>;  and  e !> body;  as a statement (expr is CC_E_UNWRAP / CC_E_UNWRAP_BODY) */
-    CC_S_FOR_IN,      /* for (x in xs) / @for (&x in xs) / @for (a, b in xs, ys) / for (i in lo..hi) */
+    CC_S_FOR_IN,      /* for (x in xs) / @for (&x in xs) / @for (a, b in xs, ys) / for (i in lo..hi);
+                         a `} !>` / `} !>(e) body` tail after the block is par_tail (as for @parallel) */
     CC_S_PARALLEL,    /* @parallel [spawn] [(pred)] [seq (cond)] { arms }  and  CCParallel h = @parallel {...}  (as expr: see CC_E_... no: statement with optional bind) */
     CC_S_PARALLEL_FOR,/* @parallel for (i in lo..hi) body  /  @parallel [seq (c)] wait (ts) for (i in lo..hi) [worker (w)] [cache (a, b)] body */
     CC_S_PARALLEL_DEST,/* @parallel(h) { stmts } */
@@ -322,7 +355,7 @@ typedef struct CcParallelArm {
     CcSpan span;
     CcName target;            /* `a = expr;` arm: a; NULL for `expr !>;` or @serial */
     CcExpr *expr;             /* the arm expression (NULL for @serial) */
-    CcStmt *serial;           /* CC_S_SERIAL block */
+    CcStmt *serial;           /* CC_S_SERIAL block, or any other statement written as an arm (a loop, a declaration) */
     int unwrap;               /* `expr !>;` */
     struct CcParallelArm *next;
 } CcParallelArm;
@@ -331,12 +364,15 @@ struct CcStmt {
     CcStmtKind kind;
     CcSpan span;
     CcExpr *expr;             /* EXPR; IF/WHILE/DO/SWITCH cond; RETURN value; CASE value (lo); FOR cond; WITH_DEADLINE deadline; STAGE gate; UNWRAP; COMPTIME_IF cond */
-    CcExpr *expr2;            /* FOR step; CASE hi (range); FOR_IN iterable (or range lo..hi as CC_E_RANGE) */
+    CcExpr *expr2;            /* FOR step; CASE hi (range); FOR_IN iterable (or range lo..hi as CC_E_RANGE) — the same
+                                 node as exprs.items[0]; a parenthesised parameter list as a comptime sequence is a
+                                 CC_E_TYPE_ARG over a CC_T_FUNC */
     CcDecl *decl;             /* DECL; FOR init decl */
     CcExpr *init_expr;        /* FOR init expression */
     CcStmt *body;             /* IF then; loops; SWITCH; LABEL/CASE inner; DEFER; ERRHANDLER; blocks: use `stmts` */
     CcStmt *else_body;        /* IF else; COMPTIME_IF else */
-    CcStmtList stmts;         /* BLOCK / SERIAL / STAGE / WITH* / CLOSING / SPAWN_BLOCK / MODE_BLOCK / UNSAFE / COMPTIME_* bodies */
+    CcStmtList stmts;         /* BLOCK / SERIAL / STAGE / WITH* / CLOSING / SPAWN_BLOCK / MODE_BLOCK / UNSAFE / COMPTIME_* bodies;
+                                 FOR: the declarations after the first in `for (int i = 0, j = n; ...)`, as CC_S_DECL */
     CcName name;              /* GOTO/LABEL; DEFER name; CANCEL_DEFER; ERRHANDLER binder; ERR_FWD binder; FOR_IN first binder; WITH_DEADLINE `as h`; MODE_BLOCK mode; PARALLEL bind name (CCParallel h = ...) */
     CcName name2;             /* FOR_IN second binder (@for (a, b in ...)) */
     CcType *type;             /* ERRHANDLER error type; PARALLEL bind type */
@@ -350,6 +386,7 @@ struct CcStmt {
     int is_variant_switch;    /* @switch */
     /* FOR_IN */
     int by_ref;               /* @for (&x in xs) */
+    int by_ref2;              /* @for (a, &b in xs, ys): the second binder is by reference */
     int is_at_for;            /* @for vs for */
     /* PARALLEL */
     CcParallelArm *arms;
@@ -360,7 +397,9 @@ struct CcStmt {
     CcName par_worker;        /* worker (w) */
     CcExprList par_cache;     /* cache (a, b) */
     CcExpr *par_dest;         /* @parallel(h) */
-    CcExpr *par_tail;         /* the `!>.wait()!>` chain after the block, as an expression over the join, or NULL */
+    CcExpr *par_target;       /* `lvalue = @parallel { ... }`: the assigned join target (an existing variable) */
+    CcExpr *par_tail;         /* the `!>.wait()!>` chain after the block, as an expression over the join, or NULL;
+                                 the join is a CC_E_IDENT named "@parallel" at the statement's first token */
     /* CLOSING */
     CcExpr *closing_spawn;    /* @closing(tx) spawn(...) — the spawn call */
     int has_braces;
@@ -383,19 +422,32 @@ typedef enum CcDeclKind {
     CC_D_GRAMMAR,     /* @grammar(engine) Name {~~~~ body ~~~~} — body kept as a span (fenced, opaque by design) */
     CC_D_GENERIC_FACTORY, /* CC_GENERIC_FACTORY(Name) { body } / _EXTEND */
     CC_D_COMPTIME_FN, /* @comptime T name(params) { body } */
-    CC_D_COMPTIME_BLOCK, /* @comptime { } at file scope */
+    CC_D_COMPTIME_BLOCK, /* @comptime { } at file scope; also `@comptime for (...) { }` and `@comptime expr;` at file
+                            scope, whose single statement is `body` */
     CC_D_COMPTIME_IF, /* @comptime if (c) { decls } [else { decls }] */
     CC_D_SCOPED_TYPE, /* @scoped type Name::[T]; */
     CC_D_PRAGMA_CC,   /* #pragma(@parallel) off — parsed from a PP token */
     CC_D_LINK,        /* @link("lib") */
-    CC_D_TASK_DOC     /* a CCDoc `@task` comment attached to the following function (kept as span) */
+    CC_D_TASK_DOC,    /* a CCDoc `@task` comment attached to the following function (kept as span) */
+    CC_D_MACRO_CALL,  /* NAME(args) or NAME at file scope with no declarator (a macro invocation
+                         such as CC_DECL_RESULT_SPEC(...)); expr is the call / ident, `;` optional */
+    CC_D_STMT         /* a top-level statement in a script (.shcc): body */
 } CcDeclKind;
 
-typedef struct CcHookEntry {   /* .destroy = fn / .ufcs = { ... } / niche = { ... } */
+typedef struct CcViewItem {    /* one item of a @typeview entry: `name`, `^name`, `out_*`, `(Type)name` */
+    CcSpan span;
+    CcName name;               /* the item spelling; `*` inside means a glob */
+    int deny;                  /* `^name` */
+    CcType *cast;              /* `(Type)name` */
+    struct CcViewItem *next;
+} CcViewItem;
+
+typedef struct CcHookEntry {   /* .destroy = fn / .ufcs = { ... } / niche = { ... } / as: a, b; */
     CcSpan span;
     CcName field;
     CcExpr *value;             /* an expression, or NULL when `body` is a block */
     CcStmt *body;
+    CcViewItem *items;         /* @typeview entries: the `key: items;` list */
     struct CcHookEntry *next;
 } CcHookEntry;
 
@@ -413,7 +465,8 @@ struct CcDecl {
     CcAttr *attrs;
     CcType *type;              /* VAR: the variable's type; FUNC: the CC_T_FUNC type; TYPEDEF: the aliased type; TAGGED: the tag type; TYPEHOOKS/TYPEVIEW: the target type */
     CcName name;               /* VAR/FUNC/TYPEDEF name; TYPEVIEW view name (NULL = anonymous); VARIANT/GRAMMAR/GENERIC_FACTORY/COMPTIME_FN/SCOPED_TYPE name; LINK library */
-    CcInit *init;              /* VAR initializer (or NULL) */
+    CcInit *init;              /* VAR initializer (or NULL); `T name@(args)` is an initializer whose expr is CC_E_CREATE
+                                  with create_var = name (postfix `!>` / `!> @destroy` may follow it) */
     CcStmt *body;              /* FUNC body (NULL for a prototype); COMPTIME_FN body; COMPTIME_BLOCK; GENERIC_FACTORY body */
     /* VAR: lifetime sugar */
     int destroy;               /* @destroy */
@@ -424,12 +477,14 @@ struct CcDecl {
     /* TYPEHOOKS / TYPEVIEW */
     CcHookEntry *entries;
     /* VARIANT */
-    CcVariantArm *arms;
+    CcVariantArm *arms;        /* each arm `name: T;` carries one unnamed payload param of type T (`void` = no payload);
+                                  the `name(T x, U y);` spelling carries the named params */
     /* GRAMMAR */
     CcName engine;
     uint32_t body_off, body_len; /* fenced body bytes */
     /* GENERIC_FACTORY */
     int factory_extend;
+    CcExpr *factory_arity;     /* CC_GENERIC_FACTORY(Name, 2): the arity argument or NULL */
     /* COMPTIME_IF */
     CcExpr *cond;
     CcDeclList then_decls, else_decls;
@@ -438,6 +493,10 @@ struct CcDecl {
     CcName pragma_value;       /* "off" / "on" / NULL */
     /* PP */
     uint32_t tok;              /* the CC_TK_PP token */
+    int pp_skipped_region;     /* the span after `tok` is an inactive `#if` region (`__cplusplus`,
+                                  `#if 0`) whose tokens are kept verbatim and were not parsed */
+    /* MACRO_CALL */
+    CcExpr *expr;              /* the call or identifier expression */
     /* STATIC_ASSERT */
     CcExpr *assert_expr;
     uint32_t assert_msg_tok;
@@ -453,6 +512,9 @@ typedef struct CcUnit {
     int has_shebang;
     /* typedef names seen at file scope, for the declaration/expression ambiguity */
     CC_LIST(const char) typedef_names;
+    /* unknown identifiers the parser treated as type names (forward references,
+     * macro-made types); the index confirms them later */
+    CC_LIST(const char) assumed_types;
 } CcUnit;
 
 /* Interning: one pointer per distinct string for the life of the arena. */
