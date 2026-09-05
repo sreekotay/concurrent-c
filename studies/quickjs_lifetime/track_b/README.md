@@ -1,6 +1,6 @@
 # Track B — natural timer pressure (scaffold)
 
-**Status:** scaffold only — not implemented in this slice.
+**Status:** pins filled — implementation next.
 
 ## Goal
 
@@ -17,8 +17,15 @@ Track B requires new libuv glue — not [`js.cch`](../../../cc/include/ccc/scrip
 
 ## Pins
 
-See [`../PINNED.md`](../PINNED.md) for txiki.js + libuv SHAs (fill before
-implementation).
+See [`../PINNED.md`](../PINNED.md):
+
+| | SHA |
+|--|-----|
+| txiki.js (`saghul/txiki.js`) | `75b8cdf3f54380c239eed7f613e75dfe01b79334` |
+| libuv (txiki submodule) | `aabb7651de73ec2f1a74361ca3430eed1a62e402` |
+
+Upstream timer kernel to mirror: `src/timers.c` + `src/js/polyfills/timers.js`
+(`TJSTimer`: `uv_timer_t` + `JSValue func` + close-after-fire).
 
 ## Slice definition (later)
 

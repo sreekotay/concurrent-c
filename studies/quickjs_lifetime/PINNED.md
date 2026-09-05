@@ -9,8 +9,8 @@ implementation.
 | rquickjs | `0.12.2` | crates.io; ships quickjs-ng bindings — for a strict same-SHA compare, prefer building against `CC_QUICKJS_SRC` / sys crate when available; otherwise document the bundled engine SHA in the receipt |
 | Concurrent-C | record `ccc` version string in each receipt | e.g. `ccc 0.3.4-320` |
 | Host C compiler | system `cc` / `clang` | Same flags for CC adapter compile and Rust C deps |
-| txiki.js (Track B) | TBD — pin before Track B impl | https://github.com/txiki-org/txiki.js — placeholder until Track B lands |
-| libuv (Track B) | TBD — pin with txiki | Usually via txiki’s submodule; not the Node loop in `js.cch` |
+| txiki.js (Track B) | `75b8cdf3f54380c239eed7f613e75dfe01b79334` | https://github.com/saghul/txiki.js (master at study start; `txiki-org/` 404s) |
+| libuv (Track B) | `aabb7651de73ec2f1a74361ca3430eed1a62e402` | txiki `deps/libuv` @ that commit (`v1.x` branch tip when pinned) |
 
 ## Compiler flags (shared)
 
