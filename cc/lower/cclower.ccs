@@ -94,6 +94,8 @@ typedef struct Loaded {
     const char* path;
     CcLowerer lw;               /* --lower: the lowerer, for the headers it recorded */
     bool lowered;
+    CcIndex* ix;                /* --lower: the index, shared with the headers lowered for this unit */
+    CcLowerOpts lo;
 } Loaded;
 
 /* --root DIR: the repository root quoted `.cch` includes are made relative to;
@@ -463,7 +465,104 @@ static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena 
     lw.lower_unit();
     L->lw = lw;
     L->lowered = true;
+    L->ix = ix;
+    L->lo = lo;
     return true;
+}
+
+static void note_headers(Loaded* L, CcNameList* more, CCArena keep);
+
+/* A local header the unit includes, lowered in header mode with the unit's
+ * own index (its registrations and known types are the header's context,
+ * as they are when the host compiles the include) to `<h-root>/<rel>.h`.
+ * Headers it includes in turn join `todo`. */
+static int lower_header_with(Loaded* owner, CCSlice hpath, CcNameList known, bool line_directives, CcNameList* todo, CCArena keep) {
+    CCArena a = owner->arena;
+    CcIndex* ix = owner->ix;
+    CcParseOpts opts;
+    CcPrintOpts po;
+    CcDiags ds = CcDiags_new(a);
+    CcUnit* u;
+    CcLowerer lw;
+    Loaded H;
+    bool ok;
+    CCSlice rel;
+    CCString out;
+    const char* h_c = (const char*)hpath.ptr;   /* NUL-terminated by note_headers */
+    CCSlice text;
+    int rc = 0;
+    memset(&H, 0, sizeof(H));
+    H.arena = a;
+    H.path = h_c;
+    H.src = read_whole_file(h_c, a, &ok);
+    if (!ok) { fprintf(stderr, "cclower: cannot read %s: %s\n", h_c, strerror(errno)); return 2; }
+    opts.mode = CC_UNIT_HEADER;
+    {
+        CcNameList all = vec_new::[CCSlice](a);
+        CcNameList from_ix = ix->known_types();
+        size_t i;
+        size_t n = known.len();
+        size_t m = from_ix.len();
+        for (i = 0; i < n; i++) { CCSlice nm = *known.get_ptr(i); all.push(nm); }
+        for (i = 0; i < m; i++) { CCSlice nm = *from_ix.get_ptr(i); all.push(nm); }
+        opts.known_types = all;
+    }
+    u = cc_parse_unit(hpath, H.src, opts, &ds, a);
+    H.unit = u;
+    H.ds = ds;
+    if (ds.has_errors()) { print_diags(&H); return 1; }
+    lw = cc_lowerer_new(u, ix, owner->lo, &H.ds);
+    lw.lower_unit();
+    H.lw = lw;
+    H.lowered = true;
+    note_headers(&H, todo, keep);
+    if (H.ds.has_errors()) { print_diags(&H); return 1; }
+    rel = cc_slice_from_buffer((char*)hpath.ptr + g_root.len + 1, hpath.len - g_root.len - 1 - 4);
+    out = @string(`${g_h_root}/${rel}.h`, a);
+    {
+        const char* out_c = cc_string_cstr(&out, a);
+        if (!mkdir_parents(out_c)) { fprintf(stderr, "cclower: cannot create the directory of %s\n", out_c); return 2; }
+        po.identity = false;
+        po.line_directives = line_directives;
+        po.header_mode = true;
+        po.path = hpath;
+        CcProduct prod = cc_print_unit(u, NULL, po, &H.ds, a) !>(e) {
+            fprintf(stderr, "cclower: %s: %.*s\n", h_c, (int)e.msg.len, e.msg.ptr);
+            return 2;
+        };
+        text = cc_string_as_slice(&prod.text);
+        if (!write_product(out_c, text, &prod.map, a)) rc = 2;
+        print_diags(&H);
+        if (H.ds.n_errors) rc = 1;
+    }
+    return rc;
+}
+
+/* Every local header the unit recorded, and those they record, each once. */
+static int lower_headers_of(Loaded* owner, CcNameList known, bool line_directives, CCArena keep) {
+    CcNameList todo = vec_new::[CCSlice](keep);
+    CcNameList seen = vec_new::[CCSlice](keep);
+    int rc = 0;
+    note_headers(owner, &todo, keep);
+    for (;;) {
+        size_t nt = todo.len();
+        CCSlice h;
+        size_t k;
+        size_t ns = seen.len();
+        bool dup = false;
+        if (!nt) break;
+        h = *todo.get_ptr(nt - 1);
+        todo.truncate(nt - 1);
+        for (k = 0; k < ns; k++) {
+            CCSlice sk = *seen.get_ptr(k);
+            if (cc_slice_eq(&sk, h)) dup = true;
+        }
+        if (dup) continue;
+        seen.push(h);
+        if (!(h.len > g_root.len && memcmp(h.ptr, g_root.ptr, g_root.len) == 0 && h.ptr[g_root.len] == '/')) continue;
+        rc |= lower_header_with(owner, h, known, line_directives, &todo, keep);
+    }
+    return rc;
 }
 
 /* Copies of the headers the lowering recorded, in the caller's arena. */
@@ -496,7 +595,8 @@ static int run_print(const char* path, CcNameList known, const char* out_path, b
     if (lower) { if (!load_lowered(&L, path, known, a)) return 2; }
     else if (!load(&L, path, known, a)) return 2;
     if (lower && L.ds.has_errors()) { print_diags(&L); return 1; }
-    note_headers(&L, more_headers, keep);
+    (void)more_headers;
+    if (lower && g_h_root && g_root.len) rc |= lower_headers_of(&L, known, line_directives, keep);
     n_parse_errors = L.ds.n_errors;
     po.identity = false;
     po.line_directives = line_directives;
@@ -591,37 +691,5 @@ int main(int argc, char** argv) {
         fflush(stdout);
     }
     if (!n_files) usage();
-    /* the local headers the lowered units include, each lowered once in
-     * header mode to <h-root>/<rel>.h; headers they include join the list */
-    if (lower && g_h_root && g_root.len) {
-        CcNameList seen = vec_new::[CCSlice](tool);
-        for (;;) {
-            size_t nt = todo.len();
-            CCSlice h;
-            size_t k;
-            size_t ns = seen.len();
-            bool dup = false;
-            CCSlice rel;
-            CCString out;
-            if (!nt) break;
-            h = *todo.get_ptr(nt - 1);
-            todo.truncate(nt - 1);
-            for (k = 0; k < ns; k++) {
-                CCSlice sk = *seen.get_ptr(k);
-                if (cc_slice_eq(&sk, h)) dup = true;
-            }
-            if (dup) continue;
-            seen.push(h);
-            if (!(h.len > g_root.len && memcmp(h.ptr, g_root.ptr, g_root.len) == 0 && h.ptr[g_root.len] == '/')) continue;
-            rel = cc_slice_from_buffer((char*)h.ptr + g_root.len + 1, h.len - g_root.len - 1 - 4);
-            out = @string(`${g_h_root}/${rel}.h`, tool);
-            {
-                const char* out_c = cc_string_cstr(&out, tool);
-                const char* h_c = (const char*)h.ptr;   /* NUL-terminated by note_headers */
-                if (!mkdir_parents(out_c)) { fprintf(stderr, "cclower: cannot create the directory of %s\n", out_c); rc |= 2; continue; }
-                rc |= run_print(h_c, known, out_c, line_directives, true, true, &todo, tool);
-            }
-        }
-    }
     return rc;
 }
