@@ -796,6 +796,95 @@ static void shadow_as_scan_typedef_typeviews(const char* text) {
 /* Scan header text for `Type field @as;` / `@typeview on T { as:… }`.
  * create/destroy/sink/niche/.ufcs come from CCSymbolTable via
  * shadow_ufcs_hooks_collect_* (one harvest — no parallel strstr). */
+/* The header scan reads one line at a time and expects one field per
+ * line. A struct written on one line (`typedef struct C { Vec::[int] a; } C;`)
+ * would register nothing, so struct bodies are re-laid out first: inside a
+ * `struct ... {` body, `{` and `;` end a line and `}` starts one. Text
+ * outside struct bodies, comments and string literals are copied as is. */
+static char* shadow_struct_lines_normalize(const char* text) {
+    size_t n = text ? strlen(text) : 0;
+    /* Worst case every byte gains a newline. */
+    char* out = (char*)malloc(n * 2 + 1);
+    size_t o = 0;
+    size_t i = 0;
+    int depth = 0;          /* brace depth inside a struct body; 0 = outside */
+    int pending_open = 0;   /* saw `struct` / `union` on this line, `{` not yet */
+    if (!out) return NULL;
+    if (!text) { out[0] = 0; return out; }
+    while (i < n) {
+        char c = text[i];
+        /* Comments and literals pass through untouched. */
+        if (c == '/' && text[i + 1] == '*') {
+            const char* e = strstr(text + i + 2, "*/");
+            size_t len = e ? (size_t)(e + 2 - (text + i)) : n - i;
+            memcpy(out + o, text + i, len);
+            o += len; i += len;
+            continue;
+        }
+        if (c == '/' && text[i + 1] == '/') {
+            const char* e = strchr(text + i, '\n');
+            size_t len = e ? (size_t)(e - (text + i)) : n - i;
+            memcpy(out + o, text + i, len);
+            o += len; i += len;
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            size_t j = i + 1;
+            while (j < n && text[j] != c && text[j] != '\n') {
+                if (text[j] == '\\' && j + 1 < n) j++;
+                j++;
+            }
+            if (j < n && text[j] == c) j++;
+            memcpy(out + o, text + i, j - i);
+            o += j - i; i = j;
+            continue;
+        }
+        if (depth == 0) {
+            if ((c == 's' && strncmp(text + i, "struct", 6) == 0 && !shadow_is_ident_char(text[i + 6]) &&
+                 (i == 0 || !shadow_is_ident_char(text[i - 1]))) ||
+                (c == 'u' && strncmp(text + i, "union", 5) == 0 && !shadow_is_ident_char(text[i + 5]) &&
+                 (i == 0 || !shadow_is_ident_char(text[i - 1]))))
+                pending_open = 1;
+            else if (c == '\n' || c == ';')
+                pending_open = 0;
+            else if (c == '{' && pending_open) {
+                depth = 1;
+                pending_open = 0;
+                out[o++] = '{';
+                out[o++] = '\n';
+                i++;
+                continue;
+            }
+            out[o++] = c;
+            i++;
+            continue;
+        }
+        /* Inside a struct body. */
+        if (c == '{') {
+            depth++;
+            out[o++] = '{';
+            out[o++] = '\n';
+        } else if (c == '}') {
+            depth--;
+            if (o > 0 && out[o - 1] != '\n') out[o++] = '\n';
+            out[o++] = '}';
+        } else if (c == ';') {
+            out[o++] = ';';
+            /* Only add a break when more text follows on this line. */
+            {
+                size_t j = i + 1;
+                while (j < n && (text[j] == ' ' || text[j] == '\t')) j++;
+                if (j < n && text[j] != '\n') out[o++] = '\n';
+            }
+        } else {
+            out[o++] = c;
+        }
+        i++;
+    }
+    out[o] = 0;
+    return out;
+}
+
 static void shadow_as_scan_header_text(const char* text) {
     const char* p;
     char outer[96];
@@ -812,7 +901,11 @@ static void shadow_as_scan_header_text(const char* text) {
     /* `@typeview on Base { … }` body capture (may span lines). */
     char tv_base[96];
     int tv_depth = 0;
+    char* normalized;
     if (!text) return;
+    normalized = shadow_struct_lines_normalize(text);
+    if (!normalized) return;
+    text = normalized;
     shadow_td_alias_scan_text(text);
     shadow_as_scan_typedef_typeviews(text);
     outer[0] = 0;
@@ -979,6 +1072,9 @@ static void shadow_as_scan_header_text(const char* text) {
                     }
                     if (outer[0])
                         shadow_field_register_ex(outer, fname, fty);
+                    /* A `Map::[K,V]` / `Vec::[T]` field names an instance the
+                     * TU must emit before the header is included. */
+                    shadow_ginst_need_from_type(fty);
                     (void)shadow_as_scan_fld_push(&flds, &nfld, &fld_cap, outer,
                                                   fname, fty);
                 }
@@ -1140,6 +1236,7 @@ static void shadow_as_scan_header_text(const char* text) {
         p = nl + 1;
     }
     free(flds);
+    free(normalized);
 }
 
 static int shadow_as_project_header_read(const char* rel, const char* from_dir,
