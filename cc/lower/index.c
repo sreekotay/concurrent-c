@@ -1110,6 +1110,7 @@ static CcType *cc__unmangle_arg(CcIndex *ix, const char *text, int depth) {
     if (!n || depth > 4) return NULL;
     /* a declared or primitive type name */
     if (cc__sym_find_kind(ix, text, CC_SYM_TYPE) || cc__primitive_words(text) ||
+        (n > 2 && strcmp(text + n - 2, "_t") == 0 && !strchr(text, ' ')) /* a C typedef (<stdint.h>, <stddef.h>) */ ||
         strcmp(text, "long_long") == 0 || strcmp(text, "unsigned_long") == 0 || strcmp(text, "unsigned_char") == 0 ||
         strcmp(text, "unsigned_int") == 0 || strcmp(text, "unsigned_long_long") == 0 || strcmp(text, "unsigned_short") == 0) {
         CcType *t = cc_type_new(ix->arena, CC_T_NAMED, sp);
@@ -1572,6 +1573,7 @@ static void cc__typehooks_decl(CcIndex *ix, CcUnit *u, CcDecl *d) {
     for (; i <= d->span.last; i++) {
         t = cc__tok(u, i);
         if (!t || (t->kind == CC_TK_PUNCT && t->punct == CC_P_LBRACE)) break;
+        if (b.len && t->after_space && t->kind == CC_TK_IDENT) cc_buf_push_char(&b, ' ');
         cc_buf_push(&b, u->file->src + t->off, t->len);
     }
     if (!b.len) {
@@ -1624,10 +1626,19 @@ static void cc__comptime_register_walk(CcIndex *ix, CcUnit *u, const CcStmt *s) 
 /* Narrowest registration whose subject matches `name`; `want_ufcs` asks
  * for one carrying a `.ufcs` entry. Exact beats pointer-subject beats
  * family beats `*`. */
+/* `struct Point` and `Point` name the same subject for a registration. */
+static const char *cc__strip_tag(const char *name) {
+    if (cc__has_prefix(name, "struct ")) return name + 7;
+    if (cc__has_prefix(name, "union ")) return name + 6;
+    if (cc__has_prefix(name, "enum ")) return name + 5;
+    return name;
+}
+
 static CcHookReg *cc__hook_match(const CcIndex *ix, const char *name, int want_ufcs) {
     CcHookReg *best = NULL;
     int best_score = -1;
     size_t i;
+    name = cc__strip_tag(name);
     for (i = 0; i < ix->hooks.n; i++) {
         CcHookReg *r = ix->hooks.items[i];
         int score;
@@ -1654,15 +1665,16 @@ static void cc__type_resolve_hooks(CcIndex *ix, CcTypeInfo *info) {
     CcHookReg *r = cc__hook_match(ix, info->name, 0);
     CcHookReg *create = NULL, *destroy = NULL;
     size_t i;
+    const char *name = cc__strip_tag(info->name);
     info->hooks = r;
     /* create / destroy come from the narrowest registration that has them */
     for (i = 0; i < ix->hooks.n; i++) {
         CcHookReg *h = ix->hooks.items[i];
         int score;
         if (h->any) score = 0;
-        else if (h->family) score = cc__has_prefix(info->name, h->base) && strlen(info->name) > strlen(h->base) ? 1 + (int)strlen(h->base) : -1;
-        else if (h->ptr) score = strcmp(info->name, h->base) == 0 ? 2000 : -1;
-        else score = strcmp(info->name, h->base) == 0 ? 3000 : -1;
+        else if (h->family) score = cc__has_prefix(name, h->base) && strlen(name) > strlen(h->base) ? 1 + (int)strlen(h->base) : -1;
+        else if (h->ptr) score = strcmp(name, h->base) == 0 ? 2000 : -1;
+        else score = strcmp(name, h->base) == 0 ? 3000 : -1;
         if (score < 0) continue;
         if (h->create_fn && (!create || score >= (create->any ? 0 : create->family ? 1 + (int)strlen(create->base) : create->ptr ? 2000 : 3000)))
             create = h;
@@ -1830,6 +1842,15 @@ static void cc__index_decl(CcIndex *ix, CcUnit *u, CcDecl *d, int is_header) {
         return;
     case CC_D_MACRO_CALL:
         cc__macro_call(ix, u, d, is_header);
+        return;
+    case CC_D_TYPEVIEW:
+        /* `@typeview Mode on T { ... }` names the value view `T_Restrict_Mode`
+         * (spec/draft_facets.md): an alias of T for method lookup */
+        if (d->name && d->type) {
+            CcName alias = cc__in(ix, cc_arena_printf(ix->arena, "%s_Restrict_%s", cc__strip_tag(cc_index_canon(ix, d->type)), d->name));
+            cc__sym_add(ix, alias, CC_SYM_TYPE, d, u, d->type, is_header, 1);
+            cc__add_typedef_name(ix, alias);
+        }
         return;
     default:
         return;
@@ -2088,6 +2109,7 @@ static const CcType *cc__struct_of(const CcIndex *ix, const char *name, int dept
 static size_t cc__view_faces(CcIndex *ix, const char *name, const char ***out) {
     CC_LIST(const char) faces = {0};
     size_t i;
+    name = cc__strip_tag(name);
     for (i = 0; i < ix->units.n; i++) {
         CcUnit *u = ix->units.items[i];
         size_t k;
@@ -2107,6 +2129,7 @@ static size_t cc__view_faces(CcIndex *ix, const char *name, const char ***out) {
             for (; ti <= d->span.last; ti++) {
                 const CcToken *t = cc__tok(u, ti);
                 if (!t || (t->kind == CC_TK_PUNCT && t->punct == CC_P_LBRACE)) break;
+                if (b.len && t->after_space && t->kind == CC_TK_IDENT) cc_buf_push_char(&b, ' ');
                 cc_buf_push(&b, u->file->src + t->off, t->len);
             }
             matches = 0;
@@ -2215,6 +2238,17 @@ static CcMethod *cc__resolve(CcIndex *ix, CcTypeInfo *recv, CcName method, CcBuf
         /* rejecting (empty slice) or opaque handlers fall through to the composed names */
     }
 
+    /* 1b. `x.destroy()` on a type with a destroy hook: the hook's callee
+     * (the spec: `Type_destroy` when that function exists, else the chain) */
+    if (strcmp(method, "destroy") == 0 && recv->destroy_fn && recv->destroy_fn[0] != '<') {
+        CcSym *d1 = cc__callee_sym(ix, cc_arena_printf(ix->arena, "%s_destroy", recv->name));
+        if (!d1) {
+            cs = cc__callee_sym(ix, recv->destroy_fn);
+            if (cs) return cc__method_new(ix, recv, method, recv->destroy_fn, "typehooks", cc_arena_printf(ix->arena, "@typehooks .destroy -> %s", cc__sym_origin(ix, cs)), cs, 0);
+            cc_buf_printf(tried, " %s (.destroy hook: not declared)", recv->destroy_fn);
+        }
+    }
+
     /* 2. *_DECL_UFCS(Name) registration: Name_<method> */
     if (recv->ufcs_registered_by) {
         composed = cc__in(ix, cc_arena_printf(ix->arena, "%s_%s", recv->name, method));
@@ -2259,13 +2293,15 @@ static CcMethod *cc__resolve(CcIndex *ix, CcTypeInfo *recv, CcName method, CcBuf
     if (cs && cs->type && cs->type->kind == CC_T_FUNC && cs->type->params.n > 0 && cs->type->params.items[0]->type) {
         CcType *p0 = cs->type->params.items[0]->type;
         CcType *base = p0->kind == CC_T_POINTER ? p0->base : p0;
-        if (base && cc__same_type(ix, cc_index_canon(ix, base), recv->name))
+        if (base && (cc__same_type(ix, cc_index_canon(ix, base), recv->name) ||
+                     (p0->kind == CC_T_POINTER && strcmp(cc_index_canon(ix, base), "void") == 0)))
             return cc__method_new(ix, recv, method, method, "bare_name", cc__sym_origin(ix, cs), cs, 0);
         cc_buf_printf(tried, " %s (first parameter is %s)", method, cc_index_canon(ix, p0));
     }
 
     /* 6. a typedef alias uses the aliased type's methods */
-    if (recv->sym && recv->sym->kind == CC_SYM_TYPE && recv->sym->decl && recv->sym->decl->kind == CC_D_TYPEDEF && recv->sym->type) {
+    if (recv->sym && recv->sym->kind == CC_SYM_TYPE && recv->sym->decl &&
+        (recv->sym->decl->kind == CC_D_TYPEDEF || recv->sym->decl->kind == CC_D_TYPEVIEW) && recv->sym->type) {
         CcType *t = recv->sym->type;
         if (t->kind == CC_T_NAMED || t->kind == CC_T_POINTER || t->kind == CC_T_GENERIC || t->kind == CC_T_SLICE ||
             t->kind == CC_T_RESULT || t->kind == CC_T_CHAN) {

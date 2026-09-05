@@ -235,6 +235,17 @@ static CcType *peel(CcType *t) {
     return t;
 }
 
+/* A local typedef name resolves to the type it aliases. */
+static CcType *unalias_local(Walker *w, CcType *t) {
+    int depth = 0;
+    while (t && t->kind == CC_T_NAMED && t->name && depth++ < 8) {
+        CcType *a = scope_lookup(w, cc_arena_printf(&w->s->arena, "typedef %s", t->name));
+        if (!a) break;
+        t = a;
+    }
+    return t;
+}
+
 static CcType *synth(Walker *w, CcTypeKind k, CcType *base) {
     CcSpan sp = {0, 0};
     CcType *t = cc_type_new(&w->s->arena, k, sp);
@@ -280,7 +291,7 @@ static const CcType *struct_of_type(Walker *w, CcType *t, int depth) {
 }
 
 static CcType *field_type(Walker *w, CcType *recv, const char *field) {
-    const CcType *st = struct_of_type(w, recv, 0);
+    const CcType *st = struct_of_type(w, unalias_local(w, peel(recv)), 0);
     const CcField *f;
     if (!st) return NULL;
     for (f = st->fields; f; f = f->next) {
@@ -301,7 +312,7 @@ static CcType *return_type_of_sym(CcSym *sym) {
 
 static CcMethod *resolve_site(Walker *w, CcType *recv_type, const char *method, const char **type_name, const char **reason) {
     CcIndex *ix = w->s->ix;
-    CcType *t = peel(recv_type);
+    CcType *t = peel(unalias_local(w, peel(recv_type)));
     CcTypeInfo *info;
     CcMethod *m;
     const char *cand = NULL;
@@ -332,7 +343,17 @@ static CcType *type_of_expr(Walker *w, CcExpr *e) {
     case CC_E_CAST:
     case CC_E_COMPOUND: return e->type;
     case CC_E_STRING: return synth(w, CC_T_POINTER, named(w, "char"));
-    case CC_E_NUMBER: return named(w, "int");
+    case CC_E_NUMBER: {
+        const CcToken *t = &w->s->unit->file->toks[e->span.first];
+        const char *txt = w->s->unit->file->src + t->off;
+        int hex = t->len > 1 && txt[0] == '0' && (txt[1] == 'x' || txt[1] == 'X');
+        uint32_t k;
+        for (k = 0; k < t->len; k++) {
+            char c = txt[k];
+            if (c == '.' || (!hex && (c == 'e' || c == 'E'))) return named(w, (txt[t->len - 1] == 'f' || txt[t->len - 1] == 'F') ? "float" : "double");
+        }
+        return named(w, "int");
+    }
     case CC_E_UNARY:
         if (e->op == CC_OP_ADDR) return synth(w, CC_T_POINTER, type_of_expr(w, e->a));
         if (e->op == CC_OP_DEREF) {
@@ -388,6 +409,11 @@ static CcType *type_of_expr(Walker *w, CcExpr *e) {
     case CC_E_UNWRAP_DESTROY: {
         CcType *t = type_of_expr(w, e->a);
         if (t && t->kind == CC_T_RESULT) return t->base;
+        if (t) {
+            /* a Result spelled by its mangled name (`CCResult_int_CCError mk(int)`) */
+            CcTypeInfo *info = cc_index_type(ix, cc_index_canon(ix, peel(t)));
+            if (info && info->is_result) return info->result_value ? info->result_value : named(w, "void");
+        }
         return NULL;
     }
     case CC_E_TEMPLATE:
@@ -418,7 +444,9 @@ static void walk_decl_local(Walker *w, CcDecl *d) {
         if (d->destroy_body) walk_stmt(w, d->destroy_body);
         if (d->body) walk_stmt(w, d->body);
     } else if (d->kind == CC_D_TYPEDEF) {
-        scope_declare(w, d->name, NULL);
+        /* a local typedef: kept in scope with a marker name so a receiver of
+         * that type resolves through the aliased type */
+        scope_declare(w, cc_arena_printf(&w->s->arena, "typedef %s", d->name), d->type);
     }
 }
 
@@ -434,8 +462,10 @@ static void visit_ufcs(Walker *w, CcExpr *e) {
             root = root->a;
         if (root && root->kind == CC_E_IDENT && root->name && root->name[0] == '@') return;
     }
-    site = CC_NEW(&w->s->arena, Site);
     rt = type_of_expr(w, e->a);
+    /* the C-member-first rule: `x.cb()` where `cb` is a field is a C call */
+    if (rt && field_type(w, rt, e->name)) return;
+    site = CC_NEW(&w->s->arena, Site);
     const CcToken *t = &w->s->unit->file->toks[e->span.first];
     CcLoc loc = cc_lex_loc(w->s->unit->file, t->off);
     site->method = e->name;
@@ -637,6 +667,7 @@ typedef struct Count {
     const char *key;
     const char *key2;
     size_t n;
+    int in_non_fail;       /* at least one site outside an expected-failure test */
     struct Count *next;
 } Count;
 
@@ -786,8 +817,12 @@ int main(int argc, char **argv) {
                     n_resolved++;
                     count_add(&agg, &by_source, site->source, NULL);
                 } else if (site->type) {
+                    Count *c;
+                    size_t fl = strlen(argv[i]);
+                    int is_fail = fl > 9 && strcmp(argv[i] + fl - 9, "_fail.ccs") == 0;
                     n_unresolved++;
-                    count_add(&agg, &unresolved, site->type, site->method);
+                    c = count_add(&agg, &unresolved, site->type, site->method);
+                    if (!is_fail) c->in_non_fail = 1;
                     if (site->reason) count_add(&agg, &reasons, site->reason, NULL);
                 } else {
                     n_unknown++;
@@ -813,9 +848,9 @@ int main(int argc, char **argv) {
             printf("| unresolved, receiver type known | %zu |\n", n_unresolved);
             printf("| receiver type unknown | %zu |\n\n", n_unknown);
             printf("### Unresolved with a known receiver type\n\n");
-            printf("(Type, method) pairs no declaration, hook or registration names.\n\n| Receiver type | Method | Sites |\n|---|---|---|\n");
+            printf("(Type, method) pairs no declaration, hook or registration names. A pair whose every site is in a `*_fail.ccs` test is a diagnostic the test expects.\n\n| Receiver type | Method | Sites | Only in `_fail` tests |\n|---|---|---|---|\n");
             arr = count_sorted(&agg, unresolved, &n);
-            for (k = 0; k < n; k++) printf("| `%s` | `%s` | %zu |\n", arr[k]->key, arr[k]->key2, arr[k]->n);
+            for (k = 0; k < n; k++) printf("| `%s` | `%s` | %zu | %s |\n", arr[k]->key, arr[k]->key2, arr[k]->n, arr[k]->in_non_fail ? "" : "yes");
             printf("\n### Receiver type unknown\n\nBy receiver expression kind:\n\n| Receiver kind | Sites |\n|---|---|\n");
             arr = count_sorted(&agg, unknown_recv, &n);
             for (k = 0; k < n; k++) printf("| %s | %zu |\n", arr[k]->key, arr[k]->n);
