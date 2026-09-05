@@ -1,0 +1,1 @@
+the generic parameter type in the prototype is never lowered ('::' was not lowered); the definition alone lowers, and a typedef of the instance works in both

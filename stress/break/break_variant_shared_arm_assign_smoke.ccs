@@ -1,0 +1,20 @@
+/* Two variants may share an arm name. Assigning `{ .arm = v }` to a field
+ * of one of them is resolved by the field's type, not by the arm name. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct A { int x; } A;
+@variant V1 { shared: A; only1: int; };
+@variant V2 { shared: A; only2: int; };
+typedef struct N { V1 k; } N;
+
+static void set(N* n, A a) { n->k = { .shared = a }; }
+
+int main(void) {
+    N n;
+    A a;
+    a.x = 4;
+    set(&n, a);
+    printf("%d\n", n.k.kind == V1_shared);
+    return 0;
+}

@@ -1,0 +1,15 @@
+/* `Vec::[T]*` as a parameter type is the same spelling in a prototype as
+ * in the definition that follows it. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/vec.cch>
+#include <stdio.h>
+
+static bool is_empty(Vec::[int]* xs);
+static bool is_empty(Vec::[int]* xs) { return xs->len() == 0; }
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    Vec::[int] v = vec_new::[int](a);
+    printf("%d\n", (int)is_empty(&v));
+    return 0;
+}

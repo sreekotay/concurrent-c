@@ -362,7 +362,7 @@ happens not to contain a banned `@token`, `!>`, `[:]` or `::`.
 ### 5.9 Shapes an AST needs that the engine refuses
 
 Writing a tree of `@variant` nodes with `Vec` children and a template
-printer (`stress/break/break_ast_cc_way_smoke.ccs`) trips ten distinct
+printer (`stress/break/break_ast_cc_way_smoke.ccs`) trips thirteen distinct
 defects, each pinned by a sibling `break_*` test with an `.xfail` marker:
 
 | Shape | What happens today | Test |
@@ -377,6 +377,9 @@ defects, each pinned by a sibling `break_*` test with an `.xfail` marker:
 | `"@errhandler"` inside a `@switch` case body | the switch lowering re-scans its bodies for `@`-tokens and splits the string literal | `break_at_word_in_switch_literal` |
 | `uint32_t lo = 0, hi = v.len();` | only the first declarator's initializer is lowered | `break_ufcs_second_declarator` |
 | `const T* p = xs.get_ptr(xs.len() - 1);` | the nested `.len()` stays un-lowered when the destination is `const T*` | `break_nested_ufcs_const_dest` |
+| `n->k = { .shared = a }` with `shared` an arm of two variants | the braced assignment is left un-lowered | `break_variant_shared_arm_assign` |
+| `Vec::[int] xs` declared inside a `@switch` case body | the generic spelling is not lowered | `break_generic_in_switch_body` |
+| `static bool f(Vec::[int]* xs);` prototype | the generic parameter in a prototype is never lowered | `break_generic_ptr_param_proto` |
 
 Every one is a text-engine property (name-keyed type tracking, splice
 points chosen by textual position, paren-counting through literals, fixed

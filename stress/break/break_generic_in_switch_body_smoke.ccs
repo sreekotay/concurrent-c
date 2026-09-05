@@ -1,0 +1,29 @@
+/* A `Vec::[T]` spelled inside a @switch case body is the same type as
+ * anywhere else. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/vec.cch>
+#include <stdio.h>
+
+@variant V { a: int; b: int; };
+typedef struct N { V k; } N;
+
+static size_t count(N* n, CCArena ar) {
+    @switch (n->k) {
+        case .a: {
+            Vec::[int] xs = vec_new::[int](ar);
+            xs.push(1);
+            return xs.len();
+        }
+        default: return 9;
+    }
+}
+
+int main(void) {
+    CCArena ar = cc_arena_heap(kilobytes(64)) @destroy;
+    N n;
+    size_t got;
+    n.k = { .a = 1 };
+    got = count(&n, ar);
+    printf("%zu\n", got);
+    return 0;
+}
