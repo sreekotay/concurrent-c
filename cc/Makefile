@@ -470,6 +470,15 @@ ccparse: $(CCPARSE_BINARY)
 cclower: $(CCLOWER_BINARY)
 ccindex: $(CCINDEX_BINARY)
 
+# The clean lowerer's own tools, written in Concurrent-C and built by the
+# current compiler. Each is gated against its C11 reference above:
+# out/cc/bin/cclex_cc vs cclex (--roundtrip, --dump), ccparse_cc vs ccparse
+# (--check, --dump), over the whole corpus.
+.PHONY: lower-cc
+lower-cc: $(SHADOW_LOWER_WRAPPER) $(LOWER_HEADERS_STAMP)
+	bin/ccc build lower/cclex.ccs -o $(OUT_BINDIR)/cclex_cc
+	bin/ccc build lower/ccparse.ccs -o $(OUT_BINDIR)/ccparse_cc
+
 # shadow_lower self-build:
 #   SHADOW_LOWER_SOURCE=bootstrap (default) — host-cc last-good snapshot
 #   SHADOW_LOWER_SOURCE=ccs — re-lower .ccs via existing native shadow_lower

@@ -11,6 +11,15 @@
 #define CC_LOWER_PARSE_FWD_CCH
 #include "parse_state.cch"
 
+/* Keeps this face impl-grade, a TU-private leaf like the sections that
+ * include it: a face of prototypes alone is lowered standalone as an
+ * interface header, which refuses the per-TU faces it includes. Never
+ * called. */
+static CCString cc__parse_fwd_impl_marker(P* p) {
+    CCString s = @string(`fwd`, p->arena);
+    return s;
+}
+
 /* parse_types.cch */
 static CcType* parse_type_name(P* p);                                  /* a type-name (abstract declarator allowed) */
 static CcType* parse_type_or_value_arg(P* p);                          /* one `::[...]` argument: a type, or a value as CcTypeArg */
@@ -31,7 +40,7 @@ static CcExpr* parse_cond(P* p);
 static CcExpr* parse_unary(P* p);
 static CcInit* parse_initializer(P* p);
 static void    parse_args(P* p, CcExprList* out, const char* what);    /* `(` args `)` */
-static bool    parse_template_parts(P* p, uint32_t tok, Vec::[CcTplPart]* out); /* split a CC_TK_TEMPLATE token */
+static bool    parse_template_parts(P* p, uint32_t tok, CcTplPartList* out); /* split a CC_TK_TEMPLATE token */
 
 /* parse_stmts.cch */
 static CcStmt* parse_stmt(P* p);

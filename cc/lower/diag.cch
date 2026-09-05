@@ -28,7 +28,11 @@ typedef struct CcDiag {
     CcLoc at;
     CCSlice msg;        /* one line, user vocabulary: "no method 'len' on 'Pair'" */
     CCSlice note;       /* optional second line: what would fix it; empty when none */
+    uint32_t len;       /* bytes the caret underlines; 0 = one caret */
+    uint32_t phys_line; /* physical line for the snippet when `at` is #line-rebased; 0 = at.line */
 } CcDiag;
+/* d.with_len(n): the same diagnostic underlining n bytes. */
+static CcDiag CcDiag_with_len(CcDiag d, uint32_t len);
 
 /* Constructors. The message is a template into `a`. */
 static CcDiag CcDiag_error(CcLoc at, CCSlice msg);

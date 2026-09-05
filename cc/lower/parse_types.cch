@@ -1,0 +1,1175 @@
+#pragma(@per_tu)
+/* Parser section 2: types. Declaration specifiers, the builtin keyword
+ * table, the Concurrent-C type suffixes (`T[:]`, `T[~cap dir]`, `T!>(E)`),
+ * generic and macro type arguments, declarators, type names, parameter
+ * lists, and struct / union / enum bodies.
+ *
+ * A suffix (`[n]`, `(params)`, `[:]`, `[~...]`) is parsed as a shell whose
+ * element is not yet known; the declarator applies the shells right to
+ * left onto the pointer type, setting each shell's element then. Every
+ * node lives in the unit's arena. */
+#ifndef CC_LOWER_PARSE_TYPES_CCH
+#define CC_LOWER_PARSE_TYPES_CCH
+#include "parse_fwd.cch"
+
+/* ---- specifier accumulation --------------------------------------------- */
+
+typedef struct Specs {
+    uint32_t first;
+    uint32_t specs;         /* CC_SPEC_* */
+    uint32_t quals;         /* CC_QUAL_* */
+    CcType* type;           /* NULL when no type specifier was seen */
+    Vec::[CcAttr] attrs;
+    bool saw_any;           /* consumed at least one token */
+    bool saw_type;
+} Specs;
+
+/* ---- small helpers ------------------------------------------------------ */
+
+/* The token at an absolute index, clamped to the EOF token. */
+static const CcToken* tat(P* p, uint32_t j) { return &p->t[j < p->n ? j : p->n - 1]; }
+
+/* The token's text equals `w`, whatever its kind. */
+static bool tok_text_is(P* p, uint32_t i, const char* w) {
+    CCSlice tx = tat(p, i)->text;
+    return cc_slice_eq_cstr(&tx, w);
+}
+static bool at_text(P* p, const char* w) { return tok_text_is(p, p->i, w); }
+
+static CcType* type_named(P* p, CCSlice name, uint32_t first) {
+    return cc_type_named(name, span_from(p, first), p->arena);
+}
+static CcType* type_blank(P* p, CcSpan span) { return cc__type_blank(span, p->arena); }
+
+/* A message with a lone bracket in it is assembled, not templated
+ * (stress/break/break_template_lone_paren_smoke). */
+static CCString msg3(P* p, const char* a, CCSlice b, const char* c) {
+    CCString m = cc_string_new();
+    m.push_cstr(a, p->arena);
+    m.push_slice(b, p->arena);
+    m.push_cstr(c, p->arena);
+    return m;
+}
+
+/* Set the element (pointee, return, value) of a suffix shell. */
+static void type_set_elem(CcType* t, CcType* e) {
+    @switch (t->k) {
+        case .pointer: t->k.pointer.pointee = e; break;
+        case .array: t->k.array.elem = e; break;
+        case .func: t->k.func.ret = e; break;
+        case .slice: t->k.slice.elem = e; break;
+        case .chan: t->k.chan.elem = e; break;
+        case .result: t->k.result.value = e; break;
+        case .atomic: t->k.atomic.pointee = e; break;
+        default: break;
+    }
+}
+
+/* The element of a slice type, or NULL for any other kind. (A projection
+ * under `if (x->k.kind == ...)` with a field-path subject does not lower;
+ * `@switch` does.) */
+static CcType* slice_elem(CcType* t) {
+    @switch (t->k) {
+        case .slice(sl): return sl.elem;
+        default: return NULL;
+    }
+}
+
+/* The spelling of a named type (`Foo`, `struct Foo`), empty otherwise. */
+static CCSlice type_name_of(CcType* t) {
+    if (!t) return CC_SLICE_LIT("");
+    @switch (t->k) {
+        case .named(nm): return nm.name;
+        default: return CC_SLICE_LIT("");
+    }
+}
+
+static bool type_is_func(CcType* t) { return t && t->k.kind == CcTypeK_func; }
+
+static void push_attrs(Vec::[CcAttr]* dst, Vec::[CcAttr]* src) {
+    size_t i;
+    size_t n = src->len();
+    for (i = 0; i < n; i++) {
+        CcAttr* at = src->get_ptr(i);   /* a nested UFCS call in an argument does not lower */
+        dst->push(*at);
+    }
+}
+
+/* ---- builtin type keywords ----------------------------------------------- */
+
+typedef struct Builtin {
+    int n_void; int n_char; int n_short; int n_int; int n_long; int n_float; int n_double;
+    int n_signed; int n_unsigned; int n_bool; int n_complex; int n_int128; int n_float128;
+} Builtin;
+
+static bool builtin_add(Builtin* b, Kw k) {
+    switch (k) {
+    case KW_VOID: b->n_void++; return true;
+    case KW_CHAR: b->n_char++; return true;
+    case KW_SHORT: b->n_short++; return true;
+    case KW_INT: b->n_int++; return true;
+    case KW_LONG: b->n_long++; return true;
+    case KW_FLOAT: b->n_float++; return true;
+    case KW_DOUBLE: b->n_double++; return true;
+    case KW_SIGNED: case KW_SIGNED2: case KW_SIGNED3: b->n_signed++; return true;
+    case KW_UNSIGNED: b->n_unsigned++; return true;
+    case KW_BOOL: b->n_bool++; return true;
+    case KW_COMPLEX: b->n_complex++; return true;
+    case KW_INT128: b->n_int128++; return true;
+    case KW_FLOAT128: b->n_float128++; return true;
+    default: return false;
+    }
+}
+
+static CCSlice builtin_name(P* p, const Builtin* b) {
+    CCString m = cc_string_new();
+    if (b->n_void) m.push_cstr("void", p->arena);
+    else if (b->n_bool) m.push_cstr("_Bool", p->arena);
+    else if (b->n_float128) m.push_cstr("__float128", p->arena);
+    else {
+        if (b->n_unsigned) m.push_cstr("unsigned ", p->arena);
+        else if (b->n_signed && b->n_char) m.push_cstr("signed ", p->arena);
+        if (b->n_char) m.push_cstr("char", p->arena);
+        else if (b->n_short) m.push_cstr("short", p->arena);
+        else if (b->n_int128) m.push_cstr("__int128", p->arena);
+        else if (b->n_long >= 2) m.push_cstr("long long", p->arena);
+        else if (b->n_long == 1 && b->n_double) m.push_cstr("long double", p->arena);
+        else if (b->n_long == 1) m.push_cstr("long", p->arena);
+        else if (b->n_float) m.push_cstr("float", p->arena);
+        else if (b->n_double) m.push_cstr("double", p->arena);
+        else m.push_cstr("int", p->arena);
+        if (b->n_complex) m.push_cstr(" _Complex", p->arena);
+    }
+    return cc_string_persist_slice(p->arena, &m);
+}
+
+/* ---- the declaration / expression ambiguity ---------------------------------- */
+
+static bool is_qual_kw(Kw k) {
+    return k == KW_CONST || k == KW_CONST2 || k == KW_CONST3 || k == KW_VOLATILE || k == KW_VOLATILE2 ||
+           k == KW_VOLATILE3 || k == KW_RESTRICT || k == KW_RESTRICT2 || k == KW_RESTRICT3;
+}
+
+/* Does the token at `i` start a declarator, as seen after an unknown
+ * identifier that might be a type name? */
+static bool declarator_follows(P* p, uint32_t i) {
+    const CcToken* t = tat(p, i);
+    if (t->kind == CC_TK_IDENT) {
+        Kw k = kw_of(p, i);
+        if (is_kw(p, i, KW_IN)) return false;
+        if (k == KW_NONE) return true;
+        /* `Foo const *p`, `Foo __attribute__((x)) y` */
+        return is_qual_kw(k) || k == KW_ATTRIBUTE || k == KW_ATTRIBUTE2;
+    }
+    if (t->kind == CC_TK_PUNCT) {
+        if (t->punct == CC_P_STAR) {
+            /* `Foo * bar` is a declaration; `a * b` where a is a variable was
+             * excluded by the caller. Require a declarator-ish continuation. */
+            uint32_t j = i + 1;
+            while (j < p->n && (tok_is_p(tat(p, j), CC_P_STAR) ||
+                                (tat(p, j)->kind == CC_TK_IDENT && (kw_of(p, j) == KW_CONST || kw_of(p, j) == KW_RESTRICT ||
+                                                                     kw_of(p, j) == KW_RESTRICT2 || kw_of(p, j) == KW_VOLATILE))))
+                j++;
+            return (tat(p, j)->kind == CC_TK_IDENT && kw_of(p, j) == KW_NONE && !is_kw(p, j, KW_IN)) ||
+                   (tok_is_p(tat(p, j), CC_P_LPAREN) && (tok_is_p(tat(p, j + 1), CC_P_STAR) || tok_is_p(tat(p, j + 1), CC_P_LPAREN))) ||
+                   tok_is_p(tat(p, j), CC_P_RPAREN) || tok_is_p(tat(p, j), CC_P_COMMA) ||
+                   tok_is_p(tat(p, j), CC_P_LBRACKET) ||
+                   ((tok_is_p(tat(p, j), CC_P_UNWRAP) || tok_is_p(tat(p, j), CC_P_UNWRAP_OR)) && tok_is_p(tat(p, j + 1), CC_P_LPAREN));
+        }
+        if (t->punct == CC_P_LBRACKET)
+            return tok_is_p(tat(p, i + 1), CC_P_COLON) || tok_is_p(tat(p, i + 1), CC_P_COLONCOLON) || tok_is_p(tat(p, i + 1), CC_P_TILDE) ||
+                   (tat(p, i + 1)->kind == CC_TK_NUMBER && tok_is_p(tat(p, i + 2), CC_P_COLON));
+        if (t->punct == CC_P_LPAREN) {
+            /* `T (*fp)(int)` / `T (*arr)[3]` versus `macro(*p == 1)` */
+            uint32_t j = i + 1;
+            if (!tok_is_p(tat(p, j), CC_P_STAR) && !tok_is_p(tat(p, j), CC_P_CARET)) return false;
+            while (tok_is_p(tat(p, j), CC_P_STAR) || tok_is_p(tat(p, j), CC_P_CARET) ||
+                   (tat(p, j)->kind == CC_TK_IDENT && (kw_of(p, j) == KW_CONST || kw_of(p, j) == KW_RESTRICT || kw_of(p, j) == KW_RESTRICT2)))
+                j++;
+            if (tat(p, j)->kind != CC_TK_IDENT || kw_of(p, j) != KW_NONE) return false;
+            j++;
+            if (!tok_is_p(tat(p, j), CC_P_RPAREN)) return false;
+            return tok_is_p(tat(p, j + 1), CC_P_LPAREN) || tok_is_p(tat(p, j + 1), CC_P_LBRACKET);
+        }
+        if (t->punct == CC_P_UNWRAP || t->punct == CC_P_UNWRAP_OR)
+            return tok_is_p(tat(p, i + 1), CC_P_LPAREN);
+        if (t->punct == CC_P_COLONCOLON) {
+            uint32_t close;
+            if (!tok_is_p(tat(p, i + 1), CC_P_LBRACKET)) return false;
+            close = match_close(p, i + 1);
+            return !tok_is_p(tat(p, close + 1), CC_P_LPAREN) && !tok_is_p(tat(p, close + 1), CC_P_DOT);
+        }
+    }
+    if (t->kind == CC_TK_AT_WORD) return tok_is_word(p, i, "typeview");
+    return false;
+}
+
+/* In `X Y ...` with X unknown: is Y the type (so X is a specifier macro)?
+ * Y is the type when a declarator follows it, or when a keyword type follows
+ * (`CC_A CC_B void f()`); `T name[:] = ...` keeps Y as the declarator. */
+static bool second_is_type(P* p, uint32_t y) {
+    const CcToken* n = tat(p, y + 1);
+    if (is_type_start(p, y + 1) && kw_of(p, y + 1) != KW_NONE) return true;
+    if (n->kind == CC_TK_IDENT) {
+        const CcToken* after = tat(p, y + 2);
+        if (kw_of(p, y + 1) != KW_NONE || is_kw(p, y + 1, KW_IN)) return false;
+        /* Z after Y: `X Y Z(` / `X Y Z;` / `X Y Z =` — Z is the declarator (it may
+         * well be a name declared before, as a definition after its prototype) */
+        if (after->kind == CC_TK_PUNCT &&
+            (after->punct == CC_P_SEMI || after->punct == CC_P_ASSIGN || after->punct == CC_P_COMMA || after->punct == CC_P_LPAREN ||
+             after->punct == CC_P_LBRACKET || after->punct == CC_P_RPAREN || after->punct == CC_P_COLON))
+            return true;
+        if (name_is_var(p, tok_name(p, y + 1))) return false;
+        return second_is_type(p, y + 1) || declarator_follows(p, y + 2);
+    }
+    if (n->kind == CC_TK_PUNCT) {
+        if (n->punct == CC_P_STAR) return declarator_follows(p, y + 1);
+        if (n->punct == CC_P_LPAREN) return tok_is_p(tat(p, y + 2), CC_P_STAR) || tok_is_p(tat(p, y + 2), CC_P_LPAREN);
+        if (n->punct == CC_P_UNWRAP || n->punct == CC_P_UNWRAP_OR) return tok_is_p(tat(p, y + 2), CC_P_LPAREN);
+        if (n->punct == CC_P_COLONCOLON) return tok_is_p(tat(p, y + 2), CC_P_LBRACKET);
+        if (n->punct == CC_P_LBRACKET) {
+            uint32_t close = match_close(p, y + 1);
+            return (tok_is_p(tat(p, y + 2), CC_P_COLON) || tok_is_p(tat(p, y + 2), CC_P_COLONCOLON) || tok_is_p(tat(p, y + 2), CC_P_TILDE) ||
+                    (tat(p, y + 2)->kind == CC_TK_NUMBER && tok_is_p(tat(p, y + 3), CC_P_COLON))) &&
+                   (tat(p, close + 1)->kind == CC_TK_IDENT || tok_is_p(tat(p, close + 1), CC_P_STAR));
+        }
+    }
+    return false;
+}
+
+/* Can the identifier at `i`, unknown to the scope stack, be taken as a type
+ * name in specifier position? */
+static bool unknown_ident_is_type(P* p, uint32_t i) {
+    CCSlice nm = tok_name(p, i);
+    if (name_is_var(p, nm)) return false;
+    return declarator_follows(p, i + 1);
+}
+
+/* ---- Concurrent-C type suffixes ------------------------------------------------ */
+
+static CcType* parse_struct_or_union(P* p);
+static CcType* parse_enum(P* p);
+
+/* `[:]` `[n:]` `[:!]` `[:0]` `[:0!]` after a type, at the `[`. */
+static CcType* parse_slice_suffix(P* p, CcType* base, uint32_t first) {
+    CcType* t = type_blank(p, span2(first, first));
+    CcSliceType sl;
+    uint32_t open = p->i;
+    int extra = 0;
+    memset(&sl, 0, sizeof sl);
+    sl.elem = base;
+    adv(p); /* [ */
+    if (!at_p(p, CC_P_COLON) && !at_p(p, CC_P_COLONCOLON)) sl.fixed = parse_cond(p);
+    if (accept_p(p, CC_P_COLONCOLON)) extra = 1;
+    else if (!expect_p(p, CC_P_COLON, "the slice type")) {
+        t->k = { .slice = sl };
+        sync(p, open);
+        return t;
+    }
+    if (p->t[p->i].kind == CC_TK_NUMBER && at_text(p, "0")) { sl.sentinel = true; adv(p); }
+    if (accept_p(p, CC_P_BANG)) sl.unique = true;
+    /* nested ranks: `T[::]` is `T[:][:]`, refinements sit on the innermost rank */
+    for (;;) {
+        if (accept_p(p, CC_P_COLONCOLON)) { extra += 2; continue; }
+        if (accept_p(p, CC_P_COLON)) { extra++; continue; }
+        break;
+    }
+    expect_close(p, CC_P_RBRACKET, "slice type", open);
+    t->k = { .slice = sl };
+    t->span = span_from(p, first);
+    while (extra-- > 0) {
+        CcType* outer = type_blank(p, t->span);
+        CcSliceType o;
+        memset(&o, 0, sizeof o);
+        o.elem = t;
+        outer->k = { .slice = o };
+        t = outer;
+    }
+    return t;
+}
+
+/* `[~cap topo ordered dir]` after a type, at the `[`. */
+static CcType* parse_chan_suffix(P* p, CcType* base, uint32_t first) {
+    CcType* t = type_blank(p, span2(first, first));
+    CcChanType ch;
+    uint32_t open = p->i;
+    memset(&ch, 0, sizeof ch);
+    ch.elem = base;
+    ch.topology = CC_SLICE_LIT("");
+    ch.policy = CC_SLICE_LIT("");
+    adv(p); /* [ */
+    adv(p); /* ~ */
+    /* capacity: anything up to a topology / direction / ordered */
+    if (!at_p(p, CC_P_LT) && !at_p(p, CC_P_GT) && !at_p(p, CC_P_RBRACKET) &&
+        !(at_ident(p) && (at_text(p, "ordered") || at_text(p, "sync") || at_text(p, "async") ||
+                          (p->t[p->i].text.len == 1 && tok_is_p(tk(p, 1), CC_P_COLON))))) {
+        ch.cap = parse_unary(p);
+    }
+    /* topology `1:1`, `N:1`, `1:N`, `N:N` */
+    if ((at_ident(p) || p->t[p->i].kind == CC_TK_NUMBER) && tok_is_p(tk(p, 1), CC_P_COLON) &&
+        (tk(p, 2)->kind == CC_TK_IDENT || tk(p, 2)->kind == CC_TK_NUMBER)) {
+        const CcToken* a = &p->t[p->i];
+        const CcToken* b = tk(p, 2);
+        ch.topology = cc_slice_from_buffer((char*)a->text.ptr, (size_t)(b->text.ptr + b->text.len - a->text.ptr));
+        adv(p); adv(p); adv(p);
+    }
+    for (;;) {
+        if (at_ident(p) && at_text(p, "ordered")) { ch.ordered = true; adv(p); continue; }
+        if (at_ident(p) && at_text(p, "sync")) { ch.sync = true; adv(p); continue; }
+        if (at_ident(p) && at_text(p, "async")) { ch.sync = false; adv(p); continue; }
+        break;
+    }
+    if (at_ident(p) && at_text(p, "owned")) {
+        ch.owned = true;
+        adv(p);
+        if (at_p(p, CC_P_LBRACE)) ch.hooks = parse_initializer(p);
+    }
+    if (at_p(p, CC_P_LT)) { ch.dir = '<'; adv(p); }
+    else if (at_p(p, CC_P_GT)) { ch.dir = '>'; adv(p); }
+    else if (!ch.owned) {
+        CCSlice found = tok_desc(p, p->i);
+        CCString m = @string(`expected '<' or '>' to give the channel type its direction, found ${found}`, p->arena);
+        err_here(p, m);
+    }
+    if (accept_p(p, CC_P_COMMA)) {
+        if (at_ident(p)) { ch.policy = tok_name(p, p->i); adv(p); }
+        else {
+            CCSlice found = tok_desc(p, p->i);
+            CCString m = @string(`expected a drop policy name after ',' in the channel type, found ${found}`, p->arena);
+            err_here(p, m);
+        }
+    }
+    expect_close(p, CC_P_RBRACKET, "channel type", open);
+    t->k = { .chan = ch };
+    t->span = span_from(p, first);
+    return t;
+}
+
+/* `!>(E)` / `?>(E)` after a type. */
+static CcType* parse_result_suffix(P* p, CcType* base, uint32_t first) {
+    bool optional = at_p(p, CC_P_UNWRAP_OR);
+    uint32_t open;
+    CcType* err;
+    adv(p);
+    open = p->i;
+    if (!expect_p(p, CC_P_LPAREN, optional ? "the ?>(E) type" : "the !>(E) type"))
+        return cc_type_result(base, NULL, optional, span2(first, first), p->arena);
+    err = parse_type_name(p);
+    expect_close(p, CC_P_RPAREN, "error type", open);
+    return cc_type_result(base, err, optional, span_from(p, first), p->arena);
+}
+
+/* Is a CC type suffix (`!>(`, `?>(`, `[:`, `[~`, `[n:`) at `i`, possibly
+ * after a run of `*` / qualifiers that then belong to the value type? */
+static bool cc_suffix_at(P* p, uint32_t i, uint32_t* after_ptrs) {
+    uint32_t j = i;
+    while (j < p->n && (tok_is_p(tat(p, j), CC_P_STAR) || (tat(p, j)->kind == CC_TK_IDENT && is_qual_kw(kw_of(p, j)))))
+        j++;
+    if (after_ptrs) *after_ptrs = j;
+    if ((tok_is_p(tat(p, j), CC_P_UNWRAP) || tok_is_p(tat(p, j), CC_P_UNWRAP_OR)) && tok_is_p(tat(p, j + 1), CC_P_LPAREN))
+        return true;
+    if (tok_is_p(tat(p, j), CC_P_LBRACKET)) {
+        if (tok_is_p(tat(p, j + 1), CC_P_COLON) || tok_is_p(tat(p, j + 1), CC_P_COLONCOLON) || tok_is_p(tat(p, j + 1), CC_P_TILDE)) return true;
+        if (tat(p, j + 1)->kind == CC_TK_NUMBER && tok_is_p(tat(p, j + 2), CC_P_COLON)) return true;
+        if (tat(p, j + 1)->kind == CC_TK_IDENT && tok_is_p(tat(p, j + 2), CC_P_COLON) && tok_is_p(tat(p, j + 3), CC_P_RBRACKET)) return true;
+    }
+    return false;
+}
+
+/* Wrap `base` in the CC suffixes that follow it (with pointer absorption). */
+static CcType* parse_cc_suffixes(P* p, CcType* base, uint32_t first) {
+    uint32_t after;
+    while (cc_suffix_at(p, p->i, &after)) {
+        while (p->i < after) {
+            if (at_p(p, CC_P_STAR)) {
+                base = cc_type_pointer(base, span2(first, p->i), p->arena);
+                adv(p);
+            } else {
+                Kw kq = kw_of(p, p->i);
+                if (kq == KW_CONST || kq == KW_CONST2 || kq == KW_CONST3) base->quals |= CC_QUAL_CONST;
+                else if (kq == KW_VOLATILE || kq == KW_VOLATILE2 || kq == KW_VOLATILE3) base->quals |= CC_QUAL_VOLATILE;
+                else base->quals |= CC_QUAL_RESTRICT;
+                base->span.last = p->i;
+                adv(p);
+            }
+        }
+        if (at_p(p, CC_P_LBRACKET)) {
+            if (tok_is_p(tk(p, 1), CC_P_TILDE)) base = parse_chan_suffix(p, base, first);
+            else base = parse_slice_suffix(p, base, first);
+        } else base = parse_result_suffix(p, base, first);
+    }
+    return base;
+}
+
+/* ---- specifiers ------------------------------------------------------------------- */
+
+static void spec_set_type(Specs* S, CcType* t) {
+    S->type = t;
+    S->saw_type = true;
+    S->saw_any = true;
+}
+
+/* Declaration specifiers. `force_type`: an unknown identifier is a type
+ * name regardless of what follows (abstract contexts: casts, sizeof,
+ * _Generic arms, parameters). */
+static void parse_specs(P* p, Specs* S, bool force_type) {
+    Builtin b;
+    uint32_t bfirst = 0;
+    bool have_builtin = false;
+    Vec::[CcAttr]* sa;
+    memset(S, 0, sizeof *S);
+    memset(&b, 0, sizeof b);
+    S->attrs = vec_new::[CcAttr](p->arena);
+    sa = &S->attrs;
+    S->first = p->i;
+    for (;;) {
+        const CcToken* t = &p->t[p->i];
+        Kw k;
+        if (t->kind == CC_TK_AT_WORD) {
+            if (at_word(p, "async")) { S->specs |= CC_SPEC_ASYNC; adv(p); S->saw_any = true; continue; }
+            if (at_word(p, "blocking")) { S->specs |= CC_SPEC_BLOCKING; adv(p); S->saw_any = true; continue; }
+            if (at_word(p, "nonblocking") || at_word(p, "noblock")) { S->specs |= CC_SPEC_NONBLOCKING; adv(p); S->saw_any = true; continue; }
+            if (at_word(p, "latency_sensitive")) { S->specs |= CC_SPEC_LATENCY_SENSITIVE; adv(p); S->saw_any = true; continue; }
+            if (at_word(p, "typeview") && tok_is_p(tk(p, 1), CC_P_LPAREN)) {
+                uint32_t first = p->i;
+                CCSlice v = CC_SLICE_LIT("");
+                adv(p); adv(p);
+                if (at_ident(p)) { v = tok_name(p, p->i); adv(p); }
+                else {
+                    CCString m = msg3(p, "expected the view name in @typeview", CC_SLICE_LIT("(Name)"), "");
+                    err_here(p, m);
+                }
+                expect_close(p, CC_P_RPAREN, "@typeview(Name)", first + 1);
+                sa->push(attr_make(p, first, CC_SLICE_LIT("typeview"), v));
+                S->saw_any = true;
+                continue;
+            }
+            if (at_word(p, "auto") && tok_is_p(tk(p, 1), CC_P_LPAREN) && !S->saw_type) {
+                uint32_t first = p->i;
+                uint32_t open = p->i + 1;
+                CcType* t2 = type_blank(p, span2(first, first));
+                CcAutoType au;
+                adv(p); adv(p);
+                au.src = parse_expr(p);
+                expect_close(p, CC_P_RPAREN, "@auto(src)", open);
+                t2->k = { .auto_ = au };
+                t2->span = span_from(p, first);
+                spec_set_type(S, t2);
+                continue;
+            }
+            break;
+        }
+        if (t->kind == CC_TK_PP && S->saw_any && !S->saw_type) {
+            /* a preprocessor line among the specifiers (`#if` around an attribute) */
+            uint32_t first = p->i;
+            uint32_t last;
+            bool skipped;
+            pp_note(p, p->i, &last, &skipped);
+            sa->push(attr_make(p, first, CC_SLICE_LIT("#"), CC_SLICE_LIT("")));
+            continue;
+        }
+        if (t->kind != CC_TK_IDENT) break;
+        k = kw_of(p, p->i);
+        switch (k) {
+        case KW_TYPEDEF: S->specs |= CC_SPEC_TYPEDEF; adv(p); S->saw_any = true; continue;
+        case KW_EXTERN: S->specs |= CC_SPEC_EXTERN; adv(p); S->saw_any = true; continue;
+        case KW_STATIC: S->specs |= CC_SPEC_STATIC; adv(p); S->saw_any = true; continue;
+        case KW_AUTO: S->specs |= CC_SPEC_AUTO; adv(p); S->saw_any = true; continue;
+        case KW_REGISTER: S->specs |= CC_SPEC_REGISTER; adv(p); S->saw_any = true; continue;
+        case KW_THREAD_LOCAL: case KW_THREAD: S->specs |= CC_SPEC_THREAD; adv(p); S->saw_any = true; continue;
+        case KW_CONST: case KW_CONST2: case KW_CONST3: S->quals |= CC_QUAL_CONST; adv(p); S->saw_any = true; continue;
+        case KW_VOLATILE: case KW_VOLATILE2: case KW_VOLATILE3: S->quals |= CC_QUAL_VOLATILE; adv(p); S->saw_any = true; continue;
+        case KW_RESTRICT: case KW_RESTRICT2: case KW_RESTRICT3: S->quals |= CC_QUAL_RESTRICT; adv(p); S->saw_any = true; continue;
+        case KW_INLINE: case KW_INLINE2: case KW_INLINE3: case KW_FORCEINLINE: S->specs |= CC_SPEC_INLINE; adv(p); S->saw_any = true; continue;
+        case KW_NORETURN: S->specs |= CC_SPEC_NORETURN; adv(p); S->saw_any = true; continue;
+        case KW_EXTENSION: adv(p); S->saw_any = true; continue;
+        case KW_ATTRIBUTE: case KW_ATTRIBUTE2: case KW_ALIGNAS: case KW_DECLSPEC: case KW_ALIGNAS2:
+            sa->push(parse_attr(p)); S->saw_any = true; continue;
+        case KW_ATOMIC:
+            if (tok_is_p(tk(p, 1), CC_P_LPAREN) && !S->saw_type) {
+                uint32_t first = p->i;
+                uint32_t open = p->i + 1;
+                CcType* t2 = type_blank(p, span2(first, first));
+                CcPointerType at;
+                adv(p); adv(p);
+                at.pointee = parse_type_name(p);
+                expect_close(p, CC_P_RPAREN, "_Atomic(type)", open);
+                t2->k = { .atomic = at };
+                t2->span = span_from(p, first);
+                spec_set_type(S, t2);
+                continue;
+            }
+            S->quals |= CC_QUAL_ATOMIC; adv(p); S->saw_any = true; continue;
+        case KW_STRUCT: case KW_UNION:
+            if (S->saw_type) break;
+            spec_set_type(S, parse_struct_or_union(p));
+            continue;
+        case KW_ENUM:
+            if (S->saw_type) break;
+            spec_set_type(S, parse_enum(p));
+            continue;
+        case KW_TYPEOF: case KW_TYPEOF2: case KW_TYPEOF3: {
+            uint32_t first = p->i;
+            uint32_t open = p->i + 1;
+            CcType* t2;
+            CcTypeofType ty;
+            if (S->saw_type) break;
+            t2 = type_blank(p, span2(first, first));
+            ty.expr = NULL;
+            ty.type = NULL;
+            adv(p);
+            if (!expect_p(p, CC_P_LPAREN, "typeof")) { t2->k = { .typeof_ = ty }; spec_set_type(S, t2); continue; }
+            if (is_type_start(p, p->i)) ty.type = parse_type_name(p);
+            else ty.expr = parse_expr(p);
+            expect_close(p, CC_P_RPAREN, "typeof", open);
+            t2->k = { .typeof_ = ty };
+            t2->span = span_from(p, first);
+            spec_set_type(S, t2);
+            continue;
+        }
+        case KW_BUILTIN_VA_LIST: case KW_NULLPTR_T: {
+            uint32_t first;
+            CCSlice nm;
+            if (S->saw_type) break;
+            first = p->i;
+            nm = tok_name(p, p->i);
+            adv(p);
+            spec_set_type(S, type_named(p, nm, first));
+            continue;
+        }
+        default: break;
+        }
+        if (builtin_add(&b, k)) {
+            /* a builtin keyword after a non-builtin type ends the specifiers */
+            if (S->saw_type && !have_builtin) break;
+            if (!have_builtin) { bfirst = p->i; have_builtin = true; }
+            adv(p);
+            spec_set_type(S, cc_type_named(builtin_name(p, &b), span_from(p, bfirst), p->arena));
+            continue;
+        }
+        if (k != KW_NONE) break;
+        /* an identifier: typedef name, generic family, or the declarator */
+        if (S->saw_type) break;
+        {
+            CCSlice nm = tok_name(p, p->i);
+            uint32_t first = p->i;
+            bool known = name_is_type(p, nm);
+            if (known && name_is_all_caps(nm) && tok_is_p(tk(p, 1), CC_P_LPAREN) && !tok_is_p(tk(p, 2), CC_P_STAR) &&
+                !tok_is_p(tk(p, 2), CC_P_LPAREN) && !tok_is_p(tk(p, 2), CC_P_RPAREN))
+                known = false; /* `CC_CAT_3(a, b, c) name`: a macro-made type, not the recorded name */
+            if (!known) {
+                /* `m.ret x`: a comptime reflection member used as a type */
+                if (tok_is_p(tk(p, 1), CC_P_DOT) && tk(p, 2)->kind == CC_TK_IDENT && tk(p, 3)->kind == CC_TK_IDENT &&
+                    kw_of(p, p->i + 3) == KW_NONE && !name_is_type(p, nm)) {
+                    CcType* t2 = type_blank(p, span2(first, first));
+                    CcExpr* m = cc_expr_ident(nm, span2(first, first), p->arena);
+                    CcTypeofType ty;
+                    adv(p);
+                    while (at_p(p, CC_P_DOT) && tk(p, 1)->kind == CC_TK_IDENT) {
+                        CCSlice fld;
+                        adv(p);
+                        fld = tok_name(p, p->i);
+                        adv(p);
+                        m = cc_expr_member(m, fld, false, span_from(p, first), p->arena);
+                    }
+                    ty.expr = m;
+                    ty.type = NULL;
+                    t2->k = { .typeof_ = ty };
+                    t2->span = span_from(p, first);
+                    spec_set_type(S, t2);
+                    continue;
+                }
+                if (name_is_var(p, nm)) break;
+                /* `NAME(args) declarator`: a macro that expands to a type */
+                if (tok_is_p(tk(p, 1), CC_P_LPAREN) && !tok_is_p(tk(p, 2), CC_P_STAR) && !tok_is_p(tk(p, 2), CC_P_LPAREN)) {
+                    uint32_t close = match_close(p, p->i + 1);
+                    const CcToken* after = tat(p, close + 1);
+                    const CcToken* after2 = tat(p, close + 2);
+                    /* three short tests: one long initializer is clipped by the rewrite buffer */
+                    bool by_name = after->kind == CC_TK_IDENT && kw_of(p, close + 1) == KW_NONE && !after->at_line_start && !is_kw(p, close + 1, KW_IN);
+                    bool by_star = tok_is_p(after, CC_P_STAR) && !after->at_line_start && (after2->kind == CC_TK_IDENT || tok_is_p(after2, CC_P_STAR));
+                    bool by_abstract = tok_is_p(after, CC_P_RPAREN) || tok_is_p(after, CC_P_COMMA) || tok_is_p(after, CC_P_STAR) || tok_is_p(after, CC_P_RBRACKET);
+                    bool is_macro_type = by_name || by_star || (force_type && by_abstract);
+                    if (!is_macro_type) break;
+                    {
+                        CcType* t2 = type_blank(p, span2(first, first));
+                        CcGenericType g;
+                        uint32_t open = p->i + 1;
+                        g.family = nm;
+                        g.args = vec_new::[CcTypeRef](p->arena);
+                        adv(p); adv(p);
+                        while (!at_p(p, CC_P_RPAREN) && !at_eof(p)) {
+                            CcType* arg = parse_type_or_value_arg(p);
+                            g.args.push(arg);
+                            if (!accept_p(p, CC_P_COMMA)) break;
+                        }
+                        expect_close(p, CC_P_RPAREN, "macro type argument list", open);
+                        t2->k = { .macro = g };
+                        t2->span = span_from(p, first);
+                        spec_set_type(S, t2);
+                        continue;
+                    }
+                }
+                /* `static_inline void f()` / `local voidpf f()` / `CC_A CC_B void f()`: a macro
+                 * used as a specifier; the next identifier must itself be a type that is followed by a
+                 * declarator (so `uint16_t u16[:] = ...` keeps u16 as the declarator) */
+                if ((is_type_start(p, p->i + 1) && kw_of(p, p->i + 1) != KW_NONE) ||
+                    (tk(p, 1)->kind == CC_TK_AT_WORD && (tok_is_word(p, p->i + 1, "async") ||
+                    tok_is_word(p, p->i + 1, "blocking") || tok_is_word(p, p->i + 1, "nonblocking") || tok_is_word(p, p->i + 1, "noblock"))) ||
+                    (!force_type && tk(p, 1)->kind == CC_TK_IDENT && kw_of(p, p->i + 1) == KW_NONE && !name_is_var(p, tok_name(p, p->i + 1)) &&
+                     !is_kw(p, p->i + 1, KW_IN) && second_is_type(p, p->i + 1))) {
+                    Kw nk = kw_of(p, p->i + 1);
+                    if (nk != KW_ATTRIBUTE && nk != KW_ATTRIBUTE2) {
+                        sa->push(attr_make(p, first, nm, CC_SLICE_LIT("")));
+                        adv(p);
+                        S->saw_any = true;
+                        continue;
+                    }
+                }
+                if (!force_type && !unknown_ident_is_type(p, p->i)) break;
+                /* `name::[...]` is a generic type (or call: the caller checked) */
+                assume_type(p, nm);
+            }
+            adv(p);
+            if (at_p2(p, CC_P_COLONCOLON, CC_P_LBRACKET)) spec_set_type(S, parse_generic_args(p, nm, first));
+            else spec_set_type(S, type_named(p, nm, first));
+            continue;
+        }
+    }
+    if (S->type) {
+        S->type->quals |= S->quals;
+        S->type = parse_cc_suffixes(p, S->type, S->type->span.first);
+        /* trailing qualifiers after the type: `Foo const *p` */
+        for (;;) {
+            Kw kq = kw_of(p, p->i);
+            if (kq == KW_CONST || kq == KW_CONST2 || kq == KW_CONST3) { S->type->quals |= CC_QUAL_CONST; adv(p); continue; }
+            if (kq == KW_VOLATILE || kq == KW_VOLATILE2 || kq == KW_VOLATILE3) { S->type->quals |= CC_QUAL_VOLATILE; adv(p); continue; }
+            if (kq == KW_RESTRICT || kq == KW_RESTRICT2 || kq == KW_RESTRICT3) { S->type->quals |= CC_QUAL_RESTRICT; adv(p); continue; }
+            if (kq == KW_ATTRIBUTE || kq == KW_ATTRIBUTE2) { sa->push(parse_attr(p)); continue; }
+            break;
+        }
+        {
+            /* a @typeview(Name) qualifier belongs to the type */
+            Vec::[CcAttr]* ta = &S->type->attrs;
+            if (sa->len() && ta->len() == 0) {
+                size_t i;
+                size_t n = sa->len();
+                for (i = 0; i < n; i++) {
+                    CcAttr* at = sa->get_ptr(i);
+                    if (cc_slice_eq_cstr(&at->name, "typeview")) ta->push(*at);
+                }
+            }
+        }
+    }
+}
+
+/* An argument of a generic or macro type: a type, or a value. */
+static CcType* parse_type_or_value_arg(P* p) {
+    if (is_type_start(p, p->i) ||
+        (at_ident(p) && kw_of(p, p->i) == KW_NONE && !name_is_var(p, tok_name(p, p->i)) &&
+         (tok_is_p(tk(p, 1), CC_P_COMMA) || tok_is_p(tk(p, 1), CC_P_RPAREN) || tok_is_p(tk(p, 1), CC_P_RBRACKET) ||
+          tok_is_p(tk(p, 1), CC_P_STAR) || tok_is_p(tk(p, 1), CC_P_LBRACKET) || at_p2(p, CC_P_COLONCOLON, CC_P_LBRACKET))))
+        return parse_type_name(p);
+    {
+        uint32_t af = p->i;
+        CcType* arg = type_blank(p, span2(af, af));
+        CcValueType v;
+        v.expr = parse_cond(p);
+        arg->k = { .valarg = v };
+        arg->span = span_from(p, af);
+        return arg;
+    }
+}
+
+/* `Name::[T, U]` at the `::`. */
+static CcType* parse_generic_args(P* p, CCSlice family, uint32_t first) {
+    CcType* t = type_blank(p, span2(first, first));
+    CcGenericType g;
+    uint32_t open;
+    g.family = family;
+    g.args = vec_new::[CcTypeRef](p->arena);
+    adv(p); /* :: */
+    open = p->i;
+    adv(p); /* [ */
+    while (!at_p(p, CC_P_RBRACKET) && !at_eof(p)) {
+        CcType* arg = parse_type_or_value_arg(p);
+        g.args.push(arg);
+        if (!accept_p(p, CC_P_COMMA)) break;
+    }
+    expect_close(p, CC_P_RBRACKET, "generic argument list", open);
+    t->k = { .generic = g };
+    t->span = span_from(p, first);
+    return t;
+}
+
+/* Does a type name start at token `i`? (keywords, known typedef names,
+ * qualifiers, `struct` ...) */
+static bool is_type_start(P* p, uint32_t i) {
+    const CcToken* t = tat(p, i);
+    Kw k;
+    if (t->kind == CC_TK_AT_WORD) return tok_is_word(p, i, "typeview") || tok_is_word(p, i, "auto");
+    if (t->kind != CC_TK_IDENT) return false;
+    k = kw_of(p, i);
+    switch (k) {
+    case KW_VOID: case KW_CHAR: case KW_SHORT: case KW_INT: case KW_LONG: case KW_FLOAT: case KW_DOUBLE:
+    case KW_SIGNED: case KW_SIGNED2: case KW_SIGNED3: case KW_UNSIGNED: case KW_BOOL: case KW_COMPLEX:
+    case KW_STRUCT: case KW_UNION: case KW_ENUM: case KW_CONST: case KW_CONST2: case KW_CONST3:
+    case KW_VOLATILE: case KW_VOLATILE2: case KW_VOLATILE3: case KW_RESTRICT: case KW_RESTRICT2:
+    case KW_RESTRICT3: case KW_ATOMIC: case KW_TYPEOF: case KW_TYPEOF2: case KW_TYPEOF3:
+    case KW_TYPEDEF: case KW_EXTERN: case KW_STATIC: case KW_AUTO: case KW_REGISTER: case KW_THREAD_LOCAL:
+    case KW_THREAD: case KW_INLINE: case KW_INLINE2: case KW_INLINE3: case KW_FORCEINLINE: case KW_NORETURN:
+    case KW_EXTENSION: case KW_ATTRIBUTE: case KW_ATTRIBUTE2: case KW_ALIGNAS: case KW_DECLSPEC:
+    case KW_INT128: case KW_BUILTIN_VA_LIST: case KW_FLOAT128: case KW_NULLPTR_T: case KW_ALIGNAS2:
+        return true;
+    case KW_NONE: return name_is_type(p, tok_name(p, i));
+    default: return false;
+    }
+}
+
+/* ---- declarators ------------------------------------------------------------------- */
+
+static CcType* parse_declarator(P* p, CcType* base, bool abstract_ok, CCSlice* name_out, uint32_t* name_tok, CcAttrList* al);
+
+/* A function type shell at `(`: the parameter list, return unset. */
+static CcType* parse_func_shell(P* p) {
+    CcType* fsn = type_blank(p, span2(p->i, p->i));   /* not `fn`: that name is a CcFuncType* elsewhere in the unit */
+    CcFuncType f;
+    memset(&f, 0, sizeof f);
+    f.params = vec_new::[CcParam](p->arena);
+    parse_params(p, &f);
+    { CcTypeK kk = { .func = f }; fsn->k = kk; }   /* a shared arm name: the literal needs a typed local */
+    fsn->span = span_from(p, fsn->span.first);
+    return fsn;
+}
+
+/* Abstract-declarator aware declarator parse. Returns the full type; the
+ * name (if any) goes to *name_out with its token. */
+static CcType* parse_declarator(P* p, CcType* base, bool abstract_ok, CCSlice* name_out, uint32_t* name_tok, CcAttrList* al) {
+    uint32_t first = p->i;
+    CcType* t = base;
+    uint32_t nested_start = 0;
+    uint32_t nested_end = 0;
+    CcTypeList suffixes = vec_new::[CcTypeRef](p->arena);
+    size_t k;
+    if (name_out) *name_out = CC_SLICE_LIT("");
+    /* pointers */
+    for (;;) {
+        if (at_p(p, CC_P_STAR) || at_p(p, CC_P_CARET)) { /* `^`: the blocks extension, as a pointer */
+            t = cc_type_pointer(t, span2(first, p->i), p->arena);
+            adv(p);
+            continue;
+        }
+        {
+            Kw kq = kw_of(p, p->i);
+            if (kq == KW_CONST || kq == KW_CONST2 || kq == KW_CONST3) { t->quals |= CC_QUAL_CONST; adv(p); continue; }
+            if (kq == KW_VOLATILE || kq == KW_VOLATILE2 || kq == KW_VOLATILE3) { t->quals |= CC_QUAL_VOLATILE; adv(p); continue; }
+            if (kq == KW_RESTRICT || kq == KW_RESTRICT2 || kq == KW_RESTRICT3) { t->quals |= CC_QUAL_RESTRICT; adv(p); continue; }
+            if (kq == KW_ATOMIC && !tok_is_p(tk(p, 1), CC_P_LPAREN)) { t->quals |= CC_QUAL_ATOMIC; adv(p); continue; }
+            if (kq == KW_ATTRIBUTE || kq == KW_ATTRIBUTE2) {
+                CcAttr at = parse_attr(p);
+                if (al) al->push(at);
+                continue;
+            }
+            if (kq == KW_EXTENSION) { adv(p); continue; }
+        }
+        break;
+    }
+    /* the name, or a nested declarator */
+    if (at_p(p, CC_P_LPAREN)) {
+        const CcToken* n1 = tk(p, 1);
+        bool nested = tok_is_p(n1, CC_P_STAR) || tok_is_p(n1, CC_P_LPAREN) || tok_is_p(n1, CC_P_CARET) ||
+                      (n1->kind == CC_TK_IDENT && (kw_of(p, p->i + 1) == KW_ATTRIBUTE || kw_of(p, p->i + 1) == KW_ATTRIBUTE2));
+        if (!nested && n1->kind == CC_TK_IDENT && kw_of(p, p->i + 1) == KW_NONE && !name_is_type(p, tok_name(p, p->i + 1)) &&
+            tok_is_p(tk(p, 2), CC_P_RPAREN) && !abstract_ok)
+            nested = true;
+        if (nested) {
+            nested_start = p->i;
+            nested_end = match_close(p, p->i);
+            p->i = nested_end;
+            if (p->t[p->i].kind == CC_TK_EOF) {
+                CCString m = @string(`unterminated parenthesised declarator`, p->arena);
+                err_at(p, nested_start, m);
+                return t;
+            }
+            adv(p);
+        }
+    }
+    if (!nested_start && at_ident(p) && kw_of(p, p->i) == KW_NONE &&
+        !(abstract_ok && name_is_type(p, tok_name(p, p->i)) &&
+          !(tok_is_p(tk(p, 1), CC_P_COMMA) || tok_is_p(tk(p, 1), CC_P_RPAREN) || tok_is_p(tk(p, 1), CC_P_ASSIGN) ||
+            tok_is_p(tk(p, 1), CC_P_LBRACKET)))) {
+        if (name_out) *name_out = tok_name(p, p->i);
+        if (name_tok) *name_tok = p->i;
+        adv(p);
+    } else if (!nested_start && !abstract_ok) {
+        if (at_ident(p) && kw_of(p, p->i) != KW_NONE) {
+            CCSlice nm = tok_name(p, p->i);
+            CCString m = @string(`'${nm}' is a keyword and cannot be a declarator name`, p->arena);
+            err_here(p, m);
+        } else {
+            CCSlice found = tok_desc(p, p->i);
+            CCString m = @string(`expected a name in the declarator, found ${found}`, p->arena);
+            err_here(p, m);
+        }
+        return t;
+    }
+    /* suffixes */
+    for (;;) {
+        if (at_p(p, CC_P_LBRACKET)) {
+            uint32_t open = p->i;
+            const CcToken* n1 = tk(p, 1);
+            CcType* s;
+            CcArrayType ar;
+            uint32_t aquals = 0;
+            if (tok_is_p(n1, CC_P_TILDE)) { s = parse_chan_suffix(p, NULL, open); suffixes.push(s); continue; }
+            if (tok_is_p(n1, CC_P_COLON) || tok_is_p(n1, CC_P_COLONCOLON) || (n1->kind == CC_TK_NUMBER && tok_is_p(tk(p, 2), CC_P_COLON))) {
+                s = parse_slice_suffix(p, NULL, open);
+                suffixes.push(s);
+                continue;
+            }
+            memset(&ar, 0, sizeof ar);
+            adv(p);
+            for (;;) {
+                Kw kq = kw_of(p, p->i);
+                if (kq == KW_STATIC) { ar.is_static = true; adv(p); continue; }
+                if (kq == KW_CONST || kq == KW_CONST2 || kq == KW_CONST3) { aquals |= CC_QUAL_CONST; adv(p); continue; }
+                if (kq == KW_VOLATILE) { aquals |= CC_QUAL_VOLATILE; adv(p); continue; }
+                if (kq == KW_RESTRICT || kq == KW_RESTRICT2 || kq == KW_RESTRICT3) { aquals |= CC_QUAL_RESTRICT; adv(p); continue; }
+                break;
+            }
+            if (at_p(p, CC_P_STAR) && tok_is_p(tk(p, 1), CC_P_RBRACKET)) { ar.is_star = true; adv(p); }
+            else if (!at_p(p, CC_P_RBRACKET)) {
+                ar.size = parse_assign(p);
+                if (at_p(p, CC_P_COLON)) {
+                    /* `T name[n:]` written after the name */
+                    CcType* sl = type_blank(p, span2(open, open));
+                    CcSliceType st;
+                    memset(&st, 0, sizeof st);
+                    st.fixed = ar.size;
+                    adv(p);
+                    if (p->t[p->i].kind == CC_TK_NUMBER && at_text(p, "0")) { st.sentinel = true; adv(p); }
+                    if (accept_p(p, CC_P_BANG)) st.unique = true;
+                    expect_close(p, CC_P_RBRACKET, "slice type", open);
+                    sl->k = { .slice = st };
+                    sl->span = span_from(p, open);
+                    suffixes.push(sl);
+                    continue;
+                }
+            }
+            expect_close(p, CC_P_RBRACKET, "array declarator", open);
+            s = type_blank(p, span_from(p, open));
+            s->quals = aquals;
+            s->k = { .array = ar };
+            suffixes.push(s);
+            continue;
+        }
+        if (at_p(p, CC_P_LPAREN)) {
+            suffixes.push(parse_func_shell(p));
+            continue;
+        }
+        break;
+    }
+    /* build: suffixes apply right to left onto the pointer type */
+    for (k = suffixes.len(); k > 0; k--) {
+        CcType* s = *suffixes.get_ptr(k - 1);
+        CcType* inner = s;
+        while (slice_elem(inner)) inner = slice_elem(inner); /* nested `[::]` ranks */
+        type_set_elem(inner, t);
+        s->span.first = first;
+        t = s;
+    }
+    /* a nested declarator wraps around everything so far */
+    if (nested_start) {
+        uint32_t save = p->i;
+        p->i = nested_start + 1;
+        t = parse_declarator(p, t, abstract_ok, name_out, name_tok, al);
+        if (p->i != nested_end) {
+            CCSlice found = tok_desc(p, p->i);
+            CCString m = @string(`unexpected ${found} inside the parenthesised declarator`, p->arena);
+            err_here(p, m);
+        }
+        p->i = save;
+    }
+    if (t != base) t->span = span_from(p, first);
+    return t;
+}
+
+/* A type name: specifiers plus an abstract declarator. */
+static CcType* parse_type_name(P* p) {
+    Specs S;
+    CcType* t;
+    uint32_t first = p->i;
+    parse_specs(p, &S, true);
+    if (!S.type) {
+        CCSlice found = tok_desc(p, p->i);
+        CCString m = @string(`expected a type, found ${found}`, p->arena);
+        err_here(p, m);
+        return type_named(p, CC_SLICE_LIT("int"), first);
+    }
+    t = parse_declarator(p, S.type, true, NULL, NULL, &S.attrs);
+    if (t && S.attrs.len()) {
+        Vec::[CcAttr]* ta = &t->attrs;
+        push_attrs(ta, &S.attrs);
+    }
+    return t;
+}
+
+/* ---- parameters ---------------------------------------------------------------------- */
+
+static CcParam param_blank(P* p, uint32_t first) {
+    CcParam pa;
+    memset(&pa, 0, sizeof pa);
+    pa.span = span2(first, first);
+    pa.name = CC_SLICE_LIT("");
+    pa.attrs = vec_new::[CcAttr](p->arena);
+    return pa;
+}
+
+/* Parameter list at `(`. */
+static void parse_params(P* p, CcFuncType* fn) {
+    uint32_t open = p->i;
+    Vec::[CcParam]* pl = &fn->params;
+    adv(p);
+    if (accept_p(p, CC_P_RPAREN)) { fn->has_prototype = false; return; }
+    fn->has_prototype = true;
+    if (at_kw(p, KW_VOID) && tok_is_p(tk(p, 1), CC_P_RPAREN)) { adv(p); adv(p); return; }
+    for (;;) {
+        CcParam pa = param_blank(p, p->i);
+        uint32_t first = p->i;
+        if (p->t[p->i].kind == CC_TK_PP) {
+            uint32_t last;
+            bool skipped;
+            pa.is_pp = true;
+            pa.pp_tok = p->i;
+            pp_note(p, p->i, &last, &skipped);
+            pa.span = span2(first, last);
+            pl->push(pa);
+            if (at_p(p, CC_P_RPAREN)) break;
+            continue;
+        }
+        if (at_p(p, CC_P_ELLIPSIS)) {
+            fn->variadic = true;
+            fn->variadic_tok = p->i;
+            adv(p);
+        } else if (at_ident(p) && kw_of(p, p->i) == KW_NONE && !name_is_type(p, tok_name(p, p->i)) &&
+                   (tok_is_p(tk(p, 1), CC_P_COMMA) || tok_is_p(tk(p, 1), CC_P_RPAREN) || tok_is_p(tk(p, 1), CC_P_ASSIGN))) {
+            /* a bare name: closure parameter or identifier-list parameter */
+            pa.name = tok_name(p, p->i);
+            adv(p);
+            if (accept_p(p, CC_P_ASSIGN)) pa.default_value = parse_assign(p);
+            pa.span = span_from(p, first);
+            pl->push(pa);
+        } else {
+            Specs S;
+            parse_specs(p, &S, true);
+            if (!S.type) {
+                CCSlice found = tok_desc(p, p->i);
+                CCString m = @string(`expected a parameter declaration, found ${found}`, p->arena);
+                err_here(p, m);
+                /* skip to the next `,` or `)` */
+                while (!at_eof(p) && !at_p(p, CC_P_COMMA) && !at_p(p, CC_P_RPAREN)) {
+                    if (at_p(p, CC_P_LPAREN) || at_p(p, CC_P_LBRACKET) || at_p(p, CC_P_LBRACE)) skip_balanced(p); else adv(p);
+                }
+                if (at_p(p, CC_P_RPAREN)) break;
+                if (!accept_p(p, CC_P_COMMA)) break;
+                continue;
+            }
+            pa.type = parse_declarator(p, S.type, true, &pa.name, NULL, &S.attrs);
+            parse_attrs(p, &S.attrs);
+            pa.attrs = S.attrs;
+            if (accept_p(p, CC_P_ASSIGN)) pa.default_value = parse_assign(p);
+            pa.span = span_from(p, first);
+            pl->push(pa);
+        }
+        if (accept_p(p, CC_P_COMMA)) {
+            if (at_p(p, CC_P_RPAREN)) break;
+            continue;
+        }
+        break;
+    }
+    expect_close(p, CC_P_RPAREN, "parameter list", open);
+}
+
+/* ---- struct / union / enum bodies ------------------------------------------------------ */
+
+static CcField field_blank(P* p, uint32_t first) {
+    CcField f;
+    memset(&f, 0, sizeof f);
+    f.span = span2(first, first);
+    f.name = CC_SLICE_LIT("");
+    f.attrs = vec_new::[CcAttr](p->arena);
+    return f;
+}
+
+/* Members of a struct/union body, at the token after `{`. */
+static void parse_members(P* p, CcRecordType* st, uint32_t open) {
+    Vec::[CcField]* fl = &st->fields;
+    while (!at_p(p, CC_P_RBRACE) && !at_eof(p)) {
+        uint32_t first = p->i;
+        Specs S;
+        if (p->t[p->i].kind == CC_TK_PP) {
+            CcField f = field_blank(p, first);
+            uint32_t last;
+            bool skipped;
+            f.is_pp = true;
+            f.pp_tok = p->i;
+            pp_note(p, p->i, &last, &skipped);
+            f.span = span2(first, last);
+            fl->push(f);
+            continue;
+        }
+        if (accept_p(p, CC_P_SEMI)) continue;
+        if (at_kw(p, KW_STATIC_ASSERT)) {
+            CCString m = @string(`_Static_assert inside a struct body is not supported by this parser`, p->arena);
+            err_here(p, m);
+            sync(p, first);
+            continue;
+        }
+        parse_specs(p, &S, false);
+        if (!S.type) {
+            CCSlice found = tok_desc(p, p->i);
+            CCString m = @string(`expected a member declaration, found ${found}`, p->arena);
+            err_here(p, m);
+            sync(p, first);
+            continue;
+        }
+        if (at_p(p, CC_P_SEMI) || at_p(p, CC_P_COLON)) {
+            /* anonymous struct/union member, or an unnamed bit-field */
+            CcField f = field_blank(p, first);
+            f.type = S.type;
+            f.attrs = S.attrs;
+            if (accept_p(p, CC_P_COLON)) f.bits = parse_cond(p);
+            parse_attrs(p, &f.attrs);
+            expect_semi(p, "the member declaration");
+            f.span = span_from(p, first);
+            fl->push(f);
+            continue;
+        }
+        for (;;) {
+            CcField f = field_blank(p, first);
+            uint32_t dfirst = p->i;
+            Vec::[CcAttr] da = vec_new::[CcAttr](p->arena);
+            f.type = parse_declarator(p, S.type, false, &f.name, NULL, &da);
+            if (accept_p(p, CC_P_COLON)) f.bits = parse_cond(p);
+            parse_attrs(p, &da);
+            push_attrs(&f.attrs, &S.attrs);
+            push_attrs(&f.attrs, &da);
+            if (accept_p(p, CC_P_COMMA)) {
+                f.span = span2(dfirst == first ? first : dfirst, last_tok(p));
+                fl->push(f);
+                continue;
+            }
+            expect_semi(p, "the member declaration");
+            f.span = span2(dfirst == first ? first : dfirst, last_tok(p));
+            fl->push(f);
+            break;
+        }
+        if (p->i == first) sync(p, first);
+    }
+    expect_close(p, CC_P_RBRACE, "struct body", open);
+}
+
+static CcType* parse_struct_or_union(P* p) {
+    uint32_t first = p->i;
+    CcType* t = type_blank(p, span2(first, first));
+    CcRecordType r;
+    Vec::[CcAttr]* ta = &t->attrs;
+    memset(&r, 0, sizeof r);
+    r.tag = CC_SLICE_LIT("");
+    r.fields = vec_new::[CcField](p->arena);
+    r.is_union = at_kw(p, KW_UNION);
+    adv(p);
+    parse_attrs(p, ta);
+    if (at_ident(p) && kw_of(p, p->i) == KW_NONE) { r.tag = tok_name(p, p->i); adv(p); }
+    if (at_p(p, CC_P_LBRACE)) {
+        uint32_t open = p->i;
+        adv(p);
+        r.is_definition = true;
+        parse_members(p, &r, open);
+        parse_attrs(p, ta);
+    } else if (!r.tag.len) {
+        CCSlice found = tok_desc(p, p->i);
+        CCString m = r.is_union ? @string(`expected a tag or '{' after 'union', found ${found}`, p->arena)
+                                : @string(`expected a tag or '{' after 'struct', found ${found}`, p->arena);
+        err_here(p, m);
+    }
+    t->k = { .record = r };
+    t->span = span_from(p, first);
+    return t;
+}
+
+static CcType* parse_enum(P* p) {
+    uint32_t first = p->i;
+    CcType* t = type_blank(p, span2(first, first));
+    CcEnumType en;
+    Vec::[CcAttr]* ta = &t->attrs;
+    memset(&en, 0, sizeof en);
+    en.tag = CC_SLICE_LIT("");
+    en.items = vec_new::[CcEnumerator](p->arena);
+    adv(p);
+    parse_attrs(p, ta);
+    if (at_ident(p) && kw_of(p, p->i) == KW_NONE) { en.tag = tok_name(p, p->i); adv(p); }
+    if (at_p(p, CC_P_COLON)) { /* C23 fixed underlying type */
+        adv(p);
+        en.base = parse_type_name(p);
+    }
+    if (at_p(p, CC_P_LBRACE)) {
+        uint32_t open = p->i;
+        adv(p);
+        en.is_definition = true;
+        while (!at_p(p, CC_P_RBRACE) && !at_eof(p)) {
+            CcEnumerator e;
+            uint32_t efirst = p->i;
+            memset(&e, 0, sizeof e);
+            e.span = span2(efirst, efirst);
+            e.name = CC_SLICE_LIT("");
+            if (p->t[p->i].kind == CC_TK_PP) {
+                uint32_t last;
+                bool skipped;
+                e.is_pp = true;
+                e.pp_tok = p->i;
+                pp_note(p, p->i, &last, &skipped);
+                e.span = span2(efirst, last);
+                en.items.push(e);
+                continue;
+            }
+            if (at_word(p, "comptime")) {
+                e.comptime = parse_at_stmt(p);
+                e.span = span_from(p, efirst);
+                en.items.push(e);
+                accept_p(p, CC_P_COMMA);
+                continue;
+            }
+            if (!at_ident(p)) {
+                CCSlice found = tok_desc(p, p->i);
+                CCString m = @string(`expected an enumerator name, found ${found}`, p->arena);
+                err_here(p, m);
+                sync(p, efirst);
+                if (at_p(p, CC_P_RBRACE)) break;
+                continue;
+            }
+            e.name = tok_name(p, p->i);
+            declare_var(p, e.name);
+            adv(p);
+            {
+                Vec::[CcAttr] ea = vec_new::[CcAttr](p->arena);
+                parse_attrs(p, &ea);
+            }
+            if (accept_p(p, CC_P_ASSIGN)) e.value = parse_cond(p);
+            e.span = span_from(p, efirst);
+            en.items.push(e);
+            if (!accept_p(p, CC_P_COMMA)) break;
+        }
+        expect_close(p, CC_P_RBRACE, "enum body", open);
+        parse_attrs(p, ta);
+    } else if (!en.tag.len) {
+        CCSlice found = tok_desc(p, p->i);
+        CCString m = @string(`expected a tag or '{' after 'enum', found ${found}`, p->arena);
+        err_here(p, m);
+    }
+    t->k = { .enumt = en };
+    t->span = span_from(p, first);
+    return t;
+}
+
+#endif

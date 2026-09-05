@@ -120,6 +120,7 @@ static CcStmt* cc_stmt_expr(CcExpr* e, CcSpan span, CCArena a) {
     CcStmt* s = cc__stmt_blank(span, a);
     CcExprStmt x;
     x.e = e;
+    x.body = NULL;
     s->k = { .expr = x };
     return s;
 }
@@ -154,6 +155,7 @@ static CcStmt* cc_stmt_goto(CCSlice label, CcSpan span, CCArena a) {
     CcStmt* s = cc__stmt_blank(span, a);
     CcGoto g;
     g.label = label;
+    g.target = NULL;
     s->k = { .goto_ = g };
     return s;
 }
@@ -267,7 +269,7 @@ static CCSlice CcExpr_kind_name(const CcExpr* e) {
         case .slice_lit: return CC_SLICE_LIT("@" "slice");
         case .scratch: return CC_SLICE_LIT("@" "scratch");
         case .closure: return CC_SLICE_LIT("closure");
-        case .await: return CC_SLICE_LIT("@" "await");
+        case .await_: return CC_SLICE_LIT("@" "await");
         case .comptime: return CC_SLICE_LIT("@" "comptime()");
         case .create: return CC_SLICE_LIT("@" "create");
         case .emit: return CC_SLICE_LIT("@" "emit");
@@ -362,6 +364,8 @@ static CCSlice CcType_kind_name(const CcType* t) {
         case .slice: return CC_SLICE_LIT("slice type");
         case .chan: return CC_SLICE_LIT("channel type");
         case .generic: return CC_SLICE_LIT("generic type");
+        case .macro: return CC_SLICE_LIT("macro type");
+        case .valarg: return CC_SLICE_LIT("value argument");
         case .scoped: return CC_SLICE_LIT("@scoped type");
         case .auto_: return CC_SLICE_LIT("@" "auto");
     }

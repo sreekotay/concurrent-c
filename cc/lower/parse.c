@@ -1013,6 +1013,7 @@ static CcType *parse_cc_suffixes(P *p, CcType *base, uint32_t first) {
 static void parse_specs(P *p, Specs *S, int force_type) {
     Builtin b;
     uint32_t bfirst = 0;
+    int have_builtin = 0;
     memset(S, 0, sizeof *S);
     memset(&b, 0, sizeof b);
     S->first = p->i;
@@ -1121,7 +1122,7 @@ static void parse_specs(P *p, Specs *S, int force_type) {
         }
         if (builtin_add(&b, k)) {
             if (S->saw_type && !builtin_any(&b)) break;
-            if (!bfirst) bfirst = p->i;
+            if (!have_builtin) { bfirst = p->i; have_builtin = 1; }
             if (!S->saw_type) {
                 S->type = cc_type_new(p->a, CC_T_NAMED, span2(p->i, p->i));
                 bfirst = p->i;
@@ -1203,7 +1204,6 @@ static void parse_specs(P *p, Specs *S, int force_type) {
                     if (nk != KW_ATTRIBUTE && nk != KW_ATTRIBUTE2) {
                         attr_append(&S->attrs, attr_new(p, first, nm, NULL));
                         adv(p);
-                        S->attrs->span = span2(first, first);
                         S->saw_any = 1;
                         continue;
                     }
@@ -2035,7 +2035,7 @@ static CcExpr *parse_unwrap_tail(P *p, CcExpr *lhs) {
     adv(p); /* !> */
     if (at_p(p, CC_P_LPAREN) && !(tk(p, 1)->kind == CC_TK_IDENT && tok_is_p(tk(p, 2), CC_P_RPAREN))) {
         if (tok_is_p(tk(p, 1), CC_P_RPAREN))
-            err_at(p, p->i + 1, "'!>()' needs a name to bind the error: write `!>(e) body`");
+            err_at(p, p->i + 1, "'!>()' needs a name to bind the error: write '!>(e) body'");
         else
             err_at(p, p->i + 1, "'!>(...)' binds the error to a name, found %s", tok_desc(p, p->i + 1));
         skip_balanced(p);
@@ -2147,7 +2147,7 @@ static CcExpr *parse_unwrap_or_tail(P *p, CcExpr *lhs) {
     adv(p); /* ?> */
     if (at_p(p, CC_P_LPAREN) && !p->t[p->i].after_space && !(tk(p, 1)->kind == CC_TK_IDENT && tok_is_p(tk(p, 2), CC_P_RPAREN))) {
         if (tok_is_p(tk(p, 1), CC_P_RPAREN))
-            err_at(p, p->i + 1, "'?>()' needs a name to bind the error: write `?>(e) default`");
+            err_at(p, p->i + 1, "'?>()' needs a name to bind the error: write '?>(e) default'");
         else
             err_at(p, p->i + 1, "'?>(...)' binds the error to a name, found %s", tok_desc(p, p->i + 1));
         skip_balanced(p);
@@ -2166,7 +2166,7 @@ static CcExpr *parse_unwrap_or_tail(P *p, CcExpr *lhs) {
     scope_push(p->syms);
     if (e->binder) declare_var(p, e->binder);
     if (at_p(p, CC_P_SEMI) || at_p(p, CC_P_RPAREN) || at_p(p, CC_P_COMMA) || at_eof(p))
-        err_here(p, "'?>' needs a default value on its right, found %s", tok_desc(p, p->i));
+        err_here(p, "expected a default value on the right of '?>', found %s", tok_desc(p, p->i));
     else
         e->b = parse_cond(p);
     scope_pop(p->syms);

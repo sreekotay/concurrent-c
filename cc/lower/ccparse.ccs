@@ -1,0 +1,144 @@
+/* ccparse: the clean lowerer's parser as a tool, in Concurrent-C.
+ *
+ *   ccparse [--check] FILE...          `ok FILE (N decls)` or the diagnostics
+ *   ccparse --dump FILE...             the tree, in the reference tool's format
+ *   ccparse --known-types LIST FILE... extra typedef names, one per line (repeatable)
+ *   ccparse --collect-types OUT FILE.. append every file-scope typedef name seen to OUT
+ *   ccparse --mode source|header|script
+ *   ccparse --quiet                    only print files with diagnostics
+ * Output is byte-identical to out/cc/bin/ccparse (the C11 reference). */
+#include "lex_impl.cch"
+#include "diag_impl.cch"
+#include "ast_impl.cch"
+#include "parse_state.cch"
+#include "parse_fwd.cch"
+#include "parse_exprs.cch"
+#include "parse_stmts.cch"
+#include "parse_types.cch"
+#include "parse_decls.cch"
+#include "parse_walk.cch"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+
+static CCSlice read_whole_file(const char* path, CCArena a, bool* ok) {
+    FILE* fp = fopen(path, "rb");
+    long n;
+    char* buf;
+    *ok = false;
+    if (!fp) return CC_SLICE_LIT("");
+    fseek(fp, 0, SEEK_END);
+    n = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (n < 0) n = 0;
+    buf = cc_arena_alloc(a, (size_t)n + 1, 1);
+    if (n > 0 && fread(buf, 1, (size_t)n, fp) != (size_t)n) { fclose(fp); return CC_SLICE_LIT(""); }
+    buf[n] = 0;
+    fclose(fp);
+    *ok = true;
+    return cc_slice_from_buffer(buf, (size_t)n);
+}
+
+static CCSlice source_of(CCSlice path, void* ctx) {
+    (void)path;
+    return *(CCSlice*)ctx;
+}
+
+static CcUnitMode mode_of(const char* path, const char* override) {
+    size_t n = strlen(path);
+    if (override) {
+        if (!strcmp(override, "header")) return CC_UNIT_HEADER;
+        if (!strcmp(override, "script")) return CC_UNIT_SCRIPT;
+        return CC_UNIT_SOURCE;
+    }
+    if (n >= 4 && !strcmp(path + n - 4, ".cch")) return CC_UNIT_HEADER;
+    if (n >= 5 && !strcmp(path + n - 5, ".shcc")) return CC_UNIT_SCRIPT;
+    return CC_UNIT_SOURCE;
+}
+
+/* Known type names: read into the tool's arena, one per line, `#` lines ignored. */
+static void load_known(const char* path, Vec::[CCSlice]* known, CCArena a) {
+    bool ok;
+    CCSlice text = read_whole_file(path, a, &ok);
+    size_t i = 0;
+    if (!ok) { fprintf(stderr, "ccparse: cannot open %s: %s\n", path, strerror(errno)); exit(2); }
+    while (i < text.len) {
+        size_t s = i;
+        size_t e;
+        while (i < text.len && text.ptr[i] != '\n') i++;
+        e = i;
+        if (i < text.len) i++;
+        while (e > s && (text.ptr[e - 1] == '\r' || text.ptr[e - 1] == ' ' || text.ptr[e - 1] == '\t')) e--;
+        while (s < e && (text.ptr[s] == ' ' || text.ptr[s] == '\t')) s++;
+        if (e > s && text.ptr[s] != '#') known->push(cc_slice_from_buffer((char*)text.ptr + s, e - s));
+    }
+}
+
+int main(int argc, char** argv) {
+    CCArena tool = cc_arena_heap(megabytes(8)) @destroy;
+    Vec::[CCSlice] known = vec_new::[CCSlice](tool);
+    const char* collect = NULL;
+    const char* mode_override = NULL;
+    bool dump = false;
+    bool quiet = false;
+    int rc = 0;
+    int nfiles = 0;
+    int i;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--dump")) { dump = true; continue; }
+        if (!strcmp(argv[i], "--check")) continue;
+        if (!strcmp(argv[i], "--quiet")) { quiet = true; continue; }
+        if (!strcmp(argv[i], "--known-types") && i + 1 < argc) { load_known(argv[++i], &known, tool); continue; }
+        if (!strcmp(argv[i], "--collect-types") && i + 1 < argc) { collect = argv[++i]; continue; }
+        if (!strcmp(argv[i], "--mode") && i + 1 < argc) { mode_override = argv[++i]; continue; }
+        if (argv[i][0] == '-' && argv[i][1]) { fprintf(stderr, "ccparse: unknown option %s\n", argv[i]); return 2; }
+        nfiles++;
+        {
+            CCArena a = cc_arena_heap(megabytes(64)) @destroy;
+            CcDiags ds = CcDiags_new(a);
+            CcParseOpts opts;
+            CcUnit* u;
+            bool ok;
+            const char* path = argv[i];
+            CCSlice src = read_whole_file(path, a, &ok);
+            if (!ok) { fprintf(stderr, "ccparse: cannot read %s: %s\n", path, strerror(errno)); rc = 2; continue; }
+            opts.mode = mode_of(path, mode_override);
+            opts.known_types = known;
+            u = cc_parse_unit(cc_slice_from_buffer((char*)path, strlen(path)), src, opts, &ds, a);
+            if (dump) u->dump(stdout);
+            {
+                Vec::[CcDiag]* items = &ds.items;
+                size_t nd = items->len();
+                if (nd) {
+                    ds.print(stdout, source_of, &src);
+                    if (ds.has_errors()) rc = 1;
+                } else if (!quiet) {
+                    CcDeclList* dl = &u->decls;
+                    size_t n = dl->len();
+                    printf("ok %s (%zu decls)\n", path, n);
+                }
+            }
+            if (collect) {
+                Vec::[CCSlice]* names = &u->typedef_names;
+                size_t k;
+                size_t nn = names->len();
+                if (nn) {
+                    FILE* out = fopen(collect, "a");
+                    if (!out) { fprintf(stderr, "ccparse: cannot append to %s: %s\n", collect, strerror(errno)); return 2; }
+                    for (k = 0; k < nn; k++) {
+                        CCSlice nm = *names->get_ptr(k);
+                        fprintf(out, "%.*s\n", (int)nm.len, nm.ptr);
+                    }
+                    fclose(out);
+                }
+            }
+            fflush(stdout);
+        }
+    }
+    if (!nfiles) {
+        fprintf(stderr, "usage: ccparse [--check|--dump] [--known-types LIST]... [--collect-types OUT] [--mode M] FILE...\n");
+        return 2;
+    }
+    return rc;
+}

@@ -1,0 +1,1750 @@
+#pragma(@per_tu)
+/* The generic walk (CcUnit_walk / CcStmt_walk / CcExpr_walk), the debug
+ * dump (CcUnit_dump) and cc_parse_expr.
+ *
+ * The dump prints one node per line, `kind [first..last] extras (line:col)`,
+ * children indented by two spaces, in the same order and spelling as the
+ * reference tool (`ccparse --dump`), so the two can be diffed. A slot
+ * expression inside a template is printed under the slot's own tape. */
+#ifndef CC_LOWER_PARSE_WALK_CCH
+#define CC_LOWER_PARSE_WALK_CCH
+#include "parse_fwd.cch"
+#include "parse_exprs.cch"
+#include "parse_stmts.cch"
+#include <stdio.h>
+
+/* ---- dump ---------------------------------------------------------------- */
+
+typedef struct Dump {
+    FILE* out;
+    const CcTape* tape;
+} Dump;
+
+static const char* dump_op_text(CcOp op) {
+    switch (op) {
+    case CC_OP_NONE: return "";
+    case CC_OP_ADD: case CC_OP_POS: return "+";
+    case CC_OP_SUB: case CC_OP_NEG: return "-";
+    case CC_OP_MUL: case CC_OP_DEREF: return "*";
+    case CC_OP_DIV: return "/";
+    case CC_OP_MOD: return "%";
+    case CC_OP_SHL: return "<<";
+    case CC_OP_SHR: return ">>";
+    case CC_OP_LT: return "<";
+    case CC_OP_GT: return ">";
+    case CC_OP_LE: return "<=";
+    case CC_OP_GE: return ">=";
+    case CC_OP_EQ: return "==";
+    case CC_OP_NE: return "!=";
+    case CC_OP_AND: case CC_OP_ADDR: return "&";
+    case CC_OP_XOR: return "^";
+    case CC_OP_OR: return "|";
+    case CC_OP_LAND: return "&&";
+    case CC_OP_LOR: return "||";
+    case CC_OP_NOT: return "!";
+    case CC_OP_BITNOT: return "~";
+    case CC_OP_PREINC: return "++";
+    case CC_OP_PREDEC: return "--";
+    case CC_OP_POSTINC: return "post++";
+    case CC_OP_POSTDEC: return "post--";
+    case CC_OP_SIZEOF: return "sizeof";
+    case CC_OP_ALIGNOF: return "_Alignof";
+    case CC_OP_ASSIGN: return "=";
+    case CC_OP_ADD_ASSIGN: return "+=";
+    case CC_OP_SUB_ASSIGN: return "-=";
+    case CC_OP_MUL_ASSIGN: return "*=";
+    case CC_OP_DIV_ASSIGN: return "/=";
+    case CC_OP_MOD_ASSIGN: return "%=";
+    case CC_OP_SHL_ASSIGN: return "<<=";
+    case CC_OP_SHR_ASSIGN: return ">>=";
+    case CC_OP_AND_ASSIGN: return "&=";
+    case CC_OP_XOR_ASSIGN: return "^=";
+    case CC_OP_OR_ASSIGN: return "|=";
+    }
+    return "?";
+}
+
+static void dump_indent(Dump* d, int depth) {
+    int i;
+    for (i = 0; i < depth; i++) fputs("  ", d->out);
+}
+
+static void dump_slice(Dump* d, CCSlice s) {
+    fprintf(d->out, "%.*s", (int)s.len, (const char*)s.ptr);
+}
+
+static uint32_t dump_ntoks(Dump* d) {
+    CcTape* tp = (CcTape*)d->tape;
+    return d->tape ? (uint32_t)tp->toks.len() : 0;
+}
+
+static void dump_pos(Dump* d, CcSpan span) {
+    const CcToken* t;
+    if (!d->tape || span.first >= dump_ntoks(d)) { fputs("\n", d->out); return; }
+    t = CcTape_at(d->tape, span.first);
+    fprintf(d->out, " (%u:%u)\n", (unsigned)t->line, (unsigned)t->col);
+}
+
+static void dump_tok_text(Dump* d, uint32_t tok) {
+    if (!d->tape || tok >= dump_ntoks(d)) return;
+    dump_slice(d, CcTape_at(d->tape, tok)->text);
+}
+
+/* `kind [first..last]` */
+static void dump_head(Dump* d, int depth, CCSlice kind, CcSpan span) {
+    dump_indent(d, depth);
+    dump_slice(d, kind);
+    fprintf(d->out, " [%u..%u]", (unsigned)span.first, (unsigned)span.last);
+}
+
+static void dump_name(Dump* d, CCSlice name) {
+    fputc(' ', d->out);
+    dump_slice(d, name);
+}
+
+static void dump_type(Dump* d, const CcType* t, int depth);
+static void dump_expr(Dump* d, const CcExpr* e, int depth);
+static void dump_init(Dump* d, const CcInit* in, int depth);
+static void dump_stmt(Dump* d, const CcStmt* s, int depth);
+static void dump_decl(Dump* d, const CcDecl* dc, int depth);
+
+static void dump_attrs(Dump* d, const Vec::[CcAttr]* attrs, int depth) {
+    Vec::[CcAttr]* v = (Vec::[CcAttr]*)attrs;
+    size_t i;
+    size_t n = v->len();
+    for (i = 0; i < n; i++) {
+        const CcAttr* a = v->get_ptr(i);
+        dump_head(d, depth, CC_SLICE_LIT("attr"), a->span);
+        dump_name(d, a->name);
+        if (a->value.len) dump_name(d, a->value);
+        dump_pos(d, a->span);
+    }
+}
+
+static void dump_params(Dump* d, const Vec::[CcParam]* params, int depth) {
+    Vec::[CcParam]* v = (Vec::[CcParam]*)params;
+    size_t i;
+    size_t n = v->len();
+    for (i = 0; i < n; i++) {
+        const CcParam* pa = v->get_ptr(i);
+        dump_head(d, depth, CC_SLICE_LIT("param"), pa->span);
+        dump_name(d, pa->name);
+        dump_pos(d, pa->span);
+        if (pa->type) dump_type(d, pa->type, depth + 1);
+        if (pa->default_value) dump_expr(d, pa->default_value, depth + 1);
+        dump_attrs(d, &pa->attrs, depth + 1);
+    }
+}
+
+static void dump_fields(Dump* d, const Vec::[CcField]* fields, int depth) {
+    Vec::[CcField]* v = (Vec::[CcField]*)fields;
+    size_t i;
+    size_t n = v->len();
+    for (i = 0; i < n; i++) {
+        const CcField* f = v->get_ptr(i);
+        if (f->is_pp) {
+            dump_head(d, depth, CC_SLICE_LIT("preprocessor line"), f->span);
+            fputc(' ', d->out);
+            dump_tok_text(d, f->pp_tok);
+        } else {
+            dump_head(d, depth, CC_SLICE_LIT("field"), f->span);
+            dump_name(d, f->name.len ? f->name : CC_SLICE_LIT("<anonymous>"));
+        }
+        dump_pos(d, f->span);
+        if (f->type) dump_type(d, f->type, depth + 1);
+        if (f->bits) dump_expr(d, f->bits, depth + 1);
+        dump_attrs(d, &f->attrs, depth + 1);
+    }
+}
+
+static void dump_enumerators(Dump* d, const Vec::[CcEnumerator]* items, int depth) {
+    Vec::[CcEnumerator]* v = (Vec::[CcEnumerator]*)items;
+    size_t i;
+    size_t n = v->len();
+    for (i = 0; i < n; i++) {
+        const CcEnumerator* en = v->get_ptr(i);
+        if (en->is_pp) {
+            dump_head(d, depth, CC_SLICE_LIT("preprocessor line"), en->span);
+            fputc(' ', d->out);
+            dump_tok_text(d, en->pp_tok);
+        } else {
+            dump_head(d, depth, CC_SLICE_LIT("enumerator"), en->span);
+            dump_name(d, en->name);
+        }
+        dump_pos(d, en->span);
+        if (en->value) dump_expr(d, en->value, depth + 1);
+        if (en->comptime) dump_stmt(d, en->comptime, depth + 1);
+    }
+}
+
+static void dump_types(Dump* d, const CcTypeList* list, int depth) {
+    CcTypeList* v = (CcTypeList*)list;
+    size_t i;
+    size_t n = v->len();
+    for (i = 0; i < n; i++) dump_type(d, *v->get_ptr(i), depth);
+}
+
+static void dump_exprs(Dump* d, const CcExprList* list, int depth) {
+    CcExprList* v = (CcExprList*)list;
+    size_t i;
+    size_t n = v->len();
+    for (i = 0; i < n; i++) dump_expr(d, *v->get_ptr(i), depth);
+}
+
+static void dump_stmts(Dump* d, const CcStmtList* list, int depth) {
+    CcStmtList* v = (CcStmtList*)list;
+    size_t i;
+    size_t n = v->len();
+    for (i = 0; i < n; i++) dump_stmt(d, *v->get_ptr(i), depth);
+}
+
+static void dump_decls(Dump* d, const CcDeclList* list, int depth) {
+    CcDeclList* v = (CcDeclList*)list;
+    size_t i;
+    size_t n = v->len();
+    for (i = 0; i < n; i++) dump_decl(d, *v->get_ptr(i), depth);
+}
+
+static void dump_quals(Dump* d, uint32_t q) {
+    if (q & CC_QUAL_CONST) fputs(" const", d->out);
+    if (q & CC_QUAL_VOLATILE) fputs(" volatile", d->out);
+    if (q & CC_QUAL_RESTRICT) fputs(" restrict", d->out);
+    if (q & CC_QUAL_ATOMIC) fputs(" _Atomic", d->out);
+}
+
+static void dump_type_b(Dump* d, const CcType* t, int depth);
+static void dump_type_c(Dump* d, const CcType* t, int depth);
+
+static void dump_type(Dump* d, const CcType* t, int depth) {
+    if (!t) return;
+    dump_head(d, depth, CcType_kind_name(t), t->span);
+    @switch (t->k) {
+        case .named(n):
+            if (n.name.len) dump_name(d, n.name);
+            dump_quals(d, t->quals);
+            dump_pos(d, t->span);
+            dump_attrs(d, &t->attrs, depth + 1);
+            break;
+        case .pointer(pt):
+            dump_quals(d, t->quals);
+            dump_pos(d, t->span);
+            dump_attrs(d, &t->attrs, depth + 1);
+            dump_type(d, pt.pointee, depth + 1);
+            break;
+        case .array(ar):
+            dump_quals(d, t->quals);
+            if (ar.is_static) fputs(" static", d->out);
+            if (ar.is_star) fputs(" [*]", d->out);
+            dump_pos(d, t->span);
+            dump_attrs(d, &t->attrs, depth + 1);
+            dump_type(d, ar.elem, depth + 1);
+            if (ar.size) dump_expr(d, ar.size, depth + 1);
+            break;
+        case .func(fn):
+            dump_quals(d, t->quals);
+            if (!fn.has_prototype) fputs(" ()", d->out);
+            dump_pos(d, t->span);
+            dump_attrs(d, &t->attrs, depth + 1);
+            dump_type(d, fn.ret, depth + 1);
+            dump_params(d, &fn.params, depth + 1);
+            if (fn.variadic) {
+                /* the reference keeps `...` as a nameless-typed parameter named "..." */
+                CcSpan vs = span2(fn.variadic_tok, fn.variadic_tok);
+                dump_head(d, depth + 1, CC_SLICE_LIT("param"), vs);
+                dump_name(d, CC_SLICE_LIT("..."));
+                dump_pos(d, vs);
+            }
+            break;
+        case .record(rc):
+            if (rc.tag.len) dump_name(d, rc.tag);
+            dump_quals(d, t->quals);
+            if (rc.is_union) fputs(" union", d->out);
+            if (rc.is_definition) fputs(" definition", d->out);
+            dump_pos(d, t->span);
+            dump_attrs(d, &t->attrs, depth + 1);
+            dump_fields(d, &rc.fields, depth + 1);
+            break;
+        case .enumt(en):
+            if (en.tag.len) dump_name(d, en.tag);
+            dump_quals(d, t->quals);
+            if (en.is_definition) fputs(" definition", d->out);
+            dump_pos(d, t->span);
+            dump_attrs(d, &t->attrs, depth + 1);
+            dump_type(d, en.base, depth + 1);
+            dump_enumerators(d, &en.items, depth + 1);
+            break;
+        default: dump_type_b(d, t, depth); break;
+    }
+}
+
+static void dump_type_b(Dump* d, const CcType* t, int depth) {
+    @switch (t->k) {
+        case .typeof_(tf):
+            dump_quals(d, t->quals);
+            dump_pos(d, t->span);
+            dump_attrs(d, &t->attrs, depth + 1);
+            if (tf.expr) dump_expr(d, tf.expr, depth + 1);
+            if (tf.type) dump_type(d, tf.type, depth + 1);
+            break;
+        case .atomic(at):
+            dump_quals(d, t->quals);
+            dump_pos(d, t->span);
+            dump_attrs(d, &t->attrs, depth + 1);
+            dump_type(d, at.pointee, depth + 1);
+            break;
+        case .result(rs):
+            dump_quals(d, t->quals);
+            if (rs.optional) fputs(" ?>", d->out);
+            dump_pos(d, t->span);
+            dump_attrs(d, &t->attrs, depth + 1);
+            dump_type(d, rs.value, depth + 1);
+            dump_type(d, rs.err, depth + 1);
+            break;
+        case .slice(sl):
+            dump_quals(d, t->quals);
+            fprintf(d->out, " [%s:%s%s]", sl.fixed ? "n" : "", sl.sentinel ? "0" : "", sl.unique ? "!" : "");
+            dump_pos(d, t->span);
+            dump_attrs(d, &t->attrs, depth + 1);
+            dump_type(d, sl.elem, depth + 1);
+            if (sl.fixed) dump_expr(d, sl.fixed, depth + 1);
+            break;
+        case .chan(ch):
+            dump_quals(d, t->quals);
+            fprintf(d->out, " [~%s%.*s%s%s %c]", ch.cap ? "cap " : "", (int)ch.topology.len, (const char*)ch.topology.ptr,
+                    ch.ordered ? " ordered" : "", ch.sync ? " sync" : "", ch.dir ? ch.dir : '?');
+            dump_pos(d, t->span);
+            dump_attrs(d, &t->attrs, depth + 1);
+            dump_type(d, ch.elem, depth + 1);
+            if (ch.cap) dump_expr(d, ch.cap, depth + 1);
+            if (ch.hooks) dump_init(d, ch.hooks, depth + 1);
+            break;
+        case .generic(g):
+            if (g.family.len) dump_name(d, g.family);
+            dump_quals(d, t->quals);
+            dump_pos(d, t->span);
+            dump_attrs(d, &t->attrs, depth + 1);
+            dump_types(d, &g.args, depth + 1);
+            break;
+        default: dump_type_c(d, t, depth); break;
+    }
+}
+
+static void dump_type_c(Dump* d, const CcType* t, int depth) {
+    @switch (t->k) {
+        case .macro(mg):
+            if (mg.family.len) dump_name(d, mg.family);
+            dump_quals(d, t->quals);
+            dump_pos(d, t->span);
+            dump_attrs(d, &t->attrs, depth + 1);
+            dump_types(d, &mg.args, depth + 1);
+            break;
+        case .valarg(vt):
+            dump_quals(d, t->quals);
+            dump_pos(d, t->span);
+            dump_attrs(d, &t->attrs, depth + 1);
+            dump_expr(d, vt.expr, depth + 1);
+            break;
+        case .scoped(sc):
+            dump_quals(d, t->quals);
+            dump_pos(d, t->span);
+            dump_attrs(d, &t->attrs, depth + 1);
+            dump_type(d, sc.inner, depth + 1);
+            break;
+        case .auto_(au):
+            dump_quals(d, t->quals);
+            dump_pos(d, t->span);
+            dump_attrs(d, &t->attrs, depth + 1);
+            dump_expr(d, au.src, depth + 1);
+            break;
+
+        default: break;
+        }
+}
+
+static void dump_init(Dump* d, const CcInit* in, int depth) {
+    Vec::[CcDesignator]* desig;
+    CcInitList* items;
+    size_t i;
+    size_t n;
+    if (!in) return;
+    desig = (Vec::[CcDesignator]*)&in->designators;
+    items = (CcInitList*)&in->items;
+    dump_indent(d, depth);
+    if (in->is_pp) {
+        fprintf(d->out, "preprocessor line [%u..%u] ", (unsigned)in->span.first, (unsigned)in->span.last);
+        dump_tok_text(d, in->pp_tok);
+    } else {
+        fprintf(d->out, "%s [%u..%u]", in->is_list ? "initializer list" : "initializer", (unsigned)in->span.first, (unsigned)in->span.last);
+    }
+    n = desig->len();
+    for (i = 0; i < n; i++) {
+        const CcDesignator* ds = desig->get_ptr(i);
+        if (ds->field.len) { fputs(" .", d->out); dump_slice(d, ds->field); }
+        else fputs(" [i]", d->out);
+    }
+    dump_pos(d, in->span);
+    for (i = 0; i < n; i++) {
+        const CcDesignator* ds = desig->get_ptr(i);
+        if (ds->index) dump_expr(d, ds->index, depth + 1);
+        if (ds->index_hi) dump_expr(d, ds->index_hi, depth + 1);
+    }
+    if (in->expr) dump_expr(d, in->expr, depth + 1);
+    n = items->len();
+    for (i = 0; i < n; i++) dump_init(d, *items->get_ptr(i), depth + 1);
+}
+
+static void dump_tpl(Dump* d, const Vec::[CcTplPart]* parts, int depth) {
+    Vec::[CcTplPart]* v = (Vec::[CcTplPart]*)parts;
+    size_t i;
+    size_t n = v->len();
+    for (i = 0; i < n; i++) {
+        const CcTplPart* pt = v->get_ptr(i);
+        dump_indent(d, depth);
+        if (pt->slot) {
+            fprintf(d->out, "slot [%u..%u]", (unsigned)pt->span.first, (unsigned)pt->span.last);
+            if (pt->tag.len) { fputs(" $~", d->out); dump_slice(d, pt->tag); }
+        } else {
+            size_t len = pt->text.len > 40 ? 40 : pt->text.len;
+            fprintf(d->out, "%s [%u..%u] %.*s", pt->is_verbatim ? "verbatim" : "literal",
+                    (unsigned)pt->span.first, (unsigned)pt->span.last, (int)len, (const char*)pt->text.ptr);
+        }
+        dump_pos(d, pt->span);
+        if (pt->slot) {
+            const CcTape* save = d->tape;   /* slot expressions index the slot's own tape */
+            if (pt->tape) d->tape = pt->tape;
+            dump_expr(d, pt->slot, depth + 1);
+            d->tape = save;
+        }
+    }
+}
+
+static void dump_template(Dump* d, const CcTemplate* tp, int depth) {
+    if (tp->policy) dump_expr(d, tp->policy, depth);
+    dump_tpl(d, &tp->parts, depth);
+    if (tp->arena) dump_expr(d, tp->arena, depth);
+}
+
+/* The synthesized `string` node of a `@slice("...")` argument: the run of
+ * adjacent string tokens from `tok`. */
+static void dump_slice_lit_arg(Dump* d, uint32_t tok, int depth) {
+    uint32_t n = dump_ntoks(d);
+    uint32_t last = tok;
+    uint32_t count = 1;
+    if (!d->tape || tok >= n) return;
+    while (last + 1 < n && CcTape_at(d->tape, last + 1)->kind == CC_TK_STRING) { last++; count++; }
+    dump_head(d, depth, CC_SLICE_LIT("string"), span2(tok, last));
+    fputc(' ', d->out);
+    dump_tok_text(d, tok);
+    if (count > 1) fprintf(d->out, " (+%u)", (unsigned)(count - 1));
+    dump_pos(d, span2(tok, last));
+}
+
+static void dump_generic_arms(Dump* d, const Vec::[CcGenericSelArm]* arms, int depth) {
+    Vec::[CcGenericSelArm]* v = (Vec::[CcGenericSelArm]*)arms;
+    size_t i;
+    size_t n = v->len();
+    for (i = 0; i < n; i++) {
+        const CcGenericSelArm* g = v->get_ptr(i);
+        dump_indent(d, depth);
+        fprintf(d->out, "%s\n", g->type ? "generic arm" : "generic default");
+        if (g->type) dump_type(d, g->type, depth + 1);
+        if (g->expr) dump_expr(d, g->expr, depth + 1);
+    }
+}
+
+static void dump_captures(Dump* d, const Vec::[CcCapture]* caps, int depth) {
+    Vec::[CcCapture]* v = (Vec::[CcCapture]*)caps;
+    size_t i;
+    size_t n = v->len();
+    for (i = 0; i < n; i++) {
+        const CcCapture* c = v->get_ptr(i);
+        dump_indent(d, depth);
+        fprintf(d->out, "capture [%u..%u] %s%s", (unsigned)c->span.first, (unsigned)c->span.last,
+                c->is_safe ? "@" "safe " : "", c->by_ref ? "&" : "");
+        dump_slice(d, c->name);
+        dump_pos(d, c->span);
+        if (c->init) dump_expr(d, c->init, depth + 1);
+    }
+}
+
+static void dump_binder(Dump* d, CCSlice binder) {
+    if (binder.len) { fputs(" (", d->out); dump_slice(d, binder); fputc(')', d->out); }
+}
+
+static void dump_expr_b(Dump* d, const CcExpr* e, int depth);
+static void dump_expr_c(Dump* d, const CcExpr* e, int depth);
+static void dump_expr_d(Dump* d, const CcExpr* e, int depth);
+static void dump_expr_e(Dump* d, const CcExpr* e, int depth);
+
+static void dump_expr(Dump* d, const CcExpr* e, int depth) {
+    if (!e) return;
+    dump_head(d, depth, CcExpr_kind_name(e), e->span);
+    @switch (e->k) {
+        case .ident(nm):
+            dump_name(d, nm);
+            dump_pos(d, e->span);
+            break;
+        case .number(l):
+            fputc(' ', d->out);
+            dump_tok_text(d, l.tok);
+            dump_pos(d, e->span);
+            break;
+        case .chr(l):
+            fputc(' ', d->out);
+            dump_tok_text(d, l.tok);
+            dump_pos(d, e->span);
+            break;
+        case .string(l):
+            fputc(' ', d->out);
+            dump_tok_text(d, l.tok);
+            if (l.n_toks > 1) fprintf(d->out, " (+%u)", (unsigned)(l.n_toks - 1));
+            dump_pos(d, e->span);
+            break;
+        case .paren(pa):
+            dump_pos(d, e->span);
+            dump_expr(d, pa.a, depth + 1);
+            break;
+        case .unary(u):
+            fprintf(d->out, " %s", dump_op_text(u.op));
+            dump_pos(d, e->span);
+            dump_expr(d, u.a, depth + 1);
+            break;
+        case .binary(b):
+            fprintf(d->out, " %s", dump_op_text(b.op));
+            dump_pos(d, e->span);
+            dump_expr(d, b.a, depth + 1);
+            dump_expr(d, b.b, depth + 1);
+            break;
+        case .assign(b):
+            fprintf(d->out, " %s", dump_op_text(b.op));
+            dump_pos(d, e->span);
+            dump_expr(d, b.a, depth + 1);
+            dump_expr(d, b.b, depth + 1);
+            break;
+        default: dump_expr_b(d, e, depth); break;
+    }
+}
+
+static void dump_expr_b(Dump* d, const CcExpr* e, int depth) {
+    @switch (e->k) {
+        case .ternary(t):
+            dump_pos(d, e->span);
+            dump_expr(d, t.c, depth + 1);
+            dump_expr(d, t.a, depth + 1);
+            dump_expr(d, t.b, depth + 1);
+            break;
+        case .call(c):
+            dump_pos(d, e->span);
+            dump_expr(d, c.callee, depth + 1);
+            dump_exprs(d, &c.args, depth + 1);
+            break;
+        case .index(ix):
+            dump_pos(d, e->span);
+            dump_expr(d, ix.a, depth + 1);
+            dump_expr(d, ix.i, depth + 1);
+            break;
+        case .member(m):
+            fprintf(d->out, " %s", m.arrow ? "->" : ".");
+            dump_slice(d, m.name);
+            dump_pos(d, e->span);
+            dump_expr(d, m.a, depth + 1);
+            break;
+        case .cast(c):
+            dump_pos(d, e->span);
+            dump_type(d, c.type, depth + 1);
+            dump_expr(d, c.a, depth + 1);
+            break;
+        case .sizeof_type(st):
+            dump_pos(d, e->span);
+            dump_type(d, st.type, depth + 1);
+            break;
+        case .compound(cl):
+            dump_pos(d, e->span);
+            dump_type(d, cl.type, depth + 1);
+            dump_init(d, cl.init, depth + 1);
+            break;
+        case .generic_sel(gs):
+            dump_pos(d, e->span);
+            dump_expr(d, gs.control, depth + 1);
+            dump_generic_arms(d, &gs.arms, depth + 1);
+            break;
+        default: dump_expr_c(d, e, depth); break;
+    }
+}
+
+static void dump_expr_c(Dump* d, const CcExpr* e, int depth) {
+    @switch (e->k) {
+        case .stmt_expr(se):
+            dump_pos(d, e->span);
+            dump_stmt(d, se.block, depth + 1);
+            break;
+        case .comma(c):
+            dump_pos(d, e->span);
+            dump_expr(d, c.a, depth + 1);
+            dump_expr(d, c.b, depth + 1);
+            break;
+        case .ufcs(u):
+            dump_name(d, u.method);
+            dump_pos(d, e->span);
+            dump_expr(d, u.recv, depth + 1);
+            dump_types(d, &u.targs, depth + 1);
+            dump_exprs(d, &u.args, depth + 1);
+            break;
+        case .type_scoped(ts):
+            dump_name(d, ts.fn);
+            dump_pos(d, e->span);
+            dump_type(d, ts.type, depth + 1);
+            dump_exprs(d, &ts.args, depth + 1);
+            break;
+        case .generic_fn(gf):
+            dump_name(d, gf.name);
+            dump_pos(d, e->span);
+            dump_types(d, &gf.targs, depth + 1);
+            dump_exprs(d, &gf.args, depth + 1);
+            break;
+        case .unwrap(u):
+            dump_pos(d, e->span);
+            dump_expr(d, u.a, depth + 1);
+            break;
+        case .unwrap_body(ub):
+            dump_binder(d, ub.binder);
+            dump_pos(d, e->span);
+            dump_expr(d, ub.a, depth + 1);
+            dump_stmt(d, ub.body, depth + 1);
+            break;
+        case .unwrap_or(uo):
+            dump_binder(d, uo.binder);
+            dump_pos(d, e->span);
+            dump_expr(d, uo.a, depth + 1);
+            dump_expr(d, uo.fallback, depth + 1);
+            break;
+        default: dump_expr_d(d, e, depth); break;
+    }
+}
+
+static void dump_expr_d(Dump* d, const CcExpr* e, int depth) {
+    @switch (e->k) {
+        case .unwrap_destroy(ud):
+            dump_pos(d, e->span);
+            dump_expr(d, ud.a, depth + 1);
+            dump_stmt(d, ud.destroy_body, depth + 1);
+            break;
+        case .template(tp):
+            dump_pos(d, e->span);
+            dump_expr(d, tp.direct, depth + 1);
+            dump_template(d, &tp, depth + 1);
+            break;
+        case .slice_lit(sl):
+            dump_pos(d, e->span);
+            if (sl.tok) dump_slice_lit_arg(d, sl.tok, depth + 1);
+            break;
+        case .scratch(sc):
+            dump_pos(d, e->span);
+            dump_expr(d, sc.bytes, depth + 1);
+            break;
+        case .closure(cl):
+            if (cl.is_unsafe) fputs(" @" "unsafe", d->out);
+            if (cl.is_async) fputs(" async", d->out);
+            dump_pos(d, e->span);
+            dump_params(d, &cl.params, depth + 1);
+            dump_captures(d, &cl.captures, depth + 1);
+            dump_stmt(d, cl.body, depth + 1);
+            break;
+        case .await_(aw):
+            dump_pos(d, e->span);
+            dump_expr(d, aw.a, depth + 1);
+            break;
+        case .comptime(ce):
+            dump_pos(d, e->span);
+            dump_expr(d, ce.a, depth + 1);
+            break;
+        case .create(cr):
+            if (cr.var.len) { dump_name(d, cr.var); fputc('@', d->out); }
+            dump_pos(d, e->span);
+            dump_exprs(d, &cr.args, depth + 1);
+            break;
+        default: dump_expr_e(d, e, depth); break;
+    }
+}
+
+static void dump_expr_e(Dump* d, const CcExpr* e, int depth) {
+    @switch (e->k) {
+        case .emit(em):
+            dump_pos(d, e->span);
+            dump_exprs(d, &em.args, depth + 1);
+            dump_template(d, &em.tpl, depth + 1);
+            break;
+        case .variant_lit(vl):
+            dump_name(d, vl.arm);
+            dump_pos(d, e->span);
+            dump_exprs(d, &vl.args, depth + 1);
+            break;
+        case .call_mode(cm):
+            dump_name(d, cm.mode);
+            dump_pos(d, e->span);
+            dump_expr(d, cm.a, depth + 1);
+            break;
+        case .range(r):
+            dump_pos(d, e->span);
+            dump_expr(d, r.lo, depth + 1);
+            dump_expr(d, r.hi, depth + 1);
+            break;
+        case .pp(ppx):
+            fputc(' ', d->out);
+            dump_tok_text(d, ppx.tok);
+            dump_pos(d, e->span);
+            break;
+        case .type_arg(ta):
+            dump_pos(d, e->span);
+            dump_type(d, ta.type, depth + 1);
+            break;
+
+        default: break;
+        }
+}
+
+static void dump_arms(Dump* d, const Vec::[CcParallelArm]* arms, int depth) {
+    Vec::[CcParallelArm]* v = (Vec::[CcParallelArm]*)arms;
+    size_t i;
+    size_t n = v->len();
+    for (i = 0; i < n; i++) {
+        const CcParallelArm* arm = v->get_ptr(i);
+        dump_head(d, depth, CC_SLICE_LIT("arm"), arm->span);
+        if (arm->target.len) { dump_name(d, arm->target); fputs(" =", d->out); }
+        if (arm->unwrap) fputs(" !>", d->out);
+        dump_pos(d, arm->span);
+        if (arm->expr) dump_expr(d, arm->expr, depth + 1);
+        if (arm->serial) dump_stmt(d, arm->serial, depth + 1);
+    }
+}
+
+static void dump_else(Dump* d, const CcStmt* els, int depth) {
+    if (!els) return;
+    dump_indent(d, depth + 1);
+    fputs("else\n", d->out);
+    dump_stmt(d, els, depth + 2);
+}
+
+static void dump_tail(Dump* d, const CcExpr* tail, int depth) {
+    if (!tail) return;
+    dump_indent(d, depth + 1);
+    fputs("tail\n", d->out);
+    dump_expr(d, tail, depth + 2);
+}
+
+/* Fields named like an arm of the subject (`label`, `closing`) are
+ * rewritten inside a @switch case body; these run outside it. */
+static void dump_goto(Dump* d, const CcStmt* s, const CcGoto* g, int depth) {
+    if (g->label.len) dump_name(d, g->label);
+    dump_pos(d, s->span);
+    dump_expr(d, g->target, depth + 1);
+}
+
+static void dump_spawn_block(Dump* d, const CcStmt* s, const CcSpawnBlock* sb, int depth) {
+    fputs(sb->is_nursery ? " nursery" : " spawn", d->out);
+    dump_pos(d, s->span);
+    dump_exprs(d, &sb->closing, depth + 1);
+    dump_stmts(d, &sb->stmts, depth + 1);
+}
+
+static void dump_for_in_names(Dump* d, const CcForIn* fi) {
+    if (fi->bind.len) dump_name(d, fi->bind);
+    if (fi->bind2.len) { fputs(", ", d->out); dump_slice(d, fi->bind2); }
+}
+
+/* `@with(key = value)` is kept as a binding; the reference tool keeps the
+ * assignment expression, so print it that way: the key is the token after
+ * `@with (`. */
+static void dump_with_binding(Dump* d, const CcStmt* s, const CcWith* w, int depth) {
+    uint32_t ktok = s->span.first + 2;
+    CcSpan ks = span2(ktok, ktok);
+    if (!w->value) return;
+    dump_head(d, depth, CC_SLICE_LIT("assign"), span2(ktok, w->value->span.last));
+    fputs(" =", d->out);
+    dump_pos(d, ks);
+    dump_head(d, depth + 1, CC_SLICE_LIT("ident"), ks);
+    dump_name(d, w->key);
+    dump_pos(d, ks);
+    dump_expr(d, w->value, depth + 1);
+}
+
+static void dump_stmt_b(Dump* d, const CcStmt* s, int depth);
+static void dump_stmt_c(Dump* d, const CcStmt* s, int depth);
+static void dump_stmt_d(Dump* d, const CcStmt* s, int depth);
+static void dump_stmt_e(Dump* d, const CcStmt* s, int depth);
+
+static void dump_stmt(Dump* d, const CcStmt* s, int depth) {
+    if (!s) return;
+    dump_head(d, depth, CcStmt_kind_name(s), s->span);
+    @switch (s->k) {
+        case .expr(es):
+            dump_pos(d, s->span);
+            dump_expr(d, es.e, depth + 1);
+            dump_stmt(d, es.body, depth + 1);
+            break;
+        case .decl(ds):
+            dump_pos(d, s->span);
+            dump_decl(d, ds.d, depth + 1);
+            break;
+        case .block(b):
+            dump_pos(d, s->span);
+            dump_stmts(d, &b.stmts, depth + 1);
+            break;
+        case .if_(i):
+            dump_pos(d, s->span);
+            dump_expr(d, i.cond, depth + 1);
+            dump_stmt(d, i.then, depth + 1);
+            dump_else(d, i.els, depth);
+            break;
+        case .while_(w):
+            dump_pos(d, s->span);
+            dump_expr(d, w.cond, depth + 1);
+            dump_stmt(d, w.body, depth + 1);
+            break;
+        case .do_(w):
+            dump_pos(d, s->span);
+            dump_expr(d, w.cond, depth + 1);
+            dump_stmt(d, w.body, depth + 1);
+            break;
+        case .for_(f):
+            dump_pos(d, s->span);
+            dump_decl(d, f.init_decl, depth + 1);
+            dump_expr(d, f.init_expr, depth + 1);
+            dump_expr(d, f.cond, depth + 1);
+            dump_expr(d, f.step, depth + 1);
+            dump_stmt(d, f.body, depth + 1);
+            dump_stmts(d, &f.more, depth + 1);
+            break;
+        case .switch_(sw):
+            if (sw.is_variant) fputs(" @" "switch", d->out);
+            dump_pos(d, s->span);
+            dump_expr(d, sw.subject, depth + 1);
+            dump_stmt(d, sw.body, depth + 1);
+            break;
+        default: dump_stmt_b(d, s, depth); break;
+    }
+}
+
+static void dump_stmt_b(Dump* d, const CcStmt* s, int depth) {
+    @switch (s->k) {
+        case .case_(c):
+            if (c.is_default) fputs(" default", d->out);
+            if (c.arm.len) { fputs(" .", d->out); dump_slice(d, c.arm); }
+            if (c.bind.len) { fputc('(', d->out); dump_slice(d, c.bind); fputc(')', d->out); }
+            dump_pos(d, s->span);
+            dump_expr(d, c.lo, depth + 1);
+            dump_expr(d, c.hi, depth + 1);
+            dump_stmt(d, c.inner, depth + 1);
+            break;
+        case .return_(r):
+            dump_pos(d, s->span);
+            dump_expr(d, r.value, depth + 1);
+            break;
+        case .break_:
+            dump_pos(d, s->span);
+            break;
+        case .continue_:
+            dump_pos(d, s->span);
+            break;
+        case .goto_(g):
+            dump_goto(d, s, &g, depth);
+            break;
+        case .label(l):
+            dump_name(d, l.name);
+            dump_pos(d, s->span);
+            dump_stmt(d, l.inner, depth + 1);
+            break;
+        case .asm_:
+            dump_pos(d, s->span);
+            break;
+        case .defer(df):
+            if (df.name.len) dump_name(d, df.name);
+            if (df.on == 'o') fputs(" (ok)", d->out);
+            else if (df.on == 'e') fputs(" (err)", d->out);
+            dump_pos(d, s->span);
+            dump_stmt(d, df.body, depth + 1);
+            break;
+        default: dump_stmt_c(d, s, depth); break;
+    }
+}
+
+static void dump_stmt_c(Dump* d, const CcStmt* s, int depth) {
+    @switch (s->k) {
+        case .cancel_defer(cd):
+            if (cd.name.len) dump_name(d, cd.name);
+            dump_pos(d, s->span);
+            break;
+        case .errhandler(eh):
+            if (eh.binder.len) dump_name(d, eh.binder);
+            dump_pos(d, s->span);
+            dump_type(d, eh.err_type, depth + 1);
+            dump_stmt(d, eh.body, depth + 1);
+            break;
+        case .err_fwd(ef): {
+            CCSlice nm;
+            if (expr_ident_name(ef.err, &nm)) dump_name(d, nm);
+            dump_pos(d, s->span);
+            dump_expr(d, ef.err, depth + 1);
+            break;
+        }
+        case .unwrap(us):
+            dump_pos(d, s->span);
+            dump_expr(d, us.e, depth + 1);
+            break;
+        case .for_in(fi):
+            dump_for_in_names(d, &fi);
+            if (fi.is_at_for) fputs(" @" "for", d->out);
+            if (fi.by_ref) fputs(" &", d->out);
+            dump_pos(d, s->span);
+            dump_exprs(d, &fi.iterables, depth + 1);
+            dump_stmt(d, fi.body, depth + 1);
+            dump_tail(d, fi.tail, depth);
+            break;
+        case .parallel(pa):
+            if (pa.bind.len) dump_name(d, pa.bind);
+            if (pa.spawn) fputs(" spawn", d->out);
+            if (pa.worker.len) { fputs(" worker(", d->out); dump_slice(d, pa.worker); fputc(')', d->out); }
+            dump_pos(d, s->span);
+            dump_type(d, pa.bind_type, depth + 1);
+            dump_expr(d, pa.pred, depth + 1);
+            dump_expr(d, pa.seq, depth + 1);
+            dump_expr(d, pa.wait, depth + 1);
+            dump_exprs(d, &pa.cache, depth + 1);
+            dump_expr(d, pa.target, depth + 1);
+            dump_arms(d, &pa.arms, depth + 1);
+            dump_tail(d, pa.tail, depth);
+            break;
+        case .parallel_for(pf):
+            if (pf.bind.len) {
+                dump_name(d, pf.bind);
+                if (pf.loop.bind2.len) { fputs(", ", d->out); dump_slice(d, pf.loop.bind2); }
+            } else dump_for_in_names(d, &pf.loop);
+            if (pf.spawn) fputs(" spawn", d->out);
+            if (pf.worker.len) { fputs(" worker(", d->out); dump_slice(d, pf.worker); fputc(')', d->out); }
+            dump_pos(d, s->span);
+            dump_type(d, pf.bind_type, depth + 1);
+            dump_exprs(d, &pf.loop.iterables, depth + 1);
+            dump_expr(d, pf.pred, depth + 1);
+            dump_expr(d, pf.seq, depth + 1);
+            dump_expr(d, pf.wait, depth + 1);
+            dump_exprs(d, &pf.cache, depth + 1);
+            dump_expr(d, pf.target, depth + 1);
+            dump_stmt(d, pf.loop.body, depth + 1);
+            dump_tail(d, pf.tail, depth);
+            break;
+        case .parallel_dest(pd):
+            dump_pos(d, s->span);
+            dump_expr(d, pd.dest, depth + 1);
+            dump_stmts(d, &pd.stmts, depth + 1);
+            break;
+        default: dump_stmt_d(d, s, depth); break;
+    }
+}
+
+static void dump_stmt_d(Dump* d, const CcStmt* s, int depth) {
+    @switch (s->k) {
+        case .serial(b):
+            dump_pos(d, s->span);
+            dump_stmts(d, &b.stmts, depth + 1);
+            break;
+        case .stage(st):
+            dump_pos(d, s->span);
+            dump_expr(d, st.gate, depth + 1);
+            dump_exprs(d, &st.args, depth + 1);
+            dump_stmts(d, &st.stmts, depth + 1);
+            break;
+        case .with_deadline(wd):
+            if (wd.as.len) dump_name(d, wd.as);
+            dump_pos(d, s->span);
+            dump_expr(d, wd.deadline, depth + 1);
+            dump_stmts(d, &wd.stmts, depth + 1);
+            break;
+        case .with(w):
+            dump_pos(d, s->span);
+            dump_with_binding(d, s, &w, depth + 1);
+            dump_stmts(d, &w.stmts, depth + 1);
+            break;
+        case .closing(cl):
+            dump_pos(d, s->span);
+            dump_exprs(d, &cl.channels, depth + 1);
+            dump_expr(d, cl.spawn, depth + 1);
+            dump_stmts(d, &cl.stmts, depth + 1);
+            break;
+        case .spawn_block(sb):
+            dump_spawn_block(d, s, &sb, depth);
+            break;
+        case .mode_block(mb):
+            dump_name(d, mb.mode);
+            dump_pos(d, s->span);
+            dump_stmts(d, &mb.stmts, depth + 1);
+            break;
+        case .unsafe(b):
+            dump_pos(d, s->span);
+            dump_stmts(d, &b.stmts, depth + 1);
+            break;
+        default: dump_stmt_e(d, s, depth); break;
+    }
+}
+
+static void dump_stmt_e(Dump* d, const CcStmt* s, int depth) {
+    @switch (s->k) {
+        case .comptime_if(ci): {
+            CcStmtList* els = (CcStmtList*)&ci.els;
+            dump_pos(d, s->span);
+            dump_expr(d, ci.cond, depth + 1);
+            dump_stmts(d, &ci.then, depth + 1);
+            if (els->len()) {
+                dump_indent(d, depth + 1);
+                fputs("else\n", d->out);
+                dump_stmts(d, &ci.els, depth + 2);
+            }
+            break;
+        }
+        case .comptime_block(b):
+            dump_pos(d, s->span);
+            dump_stmts(d, &b.stmts, depth + 1);
+            break;
+        case .comptime_for(cf):
+            if (cf.bind.len) dump_name(d, cf.bind);
+            dump_pos(d, s->span);
+            dump_expr(d, cf.over, depth + 1);
+            dump_stmts(d, &cf.stmts, depth + 1);
+            break;
+
+        default: break;
+        }
+}
+
+static void dump_specs(Dump* d, uint32_t specs) {
+    if (specs & CC_SPEC_STATIC) fputs(" static", d->out);
+    if (specs & CC_SPEC_EXTERN) fputs(" extern", d->out);
+    if (specs & CC_SPEC_TYPEDEF) fputs(" typedef", d->out);
+    if (specs & CC_SPEC_THREAD) fputs(" _Thread_local", d->out);
+    if (specs & CC_SPEC_INLINE) fputs(" inline", d->out);
+    if (specs & CC_SPEC_NORETURN) fputs(" _Noreturn", d->out);
+    if (specs & CC_SPEC_ASYNC) fputs(" @async", d->out);
+    if (specs & CC_SPEC_BLOCKING) fputs(" @blocking", d->out);
+    if (specs & CC_SPEC_NONBLOCKING) fputs(" @nonblocking", d->out);
+    if (specs & CC_SPEC_LATENCY_SENSITIVE) fputs(" @latency_sensitive", d->out);
+    if (specs & CC_SPEC_COMPTIME) fputs(" @comptime", d->out);
+}
+
+static void dump_entries(Dump* d, const Vec::[CcHookEntry]* entries, int depth) {
+    Vec::[CcHookEntry]* v = (Vec::[CcHookEntry]*)entries;
+    size_t i;
+    size_t n = v->len();
+    for (i = 0; i < n; i++) {
+        const CcHookEntry* h = v->get_ptr(i);
+        Vec::[CcViewItem]* items = (Vec::[CcViewItem]*)&h->items;
+        size_t j;
+        size_t m = items->len();
+        dump_head(d, depth, CC_SLICE_LIT("entry"), h->span);
+        dump_name(d, h->key);
+        for (j = 0; j < m; j++) {
+            const CcViewItem* vi = items->get_ptr(j);
+            fprintf(d->out, " %s", vi->deny ? "^" : "");
+            dump_slice(d, vi->name);
+        }
+        dump_pos(d, h->span);
+        for (j = 0; j < m; j++) {
+            const CcViewItem* vi = items->get_ptr(j);
+            if (vi->cast) dump_type(d, vi->cast, depth + 1);
+        }
+        if (h->value) dump_expr(d, h->value, depth + 1);
+        if (h->body) dump_stmt(d, h->body, depth + 1);
+    }
+}
+
+static void dump_variant_arms(Dump* d, const Vec::[CcVariantArm]* arms, int depth) {
+    Vec::[CcVariantArm]* v = (Vec::[CcVariantArm]*)arms;
+    size_t i;
+    size_t n = v->len();
+    for (i = 0; i < n; i++) {
+        const CcVariantArm* va = v->get_ptr(i);
+        dump_head(d, depth, CC_SLICE_LIT("arm"), va->span);
+        dump_name(d, va->name);
+        dump_pos(d, va->span);
+        if (va->payload) {
+            /* the reference keeps the payload as one unnamed parameter */
+            dump_head(d, depth + 1, CC_SLICE_LIT("param"), va->payload_span);
+            fputc(' ', d->out);
+            dump_pos(d, va->payload_span);
+            dump_type(d, va->payload, depth + 2);
+        }
+        dump_params(d, &va->fields, depth + 1);
+    }
+}
+
+static void dump_destroy_body(Dump* d, const CcStmt* body, int depth) {
+    if (!body) return;
+    dump_indent(d, depth + 1);
+    fputs("@destroy body\n", d->out);
+    dump_stmt(d, body, depth + 2);
+}
+
+/* `@comptime { ... }` at file scope prints as a block node in the reference. */
+static void dump_comptime_block_decl(Dump* d, const CcDecl* dc, const CcBlock* b, int depth) {
+    uint32_t open = dc->span.first + 1;
+    if (open < dump_ntoks(d) && CcTape_at(d->tape, open)->kind == CC_TK_PUNCT && CcTape_at(d->tape, open)->punct == CC_P_LBRACE) {
+        dump_head(d, depth + 1, CC_SLICE_LIT("block"), span2(open, dc->span.last));
+        dump_pos(d, span2(open, open));
+        dump_stmts(d, &b->stmts, depth + 2);
+    } else dump_stmts(d, &b->stmts, depth + 1);
+}
+
+static void dump_decl_b(Dump* d, const CcDecl* dc, int depth);
+static void dump_decl_c(Dump* d, const CcDecl* dc, int depth);
+static void dump_decl_d(Dump* d, const CcDecl* dc, int depth);
+
+static void dump_decl(Dump* d, const CcDecl* dc, int depth) {
+    if (!dc) return;
+    dump_head(d, depth, CcDecl_kind_name(dc), dc->span);
+    @switch (dc->k) {
+        case .var(v):
+            if (v.name.len) dump_name(d, v.name);
+            dump_specs(d, dc->specs);
+            if (v.destroy) fputs(" @" "destroy", d->out);
+            if (v.detach) fputs(" @" "detach", d->out);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            dump_type(d, v.type, depth + 1);
+            dump_init(d, v.init, depth + 1);
+            dump_destroy_body(d, v.destroy_body, depth);
+            break;
+        case .func(f):
+            if (f.name.len) dump_name(d, f.name);
+            dump_specs(d, dc->specs);
+            if (f.destroy) fputs(" @" "destroy", d->out);
+            if (f.detach) fputs(" @" "detach", d->out);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            dump_type(d, f.type, depth + 1);
+            dump_stmt(d, f.body, depth + 1);
+            break;
+        case .typedef_(td):
+            if (td.name.len) dump_name(d, td.name);
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            dump_type(d, td.type, depth + 1);
+            break;
+        case .tagged(tg):
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            dump_type(d, tg.type, depth + 1);
+            break;
+        case .static_assert_(sa):
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            dump_expr(d, sa.cond, depth + 1);
+            break;
+        case .pp(ppd):
+            fputc(' ', d->out);
+            dump_tok_text(d, ppd.tok);
+            if (!CcSpan_is_empty(ppd.skipped) && ppd.skipped.last > ppd.tok) fputs(" (inactive region)", d->out);
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            break;
+        default: dump_decl_b(d, dc, depth); break;
+    }
+}
+
+static void dump_decl_b(Dump* d, const CcDecl* dc, int depth) {
+    @switch (dc->k) {
+        case .empty:
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            break;
+        case .typehooks(th):
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            dump_type(d, th.target, depth + 1);
+            dump_entries(d, &th.entries, depth + 1);
+            break;
+        case .typeview(tv):
+            if (tv.view.len) dump_name(d, tv.view);
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            dump_type(d, tv.target, depth + 1);
+            dump_entries(d, &tv.entries, depth + 1);
+            break;
+        case .variant(vd):
+            if (vd.name.len) dump_name(d, vd.name);
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            dump_variant_arms(d, &vd.arms, depth + 1);
+            break;
+        case .grammar(gr): {
+            uint32_t off = d->tape && gr.body.ptr ? (uint32_t)((const char*)gr.body.ptr - (const char*)d->tape->src.ptr) : 0;
+            if (gr.name.len) dump_name(d, gr.name);
+            fprintf(d->out, " (%.*s) body %u+%u", (int)gr.engine.len, (const char*)gr.engine.ptr, (unsigned)off, (unsigned)gr.body.len);
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            break;
+        }
+        case .factory(fa):
+            if (fa.name.len) dump_name(d, fa.name);
+            if (fa.extend) fputs(" extend", d->out);
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            dump_expr(d, fa.arity, depth + 1);
+            dump_stmt(d, fa.body, depth + 1);
+            break;
+        default: dump_decl_c(d, dc, depth); break;
+    }
+}
+
+static void dump_decl_c(Dump* d, const CcDecl* dc, int depth) {
+    @switch (dc->k) {
+        case .comptime_fn(cf):
+            if (cf.fn.name.len) dump_name(d, cf.fn.name);
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            dump_type(d, cf.fn.type, depth + 1);
+            dump_stmt(d, cf.fn.body, depth + 1);
+            break;
+        case .comptime_block(b):
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            dump_comptime_block_decl(d, dc, &b, depth);
+            break;
+        case .comptime_if(ci): {
+            CcDeclList* els = (CcDeclList*)&ci.els;
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            dump_expr(d, ci.cond, depth + 1);
+            dump_decls(d, &ci.then, depth + 1);
+            if (els->len()) {
+                dump_indent(d, depth + 1);
+                fputs("else\n", d->out);
+                dump_decls(d, &ci.els, depth + 2);
+            }
+            break;
+        }
+        case .scoped_type(st):
+            if (st.name.len) dump_name(d, st.name);
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            dump_type(d, st.type, depth + 1);
+            break;
+        case .pragma_cc(pc):
+            fputc(' ', d->out);
+            dump_slice(d, pc.name);
+            fputc(' ', d->out);
+            dump_slice(d, pc.value);
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            break;
+        case .link(ln):
+            if (ln.lib.len) dump_name(d, ln.lib);
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            break;
+        default: dump_decl_d(d, dc, depth); break;
+    }
+}
+
+static void dump_decl_d(Dump* d, const CcDecl* dc, int depth) {
+    @switch (dc->k) {
+        case .task_doc:
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            break;
+        case .macro_call(mc): {
+            CCSlice nm;
+            if (expr_ident_name(expr_callee_or_self(mc.call), &nm)) dump_name(d, nm);
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            dump_expr(d, mc.call, depth + 1);
+            break;
+        }
+        case .stmt(ts):
+            dump_specs(d, dc->specs);
+            dump_pos(d, dc->span);
+            dump_attrs(d, &dc->attrs, depth + 1);
+            dump_stmt(d, ts.s, depth + 1);
+            break;
+
+        default: break;
+        }
+}
+
+static void CcUnit_dump(const CcUnit* u, FILE* out) {
+    Dump d;
+    CcDeclList* decls = (CcDeclList*)&u->decls;
+    size_t n = decls->len();
+    d.out = out;
+    d.tape = &u->tape;
+    fprintf(out, "unit %.*s (%zu decls%s)\n", (int)u->tape.path.len, (const char*)u->tape.path.ptr, n, u->has_shebang ? ", #!" : "");
+    dump_decls(&d, &u->decls, 1);
+}
+
+/* ---- walk ------------------------------------------------------------------ */
+
+static void walk_type(CcVisitor* v, CcType* t);
+static void walk_expr(CcVisitor* v, CcExpr* e);
+static void walk_init(CcVisitor* v, CcInit* in);
+static void walk_stmt(CcVisitor* v, CcStmt* s);
+static void walk_decl(CcVisitor* v, CcDecl* d);
+
+static void walk_params(CcVisitor* v, Vec::[CcParam]* params) {
+    size_t i;
+    size_t n = params->len();
+    for (i = 0; i < n; i++) {
+        CcParam* pa = params->get_ptr(i);
+        if (pa->type) walk_type(v, pa->type);
+        walk_expr(v, pa->default_value);
+    }
+}
+
+static void walk_types(CcVisitor* v, CcTypeList* list) {
+    size_t i;
+    size_t n = list->len();
+    for (i = 0; i < n; i++) walk_type(v, *list->get_ptr(i));
+}
+
+static void walk_exprs(CcVisitor* v, CcExprList* list) {
+    size_t i;
+    size_t n = list->len();
+    for (i = 0; i < n; i++) walk_expr(v, *list->get_ptr(i));
+}
+
+static void walk_stmts(CcVisitor* v, CcStmtList* list) {
+    size_t i;
+    size_t n = list->len();
+    for (i = 0; i < n; i++) walk_stmt(v, *list->get_ptr(i));
+}
+
+static void walk_decls(CcVisitor* v, CcDeclList* list) {
+    size_t i;
+    size_t n = list->len();
+    for (i = 0; i < n; i++) walk_decl(v, *list->get_ptr(i));
+}
+
+static void walk_fields(CcVisitor* v, Vec::[CcField]* fields) {
+    size_t i;
+    size_t n = fields->len();
+    for (i = 0; i < n; i++) {
+        CcField* f = fields->get_ptr(i);
+        walk_type(v, f->type);
+        walk_expr(v, f->bits);
+    }
+}
+
+static void walk_enumerators(CcVisitor* v, Vec::[CcEnumerator]* items) {
+    size_t i;
+    size_t n = items->len();
+    for (i = 0; i < n; i++) {
+        CcEnumerator* it = items->get_ptr(i);
+        walk_expr(v, it->value);
+        walk_stmt(v, it->comptime);
+    }
+}
+
+static void walk_generic_arms(CcVisitor* v, Vec::[CcGenericSelArm]* arms) {
+    size_t i;
+    size_t n = arms->len();
+    for (i = 0; i < n; i++) {
+        CcGenericSelArm* g = arms->get_ptr(i);
+        walk_type(v, g->type);
+        walk_expr(v, g->expr);
+    }
+}
+
+static void walk_captures(CcVisitor* v, Vec::[CcCapture]* caps) {
+    size_t i;
+    size_t n = caps->len();
+    for (i = 0; i < n; i++) walk_expr(v, caps->get_ptr(i)->init);
+}
+
+static void walk_variant_arms(CcVisitor* v, Vec::[CcVariantArm]* arms) {
+    size_t i;
+    size_t n = arms->len();
+    for (i = 0; i < n; i++) {
+        CcVariantArm* va = arms->get_ptr(i);
+        walk_type(v, va->payload);
+        walk_params(v, &va->fields);
+    }
+}
+
+static void walk_type_b(CcVisitor* v, CcType* t);
+
+static void walk_type(CcVisitor* v, CcType* t) {
+    if (!t) return;
+    if (v->type && !v->type(t, v->env)) return;
+    @switch (t->k) {
+        case .named: break;
+        case .pointer(pt): walk_type(v, pt.pointee); break;
+        case .array(ar): walk_type(v, ar.elem); walk_expr(v, ar.size); break;
+        case .func(fn): walk_type(v, fn.ret); walk_params(v, &fn.params); break;
+        case .record(rc): walk_fields(v, &rc.fields); break;
+        case .enumt(en): walk_type(v, en.base); walk_enumerators(v, &en.items); break;
+        case .typeof_(tf): walk_expr(v, tf.expr); walk_type(v, tf.type); break;
+        case .atomic(at): walk_type(v, at.pointee); break;
+        default: walk_type_b(v, t); break;
+    }
+}
+
+static void walk_type_b(CcVisitor* v, CcType* t) {
+    @switch (t->k) {
+        case .result(rs): walk_type(v, rs.value); walk_type(v, rs.err); break;
+        case .slice(sl): walk_type(v, sl.elem); walk_expr(v, sl.fixed); break;
+        case .chan(ch): walk_type(v, ch.elem); walk_expr(v, ch.cap); walk_init(v, ch.hooks); break;
+        case .generic(g): walk_types(v, &g.args); break;
+        case .macro(mg): walk_types(v, &mg.args); break;
+        case .valarg(vt): walk_expr(v, vt.expr); break;
+        case .scoped(sc): walk_type(v, sc.inner); break;
+        case .auto_(au): walk_expr(v, au.src); break;
+
+        default: break;
+        }
+}
+
+static void walk_init(CcVisitor* v, CcInit* in) {
+    Vec::[CcDesignator]* desig;
+    CcInitList* items;
+    size_t i;
+    size_t n;
+    if (!in) return;
+    desig = &in->designators;
+    n = desig->len();
+    for (i = 0; i < n; i++) {
+        CcDesignator* ds = desig->get_ptr(i);
+        walk_expr(v, ds->index);
+        walk_expr(v, ds->index_hi);
+    }
+    walk_expr(v, in->expr);
+    items = &in->items;
+    n = items->len();
+    for (i = 0; i < n; i++) walk_init(v, *items->get_ptr(i));
+}
+
+static void walk_template(CcVisitor* v, CcTemplate* tp) {
+    Vec::[CcTplPart]* parts = &tp->parts;
+    size_t i;
+    size_t n = parts->len();
+    walk_expr(v, tp->direct);
+    walk_expr(v, tp->policy);
+    for (i = 0; i < n; i++) walk_expr(v, parts->get_ptr(i)->slot);
+    walk_expr(v, tp->arena);
+}
+
+static void walk_expr_b(CcVisitor* v, CcExpr* e);
+static void walk_expr_c(CcVisitor* v, CcExpr* e);
+static void walk_expr_d(CcVisitor* v, CcExpr* e);
+
+static void walk_expr(CcVisitor* v, CcExpr* e) {
+    if (!e) return;
+    if (v->expr && !v->expr(e, v->env)) return;
+    @switch (e->k) {
+        case .ident: break;
+        case .number: break;
+        case .chr: break;
+        case .string: break;
+        case .paren(pa): walk_expr(v, pa.a); break;
+        case .unary(u): walk_expr(v, u.a); break;
+        case .binary(b): walk_expr(v, b.a); walk_expr(v, b.b); break;
+        case .assign(b): walk_expr(v, b.a); walk_expr(v, b.b); break;
+        case .ternary(t): walk_expr(v, t.c); walk_expr(v, t.a); walk_expr(v, t.b); break;
+        case .call(c): walk_expr(v, c.callee); walk_exprs(v, &c.args); break;
+        default: walk_expr_b(v, e); break;
+    }
+}
+
+static void walk_expr_b(CcVisitor* v, CcExpr* e) {
+    @switch (e->k) {
+        case .index(ix): walk_expr(v, ix.a); walk_expr(v, ix.i); break;
+        case .member(m): walk_expr(v, m.a); break;
+        case .cast(c): walk_type(v, c.type); walk_expr(v, c.a); break;
+        case .sizeof_type(st): walk_type(v, st.type); break;
+        case .compound(cl): walk_type(v, cl.type); walk_init(v, cl.init); break;
+        case .generic_sel(gs): walk_expr(v, gs.control); walk_generic_arms(v, &gs.arms); break;
+        case .stmt_expr(se): walk_stmt(v, se.block); break;
+        case .comma(c): walk_expr(v, c.a); walk_expr(v, c.b); break;
+        case .ufcs(u): walk_expr(v, u.recv); walk_types(v, &u.targs); walk_exprs(v, &u.args); break;
+        case .type_scoped(ts): walk_type(v, ts.type); walk_exprs(v, &ts.args); break;
+        default: walk_expr_c(v, e); break;
+    }
+}
+
+static void walk_expr_c(CcVisitor* v, CcExpr* e) {
+    @switch (e->k) {
+        case .generic_fn(gf): walk_types(v, &gf.targs); walk_exprs(v, &gf.args); break;
+        case .unwrap(u): walk_expr(v, u.a); break;
+        case .unwrap_body(ub): walk_expr(v, ub.a); walk_stmt(v, ub.body); break;
+        case .unwrap_or(uo): walk_expr(v, uo.a); walk_expr(v, uo.fallback); break;
+        case .unwrap_destroy(ud): walk_expr(v, ud.a); walk_stmt(v, ud.destroy_body); break;
+        case .template(tp): walk_template(v, &tp); break;
+        case .slice_lit: break;
+        case .scratch(sc): walk_expr(v, sc.bytes); break;
+        case .closure(cl): walk_params(v, &cl.params); walk_captures(v, &cl.captures); walk_stmt(v, cl.body); break;
+        case .await_(aw): walk_expr(v, aw.a); break;
+        default: walk_expr_d(v, e); break;
+    }
+}
+
+static void walk_expr_d(CcVisitor* v, CcExpr* e) {
+    @switch (e->k) {
+        case .comptime(ce): walk_expr(v, ce.a); break;
+        case .create(cr): walk_exprs(v, &cr.args); break;
+        case .emit(em): walk_exprs(v, &em.args); walk_template(v, &em.tpl); break;
+        case .variant_lit(vl): walk_exprs(v, &vl.args); break;
+        case .call_mode(cm): walk_expr(v, cm.a); break;
+        case .range(r): walk_expr(v, r.lo); walk_expr(v, r.hi); break;
+        case .pp: break;
+        case .type_arg(ta): walk_type(v, ta.type); break;
+
+        default: break;
+        }
+}
+
+static void walk_spawn_block(CcVisitor* v, CcSpawnBlock* sb) {
+    walk_exprs(v, &sb->closing);
+    walk_stmts(v, &sb->stmts);
+}
+
+static void walk_arms(CcVisitor* v, Vec::[CcParallelArm]* arms) {
+    size_t i;
+    size_t n = arms->len();
+    for (i = 0; i < n; i++) {
+        CcParallelArm* arm = arms->get_ptr(i);
+        walk_expr(v, arm->expr);
+        walk_stmt(v, arm->serial);
+    }
+}
+
+static void walk_for_in(CcVisitor* v, CcForIn* fi) {
+    walk_exprs(v, &fi->iterables);
+    walk_stmt(v, fi->body);
+    walk_expr(v, fi->tail);
+}
+
+static void walk_stmt_b(CcVisitor* v, CcStmt* s);
+static void walk_stmt_c(CcVisitor* v, CcStmt* s);
+static void walk_stmt_d(CcVisitor* v, CcStmt* s);
+
+static void walk_stmt(CcVisitor* v, CcStmt* s) {
+    if (!s) return;
+    if (v->stmt && !v->stmt(s, v->env)) return;
+    @switch (s->k) {
+        case .expr(es): walk_expr(v, es.e); walk_stmt(v, es.body); break;
+        case .decl(ds): walk_decl(v, ds.d); break;
+        case .block(b): walk_stmts(v, &b.stmts); break;
+        case .if_(i): walk_expr(v, i.cond); walk_stmt(v, i.then); walk_stmt(v, i.els); break;
+        case .while_(w): walk_expr(v, w.cond); walk_stmt(v, w.body); break;
+        case .do_(w): walk_expr(v, w.cond); walk_stmt(v, w.body); break;
+        case .for_(f):
+            walk_decl(v, f.init_decl);
+            walk_expr(v, f.init_expr);
+            walk_expr(v, f.cond);
+            walk_expr(v, f.step);
+            walk_stmt(v, f.body);
+            walk_stmts(v, &f.more);
+            break;
+        case .switch_(sw): walk_expr(v, sw.subject); walk_stmt(v, sw.body); break;
+        case .case_(c): walk_expr(v, c.lo); walk_expr(v, c.hi); walk_stmt(v, c.inner); break;
+        case .return_(r): walk_expr(v, r.value); break;
+        default: walk_stmt_b(v, s); break;
+    }
+}
+
+static void walk_stmt_b(CcVisitor* v, CcStmt* s) {
+    @switch (s->k) {
+        case .break_: break;
+        case .continue_: break;
+        case .goto_(g): walk_expr(v, g.target); break;
+        case .label(l): walk_stmt(v, l.inner); break;
+        case .asm_: break;
+        case .defer(df): walk_stmt(v, df.body); break;
+        case .cancel_defer: break;
+        case .errhandler(eh): walk_type(v, eh.err_type); walk_stmt(v, eh.body); break;
+        case .err_fwd(ef): walk_expr(v, ef.err); break;
+        case .unwrap(us): walk_expr(v, us.e); break;
+        default: walk_stmt_c(v, s); break;
+    }
+}
+
+static void walk_stmt_c(CcVisitor* v, CcStmt* s) {
+    @switch (s->k) {
+        case .for_in(fi): walk_for_in(v, &fi); break;
+        case .parallel(pa):
+            walk_type(v, pa.bind_type);
+            walk_expr(v, pa.pred);
+            walk_expr(v, pa.seq);
+            walk_expr(v, pa.wait);
+            walk_exprs(v, &pa.cache);
+            walk_expr(v, pa.target);
+            walk_arms(v, &pa.arms);
+            walk_expr(v, pa.tail);
+            break;
+        case .parallel_for(pf):
+            walk_exprs(v, &pf.loop.iterables);
+            walk_expr(v, pf.pred);
+            walk_expr(v, pf.seq);
+            walk_expr(v, pf.wait);
+            walk_type(v, pf.bind_type);
+            walk_exprs(v, &pf.cache);
+            walk_expr(v, pf.target);
+            walk_stmt(v, pf.loop.body);
+            walk_expr(v, pf.tail);
+            break;
+        case .parallel_dest(pd): walk_expr(v, pd.dest); walk_stmts(v, &pd.stmts); break;
+        case .serial(b): walk_stmts(v, &b.stmts); break;
+        case .stage(st): walk_expr(v, st.gate); walk_exprs(v, &st.args); walk_stmts(v, &st.stmts); break;
+        case .with_deadline(wd): walk_expr(v, wd.deadline); walk_stmts(v, &wd.stmts); break;
+        case .with(w): walk_expr(v, w.value); walk_stmts(v, &w.stmts); break;
+        case .closing(cl): walk_exprs(v, &cl.channels); walk_expr(v, cl.spawn); walk_stmts(v, &cl.stmts); break;
+        case .spawn_block(sb): walk_spawn_block(v, &sb); break;
+        default: walk_stmt_d(v, s); break;
+    }
+}
+
+static void walk_stmt_d(CcVisitor* v, CcStmt* s) {
+    @switch (s->k) {
+        case .mode_block(mb): walk_stmts(v, &mb.stmts); break;
+        case .unsafe(b): walk_stmts(v, &b.stmts); break;
+        case .comptime_if(ci): walk_expr(v, ci.cond); walk_stmts(v, &ci.then); walk_stmts(v, &ci.els); break;
+        case .comptime_block(b): walk_stmts(v, &b.stmts); break;
+        case .comptime_for(cf): walk_expr(v, cf.over); walk_stmts(v, &cf.stmts); break;
+
+        default: break;
+        }
+}
+
+static void walk_entries(CcVisitor* v, Vec::[CcHookEntry]* entries) {
+    size_t i;
+    size_t n = entries->len();
+    for (i = 0; i < n; i++) {
+        CcHookEntry* h = entries->get_ptr(i);
+        Vec::[CcViewItem]* items = &h->items;
+        size_t j;
+        size_t m = items->len();
+        for (j = 0; j < m; j++) walk_type(v, items->get_ptr(j)->cast);
+        walk_expr(v, h->value);
+        walk_stmt(v, h->body);
+    }
+}
+
+static void walk_decl_b(CcVisitor* v, CcDecl* d);
+static void walk_decl_c(CcVisitor* v, CcDecl* d);
+
+static void walk_decl(CcVisitor* v, CcDecl* d) {
+    if (!d) return;
+    if (v->decl && !v->decl(d, v->env)) return;
+    @switch (d->k) {
+        case .var(vd): walk_type(v, vd.type); walk_init(v, vd.init); walk_stmt(v, vd.destroy_body); break;
+        case .func(f): walk_type(v, f.type); walk_stmt(v, f.body); break;
+        case .typedef_(td): walk_type(v, td.type); break;
+        case .tagged(tg): walk_type(v, tg.type); break;
+        case .static_assert_(sa): walk_expr(v, sa.cond); break;
+        case .pp: break;
+        case .empty: break;
+        case .typehooks(th): walk_type(v, th.target); walk_entries(v, &th.entries); break;
+        case .typeview(tv): walk_type(v, tv.target); walk_entries(v, &tv.entries); break;
+        case .variant(vd): walk_variant_arms(v, &vd.arms); break;
+        default: walk_decl_b(v, d); break;
+    }
+}
+
+static void walk_decl_b(CcVisitor* v, CcDecl* d) {
+    @switch (d->k) {
+        case .grammar: break;
+        case .factory(fa): walk_expr(v, fa.arity); walk_stmt(v, fa.body); break;
+        case .comptime_fn(cf): walk_type(v, cf.fn.type); walk_stmt(v, cf.fn.body); break;
+        case .comptime_block(b): walk_stmts(v, &b.stmts); break;
+        case .comptime_if(ci): walk_expr(v, ci.cond); walk_decls(v, &ci.then); walk_decls(v, &ci.els); break;
+        case .scoped_type(st): walk_type(v, st.type); break;
+        case .pragma_cc: break;
+        case .link: break;
+        case .task_doc: break;
+        case .macro_call(mc): walk_expr(v, mc.call); break;
+        default: walk_decl_c(v, d); break;
+    }
+}
+
+static void walk_decl_c(CcVisitor* v, CcDecl* d) {
+    @switch (d->k) {
+        case .stmt(ts): walk_stmt(v, ts.s); break;
+
+        default: break;
+        }
+}
+
+static void CcUnit_walk(CcUnit* u, CcVisitor v) {
+    walk_decls(&v, &u->decls);
+}
+
+static void CcStmt_walk(CcStmt* s, CcVisitor v) {
+    walk_stmt(&v, s);
+}
+
+static void CcExpr_walk(CcExpr* e, CcVisitor v) {
+    walk_expr(&v, e);
+}
+
+/* ---- cc_parse_expr ------------------------------------------------------------ */
+
+/* Parse `text` as one expression in the unit's arena, positioned at `at`
+ * for diagnostics. The first error is the result's error arm. */
+static CcExpr* !>(CcDiag) cc_parse_expr(CCSlice text, CcLoc at, CcUnit* u) {
+    CCArena a = u->arena;
+    CcDiags ds = CcDiags_new(a);
+    CcTape* tp = cc_arena_alloc(a, sizeof(CcTape), _Alignof(CcTape));
+    CcParseOpts opts;
+    P p;
+    CcExpr* e;
+    Vec::[CcToken]* toks;
+    size_t i;
+    size_t n;
+    *tp = cc_lex(at.path, text, &ds, a);
+    toks = &tp->toks;
+    n = toks->len();
+    for (i = 0; i < n; i++) {
+        CcToken* t = toks->get_ptr(i);
+        if (t->line == 1 && at.col) t->col += at.col - 1;
+        if (at.line) t->line += at.line - 1;
+    }
+    opts.mode = CC_UNIT_SOURCE;
+    opts.known_types = u->typedef_names;
+    p = parser_new(u, opts, &ds, a);
+    p.tape = tp;
+    p.t = toks->data();
+    p.n = (uint32_t)n;
+    p.i = 0;
+    p.in_slot = true;
+    if (at_eof(&p)) err_expected(&p, "an expression");
+    e = parse_expr(&p);
+    if (!at_eof(&p)) {
+        CCSlice found = tok_desc(&p, p.i);
+        CCString m = @string(`unexpected ${found} after the expression`, a);
+        err_here(&p, m);
+    }
+    if (ds.has_errors()) {
+        Vec::[CcDiag]* items = &ds.items;
+        size_t m = items->len();
+        for (i = 0; i < m; i++) {
+            CcDiag* dg = items->get_ptr(i);
+            if (dg->sev == CC_SEV_ERROR) return cc_err(*dg);
+        }
+    }
+    return cc_ok(e);
+}
+
+#endif
