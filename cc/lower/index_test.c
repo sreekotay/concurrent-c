@@ -290,6 +290,22 @@ static const CcType *struct_of_type(Walker *w, CcType *t, int depth) {
     return NULL;
 }
 
+static CcType *field_type(Walker *w, CcType *recv, const char *field);
+
+/* The C-member-first rule: `x.m()` is a plain C call when `m` is a field of
+ * function or function-pointer type; a data field named like a method
+ * (Vec's `len`) does not hide the method. */
+static int field_is_callable(Walker *w, CcType *recv, const char *field) {
+    CcType *ft = field_type(w, recv, field);
+    CcType *t;
+    if (!ft) return 0;
+    t = peel(unalias_local(w, peel(ft)));
+    if (!t) return 0;
+    if (t->kind == CC_T_FUNC) return 1;
+    if (t->kind == CC_T_POINTER) return t->base && peel(t->base)->kind == CC_T_FUNC;
+    return 0;
+}
+
 static CcType *field_type(Walker *w, CcType *recv, const char *field) {
     const CcType *st = struct_of_type(w, unalias_local(w, peel(recv)), 0);
     const CcField *f;
@@ -385,7 +401,7 @@ static CcType *type_of_expr(Walker *w, CcExpr *e) {
             const char *tn, *reason;
             CcMethod *m;
             if (!rt) return NULL;
-            if (field_type(w, rt, c->name)) return NULL;
+            if (field_is_callable(w, rt, c->name)) return NULL;
             m = resolve_site(w, rt, c->name, &tn, &reason);
             if (m && m->sym) return return_type_of_sym(m->sym);
         }
@@ -464,7 +480,7 @@ static void visit_ufcs(Walker *w, CcExpr *e) {
     }
     rt = type_of_expr(w, e->a);
     /* the C-member-first rule: `x.cb()` where `cb` is a field is a C call */
-    if (rt && field_type(w, rt, e->name)) return;
+    if (rt && field_is_callable(w, rt, e->name)) return;
     site = CC_NEW(&w->s->arena, Site);
     const CcToken *t = &w->s->unit->file->toks[e->span.first];
     CcLoc loc = cc_lex_loc(w->s->unit->file, t->off);
@@ -492,7 +508,7 @@ static void visit_ufcs_maybe_field(Walker *w, CcExpr *e) {
     CcType *rt;
     if (e->arrow && e->a && e->name) {
         rt = type_of_expr(w, e->a);
-        if (rt && field_type(w, rt, e->name)) return;
+        if (rt && field_is_callable(w, rt, e->name)) return;
     }
     visit_ufcs(w, e);
 }

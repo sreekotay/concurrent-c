@@ -1043,6 +1043,11 @@ static const char *cc__template_instance(CcIndex *ix, const char *text, size_t l
                 int n = atoi(inner + 4);
                 if (n >= 0 && (size_t)n < nargs) cc_buf_push_str(&b, args[n]);
                 else cc_buf_push(&b, inner, inner_len);
+            } else if (inner_len > 12 && memcmp(inner, "arg_mangled(", 12) == 0) {
+                /* the identifier-safe spelling of a type argument */
+                int n = atoi(inner + 12);
+                if (n >= 0 && (size_t)n < nargs) cc_buf_push_str(&b, cc__mangle(ix, args[n]));
+                else cc_buf_push(&b, inner, inner_len);
             } else if (inner_len > 16 && memcmp(inner, "type_args.items[", 16) == 0) {
                 int n = atoi(inner + 16);
                 if (n >= 0 && (size_t)n < nargs) cc_buf_push_str(&b, args[n]);

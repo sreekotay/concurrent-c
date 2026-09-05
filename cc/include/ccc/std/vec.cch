@@ -401,17 +401,8 @@ static inline CCVec_size_t cc__CCVec_size_t_new(CCArena __a) {
  * Header lowering blanks the factory from `.h`; harvest keeps it as a
  * Concurrent-C fact. */
 CC_GENERIC_FACTORY(Vec, 1) {
-    CCSlice t = arg(0);
-    int typed_slice = cc_slice_eq_cstr(&t, "int") ||
-                      cc_slice_eq_cstr(&t, "double") ||
-                      cc_slice_eq_cstr(&t, "float") ||
-                      cc_slice_eq_cstr(&t, "bool") ||
-                      cc_slice_eq_cstr(&t, "long") ||
-                      cc_slice_eq_cstr(&t, "long_long");
-    CCString decl = typed_slice
-        ? @string(`CC_VEC_DECL_ARENA_TSLICE(${t}, ${mangled}, CCSlice_${t})`,
-                  arena)
-        : @string(`CC_VEC_DECL_ARENA(${t}, ${mangled})`, arena);
+    /* A pure template: the element's pre-declared typed slice, when there is
+     * one (`CC_HAS_CCSLICE_<T>` beside each `CC_DECL_SLICE`), rides along. */
     return @emit(`
 #ifdef CC_FRAGMENT_VALIDATE
 typedef struct ${mangled}_chk { char _; } ${mangled}_chk;
@@ -422,7 +413,11 @@ static inline ${mangled}_chk ${mangled}_chk_new(void *a) {
     return z;
 }
 #else
-${decl}
+#ifdef CC_HAS_CCSLICE_${arg_mangled(0)}
+CC_VEC_DECL_ARENA_TSLICE(${arg(0)}, ${mangled}, CCSlice_${arg_mangled(0)})
+#else
+CC_VEC_DECL_ARENA(${arg(0)}, ${mangled})
+#endif
 static inline ${mangled} cc__${mangled}_new(CCArena __a) {
     return ${mangled}_init(__a, 0);
 }

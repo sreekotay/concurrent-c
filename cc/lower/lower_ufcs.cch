@@ -39,6 +39,50 @@ static CcExpr* uf_wrap(CcLowerer* L, CcExpr* recv, CcSpan sp) {
     return simple ? recv : lw_paren(L, recv, sp);
 }
 
+/* An expression with an address: a name, a member, an element, a
+ * dereference, or one of those in parentheses. */
+static bool uf_is_lvalue(const CcExpr* e) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .ident: return true;
+        case .member: return true;
+        case .index: return true;
+        case .paren(pa): return uf_is_lvalue(pa.a);
+        case .unary(un): return un.op == CC_OP_DEREF;
+        default: return false;
+    }
+}
+
+/* The canonical spelling of a receiver's type, through local aliases. */
+static CCSlice ix_canon_of(Walker* w, CcType* rt) {
+    CcType* t = peel(unalias_local(w, peel(rt)));
+    CcIndex* ix = w->ix;
+    return ix->canon(t ? t : rt);
+}
+
+/* `(T){ e }` */
+static CcExpr* uf_compound(CcLowerer* L, CcType* t, CcExpr* e, CcSpan sp) {
+    CcExpr* r = cc__expr_blank(sp, L->arena);
+    CcCompound cl;
+    CcInit* in = cc_arena_alloc(L->arena, sizeof(CcInit), _Alignof(CcInit));
+    CcInit* item = cc_arena_alloc(L->arena, sizeof(CcInit), _Alignof(CcInit));
+    memset(in, 0, sizeof(*in));
+    memset(item, 0, sizeof(*item));
+    item->span = sp;
+    item->designators = vec_new::[CcDesignator](L->arena);
+    item->items = vec_new::[CcInitRef](L->arena);
+    item->expr = e;
+    in->span = sp;
+    in->designators = vec_new::[CcDesignator](L->arena);
+    in->items = vec_new::[CcInitRef](L->arena);
+    in->items.push(item);
+    in->is_list = true;
+    cl.type = t;
+    cl.init = in;
+    r->k = { .compound = cl };
+    return r;
+}
+
 static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice tn, CCSlice reason) {
     UStep* st = (UStep*)w->env;
     CcLowerer* L = st->L;
@@ -64,6 +108,28 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
         return;
     }
     recv_ptr = uf.arrow || uf_type_is_pointer(w, rt);
+    if (m->recv_by_ptr && !recv_ptr && !uf_is_lvalue(uf.recv)) {
+        /* a value with no address (`xs.sub(1, 3).len()`): the call's result
+         * lives in a compound literal of its own type for the callee to point at */
+        CCSlice tn2 = ix_canon_of(w, rt);
+        CcType* lit_t = cc_type_named(tn2, sp, L->arena);
+        CcExpr* lit = uf_compound(L, lit_t, uf.recv, sp);
+        CcCall call2;
+        call2.callee = lw_ident(L, m->callee, sp);
+        call2.args = vec_new::[CcExprRef](L->arena);
+        call2.args.push(cc_expr_unary(CC_OP_ADDR, lit, sp, L->arena));
+        {
+            CcExprList* args = &uf.args;
+            size_t n = args->len();
+            size_t i;
+            for (i = 0; i < n; i++) {
+                CcExpr* a = *args->get_ptr(i);
+                call2.args.push(a);
+            }
+        }
+        e->k = { .call = call2 };
+        return;
+    }
     if (cc_slice_eq_cstr(&uf.method, "destroy") && cc_slice_eq_cstr(&m->source, "typehooks") && !uf.args.len()) {
         /* `x.destroy()` is the whole chain: the hook, then the value members' */
         CcStmt* blk = lw_block(L, sp);

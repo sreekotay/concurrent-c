@@ -189,6 +189,38 @@
     "  return ta.items[i];\n" \
     "}\n" \
     "#define arg(i) cc__tpl_arg(type_args, (long)(i), generic_name)\n" \
+    "/* arg_mangled(i): the identifier-safe spelling of type argument i, the\n" \
+    "   one the instance name is built from (`long long` -> long_long,\n" \
+    "   `Pair*` -> Pairptr, `T[:]` -> Tslice): what a factory template names\n" \
+    "   a macro or a function after. */\n" \
+    "static CCSlice cc__tpl_arg_mangled(CCSliceArray ta, long i, CCSlice gname, CCArena arena) {\n" \
+    "  CCSlice s = cc__tpl_arg(ta, i, gname);\n" \
+    "  const char* p = (const char*)s.ptr;\n" \
+    "  CCSlice out;\n" \
+    "  char* buf;\n" \
+    "  size_t n = 0, k;\n" \
+    "  if (!p || !s.len) return s;\n" \
+    "  out = cc_arena_alloc_slice_bytes(CC__ARENA_HOST(arena), s.len * 5 + 1);\n" \
+    "  buf = (char*)out.ptr;\n" \
+    "  if (!buf) return cc_slice_empty();\n" \
+    "  for (k = 0; k < s.len; k++) {\n" \
+    "    char c = p[k];\n" \
+    "    if (c == ' ' || c == '\\t' || c == '\\n') {\n" \
+    "      size_t j = k + 1;\n" \
+    "      while (j < s.len && (p[j] == ' ' || p[j] == '\\t')) j++;\n" \
+    "      if (j < s.len && p[j] == '*') continue;\n" \
+    "      if (n && buf[n - 1] != '_') buf[n++] = '_';\n" \
+    "    } else if (c == '*') { buf[n++] = 'p'; buf[n++] = 't'; buf[n++] = 'r'; }\n" \
+    "    else if (c == '[' && k + 2 < s.len && p[k + 1] == ':' && p[k + 2] == ']') {\n" \
+    "      buf[n++] = 's'; buf[n++] = 'l'; buf[n++] = 'i'; buf[n++] = 'c'; buf[n++] = 'e'; k += 2;\n" \
+    "    } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') buf[n++] = c;\n" \
+    "    else if (n && buf[n - 1] != '_') buf[n++] = '_';\n" \
+    "  }\n" \
+    "  while (n && buf[n - 1] == '_') n--;\n" \
+    "  out.len = n;\n" \
+    "  return out;\n" \
+    "}\n" \
+    "#define arg_mangled(i) cc__tpl_arg_mangled(type_args, (long)(i), generic_name, arena)\n" \
     "#endif\n"
 
 #endif /* CC_COMPTIME_EMIT_TPL_PRELUDE_INC_H */

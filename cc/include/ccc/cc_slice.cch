@@ -381,6 +381,21 @@ CC_DECL_SLICE(uint32_t)
 CC_DECL_SLICE(uint64_t)
 CC_DECL_SLICE(float)
 CC_DECL_SLICE(double)
+/* Each pre-declared typed slice announces itself, keyed by the element's
+ * identifier-safe spelling: a container factory tests
+ * `#ifdef CC_HAS_CCSLICE_<T>` to ride along with it. */
+#define CC_HAS_CCSLICE_short 1
+#define CC_HAS_CCSLICE_int 1
+#define CC_HAS_CCSLICE_long 1
+#define CC_HAS_CCSLICE_long_long 1
+#define CC_HAS_CCSLICE_int16_t 1
+#define CC_HAS_CCSLICE_int32_t 1
+#define CC_HAS_CCSLICE_int64_t 1
+#define CC_HAS_CCSLICE_uint16_t 1
+#define CC_HAS_CCSLICE_uint32_t 1
+#define CC_HAS_CCSLICE_uint64_t 1
+#define CC_HAS_CCSLICE_float 1
+#define CC_HAS_CCSLICE_double 1
 
 /* Family is-a face: every `CCSlice_*` instance embeds `CCSlice base`. */
 @typeview on CCSlice_* {
