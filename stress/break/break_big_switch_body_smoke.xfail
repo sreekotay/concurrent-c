@@ -1,0 +1,1 @@
+the opaque switch body is clipped near 2 KiB by a fixed staging buffer; the host compiler sees 'expected )' mid-case

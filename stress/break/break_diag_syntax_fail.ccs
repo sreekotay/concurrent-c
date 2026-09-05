@@ -1,0 +1,13 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+int main(void) {
+    cc_arena_stack(a, kilobytes(4));
+    CCStdio io = cc_stdio_create(a);
+    CCString s = cc_string_from("hi", a);
+    int n = s.len();
+    int z = 3
+    io.println("done");
+    return 0;
+}

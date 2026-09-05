@@ -1,0 +1,7 @@
+#include <ccc/cc_runtime.cch>
+
+int main(void) {
+    cc_arena_stack(a, kilobytes(4));
+    CCString s = cc_string_from("hi", a);
+    return (int)s.len();
+}

@@ -1,0 +1,9 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    cc_arena_stack(a, kilobytes(4));
+    int x = 5;
+    CCString s = @string(`value is ${x`, a);
+    return (int)s.len();
+}

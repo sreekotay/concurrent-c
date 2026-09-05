@@ -1,0 +1,10 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    cc_arena_stack(a, kilobytes(4));
+    int x = 5;
+    int y = x !>;
+    return y;
+}

@@ -1,0 +1,3 @@
+# !> on a non-Result is a lowerer diagnostic on the operator's line
+break_diag_unwrap_nonresult_fail.ccs:8:
+!>

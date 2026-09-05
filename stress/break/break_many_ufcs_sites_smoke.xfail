@@ -1,0 +1,1 @@
+the expression is clipped at about 700 characters by a fixed rewrite buffer; the host compiler sees 'expected expression'

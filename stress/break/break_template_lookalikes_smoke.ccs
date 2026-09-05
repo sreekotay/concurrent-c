@@ -1,0 +1,11 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+/* Template literals holding text that looks like @grammar, !>, ::[, [:] and
+ * a UFCS call: the scanners must treat literal text as text. */
+int main(void) {
+    cc_arena_stack(a, kilobytes(4));
+    int n = 7;
+    CCString s = @string(`@grammar(rules) Fake { a !> b ::[c] d[:] e.f(g) } ${n}`, a);
+    printf("%s\n", s.cstr(a));
+    return 0;
+}
