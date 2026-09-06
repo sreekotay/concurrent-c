@@ -1,0 +1,521 @@
+#pragma(@per_tu)
+/* Clean lowerer, step: closures. `(params) => body` becomes three C
+ * functions and a struct: an environment holding what the body reads from
+ * the enclosing scope, a `_make` that fills it, and an `_entry` the
+ * runtime calls. The closure expression itself becomes the call to
+ * `_make`, so a closure value is the runtime's handle and nothing else.
+ *
+ * What the body captures is what it reads: an explicit `[a, b]` list when
+ * one is written, otherwise every name the body uses that the enclosing
+ * scope declares. A name is captured once, in the order the body first
+ * reads it, and by value: the environment outlives the statement that
+ * built it, so a by-reference capture has to say whose lifetime it is
+ * borrowing, and until that is lowered it is a diagnostic rather than a
+ * dangling alias.
+ *
+ * The entry's body is real declarations, not text, so the steps after
+ * this one type the closure body exactly as they type any function.
+ *
+ * Lifetime: the lowerer arena for the nodes; the environment is heap and
+ * the runtime drops it with the closure. */
+#ifndef CC_LOWER_CLOSURES_CCH
+#define CC_LOWER_CLOSURES_CCH
+#include "lower.cch"
+#include "typing.cch"
+
+typedef struct KCap {
+    CCSlice name;
+    CcType* type;
+} KCap;
+typedef KCap* KCapRef;
+typedef Vec::[KCapRef] KCapList;
+
+typedef struct KStep {
+    CcLowerer* L;
+    Walker* w;
+    uint32_t next_id;
+    CcDeclList made;            /* the generated declarations, in order */
+    CCString fwd;               /* their forward declarations */
+    bool any;
+} KStep;
+
+/* ---- the names a body reads from outside itself ------------------------- */
+
+typedef struct KScan {
+    KStep* st;
+    Walker* w;
+    CcNameList bound;           /* the closure's own parameters and locals */
+    CcNameList seen;            /* captured already */
+    KCapList caps;
+    bool failed;
+} KScan;
+
+static bool kl_name_in(CcNameList* v, CCSlice name) {
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (slice_eq(*v->get_ptr(i), name)) return true;
+    return false;
+}
+
+/* A name the body reads that the enclosing scope declares is a capture. */
+static void kl_note_use(KScan* sc, CCSlice name) {
+    CcLowerer* L = sc->st->L;
+    CcType* t;
+    KCap* cap;
+    if (!name.len) return;
+    if (kl_name_in(&sc->bound, name) || kl_name_in(&sc->seen, name)) return;
+    t = sc_lookup(sc->w, name);
+    if (!t) return;                 /* a global, a function, an enumerator: not a capture */
+    cap = cc_arena_alloc(L->arena, sizeof(KCap), _Alignof(KCap));
+    cap->name = name;
+    cap->type = t;
+    sc->caps.push(cap);
+    sc->seen.push(name);
+}
+
+static bool kl_scan_expr(CcExpr* e, void* env) {
+    KScan* sc = (KScan*)env;
+    @switch (e->k) {
+        case .ident(nm): kl_note_use(sc, nm); return true;
+        /* a member name is not a variable; its receiver is walked anyway */
+        default: return true;
+    }
+}
+
+static void kl_bind_local(KScan* sc, CCSlice name) {
+    if (!name.len) return;
+    sc->bound.push(name);
+}
+
+static bool kl_scan_stmt(CcStmt* s, void* env) {
+    KScan* sc = (KScan*)env;
+    CcDecl* d = NULL;
+    if (!stmt_is_decl(s, &d) || !d) return true;
+    @switch (d->k) {
+        case .var(v): kl_bind_local(sc, v.name); break;
+        default: break;
+    }
+    return true;
+}
+
+/* ---- the generated C ---------------------------------------------------- */
+
+static CCSlice kl_name(CcLowerer* L, uint32_t id, const char* suffix) {
+    CCString s = @string(`cc_closure__N${id}${suffix}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+/* The spelling of a type in the generated struct and signatures. */
+static CCSlice kl_type_text(CcLowerer* L, CcType* t) {
+    return L->ix->canon(t);
+}
+
+/* `T name` as a declaration reads: the canonical spelling carries the
+ * pointer, so a declarator suffix is never needed here. */
+static void kl_push_decl(CCString* sb, CcLowerer* L, CcType* t, CCSlice name, const char* tail) {
+    sb->push_slice(kl_type_text(L, t), L->arena);
+    sb->push_char(' ', L->arena);
+    sb->push_slice(name, L->arena);
+    sb->push_cstr(tail, L->arena);
+}
+
+/* The environment struct, its drop, and the `_make` that fills it. */
+static CCString kl_env_text(KStep* st, uint32_t id, KCapList* caps, size_t arity) {
+    CcLowerer* L = st->L;
+    CCArena a = L->arena;
+    CCString sb = cc_string_new();
+    CCSlice env = kl_name(L, id, "_env");
+    CCSlice make = kl_name(L, id, "_make");
+    CCSlice entry = kl_name(L, id, "_entry");
+    CCSlice drop = kl_name(L, id, "_env_drop");
+    size_t n = caps->len();
+    size_t i;
+    CCString ar = @string(`${(int)arity}`, a);
+    sb.push_cstr("\n/* CC closure ", a);
+    {
+        CCString idn = @string(`${id}`, a);
+        sb.push_slice(cc_string_as_slice(&idn), a);
+    }
+    sb.push_cstr(" */\ntypedef struct ", a);
+    sb.push_slice(env, a);
+    sb.push_cstr(" {\n", a);
+    if (!n) sb.push_cstr("    char __unused;\n", a);
+    for (i = 0; i < n; i++) {
+        KCap* c = *caps->get_ptr(i);
+        sb.push_cstr("    ", a);
+        kl_push_decl(&sb, L, c->type, c->name, ";\n");
+    }
+    sb.push_cstr("} ", a);
+    sb.push_slice(env, a);
+    sb.push_cstr(";\nstatic void ", a);
+    sb.push_slice(drop, a);
+    sb.push_cstr("(void* p) { if (p) cc__heap_free(p); }\nstatic CCClosure", a);
+    sb.push_slice(cc_string_as_slice(&ar), a);
+    sb.push_char(' ', a);
+    sb.push_slice(make, a);
+    sb.push_char('(', a);
+    if (!n) sb.push_cstr("void", a);
+    for (i = 0; i < n; i++) {
+        KCap* c = *caps->get_ptr(i);
+        if (i) sb.push_cstr(", ", a);
+        kl_push_decl(&sb, L, c->type, c->name, "");
+    }
+    sb.push_cstr(") {\n    ", a);
+    sb.push_slice(env, a);
+    sb.push_cstr("* __env = (", a);
+    sb.push_slice(env, a);
+    sb.push_cstr("*)cc__heap_alloc(sizeof(*__env));\n", a);
+    for (i = 0; i < n; i++) {
+        KCap* c = *caps->get_ptr(i);
+        sb.push_cstr("    __env->", a);
+        sb.push_slice(c->name, a);
+        sb.push_cstr(" = ", a);
+        sb.push_slice(c->name, a);
+        sb.push_cstr(";\n", a);
+    }
+    sb.push_cstr("    return cc_closure", a);
+    sb.push_slice(cc_string_as_slice(&ar), a);
+    sb.push_cstr("_make(", a);
+    sb.push_slice(entry, a);
+    sb.push_cstr(", __env, ", a);
+    sb.push_slice(drop, a);
+    sb.push_cstr(");\n}", a);
+    return sb;
+}
+
+/* `static void* <entry>(void*[, intptr_t ...]);` and the `_make` line. */
+static void kl_forward(KStep* st, uint32_t id, KCapList* caps, size_t arity) {
+    CcLowerer* L = st->L;
+    CCArena a = L->arena;
+    CCString* sb = &st->fwd;
+    size_t n = caps->len();
+    size_t i;
+    CCString ar = @string(`${(int)arity}`, a);
+    sb->push_cstr("static void* ", a);
+    sb->push_slice(kl_name(L, id, "_entry"), a);
+    sb->push_cstr("(void*", a);
+    for (i = 0; i < arity; i++) sb->push_cstr(", intptr_t", a);
+    sb->push_cstr(");\nstatic CCClosure", a);
+    sb->push_slice(cc_string_as_slice(&ar), a);
+    sb->push_char(' ', a);
+    sb->push_slice(kl_name(L, id, "_make"), a);
+    sb->push_char('(', a);
+    if (!n) sb->push_cstr("void", a);
+    for (i = 0; i < n; i++) {
+        KCap* c = *caps->get_ptr(i);
+        if (i) sb->push_cstr(", ", a);
+        kl_push_decl(sb, L, c->type, c->name, "");
+    }
+    sb->push_cstr(");\n", a);
+}
+
+/* `(T)e` as a real node. */
+static CcExpr* kl_cast(CcLowerer* L, CcType* t, CcExpr* a, CcSpan sp) {
+    CcExpr* e = cc__expr_blank(sp, L->arena);
+    CcCast ca;
+    ca.type = t;
+    ca.a = a;
+    e->k = { .cast = ca };
+    return e;
+}
+
+/* `(T)__env->name` as a real expression, so the unpacked local is typed. */
+static CcExpr* kl_unpack(CcLowerer* L, KCap* c, CcSpan sp) {
+    CcExpr* env = lw_ident(L, cstr_slice("__env"), sp);
+    return cc_expr_member(env, c->name, true, sp, L->arena);
+}
+
+/* The entry function: the environment, the unpacked captures, the
+ * parameters, then the body as written. */
+static CcDecl* kl_entry_decl(KStep* st, uint32_t id, KCapList* caps, CcClosure cl, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CCSlice env = kl_name(L, id, "_env");
+    CcStmt* body = lw_block(L, sp);
+    CcParamList params = vec_new::[CcParam](L->arena);
+    CcType* fn_type = cc__type_blank(sp, L->arena);
+    CcFuncType ft;
+    CcFuncDecl fd;
+    CcDecl* d;
+    size_t n = caps->len();
+    size_t i;
+    Vec::[CcParam]* clp = &cl.params;
+    size_t np = clp->len();
+    {
+        /* `<env>* __env = (<env>*)__p;` */
+        CcType* pt = cc_type_pointer(cc_type_named(env, sp, L->arena), sp, L->arena);
+        CcExpr* cast = kl_cast(L, pt, lw_ident(L, cstr_slice("__p"), sp), sp);
+        lw_push(body, lw_decl_stmt(L, pt, cstr_slice("__env"), cast, sp));
+    }
+    for (i = 0; i < n; i++) {
+        KCap* c = *caps->get_ptr(i);
+        lw_push(body, lw_decl_stmt(L, c->type, c->name, kl_unpack(L, c, sp), sp));
+    }
+    for (i = 0; i < np; i++) {
+        CcParam* p = clp->get_ptr(i);
+        CCString an = @string(`__arg${(int)i}`, L->arena);
+        CCSlice arg = lw_keep(L, &an);
+        CcType* pt = p->type ? p->type : cc_type_named(cstr_slice("intptr_t"), sp, L->arena);
+        CcExpr* cast = kl_cast(L, pt, lw_ident(L, arg, sp), sp);
+        if (p->name.len) lw_push(body, lw_decl_stmt(L, pt, p->name, cast, sp));
+    }
+    if (cl.body) {
+        CcStmtList* inner = NULL;
+        if (cl.body->k.kind == CcStmtK_block) inner = lw_block_stmts(cl.body);
+        if (inner) {
+            size_t k;
+            size_t nb = inner->len();
+            for (k = 0; k < nb; k++) {
+                CcStmt* bs = *inner->get_ptr(k);
+                lw_push(body, bs);
+            }
+        } else {
+            lw_push(body, cl.body);
+        }
+    }
+    lw_push(body, cc_stmt_return(lw_text(L, @string(`NULL`, L->arena), sp), sp, L->arena));
+    {
+        CcParam p0;
+        memset(&p0, 0, sizeof(p0));
+        p0.span = sp;
+        p0.type = cc_type_pointer(cc_type_named(cstr_slice("void"), sp, L->arena), sp, L->arena);
+        p0.name = cstr_slice("__p");
+        p0.attrs = vec_new::[CcAttr](L->arena);
+        params.push(p0);
+    }
+    for (i = 0; i < np; i++) {
+        CcParam pn;
+        CCString an = @string(`__arg${(int)i}`, L->arena);
+        memset(&pn, 0, sizeof(pn));
+        pn.span = sp;
+        pn.type = cc_type_named(cstr_slice("intptr_t"), sp, L->arena);
+        pn.name = lw_keep(L, &an);
+        pn.attrs = vec_new::[CcAttr](L->arena);
+        params.push(pn);
+    }
+    memset(&ft, 0, sizeof(ft));
+    ft.ret = cc_type_pointer(cc_type_named(cstr_slice("void"), sp, L->arena), sp, L->arena);
+    ft.params = params;
+    { CcTypeK tk = { .func = ft }; fn_type->k = tk; }
+    memset(&fd, 0, sizeof(fd));
+    fd.type = fn_type;
+    fd.name = kl_name(L, id, "_entry");
+    fd.body = body;
+    d = cc_arena_alloc(L->arena, sizeof(CcDecl), _Alignof(CcDecl));
+    memset(d, 0, sizeof(*d));
+    d->span = sp;
+    d->specs = CC_SPEC_STATIC;
+    d->attrs = vec_new::[CcAttr](L->arena);
+    { CcDeclK dk = { .func = fd }; d->k = dk; }
+    return d;
+}
+
+/* An explicit capture list this step does not lower yet: a borrow has a
+ * lifetime to state, and a move has an owner to hand over. */
+static bool kl_reject_capture(CcLowerer* L, CcCapture* c, CcSpan sp) {
+    CCSlice nm = c->name;
+    CCString m;
+    if (c->by_ref) {
+        m = @string(`'[&${nm}]' (a by-reference capture) is not lowered by the clean lowerer yet: the environment outlives the statement that built it`, L->arena);
+        lw_error(L, sp, m);
+        return true;
+    }
+    if (c->is_move) {
+        m = @string(`'[${"@"}move ${nm}]' (a moving capture) is not lowered by the clean lowerer yet`, L->arena);
+        lw_error(L, sp, m);
+        return true;
+    }
+    if (c->init) {
+        m = @string(`'[${nm} = ...]' (an init capture) is not lowered by the clean lowerer yet`, L->arena);
+        lw_error(L, sp, m);
+        return true;
+    }
+    return false;
+}
+
+/* One closure: its captures, its three functions, and the `_make` call
+ * that replaces it. */
+static void kl_lower(KStep* st, CcExpr* e, CcClosure cl) {
+    CcLowerer* L = st->L;
+    Walker* w = st->w;
+    CcSpan sp = e->span;
+    uint32_t id = ++st->next_id;
+    KScan sc;
+    KCapList caps;
+    Vec::[CcCapture]* capv = &cl.captures;
+    size_t ncap = capv->len();
+    size_t i;
+    Vec::[CcParam]* clp = &cl.params;
+    size_t arity = clp->len();
+    memset(&sc, 0, sizeof(sc));
+    sc.st = st;
+    sc.w = w;
+    sc.bound = vec_new::[CCSlice](L->arena);
+    sc.seen = vec_new::[CCSlice](L->arena);
+    sc.caps = vec_new::[KCapRef](L->arena);
+    if (arity > 2) {
+        CCString m = @string(`a closure of ${(int)arity} parameters has no runtime handle; the runtime carries CCClosure0 through CCClosure2`, L->arena);
+        lw_error(L, sp, m);
+        return;
+    }
+    for (i = 0; i < arity; i++) {
+        CcParam* p = clp->get_ptr(i);
+        if (p->name.len) sc.bound.push(p->name);
+    }
+    if (ncap) {
+        for (i = 0; i < ncap; i++) {
+            CcCapture* c = capv->get_ptr(i);
+            CcType* t;
+            KCap* cap;
+            if (kl_reject_capture(L, c, sp)) return;
+            t = sc_lookup(w, c->name);
+            if (!t) {
+                CCSlice nm = c->name;
+                CCString m = @string(`captured name '${nm}' is not declared in the enclosing scope`, L->arena);
+                lw_error(L, sp, m);
+                return;
+            }
+            cap = cc_arena_alloc(L->arena, sizeof(KCap), _Alignof(KCap));
+            cap->name = c->name;
+            cap->type = t;
+            sc.caps.push(cap);
+            sc.seen.push(c->name);
+        }
+    } else if (cl.body) {
+        CcVisitor v;
+        memset(&v, 0, sizeof(v));
+        v.expr = kl_scan_expr;
+        v.stmt = kl_scan_stmt;
+        v.env = &sc;
+        CcStmt_walk(cl.body, v);
+    }
+    caps = sc.caps;
+    kl_forward(st, id, &caps, arity);
+    {
+        CCString envt = kl_env_text(st, id, &caps, arity);
+        st->made.push(lw_raw_decl(L, envt, sp));
+        st->made.push(kl_entry_decl(st, id, &caps, cl, sp));
+    }
+    {
+        /* the closure value is the call that builds it */
+        CcCall call;
+        size_t n = caps.len();
+        call.callee = lw_ident(L, kl_name(L, id, "_make"), sp);
+        call.args = vec_new::[CcExprRef](L->arena);
+        for (i = 0; i < n; i++) {
+            KCap* c = *caps.get_ptr(i);
+            call.args.push(lw_ident(L, c->name, sp));
+        }
+        e->k = { .call = call };
+    }
+    st->any = true;
+}
+
+static void kl_on_closure(Walker* w, CcExpr* e, CcClosure cl) {
+    KStep* st = (KStep*)w->env;
+    kl_lower(st, e, cl);
+}
+
+/* ---- calling one -------------------------------------------------------- */
+
+/* `c(args)` where `c` is a closure handle: the runtime's call. */
+static void kl_on_call(Walker* w, CcExpr* e, CcCall cl) {
+    KStep* st = (KStep*)w->env;
+    CcLowerer* L = st->L;
+    CcIndex* ix = w->ix;
+    CCSlice nm;
+    CcType* t;
+    CCSlice cn;
+    size_t n;
+    size_t i;
+    int arity;
+    if (!expr_ident(strip_parens_expr(cl.callee), &nm) || !nm.len) return;
+    t = sc_lookup(w, nm);
+    if (!t) return;
+    cn = ix->canon(t);
+    if (!(cn.len == 10 && memcmp(cn.ptr, "CCClosure", 9) == 0)) return;
+    arity = cn.ptr[9] - '0';
+    if (arity < 0 || arity > 2) return;
+    {
+        CCString fn = @string(`cc_closure${arity}_call`, L->arena);
+        CcCall out;
+        CcExprList* args = &cl.args;
+        out.callee = lw_ident(L, lw_keep(L, &fn), e->span);
+        out.args = vec_new::[CcExprRef](L->arena);
+        out.args.push(lw_ident(L, nm, e->span));
+        n = args->len();
+        for (i = 0; i < n; i++) {
+            CcExpr* a = *args->get_ptr(i);
+            CcExpr* cast = kl_cast(L, cc_type_named(cstr_slice("intptr_t"), a->span, L->arena),
+                                   lw_paren(L, a, a->span), a->span);
+            out.args.push(cast);
+        }
+        e->k = { .call = out };
+    }
+}
+
+static void CcLowerer_closures(CcLowerer* L) {
+    Walker w;
+    KStep st;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    st.w = &w;
+    st.made = vec_new::[CcDeclRef](L->arena);
+    st.fwd = cc_string_new();
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_closure = kl_on_closure;
+    w.on_call = kl_on_call;
+    w.env = &st;
+    tw_unit(&w);
+    if (!st.any) return;
+    {
+        CcDeclList* decls = &L->unit->decls;
+        CcDeclList with = vec_new::[CcDeclRef](L->arena);
+        size_t nd = decls->len();
+        size_t at = 0;
+        size_t k;
+        CcSpan sp;
+        sp.first = 0;
+        sp.last = 0;
+        for (k = 0; k < nd; k++) {
+            CcDecl* dd = *decls->get_ptr(k);
+            bool is_pp = false;
+            @switch (dd->k) {
+                case .pp: is_pp = true; break;
+                case .empty: is_pp = true; break;
+                case .pragma_cc: is_pp = true; break;
+                case .raw: is_pp = true; break;
+                default: break;
+            }
+            if (!is_pp) break;
+            at = k + 1;
+        }
+        {
+            CCString head = cc_string_new();
+            head.push_cstr("/* --- CC closure declarations --- */\n", L->arena);
+            head.push_slice(cc_string_as_slice(&st.fwd), L->arena);
+            head.push_cstr("/* --- end closure declarations --- */", L->arena);
+            for (k = 0; k < nd; k++) {
+                CcDecl* dk = *decls->get_ptr(k);
+                if (k == at) with.push(lw_raw_decl(L, head, sp));
+                with.push(dk);
+            }
+            if (at >= nd) with.push(lw_raw_decl(L, head, sp));
+        }
+        {
+            CcDeclList* madev = &st.made;
+            size_t nm2 = madev->len();
+            with.push(lw_raw_decl(L, @string(`/* --- CC generated closures --- */`, L->arena), sp));
+            for (k = 0; k < nm2; k++) {
+                CcDecl* md = *madev->get_ptr(k);
+                with.push(md);
+            }
+        }
+        *decls = with;
+    }
+}
+
+#endif

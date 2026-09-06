@@ -44,6 +44,8 @@ typedef struct Walker {
     void (*on_field)(struct Walker* w, CcExpr* e, CcMember mb, CcType* rt);
     /* called at every plain call, after its arguments are walked */
     void (*on_call)(struct Walker* w, CcExpr* e, CcCall cl);
+    /* called at every closure, with the enclosing scope still in hand */
+    void (*on_closure)(struct Walker* w, CcExpr* e, CcClosure cl);
     void* env;
 } Walker;
 
@@ -738,11 +740,16 @@ static void tw_called(Walker* w, CcExpr* e, CcCall cl) {
     w->on_call(w, e, cl);
 }
 
+static void tw_closed(Walker* w, CcExpr* e, CcClosure cl) {
+    if (!w->on_closure) return;
+    w->on_closure(w, e, cl);
+}
+
 static void tw_expr(Walker* w, CcExpr* e) {
     if (!e) return;
     @switch (e->k) {
         case .ufcs(uf): visit_ufcs_maybe_field(w, e, uf); tw_expr(w, uf.recv); tw_exprs(w, uf.args); return;
-        case .closure(cl): tw_closure(w, cl); return;
+        case .closure(cl): tw_closure(w, cl); tw_closed(w, e, cl); return;
         case .paren(pa): tw_expr(w, pa.a); return;
         case .unary(un): tw_expr(w, un.a); return;
         case .binary(bi): tw_expr(w, bi.a); tw_expr(w, bi.b); return;
