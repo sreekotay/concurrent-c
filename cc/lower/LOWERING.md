@@ -150,6 +150,53 @@ at each exit, in reverse order, which is what the `#line` pinning needs.
 `r.error()` symmetric, `r.unwrap_or(d)` → `((r).ok ? (r).u.value : (d))`.
 These come from the index as the method set of every `CCResult_*` type.
 
+## UFCS
+
+**The operator follows the receiver.** A pointer receiver takes `->`, a
+value receiver takes `.`; writing the other one is a diagnostic, never a
+silent coercion. A char pointer is the one receiver a `.` reaches
+through, so `"s".len()` keeps working. Whether the receiver is a pointer
+is asked of the type as written, through aliases and through the
+pointer-instance rule: a generic instance whose factory hands back a
+pointer is spelled as one in every unit that names it, including a
+header the current unit only includes.
+
+**The call.** `callee(<recv>, args)` with the receiver fitted to the
+callee's first parameter: by address when the callee takes a pointer and
+the receiver is a value, itself when the two agree. An rvalue receiver
+that the callee wants by address lives in a compound literal of its own
+type. `Type.fn(args)` is the declared `Type_fn(args)`.
+
+**The bare-name tier.** A plain `m(T, ...)` is callable as `x.m(...)`
+under one rule: the address of a receiver may be taken, but a pointer is
+never dereferenced and const is never dropped. So a `T*` receiver does
+not reach `m(T)`, a `const T*` receiver does not reach `m(T*)`, and
+`void*` is a dispatch key for a pointer receiver only. A near miss lands
+in the resolution ladder:
+
+```
+no UFCS method 'get_x' for receiver type 'Pair'; tried: Pair_get_x pair_get_x; candidate get_x (bare): declared, but first parameter 'Pair* p1' does not take 'Pair'
+```
+
+The named tiers (`T_m`, `cc_<snake>_m`, hooks, registrations) are
+conventions the declaration opted into, so they keep the ordinary
+address rule.
+
+**`as:` faces.** A method resolved through a `@typeview on T { as: f; }`
+field belongs to the field, not to `T`: the resolution records the member
+chain it walked, dot-joined across hops, and the call site projects the
+receiver through it before the address rule applies. `w.create(p)`
+resolved through `as: file` is `cc_file_create(&w.file, p)`.
+
+**Declaration checks.** A `@typeview` is checked where it is written, not
+where it is used. Each `as:` field names a value member, never a pointer;
+the face graph is acyclic; and no type is reachable through two faces,
+which would make a projection ambiguous. In a restrict list (`r:`, `w:`,
+`rw:`) every name matches a field or a method of the type, with the
+nearest name offered as a note when it does not; a `*` anywhere in an
+item is a pattern, so `out_*` and `*_len` match the members they name;
+and `^*` is refused as ill-formed rather than read as denying nothing.
+
 ## Variants
 
 **Declaration.** `@variant V { a: A; b: B; c: void; }` is the tag enum and

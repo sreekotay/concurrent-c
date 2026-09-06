@@ -268,7 +268,10 @@ differential report.
   remaining choice, so the runtime and stdlib hold no privilege. A factory
   whose body computes part of the fragment needs the body run, which is
   M7's comptime seam; until then such an instance is a diagnostic at the
-  site, never a guessed fragment. Variants lower in their own step before
+  site, never a guessed fragment. A key type with no installed hash and
+  equality is refused by the stdlib stating its own requirement, which
+  needs the comptime seam, so that refusal lands with M7 rather than by
+  teaching the compiler about maps. Variants lower in their own step before
   UFCS (`cc/lower/lower_variants.cch`, shapes in `cc/lower/LOWERING.md`):
   the declaration becomes the tag enum and tagged union with the drop
   helper registered as the type's destroy hook, and after the step every

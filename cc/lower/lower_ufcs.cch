@@ -23,18 +23,25 @@ typedef struct UStep {
  * followed but nothing is peeled: peeling a pointer away first would make
  * every receiver a value. */
 static bool uf_type_is_pointer(Walker* w, CcType* rt) {
+    UStep* st = (UStep*)w->env;
+    CcLowerer* L = st->L;
     CcIndex* ix = w->ix;
     CcType* t = rt;
     int depth = 0;
     while (t && depth++ < 8) {
         CcType* a;
-        CCSlice nm;
+        CCSlice cn;
         CcSym* sym;
         if (t->k.kind == CcTypeK_pointer || t->k.kind == CcTypeK_array) return true;
         a = unalias_local(w, t);
         if (a && a != t) { t = a; continue; }
-        if (!type_named_name(t, &nm) || !nm.len) return false;
-        sym = sym_any(ix, ix->canon(t));
+        cn = ix->canon(t);
+        if (!cn.len) return false;
+        if (cn.ptr[cn.len - 1] == '*') return true;
+        /* a generic instance whose factory hands back a pointer is spelled as
+         * one, in this unit and in every header that names it */
+        if (gn_instance_is_pointer(L, cn)) return true;
+        sym = sym_any(ix, cn);
         if (!sym || sym->kind != CC_SYM_TYPE || !sym->type || sym->type == t) return false;
         t = sym->type;
     }
