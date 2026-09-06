@@ -1,0 +1,75 @@
+/*
+ * Smoke: cc_listener_close from a foreign fiber while another fiber is
+ * parked (or about to park) in accept.
+ *
+ * Two-phase close: the closer marks the listener closing and wakes the
+ * accepter; the accepter returns CC_NET_CONNECTION_CLOSED and, being the
+ * last one out, tears the fd/watcher down on its own stack. The pre-fix
+ * runtime freed the watcher under the parked accepter (null deref in
+ * bind_cached_slot) or lost the wake (accept parked forever).
+ *
+ * Rounds alternate a yielded close (accepter is parked) with an immediate
+ * close (races the accepter's arm) to cover both windows. Every round must
+ * end with accept reporting CLOSED and the listener fd == -1.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/net.cch>
+#include <ccc/cc_nursery.cch>
+
+#include <stdio.h>
+#include <stdlib.h>
+
+#define ROUNDS 200
+
+static cc_atomic_int g_closed_seen = 0;
+static cc_atomic_int g_other_err = 0;
+
+static void accept_loop(CCListener* ln) {
+    while (1) {
+        CCSocket c = ln->accept() !>(e) {
+            if (e == CC_NET_CONNECTION_CLOSED) cc_atomic_fetch_add(&g_closed_seen, 1);
+            else cc_atomic_fetch_add(&g_other_err, 1);
+            return;
+        };
+        c.close(); /* nobody connects; unreachable, keeps the loop honest */
+    }
+}
+
+static void closer(CCListener* ln, int yields) {
+    for (int i = 0; i < yields; i++) cc_yield();
+    ln->close();
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    for (int r = 0; r < ROUNDS; r++) {
+        cc_arena_stack(scratch, 64);
+        int port = 18800 + (r % 16);
+        CCString addr = @string(`127.0.0.1:${port}`, scratch);
+        char[:] addr_v = addr;
+        CCListener ln = cc_tcp_listen(addr_v) !>(e) {
+            fprintf(stderr, "listener_close_foreign_smoke: listen err=%d\n", (int)e);
+            return 1;
+        };
+        int yields = (r & 1) ? 8 : 0;
+        {
+            CCNursery n = cc_nursery_create() !> @destroy;
+            n.spawn(() => [@safe &ln] accept_loop(&ln)) !>;
+            n.spawn(() => [@safe &ln, yields] closer(&ln, yields)) !>;
+        }
+        if (ln.fd != -1) {
+            fprintf(stderr, "listener_close_foreign_smoke: round %d fd still open (%d)\n", r, ln.fd);
+            return 2;
+        }
+        ln.close(); /* idempotent second close */
+    }
+
+    if (g_closed_seen != ROUNDS || g_other_err != 0) {
+        fprintf(stderr, "listener_close_foreign_smoke: closed=%d other=%d want %d/0\n",
+                g_closed_seen, g_other_err, ROUNDS);
+        return 3;
+    }
+    printf("listener_close_foreign_smoke: PASS\n");
+    return 0;
+}

@@ -35,6 +35,7 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_instantiate.cch>
 #include <ccc/std/net.cch>
+#include <ccc/std/signal.cch>
 #include <ccc/std/map.cch>
 #include <ccc/std/string.cch>
 #include <ccc/stdio.cch>
@@ -1060,14 +1061,6 @@ static void handle_client(CCSocket client, RedisDb* db, CCShardDomain* shards) {
     }
 }
 
-/* SIGTERM/INT close the listener so accept returns and the dest can wait. */
-static CCListener* g_redis_ln;
-
-static void redis_on_stop_signal(int sig) {
-    (void)sig;
-    if (g_redis_ln) g_redis_ln->close();
-}
-
 int main(int argc, char** argv) {
     @errhandler(CCError err) { cc_error_log(err); return 1; }
 
@@ -1107,25 +1100,43 @@ int main(int argc, char** argv) {
     eprintln(@string(`redis_idiomatic listening on ${addr} shards=${nshards}`,
                      @scratch));
 
-    g_redis_ln = &ln;
-    signal(SIGINT, redis_on_stop_signal);
-    signal(SIGTERM, redis_on_stop_signal);
+    /* Stop = stop admission, drain what is left. SIGINT/SIGTERM reach a
+     * fiber through CCSignal; that fiber closes the listener, accept
+     * returns CLOSED, and h.wait() below drains the clients. Nothing runs
+     * in signal context. If accept dies on its own, stop.close() releases
+     * the parked signal fiber so the dest still joins.
+     * Dest-bound arms are closures: a bare owner name is a copy. The
+     * listener and the signal are shared by two arms, so both arms get a
+     * pointer to the frame's object, never the object. */
+    CCSignal stop = cc_signal_watch2(SIGINT, SIGTERM) !> @destroy;
+    CCListener* lnp = &ln;
+    CCSignal* stopp = &stop;
+    RedisDb* dbp = &db;
+    CCShardDomain* shardsp = &shards;
     CCParallel h = @parallel spawn {
         @serial {
+            int sig = stopp->wait() !>(e) {
+                (void)e;
+                return;
+            };
+            (void)sig;
+            lnp->close();
+        }
+        @serial {
             while (1) {
-                CCSocket client = ln.accept() !>(stop) {
-                    (void)stop;
+                CCSocket client = lnp->accept() !>(e) {
+                    (void)e;
                     break;
                 };
                 (void)client.set_nodelay(1);
                 @parallel(h) {
-                    handle_client(client, &db, &shards);
+                    handle_client(client, dbp, shardsp);
                 }
             }
+            stopp->close();
         }
     } !>;
     h.wait() !>;
-    g_redis_ln = NULL;
 
     return 0;
 }

@@ -1,0 +1,121 @@
+/*
+ * Smoke: CCSignal delivers a process signal to a fiber, which stops
+ * admission (ln.close()) and lets the dest drain — the redis / staticd
+ * shutdown shape, with no runtime call in signal context.
+ *
+ *   - kill(getpid(), SIGUSR1) with no waiter: delivery is held (poll() sees it).
+ *   - stop fiber parked in wait(); kill(getpid(), SIGTERM) from another fiber; wait
+ *     returns SIGTERM, the fiber closes the listener, the accept fiber
+ *     returns CLOSED, h.wait() completes.
+ *   - close() under a parked waiter: wait returns CC_ERR_CANCELLED.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/net.cch>
+#include <ccc/std/signal.cch>
+#include <ccc/cc_parallel.cch>
+#include <ccc/cc_nursery.cch>
+
+#include <signal.h>
+#include <stdio.h>
+#include <time.h>
+#include <unistd.h>
+
+static cc_atomic_int g_accept_closed = 0;
+static cc_atomic_int g_stop_sig = 0;
+
+static void accept_loop(CCListener* ln) {
+    while (1) {
+        CCSocket c = ln->accept() !>(e) {
+            if (e == CC_NET_CONNECTION_CLOSED) cc_atomic_fetch_add(&g_accept_closed, 1);
+            return;
+        };
+        c.close();
+    }
+}
+
+static void stop_fiber(CCSignal* stop, CCListener* ln) {
+    int sig = stop->wait() !>(e) {
+        (void)e;
+        return;
+    };
+    cc_atomic_store(&g_stop_sig, sig);
+    ln->close();
+}
+
+static void wait_expect_cancel(CCSignal* s, cc_atomic_int* cancelled) {
+    int sig = s->wait() !>(e) {
+        if (e.base.kind == CC_ERR_CANCELLED) cc_atomic_fetch_add(cancelled, 1);
+        return;
+    };
+    (void)sig;
+}
+
+static void raiser(void) {
+    for (int i = 0; i < 4; i++) cc_yield();
+    kill(getpid(), SIGTERM);
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    /* 1. held delivery */
+    {
+        CCSignal usr = cc_signal_watch(SIGUSR1) !> @destroy;
+        kill(getpid(), SIGUSR1);
+        int got = 0;
+        for (int i = 0; i < 200 && !got; i++) {
+            got = usr.poll();
+            if (!got) { struct timespec ts = {0, 5 * 1000000L}; nanosleep(&ts, NULL); }
+        }
+        if (got != SIGUSR1) {
+            fprintf(stderr, "signal_stop_listener_smoke: held SIGUSR1 not delivered (got %d)\n", got);
+            return 2;
+        }
+        if (usr.poll() != 0) {
+            fprintf(stderr, "signal_stop_listener_smoke: poll did not take\n");
+            return 2;
+        }
+    }
+
+    /* 2. stop fiber closes the listener from a real signal */
+    {
+        CCSignal stop = cc_signal_watch2(SIGINT, SIGTERM) !> @destroy;
+        CCListener ln = cc_tcp_listen(cc_slice_cstr("127.0.0.1:18830")) !>(e) {
+            fprintf(stderr, "signal_stop_listener_smoke: listen err=%d\n", (int)e);
+            return 1;
+        };
+        {
+            CCNursery n = cc_nursery_create() !> @destroy;
+            n.spawn(() => [@safe &stop, @safe &ln] stop_fiber(&stop, &ln)) !>;
+            n.spawn(() => [@safe &ln] accept_loop(&ln)) !>;
+            n.spawn(() => raiser()) !>;
+        }
+        if (g_stop_sig != SIGTERM || g_accept_closed != 1 || ln.fd != -1) {
+            fprintf(stderr, "signal_stop_listener_smoke: sig=%d closed=%d fd=%d\n",
+                    g_stop_sig, g_accept_closed, ln.fd);
+            return 3;
+        }
+        ln.close();
+    }
+
+    /* 3. close under a parked waiter cancels the wait */
+    {
+        CCSignal s = cc_signal_watch(SIGUSR2) !>;
+        cc_atomic_int cancelled = 0;
+        {
+            CCNursery n = cc_nursery_create() !> @destroy;
+            n.spawn(() => [@safe &s, @safe &cancelled] wait_expect_cancel(&s, &cancelled)) !>;
+            n.spawn(() => [@safe &s] {
+                for (int i = 0; i < 4; i++) cc_yield();
+                s.close();
+            }) !>;
+        }
+        if (cancelled != 1) {
+            fprintf(stderr, "signal_stop_listener_smoke: close did not cancel wait (%d)\n", cancelled);
+            return 4;
+        }
+    }
+
+    printf("signal_stop_listener_smoke: PASS\n");
+    return 0;
+}

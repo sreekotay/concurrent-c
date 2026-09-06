@@ -313,13 +313,68 @@ CCResult_CCListener_CCNetError cc_tcp_listen(CCSlice addr) {
     return cc_ok_CCResult_CCListener_CCNetError(ln);
 }
 
-CCResult_CCSocket_CCNetError cc_listener_accept(CCListener* ln) {
-    CCSocket sock = {.fd = -1, .flags = 0, .watcher = NULL};
-    int fiber_ctx = cc__fiber_in_context();
+/* Listener close is two-phase (see net.cch). `state` packs the closing bit
+ * with a count of fibers inside accept; whoever observes closing with the
+ * count at zero owns the teardown, so the fd/watcher are freed exactly once
+ * and never under a live accepter. */
+#define CC_LN_CLOSING 1
+#define CC_LN_ONE     2
 
-    if (!ln || ln->fd < 0) {
+static void cc__listener_teardown(CCListener* ln) {
+    if (ln->watcher) {
+        cc__io_watcher_destroy((cc__io_owned_watcher*)ln->watcher);
+        ln->watcher = NULL;
+    } else if (ln->fd >= 0) {
+        cc__io_wait_forget_fd(ln->fd);
+    }
+    if (ln->fd >= 0) {
+        close(ln->fd);
+        ln->fd = -1;
+    }
+}
+
+/* Returns 0 when admitted, nonzero when the listener is closing. */
+static int cc__listener_enter(CCListener* ln) {
+    int cur = atomic_load_explicit(&ln->state, memory_order_acquire);
+    while (1) {
+        if (cur & CC_LN_CLOSING) return 1;
+        if (atomic_compare_exchange_weak_explicit(&ln->state, &cur, cur + CC_LN_ONE,
+                                                  memory_order_acq_rel, memory_order_acquire))
+            return 0;
+    }
+}
+
+static void cc__listener_leave(CCListener* ln) {
+    int prev = atomic_fetch_sub_explicit(&ln->state, CC_LN_ONE, memory_order_acq_rel);
+    if ((prev & CC_LN_CLOSING) && (prev - CC_LN_ONE) == CC_LN_CLOSING) {
+        cc__listener_teardown(ln);
+    }
+}
+
+static CCResult_CCSocket_CCNetError cc__listener_accept_inner(CCListener* ln, int fiber_ctx);
+
+CCResult_CCSocket_CCNetError cc_listener_accept(CCListener* ln) {
+    if (!ln) return cc_err_CCResult_CCSocket_CCNetError(CC_NET_OTHER);
+    if (cc__listener_enter(ln) != 0) {
+        return cc_err_CCResult_CCSocket_CCNetError(CC_NET_CONNECTION_CLOSED);
+    }
+    if (ln->fd < 0) {
+        cc__listener_leave(ln);
         return cc_err_CCResult_CCSocket_CCNetError(CC_NET_OTHER);
     }
+    CCResult_CCSocket_CCNetError r = cc__listener_accept_inner(ln, cc__fiber_in_context());
+    /* A close that raced our last wait is reported as CLOSED, not as the
+     * EBADF/ECANCELED it surfaced as. */
+    if (cc_is_err(r) &&
+        (atomic_load_explicit(&ln->state, memory_order_acquire) & CC_LN_CLOSING)) {
+        r = cc_err_CCResult_CCSocket_CCNetError(CC_NET_CONNECTION_CLOSED);
+    }
+    cc__listener_leave(ln);
+    return r;
+}
+
+static CCResult_CCSocket_CCNetError cc__listener_accept_inner(CCListener* ln, int fiber_ctx) {
+    CCSocket sock = {.fd = -1, .flags = 0, .watcher = NULL};
 
     struct sockaddr_storage client_addr;
     socklen_t client_len = sizeof(client_addr);
@@ -329,6 +384,9 @@ CCResult_CCSocket_CCNetError cc_listener_accept(CCListener* ln) {
     }
 
     while (1) {
+        if (atomic_load_explicit(&ln->state, memory_order_acquire) & CC_LN_CLOSING) {
+            return cc_err_CCResult_CCSocket_CCNetError(CC_NET_CONNECTION_CLOSED);
+        }
         /* A blocking accept outside fiber context is still waiting on
          * outside-world progress, so classify just this wait site as external. */
         if (!fiber_ctx) cc_external_wait_enter();
@@ -348,8 +406,23 @@ CCResult_CCSocket_CCNetError cc_listener_accept(CCListener* ln) {
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             cc__io_owned_watcher* watcher = cc__net_ensure_listener_watcher(ln);
-            int wait_err = watcher ? cc__io_watcher_wait(watcher, POLLIN)
-                                   : cc__io_wait_fd(ln->fd, POLLIN);
+            int wait_err;
+            if (watcher) {
+                wait_err = cc__io_watcher_wait(watcher, POLLIN);
+            } else {
+                /* No watcher (allocation failed): nothing for close to wake,
+                 * so poll in slices and re-read the closing bit ourselves. */
+                struct timespec slice;
+                clock_gettime(CLOCK_REALTIME, &slice);
+                slice.tv_nsec += 50 * 1000000L;
+                if (slice.tv_nsec >= 1000000000L) { slice.tv_sec++; slice.tv_nsec -= 1000000000L; }
+                wait_err = cc__io_wait_fd_deadline(ln->fd, POLLIN, &slice);
+                if (wait_err == ETIMEDOUT) wait_err = 0;
+            }
+            if (wait_err == ECANCELED ||
+                (atomic_load_explicit(&ln->state, memory_order_acquire) & CC_LN_CLOSING)) {
+                return cc_err_CCResult_CCSocket_CCNetError(CC_NET_CONNECTION_CLOSED);
+            }
             if (wait_err != 0) {
                 return cc_err_CCResult_CCSocket_CCNetError(errno_to_net_error(wait_err));
             }
@@ -380,15 +453,19 @@ void cc_listener_serve(CCListener* ln, CCNursery n, CCClosure1 on_conn) {
 
 void cc_listener_close(CCListener* ln) {
     if (!ln) return;
-    if (ln->watcher) {
-        cc__io_watcher_destroy((cc__io_owned_watcher*)ln->watcher);
-        ln->watcher = NULL;
-    } else if (ln->fd >= 0) {
-        cc__io_wait_forget_fd(ln->fd);
+    int prev = atomic_fetch_or_explicit(&ln->state, CC_LN_CLOSING, memory_order_acq_rel);
+    if ((prev & ~CC_LN_CLOSING) == 0) {
+        /* Nobody inside accept: this call owns the teardown. Also the path
+         * a second close / the @destroy hook takes — teardown is a no-op
+         * once fd == -1 and watcher == NULL. */
+        cc__listener_teardown(ln);
+        return;
     }
-    if (ln->fd >= 0) {
-        close(ln->fd);
-        ln->fd = -1;
+    /* Accepters are inside. Wake them; the last one out tears down. The
+     * watcher is only ever created by an accepter, which is admitted, so
+     * it cannot appear or vanish under us here. */
+    if (ln->watcher) {
+        cc__io_watcher_cancel_waiters((cc__io_owned_watcher*)ln->watcher);
     }
 }
 

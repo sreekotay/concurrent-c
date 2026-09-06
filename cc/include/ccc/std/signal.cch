@@ -1,0 +1,67 @@
+/*
+ * CCSignal — process signals delivered to a fiber.
+ *
+ * A signal handler may not touch the runtime: no locks, no unpark, no
+ * `ln.close()`. CCSignal moves delivery onto the I/O waiter thread (kqueue
+ * EVFILT_SIGNAL; a self-pipe on the poll backend) and hands it to whichever
+ * fiber is parked in `wait`. Everything the program wants to do on SIGTERM —
+ * stop admission, drain what is left — then runs as ordinary fiber code:
+ *
+ *     CCSignal stop = cc_signal_watch2(SIGINT, SIGTERM) !> @destroy;
+ *     CCParallel h = @parallel spawn {
+ *         @serial { int sig = stop.wait() !>(e) { return; }; ln.close(); }
+ *         @serial { while (1) { CCSocket c = ln.accept() !>(e) { break; };
+ *                               @parallel(h) { handle(c); } } }
+ *     } !>;
+ *     h.wait() !>;
+ *
+ * Watching a signal replaces its disposition (default action off) for the
+ * whole process until the last CCSignal watching it closes. Deliveries
+ * coalesce per signal number while nobody is waiting, as with sigpending.
+ * A CCSignal is a process-lifetime object; create it once, near main.
+ *
+ * Process-directed signals only (kill(2), the shell, an init system). On
+ * Darwin EVFILT_SIGNAL does not record thread-directed delivery, so
+ * raise(3) / pthread_kill(3) from inside the process are not seen; send
+ * kill(getpid(), sig) instead.
+ */
+#ifndef CC_STD_SIGNAL_H
+#define CC_STD_SIGNAL_H
+
+#include <ccc/cc_result.cch>
+#include <ccc/cc_io_error.cch>
+#include <ccc/cc_type.cch>
+#include <ccc/cc_ufcs.cch>
+#include <signal.h>
+#include <stddef.h>
+#include <stdbool.h>
+
+typedef struct CCSignal {
+    void* impl; /* runtime-owned sink; NULL after close */
+} CCSignal;
+
+/* Watch `sigs[0..n)`. Fails (CC_ERR_INVALID_ARG / os error) on a signo
+ * outside 1..64 or when the platform cannot route it. */
+CCSignal !>(CCIoError) cc_signal_watch_list(const int* sigs, size_t n);
+CCSignal !>(CCIoError) cc_signal_watch(int sig);
+CCSignal !>(CCIoError) cc_signal_watch2(int sig_a, int sig_b);
+
+/* Park until one watched signal is delivered; returns its number.
+ * Errors: CC_ERR_CANCELLED when the enclosing nursery / dest is cancelled
+ * or the CCSignal is closed under the waiter. Outside fiber context the
+ * wait is a 10 ms sleep-poll. UFCS: `sig = stop.wait() !>`. */
+int !>(CCIoError) cc_signal_wait(CCSignal* s);
+
+/* Non-blocking: a delivered-but-untaken signal number, or 0. */
+int cc_signal_poll(CCSignal* s);
+
+/* Stop watching; restores the default disposition of every signal no other
+ * CCSignal still watches; wakes a parked waiter with CC_ERR_CANCELLED.
+ * Idempotent (registered as the destroy hook). */
+void cc_signal_close(CCSignal* s);
+
+@typehooks on CCSignal {
+    .destroy = cc_type_destroy_call("cc_signal_close"),
+};
+
+#endif /* CC_STD_SIGNAL_H */

@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
+#include <time.h>
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
 #include <sys/event.h>
 #include <sys/time.h>
@@ -39,6 +41,14 @@ typedef struct cc_io_waiter {
 } cc_io_waiter;
 
 static int cc__io_wait_ready_deadline(int fd, short events, const struct timespec* abs_deadline);
+static int cc__io_wait_fd_deadline_cl(int fd, short events,
+                                      const struct timespec* abs_deadline,
+                                      const _Atomic int* closing);
+static int cc__io_wait_ready_sliced_closing(cc__io_owned_watcher* watcher, short events,
+                                            const struct timespec* abs_deadline);
+static int cc__io_wait_suspend_ready(_Atomic int* flag,
+                                     const struct timespec* abs_deadline);
+static int cc__io_wait_deadline_timeout_ms(const struct timespec* abs_deadline);
 
 #if CC_IO_WAIT_HAS_KQUEUE
 typedef struct cc_io_kqueue_slot {
@@ -58,6 +68,10 @@ typedef struct cc_io_kqueue_slot {
 
 struct cc__io_owned_watcher {
     int fd;
+    /* Set by cc__io_watcher_cancel_waiters. Waiters that arm after the
+     * cancel pass re-check this before parking, so a close that lands
+     * between "cancelled the slots" and "parked" is still seen. */
+    _Atomic int closing;
 #if CC_IO_WAIT_HAS_KQUEUE
     cc_io_kqueue_slot* read_slot;
     cc_io_kqueue_slot* write_slot;
@@ -75,6 +89,12 @@ typedef struct {
 #if CC_IO_WAIT_HAS_KQUEUE
     cc_io_kqueue_slot* kq_slots;
 #endif
+    /* Signal sinks (CCSignal). kqueue: EVFILT_SIGNAL on kqfd, ident = signo.
+     * poll: a sigaction handler writes the signo byte to sig_pipe and the
+     * waiter thread drains it. Either way delivery happens on the waiter
+     * thread — never in signal context — via cc__io_signal_deliver. */
+    struct cc__io_signal_sink* sinks;
+    int sig_pipe[2];
 } cc_io_wait_state;
 
 static cc_io_wait_state g_cc_io_wait_state = {
@@ -87,7 +107,22 @@ static cc_io_wait_state g_cc_io_wait_state = {
 #if CC_IO_WAIT_HAS_KQUEUE
     .kq_slots = NULL,
 #endif
+    .sinks = NULL,
+    .sig_pipe = {-1, -1},
 };
+
+struct cc__io_signal_sink {
+    struct cc__io_signal_sink* next;
+    _Atomic uint64_t mask;     /* bit (signo-1): watched */
+    _Atomic uint64_t pending;  /* bit (signo-1): delivered, not yet taken */
+    _Atomic int ready;
+    _Atomic int active;
+    void* fiber;
+    uint64_t wait_ticket;
+};
+
+static void cc__io_signal_deliver(int signo);
+static void cc__io_signal_drain_pipe(void);
 
 typedef struct {
     _Atomic int enabled;
@@ -524,6 +559,10 @@ static void* cc__io_waiter_main_kqueue(void* arg) {
         }
         if (rc <= 0) continue;
         for (int i = 0; i < rc; ++i) {
+            if (events[i].filter == EVFILT_SIGNAL) {
+                cc__io_signal_deliver((int)events[i].ident);
+                continue;
+            }
             cc_io_kqueue_slot* slot = (cc_io_kqueue_slot*)events[i].udata;
             if (!slot) continue;
             short revents = cc__io_wait_kevent_to_revents(&events[i]);
@@ -573,19 +612,22 @@ static void* cc__io_waiter_main_poll(void* arg) {
     struct pollfd* pfds = NULL;
     cc_io_waiter** waiters = NULL;
     size_t capacity = 0;
+    /* pfds[0] = wake pipe, pfds[1] = signal pipe (fd -1 = ignored by poll),
+     * waiters from pfds[CC_IO_POLL_FIXED] on. */
+    enum { CC_IO_POLL_FIXED = 2 };
     while (1) {
         size_t count = 0;
-        size_t idx = 1;
+        size_t idx = CC_IO_POLL_FIXED;
 
         pthread_mutex_lock(&g_cc_io_wait_state.mu);
         for (cc_io_waiter* w = g_cc_io_wait_state.head; w; w = w->next) count++;
-        size_t needed = count + 1;
+        size_t needed = count + CC_IO_POLL_FIXED;
         if (needed > capacity) {
             size_t new_capacity = capacity ? capacity : 16;
             while (new_capacity < needed) new_capacity *= 2;
             struct pollfd* new_pfds = (struct pollfd*)malloc(sizeof(*new_pfds) * new_capacity);
             cc_io_waiter** new_waiters =
-                (cc_io_waiter**)malloc(sizeof(*new_waiters) * (new_capacity > 0 ? (new_capacity - 1) : 1));
+                (cc_io_waiter**)malloc(sizeof(*new_waiters) * new_capacity);
             if (!new_pfds || !new_waiters) {
                 pthread_mutex_unlock(&g_cc_io_wait_state.mu);
                 free(new_pfds);
@@ -604,9 +646,12 @@ static void* cc__io_waiter_main_poll(void* arg) {
         pfds[0].fd = g_cc_io_wait_state.wake_pipe[0];
         pfds[0].events = POLLIN;
         pfds[0].revents = 0;
+        pfds[1].fd = g_cc_io_wait_state.sig_pipe[0];
+        pfds[1].events = POLLIN;
+        pfds[1].revents = 0;
         for (cc_io_waiter* w = g_cc_io_wait_state.head; w; w = w->next) {
             cc__io_waiter_addref(w);
-            waiters[idx - 1] = w;
+            waiters[idx - CC_IO_POLL_FIXED] = w;
             pfds[idx].fd = w->fd;
             pfds[idx].events = w->events;
             pfds[idx].revents = 0;
@@ -631,9 +676,12 @@ static void* cc__io_waiter_main_poll(void* arg) {
             }
             cc__io_waiter_drain_wake_pipe();
         }
+        if (pfds[1].fd >= 0 && (pfds[1].revents & POLLIN)) {
+            cc__io_signal_drain_pipe();
+        }
 
-        for (size_t i = 1; i < idx; ++i) {
-            cc_io_waiter* w = waiters[i - 1];
+        for (size_t i = CC_IO_POLL_FIXED; i < idx; ++i) {
+            cc_io_waiter* w = waiters[i - CC_IO_POLL_FIXED];
             short revents = pfds[i].revents;
             if (!w || revents == 0) continue;
             cc__io_wait_trace("poll_hit", w, revents);
@@ -654,7 +702,7 @@ static void* cc__io_waiter_main_poll(void* arg) {
             }
         }
 
-        for (size_t i = 0; i + 1 < idx; ++i) {
+        for (size_t i = 0; i + CC_IO_POLL_FIXED < idx; ++i) {
             cc__io_waiter_release(waiters[i]);
         }
     }
@@ -724,6 +772,212 @@ static int cc__io_wait_ensure_running(void) {
     return g_cc_io_wait_state.init_err;
 }
 
+/* ---- Signal sinks -------------------------------------------------------
+ * Delivery runs on the waiter thread (kqueue EVFILT_SIGNAL event, or the
+ * poll thread draining sig_pipe). It sets the pending bit on every sink
+ * watching that signo and unparks the sink's waiter if one is parked. The
+ * waiter side is a Dekker pair with this: publish active=1, fence, re-read
+ * pending; deliver stores pending, fences, reads active. */
+
+static void cc__io_signal_deliver(int signo) {
+    if (signo < 1 || signo > 64) return;
+    uint64_t bit = (uint64_t)1 << (signo - 1);
+    pthread_mutex_lock(&g_cc_io_wait_state.mu);
+    for (struct cc__io_signal_sink* k = g_cc_io_wait_state.sinks; k; k = k->next) {
+        if (!(atomic_load_explicit(&k->mask, memory_order_acquire) & bit)) continue;
+        atomic_fetch_or_explicit(&k->pending, bit, memory_order_seq_cst);
+        atomic_thread_fence(memory_order_seq_cst);
+        void* fiber = k->fiber;
+        if (atomic_load_explicit(&k->active, memory_order_acquire) && fiber &&
+            cc__fiber_wait_ticket_matches(fiber, k->wait_ticket) &&
+            atomic_exchange_explicit(&k->ready, 1, memory_order_acq_rel) == 0) {
+            cc__fiber_unpark(fiber);
+        }
+    }
+    pthread_mutex_unlock(&g_cc_io_wait_state.mu);
+}
+
+#if !CC_IO_WAIT_HAS_KQUEUE
+/* poll backend: async-signal-safe handler. One byte per delivery; a full
+ * pipe (64 KiB of undrained signals) drops, which is the same coalescing a
+ * pending-bit mask does anyway. */
+static void cc__io_signal_handler(int signo) {
+    int saved = errno;
+    unsigned char b = (unsigned char)signo;
+    if (g_cc_io_wait_state.sig_pipe[1] >= 0) {
+        (void)!write(g_cc_io_wait_state.sig_pipe[1], &b, 1);
+    }
+    errno = saved;
+}
+
+static int cc__io_signal_pipe_ensure(void) {
+    if (g_cc_io_wait_state.sig_pipe[0] >= 0) return 0;
+    int p[2];
+    if (pipe(p) != 0) return errno ? errno : EIO;
+    for (int i = 0; i < 2; i++) {
+        int fl = fcntl(p[i], F_GETFL, 0);
+        if (fl < 0 || fcntl(p[i], F_SETFL, fl | O_NONBLOCK) < 0) {
+            int e = errno ? errno : EIO;
+            close(p[0]); close(p[1]);
+            return e;
+        }
+        (void)fcntl(p[i], F_SETFD, FD_CLOEXEC);
+    }
+    g_cc_io_wait_state.sig_pipe[1] = p[1];
+    g_cc_io_wait_state.sig_pipe[0] = p[0]; /* read end last: poll loop keys on it */
+    cc__io_waiter_notify();                /* rebuild the pfd set with it */
+    return 0;
+}
+#endif
+
+static void cc__io_signal_drain_pipe(void) {
+    if (g_cc_io_wait_state.sig_pipe[0] < 0) return;
+    unsigned char buf[64];
+    while (1) {
+        ssize_t n = read(g_cc_io_wait_state.sig_pipe[0], buf, sizeof(buf));
+        if (n > 0) {
+            for (ssize_t i = 0; i < n; i++) cc__io_signal_deliver((int)buf[i]);
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        break;
+    }
+}
+
+cc__io_signal_sink* cc__io_signal_sink_create(void) {
+    cc__io_signal_sink* k = (cc__io_signal_sink*)calloc(1, sizeof(*k));
+    if (!k) return NULL;
+    pthread_mutex_lock(&g_cc_io_wait_state.mu);
+    k->next = g_cc_io_wait_state.sinks;
+    g_cc_io_wait_state.sinks = k;
+    pthread_mutex_unlock(&g_cc_io_wait_state.mu);
+    return k;
+}
+
+/* Sinks are never freed: the waiter thread may hold one across a delivery
+ * and CCSignal objects are process-lifetime in practice. close() only
+ * clears the mask and restores the default disposition when no other sink
+ * still watches the signal. */
+static int cc__io_signal_watched_by_other_locked(cc__io_signal_sink* self, uint64_t bit) {
+    for (cc__io_signal_sink* k = g_cc_io_wait_state.sinks; k; k = k->next) {
+        if (k != self && (atomic_load_explicit(&k->mask, memory_order_acquire) & bit)) return 1;
+    }
+    return 0;
+}
+
+int cc__io_signal_sink_add(cc__io_signal_sink* k, int signo) {
+    if (!k || signo < 1 || signo > 64) return EINVAL;
+    int init_err = cc__io_wait_ensure_running();
+    if (init_err != 0) return init_err;
+    uint64_t bit = (uint64_t)1 << (signo - 1);
+    pthread_mutex_lock(&g_cc_io_wait_state.mu);
+    int first = !cc__io_signal_watched_by_other_locked(k, bit) &&
+                !(atomic_load_explicit(&k->mask, memory_order_acquire) & bit);
+    int err = 0;
+    if (first) {
+#if CC_IO_WAIT_HAS_KQUEUE
+        if (cc__io_wait_use_kqueue() && g_cc_io_wait_state.kqfd >= 0) {
+            struct kevent ev;
+            EV_SET(&ev, (uintptr_t)signo, EVFILT_SIGNAL, EV_ADD | EV_ENABLE, 0, 0, NULL);
+            err = cc__io_wait_kqueue_apply(&ev, 1);
+            /* EVFILT_SIGNAL records the delivery even when the signal is
+             * ignored; SIG_IGN keeps the default action (terminate) off. */
+            if (err == 0) signal(signo, SIG_IGN);
+        } else {
+            err = ENOTSUP;
+        }
+#else
+        err = cc__io_signal_pipe_ensure();
+        if (err == 0) {
+            struct sigaction sa;
+            memset(&sa, 0, sizeof(sa));
+            sa.sa_handler = cc__io_signal_handler;
+            sa.sa_flags = SA_RESTART;
+            sigemptyset(&sa.sa_mask);
+            if (sigaction(signo, &sa, NULL) != 0) err = errno ? errno : EIO;
+        }
+#endif
+    }
+    if (err == 0) atomic_fetch_or_explicit(&k->mask, bit, memory_order_acq_rel);
+    pthread_mutex_unlock(&g_cc_io_wait_state.mu);
+    return err;
+}
+
+void cc__io_signal_sink_close(cc__io_signal_sink* k) {
+    if (!k) return;
+    pthread_mutex_lock(&g_cc_io_wait_state.mu);
+    uint64_t mask = atomic_exchange_explicit(&k->mask, 0, memory_order_acq_rel);
+    for (int signo = 1; signo <= 64 && mask; signo++) {
+        uint64_t bit = (uint64_t)1 << (signo - 1);
+        if (!(mask & bit)) continue;
+        mask &= ~bit;
+        if (cc__io_signal_watched_by_other_locked(k, bit)) continue;
+#if CC_IO_WAIT_HAS_KQUEUE
+        if (cc__io_wait_use_kqueue() && g_cc_io_wait_state.kqfd >= 0) {
+            struct kevent ev;
+            EV_SET(&ev, (uintptr_t)signo, EVFILT_SIGNAL, EV_DELETE, 0, 0, NULL);
+            (void)cc__io_wait_kqueue_apply(&ev, 1);
+        }
+#endif
+        signal(signo, SIG_DFL);
+    }
+    /* Wake a parked waiter so it can report ECANCELED. */
+    void* fiber = k->fiber;
+    if (atomic_load_explicit(&k->active, memory_order_acquire) && fiber &&
+        cc__fiber_wait_ticket_matches(fiber, k->wait_ticket) &&
+        atomic_exchange_explicit(&k->ready, 1, memory_order_acq_rel) == 0) {
+        cc__fiber_unpark(fiber);
+    }
+    pthread_mutex_unlock(&g_cc_io_wait_state.mu);
+}
+
+int cc__io_signal_sink_take(cc__io_signal_sink* k) {
+    if (!k) return 0;
+    uint64_t cur = atomic_load_explicit(&k->pending, memory_order_acquire);
+    while (cur) {
+        int signo = __builtin_ctzll(cur) + 1;
+        uint64_t bit = (uint64_t)1 << (signo - 1);
+        if (atomic_compare_exchange_weak_explicit(&k->pending, &cur, cur & ~bit,
+                                                  memory_order_acq_rel, memory_order_acquire))
+            return signo;
+    }
+    return 0;
+}
+
+int cc__io_signal_sink_wait(cc__io_signal_sink* k, const struct timespec* abs_deadline, int* out_signo) {
+    if (!k || !out_signo) return EINVAL;
+    while (1) {
+        int signo = cc__io_signal_sink_take(k);
+        if (signo) { *out_signo = signo; return 0; }
+        if (atomic_load_explicit(&k->mask, memory_order_acquire) == 0) return ECANCELED;
+        if (!cc__fiber_in_context()) {
+            /* Thread-side wait: nothing to unpark, so sleep in slices. */
+            if (abs_deadline && cc__io_wait_deadline_timeout_ms(abs_deadline) == 0) return ETIMEDOUT;
+            struct timespec ts = {0, 10 * 1000000L};
+            cc_external_wait_enter();
+            nanosleep(&ts, NULL);
+            cc_external_wait_leave();
+            continue;
+        }
+        void* fiber = cc__fiber_current();
+        k->wait_ticket = cc__fiber_publish_wait_ticket(fiber);
+        k->fiber = fiber;
+        atomic_store_explicit(&k->ready, 0, memory_order_relaxed);
+        atomic_store_explicit(&k->active, 1, memory_order_seq_cst);
+        atomic_thread_fence(memory_order_seq_cst);
+        int wait_err = 0;
+        if (atomic_load_explicit(&k->pending, memory_order_acquire) == 0 &&
+            atomic_load_explicit(&k->mask, memory_order_acquire) != 0) {
+            cc__fiber_set_park_obj(k);
+            wait_err = cc__io_wait_suspend_ready(&k->ready, abs_deadline);
+            cc__fiber_set_park_obj(NULL);
+        }
+        atomic_store_explicit(&k->active, 0, memory_order_release);
+        k->fiber = NULL;
+        if (wait_err != 0) return wait_err;
+    }
+}
+
 cc__io_owned_watcher* cc__io_watcher_create(int fd) {
     if (fd < 0) return NULL;
     cc__io_owned_watcher* watcher = (cc__io_owned_watcher*)calloc(1, sizeof(*watcher));
@@ -752,6 +1006,51 @@ static void cc__io_watcher_cancel_slot(cc_io_kqueue_slot* slot) {
     }
 }
 #endif
+
+/* Wake every fiber parked on `fd` through the shared lists (kqueue slots
+ * acquired by fd when the cached slot was busy; poll-backend waiters). The
+ * woken fiber re-reads its owner's closing state; this never frees. */
+static void cc__io_wait_cancel_fd_waiters(int fd) {
+    if (fd < 0) return;
+    pthread_mutex_lock(&g_cc_io_wait_state.mu);
+#if CC_IO_WAIT_HAS_KQUEUE
+    for (cc_io_kqueue_slot* slot = g_cc_io_wait_state.kq_slots; slot; slot = slot->next) {
+        if (slot->fd == fd) cc__io_watcher_cancel_slot(slot);
+    }
+#endif
+    for (cc_io_waiter* w = g_cc_io_wait_state.head; w; w = w->next) {
+        if (w->fd != fd) continue;
+        if (atomic_load_explicit(&w->cancelled, memory_order_acquire)) continue;
+        if (w->fiber && !cc__fiber_wait_ticket_matches(w->fiber, w->wait_ticket)) continue;
+        if (atomic_exchange_explicit(&w->ready, 1, memory_order_acq_rel) == 0 &&
+            cc__wait_select_try_win(w->select_group, w->select_index)) {
+            if (w->select_group) {
+                cc__wait_select_group* group = (cc__wait_select_group*)w->select_group;
+                atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
+            }
+            cc__fiber_unpark(w->fiber);
+        }
+    }
+    pthread_mutex_unlock(&g_cc_io_wait_state.mu);
+}
+
+void cc__io_watcher_cancel_waiters(cc__io_owned_watcher* watcher) {
+    if (!watcher) return;
+    /* Publish closing before the wake pass: a waiter that arms after we
+     * looked at its slot loads `closing` after its own arm (seq_cst both
+     * sides), so one of the two of us sees the other. */
+    atomic_store_explicit(&watcher->closing, 1, memory_order_seq_cst);
+    atomic_thread_fence(memory_order_seq_cst);
+#if CC_IO_WAIT_HAS_KQUEUE
+    cc__io_watcher_cancel_slot(watcher->read_slot);
+    cc__io_watcher_cancel_slot(watcher->write_slot);
+#endif
+    cc__io_wait_cancel_fd_waiters(watcher->fd);
+}
+
+int cc__io_watcher_closing(const cc__io_owned_watcher* watcher) {
+    return watcher && atomic_load_explicit(&watcher->closing, memory_order_acquire);
+}
 
 void cc__io_watcher_destroy(cc__io_owned_watcher* watcher) {
     if (!watcher) return;
@@ -799,15 +1098,15 @@ int cc__io_watcher_wait_deadline(cc__io_owned_watcher* watcher,
                                  short events,
                                  const struct timespec* abs_deadline) {
     if (!watcher || watcher->fd < 0) return EINVAL;
-    if (!cc__fiber_in_context()) {
-        return cc__io_wait_ready_deadline(watcher->fd, events, abs_deadline);
-    }
-    if (cc__io_wait_force_direct()) {
-        return cc__io_wait_ready_deadline(watcher->fd, events, abs_deadline);
+    if (atomic_load_explicit(&watcher->closing, memory_order_acquire)) return ECANCELED;
+    if (!cc__fiber_in_context() || cc__io_wait_force_direct()) {
+        /* Thread-side poll cannot be woken by cancel_waiters; slice it so a
+         * close is noticed within one slice instead of never. */
+        return cc__io_wait_ready_sliced_closing(watcher, events, abs_deadline);
     }
 
     int init_err = cc__io_wait_ensure_running();
-    if (init_err != 0) return cc__io_wait_ready_deadline(watcher->fd, events, abs_deadline);
+    if (init_err != 0) return cc__io_wait_ready_sliced_closing(watcher, events, abs_deadline);
     if (cc__io_wait_stats_enabled()) {
         cc__io_wait_stats_init();
         atomic_fetch_add_explicit(&g_cc_io_wait_stats.wait_async_calls, 1, memory_order_relaxed);
@@ -824,7 +1123,10 @@ int cc__io_watcher_wait_deadline(cc__io_owned_watcher* watcher,
         if (events == POLLIN) persistent_read = 1;
         cc_io_kqueue_slot* slot = cc__io_wait_kqueue_bind_cached_slot(cached_slot, watcher->fd, events, fiber, wait_ticket, persistent_read);
         if (!slot) {
-            return cc__io_wait_fd_deadline(watcher->fd, events, abs_deadline);
+            /* Cached slot busy (a second waiter on the same watcher/event).
+             * The by-fd slot is woken by cancel_waiters' fd walk, but a bind
+             * that lands after that walk would park unseen — slice it. */
+            return cc__io_wait_fd_deadline_cl(watcher->fd, events, abs_deadline, &watcher->closing);
         }
         if (cc__io_wait_stats_enabled()) {
             atomic_fetch_add_explicit(&g_cc_io_wait_stats.waiter_adds, 1, memory_order_relaxed);
@@ -850,16 +1152,28 @@ int cc__io_watcher_wait_deadline(cc__io_owned_watcher* watcher,
             }
             return 0;
         }
-        if (cc__io_wait_stats_enabled()) {
-            cc__io_wait_stats_init();
-            atomic_fetch_add_explicit(&g_cc_io_wait_stats.kq_suspend_calls, 1, memory_order_relaxed);
-            if (atomic_load_explicit(&slot->ready, memory_order_acquire)) {
-                atomic_fetch_add_explicit(&g_cc_io_wait_stats.kq_ready_before_suspend, 1, memory_order_relaxed);
+        /* Armed and visible (active=1). Now the Dekker check against
+         * cancel_waiters: if it published `closing` before our arm it did
+         * not see us, so we must see it here. */
+        atomic_thread_fence(memory_order_seq_cst);
+        int wait_err;
+        if (atomic_load_explicit(&watcher->closing, memory_order_acquire)) {
+            wait_err = ECANCELED;
+        } else {
+            if (cc__io_wait_stats_enabled()) {
+                cc__io_wait_stats_init();
+                atomic_fetch_add_explicit(&g_cc_io_wait_stats.kq_suspend_calls, 1, memory_order_relaxed);
+                if (atomic_load_explicit(&slot->ready, memory_order_acquire)) {
+                    atomic_fetch_add_explicit(&g_cc_io_wait_stats.kq_ready_before_suspend, 1, memory_order_relaxed);
+                }
+            }
+            cc__fiber_set_park_obj(slot);
+            wait_err = cc__io_wait_suspend_ready(&slot->ready, abs_deadline);
+            cc__fiber_set_park_obj(NULL);
+            if (wait_err == 0 && atomic_load_explicit(&watcher->closing, memory_order_acquire)) {
+                wait_err = ECANCELED;
             }
         }
-        cc__fiber_set_park_obj(slot);
-        int wait_err = cc__io_wait_suspend_ready(&slot->ready, abs_deadline);
-        cc__fiber_set_park_obj(NULL);
         if (persistent_read) {
             (void)atomic_exchange_explicit(&slot->ready, 0, memory_order_acq_rel);
         }
@@ -876,7 +1190,7 @@ int cc__io_watcher_wait_deadline(cc__io_owned_watcher* watcher,
 #endif
     }
 
-    return cc__io_wait_fd_deadline(watcher->fd, events, abs_deadline);
+    return cc__io_wait_fd_deadline_cl(watcher->fd, events, abs_deadline, &watcher->closing);
 }
 
 int cc__io_wait_select_publish(cc__io_owned_watcher* watcher,
@@ -1028,11 +1342,41 @@ static int cc__io_wait_ready_deadline(int fd, short events, const struct timespe
     }
 }
 
+/* Thread-side poll on a watcher's fd. A thread in poll() cannot be woken by
+ * cc__io_watcher_cancel_waiters (no fiber to unpark, and the fd stays open
+ * until the last waiter drains), so poll in slices and re-read `closing`. */
+static int cc__io_wait_ready_sliced_closing(cc__io_owned_watcher* watcher, short events,
+                                            const struct timespec* abs_deadline) {
+    const int slice_ms = 50;
+    while (1) {
+        if (atomic_load_explicit(&watcher->closing, memory_order_acquire)) return ECANCELED;
+        int timeout_ms = cc__io_wait_deadline_timeout_ms(abs_deadline);
+        if (timeout_ms < 0 || timeout_ms > slice_ms) timeout_ms = slice_ms;
+        struct pollfd pfd = {.fd = watcher->fd, .events = events};
+        cc_external_wait_enter();
+        int rc = poll(&pfd, 1, timeout_ms);
+        cc_external_wait_leave();
+        if (rc > 0) {
+            if (pfd.revents & POLLNVAL) return EBADF;
+            if (pfd.revents & (POLLERR | POLLHUP)) return EIO;
+            return 0;
+        }
+        if (rc < 0 && errno != EINTR) return errno;
+        if (rc == 0 && abs_deadline && cc__io_wait_deadline_timeout_ms(abs_deadline) == 0)
+            return ETIMEDOUT;
+    }
+}
+
 int cc__io_wait_fd(int fd, short events) {
     return cc__io_wait_fd_deadline(fd, events, NULL);
 }
 
-int cc__io_wait_fd_deadline(int fd, short events, const struct timespec* abs_deadline) {
+/* `closing`, when given, is the owning watcher's close flag: re-read after
+ * the slot/waiter is published (seq_cst fence) so a cancel pass that ran
+ * before the publish is still seen instead of parking forever. */
+static int cc__io_wait_fd_deadline_cl(int fd, short events,
+                                      const struct timespec* abs_deadline,
+                                      const _Atomic int* closing) {
     if (!cc__fiber_in_context()) {
         /* Direct thread waits here are driven by kernel I/O readiness, so mark
          * this call site as external to the scheduler dependency graph. */
@@ -1073,16 +1417,25 @@ int cc__io_wait_fd_deadline(int fd, short events, const struct timespec* abs_dea
             }
             return arm_err;
         }
-        if (cc__io_wait_stats_enabled()) {
-            cc__io_wait_stats_init();
-            atomic_fetch_add_explicit(&g_cc_io_wait_stats.kq_suspend_calls, 1, memory_order_relaxed);
-            if (atomic_load_explicit(&slot->ready, memory_order_acquire)) {
-                atomic_fetch_add_explicit(&g_cc_io_wait_stats.kq_ready_before_suspend, 1, memory_order_relaxed);
+        int wait_err;
+        atomic_thread_fence(memory_order_seq_cst);
+        if (closing && atomic_load_explicit(closing, memory_order_acquire)) {
+            wait_err = ECANCELED;
+        } else {
+            if (cc__io_wait_stats_enabled()) {
+                cc__io_wait_stats_init();
+                atomic_fetch_add_explicit(&g_cc_io_wait_stats.kq_suspend_calls, 1, memory_order_relaxed);
+                if (atomic_load_explicit(&slot->ready, memory_order_acquire)) {
+                    atomic_fetch_add_explicit(&g_cc_io_wait_stats.kq_ready_before_suspend, 1, memory_order_relaxed);
+                }
+            }
+            cc__fiber_set_park_obj(slot);
+            wait_err = cc__io_wait_suspend_ready(&slot->ready, abs_deadline);
+            cc__fiber_set_park_obj(NULL);
+            if (wait_err == 0 && closing && atomic_load_explicit(closing, memory_order_acquire)) {
+                wait_err = ECANCELED;
             }
         }
-        cc__fiber_set_park_obj(slot);
-        int wait_err = cc__io_wait_suspend_ready(&slot->ready, abs_deadline);
-        cc__fiber_set_park_obj(NULL);
         atomic_store_explicit(&slot->active, 0, memory_order_release);
         slot->fiber = NULL;
         if (cc__io_wait_stats_enabled()) {
@@ -1121,9 +1474,18 @@ int cc__io_wait_fd_deadline(int fd, short events, const struct timespec* abs_dea
     cc__io_wait_trace("add", waiter, 0);
     cc__io_waiter_notify();
 
-    cc__fiber_set_park_obj(waiter);
-    int wait_err = cc__io_wait_suspend_ready(&waiter->ready, abs_deadline);
-    cc__fiber_set_park_obj(NULL);
+    int wait_err;
+    atomic_thread_fence(memory_order_seq_cst);
+    if (closing && atomic_load_explicit(closing, memory_order_acquire)) {
+        wait_err = ECANCELED;
+    } else {
+        cc__fiber_set_park_obj(waiter);
+        wait_err = cc__io_wait_suspend_ready(&waiter->ready, abs_deadline);
+        cc__fiber_set_park_obj(NULL);
+        if (wait_err == 0 && closing && atomic_load_explicit(closing, memory_order_acquire)) {
+            wait_err = ECANCELED;
+        }
+    }
 
     atomic_store_explicit(&waiter->cancelled, 1, memory_order_release);
     pthread_mutex_lock(&g_cc_io_wait_state.mu);
@@ -1144,6 +1506,10 @@ int cc__io_wait_fd_deadline(int fd, short events, const struct timespec* abs_dea
     }
     cc__io_waiter_release(waiter);
     return wait_err;
+}
+
+int cc__io_wait_fd_deadline(int fd, short events, const struct timespec* abs_deadline) {
+    return cc__io_wait_fd_deadline_cl(fd, events, abs_deadline, NULL);
 }
 
 void cc__io_wait_dump_kq_diag(void) {

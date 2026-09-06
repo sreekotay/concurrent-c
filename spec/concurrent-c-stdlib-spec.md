@@ -1484,6 +1484,7 @@ typedef struct CCListener {
     int fd;
     uint8_t flags;
     void *watcher;
+    cc_atomic_int state;   /* runtime-owned: closing bit + accepters inside */
 } CCListener;
 
 typedef struct CCUdpSocket {
@@ -1546,6 +1547,17 @@ CCListener ln@(addr) !> @destroy;
 CCSocket sock = ln.accept() !>;
 CCSocket client = cc_tcp_connect(addr, len) !>;
 ```
+
+**Listener close is two-phase: stop admission, drain what is left.**
+`cc_listener_close` marks the listener closing and wakes every fiber parked in
+`cc_listener_accept`; each returns `CC_NET_CONNECTION_CLOSED`. The fd is closed
+and the watcher freed by the last accepter to leave (or by the closer when no
+accepter is inside), so an accepter never runs against a freed watcher or a
+reused fd. Close may be called from any fiber or thread other than a signal
+handler; it is idempotent (`fd == -1` afterwards). The `CCListener` must
+outlive its accepters: join them, or the dest they run on, before the frame
+that owns it returns. A listener shared by two arms of a dest-bound
+construct is one object — the arms take a pointer to it (§Parallel Captures).
 
 `cc_net_to_io_error` maps connection closed/reset to `CC_IO_CONNECTION_CLOSED`,
 timeout to `CC_IO_BUSY`, and other net errors to `CC_IO_OTHER`.
@@ -1620,6 +1632,73 @@ CCSlice cc_dns_reverse(CCArena arena, const CCIpAddr *addr, CCNetError *out_err)
 ```
 
 The header declares them; the shipped runtime does not provide definitions.
+
+## Signals
+
+`<ccc/std/signal.cch>`. A signal handler may not touch the runtime: no locks,
+no unpark, no `ln.close()`. `CCSignal` moves delivery onto the I/O waiter
+thread and hands it to a fiber, so what the program does on `SIGTERM` — stop
+admission, drain what is left — is ordinary fiber code.
+
+```c
+typedef struct CCSignal { void *impl; } CCSignal;
+
+CCResult_CCSignal_CCIoError cc_signal_watch_list(const int *sigs, size_t n);
+CCResult_CCSignal_CCIoError cc_signal_watch(int sig);
+CCResult_CCSignal_CCIoError cc_signal_watch2(int sig_a, int sig_b);
+CCResult_int_CCIoError      cc_signal_wait(CCSignal *s);   /* signo */
+int                         cc_signal_poll(CCSignal *s);   /* signo or 0 */
+void                        cc_signal_close(CCSignal *s);  /* @destroy hook */
+```
+
+`watch` takes signal numbers in 1..64 and replaces their disposition for the
+whole process (default action off) until the last `CCSignal` watching that
+number closes; `close` restores `SIG_DFL` for numbers no other `CCSignal`
+watches. `wait` parks the fiber until one watched signal is delivered and
+returns its number; it fails with `CC_ERR_CANCELLED` when the enclosing
+nursery / dest is cancelled or the `CCSignal` is closed under the waiter.
+Outside fiber context `wait` is a 10 ms sleep-poll. Deliveries coalesce per
+signal number while nobody is waiting (as `sigpending`); a delivery with no
+waiter is held for the next `wait` / `poll`. UFCS: `stop.wait()`, `stop.poll()`,
+`stop.close()`. A `CCSignal` is a process-lifetime object; create it once, near
+`main`.
+
+Delivery: kqueue hosts register `EVFILT_SIGNAL` on the I/O waiter's kqueue;
+poll hosts install a `sigaction` handler whose only act is an
+async-signal-safe byte write to a runtime pipe the waiter thread drains. Only
+process-directed signals are seen (`kill(2)`, a shell, an init system):
+`EVFILT_SIGNAL` does not record thread-directed delivery, so `raise(3)` /
+`pthread_kill(3)` from inside the process are not routed — send
+`kill(getpid(), sig)`.
+
+The stop shape for a server: one arm waits the signal and closes the
+listener, the accept arm sees `CC_NET_CONNECTION_CLOSED` and stops admitting,
+and the dest's `wait` drains the connections. Both arms share the listener
+and the signal through pointers (dest-bound arms are closures; a bare owner
+name is a copy). If the accept arm ends on its own it closes the `CCSignal`
+so the parked arm is released and the dest still joins.
+
+```c
+CCSignal stop = cc_signal_watch2(SIGINT, SIGTERM) !> @destroy;
+CCListener* lnp = &ln;
+CCSignal* stopp = &stop;
+CCParallel h = @parallel spawn {
+    @serial { int sig = stopp->wait() !>(e) { return; }; (void)sig; lnp->close(); }
+    @serial {
+        while (1) {
+            CCSocket c = lnp->accept() !>(e) { break; };
+            @parallel(h) { handle(c); }
+        }
+        stopp->close();
+    }
+} !>;
+h.wait() !>;
+```
+
+`CCNursery.cancel_on_signals` / `on_signals` remain the nursery-side form: a
+`sigwait` thread that cancels the nursery or runs a closure off-fiber.
+`CCSignal` is the fiber-side complement for programs whose stop path is
+"stop admission, drain", not "cancel".
 
 ## HTTP
 

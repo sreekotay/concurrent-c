@@ -71,6 +71,8 @@ typedef struct CCListener {
     int fd;
     uint8_t flags;
     void* watcher;  /* Internal runtime-owned I/O watcher */
+    /* bit 0: closing; bits 1..: fibers inside accept. Runtime-owned. */
+    cc_atomic_int state;
 } CCListener;
 
 /* UDP socket */
@@ -143,7 +145,9 @@ CCSocket !>(CCNetError) cc_tcp_connect(const char* addr, size_t addr_len);
 CCListener !>(CCNetError) cc_tcp_listen(CCSlice addr);
 
 /* Accept connection (blocking / fiber-parked).
- * On error the returned socket has fd == -1. */
+ * On error the returned socket has fd == -1. After `cc_listener_close`
+ * (from any fiber or thread) every accepter — parked or about to park —
+ * returns CC_NET_CONNECTION_CLOSED; that is the accept loop's exit. */
 CCSocket !>(CCNetError) cc_listener_accept(CCListener* ln);
 
 /* Async accept */
@@ -157,7 +161,15 @@ CCSocket !>(CCNetError) cc_listener_accept(CCListener* ln);
  * UFCS: `ln.serve(nursery, on_conn)`. */
 void cc_listener_serve(CCListener* ln, CCNursery n, CCClosure1 on_conn);
 
-/* Close listener */
+/* Close listener: stop admission, drain what is left.
+ * Two-phase. Marks the listener closing and wakes every fiber parked in
+ * accept; they return CC_NET_CONNECTION_CLOSED. The fd is closed and the
+ * watcher freed by the last accepter to leave (or here, if none is inside),
+ * so an accepter never runs against a freed watcher or a reused fd.
+ * Callable from another fiber or thread; NOT from a signal handler — wake
+ * a fiber with CCSignal and close from there. Idempotent.
+ * The CCListener must outlive its accepters: join them (or the dest they
+ * run on) before the frame that owns `ln` returns. */
 void cc_listener_close(CCListener* ln);
 
 /* ============================================================================
