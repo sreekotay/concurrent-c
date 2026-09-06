@@ -21,7 +21,17 @@ typedef struct NStep {
     CcLowerer* L;
     Walker* w;
     CcType* want;               /* the declared type the initializer is filling */
+    CcExprList seen;            /* creates a declaration already governed */
 } NStep;
+
+static bool nc_seen(NStep* st, CcExpr* e) {
+    CcExprList* v = &st->seen;
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (*v->get_ptr(i) == e) return true;
+    return false;
+}
 
 /* The create hook of a type, as its declaration registered it. */
 static bool nc_create_of(CcLowerer* L, CcType* t, CCSlice* one, CCSlice* two) {
@@ -39,9 +49,12 @@ static bool nc_create_of(CcLowerer* L, CcType* t, CCSlice* one, CCSlice* two) {
     }
     if (!canon.len) return false;
     info = ix->type_get(canon);
-    if (!info || !info->hooks) return false;
-    *one = info->hooks->create_fn;
-    *two = info->hooks->create_fn2;
+    if (!info) return false;
+    *one = info->create_fn;
+    if (info->hooks) {
+        if (!one->len) *one = info->hooks->create_fn;
+        *two = info->hooks->create_fn2;
+    }
     return one->len != 0;
 }
 
@@ -141,6 +154,7 @@ static void nc_decl(NStep* st, CcDecl* d) {
     if (!is_var || !v.init || !v.init->expr) return;
     inner = nc_peel_init(v.init->expr);
     if (!nc_is_create(inner, &cr)) return;
+    st->seen.push(inner);
     nc_rewrite(st, inner, cr, v.type);
 }
 
@@ -161,6 +175,7 @@ static bool nc_leftover(CcExpr* e, void* env) {
     NStep* st = (NStep*)env;
     CcCreate cr;
     if (!nc_is_create(e, &cr)) return true;
+    if (nc_seen(st, e)) return true;      /* a declaration already spoke for it */
     nc_rewrite(st, e, cr, NULL);
     return true;
 }
@@ -172,6 +187,7 @@ static void CcLowerer_create(CcLowerer* L) {
     memset(&st, 0, sizeof(st));
     st.L = L;
     st.w = &w;
+    st.seen = vec_new::[CcExprRef](L->arena);
     memset(&w, 0, sizeof(w));
     w.arena = L->arena;
     w.ix = L->ix;
