@@ -39,6 +39,9 @@ typedef struct Walker {
     void (*on_stmt)(struct Walker* w, CcStmt* s, bool enter);
     /* called at every file-scope declaration before it is walked */
     void (*on_decl)(struct Walker* w, CcDecl* d);
+    /* called at every `x.f` / `p->f` that is not a call, with the
+     * receiver's type (NULL when unknown) */
+    void (*on_field)(struct Walker* w, CcExpr* e, CcMember mb, CcType* rt);
     void* env;
 } Walker;
 
@@ -721,6 +724,13 @@ static void tw_generic_sel(Walker* w, CcGenericSel gs) {
 
 static void tw_expr_b(Walker* w, CcExpr* e);
 
+/* A field access is offered to the step with the receiver's type; the
+ * guard lives here so the call is not inside a case arm. */
+static void tw_field(Walker* w, CcExpr* e, CcMember mb) {
+    if (!w->on_field) return;
+    w->on_field(w, e, mb, type_of_expr(w, mb.a));
+}
+
 static void tw_expr(Walker* w, CcExpr* e) {
     if (!e) return;
     @switch (e->k) {
@@ -733,7 +743,7 @@ static void tw_expr(Walker* w, CcExpr* e) {
         case .ternary(te): tw_expr(w, te.c); tw_expr(w, te.a); tw_expr(w, te.b); return;
         case .call(cl): tw_expr(w, cl.callee); tw_exprs(w, cl.args); return;
         case .index(ix2): tw_expr(w, ix2.a); tw_expr(w, ix2.i); return;
-        case .member(mb): tw_expr(w, mb.a); return;
+        case .member(mb): tw_expr(w, mb.a); tw_field(w, e, mb); return;
         case .cast(ca): tw_expr(w, ca.a); return;
         case .compound(cl): tw_init(w, cl.init); return;
         case .generic_sel(gs): tw_generic_sel(w, gs); return;

@@ -30,7 +30,8 @@ typedef struct CcLowerer {
     CcLowerOpts opts;
     uint32_t next_temp;
     bool unwraps_used;          /* a scaffold was emitted: the unit needs <ccc/cc_result.h> */
-    Vec::[CCSlice] headers;     /* quoted local `.cch` headers this unit includes, resolved; lifetime: the arena */         /* __cc_r_N, __cc_eh_N: one counter per unit */
+    CcType* ret_slice;          /* the return type of the function the slice step is in */
+    Vec::[CCSlice] headers;     /* quoted local `.cch` headers this unit includes, resolved; lifetime: the arena */
 } CcLowerer;
 
 static CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds);
@@ -41,6 +42,7 @@ static void CcLowerer_results(CcLowerer* L);      /* Result types, cc_ok/cc_err,
 static void CcLowerer_cleanup(CcLowerer* L);      /* @defer, @cancel_defer, @destroy: scope-exit runs and soft returns */
 static void CcLowerer_includes(CcLowerer* L);
 static void CcLowerer_generics(CcLowerer* L);     /* `Vec::[T]` -> `CCVec_T` and the factory expansion spliced once */
+static void CcLowerer_slices(CcLowerer* L);       /* `T[:]` values: string literals, braced lists, `@slice(...)` */
 static void CcLowerer_variants(CcLowerer* L);     /* variant declarations, construction, checked switch, protected projection */
 static void CcLowerer_ufcs(CcLowerer* L);         /* `x.m(args)` -> the resolved `callee(&x, args)`; `Type.fn(args)` -> `Type_fn(args)` */     /* `#include "x.cch"` -> `#include <rel/x.h>`, the header recorded for lowering */
 

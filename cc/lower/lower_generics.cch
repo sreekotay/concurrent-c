@@ -74,6 +74,10 @@ static bool gn_type_visit(CcType* t, void* env) {
     bool is_generic = false;
     @switch (t->k) {
         case .generic: is_generic = true; break;
+        /* `T[:]` is an instance of the slice family, named by the same
+         * canonical spelling: `CCSlice` for the char family, `CCSlice_T`
+         * for anything else */
+        case .slice: is_generic = true; break;
         default: break;
     }
     if (!is_generic) return true;
