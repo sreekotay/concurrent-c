@@ -1,0 +1,3 @@
+/* PpTok has no '$' punct. Stage 1 must name the byte, not "arena exhaustion". */
+int main(void) { return 0; }
+$

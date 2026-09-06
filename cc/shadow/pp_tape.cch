@@ -614,6 +614,44 @@ static FileTape* tape_cache_find(TapeCache* c, const char* path) {
     return NULL;
 }
 
+/* PpTok alphabet (ws / comment / ident / number / string / punct). A byte
+ * outside this set is why collect failed — not "arena exhaustion". */
+static int pptok_can_start(unsigned char b) {
+    if (b == ' ' || b == '\t' || b == '\r' || b == '\n') return 1;
+    if (b == '/' || b == '"' || b == '\'' || b == '`') return 1;
+    if ((b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '_') return 1;
+    if (b >= '0' && b <= '9') return 1;
+    return b && strchr("#@[](){}.&*+-~!/%<>^|?:;=,", (int)b) != NULL;
+}
+
+static void tape_tok_fail_diag(const FileTape* ft) {
+    size_t pos = cc_grammar_fail_pos();
+    size_t n = (ft && ft->bytes) ? ft->len : 0;
+    const char* path = (ft && ft->path && ft->path[0]) ? ft->path : "<input>";
+    int line = 1, col = 1;
+    char msg[256];
+
+    if (ft && ft->bytes && n)
+        offset_to_linecol(ft, pos < n ? pos : (n - 1), &line, &col);
+
+    if (ft && ft->bytes && pos < n) {
+        unsigned char b = (unsigned char)ft->bytes[pos];
+        if (!pptok_can_start(b)) {
+            if (b >= 32 && b < 127)
+                snprintf(msg, sizeof(msg), "not a token ('%c')", (char)b);
+            else
+                snprintf(msg, sizeof(msg), "not a token (byte 0x%02x)", (unsigned)b);
+        } else {
+            snprintf(msg, sizeof(msg),
+                     "could not tokenize from here (unclosed string, comment, or backtick)");
+        }
+        diag_err_loc(path, line, col, msg);
+        return;
+    }
+    snprintf(msg, sizeof(msg), "unclosed token at end of file");
+    diag_err_loc(path, line, col, msg);
+}
+
 /* Load stage1 from owned `bytes` (takes ownership). `path` is the diagnostic
  * identity (usually the original input); may differ from the byte source when
  * comptime prepare+blank rewrites the buffer before whitelist parse.
@@ -670,15 +708,15 @@ static FileTape* tape_cache_load_bytes(TapeCache* c, const char* path,
     }
 
     TokBuild b = {.toks = ft->toks, .n = 0, .cap = TOK_BUILD_CAP, .building = ft};
-    if (!PpTok_collect(ft->bytes, ft->len, CC__ARENA_HANDLE(arena),
-                       tok_build_push, &b)) {
-        char __diag[320];
-        snprintf(__diag, sizeof(__diag),
-                 "tokenize failed for '%s' (often arena exhaustion)",
-                 path ? path : "<null>");
-        diag_err_loc(NULL, 0, 0, __diag);
-        file_tape_free(ft);
-        return NULL;
+    {
+        int errs = g_shadow_diag_errors;
+        if (!PpTok_collect(ft->bytes, ft->len, CC__ARENA_HANDLE(arena),
+                           tok_build_push, &b)) {
+            if (g_shadow_diag_errors == errs)
+                tape_tok_fail_diag(ft);
+            file_tape_free(ft);
+            return NULL;
+        }
     }
     ft->ntoks = b.n;
     c->items[c->n++] = ft;
