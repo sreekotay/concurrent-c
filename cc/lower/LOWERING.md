@@ -444,6 +444,33 @@ printed one push per line. `@scratch` as the arena is the function's
 
 with the restore also emitted before every exit from inside the statement.
 
+## Async
+
+`@async Ret f(a)` hands the caller a `CCTaskIntptr` instead of a value.
+It becomes four things:
+
+- `__cc_async_<f>_<n>_frame` — `__st`, `__r`, one `__p_<name>` per
+  parameter, and a task slot. It is heap-allocated because it outlives
+  the call that made it: the caller returns, the task does not.
+- `__cc_async_<f>_<n>_body(frame*)` — the body the user wrote, over
+  locals named as they named their parameters and read from the frame.
+- `__cc_async_<f>_<n>_poll` — `0 -> 1 -> 999`: run the body once, keep
+  the result in `__r`, report `CC_FUTURE_READY`. A `void` async keeps 0.
+- `__cc_async_<f>_<n>_drop` — releases the task slot and the frame.
+
+and the function the caller still calls by name, which allocates the
+frame, copies the arguments into it, and returns
+`cc_task_intptr_make_poll_ex(poll, NULL, frame, drop)`. A declaration
+without a body just returns `CCTaskIntptr`.
+
+`@await e` is `cc_block_on(T, e)`, with `T` the declared return type of
+the function `e` calls. An await whose type cannot be read that way is a
+diagnostic: reading a task's payload at the wrong width is a wrong value
+that still compiles.
+
+An `@async` function returning a Result is not lowered yet — the task
+carries the value boxed, and the await unboxes it.
+
 ## Views
 
 `@typeview(V) T*` on a parameter is a restricted binding: the index

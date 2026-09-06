@@ -260,6 +260,7 @@ static void lw_drop_cc_only(CcLowerer* L);
 #include "lower_create.cch"
 #include "lower_forin.cch"
 #include "lower_chan.cch"
+#include "lower_async.cch"
 #include "lower_variants.cch"
 #include "lower_ufcs.cch"
 #include "lower_results.cch"
@@ -425,6 +426,7 @@ static void CcLowerer_includes(CcLowerer* L) {
 
 static void CcLowerer_lower_unit(CcLowerer* L) {
     CcLowerer_includes(L);
+    CcLowerer_async(L);     /* first: an async body is an ordinary body to every step after it */
     CcLowerer_chan(L);      /* first: an endpoint is the runtime handle before anything captures it */
     CcLowerer_closures(L);  /* then: the body becomes a function the later steps walk */
     CcLowerer_create(L);    /* before UFCS: the constructor becomes an ordinary call */

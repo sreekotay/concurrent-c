@@ -1,0 +1,348 @@
+#pragma(@per_tu)
+/* Clean lowerer, step: asynchronous functions. `@async Ret f(a)` is a
+ * function that hands back a task instead of a value: the caller gets a
+ * `CCTaskIntptr` it can poll, block on, or hand to a nursery.
+ *
+ * The shape is a frame the task owns, the body as an ordinary function
+ * over that frame, a poll that runs the body once and reports the result,
+ * and a drop that releases both. The frame is heap-allocated because it
+ * outlives the call that made it: the caller returns, the task does not.
+ *
+ * A parameter is copied into the frame at the call and read back into a
+ * local of the same name at the top of the body, so the body is the code
+ * the user wrote, over the names they wrote.
+ *
+ * `@await e` waits for the task `e` yields and takes its value; the value
+ * type is the awaited function's declared return type, so the wait knows
+ * what it is unwrapping. An await whose type cannot be read is a
+ * diagnostic, never a guess: reading a task's payload at the wrong width
+ * is a wrong value that still compiles. Lifetime: the lowerer arena. */
+#ifndef CC_LOWER_ASYNC_CCH
+#define CC_LOWER_ASYNC_CCH
+#include "lower.cch"
+#include "typing.cch"
+
+typedef struct AStep {
+    CcLowerer* L;
+    Walker* w;
+} AStep;
+
+static bool as_func_of(CcDecl* d, CcFuncDecl* out) {
+    @switch (d->k) {
+        case .func(f): *out = f; return true;
+        default: return false;
+    }
+}
+
+static CcFuncType* as_func_type(CcType* t) {
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .func: return &t->k.func;
+        default: return NULL;
+    }
+}
+
+static bool as_is_void(CcType* t) {
+    CCSlice nm;
+    if (!t) return true;
+    @switch (t->k) {
+        case .named(n): nm = n.name; break;
+        default: return false;
+    }
+    return cc_slice_eq_cstr(&nm, "void");
+}
+
+static bool as_is_result(CcType* t) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .result: return true;
+        default: return false;
+    }
+}
+
+/* The C spelling of a type, as a declaration of `name`. */
+static CCString as_spell(CcLowerer* L, CcType* t, CCSlice name) {
+    return CcType_spell(t, name, &L->unit->tape, L->arena);
+}
+
+/* `int v, char* p` as written, or `void` for a function of none. */
+static CCString as_param_list(CcLowerer* L, CcParamList* ps) {
+    CCString out = cc_string_new();
+    size_t n = ps->len();
+    size_t i;
+    if (!n) { cc_string_push_cstr(&out, "void", L->arena); return out; }
+    for (i = 0; i < n; i++) {
+        CcParam* p = ps->get_ptr(i);
+        CCString one = as_spell(L, p->type, p->name);
+        if (i) cc_string_push_cstr(&out, ", ", L->arena);
+        cc_string_push_slice(&out, one.as_slice(), L->arena);
+    }
+    return out;
+}
+
+/* The frame's fields: one per named parameter. */
+static CCString as_frame_fields(CcLowerer* L, CcParamList* ps) {
+    CCString out = cc_string_new();
+    size_t n = ps->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcParam* p = ps->get_ptr(i);
+        CCString slot;
+        CCString one;
+        if (!p->name.len || !p->type) continue;
+        slot = @string(`__p_${p->name}`, L->arena);
+        one = as_spell(L, p->type, slot.as_slice());
+        cc_string_push_cstr(&out, "    ", L->arena);
+        cc_string_push_slice(&out, one.as_slice(), L->arena);
+        cc_string_push_cstr(&out, ";\n", L->arena);
+    }
+    return out;
+}
+
+/* The call filling the frame from the arguments the caller passed. */
+static CCString as_frame_fills(CcLowerer* L, CcParamList* ps) {
+    CCString out = cc_string_new();
+    size_t n = ps->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcParam* p = ps->get_ptr(i);
+        CCSlice nm = p->name;
+        CCString one;
+        if (!nm.len || !p->type) continue;
+        one = @string(`    __f->__p_${nm} = ${nm};
+`, L->arena);
+        cc_string_push_slice(&out, one.as_slice(), L->arena);
+    }
+    return out;
+}
+
+/* `static <Ret> <base>_body(<base>_frame* __f)`: the body the user wrote,
+ * over locals named as they named their parameters. */
+static CcDecl* as_body_decl(CcLowerer* L, CcFuncDecl fd, CcParamList* ps, CCSlice base, CcSpan sp) {
+    CcStmt* body = lw_block(L, sp);
+    CcParamList params = vec_new::[CcParam](L->arena);
+    CcType* fn_type = cc__type_blank(sp, L->arena);
+    CcFuncType* src = as_func_type(fd.type);
+    CcFuncType ft;
+    CcFuncDecl out;
+    CcDecl* d;
+    size_t n = ps->len();
+    size_t i;
+    CCString fname = @string(`${base}_frame`, L->arena);
+    for (i = 0; i < n; i++) {
+        CcParam* p = ps->get_ptr(i);
+        CCString slot;
+        CcExpr* read;
+        if (!p->name.len || !p->type) continue;
+        slot = @string(`__p_${p->name}`, L->arena);
+        read = cc_expr_member(lw_ident(L, cstr_slice("__f"), sp), lw_keep(L, &slot), true, sp, L->arena);
+        lw_push(body, lw_decl_stmt(L, p->type, p->name, read, sp));
+    }
+    if (fd.body) lw_push(body, fd.body);
+    {
+        CcParam p0;
+        memset(&p0, 0, sizeof(p0));
+        p0.span = sp;
+        p0.type = cc_type_pointer(cc_type_named(lw_keep(L, &fname), sp, L->arena), sp, L->arena);
+        p0.name = cstr_slice("__f");
+        p0.attrs = vec_new::[CcAttr](L->arena);
+        params.push(p0);
+    }
+    memset(&ft, 0, sizeof(ft));
+    ft.ret = src ? src->ret : NULL;
+    ft.params = params;
+    ft.has_prototype = true;
+    { CcTypeK tk = { .func = ft }; fn_type->k = tk; }
+    memset(&out, 0, sizeof(out));
+    out.type = fn_type;
+    {
+        CCString bn = @string(`${base}_body`, L->arena);
+        out.name = lw_keep(L, &bn);
+    }
+    out.body = body;
+    d = cc_arena_alloc(L->arena, sizeof(CcDecl), _Alignof(CcDecl));
+    memset(d, 0, sizeof(*d));
+    d->span = sp;
+    d->specs = CC_SPEC_STATIC;
+    d->attrs = vec_new::[CcAttr](L->arena);
+    { CcDeclK dk = { .func = out }; d->k = dk; }
+    return d;
+}
+
+/* The poll, the drop, and the function the caller still calls by name. */
+static CCString as_tail_text(CcLowerer* L, CCSlice base, CCSlice name, CCString plist,
+                             CCString fills, bool is_void, bool is_static) {
+    CCString run = is_void
+        ? @string(`${base}_body(__f);
+                __f->__r = 0;`, L->arena)
+        : @string(`__f->__r = (intptr_t)${base}_body(__f);`, L->arena);
+    CCSlice stat = is_static ? cstr_slice("static ") : cc_slice_empty();
+    CCString out = @string(`static CCFutureStatus ${base}_poll(void* __p, intptr_t* __o, int* __e) {
+    ${base}_frame* __f = (${base}_frame*)__p;
+    (void)__e;
+    if (!__f) return CC_FUTURE_ERR;
+    for (;;) {
+        switch (__f->__st) {
+            case 0:
+                __f->__st = 1;
+                /* falls through */
+            case 1: {
+                ${run}
+                __f->__st = 999;
+                continue;
+            }
+            case 999: {
+                if (__o) *__o = __f->__r;
+                return CC_FUTURE_READY;
+            }
+            default:
+                return CC_FUTURE_ERR;
+        }
+    }
+}
+
+static void ${base}_drop(void* __p) {
+    ${base}_frame* __f = (${base}_frame*)__p;
+    if (!__f) return;
+    cc_task_intptr_free(&__f->__t[0]);
+    cc__heap_free(__f);
+}
+
+${stat}CCTaskIntptr ${name}(${plist}) {
+    ${base}_frame* __f = (${base}_frame*)cc__heap_calloc(1, sizeof(${base}_frame));
+    if (!__f) {
+        CCTaskIntptr __t;
+        cc__bytes_zero(&__t, sizeof(__t));
+        return __t;
+    }
+    __f->__st = 0;
+${fills}    return cc_task_intptr_make_poll_ex(${base}_poll, NULL, __f, ${base}_drop);
+}
+`, L->arena);
+    return out;
+}
+
+/* A declaration without a body: the caller only needs to know it hands
+ * back a task. */
+static void as_prototype(CcLowerer* L, CcDecl* d, CcFuncDecl fd, CcSpan sp) {
+    CcFuncType* ft = as_func_type(fd.type);
+    if (!ft) return;
+    ft->ret = cc_type_named(cstr_slice("CCTaskIntptr"), sp, L->arena);
+    d->specs &= ~(uint32_t)CC_SPEC_ASYNC;
+}
+
+/* One `@async` function, as the frame, the body, and the factory. */
+static bool as_lower_one(CcLowerer* L, CcDecl* d, CcDeclList* into) {
+    CcFuncDecl fd;
+    CcFuncType* ft;
+    CcSpan sp = d->span;
+    uint32_t id;
+    if (!as_func_of(d, &fd)) return false;
+    ft = as_func_type(fd.type);
+    if (!ft) return false;
+    if (!fd.body) { as_prototype(L, d, fd, sp); return false; }
+    if (as_is_result(ft->ret)) {
+        CCString m = @string(`an ${"@"}async function returning a Result is not lowered by the clean lowerer yet: its value is boxed for the task to carry`, L->arena);
+        lw_error(L, sp, m);
+        return false;
+    }
+    id = L->temp_id();
+    {
+        CcParamList ps = ft->params;
+        CCString bn = @string(`__cc_async_${fd.name}_${id}`, L->arena);
+        CCSlice base = lw_keep(L, &bn);
+        CCString fields = as_frame_fields(L, &ps);
+        CCString plist = as_param_list(L, &ps);
+        CCString fills = as_frame_fills(L, &ps);
+        CCString frame = @string(`typedef struct ${base}_frame {
+    int __st;
+    intptr_t __r;
+${fields}    CCTaskIntptr __t[1];
+} ${base}_frame;
+`, L->arena);
+        CCString tail = as_tail_text(L, base, fd.name, plist, fills,
+                                     as_is_void(ft->ret), (d->specs & CC_SPEC_STATIC) != 0);
+        into->push(lw_raw_decl(L, frame, sp));
+        into->push(as_body_decl(L, fd, &ps, base, sp));
+        into->push(lw_raw_decl(L, tail, sp));
+    }
+    return true;
+}
+
+/* The value type an await unwraps: what the awaited function declares it
+ * returns. */
+static bool as_await_type(AStep* st, CcExpr* operand, CCString* out) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CcExpr* s = strip_parens_expr(operand);
+    CCSlice fn;
+    CcSym* sym;
+    CcType* ret = NULL;
+    CcCall cl;
+    bool is_call = false;
+    if (!s) return false;
+    @switch (s->k) {
+        case .call(x): cl = x; is_call = true; break;
+        default: break;
+    }
+    if (!is_call) return false;
+    if (!expr_ident(strip_parens_expr(cl.callee), &fn)) return false;
+    sym = sym_any(ix, fn);
+    while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+    if (!sym || !sym->type) return false;
+    @switch (sym->type->k) {
+        case .func(x): ret = x.ret; break;
+        default: break;
+    }
+    if (!ret) return false;
+    *out = as_spell(L, ret, cc_slice_empty());
+    return true;
+}
+
+static bool as_await_visit(CcExpr* e, void* env) {
+    AStep* st = (AStep*)env;
+    CcLowerer* L = st->L;
+    CcAwait aw;
+    bool hit = false;
+    CCString ty;
+    @switch (e->k) {
+        case .await_(x): aw = x; hit = true; break;
+        default: break;
+    }
+    if (!hit) return true;
+    if (!as_await_type(st, aw.a, &ty)) {
+        CCString m = @string(`cannot tell what this ${"@"}await unwraps: name the ${"@"}async function it waits on, so the wait reads the task's value at the width the function returns`, L->arena);
+        lw_error(L, e->span, m);
+        return true;
+    }
+    {
+        CcExpr* c = lw_call2(L, cstr_slice("cc_block_on"), lw_text(L, ty, e->span), aw.a, e->span);
+        e->k = c->k;
+    }
+    return true;
+}
+
+static void CcLowerer_async(CcLowerer* L) {
+    CcDeclList* decls = &L->unit->decls;
+    CcDeclList with = vec_new::[CcDeclRef](L->arena);
+    size_t n = decls->len();
+    size_t i;
+    bool any = false;
+    AStep st;
+    CcVisitor v;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *decls->get_ptr(i);
+        if (!(d->specs & CC_SPEC_ASYNC)) { with.push(d); continue; }
+        any = true;
+        if (!as_lower_one(L, d, &with)) with.push(d);
+    }
+    if (any) *decls = with;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    memset(&v, 0, sizeof(v));
+    v.expr = as_await_visit;
+    v.env = &st;
+    CcUnit_walk(L->unit, v);
+}
+
+#endif
