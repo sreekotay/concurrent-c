@@ -89,41 +89,46 @@ Latency-first. Peers (missing ones are skipped):
 | **caddy** | 8083 | `INCLUDE_CADDY=1` |
 
 ```bash
-./compare.sh --smoke        # correctness + 2s wrk, 4kb.html @ c=10
+make smoke                  # correctness + 2s wrk, 4kb.html @ c=10
+make bench                  # ./bench_latency.sh (isolated RSS)
+./compare.sh --smoke
 ./bench_latency.sh          # directional: 1s × 3 rounds, 4kb / 1mb / 10mb, c=1/10/100
 FULL=1 ./bench_latency.sh   # receipt: 30s × 5, five files
 SMOKE=1 ./bench_latency.sh  # 2s, 4kb.html @ c=10 only
+ISOLATE=0 ./bench_latency.sh  # keep all peers up (RSS then cumulative)
 ./compare.sh                # correctness + directional
 ./compare.sh --full         # correctness + receipt
 ```
 
 Knobs: `REPEATS`, `DURATION`, `CONCURRENCY`, `FILES`, `FULL`, `SMOKE`,
-`INCLUDE_NGINX`, `INCLUDE_DARKHTTPD`, `INCLUDE_CADDY`, `BENCH_OUT`.
+`ISOLATE`, `TIMEOUT`, `INCLUDE_NGINX`, `INCLUDE_DARKHTTPD`,
+`INCLUDE_CADDY`, `BENCH_OUT`.
 
 Receipt columns: **p50 / p75 / p90 / p99** (ms), RPS, process RSS, errors.
 Fixtures are deterministic (`gen_fixtures.sh`); bodies are gitignored,
 `fixtures/manifest.txt` is checked in. Each block page-caches the fixture
-tree and shuffles server order. Servers stay up for the whole matrix, so
-RSS is cumulative (the 16MB ring faults in as blocks are first filled).
+tree and shuffles server order. `ISOLATE=1` (default) starts a fresh
+process for that cell only — RSS is the cell, not leftover stacks.
 
-Local receipts land under `benchmarks/` (gitignored). Table: Darwin 25.5.0
-arm64, 10 CPUs, wrk `-t2 -d5s --timeout 15s`, 3 rounds, median of measured
-(round 0 discarded). Zero socket errors on every cell.
+Local receipts land under `benchmarks/` (gitignored). rps/p50: Darwin
+25.5.0 arm64, 10 CPUs, wrk `-t2 -d5s --timeout 15s`, 3 rounds, median
+(round 0 discarded). RSS: `ISOLATE=1`, fresh process, 2s cell (`rss_kb/1024`;
+nginx = master + workers). Zero socket errors on every cell.
 
 | file | c | staticd rps | nginx | darkhttpd | staticd p50 | nginx p50 | darkhttpd p50 | staticd RSS | nginx RSS | darkhttpd RSS |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 4kb.html | 1 | 54385 | 32628 | 27854 | 0.017 | 0.030 | 0.035 | 2.5 | 8.7 | 1.7 |
-| 4kb.html | 10 | 140496 | 72104 | 55282 | 0.057 | 0.131 | 0.158 | 4.7 | 8.7 | 1.7 |
-| 4kb.html | 100 | 145354 | 72916 | 56274 | 0.605 | 1.31 | 1.73 | 18.7 | 8.7 | 1.7 |
-| 1mb.bin | 1 | 7354 | 6845 | 5239 | 0.132 | 0.142 | 0.176 | 18.8 | 6.3 | 1.4 |
-| 1mb.bin | 10 | 10441 | 14238 | 6212 | 0.93 | 0.405 | 1.59 | 18.9 | 6.4 | 1.4 |
-| 1mb.bin | 100 | 9972 | 12744 | 5886 | 9.79 | 4.55 | 16.79 | 34.0 | 7.1 | 1.5 |
-| 10mb.bin | 1 | 716 | 795 | 574 | 1.33 | 1.23 | 1.69 | 45.3 | 7.1 | 1.5 |
-| 10mb.bin | 10 | 756 | 1013 | 544 | 12.6 | 7.90 | 17.29 | 44.2 | 7.0 | 1.5 |
-| 10mb.bin | 100 | 666 | 0 | 559 | 134 | — | 174 | 51.3 | 7.2 | 1.5 |
+| 4kb.html | 1 | 54385 | 32628 | 27854 | 0.017 | 0.030 | 0.035 | 2.3 | 8.7 | 1.7 |
+| 4kb.html | 10 | 140496 | 72104 | 55282 | 0.057 | 0.131 | 0.158 | 4.0 | 8.6 | 1.7 |
+| 4kb.html | 100 | 145354 | 72916 | 56274 | 0.605 | 1.31 | 1.73 | 18.3 | 8.7 | 1.7 |
+| 1mb.bin | 1 | 7354 | 6845 | 5239 | 0.132 | 0.142 | 0.176 | 3.6 | 8.7 | 1.7 |
+| 1mb.bin | 10 | 10441 | 14238 | 6212 | 0.93 | 0.405 | 1.59 | 6.5 | 8.8 | 1.7 |
+| 1mb.bin | 100 | 9972 | 12744 | 5886 | 9.79 | 4.55 | 16.79 | 29.9 | 9.5 | 1.8 |
+| 10mb.bin | 1 | 716 | 795 | 574 | 1.33 | 1.23 | 1.69 | 12.6 | 8.7 | 1.7 |
+| 10mb.bin | 10 | 756 | 1013 | 544 | 12.6 | 7.90 | 17.29 | 15.0 | 8.8 | 1.7 |
+| 10mb.bin | 100 | 666 | 0 | 559 | 134 | — | 174 | 41.3 | 9.5 | 1.7 |
 
-RPS and p50 (ms) from the receipt. RSS is process RSS in MB (`rss_kb/1024`;
-nginx = master + workers). nginx 10mb / c=100 completed 0 requests.
+nginx 10mb / c=100 completed 0 requests. 10mb / c=1 RSS is the ~10MB of
+ring pages plus ~2MB base; c=100 is fiber stacks on top of that.
 
 ## Shape
 

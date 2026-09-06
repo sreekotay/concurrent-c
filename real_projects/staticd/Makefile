@@ -3,7 +3,7 @@ OUT_DIR = out
 DARKHTTPD_DIR = vendor/darkhttpd
 DARKHTTPD_BIN = $(OUT_DIR)/darkhttpd
 
-.PHONY: all staticd darkhttpd fixtures clean setup smoke string_tpl
+.PHONY: all staticd darkhttpd fixtures clean setup smoke bench string_tpl
 
 all: staticd
 
@@ -37,6 +37,10 @@ setup:
 
 smoke: staticd fixtures
 	./compare.sh --smoke
+
+# Isolated RSS (fresh process per cell). Override with DURATION=5 REPEATS=3 …
+bench: staticd fixtures
+	./bench_latency.sh
 
 clean:
 	rm -rf $(OUT_DIR)

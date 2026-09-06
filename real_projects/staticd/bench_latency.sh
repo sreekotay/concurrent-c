@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Latency-first matrix: page-cache fixtures, shuffle server order, median
-# over REPEATS (first round discarded as warmup when REPEATS>1).
+# Latency + RSS matrix. wrk (or hey), page-cache fixtures, shuffle order,
+# median over REPEATS (round 0 discarded when REPEATS>1).
 #
 #   ./bench_latency.sh              # directional: 1s, 3 rounds, 3 files
 #   FULL=1 ./bench_latency.sh       # receipt: 30s, 5 rounds, 5 files
 #   SMOKE=1 ./bench_latency.sh      # 2s, 4kb.html @ c=10
+#   ISOLATE=0 ./bench_latency.sh    # keep all peers up (RSS then cumulative)
 #
-# Explicit REPEATS / DURATION / FILES / CONCURRENCY always win.
+# ISOLATE=1 (default): only the server under test is up for that cell, and
+# it is a fresh process. RSS is then that cell, not leftover fiber stacks.
+#
+# Explicit REPEATS / DURATION / FILES / CONCURRENCY / TIMEOUT always win.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -22,6 +26,8 @@ STATICD_PORT="${STATICD_PORT:-8080}"
 NGINX_PORT="${NGINX_PORT:-8081}"
 DARKHTTPD_PORT="${DARKHTTPD_PORT:-8082}"
 CADDY_PORT="${CADDY_PORT:-8083}"
+ISOLATE="${ISOLATE:-1}"
+TIMEOUT="${TIMEOUT:-15}"
 
 SMOKE="${SMOKE:-0}"
 FULL="${FULL:-0}"
@@ -48,33 +54,74 @@ fi
 BENCH_OUT="${BENCH_OUT:-}"
 THREADS="${THREADS:-2}"
 
-PIDS=()
 STATICD_PID=""
 NGINX_PID=""
 DARKHTTPD_PID=""
 CADDY_PID=""
 TMPDIR_RUN="$(mktemp -d "$SCRIPT_DIR/run/bench.XXXXXX")"
-reap_listen() {
-    local port p
-    for port in "$STATICD_PORT" "$NGINX_PORT" "$DARKHTTPD_PORT" "$CADDY_PORT"; do
-        for p in $(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true); do
-            kill -9 "$p" 2>/dev/null || true
-        done
+NGINX_PREFIX="$SCRIPT_DIR/run/nginx"
+
+reap_port() {
+    local port="$1" p
+    for p in $(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true); do
+        kill -9 "$p" 2>/dev/null || true
     done
 }
+
+reap_listen() {
+    reap_port "$STATICD_PORT"
+    reap_port "$NGINX_PORT"
+    reap_port "$DARKHTTPD_PORT"
+    reap_port "$CADDY_PORT"
+}
+
+stop_one() {
+    local name="$1" pid=""
+    case "$name" in
+        staticd)
+            pid="$STATICD_PID"
+            STATICD_PID=""
+            [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+            [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
+            reap_port "$STATICD_PORT"
+            ;;
+        nginx)
+            pid="$NGINX_PID"
+            NGINX_PID=""
+            if [[ -f "$NGINX_PREFIX/nginx.pid" ]]; then
+                nginx -c "$NGINX_PREFIX/nginx.conf" -p "$NGINX_PREFIX" -s quit 2>/dev/null || true
+                sleep 0.15
+            fi
+            [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+            [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
+            reap_port "$NGINX_PORT"
+            ;;
+        darkhttpd)
+            pid="$DARKHTTPD_PID"
+            DARKHTTPD_PID=""
+            [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+            [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
+            reap_port "$DARKHTTPD_PORT"
+            ;;
+        caddy)
+            pid="$CADDY_PID"
+            CADDY_PID=""
+            [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+            [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
+            reap_port "$CADDY_PORT"
+            ;;
+    esac
+}
+
+stop_all() {
+    stop_one staticd
+    stop_one nginx
+    stop_one darkhttpd
+    stop_one caddy
+}
+
 cleanup() {
-    local p
-    for p in "${PIDS[@]:-}"; do
-        kill "$p" 2>/dev/null || true
-    done
-    sleep 0.15
-    for p in "${PIDS[@]:-}"; do
-        kill -9 "$p" 2>/dev/null || true
-        wait "$p" 2>/dev/null || true
-    done
-    if [[ -f "$SCRIPT_DIR/run/nginx/nginx.pid" ]]; then
-        nginx -c "$SCRIPT_DIR/run/nginx/nginx.conf" -p "$SCRIPT_DIR/run/nginx" -s quit 2>/dev/null || true
-    fi
+    stop_all
     reap_listen
     rm -rf "$TMPDIR_RUN"
 }
@@ -116,58 +163,61 @@ expect_200() {
     fi
 }
 
-start_servers() {
-    if [[ "$INCLUDE_STATICD" == "1" ]]; then
-        [[ -x "$STATICD_BIN" ]] || { echo "missing staticd" >&2; exit 1; }
-        "$STATICD_BIN" --listen "127.0.0.1:${STATICD_PORT}" --root "$FIX" \
-            >"$TMPDIR_RUN/staticd.log" 2>&1 &
-        STATICD_PID=$!
-        PIDS+=("$STATICD_PID")
-        wait_port "$STATICD_PORT" staticd
-        expect_200 "$STATICD_PORT" staticd
-    fi
-    if [[ "$INCLUDE_NGINX" == "1" ]]; then
-        if ! command -v nginx >/dev/null 2>&1; then
-            INCLUDE_NGINX=0
-        else
-            local prefix="$SCRIPT_DIR/run/nginx"
-            mkdir -p "$prefix/logs"
-            sed "s|FIXTURES_ROOT|$FIX|g" "$SCRIPT_DIR/nginx.conf.in" > "$prefix/nginx.conf"
-            nginx -c "$prefix/nginx.conf" -p "$prefix" >"$TMPDIR_RUN/nginx.log" 2>&1 &
+start_one() {
+    local name="$1"
+    case "$name" in
+        staticd)
+            [[ -x "$STATICD_BIN" ]] || { echo "missing staticd" >&2; exit 1; }
+            "$STATICD_BIN" --listen "127.0.0.1:${STATICD_PORT}" --root "$FIX" \
+                >"$TMPDIR_RUN/staticd.log" 2>&1 &
+            STATICD_PID=$!
+            wait_port "$STATICD_PORT" staticd
+            expect_200 "$STATICD_PORT" staticd
+            ;;
+        nginx)
+            mkdir -p "$NGINX_PREFIX/logs"
+            sed "s|FIXTURES_ROOT|$FIX|g" "$SCRIPT_DIR/nginx.conf.in" > "$NGINX_PREFIX/nginx.conf"
+            nginx -c "$NGINX_PREFIX/nginx.conf" -p "$NGINX_PREFIX" \
+                >"$TMPDIR_RUN/nginx.log" 2>&1 &
             NGINX_PID=$!
-            PIDS+=("$NGINX_PID")
             wait_port "$NGINX_PORT" nginx
             expect_200 "$NGINX_PORT" nginx
-        fi
-    fi
-    if [[ "$INCLUDE_DARKHTTPD" == "1" ]]; then
-        if [[ ! -x "$DARKHTTPD_BIN" ]]; then
-            INCLUDE_DARKHTTPD=0
-        else
+            ;;
+        darkhttpd)
+            [[ -x "$DARKHTTPD_BIN" ]] || { echo "missing darkhttpd" >&2; exit 1; }
             "$DARKHTTPD_BIN" "$FIX" --addr 127.0.0.1 --port "$DARKHTTPD_PORT" \
                 >"$TMPDIR_RUN/darkhttpd.log" 2>&1 &
             DARKHTTPD_PID=$!
-            PIDS+=("$DARKHTTPD_PID")
             wait_port "$DARKHTTPD_PORT" darkhttpd
             expect_200 "$DARKHTTPD_PORT" darkhttpd
-        fi
-    fi
-    if [[ "$INCLUDE_CADDY" == "1" ]]; then
-        if ! command -v caddy >/dev/null 2>&1; then
-            INCLUDE_CADDY=0
-        else
+            ;;
+        caddy)
             sed "s|FIXTURES_ROOT|$FIX|g" "$SCRIPT_DIR/Caddyfile.in" > "$TMPDIR_RUN/Caddyfile"
             caddy run --config "$TMPDIR_RUN/Caddyfile" >"$TMPDIR_RUN/caddy.log" 2>&1 &
             CADDY_PID=$!
-            PIDS+=("$CADDY_PID")
             wait_port "$CADDY_PORT" caddy
             expect_200 "$CADDY_PORT" caddy
-        fi
+            ;;
+    esac
+}
+
+probe_peers() {
+    if [[ "$INCLUDE_STATICD" == "1" && ! -x "$STATICD_BIN" ]]; then
+        echo "missing staticd" >&2
+        exit 1
+    fi
+    if [[ "$INCLUDE_NGINX" == "1" ]] && ! command -v nginx >/dev/null 2>&1; then
+        INCLUDE_NGINX=0
+    fi
+    if [[ "$INCLUDE_DARKHTTPD" == "1" && ! -x "$DARKHTTPD_BIN" ]]; then
+        INCLUDE_DARKHTTPD=0
+    fi
+    if [[ "$INCLUDE_CADDY" == "1" ]] && ! command -v caddy >/dev/null 2>&1; then
+        INCLUDE_CADDY=0
     fi
 }
 
 page_cache() {
-    # Touch every fixture byte once so subsequent runs are warm-cache.
     cat "$FIX"/* >/dev/null 2>&1 || true
 }
 
@@ -192,8 +242,6 @@ rss_kb_of() {
     ps -o rss= -p "$plist" 2>/dev/null | awk '{s+=$1} END{print int(s+0)}'
 }
 
-# Parse wrk -latency output into p50 p75 p90 p99 rps errs
-# (wrk's Latency Distribution has 50/75/90/99 — no 95).
 parse_wrk() {
     local file="$1"
     local rps errs p50 p75 p90 p99
@@ -206,7 +254,6 @@ parse_wrk() {
     p75=$(awk '/Latency Distribution/,0 { if ($1=="75%") {print $2; exit} }' "$file")
     p90=$(awk '/Latency Distribution/,0 { if ($1=="90%") {print $2; exit} }' "$file")
     p99=$(awk '/Latency Distribution/,0 { if ($1=="99%") {print $2; exit} }' "$file")
-    # Normalize units to ms: wrk prints "123.45us" or "1.23ms" or "1.23s"
     to_ms() {
         local v="$1"
         if [[ "$v" == *us ]]; then
@@ -235,7 +282,6 @@ parse_hey() {
     p90=$(awk '/90% in / {print $(NF-1)}' "$file" | head -1)
     p99=$(awk '/99% in / {print $(NF-1)}' "$file" | head -1)
     errs=$(awk '/\[ERROR\]/ {c++} END{print c+0}' "$file")
-    # hey prints seconds
     to_ms() { awk -v x="${1:-0}" 'BEGIN{printf "%.3f", x*1000}'; }
     echo "$(to_ms "$p50") $(to_ms "$p75") $(to_ms "$p90") $(to_ms "$p99") ${rps:-0} ${errs:-0}"
 }
@@ -243,23 +289,16 @@ parse_hey() {
 run_load() {
     local url="$1" c="$2" out="$3"
     if [[ "$TOOL" == "wrk" ]]; then
-        # wrk requires connections >= threads
         local t="$THREADS"
         if [[ "$c" -lt "$t" ]]; then t="$c"; fi
         if [[ "$t" -lt 1 ]]; then t=1; fi
-        # wrk default timeout is 2s — 10MB @ high c needs more (TIMEOUT=10)
-        if [[ -n "${TIMEOUT:-}" ]]; then
-            wrk -t "$t" -c "$c" -d "${DURATION}s" --timeout "${TIMEOUT}s" --latency "$url" >"$out" 2>&1 || true
-        else
-            wrk -t "$t" -c "$c" -d "${DURATION}s" --latency "$url" >"$out" 2>&1 || true
-        fi
+        wrk -t "$t" -c "$c" -d "${DURATION}s" --timeout "${TIMEOUT}s" --latency "$url" >"$out" 2>&1 || true
     else
         hey -z "${DURATION}s" -c "$c" "$url" >"$out" 2>&1 || true
     fi
 }
 
 median_of() {
-    # stdin: one number per line → median
     sort -n | awk '{
         a[NR]=$1
     } END {
@@ -269,6 +308,7 @@ median_of() {
     }'
 }
 
+probe_peers
 LABELS=()
 PORTS=()
 if [[ "$INCLUDE_STATICD" == "1" ]]; then LABELS+=(staticd); PORTS+=("$STATICD_PORT"); fi
@@ -277,7 +317,9 @@ if [[ "$INCLUDE_DARKHTTPD" == "1" ]]; then LABELS+=(darkhttpd); PORTS+=("$DARKHT
 if [[ "$INCLUDE_CADDY" == "1" ]]; then LABELS+=(caddy); PORTS+=("$CADDY_PORT"); fi
 
 [[ -f "$FIX/manifest.txt" ]] || ./gen_fixtures.sh
-start_servers
+if [[ "$ISOLATE" != "1" ]]; then
+    for name in "${LABELS[@]}"; do start_one "$name"; done
+fi
 page_cache
 
 HOST="$(uname -srm)"
@@ -287,8 +329,8 @@ DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 {
     echo "# staticd latency benchmark"
     echo "# host: $HOST, cpus: $CPUS, date: $DATE"
-    echo "# tool: $TOOL, duration: ${DURATION}s, warmup_rounds: 1 (discarded if REPEATS>1), repeats: $REPEATS (median of measured)"
-    echo "# note: WARMUP=$WARMUP reserved; wrk has no internal warmup — round 0 discarded"
+    echo "# tool: $TOOL, duration: ${DURATION}s, timeout: ${TIMEOUT}s, repeats: $REPEATS (median; round 0 discarded if REPEATS>1)"
+    echo "# isolate: $ISOLATE (1 = fresh process per cell; RSS is that cell)"
     echo "# fixtures: page-cached before each block"
     echo "#"
     printf '%-12s %-6s %-10s %10s %10s %10s %10s %12s %8s %6s\n' \
@@ -298,10 +340,8 @@ DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 for file in $FILES; do
     for c in $CONCURRENCY; do
         page_cache
-        # Shuffle server indices
         order=()
         for i in "${!LABELS[@]}"; do order+=("$i"); done
-        # Fisher-Yates
         for ((i=${#order[@]}-1; i>0; i--)); do
             j=$((RANDOM % (i+1)))
             tmp=${order[i]}; order[i]=${order[j]}; order[j]=$tmp
@@ -311,6 +351,11 @@ for file in $FILES; do
             name="${LABELS[$idx]}"
             port="${PORTS[$idx]}"
             url="http://127.0.0.1:${port}/${file}"
+
+            if [[ "$ISOLATE" == "1" ]]; then
+                stop_all
+                start_one "$name"
+            fi
 
             declare -a p50s=() p75s=() p90s=() p99s=() rpss=() rsss=() errss=()
             for ((r=0; r<REPEATS; r++)); do
@@ -325,13 +370,12 @@ for file in $FILES; do
                 rss=$(rss_kb_of "$name")
                 echo "  rss $name ${rss}k" >&2
                 if [[ "$REPEATS" -gt 1 && "$r" -eq 0 ]]; then
-                    continue  # discard warmup round
+                    continue
                 fi
                 p50s+=("$p50"); p75s+=("$p75"); p90s+=("$p90"); p99s+=("$p99")
                 rpss+=("$rps"); rsss+=("$rss"); errss+=("$errs")
             done
             med() { printf '%s\n' "$@" | median_of; }
-            # Sum errs (not median) — any errors matter
             err_sum=0
             for e in "${errss[@]:-}"; do err_sum=$((err_sum + ${e%.*})); done
             rps_med=$(awk -v x="$(med "${rpss[@]}")" 'BEGIN{printf "%.0f", x+0}')

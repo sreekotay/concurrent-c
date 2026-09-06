@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# correctness + optional latency bench. --smoke: correctness + short wrk.
+# correctness + bench_latency.sh. --smoke / --full / default directional.
+# Forwards FULL / SMOKE / BENCH_OUT / ISOLATE / TIMEOUT / FILES / … .
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
