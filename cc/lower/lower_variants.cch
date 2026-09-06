@@ -250,37 +250,17 @@ static CCString vt_arm_list(VStep* st, VInfo* vi) {
     return sb;
 }
 
-static int vt_edit_distance(CCSlice a, CCSlice b) {
-    int prev[64];
-    int cur[64];
-    size_t i;
-    size_t j;
-    size_t na = a.len < 63 ? a.len : 63;
-    size_t nb = b.len < 63 ? b.len : 63;
-    for (j = 0; j <= nb; j++) prev[j] = (int)j;
-    for (i = 1; i <= na; i++) {
-        cur[0] = (int)i;
-        for (j = 1; j <= nb; j++) {
-            int cost = a.ptr[i - 1] == b.ptr[j - 1] ? 0 : 1;
-            int d = prev[j - 1] + cost;
-            if (prev[j] + 1 < d) d = prev[j] + 1;
-            if (cur[j - 1] + 1 < d) d = cur[j - 1] + 1;
-            cur[j] = d;
-        }
-        for (j = 0; j <= nb; j++) prev[j] = cur[j];
-    }
-    return prev[nb];
-}
-
 static CCSlice vt_closest_arm(VInfo* vi, CCSlice name) {
+    CcLowerer* L = NULL;
     VArmList* av = &vi->arms;
     size_t n = av->len();
     size_t i;
     int best = 1 << 30;
     CCSlice pick = cc_slice_empty();
+    (void)L;
     for (i = 0; i < n; i++) {
         VArm* a = *av->get_ptr(i);
-        int d = vt_edit_distance(a->name, name);
+        int d = lw_edit_distance(a->name, name);
         if (d < best) { best = d; pick = a->name; }
     }
     return pick;

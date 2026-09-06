@@ -205,6 +205,47 @@ static CCString lw_spell_expr(CcLowerer* L, const CcExpr* e) {
     return CcExpr_spell(e, &L->unit->tape, L->arena);
 }
 
+/* ---- name suggestions -------------------------------------------------- */
+
+/* Levenshtein distance, for "did you mean". Names longer than the window
+ * are compared by their first 63 bytes: a suggestion, not a proof. */
+static int lw_edit_distance(CCSlice a, CCSlice b) {
+    int prev[64];
+    int cur[64];
+    size_t i;
+    size_t j;
+    size_t na = a.len < 63 ? a.len : 63;
+    size_t nb = b.len < 63 ? b.len : 63;
+    for (j = 0; j <= nb; j++) prev[j] = (int)j;
+    for (i = 1; i <= na; i++) {
+        cur[0] = (int)i;
+        for (j = 1; j <= nb; j++) {
+            int cost = a.ptr[i - 1] == b.ptr[j - 1] ? 0 : 1;
+            int d = prev[j - 1] + cost;
+            if (prev[j] + 1 < d) d = prev[j] + 1;
+            if (cur[j - 1] + 1 < d) d = cur[j - 1] + 1;
+            cur[j] = d;
+        }
+        for (j = 0; j <= nb; j++) prev[j] = cur[j];
+    }
+    return prev[nb];
+}
+
+/* The nearest of `names` to `name`, or empty when none is near enough. */
+static CCSlice lw_closest(CcNameList names, CCSlice name) {
+    size_t n = names.len();
+    size_t i;
+    int best = 1 << 30;
+    CCSlice pick = cc_slice_empty();
+    for (i = 0; i < n; i++) {
+        CCSlice cand = *names.get_ptr(i);
+        int d = lw_edit_distance(cand, name);
+        if (d < best) { best = d; pick = cand; }
+    }
+    if (best > 3) return cc_slice_empty();
+    return pick;
+}
+
 /* ---- the pipeline ----------------------------------------------------- */
 
 #include "lower_generics.cch"

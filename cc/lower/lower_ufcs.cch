@@ -232,6 +232,237 @@ static bool uf_type_scoped_visit(CcExpr* e, void* env) {
     return true;
 }
 
+/* ---- the `as:` face graph ------------------------------------------------ */
+
+/* The type of an `as:` field of `owner`, and whether it is written as a
+ * pointer. Empty when the owner has no such member. */
+static CCSlice uf_face_field(CcLowerer* L, CCSlice owner, CCSlice face, bool* is_ptr) {
+    CcIndex* ix = L->ix;
+    CcRecordType st;
+    CcFieldList* fieldv;
+    size_t k;
+    size_t nf;
+    *is_ptr = false;
+    if (!cc__struct_of(ix, owner, 0, &st)) return cc_slice_empty();
+    fieldv = &st.fields;
+    nf = fieldv->len();
+    for (k = 0; k < nf; k++) {
+        CcField* f = fieldv->get_ptr(k);
+        if (!f->name.len || !f->type || !slice_eq(f->name, face)) continue;
+        *is_ptr = f->type->k.kind == CcTypeK_pointer;
+        return ix->canon(f->type);
+    }
+    return cc_slice_empty();
+}
+
+/* Every type reachable from `from` through `as:` faces, itself included.
+ * A type met twice on one path is a cycle. */
+static void uf_face_reach(CcLowerer* L, CCSlice from, CcNameList* out, CcNameList* seen, bool* cycle, int depth) {
+    CcIndex* ix = L->ix;
+    CcNameList faces;
+    size_t n;
+    size_t i;
+    if (!from.len || depth > 8) return;
+    {
+        size_t ns = seen->len();
+        for (i = 0; i < ns; i++)
+            if (slice_eq(*seen->get_ptr(i), from)) { *cycle = true; return; }
+    }
+    out->push(from);
+    seen->push(from);
+    faces = cc__view_faces(ix, from);
+    n = faces.len();
+    for (i = 0; i < n; i++) {
+        CCSlice face = *faces.get_ptr(i);
+        bool is_ptr = false;
+        CCSlice fty = uf_face_field(L, from, face, &is_ptr);
+        if (!fty.len || is_ptr) continue;
+        uf_face_reach(L, fty, out, seen, cycle, depth + 1);
+    }
+    {
+        CCSlice dropped = cc_slice_empty();
+        seen->pop(&dropped);
+    }
+}
+
+/* Every name a restrict list may mention: the type's fields and its
+ * methods. */
+static CcNameList uf_surface_of(CcLowerer* L, CCSlice tn) {
+    CcIndex* ix = L->ix;
+    CcNameList out = vec_new::[CCSlice](L->arena);
+    CcRecordType st;
+    CcTypeInfo* info = ix->type_get(tn);
+    if (cc__struct_of(ix, tn, 0, &st)) {
+        CcFieldList* fieldv = &st.fields;
+        size_t n = fieldv->len();
+        size_t i;
+        for (i = 0; i < n; i++) {
+            CcField* f = fieldv->get_ptr(i);
+            if (f->name.len) out.push(f->name);
+        }
+    }
+    if (info) {
+        CcMethodList ms = ix->methods_of(info);
+        size_t n = ms.len();
+        size_t i;
+        for (i = 0; i < n; i++) {
+            CcMethod* m = *ms.get_ptr(i);
+            if (m->method.len) out.push(m->method);
+        }
+    }
+    return out;
+}
+
+/* `out_*`, `*_len` and `*` stand for a set; anything else names one member. */
+static bool uf_item_is_glob(CCSlice name) {
+    size_t i;
+    for (i = 0; i < name.len; i++)
+        if (name.ptr[i] == '*') return true;
+    return false;
+}
+
+/* One `*` in a restrict item matches any run of characters. */
+static bool uf_glob_match(CCSlice pat, CCSlice name) {
+    size_t star = pat.len;
+    size_t i;
+    size_t head;
+    size_t tail;
+    for (i = 0; i < pat.len; i++)
+        if (pat.ptr[i] == '*') { star = i; break; }
+    if (star == pat.len) return slice_eq(pat, name);
+    head = star;
+    tail = pat.len - star - 1;
+    if (name.len < head + tail) return false;
+    if (head && memcmp(name.ptr, pat.ptr, head) != 0) return false;
+    if (tail && memcmp(name.ptr + name.len - tail, pat.ptr + star + 1, tail) != 0) return false;
+    return true;
+}
+
+/* One `@typeview T { r: a, ^b; }`: every name in the list matches a field
+ * or a method, and `^*` denies nothing at all. */
+static void uf_check_restrict(CcLowerer* L, CcDecl* d, CcTypeview tv, CCSlice tn, CcHookEntry* e) {
+    CcViewItemList* itemv = &e->items;
+    size_t n = itemv->len();
+    size_t i;
+    CcNameList surface = uf_surface_of(L, tn);
+    CCSlice view = tv.view.len ? tv.view : cstr_slice("(default)");
+    for (i = 0; i < n; i++) {
+        CcViewItem* it = itemv->get_ptr(i);
+        CCSlice nm = it->name;
+        CCSlice near;
+        size_t k;
+        size_t ns = surface.len();
+        bool found = false;
+        if (!nm.len) continue;
+        if (it->deny && nm.len == 1 && nm.ptr[0] == '*') {
+            CCString m = @string(`${"@"}typeview ${view} on ${tn}: '^*' is ill-formed`, L->arena);
+            lw_error(L, d->span, m);
+            continue;
+        }
+        if (nm.len == 1 && nm.ptr[0] == '*') continue;      /* the whole surface */
+        if (uf_item_is_glob(nm)) {
+            for (k = 0; k < ns && !found; k++)
+                if (uf_glob_match(nm, *surface.get_ptr(k))) found = true;
+            if (found) continue;
+        }
+        for (k = 0; k < ns && !found; k++)
+            if (slice_eq(*surface.get_ptr(k), nm)) found = true;
+        if (found) continue;
+        near = lw_closest(surface, nm);
+        {
+            const char* kind = it->deny ? "deny-list '^" : "allow-list '";
+            CCString m = @string(`${"@"}typeview ${view} on ${tn}: ${kind}${nm}' matches no field or method on ${tn}`, L->arena);
+            if (near.len) {
+                CCString note = @string(`did you mean '${near}'?`, L->arena);
+                vt_error_note(L, d->span, m, lw_keep(L, &note));
+            } else {
+                lw_error(L, d->span, m);
+            }
+        }
+    }
+}
+
+/* One `@typeview T { as: f, g; }`: each face names a value member, the
+ * graph is acyclic, and no type is reachable through two faces. */
+static void uf_check_view(CcLowerer* L, CcDecl* d, CcTypeview tv) {
+    CcIndex* ix = L->ix;
+    CCSlice tn;
+    CcHookEntryList* entryv = &tv.entries;
+    size_t ne = entryv->len();
+    size_t i;
+    CcNameList seen_types = vec_new::[CCSlice](L->arena);
+    CcNameList reached = vec_new::[CCSlice](L->arena);
+    if (!tv.target) return;
+    tn = cc__strip_tag(ix->canon(tv.target));
+    if (!tn.len || tn.ptr[tn.len - 1] == '*') return;    /* a family glob has no one struct */
+    for (i = 0; i < ne; i++) {
+        CcHookEntry* e = entryv->get_ptr(i);
+        CcViewItemList* itemv = &e->items;
+        size_t nj = itemv->len();
+        size_t j;
+        if (!cc_slice_eq_cstr(&e->key, "as")) {
+            if (cc_slice_eq_cstr(&e->key, "r") || cc_slice_eq_cstr(&e->key, "w") ||
+                cc_slice_eq_cstr(&e->key, "rw")) uf_check_restrict(L, d, tv, tn, e);
+            continue;
+        }
+        for (j = 0; j < nj; j++) {
+            CcViewItem* it = itemv->get_ptr(j);
+            bool is_ptr = false;
+            CCSlice fty;
+            CcNameList mine = vec_new::[CCSlice](L->arena);
+            CcNameList path = vec_new::[CCSlice](L->arena);
+            bool cycle = false;
+            size_t k;
+            size_t nm;
+            if (!it->name.len) continue;
+            fty = uf_face_field(L, tn, it->name, &is_ptr);
+            if (is_ptr) {
+                CCSlice fname = it->name;
+                CCString m = @string(`type: as: field '${fname}' on '${tn}' must be a value embed, not a pointer`, L->arena);
+                lw_error(L, d->span, m);
+                continue;
+            }
+            if (!fty.len) continue;
+            uf_face_reach(L, fty, &mine, &path, &cycle, 0);
+            if (cycle || slice_eq(fty, tn)) {
+                CCString m = @string(`cyclic as: on '${tn}'`, L->arena);
+                lw_error(L, d->span, m);
+                continue;
+            }
+            nm = mine.len();
+            for (k = 0; k < nm; k++) {
+                CCSlice got = *mine.get_ptr(k);
+                size_t q;
+                size_t nr = reached.len();
+                bool dup = false;
+                for (q = 0; q < nr && !dup; q++)
+                    if (slice_eq(*reached.get_ptr(q), got)) dup = true;
+                if (dup) {
+                    CCString m = @string(`type: ambiguous as: embed of '${got}' on '${tn}'`, L->arena);
+                    lw_error(L, d->span, m);
+                } else {
+                    reached.push(got);
+                }
+            }
+        }
+    }
+    (void)seen_types;
+}
+
+static void uf_check_views(CcLowerer* L) {
+    CcUnit* u = L->unit;
+    CcDeclList* declv = &u->decls;
+    size_t n = declv->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *declv->get_ptr(i);
+        @switch (d->k) {
+            case .typeview(tv): uf_check_view(L, d, tv); break;
+            default: break;
+        }
+    }
+}
+
 static void CcLowerer_ufcs(CcLowerer* L) {
     Walker w;
     UStep st;
@@ -249,6 +480,7 @@ static void CcLowerer_ufcs(CcLowerer* L) {
     v.expr = uf_type_scoped_visit;
     v.env = &st;
     CcUnit_walk(L->unit, v);
+    uf_check_views(L);
 }
 
 #endif
