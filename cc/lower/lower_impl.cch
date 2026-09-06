@@ -293,12 +293,59 @@ static void lw_banner(CcLowerer* L) {
     *decls = with;
 }
 
+/* `@typeview(Name)` on a parameter's type names the face the callee may
+ * reach through: the index enforces it, and C has nothing to say about
+ * it, so it does not survive into the output. */
+static void lw_strip_views(CcLowerer* L, CcAttrList* av) {
+    size_t n = av->len();
+    size_t i;
+    bool any = false;
+    for (i = 0; i < n; i++) {
+        CcAttr* a = av->get_ptr(i);
+        if (cc_slice_eq_cstr(&a->name, "typeview")) any = true;
+    }
+    if (!any) return;
+    {
+        CcAttrList keep = vec_new::[CcAttr](L->arena);
+        for (i = 0; i < n; i++) {
+            CcAttr a = *av->get_ptr(i);
+            if (cc_slice_eq_cstr(&a.name, "typeview")) continue;
+            keep.push(a);
+        }
+        *av = keep;
+    }
+}
+
+static void lw_strip_view_params(CcLowerer* L, CcType* t) {
+    CcParamList* ps = NULL;
+    size_t n;
+    size_t i;
+    @switch (t->k) {
+        case .func: ps = &t->k.func.params; break;
+        default: break;
+    }
+    if (!ps) return;
+    n = ps->len();
+    for (i = 0; i < n; i++) {
+        CcParam* pa = ps->get_ptr(i);
+        lw_strip_views(L, &pa->attrs);
+    }
+}
+
+static bool lw_strip_view_attrs(CcType* t, void* env) {
+    CcLowerer* L = (CcLowerer*)env;
+    lw_strip_views(L, &t->attrs);
+    lw_strip_view_params(L, t);
+    return true;
+}
+
 /* Declarations the index consumed and C never sees: `@typeview`. */
 static void lw_drop_cc_only(CcLowerer* L) {
     CcDeclList* decls = &L->unit->decls;
     CcDeclList with = vec_new::[CcDeclRef](L->arena);
     size_t n = decls->len();
     size_t i;
+    CcVisitor v;
     for (i = 0; i < n; i++) {
         CcDecl* d = *decls->get_ptr(i);
         bool drop = false;
@@ -311,6 +358,10 @@ static void lw_drop_cc_only(CcLowerer* L) {
         if (!drop) with.push(d);
     }
     *decls = with;
+    memset(&v, 0, sizeof(v));
+    v.type = lw_strip_view_attrs;
+    v.env = L;
+    CcUnit_walk(L->unit, v);
 }
 
 /* `#include "x.cch"` names a local header: the C includes its lowered
