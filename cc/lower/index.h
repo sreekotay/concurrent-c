@@ -81,6 +81,10 @@ typedef struct CcHookReg {
     int ufcs_rejects;          /* default path returns the empty slice: no composition after the rules */
     int ufcs_opaque;           /* handler body could not be read as rules (computed names) */
     int has_len, has_access, has_cast, has_niche, has_sink;
+    const char *len_kind;      /* .len hook: "field" or "call", naming len_name */
+    const char *len_name;
+    const char *access_kind;   /* .access hook: "load" or "call", naming access_name */
+    const char *access_name;
     CcName sink_fn;            /* .ufcs_sink callee: unresolved methods lower to sink(&recv, "m", n, args...) */
     struct CcHookReg *next;
 } CcHookReg;

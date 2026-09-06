@@ -120,6 +120,10 @@ struct CcHookReg {
     bool ufcs_rejects;          /* default path returns the empty slice: no composition after the rules */
     bool ufcs_opaque;           /* handler body could not be read as rules (computed names) */
     bool has_len; bool has_access; bool has_cast; bool has_niche; bool has_sink;
+    CCSlice len_kind;           /* .len hook: "field" or "call", naming len_name */
+    CCSlice len_name;
+    CCSlice access_kind;        /* .access hook: "load" or "call", naming access_name */
+    CCSlice access_name;
     CCSlice sink_fn;            /* .ufcs_sink callee: unresolved methods lower to sink(&recv, "m", n, args...) */
 };
 
