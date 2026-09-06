@@ -4615,10 +4615,23 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             /* Clean lowerer: emit C beside the cache, then continue as raw C
              * (include rewrite, host compile, link happen in the driver). */
             char dir[PATH_MAX], clean_c[PATH_MAX], stem[128];
+            char clean_shcc_wrap[PATH_MAX];
             CCBuildOptions o2;
+            CCBuildOptions o_shcc;
             if (uk == CC_UNIT_KIND_CCH) {
                 fprintf(stderr, "cc: the clean lowerer does not lower header units yet (%s)\n", opt->in_path);
                 return -1;
+            }
+            if (uk == CC_UNIT_KIND_SHCC) {
+                /* A script is a unit once its prelude, main and default
+                   handler are in place: lower the same wrapper the shadow
+                   path lowers, so the two see one program. */
+                if (cc__materialize_shcc_for_native(opt->in_path, clean_shcc_wrap,
+                                                    sizeof(clean_shcc_wrap)) != 0)
+                    return -1;
+                o_shcc = *opt;
+                o_shcc.in_path = clean_shcc_wrap;
+                opt = &o_shcc;
             }
             cc__stem_from_path(opt->in_path, stem, sizeof(stem));
             snprintf(dir, sizeof(dir), "%s/.cc-build/clean", g_out_root);
