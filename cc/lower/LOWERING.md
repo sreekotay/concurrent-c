@@ -197,6 +197,14 @@ nearest name offered as a note when it does not; a `*` anywhere in an
 item is a pattern, so `out_*` and `*_len` match the members they name;
 and `^*` is refused as ill-formed rather than read as denying nothing.
 
+The receiver goes in as `&recv` when the callee's first parameter is a
+pointer. A declared function says so and the index reads it; a
+function-like macro has no parameters to read, and where a macro and a
+function share a name the macro is what the host compiler sees. What the
+macro does with its first argument answers it: one that hands it straight
+to the call it expands to wants an address, one that converts it first
+(`CC__ARENA_HOST(a)`) wants the value.
+
 ## Closures
 
 `(params) => body` becomes three C functions and a struct, and the
@@ -435,6 +443,14 @@ printed one push per line. `@scratch` as the arena is the function's
 ```
 
 with the restore also emitted before every exit from inside the statement.
+
+## Views
+
+`@typeview(V) T*` on a parameter is a restricted binding: the index
+enforces what the view lets through, and the annotation does not survive
+into C. Passing such a binding where the whole `T*` is expected is an
+error at the call — the callee would get everything the view withheld,
+and no cast makes that safe.
 
 ## Generic instances
 

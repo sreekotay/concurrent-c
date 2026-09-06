@@ -201,6 +201,87 @@ static CCSlice uf_overload_for_args(Walker* w, CcLowerer* L, CcUfcs uf, CcMethod
     return m->callee;
 }
 
+/* Whether the receiver goes in as `&recv`.
+ *
+ * A declared function says so in its first parameter, and the index reads
+ * it. A function-like macro has no parameters to read, and where a macro
+ * and a function share a name the macro is what the host compiler sees.
+ * What the macro does with its first argument answers it: one that hands
+ * it straight to the call it expands to wants what that call wants — an
+ * address; one that converts it first (`CC__ARENA_HOST(a)`) wants the
+ * value, and `CC__ARENA_HOST(&a)` is a pointer no association in it
+ * matches. */
+static CcMacroDef* uf_macro_of(CcIndex* ix, CCSlice name) {
+    CcSym* sym = sym_any(ix, name);
+    while (sym) {
+        if (sym->kind == CC_SYM_MACRO && sym->macro) return sym->macro;
+        sym = sym->same_name;
+    }
+    return NULL;
+}
+
+/* The `)` that closes the `(` at i, or the length when it is unbalanced. */
+static size_t uf_close_paren(CCSlice s, size_t i) {
+    int depth = 0;
+    for (; i < s.len; i++) {
+        if (s.ptr[i] == '(') depth++;
+        else if (s.ptr[i] == ')') { depth--; if (!depth) return i; }
+    }
+    return s.len;
+}
+
+static bool uf_macro_passes_recv(CcMacroDef* md) {
+    CCSlice body = md->body;
+    CcNameList* ps = &md->params;
+    CCSlice p0;
+    size_t open = 0;
+    size_t i;
+    size_t start;
+    size_t end;
+    int depth = 0;
+    bool have = false;
+    if (!md->function_like || !ps->len()) return true;
+    p0 = *ps->get_ptr(0);
+    /* the argument list of the call the body expands to: the last group
+     * that opens at the body's own depth */
+    for (i = 0; i < body.len; i++) {
+        char c = body.ptr[i];
+        if (c == '(') { if (depth == 0) { open = i; have = true; } depth++; }
+        else if (c == ')') { if (depth) depth--; }
+    }
+    if (!have) return true;
+    start = open + 1;
+    end = body.len;
+    depth = 0;
+    for (i = start; i < body.len; i++) {
+        char c = body.ptr[i];
+        if (c == '(' || c == '[') depth++;
+        else if (c == ')' || c == ']') { if (!depth) { end = i; break; } depth--; }
+        else if (c == ',' && !depth) { end = i; break; }
+    }
+    for (;;) {
+        if (start >= end) return false;
+        if (body.ptr[start] == ' ' || body.ptr[start] == '\t') { start++; continue; }
+        if (body.ptr[end - 1] == ' ' || body.ptr[end - 1] == '\t') { end--; continue; }
+        if (body.ptr[start] == '(' &&
+            uf_close_paren(cc_slice_from_buffer((char*)body.ptr, end), start) == end - 1) {
+            start++;
+            end--;
+            continue;
+        }
+        break;
+    }
+    return slice_eq(cc_slice_from_buffer((char*)body.ptr + start, end - start), p0);
+}
+
+static bool uf_recv_by_ptr(CcLowerer* L, CcMethod* m) {
+    CcMacroDef* md;
+    if (!m->recv_by_ptr) return false;
+    md = uf_macro_of(L->ix, m->callee);
+    if (md) return uf_macro_passes_recv(md);
+    return true;
+}
+
 static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice tn, CCSlice reason) {
     UStep* st = (UStep*)w->env;
     CcLowerer* L = st->L;
@@ -265,7 +346,7 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
         e->k = { .stmt_expr = se };
         return;
     }
-    if (m->recv_by_ptr) recv_arg = recv_ptr ? uf.recv : cc_expr_unary(CC_OP_ADDR, uf_wrap(L, uf.recv, sp), sp, L->arena);
+    if (uf_recv_by_ptr(L, m)) recv_arg = recv_ptr ? uf.recv : cc_expr_unary(CC_OP_ADDR, uf_wrap(L, uf.recv, sp), sp, L->arena);
     else recv_arg = recv_ptr ? cc_expr_unary(CC_OP_DEREF, uf_wrap(L, uf.recv, sp), sp, L->arena) : uf.recv;
     call.callee = lw_ident(L, uf_overload_for_args(w, L, uf, m), sp);
     call.args = vec_new::[CcExprRef](L->arena);
@@ -619,6 +700,82 @@ static void uf_check_view(CcLowerer* L, CcDecl* d, CcTypeview tv) {
     (void)seen_types;
 }
 
+/* The view a binding is restricted to, or empty. `@typeview(V) T*` puts
+ * the annotation on the `T` the declarator built the pointer from, so the
+ * pointers are peeled looking for it. */
+static CCSlice uf_view_attr(CcType* t) {
+    while (t) {
+        CcAttrList* av = &t->attrs;
+        size_t n = av->len();
+        size_t i;
+        CcType* inner = NULL;
+        for (i = 0; i < n; i++) {
+            CcAttr* a = av->get_ptr(i);
+            if (cc_slice_eq_cstr(&a->name, "typeview")) return a->value;
+        }
+        @switch (t->k) {
+            case .pointer(pt): inner = pt.pointee; break;
+            default: break;
+        }
+        t = inner;
+    }
+    return cc_slice_empty();
+}
+
+/* A restricted binding does not widen. `@typeview(V) T*` names what the
+ * view lets through; a parameter declared as the whole `T*` would hand
+ * the callee everything the view withheld, and there is no cast that
+ * makes that safe. */
+static void uf_check_widen(Walker* w, CcExpr* e, CcCall cl) {
+    UStep* st = (UStep*)w->env;
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CcExprList* av = &cl.args;
+    CcParamList* ps = NULL;
+    CCSlice fn;
+    CcSym* sym;
+    size_t n = av->len();
+    size_t np;
+    size_t i;
+    if (!expr_ident(strip_parens_expr(cl.callee), &fn)) return;
+    sym = sym_any(ix, fn);
+    while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+    if (!sym || !sym->type) return;
+    @switch (sym->type->k) {
+        case .func: ps = &sym->type->k.func.params; break;
+        default: break;
+    }
+    if (!ps) return;
+    np = ps->len();
+    for (i = 0; i < n && i < np; i++) {
+        CcExpr* a = *av->get_ptr(i);
+        CcType* at = type_of_expr(w, a);
+        CCSlice have = uf_view_attr(at);
+        CcParam* pa = ps->get_ptr(i);
+        CCSlice want;
+        if (!have.len) continue;
+        want = uf_view_attr(pa->type);
+        if (want.len && slice_eq(want, have)) continue;
+        {
+            CCSlice on = cc__strip_tag(ix->canon(peel(at)));
+            CCSlice to = pa->type ? ix->canon(pa->type) : cc_slice_empty();
+            CCString m = @string(`restricted mode '${have}' on '${on}': cannot widen to '${to}' (const-shaped; no cast)`, L->arena);
+            lw_error(L, e->span, m);
+        }
+    }
+}
+
+static void uf_widen_pass(CcLowerer* L, UStep* st) {
+    Walker w;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_call = uf_check_widen;
+    w.env = st;
+    tw_unit(&w);
+}
+
 static void uf_check_views(CcLowerer* L) {
     CcUnit* u = L->unit;
     CcDeclList* declv = &u->decls;
@@ -643,6 +800,7 @@ static void CcLowerer_ufcs(CcLowerer* L) {
     w.arena = L->arena;
     w.ix = L->ix;
     w.unit = L->unit;
+    uf_widen_pass(L, &st);      /* before the rewrite: the arguments are as written */
     w.on_ufcs = uf_rewrite;
     w.on_field = uf_member;
     w.env = &st;
