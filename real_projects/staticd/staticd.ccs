@@ -7,7 +7,9 @@
  *   ConnEnc (= @typeview Encode) → encode-only (no sock/flush)
  *   File body               → 64KB named-block ring (dev+ino+block), reuse
  *                           in place; fstat ≤1s; idle cull. Else pool
- *                           pread. Dest-attach onto g_clients (cap 2).
+ *                           pread. Accept dest-attaches onto g_clients.
+ *                           Chunk writes dest-attach onto a send dest
+ *                           the frame waits (the turnstile is stack).
  *   Request parse           → BufReader + @grammar(schema) ReqLine;
  *                           method/path copied onto Conn.arena before
  *                           header drain (fill() memmoves the read buf)
@@ -25,7 +27,7 @@
  * Usage:  ./out/staticd [--listen ADDR] [--root DIR] [--index NAME]
  *                       [--list] [--header 'Name: value']
  * v1: GET/HEAD/OPTIONS, keep-alive, Date/Last-Modified/IMS, one Range,
- *     pread + 64KB write; @parallel(g_clients) when n>1.
+ *     pread + 64KB write; send dest + turnstile when n>1.
  *     `?query` ignored. `--list` off. `--index` default index.html.
  */
 
@@ -200,6 +202,15 @@ static void !>(CCError) send_file_chunks(CCSocket* sock, FileHold* fh,
     int n = (int)((nsend + (size_t)FILE_SEND_CHUNK - 1) / (size_t)FILE_SEND_CHUNK);
     cc_arena_stack(ts_a, kilobytes(64));
     CCTurnstile ts@(SEND_PIPE_CAP, 1, ts_a) !> @destroy;
+    /* Frame dest: dest-attach onto g_clients would outlive ts_a. */
+    CCParallel pipe = @parallel spawn { @serial { (void)0; } } !>;
+    @defer pipe.wait() !>(e) { (void)e; };
+    @defer(err) {
+        int j;
+        @for (j in 0..n) {
+            ts.fail(0, j) !>(e2) { (void)e2; };
+        }
+    }
     int i;
     for (i = 0; i < n; i++) {
         size_t chunk_off = (size_t)i * (size_t)FILE_SEND_CHUNK;
@@ -207,7 +218,7 @@ static void !>(CCError) send_file_chunks(CCSocket* sock, FileHold* fh,
         if (want > (size_t)FILE_SEND_CHUNK) want = (size_t)FILE_SEND_CHUNK;
         int ticket = i;
         ts.enter(ticket) !>;
-        @parallel(g_clients) {
+        @parallel(pipe) {
             send_one_chunk(&ts, sock, fh->fd, fh->dev, fh->ino, fh->mtime,
                            off + chunk_off, want, ticket);
         }
