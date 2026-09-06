@@ -10,7 +10,7 @@ enum {
     SHADOW_SAFE_EH_CAP = 16,
     SHADOW_SAFE_VARIANT_CAP = 32,
     SHADOW_SAFE_VARM_CAP = 256,
-    SHADOW_SAFE_TYPE_CAP = 128,
+    SHADOW_SAFE_TYPE_CAP = 512,
     SHADOW_SAFE_DOM_CAP = 16,
     SHADOW_SAFE_CHAN_TD_CAP = 32,
     SHADOW_SAFE_GLOBAL_CAP = 64,
@@ -514,7 +514,7 @@ static void shadow_safe_add_type_name(ShadowSafeCtx* ctx, const char* name) {
         if (strcmp(ctx->type_names[i], name) == 0) return;
     if (ctx->ntypes >= SHADOW_SAFE_TYPE_CAP) {
         shadow_safe_err_at(ctx, NULL,
-                           "safety type-name table capacity exceeded (128)");
+                           "safety type-name table capacity exceeded (512)");
         return;
     }
     snprintf(ctx->type_names[ctx->ntypes++], sizeof(ctx->type_names[0]), "%s",
