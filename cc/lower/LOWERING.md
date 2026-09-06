@@ -436,6 +436,25 @@ printed one push per line. `@scratch` as the arena is the function's
 
 with the restore also emitted before every exit from inside the statement.
 
+## Generic instances
+
+Every instance a unit mentions is expanded from its family's factory
+template and spliced in after the leading includes, once, under
+`#ifndef CC_HEADER_<FAMILY>_<Instance>`. The expansion is a unit in its
+own right: it is parsed against the same index, put through the same
+steps, and printed. It carries the language it was written in — Result
+returns, methods, string templates — so what is spliced is the C those
+lower to, not the template's own source. An expansion that does not
+parse, lower or print is an error at the unit that asked for it, naming
+the stage and the first message; the expansion nests at most eight deep,
+past which the family is expanding into itself.
+
+`_Generic` inside an expansion (and anywhere else) may carry preprocessor
+lines between its associations, or a macro standing for whole
+associations: which associations the host compiler sees is the
+preprocessor's answer, not the parser's. The control expression is
+lowered; the association list is replayed as the tokens the user wrote.
+
 ## Print
 
 `println(x)` is `cc_println(x)`; the alias list is the set of functions

@@ -741,6 +741,21 @@ static void pr_pp_inside(Pr* p, uint32_t tok, CcSpan span) {
     if (last + 1 < p->n) pr_set_pin_tok(p, last + 1);
 }
 
+/* Tokens replayed as the user wrote them, trivia and preprocessor lines
+ * included: a construct whose shape the preprocessor decides, not the
+ * parser, is printed as the source that decides it. */
+static void pr_verbatim(Pr* p, CcSpan span) {
+    uint32_t i;
+    if (span.last < span.first || span.last >= p->n) return;
+    pr_set_pin_tok(p, span.first);
+    pr_tok_text(p, span.first);
+    for (i = span.first + 1; i <= span.last; i++) {
+        pr_trivia_raw(p, lead_off(p, i), lead_len(p, i));
+        pr_tok_text(p, i);
+    }
+    if (span.last + 1 < p->n) pr_set_pin_tok(p, span.last + 1);
+}
+
 /* Whether a `,` follows the span in the source; lists that carry
  * preprocessor lines keep the user's comma placement. */
 static bool src_comma_after(const Pr* p, CcSpan s) {
@@ -1210,6 +1225,12 @@ static void pr_e_generic_sel(Pr* p, const CcGenericSel* gs) {
     size_t i;
     pr_str(p, "_Generic(");
     if (gs->control) pr_expr_p(p, gs->control, PREC_ASSIGN);
+    if (gs->verbatim) {
+        /* the association list is the preprocessor's to shape: replayed */
+        pr_verbatim(p, gs->args);
+        pr_str(p, ")");
+        return;
+    }
     for (i = 0; i < n; i++) {
         const CcGenericSelArm* arm = arms->get_ptr(i);
         if (!arm->type && expr_is_pp(arm->expr)) {

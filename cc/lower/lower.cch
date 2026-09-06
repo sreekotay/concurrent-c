@@ -32,6 +32,7 @@ typedef struct CcLowerer {
     bool unwraps_used;          /* a scaffold was emitted: the unit needs <ccc/cc_result.h> */
     CcType* ret_slice;          /* the return type of the function the slice step is in */
     Vec::[CCSlice] headers;     /* quoted local `.cch` headers this unit includes, resolved; lifetime: the arena */
+    uint32_t depth;             /* 0 for the unit; one deeper for each generic expansion lowered inside it */
 } CcLowerer;
 
 static CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds);
