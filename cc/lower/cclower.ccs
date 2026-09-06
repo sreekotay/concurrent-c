@@ -404,6 +404,11 @@ static bool write_product(const char* out_path, CCSlice text, CcSrcMap* map, CCA
 /* `-I DIR` search path for the index (default: cc/include); lifetime: the tool arena */
 static CcNameList g_include_dirs;
 
+/* --quote-dir DIR: the directory quoted `.cch` includes resolve against,
+ * when the unit being lowered is a stage the driver materialized from a
+ * source that lives somewhere else. */
+static const char* g_quote_dir = NULL;
+
 static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena a) {
     CcParseOpts opts;
     bool ok;
@@ -420,11 +425,14 @@ static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena 
         return false;
     }
     {
-        /* quoted includes resolve against the unit's own directory */
+        /* quoted includes resolve against the unit's own directory — or,
+         * when the driver handed us a materialized stage of a unit that
+         * lives elsewhere, against the directory the user wrote it in */
         size_t slash = pathsl.len;
         CCSlice qdir = cc_slice_empty();
         while (slash > 0 && pathsl.ptr[slash - 1] != '/') slash--;
         if (slash) qdir = cc_slice_from_buffer((char*)pathsl.ptr, slash - 1);
+        if (g_quote_dir) qdir = cc_slice_from_buffer((char*)g_quote_dir, strlen(g_quote_dir));
         ix = cc_index_new(g_include_dirs, qdir, &L->ds, a);
     }
     opts.mode = mode_for(path);
@@ -665,11 +673,13 @@ int main(int argc, char** argv) {
         }
         if (strcmp(argv[i], "--root") == 0 && i + 1 < argc) { g_root = cc_slice_from_buffer(argv[i + 1], strlen(argv[i + 1])); i++; continue; }
         if (strcmp(argv[i], "--h-root") == 0 && i + 1 < argc) { g_h_root = argv[i + 1]; i++; continue; }
+        if (strcmp(argv[i], "--quote-dir") == 0 && i + 1 < argc) { g_quote_dir = argv[i + 1]; i++; continue; }
         if (strcmp(argv[i], "--identity") == 0) mode = M_IDENTITY;
         else if (strcmp(argv[i], "--print") == 0) mode = M_PRINT;
         else if (strcmp(argv[i], "--lower") == 0) { mode = M_PRINT; lower = true; }
         else if (strcmp(argv[i], "--is-plain-c") == 0) mode = M_PLAIN;
         else if (strcmp(argv[i], "--known-types") == 0 && i + 1 < argc) known_path = argv[++i];
+        else if (strcmp(argv[i], "--quote-dir") == 0 && i + 1 < argc) i++;
         else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) out_path = argv[++i];
         else if (strcmp(argv[i], "--no-line") == 0) line_directives = false;
         else if (strcmp(argv[i], "--header") == 0) header_mode = true;
@@ -679,7 +689,8 @@ int main(int argc, char** argv) {
     if (known_path) read_known_types(known_path, &known, tool);
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--known-types") == 0 || strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "-I") == 0 ||
-            strcmp(argv[i], "--root") == 0 || strcmp(argv[i], "--h-root") == 0) { i++; continue; }
+            strcmp(argv[i], "--root") == 0 || strcmp(argv[i], "--h-root") == 0 ||
+            strcmp(argv[i], "--quote-dir") == 0) { i++; continue; }
         if (argv[i][0] == '-' && argv[i][1]) continue;
         n_files++;
         switch (mode) {

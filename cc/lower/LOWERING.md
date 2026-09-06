@@ -455,6 +455,24 @@ printed one push per line. `@scratch` as the arena is the function's
 
 with the restore also emitted before every exit from inside the statement.
 
+## Compile time
+
+`@comptime if` / `@comptime for` / `@comptime(expr)` decide what source
+there is to lower at all, and a `@grammar` body is raw bytes no parser
+may read. Both are resolved before the lowerer sees the unit, by the same
+engine the shadow path runs, and the lowerer is handed the source that
+survived — written to a stage in the cache, with a `#line` back to the
+file the user wrote (the prepare passes blank rather than delete, so line
+N there is line N here) and `--quote-dir` naming the directory that
+unit's quoted `.cch` includes resolve against.
+
+What the lowerer is not handed is C. The type-scoped and template passes
+are left off, so `Tweet.parse(...)` and `@string(`...`)` still reach it as
+the language, for its own steps to lower from the index and the AST.
+
+`@comptime { }` blocks are not run yet: those need the executor and the
+emit-plan splice, and reach the output as themselves.
+
 ## Async
 
 `@async Ret f(a)` hands the caller a `CCTaskIntptr` instead of a value.
