@@ -321,6 +321,43 @@ switch ((r->del).kind) {
 `@variant(packed)` is not lowered by the clean lowerer yet: the
 declaration is a diagnostic.
 
+## String templates
+
+`@string(`...`, arena)` builds a CCString by pushing each piece in order,
+so it is a run of statements and is written where statements go: the
+initializer of a declaration. Anywhere else it is a diagnostic naming the
+fix, never a partial build.
+
+```c
+CCString s = cc_string_new();
+cc_string_push_buffer(&s, "hi ", 3, a);
+cc__string_slot_push(&s, (who), a);
+```
+
+A literal run carries the bytes as the source wrote them and the count of
+characters they stand for, so an escape counts once. `@scratch` as the
+arena names one stack arena per function, declared at the top and sized
+to the largest request in the body:
+
+```c
+cc_arena_stack(__cc_str_scratch, 1024);
+```
+
+`@string(`...`)` with no arena is the same pieces over a buffer sized on
+the stack, which is one expression and goes anywhere:
+
+```c
+CCSlice t = cc__string_stack_slice(cc__string_stack_push(cc__string_stack_lit(
+    cc__string_stack_new((char[0u + 4u + cc__string_stack_bound((n))]){0},
+                         0u + 4u + cc__string_stack_bound((n))), "a\nb ", 4), (n)));
+```
+
+The step runs after UFCS and the slice arguments, so a slot expression is
+already the C it will be: the stack form spells each slot into its size
+expression, and spelling it earlier would freeze a call the later steps
+had not rewritten yet. A tagged slot (`$~tag{e}`) and the direct form
+`@string(e, arena)` are diagnostics for now rather than a dropped tag.
+
 ## Scratch and templates
 
 `@string(\`text ${x} more\`, arena)`:
