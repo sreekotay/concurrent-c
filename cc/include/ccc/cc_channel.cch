@@ -684,6 +684,12 @@ static inline CCSlice cc_channel_rx_lower_c(CCSlice recv_type, CCSlice method, C
 }
 
 
+/* A channel a pair created is freed through the same generic the UFCS
+   `free` rule names, so `!> @destroy` on the handle needs no rule of its
+   own in the lowerer. */
+@typehooks on CCChan {
+    .destroy = cc_type_destroy_call("cc_channel_free"),
+};
 @typehooks on CCChanTx_* {
     .ufcs = cc_channel_tx_lower_c,
 };
