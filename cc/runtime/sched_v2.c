@@ -226,6 +226,7 @@ struct fiber_v2 {
     CCNurseryHost* saved_nursery;
     CCNurseryHost* admission_nursery;
     void* par_gate; /* CCParallel*; cancel wakes parks on this fiber */
+    int   par_slot; /* dest live-index slot; -1 if not listed */
 
     /* R1 — user-facing async backtrace metadata.
      *
@@ -412,6 +413,8 @@ extern void cc__fiber_dump_unpark_reason_stats(void);
 extern void cc_sched_wait_many_dump_diag(void);
 extern void cc__socket_wait_dump_diag(void);
 extern _Atomic size_t g_external_wait_threads;
+/* Dest completer: take f off dest's live index. 1 = this path frees. */
+int cc_parallel_claim_child(void* dest, fiber_v2* f);
 
 /* Diagnostic counters */
 static _Atomic uint64_t g_v2_fibers_alive = 0;
@@ -1034,6 +1037,7 @@ static fiber_v2* fiber_v2_alloc(void) {
             f->saved_nursery = NULL;
             f->admission_nursery = NULL;
             f->par_gate = NULL;
+            f->par_slot = -1;
             atomic_store_explicit(&f->done, 0, memory_order_relaxed);
             atomic_store_explicit(&f->wait_ticket, 0, memory_order_relaxed);
             atomic_store_explicit(&f->join_waiter_fiber, NULL, memory_order_relaxed);
@@ -1061,6 +1065,7 @@ static fiber_v2* fiber_v2_alloc(void) {
     f->saved_nursery = NULL;
     f->admission_nursery = NULL;
     f->par_gate = NULL;
+    f->par_slot = -1;
     atomic_store_explicit(&f->join_waiter_fiber, NULL, memory_order_relaxed);
     wake_primitive_init(&f->done_wake);
 
@@ -1083,6 +1088,7 @@ static void fiber_v2_free(fiber_v2* f) {
     f->saved_nursery = NULL;
     f->admission_nursery = NULL;
     f->par_gate = NULL;
+    f->par_slot = -1;
     /* Clear detector metadata so the next spawn starts clean and the
      * detector never observes stale park_obj/suppress/external-wait state
      * on a pooled fiber. */
@@ -1461,7 +1467,7 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
     }
 
     if (mco_status(f->coro) == MCO_DEAD) {
-        /* Snapshot ownership metadata BEFORE publishing done=1.
+        /* Snapshot dest/nursery ownership BEFORE publishing done=1.
          *
          * The moment done=1 lands, a joiner (cc_block_on / sched_v2_join)
          * may return, call sched_v2_fiber_release, and push this fiber_v2
@@ -1478,9 +1484,19 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
          * cc_nursery_notify_child_done fires early for a child that never
          * ran.  Reproduced by tests/hybrid_run_to_completion_smoke.ccs
          * under parallel suite load (block_on releases t1/t2 into the
-         * pool right before three nursery spawns reuse them). */
+         * pool right before three nursery spawns reuse them).
+         *
+         * A dest child claims itself off the live index here, while f
+         * cannot yet have been recycled: done is still 0, so no joiner
+         * has released it. Claim is exclusive with wait / leave /
+         * admit-reap. Dest-attached fibers are not nursery worker-frees
+         * — if claim loses, the joiner that took the slot frees. */
+        void* gate = f->par_gate;
+        int claimed = 0;
+        if (gate)
+            claimed = cc_parallel_claim_child(gate, f);
         int worker_frees = cc_v2_worker_frees_mode();
-        CCNurseryHost* adm = worker_frees ? f->saved_nursery : NULL;
+        CCNurseryHost* adm = (worker_frees && !gate) ? f->saved_nursery : NULL;
         atomic_store_explicit(&f->state, FIBER_V2_DEAD, memory_order_release);
         atomic_store_explicit(&f->done, 1, memory_order_release);
         /* Dekker pair with sched_v2_join waiter: completer stores done then
@@ -1514,7 +1530,9 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
          * through entry and is the correct handle to identify a
          * nursery-owned fiber at completion.  adm was snapshotted
          * above, before done=1 could hand the fiber to a joiner. */
-        if (worker_frees && adm) {
+        if (claimed) {
+            fiber_v2_free(f);
+        } else if (worker_frees && adm) {
             fiber_v2_free(f);
             cc_nursery_notify_child_done(adm);
         }
@@ -1793,6 +1811,14 @@ void sched_v2_fiber_set_par_gate(fiber_v2* f, void* gate) {
 
 void* sched_v2_fiber_par_gate(fiber_v2* f) {
     return f ? f->par_gate : NULL;
+}
+
+void sched_v2_fiber_set_par_slot(fiber_v2* f, int slot) {
+    if (f) f->par_slot = slot;
+}
+
+int sched_v2_fiber_par_slot(fiber_v2* f) {
+    return f ? f->par_slot : -1;
 }
 
 /* Walk the all_fibers list and signal any parked fiber whose deadline

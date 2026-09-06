@@ -49,8 +49,10 @@ static void cc_parallel_env_free(CCParallel* h, void* env) {
 }
 
 /* Live-index lock. The index (tasks / envs / nt / ncap / xtasks / xenvs)
- * is read or written only under it. Nothing parks while holding it: a
- * fiber is joined only by whoever took its slot out under the lock. */
+ * is read or written only under it. Nothing parks while holding it.
+ * Whoever takes a slot out under the lock is the only one who joins or
+ * frees that fiber. Completers claim themselves when they finish;
+ * wait / leave / admit-reap take what is still listed. */
 static inline void cc_par_cpu_pause(void) {
 #if defined(__TINYC__)
     __asm__ __volatile__("" ::: "memory");
@@ -90,10 +92,12 @@ static void cc_par_unlock(CCParallel* h) {
     atomic_store_explicit(&h->lock, 0, memory_order_release);
 }
 
-/* Live occupancy: drop finished admits. Brace pad stays; history does not.
- * Never join the fiber that is admitting (the kick). Caller holds the
- * lock; finished slots are taken out under it and joined after release
- * so the join never runs under the lock.
+/* Live occupancy: drop finished admits. Completers claim themselves off
+ * the index when they finish; admit-reap is the backup scan for a done
+ * slot still present. Brace pad stays; history does not. Never join the
+ * fiber that is admitting (the kick). Caller holds the lock; finished
+ * slots are taken out under it and joined after release so the join
+ * never runs under the lock.
  *
  * Each admit scans a bounded window of the index from a rotating cursor,
  * not the whole index: the section under the lock is O(window), and the
@@ -109,16 +113,63 @@ typedef struct CCParReapSet {
     int n;
 } CCParReapSet;
 
+static void cc_parallel_set_slot(CCTask t, int slot) {
+    fiber_v2* f = cc_task_fiber_v2(t);
+    if (f)
+        sched_v2_fiber_set_par_slot(f, slot);
+}
+
+/* Caller holds the lock. Take slot i; write task and env; set the taken
+ * fiber's par_slot to -1 and the moved sibling's par_slot to i. */
+static void cc_parallel_index_take(CCParallel* h, int i, CCTask* out_t,
+                                  void** out_env) {
+    CCTask* tasks = cc_parallel_tasks(h);
+    void** envs = cc_parallel_envs(h);
+    fiber_v2* taken;
+    *out_t = tasks[i];
+    *out_env = envs[i];
+    taken = cc_task_fiber_v2(*out_t);
+    h->nt--;
+    if (i != h->nt) {
+        tasks[i] = tasks[h->nt];
+        envs[i] = envs[h->nt];
+        cc_parallel_set_slot(tasks[i], i);
+    }
+    if (taken)
+        sched_v2_fiber_set_par_slot(taken, -1);
+    if (h->reap_at >= h->nt)
+        h->reap_at = 0;
+}
+
+int cc_parallel_claim_child(void* hp, fiber_v2* f) {
+    CCParallel* h = (CCParallel*)hp;
+    CCTask t;
+    void* env;
+    int slot;
+    if (!h || !f)
+        return 0;
+    cc_par_lock(h);
+    slot = sched_v2_fiber_par_slot(f);
+    if (slot < 0 || slot >= h->nt ||
+        cc_task_fiber_v2(cc_parallel_tasks(h)[slot]) != f) {
+        cc_par_unlock(h);
+        return 0;
+    }
+    cc_parallel_index_take(h, slot, &t, &env);
+    cc_par_unlock(h);
+    (void)t;
+    cc_parallel_env_free(h, env);
+    return 1;
+}
+
 static void cc_parallel_reap_take(CCParallel* h, CCParReapSet* rs) {
     CCTask* tasks;
-    void** envs;
     fiber_v2* self;
     int i, seen, budget;
     rs->n = 0;
     if (!h || h->nt <= 0)
         return;
     tasks = cc_parallel_tasks(h);
-    envs = cc_parallel_envs(h);
     self = sched_v2_current_fiber();
     budget = h->nt < CC_PAR_REAP_SCAN ? h->nt : CC_PAR_REAP_SCAN;
     if (h->reap_at < 0 || h->reap_at >= h->nt)
@@ -132,14 +183,8 @@ static void cc_parallel_reap_take(CCParallel* h, CCParReapSet* rs) {
             i = 0;
         f = cc_task_fiber_v2(tasks[i]);
         if (f && f != self && sched_v2_fiber_done(f)) {
-            rs->tasks[rs->n] = tasks[i];
-            rs->envs[rs->n] = envs[i];
+            cc_parallel_index_take(h, i, &rs->tasks[rs->n], &rs->envs[rs->n]);
             rs->n++;
-            h->nt--;
-            if (i != h->nt) {
-                tasks[i] = tasks[h->nt];
-                envs[i] = envs[h->nt];
-            }
             /* re-examine slot i: it now holds the moved tail */
             continue;
         }
@@ -236,6 +281,7 @@ void cc_parallel_admit(CCParallel* h, CCTask t, void* env) {
     tasks[h->nt] = t;
     envs[h->nt] = env;
     cc_parallel_attach(h, t);
+    cc_parallel_set_slot(t, h->nt);
     h->nt++;
     cc_par_unlock(h);
     cc_parallel_reap_finish(h, &rs);
@@ -378,6 +424,8 @@ static CCParallelLeaveHost* cc_parallel_leave_pack(CCParallel* h) {
         envs = cc_parallel_envs(h);
         for (i = 0; i < h->nt; i++) {
             fiber_v2* f = cc_task_fiber_v2(tasks[i]);
+            if (f)
+                sched_v2_fiber_set_par_slot(f, -1);
             if (f && f == self) {
                 cc_parallel_env_free(h, envs[i]);
                 envs[i] = NULL;
@@ -451,9 +499,7 @@ CCResult_void_CCError cc_parallel_wait(CCParallel* h) {
             cc_par_unlock(h);
             break;
         }
-        h->nt--;
-        t = cc_parallel_tasks(h)[h->nt];
-        env = cc_parallel_envs(h)[h->nt];
+        cc_parallel_index_take(h, h->nt - 1, &t, &env);
         cc_par_unlock(h);
         f = cc_task_fiber_v2(t);
         if (f && f == self) {

@@ -1,0 +1,68 @@
+/*
+ * Dest-attached fibers drop off the live index when they finish. The dest
+ * stays live with no further admit; wait and leave join whoever is still
+ * running. Completer and joiner must not both take the same slot.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+#define N 512
+
+static cc_atomic_int g_ran;
+static cc_atomic_int g_left_ran;
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    {
+        CCParallel h = @parallel spawn {
+            @serial {
+                int i;
+                @for (i in 0..N) {
+                    @parallel(h) {
+                        cc_atomic_fetch_add(&g_ran, 1);
+                    }
+                }
+                /* dest stays live; children finish with no next admit */
+                cc_sleep_ms(50);
+                int j;
+                @for (j in 0..N) {
+                    @parallel(h) {
+                        cc_atomic_fetch_add(&g_ran, 1);
+                    }
+                }
+            }
+        } !>;
+        h.wait() !>;
+        int got = cc_atomic_load(&g_ran);
+        if (got != 2 * N) {
+            fprintf(stderr, "FAIL wait-after-idle ran=%d want=%d\n", got, 2 * N);
+            return 1;
+        }
+    }
+
+    {
+        CCParallel h = @parallel spawn { @serial { (void)0; } } !>;
+        int i;
+        for (i = 0; i < N; i++) {
+            @parallel(h) {
+                cc_atomic_fetch_add(&g_left_ran, 1);
+            }
+        }
+        cc_sleep_ms(50);
+        h.leave();
+        int spins = 0;
+        while (cc_atomic_load(&g_left_ran) != N && spins < 2000) {
+            cc_sleep_ms(1);
+            spins++;
+        }
+        if (cc_atomic_load(&g_left_ran) != N) {
+            fprintf(stderr, "FAIL leave-after-idle ran=%d want=%d\n",
+                    cc_atomic_load(&g_left_ran), N);
+            return 1;
+        }
+    }
+
+    printf("parallel_dest_claim_reap_smoke: OK\n");
+    return 0;
+}

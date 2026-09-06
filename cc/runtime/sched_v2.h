@@ -98,6 +98,8 @@ void   sched_v2_fiber_set_park_deadline(fiber_v2* f, const struct timespec* d);
 void   sched_v2_fiber_clear_park_deadline(fiber_v2* f);
 void   sched_v2_fiber_set_par_gate(fiber_v2* f, void* gate);
 void*  sched_v2_fiber_par_gate(fiber_v2* f);
+void   sched_v2_fiber_set_par_slot(fiber_v2* f, int slot);
+int    sched_v2_fiber_par_slot(fiber_v2* f);
 
 /* Deadlock-detector check.
  *
