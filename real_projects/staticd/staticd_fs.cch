@@ -1,8 +1,10 @@
 /*
- * Jail, map cache, directory listing. Policy (403 vs list, encode) stays
- * in staticd.ccs. Include after <ccc/std/mmap.cch> and K_PATH_MAX.
+ * Jail, fd cache, directory listing. Policy (403 vs list, encode) stays
+ * in staticd.ccs. Include after staticd_block.cch (tick / cull / name_id).
  *
  * openat + O_NOFOLLOW — not cc_dir_open (path-based, not jailed).
+ * Body bytes: caller preads the held fd (no mmap).
+ * fstat ≤1s while the fd is cached (hot files included).
  */
 #ifndef STATICD_FS_CCH
 #define STATICD_FS_CCH
@@ -25,9 +27,11 @@
 #define K_LIST_NAME    128
 
 typedef struct FileHold {
-    CCMappedFile mapped;
+    size_t file_len;
     time_t mtime;
     int slot;
+    int fd; /* shared while cached; owned when slot < 0 */
+    char rel[128];
 } FileHold;
 
 static char[:] path_without_query(char[:] raw) {
@@ -61,10 +65,9 @@ static int path_is_safe(char[:] path) {
     return 1;
 }
 
-static CCMappedFile !>(CCIoError) map_at(int root_fd, const char* rel, time_t* mtime) {
-    CCMappedFile m = {0};
+static int !>(CCIoError) open_at(int root_fd, const char* rel,
+                                 size_t* file_len, time_t* mtime) {
     struct stat st;
-    void* p;
     int fd;
     if (!rel || !rel[0] || rel[0] == '/')
         return cc_err(cc_io_from_errno(EINVAL));
@@ -80,25 +83,20 @@ static CCMappedFile !>(CCIoError) map_at(int root_fd, const char* rel, time_t* m
         return cc_err(cc_io_from_errno(EINVAL));
     }
     *mtime = st.st_mtime;
-    if (st.st_size == 0) {
-        close(fd);
-        return cc_ok(m);
-    }
-    p = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (p == MAP_FAILED) return cc_err(cc_io_from_errno(errno));
-    m.ptr = p;
-    m.len = (size_t)st.st_size;
-    return cc_ok(m);
+    *file_len = (size_t)st.st_size;
+    return cc_ok(fd);
 }
 
-/* until slides on hit (idle 1s). Serve stale while refs > 0. */
+/* until slides on hit (idle 1s fd). checked is last fstat second —
+ * restat at most once a second even while hot. Serve stale while refs > 0. */
 typedef struct FileSlot {
     char rel[FILE_CACHE_KEY];
     time_t mtime;
     time_t until;
+    time_t checked;
+    size_t file_len;
     int refs;
-    CCMappedFile mapped;
+    int fd;
 } FileSlot;
 
 static FileSlot g_fc[FILE_CACHE_N];
@@ -112,9 +110,9 @@ static int fc_find(const char* rel) {
     return -1;
 }
 
-static void fc_unmap(int i) {
-    g_fc[i].mapped.destroy();
-    g_fc[i] = (FileSlot){0};
+static void fc_clear(int i) {
+    if (g_fc[i].fd >= 0) close(g_fc[i].fd);
+    g_fc[i] = (FileSlot){ .fd = -1 };
 }
 
 static int fc_evict(time_t now) {
@@ -123,13 +121,13 @@ static int fc_evict(time_t now) {
         if (g_fc[i].refs > 0) continue;
         if (!g_fc[i].rel[0]) return (int)i;
         if (now > g_fc[i].until) {
-            fc_unmap((int)i);
+            fc_clear((int)i);
             return (int)i;
         }
         if (idle < 0) idle = (int)i;
     }
     if (idle >= 0) {
-        fc_unmap(idle);
+        fc_clear(idle);
         return idle;
     }
     return -1;
@@ -138,40 +136,64 @@ static int fc_evict(time_t now) {
 static void fc_sweep(time_t now) {
     @for (i in 0..FILE_CACHE_N) {
         if (g_fc[i].rel[0] && g_fc[i].refs == 0 && now > g_fc[i].until)
-            fc_unmap((int)i);
+            fc_clear((int)i);
     }
+}
+
+/* g_fc_mu held. fstat at most once a second. -1 = slot gone. */
+static int fc_revalidate(int i, time_t now) {
+    struct stat st;
+    uint64_t nid;
+    if (now <= g_fc[i].checked) return 0;
+    if (fstat(g_fc[i].fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) {
+        g_fc[i].checked = now;
+        if (g_fc[i].refs > 0) return 0;
+        nid = block_name_id(g_fc[i].rel);
+        fc_clear(i);
+        block_cull_name(nid);
+        return -1;
+    }
+    g_fc[i].checked = now;
+    if (st.st_mtime != g_fc[i].mtime || (size_t)st.st_size != g_fc[i].file_len) {
+        block_cull_name(block_name_id(g_fc[i].rel));
+        g_fc[i].mtime = st.st_mtime;
+        g_fc[i].file_len = (size_t)st.st_size;
+    }
+    return 0;
 }
 
 static void file_hold_drop(FileHold* h) {
     if (!h) return;
     if (h->slot < 0) {
-        cc_file_unmap(&h->mapped);
+        if (h->fd >= 0) close(h->fd);
     } else {
         pthread_mutex_lock(&g_fc_mu);
         if (h->slot < FILE_CACHE_N && g_fc[h->slot].refs > 0) {
             g_fc[h->slot].refs--;
             if (g_fc[h->slot].refs == 0 && time(NULL) > g_fc[h->slot].until)
-                fc_unmap(h->slot);
+                fc_clear(h->slot);
         }
         pthread_mutex_unlock(&g_fc_mu);
     }
-    h->slot = -1;
-    h->mapped = (CCMappedFile){0};
+    *h = (FileHold){ .slot = -1, .fd = -1 };
 }
 
 static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
-    FileHold h = { .slot = -1 };
-    CCMappedFile m;
+    FileHold h = { .slot = -1, .fd = -1 };
     time_t now;
-    int i;
+    int i, fd;
     size_t n;
 
     if (!rel || !rel[0] || rel[0] == '/')
         return cc_err(cc_io_from_errno(EINVAL));
     n = strlen(rel);
+    if (n < FILE_CACHE_KEY) memcpy(h.rel, rel, n + 1);
     if (n >= FILE_CACHE_KEY) {
-        m = map_at(root_fd, rel, &h.mtime) !>(e) { return cc_err(e); };
-        h.mapped = m;
+        fd = open_at(root_fd, rel, &h.file_len, &h.mtime) !>(e) {
+            return cc_err(e);
+        };
+        h.fd = fd;
+        block_tick(time(NULL));
         return cc_ok(h);
     }
 
@@ -180,49 +202,68 @@ static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
     fc_sweep(now);
     i = fc_find(rel);
     if (i >= 0 && (now <= g_fc[i].until || g_fc[i].refs > 0)) {
+        if (fc_revalidate(i, now) != 0) {
+            pthread_mutex_unlock(&g_fc_mu);
+            return cc_err(cc_io_from_errno(ENOENT));
+        }
         g_fc[i].refs++;
         g_fc[i].until = now + FILE_CACHE_TTL;
         h.mtime = g_fc[i].mtime;
+        h.file_len = g_fc[i].file_len;
         h.slot = i;
-        h.mapped = g_fc[i].mapped;
+        h.fd = g_fc[i].fd;
         pthread_mutex_unlock(&g_fc_mu);
+        block_tick(now);
         return cc_ok(h);
     }
     pthread_mutex_unlock(&g_fc_mu);
 
-    m = map_at(root_fd, rel, &h.mtime) !>(e) { return cc_err(e); };
+    fd = open_at(root_fd, rel, &h.file_len, &h.mtime) !>(e) {
+        return cc_err(e);
+    };
 
     pthread_mutex_lock(&g_fc_mu);
     now = time(NULL);
     fc_sweep(now);
     i = fc_find(rel);
     if (i >= 0 && (now <= g_fc[i].until || g_fc[i].refs > 0)) {
+        if (fc_revalidate(i, now) != 0) {
+            pthread_mutex_unlock(&g_fc_mu);
+            close(fd);
+            return cc_err(cc_io_from_errno(ENOENT));
+        }
         g_fc[i].refs++;
         g_fc[i].until = now + FILE_CACHE_TTL;
         h.mtime = g_fc[i].mtime;
+        h.file_len = g_fc[i].file_len;
         h.slot = i;
-        h.mapped = g_fc[i].mapped;
+        h.fd = g_fc[i].fd;
         pthread_mutex_unlock(&g_fc_mu);
-        m.destroy();
+        close(fd);
+        block_tick(now);
         return cc_ok(h);
     }
     if (i >= 0 && g_fc[i].refs == 0)
-        fc_unmap(i);
+        fc_clear(i);
     else
         i = fc_evict(now);
     if (i < 0) {
         pthread_mutex_unlock(&g_fc_mu);
-        h.mapped = m;
+        h.fd = fd;
+        block_tick(now);
         return cc_ok(h);
     }
     memcpy(g_fc[i].rel, rel, n + 1);
     g_fc[i].mtime = h.mtime;
+    g_fc[i].file_len = h.file_len;
     g_fc[i].until = now + FILE_CACHE_TTL;
+    g_fc[i].checked = now;
     g_fc[i].refs = 1;
-    g_fc[i].mapped = m;
+    g_fc[i].fd = fd;
     h.slot = i;
-    h.mapped = m;
+    h.fd = fd;
     pthread_mutex_unlock(&g_fc_mu);
+    block_tick(now);
     return cc_ok(h);
 }
 

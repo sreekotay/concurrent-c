@@ -3,10 +3,7 @@
 A small HTTP/1.1 file server written as a Concurrent-C specimen. Accept,
 header encode, and body flush are separate on the page the same way
 [`redis_async_sketch.ccs`](../redis/redis_async_sketch.ccs) separates hold,
-encode, and ship. nginx is the aspirational bar; darkhttpd is the honest
-tiny-C peer.
-
-Tutorial = idiomatic = production: the file you read is the server you run.
+encode, and ship. The file you read is the server you run.
 
 ## Features
 
@@ -22,7 +19,7 @@ Tutorial = idiomatic = production: the file you read is the server you run.
 | Listing | `--list` (off). Directory with no index → HTML table; without `--list` → 403 |
 | Query | `?…` is recognized and ignored |
 | Extra headers | `--header 'Name: value'` (repeatable; no CR/LF) |
-| Body | 64KB `g_send_pool` `pread` after header flush (no mmap). 1s idle last-8 fd cache |
+| Body | Named-block ring: 256 × 64KB = 16MB BSS, key `rel`+block, reuse in place, fstat ≤1s, idle cull. Pool `pread` on miss / unaligned Range. 1s idle last-8 fd cache. Dest-attach onto `g_clients`, turnstile cap 2 |
 
 **Not in scope:** TLS, gzip, HTTP/2, multipart ranges, sendfile, directory
 listing on by default, CGI.
@@ -84,12 +81,12 @@ Missing nginx / darkhttpd / caddy are skipped. Traversal may be 400, 403, or
 
 Latency-first. Peers (missing ones are skipped):
 
-| Server | Port | Role |
-|--------|------|------|
+| Server | Port | |
+|--------|------|---|
 | **staticd** | 8080 | this specimen |
-| **nginx** | 8081 | production bar (`sendfile`) |
-| **darkhttpd** | 8082 | tiny-C peer |
-| **caddy** | 8083 | optional (`INCLUDE_CADDY=1`) |
+| **nginx** | 8081 | `sendfile on`, `tcp_nopush on`, one worker |
+| **darkhttpd** | 8082 | |
+| **caddy** | 8083 | `INCLUDE_CADDY=1` |
 
 ```bash
 ./compare.sh --smoke        # correctness + 2s wrk, 4kb.html @ c=10
@@ -103,54 +100,51 @@ SMOKE=1 ./bench_latency.sh  # 2s, 4kb.html @ c=10 only
 Knobs: `REPEATS`, `DURATION`, `CONCURRENCY`, `FILES`, `FULL`, `SMOKE`,
 `INCLUDE_NGINX`, `INCLUDE_DARKHTTPD`, `INCLUDE_CADDY`, `BENCH_OUT`.
 
-Receipt columns match `wrk --latency`: **p50 / p75 / p90 / p99** (ms), RPS,
-errors. Fixtures are deterministic (`gen_fixtures.sh`); bodies are gitignored,
+Receipt columns: **p50 / p75 / p90 / p99** (ms), RPS, process RSS, errors.
+Fixtures are deterministic (`gen_fixtures.sh`); bodies are gitignored,
 `fixtures/manifest.txt` is checked in. Each block page-caches the fixture
-tree and shuffles server order.
+tree and shuffles server order. Servers stay up for the whole matrix, so
+RSS is cumulative (the 16MB ring faults in as blocks are first filled).
 
-Local receipts land under `benchmarks/` (gitignored). Numbers below are from
-a Darwin 25.5.0 arm64 / 10 CPU wrk run (5s × 3 rounds, median of measured,
-round 0 discarded), after Date/Range and the 1s map cache.
+Local receipts land under `benchmarks/` (gitignored). Table: Darwin 25.5.0
+arm64, 10 CPUs, wrk `-t2 -d5s --timeout 15s`, 3 rounds, median of measured
+(round 0 discarded). Zero socket errors on every cell.
 
-| file | c | staticd rps | nginx | darkhttpd | staticd p50 | nginx p50 | darkhttpd p50 |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| 4kb.html | 1 | 48843 | 37536 | 30795 | 0.020 | 0.025 | 0.032 |
-| 4kb.html | 10 | 151410 | 99171 | 58849 | 0.053 | 0.090 | 0.150 |
-| 4kb.html | 100 | 176433 | 118754 | 61283 | 0.436 | 0.731 | 1.575 |
-| 1mb.bin | 1 | 7749 | 7114 | 5569 | 0.126 | 0.137 | 0.173 |
-| 1mb.bin | 10 | 14334 | 12635 | 6154 | 0.401 | 0.520 | 1.585 |
-| 1mb.bin | 100 | 12041 | 11955 | 5662 | 4.20 | 4.24 | 17.22 |
-| 10mb.bin | 1 | 806 | 807 | 563 | 1.22 | 1.22 | 1.72 |
-| 10mb.bin | 10 | 1044 | 1043 | 582 | 7.46 | 7.27 | 17.10 |
-| 10mb.bin | 100 | 853 | 1269 | 512 | 119 | 38.3 | 185 |
+| file | c | staticd rps | nginx | darkhttpd | staticd p50 | nginx p50 | darkhttpd p50 | staticd RSS | nginx RSS | darkhttpd RSS |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 4kb.html | 1 | 54385 | 32628 | 27854 | 0.017 | 0.030 | 0.035 | 2.5 | 8.7 | 1.7 |
+| 4kb.html | 10 | 140496 | 72104 | 55282 | 0.057 | 0.131 | 0.158 | 4.7 | 8.7 | 1.7 |
+| 4kb.html | 100 | 145354 | 72916 | 56274 | 0.605 | 1.31 | 1.73 | 18.7 | 8.7 | 1.7 |
+| 1mb.bin | 1 | 7354 | 6845 | 5239 | 0.132 | 0.142 | 0.176 | 18.8 | 6.3 | 1.4 |
+| 1mb.bin | 10 | 10441 | 14238 | 6212 | 0.93 | 0.405 | 1.59 | 18.9 | 6.4 | 1.4 |
+| 1mb.bin | 100 | 9972 | 12744 | 5886 | 9.79 | 4.55 | 16.79 | 34.0 | 7.1 | 1.5 |
+| 10mb.bin | 1 | 716 | 795 | 574 | 1.33 | 1.23 | 1.69 | 45.3 | 7.1 | 1.5 |
+| 10mb.bin | 10 | 756 | 1013 | 544 | 12.6 | 7.90 | 17.29 | 44.2 | 7.0 | 1.5 |
+| 10mb.bin | 100 | 666 | 0 | 559 | 134 | — | 174 | 51.3 | 7.2 | 1.5 |
 
-RPS rounded from the receipt. p50 is ms. Zero errors on every cell.
-
-On this pin staticd leads nginx on 4kb (about 1.3–1.5× RPS) and 1mb, and
-matches it on 10mb until c=100, where nginx `sendfile` pulls ahead. darkhttpd
-is behind on every cell. The 10mb / c=100 nginx row was remasured after wrk
-got an empty first pass (Darwin sendfile worker wedged); see the receipt
-header. `FULL=1` is the longer 30s matrix if you want a new pin.
+RPS and p50 (ms) from the receipt. RSS is process RSS in MB (`rss_kb/1024`;
+nginx = master + workers). nginx 10mb / c=100 completed 0 requests.
 
 ## Shape
 
 ```
-accept (@parallel dest)
+accept (@parallel dest g_clients)
   └─ handle_client
        └─ loop: BufReader request
             ├─ ReqLine (query stripped) + path_is_safe
-            ├─ FileHold → openat jail / 1s fd cache
-            │    64KB g_send_pool pread (no mmap)
+            ├─ FileHold → openat jail / 1s fd cache (fstat ≤1s)
             │    or directory: --index, else --list / 403
             ├─ @typeview Encode → status + headers into Conn.out
             ├─ conn_flush (headers only)
-            └─ send_file_body (pool pread)  # listings are a small @string
+            └─ send_file_body → checkout_block (256 × 64KB ring)
+                 miss / unaligned Range → g_send_pool pread
+                 n > 64KB: @parallel(g_clients) per window, turnstile cap 2
 ```
 
-Encode methods never touch the socket. Body is `pread` into a pooled 64KB
-slab, returned after the send. The jail is still `openat`. The cache slides
-a 1s idle window on each hit and closes the fd when the last holder drops
-an expired slot.
+Encode methods never touch the socket. The jail is `openat`. The fd cache
+slides a 1s idle window and closes the fd when the last holder drops an
+expired slot. The ring reuses the same name+block slot; idle `refs==0`
+slots become holes once a second.
 
 ## Layout
 
@@ -158,7 +152,8 @@ an expired slot.
 |------|---------|
 | `staticd.ccs` | Server (`handle_one` is the story) |
 | `staticd_http.cch` | Date / Range / header-CI tape |
-| `staticd_fs.cch` | Jail, `FileHold`, 1s map cache, listing |
+| `staticd_block.cch` | Named-block ring (`checkout_block`) |
+| `staticd_fs.cch` | Jail, `FileHold`, 1s fd cache, listing |
 | `gen_fixtures.sh` | Fixture tree + manifest |
 | `correctness.sh` | Golden gate |
 | `bench_latency.sh` | Latency matrix |

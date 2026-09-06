@@ -1,0 +1,196 @@
+/*
+ * Named-block ring — mmap's hit without mapping the file.
+ * Include before staticd_fs.cch (file_hold ticks and culls).
+ *
+ * Key is name+block. A later GET reuses that slot (refill if mtime/len
+ * moved). Never steal a live other key — pool pread if the probe chain
+ * has no hole. Idle refs==0 past until is a hole (cull ≤1s on file_hold).
+ * Unaligned Range / empty rel → pool.
+ *
+ * 256 × 64KB = 16MB BSS until process exit. A send holds refs so a
+ * sweep cannot drop a slab still on the wire.
+ */
+#ifndef STATICD_BLOCK_CCH
+#define STATICD_BLOCK_CCH
+
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <errno.h>
+#include <pthread.h>
+#include <stdint.h>
+
+#define FILE_SEND_CHUNK (64u * 1024u)
+#define BLOCK_RING_N    256
+#define BLOCK_IDLE_TTL  1
+
+typedef struct BlockSlot {
+    uint64_t name_id;
+    time_t mtime;
+    time_t until;
+    uint32_t block;
+    uint32_t refs;
+    uint32_t ready; /* 1 after pread; miss must not see a half fill */
+    size_t len;
+} BlockSlot;
+
+typedef struct BlockHold {
+    char* ptr;
+    int slot; /* >=0 ring; <0 pool slab */
+} BlockHold;
+
+static char g_block_bytes[BLOCK_RING_N][FILE_SEND_CHUNK];
+static BlockSlot g_block_ring[BLOCK_RING_N];
+static time_t g_block_now;
+static pthread_mutex_t g_block_mu = PTHREAD_MUTEX_INITIALIZER;
+static CCArenaPool* g_send_pool; /* miss / unaligned; process lifetime */
+
+static uint64_t block_name_id(const char* rel) {
+    uint64_t h = 5381;
+    const unsigned char* p;
+    if (!rel) return 0;
+    for (p = (const unsigned char*)rel; *p; p++)
+        h = (h << 5) + h + *p;
+    return h;
+}
+
+/* At most one sweep per second — file_hold, not per chunk. */
+static void block_tick(time_t now) {
+    pthread_mutex_lock(&g_block_mu);
+    if (now != g_block_now) {
+        @for (i in 0..BLOCK_RING_N) {
+            if (g_block_ring[i].refs == 0 && g_block_ring[i].name_id
+                    && now > g_block_ring[i].until)
+                g_block_ring[i] = (BlockSlot){0};
+        }
+        g_block_now = now;
+    }
+    pthread_mutex_unlock(&g_block_mu);
+}
+
+static void block_cull_name(uint64_t nid) {
+    if (!nid) return;
+    pthread_mutex_lock(&g_block_mu);
+    @for (i in 0..BLOCK_RING_N) {
+        if (g_block_ring[i].name_id == nid && g_block_ring[i].refs == 0)
+            g_block_ring[i] = (BlockSlot){0};
+    }
+    pthread_mutex_unlock(&g_block_mu);
+}
+
+static char* !>(CCError) pool_pread(int fd, size_t want, size_t file_off) {
+    char* buf;
+    ssize_t r;
+    if (!g_send_pool || want == 0 || want > (size_t)FILE_SEND_CHUNK)
+        return cc_err(CC_ERROR(CC_ERR_IO, "bad pread"));
+    buf = (char*)g_send_pool->alloc();
+    if (!buf) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "send pool"));
+    r = pread(fd, buf, want, (off_t)file_off);
+    if (r < 0) {
+        int e = errno;
+        g_send_pool->free(buf);
+        return cc_err(CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_io_from_errno(e))));
+    }
+    if ((size_t)r != want) {
+        g_send_pool->free(buf);
+        return cc_err(CC_ERROR(CC_ERR_CLOSED, "short file"));
+    }
+    return cc_ok(buf);
+}
+
+static void block_hold_drop(BlockHold* h) {
+    if (!h || !h->ptr) return;
+    if (h->slot < 0) {
+        if (g_send_pool) g_send_pool->free(h->ptr);
+    } else {
+        pthread_mutex_lock(&g_block_mu);
+        if (g_block_ring[h->slot].refs > 0)
+            g_block_ring[h->slot].refs--;
+        pthread_mutex_unlock(&g_block_mu);
+    }
+    h->ptr = NULL;
+    h->slot = -1;
+}
+
+static BlockHold !>(CCError) checkout_block(int fd, const char* rel, time_t mtime,
+                                           size_t file_off, size_t want) {
+    BlockHold h = { .slot = -1 };
+    uint64_t nid;
+    uint32_t block, i, k;
+    ssize_t r;
+    if (want == 0 || want > (size_t)FILE_SEND_CHUNK)
+        return cc_err(CC_ERROR(CC_ERR_IO, "bad block"));
+    if (!rel || !rel[0] || (file_off % (size_t)FILE_SEND_CHUNK) != 0) {
+        h.ptr = pool_pread(fd, want, file_off) !>;
+        return cc_ok(h);
+    }
+    nid = block_name_id(rel);
+    block = (uint32_t)(file_off / (size_t)FILE_SEND_CHUNK);
+    pthread_mutex_lock(&g_block_mu);
+    i = (uint32_t)((nid ^ (uint64_t)block) % (uint64_t)BLOCK_RING_N);
+    {
+        uint32_t found = (uint32_t)-1;
+        uint32_t hole = (uint32_t)-1;
+        @for (probe in 0..BLOCK_RING_N) {
+            k = (i + (uint32_t)probe) % (uint32_t)BLOCK_RING_N;
+            if (g_block_ring[k].name_id == nid && g_block_ring[k].block == block) {
+                found = k;
+                break;
+            }
+            if (hole == (uint32_t)-1 && g_block_ring[k].refs == 0
+                    && !g_block_ring[k].ready)
+                hole = k;
+        }
+        if (found != (uint32_t)-1) {
+            k = found;
+            if (g_block_ring[k].ready && g_block_ring[k].mtime == mtime
+                    && g_block_ring[k].len == want) {
+                g_block_ring[k].refs++;
+                g_block_ring[k].until = g_block_now + BLOCK_IDLE_TTL;
+                pthread_mutex_unlock(&g_block_mu);
+                h.ptr = g_block_bytes[k];
+                h.slot = (int)k;
+                return cc_ok(h);
+            }
+            if (g_block_ring[k].refs != 0) {
+                pthread_mutex_unlock(&g_block_mu);
+                h.ptr = pool_pread(fd, want, file_off) !>;
+                return cc_ok(h);
+            }
+        } else if (hole != (uint32_t)-1) {
+            k = hole;
+        } else {
+            pthread_mutex_unlock(&g_block_mu);
+            h.ptr = pool_pread(fd, want, file_off) !>;
+            return cc_ok(h);
+        }
+    }
+    g_block_ring[k].refs = 1;
+    g_block_ring[k].ready = 0;
+    g_block_ring[k].name_id = nid;
+    g_block_ring[k].mtime = mtime;
+    g_block_ring[k].block = block;
+    g_block_ring[k].len = want;
+    pthread_mutex_unlock(&g_block_mu);
+    r = pread(fd, g_block_bytes[k], want, (off_t)file_off);
+    if (r < 0 || (size_t)r != want) {
+        pthread_mutex_lock(&g_block_mu);
+        g_block_ring[k].refs = 0;
+        g_block_ring[k].ready = 0;
+        g_block_ring[k].name_id = 0;
+        pthread_mutex_unlock(&g_block_mu);
+        if (r < 0)
+            return cc_err(CC_ERROR(CC_ERR_IO,
+                cc_io_error_str(cc_io_from_errno(errno))));
+        return cc_err(CC_ERROR(CC_ERR_CLOSED, "short file"));
+    }
+    pthread_mutex_lock(&g_block_mu);
+    g_block_ring[k].ready = 1;
+    g_block_ring[k].until = g_block_now + BLOCK_IDLE_TTL;
+    pthread_mutex_unlock(&g_block_mu);
+    h.ptr = g_block_bytes[k];
+    h.slot = (int)k;
+    return cc_ok(h);
+}
+
+#endif /* STATICD_BLOCK_CCH */

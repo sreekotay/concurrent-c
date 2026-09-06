@@ -1,4 +1,6 @@
-# Stock nginx defaults (plus harness: daemon off, pid, listen, root).
+# Homebrew nginx.conf defaults, plus the recommended uncomment
+# (`sendfile on`, `tcp_nopush on`) and the harness (daemon off, pid,
+# listen, root, access_log off).
 # Invoke: nginx -c $PWD/nginx.conf -p $PWD/run/nginx
 worker_processes 1;
 error_log stderr notice;
@@ -6,14 +8,14 @@ pid nginx.pid;
 daemon off;
 
 events {
-    worker_connections 512;
+    worker_connections 1024;
 }
 
 http {
     access_log off;
-    sendfile off;
-    tcp_nopush off;
-    keepalive_timeout 75;
+    sendfile on;
+    tcp_nopush on;
+    keepalive_timeout 65;
     types {
         text/html                             html htm;
         text/css                              css;
