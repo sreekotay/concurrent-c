@@ -94,6 +94,7 @@ typedef struct CcMethod {
     int recv_by_ptr;
     const char *source;        /* "typehooks", "DECL_UFCS", "Type_method", "cc_snake_method", "snake_method", "Result" */
     const char *origin;        /* where the mapping was read: the hook, registration or declaration site */
+    const char *recv_path;     /* `as:` faces walked to reach the callee's object, dot-joined ("file", "a.file"); NULL when the receiver is it */
     CcSym *sym;                /* the callee's declaration */
     struct CcMethod *next;
 } CcMethod;

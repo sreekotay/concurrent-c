@@ -132,6 +132,7 @@ typedef struct CcMethod {
     bool recv_by_ptr;
     CCSlice source;             /* "typehooks", "DECL_UFCS", "Type_method", "cc_snake_method", "snake_method", "Result", "bare_name", "ufcs_sink" */
     CCSlice origin;             /* the hook, registration or declaration site */
+    CCSlice recv_path;          /* `as:` faces walked to reach the callee's object, dot-joined ("file", "a.file"); empty when the receiver is it */
     CcSym* sym;                 /* the callee's declaration */
 } CcMethod;
 typedef CcMethod* CcMethodRef;

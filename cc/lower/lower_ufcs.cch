@@ -126,6 +126,25 @@ static bool uf_operator_matches(Walker* w, CcLowerer* L, CcExpr* e, CcUfcs uf, C
     return false;
 }
 
+/* The receiver the callee actually takes: the written receiver projected
+ * through the `as:` faces the resolution walked (`w` -> `w.file`). */
+static CcExpr* uf_project_faces(CcLowerer* L, CcExpr* recv, CCSlice path, bool arrow, CcSpan sp) {
+    size_t i = 0;
+    bool first = true;
+    if (!path.len) return recv;
+    while (i < path.len) {
+        size_t start = i;
+        CCSlice step;
+        while (i < path.len && path.ptr[i] != '.') i++;
+        step = cc_slice_from_buffer((char*)path.ptr + start, i - start);
+        if (i < path.len) i++;
+        if (!step.len) continue;
+        recv = cc_expr_member(first ? uf_wrap(L, recv, sp) : recv, step, first && arrow, sp, L->arena);
+        first = false;
+    }
+    return recv;
+}
+
 static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice tn, CCSlice reason) {
     UStep* st = (UStep*)w->env;
     CcLowerer* L = st->L;
@@ -152,6 +171,12 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
     }
     if (!uf_operator_matches(w, L, e, uf, rt, tn)) return;
     recv_ptr = uf.arrow || uf_type_is_pointer(w, rt);
+    if (m->recv_path.len) {
+        /* the face field is a value member: after the projection the
+         * receiver is that value, whatever the written receiver was */
+        uf.recv = uf_project_faces(L, uf.recv, m->recv_path, recv_ptr, sp);
+        recv_ptr = false;
+    }
     if (m->recv_by_ptr && !recv_ptr && !uf_is_lvalue(uf.recv)) {
         /* a value with no address (`xs.sub(1, 3).len()`): the call's result
          * lives in a compound literal of its own type for the callee to point at */
