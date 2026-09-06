@@ -2089,6 +2089,7 @@ static CcMethod *cc__method_new(CcIndex *ix, CcTypeInfo *info, CcName method, Cc
     m->callee = callee;
     m->source = source;
     m->origin = origin;
+    m->recv_path = NULL;
     m->sym = sym;
     /* a function-like macro from a hook has no parameters to read: a hook's
      * callee is address-style unless it said by value */
@@ -2211,7 +2212,7 @@ static int cc__same_type(CcIndex *ix, const char *a, const char *b) {
 
 /* The receiver type an `as:` face or a typedef alias delegates to. */
 static CcMethod *cc__resolve_via(CcIndex *ix, CcTypeInfo *recv, CcName method, CcBuf *tried, int depth,
-                                 CcType *target, const char *how, unsigned recv_shape) {
+                                 CcType *target, const char *how, unsigned recv_shape, const char *face) {
     CcName tn;
     CcTypeInfo *ti;
     CcMethod *m;
@@ -2222,8 +2223,18 @@ static CcMethod *cc__resolve_via(CcIndex *ix, CcTypeInfo *recv, CcName method, C
     ti = cc_index_type_get(ix, tn);
     m = cc__resolve(ix, ti, method, tried, depth + 1, recv_shape);
     if (!m) return NULL;
-    return cc__method_new(ix, recv, method, m->callee, m->source,
+    {
+        CcMethod *out = cc__method_new(ix, recv, method, m->callee, m->source,
                           cc_arena_printf(ix->arena, "%s %s; %s", how, tn, m->origin ? m->origin : ""), m->sym, !m->recv_by_ptr);
+        /* a face hop reaches the callee's object through a member: the site
+           projects the receiver before it passes it */
+        if (face && face[0])
+            out->recv_path = m->recv_path && m->recv_path[0]
+                             ? cc_arena_printf(ix->arena, "%s.%s", face, m->recv_path) : face;
+        else
+            out->recv_path = m->recv_path;
+        return out;
+    }
 }
 
 static CcMethod *cc__resolve(CcIndex *ix, CcTypeInfo *recv, CcName method, CcBuf *tried, int depth, unsigned recv_shape) {
@@ -2339,7 +2350,7 @@ static CcMethod *cc__resolve(CcIndex *ix, CcTypeInfo *recv, CcName method, CcBuf
         CcType *t = recv->sym->type;
         if (t->kind == CC_T_NAMED || t->kind == CC_T_POINTER || t->kind == CC_T_GENERIC || t->kind == CC_T_SLICE ||
             t->kind == CC_T_RESULT || t->kind == CC_T_CHAN) {
-            m = cc__resolve_via(ix, recv, method, tried, depth, t, "via typedef", recv_shape);
+            m = cc__resolve_via(ix, recv, method, tried, depth, t, "via typedef", recv_shape, NULL);
             if (m) return m;
         }
     }
@@ -2353,7 +2364,7 @@ static CcMethod *cc__resolve(CcIndex *ix, CcTypeInfo *recv, CcName method, CcBuf
             const CcField *f;
             for (f = st->fields; f; f = f->next) {
                 if (!f->name || strcmp(f->name, faces[i]) != 0) continue;
-                m = cc__resolve_via(ix, recv, method, tried, depth, f->type, cc_arena_printf(ix->arena, "via @typeview as: %s ->", f->name), 0u);
+                m = cc__resolve_via(ix, recv, method, tried, depth, f->type, cc_arena_printf(ix->arena, "via @typeview as: %s ->", f->name), 0u, f->name);
                 if (m) return m;
             }
         }

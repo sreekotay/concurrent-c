@@ -3055,7 +3055,7 @@ static CcType* cc__peel_ptr_atomic(CcType* t) {
 
 /* The receiver type an `as:` face or a typedef alias delegates to. */
 static CcMethod* cc__resolve_via(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, int depth,
-                                 CcType* target, CCSlice how, unsigned recv_shape) {
+                                 CcType* target, CCSlice how, unsigned recv_shape, CCSlice face) {
     CCSlice tn;
     CcTypeInfo* ti;
     CcMethod* m;
@@ -3072,7 +3072,25 @@ static CcMethod* cc__resolve_via(CcIndex* ix, CcTypeInfo* recv, CCSlice method, 
     sb.push_slice(tn, ix->arena);
     sb.push_cstr("; ", ix->arena);
     if (m->origin.ptr) sb.push_slice(m->origin, ix->arena);
-    return cc__method_new(ix, recv, method, m->callee, cc__ix_cstr(ix, m->source), cc__ix_finish(ix, &sb), m->sym, !m->recv_by_ptr);
+    {
+        CcMethod* out = cc__method_new(ix, recv, method, m->callee, cc__ix_cstr(ix, m->source), cc__ix_finish(ix, &sb), m->sym, !m->recv_by_ptr);
+        /* a face hop reaches the callee's object through a member: the site
+         * projects the receiver before it passes it */
+        if (face.len) {
+            if (m->recv_path.len) {
+                CCString pb = cc_string_new();
+                pb.push_slice(face, ix->arena);
+                pb.push_char('.', ix->arena);
+                pb.push_slice(m->recv_path, ix->arena);
+                out->recv_path = cc__ix_finish(ix, &pb);
+            } else {
+                out->recv_path = face;
+            }
+        } else {
+            out->recv_path = m->recv_path;
+        }
+        return out;
+    }
 }
 
 static void cc__tried(CCString* tried, CCArena ta, CCSlice name, const char* note) {
@@ -3269,7 +3287,7 @@ static CcMethod* cc__resolve_alias(CcIndex* ix, CcTypeInfo* recv, CCSlice method
     t = recv->sym->type;
     if (t->k.kind == CcTypeK_named || t->k.kind == CcTypeK_pointer || t->k.kind == CcTypeK_generic ||
         t->k.kind == CcTypeK_slice || t->k.kind == CcTypeK_result || t->k.kind == CcTypeK_chan)
-        return cc__resolve_via(ix, recv, method, tried, ta, depth, t, cc__ix_s("via typedef"), recv_shape);
+        return cc__resolve_via(ix, recv, method, tried, ta, depth, t, cc__ix_s("via typedef"), recv_shape, cc_slice_empty());
     return NULL;
 }
 
@@ -3290,7 +3308,7 @@ static CcMethod* cc__resolve_faces(CcIndex* ix, CcTypeInfo* recv, CCSlice method
             CcField* f = fieldv->get_ptr(k);
             CcMethod* m;
             if (!f->name.len || !cc__eq(f->name, *faces.get_ptr(i))) continue;
-            m = cc__resolve_via(ix, recv, method, tried, ta, depth, f->type, cc__cat3(ix, "via @" "typeview as: ", f->name, " ->"), 0u);
+            m = cc__resolve_via(ix, recv, method, tried, ta, depth, f->type, cc__cat3(ix, "via @" "typeview as: ", f->name, " ->"), 0u, f->name);
             if (m) return m;
         }
     }
