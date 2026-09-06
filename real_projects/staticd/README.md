@@ -22,7 +22,7 @@ Tutorial = idiomatic = production: the file you read is the server you run.
 | Listing | `--list` (off). Directory with no index → HTML table; without `--list` → 403 |
 | Query | `?…` is recognized and ignored |
 | Extra headers | `--header 'Name: value'` (repeatable; no CR/LF) |
-| Body | mmap after header flush; 1s idle last-8 cache (unmap on last expired drop) |
+| Body | 64KB `g_send_pool` `pread` after header flush (no mmap). 1s idle last-8 fd cache |
 
 **Not in scope:** TLS, gzip, HTTP/2, multipart ranges, sendfile, directory
 listing on by default, CGI.
@@ -108,10 +108,29 @@ errors. Fixtures are deterministic (`gen_fixtures.sh`); bodies are gitignored,
 `fixtures/manifest.txt` is checked in. Each block page-caches the fixture
 tree and shuffles server order.
 
-staticd is not expected to beat nginx on p99 at high concurrency. Chase
-darkhttpd first; nginx is the bar. A dated receipt lives in
-[`benchmarks/`](benchmarks/) — treat older files as historical (they predate
-Date/Range and the 1s map cache).
+Local receipts land under `benchmarks/` (gitignored). Numbers below are from
+a Darwin 25.5.0 arm64 / 10 CPU wrk run (5s × 3 rounds, median of measured,
+round 0 discarded), after Date/Range and the 1s map cache.
+
+| file | c | staticd rps | nginx | darkhttpd | staticd p50 | nginx p50 | darkhttpd p50 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 4kb.html | 1 | 48843 | 37536 | 30795 | 0.020 | 0.025 | 0.032 |
+| 4kb.html | 10 | 151410 | 99171 | 58849 | 0.053 | 0.090 | 0.150 |
+| 4kb.html | 100 | 176433 | 118754 | 61283 | 0.436 | 0.731 | 1.575 |
+| 1mb.bin | 1 | 7749 | 7114 | 5569 | 0.126 | 0.137 | 0.173 |
+| 1mb.bin | 10 | 14334 | 12635 | 6154 | 0.401 | 0.520 | 1.585 |
+| 1mb.bin | 100 | 12041 | 11955 | 5662 | 4.20 | 4.24 | 17.22 |
+| 10mb.bin | 1 | 806 | 807 | 563 | 1.22 | 1.22 | 1.72 |
+| 10mb.bin | 10 | 1044 | 1043 | 582 | 7.46 | 7.27 | 17.10 |
+| 10mb.bin | 100 | 853 | 1269 | 512 | 119 | 38.3 | 185 |
+
+RPS rounded from the receipt. p50 is ms. Zero errors on every cell.
+
+On this pin staticd leads nginx on 4kb (about 1.3–1.5× RPS) and 1mb, and
+matches it on 10mb until c=100, where nginx `sendfile` pulls ahead. darkhttpd
+is behind on every cell. The 10mb / c=100 nginx row was remasured after wrk
+got an empty first pass (Darwin sendfile worker wedged); see the receipt
+header. `FULL=1` is the longer 30s matrix if you want a new pin.
 
 ## Shape
 
@@ -120,17 +139,18 @@ accept (@parallel dest)
   └─ handle_client
        └─ loop: BufReader request
             ├─ ReqLine (query stripped) + path_is_safe
-            ├─ FileHold → openat jail / 1s map cache
+            ├─ FileHold → openat jail / 1s fd cache
+            │    64KB g_send_pool pread (no mmap)
             │    or directory: --index, else --list / 403
             ├─ @typeview Encode → status + headers into Conn.out
             ├─ conn_flush (headers only)
-            └─ write_all(mmap body)   # listings are a small @string
+            └─ send_file_body (pool pread)  # listings are a small @string
 ```
 
-Encode methods never touch the socket. File bytes stay mapped until after
-header flush. The jail is still `map_at`. The cache slides a 1s idle window
-on each hit and unmaps when the last holder drops an expired slot (or on
-the next hold's idle sweep). A busy request is never unmapped underfoot.
+Encode methods never touch the socket. Body is `pread` into a pooled 64KB
+slab, returned after the send. The jail is still `openat`. The cache slides
+a 1s idle window on each hit and closes the fd when the last holder drops
+an expired slot.
 
 ## Layout
 

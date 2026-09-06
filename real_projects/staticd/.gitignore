@@ -3,7 +3,8 @@ run/
 vendor/
 *.o
 .DS_Store
-benchmarks/smoke_latest.txt
+# Local wrk receipts (compare.sh / bench_latency.sh). Not a git pin.
+benchmarks/*.txt
 # Generated fixture bodies are large; keep manifest checked in.
 fixtures/*.bin
 fixtures/*.html

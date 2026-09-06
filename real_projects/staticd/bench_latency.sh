@@ -49,6 +49,10 @@ BENCH_OUT="${BENCH_OUT:-}"
 THREADS="${THREADS:-2}"
 
 PIDS=()
+STATICD_PID=""
+NGINX_PID=""
+DARKHTTPD_PID=""
+CADDY_PID=""
 TMPDIR_RUN="$(mktemp -d "$SCRIPT_DIR/run/bench.XXXXXX")"
 reap_listen() {
     local port p
@@ -117,7 +121,8 @@ start_servers() {
         [[ -x "$STATICD_BIN" ]] || { echo "missing staticd" >&2; exit 1; }
         "$STATICD_BIN" --listen "127.0.0.1:${STATICD_PORT}" --root "$FIX" \
             >"$TMPDIR_RUN/staticd.log" 2>&1 &
-        PIDS+=($!)
+        STATICD_PID=$!
+        PIDS+=("$STATICD_PID")
         wait_port "$STATICD_PORT" staticd
         expect_200 "$STATICD_PORT" staticd
     fi
@@ -129,7 +134,8 @@ start_servers() {
             mkdir -p "$prefix/logs"
             sed "s|FIXTURES_ROOT|$FIX|g" "$SCRIPT_DIR/nginx.conf.in" > "$prefix/nginx.conf"
             nginx -c "$prefix/nginx.conf" -p "$prefix" >"$TMPDIR_RUN/nginx.log" 2>&1 &
-            PIDS+=($!)
+            NGINX_PID=$!
+            PIDS+=("$NGINX_PID")
             wait_port "$NGINX_PORT" nginx
             expect_200 "$NGINX_PORT" nginx
         fi
@@ -140,7 +146,8 @@ start_servers() {
         else
             "$DARKHTTPD_BIN" "$FIX" --addr 127.0.0.1 --port "$DARKHTTPD_PORT" \
                 >"$TMPDIR_RUN/darkhttpd.log" 2>&1 &
-            PIDS+=($!)
+            DARKHTTPD_PID=$!
+            PIDS+=("$DARKHTTPD_PID")
             wait_port "$DARKHTTPD_PORT" darkhttpd
             expect_200 "$DARKHTTPD_PORT" darkhttpd
         fi
@@ -151,7 +158,8 @@ start_servers() {
         else
             sed "s|FIXTURES_ROOT|$FIX|g" "$SCRIPT_DIR/Caddyfile.in" > "$TMPDIR_RUN/Caddyfile"
             caddy run --config "$TMPDIR_RUN/Caddyfile" >"$TMPDIR_RUN/caddy.log" 2>&1 &
-            PIDS+=($!)
+            CADDY_PID=$!
+            PIDS+=("$CADDY_PID")
             wait_port "$CADDY_PORT" caddy
             expect_200 "$CADDY_PORT" caddy
         fi
@@ -163,12 +171,33 @@ page_cache() {
     cat "$FIX"/* >/dev/null 2>&1 || true
 }
 
+pid_of() {
+    case "$1" in
+        staticd) echo "${STATICD_PID:-}" ;;
+        nginx) echo "${NGINX_PID:-}" ;;
+        darkhttpd) echo "${DARKHTTPD_PID:-}" ;;
+        caddy) echo "${CADDY_PID:-}" ;;
+        *) echo "" ;;
+    esac
+}
+
+# Process RSS in KB (nginx: master + workers).
+rss_kb_of() {
+    local pid kids plist
+    pid=$(pid_of "$1")
+    if [[ -z "$pid" ]]; then echo 0; return; fi
+    plist="$pid"
+    kids=$(pgrep -P "$pid" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+    if [[ -n "$kids" ]]; then plist="$pid,$kids"; fi
+    ps -o rss= -p "$plist" 2>/dev/null | awk '{s+=$1} END{print int(s+0)}'
+}
+
 # Parse wrk -latency output into p50 p75 p90 p99 rps errs
 # (wrk's Latency Distribution has 50/75/90/99 — no 95).
 parse_wrk() {
     local file="$1"
     local rps errs p50 p75 p90 p99
-    rps=$(awk '/Requests\/sec:/ {print $2}' "$file" | tail -1)
+    rps=$(awk '/Requests\/sec:/ {v=$2} END{printf "%.0f", v+0}' "$file")
     errs=$(awk '/Socket errors:/ {
         s=0; for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/) s+=$i; print s; exit
     }' "$file")
@@ -200,7 +229,7 @@ parse_wrk() {
 parse_hey() {
     local file="$1"
     local rps p50 p75 p90 p99 errs
-    rps=$(awk '/Requests\/sec:/ {print $2}' "$file" | tail -1)
+    rps=$(awk '/Requests\/sec:/ {v=$2} END{printf "%.0f", v+0}' "$file")
     p50=$(awk '/50% in / {print $(NF-1)}' "$file" | head -1)
     p75=$(awk '/75% in / {print $(NF-1)}' "$file" | head -1)
     p90=$(awk '/90% in / {print $(NF-1)}' "$file" | head -1)
@@ -218,7 +247,12 @@ run_load() {
         local t="$THREADS"
         if [[ "$c" -lt "$t" ]]; then t="$c"; fi
         if [[ "$t" -lt 1 ]]; then t=1; fi
-        wrk -t "$t" -c "$c" -d "${DURATION}s" --latency "$url" >"$out" 2>&1 || true
+        # wrk default timeout is 2s — 10MB @ high c needs more (TIMEOUT=10)
+        if [[ -n "${TIMEOUT:-}" ]]; then
+            wrk -t "$t" -c "$c" -d "${DURATION}s" --timeout "${TIMEOUT}s" --latency "$url" >"$out" 2>&1 || true
+        else
+            wrk -t "$t" -c "$c" -d "${DURATION}s" --latency "$url" >"$out" 2>&1 || true
+        fi
     else
         hey -z "${DURATION}s" -c "$c" "$url" >"$out" 2>&1 || true
     fi
@@ -257,8 +291,8 @@ DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "# note: WARMUP=$WARMUP reserved; wrk has no internal warmup — round 0 discarded"
     echo "# fixtures: page-cached before each block"
     echo "#"
-    printf '%-12s %-6s %-10s %10s %10s %10s %10s %12s %6s\n' \
-        file c server p50_ms p75_ms p90_ms p99_ms rps errs
+    printf '%-12s %-6s %-10s %10s %10s %10s %10s %12s %8s %6s\n' \
+        file c server p50_ms p75_ms p90_ms p99_ms rps rss_kb errs
 } | tee "$TMPDIR_RUN/receipt.txt"
 
 for file in $FILES; do
@@ -278,7 +312,7 @@ for file in $FILES; do
             port="${PORTS[$idx]}"
             url="http://127.0.0.1:${port}/${file}"
 
-            declare -a p50s=() p75s=() p90s=() p99s=() rpss=() errss=()
+            declare -a p50s=() p75s=() p90s=() p99s=() rpss=() rsss=() errss=()
             for ((r=0; r<REPEATS; r++)); do
                 outf="$TMPDIR_RUN/${name}_${file}_${c}_r${r}.txt"
                 echo "  wrk $name $file c=$c round=$((r+1))/$REPEATS (${DURATION}s)..." >&2
@@ -288,21 +322,25 @@ for file in $FILES; do
                 else
                     read -r p50 p75 p90 p99 rps errs < <(parse_hey "$outf")
                 fi
+                rss=$(rss_kb_of "$name")
+                echo "  rss $name ${rss}k" >&2
                 if [[ "$REPEATS" -gt 1 && "$r" -eq 0 ]]; then
                     continue  # discard warmup round
                 fi
                 p50s+=("$p50"); p75s+=("$p75"); p90s+=("$p90"); p99s+=("$p99")
-                rpss+=("$rps"); errss+=("$errs")
+                rpss+=("$rps"); rsss+=("$rss"); errss+=("$errs")
             done
             med() { printf '%s\n' "$@" | median_of; }
             # Sum errs (not median) — any errors matter
             err_sum=0
             for e in "${errss[@]:-}"; do err_sum=$((err_sum + ${e%.*})); done
-            line=$(printf '%-12s %-6s %-10s %10s %10s %10s %10s %12s %6s\n' \
+            rps_med=$(awk -v x="$(med "${rpss[@]}")" 'BEGIN{printf "%.0f", x+0}')
+            rss_med=$(awk -v x="$(med "${rsss[@]:-0}")" 'BEGIN{printf "%.0f", x+0}')
+            line=$(printf '%-12s %-6s %-10s %10s %10s %10s %10s %12s %8s %6s\n' \
                 "$file" "$c" "$name" \
                 "$(med "${p50s[@]}")" "$(med "${p75s[@]}")" \
                 "$(med "${p90s[@]}")" "$(med "${p99s[@]}")" \
-                "$(med "${rpss[@]}")" "$err_sum")
+                "$rps_med" "$rss_med" "$err_sum")
             echo "$line" | tee -a "$TMPDIR_RUN/receipt.txt"
         done
     done
