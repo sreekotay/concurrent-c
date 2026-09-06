@@ -76,10 +76,15 @@ typedef struct CCParallel {
     /* Guards the live index (tasks / envs / nt / ncap / xtasks / xenvs).
      * Admit may come from any fiber while another fiber is in wait. */
     cc_atomic_int lock;
-    int fail;
+    /* Dest error. 0 → 1 once, by whoever records first; `err` is that
+     * error and is written before the flag. wait() returns it after the
+     * join. */
+    cc_atomic_int fail;
+    cc_atomic_int fail_claim;
     int fin;
     int nt;
     int ncap;
+    int reap_at; /* rotating cursor: where the next admit's reap scan starts */
     int nch;
     int nclose;
     CCError err;
@@ -200,6 +205,22 @@ static inline bool !>(CCIoError) cc_parallel_cancel(CCParallel* h) {
     if (!h)
         return cc_err(cc_io_error(CC_IO_INVALID_ARGUMENT));
     return cc_ok(cc__parallel_cancel_tree(h) != 0);
+}
+
+/* Record the dest error. First wins: true when this call recorded `e`;
+ * false when the dest already holds an error, is idle, or is joined.
+ * Does not cancel and does not stop admits. wait() returns `err` after
+ * the join: the claim takes `fail_claim`, writes `err`, then publishes
+ * `fail`, so a waiter that sees `fail` sees the whole error. */
+static inline bool cc_parallel_fail(CCParallel* h, CCError e) {
+    int z = 0;
+    if (!h || !cc_parallel_live(h))
+        return false;
+    if (!cc_atomic_cas(&h->fail_claim, &z, 1))
+        return false;
+    h->err = e;
+    cc_atomic_store(&h->fail, 1);
+    return true;
 }
 
 static inline void !>(CCError) cc__parallel_adopt(CCParallel* parent,

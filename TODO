@@ -1,4 +1,5 @@
-- typeview: views (cast) generalize, validate, hooks
-- ccfile and io cleanup
+- typeview: validate
+- ccfile and io cleanup -> buffers
 - @create pointer vs val confusions
-see
+- ENOBUFS
+

@@ -63,13 +63,26 @@ static inline void cc_par_cpu_pause(void) {
 #endif
 }
 
+/* Spin briefly, then yield the worker. A contended dest at c=1000 has a
+ * thousand fibers admitting; a pure spin burns every worker on the one
+ * holder while the sockets starve. The holder's section is bounded (see
+ * reap), so a short spin catches most handoffs; past that the fiber
+ * steps aside and lets a sender run. */
+#define CC_PAR_LOCK_SPIN 64
+
 static void cc_par_lock(CCParallel* h) {
+    int spins = 0;
     for (;;) {
         int z = 0;
         if (atomic_compare_exchange_weak_explicit(&h->lock, &z, 1,
                 memory_order_acquire, memory_order_relaxed))
             return;
-        cc_par_cpu_pause();
+        if (++spins < CC_PAR_LOCK_SPIN) {
+            cc_par_cpu_pause();
+            continue;
+        }
+        spins = 0;
+        cc_yield();
     }
 }
 
@@ -80,8 +93,15 @@ static void cc_par_unlock(CCParallel* h) {
 /* Live occupancy: drop finished admits. Brace pad stays; history does not.
  * Never join the fiber that is admitting (the kick). Caller holds the
  * lock; finished slots are taken out under it and joined after release
- * so the join never runs under the lock. */
+ * so the join never runs under the lock.
+ *
+ * Each admit scans a bounded window of the index from a rotating cursor,
+ * not the whole index: the section under the lock is O(window), and the
+ * cursor walks the index once every nt/window admits so nothing is left
+ * behind. Slots are swap-removed (last into the hole); the index is a
+ * set, and wait takes any slot. */
 #define CC_PAR_REAP_BATCH 16
+#define CC_PAR_REAP_SCAN 64
 
 typedef struct CCParReapSet {
     CCTask tasks[CC_PAR_REAP_BATCH];
@@ -93,30 +113,39 @@ static void cc_parallel_reap_take(CCParallel* h, CCParReapSet* rs) {
     CCTask* tasks;
     void** envs;
     fiber_v2* self;
-    int i, w;
+    int i, seen, budget;
     rs->n = 0;
-    if (!h)
+    if (!h || h->nt <= 0)
         return;
     tasks = cc_parallel_tasks(h);
     envs = cc_parallel_envs(h);
     self = sched_v2_current_fiber();
-    w = 0;
-    for (i = 0; i < h->nt; i++) {
-        fiber_v2* f = cc_task_fiber_v2(tasks[i]);
-        if (f && f != self && rs->n < CC_PAR_REAP_BATCH &&
-            sched_v2_fiber_done(f)) {
+    budget = h->nt < CC_PAR_REAP_SCAN ? h->nt : CC_PAR_REAP_SCAN;
+    if (h->reap_at < 0 || h->reap_at >= h->nt)
+        h->reap_at = 0;
+    i = h->reap_at;
+    for (seen = 0; seen < budget && rs->n < CC_PAR_REAP_BATCH; seen++) {
+        fiber_v2* f;
+        if (h->nt <= 0)
+            break;
+        if (i >= h->nt)
+            i = 0;
+        f = cc_task_fiber_v2(tasks[i]);
+        if (f && f != self && sched_v2_fiber_done(f)) {
             rs->tasks[rs->n] = tasks[i];
             rs->envs[rs->n] = envs[i];
             rs->n++;
+            h->nt--;
+            if (i != h->nt) {
+                tasks[i] = tasks[h->nt];
+                envs[i] = envs[h->nt];
+            }
+            /* re-examine slot i: it now holds the moved tail */
             continue;
         }
-        if (w != i) {
-            tasks[w] = tasks[i];
-            envs[w] = envs[i];
-        }
-        w++;
+        i++;
     }
-    h->nt = w;
+    h->reap_at = h->nt > 0 ? i % h->nt : 0;
 }
 
 static void cc_parallel_reap_finish(CCParallel* h, CCParReapSet* rs) {
@@ -126,22 +155,6 @@ static void cc_parallel_reap_finish(CCParallel* h, CCParReapSet* rs) {
         cc_parallel_env_free(h, rs->envs[i]);
     }
     rs->n = 0;
-}
-
-/* Drop slot i without joining. Shift the tail down. */
-static void cc_parallel_remove_at(CCParallel* h, int i) {
-    CCTask* tasks;
-    void** envs;
-    int k;
-    if (!h || i < 0 || i >= h->nt)
-        return;
-    tasks = cc_parallel_tasks(h);
-    envs = cc_parallel_envs(h);
-    for (k = i; k < h->nt - 1; k++) {
-        tasks[k] = tasks[k + 1];
-        envs[k] = envs[k + 1];
-    }
-    h->nt--;
 }
 
 static void cc_parallel_release_index(CCParallel* h) {
@@ -407,19 +420,25 @@ CCResult_void_CCError cc_parallel_wait(CCParallel* h) {
     if (cc_atomic_load(&h->left))
         cc_parallel_die("wait after leave");
     cc_parallel_deny_leave_dest(cc__par_tls(), h);
-    if (cc_atomic_load(&h->joined))
+    /* wait is idempotent, and so is its answer: a dest that holds an
+     * error keeps reporting it (sequential-path plants join before the
+     * frame's wait; a second wait must not turn err into ok). */
+    if (cc_atomic_load(&h->joined)) {
+        if (cc_atomic_load(&h->fail))
+            return cc_err_CCResult_void_CCError(h->err);
         return cc_ok_CCResult_void_CCError();
+    }
     if (h->n) {
         CCResult_void_CCError wr = cc_nursery_wait_host(h->n);
         if (!wr.ok) return wr;
     }
-    /* The kick may still be admitting. Take slot 0 (the oldest — the kick)
-     * out of the index under the lock, then join it with the lock released;
-     * whoever holds a slot is the only one who joins it, so a concurrent
-     * admit's reap cannot join the same CCTask (a second join parks on a
-     * recycled fiber — often this one). Admits that land during the join
-     * are seen on the next pass. `joined` is set under the hold that saw
-     * nt == 0, so no admit can land on a joined dest. */
+    /* The kick may still be admitting. Take one slot (the last — O(1), the
+     * index is a set) out under the lock, then join it with the lock
+     * released; whoever holds a slot is the only one who joins it, so a
+     * concurrent admit's reap cannot join the same CCTask (a second join
+     * parks on a recycled fiber — often this one). Admits that land during
+     * the join are seen on the next pass. `joined` is set under the hold
+     * that saw nt == 0, so no admit can land on a joined dest. */
     for (;;) {
         CCTask t;
         void* env;
@@ -432,9 +451,9 @@ CCResult_void_CCError cc_parallel_wait(CCParallel* h) {
             cc_par_unlock(h);
             break;
         }
-        t = cc_parallel_tasks(h)[0];
-        env = cc_parallel_envs(h)[0];
-        cc_parallel_remove_at(h, 0);
+        h->nt--;
+        t = cc_parallel_tasks(h)[h->nt];
+        env = cc_parallel_envs(h)[h->nt];
         cc_par_unlock(h);
         f = cc_task_fiber_v2(t);
         if (f && f == self) {
@@ -446,7 +465,7 @@ CCResult_void_CCError cc_parallel_wait(CCParallel* h) {
     }
     cc_parallel_close_list(h->closing, h->nclose);
     h->nclose = 0;
-    if (h->fail)
+    if (cc_atomic_load(&h->fail))
         return cc_err_CCResult_void_CCError(h->err);
     return cc_ok_CCResult_void_CCError();
 }

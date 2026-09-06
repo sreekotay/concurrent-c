@@ -531,15 +531,42 @@ CCResult_size_t_CCIoError cc_socket_write_deadline(CCSocket* sock,
 
     while (1) {
         ssize_t n = send(sock->fd, data, len, CC__NET_SEND_FLAGS);
+        int nobufs;
         if (n >= 0) {
             return cc_ok_CCResult_size_t_CCIoError((size_t)n);
         }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        /* ENOBUFS (BSD / Darwin): the kernel could not get an mbuf for this
+         * send. The socket is still writable, so it is a transient like
+         * EAGAIN, not a peer condition. Retry after the writable wait (which
+         * honors the deadline) plus a short park, since the fd reports
+         * POLLOUT immediately and a bare retry would spin on the pool. */
+        nobufs = errno == ENOBUFS;
+        if (nobufs || errno == EAGAIN || errno == EWOULDBLOCK) {
             cc__io_owned_watcher* watcher = cc__net_ensure_socket_watcher(sock);
             int wait_err = watcher ? cc__io_watcher_wait_deadline(watcher, POLLOUT, abs_deadline)
                                    : cc__io_wait_fd_deadline(sock->fd, POLLOUT, abs_deadline);
             if (wait_err != 0) {
                 return cc_err_CCResult_size_t_CCIoError(errno_to_io_error(wait_err));
+            }
+            if (nobufs) {
+                /* Park the fiber, not the worker (cc_sleep_ms would
+                 * nanosleep the thread). Sysmon expires the deadline. */
+                struct timespec until;
+                clock_gettime(CLOCK_REALTIME, &until);
+                until.tv_nsec += 1000000L;
+                if (until.tv_nsec >= 1000000000L) {
+                    until.tv_nsec -= 1000000000L;
+                    until.tv_sec += 1;
+                }
+                if (abs_deadline &&
+                    (abs_deadline->tv_sec < until.tv_sec ||
+                     (abs_deadline->tv_sec == until.tv_sec &&
+                      abs_deadline->tv_nsec < until.tv_nsec)))
+                    until = *abs_deadline;
+                if (cc__fiber_in_context())
+                    (void)CC_FIBER_PARK_IF_UNTIL(NULL, 0, &until, "send_enobufs");
+                else
+                    cc_sleep_ms(1); /* a thread: there is no one to park */
             }
             continue;
         }
