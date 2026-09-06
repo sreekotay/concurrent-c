@@ -214,9 +214,14 @@ static CcTypeInfo* CcIndex_type_get(CcIndex* ix, CCSlice canonical);
  * "int", "unsigned long", "struct Foo", "CCString", "CCResult_int_CCError",
  * "Map_int_int", "CCSlice" for char[:]. */
 static CCSlice CcIndex_canon(CcIndex* ix, const CcType* t);
-/* ix.method(recv, name, a): the method, or an error whose message lists
- * what was tried and what the type has, ready for the use site. */
-static CcMethod* !>(CcDiag) CcIndex_method(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCArena a);
+/* How the receiver is written at the call site, for the bare-name tier.
+ * CC_RECV_PTR: the receiver expression is a pointer; CC_RECV_CONST: what it
+ * names is const. */
+#define CC_RECV_PTR   1u
+#define CC_RECV_CONST 2u
+/* ix.method_recv(recv, name, shape, a): the method, or an error whose message
+ * lists what was tried and what the type has, ready for the use site. */
+static CcMethod* !>(CcDiag) CcIndex_method_recv(CcIndex* ix, CcTypeInfo* recv, CCSlice method, unsigned recv_shape, CCArena a);
 /* ix.methods_of(info): every method the type has, from every source, for
  * dumps and for the candidates list. */
 static CcMethodList CcIndex_methods_of(CcIndex* ix, CcTypeInfo* info);

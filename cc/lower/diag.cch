@@ -26,7 +26,7 @@ typedef struct CcLoc {
 typedef struct CcDiag {
     CcSeverity sev;
     CcLoc at;
-    CCSlice msg;        /* one line, user vocabulary: "no method 'len' on 'Pair'" */
+    CCSlice msg;        /* one line, user vocabulary: "no UFCS method 'len' for receiver type 'Pair'" */
     CCSlice note;       /* optional second line: what would fix it; empty when none */
     uint32_t len;       /* bytes the caret underlines; 0 = one caret */
     uint32_t phys_line; /* physical line for the snippet when `at` is #line-rebased; 0 = at.line */

@@ -174,7 +174,13 @@ CcTypeInfo *cc_index_type(const CcIndex *ix, CcName canonical);
 CcName      cc_index_canon(CcIndex *ix, const CcType *t);
 /* Method lookup for a receiver type; NULL when nothing declares it, with
  * `candidates` (arena string) listing the near misses for the diagnostic. */
-CcMethod   *cc_index_method(CcIndex *ix, CcTypeInfo *recv, CcName method, const char **candidates);
+/* How the receiver is written at the call site, for the bare-name tier.
+   CC_RECV_PTR: the receiver expression is a pointer; CC_RECV_CONST: what
+   it names is const. */
+#define CC_RECV_PTR   1u
+#define CC_RECV_CONST 2u
+CcMethod   *cc_index_method_recv(CcIndex *ix, CcTypeInfo *recv, CcName method, unsigned recv_shape, const char **candidates);
+#define cc_index_method(ix, recv, method, cand) cc_index_method_recv((ix), (recv), (method), 0u, (cand))
 /* Register the Result spec for (value, err, optional) and return its info;
  * the printer emits the spec block once for every entry not declared in a header. */
 CcTypeInfo *cc_index_result(CcIndex *ix, CcType *value, CcType *err, int optional);

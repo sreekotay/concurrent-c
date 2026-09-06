@@ -2997,7 +2997,7 @@ static CcNameList cc__view_faces(CcIndex* ix, CCSlice name) {
     return faces;
 }
 
-static CcMethod* cc__resolve(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, int depth);
+static CcMethod* cc__resolve(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, int depth, unsigned recv_shape);
 
 static bool cc__decl_is_typedef(const CcDecl* d) {
     if (!d) return false;
@@ -3055,7 +3055,7 @@ static CcType* cc__peel_ptr_atomic(CcType* t) {
 
 /* The receiver type an `as:` face or a typedef alias delegates to. */
 static CcMethod* cc__resolve_via(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, int depth,
-                                 CcType* target, CCSlice how) {
+                                 CcType* target, CCSlice how, unsigned recv_shape) {
     CCSlice tn;
     CcTypeInfo* ti;
     CcMethod* m;
@@ -3065,7 +3065,7 @@ static CcMethod* cc__resolve_via(CcIndex* ix, CcTypeInfo* recv, CCSlice method, 
     tn = CcIndex_canon(ix, target);
     if (cc__eq(tn, recv->name)) return NULL;
     ti = CcIndex_type_get(ix, tn);
-    m = cc__resolve(ix, ti, method, tried, ta, depth + 1);
+    m = cc__resolve(ix, ti, method, tried, ta, depth + 1, recv_shape);
     if (!m) return NULL;
     sb.push_slice(how, ix->arena);
     sb.push_char(' ', ix->arena);
@@ -3087,6 +3087,22 @@ static void cc__tried2(CCString* tried, CCArena ta, CCSlice name, const char* a,
     tried->push_cstr(a, ta);
     tried->push_slice(mid, ta);
     tried->push_cstr(b, ta);
+}
+
+/* The bare-name near miss: the callee is declared, its first parameter does
+ * not take this receiver. */
+static void cc__tried_bare(CCString* tried, CCArena ta, CCSlice method, CCSlice p0, CCSlice pname, CCSlice recv) {
+    tried->push_cstr("; candidate ", ta);
+    tried->push_slice(method, ta);
+    tried->push_cstr(" (bare): declared, but first parameter '", ta);
+    tried->push_slice(p0, ta);
+    if (pname.len) {
+        tried->push_char(' ', ta);
+        tried->push_slice(pname, ta);
+    }
+    tried->push_cstr("' does not take '", ta);
+    tried->push_slice(recv, ta);
+    tried->push_cstr("'", ta);
 }
 
 static CCSlice cc__hook_origin(CcIndex* ix, const CcHookReg* hook, const CcSym* cs) {
@@ -3210,7 +3226,7 @@ static CcMethod* cc__resolve_snake(CcIndex* ix, CcTypeInfo* recv, CCSlice method
 }
 
 /* 5. the bare-name tier: a declared `method(T, ...)` is callable as `x.method(...)` */
-static CcMethod* cc__resolve_bare(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta) {
+static CcMethod* cc__resolve_bare(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, unsigned recv_shape) {
     CcSym* cs = cc__sym_find_kind(ix, method, CC_SYM_FUNC);
     CcFuncType fn;
     CcParamList params;
@@ -3220,22 +3236,31 @@ static CcMethod* cc__resolve_bare(CcIndex* ix, CcTypeInfo* recv, CCSlice method,
     params = fn.params;
     if (params.len() == 0 || !params.get_ptr(0)->type) return NULL;
     p0 = params.get_ptr(0)->type;
-    base = p0->k.kind == CcTypeK_pointer ? cc__peel_ptr_atomic(p0) : p0;
+    base = p0;
     if (p0->k.kind == CcTypeK_pointer) {
         @switch (p0->k) {
             case .pointer(pt): base = pt.pointee; break;
             default: break;
         }
     }
-    if (base && (cc__same_type(ix, CcIndex_canon(ix, base), recv->name) ||
-                 (p0->k.kind == CcTypeK_pointer && cc__eqc(CcIndex_canon(ix, base), "void"))))
-        return cc__method_new(ix, recv, method, method, "bare_name", cc__sym_origin(ix, cs), cs, false);
-    cc__tried2(tried, ta, method, " (first parameter is ", CcIndex_canon(ix, p0), ")");
+    {
+        bool p0_ptr = p0->k.kind == CcTypeK_pointer;
+        bool recv_ptr = (recv_shape & CC_RECV_PTR) != 0;
+        bool recv_const = (recv_shape & CC_RECV_CONST) != 0;
+        bool p0_const = base && (base->quals & CC_QUAL_CONST) != 0;
+        bool names_it = base && (cc__same_type(ix, CcIndex_canon(ix, base), recv->name) ||
+                                 (p0_ptr && recv_ptr && cc__eqc(CcIndex_canon(ix, base), "void")));
+        /* the address of a receiver may be taken; a pointer is never
+         * dereferenced, and const is never dropped */
+        if (names_it && !(recv_ptr && !p0_ptr) && !(recv_const && p0_ptr && !p0_const))
+            return cc__method_new(ix, recv, method, method, "bare_name", cc__sym_origin(ix, cs), cs, false);
+        cc__tried_bare(tried, ta, method, CcIndex_canon(ix, p0), params.get_ptr(0)->name, recv->name);
+    }
     return NULL;
 }
 
 /* 6. a typedef alias uses the aliased type's methods */
-static CcMethod* cc__resolve_alias(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, int depth) {
+static CcMethod* cc__resolve_alias(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, int depth, unsigned recv_shape) {
     CcType* t;
     int kind;
     if (!(recv->sym && recv->sym->kind == CC_SYM_TYPE && recv->sym->decl && recv->sym->type)) return NULL;
@@ -3244,7 +3269,7 @@ static CcMethod* cc__resolve_alias(CcIndex* ix, CcTypeInfo* recv, CCSlice method
     t = recv->sym->type;
     if (t->k.kind == CcTypeK_named || t->k.kind == CcTypeK_pointer || t->k.kind == CcTypeK_generic ||
         t->k.kind == CcTypeK_slice || t->k.kind == CcTypeK_result || t->k.kind == CcTypeK_chan)
-        return cc__resolve_via(ix, recv, method, tried, ta, depth, t, cc__ix_s("via typedef"));
+        return cc__resolve_via(ix, recv, method, tried, ta, depth, t, cc__ix_s("via typedef"), recv_shape);
     return NULL;
 }
 
@@ -3265,7 +3290,7 @@ static CcMethod* cc__resolve_faces(CcIndex* ix, CcTypeInfo* recv, CCSlice method
             CcField* f = fieldv->get_ptr(k);
             CcMethod* m;
             if (!f->name.len || !cc__eq(f->name, *faces.get_ptr(i))) continue;
-            m = cc__resolve_via(ix, recv, method, tried, ta, depth, f->type, cc__cat3(ix, "via @" "typeview as: ", f->name, " ->"));
+            m = cc__resolve_via(ix, recv, method, tried, ta, depth, f->type, cc__cat3(ix, "via @" "typeview as: ", f->name, " ->"), 0u);
             if (m) return m;
         }
     }
@@ -3302,7 +3327,7 @@ static CcMethod* cc__resolve_sink(CcIndex* ix, CcTypeInfo* recv, CCSlice method,
     return NULL;
 }
 
-static CcMethod* cc__resolve(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, int depth) {
+static CcMethod* cc__resolve(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, int depth, unsigned recv_shape) {
     CcMethod* m;
     bool stop;
     CCSlice base_name;
@@ -3325,9 +3350,9 @@ static CcMethod* cc__resolve(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCSt
     if (m) return m;
     m = cc__resolve_snake(ix, recv, method, tried, ta, base_name);
     if (m) return m;
-    m = cc__resolve_bare(ix, recv, method, tried, ta);
+    m = cc__resolve_bare(ix, recv, method, tried, ta, recv_shape);
     if (m) return m;
-    m = cc__resolve_alias(ix, recv, method, tried, ta, depth);
+    m = cc__resolve_alias(ix, recv, method, tried, ta, depth, recv_shape);
     if (m) return m;
     m = cc__resolve_faces(ix, recv, method, tried, ta, depth);
     if (m) return m;
@@ -3391,9 +3416,9 @@ static CcMethodList CcIndex_methods_of(CcIndex* ix, CcTypeInfo* info) {
     return list;
 }
 
-static CcMethod* !>(CcDiag) CcIndex_method(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCArena a) {
+static CcMethod* !>(CcDiag) CcIndex_method_recv(CcIndex* ix, CcTypeInfo* recv, CCSlice method, unsigned recv_shape, CCArena a) {
     CCString tried = cc_string_new();
-    CcMethod* m = cc__resolve(ix, recv, method, &tried, a, 0);
+    CcMethod* m = cc__resolve(ix, recv, method, &tried, a, 0, recv_shape);
     if (m) return cc_ok(m);
     {
         CCString sb = cc_string_new();
@@ -3403,7 +3428,7 @@ static CcMethod* !>(CcDiag) CcIndex_method(CcIndex* ix, CcTypeInfo* recv, CCSlic
         size_t shown = 0;
         CcLoc at;
         CcDiag d;
-        sb.push_cstr("no method '", a);
+        sb.push_cstr("no UFCS method '", a);
         sb.push_slice(method, a);
         sb.push_cstr("' for receiver type '", a);
         sb.push_slice(recv->name, a);

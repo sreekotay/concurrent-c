@@ -257,6 +257,27 @@ static bool is_typeof_without_type(CcType* t) {
     }
 }
 
+/* The receiver as the call site writes it: the bare-name tier reads whether
+ * it is a pointer and whether what it names is const. */
+static unsigned recv_shape_of(Walker* w, CcType* recv_type) {
+    CcType* t = unalias_local(w, recv_type);
+    unsigned shape = 0;
+    CcType* inner = NULL;
+    if (!t) return 0;
+    @switch (t->k) {
+        case .pointer(pt): inner = pt.pointee; break;
+        case .array(ar): inner = ar.elem; break;
+        default: break;
+    }
+    if (inner) {
+        shape |= CC_RECV_PTR;
+        if (inner->quals & CC_QUAL_CONST) shape |= CC_RECV_CONST;
+    } else if (t->quals & CC_QUAL_CONST) {
+        shape |= CC_RECV_CONST;
+    }
+    return shape;
+}
+
 static CcMethod* resolve_site(Walker* w, CcType* recv_type, CCSlice method, CCSlice* type_name, CCSlice* reason) {
     CcIndex* ix = w->ix;
     CcType* t = peel(unalias_local(w, peel(recv_type)));
@@ -268,7 +289,7 @@ static CcMethod* resolve_site(Walker* w, CcType* recv_type, CCSlice method, CCSl
     *type_name = ix->canon(t);
     info = ix->type_get(*type_name);
     {
-        CcMethod* !>(CcDiag) r = ix->method(info, method, w->arena);
+        CcMethod* !>(CcDiag) r = ix->method_recv(info, method, recv_shape_of(w, recv_type), w->arena);
         if (r.is_ok()) return r.value();
         {
             CcDiag d = r.error();
