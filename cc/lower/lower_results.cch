@@ -105,6 +105,14 @@ static CcTypeInfo* rl_result_of_call(CcLowerer* L, const CcExpr* e) {
 
 /* ---- cc_ok / cc_err ------------------------------------------------------ */
 
+/* A `T ?>(E)` return declares that dropping the result is allowed, so a
+ * call that drops it is not unhandled. `T !>(E)` does not. */
+static bool rl_unhandled_counts(CcLowerer* L, const CcExpr* e) {
+    CcTypeInfo* rt = rl_result_of_call(L, e);
+    if (!rt) return false;
+    return !rt->result_optional;
+}
+
 static bool rl_is_type_arg(const CcExpr* e) {
     @switch (e->k) {
         case .type_arg: return true;
@@ -847,7 +855,7 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
             case .decl(ds): handled = rl_decl_unwrap(fn, s, ds.d, &out); break;
             case .expr(es):
                 handled = rl_expr_stmt_unwrap(fn, s, es.e, &out);
-                if (!handled && L->opts.strict_unhandled && es.e && rl_result_of_call(L, es.e)) {
+                if (!handled && L->opts.strict_unhandled && es.e && rl_unhandled_counts(L, es.e)) {
                     CCSlice callee = rl_call_name(es.e);
                     CCString m = @string(`unhandled-result: call to '${callee}' returns a result-typed value; consume with '?>', '!>', '${"@"}err', assign to a result-typed destination, 'return', or cast to '(void)' to explicitly discard`, L->arena);
                     lw_error(L, s->span, m);
