@@ -130,9 +130,42 @@ static bool sl_callee_params(SStep* st, CcExpr* callee, CcParamList* out) {
     }
 }
 
-/* A string literal handed to a slice parameter carries its length with it. */
+/* The erased byte slice, as opposed to a typed `CCSlice_T` instance. */
+static bool sl_canon_is_erased(CCSlice cn) {
+    return cc_slice_eq_cstr(&cn, "CCSlice");
+}
+
+static bool sl_canon_is_typed(CCSlice cn) {
+    return cn.len > 8 && memcmp(cn.ptr, "CCSlice_", 8) == 0;
+}
+
+/* `<instance>_bytes(&x)`: the honest byte view of a typed slice, its
+ * length scaled by the element size. */
+static bool sl_is_simple(const CcExpr* e) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .ident: return true;
+        case .member: return true;
+        case .index: return true;
+        default: return false;
+    }
+}
+
+static CcExpr* sl_bytes_of(CcLowerer* L, CCSlice instance, CcExpr* a, CcSpan sp) {
+    CCString fn = @string(`${instance}_bytes`, L->arena);
+    CcExpr* target = sl_is_simple(a) ? a : lw_paren(L, a, sp);
+    CcExpr* addr = cc_expr_unary(CC_OP_ADDR, target, sp, L->arena);
+    return lw_call1(L, lw_keep(L, &fn), addr, sp);
+}
+
+/* Arguments a slice parameter accepts: a string literal carries its length
+ * with it, and a typed instance handed to an erased `CCSlice` parameter is
+ * converted where the callee's declaration provably takes the erased one.
+ * Erasing anything else would turn a typed borrow into a byte marshal that
+ * still compiles. */
 static void sl_call_args(SStep* st, CcCall cl) {
-    CcIndex* ix = st->w->ix;
+    Walker* w = st->w;
+    CcIndex* ix = w->ix;
     CcParamList params;
     CcExprList* args = &cl.args;
     size_t n = args->len();
@@ -143,10 +176,29 @@ static void sl_call_args(SStep* st, CcCall cl) {
     for (i = 0; i < n && i < np; i++) {
         CcExpr* a = *args->get_ptr(i);
         CcParam* p = params.get_ptr(i);
-        if (!sl_is_string(a) || !p->type) continue;
-        if (!sl_canon_is_slice(ix->canon(p->type))) continue;
-        *args->get_ptr(i) = sl_lit_call(st->L, a);
+        CCSlice pc;
+        if (!p->type) continue;
+        pc = ix->canon(p->type);
+        if (sl_is_string(a)) {
+            if (sl_canon_is_slice(pc)) *args->get_ptr(i) = sl_lit_call(st->L, a);
+            continue;
+        }
+        if (!sl_canon_is_erased(pc)) continue;
+        {
+            CcType* at = type_of_expr(w, a);
+            CCSlice ac;
+            if (!at) continue;
+            ac = ix->canon(at);
+            if (!sl_canon_is_typed(ac)) continue;
+            *args->get_ptr(i) = sl_bytes_of(st->L, ac, a, a->span);
+        }
     }
+}
+
+static void sl_on_call(Walker* w, CcExpr* e, CcCall cl) {
+    SStep* st = (SStep*)w->env;
+    (void)e;
+    sl_call_args(st, cl);
 }
 
 static bool sl_expr_visit(CcExpr* e, void* env) {
@@ -163,7 +215,6 @@ static bool sl_expr_visit(CcExpr* e, void* env) {
             e->k = sl_lit_call(L, s)->k;
             return true;
         }
-        case .call(cl): sl_call_args(st, cl); return true;
         default: return true;
     }
 }
@@ -284,6 +335,23 @@ static void CcLowerer_slices(CcLowerer* L) {
     v.expr = sl_expr_visit;
     v.env = &st;
     CcUnit_walk(L->unit, v);
+}
+
+/* Argument coercion runs after UFCS: a `x.m("lit")` call site is a plain
+ * call by then, and its parameter types are the callee's. */
+static void CcLowerer_slice_args(CcLowerer* L) {
+    Walker w;
+    SStep st;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    st.w = &w;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_call = sl_on_call;
+    w.env = &st;
+    tw_unit(&w);
 }
 
 #endif

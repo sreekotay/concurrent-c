@@ -42,6 +42,8 @@ typedef struct Walker {
     /* called at every `x.f` / `p->f` that is not a call, with the
      * receiver's type (NULL when unknown) */
     void (*on_field)(struct Walker* w, CcExpr* e, CcMember mb, CcType* rt);
+    /* called at every plain call, after its arguments are walked */
+    void (*on_call)(struct Walker* w, CcExpr* e, CcCall cl);
     void* env;
 } Walker;
 
@@ -731,6 +733,11 @@ static void tw_field(Walker* w, CcExpr* e, CcMember mb) {
     w->on_field(w, e, mb, type_of_expr(w, mb.a));
 }
 
+static void tw_called(Walker* w, CcExpr* e, CcCall cl) {
+    if (!w->on_call) return;
+    w->on_call(w, e, cl);
+}
+
 static void tw_expr(Walker* w, CcExpr* e) {
     if (!e) return;
     @switch (e->k) {
@@ -741,7 +748,7 @@ static void tw_expr(Walker* w, CcExpr* e) {
         case .binary(bi): tw_expr(w, bi.a); tw_expr(w, bi.b); return;
         case .assign(as): tw_expr(w, as.a); tw_expr(w, as.b); return;
         case .ternary(te): tw_expr(w, te.c); tw_expr(w, te.a); tw_expr(w, te.b); return;
-        case .call(cl): tw_expr(w, cl.callee); tw_exprs(w, cl.args); return;
+        case .call(cl): tw_expr(w, cl.callee); tw_exprs(w, cl.args); tw_called(w, e, cl); return;
         case .index(ix2): tw_expr(w, ix2.a); tw_expr(w, ix2.i); return;
         case .member(mb): tw_expr(w, mb.a); tw_field(w, e, mb); return;
         case .cast(ca): tw_expr(w, ca.a); return;

@@ -197,6 +197,43 @@ nearest name offered as a note when it does not; a `*` anywhere in an
 item is a pattern, so `out_*` and `*_len` match the members they name;
 and `^*` is refused as ill-formed rather than read as denying nothing.
 
+## Slices
+
+**The type.** `T[:]` is an instance of the slice family, named by the same
+canonical spelling the index computes: `CCSlice` for the char family,
+`CCSlice_T` otherwise, and `CCSliceUnique` for a unique char slice. A
+typed instance is `struct { CCSlice base; }`, and the header declares
+`@typeview on CCSlice_* { as: base; }`, so `xs.len` reaches `xs.base.len`
+by the ordinary rule that a field the type does not have may live in an
+`as:` embed. Nothing in the lowerer names a slice to make that work.
+
+**The value.** A string literal that initializes, is returned as, or is
+passed to a slice becomes `CC_SLICE_LIT(...)`, which carries the bytes
+and their length with no run of `strlen`. `@slice("...")` is the same
+literal in expression position. A braced list is the array it spells,
+hoisted to its own local, and a slice over that array, so the storage and
+the view share one extent:
+
+```c
+char __cc_sl_br[] = { 'a', 'b', 'c', 'd' };
+CCSlice br = cc_slice_from_buffer(__cc_sl_br, sizeof(__cc_sl_br)/sizeof(__cc_sl_br[0]));
+
+double __cc_sl_xs[] = { 1.0, 2.0 };
+CCSlice_double xs = CCSlice_double_from_buffer(__cc_sl_xs, sizeof(__cc_sl_xs)/sizeof(__cc_sl_xs[0]));
+```
+
+**Arguments.** A typed instance handed to a parameter declared as the
+erased `CCSlice` becomes `CCSlice_T_bytes(&arg)`, whose length is scaled
+by the element size. This happens only where the callee's declaration
+provably takes the erased slice: erasing by default would turn a typed
+borrow into a byte marshal that still compiles. The coercion runs after
+UFCS, when a method call is a plain call and its parameter types are the
+callee's.
+
+The conversions the stdlib declares on a `.cast` hook (a char pointer or
+a `CCString` to a byte slice) are computed by the hook body, so they wait
+on the comptime seam rather than being written into the lowerer.
+
 ## Variants
 
 **Declaration.** `@variant V { a: A; b: B; c: void; }` is the tag enum and
