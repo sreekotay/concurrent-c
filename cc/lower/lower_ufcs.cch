@@ -370,6 +370,95 @@ static bool uf_glob_match(CCSlice pat, CCSlice name) {
     return true;
 }
 
+/* A member the type does not have may live in an `as:` embed. The search
+ * walks the faces one hop at a time and counts every way it reaches the
+ * field: exactly one is the answer, two is ambiguous. */
+static bool uf_field_path(CcLowerer* L, CCSlice owner, CCSlice field, CcNameList* path, int* found, int depth) {
+    CcIndex* ix = L->ix;
+    CcNameList faces;
+    CcRecordType st;
+    size_t n;
+    size_t i;
+    bool set = false;
+    if (!owner.len || depth > 6) return false;
+    faces = cc__view_faces(ix, owner);
+    n = faces.len();
+    if (!n) return false;
+    {
+        CcNameList* fv = &faces;
+        (void)fv;
+    }
+    if (!cc__struct_of(ix, owner, 0, &st)) return false;
+    for (i = 0; i < n; i++) {
+        CcNameList* facev = &faces;
+        CCSlice face = *facev->get_ptr(i);
+        bool is_ptr = false;
+        CCSlice fty = uf_face_field(L, owner, face, &is_ptr);
+        CcRecordType fst;
+        if (!fty.len || is_ptr) continue;
+        if (cc__struct_of(ix, fty, 0, &fst) && field_of_record(fst, field)) {
+            (*found)++;
+            if (!set) { path->push(face); set = true; }
+            continue;
+        }
+        {
+            CcNameList sub = vec_new::[CCSlice](L->arena);
+            CcNameList* subv = &sub;
+            if (uf_field_path(L, fty, field, &sub, found, depth + 1) && !set) {
+                size_t j;
+                size_t ns = subv->len();
+                path->push(face);
+                for (j = 0; j < ns; j++) {
+                    CCSlice step = *subv->get_ptr(j);
+                    path->push(step);
+                }
+                set = true;
+            }
+        }
+    }
+    return set;
+}
+
+/* `x.f` where `f` is not a member of x's type: the face chain that reaches
+ * it, spliced in. */
+static void uf_member(Walker* w, CcExpr* e, CcMember mb, CcType* rt) {
+    UStep* st = (UStep*)w->env;
+    CcLowerer* L = st->L;
+    CCSlice owner;
+    CcNameList path;
+    int found = 0;
+    if (!rt || !mb.name.len) return;
+    if (field_type(w, rt, mb.name)) return;              /* the type has it */
+    owner = cc__strip_tag(ix_canon_of(w, rt));
+    if (!owner.len) return;
+    path = vec_new::[CCSlice](L->arena);
+    if (!uf_field_path(L, owner, mb.name, &path, &found, 0)) return;
+    if (found > 1) {
+        CCSlice f = mb.name;
+        CCString m = @string(`type: ambiguous field '${f}' on '${owner}': two ${"@"}typeview as: embeds reach it`, L->arena);
+        lw_error(L, vt_dot_span(e), m);
+        return;
+    }
+    {
+        CcExpr* recv = mb.a;
+        CcNameList* pathv = &path;
+        size_t n = pathv->len();
+        size_t i;
+        bool first = true;
+        for (i = 0; i < n; i++) {
+            recv = cc_expr_member(first ? uf_wrap(L, recv, e->span) : recv, *pathv->get_ptr(i), first && mb.arrow, e->span, L->arena);
+            first = false;
+        }
+        {
+            CcMember out;
+            out.a = recv;
+            out.name = mb.name;
+            out.arrow = false;
+            e->k = { .member = out };
+        }
+    }
+}
+
 /* One `@typeview T { r: a, ^b; }`: every name in the list matches a field
  * or a method, and `^*` denies nothing at all. */
 static void uf_check_restrict(CcLowerer* L, CcDecl* d, CcTypeview tv, CCSlice tn, CcHookEntry* e) {
@@ -506,6 +595,7 @@ static void CcLowerer_ufcs(CcLowerer* L) {
     w.ix = L->ix;
     w.unit = L->unit;
     w.on_ufcs = uf_rewrite;
+    w.on_field = uf_member;
     w.env = &st;
     tw_unit(&w);
     memset(&v, 0, sizeof(v));

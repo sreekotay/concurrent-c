@@ -249,6 +249,7 @@ static CCSlice lw_closest(CcNameList names, CCSlice name) {
 /* ---- the pipeline ----------------------------------------------------- */
 
 #include "lower_generics.cch"
+#include "lower_slices.cch"
 #include "lower_variants.cch"
 #include "lower_ufcs.cch"
 #include "lower_results.cch"
@@ -363,6 +364,7 @@ static void CcLowerer_includes(CcLowerer* L) {
 
 static void CcLowerer_lower_unit(CcLowerer* L) {
     CcLowerer_includes(L);
+    CcLowerer_slices(L);    /* before generics: it reads `T[:]` as written */
     CcLowerer_generics(L);  /* before UFCS: a local of `Vec::[T]` is typed by its instance name */
     CcLowerer_variants(L);  /* before UFCS and Results: projections are plain members after it */
     CcLowerer_ufcs(L);      /* before Results: an unwrap needs the plain call to type its Result */
