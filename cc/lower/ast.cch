@@ -217,7 +217,14 @@ typedef struct CcGenericSelArm {
     CcSpan span; CcType* type; CcExpr* expr; bool is_default;
     bool is_pp; uint32_t pp_tok;    /* a preprocessor line between arms: pp_tok only */
 } CcGenericSelArm;
-typedef struct CcGenericSel { CcExpr* control; Vec::[CcGenericSelArm] arms; } CcGenericSel;
+typedef struct CcGenericSel {
+    CcExpr* control;
+    Vec::[CcGenericSelArm] arms;
+    bool verbatim;      /* the association list carries preprocessor lines or a macro standing for
+                         * associations: it is replayed from the tape, since which associations are
+                         * there is the preprocessor's answer, not the parser's */
+    CcSpan args;        /* the tokens of the association list, for that replay */
+} CcGenericSel;
 typedef struct CcStmtExpr { CcStmt* block; } CcStmtExpr;                  /* ({ ... }) */
 typedef struct CcComma { CcExpr* a; CcExpr* b; } CcComma;
 /* Concurrent-C */

@@ -1394,25 +1394,62 @@ static CcExpr* parse_at_emit(P* p) {
 
 /* ---- primary --------------------------------------------------------------------- */
 
+/* An association is `type-name : expr`; an identifier where one starts
+ * with no `:` to follow is a macro standing for whole associations. */
+static bool gen_arm_is_macro(P* p) {
+    uint32_t i = p->i;
+    int depth = 0;
+    if (p->t[i].kind != CC_TK_IDENT) return false;
+    while (i < p->n) {
+        const CcToken* t = &p->t[i];
+        if (t->kind == CC_TK_PP) return true;
+        if (t->kind == CC_TK_PUNCT) {
+            CcPunct k = t->punct;
+            if (k == CC_P_LPAREN || k == CC_P_LBRACKET) depth++;
+            else if (k == CC_P_RBRACKET) { if (depth) depth--; }
+            else if (k == CC_P_RPAREN) { if (!depth) return true; depth--; }
+            else if (!depth && k == CC_P_COMMA) return true;
+            else if (!depth && k == CC_P_COLON) return false;
+        }
+        i++;
+    }
+    return true;
+}
+
+/* `_Generic(control, T: e, ...)`. Which associations the host compiler
+ * sees is the preprocessor's answer, not the parser's: a `#ifdef` between
+ * them guards associations naming types this unit never declares, and a
+ * lone macro stands for whole associations. A list with either is kept as
+ * the tokens the user wrote, and replayed. */
 static CcExpr* parse_generic_sel(P* p) {
     uint32_t first = p->i;
     uint32_t open;
+    uint32_t args_first;
+    uint32_t close;
+    bool after_pp = false;
     CcGenericSel gs;
     Vec::[CcGenericSelArm] arms = vec_new::[CcGenericSelArm](p->arena);
     CcExpr* e;
+    memset(&gs, 0, sizeof gs);
     gs.control = NULL;
     gs.arms = arms;
     adv(p);
     open = p->i;
     if (!expect_p(p, CC_P_LPAREN, "_Generic")) {
         e = cc__expr_blank(span_from(p, first), p->arena);
+        gs.args = span2(first, first);
         e->k = { .generic_sel = gs };
         return e;
     }
     gs.control = parse_assign(p);
-    while (accept_p(p, CC_P_COMMA) || p->t[p->i].kind == CC_TK_PP) {
+    args_first = p->i;
+    for (;;) {
         CcGenericSelArm arm;
-        uint32_t afirst = p->i;
+        uint32_t afirst;
+        if (!accept_p(p, CC_P_COMMA) && p->t[p->i].kind != CC_TK_PP && !after_pp) break;
+        after_pp = false;
+        if (at_p(p, CC_P_RPAREN)) break;
+        afirst = p->i;
         arm.type = NULL;
         arm.expr = NULL;
         arm.is_default = false;
@@ -1426,14 +1463,22 @@ static CcExpr* parse_generic_sel(P* p) {
             pp_note(p, p->i, &last, &skipped);
             arm.span = span2(afirst, last);
             arms.push(arm);
-            if (at_p(p, CC_P_RPAREN)) break;
-            if (!at_p(p, CC_P_COMMA) && !at_kw(p, KW_DEFAULT) && !is_type_start(p, p->i)) break;
-            if (at_p(p, CC_P_COMMA)) continue;
-            arm.is_pp = false;
-            arm.pp_tok = 0;
-            afirst = p->i;
+            gs.verbatim = true;
+            after_pp = true;
+            continue;
         }
-        if (at_p(p, CC_P_RPAREN)) break;
+        if (gen_arm_is_macro(p)) {
+            uint32_t mlast = afirst;
+            arm.is_pp = true;
+            arm.pp_tok = afirst;
+            while (p->t[p->i].kind != CC_TK_PP && p->t[p->i].kind != CC_TK_EOF &&
+                   !at_p(p, CC_P_RPAREN) && !at_p(p, CC_P_COMMA)) { mlast = p->i; adv(p); }
+            arm.span = span2(afirst, mlast);
+            arms.push(arm);
+            gs.verbatim = true;
+            after_pp = true;
+            continue;
+        }
         if (accept_kw(p, KW_DEFAULT)) arm.is_default = true;
         else arm.type = parse_type_name(p);
         if (!expect_p(p, CC_P_COLON, "the _Generic association")) break;
@@ -1441,7 +1486,9 @@ static CcExpr* parse_generic_sel(P* p) {
         arm.span = span_from(p, afirst);
         arms.push(arm);
     }
+    close = p->i;
     expect_close(p, CC_P_RPAREN, "_Generic", open);
+    gs.args = span2(args_first, close > args_first ? close - 1 : args_first);
     gs.arms = arms;
     e = cc__expr_blank(span_from(p, first), p->arena);
     e->k = { .generic_sel = gs };

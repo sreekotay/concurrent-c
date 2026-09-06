@@ -9,6 +9,8 @@
 #ifndef CC_LOWER_GENERICS_CCH
 #define CC_LOWER_GENERICS_CCH
 #include "lower.cch"
+#include "parse.cch"
+#include "typing.cch"
 
 typedef struct GStep {
     CcLowerer* L;
@@ -320,6 +322,90 @@ static CCString gn_instance_text(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool
     return text;
 }
 
+/* How deep an expansion may nest before the step calls it a cycle: an
+ * expansion whose own text names the family that produced it would
+ * otherwise expand forever. */
+enum { GN_MAX_DEPTH = 8 };
+
+/* The steps a spliced expansion goes through: the pipeline without the
+ * include rewrite (an expansion records no local headers of its own) and
+ * without the banner (the unit it is spliced into carries one). */
+static void gn_lower_steps(CcLowerer* L) {
+    CcLowerer_chan(L);
+    CcLowerer_closures(L);
+    CcLowerer_create(L);
+    CcLowerer_forin(L);
+    CcLowerer_slices(L);
+    CcLowerer_generics(L);
+    CcLowerer_variants(L);
+    CcLowerer_ufcs(L);
+    CcLowerer_slice_args(L);
+    CcLowerer_strings(L);
+    CcLowerer_results(L);
+    CcLowerer_cleanup(L);
+    lw_drop_cc_only(L);
+}
+
+/* What went wrong inside an expansion, said at the site that asked for it:
+ * the expansion has no position in the file the user can open. */
+static void gn_fragment_error(CcLowerer* L, CcSpan sp, CcDiags* ds, CCSlice stage) {
+    Vec::[CcDiag]* items = &ds->items;
+    size_t n = items->len();
+    size_t i;
+    CCSlice first = cc_slice_empty();
+    uint32_t line = 0;
+    for (i = 0; i < n; i++) {
+        CcDiag* d = items->get_ptr(i);
+        if (d->sev != CC_SEV_ERROR) continue;
+        first = d->msg;
+        line = d->at.line;
+        break;
+    }
+    {
+        CCString m = @string(`the expansion of this unit's generic instances does not ${stage}: line ${line}: ${first}`, L->arena);
+        lw_error(L, sp, m);
+    }
+}
+
+/* The C an expansion lowers to. The expansion is a unit in its own right:
+ * parsed against the same index, put through the same steps, printed. It
+ * carries the language it was written in — Result returns, methods, string
+ * templates — so splicing its text unlowered would hand the host compiler
+ * Concurrent-C to compile. */
+static bool gn_lower_fragment(CcLowerer* L, CCString text, CcSpan sp, CCString* out) {
+    CCArena a = L->arena;
+    CcIndex* ix = L->ix;
+    CcDiags ds = CcDiags_new(a);
+    CcParseOpts opts;
+    CcPrintOpts po;
+    CcUnit* u;
+    CcLowerer sub;
+    CCSlice path = cstr_slice("<generic expansion>");
+    /* the expansion is spliced into whatever the unit is, so it is read and
+     * printed as source: bodies kept, no include guard of its own */
+    opts.mode = CC_UNIT_SOURCE;
+    opts.known_types = ix->known_types();
+    u = cc_parse_unit(path, text.as_slice(), opts, &ds, a);
+    if (!u || ds.has_errors()) { gn_fragment_error(L, sp, &ds, cstr_slice("parse")); return false; }
+    sub = cc_lowerer_new(u, ix, L->opts, &ds);
+    sub.depth = L->depth + 1;
+    gn_lower_steps(&sub);
+    if (ds.has_errors()) { gn_fragment_error(L, sp, &ds, cstr_slice("lower")); return false; }
+    po.identity = false;
+    po.line_directives = false;
+    po.header_mode = false;
+    po.path = path;
+    CcProduct prod = cc_print_unit(u, NULL, po, &ds, a) !>(e) {
+        CCSlice why = e.msg;
+        CCString m = @string(`the expansion of this unit's generic instances does not print: ${why}`, L->arena);
+        lw_error(L, sp, m);
+        return false;
+    };
+    if (ds.has_errors()) { gn_fragment_error(L, sp, &ds, cstr_slice("print")); return false; }
+    *out = prod.text;
+    return true;
+}
+
 static void CcLowerer_generics(CcLowerer* L) {
     GStep st;
     CcVisitor v;
@@ -347,12 +433,26 @@ static void CcLowerer_generics(CcLowerer* L) {
             sp0.first = 0;
             sp0.last = 0;
             if (gn_hand_declared(L, name)) continue;
+            if (L->depth >= (uint32_t)GN_MAX_DEPTH) {
+                int deep = GN_MAX_DEPTH;
+                CCString m = @string(`generic instance '${name}' expands into itself: the expansion nests ${deep} deep and still asks for another`, L->arena);
+                lw_error(L, sp0, m);
+                continue;
+            }
             one = gn_instance_text(L, info, sp0, &ok);
             if (!ok) continue;
             cc_string_push_slice(&all, one.as_slice(), L->arena);
             any = true;
         }
         if (!any) return;
+        {
+            CCString lowered = cc_string_new();
+            CcSpan at;
+            at.first = 0;
+            at.last = 0;
+            if (!gn_lower_fragment(L, all, at, &lowered)) return;
+            all = lowered;
+        }
         /* after the leading includes */
         {
             CcDeclList* decls = &L->unit->decls;

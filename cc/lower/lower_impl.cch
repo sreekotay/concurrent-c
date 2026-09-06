@@ -248,6 +248,11 @@ static CCSlice lw_closest(CcNameList names, CCSlice name) {
 
 /* ---- the pipeline ----------------------------------------------------- */
 
+/* Declarations no longer part of the unit once the steps have read them:
+ * the generics step lowers a spliced expansion through the same steps and
+ * needs this one before it is defined. */
+static void lw_drop_cc_only(CcLowerer* L);
+
 #include "lower_generics.cch"
 #include "lower_slices.cch"
 #include "lower_strings.cch"
