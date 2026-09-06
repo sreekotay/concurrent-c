@@ -1,6 +1,6 @@
 # JSON serdes (engine + golden)
 
-**Example path:** `@grammar(rules)` / `@grammar(schema)` over the stdlib
+**This example:** `@grammar(rules)` / `@grammar(schema)` over the stdlib
 factory (`<ccc/std/json.cch>`, `include JsonRfc` / `JsonKeep` / `JsonDom`).
 This directory keeps the hand golden DOM (`json.h`) and benches.
 `json.rules` / `json_dom.rules` / `json_codec.cch` here are shims onto
@@ -14,8 +14,8 @@ recognizer: `ws value ws`, the seven value types, numbers without a
 leading `+` / leading zero / trailing dot, and unescaped `U+0000`–`U+001F`
 rejected in strings. Escapes (`\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`,
 `\t`, `\uXXXX`) are accepted. Clean string spans stay borrowed; UTF-8
-well-formedness of a borrow is a use-site check, not a parse-time copy.
-`jstr` (in `<ccc/std/json.cch>`) runs only on dirty (escaped) spans.
+well-formedness of a borrowed span is a use-site check, not a parse-time
+copy. `jstr` (in `<ccc/std/json.cch>`) runs only on dirty (escaped) spans.
 
 The product schema for that text is `JsonVal` (tagged sum of the seven
 types) plus `JsonText` (`ws` + `JsonVal` + `ws`). Closed products such
@@ -69,11 +69,14 @@ without skewing the timing (expected: twitter.json `chk=406072`, numbers.json
 ## Corpora
 
 - `twitter.json` — the standard ~630 KB nested-object benchmark file (string-heavy).
-- `numbers.json` — 30k floats (array-heavy). Regenerate a larger one with
-  `python3 tools/gen_numbers.py 300000 > numbers.json`.
-- `python3 tools/minify.py < twitter.json > twitter_min.json` strips structural
-  whitespace *without* re-encoding strings — useful because pretty-printing
-  (twitter.json is 26.6% whitespace) otherwise dominates the parse.
+- `numbers.json` — 30k floats (array-heavy). A larger one:
+  `python3 tools/gen_numbers.py 300000 > numbers_big.json`.
+- `tools/minify.py` and `tools/minify.shcc` are byte twins: they strip
+  structural whitespace without re-encoding strings (compacted bytes only;
+  no added newline). `twitter.json` is 26.6% whitespace; leaving it
+  pretty-printed would dominate the parse.
+  `python3 tools/minify.py < twitter.json > twitter_min.json`
+  (or `./tools/minify.shcc < …`). Suite: `tests/script_minify_smoke.shcc`.
 
 ## Comparing against yyjson (optional)
 
@@ -105,11 +108,15 @@ the July Linux receipt has generated match ahead of yyjson-default.
 | `<ccc/std/json_dom.rules>` | tape collect (`include JsonDom`) |
 | `<ccc/std/json.cch>` | `jstr` decode + `jstr_enc` encode |
 | `json.rules` / `json_dom.rules` / `json_codec.cch` | shims onto stdlib |
-| `bench_grammar.ccs` | engine match / collect / DOM / schema bench |
+| `bench_grammar.ccs` | engine match / collect / DOM / schema bench (`-g`) |
+| `bench_write.ccs` | generated write vs hand unchecked encoder (`-w`) |
+| `bench_dom.ccs` | shaped DOM vs pair-tape (`-d`) |
+| `bench_shape.c`, `json_shape.h` | hidden-class DOM vs tape (`-s`) |
 | `json.h` | hand golden DOM (lowering oracle; not RFC-strict on controls) |
 | `bench.c` | golden throughput + zero-copy harness |
 | `bench.sh` | build + run driver (`-a` / `-g` / `-y` / `-d` / `-w` / `-s`) |
 | `yy.c` | yyjson comparison harness |
 | `yyjson.c`, `yyjson.h` | vendored yyjson 0.12.0 |
 | `benchmark_baseline_2026_08_15.txt` | latest full-ladder receipt |
-| `tools/gen_numbers.py`, `tools/minify.py` | corpus helpers |
+| `tools/gen_numbers.py` | regenerate a larger numbers corpus |
+| `tools/minify.py`, `tools/minify.shcc` | byte-twin whitespace strippers |

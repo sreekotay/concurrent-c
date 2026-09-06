@@ -3,9 +3,9 @@
 [Getting Started](docs/getting-started.md) ·
 [The CC Way](docs/the-cc-way.md) · [Cheatsheet](docs/cheatsheet.md)
 
-**Version:** 0.3.4-258 (`ccc --version`)
+**Version:** 0.3.4-324 (`ccc --version`)
 
-Concurrent‑C is a **strict C11-superset preprocessor**: `.ccs` lowers to
+Concurrent-C is a **strict C11-superset preprocessor**: `.ccs` lowers to
 plain C and compiles with your **host C compiler**. Structured concurrency,
 results, comptime, UFCS, slices/arenas, and a header-first runtime ship with the
 language.
@@ -13,10 +13,10 @@ language.
 **License:** Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.
 
 Toolchain:
-- A `ccc` driver (`out/cc/bin/ccc` or wrapper `cc/bin/ccc`) that lowers `.ccs` → C (with `#line` sourcemaps) and then compiles/links with the host C compiler (`cc`, `clang`, …).
-- A light/statically linked runtime/stdlib (header-first, prefixed APIs) under `cc/include/ccc` and `cc/runtime`.
+- A `ccc` driver (`out/cc/bin/ccc` or wrapper `cc/bin/ccc`) that lowers `.ccs` → C (with `#line` source maps) and then compiles/links with the host C compiler (`cc`, `clang`, …).
+- A lightweight, statically linked runtime/stdlib (header-first, prefixed APIs) under `cc/include/ccc` and `cc/runtime`.
 - A test runner (`tools/cc_test`) that drives `cc/bin/ccc` end-to-end.
-- Vendored TinyCC runs **comptime** (`CONFIG_CC_EXT`); it can also be selected as a host-C backend if desired.
+- Vendored TinyCC runs **comptime** (`CONFIG_CC_EXT`); it can also be selected as a host-C backend if desired. TinyCC support does not require a CC language fork of TCC; the current compatibility patch is ~1.8 KB against a pinned pristine upstream mob.
 
 ```c
 #include <ccc/cc_runtime.cch>      // nurseries, channels, core runtime
@@ -57,7 +57,7 @@ Three named siblings: [examples/hello.ccs](examples/hello.ccs).
 - [Sanitizers / fuzzing](docs/sanitizers.md) — ASan/TSan receipts (runtime, real_projects, bridge)
 - [Performance](perf/) — benches, [interop baselines](perf/baselines/), [compiler baseline](perf/compiler_baseline.txt), Neckbeard gauntlets
 - [Backwards compatibility](docs/backwards_compatibility.md) — unit headers, version pins, bootstrap seeds
-- [Docs index](docs/README.md) 
+- [Docs index](docs/README.md)
 
 ### Python & JavaScript interop
 
@@ -70,9 +70,9 @@ Three named siblings: [examples/hello.ccs](examples/hello.ccs).
 
 | Project | What it is |
 |---------|------------|
-| [cc-python](https://www.npmjs.com/package/concurrent-c-python) | npm package to run Python in JS - any pip module — zero copy numpy etc, full speed, fully featured |
+| [cc-python](https://www.npmjs.com/package/concurrent-c-python) | npm package to run Python in JS — any pip module — zero-copy NumPy etc, full speed, fully featured |
 | [cc-node](https://pypi.org/project/concurrent-c-node/) | pip package to run Node at full speed in Python, including first-class Jupyter/notebook support |
-| [cctext](https://github.com/sreekotay/cctext) | Open multi-GB text, CSV, code, JSON and navigate and edit in ms. Includes deep-search file explorer (TUI and GUI). Open and edit an 8GB file with <5MB memory usage in under 2ms. |
+| [cctext](https://github.com/sreekotay/cctext) | Open multi-GB text, CSV, code, and JSON and navigate and edit in ms. Includes a deep-search file explorer (TUI and GUI). Open and edit an 8 GB file with <5 MB memory usage in under 2 ms. |
 | [rlsw-cc](https://github.com/sreekotay/rlsw-cc) | Update to raylib software rendering, running at 1.5x to 2x speed |
 
 ### Real projects, measured
@@ -85,7 +85,7 @@ tutorial, idiomatic, and production code — and race their upstreams
 (dated baselines with full output live in each folder's `benchmarks/`):
 
 - [**pigz**](real_projects/pigz/) — parallel gzip, feature-complete next
-  to upstream C: **191 MB/s vs upstream pigz's 166 MB/s** on 100MB
+  to upstream C: **191 MB/s vs upstream pigz's 166 MB/s** on 100 MB
   (fiber scheduler vs pthreads), plus an idiomatic pipeline file you can
   read in one sitting.
 - [**Redis**](real_projects/redis/) — the data-plane subset benched with
@@ -108,7 +108,7 @@ tutorial, idiomatic, and production code — and race their upstreams
 - [**The Neckbeard Challenges**](perf/run_neckbeard_challenges.sh) — six
   cross-language robustness gauntlets (syscall kidnapping, wake storms,
   fairness, named locks) run head-to-head against pthreads, Go, and Zig,
-  each sub-benchmark's verdict printed verbatim:
+  with each sub-benchmark's verdict printed verbatim:
   [latest record](perf/benchmarks/neckbeard_2026_08_14.txt).
 - [**CVE locality study**](studies/cve_locality/) — 27 real CVE/shape
   reconstructions under idiomatic CC, pre-registered rules, misses
@@ -136,7 +136,7 @@ cd concurrent-c
 PREFIX="$HOME/.local" ./cc-install.sh
 ```
 
-`cc-install.sh` also works from anywhere (clones into `$PWD/concurrent-c` or `$CC_REPO_DIR`), builds, installs to `$PREFIX/bin`, and compiles a small program to prove the install. Roughly half a minute on four cores and about 40M of disk.
+`cc-install.sh` also works from anywhere (clones into `$PWD/concurrent-c` or `$CC_REPO_DIR`), builds, installs to `$PREFIX/bin`, and compiles a small program to prove the install. Roughly half a minute on four cores and about 40 MB of disk.
 
 ```bash
 ./cc-install.sh                                   # from an existing checkout
@@ -230,7 +230,7 @@ Self-contained install; headers ship pre-lowered.
 
 ### Examples and tests
 
-Needs the hacking checkout (patched TinyCC), not just an installed `ccc`.
+The suite needs the hacking checkout (patched TinyCC), not just an installed `ccc`.
 `./scripts/test.sh` / `make test` refuse an unpatched or stale tree and
 rebuild `ccc` when sources are newer than the binaries.
 
@@ -257,9 +257,11 @@ seed 0.3.4-294). Receipts: [docs/ilp32-docker.md](docs/ilp32-docker.md).
 
 ### Updating TCC
 
-TinyCC is the **comptime** engine (and an optional host-C backend). Patch:
-`third_party/tcc-patches/0001-cc-ext-hooks.patch`. Fork branch: `origin/mob`
-on `https://github.com/sreekotay/tinycc.git`.
+TinyCC is the **comptime** engine (and an optional host-C backend). TinyCC
+support does not require a CC language fork of TCC; the current compatibility
+patch is ~1.8 KB against a pinned pristine upstream mob
+(`third_party/tcc-patches/0001-cc-ext-hooks.patch`, pin `origin/upstream-mob`
+on `https://github.com/sreekotay/tinycc.git`).
 
 ```bash
 make tcc-patch-apply
@@ -267,14 +269,15 @@ make tcc-patch-regen
 make tcc-update-check
 ```
 
-`third_party/tcc` is usually detached HEAD (parent pins the commit). Push CC
-TCC changes to `origin/mob`.
+`third_party/tcc` is usually detached HEAD (parent pins the commit). CC hook
+edits ride the patch file (`make tcc-patch-regen`); the applied working tree
+is intentionally dirty.
 
-Upgrade loop: update submodule → `tcc-patch-apply` → fix → `tcc-patch-regen` →
-push submodule to `origin/mob` → `tcc-update-check`.
+Upgrade loop: bump the submodule pin → `tcc-patch-apply` → fix →
+`tcc-patch-regen` → `tcc-update-check`.
 
+### CC Adversarial Projects
 
-### CC Adverserial Projcts
 Work selection process: upstream fail candidates identified and registered prior to work.
 
 - throughput pipelines with pigz; (Adler)
@@ -283,10 +286,10 @@ Work selection process: upstream fail candidates identified and registered prior
 - historical safety failures through the CVE study; (CVE)
 - tiny scripting; (.shcc)
 - specialization/code generation; (levenshtein.py)
-- ordinary C lowering (bootsrap with only TCC on ILP32)
+- ordinary C lowering (bootstrap with only TCC on ILP32)
 - foreign-language hosting/export with Python/JS; (node, py3)
-- embarassingly parallel (raytracer)
+- embarrassingly parallel (raytracer)
 - C/brownfield integration; (libcurl)
 - C/brownfield (no toolchain) integration w/concurrency; (rlsw-cc)
-- large interactive state with cctext; (fast, low RSS, multiGB, workspace)
-- persistent incremental dependency/invalidation in foreign runtin; (Stylo)
+- large interactive state with cctext; (fast, low RSS, multi-GB, workspace)
+- persistent incremental dependency/invalidation in foreign runtime; (Stylo)

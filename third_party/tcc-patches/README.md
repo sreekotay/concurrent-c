@@ -1,6 +1,10 @@
 # TCC Patches for Concurrent C
 
-This directory contains patches to TCC (Tiny C Compiler) that enable CC language extensions.
+TinyCC support does not require a CC language fork of TCC; the current
+compatibility patch is ~1.8 KB against a pinned pristine upstream mob.
+
+This directory contains that patch: the `CONFIG_CC_EXT` hooks TinyCC needs
+for CC comptime / `libtcc`.
 
 ## Documentation
 

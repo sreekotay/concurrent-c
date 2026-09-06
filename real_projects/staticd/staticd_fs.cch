@@ -2,9 +2,12 @@
  * Jail, fd cache, directory listing. Policy (403 vs list, encode) stays
  * in staticd.ccs. Include after staticd_block.cch (tick / cull).
  *
- * openat + O_NOFOLLOW — not cc_dir_open (path-based, not jailed).
+ * Jail is a directory-fd walk: each component openat(O_NOFOLLOW),
+ * intermediates O_DIRECTORY. Not one openat of the whole relative path
+ * (O_NOFOLLOW is the leaf only). Not cc_dir_open (path-based).
  * Body bytes: caller preads the held fd (no mmap).
- * fstat ≤1s while the fd is cached (hot files included).
+ * Fd cache: pathname revalidate ≤1s (absolute). Hold dups the fd so a
+ * swap can close the slot fd while in-flight holds finish.
  */
 #ifndef STATICD_FS_CCH
 #define STATICD_FS_CCH
@@ -18,6 +21,11 @@
 #include <errno.h>
 #include <dirent.h>
 #include <stdint.h>
+#include <limits.h>
+
+#ifndef NAME_MAX
+#define NAME_MAX 255
+#endif
 
 #define FILE_CACHE_N   8
 #define FILE_CACHE_TTL 1
@@ -31,7 +39,7 @@ typedef struct FileHold {
     uint64_t dev;
     uint64_t ino;
     int slot;
-    int fd; /* shared while cached; owned when slot < 0 */
+    int fd; /* always owned (cache hit is a dup of slot.fd) */
     char rel[128];
 } FileHold;
 
@@ -66,6 +74,74 @@ static int path_is_safe(char[:] path) {
     return 1;
 }
 
+/* Walk rel under root_fd. Each component O_NOFOLLOW; intermediates
+ * O_DIRECTORY. last_dir: the leaf is a directory too. Does not close
+ * root_fd. Empty / `//` / `.` / `..` components fail. */
+static int open_beneath(int root_fd, const char* rel, int last_dir) {
+    int dirfd = root_fd;
+    const char* p = rel;
+    char name[NAME_MAX + 1];
+
+    if (root_fd < 0 || !rel || rel[0] == '/') {
+        errno = EINVAL;
+        return -1;
+    }
+    if (!rel[0]) {
+        errno = EINVAL;
+        return -1;
+    }
+    for (;;) {
+        const char* slash = strchr(p, '/');
+        size_t n;
+        int last, flags, fd;
+
+        if (slash) {
+            n = (size_t)(slash - p);
+            last = 0;
+        } else {
+            n = strlen(p);
+            last = 1;
+        }
+        if (n == 0) {
+            if (last) {
+                if (last_dir) {
+                    if (dirfd == root_fd) {
+                        fd = fcntl(root_fd, F_DUPFD_CLOEXEC, 0);
+                        return fd;
+                    }
+                    return dirfd;
+                }
+                if (dirfd != root_fd) close(dirfd);
+                errno = EISDIR;
+                return -1;
+            }
+            p = slash + 1;
+            continue;
+        }
+        if ((n == 1 && p[0] == '.')
+                || (n == 2 && p[0] == '.' && p[1] == '.')) {
+            if (dirfd != root_fd) close(dirfd);
+            errno = EPERM;
+            return -1;
+        }
+        if (n > (size_t)NAME_MAX) {
+            if (dirfd != root_fd) close(dirfd);
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        memcpy(name, p, n);
+        name[n] = 0;
+        flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW;
+        if (!last || last_dir) flags |= O_DIRECTORY;
+        fd = openat(dirfd, name, flags);
+        if (dirfd != root_fd) close(dirfd);
+        if (fd < 0) return -1;
+        if (last) return fd;
+        dirfd = fd;
+        p = slash + 1;
+    }
+}
+
 static int !>(CCIoError) open_at(int root_fd, const char* rel,
                                  size_t* file_len, time_t* mtime,
                                  uint64_t* dev, uint64_t* ino) {
@@ -73,7 +149,7 @@ static int !>(CCIoError) open_at(int root_fd, const char* rel,
     int fd;
     if (!rel || !rel[0] || rel[0] == '/')
         return cc_err(cc_io_from_errno(EINVAL));
-    fd = openat(root_fd, rel, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    fd = open_beneath(root_fd, rel, 0);
     if (fd < 0) return cc_err(cc_io_from_errno(errno));
     if (fstat(fd, &st) != 0) {
         int e = errno;
@@ -91,8 +167,8 @@ static int !>(CCIoError) open_at(int root_fd, const char* rel,
     return cc_ok(fd);
 }
 
-/* until slides on hit (idle 1s fd). checked is last fstat second —
- * restat at most once a second even while hot. Serve stale while refs > 0. */
+/* until slides on hit (cache residency). checked is last pathname
+ * resolve — once a second, not idle-sliding. Hold dups slot.fd. */
 typedef struct FileSlot {
     char rel[FILE_CACHE_KEY];
     time_t mtime;
@@ -145,35 +221,49 @@ static void fc_sweep(time_t now) {
     }
 }
 
-/* File-cache name held. fstat at most once a second. -1 = slot gone. */
-static int fc_revalidate(int i, time_t now) {
-    struct stat st;
-    if (now <= g_fc[i].checked) return 0;
-    if (fstat(g_fc[i].fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) {
-        g_fc[i].checked = now;
-        if (g_fc[i].refs > 0) return 0;
-        {
-            uint64_t dev = g_fc[i].dev;
-            uint64_t ino = g_fc[i].ino;
-            fc_clear(i);
-            block_cull_id(dev, ino);
+/* Lock held. Dup slot.fd onto h; ++refs. 0 ok, -1 errno. */
+static int fc_dup_hold(int i, time_t now, FileHold* h) {
+    int d = fcntl(g_fc[i].fd, F_DUPFD_CLOEXEC, 0);
+    if (d < 0) return -1;
+    g_fc[i].refs++;
+    g_fc[i].until = now + FILE_CACHE_TTL;
+    h->mtime = g_fc[i].mtime;
+    h->file_len = g_fc[i].file_len;
+    h->dev = g_fc[i].dev;
+    h->ino = g_fc[i].ino;
+    h->slot = i;
+    h->fd = d;
+    return 0;
+}
+
+/* Lock held. Consume fd: same inode keeps slot.fd, else swap. */
+static void fc_apply_open(int i, int fd, time_t now, size_t file_len,
+                          time_t mtime, uint64_t dev, uint64_t ino) {
+    int same = (g_fc[i].fd >= 0 && g_fc[i].dev == dev && g_fc[i].ino == ino);
+    if (same) {
+        if (g_fc[i].mtime != mtime || g_fc[i].file_len != file_len) {
+            block_cull_id(g_fc[i].dev, g_fc[i].ino);
+            g_fc[i].mtime = mtime;
+            g_fc[i].file_len = file_len;
         }
-        return -1;
+        close(fd);
+    } else {
+        if (g_fc[i].ino)
+            block_cull_id(g_fc[i].dev, g_fc[i].ino);
+        if (g_fc[i].fd >= 0) close(g_fc[i].fd);
+        g_fc[i].fd = fd;
+        g_fc[i].mtime = mtime;
+        g_fc[i].file_len = file_len;
+        g_fc[i].dev = dev;
+        g_fc[i].ino = ino;
     }
     g_fc[i].checked = now;
-    if (st.st_mtime != g_fc[i].mtime || (size_t)st.st_size != g_fc[i].file_len) {
-        block_cull_id(g_fc[i].dev, g_fc[i].ino);
-        g_fc[i].mtime = st.st_mtime;
-        g_fc[i].file_len = (size_t)st.st_size;
-    }
-    return 0;
 }
 
 static void file_hold_drop(FileHold* h) {
     if (!h) return;
-    if (h->slot < 0) {
-        if (h->fd >= 0) close(h->fd);
-    } else {
+    if (h->fd >= 0) close(h->fd);
+    if (h->slot >= 0) {
         CCExclusiveGuard hold = g_fc_mx.acquire() @destroy;
         if (h->slot < FILE_CACHE_N && g_fc[h->slot].refs > 0) {
             g_fc[h->slot].refs--;
@@ -187,7 +277,7 @@ static void file_hold_drop(FileHold* h) {
 static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
     FileHold h = { .slot = -1, .fd = -1 };
     time_t now;
-    int i, fd;
+    int i, fd, e;
     size_t n;
 
     if (!rel || !rel[0] || rel[0] == '/')
@@ -195,8 +285,8 @@ static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
     n = strlen(rel);
     if (n < FILE_CACHE_KEY) memcpy(h.rel, rel, n + 1);
     if (n >= FILE_CACHE_KEY) {
-        fd = open_at(root_fd, rel, &h.file_len, &h.mtime, &h.dev, &h.ino) !>(e) {
-            return cc_err(e);
+        fd = open_at(root_fd, rel, &h.file_len, &h.mtime, &h.dev, &h.ino) !>(err) {
+            return cc_err(err);
         };
         h.fd = fd;
         block_tick(time(NULL));
@@ -207,56 +297,47 @@ static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
     CCExclusiveGuard hold = g_fc_mx.acquire() @destroy;
     fc_sweep(now);
     i = fc_find(rel);
-    if (i >= 0 && (now <= g_fc[i].until || g_fc[i].refs > 0)) {
-        if (fc_revalidate(i, now) != 0) {
+    if (i >= 0 && (now <= g_fc[i].until || g_fc[i].refs > 0)
+            && now <= g_fc[i].checked) {
+        if (fc_dup_hold(i, now, &h) != 0) {
+            e = errno;
             hold.release();
-            return cc_err(cc_io_from_errno(ENOENT));
+            return cc_err(cc_io_from_errno(e));
         }
-        g_fc[i].refs++;
-        g_fc[i].until = now + FILE_CACHE_TTL;
-        h.mtime = g_fc[i].mtime;
-        h.file_len = g_fc[i].file_len;
-        h.dev = g_fc[i].dev;
-        h.ino = g_fc[i].ino;
-        h.slot = i;
-        h.fd = g_fc[i].fd;
         hold.release();
         block_tick(now);
         return cc_ok(h);
     }
     hold.release();
 
-    fd = open_at(root_fd, rel, &h.file_len, &h.mtime, &h.dev, &h.ino) !>(e) {
-        return cc_err(e);
+    fd = open_at(root_fd, rel, &h.file_len, &h.mtime, &h.dev, &h.ino) !>(err) {
+        hold = g_fc_mx.acquire();
+        now = time(NULL);
+        i = fc_find(rel);
+        if (i >= 0) {
+            g_fc[i].checked = now;
+            if (g_fc[i].refs == 0) fc_clear(i);
+        }
+        hold.release();
+        return cc_err(err);
     };
 
     hold = g_fc_mx.acquire();
     now = time(NULL);
     fc_sweep(now);
     i = fc_find(rel);
-    if (i >= 0 && (now <= g_fc[i].until || g_fc[i].refs > 0)) {
-        if (fc_revalidate(i, now) != 0) {
+    if (i >= 0) {
+        fc_apply_open(i, fd, now, h.file_len, h.mtime, h.dev, h.ino);
+        if (fc_dup_hold(i, now, &h) != 0) {
+            e = errno;
             hold.release();
-            close(fd);
-            return cc_err(cc_io_from_errno(ENOENT));
+            return cc_err(cc_io_from_errno(e));
         }
-        g_fc[i].refs++;
-        g_fc[i].until = now + FILE_CACHE_TTL;
-        h.mtime = g_fc[i].mtime;
-        h.file_len = g_fc[i].file_len;
-        h.dev = g_fc[i].dev;
-        h.ino = g_fc[i].ino;
-        h.slot = i;
-        h.fd = g_fc[i].fd;
         hold.release();
-        close(fd);
         block_tick(now);
         return cc_ok(h);
     }
-    if (i >= 0 && g_fc[i].refs == 0)
-        fc_clear(i);
-    else
-        i = fc_evict(now);
+    i = fc_evict(now);
     if (i < 0) {
         hold.release();
         h.fd = fd;
@@ -270,10 +351,14 @@ static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
     g_fc[i].ino = h.ino;
     g_fc[i].until = now + FILE_CACHE_TTL;
     g_fc[i].checked = now;
-    g_fc[i].refs = 1;
+    g_fc[i].refs = 0;
     g_fc[i].fd = fd;
-    h.slot = i;
-    h.fd = fd;
+    if (fc_dup_hold(i, now, &h) != 0) {
+        e = errno;
+        fc_clear(i);
+        hold.release();
+        return cc_err(cc_io_from_errno(e));
+    }
     hold.release();
     block_tick(now);
     return cc_ok(h);
@@ -308,8 +393,9 @@ static int join_index(char* dst, size_t cap, const char* rel, const char* index)
 }
 
 static int fs_dir_open(int root_fd, const char* rel) {
-    const char* drel = (rel && rel[0]) ? rel : ".";
-    return openat(root_fd, drel, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (!rel || !rel[0] || strcmp(rel, ".") == 0)
+        return fcntl(root_fd, F_DUPFD_CLOEXEC, 0);
+    return open_beneath(root_fd, rel, 1);
 }
 
 typedef struct DirEnt {

@@ -880,7 +880,7 @@ int main(void) {
 ## `.shcc` scripts
 
 Same language as `.ccs`; script prelude + synthetic `main` when you omit
-`main`. Ambient `stdin` / `arena` / `args` when those names appear.
+`main`. That wrap predeclares `stdin` / `arena` / `args` when referenced.
 `ccc tool.shcc` is an implicit run. See
 [getting-started § `.shcc`](getting-started.md#shcc-scripts) and
 [spec §9.5](../spec/concurrent-c-spec-complete.md#95-script-library-shcc--cccscript).

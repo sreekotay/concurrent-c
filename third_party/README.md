@@ -38,7 +38,9 @@ than a hard prerequisite.
 
 ## TCC
 
-Upstream TinyCC with minimal CC integration hooks.
+Upstream TinyCC with minimal CC integration hooks. TinyCC support does
+not require a CC language fork of TCC; the current compatibility patch is
+~1.8 KB against a pinned pristine upstream mob.
 
 - **Patches**: `tcc-patches/` contains small hooks for CC integration (lexer/parser hooks, const-eval API)
 - **Apply patches**: `make tcc-patch-apply`

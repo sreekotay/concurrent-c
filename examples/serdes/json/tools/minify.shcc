@@ -2,6 +2,7 @@
 #include <stdio.h>
 /*
  * Twin of minify.py: strip structural JSON whitespace, preserve string bytes.
+ * Same stdout as Python: compacted bytes only (no added newline).
  *
  * Usage:  ./minify.shcc < twitter.json > twitter_min.json
  *         (or: ccc minify.shcc < ...)
@@ -24,5 +25,5 @@ bool instr = false, esc = false;
         if (ch == '"') instr = true;
     }
 }
-println(out.as_slice()) !>;
+std_out.write(out.as_slice()) !>;
 /* prelude + synthetic-main predecls (arena/stdin); default @errhandler */

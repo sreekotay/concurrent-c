@@ -52,6 +52,13 @@ Chapel's release RA at one locale (`ra.chpl` / `ra-atomics.chpl`,
 `./random_access/compare.sh` (or `--smoke`). Multi-locale is
 `./random_access/compare_dist.sh` (`ra_dist.ccs`).
 
+## staticd
+
+[`staticd/`](staticd/) is an HTTP/1.1 static file server: dest accept,
+`@typeview` header encode, and a `(dev, ino, block)` send ring. Peers
+are nginx, darkhttpd, and optional caddy. Same fixture tree, SHA-256
+gate, latency matrix. `./staticd/compare.sh` (or `--smoke`).
+
 ## Sanitizers / fuzz
 
 ```bash

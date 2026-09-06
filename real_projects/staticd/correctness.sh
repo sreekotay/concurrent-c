@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Correctness gate: every enabled server must match fixtures/manifest.txt
 # (status 200, Content-Length, body SHA-256) and reject traversal.
+# staticd also: OPTIONS, query strip, --header, --index, --list,
+# Connection token list, Range / 304 / If-Range, intermediate symlink
+# jail, atomic rename under a hot name.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -37,6 +40,13 @@ cleanup() {
     rm -rf "$TMPDIR_RUN"
 }
 trap cleanup EXIT
+
+hdr_field() {
+    local file="$1" name="$2"
+    awk -v n="$name" 'BEGIN{IGNORECASE=1} $0 ~ "^" n ":" {
+        sub(/^[^:]+:[ \t]*/, ""); print; exit
+    }' "$file" | tr -d '\r'
+}
 
 sha256_file() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -187,6 +197,79 @@ check_server() {
             exit 1
         fi
         echo "  ok --header -> $acao"
+
+        local rcode rclen rbytes
+        rcode=$(curl -sS -D "$TMPDIR_RUN/range.hdr" -o "$TMPDIR_RUN/range.body" \
+            -w '%{http_code}' -H 'Range: bytes=0-15' \
+            "http://127.0.0.1:${port}/4kb.html")
+        rclen=$(hdr_field "$TMPDIR_RUN/range.hdr" Content-Length)
+        rbytes=$(wc -c < "$TMPDIR_RUN/range.body" | tr -d ' ')
+        if [[ "$rcode" != "206" || "$rclen" != "16" || "$rbytes" != "16" ]]; then
+            echo "FAIL $name Range 0-15 status=$rcode clen=$rclen bytes=$rbytes" >&2
+            exit 1
+        fi
+        echo "  ok Range bytes=0-15 -> 206 clen=16"
+
+        local ovr
+        ovr=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'Range: bytes=999999999999999999999999-999999999999999999999999' \
+            "http://127.0.0.1:${port}/4kb.html")
+        if [[ "$ovr" != "416" ]]; then
+            echo "FAIL $name Range overflow status=$ovr (want 416)" >&2
+            exit 1
+        fi
+        echo "  ok Range overflow -> 416"
+
+        local lm ims_code ifr_ok ifr_miss bad_ims conn_h
+        curl -sS -D "$TMPDIR_RUN/lm.hdr" -o /dev/null \
+            "http://127.0.0.1:${port}/4kb.html"
+        lm=$(hdr_field "$TMPDIR_RUN/lm.hdr" Last-Modified)
+        if [[ -z "$lm" ]]; then
+            echo "FAIL $name missing Last-Modified" >&2
+            exit 1
+        fi
+        ims_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "If-Modified-Since: $lm" \
+            "http://127.0.0.1:${port}/4kb.html")
+        if [[ "$ims_code" != "304" ]]; then
+            echo "FAIL $name If-Modified-Since status=$ims_code (want 304)" >&2
+            exit 1
+        fi
+        echo "  ok If-Modified-Since -> 304"
+        bad_ims=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'If-Modified-Since: not-a-date' \
+            "http://127.0.0.1:${port}/4kb.html")
+        if [[ "$bad_ims" != "200" ]]; then
+            echo "FAIL $name malformed If-Modified-Since status=$bad_ims (want 200)" >&2
+            exit 1
+        fi
+        echo "  ok malformed If-Modified-Since -> 200"
+        ifr_ok=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "If-Range: $lm" -H 'Range: bytes=0-15' \
+            "http://127.0.0.1:${port}/4kb.html")
+        if [[ "$ifr_ok" != "206" ]]; then
+            echo "FAIL $name If-Range match status=$ifr_ok (want 206)" >&2
+            exit 1
+        fi
+        echo "  ok If-Range match -> 206"
+        ifr_miss=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'If-Range: Wed, 01 Jan 1990 00:00:00 GMT' \
+            -H 'Range: bytes=0-15' \
+            "http://127.0.0.1:${port}/4kb.html")
+        if [[ "$ifr_miss" != "200" ]]; then
+            echo "FAIL $name If-Range miss status=$ifr_miss (want 200)" >&2
+            exit 1
+        fi
+        echo "  ok If-Range miss -> 200"
+
+        conn_h=$(curl -sS -D- -o /dev/null -H 'Connection: foo, close' \
+            "http://127.0.0.1:${port}/4kb.html" \
+            | awk 'BEGIN{IGNORECASE=1} /^Connection:/ {print}' | tr -d '\r')
+        if [[ "$conn_h" != *close* ]]; then
+            echo "FAIL $name Connection: foo, close -> '$conn_h'" >&2
+            exit 1
+        fi
+        echo "  ok Connection token list -> $conn_h"
     fi
 }
 
@@ -247,6 +330,64 @@ if [[ "$INCLUDE_STATICD" == "1" ]]; then
         exit 1
     fi
     echo "  ok repeat --header"
+
+    mkdir -p "$www/public"
+    printf 'ok\n' > "$www/public/ok.txt"
+    printf 'old\n' > "$www/swap.txt"
+    ln -sfn /etc "$www/public/external"
+    leaf_src=""
+    if [[ -e /etc/hosts ]]; then leaf_src=/etc/hosts
+    elif [[ -e /etc/passwd ]]; then leaf_src=/etc/passwd
+    fi
+    if [[ -n "$leaf_src" ]]; then
+        ln -sfn "$leaf_src" "$www/public/secret"
+        esc_name=$(basename "$leaf_src")
+        ok_body=$(curl -sS "http://127.0.0.1:${list_port}/public/ok.txt")
+        if [[ "$ok_body" != $'ok\n' && "$ok_body" != ok ]]; then
+            echo "FAIL staticd jail peer /public/ok.txt body=$ok_body" >&2
+            exit 1
+        fi
+        esc_code=$(curl --path-as-is -sS -o "$TMPDIR_RUN/esc.body" -w '%{http_code}' \
+            "http://127.0.0.1:${list_port}/public/external/${esc_name}")
+        if [[ "$esc_code" == "200" ]] || cmp -s "$TMPDIR_RUN/esc.body" "$leaf_src" 2>/dev/null; then
+            echo "FAIL staticd intermediate symlink escape status=$esc_code" >&2
+            exit 1
+        fi
+        echo "  ok intermediate symlink /public/external/${esc_name} -> $esc_code"
+        esc_code=$(curl --path-as-is -sS -o "$TMPDIR_RUN/leaf.body" -w '%{http_code}' \
+            "http://127.0.0.1:${list_port}/public/secret")
+        if [[ "$esc_code" == "200" ]] || cmp -s "$TMPDIR_RUN/leaf.body" "$leaf_src" 2>/dev/null; then
+            echo "FAIL staticd leaf symlink escape status=$esc_code" >&2
+            exit 1
+        fi
+        echo "  ok leaf symlink /public/secret -> $esc_code"
+        esc_code=$(curl --path-as-is -sS -o "$TMPDIR_RUN/escdir.body" -w '%{http_code}' \
+            "http://127.0.0.1:${list_port}/public/external/")
+        if [[ "$esc_code" == "200" ]] && grep -q hosts "$TMPDIR_RUN/escdir.body" 2>/dev/null; then
+            echo "FAIL staticd symlink dir listing escaped" >&2
+            exit 1
+        fi
+        echo "  ok symlink dir /public/external/ -> $esc_code"
+    fi
+
+    old_body=$(curl -sS "http://127.0.0.1:${list_port}/swap.txt")
+    if [[ "$old_body" != $'old\n' && "$old_body" != old ]]; then
+        echo "FAIL staticd swap.txt before rename body=$old_body" >&2
+        exit 1
+    fi
+    printf 'new\n' > "$www/swap.txt.new"
+    mv -f "$www/swap.txt.new" "$www/swap.txt"
+    tick=$(date +%s)
+    while [[ "$(date +%s)" -le "$tick" ]]; do
+        curl -sS -o /dev/null "http://127.0.0.1:${list_port}/swap.txt" || true
+        sleep 0.05
+    done
+    new_body=$(curl -sS "http://127.0.0.1:${list_port}/swap.txt")
+    if [[ "$new_body" != $'new\n' && "$new_body" != new ]]; then
+        echo "FAIL staticd rename still serving stale body=$new_body" >&2
+        exit 1
+    fi
+    echo "  ok pathname revalidate after rename"
 fi
 
 echo "correctness: PASS"

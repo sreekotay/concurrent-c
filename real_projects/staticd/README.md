@@ -10,16 +10,16 @@ encode, and ship. The file you read is the server you run.
 | | |
 |---|---|
 | Methods | `GET`, `HEAD`, `OPTIONS` (204 + `Allow`) |
-| HTTP/1.1 | keep-alive (HTTP/1.1 default; `Connection: close` / HTTP/1.0 close) |
+| HTTP/1.1 | keep-alive (HTTP/1.1 default). `Connection` is a token list; `close` dominates |
 | Time | `Date`, `Last-Modified`, `If-Modified-Since` → 304 |
 | Range | one `Range: bytes=` → 206 / 416; `If-Range` (date match → 206, else 200) |
 | MIME | extension → `static_map` → wire string (`text/html`, `application/javascript`, …) |
-| Jail | `openat` + `O_NOFOLLOW` on a docroot fd. `.` / `..` / `//` / `/./` → 403. No rewrite, no chroot |
+| Jail | Per-component `openat(O_NOFOLLOW)` under the docroot fd (intermediates `O_DIRECTORY`). `.` / `..` / `//` / `/./` → 403. Intermediate and leaf symlinks do not escape. No rewrite, no chroot |
 | Index | `--index NAME` (default `index.html`) for `/` and directory URLs |
 | Listing | `--list` (off). Directory with no index → HTML table; without `--list` → 403 |
 | Query | `?…` is recognized and ignored |
 | Extra headers | `--header 'Name: value'` (repeatable; no CR/LF) |
-| Body | Named-block ring: 256 × 64KB = 16MB BSS, key `rel`+block, reuse in place, fstat ≤1s, idle cull. Pool `pread` on miss / unaligned Range. 1s idle last-8 fd cache. Dest-attach onto `g_clients`, turnstile cap 2 |
+| Body | Named-block ring: 256 × 64KB = 16MB BSS, key `(dev, ino, block)`, FNV probe only, reuse in place, idle cull. Pool `pread` on miss / unaligned Range / busy fill. 8-slot fd cache; pathname revalidate ≤1s (absolute); hold dups the fd. Accept dest `g_clients`; chunk dest is a frame dest the send waits; turnstile cap 2. Ring and fd cache are two `CCExclusive` names |
 
 **Not in scope:** TLS, gzip, HTTP/2, multipart ranges, sendfile, directory
 listing on by default, CGI.
@@ -71,7 +71,9 @@ curl -D- -H 'Range: bytes=0-15' http://127.0.0.1:8080/4kb.html | head
 ```bash
 ./correctness.sh            # each peer: status, Content-Length, SHA-256, traversal
                             # staticd also: OPTIONS, query strip, --header,
-                            # --index, --list, dir-without-list → 403
+                            # --index, --list, dir-without-list → 403,
+                            # Range / 304 / If-Range, Connection tokens,
+                            # symlink jail, rename under a hot name
 ```
 
 Missing nginx / darkhttpd / caddy are skipped. Traversal may be 400, 403, or
@@ -130,6 +132,10 @@ nginx = master + workers). Zero socket errors on every cell.
 nginx 10mb / c=100 completed 0 requests. 10mb / c=1 RSS is the ~10MB of
 ring pages plus ~2MB base; c=100 is fiber stacks on top of that.
 
+After wrk disconnects, dest children drop themselves off the live index
+when the fiber is done. Idle RSS is the fiber pool floor (default 512
+stacks, ~85 MB here), not leftover connections.
+
 ## Shape
 
 ```
@@ -137,19 +143,51 @@ accept (@parallel dest g_clients)
   └─ handle_client
        └─ loop: BufReader request
             ├─ ReqLine (query stripped) + path_is_safe
-            ├─ FileHold → openat jail / 1s fd cache (fstat ≤1s)
+            ├─ FileHold → component-walk jail / 8-slot fd cache (pathname ≤1s)
             │    or directory: --index, else --list / 403
             ├─ @typeview Encode → status + headers into Conn.out
             ├─ conn_flush (headers only)
             └─ send_file_body → checkout_block (256 × 64KB ring)
-                 miss / unaligned Range → g_send_pool pread
-                 n > 64KB: @parallel(g_clients) per window, turnstile cap 2
+                 miss / unaligned Range / busy fill → g_send_pool pread
+                 n > 64KB: frame dest + turnstile cap 2
+                           (wait dest before the stack turnstile dies)
 ```
 
-Encode methods never touch the socket. The jail is `openat`. The fd cache
-slides a 1s idle window and closes the fd when the last holder drops an
-expired slot. The ring reuses the same name+block slot; idle `refs==0`
-slots become holes once a second.
+Encode methods never touch the socket. The jail walks each path
+component with `openat(O_NOFOLLOW)`. The fd cache re-resolves the name
+at most once a second (absolute, not idle-sliding); a hold dups the fd
+so a `rename` swap can close the slot while in-flight holds finish. The
+ring reuses the same `(dev, ino, block)` slot; idle `refs==0` slots
+become holes once a second.
+
+## Architecture
+
+Same bar as redis accept / encode / ship. Three names, do not mix:
+
+| Name | What it is |
+|------|------------|
+| **Accept dest** | `g_clients`. Process-lifetime. One dest-attach per accepted socket. A bad GET must not `fail` this dest. Occupancy is who is still running — a finished child claims itself off the live index. |
+| **Chunk dest** | Frame `pipe` inside `send_file_chunks`. Dest-attach the window writes here. The frame `@defer`s `pipe.wait()` so those fibers join before the stack turnstile is destroyed. |
+| **Tickets** | Turnstile `enter` / `wait` / `leave` / `pass`. Cap 2 in-flight chunk writes. Fail tickets on the error path so waiters unstick. |
+
+`g_clients` outlives any one send. Dest-attaching chunk writes onto it
+would leave them running after `send_file_chunks` returns; the turnstile
+lives on `cc_arena_stack`. Join the send dest first.
+
+Ring and fd cache share one `CCExclusive` (`cli_a.create_exclusive(4)`),
+names `SYNC_BLOCK` and `SYNC_FC`. Hold is metadata only: drop the lock
+before `pread` / `openat`. When a pathname refresh swaps the cached
+inode, order is file cache then ring (`block_cull_id`). A contended
+exclusive parks the fiber, not the OS worker. Date / Last-Modified
+format onto the request arena.
+
+Ring identity is `(dev, ino, block)` from `fstat` after `openat`. FNV-1a
+of that triple is the probe start only — a path hash is not a file.
+Hardlinks share a slab. `ino == 0` or an unaligned Range goes to
+`g_send_pool`. A same-key GET while `ready == 0 && refs != 0` pools too
+(no half-fill, no condvar). A warm other key is not stolen; pressure
+pools. `g_send_pool` is `cc_arena_pool_stack` at the top of `main`
+(an 8 MB VLA SIGSEGVs Darwin's default stack).
 
 ## Layout
 
