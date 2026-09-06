@@ -1,0 +1,189 @@
+#pragma(@per_tu)
+/* Clean lowerer, step: `@create`. `T x = @create(args);` calls whatever
+ * the type registered as its `.create` hook, so the constructor is named
+ * by the type's own declaration and never by the lowerer. The declared
+ * type of what is being initialized picks the hook: `@create` in any
+ * other position has no type to ask, and says so.
+ *
+ * A type may register two overloads. The first is the plain constructor;
+ * the second is the one that takes something extra, and is chosen when
+ * the call passes arguments the first cannot accept. Which is which is
+ * the type's business, read off `cc_type_create_overloads`.
+ *
+ * The step runs before UFCS so the resulting call is an ordinary one by
+ * the time the method steps look at it. Lifetime: the lowerer arena. */
+#ifndef CC_LOWER_CREATE_CCH
+#define CC_LOWER_CREATE_CCH
+#include "lower.cch"
+#include "typing.cch"
+
+typedef struct NStep {
+    CcLowerer* L;
+    Walker* w;
+    CcType* want;               /* the declared type the initializer is filling */
+} NStep;
+
+/* The create hook of a type, as its declaration registered it. */
+static bool nc_create_of(CcLowerer* L, CcType* t, CCSlice* one, CCSlice* two) {
+    CcIndex* ix = L->ix;
+    CCSlice canon;
+    CcTypeInfo* info;
+    *one = cc_slice_empty();
+    *two = cc_slice_empty();
+    if (!t) return false;
+    canon = cc__strip_tag(ix->canon(t));
+    {
+        size_t n = canon.len;
+        while (n && (canon.ptr[n - 1] == '*' || canon.ptr[n - 1] == ' ')) n--;
+        canon = cc_slice_from_buffer((char*)canon.ptr, n);
+    }
+    if (!canon.len) return false;
+    info = ix->type_get(canon);
+    if (!info || !info->hooks) return false;
+    *one = info->hooks->create_fn;
+    *two = info->hooks->create_fn2;
+    return one->len != 0;
+}
+
+/* The number of parameters a declared function takes, or -1 when the
+ * declaration is not one the index can read. */
+static int nc_param_count(CcIndex* ix, CCSlice callee) {
+    CcSym* sym = sym_any(ix, callee);
+    while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+    if (!sym || !sym->type) return -1;
+    @switch (sym->type->k) {
+        case .func(ft): {
+            CcParamList ps = ft.params;
+            return (int)ps.len();
+        }
+        default: return -1;
+    }
+}
+
+/* `@create(args)` with the type in hand. */
+static void nc_rewrite(NStep* st, CcExpr* e, CcCreate cr, CcType* want) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CCSlice one;
+    CCSlice two;
+    CCSlice pick;
+    int nargs = (int)cr.args.len();
+    if (!want) {
+        CCString m = @string(`'${"@"}create' has no type to construct here: name it, 'T x = ${"@"}create(...);'`, L->arena);
+        lw_error(L, e->span, m);
+        return;
+    }
+    if (!nc_create_of(L, want, &one, &two)) {
+        CCSlice tn = ix->canon(want);
+        CCString m = @string(`type '${tn}' has no .create hook: '${"@"}create' needs one to know what to call`, L->arena);
+        lw_error(L, e->span, m);
+        return;
+    }
+    pick = one;
+    if (two.len) {
+        /* the second overload is the one that takes what the first cannot */
+        int n1 = nc_param_count(ix, one);
+        if (n1 >= 0 && n1 != nargs) {
+            int n2 = nc_param_count(ix, two);
+            if (n2 == nargs) pick = two;
+        }
+    }
+    {
+        CcCall call;
+        size_t n = cr.args.len();
+        size_t i;
+        CcExprList* av = &cr.args;
+        call.callee = lw_ident(L, pick, e->span);
+        call.args = vec_new::[CcExprRef](L->arena);
+        for (i = 0; i < n; i++) {
+            CcExpr* a = *av->get_ptr(i);
+            call.args.push(a);
+        }
+        e->k = { .call = call };
+    }
+}
+
+/* `@create` under the unwraps a declaration may wrap it in. */
+static CcExpr* nc_peel_init(CcExpr* e) {
+    for (;;) {
+        CcExpr* inner = NULL;
+        if (!e) return NULL;
+        @switch (e->k) {
+            case .paren(pa): inner = pa.a; break;
+            case .unwrap(uw): inner = uw.a; break;
+            case .unwrap_body(ub): inner = ub.a; break;
+            case .unwrap_or(uo): inner = uo.a; break;
+            case .unwrap_destroy(ud): inner = ud.a; break;
+            default: return e;
+        }
+        e = inner;
+    }
+}
+
+static bool nc_is_create(CcExpr* e, CcCreate* out) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .create(cr): *out = cr; return true;
+        default: return false;
+    }
+}
+
+static void nc_decl(NStep* st, CcDecl* d) {
+    CcVarDecl v;
+    bool is_var = false;
+    CcExpr* inner;
+    CcCreate cr;
+    if (!d) return;
+    @switch (d->k) {
+        case .var(x): v = x; is_var = true; break;
+        default: break;
+    }
+    if (!is_var || !v.init || !v.init->expr) return;
+    inner = nc_peel_init(v.init->expr);
+    if (!nc_is_create(inner, &cr)) return;
+    nc_rewrite(st, inner, cr, v.type);
+}
+
+static void nc_on_stmt(Walker* w, CcStmt* s, bool enter) {
+    NStep* st = (NStep*)w->env;
+    CcDecl* d = NULL;
+    if (!enter) return;
+    if (stmt_is_decl(s, &d)) nc_decl(st, d);
+}
+
+static void nc_on_decl(Walker* w, CcDecl* d) {
+    NStep* st = (NStep*)w->env;
+    nc_decl(st, d);
+}
+
+/* A `@create` no declaration governs. */
+static bool nc_leftover(CcExpr* e, void* env) {
+    NStep* st = (NStep*)env;
+    CcCreate cr;
+    if (!nc_is_create(e, &cr)) return true;
+    nc_rewrite(st, e, cr, NULL);
+    return true;
+}
+
+static void CcLowerer_create(CcLowerer* L) {
+    Walker w;
+    NStep st;
+    CcVisitor v;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    st.w = &w;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_stmt = nc_on_stmt;
+    w.on_decl = nc_on_decl;
+    w.env = &st;
+    tw_unit(&w);
+    memset(&v, 0, sizeof(v));
+    v.expr = nc_leftover;
+    v.env = &st;
+    CcUnit_walk(L->unit, v);
+}
+
+#endif

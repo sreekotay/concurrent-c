@@ -333,6 +333,37 @@ static bool kl_reject_capture(CcLowerer* L, CcCapture* c, CcSpan sp) {
     return false;
 }
 
+/* The generated `_make` is an ordinary declaration, so the index learns it:
+ * a later step asking what the closure expression is typed as gets
+ * `CCClosureN` and not a shrug. */
+static void kl_declare_make(KStep* st, uint32_t id, KCapList* caps, size_t arity) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CcSpan sp;
+    CCString rn = @string(`CCClosure${(int)arity}`, L->arena);
+    CcType* fn_type = cc__type_blank(span0(), L->arena);
+    CcFuncType ft;
+    CcParamList ps = vec_new::[CcParam](L->arena);
+    size_t n = caps->len();
+    size_t i;
+    sp = span0();
+    for (i = 0; i < n; i++) {
+        KCap* c = *caps->get_ptr(i);
+        CcParam p;
+        memset(&p, 0, sizeof(p));
+        p.span = sp;
+        p.type = c->type;
+        p.name = c->name;
+        p.attrs = vec_new::[CcAttr](L->arena);
+        ps.push(p);
+    }
+    memset(&ft, 0, sizeof(ft));
+    ft.ret = cc_type_named(lw_keep(L, &rn), sp, L->arena);
+    ft.params = ps;
+    { CcTypeK tk = { .func = ft }; fn_type->k = tk; }
+    cc__sym_add(ix, kl_name(L, id, "_make"), CC_SYM_FUNC, NULL, L->unit, fn_type, false, true);
+}
+
 /* One closure: its captures, its three functions, and the `_make` call
  * that replaces it. */
 static void kl_lower(KStep* st, CcExpr* e, CcClosure cl) {
@@ -395,6 +426,7 @@ static void kl_lower(KStep* st, CcExpr* e, CcClosure cl) {
         CCString envt = kl_env_text(st, id, &caps, arity);
         st->made.push(lw_raw_decl(L, envt, sp));
         st->made.push(kl_entry_decl(st, id, &caps, cl, sp));
+        kl_declare_make(st, id, &caps, arity);
     }
     {
         /* the closure value is the call that builds it */

@@ -152,6 +152,55 @@ static CcExpr* uf_project_faces(CcLowerer* L, CcExpr* recv, CCSlice path, bool a
     return recv;
 }
 
+/* How many parameters a declared function takes, or -1 when the index
+ * cannot read the declaration. */
+static int uf_param_count(CcIndex* ix, CCSlice callee) {
+    CcSym* sym = sym_any(ix, callee);
+    while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+    if (!sym || !sym->type) return -1;
+    @switch (sym->type->k) {
+        case .func(ft): {
+            CcParamList ps = ft.params;
+            return (int)ps.len();
+        }
+        default: return -1;
+    }
+}
+
+/* A candidate whose parameters cannot take this call is not the method.
+ * The declared set may hold one named for the argument it does take:
+ * the resolved name, then the argument's type in the same snake spelling
+ * the index composes method names with, without its `cc_` prefix. So a
+ * `CCClosure0` argument reaches `..._closure0`. */
+static CCSlice uf_overload_for_args(Walker* w, CcLowerer* L, CcUfcs uf, CcMethod* m) {
+    CcIndex* ix = w->ix;
+    int want = 1 + (int)uf.args.len();
+    int have = uf_param_count(ix, m->callee);
+    CcExprList* av = &uf.args;
+    size_t n = av->len();
+    size_t i;
+    if (have < 0 || have == want) return m->callee;
+    for (i = 0; i < n; i++) {
+        CcExpr* a = *av->get_ptr(i);
+        CcType* at = type_of_expr(w, a);
+        CCSlice snake;
+        CCSlice bare;
+        if (!at) continue;
+        snake = ix->snake(ix->canon(at));
+        bare = snake;
+        if (bare.len > 3 && memcmp(bare.ptr, "cc_", 3) == 0)
+            bare = cc_slice_from_buffer((char*)bare.ptr + 3, bare.len - 3);
+        if (!bare.len) continue;
+        {
+            CCSlice base = m->callee;
+            CCString cand = @string(`${base}_${bare}`, L->arena);
+            CCSlice name = lw_keep(L, &cand);
+            if (uf_param_count(ix, name) == want) return name;
+        }
+    }
+    return m->callee;
+}
+
 static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice tn, CCSlice reason) {
     UStep* st = (UStep*)w->env;
     CcLowerer* L = st->L;
@@ -218,7 +267,7 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
     }
     if (m->recv_by_ptr) recv_arg = recv_ptr ? uf.recv : cc_expr_unary(CC_OP_ADDR, uf_wrap(L, uf.recv, sp), sp, L->arena);
     else recv_arg = recv_ptr ? cc_expr_unary(CC_OP_DEREF, uf_wrap(L, uf.recv, sp), sp, L->arena) : uf.recv;
-    call.callee = lw_ident(L, m->callee, sp);
+    call.callee = lw_ident(L, uf_overload_for_args(w, L, uf, m), sp);
     call.args = vec_new::[CcExprRef](L->arena);
     call.args.push(recv_arg);
     {
