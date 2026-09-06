@@ -1,6 +1,6 @@
 /*
  * Jail, fd cache, directory listing. Policy (403 vs list, encode) stays
- * in staticd.ccs. Include after staticd_block.cch (tick / cull / name_id).
+ * in staticd.ccs. Include after staticd_block.cch (tick / cull).
  *
  * openat + O_NOFOLLOW — not cc_dir_open (path-based, not jailed).
  * Body bytes: caller preads the held fd (no mmap).
@@ -16,7 +16,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
-#include <pthread.h>
 #include <dirent.h>
 #include <stdint.h>
 
@@ -29,6 +28,8 @@
 typedef struct FileHold {
     size_t file_len;
     time_t mtime;
+    uint64_t dev;
+    uint64_t ino;
     int slot;
     int fd; /* shared while cached; owned when slot < 0 */
     char rel[128];
@@ -66,7 +67,8 @@ static int path_is_safe(char[:] path) {
 }
 
 static int !>(CCIoError) open_at(int root_fd, const char* rel,
-                                 size_t* file_len, time_t* mtime) {
+                                 size_t* file_len, time_t* mtime,
+                                 uint64_t* dev, uint64_t* ino) {
     struct stat st;
     int fd;
     if (!rel || !rel[0] || rel[0] == '/')
@@ -84,6 +86,8 @@ static int !>(CCIoError) open_at(int root_fd, const char* rel,
     }
     *mtime = st.st_mtime;
     *file_len = (size_t)st.st_size;
+    *dev = (uint64_t)st.st_dev;
+    *ino = (uint64_t)st.st_ino;
     return cc_ok(fd);
 }
 
@@ -95,12 +99,13 @@ typedef struct FileSlot {
     time_t until;
     time_t checked;
     size_t file_len;
+    uint64_t dev;
+    uint64_t ino;
     int refs;
     int fd;
 } FileSlot;
 
 static FileSlot g_fc[FILE_CACHE_N];
-static pthread_mutex_t g_fc_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static int fc_find(const char* rel) {
     @for (i in 0..FILE_CACHE_N) {
@@ -140,22 +145,24 @@ static void fc_sweep(time_t now) {
     }
 }
 
-/* g_fc_mu held. fstat at most once a second. -1 = slot gone. */
+/* File-cache name held. fstat at most once a second. -1 = slot gone. */
 static int fc_revalidate(int i, time_t now) {
     struct stat st;
-    uint64_t nid;
     if (now <= g_fc[i].checked) return 0;
     if (fstat(g_fc[i].fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) {
         g_fc[i].checked = now;
         if (g_fc[i].refs > 0) return 0;
-        nid = block_name_id(g_fc[i].rel);
-        fc_clear(i);
-        block_cull_name(nid);
+        {
+            uint64_t dev = g_fc[i].dev;
+            uint64_t ino = g_fc[i].ino;
+            fc_clear(i);
+            block_cull_id(dev, ino);
+        }
         return -1;
     }
     g_fc[i].checked = now;
     if (st.st_mtime != g_fc[i].mtime || (size_t)st.st_size != g_fc[i].file_len) {
-        block_cull_name(block_name_id(g_fc[i].rel));
+        block_cull_id(g_fc[i].dev, g_fc[i].ino);
         g_fc[i].mtime = st.st_mtime;
         g_fc[i].file_len = (size_t)st.st_size;
     }
@@ -167,13 +174,12 @@ static void file_hold_drop(FileHold* h) {
     if (h->slot < 0) {
         if (h->fd >= 0) close(h->fd);
     } else {
-        pthread_mutex_lock(&g_fc_mu);
+        CCExclusiveGuard hold = g_fc_mx.acquire() @destroy;
         if (h->slot < FILE_CACHE_N && g_fc[h->slot].refs > 0) {
             g_fc[h->slot].refs--;
             if (g_fc[h->slot].refs == 0 && time(NULL) > g_fc[h->slot].until)
                 fc_clear(h->slot);
         }
-        pthread_mutex_unlock(&g_fc_mu);
     }
     *h = (FileHold){ .slot = -1, .fd = -1 };
 }
@@ -189,7 +195,7 @@ static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
     n = strlen(rel);
     if (n < FILE_CACHE_KEY) memcpy(h.rel, rel, n + 1);
     if (n >= FILE_CACHE_KEY) {
-        fd = open_at(root_fd, rel, &h.file_len, &h.mtime) !>(e) {
+        fd = open_at(root_fd, rel, &h.file_len, &h.mtime, &h.dev, &h.ino) !>(e) {
             return cc_err(e);
         };
         h.fd = fd;
@@ -198,37 +204,39 @@ static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
     }
 
     now = time(NULL);
-    pthread_mutex_lock(&g_fc_mu);
+    CCExclusiveGuard hold = g_fc_mx.acquire() @destroy;
     fc_sweep(now);
     i = fc_find(rel);
     if (i >= 0 && (now <= g_fc[i].until || g_fc[i].refs > 0)) {
         if (fc_revalidate(i, now) != 0) {
-            pthread_mutex_unlock(&g_fc_mu);
+            hold.release();
             return cc_err(cc_io_from_errno(ENOENT));
         }
         g_fc[i].refs++;
         g_fc[i].until = now + FILE_CACHE_TTL;
         h.mtime = g_fc[i].mtime;
         h.file_len = g_fc[i].file_len;
+        h.dev = g_fc[i].dev;
+        h.ino = g_fc[i].ino;
         h.slot = i;
         h.fd = g_fc[i].fd;
-        pthread_mutex_unlock(&g_fc_mu);
+        hold.release();
         block_tick(now);
         return cc_ok(h);
     }
-    pthread_mutex_unlock(&g_fc_mu);
+    hold.release();
 
-    fd = open_at(root_fd, rel, &h.file_len, &h.mtime) !>(e) {
+    fd = open_at(root_fd, rel, &h.file_len, &h.mtime, &h.dev, &h.ino) !>(e) {
         return cc_err(e);
     };
 
-    pthread_mutex_lock(&g_fc_mu);
+    hold = g_fc_mx.acquire();
     now = time(NULL);
     fc_sweep(now);
     i = fc_find(rel);
     if (i >= 0 && (now <= g_fc[i].until || g_fc[i].refs > 0)) {
         if (fc_revalidate(i, now) != 0) {
-            pthread_mutex_unlock(&g_fc_mu);
+            hold.release();
             close(fd);
             return cc_err(cc_io_from_errno(ENOENT));
         }
@@ -236,9 +244,11 @@ static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
         g_fc[i].until = now + FILE_CACHE_TTL;
         h.mtime = g_fc[i].mtime;
         h.file_len = g_fc[i].file_len;
+        h.dev = g_fc[i].dev;
+        h.ino = g_fc[i].ino;
         h.slot = i;
         h.fd = g_fc[i].fd;
-        pthread_mutex_unlock(&g_fc_mu);
+        hold.release();
         close(fd);
         block_tick(now);
         return cc_ok(h);
@@ -248,7 +258,7 @@ static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
     else
         i = fc_evict(now);
     if (i < 0) {
-        pthread_mutex_unlock(&g_fc_mu);
+        hold.release();
         h.fd = fd;
         block_tick(now);
         return cc_ok(h);
@@ -256,13 +266,15 @@ static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
     memcpy(g_fc[i].rel, rel, n + 1);
     g_fc[i].mtime = h.mtime;
     g_fc[i].file_len = h.file_len;
+    g_fc[i].dev = h.dev;
+    g_fc[i].ino = h.ino;
     g_fc[i].until = now + FILE_CACHE_TTL;
     g_fc[i].checked = now;
     g_fc[i].refs = 1;
     g_fc[i].fd = fd;
     h.slot = i;
     h.fd = fd;
-    pthread_mutex_unlock(&g_fc_mu);
+    hold.release();
     block_tick(now);
     return cc_ok(h);
 }

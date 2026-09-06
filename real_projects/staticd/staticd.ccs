@@ -5,7 +5,7 @@
  *   Conn.arena / Conn.out → response header coalesce (cc_arena_stack);
  *                           flush then reset between requests
  *   ConnEnc (= @typeview Encode) → encode-only (no sock/flush)
- *   File body               → 64KB named-block ring (rel+block), reuse
+ *   File body               → 64KB named-block ring (dev+ino+block), reuse
  *                           in place; fstat ≤1s; idle cull. Else pool
  *                           pread. Dest-attach onto g_clients (cap 2).
  *   Request parse           → BufReader + @grammar(schema) ReqLine;
@@ -16,7 +16,7 @@
  * Shape on the page:
  *   ReqLine — SERDES (recognize; no path rewrite)
  *   staticd_http.cch    — date / Range / header-CI mechanics
- *   staticd_block.cch   — named-block ring (reuse; fstat ≤1s; idle cull)
+ *   staticd_block.cch   — block ring keyed by dev+ino (reuse; idle cull)
  *   staticd_fs.cch      — jail, 1s fd cache, FileHold, listing
  *   mime_ext static_map     — ext → MimeTag (POD) → k_mime[]
  *   @variant Method         — GET HEAD OPTIONS
@@ -47,7 +47,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
-#include <pthread.h>
 
 #define K_READ_BUF   (16 * 1024)
 #define K_OUT_BUF    (8 * 1024)
@@ -175,7 +174,7 @@ static void !>(CCError) send_write_slice(CCSocket* sock, char[:] s) {
 
 /* leave before pass so the caller's wait(n) is the join. */
 static void send_one_chunk(CCTurnstile* ts, CCSocket* sock, int fd,
-                           const char* rel, time_t mtime,
+                           uint64_t dev, uint64_t ino, time_t mtime,
                            size_t file_off, size_t want, int i) {
     @errhandler(CCError e) {
         (void)e;
@@ -183,7 +182,7 @@ static void send_one_chunk(CCTurnstile* ts, CCSocket* sock, int fd,
         ts->fail(0, i) !>(e2) { (void)e2; };
         return;
     }
-    BlockHold bh = checkout_block(fd, rel, mtime, file_off, want) !>;
+    BlockHold bh = checkout_block(fd, dev, ino, mtime, file_off, want) !>;
     @defer bh.drop();
     ts->wait(0, i) !>;
     send_write_slice(sock, cc_slice_from_buffer(bh.ptr, want)) !>;
@@ -209,7 +208,7 @@ static void !>(CCError) send_file_chunks(CCSocket* sock, FileHold* fh,
         int ticket = i;
         ts.enter(ticket) !>;
         @parallel(g_clients) {
-            send_one_chunk(&ts, sock, fh->fd, fh->rel, fh->mtime,
+            send_one_chunk(&ts, sock, fh->fd, fh->dev, fh->ino, fh->mtime,
                            off + chunk_off, want, ticket);
         }
     }
@@ -224,7 +223,7 @@ static bool !>(CCIoError) send_file_body(CCSocket* sock, FileHold* fh,
     if (fh->fd < 0 || off + nsend > fh->file_len)
         return cc_err(cc_io_from_errno(EIO));
     if (nsend <= (size_t)FILE_SEND_CHUNK) {
-        bh = checkout_block(fh->fd, fh->rel, fh->mtime, off, nsend) !>(e) {
+        bh = checkout_block(fh->fd, fh->dev, fh->ino, fh->mtime, off, nsend) !>(e) {
             return cc_err(cc_io_error(e));
         };
         @defer bh.drop();
@@ -652,6 +651,7 @@ int main(int argc, char** argv) {
     }
 
     cc_arena_stack(cli_a, kilobytes(4));
+    staticd_sync_init(cli_a.create_exclusive(4) !>);
     StaticdOpts opts = {0};
     bool go = cc_prepare_args(StaticdOpts, argc, argv, cli_a, &opts, stderr) !>;
     if (!go) return 0;
