@@ -331,6 +331,7 @@ enum { GN_MAX_DEPTH = 8 };
  * include rewrite (an expansion records no local headers of its own) and
  * without the banner (the unit it is spliced into carries one). */
 static void gn_lower_steps(CcLowerer* L) {
+    CcLowerer_async(L);
     CcLowerer_chan(L);
     CcLowerer_closures(L);
     CcLowerer_create(L);

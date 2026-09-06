@@ -49,6 +49,7 @@ static void CcLowerer_strings(CcLowerer* L);      /* `@string(`...`)`: the pushe
 static void CcLowerer_closures(CcLowerer* L);     /* `(p) => body`: the environment, the entry, the make */
 static void CcLowerer_create(CcLowerer* L);       /* `@create(...)`: the type's own .create hook */
 static void CcLowerer_forin(CcLowerer* L);        /* `@for (x in xs)`: the extent the type declares */
+static void CcLowerer_async(CcLowerer* L);     /* `@async Ret f(...)`: the frame, the body, the poll, the factory; `@await e` */
 static void CcLowerer_chan(CcLowerer* L);         /* channel endpoints, the pair that creates them, typed sends */
 static void CcLowerer_variants(CcLowerer* L);     /* variant declarations, construction, checked switch, protected projection */
 static void CcLowerer_ufcs(CcLowerer* L);         /* `x.m(args)` -> the resolved `callee(&x, args)`; `Type.fn(args)` -> `Type_fn(args)` */     /* `#include "x.cch"` -> `#include <rel/x.h>`, the header recorded for lowering */
