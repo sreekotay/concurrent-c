@@ -22,6 +22,7 @@ typedef struct TStep {
     CcLowerer* L;
     Walker* w;
     int n_templates;
+    CcExprList failed;          /* arena templates the step could not build; already reported */
     bool scratch_used;          /* this function has a template on `@scratch` */
     int scratch_bytes;          /* the largest size any of them asked for */
 } TStep;
@@ -294,18 +295,75 @@ static void sr_stmts(TStep* st, CcStmtList* list) {
     *list = out;
 }
 
-/* An arena template left anywhere but a declaration initializer: it is a
- * run of statements, so there is nowhere to put it. Only statements the
- * step walked are checked: a template inside a `${"@"}comptime` block or a
- * factory body is the comptime seam's to evaluate. */
+/* An arena template anywhere but a declaration initializer: a run of
+ * statements where an expression is wanted. It becomes those statements
+ * and the string they built, as one expression, so it evaluates where it
+ * stands — inside a condition, an argument, a loop body — and not once,
+ * earlier, where the code did not ask for it. */
+static CcExpr* sr_arena_expr(TStep* st, CcTemplate tp, CcSpan sp) {
+    CcLowerer* L = st->L;
+    uint32_t id = L->temp_id();
+    CCString nm = @string(`__cc_str_${id}`, L->arena);
+    CCSlice name = lw_keep(L, &nm);
+    CcStmtList pushes = vec_new::[CcStmtRef](L->arena);
+    CcStmtList* pv = &pushes;
+    CcStmt* blk;
+    CcExpr* out;
+    CcStmtExpr se;
+    size_t i;
+    size_t n;
+    if (!sr_arena_stmts(st, name, tp, sp, &pushes)) return NULL;
+    blk = lw_block(L, sp);
+    lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("CCString"), sp, L->arena), name,
+                              lw_call0(L, cstr_slice("cc_string_new"), sp), sp));
+    n = pv->len();
+    for (i = 0; i < n; i++) lw_push(blk, *pv->get_ptr(i));
+    lw_push(blk, lw_expr_stmt(L, lw_ident(L, name, sp), sp));
+    out = cc__expr_blank(sp, L->arena);
+    se.block = blk;
+    out->k = { .stmt_expr = se };
+    return out;
+}
+
+static void sr_note_failed(TStep* st, CcExpr* e) {
+    CcExprList* v = &st->failed;
+    v->push(e);
+}
+
+static bool sr_was_failed(TStep* st, CcExpr* e) {
+    CcExprList* v = &st->failed;
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (*v->get_ptr(i) == e) return true;
+    return false;
+}
+
+static bool sr_arena_expr_visit(CcExpr* e, void* env) {
+    TStep* st = (TStep*)env;
+    CcTemplate tp;
+    CcExpr* built;
+    if (!sr_is_template(e, &tp)) return true;
+    if (!tp.arena) return true;
+    built = sr_arena_expr(st, tp, e->span);
+    if (!built) { sr_note_failed(st, e); return true; }   /* it said why */
+    st->n_templates++;
+    e->k = built->k;
+    return true;
+}
+
+/* An arena template the step never reached: inside a `${"@"}comptime`
+ * block or a factory body, which the comptime seam evaluates. Saying so
+ * beats printing the template into the C for the host to choke on. */
 static bool sr_leftover_visit(CcExpr* e, void* env) {
     TStep* st = (TStep*)env;
     CcLowerer* L = st->L;
     CcTemplate tp;
     if (!sr_is_template(e, &tp)) return true;
     if (!tp.arena) return true;
+    if (sr_was_failed(st, e)) return true;
     {
-        CCString m = @string(`'${"@"}string(...)' with an arena builds its value in several statements: bind it first ('CCString s = ${"@"}string(...);') and use 's' here`, L->arena);
+        CCString m = @string(`'${"@"}string(...)' with an arena is not lowered where it stands here`, L->arena);
         lw_error(L, e->span, m);
     }
     return true;
@@ -325,6 +383,14 @@ static void sr_function(TStep* st, CcDecl* d, CcFuncDecl f) {
     st->scratch_used = false;
     st->scratch_bytes = 0;
     sr_stmts(st, body);
+    {
+        /* the rest, where a declaration could not hold them */
+        CcVisitor ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.expr = sr_arena_expr_visit;
+        ev.env = st;
+        CcStmt_walk(f.body, ev);
+    }
     if (!st->scratch_used) return;
     with = vec_new::[CcStmtRef](L->arena);
     bytes = st->scratch_bytes;
@@ -362,6 +428,7 @@ static void CcLowerer_strings(CcLowerer* L) {
     memset(&st, 0, sizeof(st));
     st.L = L;
     st.w = &w;
+    st.failed = vec_new::[CcExprRef](L->arena);
     memset(&w, 0, sizeof(w));
     w.arena = L->arena;
     w.ix = L->ix;

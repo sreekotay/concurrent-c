@@ -116,6 +116,27 @@ static bool uf_char_pointer(Walker* w, CcType* rt) {
            slice_eq(nm, cstr_slice("signed char")) || slice_eq(nm, cstr_slice("void"));
 }
 
+/* A pointer to a type the program never defines is a handle: there are no
+ * fields to reach through it, so `.` and `->` name the same thing and `.`
+ * is the one that reads. `CCChan*` is the runtime's channel, not a struct
+ * the user opens. A pointer to a struct with fields is not: there `.` and
+ * `->` differ, and writing the wrong one means the wrong thing. */
+static bool uf_opaque_pointer(Walker* w, CcLowerer* L, CcType* rt) {
+    CcType* t = peel(unalias_local(w, peel(rt)));
+    CcIndex* ix = L->ix;
+    CcTypeInfo* info;
+    CCSlice nm;
+    CcSym* sym;
+    if (!t) return false;
+    nm = cc__strip_tag(ix->canon(t));
+    if (!nm.len || nm.ptr[nm.len - 1] == '*') return false;
+    info = ix->type_get(nm);
+    if (info && info->sym) return !info->sym->is_definition;
+    sym = sym_any(ix, nm);
+    while (sym && sym->kind != CC_SYM_TYPE) sym = sym->same_name;
+    return sym != NULL && !sym->is_definition;
+}
+
 /* The operator follows the receiver: a pointer takes `->`, a value takes `.`.
  * Writing the other one is a diagnostic, not a silent coercion. */
 static bool uf_operator_matches(Walker* w, CcLowerer* L, CcExpr* e, CcUfcs uf, CcType* rt, CCSlice tn) {
@@ -123,6 +144,7 @@ static bool uf_operator_matches(Walker* w, CcLowerer* L, CcExpr* e, CcUfcs uf, C
     CcSpan sp = e->span;
     if (is_ptr == uf.arrow) return true;
     if (uf_char_pointer(w, rt)) return true;
+    if (is_ptr && !uf.arrow && uf_opaque_pointer(w, L, rt)) return true;
     if (is_ptr) {
         CCString msg = @string(`type: UFCS on pointer type '${tn}' uses '->', not '.'`, L->arena);
         lw_error(L, sp, msg);

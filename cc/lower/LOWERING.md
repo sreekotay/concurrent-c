@@ -205,6 +205,11 @@ macro does with its first argument answers it: one that hands it straight
 to the call it expands to wants an address, one that converts it first
 (`CC__ARENA_HOST(a)`) wants the value.
 
+A pointer to a type the program never defines is a handle: there are no
+fields to reach through it, so `.` and `->` name the same thing and `.`
+is the one that reads. A pointer to a struct with fields is not — there
+the two differ, and writing the wrong one is a diagnostic.
+
 ## Closures
 
 `(params) => body` becomes three C functions and a struct, and the
@@ -415,6 +420,12 @@ already the C it will be: the stack form spells each slot into its size
 expression, and spelling it earlier would freeze a call the later steps
 had not rewritten yet. A tagged slot (`$~tag{e}`) and the direct form
 `@string(e, arena)` are diagnostics for now rather than a dropped tag.
+
+An arena template anywhere but a declaration initializer becomes those
+statements and the string they built, as one expression
+(`({ CCString __cc_str_n = cc_string_new(); ...; __cc_str_n; })`), so it
+evaluates where it stands — inside a condition, an argument, a loop body
+— and not once, earlier, where the code did not ask for it.
 
 ## Scratch and templates
 
