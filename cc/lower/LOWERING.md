@@ -197,6 +197,56 @@ nearest name offered as a note when it does not; a `*` anywhere in an
 item is a pattern, so `out_*` and `*_len` match the members they name;
 and `^*` is refused as ill-formed rather than read as denying nothing.
 
+## Closures
+
+`(params) => body` becomes three C functions and a struct, and the
+closure expression becomes the call that builds one, so a closure value
+is the runtime's handle and nothing else:
+
+```c
+/* --- CC closure declarations --- */
+static void* cc_closure__N1_entry(void*, intptr_t);
+static CCClosure1 cc_closure__N1_make(int* gp);
+/* --- end closure declarations --- */
+
+CCClosure1 c = cc_closure__N1_make(gp);
+```
+
+```c
+typedef struct cc_closure__N1_env { int* gp; } cc_closure__N1_env;
+static void cc_closure__N1_env_drop(void* p) { if (p) cc__heap_free(p); }
+static CCClosure1 cc_closure__N1_make(int* gp) {
+    cc_closure__N1_env* __env = (cc_closure__N1_env*)cc__heap_alloc(sizeof(*__env));
+    __env->gp = gp;
+    return cc_closure1_make(cc_closure__N1_entry, __env, cc_closure__N1_env_drop);
+}
+static void* cc_closure__N1_entry(void* __p, intptr_t __arg0) {
+    cc_closure__N1_env* __env = (cc_closure__N1_env*)__p;
+    int* gp = __env->gp;
+    intptr_t x = (intptr_t)__arg0;
+    ...
+    return NULL;
+}
+```
+
+**What it captures** is what it reads: an explicit `[a, b]` list when one
+is written, otherwise every name the body uses that the enclosing scope
+declares, once each, in the order the body first reads it. Names that
+resolve to a global, a function or an enumerator are not captures.
+
+Captures are by value. The environment outlives the statement that built
+it, so a by-reference capture has to say whose lifetime it is borrowing;
+`[&x]`, a moving capture and an init capture are diagnostics until that
+is lowered, rather than a dangling alias that still compiles.
+
+**The call.** `c(a)` on a closure handle is `cc_closureN_call(c,
+(intptr_t)(a))`, with the arity read off the handle's type. The runtime
+carries `CCClosure0` through `CCClosure2`; more parameters than that is a
+diagnostic at the closure.
+
+The entry's body is built as real declarations, not text, so every step
+after this one types a closure body exactly as it types any function.
+
 ## Slices
 
 **The type.** `T[:]` is an instance of the slice family, named by the same
