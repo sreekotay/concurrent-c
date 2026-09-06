@@ -539,7 +539,16 @@ CCResult_size_t_CCIoError cc_socket_write_deadline(CCSocket* sock,
          * send. The socket is still writable, so it is a transient like
          * EAGAIN, not a peer condition. Retry after the writable wait (which
          * honors the deadline) plus a short park, since the fd reports
-         * POLLOUT immediately and a bare retry would spin on the pool. */
+         * POLLOUT immediately and a bare retry would spin on the pool.
+         *
+         * OPEN — BACKPRESSURE POLICY, NOT SETTLED. This keeps every sender
+         * alive and lets them all thrash the pool; at c=1000 x 10MB on
+         * loopback that halves aggregate bytes versus a server that drops
+         * a third of its clients on the first ENOBUFS and serves the rest
+         * fast (the pre-retry runtime did exactly that, by accident). The
+         * 1ms park is a first cut (sysmon expiry is ~250us; yield-first
+         * measured worse). Bounding how many fibers are in send() at once
+         * — here, or in the caller — is the real fix. See TODO: ENOBUFS. */
         nobufs = errno == ENOBUFS;
         if (nobufs || errno == EAGAIN || errno == EWOULDBLOCK) {
             cc__io_owned_watcher* watcher = cc__net_ensure_socket_watcher(sock);
