@@ -47,6 +47,7 @@ static void CcLowerer_slice_args(CcLowerer* L);   /* arguments a slice parameter
 static void CcLowerer_strings(CcLowerer* L);      /* `@string(`...`)`: the pushes that build it */
 static void CcLowerer_closures(CcLowerer* L);     /* `(p) => body`: the environment, the entry, the make */
 static void CcLowerer_create(CcLowerer* L);       /* `@create(...)`: the type's own .create hook */
+static void CcLowerer_forin(CcLowerer* L);        /* `@for (x in xs)`: the extent the type declares */
 static void CcLowerer_variants(CcLowerer* L);     /* variant declarations, construction, checked switch, protected projection */
 static void CcLowerer_ufcs(CcLowerer* L);         /* `x.m(args)` -> the resolved `callee(&x, args)`; `Type.fn(args)` -> `Type_fn(args)` */     /* `#include "x.cch"` -> `#include <rel/x.h>`, the header recorded for lowering */
 

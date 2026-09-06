@@ -1485,6 +1485,25 @@ static void cc__hook_read_ufcs(CcIndex *ix, const CcUnit *u, CcHookReg *reg) {
 
 /* ---- @typehooks ---------------------------------------------------------- */
 
+/* `cc_type_len_field("len")` and its kin read as a kind and a name: the
+   kind is the constructor's last word, the name its string argument. */
+static void cc__hook_kind_name(CcIndex *ix, const CcUnit *u, const CcExpr *value,
+                               const char **kind, const char **name) {
+    size_t i;
+    int n = 0;
+    if (!value) return;
+    for (i = 0; i < value->args.n; i++) {
+        const char *s = cc__expr_string(ix, u, value->args.items[i]);
+        if (!s) continue;
+        if (n == 0) *name = cc__in(ix, s);
+        n++;
+    }
+    if (value->kind == CC_E_CALL && value->a && value->a->kind == CC_E_IDENT) {
+        const char *tail = strrchr(value->a->name, '_');
+        if (tail) *kind = cc__in(ix, tail + 1);
+    }
+}
+
 static void cc__hook_entry(CcIndex *ix, const CcUnit *u, CcHookReg *reg, const char *field, const CcExpr *value) {
     const char *f = field;
     const char *callee;
@@ -1527,8 +1546,13 @@ static void cc__hook_entry(CcIndex *ix, const CcUnit *u, CcHookReg *reg, const c
         reg->ufcs_value = (CcExpr *)value;
         reg->ufcs_fn = value->kind == CC_E_IDENT ? value->name : cc__in(ix, "<lambda>");
         cc__hook_read_ufcs(ix, u, reg);
-    } else if (strcmp(f, "len") == 0) reg->has_len = 1;
-    else if (strcmp(f, "access") == 0) reg->has_access = 1;
+    } else if (strcmp(f, "len") == 0) {
+        reg->has_len = 1;
+        cc__hook_kind_name(ix, u, value, &reg->len_kind, &reg->len_name);
+    } else if (strcmp(f, "access") == 0) {
+        reg->has_access = 1;
+        cc__hook_kind_name(ix, u, value, &reg->access_kind, &reg->access_name);
+    }
     else if (strcmp(f, "cast") == 0) reg->has_cast = 1;
     else if (strcmp(f, "niche") == 0) reg->has_niche = 1;
     else if (cc__has_prefix(f, "ufcs_sink") || cc__has_prefix(f, "ufcs_dynamic")) {

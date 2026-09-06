@@ -2036,6 +2036,50 @@ static CcExprList cc__call_arglist(const CcExpr* e, bool* ok) {
     }
 }
 
+/* The name a call names, when its callee is a plain identifier. */
+static CCSlice cc__call_callee_name(const CcExpr* e) {
+    CcExpr* callee = NULL;
+    @switch (e->k) {
+        case .call(cl): callee = cl.callee; break;
+        default: return cc_slice_empty();
+    }
+    if (!callee) return cc_slice_empty();
+    @switch (callee->k) {
+        case .ident(nm): return nm;
+        default: return cc_slice_empty();
+    }
+}
+
+/* `cc_type_len_field("len")` and its kin read as a kind and a name: the
+ * kind is the constructor's last word, the name its string argument. */
+static void cc__hook_kind_name(CcIndex* ix, const CcUnit* u, const CcExpr* value,
+                               CCSlice* kind, CCSlice* name) {
+    bool ok = false;
+    CcExprList args;
+    CCSlice callee;
+    size_t n;
+    size_t i;
+    int cnt = 0;
+    if (!value) return;
+    args = cc__call_arglist(value, &ok);
+    n = ok ? args.len() : 0;
+    {
+        CcExprList* av = &args;
+        for (i = 0; i < n; i++) {
+            CCSlice sv = cc__expr_string(ix, u, *av->get_ptr(i));
+            if (!sv.ptr) continue;
+            if (cnt == 0) *name = sv;
+            cnt++;
+        }
+    }
+    callee = cc__call_callee_name(value);
+    if (callee.len) {
+        size_t k = callee.len;
+        while (k && callee.ptr[k - 1] != '_') k--;
+        if (k) *kind = cc_slice_from_buffer((char*)callee.ptr + k, callee.len - k);
+    }
+}
+
 static void cc__hook_create(CcIndex* ix, const CcUnit* u, CcHookReg* reg, const CcExpr* value) {
     CCSlice nm;
     if (cc__expr_is_ident(value, &nm)) reg->create_fn = nm;
@@ -2096,8 +2140,13 @@ static void cc__hook_entry(CcIndex* ix, const CcUnit* u, CcHookReg* reg, CCSlice
         reg->ufcs_value = (CcExpr*)value;
         reg->ufcs_fn = cc__expr_is_ident(value, &nm) ? nm : cc__ix_s("<lambda>");
         cc__hook_read_ufcs(ix, u, reg);
-    } else if (cc__eqc(f, "len")) reg->has_len = true;
-    else if (cc__eqc(f, "access")) reg->has_access = true;
+    } else if (cc__eqc(f, "len")) {
+        reg->has_len = true;
+        cc__hook_kind_name(ix, u, value, &reg->len_kind, &reg->len_name);
+    } else if (cc__eqc(f, "access")) {
+        reg->has_access = true;
+        cc__hook_kind_name(ix, u, value, &reg->access_kind, &reg->access_name);
+    }
     else if (cc__eqc(f, "cast")) reg->has_cast = true;
     else if (cc__eqc(f, "niche")) reg->has_niche = true;
     else if (cc__has_prefix(f, "ufcs_sink") || cc__has_prefix(f, "ufcs_dynamic")) {
