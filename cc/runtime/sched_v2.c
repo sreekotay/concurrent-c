@@ -741,7 +741,8 @@ static _Atomic int g_v2_running_workers = 0;
  * ready_queue.count and n = num_threads, grow one worker iff:
  *   - the pool's aggregate drain rate is below one pop per worker per
  *     g_v2_grow_rate_us (workers blocked or running long CPU arms), OR
- *   - depth >= 2*n (backlog relative to pool size),
+ *   - depth >= 2*n (backlog relative to pool size), sustained across
+ *     g_v2_grow_depth_dwell consecutive rechecks,
  * AND the episode is not run-to-park: parks since baseline do not
  * exceed half the pops. A high park fraction is recv/accept or lock
  * wait multiplexing — extra workers add traffic. A low park fraction
@@ -779,6 +780,19 @@ static int g_v2_grow_rate_us = 100;
  * pool size even if the drain rate is healthy. 0 disables the depth
  * trigger (rate-only growth). CC_V2_GROW_DEPTH_X. */
 static int g_v2_grow_depth_mult = 2;
+/* Depth dwell: the depth trigger must hold on this many consecutive
+ * rechecks before it grows. A single recheck cannot tell backlog from
+ * a completion wave: on the first sample of an episode dp is a few pops
+ * and dpark is 0 only because nothing has had time to park, so
+ * run_to_park cannot yet say "recv churn"; and a kqueue wave for many
+ * clients is depth >= 2n that drains in tens of us. Both recruited a
+ * worker that then stayed for the life of the process, and on an
+ * I/O-bound pool each extra live worker is global-queue contention and
+ * park/wake churn without extra work (redis at 50 pipelined clients: 2
+ * workers 2.9M GET/s, 4 workers 2.6M). Three rechecks is ~75us of
+ * sustained depth; a producer that outpaces the pool holds it easily.
+ * The rate trigger (CPU-bound arms) is not dwelled. CC_V2_GROW_DEPTH_DWELL. */
+static int g_v2_grow_depth_dwell = 3;
 /* Slow-tick escalation dwell: grow one worker per slow tick once the
  * ready queue has stayed non-empty (with nobody idle) for this many
  * consecutive slow ticks, regardless of the rate test.
@@ -2324,6 +2338,7 @@ static void* sched_v2_sysmon_main(void* arg) {
     uint64_t grow_base_parks = 0;
     uint64_t grow_base_ns = 0;
     int grow_have_baseline = 0;
+    int grow_depth_streak = 0;
     uint64_t grow_slack_since_ns = 0;
     int slow_prev_backlog = 0;
     uint64_t last_slow_ns = 0;
@@ -2388,6 +2403,7 @@ static void* sched_v2_sysmon_main(void* arg) {
             if (n >= g_v2.max_threads || !admit_ok || slack_done) {
                 atomic_store_explicit(&g_v2_grow_pending, 0, memory_order_release);
                 grow_have_baseline = 0;
+                grow_depth_streak = 0;
                 grow_slack_since_ns = 0;
             } else {
                 uint64_t pops = atomic_load_explicit(&g_v2.ready_queue.pops,
@@ -2409,8 +2425,13 @@ static void* sched_v2_sysmon_main(void* arg) {
                     uint64_t dt = now - grow_base_ns;
                     /* Need a long-enough sample for the rate to mean
                      * anything; an early/spurious wake defers the decision
-                     * to the next recheck. */
-                    if (dt >= 10000ull) {
+                     * to the next recheck. The bar is one pop per worker
+                     * per grow_rate_us, so the sample must span at least
+                     * that period: in a shorter window a healthy pool is
+                     * expected to show zero pops, which the test would
+                     * read as a stall (and run_to_park cannot answer at
+                     * dp == 0). */
+                    if (dt >= (uint64_t)g_v2_grow_rate_us * 1000ull) {
                         int run_to_park = sched_v2_grow_run_to_park(dp, dpark);
                         int rate_slow = (dp * (uint64_t)g_v2_grow_rate_us
                                          * 1000ull < (uint64_t)n * dt);
@@ -2422,11 +2443,20 @@ static void* sched_v2_sysmon_main(void* arg) {
                          * stay in integers. Depth is the same backlog
                          * test, gated on run-to-park so an accept or
                          * request wave does not walk ncpu. */
+                        /* Depth must persist (see g_v2_grow_depth_dwell). */
+                        if (depth_hit && !run_to_park)
+                            grow_depth_streak++;
+                        else
+                            grow_depth_streak = 0;
+                        int depth_grow = depth_hit && !run_to_park &&
+                                         grow_depth_streak >= g_v2_grow_depth_dwell;
                         if (rate_slow && !run_to_park) {
                             V2_STAT_INC(g_v2_grow_stall);
+                            grow_depth_streak = 0;
                             (void)sched_v2_try_expand_pool();
-                        } else if (depth_hit && !run_to_park) {
+                        } else if (depth_grow) {
                             V2_STAT_INC(g_v2_grow_backlog);
+                            grow_depth_streak = 0;
                             (void)sched_v2_try_expand_pool();
                         } else if (run_to_park && (rate_slow || depth_hit)) {
                             V2_STAT_INC(g_v2_grow_parked);
@@ -2438,6 +2468,7 @@ static void* sched_v2_sysmon_main(void* arg) {
             }
         } else {
             grow_have_baseline = 0;
+            grow_depth_streak = 0;
             grow_slack_since_ns = 0;
         }
 
@@ -2690,10 +2721,10 @@ static void sched_v2_atexit_dump_stats(void) {
             (unsigned long long)atomic_load_explicit(&g_v2_worker_idle_entries, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_recheck, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_wake, memory_order_relaxed));
-    fprintf(stderr, "[sched_v2 stats] grow (eager<=%d recheck=%dus rate=%dus/pop/worker depth_x=%d esc=%d): requests=%llu "
+    fprintf(stderr, "[sched_v2 stats] grow (eager<=%d recheck=%dus rate=%dus/pop/worker depth_x=%d dwell=%d esc=%d): requests=%llu "
                     "stall=%llu backlog=%llu escalate=%llu held=%llu parked=%llu final_threads=%d/%d\n",
             g_v2_eager_threads, g_v2_grow_recheck_us, g_v2_grow_rate_us,
-            g_v2_grow_depth_mult, g_v2_grow_escalate_ticks,
+            g_v2_grow_depth_mult, g_v2_grow_depth_dwell, g_v2_grow_escalate_ticks,
             (unsigned long long)atomic_load_explicit(&g_v2_grow_requests, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_grow_stall, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_grow_backlog, memory_order_relaxed),
@@ -2820,6 +2851,14 @@ static void sched_v2_init_impl(void) {
         long v = strtol(depth_env, &end, 10);
         if (end != depth_env && v >= 0 && v <= 100000L) {
             g_v2_grow_depth_mult = (int)v;
+        }
+    }
+    const char* dwell_env = getenv("CC_V2_GROW_DEPTH_DWELL");
+    if (dwell_env) {
+        char* end = NULL;
+        long v = strtol(dwell_env, &end, 10);
+        if (end != dwell_env && v >= 1 && v <= 10000L) {
+            g_v2_grow_depth_dwell = (int)v;
         }
     }
     const char* esc_env = getenv("CC_V2_GROW_ESCALATE_TICKS");

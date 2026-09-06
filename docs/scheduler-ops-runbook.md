@@ -50,6 +50,7 @@ Scheduler (see also the config table in the scheduler spec):
 - `CC_V2_EAGER_THREADS` — inline worker-creation cap on the push path
   (default 2); set to the core count to restore fully-inline pool growth
 - `CC_V2_GROW_RECHECK_US`, `CC_V2_GROW_RATE_US`, `CC_V2_GROW_DEPTH_X`,
+  `CC_V2_GROW_DEPTH_DWELL`,
   `CC_V2_GROW_ESCALATE_TICKS` — deferred pool-growth controller (see
   "Worker pool growth" below)
 - `CC_V2_SYSMON_DETACH=0` — disable unchanged-dispatch worker eviction
@@ -110,7 +111,9 @@ run-to-park:
   `CC_V2_GROW_RATE_US` (default 100us): workers blocked or running long
   CPU arms; or
 - **depth** — ready-queue depth >= `CC_V2_GROW_DEPTH_X` (default 2) times
-  the current pool size; 0 disables the depth trigger;
+  the current pool size, on `CC_V2_GROW_DEPTH_DWELL` (default 3)
+  consecutive rechecks; 0 disables the depth trigger. A completion wave
+  that drains in tens of us does not survive the dwell;
 - **run-to-park** — parks since the baseline exceed half the pops. Recv,
   accept, and lock-wait multiplexing look like stall or backlog; extra
   workers add traffic. A low park fraction with a slow drain is CPU-bound

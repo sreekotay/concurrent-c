@@ -364,8 +364,15 @@ While grow-pending is set, sysmon rechecks on a short cadence (default
 
 - the cumulative drain rate since the episode baseline is below one pop
   per worker per 100 µs (workers blocked or running long CPU arms), or
-  ready-queue depth is at least twice the live pool; and
+  ready-queue depth is at least twice the live pool on three consecutive
+  rechecks; and
 - parks since the baseline do not exceed half the pops.
+
+Neither test is read before the sample spans the rate period (100 µs).
+In a shorter window a healthy pool is expected to show no pops, and the
+park fraction is undefined at zero pops. A completion wave for many
+clients is depth past twice the pool that drains in tens of
+microseconds; it does not survive the dwell.
 
 A high park fraction is run-to-park multiplexing (recv, accept, named
 exclusive wait). Extra workers add traffic, not progress. A low park
@@ -381,7 +388,8 @@ CPU-bound arms is not slack either. The episode stays armed so the rate
 trigger can keep recruiting.
 
 `CC_V2_EAGER_THREADS`, `CC_V2_GROW_RECHECK_US`, `CC_V2_GROW_RATE_US`,
-`CC_V2_GROW_DEPTH_X`, and `CC_V2_GROW_ESCALATE_TICKS` are test overrides.
+`CC_V2_GROW_DEPTH_X`, `CC_V2_GROW_DEPTH_DWELL`, and
+`CC_V2_GROW_ESCALATE_TICKS` are test overrides.
 
 ## Deadline-aware park
 
@@ -532,6 +540,7 @@ correctness.
 | `CC_V2_GROW_RECHECK_US=N`        | Test: sysmon grow-episode cadence. Default 25.                                                 |
 | `CC_V2_GROW_RATE_US=N`           | Test: µs/pop/worker below which the rate trigger grows. Default 100.                           |
 | `CC_V2_GROW_DEPTH_X=N`           | Test: grow when ready depth ≥ N× pool size. 0 disables. Default 2.                             |
+| `CC_V2_GROW_DEPTH_DWELL=N`       | Test: the depth trigger must hold on N consecutive rechecks. Default 3.                        |
 | `CC_V2_GROW_ESCALATE_TICKS=N`    | Test: grow on N consecutive slow ticks of queued work + no idle. 0 off.                        |
 | `CC_V2_TARGET_ACTIVE=N`          | Cap concurrently active (non-parked) workers. 0 disables.                                      |
 | `CC_V2_PARK_EXTRAS_AT_STARTUP=1` | Non-primary workers park at startup rather than all draining the first enqueue.                |
