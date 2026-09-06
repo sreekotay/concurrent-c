@@ -19,10 +19,26 @@ typedef struct UStep {
     int n_sites;
 } UStep;
 
+/* Is the receiver itself a pointer? Its own shape decides, so aliases are
+ * followed but nothing is peeled: peeling a pointer away first would make
+ * every receiver a value. */
 static bool uf_type_is_pointer(Walker* w, CcType* rt) {
-    CcType* t = peel(unalias_local(w, peel(rt)));
-    if (!t) return false;
-    return t->k.kind == CcTypeK_pointer || t->k.kind == CcTypeK_array;
+    CcIndex* ix = w->ix;
+    CcType* t = rt;
+    int depth = 0;
+    while (t && depth++ < 8) {
+        CcType* a;
+        CCSlice nm;
+        CcSym* sym;
+        if (t->k.kind == CcTypeK_pointer || t->k.kind == CcTypeK_array) return true;
+        a = unalias_local(w, t);
+        if (a && a != t) { t = a; continue; }
+        if (!type_named_name(t, &nm) || !nm.len) return false;
+        sym = sym_any(ix, ix->canon(t));
+        if (!sym || sym->kind != CC_SYM_TYPE || !sym->type || sym->type == t) return false;
+        t = sym->type;
+    }
+    return false;
 }
 
 /* A receiver that is not a simple name is parenthesized before `&` / `*`. */
@@ -83,6 +99,33 @@ static CcExpr* uf_compound(CcLowerer* L, CcType* t, CcExpr* e, CcSpan sp) {
     return r;
 }
 
+/* A char pointer is the one receiver a `.` reaches through: `"s".len()`,
+ * `buf.copy(...)` on a `char*`, where the pointer is the value. */
+static bool uf_char_pointer(Walker* w, CcType* rt) {
+    CcType* t = peel(unalias_local(w, peel(rt)));
+    CCSlice nm;
+    if (!t || !type_named_name(t, &nm)) return false;
+    return slice_eq(nm, cstr_slice("char")) || slice_eq(nm, cstr_slice("unsigned char")) ||
+           slice_eq(nm, cstr_slice("signed char")) || slice_eq(nm, cstr_slice("void"));
+}
+
+/* The operator follows the receiver: a pointer takes `->`, a value takes `.`.
+ * Writing the other one is a diagnostic, not a silent coercion. */
+static bool uf_operator_matches(Walker* w, CcLowerer* L, CcExpr* e, CcUfcs uf, CcType* rt, CCSlice tn) {
+    bool is_ptr = uf_type_is_pointer(w, rt);
+    CcSpan sp = e->span;
+    if (is_ptr == uf.arrow) return true;
+    if (uf_char_pointer(w, rt)) return true;
+    if (is_ptr) {
+        CCString msg = @string(`type: UFCS on pointer type '${tn}' uses '->', not '.'`, L->arena);
+        lw_error(L, sp, msg);
+    } else {
+        CCString msg = @string(`type: UFCS on value type '${tn}' uses '.', not '->'`, L->arena);
+        lw_error(L, sp, msg);
+    }
+    return false;
+}
+
 static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice tn, CCSlice reason) {
     UStep* st = (UStep*)w->env;
     CcLowerer* L = st->L;
@@ -107,6 +150,7 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
         lw_error(L, sp, msg);
         return;
     }
+    if (!uf_operator_matches(w, L, e, uf, rt, tn)) return;
     recv_ptr = uf.arrow || uf_type_is_pointer(w, rt);
     if (m->recv_by_ptr && !recv_ptr && !uf_is_lvalue(uf.recv)) {
         /* a value with no address (`xs.sub(1, 3).len()`): the call's result

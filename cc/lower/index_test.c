@@ -326,6 +326,21 @@ static CcType *return_type_of_sym(CcSym *sym) {
     return sym->type->base;
 }
 
+/* The receiver as the call site writes it: the bare-name tier reads whether
+   it is a pointer and whether what it names is const. */
+static unsigned recv_shape_of(Walker *w, CcType *recv_type) {
+    CcType *t = unalias_local(w, recv_type);
+    unsigned shape = 0;
+    if (!t) return 0;
+    if (t->kind == CC_T_POINTER || t->kind == CC_T_ARRAY) {
+        shape |= CC_RECV_PTR;
+        if (t->base && (t->base->quals & CC_Q_CONST)) shape |= CC_RECV_CONST;
+    } else if (t->quals & CC_Q_CONST) {
+        shape |= CC_RECV_CONST;
+    }
+    return shape;
+}
+
 static CcMethod *resolve_site(Walker *w, CcType *recv_type, const char *method, const char **type_name, const char **reason) {
     CcIndex *ix = w->s->ix;
     CcType *t = peel(unalias_local(w, peel(recv_type)));
@@ -338,7 +353,7 @@ static CcMethod *resolve_site(Walker *w, CcType *recv_type, const char *method, 
     if (t->kind == CC_T_TYPEOF && !t->typeof_type) return NULL;
     *type_name = cc_index_canon(ix, t);
     info = cc_index_type_get(ix, *type_name);
-    m = cc_index_method(ix, info, cc_intern(w->s->intern, method, strlen(method)), &cand);
+    m = cc_index_method_recv(ix, info, cc_intern(w->s->intern, method, strlen(method)), recv_shape_of(w, recv_type), &cand);
     if (!m) *reason = cand;
     return m;
 }

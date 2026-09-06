@@ -2171,7 +2171,7 @@ static size_t cc__view_faces(CcIndex *ix, const char *name, const char ***out) {
     return faces.n;
 }
 
-static CcMethod *cc__resolve(CcIndex *ix, CcTypeInfo *recv, CcName method, CcBuf *tried, int depth);
+static CcMethod *cc__resolve(CcIndex *ix, CcTypeInfo *recv, CcName method, CcBuf *tried, int depth, unsigned recv_shape);
 
 /* Do two canonical spellings name one type: the same name, a typedef of
  * the other (`Point` / `struct Point`), or two arithmetic types (a C call
@@ -2211,7 +2211,7 @@ static int cc__same_type(CcIndex *ix, const char *a, const char *b) {
 
 /* The receiver type an `as:` face or a typedef alias delegates to. */
 static CcMethod *cc__resolve_via(CcIndex *ix, CcTypeInfo *recv, CcName method, CcBuf *tried, int depth,
-                                 CcType *target, const char *how) {
+                                 CcType *target, const char *how, unsigned recv_shape) {
     CcName tn;
     CcTypeInfo *ti;
     CcMethod *m;
@@ -2220,13 +2220,13 @@ static CcMethod *cc__resolve_via(CcIndex *ix, CcTypeInfo *recv, CcName method, C
     tn = cc_index_canon(ix, target);
     if (strcmp(tn, recv->name) == 0) return NULL;
     ti = cc_index_type_get(ix, tn);
-    m = cc__resolve(ix, ti, method, tried, depth + 1);
+    m = cc__resolve(ix, ti, method, tried, depth + 1, recv_shape);
     if (!m) return NULL;
     return cc__method_new(ix, recv, method, m->callee, m->source,
                           cc_arena_printf(ix->arena, "%s %s; %s", how, tn, m->origin ? m->origin : ""), m->sym, !m->recv_by_ptr);
 }
 
-static CcMethod *cc__resolve(CcIndex *ix, CcTypeInfo *recv, CcName method, CcBuf *tried, int depth) {
+static CcMethod *cc__resolve(CcIndex *ix, CcTypeInfo *recv, CcName method, CcBuf *tried, int depth, unsigned recv_shape) {
     CcMethod *m;
     CcHookReg *hook;
     CcSym *cs;
@@ -2316,12 +2316,21 @@ static CcMethod *cc__resolve(CcIndex *ix, CcTypeInfo *recv, CcName method, CcBuf
     /* 5. the bare-name tier: a declared `method(T, ...)` is callable as `x.method(...)` */
     cs = cc__sym_find_kind(ix, method, CC_SYM_FUNC);
     if (cs && cs->type && cs->type->kind == CC_T_FUNC && cs->type->params.n > 0 && cs->type->params.items[0]->type) {
-        CcType *p0 = cs->type->params.items[0]->type;
-        CcType *base = p0->kind == CC_T_POINTER ? p0->base : p0;
-        if (base && (cc__same_type(ix, cc_index_canon(ix, base), recv->name) ||
-                     (p0->kind == CC_T_POINTER && strcmp(cc_index_canon(ix, base), "void") == 0)))
+        CcParam *pm = cs->type->params.items[0];
+        CcType *p0 = pm->type;
+        int p0_ptr = p0->kind == CC_T_POINTER;
+        CcType *base = p0_ptr ? p0->base : p0;
+        int recv_ptr = (recv_shape & CC_RECV_PTR) != 0;
+        int recv_const = (recv_shape & CC_RECV_CONST) != 0;
+        int p0_const = base && (base->quals & CC_Q_CONST) != 0;
+        int names_it = base && (cc__same_type(ix, cc_index_canon(ix, base), recv->name) ||
+                                (p0_ptr && recv_ptr && strcmp(cc_index_canon(ix, base), "void") == 0));
+        /* the address of a receiver may be taken; a pointer is never
+         * dereferenced, and const is never dropped */
+        if (names_it && !(recv_ptr && !p0_ptr) && !(recv_const && p0_ptr && !p0_const))
             return cc__method_new(ix, recv, method, method, "bare_name", cc__sym_origin(ix, cs), cs, 0);
-        cc_buf_printf(tried, " %s (first parameter is %s)", method, cc_index_canon(ix, p0));
+        cc_buf_printf(tried, "; candidate %s (bare): declared, but first parameter '%s%s%s' does not take '%s'",
+                      method, cc_index_canon(ix, p0), pm->name ? " " : "", pm->name ? pm->name : "", recv->name);
     }
 
     /* 6. a typedef alias uses the aliased type's methods */
@@ -2330,7 +2339,7 @@ static CcMethod *cc__resolve(CcIndex *ix, CcTypeInfo *recv, CcName method, CcBuf
         CcType *t = recv->sym->type;
         if (t->kind == CC_T_NAMED || t->kind == CC_T_POINTER || t->kind == CC_T_GENERIC || t->kind == CC_T_SLICE ||
             t->kind == CC_T_RESULT || t->kind == CC_T_CHAN) {
-            m = cc__resolve_via(ix, recv, method, tried, depth, t, "via typedef");
+            m = cc__resolve_via(ix, recv, method, tried, depth, t, "via typedef", recv_shape);
             if (m) return m;
         }
     }
@@ -2344,7 +2353,7 @@ static CcMethod *cc__resolve(CcIndex *ix, CcTypeInfo *recv, CcName method, CcBuf
             const CcField *f;
             for (f = st->fields; f; f = f->next) {
                 if (!f->name || strcmp(f->name, faces[i]) != 0) continue;
-                m = cc__resolve_via(ix, recv, method, tried, depth, f->type, cc_arena_printf(ix->arena, "via @typeview as: %s ->", f->name));
+                m = cc__resolve_via(ix, recv, method, tried, depth, f->type, cc_arena_printf(ix->arena, "via @typeview as: %s ->", f->name), 0u);
                 if (m) return m;
             }
         }
@@ -2420,11 +2429,11 @@ size_t cc_index_methods_of(CcIndex *ix, CcTypeInfo *info, CcMethod ***out) {
     return list.n;
 }
 
-CcMethod *cc_index_method(CcIndex *ix, CcTypeInfo *recv, CcName method, const char **candidates) {
+CcMethod *cc_index_method_recv(CcIndex *ix, CcTypeInfo *recv, CcName method, unsigned recv_shape, const char **candidates) {
     CcBuf tried;
     CcMethod *m;
     cc_buf_init(&tried);
-    m = cc__resolve(ix, recv, method, &tried, 0);
+    m = cc__resolve(ix, recv, method, &tried, 0, recv_shape);
     if (candidates) {
         if (m) *candidates = NULL;
         else {
@@ -2432,7 +2441,7 @@ CcMethod *cc_index_method(CcIndex *ix, CcTypeInfo *recv, CcName method, const ch
             CcMethod **have = NULL;
             size_t n = cc_index_methods_of(ix, recv, &have), i, shown = 0;
             cc_buf_init(&b);
-            cc_buf_printf(&b, "no method '%s' for receiver type '%s'; tried:%s", method, recv->name, tried.len ? tried.data : " nothing");
+            cc_buf_printf(&b, "no UFCS method '%s' for receiver type '%s'; tried:%s", method, recv->name, tried.len ? tried.data : " nothing");
             if (n) {
                 cc_buf_push_str(&b, "; the type has:");
                 for (i = 0; i < n && shown < 24; i++) {

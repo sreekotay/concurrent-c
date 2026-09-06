@@ -531,7 +531,7 @@ static int run_resolve(const char* path, const char* type_arg, const char* metho
         info = s.ix->type_get(cstr_slice(type_arg));
     }
     {
-        CcMethod* !>(CcDiag) r = s.ix->method(info, cstr_slice(method), a);
+        CcMethod* !>(CcDiag) r = s.ix->method_recv(info, cstr_slice(method), 0u, a);
         if (r.is_ok()) {
             CcMethod* m = r.value();
             printf("%s.%s -> %.*s(%srecv, ...) [%.*s] %.*s\n", type_arg, method, SL(m->callee), m->recv_by_ptr ? "&" : "",
