@@ -68,6 +68,16 @@ static size_t sr_decoded_len(CCSlice text, bool verbatim) {
     return n;
 }
 
+/* A slot's spans index the template's own tape, not the unit's: spelling
+ * it against the unit would read whatever tokens sit at those offsets
+ * there. The slot travels as the text it spells. */
+static CcExpr* sr_slot_expr(CcLowerer* L, CcTplPart* part, CcSpan sp) {
+    const CcTape* tape = part->tape ? part->tape : &L->unit->tape;
+    CCString spelled = CcExpr_spell(part->slot, tape, L->arena);
+    CCString wrapped = @string(`(${spelled})`, L->arena);
+    return lw_text(L, wrapped, sp);
+}
+
 /* `"<text>"`, the bytes as the source wrote them. */
 static CcExpr* sr_literal(CcLowerer* L, CCSlice text, CcSpan sp) {
     CCString q = cc_string_new();
@@ -138,7 +148,7 @@ static bool sr_arena_stmts(TStep* st, CCSlice name, CcTemplate tp, CcSpan sp, Cc
             args->push(tp.arena);
             out->push(lw_expr_stmt(L, call, sp));
         } else {
-            CcExpr* call = lw_call2(L, cstr_slice("cc__string_slot_push"), recv, lw_paren(L, part->slot, sp), sp);
+            CcExpr* call = lw_call2(L, cstr_slice("cc__string_slot_push"), recv, sr_slot_expr(L, part, sp), sp);
             CcExprList* args = lw_call_args(call);
             args->push(tp.arena);
             out->push(lw_expr_stmt(L, call, sp));
@@ -169,7 +179,8 @@ static CcExpr* sr_stack_expr(TStep* st, CcTemplate tp, CcSpan sp) {
             CCString cnt = @string(` + ${(int)sr_decoded_len(part->text, part->is_verbatim)}u`, L->arena);
             size.push_slice(cc_string_as_slice(&cnt), L->arena);
         } else {
-            CCString spelled = lw_spell_expr(L, part->slot);
+            const CcTape* tape = part->tape ? part->tape : &L->unit->tape;
+            CCString spelled = CcExpr_spell(part->slot, tape, L->arena);
             size.push_cstr(" + cc__string_stack_bound((", L->arena);
             size.push_slice(cc_string_as_slice(&spelled), L->arena);
             size.push_cstr("))", L->arena);
@@ -190,7 +201,7 @@ static CcExpr* sr_stack_expr(TStep* st, CcTemplate tp, CcSpan sp) {
             args->push(lw_text(L, cnt, sp));
             built = call;
         } else {
-            built = lw_call2(L, cstr_slice("cc__string_stack_push"), built, lw_paren(L, part->slot, sp), sp);
+            built = lw_call2(L, cstr_slice("cc__string_stack_push"), built, sr_slot_expr(L, part, sp), sp);
         }
     }
     return lw_call1(L, cstr_slice("cc__string_stack_slice"), built, sp);
@@ -284,7 +295,9 @@ static void sr_stmts(TStep* st, CcStmtList* list) {
 }
 
 /* An arena template left anywhere but a declaration initializer: it is a
- * run of statements, so there is nowhere to put it. */
+ * run of statements, so there is nowhere to put it. Only statements the
+ * step walked are checked: a template inside a `${"@"}comptime` block or a
+ * factory body is the comptime seam's to evaluate. */
 static bool sr_leftover_visit(CcExpr* e, void* env) {
     TStep* st = (TStep*)env;
     CcLowerer* L = st->L;
@@ -329,6 +342,16 @@ static void sr_function(TStep* st, CcDecl* d, CcFuncDecl f) {
     *body = with;
 }
 
+/* The leftover check, over one function body. */
+static void sr_leftover_fn(TStep* st, CcFuncDecl f) {
+    CcVisitor v;
+    if (!f.body) return;
+    memset(&v, 0, sizeof(v));
+    v.expr = sr_leftover_visit;
+    v.env = st;
+    CcStmt_walk(f.body, v);
+}
+
 static void CcLowerer_strings(CcLowerer* L) {
     Walker w;
     TStep st;
@@ -358,10 +381,13 @@ static void CcLowerer_strings(CcLowerer* L) {
     v.expr = sr_stack_visit;
     v.env = &st;
     CcUnit_walk(L->unit, v);
-    memset(&v, 0, sizeof(v));
-    v.expr = sr_leftover_visit;
-    v.env = &st;
-    CcUnit_walk(L->unit, v);
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *declv->get_ptr(i);
+        @switch (d->k) {
+            case .func(f): sr_leftover_fn(&st, f); break;
+            default: break;
+        }
+    }
 }
 
 #endif
