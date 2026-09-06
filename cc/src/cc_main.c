@@ -3968,10 +3968,73 @@ static int cc__clean_known_types(char* dst, size_t cap) {
     return 0;
 }
 
+/* Compile time, before the clean lowerer sees the unit.
+ *
+ * `@comptime if` / `@comptime for` / `@comptime(expr)` decide what source
+ * there is to lower at all, and `@grammar` bodies are raw bytes no parser
+ * may read. Both are resolved here, by the same engine the shadow path
+ * runs, and the lowerer is handed the source that survived. What it is
+ * NOT handed is C: the type-scoped and template passes are left off, so
+ * `Tweet.parse(...)` and `@string(`...`)` reach the lowerer as the
+ * language, for its own steps to lower from the index and the AST.
+ *
+ * The prepare passes keep the line count (they blank rather than delete),
+ * so the stage the lowerer reads still names the user's own lines. */
+static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs,
+                                              size_t cap) {
+    char* buf = NULL;
+    size_t len = 0;
+    uint64_t h;
+    char dir[PATH_MAX];
+    char path[PATH_MAX];
+    if (!in_path || !out_ccs || !cap) return -1;
+    out_ccs[0] = '\0';
+    buf = cc__read_all_file(in_path, &len);
+    if (!buf) {
+        fprintf(stderr, "cc: cannot read %s\n", in_path);
+        return -1;
+    }
+    if (cc_comptime_prepare_source_ex(&buf, &len, in_path,
+                                      CC_PREPARE_COMPTIME | CC_PREPARE_GRAMMAR |
+                                      CC_PREPARE_MODULE_EXPORT | CC_PREPARE_STATIC_MAP) != 0) {
+        free(buf);
+        return -1;
+    }
+    {
+        /* the stage still names the user's file: the prepare passes keep
+         * the line count, so line N there is line N here */
+        size_t hn = strlen(in_path) + 32;
+        char* with = (char*)malloc(hn + len + 1);
+        int k;
+        if (!with) { free(buf); return -1; }
+        k = snprintf(with, hn, "#line 1 \"%s\"\n", in_path);
+        memcpy(with + k, buf, len);
+        with[k + len] = '\0';
+        free(buf);
+        buf = with;
+        len = (size_t)k + len;
+    }
+    h = 1469598103934665603ULL;
+    h = cc__fnv1a64_str(h, in_path);
+    h = cc__fnv1a64_update(h, buf, len);
+    snprintf(dir, sizeof(dir), "%s/clean_comptime", g_cache_root);
+    if (cc__mkdir_p(dir) != 0) { free(buf); return -1; }
+    snprintf(path, sizeof(path), "%s/%016llx.ccs", dir, (unsigned long long)h);
+    if (cc__install_wrap_file(path, buf, len) != 0) { free(buf); return -1; }
+    free(buf);
+    if (strlen(path) + 1 > cap) {
+        fprintf(stderr, "cc: clean comptime stage path too long\n");
+        return -1;
+    }
+    snprintf(out_ccs, cap, "%s", path);
+    return 0;
+}
+
 /* Lower `in_path` to C with the clean lowerer into `c_out`. */
-static int cc__run_clean_lowerer(const char* in_path, const char* c_out) {
+static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
+                                 const char* quote_dir) {
     char tool[PATH_MAX], known[PATH_MAX], incdir[PATH_MAX], hroot[PATH_MAX];
-    char* argv[16];
+    char* argv[20];
     int argc = 0, rc;
     if (cc__find_clean_tool("cclower_cc", tool, sizeof(tool)) != 0) {
         fprintf(stderr, "cc: clean lowerer not built (out/cc/bin/cclower_cc missing): run `make -C cc lower-cc`\n");
@@ -3993,6 +4056,10 @@ static int cc__run_clean_lowerer(const char* in_path, const char* c_out) {
     argv[argc++] = hroot;
     argv[argc++] = (char*)"--known-types";
     argv[argc++] = known;
+    if (quote_dir && quote_dir[0]) {
+        argv[argc++] = (char*)"--quote-dir";
+        argv[argc++] = (char*)quote_dir;
+    }
     argv[argc++] = (char*)"-o";
     argv[argc++] = (char*)c_out;
     argv[argc] = NULL;
@@ -4616,6 +4683,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
              * (include rewrite, host compile, link happen in the driver). */
             char dir[PATH_MAX], clean_c[PATH_MAX], stem[128];
             char clean_shcc_wrap[PATH_MAX];
+            char clean_qdir[PATH_MAX];
             CCBuildOptions o2;
             CCBuildOptions o_shcc;
             if (uk == CC_UNIT_KIND_CCH) {
@@ -4633,12 +4701,28 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                 o_shcc.in_path = clean_shcc_wrap;
                 opt = &o_shcc;
             }
+            /* a stage lives in the cache, so quoted includes still resolve
+             * against the directory the user wrote the unit in */
+            cc__dir_of_path(opt->in_path, clean_qdir, sizeof(clean_qdir));
+            {
+                /* compile time first: what it decides is what there is to lower */
+                char clean_ct[PATH_MAX];
+                static CCBuildOptions o_ct;
+                if (cc__materialize_comptime_for_clean(opt->in_path, clean_ct,
+                                                       sizeof(clean_ct)) != 0)
+                    return -1;
+                if (clean_ct[0]) {
+                    o_ct = *opt;
+                    o_ct.in_path = clean_ct;
+                    opt = &o_ct;
+                }
+            }
             cc__stem_from_path(opt->in_path, stem, sizeof(stem));
             snprintf(dir, sizeof(dir), "%s/.cc-build/clean", g_out_root);
             (void)cc__mkdir_p(dir);
             snprintf(clean_c, sizeof(clean_c), "%s/%s.%016llx.c", dir, stem,
                      (unsigned long long)cc__fold_file_content(1469598103934665603ULL, opt->in_path));
-            if (cc__run_clean_lowerer(opt->in_path, clean_c) != 0) return -1;
+            if (cc__run_clean_lowerer(opt->in_path, clean_c, clean_qdir) != 0) return -1;
             if (opt->mode == CC_MODE_EMIT_C) {
                 if (cc__materialize_host_c(clean_c, opt->c_out_path) != 0) return -1;
                 if (summary_out) { memset(summary_out, 0, sizeof(*summary_out)); summary_out->c_out_path = opt->c_out_path; summary_out->did_emit_c = 1; }

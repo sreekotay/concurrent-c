@@ -19,6 +19,12 @@ int cc_comptime_unified_exec_enabled(void) {
 
 int cc_comptime_prepare_source(char** inout_buf, size_t* inout_len,
                                const char* input_path) {
+    return cc_comptime_prepare_source_ex(inout_buf, inout_len, input_path,
+                                         CC_PREPARE_ALL);
+}
+
+int cc_comptime_prepare_source_ex(char** inout_buf, size_t* inout_len,
+                                  const char* input_path, unsigned passes) {
     char* resolved;
     char* templ;
     char* factory;
@@ -42,7 +48,7 @@ int cc_comptime_prepare_source(char** inout_buf, size_t* inout_len,
      * rewrite to a synthesized @comptime engine call.  Must run before every
      * other rewrite — the body is raw non-C bytes that later passes (templates,
      * factories) must never see. */
-    {
+    if (passes & CC_PREPARE_GRAMMAR) {
         char* grammar = cc_rewrite_grammar_decls_text(*inout_buf, *inout_len, input_path);
         if (grammar == (char*)-1) return -1;
         if (grammar) {
@@ -56,7 +62,7 @@ int cc_comptime_prepare_source(char** inout_buf, size_t* inout_len,
      * header-declared CC_MODULE_EXPORT template into the same entry
      * stanza a hand-written registration spells, before any other pass
      * reads the TU — the splice is indistinguishable from source. */
-    {
+    if (passes & CC_PREPARE_MODULE_EXPORT) {
         char* mex = cc_rewrite_module_export_directives_text(*inout_buf, *inout_len, input_path);
         if (mex == (char*)-1) return -1;
         if (mex) {
@@ -68,8 +74,9 @@ int cc_comptime_prepare_source(char** inout_buf, size_t* inout_len,
 
     /* Type-scoped calls (`Tweet.parse(...)` -> `Tweet_parse(...)`) rewrite
      * AFTER the grammar splice so lowered names emitted by the engines count
-     * as visible; must happen before the C parse (syntax error otherwise). */
-    {
+     * as visible; must happen before the C parse (syntax error otherwise).
+     * The clean lowerer resolves these itself, from the index. */
+    if (passes & CC_PREPARE_TYPE_SCOPED) {
         char* tsc = cc_rewrite_type_scoped_calls_text(*inout_buf, *inout_len);
         if (tsc) {
             free(*inout_buf);
@@ -81,17 +88,19 @@ int cc_comptime_prepare_source(char** inout_buf, size_t* inout_len,
     /* Expand CC_GENERIC_FACTORY(Name){...} sugar before anything else so the
      * downstream @comptime if/for + @emit lowering and the comptime collector
      * see canonical @comptime constructs. */
-    factory = cc_rewrite_generic_factory_text(*inout_buf, *inout_len, input_path);
-    if (factory == (char*)-1) return -1;
-    if (factory) {
-        free(*inout_buf);
-        *inout_buf = factory;
-        *inout_len = strlen(factory);
+    if (passes & CC_PREPARE_FACTORY_SUGAR) {
+        factory = cc_rewrite_generic_factory_text(*inout_buf, *inout_len, input_path);
+        if (factory == (char*)-1) return -1;
+        if (factory) {
+            free(*inout_buf);
+            *inout_buf = factory;
+            *inout_len = strlen(factory);
+        }
     }
 
     /* Typed static_map(name, entries, flags) → layout-carrying internal call
      * before @comptime if/for so the executor sees the expanded arity. */
-    {
+    if (passes & CC_PREPARE_STATIC_MAP) {
         char* sm = cc_rewrite_static_map_calls_text(*inout_buf, *inout_len, input_path);
         if (sm == (char*)-1) return -1;
         if (sm) {
@@ -101,12 +110,14 @@ int cc_comptime_prepare_source(char** inout_buf, size_t* inout_len,
         }
     }
 
-    resolved = cc__resolve_comptime_if(*inout_buf, *inout_len, input_path);
-    if (resolved == (char*)-1) return -1;
-    if (resolved) {
-        free(*inout_buf);
-        *inout_buf = resolved;
-        *inout_len = strlen(resolved);
+    if (passes & CC_PREPARE_COMPTIME) {
+        resolved = cc__resolve_comptime_if(*inout_buf, *inout_len, input_path);
+        if (resolved == (char*)-1) return -1;
+        if (resolved) {
+            free(*inout_buf);
+            *inout_buf = resolved;
+            *inout_len = strlen(resolved);
+        }
     }
 
     /* Value-position `@comptime(expr)`: evaluate and splice the projected C
@@ -114,7 +125,7 @@ int cc_comptime_prepare_source(char** inout_buf, size_t* inout_len,
      * sites are evaluated) and before template lowering.  The splice lands in
      * the buffer that feeds both the parse buffer and `buffer_codegen`, so the
      * hoisted literal is visible in the lowered C — no anchor plumbing needed. */
-    {
+    if (passes & CC_PREPARE_COMPTIME) {
         char* valued = cc__resolve_comptime_value(*inout_buf, *inout_len, input_path);
         if (valued == (char*)-1) return -1;
         if (valued) {
@@ -123,6 +134,8 @@ int cc_comptime_prepare_source(char** inout_buf, size_t* inout_len,
             *inout_len = strlen(valued);
         }
     }
+
+    if (!(passes & CC_PREPARE_TEMPLATES)) return 0;
 
     templ = cc_normalize_template_recv_chains_text(*inout_buf, *inout_len);
     if (templ == (char*)-1) return -1;

@@ -319,7 +319,13 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
     }
     if (!rt) {
         CCSlice kind = uf.recv ? CcExpr_kind_name(uf.recv) : cc_slice_empty();
-        CCString msg = @string(`type: cannot type the receiver of '.${uf.method}' (a ${kind}); declare it with a type the index can see`, L->arena);
+        CCSlice who = cc_slice_empty();
+        CCString msg;
+        /* name the receiver when it has one: 'nosuchvar' says more than 'a ident' */
+        if (uf.recv && expr_ident(strip_parens_expr(uf.recv), &who) && who.len)
+            msg = @string(`type: cannot type the receiver '${who}' of '.${uf.method}'; declare it with a type the index can see`, L->arena);
+        else
+            msg = @string(`type: cannot type the receiver of '.${uf.method}' (a ${kind}); declare it with a type the index can see`, L->arena);
         lw_error(L, sp, msg);
         return;
     }
