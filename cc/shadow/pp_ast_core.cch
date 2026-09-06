@@ -156,7 +156,7 @@ static ShadowKwKind shadow_kw(Token t) {
 /* Nodes come from Parser.parse_ar (one AstNode per alloc — pointers stay
  * stable). Kids lists alias a bump table (`n->kids = &kids_storage[i]`);
  * that table must not relocate. SCOPE_CAP is lexical depth, not a heap. */
-enum { SCOPE_CAP = 32, NAME_CAP = 256, SHADOW_KIDS_CAP = 131072 };
+enum { SCOPE_CAP = 32, NAME_CAP = 1024, SHADOW_KIDS_CAP = 131072 };
 
 typedef struct {
     char names[NAME_CAP][128];

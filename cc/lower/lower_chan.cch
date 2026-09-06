@@ -1,0 +1,257 @@
+#pragma(@per_tu)
+/* Clean lowerer, step: channels. An endpoint is declared by what travels
+ * through it and how much can wait: `int64_t[~4 >] tx;` is a sending end
+ * of a four-deep channel of int64_t. In C it is the runtime's untyped
+ * handle, and the element type, the depth and the policy travel with the
+ * declaration so the pair that creates the channel and the sends that use
+ * it can be built from them.
+ *
+ * A send carries its value through a temporary of the element type. The
+ * runtime sizes the copy with `sizeof` of what it is handed, so sending
+ * `7` down a channel of int64_t without that temporary would copy four
+ * bytes and leave four behind — a wrong value that still compiles.
+ *
+ * A policy or topology this step does not know is a diagnostic naming it,
+ * never a silent fall back to the blocking default: the difference
+ * between blocking and dropping is the difference between a slow program
+ * and one that loses messages. Lifetime: the lowerer arena. */
+#ifndef CC_LOWER_CHAN_CCH
+#define CC_LOWER_CHAN_CCH
+#include "lower.cch"
+#include "typing.cch"
+
+typedef struct HEnd {
+    CCSlice name;               /* the declared endpoint */
+    CcType* elem;
+    CcExpr* cap;
+    CCSlice mode;               /* CC_CHAN_MODE_* */
+    CCSlice topo;               /* CC_CHAN_TOPO_* */
+    char dir;
+} HEnd;
+typedef HEnd* HEndRef;
+typedef Vec::[HEndRef] HEndList;
+
+typedef struct HStep {
+    CcLowerer* L;
+    Walker* w;
+    HEndList ends;
+    uint32_t next_id;
+} HStep;
+
+static HEnd* hc_find(HStep* st, CCSlice name) {
+    HEndList* v = &st->ends;
+    size_t n = v->len();
+    size_t i;
+    if (!name.len) return NULL;
+    for (i = 0; i < n; i++) {
+        HEnd* e = *v->get_ptr(i);
+        if (slice_eq(e->name, name)) return e;
+    }
+    return NULL;
+}
+
+/* The runtime's mode for a declared drop policy. */
+static bool hc_mode_of(CcLowerer* L, CcChanType ch, CcSpan sp, CCSlice* out) {
+    CCSlice p = ch.policy;
+    if (!p.len) { *out = cstr_slice("CC_CHAN_MODE_BLOCK"); return true; }
+    if (cc_slice_eq_cstr(&p, "Drop")) { *out = cstr_slice("CC_CHAN_MODE_DROP_NEW"); return true; }
+    if (cc_slice_eq_cstr(&p, "DropOld")) { *out = cstr_slice("CC_CHAN_MODE_DROP_OLD"); return true; }
+    {
+        CCString m = @string(`channel policy '${p}' is not one the clean lowerer knows; it would otherwise block where you asked it to drop`, L->arena);
+        lw_error(L, sp, m);
+    }
+    return false;
+}
+
+/* The runtime's topology for a declared one. */
+static bool hc_topo_of(CcLowerer* L, CcChanType ch, CcSpan sp, CCSlice* out) {
+    CCSlice t = ch.topology;
+    if (!t.len) { *out = cstr_slice("CC_CHAN_TOPO_DEFAULT"); return true; }
+    if (cc_slice_eq_cstr(&t, "1:1")) { *out = cstr_slice("CC_CHAN_TOPO_1_1"); return true; }
+    if (cc_slice_eq_cstr(&t, "1:N")) { *out = cstr_slice("CC_CHAN_TOPO_1_N"); return true; }
+    if (cc_slice_eq_cstr(&t, "N:1")) { *out = cstr_slice("CC_CHAN_TOPO_N_1"); return true; }
+    if (cc_slice_eq_cstr(&t, "N:N")) { *out = cstr_slice("CC_CHAN_TOPO_N_N"); return true; }
+    {
+        CCString m = @string(`channel topology '${t}' is not one the clean lowerer knows`, L->arena);
+        lw_error(L, sp, m);
+    }
+    return false;
+}
+
+static bool hc_is_chan(CcType* t, CcChanType* out) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .chan(ch): *out = ch; return true;
+        default: return false;
+    }
+}
+
+/* `int64_t[~4 >] tx;` keeps what it carries, and becomes the handle. */
+static void hc_decl(HStep* st, CcDecl* d, CcVarDecl v) {
+    CcLowerer* L = st->L;
+    CcChanType ch;
+    HEnd* e;
+    CCSlice mode;
+    CCSlice topo;
+    if (!hc_is_chan(v.type, &ch)) return;
+    if (!hc_mode_of(L, ch, d->span, &mode)) return;
+    if (!hc_topo_of(L, ch, d->span, &topo)) return;
+    e = cc_arena_alloc(L->arena, sizeof(HEnd), _Alignof(HEnd));
+    memset(e, 0, sizeof(*e));
+    e->name = v.name;
+    e->elem = ch.elem;
+    e->cap = ch.cap;
+    e->mode = mode;
+    e->topo = topo;
+    e->dir = ch.dir;
+    st->ends.push(e);
+    v.type = cc_type_named(ch.dir == '<' ? cstr_slice("CCChanRx") : cstr_slice("CCChanTx"),
+                           d->span, L->arena);
+    d->k = { .var = v };
+}
+
+/* The name an `&x` argument names. */
+static CCSlice hc_addr_name(CcExpr* e) {
+    CcExpr* s = strip_parens_expr(e);
+    CCSlice nm;
+    if (!s) return cc_slice_empty();
+    @switch (s->k) {
+        case .unary(un): {
+            if (un.op != CC_OP_ADDR) return cc_slice_empty();
+            if (!expr_ident(strip_parens_expr(un.a), &nm)) return cc_slice_empty();
+            return nm;
+        }
+        default: return cc_slice_empty();
+    }
+}
+
+/* `cc_channel_pair(&tx, &rx)` is built from what the two ends declared. */
+static void hc_pair(HStep* st, CcExpr* e, CcCall cl) {
+    CcLowerer* L = st->L;
+    CcExprList* av = &cl.args;
+    CCSlice n1;
+    CCSlice n2;
+    HEnd* a;
+    HEnd* b;
+    CcSpan sp = e->span;
+    if (av->len() != 2) return;
+    n1 = hc_addr_name(*av->get_ptr(0));
+    n2 = hc_addr_name(*av->get_ptr(1));
+    a = hc_find(st, n1);
+    b = hc_find(st, n2);
+    if (!a || !b) return;
+    {
+        /* a real call, so the unwrap that follows can see the Result the
+         * runtime declares it returns */
+        CCSlice elem = L->ix->canon(a->elem);
+        CCString capt = a->cap ? lw_spell_expr(L, a->cap) : @string(`0`, L->arena);
+        CCString szt = @string(`sizeof(${elem})`, L->arena);
+        CCString names = @string(`"${n1},${n2}"`, L->arena);
+        CcCall out;
+        out.callee = lw_ident(L, cstr_slice("cc_channel_pair_create_named"), sp);
+        out.args = vec_new::[CcExprRef](L->arena);
+        out.args.push(lw_text(L, capt, sp));
+        out.args.push(lw_ident(L, a->mode, sp));
+        out.args.push(lw_text(L, @string(`0`, L->arena), sp));
+        out.args.push(lw_text(L, szt, sp));
+        out.args.push(lw_text(L, @string(`0`, L->arena), sp));
+        out.args.push(lw_ident(L, a->topo, sp));
+        out.args.push(lw_text(L, @string(`0`, L->arena), sp));
+        out.args.push(cc_expr_unary(CC_OP_ADDR, lw_ident(L, n1, sp), sp, L->arena));
+        out.args.push(cc_expr_unary(CC_OP_ADDR, lw_ident(L, n2, sp), sp, L->arena));
+        out.args.push(lw_text(L, names, sp));
+        out.args.push(lw_text(L, @string(`__FILE__`, L->arena), sp));
+        out.args.push(lw_text(L, @string(`__LINE__`, L->arena), sp));
+        e->k = { .call = out };
+    }
+}
+
+/* A send hands the runtime a value it sizes with `sizeof`: the value
+ * travels through a temporary of the element type so the copy is the
+ * width the channel carries. */
+static bool hc_is_value_send(CCSlice m) {
+    return cc_slice_eq_cstr(&m, "send") || cc_slice_eq_cstr(&m, "try_send") ||
+           cc_slice_eq_cstr(&m, "send_task") || cc_slice_eq_cstr(&m, "send_task_hybrid");
+}
+
+static void hc_send(HStep* st, CcExpr* e, CcUfcs uf) {
+    CcLowerer* L = st->L;
+    CCSlice recv;
+    HEnd* end;
+    CcExprList* av = &uf.args;
+    if (!hc_is_value_send(uf.method)) return;
+    if (av->len() != 1) return;
+    if (!expr_ident(strip_parens_expr(uf.recv), &recv)) return;
+    end = hc_find(st, recv);
+    if (!end || end->dir == '<') return;
+    {
+        CcSpan sp = e->span;
+        uint32_t id = st->next_id++;
+        CCSlice elem = L->ix->canon(end->elem);
+        CCString nm = @string(`__cc_snd${id}`, L->arena);
+        CCSlice tmp = lw_keep(L, &nm);
+        CcExpr* val = *av->get_ptr(0);
+        CcStmt* blk = lw_block(L, sp);
+        CcExpr* wrapped = cc__expr_blank(sp, L->arena);
+        CcStmtExpr se;
+        lw_push(blk, lw_decl_stmt(L, cc_type_named(elem, sp, L->arena), tmp, lw_paren(L, val, sp), sp));
+        lw_push(blk, lw_expr_stmt(L, lw_ident(L, tmp, sp), sp));
+        se.block = blk;
+        wrapped->k = { .stmt_expr = se };
+        *av->get_ptr(0) = wrapped;
+    }
+}
+
+static void hc_on_stmt(Walker* w, CcStmt* s, bool enter) {
+    HStep* st = (HStep*)w->env;
+    CcDecl* d = NULL;
+    if (!enter) return;
+    if (!stmt_is_decl(s, &d) || !d) return;
+    @switch (d->k) {
+        case .var(v): hc_decl(st, d, v); break;
+        default: break;
+    }
+}
+
+static void hc_on_decl(Walker* w, CcDecl* d) {
+    HStep* st = (HStep*)w->env;
+    @switch (d->k) {
+        case .var(v): hc_decl(st, d, v); break;
+        default: break;
+    }
+}
+
+static void hc_on_call(Walker* w, CcExpr* e, CcCall cl) {
+    HStep* st = (HStep*)w->env;
+    CCSlice nm;
+    if (!expr_ident(strip_parens_expr(cl.callee), &nm)) return;
+    if (!cc_slice_eq_cstr(&nm, "cc_channel_pair")) return;
+    hc_pair(st, e, cl);
+}
+
+static void hc_on_ufcs(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice tn, CCSlice reason) {
+    HStep* st = (HStep*)w->env;
+    (void)rt; (void)m; (void)tn; (void)reason;
+    hc_send(st, e, uf);
+}
+
+static void CcLowerer_chan(CcLowerer* L) {
+    Walker w;
+    HStep st;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    st.w = &w;
+    st.ends = vec_new::[HEndRef](L->arena);
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_stmt = hc_on_stmt;
+    w.on_decl = hc_on_decl;
+    w.on_call = hc_on_call;
+    w.on_ufcs = hc_on_ufcs;
+    w.env = &st;
+    tw_unit(&w);
+}
+
+#endif
