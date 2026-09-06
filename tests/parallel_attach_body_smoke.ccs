@@ -1,0 +1,142 @@
+/*
+ * Dest bodies (§8.11): a `@parallel(h) { … }` body is a fiber of h.
+ *   - `!>` resolves to a handler inside the body (attached !>(e) or a
+ *     body-top @errhandler); `return;` ends that fiber only.
+ *   - the dest's own name is the caller's dest: h.cancel(), h.fail(e).
+ *   - h.fail(e) is the dest error: first wins, h.wait() returns it.
+ *   - a body that handles its error does not fail the dest.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+static int !>(CCError) step(int x) {
+    if (x == 2)
+        return cc_err(CC_ERROR(CC_ERR_IO, "boom on 2"));
+    if (x == 3)
+        return cc_err(CC_ERROR(CC_ERR_IO, "boom on 3"));
+    return cc_ok(x * 10);
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    /* Attached handler + return; ends the fiber. Dest waits ok. */
+    {
+        cc_atomic_int ok_sum = 0;
+        cc_atomic_int handled = 0;
+        cc_atomic_int after = 0;
+        CCParallel h = @parallel spawn { @serial { (void)0; } } !>;
+        int i;
+        for (i = 0; i < 4; i++) {
+            int x = i;
+            @parallel(h) {
+                int v = step(x) !>(e) {
+                    (void)e;
+                    handled.fetch_add(1);
+                    return;
+                };
+                ok_sum.fetch_add(v);
+                after.fetch_add(1);
+            }
+        }
+        h.wait() !>;
+        /* x = 0..3: 0 and 1 succeed (0 + 10); 2 and 3 err and return. */
+        if (ok_sum.load() != 10 || handled.load() != 2 || after.load() != 2) {
+            fprintf(stderr, "FAIL attached: ok_sum=%d handled=%d after=%d\n",
+                    ok_sum.load(), handled.load(), after.load());
+            return 1;
+        }
+    }
+
+    /* Body-top @errhandler is the body's handler. */
+    {
+        cc_atomic_int handled = 0;
+        CCParallel h = @parallel spawn { @serial { (void)0; } } !>;
+        int i;
+        for (i = 0; i < 4; i++) {
+            int x = i;
+            @parallel(h) {
+                @errhandler(CCError e) { (void)e; handled.fetch_add(1); return; }
+                int v = step(x) !>;
+                (void)v;
+            }
+        }
+        h.wait() !>;
+        if (handled.load() != 2) {
+            fprintf(stderr, "FAIL body errhandler: handled=%d\n", handled.load());
+            return 1;
+        }
+    }
+
+    /* h.fail(e): first error wins; wait returns it after joining all. */
+    {
+        cc_atomic_int done = 0;
+        int failed = 0;
+        char msg[64];
+        msg[0] = 0;
+        CCParallel h = @parallel spawn { @serial { (void)0; } } !>;
+        int i;
+        for (i = 0; i < 4; i++) {
+            int x = i;
+            @parallel(h) {
+                @errhandler(CCError e) { h.fail(e); return; }
+                int v = step(x) !>;
+                (void)v;
+                done.fetch_add(1);
+            }
+        }
+        h.wait() !>(e) {
+            failed = 1;
+            snprintf(msg, sizeof(msg), "%s", e.message);
+        };
+        if (!failed || done.load() != 2 || strncmp(msg, "boom on ", 8) != 0) {
+            fprintf(stderr, "FAIL fail: failed=%d done=%d msg=%s\n", failed,
+                    done.load(), msg);
+            return 1;
+        }
+        if (!h.joined) {
+            fprintf(stderr, "FAIL fail: wait did not join\n");
+            return 1;
+        }
+    }
+
+    /* fail is bool: first wins. fail on idle / joined is false. */
+    {
+        CCParallel z = cc_parallel_empty();
+        if (z.fail(CC_ERROR(CC_ERR_IO, "idle"))) {
+            fprintf(stderr, "FAIL fail(idle) returned true\n");
+            return 1;
+        }
+        CCParallel h = @parallel spawn { @serial { (void)0; } } !>;
+        bool first = h.fail(CC_ERROR(CC_ERR_IO, "first"));
+        bool second = h.fail(CC_ERROR(CC_ERR_IO, "second"));
+        int got_first = 0;
+        h.wait() !>(e) { got_first = strcmp(e.message, "first") == 0; };
+        if (!first || second || !got_first) {
+            fprintf(stderr, "FAIL first-wins: first=%d second=%d got_first=%d\n",
+                    (int)first, (int)second, got_first);
+            return 1;
+        }
+        if (h.fail(CC_ERROR(CC_ERR_IO, "late"))) {
+            fprintf(stderr, "FAIL fail(joined) returned true\n");
+            return 1;
+        }
+    }
+
+    /* h.cancel() from a body: the name is the caller's dest. */
+    {
+        CCParallel h = @parallel spawn { @serial { (void)0; } } !>;
+        @parallel(h) {
+            h.cancel() !>(e) { (void)e; return; };
+        }
+        h.wait() !>;
+        if (!cc_atomic_load(&h.cancelled)) {
+            fprintf(stderr, "FAIL cancel from body not visible\n");
+            return 1;
+        }
+    }
+
+    printf("parallel_attach_body_smoke: OK\n");
+    return 0;
+}

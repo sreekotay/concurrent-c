@@ -1,0 +1,21 @@
+/* Same rule for an arm of a dest-bound construct: the frame has moved on
+ * by the time the arm errs, so `!>` must resolve inside the arm. */
+#include <ccc/std/prelude.cch>
+
+static int !>(CCError) step(int x) {
+    if (x == 2)
+        return cc_err(CC_ERROR(CC_ERR_IO, "boom"));
+    return cc_ok(x);
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int a = 0;
+    int b = 0;
+    CCParallel h = @parallel {
+        a = step(1) !>;
+        b = step(2) !>;
+    } !>;
+    h.wait() !>;
+    return a + b;
+}

@@ -27,6 +27,7 @@ CC_TARGET recipe_pipeline exe examples/recipe_channel_pipeline.ccs
 CC_TARGET recipe_defer exe examples/recipe_defer_cleanup.ccs
 CC_TARGET recipe_capture exe examples/recipe_explicit_capture.ccs
 CC_TARGET recipe_parallel exe examples/recipe_parallel.ccs
+CC_TARGET recipe_parallel_forms exe examples/recipe_parallel_forms.ccs
 CC_TARGET recipe_turnstile exe examples/recipe_turnstile.ccs
 CC_TARGET recipe_http exe examples/recipe_http_get.ccs
 CC_TARGET recipe_ordered exe examples/recipe_ordered_parallel.ccs

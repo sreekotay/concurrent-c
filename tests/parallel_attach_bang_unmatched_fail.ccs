@@ -1,0 +1,21 @@
+/* `!>` in a dest-attach body with no handler inside the body is ill-formed:
+ * the frame's @errhandler is not reachable from a fiber of the dest. */
+#include <ccc/std/prelude.cch>
+
+static int !>(CCError) step(int x) {
+    if (x == 2)
+        return cc_err(CC_ERROR(CC_ERR_IO, "boom"));
+    return cc_ok(x);
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCParallel h = @parallel spawn { @serial { (void)0; } } !>;
+    int x = 2;
+    @parallel(h) {
+        int v = step(x) !>;
+        (void)v;
+    }
+    h.wait() !>;
+    return 0;
+}

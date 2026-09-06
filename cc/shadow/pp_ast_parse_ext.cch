@@ -428,10 +428,15 @@ static int serial_name_in(char names[][64], int n, const char* id) {
 static void serial_walk_dests(AstNode* s, char locals[][64], int nloc,
                               char dests[][128], int* nd, int cap) {
     int k;
+    const char* lhs = NULL;
     if (!s || !nd) return;
-    if (s->kind == AST_ASSIGN && parallel_lhs_is_ident(s->a)) {
+    if (s->kind == AST_ASSIGN)
+        lhs = s->a;
+    else if (s->kind == AST_STMT_UNWRAP && s->e && s->e[0])
+        lhs = s->e; /* `x = call !>…;` — assign-unwrap keeps its lhs in e */
+    if (lhs && parallel_lhs_is_ident(lhs)) {
         char id[128];
-        serial_trim_ident(s->a, id, sizeof(id));
+        serial_trim_ident(lhs, id, sizeof(id));
         if (id[0] && !serial_name_in(locals, nloc, id)) {
             int i, hit = 0;
             for (i = 0; i < *nd; i++) {
@@ -537,9 +542,24 @@ static AstNode* parse_parallel_block(Parser* p) {
                             "@parallel left-hand side must be a simple name");
                 return NULL;
             } else if (parallel_expr_arm(s)) {
+                /* Expression arm, including `x = f() !>…;`. Same one-outer-
+                 * name rule as @serial, so the thunk writes the outer name
+                 * through its out pointer instead of an unbound `x`. */
                 AstNode* ser = ast_new(p, AST_SERIAL);
+                char locals[32][64];
+                char dests[8][128];
+                int nloc = 0, nd = 0;
                 if (!ser) return NULL;
                 if (!ast_body_push(p, ser, s)) return NULL;
+                serial_walk_locals(s, locals, &nloc, 32);
+                serial_walk_dests(s, locals, nloc, dests, &nd, 8);
+                if (nd > 1) {
+                    parser_fail(p, at,
+                                "@parallel arm must assign at most one simple outer name");
+                    return NULL;
+                }
+                if (nd == 1)
+                    ser->a = ast_arena_cstr(p, dests[0]);
                 s = ser;
             } else if (s->kind == AST_FOR) {
                 parser_fail(p, at,

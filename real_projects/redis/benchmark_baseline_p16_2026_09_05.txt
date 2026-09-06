@@ -1,0 +1,101 @@
+=== Benchmark Baseline (P=16) ===
+Date: Sat Sep 05 18:42 EDT 2026
+Host: Darwin 25.5.0 arm64  ncpu=10
+Commit: f47fd12b
+Command: CC_V2_STATS=1 ./bench_robust.sh
+         (defaults: REPEATS=6 REQUESTS=500000 CLIENTS=50 PIPELINE=16 BENCH_TESTS=set,get,incr)
+Bin:    real_projects/redis/out/redis_idiomatic  (CCC=../../cc/bin/ccc --release)
+Notes: dest-only @parallel serve. Rebuilt on shadow_lower 0.3.4-324
+       (structured @switch domination; redis db_get compiles cold).
+
+Refresh:
+  make CCC=../../cc/bin/ccc out/redis_idiomatic
+  CC_V2_STATS=1 ./bench_robust.sh
+
+tmp dir: /var/folders/12/04b0tf2d79b7d7wdgzwx12yr0000gn/T/bench_robust.XXXXXX.ocja4lmYG7
+[warmup]
+   upstream  set   rps=1923077.00
+   idiomatic set   rps=2941176.50
+   idiomatic get   rps=2732240.50
+   upstream  get   rps=2487562.25
+   idiomatic incr  rps=2873563.25
+   upstream  incr  rps=1901140.62
+[mem] CC.MEMLOG post-warmup
+[round 1/6]
+   idiomatic set   rps=2976190.50
+   upstream  set   rps=2008032.12
+   idiomatic get   rps=2958580.00
+   upstream  get   rps=2487562.25
+   idiomatic incr  rps=3012048.25
+   upstream  incr  rps=2450980.50
+[round 2/6]
+   upstream  set   rps=1976284.62
+   idiomatic set   rps=2923976.50
+   idiomatic get   rps=2941176.50
+   upstream  get   rps=2512562.75
+   idiomatic incr  rps=3067484.50
+   upstream  incr  rps=2487562.25
+[round 3/6]
+   idiomatic set   rps=2958580.00
+   upstream  set   rps=2000000.00
+   upstream  get   rps=2512562.75
+   idiomatic get   rps=2976190.50
+   upstream  incr  rps=2475247.50
+   idiomatic incr  rps=3048780.50
+[round 4/6]
+   idiomatic set   rps=2958580.00
+   upstream  set   rps=2000000.00
+   idiomatic get   rps=2958580.00
+   upstream  get   rps=2512562.75
+   idiomatic incr  rps=2994012.00
+   upstream  incr  rps=2475247.50
+[round 5/6]
+   upstream  set   rps=1886792.50
+   idiomatic set   rps=2941176.50
+   idiomatic get   rps=2958580.00
+   upstream  get   rps=2463054.25
+   idiomatic incr  rps=3067484.50
+   upstream  incr  rps=2475247.50
+[round 6/6]
+   upstream  set   rps=2000000.00
+   idiomatic set   rps=2976190.50
+   upstream  get   rps=2512562.75
+   idiomatic get   rps=2906976.75
+   upstream  incr  rps=2487562.25
+   idiomatic incr  rps=3067484.50
+[mem] CC.MEMLOG final
+
+== bench_robust summary ==
+rounds=6 requests_per_round=500000 clients=50 pipeline=16 mget_keys=8 cc_workers=default
+labels=upstream,idiomatic include_sketch=0 include_parallel=0 include_go=0
+sample_interval=0.05s  samples_taken: upstream=148  idiomatic=148
+
+[SET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.979M   2.000M   1.887M   2.008M   0.046M   2.3%
+  idiomatic    2.956M   2.959M   2.924M   2.976M   0.020M   0.7%
+  idiomatic/upstream median: 1.479x  (SEPARATED)
+
+[GET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     2.500M   2.513M   2.463M   2.513M   0.021M   0.8%
+  idiomatic    2.950M   2.959M   2.907M   2.976M   0.024M   0.8%
+  idiomatic/upstream median: 1.178x  (SEPARATED)
+
+[INCR]
+  label          mean   median      min      max   stddev    cv%
+  upstream     2.475M   2.475M   2.451M   2.488M   0.013M   0.5%
+  idiomatic    3.043M   3.058M   2.994M   3.067M   0.032M   1.1%
+  idiomatic/upstream median: 1.235x  (SEPARATED)
+
+[RESOURCE PEAKS] (sampled every 0.05 s across the whole run)
+  label        peak_rss   peak_threads
+  upstream       12.9MB              3
+  idiomatic      17.8MB              6
+
+[MEM GAP] footprint − (map+key+value live); remainder ≈ runtime/fibers/overflow/frag
+  phase           footprint    logical        gap      map      key    value     arenas        src
+  owner-ready        1.42MB     42.5KB     1.38MB   42.5KB       0B       0B    16.05MB  mach_phys
+  post-warmup       17.14MB     5.74MB    11.40MB   4.03MB   1.72MB       0B    20.03MB  mach_phys
+  final             17.22MB     5.74MB    11.48MB   4.03MB   1.72MB       0B    20.03MB  mach_phys
+

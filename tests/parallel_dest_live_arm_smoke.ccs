@@ -1,0 +1,102 @@
+/*
+ * Dest-bound construct arms are fibers of the dest (§8.11 dest bodies).
+ *   - an arm's `!>` resolves inside the arm; `return;` ends the arm.
+ *   - the first (caller-run) arm follows the same rule: its return;
+ *     ends that arm and the construct still plants h.
+ *   - an assignment arm's value lands in the outer name (out wiring)
+ *     on the success path, and the outer name is untouched on error.
+ *   - h.fail(e) from an arm is what h.wait() returns.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+static int !>(CCError) step(int x) {
+    if (x == 2)
+        return cc_err(CC_ERROR(CC_ERR_IO, "boom on 2"));
+    return cc_ok(x * 10);
+}
+
+static int g_reached = 0;
+
+static int plant_and_return(int* out_b) {
+    int a = -1;
+    int b = -1;
+    CCParallel h = @parallel {
+        a = step(2) !>(e) { (void)e; return; };
+        b = step(1) !>(e) { (void)e; return; };
+    } !>;
+    /* first arm returned; construct still planted h and continued here */
+    g_reached = 1;
+    h.wait() !>(e) { (void)e; return 99; };
+    *out_b = b;
+    return a;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    /* Success path: both values land in the outer names. */
+    {
+        int a = 0;
+        int b = 0;
+        CCParallel h = @parallel {
+            a = step(1) !>(e) { (void)e; return; };
+            b = step(3) !>(e) { (void)e; return; };
+        } !>;
+        h.wait() !>;
+        if (a != 10 || b != 30) {
+            fprintf(stderr, "FAIL out wiring a=%d b=%d\n", a, b);
+            return 1;
+        }
+    }
+
+    /* Error in a spawned arm: handled in the arm, outer name untouched,
+     * dest waits ok (nothing failed it). */
+    {
+        int a = 0;
+        int b = -1;
+        cc_atomic_int handled = 0;
+        CCParallel h = @parallel {
+            a = step(1) !>(e) { (void)e; return; };
+            b = step(2) !>(e) { (void)e; handled.fetch_add(1); return; };
+        } !>;
+        h.wait() !>;
+        if (a != 10 || b != -1 || handled.load() != 1) {
+            fprintf(stderr, "FAIL arm error a=%d b=%d handled=%d\n", a, b,
+                    handled.load());
+            return 1;
+        }
+    }
+
+    /* Error in the first (caller) arm: return; ends the arm, construct
+     * plants h, the function continues past the statement. */
+    {
+        int b = -1;
+        int a = plant_and_return(&b);
+        if (!g_reached || a != -1 || b != 10) {
+            fprintf(stderr, "FAIL first-arm return reached=%d a=%d b=%d\n",
+                    g_reached, a, b);
+            return 1;
+        }
+    }
+
+    /* h.fail(e) from an arm is the dest error. */
+    {
+        int a = 0;
+        int b = 0;
+        int failed = 0;
+        CCParallel h = @parallel {
+            a = step(1) !>(e) { h.fail(e); return; };
+            b = step(2) !>(e) { h.fail(e); return; };
+        } !>;
+        h.wait() !>(e) { failed = strcmp(e.message, "boom on 2") == 0; };
+        if (a != 10 || b != 0 || !failed) {
+            fprintf(stderr, "FAIL dest fail a=%d b=%d failed=%d\n", a, b, failed);
+            return 1;
+        }
+    }
+
+    printf("parallel_dest_live_arm_smoke: OK\n");
+    return 0;
+}

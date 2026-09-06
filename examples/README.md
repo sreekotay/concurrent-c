@@ -23,6 +23,7 @@ New to Concurrent-C? Work through these in order:
 | 4  | `recipe_ufcs_forms.ccs` | UFCS shape | One dispatch rule × spellings (families, bare-name, fallible chains) |
 | 4a | `recipe_user_generics.ccs` | Generics | `Name::[args]` + `CC_GENERIC_FACTORY` — same rule as Vec/Map |
 | 5  | `recipe_parallel.ccs` | `@parallel` | Join, `@serial`, dest, `@parallel for` (disjoint), `wait` + `@stage` (shared ticket) |
+| 5c | `recipe_parallel_forms.ccs` | `@parallel` shape | One join + one dest × modifiers; dest bodies: `!>` inside, `return;`, `h.fail(e)` |
 | 5a | `recipe_parallel_stream.ccs` | On-page stream | `@parallel spawn`; `tx.close()` next to produce; not a nursery |
 | 5b | `recipe_parallel_empty.ccs` | Dest EMPTY-close | Consumer already in `recv`; inner dest `h.close(tx)` + `@destroy` / `leave` |
 | 6  | `recipe_explicit_capture.ccs` | Capture | `@parallel` is the frame (no list); closure lists on `n.spawn` / `send_task` |
@@ -52,6 +53,7 @@ Minimal concurrent hello — three named siblings, `.wait()` joins.
 | File | Pattern | Key Concept |
 |------|---------|-------------|
 | `recipe_parallel.ccs` | `@parallel` | Independent join / range; wait-for + `@stage` is the shared write ticket |
+| `recipe_parallel_forms.ccs` | `@parallel` matrix | Join vs dest × modifiers; dest bodies resolve `!>` inside, `return;` ends the fiber, `h.fail(e)` is the dest error |
 | `recipe_parallel_stream.ccs` | On-page stream | `@parallel spawn`; produce `tx.close()`; consume `recv` until EOF |
 | `recipe_parallel_empty.ccs` | Dest EMPTY-close | Consumer already in `recv`; `h.close(tx)` on the producer dest |
 | `recipe_explicit_capture.ccs` | Capture | `@parallel` is the frame (no list); closure lists on `n.spawn` / `send_task` |

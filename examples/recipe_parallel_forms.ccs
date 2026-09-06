@@ -1,0 +1,229 @@
+/*
+ * Recipe: every form of @parallel
+ *
+ * One file, one page — the whole shape of @parallel. Expected stdout
+ * lives in the matching .stdout (see tests/ version); CI uses this as a
+ * regression sentinel.
+ *
+ * The forms below are NOT ten things to learn. There is one join and
+ * one dest, composed with orthogonal modifiers:
+ *
+ *   join    @parallel { … } !>.wait()!>;     arms run, then the statement
+ *                                            ends. Errors and `return`
+ *                                            in an arm come back to the
+ *                                            frame after the join.
+ *   dest    CCParallel h = @parallel { … } !>;   arms start; `h` is live;
+ *           @parallel(h) { … }                   admit one more fiber onto h;
+ *           h.wait() !>;                         the join, later.
+ *
+ * A dest body is a fiber of `h`. The frame has moved on, so control does
+ * not leave the body: `!>` resolves inside it (an @errhandler at its top,
+ * or an attached `!>(e) { … }`), `return;` ends the fiber, and the dest's
+ * own name is in scope — `h.cancel()`, `h.fail(e)`. `h.fail(e)` records
+ * the dest error (first wins); `h.wait()` returns it after the join.
+ *
+ * Sections:
+ *    1. Assignment join `!>.wait()!>`
+ *    2. `spawn` join with `@serial` arms (on-page stream)
+ *    3. Gated join `(pred)` and the named denial `seq (cond)`
+ *    4. `@parallel for` over a range
+ *    5. `wait (ts) for` with `@stage` — ordered tickets
+ *    6. Dest bind: `CCParallel h = @parallel { … } !>;` then `h.wait()`
+ *    7. Dest-attach body: body-local handler, `return;` ends the fiber
+ *    8. `h.fail(e)` — batch dest, `h.wait()` returns the first error
+ *    9. `h.cancel()` from inside a body; `h.cancelled` after the join
+ *   10. `#pragma(@parallel) off` — the same page, sequential
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+static int !>(CCError) step(int x) {
+    if (x == 2)
+        return cc_err(CC_ERROR(CC_ERR_IO, "boom on 2"));
+    return cc_ok(x * 10);
+}
+
+static int square(int x) { return x * x; }
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    /* 1. Assignment join. First arm on the caller; the rest may spawn.
+     *    `.wait()` joins before the statement ends; both writes visible. */
+    {
+        int a = 0;
+        int b = 0;
+        @parallel {
+            a = square(3);
+            b = square(4);
+        } !>.wait()!>;
+        println(@string(`1 join: a=${a} b=${b}`, @scratch));
+    }
+
+    /* 2. `spawn` join: spawned arms are never denied, so complementary
+     *    send/recv across arms is legal. Close sits next to produce. */
+    {
+        int[~4 >] tx;
+        int[~4 <] rx;
+        CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+        (void)ch;
+        int sum = 0;
+        @parallel spawn {
+            @serial {
+                int i;
+                for (i = 1; i <= 4; i++)
+                    tx.send(i) !>;
+                tx.close();
+            }
+            @serial {
+                int v;
+                while (cc_io_avail(rx.recv(&v)))
+                    sum = sum + v;
+            }
+        } !>.wait()!>;
+        println(@string(`2 spawn stream: sum=${sum}`, @scratch));
+    }
+
+    /* 3. Gated join: `pred` picks the schedule, not presence. `seq (cond)`
+     *    is the same thing with the denial named. Same body, two runs. */
+    {
+        int a = 0;
+        int b = 0;
+        int depth = 1;
+        @parallel (depth < 4) {
+            a = square(5);
+            b = square(6);
+        } !>.wait()!>;
+        int c = 0;
+        int d = 0;
+        @parallel seq (0) {
+            c = square(5);
+            d = square(6);
+        } !>.wait()!>;
+        println(@string(`3 gated: ${a} ${b}  seq: ${c} ${d}`, @scratch));
+    }
+
+    /* 4. Range form. Iterations are independent; disjoint writes. */
+    {
+        int out[8];
+        int i;
+        @parallel for (i in 0..8) {
+            out[i] = square(i);
+        } !>.wait()!>;
+        int total = 0;
+        for (i = 0; i < 8; i++)
+            total = total + out[i];
+        println(@string(`4 for: total=${total}`, @scratch));
+    }
+
+    /* 5. Ordered tickets. Work outside @stage overlaps; inside it ticket i
+     *    runs before i+1, so the loop-carried cursor reads as sequential. */
+    {
+        cc_arena_stack(arena, kilobytes(64));
+        CCTurnstile ts@(3, 1, arena) !> @destroy;
+        int packed[8];
+        int pos = 0;
+        int i;
+        @parallel wait (ts) for (i in 0..8) {
+            int v = square(i);
+            @stage (ts, 0, i) {
+                packed[pos] = v;
+                pos = pos + 1;
+            }
+        } !>.wait()!>;
+        println(@string(`5 wait-for: pos=${pos} last=${packed[7]}`, @scratch));
+    }
+
+    /* 6. Dest bind. Binding starts the arms and does not join; `h` is live
+     *    until `h.wait()`. The frame does other work in between. */
+    {
+        cc_atomic_int hits = 0;
+        CCParallel h = @parallel spawn {
+            hits.fetch_add(1);
+            hits.fetch_add(1);
+        } !>;
+        int live = h.live();
+        h.wait() !>;
+        int n = hits.load();
+        println(@string(`6 dest bind: live=${live} hits=${n} joined=${h.joined}`, @scratch));
+    }
+
+    /* 7. Dest-attach. Each body is a fiber of `h`. `!>` resolves to the
+     *    handler inside the body; `return;` ends that fiber only. The
+     *    frame keeps admitting; the dest waits `ok` — nothing failed it. */
+    {
+        cc_atomic_int ok_sum = 0;
+        cc_atomic_int handled = 0;
+        CCParallel h = @parallel spawn { @serial { (void)0; } } !>;
+        int i;
+        for (i = 0; i < 4; i++) {
+            int x = i;
+            @parallel(h) {
+                int v = step(x) !>(e) {
+                    (void)e;
+                    handled.fetch_add(1);
+                    return;
+                };
+                ok_sum.fetch_add(v);
+            }
+        }
+        h.wait() !>;
+        int s = ok_sum.load();
+        int k = handled.load();
+        println(@string(`7 attach: ok_sum=${s} handled=${k}`, @scratch));
+    }
+
+    /* 8. Batch dest. The body records its error on the dest; `h.wait()`
+     *    joins everyone, then returns the first error recorded. */
+    {
+        cc_atomic_int done = 0;
+        CCParallel h = @parallel spawn { @serial { (void)0; } } !>;
+        int i;
+        for (i = 0; i < 4; i++) {
+            int x = i;
+            @parallel(h) {
+                @errhandler(CCError e) { h.fail(e); return; }
+                int v = step(x) !>;
+                (void)v;
+                done.fetch_add(1);
+            }
+        }
+        int failed = 0;
+        h.wait() !>(e) {
+            failed = 1;
+            println(@string(`8 fail: wait -> ${e.message}`, @scratch));
+        };
+        int n = done.load();
+        println(@string(`8 fail: done=${n} failed=${failed}`, @scratch));
+    }
+
+    /* 9. Cancel from a body. The dest's name is the caller's dest. Cancel
+     *    is a mark: bodies already past their seam finish; admits after
+     *    it fail with CANCELLED into the frame's handler. */
+    {
+        CCParallel h = @parallel spawn { @serial { (void)0; } } !>;
+        @parallel(h) {
+            h.cancel() !>(e) { (void)e; return; };
+        }
+        h.wait() !>;
+        int c = (int)cc_atomic_load(&h.cancelled);
+        println(@string(`9 cancel: cancelled=${c}`, @scratch));
+    }
+
+    /* 10. Static denial: the same constructs lower to the linear program.
+     *     Arms run in order on the caller; no task, no scheduler call. */
+    {
+        int a = 0;
+        int b = 0;
+#pragma(@parallel) off
+        @parallel {
+            a = square(7);
+            b = square(8);
+        } !>.wait()!>;
+#pragma(@parallel) on
+        println(@string(`10 off: a=${a} b=${b}`, @scratch));
+    }
+
+    println("done");
+    return 0;
+}

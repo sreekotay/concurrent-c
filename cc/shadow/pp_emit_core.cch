@@ -1128,6 +1128,13 @@ typedef struct {
     int pj_thunk;
     char pj_ex[64];
     char pj_join[64];
+    /* Emitting a dest body: a dest-attach body or an arm of a dest-bound
+     * construct. The body is a fiber of the dest — the handler stack is
+     * the body's own (`!>` with none is ill-formed, not a goto into the
+     * frame), `return;` ends the fiber (`return NULL` in a thunk, `goto`
+     * the plant from the caller-run first arm), a valued return is
+     * ill-formed. Cleared by shadow_pj_set for nested constructs. */
+    int dest_body;
     /* Enclosing @errhandler trailers: sites assign + goto; body once. */
     ShadowEhHoist eh_hoist[SHADOW_EH_STACK_CAP];
     int neh_hoist;
@@ -1771,10 +1778,19 @@ static const char* shadow_eh_hoist_var(ShadowCtx* ctx) {
     ShadowEhHoist* tr;
     if (!ctx || !ctx->eh || ctx->eh_in_trailer || ctx->eh_in_cleanup)
         return NULL;
-    if (ctx->pj_body || ctx->pj_thunk || ctx->pf_body) return NULL;
+    if (ctx->pj_body || ctx->pj_thunk || ctx->pf_body || ctx->dest_body)
+        return NULL;
     tr = shadow_eh_hoist_find(ctx, ctx->eh);
     if (!tr || !tr->var[0]) return NULL;
     return tr->var;
+}
+
+/* Diagnostic for a `!>` with no handler in scope. In a dest body the
+ * frame's handler exists but is not reachable — say that. */
+static const char* shadow_eh_missing_msg(ShadowCtx* ctx, const char* dflt) {
+    if (ctx && ctx->dest_body)
+        return "!> in a dest body has no handler inside the body";
+    return dflt;
 }
 
 /* Unwrap / language-raise dest: the hoist cell when this handler is
