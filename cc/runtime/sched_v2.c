@@ -1991,12 +1991,14 @@ static void* thread_v2_main(void* arg) {
      * They are admitted on demand by sched_v2_wake(-1) when the primary
      * cannot drain fast enough. */
     if (g_v2_park_extras_at_startup && tid != 0) {
+        /* Read the wake ticket BEFORE publishing is_idle (see the main
+         * park below for why). */
+        uint32_t val = atomic_load_explicit(&g_v2.threads[tid].wake.value,
+                                            memory_order_acquire);
         atomic_store_explicit(&g_v2.threads[tid].is_idle, 1, memory_order_release);
         atomic_fetch_add_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
         V2_STAT_INC(g_v2_worker_idle_entries);
         atomic_thread_fence(memory_order_seq_cst);
-        uint32_t val = atomic_load_explicit(&g_v2.threads[tid].wake.value,
-                                            memory_order_acquire);
         /* Queue is empty at startup so no Dekker recheck needed. */
         wake_primitive_wait(&g_v2.threads[tid].wake, val);
         if (atomic_exchange_explicit(&g_v2.threads[tid].is_idle, 0,
@@ -2014,14 +2016,14 @@ static void* thread_v2_main(void* arg) {
          * that got woken by sched_v2_wake(-1)'s producer-side loop
          * bow out without burning cycles. */
         if (!try_admit_running()) {
+            uint32_t val = atomic_load_explicit(&g_v2.threads[tid].wake.value,
+                                                memory_order_acquire);
             atomic_store_explicit(&g_v2.threads[tid].is_idle, 1,
                                   memory_order_release);
             atomic_fetch_add_explicit(&g_v2.idle_workers, 1,
                                       memory_order_acq_rel);
             V2_STAT_INC(g_v2_worker_idle_entries);
             atomic_thread_fence(memory_order_seq_cst);
-            uint32_t val = atomic_load_explicit(&g_v2.threads[tid].wake.value,
-                                                memory_order_acquire);
             /* No Dekker recheck here: we're parked because target is
              * saturated, not because the queue was empty. Pure wait. */
             wake_primitive_wait(&g_v2.threads[tid].wake, val);
@@ -2065,13 +2067,21 @@ static void* thread_v2_main(void* arg) {
          * allows the architecture to reorder the load before the store,
          * which would race with the producer's symmetric "push count ; load
          * idle_workers" and leave a task stranded while the worker sleeps.
-         * See sched_v2_wake for the matching fence on the producer side. */
+         * See sched_v2_wake for the matching fence on the producer side.
+         *
+         * The wake ticket is read BEFORE is_idle is published. A waker
+         * that finds is_idle==1 CASes it to 0, bumps wake.value and issues
+         * the wake. If we read the ticket after that bump we would park on
+         * the new value with is_idle already 0: not idle, not running,
+         * and no waker will ever look at us again — a worker lost for the
+         * life of the process. Read first, and a wake that lands after
+         * the read makes wake_primitive_wait return at once. */
+        uint32_t val = atomic_load_explicit(&g_v2.threads[tid].wake.value,
+                                            memory_order_acquire);
         atomic_store_explicit(&g_v2.threads[tid].is_idle, 1, memory_order_release);
         atomic_fetch_add_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
         V2_STAT_INC(g_v2_worker_idle_entries);
         atomic_thread_fence(memory_order_seq_cst);
-        uint32_t val = atomic_load_explicit(&g_v2.threads[tid].wake.value,
-                                            memory_order_acquire);
 
         /* Recheck: work appeared after we marked ourselves idle. */
         if (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_acquire) > 0) {
@@ -2168,6 +2178,13 @@ int sched_v2_live_workers(void) {
 int sched_v2_max_workers(void) {
     sched_v2_ensure_init();
     return g_v2.max_threads;
+}
+
+static int sched_v2_count_idle_workers(void);
+
+int sched_v2_idle_workers(void) {
+    sched_v2_ensure_init();
+    return sched_v2_count_idle_workers();
 }
 
 static int sched_v2_count_idle_workers(void) {
@@ -2321,6 +2338,29 @@ static void* sched_v2_sysmon_main(void* arg) {
         }
 
         if (!atomic_load_explicit(&g_v2.running, memory_order_acquire)) break;
+
+        /* CC_V2_IDLE_TRACE: every 100ms, the idle counter against the
+         * per-slot is_idle flags and the running count. A worker parked
+         * with is_idle=0 and not running is a lost worker. */
+        {
+            static int trace = -1;
+            static uint64_t last_ns = 0;
+            if (trace < 0) trace = getenv("CC_V2_IDLE_TRACE") ? 1 : 0;
+            if (trace) {
+                uint64_t now = v2_now_ns();
+                if (now - last_ns > 100000000ull) {
+                    int n = atomic_load_explicit(&g_v2.num_threads, memory_order_relaxed);
+                    int real_idle = sched_v2_count_idle_workers();
+                    fprintf(stderr, "[idle-trace] idle_workers=%d is_idle=%d/%d running=%d queue=%zu grow_pending=%d\n",
+                            atomic_load_explicit(&g_v2.idle_workers, memory_order_relaxed),
+                            real_idle, n,
+                            atomic_load_explicit(&g_v2_running_workers, memory_order_relaxed),
+                            atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed),
+                            atomic_load_explicit(&g_v2_grow_pending, memory_order_relaxed));
+                    last_ns = now;
+                }
+            }
+        }
 
         /* Deferred pool growth: decide grow/hold once per recheck window. */
         if (atomic_load_explicit(&g_v2_grow_pending, memory_order_acquire)) {

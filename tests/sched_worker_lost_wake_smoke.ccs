@@ -1,0 +1,92 @@
+/*
+ * Every worker that parks must be findable again.
+ *
+ * A worker parks by publishing is_idle=1 and waiting on its wake ticket.
+ * A producer that sees is_idle=1 claims the slot (is_idle -> 0), bumps the
+ * ticket and issues the wake. If the worker read the ticket *after* that
+ * bump it parks on the new value with is_idle already 0: not idle, not
+ * running, and no producer will ever look at it again. Under spawn / join
+ * churn this lost three of ten workers within 100ms, for the life of the
+ * process.
+ *
+ * A lost worker is never idle. So after a spawn storm quiesces, every
+ * worker but the one running main must report idle within a bounded time.
+ *
+ * The window is the wake-from-idle transition, so the storm is many short
+ * bursts: workers park idle between rounds and are woken from idle at the
+ * start of each one. With the ordering bug this fails within ~30 rounds.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+
+/* Runtime-internal introspection (cc/runtime/sched_v2.h). */
+int sched_v2_live_workers(void);
+int sched_v2_idle_workers(void);
+int sched_v2_in_context(void);
+
+#define DEPTH 14
+#define ROUNDS 400
+
+static uint32_t sum_par(uint32_t d, uint32_t i) {
+    @errhandler(CCError e) cc_error_exit(e);
+    if (d >= DEPTH)
+        return i;
+    uint32_t left = 0;
+    uint32_t right = 0;
+    @parallel {
+        left  = sum_par(d + 1, i * 2);
+        right = sum_par(d + 1, i * 2 + 1);
+    } !>.wait()!>;
+    return left + right;
+}
+
+/* The storm runs on a fiber: joins park fibers, and the resulting
+ * enqueue / park / wake churn on the workers is the race window. */
+static void* root_thunk(void* arg) {
+    *(uint32_t*)arg = sum_par(0, 0);
+    return NULL;
+}
+
+static uint32_t storm_on_fiber(void) {
+    uint32_t out = 0;
+    CCTask t = cc_fiber_spawn_task(root_thunk, &out);
+    if (t.kind == CC_TASK_KIND_INVALID)
+        abort();
+    (void)cc_block_on_intptr(t);
+    return out;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int r;
+    uint32_t want = 0, k;
+    for (k = 0; k < (1u << DEPTH); k++) want += k;
+
+    for (r = 0; r < ROUNDS; r++) {
+        uint32_t got = storm_on_fiber();
+        if (got != want) {
+            fprintf(stderr, "FAIL sum got=%u want=%u\n", got, want);
+            return 1;
+        }
+        /* Quiesce, then every worker must come back as idle. main may be
+         * riding one worker, so allow for exactly one non-idle. */
+        int n = sched_v2_live_workers();
+        int need = n - (sched_v2_in_context() ? 1 : 0);
+        int idle = 0, tries;
+        for (tries = 0; tries < 200; tries++) {
+            idle = sched_v2_idle_workers();
+            if (idle >= need) break;
+            cc_sleep_ms(5);
+        }
+        if (idle < need) {
+            fprintf(stderr, "FAIL round %d: %d of %d workers idle after quiesce "
+                            "(need %d): %d worker(s) lost\n",
+                    r, idle, n, need, need - idle);
+            return 1;
+        }
+    }
+    printf("sched_worker_lost_wake_smoke: OK (%d workers)\n",
+           sched_v2_live_workers());
+    return 0;
+}
