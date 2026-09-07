@@ -189,6 +189,7 @@ static int range_parse(char[:] v, size_t n, CCArena a, size_t* off, size_t* len)
     if (!r.lo.len && !r.hi.len) return 0;
     if (!r.lo.len) {
         if (!digits_u(r.hi, &end) || n == 0) return -1;
+        if (end == 0) return -1; /* bytes=-0 → 416 (RFC 9110 §14.1.2) */
         if (end > n) end = n;
         *off = n - end;
         *len = end;

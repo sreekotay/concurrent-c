@@ -36,6 +36,7 @@
 typedef struct FileHold {
     size_t file_len;
     time_t mtime;
+    long mtime_nsec;
     uint64_t dev;
     uint64_t ino;
     int slot;
@@ -144,7 +145,8 @@ static int open_beneath(int root_fd, const char* rel, int last_dir) {
 
 static int !>(CCIoError) open_at(int root_fd, const char* rel,
                                  size_t* file_len, time_t* mtime,
-                                 uint64_t* dev, uint64_t* ino) {
+                                 long* mtime_nsec, uint64_t* dev,
+                                 uint64_t* ino) {
     struct stat st;
     int fd;
     if (!rel || !rel[0] || rel[0] == '/')
@@ -161,6 +163,13 @@ static int !>(CCIoError) open_at(int root_fd, const char* rel,
         return cc_err(cc_io_from_errno(EINVAL));
     }
     *mtime = st.st_mtime;
+#if defined(__APPLE__)
+    *mtime_nsec = st.st_mtimespec.tv_nsec;
+#elif defined(__linux__)
+    *mtime_nsec = st.st_mtim.tv_nsec;
+#else
+    *mtime_nsec = 0;
+#endif
     *file_len = (size_t)st.st_size;
     *dev = (uint64_t)st.st_dev;
     *ino = (uint64_t)st.st_ino;
@@ -172,6 +181,7 @@ static int !>(CCIoError) open_at(int root_fd, const char* rel,
 typedef struct FileSlot {
     char rel[FILE_CACHE_KEY];
     time_t mtime;
+    long mtime_nsec;
     time_t until;
     time_t checked;
     size_t file_len;
@@ -228,6 +238,7 @@ static int fc_dup_hold(int i, time_t now, FileHold* h) {
     g_fc[i].refs++;
     g_fc[i].until = now + FILE_CACHE_TTL;
     h->mtime = g_fc[i].mtime;
+    h->mtime_nsec = g_fc[i].mtime_nsec;
     h->file_len = g_fc[i].file_len;
     h->dev = g_fc[i].dev;
     h->ino = g_fc[i].ino;
@@ -238,12 +249,15 @@ static int fc_dup_hold(int i, time_t now, FileHold* h) {
 
 /* Lock held. Consume fd: same inode keeps slot.fd, else swap. */
 static void fc_apply_open(int i, int fd, time_t now, size_t file_len,
-                          time_t mtime, uint64_t dev, uint64_t ino) {
+                          time_t mtime, long mtime_nsec, uint64_t dev,
+                          uint64_t ino) {
     int same = (g_fc[i].fd >= 0 && g_fc[i].dev == dev && g_fc[i].ino == ino);
     if (same) {
-        if (g_fc[i].mtime != mtime || g_fc[i].file_len != file_len) {
+        if (g_fc[i].mtime != mtime || g_fc[i].mtime_nsec != mtime_nsec
+                || g_fc[i].file_len != file_len) {
             block_cull_id(g_fc[i].dev, g_fc[i].ino);
             g_fc[i].mtime = mtime;
+            g_fc[i].mtime_nsec = mtime_nsec;
             g_fc[i].file_len = file_len;
         }
         close(fd);
@@ -253,6 +267,7 @@ static void fc_apply_open(int i, int fd, time_t now, size_t file_len,
         if (g_fc[i].fd >= 0) close(g_fc[i].fd);
         g_fc[i].fd = fd;
         g_fc[i].mtime = mtime;
+        g_fc[i].mtime_nsec = mtime_nsec;
         g_fc[i].file_len = file_len;
         g_fc[i].dev = dev;
         g_fc[i].ino = ino;
@@ -285,7 +300,8 @@ static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
     n = strlen(rel);
     if (n < FILE_CACHE_KEY) memcpy(h.rel, rel, n + 1);
     if (n >= FILE_CACHE_KEY) {
-        fd = open_at(root_fd, rel, &h.file_len, &h.mtime, &h.dev, &h.ino) !>(err) {
+        fd = open_at(root_fd, rel, &h.file_len, &h.mtime, &h.mtime_nsec,
+                     &h.dev, &h.ino) !>(err) {
             return cc_err(err);
         };
         h.fd = fd;
@@ -310,7 +326,8 @@ static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
     }
     hold.release();
 
-    fd = open_at(root_fd, rel, &h.file_len, &h.mtime, &h.dev, &h.ino) !>(err) {
+    fd = open_at(root_fd, rel, &h.file_len, &h.mtime, &h.mtime_nsec,
+                 &h.dev, &h.ino) !>(err) {
         hold = g_fc_mx.acquire();
         now = time(NULL);
         i = fc_find(rel);
@@ -327,7 +344,8 @@ static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
     fc_sweep(now);
     i = fc_find(rel);
     if (i >= 0) {
-        fc_apply_open(i, fd, now, h.file_len, h.mtime, h.dev, h.ino);
+        fc_apply_open(i, fd, now, h.file_len, h.mtime, h.mtime_nsec, h.dev,
+                      h.ino);
         if (fc_dup_hold(i, now, &h) != 0) {
             e = errno;
             hold.release();
@@ -346,6 +364,7 @@ static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
     }
     memcpy(g_fc[i].rel, rel, n + 1);
     g_fc[i].mtime = h.mtime;
+    g_fc[i].mtime_nsec = h.mtime_nsec;
     g_fc[i].file_len = h.file_len;
     g_fc[i].dev = h.dev;
     g_fc[i].ino = h.ino;

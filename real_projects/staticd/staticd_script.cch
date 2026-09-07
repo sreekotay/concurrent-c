@@ -77,9 +77,20 @@ static const char k_js_shim[] =
     "  var h = init.headers || {};\n"
     "  var ct = h['content-type'] || h['Content-Type']"
     " || 'text/plain; charset=utf-8';\n"
+    "  var tape = '';\n"
+    "  for (var k in h) {\n"
+    "    if (!Object.prototype.hasOwnProperty.call(h, k)) continue;\n"
+    "    var kl = String(k).toLowerCase();\n"
+    "    if (kl === 'content-type' || kl === 'content-length'\n"
+    "        || kl === 'transfer-encoding') continue;\n"
+    "    var vs = String(h[k]);\n"
+    "    if (String(k).indexOf('\\n') >= 0 || vs.indexOf('\\n') >= 0) continue;\n"
+    "    tape += String(k) + '\\n' + vs + '\\n';\n"
+    "  }\n"
     "  return {\n"
     "    status: init.status || 200,\n"
     "    headers: h,\n"
+    "    header_tape: tape,\n"
     "    body: (body == null) ? '' : String(body),\n"
     "    content_type: ct\n"
     "  };\n"
@@ -101,6 +112,15 @@ static const char k_py_shim[] =
     "            self.headers['content-type'] = content_type\n"
     "        self.content_type = self.headers.get('content-type',"
     " content_type or 'text/plain; charset=utf-8')\n"
+    "        skip = {'content-type', 'content-length', 'transfer-encoding'}\n"
+    "        parts = []\n"
+    "        for k, v in self.headers.items():\n"
+    "            ks, vs = str(k), str(v)\n"
+    "            if ks.lower() in skip or '\\n' in ks or '\\n' in vs:\n"
+    "                continue\n"
+    "            parts.append(ks)\n"
+    "            parts.append(vs)\n"
+    "        self.header_tape = '\\n'.join(parts) + ('\\n' if parts else '')\n"
     "\n"
     "class Request:\n"
     "    def __init__(self, method, path, query, body):\n"
@@ -440,6 +460,25 @@ static int script_reply_add_hdr(ScriptReply* r, char[:] name, char[:] value) {
     return 0;
 }
 
+/* Shim encodes name/value pairs as `name\\nvalue\\n`… (no newlines in cells). */
+static void script_reply_take_hdr_tape(ScriptReply* r, char[:] tape) {
+    size_t i = 0;
+    if (!r || !tape.ptr) return;
+    while (i < tape.len && r->nhdrs < 8) {
+        size_t n0 = i, n1, v0, v1;
+        while (i < tape.len && tape.ptr[i] != '\n') i++;
+        n1 = i;
+        if (i >= tape.len) break;
+        i++;
+        v0 = i;
+        while (i < tape.len && tape.ptr[i] != '\n') i++;
+        v1 = i;
+        if (i < tape.len) i++;
+        if (n1 > n0)
+            script_reply_add_hdr(r, tape.sub(n0, n1), tape.sub(v0, v1));
+    }
+}
+
 static ScriptReply !>(CCError) pages_materialize_js(CCQjsVal* out, CCArena arena) {
     ScriptReply r = script_reply_empty();
     CCQjsVal st, bd, ct, hdrs;
@@ -500,12 +539,19 @@ take_body:
             return cc_err(CC_ERR_OUT_OF_MEMORY, "pages body oom");
     }
 
-    hdrs = out->get("headers") !>(e) {
+    hdrs = out->get("header_tape") !>(e) {
         (void)e;
         return cc_ok(r);
     };
-    /* Response shim already mirrored content-type onto the object. */
-    cc_qjs_val_release(&hdrs);
+    {
+        char[:] tape = hdrs.as_slice() !>(e) {
+            (void)e;
+            cc_qjs_val_release(&hdrs);
+            return cc_ok(r);
+        };
+        script_reply_take_hdr_tape(&r, tape);
+        cc_qjs_val_release(&hdrs);
+    }
     return cc_ok(r);
 }
 
@@ -628,11 +674,19 @@ take_body:
             return cc_err(CC_ERR_OUT_OF_MEMORY, "pages body oom");
     }
 
-    hdrs = out->get("headers") !>(e) {
+    hdrs = out->get("header_tape") !>(e) {
         (void)e;
         return cc_ok(r);
     };
-    cc_py_obj_release(&hdrs);
+    {
+        char[:] tape = hdrs.as_slice() !>(e) {
+            (void)e;
+            cc_py_obj_release(&hdrs);
+            return cc_ok(r);
+        };
+        script_reply_take_hdr_tape(&r, tape);
+        cc_py_obj_release(&hdrs);
+    }
     return cc_ok(r);
 }
 
@@ -653,8 +707,13 @@ static ScriptReply !>(CCError) pages_run_py(PagesEngines* e, int pages_fd,
         return cc_err(CC_ERROR(CC_ERR_IO, "pages py shim"));
 
     src = pages_read_leaf(pages_fd, leaf, arena) !>;
-    wrap = @string(`${src}
-__handler = GET if 'GET' in dir() else (handler if 'handler' in dir() else None)
+    /* Clear prior page handlers before exec so a leftover GET cannot
+     * satisfy a later page that only defines handler (or defines none). */
+    wrap = @string(`
+for _n in ('GET', 'handler', '__handler'):
+    globals().pop(_n, None)
+${src}
+__handler = globals().pop('GET', None) or globals().pop('handler', None)
 if __handler is None:
     raise RuntimeError('pages: no GET/handler')
 `, arena);

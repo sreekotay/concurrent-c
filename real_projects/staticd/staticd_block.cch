@@ -1,15 +1,19 @@
 /*
- * Named-block ring — mmap's hit without mapping the file.
+ * Named-block cache — mmap's hit without mapping the file.
  * Include before staticd_fs.cch (file_hold ticks and culls).
  *
- * Key is (dev, ino, block). Hash of that triple is the probe start only.
- * A later GET reuses that slot (refill if mtime/len moved). Never steal
- * a live other key — pool pread if the probe chain has no hole. Idle
- * refs==0 past until is a hole (cull ≤1s on file_hold). Unaligned
- * Range → pool.
+ * Owned face: `BlockCache` (ring + miss pool + mutex). Hot path is
+ * checkout of a ready slab. Cold path is `block_cache_fill` — blocking
+ * `pread` on the caller today; that is the seam for a waitable fill
+ * (return to poll, complete off-thread, then checkout). Unaligned
+ * Range and ring pressure go through the miss pool.
  *
- * 256 × 64KB = 16MB BSS until process exit. A send holds refs so a
- * sweep cannot drop a slab still on the wire.
+ * Key is (dev, ino, block). FNV of that triple is the probe start only.
+ * Never steal a live other key. Idle refs==0 past until is a hole
+ * (cull ≤1s on file_hold).
+ *
+ * 256 × 64KB = 16MB BSS until process exit. A hold refs a slab so a
+ * sweep cannot drop bytes still on the wire.
  */
 #ifndef STATICD_BLOCK_CCH
 #define STATICD_BLOCK_CCH
@@ -28,22 +32,27 @@ typedef struct BlockSlot {
     uint64_t dev;
     uint64_t ino;
     time_t mtime;
+    long mtime_nsec; /* rejects same-second in-place rewrite when platform has it */
     time_t until;
     uint32_t block;
     uint32_t refs;
-    uint32_t ready; /* 1 after pread; miss must not see a half fill */
+    uint32_t ready; /* 1 after fill; miss must not see a half fill */
     size_t len;
 } BlockSlot;
 
+typedef struct BlockCache {
+    char bytes[BLOCK_RING_N][FILE_SEND_CHUNK];
+    BlockSlot ring[BLOCK_RING_N];
+    time_t now;
+    CCArenaPool* pool; /* miss / unaligned; process lifetime */
+    CCExclusiveMutex mx;
+} BlockCache;
+
 typedef struct BlockHold {
+    BlockCache* cache;
     char* ptr;
     int slot; /* >=0 ring; <0 pool slab */
 } BlockHold;
-
-static char g_block_bytes[BLOCK_RING_N][FILE_SEND_CHUNK];
-static BlockSlot g_block_ring[BLOCK_RING_N];
-static time_t g_block_now;
-static CCArenaPool* g_send_pool; /* miss / unaligned; process lifetime */
 
 /* One domain: name 0 = ring, name 1 = file cache (fs.cch). Same order
  * as before — file cache then ring — when both are held. */
@@ -51,11 +60,19 @@ enum { SYNC_BLOCK = 0, SYNC_FC = 1 };
 static CCExclusive g_sync;
 static CCExclusiveMutex g_block_mx;
 static CCExclusiveMutex g_fc_mx;
+static BlockCache g_blocks;
 
 static void staticd_sync_init(CCExclusive e) {
     g_sync = e;
     g_block_mx = e.mutex(SYNC_BLOCK);
     g_fc_mx = e.mutex(SYNC_FC);
+}
+
+static void block_cache_init(BlockCache* c, CCArenaPool* pool) {
+    if (!c) return;
+    memset(c, 0, sizeof(*c));
+    c->pool = pool;
+    c->mx = g_block_mx;
 }
 
 static uint64_t block_probe(uint64_t dev, uint64_t ino, uint32_t block) {
@@ -70,139 +87,180 @@ static uint64_t block_probe(uint64_t dev, uint64_t ino, uint32_t block) {
 }
 
 /* At most one sweep per second — file_hold, not per chunk. */
-static void block_tick(time_t now) {
-    CCExclusiveGuard hold = g_block_mx.acquire() @destroy;
-    if (now != g_block_now) {
+static void block_cache_tick(BlockCache* c, time_t now) {
+    if (!c) return;
+    CCExclusiveGuard hold = c->mx.acquire() @destroy;
+    if (now != c->now) {
         @for (i in 0..BLOCK_RING_N) {
-            if (g_block_ring[i].refs == 0 && g_block_ring[i].ino
-                    && now > g_block_ring[i].until)
-                g_block_ring[i] = (BlockSlot){0};
+            if (c->ring[i].refs == 0 && c->ring[i].ino
+                    && now > c->ring[i].until)
+                c->ring[i] = (BlockSlot){0};
         }
-        g_block_now = now;
+        c->now = now;
     }
 }
 
-static void block_cull_id(uint64_t dev, uint64_t ino) {
-    if (!ino) return;
-    CCExclusiveGuard hold = g_block_mx.acquire() @destroy;
+static void block_cache_cull_id(BlockCache* c, uint64_t dev, uint64_t ino) {
+    if (!c || !ino) return;
+    CCExclusiveGuard hold = c->mx.acquire() @destroy;
     @for (i in 0..BLOCK_RING_N) {
-        if (g_block_ring[i].dev == dev && g_block_ring[i].ino == ino
-                && g_block_ring[i].refs == 0)
-            g_block_ring[i] = (BlockSlot){0};
+        if (c->ring[i].dev == dev && c->ring[i].ino == ino
+                && c->ring[i].refs == 0)
+            c->ring[i] = (BlockSlot){0};
     }
 }
 
-static char* !>(CCError) pool_pread(int fd, size_t want, size_t file_off) {
+/* Blocking cold read into the miss pool. Dest HOL until this returns. */
+static char* !>(CCError) block_cache_pool_pread(BlockCache* c, int fd,
+                                               size_t want, size_t file_off) {
     char* buf;
     ssize_t r;
-    if (!g_send_pool || want == 0 || want > (size_t)FILE_SEND_CHUNK)
+    if (!c || !c->pool || want == 0 || want > (size_t)FILE_SEND_CHUNK)
         return cc_err(CC_ERROR(CC_ERR_IO, "bad pread"));
-    buf = (char*)g_send_pool->alloc();
+    buf = (char*)c->pool->alloc();
     if (!buf) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "send pool"));
     r = pread(fd, buf, want, (off_t)file_off);
     if (r < 0) {
         int e = errno;
-        g_send_pool->free(buf);
+        c->pool->free(buf);
         return cc_err(CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_io_from_errno(e))));
     }
     if ((size_t)r != want) {
-        g_send_pool->free(buf);
+        c->pool->free(buf);
         return cc_err(CC_ERROR(CC_ERR_CLOSED, "short file"));
     }
     return cc_ok(buf);
 }
 
-void block_hold_drop(BlockHold* h) {
-    if (!h || !h->ptr) return;
-    if (h->slot < 0) {
-        if (g_send_pool) g_send_pool->free(h->ptr);
-    } else {
-        CCExclusiveGuard hold = g_block_mx.acquire() @destroy;
-        if (g_block_ring[h->slot].refs > 0)
-            g_block_ring[h->slot].refs--;
-    }
-    h->ptr = NULL;
-    h->slot = -1;
-}
-
-BlockHold !>(CCError) checkout_block(int fd, uint64_t dev, uint64_t ino,
-                                           time_t mtime, size_t file_off,
-                                           size_t want) {
-    BlockHold h = { .slot = -1 };
-    uint32_t block, i, k;
+/*
+ * Blocking fill of a reserved ring slot (refs==1, ready==0). Mutex must
+ * not be held. Seam for a future waitable fill: park the row, run this
+ * off the dest, then mark ready and resume checkout.
+ */
+static int !>(CCError) block_cache_fill(BlockCache* c, uint32_t k, int fd,
+                                       size_t want, size_t file_off) {
     ssize_t r;
-    if (want == 0 || want > (size_t)FILE_SEND_CHUNK)
-        return cc_err(CC_ERROR(CC_ERR_IO, "bad block"));
-    if (!ino || (file_off % (size_t)FILE_SEND_CHUNK) != 0) {
-        h.ptr = pool_pread(fd, want, file_off) !>;
-        return cc_ok(h);
-    }
-    block = (uint32_t)(file_off / (size_t)FILE_SEND_CHUNK);
-    CCExclusiveGuard hold = g_block_mx.acquire() @destroy;
-    i = (uint32_t)(block_probe(dev, ino, block) % (uint64_t)BLOCK_RING_N);
-    {
-        uint32_t found = (uint32_t)-1;
-        uint32_t hole = (uint32_t)-1;
-        @for (probe in 0..BLOCK_RING_N) {
-            k = (i + (uint32_t)probe) % (uint32_t)BLOCK_RING_N;
-            if (g_block_ring[k].dev == dev && g_block_ring[k].ino == ino
-                    && g_block_ring[k].block == block) {
-                found = k;
-                break;
-            }
-            if (hole == (uint32_t)-1 && g_block_ring[k].refs == 0
-                    && !g_block_ring[k].ready)
-                hole = k;
-        }
-        if (found != (uint32_t)-1) {
-            k = found;
-            if (g_block_ring[k].ready && g_block_ring[k].mtime == mtime
-                    && g_block_ring[k].len == want) {
-                g_block_ring[k].refs++;
-                g_block_ring[k].until = g_block_now + BLOCK_IDLE_TTL;
-                hold.release();
-                h.ptr = g_block_bytes[k];
-                h.slot = (int)k;
-                return cc_ok(h);
-            }
-            if (g_block_ring[k].refs != 0) {
-                hold.release();
-                h.ptr = pool_pread(fd, want, file_off) !>;
-                return cc_ok(h);
-            }
-        } else if (hole != (uint32_t)-1) {
-            k = hole;
-        } else {
-            hold.release();
-            h.ptr = pool_pread(fd, want, file_off) !>;
-            return cc_ok(h);
-        }
-    }
-    g_block_ring[k].refs = 1;
-    g_block_ring[k].ready = 0;
-    g_block_ring[k].dev = dev;
-    g_block_ring[k].ino = ino;
-    g_block_ring[k].mtime = mtime;
-    g_block_ring[k].block = block;
-    g_block_ring[k].len = want;
-    hold.release();
-    r = pread(fd, g_block_bytes[k], want, (off_t)file_off);
+    if (!c || k >= (uint32_t)BLOCK_RING_N)
+        return cc_err(CC_ERROR(CC_ERR_IO, "bad fill"));
+    r = pread(fd, c->bytes[k], want, (off_t)file_off);
     if (r < 0 || (size_t)r != want) {
-        hold = g_block_mx.acquire();
-        g_block_ring[k] = (BlockSlot){0};
-        hold.release();
+        CCExclusiveGuard hold = c->mx.acquire() @destroy;
+        c->ring[k] = (BlockSlot){0};
         if (r < 0) {
             const char* em = cc_io_error_str(cc_io_from_errno(errno));
             return cc_err(CC_ERROR(CC_ERR_IO, em));
         }
         return cc_err(CC_ERROR(CC_ERR_CLOSED, "short file"));
     }
-    hold = g_block_mx.acquire();
-    g_block_ring[k].ready = 1;
-    g_block_ring[k].until = g_block_now + BLOCK_IDLE_TTL;
-    h.ptr = g_block_bytes[k];
+    {
+        CCExclusiveGuard hold = c->mx.acquire() @destroy;
+        c->ring[k].ready = 1;
+        c->ring[k].until = c->now + BLOCK_IDLE_TTL;
+    }
+    return cc_ok(1);
+}
+
+void block_hold_drop(BlockHold* h) {
+    BlockCache* c;
+    if (!h || !h->ptr) return;
+    c = h->cache;
+    if (h->slot < 0) {
+        if (c && c->pool) c->pool->free(h->ptr);
+    } else if (c) {
+        CCExclusiveGuard hold = c->mx.acquire() @destroy;
+        if (c->ring[h->slot].refs > 0)
+            c->ring[h->slot].refs--;
+    }
+    h->ptr = NULL;
+    h->slot = -1;
+    h->cache = NULL;
+}
+
+@typehooks on BlockHold {
+    .destroy = cc_type_destroy_call("block_hold_drop"),
+};
+
+BlockHold !>(CCError) block_cache_checkout(BlockCache* c, int fd,
+                                          uint64_t dev, uint64_t ino,
+                                          time_t mtime, long mtime_nsec,
+                                          size_t file_off, size_t want) {
+    @errhandler(CCError e) { return cc_err(e); }
+    BlockHold h = { .cache = c, .slot = -1 };
+    uint32_t block, i, k;
+    if (!c) return cc_err(CC_ERROR(CC_ERR_IO, "no block cache"));
+    if (want == 0 || want > (size_t)FILE_SEND_CHUNK)
+        return cc_err(CC_ERROR(CC_ERR_IO, "bad block"));
+    if (!ino || (file_off % (size_t)FILE_SEND_CHUNK) != 0) {
+        h.ptr = block_cache_pool_pread(c, fd, want, file_off) !>;
+        return cc_ok(h);
+    }
+    block = (uint32_t)(file_off / (size_t)FILE_SEND_CHUNK);
+    CCExclusiveGuard hold = c->mx.acquire() @destroy;
+    i = (uint32_t)(block_probe(dev, ino, block) % (uint64_t)BLOCK_RING_N);
+    {
+        uint32_t found = (uint32_t)-1;
+        uint32_t hole = (uint32_t)-1;
+        @for (probe in 0..BLOCK_RING_N) {
+            k = (i + (uint32_t)probe) % (uint32_t)BLOCK_RING_N;
+            if (c->ring[k].dev == dev && c->ring[k].ino == ino
+                    && c->ring[k].block == block) {
+                found = k;
+                break;
+            }
+            if (hole == (uint32_t)-1 && c->ring[k].refs == 0
+                    && !c->ring[k].ready)
+                hole = k;
+        }
+        if (found != (uint32_t)-1) {
+            k = found;
+            if (c->ring[k].ready && c->ring[k].mtime == mtime
+                    && c->ring[k].mtime_nsec == mtime_nsec
+                    && c->ring[k].len == want) {
+                c->ring[k].refs++;
+                c->ring[k].until = c->now + BLOCK_IDLE_TTL;
+                hold.release();
+                h.ptr = c->bytes[k];
+                h.slot = (int)k;
+                return cc_ok(h);
+            }
+            if (c->ring[k].refs != 0) {
+                hold.release();
+                h.ptr = block_cache_pool_pread(c, fd, want, file_off) !>;
+                return cc_ok(h);
+            }
+        } else if (hole != (uint32_t)-1) {
+            k = hole;
+        } else {
+            hold.release();
+            h.ptr = block_cache_pool_pread(c, fd, want, file_off) !>;
+            return cc_ok(h);
+        }
+    }
+    c->ring[k].refs = 1;
+    c->ring[k].ready = 0;
+    c->ring[k].dev = dev;
+    c->ring[k].ino = ino;
+    c->ring[k].mtime = mtime;
+    c->ring[k].mtime_nsec = mtime_nsec;
+    c->ring[k].block = block;
+    c->ring[k].len = want;
+    hold.release();
+    block_cache_fill(c, k, fd, want, file_off) !>;
+    h.ptr = c->bytes[k];
     h.slot = (int)k;
     return cc_ok(h);
+}
+
+/* Process singleton — fs tick/cull and page send share one cache. */
+static void block_tick(time_t now) { block_cache_tick(&g_blocks, now); }
+static void block_cull_id(uint64_t dev, uint64_t ino) {
+    block_cache_cull_id(&g_blocks, dev, ino);
+}
+static BlockHold !>(CCError) checkout_block(int fd, uint64_t dev, uint64_t ino,
+                                            time_t mtime, long mtime_nsec,
+                                            size_t file_off, size_t want) {
+    return block_cache_checkout(&g_blocks, fd, dev, ino, mtime, mtime_nsec,
+                                file_off, want);
 }
 
 #endif /* STATICD_BLOCK_CCH */

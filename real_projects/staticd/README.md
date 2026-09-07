@@ -26,7 +26,7 @@ and redis. Not a second file server.
 | Workers | Start 2, grow every 64 live conns, cap ncpu/2 (`--workers 0`). `--workers N` is the cap. `--workers 1` stays one dest |
 | Pages | `--pages DIR` (off). Load `hello.js` (QuickJS) or `hello.py` (CPython) as a view: `GET(request)` → `Response`. Same ABI; both faces at one path → 500. Never executes `--root` `*.js` |
 | TLS | `--tls-cert PEM` + `--tls-key PEM` (off). BearSSL server; process-wide load at startup. Build with `CC_ENABLE_TLS=1` (Makefile default) |
-| WebSocket | `Upgrade: websocket` → `101`, then echo (text / binary), pong for ping, close for close. No fragments; payload cap 64KB |
+| WebSocket | Narrow echo subset: `Upgrade` + `Connection: upgrade` + `Sec-WebSocket-Version: 13` + base64-16 `Sec-WebSocket-Key` → `101`, then echo (text / binary), pong for ping, close for close. No fragments; payload capped to the row window |
 | Body | Named-block ring: 256 × 64KB = 16MB BSS, key `(dev, ino, block)`, FNV probe only, reuse in place, idle cull. Pool `pread` on miss / unaligned Range / busy fill. 8-slot fd cache; pathname revalidate ≤1s (absolute); hold dups the fd. Send is a cursor on the row: one 64KB chunk per step, `POLLOUT` while left |
 
 **Not in scope:** gzip, HTTP/2, multipart ranges, sendfile, directory
@@ -198,7 +198,13 @@ errors except nginx `10mb.bin` @ c=100 (empty — Darwin `sendfile` wedge).
 | 100 | **1.00k** / 92.5 / 16 MB | 0 (wedge) | 545 / 159 / 1.8 MB |
 
 Body send is a 64KB cursor (`try_write`, `.wait_out` on short/BUSY).
-File body is the named-block ring, not a per-response `mmap`.
+File body is the named-block ring; page and listing bodies are the same
+cursor over a pool slab (`session_queue_mem`). Close-after-body is
+`send_close` on the cursor — never “headers flushed, drop the body”.
+
+TLS still handshakes (and some writes) synchronously in the worker today;
+that punctures the row/poll model for a slow client. Stepping the
+handshake from readiness is the intended fit, not done here.
 
 ## Shape
 
@@ -235,8 +241,8 @@ become holes once a second.
 |------|------------|
 | **Worker dest** | `srv.serve` plants dests (start 2, or 1 if cap is 1) and grows with live. Each worker owns the poll tape and live table. One app closure is borrow-invoked per ready window. |
 | **Socket session** | `CCIoSess` on the server: sock / TLS / window / dead. Tape sees `io` only. |
-| **HTTP/WS row** | `Session*` in the table. Embeds `CCIoSess`, send cursor (`FileHold` / off / left). |
-| **Send cursor** | One `FILE_SEND_CHUNK` per `session_step`. `POLLOUT` while `send_left`. Close-after-body is `send_close`, not `dead` before the cursor drains. |
+| **HTTP/WS row** | `Session*` in the table. Embeds `CCIoSess`, send cursor (file hold or mem slab / off / left / `send_close`). |
+| **Send cursor** | One chunk per `session_step`. `POLLOUT` while `send_left`. Disposition is `send_close` after the body drains — headers alone never close. |
 
 Ring and fd cache share one `CCExclusive` (`cli_a.create_exclusive(4)`),
 names `SYNC_BLOCK` and `SYNC_FC`. Hold is metadata only: drop the lock
@@ -245,13 +251,15 @@ inode, order is file cache then ring (`block_cull_id`). A contended
 exclusive parks the fiber, not the OS worker. Date / Last-Modified
 format onto the request arena.
 
-Ring identity is `(dev, ino, block)` from `fstat` after `openat`. FNV-1a
-of that triple is the probe start only — a path hash is not a file.
-Hardlinks share a slab. `ino == 0` or an unaligned Range goes to
-`g_send_pool`. A same-key GET while `ready == 0 && refs != 0` pools too
-(no half-fill, no condvar). A warm other key is not stolen; pressure
-pools. `g_send_pool` is `cc_arena_pool_stack` at the top of `main`
-(an 8 MB VLA SIGSEGVs Darwin's default stack).
+Ring identity is `(dev, ino, block)` plus `mtime`/`mtime_nsec`/`len` from
+`fstat` after `openat`. FNV-1a of the triple is the probe start only — a
+path hash is not a file. Hardlinks share a slab. Same-second in-place
+rewrites invalidate when the platform exposes nanosecond mtime. `ino == 0`
+or an unaligned Range goes to the miss pool on `BlockCache`. A same-key
+GET while `ready == 0 && refs != 0` pools too (no half-fill, no condvar).
+A warm other key is not stolen; pressure pools. The miss pool is
+`cc_arena_pool_stack` at the top of `main` (an 8 MB VLA SIGSEGVs Darwin's
+default stack), owned by `g_blocks`.
 
 ## Layout
 
@@ -262,7 +270,7 @@ pools. `g_send_pool` is `cc_arena_pool_stack` at the top of `main`
 | `CCServer.ccs` | Owner: `srv.serve` — workers / poll / grow, borrow-invoke |
 | `staticd_ws.cch` | SHA-1 / base64 / WS frame tape |
 | `staticd_http.cch` | Date / Range / header-CI tape |
-| `staticd_block.cch` | Named-block ring (`checkout_block`) |
+| `staticd_block.cch` | `BlockCache` named-block ring (`checkout_block` / `block_cache_fill`) |
 | `staticd_fs.cch` | Jail, `FileHold`, 1s fd cache, listing |
 | `gen_fixtures.sh` | Fixture tree + manifest |
 | `correctness.sh` | Golden gate |
