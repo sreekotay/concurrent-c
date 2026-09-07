@@ -1,0 +1,73 @@
+/*
+ * Dest waiter face. Bodies: CCServerPoll.ccs (kqueue / epoll / poll).
+ * Pulls CCServer.cch so the published .h is self-contained (emit may
+ * reorder includes ahead of the owner's CCServer.cch).
+ */
+#ifndef CC_SERVER_POLL_CCH
+#define CC_SERVER_POLL_CCH
+
+#include "CCServer.cch"
+
+#ifndef CC_SERVER_POLL_MS
+#define CC_SERVER_POLL_MS 50
+#endif
+#ifndef CC_ACCEPT_BACKOFF_MS
+#define CC_ACCEPT_BACKOFF_MS 100
+#endif
+
+typedef struct CCReady {
+    int in;
+    int out;
+    int err;
+} CCReady;
+
+/* Arm names are TU-wide for designated init — do not reuse `.fd` / `.wait`. */
+@variant CCAccept {
+    ready: int;
+    busy: void;
+    dead: void;
+};
+
+typedef struct CCWaitSlot {
+    int fd;
+    int want_in;
+    int want_out;
+    int ready_in;
+    int ready_out;
+    int ready_err;
+} CCWaitSlot;
+
+/* Unified tape: sessions in slots; listen separate. backend_fd is
+ * kqueue/epoll, or -1 for poll. */
+typedef struct CCTape {
+    CCServer* srv;
+    Vec::[CCWaitSlot] slots;
+    int listening;
+    int spare_fd;
+    int listen_fd;
+    int listen_want;
+    int listen_ready;
+    int backend_fd;
+} CCTape;
+
+uint64_t cc_mono_ms(void);
+void cc_server_publish_accept_backoff(CCServer* srv);
+void cc_server_clear_accept_backoff_if_due(CCServer* srv, uint64_t now);
+int cc_accept_resource_err(int err);
+int cc_ready_bad(CCReady r);
+int cc_ready_in(CCReady r);
+int cc_ready_out(CCReady r);
+int cc_tape_interest(CCIoSess* io, int want_out_extra, int* want_in,
+                     int* want_out);
+
+int cc_tape_open(CCTape* w, CCServer* srv, CCArena a);
+void cc_tape_close(CCTape* w);
+int cc_tape_wait(CCTape* w);
+CCReady cc_tape_ready(CCTape* w, size_t i);
+int cc_tape_listen_ready(CCTape* w);
+void cc_tape_arm(CCTape* w, size_t i, CCIoSess* io);
+int cc_tape_watch(CCTape* w, CCIoSess* io);
+int cc_tape_keep_row(CCTape* w, size_t from, size_t to);
+void cc_tape_done(CCTape* w, size_t nlive);
+
+#endif /* CC_SERVER_POLL_CCH */

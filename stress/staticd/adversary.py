@@ -64,6 +64,8 @@ class Ctx:
     pages: Optional[Path] = None
     tls_cert: Optional[Path] = None
     tls_key: Optional[Path] = None
+    # Soft RLIMIT_NOFILE applied to a --spawn'd server (None = external / unknown).
+    server_nofile: Optional[int] = None
     breaks: list[str] = field(default_factory=list)
     rng: random.Random = field(default_factory=lambda: random.Random(0))
 
@@ -168,76 +170,88 @@ def mode_accept_burst_survive(ctx: Ctx) -> Result:
 
 
 def mode_fd_exhaust_accept(ctx: Ctx) -> Result:
-    """Push toward EMFILE; server must soft-fail, back off listen, keep serving."""
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    target = min(soft, 256)
-    try:
-        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
-    except (ValueError, OSError):
-        return Result("fd_exhaust_accept", True, "SKIP setrlimit")
+    """Fill the *server* fd table until accept soft-fails; then still serve.
+
+    Requires --spawn with STATICD_NOFILE. Hold keep-alive GETs so each
+    holder is an accepted server fd (listen backlog alone does not count).
+    """
+    limit = ctx.server_nofile
+    if limit is None:
+        return Result(
+            "fd_exhaust_accept",
+            True,
+            "SKIP need --spawn (server NOFILE lowered at exec)",
+        )
 
     holders: list[socket.socket] = []
-    server_socks: list[socket.socket] = []
     burst_s = 0.0
     attempts = 0
+    accept_fails = 0
+    held = 0
+    req = (
+        b"GET /1kb.bin HTTP/1.1\r\n"
+        b"Host: x\r\n"
+        b"Connection: keep-alive\r\n"
+        b"\r\n"
+    )
     try:
-        for _ in range(target):
+        stall = 0
+        for _ in range(limit + 32):
             try:
-                holders.append(socket.socket())
+                s = socket.create_connection((ctx.host, ctx.port), 0.5)
+                s.settimeout(1.0)
+                s.sendall(req)
+                buf = b""
+                while b"\r\n\r\n" not in buf or len(buf) < 1024 + 40:
+                    chunk = s.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+                if b"200" not in buf.split(b"\r\n", 1)[0]:
+                    rst_close(s)
+                    stall += 1
+                    if stall >= 3 and holders:
+                        break
+                    continue
+                holders.append(s)
+                stall = 0
             except OSError:
-                break
-        for _ in range(64):
-            try:
-                server_socks.append(socket.create_connection((ctx.host, ctx.port), 0.5))
-            except OSError:
-                break
-        for s in server_socks:
-            rst_close(s)
-        server_socks.clear()
-        # Hammer while exhausted: with listen POLLIN backoff, a tight
-        # accept spin should not make this burst complete in near-zero time.
+                stall += 1
+                if stall >= 3 and holders:
+                    break
+        held = len(holders)
+        if held < max(8, limit // 8):
+            return Result(
+                "fd_exhaust_accept",
+                False,
+                f"did not fill server fds held={held} limit={limit}",
+            )
+
         t0 = time.perf_counter()
-        attempts = 0
-        while time.perf_counter() - t0 < 0.25:
+        while time.perf_counter() - t0 < 0.35:
             attempts += 1
             try:
                 s = socket.create_connection((ctx.host, ctx.port), 0.05)
                 rst_close(s)
             except OSError:
-                pass
+                accept_fails += 1
         burst_s = time.perf_counter() - t0
         time.sleep(0.15)
     finally:
-        for s in server_socks:
-            rst_close(s)
         for s in holders:
-            try:
-                s.close()
-            except OSError:
-                pass
-        try:
-            resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
-        except (ValueError, OSError):
-            pass
+            rst_close(s)
 
     try:
         still_serves(ctx)
-        # Client loop is wall-clock bounded (~0.25s); refuse a pathological
-        # "instant" run that never blocked (should not happen with timeout).
-        if burst_s < 0.05:
-            return Result(
-                "fd_exhaust_accept",
-                False,
-                f"accept path too hot burst={burst_s:.4f}s attempts={attempts}",
-            )
         return Result(
             "fd_exhaust_accept",
             True,
-            f"holders_peak~{target} burst={burst_s:.3f}s attempts={attempts}",
+            f"server_nofile={limit} held={held} "
+            f"burst={burst_s:.3f}s fails={accept_fails}/{attempts}",
         )
     except Fail as e:
         return Result("fd_exhaust_accept", False,
-                      f"server dead after pressure: {e}", known_break=True)
+                      f"server dead after pressure: {e}")
 
 
 def mode_slowloris_headers(ctx: Ctx) -> Result:
@@ -812,37 +826,45 @@ def mode_pages_throw_storm(ctx: Ctx) -> Result:
 
 
 def mode_listing_href_abuse(ctx: Ctx) -> Result:
-    """Filenames with ? # space — listing hrefs must encode and GET."""
+    """Weird names at any depth — every listing href must GET."""
     import re
+
+    def walk(path: str, depth: int, checked: list[int]) -> Optional[str]:
+        code, _, body = http_get(ctx.host, ctx.port, path, timeout=2.0)
+        if code != 200 or b"<a href" not in body:
+            return f"GET {path} → {code} (want listing)"
+        hrefs = re.findall(br'href="([^"]+)"', body)
+        if not hrefs:
+            return f"no hrefs in {path}"
+        for h in hrefs:
+            if b"?" in h or b"#" in h or b" " in h:
+                return f"unencoded special in href={h!r} under {path}"
+        for h in hrefs:
+            link = h.decode("ascii", "replace")
+            if link.endswith("../") or link.endswith("/.."):
+                continue
+            c, _, b2 = http_get(ctx.host, ctx.port, link, timeout=2.0)
+            if c != 200:
+                return f"GET {link} → {c}"
+            checked[0] += 1
+            if depth < 4 and b"Index of" in b2 and b"<a href" in b2:
+                nxt = link if link.endswith("/") else (link + "/")
+                err = walk(nxt, depth + 1, checked)
+                if err:
+                    return err
+        return None
+
     code, _, body = http_get(ctx.host, ctx.port, "/", timeout=2.0)
     if code != 200 or b"<a href" not in body:
         return Result("listing_href_abuse", True, "SKIP no listing")
-    hrefs = re.findall(br'href="([^"]+)"', body)
-    if not hrefs:
-        return Result("listing_href_abuse", False, "no hrefs parsed")
-    # Raw specials must not appear unencoded in hrefs.
-    for raw in (b"weird?", b"weird#", b"weird space"):
-        for h in hrefs:
-            if raw in h:
-                return Result("listing_href_abuse", False,
-                              f"unencoded {raw!r} in href={h!r}")
-    # Each emitted file href should resolve (skip parent "..").
-    checked = 0
-    for h in hrefs:
-        path = h.decode("ascii", "replace")
-        if path in (".", "..") or path.endswith("/..") or "/../" in path:
-            continue
-        if path == "/" or path.endswith("/"):
-            continue
-        c, _, _ = http_get(ctx.host, ctx.port, path, timeout=2.0)
-        if c != 200:
-            return Result("listing_href_abuse", False,
-                          f"GET {path} → {c}")
-        checked += 1
-    if checked < 3:
+    checked = [0]
+    err = walk("/", 0, checked)
+    if err:
+        return Result("listing_href_abuse", False, err)
+    if checked[0] < 5:
         return Result("listing_href_abuse", False,
-                      f"expected ≥3 file hrefs, got {checked}")
-    return Result("listing_href_abuse", True, f"hrefs={checked}")
+                      f"expected ≥5 href GETs, got {checked[0]}")
+    return Result("listing_href_abuse", True, f"hrefs={checked[0]}")
 
 
 def mode_uri_decode_refuse(ctx: Ctx) -> Result:
@@ -928,6 +950,25 @@ QUICK_ORDER = [
 ]
 
 
+# Soft NOFILE for --spawn'd staticd so fd_exhaust_accept can fill the
+# *server* table. Overridable; must stay above workers+listen+spares+pages.
+SERVER_NOFILE = int(os.environ.get("STATICD_STRESS_NOFILE", "128"))
+
+
+def _preexec_nofile(soft: int):
+    """Child-only: lower RLIMIT_NOFILE before exec (does not touch parent)."""
+    def _set():
+        try:
+            _cur, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            n = min(soft, hard) if hard > 0 else soft
+            if n < 32:
+                n = 32
+            resource.setrlimit(resource.RLIMIT_NOFILE, (n, hard))
+        except (ValueError, OSError):
+            pass
+    return _set
+
+
 def prepare_pages(tmp: Path, pages_src: Path) -> Optional[Path]:
     if not pages_src.is_dir():
         return None
@@ -956,11 +997,18 @@ def prepare_root(tmp: Path, fixtures: Path, with_list: bool) -> Path:
         (root / "weird?x.txt").write_text("q\n")
         (root / "weird#y.txt").write_text("h\n")
         (root / "weird space.txt").write_text("s\n")
+        odd = root / "odd?dir"
+        odd.mkdir()
+        (odd / "child#x.txt").write_text("cx\n")
+        sub = odd / "sub space"
+        sub.mkdir()
+        (sub / "leaf%.txt").write_text("leaf\n")
     return root
 
 
 def spawn_staticd(bin_path: str, port: int, root: Path, pages: Optional[Path],
-                  list_dir: bool) -> tuple[subprocess.Popen, Path]:
+                  list_dir: bool,
+                  nofile: int = SERVER_NOFILE) -> tuple[subprocess.Popen, Path, int]:
     logdir = Path(tempfile.mkdtemp(prefix="staticd-adv-"))
     log = open(logdir / "staticd.log", "w")
     cmd = [bin_path, "--listen", f"127.0.0.1:{port}", "--root", str(root),
@@ -977,12 +1025,20 @@ def spawn_staticd(bin_path: str, port: int, root: Path, pages: Optional[Path],
     env.setdefault("TLS_HS", "5")
     env.setdefault("WRITE_STALL", "10")
     env.setdefault("WS_IDLE", "30")
-    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
+    # Applied inside staticd main (reliable); preexec is a backup only.
+    env["STATICD_NOFILE"] = str(nofile)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        env=env,
+        preexec_fn=_preexec_nofile(nofile),
+    )
     deadline = time.time() + 5
     while time.time() < deadline:
         try:
             with socket.create_connection(("127.0.0.1", port), 0.2):
-                return proc, logdir
+                return proc, logdir, nofile
         except OSError:
             if proc.poll() is not None:
                 log.close()
@@ -1007,6 +1063,7 @@ def main() -> None:
     port = args.port or (18090 if args.spawn else 8080)
     proc = None
     logdir = None
+    server_nofile: Optional[int] = None
     tmp = Path(tempfile.mkdtemp(prefix="staticd-adv-www-"))
     fixtures = STATICD_DIR / "fixtures"
     if not (fixtures / "1kb.bin").exists():
@@ -1019,10 +1076,12 @@ def main() -> None:
 
     try:
         if args.spawn:
-            proc, logdir = spawn_staticd(args.spawn, port, root, pages, list_dir)
+            proc, logdir, server_nofile = spawn_staticd(
+                args.spawn, port, root, pages, list_dir)
 
         ctx = Ctx(host=args.host, port=port, root=root, scale=args.scale,
-                  pages=pages, rng=random.Random(args.seed))
+                  pages=pages, rng=random.Random(args.seed),
+                  server_nofile=server_nofile)
 
         modes = [args.mode] if args.mode else QUICK_ORDER
         if args.scale == "soak" and not args.mode:

@@ -5,9 +5,9 @@
  *   CCServer  — listen, tls mats, dest, stop, live / worker ratchet
  *   CCIoAct   — wait | wait_out | close (how a socket step finishes)
  *
- * `serve` lives in CCServer.ccs (this header's owner): workers / poll /
- * grow, borrow-invoke one closure with `CCIoSess*`. Tape, accept, fill,
- * and arm stay in that unit. Dest-per-conn is `ln.serve`.
+ * `serve` lives in CCServer.ccs (this header's owner): workers / wait /
+ * grow, borrow-invoke one closure with `CCIoSess*`. Tape interest is
+ * CCServerPoll.cch / .ccs. Dest-per-conn is `ln.serve`.
  *
  * Page sees: init / close / listen / load_tls / serve / start_n /
  * workers_max / tls / tls_fails; on io: try_write / window /
@@ -15,13 +15,13 @@
  * cookie; dest never derefs it.
  *
  * try_write: one non-blocking send. Ok(n) may be short. BUSY = wrote
- * nothing, POLLOUT later. App output is try_write + cursors only.
+ * nothing, wait_out later. App output is try_write + cursors only.
  *
- * TLS: bind starts the engine (`tls_hs`); handshake steps from poll
+ * TLS: bind starts the engine (`tls_hs`); handshake steps from waiter
  * readiness (WANT_READ / WANT_WRITE) before on_app sees the row.
  *
  * Deadlines: absolute `time_t` on the session (`deadline`); 0 = none.
- * Dest reaps expired rows on the 50ms poll wake.
+ * Dest reaps expired rows on the 50ms wait wake.
  *
  * Caller includes <ccc/std/net.cch>, <ccc/std/tls.cch>, <ccc/std/signal.cch>,
  * <ccc/cc_atomic.cch>. Certs are process mats (`cc_tls_server_load`)
@@ -34,6 +34,7 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <time.h>
+#include <errno.h>
 #include <ccc/cc_closure.cch>
 
 @variant CCIoAct {
@@ -70,7 +71,7 @@ typedef struct CCServer {
     int workers_max;
     int sec_tls_hs;       /* first-byte budget during TLS HS (default 10) */
     int sec_first_byte;   /* first HTTP byte after bind/HS (default 15) */
-    cc_atomic_u64 accept_backoff_until_ms; /* listen POLLIN off until mono ms */
+    cc_atomic_u64 accept_backoff_until_ms; /* listen interest off until mono ms */
     cc_atomic_int stop;
     cc_atomic_int live;
     cc_atomic_int nworkers; /* running workers */
@@ -84,6 +85,8 @@ int cc_fd_nonblock(int fd) {
     if (fl < 0) return -1;
     return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
+
+int cc_server_stopped(CCServer* srv);
 
 /* Defined in CCServer.ccs — send() / cc_tls_try_write, never parks. */
 size_t !>(CCIoError) io_sess_try_write(CCIoSess* io, char[:] data);

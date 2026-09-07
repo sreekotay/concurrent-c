@@ -307,4 +307,36 @@ static bool !>(CCError) uri_path_encode_component(char[:] name, CCString* dst,
     return cc_ok(true);
 }
 
+/* Encode a full decoded path: keep `/` separators; encode each component. */
+static bool !>(CCError) uri_path_encode_path(char[:] path, CCString* dst,
+                                              CCArena a) {
+    size_t i = 0;
+    if (!dst) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "uri encode path"));
+    *dst = cc_string_new();
+    if (!path.len) {
+        if (!dst->append(cc_slice_cstr("/"), a) || dst->failed())
+            return cc_err(CC_ERR_OUT_OF_MEMORY, "uri encode path");
+        return cc_ok(true);
+    }
+    while (i < path.len) {
+        if (path.ptr[i] == '/') {
+            if (!dst->append(cc_slice_cstr("/"), a) || dst->failed())
+                return cc_err(CC_ERR_OUT_OF_MEMORY, "uri encode path");
+            i++;
+            continue;
+        }
+        {
+            size_t start = i;
+            CCString comp;
+            while (i < path.len && path.ptr[i] != '/') i++;
+            uri_path_encode_component(path.sub(start, i), &comp, a) !>(err) {
+                return cc_err(err);
+            };
+            if (!dst->append(comp.as_slice(), a) || dst->failed())
+                return cc_err(CC_ERR_OUT_OF_MEMORY, "uri encode path");
+        }
+    }
+    return cc_ok(true);
+}
+
 #endif /* STATICD_HTTP_CCH */

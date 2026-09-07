@@ -23,12 +23,12 @@
  * Usage:  ./out/staticd [--listen ADDR] [--root DIR] [--pages DIR]
  *                       [--tls-cert PEM] [--tls-key PEM]
  *                       [--index NAME] [--list] [--header 'Name: value']
- *                       [--workers N]
+ *                       [--workers N] [--block-ring N]
  * v1: GET/HEAD/OPTIONS, keep-alive, Date/Last-Modified/IMS, one Range,
  *     send cursor (one 64KB chunk per step). `?query` ignored on files;
  *     passed to pages. `--list` off. `--index` default index.html.
  *     `--pages` off. Optional TLS (`--tls-cert` + `--tls-key`). WS echo
- *     on Upgrade.
+ *     on Upgrade. `--block-ring` default 256 (named-block cache slots).
  */
 
 #include <ccc/std/prelude.cch>
@@ -52,6 +52,7 @@
 #include <time.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #include <stdlib.h>
 
@@ -110,6 +111,22 @@ static void staticd_load_budgets(void) {
             env_sec("STATICD_WRITE_STALL_SEC", g_sec_write_stall));
     g_sec_ws_idle = env_sec("WS_IDLE",
             env_sec("STATICD_WS_IDLE_SEC", g_sec_ws_idle));
+    /* Stress: lower this process's soft NOFILE so accept EMFILE is reachable. */
+    {
+        const char* v = getenv("STATICD_NOFILE");
+        long n;
+        char* end = NULL;
+        struct rlimit rl;
+        if (v && v[0] && getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+            n = strtol(v, &end, 10);
+            if (end && end != v && !*end && n >= 32 && n <= 100000) {
+                rl.rlim_cur = (rlim_t)n;
+                if (rl.rlim_max != RLIM_INFINITY && rl.rlim_cur > rl.rlim_max)
+                    rl.rlim_cur = rl.rlim_max;
+                (void)setrlimit(RLIMIT_NOFILE, &rl);
+            }
+        }
+    }
 }
 
 @variant Phase {
@@ -164,6 +181,7 @@ typedef @typeview Encode on Enc {
     index: opt string --index as NAME default "index.html" desc "Directory index file"
     header: opt string --header as LINE desc "Extra response header Name: value (repeatable)"
     workers: opt i64 -w, --workers as N default 0 desc "Worker cap (0 = ncpu/2; start 2, grow with conns)"
+    block_ring: opt i64 --block-ring as N default 256 desc "Named-block cache slots (64KB each; default 256, max 4096)"
     pages: opt string --pages as DIR default "" desc "Script pages jail (.js / .py views; off when empty)"
     tls_cert: opt string --tls-cert as PATH default "" desc "PEM certificate chain (requires --tls-key)"
     tls_key: opt string --tls-key as PATH default "" desc "PEM private key (requires --tls-cert)"
@@ -395,10 +413,11 @@ static CCIoAct !>(CCError) session_send_one(Session* s) {
         if (s->out_left)
             return cc_ok((CCIoAct){ .wait_out = {} });
         session_clear_out(s);
-        if (s->send_left)
-            return cc_ok((CCIoAct){ .wait_out = {} });
-        if (s->send_close) return cc_ok((CCIoAct){ .close = {} });
-        return cc_ok((CCIoAct){ .wait = {} });
+        /* Fall through to body in the same step. */
+        if (!s->send_left) {
+            if (s->send_close) return cc_ok((CCIoAct){ .close = {} });
+            return cc_ok((CCIoAct){ .wait = {} });
+        }
     }
     if (!s->send_left) return cc_ok((CCIoAct){ .wait = {} });
     if (s->mem) {
@@ -1168,6 +1187,8 @@ static int header_line_ok(char[:] v) {
 
 int main(int argc, char** argv) {
     cc_arena_pool_stack(send_pool, FILE_SEND_CHUNK, megabytes(1));
+    /* L1 one chunk; grows via heap up to --block-ring live slabs. */
+    cc_arena_pool_stack(ring_pool, FILE_SEND_CHUNK, FILE_SEND_CHUNK);
     cc_arena_pool_stack(sess_pool, sizeof(Session), kilobytes(64));
 
     @errhandler(CCError err) {
@@ -1179,10 +1200,27 @@ int main(int argc, char** argv) {
 
     cc_arena_stack(cli_a, kilobytes(4));
     staticd_sync_init(cli_a.create_exclusive(4) !>);
-    block_cache_init(&g_blocks, &send_pool);
     StaticdOpts opts = {0};
     bool go = cc_prepare_args(StaticdOpts, argc, argv, cli_a, &opts, stderr) !>;
     if (!go) return 0;
+
+    {
+        uint32_t ring_max = BLOCK_RING_MAX;
+        uint32_t ring_def = BLOCK_RING_DEFAULT;
+        int64_t want = opts.block_ring;
+        uint32_t nring;
+        if (want < 1 || want > (int64_t)ring_max) {
+            eprintln(@string(
+                `fatal: --block-ring must be 1..${ring_max} (default ${ring_def})`,
+                @scratch));
+            return 1;
+        }
+        nring = (uint32_t)want;
+        if (!block_cache_init(&g_blocks, &send_pool, &ring_pool, nring)) {
+            eprintln("fatal: block ring alloc");
+            return 1;
+        }
+    }
 
     char[:0] listen = opts.listen;
     int nworkers = (int)opts.workers;

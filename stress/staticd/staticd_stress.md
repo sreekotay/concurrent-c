@@ -61,7 +61,7 @@ What we are trying to break, mapped to the specimen's seams:
 | Mode | Status | What it hammers | expect |
 |------|--------|-----------------|--------|
 | `conn_storm` | green | N concurrent TCP connects + GET /1kb.bin | all settle; server still serves |
-| `fd_exhaust_accept` | green / break | Raise open-file soft limit pressure around accept | server stays up; later GET works (break = worker died) |
+| `fd_exhaust_accept` | green | `--spawn` with lowered server `RLIMIT_NOFILE`; hold conns until accept stalls; spare soft-fail + backoff | server stays up; later GET works. SKIP without spawn |
 | `accept_burst_survive` | green | Burst connect/close without read | server still serves afterward |
 
 ### Deadlines / Slowloris

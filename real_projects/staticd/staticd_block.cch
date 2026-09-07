@@ -2,10 +2,10 @@
  * Named-block cache — mmap's hit without mapping the file.
  * Include before staticd_fs.cch (file_hold ticks and culls).
  *
- * Owned face: `BlockCache` (ring + miss pool + mutex). Hot path is
- * checkout of a ready slab. Cold path is `block_cache_fill` — blocking
- * `pread` on the caller today; that is the seam for a waitable fill
- * (return to poll, complete off-thread, then checkout). Unaligned
+ * Owned face: `BlockCache` (ring metadata + ring pool + miss pool + mutex).
+ * Hot path is checkout of a ready slab. Cold path is `block_cache_fill` —
+ * blocking `pread` on the caller today; that is the seam for a waitable
+ * fill (return to poll, complete off-thread, then checkout). Unaligned
  * Range and ring pressure go through the miss pool.
  *
  * Async fill (not wired): pass non-NULL `async_fill` to checkout →
@@ -20,23 +20,31 @@
  * Never steal a live other key. Idle refs==0 past until is a hole
  * (cull ≤1s on file_hold).
  *
- * 256 × 64KB = 16MB BSS until process exit. A hold refs a slab so a
- * sweep cannot drop bytes still on the wire.
+ * Ring bytes live on `ring_pool` (CCArenaPool, FILE_SEND_CHUNK elems).
+ * Slabs grow on demand up to `ring_n` live entries (`--block-ring`,
+ * default 256); cull/free returns them to the freelist.
  */
 #ifndef STATICD_BLOCK_CCH
 #define STATICD_BLOCK_CCH
 
 #include <string.h>
+#include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
 #include <errno.h>
 #include <stdint.h>
 
 #define FILE_SEND_CHUNK (64u * 1024u)
-#define BLOCK_RING_N    256
+#ifndef BLOCK_RING_DEFAULT
+#define BLOCK_RING_DEFAULT 256u
+#endif
+#ifndef BLOCK_RING_MAX
+#define BLOCK_RING_MAX 4096u
+#endif
 #define BLOCK_IDLE_TTL  1
 
 typedef struct BlockSlot {
+    char* data; /* ring_pool slab; NULL when hole */
     uint64_t dev;
     uint64_t ino;
     time_t mtime;
@@ -49,10 +57,11 @@ typedef struct BlockSlot {
 } BlockSlot;
 
 typedef struct BlockCache {
-    char bytes[BLOCK_RING_N][FILE_SEND_CHUNK];
-    BlockSlot ring[BLOCK_RING_N];
+    BlockSlot* ring; /* heap; length ring_n */
+    uint32_t ring_n;
     time_t now;
-    CCArenaPool* pool; /* miss / unaligned; process lifetime */
+    CCArenaPool* pool;      /* miss / unaligned; process lifetime */
+    CCArenaPool* ring_pool; /* named-block slabs; grow ≤ ring_n */
     CCExclusiveMutex mx;
 } BlockCache;
 
@@ -76,11 +85,20 @@ static void staticd_sync_init(CCExclusive e) {
     g_fc_mx = e.mutex(SYNC_FC);
 }
 
-static void block_cache_init(BlockCache* c, CCArenaPool* pool) {
-    if (!c) return;
+/* 0 = ok. `ring_n` clamped by caller to [1, BLOCK_RING_MAX]. */
+static int block_cache_init(BlockCache* c, CCArenaPool* pool,
+                            CCArenaPool* ring_pool, uint32_t ring_n) {
+    BlockSlot* ring;
+    if (!c || !ring_n) return 0;
+    ring = (BlockSlot*)calloc((size_t)ring_n, sizeof(BlockSlot));
+    if (!ring) return 0;
     memset(c, 0, sizeof(*c));
+    c->ring = ring;
+    c->ring_n = ring_n;
     c->pool = pool;
+    c->ring_pool = ring_pool;
     c->mx = g_block_mx;
+    return 1;
 }
 
 static uint64_t block_probe(uint64_t dev, uint64_t ino, uint32_t block) {
@@ -94,27 +112,40 @@ static uint64_t block_probe(uint64_t dev, uint64_t ino, uint32_t block) {
     return h;
 }
 
+/* Drop a ring row's slab back to ring_pool; clear metadata. Caller holds mx. */
+static void block_slot_clear(BlockCache* c, uint32_t k) {
+    char* data;
+    if (!c || !c->ring || k >= c->ring_n) return;
+    data = c->ring[k].data;
+    c->ring[k] = (BlockSlot){0};
+    if (data && c->ring_pool) c->ring_pool->free(data);
+}
+
 /* At most one sweep per second — file_hold, not per chunk. */
 static void block_cache_tick(BlockCache* c, time_t now) {
-    if (!c) return;
+    uint32_t n;
+    if (!c || !c->ring) return;
+    n = c->ring_n;
     CCExclusiveGuard hold = c->mx.acquire() @destroy;
     if (now != c->now) {
-        @for (i in 0..BLOCK_RING_N) {
+        @for (i in 0..n) {
             if (c->ring[i].refs == 0 && c->ring[i].ino
                     && now > c->ring[i].until)
-                c->ring[i] = (BlockSlot){0};
+                block_slot_clear(c, (uint32_t)i);
         }
         c->now = now;
     }
 }
 
 static void block_cache_cull_id(BlockCache* c, uint64_t dev, uint64_t ino) {
-    if (!c || !ino) return;
+    uint32_t n;
+    if (!c || !c->ring || !ino) return;
+    n = c->ring_n;
     CCExclusiveGuard hold = c->mx.acquire() @destroy;
-    @for (i in 0..BLOCK_RING_N) {
+    @for (i in 0..n) {
         if (c->ring[i].dev == dev && c->ring[i].ino == ino
                 && c->ring[i].refs == 0)
-            c->ring[i] = (BlockSlot){0};
+            block_slot_clear(c, (uint32_t)i);
     }
 }
 
@@ -141,17 +172,20 @@ static char* !>(CCError) block_cache_pool_pread(BlockCache* c, int fd,
 }
 
 /*
- * Blocking fill of a reserved ring slot (refs==1, ready==0). Mutex must
- * not be held. Safe to call from a blocking-pool thread.
+ * Blocking fill of a reserved ring slot (refs==1, ready==0, data set).
+ * Mutex must not be held. Safe to call from a blocking-pool thread.
  */
 static int block_cache_fill_raw(BlockCache* c, uint32_t k, int fd,
                                 size_t want, size_t file_off) {
     ssize_t r;
-    if (!c || k >= (uint32_t)BLOCK_RING_N) return -1;
-    r = pread(fd, c->bytes[k], want, (off_t)file_off);
+    char* data;
+    if (!c || !c->ring || k >= c->ring_n) return -1;
+    data = c->ring[k].data;
+    if (!data) return -1;
+    r = pread(fd, data, want, (off_t)file_off);
     if (r < 0 || (size_t)r != want) {
         CCExclusiveGuard hold = c->mx.acquire() @destroy;
-        c->ring[k] = (BlockSlot){0};
+        block_slot_clear(c, k);
         return -1;
     }
     {
@@ -197,6 +231,14 @@ void block_hold_drop(BlockHold* h) {
     .destroy = cc_type_destroy_call("block_hold_drop"),
 };
 
+/* Under mx: ensure slot has a ring_pool slab. 0 = ok, -1 = OOM. */
+static int block_slot_ensure_data(BlockCache* c, uint32_t k) {
+    if (!c || !c->ring || k >= c->ring_n || !c->ring_pool) return -1;
+    if (c->ring[k].data) return 0;
+    c->ring[k].data = (char*)c->ring_pool->alloc();
+    return c->ring[k].data ? 0 : -1;
+}
+
 BlockHold !>(CCError) block_cache_checkout(BlockCache* c, int fd,
                                           uint64_t dev, uint64_t ino,
                                           time_t mtime, long mtime_nsec,
@@ -204,22 +246,24 @@ BlockHold !>(CCError) block_cache_checkout(BlockCache* c, int fd,
                                           BlockFillReq* async_fill) {
     @errhandler(CCError e) { return cc_err(e); }
     BlockHold h = { .cache = c, .slot = -1 };
-    uint32_t block, i, k;
-    if (!c) return cc_err(CC_ERROR(CC_ERR_IO, "no block cache"));
+    uint32_t block, i, k, n;
+    if (!c || !c->ring || !c->ring_n)
+        return cc_err(CC_ERROR(CC_ERR_IO, "no block cache"));
     if (want == 0 || want > (size_t)FILE_SEND_CHUNK)
         return cc_err(CC_ERROR(CC_ERR_IO, "bad block"));
     if (!ino || (file_off % (size_t)FILE_SEND_CHUNK) != 0) {
         h.ptr = block_cache_pool_pread(c, fd, want, file_off) !>;
         return cc_ok(h);
     }
+    n = c->ring_n;
     block = (uint32_t)(file_off / (size_t)FILE_SEND_CHUNK);
     CCExclusiveGuard hold = c->mx.acquire() @destroy;
-    i = (uint32_t)(block_probe(dev, ino, block) % (uint64_t)BLOCK_RING_N);
+    i = (uint32_t)(block_probe(dev, ino, block) % (uint64_t)n);
     {
         uint32_t found = (uint32_t)-1;
         uint32_t hole = (uint32_t)-1;
-        @for (probe in 0..BLOCK_RING_N) {
-            k = (i + (uint32_t)probe) % (uint32_t)BLOCK_RING_N;
+        @for (probe in 0..n) {
+            k = (i + (uint32_t)probe) % n;
             if (c->ring[k].dev == dev && c->ring[k].ino == ino
                     && c->ring[k].block == block) {
                 found = k;
@@ -233,11 +277,11 @@ BlockHold !>(CCError) block_cache_checkout(BlockCache* c, int fd,
             k = found;
             if (c->ring[k].ready && c->ring[k].mtime == mtime
                     && c->ring[k].mtime_nsec == mtime_nsec
-                    && c->ring[k].len == want) {
+                    && c->ring[k].len == want && c->ring[k].data) {
                 c->ring[k].refs++;
                 c->ring[k].until = c->now + BLOCK_IDLE_TTL;
                 hold.release();
-                h.ptr = c->bytes[k];
+                h.ptr = c->ring[k].data;
                 h.slot = (int)k;
                 return cc_ok(h);
             }
@@ -262,6 +306,12 @@ BlockHold !>(CCError) block_cache_checkout(BlockCache* c, int fd,
     c->ring[k].mtime_nsec = mtime_nsec;
     c->ring[k].block = block;
     c->ring[k].len = want;
+    if (block_slot_ensure_data(c, k) != 0) {
+        block_slot_clear(c, k);
+        hold.release();
+        h.ptr = block_cache_pool_pread(c, fd, want, file_off) !>;
+        return cc_ok(h);
+    }
     hold.release();
     if (async_fill) {
         *async_fill = (BlockFillReq){
@@ -271,7 +321,7 @@ BlockHold !>(CCError) block_cache_checkout(BlockCache* c, int fd,
         return cc_err(CC_ERROR(CC_ERR_WOULD_BLOCK, "fill"));
     }
     block_cache_fill(c, k, fd, want, file_off) !>;
-    h.ptr = c->bytes[k];
+    h.ptr = c->ring[k].data;
     h.slot = (int)k;
     return cc_ok(h);
 }

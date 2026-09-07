@@ -1,0 +1,573 @@
+#!ccc ccs
+/*
+ * Dest waiter bodies. Host #ifdef picks backend.
+ * Default: kqueue (BSD/Darwin), epoll (Linux), else poll.
+ * Override: -DCC_SERVER_WAIT_POLL=1 / _KQUEUE=1 / _EPOLL=1.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/std/net.cch>
+#include <ccc/std/tls.cch>
+#include <ccc/std/signal.cch>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <time.h>
+#include <sys/socket.h>
+#include "CCServer.cch"
+#include "CCServerPoll.cch"
+
+#if defined(CC_SERVER_WAIT_POLL) && CC_SERVER_WAIT_POLL
+#define CC_WAIT_USE_POLL 1
+#elif defined(CC_SERVER_WAIT_KQUEUE) && CC_SERVER_WAIT_KQUEUE
+#define CC_WAIT_USE_KQUEUE 1
+#elif defined(CC_SERVER_WAIT_EPOLL) && CC_SERVER_WAIT_EPOLL
+#define CC_WAIT_USE_EPOLL 1
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) \
+    || defined(__OpenBSD__) || defined(__DragonFly__)
+#define CC_WAIT_USE_KQUEUE 1
+#elif defined(__linux__)
+#define CC_WAIT_USE_EPOLL 1
+#else
+#define CC_WAIT_USE_POLL 1
+#endif
+
+#if CC_WAIT_USE_KQUEUE
+#include <sys/types.h>
+#include <sys/event.h>
+#ifndef CC_SERVER_KEVENT_BATCH
+#define CC_SERVER_KEVENT_BATCH 1024
+#endif
+#elif CC_WAIT_USE_EPOLL
+#include <sys/epoll.h>
+#ifndef CC_SERVER_EPOLL_BATCH
+#define CC_SERVER_EPOLL_BATCH 1024
+#endif
+#else
+#include <poll.h>
+#endif
+
+uint64_t cc_mono_ms(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return (uint64_t)time(NULL) * 1000ull;
+    return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+}
+
+void cc_server_publish_accept_backoff(CCServer* srv) {
+    uint64_t until = cc_mono_ms() + (uint64_t)CC_ACCEPT_BACKOFF_MS;
+    uint64_t cur;
+    if (!srv) return;
+    cur = cc_atomic_load(&srv->accept_backoff_until_ms);
+    while (until > cur) {
+        if (cc_atomic_cas(&srv->accept_backoff_until_ms, &cur, until))
+            return;
+    }
+}
+
+void cc_server_clear_accept_backoff_if_due(CCServer* srv, uint64_t now) {
+    uint64_t cur;
+    if (!srv) return;
+    cur = cc_atomic_load(&srv->accept_backoff_until_ms);
+    if (!cur || now < cur) return;
+    (void)cc_atomic_cas(&srv->accept_backoff_until_ms, &cur, (uint64_t)0);
+}
+
+int cc_accept_resource_err(int err) {
+    return err == EMFILE || err == ENFILE || err == ENOMEM || err == ENOBUFS;
+}
+
+int cc_ready_bad(CCReady r) { return r.err != 0; }
+int cc_ready_in(CCReady r) { return r.in != 0; }
+int cc_ready_out(CCReady r) { return r.out != 0; }
+
+int cc_tape_interest(CCIoSess* io, int want_out_extra, int* want_in,
+                     int* want_out) {
+    int wi = 0, wo = 0;
+    if (!io || io->want_in) wi = 1;
+    if (want_out_extra || (io && io->want_out)) wo = 1;
+    if (!wi && !wo) wi = 1;
+    if (want_in) *want_in = wi;
+    if (want_out) *want_out = wo;
+    return 0;
+}
+
+/* UFCS on slots is unreliable inside host #if arms — funnel through these. */
+static CCWaitSlot* cc_tape_slot(CCTape* w, size_t i) {
+    return w->slots.get(i);
+}
+static size_t cc_tape_nslots(CCTape* w) {
+    return w->slots.len();
+}
+static int cc_tape_slot_push(CCTape* w, CCWaitSlot slot) {
+    return w->slots.push(slot);
+}
+static int cc_tape_slot_set(CCTape* w, size_t i, CCWaitSlot slot) {
+    return w->slots.set(i, slot);
+}
+static void cc_tape_slot_trunc(CCTape* w, size_t n) {
+    w->slots.truncate(n);
+}
+
+static void cc_tape_clear_ready(CCTape* w) {
+    size_t n, i;
+    if (!w) return;
+    w->listen_ready = 0;
+    n = cc_tape_nslots(w);
+    for (i = 0; i < n; i++) {
+        CCWaitSlot* s = cc_tape_slot(w, i);
+        if (!s) continue;
+        s->ready_in = 0;
+        s->ready_out = 0;
+        s->ready_err = 0;
+    }
+}
+
+static int cc_tape_drop_listen_if_stopped(CCTape* w) {
+    if (!w || !w->listening) return 0;
+    if (!w->srv || !cc_server_stopped(w->srv)) return 1;
+#if CC_WAIT_USE_KQUEUE
+    if (w->listen_want && w->backend_fd >= 0 && w->listen_fd >= 0) {
+        struct kevent kev;
+        EV_SET(&kev, w->listen_fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+        (void)kevent(w->backend_fd, &kev, 1, NULL, 0, NULL);
+        w->listen_want = 0;
+    }
+#elif CC_WAIT_USE_EPOLL
+    if (w->listen_want && w->backend_fd >= 0 && w->listen_fd >= 0) {
+        (void)epoll_ctl(w->backend_fd, EPOLL_CTL_DEL, w->listen_fd, NULL);
+        w->listen_want = 0;
+    }
+#endif
+    w->listening = 0;
+    w->listen_ready = 0;
+    return 0;
+}
+
+#if CC_WAIT_USE_KQUEUE
+static int cc_kq_set(int kq, int fd, int16_t filter, uint16_t flags,
+                     void* udata) {
+    struct kevent kev;
+    EV_SET(&kev, fd, filter, flags, 0, 0, udata);
+    return kevent(kq, &kev, 1, NULL, 0, NULL);
+}
+
+static int cc_kq_listen_arm(CCTape* w, int on) {
+    void* ud = (void*)(uintptr_t)0;
+    if (!w || w->listen_fd < 0 || w->backend_fd < 0) return -1;
+    if (on && !w->listen_want) {
+        if (cc_kq_set(w->backend_fd, w->listen_fd, EVFILT_READ,
+                      EV_ADD | EV_ENABLE, ud) < 0)
+            return -1;
+        w->listen_want = 1;
+    } else if (!on && w->listen_want) {
+        (void)cc_kq_set(w->backend_fd, w->listen_fd, EVFILT_READ, EV_DELETE, ud);
+        w->listen_want = 0;
+    }
+    return 0;
+}
+
+static int cc_kq_arm_slot(CCTape* w, size_t i, int wi, int wo) {
+    CCWaitSlot* s;
+    void* ud;
+    if (!w || !(s = cc_tape_slot(w, i))) return -1;
+    ud = (void*)(uintptr_t)(i + 1);
+    /* Only syscall on interest change — re-ADD every arm was a kevent storm. */
+    if (wi && !s->want_in) {
+        if (cc_kq_set(w->backend_fd, s->fd, EVFILT_READ, EV_ADD | EV_ENABLE, ud) < 0)
+            return -1;
+    } else if (!wi && s->want_in) {
+        (void)cc_kq_set(w->backend_fd, s->fd, EVFILT_READ, EV_DELETE, ud);
+    }
+    if (wo && !s->want_out) {
+        if (cc_kq_set(w->backend_fd, s->fd, EVFILT_WRITE, EV_ADD | EV_ENABLE, ud) < 0)
+            return -1;
+    } else if (!wo && s->want_out) {
+        (void)cc_kq_set(w->backend_fd, s->fd, EVFILT_WRITE, EV_DELETE, ud);
+    }
+    s->want_in = wi;
+    s->want_out = wo;
+    return 0;
+}
+#endif /* KQUEUE */
+
+#if CC_WAIT_USE_EPOLL
+static uint32_t cc_epoll_events(int wi, int wo) {
+    uint32_t ev = 0;
+    if (wi) ev |= EPOLLIN;
+    if (wo) ev |= EPOLLOUT;
+    if (!ev) ev = EPOLLIN;
+    return ev | EPOLLERR | EPOLLHUP;
+}
+
+static int cc_epoll_listen_arm(CCTape* w, int on) {
+    struct epoll_event ev;
+    if (!w || w->backend_fd < 0 || w->listen_fd < 0) return -1;
+    if (on && !w->listen_want) {
+        ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
+        ev.data.u32 = 0;
+        if (epoll_ctl(w->backend_fd, EPOLL_CTL_ADD, w->listen_fd, &ev) < 0)
+            return -1;
+        w->listen_want = 1;
+    } else if (!on && w->listen_want) {
+        (void)epoll_ctl(w->backend_fd, EPOLL_CTL_DEL, w->listen_fd, NULL);
+        w->listen_want = 0;
+    }
+    return 0;
+}
+
+static int cc_epoll_arm_slot(CCTape* w, size_t i, int wi, int wo) {
+    CCWaitSlot* s;
+    struct epoll_event ev;
+    int op;
+    if (!w || !(s = cc_tape_slot(w, i))) return -1;
+    ev.events = cc_epoll_events(wi, wo);
+    ev.data.u32 = (uint32_t)(i + 1);
+    if (!s->want_in && !s->want_out)
+        op = EPOLL_CTL_ADD;
+    else if (!wi && !wo) {
+        (void)epoll_ctl(w->backend_fd, EPOLL_CTL_DEL, s->fd, NULL);
+        s->want_in = 0;
+        s->want_out = 0;
+        return 0;
+    } else
+        op = EPOLL_CTL_MOD;
+    if (epoll_ctl(w->backend_fd, op, s->fd, &ev) < 0) {
+        if (op == EPOLL_CTL_ADD && errno == EEXIST) {
+            if (epoll_ctl(w->backend_fd, EPOLL_CTL_MOD, s->fd, &ev) < 0)
+                return -1;
+        } else
+            return -1;
+    }
+    s->want_in = wi;
+    s->want_out = wo;
+    return 0;
+}
+#endif /* EPOLL */
+
+#if CC_WAIT_USE_KQUEUE
+__attribute__((used)) static const char cc_wait_backend_tag[] =
+    "cc_wait_backend=kqueue";
+#elif CC_WAIT_USE_EPOLL
+__attribute__((used)) static const char cc_wait_backend_tag[] =
+    "cc_wait_backend=epoll";
+#else
+__attribute__((used)) static const char cc_wait_backend_tag[] =
+    "cc_wait_backend=poll";
+#endif
+
+int cc_tape_open(CCTape* w, CCServer* srv, CCArena a) {
+    Vec::[CCWaitSlot] slots@(a) @detach;
+    int spare;
+    int backend = -1;
+    if (!w || !srv || !cc_arena_is_live(a) || srv->ln.fd < 0) return 0;
+    (void)cc_fd_nonblock(srv->ln.fd);
+#if CC_WAIT_USE_KQUEUE
+    backend = kqueue();
+    if (backend < 0) return 0;
+    (void)fcntl(backend, F_SETFD, FD_CLOEXEC);
+#elif CC_WAIT_USE_EPOLL
+    backend = epoll_create1(EPOLL_CLOEXEC);
+    if (backend < 0) return 0;
+#endif
+    spare = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    *w = (CCTape){
+        .srv = srv,
+        .slots = slots,
+        .listening = 1,
+        .spare_fd = spare,
+        .listen_fd = srv->ln.fd,
+        .listen_want = 0,
+        .listen_ready = 0,
+        .backend_fd = backend,
+    };
+#if CC_WAIT_USE_KQUEUE
+    if (cc_kq_listen_arm(w, 1) != 0) {
+        close(backend);
+        if (spare >= 0) close(spare);
+        return 0;
+    }
+#elif CC_WAIT_USE_EPOLL
+    if (cc_epoll_listen_arm(w, 1) != 0) {
+        close(backend);
+        if (spare >= 0) close(spare);
+        return 0;
+    }
+#else
+    w->listen_want = 1;
+#endif
+    return 1;
+}
+
+void cc_tape_close(CCTape* w) {
+    if (!w) return;
+    if (w->spare_fd >= 0) {
+        close(w->spare_fd);
+        w->spare_fd = -1;
+    }
+    if (w->backend_fd >= 0) {
+        close(w->backend_fd);
+        w->backend_fd = -1;
+    }
+}
+
+int cc_tape_wait(CCTape* w) {
+    int hold;
+    if (!w) return -1;
+    hold = cc_tape_drop_listen_if_stopped(w);
+    if (hold < 0) return -1;
+    cc_tape_clear_ready(w);
+
+    if (w->listening && w->srv) {
+        uint64_t now = cc_mono_ms();
+        uint64_t until = cc_atomic_load(&w->srv->accept_backoff_until_ms);
+        int on = !(until && now < until);
+#if CC_WAIT_USE_KQUEUE
+        (void)cc_kq_listen_arm(w, on);
+#elif CC_WAIT_USE_EPOLL
+        (void)cc_epoll_listen_arm(w, on);
+#else
+        w->listen_want = on ? 1 : 0;
+#endif
+        if (on && until)
+            cc_server_clear_accept_backoff_if_due(w->srv, now);
+    }
+
+#if CC_WAIT_USE_KQUEUE
+    {
+        struct kevent evs[CC_SERVER_KEVENT_BATCH];
+        struct timespec ts;
+        int pr, i;
+        ts.tv_sec = 0;
+        ts.tv_nsec = (w->listening ? (long)CC_SERVER_POLL_MS : 0L) * 1000000L;
+        pr = kevent(w->backend_fd, NULL, 0, evs, CC_SERVER_KEVENT_BATCH, &ts);
+        if (pr < 0) return (errno == EINTR) ? 0 : -1;
+        for (i = 0; i < pr; i++) {
+            uintptr_t ud = (uintptr_t)evs[i].udata;
+            if (evs[i].flags & EV_ERROR) {
+                if (ud == 0) continue;
+                {
+                    CCWaitSlot* s = cc_tape_slot(w, (size_t)(ud - 1));
+                    if (s) s->ready_err = 1;
+                }
+                continue;
+            }
+            if (ud == 0) {
+                if (evs[i].filter == EVFILT_READ)
+                    w->listen_ready = 1;
+                continue;
+            }
+            {
+                CCWaitSlot* s = cc_tape_slot(w, (size_t)(ud - 1));
+                if (!s) continue;
+                if (evs[i].flags & (EV_EOF | EV_ERROR))
+                    s->ready_err = 1;
+                if (evs[i].filter == EVFILT_READ)
+                    s->ready_in = 1;
+                else if (evs[i].filter == EVFILT_WRITE)
+                    s->ready_out = 1;
+            }
+        }
+        return pr;
+    }
+#elif CC_WAIT_USE_EPOLL
+    {
+        struct epoll_event evs[CC_SERVER_EPOLL_BATCH];
+        int pr, i;
+        pr = epoll_wait(w->backend_fd, evs, CC_SERVER_EPOLL_BATCH,
+                        w->listening ? CC_SERVER_POLL_MS : 0);
+        if (pr < 0) return (errno == EINTR) ? 0 : -1;
+        for (i = 0; i < pr; i++) {
+            uint32_t ud = evs[i].data.u32;
+            uint32_t e = evs[i].events;
+            if (ud == 0) {
+                if (e & EPOLLIN)
+                    w->listen_ready = 1;
+                continue;
+            }
+            {
+                CCWaitSlot* s = cc_tape_slot(w, (size_t)(ud - 1));
+                if (!s) continue;
+                if (e & (EPOLLERR | EPOLLHUP))
+                    s->ready_err = 1;
+                if (e & EPOLLIN)
+                    s->ready_in = 1;
+                if (e & EPOLLOUT)
+                    s->ready_out = 1;
+            }
+        }
+        return pr;
+    }
+#else
+    {
+        /* Portable poll: rebuild interest set each wake (O(n)). */
+        size_t n = cc_tape_nslots(w);
+        size_t nfds = (w->listening && w->listen_want) ? n + 1 : n;
+        size_t i, base = 0;
+        int pr;
+        struct pollfd* raw;
+        if (nfds == 0)
+            return 0;
+        raw = (struct pollfd*)malloc(nfds * sizeof(struct pollfd));
+        if (!raw) return -1;
+        if (w->listening && w->listen_want) {
+            raw[0].fd = w->listen_fd;
+            raw[0].events = POLLIN;
+            raw[0].revents = 0;
+            base = 1;
+        }
+        for (i = 0; i < n; i++) {
+            CCWaitSlot* s = cc_tape_slot(w, i);
+            short ev = 0;
+            if (!s) {
+                free(raw);
+                return -1;
+            }
+            if (s->want_in) ev |= (short)POLLIN;
+            if (s->want_out) ev |= (short)POLLOUT;
+            if (!ev) ev = (short)POLLIN;
+            raw[base + i].fd = s->fd;
+            raw[base + i].events = ev;
+            raw[base + i].revents = 0;
+        }
+        pr = poll(raw, (nfds_t)nfds, w->listening ? CC_SERVER_POLL_MS : 0);
+        if (pr < 0) {
+            int e = errno;
+            free(raw);
+            return (e == EINTR) ? 0 : -1;
+        }
+        if (base && (raw[0].revents & POLLIN))
+            w->listen_ready = 1;
+        for (i = 0; i < n; i++) {
+            CCWaitSlot* s = cc_tape_slot(w, i);
+            short rev;
+            if (!s) continue;
+            rev = raw[base + i].revents;
+            s->ready_in = (rev & POLLIN) ? 1 : 0;
+            s->ready_out = (rev & POLLOUT) ? 1 : 0;
+            s->ready_err = (rev & (POLLERR | POLLHUP | POLLNVAL)) ? 1 : 0;
+        }
+        free(raw);
+        return pr;
+    }
+#endif
+}
+
+CCReady cc_tape_ready(CCTape* w, size_t i) {
+    CCWaitSlot* s;
+    CCReady r = {0};
+    if (!w || !(s = cc_tape_slot(w, i))) return r;
+    r.in = s->ready_in;
+    r.out = s->ready_out;
+    r.err = s->ready_err;
+    return r;
+}
+
+int cc_tape_listen_ready(CCTape* w) {
+    return w && w->listening && w->listen_ready;
+}
+
+void cc_tape_arm(CCTape* w, size_t i, CCIoSess* io) {
+    int wi = 0, wo = 0;
+    CCWaitSlot* s;
+    if (!w) return;
+    cc_tape_interest(io, 0, &wi, &wo);
+#if CC_WAIT_USE_KQUEUE
+    (void)cc_kq_arm_slot(w, i, wi, wo);
+#elif CC_WAIT_USE_EPOLL
+    (void)cc_epoll_arm_slot(w, i, wi, wo);
+#else
+    s = cc_tape_slot(w, i);
+    if (!s) return;
+    s->want_in = wi;
+    s->want_out = wo;
+#endif
+}
+
+int cc_tape_watch(CCTape* w, CCIoSess* io) {
+    CCWaitSlot slot;
+    size_t i;
+    if (!w || !io || io->sock.fd < 0) return 0;
+    slot = (CCWaitSlot){ .fd = io->sock.fd };
+    if (cc_tape_slot_push(w, slot) != 0) return 0;
+    i = cc_tape_nslots(w) - 1;
+#if CC_WAIT_USE_KQUEUE
+    if (cc_kq_arm_slot(w, i, 1, io->want_out ? 1 : 0) != 0) {
+        cc_tape_slot_trunc(w, i);
+        return 0;
+    }
+#elif CC_WAIT_USE_EPOLL
+    if (cc_epoll_arm_slot(w, i, 1, io->want_out ? 1 : 0) != 0) {
+        cc_tape_slot_trunc(w, i);
+        return 0;
+    }
+#else
+    {
+        CCWaitSlot* s = cc_tape_slot(w, i);
+        if (!s) {
+            cc_tape_slot_trunc(w, i);
+            return 0;
+        }
+        s->want_in = 1;
+        s->want_out = io->want_out ? 1 : 0;
+    }
+#endif
+    return 1;
+}
+
+int cc_tape_keep_row(CCTape* w, size_t from, size_t to) {
+    CCWaitSlot* p;
+    if (!w) return 0;
+    p = cc_tape_slot(w, from);
+    if (!p) return 0;
+    if (cc_tape_slot_set(w, to, *p) != 0) return 0;
+    if (from == to) return 1;
+#if CC_WAIT_USE_KQUEUE
+    {
+        CCWaitSlot* s = cc_tape_slot(w, to);
+        int wi, wo;
+        if (!s) return 0;
+        wi = s->want_in;
+        wo = s->want_out;
+        s->want_in = 0;
+        s->want_out = 0;
+        if (cc_kq_arm_slot(w, to, wi, wo) != 0) return 0;
+    }
+#elif CC_WAIT_USE_EPOLL
+    {
+        CCWaitSlot* s = cc_tape_slot(w, to);
+        struct epoll_event ev;
+        if (!s) return 0;
+        ev.events = cc_epoll_events(s->want_in, s->want_out);
+        ev.data.u32 = (uint32_t)(to + 1);
+        if (epoll_ctl(w->backend_fd, EPOLL_CTL_MOD, s->fd, &ev) < 0)
+            return 0;
+    }
+#endif
+    return 1;
+}
+
+void cc_tape_done(CCTape* w, size_t nlive) {
+    size_t n, i;
+    if (!w) return;
+    n = cc_tape_nslots(w);
+    for (i = nlive; i < n; i++) {
+        CCWaitSlot* s = cc_tape_slot(w, i);
+        if (!s || s->fd < 0) continue;
+#if CC_WAIT_USE_KQUEUE
+        if (s->want_in)
+            (void)cc_kq_set(w->backend_fd, s->fd, EVFILT_READ, EV_DELETE, NULL);
+        if (s->want_out)
+            (void)cc_kq_set(w->backend_fd, s->fd, EVFILT_WRITE, EV_DELETE, NULL);
+#elif CC_WAIT_USE_EPOLL
+        if (s->want_in || s->want_out)
+            (void)epoll_ctl(w->backend_fd, EPOLL_CTL_DEL, s->fd, NULL);
+#else
+        (void)s;
+#endif
+    }
+    cc_tape_slot_trunc(w, nlive);
+}

@@ -1,7 +1,8 @@
 # staticd — Concurrent-C static HTTP/1.1 + WebSocket
 
-HTTP/1.1 file server. Sessions are rows; dests are workers. `poll()`
-waits; a ready fd steps that row. The worker is the only writer.
+HTTP/1.1 file server. Sessions are rows; dests are workers. The dest
+waiter (`CCServerPoll.ccs`) is kqueue, epoll, or `poll` (host `#ifdef`).
+A ready fd steps that row. The worker is the only writer.
 
 Dest-per-connection accept is in
 [`examples/recipe_tcp_echo.ccs`](../../examples/recipe_tcp_echo.ccs)
@@ -16,17 +17,18 @@ and redis.
 | Time | `Date`, `Last-Modified`, `If-Modified-Since` → 304 |
 | Range | one `Range: bytes=` → 206 / 416; `If-Range` (date match → 206, else 200) |
 | MIME | extension → `static_map` → wire string (`text/html`, `application/javascript`, …) |
-| URI | Split `?` first; strict path percent-decode (bad `%` / `%00` / decoded `/` `\` → 400); then jail. Listing encodes each filename component (`%HH`); link text is HTML-escaped raw name |
+| URI | Split `?` first; strict path percent-decode (bad `%` / `%00` / decoded `/` `\` → 400); then jail. Listing hrefs encode the full path (keep `/`, `%HH` per component); link text is HTML-escaped raw name |
 | Jail | Per-component `openat(O_NOFOLLOW)` under the docroot fd (intermediates `O_DIRECTORY`). `.` / `..` / `//` / `/./` → 403. Intermediate and leaf symlinks do not escape. No rewrite, no chroot |
 | Index | `--index NAME` (default `index.html`) for `/` and directory URLs |
 | Listing | `--list` (off). Directory with no index → HTML table; without `--list` → 403 |
 | Query | `?…` split off the path; ignored for files; passed to pages |
 | Extra headers | `--header 'Name: value'` (repeatable; no CR/LF) |
 | Workers | Start 2, grow every 64 live conns, cap ncpu/2 (`--workers 0`). `--workers N` is the cap. `--workers 1` stays one dest |
-| Accept | Soft-fail on `EMFILE` / `ENFILE` / `ENOMEM` / `ENOBUFS`. Spare fd is per-dest on the tape; `CCServer` holds only listen + atomics (backoff deadline). Listen `POLLIN` backoff ~100 ms. Worker death decrements live and respawns to the floor |
+| Accept | Soft-fail on `EMFILE` / `ENFILE` / `ENOMEM` / `ENOBUFS`. Spare fd is per-dest on the tape; `CCServer` holds only listen + atomics (backoff deadline). Listen interest backoff ~100 ms. Worker death decrements live and respawns to the floor |
+| Waiter | `CCServerPoll.ccs`: kqueue / epoll / poll via host `#ifdef` (`-DCC_SERVER_WAIT_POLL=1` forces poll). Serve loop sees `CCReady` |
 | Deadlines | Absolute `io->deadline` (dest reaps). TLS HS; header gap ∩ hard total; keepalive idle; write stall (refresh only on `try_write` progress); WS idle. Defaults 10 / 5∩15 / 30 / 30 / 120 s; env `TLS_HS`, `HEADER_GAP`, `HEADER_TOTAL`, `KEEPALIVE`, `WRITE_STALL`, `WS_IDLE` (or `STATICD_*`) |
 | Output | App socket I/O is `try_write` only. `out_*` cursor for protocol bytes (HTTP headers, WS frames); body cursor for file / mem. `flush_conn` / `write_ws` queue; short / `BUSY` → `.wait_out` |
-| Body | Named-block ring: 256 × 64KB = 16MB BSS, key `(dev, ino, block)`, FNV probe only, reuse in place, idle cull. Pool `pread` on miss / unaligned Range / busy fill. 8-slot fd cache; pathname revalidate ≤1s (absolute); hold dups the fd. One 64KB chunk per step |
+| Body | Named-block ring (`--block-ring N`, default **256** × 64KB slabs on a growing `CCArenaPool`; max 4096). Key `(dev, ino, block)`, FNV probe only, reuse in place, idle cull → freelist. Pool `pread` on miss / unaligned Range / busy fill / ring pressure. 8-slot fd cache; pathname revalidate ≤1s (absolute); hold dups the fd. One 64KB chunk per step |
 | Pages | `--pages DIR` (off). Load `hello.js` (QuickJS) or `hello.py` (CPython) as a view: `GET(request)` → `Response`. Same ABI; both faces at one path → 500. Never executes `--root` `*.js` |
 | TLS | `--tls-cert PEM` + `--tls-key PEM` (off). BearSSL; process-wide load at startup. Handshake steps from poll readiness (`tls_hs`) before `on_app`. Build with `CC_ENABLE_TLS=1` (Makefile default) |
 | WebSocket | Narrow echo subset: `Upgrade` + `Connection: upgrade` + `Sec-WebSocket-Version: 13` + base64-16 `Sec-WebSocket-Key` → `101`, then echo (text / binary), pong for ping, close for close. No fragments; payload capped to the row window |
@@ -73,6 +75,7 @@ make darkhttpd              # optional peer
 | `--tls-cert PATH` | off | PEM cert chain (with `--tls-key`) |
 | `--tls-key PATH` | off | PEM private key (with `--tls-cert`) |
 | `-w` / `--workers N` | ncpu/2 (`0`) | cap; start 2, grow with live conns. `1` = one dest |
+| `--block-ring N` | `256` | named-block cache slots (64KB each; grow on demand; max 4096) |
 | `--index NAME` | `index.html` | one path segment; no `/` or `..` |
 | `--list` | off | listing when the index is missing |
 | `--header LINE` | none | extra response header; repeatable |
@@ -141,10 +144,10 @@ Latency-first. Peers (missing ones are skipped):
 
 | Server | Port | |
 |--------|------|---|
-| **staticd** | 8080 | |
-| **nginx** | 8081 | `sendfile on`, `tcp_nopush on`, `multi_accept on`, `worker_connections 8192`, one worker |
-| **darkhttpd** | 8082 | |
-| **caddy** | 8083 | `INCLUDE_CADDY=1` |
+| staticd | 8080 | |
+| nginx | 8081 | `sendfile on`, `tcp_nopush on`, `multi_accept on`, `worker_connections 8192`, one worker |
+| darkhttpd | 8082 | |
+| caddy | 8083 | `INCLUDE_CADDY=1` |
 
 ```bash
 make smoke                  # correctness + 2s wrk, 4kb.html @ c=10
@@ -180,29 +183,29 @@ nginx + darkhttpd). Directional wrk: 1s, 3-round median (round 0
 discarded), isolate, `--workers 1`, page-cached fixtures. 0 errors
 except nginx `10mb.bin` @ c=100 (empty — Darwin `sendfile` wedge).
 
-**4kb.html**
+4kb.html
 
 | c | staticd rps / p50 / RSS | nginx | darkhttpd |
 |---|-------------------------|-------|-----------|
-| 1 | **55.7k** / 0.017 ms / 2.4 MB | 35.0k / 0.028 / 12 MB | 28.9k / 0.034 / 1.8 MB |
-| 10 | **171k** / 0.046 / 2.8 MB | 68.1k / 0.134 / 12 MB | 57.8k / 0.150 / 1.8 MB |
-| 100 | **169k** / 0.569 / 4.4 MB | 73.1k / 1.34 / 12 MB | 57.6k / 1.66 / 1.8 MB |
+| 1 | 55.7k / 0.017 ms / 2.4 MB | 35.0k / 0.028 / 12 MB | 28.9k / 0.034 / 1.8 MB |
+| 10 | 171k / 0.046 / 2.8 MB | 68.1k / 0.134 / 12 MB | 57.8k / 0.150 / 1.8 MB |
+| 100 | 169k / 0.569 / 4.4 MB | 73.1k / 1.34 / 12 MB | 57.6k / 1.66 / 1.8 MB |
 
-**1mb.bin**
-
-| c | staticd rps / p50 / RSS | nginx | darkhttpd |
-|---|-------------------------|-------|-----------|
-| 1 | **7.2k** / 0.135 ms / 3.6 MB | 6.8k / 0.142 / 12 MB | 5.7k / 0.169 / 1.8 MB |
-| 10 | **11.3k** / 0.843 / 3.8 MB | 9.3k / 0.707 / 12 MB | 5.8k / 1.59 / 1.8 MB |
-| 100 | 10.5k / 9.50 / 5.3 MB | **11.7k** / 4.67 / 13 MB | 5.1k / 18.1 / 1.8 MB |
-
-**10mb.bin**
+1mb.bin
 
 | c | staticd rps / p50 / RSS | nginx | darkhttpd |
 |---|-------------------------|-------|-----------|
-| 1 | 681 / 1.36 ms / 14 MB | **808** / 1.21 / 12 MB | 556 / 1.73 / 1.7 MB |
-| 10 | 1.04k / 9.60 / 14 MB | **1.30k** / 6.36 / 12 MB | 618 / 15.9 / 1.8 MB |
-| 100 | **1.00k** / 92.5 / 16 MB | 0 (wedge) | 545 / 159 / 1.8 MB |
+| 1 | 7.2k / 0.135 ms / 3.6 MB | 6.8k / 0.142 / 12 MB | 5.7k / 0.169 / 1.8 MB |
+| 10 | 11.3k / 0.843 / 3.8 MB | 9.3k / 0.707 / 12 MB | 5.8k / 1.59 / 1.8 MB |
+| 100 | 10.5k / 9.50 / 5.3 MB | 11.7k / 4.67 / 13 MB | 5.1k / 18.1 / 1.8 MB |
+
+10mb.bin
+
+| c | staticd rps / p50 / RSS | nginx | darkhttpd |
+|---|-------------------------|-------|-----------|
+| 1 | 681 / 1.36 ms / 14 MB | 808 / 1.21 / 12 MB | 556 / 1.73 / 1.7 MB |
+| 10 | 1.04k / 9.60 / 14 MB | 1.30k / 6.36 / 12 MB | 618 / 15.9 / 1.8 MB |
+| 100 | 1.00k / 92.5 / 16 MB | 0 (wedge) | 545 / 159 / 1.8 MB |
 
 ## Shape
 
@@ -218,11 +221,11 @@ main → open cfg → srv.listen / load_tls → serve
 
 Keep-alive and WebSocket keep the row in the table. Workers share the
 listen fd. The table is `Vec` of `Session*` on a worker arena; slots are
-a pool on that arena. `poll()` is a tape. Session embeds `CCIoSess`; TLS
-wraps at `bind_conn`. `CCIoAct` is `wait` / `wait_out` / `close`; `dead`
-is the reap mark. Handshake drops increment `srv.tls_fail`. `CCServer.cch`
-is a local face (not std); `CCServer.ccs` owns `serve`. The page is
-HTTP/WS + `main`.
+a pool on that arena. The waiter tape holds interest; readiness is
+`CCReady`. Session embeds `CCIoSess`; TLS wraps at `bind_conn`. `CCIoAct`
+is `wait` / `wait_out` / `close`; `dead` is the reap mark. Handshake drops
+increment `srv.tls_fail`. `CCServer.cch` is a local face (not std);
+`CCServer.ccs` owns `serve`. The page is HTTP/WS + `main`.
 
 Encode queues onto `out_*`; the jail walks each path component with
 `openat(O_NOFOLLOW)`. The fd cache re-resolves the name at most once a
@@ -251,16 +254,20 @@ Ring identity is `(dev, ino, block)` plus `mtime`/`mtime_nsec`/`len` from
 Hardlinks share a slab. Same-second in-place rewrites invalidate when
 the platform exposes nanosecond mtime. `ino == 0` or an unaligned Range
 goes to the miss pool. A same-key GET while `ready == 0 && refs != 0`
-pools too. A warm other key is not stolen; pressure pools. The miss pool
-is `cc_arena_pool_stack` at the top of `main`, owned by `g_blocks`.
+pools too. A warm other key is not stolen; pressure pools. Ring slabs and
+the miss pool are each a `cc_arena_pool_stack` at the top of `main`
+(owned by `g_blocks`): ring grows on demand up to `--block-ring` live
+chunks (default 256, max 4096); idle cull returns slabs to the freelist.
 
 ## Layout
 
 | Path | Purpose |
 |------|---------|
 | `staticd.ccs` | HTTP / WS / encode / deadlines / `main` |
-| `CCServer.cch` | Dest zip + `CCIoSess` + row types — not std |
-| `CCServer.ccs` | Owner: `srv.serve` — workers / poll / grow / accept backoff / TLS step |
+| `CCServer.cch` | Dest zip + `CCIoSess` — not std |
+| `CCServer.ccs` | Owner: `srv.serve` — workers / wait / grow / accept / TLS step |
+| `CCServerPoll.cch` | Waiter types + `cc_tape_*` prototypes |
+| `CCServerPoll.ccs` | Waiter bodies (kqueue / epoll / poll via host `#ifdef`) |
 | `staticd_ws.cch` | SHA-1 / base64 / WS frame tape |
 | `staticd_http.cch` | Date / Range / header-CI / URI encode·decode |
 | `staticd_block.cch` | `BlockCache` named-block ring (`checkout_block` / `block_cache_fill`) |

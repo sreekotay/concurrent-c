@@ -106,10 +106,10 @@ static int open_beneath(int root_fd, const char* rel, int last_dir) {
         if (n == 0) {
             if (last) {
                 if (last_dir) {
-                    if (dirfd == root_fd) {
-                        fd = fcntl(root_fd, F_DUPFD_CLOEXEC, 0);
-                        return fd;
-                    }
+                    /* Fresh OFD — F_DUPFD shares readdir offset with root_fd. */
+                    if (dirfd == root_fd)
+                        return openat(root_fd, ".",
+                                      O_RDONLY | O_DIRECTORY | O_CLOEXEC);
                     return dirfd;
                 }
                 if (dirfd != root_fd) close(dirfd);
@@ -412,8 +412,10 @@ static int join_index(char* dst, size_t cap, const char* rel, const char* index)
 }
 
 static int fs_dir_open(int root_fd, const char* rel) {
+    /* openat(".") — not F_DUPFD: dup shares the directory offset, so the
+     * second listing of / would readdir from EOF and look empty. */
     if (!rel || !rel[0] || strcmp(rel, ".") == 0)
-        return fcntl(root_fd, F_DUPFD_CLOEXEC, 0);
+        return openat(root_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     return open_beneath(root_fd, rel, 1);
 }
 
@@ -452,6 +454,14 @@ static CCString !>(CCError) dir_listing(int dfd, char[:] url, CCArena a) {
     CCString html = cc_string_new();
     int root = (url.len == 1 && url.ptr[0] == '/');
 
+    /* Private OFD for readdir (caller may have passed a shared dup). */
+    {
+        int listfd = openat(dfd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        close(dfd);
+        if (listfd < 0)
+            return cc_err(CC_ERR_IO, "openat listing");
+        dfd = listfd;
+    }
     dp = fdopendir(dfd);
     if (!dp) {
         close(dfd);
@@ -481,17 +491,25 @@ static CCString !>(CCError) dir_listing(int dfd, char[:] url, CCArena a) {
     }
     qsort(ents, n, sizeof(ents[0]), dirent_cmp);
 
+    /* Decoded `url` for titles/text; encoded base for hrefs (so `?` `#`
+     * in parent dirs do not become query/fragment). */
+    CCString url_enc;
+    uri_path_encode_path(url, &url_enc, a) !>(err) {
+        return cc_err(err);
+    };
+    char[:] href_base = url_enc.as_slice();
+
     html.append("<html><head><title>Index of ", a);
     html_push(&html, a, url);
     html.append("</title></head><body><h1>Index of ", a);
     html_push(&html, a, url);
     html.append("</h1><pre>\n", a);
     if (!root) {
-        size_t pn = url.len;
+        size_t pn = href_base.len;
         char[:] parent;
-        while (pn > 1 && url.ptr[pn - 1] == '/') pn--;
-        while (pn > 0 && url.ptr[pn - 1] != '/') pn--;
-        parent = pn ? url.sub(0, pn) : cc_slice_cstr("/");
+        while (pn > 1 && href_base.ptr[pn - 1] == '/') pn--;
+        while (pn > 0 && href_base.ptr[pn - 1] != '/') pn--;
+        parent = pn ? href_base.sub(0, pn) : cc_slice_cstr("/");
         html.append("<a href=\"", a);
         html_push(&html, a, parent);
         html.append("\">../</a>\n", a);
@@ -500,20 +518,20 @@ static CCString !>(CCError) dir_listing(int dfd, char[:] url, CCArena a) {
         DirEnt e = ents[i];
         char[:] name = cc_slice_cstr(e.name);
         char[:] slash = e.is_dir ? cc_slice_cstr("/") : cc_slice_empty();
-        size_t un = url.len;
+        size_t un = href_base.len;
         CCString enc;
         CCString href;
         uint64_t sz = e.size;
-        while (un > 1 && url.ptr[un - 1] == '/') un--;
+        while (un > 1 && href_base.ptr[un - 1] == '/') un--;
         uri_path_encode_component(name, &enc, a) !>(err) {
             return cc_err(err);
         };
         {
             char[:] encs = enc.as_slice();
-            if (un == 1 && url.ptr[0] == '/')
+            if (un == 1 && href_base.ptr[0] == '/')
                 href = @string(`/${encs}${slash}`, a);
             else {
-                char[:] base = url.sub(0, un);
+                char[:] base = href_base.sub(0, un);
                 href = @string(`${base}/${encs}${slash}`, a);
             }
         }
