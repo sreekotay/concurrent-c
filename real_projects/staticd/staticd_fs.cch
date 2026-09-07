@@ -501,14 +501,21 @@ static CCString !>(CCError) dir_listing(int dfd, char[:] url, CCArena a) {
         char[:] name = cc_slice_cstr(e.name);
         char[:] slash = e.is_dir ? cc_slice_cstr("/") : cc_slice_empty();
         size_t un = url.len;
+        CCString enc;
         CCString href;
         uint64_t sz = e.size;
         while (un > 1 && url.ptr[un - 1] == '/') un--;
-        if (un == 1 && url.ptr[0] == '/')
-            href = @string(`/${name}${slash}`, a);
-        else {
-            char[:] base = url.sub(0, un);
-            href = @string(`${base}/${name}${slash}`, a);
+        uri_path_encode_component(name, &enc, a) !>(err) {
+            return cc_err(err);
+        };
+        {
+            char[:] encs = enc.as_slice();
+            if (un == 1 && url.ptr[0] == '/')
+                href = @string(`/${encs}${slash}`, a);
+            else {
+                char[:] base = url.sub(0, un);
+                href = @string(`${base}/${encs}${slash}`, a);
+            }
         }
         html.append("<a href=\"", a);
         html_push(&html, a, href);

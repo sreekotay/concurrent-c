@@ -8,6 +8,14 @@
  * (return to poll, complete off-thread, then checkout). Unaligned
  * Range and ring pressure go through the miss pool.
  *
+ * Async fill (not wired): pass non-NULL `async_fill` to checkout →
+ * `WOULD_BLOCK` with a `BlockFillReq`. A blocking-pool worker must
+ * `pread`, mark the slot ready, then **wake the owning dest**
+ * (eventfd/pipe on the poll tape, or schedule onto that dest). The fill
+ * job must own a generation token so a dropped session cannot UAF the
+ * row. `.wait` alone is insufficient — without a wake the dest may
+ * sleep until the next unrelated poll event. Call sites pass NULL today.
+ *
  * Key is (dev, ino, block). FNV of that triple is the probe start only.
  * Never steal a live other key. Idle refs==0 past until is a hole
  * (cull ≤1s on file_hold).
@@ -134,31 +142,40 @@ static char* !>(CCError) block_cache_pool_pread(BlockCache* c, int fd,
 
 /*
  * Blocking fill of a reserved ring slot (refs==1, ready==0). Mutex must
- * not be held. Seam for a future waitable fill: park the row, run this
- * off the dest, then mark ready and resume checkout.
+ * not be held. Safe to call from a blocking-pool thread.
  */
-static int !>(CCError) block_cache_fill(BlockCache* c, uint32_t k, int fd,
-                                       size_t want, size_t file_off) {
+static int block_cache_fill_raw(BlockCache* c, uint32_t k, int fd,
+                                size_t want, size_t file_off) {
     ssize_t r;
-    if (!c || k >= (uint32_t)BLOCK_RING_N)
-        return cc_err(CC_ERROR(CC_ERR_IO, "bad fill"));
+    if (!c || k >= (uint32_t)BLOCK_RING_N) return -1;
     r = pread(fd, c->bytes[k], want, (off_t)file_off);
     if (r < 0 || (size_t)r != want) {
         CCExclusiveGuard hold = c->mx.acquire() @destroy;
         c->ring[k] = (BlockSlot){0};
-        if (r < 0) {
-            const char* em = cc_io_error_str(cc_io_from_errno(errno));
-            return cc_err(CC_ERROR(CC_ERR_IO, em));
-        }
-        return cc_err(CC_ERROR(CC_ERR_CLOSED, "short file"));
+        return -1;
     }
     {
         CCExclusiveGuard hold = c->mx.acquire() @destroy;
         c->ring[k].ready = 1;
         c->ring[k].until = c->now + BLOCK_IDLE_TTL;
     }
+    return 0;
+}
+
+static int !>(CCError) block_cache_fill(BlockCache* c, uint32_t k, int fd,
+                                       size_t want, size_t file_off) {
+    if (block_cache_fill_raw(c, k, fd, want, file_off) != 0)
+        return cc_err(CC_ERROR(CC_ERR_IO, "block fill"));
     return cc_ok(1);
 }
+
+typedef struct BlockFillReq {
+    BlockCache* cache;
+    uint32_t slot;
+    int fd;
+    size_t want;
+    size_t file_off;
+} BlockFillReq;
 
 void block_hold_drop(BlockHold* h) {
     BlockCache* c;
@@ -183,7 +200,8 @@ void block_hold_drop(BlockHold* h) {
 BlockHold !>(CCError) block_cache_checkout(BlockCache* c, int fd,
                                           uint64_t dev, uint64_t ino,
                                           time_t mtime, long mtime_nsec,
-                                          size_t file_off, size_t want) {
+                                          size_t file_off, size_t want,
+                                          BlockFillReq* async_fill) {
     @errhandler(CCError e) { return cc_err(e); }
     BlockHold h = { .cache = c, .slot = -1 };
     uint32_t block, i, k;
@@ -245,6 +263,13 @@ BlockHold !>(CCError) block_cache_checkout(BlockCache* c, int fd,
     c->ring[k].block = block;
     c->ring[k].len = want;
     hold.release();
+    if (async_fill) {
+        *async_fill = (BlockFillReq){
+            .cache = c, .slot = k, .fd = fd,
+            .want = want, .file_off = file_off,
+        };
+        return cc_err(CC_ERROR(CC_ERR_WOULD_BLOCK, "fill"));
+    }
     block_cache_fill(c, k, fd, want, file_off) !>;
     h.ptr = c->bytes[k];
     h.slot = (int)k;
@@ -258,9 +283,10 @@ static void block_cull_id(uint64_t dev, uint64_t ino) {
 }
 static BlockHold !>(CCError) checkout_block(int fd, uint64_t dev, uint64_t ino,
                                             time_t mtime, long mtime_nsec,
-                                            size_t file_off, size_t want) {
+                                            size_t file_off, size_t want,
+                                            BlockFillReq* async_fill) {
     return block_cache_checkout(&g_blocks, fd, dev, ino, mtime, mtime_nsec,
-                                file_off, want);
+                                file_off, want, async_fill);
 }
 
 #endif /* STATICD_BLOCK_CCH */

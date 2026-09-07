@@ -227,4 +227,69 @@ static char[:] path_ext(char[:] path) {
     return path.sub(dot, path.len);
 }
 
+static int uri_hexval(unsigned char c) {
+    if (c >= '0' && c <= '9') return (int)(c - '0');
+    if (c >= 'a' && c <= 'f') return (int)(c - 'a') + 10;
+    if (c >= 'A' && c <= 'F') return (int)(c - 'A') + 10;
+    return -1;
+}
+
+static int uri_unreserved(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return 1;
+    if (c >= 'a' && c <= 'z') return 1;
+    if (c >= '0' && c <= '9') return 1;
+    return c == '-' || c == '.' || c == '_' || c == '~';
+}
+
+/* Strict path decode after query split. Rejects %00, decoded / \, bad %. */
+static bool !>(CCError) uri_path_decode(char[:] src, CCString* dst, CCArena a) {
+    size_t i = 0;
+    if (!dst) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "uri decode"));
+    *dst = cc_string_new();
+    while (i < src.len) {
+        unsigned char ch = (unsigned char)src.ptr[i];
+        char one[1];
+        if (ch == '%') {
+            int hi, lo;
+            if (i + 2 >= src.len)
+                return cc_err(CC_ERROR(CC_ERR_PARSE, "bad uri"));
+            hi = uri_hexval((unsigned char)src.ptr[i + 1]);
+            lo = uri_hexval((unsigned char)src.ptr[i + 2]);
+            if (hi < 0 || lo < 0)
+                return cc_err(CC_ERROR(CC_ERR_PARSE, "bad uri"));
+            ch = (unsigned char)((hi << 4) | lo);
+            i += 3;
+            if (ch == 0 || ch == '/' || ch == '\\')
+                return cc_err(CC_ERROR(CC_ERR_PARSE, "bad uri"));
+        } else {
+            i++;
+        }
+        one[0] = (char)ch;
+        if (!dst->append(cc_slice_from_buffer(one, 1), a) || dst->failed())
+            return cc_err(CC_ERR_OUT_OF_MEMORY, "uri decode");
+    }
+    return cc_ok(true);
+}
+
+/* Percent-encode one path component (RFC unreserved literal). */
+static bool !>(CCError) uri_path_encode_component(char[:] name, CCString* dst,
+                                                   CCArena a) {
+    static const char hex[] = "0123456789ABCDEF";
+    if (!dst) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "uri encode"));
+    *dst = cc_string_new();
+    @for (ch in name) {
+        unsigned char c = (unsigned char)ch;
+        if (uri_unreserved(c)) {
+            char one[1] = { (char)c };
+            if (!dst->append(cc_slice_from_buffer(one, 1), a) || dst->failed())
+                return cc_err(CC_ERR_OUT_OF_MEMORY, "uri encode");
+        } else {
+            char esc[3] = { '%', hex[c >> 4], hex[c & 15] };
+            if (!dst->append(cc_slice_from_buffer(esc, 3), a) || dst->failed())
+                return cc_err(CC_ERR_OUT_OF_MEMORY, "uri encode");
+        }
+    }
+    return cc_ok(true);
+}
+
 #endif /* STATICD_HTTP_CCH */

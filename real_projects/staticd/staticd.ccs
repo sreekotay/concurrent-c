@@ -53,11 +53,64 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 #define K_PATH_MAX   4096
 #define K_LIST_ARENA (32 * 1024)
 #define K_OUT_BUF    (8 * 1024)
 #define WORKERS_MAX  32
+
+/* Phase budgets (stress shortens via env; one production path). */
+#ifndef STATICD_TLS_HS_SEC
+#define STATICD_TLS_HS_SEC 10
+#endif
+#ifndef STATICD_HEADER_GAP_SEC
+#define STATICD_HEADER_GAP_SEC 5
+#endif
+#ifndef STATICD_HEADER_TOTAL_SEC
+#define STATICD_HEADER_TOTAL_SEC 15
+#endif
+#ifndef STATICD_KEEPALIVE_IDLE_SEC
+#define STATICD_KEEPALIVE_IDLE_SEC 30
+#endif
+#ifndef STATICD_WRITE_STALL_SEC
+#define STATICD_WRITE_STALL_SEC 30
+#endif
+#ifndef STATICD_WS_IDLE_SEC
+#define STATICD_WS_IDLE_SEC 120
+#endif
+
+static int g_sec_tls_hs = STATICD_TLS_HS_SEC;
+static int g_sec_header_gap = STATICD_HEADER_GAP_SEC;
+static int g_sec_header_total = STATICD_HEADER_TOTAL_SEC;
+static int g_sec_keepalive = STATICD_KEEPALIVE_IDLE_SEC;
+static int g_sec_write_stall = STATICD_WRITE_STALL_SEC;
+static int g_sec_ws_idle = STATICD_WS_IDLE_SEC;
+
+static int env_sec(const char* name, int defv) {
+    const char* v = getenv(name);
+    long n;
+    char* end = NULL;
+    if (!v || !v[0]) return defv;
+    n = strtol(v, &end, 10);
+    if (!end || end == v || *end || n < 1 || n > 86400) return defv;
+    return (int)n;
+}
+
+static void staticd_load_budgets(void) {
+    /* Prefer short names the adversary sets; STATICD_* also accepted. */
+    g_sec_tls_hs = env_sec("TLS_HS", env_sec("STATICD_TLS_HS_SEC", g_sec_tls_hs));
+    g_sec_header_gap = env_sec("HEADER_GAP",
+            env_sec("STATICD_HEADER_GAP_SEC", g_sec_header_gap));
+    g_sec_header_total = env_sec("HEADER_TOTAL",
+            env_sec("STATICD_HEADER_TOTAL_SEC", g_sec_header_total));
+    g_sec_keepalive = env_sec("KEEPALIVE",
+            env_sec("STATICD_KEEPALIVE_IDLE_SEC", g_sec_keepalive));
+    g_sec_write_stall = env_sec("WRITE_STALL",
+            env_sec("STATICD_WRITE_STALL_SEC", g_sec_write_stall));
+    g_sec_ws_idle = env_sec("WS_IDLE",
+            env_sec("STATICD_WS_IDLE_SEC", g_sec_ws_idle));
+}
 
 @variant Phase {
     http: void;
@@ -91,6 +144,10 @@ typedef struct Session {
     size_t mem_len;
     size_t send_off;
     size_t send_left;
+    char* out_mem;   /* protocol bytes (HTTP headers / WS frames) */
+    size_t out_off;
+    size_t out_left;
+    time_t header_hard_deadline; /* 0 = none; absolute */
     Phase phase;
     int send_close;
 } Session;
@@ -182,6 +239,15 @@ static const char* k_mime[] = {
     [MIME_TXT]   = "text/plain; charset=utf-8",
 };
 
+static void session_clear_out(Session* s) {
+    if (s->out_mem) {
+        if (g_blocks.pool) g_blocks.pool->free(s->out_mem);
+        s->out_mem = NULL;
+    }
+    s->out_off = 0;
+    s->out_left = 0;
+}
+
 static void session_clear_send(Session* s) {
     if (s->mem) {
         if (g_blocks.pool) g_blocks.pool->free(s->mem);
@@ -191,6 +257,24 @@ static void session_clear_send(Session* s) {
     s->send.drop();
     s->send_off = 0;
     s->send_left = 0;
+}
+
+/* Idle / write / WS: absolute deadline from now. */
+static void session_touch(Session* s, time_t now, int sec) {
+    if (!s || !s->io) return;
+    s->io->touch(now, sec);
+}
+
+/* Partial headers: gap from last progress ∩ hard from first byte. */
+static void session_touch_headers(Session* s, time_t now) {
+    time_t gap, hard, dl;
+    if (!s || !s->io) return;
+    if (!s->header_hard_deadline)
+        s->header_hard_deadline = now + (time_t)g_sec_header_total;
+    gap = now + (time_t)g_sec_header_gap;
+    hard = s->header_hard_deadline;
+    dl = gap < hard ? gap : hard;
+    s->io->deadline = dl;
 }
 
 static Session* session_of(CCIoSess* io, CCArenaPool* pool) {
@@ -206,6 +290,10 @@ static Session* session_of(CCIoSess* io, CCArenaPool* pool) {
     s->mem_len = 0;
     s->send_off = 0;
     s->send_left = 0;
+    s->out_mem = NULL;
+    s->out_off = 0;
+    s->out_left = 0;
+    s->header_hard_deadline = 0;
     s->send_close = 0;
     s->phase = (Phase){ .http = {} };
     io->app = s;
@@ -218,6 +306,7 @@ static void session_release(CCIoSess* io, CCArenaPool* pool) {
     s = (Session*)io->app;
     if (!s) return;
     session_clear_send(s);
+    session_clear_out(s);
     io->app = NULL;
     if (pool) pool->free(s);
 }
@@ -228,6 +317,7 @@ static void session_queue_send(Session* s, FileHold* fh, size_t off, size_t nsen
     *fh = (FileHold){ .slot = -1, .fd = -1 };
     s->send_off = off;
     s->send_left = nsend;
+    session_touch(s, time(NULL), g_sec_write_stall);
 }
 
 /* Memory body on a send_pool slab — same cursor / send_close as files. */
@@ -247,13 +337,68 @@ static bool !>(CCError) session_queue_mem(Session* s, char[:] body) {
     s->mem_len = body.len;
     s->send_off = 0;
     s->send_left = body.len;
+    session_touch(s, time(NULL), g_sec_write_stall);
+    return cc_ok(true);
+}
+
+/* Queue protocol bytes onto out_* (send_pool slab). Never write_all. */
+static bool !>(CCError) session_queue_out(Session* s, char[:] data) {
+    if (!data.len) return cc_ok(true);
+    if (!g_blocks.pool)
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "out pool"));
+    if (s->out_left) {
+        size_t used = s->out_off + s->out_left;
+        if (used + data.len > (size_t)FILE_SEND_CHUNK)
+            return cc_err(CC_ERROR(CC_ERR_IO, "out backlog"));
+        memcpy(s->out_mem + used, data.ptr, data.len);
+        s->out_left += data.len;
+        session_touch(s, time(NULL), g_sec_write_stall);
+        return cc_ok(true);
+    }
+    if (data.len > (size_t)FILE_SEND_CHUNK)
+        return cc_err(CC_ERROR(CC_ERR_IO, "out too big"));
+    {
+        char* buf = (char*)g_blocks.pool->alloc();
+        if (!buf) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "out pool"));
+        memcpy(buf, data.ptr, data.len);
+        s->out_mem = buf;
+        s->out_off = 0;
+        s->out_left = data.len;
+    }
+    session_touch(s, time(NULL), g_sec_write_stall);
     return cc_ok(true);
 }
 
 static CCIoAct !>(CCError) session_send_one(Session* s) {
     @errhandler(CCError e) {
         session_clear_send(s);
+        session_clear_out(s);
         return cc_err(e);
+    }
+    /* Protocol bytes first, then body. */
+    if (s->out_left) {
+        size_t want = s->out_left;
+        size_t n = s->io->try_write(
+            cc_slice_from_buffer(s->out_mem + s->out_off, want)) !>(e) {
+            if (e.base.kind == CC_IO_BUSY)
+                return cc_ok((CCIoAct){ .wait_out = {} });
+            session_clear_out(s);
+            session_clear_send(s);
+            return cc_err(e);
+        };
+        if (n > 0) {
+            s->out_off += n;
+            s->out_left -= n;
+            if (s->out_left || s->send_left)
+                session_touch(s, time(NULL), g_sec_write_stall);
+        }
+        if (s->out_left)
+            return cc_ok((CCIoAct){ .wait_out = {} });
+        session_clear_out(s);
+        if (s->send_left)
+            return cc_ok((CCIoAct){ .wait_out = {} });
+        if (s->send_close) return cc_ok((CCIoAct){ .close = {} });
+        return cc_ok((CCIoAct){ .wait = {} });
     }
     if (!s->send_left) return cc_ok((CCIoAct){ .wait = {} });
     if (s->mem) {
@@ -265,8 +410,12 @@ static CCIoAct !>(CCError) session_send_one(Session* s) {
             session_clear_send(s);
             return cc_err(e);
         };
-        s->send_off += n;
-        s->send_left -= n;
+        if (n > 0) {
+            s->send_off += n;
+            s->send_left -= n;
+            if (s->send_left)
+                session_touch(s, time(NULL), g_sec_write_stall);
+        }
     } else {
         size_t want;
         BlockHold bh;
@@ -280,7 +429,7 @@ static CCIoAct !>(CCError) session_send_one(Session* s) {
             }
         }
         bh = checkout_block(s->send.fd, s->send.dev, s->send.ino, s->send.mtime,
-                            s->send.mtime_nsec, s->send_off, want) !>;
+                            s->send.mtime_nsec, s->send_off, want, NULL) !>;
         {
             size_t n = s->io->try_write(cc_slice_from_buffer(bh.ptr, want)) !>(e) {
                 block_hold_drop(&bh);
@@ -290,8 +439,12 @@ static CCIoAct !>(CCError) session_send_one(Session* s) {
                 return cc_err(e);
             };
             block_hold_drop(&bh);
-            s->send_off += n;
-            s->send_left -= n;
+            if (n > 0) {
+                s->send_off += n;
+                s->send_left -= n;
+                if (s->send_left)
+                    session_touch(s, time(NULL), g_sec_write_stall);
+            }
         }
     }
     if (!s->send_left) {
@@ -306,7 +459,7 @@ static bool !>(CCError) flush_conn(Session* s, Enc* c) {
     @errhandler(CCError e) { return cc_err(e); }
     char[:] sl = c->out.as_slice();
     if (sl.len)
-        s->io->write_all(sl) !>;
+        session_queue_out(s, sl) !>;
     c->out.release(c->arena);
     c->out = cc_string_new();
     return cc_ok(true);
@@ -472,9 +625,9 @@ static bool !>(CCError) write_ws(Session* s, int opcode, char[:] body) {
     if (body.len > (size_t)WS_MAX_PAYLOAD)
         return cc_err(CC_ERROR(CC_ERR_IO, "ws too big"));
     hn = ws_hdr_unmasked(opcode, body.len, h);
-    s->io->write_all(cc_slice_from_buffer((char*)h, hn)) !>;
+    session_queue_out(s, cc_slice_from_buffer((char*)h, hn)) !>;
     if (body.len)
-        s->io->write_all(body) !>;
+        session_queue_out(s, body) !>;
     return cc_ok(true);
 }
 
@@ -484,6 +637,10 @@ static CCIoAct !>(CCError) http_fail(Session* s, Enc* conn, int code,
     @errhandler(CCError e) { return cc_err(e); }
     send_error(conn, code, reason, body, with_body, ka) !>;
     flush_conn(s, conn) !>;
+    if (s->out_left) {
+        if (!ka) s->send_close = 1;
+        return cc_ok((CCIoAct){ .wait_out = {} });
+    }
     if (!ka) return cc_ok((CCIoAct){ .close = {} });
     return cc_ok((CCIoAct){ .wait = {} });
 }
@@ -491,6 +648,10 @@ static CCIoAct !>(CCError) http_fail(Session* s, Enc* conn, int code,
 static CCIoAct !>(CCError) http_commit(Session* s, Enc* conn, int ka) {
     @errhandler(CCError e) { return cc_err(e); }
     flush_conn(s, conn) !>;
+    if (s->out_left) {
+        if (!ka) s->send_close = 1;
+        return cc_ok((CCIoAct){ .wait_out = {} });
+    }
     if (!ka) return cc_ok((CCIoAct){ .close = {} });
     return cc_ok((CCIoAct){ .wait = {} });
 }
@@ -542,6 +703,10 @@ static CCIoAct !>(CCError) pages_send(Session* s, Enc* conn, ScriptReply* r,
     case .other:
         break;
     }
+    if (s->out_left) {
+        if (!ka) s->send_close = 1;
+        return cc_ok((CCIoAct){ .wait_out = {} });
+    }
     if (!ka) return cc_ok((CCIoAct){ .close = {} });
     return cc_ok((CCIoAct){ .wait = {} });
 }
@@ -586,6 +751,7 @@ static CCIoAct !>(CCError) handle_http(Session* s, Enc* conn, Cfg* cfg) {
     @defer fh.drop();
 
     if (!hend) return cc_err(CC_ERROR(CC_ERR_IO, "no headers"));
+    s->header_hard_deadline = 0;
     {
         char[:] win = s->io->window();
         block = win.sub(0, hend);
@@ -602,8 +768,12 @@ static CCIoAct !>(CCError) handle_http(Session* s, Enc* conn, Cfg* cfg) {
         meth = method_of(req.method);
         {
             char[:] raw = path_without_query(req.path);
-            path_s = @string(`${raw}`, conn->arena);
             query_s = path_query_of(req.path);
+            uri_path_decode(raw, &path_s, conn->arena) !>(e) {
+                (void)e;
+                s->io->consume(hend);
+                return http_fail(s, conn, 400, "Bad Request", "bad uri\n", 1, 0);
+            };
         }
         if (path_s.failed()) {
             s->io->consume(hend);
@@ -783,6 +953,10 @@ static CCIoAct !>(CCError) handle_http(Session* s, Enc* conn, Cfg* cfg) {
             case .other:
                 break;
             }
+            if (s->out_left) {
+                if (!ka) s->send_close = 1;
+                return cc_ok((CCIoAct){ .wait_out = {} });
+            }
             if (!ka) return cc_ok((CCIoAct){ .close = {} });
             return cc_ok((CCIoAct){ .wait = {} });
         }
@@ -834,6 +1008,10 @@ static CCIoAct !>(CCError) handle_http(Session* s, Enc* conn, Cfg* cfg) {
             return cc_ok((CCIoAct){ .wait_out = {} });
         }
     }
+    if (s->out_left) {
+        if (!ka) s->send_close = 1;
+        return cc_ok((CCIoAct){ .wait_out = {} });
+    }
     if (!ka) return cc_ok((CCIoAct){ .close = {} });
     return cc_ok((CCIoAct){ .wait = {} });
 }
@@ -881,7 +1059,8 @@ static WsStep !>(CCError) ws_one_frame(Session* s) {
     if (opcode == 8) {
         write_ws(s, 8, cc_slice_from_buffer(payload, n)) !>;
         s->io->consume(need);
-        return cc_ok((WsStep){ .fin = {} });
+        s->send_close = 1;
+        return cc_ok((WsStep){ .again = {} });
     }
     if (opcode == 9) {
         write_ws(s, 10, cc_slice_from_buffer(payload, n)) !>;
@@ -905,7 +1084,7 @@ static WsStep !>(CCError) ws_one_frame(Session* s) {
 static CCIoAct !>(CCError) session_app(Session* s, Enc* conn, Cfg* cfg) {
     @errhandler(CCError e) { return cc_err(e); }
     for (;;) {
-        if (s->send_left) {
+        if (s->out_left || s->send_left) {
             CCIoAct a = session_send_one(s) !>;
             @switch (a) {
             case .close: return cc_ok(a);
@@ -913,7 +1092,8 @@ static CCIoAct !>(CCError) session_app(Session* s, Enc* conn, Cfg* cfg) {
             case .wait_out:
                 break;
             }
-            if (s->send_left) return cc_ok((CCIoAct){ .wait_out = {} });
+            if (s->out_left || s->send_left)
+                return cc_ok((CCIoAct){ .wait_out = {} });
             if (s->send_close) return cc_ok((CCIoAct){ .close = {} });
             continue;
         }
@@ -922,23 +1102,36 @@ static CCIoAct !>(CCError) session_app(Session* s, Enc* conn, Cfg* cfg) {
             WsStep st = ws_one_frame(s) !>;
             CCIoAct fin = (CCIoAct){ .close = {} };
             CCIoAct more = (CCIoAct){ .wait = {} };
+            CCIoAct out = (CCIoAct){ .wait_out = {} };
             @switch (st) {
             case .fin:
                 return cc_ok(fin);
             case .more:
                 /* Window full and still incomplete → frame cannot fit. */
                 if (s->io->full()) return cc_ok(fin);
+                session_touch(s, time(NULL), g_sec_ws_idle);
                 return cc_ok(more);
             case .again:
+                session_touch(s, time(NULL), g_sec_ws_idle);
+                if (s->out_left)
+                    return cc_ok(out);
                 continue;
             }
             continue;
         }
         case .http:
             if (!headers_end(s)) {
+                char[:] win = s->io->window();
+                time_t now = time(NULL);
                 if (s->io->full())
                     return http_fail(s, conn, 400, "Bad Request",
                                      "headers too big\n", 1, 0);
+                if (win.len == 0) {
+                    s->header_hard_deadline = 0;
+                    session_touch(s, now, g_sec_keepalive);
+                } else {
+                    session_touch_headers(s, now);
+                }
                 return cc_ok((CCIoAct){ .wait = {} });
             }
             {
@@ -956,6 +1149,7 @@ static CCIoAct !>(CCError) session_app(Session* s, Enc* conn, Cfg* cfg) {
                 conn->out = cc_string_new();
                 break;
             case .ws:
+                session_touch(s, time(NULL), g_sec_ws_idle);
                 break;
             }
             break;
@@ -997,6 +1191,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    staticd_load_budgets();
+
     cc_arena_stack(cli_a, kilobytes(4));
     staticd_sync_init(cli_a.create_exclusive(4) !>);
     block_cache_init(&g_blocks, &send_pool);
@@ -1022,6 +1218,8 @@ int main(int argc, char** argv) {
 
     CCServer srv;
     srv.init(nworkers);
+    srv.sec_tls_hs = g_sec_tls_hs;
+    srv.sec_first_byte = g_sec_header_total;
     @defer srv.close();
 
     char[:] root_view = opts.root;

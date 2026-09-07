@@ -11,13 +11,18 @@
  *
  * Page sees: init / close / listen / load_tls / serve / start_n /
  * workers_max / tls / tls_fails; on io: write_all / try_write / window /
- * consume / full / apply / dead. `app` is a page cookie; dest never
- * derefs it.
+ * consume / full / apply / dead / touch / set_deadline. `app` is a page
+ * cookie; dest never derefs it.
  *
- * write_all: finish this slice or fail (headers, WS control, listings).
  * try_write: one non-blocking send. Ok(n) may be short. BUSY = wrote
- * nothing, POLLOUT later. File send uses this so .wait_out matches the
- * socket.
+ * nothing, POLLOUT later. write_all remains for callers that still want
+ * finish-or-fail; the page prefers try_write + an output cursor.
+ *
+ * TLS: bind starts the engine (`tls_hs`); handshake steps from poll
+ * readiness (WANT_READ / WANT_WRITE) before on_app sees the row.
+ *
+ * Deadlines: absolute `time_t` on the session (`deadline`); 0 = none.
+ * Dest reaps expired rows on the 50ms poll wake.
  *
  * Caller includes <ccc/std/net.cch>, <ccc/std/tls.cch>, <ccc/std/signal.cch>,
  * <ccc/cc_atomic.cch>. Certs are process mats (`cc_tls_server_load`)
@@ -27,6 +32,9 @@
 #define CC_SERVER_CCH
 
 #include <fcntl.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <time.h>
 #include <ccc/cc_closure.cch>
 
 @variant CCIoAct {
@@ -41,11 +49,15 @@ typedef struct CCIoSess {
     CCTlsConn tls;
     void* tls_iobuf;
     int tls_on;
+    int tls_hs;       /* 1 = handshake in progress (poll-stepped) */
     char* read_ptr;
     size_t rlen;
     size_t rcap;
     int dead;
-    int want_out;
+    int want_in;      /* POLLIN; TLS HS may clear */
+    int want_out;     /* POLLOUT */
+    time_t deadline;  /* 0 = none; absolute time() */
+    int sec_after_hs; /* first HTTP byte budget after TLS (set at bind) */
     void* app;
 } CCIoSess;
 
@@ -55,10 +67,15 @@ typedef struct CCServer {
     int tls;
     int tls_owned;
     int workers_max;
+    int spare_fd; /* EMFILE recovery: close, accept, reopen */
+    int sec_tls_hs;       /* first-byte budget during TLS HS (default 10) */
+    int sec_first_byte;   /* first HTTP byte after bind/HS (default 15) */
+    uint64_t accept_backoff_until_ms; /* listen POLLIN off until mono ms */
     cc_atomic_int stop;
     cc_atomic_int live;
-    cc_atomic_int nworkers;
+    cc_atomic_int nworkers; /* running workers */
     cc_atomic_int tls_fail;
+    cc_atomic_int accept_soft; /* EMFILE/ENFILE soft-fail count */
     CCParallel app;
 } CCServer;
 
@@ -81,7 +98,7 @@ bool !>(CCIoError) io_sess_write_sock(CCSocket* sock, char[:] data) {
     return cc_ok(true);
 }
 
-/* One transport face: TLS is wrap-once at accept; callers never branch. */
+/* Finish-or-fail (legacy). Prefer try_write + cursor on the page. */
 bool !>(CCIoError) io_sess_write_all(CCIoSess* io, char[:] data) {
     size_t off = 0;
     if (!io->tls_on)
@@ -122,6 +139,15 @@ int io_sess_full(CCIoSess* io) {
     return io && io->rcap && io->rlen >= io->rcap;
 }
 
+void io_sess_touch(CCIoSess* io, time_t now, int secs) {
+    if (!io) return;
+    if (secs <= 0) {
+        io->deadline = 0;
+        return;
+    }
+    io->deadline = now + (time_t)secs;
+}
+
 void io_sess_apply(CCIoSess* io, CCIoAct a) {
     @switch (a) {
     case .close:
@@ -141,6 +167,9 @@ void cc_server_init(CCServer* srv, int workers_max) {
     *srv = (CCServer){
         .ln = { .fd = -1 },
         .workers_max = workers_max,
+        .spare_fd = -1,
+        .sec_tls_hs = 10,
+        .sec_first_byte = 15,
     };
 }
 
@@ -156,6 +185,8 @@ void !>(CCError) cc_server_listen(CCServer* srv, CCSlice addr) {
         return cc_err(cc_net_to_io_error(e).base);
     };
     (void)cc_fd_nonblock(srv->ln.fd);
+    if (srv->spare_fd < 0)
+        srv->spare_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
     return cc_ok();
 }
 
@@ -179,6 +210,10 @@ void cc_server_close(CCServer* srv) {
     if (!srv) return;
     cc_server_shutdown(srv);
     srv->ln.close();
+    if (srv->spare_fd >= 0) {
+        close(srv->spare_fd);
+        srv->spare_fd = -1;
+    }
     if (srv->tls_owned) {
         cc_tls_server_unload();
         srv->tls_owned = 0;

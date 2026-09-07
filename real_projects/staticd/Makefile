@@ -13,7 +13,7 @@ BEARSSL_INC = $(abspath $(BEARSSL_DIR)/inc)
 REPO_CC = ../../cc
 REPO_ROOT = ../..
 
-.PHONY: all staticd darkhttpd fixtures clean setup smoke bench ws string_tpl \
+.PHONY: all staticd darkhttpd fixtures clean setup smoke bench ws stress string_tpl \
 	ensure-tls-runtime ensure-bearssl
 
 all: staticd
@@ -75,6 +75,10 @@ smoke: staticd fixtures
 # Narrow WebSocket subset (spawn throwaway staticd on :18080).
 ws: staticd
 	python3 ./ws_test.py --spawn ./out/staticd --port 18080
+
+# Adversarial storms (see ../../stress/staticd/staticd_stress.md).
+stress: staticd fixtures
+	cd ../.. && CHAOS_SCALE=$${CHAOS_SCALE:-quick} ./stress/staticd/run.sh
 
 # Isolated RSS (fresh process per cell). Override with DURATION=5 REPEATS=3 …
 bench: staticd fixtures

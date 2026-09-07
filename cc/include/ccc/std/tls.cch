@@ -103,6 +103,25 @@ CCTlsConn cc_tls_accept(CCSocket sock, CCTlsServerConfig cfg,
                          void* iobuf, size_t iobuf_len,
                          CCArena info_arena, CCNetError* out_err);
 
+/* Start server TLS without completing the handshake. Socket stays
+ * nonblocking. Pump with cc_tls_handshake_step until DONE. */
+CCTlsConn cc_tls_server_start(CCSocket sock, CCTlsServerConfig cfg,
+                              void* iobuf, size_t iobuf_len,
+                              CCNetError* out_err);
+
+/* Handshake step result for poll-driven TLS. */
+typedef enum CCTlsHs {
+    CC_TLS_HS_DONE = 0,
+    CC_TLS_HS_WANT_READ = 1,
+    CC_TLS_HS_WANT_WRITE = 2,
+    CC_TLS_HS_FAIL = -1,
+} CCTlsHs;
+
+/* One nonblocking handshake pump. Never select()-waits. */
+CCTlsHs cc_tls_handshake_step(CCTlsConn* conn, CCNetError* out_err);
+
+int cc_tls_is_ready(const CCTlsConn* conn);
+
 /* Async variant */
 /* @async CCTlsConn cc_tls_accept_async(...); */
 

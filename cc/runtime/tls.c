@@ -451,57 +451,60 @@ static int cc__tls_pump_rec(CCTlsConn *conn) {
     return 0;
 }
 
-static int cc__tls_handshake(CCTlsConn *conn) {
+/* Nonblocking handshake step. Maps engine state → DONE / WANT_* / FAIL. */
+static int cc__tls_handshake_step(CCTlsConn *conn) {
     br_ssl_engine_context *eng = cc__tls_eng(conn);
-    int spins = 0;
+    unsigned st;
+    int p;
     if (!eng) return -1;
+    st = br_ssl_engine_current_state(eng);
+    if (st & BR_SSL_CLOSED) {
+        return br_ssl_engine_last_error(eng) == BR_ERR_OK ? 0 : -1;
+    }
+    if ((st & BR_SSL_SENDAPP) || (st & BR_SSL_RECVAPP)) return 0;
+    if (st & (BR_SSL_SENDREC | BR_SSL_RECVREC)) {
+        p = cc__tls_pump_rec(conn);
+        if (p < 0) return -1;
+        if (p > 0) {
+            st = br_ssl_engine_current_state(eng);
+            if ((st & BR_SSL_SENDAPP) || (st & BR_SSL_RECVAPP)) return 0;
+            if (st & BR_SSL_CLOSED)
+                return br_ssl_engine_last_error(eng) == BR_ERR_OK ? 0 : -1;
+            if (st & BR_SSL_SENDREC) return 2; /* WANT_WRITE */
+            if (st & BR_SSL_RECVREC) return 1; /* WANT_READ */
+            return 1;
+        }
+        if (st & BR_SSL_SENDREC) return 2;
+        return 1;
+    }
+    /* Idle mid-handshake — need peer records. */
+    return 1;
+}
+
+static int cc__tls_handshake(CCTlsConn *conn) {
+    int spins = 0;
+    if (!cc__tls_eng(conn)) return -1;
     for (;;) {
-        unsigned st = br_ssl_engine_current_state(eng);
-        if (st & BR_SSL_CLOSED) {
-            return br_ssl_engine_last_error(eng) == BR_ERR_OK ? 0 : -1;
-        }
-        /* Application can send/recv ⇒ handshake done. */
-        if ((st & BR_SSL_SENDAPP) || (st & BR_SSL_RECVAPP)) return 0;
-        if ((st & (BR_SSL_SENDREC | BR_SSL_RECVREC)) == 0) {
-            /* Idle mid-handshake — need peer data. */
-            if (++spins > 100000) return -1;
-            {
-                int p = cc__tls_pump_rec(conn);
-                if (p < 0) return -1;
-                if (p == 0) {
-                    /* Blocking wait: briefly poll for readability. */
-                    fd_set rf, wf;
-                    struct timeval tv;
-                    int fd = conn->underlying.fd;
-                    FD_ZERO(&rf);
-                    FD_ZERO(&wf);
-                    FD_SET(fd, &rf);
-                    FD_SET(fd, &wf);
-                    tv.tv_sec = 5;
-                    tv.tv_usec = 0;
-                    if (select(fd + 1, &rf, &wf, NULL, &tv) <= 0) return -1;
-                }
-            }
-            continue;
-        }
+        int step = cc__tls_handshake_step(conn);
+        if (step == 0) return 0;
+        if (step < 0) return -1;
+        if (++spins > 100000) return -1;
         {
-            int p = cc__tls_pump_rec(conn);
-            if (p < 0) return -1;
-            if (p == 0) {
-                fd_set rf, wf;
-                struct timeval tv;
-                int fd = conn->underlying.fd;
-                unsigned st2 = br_ssl_engine_current_state(eng);
-                FD_ZERO(&rf);
-                FD_ZERO(&wf);
-                if (st2 & BR_SSL_RECVREC) FD_SET(fd, &rf);
-                if (st2 & BR_SSL_SENDREC) FD_SET(fd, &wf);
-                tv.tv_sec = 5;
-                tv.tv_usec = 0;
-                if (select(fd + 1, &rf, &wf, NULL, &tv) <= 0) return -1;
+            fd_set rf, wf;
+            struct timeval tv;
+            int fd = conn->underlying.fd;
+            FD_ZERO(&rf);
+            FD_ZERO(&wf);
+            if (step == 1) FD_SET(fd, &rf);
+            if (step == 2) FD_SET(fd, &wf);
+            if (step != 1 && step != 2) {
+                FD_SET(fd, &rf);
+                FD_SET(fd, &wf);
             }
+            tv.tv_sec = 5;
+            tv.tv_usec = 0;
+            if (select(fd + 1, &rf, &wf, NULL, &tv) <= 0) return -1;
         }
-        spins = 0;
     }
 }
 
@@ -597,17 +600,15 @@ CCTlsConn cc_tls_connect_addr(const char *addr, size_t addr_len,
     return conn;
 }
 
-CCTlsConn cc_tls_accept(CCSocket sock, CCTlsServerConfig cfg, void *iobuf,
-                        size_t iobuf_len, CCArena info_arena,
-                        CCNetError *out_err) {
+CCTlsConn cc_tls_server_start(CCSocket sock, CCTlsServerConfig cfg,
+                              void *iobuf, size_t iobuf_len,
+                              CCNetError *out_err) {
     CCTlsConn conn = {0};
     *out_err = CC_NET_OK;
-    (void)info_arena;
 #ifdef CC_HAS_BEARSSL
     {
         CC__TlsCtx *ctx;
         CC__TlsServerMats *m = &cc__tls_server_mats;
-        /* Load from cfg paths if mats not yet ready. */
         if (!m->ready) {
             char cert[1024], key[1024];
             size_t cl = cfg.cert_path_len, kl = cfg.key_path_len;
@@ -658,16 +659,7 @@ CCTlsConn cc_tls_accept(CCSocket sock, CCTlsServerConfig cfg, void *iobuf,
         conn.iobuf_len = iobuf_len;
         conn.underlying = sock;
         conn.flags = CC__TLS_F_SERVER;
-        /* Handshake with blocking I/O, then restore nonblock. */
-        cc__tls_set_blocking(sock.fd, 1);
-        if (cc__tls_handshake(&conn) != 0) {
-            free(ctx);
-            conn.ctx = NULL;
-            *out_err = CC_NET_TLS_HANDSHAKE_FAILED;
-            return conn;
-        }
-        cc__tls_set_blocking(sock.fd, 0);
-        conn.flags |= CC__TLS_F_READY;
+        (void)cc__tls_set_blocking(sock.fd, 0);
         return conn;
     }
 #else
@@ -675,6 +667,63 @@ CCTlsConn cc_tls_accept(CCSocket sock, CCTlsServerConfig cfg, void *iobuf,
     (void)cfg;
     (void)iobuf;
     (void)iobuf_len;
+    *out_err = CC_NET_TLS_HANDSHAKE_FAILED;
+    return conn;
+#endif
+}
+
+CCTlsHs cc_tls_handshake_step(CCTlsConn *conn, CCNetError *out_err) {
+    if (out_err) *out_err = CC_NET_OK;
+    if (!conn || !conn->ctx) {
+        if (out_err) *out_err = CC_NET_TLS_HANDSHAKE_FAILED;
+        return CC_TLS_HS_FAIL;
+    }
+    if (conn->flags & CC__TLS_F_READY) return CC_TLS_HS_DONE;
+#ifdef CC_HAS_BEARSSL
+    {
+        int step = cc__tls_handshake_step(conn);
+        if (step == 0) {
+            conn->flags |= CC__TLS_F_READY;
+            return CC_TLS_HS_DONE;
+        }
+        if (step < 0) {
+            if (out_err) *out_err = CC_NET_TLS_HANDSHAKE_FAILED;
+            return CC_TLS_HS_FAIL;
+        }
+        return step == 2 ? CC_TLS_HS_WANT_WRITE : CC_TLS_HS_WANT_READ;
+    }
+#else
+    (void)conn;
+    if (out_err) *out_err = CC_NET_TLS_HANDSHAKE_FAILED;
+    return CC_TLS_HS_FAIL;
+#endif
+}
+
+int cc_tls_is_ready(const CCTlsConn *conn) {
+    return conn && (conn->flags & CC__TLS_F_READY) != 0;
+}
+
+CCTlsConn cc_tls_accept(CCSocket sock, CCTlsServerConfig cfg, void *iobuf,
+                        size_t iobuf_len, CCArena info_arena,
+                        CCNetError *out_err) {
+    CCTlsConn conn;
+    (void)info_arena;
+    conn = cc_tls_server_start(sock, cfg, iobuf, iobuf_len, out_err);
+    if (*out_err != CC_NET_OK || !conn.ctx) return conn;
+#ifdef CC_HAS_BEARSSL
+    /* Legacy blocking accept: flip blocking for the handshake loop. */
+    cc__tls_set_blocking(sock.fd, 1);
+    if (cc__tls_handshake(&conn) != 0) {
+        free(conn.ctx);
+        conn.ctx = NULL;
+        *out_err = CC_NET_TLS_HANDSHAKE_FAILED;
+        cc__tls_set_blocking(sock.fd, 0);
+        return conn;
+    }
+    cc__tls_set_blocking(sock.fd, 0);
+    conn.flags |= CC__TLS_F_READY;
+    return conn;
+#else
     *out_err = CC_NET_TLS_HANDSHAKE_FAILED;
     return conn;
 #endif

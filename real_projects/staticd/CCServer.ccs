@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <unistd.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <poll.h>
 #include "CCServer.cch"
@@ -33,7 +34,18 @@
 #define WORKER_GROW_EVERY 64
 #endif
 
+#ifndef CC_ACCEPT_BACKOFF_MS
+#define CC_ACCEPT_BACKOFF_MS 100
+#endif
+
 typedef struct pollfd PollFd;
+
+static uint64_t cc_mono_ms(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return (uint64_t)time(NULL) * 1000ull;
+    return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+}
 
 /* Arm names are TU-wide for designated init — do not reuse `.fd` / `.wait`. */
 @variant CCAccept {
@@ -113,20 +125,22 @@ void io_sess_init(CCIoSess* io, CCSocket sock, char* buf, size_t cap) {
         .sock = sock,
         .read_ptr = buf,
         .rcap = cap,
+        .want_in = 1,
     };
     (void)io->sock.set_nodelay(1);
 }
 
+/* Begin TLS; handshake completes via cc_io_ready steps. */
 int io_sess_wrap_tls(CCIoSess* io) {
     void* iobuf;
     CCTlsServerConfig tcfg = {0};
     CCNetError ne = CC_NET_OK;
     CCTlsConn tls;
-    cc_arena_stack(info_a, 64);
+    CCTlsHs hs;
     if (!io) return -1;
     iobuf = malloc(CC_TLS_IOBUF_SIZE);
     if (!iobuf) return -1;
-    tls = cc_tls_accept(io->sock, tcfg, iobuf, CC_TLS_IOBUF_SIZE, info_a, &ne);
+    tls = cc_tls_server_start(io->sock, tcfg, iobuf, CC_TLS_IOBUF_SIZE, &ne);
     if (ne != CC_NET_OK || !tls.ctx) {
         free(iobuf);
         return -1;
@@ -134,7 +148,26 @@ int io_sess_wrap_tls(CCIoSess* io) {
     io->tls = tls;
     io->tls_iobuf = iobuf;
     io->tls_on = 1;
+    io->tls_hs = 1;
     io->sock = tls.underlying;
+    hs = cc_tls_handshake_step(&io->tls, &ne);
+    if (hs == CC_TLS_HS_DONE) {
+        io->tls_hs = 0;
+        io->want_in = 1;
+        io->want_out = 0;
+        return 0;
+    }
+    if (hs == CC_TLS_HS_FAIL) {
+        cc_tls_close(&io->tls);
+        free(iobuf);
+        io->tls_iobuf = NULL;
+        io->tls_on = 0;
+        io->tls_hs = 0;
+        return -1;
+    }
+    io->want_in = (hs == CC_TLS_HS_WANT_READ) ? 1 : 0;
+    io->want_out = (hs == CC_TLS_HS_WANT_WRITE) ? 1 : 0;
+    if (!io->want_in && !io->want_out) io->want_in = 1;
     return 0;
 }
 
@@ -145,6 +178,7 @@ void io_sess_drop(CCIoSess* io) {
         free(io->tls_iobuf);
         io->tls_iobuf = NULL;
         io->tls_on = 0;
+        io->tls_hs = 0;
         io->sock.fd = -1;
     } else if (io->sock.fd >= 0) {
         io->sock.close();
@@ -153,14 +187,19 @@ void io_sess_drop(CCIoSess* io) {
     io->rlen = 0;
     io->rcap = 0;
     io->dead = 0;
+    io->want_in = 1;
     io->want_out = 0;
+    io->deadline = 0;
     io->app = NULL;
 }
 
 void io_sess_arm(CCIoSess* io, PollFd* p, int want_out) {
-    (void)io;
+    short ev = 0;
     if (!p) return;
-    p->events = want_out ? (short)(POLLIN | POLLOUT) : (short)POLLIN;
+    if (!io || io->want_in) ev |= (short)POLLIN;
+    if (want_out || (io && io->want_out)) ev |= (short)POLLOUT;
+    if (!ev) ev = (short)POLLIN;
+    p->events = ev;
 }
 
 int io_sess_poll_bad(CCIoSess* io, PollFd* p) {
@@ -197,6 +236,24 @@ CCAccept cc_server_accept_fd(CCServer* srv) {
     if (fd < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
             return (CCAccept){ .busy = {} };
+        /* Resource exhaustion: spare-fd trick, then soft-busy (do not
+         * kill the worker). */
+        if (errno == EMFILE || errno == ENFILE || errno == ENOMEM
+                || errno == ENOBUFS) {
+            if (srv->spare_fd >= 0) {
+                close(srv->spare_fd);
+                srv->spare_fd = -1;
+                fd = accept(srv->ln.fd, NULL, NULL);
+                srv->spare_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+                if (fd >= 0) {
+                    close(fd); /* recovered one slot; drop this conn */
+                }
+            }
+            cc_atomic_fetch_add(&srv->accept_soft, 1);
+            srv->accept_backoff_until_ms = cc_mono_ms() + CC_ACCEPT_BACKOFF_MS;
+            return (CCAccept){ .busy = {} };
+        }
+        /* True listener failure (EBADF / EINVAL / …). */
         return (CCAccept){ .dead = {} };
     }
     (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
@@ -206,11 +263,22 @@ CCAccept cc_server_accept_fd(CCServer* srv) {
 
 int cc_server_bind_conn(CCServer* srv, CCIoSess* io, int fd,
                                char* buf, size_t cap) {
+    int first = (srv && srv->sec_first_byte > 0) ? srv->sec_first_byte : 15;
+    int tls_hs = (srv && srv->sec_tls_hs > 0) ? srv->sec_tls_hs : 10;
     io_sess_init(io, (CCSocket){ .fd = fd }, buf, cap);
-    if (srv && srv->tls && io->wrap_tls() != 0) {
-        cc_atomic_fetch_add(&srv->tls_fail, 1);
-        io->drop();
-        return 0;
+    io->sec_after_hs = first;
+    if (srv && srv->tls) {
+        if (io->wrap_tls() != 0) {
+            cc_atomic_fetch_add(&srv->tls_fail, 1);
+            io->drop();
+            return 0;
+        }
+        if (io->tls_hs)
+            io_sess_touch(io, time(NULL), tls_hs);
+        else
+            io_sess_touch(io, time(NULL), first);
+    } else {
+        io_sess_touch(io, time(NULL), first);
     }
     return 1;
 }
@@ -250,6 +318,19 @@ int cc_tape_poll(CCTape* w) {
     if (!w) return -1;
     hold = cc_tape_keep_listen(w);
     if (hold < 0) return -1;
+    if (w->listening && w->srv) {
+        PollFd* lp = w->tape.get(0);
+        if (lp) {
+            uint64_t now = cc_mono_ms();
+            if (w->srv->accept_backoff_until_ms
+                    && now < w->srv->accept_backoff_until_ms)
+                lp->events = 0;
+            else {
+                lp->events = (short)POLLIN;
+                w->srv->accept_backoff_until_ms = 0;
+            }
+        }
+    }
     n = w->tape.len();
     raw = w->tape.data();
     if (n && !raw) return -1;
@@ -303,6 +384,17 @@ int cc_server_try_grow(CCServer* srv, int every) {
     int next;
     if (n < 1 || n >= srv->workers_max) return 0;
     if (every < 1 || live < (n + 1) * every) return 0;
+    next = n + 1;
+    return cc_atomic_cas(&srv->nworkers, &n, next) ? 1 : 0;
+}
+
+/* Claim a replacement slot when a worker exited below the start floor. */
+static int cc_server_try_respawn_slot(CCServer* srv) {
+    int n = cc_atomic_load_acquire(&srv->nworkers);
+    int floor = cc_server_start_n(srv);
+    int next;
+    if (srv->stopped()) return 0;
+    if (n >= floor || n >= srv->workers_max) return 0;
     next = n + 1;
     return cc_atomic_cas(&srv->nworkers, &n, next) ? 1 : 0;
 }
@@ -380,6 +472,37 @@ static int !>(CCError) cc_io_ready(CCIoSess* io, PollFd* p) {
         io->dead = 1;
         return cc_ok(-1);
     }
+    /* Poll-stepped TLS handshake before application I/O. */
+    if (io->tls_hs) {
+        CCNetError ne = CC_NET_OK;
+        CCTlsHs hs;
+        int readable = io->can_read(p);
+        int writable = io->can_write(p);
+        if (!readable && !writable && (io->want_in || io->want_out)) {
+            io->arm(p, io->want_out);
+            return cc_ok(0);
+        }
+        hs = cc_tls_handshake_step(&io->tls, &ne);
+        if (hs == CC_TLS_HS_FAIL) {
+            io->dead = 1;
+            return cc_ok(-1);
+        }
+        if (hs == CC_TLS_HS_DONE) {
+            io->tls_hs = 0;
+            io->want_in = 1;
+            io->want_out = 0;
+            io_sess_touch(io, time(NULL),
+                          io->sec_after_hs > 0 ? io->sec_after_hs : 15);
+            io->arm(p, 0);
+            /* Fall through to normal read path if data already queued. */
+        } else {
+            io->want_in = (hs == CC_TLS_HS_WANT_READ) ? 1 : 0;
+            io->want_out = (hs == CC_TLS_HS_WANT_WRITE) ? 1 : 0;
+            if (!io->want_in && !io->want_out) io->want_in = 1;
+            io->arm(p, io->want_out);
+            return cc_ok(0);
+        }
+    }
     if (io->want_out) {
         if (io->can_read(p)) {
             int got = io->fill() !>;
@@ -428,7 +551,14 @@ static int cc_tape_try_accept(CCTape* tape, Vec::[CCIoSessP]* live,
     CCAccept a = tape->accept();
     @switch (a) {
     case .busy: return 0;
-    case .dead: return -1;
+    case .dead:
+        /* Listener is broken — stop accepting on this worker, but do not
+         * tear the worker down solely for that; mark stop so peers exit. */
+        srv = tape->srv;
+        if (srv) {
+            cc_server_shutdown(srv);
+        }
+        return 0;
     case .ready(fd): {
         CCIoSess* io;
         srv = tape->srv;
@@ -442,6 +572,12 @@ static int cc_tape_try_accept(CCTape* tape, Vec::[CCIoSessP]* live,
             cc_io_row_drop(NULL, io, slots);
             live->truncate(live->len - 1);
             return 0;
+        }
+        {
+            PollFd* p = tape->row(live->len - 1);
+            if (p) {
+                io_sess_arm(io, p, io->want_out);
+            }
         }
         srv->note_open();
         return 1;
@@ -467,10 +603,32 @@ static void cc_tape_reap(CCTape* tape, Vec::[CCIoSessP]* live,
     tape->done(w);
 }
 
+static void cc_tape_deadline_sweep(Vec::[CCIoSessP]* live, time_t now) {
+    size_t n = live->len();
+    @for (i in 0..n) {
+        CCIoSessP* slot = live->get(i);
+        CCIoSess* io;
+        if (!slot || !*slot) continue;
+        io = *slot;
+        if (io->deadline && now >= io->deadline)
+            io->dead = 1;
+    }
+}
+
 static void cc_server_maybe_grow(ServeCtx* ctx) {
     ServeCtx* ctxp = ctx;
     CCServer* srv;
     if (!ctx || !ctx->srv->try_grow(WORKER_GROW_EVERY)) return;
+    srv = ctx->srv;
+    @parallel(srv->app) {
+        cc_server_worker(ctxp);
+    }
+}
+
+static void cc_server_maybe_respawn(ServeCtx* ctx) {
+    ServeCtx* ctxp = ctx;
+    CCServer* srv;
+    if (!ctx || !cc_server_try_respawn_slot(ctx->srv)) return;
     srv = ctx->srv;
     @parallel(srv->app) {
         cc_server_worker(ctxp);
@@ -482,41 +640,86 @@ static void cc_server_worker(ServeCtx* ctx) {
     cc_arena_stack(wa, kilobytes(8));
     CCArenaPool* slots;
     CCTape tape;
-    if (!cc_arena_is_live(wa)) return;
+    if (!cc_arena_is_live(wa)) {
+        cc_atomic_fetch_sub(&srv->nworkers, 1);
+        cc_server_maybe_respawn(ctx);
+        return;
+    }
     slots = wa.create_pool(sizeof(CCIoRow)) !>(e) {
         (void)e;
+        cc_atomic_fetch_sub(&srv->nworkers, 1);
+        cc_server_maybe_respawn(ctx);
         return;
     };
     Vec::[CCIoSessP] live@(wa) @destroy;
-    if (!tape.open(srv, wa)) return;
+    if (!tape.open(srv, wa)) {
+        cc_atomic_fetch_sub(&srv->nworkers, 1);
+        cc_server_maybe_respawn(ctx);
+        return;
+    }
     @defer {
-        @for (io in live) {
-            cc_io_row_drop(ctx, io, slots);
+        size_t nlive = live.len();
+        @for (i in 0..nlive) {
+            CCIoSessP* slot = live.get(i);
+            if (!slot || !*slot) continue;
+            cc_io_row_drop(ctx, *slot, slots);
             srv->note_close();
         }
+        cc_atomic_fetch_sub(&srv->nworkers, 1);
+        if (!srv->stopped())
+            cc_server_maybe_respawn(ctx);
     };
 
     while (!srv->stopped() || live.len() > 0) {
         int pr, died;
+        time_t now;
         pr = tape.poll();
         if (pr < 0) return;
+        now = time(NULL);
         if (pr == 0) {
+            cc_tape_deadline_sweep(&live, now);
+            died = 0;
+            {
+                size_t nlive = live.len();
+                @for (i in 0..nlive) {
+                    CCIoSessP* slot = live.get(i);
+                    if (slot && *slot && (*slot)->dead) died = 1;
+                }
+            }
+            if (died) tape.reap(&live, slots, ctx);
             cc_yield();
             continue;
         }
 
         died = 0;
-        @for (i, io in live) {
-            PollFd* p = tape.row(i);
-            if (!p) return;
-            cc_serve_step(io, ctx, p);
-            if (io->dead) died = 1;
+        {
+            size_t nlive = live.len();
+            @for (i in 0..nlive) {
+                CCIoSessP* slot = live.get(i);
+                CCIoSess* io;
+                PollFd* p = tape.row(i);
+                if (!p || !slot || !*slot) return;
+                io = *slot;
+                if (io->deadline && now >= io->deadline) {
+                    io->dead = 1;
+                    died = 1;
+                    continue;
+                }
+                /* TLS handshake rows step without on_app until ready. */
+                if (io->tls_hs) {
+                    cc_serve_step(io, ctx, p);
+                    if (io->dead) died = 1;
+                    continue;
+                }
+                cc_serve_step(io, ctx, p);
+                if (io->dead) died = 1;
+            }
         }
 
         {
             int ar = tape.try_accept(&live, slots);
-            if (ar < 0) return;
             if (ar > 0) cc_server_maybe_grow(ctx);
+            (void)ar;
         }
 
         if (!died) continue;
