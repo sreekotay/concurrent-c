@@ -130,17 +130,18 @@ static void cc_tape_ready_clear_prev(CCTape* w) {
 static int cc_tape_mark_ready(CCTape* w, size_t i, int in, int out, int err) {
     CCWaitSlot* s;
     int was;
-    if (!w || !(s = cc_tape_slot(w, i))) return -1;
+    if (!w || !(s = cc_tape_slot(w, i))) return -1; /* bad index — waiter desync */
     was = s->ready_in | s->ready_out | s->ready_err;
     if (in) s->ready_in = 1;
     if (out) s->ready_out = 1;
     if (err) s->ready_err = 1;
     if (!was && (s->ready_in | s->ready_out | s->ready_err)) {
         if (w->ready_ix.push((uint32_t)i) != 0) {
+            /* Alloc fail: drop this wake's note; LT will re-fire. Not fatal. */
             s->ready_in = 0;
             s->ready_out = 0;
             s->ready_err = 0;
-            return -1;
+            return 0;
         }
     }
     return 0;

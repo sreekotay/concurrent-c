@@ -1155,9 +1155,11 @@ QUICK_ORDER = [
 ]
 
 
-# Soft NOFILE for --spawn'd staticd so fd_exhaust_accept can fill the
-# *server* table. Overridable; must stay above workers+listen+spares+pages.
-SERVER_NOFILE = int(os.environ.get("STATICD_STRESS_NOFILE", "128"))
+# Soft NOFILE for --spawn'd staticd. Must clear workers+listen+spares+pages
+# plus concurrent file opens. Accept batch can admit many conns per wake —
+# 128 was enough for one-accept-per-wake; 512 leaves room for conn_storm.
+# fd_exhaust_accept still fills the table; override via STATICD_STRESS_NOFILE.
+SERVER_NOFILE = int(os.environ.get("STATICD_STRESS_NOFILE", "512"))
 
 
 def _preexec_nofile(soft: int):

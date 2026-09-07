@@ -14,6 +14,9 @@
 #ifndef CC_ACCEPT_BACKOFF_MS
 #define CC_ACCEPT_BACKOFF_MS 100
 #endif
+#ifndef CC_SERVER_ACCEPT_BATCH
+#define CC_SERVER_ACCEPT_BATCH 64
+#endif
 
 typedef struct CCReady {
     int in;

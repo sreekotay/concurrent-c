@@ -334,8 +334,7 @@ static int !>(CCIoError) cc_io_fill_while_out(CCIoSess* io) {
     return cc_ok(got);
 }
 
-/* -1 = close, 0 = wait (armed), 1 = window ready for on_app,
- * -2 = waiter desync (arm failed — exit worker). */
+/* -1 = close, 0 = wait (armed), 1 = window ready for on_app. */
 static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, size_t i,
                                    CCReady r) {
     @errhandler(CCError e) { return cc_err(e); }
@@ -350,7 +349,10 @@ static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, size_t i,
         int readable = cc_ready_in(r);
         int writable = cc_ready_out(r);
         if (!readable && !writable && (io->want_in || io->want_out)) {
-            if (tape->arm(i, io) != 0) return cc_ok(-2);
+            if (tape->arm(i, io) != 0) {
+                io->dead = 1;
+                return cc_ok(-1);
+            }
             return cc_ok(0);
         }
         hs = cc_tls_handshake_step(&io->tls, &ne);
@@ -364,13 +366,19 @@ static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, size_t i,
             io->want_out = 0;
             io_sess_touch(io, time(NULL),
                           io->sec_after_hs > 0 ? io->sec_after_hs : 15);
-            if (tape->arm(i, io) != 0) return cc_ok(-2);
+            if (tape->arm(i, io) != 0) {
+                io->dead = 1;
+                return cc_ok(-1);
+            }
             /* Fall through to normal read path if data already queued. */
         } else {
             io->want_in = (hs == CC_TLS_HS_WANT_READ) ? 1 : 0;
             io->want_out = (hs == CC_TLS_HS_WANT_WRITE) ? 1 : 0;
             if (!io->want_in && !io->want_out) io->want_in = 1;
-            if (tape->arm(i, io) != 0) return cc_ok(-2);
+            if (tape->arm(i, io) != 0) {
+                io->dead = 1;
+                return cc_ok(-1);
+            }
             return cc_ok(0);
         }
     }
@@ -385,7 +393,10 @@ static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, size_t i,
         }
         if (cc_ready_out(r))
             return cc_ok(1);
-        if (tape->arm(i, io) != 0) return cc_ok(-2);
+        if (tape->arm(i, io) != 0) {
+            io->dead = 1;
+            return cc_ok(-1);
+        }
         return cc_ok(0);
     }
     if (!cc_ready_in(r))
@@ -401,7 +412,8 @@ static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, size_t i,
     return cc_ok(1);
 }
 
-/* 0 = continue, -1 = waiter desync (exit worker). */
+/* 0 = continue; -1 reserved for index desync from drop/reap only.
+ * Arm failure marks the row dead — proportionate under resource pressure. */
 static int cc_serve_step(CCIoSess* io, ServeCtx* ctx, CCTape* tape, size_t i,
                          CCReady r) {
     int st = cc_io_ready(io, tape, i, r) !>(e) {
@@ -410,51 +422,64 @@ static int cc_serve_step(CCIoSess* io, ServeCtx* ctx, CCTape* tape, size_t i,
         cc_serve_invoke(ctx, io);
         return 0;
     };
-    if (st == -2) return -1;
     if (st < 0) {
         cc_serve_invoke(ctx, io);
         return 0;
     }
     if (st == 0) return 0;
     cc_serve_invoke(ctx, io);
-    if (tape->arm(i, io) != 0) return -1;
+    if (tape->arm(i, io) != 0)
+        io->dead = 1;
     return 0;
 }
 
+/* Accept until EAGAIN / batch cap. Returns accepted count, or -1 on
+ * tape index desync while discarding a failed arm. */
 static int cc_tape_try_accept(CCTape* tape, Vec::[CCIoSessP]* live,
                               CCArenaPool* slots) {
-    CCServer* srv;
-    CCAccept a = tape->accept();
-    @switch (a) {
-    case .busy: return 0;
-    case .dead:
-        /* Listener is broken — stop accepting on this worker, but do not
-         * tear the worker down solely for that; mark stop so peers exit. */
-        srv = tape->srv;
-        if (srv) {
-            cc_server_shutdown(srv);
+    int n = 0;
+    while (n < CC_SERVER_ACCEPT_BATCH) {
+        CCServer* srv;
+        CCAccept a = tape->accept();
+        @switch (a) {
+        case .busy: return n;
+        case .dead:
+            /* Listener is broken — stop accepting on this worker, but do not
+             * tear the worker down solely for that; mark stop so peers exit. */
+            srv = tape->srv;
+            if (srv) {
+                cc_server_shutdown(srv);
+            }
+            return n;
+        case .ready(fd): {
+            CCIoSess* io;
+            size_t i;
+            srv = tape->srv;
+            io = cc_io_row_new(srv, fd, slots);
+            if (!io) return n;
+            if (live->push(io) != 0) {
+                cc_io_row_drop(NULL, io, slots);
+                return n;
+            }
+            i = live->len() - 1;
+            if (!tape->watch(io)) {
+                cc_io_row_drop(NULL, io, slots);
+                live->truncate(i);
+                return n;
+            }
+            if (tape->arm(i, io) != 0) {
+                if (tape->drop_at(i) != 0) return -1;
+                cc_io_row_drop(NULL, io, slots);
+                live->truncate(i);
+                continue;
+            }
+            srv->note_open();
+            n++;
+            break;
         }
-        return 0;
-    case .ready(fd): {
-        CCIoSess* io;
-        srv = tape->srv;
-        io = cc_io_row_new(srv, fd, slots);
-        if (!io) return 0;
-        if (live->push(io) != 0) {
-            cc_io_row_drop(NULL, io, slots);
-            return 0;
         }
-        if (!tape->watch(io)) {
-            cc_io_row_drop(NULL, io, slots);
-            live->truncate(live->len - 1);
-            return 0;
-        }
-        if (tape->arm(live->len - 1, io) != 0)
-            return -1;
-        srv->note_open();
-        return 1;
     }
-    }
+    return n;
 }
 
 /* Drop live[i] and tape.slots[i] together. Returns 1 if a survivor

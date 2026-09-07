@@ -41,7 +41,7 @@ What we are trying to break, mapped to the specimen's seams:
 
 | Seam | Failure mode | Modes |
 |------|--------------|-------|
-| Worker / accept | EMFILE soft-fail, worker exit without respawn, accept storm | `fd_exhaust_accept`, `conn_storm` |
+| Worker / accept | EMFILE soft-fail, worker exit without respawn, accept storm | `fd_exhaust_accept`, `conn_storm`, `accept_burst_survive` |
 | Waiter / compact | kqueue/epoll unwatch after row shift; swap drops batch readiness (LT re-fire) | `waiter_compact_live`, `waiter_reap_under_load` |
 | Waiter / half-close | READ+EOF/HUP must drain request before close | `halfclose_after_request` |
 | Deadlines | Slowloris header drip, idle keep-alive | `slowloris_headers`, `idle_keepalive_pile` |
