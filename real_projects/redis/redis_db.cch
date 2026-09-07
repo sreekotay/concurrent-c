@@ -74,12 +74,14 @@ static size_t db_shard_index_for_hash(const RedisDb* db, size_t hash) {
     return hash & db->shard_mask;
 }
 
-static size_t db_shard_index_for_key(const RedisDb* db, char[:] key) {
+static size_t db_hash_key(char[:] key) {
     CCSlicePackedView view;
-    CCSlicePacked kh;
+    return cc_map_hash_slice_packed(db_key_packed_borrow(&view, key));
+}
+
+static size_t db_shard_index_for_key(const RedisDb* db, char[:] key) {
     if (!db || db->shard_count == 0) return 0;
-    kh = db_key_packed_borrow(&view, key);
-    return db_shard_index_for_hash(db, cc_map_hash_slice_packed(kh));
+    return db_shard_index_for_hash(db, db_hash_key(key));
 }
 
 static size_t db_shard_index_for_packed(const RedisDb* db, CCSlicePacked kh) {
@@ -278,17 +280,20 @@ static void !>(CCError) db_entry_store_str(RedisDb* db, RedisValue* val, char[:]
     return cc_ok();
 }
 
-static RedisEntry* db_find_entry(RedisDb* db, char[:] key) {
+static RedisEntry* db_find_entry_h(RedisDb* db, char[:] key, size_t h) {
     CCSlicePackedView view;
     CCSlicePacked kh;
-    size_t h;
     RedisDbShard* sh;
     if (!db || !db->shards) return NULL;
     kh = db_key_packed_borrow(&view, key);
-    h = cc_map_hash_slice_packed(kh);
     sh = db_shard_at(db, db_shard_index_for_hash(db, h));
     if (!sh || !sh->entries) return NULL;
     return sh->entries->get_ptr_h(kh, h);
+}
+
+static RedisEntry* db_find_entry(RedisDb* db, char[:] key) {
+    size_t h = db_hash_key(key);
+    return db_find_entry_h(db, key, h);
 }
 
 /* ---- lazy expiration ----
@@ -453,15 +458,14 @@ static void db_remove_entry(RedisDb* db, char[:] key, RedisEntry* cell) {
 /* THE read path: every command that touches a key goes through here so
  * expired entries die on first contact (lazy expiration, no active cycle).
  * One hash serves entries + expires; empty expires skips the side probe. */
-static RedisEntry* db_lookup_live(RedisDb* db, char[:] key, DbCmdClock* clock) {
+static RedisEntry* db_lookup_live_h(RedisDb* db, char[:] key, DbCmdClock* clock,
+                                    size_t h) {
     CCSlicePackedView view;
     CCSlicePacked kh;
-    size_t h;
     RedisDbShard* sh;
     RedisEntry* cell;
     if (!db || !db->shards) return NULL;
     kh = db_key_packed_borrow(&view, key);
-    h = cc_map_hash_slice_packed(kh);
     sh = db_shard_at(db, db_shard_index_for_hash(db, h));
     if (!sh || !sh->entries) return NULL;
     cell = sh->entries->get_ptr_h(kh, h);
@@ -474,6 +478,11 @@ static RedisEntry* db_lookup_live(RedisDb* db, char[:] key, DbCmdClock* clock) {
         }
     }
     return cell;
+}
+
+static RedisEntry* db_lookup_live(RedisDb* db, char[:] key, DbCmdClock* clock) {
+    size_t h = db_hash_key(key);
+    return db_lookup_live_h(db, key, clock, h);
 }
 
 static void !>(CCError) db_insert_value(RedisDb* db, CCSlicePacked owned_key, RedisEntry entry) {
@@ -529,12 +538,12 @@ static void !>(CCError) db_insert_new_entry(RedisDb* db, char[:] key,
  * per redis semantics.  An expired-but-unreaped cell is safe to overwrite
  * in place — that IS its reap. */
 /* Ok = stored; caller encodes +OK / integer as appropriate. */
-static void !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value,
-                               int64_t expires_at_ms) {
+static void !>(CCError) db_set_h(RedisDb* db, char[:] key, char[:] value,
+                                 int64_t expires_at_ms, size_t h) {
     @errhandler(CCError e) { return cc_err(e); }
     if (!db || !db->shards) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
 
-    RedisEntry* cell = db_find_entry(db, key);
+    RedisEntry* cell = db_find_entry_h(db, key, h);
     if (cell) {
         db_entry_store_str(db, &cell->val, value) !>;
         /* Clearing TTL is a no-op when the shard has no expire rows and the
@@ -542,7 +551,7 @@ static void !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value,
         if (expires_at_ms != 0) {
             db_expires_set(db, key, expires_at_ms) !>;
         } else {
-            RedisDbShard* sh = db_shard_for_key(db, key);
+            RedisDbShard* sh = db_shard_at(db, db_shard_index_for_hash(db, h));
             if (sh && sh->expires && sh->expires->len() > 0)
                 db_expires_set(db, key, 0) !>;
         }
@@ -552,6 +561,14 @@ static void !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value,
     CCString owned_str =
         db_clone_value_into_arena(db->value_arena, value, "entry value clone failed") !>;
     db_insert_new_entry(db, key, (RedisValue){ .str = owned_str }, expires_at_ms) !>;
+    return cc_ok();
+}
+
+static void !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value,
+                               int64_t expires_at_ms) {
+    @errhandler(CCError e) { return cc_err(e); }
+    size_t h = db_hash_key(key);
+    db_set_h(db, key, value, expires_at_ms, h) !>;
     return cc_ok();
 }
 
@@ -676,11 +693,12 @@ static RedisReply !>(CCError) db_append(RedisDb* db,
  * no re-encode.  A str cell parses once in the `?>` fallback; the
  * assignment drops the old arm.  Account the heap string first — drop
  * does not know about memlog.  Error paths leave the cell untouched. */
-static RedisReply !>(CCError) db_incrby(RedisDb* db, char[:] key, int64_t delta, DbCmdClock* clock) {
+static RedisReply !>(CCError) db_incrby_h(RedisDb* db, char[:] key, int64_t delta,
+                                          DbCmdClock* clock, size_t h) {
     @errhandler(CCError e) { return cc_err(e); }
     if (!db || !db->shards) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
 
-    RedisEntry* cell = db_lookup_live(db, key, clock);
+    RedisEntry* cell = db_lookup_live_h(db, key, clock, h);
 
     int64_t value = delta;
     if (cell) {
@@ -706,6 +724,12 @@ static RedisReply !>(CCError) db_incrby(RedisDb* db, char[:] key, int64_t delta,
     }
 
     return cc_ok(reply_integer(value));
+}
+
+static RedisReply !>(CCError) db_incrby(RedisDb* db, char[:] key, int64_t delta,
+                                        DbCmdClock* clock) {
+    size_t h = db_hash_key(key);
+    return db_incrby_h(db, key, delta, clock, h);
 }
 
 /* EXPIRE/PEXPIRE, already scaled to relative ms.  Non-positive TTL deletes

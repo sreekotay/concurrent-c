@@ -49,17 +49,15 @@ static bool !>(CCIoError) rr_fill_common(RespReader* r, CCSocket* sock, bool non
         return cc_err(cc_io_error(CC_IO_INVALID_ARGUMENT));
     }
 
-    /* One syscall's worth; capped by space left in the reader buffer. */
-    const size_t max_read_chunk = 4096;
-    size_t max_bytes = max_read_chunk;
-    if (max_bytes > avail) max_bytes = avail;
-
+    /* One read: as many bytes as the reader still has room for. The
+     * 64 KiB cap is the command-size ceiling; a 4K chunk here only
+     * added syscalls on fat pipelines. */
     size_t n = 0;
     if (nonblocking) {
         /* Socket try is three-way: Ok(true)=data, Ok(false)=FIN, Err(BUSY)=EAGAIN.
          * At the fill layer, would-block means "no progress now" → Ok(false). */
         bool !>(CCIoError) res =
-            cc_socket_try_read_into(sock, r->data + r->end, max_bytes, &n);
+            sock->try_read_into(r->data + r->end, avail, &n);
         if (cc_is_err(res)) {
             CCIoError e = cc_error(res);
             if (e.base.kind == CC_IO_BUSY) return cc_ok(false);
@@ -67,12 +65,12 @@ static bool !>(CCIoError) rr_fill_common(RespReader* r, CCSocket* sock, bool non
         }
         if (!cc_value(res)) return cc_ok(false);  /* FIN */
     } else {
-        const int read_deadline_ms = 60000;
-        CCDeadline deadline = cc_deadline_after_ms(read_deadline_ms);
-        bool !>(CCIoError) res =
-            cc_socket_read_into_deadline(sock, r->data + r->end, max_bytes, &n, &deadline);
-        if (cc_is_err(res)) return cc_err(cc_error(res));
-        if (!cc_value(res)) return cc_ok(false);  /* FIN */
+        /* No per-fill clock. EAGAIN parks until readable (client close /
+         * dest cancel ends the wait). */
+        bool more = sock->read_into(r->data + r->end, avail, &n) !>(e) {
+            return cc_err(e);
+        };
+        if (!more) return cc_ok(false);  /* FIN */
     }
     r->end += n;
     return cc_ok(true);
