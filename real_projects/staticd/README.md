@@ -121,7 +121,9 @@ curl -D- -H 'Range: bytes=0-15' http://127.0.0.1:8080/4kb.html | head
                             # staticd also: OPTIONS, query strip, --header,
                             # --index, --list, dir-without-list → 403,
                             # Range / 304 / If-Range, Connection tokens,
-                            # symlink jail, rename under a hot name, WS echo
+                            # symlink jail, rename under a hot name, WS suite
+                            # (`ws_test.py` / `make ws`: echo, ping, close,
+                            # handshake rejects, fragment/unmasked/oversize)
 ```
 
 Missing nginx / darkhttpd / caddy are skipped. Traversal may be 400, 403, or
@@ -273,6 +275,7 @@ default stack), owned by `g_blocks`.
 | `staticd_block.cch` | `BlockCache` named-block ring (`checkout_block` / `block_cache_fill`) |
 | `staticd_fs.cch` | Jail, `FileHold`, 1s fd cache, listing |
 | `gen_fixtures.sh` | Fixture tree + manifest |
+| `ws_test.py` | WebSocket subset gate (`make ws`) |
 | `correctness.sh` | Golden gate |
 | `bench_latency.sh` | Latency matrix |
 | `compare.sh` | correctness + bench (`--smoke` / `--full`) |

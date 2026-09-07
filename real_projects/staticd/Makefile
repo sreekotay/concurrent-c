@@ -13,7 +13,7 @@ BEARSSL_INC = $(abspath $(BEARSSL_DIR)/inc)
 REPO_CC = ../../cc
 REPO_ROOT = ../..
 
-.PHONY: all staticd darkhttpd fixtures clean setup smoke bench string_tpl \
+.PHONY: all staticd darkhttpd fixtures clean setup smoke bench ws string_tpl \
 	ensure-tls-runtime ensure-bearssl
 
 all: staticd
@@ -71,6 +71,10 @@ setup:
 
 smoke: staticd fixtures
 	./compare.sh --smoke
+
+# Narrow WebSocket subset (spawn throwaway staticd on :18080).
+ws: staticd
+	python3 ./ws_test.py --spawn ./out/staticd --port 18080
 
 # Isolated RSS (fresh process per cell). Override with DURATION=5 REPEATS=3 …
 bench: staticd fixtures
