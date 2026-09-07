@@ -487,6 +487,28 @@ anchors the fragments name. What is left of a block in the stage is
 blanked: a block that has run has no code in it for the lowerer to
 lower, and the blanking keeps the line count so the map still holds.
 
+## Parallel
+
+The arms of `@parallel { a = f(); b = g(); }` may run at the same time.
+The first stays on the caller; each of the others becomes a
+`__cc_par_<n>_<k>_thunk` the runtime may put on another fiber, and the
+block joins before it ends — a lexical fork and join, not a nursery that
+outlives the scope.
+
+An arm reaches the locals it names through their addresses, carried in a
+`__cc_par_<n>_<k>_env_t`: the caller's frame is live while the arm runs,
+and the arm is meant to see what the caller sees. The assignment target
+is one of those addresses. The runtime may refuse the site
+(`cc_parallel_deny_fast`) and a spawn may fail; both run the same thunk
+inline at the join, so the arms happen either way and the only difference
+is whether they overlapped.
+
+Everything the form can carry beyond plain arms — `spawn`, a predicate,
+`seq`, `wait`, `worker`, `cache`, a bound handle, `@serial`, and the `for`
+and dest forms — is a diagnostic naming it. A concurrency construct that
+quietly ran as something else would be a program that behaves differently
+for reasons the page does not show.
+
 ## Scheduling facts
 
 `@blocking` / `@nonblocking` / `@noblock` / `@latency_sensitive` on a
