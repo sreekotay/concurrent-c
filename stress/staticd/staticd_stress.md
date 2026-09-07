@@ -42,7 +42,8 @@ What we are trying to break, mapped to the specimen's seams:
 | Seam | Failure mode | Modes |
 |------|--------------|-------|
 | Worker / accept | EMFILE soft-fail, worker exit without respawn, accept storm | `fd_exhaust_accept`, `conn_storm` |
-| Waiter / compact | kqueue/epoll unwatch after row shift; ready flags after swap-remove | `waiter_compact_live`, `waiter_reap_under_load` |
+| Waiter / compact | kqueue/epoll unwatch after row shift; swap drops batch readiness (LT re-fire) | `waiter_compact_live`, `waiter_reap_under_load` |
+| Waiter / half-close | READ+EOF/HUP must drain request before close | `halfclose_after_request` |
 | Deadlines | Slowloris header drip, idle keep-alive | `slowloris_headers`, `idle_keepalive_pile` |
 | Output path | abort mid-headers / mid-body | `abort_mid_headers`, `abort_mid_body` |
 | HTTP parse | Garbage methods, huge headers, CL mismatch, Range edges | `http_garbage_hail`, `header_bomb`, `body_cl_mismatch`, `range_edge_hail` |
@@ -67,7 +68,8 @@ on `pread`.
 | Mode | Status | What it hammers | expect |
 |------|--------|-----------------|--------|
 | `waiter_compact_live` | green | `--workers 1`; A,B,C keep-alive; RST A; second GET on B and C | both complete promptly. `run.sh` also rebuilds with `-DCC_SERVER_WAIT_POLL=1` as control |
-| `waiter_reap_under_load` | green | N idle KA expire while a hot tail conn is under continuous GET | hot keeps answering through/after expiry (ready_ix remapped on swap) |
+| `waiter_reap_under_load` | green | N idle KA expire while a hot tail conn is under continuous GET | hot keeps answering through/after expiry (swap clears batch ready; LT re-arms). Does not force hole+tail both in same ready_ix |
+| `halfclose_after_request` | green | complete GET then `SHUT_WR`; expect full response | native + poll control in `run.sh`. EV_EOF/HUP ≠ hard err; read interest cleared while `want_out` |
 | `conn_storm` | green | N concurrent TCP connects + GET /1kb.bin | all settle; server still serves |
 | `fd_exhaust_accept` | green | `--spawn` with lowered server `RLIMIT_NOFILE`; hold keep-alive GETs until accept stalls; spare soft-fail + backoff | server stays up; later GET works. SKIP without spawn. Receipt is behavioral (serve after release); does not yet assert `accept_soft` delta |
 | `accept_burst_survive` | green | Burst connect/close without read | server still serves afterward |

@@ -44,9 +44,9 @@ run_adv() {
 
 run_adv "$STATICD_BIN"
 
-# Compact-live against forced poll (control). Native already ran above.
-if [[ -z "${MODE:-}" || "${MODE}" == "waiter_compact_live" ]]; then
-  echo "=== waiter_compact_live (poll control) ==="
+# Compact-live / halfclose against forced poll (control). Native already ran above.
+if [[ -z "${MODE:-}" || "${MODE}" == "waiter_compact_live" || "${MODE}" == "halfclose_after_request" ]]; then
+  echo "=== poll control (waiter_compact_live, halfclose_after_request) ==="
   POLL_BIN="$ROOT/real_projects/staticd/out/staticd.poll"
   rm -f "$ROOT/real_projects/staticd/out/staticd"
   make -C "$ROOT/real_projects/staticd" staticd EXTRA_CFLAGS=-DCC_SERVER_WAIT_POLL=1
@@ -54,5 +54,10 @@ if [[ -z "${MODE:-}" || "${MODE}" == "waiter_compact_live" ]]; then
   # Restore native default binary for later local use.
   rm -f "$ROOT/real_projects/staticd/out/staticd"
   make -C "$ROOT/real_projects/staticd" staticd
-  MODE=waiter_compact_live run_adv "$POLL_BIN"
+  if [[ -z "${MODE:-}" || "${MODE}" == "waiter_compact_live" ]]; then
+    MODE=waiter_compact_live run_adv "$POLL_BIN"
+  fi
+  if [[ -z "${MODE:-}" || "${MODE}" == "halfclose_after_request" ]]; then
+    MODE=halfclose_after_request run_adv "$POLL_BIN"
+  fi
 fi

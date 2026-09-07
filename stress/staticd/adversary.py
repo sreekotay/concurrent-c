@@ -211,7 +211,8 @@ def mode_waiter_reap_under_load(ctx: Ctx) -> Result:
 
     Open N idle keep-alives, then a hot tail conn under continuous GET.
     When idles expire (KEEPALIVE), deadline reap swap-removes them while
-    the tail may be in ready_ix — the hot conn must keep answering.
+    the tail may have been ready — interest moves, batch readiness does not;
+    level-triggered must re-fire the hot conn.
     """
     n_idle = {"quick": 24, "full": 48, "soak": 64}[ctx.scale]
     path = "/1kb.bin"
@@ -273,6 +274,57 @@ def mode_waiter_reap_under_load(ctx: Ctx) -> Result:
             rst_close(s)
         if hot is not None:
             rst_close(hot)
+
+
+def mode_halfclose_after_request(ctx: Ctx) -> Result:
+    """Peer SHUT_WR after a full request must still get the response.
+
+    kqueue EV_EOF / epoll HUP must not discard buffered request bytes.
+    """
+    path = "/1kb.bin"
+    s = socket.create_connection((ctx.host, ctx.port), 2.0)
+    try:
+        s.settimeout(2.0)
+        req = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {ctx.host}\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+        ).encode()
+        s.sendall(req)
+        s.shutdown(socket.SHUT_WR)
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = s.recv(65536)
+            if not chunk:
+                return Result("halfclose_after_request", False,
+                              "eof before headers")
+            buf += chunk
+        head, body = buf.split(b"\r\n\r\n", 1)
+        line = head.split(b"\r\n", 1)[0]
+        parts = line.split(b" ")
+        code = int(parts[1]) if len(parts) >= 2 else 0
+        cl = None
+        for h in head.split(b"\r\n")[1:]:
+            if h.lower().startswith(b"content-length:"):
+                cl = int(h.split(b":", 1)[1].strip())
+                break
+        if cl is not None:
+            while len(body) < cl:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                body += chunk
+            body = body[:cl]
+        if code != 200 or (cl is not None and len(body) != cl):
+            return Result("halfclose_after_request", False,
+                          f"{code}/{len(body)} cl={cl}")
+        if cl is None and len(body) != 1024:
+            return Result("halfclose_after_request", False,
+                          f"{code}/{len(body)} (no CL)")
+        return Result("halfclose_after_request", True, f"{code} {len(body)}b")
+    finally:
+        rst_close(s)
 
 
 # ---- modes ----
@@ -1046,6 +1098,7 @@ MODES: dict[str, Callable[[Ctx], Result]] = {
     "fd_exhaust_accept": mode_fd_exhaust_accept,
     "waiter_compact_live": mode_waiter_compact_live,
     "waiter_reap_under_load": mode_waiter_reap_under_load,
+    "halfclose_after_request": mode_halfclose_after_request,
     "slowloris_headers": mode_slowloris_headers,
     "header_never_finishes": mode_header_never_finishes,
     "idle_keepalive_pile": mode_idle_keepalive_pile,
@@ -1073,6 +1126,7 @@ MODES: dict[str, Callable[[Ctx], Result]] = {
 QUICK_ORDER = [
     "waiter_compact_live",
     "waiter_reap_under_load",
+    "halfclose_after_request",
     "conn_storm",
     "accept_burst_survive",
     "abort_mid_headers",

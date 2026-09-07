@@ -71,9 +71,10 @@ void cc_tape_close(CCTape* w);
 int cc_tape_wait(CCTape* w);
 CCReady cc_tape_ready(CCTape* w, size_t i);
 int cc_tape_listen_ready(CCTape* w);
-void cc_tape_arm(CCTape* w, size_t i, CCIoSess* io);
+int cc_tape_arm(CCTape* w, size_t i, CCIoSess* io);
 int cc_tape_watch(CCTape* w, CCIoSess* io);
-/* Unwatch fd at i, then swap-remove last wait-slot into i (one udata refresh). */
-void cc_tape_drop_at(CCTape* w, size_t i);
+/* Unwatch fd at i, then swap-remove last wait-slot into i (one udata refresh).
+ * Returns -1 if the moved row's kernel udata could not be updated. */
+int cc_tape_drop_at(CCTape* w, size_t i);
 
 #endif /* CC_SERVER_POLL_CCH */
