@@ -764,12 +764,27 @@ static bool src_comma_after(const Pr* p, CcSpan s) {
 
 /* ---- attributes, specifiers ------------------------------------------------ */
 
+/* An attribute is printed by replaying the tokens it occupies, so only one
+ * the source spells can be printed. `@tag:NAME` and `@task` are read out of
+ * a comment and carry the span of the declaration they describe — the span
+ * a diagnostic wants — so replaying one would print that declaration's
+ * first token a second time (`static static void f`). */
+static bool pr_attr_written(Pr* p, CcSpan sp) {
+    CCSlice t;
+    if (sp.first >= p->n) return false;
+    t = p->t[sp.first].text;
+    return cc_slice_eq_cstr(&t, "__attribute__") || cc_slice_eq_cstr(&t, "__attribute") ||
+           cc_slice_eq_cstr(&t, "_Alignas") || cc_slice_eq_cstr(&t, "alignas") ||
+           cc_slice_eq_cstr(&t, "__declspec") || cc_slice_eq_cstr(&t, "[");
+}
+
 static void pr_attrs(Pr* p, const CcAttrVec* attrs, bool leading_space) {
     CcAttrVec* v = (CcAttrVec*)attrs;
     size_t n = v->len();
     size_t i;
     for (i = 0; i < n; i++) {
         const CcAttr* a = v->get_ptr(i);
+        if (!pr_attr_written(p, a->span)) continue;
         if (leading_space) pr_str(p, " ");
         pr_span_c(p, a->span, "attribute");
         if (!leading_space) pr_str(p, " ");

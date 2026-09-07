@@ -401,27 +401,34 @@ static void vt_spell_block(VStep* st, CcStmt* blk, CCString* sb) {
 
 /* Which arms carry a destroy chain; the drop helper is registered as the
  * destroy hook of the variant so locals, members and transitions run it. */
+/* Which arms the drop helper destroys, and so whether locals of the variant
+ * are dropped on scope exit at all.
+ *
+ * The arm type itself must have a registered destructor. A struct that
+ * merely contains one does not make the arm destructor-bearing: an arena
+ * `Vec` inside a plain record is owned by the arena, and reading the
+ * record's fields is not the same as owning them. Counting members here
+ * would give every `@variant` over such a record a scope-exit drop, and
+ * a local copied into a longer-lived node would free what the node
+ * points at. */
 static void vt_detect_dtors(VStep* st, VInfo* vi) {
     CcLowerer* L = st->L;
     CcIndex* ix = st->w->ix;
-    CcSpan sp = vi->decl->span;
     VArmList* av = &vi->arms;
     size_t n = av->len();
     size_t i;
+    (void)L;
     for (i = 0; i < n; i++) {
         VArm* arm = *av->get_ptr(i);
-        CcStmt* blk;
-        CcExpr* subject;
         CCSlice canon;
+        CcTypeInfo* ti;
         if (!arm->type) continue;
         if (arm->type->k.kind == CcTypeK_pointer || arm->type->k.kind == CcTypeK_array) continue;
-        blk = lw_block(L, sp);
-        subject = cc_expr_member(cc_expr_member(lw_ident(L, cstr_slice("__v"), sp), cstr_slice("u"), true, sp, L->arena), arm->name, false, sp, L->arena);
         canon = ix->canon(arm->type);
-        if (cl_destroy_chain2(L, canon, subject, blk, sp, 0, false) > 0) {
-            arm->has_dtor = true;
-            vi->has_dtor = true;
-        }
+        ti = canon.len ? ix->type_get(canon) : NULL;
+        if (!ti || !ti->destroy_fn.len) continue;
+        arm->has_dtor = true;
+        vi->has_dtor = true;
     }
     if (vi->has_dtor) {
         CCSlice vname = vi->name;
@@ -547,6 +554,31 @@ static void vt_check_arms(VStep* st, VInfo* vi, CcVariantDecl vd) {
     }
 }
 
+/* The declaration of variant `name` in the unit being lowered, or NULL.
+ *
+ * The index holds one `CcDecl` per `@variant`, from the parse that indexed
+ * the file. A header lowered on its own is parsed again, so that decl is
+ * not this unit's: its spans index another tape, and replacing it would
+ * rewrite a list nobody prints. The declaration to lower is the one in
+ * `L->unit->decls`; when it is there, this unit owns the variant. */
+static CcDecl* vt_local_decl(VStep* st, CCSlice name, CcVariantDecl* out) {
+    CcLowerer* L = st->L;
+    CcDeclList* declv = &L->unit->decls;
+    size_t n = declv->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *declv->get_ptr(i);
+        @switch (d->k) {
+            case .variant(vd): {
+                if (slice_eq(vd.name, name)) { *out = vd; return d; }
+                break;
+            }
+            default: break;
+        }
+    }
+    return NULL;
+}
+
 static void vt_add(VStep* st, CcUnit* u, CcDecl* d, CcVariantDecl vd) {
     CcLowerer* L = st->L;
     CCArena a = L->arena;
@@ -556,7 +588,11 @@ static void vt_add(VStep* st, CcUnit* u, CcDecl* d, CcVariantDecl vd) {
     size_t i;
     CCSlice vname = vd.name;
     CCString kn = @string(`${vname}Kind`, a);
+    CcVariantDecl local_vd;
+    CcDecl* local;
     if (vt_find(st, vd.name)) return;
+    local = vt_local_decl(st, vd.name, &local_vd);
+    if (local) { u = L->unit; d = local; vd = local_vd; armv = &vd.arms; n = armv->len(); }
     vi = cc_arena_alloc(a, sizeof(VInfo), _Alignof(VInfo));
     memset(vi, 0, sizeof(*vi));
     vi->name = vd.name;

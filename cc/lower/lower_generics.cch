@@ -391,8 +391,25 @@ static bool gn_lower_fragment(CcLowerer* L, CCString text, CcSpan sp, CCString* 
     if (!u || ds.has_errors()) { gn_fragment_error(L, sp, &ds, cstr_slice("parse")); return false; }
     sub = cc_lowerer_new(u, ix, L->opts, &ds);
     sub.depth = L->depth + 1;
+    sub.fragment = true;
     gn_lower_steps(&sub);
     if (ds.has_errors()) { gn_fragment_error(L, sp, &ds, cstr_slice("lower")); return false; }
+    /* the Results the expansion names are the unit's to declare: it is
+     * spliced into the unit, and the expansion declares none itself */
+    {
+        Vec::[CcTypeInfoRef]* got = &sub.specs;
+        Vec::[CcTypeInfoRef]* mine = &L->specs;
+        size_t ng = got->len();
+        size_t g;
+        for (g = 0; g < ng; g++) {
+            CcTypeInfo* ti = *got->get_ptr(g);
+            size_t nm = mine->len();
+            size_t m;
+            bool listed = false;
+            for (m = 0; m < nm; m++) if (*mine->get_ptr(m) == ti) listed = true;
+            if (!listed) mine->push(ti);
+        }
+    }
     po.identity = false;
     po.line_directives = false;
     po.header_mode = false;
@@ -425,30 +442,25 @@ static bool gn_decl_defines(CcDecl* d, CCSlice name) {
  * last declaration this unit makes of any type the expansion names. An
  * `ArrayMap::[int, Entr]` spells `Entr` in its fields, so it cannot be
  * spliced above the `typedef struct Entr` that says what one is. */
-static size_t gn_anchor(CcLowerer* L, CcNameList* order, size_t base) {
+static size_t gn_anchor(CcLowerer* L, CCSlice name, size_t base) {
     CcIndex* ix = L->ix;
     CcDeclList* decls = &L->unit->decls;
     size_t nd = decls->len();
     size_t at = base;
-    size_t n = order->len();
-    size_t i;
-    for (i = 0; i < n; i++) {
-        CCSlice nm = *order->get_ptr(i);
-        CcTypeInfo* info = ix->type_get(nm);
-        CcTypeList* tv;
-        size_t k;
-        size_t nt;
-        if (!info) continue;
-        tv = &info->targs;
-        nt = tv->len();
-        for (k = 0; k < nt; k++) {
-            CcType* at_k = *tv->get_ptr(k);
-            CCSlice tn = cc__strip_tag(ix->canon(at_k));
-            size_t j;
-            for (j = 0; j < nd; j++) {
-                CcDecl* d = *decls->get_ptr(j);
-                if (gn_decl_defines(d, tn) && j + 1 > at) at = j + 1;
-            }
+    CcTypeInfo* info = ix->type_get(name);
+    CcTypeList* tv;
+    size_t k;
+    size_t nt;
+    if (!info) return at;
+    tv = &info->targs;
+    nt = tv->len();
+    for (k = 0; k < nt; k++) {
+        CcType* at_k = *tv->get_ptr(k);
+        CCSlice tn = cc__strip_tag(ix->canon(at_k));
+        size_t j;
+        for (j = 0; j < nd; j++) {
+            CcDecl* d = *decls->get_ptr(j);
+            if (gn_decl_defines(d, tn) && j + 1 > at) at = j + 1;
         }
     }
     return at;
@@ -470,7 +482,8 @@ static void CcLowerer_generics(CcLowerer* L) {
         CcNameList* o = &st.order;
         size_t n = o->len();
         size_t i;
-        CCString all = cc_string_new();
+        Vec::[CCString] texts = vec_new::[CCString](L->arena);
+        CcNameList names = vec_new::[CCSlice](L->arena);
         bool any = false;
         for (i = 0; i < n; i++) {
             CCSlice name = *o->get_ptr(i);
@@ -489,26 +502,28 @@ static void CcLowerer_generics(CcLowerer* L) {
             }
             one = gn_instance_text(L, info, sp0, &ok);
             if (!ok) continue;
-            cc_string_push_slice(&all, one.as_slice(), L->arena);
+            texts.push(one);
+            names.push(name);
             any = true;
         }
         if (!any) return;
-        {
-            CCString lowered = cc_string_new();
-            CcSpan at;
-            at.first = 0;
-            at.last = 0;
-            if (!gn_lower_fragment(L, all, at, &lowered)) return;
-            all = lowered;
-        }
-        /* after the leading includes */
+        /* Each expansion lands after the leading includes and after the
+         * last declaration this unit makes of a type it names — its own,
+         * not the latest of them all: one instance whose argument is
+         * declared at the end of the file would otherwise carry every
+         * other expansion down there with it, past their uses. They keep
+         * their order among themselves, since an instance may name
+         * another. */
         {
             CcDeclList* decls = &L->unit->decls;
             size_t nd = decls->len();
-            size_t at = 0;
+            size_t base = 0;
+            size_t run;
             size_t k;
+            CcNameList* nv = &names;
+            size_t nt2 = nv->len();
             CcDeclList with = vec_new::[CcDeclRef](L->arena);
-            CcSpan sp;
+            Vec::[size_t] at = vec_new::[size_t](L->arena);
             for (k = 0; k < nd; k++) {
                 CcDecl* dd = *decls->get_ptr(k);
                 bool is_pp = false;
@@ -520,19 +535,43 @@ static void CcLowerer_generics(CcLowerer* L) {
                     default: break;
                 }
                 if (!is_pp) break;
-                at = k + 1;
+                base = k + 1;
             }
-            at = gn_anchor(L, o, at);
-            sp.first = 0;
-            sp.last = 0;
-            if (at < nd) { CcDecl* da = *decls->get_ptr(at); sp = da->span; }
-            else if (nd) { CcDecl* dl = *decls->get_ptr(nd - 1); sp = dl->span; }
-            for (k = 0; k < nd; k++) {
-                CcDecl* dk = *decls->get_ptr(k);
-                if (k == at) with.push(lw_raw_decl(L, all, sp));
-                with.push(dk);
+            run = base;
+            for (k = 0; k < nt2; k++) {
+                CCSlice nm = *nv->get_ptr(k);
+                size_t a = gn_anchor(L, nm, base);
+                if (a < run) a = run;
+                run = a;
+                at.push(a);
             }
-            if (at >= nd) with.push(lw_raw_decl(L, all, sp));
+            for (k = 0; k <= nd; k++) {
+                CCString group = cc_string_new();
+                bool grouped = false;
+                size_t j;
+                CcSpan sp;
+                sp.first = 0;
+                sp.last = 0;
+                if (k < nd) { CcDecl* dk2 = *decls->get_ptr(k); sp = dk2->span; }
+                else if (nd) { CcDecl* dl = *decls->get_ptr(nd - 1); sp = dl->span; }
+                for (j = 0; j < nt2; j++) {
+                    size_t aj = *at.get_ptr(j);
+                    CCString tj;
+                    if (aj != k) continue;
+                    tj = *texts.get_ptr(j);
+                    cc_string_push_slice(&group, tj.as_slice(), L->arena);
+                    grouped = true;
+                }
+                if (grouped) {
+                    CCString lowered = cc_string_new();
+                    CcSpan zero;
+                    zero.first = 0;
+                    zero.last = 0;
+                    if (!gn_lower_fragment(L, group, zero, &lowered)) return;
+                    with.push(lw_raw_decl(L, lowered, sp));
+                }
+                if (k < nd) { CcDecl* dk3 = *decls->get_ptr(k); with.push(dk3); }
+            }
             *decls = with;
         }
     }

@@ -1,0 +1,59 @@
+/* An arm whose type is a plain record that *contains* an arena container
+ * is not destructor-bearing: the arena owns it. A variant over such a
+ * record gets no drop helper, so a local copied into a longer-lived node
+ * does not release what the node points at when the local goes out of
+ * scope. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+
+typedef struct Shell { Vec::[int] items; int32_t tag; } Shell;
+
+@variant Slot {
+    shell: Shell;
+    num:   int64_t;
+};
+
+typedef struct Node { Slot k; } Node;
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    Node* n = cc_arena_alloc(a, sizeof(Node), _Alignof(Node));
+    int i;
+    memset(n, 0, sizeof *n);
+    {
+        Shell s;
+        memset(&s, 0, sizeof s);
+        s.items = vec_new::[int](a);
+        s.tag = 7;
+        /* fill past the initial capacity so the vector regrows at least once */
+        for (i = 0; i < 40; i++) s.items.push(i);
+        {
+            Slot k = { .shell = s };
+            n->k = k;
+        }
+        /* leaving this scope must not release the vector the node holds */
+    }
+    /* the arena hands the released bytes to the next allocation */
+    for (i = 0; i < 64; i++) {
+        char* junk = cc_arena_alloc(a, 96, 8);
+        memset(junk, 0x5a, 96);
+    }
+    @switch (n->k) {
+        case .shell(sh): {
+            Vec::[int]* v = &sh.items;
+            size_t got = v->len();
+            if (got != 40) { printf("len=%zu after scope exit\n", got); return 1; }
+            for (i = 0; i < 40; i++) {
+                int* p = v->get_ptr((size_t)i);
+                if (*p != i) { printf("items[%d]=%d\n", i, *p); return 2; }
+            }
+            if (sh.tag != 7) { printf("tag=%d\n", sh.tag); return 3; }
+            break;
+        }
+        case .num: printf("wrong arm\n"); return 4;
+    }
+    printf("ok\n");
+    return 0;
+}

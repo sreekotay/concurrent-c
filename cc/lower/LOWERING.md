@@ -316,11 +316,13 @@ typedef enum { V_a, V_b, V_c } VKind;
 typedef struct V { VKind kind; union { A a; B b; } u; } V;
 ```
 
-When an arm type carries a registered destroy chain (a `@typehooks`
-`.destroy`, or a value member with one; the `Type_destroy` naming
-convention does not count here), the drop helper follows the typedef and is
-the variant's own destroy hook, so `@destroy`, `x.destroy()` and the
-chains of enclosing structs run it:
+When an arm type is itself registered with a destructor (a `@typehooks`
+`.destroy`; the `Type_destroy` naming convention does not count here, and
+neither does a value member that has one — a plain record holding an arena
+`Vec` is owned by the arena, and a variant over it must not be dropped on
+scope exit), the drop helper follows the typedef and is the variant's own
+destroy hook, so `@destroy`, `x.destroy()` and the chains of enclosing
+structs run it:
 
 ```c
 static inline void V__cc_drop(V* __v) {
@@ -489,6 +491,21 @@ specs of the types it defines; a user of one reaches it through the
 include. A translation unit the host compiles alone still carries every
 spec the index knows, since anything it reaches has to be there.
 
+The type that decides is the value. An error type is shared by every
+Result in a program, so the header declaring it would take them all back
+and be first again — `CcDiag` is the error arm of nearly every spec here,
+and `diag.h` is included before anything else. A `void` Result has no
+value to decide and belongs to the header that declares its error.
+
+Both questions — what this unit defines, and where — are answered from
+this unit's text. The index holds one declaration per type, from the
+parse that indexed the file; a header lowered on its own is parsed
+again, so that declaration is not in this unit's list and its spans index
+another tape. Asking the index would say "not defined here" of a type
+this very file defines, and put its spec above the definition. The same
+applies to a `@variant`: the declaration to lower is the one in this
+unit, not the index's.
+
 ## Compile time
 
 `@comptime if` / `@comptime for` / `@comptime(expr)` decide what source
@@ -618,7 +635,15 @@ past which the family is expanding into itself.
 An expansion lands after the leading includes, and after the last
 declaration this unit makes of any type it names: an
 `ArrayMap::[int, Entr]` spells `Entr` in its fields, so it cannot be
-spliced above the `typedef struct Entr` that says what one is.
+spliced above the `typedef struct Entr` that says what one is. Each
+instance is placed at its own such position, so one instance naming a
+type declared late in the file does not push the rest down with it.
+
+An expansion declares no Result specs of its own. It is spliced into a
+unit that declares them, and a second `#include <ccc/cc_result.h>` with a
+second copy of every spec in the middle of the file says nothing the unit
+has not said. The Results an expansion names join the unit's list
+instead, which the results step reads after this one.
 
 `_Generic` inside an expansion (and anywhere else) may carry preprocessor
 lines between its associations, or a macro standing for whole
@@ -631,3 +656,9 @@ lowered; the association list is replayed as the tokens the user wrote.
 `println(x)` is `cc_println(x)`; the alias list is the set of functions
 declared with the print attribute in `stdio.cch`. A bare `println(...)`
 statement is a discarded optional Result.
+
+An attribute is printed by replaying the tokens it occupies, so only one
+the source spells is printed at all. `@tag:NAME` and `@task` are read out
+of a comment and carry the span of the declaration they describe — the
+span a diagnostic wants — so replaying one would print that declaration's
+first token a second time (`static static void f`).

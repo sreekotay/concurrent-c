@@ -34,6 +34,16 @@ Produces: `cc/bin/ccc`, `out/cc/bin/shadow_lower`, lowered `out/include/`.
 | Stdlib / runtime (`cc/include/ccc/**`, `cc/runtime/**`) | `make -C cc lower-headers` then rebuild your program (`make cc` also works) | `iterate_shadow_lower.sh` |
 | Driver / TCC glue (`cc/src/**`) | `make cc -jN` | snapshot / promote |
 | Lowerer faces (`cc/shadow/*.cch` / `shadow_lower.ccs`) | `./scripts/iterate_shadow_lower.sh` | `make all` unless you also need `ccc`/stdlib rebuilt; **no** snapshot until you ship |
+| Clean lowerer (`cc/lower/*.cch` / `*.ccs`) | `CC_NO_CACHE=1 make -C cc lower-cc`, then `./scripts/lowerer_selfhost.sh` and `./scripts/lowerer_diff.sh` | `iterate_shadow_lower.sh` |
+
+`lowerer_selfhost.sh` builds the lowerer from what it lowered its own
+sources to and has that build lower them again: the `.c` and every `.h`
+must come back byte for byte. It runs in about a minute and catches what
+the corpus cannot — a lowering that is wrong only about the lowerer.
+`lowerer_diff.sh` (~40 min, **one run at a time**: it shares state) writes
+`out/lowerer_diff/table.txt`, a row per corpus unit with the shadow and
+clean verdicts; keep a copy before a change so you can name the rows you
+gained and prove you lost none.
 
 `iterate_shadow_lower.sh` rebuilds **`shadow_lower` only** (the native front). `ccc` already invokes that binary.
 

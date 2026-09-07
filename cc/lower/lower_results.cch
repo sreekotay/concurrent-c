@@ -1302,21 +1302,26 @@ static CCSlice rl_type_base_name(const CcType* t) {
     return cc_slice_empty();
 }
 
-/* The index in this unit's declarations of the one defining type `name`;
- * SIZE_MAX when it is not defined at file scope here (a header, a builtin,
- * a local type, or unknown). */
+/* The index in this unit's declarations of the last one declaring type
+ * `name`; SIZE_MAX when this unit does not declare it at file scope (a
+ * builtin, a type from an include, a local type, or unknown).
+ *
+ * The question is about this text, so it is answered from this text. The
+ * index holds one decl per type, from the parse that indexed the file; a
+ * header lowered on its own is parsed again, so that decl is not in this
+ * unit's list and asking the index would say "not here" of a type this
+ * very file defines — and put its spec above the definition. */
 static size_t rl_defining_decl(CcLowerer* L, CCSlice name) {
-    CcSym* s = rl_ix_sym(L, name);
     CcDeclList* decls = &L->unit->decls;
     size_t n = decls->len();
+    size_t at = SIZE_MAX;
     size_t k;
-    while (s && s->kind != CC_SYM_TYPE) s = s->same_name;
-    if (!s || s->unit != L->unit || !s->decl) return SIZE_MAX;
+    if (!name.len) return SIZE_MAX;
     for (k = 0; k < n; k++) {
         CcDecl* d = *decls->get_ptr(k);
-        if (d == s->decl) return k;
+        if (gn_decl_defines(d, name)) at = k;
     }
-    return SIZE_MAX;
+    return at;
 }
 
 /* Where a spec goes: before the declaration at the returned index. After
@@ -1406,7 +1411,12 @@ static void rl_spec_text(CcLowerer* L, CcTypeInfo* ti, CCString* text) {
  * every spec would put `CCResult_CcProduct_CcDiag` above the include that
  * says what a `CcProduct` is, in whichever header happened to be read
  * first. So a header declares the specs it spells and the specs of the
- * types it defines; a user of one reaches it through the include. */
+ * types it defines; a user of one reaches it through the include.
+ *
+ * The type that decides is the value: an error type is shared by every
+ * Result in a program (`CcDiag` here), so the header declaring it would
+ * take them all back and be first again. A `void` Result has no value to
+ * decide, and belongs to the header that declares its error. */
 static RSpecList rl_specs_for(CcLowerer* L) {
     CcIndex* ix = rl_ix(L);
     RSpecList* all = &ix->result_specs;
@@ -1431,17 +1441,23 @@ static RSpecList rl_specs_for(CcLowerer* L) {
         if (!ti->is_result) continue;
         vn = rl_type_base_name(ti->result_value);
         en = rl_type_base_name(ti->result_err);
-        if ((!vn.len || rl_defining_decl(L, vn) == SIZE_MAX) &&
-            (!en.len || rl_defining_decl(L, en) == SIZE_MAX)) continue;
+        if (vn.len) {
+            if (rl_defining_decl(L, vn) == SIZE_MAX) continue;
+        } else if (!en.len || rl_defining_decl(L, en) == SIZE_MAX) continue;
         for (k = 0; k < no; k++)
             if (*ov->get_ptr(k) == ti) listed = true;
-        if (!listed) out.push(ti);
+            if (!listed) out.push(ti);
     }
     return out;
 }
 
+/* An expansion is spliced into a unit that declares specs of its own: a
+ * second `#include <ccc/cc_result.h>` and a second copy of every spec, in
+ * the middle of the file, say nothing the unit has not said. The Results
+ * an expansion names reach the unit's list instead (`gn_lower_fragment`). */
 static void rl_emit_specs(CcLowerer* L, RSpecList* used) {
     CcIndex* ix = rl_ix(L);
+    if (L->fragment) return;
     RSpecList mine = rl_specs_for(L);
     RSpecList* specs = &mine;
     (void)used;
