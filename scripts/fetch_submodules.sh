@@ -14,15 +14,18 @@
 # no mirror — a fetch failure there used to abort the whole install. Pass
 # --with-liblfds to opt in.
 #
-# bearssl and curl back the opt-in TLS/HTTP modules; `make deps` fetches those.
+# bearssl and curl back the opt-in TLS/HTTP modules. `make bearssl` /
+# `make deps` fetch BearSSL when the tree is missing; pass --with-bearssl
+# here to fetch without building. curl is still `git submodule update`.
 set -e
 
 usage() {
   cat <<'EOF'
-Usage: scripts/fetch_submodules.sh [--with-liblfds] [--full]
+Usage: scripts/fetch_submodules.sh [--with-liblfds] [--with-bearssl] [--full]
 
 Options:
   --with-liblfds  Also fetch third_party/liblfds (optional channel backend).
+  --with-bearssl  Also fetch third_party/bearssl (TLS; `make bearssl` does this).
   --full          Fetch complete submodule trees; skip partial-clone filters.
                   Use when you need to work in a submodule.
   -h, --help      Show this help.
@@ -30,11 +33,13 @@ EOF
 }
 
 WITH_LIBLFDS=0
+WITH_BEARSSL=0
 FULL=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --with-liblfds) WITH_LIBLFDS=1 ;;
+    --with-bearssl) WITH_BEARSSL=1 ;;
     --full) FULL=1 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; echo "Error: unknown argument: $1" >&2; exit 1 ;;
@@ -69,6 +74,12 @@ if [ "$WITH_LIBLFDS" = "1" ]; then
     echo "Warning: could not fetch third_party/liblfds; continuing without it." >&2
     echo "         Channels use the native ring queue instead." >&2
   fi
+fi
+
+if [ "$WITH_BEARSSL" = "1" ]; then
+  echo "Fetching third_party/bearssl..."
+  git submodule sync -- third_party/bearssl >/dev/null 2>&1 || true
+  submodule_update third_party/bearssl
 fi
 
 echo "Submodules ready."

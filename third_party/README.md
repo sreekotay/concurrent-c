@@ -20,9 +20,12 @@ Fetch the build inputs with:
 ./scripts/fetch_submodules.sh              # tcc
 ./scripts/fetch_submodules.sh --full       # complete trees, for submodule work
 ./scripts/fetch_submodules.sh --with-liblfds
+./scripts/fetch_submodules.sh --with-bearssl  # TLS sources; `make bearssl` also fetches
 ```
 
-**Note**: BearSSL and libcurl are opt-in. Only build/link what you need.
+**Note**: BearSSL and libcurl are opt-in. A default `ccc` build does not fetch
+them. `CC_ENABLE_TLS=1` / `make bearssl` / `make deps` init the BearSSL gitlink
+if the tree is missing, then build `libbearssl.a`.
 
 ## liblfds
 

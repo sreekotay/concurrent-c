@@ -40,9 +40,11 @@ endif
 ifeq ($(CC_ENABLE_ASYNC),1)
   CFLAGS_COMMON += -DCC_ENABLE_ASYNC
 endif
+TLS_LIB_DEP :=
 ifeq ($(CC_ENABLE_TLS),1)
   CFLAGS_COMMON += -DCC_ENABLE_TLS -I$(BEARSSL_DIR)/inc
-  LDLIBS += $(BEARSSL_DIR)/build/libbearssl.a
+  TLS_LIB_DEP := $(BEARSSL_DIR)/build/libbearssl.a
+  LDLIBS += $(TLS_LIB_DEP)
 endif
 ifeq ($(BUILD),debug)
   CFLAGS := $(CFLAGS_COMMON) -O0 -g
@@ -390,12 +392,12 @@ $(WRAPPER): $(CCC_SCRIPT)
 # Runtime shared lib for shadow --exe (libtcc cannot link host clang .o on Darwin).
 # Leaf soname only — run with DYLD_LIBRARY_PATH / LD_LIBRARY_PATH = this dir.
 # Host TCC needs CFLAGS (-B) so -shared finds libtcc1.a.
-$(RUNTIME_DYLIB): $(OBJDIR)/runtime/concurrent_c.o
+$(RUNTIME_DYLIB): $(OBJDIR)/runtime/concurrent_c.o $(TLS_LIB_DEP)
 	@mkdir -p $(dir $@)
 ifeq ($(shell uname -s),Darwin)
-	$(CC) $(CFLAGS) $(RUNTIME_DYLIB_LINK) -install_name libcc_runtime.dylib -o $@ $< $(if $(filter 1,$(CC_ENABLE_TLS)),$(BEARSSL_DIR)/build/libbearssl.a,) -lpthread -lm
+	$(CC) $(CFLAGS) $(RUNTIME_DYLIB_LINK) -install_name libcc_runtime.dylib -o $@ $< $(TLS_LIB_DEP) -lpthread -lm
 else
-	$(or $(RUNTIME_DYLIB_LINK_CC),$(CC)) $(CFLAGS) $(RUNTIME_DYLIB_LINK) -o $@ $< $(if $(filter 1,$(CC_ENABLE_TLS)),$(BEARSSL_DIR)/build/libbearssl.a,) -lpthread -lm
+	$(or $(RUNTIME_DYLIB_LINK_CC),$(CC)) $(CFLAGS) $(RUNTIME_DYLIB_LINK) -o $@ $< $(TLS_LIB_DEP) -lpthread -lm
 endif
 
 $(SHADOW_TCC_OBJ): $(SHADOW_TCC_C) $(TCC_LIB_DEP)
@@ -607,9 +609,14 @@ $(LOWER_HEADERS_BINARY): $(LOWER_HEADERS_OBJS) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(LOWER_HEADERS_OBJS) $(LDLIBS)
 
-$(OBJDIR)/runtime/concurrent_c.o: $(LOWER_HEADERS_STAMP)
+$(OBJDIR)/runtime/concurrent_c.o: $(LOWER_HEADERS_STAMP) $(TLS_LIB_DEP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Iruntime $(RUNTIME_PIC) -MMD -MP -MF $(@:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $@
+
+# TLS=1: headers + archive come from the submodule. Root `make bearssl` inits
+# the gitlink on a fresh clone, then builds libbearssl.a.
+$(BEARSSL_DIR)/build/libbearssl.a:
+	$(MAKE) -C .. bearssl
 
 # arena_state.o for lower_headers*: compile the seeded rewrite (has .h includes).
 # Depend on the seed stamp only — never LOWER_HEADERS_STAMP (breaks cold -j).

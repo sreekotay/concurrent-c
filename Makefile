@@ -248,8 +248,13 @@ perf-regress-oracle: cc tools
 #   CC_TARGET_LIBS myapp third_party/bearssl/build/libbearssl.a
 #   CC_TARGET_LIBS myapp third_party/curl/build/lib/libcurl.a
 
-# Build BearSSL static library (for TLS)
+# Build BearSSL static library (for TLS). Fresh clones have only the gitlink;
+# fetch the tree before `make -C` so `CC_ENABLE_TLS=1` / `make deps` work.
 bearssl:
+	@if [ ! -f $(BEARSSL_DIR)/Makefile ]; then \
+		echo "Fetching third_party/bearssl..."; \
+		./scripts/fetch_submodules.sh --with-bearssl; \
+	fi
 	@echo "Building BearSSL..."
 	@$(MAKE) -C $(BEARSSL_DIR) -j4
 	@echo "BearSSL built: $(BEARSSL_DIR)/build/libbearssl.a"
