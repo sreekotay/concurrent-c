@@ -1,0 +1,51 @@
+#pragma(@per_tu)
+/* The compile-time seam.
+ *
+ * Running compile-time code needs a C compiler, so the executor stays what
+ * it is: a C library the lowerer links (`comptime/executor.c`, on libtcc).
+ * What this file is for is the shape of the call. The lowerer asks about
+ * one construct at a time, naming it by a span of its own tape — not by
+ * handing the engine the whole translation unit as text and reading back
+ * whatever came out.
+ *
+ * Only the entry points the lowerer calls are declared here. They are C,
+ * so they are declared as C: no UFCS, no Result. A failure is a return
+ * code and a message the caller turns into a diagnostic at the span. */
+#ifndef CC_LOWER_COMPTIME_CCH
+#define CC_LOWER_COMPTIME_CCH
+
+#include "diag.cch"
+
+/* Where a construct is, for the engine's own diagnostics and for the
+ * anchors an `@emit` splices at. `site_pos` is a byte offset into the
+ * file; `site_line` is 1-based, 0 when unknown. */
+typedef struct CCComptimeExecOpts {
+    const char* input_path;
+    size_t      site_pos;
+    int         site_line;
+    const char* type_prelude;
+} CCComptimeExecOpts;
+
+/* The `@comptime` function definitions in `src` become callable by the
+ * evaluations below. `_scan` clears what was registered before — one
+ * unit's definitions are not another's — and returns how many it found,
+ * or -1 with `_scan_error()` set. Zero is not a failure: a unit may have
+ * none. */
+extern int  cc_comptime_fn_registry_scan(const char* src, size_t len);
+extern const char* cc_comptime_fn_registry_scan_error(void);
+
+/* Evaluate `expr` and project its value to the text of a C constant
+ * expression — the literal that stands in place of `@comptime(expr)`.
+ * Integers, floating point, bool and strings project; an aggregate or a
+ * pointer into compile-time memory does not.
+ *
+ *    0  `*out_lit` is the literal, in `arena`, NUL-terminated
+ *   -2  it ran, and its value is not a literal
+ *   -1  it did not run: `err_buf` says why */
+extern int cc_comptime_exec_eval_literal(const char* expr,
+                                         const CCComptimeExecOpts* opts,
+                                         char** out_lit, size_t* out_len,
+                                         char* err_buf, size_t err_sz,
+                                         CCArena arena);
+
+#endif

@@ -12,8 +12,13 @@
 #define CC_PREPARE_TYPE_SCOPED   4u
 #define CC_PREPARE_FACTORY_SUGAR 8u
 #define CC_PREPARE_STATIC_MAP    16u
-#define CC_PREPARE_COMPTIME      32u
+#define CC_PREPARE_COMPTIME_IF   32u
 #define CC_PREPARE_TEMPLATES     64u
+/* Value-position `@comptime(expr)`. Separate from the branch pass because
+ * the clean lowerer resolves it itself, from the AST: it calls the same
+ * executor, naming the expression by the span it parsed. */
+#define CC_PREPARE_COMPTIME_VALUE 128u
+#define CC_PREPARE_COMPTIME      (CC_PREPARE_COMPTIME_IF | CC_PREPARE_COMPTIME_VALUE)
 #define CC_PREPARE_ALL           (CC_PREPARE_GRAMMAR | CC_PREPARE_MODULE_EXPORT | \
                                   CC_PREPARE_TYPE_SCOPED | CC_PREPARE_FACTORY_SUGAR | \
                                   CC_PREPARE_STATIC_MAP | CC_PREPARE_COMPTIME | \
@@ -30,6 +35,15 @@ int cc_comptime_prepare_source_ex(char** inout_buf, size_t* inout_len,
  * are never overwritten, so the line map holds. Returns NULL on an
  * unterminated construct, having said which. Caller frees. */
 char* cc_comptime_blank_blocks(const char* src, size_t n);
+
+/* Leave value-position `@comptime(expr)` in place: the caller resolves it
+ * itself, from the expression it parsed. */
+#define CC_BLANK_KEEP_VALUE 1u
+/* Leave `@comptime` function and constant definitions in place: the
+ * caller registers them from its own parse, so what a value-position
+ * `@comptime(expr)` calls is there to be read, and drops them itself. */
+#define CC_BLANK_KEEP_FN 2u
+char* cc_comptime_blank_blocks_ex(const char* src, size_t n, unsigned keep);
 
 /* Resolve `@comptime if/for`, then lower `@emit` / `@string` templates.
  * Updates *inout_buf / *inout_len in place (frees the prior buffer on change).

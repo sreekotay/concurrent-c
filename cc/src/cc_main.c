@@ -4034,7 +4034,14 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
     if (r) { free(buf); buf = r; len = strlen(buf); }
     r = cc_rewrite_system_cch_includes_to_lowered_headers(buf, len);
     if (r) { free(buf); buf = r; len = strlen(buf); }
-    if (cc_comptime_prepare_source(&buf, &len, in_path) != 0) { free(buf); return -1; }
+    /* Not the value pass: `@comptime(expr)` is the lowerer's, and running
+     * it here too would evaluate every site twice and report a bad one
+     * from a copy that is thrown away. */
+    if (cc_comptime_prepare_source_ex(&buf, &len, in_path,
+                                      CC_PREPARE_ALL & ~CC_PREPARE_COMPTIME_VALUE) != 0) {
+        free(buf);
+        return -1;
+    }
     cc_emit_plan_clear_generic_factory_registrations();
     cc_emit_plan_clear_comptime_fragments();
     if (cc_emit_plan_exec_comptime_blocks(buf, len, in_path) != 0) rc = -1;
@@ -4045,13 +4052,15 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
 
 /* Compile time, before the clean lowerer sees the unit.
  *
- * `@comptime if` / `@comptime for` / `@comptime(expr)` decide what source
- * there is to lower at all, and `@grammar` bodies are raw bytes no parser
- * may read. Both are resolved here, by the same engine the shadow path
- * runs, and the lowerer is handed the source that survived. What it is
- * NOT handed is C: the type-scoped and template passes are left off, so
- * `Tweet.parse(...)` and `@string(`...`)` reach the lowerer as the
- * language, for its own steps to lower from the index and the AST.
+ * `@comptime if` / `@comptime for` decide what source there is to lower at
+ * all, and `@grammar` bodies are raw bytes no parser may read. Those are
+ * resolved here, by the same engine the shadow path runs, and the lowerer
+ * is handed the source that survived. What it is NOT handed is C: the
+ * type-scoped and template passes are left off, so `Tweet.parse(...)` and
+ * `@string(`...`)` reach the lowerer as the language, for its own steps to
+ * lower from the index and the AST. `@comptime(expr)` is left off for the
+ * same reason: the lowerer evaluates it from the span it parsed, calling
+ * the same executor, so the value has a position to be wrong at.
  *
  * The prepare passes keep the line count (they blank rather than delete),
  * so the stage the lowerer reads still names the user's own lines. */
@@ -4078,13 +4087,13 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
         return -1;
     }
     if (cc_comptime_prepare_source_ex(&buf, &len, in_path,
-                                      CC_PREPARE_COMPTIME | CC_PREPARE_GRAMMAR |
+                                      CC_PREPARE_COMPTIME_IF | CC_PREPARE_GRAMMAR |
                                       CC_PREPARE_MODULE_EXPORT | CC_PREPARE_STATIC_MAP) != 0) {
         free(buf);
         return -1;
     }
     {
-        char* blanked = cc_comptime_blank_blocks(buf, len);
+        char* blanked = cc_comptime_blank_blocks_ex(buf, len, CC_BLANK_KEEP_VALUE | CC_BLANK_KEEP_FN);
         free(buf);
         if (!blanked) return -1;
         buf = blanked;

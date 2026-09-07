@@ -35,6 +35,7 @@ Produces: `cc/bin/ccc`, `out/cc/bin/shadow_lower`, lowered `out/include/`.
 | Driver / TCC glue (`cc/src/**`) | `make cc -jN` | snapshot / promote |
 | Lowerer faces (`cc/shadow/*.cch` / `shadow_lower.ccs`) | `./scripts/iterate_shadow_lower.sh` | `make all` unless you also need `ccc`/stdlib rebuilt; **no** snapshot until you ship |
 | Clean lowerer (`cc/lower/*.cch` / `*.ccs`) | `CC_NO_CACHE=1 make -C cc lower-cc`, then `./scripts/lowerer_selfhost.sh` and `./scripts/lowerer_diff.sh` | `iterate_shadow_lower.sh` |
+| The comptime seam (`cc/src/comptime/**`, `cc/src/preprocess/**`) | `make -C cc` **then** `CC_NO_CACHE=1 make -C cc lower-cc` — `cclower_cc` links `libshadow_comptime.a`, so a stale archive is a stale lowerer | linking the lowerer against a `libshadow_comptime.a` the driver did not just rebuild |
 
 `lowerer_selfhost.sh` builds the lowerer from what it lowered its own
 sources to and has that build lower them again: the `.c` and every `.h`

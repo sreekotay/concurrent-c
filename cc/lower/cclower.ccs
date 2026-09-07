@@ -57,10 +57,7 @@ static CCSlice read_whole_file(const char* path, CCArena a, bool* ok) {
     return cc_slice_from_buffer(buf, (size_t)n);
 }
 
-static CCSlice source_of(CCSlice path, void* ctx) {
-    (void)path;
-    return *(CCSlice*)ctx;
-}
+
 
 /* Known type names: whitespace-separated, `#`-prefixed words ignored. */
 static void read_known_types(const char* path, CcNameList* known, CCArena a) {
@@ -97,6 +94,34 @@ typedef struct Loaded {
     CcIndex* ix;                /* --lower: the index, shared with the headers lowered for this unit */
     CcLowerOpts lo;
 } Loaded;
+
+/* The text a caret snippet is cut from.
+ *
+ * A diagnostic names the file the user can open, which is not always the
+ * file the tool read: a unit that went through the compile-time stage is
+ * lowered from a copy under the cache, and that copy carries a `#line`
+ * back to the original. Cutting the snippet from the copy by the user's
+ * line number points at the wrong line — the closer the copy is to the
+ * original, the more convincingly wrong. So the snippet comes from the
+ * named file when it can be read, and from what was lowered otherwise. */
+static CCSlice source_of(CCSlice path, void* ctx) {
+    Loaded* L = (Loaded*)ctx;
+    CCSlice mine = L->src;
+    bool ok = false;
+    CCSlice text;
+    const char* p;
+    if (!path.len) return mine;
+    if (L->path && cc_slice_eq_cstr(&path, L->path)) return mine;
+    {
+        CCString s = cc_string_new();
+        cc_string_push_slice(&s, path, L->arena);
+        p = cc_string_cstr(&s, L->arena);
+        if (!p) return mine;
+        text = read_whole_file(p, L->arena, &ok);
+    }
+    if (!ok) return mine;
+    return text;
+}
 
 /* --root DIR: the repository root quoted `.cch` includes are made relative to;
  * --h-root DIR: where their lowered `.h` files go (`DIR/<rel>.h`). */
@@ -139,7 +164,7 @@ static bool load(Loaded* L, const char* path, CcNameList known, CCArena a) {
 static void print_diags(Loaded* L) {
     CcDiags* ds = &L->ds;
     Vec::[CcDiag]* items = &ds->items;
-    if (items->len()) ds->print(stderr, source_of, &L->src);
+    if (items->len()) ds->print(stderr, source_of, L);
 }
 
 /* Byte offset of physical (line, col) in `src`. */

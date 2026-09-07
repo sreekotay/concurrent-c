@@ -1,0 +1,155 @@
+#pragma(@per_tu)
+/* Clean lowerer, step: `@comptime(expr)` in value position.
+ *
+ * The expression runs at compile time and what stands in its place is the
+ * text of a C constant expression. Running it needs a C compiler, so the
+ * executor does that (`comptime.cch` is the seam); what this step decides
+ * is which expression, where its answer goes, and what a failure says.
+ *
+ * The step runs first, before any other reads the unit: a value the user
+ * wrote `@comptime(...)` for is a constant to everything downstream —
+ * an array bound, an enumerator, a case label — and none of those can be
+ * typed from an expression that has not been evaluated yet. */
+#ifndef CC_LOWER_COMPTIME_CCH_STEP
+#define CC_LOWER_COMPTIME_CCH_STEP
+#include "lower.cch"
+#include "typing.cch"
+#include "comptime.cch"
+
+typedef struct XStep {
+    CcLowerer* L;
+    bool registered;        /* the unit's `@comptime` functions are in scope */
+    int n;                  /* how many sites this unit resolved */
+    /* The engine takes C strings, and a short `CCString` keeps its bytes
+     * inside itself: a NUL-terminated view of one dies with the block that
+     * declared it. These live as long as the step does. */
+    CCString path_buf;
+    CCString expr_buf;
+} XStep;
+
+/* The unit's own path, as the engine's messages and anchors name it. */
+static const char* xt_path(XStep* st) {
+    CcLowerer* L = st->L;
+    CcTape* tp = &L->unit->tape;
+    CCSlice p = tp->path;
+    st->path_buf = cc_string_new();
+    cc_string_push_slice(&st->path_buf, p, L->arena);
+    return cc_string_cstr(&st->path_buf, L->arena);
+}
+
+/* The `@comptime` function definitions of this unit, once. They are in
+ * the source the lowerer was handed — the stage keeps them for exactly
+ * this, and the drop step takes them back out of the C. The registry is
+ * process-global and one unit's definitions are not another's, so it is
+ * cleared before the scan rather than added to. */
+static bool xt_register(XStep* st) {
+    CcLowerer* L = st->L;
+    CcTape* tp = &L->unit->tape;
+    CCSlice src = tp->src;
+    if (st->registered) return true;
+    st->registered = true;
+    if (cc_comptime_fn_registry_scan(src.ptr, src.len) < 0) {
+        const char* why = cc_comptime_fn_registry_scan_error();
+        CCSlice w = cstr_slice("no reason given");
+        CcSpan sp;
+        if (why && why[0]) w = cc_slice_from_buffer((char*)why, strlen(why));
+        CCString m;
+        sp.first = 0;
+        sp.last = 0;
+        m = @string(`this unit's ${"@"}comptime functions do not scan: ${w}`, L->arena);
+        lw_error(L, sp, m);
+        return false;
+    }
+    return true;
+}
+
+/* Where the site is, for the engine's messages. */
+static CCComptimeExecOpts xt_opts(XStep* st, CcSpan sp, const char* path) {
+    CcLowerer* L = st->L;
+    CcUnit* u = L->unit;
+    CcTape* tp = &u->tape;
+    CcLoc at = u->loc(sp);
+    const CcToken* tk = tp->at(sp.first);
+    CCComptimeExecOpts o;
+    o.input_path = path;
+    o.site_pos = (size_t)(tk->text.ptr - tp->src.ptr);
+    o.site_line = (int)at.line;
+    o.type_prelude = NULL;
+    return o;
+}
+
+/* `@comptime(e)` -> the literal its value projects to. */
+static void xt_value(XStep* st, CcExpr* e, CcComptimeExpr ce) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CcSpan sp = e->span;
+    CCSlice text;
+    const char* expr;
+    const char* path;
+    char* lit = NULL;
+    size_t lit_len = 0;
+    char err[512];
+    int rc;
+    CCComptimeExecOpts o;
+    if (!ce.a) return;
+    if (!xt_register(st)) return;
+    text = cc__span_text(ix, L->unit, ce.a->span.first, ce.a->span.last);
+    st->expr_buf = cc_string_new();
+    cc_string_push_slice(&st->expr_buf, text, L->arena);
+    expr = cc_string_cstr(&st->expr_buf, L->arena);
+    if (!expr) return;
+    path = xt_path(st);
+    o = xt_opts(st, sp, path);
+    err[0] = '\0';
+    rc = cc_comptime_exec_eval_literal(expr, &o, &lit, &lit_len, err, sizeof err, L->arena);
+    if (rc == 0 && lit) {
+        CCString out = cc_string_new();
+        cc_string_push_slice(&out, cc_slice_from_buffer(lit, lit_len), L->arena);
+        e->k = { .ident = lw_keep(L, &out) };   /* already C: replayed as written */
+        st->n++;
+        return;
+    }
+    {
+        CCSlice what = cc_slice_from_buffer((char*)expr, strlen(expr));
+        CcUnit* u = L->unit;
+        CcLoc loc = u->loc(sp);
+        CcDiags* ds = L->ds;
+        CCString m;
+        CcDiag d;
+        loc.col = 0;   /* the value is the line's, not one column of it */
+        if (rc == -2) {
+            m = @string(`${"@"}comptime(${what}) value is not projectable to a C literal`, L->arena);
+            d = CcDiag_error(loc, cc_string_persist_slice(L->arena, &m));
+            d = CcDiag_with_note(d, cstr_slice("value-position @comptime supports integers, floating point, bool, and strings"));
+        } else {
+            CCSlice why = cstr_slice("no reason given");
+            CCString m2;
+            if (err[0]) why = cc_slice_from_buffer(err, strlen(err));
+            m2 = @string(`${"@"}comptime(${what}) did not run: ${why}`, L->arena);
+            d = CcDiag_error(loc, cc_string_persist_slice(L->arena, &m2));
+        }
+        ds->push(d);
+    }
+}
+
+static bool xt_expr_visit(CcExpr* e, void* env) {
+    XStep* st = (XStep*)env;
+    @switch (e->k) {
+        case .comptime(ce): xt_value(st, e, ce); break;
+        default: break;
+    }
+    return true;
+}
+
+static void CcLowerer_comptime(CcLowerer* L) {
+    XStep st;
+    CcVisitor v;
+    memset(&st, 0, sizeof st);
+    st.L = L;
+    memset(&v, 0, sizeof v);
+    v.expr = xt_expr_visit;
+    v.env = &st;
+    CcUnit_walk(L->unit, v);
+}
+
+#endif

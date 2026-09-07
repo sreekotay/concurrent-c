@@ -254,6 +254,7 @@ static CCSlice lw_closest(CcNameList names, CCSlice name) {
  * needs this one before it is defined. */
 static void lw_drop_cc_only(CcLowerer* L);
 
+#include "lower_comptime.cch"
 #include "lower_generics.cch"
 #include "lower_slices.cch"
 #include "lower_strings.cch"
@@ -350,7 +351,9 @@ static bool lw_strip_view_attrs(CcType* t, void* env) {
  * language. */
 #define LW_SPEC_SCHEDULING (CC_SPEC_BLOCKING | CC_SPEC_NONBLOCKING | CC_SPEC_LATENCY_SENSITIVE)
 
-/* Declarations the index consumed and C never sees: `@typeview`. */
+/* Declarations the index consumed and C never sees: `@typeview`, and a
+ * `@comptime` definition — that one ran at compile time, and what it
+ * computed is already the literal standing in its caller's place. */
 static void lw_drop_cc_only(CcLowerer* L) {
     CcDeclList* decls = &L->unit->decls;
     CcDeclList with = vec_new::[CcDeclRef](L->arena);
@@ -366,6 +369,7 @@ static void lw_drop_cc_only(CcLowerer* L) {
             case .factory: drop = true; break;
             default: break;
         }
+        if ((d->specs & (uint32_t)CC_SPEC_COMPTIME) != 0) drop = true;
         d->specs &= ~(uint32_t)LW_SPEC_SCHEDULING;
         if (!drop) with.push(d);
     }
@@ -458,6 +462,7 @@ static void CcLowerer_includes(CcLowerer* L) {
 }
 
 static void CcLowerer_lower_unit(CcLowerer* L) {
+    CcLowerer_comptime(L);  /* first: a value the user asked for at compile time is a constant to every step */
     CcLowerer_includes(L);
     CcLowerer_async(L);     /* first: an async body is an ordinary body to every step after it */
     CcLowerer_parallel(L);  /* then: an arm becomes an ordinary function the later steps walk */

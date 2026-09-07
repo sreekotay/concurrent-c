@@ -508,14 +508,36 @@ unit, not the index's.
 
 ## Compile time
 
-`@comptime if` / `@comptime for` / `@comptime(expr)` decide what source
-there is to lower at all, and a `@grammar` body is raw bytes no parser
-may read. Both are resolved before the lowerer sees the unit, by the same
-engine the shadow path runs, and the lowerer is handed the source that
-survived — written to a stage in the cache, with a `#line` back to the
-file the user wrote (the prepare passes blank rather than delete, so line
-N there is line N here) and `--quote-dir` naming the directory that
-unit's quoted `.cch` includes resolve against.
+Running compile-time code needs a C compiler, so there is an executor and
+it stays: `cc/src/comptime`, on libtcc, which the lowerer links. What is
+being taken apart is not the executor but the shape of the call — a
+whole-translation-unit text rewrite before the lowerer sees anything, with
+the lowerer reading back whatever came out.
+
+`@comptime if` / `@comptime for` decide what source there is to lower at
+all, and a `@grammar` body is raw bytes no parser may read. Those are
+still resolved before the lowerer sees the unit, by the same engine the
+shadow path runs, and the lowerer is handed the source that survived —
+written to a stage in the cache, with a `#line` back to the file the user
+wrote (the prepare passes blank rather than delete, so line N there is
+line N here) and `--quote-dir` naming the directory that unit's quoted
+`.cch` includes resolve against.
+
+`@comptime(expr)` in value position is the lowerer's own. It parses the
+expression, names it by the span it parsed, and asks the executor for the
+text of the C constant its value projects to — an integer, a floating
+point number, a bool or a string. So a value that is none of those is a
+diagnostic at the expression the user wrote, in a file that is still being
+lowered, rather than a message from a copy that is thrown away. The stage
+keeps `@comptime` function definitions for the same reason: what the
+expression calls has to be there to read, and the lowerer takes those
+definitions back out of the C itself (they ran at compile time; what they
+computed is already the literal standing in the caller's place).
+
+A diagnostic on a staged unit names the file the user wrote, so its caret
+snippet is cut from that file, not from the stage: the stage is one line
+longer, and a snippet cut from it by the user's line number points one
+line off — the closer the copy, the more convincingly wrong.
 
 What the lowerer is not handed is C. The type-scoped and template passes
 are left off, so `Tweet.parse(...)` and `@string(`...`)` still reach it as

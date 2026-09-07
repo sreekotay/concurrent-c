@@ -39,7 +39,7 @@ static void cc__blank_unterminated(const char* src, size_t at,
             what ? what : "@comptime", line);
 }
 
-char* cc_comptime_blank_blocks(const char* src, size_t n) {
+char* cc_comptime_blank_blocks_ex(const char* src, size_t n, unsigned keep) {
     char* out;
     CCInertScan sc;
     int brace_depth = 0;
@@ -209,7 +209,21 @@ char* cc_comptime_blank_blocks(const char* src, size_t n) {
                 i = end + 1;
                 continue;
             }
+            /* Value position: `@comptime(expr)` — the paren opens right
+             * after the keyword, with no declarator between. The caller
+             * that resolves it from the AST keeps it; everyone else blanks
+             * it through the `;`, with the declaration it initializes. */
+            if (src[body_l] == '(' && (keep & CC_BLANK_KEEP_VALUE)) {
+                i = kw_end;
+                continue;
+            }
             /* @comptime fn/const decl — blank through body or ';'. */
+            if (keep & CC_BLANK_KEEP_FN) {
+                /* the caller parses it and drops it itself; what the
+                 * compile-time code may call has to still be there to read */
+                i = kw_end;
+                continue;
+            }
             {
                 size_t p = body_l, lpar = 0, rpar = 0, end = 0;
                 {
@@ -254,6 +268,10 @@ char* cc_comptime_blank_blocks(const char* src, size_t n) {
     return out;
 }
 
+
+char* cc_comptime_blank_blocks(const char* src, size_t n) {
+    return cc_comptime_blank_blocks_ex(src, n, 0u);
+}
 
 int cc_comptime_prepare_source(char** inout_buf, size_t* inout_len,
                                const char* input_path) {
@@ -348,7 +366,7 @@ int cc_comptime_prepare_source_ex(char** inout_buf, size_t* inout_len,
         }
     }
 
-    if (passes & CC_PREPARE_COMPTIME) {
+    if (passes & CC_PREPARE_COMPTIME_IF) {
         resolved = cc__resolve_comptime_if(*inout_buf, *inout_len, input_path);
         if (resolved == (char*)-1) return -1;
         if (resolved) {
@@ -363,7 +381,7 @@ int cc_comptime_prepare_source_ex(char** inout_buf, size_t* inout_len,
      * sites are evaluated) and before template lowering.  The splice lands in
      * the buffer that feeds both the parse buffer and `buffer_codegen`, so the
      * hoisted literal is visible in the lowered C — no anchor plumbing needed. */
-    if (passes & CC_PREPARE_COMPTIME) {
+    if (passes & CC_PREPARE_COMPTIME_VALUE) {
         char* valued = cc__resolve_comptime_value(*inout_buf, *inout_len, input_path);
         if (valued == (char*)-1) return -1;
         if (valued) {

@@ -476,11 +476,20 @@ ccindex: $(CCINDEX_BINARY)
 # current compiler. Each is gated against its C11 reference above:
 # out/cc/bin/cclex_cc vs cclex (--roundtrip, --dump), ccparse_cc vs ccparse
 # (--check, --dump), over the whole corpus.
+# Running compile-time code needs a C compiler, so the lowerer links the
+# comptime executor and libtcc. Every other seam of the clean path is the
+# lowerer's own; this one cannot be, and the archive is the same one the
+# shadow path uses.
+LOWER_CC_COMPTIME_LIBS := $(abspath $(SHADOW_COMPTIME_LIB)) $(abspath $(TCC_LIB))/libtcc.a -ldl
+ifeq ($(suffix $(TCC_LIB)),.a)
+  LOWER_CC_COMPTIME_LIBS := $(abspath $(SHADOW_COMPTIME_LIB)) $(abspath $(TCC_LIB)) -ldl
+endif
+
 .PHONY: lower-cc
 lower-cc: $(SHADOW_LOWER_WRAPPER) $(LOWER_HEADERS_STAMP)
 	bin/ccc build lower/cclex.ccs -o $(OUT_BINDIR)/cclex_cc
 	bin/ccc build lower/ccparse.ccs -o $(OUT_BINDIR)/ccparse_cc
-	bin/ccc build lower/cclower.ccs -o $(OUT_BINDIR)/cclower_cc
+	bin/ccc build lower/cclower.ccs --ld-flags "$(LOWER_CC_COMPTIME_LIBS)" -o $(OUT_BINDIR)/cclower_cc
 	bin/ccc build lower/ccindex.ccs -o $(OUT_BINDIR)/ccindex_cc
 
 # shadow_lower self-build:

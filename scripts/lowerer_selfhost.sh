@@ -32,11 +32,14 @@ echo "selfhost: gen0 lowers cclower.ccs"
 lower "$gen0" cclower "$work/h0" "$work/cclower0.c"
 
 echo "selfhost: building gen1"
+# the lowerer calls the comptime executor; running compile-time code needs
+# a C compiler, so gen1 links what `make -C cc lower-cc` links
+comptime_libs="out/cc/obj/libshadow_comptime.a ${CC_TCC_LIB:-third_party/tcc/libtcc.a}"
 cc -std=c11 -D_DEFAULT_SOURCE -O2 -w \
    -I "$work/h0" -I out/include -I cc/include -I cc/lower \
    -c "$work/cclower0.c" -o "$work/gen1.o"
-cc "$work/gen1.o" out/cc/obj/runtime/concurrent_c.o \
-   -o "$work/cclower_gen1" -lpthread -lm
+cc "$work/gen1.o" out/cc/obj/runtime/concurrent_c.o $comptime_libs \
+   -o "$work/cclower_gen1" -lpthread -lm -ldl
 
 rc=0
 for t in $tools; do
