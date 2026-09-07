@@ -1,6 +1,12 @@
 /*
  * Spawn nursery throughput benchmark.
- * Measures: nursery-based spawn creation and completion throughput.
+ *
+ * Two rows, two jobs:
+ *   nursery spawns — 100 batches of 1000 `n.spawn` + join (fiber tax).
+ *   par for        — `@parallel for` over the same 100k increments
+ *                    (range walk; the gate may inline cheap leaves).
+ *
+ * Go twin: `perf/go/spawn_nursery.go`. Do not read par-for as spawn.
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/stdio.cch>
@@ -57,7 +63,7 @@ int main(void) {
             eprintln(@string(` par for: expected ${ITERATIONS} got ${par_total}`, @scratch));
             return 1;
         }
-        println(@string(` par for: ${par_per_sec} spawns/sec (${elapsed} ms, total=${par_total})`, @scratch));
+        println(@string(` par for: ${par_per_sec} ops/sec (${elapsed} ms, total=${par_total})`, @scratch));
     }
 
     println("spawn_nursery: DONE");

@@ -79,7 +79,7 @@ format_number() {
 
 # Benchmarks to compare
 BENCHMARKS=(
-    "spawn_nursery:perf/spawn_nursery.ccs:spawn_nursery.go:Nursery spawn throughput"
+    "spawn_nursery:perf/spawn_nursery.ccs:spawn_nursery.go:Nursery spawn + @parallel for increment"
     "spawn_sequential:perf/spawn_sequential.ccs:spawn_sequential.go:Sequential spawn+join"
     "channel_throughput:perf/perf_channel_throughput.ccs:channel_throughput.go:Channel operations"
     "unbuffered_spsc:perf/perf_unbuffered_spsc.ccs:unbuffered_spsc.go:Unbuffered 1P1C rendezvous"
@@ -112,10 +112,17 @@ for bench_spec in "${BENCHMARKS[@]}"; do
 
     # Multi-row benches: CC needle|Go needle (same job, different spelling).
     pairs=""
-    if [ "$name" = "channel_throughput" ]; then
+    if [ "$name" = "spawn_nursery" ]; then
+        pairs="nursery spawns|nursery spawns
+par for|par for"
+    elif [ "$name" = "channel_throughput" ]; then
         pairs="single-thread|single-thread
 buffered|buffered
-unbuffered|unbuffered"
+unbuffered (rendezvous)|unbuffered (rendezvous)
+unbuffered par|unbuffered (rendezvous)"
+    elif [ "$name" = "unbuffered_spsc" ]; then
+        pairs="unbuffered spsc:|unbuffered spsc:
+unbuffered spsc par|unbuffered spsc"
     elif [ "$name" = "parallel_handoff" ]; then
         pairs="seq loop|seq loop
 par chunks|par chunks

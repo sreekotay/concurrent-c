@@ -70,7 +70,7 @@ extract_value_unit() {
 
 # Main benchmarks to run
 BENCHMARKS=(
-    "spawn_nursery:perf/spawn_nursery.ccs:Nursery-based spawn throughput"
+    "spawn_nursery:perf/spawn_nursery.ccs:Nursery spawn + @parallel for increment"
     "spawn_sequential:perf/spawn_sequential.ccs:Sequential spawn+join throughput"
     "channel_throughput:perf/perf_channel_throughput.ccs:Channel operations throughput"
     "parallel_handoff:perf/perf_parallel_handoff.ccs:Seq / P-way chunks / wait-stage store (no channel)"

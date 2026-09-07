@@ -85,6 +85,37 @@ static void bench_unbuffered(void) {
     println(@string(` unbuffered (rendezvous): ${ops_per_sec} ops/sec (${elapsed} ms for ${iterations} pairs)`, @scratch));
 }
 
+/*
+ * Meeting: null kick, both ends spawned.
+ * A first arm that send/recv's on the caller was ~15× slower (same 2M
+ * pairs): the kick fiber is not a worker handshake. Empty `@serial { }`
+ * is rejected; the dummy local is the kick.
+ */
+static void bench_unbuffered_par(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    int[~ >] tx;
+    int[~ <] rx;
+    cc_channel_pair(&tx, &rx);
+
+    int iterations = UNBUF_ITERATIONS;
+    double start = time_now_ms();
+    @parallel spawn {
+        @serial { int noop = 0; (void)noop; }
+        @serial {
+            for (int i = 0; i < iterations; i++)
+                tx.send(i);
+        }
+        @serial {
+            int v;
+            for (int i = 0; i < iterations; i++)
+                rx.recv(&v);
+        }
+    } !>.wait()!>;
+    double elapsed = time_now_ms() - start;
+    double ops_per_sec = (iterations * 2.0) / (elapsed / 1000.0);
+    println(@string(` unbuffered par: ${ops_per_sec} ops/sec (${elapsed} ms for ${iterations} pairs)`, @scratch));
+}
+
 /* Single-threaded throughput (no contention) */
 static void bench_single_thread(void) {
     @errhandler(CCError e) cc_error_exit(e);
@@ -116,6 +147,7 @@ int main(void) {
     bench_single_thread();
     bench_buffered();
     bench_unbuffered();
+    bench_unbuffered_par();
     
     println("perf_channel_throughput: DONE");
     return 0;

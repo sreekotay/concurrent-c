@@ -49,6 +49,12 @@ cc_sched_wait_result cc_sched_fiber_wait(
     void* io,
     const cc_sched_waitable_ops* ops
 );
+cc_sched_wait_result cc_sched_fiber_wait_on(
+    CCSchedFiber* fiber,
+    void* waitable,
+    void* io,
+    const cc_sched_waitable_ops* ops
+);
 cc_sched_wait_result cc_sched_fiber_wait_until(
     void* waitable,
     void* io,

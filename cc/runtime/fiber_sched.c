@@ -234,6 +234,7 @@ void   sched_v2_park(void);
 void   sched_v2_yield(void);
 void   sched_v2_set_park_reason(const char* reason);
 void   sched_v2_signal(fiber_v2* f);
+void   sched_v2_signal_local(fiber_v2* f);
 uint64_t sched_v2_fiber_publish_wait_ticket(fiber_v2* f);
 int      sched_v2_fiber_wait_ticket_matches(fiber_v2* f, uint64_t ticket);
 void*  sched_v2_current_result_buf(size_t size);
@@ -1200,6 +1201,13 @@ void cc__fiber_unpark(void* fiber_ptr) {
     cc__fiber_unpark_tagged(fiber_ptr, CC_FIBER_UNPARK_REASON_GENERIC);
 }
 
+void cc__fiber_unpark_prefer_local(void* fiber_ptr) {
+    if (!fiber_ptr) return;
+    if ((uintptr_t)fiber_ptr & 1) {
+        sched_v2_signal_local((fiber_v2*)((uintptr_t)fiber_ptr & ~(uintptr_t)1));
+        return;
+    }
+}
 
 void cc__fiber_unpark_channel_attrib(uint32_t attrib_flags) {
     /* V1 retired: the attribute flags steered V1 worker-pool wake heuristics

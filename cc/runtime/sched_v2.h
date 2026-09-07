@@ -37,6 +37,10 @@ fiber_v2* sched_v2_spawn(void* (*fn)(void*), void* arg);
 fiber_v2* sched_v2_spawn_in_nursery(void* (*fn)(void*), void* arg, CCNurseryHost* nursery);
 int    sched_v2_join(fiber_v2* f, void** out_result);
 void   sched_v2_signal(fiber_v2* f);
+/* Enqueue a parked fiber without waking a peer worker. The current
+ * worker drains it on the next park. Unbuffered rendezvous uses this
+ * so 1P1C stays on one OS thread. Off-fiber still wakes. */
+void   sched_v2_signal_local(fiber_v2* f);
 void   sched_v2_park(void);
 void   sched_v2_yield(void);
 void   sched_v2_set_park_reason(const char* reason);
@@ -44,6 +48,7 @@ int    sched_v2_in_context(void);
 fiber_v2* sched_v2_current_fiber(void);
 CCNurseryHost* sched_v2_current_nursery(void);
 void*  sched_v2_current_deadline_scope(void);
+void*  sched_v2_fiber_deadline_scope(fiber_v2* f);
 void*  sched_v2_deadline_scope_push(void* d);
 void   sched_v2_deadline_scope_pop(void* prev);
 int    sched_v2_current_worker_id(void); /* -1 if not on a V2 worker thread */

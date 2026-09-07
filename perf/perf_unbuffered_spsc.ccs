@@ -1,9 +1,11 @@
 /*
  * SPSC unbuffered rendezvous — the 1P1C row from channel_throughput,
- * long enough to sample. Same handshake as a 2-arm join: one parks,
- * the other copies + wakes.
+ * long enough to sample. Nursery pair, then `@parallel spawn` with a
+ * null kick so both ends are worker fibers. Caller send/recv on arm 0
+ * was ~15× slower (same N); empty `@serial { }` is rejected.
  *
  *   CC_UNBUF_ITERS  default 2000000
+ *   CC_UNBUF_SKIP_NURSERY=1  meeting only (profile)
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/stdio.cch>
@@ -27,30 +29,68 @@ int main(void) {
         if (v > 0) iters = v;
     }
 
-    int[~ >] tx;
-    int[~ <] rx;
-    cc_channel_pair(&tx, &rx);
-
-    double start = time_now_ms();
+    int skip_nursery = 0;
     {
-        CCNursery n = @create() !> @destroy;
-        (void)n.close(tx);
-        n.spawn(() => [tx, iters] {
-            int i;
-            for (i = 0; i < iters; i++)
-                tx.send(i);
-        }) !>;
-        n.spawn(() => [rx, iters] {
-            int v;
-            int i;
-            for (i = 0; i < iters; i++)
-                rx.recv(&v);
-        }) !>;
+        const char* skip = getenv("CC_UNBUF_SKIP_NURSERY");
+        if (skip && skip[0] == '1') skip_nursery = 1;
     }
-    double elapsed = time_now_ms() - start;
-    double pairs_per_sec = iters / (elapsed / 1000.0);
-    double ns = elapsed * 1.0e6 / iters;
-    println(@string(` unbuffered spsc: ${pairs_per_sec} pairs/sec (${elapsed} ms, ${ns} ns/pair, n=${iters})`,
-                    @scratch));
+
+    double start;
+    double elapsed;
+    double pairs_per_sec;
+    double ns;
+
+    if (!skip_nursery) {
+        int[~ >] tx;
+        int[~ <] rx;
+        cc_channel_pair(&tx, &rx);
+        start = time_now_ms();
+        {
+            CCNursery n = @create() !> @destroy;
+            (void)n.close(tx);
+            n.spawn(() => [tx, iters] {
+                int i;
+                for (i = 0; i < iters; i++)
+                    tx.send(i);
+            }) !>;
+            n.spawn(() => [rx, iters] {
+                int v;
+                int i;
+                for (i = 0; i < iters; i++)
+                    rx.recv(&v);
+            }) !>;
+        }
+        elapsed = time_now_ms() - start;
+        pairs_per_sec = iters / (elapsed / 1000.0);
+        ns = elapsed * 1.0e6 / iters;
+        println(@string(` unbuffered spsc: ${pairs_per_sec} pairs/sec (${elapsed} ms, ${ns} ns/pair, n=${iters})`,
+                        @scratch));
+    }
+
+    {
+        int[~ >] ptx;
+        int[~ <] prx;
+        cc_channel_pair(&ptx, &prx);
+        start = time_now_ms();
+        @parallel spawn {
+            @serial { int noop = 0; (void)noop; }
+            @serial {
+                int i;
+                for (i = 0; i < iters; i++)
+                    ptx.send(i);
+            }
+            @serial {
+                int v;
+                int i;
+                for (i = 0; i < iters; i++)
+                    prx.recv(&v);
+            }
+        } !>.wait()!>;
+        elapsed = time_now_ms() - start;
+        pairs_per_sec = iters / (elapsed / 1000.0);
+        ns = elapsed * 1.0e6 / iters;
+        println(@string(` unbuffered spsc par: ${pairs_per_sec} pairs/sec (${elapsed} ms, ${ns} ns/pair, n=${iters})`,
+                        @scratch));
+    }
     return 0;
 }

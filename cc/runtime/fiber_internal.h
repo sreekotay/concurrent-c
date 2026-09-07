@@ -65,8 +65,10 @@ void cc__fiber_dump_unpark_reason_stats(void);
 enum {
     CC_FIBER_UNPARK_ATTR_NONE = 0u,
     CC_FIBER_UNPARK_ATTR_CONTENTION_LOCAL = 1u << 0,
+    CC_FIBER_UNPARK_ATTR_PREFER_LOCAL = 1u << 1,
 };
 void cc__fiber_unpark_channel_attrib(uint32_t attrib_flags);
+void cc__fiber_unpark_prefer_local(void* fiber);
 void cc__fiber_yield(void);         /* Cooperative yield - push to local queue */
 void cc__fiber_yield_global(void);  /* Yield to global queue for fairness */
 void cc__fiber_sched_enqueue(void* fiber);

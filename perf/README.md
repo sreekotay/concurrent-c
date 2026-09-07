@@ -25,7 +25,8 @@ Run an individual benchmark directly:
 
 | Benchmark | What it measures |
 |-----------|------------------|
-| `perf_channel_throughput.ccs` | Buffered, unbuffered, and single-thread channel ops/sec. |
+| `perf_channel_throughput.ccs` | Buffered, unbuffered nursery, unbuffered `@parallel spawn` (null kick), and single-thread channel ops/sec. |
+| `perf_unbuffered_spsc.ccs` | Unbuffered 1P1C: nursery pair, then `@parallel spawn` with a null kick (both ends are worker fibers). Go twin in `perf/go/unbuffered_spsc.go`. |
 | `perf_buffered_base.ccs` | Minimal buffered 1 producer / 1 consumer throughput. |
 | `perf_buffered_core.ccs` | Buffered throughput using low-level public runtime APIs. |
 | `perf_buffered_ladder.ccs` | Loop vs fiber vs buffered-channel overhead ladder. |
@@ -43,7 +44,7 @@ Run an individual benchmark directly:
 |-----------|------------------|
 | `spawn_simple.ccs` | Minimal nursery spawn/join throughput. |
 | `spawn_sequential.ccs` | Sequential spawn + join cost via `@async`. |
-| `spawn_nursery.ccs` | Batched nursery spawn throughput. |
+| `spawn_nursery.ccs` | Batched nursery spawn, plus `@parallel for` over the same 100k increments. Go twin in `perf/go/spawn_nursery.go`. |
 | `spawn_nursery_simple.ccs` | Nursery throughput with simpler task bodies. |
 | `spawn_nursery_direct.ccs` | Nursery throughput with direct function calls. |
 | `spawn_fiber_direct.ccs` | Raw internal fiber spawn/join throughput. |

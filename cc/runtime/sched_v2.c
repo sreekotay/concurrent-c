@@ -454,6 +454,11 @@ static _Atomic uint64_t g_v2_wake_scan_miss = 0;
  * parking-worker Dekker recheck catches the push->park transition race,
  * and sysmon issues an unconditional safety-net wake every tick. */
 static _Atomic uint64_t g_v2_wake_skipped_deep = 0;
+/* Unbuffered in-fiber enqueue: skip sched_v2_wake(-1). This worker
+ * self-drains after the current fiber parks. */
+static _Atomic uint64_t g_v2_wake_skipped_local = 0;
+/* CC_V2_WAKE_LOCAL=0 restores peer-wake on every unbuffered handoff. */
+static int g_v2_wake_local = 1;
 static _Atomic uint64_t g_v2_worker_self_drain = 0;
 /* Spin-before-park outcomes (self-drain path, tid==worker_hint).
  *   worker_spin_hit:   queue became non-empty during the spin budget — we
@@ -1263,7 +1268,7 @@ static void sched_v2_grow_if_backlogged(void) {
 
 static void thread_v2_run_fiber(int tid, fiber_v2* f);
 
-static void sched_v2_enqueue_runnable(fiber_v2* f) {
+static void sched_v2_enqueue_runnable_ex(fiber_v2* f, int prefer_local) {
     int prev = v2_queue_push(&g_v2.ready_queue, f);
     /* If the queue was already deep, a drainer is on it (or a previous
      * push just woke one) and will self-drain to our item. Skip the
@@ -1279,7 +1284,21 @@ static void sched_v2_enqueue_runnable(fiber_v2* f) {
         V2_STAT_INC(g_v2_wake_skipped_deep);
         return;
     }
+    /* Unbuffered handoff from a running fiber: do not ulock_wake a peer.
+     * thread_v2_main self-drains after this fiber parks, so the pair
+     * converges on one worker. A long compute without park is covered by
+     * sysmon's ready&&idle tick (~20ms). Buffered / off-fiber still wake.
+     * CC_V2_WAKE_LOCAL=0 restores peer-wake. */
+    if (prefer_local && g_v2_wake_local &&
+        tls_v2_current_fiber != NULL && tls_v2_thread_id >= 0) {
+        V2_STAT_INC(g_v2_wake_skipped_local);
+        return;
+    }
     sched_v2_wake(-1);
+}
+
+static void sched_v2_enqueue_runnable(fiber_v2* f) {
+    sched_v2_enqueue_runnable_ex(f, 0);
 }
 
 /*
@@ -1479,7 +1498,6 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
         fprintf(stderr, "[sched_v2] mco_resume failed rc=%d\n", (int)res);
         abort();
     }
-
     if (mco_status(f->coro) == MCO_DEAD) {
         /* Snapshot dest/nursery ownership BEFORE publishing done=1.
          *
@@ -1618,7 +1636,7 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
  * carries it into RUNNING and the park-commit converts it to a requeue, so
  * the fiber always re-checks after the wake.  IDLE/DEAD drop (validated).
  */
-void sched_v2_signal(fiber_v2* f) {
+static void sched_v2_signal_ex(fiber_v2* f, int prefer_local) {
     int expected = atomic_load_explicit(&f->state, memory_order_acquire);
     for (;;) {
         int base_state = fiber_v2_state_base(expected);
@@ -1634,7 +1652,7 @@ void sched_v2_signal(fiber_v2* f) {
                 memory_order_acq_rel, memory_order_acquire)) {
             if (base_state == FIBER_V2_PARKED) {
                 V2_STAT_INC(g_v2_signal_ok);
-                sched_v2_enqueue_runnable(f);
+                sched_v2_enqueue_runnable_ex(f, prefer_local);
             } else if (base_state == FIBER_V2_QUEUED || base_state == FIBER_V2_RUNNING) {
                 if (fiber_v2_state_has_signal_pending(expected)) {
                     V2_STAT_INC(g_v2_signal_running_pending_already_set);
@@ -1652,6 +1670,14 @@ void sched_v2_signal(fiber_v2* f) {
         }
         /* CAS failure refreshed `expected`; retry against the live value. */
     }
+}
+
+void sched_v2_signal(fiber_v2* f) {
+    sched_v2_signal_ex(f, 0);
+}
+
+void sched_v2_signal_local(fiber_v2* f) {
+    sched_v2_signal_ex(f, 1);
 }
 
 /* ============================================================================
@@ -1962,6 +1988,10 @@ CCNurseryHost* sched_v2_current_nursery(void) {
 
 void* sched_v2_current_deadline_scope(void) {
     fiber_v2* f = sched_v2_current_fiber();
+    return f ? f->current_deadline_scope : NULL;
+}
+
+void* sched_v2_fiber_deadline_scope(fiber_v2* f) {
     return f ? f->current_deadline_scope : NULL;
 }
 
@@ -2708,7 +2738,7 @@ static void sched_v2_atexit_dump_stats(void) {
             (unsigned long long)atomic_load_explicit(&g_v2_join_park_fiber, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_join_park_thread, memory_order_relaxed));
     fprintf(stderr, "[sched_v2 stats] wake: ext_calls=%llu no_idle=%llu issued=%llu scan_miss=%llu  "
-                    "skipped_deep=%llu (depth>=%d)  "
+                    "skipped_deep=%llu (depth>=%d) skipped_local=%llu (local=%d)  "
                     "worker_self_drain=%llu  worker_idle_entries=%llu (recheck=%llu from_wake=%llu)\n",
             (unsigned long long)atomic_load_explicit(&g_v2_wake_calls_ext, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_wake_no_idle, memory_order_relaxed),
@@ -2716,6 +2746,8 @@ static void sched_v2_atexit_dump_stats(void) {
             (unsigned long long)atomic_load_explicit(&g_v2_wake_scan_miss, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_wake_skipped_deep, memory_order_relaxed),
             g_v2_wake_skip_depth,
+            (unsigned long long)atomic_load_explicit(&g_v2_wake_skipped_local, memory_order_relaxed),
+            g_v2_wake_local,
             (unsigned long long)atomic_load_explicit(&g_v2_worker_self_drain, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_worker_idle_entries, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_recheck, memory_order_relaxed),
@@ -2788,6 +2820,10 @@ static void sched_v2_init_impl(void) {
         if (end != spin_env && v >= 0 && v <= 65536) {
             g_v2_join_spin = (int)v;
         }
+    }
+    const char* wl_env = getenv("CC_V2_WAKE_LOCAL");
+    if (wl_env && wl_env[0] == '0') {
+        g_v2_wake_local = 0;
     }
     const char* wsd_env = getenv("CC_V2_WAKE_SKIP_DEPTH");
     if (wsd_env) {

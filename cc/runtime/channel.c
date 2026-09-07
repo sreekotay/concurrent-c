@@ -122,6 +122,16 @@ static inline CCDeadline* cc__runtime_current_deadline(void) {
     return v2 ? v2 : cc__tls_current_deadline;
 }
 
+/* Deadline without a second mco_running(): use the fiber we already have. */
+static inline CCDeadline* cc__deadline_hot(cc__fiber* fiber) {
+    if (fiber && ((uintptr_t)fiber & 1)) {
+        void* d = sched_v2_fiber_deadline_scope(
+            (fiber_v2*)((uintptr_t)fiber & ~(uintptr_t)1));
+        if (d) return (CCDeadline*)d;
+    }
+    return cc__tls_current_deadline;
+}
+
 
 static int cc_channel_recv_dedupe_enabled(void) {
     static int enabled = -1;
@@ -242,7 +252,10 @@ static inline void wake_batch_flush(void) {
     for (size_t i = 0; i < b->count; i++) {
         if (b->fibers[i]) {
             cc__fiber_unpark_channel_attrib(b->attribs[i]);
-            cc_sched_fiber_wake((CCSchedFiber*)b->fibers[i]);
+            if (b->attribs[i] & CC_FIBER_UNPARK_ATTR_PREFER_LOCAL)
+                cc__fiber_unpark_prefer_local(b->fibers[i]);
+            else
+                cc_sched_fiber_wake((CCSchedFiber*)b->fibers[i]);
             b->fibers[i] = NULL;
             b->attribs[i] = 0;
         }
@@ -517,8 +530,65 @@ static inline cc_sched_wait_result cc__chan_wait_notified_deadline(cc__fiber_wai
     return rc;
 }
 
+static inline cc_sched_wait_result cc__chan_wait_notified_deadline_on(cc__fiber_wait_node* node,
+                                                                      const struct timespec* abs_deadline,
+                                                                      const char* reason,
+                                                                      void* obj,
+                                                                      int wait_flags,
+                                                                      CCSchedFiber* fiber) {
+    if (atomic_load_explicit(&node->notified, memory_order_acquire) != 0) {
+        return CC_SCHED_WAIT_OK;
+    }
+    if (wait_flags & CC__CHAN_WAIT_SPIN) {
+        int spin = cc__chan_rv_spin_count();
+        while (spin-- > 0) {
+            cc__chan_spin_hint();
+            if (atomic_load_explicit(&node->notified, memory_order_acquire) != 0) {
+                return CC_SCHED_WAIT_OK;
+            }
+        }
+    }
+    cc__chan_wait_flag_ctx ctx = {
+        .flag = &node->notified,
+        .expected = 0,
+        .reason = reason,
+        .obj = obj,
+        .node = node,
+        .trace_recv_empty = (wait_flags & CC__CHAN_WAIT_TRACE_EMPTY) ? 1 : 0,
+    };
+    const cc_sched_waitable_ops ops = {
+        .try_complete = cc__chan_wait_flag_try_complete,
+        .publish = cc__chan_wait_flag_publish,
+        .unpublish = cc__chan_wait_flag_unpublish,
+        .park = cc__chan_wait_flag_park,
+        .park_until = cc__chan_wait_flag_park_until,
+    };
+    if (abs_deadline)
+        return cc_sched_fiber_wait_until(&ctx, NULL, &ops, abs_deadline);
+    if (fiber)
+        return cc_sched_fiber_wait_on(fiber, &ctx, NULL, &ops);
+    return cc_sched_fiber_wait(&ctx, NULL, &ops);
+}
+
 static inline cc_sched_wait_result cc__chan_wait_notified(cc__fiber_wait_node* node, const char* reason, void* obj) {
     return cc__chan_wait_notified_deadline(node, NULL, reason, obj, CC__CHAN_WAIT_NONE);
+}
+
+static inline cc_sched_wait_result cc__chan_wait_notified_mark_close_on(cc__fiber_wait_node* node,
+                                                                        const struct timespec* abs_deadline,
+                                                                        const char* reason,
+                                                                        void* obj,
+                                                                        int wait_flags,
+                                                                        cc__fiber* fiber) {
+    cc_parallel_abort_if_denied_chan(reason);
+    cc_sched_wait_result wait_rc = cc__chan_wait_notified_deadline_on(
+        node, abs_deadline, reason, obj, wait_flags, (CCSchedFiber*)fiber);
+    if (wait_rc == CC_SCHED_WAIT_CLOSED) {
+        atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_CLOSE, memory_order_release);
+    }
+    if (cc_parallel_current_cancelled())
+        return CC_SCHED_WAIT_CANCELLED;
+    return wait_rc;
 }
 
 static inline cc_sched_wait_result cc__chan_wait_notified_mark_close(cc__fiber_wait_node* node,
@@ -526,14 +596,7 @@ static inline cc_sched_wait_result cc__chan_wait_notified_mark_close(cc__fiber_w
                                                                      const char* reason,
                                                                      void* obj,
                                                                      int wait_flags) {
-    cc_parallel_abort_if_denied_chan(reason);
-    cc_sched_wait_result wait_rc = cc__chan_wait_notified_deadline(node, abs_deadline, reason, obj, wait_flags);
-    if (wait_rc == CC_SCHED_WAIT_CLOSED) {
-        atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_CLOSE, memory_order_release);
-    }
-    if (cc_parallel_current_cancelled())
-        return CC_SCHED_WAIT_CANCELLED;
-    return wait_rc;
+    return cc__chan_wait_notified_mark_close_on(node, abs_deadline, reason, obj, wait_flags, NULL);
 }
 
 static _Atomic int g_chan_minimal_path_mode = -1; /* -1 unknown, 0 off, 1 on */
@@ -792,10 +855,12 @@ static inline void cc__chan_set_fast_path_ok(CCChan* ch, int v) {
 
 
 static inline uint32_t cc__chan_wake_sched_attrib(CCChan* ch) {
-    if (ch && cc__chan_fast_path_ok(ch)) {
-        return CC_FIBER_UNPARK_ATTR_CONTENTION_LOCAL;
-    }
-    return CC_FIBER_UNPARK_ATTR_NONE;
+    uint32_t a = CC_FIBER_UNPARK_ATTR_NONE;
+    if (ch && ch->cap == 0)
+        a |= CC_FIBER_UNPARK_ATTR_PREFER_LOCAL;
+    if (ch && cc__chan_fast_path_ok(ch))
+        a |= CC_FIBER_UNPARK_ATTR_CONTENTION_LOCAL;
+    return a;
 }
 
 static void cc__chan_trace_flow_slow(CCChan* ch,
@@ -3630,8 +3695,10 @@ static inline void cc__chan_finish_recv_from_send_waiter(CCChan* ch, cc__fiber_w
  * Mirror of cc_chan_recv_unbuffered. On direct receiver handoff
  * (NOTIFY_DATA), the receiver has already popped this node and copied the
  * value out; the sender has no post-wake work that needs ch->mu. */
-static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct timespec* deadline) {
-    cc__fiber* fiber = cc__fiber_in_context() ? cc__fiber_current() : NULL;
+static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct timespec* deadline,
+                                   cc__fiber* fiber) {
+    if (!fiber)
+        fiber = cc__fiber_current();
     int err = 0;
 
     while (!cc__chan_closed(ch) && !ch->rx_error_closed) {
@@ -3674,7 +3741,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
                 }
                 pthread_mutex_unlock(&ch->mu);
                 if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
-                    (void)cc__chan_wait_notified_mark_close(&node, NULL, "chan_send_wait_rendezvous", ch, CC__CHAN_WAIT_SPIN);
+                    (void)cc__chan_wait_notified_mark_close_on(&node, NULL, "chan_send_wait_rendezvous", ch, CC__CHAN_WAIT_SPIN, fiber);
                 }
                 /* FAST PATH: receiver's direct handoff already popped us and
                  * consumed the data. No post-wake work needs mu -- return
@@ -3758,8 +3825,10 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
  * "wake -> mutex contention cascade" under fan-out (N senders, N receivers).
  * Cold paths (SIGNAL, CLOSE, timeout, close-while-parked) still re-lock for
  * list cleanup and exit via the unified unlock-then-return epilogue. */
-static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct timespec* deadline) {
-    cc__fiber* fiber = cc__fiber_in_context() ? cc__fiber_current() : NULL;
+static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct timespec* deadline,
+                                   cc__fiber* fiber) {
+    if (!fiber)
+        fiber = cc__fiber_current();
     int err = 0;
 
     while (!cc__chan_closed(ch)) {
@@ -3791,7 +3860,7 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
             if (fiber && !deadline) {
                 pthread_mutex_unlock(&ch->mu);
                 if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
-                    (void)cc__chan_wait_notified_mark_close(&node, NULL, "chan_recv_wait_rendezvous", ch, CC__CHAN_WAIT_SPIN);
+                    (void)cc__chan_wait_notified_mark_close_on(&node, NULL, "chan_recv_wait_rendezvous", ch, CC__CHAN_WAIT_SPIN, fiber);
                 }
                 /* FAST PATH: sender's direct handoff already popped us, stored
                  * data, and decremented rv_recv_waiters / has_recv_waiters
@@ -3872,7 +3941,46 @@ static int cc_chan_handle_full_send(CCChan* ch, const void* value, const struct 
     }
 }
 
+/* Unbuffered send: skip branded-minimal, owned, lockfree, ensure_buf once
+ * elem_size is set. One fiber lookup covers deadline and the wait path. */
+static int cc_chan_send_cap0(CCChan* ch, const void* value, size_t value_size) {
+    if (!ch || !value || value_size == 0) return EINVAL;
+    if (ch->elem_size != 0 && ch->elem_size != value_size) return EINVAL;
+    if (cc__chan_closed(ch)) return cc__chan_send_close_errno(ch);
+    if (ch->rx_error_closed) return ch->rx_error_code;
+
+    cc__fiber* fiber = cc__fiber_current();
+    {
+        CCDeadline* d = cc__deadline_hot(fiber);
+        if (d)
+            return cc_chan_deadline_send(ch, value, value_size, d);
+    }
+
+    cc_chan_lock(ch);
+    if (ch->elem_size == 0) {
+        int err = cc_chan_ensure_buf(ch, value_size);
+        if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
+    }
+    if (cc__chan_closed(ch)) {
+        int rc = cc__chan_send_close_errno(ch);
+        pthread_mutex_unlock(&ch->mu);
+        return rc;
+    }
+    if (ch->rx_error_closed) {
+        int rc = ch->rx_error_code;
+        pthread_mutex_unlock(&ch->mu);
+        return rc;
+    }
+    int err = cc_chan_send_unbuffered(ch, value, NULL, fiber);
+    wake_batch_flush();
+    if (err == 0) cc__chan_signal_recv_ready(ch);
+    return err;
+}
+
 int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
+    if (ch && ch->cap == 0 && !ch->is_owned)
+        return cc_chan_send_cap0(ch, value, value_size);
+
     /* Minimal fast path: branded channel, just enqueue and return.
      * Skips guards, debug, timing, signal_activity.
      * Uses the post-enqueue wake path to notify parked receivers. */
@@ -3978,7 +4086,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     /* Unbuffered (rendezvous) channel - direct handoff.
      * cc_chan_send_unbuffered owns the unlock on every return path. */
     if (ch->cap == 0) {
-        err = cc_chan_send_unbuffered(ch, value, NULL);
+        err = cc_chan_send_unbuffered(ch, value, NULL, NULL);
         wake_batch_flush();
         if (err == 0) cc__chan_signal_recv_ready(ch);
         return err;
@@ -4332,7 +4440,32 @@ static int cc_chan_recv_owned(CCChan* ch, void* out_value, size_t value_size) {
     return rc;
 }
 
+static int cc_chan_recv_cap0(CCChan* ch, void* out_value, size_t value_size) {
+    if (!ch || !out_value || value_size == 0) return EINVAL;
+    if (ch->elem_size != 0 && ch->elem_size != value_size) return EINVAL;
+
+    cc__fiber* fiber = cc__fiber_current();
+    {
+        CCDeadline* d = cc__deadline_hot(fiber);
+        if (d)
+            return cc_chan_deadline_recv(ch, out_value, value_size, d);
+    }
+
+    cc_chan_lock(ch);
+    if (ch->elem_size == 0) {
+        int err = cc_chan_ensure_buf(ch, value_size);
+        if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
+    }
+    int err = cc_chan_recv_unbuffered(ch, out_value, NULL, fiber);
+    wake_batch_flush();
+    if (err == 0) cc__chan_signal_recv_ready(ch);
+    return err;
+}
+
 int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
+    if (ch && ch->cap == 0 && !ch->is_owned)
+        return cc_chan_recv_cap0(ch, out_value, value_size);
+
     /* Minimal fast path: branded channel, just dequeue and return.
      * Skips guards, debug, timing, signal_activity.
      * Checks send_waiters_head to wake parked senders (pipeline correctness). */
@@ -4401,7 +4534,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     /* Unbuffered rendezvous: direct handoff.
      * cc_chan_recv_unbuffered owns the unlock on every return path. */
     if (ch->cap == 0) {
-        err = cc_chan_recv_unbuffered(ch, out_value, NULL);
+        err = cc_chan_recv_unbuffered(ch, out_value, NULL, NULL);
         wake_batch_flush();
         if (err == 0) cc__chan_signal_recv_ready(ch);
         return err;
@@ -4988,7 +5121,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
     if (ch->rx_error_closed) { pthread_mutex_unlock(&ch->mu); return ch->rx_error_code; }
     if (ch->cap == 0) {
         /* cc_chan_send_unbuffered owns the unlock on every return path. */
-        err = cc_chan_send_unbuffered(ch, value, abs_deadline);
+        err = cc_chan_send_unbuffered(ch, value, abs_deadline, NULL);
         wake_batch_flush();
         if (err == 0) cc__chan_signal_recv_ready(ch);
         return err;
@@ -5173,7 +5306,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     if (ch->cap == 0) {
         /* cc_chan_recv_unbuffered owns the unlock on every return path. */
-        err = cc_chan_recv_unbuffered(ch, out_value, abs_deadline);
+        err = cc_chan_recv_unbuffered(ch, out_value, abs_deadline, NULL);
         wake_batch_flush();
         return err;
     }
@@ -5966,8 +6099,8 @@ static CCFutureStatus cc__chan_task_poll(void* frame, intptr_t* out_val, int* ou
                  * their unlock on every return path. */
                 cc_chan_lock(ch);
                 err = f->is_send
-                    ? cc_chan_send_unbuffered(ch, f->buf, p)
-                    : cc_chan_recv_unbuffered(ch, f->buf, p);
+                    ? cc_chan_send_unbuffered(ch, f->buf, p, NULL)
+                    : cc_chan_recv_unbuffered(ch, f->buf, p, NULL);
             } else {
                 err = f->is_send
                     ? cc_chan_timed_send(ch, f->buf, f->elem_size, p)
@@ -6024,8 +6157,8 @@ static int cc__chan_task_wait(void* frame) {
         /* Both _send_unbuffered and _recv_unbuffered own their unlock on
          * every return path. */
         int err = f->is_send
-            ? cc_chan_send_unbuffered(ch, f->buf, p)
-            : cc_chan_recv_unbuffered(ch, f->buf, p);
+            ? cc_chan_send_unbuffered(ch, f->buf, p, NULL)
+            : cc_chan_recv_unbuffered(ch, f->buf, p, NULL);
         wake_batch_flush();
         return err;
     }
