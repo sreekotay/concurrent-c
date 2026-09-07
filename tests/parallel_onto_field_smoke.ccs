@@ -1,0 +1,33 @@
+/*
+ * Dest-attach onto a CCParallel field (`b.app`, `p->app`).
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+typedef struct Box {
+    CCParallel app;
+} Box;
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    Box b;
+    Box* p = &b;
+    cc_atomic_int sum = 0;
+    b.app = @parallel spawn { @serial { (void)0; } } !>;
+    @parallel(b.app) {
+        sum.fetch_add(1);
+    }
+    @parallel(p->app) {
+        sum.fetch_add(2);
+    }
+    b.app.wait() !>;
+
+    int total = sum.load();
+    if (total != 3) {
+        eprintln(@string(`FAIL sum=${total}`, @scratch));
+        return 1;
+    }
+    println(@string(`sum = ${total}`, @scratch));
+    return 0;
+}

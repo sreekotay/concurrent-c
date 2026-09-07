@@ -3106,6 +3106,52 @@ static void cc__extract_link_directives(const char* c_file_path, const char* inc
     pclose(pp);
 }
 
+static void cc__scan_path_for_link_directives(const char* path, char* ld_flags, size_t ld_cap) {
+    size_t len = 0;
+    char* content;
+    if (!path || !path[0] || !ld_flags) return;
+    content = cc__read_all_file(path, &len);
+    if (!content) return;
+    cc__scan_for_link_directives(content, len, ld_flags, ld_cap);
+    free(content);
+}
+
+/* Multi-TU `cc__link_many` used to take only CLI --ld-flags. Single-TU
+ * shadow_host_link already pulls @link from emit.c and the original source;
+ * do the same here so a page @link is not dropped when a second .ccs joins. */
+static void cc__collect_multi_link_flags(const char* extra_ld,
+                                        const char* const* inputs,
+                                        char c_bufs[][PATH_MAX],
+                                        char src_dir_bufs[][PATH_MAX],
+                                        int n,
+                                        char* out, size_t cap) {
+    int i;
+    if (!out || !cap) return;
+    out[0] = '\0';
+    if (extra_ld && extra_ld[0]) {
+        strncpy(out, extra_ld, cap - 1);
+        out[cap - 1] = '\0';
+    }
+    for (i = 0; i < n; i++) {
+        char link_inc_flags[512];
+        snprintf(link_inc_flags, sizeof(link_inc_flags), "-I%s -I%s -I%s -I%s",
+                 g_cc_lowered_include, g_cc_include, g_cc_dir, g_repo_root);
+        if (src_dir_bufs && src_dir_bufs[i][0]) {
+            strncat(link_inc_flags, " -I",
+                    sizeof(link_inc_flags) - strlen(link_inc_flags) - 1);
+            strncat(link_inc_flags, src_dir_bufs[i],
+                    sizeof(link_inc_flags) - strlen(link_inc_flags) - 1);
+        }
+        if (c_bufs && c_bufs[i][0])
+            cc__extract_link_directives(c_bufs[i], link_inc_flags, out, cap);
+        if (inputs && inputs[i])
+            cc__scan_path_for_link_directives(inputs[i], out, cap);
+    }
+#ifndef _WIN32
+    cc__add_lib_to_flags("m", out, cap);
+#endif
+}
+
 // Post-process generated .c file to rewrite @link("lib") to markers.
 // This handles @link directives that come from included headers.
 static int cc__postprocess_link_directives(const char* c_file_path) {
@@ -6850,6 +6896,10 @@ static int run_build_mode(int argc, char** argv) {
         }
 
         // Link all objects
+        char collected_ld[2048];
+        cc__collect_multi_link_flags(ld_flags, inputs, c_bufs, src_dir_bufs,
+                                    input_count, collected_ld, sizeof(collected_ld));
+        base_opt.ld_flags = collected_ld[0] ? collected_ld : ld_flags;
         char runtime_path[PATH_MAX];
         int runtime_reused = 0;
         if (cc__ensure_runtime_obj(&base_opt, target_part, sysroot_part, runtime_path, sizeof(runtime_path), &runtime_reused) != 0) goto parse_fail;
@@ -6866,7 +6916,7 @@ static int run_build_mode(int argc, char** argv) {
             uint64_t h = 1469598103934665603ULL;
             h = cc__fnv1a64_str(h, target_part);
             h = cc__fnv1a64_str(h, sysroot_part);
-            h = cc__fnv1a64_str(h, ld_flags);
+            h = cc__fnv1a64_str(h, base_opt.ld_flags);
             h = cc__fnv1a64_str(h, getenv("LDFLAGS"));
             h = cc__fnv1a64_str(h, g_host_fp);
             h = cc__fnv1a64_i64(h, (long long)rt_sig.mtime_sec);
@@ -8430,6 +8480,10 @@ int main(int argc, char **argv) {
             for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
             return 0;
         }
+        char collected_ld[2048];
+        cc__collect_multi_link_flags(ld_flags, inputs, c_bufs, src_dir_bufs,
+                                    input_count, collected_ld, sizeof(collected_ld));
+        base_opt.ld_flags = collected_ld[0] ? collected_ld : ld_flags;
         char runtime_path[PATH_MAX]; int runtime_reused = 0;
         if (cc__ensure_runtime_obj(&base_opt, target_part, sysroot_part, runtime_path, sizeof(runtime_path), &runtime_reused) != 0) {
             for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);

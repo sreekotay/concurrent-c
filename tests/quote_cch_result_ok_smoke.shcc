@@ -1,0 +1,24 @@
+/* Extracted face Ok type used as Result after an earlier Result fn. */
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
+
+CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
+build.arg("build");
+build.arg("--no-cache");
+build.arg("tests/quote_cch_result_ok_smoke.ccs");
+build.arg("tests/quote_cch_result_ok_face.ccs");
+build.arg("-o");
+build.arg("out/quote_cch_result_ok_smoke");
+build.inherit_stdio();
+int rc = build.status() !>;
+if (rc != 0) {
+    "build failed".println();
+    return 1;
+}
+CCCommand run = cc_command(arena, @slice("out/quote_cch_result_ok_smoke"));
+run.inherit_stdio();
+rc = run.status() !>;
+if (rc != 0) {
+    "run failed".println();
+    return 1;
+}
+return 0;

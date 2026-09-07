@@ -1058,18 +1058,45 @@ static int parallel_skip_braced(Parser* p) {
     }
 }
 
-/* `@parallel (name) { … }` without `!>` is dest admit. The same tokens
- * with `!>` stay the predicate join (`@parallel (ready) { … } !>`). */
+/* Dest cell: `h` or one field hop (`zip.app`, `srv->app`). Not a call. */
+static int parallel_take_dest_cell(Parser* p, char* dest, size_t cap) {
+    Token t;
+    size_t n = 0;
+    if (!dest || cap < 2) return 0;
+    dest[0] = 0;
+    if (p_peek(p).kind != TK_IDENT) return 0;
+    t = p_next(p);
+    if (t.spell.len + 1 > cap) return 0;
+    memcpy(dest, t.spell.ptr, t.spell.len);
+    n = t.spell.len;
+    dest[n] = 0;
+    if (tok_eq(p_peek(p), TK_PUNCT, ".") || tok_eq(p_peek(p), TK_PUNCT, "->")) {
+        Token op = p_next(p);
+        Token f;
+        if (p_peek(p).kind != TK_IDENT) return 0;
+        f = p_next(p);
+        if (n + op.spell.len + f.spell.len + 1 > cap) return 0;
+        memcpy(dest + n, op.spell.ptr, op.spell.len);
+        n += op.spell.len;
+        memcpy(dest + n, f.spell.ptr, f.spell.len);
+        n += f.spell.len;
+        dest[n] = 0;
+    }
+    return 1;
+}
+
+/* `@parallel (dest) { … }` without `!>` is dest admit. dest is a name or
+ * one field hop. The same tokens with `!>` stay the predicate join. */
 static int peek_parallel_onto(Parser* p) {
     int save = p->i;
     int onto;
+    char dest[256];
     if (!tok_eq(p_peek(p), TK_PUNCT, "(")) return 0;
     p_next(p);
-    if (p_peek(p).kind != TK_IDENT) {
+    if (!parallel_take_dest_cell(p, dest, sizeof(dest))) {
         p->i = save;
         return 0;
     }
-    p_next(p);
     if (!tok_eq(p_peek(p), TK_PUNCT, ")")) {
         p->i = save;
         return 0;
@@ -1089,16 +1116,16 @@ static int peek_parallel_onto(Parser* p) {
 }
 
 static AstNode* parse_parallel_onto(Parser* p) {
-    Token name;
+    char dest[256];
     AstNode* n;
     AstNode* ser;
     if (!p_accept(p, TK_PUNCT, "(")) {
         parser_fail(p, p_peek(p), "expected '(' after @parallel");
         return NULL;
     }
-    name = p_next(p);
-    if (name.kind != TK_IDENT) {
-        parser_fail(p, name, "@parallel(h) dest must be a name");
+    if (!parallel_take_dest_cell(p, dest, sizeof(dest))) {
+        parser_fail(p, p_peek(p),
+                    "@parallel(h) dest must be a name or field (h, zip.app, srv->app)");
         return NULL;
     }
     if (!p_accept(p, TK_PUNCT, ")")) {
@@ -1114,7 +1141,7 @@ static AstNode* parse_parallel_onto(Parser* p) {
     if (!n) return NULL;
     n->par_onto = 1;
     n->forced_seq = p->parallel_off;
-    n->a = ast_arena_slice(p, name.spell);
+    n->a = ast_arena_cstr(p, dest);
     ser = ast_new(p, AST_SERIAL);
     if (!ser) return NULL;
     while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF &&

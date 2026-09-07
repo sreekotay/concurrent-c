@@ -70,4 +70,22 @@ printf '%s\n' "$e2e_ln" | grep -F -q -- "-l$work/libatlinkpath.a" \
     && fail "e2e path became -lPATH: $e2e_ln"
 "$work/bin/e2e" || fail "e2e binary exited nonzero"
 
+# Two TUs: @link on the first file must reach cc__link_many (not only single-TU).
+printf '%s\n' 'int two_tu_marker(void) { return 1; }' > "$work/e2e_b.ccs"
+printf '%s\n' \
+    "@link(\"$work/libatlinkpath.a\")" \
+    "int at_link_path_answer(void);" \
+    "int two_tu_marker(void);" \
+    "int main(void) {" \
+    "    if (at_link_path_answer() != 42) return 1;" \
+    "    if (two_tu_marker() != 1) return 1;" \
+    "    return 0;" \
+    "}" > "$work/e2e_a.ccs"
+two_err="$("$CCC" --verbose --no-cache --out-dir "$work/out" --bin-dir "$work/bin" \
+    -o "$work/bin/e2e2" "$work/e2e_a.ccs" "$work/e2e_b.ccs" 2>&1)" \
+    || fail "two-tu link failed: $two_err"
+printf '%s\n' "$two_err" | grep -F -q -- "-l$work/libatlinkpath.a" \
+    && fail "two-tu path became -lPATH: $two_err"
+"$work/bin/e2e2" || fail "two-tu binary exited nonzero"
+
 echo "[test_at_link_path] ok"

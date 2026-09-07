@@ -1,0 +1,13 @@
+#ifndef TESTS_QUOTE_CCH_RESULT_OK_FACE_CCH
+#define TESTS_QUOTE_CCH_RESULT_OK_FACE_CCH
+
+#include <ccc/std/prelude.cch>
+
+@variant FaceAct {
+    wait: void;
+    close: void;
+};
+
+FaceAct !>(CCError) face_act(int n);
+
+#endif

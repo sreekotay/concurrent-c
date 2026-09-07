@@ -76,6 +76,159 @@ static int shadow_raw_is_quoted_include(const AstNode* it) {
     return strncmp(s, "#include \"", 10) == 0;
 }
 
+/* Item walk cursor: unique Result Ok types defined only in a later
+ * extracted quote wait until that include is out (SessAct in CCServer.h). */
+static AstNode** g_shadow_result_items;
+static int g_shadow_result_nitems;
+static int g_shadow_result_before_i;
+
+static int shadow_ident_sym(char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+static void shadow_path_stem(const char* path, char* dst, size_t cap) {
+    const char* base;
+    const char* dot;
+    size_t n;
+    if (!dst || !cap) return;
+    dst[0] = 0;
+    if (!path || !path[0]) return;
+    base = path;
+    {
+        const char* p;
+        for (p = path; *p; p++)
+            if (*p == '/' || *p == '\\') base = p + 1;
+    }
+    dot = strrchr(base, '.');
+    n = dot ? (size_t)(dot - base) : strlen(base);
+    if (n >= cap) n = cap - 1;
+    memcpy(dst, base, n);
+    dst[n] = 0;
+}
+
+static void shadow_include_stem(const char* line, char* dst, size_t cap) {
+    const char* q;
+    char path[512];
+    size_t n;
+    dst[0] = 0;
+    if (!line) return;
+    q = strchr(line, '"');
+    if (!q) q = strchr(line, '<');
+    if (!q || !q[1]) return;
+    q++;
+    n = 0;
+    while (q[n] && q[n] != '"' && q[n] != '>' && n + 1 < sizeof(path)) {
+        path[n] = q[n];
+        n++;
+    }
+    path[n] = 0;
+    shadow_path_stem(path, dst, cap);
+}
+
+static int shadow_looks_like_type_def(const char* text, const char* hit) {
+    const char* q;
+    const char* w;
+    if (!text || !hit || hit < text) return 0;
+    q = hit;
+    while (q > text && (q[-1] == ' ' || q[-1] == '\t' || q[-1] == '\n' ||
+                        q[-1] == '\r'))
+        q--;
+    if (q > text && q[-1] == '}') return 1;
+    w = q;
+    while (w > text && shadow_ident_sym(w[-1])) w--;
+    if (w > text && w[-1] == '@') w--;
+    if (strncmp(w, "@variant", 8) == 0 && !shadow_ident_sym(w[8])) return 1;
+    if (strncmp(w, "struct", 6) == 0 && !shadow_ident_sym(w[6])) return 1;
+    if (strncmp(w, "enum", 4) == 0 && !shadow_ident_sym(w[4])) return 1;
+    return 0;
+}
+
+static int shadow_file_defines_type(const char* path, const char* ty) {
+    FILE* f;
+    char* buf;
+    long sz;
+    size_t n;
+    const char* p;
+    size_t tl;
+    int found = 0;
+    if (!path || !path[0] || !ty || !ty[0]) return 0;
+    f = fopen(path, "rb");
+    if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return 0;
+    }
+    sz = ftell(f);
+    if (sz < 0 || sz > 4 * 1024 * 1024) {
+        fclose(f);
+        return 0;
+    }
+    rewind(f);
+    buf = (char*)malloc((size_t)sz + 1);
+    if (!buf) {
+        fclose(f);
+        return 0;
+    }
+    n = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[n] = 0;
+    tl = strlen(ty);
+    p = buf;
+    while ((p = strstr(p, ty)) != NULL) {
+        if (p > buf && shadow_ident_sym(p[-1])) {
+            p += tl;
+            continue;
+        }
+        if (shadow_ident_sym(p[tl])) {
+            p += tl;
+            continue;
+        }
+        if (shadow_looks_like_type_def(buf, p)) {
+            found = 1;
+            break;
+        }
+        p += tl;
+    }
+    free(buf);
+    return found;
+}
+
+static const char* shadow_quote_cch_src(const AstNode* it) {
+    char stem[64];
+    size_t i, nc;
+    if (!it || !shadow_raw_is_quoted_include(it)) return NULL;
+    shadow_include_stem(it->a, stem, sizeof(stem));
+    if (!stem[0]) return NULL;
+    nc = cc_lowered_local_header_count();
+    for (i = 0; i < nc; i++) {
+        char have[64];
+        const char* p = cc_lowered_local_header_source_path(i);
+        shadow_path_stem(p, have, sizeof(have));
+        if (have[0] && strcmp(have, stem) == 0) return p;
+    }
+    return NULL;
+}
+
+/* Ok type is defined only in an extracted quote that is still an item
+ * after the current cursor (or not marked ginc). */
+static int shadow_result_ok_waiting(const char* ok) {
+    int qi;
+    if (!ok || !ok[0] || !g_shadow_result_items) return 0;
+    for (qi = 0; qi < g_shadow_result_nitems; qi++) {
+        const char* src;
+        AstNode* it = g_shadow_result_items[qi];
+        if (!shadow_raw_is_quoted_include(it)) continue;
+        if (it->e && it->e[0] && strcmp(ast_slot(it->e), "ginc") == 0)
+            continue;
+        if (qi < g_shadow_result_before_i) continue;
+        src = shadow_quote_cch_src(it);
+        if (!src) continue;
+        if (shadow_file_defines_type(src, ok)) return 1;
+    }
+    return 0;
+}
+
 static int shadow_item_is_type_decl(const AstNode* it) {
     if (!it) return 0;
     return it->kind == AST_STRUCT || it->kind == AST_TYPEDEF_STRUCT ||
@@ -1125,6 +1278,10 @@ static int shadow_emit_unwrap_generics(CEmit* out, char seen_ok[][128],
         if (prelude_only &&
             !shadow_result_pair_is_prelude(seen_ok[si], seen_err[si]))
             continue;
+        if (!prelude_only &&
+            !shadow_result_pair_is_prelude(seen_ok[si], seen_err[si]) &&
+            shadow_result_ok_waiting(seen_ok[si]))
+            continue;
         shadow_result_name(seen_ok[si], seen_err[si], rname, sizeof(rname));
         if (shadow_uw_skip_builtin_rname(rname)) continue;
         if (!cemit_fmt(out, ", %s: (!((%s*)(void*)&(__x__))->ok)", rname,
@@ -1150,6 +1307,10 @@ static int shadow_emit_unwrap_generics(CEmit* out, char seen_ok[][128],
     for (si = 0; si < nseen; si++) {
         if (prelude_only &&
             !shadow_result_pair_is_prelude(seen_ok[si], seen_err[si]))
+            continue;
+        if (!prelude_only &&
+            !shadow_result_pair_is_prelude(seen_ok[si], seen_err[si]) &&
+            shadow_result_ok_waiting(seen_ok[si]))
             continue;
         shadow_result_name(seen_ok[si], seen_err[si], rname, sizeof(rname));
         if (shadow_uw_skip_builtin_rname(rname) ||
@@ -1185,6 +1346,10 @@ static int shadow_emit_unwrap_generics(CEmit* out, char seen_ok[][128],
     for (si = 0; si < nseen; si++) {
         if (prelude_only &&
             !shadow_result_pair_is_prelude(seen_ok[si], seen_err[si]))
+            continue;
+        if (!prelude_only &&
+            !shadow_result_pair_is_prelude(seen_ok[si], seen_err[si]) &&
+            shadow_result_ok_waiting(seen_ok[si]))
             continue;
         shadow_result_name(seen_ok[si], seen_err[si], rname, sizeof(rname));
         if (shadow_uw_skip_builtin_rname(rname)) continue;
@@ -1230,6 +1395,7 @@ static int shadow_emit_collected_result_specs(CEmit* out,
         int is_pre = shadow_result_pair_is_prelude(seen_ok[i], seen_err[i]);
         if (prelude_only && !is_pre) continue;
         if (unique_only && is_pre) continue;
+        if (!is_pre && shadow_result_ok_waiting(seen_ok[i])) continue;
         shadow_result_name(seen_ok[i], seen_err[i], rname, sizeof(rname));
         /* Header-owned: keep unwrap arms, do not re-DECL. Concrete-name
          * split yields mangled ok (`CCDirIterptr`) which is not a C type. */
@@ -1303,6 +1469,14 @@ static int shadow_emit_collected_result_specs(CEmit* out,
     return 1;
 }
 
+static int shadow_emit_unique_results_now(CEmit* out, char seen_ok[][128],
+                                          char seen_err[][128], int nseen) {
+    if (!nseen || !shadow_seen_has_unique(seen_ok, seen_err, nseen)) return 1;
+    if (!shadow_emit_collected_result_specs(out, seen_ok, seen_err, nseen, 0, 1))
+        return 0;
+    return shadow_emit_unwrap_generics(out, seen_ok, seen_err, nseen, 0);
+}
+
 static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                        ShadowEmitKind kind, char** pass_inc, int npass_inc,
                        char** pass_def, int npass_def,
@@ -1326,6 +1500,9 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
     g_file_header_lead_done = 0;
     g_shadow_async_id = 60000;
     g_shadow_closure_id = 1;
+    g_shadow_result_items = items;
+    g_shadow_result_nitems = n;
+    g_shadow_result_before_i = 0;
     shadow_par_helpers_reset();
     g_shadow_n_emitted_grammar_fns = 0;
     /* Pre-scan send_task receivers so ordered channel_pair can select task
@@ -2688,6 +2865,7 @@ ginst_after_quotes:
 
     for (int i = 0; i < n; i++) {
         AstNode* it = items[i];
+        g_shadow_result_before_i = i;
         if (!specs_emitted && nseen && it->kind == AST_RESULT_FN) {
             if (shadow_seen_has_unique(seen_ok, seen_err, nseen)) {
                 if (!shadow_emit_collected_result_specs(out, seen_ok, seen_err,
@@ -2839,13 +3017,62 @@ ginst_after_quotes:
             int bind_mark = shadow_push_fn_binds(it);
             int bind_ok = 1;
             AstNode* pars[16];
-            int npars = 0;
+            AstNode* rspawns[16];
+            int npars = 0, nrspawns = 0;
             for (int k = 0; bind_ok && k < it->nkids; k++) {
                 if (!shadow_collect_parallels(it->kids[k], pars, &npars, 16)) {
                     shadow_emit_err_loc(cache, it, NULL, 0, "too many @parallel for shadow beachhead");
                     out->err = 1;
                     bind_ok = 0;
                 }
+                if (bind_ok &&
+                    !shadow_collect_spawns(it->kids[k], rspawns, &nrspawns, 16)) {
+                    shadow_emit_err_loc(cache, it, NULL, 0, "too many spawns for shadow beachhead");
+                    out->err = 1;
+                    bind_ok = 0;
+                }
+            }
+            if (bind_ok) {
+                for (int s = 0; s < nrspawns; s++)
+                    shadow_cap_collect_closure_locals(rspawns[s]);
+                if (g_shadow_cap_overflow || g_shadow_table_overflow) {
+                    out->err = 1;
+                    bind_ok = 0;
+                }
+            }
+            if (bind_ok && nrspawns) {
+                if (!cemit_str(out, "\n/* --- CC closure declarations --- */\n"))
+                    bind_ok = 0;
+                for (int s = 0; bind_ok && s < nrspawns; s++) {
+                    char proto[1024];
+                    int ar = shadow_closure_arity(rspawns[s]);
+                    const char* ccty = shadow_closure_cc_ty(rspawns[s]);
+                    if (!shadow_caps_proto(rspawns[s]->e, proto, sizeof(proto))) {
+                        shadow_emit_err_loc(cache, it, NULL, 0,
+                                            "closure caps proto failed in result fn");
+                        bind_ok = 0;
+                    } else if (ar == 1) {
+                        if (!cemit_fmt(out,
+                                "static void* cc_closure__N%s_entry(void*, intptr_t);\n"
+                                "static %s cc_closure__N%s_make(%s);\n",
+                                rspawns[s]->d, ccty, rspawns[s]->d, proto))
+                            bind_ok = 0;
+                    } else if (ar == 2) {
+                        if (!cemit_fmt(out,
+                                "static void* cc_closure__N%s_entry(void*, intptr_t, intptr_t);\n"
+                                "static %s cc_closure__N%s_make(%s);\n",
+                                rspawns[s]->d, ccty, rspawns[s]->d, proto))
+                            bind_ok = 0;
+                    } else if (!cemit_fmt(out,
+                            "static void* cc_closure__N%s_entry(void*);\n"
+                            "static CCClosure0 cc_closure__N%s_make(%s);\n",
+                            rspawns[s]->d, rspawns[s]->d, proto)) {
+                        bind_ok = 0;
+                    }
+                }
+                if (bind_ok &&
+                    !cemit_str(out, "/* --- end closure declarations --- */\n\n"))
+                    bind_ok = 0;
             }
             if (bind_ok && !shadow_emit_par_protos(out, pars, npars))
                 bind_ok = 0;
@@ -2939,6 +3166,14 @@ ginst_after_quotes:
                     bind_ok = 0;
                 }
                 if (bind_ok && !cemit_str(out, "}\n\n")) bind_ok = 0;
+                if (bind_ok && nrspawns) {
+                    if (!cemit_str(out, "/* --- CC generated closures --- */\n\n"))
+                        bind_ok = 0;
+                    for (int s = 0; bind_ok && s < nrspawns; s++) {
+                        if (!shadow_emit_closure_def(rspawns[s], out, cache))
+                            bind_ok = 0;
+                    }
+                }
                 if (bind_ok && !shadow_flush_par_helpers(out)) bind_ok = 0;
             }
             shadow_pop_fn_binds(bind_mark);
@@ -3689,7 +3924,14 @@ ginst_after_quotes:
             return 0;
         }
         if (out->err) return 0;
+        if (kind == SHADOW_EMIT_C && shadow_raw_is_quoted_include(it) &&
+            !(it->e && it->e[0] && strcmp(ast_slot(it->e), "ginc") == 0)) {
+            g_shadow_result_before_i = i + 1;
+            if (!shadow_emit_unique_results_now(out, seen_ok, seen_err, nseen))
+                return 0;
+        }
     }
+    g_shadow_result_before_i = n;
     if (nseen && !specs_emitted &&
         shadow_seen_has_unique(seen_ok, seen_err, nseen)) {
         if (!shadow_emit_collected_result_specs(out, seen_ok, seen_err, nseen, 0,

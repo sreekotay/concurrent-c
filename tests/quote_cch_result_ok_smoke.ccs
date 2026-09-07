@@ -1,0 +1,33 @@
+#!ccc ccs
+/* Unique Result Ok from an extracted face, after an earlier Result fn. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int !>(CCError) early_ok(void) {
+    @errhandler(CCError e) { return cc_err(e); }
+    return cc_ok(1);
+}
+
+#include "quote_cch_result_ok_face.cch"
+
+static FaceAct !>(CCError) wrap(void) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int z = early_ok() !>;
+    (void)z;
+    FaceAct a = face_act(1) !>;
+    return cc_ok(a);
+}
+
+int main(void) {
+    FaceAct a = wrap() !>(e) {
+        (void)e;
+        fprintf(stderr, "wrap failed\n");
+        return 1;
+    };
+    if (a.kind != FaceAct_wait) {
+        fprintf(stderr, "kind\n");
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

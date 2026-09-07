@@ -776,6 +776,26 @@ static int shadow_emit_closure_body(AstNode* cl, CEmit* out, TapeCache* cache) {
             p = c + 1;
         }
     }
+    /* Callarg formals are C locals in the entry; bind so `s->io.apply` UFCS. */
+    if (cl->a && cl->a[0] && shadow_closure_arity(cl) > 0) {
+        const char* fp = cl->a;
+        while (*fp) {
+            char ty[32];
+            char name[32];
+            size_t ti = 0, ni = 0;
+            while (*fp == ' ') fp++;
+            while (*fp && *fp != ' ' && *fp != ',' && ti + 1 < sizeof(ty))
+                ty[ti++] = *fp++;
+            ty[ti] = 0;
+            while (*fp == ' ') fp++;
+            while (*fp && *fp != ',' && *fp != ' ' && ni + 1 < sizeof(name))
+                name[ni++] = *fp++;
+            name[ni] = 0;
+            if (ty[0] && name[0]) shadow_bind_name(name, ty, 0);
+            while (*fp && *fp != ',') fp++;
+            if (*fp == ',') fp++;
+        }
+    }
     (void)shadow_push_block_binds(cl->body, cl->nbody);
     {
         int need_scratch = 0;

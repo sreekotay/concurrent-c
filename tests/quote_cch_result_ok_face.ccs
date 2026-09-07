@@ -1,0 +1,9 @@
+#!ccc ccs
+#include <ccc/std/prelude.cch>
+#include "quote_cch_result_ok_face.cch"
+
+FaceAct !>(CCError) face_act(int n) {
+    @errhandler(CCError e) { return cc_err(e); }
+    if (n < 0) return cc_err(CC_ERR_INVALID_ARG, "neg");
+    return cc_ok((FaceAct){ .wait = {} });
+}

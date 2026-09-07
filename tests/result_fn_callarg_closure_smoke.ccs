@@ -1,0 +1,51 @@
+/* Call-arg closure inside `T !>(E) fn` must emit make/entry (not only splice). */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_closure.cch>
+#include <stdio.h>
+
+typedef struct Box {
+    int n;
+} Box;
+
+typedef struct Srv {
+    int n;
+} Srv;
+
+static int g_sum = 0;
+
+static void box_bump(Box* b, int d) {
+    if (b) b->n += d;
+}
+
+static void srv_go(Srv* s, CCClosure2 cb) {
+    Box x = { .n = 1 };
+    Box y = { .n = 2 };
+    (void)s;
+    if (cb.fn)
+        (void)cb.fn(cb.env, (intptr_t)&x, (intptr_t)&y);
+    cc_closure2_drop(cb);
+}
+
+static void !>(CCError) run(Srv* s, int cap) {
+    @errhandler(CCError e) { return cc_err(e); }
+    s->go((Box* a, Box* b) => [cap] {
+        a->bump(cap);
+        g_sum = a->n + b->n;
+    });
+    return cc_ok();
+}
+
+int main(void) {
+    Srv s = { .n = 0 };
+    run(&s, 10) !>(e) {
+        (void)e;
+        fprintf(stderr, "run failed\n");
+        return 1;
+    };
+    if (g_sum != 13) {
+        fprintf(stderr, "sum=%d want 13\n", g_sum);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}
