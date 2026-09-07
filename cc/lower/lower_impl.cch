@@ -340,6 +340,14 @@ static bool lw_strip_view_attrs(CcType* t, void* env) {
     return true;
 }
 
+/* What `@blocking` / `@nonblocking` / `@noblock` / `@latency_sensitive`
+ * say about a function is a fact for the scheduler, read off the
+ * declaration by the index. C carries no such word, so once it has been
+ * read the declaration is an ordinary one — and has to be, or the printer
+ * keeps it whole rather than lower a declaration it thinks is still the
+ * language. */
+#define LW_SPEC_SCHEDULING (CC_SPEC_BLOCKING | CC_SPEC_NONBLOCKING | CC_SPEC_LATENCY_SENSITIVE)
+
 /* Declarations the index consumed and C never sees: `@typeview`. */
 static void lw_drop_cc_only(CcLowerer* L) {
     CcDeclList* decls = &L->unit->decls;
@@ -356,6 +364,7 @@ static void lw_drop_cc_only(CcLowerer* L) {
             case .factory: drop = true; break;
             default: break;
         }
+        d->specs &= ~(uint32_t)LW_SPEC_SCHEDULING;
         if (!drop) with.push(d);
     }
     *decls = with;

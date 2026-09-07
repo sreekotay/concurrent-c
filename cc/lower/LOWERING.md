@@ -479,6 +479,17 @@ anchors the fragments name. What is left of a block in the stage is
 blanked: a block that has run has no code in it for the lowerer to
 lower, and the blanking keeps the line count so the map still holds.
 
+## Scheduling facts
+
+`@blocking` / `@nonblocking` / `@noblock` / `@latency_sensitive` on a
+declaration say what the scheduler needs to know about the function. The
+index reads them off the declaration; C carries no such word, so they do
+not survive into the output — and must not, or the printer keeps the
+declaration whole rather than lower one it still reads as the language.
+
+The same words at a call site are a different construct: the call becomes
+a closure over its arguments, run as a task. That is a diagnostic for now.
+
 ## Async
 
 `@async Ret f(a)` hands the caller a `CCTaskIntptr` instead of a value.
