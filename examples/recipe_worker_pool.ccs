@@ -4,8 +4,9 @@
  *   jobs_ch: feeder → N workers (bounded queue)
  *   done_ch: workers → main (completion ledger, no shared counter)
  *
- * N is on the page. Dest-attach the workers, feed, close jobs next to
- * the last send, `.wait()` joins. Meeting: `@parallel spawn`.
+ * N is on the page. Dest-attach the workers, then feed/close on the same
+ * arm (pass the end into `feed`; dest-bound `jobs_tx.send` is UFCS
+ * on a copy). `.wait()` joins. Meeting: `@parallel spawn`.
  *
  * Host grow / retract / AGAIN / leave: thrdqueue.ccs (still a bag).
  * Nursery EMPTY-close twin: recipe_channel_pipeline.ccs.
@@ -23,6 +24,17 @@ static void worker(int[~ <] jobs_rx, int[~ >] done_tx) {
         println(@string(`worker: processed job ${job}`, @scratch));
         done_tx.send(job) !>;
     }
+}
+
+static void feed(int[~4 >] tx, int n) {
+    @errhandler(CCError e) cc_error_exit(e);
+    int j;
+    @for (j in 1..(n + 1)) {
+        int v = (int)j;
+        tx.send(v) !>;
+    }
+    tx.close();
+    println(@string(`feeder: sent ${n} jobs`, @scratch));
 }
 
 int main(void) {
@@ -44,13 +56,7 @@ int main(void) {
                     worker(jobs_rx, done_tx);
                 }
             }
-            int j;
-            @for (j in 1..(NUM_JOBS + 1)) {
-                jobs_tx.send(j) !>;
-            }
-            jobs_tx.close();
-            int n = NUM_JOBS;
-            println(@string(`feeder: sent ${n} jobs`, @scratch));
+            feed(jobs_tx, NUM_JOBS);
         }
     } !>;
     h.wait() !>;

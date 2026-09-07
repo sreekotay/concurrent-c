@@ -1,0 +1,13 @@
+/* Dest-live plant: UFCS on a by-value capture hits the copy. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCString s = cc_string_new();
+    CCParallel h = @parallel spawn {
+        @serial { s.append("x", 1); }
+    } !>;
+    h.wait() !>;
+    s.destroy();
+    return 0;
+}

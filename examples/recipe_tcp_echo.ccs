@@ -110,13 +110,14 @@ int main(int argc, char** argv) {
         println(@string(`listen error: ${e}`, @scratch));
         return 1;
     } @destroy;
+    CCListener* lnp = &ln;
     const char* mode = test_mode ? "test" : "demo";
     println(@string(`listening on ${PORT} (${mode} mode)`, @scratch));
 
     CCParallel h = @parallel spawn {
         @serial {
             do {
-                CCSocket sock = ln.accept() !>(e) {
+                CCSocket sock = lnp->accept() !>(e) {
                     println(@string(`accept stopped: ${e}`, @scratch));
                     break;
                 };

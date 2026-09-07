@@ -74,7 +74,7 @@ void cc_fiber_dump_state(const char* reason);  /* Debug: dump scheduler state */
 int cc__fiber_sched_active(void);
 void cc__fiber_set_park_obj(void* obj);
 void cc__fiber_clear_pending_unpark(void);  /* Clear stale pending_unpark before new wait */
-void cc__fiber_sleep_park(unsigned int ms); /* Park fiber on sleep queue with timer */
+void cc__fiber_sleep_park(unsigned int ms); /* Fiber: deadline park. Thread: nanosleep. */
 uint64_t cc__fiber_publish_wait_ticket(void* fiber_ptr);
 int cc__fiber_wait_ticket_matches(void* fiber_ptr, uint64_t ticket);
 void cc_external_wait_enter(void);

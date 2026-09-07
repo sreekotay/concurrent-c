@@ -152,6 +152,7 @@ int main(void) {
         int q = 0;
         CCParallel h = @parallel {
             @serial {
+                @errhandler(CCError e) { h.fail(e); return; }
                 int r = 0;
                 int s = 0;
                 CCParallel c = @parallel {

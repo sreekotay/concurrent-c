@@ -14,6 +14,11 @@ static int drain_sum(CCChanRx rx) {
     return sum;
 }
 
+static void send_int(int[~4 >] tx, int v) {
+    @errhandler(CCError e) cc_error_exit(e);
+    tx.send(v) !>;
+}
+
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
@@ -32,7 +37,7 @@ int main(void) {
                 @serial {
                     int i;
                     for (i = 1; i <= 3; i++)
-                        tx.send(i) !>;
+                        send_int(tx, i);
                 }
             } !> @destroy;
             prod.close(tx) !>;
@@ -58,7 +63,7 @@ int main(void) {
             @serial {
                 int i;
                 for (i = 1; i <= 3; i++)
-                    tx.send(i) !>;
+                    send_int(tx, i);
             }
         } !>;
         prod.close(tx) !>;
@@ -82,14 +87,14 @@ int main(void) {
         } !>;
         CCParallel prod = @parallel spawn {
             @serial {
-                tx.send(1) !>;
+                send_int(tx, 1);
             }
         } !>;
         prod.close(tx) !>;
         @parallel(prod) {
             @errhandler(CCError e) cc_error_exit(e);
-            tx.send(2) !>;
-            tx.send(3) !>;
+            send_int(tx, 2);
+            send_int(tx, 3);
         }
         prod.wait() !>;
         cons.wait() !>;

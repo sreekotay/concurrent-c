@@ -5,6 +5,19 @@
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
+static void produce(int[~ >] tx, int v) {
+    @errhandler(CCError e) cc_error_exit(e);
+    tx.send(v) !>;
+    tx.close();
+}
+
+static int consume(int[~ <] rx) {
+    int v = 0;
+    if (!cc_io_avail(rx.recv(&v)))
+        return -1;
+    return v;
+}
+
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
@@ -37,16 +50,8 @@ int main(void) {
         CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
         int got = 0;
         CCParallel h = @parallel spawn {
-            @serial {
-                tx.send(9) !>;
-                tx.close();
-            }
-            @serial {
-                int v = 0;
-                if (!cc_io_avail(rx.recv(&v)))
-                    return 4;
-                got = v;
-            }
+            @serial { produce(tx, 9); }
+            got = consume(rx);
         } !>;
         h.wait() !>;
         if (got != 9) {

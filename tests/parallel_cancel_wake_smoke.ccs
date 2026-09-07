@@ -15,6 +15,7 @@ int main(void) {
     int saw = 0;
     CCParallel h = @parallel spawn {
         @serial {
+            @errhandler(CCError e) { h.fail(e); return; }
             cc_sleep_ms(20);
             h.cancel() !>;
             kicked = 1;

@@ -311,9 +311,8 @@ void* cc_thread_task_get_result(struct CCSpawnTask* task) {
 }
 
 int cc_sleep_ms(unsigned int ms) {
-    /* Fiber-aware: park the fiber on the sleep queue with a deadline.
-     * Sysmon drains expired sleepers every ~250µs and re-enqueues them.
-     * This avoids O(N) queue churn when many fibers sleep concurrently. */
+    /* Fiber: park this fiber; the worker runs someone else. Sysmon
+     * signals when the deadline is due. Thread: nanosleep. */
     if (cc__fiber_in_context()) {
         cc__fiber_sleep_park(ms);
         return 0;
@@ -369,9 +368,10 @@ uint32_t sched_v2_current_fiber_suspends(void);
 /* ============================================================================
  * Adaptive spawn gate (CC_PAR_ADAPT, default on).
  *
- * If this site's leaf arms are cheaper than a spawn, do not spawn when
- * the ready queue is already busy; otherwise spawn. Denied arms run
- * inline at the join, so nothing strands.
+ * If this site's leaf arms are cheaper than a spawn, do not spawn.
+ * Denied arms run inline at the join, so nothing strands. A shallow
+ * ready queue is not a reason to admit: a recursive cheap tree keeps
+ * the queue empty and would otherwise become a spawn/wake storm.
  *
  * A site is a @parallel thunk pointer. Clean leaf-arm CPU time below
  * CC_PAR_CHURN_NS (default 8us) is cheap; at or above is heavy. Heavy
@@ -380,8 +380,9 @@ uint32_t sched_v2_current_fiber_suspends(void);
  * evidence commits CHURN from virgin on the first sample (a storm is
  * all cheap); demoting REAL to CHURN takes CC_PAR_CHEAP_STREAK
  * consecutive cheap resamples, so one freak-cheap sample cannot
- * serialize a real site. A 1-in-1024 resample keeps a wrong verdict
- * from sticking. CC_PAR_ADAPT=0 always spawns.
+ * serialize a real site. A 1-in-2^20 CHURN resample (inline gate) and
+ * a 1-in-1024 REAL wrap keep a wrong verdict from sticking.
+ * CC_PAR_ADAPT=0 always spawns.
  *
  * Table: fixed open-addressed, insert-only. Overflow stays virgin and
  * always spawns. */
@@ -393,6 +394,7 @@ enum {
     CC_PAR_SITE_REAL = 2,
 };
 #define CC_PAR_RESAMPLE_MASK 1023u
+#define CC_PAR_CHURN_RESAMPLE_MASK 0xfffffu /* 1-in-2^20; see deny_fast */
 #define CC_PAR_CHEAP_STREAK 3u /* REAL→CHURN; toward-deny is the starving direction */
 #define CC_PAR_FLOOD_DEPTH 512u /* virgin/TCC wrap cap: above any coarse fan-out */
 
@@ -651,16 +653,21 @@ CCTask cc_parallel_spawn(void* (*fn)(void*), void* arg) {
     if (cc_parallel_adapt_on() && (site = cc_par_site_get(fn)) != NULL) {
         int st = atomic_load_explicit(&site->state, memory_order_relaxed);
         if (st == CC_PAR_SITE_CHURN) {
-            /* Shallow: spawn unwrapped. Deep: this call is the inline
-             * gate's resample — wrap it. Depth 512 caps wrapped admits
-             * when there is no inline gate (TCC / direct API). */
-            size_t depth = sched_v2_ready_depth();
-            if (depth < (size_t)cc_parallel_adapt_backlog())
-                site = NULL;
-            else if (depth >= CC_PAR_FLOOD_DEPTH) {
+            /* Native: deny_fast already denied except a 1-in-2^20
+             * resample, which lands here to wrap and re-measure. TCC
+             * has no inline gate — deny here except that same trickle.
+             * Cheap work is not admitted just because the queue is
+             * shallow. */
+            if (sched_v2_ready_depth() >= CC_PAR_FLOOD_DEPTH) {
                 tls_par_denials++;
                 return invalid;
             }
+#if defined(__TINYC__)
+            if ((++tls_par_tick & CC_PAR_CHURN_RESAMPLE_MASK) != 0) {
+                tls_par_denials++;
+                return invalid;
+            }
+#endif
         } else if (st == CC_PAR_SITE_REAL) {
             /* Never denied. Rare wrap so a wrong REAL can recover. */
             if ((++tls_par_tick & CC_PAR_RESAMPLE_MASK) != 0)

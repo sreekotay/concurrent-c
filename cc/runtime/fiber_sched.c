@@ -1244,25 +1244,26 @@ void cc__fiber_yield_global(void) {
     sched_yield();
 }
 
-/* Signal to the sysmon that the current worker is still alive and doing
-* productive work.  Call this from long-running tasks that do not yield
-* (e.g. CPU-bound pool tasks) to prevent the orphan-threshold detector
-* from treating the worker as "stuck" and spawning hybrid-promotion
-* threads unnecessarily. */
 /* Sleep for `ms` milliseconds.
  *
- * V1 had a dedicated fiber sleep queue drained by sysmon every ~250µs,
- * which avoided O(N) run-queue churn for many concurrent sleepers.  V2
- * has no equivalent yet: a sleeping V2 fiber currently blocks the worker
- * thread via nanosleep, and sysmon's orphan-and-replace mechanism spawns
- * a temp worker if the pool becomes fully blocked.  This is cheap and
- * correct for the small number of cc_sleep_ms callers in the codebase;
- * if a workload ever stresses concurrent fiber sleeps, a dedicated V2
- * timer park can be added in sched_v2.c and this shim rewired.  Until
- * then the nanosleep fallback is the one-and-only path — the legacy
- * fiber_task->sleep_deadline + YIELD_SLEEP trampoline handoff was V1-only
- * and is now dead code. */
+ * In a fiber: park with a deadline. The worker runs someone else;
+ * sysmon's expired-park walk signals when the clock is due. Resolution
+ * is the sysmon tick (V2_SYSMON_INTERVAL_MS). Cancel does not cut the
+ * sleep. Off-fiber: nanosleep the thread. */
 void cc__fiber_sleep_park(unsigned int ms) {
+    if (sched_v2_in_context()) {
+        struct timespec until;
+        clock_gettime(CLOCK_REALTIME, &until);
+        until.tv_sec += (time_t)(ms / 1000);
+        until.tv_nsec += (long)(ms % 1000) * 1000000L;
+        if (until.tv_nsec >= 1000000000L) {
+            until.tv_nsec -= 1000000000L;
+            until.tv_sec += 1;
+        }
+        (void)cc__fiber_park_if_until(NULL, 0, &until, "sleep",
+                                      __FILE__, __LINE__);
+        return;
+    }
     struct timespec ts = { .tv_sec = ms / 1000,
                            .tv_nsec = (long)(ms % 1000) * 1000000L };
     while (nanosleep(&ts, &ts) == -1 && errno == EINTR) {}

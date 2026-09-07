@@ -66,6 +66,7 @@ int main(void) {
     @with_deadline(millis(50)) {
         CCParallel h = @parallel {
             @serial {
+                @errhandler(CCError e) { h.fail(e); return; }
                 while (!cc_deadline_expired(cc_current_deadline()))
                     cc_sleep_ms(10);
                 bool did = h.cancel() !>;

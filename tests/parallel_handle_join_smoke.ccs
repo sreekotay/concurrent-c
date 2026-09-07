@@ -49,8 +49,8 @@ int main(void) {
 
     /* Bind the fan-in, then wait. */
     CCParallel both = @parallel {
-        h1.wait() !>;
-        h2.wait() !>;
+        h1.wait() !>(e) { both.fail(e); return; };
+        h2.wait() !>(e) { both.fail(e); return; };
     } !>;
     both.wait() !>;
 

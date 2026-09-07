@@ -43,9 +43,11 @@ int main(void) {
         int stuck = 0;
         int done = 0;
         int saw = 0;
+        int* stuckp = &stuck;
+        int* donep = &done;
         CCParallel h = @parallel {
-            saw = kick_pause(&h, &stuck, &done);
-            done = hold_then_run(&h, &stuck);
+            saw = kick_pause(&h, stuckp, donep);
+            done = hold_then_run(&h, stuckp);
         } !>;
         h.wait() !>;
         if (saw != 1 || done != 1) {
@@ -58,9 +60,10 @@ int main(void) {
         int stuck = 0;
         int done = 0;
         int saw = 0;
+        int* stuckp = &stuck;
         CCParallel h = @parallel {
-            saw = kick_cancel(&h, &stuck);
-            done = hold_then_run(&h, &stuck);
+            saw = kick_cancel(&h, stuckp);
+            done = hold_then_run(&h, stuckp);
         } !>;
         h.wait() !>;
         if (done != 1 || saw != 2 || !h.cancelled) {

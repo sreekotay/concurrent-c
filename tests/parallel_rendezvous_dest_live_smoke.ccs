@@ -5,11 +5,11 @@
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
-static void consume(int[~ <] rx, int* got) {
+static int consume(int[~ <] rx) {
     int v = 0;
     if (!cc_io_avail(rx.recv(&v)))
-        return;
-    *got = v;
+        return 0;
+    return v;
 }
 
 int main(void) {
@@ -20,7 +20,7 @@ int main(void) {
     CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
     int got = 0;
     CCParallel h = @parallel spawn {
-        @serial { consume(rx, &got); }
+        @serial { got = consume(rx); }
     } !>;
     tx.send(9) !>;
     tx.close();

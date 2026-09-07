@@ -59,7 +59,7 @@ Scheduler (see also the config table in the scheduler spec):
 - `CC_DEADLOCK_PERSIST_MS=N` — override deadlock latch duration (default 1000)
 - `CC_PAR_ADAPT=0` — disable the `@parallel` spawn gate (always spawn). Default on
 - `CC_PAR_CHURN_NS=N` — cheap/heavy leaf line in nanoseconds (default 8000)
-- `CC_PAR_ADAPT_BACKLOG=N` — ready-queue depth at which CHURN denies (default 4)
+- `CC_PAR_ADAPT_BACKLOG=N` — unused on the CHURN fast path (kept for ABI)
 - `CC_PAR_ADAPT_DEBUG=1` — dump the `@parallel` site table at exit
 
 Optional diagnostics (when present in the linked runtime):

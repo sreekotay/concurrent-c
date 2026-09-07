@@ -166,9 +166,8 @@ Brace-form and `@parallel for` arms go through `cc_parallel_spawn` /
 `cc/include/ccc/cc_sched.cch`.
 
 If this site's leaf arms are cheaper than a spawn, the gate does not spawn
-when the ready queue is already busy; otherwise it spawns. A denied spawn
-returns an INVALID task; the join runs the arm inline. Nothing strands.
-REAL work is never denied.
+except a 1-in-2^20 resample. A denied spawn returns an INVALID task; the
+join runs the arm inline. Nothing strands. REAL work is never denied.
 
 `@parallel wait`, nursery, and `cc_nursery_spawn*` do not go through
 `cc_parallel_spawn`.
@@ -202,8 +201,8 @@ stops; the site still spawns.
 
 - **VIRGIN** — no clean sample yet. Spawn, wrapped in a timing trampoline.
 - **CHURN** — cheap leaf (below `CC_PAR_CHURN_NS`, default 8000 ns, about
-  5× spawn+join of ~1.5 µs). Deny when ready-queue depth ≥ deny_depth
-  (default 4, `CC_PAR_ADAPT_BACKLOG`).
+  5× spawn+join of ~1.5 µs). Always deny except a 1-in-2^20 resample.
+  A shallow ready queue is not a reason to admit.
 - **REAL** — heavy leaf. Never denied.
 
 One heavy clean sample commits REAL immediately. Virgin plus one cheap
@@ -225,13 +224,19 @@ on a channel aborts.
 
 Per construct the lowering emits a `static void*` site slot.
 `cc_parallel_deny_fast` reads `CCParSiteGate` `{state, deny_depth}` (layout
-prefix of the runtime site record; `_Static_assert` in `scheduler.c`) and
-`*__cc_par_depth_addr`. CHURN and depth ≥ deny_depth yields an invalid
-task. `cc_parallel_site_gate` never returns NULL: adapt-off and table-full
+prefix of the runtime site record; `_Static_assert` in `scheduler.c`).
+CHURN yields an invalid task except a 1-in-2^20 resample. `deny_depth`
+is unused on the fast path. `cc_parallel_site_gate` never returns NULL: adapt-off and table-full
 return a static never-CHURN record. Emit cache and runtime version
 together.
 
-Per-thread gate state (denied-sibling stack, inlined-arm count, resample
+An assignment-only immediate-wait join (`name = expr` arms, no `return`
+or `goto` in an arm, no dest) does not emit an exit cell. A CHURN deny
+runs the arms as ordinary assignments on the caller. A spawn uses a
+noinline helper so the denied recursion does not carry the task/env
+frame.
+
+Per-thread gate state (denied-sibling stack, inlined-arm count, resample)
 tick) is one thread-local `CCParTls` block. A construct fetches it once
 (`cc__par_tls()`) and passes the pointer to `cc_parallel_deny_enter`,
 `cc_parallel_deny_fast`, `cc_parallel_note_denied`,
@@ -555,7 +560,7 @@ correctness.
 | `CC_DEADLOCK_PERSIST_MS=N`       | Override the deadlock latch duration (default 1000).                                           |
 | `CC_PAR_ADAPT=0`                 | Disable the `@parallel` spawn gate (always spawn). Default on.                                 |
 | `CC_PAR_CHURN_NS=N`              | Cheap/heavy leaf line in nanoseconds. Default 8000.                                            |
-| `CC_PAR_ADAPT_BACKLOG=N`         | Ready-queue depth at which CHURN denies. Default 4.                                            |
+| `CC_PAR_ADAPT_BACKLOG=N`         | Unused on the CHURN fast path (site `deny_depth` still written). Default 4.                    |
 | `CC_PAR_ADAPT_DEBUG=1`           | Dump the `@parallel` site table at exit.                                                       |
 
 ### Compile-time constants (`sched_v2.c`)

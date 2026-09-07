@@ -4,7 +4,8 @@
 # The question this answers: what happens when the programmer writes the
 # naive thing — a spawn per tree node, no grain cut, no tuning — in each
 # runtime? CC's answer is the adaptive spawn gate (scheduler.c): churn
-# sites are learned and inlined, so the flood never materializes. Go's
+# sites are learned and inlined (CHURN always denies except a 1-in-2^20
+# resample), so the flood never materializes. Go's
 # answer is 16.7M live goroutines.
 #
 # Fairness contract:

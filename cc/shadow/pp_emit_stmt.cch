@@ -3129,7 +3129,8 @@ static int shadow_par_go_collect(AstNode* st, char lhs[][128],
 static int shadow_par_go_fmt_params(char* dst, size_t cap, char lhs[][128],
                                     char lhs_ty[][96], int n,
                                     char cap_names[][64], char cap_tys[][160],
-                                    int ncaps);
+                                    int ncaps, int with_ex);
+static int shadow_par_join_slim(AstNode* st, const char* hdest);
 
 static int shadow_emit_par_protos(CEmit* out, AstNode** pars, int n) {
     int i;
@@ -3182,17 +3183,19 @@ static int shadow_emit_par_protos(CEmit* out, AstNode** pars, int n) {
                                id + a, id + a))
                     return 0;
             }
-            if (pars[i]->e && pars[i]->e[0]) {
+            if ((pars[i]->e && pars[i]->e[0]) ||
+                shadow_par_join_slim(pars[i], NULL)) {
                 char glhs[32][128];
                 char glty[32][96];
                 char gnames[SHADOW_PAR_CAP_MAX][64];
                 char gtys[SHADOW_PAR_CAP_MAX][160];
                 char params[2048];
                 int nlhs = 0, ng = 0;
+                int with_ex = !shadow_par_join_slim(pars[i], NULL);
                 if (shadow_par_go_collect(pars[i], glhs, glty, &nlhs, gnames,
                                           gtys, &ng) &&
                     shadow_par_go_fmt_params(params, sizeof(params), glhs, glty,
-                                             nlhs, gnames, gtys, ng)) {
+                                             nlhs, gnames, gtys, ng, with_ex)) {
                     if (!cemit_fmt(out,
                                    "static __attribute__((noinline)) void "
                                    "__cc_par_go_%d(%s);\n",
@@ -3291,24 +3294,118 @@ static int shadow_par_arm_assigns(AstNode* s, const char* name) {
     return 0;
 }
 
-/* Reference capture (spec §8.11 Captures). A T* copies the pointer —
- * `&p` is the kick-frame slot, dead after a dest-live return. Arrays
- * already decay to that pointer value. Dest-live plant snapshots every
- * other read-only name at pack (the kick's arguments). A name the arm
- * assigns or address-takes, an atomic, and a CCParallel dest stay the
- * frame object. Immediate-wait joins capture by reference. */
+/* Identity types stay the frame object. Everything else in a dest-bound
+ * arm is a copy (pointer copies the pointer). Immediate-wait joins
+ * (`g_par_plant_arm` NULL) capture every name by reference. Assign,
+ * `&name`, and UFCS-on-a-copy of a by-value dest-bound capture are
+ * ill-formed — see shadow_par_diag_dest_bound_caps. */
+static int shadow_par_cap_is_identity(const char* name) {
+    const ShadowBind* b = shadow_bind_lookup(name);
+    if (!b || !b->ty[0]) return 0;
+    if (strncmp(b->ty, "cc_atomic", 9) == 0) return 1;
+    if (strcmp(b->ty, "CCParallel") == 0) return 1;
+    return 0;
+}
+
+static int shadow_par_cap_is_byvalue(const char* name) {
+    const ShadowBind* b = shadow_bind_lookup(name);
+    if (!b || !b->ty[0]) return 0;
+    if (b->flags & SHADOW_BIND_ARRAY) return 0;
+    if (shadow_type_is_pointer(b->ty)) return 0;
+    if (shadow_par_cap_is_identity(name)) return 0;
+    return 1;
+}
+
+static int shadow_par_text_ufcs_receiver(const char* text, const char* name) {
+    const char* p = text ? text : "";
+    size_t nlen;
+    if (!name || !name[0]) return 0;
+    nlen = strlen(name);
+    while (*p) {
+        if (*p == '"' || *p == '\'') {
+            char q = *p++;
+            while (*p && *p != q) {
+                if (*p == '\\' && p[1]) p++;
+                p++;
+            }
+            if (*p == q) p++;
+            continue;
+        }
+        if (strncmp(p, name, nlen) == 0 &&
+            (p == text || !shadow_is_ident_char(p[-1]))) {
+            const char* s = p + nlen;
+            if (*s == '.') {
+                s++;
+                if (shadow_is_ident_char(*s) &&
+                    !(*s >= '0' && *s <= '9')) {
+                    while (shadow_is_ident_char(*s)) s++;
+                    while (*s == ' ' || *s == '\t') s++;
+                    if (*s == '(') return 1;
+                }
+            }
+        }
+        p++;
+    }
+    return 0;
+}
+
+static int shadow_par_arm_ufcs_receiver(AstNode* s, const char* name) {
+    int k;
+    if (!s || !name) return 0;
+    /* Parsed UFCS: receiver is slot a, method is slot b. */
+    if ((s->kind == AST_UFCS_STMT || s->kind == AST_UFCS_EXPR) &&
+        strcmp(ast_slot(s->a), name) == 0)
+        return 1;
+    if (shadow_par_text_ufcs_receiver(s->a, name) ||
+        shadow_par_text_ufcs_receiver(s->b, name) ||
+        shadow_par_text_ufcs_receiver(s->c, name))
+        return 1;
+    for (k = 0; k < s->nbody; k++)
+        if (shadow_par_arm_ufcs_receiver(s->body[k], name)) return 1;
+    for (k = 0; k < s->ndbody; k++)
+        if (shadow_par_arm_ufcs_receiver(s->dbody[k], name)) return 1;
+    if (s->kids) {
+        for (k = 0; k < s->nkids; k++)
+            if (shadow_par_arm_ufcs_receiver(s->kids[k], name)) return 1;
+    }
+    return 0;
+}
+
+/* Dest-bound body: a by-value name is a copy. Assign, `&name`, or UFCS
+ * `name.m(` would hit that copy, not the frame object. */
+static int shadow_par_diag_dest_bound_caps(ShadowCtx* ctx, CEmit* out,
+                                          AstNode* st, AstNode* arm,
+                                          char names[][64], int nc) {
+    int i;
+    if (!ctx || !out || !arm) return 1;
+    for (i = 0; i < nc; i++) {
+        if (!shadow_par_cap_is_byvalue(names[i])) continue;
+        if (!shadow_par_arm_assigns(arm, names[i]) &&
+            !shadow_par_arm_addr_takes(arm, names[i]) &&
+            !shadow_par_arm_ufcs_receiver(arm, names[i]))
+            continue;
+        {
+            char msg[512];
+            snprintf(msg, sizeof(msg),
+                     "'%s' is a dest-bound by-value capture (a copy); assign, "
+                     "address-take, or UFCS receiver is ill-formed. Shared: "
+                     "`T* p = &%s` in the frame and pass `p`. Moved: stop "
+                     "naming `%s` in the frame",
+                     names[i], names[i], names[i]);
+            shadow_err(ctx, st, msg);
+        }
+        out->err = 1;
+    }
+    return out->err ? 0 : 1;
+}
+
 static int shadow_par_cap_is_ref(const char* name) {
     const ShadowBind* b = shadow_bind_lookup(name);
     if (!b) return 1;
     if (b->flags & SHADOW_BIND_ARRAY) return 0;
     if (shadow_type_is_pointer(b->ty)) return 0;
     if (!g_par_plant_arm) return 1;
-    if (strncmp(b->ty, "cc_atomic", 9) == 0) return 1;
-    /* Dest identity: admit onto a snapshot is not this dest. */
-    if (strcmp(b->ty, "CCParallel") == 0) return 1;
-    if (shadow_par_arm_addr_takes(g_par_plant_arm, name)) return 1;
-    if (shadow_par_arm_assigns(g_par_plant_arm, name)) return 1;
-    return 0;
+    return shadow_par_cap_is_identity(name);
 }
 
 /* Env members are mangled (`__cc_cap_x`) so a captured name can never
@@ -3562,7 +3659,8 @@ static int shadow_par_emit_honor_pack(CEmit* dest, const char* bi,
 static int shadow_par_emit_assign_thunk(int id, int pj_id, const char* lhs_ty,
                                         const char* rhs, char names[][64],
                                         char tys[][160], int ncaps,
-                                        const char* hdest, int h_named) {
+                                        const char* hdest, int h_named,
+                                        int with_ex) {
     CEmit* h = &g_shadow_par_helpers;
     char refs[SHADOW_PAR_CAP_MAX][64];
     int nrefs = shadow_par_ref_list(names, ncaps, refs);
@@ -3576,10 +3674,16 @@ static int shadow_par_emit_assign_thunk(int id, int pj_id, const char* lhs_ty,
         return 0;
     if (!shadow_par_emit_cap_members(h, "        ", names, tys, ncaps))
         return 0;
-    if (!cemit_fmt(h, "        %s* out;\n"
-                      "        __cc_pj_ex_%d_t *__cc_pj_ex;\n",
-                   lhs_ty, pj_id))
-        return 0;
+    if (with_ex) {
+        if (!cemit_fmt(h, "        %s* out;\n"
+                          "        __cc_pj_ex_%d_t *__cc_pj_ex;\n",
+                       lhs_ty, pj_id))
+            return 0;
+    } else {
+        (void)pj_id;
+        if (!cemit_fmt(h, "        %s* out;\n", lhs_ty))
+            return 0;
+    }
     if (!shadow_par_emit_honor_field(h, "        "))
         return 0;
     if (!cemit_fmt(h, "    } *__cc_par_env = arg;\n"
@@ -3676,6 +3780,47 @@ static int shadow_par_emit_serial_thunk(int id, int pj_id, const char* lhs_ty,
     return cemit_str(h, "    return NULL;\n}\n");
 }
 
+/* Nested @parallel has its own exit cell; a return there does not
+ * claim this join. */
+static int shadow_par_arm_has_leave(AstNode* s) {
+    int k;
+    if (!s) return 0;
+    if (s->kind == AST_PARALLEL || s->kind == AST_PARALLEL_FOR)
+        return 0;
+    if (s->kind == AST_RETURN_INT || s->kind == AST_RETURN_CC ||
+        s->kind == AST_RETURN_EXPR || s->kind == AST_GOTO)
+        return 1;
+    for (k = 0; k < s->nbody; k++)
+        if (shadow_par_arm_has_leave(s->body[k])) return 1;
+    for (k = 0; k < s->ndbody; k++)
+        if (shadow_par_arm_has_leave(s->dbody[k])) return 1;
+    if (s->kids) {
+        for (k = 0; k < s->nkids; k++)
+            if (shadow_par_arm_has_leave(s->kids[k])) return 1;
+    }
+    return 0;
+}
+
+/* Assignment-only immediate-wait join: denied arms are ordinary
+ * assignments in the caller. No exit cell, no deny stack. A spawn
+ * uses a noinline helper so the denied recursion does not carry
+ * the task/env frame. */
+static int shadow_par_join_slim(AstNode* st, const char* hdest) {
+    int a;
+    if (!st || st->kind != AST_PARALLEL) return 0;
+    if (!st->par_wake || st->par_spawn || st->forced_seq || st->par_onto)
+        return 0;
+    if (hdest && hdest[0]) return 0;
+    if (st->nbody < 2 || st->nbody > 32) return 0;
+    for (a = 0; a < st->nbody; a++) {
+        AstNode* arm = st->body[a];
+        if (!arm || arm->kind == AST_SERIAL) return 0;
+        if (!arm->a || !arm->a[0]) return 0;
+        if (shadow_par_arm_has_leave(arm)) return 0;
+    }
+    return 1;
+}
+
 static int shadow_par_go_collect(AstNode* st, char lhs[][128],
                                  char lhs_ty[][96], int* nlhs,
                                  char cap_names[][64], char cap_tys[][160],
@@ -3748,7 +3893,7 @@ static int shadow_par_go_collect(AstNode* st, char lhs[][128],
 static int shadow_par_go_fmt_params(char* dst, size_t cap, char lhs[][128],
                                     char lhs_ty[][96], int n,
                                     char cap_names[][64], char cap_tys[][160],
-                                    int ncaps) {
+                                    int ncaps, int with_ex) {
     size_t o = 0;
     int a;
     (void)lhs;
@@ -3771,7 +3916,7 @@ static int shadow_par_go_fmt_params(char* dst, size_t cap, char lhs[][128],
         if (r < 0 || (size_t)r >= cap - o) return 0;
         o += (size_t)r;
     }
-    {
+    if (with_ex) {
         int r = snprintf(dst + o, cap - o, ", void* __cc_pj_exv");
         if (r < 0 || (size_t)r >= cap - o) return 0;
         o += (size_t)r;
@@ -4212,21 +4357,24 @@ static int shadow_emit_par_spawn_body(
     char cap_names[][SHADOW_PAR_CAP_MAX][64],
     char cap_tys[][SHADOW_PAR_CAP_MAX][160], int     via_outs, AstNode* st,
     ShadowCtx* ctx, int use_cleanup, char grefs[][64], int ngrefs,
-    const char* hdest) {
+    const char* hdest, int slim) {
     int a;
     int spawn0 = parallel_dest_expr_worker(st) ? 0 : 1;
     int dest_live = (hdest && hdest[0] && st && !st->par_wake);
     int never_deny = (st && st->par_spawn) || dest_live;
-    /* One TLS lookup per construct: every gate helper takes the block. */
-    if (!cemit_fmt(dest, "%sCCParTls* __cc_pt = cc__par_tls();\n", bi))
-        return 0;
-    if (hdest && hdest[0]) {
-        if (!cemit_fmt(dest, "%scc_parallel_deny_enter(__cc_pt, &(%s));\n",
-                       bi, hdest))
+    /* Slim helper is admit-only: the caller already took the deny path.
+     * No TLS / deny stack / exit cell. */
+    if (!slim) {
+        if (!cemit_fmt(dest, "%sCCParTls* __cc_pt = cc__par_tls();\n", bi))
             return 0;
-    } else if (!cemit_fmt(dest, "%scc_parallel_deny_enter(__cc_pt, NULL);\n",
-                          bi))
-        return 0;
+        if (hdest && hdest[0]) {
+            if (!cemit_fmt(dest, "%scc_parallel_deny_enter(__cc_pt, &(%s));\n",
+                           bi, hdest))
+                return 0;
+        } else if (!cemit_fmt(dest, "%scc_parallel_deny_enter(__cc_pt, NULL);\n",
+                              bi))
+            return 0;
+    }
     for (a = spawn0; a < n; a++) {
         int id = base + a - spawn0;
         char dot[48];
@@ -4244,7 +4392,10 @@ static int shadow_emit_par_spawn_body(
                                              cap_tys[a], ncaps[a]))
                 return 0;
         }
-        if (!cemit_fmt(dest,
+        if (slim) {
+            if (!cemit_fmt(dest, "%s    %s* out;\n", bi, lhs_ty[a]))
+                return 0;
+        } else if (!cemit_fmt(dest,
                        "%s    %s* out;\n"
                        "%s    __cc_pj_ex_%d_t *__cc_pj_ex;\n",
                        bi, lhs_ty[a], bi, base))
@@ -4309,7 +4460,8 @@ static int shadow_emit_par_spawn_body(
                     return 0;
             } else if (!cemit_fmt(dest, "%s%sout = &(%s);\n", bi, dot, lhs[a]))
                 return 0;
-            if (!cemit_fmt(dest, "%s%s__cc_pj_ex = __cc_pj_ex;\n", bi, dot))
+            if (!slim &&
+                !cemit_fmt(dest, "%s%s__cc_pj_ex = __cc_pj_ex;\n", bi, dot))
                 return 0;
             if (!shadow_par_emit_honor_pack(dest, bi, dot, hdest))
                 return 0;
@@ -4357,7 +4509,8 @@ static int shadow_emit_par_spawn_body(
             } else if (!cemit_fmt(dest, "%s%sout = &(%s);\n", bi, dot,
                                  lhs[a]))
                 return 0;
-            if (!cemit_fmt(dest, "%s%s__cc_pj_ex = __cc_pj_ex;\n", bi, dot))
+            if (!slim &&
+                !cemit_fmt(dest, "%s%s__cc_pj_ex = __cc_pj_ex;\n", bi, dot))
                 return 0;
             if (!shadow_par_emit_honor_pack(dest, bi, dot, hdest))
                 return 0;
@@ -4384,11 +4537,18 @@ static int shadow_emit_par_spawn_body(
                     return 0;
             } else if (!cemit_fmt(dest, "%s%sout = &(%s);\n", bi, dot, lhs[a]))
                 return 0;
-            if (!cemit_fmt(dest, "%s%s__cc_pj_ex = __cc_pj_ex;\n", bi, dot))
+            if (!slim &&
+                !cemit_fmt(dest, "%s%s__cc_pj_ex = __cc_pj_ex;\n", bi, dot))
                 return 0;
             if (!shadow_par_emit_honor_pack(dest, bi, dot, hdest))
                 return 0;
-            if (never_deny) {
+            if (slim) {
+                if (!cemit_fmt(dest,
+                        "%s__cc_par_t_%d = cc_parallel_spawn(__cc_par_thunk_%d, "
+                        "&__cc_par_e_%d);\n",
+                        bi, id, id, id))
+                    return 0;
+            } else if (never_deny) {
                 if (!cemit_fmt(dest,
                         "%s__cc_par_t_%d = cc_parallel_spawn_admit(__cc_par_thunk_%d, "
                         "&__cc_par_e_%d);\n",
@@ -4415,7 +4575,8 @@ static int shadow_emit_par_spawn_body(
         int in_dest = hdest && hdest[0];
         snprintf(join, sizeof(join), "__cc_pj_join_%d", base);
         shadow_pj_save(ctx, &pb, &pt, pex, pjn);
-        shadow_pj_set(ctx, 0, "__cc_pj_ex", join);
+        if (!slim)
+            shadow_pj_set(ctx, 0, "__cc_pj_ex", join);
         /* Caller-run first arm of a dest-bound construct is a dest body
          * too: own handlers; `return;` goes to the plant. */
         if (in_dest) shadow_dest_body_enter(ctx, &dbs);
@@ -4480,7 +4641,7 @@ static int shadow_emit_par_spawn_body(
         }
         if (in_dest) shadow_dest_body_leave(ctx, &dbs);
         shadow_pj_restore(ctx, pb, pt, pex, pjn);
-        if (!cemit_fmt(dest, "%s%s: ;\n", bi, join))
+        if (!slim && !cemit_fmt(dest, "%s%s: ;\n", bi, join))
             return 0;
     }
     /* Dest-bound construct: the arms are dest bodies, so no arm can claim
@@ -4524,6 +4685,14 @@ static int shadow_emit_par_spawn_body(
                     "%s}\n",
                     bi, bi, bi, id, id, bi))
                 return 0;
+        } else if (slim) {
+            if (!cemit_fmt(dest,
+                    "%sif (__cc_par_t_%d.kind == CC_TASK_KIND_INVALID)\n"
+                    "%s    (void)__cc_par_thunk_%d(&__cc_par_e_%d);\n"
+                    "%selse\n"
+                    "%s    cc_parallel_join(__cc_par_t_%d);\n",
+                    bi, id, bi, id, id, bi, bi, id))
+                return 0;
         } else if (!cemit_fmt(dest,
                 "%sif (__cc_par_t_%d.kind == CC_TASK_KIND_INVALID)\n"
                 "%s    { CC_PAR_NOTE_INLINE_ARM(__cc_pt); "
@@ -4533,7 +4702,8 @@ static int shadow_emit_par_spawn_body(
                 bi, id, bi, id, id, bi, bi, id))
             return 0;
     }
-    if (!cemit_fmt(dest, "%scc_parallel_deny_leave(__cc_pt);\n", bi))
+    if (!slim &&
+        !cemit_fmt(dest, "%scc_parallel_deny_leave(__cc_pt);\n", bi))
         return 0;
     return 1;
 }
@@ -4542,15 +4712,15 @@ static int shadow_pw_emit_dest_decl(CEmit* out, const char* indent,
                                     const char* dest, const char* dty);
 
 /* `@parallel(h) { … }`: never-deny spawn, value-copy captures, admit onto h. */
-/* Snapshot unless the name is already a pointer/array or an atomic
- * (shared mutable). Loop `x` / accept `sock` must not alias the next
- * iteration; `sum.fetch_add` still hits the caller's cell. */
+/* Snapshot unless the name is already a pointer/array or an identity
+ * type (atomic / CCParallel). Loop `x` / accept `sock` must not alias
+ * the next iteration; `sum.fetch_add` still hits the caller's cell. */
 static int shadow_par_onto_is_ref(const char* name) {
     const ShadowBind* b = shadow_bind_lookup(name);
     if (!b || !b->ty[0]) return 0;
     if (b->flags & SHADOW_BIND_ARRAY) return 0;
     if (shadow_type_is_pointer(b->ty)) return 0;
-    return strncmp(b->ty, "cc_atomic", 9) == 0;
+    return shadow_par_cap_is_identity(name);
 }
 
 static int shadow_par_emit_seq_dest_arm(AstNode* arm, CEmit* out,
@@ -4620,6 +4790,8 @@ static int shadow_emit_parallel_onto(AstNode* st, CEmit* out, ShadowCtx* ctx,
         w++;
     }
     nc = w;
+    if (!shadow_par_diag_dest_bound_caps(ctx, out, st, arm, names, nc))
+        return 0;
     nrefs = 0;
     for (i = 0; i < nc; i++) {
         if (shadow_par_onto_is_ref(names[i])) {
@@ -4709,8 +4881,21 @@ static int shadow_emit_parallel_onto(AstNode* st, CEmit* out, ShadowCtx* ctx,
     {
         char gate[320];
         snprintf(gate, sizeof(gate), "cc_parallel_admit_ok(&(%s))", hdest);
-        if (!shadow_emit_try_call(out, ctx, i1, gate, "cc_parallel_admit_ok",
-                                  "e", 1))
+        /* Nested dest-attach sits in a dest body: admit is a seam, not a
+         * user `!>`. Cancel / not-live ends this fiber. */
+        if (ctx && ctx->dest_body) {
+            if (!cemit_fmt(out,
+                    "%s{\n"
+                    "%s    __typeof__(%s) __cc_adm = %s;\n"
+                    "%s    if (!__cc_adm.ok) {\n",
+                    i1, i1, gate, gate, i1))
+                return 0;
+            if (!shadow_dest_body_emit_return(out, ctx, i1))
+                return 0;
+            if (!cemit_fmt(out, "%s    }\n%s}\n", i1, i1))
+                return 0;
+        } else if (!shadow_emit_try_call(out, ctx, i1, gate,
+                                         "cc_parallel_admit_ok", "e", 1))
             return 0;
     }
     if (!cemit_fmt(out, "%sstruct {\n", i1))
@@ -4750,6 +4935,122 @@ static int shadow_emit_parallel_onto(AstNode* st, CEmit* out, ShadowCtx* ctx,
     return 1;
 }
 
+static int shadow_par_emit_go_fn(
+    int base, const char* params, int n, char lhs[][128], char lhs_ty[][96],
+    char rhs[][2048], int ncaps[], char cap_names[][SHADOW_PAR_CAP_MAX][64],
+    char cap_tys[][SHADOW_PAR_CAP_MAX][160], AstNode* st, ShadowCtx* ctx,
+    int use_cleanup, char grefs[][64], int ngrefs, int slim) {
+    CEmit* h = &g_shadow_par_helpers;
+    if (slim) {
+        if (!cemit_fmt(h,
+                       "\nstatic __attribute__((noinline)) void "
+                       "__cc_par_go_%d(%s) {\n",
+                       base, params))
+            return 0;
+    } else if (!cemit_fmt(h,
+                          "\nstatic __attribute__((noinline)) void "
+                          "__cc_par_go_%d(%s) {\n"
+                          "    __cc_pj_ex_%d_t *__cc_pj_ex = "
+                          "(__cc_pj_ex_%d_t*)__cc_pj_exv;\n",
+                          base, params, base, base))
+        return 0;
+    if (!shadow_emit_par_spawn_body(h, "    ", n, base, lhs, lhs_ty, rhs,
+                                    ncaps, cap_names, cap_tys, 1, st, ctx,
+                                    use_cleanup, grefs, ngrefs, NULL, slim))
+        return 0;
+    return cemit_str(h, "}\n");
+}
+
+static int shadow_par_fmt_go_args(char* args, size_t cap, CEmit* out,
+                                  const char* pad, int n, char lhs[][128],
+                                  char cap_names[][64], int ng, int with_ex) {
+    size_t ao = 0;
+    int a;
+    if (!args || !cap) return 0;
+    args[0] = 0;
+    for (a = 0; a < n; a++) {
+        if (!lhs[a][0] &&
+            !cemit_fmt(out, "%sint __cc_par_go_sink_%d = 0;\n", pad, a))
+            return 0;
+    }
+    for (a = 0; a < n; a++) {
+        int r;
+        if (!lhs[a][0])
+            r = snprintf(args + ao, cap - ao, "%s&__cc_par_go_sink_%d",
+                         a ? ", " : "", a);
+        else
+            r = snprintf(args + ao, cap - ao, "%s&(%s)", a ? ", " : "",
+                         lhs[a]);
+        if (r < 0 || (size_t)r >= cap - ao) return 0;
+        ao += (size_t)r;
+    }
+    for (a = 0; a < ng; a++) {
+        int r = snprintf(args + ao, cap - ao, ", %s%s",
+                         shadow_par_cap_is_ref(cap_names[a]) ? "&" : "",
+                         cap_names[a]);
+        if (r < 0 || (size_t)r >= cap - ao) return 0;
+        ao += (size_t)r;
+    }
+    if (with_ex) {
+        int r = snprintf(args + ao, cap - ao, ", __cc_pj_ex");
+        if (r < 0 || (size_t)r >= cap - ao) return 0;
+    }
+    return 1;
+}
+
+static int shadow_par_emit_assign_arms(CEmit* out, const char* pad, int n,
+                                       char lhs[][128], char rhs[][2048]) {
+    int a;
+    for (a = 0; a < n; a++) {
+        if (!cemit_fmt(out, "%s%s = %s;\n", pad, lhs[a], rhs[a]))
+            return 0;
+    }
+    return 1;
+}
+
+/* Deny in the caller (small frame). Admit calls the noinline helper. */
+static int shadow_par_emit_deny_then_go(CEmit* out, const char* i1,
+                                        const char* i2, int n, int base,
+                                        char lhs[][128], char rhs[][2048],
+                                        const char* args) {
+    int nsib = n - 1;
+    int s;
+    if (!cemit_fmt(out, "%sCCParTls* __cc_pt = cc__par_tls();\n", i1))
+        return 0;
+    if (nsib <= 1) {
+        if (!cemit_fmt(out,
+                       "%sif (cc_parallel_deny_fast(__cc_pt, &__cc_par_site_%d, "
+                       "__cc_par_thunk_%d)) {\n"
+                       "%sCC_PAR_NOTE_INLINE_ARM(__cc_pt);\n",
+                       i1, base, base, i2))
+            return 0;
+        if (!shadow_par_emit_assign_arms(out, i2, n, lhs, rhs))
+            return 0;
+        return cemit_fmt(out, "%s} else {\n%s__cc_par_go_%d(%s);\n%s}\n",
+                         i1, i2, base, args, i1);
+    }
+    if (!cemit_fmt(out, "%sint __cc_par_all_deny = 1;\n", i1))
+        return 0;
+    for (s = 0; s < nsib; s++) {
+        if (!cemit_fmt(out,
+                       "%sif (!cc_parallel_deny_fast(__cc_pt, &__cc_par_site_%d, "
+                       "__cc_par_thunk_%d))\n"
+                       "%s    __cc_par_all_deny = 0;\n",
+                       i1, base + s, base + s, i1))
+            return 0;
+    }
+    if (!cemit_fmt(out, "%sif (__cc_par_all_deny) {\n", i1))
+        return 0;
+    for (s = 0; s < nsib; s++) {
+        if (!cemit_fmt(out, "%sCC_PAR_NOTE_INLINE_ARM(__cc_pt);\n", i2))
+            return 0;
+    }
+    if (!shadow_par_emit_assign_arms(out, i2, n, lhs, rhs))
+        return 0;
+    return cemit_fmt(out, "%s} else {\n%s__cc_par_go_%d(%s);\n%s}\n",
+                     i1, i2, base, args, i1);
+}
+
 static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                 const char* indent, int use_cleanup) {
     if (st && st->par_onto)
@@ -4768,6 +5069,7 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
     char rhs[32][2048];
     const char* hdest = NULL;
     int spawn0 = parallel_dest_expr_worker(st) ? 0 : 1;
+    int slim;
 
     memset(h_named, 0, sizeof(h_named));
     g_par_plant_arm = NULL;
@@ -4817,7 +5119,8 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
             }
         }
     }
-    if (!st->forced_seq) {
+    slim = shadow_par_join_slim(st, hdest);
+    if (!st->forced_seq && !slim) {
         CEmit* h = &g_shadow_par_helpers;
         if (!shadow_pj_emit_typedef(h, "", base, shadow_soft_rty(ctx)))
             return 0;
@@ -4913,6 +5216,11 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 }
                 ncaps[a] = w;
                 g_par_plant_arm = arm;
+                if (!shadow_par_diag_dest_bound_caps(ctx, out, st, arm,
+                                                     cap_names[a], ncaps[a])) {
+                    g_par_plant_arm = NULL;
+                    return 0;
+                }
             }
             if (serial) {
                 int pb, pt;
@@ -4933,7 +5241,9 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
             } else if (!shadow_par_emit_assign_thunk(base + a - spawn0, base,
                                                      lhs_ty[a], rhs[a],
                                                      cap_names[a],
-                                                     cap_tys[a], ncaps[a])) {
+                                                     cap_tys[a], ncaps[a],
+                                                     hdest, h_named[a],
+                                                     !slim)) {
                 g_par_plant_arm = NULL;
                 return 0;
             }
@@ -4973,8 +5283,53 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
             return 0;
         return cemit_fmt(out, "%s}\n", indent);
     }
+    if (slim) {
+        char gnames[SHADOW_PAR_CAP_MAX][64];
+        char gtys[SHADOW_PAR_CAP_MAX][160];
+        char glhs[32][128];
+        char glty[32][96];
+        char params[2048];
+        char args[2048];
+        int nlhs = 0, ng = 0;
+        if (shadow_par_go_collect(st, glhs, glty, &nlhs, gnames, gtys, &ng) &&
+            shadow_par_go_fmt_params(params, sizeof(params), glhs, glty, nlhs,
+                                     gnames, gtys, ng, 0)) {
+            char grefs[SHADOW_PAR_CAP_MAX][64];
+            int ngrefs = shadow_par_ref_list(gnames, ng, grefs);
+            if (!shadow_par_emit_go_fn(base, params, n, lhs, lhs_ty, rhs,
+                                       ncaps, cap_names, cap_tys, st, ctx,
+                                       use_cleanup, grefs, ngrefs, 1))
+                return 0;
+            if (!cemit_fmt(out, "%s{\n", indent)) return 0;
+            if (!shadow_par_fmt_go_args(args, sizeof(args), out, i1, n, lhs,
+                                        gnames, ng, 0))
+                return 0;
+            if (st->e && st->e[0]) {
+                if (!cemit_fmt(out, "%sif (!(%s)) {\n", i1, st->e))
+                    return 0;
+                if (!shadow_par_emit_assign_arms(out, i2, n, lhs, rhs))
+                    return 0;
+                if (!cemit_fmt(out, "%s} else {\n", i1)) return 0;
+                if (!shadow_par_emit_deny_then_go(out, i2, i2, n, base, lhs,
+                                                  rhs, args))
+                    return 0;
+                if (!cemit_fmt(out, "%s}\n", i1)) return 0;
+            } else if (!shadow_par_emit_deny_then_go(out, i1, i2, n, base, lhs,
+                                                     rhs, args)) {
+                return 0;
+            }
+            return cemit_fmt(out, "%s}\n", indent);
+        }
+        /* Collect failed: keep the fat frame. */
+        {
+            CEmit* h = &g_shadow_par_helpers;
+            if (!shadow_pj_emit_typedef(h, "", base, shadow_soft_rty(ctx)))
+                return 0;
+        }
+        slim = 0;
+    }
     if (!cemit_fmt(out, "%s{\n", indent)) return 0;
-    if (!shadow_pj_emit_cell(out, i1, base, ctx)) return 0;
+    if (!slim && !shadow_pj_emit_cell(out, i1, base, ctx)) return 0;
     if (hdest && hdest[0] &&
         !cemit_fmt(out, "%s%s = cc_parallel_dest();\n", i1, hdest))
         return 0;
@@ -5007,27 +5362,17 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
         if (!hdest &&
             shadow_par_go_collect(st, glhs, glty, &nlhs, gnames, gtys, &ng) &&
             shadow_par_go_fmt_params(params, sizeof(params), glhs, glty, nlhs,
-                                     gnames, gtys, ng)) {
-            CEmit* h = &g_shadow_par_helpers;
+                                     gnames, gtys, ng, 1)) {
             char grefs[SHADOW_PAR_CAP_MAX][64];
             int ngrefs = shadow_par_ref_list(gnames, ng, grefs);
             /* noinline: the helper exists so the predicate-false serial
              * path does not carry the spawn machinery (gate block
              * pointer, task, env) in the caller's frame. Inlined, that
              * costs the serial recursion an extra callee-saved pair. */
-            if (!cemit_fmt(h,
-                    "\nstatic __attribute__((noinline)) void "
-                    "__cc_par_go_%d(%s) {\n"
-                    "    __cc_pj_ex_%d_t *__cc_pj_ex = "
-                    "(__cc_pj_ex_%d_t*)__cc_pj_exv;\n",
-                    base, params, base, base))
+            if (!shadow_par_emit_go_fn(base, params, n, lhs, lhs_ty, rhs,
+                                       ncaps, cap_names, cap_tys, st, ctx,
+                                       use_cleanup, grefs, ngrefs, 0))
                 return 0;
-            if (!shadow_emit_par_spawn_body(h, "    ", n, base, lhs, lhs_ty,
-                                            rhs, ncaps, cap_names, cap_tys, 1,
-                                            st, ctx, use_cleanup, grefs,
-                                            ngrefs, NULL))
-                return 0;
-            if (!cemit_str(h, "}\n")) return 0;
             args[0] = 0;
             for (a = 0; a < n; a++) {
                 if (!lhs[a][0] &&
@@ -5065,7 +5410,8 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
             if (!cemit_fmt(out, "%s} else {\n", i1)) return 0;
             if (!shadow_emit_par_spawn_body(out, i2, n, base, lhs, lhs_ty, rhs,
                                             ncaps, cap_names, cap_tys, 0, st,
-                                            ctx, use_cleanup, NULL, 0, hdest))
+                                            ctx, use_cleanup, NULL, 0, hdest,
+                                            0))
                 return 0;
             if (!cemit_fmt(out, "%s}\n", i1)) return 0;
         }
@@ -5075,7 +5421,7 @@ static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
     }
     if (!shadow_emit_par_spawn_body(out, i1, n, base, lhs, lhs_ty, rhs, ncaps,
                                     cap_names, cap_tys, 0, st, ctx,
-                                    use_cleanup, NULL, 0, hdest))
+                                    use_cleanup, NULL, 0, hdest, 0))
         return 0;
     if (!hdest && !shadow_pj_emit_after(out, ctx, i1, base, st)) return 0;
     return cemit_fmt(out, "%s}\n", indent);

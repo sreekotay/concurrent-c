@@ -1,0 +1,55 @@
+/*
+ * cc_sleep_ms parks the fiber. Two overlapping 80ms sleeps on one
+ * worker finish in one sleep, not two. A 400ms sleep does not trip
+ * the deadlock detector (persist 200ms): the clock is the waiter.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    setenv("CC_V2_THREADS", "1", 1);
+    setenv("CC_WORKERS", "1", 1);
+    setenv("CC_DEADLOCK_PERSIST_MS", "200", 1);
+
+    {
+        CCParallel h = @parallel spawn { @serial { (void)0; } } !>;
+        double t0 = now_ms();
+        @parallel(h) { cc_sleep_ms(80); }
+        @parallel(h) { cc_sleep_ms(80); }
+        h.wait() !>;
+        double dt = now_ms() - t0;
+        if (dt >= 140.0) {
+            fprintf(stderr, "FAIL overlap dt=%.1f (worker slept twice)\n", dt);
+            return 2;
+        }
+        if (dt < 60.0) {
+            fprintf(stderr, "FAIL overlap dt=%.1f (sleeps too short)\n", dt);
+            return 3;
+        }
+    }
+
+    {
+        double t0 = now_ms();
+        CCParallel h = @parallel spawn {
+            @serial { cc_sleep_ms(400); }
+        } !>;
+        h.wait() !>;
+        double dt = now_ms() - t0;
+        if (dt < 350.0) {
+            fprintf(stderr, "FAIL long sleep dt=%.1f\n", dt);
+            return 4;
+        }
+    }
+
+    printf("sleep_fiber_park_smoke: OK\n");
+    return 0;
+}

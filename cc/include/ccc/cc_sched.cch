@@ -165,13 +165,12 @@ void cc_parallel_join(CCTask t);
  *
  * cc_parallel_spawn's adaptive gate (scheduler.c) classifies each
  * @parallel call site by its clean leaf-arm CPU time; churn sites are
- * denied when the ready queue is busy and the lowering runs the denied
- * arm inline. Once a site is classified churn, the deny verdict is the
- * common case by orders of magnitude (millions of denials per admit in a
- * spawn storm), so paying a cross-TU call returning a 128-byte CCTask
- * per denial dominates the construct's cost. This gate lets the lowering
- * take the deny decision inline: one cached-pointer load, one state
- * load, one depth load.
+ * denied and the lowering runs the denied arm inline. Once a site is
+ * classified churn, the deny verdict is the common case by orders of
+ * magnitude (millions of denials per admit in a spawn storm), so paying
+ * a cross-TU call returning a 128-byte CCTask per denial dominates the
+ * construct's cost. This gate lets the lowering take the deny decision
+ * inline: one cached-pointer load, one state load.
  *
  * The lowering emits, per @parallel construct:
  *
@@ -191,14 +190,14 @@ void cc_parallel_join(CCTask t);
  * and alignment as the plain ints here, read via volatile — relaxed
  * loads). Both sides live in this repo and version together.
  *
- * A 1-in-1024 fall-through reaches cc_parallel_spawn as a resample.
+ * A 1-in-2^20 fall-through reaches cc_parallel_spawn as a resample.
  * Inlined arms are counted at the run (CC_PAR_NOTE_INLINE_ARM).
  */
 #define CC_PAR_GATE_CHURN 1
 
 typedef struct CCParSiteGate {
     int state;      /* CC_PAR_GATE_CHURN or not; other values private */
-    int deny_depth; /* ready-queue depth at which churn spawns deny */
+    int deny_depth; /* written; unused on the CHURN fast path */
 } CCParSiteGate;
 
 /* Resolve the gate record for a thunk. Never NULL: when the adaptive
@@ -273,10 +272,9 @@ static inline int cc__par_deny_fast(CCParTls* pt, void** slot,
     if (*(volatile const int*)&s->state != CC_PAR_GATE_CHURN)
         return 0; /* virgin/real: full runtime path */
     if (!pt) pt = cc__par_tls();
-    if (((++pt->tick) & 1023u) == 0)
-        return 0; /* resample trickle: go measured through the runtime */
-    if (*__cc_par_depth_addr < (size_t)*(volatile const int*)&s->deny_depth)
-        return 0; /* queue shallow: admit */
+    /* 1-in-2^20: unstick a wrong CHURN without a spawn storm. */
+    if (((++pt->tick) & 0xfffffu) == 0)
+        return 0;
     return 1;
 }
 

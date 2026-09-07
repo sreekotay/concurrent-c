@@ -3,7 +3,7 @@
  *
  * Same u24 binary reduction as parallel_hello_lowered.ccs and
  * go/parallel_hello.go. `par` is `@parallel { }` (the adaptive gate
- * classifies the storm as churn and inlines when the queue is busy).
+ * classifies the storm as CHURN and inlines except a 1-in-2^20 resample).
  * `cut` is `@parallel (d < CC_PAR_CUT)` — same arms, serial below the cut.
  *
  *   CC_PAR_DEPTH    default 20

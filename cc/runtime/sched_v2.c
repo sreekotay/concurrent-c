@@ -1841,9 +1841,8 @@ int sched_v2_fiber_par_slot(fiber_v2* f) {
  *
  * Called once per sysmon tick (see sched_v2_sysmon_main).  The resolution
  * is V2_SYSMON_INTERVAL_MS (20 ms today) — a 10 ms deadline will fire
- * 10–30 ms after being posted, which is fine for the only current caller
- * (@with_deadline wrapping blocking channel ops): tests only care about
- * seeing ETIMEDOUT, not latency. */
+ * 10–30 ms after being posted. Callers are @with_deadline on a blocking
+ * op and cc_sleep_ms (fiber timer park). */
 static void sched_v2_wake_expired_parkers(void) {
     if (atomic_load_explicit(&g_v2_park_deadlines, memory_order_relaxed) == 0) {
         return;
@@ -3153,6 +3152,11 @@ static void sched_v2_classify_parked_fibers(size_t* internal_parked,
         if (base != FIBER_V2_PARKED) continue;
         if (atomic_load_explicit(&f->external_wait_depth, memory_order_acquire) > 0) { (*external_parked)++; continue; }
         if (atomic_load_explicit(&f->deadlock_suppress_depth, memory_order_acquire) > 0) { (*suppressed_parked)++; continue; }
+        /* Clock will wake this fiber (cc_sleep_ms / @with_deadline). */
+        if (atomic_load_explicit(&f->has_park_deadline, memory_order_acquire)) {
+            (*suppressed_parked)++;
+            continue;
+        }
         (*internal_parked)++;
         if (!sched_v2_fiber_is_open_chan_recv_wait(f)) *saw_only_open_recv = 0;
     }
@@ -3178,7 +3182,8 @@ static void sched_v2_dump_parked_fibers_for_verdict(void) {
         if (is_parked) parked_total++;
         int skipped = 0;
         if (is_parked && (atomic_load_explicit(&f->external_wait_depth, memory_order_acquire) > 0 ||
-                          atomic_load_explicit(&f->deadlock_suppress_depth, memory_order_acquire) > 0)) {
+                          atomic_load_explicit(&f->deadlock_suppress_depth, memory_order_acquire) > 0 ||
+                          atomic_load_explicit(&f->has_park_deadline, memory_order_acquire))) {
             skipped = 1;
             skipped_total++;
         } else if (is_parked) {
@@ -3261,6 +3266,13 @@ void sched_v2_check_deadlock(void) {
                                      memory_order_relaxed);
     if (idle < n || rq > 0) {
         /* Some worker busy or work pending — not stalled. Reset latch. */
+        atomic_store_explicit(&g_v2_deadlock_first_seen, 0,
+                              memory_order_relaxed);
+        return;
+    }
+    /* A published park deadline is a clock wait: sysmon will signal.
+     * A dest join parked on a sleeper is not a deadlock. */
+    if (atomic_load_explicit(&g_v2_park_deadlines, memory_order_relaxed) > 0) {
         atomic_store_explicit(&g_v2_deadlock_first_seen, 0,
                               memory_order_relaxed);
         return;

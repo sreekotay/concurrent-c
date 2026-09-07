@@ -325,12 +325,15 @@ this dest is never live on the caller. A dest bound to one expression
 arm (`CCParallel h = @parallel { work(); } !>;`) is the worker
 (spawned); dest is live. One-arm `@serial` is that worker too —
 an outer assign does not make it the kick. Join with `!>.wait()!>`, or bind the dest.
-`h.wait()` joins them and publishes their writes. Pointer names copy
-the pointer; other captured names are the frame object and must
-outlive `.wait()`. Dest-live plant snapshots read-only captures at
-the kick; a write after the bind is not that arm's object. A name
-the arm assigns, an atomic, and a `CCParallel` dest stay the frame
-object — admit onto a snapshot is not this dest. `h.close(tx)` arms
+`h.wait()` joins them and publishes assignment-arm writes. Dest-bound
+arms are closures: a pointer copies the pointer, a value copies, an
+owner moves. Atomic and `CCParallel` names are the frame object.
+Assignment-arm LHS (`a = expr`) and a serial arm's one outer write
+are the construct's out slot and stay the frame. Assign, `&x`, or
+`x.m(` on any other by-value dest-bound name is ill-formed — take
+`T* p = &x` in the frame (shared) or stop naming `x` there (moved). Immediate-wait joins capture every name by
+reference. A dest name is the caller's dest — admit onto a snapshot
+is not this dest. `h.close(tx)` arms
 EMPTY to close `tx` on wait and leave. EMPTY is this dest's join set — a
 sibling consumer on the same dest does not unblock there
 ([recipe_parallel_empty.ccs](../examples/recipe_parallel_empty.ccs)). `h.leave()` consumes the

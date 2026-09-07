@@ -1,0 +1,21 @@
+/*
+ * Dest-bound share is a pointer taken in the frame. The body writes
+ * through it; assign / & / UFCS on the by-value name stay ill-formed.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int x = 0;
+    int* xp = &x;
+    CCParallel h = @parallel spawn { @serial { (void)0; } } !>;
+    @parallel(h) { *xp = 7; }
+    h.wait() !>;
+    if (x != 7) {
+        fprintf(stderr, "parallel_dest_bound_ptr_smoke: x=%d\n", x);
+        return 1;
+    }
+    printf("parallel_dest_bound_ptr_smoke: PASS\n");
+    return 0;
+}

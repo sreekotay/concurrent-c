@@ -6,8 +6,10 @@
  * consumer is already in recv; close runs when the *producer dest*
  * hits EMPTY, not on a line next to send.
  *
- *   prod { send }                   close(tx) — arms EMPTY to close tx
- *   cons { recv }                   already parked; sees close → drains
+ *   prod { produce(tx) }            close(tx) — arms EMPTY to close tx
+ *   cons { consume(rx) }            already parked; sees close → drains
+ *
+ * Dest-bound `tx.send` / `rx.recv` is UFCS on a copy; pass the end.
  *
  * EMPTY closes this dest's join set. A sibling consumer on the same dest
  * does not see that close — that is the produce arm (`tx.close()`) or
@@ -16,6 +18,23 @@
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/stdio.cch>
+
+static void consume(int[~4 <] rx, cc_atomic_int* sum) {
+    int v;
+    while (cc_io_avail(rx.recv(&v))) {
+        println(@string(`recv: ${v}`, @scratch));
+        cc_atomic_fetch_add(sum, v);
+    }
+}
+
+static void produce(int[~4 >] tx) {
+    @errhandler(CCError e) cc_error_exit(e);
+    int i;
+    for (i = 1; i <= 3; i++) {
+        tx.send(i) !>;
+        println(@string(`send: ${i}`, @scratch));
+    }
+}
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
@@ -27,24 +46,12 @@ int main(void) {
     cc_atomic_int sum = 0;
 
     CCParallel cons = @parallel spawn {
-        @serial {
-            int v;
-            while (cc_io_avail(rx.recv(&v))) {
-                println(@string(`recv: ${v}`, @scratch));
-                sum.fetch_add(v);
-            }
-        }
+        @serial { consume(rx, &sum); }
     } !>;
 
     {
         CCParallel prod = @parallel spawn {
-            @serial {
-                int i;
-                for (i = 1; i <= 3; i++) {
-                    tx.send(i) !>;
-                    println(@string(`send: ${i}`, @scratch));
-                }
-            }
+            @serial { produce(tx); }
         } !> @destroy;
         prod.close(tx) !>;
     }
