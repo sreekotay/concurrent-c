@@ -135,6 +135,11 @@ const CCTlsInfo* cc_tls_info(const CCTlsConn* conn);
  * Certificate Loading (helpers)
  * ============================================================================ */
 
+/* Load PEM certificate chain + private key for subsequent cc_tls_accept
+ * calls. Process-wide; call once at startup. Returns 0 on success. */
+int cc_tls_server_load(const char *cert_path, const char *key_path);
+void cc_tls_server_unload(void);
+
 /* Load certificate chain from PEM file.
  * Returns opaque handle for use in config. */
 typedef struct CCTlsCertChain CCTlsCertChain;

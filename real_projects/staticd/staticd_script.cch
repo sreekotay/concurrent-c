@@ -1,0 +1,749 @@
+/*
+ * Pages — load a .js (QuickJS) or .py (CPython) view under --pages.
+ * Same request/response ABI on both faces. Policy (when to call, encode)
+ * stays in staticd.ccs. Include after staticd_fs.cch (open_beneath).
+ *
+ * One process-wide QuickJS and one CPython so in-memory page state is
+ * shared across workers. Call sites take g_pages.mx around resolve+run.
+ *
+ * Resolve never falls through to serving source. Both faces → error.
+ * Missing engine for the only face → 501. Throw / no export → 500.
+ */
+#ifndef STATICD_SCRIPT_CCH
+#define STATICD_SCRIPT_CCH
+
+#include <string.h>
+#include <time.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <errno.h>
+#include <pthread.h>
+
+#define PAGES_BODY_MAX   (32 * 1024)
+#define PAGES_CACHE_N    32
+#define PAGES_CACHE_TTL  1
+#define PAGES_REL_MAX    256
+
+typedef enum PagesKind {
+    PAGES_MISS = 0,
+    PAGES_JS,
+    PAGES_PY,
+    PAGES_BOTH,
+    PAGES_NO_ENGINE,
+} PagesKind;
+
+typedef struct ScriptHdr {
+    char name[64];
+    char value[256];
+} ScriptHdr;
+
+typedef struct ScriptReply {
+    int status;
+    char content_type[128];
+    char[:] body;
+    ScriptHdr hdrs[8];
+    int nhdrs;
+} ScriptReply;
+
+typedef struct PagesCacheSlot {
+    char rel[PAGES_REL_MAX];
+    time_t mtime;
+    time_t checked;
+    PagesKind kind;
+    int ready;
+} PagesCacheSlot;
+
+typedef struct PagesEngines {
+    CCArena arena;
+    CCQjs js;
+    CCPy py;
+    int have_js;
+    int have_py;
+    int js_shim;
+    int py_shim;
+    int ready;
+    int mx_inited;
+    pthread_mutex_t mx;
+    PagesCacheSlot cache[PAGES_CACHE_N];
+} PagesEngines;
+
+/* Process-wide: one JS heap, one Python interp — page globals persist. */
+static PagesEngines g_pages;
+
+static const char k_js_shim[] =
+    "globalThis.Response = function(body, init) {\n"
+    "  init = init || {};\n"
+    "  var h = init.headers || {};\n"
+    "  var ct = h['content-type'] || h['Content-Type']"
+    " || 'text/plain; charset=utf-8';\n"
+    "  return {\n"
+    "    status: init.status || 200,\n"
+    "    headers: h,\n"
+    "    body: (body == null) ? '' : String(body),\n"
+    "    content_type: ct\n"
+    "  };\n"
+    "};\n"
+    "globalThis.__mk_request = function(method, path, query, body) {\n"
+    "  return { method: method, path: path, query: query,"
+    " headers: {}, body: body == null ? '' : String(body) };\n"
+    "};\n";
+
+static const char k_py_shim[] =
+    "class Response:\n"
+    "    def __init__(self, body='', status=200,"
+    " content_type='text/plain; charset=utf-8', headers=None):\n"
+    "        self.status = int(status)\n"
+    "        self.body = '' if body is None else body\n"
+    "        self.headers = dict(headers) if headers else {}\n"
+    "        ct_keys = {k.lower() for k in self.headers}\n"
+    "        if content_type and 'content-type' not in ct_keys:\n"
+    "            self.headers['content-type'] = content_type\n"
+    "        self.content_type = self.headers.get('content-type',"
+    " content_type or 'text/plain; charset=utf-8')\n"
+    "\n"
+    "class Request:\n"
+    "    def __init__(self, method, path, query, body):\n"
+    "        self.method = method\n"
+    "        self.path = path\n"
+    "        self.query = query\n"
+    "        self.headers = {}\n"
+    "        self.body = body if body is not None else b''\n"
+    "\n"
+    "def __mk_request(method, path, query, body):\n"
+    "    return Request(method, path, query, body)\n";
+
+static void pages_engines_close(void) {
+    if (!g_pages.ready && !g_pages.mx_inited) return;
+    if (g_pages.mx_inited) pthread_mutex_lock(&g_pages.mx);
+    if (g_pages.have_js) {
+        cc_qjs_close(&g_pages.js);
+        g_pages.have_js = 0;
+    }
+    if (g_pages.have_py) {
+        cc_py_close(&g_pages.py);
+        g_pages.have_py = 0;
+    }
+    g_pages.js_shim = 0;
+    g_pages.py_shim = 0;
+    memset(g_pages.cache, 0, sizeof(g_pages.cache));
+    g_pages.ready = 0;
+    if (g_pages.mx_inited) {
+        pthread_mutex_unlock(&g_pages.mx);
+        pthread_mutex_destroy(&g_pages.mx);
+        g_pages.mx_inited = 0;
+    }
+}
+
+/* Caller holds g_pages.mx. Opens engines once on the calling thread. */
+static int pages_engines_ensure_locked(void) {
+    CCArena arena;
+    if (g_pages.ready) return 0;
+    arena = cc_arena_heap(megabytes(2));
+    if (!cc_arena_is_live(arena)) return -1;
+    g_pages.arena = arena;
+    if (cc_qjs_available()) {
+        CCQjs !>(CCQjsError) jr = cc_qjs_new(arena);
+        if (jr.ok) {
+            g_pages.js = jr.u.value;
+            g_pages.have_js = 1;
+        }
+    }
+    if (cc_py_available()) {
+        CCPy !>(CCPyError) pr = cc_py_new(false, arena);
+        if (pr.ok) {
+            g_pages.py = pr.u.value;
+            g_pages.have_py = 1;
+        }
+    }
+    g_pages.ready = 1;
+    return 0;
+}
+
+static int pages_engines_open(void) {
+    /* Mutex only; engines open on first request (worker thread). */
+    if (g_pages.mx_inited) return 0;
+    memset(&g_pages, 0, sizeof(g_pages));
+    if (pthread_mutex_init(&g_pages.mx, NULL) != 0) return -1;
+    g_pages.mx_inited = 1;
+    return 0;
+}
+
+static PagesEngines* pages_engines(void) {
+    return g_pages.mx_inited ? &g_pages : NULL;
+}
+
+/* Strip a leading "export " so QuickJS global-script mode accepts the page. */
+static char[:] pages_strip_export(char[:] src, CCArena arena) {
+    size_t n = src.len;
+    char* out;
+    size_t i = 0, o = 0;
+    if (!src.ptr || !n) return cc_slice_empty();
+    out = (char*)cc_arena_alloc(arena, n + 1, 1);
+    if (!out) return cc_slice_empty();
+    while (i < n) {
+        size_t line = i;
+        while (i < n && (src.ptr[i] == ' ' || src.ptr[i] == '\t')) i++;
+        if (i + 7 <= n && src.ptr[i] == 'e' && src.ptr[i + 1] == 'x'
+                && src.ptr[i + 2] == 'p' && src.ptr[i + 3] == 'o'
+                && src.ptr[i + 4] == 'r' && src.ptr[i + 5] == 't'
+                && (src.ptr[i + 6] == ' ' || src.ptr[i + 6] == '\t')) {
+            while (line < i) out[o++] = src.ptr[line++];
+            i += 7;
+            while (i < n && (src.ptr[i] == ' ' || src.ptr[i] == '\t')) i++;
+            continue;
+        }
+        i = line;
+        while (i < n && src.ptr[i] != '\n') out[o++] = src.ptr[i++];
+        if (i < n && src.ptr[i] == '\n') out[o++] = src.ptr[i++];
+    }
+    out[o] = 0;
+    return cc_slice_from_buffer(out, o);
+}
+
+static int pages_probe_leaf(int pages_fd, const char* rel) {
+    int fd;
+    if (pages_fd < 0 || !rel || !rel[0]) return 0;
+    fd = open_beneath(pages_fd, rel, 0);
+    if (fd < 0) return 0;
+    close(fd);
+    return 1;
+}
+
+static time_t pages_mtime(int pages_fd, const char* rel) {
+    int fd;
+    struct stat st;
+    time_t m = 0;
+    fd = open_beneath(pages_fd, rel, 0);
+    if (fd < 0) return 0;
+    if (fstat(fd, &st) == 0) m = st.st_mtime;
+    close(fd);
+    return m;
+}
+
+/* Fill base without extension: "hello" or "index" or "api/hi". */
+static int pages_base_of(char[:] url_path, char* base, size_t cap) {
+    size_t n;
+    size_t i = 0;
+    if (!base || cap < 2) return 0;
+    if (!url_path.ptr) url_path = cc_slice_empty();
+    while (i < url_path.len && url_path.ptr[i] == '/') i++;
+    n = url_path.len - i;
+    if (n && url_path.ptr[url_path.len - 1] == '/') n--;
+    if (n == 0) {
+        if (cap < 6) return 0;
+        memcpy(base, "index", 5);
+        base[5] = 0;
+        return 1;
+    }
+    if (n >= cap) return 0;
+    memcpy(base, url_path.ptr + i, n);
+    base[n] = 0;
+    return 1;
+}
+
+/*
+ * Resolve URL path under pages_fd.
+ * *out_rel is "hello.js" / "hello.py" when kind is JS or PY.
+ * BOTH / NO_ENGINE leave out_rel empty; caller maps to 500 / 501.
+ */
+static PagesKind pages_resolve(int pages_fd, PagesEngines* eng,
+                               char[:] url_path, char* out_rel, size_t cap) {
+    char base[PAGES_REL_MAX];
+    char js_rel[PAGES_REL_MAX];
+    char py_rel[PAGES_REL_MAX];
+    int have_js, have_py;
+    size_t bl;
+    time_t now = time(NULL);
+    size_t slot;
+    PagesCacheSlot* c;
+
+    if (out_rel && cap) out_rel[0] = 0;
+    if (pages_fd < 0) return PAGES_MISS;
+    if (!pages_base_of(url_path, base, sizeof(base))) return PAGES_MISS;
+    bl = strlen(base);
+    if (bl + 4 >= sizeof(js_rel)) return PAGES_MISS;
+    memcpy(js_rel, base, bl);
+    memcpy(js_rel + bl, ".js", 4);
+    memcpy(py_rel, base, bl);
+    memcpy(py_rel + bl, ".py", 4);
+
+    slot = 0;
+    {
+        size_t h = 14695981039346656037ull;
+        size_t z;
+        for (z = 0; z < bl; z++) {
+            h ^= (unsigned char)base[z];
+            h *= 1099511628211ull;
+        }
+        slot = h % (size_t)PAGES_CACHE_N;
+    }
+    c = eng ? &eng->cache[slot] : NULL;
+    if (c && c->ready && c->rel[0]
+            && strcmp(c->rel, base) == 0
+            && now <= c->checked + PAGES_CACHE_TTL) {
+        if (c->kind == PAGES_JS && out_rel && cap > strlen(js_rel)) {
+            memcpy(out_rel, js_rel, strlen(js_rel) + 1);
+        } else if (c->kind == PAGES_PY && out_rel && cap > strlen(py_rel)) {
+            memcpy(out_rel, py_rel, strlen(py_rel) + 1);
+        }
+        return c->kind;
+    }
+
+    have_js = pages_probe_leaf(pages_fd, js_rel);
+    have_py = pages_probe_leaf(pages_fd, py_rel);
+    if (!have_js && !have_py) {
+        if (c) {
+            memcpy(c->rel, base, bl + 1);
+            c->kind = PAGES_MISS;
+            c->checked = now;
+            c->ready = 1;
+            c->mtime = 0;
+        }
+        return PAGES_MISS;
+    }
+    if (have_js && have_py) {
+        if (c) {
+            memcpy(c->rel, base, bl + 1);
+            c->kind = PAGES_BOTH;
+            c->checked = now;
+            c->ready = 1;
+            c->mtime = 0;
+        }
+        return PAGES_BOTH;
+    }
+    if (have_js) {
+        if (!eng || !eng->have_js) return PAGES_NO_ENGINE;
+        if (out_rel && cap > strlen(js_rel))
+            memcpy(out_rel, js_rel, strlen(js_rel) + 1);
+        if (c) {
+            memcpy(c->rel, base, bl + 1);
+            c->kind = PAGES_JS;
+            c->mtime = pages_mtime(pages_fd, js_rel);
+            c->checked = now;
+            c->ready = 1;
+        }
+        return PAGES_JS;
+    }
+    if (!eng || !eng->have_py) return PAGES_NO_ENGINE;
+    if (out_rel && cap > strlen(py_rel))
+        memcpy(out_rel, py_rel, strlen(py_rel) + 1);
+    if (c) {
+        memcpy(c->rel, base, bl + 1);
+        c->kind = PAGES_PY;
+        c->mtime = pages_mtime(pages_fd, py_rel);
+        c->checked = now;
+        c->ready = 1;
+    }
+    return PAGES_PY;
+}
+
+static CCSlice !>(CCError) pages_read_leaf(int pages_fd, const char* rel,
+                                           CCArena arena) {
+    int fd;
+    struct stat st;
+    char* buf;
+    size_t n, got = 0;
+    ssize_t r;
+    if (pages_fd < 0 || !rel || !rel[0])
+        return cc_err(CC_ERROR(CC_ERR_IO, "pages read"));
+    fd = open_beneath(pages_fd, rel, 0);
+    if (fd < 0) return cc_err(CC_ERROR(CC_ERR_IO, "pages open"));
+    if (fstat(fd, &st) != 0 || st.st_size < 0) {
+        close(fd);
+        return cc_err(CC_ERROR(CC_ERR_IO, "pages stat"));
+    }
+    n = (size_t)st.st_size;
+    if (n > (size_t)(1024 * 1024)) {
+        close(fd);
+        return cc_err(CC_ERROR(CC_ERR_IO, "pages too big"));
+    }
+    buf = (char*)cc_arena_alloc(arena, n + 1, 1);
+    if (!buf) {
+        close(fd);
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "pages read oom");
+    }
+    while (got < n) {
+        r = read(fd, buf + got, n - got);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            close(fd);
+            return cc_err(CC_ERROR(CC_ERR_IO, "pages read"));
+        }
+        if (r == 0) break;
+        got += (size_t)r;
+    }
+    close(fd);
+    buf[got] = 0;
+    return cc_ok(cc_slice_from_buffer(buf, got));
+}
+
+static int pages_ensure_js_shim(PagesEngines* e) {
+    if (!e || !e->have_js) return -1;
+    if (e->js_shim) return 0;
+    cc_qjs_exec(&e->js, cc_slice_cstr(k_js_shim)) !>(err) {
+        (void)err;
+        return -1;
+    };
+    e->js_shim = 1;
+    return 0;
+}
+
+static int pages_ensure_py_shim(PagesEngines* e) {
+    if (!e || !e->have_py) return -1;
+    if (e->py_shim) return 0;
+    cc_py_exec(&e->py, cc_slice_cstr(k_py_shim)) !>(err) {
+        (void)err;
+        return -1;
+    };
+    e->py_shim = 1;
+    return 0;
+}
+
+static ScriptReply script_reply_empty(void) {
+    ScriptReply r;
+    memset(&r, 0, sizeof(r));
+    r.status = 200;
+    memcpy(r.content_type, "text/plain; charset=utf-8", 26);
+    r.body = cc_slice_empty();
+    return r;
+}
+
+static int script_reply_take_body(ScriptReply* r, char[:] body, CCArena arena) {
+    char* p;
+    if (!r) return -1;
+    if (body.len > (size_t)PAGES_BODY_MAX) return -2;
+    if (!body.len) {
+        r->body = cc_slice_empty();
+        return 0;
+    }
+    p = (char*)cc_arena_alloc(arena, body.len, 1);
+    if (!p) return -1;
+    memcpy(p, body.ptr, body.len);
+    r->body = cc_slice_from_buffer(p, body.len);
+    return 0;
+}
+
+static int script_reply_add_hdr(ScriptReply* r, char[:] name, char[:] value) {
+    ScriptHdr* h;
+    size_t nn, nv;
+    if (!r || r->nhdrs >= 8) return -1;
+    nn = name.len < sizeof(h->name) - 1 ? name.len : sizeof(h->name) - 1;
+    nv = value.len < sizeof(h->value) - 1 ? value.len : sizeof(h->value) - 1;
+    if (!nn) return -1;
+    h = &r->hdrs[r->nhdrs];
+    memcpy(h->name, name.ptr, nn);
+    h->name[nn] = 0;
+    memcpy(h->value, value.ptr, nv);
+    h->value[nv] = 0;
+    r->nhdrs++;
+    return 0;
+}
+
+static ScriptReply !>(CCError) pages_materialize_js(CCQjsVal* out, CCArena arena) {
+    ScriptReply r = script_reply_empty();
+    CCQjsVal st, bd, ct, hdrs;
+    int64_t code = 200;
+    char[:] body;
+    @errhandler(CCError e) { return cc_err(e); }
+
+    st = out->get("status") !>(e) {
+        (void)e;
+        goto after_status;
+    };
+    code = st.as_i64() !>(e) {
+        (void)e;
+        cc_qjs_val_release(&st);
+        code = 200;
+        goto after_status;
+    };
+    cc_qjs_val_release(&st);
+after_status:
+    if (code < 100 || code > 599) code = 500;
+    r.status = (int)code;
+
+    ct = out->get("content_type") !>(e) {
+        (void)e;
+        goto take_body;
+    };
+    {
+        char[:] cts = ct.as_slice() !>(e) {
+            (void)e;
+            cc_qjs_val_release(&ct);
+            goto take_body;
+        };
+        size_t n = cts.len < sizeof(r.content_type) - 1
+                       ? cts.len : sizeof(r.content_type) - 1;
+        if (n) {
+            memcpy(r.content_type, cts.ptr, n);
+            r.content_type[n] = 0;
+        }
+        cc_qjs_val_release(&ct);
+    }
+
+take_body:
+    bd = out->get("body") !>(e) {
+        (void)e;
+        return cc_ok(r);
+    };
+    body = bd.as_slice() !>(e) {
+        (void)e;
+        cc_qjs_val_release(&bd);
+        return cc_err(CC_ERROR(CC_ERR_IO, "pages body"));
+    };
+    {
+        int rc = script_reply_take_body(&r, body, arena);
+        cc_qjs_val_release(&bd);
+        if (rc == -2)
+            return cc_err(CC_ERROR(CC_ERR_IO, "pages body too big"));
+        if (rc != 0)
+            return cc_err(CC_ERR_OUT_OF_MEMORY, "pages body oom");
+    }
+
+    hdrs = out->get("headers") !>(e) {
+        (void)e;
+        return cc_ok(r);
+    };
+    /* Response shim already mirrored content-type onto the object. */
+    cc_qjs_val_release(&hdrs);
+    return cc_ok(r);
+}
+
+static ScriptReply !>(CCError) pages_run_js(PagesEngines* e, int pages_fd,
+                                            const char* leaf,
+                                            char[:] method, char[:] path,
+                                            char[:] query, char[:] body,
+                                            CCArena arena) {
+    @errhandler(CCError err) { return cc_err(err); }
+    CCSlice src;
+    char[:] stripped;
+    CCString wrap;
+    CCQjsVal g, req, out;
+    ScriptReply r;
+
+    if (!e || !e->have_js || !leaf)
+        return cc_err(CC_ERROR(CC_ERR_IO, "pages js"));
+    if (pages_ensure_js_shim(e) != 0)
+        return cc_err(CC_ERROR(CC_ERR_IO, "pages js shim"));
+
+    src = pages_read_leaf(pages_fd, leaf, arena) !>(err) {
+        return cc_err(err);
+    };
+    stripped = pages_strip_export(src, arena);
+    if (!stripped.ptr && src.len)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "pages strip");
+    wrap = @string(`(function(){
+${stripped}
+var h = (typeof GET === 'function') ? GET
+ : (typeof handler === 'function') ? handler : null;
+if (!h) throw new Error('pages: no GET/handler');
+globalThis.__handler = h;
+})();
+`, arena);
+    if (wrap.failed())
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "pages wrap");
+    cc_qjs_exec(&e->js, wrap.as_slice()) !>(err) {
+        return cc_err(CC_ERROR(CC_ERR_IO, "pages js exec"));
+    };
+
+    g = cc_qjs_global(&e->js) !>(err) {
+        return cc_err(CC_ERROR(CC_ERR_IO, "pages js global"));
+    };
+    req = g.__mk_request(method, path, query, body) !>(err) {
+        cc_qjs_val_release(&g);
+        return cc_err(CC_ERROR(CC_ERR_IO, "pages js request"));
+    };
+    out = g.__handler(req) !>(err) {
+        cc_qjs_val_release(&req);
+        cc_qjs_val_release(&g);
+        return cc_err(CC_ERROR(CC_ERR_IO, "pages js handler"));
+    };
+    cc_qjs_val_release(&req);
+    cc_qjs_val_release(&g);
+    r = pages_materialize_js(&out, arena) !>(err) {
+        cc_qjs_val_release(&out);
+        return cc_err(err);
+    };
+    cc_qjs_val_release(&out);
+    return cc_ok(r);
+}
+
+static ScriptReply !>(CCError) pages_materialize_py(CCPyObj* out, CCArena arena) {
+    ScriptReply r = script_reply_empty();
+    CCPyObj st, bd, ct, hdrs;
+    long long code = 200;
+    char[:] body;
+    @errhandler(CCError e) { return cc_err(e); }
+
+    st = out->get("status") !>(e) {
+        (void)e;
+        goto after_status;
+    };
+    code = st.as_i64() !>(e) {
+        (void)e;
+        cc_py_obj_release(&st);
+        code = 200;
+        goto after_status;
+    };
+    cc_py_obj_release(&st);
+after_status:
+    if (code < 100 || code > 599) code = 500;
+    r.status = (int)code;
+
+    ct = out->get("content_type") !>(e) {
+        (void)e;
+        goto take_body;
+    };
+    {
+        char[:] cts = ct.as_slice() !>(e) {
+            (void)e;
+            cc_py_obj_release(&ct);
+            goto take_body;
+        };
+        size_t n = cts.len < sizeof(r.content_type) - 1
+                       ? cts.len : sizeof(r.content_type) - 1;
+        if (n) {
+            memcpy(r.content_type, cts.ptr, n);
+            r.content_type[n] = 0;
+        }
+        cc_py_obj_release(&ct);
+    }
+
+take_body:
+    bd = out->get("body") !>(e) {
+        (void)e;
+        return cc_ok(r);
+    };
+    body = bd.as_slice() !>(e) {
+        (void)e;
+        cc_py_obj_release(&bd);
+        return cc_err(CC_ERROR(CC_ERR_IO, "pages body"));
+    };
+    {
+        int rc = script_reply_take_body(&r, body, arena);
+        cc_py_obj_release(&bd);
+        if (rc == -2)
+            return cc_err(CC_ERROR(CC_ERR_IO, "pages body too big"));
+        if (rc != 0)
+            return cc_err(CC_ERR_OUT_OF_MEMORY, "pages body oom");
+    }
+
+    hdrs = out->get("headers") !>(e) {
+        (void)e;
+        return cc_ok(r);
+    };
+    cc_py_obj_release(&hdrs);
+    return cc_ok(r);
+}
+
+static ScriptReply !>(CCError) pages_run_py(PagesEngines* e, int pages_fd,
+                                            const char* leaf,
+                                            char[:] method, char[:] path,
+                                            char[:] query, char[:] body,
+                                            CCArena arena) {
+    @errhandler(CCError err) { return cc_err(err); }
+    CCSlice src;
+    CCString wrap;
+    CCPyObj main, req, out;
+    ScriptReply r;
+
+    if (!e || !e->have_py || !leaf)
+        return cc_err(CC_ERROR(CC_ERR_IO, "pages py"));
+    if (pages_ensure_py_shim(e) != 0)
+        return cc_err(CC_ERROR(CC_ERR_IO, "pages py shim"));
+
+    src = pages_read_leaf(pages_fd, leaf, arena) !>;
+    wrap = @string(`${src}
+__handler = GET if 'GET' in dir() else (handler if 'handler' in dir() else None)
+if __handler is None:
+    raise RuntimeError('pages: no GET/handler')
+`, arena);
+    if (wrap.failed())
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "pages wrap");
+    cc_py_exec(&e->py, wrap.as_slice()) !>;
+
+    main = e->py.import("__main__") !>;
+    req = main.__mk_request(method, path, query, body) !>(err) {
+        cc_py_obj_release(&main);
+        return cc_err(err);
+    };
+    out = main.__handler(req) !>(err) {
+        cc_py_obj_release(&req);
+        cc_py_obj_release(&main);
+        return cc_err(err);
+    };
+    cc_py_obj_release(&req);
+    cc_py_obj_release(&main);
+    r = pages_materialize_py(&out, arena) !>(err) {
+        cc_py_obj_release(&out);
+        return cc_err(err);
+    };
+    cc_py_obj_release(&out);
+    (void)method;
+    return cc_ok(r);
+}
+
+static ScriptReply !>(CCError) pages_run(PagesEngines* e, int pages_fd,
+                                         PagesKind kind, const char* leaf,
+                                         char[:] method, char[:] path,
+                                         char[:] query, char[:] body,
+                                         CCArena arena) {
+    if (kind == PAGES_JS)
+        return pages_run_js(e, pages_fd, leaf, method, path, query, body, arena);
+    if (kind == PAGES_PY)
+        return pages_run_py(e, pages_fd, leaf, method, path, query, body, arena);
+    return cc_err(CC_ERROR(CC_ERR_IO, "pages kind"));
+}
+
+/* Resolve + run under the process-wide engine mutex (shared JS/Py state).
+ * MISS → Ok(empty) with *out_kind = PAGES_MISS (caller falls through to static).
+ * BOTH / NO_ENGINE / run failure → Err (kind set when known). */
+static ScriptReply !>(CCError) pages_serve(int pages_fd, char[:] url_path,
+                                           char[:] method, char[:] path,
+                                           char[:] query, char[:] body,
+                                           CCArena arena, PagesKind* out_kind) {
+    @errhandler(CCError err) { return cc_err(err); }
+    PagesEngines* e = pages_engines();
+    char leaf[PAGES_REL_MAX];
+    PagesKind kind;
+    ScriptReply r;
+
+    if (out_kind) *out_kind = PAGES_MISS;
+    if (!e) {
+        if (out_kind) *out_kind = PAGES_NO_ENGINE;
+        return cc_err(CC_ERROR(CC_ERR_IO, "pages: engine not attached"));
+    }
+    pthread_mutex_lock(&e->mx);
+    if (pages_engines_ensure_locked() != 0) {
+        pthread_mutex_unlock(&e->mx);
+        if (out_kind) *out_kind = PAGES_NO_ENGINE;
+        return cc_err(CC_ERROR(CC_ERR_IO, "pages engines"));
+    }
+    kind = pages_resolve(pages_fd, e, url_path, leaf, sizeof(leaf));
+    if (out_kind) *out_kind = kind;
+    if (kind == PAGES_MISS) {
+        pthread_mutex_unlock(&e->mx);
+        return cc_ok(script_reply_empty());
+    }
+    if (kind == PAGES_BOTH) {
+        pthread_mutex_unlock(&e->mx);
+        return cc_err(CC_ERROR(CC_ERR_IO, "pages: both .js and .py"));
+    }
+    if (kind == PAGES_NO_ENGINE) {
+        pthread_mutex_unlock(&e->mx);
+        return cc_err(CC_ERROR(CC_ERR_IO, "pages: engine not attached"));
+    }
+    if (kind != PAGES_JS && kind != PAGES_PY) {
+        pthread_mutex_unlock(&e->mx);
+        return cc_ok(script_reply_empty());
+    }
+    r = pages_run(e, pages_fd, kind, leaf, method, path, query, body, arena)
+            !>(err) {
+        pthread_mutex_unlock(&e->mx);
+        return cc_err(err);
+    };
+    pthread_mutex_unlock(&e->mx);
+    return cc_ok(r);
+}
+
+#endif /* STATICD_SCRIPT_CCH */

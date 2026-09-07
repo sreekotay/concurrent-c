@@ -191,9 +191,10 @@ static BlockHold !>(CCError) checkout_block(int fd, uint64_t dev, uint64_t ino,
         hold = g_block_mx.acquire();
         g_block_ring[k] = (BlockSlot){0};
         hold.release();
-        if (r < 0)
-            return cc_err(CC_ERROR(CC_ERR_IO,
-                cc_io_error_str(cc_io_from_errno(errno))));
+        if (r < 0) {
+            const char* em = cc_io_error_str(cc_io_from_errno(errno));
+            return cc_err(CC_ERROR(CC_ERR_IO, em));
+        }
         return cc_err(CC_ERROR(CC_ERR_CLOSED, "short file"));
     }
     hold = g_block_mx.acquire();

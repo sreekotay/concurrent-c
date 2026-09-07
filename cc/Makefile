@@ -393,9 +393,9 @@ $(WRAPPER): $(CCC_SCRIPT)
 $(RUNTIME_DYLIB): $(OBJDIR)/runtime/concurrent_c.o
 	@mkdir -p $(dir $@)
 ifeq ($(shell uname -s),Darwin)
-	$(CC) $(CFLAGS) $(RUNTIME_DYLIB_LINK) -install_name libcc_runtime.dylib -o $@ $< -lpthread -lm
+	$(CC) $(CFLAGS) $(RUNTIME_DYLIB_LINK) -install_name libcc_runtime.dylib -o $@ $< $(if $(filter 1,$(CC_ENABLE_TLS)),$(BEARSSL_DIR)/build/libbearssl.a,) -lpthread -lm
 else
-	$(or $(RUNTIME_DYLIB_LINK_CC),$(CC)) $(CFLAGS) $(RUNTIME_DYLIB_LINK) -o $@ $< -lpthread -lm
+	$(or $(RUNTIME_DYLIB_LINK_CC),$(CC)) $(CFLAGS) $(RUNTIME_DYLIB_LINK) -o $@ $< $(if $(filter 1,$(CC_ENABLE_TLS)),$(BEARSSL_DIR)/build/libbearssl.a,) -lpthread -lm
 endif
 
 $(SHADOW_TCC_OBJ): $(SHADOW_TCC_C) $(TCC_LIB_DEP)

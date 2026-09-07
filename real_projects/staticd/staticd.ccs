@@ -2,41 +2,53 @@
  * staticd — Concurrent-C static HTTP/1.1 + WebSocket (specimen).
  *
  * Sessions are rows. Dest is the worker. The worker loop is the page:
- * poll the tape, step ready rows, accept, reap. The tape stays; accept
- * and reap are the only writes. poll is the wait — one live fd is that
- * wait on one socket. A ready fd fills, then one HTTP request or WS
- * frames (no dest-per-conn). A file body is a cursor on the row; a step
- * sends one chunk, then the zip continues. POLLOUT waits while left.
+ * poll → step rows → accept → reap. A ready fd fills, then one HTTP
+ * request or WS frames (no dest-per-conn). A file body is a cursor on
+ * the row; a step sends one chunk. POLLOUT waits while left.
  * Workers: start 2 (1 if the cap is 1), grow with live conns (one
- * accept per poll, so the zip splits during the storm). Cap is ncpu/2
- * (`--workers 0`) or N. `--workers 1` stays one dest — the page, and
- * the isolate receipt.
- * Live table is Vec of Session* on the worker stack arena; slots are a
+ * accept per poll). Cap is ncpu/2 (`--workers 0`) or N. `--workers 1`
+ * stays one dest — the page, and the isolate receipt.
+ * `ServerCfg` holds policy (root/pages/tls/index/list/extra). Join/grow
+ * atomics are process-wide. `SessAct` is wait|close; TLS wraps once at
+ * accept. Pages are an early arm (`pages_serve`; MISS → static).
+ *
+ * Live table is Vec of Session* on a worker stack arena; slots are a
  * pool on that arena. Encode scratch is a second stack arena on the worker.
  *
  *   staticd_http.cch    — date / Range / header-CI mechanics
  *   staticd_block.cch   — block ring keyed by dev+ino (reuse; idle cull)
  *   staticd_fs.cch      — jail, 1s fd cache, FileHold, listing
+ *   staticd_script.cch  — --pages QuickJS / CPython views (same ABI)
  *   staticd_ws.cch      — SHA-1 / base64 / frame tape
  *
- * Usage:  ./out/staticd [--listen ADDR] [--root DIR] [--index NAME]
- *                       [--list] [--header 'Name: value'] [--workers N]
+ * Usage:  ./out/staticd [--listen ADDR] [--root DIR] [--pages DIR]
+ *                       [--tls-cert PEM] [--tls-key PEM]
+ *                       [--index NAME] [--list] [--header 'Name: value']
+ *                       [--workers N]
  * v1: GET/HEAD/OPTIONS, keep-alive, Date/Last-Modified/IMS, one Range,
- *     send cursor (one 64KB chunk per step). `?query` ignored. `--list`
- *     off. `--index` default index.html. WS echo on Upgrade.
+ *     send cursor (one 64KB chunk per step). `?query` ignored on files;
+ *     passed to pages. `--list` off. `--index` default index.html.
+ *     `--pages` off. Optional TLS (`--tls-cert` + `--tls-key`). WS echo
+ *     on Upgrade.
  */
 
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
 #include <ccc/cc_instantiate.cch>
 #include <ccc/std/net.cch>
+#include <ccc/std/tls.cch>
+@link("../../third_party/bearssl/build/libbearssl.a")
 #include <ccc/std/signal.cch>
 #include <ccc/std/cli.cch>
 #include <ccc/std/static_map.cch>
 #include <ccc/stdio.cch>
+#include <ccc/script/quickjs.cch>
+#include <ccc/script/py.cch>
+#include <stdlib.h>
 #include "staticd_http.cch"
 #include "staticd_block.cch"
 #include "staticd_fs.cch"
+#include "staticd_script.cch"
 #include "staticd_ws.cch"
 #include <time.h>
 #include <fcntl.h>
@@ -59,13 +71,33 @@ enum {
     SESS_WS = 1
 };
 
+/* Policy for one serve(); join/grow atomics stay process-wide. */
+typedef struct ServerCfg {
+    int root_fd;
+    int pages_fd;
+    int list;
+    int tls;
+    const char* index;
+    CCSlice extra;
+} ServerCfg;
+
+/* Row advance: wait for poll, or drop the row. Errors are hard fails. */
+@variant SessAct {
+    wait: void;
+    close: void;
+};
+
 typedef struct Conn {
     CCArena arena;
     CCString out;
+    CCSlice extra; /* --header lines; view owned by ServerCfg */
 } Conn;
 
 typedef struct Session {
     CCSocket sock;
+    CCTlsConn tls;
+    void* tls_iobuf;
+    int tls_on;
     char read_buf[K_READ_BUF];
     size_t rlen;
     FileHold send;
@@ -80,18 +112,16 @@ typedef Session* SessionP;
 typedef struct pollfd PollFd;
 
 typedef @typeview Encode on Conn {
-    r: write, lit, status, hdr, end_headers, date_ka;
+    r: write, lit, status, hdr, end_headers, date_ka, extra;
 } *ConnEnc;
 
-static int g_list;
-static const char* g_index = "index.html";
-static CCSlice g_extra;
+/* Process-wide join/grow tape (not HTTP policy). */
 static cc_atomic_int g_stop;
 static cc_atomic_int g_live;
 static cc_atomic_int g_nworkers;
 static int g_workers_max;
-static int g_root_fd;
 static CCListener* g_ln;
+static ServerCfg* g_cfg;
 static CCParallel g_app;
 
 @grammar(cli) StaticdOpts {~~~~
@@ -102,6 +132,9 @@ static CCParallel g_app;
     index: opt string --index as NAME default "index.html" desc "Directory index file"
     header: opt string --header as LINE desc "Extra response header Name: value (repeatable)"
     workers: opt i64 -w, --workers as N default 0 desc "Worker cap (0 = ncpu/2; start 2, grow with conns)"
+    pages: opt string --pages as DIR default "" desc "Script pages jail (.js / .py views; off when empty)"
+    tls_cert: opt string --tls-cert as PATH default "" desc "PEM certificate chain (requires --tls-key)"
+    tls_key: opt string --tls-key as PATH default "" desc "PEM private key (requires --tls-cert)"
 ~~~~}
 
 @grammar(schema) ReqLine {~~~~
@@ -174,7 +207,7 @@ static const char* k_mime[] = {
     [MIME_TXT]   = "text/plain; charset=utf-8",
 };
 
-static bool !>(CCIoError) write_all(CCSocket* sock, char[:] data) {
+static bool !>(CCIoError) write_all_sock(CCSocket* sock, char[:] data) {
     size_t off = 0;
     while (off < data.len) {
         size_t n = sock->write(data.ptr + off, data.len - off) !>(e) {
@@ -187,11 +220,59 @@ static bool !>(CCIoError) write_all(CCSocket* sock, char[:] data) {
     return cc_ok(true);
 }
 
-static bool !>(CCError) flush_conn(CCSocket* sock, Conn* c) {
+/* One transport face: TLS is wrap-once at accept; callers never branch. */
+static bool !>(CCIoError) session_write_all(Session* s, char[:] data) {
+    size_t off = 0;
+    if (!s->tls_on)
+        return write_all_sock(&s->sock, data);
+    while (off < data.len) {
+        CCNetError ne = CC_NET_OK;
+        size_t n = cc_tls_write(&s->tls, data.ptr + off, data.len - off, &ne);
+        if (ne != CC_NET_OK && n == 0)
+            return cc_err(cc_net_to_io_error(ne));
+        if (n == 0)
+            return cc_err(cc_io_error(CC_ERROR(CC_ERR_CLOSED, "short write")));
+        off += n;
+    }
+    return cc_ok(true);
+}
+
+/* 1 = got bytes, 0 = would-block, Err = peer/error. */
+static int !>(CCIoError) session_fill(Session* s) {
+    size_t n = 0;
+    size_t room;
+    bool got;
+    if (s->rlen >= sizeof(s->read_buf)) return cc_ok(1);
+    room = sizeof(s->read_buf) - s->rlen;
+    if (s->tls_on) {
+        CCNetError ne = CC_NET_OK;
+        CCSlice got_sl;
+        cc_arena_stack(tmp, K_READ_BUF);
+        got_sl = cc_tls_read(&s->tls, tmp, room, &ne);
+        if (ne == CC_NET_OK && got_sl.len == 0) return cc_ok(0);
+        if (ne != CC_NET_OK)
+            return cc_err(cc_net_to_io_error(ne));
+        if (got_sl.len > room)
+            return cc_err(cc_io_error(CC_ERROR(CC_ERR_IO, "tls overread")));
+        memcpy(s->read_buf + s->rlen, got_sl.ptr, got_sl.len);
+        s->rlen += got_sl.len;
+        return cc_ok(1);
+    }
+    got = s->sock.try_read_into(s->read_buf + s->rlen, room, &n) !>(e) {
+        if (e.base.kind == CC_IO_BUSY) return cc_ok(0);
+        return cc_err(e);
+    };
+    if (!got)
+        return cc_err(cc_io_error(CC_ERROR(CC_ERR_CLOSED, "eof")));
+    s->rlen += n;
+    return cc_ok(1);
+}
+
+static bool !>(CCError) flush_conn(Session* s, Conn* c) {
     @errhandler(CCError e) { return cc_err(e); }
     char[:] sl = c->out.as_slice();
     if (sl.len)
-        write_all(sock, sl) !>;
+        session_write_all(s, sl) !>;
     c->out.release(c->arena);
     c->out = cc_string_new();
     return cc_ok(true);
@@ -211,31 +292,32 @@ static void session_queue_send(Session* s, FileHold* fh, size_t off, size_t nsen
     s->send_left = nsend;
 }
 
-/* One FILE_SEND_CHUNK. Leaves send_left if more. Sets dead on error. */
-static void session_send_one(Session* s) {
+/* One FILE_SEND_CHUNK. Leaves send_left if more. */
+static SessAct !>(CCError) session_send_one(Session* s) {
+    @errhandler(CCError e) {
+        session_clear_send(s);
+        return cc_err(e);
+    }
     size_t want;
     BlockHold bh;
-    if (!s->send_left) return;
+    if (!s->send_left) return cc_ok((SessAct){ .wait = {} });
     want = s->send_left;
     if (want > (size_t)FILE_SEND_CHUNK) want = (size_t)FILE_SEND_CHUNK;
     bh = checkout_block(s->send.fd, s->send.dev, s->send.ino, s->send.mtime,
-                        s->send_off, want) !>(e) {
-        (void)e;
-        s->dead = 1;
-        session_clear_send(s);
-        return;
-    };
-    write_all(&s->sock, cc_slice_from_buffer(bh.ptr, want)) !>(e) {
-        (void)e;
+                        s->send_off, want) !>;
+    session_write_all(s, cc_slice_from_buffer(bh.ptr, want)) !>(e) {
         block_hold_drop(&bh);
-        s->dead = 1;
         session_clear_send(s);
-        return;
+        return cc_err(e);
     };
     block_hold_drop(&bh);
     s->send_off += want;
     s->send_left -= want;
-    if (!s->send_left) session_clear_send(s);
+    if (!s->send_left) {
+        session_clear_send(s);
+        if (s->send_close) return cc_ok((SessAct){ .close = {} });
+    }
+    return cc_ok((SessAct){ .wait = {} });
 }
 
 static void session_arm(Session* s, PollFd* p) {
@@ -295,8 +377,8 @@ static bool !>(CCError) conn_date_ka(Conn* c, int ka) {
     c->hdr("Date", date) !>;
     c->hdr("Connection", ka ? cc_slice_cstr("keep-alive")
                             : cc_slice_cstr("close")) !>;
-    if (g_extra.len) {
-        CCString extra = @string(`${g_extra}\r\n`, @scratch);
+    if (c->extra.len) {
+        CCString extra = @string(`${c->extra}\r\n`, @scratch);
         c->write(extra) !>;
     }
     return cc_ok(true);
@@ -334,8 +416,8 @@ static bool !>(CCError) send_file_hdrs(ConnEnc conn, int code, const char* reaso
     else
         block = @string(`HTTP/1.1 ${code} ${reason}\r\nContent-Type: ${ct}\r\nContent-Length: ${body_len}\r\nLast-Modified: ${lm}\r\nAccept-Ranges: bytes\r\nDate: ${date}\r\nConnection: ${ka_s}\r\n`, @scratch);
     conn->write(block) !>;
-    if (g_extra.len) {
-        CCString extra = @string(`${g_extra}\r\n`, @scratch);
+    if (conn->extra.len) {
+        CCString extra = @string(`${conn->extra}\r\n`, @scratch);
         conn->write(extra) !>;
     }
     return conn->end_headers();
@@ -406,45 +488,89 @@ static size_t headers_end(Session* s) {
     return 0;
 }
 
-static bool !>(CCError) write_ws(CCSocket* sock, int opcode, char[:] s) {
+static bool !>(CCError) write_ws(Session* s, int opcode, char[:] body) {
     @errhandler(CCError e) { return cc_err(e); }
     unsigned char h[10];
     size_t hn;
-    if (s.len > (size_t)WS_MAX_PAYLOAD)
+    if (body.len > (size_t)WS_MAX_PAYLOAD)
         return cc_err(CC_ERROR(CC_ERR_IO, "ws too big"));
-    hn = ws_hdr_unmasked(opcode, s.len, h);
-    write_all(sock, cc_slice_from_buffer((char*)h, hn)) !>;
-    if (s.len)
-        write_all(sock, s) !>;
+    hn = ws_hdr_unmasked(opcode, body.len, h);
+    session_write_all(s, cc_slice_from_buffer((char*)h, hn)) !>;
+    if (body.len)
+        session_write_all(s, body) !>;
     return cc_ok(true);
 }
 
-static void http_fail(Session* s, Conn* conn, int code, const char* reason,
-                      const char* body, int with_body, int ka) {
-    send_error(conn, code, reason, body, with_body, ka) !> {
-        s->dead = 1;
-        return;
-    };
-    flush_conn(&s->sock, conn) !>(e) {
-        (void)e;
-        s->dead = 1;
-        return;
-    };
-    if (!ka) s->dead = 1;
+static SessAct !>(CCError) http_fail(Session* s, Conn* conn, int code,
+                                     const char* reason, const char* body,
+                                     int with_body, int ka) {
+    @errhandler(CCError e) { return cc_err(e); }
+    send_error(conn, code, reason, body, with_body, ka) !>;
+    flush_conn(s, conn) !>;
+    if (!ka) return cc_ok((SessAct){ .close = {} });
+    return cc_ok((SessAct){ .wait = {} });
 }
 
-static void http_commit(Session* s, Conn* conn, int ka) {
-    flush_conn(&s->sock, conn) !>(e) {
-        (void)e;
-        s->dead = 1;
-        return;
-    };
-    if (!ka) s->dead = 1;
+static SessAct !>(CCError) http_commit(Session* s, Conn* conn, int ka) {
+    @errhandler(CCError e) { return cc_err(e); }
+    flush_conn(s, conn) !>;
+    if (!ka) return cc_ok((SessAct){ .close = {} });
+    return cc_ok((SessAct){ .wait = {} });
 }
 
-/* One request. Sets s->phase = SESS_WS on upgrade; s->dead on close/error.
+static const char* pages_reason(int code) {
+    if (code == 200) return "OK";
+    if (code == 201) return "Created";
+    if (code == 204) return "No Content";
+    if (code == 400) return "Bad Request";
+    if (code == 404) return "Not Found";
+    if (code == 500) return "Internal Server Error";
+    if (code == 501) return "Not Implemented";
+    return "OK";
+}
+
+static char[:] path_query_of(char[:] raw) {
+    @for (i, ch in raw) {
+        if (ch == '?')
+            return raw.sub(i + 1, raw.len);
+    }
+    return cc_slice_empty();
+}
+
+static SessAct !>(CCError) pages_send(Session* s, Conn* conn, ScriptReply* r,
+                                      int with_body, int ka) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCString cl = @string(`${r->body.len}`, @scratch);
+    const char* reason = pages_reason(r->status);
+    char[:] ct = cc_slice_cstr(r->content_type);
+    conn->status(r->status, reason) !>;
+    conn->hdr("Content-Type", ct) !>;
+    conn->hdr("Content-Length", cl) !>;
+    conn->date_ka(ka) !>;
+    {
+        int i;
+        for (i = 0; i < r->nhdrs; i++)
+            conn->hdr(r->hdrs[i].name, cc_slice_cstr(r->hdrs[i].value)) !>;
+    }
+    conn->end_headers() !>;
+    {
+        SessAct a = http_commit(s, conn, ka) !>;
+        @switch (a) {
+        case .close:
+            return cc_ok(a);
+        case .wait:
+            break;
+        }
+    }
+    if (with_body && r->body.len)
+        session_write_all(s, r->body) !>;
+    return cc_ok((SessAct){ .wait = {} });
+}
+
+/* One request. Sets s->phase = SESS_WS on upgrade.
  * Caller has a complete header block at the front of s->read_buf. */
-static void handle_http(Session* s, Conn* conn, int root_fd) {
+static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
+    @errhandler(CCError e) { return cc_err(e); }
     size_t hend = headers_end(s);
     char[:] block;
     char[:] rest;
@@ -463,26 +589,29 @@ static void handle_http(Session* s, Conn* conn, int root_fd) {
     int rkind;
     FileHold fh = { .slot = -1, .fd = -1 };
     size_t file_len;
+    int root_fd = cfg->root_fd;
     @defer fh.drop();
 
-    if (!hend) { s->dead = 1; return; }
+    if (!hend) return cc_err(CC_ERROR(CC_ERR_IO, "no headers"));
     block = cc_slice_from_buffer(s->read_buf, hend);
     rest = block;
-    if (!take_line(&rest, &first)) { s->dead = 1; return; }
+    if (!take_line(&rest, &first))
+        return cc_err(CC_ERROR(CC_ERR_IO, "bad request line"));
 
     ReqLine req;
     parsed = cc_parse(ReqLine, first.ptr, first.len, conn->arena, &req);
     CCString path_s = cc_string_new();
+    char[:] query_s = empty;
     if (parsed) {
         meth = method_of(req.method);
         {
             char[:] raw = path_without_query(req.path);
             path_s = @string(`${raw}`, conn->arena);
+            query_s = path_query_of(req.path);
         }
         if (path_s.failed()) {
             session_consume(s, hend);
-            http_fail(s, conn, 500, "Internal Server Error", "oom\n", 1, 0);
-            return;
+            return http_fail(s, conn, 500, "Internal Server Error", "oom\n", 1, 0);
         }
         ka = !req.version.eq_cstr("HTTP/1.0");
         @switch (meth) {
@@ -524,82 +653,95 @@ static void handle_http(Session* s, Conn* conn, int root_fd) {
     session_consume(s, hend);
     if (!parsed) {
         int head400 = first.starts_with("HEAD ");
-        http_fail(s, conn, 400, "Bad Request", "bad request\n", !head400, ka);
-        return;
+        return http_fail(s, conn, 400, "Bad Request", "bad request\n", !head400, ka);
     }
     if (is_get && want_upgrade && ws_key.len) {
         char acc[29];
         char[:] accept;
-        if (!ws_accept_b64(ws_key, acc)) {
-            http_fail(s, conn, 400, "Bad Request", "bad websocket key\n", 1, 0);
-            return;
-        }
+        if (!ws_accept_b64(ws_key, acc))
+            return http_fail(s, conn, 400, "Bad Request", "bad websocket key\n", 1, 0);
         accept = cc_slice_cstr(acc);
-        conn->status(101, "Switching Protocols") !>(e) { (void)e; s->dead = 1; return; };
-        conn->hdr("Upgrade", cc_slice_cstr("websocket")) !>(e) { (void)e; s->dead = 1; return; };
-        conn->hdr("Connection", cc_slice_cstr("Upgrade")) !>(e) { (void)e; s->dead = 1; return; };
-        conn->hdr("Sec-WebSocket-Accept", accept) !>(e) { (void)e; s->dead = 1; return; };
-        if (g_extra.len) {
-            CCString extra = @string(`${g_extra}\r\n`, @scratch);
-            conn->write(extra) !>(e) { (void)e; s->dead = 1; return; };
-        }
-        conn->end_headers() !>(e) { (void)e; s->dead = 1; return; };
-        flush_conn(&s->sock, conn) !> { s->dead = 1; return; };
+        conn->status(101, "Switching Protocols") !>;
+        conn->hdr("Upgrade", cc_slice_cstr("websocket")) !>;
+        conn->hdr("Connection", cc_slice_cstr("Upgrade")) !>;
+        conn->hdr("Sec-WebSocket-Accept", accept) !>;
+        conn->end_headers() !>;
+        flush_conn(s, conn) !>;
         s->phase = SESS_WS;
-        return;
+        return cc_ok((SessAct){ .wait = {} });
     }
-    if (!is_get && !is_head && !is_options) {
-        http_fail(s, conn, 405, "Method Not Allowed", "method not allowed\n", 1, ka);
-        return;
-    }
+    if (!is_get && !is_head && !is_options)
+        return http_fail(s, conn, 405, "Method Not Allowed",
+                         "method not allowed\n", 1, ka);
 
     url = path_s;
-    if (!path_is_safe(url)) {
-        http_fail(s, conn, 403, "Forbidden", "forbidden\n", !is_head, ka);
-        return;
-    }
-    if (url.len > (size_t)K_PATH_MAX) {
-        http_fail(s, conn, 414, "URI Too Long", "uri too long\n", !is_head, ka);
-        return;
-    }
+    if (!path_is_safe(url))
+        return http_fail(s, conn, 403, "Forbidden", "forbidden\n", !is_head, ka);
+    if (url.len > (size_t)K_PATH_MAX)
+        return http_fail(s, conn, 414, "URI Too Long", "uri too long\n",
+                         !is_head, ka);
 
     if (is_options) {
-        send_options(conn, ka) !> { s->dead = 1; return; };
-        http_commit(s, conn, ka);
-        return;
+        send_options(conn, ka) !>;
+        return http_commit(s, conn, ka);
     }
 
     const char* rel = "";
     {
-        const char* p = path_s.cstr(conn->arena) !> {
-            http_fail(s, conn, 500, "Internal Server Error", "oom\n", !is_head, ka);
-            return;
+        const char* p = path_s.cstr(conn->arena) !>(e) {
+            (void)e;
+            return http_fail(s, conn, 500, "Internal Server Error", "oom\n",
+                             !is_head, ka);
         };
         rel = (p[0] == '/') ? p + 1 : p;
+    }
+
+    /* Pages arm: MISS falls through to static. */
+    if (cfg->pages_fd >= 0) {
+        PagesKind kind = PAGES_MISS;
+        ScriptReply reply = pages_serve(cfg->pages_fd, url, req.method, url,
+                                        query_s, empty, conn->arena, &kind)
+                !>(e) {
+            int code = 500;
+            const char* msg = "pages failed\n";
+            if (kind == PAGES_NO_ENGINE) {
+                code = 501;
+                msg = "pages: engine not attached\n";
+            } else if (kind == PAGES_BOTH) {
+                msg = "pages: both .js and .py\n";
+            } else if (e.message && e.message[0]) {
+                msg = e.message;
+            }
+            return http_fail(s, conn, code,
+                             code == 501 ? "Not Implemented"
+                                         : "Internal Server Error",
+                             msg, !is_head, ka);
+        };
+        if (kind == PAGES_JS || kind == PAGES_PY)
+            return pages_send(s, conn, &reply, is_get, ka);
     }
 
     int got_file = try_file(root_fd, rel, &fh);
     if (!got_file) {
         int dfd = fs_dir_open(root_fd, rel);
         char idx[K_PATH_MAX];
-        if (dfd < 0) {
-            http_fail(s, conn, 404, "Not Found", "not found\n", !is_head, ka);
-            return;
-        }
-        if (!join_index(idx, sizeof(idx), rel, g_index)) {
+        if (dfd < 0)
+            return http_fail(s, conn, 404, "Not Found", "not found\n",
+                             !is_head, ka);
+        if (!join_index(idx, sizeof(idx), rel, cfg->index)) {
             close(dfd);
-            http_fail(s, conn, 414, "URI Too Long", "uri too long\n", !is_head, ka);
-            return;
+            return http_fail(s, conn, 414, "URI Too Long", "uri too long\n",
+                             !is_head, ka);
         }
         if (try_file(root_fd, idx, &fh)) {
             CCString mu = @string(`/${idx}`, conn->arena);
             if (!mu.failed()) url = mu;
             close(dfd);
             got_file = 1;
-        } else if (!g_list) {
+        } else if (!cfg->list) {
             close(dfd);
-            http_fail(s, conn, 403, "Forbidden", "forbidden\n", !is_head, ka);
-            return;
+            return http_fail(s, conn, 403, "Forbidden", "forbidden\n",
+                             !is_head, ka);
         } else {
             struct stat dst;
             time_t dmtime = 0;
@@ -607,34 +749,33 @@ static void handle_http(Session* s, Conn* conn, int root_fd) {
             cc_arena_stack(list_a, K_LIST_ARENA);
             CCString html = dir_listing(dfd, url, list_a) !>(e) {
                 (void)e;
-                http_fail(s, conn, 500, "Internal Server Error", "listing\n",
-                          !is_head, ka);
-                return;
+                return http_fail(s, conn, 500, "Internal Server Error",
+                                 "listing\n", !is_head, ka);
             };
             if (ims.len && http_parse_date(ims, conn->arena, &ims_t)
                     && ims_t >= dmtime) {
-                send_not_modified(conn, dmtime, ka) !> { s->dead = 1; return; };
-                http_commit(s, conn, ka);
-                return;
+                send_not_modified(conn, dmtime, ka) !>;
+                return http_commit(s, conn, ka);
             }
             send_file_hdrs(conn, 200, "OK", cc_slice_cstr("/listing.html"),
-                           (size_t)html.len, dmtime, empty, ka) !> {
-                s->dead = 1;
-                return;
-            };
-            http_commit(s, conn, ka);
-            if (s->dead) return;
+                           (size_t)html.len, dmtime, empty, ka) !>;
+            {
+                SessAct a = http_commit(s, conn, ka) !>;
+                @switch (a) {
+                case .close: return cc_ok(a);
+                case .wait: break;
+                }
+            }
             if (is_get && html.len > 0)
-                write_all(&s->sock, html.as_slice()) !> { s->dead = 1; return; };
-            return;
+                session_write_all(s, html.as_slice()) !>;
+            return cc_ok((SessAct){ .wait = {} });
         }
     }
     mtime = fh.mtime;
     file_len = fh.file_len;
     if (ims.len && http_parse_date(ims, conn->arena, &ims_t) && ims_t >= mtime) {
-        send_not_modified(conn, mtime, ka) !> { s->dead = 1; return; };
-        http_commit(s, conn, ka);
-        return;
+        send_not_modified(conn, mtime, ka) !>;
+        return http_commit(s, conn, ka);
     }
 
     if (range.len && ifr.len) {
@@ -646,32 +787,27 @@ static void handle_http(Session* s, Conn* conn, int root_fd) {
     nsend = file_len;
     rkind = range.len ? range_parse(range, file_len, conn->arena, &off, &nsend) : 0;
     if (rkind < 0) {
-        send_416(conn, file_len, ka) !> { s->dead = 1; return; };
-        http_commit(s, conn, ka);
-        return;
+        send_416(conn, file_len, ka) !>;
+        return http_commit(s, conn, ka);
     }
     if (rkind > 0) {
         size_t last = off + nsend - 1;
         CCString cr = @string(`bytes ${off}-${last}/${file_len}`, @scratch);
-        if (cr.failed()) { s->dead = 1; return; }
+        if (cr.failed())
+            return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "content-range"));
         send_file_hdrs(conn, 206, "Partial Content", url, nsend, mtime,
-                       cr.as_slice(), ka) !> {
-            s->dead = 1;
-            return;
-        };
+                       cr.as_slice(), ka) !>;
     } else {
-        send_file_hdrs(conn, 200, "OK", url, nsend, mtime, empty, ka) !> {
-            s->dead = 1;
-            return;
-        };
+        send_file_hdrs(conn, 200, "OK", url, nsend, mtime, empty, ka) !>;
     }
-    flush_conn(&s->sock, conn) !> { s->dead = 1; return; };
+    flush_conn(s, conn) !>;
     if (is_get && nsend > 0) {
         session_queue_send(s, &fh, off, nsend);
         if (!ka) s->send_close = 1;
-        return;
+        return cc_ok((SessAct){ .wait = {} });
     }
-    if (!ka) s->dead = 1;
+    if (!ka) return cc_ok((SessAct){ .close = {} });
+    return cc_ok((SessAct){ .wait = {} });
 }
 
 /* 1 = consumed a frame, 0 = need more, -1 = close. */
@@ -714,12 +850,12 @@ static int ws_one_frame(Session* s) {
     payload = s->read_buf + hdr + 4;
     if (n) ws_unmask(payload, n, maskk);
     if (opcode == 8) {
-        write_ws(&s->sock, 8, cc_slice_from_buffer(payload, n)) !>(e) { (void)e; };
+        write_ws(s, 8, cc_slice_from_buffer(payload, n)) !>(e) { (void)e; };
         session_consume(s, need);
         return -1;
     }
     if (opcode == 9) {
-        write_ws(&s->sock, 10, cc_slice_from_buffer(payload, n)) !>(e) { (void)e; };
+        write_ws(s, 10, cc_slice_from_buffer(payload, n)) !>(e) { (void)e; };
         session_consume(s, need);
         return 1;
     }
@@ -728,7 +864,7 @@ static int ws_one_frame(Session* s) {
         return 1;
     }
     if (opcode == 1 || opcode == 2) {
-        write_ws(&s->sock, opcode, cc_slice_from_buffer(payload, n)) !>(e) {
+        write_ws(s, opcode, cc_slice_from_buffer(payload, n)) !>(e) {
             (void)e;
             session_consume(s, need);
             return -1;
@@ -743,7 +879,15 @@ static int ws_one_frame(Session* s) {
 static void session_drop(Session* s, CCArenaPool* pool) {
     if (!s) return;
     session_clear_send(s);
-    s->sock.close();
+    if (s->tls_on) {
+        cc_tls_close(&s->tls);
+        free(s->tls_iobuf);
+        s->tls_iobuf = NULL;
+        s->tls_on = 0;
+        s->sock.fd = -1;
+    } else {
+        s->sock.close();
+    }
     pool->free(s);
 }
 
@@ -758,19 +902,26 @@ static Session* session_new(CCSocket sock, CCArenaPool* pool) {
     return s;
 }
 
-static int session_fill(Session* s) {
-    size_t n = 0;
-    size_t room;
-    bool got;
-    if (s->rlen >= sizeof(s->read_buf)) return 1;
-    room = sizeof(s->read_buf) - s->rlen;
-    got = s->sock.try_read_into(s->read_buf + s->rlen, room, &n) !>(e) {
-        if (e.base.kind == CC_IO_BUSY) return 0;
+static int session_tls_wrap(Session* s, ServerCfg* cfg) {
+    void* iobuf;
+    CCTlsServerConfig tcfg = {0};
+    CCNetError ne = CC_NET_OK;
+    CCTlsConn tls;
+    cc_arena_stack(info_a, 64);
+    if (!s || !cfg || !cfg->tls) return 0;
+    iobuf = malloc(CC_TLS_IOBUF_SIZE);
+    if (!iobuf) return -1;
+    /* Certs already in process mats via cc_tls_server_load. */
+    tls = cc_tls_accept(s->sock, tcfg, iobuf, CC_TLS_IOBUF_SIZE, info_a, &ne);
+    if (ne != CC_NET_OK || !tls.ctx) {
+        free(iobuf);
         return -1;
-    };
-    if (!got) return -1;
-    s->rlen += n;
-    return 1;
+    }
+    s->tls = tls;
+    s->tls_iobuf = iobuf;
+    s->tls_on = 1;
+    s->sock = tls.underlying;
+    return 0;
 }
 
 static int fd_nonblock(int fd) {
@@ -779,7 +930,8 @@ static int fd_nonblock(int fd) {
     return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
 
-static int try_accept(CCListener* ln, Vec::[SessionP]* live,
+/* 1 = accepted, 0 = would-block / dropped, -1 = hard listen error. */
+static int try_accept(CCListener* ln, ServerCfg* cfg, Vec::[SessionP]* live,
                       Vec::[PollFd]* wait, CCArenaPool* slots) {
     int fd = accept(ln->fd, NULL, NULL);
     Session* s;
@@ -793,6 +945,11 @@ static int try_accept(CCListener* ln, Vec::[SessionP]* live,
     (void)fd_nonblock(fd);
     s = session_new((CCSocket){ .fd = fd }, slots);
     if (!s) return 0;
+    if (cfg->tls && session_tls_wrap(s, cfg) != 0) {
+        /* Handshake failed: drop; do not look like EAGAIN. */
+        session_drop(s, slots);
+        return 0;
+    }
     if (live->push(s) != 0) {
         session_drop(s, slots);
         return 0;
@@ -807,7 +964,7 @@ static int try_accept(CCListener* ln, Vec::[SessionP]* live,
     return 1;
 }
 
-static void worker_run(CCListener* ln, int root_fd);
+static void worker_run(ServerCfg* cfg, CCListener* ln);
 
 /* One accept per poll, so live grows in the open. Spawn when
  * live >= (n+1) * WORKER_GROW_EVERY and n < cap. CAS owns the slot. */
@@ -821,85 +978,106 @@ static void maybe_grow(void) {
     if (!cc_atomic_cas(&g_nworkers, &n, next)) return;
     {
         CCListener* lnp = g_ln;
-        int root = g_root_fd;
+        ServerCfg* cfg = g_cfg;
         @parallel(g_app) {
-            worker_run(lnp, root);
+            worker_run(cfg, lnp);
         }
     }
 }
 
-/* Fill, one send chunk, or HTTP/WS until the row needs another wait. */
-static void session_step(Session* s, Conn* conn, int root_fd, PollFd* p) {
-    short rv = p ? p->revents : 0;
-    if (rv & (POLLERR | POLLHUP | POLLNVAL)) {
-        s->dead = 1;
-        return;
+static void session_apply(Session* s, SessAct a) {
+    @switch (a) {
+    case .close: s->dead = 1; break;
+    case .wait: break;
     }
+}
+
+/* Fill, one send chunk, or HTTP/WS until the row needs another wait. */
+static SessAct !>(CCError) session_step(Session* s, Conn* conn, ServerCfg* cfg,
+                                        PollFd* p) {
+    @errhandler(CCError e) { return cc_err(e); }
+    short rv = p ? p->revents : 0;
+    if (rv & (POLLERR | POLLHUP | POLLNVAL))
+        return cc_ok((SessAct){ .close = {} });
+
     if (s->send_left) {
         if (rv & POLLIN) {
-            if (session_fill(s) < 0) {
-                s->dead = 1;
-                return;
-            }
+            int got = session_fill(s) !>;
+            if (got < 0) return cc_ok((SessAct){ .close = {} });
         }
         if (rv & POLLOUT) {
-            session_send_one(s);
-            if (s->dead) return;
+            SessAct a = session_send_one(s) !>;
+            @switch (a) {
+            case .close: return cc_ok(a);
+            case .wait: break;
+            }
         }
         session_arm(s, p);
-        if (s->send_left) return;
-        if (s->send_close) {
-            s->dead = 1;
-            return;
-        }
+        if (s->send_left) return cc_ok((SessAct){ .wait = {} });
+        if (s->send_close) return cc_ok((SessAct){ .close = {} });
     } else if (!(rv & POLLIN)) {
-        return;
-    } else if (session_fill(s) < 0) {
-        s->dead = 1;
-        return;
+        return cc_ok((SessAct){ .wait = {} });
+    } else {
+        int got = session_fill(s) !>;
+        if (got < 0) return cc_ok((SessAct){ .close = {} });
+        if (got == 0) return cc_ok((SessAct){ .wait = {} });
     }
+
     for (;;) {
-        if (s->dead) return;
         if (s->phase == SESS_WS) {
             int r = ws_one_frame(s);
-            if (r < 0) { s->dead = 1; return; }
+            if (r < 0) return cc_ok((SessAct){ .close = {} });
             if (r == 0) {
                 session_arm(s, p);
-                return;
+                return cc_ok((SessAct){ .wait = {} });
             }
             continue;
         }
         if (!headers_end(s)) {
-            if (s->rlen == sizeof(s->read_buf)) {
-                http_fail(s, conn, 400, "Bad Request", "headers too big\n", 1, 0);
-                s->dead = 1;
-            }
+            if (s->rlen == sizeof(s->read_buf))
+                return http_fail(s, conn, 400, "Bad Request",
+                                 "headers too big\n", 1, 0);
             session_arm(s, p);
-            return;
+            return cc_ok((SessAct){ .wait = {} });
         }
-        handle_http(s, conn, root_fd);
-        if (s->dead) return;
+        {
+            SessAct a = handle_http(s, conn, cfg) !>;
+            @switch (a) {
+            case .close: return cc_ok(a);
+            case .wait: break;
+            }
+        }
         if (s->phase == SESS_HTTP) {
             conn->arena.reset();
             conn->out = cc_string_new();
         }
         if (s->send_left) {
-            session_send_one(s);
+            SessAct a = session_send_one(s) !>;
             session_arm(s, p);
-            if (s->dead) return;
-            if (s->send_left) return;
-            if (s->send_close) {
-                s->dead = 1;
-                return;
+            @switch (a) {
+            case .close: return cc_ok(a);
+            case .wait: break;
             }
+            if (s->send_left) return cc_ok((SessAct){ .wait = {} });
+            if (s->send_close) return cc_ok((SessAct){ .close = {} });
         }
     }
 }
 
-static void worker_run(CCListener* ln, int root_fd) {
+static void step_row(Session* s, Conn* conn, ServerCfg* cfg, PollFd* p) {
+    SessAct a = session_step(s, conn, cfg, p) !>(e) {
+        (void)e;
+        s->dead = 1;
+        return;
+    };
+    session_apply(s, a);
+}
+
+/* Named steps: poll → step rows → accept → reap. */
+static void worker_run(ServerCfg* cfg, CCListener* ln) {
     cc_arena_stack(wa, kilobytes(8));
     cc_arena_stack(enc, K_OUT_BUF);
-    Conn conn = { .arena = enc, .out = cc_string_new() };
+    Conn conn = { .arena = enc, .out = cc_string_new(), .extra = cfg->extra };
     CCArenaPool* slots;
     if (!cc_arena_is_live(wa) || !cc_arena_is_live(enc)) return;
     slots = wa.create_pool(sizeof(Session)) !>(e) {
@@ -937,6 +1115,7 @@ static void worker_run(CCListener* ln, int root_fd) {
             listening = 0;
         }
 
+        /* poll */
         raw = wait.data();
         if (wait.len() && !raw) return;
         pr = poll(raw, (nfds_t)wait.len(), listening ? POLL_MS : 0);
@@ -949,24 +1128,27 @@ static void worker_run(CCListener* ln, int root_fd) {
             continue;
         }
 
+        /* step ready rows */
         base = listening ? 1 : 0;
         died = 0;
         @for (i, s in live) {
             PollFd* p = wait.get(base + i);
             if (!p) return;
-            session_step(s, &conn, root_fd, p);
+            step_row(s, &conn, cfg, p);
             if (s->dead) died = 1;
         }
 
+        /* accept */
         if (listening) {
             PollFd* lp = wait.get(0);
             if (lp && (lp->revents & POLLIN)) {
-                int ar = try_accept(ln, &live, &wait, slots);
+                int ar = try_accept(ln, cfg, &live, &wait, slots);
                 if (ar < 0) return;
                 if (ar > 0) maybe_grow();
             }
         }
 
+        /* reap */
         if (!died) continue;
         rows = live;
         w = 0;
@@ -974,8 +1156,7 @@ static void worker_run(CCListener* ln, int root_fd) {
             if (s->dead) {
                 session_drop(s, slots);
                 cc_atomic_fetch_sub(&g_live, 1);
-            }
-            else {
+            } else {
                 PollFd* p = wait.get(base + i);
                 live.set(w, s);
                 if (p) wait.set(base + w, *p);
@@ -1035,6 +1216,15 @@ int main(int argc, char** argv) {
     }
     if (nworkers > WORKERS_MAX) nworkers = WORKERS_MAX;
 
+    ServerCfg cfg = {
+        .root_fd = -1,
+        .pages_fd = -1,
+        .list = 0,
+        .tls = 0,
+        .index = "index.html",
+        .extra = cc_slice_empty(),
+    };
+
     char[:] root_view = opts.root;
     if (root_view.len == 0) {
         eprintln("staticd: empty docroot");
@@ -1051,12 +1241,77 @@ int main(int argc, char** argv) {
         eprintln("staticd: docroot nul");
         return 1;
     };
-    int root_fd = open(root_c, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (root_fd < 0) {
+    cfg.root_fd = open(root_c, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (cfg.root_fd < 0) {
         eprintln(@string(`staticd: docroot open: ${root_c}`, @scratch));
         return 1;
     }
-    @defer close(root_fd);
+    @defer close(cfg.root_fd);
+
+    {
+        char[:] pages_view = opts.pages;
+        if (pages_view.len > 0) {
+            while (pages_view.len > 1
+                    && pages_view.ptr[pages_view.len - 1] == '/')
+                pages_view = pages_view.sub(0, pages_view.len - 1);
+            CCString pages_owned = @string(`${pages_view}`, cli_a);
+            if (pages_owned.failed()) {
+                eprintln("staticd: pages oom");
+                return 1;
+            }
+            const char* pages_c = pages_owned.cstr(cli_a) !> {
+                eprintln("staticd: pages nul");
+                return 1;
+            };
+            int pfd = open(pages_c, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            if (pfd < 0) {
+                eprintln(@string(`staticd: pages open: ${pages_c}`, @scratch));
+                return 1;
+            }
+            cfg.pages_fd = pfd;
+            if (pages_engines_open() != 0) {
+                eprintln("staticd: pages engines open failed");
+                return 1;
+            }
+        }
+    }
+    @defer {
+        pages_engines_close();
+        if (cfg.pages_fd >= 0) close(cfg.pages_fd);
+        if (cfg.tls) cc_tls_server_unload();
+    };
+
+    {
+        char[:] cert_v = opts.tls_cert;
+        char[:] key_v = opts.tls_key;
+        int have_c = cert_v.len > 0;
+        int have_k = key_v.len > 0;
+        if (have_c != have_k) {
+            eprintln("staticd: --tls-cert and --tls-key are required together");
+            return 1;
+        }
+        if (have_c) {
+            CCString cert_owned = @string(`${cert_v}`, cli_a);
+            CCString key_owned = @string(`${key_v}`, cli_a);
+            if (cert_owned.failed() || key_owned.failed()) {
+                eprintln("staticd: tls path oom");
+                return 1;
+            }
+            const char* cert_c = cert_owned.cstr(cli_a) !> {
+                eprintln("staticd: tls cert nul");
+                return 1;
+            };
+            const char* key_c = key_owned.cstr(cli_a) !> {
+                eprintln("staticd: tls key nul");
+                return 1;
+            };
+            if (cc_tls_server_load(cert_c, key_c) != 0) {
+                eprintln("staticd: tls load failed (bad PEM cert/key?)");
+                return 1;
+            }
+            cfg.tls = 1;
+        }
+    }
 
     CCListener ln = cc_tcp_listen(listen) !>(err) {
         eprintln(@string(`listen: ${err}`, @scratch));
@@ -1064,16 +1319,16 @@ int main(int argc, char** argv) {
     };
     @defer ln.close();
 
-    g_list = opts.list ? 1 : 0;
+    cfg.list = opts.list ? 1 : 0;
     {
         char[:] idx = opts.index;
         if (idx.len == 0)
-            g_index = "index.html";
+            cfg.index = "index.html";
         else if (!index_name_ok(idx)) {
             eprintln("staticd: bad --index");
             return 1;
         } else
-            g_index = (const char*)idx.ptr;
+            cfg.index = (const char*)idx.ptr;
     }
     CCString extra = cc_string_new();
     {
@@ -1093,18 +1348,26 @@ int main(int argc, char** argv) {
             eprintln("staticd: --header oom");
             return 1;
         }
-        g_extra = extra.as_slice();
+        cfg.extra = extra.as_slice();
     }
 
     {
         int start = nworkers < 2 ? nworkers : 2;
-        println(@string(`staticd on ${listen} root=${root_c} workers=${start}..${nworkers}`, @scratch));
+        if (cfg.pages_fd >= 0 && cfg.tls)
+            println(@string(`staticd on ${listen} root=${root_c} pages=on tls=on workers=${start}..${nworkers}`, @scratch));
+        else if (cfg.pages_fd >= 0)
+            println(@string(`staticd on ${listen} root=${root_c} pages=on workers=${start}..${nworkers}`, @scratch));
+        else if (cfg.tls)
+            println(@string(`staticd on ${listen} root=${root_c} tls=on workers=${start}..${nworkers}`, @scratch));
+        else
+            println(@string(`staticd on ${listen} root=${root_c} workers=${start}..${nworkers}`, @scratch));
 
         CCSignal stop = cc_signal_watch2(SIGINT, SIGTERM) !> @destroy;
         CCListener* lnp = &ln;
+        ServerCfg* cfgp = &cfg;
         CCSignal* stopp = &stop;
         g_ln = lnp;
-        g_root_fd = root_fd;
+        g_cfg = cfgp;
         g_workers_max = nworkers;
         cc_atomic_store_release(&g_nworkers, start);
 
@@ -1116,7 +1379,7 @@ int main(int argc, char** argv) {
         }
         for (int w = 0; w < start; w++) {
             @parallel(g_app) {
-                worker_run(lnp, root_fd);
+                worker_run(cfgp, lnp);
             }
         }
         g_app.wait() !>;

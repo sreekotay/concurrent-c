@@ -24,32 +24,41 @@ and redis. Not a second file server.
 | Query | `?…` is recognized and ignored |
 | Extra headers | `--header 'Name: value'` (repeatable; no CR/LF) |
 | Workers | Start 2, grow every 64 live conns, cap ncpu/2 (`--workers 0`). `--workers N` is the cap. `--workers 1` stays one dest |
+| Pages | `--pages DIR` (off). Load `hello.js` (QuickJS) or `hello.py` (CPython) as a view: `GET(request)` → `Response`. Same ABI; both faces at one path → 500. Never executes `--root` `*.js` |
+| TLS | `--tls-cert PEM` + `--tls-key PEM` (off). BearSSL server; process-wide load at startup. Build with `CC_ENABLE_TLS=1` (Makefile default) |
 | WebSocket | `Upgrade: websocket` → `101`, then echo (text / binary), pong for ping, close for close. No fragments; payload cap 64KB |
 | Body | Named-block ring: 256 × 64KB = 16MB BSS, key `(dev, ino, block)`, FNV probe only, reuse in place, idle cull. Pool `pread` on miss / unaligned Range / busy fill. 8-slot fd cache; pathname revalidate ≤1s (absolute); hold dups the fd. Send is a cursor on the row: one 64KB chunk per step, `POLLOUT` while left |
 
-**Not in scope:** TLS, gzip, HTTP/2, multipart ranges, sendfile, directory
-listing on by default, CGI.
+**Not in scope:** gzip, HTTP/2, multipart ranges, sendfile, directory
+listing on by default, CGI, Node `require`, Django ORM.
 
 ## Build
 
 From this directory. `ccc` is `../../out/cc/bin/ccc` (repo `make cc`).
+TLS needs BearSSL (`make -C ../../cc bearssl`) and a runtime built with
+`CC_ENABLE_TLS=1` — `make staticd` does both by default.
 
 ```bash
 cd real_projects/staticd
 ./setup.sh                  # fixtures + darkhttpd sources; brew nginx/wrk if missing
-make staticd                # ./out/staticd
+make staticd                # ./out/staticd (TLS-capable)
 make darkhttpd              # optional peer
 ./gen_fixtures.sh           # 1kb / 4kb / 64kb / 1mb / 10mb + index.html
 ```
 
 `make` / `make all` builds staticd only. `make setup` is `./setup.sh`.
-`make clean` removes `out/`.
+`make clean` removes `out/`. `CC_ENABLE_TLS=0 make staticd` skips BearSSL
+(link will fail if the binary still references TLS symbols).
 
 ## Run
 
 ```bash
 ./out/staticd --listen 127.0.0.1:8080 --root ./fixtures
 ./out/staticd --workers 1   # one dest (isolate receipt / the page)
+./out/staticd --root ./fixtures --pages ./pages --workers 1
+./out/staticd --listen 127.0.0.1:8443 --root ./fixtures \
+  --tls-cert ../../third_party/bearssl/samples/cert-ee-rsa.pem \
+  --tls-key  ../../third_party/bearssl/samples/key-ee-rsa.pem
 ./out/staticd --help
 ```
 
@@ -57,10 +66,41 @@ make darkhttpd              # optional peer
 |---|---|---|
 | `-l` / `--listen ADDR` | `127.0.0.1:8080` | `host:port` |
 | `-r` / `--root DIR` | `fixtures` | document root |
+| `--pages DIR` | off | script pages jail (`.js` / `.py` views) |
+| `--tls-cert PATH` | off | PEM cert chain (with `--tls-key`) |
+| `--tls-key PATH` | off | PEM private key (with `--tls-cert`) |
 | `-w` / `--workers N` | ncpu/2 (`0`) | cap; start 2, grow with live conns. `1` = one dest |
 | `--index NAME` | `index.html` | one path segment; no `/` or `..` |
 | `--list` | off | listing when the index is missing |
 | `--header LINE` | none | extra response header; repeatable |
+
+### Script pages
+
+One process-wide QuickJS and one CPython (mutex across workers), so
+in-memory page state is shared. Attach QuickJS with `CC_QUICKJS_SRC` (or
+`./quickjs`); Python needs a discoverable libpython.
+
+`pages/hello.js`:
+
+```js
+export function GET(request) {
+  return new Response(`hello ${request.path}\n`, {
+    headers: { "content-type": "text/plain; charset=utf-8" },
+  });
+}
+```
+
+`pages/hello.py` (same path as `hello.js` → 500; use one face per path):
+
+```python
+def GET(request):
+    return Response(f"hello {request.path}\n", content_type="text/plain; charset=utf-8")
+```
+
+`GET /hello` → `hello.js` or `hello.py`. Both → 500. Missing → fall through
+to `--root`. Throw / no export → 500. Engine missing → 501 (never the
+source as `application/javascript`). The sample `pages/` tree ships both
+faces for the dual-file check; for a live `/hello`, keep only one.
 
 ```bash
 # CORS + listing
@@ -129,19 +169,21 @@ splits the zip. ncpu as a *start* count oversubscribes a CPU-bound zip.
 ## Shape
 
 ```
-app dest
+main → ServerCfg → serve
   signal → g_stop
   worker × 2..cap               // start 2; grow every 64 conns; cap ncpu/2
-    poll(listen + session fds)
-    listen ready → accept → row
-    session ready → try_read → HTTP or WS step
-                     file body → one chunk, then the zip continues
+    poll → step rows → accept → reap
+    step: fill | send chunk | handle_http | WS frame
+    handle_http: pages arm (MISS→static) | file | upgrade
 ```
 
 Keep-alive and WebSocket are the row staying in the table, not a dest
 that stays live. Add workers to use more cores; they share the listen fd.
 The table is `Vec` of `Session*` on a worker arena; slots are a pool on
-that arena. `poll()` is a tape, not a second table.
+that arena. `poll()` is a tape, not a second table. TLS wraps once at
+accept; `session_read` / `session_write` are the one transport face.
+`SessAct` (`wait` / `close`) is how a step finishes; `dead` is only the
+reap mark.
 
 Encode methods never touch the socket. The jail walks each path
 component with `openat(O_NOFOLLOW)`. The fd cache re-resolves the name

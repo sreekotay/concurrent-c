@@ -3,7 +3,9 @@
 # (status 200, Content-Length, body SHA-256) and reject traversal.
 # staticd also: OPTIONS, query strip, --header, --index, --list,
 # Connection token list, Range / 304 / If-Range, intermediate symlink
-# jail, atomic rename under a hot name, WebSocket echo.
+# jail, atomic rename under a hot name, WebSocket echo, --pages script
+# replies (SKIP if QuickJS / libpython missing), optional TLS
+# (--tls-cert/--tls-key with BearSSL sample PEMs).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -466,6 +468,142 @@ if [[ "$INCLUDE_STATICD" == "1" ]]; then
         exit 1
     fi
     echo "  ok pathname revalidate after rename"
+
+    # --pages: script replies (QuickJS / CPython). Never serve source.
+    pages_port=$((STATICD_PORT + 11))
+    off_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+        "http://127.0.0.1:${STATICD_PORT}/hello" || true)
+    if [[ "$off_code" != "404" ]]; then
+        echo "FAIL staticd --pages off /hello status=$off_code (want 404)" >&2
+        exit 1
+    fi
+    echo "  ok --pages off /hello -> 404"
+
+    pages_js="$TMPDIR_RUN/pages_js"
+    mkdir -p "$pages_js"
+    cp "$SCRIPT_DIR/pages/hello.js" "$pages_js/hello.js"
+    cp "$SCRIPT_DIR/pages/boom.js" "$pages_js/boom.js"
+    "$STATICD_BIN" --listen "127.0.0.1:${pages_port}" --root "$www" \
+        --pages "$pages_js" --workers 1 \
+        >"$TMPDIR_RUN/staticd-pages-js.log" 2>&1 &
+    PIDS+=($!)
+    wait_port "$pages_port" staticd-pages-js
+    js_code=$(curl -sS -o "$TMPDIR_RUN/hello.js.body" -w '%{http_code}' \
+        "http://127.0.0.1:${pages_port}/hello")
+    js_body=$(cat "$TMPDIR_RUN/hello.js.body"; printf x); js_body=${js_body%x}
+    if [[ "$js_code" == "501" ]]; then
+        echo "  SKIP pages js (QuickJS not attached; set CC_QUICKJS_SRC)"
+    elif [[ "$js_code" != "200" || "$js_body" != $'hello /hello\n' ]]; then
+        echo "FAIL staticd pages js status=$js_code body=$(printf %q "$js_body")" >&2
+        cat "$TMPDIR_RUN/staticd-pages-js.log" >&2 || true
+        exit 1
+    else
+        echo "  ok pages hello.js -> 200"
+        boom_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            "http://127.0.0.1:${pages_port}/boom")
+        if [[ "$boom_code" != "500" ]]; then
+            echo "FAIL staticd pages throw status=$boom_code (want 500)" >&2
+            exit 1
+        fi
+        echo "  ok pages throw -> 500"
+        # must not serve .js as static from --root when pages miss
+        src_code=$(curl -sS -o "$TMPDIR_RUN/nosrc.body" -w '%{http_code}' \
+            "http://127.0.0.1:${pages_port}/hello.js")
+        if [[ "$src_code" == "200" ]] && grep -q 'export function' "$TMPDIR_RUN/nosrc.body" 2>/dev/null; then
+            echo "FAIL staticd served pages source as static" >&2
+            exit 1
+        fi
+        echo "  ok pages source not served as static ($src_code)"
+    fi
+
+    pages_py="$TMPDIR_RUN/pages_py"
+    mkdir -p "$pages_py"
+    cp "$SCRIPT_DIR/pages/hello.py" "$pages_py/hello.py"
+    pages_py_port=$((STATICD_PORT + 12))
+    "$STATICD_BIN" --listen "127.0.0.1:${pages_py_port}" --root "$www" \
+        --pages "$pages_py" --workers 1 \
+        >"$TMPDIR_RUN/staticd-pages-py.log" 2>&1 &
+    PIDS+=($!)
+    wait_port "$pages_py_port" staticd-pages-py
+    py_code=$(curl -sS -o "$TMPDIR_RUN/hello.py.body" -w '%{http_code}' \
+        "http://127.0.0.1:${pages_py_port}/hello")
+    py_body=$(cat "$TMPDIR_RUN/hello.py.body"; printf x); py_body=${py_body%x}
+    if [[ "$py_code" == "501" ]]; then
+        echo "  SKIP pages py (libpython not attached)"
+    elif [[ "$py_code" != "200" || "$py_body" != $'hello /hello\n' ]]; then
+        echo "FAIL staticd pages py status=$py_code body=$(printf %q "$py_body")" >&2
+        cat "$TMPDIR_RUN/staticd-pages-py.log" >&2 || true
+        exit 1
+    else
+        echo "  ok pages hello.py -> 200"
+    fi
+
+    pages_both="$TMPDIR_RUN/pages_both"
+    mkdir -p "$pages_both"
+    cp "$SCRIPT_DIR/pages/hello.js" "$pages_both/hello.js"
+    cp "$SCRIPT_DIR/pages/hello.py" "$pages_both/hello.py"
+    pages_both_port=$((STATICD_PORT + 13))
+    "$STATICD_BIN" --listen "127.0.0.1:${pages_both_port}" --root "$www" \
+        --pages "$pages_both" --workers 1 \
+        >"$TMPDIR_RUN/staticd-pages-both.log" 2>&1 &
+    PIDS+=($!)
+    wait_port "$pages_both_port" staticd-pages-both
+    both_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+        "http://127.0.0.1:${pages_both_port}/hello")
+    if [[ "$both_code" != "500" ]]; then
+        echo "FAIL staticd pages both faces status=$both_code (want 500)" >&2
+        exit 1
+    fi
+    echo "  ok pages both .js+.py -> 500"
+
+    # TLS: BearSSL sample RSA EE. SKIP if runtime was built without TLS.
+    tls_port=$((STATICD_PORT + 14))
+    tls_cert="$SCRIPT_DIR/../../third_party/bearssl/samples/cert-ee-rsa.pem"
+    tls_key="$SCRIPT_DIR/../../third_party/bearssl/samples/key-ee-rsa.pem"
+    if [[ ! -f "$tls_cert" || ! -f "$tls_key" ]]; then
+        echo "  SKIP tls (BearSSL sample PEMs missing)"
+    else
+        set +e
+        "$STATICD_BIN" --listen "127.0.0.1:${tls_port}" --root "$www" \
+            --tls-cert "$tls_cert" --tls-key "$tls_key" --workers 1 \
+            >"$TMPDIR_RUN/staticd-tls.log" 2>&1 &
+        tls_pid=$!
+        PIDS+=($tls_pid)
+        set -e
+        tls_up=0
+        for i in $(seq 1 50); do
+            if curl -skS -o /dev/null --connect-timeout 0.2 \
+                "https://127.0.0.1:${tls_port}/" 2>/dev/null; then
+                tls_up=1
+                break
+            fi
+            if ! kill -0 "$tls_pid" 2>/dev/null; then
+                break
+            fi
+            sleep 0.1
+        done
+        if [[ "$tls_up" != "1" ]]; then
+            if grep -qi 'tls load failed\|undefined symbol\|Symbol not found\|cc_tls_server_load' \
+                "$TMPDIR_RUN/staticd-tls.log" 2>/dev/null; then
+                echo "  SKIP tls (runtime without BearSSL / load failed)"
+                cat "$TMPDIR_RUN/staticd-tls.log" >&2 || true
+            else
+                echo "FAIL staticd tls did not accept on :${tls_port}" >&2
+                cat "$TMPDIR_RUN/staticd-tls.log" >&2 || true
+                exit 1
+            fi
+        else
+            tls_code=$(curl -skS -o "$TMPDIR_RUN/tls.body" -w '%{http_code}' \
+                "https://127.0.0.1:${tls_port}/public/ok.txt")
+            tls_body=$(cat "$TMPDIR_RUN/tls.body"; printf x); tls_body=${tls_body%x}
+            if [[ "$tls_code" != "200" || "$tls_body" != $'ok\n' ]]; then
+                echo "FAIL staticd tls /public/ok.txt status=$tls_code body=$(printf %q "$tls_body")" >&2
+                cat "$TMPDIR_RUN/staticd-tls.log" >&2 || true
+                exit 1
+            fi
+            echo "  ok tls https /public/ok.txt -> 200"
+        fi
+    fi
 fi
 
 echo "correctness: PASS"
