@@ -520,6 +520,7 @@ static int lower_header_with(Loaded* owner, CCSlice hpath, CcNameList known, boo
     H.ds = ds;
     if (ds.has_errors()) { print_diags(&H); return 1; }
     lw = cc_lowerer_new(u, ix, owner->lo, &H.ds);
+    lw.header_mode = true;
     lw.lower_unit();
     H.lw = lw;
     H.lowered = true;

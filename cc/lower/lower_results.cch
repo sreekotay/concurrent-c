@@ -42,7 +42,18 @@ static CCSlice rl_lit(const char* s) { return cc_slice_from_buffer((char*)s, str
 /* The current engine types a UFCS receiver from its first path segment, so
  * `L->ix->m()` must be `ix->m()` on a bound local (stress/break shape 3). */
 static CcIndex* rl_ix(CcLowerer* L) { return L->ix; }
-static CcTypeInfo* rl_ix_result(CcLowerer* L, CcType* v, CcType* e, bool opt) { CcIndex* ix = L->ix; return ix->result(v, e, opt); }
+/* Registering a Result also records that THIS unit spells it. */
+static CcTypeInfo* rl_ix_result(CcLowerer* L, CcType* v, CcType* e, bool opt) {
+    CcIndex* ix = L->ix;
+    CcTypeInfo* ti = ix->result(v, e, opt);
+    RSpecList* used = &L->specs;
+    size_t n = used->len();
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (*used->get_ptr(i) == ti) return ti;
+    used->push(ti);
+    return ti;
+}
 static CcSym* rl_ix_sym(CcLowerer* L, CCSlice name) { CcIndex* ix = L->ix; CcSym* s = ix->sym(name) ?> NULL; return s; }
 static CCSlice rl_ix_canon(CcLowerer* L, const CcType* t) { CcIndex* ix = L->ix; return ix->canon(t); }
 static CcLoc rl_loc(CcLowerer* L, CcSpan sp) { CcUnit* u = L->unit; return u->loc(sp); }
@@ -1206,6 +1217,10 @@ static void rl_function(CcLowerer* L, CcDecl* d, CcFuncDecl* f) {
 
 /* ---- types --------------------------------------------------------------- */
 
+/* The Result types this unit spells. The index's list is every Result
+ * every unit lowered in this process has named, and a unit that emits
+ * all of them declares specs for types it never sees — above, in the
+ * header order, the declarations that say what those types are. */
 typedef struct RTypeEnv { CcLowerer* L; CcVisitor* self; } RTypeEnv;
 
 static bool rl_type_visit(CcType* t, void* env) {
@@ -1380,9 +1395,57 @@ static void rl_spec_text(CcLowerer* L, CcTypeInfo* ti, CCString* text) {
 /* Every Result type this unit uses that no header declared gets its spec:
  * after the leading includes, or after the file-scope definition of a type
  * it spells; `<ccc/cc_result.h>` is included once when the unit did not. */
-static void rl_emit_specs(CcLowerer* L) {
+/* Which specs a unit declares.
+ *
+ * A translation unit the host compiles on its own carries every spec the
+ * index knows: anything it reaches through an include has to be there,
+ * and a spec it does not need costs a guarded macro.
+ *
+ * A header is included, not compiled alone, and the one that declares a
+ * type is the one that must declare its Result: a header that emitted
+ * every spec would put `CCResult_CcProduct_CcDiag` above the include that
+ * says what a `CcProduct` is, in whichever header happened to be read
+ * first. So a header declares the specs it spells and the specs of the
+ * types it defines; a user of one reaches it through the include. */
+static RSpecList rl_specs_for(CcLowerer* L) {
     CcIndex* ix = rl_ix(L);
-    RSpecList* specs = &ix->result_specs;
+    RSpecList* all = &ix->result_specs;
+    RSpecList out;
+    size_t n = all->len();
+    size_t i;
+    if (!L->header_mode) return *all;
+    out = vec_new::[CcTypeInfoRef](L->arena);
+    {
+        RSpecList* mine = &L->specs;
+        size_t m = mine->len();
+        for (i = 0; i < m; i++) { CcTypeInfo* one = *mine->get_ptr(i); out.push(one); }
+    }
+    for (i = 0; i < n; i++) {
+        CcTypeInfo* ti = *all->get_ptr(i);
+        CCSlice vn;
+        CCSlice en;
+        size_t k;
+        RSpecList* ov = &out;
+        size_t no = ov->len();
+        bool listed = false;
+        if (!ti->is_result) continue;
+        vn = rl_type_base_name(ti->result_value);
+        en = rl_type_base_name(ti->result_err);
+        if ((!vn.len || rl_defining_decl(L, vn) == SIZE_MAX) &&
+            (!en.len || rl_defining_decl(L, en) == SIZE_MAX)) continue;
+        for (k = 0; k < no; k++)
+            if (*ov->get_ptr(k) == ti) listed = true;
+        if (!listed) out.push(ti);
+    }
+    return out;
+}
+
+static void rl_emit_specs(CcLowerer* L, RSpecList* used) {
+    CcIndex* ix = rl_ix(L);
+    RSpecList mine = rl_specs_for(L);
+    RSpecList* specs = &mine;
+    (void)used;
+    (void)ix;
     size_t n = specs->len();
     size_t i;
     CcDeclList* decls = &L->unit->decls;
@@ -1494,8 +1557,8 @@ static void CcLowerer_results(CcLowerer* L) {
         v.type = rl_type_visit;
         v.env = &te;
         CcUnit_walk(L->unit, v);
+        rl_emit_specs(L, &L->specs);
     }
-    rl_emit_specs(L);
 }
 
 #endif

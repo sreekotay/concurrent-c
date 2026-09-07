@@ -33,6 +33,11 @@ typedef struct CcLowerer {
     CcType* ret_slice;          /* the return type of the function the slice step is in */
     Vec::[CCSlice] headers;     /* quoted local `.cch` headers this unit includes, resolved; lifetime: the arena */
     uint32_t depth;             /* 0 for the unit; one deeper for each generic expansion lowered inside it */
+    bool header_mode;           /* lowering a `.cch` to a `.h`: the product is included, not compiled alone */
+    Vec::[CcTypeInfoRef] specs; /* the Result specs THIS unit spells: the index's list is every one
+                                 * every unit lowered in this process has named, and a unit that
+                                 * emitted all of them would declare specs above the declarations
+                                 * that say what their types are */
 } CcLowerer;
 
 static CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds);

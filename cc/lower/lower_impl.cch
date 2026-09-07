@@ -20,6 +20,7 @@ static CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiag
     L.opts = opts;
     L.next_temp = 0;
     L.headers = vec_new::[CCSlice](u->arena);
+    L.specs = vec_new::[CcTypeInfoRef](u->arena);
     return L;
 }
 
@@ -395,8 +396,30 @@ static void CcLowerer_includes(CcLowerer* L) {
         CCSlice found;
         CCSlice rel;
         size_t k;
-        if (!r->quoted) continue;
         if (!(r->path.len > 4 && memcmp(r->path.ptr + r->path.len - 4, ".cch", 4) == 0)) continue;
+        if (!r->quoted) {
+            /* `<ccc/std/prelude.cch>` names the lowered header the host
+             * compiler reads. The driver rewrites these on its way to the
+             * host for a `.c`, but a `.h` this step writes is included as
+             * it stands — and the language is not C. */
+            CCSlice stem = cc_slice_from_buffer((char*)r->path.ptr, r->path.len - 4);
+            size_t k2;
+            for (k2 = 0; k2 < nd; k2++) {
+                CcDecl* d = *decls->get_ptr(k2);
+                bool hit = false;
+                @switch (d->k) {
+                    case .pp(pd): hit = pd.tok == r->tok; break;
+                    default: break;
+                }
+                if (hit) {
+                    CCString line = @string(`#include <${stem}.h>
+`, L->arena);
+                    *decls->get_ptr(k2) = lw_raw_decl(L, line, d->span);
+                    break;
+                }
+            }
+            continue;
+        }
         found = cc__resolve_include(ix, L->unit->tape.path, r, &searched);
         if (!found.len) continue;   /* the index reported it */
         found = cc__canonical_path(ix, found);

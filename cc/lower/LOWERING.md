@@ -470,6 +470,25 @@ printed one push per line. `@scratch` as the arena is the function's
 
 with the restore also emitted before every exit from inside the statement.
 
+## Header mode
+
+A `.cch` is lowered to a `.h` the host compiler includes, and two things
+follow from being included rather than compiled alone.
+
+`<ccc/std/prelude.cch>` names the lowered header, so an angle `.cch`
+include becomes `.h` here. The driver rewrites those on the way to the
+host for a `.c`; a `.h` this step writes is read as it stands, and the
+language is not C.
+
+The unit that declares a type declares its Result spec. The index's spec
+list is every Result every unit lowered in this process has named, so a
+header that emitted all of them would put `CCResult_CcProduct_CcDiag`
+above the include that says what a `CcProduct` is — in whichever header
+happened to be read first. A header emits the specs it spells and the
+specs of the types it defines; a user of one reaches it through the
+include. A translation unit the host compiles alone still carries every
+spec the index knows, since anything it reaches has to be there.
+
 ## Compile time
 
 `@comptime if` / `@comptime for` / `@comptime(expr)` decide what source
