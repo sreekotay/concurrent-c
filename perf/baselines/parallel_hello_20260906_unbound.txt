@@ -1,0 +1,40 @@
+# perf/parallel_hello.ccs + compare_parallel_unbound.sh snapshot
+# date: 2026-09-07T02:17:15Z
+# host: Darwin 25.5.0 arm64 ncpu=10
+# cc:   a5990c74
+# cmd:  ./perf/compare_parallel_unbound.sh
+#       (this run: depth=24 samples=5 — binary default; wrapper can pin 3)
+# bins: perf/out/parallel_hello_cc --release (rebuilt a5990c74)
+#
+# Ungated @parallel { } at depth 24 vs Go grain=depth.
+# vs 2026-09-04 grow-park snapshot (CC only, samples=3):
+#   seq 28.7 ms  par 251 ms  cut 8.8 ms  RSS 35 MB
+# this run: seq 28.3 ms  par 40.4 ms  cut 4.7 ms  RSS 25 MB
+# Refresh: ./perf/compare_parallel_unbound.sh
+
+=================================================================
+UNBOUNDED PARALLEL MATRIX: CC @parallel (defaults) vs Go
+depth=24 samples=5
+=================================================================
+Building CC surface @parallel...
+Building Go...
+
+--- CC: seq + ungated par + cut (defaults, CC_PAR_BARE=1) ---
+ seq 8388608 28.30800000205636 ms
+ par 8388608 40.39299999922514 ms vs_seq 0.7008144976258113x (@parallel { })
+ cut 8388608 4.736999999731779 ms vs_seq 5.975934136301294x (@parallel (d<8))
+            25772032  maximum resident set size
+
+--- Go: seq + spawn-at-every-level (grain=depth) ---
+  seq  8388608  21.54 ms
+     24  16777215    3035.90    0.01x
+          1496170496  maximum resident set size
+
+=================================================================
+SUMMARY (medians; RSS = whole-process peak)
+=================================================================
+                     seq_ms par_unbound_ms    peak_MB
+  CC (defaults)        28.3           40.4         25
+  Go                   21.5         3035.9       1427
+
+Interpret with the fairness contract at the top of this script.

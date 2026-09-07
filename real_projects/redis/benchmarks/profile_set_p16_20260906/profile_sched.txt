@@ -1,0 +1,7 @@
+[sched_v2 stats] coro_pool: reuse=53 fresh=51  spawns: parks=584538 dead=104  pool=51/512
+[sched_v2 stats] join (spin=0): fast=0 spin_hit=0 park_fiber=0 park_thread=1
+[sched_v2 stats] wake: ext_calls=356055 no_idle=240356 issued=157232 scan_miss=2405  skipped_deep=228592 (depth>=4) skipped_local=0 (local=1)  worker_self_drain=584642  worker_idle_entries=163083 (recheck=6941 from_wake=120456)
+[sched_v2 stats] grow (eager<=2 recheck=25us rate=100us/pop/worker depth_x=2 dwell=3 esc=0): requests=4960 stall=2 backlog=0 escalate=0 held=27910 parked=22845 final_threads=4/10
+[sched_v2 stats] spin_before_park=0: hit=0 miss=163083
+[sched_v2 stats] target_active=0 running=0: admit_ok=163083 admit_fail=0 wake_gated=0
+[sched_v2 stats] sysmon_evict: evicted_total=0 orphans_alive=0 cap_hit=0

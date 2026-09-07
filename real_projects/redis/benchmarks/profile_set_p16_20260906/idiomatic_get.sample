@@ -1,0 +1,755 @@
+Analysis of sampling redis_idiomatic_profile (pid 96718) every 1 millisecond
+Process:         redis_idiomatic_profile [96718]
+Path:            /Users/USER/Documents/*/redis_idiomatic_profile
+Load Address:    0x1008ac000
+Identifier:      redis_idiomatic_profile
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  zsh [96702]
+Target Type:     live task
+
+Date/Time:       2026-09-06 22:28:00.312 -0400
+Launch Time:     2026-09-06 22:27:50.490 -0400
+OS Version:      macOS 26.5.2 (25F84)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         12.1M
+Physical footprint (peak):  12.7M
+Idle exit:                  untracked
+----
+
+Call graph:
+    6945 Thread_1166167   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 6945 start  (in dyld) + 6992  [0x18ef8fe00]
+    +   6945 main  (in redis_idiomatic_profile) + 5548  [0x1008b49f4]  redis_idiomatic.ccs:1120
+    +     6945 cc_signal_wait  (in redis_idiomatic_profile) + 48  [0x1008ca1b8]  signal.c:52
+    +       6916 cc__io_signal_sink_wait  (in redis_idiomatic_profile) + 480  [0x1008c6664]  io_wait.c:958
+    +       ! 6894 nanosleep  (in libsystem_c.dylib) + 220  [0x18f1e9cc0]
+    +       ! : 6889 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x18f30d308]
+    +       ! : 5 __semwait_signal  (in libsystem_kernel.dylib) + 28  [0x18f30d31c]
+    +       ! :   5 cerror  (in libsystem_kernel.dylib) + 44  [0x18f30b600]
+    +       ! :     5 _pthread_exit_if_canceled  (in libsystem_pthread.dylib) + 0  [0x18f347908]
+    +       ! 12 nanosleep  (in libsystem_c.dylib) + 60  [0x18f1e9c20]
+    +       ! : 11 pthread_testcancel  (in libsystem_pthread.dylib) + 0  [0x18f34a9d0]
+    +       ! : 1 DYLD-STUB$$pthread_testcancel  (in libsystem_c.dylib) + 0  [0x18f255cdc]
+    +       ! 10 nanosleep  (in libsystem_c.dylib) + 12  [0x18f1e9bf0]
+    +       15 cc__io_signal_sink_wait  (in redis_idiomatic_profile) + 524,480  [0x1008c6690,0x1008c6664]  io_wait.c:959
+    +       12 cc__io_signal_sink_wait  (in redis_idiomatic_profile) + 492  [0x1008c6670]  io_wait.c:959
+    +       ! 12 _mco_running  (in redis_idiomatic_profile) + 24  [0x1008c35cc]  minicoro.h:2000
+    +       !   12 _tlv_get_addr  (in libdyld.dylib) + 0  [0x18ef58388]
+    +       1 cc__io_signal_sink_wait  (in redis_idiomatic_profile) + 192  [0x1008c6544]  io_wait.c:953
+    +       ! 1 _mco_running  (in redis_idiomatic_profile) + 24  [0x1008c35cc]  minicoro.h:2000
+    +       !   1 _tlv_get_addr  (in libdyld.dylib) + 20  [0x18ef5839c]
+    +       1 cc__io_signal_sink_wait  (in redis_idiomatic_profile) + 248  [0x1008c657c]  io_wait.c:955
+    6945 Thread_1166178
+    + 6945 thread_start  (in libsystem_pthread.dylib) + 8  [0x18f348c1c]
+    +   6945 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18f34dc58]
+    +     6818 cc__io_waiter_main_kqueue  (in redis_idiomatic_profile) + 248  [0x1008d05d8]  io_wait.c:556
+    +     ! 6818 kevent  (in libsystem_kernel.dylib) + 8,4  [0x18f30ffc4,0x18f30ffc0]
+    +     119 cc__io_waiter_main_kqueue  (in redis_idiomatic_profile) + 1252  [0x1008d09c4]  io_wait.c:0
+    +     ! 101 sched_v2_wake  (in redis_idiomatic_profile) + 2392  [0x1008cdcac]  wake_primitive.h:147
+    +     ! : 101 __ulock_wake  (in libsystem_kernel.dylib) + 8,4  [0x18f30bbcc,0x18f30bbc8]
+    +     ! 3 sched_v2_signal_ex  (in redis_idiomatic_profile) + 68  [0x1008c19cc]  sched_v2.c:1651
+    +     ! 3 sched_v2_signal_ex  (in redis_idiomatic_profile) + 96,124,...  [0x1008c19e8,0x1008c1a04,...]  sched_v2.c:1655
+    +     ! 2 __ulock_wake  (in libsystem_kernel.dylib) + 8,40  [0x18f30bbcc,0x18f30bbec]
+    +     ! 2 sched_v2_signal_ex  (in redis_idiomatic_profile) + 116  [0x1008c19fc]  sched_v2.c:1655
+    +     ! : 1 _os_unfair_lock_lock_slow  (in libsystem_platform.dylib) + 172  [0x18f3553c0]
+    +     ! : | 1 __ulock_wait2  (in libsystem_kernel.dylib) + 8  [0x18f317c98]
+    +     ! : 1 os_unfair_lock_lock  (in libsystem_platform.dylib) + 0  [0x18f354be8]
+    +     ! 2 sched_v2_signal_ex  (in redis_idiomatic_profile) + 232  [0x1008c1a70]  sched_v2.c:1655
+    +     ! : 2 _os_unfair_lock_unlock_slow  (in libsystem_platform.dylib) + 56  [0x18f3554bc]
+    +     ! :   2 __ulock_wake  (in libsystem_kernel.dylib) + 8  [0x18f30bbcc]
+    +     ! 1 sched_v2_grow_if_backlogged  (in redis_idiomatic_profile) + 48  [0x1008cddb8]  sched_v2.c:1246
+    +     ! 1 sched_v2_wake  (in redis_idiomatic_profile) + 2292  [0x1008cdc48]  sched_v2.c:1184
+    +     ! 1 sched_v2_wake  (in redis_idiomatic_profile) + 2340  [0x1008cdc78]  sched_v2.c:1188
+    +     ! 1 sched_v2_wake  (in redis_idiomatic_profile) + 2536  [0x1008cdd3c]  sched_v2.c:1383
+    +     ! 1 sched_v2_wake  (in redis_idiomatic_profile) + 2252  [0x1008cdc20]  sched_v2.c:1409
+    +     ! 1 sched_v2_wake  (in redis_idiomatic_profile) + 2284  [0x1008cdc40]  sched_v2.c:1415
+    +     4 cc__io_waiter_main_kqueue  (in redis_idiomatic_profile) + 672,684  [0x1008d0780,0x1008d078c]  io_wait.c:585
+    +     1 cc__io_waiter_main_kqueue  (in redis_idiomatic_profile) + 1240  [0x1008d09b8]  fiber_sched.c:1196
+    +     1 cc__io_waiter_main_kqueue  (in redis_idiomatic_profile) + 1244  [0x1008d09bc]  io_wait.c:0
+    +     1 cc__io_waiter_main_kqueue  (in redis_idiomatic_profile) + 92  [0x1008d053c]  io_wait.c:542
+    +     1 cc__io_waiter_main_kqueue  (in redis_idiomatic_profile) + 540  [0x1008d06fc]  io_wait.c:561
+    6945 Thread_1166179
+    + 6362 thread_start  (in libsystem_pthread.dylib) + 8  [0x18f348c1c]
+    + ! 6362 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18f34dc58]
+    + !   6345 thread_v2_main  (in redis_idiomatic_profile) + 524  [0x1008ce1a0]  sched_v2.c:2138
+    + !   : 6345 __ulock_wait  (in libsystem_kernel.dylib) + 8,4  [0x18f30baf8,0x18f30baf4]
+    + !   15 thread_v2_main  (in redis_idiomatic_profile) + 276  [0x1008ce0a8]  sched_v2.c:2083
+    + !   : 4 sched_v2_wake  (in redis_idiomatic_profile) + 228  [0x1008cd438]  sched_v2.c:65
+    + !   : | 4 _os_unfair_lock_lock_slow  (in libsystem_platform.dylib) + 172  [0x18f3553c0]
+    + !   : |   4 __ulock_wait2  (in libsystem_kernel.dylib) + 8  [0x18f317c98]
+    + !   : 3 sched_v2_wake  (in redis_idiomatic_profile) + 1184  [0x1008cd7f4]  sched_v2.c:1366
+    + !   : | 1 _mco_running  (in redis_idiomatic_profile) + 4  [0x1008c35b8]  minicoro.h:1999
+    + !   : | 1 _mco_running  (in redis_idiomatic_profile) + 24  [0x1008c35cc]  minicoro.h:2000
+    + !   : | + 1 _tlv_get_addr  (in libdyld.dylib) + 20  [0x18ef5839c]
+    + !   : | 1 _mco_running  (in redis_idiomatic_profile) + 28  [0x1008c35d0]  minicoro.h:2000
+    + !   : 2 sched_v2_wake  (in redis_idiomatic_profile) + 1444  [0x1008cd8f8]  sched_v2.c:1366
+    + !   : 1 sched_v2_wake  (in redis_idiomatic_profile) + 1980  [0x1008cdb10]  sched_v2.c:1297
+    + !   : | 1 sched_v2_wake  (in redis_idiomatic_profile) + 2392  [0x1008cdcac]  wake_primitive.h:147
+    + !   : |   1 __ulock_wake  (in libsystem_kernel.dylib) + 8  [0x18f30bbcc]
+    + !   : 1 sched_v2_wake  (in redis_idiomatic_profile) + 2412  [0x1008cdcc0]  sched_v2.c:1351
+    + !   : 1 sched_v2_wake  (in redis_idiomatic_profile) + 312  [0x1008cd48c]  sched_v2.c:1356
+    + !   : 1 sched_v2_wake  (in redis_idiomatic_profile) + 2420  [0x1008cdcc8]  sched_v2.c:1424
+    + !   : 1 sched_v2_wake  (in redis_idiomatic_profile) + 252  [0x1008cd450]  sched_v2.c:305
+    + !   : 1 sched_v2_wake  (in redis_idiomatic_profile) + 292  [0x1008cd478]  sched_v2.c:66
+    + !   :   1 _os_unfair_lock_unlock_slow  (in libsystem_platform.dylib) + 56  [0x18f3554bc]
+    + !   :     1 __ulock_wake  (in libsystem_kernel.dylib) + 8  [0x18f30bbcc]
+    + !   1 thread_v2_main  (in redis_idiomatic_profile) + 524  [0x1008ce1a0]  sched_v2.c:2139
+    + !   1 thread_v2_main  (in redis_idiomatic_profile) + 572  [0x1008ce1d0]  sched_v2.c:2143
+    + 583 ???  (in <unknown binary>)  [0xffffdeaddeaddead]
+    +   583 _mco_main  (in redis_idiomatic_profile) + 24  [0x1008cf580]  minicoro.h:644
+    +     583 fiber_v2_entry  (in redis_idiomatic_profile) + 132  [0x1008cdf7c]  sched_v2.c:1007
+    +       361 __cc_par_onto_2  (in redis_idiomatic_profile) + 496  [0x1008ba1a8]  redis_idiomatic.ccs:1133
+    +       : 168 run_pipeline_window  (in redis_idiomatic_profile) + 1996  [0x1008b2e68]  redis_idiomatic.ccs:996
+    +       : | 139 execute  (in redis_idiomatic_profile) + 1752  [0x1008b1b94]  redis_idiomatic.ccs:884
+    +       : | + 81 exec  (in redis_idiomatic_profile) + 1648  [0x1008acde8]  redis_idiomatic.ccs:572
+    +       : | + ! 75 db_lookup_live  (in redis_idiomatic_profile) + 240  [0x1008adba4]  redis_db.cch:467
+    +       : | + ! : 74 ArrayMap_CCSlicePacked_RedisEntry_find_dense_h  (in redis_idiomatic_profile) + 396,176,...  [0x1008b5d0c,0x1008b5c30,...]  redis_idiomatic.ccs:58
+    +       : | + ! : 1 db_lookup_live  (in redis_idiomatic_profile) + 272  [0x1008adbc4]  redis_db.cch:469
+    +       : | + ! 6 exec  (in redis_idiomatic_profile) + 1648  [0x1008acde8]  redis_idiomatic.ccs:572
+    +       : | + !   4 db_lookup_live  (in redis_idiomatic_profile) + 84  [0x1008adb08]  redis_db.cch:464
+    +       : | + !   1 db_lookup_live  (in redis_idiomatic_profile) + 48  [0x1008adae4]  redis_db.cch:463
+    +       : | + !   1 db_lookup_live  (in redis_idiomatic_profile) + 140  [0x1008adb40]  redis_db.cch:465
+    +       : | + 55 enc_redis_value  (in redis_idiomatic_profile) + 368  [0x1008addc8]  redis_idiomatic.ccs:0
+    +       : | + ! 12 redis_conn_bulk  (in redis_idiomatic_profile) + 128,136,...  [0x1008b01f4,0x1008b01fc,...]  redis_idiomatic.ccs:478
+    +       : | + ! 9 redis_conn_bulk  (in redis_idiomatic_profile) + 688  [0x1008b0424]  redis_idiomatic.ccs:481
+    +       : | + ! : 5 cc__string_push_buffer_grow  (in redis_idiomatic_profile) + 100  [0x1008c595c]  string.c:52
+    +       : | + ! : | 3 cc_string_reserve  (in redis_idiomatic_profile) + 612  [0x1008c58a0]  string.h:446
+    +       : | + ! : | + 2 cc_arena_owner_regrow  (in redis_idiomatic_profile) + 124  [0x1008cfca4]  cc_arena.h:2612
+    +       : | + ! : | + ! 1 cc_arena_realloc_host  (in redis_idiomatic_profile) + 56  [0x1008babcc]  cc_arena.h:1574
+    +       : | + ! : | + ! 1 cc_arena_realloc_host  (in redis_idiomatic_profile) + 1476  [0x1008bb158]  cc_arena.h:1614
+    +       : | + ! : | + 1 cc_arena_realloc_host  (in redis_idiomatic_profile) + 76  [0x1008babe0]  cc_arena.h:1574
+    +       : | + ! : | 1 cc_string_reserve  (in redis_idiomatic_profile) + 228  [0x1008c5720]  string.h:356
+    +       : | + ! : | 1 cc_string_reserve  (in redis_idiomatic_profile) + 96  [0x1008c569c]  string.h:463
+    +       : | + ! : 3 cc__string_push_buffer_grow  (in redis_idiomatic_profile) + 136  [0x1008c5980]  string.c:55
+    +       : | + ! : | 3 _platform_memmove  (in libsystem_platform.dylib) + 12,428,...  [0x18f35736c,0x18f35750c,...]
+    +       : | + ! : 1 cc__string_push_buffer_grow  (in redis_idiomatic_profile) + 0  [0x1008c58f8]  string.c:49
+    +       : | + ! 9 redis_conn_bulk  (in redis_idiomatic_profile) + 684,248,...  [0x1008b0420,0x1008b026c,...]  redis_idiomatic.ccs:481
+    +       : | + ! 8 redis_conn_bulk  (in redis_idiomatic_profile) + 924  [0x1008b0510]  redis_idiomatic.ccs:482
+    +       : | + ! : 3 redis_conn_write  (in redis_idiomatic_profile) + 60,228  [0x1008b5a94,0x1008b5b3c]  redis_idiomatic.ccs:449
+    +       : | + ! : 2 redis_conn_write  (in redis_idiomatic_profile) + 108  [0x1008b5ac4]  redis_idiomatic.ccs:449
+    +       : | + ! : | 1 DYLD-STUB$$memcpy  (in redis_idiomatic_profile) + 4  [0x1008d240c]
+    +       : | + ! : | 1 _platform_memmove  (in libsystem_platform.dylib) + 460  [0x18f35752c]
+    +       : | + ! : 2 redis_conn_write  (in redis_idiomatic_profile) + 212  [0x1008b5b2c]  redis_idiomatic.ccs:449
+    +       : | + ! : | 2 cc__string_push_buffer_grow  (in redis_idiomatic_profile) + 100  [0x1008c595c]  string.c:52
+    +       : | + ! : |   2 cc_string_reserve  (in redis_idiomatic_profile) + 436  [0x1008c57f0]  string.h:438
+    +       : | + ! : |     2 cc__arena_owner_new_impl  (in redis_idiomatic_profile) + 604  [0x1008cfb20]  cc_arena.h:2585
+    +       : | + ! : |       1 cc_slice_gen_birth  (in redis_idiomatic_profile) + 0  [0x1008c59f8]  slice_gen.c:86
+    +       : | + ! : |       1 cc_slice_gen_birth  (in redis_idiomatic_profile) + 148  [0x1008c5a8c]  slice_gen.c:96
+    +       : | + ! : 1 redis_conn_write  (in redis_idiomatic_profile) + 16  [0x1008b5a68]  redis_idiomatic.ccs:448
+    +       : | + ! 7 redis_conn_bulk  (in redis_idiomatic_profile) + 788  [0x1008b0488]  redis_idiomatic.ccs:482
+    +       : | + ! : 5 _platform_memmove  (in libsystem_platform.dylib) + 444,12,...  [0x18f35751c,0x18f35736c,...]
+    +       : | + ! : 2 DYLD-STUB$$memcpy  (in redis_idiomatic_profile) + 4  [0x1008d240c]
+    +       : | + ! 4 redis_conn_bulk  (in redis_idiomatic_profile) + 368  [0x1008b02e4]  redis_idiomatic.ccs:481
+    +       : | + ! : 3 _platform_memmove  (in libsystem_platform.dylib) + 0,460  [0x18f357360,0x18f35752c]
+    +       : | + ! : 1 DYLD-STUB$$memcpy  (in redis_idiomatic_profile) + 4  [0x1008d240c]
+    +       : | + ! 3 redis_conn_bulk  (in redis_idiomatic_profile) + 328  [0x1008b02bc]  redis_idiomatic.ccs:481
+    +       : | + ! : 2 cc_string_reserve  (in redis_idiomatic_profile) + 36  [0x1008b7a98]  string.h:463
+    +       : | + ! : 1 cc_string_reserve  (in redis_idiomatic_profile) + 0  [0x1008b7a74]  string.h:407
+    +       : | + ! 1 redis_conn_bulk  (in redis_idiomatic_profile) + 48  [0x1008b01a4]  redis_idiomatic.ccs:477
+    +       : | + ! 1 redis_conn_bulk  (in redis_idiomatic_profile) + 776  [0x1008b047c]  redis_idiomatic.ccs:482
+    +       : | + ! 1 redis_conn_write  (in redis_idiomatic_profile) + 288  [0x1008b5b78]  cc_io_error.h:0
+    +       : | + 1 enc_redis_value  (in redis_idiomatic_profile) + 44  [0x1008adc84]  redis_idiomatic.ccs:546
+    +       : | + 1 exec  (in redis_idiomatic_profile) + 4  [0x1008ac77c]  redis_idiomatic.ccs:560
+    +       : | + 1 exec  (in redis_idiomatic_profile) + 72  [0x1008ac7c0]  redis_idiomatic.ccs:566
+    +       : | 11 execute  (in redis_idiomatic_profile) + 924,980,...  [0x1008b1858,0x1008b1890,...]  redis_idiomatic.ccs:880
+    +       : | 10 execute  (in redis_idiomatic_profile) + 1776  [0x1008b1bac]  redis_idiomatic.ccs:880
+    +       : | + 10 cc_exclusive_unlock_contended  (in redis_idiomatic_profile) + 364  [0x1008caa6c]  sched_v2.c:1676
+    +       : | +   5 sched_v2_wake  (in redis_idiomatic_profile) + 2392  [0x1008cdcac]  wake_primitive.h:147
+    +       : | +   ! 5 __ulock_wake  (in libsystem_kernel.dylib) + 8  [0x18f30bbcc]
+    +       : | +   4 sched_v2_signal_ex  (in redis_idiomatic_profile) + 116  [0x1008c19fc]  sched_v2.c:1655
+    +       : | +   ! 2 _os_unfair_lock_lock_slow  (in libsystem_platform.dylib) + 172  [0x18f3553c0]
+    +       : | +   ! : 2 __ulock_wait2  (in libsystem_kernel.dylib) + 8  [0x18f317c98]
+    +       : | +   ! 2 os_unfair_lock_lock  (in libsystem_platform.dylib) + 12  [0x18f354bf4]
+    +       : | +   1 sched_v2_wake  (in redis_idiomatic_profile) + 2360  [0x1008cdc8c]  sched_v2.c:558
+    +       : | 5 execute  (in redis_idiomatic_profile) + 1080  [0x1008b18f4]  redis_idiomatic.ccs:880
+    +       : | + 4 cc_exclusive_lock_entry_slow  (in redis_idiomatic_profile) + 804  [0x1008ca5f8]  exclusive.c:542
+    +       : | + ! 3 cc__fiber_park_reason  (in redis_idiomatic_profile) + 80  [0x1008c3c0c]  fiber_sched.c:1144
+    +       : | + ! : 2 sched_v2_park  (in redis_idiomatic_profile) + 292  [0x1008c1c9c]  sched_v2.c:1766
+    +       : | + ! : 1 sched_v2_park  (in redis_idiomatic_profile) + 320  [0x1008c1cb8]  sched_v2.c:1756
+    +       : | + ! 1 cc__fiber_park_reason  (in redis_idiomatic_profile) + 80  [0x1008c3c0c]  fiber_sched.c:1145
+    +       : | + 1 cc_exclusive_lock_entry_slow  (in redis_idiomatic_profile) + 616  [0x1008ca53c]  exclusive.c:542
+    +       : | 2 execute  (in redis_idiomatic_profile) + 64,112  [0x1008b14fc,0x1008b152c]  redis_idiomatic.ccs:835
+    +       : | 1 execute  (in redis_idiomatic_profile) + 20  [0x1008b14d0]  redis_idiomatic.ccs:830
+    +       : 154 run_pipeline_window  (in redis_idiomatic_profile) + 2252  [0x1008b2f68]  redis_idiomatic.ccs:1012
+    +       : | 149 redis_conn_flush  (in redis_idiomatic_profile) + 120  [0x1008b33a8]  redis_idiomatic.ccs:444
+    +       : | + 149 cc_socket_write_deadline  (in redis_idiomatic_profile) + 388  [0x1008c9c24]  net.c:610
+    +       : | +   149 __sendto  (in libsystem_kernel.dylib) + 8,4  [0x18f30e390,0x18f30e38c]
+    +       : | 3 redis_conn_flush  (in redis_idiomatic_profile) + 84  [0x1008b3384]  redis_idiomatic.ccs:444
+    +       : | + 2 cc_deadline_after_ms  (in redis_idiomatic_profile) + 40  [0x1008c3fc0]  scheduler.c:336
+    +       : | + ! 1 clock_gettime  (in libsystem_c.dylib) + 256  [0x18f1eae24]
+    +       : | + ! : 1 gettimeofday  (in libsystem_c.dylib) + 56  [0x18f1e2dc0]
+    +       : | + ! :   1 __commpage_gettimeofday_internal  (in libsystem_kernel.dylib) + 44  [0x18f30bc24]
+    +       : | + ! :     1 mach_absolute_time  (in libsystem_kernel.dylib) + 108  [0x18f30a10c]
+    +       : | + ! 1 clock_gettime  (in libsystem_c.dylib) + 392  [0x18f1eaeac]
+    +       : | + 1 cc_deadline_after_ms  (in redis_idiomatic_profile) + 0  [0x1008c3f98]  scheduler.c:333
+    +       : | 1 redis_conn_flush  (in redis_idiomatic_profile) + 56  [0x1008b3368]  redis_idiomatic.ccs:440
+    +       : | 1 redis_conn_flush  (in redis_idiomatic_profile) + 120  [0x1008b33a8]  redis_idiomatic.ccs:444
+    +       : 17 run_pipeline_window  (in redis_idiomatic_profile) + 1500,372,...  [0x1008b2c78,0x1008b2810,...]  redis_idiomatic.ccs:993
+    +       : 7 run_pipeline_window  (in redis_idiomatic_profile) + 2028  [0x1008b2e88]  redis_idiomatic.ccs:989
+    +       : | 2 cc_arena_free  (in redis_idiomatic_profile) + 72,412  [0x1008bc1c4,0x1008bc318]  cc_arena.h:523
+    +       : | 1 cc_arena_free  (in redis_idiomatic_profile) + 108  [0x1008bc1e8]  cc_arena.h:2774
+    +       : | 1 cc_arena_free  (in redis_idiomatic_profile) + 20  [0x1008bc190]  cc_arena.h:2817
+    +       : | 1 cc_arena_free  (in redis_idiomatic_profile) + 516  [0x1008bc380]  cc_arena.h:2855
+    +       : | 1 cc_arena_free  (in redis_idiomatic_profile) + 524  [0x1008bc388]  cc_arena.h:2856
+    +       : | 1 cc_arena_free  (in redis_idiomatic_profile) + 756  [0x1008bc470]  cc_arena.h:2867
+    +       : 7 run_pipeline_window  (in redis_idiomatic_profile) + 260,256,...  [0x1008b27a0,0x1008b279c,...]  redis_idiomatic.ccs:992
+    +       : 5 run_pipeline_window  (in redis_idiomatic_profile) + 1420  [0x1008b2c28]  redis_idiomatic.ccs:993
+    +       : | 2 cc__arena_alloc_here_epoch  (in redis_idiomatic_profile) + 64,68  [0x1008b82c0,0x1008b82c4]  cc_arena.h:1372
+    +       : | 2 cc__arena_alloc_here_epoch  (in redis_idiomatic_profile) + 1112  [0x1008b86d8]  cc_arena.h:1433
+    +       : | 1 cc__arena_alloc_here_epoch  (in redis_idiomatic_profile) + 864  [0x1008b85e0]  cc_arena.h:0
+    +       : 1 execute  (in redis_idiomatic_profile) + 520  [0x1008b16c4]  redis_idiomatic.ccs:925
+    +       : 1 run_pipeline_window  (in redis_idiomatic_profile) + 44  [0x1008b26c8]  redis_idiomatic.ccs:983
+    +       : | 1 ___chkstk_darwin  (in libsystem_pthread.dylib) + 20  [0x18f348c34]
+    +       : 1 run_pipeline_window  (in redis_idiomatic_profile) + 92  [0x1008b26f8]  redis_idiomatic.ccs:987
+    +       213 __cc_par_onto_2  (in redis_idiomatic_profile) + 644  [0x1008ba23c]  redis_idiomatic.ccs:1133
+    +       : 204 cc_socket_read_into_deadline  (in redis_idiomatic_profile) + 388  [0x1008c9468]  net.c:498
+    +       : | 204 read  (in libsystem_kernel.dylib) + 8,4  [0x18f30a91c,0x18f30a918]
+    +       : 7 cc_socket_read_into_deadline  (in redis_idiomatic_profile) + 684  [0x1008c9590]  net.c:513
+    +       : | 5 cc__io_watcher_wait_deadline  (in redis_idiomatic_profile) + 896  [0x1008c707c]  io_wait.c:1171
+    +       : | + 5 cc__io_wait_suspend_ready  (in redis_idiomatic_profile) + 160  [0x1008c6828]  io_wait.c:1086
+    +       : | +   2 cc__fiber_suspend_until_ready_or_cancel_until  (in redis_idiomatic_profile) + 424  [0x1008c3930]  fiber_sched.c:1094
+    +       : | +   ! 2 clock_gettime  (in libsystem_c.dylib) + 256  [0x18f1eae24]
+    +       : | +   !   2 gettimeofday  (in libsystem_c.dylib) + 56  [0x18f1e2dc0]
+    +       : | +   !     2 __commpage_gettimeofday_internal  (in libsystem_kernel.dylib) + 44  [0x18f30bc24]
+    +       : | +   !       2 mach_absolute_time  (in libsystem_kernel.dylib) + 108  [0x18f30a10c]
+    +       : | +   1 cc__fiber_suspend_until_ready_or_cancel_until  (in redis_idiomatic_profile) + 508  [0x1008c3984]  fiber_sched.c:1122
+    +       : | +   ! 1 sched_v2_park  (in redis_idiomatic_profile) + 292  [0x1008c1c9c]  sched_v2.c:1765
+    +       : | +   !   1 mco_yield  (in redis_idiomatic_profile) + 152  [0x1008c1d68]  minicoro.h:1902
+    +       : | +   1 cc__fiber_suspend_until_ready_or_cancel_until  (in redis_idiomatic_profile) + 508  [0x1008c3984]  sched_v2.c:1844
+    +       : | +   1 cc__fiber_suspend_until_ready_or_cancel_until  (in redis_idiomatic_profile) + 512  [0x1008c3988]  sched_v2.c:1845
+    +       : | 1 cc__io_watcher_wait_deadline  (in redis_idiomatic_profile) + 332  [0x1008c6e48]  io_wait.c:1110
+    +       : | 1 cc__io_watcher_wait_deadline  (in redis_idiomatic_profile) + 896  [0x1008c707c]  io_wait.c:1171
+    +       : 1 cc_socket_read_into_deadline  (in redis_idiomatic_profile) + 372  [0x1008c9458]  net.c:498
+    +       : 1 cc_socket_read_into_deadline  (in redis_idiomatic_profile) + 408  [0x1008c947c]  net.c:510
+    +       :   1 DYLD-STUB$$__error  (in redis_idiomatic_profile) + 4  [0x1008d228c]
+    +       8 __cc_par_onto_2  (in redis_idiomatic_profile) + 612  [0x1008ba21c]  redis_idiomatic.ccs:1133
+    +       : 8 cc_deadline_after_ms  (in redis_idiomatic_profile) + 40  [0x1008c3fc0]  scheduler.c:336
+    +       :   7 clock_gettime  (in libsystem_c.dylib) + 256  [0x18f1eae24]
+    +       :   | 7 gettimeofday  (in libsystem_c.dylib) + 56  [0x18f1e2dc0]
+    +       :   |   7 __commpage_gettimeofday_internal  (in libsystem_kernel.dylib) + 44  [0x18f30bc24]
+    +       :   |     7 mach_absolute_time  (in libsystem_kernel.dylib) + 108,16  [0x18f30a10c,0x18f30a0b0]
+    +       :   1 clock_gettime  (in libsystem_c.dylib) + 0  [0x18f1ead24]
+    +       1 cc_socket_read_into_deadline  (in redis_idiomatic_profile) + 260  [0x1008c93e8]  net.c:524
+    6945 Thread_1166180
+    + 6945 thread_start  (in libsystem_pthread.dylib) + 8  [0x18f348c1c]
+    +   6945 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18f34dc58]
+    +     6788 sched_v2_sysmon_main  (in redis_idiomatic_profile) + 240  [0x1008ce5f8]  sched_v2.c:0
+    +     ! 6788 __ulock_wait  (in libsystem_kernel.dylib) + 8  [0x18f30baf8]
+    +     153 sched_v2_sysmon_main  (in redis_idiomatic_profile) + 1640  [0x1008ceb70]  sched_v2.c:2526
+    +     ! 146 sched_v2_check_deadlock  (in redis_idiomatic_profile) + 284,272,...  [0x1008c2980,0x1008c2974,...]  sched_v2.c:3319
+    +     ! 3 sched_v2_check_deadlock  (in redis_idiomatic_profile) + 0,24  [0x1008c2864,0x1008c287c]  sched_v2.c:3290
+    +     ! 3 sched_v2_check_deadlock  (in redis_idiomatic_profile) + 224  [0x1008c2944]  sched_v2.c:3319
+    +     ! : 3 pthread_mutex_lock  (in libsystem_pthread.dylib) + 0  [0x18f3483fc]
+    +     ! 1 sched_v2_check_deadlock  (in redis_idiomatic_profile) + 440  [0x1008c2a1c]  sched_v2.c:3199
+    +     2 sched_v2_sysmon_main  (in redis_idiomatic_profile) + 240  [0x1008ce5f8]  sched_v2.c:2384
+    +     1 sched_v2_sysmon_main  (in redis_idiomatic_profile) + 248  [0x1008ce600]  sched_v2.c:2392
+    +     1 sched_v2_sysmon_main  (in redis_idiomatic_profile) + 800  [0x1008ce828]  sched_v2.c:2441
+    +       1 mach_absolute_time  (in libsystem_kernel.dylib) + 108  [0x18f30a10c]
+    6945 Thread_1166181
+    + 6419 thread_start  (in libsystem_pthread.dylib) + 8  [0x18f348c1c]
+    + ! 6419 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18f34dc58]
+    + !   6409 thread_v2_main  (in redis_idiomatic_profile) + 524  [0x1008ce1a0]  sched_v2.c:2138
+    + !   : 6409 __ulock_wait  (in libsystem_kernel.dylib) + 8,4  [0x18f30baf8,0x18f30baf4]
+    + !   9 thread_v2_main  (in redis_idiomatic_profile) + 276  [0x1008ce0a8]  sched_v2.c:2083
+    + !   : 3 sched_v2_wake  (in redis_idiomatic_profile) + 228  [0x1008cd438]  sched_v2.c:65
+    + !   : | 2 _os_unfair_lock_lock_slow  (in libsystem_platform.dylib) + 172  [0x18f3553c0]
+    + !   : | + 2 __ulock_wait2  (in libsystem_kernel.dylib) + 8  [0x18f317c98]
+    + !   : | 1 os_unfair_lock_lock  (in libsystem_platform.dylib) + 16  [0x18f354bf8]
+    + !   : 2 sched_v2_wake  (in redis_idiomatic_profile) + 536,1156  [0x1008cd56c,0x1008cd7d8]  sched_v2.c:1366
+    + !   : 2 sched_v2_wake  (in redis_idiomatic_profile) + 292  [0x1008cd478]  sched_v2.c:66
+    + !   : | 1 _os_unfair_lock_unlock_slow  (in libsystem_platform.dylib) + 56  [0x18f3554bc]
+    + !   : | + 1 __ulock_wake  (in libsystem_kernel.dylib) + 8  [0x18f30bbcc]
+    + !   : | 1 os_unfair_lock_unlock  (in libsystem_platform.dylib) + 12  [0x18f3548d0]
+    + !   : 1 sched_v2_wake  (in redis_idiomatic_profile) + 208  [0x1008cd424]  sched_v2.c:300
+    + !   : 1 sched_v2_wake  (in redis_idiomatic_profile) + 244  [0x1008cd448]  sched_v2.c:304
+    + !   1 sched_v2_wake  (in redis_idiomatic_profile) + 2440  [0x1008cdcdc]  sched_v2.c:1424
+    + 526 ???  (in <unknown binary>)  [0xffffdeaddeaddead]
+    +   526 _mco_main  (in redis_idiomatic_profile) + 24  [0x1008cf580]  minicoro.h:644
+    +     526 fiber_v2_entry  (in redis_idiomatic_profile) + 132  [0x1008cdf7c]  sched_v2.c:1007
+    +       338 __cc_par_onto_2  (in redis_idiomatic_profile) + 496  [0x1008ba1a8]  redis_idiomatic.ccs:1133
+    +       : 166 run_pipeline_window  (in redis_idiomatic_profile) + 1996  [0x1008b2e68]  redis_idiomatic.ccs:996
+    +       : | 141 execute  (in redis_idiomatic_profile) + 1752  [0x1008b1b94]  redis_idiomatic.ccs:884
+    +       : | + 84 exec  (in redis_idiomatic_profile) + 1648  [0x1008acde8]  redis_idiomatic.ccs:572
+    +       : | + ! 72 db_lookup_live  (in redis_idiomatic_profile) + 240  [0x1008adba4]  redis_db.cch:467
+    +       : | + ! : 71 ArrayMap_CCSlicePacked_RedisEntry_find_dense_h  (in redis_idiomatic_profile) + 396,176,...  [0x1008b5d0c,0x1008b5c30,...]  redis_idiomatic.ccs:58
+    +       : | + ! : 1 db_lookup_live  (in redis_idiomatic_profile) + 240  [0x1008adba4]  redis_db.cch:467
+    +       : | + ! 11 exec  (in redis_idiomatic_profile) + 1648  [0x1008acde8]  redis_idiomatic.ccs:572
+    +       : | + ! : 11 db_lookup_live  (in redis_idiomatic_profile) + 84,100,...  [0x1008adb08,0x1008adb18,...]  redis_db.cch:464
+    +       : | + ! 1 db_lookup_live  (in redis_idiomatic_profile) + 4  [0x1008adab8]  redis_db.cch:462
+    +       : | + 55 enc_redis_value  (in redis_idiomatic_profile) + 368  [0x1008addc8]  redis_idiomatic.ccs:0
+    +       : | + ! 11 redis_conn_bulk  (in redis_idiomatic_profile) + 924  [0x1008b0510]  redis_idiomatic.ccs:482
+    +       : | + ! : 6 redis_conn_write  (in redis_idiomatic_profile) + 156,40,...  [0x1008b5af4,0x1008b5a80,...]  redis_idiomatic.ccs:449
+    +       : | + ! : 3 redis_conn_write  (in redis_idiomatic_profile) + 212  [0x1008b5b2c]  redis_idiomatic.ccs:449
+    +       : | + ! : | 2 cc__string_push_buffer_grow  (in redis_idiomatic_profile) + 100  [0x1008c595c]  string.c:52
+    +       : | + ! : | + 2 cc_string_reserve  (in redis_idiomatic_profile) + 436  [0x1008c57f0]  string.h:438
+    +       : | + ! : | +   2 cc__arena_owner_new_impl  (in redis_idiomatic_profile) + 604  [0x1008cfb20]  cc_arena.h:2585
+    +       : | + ! : | +     1 cc_slice_gen_birth  (in redis_idiomatic_profile) + 4  [0x1008c59fc]  slice_gen.c:86
+    +       : | + ! : | +     1 cc_slice_gen_birth  (in redis_idiomatic_profile) + 44  [0x1008c5a24]  slice_gen.c:96
+    +       : | + ! : | +       1 _tlv_get_addr  (in libdyld.dylib) + 0  [0x18ef58388]
+    +       : | + ! : | 1 cc__string_push_buffer_grow  (in redis_idiomatic_profile) + 0  [0x1008c58f8]  string.c:49
+    +       : | + ! : 1 cc__string_push_buffer_grow  (in redis_idiomatic_profile) + 164  [0x1008c599c]  string.c:0
+    +       : | + ! : 1 redis_conn_write  (in redis_idiomatic_profile) + 108  [0x1008b5ac4]  redis_idiomatic.ccs:449
+    +       : | + ! :   1 _platform_memmove  (in libsystem_platform.dylib) + 460  [0x18f35752c]
+    +       : | + ! 9 redis_conn_bulk  (in redis_idiomatic_profile) + 128,192,...  [0x1008b01f4,0x1008b0234,...]  redis_idiomatic.ccs:478
+    +       : | + ! 9 redis_conn_bulk  (in redis_idiomatic_profile) + 688  [0x1008b0424]  redis_idiomatic.ccs:481
+    +       : | + ! : 8 cc__string_push_buffer_grow  (in redis_idiomatic_profile) + 100  [0x1008c595c]  string.c:52
+    +       : | + ! : | 5 cc_string_reserve  (in redis_idiomatic_profile) + 612  [0x1008c58a0]  string.h:446
+    +       : | + ! : | + 3 cc_arena_owner_regrow  (in redis_idiomatic_profile) + 124  [0x1008cfca4]  cc_arena.h:2612
+    +       : | + ! : | + ! 2 cc_arena_realloc_host  (in redis_idiomatic_profile) + 1476,1484  [0x1008bb158,0x1008bb160]  cc_arena.h:1614
+    +       : | + ! : | + ! 1 cc_arena_realloc_host  (in redis_idiomatic_profile) + 1524  [0x1008bb188]  cc_arena.h:1616
+    +       : | + ! : | + !   1 cc__slab_regrow_tip  (in redis_idiomatic_profile) + 64  [0x1008bb8e8]  cc_arena.h:681
+    +       : | + ! : | + 1 cc_arena_owner_regrow  (in redis_idiomatic_profile) + 128  [0x1008cfca8]  cc_arena.h:2617
+    +       : | + ! : | + 1 cc_arena_owner_regrow  (in redis_idiomatic_profile) + 572  [0x1008cfe64]  cc_arena.h:2625
+    +       : | + ! : | 1 cc_string_reserve  (in redis_idiomatic_profile) + 228  [0x1008c5720]  string.h:356
+    +       : | + ! : | 1 cc_string_reserve  (in redis_idiomatic_profile) + 336  [0x1008c578c]  string.h:426
+    +       : | + ! : | 1 cc_string_reserve  (in redis_idiomatic_profile) + 348  [0x1008c5798]  string.h:429
+    +       : | + ! : 1 cc__string_push_buffer_grow  (in redis_idiomatic_profile) + 136  [0x1008c5980]  string.c:55
+    +       : | + ! :   1 DYLD-STUB$$memcpy  (in redis_idiomatic_profile) + 4  [0x1008d240c]
+    +       : | + ! 7 redis_conn_bulk  (in redis_idiomatic_profile) + 884,400,...  [0x1008b04e8,0x1008b0304,...]  redis_idiomatic.ccs:482
+    +       : | + ! 6 redis_conn_bulk  (in redis_idiomatic_profile) + 684,288,...  [0x1008b0420,0x1008b0294,...]  redis_idiomatic.ccs:481
+    +       : | + ! 5 redis_conn_bulk  (in redis_idiomatic_profile) + 368  [0x1008b02e4]  redis_idiomatic.ccs:481
+    +       : | + ! : 3 DYLD-STUB$$memcpy  (in redis_idiomatic_profile) + 0,4  [0x1008d2408,0x1008d240c]
+    +       : | + ! : 2 _platform_memmove  (in libsystem_platform.dylib) + 436,444  [0x18f357514,0x18f35751c]
+    +       : | + ! 5 redis_conn_bulk  (in redis_idiomatic_profile) + 788  [0x1008b0488]  redis_idiomatic.ccs:482
+    +       : | + ! : 4 _platform_memmove  (in libsystem_platform.dylib) + 12,428,...  [0x18f35736c,0x18f35750c,...]
+    +       : | + ! : 1 DYLD-STUB$$memcpy  (in redis_idiomatic_profile) + 8  [0x1008d2410]
+    +       : | + ! 1 redis_conn_bulk  (in redis_idiomatic_profile) + 328  [0x1008b02bc]  redis_idiomatic.ccs:481
+    +       : | + ! : 1 cc_string_reserve  (in redis_idiomatic_profile) + 36  [0x1008b7a98]  string.h:463
+    +       : | + ! 1 redis_conn_bulk  (in redis_idiomatic_profile) + 536  [0x1008b038c]  redis_idiomatic.ccs:481
+    +       : | + ! : 1 cc_string_as_slice  (in redis_idiomatic_profile) + 16  [0x1008c55d0]  string.h:371
+    +       : | + ! 1 redis_conn_bulk  (in redis_idiomatic_profile) + 620  [0x1008b03e0]  redis_idiomatic.ccs:481
+    +       : | + !   1 _platform_memmove  (in libsystem_platform.dylib) + 444  [0x18f35751c]
+    +       : | + 1 enc_redis_value  (in redis_idiomatic_profile) + 368  [0x1008addc8]  redis_idiomatic.ccs:0
+    +       : | + 1 exec  (in redis_idiomatic_profile) + 24  [0x1008ac790]  redis_idiomatic.ccs:560
+    +       : | 7 execute  (in redis_idiomatic_profile) + 1776  [0x1008b1bac]  redis_idiomatic.ccs:880
+    +       : | + 7 cc_exclusive_unlock_contended  (in redis_idiomatic_profile) + 364  [0x1008caa6c]  sched_v2.c:1676
+    +       : | +   5 sched_v2_wake  (in redis_idiomatic_profile) + 2392  [0x1008cdcac]  wake_primitive.h:147
+    +       : | +   ! 5 __ulock_wake  (in libsystem_kernel.dylib) + 8,4  [0x18f30bbcc,0x18f30bbc8]
+    +       : | +   1 sched_v2_signal_ex  (in redis_idiomatic_profile) + 116  [0x1008c19fc]  sched_v2.c:1655
+    +       : | +   ! 1 _os_unfair_lock_lock_slow  (in libsystem_platform.dylib) + 172  [0x18f3553c0]
+    +       : | +   !   1 __ulock_wait2  (in libsystem_kernel.dylib) + 8  [0x18f317c98]
+    +       : | +   1 sched_v2_signal_ex  (in redis_idiomatic_profile) + 132  [0x1008c1a0c]  sched_v2.c:1655
+    +       : | 7 execute  (in redis_idiomatic_profile) + 924,1768,...  [0x1008b1858,0x1008b1ba4,...]  redis_idiomatic.ccs:880
+    +       : | 3 execute  (in redis_idiomatic_profile) + 92,108,...  [0x1008b1518,0x1008b1528,...]  redis_idiomatic.ccs:835
+    +       : | 3 execute  (in redis_idiomatic_profile) + 1044  [0x1008b18d0]  redis_idiomatic.ccs:880
+    +       : | + 1 cc_exclusive_mutex_host  (in redis_idiomatic_profile) + 124  [0x1008cb520]  exclusive.c:354
+    +       : | + 1 cc_exclusive_mutex_host  (in redis_idiomatic_profile) + 152  [0x1008cb53c]  exclusive.c:357
+    +       : | + 1 cc_exclusive_mutex_host  (in redis_idiomatic_profile) + 28  [0x1008cb4c0]  exclusive.c:990
+    +       : | 2 execute  (in redis_idiomatic_profile) + 1080  [0x1008b18f4]  redis_idiomatic.ccs:880
+    +       : | + 1 cc_exclusive_lock_entry_slow  (in redis_idiomatic_profile) + 804  [0x1008ca5f8]  exclusive.c:542
+    +       : | + ! 1 cc__fiber_park_reason  (in redis_idiomatic_profile) + 80  [0x1008c3c0c]  fiber_sched.c:1145
+    +       : | + 1 cc_exclusive_lock_entry_slow  (in redis_idiomatic_profile) + 1476  [0x1008ca898]  exclusive.c:557
+    +       : | 1 cc_exclusive_mutex_host  (in redis_idiomatic_profile) + 840  [0x1008cb7ec]  exclusive.c:997
+    +       : | 1 execute  (in redis_idiomatic_profile) + 52  [0x1008b14f0]  redis_idiomatic.ccs:834
+    +       : | 1 execute  (in redis_idiomatic_profile) + 828  [0x1008b17f8]  redis_idiomatic.ccs:879
+    +       : 144 run_pipeline_window  (in redis_idiomatic_profile) + 2252  [0x1008b2f68]  redis_idiomatic.ccs:1012
+    +       : | 141 redis_conn_flush  (in redis_idiomatic_profile) + 120  [0x1008b33a8]  redis_idiomatic.ccs:444
+    +       : | + 141 cc_socket_write_deadline  (in redis_idiomatic_profile) + 388  [0x1008c9c24]  net.c:610
+    +       : | +   141 __sendto  (in libsystem_kernel.dylib) + 8  [0x18f30e390]
+    +       : | 2 redis_conn_flush  (in redis_idiomatic_profile) + 84  [0x1008b3384]  redis_idiomatic.ccs:444
+    +       : | + 2 cc_deadline_after_ms  (in redis_idiomatic_profile) + 40  [0x1008c3fc0]  scheduler.c:336
+    +       : | +   2 clock_gettime  (in libsystem_c.dylib) + 256  [0x18f1eae24]
+    +       : | +     2 gettimeofday  (in libsystem_c.dylib) + 56  [0x18f1e2dc0]
+    +       : | +       2 __commpage_gettimeofday_internal  (in libsystem_kernel.dylib) + 44  [0x18f30bc24]
+    +       : | +         2 mach_absolute_time  (in libsystem_kernel.dylib) + 108  [0x18f30a10c]
+    +       : | 1 redis_conn_flush  (in redis_idiomatic_profile) + 252  [0x1008b342c]  redis_idiomatic.ccs:441
+    +       : |   1 cc_arena_reset  (in redis_idiomatic_profile) + 268  [0x1008bc770]  cc_arena.h:962
+    +       : 18 run_pipeline_window  (in redis_idiomatic_profile) + 1464,1692,...  [0x1008b2c54,0x1008b2d38,...]  redis_idiomatic.ccs:993
+    +       : 3 run_pipeline_window  (in redis_idiomatic_profile) + 256,260,...  [0x1008b279c,0x1008b27a0,...]  redis_idiomatic.ccs:992
+    +       : 2 run_pipeline_window  (in redis_idiomatic_profile) + 2028  [0x1008b2e88]  redis_idiomatic.ccs:989
+    +       : | 1 cc_arena_free  (in redis_idiomatic_profile) + 284  [0x1008bc298]  cc_arena.h:2706
+    +       : | 1 cc_arena_free  (in redis_idiomatic_profile) + 412  [0x1008bc318]  cc_arena.h:523
+    +       : 1 cc__arena_alloc_here_epoch  (in redis_idiomatic_profile) + 1120  [0x1008b86e0]  cc_arena.h:1433
+    +       : 1 execute  (in redis_idiomatic_profile) + 520  [0x1008b16c4]  redis_idiomatic.ccs:925
+    +       : 1 run_pipeline_window  (in redis_idiomatic_profile) + 2012  [0x1008b2e78]  redis_idiomatic.ccs:0
+    +       : 1 run_pipeline_window  (in redis_idiomatic_profile) + 1420  [0x1008b2c28]  redis_idiomatic.ccs:993
+    +       : | 1 cc__arena_alloc_here_epoch  (in redis_idiomatic_profile) + 72  [0x1008b82c8]  cc_arena.h:1373
+    +       : 1 run_pipeline_window  (in redis_idiomatic_profile) + 1996  [0x1008b2e68]  redis_idiomatic.ccs:997
+    +       178 __cc_par_onto_2  (in redis_idiomatic_profile) + 644  [0x1008ba23c]  redis_idiomatic.ccs:1133
+    +       : 167 cc_socket_read_into_deadline  (in redis_idiomatic_profile) + 388  [0x1008c9468]  net.c:498
+    +       : | 167 read  (in libsystem_kernel.dylib) + 8,4  [0x18f30a91c,0x18f30a918]
+    +       : 11 cc_socket_read_into_deadline  (in redis_idiomatic_profile) + 684  [0x1008c9590]  net.c:513
+    +       :   9 cc__io_watcher_wait_deadline  (in redis_idiomatic_profile) + 896  [0x1008c707c]  io_wait.c:1171
+    +       :   + 8 cc__io_wait_suspend_ready  (in redis_idiomatic_profile) + 160  [0x1008c6828]  io_wait.c:1086
+    +       :   + ! 3 cc__fiber_suspend_until_ready_or_cancel_until  (in redis_idiomatic_profile) + 424  [0x1008c3930]  fiber_sched.c:1094
+    +       :   + ! : 3 clock_gettime  (in libsystem_c.dylib) + 256  [0x18f1eae24]
+    +       :   + ! :   3 gettimeofday  (in libsystem_c.dylib) + 56  [0x18f1e2dc0]
+    +       :   + ! :     2 __commpage_gettimeofday_internal  (in libsystem_kernel.dylib) + 44  [0x18f30bc24]
+    +       :   + ! :     | 2 mach_absolute_time  (in libsystem_kernel.dylib) + 108  [0x18f30a10c]
+    +       :   + ! :     1 DYLD-STUB$$__commpage_gettimeofday  (in libsystem_c.dylib) + 12  [0x18f254f88]
+    +       :   + ! 3 cc__fiber_suspend_until_ready_or_cancel_until  (in redis_idiomatic_profile) + 508  [0x1008c3984]  fiber_sched.c:1122
+    +       :   + ! : 3 sched_v2_park  (in redis_idiomatic_profile) + 292  [0x1008c1c9c]  sched_v2.c:1766
+    +       :   + ! 1 cc__fiber_suspend_until_ready_or_cancel_until  (in redis_idiomatic_profile) + 180  [0x1008c383c]  minicoro.h:2009
+    +       :   + ! : 1 _mco_running  (in redis_idiomatic_profile) + 24  [0x1008c35cc]  minicoro.h:2000
+    +       :   + ! :   1 _tlv_get_addr  (in libdyld.dylib) + 0  [0x18ef58388]
+    +       :   + ! 1 cc__fiber_suspend_until_ready_or_cancel_until  (in redis_idiomatic_profile) + 508  [0x1008c3984]  sched_v2.c:1844
+    +       :   + 1 cc__fiber_suspend_until_ready_or_cancel_until  (in redis_idiomatic_profile) + 656  [0x1008c3a18]  fiber_sched.c:1128
+    +       :   1 cc__io_watcher_wait_deadline  (in redis_idiomatic_profile) + 492  [0x1008c6ee8]  io_wait.c:1124
+    +       :   + 1 cc__io_wait_kqueue_bind_cached_slot  (in redis_idiomatic_profile) + 344  [0x1008c7630]  io_wait.c:438
+    +       :   1 cc__io_watcher_wait_deadline  (in redis_idiomatic_profile) + 896  [0x1008c707c]  io_wait.c:1171
+    +       9 __cc_par_onto_2  (in redis_idiomatic_profile) + 612  [0x1008ba21c]  redis_idiomatic.ccs:1133
+    +       : 9 cc_deadline_after_ms  (in redis_idiomatic_profile) + 40  [0x1008c3fc0]  scheduler.c:336
+    +       :   8 clock_gettime  (in libsystem_c.dylib) + 256  [0x18f1eae24]
+    +       :   | 8 gettimeofday  (in libsystem_c.dylib) + 56  [0x18f1e2dc0]
+    +       :   |   8 __commpage_gettimeofday_internal  (in libsystem_kernel.dylib) + 44  [0x18f30bc24]
+    +       :   |     8 mach_absolute_time  (in libsystem_kernel.dylib) + 108  [0x18f30a10c]
+    +       :   1 DYLD-STUB$$clock_gettime  (in redis_idiomatic_profile) + 4  [0x1008d2328]
+    +       1 __cc_par_onto_2  (in redis_idiomatic_profile) + 644  [0x1008ba23c]  redis_idiomatic.ccs:1133
+    6758 Thread_1166425
+    + 6402 thread_start  (in libsystem_pthread.dylib) + 8  [0x18f348c1c]
+    + ! 6402 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18f34dc58]
+    + !   6393 thread_v2_main  (in redis_idiomatic_profile) + 524  [0x1008ce1a0]  sched_v2.c:2138
+    + !   : 6393 __ulock_wait  (in libsystem_kernel.dylib) + 8,4  [0x18f30baf8,0x18f30baf4]
+    + !   7 thread_v2_main  (in redis_idiomatic_profile) + 276  [0x1008ce0a8]  sched_v2.c:2083
+    + !   : 3 sched_v2_wake  (in redis_idiomatic_profile) + 228  [0x1008cd438]  sched_v2.c:65
+    + !   : | 3 _os_unfair_lock_lock_slow  (in libsystem_platform.dylib) + 172  [0x18f3553c0]
+    + !   : |   3 __ulock_wait2  (in libsystem_kernel.dylib) + 8  [0x18f317c98]
+    + !   : 1 sched_v2_wake  (in redis_idiomatic_profile) + 1980  [0x1008cdb10]  sched_v2.c:1297
+    + !   : | 1 sched_v2_wake  (in redis_idiomatic_profile) + 2392  [0x1008cdcac]  wake_primitive.h:147
+    + !   : |   1 __ulock_wake  (in libsystem_kernel.dylib) + 8  [0x18f30bbcc]
+    + !   : 1 sched_v2_wake  (in redis_idiomatic_profile) + 312  [0x1008cd48c]  sched_v2.c:1356
+    + !   : 1 sched_v2_wake  (in redis_idiomatic_profile) + 1132  [0x1008cd7c0]  sched_v2.c:1366
+    + !   : 1 sched_v2_wake  (in redis_idiomatic_profile) + 292  [0x1008cd478]  sched_v2.c:66
+    + !   :   1 os_unfair_lock_unlock  (in libsystem_platform.dylib) + 12  [0x18f3548d0]
+    + !   1 sched_v2_wake  (in redis_idiomatic_profile) + 2440  [0x1008cdcdc]  sched_v2.c:1424
+    + !   1 thread_v2_main  (in redis_idiomatic_profile) + 504  [0x1008ce18c]  sched_v2.c:2138
+    + 356 ???  (in <unknown binary>)  [0xffffdeaddeaddead]
+    +   356 _mco_main  (in redis_idiomatic_profile) + 24  [0x1008cf580]  minicoro.h:644
+    +     356 fiber_v2_entry  (in redis_idiomatic_profile) + 132  [0x1008cdf7c]  sched_v2.c:1007
+    +       244 __cc_par_onto_2  (in redis_idiomatic_profile) + 496  [0x1008ba1a8]  redis_idiomatic.ccs:1133
+    +       : 113 run_pipeline_window  (in redis_idiomatic_profile) + 1996  [0x1008b2e68]  redis_idiomatic.ccs:996
+    +       : | 90 execute  (in redis_idiomatic_profile) + 1752  [0x1008b1b94]  redis_idiomatic.ccs:884
+    +       : | + 60 exec  (in redis_idiomatic_profile) + 1648  [0x1008acde8]  redis_idiomatic.ccs:572
+    +       : | + ! 51 db_lookup_live  (in redis_idiomatic_profile) + 240  [0x1008adba4]  redis_db.cch:467
+    +       : | + ! : 50 ArrayMap_CCSlicePacked_RedisEntry_find_dense_h  (in redis_idiomatic_profile) + 396,176,...  [0x1008b5d0c,0x1008b5c30,...]  redis_idiomatic.ccs:58
+    +       : | + ! : 1 db_lookup_live  (in redis_idiomatic_profile) + 264  [0x1008adbbc]  redis_db.cch:469
+    +       : | + ! 9 exec  (in redis_idiomatic_profile) + 1648  [0x1008acde8]  redis_idiomatic.ccs:572
+    +       : | + !   7 db_lookup_live  (in redis_idiomatic_profile) + 84,104  [0x1008adb08,0x1008adb1c]  redis_db.cch:464
+    +       : | + !   2 db_lookup_live  (in redis_idiomatic_profile) + 64,68  [0x1008adaf4,0x1008adaf8]  redis_db.cch:463
+    +       : | + 28 enc_redis_value  (in redis_idiomatic_profile) + 368  [0x1008addc8]  redis_idiomatic.ccs:0
+    +       : | + ! 8 redis_conn_bulk  (in redis_idiomatic_profile) + 128,136  [0x1008b01f4,0x1008b01fc]  redis_idiomatic.ccs:478
+    +       : | + ! 5 redis_conn_bulk  (in redis_idiomatic_profile) + 276,328,...  [0x1008b0288,0x1008b02bc,...]  redis_idiomatic.ccs:481
+    +       : | + ! 4 redis_conn_bulk  (in redis_idiomatic_profile) + 400,416,...  [0x1008b0304,0x1008b0314,...]  redis_idiomatic.ccs:482
+    +       : | + ! 3 redis_conn_bulk  (in redis_idiomatic_profile) + 536  [0x1008b038c]  redis_idiomatic.ccs:481
+    +       : | + ! : 2 cc_string_as_slice  (in redis_idiomatic_profile) + 0,4  [0x1008c55c0,0x1008c55c4]  string.c:85
+    +       : | + ! : 1 cc_string_as_slice  (in redis_idiomatic_profile) + 16  [0x1008c55d0]  string.h:371
+    +       : | + ! 3 redis_conn_bulk  (in redis_idiomatic_profile) + 688  [0x1008b0424]  redis_idiomatic.ccs:481
+    +       : | + ! : 3 cc__string_push_buffer_grow  (in redis_idiomatic_profile) + 100  [0x1008c595c]  string.c:52
+    +       : | + ! :   3 cc_string_reserve  (in redis_idiomatic_profile) + 612  [0x1008c58a0]  string.h:446
+    +       : | + ! :     2 cc_arena_owner_regrow  (in redis_idiomatic_profile) + 124  [0x1008cfca4]  cc_arena.h:2612
+    +       : | + ! :     | 1 cc_arena_realloc_host  (in redis_idiomatic_profile) + 1544  [0x1008bb19c]  cc_arena.h:0
+    +       : | + ! :     | 1 cc_arena_realloc_host  (in redis_idiomatic_profile) + 24  [0x1008babac]  cc_arena.h:1558
+    +       : | + ! :     1 cc_arena_realloc_host  (in redis_idiomatic_profile) + 72  [0x1008babdc]  cc_arena.h:1574
+    +       : | + ! 2 redis_conn_bulk  (in redis_idiomatic_profile) + 924  [0x1008b0510]  redis_idiomatic.ccs:482
+    +       : | + ! : 1 redis_conn_write  (in redis_idiomatic_profile) + 212  [0x1008b5b2c]  redis_idiomatic.ccs:449
+    +       : | + ! : | 1 cc__string_push_buffer_grow  (in redis_idiomatic_profile) + 100  [0x1008c595c]  string.c:52
+    +       : | + ! : |   1 cc_string_reserve  (in redis_idiomatic_profile) + 436  [0x1008c57f0]  string.h:438
+    +       : | + ! : |     1 cc__arena_owner_new_impl  (in redis_idiomatic_profile) + 68  [0x1008cf908]  cc_arena.h:2563
+    +       : | + ! : 1 redis_conn_write  (in redis_idiomatic_profile) + 44  [0x1008b5a84]  redis_idiomatic.ccs:449
+    +       : | + ! 1 cc__string_push_buffer_grow  (in redis_idiomatic_profile) + 160  [0x1008c5998]  string.c:0
+    +       : | + ! 1 redis_conn_bulk  (in redis_idiomatic_profile) + 368  [0x1008b02e4]  redis_idiomatic.ccs:481
+    +       : | + ! : 1 _platform_memmove  (in libsystem_platform.dylib) + 436  [0x18f357514]
+    +       : | + ! 1 redis_conn_bulk  (in redis_idiomatic_profile) + 788  [0x1008b0488]  redis_idiomatic.ccs:482
+    +       : | + !   1 _platform_memmove  (in libsystem_platform.dylib) + 0  [0x18f357360]
+    +       : | + 1 exec  (in redis_idiomatic_profile) + 0  [0x1008ac778]  redis_idiomatic.ccs:560
+    +       : | + 1 exec  (in redis_idiomatic_profile) + 68  [0x1008ac7bc]  redis_idiomatic.ccs:565
+    +       : | 7 execute  (in redis_idiomatic_profile) + 1776  [0x1008b1bac]  redis_idiomatic.ccs:880
+    +       : | + 6 cc_exclusive_unlock_contended  (in redis_idiomatic_profile) + 364  [0x1008caa6c]  sched_v2.c:1676
+    +       : | + ! 4 sched_v2_wake  (in redis_idiomatic_profile) + 2392  [0x1008cdcac]  wake_primitive.h:147
+    +       : | + ! : 4 __ulock_wake  (in libsystem_kernel.dylib) + 8  [0x18f30bbcc]
+    +       : | + ! 1 sched_v2_signal_ex  (in redis_idiomatic_profile) + 116  [0x1008c19fc]  sched_v2.c:1655
+    +       : | + ! : 1 _os_unfair_lock_lock_slow  (in libsystem_platform.dylib) + 172  [0x18f3553c0]
+    +       : | + ! :   1 __ulock_wait2  (in libsystem_kernel.dylib) + 8  [0x18f317c98]
+    +       : | + ! 1 sched_v2_signal_ex  (in redis_idiomatic_profile) + 232  [0x1008c1a70]  sched_v2.c:1655
+    +       : | + !   1 _os_unfair_lock_unlock_slow  (in libsystem_platform.dylib) + 56  [0x18f3554bc]
+    +       : | + !     1 __ulock_wake  (in libsystem_kernel.dylib) + 8  [0x18f30bbcc]
+    +       : | + 1 cc_exclusive_unlock_contended  (in redis_idiomatic_profile) + 180  [0x1008ca9b4]  minicoro.h:2009
+    +       : | +   1 _mco_running  (in redis_idiomatic_profile) + 24  [0x1008c35cc]  minicoro.h:2000
+    +       : | +     1 _tlv_get_addr  (in libdyld.dylib) + 20  [0x18ef5839c]
+    +       : | 7 execute  (in redis_idiomatic_profile) + 912,924,...  [0x1008b184c,0x1008b1858,...]  redis_idiomatic.ccs:880
+    +       : | 4 execute  (in redis_idiomatic_profile) + 1080  [0x1008b18f4]  redis_idiomatic.ccs:880
+    +       : | + 2 cc_exclusive_lock_entry_slow  (in redis_idiomatic_profile) + 804  [0x1008ca5f8]  exclusive.c:542
+    +       : | + ! 2 cc__fiber_park_reason  (in redis_idiomatic_profile) + 80  [0x1008c3c0c]  fiber_sched.c:1144
+    +       : | + !   2 sched_v2_park  (in redis_idiomatic_profile) + 292  [0x1008c1c9c]  sched_v2.c:1766
+    +       : | + 1 cc_exclusive_lock_entry_slow  (in redis_idiomatic_profile) + 72  [0x1008ca31c]  exclusive.c:456
+    +       : | + 1 cc_exclusive_lock_entry_slow  (in redis_idiomatic_profile) + 804  [0x1008ca5f8]  exclusive.c:542
+    +       : | 1 cc_exclusive_mutex_host  (in redis_idiomatic_profile) + 840  [0x1008cb7ec]  exclusive.c:997
+    +       : | 1 execute  (in redis_idiomatic_profile) + 20  [0x1008b14d0]  redis_idiomatic.ccs:830
+    +       : | 1 execute  (in redis_idiomatic_profile) + 52  [0x1008b14f0]  redis_idiomatic.ccs:834
+    +       : | 1 execute  (in redis_idiomatic_profile) + 264  [0x1008b15c4]  redis_idiomatic.ccs:835
+    +       : | 1 execute  (in redis_idiomatic_profile) + 1044  [0x1008b18d0]  redis_idiomatic.ccs:880
+    +       : |   1 cc_exclusive_mutex_host  (in redis_idiomatic_profile) + 144  [0x1008cb534]  exclusive.c:357
+    +       : 112 run_pipeline_window  (in redis_idiomatic_profile) + 2252  [0x1008b2f68]  redis_idiomatic.ccs:1012
+    +       : | 109 redis_conn_flush  (in redis_idiomatic_profile) + 120  [0x1008b33a8]  redis_idiomatic.ccs:444
+    +       : | + 109 cc_socket_write_deadline  (in redis_idiomatic_profile) + 388  [0x1008c9c24]  net.c:610
+    +       : | +   109 __sendto  (in libsystem_kernel.dylib) + 8  [0x18f30e390]
+    +       : | 2 redis_conn_flush  (in redis_idiomatic_profile) + 120,136  [0x1008b33a8,0x1008b33b8]  redis_idiomatic.ccs:444
+    +       : | 1 redis_conn_flush  (in redis_idiomatic_profile) + 84  [0x1008b3384]  redis_idiomatic.ccs:444
+    +       : |   1 cc_deadline_after_ms  (in redis_idiomatic_profile) + 40  [0x1008c3fc0]  scheduler.c:336
+    +       : |     1 clock_gettime  (in libsystem_c.dylib) + 416  [0x18f1eaec4]
+    +       : 11 run_pipeline_window  (in redis_idiomatic_profile) + 1500,1692,...  [0x1008b2c78,0x1008b2d38,...]  redis_idiomatic.ccs:993
+    +       : 4 run_pipeline_window  (in redis_idiomatic_profile) + 256,260  [0x1008b279c,0x1008b27a0]  redis_idiomatic.ccs:992
+    +       : 2 run_pipeline_window  (in redis_idiomatic_profile) + 2028  [0x1008b2e88]  redis_idiomatic.ccs:989
+    +       : | 1 cc_arena_free  (in redis_idiomatic_profile) + 56  [0x1008bc1b4]  cc_arena.h:523
+    +       : | 1 cc_arena_free  (in redis_idiomatic_profile) + 476  [0x1008bc358]  cc_arena.h:556
+    +       : 1 cc__arena_alloc_here_epoch  (in redis_idiomatic_profile) + 1132  [0x1008b86ec]  cc_arena.h:1433
+    +       : 1 run_pipeline_window  (in redis_idiomatic_profile) + 2240  [0x1008b2f5c]  redis_idiomatic.ccs:1012
+    +       109 __cc_par_onto_2  (in redis_idiomatic_profile) + 644  [0x1008ba23c]  redis_idiomatic.ccs:1133
+    +       : 104 cc_socket_read_into_deadline  (in redis_idiomatic_profile) + 388  [0x1008c9468]  net.c:498
+    +       : | 103 read  (in libsystem_kernel.dylib) + 8  [0x18f30a91c]
+    +       : | 1 DYLD-STUB$$read  (in redis_idiomatic_profile) + 4  [0x1008d2520]
+    +       : 4 cc_socket_read_into_deadline  (in redis_idiomatic_profile) + 684  [0x1008c9590]  net.c:513
+    +       : | 3 cc__io_watcher_wait_deadline  (in redis_idiomatic_profile) + 896  [0x1008c707c]  io_wait.c:1171
+    +       : | + 3 cc__io_wait_suspend_ready  (in redis_idiomatic_profile) + 160  [0x1008c6828]  io_wait.c:1086
+    +       : | +   1 cc__fiber_suspend_until_ready_or_cancel_until  (in redis_idiomatic_profile) + 508  [0x1008c3984]  fiber_sched.c:1122
+    +       : | +   ! 1 sched_v2_park  (in redis_idiomatic_profile) + 292  [0x1008c1c9c]  sched_v2.c:1766
+    +       : | +   1 cc__fiber_suspend_until_ready_or_cancel_until  (in redis_idiomatic_profile) + 180  [0x1008c383c]  minicoro.h:2009
+    +       : | +   ! 1 _mco_running  (in redis_idiomatic_profile) + 0  [0x1008c35b4]  minicoro.h:1999
+    +       : | +   1 cc__fiber_suspend_until_ready_or_cancel_until  (in redis_idiomatic_profile) + 508  [0x1008c3984]  sched_v2.c:1844
+    +       : | 1 cc__io_watcher_wait_deadline  (in redis_idiomatic_profile) + 804  [0x1008c7020]  io_wait.c:1163
+    +       : 1 cc_socket_read_into_deadline  (in redis_idiomatic_profile) + 632  [0x1008c955c]  net.c:43
+    +       2 __cc_par_onto_2  (in redis_idiomatic_profile) + 612  [0x1008ba21c]  redis_idiomatic.ccs:1133
+    +       : 2 cc_deadline_after_ms  (in redis_idiomatic_profile) + 40  [0x1008c3fc0]  scheduler.c:336
+    +       :   2 clock_gettime  (in libsystem_c.dylib) + 256  [0x18f1eae24]
+    +       :     2 gettimeofday  (in libsystem_c.dylib) + 56  [0x18f1e2dc0]
+    +       :       2 __commpage_gettimeofday_internal  (in libsystem_kernel.dylib) + 44  [0x18f30bc24]
+    +       :         2 mach_absolute_time  (in libsystem_kernel.dylib) + 108  [0x18f30a10c]
+    +       1 __cc_par_onto_2  (in redis_idiomatic_profile) + 644  [0x1008ba23c]  redis_idiomatic.ccs:1133
+    6700 Thread_1166426
+      6414 thread_start  (in libsystem_pthread.dylib) + 8  [0x18f348c1c]
+      ! 6414 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18f34dc58]
+      !   6406 thread_v2_main  (in redis_idiomatic_profile) + 524  [0x1008ce1a0]  sched_v2.c:2138
+      !   : 6406 __ulock_wait  (in libsystem_kernel.dylib) + 8,4  [0x18f30baf8,0x18f30baf4]
+      !   8 thread_v2_main  (in redis_idiomatic_profile) + 276  [0x1008ce0a8]  sched_v2.c:2083
+      !     3 sched_v2_wake  (in redis_idiomatic_profile) + 228  [0x1008cd438]  sched_v2.c:65
+      !     | 2 _os_unfair_lock_lock_slow  (in libsystem_platform.dylib) + 172  [0x18f3553c0]
+      !     | + 2 __ulock_wait2  (in libsystem_kernel.dylib) + 8  [0x18f317c98]
+      !     | 1 os_unfair_lock_lock  (in libsystem_platform.dylib) + 16  [0x18f354bf8]
+      !     2 sched_v2_wake  (in redis_idiomatic_profile) + 1184  [0x1008cd7f4]  sched_v2.c:1366
+      !     | 1 _mco_running  (in redis_idiomatic_profile) + 0  [0x1008c35b4]  minicoro.h:1999
+      !     | 1 _mco_running  (in redis_idiomatic_profile) + 28  [0x1008c35d0]  minicoro.h:2000
+      !     2 sched_v2_wake  (in redis_idiomatic_profile) + 520,576  [0x1008cd55c,0x1008cd594]  sched_v2.c:1366
+      !     1 sched_v2_wake  (in redis_idiomatic_profile) + 252  [0x1008cd450]  sched_v2.c:305
+      286 ???  (in <unknown binary>)  [0xffffdeaddeaddead]
+        286 _mco_main  (in redis_idiomatic_profile) + 24  [0x1008cf580]  minicoro.h:644
+          286 fiber_v2_entry  (in redis_idiomatic_profile) + 132  [0x1008cdf7c]  sched_v2.c:1007
+            186 __cc_par_onto_2  (in redis_idiomatic_profile) + 496  [0x1008ba1a8]  redis_idiomatic.ccs:1133
+            : 89 run_pipeline_window  (in redis_idiomatic_profile) + 1996  [0x1008b2e68]  redis_idiomatic.ccs:996
+            : | 72 execute  (in redis_idiomatic_profile) + 1752  [0x1008b1b94]  redis_idiomatic.ccs:884
+            : | + 45 exec  (in redis_idiomatic_profile) + 1648  [0x1008acde8]  redis_idiomatic.ccs:572
+            : | + ! 43 db_lookup_live  (in redis_idiomatic_profile) + 240  [0x1008adba4]  redis_db.cch:467
+            : | + ! : 43 ArrayMap_CCSlicePacked_RedisEntry_find_dense_h  (in redis_idiomatic_profile) + 396,176,...  [0x1008b5d0c,0x1008b5c30,...]  redis_idiomatic.ccs:58
+            : | + ! 2 exec  (in redis_idiomatic_profile) + 1648  [0x1008acde8]  redis_idiomatic.ccs:572
+            : | + !   2 db_lookup_live  (in redis_idiomatic_profile) + 84  [0x1008adb08]  redis_db.cch:464
+            : | + 26 enc_redis_value  (in redis_idiomatic_profile) + 368  [0x1008addc8]  redis_idiomatic.ccs:0
+            : | + ! 4 redis_conn_bulk  (in redis_idiomatic_profile) + 128  [0x1008b01f4]  redis_idiomatic.ccs:478
+            : | + ! 4 redis_conn_bulk  (in redis_idiomatic_profile) + 328  [0x1008b02bc]  redis_idiomatic.ccs:481
+            : | + ! : 3 cc_string_reserve  (in redis_idiomatic_profile) + 40,56  [0x1008b7a9c,0x1008b7aac]  string.h:409
+            : | + ! : 1 cc_string_reserve  (in redis_idiomatic_profile) + 0  [0x1008b7a74]  string.h:407
+            : | + ! 4 redis_conn_bulk  (in redis_idiomatic_profile) + 688  [0x1008b0424]  redis_idiomatic.ccs:481
+            : | + ! : 2 cc__string_push_buffer_grow  (in redis_idiomatic_profile) + 100  [0x1008c595c]  string.c:52
+            : | + ! : | 2 cc_string_reserve  (in redis_idiomatic_profile) + 612  [0x1008c58a0]  string.h:446
+            : | + ! : |   2 cc_arena_owner_regrow  (in redis_idiomatic_profile) + 124  [0x1008cfca4]  cc_arena.h:2612
+            : | + ! : |     1 cc_arena_realloc_host  (in redis_idiomatic_profile) + 1484  [0x1008bb160]  cc_arena.h:1614
+            : | + ! : |     1 cc_arena_realloc_host  (in redis_idiomatic_profile) + 1524  [0x1008bb188]  cc_arena.h:1616
+            : | + ! : |       1 cc__slab_regrow_tip  (in redis_idiomatic_profile) + 64  [0x1008bb8e8]  cc_arena.h:681
+            : | + ! : 2 cc__string_push_buffer_grow  (in redis_idiomatic_profile) + 136  [0x1008c5980]  string.c:55
+            : | + ! :   2 _platform_memmove  (in libsystem_platform.dylib) + 0,444  [0x18f357360,0x18f35751c]
+            : | + ! 4 redis_conn_bulk  (in redis_idiomatic_profile) + 924  [0x1008b0510]  redis_idiomatic.ccs:482
+            : | + ! : 2 redis_conn_write  (in redis_idiomatic_profile) + 40,144  [0x1008b5a80,0x1008b5ae8]  redis_idiomatic.ccs:449
+            : | + ! : 1 redis_conn_write  (in redis_idiomatic_profile) + 108  [0x1008b5ac4]  redis_idiomatic.ccs:449
+            : | + ! : | 1 _platform_memmove  (in libsystem_platform.dylib) + 0  [0x18f357360]
+            : | + ! : 1 redis_conn_write  (in redis_idiomatic_profile) + 212  [0x1008b5b2c]  redis_idiomatic.ccs:449
+            : | + ! :   1 cc__string_push_buffer_grow  (in redis_idiomatic_profile) + 100  [0x1008c595c]  string.c:52
+            : | + ! :     1 cc_string_reserve  (in redis_idiomatic_profile) + 420  [0x1008c57e0]  cc_mem.c:11
+            : | + ! :       1 _platform_memmove  (in libsystem_platform.dylib) + 436  [0x18f357514]
+            : | + ! 3 redis_conn_bulk  (in redis_idiomatic_profile) + 732,872,...  [0x1008b0450,0x1008b04dc,...]  redis_idiomatic.ccs:482
+            : | + ! 2 redis_conn_bulk  (in redis_idiomatic_profile) + 684,692  [0x1008b0420,0x1008b0428]  redis_idiomatic.ccs:481
+            : | + ! 1 redis_conn_bulk  (in redis_idiomatic_profile) + 368  [0x1008b02e4]  redis_idiomatic.ccs:481
+            : | + ! : 1 _platform_memmove  (in libsystem_platform.dylib) + 436  [0x18f357514]
+            : | + ! 1 redis_conn_bulk  (in redis_idiomatic_profile) + 536  [0x1008b038c]  redis_idiomatic.ccs:481
+            : | + ! : 1 cc_string_as_slice  (in redis_idiomatic_profile) + 4  [0x1008c55c4]  string.c:85
+            : | + ! 1 redis_conn_bulk  (in redis_idiomatic_profile) + 620  [0x1008b03e0]  redis_idiomatic.ccs:481
+            : | + ! : 1 _platform_memmove  (in libsystem_platform.dylib) + 0  [0x18f357360]
+            : | + ! 1 redis_conn_bulk  (in redis_idiomatic_profile) + 788  [0x1008b0488]  redis_idiomatic.ccs:482
+            : | + ! : 1 DYLD-STUB$$memcpy  (in redis_idiomatic_profile) + 4  [0x1008d240c]
+            : | + ! 1 redis_conn_write  (in redis_idiomatic_profile) + 288  [0x1008b5b78]  cc_io_error.h:0
+            : | + 1 exec  (in redis_idiomatic_profile) + 88  [0x1008ac7d0]  redis_idiomatic.ccs:0
+            : | 6 execute  (in redis_idiomatic_profile) + 924,912,...  [0x1008b1858,0x1008b184c,...]  redis_idiomatic.ccs:880
+            : | 5 execute  (in redis_idiomatic_profile) + 1080  [0x1008b18f4]  redis_idiomatic.ccs:880
+            : | + 2 cc_exclusive_lock_entry_slow  (in redis_idiomatic_profile) + 804  [0x1008ca5f8]  exclusive.c:542
+            : | + ! 2 cc__fiber_park_reason  (in redis_idiomatic_profile) + 80  [0x1008c3c0c]  fiber_sched.c:1144
+            : | + !   1 sched_v2_park  (in redis_idiomatic_profile) + 240  [0x1008c1c68]  sched_v2.c:1758
+            : | + !   : 1 _tlv_get_addr  (in libdyld.dylib) + 0  [0x18ef58388]
+            : | + !   1 sched_v2_park  (in redis_idiomatic_profile) + 292  [0x1008c1c9c]  sched_v2.c:1766
+            : | + 1 cc_exclusive_lock_entry_slow  (in redis_idiomatic_profile) + 52  [0x1008ca308]  exclusive.c:181
+            : | + 1 cc_exclusive_lock_entry_slow  (in redis_idiomatic_profile) + 64  [0x1008ca314]  exclusive.c:484
+            : | + 1 cc_exclusive_lock_entry_slow  (in redis_idiomatic_profile) + 804  [0x1008ca5f8]  exclusive.c:542
+            : | 2 execute  (in redis_idiomatic_profile) + 1044  [0x1008b18d0]  redis_idiomatic.ccs:880
+            : | + 1 cc_exclusive_mutex_host  (in redis_idiomatic_profile) + 64  [0x1008cb4e4]  exclusive.c:144
+            : | + 1 cc_exclusive_mutex_host  (in redis_idiomatic_profile) + 24  [0x1008cb4bc]  exclusive.c:989
+            : | 2 execute  (in redis_idiomatic_profile) + 1776  [0x1008b1bac]  redis_idiomatic.ccs:880
+            : | + 2 cc_exclusive_unlock_contended  (in redis_idiomatic_profile) + 364  [0x1008caa6c]  sched_v2.c:1676
+            : | +   2 sched_v2_wake  (in redis_idiomatic_profile) + 2392  [0x1008cdcac]  wake_primitive.h:147
+            : | +     2 __ulock_wake  (in libsystem_kernel.dylib) + 8  [0x18f30bbcc]
+            : | 1 execute  (in redis_idiomatic_profile) + 52  [0x1008b14f0]  redis_idiomatic.ccs:834
+            : | 1 execute  (in redis_idiomatic_profile) + 272  [0x1008b15cc]  redis_idiomatic.ccs:835
+            : 82 run_pipeline_window  (in redis_idiomatic_profile) + 2252  [0x1008b2f68]  redis_idiomatic.ccs:1012
+            : | 81 redis_conn_flush  (in redis_idiomatic_profile) + 120  [0x1008b33a8]  redis_idiomatic.ccs:444
+            : | + 81 cc_socket_write_deadline  (in redis_idiomatic_profile) + 388  [0x1008c9c24]  net.c:610
+            : | +   80 __sendto  (in libsystem_kernel.dylib) + 8  [0x18f30e390]
+            : | +   1 send  (in libsystem_c.dylib) + 0  [0x18f1ee668]
+            : | 1 redis_conn_flush  (in redis_idiomatic_profile) + 240  [0x1008b3420]  redis_idiomatic.ccs:442
+            : |   1 cc_arena_owner_release  (in redis_idiomatic_profile) + 128  [0x1008b5670]  cc_arena.h:2654
+            : 10 run_pipeline_window  (in redis_idiomatic_profile) + 1692,416,...  [0x1008b2d38,0x1008b283c,...]  redis_idiomatic.ccs:993
+            : 1 run_pipeline_window  (in redis_idiomatic_profile) + 44  [0x1008b26c8]  redis_idiomatic.ccs:983
+            : | 1 ___chkstk_darwin  (in libsystem_pthread.dylib) + 20  [0x18f348c34]
+            : 1 run_pipeline_window  (in redis_idiomatic_profile) + 2028  [0x1008b2e88]  redis_idiomatic.ccs:989
+            : | 1 cc_arena_free  (in redis_idiomatic_profile) + 736  [0x1008bc45c]  cc_arena.h:2866
+            : 1 run_pipeline_window  (in redis_idiomatic_profile) + 260  [0x1008b27a0]  redis_idiomatic.ccs:992
+            : 1 run_pipeline_window  (in redis_idiomatic_profile) + 1420  [0x1008b2c28]  redis_idiomatic.ccs:993
+            : | 1 cc__arena_alloc_here_epoch  (in redis_idiomatic_profile) + 528  [0x1008b8490]  cc_arena.h:1396
+            : 1 run_pipeline_window  (in redis_idiomatic_profile) + 1996  [0x1008b2e68]  redis_idiomatic.ccs:997
+            98 __cc_par_onto_2  (in redis_idiomatic_profile) + 644  [0x1008ba23c]  redis_idiomatic.ccs:1133
+            : 88 cc_socket_read_into_deadline  (in redis_idiomatic_profile) + 388  [0x1008c9468]  net.c:498
+            : | 88 read  (in libsystem_kernel.dylib) + 8,4  [0x18f30a91c,0x18f30a918]
+            : 9 cc_socket_read_into_deadline  (in redis_idiomatic_profile) + 684  [0x1008c9590]  net.c:513
+            : | 7 cc__io_watcher_wait_deadline  (in redis_idiomatic_profile) + 896  [0x1008c707c]  io_wait.c:1171
+            : | + 6 cc__io_wait_suspend_ready  (in redis_idiomatic_profile) + 160  [0x1008c6828]  io_wait.c:1086
+            : | + ! 3 cc__fiber_suspend_until_ready_or_cancel_until  (in redis_idiomatic_profile) + 508  [0x1008c3984]  fiber_sched.c:1122
+            : | + ! : 3 sched_v2_park  (in redis_idiomatic_profile) + 292  [0x1008c1c9c]  sched_v2.c:1766
+            : | + ! 1 cc__fiber_suspend_until_ready_or_cancel_until  (in redis_idiomatic_profile) + 424  [0x1008c3930]  fiber_sched.c:1094
+            : | + ! : 1 clock_gettime  (in libsystem_c.dylib) + 256  [0x18f1eae24]
+            : | + ! :   1 gettimeofday  (in libsystem_c.dylib) + 56  [0x18f1e2dc0]
+            : | + ! :     1 __commpage_gettimeofday_internal  (in libsystem_kernel.dylib) + 44  [0x18f30bc24]
+            : | + ! :       1 mach_absolute_time  (in libsystem_kernel.dylib) + 108  [0x18f30a10c]
+            : | + ! 1 cc__fiber_suspend_until_ready_or_cancel_until  (in redis_idiomatic_profile) + 536  [0x1008c39a0]  minicoro.h:2009
+            : | + ! : 1 _mco_running  (in redis_idiomatic_profile) + 24  [0x1008c35cc]  minicoro.h:2000
+            : | + ! :   1 _tlv_get_addr  (in libdyld.dylib) + 0  [0x18ef58388]
+            : | + ! 1 cc__fiber_suspend_until_ready_or_cancel_until  (in redis_idiomatic_profile) + 508  [0x1008c3984]  sched_v2.c:1844
+            : | + 1 cc__io_wait_suspend_ready  (in redis_idiomatic_profile) + 48  [0x1008c67b8]  minicoro.h:2009
+            : | +   1 _mco_running  (in redis_idiomatic_profile) + 24  [0x1008c35cc]  minicoro.h:2000
+            : | +     1 _tlv_get_addr  (in libdyld.dylib) + 20  [0x18ef5839c]
+            : | 1 cc__io_watcher_wait_deadline  (in redis_idiomatic_profile) + 492  [0x1008c6ee8]  io_wait.c:1125
+            : | 1 cc__io_watcher_wait_deadline  (in redis_idiomatic_profile) + 868  [0x1008c7060]  minicoro.h:2009
+            : |   1 _mco_running  (in redis_idiomatic_profile) + 24  [0x1008c35cc]  minicoro.h:2000
+            : 1 cc_socket_read_into_deadline  (in redis_idiomatic_profile) + 252  [0x1008c93e0]  net.c:524
+            2 __cc_par_onto_2  (in redis_idiomatic_profile) + 612  [0x1008ba21c]  redis_idiomatic.ccs:1133
+              2 cc_deadline_after_ms  (in redis_idiomatic_profile) + 40  [0x1008c3fc0]  scheduler.c:336
+                2 clock_gettime  (in libsystem_c.dylib) + 256  [0x18f1eae24]
+                  2 gettimeofday  (in libsystem_c.dylib) + 56  [0x18f1e2dc0]
+                    2 __commpage_gettimeofday_internal  (in libsystem_kernel.dylib) + 44  [0x18f30bc24]
+                      2 mach_absolute_time  (in libsystem_kernel.dylib) + 108  [0x18f30a10c]
+
+Total number in stack (recursive counted multiple, when >=5):
+        15       _platform_memmove  (in libsystem_platform.dylib) + 0  [0x18f357360]
+        12       __ulock_wake  (in libsystem_kernel.dylib) + 0  [0x18f30bbc4]
+        10       mach_absolute_time  (in libsystem_kernel.dylib) + 0  [0x18f30a0a0]
+        9       __commpage_gettimeofday_internal  (in libsystem_kernel.dylib) + 44  [0x18f30bc24]
+        9       _tlv_get_addr  (in libdyld.dylib) + 0  [0x18ef58388]
+        9       clock_gettime  (in libsystem_c.dylib) + 256  [0x18f1eae24]
+        9       gettimeofday  (in libsystem_c.dylib) + 56  [0x18f1e2dc0]
+        8       __ulock_wait2  (in libsystem_kernel.dylib) + 0  [0x18f317c90]
+        8       _os_unfair_lock_lock_slow  (in libsystem_platform.dylib) + 172  [0x18f3553c0]
+        8       cc__string_push_buffer_grow  (in redis_idiomatic_profile) + 100  [0x1008c595c]  string.c:52
+        8       exec  (in redis_idiomatic_profile) + 1648  [0x1008acde8]  redis_idiomatic.ccs:572
+        7       DYLD-STUB$$memcpy  (in redis_idiomatic_profile) + 0  [0x1008d2408]
+        7       _mco_running  (in redis_idiomatic_profile) + 24  [0x1008c35cc]  minicoro.h:2000
+        7       cc_deadline_after_ms  (in redis_idiomatic_profile) + 40  [0x1008c3fc0]  scheduler.c:336
+        7       sched_v2_wake  (in redis_idiomatic_profile) + 2392  [0x1008cdcac]  wake_primitive.h:147
+        6       _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18f34dc58]
+        6       sched_v2_park  (in redis_idiomatic_profile) + 0  [0x1008c1b78]  sched_v2.c:1766
+        6       thread_start  (in libsystem_pthread.dylib) + 8  [0x18f348c1c]
+        5       __ulock_wait  (in libsystem_kernel.dylib) + 0  [0x18f30baf0]
+
+Sort by top of stack, same collapsed (when >= 5):
+        __ulock_wait  (in libsystem_kernel.dylib)        32341
+        __semwait_signal  (in libsystem_kernel.dylib)        6889
+        kevent  (in libsystem_kernel.dylib)        6818
+        read  (in libsystem_kernel.dylib)        562
+        __sendto  (in libsystem_kernel.dylib)        479
+        ArrayMap_CCSlicePacked_RedisEntry_find_dense_h  (in redis_idiomatic_profile)        238
+        sched_v2_check_deadlock  (in redis_idiomatic_profile)        150
+        __ulock_wake  (in libsystem_kernel.dylib)        126
+        run_pipeline_window  (in redis_idiomatic_profile)        76
+        redis_conn_bulk  (in redis_idiomatic_profile)        71
+        execute  (in redis_idiomatic_profile)        46
+        db_lookup_live  (in redis_idiomatic_profile)        32
+        _platform_memmove  (in libsystem_platform.dylib)        28
+        mach_absolute_time  (in libsystem_kernel.dylib)        28
+        sched_v2_wake  (in redis_idiomatic_profile)        23
+        _tlv_get_addr  (in libdyld.dylib)        20
+        __ulock_wait2  (in libsystem_kernel.dylib)        16
+        cc__io_signal_sink_wait  (in redis_idiomatic_profile)        16
+        redis_conn_write  (in redis_idiomatic_profile)        15
+        cc_string_reserve  (in redis_idiomatic_profile)        13
+        sched_v2_park  (in redis_idiomatic_profile)        13
+        cc_arena_free  (in redis_idiomatic_profile)        12
+        pthread_testcancel  (in libsystem_pthread.dylib)        11
+        DYLD-STUB$$memcpy  (in redis_idiomatic_profile)        10
+        nanosleep  (in libsystem_c.dylib)        10
+        cc__arena_alloc_here_epoch  (in redis_idiomatic_profile)        9
+        cc_arena_realloc_host  (in redis_idiomatic_profile)        9
+        cc__io_waiter_main_kqueue  (in redis_idiomatic_profile)        8
+        cc_exclusive_mutex_host  (in redis_idiomatic_profile)        8
+        cc_exclusive_lock_entry_slow  (in redis_idiomatic_profile)        7
+        sched_v2_signal_ex  (in redis_idiomatic_profile)        7
+        _mco_running  (in redis_idiomatic_profile)        6
+        cc__fiber_suspend_until_ready_or_cancel_until  (in redis_idiomatic_profile)        6
+        exec  (in redis_idiomatic_profile)        6
+        _pthread_exit_if_canceled  (in libsystem_pthread.dylib)        5
+        cc__io_watcher_wait_deadline  (in redis_idiomatic_profile)        5
+        cc_string_as_slice  (in redis_idiomatic_profile)        5
+        os_unfair_lock_lock  (in libsystem_platform.dylib)        5
+
+Binary Images:
+       0x1008ac000 -        0x1008d656f +redis_idiomatic_profile (0) <9DBC3079-DDE6-3636-B3F8-69F10EFA2178> /Users/*/Documents/*/redis_idiomatic_profile
+       0x18eee8000 -        0x18ef3ab4b  libobjc.A.dylib (951.7) <FF1D8AE4-ABEF-35F1-A30A-1183B9CB414F> /usr/lib/libobjc.A.dylib
+       0x18ef3b000 -        0x18ef6fd07  libdyld.dylib (1378) <B147D877-D0C2-388F-B38D-D3132E39905F> /usr/lib/system/libdyld.dylib
+       0x18ef70000 -        0x18f016217  dyld (1.0.0 - 1378) <F924BDD3-4365-3466-9580-8B1B3FA8F857> /usr/lib/dyld
+       0x18f017000 -        0x18f01a228  libsystem_blocks.dylib (96) <CC947089-488D-316B-A9C7-46DEC0F73145> /usr/lib/system/libsystem_blocks.dylib
+       0x18f01b000 -        0x18f06f55f  libxpc.dylib (3102.120.13) <C40FCAE8-7A17-3D82-87CB-3DA4802ADEF1> /usr/lib/system/libxpc.dylib
+       0x18f070000 -        0x18f0909ff  libsystem_trace.dylib (1861.120.4) <D0FABAB3-5AE7-3F10-8C62-60CBF5D70850> /usr/lib/system/libsystem_trace.dylib
+       0x18f091000 -        0x18f13f5f7  libcorecrypto.dylib (1922.121.1) <A01A158D-6FE7-3B1C-A2C4-6BCB90D7314A> /usr/lib/system/libcorecrypto.dylib
+       0x18f140000 -        0x18f1901d7  libsystem_malloc.dylib (812.100.31) <5FAE4807-4D2B-3A95-A63A-DD96D3DA11B4> /usr/lib/system/libsystem_malloc.dylib
+       0x18f191000 -        0x18f1d823f  libdispatch.dylib (1542.100.32) <F071EFE4-299F-3089-ACC4-0025B8FFB52A> /usr/lib/system/libdispatch.dylib
+       0x18f1d9000 -        0x18f1dbffb  libsystem_featureflags.dylib (103) <71FCFFBD-85F8-3365-AFE0-BECEA4369122> /usr/lib/system/libsystem_featureflags.dylib
+       0x18f1dc000 -        0x18f25cd9f  libsystem_c.dylib (1752.120.2) <694B7881-1BF3-3D0F-8F19-B50AE4E8EF8A> /usr/lib/system/libsystem_c.dylib
+       0x18f25d000 -        0x18f2edae7  libc++.1.dylib (2100.43) <5013C0F8-84A9-3B56-9FEB-C353816A750F> /usr/lib/libc++.1.dylib
+       0x18f2ee000 -        0x18f30875f  libc++abi.dylib (2100.43) <E482D257-E5A0-3816-BD97-7B39342958DA> /usr/lib/libc++abi.dylib
+       0x18f309000 -        0x18f3462af  libsystem_kernel.dylib (12377.121.10) <FCA53B98-3D6A-38B2-A0EC-DF0F7E05F171> /usr/lib/system/libsystem_kernel.dylib
+       0x18f347000 -        0x18f353b3b  libsystem_pthread.dylib (539.100.4) <4F33683C-18C8-39A1-800B-2E3BD43BCC13> /usr/lib/system/libsystem_pthread.dylib
+       0x18f354000 -        0x18f35c963  libsystem_platform.dylib (375.120.2) <160FD864-8D15-36FC-9E97-9725388CFAFE> /usr/lib/system/libsystem_platform.dylib
+       0x18f35d000 -        0x18f38c6eb  libsystem_info.dylib (600) <3D62F2D9-F516-31BF-83C7-E203D872300B> /usr/lib/system/libsystem_info.dylib
+       0x193324000 -        0x19332de5f  libsystem_darwin.dylib (1752.120.2) <8858F025-745A-388E-9544-080781CC9A69> /usr/lib/system/libsystem_darwin.dylib
+       0x19378f000 -        0x1937a11b6  libsystem_notify.dylib (348.120.4) <64D76451-1E0C-369B-A631-54DA3140E083> /usr/lib/system/libsystem_notify.dylib
+       0x195a5c000 -        0x195a76f7b  libsystem_networkextension.dylib (2226.121.1) <0331EE20-A1FB-3C0D-990A-F65939CFF505> /usr/lib/system/libsystem_networkextension.dylib
+       0x195af9000 -        0x195b10fdf  libsystem_asl.dylib (406) <F40838DF-2F15-3F62-970F-DEE25706BF1B> /usr/lib/system/libsystem_asl.dylib
+       0x1976b7000 -        0x1976bf387  libsystem_symptoms.dylib (2169.120.7) <F5029F5C-1BF3-31C7-892E-BC8606AC829E> /usr/lib/system/libsystem_symptoms.dylib
+       0x19b95b000 -        0x19b993257  libsystem_containermanager.dylib (725.120.2) <518BE44D-AA31-31E6-B44B-A37AD5E47040> /usr/lib/system/libsystem_containermanager.dylib
+       0x19cd6c000 -        0x19cd705d7  libsystem_configuration.dylib (1405.120.5) <0F7BBC1C-3D50-3E59-A31F-E4672A80BCEB> /usr/lib/system/libsystem_configuration.dylib
+       0x19cd71000 -        0x19cd778cf  libsystem_sandbox.dylib (2680.120.12) <EC3A75EA-44C0-3A0B-9BF7-71C117B0A9C6> /usr/lib/system/libsystem_sandbox.dylib
+       0x19e3cb000 -        0x19e3ce1fb  libquarantine.dylib (196.120.2) <5849009B-ACA3-3796-94C4-BBDF8D300EBA> /usr/lib/system/libquarantine.dylib
+       0x19eb6a000 -        0x19eb70d03  libsystem_coreservices.dylib (191.4.5) <9576143B-C303-35A3-BA63-1FD06EDA2BB1> /usr/lib/system/libsystem_coreservices.dylib
+       0x19f0f5000 -        0x19f132a77  libsystem_m.dylib (3312.100.1) <A7E0863C-101A-31A0-922B-ED9B02626151> /usr/lib/system/libsystem_m.dylib
+       0x19f134000 -        0x19f137527  libmacho.dylib (1378) <755441B4-C034-3E3A-8E3C-F424FBB28261> /usr/lib/system/libmacho.dylib
+       0x19f151000 -        0x19f15e3a7  libcommonCrypto.dylib (600035) <CE357BB1-2D49-37CC-9FFE-D093936B1475> /usr/lib/system/libcommonCrypto.dylib
+       0x19f15f000 -        0x19f168ca3  libunwind.dylib (2100.2) <FC8F0C4E-6FB0-3E27-ABEF-B0FA720CD5E4> /usr/lib/system/libunwind.dylib
+       0x19f171000 -        0x19f17b7ff  libcopyfile.dylib (240) <8ACFAC7A-88E9-3EF4-853F-A9140FF110E5> /usr/lib/system/libcopyfile.dylib
+       0x19f17c000 -        0x19f17f987  libcompiler_rt.dylib (103.3) <AA79151F-C19D-3C7C-92F8-B10F04D82C1C> /usr/lib/system/libcompiler_rt.dylib
+       0x19f180000 -        0x19f18478b  libsystem_collections.dylib (1752.120.2) <72DB5BE7-EF78-37D0-8AAD-53E37CFE4287> /usr/lib/system/libsystem_collections.dylib
+       0x19f185000 -        0x19f1884cf  libsystem_secinit.dylib (168.100.7) <E525C566-CDA4-3D99-B12B-1615FD54A1F3> /usr/lib/system/libsystem_secinit.dylib
+       0x19f189000 -        0x19f18bbf7  libremovefile.dylib (85.100.6) <635E661D-80A7-340D-A165-3F7D318FDFC9> /usr/lib/system/libremovefile.dylib
+       0x19f18c000 -        0x19f18cf27  libkeymgr.dylib (31) <8C08891A-DF1C-3DCC-AB64-4742FD6BE9BA> /usr/lib/system/libkeymgr.dylib
+       0x19f18d000 -        0x19f195e37  libsystem_dnssd.dylib (2881.120.11) <6F45DF3F-233B-3BC3-BA8C-B43E7DA884BF> /usr/lib/system/libsystem_dnssd.dylib
+       0x19f196000 -        0x19f19b09b  libcache.dylib (95) <189B576E-6176-3F82-8FA4-5914B0BEAEE7> /usr/lib/system/libcache.dylib
+       0x19f19c000 -        0x19f19dce3  libSystem.B.dylib (1356) <BA6A669A-3BB9-3BC7-85E8-8F0C1E68351E> /usr/lib/libSystem.B.dylib
+       0x292458000 -        0x29245f349  libRosetta.dylib (367.9) <8651ED4F-6506-3788-B56B-32EE414A85CA> /usr/lib/libRosetta.dylib
+       0x294075000 -        0x294078a4b  libsystem_darwindirectory.dylib (122) <CF277A2C-C818-3F16-8B3F-3C7B39FCD164> /usr/lib/system/libsystem_darwindirectory.dylib
+       0x294079000 -        0x2940825d3  libsystem_eligibility.dylib (319.121.1) <DDAC0531-0262-3DDC-8EC8-80EB9438847A> /usr/lib/system/libsystem_eligibility.dylib
+       0x294083000 -        0x29408a88b  libsystem_sanitizers.dylib (26.1) <44C4234F-8B2D-38D3-A774-B4B3C75AF3A7> /usr/lib/system/libsystem_sanitizers.dylib
+       0x29408b000 -        0x29408bbb7  libsystem_trial.dylib (474.2.18.2) <68C583BA-AFF5-3916-86AE-6E38BFEF98D6> /usr/lib/system/libsystem_trial.dylib

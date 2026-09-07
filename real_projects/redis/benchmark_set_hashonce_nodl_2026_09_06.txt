@@ -1,0 +1,14 @@
+SET-only isolation after hash-once + no per-flush write deadline
+(before I/O prepare-flag skip). Box load ~2.4. Port 6443.
+
+INCLUDE_UPSTREAM=0 BENCH_TESTS=set REPEATS=5 REQUESTS=500000
+clients=50 pipeline=16 random_keys=50000 cc_workers=default
+
+rounds (discard warmup 2.660M):
+  2.841M  2.841M  2.841M  2.825M  2.674M
+
+SET  mean=2.804M  median=2.841M  min=2.674M  max=2.841M  cv=2.6%
+peak_rss=13.2MB  peak_threads=4
+
+Prior same recipe (default 2/10, pre-latch): median 2.778M
+Sept 5 interleaved idiomatic SET was 2.96M — do not use as this target.

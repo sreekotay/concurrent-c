@@ -1,0 +1,357 @@
+=== Redis thread-class probe ===
+Date: Sun Sep  6 22:23 EDT 2026
+Commit: a5990c74
+Host: Darwin 25.5.0 arm64 ncpu=10
+Load: 22:23  up  8:29, 1 user, load averages: 2.95 3.19 2.88
+Question: is today's GET/INCR overlap the too-many-threads class
+          (pool walks toward ncpu / oversubscribe), or grow-park hold
+          / host weather?
+Method: same bench_robust defaults, three pool shapes, 6401+ offsets.
+        6393 still held by leftover pid 51777; not used.
+
+===== default  env=  ports=6411/6413 =====
+tmp dir: /var/folders/12/04b0tf2d79b7d7wdgzwx12yr0000gn/T/bench_robust.XXXXXX.rBz340bkyq
+[warmup]
+   upstream  set   rps=905797.12
+   idiomatic set   rps=1628664.38
+   idiomatic get   rps=1457726.00
+   upstream  get   rps=910746.75
+   idiomatic incr  rps=1165501.25
+   upstream  incr  rps=1061571.12
+[mem] CC.MEMLOG post-warmup
+[round 1/6]
+   idiomatic set   rps=1201923.00
+   upstream  set   rps=814332.19
+   upstream  get   rps=996016.00
+   idiomatic get   rps=1602564.12
+   upstream  incr  rps=1128668.25
+   idiomatic incr  rps=2192982.50
+[round 2/6]
+   upstream  set   rps=1366120.25
+   idiomatic set   rps=2100840.25
+   idiomatic get   rps=2164502.00
+   upstream  get   rps=1960784.38
+   upstream  incr  rps=1879699.25
+   idiomatic incr  rps=1915708.75
+[round 3/6]
+   upstream  set   rps=1259445.75
+   idiomatic set   rps=2040816.25
+   idiomatic get   rps=2083333.38
+   upstream  get   rps=1436781.62
+   upstream  incr  rps=1543209.88
+   idiomatic incr  rps=1886792.50
+[round 4/6]
+   idiomatic set   rps=1567398.12
+   upstream  set   rps=850340.12
+   idiomatic get   rps=1901140.62
+   upstream  get   rps=1196172.25
+   upstream  incr  rps=1295336.75
+   idiomatic incr  rps=1886792.50
+[round 5/6]
+   idiomatic set   rps=1838235.25
+   upstream  set   rps=1366120.25
+   idiomatic get   rps=1760563.38
+   upstream  get   rps=2100840.25
+   upstream  incr  rps=2083333.38
+   idiomatic incr  rps=2173913.00
+[round 6/6]
+   upstream  set   rps=1420454.50
+   idiomatic set   rps=2074688.88
+   upstream  get   rps=2040816.25
+   idiomatic get   rps=2252252.25
+   upstream  incr  rps=2145922.75
+   idiomatic incr  rps=2136752.25
+[mem] CC.MEMLOG final
+
+== bench_robust summary ==
+rounds=6 requests_per_round=500000 clients=50 pipeline=16 mget_keys=8 cc_workers=default
+labels=upstream,idiomatic include_sketch=0 include_parallel=0 include_go=0
+sample_interval=0.05s  samples_taken: upstream=246  idiomatic=247
+
+[SET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.179M   1.313M   0.814M   1.420M   0.274M  23.2%
+  idiomatic    1.804M   1.940M   1.202M   2.101M   0.357M  19.8%
+  idiomatic/upstream median: 1.477x  (OVERLAP)
+
+[GET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.622M   1.699M   0.996M   2.101M   0.475M  29.3%
+  idiomatic    1.961M   1.992M   1.603M   2.252M   0.250M  12.8%
+  idiomatic/upstream median: 1.173x  (OVERLAP)
+
+[INCR]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.679M   1.711M   1.129M   2.146M   0.422M  25.1%
+  idiomatic    2.032M   2.026M   1.887M   2.193M   0.150M   7.4%
+  idiomatic/upstream median: 1.184x  (OVERLAP)
+
+[RESOURCE PEAKS] (sampled every 0.05 s across the whole run)
+  label        peak_rss   peak_threads
+  upstream       12.9MB              3
+  idiomatic      18.6MB              6
+
+[MEM GAP] footprint − (map+key+value live); remainder ≈ runtime/fibers/overflow/frag
+  phase           footprint    logical        gap      map      key    value     arenas        src
+  owner-ready        1.42MB     42.5KB     1.38MB   42.5KB       0B       0B    16.05MB  mach_phys
+  post-warmup       17.92MB     5.74MB    12.18MB   4.03MB   1.72MB       0B    20.03MB  mach_phys
+  final             18.03MB     5.74MB    12.29MB   4.03MB   1.72MB       0B    20.03MB  mach_phys
+
+tmp=/var/folders/12/04b0tf2d79b7d7wdgzwx12yr0000gn/T/bench_robust.XXXXXX.rBz340bkyq
+--- default thread histogram (ps -M samples) ---
+  threads=4 samples=104
+  threads=5 samples=48
+  threads=6 samples=95
+  thread min=4 max=6 n=247
+--- default live memlog workers ---
+redis_idiomatic: mem_gap phase=owner-ready footprint_B=1491256 source=mach_phys logical_B=43520 gap_B=1447736 map_B=43520 key_B=0 value_B=0 arenas_gross_B=16827565 workers=10 fiber_reserve_hint_B=20971520 note=runtime+fibers+overflow+frag+untracked
+redis_idiomatic listening on 127.0.0.1:6413 shards=16
+redis_idiomatic: mem[post-warmup] worker_hint=10 sched_workers=0 (fiber stacks: VM reserve ~2MiB each, commit on touch; see cc/runtime/fiber_sched.c MCO_USE_VMEM_ALLOCATOR)
+redis_idiomatic: mem_gap phase=post-warmup footprint_B=18792904 source=mach_phys logical_B=6020540 gap_B=12772364 map_B=4220672 key_B=1799868 value_B=0 arenas_gross_B=21005076 workers=10 fiber_reserve_hint_B=20971520 note=runtime+fibers+overflow+frag+untracked
+redis_idiomatic: mem[final] worker_hint=10 sched_workers=0 (fiber stacks: VM reserve ~2MiB each, commit on touch; see cc/runtime/fiber_sched.c MCO_USE_VMEM_ALLOCATOR)
+redis_idiomatic: mem_gap phase=final footprint_B=18907592 source=mach_phys logical_B=6020672 gap_B=12886920 map_B=4220672 key_B=1800000 value_B=0 arenas_gross_B=21005076 workers=10 fiber_reserve_hint_B=20971520 note=runtime+fibers+overflow+frag+untracked
+--- default sched_v2 stats ---
+[sched_v2 stats] coro_pool: reuse=1024 fresh=51  spawns: parks=832449 dead=1075  pool=51/512
+[sched_v2 stats] join (spin=0): fast=0 spin_hit=0 park_fiber=0 park_thread=1
+[sched_v2 stats] wake: ext_calls=536116 no_idle=425110 issued=291953 scan_miss=4555  skipped_deep=297419 (depth>=4) skipped_local=0 (local=1)  worker_self_drain=833524  worker_idle_entries=304250 (recheck=15347 from_wake=201255)
+[sched_v2 stats] grow (eager<=2 recheck=25us rate=100us/pop/worker depth_x=2 dwell=3 esc=0): requests=4121 stall=1 backlog=1 escalate=0 held=33835 parked=26882 final_threads=4/10
+[sched_v2 stats] spin_before_park=0: hit=0 miss=304250
+[sched_v2 stats] target_active=0 running=0: admit_ok=304250 admit_fail=0 wake_gated=0
+[sched_v2 stats] sysmon_evict: evicted_total=0 orphans_alive=0 cap_hit=0
+
+===== thin  env=env CC_V2_THREADS=2 CC_V2_EAGER_THREADS=2  ports=6421/6423 =====
+tmp dir: /var/folders/12/04b0tf2d79b7d7wdgzwx12yr0000gn/T/bench_robust.XXXXXX.vdZ2zvTaJL
+[warmup]
+   upstream  set   rps=723589.00
+   idiomatic set   rps=1322751.38
+   upstream  get   rps=968992.31
+   idiomatic get   rps=1597444.12
+   upstream  incr  rps=1529052.00
+   idiomatic incr  rps=2092050.25
+[mem] CC.MEMLOG post-warmup
+[round 1/6]
+   upstream  set   rps=1547987.50
+   idiomatic set   rps=2325581.25
+   upstream  get   rps=2083333.38
+   idiomatic get   rps=2463054.25
+   upstream  incr  rps=2066115.75
+   idiomatic incr  rps=2551020.50
+[round 2/6]
+   idiomatic set   rps=2450980.50
+   upstream  set   rps=1661129.62
+   upstream  get   rps=2100840.25
+   idiomatic get   rps=2155172.50
+   idiomatic incr  rps=2551020.50
+   upstream  incr  rps=2057613.12
+[round 3/6]
+   idiomatic set   rps=2083333.38
+   upstream  set   rps=1592356.62
+   upstream  get   rps=2092050.25
+   idiomatic get   rps=2183406.00
+   idiomatic incr  rps=2155172.50
+   upstream  incr  rps=1811594.25
+[round 4/6]
+   upstream  set   rps=847457.69
+   idiomatic set   rps=1510574.00
+   upstream  get   rps=982318.25
+   idiomatic get   rps=1818181.75
+   idiomatic incr  rps=2192982.50
+   upstream  incr  rps=1618123.00
+[round 5/6]
+   idiomatic set   rps=1538461.62
+   upstream  set   rps=724637.69
+   upstream  get   rps=998004.00
+   idiomatic get   rps=1154734.38
+   upstream  incr  rps=968992.31
+   idiomatic incr  rps=1618123.00
+[round 6/6]
+   upstream  set   rps=896057.31
+   idiomatic set   rps=2083333.38
+   upstream  get   rps=1628664.38
+   idiomatic get   rps=2392344.50
+   upstream  incr  rps=1968503.88
+   idiomatic incr  rps=2487562.25
+[mem] CC.MEMLOG final
+
+== bench_robust summary ==
+rounds=6 requests_per_round=500000 clients=50 pipeline=16 mget_keys=8 cc_workers=default
+labels=upstream,idiomatic include_sketch=0 include_parallel=0 include_go=0
+sample_interval=0.05s  samples_taken: upstream=238  idiomatic=238
+
+[SET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.212M   1.222M   0.725M   1.661M   0.431M  35.6%
+  idiomatic    1.999M   2.083M   1.511M   2.451M   0.394M  19.7%
+  idiomatic/upstream median: 1.705x  (OVERLAP)
+
+[GET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.648M   1.856M   0.982M   2.101M   0.540M  32.8%
+  idiomatic    2.028M   2.169M   1.155M   2.463M   0.484M  23.8%
+  idiomatic/upstream median: 1.169x  (OVERLAP)
+
+[INCR]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.748M   1.890M   0.969M   2.066M   0.418M  23.9%
+  idiomatic    2.259M   2.340M   1.618M   2.551M   0.360M  15.9%
+  idiomatic/upstream median: 1.238x  (OVERLAP)
+
+[RESOURCE PEAKS] (sampled every 0.05 s across the whole run)
+  label        peak_rss   peak_threads
+  upstream       12.9MB              3
+  idiomatic      18.4MB              4
+
+[MEM GAP] footprint − (map+key+value live); remainder ≈ runtime/fibers/overflow/frag
+  phase           footprint    logical        gap      map      key    value     arenas        src
+  owner-ready        1.42MB     42.5KB     1.38MB   42.5KB       0B       0B    16.05MB  mach_phys
+  post-warmup       17.83MB     5.74MB    12.09MB   4.03MB   1.72MB       0B    20.03MB  mach_phys
+  final             17.84MB     5.74MB    12.10MB   4.03MB   1.72MB       0B    20.03MB  mach_phys
+
+tmp=/var/folders/12/04b0tf2d79b7d7wdgzwx12yr0000gn/T/bench_robust.XXXXXX.vdZ2zvTaJL
+--- thin thread histogram (ps -M samples) ---
+  threads=4 samples=238
+  thread min=4 max=4 n=238
+--- thin live memlog workers ---
+redis_idiomatic: mem_gap phase=owner-ready footprint_B=1491256 source=mach_phys logical_B=43520 gap_B=1447736 map_B=43520 key_B=0 value_B=0 arenas_gross_B=16827565 workers=10 fiber_reserve_hint_B=20971520 note=runtime+fibers+overflow+frag+untracked
+redis_idiomatic listening on 127.0.0.1:6423 shards=16
+redis_idiomatic: mem[post-warmup] worker_hint=10 sched_workers=0 (fiber stacks: VM reserve ~2MiB each, commit on touch; see cc/runtime/fiber_sched.c MCO_USE_VMEM_ALLOCATOR)
+redis_idiomatic: mem_gap phase=post-warmup footprint_B=18694576 source=mach_phys logical_B=6020584 gap_B=12673992 map_B=4220672 key_B=1799912 value_B=0 arenas_gross_B=21005076 workers=10 fiber_reserve_hint_B=20971520 note=runtime+fibers+overflow+frag+untracked
+redis_idiomatic: mem[final] worker_hint=10 sched_workers=0 (fiber stacks: VM reserve ~2MiB each, commit on touch; see cc/runtime/fiber_sched.c MCO_USE_VMEM_ALLOCATOR)
+redis_idiomatic: mem_gap phase=final footprint_B=18710960 source=mach_phys logical_B=6020672 gap_B=12690288 map_B=4220672 key_B=1800000 value_B=0 arenas_gross_B=21005076 workers=10 fiber_reserve_hint_B=20971520 note=runtime+fibers+overflow+frag+untracked
+--- thin sched_v2 stats ---
+[sched_v2 stats] coro_pool: reuse=1024 fresh=51  spawns: parks=745498 dead=1075  pool=51/512
+[sched_v2 stats] join (spin=0): fast=0 spin_hit=0 park_fiber=0 park_thread=1
+[sched_v2 stats] wake: ext_calls=429731 no_idle=256346 issued=140872 scan_miss=2340  skipped_deep=316848 (depth>=4) skipped_local=0 (local=1)  worker_self_drain=746573  worker_idle_entries=145302 (recheck=5075 from_wake=119080)
+[sched_v2 stats] grow (eager<=2 recheck=25us rate=100us/pop/worker depth_x=2 dwell=3 esc=0): requests=0 stall=0 backlog=0 escalate=0 held=0 parked=0 final_threads=2/2
+[sched_v2 stats] spin_before_park=0: hit=0 miss=145302
+[sched_v2 stats] target_active=0 running=0: admit_ok=145302 admit_fail=0 wake_gated=0
+[sched_v2 stats] sysmon_evict: evicted_total=0 orphans_alive=0 cap_hit=0
+
+===== fat  env=env CC_V2_THREADS=10 CC_V2_EAGER_THREADS=10  ports=6431/6433 =====
+tmp dir: /var/folders/12/04b0tf2d79b7d7wdgzwx12yr0000gn/T/bench_robust.XXXXXX.ES6BvwoI7W
+[warmup]
+   idiomatic set   rps=2183406.00
+   upstream  set   rps=1315789.50
+   idiomatic get   rps=2173913.00
+   upstream  get   rps=2083333.38
+   idiomatic incr  rps=1879699.25
+   upstream  incr  rps=1915708.75
+[mem] CC.MEMLOG post-warmup
+[round 1/6]
+   idiomatic set   rps=2222222.25
+   upstream  set   rps=1285347.00
+   upstream  get   rps=1256281.38
+   idiomatic get   rps=1650165.00
+   idiomatic incr  rps=1066098.00
+   upstream  incr  rps=2118644.00
+[round 2/6]
+   idiomatic set   rps=1984127.00
+   upstream  set   rps=1792114.62
+   idiomatic get   rps=2314814.75
+   upstream  get   rps=2232142.75
+   upstream  incr  rps=2222222.25
+   idiomatic incr  rps=2380952.50
+[round 3/6]
+   idiomatic set   rps=1937984.62
+   upstream  set   rps=1712328.75
+   idiomatic get   rps=2325581.25
+   upstream  get   rps=2202643.25
+   upstream  incr  rps=2202643.25
+   idiomatic incr  rps=1960784.38
+[round 4/6]
+   idiomatic set   rps=1779359.50
+   upstream  set   rps=1587301.62
+   upstream  get   rps=1945525.25
+   idiomatic get   rps=1587301.62
+   upstream  incr  rps=2083333.38
+   idiomatic incr  rps=1736111.12
+[round 5/6]
+   upstream  set   rps=1742160.25
+   idiomatic set   rps=2232142.75
+   idiomatic get   rps=2192982.50
+   upstream  get   rps=2083333.38
+   idiomatic incr  rps=1879699.25
+   upstream  incr  rps=2057613.12
+[round 6/6]
+   upstream  set   rps=1754386.00
+   idiomatic set   rps=2242152.50
+   idiomatic get   rps=2242152.50
+   upstream  get   rps=2000000.00
+   idiomatic incr  rps=2262443.50
+   upstream  incr  rps=2183406.00
+[mem] CC.MEMLOG final
+
+== bench_robust summary ==
+rounds=6 requests_per_round=500000 clients=50 pipeline=16 mget_keys=8 cc_workers=default
+labels=upstream,idiomatic include_sketch=0 include_parallel=0 include_go=0
+sample_interval=0.05s  samples_taken: upstream=200  idiomatic=200
+
+[SET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.646M   1.727M   1.285M   1.792M   0.190M  11.5%
+  idiomatic    2.066M   2.103M   1.779M   2.242M   0.194M   9.4%
+  idiomatic/upstream median: 1.218x  (OVERLAP)
+
+[GET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.953M   2.042M   1.256M   2.232M   0.359M  18.4%
+  idiomatic    2.052M   2.218M   1.587M   2.326M   0.340M  16.6%
+  idiomatic/upstream median: 1.086x  (OVERLAP)
+
+[INCR]
+  label          mean   median      min      max   stddev    cv%
+  upstream     2.145M   2.151M   2.058M   2.222M   0.068M   3.2%
+  idiomatic    1.881M   1.920M   1.066M   2.381M   0.466M  24.8%
+  idiomatic/upstream median: 0.893x  (OVERLAP)
+
+[RESOURCE PEAKS] (sampled every 0.05 s across the whole run)
+  label        peak_rss   peak_threads
+  upstream       12.9MB              3
+  idiomatic      18.8MB             12
+
+[MEM GAP] footprint − (map+key+value live); remainder ≈ runtime/fibers/overflow/frag
+  phase           footprint    logical        gap      map      key    value     arenas        src
+  owner-ready        1.41MB     42.5KB     1.37MB   42.5KB       0B       0B    16.05MB  mach_phys
+  post-warmup       18.25MB     5.74MB    12.51MB   4.03MB   1.72MB       0B    20.03MB  mach_phys
+  final             17.05MB     5.74MB    11.31MB   4.03MB   1.72MB       0B    20.03MB  mach_phys
+
+tmp=/var/folders/12/04b0tf2d79b7d7wdgzwx12yr0000gn/T/bench_robust.XXXXXX.ES6BvwoI7W
+--- fat thread histogram (ps -M samples) ---
+  threads=12 samples=199
+  threads=6 samples=1
+  thread min=6 max=12 n=200
+--- fat live memlog workers ---
+redis_idiomatic: mem_gap phase=owner-ready footprint_B=1474872 source=mach_phys logical_B=43520 gap_B=1431352 map_B=43520 key_B=0 value_B=0 arenas_gross_B=16827565 workers=10 fiber_reserve_hint_B=20971520 note=runtime+fibers+overflow+frag+untracked
+redis_idiomatic listening on 127.0.0.1:6433 shards=16
+redis_idiomatic: mem[post-warmup] worker_hint=10 sched_workers=0 (fiber stacks: VM reserve ~2MiB each, commit on touch; see cc/runtime/fiber_sched.c MCO_USE_VMEM_ALLOCATOR)
+redis_idiomatic: mem_gap phase=post-warmup footprint_B=19136944 source=mach_phys logical_B=6020576 gap_B=13116368 map_B=4220672 key_B=1799904 value_B=0 arenas_gross_B=21005076 workers=10 fiber_reserve_hint_B=20971520 note=runtime+fibers+overflow+frag+untracked
+redis_idiomatic: mem[final] worker_hint=10 sched_workers=0 (fiber stacks: VM reserve ~2MiB each, commit on touch; see cc/runtime/fiber_sched.c MCO_USE_VMEM_ALLOCATOR)
+redis_idiomatic: mem_gap phase=final footprint_B=17875376 source=mach_phys logical_B=6020672 gap_B=11854704 map_B=4220672 key_B=1800000 value_B=0 arenas_gross_B=21005076 workers=10 fiber_reserve_hint_B=20971520 note=runtime+fibers+overflow+frag+untracked
+--- fat sched_v2 stats ---
+[sched_v2 stats] coro_pool: reuse=1024 fresh=51  spawns: parks=893702 dead=1075  pool=51/512
+[sched_v2 stats] join (spin=0): fast=0 spin_hit=0 park_fiber=0 park_thread=1
+[sched_v2 stats] wake: ext_calls=790556 no_idle=395606 issued=1140941 scan_miss=10854  skipped_deep=104284 (depth>=4) skipped_local=0 (local=1)  worker_self_drain=894777  worker_idle_entries=1201855 (recheck=76682 from_wake=428430)
+[sched_v2 stats] grow (eager<=10 recheck=25us rate=100us/pop/worker depth_x=2 dwell=3 esc=0): requests=0 stall=0 backlog=0 escalate=0 held=0 parked=0 final_threads=10/10
+[sched_v2 stats] spin_before_park=0: hit=0 miss=1201855
+[sched_v2 stats] target_active=0 running=0: admit_ok=1201855 admit_fail=0 wake_gated=0
+[sched_v2 stats] sysmon_evict: evicted_total=0 orphans_alive=0 cap_hit=0
+
+PROBE_DONE
+
+Verdict: not the too-many-threads class on the default path.
+- Default grow: stall=1 backlog=1 parked=26882 held=33835 final_threads=4/10.
+  OS threads stayed 4–6. Accept/recv dest-serve is run-to-park; the
+  controller holds. That is the opposite of walking ncpu.
+- Thin (2/2) idiomatic medians were as good or better (SET 2.08M GET 2.17M
+  INCR 2.34M). We are not pool-starved.
+- Fat (eager 10) is the class when forced: peak 12 OS threads, wake issued
+  1.14M vs default 0.29M, INCR 0.893x (loses to upstream). Default is not
+  in that shape.
+- Sept 5 vs this file is host weather: upstream SET median 2.00M → 1.31M
+  here, CVs 20–30%. Same 4–6 thread band as the 2.96M Sept 5 receipt.
+- skipped_local=0 on every shape. Redis dest-serve is not the unbuffered
+  local-wake path.
+
+Do not treat GET/INCR overlap in benchmark_baseline_p16_2026_09_06.txt as
+a dest-serve or grow-park regression. Re-run on a quiet box for a fair
+dated column.

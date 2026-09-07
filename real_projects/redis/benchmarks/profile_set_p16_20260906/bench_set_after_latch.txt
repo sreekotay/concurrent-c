@@ -1,0 +1,35 @@
+tmp dir: /var/folders/12/04b0tf2d79b7d7wdgzwx12yr0000gn/T/bench_robust.XXXXXX.PbEciGPB31
+[warmup]
+   idiomatic set   rps=2577319.50
+[mem] CC.MEMLOG post-warmup
+[round 1/5]
+   idiomatic set   rps=2659574.50
+[round 2/5]
+   idiomatic set   rps=2702702.75
+[round 3/5]
+   idiomatic set   rps=2688172.00
+[round 4/5]
+   idiomatic set   rps=2049180.25
+[round 5/5]
+   idiomatic set   rps=2631579.00
+[mem] CC.MEMLOG final
+
+== bench_robust summary ==
+rounds=5 requests_per_round=500000 clients=50 pipeline=16 mget_keys=8 cc_workers=default
+labels=idiomatic include_sketch=0 include_parallel=0 include_go=0
+sample_interval=0.05s  samples_taken: idiomatic=24
+
+[SET]
+  label          mean   median      min      max   stddev    cv%
+  idiomatic    2.546M   2.660M   2.049M   2.703M   0.279M  11.0%
+
+[RESOURCE PEAKS] (sampled every 0.05 s across the whole run)
+  label        peak_rss   peak_threads
+  idiomatic      12.8MB              4
+
+[MEM GAP] footprint − (map+key+value live); remainder ≈ runtime/fibers/overflow/frag
+  phase           footprint    logical        gap      map      key    value     arenas        src
+  owner-ready        1.41MB     42.5KB     1.37MB   42.5KB       0B       0B    16.05MB  mach_phys
+  post-warmup       12.14MB     2.44MB     9.70MB   1.68MB  781.2KB       0B    17.69MB  mach_phys
+  final             12.23MB     2.44MB     9.79MB   1.68MB  781.2KB       0B    17.69MB  mach_phys
+
