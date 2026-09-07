@@ -299,6 +299,28 @@ static bool as_await_type(AStep* st, CcExpr* operand, CCString* out) {
     return true;
 }
 
+/* `@nonblocking f(x)` at a call site hands the call to a pool and waits
+ * for it, so the fiber it runs on is not the one that blocks. That is a
+ * closure over the arguments and a task, not an annotation: saying so
+ * beats printing the word into the C. */
+static bool as_call_mode_visit(CcExpr* e, void* env) {
+    AStep* st = (AStep*)env;
+    CcLowerer* L = st->L;
+    CcCallMode cm;
+    bool hit = false;
+    @switch (e->k) {
+        case .call_mode(x): cm = x; hit = true; break;
+        default: break;
+    }
+    if (!hit) return true;
+    {
+        CCSlice mode = cm.mode;
+        CCString m = @string(`'${"@"}${mode}' at a call site is not lowered by the clean lowerer yet: the call becomes a closure over its arguments, run as a task`, L->arena);
+        lw_error(L, e->span, m);
+    }
+    return true;
+}
+
 static bool as_await_visit(CcExpr* e, void* env) {
     AStep* st = (AStep*)env;
     CcLowerer* L = st->L;
@@ -341,6 +363,10 @@ static void CcLowerer_async(CcLowerer* L) {
     st.L = L;
     memset(&v, 0, sizeof(v));
     v.expr = as_await_visit;
+    v.env = &st;
+    CcUnit_walk(L->unit, v);
+    memset(&v, 0, sizeof(v));
+    v.expr = as_call_mode_visit;
     v.env = &st;
     CcUnit_walk(L->unit, v);
 }
