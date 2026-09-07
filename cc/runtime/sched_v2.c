@@ -2519,10 +2519,8 @@ static void* sched_v2_sysmon_main(void* arg) {
          * relaxed load when no deadlines are in flight. */
         sched_v2_wake_expired_parkers();
 
-        /* Deadlock detector: runs every tick. Internal checks (idle
-         * count + ready queue depth + first-seen timestamp) short-circuit
-         * the all_fibers walk when the system is healthy, so the
-         * amortized cost on the hot path is just two atomic loads. */
+        /* Deadlock detector: idle/queue/deadline every tick. The
+         * all_fibers walk runs only after the stall has persisted. */
         sched_v2_check_deadlock();
 
         /* Unconditional every-tick safety net: if any work is queued AND
@@ -3110,6 +3108,9 @@ void sched_v2_debug_dump_state(const char* prefix) {
  *     on an *open* channel AND some external-wait thread is providing
  *     progress (this is the "I/O-driven progress" exemption V1 had).
  *   - Require the condition to persist for ~1 s before declaring deadlock.
+ *     The all_fibers classify walk runs only after that latch; dest-serve
+ *     I/O-wait (all idle, empty queue, no internal parks) must not walk
+ *     every 20 ms tick.
  *   - Opt out via CC_DEADLOCK_ABORT=0 (print banner, keep running).
  *
  * The idle/queue checks deliberately use sysmon's own snapshot of the V2
@@ -3137,13 +3138,22 @@ static _Atomic int g_v2_deadlock_reported = 0;
 #define SCHED_V2_DEADLOCK_PERSIST_MS 1000u
 
 static uint64_t sched_v2_deadlock_persist_ms(void) {
+    static uint64_t cached = 0;
+    static int inited = 0;
+    if (inited) return cached;
     const char* env = getenv("CC_DEADLOCK_PERSIST_MS");
-    if (!env || !env[0]) return SCHED_V2_DEADLOCK_PERSIST_MS;
-    char* end = NULL;
-    unsigned long v = strtoul(env, &end, 10);
-    if (end == env || (end && *end) || v == 0 || v > 60000ul)
-        return SCHED_V2_DEADLOCK_PERSIST_MS;
-    return (uint64_t)v;
+    if (!env || !env[0]) {
+        cached = SCHED_V2_DEADLOCK_PERSIST_MS;
+    } else {
+        char* end = NULL;
+        unsigned long v = strtoul(env, &end, 10);
+        if (end == env || (end && *end) || v == 0 || v > 60000ul)
+            cached = SCHED_V2_DEADLOCK_PERSIST_MS;
+        else
+            cached = (uint64_t)v;
+    }
+    inited = 1;
+    return cached;
 }
 
 static uint64_t sched_v2_monotonic_ms(void) {
@@ -3314,6 +3324,22 @@ void sched_v2_check_deadlock(void) {
         return;
     }
 
+    /* Latch first. Dest-serve I/O-wait is idle==n && empty queue for the
+     * life of the process; walking all_fibers every tick is the tax.
+     * Classify only after persist_ms so a healthy kqueue wait is one
+     * walk per latch, not fifty per second. */
+    uint64_t persist_ms = sched_v2_deadlock_persist_ms();
+    uint64_t now = sched_v2_monotonic_ms();
+    uint64_t first = atomic_load_explicit(&g_v2_deadlock_first_seen,
+                                          memory_order_relaxed);
+    if (first == 0) {
+        atomic_compare_exchange_strong_explicit(
+            &g_v2_deadlock_first_seen, &first, now,
+            memory_order_relaxed, memory_order_relaxed);
+        return;
+    }
+    if (now - first < persist_ms) return;
+
     size_t internal_parked = 0, suppressed_parked = 0, external_parked = 0;
     int saw_only_open_recv = 1;
     sched_v2_classify_parked_fibers(&internal_parked, &suppressed_parked,
@@ -3336,7 +3362,7 @@ void sched_v2_check_deadlock(void) {
      *   if (external_waits > 0 && only_open_recv_waits) { reset; return; }
      * The open-channel check is the key: if any internal park is NOT on
      * an open-channel recv, the external source has no plausible way to
-     * unblock it, so we proceed to latch the deadlock verdict. */
+     * unblock it, so we proceed to the verdict. */
     size_t external_threads = atomic_load_explicit(&g_external_wait_threads,
                                                    memory_order_relaxed);
     size_t external_waits = external_parked + external_threads;
@@ -3345,19 +3371,6 @@ void sched_v2_check_deadlock(void) {
                               memory_order_relaxed);
         return;
     }
-
-    /* Latch timer: require the stall to persist >= persist_ms. */
-    uint64_t persist_ms = sched_v2_deadlock_persist_ms();
-    uint64_t now = sched_v2_monotonic_ms();
-    uint64_t first = atomic_load_explicit(&g_v2_deadlock_first_seen,
-                                          memory_order_relaxed);
-    if (first == 0) {
-        atomic_compare_exchange_strong_explicit(
-            &g_v2_deadlock_first_seen, &first, now,
-            memory_order_relaxed, memory_order_relaxed);
-        return;
-    }
-    if (now - first < persist_ms) return;
 
     /* Claim the report slot. */
     int expected = 0;

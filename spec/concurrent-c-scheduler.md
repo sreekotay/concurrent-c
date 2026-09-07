@@ -460,6 +460,11 @@ at least `SCHED_V2_DEADLOCK_PERSIST_MS` (1000 ms):
 - At least one fiber is `PARKED` with `external_wait_depth == 0` and
   `deadlock_suppress_depth == 0`.
 
+Sysmon samples idle / ready-queue / park-deadline every tick. The parked-fiber
+walk runs only after that stall has persisted for the latch duration. An
+I/O-wait pool (all idle, empty queue, no internal parks) does not walk every
+tick.
+
 On fire: print a diagnostic banner and `_exit(124)`. `CC_DEADLOCK_ABORT=0`
 prints the banner without exiting.
 

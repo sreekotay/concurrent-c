@@ -129,8 +129,10 @@ static void cc__net_disable_sigpipe_best_effort(int fd) {
 #endif
 
 static int cc__net_prepare_fiber_fd(int fd, uint8_t* flags) {
-    if (!cc__fiber_in_context()) return 0;
+    /* Already nonblock: skip cc__fiber_in_context() (mco_running trampoline).
+     * Dest-serve hits this on every read/write after the first prepare. */
     if (flags && (*flags & CC_NET_FLAG_NONBLOCK)) return 0;
+    if (!cc__fiber_in_context()) return 0;
     int err = cc__net_set_nonblocking(fd);
     if (err == 0 && flags) *flags |= CC_NET_FLAG_NONBLOCK;
     return err;
