@@ -561,6 +561,101 @@ static CcExpr* rl_project(CcLowerer* L, CcExpr* err, CcNameList* path, CcSpan sp
     return err;
 }
 
+/* A name a `_Generic` arm may spell: one identifier. A canon like
+ * "unsigned long" or "struct Foo" is a type an error can be, but not one
+ * this step needs — an error type is a record with faces. */
+static bool rl_is_plain_name(CCSlice s) {
+    size_t i;
+    if (!s.len) return false;
+    for (i = 0; i < s.len; i++) {
+        char c = s.ptr[i];
+        bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || (i && c >= '0' && c <= '9');
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/* The error of a Result whose type this unit cannot name, read as `to`.
+ *
+ * A callee that is a macro has no declaration to read a `T !>(E)` off, so
+ * `E` is the host's to decide and not ours. Reading `__r.u.error` into a
+ * cell of type `to` is right only when `E` is `to`; where it is not, the
+ * host rejects the assignment and the lowerer will have emitted a mismatch
+ * it could have said something about — `rx.recv(&v) !>;` under an
+ * `@errhandler(CCError e)` returns `CCIoError`, which reaches `CCError`
+ * through its `as: base` face.
+ *
+ * So the choice is made where the types are known: one `_Generic` arm per
+ * error type this unit declares a Result for that reaches `to`, each
+ * reading the error through its own `as:` path. Every arm casts the
+ * address before it projects, so an arm that is not selected still
+ * type-checks. There is deliberately no default arm: a Result whose error
+ * cannot reach `to` is then a compile error at this line, naming the
+ * types, rather than a conversion nobody chose.
+ *
+ * NULL when no error type this unit knows reaches `to` — the caller keeps
+ * the plain read, which is what a unit with one error type wants. */
+static CcExpr* rl_err_as(CcLowerer* L, CcSpan sp, CCSlice to) {
+    CcIndex* ix = rl_ix(L);
+    CcTypeInfoList* all = &ix->types;
+    size_t n = all->len();
+    size_t i;
+    CcNameList done = vec_new::[CCSlice](L->arena);
+    CCString text = cc_string_new();
+    int arms = 0;
+    cc_string_push_cstr(&text, "_Generic((__r).u.error", L->arena);
+    for (i = 0; i < n; i++) {
+        CcTypeInfo* ti = *all->get_ptr(i);
+        CCSlice en = ti->name;
+        size_t k;
+        size_t nd;
+        bool seen = false;
+        CcNameList path = vec_new::[CCSlice](L->arena);
+        CcNameList visited = vec_new::[CCSlice](L->arena);
+        int n_found = 0;
+        bool cycle = false;
+        /* a Result contributes the type of its error arm, not its own name */
+        if (ti->is_result) {
+            if (!ti->result_err) continue;
+            en = rl_ix_canon(L, ti->result_err);
+        }
+        if (!en.len || !rl_is_plain_name(en)) continue;
+        nd = done.len();
+        for (k = 0; k < nd; k++) { CCSlice d = *done.get_ptr(k); if (cc_slice_eq(&d, en)) seen = true; }
+        if (seen) continue;
+        done.push(en);
+        if (cc_slice_eq(&en, to)) {
+            cc_string_push_cstr(&text, ", ", L->arena);
+            cc_string_push_slice(&text, en, L->arena);
+            cc_string_push_cstr(&text, ": (*(", L->arena);
+            cc_string_push_slice(&text, to, L->arena);
+            cc_string_push_cstr(&text, "*)(void*)&(__r).u.error)", L->arena);
+            arms++;
+            continue;
+        }
+        if (!rl_as_search(L, en, to, &path, &visited, &n_found, &cycle)) continue;
+        if (n_found != 1) continue;   /* ambiguous: not this step's to pick */
+        cc_string_push_cstr(&text, ", ", L->arena);
+        cc_string_push_slice(&text, en, L->arena);
+        cc_string_push_cstr(&text, ": ((", L->arena);
+        cc_string_push_slice(&text, en, L->arena);
+        cc_string_push_cstr(&text, "*)(void*)&(__r).u.error)", L->arena);
+        {
+            size_t np = path.len();
+            size_t j;
+            for (j = 0; j < np; j++) {
+                CCSlice face = *path.get_ptr(j);
+                cc_string_push_cstr(&text, j ? "." : "->", L->arena);
+                cc_string_push_slice(&text, face, L->arena);
+            }
+        }
+        arms++;
+    }
+    if (!arms) return NULL;
+    cc_string_push_char(&text, ')', L->arena);
+    return lw_text(L, text, sp);
+}
+
 static CCSlice rl_cell_name(CcLowerer* L, uint32_t id) {
     CCString s = @string(`__cc_eh_e_${id}`, L->arena);
     return lw_keep(L, &s);
@@ -676,6 +771,12 @@ static CcStmt* rl_scaffold(RFn* fn, CcExpr* uw, CcExpr* target, CcSpan sp) {
             return NULL;
         }
         err = rl_project(L, rl_r_error2(L, sp, ptr, inner), &path, sp);
+        /* the callee named no `T !>(E)`: which error this is is the host's
+         * to decide, and the handler's type is what it has to become */
+        if (!rt && !ptr && h->err_canon.len) {
+            CcExpr* as = rl_err_as(L, sp, h->err_canon);
+            if (as) err = as;
+        }
         lw_push(on_err, rl_record_site(L, sp));
         if (h->hoisted) rl_push_jump(fn, on_err, h, err, sp);
         else lw_push(on_err, rl_inline_handler(fn, h, err, sp));
@@ -1061,6 +1162,12 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
             return false;
         }
         err = rl_project(L, rl_r_error2(L, sp, ptr, inner), &path, sp);
+        /* the callee named no `T !>(E)`: which error this is is the host's
+         * to decide, and the handler's type is what it has to become */
+        if (!rt && !ptr && h->err_canon.len) {
+            CcExpr* as = rl_err_as(L, sp, h->err_canon);
+            if (as) err = as;
+        }
         lw_push(on_err, rl_record_site(L, sp));
         if (h->hoisted) rl_push_jump(fn, on_err, h, err, sp);
         else lw_push(on_err, rl_inline_handler(fn, h, err, sp));

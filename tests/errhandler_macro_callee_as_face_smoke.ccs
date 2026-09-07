@@ -1,0 +1,48 @@
+/* An unwrap whose callee is a macro: the lowerer cannot read a `T !>(E)`
+ * off a `#define`, so which error the Result carries is the host's to
+ * decide. The handler still takes one error type, and an error that is not
+ * that type reaches it through its `as:` face — reading the payload as the
+ * handler's type without the face is what the host rejects. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_io_error.cch>
+#include <stdio.h>
+
+static int g_seen = 0;
+
+static bool !>(CCIoError) io_step(int ok) {
+    if (!ok) return cc_err(cc_io_error_os(CC_ERR_CLOSED, 42));
+    return cc_ok(true);
+}
+
+static int !>(CCError) plain_step(int ok) {
+    if (!ok) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "no"));
+    return cc_ok(7);
+}
+
+/* the callee is a macro, so the unwrap site has no declaration to read */
+#define IO_STEP(x)    io_step((x))
+#define PLAIN_STEP(x) plain_step((x))
+
+static int !>(CCError) run(int io_ok, int plain_ok) {
+    @errhandler(CCError e) { g_seen = (int)e.kind; return cc_err(e); }
+    int n;
+    IO_STEP(io_ok) !>;          /* CCIoError -> CCError through `as: base` */
+    n = PLAIN_STEP(plain_ok) !>; /* already CCError */
+    return cc_ok(n);
+}
+
+int main(void) {
+    int v = run(1, 1) !> { printf("both ok should not fail\n"); return 1; };
+    if (v != 7) { printf("v=%d\n", v); return 2; }
+    if (g_seen != 0) { printf("handler ran: %d\n", g_seen); return 3; }
+
+    run(0, 1) ?> 0;
+    if (g_seen != (int)CC_ERR_CLOSED) { printf("io kind=%d\n", g_seen); return 4; }
+
+    g_seen = 0;
+    run(1, 0) ?> 0;
+    if (g_seen != (int)CC_ERR_INVALID_ARG) { printf("plain kind=%d\n", g_seen); return 5; }
+
+    printf("ok\n");
+    return 0;
+}

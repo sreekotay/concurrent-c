@@ -57,12 +57,40 @@ int total;
     __typeof__(get_total_wait_time()) __r = get_total_wait_time();
     if (!__r.ok) {
         cc_rt_diag_record_unwrap_site("recipe.ccs", "49");
-        __cc_eh_e_0 = _Generic((__r).u.error, CCError: (__r).u.error, CCIoError: (*(CCError*)(void*)&(__r).u.error), default: (__r).u.error);
+        __cc_eh_e_0 = (__r).u.error;
         goto __cc_eh_0;
     }
     total = (__r).u.value;
 }
 ```
+
+The plain read is right because the declaration said what `E` is, and the
+handler was picked for it (through its `as:` faces when the two differ —
+that walk is the `path` above, read as members).
+
+**When the callee named no `T !>(E)`.** A `#define` has no declaration to
+read a Result off, so which error a macro call carries is the host's to
+decide and not the lowerer's. Reading `__r.u.error` into a cell of type `F`
+is right only when the error is an `F`; where it is not, the host rejects
+the assignment and the lowerer will have emitted a mismatch it could have
+said something about — `rx.recv(&v) !>;` under an `@errhandler(CCError e)`
+returns `CCIoError`, which reaches `CCError` through its `as: base` face.
+
+So the choice is made where the types are known: one arm per error type the
+index knows that reaches `F`, each reading the error through its own `as:`
+path. Every arm casts the address before it projects, so an arm that is not
+selected still type-checks.
+
+```c
+__cc_eh_e_0 = _Generic((__r).u.error,
+    CCIoError: ((CCIoError*)(void*)&(__r).u.error)->base,
+    CCError:   (*(CCError*)(void*)&(__r).u.error));
+```
+
+There is deliberately no `default:` arm. A Result whose error reaches `F`
+by no face is then a compile error at that line, naming the types, rather
+than a conversion nobody chose. A unit whose errors are all one type gets
+no ladder at all: there is nothing for the host to decide.
 
 The handler is hoisted to the end of the function body as a label, with the
 error cell declared at the top of the function:
