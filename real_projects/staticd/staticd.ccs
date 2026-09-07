@@ -119,6 +119,7 @@ typedef @typeview Encode on Conn {
 static cc_atomic_int g_stop;
 static cc_atomic_int g_live;
 static cc_atomic_int g_nworkers;
+static cc_atomic_int g_tls_fail; /* handshake / wrap drops (not EAGAIN) */
 static int g_workers_max;
 static CCListener* g_ln;
 static ServerCfg* g_cfg;
@@ -930,7 +931,8 @@ static int fd_nonblock(int fd) {
     return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
 
-/* 1 = accepted, 0 = would-block / dropped, -1 = hard listen error. */
+/* 1 = accepted, 0 = would-block / soft drop, -1 = hard listen error.
+ * TLS wrap failure increments g_tls_fail (not silent EAGAIN). */
 static int try_accept(CCListener* ln, ServerCfg* cfg, Vec::[SessionP]* live,
                       Vec::[PollFd]* wait, CCArenaPool* slots) {
     int fd = accept(ln->fd, NULL, NULL);
@@ -946,7 +948,7 @@ static int try_accept(CCListener* ln, ServerCfg* cfg, Vec::[SessionP]* live,
     s = session_new((CCSocket){ .fd = fd }, slots);
     if (!s) return 0;
     if (cfg->tls && session_tls_wrap(s, cfg) != 0) {
-        /* Handshake failed: drop; do not look like EAGAIN. */
+        cc_atomic_fetch_add(&g_tls_fail, 1);
         session_drop(s, slots);
         return 0;
     }
