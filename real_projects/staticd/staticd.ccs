@@ -465,6 +465,16 @@ static bool !>(CCError) flush_conn(Session* s, Enc* c) {
     return cc_ok(true);
 }
 
+/* After headers are queued: drain out_*, or wait/close by keepalive. */
+static CCIoAct session_after_flush(Session* s, int ka) {
+    if (s->out_left) {
+        if (!ka) s->send_close = 1;
+        return (CCIoAct){ .wait_out = {} };
+    }
+    if (!ka) return (CCIoAct){ .close = {} };
+    return (CCIoAct){ .wait = {} };
+}
+
 static bool !>(CCError) enc_write(Enc* c, char[:] data) {
     if (data.len == 0) return cc_ok(true);
     if (!c->out.append(data, c->arena) || c->out.failed())
@@ -637,23 +647,13 @@ static CCIoAct !>(CCError) http_fail(Session* s, Enc* conn, int code,
     @errhandler(CCError e) { return cc_err(e); }
     send_error(conn, code, reason, body, with_body, ka) !>;
     flush_conn(s, conn) !>;
-    if (s->out_left) {
-        if (!ka) s->send_close = 1;
-        return cc_ok((CCIoAct){ .wait_out = {} });
-    }
-    if (!ka) return cc_ok((CCIoAct){ .close = {} });
-    return cc_ok((CCIoAct){ .wait = {} });
+    return cc_ok(session_after_flush(s, ka));
 }
 
 static CCIoAct !>(CCError) http_commit(Session* s, Enc* conn, int ka) {
     @errhandler(CCError e) { return cc_err(e); }
     flush_conn(s, conn) !>;
-    if (s->out_left) {
-        if (!ka) s->send_close = 1;
-        return cc_ok((CCIoAct){ .wait_out = {} });
-    }
-    if (!ka) return cc_ok((CCIoAct){ .close = {} });
-    return cc_ok((CCIoAct){ .wait = {} });
+    return cc_ok(session_after_flush(s, ka));
 }
 
 static const char* pages_reason(int code) {
@@ -703,12 +703,7 @@ static CCIoAct !>(CCError) pages_send(Session* s, Enc* conn, ScriptReply* r,
     case .other:
         break;
     }
-    if (s->out_left) {
-        if (!ka) s->send_close = 1;
-        return cc_ok((CCIoAct){ .wait_out = {} });
-    }
-    if (!ka) return cc_ok((CCIoAct){ .close = {} });
-    return cc_ok((CCIoAct){ .wait = {} });
+    return cc_ok(session_after_flush(s, ka));
 }
 
 static size_t headers_end(Session* s) {
@@ -835,7 +830,6 @@ static CCIoAct !>(CCError) handle_http(Session* s, Enc* conn, Cfg* cfg) {
             conn->hdr("Connection", cc_slice_cstr("Upgrade")) !>;
             conn->hdr("Sec-WebSocket-Accept", accept) !>;
             conn->end_headers() !>;
-            flush_conn(s, conn) !>;
             s->phase = (Phase){ .ws = {} };
             return http_commit(s, conn, 1);
         }
@@ -953,12 +947,7 @@ static CCIoAct !>(CCError) handle_http(Session* s, Enc* conn, Cfg* cfg) {
             case .other:
                 break;
             }
-            if (s->out_left) {
-                if (!ka) s->send_close = 1;
-                return cc_ok((CCIoAct){ .wait_out = {} });
-            }
-            if (!ka) return cc_ok((CCIoAct){ .close = {} });
-            return cc_ok((CCIoAct){ .wait = {} });
+            return cc_ok(session_after_flush(s, ka));
         }
     }
     mtime = fh.mtime;
@@ -1008,12 +997,7 @@ static CCIoAct !>(CCError) handle_http(Session* s, Enc* conn, Cfg* cfg) {
             return cc_ok((CCIoAct){ .wait_out = {} });
         }
     }
-    if (s->out_left) {
-        if (!ka) s->send_close = 1;
-        return cc_ok((CCIoAct){ .wait_out = {} });
-    }
-    if (!ka) return cc_ok((CCIoAct){ .close = {} });
-    return cc_ok((CCIoAct){ .wait = {} });
+    return cc_ok(session_after_flush(s, ka));
 }
 
 static WsStep !>(CCError) ws_one_frame(Session* s) {
@@ -1087,14 +1071,13 @@ static CCIoAct !>(CCError) session_app(Session* s, Enc* conn, Cfg* cfg) {
         if (s->out_left || s->send_left) {
             CCIoAct a = session_send_one(s) !>;
             @switch (a) {
-            case .close: return cc_ok(a);
-            case .wait:
+            case .close:
             case .wait_out:
+                return cc_ok(a);
+            case .wait:
+                /* Cursors drained; continue into http/ws. */
                 break;
             }
-            if (s->out_left || s->send_left)
-                return cc_ok((CCIoAct){ .wait_out = {} });
-            if (s->send_close) return cc_ok((CCIoAct){ .close = {} });
             continue;
         }
         @switch (s->phase) {
@@ -1137,9 +1120,10 @@ static CCIoAct !>(CCError) session_app(Session* s, Enc* conn, Cfg* cfg) {
             {
                 CCIoAct a = handle_http(s, conn, cfg) !>;
                 @switch (a) {
-                case .close: return cc_ok(a);
-                case .wait:
+                case .close:
                 case .wait_out:
+                    return cc_ok(a);
+                case .wait:
                     break;
                 }
             }

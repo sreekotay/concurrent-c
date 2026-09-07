@@ -23,7 +23,7 @@ and redis.
 | Query | `?…` split off the path; ignored for files; passed to pages |
 | Extra headers | `--header 'Name: value'` (repeatable; no CR/LF) |
 | Workers | Start 2, grow every 64 live conns, cap ncpu/2 (`--workers 0`). `--workers N` is the cap. `--workers 1` stays one dest |
-| Accept | Soft-fail on `EMFILE` / `ENFILE` / `ENOMEM` / `ENOBUFS` (spare-fd trick); listen `POLLIN` backoff ~100 ms. Worker death decrements the live count and respawns to the floor |
+| Accept | Soft-fail on `EMFILE` / `ENFILE` / `ENOMEM` / `ENOBUFS`. Spare fd is per-dest on the tape; `CCServer` holds only listen + atomics (backoff deadline). Listen `POLLIN` backoff ~100 ms. Worker death decrements live and respawns to the floor |
 | Deadlines | Absolute `io->deadline` (dest reaps). TLS HS; header gap ∩ hard total; keepalive idle; write stall (refresh only on `try_write` progress); WS idle. Defaults 10 / 5∩15 / 30 / 30 / 120 s; env `TLS_HS`, `HEADER_GAP`, `HEADER_TOTAL`, `KEEPALIVE`, `WRITE_STALL`, `WS_IDLE` (or `STATICD_*`) |
 | Output | App socket I/O is `try_write` only. `out_*` cursor for protocol bytes (HTTP headers, WS frames); body cursor for file / mem. `flush_conn` / `write_ws` queue; short / `BUSY` → `.wait_out` |
 | Body | Named-block ring: 256 × 64KB = 16MB BSS, key `(dev, ino, block)`, FNV probe only, reuse in place, idle cull. Pool `pread` on miss / unaligned Range / busy fill. 8-slot fd cache; pathname revalidate ≤1s (absolute); hold dups the fd. One 64KB chunk per step |
@@ -234,7 +234,7 @@ while in-flight holds finish. The ring reuses `(dev, ino, block)`; idle
 
 | Name | What it is |
 |------|------------|
-| **Worker dest** | `srv.serve` plants dests (start 2, or 1 if cap is 1) and grows with live. Each worker owns the poll tape and live table. One app closure is borrow-invoked per ready window. |
+| **Worker dest** | `srv.serve` plants dests (start 2, or 1 if cap is 1) and grows with live. Each worker owns the poll tape, accept spare fd, and live table. One app closure is borrow-invoked per ready window. |
 | **Socket session** | `CCIoSess`: sock / TLS / window / `deadline` / dead. Tape sees `io` only. |
 | **HTTP/WS row** | `Session*`: embeds `CCIoSess`; `out_*` protocol cursor; body cursor (file hold or mem slab / off / left / `send_close`). |
 | **Send** | Drain `out_*` then body. `POLLOUT` while left. `send_close` after drains when the response closes. |

@@ -151,11 +151,16 @@ static int http_parse_date(char[:] s, CCArena a, time_t* out) {
     HttpDate d;
     int m;
     struct tm tm;
+    struct tm back;
+    time_t t;
     if (!cc_parse(HttpDate, s.ptr, s.len, a, &d)) return 0;
     if (d.month.len != 3) return 0;
     for (m = 0; m < 12; m++)
         if (memcmp(d.month.ptr, k_mo[m], 3) == 0) break;
     if (m == 12 || d.day < 1 || d.day > 31) return 0;
+    if (d.hour < 0 || d.hour > 23) return 0;
+    if (d.minute < 0 || d.minute > 59) return 0;
+    if (d.sec < 0 || d.sec > 60) return 0;
     memset(&tm, 0, sizeof(tm));
     tm.tm_mday = d.day;
     tm.tm_mon = m;
@@ -163,8 +168,15 @@ static int http_parse_date(char[:] s, CCArena a, time_t* out) {
     tm.tm_hour = d.hour;
     tm.tm_min = d.minute;
     tm.tm_sec = d.sec;
-    *out = timegm(&tm);
-    return *out != (time_t)-1;
+    t = timegm(&tm);
+    if (t == (time_t)-1) return 0;
+    if (!gmtime_r(&t, &back)) return 0;
+    if (back.tm_year != tm.tm_year || back.tm_mon != tm.tm_mon
+            || back.tm_mday != tm.tm_mday || back.tm_hour != tm.tm_hour
+            || back.tm_min != tm.tm_min || back.tm_sec != tm.tm_sec)
+        return 0;
+    *out = t;
+    return 1;
 }
 
 static int digits_u(char[:] s, size_t* out) {
@@ -241,7 +253,8 @@ static int uri_unreserved(unsigned char c) {
     return c == '-' || c == '.' || c == '_' || c == '~';
 }
 
-/* Strict path decode after query split. Rejects %00, decoded / \, bad %. */
+/* Strict path decode after query split. Rejects bad %, decoded / \,
+ * C0 controls, and DEL (byte-oriented; POSIX filenames). */
 static bool !>(CCError) uri_path_decode(char[:] src, CCString* dst, CCArena a) {
     size_t i = 0;
     if (!dst) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "uri decode"));
@@ -259,10 +272,12 @@ static bool !>(CCError) uri_path_decode(char[:] src, CCString* dst, CCArena a) {
                 return cc_err(CC_ERROR(CC_ERR_PARSE, "bad uri"));
             ch = (unsigned char)((hi << 4) | lo);
             i += 3;
-            if (ch == 0 || ch == '/' || ch == '\\')
+            if (ch < 0x20 || ch == 0x7f || ch == '/' || ch == '\\')
                 return cc_err(CC_ERROR(CC_ERR_PARSE, "bad uri"));
         } else {
             i++;
+            if (ch < 0x20 || ch == 0x7f)
+                return cc_err(CC_ERROR(CC_ERR_PARSE, "bad uri"));
         }
         one[0] = (char)ch;
         if (!dst->append(cc_slice_from_buffer(one, 1), a) || dst->failed())

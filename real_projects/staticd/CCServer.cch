@@ -10,13 +10,12 @@
  * and arm stay in that unit. Dest-per-conn is `ln.serve`.
  *
  * Page sees: init / close / listen / load_tls / serve / start_n /
- * workers_max / tls / tls_fails; on io: write_all / try_write / window /
+ * workers_max / tls / tls_fails; on io: try_write / window /
  * consume / full / apply / dead / touch / set_deadline. `app` is a page
  * cookie; dest never derefs it.
  *
  * try_write: one non-blocking send. Ok(n) may be short. BUSY = wrote
- * nothing, POLLOUT later. write_all remains for callers that still want
- * finish-or-fail; the page prefers try_write + an output cursor.
+ * nothing, POLLOUT later. App output is try_write + cursors only.
  *
  * TLS: bind starts the engine (`tls_hs`); handshake steps from poll
  * readiness (WANT_READ / WANT_WRITE) before on_app sees the row.
@@ -61,16 +60,17 @@ typedef struct CCIoSess {
     void* app;
 } CCIoSess;
 
-/* Dest bag. Owns the listen fd and (optional) TLS mats. */
+/* Dest bag. Owns the listen fd and (optional) TLS mats.
+ * Shared worker-visible state is listen + atomics only — no worker-mutable
+ * fds. EMFILE spare recovery lives on CCTape (per dest). */
 typedef struct CCServer {
     CCListener ln;
     int tls;
     int tls_owned;
     int workers_max;
-    int spare_fd; /* EMFILE recovery: close, accept, reopen */
     int sec_tls_hs;       /* first-byte budget during TLS HS (default 10) */
     int sec_first_byte;   /* first HTTP byte after bind/HS (default 15) */
-    uint64_t accept_backoff_until_ms; /* listen POLLIN off until mono ms */
+    cc_atomic_u64 accept_backoff_until_ms; /* listen POLLIN off until mono ms */
     cc_atomic_int stop;
     cc_atomic_int live;
     cc_atomic_int nworkers; /* running workers */
@@ -83,36 +83,6 @@ int cc_fd_nonblock(int fd) {
     int fl = fcntl(fd, F_GETFL, 0);
     if (fl < 0) return -1;
     return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
-}
-
-bool !>(CCIoError) io_sess_write_sock(CCSocket* sock, char[:] data) {
-    size_t off = 0;
-    while (off < data.len) {
-        size_t n = sock->write(data.ptr + off, data.len - off) !>(e) {
-            return cc_err(e);
-        };
-        if (n == 0)
-            return cc_err(cc_io_error(CC_ERROR(CC_ERR_CLOSED, "short write")));
-        off += n;
-    }
-    return cc_ok(true);
-}
-
-/* Finish-or-fail (legacy). Prefer try_write + cursor on the page. */
-bool !>(CCIoError) io_sess_write_all(CCIoSess* io, char[:] data) {
-    size_t off = 0;
-    if (!io->tls_on)
-        return io_sess_write_sock(&io->sock, data);
-    while (off < data.len) {
-        CCNetError ne = CC_NET_OK;
-        size_t n = cc_tls_write(&io->tls, data.ptr + off, data.len - off, &ne);
-        if (ne != CC_NET_OK && n == 0)
-            return cc_err(cc_net_to_io_error(ne));
-        if (n == 0)
-            return cc_err(cc_io_error(CC_ERROR(CC_ERR_CLOSED, "short write")));
-        off += n;
-    }
-    return cc_ok(true);
 }
 
 /* Defined in CCServer.ccs — send() / cc_tls_try_write, never parks. */
@@ -167,7 +137,6 @@ void cc_server_init(CCServer* srv, int workers_max) {
     *srv = (CCServer){
         .ln = { .fd = -1 },
         .workers_max = workers_max,
-        .spare_fd = -1,
         .sec_tls_hs = 10,
         .sec_first_byte = 15,
     };
@@ -185,8 +154,6 @@ void !>(CCError) cc_server_listen(CCServer* srv, CCSlice addr) {
         return cc_err(cc_net_to_io_error(e).base);
     };
     (void)cc_fd_nonblock(srv->ln.fd);
-    if (srv->spare_fd < 0)
-        srv->spare_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
     return cc_ok();
 }
 
@@ -210,10 +177,6 @@ void cc_server_close(CCServer* srv) {
     if (!srv) return;
     cc_server_shutdown(srv);
     srv->ln.close();
-    if (srv->spare_fd >= 0) {
-        close(srv->spare_fd);
-        srv->spare_fd = -1;
-    }
     if (srv->tls_owned) {
         cc_tls_server_unload();
         srv->tls_owned = 0;
