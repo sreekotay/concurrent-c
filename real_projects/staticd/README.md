@@ -163,27 +163,64 @@ process for that cell only — RSS is the cell.
 
 Local receipts land under `benchmarks/` (gitignored). Isolate cells pass
 `--workers 1` so the nginx peer stays one worker. Default starts two dests
-and grows to ncpu/2 as `g_live` crosses 192, 256, … — the accept storm
+and grows to ncpu/2 as `CCServer.live` crosses 192, 256, … — the accept storm
 splits the zip. ncpu as a *start* count oversubscribes a CPU-bound zip.
+
+### Receipt (2026-09-07)
+
+`./compare.sh` on this machine (Darwin arm64, 10 CPUs). Correctness
+PASS (staticd + nginx + darkhttpd). Directional wrk: 1s, 3-round median
+(round 0 discarded), isolate, `--workers 1`, page-cached fixtures. 0
+errors except nginx `10mb.bin` @ c=100 (empty — Darwin `sendfile` wedge).
+
+**4kb.html** — staticd every cell
+
+| c | staticd rps / p50 / RSS | nginx | darkhttpd |
+|---|-------------------------|-------|-----------|
+| 1 | **55.7k** / 0.017 ms / 2.4 MB | 35.0k / 0.028 / 12 MB | 28.9k / 0.034 / 1.8 MB |
+| 10 | **171k** / 0.046 / 2.8 MB | 68.1k / 0.134 / 12 MB | 57.8k / 0.150 / 1.8 MB |
+| 100 | **169k** / 0.569 / 4.4 MB | 73.1k / 1.34 / 12 MB | 57.6k / 1.66 / 1.8 MB |
+
+**1mb.bin** — staticd at c=1 and c=10 rps; nginx p50 and c=100 rps
+
+| c | staticd rps / p50 / RSS | nginx | darkhttpd |
+|---|-------------------------|-------|-----------|
+| 1 | **7.2k** / 0.135 ms / 3.6 MB | 6.8k / 0.142 / 12 MB | 5.7k / 0.169 / 1.8 MB |
+| 10 | **11.3k** / 0.843 / 3.8 MB | 9.3k / 0.707 / 12 MB | 5.8k / 1.59 / 1.8 MB |
+| 100 | 10.5k / 9.50 / 5.3 MB | **11.7k** / 4.67 / 13 MB | 5.1k / 18.1 / 1.8 MB |
+
+**10mb.bin** — nginx quicker per request; staticd more rps at c=100
+
+| c | staticd rps / p50 / RSS | nginx | darkhttpd |
+|---|-------------------------|-------|-----------|
+| 1 | 681 / 1.36 ms / 14 MB | **808** / 1.21 / 12 MB | 556 / 1.73 / 1.7 MB |
+| 10 | 1.04k / 9.60 / 14 MB | **1.30k** / 6.36 / 12 MB | 618 / 15.9 / 1.8 MB |
+| 100 | **1.00k** / 92.5 / 16 MB | 0 (wedge) | 545 / 159 / 1.8 MB |
+
+Body send is a 64KB cursor (`try_write`, `.wait_out` on short/BUSY).
+File body is the named-block ring, not a per-response `mmap`.
 
 ## Shape
 
 ```
-main → open cfg → serve(cfg)
-  signal → g_stop
-  worker × 2..cap               // start 2; grow every 64 conns; cap ncpu/2
-    poll → step rows → accept → reap
-    step: fill | send chunk | handle_http | WS frame
+main → open cfg → srv.listen / load_tls → serve
+  srv.serve(stop, cfg, (s, enc) => [cfg] { session_app })
+  worker × 2..cap               // grow every 64 conns; cap ncpu/2
+    wait.poll → step rows → accept → reap
+    session_step: fill | send chunk
+    session_app: handle_http | WS frame
     handle_http: pages arm (MISS→static) | file | upgrade
 ```
 
 Keep-alive and WebSocket are the row staying in the table, not a dest
 that stays live. Add workers to use more cores; they share the listen fd.
 The table is `Vec` of `Session*` on a worker arena; slots are a pool on
-that arena. `poll()` is a tape, not a second table. TLS wraps once at
-accept; `session_fill` / `session_write_all` are the one transport face.
-`SessAct` (`wait` / `close`) is how a step finishes; `dead` is only the
-reap mark. TLS handshake drops increment `g_tls_fail` (shutdown summary).
+that arena. `poll()` is a tape, not a second table. Session embeds
+`CCIoSess`; TLS wraps once at `bind_conn`. `SessAct` (`wait` / `close`)
+is how a step finishes; `dead` is only the reap mark. Handshake drops
+increment `srv.tls_fail` (shutdown summary). `CCServer.cch` is a local
+face (not std) — dest zip + socket session (`CCIoSess`). `CCServer.ccs`
+owns the header and is `serve`. The page is HTTP/WS + `main`.
 
 Encode methods never touch the socket. The jail walks each path
 component with `openat(O_NOFOLLOW)`. The fd cache re-resolves the name
@@ -196,8 +233,9 @@ become holes once a second.
 
 | Name | What it is |
 |------|------------|
-| **Worker dest** | `g_app`. Start 2 (1 if cap is 1); `maybe_grow` dest-attaches up to the cap. Owns the poll tape and the live table. |
-| **Session row** | `Session*` in the table. Socket, read buf, send cursor (`FileHold` / off / left). |
+| **Worker dest** | `srv.serve` plants dests (start 2, or 1 if cap is 1) and grows with live. Each worker owns the poll tape and live table. One app closure is borrow-invoked per ready window. |
+| **Socket session** | `CCIoSess` on the server: sock / TLS / window / dead. Tape sees `io` only. |
+| **HTTP/WS row** | `Session*` in the table. Embeds `CCIoSess`, send cursor (`FileHold` / off / left). |
 | **Send cursor** | One `FILE_SEND_CHUNK` per `session_step`. `POLLOUT` while `send_left`. Close-after-body is `send_close`, not `dead` before the cursor drains. |
 
 Ring and fd cache share one `CCExclusive` (`cli_a.create_exclusive(4)`),
@@ -219,7 +257,9 @@ pools. `g_send_pool` is `cc_arena_pool_stack` at the top of `main`
 
 | Path | Purpose |
 |------|---------|
-| `staticd.ccs` | Server (`worker_run` is the story) |
+| `staticd.ccs` | HTTP / WS / encode / `main` |
+| `CCServer.cch` | Dest zip + `CCIoSess` + row types — not std |
+| `CCServer.ccs` | Owner: `srv.serve` — workers / poll / grow, borrow-invoke |
 | `staticd_ws.cch` | SHA-1 / base64 / WS frame tape |
 | `staticd_http.cch` | Date / Range / header-CI tape |
 | `staticd_block.cch` | Named-block ring (`checkout_block`) |

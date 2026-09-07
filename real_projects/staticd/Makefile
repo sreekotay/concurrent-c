@@ -30,7 +30,7 @@ ensure-bearssl:
 ensure-tls-runtime: ensure-bearssl
 ifeq ($(CC_ENABLE_TLS),1)
 	$(MAKE) -C $(REPO_CC) CC_ENABLE_TLS=1 lower-headers
-	@if ! nm $(REPO_ROOT)/out/cc/obj/runtime/concurrent_c.o 2>/dev/null | grep -q 'cc_tls_server_load'; then \
+	@if ! nm $(REPO_ROOT)/out/cc/obj/runtime/concurrent_c.o 2>/dev/null | grep -q 'cc_tls_try_write'; then \
 		rm -f $(REPO_ROOT)/out/cc/obj/runtime/concurrent_c.o; \
 		$(MAKE) -C $(REPO_CC) CC_ENABLE_TLS=1 ../out/cc/obj/runtime/concurrent_c.o; \
 	fi
@@ -38,13 +38,13 @@ endif
 
 $(OUT_DIR)/staticd: staticd.ccs staticd_ws.cch \
 		staticd_http.cch staticd_block.cch staticd_fs.cch staticd_script.cch \
-		staticd_io.cch \
+		CCServer.cch CCServer.ccs \
 		| $(OUT_DIR) ensure-tls-runtime
 ifeq ($(CC_ENABLE_TLS),1)
 	CFLAGS="-DCC_ENABLE_TLS -I$(BEARSSL_INC) $${CFLAGS:-}" \
-		$(CCC) -O -o $@ staticd.ccs --release
+		$(CCC) -O -o $@ staticd.ccs CCServer.ccs --release
 else
-	$(CCC) -O -o $@ staticd.ccs --release
+	$(CCC) -O -o $@ staticd.ccs CCServer.ccs --release
 endif
 
 staticd: $(OUT_DIR)/staticd

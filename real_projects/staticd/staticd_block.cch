@@ -112,7 +112,7 @@ static char* !>(CCError) pool_pread(int fd, size_t want, size_t file_off) {
     return cc_ok(buf);
 }
 
-static void block_hold_drop(BlockHold* h) {
+void block_hold_drop(BlockHold* h) {
     if (!h || !h->ptr) return;
     if (h->slot < 0) {
         if (g_send_pool) g_send_pool->free(h->ptr);
@@ -125,7 +125,7 @@ static void block_hold_drop(BlockHold* h) {
     h->slot = -1;
 }
 
-static BlockHold !>(CCError) checkout_block(int fd, uint64_t dev, uint64_t ino,
+BlockHold !>(CCError) checkout_block(int fd, uint64_t dev, uint64_t ino,
                                            time_t mtime, size_t file_off,
                                            size_t want) {
     BlockHold h = { .slot = -1 };

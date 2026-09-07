@@ -13,6 +13,7 @@
 #undef cc_tls_accept
 #undef cc_tls_read
 #undef cc_tls_write
+#undef cc_tls_try_write
 #undef cc_tls_shutdown
 #undef cc_tls_close
 #undef cc_tls_load_cert_chain
@@ -836,6 +837,63 @@ size_t cc_tls_write(CCTlsConn *conn, const char *data, size_t len,
                 } else {
                     idle = 0;
                 }
+            }
+        }
+        return sent;
+    }
+#else
+    (void)conn;
+    (void)data;
+    (void)len;
+    *out_err = CC_NET_TLS_HANDSHAKE_FAILED;
+    return 0;
+#endif
+}
+
+/* One shot: accept into SENDAPP if ready, pump SENDREC once. Never select. */
+size_t cc_tls_try_write(CCTlsConn *conn, const char *data, size_t len,
+                        CCNetError *out_err) {
+    *out_err = CC_NET_OK;
+#ifdef CC_HAS_BEARSSL
+    if (!conn || !(conn->flags & CC__TLS_F_READY) || !data) {
+        *out_err = CC_NET_CONNECTION_CLOSED;
+        return 0;
+    }
+    if (len == 0)
+        return 0;
+    {
+        br_ssl_engine_context *eng = cc__tls_eng(conn);
+        unsigned st = br_ssl_engine_current_state(eng);
+        size_t sent = 0;
+        if (st & BR_SSL_CLOSED) {
+            *out_err = CC_NET_CONNECTION_CLOSED;
+            return 0;
+        }
+        if (st & BR_SSL_SENDREC) {
+            int p = cc__tls_pump_rec(conn);
+            if (p < 0) {
+                *out_err = CC_NET_CONNECTION_CLOSED;
+                return 0;
+            }
+            st = br_ssl_engine_current_state(eng);
+        }
+        if (st & BR_SSL_SENDAPP) {
+            size_t avail = 0;
+            unsigned char *buf = br_ssl_engine_sendapp_buf(eng, &avail);
+            if (buf && avail) {
+                size_t chunk = len < avail ? len : avail;
+                memcpy(buf, data, chunk);
+                br_ssl_engine_sendapp_ack(eng, chunk);
+                br_ssl_engine_flush(eng, 0);
+                sent = chunk;
+            }
+        }
+        st = br_ssl_engine_current_state(eng);
+        if (st & BR_SSL_SENDREC) {
+            int p = cc__tls_pump_rec(conn);
+            if (p < 0 && sent == 0) {
+                *out_err = CC_NET_CONNECTION_CLOSED;
+                return 0;
             }
         }
         return sent;

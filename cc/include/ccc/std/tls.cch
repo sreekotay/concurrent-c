@@ -119,6 +119,11 @@ CCSlice cc_tls_read(CCTlsConn* conn, CCArena arena, size_t max_bytes, CCNetError
 /* Write data (encrypted automatically) */
 size_t cc_tls_write(CCTlsConn* conn, const char* data, size_t len, CCNetError* out_err);
 
+/* One non-blocking write shot. Ok bytes accepted into the engine (may be
+ * short). 0 + CC_NET_OK means would-block; dest maps that to CC_IO_BUSY. */
+size_t cc_tls_try_write(CCTlsConn* conn, const char* data, size_t len,
+                        CCNetError* out_err);
+
 /* Async write */
 /* @async size_t cc_tls_write_async(CCTlsConn* conn, const char* data, size_t len, CCNetError* out_err); */
 

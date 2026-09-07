@@ -1,0 +1,193 @@
+/*
+ * Local dest face. Not std. No protocol, no app row, no app hook.
+ *
+ *   CCIoSess  — socket session (sock / optional TLS / window / dead)
+ *   CCServer  — listen, tls mats, dest, stop, live / worker ratchet
+ *   CCIoAct   — wait | wait_out | close (how a socket step finishes)
+ *
+ * `serve` lives in CCServer.ccs (this header's owner): workers / poll /
+ * grow, borrow-invoke one closure with `CCIoSess*`. Tape, accept, fill,
+ * and arm stay in that unit. Dest-per-conn is `ln.serve`.
+ *
+ * Page sees: init / close / listen / load_tls / serve / start_n /
+ * workers_max / tls / tls_fails; on io: write_all / try_write / window /
+ * consume / full / apply / dead. `app` is a page cookie; dest never
+ * derefs it.
+ *
+ * write_all: finish this slice or fail (headers, WS control, listings).
+ * try_write: one non-blocking send. Ok(n) may be short. BUSY = wrote
+ * nothing, POLLOUT later. File send uses this so .wait_out matches the
+ * socket.
+ *
+ * Caller includes <ccc/std/net.cch>, <ccc/std/tls.cch>, <ccc/std/signal.cch>,
+ * <ccc/cc_atomic.cch>. Certs are process mats (`cc_tls_server_load`)
+ * before dest wraps TLS.
+ */
+#ifndef CC_SERVER_CCH
+#define CC_SERVER_CCH
+
+#include <fcntl.h>
+#include <ccc/cc_closure.cch>
+
+@variant CCIoAct {
+    wait: void;
+    wait_out: void;
+    close: void;
+};
+
+/* Socket-level session. read_ptr views a dest-owned buffer. */
+typedef struct CCIoSess {
+    CCSocket sock;
+    CCTlsConn tls;
+    void* tls_iobuf;
+    int tls_on;
+    char* read_ptr;
+    size_t rlen;
+    size_t rcap;
+    int dead;
+    int want_out;
+    void* app;
+} CCIoSess;
+
+/* Dest bag. Owns the listen fd and (optional) TLS mats. */
+typedef struct CCServer {
+    CCListener ln;
+    int tls;
+    int tls_owned;
+    int workers_max;
+    cc_atomic_int stop;
+    cc_atomic_int live;
+    cc_atomic_int nworkers;
+    cc_atomic_int tls_fail;
+    CCParallel app;
+} CCServer;
+
+int cc_fd_nonblock(int fd) {
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0) return -1;
+    return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+}
+
+bool !>(CCIoError) io_sess_write_sock(CCSocket* sock, char[:] data) {
+    size_t off = 0;
+    while (off < data.len) {
+        size_t n = sock->write(data.ptr + off, data.len - off) !>(e) {
+            return cc_err(e);
+        };
+        if (n == 0)
+            return cc_err(cc_io_error(CC_ERROR(CC_ERR_CLOSED, "short write")));
+        off += n;
+    }
+    return cc_ok(true);
+}
+
+/* One transport face: TLS is wrap-once at accept; callers never branch. */
+bool !>(CCIoError) io_sess_write_all(CCIoSess* io, char[:] data) {
+    size_t off = 0;
+    if (!io->tls_on)
+        return io_sess_write_sock(&io->sock, data);
+    while (off < data.len) {
+        CCNetError ne = CC_NET_OK;
+        size_t n = cc_tls_write(&io->tls, data.ptr + off, data.len - off, &ne);
+        if (ne != CC_NET_OK && n == 0)
+            return cc_err(cc_net_to_io_error(ne));
+        if (n == 0)
+            return cc_err(cc_io_error(CC_ERROR(CC_ERR_CLOSED, "short write")));
+        off += n;
+    }
+    return cc_ok(true);
+}
+
+/* Defined in CCServer.ccs — send() / cc_tls_try_write, never parks. */
+size_t !>(CCIoError) io_sess_try_write(CCIoSess* io, char[:] data);
+
+void io_sess_consume(CCIoSess* io, size_t n) {
+    if (!io->read_ptr) return;
+    if (n > io->rlen) n = io->rlen;
+    if (n && n < io->rlen) {
+        size_t keep = io->rlen - n;
+        char[:] buf = cc_slice_from_buffer(io->read_ptr, io->rlen);
+        char[:] dst = buf.sub(0, keep);
+        dst.copy_overlap(buf.sub(n, io->rlen)) !>(e) { (void)e; return; };
+    }
+    io->rlen -= n;
+}
+
+char[:] io_sess_window(CCIoSess* io) {
+    if (!io || !io->read_ptr) return cc_slice_empty();
+    return cc_slice_from_buffer(io->read_ptr, io->rlen);
+}
+
+int io_sess_full(CCIoSess* io) {
+    return io && io->rcap && io->rlen >= io->rcap;
+}
+
+void io_sess_apply(CCIoSess* io, CCIoAct a) {
+    @switch (a) {
+    case .close:
+        io->dead = 1;
+        io->want_out = 0;
+        break;
+    case .wait:
+        io->want_out = 0;
+        break;
+    case .wait_out:
+        io->want_out = 1;
+        break;
+    }
+}
+
+void cc_server_init(CCServer* srv, int workers_max) {
+    *srv = (CCServer){
+        .ln = { .fd = -1 },
+        .workers_max = workers_max,
+    };
+}
+
+int cc_server_start_n(CCServer* srv) {
+    int n = srv->workers_max;
+    if (n < 1) return 1;
+    return n < 2 ? n : 2;
+}
+
+void !>(CCError) cc_server_listen(CCServer* srv, CCSlice addr) {
+    @errhandler(CCError e) { return cc_err(e); }
+    srv->ln = cc_tcp_listen(addr) !>(e) {
+        return cc_err(cc_net_to_io_error(e).base);
+    };
+    (void)cc_fd_nonblock(srv->ln.fd);
+    return cc_ok();
+}
+
+int cc_server_load_tls(CCServer* srv, const char* cert, const char* key) {
+    if (!srv || !cert || !key) return -1;
+    if (cc_tls_server_load(cert, key) != 0) return -1;
+    srv->tls = 1;
+    srv->tls_owned = 1;
+    return 0;
+}
+
+void cc_server_shutdown(CCServer* srv) {
+    cc_atomic_store_release(&srv->stop, 1);
+}
+
+int cc_server_tls_fails(CCServer* srv) {
+    return cc_atomic_load_acquire(&srv->tls_fail);
+}
+
+void cc_server_close(CCServer* srv) {
+    if (!srv) return;
+    cc_server_shutdown(srv);
+    srv->ln.close();
+    if (srv->tls_owned) {
+        cc_tls_server_unload();
+        srv->tls_owned = 0;
+        srv->tls = 0;
+    }
+}
+
+/* Borrow-invoke on_app(io) per ready window; drop once after join. */
+void !>(CCError) cc_server_serve(CCServer* srv, CCSignal* stop,
+                                 CCClosure1 on_app);
+
+#endif /* CC_SERVER_CCH */

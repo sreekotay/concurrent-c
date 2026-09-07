@@ -260,7 +260,7 @@ static void fc_apply_open(int i, int fd, time_t now, size_t file_len,
     g_fc[i].checked = now;
 }
 
-static void file_hold_drop(FileHold* h) {
+void file_hold_drop(FileHold* h) {
     if (!h) return;
     if (h->fd >= 0) close(h->fd);
     if (h->slot >= 0) {

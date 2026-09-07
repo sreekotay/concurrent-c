@@ -1,0 +1,543 @@
+#!ccc ccs
+/*
+ * Owner of CCServer.cch. Page includes the header (decls) and links this unit.
+ *
+ * `srv.serve(stop, (io) => [cfg, sessions] { … })` plants dests, polls,
+ * accepts, fills, borrow-invokes `on_app` with `CCIoSess*` (many fibers,
+ * one env), then drops the closure at join. Dest does not see Cfg / Enc /
+ * Session. The page row lives in a pool the closure captured.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/std/net.cch>
+#include <ccc/std/tls.cch>
+#include <ccc/std/signal.cch>
+#include <string.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <poll.h>
+#include "CCServer.cch"
+
+#ifndef K_IO_READ_BUF
+#define K_IO_READ_BUF (16 * 1024)
+#endif
+
+#ifndef CC_SERVER_POLL_MS
+#define CC_SERVER_POLL_MS 50
+#endif
+
+#ifndef WORKER_GROW_EVERY
+#define WORKER_GROW_EVERY 64
+#endif
+
+typedef struct pollfd PollFd;
+
+/* Arm names are TU-wide for designated init — do not reuse `.fd` / `.wait`. */
+@variant CCAccept {
+    ready: int;
+    busy: void;
+    dead: void;
+};
+
+typedef struct CCTape {
+    CCServer* srv;
+    Vec::[PollFd] tape;
+    int listening;
+} CCTape;
+
+int !>(CCIoError) io_sess_fill(CCIoSess* io) {
+    size_t n = 0;
+    size_t room;
+    bool got;
+    if (!io->read_ptr || io->rcap == 0) return cc_ok(1);
+    if (io->rlen >= io->rcap) return cc_ok(1);
+    room = io->rcap - io->rlen;
+    if (io->tls_on) {
+        CCNetError ne = CC_NET_OK;
+        CCSlice got_sl;
+        cc_arena_stack(tmp, K_IO_READ_BUF);
+        got_sl = cc_tls_read(&io->tls, tmp, room, &ne);
+        if (ne == CC_NET_OK && got_sl.len == 0) return cc_ok(0);
+        if (ne != CC_NET_OK)
+            return cc_err(cc_net_to_io_error(ne));
+        if (got_sl.len > room)
+            return cc_err(cc_io_error(CC_ERROR(CC_ERR_IO, "tls overread")));
+        memcpy(io->read_ptr + io->rlen, got_sl.ptr, got_sl.len);
+        io->rlen += got_sl.len;
+        return cc_ok(1);
+    }
+    got = io->sock.try_read_into(io->read_ptr + io->rlen, room, &n) !>(e) {
+        if (e.base.kind == CC_IO_BUSY) return cc_ok(0);
+        return cc_err(e);
+    };
+    if (!got)
+        return cc_err(cc_io_error(CC_ERROR(CC_ERR_CLOSED, "eof")));
+    io->rlen += n;
+    return cc_ok(1);
+}
+
+size_t !>(CCIoError) io_sess_try_write(CCIoSess* io, char[:] data) {
+    if (!data.len)
+        return cc_ok(0);
+    if (io->tls_on) {
+        CCNetError ne = CC_NET_OK;
+        size_t n = cc_tls_try_write(&io->tls, data.ptr, data.len, &ne);
+        if (ne != CC_NET_OK)
+            return cc_err(cc_net_to_io_error(ne));
+        if (n == 0)
+            return cc_err(cc_io_error(CC_IO_BUSY));
+        return cc_ok(n);
+    }
+    {
+#ifdef MSG_NOSIGNAL
+        ssize_t n = send(io->sock.fd, data.ptr, data.len, MSG_NOSIGNAL);
+#else
+        ssize_t n = send(io->sock.fd, data.ptr, data.len, 0);
+#endif
+        if (n > 0)
+            return cc_ok((size_t)n);
+        if (n == 0)
+            return cc_err(cc_io_error(CC_ERROR(CC_ERR_CLOSED, "peer closed")));
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS ||
+            errno == EINTR)
+            return cc_err(cc_io_error(CC_IO_BUSY));
+        return cc_err(cc_io_from_errno(errno));
+    }
+}
+
+void io_sess_init(CCIoSess* io, CCSocket sock, char* buf, size_t cap) {
+    *io = (CCIoSess){
+        .sock = sock,
+        .read_ptr = buf,
+        .rcap = cap,
+    };
+    (void)io->sock.set_nodelay(1);
+}
+
+int io_sess_wrap_tls(CCIoSess* io) {
+    void* iobuf;
+    CCTlsServerConfig tcfg = {0};
+    CCNetError ne = CC_NET_OK;
+    CCTlsConn tls;
+    cc_arena_stack(info_a, 64);
+    if (!io) return -1;
+    iobuf = malloc(CC_TLS_IOBUF_SIZE);
+    if (!iobuf) return -1;
+    tls = cc_tls_accept(io->sock, tcfg, iobuf, CC_TLS_IOBUF_SIZE, info_a, &ne);
+    if (ne != CC_NET_OK || !tls.ctx) {
+        free(iobuf);
+        return -1;
+    }
+    io->tls = tls;
+    io->tls_iobuf = iobuf;
+    io->tls_on = 1;
+    io->sock = tls.underlying;
+    return 0;
+}
+
+void io_sess_drop(CCIoSess* io) {
+    if (!io) return;
+    if (io->tls_on) {
+        cc_tls_close(&io->tls);
+        free(io->tls_iobuf);
+        io->tls_iobuf = NULL;
+        io->tls_on = 0;
+        io->sock.fd = -1;
+    } else if (io->sock.fd >= 0) {
+        io->sock.close();
+    }
+    io->read_ptr = NULL;
+    io->rlen = 0;
+    io->rcap = 0;
+    io->dead = 0;
+    io->want_out = 0;
+    io->app = NULL;
+}
+
+void io_sess_arm(CCIoSess* io, PollFd* p, int want_out) {
+    (void)io;
+    if (!p) return;
+    p->events = want_out ? (short)(POLLIN | POLLOUT) : (short)POLLIN;
+}
+
+int io_sess_poll_bad(CCIoSess* io, PollFd* p) {
+    (void)io;
+    return p && (p->revents & (POLLERR | POLLHUP | POLLNVAL));
+}
+
+int io_sess_can_read(CCIoSess* io, PollFd* p) {
+    (void)io;
+    return p && (p->revents & POLLIN);
+}
+
+int io_sess_can_write(CCIoSess* io, PollFd* p) {
+    (void)io;
+    return p && (p->revents & POLLOUT);
+}
+
+int cc_server_stopped(CCServer* srv) {
+    return cc_atomic_load_acquire(&srv->stop);
+}
+
+void cc_server_note_open(CCServer* srv) {
+    if (srv) cc_atomic_fetch_add(&srv->live, 1);
+}
+
+void cc_server_note_close(CCServer* srv) {
+    if (srv) cc_atomic_fetch_sub(&srv->live, 1);
+}
+
+CCAccept cc_server_accept_fd(CCServer* srv) {
+    int fd;
+    if (!srv || srv->ln.fd < 0) return (CCAccept){ .dead = {} };
+    fd = accept(srv->ln.fd, NULL, NULL);
+    if (fd < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+            return (CCAccept){ .busy = {} };
+        return (CCAccept){ .dead = {} };
+    }
+    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+    (void)cc_fd_nonblock(fd);
+    return (CCAccept){ .ready = fd };
+}
+
+int cc_server_bind_conn(CCServer* srv, CCIoSess* io, int fd,
+                               char* buf, size_t cap) {
+    io_sess_init(io, (CCSocket){ .fd = fd }, buf, cap);
+    if (srv && srv->tls && io->wrap_tls() != 0) {
+        cc_atomic_fetch_add(&srv->tls_fail, 1);
+        io->drop();
+        return 0;
+    }
+    return 1;
+}
+
+int cc_tape_open(CCTape* w, CCServer* srv, CCArena a) {
+    Vec::[PollFd] tape@(a) @detach;
+    PollFd p;
+    if (!w || !srv || !cc_arena_is_live(a) || srv->ln.fd < 0) return 0;
+    (void)cc_fd_nonblock(srv->ln.fd);
+    p = (PollFd){ .fd = srv->ln.fd, .events = POLLIN, .revents = 0 };
+    if (tape.push(p) != 0) return 0;
+    *w = (CCTape){ .srv = srv, .tape = tape, .listening = 1 };
+    return 1;
+}
+
+int cc_tape_keep_listen(CCTape* w) {
+    Vec::[PollFd] rows;
+    size_t n;
+    if (!w || !w->listening) return 0;
+    if (!w->srv || !w->srv->stopped()) return 1;
+    rows = w->tape;
+    n = 0;
+    @for (i, src in rows) {
+        if (i == 0) continue;
+        if (w->tape.set(n, src) != 0) return -1;
+        n++;
+    }
+    w->tape.truncate(n);
+    w->listening = 0;
+    return 0;
+}
+
+int cc_tape_poll(CCTape* w) {
+    PollFd* raw;
+    size_t n;
+    int pr, hold;
+    if (!w) return -1;
+    hold = cc_tape_keep_listen(w);
+    if (hold < 0) return -1;
+    n = w->tape.len();
+    raw = w->tape.data();
+    if (n && !raw) return -1;
+    pr = poll(raw, (nfds_t)n, w->listening ? CC_SERVER_POLL_MS : 0);
+    if (pr < 0) return (errno == EINTR) ? 0 : -1;
+    return pr;
+}
+
+PollFd* cc_tape_row(CCTape* w, size_t i) {
+    size_t base;
+    if (!w) return NULL;
+    base = w->listening ? 1 : 0;
+    return w->tape.get(base + i);
+}
+
+CCAccept cc_tape_accept(CCTape* w) {
+    PollFd* lp;
+    if (!w || !w->srv || !w->listening) return (CCAccept){ .busy = {} };
+    lp = w->tape.get(0);
+    if (!lp || !(lp->revents & POLLIN)) return (CCAccept){ .busy = {} };
+    return cc_server_accept_fd(w->srv);
+}
+
+int cc_tape_watch(CCTape* w, CCIoSess* io) {
+    PollFd p;
+    if (!w || !io || io->sock.fd < 0) return 0;
+    p = (PollFd){ .fd = io->sock.fd, .events = POLLIN, .revents = 0 };
+    return w->tape.push(p) == 0;
+}
+
+int cc_tape_keep_row(CCTape* w, size_t from, size_t to) {
+    size_t base;
+    PollFd* p;
+    if (!w) return 0;
+    base = w->listening ? 1 : 0;
+    p = w->tape.get(base + from);
+    if (!p) return 0;
+    return w->tape.set(base + to, *p) == 0;
+}
+
+void cc_tape_done(CCTape* w, size_t nlive) {
+    size_t base;
+    if (!w) return;
+    base = w->listening ? 1 : 0;
+    w->tape.truncate(base + nlive);
+}
+
+int cc_server_try_grow(CCServer* srv, int every) {
+    int n = cc_atomic_load_acquire(&srv->nworkers);
+    int live = cc_atomic_load_acquire(&srv->live);
+    int next;
+    if (n < 1 || n >= srv->workers_max) return 0;
+    if (every < 1 || live < (n + 1) * every) return 0;
+    next = n + 1;
+    return cc_atomic_cas(&srv->nworkers, &n, next) ? 1 : 0;
+}
+
+void cc_server_kick(CCServer* srv) {
+    srv->app = @parallel spawn { @serial { (void)0; } } !>;
+}
+
+void cc_server_start(CCServer* srv, CCSignal* stop) {
+    CCServer* srvp = srv;
+    CCSignal* stopp = stop;
+    cc_atomic_store_release(&srv->nworkers, cc_server_start_n(srv));
+    cc_server_kick(srv);
+    if (!stopp) return;
+    @parallel(srv->app) {
+        int sig = 0;
+        sig = stopp->wait() !>(e) { (void)e; };
+        if (sig) srvp->shutdown();
+    }
+}
+
+void !>(CCError) cc_server_join(CCServer* srv) {
+    @errhandler(CCError e) { return cc_err(e); }
+    srv->app.wait() !>;
+    return cc_ok();
+}
+
+typedef struct CCIoRow {
+    CCIoSess io;
+    char read_buf[K_IO_READ_BUF];
+} CCIoRow;
+
+typedef CCIoSess* CCIoSessP;
+
+typedef struct ServeCtx {
+    CCServer* srv;
+    CCClosure1 on_app;
+} ServeCtx;
+
+static void cc_server_worker(ServeCtx* ctx);
+
+static void cc_serve_invoke(ServeCtx* ctx, CCIoSess* io) {
+    if (ctx && ctx->on_app.fn)
+        (void)(ctx->on_app.fn)(ctx->on_app.env, (intptr_t)io);
+}
+
+static void cc_io_row_drop(ServeCtx* ctx, CCIoSess* io, CCArenaPool* slots) {
+    CCIoRow* row;
+    if (!io) return;
+    io->dead = 1;
+    if (io->app) cc_serve_invoke(ctx, io);
+    io->drop();
+    row = (CCIoRow*)io;
+    if (slots) slots->free(row);
+}
+
+static CCIoSess* cc_io_row_new(CCServer* srv, int fd, CCArenaPool* pool) {
+    CCIoRow* row = (CCIoRow*)pool->alloc();
+    if (!row) {
+        close(fd);
+        return NULL;
+    }
+    *row = (CCIoRow){0};
+    if (srv->bind_conn(&row->io, fd, row->read_buf, sizeof(row->read_buf)) != 1) {
+        pool->free(row);
+        return NULL;
+    }
+    return &row->io;
+}
+
+/* -1 = close, 0 = wait (armed), 1 = window ready for on_app. */
+static int !>(CCError) cc_io_ready(CCIoSess* io, PollFd* p) {
+    @errhandler(CCError e) { return cc_err(e); }
+    if (io->poll_bad(p)) {
+        io->dead = 1;
+        return cc_ok(-1);
+    }
+    if (io->want_out) {
+        if (io->can_read(p)) {
+            int got = io->fill() !>;
+            if (got < 0) {
+                io->dead = 1;
+                return cc_ok(-1);
+            }
+        }
+        if (io->can_write(p))
+            return cc_ok(1);
+        io->arm(p, 1);
+        return cc_ok(0);
+    }
+    if (!io->can_read(p))
+        return cc_ok(0);
+    {
+        int got = io->fill() !>;
+        if (got < 0) {
+            io->dead = 1;
+            return cc_ok(-1);
+        }
+        if (got == 0) return cc_ok(0);
+    }
+    return cc_ok(1);
+}
+
+static void cc_serve_step(CCIoSess* io, ServeCtx* ctx, PollFd* p) {
+    int r = cc_io_ready(io, p) !>(e) {
+        (void)e;
+        io->dead = 1;
+        cc_serve_invoke(ctx, io);
+        return;
+    };
+    if (r < 0) {
+        cc_serve_invoke(ctx, io);
+        return;
+    }
+    if (r == 0) return;
+    cc_serve_invoke(ctx, io);
+    io->arm(p, io->want_out);
+}
+
+static int cc_tape_try_accept(CCTape* tape, Vec::[CCIoSessP]* live,
+                              CCArenaPool* slots) {
+    CCServer* srv;
+    CCAccept a = tape->accept();
+    @switch (a) {
+    case .busy: return 0;
+    case .dead: return -1;
+    case .ready(fd): {
+        CCIoSess* io;
+        srv = tape->srv;
+        io = cc_io_row_new(srv, fd, slots);
+        if (!io) return 0;
+        if (live->push(io) != 0) {
+            cc_io_row_drop(NULL, io, slots);
+            return 0;
+        }
+        if (!tape->watch(io)) {
+            cc_io_row_drop(NULL, io, slots);
+            live->truncate(live->len - 1);
+            return 0;
+        }
+        srv->note_open();
+        return 1;
+    }
+    }
+}
+
+static void cc_tape_reap(CCTape* tape, Vec::[CCIoSessP]* live,
+                         CCArenaPool* slots, ServeCtx* ctx) {
+    CCServer* srv = tape->srv;
+    Vec::[CCIoSessP] rows = *live;
+    size_t w = 0;
+    @for (i, io in rows) {
+        if (io->dead || !tape->keep_row(i, w)) {
+            cc_io_row_drop(ctx, io, slots);
+            if (srv) srv->note_close();
+        } else {
+            live->set(w, io);
+            w++;
+        }
+    }
+    live->truncate(w);
+    tape->done(w);
+}
+
+static void cc_server_maybe_grow(ServeCtx* ctx) {
+    ServeCtx* ctxp = ctx;
+    CCServer* srv;
+    if (!ctx || !ctx->srv->try_grow(WORKER_GROW_EVERY)) return;
+    srv = ctx->srv;
+    @parallel(srv->app) {
+        cc_server_worker(ctxp);
+    }
+}
+
+static void cc_server_worker(ServeCtx* ctx) {
+    CCServer* srv = ctx->srv;
+    cc_arena_stack(wa, kilobytes(8));
+    CCArenaPool* slots;
+    CCTape tape;
+    if (!cc_arena_is_live(wa)) return;
+    slots = wa.create_pool(sizeof(CCIoRow)) !>(e) {
+        (void)e;
+        return;
+    };
+    Vec::[CCIoSessP] live@(wa) @destroy;
+    if (!tape.open(srv, wa)) return;
+    @defer {
+        @for (io in live) {
+            cc_io_row_drop(ctx, io, slots);
+            srv->note_close();
+        }
+    };
+
+    while (!srv->stopped() || live.len() > 0) {
+        int pr, died;
+        pr = tape.poll();
+        if (pr < 0) return;
+        if (pr == 0) {
+            cc_yield();
+            continue;
+        }
+
+        died = 0;
+        @for (i, io in live) {
+            PollFd* p = tape.row(i);
+            if (!p) return;
+            cc_serve_step(io, ctx, p);
+            if (io->dead) died = 1;
+        }
+
+        {
+            int ar = tape.try_accept(&live, slots);
+            if (ar < 0) return;
+            if (ar > 0) cc_server_maybe_grow(ctx);
+        }
+
+        if (!died) continue;
+        tape.reap(&live, slots, ctx);
+    }
+}
+
+void !>(CCError) cc_server_serve(CCServer* srv, CCSignal* stop,
+                                 CCClosure1 on_app) {
+    @errhandler(CCError e) { return cc_err(e); }
+    ServeCtx ctx = { .srv = srv, .on_app = on_app };
+    ServeCtx* ctxp = &ctx;
+    int w, n;
+    @defer cc_closure1_drop(on_app);
+    srv->start(stop);
+    n = srv->start_n();
+    for (w = 0; w < n; w++) {
+        @parallel(srv->app) {
+            cc_server_worker(ctxp);
+        }
+    }
+    srv->join() !>;
+    return cc_ok();
+}

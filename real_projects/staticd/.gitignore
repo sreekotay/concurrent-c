@@ -4,7 +4,7 @@ vendor/
 *.o
 .DS_Store
 # Local wrk receipts (compare.sh / bench_latency.sh). Not a git pin.
-benchmarks/*.txt
+benchmarks/
 # Generated fixture bodies are large; keep manifest checked in.
 fixtures/*.bin
 fixtures/*.html

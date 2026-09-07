@@ -1,23 +1,19 @@
 /*
  * staticd — Concurrent-C static HTTP/1.1 + WebSocket (specimen).
  *
- * Sessions are rows. Dest is the worker. The worker loop is the page:
- * poll → step rows → accept → reap. A ready fd fills, then one HTTP
- * request or WS frames (no dest-per-conn). A file body is a cursor on
- * the row; a step sends one chunk. POLLOUT waits while left.
- * Workers: start 2 (1 if the cap is 1), grow with live conns (one
- * accept per poll). Cap is ncpu/2 (`--workers 0`) or N. `--workers 1`
- * stays one dest — the page, and the isolate receipt.
- * `ServerCfg` holds policy (root/pages/tls/index/list/extra). Join/grow
- * atomics are process-wide. `serve(cfg)` owns the worker zip. Session
- * embeds `CCIoSess` (transport); `SessAct` is wait|close; TLS wraps once
- * at accept (`g_tls_fail` counts drops). Pages are an early arm
- * (`pages_serve`; MISS → static).
+ * Sessions are rows. Dest is the worker (`CCServer`: poll → step →
+ * accept → reap). A ready fd fills, then one HTTP request or WS frames
+ * (no dest-per-conn). A file body is a cursor on the row; a step sends
+ * one chunk. POLLOUT waits while left. Workers: start 2 (1 if the cap
+ * is 1), grow with live conns (one accept per poll). Cap is ncpu/2
+ * (`--workers 0`) or N. `--workers 1` stays one dest — the isolate
+ * receipt. `Cfg` is policy (root/pages/index/list/extra).
+ * `CCIoAct` is wait|wait_out|close; TLS wraps once at accept (`srv.tls_fail`
+ * counts drops). Pages are an early arm (`pages_serve`; MISS → static).
  *
- * Live table is Vec of Session* on a worker stack arena; slots are a
- * pool on that arena. Encode scratch is a second stack arena on the worker.
- *
- *   staticd_io.cch      — CCIoSess / SessAct / fill·write·tls·accept·reap
+ *   CCServer.cch        — dest face (`CCServer` / `CCIoSess` / `CCIoAct`)
+ *   CCServer.ccs        — owner: `srv.serve` (workers / poll / grow)
+ *   this page           — HTTP/WS (`handle_http` / `session_app`) + `main`
  *   staticd_http.cch    — date / Range / header-CI mechanics
  *   staticd_block.cch   — block ring keyed by dev+ino (reuse; idle cull)
  *   staticd_fs.cch      — jail, 1s fd cache, FileHold, listing
@@ -47,84 +43,59 @@
 #include <ccc/stdio.cch>
 #include <ccc/script/quickjs.cch>
 #include <ccc/script/py.cch>
-#include <stdlib.h>
 #include "staticd_http.cch"
 #include "staticd_block.cch"
 #include "staticd_fs.cch"
 #include "staticd_script.cch"
 #include "staticd_ws.cch"
-#include "staticd_io.cch"
+#include "CCServer.cch"
 #include <time.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/socket.h>
 #include <unistd.h>
-#include <errno.h>
 
-#define K_READ_BUF   K_IO_READ_BUF
-#define K_OUT_BUF    (8 * 1024)
 #define K_PATH_MAX   4096
 #define K_LIST_ARENA (32 * 1024)
+#define K_OUT_BUF    (8 * 1024)
 #define WORKERS_MAX  32
-#define POLL_MS      50
-#define WORKER_GROW_EVERY 64
 
-enum {
-    SESS_HTTP = 0,
-    SESS_WS = 1
+@variant Phase {
+    http: void;
+    ws: void;
 };
 
-/* Policy for one serve(); join/grow atomics stay process-wide. */
-typedef struct ServerCfg {
+@variant WsStep {
+    more: void;
+    again: void;
+    fin: void;
+};
+
+typedef struct Cfg {
     int root_fd;
     int pages_fd;
     int list;
-    int tls;
     const char* index;
     CCSlice extra;
-} ServerCfg;
+} Cfg;
 
-typedef struct Conn {
+typedef struct Enc {
     CCArena arena;
     CCString out;
-    CCSlice extra; /* --header lines; view owned by ServerCfg */
-} Conn;
+    CCSlice extra;
+} Enc;
 
-/* App row: transport embed + send cursor + HTTP/WS phase. */
 typedef struct Session {
-    CCIoSess io;
-    char read_buf[K_READ_BUF];
+    CCIoSess* io;
     FileHold send;
     size_t send_off;
     size_t send_left;
-    int phase;
+    Phase phase;
     int send_close;
 } Session;
 
-typedef Session* SessionP;
-
-/* Session is CCIoSess for fill/write/wrap; Io allow-lists the face. */
-@typeview on Session {
-    as: io;
-};
-
-typedef @typeview Io on Session {
-    r: fill, write_all, wrap_tls, consume, arm, drop;
-} *SessIo;
-
-typedef @typeview Encode on Conn {
+typedef @typeview Encode on Enc {
     r: write, lit, status, hdr, end_headers, date_ka, extra;
-} *ConnEnc;
-
-/* Process-wide join/grow tape (not HTTP policy). */
-static cc_atomic_int g_stop;
-static cc_atomic_int g_live;
-static cc_atomic_int g_nworkers;
-static cc_atomic_int g_tls_fail; /* handshake / wrap drops (not EAGAIN) */
-static int g_workers_max;
-static CCListener* g_ln;
-static ServerCfg* g_cfg;
-static CCParallel g_app;
+} *EncView;
 
 @grammar(cli) StaticdOpts {~~~~
     help: flag -h, --help desc "Show help"
@@ -209,24 +180,38 @@ static const char* k_mime[] = {
     [MIME_TXT]   = "text/plain; charset=utf-8",
 };
 
-static bool !>(CCError) flush_conn(Session* s, Conn* c) {
-    @errhandler(CCError e) { return cc_err(e); }
-    char[:] sl = c->out.as_slice();
-    if (sl.len)
-        s->io.write_all(sl) !>;
-    c->out.release(c->arena);
-    c->out = cc_string_new();
-    return cc_ok(true);
-}
-
 static void session_clear_send(Session* s) {
     s->send.drop();
     s->send_off = 0;
     s->send_left = 0;
 }
 
-#define STATICD_IO_ZIP
-#include "staticd_io.cch"
+static Session* session_of(CCIoSess* io, CCArenaPool* pool) {
+    Session* s;
+    if (!io || !pool) return NULL;
+    s = (Session*)io->app;
+    if (s) return s;
+    s = (Session*)pool->alloc();
+    if (!s) return NULL;
+    s->io = io;
+    s->send = (FileHold){ .slot = -1, .fd = -1 };
+    s->send_off = 0;
+    s->send_left = 0;
+    s->send_close = 0;
+    s->phase = (Phase){ .http = {} };
+    io->app = s;
+    return s;
+}
+
+static void session_release(CCIoSess* io, CCArenaPool* pool) {
+    Session* s;
+    if (!io) return;
+    s = (Session*)io->app;
+    if (!s) return;
+    session_clear_send(s);
+    io->app = NULL;
+    if (pool) pool->free(s);
+}
 
 static void session_queue_send(Session* s, FileHold* fh, size_t off, size_t nsend) {
     session_clear_send(s);
@@ -236,57 +221,83 @@ static void session_queue_send(Session* s, FileHold* fh, size_t off, size_t nsen
     s->send_left = nsend;
 }
 
-/* One FILE_SEND_CHUNK. Leaves send_left if more. */
-static SessAct !>(CCError) session_send_one(Session* s) {
+static CCIoAct !>(CCError) session_send_one(Session* s) {
     @errhandler(CCError e) {
         session_clear_send(s);
         return cc_err(e);
     }
     size_t want;
     BlockHold bh;
-    if (!s->send_left) return cc_ok((SessAct){ .wait = {} });
+    if (!s->send_left) return cc_ok((CCIoAct){ .wait = {} });
     want = s->send_left;
     if (want > (size_t)FILE_SEND_CHUNK) want = (size_t)FILE_SEND_CHUNK;
     bh = checkout_block(s->send.fd, s->send.dev, s->send.ino, s->send.mtime,
                         s->send_off, want) !>;
-    s->io.write_all(cc_slice_from_buffer(bh.ptr, want)) !>(e) {
+    {
+        size_t n = s->io->try_write(cc_slice_from_buffer(bh.ptr, want)) !>(e) {
+            block_hold_drop(&bh);
+            if (e.base.kind == CC_IO_BUSY)
+                return cc_ok((CCIoAct){ .wait_out = {} });
+            session_clear_send(s);
+            return cc_err(e);
+        };
         block_hold_drop(&bh);
-        session_clear_send(s);
-        return cc_err(e);
-    };
-    block_hold_drop(&bh);
-    s->send_off += want;
-    s->send_left -= want;
+        s->send_off += n;
+        s->send_left -= n;
+    }
     if (!s->send_left) {
         session_clear_send(s);
-        if (s->send_close) return cc_ok((SessAct){ .close = {} });
+        if (s->send_close) return cc_ok((CCIoAct){ .close = {} });
+        return cc_ok((CCIoAct){ .wait = {} });
     }
-    return cc_ok((SessAct){ .wait = {} });
+    return cc_ok((CCIoAct){ .wait_out = {} });
 }
 
-static bool !>(CCError) conn_write(Conn* c, char[:] data) {
+static bool !>(CCError) flush_conn(Session* s, Enc* c) {
+    @errhandler(CCError e) { return cc_err(e); }
+    char[:] sl = c->out.as_slice();
+    if (sl.len)
+        s->io->write_all(sl) !>;
+    c->out.release(c->arena);
+    c->out = cc_string_new();
+    return cc_ok(true);
+}
+
+static bool !>(CCError) enc_write(Enc* c, char[:] data) {
     if (data.len == 0) return cc_ok(true);
     if (!c->out.append(data, c->arena) || c->out.failed())
         return cc_err(CC_ERR_OUT_OF_MEMORY, "conn encode oom");
     return cc_ok(true);
 }
 
-static bool !>(CCError) conn_lit(Conn* c, char[:] s) {
+static bool !>(CCError) enc_lit(Enc* c, char[:] s) {
     return c->write(s);
 }
 
-static bool !>(CCError) conn_status(Conn* c, int code, const char* reason) {
+static bool !>(CCError) enc_status(Enc* c, int code, const char* reason) {
     CCString line = @string(`HTTP/1.1 ${code} ${reason}\r\n`, @scratch);
     return c->write(line);
 }
 
-static bool !>(CCError) conn_hdr(Conn* c, const char* name, char[:] value) {
+static bool !>(CCError) enc_hdr(Enc* c, const char* name, char[:] value) {
     CCString line = @string(`${name}: ${value}\r\n`, @scratch);
     return c->write(line);
 }
 
-static bool !>(CCError) conn_end_headers(Conn* c) {
+static bool !>(CCError) enc_end_headers(Enc* c) {
     return c->lit("\r\n");
+}
+
+static int method_sends_body(Method m) {
+    @switch (m) {
+    case .head:
+        return 0;
+    case .get:
+    case .options:
+    case .other:
+        return 1;
+    }
+    return 1;
 }
 
 static Method method_of(char[:] name) {
@@ -310,7 +321,7 @@ static const char* content_type_for(char[:] path) {
     return k_mime[spec->kind];
 }
 
-static bool !>(CCError) conn_date_ka(Conn* c, int ka) {
+static bool !>(CCError) enc_date_ka(Enc* c, int ka) {
     cc_arena_stack(stamp_a, 64);
     char[:] date = http_date_now(stamp_a);
     c->hdr("Date", date) !>;
@@ -323,7 +334,7 @@ static bool !>(CCError) conn_date_ka(Conn* c, int ka) {
     return cc_ok(true);
 }
 
-static bool !>(CCError) send_error(ConnEnc conn, int code, const char* reason,
+static bool !>(CCError) send_error(EncView conn, int code, const char* reason,
                                    const char* body, int with_body, int ka) {
     @errhandler(CCError e) { return cc_err(e); }
     char[:] body_s = cc_slice_cstr(body);
@@ -340,7 +351,7 @@ static bool !>(CCError) send_error(ConnEnc conn, int code, const char* reason,
     return conn->write(body_s);
 }
 
-static bool !>(CCError) send_file_hdrs(ConnEnc conn, int code, const char* reason,
+static bool !>(CCError) send_file_hdrs(EncView conn, int code, const char* reason,
                                        char[:] url_path, size_t body_len,
                                        time_t mtime, char[:] crange, int ka) {
     @errhandler(CCError e) { return cc_err(e); }
@@ -362,7 +373,7 @@ static bool !>(CCError) send_file_hdrs(ConnEnc conn, int code, const char* reaso
     return conn->end_headers();
 }
 
-static bool !>(CCError) send_options(ConnEnc conn, int ka) {
+static bool !>(CCError) send_options(EncView conn, int ka) {
     @errhandler(CCError e) { return cc_err(e); }
     conn->status(204, "No Content") !>;
     conn->hdr("Allow", cc_slice_cstr("GET, HEAD, OPTIONS")) !>;
@@ -371,7 +382,7 @@ static bool !>(CCError) send_options(ConnEnc conn, int ka) {
     return conn->end_headers();
 }
 
-static bool !>(CCError) send_not_modified(ConnEnc conn, time_t mtime, int ka) {
+static bool !>(CCError) send_not_modified(EncView conn, time_t mtime, int ka) {
     @errhandler(CCError e) { return cc_err(e); }
     cc_arena_stack(stamp_a, 64);
     char[:] lm = http_last_modified(mtime, stamp_a);
@@ -381,7 +392,7 @@ static bool !>(CCError) send_not_modified(ConnEnc conn, time_t mtime, int ka) {
     return conn->end_headers();
 }
 
-static bool !>(CCError) send_416(ConnEnc conn, size_t total, int ka) {
+static bool !>(CCError) send_416(EncView conn, size_t total, int ka) {
     @errhandler(CCError e) { return cc_err(e); }
     CCString cr = @string(`bytes */${total}`, @scratch);
     conn->status(416, "Range Not Satisfiable") !>;
@@ -405,17 +416,6 @@ static int take_line(char[:]* rest, char[:]* line) {
     return 0;
 }
 
-static size_t headers_end(Session* s) {
-    size_t i;
-    if (s->io.rlen < 4) return 0;
-    for (i = 0; i + 3 < s->io.rlen; i++) {
-        if (s->io.read_ptr[i] == '\r' && s->io.read_ptr[i + 1] == '\n'
-                && s->io.read_ptr[i + 2] == '\r' && s->io.read_ptr[i + 3] == '\n')
-            return i + 4;
-    }
-    return 0;
-}
-
 static bool !>(CCError) write_ws(Session* s, int opcode, char[:] body) {
     @errhandler(CCError e) { return cc_err(e); }
     unsigned char h[10];
@@ -423,27 +423,27 @@ static bool !>(CCError) write_ws(Session* s, int opcode, char[:] body) {
     if (body.len > (size_t)WS_MAX_PAYLOAD)
         return cc_err(CC_ERROR(CC_ERR_IO, "ws too big"));
     hn = ws_hdr_unmasked(opcode, body.len, h);
-    s->io.write_all(cc_slice_from_buffer((char*)h, hn)) !>;
+    s->io->write_all(cc_slice_from_buffer((char*)h, hn)) !>;
     if (body.len)
-        s->io.write_all(body) !>;
+        s->io->write_all(body) !>;
     return cc_ok(true);
 }
 
-static SessAct !>(CCError) http_fail(Session* s, Conn* conn, int code,
+static CCIoAct !>(CCError) http_fail(Session* s, Enc* conn, int code,
                                      const char* reason, const char* body,
                                      int with_body, int ka) {
     @errhandler(CCError e) { return cc_err(e); }
     send_error(conn, code, reason, body, with_body, ka) !>;
     flush_conn(s, conn) !>;
-    if (!ka) return cc_ok((SessAct){ .close = {} });
-    return cc_ok((SessAct){ .wait = {} });
+    if (!ka) return cc_ok((CCIoAct){ .close = {} });
+    return cc_ok((CCIoAct){ .wait = {} });
 }
 
-static SessAct !>(CCError) http_commit(Session* s, Conn* conn, int ka) {
+static CCIoAct !>(CCError) http_commit(Session* s, Enc* conn, int ka) {
     @errhandler(CCError e) { return cc_err(e); }
     flush_conn(s, conn) !>;
-    if (!ka) return cc_ok((SessAct){ .close = {} });
-    return cc_ok((SessAct){ .wait = {} });
+    if (!ka) return cc_ok((CCIoAct){ .close = {} });
+    return cc_ok((CCIoAct){ .wait = {} });
 }
 
 static const char* pages_reason(int code) {
@@ -465,8 +465,8 @@ static char[:] path_query_of(char[:] raw) {
     return cc_slice_empty();
 }
 
-static SessAct !>(CCError) pages_send(Session* s, Conn* conn, ScriptReply* r,
-                                      int with_body, int ka) {
+static CCIoAct !>(CCError) pages_send(Session* s, Enc* conn, ScriptReply* r,
+                                      Method meth, int ka) {
     @errhandler(CCError e) { return cc_err(e); }
     CCString cl = @string(`${r->body.len}`, @scratch);
     const char* reason = pages_reason(r->status);
@@ -475,34 +475,51 @@ static SessAct !>(CCError) pages_send(Session* s, Conn* conn, ScriptReply* r,
     conn->hdr("Content-Type", ct) !>;
     conn->hdr("Content-Length", cl) !>;
     conn->date_ka(ka) !>;
-    {
-        int i;
-        for (i = 0; i < r->nhdrs; i++)
-            conn->hdr(r->hdrs[i].name, cc_slice_cstr(r->hdrs[i].value)) !>;
+    @for (i in 0..r->nhdrs) {
+        conn->hdr(r->hdrs[i].name, cc_slice_cstr(r->hdrs[i].value)) !>;
     }
     conn->end_headers() !>;
     {
-        SessAct a = http_commit(s, conn, ka) !>;
+        CCIoAct a = http_commit(s, conn, ka) !>;
         @switch (a) {
         case .close:
             return cc_ok(a);
         case .wait:
+        case .wait_out:
             break;
         }
     }
-    if (with_body && r->body.len)
-        s->io.write_all(r->body) !>;
-    return cc_ok((SessAct){ .wait = {} });
+    @switch (meth) {
+    case .get:
+        if (r->body.len)
+            s->io->write_all(r->body) !>;
+        break;
+    case .head:
+    case .options:
+    case .other:
+        break;
+    }
+    return cc_ok((CCIoAct){ .wait = {} });
 }
 
-/* One request. Sets s->phase = SESS_WS on upgrade.
- * Caller has a complete header block at the front of s->io.read_ptr. */
-static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
+static size_t headers_end(Session* s) {
+    char[:] w = s->io->window();
+    @for (i, ch in w) {
+        if (ch != '\r') continue;
+        if (w.sub(i, w.len).starts_with("\r\n\r\n"))
+            return i + 4;
+    }
+    return 0;
+}
+
+/* One request. Sets s->phase = .ws on upgrade.
+ * Caller has a complete header block at the front of s->io->window(). */
+static CCIoAct !>(CCError) handle_http(Session* s, Enc* conn, Cfg* cfg) {
     @errhandler(CCError e) { return cc_err(e); }
     size_t hend = headers_end(s);
     char[:] block;
     char[:] rest;
-    int parsed = 0, ka = 1, want_close = 0, is_head = 0, is_get = 0, is_options = 0;
+    int parsed = 0, ka = 1, want_close = 0;
     int want_upgrade = 0;
     char[:] url;
     char[:] empty = cc_slice_empty();
@@ -511,7 +528,7 @@ static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
     char[:] ifr = empty;
     char[:] ws_key = empty;
     char[:] first;
-    Method meth;
+    Method meth = (Method){ .other = {} };
     time_t mtime = 0, ims_t;
     size_t off = 0, nsend;
     int rkind;
@@ -521,7 +538,10 @@ static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
     @defer fh.drop();
 
     if (!hend) return cc_err(CC_ERROR(CC_ERR_IO, "no headers"));
-    block = cc_slice_from_buffer(s->io.read_ptr, hend);
+    {
+        char[:] win = s->io->window();
+        block = win.sub(0, hend);
+    }
     rest = block;
     if (!take_line(&rest, &first))
         return cc_err(CC_ERROR(CC_ERR_IO, "bad request line"));
@@ -538,16 +558,10 @@ static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
             query_s = path_query_of(req.path);
         }
         if (path_s.failed()) {
-            s->io.consume(hend);
+            s->io->consume(hend);
             return http_fail(s, conn, 500, "Internal Server Error", "oom\n", 1, 0);
         }
         ka = !req.version.eq_cstr("HTTP/1.0");
-        @switch (meth) {
-        case .get:     is_get = 1; break;
-        case .head:    is_head = 1; break;
-        case .options: is_options = 1; break;
-        case .other:   break;
-        }
     }
 
     for (;;) {
@@ -578,40 +592,54 @@ static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
         }
     }
     if (want_close) ka = 0;
-    s->io.consume(hend);
+    s->io->consume(hend);
     if (!parsed) {
         int head400 = first.starts_with("HEAD ");
         return http_fail(s, conn, 400, "Bad Request", "bad request\n", !head400, ka);
     }
-    if (is_get && want_upgrade && ws_key.len) {
-        char acc[29];
-        char[:] accept;
-        if (!ws_accept_b64(ws_key, acc))
-            return http_fail(s, conn, 400, "Bad Request", "bad websocket key\n", 1, 0);
-        accept = cc_slice_cstr(acc);
-        conn->status(101, "Switching Protocols") !>;
-        conn->hdr("Upgrade", cc_slice_cstr("websocket")) !>;
-        conn->hdr("Connection", cc_slice_cstr("Upgrade")) !>;
-        conn->hdr("Sec-WebSocket-Accept", accept) !>;
-        conn->end_headers() !>;
-        flush_conn(s, conn) !>;
-        s->phase = SESS_WS;
-        return cc_ok((SessAct){ .wait = {} });
-    }
-    if (!is_get && !is_head && !is_options)
+    @switch (meth) {
+    case .get:
+        if (want_upgrade && ws_key.len) {
+            char acc[29];
+            char[:] accept;
+            if (!ws_accept_b64(ws_key, acc))
+                return http_fail(s, conn, 400, "Bad Request",
+                                 "bad websocket key\n", 1, 0);
+            accept = cc_slice_cstr(acc);
+            conn->status(101, "Switching Protocols") !>;
+            conn->hdr("Upgrade", cc_slice_cstr("websocket")) !>;
+            conn->hdr("Connection", cc_slice_cstr("Upgrade")) !>;
+            conn->hdr("Sec-WebSocket-Accept", accept) !>;
+            conn->end_headers() !>;
+            flush_conn(s, conn) !>;
+            s->phase = (Phase){ .ws = {} };
+            return http_commit(s, conn, 1);
+        }
+        break;
+    case .other:
         return http_fail(s, conn, 405, "Method Not Allowed",
                          "method not allowed\n", 1, ka);
+    case .head:
+    case .options:
+        break;
+    }
 
     url = path_s;
     if (!path_is_safe(url))
-        return http_fail(s, conn, 403, "Forbidden", "forbidden\n", !is_head, ka);
+        return http_fail(s, conn, 403, "Forbidden", "forbidden\n",
+                         method_sends_body(meth), ka);
     if (url.len > (size_t)K_PATH_MAX)
         return http_fail(s, conn, 414, "URI Too Long", "uri too long\n",
-                         !is_head, ka);
+                         method_sends_body(meth), ka);
 
-    if (is_options) {
+    @switch (meth) {
+    case .options:
         send_options(conn, ka) !>;
         return http_commit(s, conn, ka);
+    case .get:
+    case .head:
+    case .other:
+        break;
     }
 
     const char* rel = "";
@@ -619,7 +647,7 @@ static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
         const char* p = path_s.cstr(conn->arena) !>(e) {
             (void)e;
             return http_fail(s, conn, 500, "Internal Server Error", "oom\n",
-                             !is_head, ka);
+                             method_sends_body(meth), ka);
         };
         rel = (p[0] == '/') ? p + 1 : p;
     }
@@ -643,10 +671,10 @@ static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
             return http_fail(s, conn, code,
                              code == 501 ? "Not Implemented"
                                          : "Internal Server Error",
-                             msg, !is_head, ka);
+                             msg, method_sends_body(meth), ka);
         };
         if (kind == PAGES_JS || kind == PAGES_PY)
-            return pages_send(s, conn, &reply, is_get, ka);
+            return pages_send(s, conn, &reply, meth, ka);
     }
 
     int got_file = try_file(root_fd, rel, &fh);
@@ -655,11 +683,11 @@ static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
         char idx[K_PATH_MAX];
         if (dfd < 0)
             return http_fail(s, conn, 404, "Not Found", "not found\n",
-                             !is_head, ka);
+                             method_sends_body(meth), ka);
         if (!join_index(idx, sizeof(idx), rel, cfg->index)) {
             close(dfd);
             return http_fail(s, conn, 414, "URI Too Long", "uri too long\n",
-                             !is_head, ka);
+                             method_sends_body(meth), ka);
         }
         if (try_file(root_fd, idx, &fh)) {
             CCString mu = @string(`/${idx}`, conn->arena);
@@ -669,7 +697,7 @@ static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
         } else if (!cfg->list) {
             close(dfd);
             return http_fail(s, conn, 403, "Forbidden", "forbidden\n",
-                             !is_head, ka);
+                             method_sends_body(meth), ka);
         } else {
             struct stat dst;
             time_t dmtime = 0;
@@ -678,7 +706,7 @@ static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
             CCString html = dir_listing(dfd, url, list_a) !>(e) {
                 (void)e;
                 return http_fail(s, conn, 500, "Internal Server Error",
-                                 "listing\n", !is_head, ka);
+                                 "listing\n", method_sends_body(meth), ka);
             };
             if (ims.len && http_parse_date(ims, conn->arena, &ims_t)
                     && ims_t >= dmtime) {
@@ -688,15 +716,25 @@ static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
             send_file_hdrs(conn, 200, "OK", cc_slice_cstr("/listing.html"),
                            (size_t)html.len, dmtime, empty, ka) !>;
             {
-                SessAct a = http_commit(s, conn, ka) !>;
+                CCIoAct a = http_commit(s, conn, ka) !>;
                 @switch (a) {
                 case .close: return cc_ok(a);
-                case .wait: break;
+                case .wait:
+                case .wait_out:
+                    break;
                 }
             }
-            if (is_get && html.len > 0)
-                s->io.write_all(html.as_slice()) !>;
-            return cc_ok((SessAct){ .wait = {} });
+            @switch (meth) {
+            case .get:
+                if (html.len > 0)
+                    s->io->write_all(html.as_slice()) !>;
+                break;
+            case .head:
+            case .options:
+            case .other:
+                break;
+            }
+            return cc_ok((CCIoAct){ .wait = {} });
         }
     }
     mtime = fh.mtime;
@@ -729,260 +767,145 @@ static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
         send_file_hdrs(conn, 200, "OK", url, nsend, mtime, empty, ka) !>;
     }
     flush_conn(s, conn) !>;
-    if (is_get && nsend > 0) {
-        session_queue_send(s, &fh, off, nsend);
-        if (!ka) s->send_close = 1;
-        return cc_ok((SessAct){ .wait = {} });
+    {
+        int send_body = 0;
+        @switch (meth) {
+        case .get:
+            send_body = nsend > 0;
+            break;
+        case .head:
+        case .options:
+        case .other:
+            break;
+        }
+        if (send_body) {
+            session_queue_send(s, &fh, off, nsend);
+            if (!ka) s->send_close = 1;
+            return cc_ok((CCIoAct){ .wait_out = {} });
+        }
     }
-    if (!ka) return cc_ok((SessAct){ .close = {} });
-    return cc_ok((SessAct){ .wait = {} });
+    if (!ka) return cc_ok((CCIoAct){ .close = {} });
+    return cc_ok((CCIoAct){ .wait = {} });
 }
 
-/* 1 = consumed a frame, 0 = need more, -1 = close. */
-static int ws_one_frame(Session* s) {
+static WsStep !>(CCError) ws_one_frame(Session* s) {
+    @errhandler(CCError e) { return cc_err(e); }
     unsigned char b0, b1, maskk[4];
     int opcode, masked;
     size_t n = 0, need = 2, hdr = 2;
     char* payload;
-    if (s->io.rlen < 2) return 0;
-    b0 = (unsigned char)s->io.read_ptr[0];
-    b1 = (unsigned char)s->io.read_ptr[1];
-    if ((b0 & 0x80) == 0) return -1;
+    char[:] w = s->io->window();
+    if (w.len < 2) return cc_ok((WsStep){ .more = {} });
+    b0 = (unsigned char)w.ptr[0];
+    b1 = (unsigned char)w.ptr[1];
+    if ((b0 & 0x80) == 0) return cc_ok((WsStep){ .fin = {} });
     opcode = (int)(b0 & 0x0f);
     masked = (b1 & 0x80) != 0;
     n = (size_t)(b1 & 0x7f);
     if (n == 126) {
-        if (s->io.rlen < 4) return 0;
-        n = ((size_t)(unsigned char)s->io.read_ptr[2] << 8)
-          | (size_t)(unsigned char)s->io.read_ptr[3];
+        if (w.len < 4) return cc_ok((WsStep){ .more = {} });
+        n = ((size_t)(unsigned char)w.ptr[2] << 8)
+          | (size_t)(unsigned char)w.ptr[3];
         hdr = 4;
     } else if (n == 127) {
-        int z;
-        if (s->io.rlen < 10) return 0;
-        for (z = 2; z < 8; z++)
-            if (s->io.read_ptr[z]) return -1;
-        n = ((size_t)(unsigned char)s->io.read_ptr[8] << 8)
-          | (size_t)(unsigned char)s->io.read_ptr[9];
+        if (w.len < 10) return cc_ok((WsStep){ .more = {} });
+        @for (ch in w.sub(2, 8)) {
+            if (ch) return cc_ok((WsStep){ .fin = {} });
+        }
+        n = ((size_t)(unsigned char)w.ptr[8] << 8)
+          | (size_t)(unsigned char)w.ptr[9];
         hdr = 10;
     }
-    if (!masked || n > (size_t)WS_MAX_PAYLOAD) return -1;
+    if (!masked || n > (size_t)WS_MAX_PAYLOAD)
+        return cc_ok((WsStep){ .fin = {} });
     need = hdr + 4 + n;
-    if (s->io.rlen < need) return 0;
+    if (w.len < need) return cc_ok((WsStep){ .more = {} });
     {
         char[:] mk = cc_slice_from_buffer((char*)maskk, 4);
-        mk.copy(cc_slice_from_buffer(s->io.read_ptr + hdr, 4)) !>(e) {
-            (void)e;
-            return -1;
-        };
+        mk.copy(w.sub(hdr, hdr + 4)) !>;
     }
-    payload = s->io.read_ptr + hdr + 4;
+    payload = w.ptr + hdr + 4;
     if (n) ws_unmask(payload, n, maskk);
     if (opcode == 8) {
-        write_ws(s, 8, cc_slice_from_buffer(payload, n)) !>(e) { (void)e; };
-        s->io.consume(need);
-        return -1;
+        write_ws(s, 8, cc_slice_from_buffer(payload, n)) !>;
+        s->io->consume(need);
+        return cc_ok((WsStep){ .fin = {} });
     }
     if (opcode == 9) {
-        write_ws(s, 10, cc_slice_from_buffer(payload, n)) !>(e) { (void)e; };
-        s->io.consume(need);
-        return 1;
+        write_ws(s, 10, cc_slice_from_buffer(payload, n)) !>;
+        s->io->consume(need);
+        return cc_ok((WsStep){ .again = {} });
     }
     if (opcode == 10) {
-        s->io.consume(need);
-        return 1;
+        s->io->consume(need);
+        return cc_ok((WsStep){ .again = {} });
     }
     if (opcode == 1 || opcode == 2) {
-        write_ws(s, opcode, cc_slice_from_buffer(payload, n)) !>(e) {
-            (void)e;
-            s->io.consume(need);
-            return -1;
-        };
-        s->io.consume(need);
-        return 1;
+        write_ws(s, opcode, cc_slice_from_buffer(payload, n)) !>;
+        s->io->consume(need);
+        return cc_ok((WsStep){ .again = {} });
     }
-    s->io.consume(need);
-    return -1;
+    s->io->consume(need);
+    return cc_ok((WsStep){ .fin = {} });
 }
 
-static void worker_run(ServerCfg* cfg, CCListener* ln);
-
-/* One accept per poll, so live grows in the open. Spawn when
- * live >= (n+1) * WORKER_GROW_EVERY and n < cap. CAS owns the slot. */
-static void maybe_grow(void) {
-    int n = cc_atomic_load_acquire(&g_nworkers);
-    int live = cc_atomic_load_acquire(&g_live);
-    int next;
-    if (n < 1 || n >= g_workers_max) return;
-    if (live < (n + 1) * WORKER_GROW_EVERY) return;
-    next = n + 1;
-    if (!cc_atomic_cas(&g_nworkers, &n, next)) return;
-    {
-        CCListener* lnp = g_ln;
-        ServerCfg* cfg = g_cfg;
-        @parallel(g_app) {
-            worker_run(cfg, lnp);
-        }
-    }
-}
-
-/* Fill, one send chunk, or HTTP/WS until the row needs another wait. */
-static SessAct !>(CCError) session_step(Session* s, Conn* conn, ServerCfg* cfg,
-                                        PollFd* p) {
+/* HTTP / WS until the row needs another wait. Transport already filled. */
+static CCIoAct !>(CCError) session_app(Session* s, Enc* conn, Cfg* cfg) {
     @errhandler(CCError e) { return cc_err(e); }
-    short rv = p ? p->revents : 0;
-    if (rv & (POLLERR | POLLHUP | POLLNVAL))
-        return cc_ok((SessAct){ .close = {} });
-
-    if (s->send_left) {
-        if (rv & POLLIN) {
-            int got = s->io.fill() !>;
-            if (got < 0) return cc_ok((SessAct){ .close = {} });
-        }
-        if (rv & POLLOUT) {
-            SessAct a = session_send_one(s) !>;
-            @switch (a) {
-            case .close: return cc_ok(a);
-            case .wait: break;
-            }
-        }
-        s->arm(p);
-        if (s->send_left) return cc_ok((SessAct){ .wait = {} });
-        if (s->send_close) return cc_ok((SessAct){ .close = {} });
-    } else if (!(rv & POLLIN)) {
-        return cc_ok((SessAct){ .wait = {} });
-    } else {
-        int got = s->io.fill() !>;
-        if (got < 0) return cc_ok((SessAct){ .close = {} });
-        if (got == 0) return cc_ok((SessAct){ .wait = {} });
-    }
-
     for (;;) {
-        if (s->phase == SESS_WS) {
-            int r = ws_one_frame(s);
-            if (r < 0) return cc_ok((SessAct){ .close = {} });
-            if (r == 0) {
-                s->arm(p);
-                return cc_ok((SessAct){ .wait = {} });
-            }
-            continue;
-        }
-        if (!headers_end(s)) {
-            if (s->io.rlen == s->io.rcap)
-                return http_fail(s, conn, 400, "Bad Request",
-                                 "headers too big\n", 1, 0);
-            s->arm(p);
-            return cc_ok((SessAct){ .wait = {} });
-        }
-        {
-            SessAct a = handle_http(s, conn, cfg) !>;
-            @switch (a) {
-            case .close: return cc_ok(a);
-            case .wait: break;
-            }
-        }
-        if (s->phase == SESS_HTTP) {
-            conn->arena.reset();
-            conn->out = cc_string_new();
-        }
         if (s->send_left) {
-            SessAct a = session_send_one(s) !>;
-            s->arm(p);
+            CCIoAct a = session_send_one(s) !>;
             @switch (a) {
             case .close: return cc_ok(a);
-            case .wait: break;
+            case .wait:
+            case .wait_out:
+                break;
             }
-            if (s->send_left) return cc_ok((SessAct){ .wait = {} });
-            if (s->send_close) return cc_ok((SessAct){ .close = {} });
-        }
-    }
-}
-
-static void step_row(Session* s, Conn* conn, ServerCfg* cfg, PollFd* p) {
-    SessAct a = session_step(s, conn, cfg, p) !>(e) {
-        (void)e;
-        s->io.dead = 1;
-        return;
-    };
-    session_apply(s, a);
-}
-
-/* Named steps: poll → step rows → accept → reap. */
-static void worker_run(ServerCfg* cfg, CCListener* ln) {
-    cc_arena_stack(wa, kilobytes(8));
-    cc_arena_stack(enc, K_OUT_BUF);
-    Conn conn = { .arena = enc, .out = cc_string_new(), .extra = cfg->extra };
-    CCArenaPool* slots;
-    if (!cc_arena_is_live(wa) || !cc_arena_is_live(enc)) return;
-    slots = wa.create_pool(sizeof(Session)) !>(e) {
-        (void)e;
-        return;
-    };
-    Vec::[SessionP] live@(wa) @destroy;
-    Vec::[PollFd] wait@(wa) @destroy;
-    @defer {
-        @for (s in live) {
-            session_drop(s, slots);
-            cc_atomic_fetch_sub(&g_live, 1);
-        }
-    };
-    (void)io_fd_nonblock(ln->fd);
-    {
-        PollFd p = { .fd = ln->fd, .events = POLLIN, .revents = 0 };
-        if (wait.push(p) != 0) return;
-    }
-
-    int listening = 1;
-    while (!cc_atomic_load_acquire(&g_stop) || live.len() > 0) {
-        PollFd* raw;
-        size_t base;
-        int pr, died;
-        int stop = cc_atomic_load_acquire(&g_stop);
-        if (stop && listening) {
-            size_t n = wait.len();
-            @for (i, src in wait) {
-                if (i == 0) continue;
-                if (wait.set(i - 1, src) != 0) return;
-            }
-            wait.truncate(n ? n - 1 : 0);
-            listening = 0;
-        }
-
-        /* poll */
-        raw = wait.data();
-        if (wait.len() && !raw) return;
-        pr = poll(raw, (nfds_t)wait.len(), listening ? POLL_MS : 0);
-        if (pr < 0) {
-            if (errno == EINTR) continue;
-            return;
-        }
-        if (pr == 0) {
-            cc_yield();
+            if (s->send_left) return cc_ok((CCIoAct){ .wait_out = {} });
+            if (s->send_close) return cc_ok((CCIoAct){ .close = {} });
             continue;
         }
-
-        /* step ready rows */
-        base = listening ? 1 : 0;
-        died = 0;
-        @for (i, s in live) {
-            PollFd* p = wait.get(base + i);
-            if (!p) return;
-            step_row(s, &conn, cfg, p);
-            if (s->io.dead) died = 1;
-        }
-
-        /* accept */
-        if (listening) {
-            PollFd* lp = wait.get(0);
-            if (lp && (lp->revents & POLLIN)) {
-                int ar = try_accept(ln, cfg, &live, &wait, slots);
-                if (ar < 0) return;
-                if (ar > 0) maybe_grow();
+        @switch (s->phase) {
+        case .ws: {
+            WsStep st = ws_one_frame(s) !>;
+            CCIoAct fin = (CCIoAct){ .close = {} };
+            CCIoAct more = (CCIoAct){ .wait = {} };
+            @switch (st) {
+            case .fin:
+                return cc_ok(fin);
+            case .more:
+                return cc_ok(more);
+            case .again:
+                continue;
             }
+            continue;
         }
-
-        /* reap */
-        if (!died) continue;
-        session_reap(&live, &wait, base, slots);
+        case .http:
+            if (!headers_end(s)) {
+                if (s->io->full())
+                    return http_fail(s, conn, 400, "Bad Request",
+                                     "headers too big\n", 1, 0);
+                return cc_ok((CCIoAct){ .wait = {} });
+            }
+            {
+                CCIoAct a = handle_http(s, conn, cfg) !>;
+                @switch (a) {
+                case .close: return cc_ok(a);
+                case .wait:
+                case .wait_out:
+                    break;
+                }
+            }
+            @switch (s->phase) {
+            case .http:
+                conn->arena.reset();
+                conn->out = cc_string_new();
+                break;
+            case .ws:
+                break;
+            }
+            break;
+        }
     }
 }
 
@@ -1011,53 +934,9 @@ static int header_line_ok(char[:] v) {
     return colon;
 }
 
-/* Banner + workers + signal. Caller owns cfg / ln / open fds. */
-static void !>(CCError) serve(ServerCfg* cfg, CCListener* ln,
-                              char[:] listen, const char* root_c,
-                              int nworkers) {
-    @errhandler(CCError e) { return cc_err(e); }
-    int start = nworkers < 2 ? nworkers : 2;
-    if (cfg->pages_fd >= 0 && cfg->tls)
-        println(@string(`staticd on ${listen} root=${root_c} pages=on tls=on workers=${start}..${nworkers}`, @scratch));
-    else if (cfg->pages_fd >= 0)
-        println(@string(`staticd on ${listen} root=${root_c} pages=on workers=${start}..${nworkers}`, @scratch));
-    else if (cfg->tls)
-        println(@string(`staticd on ${listen} root=${root_c} tls=on workers=${start}..${nworkers}`, @scratch));
-    else
-        println(@string(`staticd on ${listen} root=${root_c} workers=${start}..${nworkers}`, @scratch));
-
-    CCSignal stop = cc_signal_watch2(SIGINT, SIGTERM) !> @destroy;
-    CCListener* lnp = ln;
-    ServerCfg* cfgp = cfg;
-    CCSignal* stopp = &stop;
-    g_ln = lnp;
-    g_cfg = cfgp;
-    g_workers_max = nworkers;
-    cc_atomic_store_release(&g_nworkers, start);
-    cc_atomic_store_release(&g_tls_fail, 0);
-
-    g_app = @parallel spawn { @serial { (void)0; } } !>;
-    @parallel(g_app) {
-        int sig = 0;
-        sig = stopp->wait() !>(e) { (void)e; };
-        if (sig) cc_atomic_store_release(&g_stop, 1);
-    }
-    for (int w = 0; w < start; w++) {
-        @parallel(g_app) {
-            worker_run(cfgp, lnp);
-        }
-    }
-    g_app.wait() !>;
-    {
-        int nfail = cc_atomic_load_acquire(&g_tls_fail);
-        if (cfg->tls && nfail > 0)
-            eprintln(@string(`staticd: tls handshake failures: ${nfail}`, @scratch));
-    }
-    return cc_ok();
-}
-
 int main(int argc, char** argv) {
     cc_arena_pool_stack(send_pool, FILE_SEND_CHUNK, megabytes(1));
+    cc_arena_pool_stack(sess_pool, sizeof(Session), kilobytes(64));
     g_send_pool = &send_pool;
 
     @errhandler(CCError err) {
@@ -1079,14 +958,17 @@ int main(int argc, char** argv) {
     }
     if (nworkers > WORKERS_MAX) nworkers = WORKERS_MAX;
 
-    ServerCfg cfg = {
+    Cfg cfg = {
         .root_fd = -1,
         .pages_fd = -1,
         .list = 0,
-        .tls = 0,
         .index = "index.html",
         .extra = cc_slice_empty(),
     };
+
+    CCServer srv;
+    srv.init(nworkers);
+    @defer srv.close();
 
     char[:] root_view = opts.root;
     if (root_view.len == 0) {
@@ -1141,7 +1023,6 @@ int main(int argc, char** argv) {
     @defer {
         pages_engines_close();
         if (cfg.pages_fd >= 0) close(cfg.pages_fd);
-        if (cfg.tls) cc_tls_server_unload();
     };
 
     {
@@ -1168,19 +1049,12 @@ int main(int argc, char** argv) {
                 eprintln("staticd: tls key nul");
                 return 1;
             };
-            if (cc_tls_server_load(cert_c, key_c) != 0) {
+            if (srv.load_tls(cert_c, key_c) != 0) {
                 eprintln("staticd: tls load failed (bad PEM cert/key?)");
                 return 1;
             }
-            cfg.tls = 1;
         }
     }
-
-    CCListener ln = cc_tcp_listen(listen) !>(err) {
-        eprintln(@string(`listen: ${err}`, @scratch));
-        return 1;
-    };
-    @defer ln.close();
 
     cfg.list = opts.list ? 1 : 0;
     {
@@ -1190,8 +1064,17 @@ int main(int argc, char** argv) {
         else if (!index_name_ok(idx)) {
             eprintln("staticd: bad --index");
             return 1;
-        } else
-            cfg.index = (const char*)idx.ptr;
+        } else {
+            CCString idx_owned = @string(`${idx}`, cli_a);
+            if (idx_owned.failed()) {
+                eprintln("staticd: index oom");
+                return 1;
+            }
+            cfg.index = idx_owned.cstr(cli_a) !> {
+                eprintln("staticd: index nul");
+                return 1;
+            };
+        }
     }
     CCString extra = cc_string_new();
     {
@@ -1214,6 +1097,50 @@ int main(int argc, char** argv) {
         cfg.extra = extra.as_slice();
     }
 
-    serve(&cfg, &ln, listen, root_c, nworkers) !>;
+    srv.listen(listen) !>(err) {
+        const char* msg = cc_error_str(err);
+        eprintln(@string(`listen: ${msg}`, @scratch));
+        return 1;
+    };
+    {
+        int start = srv.start_n();
+        int cap = srv.workers_max;
+        if (cfg.pages_fd >= 0 && srv.tls)
+            println(@string(`staticd on ${listen} root=${root_c} pages=on tls=on workers=${start}..${cap}`, @scratch));
+        else if (cfg.pages_fd >= 0)
+            println(@string(`staticd on ${listen} root=${root_c} pages=on workers=${start}..${cap}`, @scratch));
+        else if (srv.tls)
+            println(@string(`staticd on ${listen} root=${root_c} tls=on workers=${start}..${cap}`, @scratch));
+        else
+            println(@string(`staticd on ${listen} root=${root_c} workers=${start}..${cap}`, @scratch));
+    }
+    CCSignal stop = cc_signal_watch2(SIGINT, SIGTERM) !> @destroy;
+    Cfg* cfgp = &cfg;
+    CCArenaPool* sessions = &sess_pool;
+    srv.serve(&stop, (CCIoSess* io) => [cfgp, sessions] {
+        @errhandler(CCError e) { (void)e; io->dead = 1; }
+        Session* s;
+        Enc enc;
+        CCIoAct a;
+        if (io->dead) {
+            session_release(io, sessions);
+            return;
+        }
+        s = session_of(io, sessions);
+        if (!s) {
+            io->dead = 1;
+            return;
+        }
+        cc_arena_stack(enc_a, K_OUT_BUF);
+        enc = (Enc){ .arena = enc_a, .out = cc_string_new(), .extra = cfgp->extra };
+        a = session_app(s, &enc, cfgp) !>;
+        io->apply(a);
+        if (io->dead) session_release(io, sessions);
+    }) !>;
+    {
+        int nfail = srv.tls_fails();
+        if (srv.tls && nfail > 0)
+            eprintln(@string(`staticd: tls handshake failures: ${nfail}`, @scratch));
+    }
     return 0;
 }
