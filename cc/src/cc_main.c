@@ -23,6 +23,7 @@
 #include "diag/diag.h"
 #include "visitor/pass_common.h"
 #include "preprocess/preprocess.h"
+#include "preprocess/emit_plan.h"
 #include "preprocess/script_entry.h"
 #include "preprocess/script_oneliner.h"
 #include "preprocess/unit_header.h"
@@ -3968,6 +3969,34 @@ static int cc__clean_known_types(char* dst, size_t cap) {
     return 0;
 }
 
+/* The `@comptime { }` blocks of a unit, run. The executor compiles the
+ * block as C, so the copy it is handed has every `.cch` include rewritten
+ * to the lowered header it stands for — a rewrite the lowerer must not
+ * see, since it resolves those itself. */
+static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
+                                              const char* in_path) {
+    char* buf = (char*)malloc(raw_len + 1);
+    size_t len = raw_len;
+    char* r;
+    int rc = 0;
+    if (!buf) return -1;
+    memcpy(buf, raw, raw_len);
+    buf[raw_len] = '\0';
+    cc_reset_included_cch_sources();
+    r = cc_rewrite_local_cch_includes_to_lowered_headers(buf, len, in_path);
+    if (cc_local_header_lower_failed()) { free(r); free(buf); return -1; }
+    if (r) { free(buf); buf = r; len = strlen(buf); }
+    r = cc_rewrite_system_cch_includes_to_lowered_headers(buf, len);
+    if (r) { free(buf); buf = r; len = strlen(buf); }
+    if (cc_comptime_prepare_source(&buf, &len, in_path) != 0) { free(buf); return -1; }
+    cc_emit_plan_clear_generic_factory_registrations();
+    cc_emit_plan_clear_comptime_fragments();
+    if (cc_emit_plan_exec_comptime_blocks(buf, len, in_path) != 0) rc = -1;
+    else cc_emit_plan_collect_comptime_emits(buf, len);
+    free(buf);
+    return rc;
+}
+
 /* Compile time, before the clean lowerer sees the unit.
  *
  * `@comptime if` / `@comptime for` / `@comptime(expr)` decide what source
@@ -3994,11 +4023,26 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
         fprintf(stderr, "cc: cannot read %s\n", in_path);
         return -1;
     }
+    /* Run the `@comptime { }` blocks first, on their own copy: the
+     * executor is a C compiler, so it needs the lowered `.h` a `.cch`
+     * include stands for, which the lowerer wants left alone. What the
+     * blocks emit is collected now and spliced into the C after lowering. */
+    if (cc__exec_comptime_blocks_for_clean(buf, len, in_path) != 0) {
+        free(buf);
+        return -1;
+    }
     if (cc_comptime_prepare_source_ex(&buf, &len, in_path,
                                       CC_PREPARE_COMPTIME | CC_PREPARE_GRAMMAR |
                                       CC_PREPARE_MODULE_EXPORT | CC_PREPARE_STATIC_MAP) != 0) {
         free(buf);
         return -1;
+    }
+    {
+        char* blanked = cc_comptime_blank_blocks(buf, len);
+        free(buf);
+        if (!blanked) return -1;
+        buf = blanked;
+        len = strlen(blanked);
     }
     {
         /* the stage still names the user's file: the prepare passes keep
@@ -4027,6 +4071,31 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
         return -1;
     }
     snprintf(out_ccs, cap, "%s", path);
+    return 0;
+}
+
+/* What the `@comptime { }` blocks emitted, into the C the lowerer wrote.
+ * The fragments were collected before lowering; they are host C already,
+ * so they splice at their anchors and nothing re-reads them. */
+static int cc__splice_comptime_into_clean(const char* c_path, const char* orig_path) {
+    char* buf = NULL;
+    size_t len = 0;
+    FILE* f;
+    if (!cc_emit_plan_comptime_fragment_count()) return 0;
+    buf = cc__read_all_file(c_path, &len);
+    if (!buf) {
+        fprintf(stderr, "cc: cannot read %s\n", c_path);
+        return -1;
+    }
+    if (cc_emit_plan_splice_comptime_fragments(&buf, &len, orig_path) != 0) {
+        free(buf);
+        return -1;
+    }
+    f = fopen(c_path, "wb");
+    if (!f) { free(buf); return -1; }
+    fwrite(buf, 1, len, f);
+    fclose(f);
+    free(buf);
     return 0;
 }
 
@@ -4684,6 +4753,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             char dir[PATH_MAX], clean_c[PATH_MAX], stem[128];
             char clean_shcc_wrap[PATH_MAX];
             char clean_qdir[PATH_MAX];
+            const char* clean_orig = opt->in_path;
             CCBuildOptions o2;
             CCBuildOptions o_shcc;
             if (uk == CC_UNIT_KIND_CCH) {
@@ -4723,6 +4793,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             snprintf(clean_c, sizeof(clean_c), "%s/%s.%016llx.c", dir, stem,
                      (unsigned long long)cc__fold_file_content(1469598103934665603ULL, opt->in_path));
             if (cc__run_clean_lowerer(opt->in_path, clean_c, clean_qdir) != 0) return -1;
+            if (cc__splice_comptime_into_clean(clean_c, clean_orig) != 0) return -1;
             if (opt->mode == CC_MODE_EMIT_C) {
                 if (cc__materialize_host_c(clean_c, opt->c_out_path) != 0) return -1;
                 if (summary_out) { memset(summary_out, 0, sizeof(*summary_out)); summary_out->c_out_path = opt->c_out_path; summary_out->did_emit_c = 1; }

@@ -470,8 +470,14 @@ What the lowerer is not handed is C. The type-scoped and template passes
 are left off, so `Tweet.parse(...)` and `@string(`...`)` still reach it as
 the language, for its own steps to lower from the index and the AST.
 
-`@comptime { }` blocks are not run yet: those need the executor and the
-emit-plan splice, and reach the output as themselves.
+`@comptime { }` blocks are run, on their own copy of the source: the
+executor compiles a block as C, so the copy it is handed has every `.cch`
+include rewritten to the lowered header it stands for — a rewrite the
+lowerer must not see, since it resolves those itself. What the blocks
+emit is collected there and spliced into the C after lowering, at the
+anchors the fragments name. What is left of a block in the stage is
+blanked: a block that has run has no code in it for the lowerer to
+lower, and the blanking keeps the line count so the map still holds.
 
 ## Async
 
