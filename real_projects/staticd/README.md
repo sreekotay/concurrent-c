@@ -23,7 +23,7 @@ and redis. Not a second file server.
 | Listing | `--list` (off). Directory with no index → HTML table; without `--list` → 403 |
 | Query | `?…` is recognized and ignored |
 | Extra headers | `--header 'Name: value'` (repeatable; no CR/LF) |
-| Workers | `--workers N` (default 1). Share the listen fd |
+| Workers | Start 2, grow every 64 live conns, cap ncpu/2 (`--workers 0`). `--workers N` is the cap. `--workers 1` stays one dest |
 | WebSocket | `Upgrade: websocket` → `101`, then echo (text / binary), pong for ping, close for close. No fragments; payload cap 64KB |
 | Body | Named-block ring: 256 × 64KB = 16MB BSS, key `(dev, ino, block)`, FNV probe only, reuse in place, idle cull. Pool `pread` on miss / unaligned Range / busy fill. 8-slot fd cache; pathname revalidate ≤1s (absolute); hold dups the fd. Send is a cursor on the row: one 64KB chunk per step, `POLLOUT` while left |
 
@@ -49,7 +49,7 @@ make darkhttpd              # optional peer
 
 ```bash
 ./out/staticd --listen 127.0.0.1:8080 --root ./fixtures
-./out/staticd --workers 4
+./out/staticd --workers 1   # one dest (isolate receipt / the page)
 ./out/staticd --help
 ```
 
@@ -57,7 +57,7 @@ make darkhttpd              # optional peer
 |---|---|---|
 | `-l` / `--listen ADDR` | `127.0.0.1:8080` | `host:port` |
 | `-r` / `--root DIR` | `fixtures` | document root |
-| `-w` / `--workers N` | `1` | worker dests; shared listen |
+| `-w` / `--workers N` | ncpu/2 (`0`) | cap; start 2, grow with live conns. `1` = one dest |
 | `--index NAME` | `index.html` | one path segment; no `/` or `..` |
 | `--list` | off | listing when the index is missing |
 | `--header LINE` | none | extra response header; repeatable |
@@ -121,16 +121,17 @@ Fixtures are deterministic (`gen_fixtures.sh`); bodies are gitignored,
 tree and shuffles server order. `ISOLATE=1` (default) starts a fresh
 process for that cell only — RSS is the cell.
 
-Local receipts land under `benchmarks/` (gitignored). One worker: c=1000
-does not grow a dest stack per conn. `--workers` is the knob when the
-dest is saturated (small-file high-c).
+Local receipts land under `benchmarks/` (gitignored). Isolate cells pass
+`--workers 1` so the nginx peer stays one worker. Default starts two dests
+and grows to ncpu/2 as `g_live` crosses 192, 256, … — the accept storm
+splits the zip. ncpu as a *start* count oversubscribes a CPU-bound zip.
 
 ## Shape
 
 ```
 app dest
   signal → g_stop
-  worker × N                    // --workers, default 1
+  worker × 2..cap               // start 2; grow every 64 conns; cap ncpu/2
     poll(listen + session fds)
     listen ready → accept → row
     session ready → try_read → HTTP or WS step
@@ -153,7 +154,7 @@ become holes once a second.
 
 | Name | What it is |
 |------|------------|
-| **Worker dest** | `g_app`. One dest per `--workers`. Owns the poll tape and the live table. |
+| **Worker dest** | `g_app`. Start 2 (1 if cap is 1); `maybe_grow` dest-attaches up to the cap. Owns the poll tape and the live table. |
 | **Session row** | `Session*` in the table. Socket, read buf, send cursor (`FileHold` / off / left). |
 | **Send cursor** | One `FILE_SEND_CHUNK` per `session_step`. `POLLOUT` while `send_left`. Close-after-body is `send_close`, not `dead` before the cursor drains. |
 

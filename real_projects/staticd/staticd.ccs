@@ -7,9 +7,12 @@
  * wait on one socket. A ready fd fills, then one HTTP request or WS
  * frames (no dest-per-conn). A file body is a cursor on the row; a step
  * sends one chunk, then the zip continues. POLLOUT waits while left.
- * Add workers with --workers; they share the listen fd. Live table is
- * Vec of Session* on the worker stack arena; slots are a pool on that
- * arena. Encode scratch is a second stack arena on the worker.
+ * Workers: start 2 (1 if the cap is 1), grow with live conns (one
+ * accept per poll, so the zip splits during the storm). Cap is ncpu/2
+ * (`--workers 0`) or N. `--workers 1` stays one dest — the page, and
+ * the isolate receipt.
+ * Live table is Vec of Session* on the worker stack arena; slots are a
+ * pool on that arena. Encode scratch is a second stack arena on the worker.
  *
  *   staticd_http.cch    — date / Range / header-CI mechanics
  *   staticd_block.cch   — block ring keyed by dev+ino (reuse; idle cull)
@@ -49,6 +52,7 @@
 #define K_LIST_ARENA (32 * 1024)
 #define WORKERS_MAX  32
 #define POLL_MS      50
+#define WORKER_GROW_EVERY 64
 
 enum {
     SESS_HTTP = 0,
@@ -83,6 +87,11 @@ static int g_list;
 static const char* g_index = "index.html";
 static CCSlice g_extra;
 static cc_atomic_int g_stop;
+static cc_atomic_int g_live;
+static cc_atomic_int g_nworkers;
+static int g_workers_max;
+static int g_root_fd;
+static CCListener* g_ln;
 static CCParallel g_app;
 
 @grammar(cli) StaticdOpts {~~~~
@@ -92,7 +101,7 @@ static CCParallel g_app;
     list: flag --list desc "Directory listing when no index file"
     index: opt string --index as NAME default "index.html" desc "Directory index file"
     header: opt string --header as LINE desc "Extra response header Name: value (repeatable)"
-    workers: opt i64 -w, --workers as N default 1 desc "Worker dests (shared listen)"
+    workers: opt i64 -w, --workers as N default 0 desc "Worker cap (0 = ncpu/2; start 2, grow with conns)"
 ~~~~}
 
 @grammar(schema) ReqLine {~~~~
@@ -794,7 +803,29 @@ static int try_accept(CCListener* ln, Vec::[SessionP]* live,
         live->truncate(live->len - 1);
         return 0;
     }
+    cc_atomic_fetch_add(&g_live, 1);
     return 1;
+}
+
+static void worker_run(CCListener* ln, int root_fd);
+
+/* One accept per poll, so live grows in the open. Spawn when
+ * live >= (n+1) * WORKER_GROW_EVERY and n < cap. CAS owns the slot. */
+static void maybe_grow(void) {
+    int n = cc_atomic_load_acquire(&g_nworkers);
+    int live = cc_atomic_load_acquire(&g_live);
+    int next;
+    if (n < 1 || n >= g_workers_max) return;
+    if (live < (n + 1) * WORKER_GROW_EVERY) return;
+    next = n + 1;
+    if (!cc_atomic_cas(&g_nworkers, &n, next)) return;
+    {
+        CCListener* lnp = g_ln;
+        int root = g_root_fd;
+        @parallel(g_app) {
+            worker_run(lnp, root);
+        }
+    }
 }
 
 /* Fill, one send chunk, or HTTP/WS until the row needs another wait. */
@@ -878,8 +909,10 @@ static void worker_run(CCListener* ln, int root_fd) {
     Vec::[SessionP] live@(wa) @destroy;
     Vec::[PollFd] wait@(wa) @destroy;
     @defer {
-        @for (s in live)
+        @for (s in live) {
             session_drop(s, slots);
+            cc_atomic_fetch_sub(&g_live, 1);
+        }
     };
     (void)fd_nonblock(ln->fd);
     {
@@ -927,16 +960,21 @@ static void worker_run(CCListener* ln, int root_fd) {
 
         if (listening) {
             PollFd* lp = wait.get(0);
-            if (lp && (lp->revents & POLLIN)
-                    && try_accept(ln, &live, &wait, slots) < 0)
-                return;
+            if (lp && (lp->revents & POLLIN)) {
+                int ar = try_accept(ln, &live, &wait, slots);
+                if (ar < 0) return;
+                if (ar > 0) maybe_grow();
+            }
         }
 
         if (!died) continue;
         rows = live;
         w = 0;
         @for (i, s in rows) {
-            if (s->dead) session_drop(s, slots);
+            if (s->dead) {
+                session_drop(s, slots);
+                cc_atomic_fetch_sub(&g_live, 1);
+            }
             else {
                 PollFd* p = wait.get(base + i);
                 live.set(w, s);
@@ -991,7 +1029,10 @@ int main(int argc, char** argv) {
 
     char[:0] listen = opts.listen;
     int nworkers = (int)opts.workers;
-    if (nworkers < 1) nworkers = 1;
+    if (nworkers <= 0) {
+        long n = sysconf(_SC_NPROCESSORS_ONLN);
+        nworkers = (n > 1) ? (int)(n / 2) : 1;
+    }
     if (nworkers > WORKERS_MAX) nworkers = WORKERS_MAX;
 
     char[:] root_view = opts.root;
@@ -1055,23 +1096,30 @@ int main(int argc, char** argv) {
         g_extra = extra.as_slice();
     }
 
-    println(@string(`staticd on ${listen} root=${root_c} workers=${nworkers}`, @scratch));
+    {
+        int start = nworkers < 2 ? nworkers : 2;
+        println(@string(`staticd on ${listen} root=${root_c} workers=${start}..${nworkers}`, @scratch));
 
-    CCSignal stop = cc_signal_watch2(SIGINT, SIGTERM) !> @destroy;
-    CCListener* lnp = &ln;
-    CCSignal* stopp = &stop;
+        CCSignal stop = cc_signal_watch2(SIGINT, SIGTERM) !> @destroy;
+        CCListener* lnp = &ln;
+        CCSignal* stopp = &stop;
+        g_ln = lnp;
+        g_root_fd = root_fd;
+        g_workers_max = nworkers;
+        cc_atomic_store_release(&g_nworkers, start);
 
-    g_app = @parallel spawn { @serial { (void)0; } } !>;
-    @parallel(g_app) {
-        int sig = 0;
-        sig = stopp->wait() !>(e) { (void)e; };
-        if (sig) cc_atomic_store_release(&g_stop, 1);
-    }
-    for (int w = 0; w < nworkers; w++) {
+        g_app = @parallel spawn { @serial { (void)0; } } !>;
         @parallel(g_app) {
-            worker_run(lnp, root_fd);
+            int sig = 0;
+            sig = stopp->wait() !>(e) { (void)e; };
+            if (sig) cc_atomic_store_release(&g_stop, 1);
         }
+        for (int w = 0; w < start; w++) {
+            @parallel(g_app) {
+                worker_run(lnp, root_fd);
+            }
+        }
+        g_app.wait() !>;
     }
-    g_app.wait() !>;
     return 0;
 }
