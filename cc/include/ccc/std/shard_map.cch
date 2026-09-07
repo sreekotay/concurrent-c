@@ -19,6 +19,8 @@
  * Cell ownership (read once):
  *   put(k, v)     copies key+value into the shard arena (views OK as inputs)
  *   get(k)        interior pointer — only under an exclusive hold; do not stash
+ *   get_h / put_h / delete_h  same, with a caller-supplied map hash word
+ *                   (hold index + lookup share one hash)
  *   get_into(...) clones into a caller arena — safe after the hold releases
  *   contains(k)   presence only (no value pointer)
  *   delete(k)     frees the packed key and value in the shard arena
@@ -86,14 +88,20 @@ static inline size_t cc_shard_len(const CCShard* m) {
 }
 
 /* Interior pointer — only under an exclusive hold; do not stash past release. */
+static inline CCString* cc_shard_get_h(CCShard* m, CCSlice key, size_t h) {
+    CCSlicePackedView view;
+    CCSlicePacked pk;
+    if (!m || !m->data) return NULL;
+    pk = cc_slice_packed_borrow_slice(&view, key);
+    return CCShardMapTable_get_ptr_h(m->data, pk, h);
+}
+
 static inline CCString* cc_shard_get(CCShard* m, CCSlice key) {
     CCSlicePackedView view;
     CCSlicePacked pk;
-    size_t h;
     if (!m || !m->data) return NULL;
     pk = cc_slice_packed_borrow_slice(&view, key);
-    h = cc_map_hash_slice_packed(pk);
-    return CCShardMapTable_get_ptr_h(m->data, pk, h);
+    return cc_shard_get_h(m, key, cc_map_hash_slice_packed(pk));
 }
 
 static inline bool cc_shard_contains(CCShard* m, CCSlice key) {
@@ -112,17 +120,15 @@ static inline bool cc_shard_get_into(CCShard* m, CCSlice key, CCArena arena,
     return true;
 }
 
-static inline bool cc_shard_put(CCShard* m, CCSlice key, CCSlice val) {
+static inline bool cc_shard_put_h(CCShard* m, CCSlice key, CCSlice val, size_t h) {
     CCSlicePackedView view;
     CCSlicePacked pk;
-    size_t h;
     CCString* cur;
     CCString owned;
     CCSlicePacked !>(CCError) packed;
     CCSlicePacked durable;
     if (!m || !m->data) return false;
     pk = cc_slice_packed_borrow_slice(&view, key);
-    h = cc_map_hash_slice_packed(pk);
     cur = CCShardMapTable_get_ptr_h(m->data, pk, h);
     owned = cc_string_from_slice(m->arena, val);
     if (cc_string_failed(&owned)) return false;
@@ -147,7 +153,15 @@ static inline bool cc_shard_put(CCShard* m, CCSlice key, CCSlice val) {
     return true;
 }
 
-static inline bool cc_shard_delete(CCShard* m, CCSlice key) {
+static inline bool cc_shard_put(CCShard* m, CCSlice key, CCSlice val) {
+    CCSlicePackedView view;
+    CCSlicePacked pk;
+    if (!m || !m->data) return false;
+    pk = cc_slice_packed_borrow_slice(&view, key);
+    return cc_shard_put_h(m, key, val, cc_map_hash_slice_packed(pk));
+}
+
+static inline bool cc_shard_delete_h(CCShard* m, CCSlice key, size_t h) {
     CCSlicePackedView view;
     CCSlicePacked pk;
     size_t bucket = 0;
@@ -156,7 +170,7 @@ static inline bool cc_shard_delete(CCShard* m, CCSlice key) {
     CCSlicePacked doomed;
     if (!m || !m->data) return false;
     pk = cc_slice_packed_borrow_slice(&view, key);
-    di = CCShardMapTable_find_dense(m->data, pk, &bucket);
+    di = CCShardMapTable_find_dense_h(m->data, pk, h, &bucket);
     if (di == SIZE_MAX) return false;
     v = CCShardMapTable_at_ptr(m->data, di);
     doomed = *CCShardMapTable_key_ptr(m->data, di);
@@ -164,6 +178,14 @@ static inline bool cc_shard_delete(CCShard* m, CCSlice key) {
     if (!CCShardMapTable_del_at(m->data, di, bucket)) return false;
     cc_slice_packed_release(m->arena, &doomed);
     return true;
+}
+
+static inline bool cc_shard_delete(CCShard* m, CCSlice key) {
+    CCSlicePackedView view;
+    CCSlicePacked pk;
+    if (!m || !m->data) return false;
+    pk = cc_slice_packed_borrow_slice(&view, key);
+    return cc_shard_delete_h(m, key, cc_map_hash_slice_packed(pk));
 }
 
 /* ---- Sharded map (cells + domain as:) ---- */
