@@ -1,0 +1,268 @@
+/*
+ * Transport row for the poll/accept/reap zip. Not a protocol server.
+ *
+ * CCIoSess is sock + optional TLS + read window + dead. SessAct is
+ * wait|close. HTTP / FileHold / pages stay in staticd.ccs.
+ *
+ * Include once for types + CCIoSess ops. After Session / ServerCfg /
+ * g_live / g_tls_fail exist, `#define STATICD_IO_ZIP` and include again
+ * for new/drop/arm/apply/accept/reap.
+ */
+#ifndef STATICD_IO_CCH
+#define STATICD_IO_CCH
+
+#include <string.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#ifndef K_IO_READ_BUF
+#define K_IO_READ_BUF (16 * 1024)
+#endif
+
+typedef struct pollfd PollFd;
+
+/* Row advance: wait for poll, or drop the row. Errors are hard fails. */
+@variant SessAct {
+    wait: void;
+    close: void;
+};
+
+/* Transport fact only. read_ptr views the app row's buffer. */
+typedef struct CCIoSess {
+    CCSocket sock;
+    CCTlsConn tls;
+    void* tls_iobuf;
+    int tls_on;
+    char* read_ptr;
+    size_t rlen;
+    size_t rcap;
+    int dead;
+} CCIoSess;
+
+static bool !>(CCIoError) io_sess_write_sock(CCSocket* sock, char[:] data) {
+    size_t off = 0;
+    while (off < data.len) {
+        size_t n = sock->write(data.ptr + off, data.len - off) !>(e) {
+            return cc_err(e);
+        };
+        if (n == 0)
+            return cc_err(cc_io_error(CC_ERROR(CC_ERR_CLOSED, "short write")));
+        off += n;
+    }
+    return cc_ok(true);
+}
+
+/* One transport face: TLS is wrap-once at accept; callers never branch. */
+static bool !>(CCIoError) io_sess_write_all(CCIoSess* io, char[:] data) {
+    size_t off = 0;
+    if (!io->tls_on)
+        return io_sess_write_sock(&io->sock, data);
+    while (off < data.len) {
+        CCNetError ne = CC_NET_OK;
+        size_t n = cc_tls_write(&io->tls, data.ptr + off, data.len - off, &ne);
+        if (ne != CC_NET_OK && n == 0)
+            return cc_err(cc_net_to_io_error(ne));
+        if (n == 0)
+            return cc_err(cc_io_error(CC_ERROR(CC_ERR_CLOSED, "short write")));
+        off += n;
+    }
+    return cc_ok(true);
+}
+
+/* 1 = got bytes, 0 = would-block, Err = peer/error. */
+static int !>(CCIoError) io_sess_fill(CCIoSess* io) {
+    size_t n = 0;
+    size_t room;
+    bool got;
+    if (!io->read_ptr || io->rcap == 0) return cc_ok(1);
+    if (io->rlen >= io->rcap) return cc_ok(1);
+    room = io->rcap - io->rlen;
+    if (io->tls_on) {
+        CCNetError ne = CC_NET_OK;
+        CCSlice got_sl;
+        cc_arena_stack(tmp, K_IO_READ_BUF);
+        got_sl = cc_tls_read(&io->tls, tmp, room, &ne);
+        if (ne == CC_NET_OK && got_sl.len == 0) return cc_ok(0);
+        if (ne != CC_NET_OK)
+            return cc_err(cc_net_to_io_error(ne));
+        if (got_sl.len > room)
+            return cc_err(cc_io_error(CC_ERROR(CC_ERR_IO, "tls overread")));
+        memcpy(io->read_ptr + io->rlen, got_sl.ptr, got_sl.len);
+        io->rlen += got_sl.len;
+        return cc_ok(1);
+    }
+    got = io->sock.try_read_into(io->read_ptr + io->rlen, room, &n) !>(e) {
+        if (e.base.kind == CC_IO_BUSY) return cc_ok(0);
+        return cc_err(e);
+    };
+    if (!got)
+        return cc_err(cc_io_error(CC_ERROR(CC_ERR_CLOSED, "eof")));
+    io->rlen += n;
+    return cc_ok(1);
+}
+
+static void io_sess_consume(CCIoSess* io, size_t n) {
+    if (!io->read_ptr) return;
+    if (n > io->rlen) n = io->rlen;
+    if (n && n < io->rlen) {
+        size_t keep = io->rlen - n;
+        char[:] buf = cc_slice_from_buffer(io->read_ptr, io->rlen);
+        char[:] dst = buf.sub(0, keep);
+        dst.copy_overlap(buf.sub(n, io->rlen)) !>(e) { (void)e; return; };
+    }
+    io->rlen -= n;
+}
+
+static void io_sess_init(CCIoSess* io, CCSocket sock, char* buf, size_t cap) {
+    *io = (CCIoSess){
+        .sock = sock,
+        .read_ptr = buf,
+        .rcap = cap,
+    };
+    (void)io->sock.set_nodelay(1);
+}
+
+/* Certs already in process mats via cc_tls_server_load. */
+static int io_sess_wrap_tls(CCIoSess* io) {
+    void* iobuf;
+    CCTlsServerConfig tcfg = {0};
+    CCNetError ne = CC_NET_OK;
+    CCTlsConn tls;
+    cc_arena_stack(info_a, 64);
+    if (!io) return -1;
+    iobuf = malloc(CC_TLS_IOBUF_SIZE);
+    if (!iobuf) return -1;
+    tls = cc_tls_accept(io->sock, tcfg, iobuf, CC_TLS_IOBUF_SIZE, info_a, &ne);
+    if (ne != CC_NET_OK || !tls.ctx) {
+        free(iobuf);
+        return -1;
+    }
+    io->tls = tls;
+    io->tls_iobuf = iobuf;
+    io->tls_on = 1;
+    io->sock = tls.underlying;
+    return 0;
+}
+
+static void io_sess_drop(CCIoSess* io) {
+    if (!io) return;
+    if (io->tls_on) {
+        cc_tls_close(&io->tls);
+        free(io->tls_iobuf);
+        io->tls_iobuf = NULL;
+        io->tls_on = 0;
+        io->sock.fd = -1;
+    } else if (io->sock.fd >= 0) {
+        io->sock.close();
+    }
+    io->read_ptr = NULL;
+    io->rlen = 0;
+    io->rcap = 0;
+    io->dead = 0;
+}
+
+static int io_fd_nonblock(int fd) {
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0) return -1;
+    return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+}
+
+#endif /* STATICD_IO_CCH */
+
+#ifdef STATICD_IO_ZIP
+#ifndef STATICD_IO_ZIP_CCH
+#define STATICD_IO_ZIP_CCH
+
+/* Session embeds CCIoSess; FileHold send cursor is app policy. */
+
+static Session* session_new(CCSocket sock, CCArenaPool* pool) {
+    Session* s = (Session*)pool->alloc();
+    if (!s) {
+        sock.close();
+        return NULL;
+    }
+    *s = (Session){ .send = { .slot = -1, .fd = -1 } };
+    io_sess_init(&s->io, sock, s->read_buf, sizeof(s->read_buf));
+    return s;
+}
+
+static void session_drop(Session* s, CCArenaPool* pool) {
+    if (!s) return;
+    session_clear_send(s);
+    s->io.drop();
+    pool->free(s);
+}
+
+static void session_arm(Session* s, PollFd* p) {
+    if (!p) return;
+    p->events = s->send_left ? (short)(POLLIN | POLLOUT) : (short)POLLIN;
+}
+
+static void session_apply(Session* s, SessAct a) {
+    @switch (a) {
+    case .close: s->io.dead = 1; break;
+    case .wait: break;
+    }
+}
+
+/* 1 = accepted, 0 = would-block / soft drop, -1 = hard listen error.
+ * TLS wrap failure increments g_tls_fail (not silent EAGAIN). */
+static int try_accept(CCListener* ln, ServerCfg* cfg, Vec::[SessionP]* live,
+                      Vec::[PollFd]* wait, CCArenaPool* slots) {
+    int fd = accept(ln->fd, NULL, NULL);
+    Session* s;
+    PollFd p;
+    if (fd < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+            return 0;
+        return -1;
+    }
+    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+    (void)io_fd_nonblock(fd);
+    s = session_new((CCSocket){ .fd = fd }, slots);
+    if (!s) return 0;
+    if (cfg->tls && s->io.wrap_tls() != 0) {
+        cc_atomic_fetch_add(&g_tls_fail, 1);
+        session_drop(s, slots);
+        return 0;
+    }
+    if (live->push(s) != 0) {
+        session_drop(s, slots);
+        return 0;
+    }
+    p = (PollFd){ .fd = s->io.sock.fd, .events = POLLIN, .revents = 0 };
+    if (wait->push(p) != 0) {
+        session_drop(s, slots);
+        live->truncate(live->len - 1);
+        return 0;
+    }
+    cc_atomic_fetch_add(&g_live, 1);
+    return 1;
+}
+
+/* Compact dead rows out of live/wait; updates g_live. */
+static void session_reap(Vec::[SessionP]* live, Vec::[PollFd]* wait,
+                         size_t base, CCArenaPool* slots) {
+    Vec::[SessionP] rows = *live;
+    size_t w = 0;
+    @for (i, s in rows) {
+        if (s->io.dead) {
+            session_drop(s, slots);
+            cc_atomic_fetch_sub(&g_live, 1);
+        } else {
+            PollFd* p = wait->get(base + i);
+            live->set(w, s);
+            if (p) wait->set(base + w, *p);
+            w++;
+        }
+    }
+    live->truncate(w);
+    wait->truncate(base + w);
+}
+
+#endif /* STATICD_IO_ZIP_CCH */
+#endif /* STATICD_IO_ZIP */

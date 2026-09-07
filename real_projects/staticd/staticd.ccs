@@ -9,12 +9,15 @@
  * accept per poll). Cap is ncpu/2 (`--workers 0`) or N. `--workers 1`
  * stays one dest — the page, and the isolate receipt.
  * `ServerCfg` holds policy (root/pages/tls/index/list/extra). Join/grow
- * atomics are process-wide. `SessAct` is wait|close; TLS wraps once at
- * accept. Pages are an early arm (`pages_serve`; MISS → static).
+ * atomics are process-wide. `serve(cfg)` owns the worker zip. Session
+ * embeds `CCIoSess` (transport); `SessAct` is wait|close; TLS wraps once
+ * at accept (`g_tls_fail` counts drops). Pages are an early arm
+ * (`pages_serve`; MISS → static).
  *
  * Live table is Vec of Session* on a worker stack arena; slots are a
  * pool on that arena. Encode scratch is a second stack arena on the worker.
  *
+ *   staticd_io.cch      — CCIoSess / SessAct / fill·write·tls·accept·reap
  *   staticd_http.cch    — date / Range / header-CI mechanics
  *   staticd_block.cch   — block ring keyed by dev+ino (reuse; idle cull)
  *   staticd_fs.cch      — jail, 1s fd cache, FileHold, listing
@@ -50,15 +53,15 @@
 #include "staticd_fs.cch"
 #include "staticd_script.cch"
 #include "staticd_ws.cch"
+#include "staticd_io.cch"
 #include <time.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
-#include <poll.h>
 #include <unistd.h>
 #include <errno.h>
 
-#define K_READ_BUF   (16 * 1024)
+#define K_READ_BUF   K_IO_READ_BUF
 #define K_OUT_BUF    (8 * 1024)
 #define K_PATH_MAX   4096
 #define K_LIST_ARENA (32 * 1024)
@@ -81,35 +84,33 @@ typedef struct ServerCfg {
     CCSlice extra;
 } ServerCfg;
 
-/* Row advance: wait for poll, or drop the row. Errors are hard fails. */
-@variant SessAct {
-    wait: void;
-    close: void;
-};
-
 typedef struct Conn {
     CCArena arena;
     CCString out;
     CCSlice extra; /* --header lines; view owned by ServerCfg */
 } Conn;
 
+/* App row: transport embed + send cursor + HTTP/WS phase. */
 typedef struct Session {
-    CCSocket sock;
-    CCTlsConn tls;
-    void* tls_iobuf;
-    int tls_on;
+    CCIoSess io;
     char read_buf[K_READ_BUF];
-    size_t rlen;
     FileHold send;
     size_t send_off;
     size_t send_left;
     int phase;
-    int dead;
     int send_close;
 } Session;
 
 typedef Session* SessionP;
-typedef struct pollfd PollFd;
+
+/* Session is CCIoSess for fill/write/wrap; Io allow-lists the face. */
+@typeview on Session {
+    as: io;
+};
+
+typedef @typeview Io on Session {
+    r: fill, write_all, wrap_tls, consume, arm, drop;
+} *SessIo;
 
 typedef @typeview Encode on Conn {
     r: write, lit, status, hdr, end_headers, date_ka, extra;
@@ -208,72 +209,11 @@ static const char* k_mime[] = {
     [MIME_TXT]   = "text/plain; charset=utf-8",
 };
 
-static bool !>(CCIoError) write_all_sock(CCSocket* sock, char[:] data) {
-    size_t off = 0;
-    while (off < data.len) {
-        size_t n = sock->write(data.ptr + off, data.len - off) !>(e) {
-            return cc_err(e);
-        };
-        if (n == 0)
-            return cc_err(cc_io_error(CC_ERROR(CC_ERR_CLOSED, "short write")));
-        off += n;
-    }
-    return cc_ok(true);
-}
-
-/* One transport face: TLS is wrap-once at accept; callers never branch. */
-static bool !>(CCIoError) session_write_all(Session* s, char[:] data) {
-    size_t off = 0;
-    if (!s->tls_on)
-        return write_all_sock(&s->sock, data);
-    while (off < data.len) {
-        CCNetError ne = CC_NET_OK;
-        size_t n = cc_tls_write(&s->tls, data.ptr + off, data.len - off, &ne);
-        if (ne != CC_NET_OK && n == 0)
-            return cc_err(cc_net_to_io_error(ne));
-        if (n == 0)
-            return cc_err(cc_io_error(CC_ERROR(CC_ERR_CLOSED, "short write")));
-        off += n;
-    }
-    return cc_ok(true);
-}
-
-/* 1 = got bytes, 0 = would-block, Err = peer/error. */
-static int !>(CCIoError) session_fill(Session* s) {
-    size_t n = 0;
-    size_t room;
-    bool got;
-    if (s->rlen >= sizeof(s->read_buf)) return cc_ok(1);
-    room = sizeof(s->read_buf) - s->rlen;
-    if (s->tls_on) {
-        CCNetError ne = CC_NET_OK;
-        CCSlice got_sl;
-        cc_arena_stack(tmp, K_READ_BUF);
-        got_sl = cc_tls_read(&s->tls, tmp, room, &ne);
-        if (ne == CC_NET_OK && got_sl.len == 0) return cc_ok(0);
-        if (ne != CC_NET_OK)
-            return cc_err(cc_net_to_io_error(ne));
-        if (got_sl.len > room)
-            return cc_err(cc_io_error(CC_ERROR(CC_ERR_IO, "tls overread")));
-        memcpy(s->read_buf + s->rlen, got_sl.ptr, got_sl.len);
-        s->rlen += got_sl.len;
-        return cc_ok(1);
-    }
-    got = s->sock.try_read_into(s->read_buf + s->rlen, room, &n) !>(e) {
-        if (e.base.kind == CC_IO_BUSY) return cc_ok(0);
-        return cc_err(e);
-    };
-    if (!got)
-        return cc_err(cc_io_error(CC_ERROR(CC_ERR_CLOSED, "eof")));
-    s->rlen += n;
-    return cc_ok(1);
-}
-
 static bool !>(CCError) flush_conn(Session* s, Conn* c) {
     @errhandler(CCError e) { return cc_err(e); }
     char[:] sl = c->out.as_slice();
     if (sl.len)
-        session_write_all(s, sl) !>;
+        s->io.write_all(sl) !>;
     c->out.release(c->arena);
     c->out = cc_string_new();
     return cc_ok(true);
@@ -284,6 +224,9 @@ static void session_clear_send(Session* s) {
     s->send_off = 0;
     s->send_left = 0;
 }
+
+#define STATICD_IO_ZIP
+#include "staticd_io.cch"
 
 static void session_queue_send(Session* s, FileHold* fh, size_t off, size_t nsend) {
     session_clear_send(s);
@@ -306,7 +249,7 @@ static SessAct !>(CCError) session_send_one(Session* s) {
     if (want > (size_t)FILE_SEND_CHUNK) want = (size_t)FILE_SEND_CHUNK;
     bh = checkout_block(s->send.fd, s->send.dev, s->send.ino, s->send.mtime,
                         s->send_off, want) !>;
-    session_write_all(s, cc_slice_from_buffer(bh.ptr, want)) !>(e) {
+    s->io.write_all(cc_slice_from_buffer(bh.ptr, want)) !>(e) {
         block_hold_drop(&bh);
         session_clear_send(s);
         return cc_err(e);
@@ -319,11 +262,6 @@ static SessAct !>(CCError) session_send_one(Session* s) {
         if (s->send_close) return cc_ok((SessAct){ .close = {} });
     }
     return cc_ok((SessAct){ .wait = {} });
-}
-
-static void session_arm(Session* s, PollFd* p) {
-    if (!p) return;
-    p->events = s->send_left ? (short)(POLLIN | POLLOUT) : (short)POLLIN;
 }
 
 static bool !>(CCError) conn_write(Conn* c, char[:] data) {
@@ -453,17 +391,6 @@ static bool !>(CCError) send_416(ConnEnc conn, size_t total, int ka) {
     return conn->end_headers();
 }
 
-static void session_consume(Session* s, size_t n) {
-    if (n > s->rlen) n = s->rlen;
-    if (n && n < s->rlen) {
-        size_t keep = s->rlen - n;
-        char[:] buf = cc_slice_from_buffer(s->read_buf, s->rlen);
-        char[:] dst = buf.sub(0, keep);
-        dst.copy_overlap(buf.sub(n, s->rlen)) !>(e) { (void)e; return; };
-    }
-    s->rlen -= n;
-}
-
 static int take_line(char[:]* rest, char[:]* line) {
     if (!rest || rest->len == 0) return 0;
     char[:] s = *rest;
@@ -480,10 +407,10 @@ static int take_line(char[:]* rest, char[:]* line) {
 
 static size_t headers_end(Session* s) {
     size_t i;
-    if (s->rlen < 4) return 0;
-    for (i = 0; i + 3 < s->rlen; i++) {
-        if (s->read_buf[i] == '\r' && s->read_buf[i + 1] == '\n'
-                && s->read_buf[i + 2] == '\r' && s->read_buf[i + 3] == '\n')
+    if (s->io.rlen < 4) return 0;
+    for (i = 0; i + 3 < s->io.rlen; i++) {
+        if (s->io.read_ptr[i] == '\r' && s->io.read_ptr[i + 1] == '\n'
+                && s->io.read_ptr[i + 2] == '\r' && s->io.read_ptr[i + 3] == '\n')
             return i + 4;
     }
     return 0;
@@ -496,9 +423,9 @@ static bool !>(CCError) write_ws(Session* s, int opcode, char[:] body) {
     if (body.len > (size_t)WS_MAX_PAYLOAD)
         return cc_err(CC_ERROR(CC_ERR_IO, "ws too big"));
     hn = ws_hdr_unmasked(opcode, body.len, h);
-    session_write_all(s, cc_slice_from_buffer((char*)h, hn)) !>;
+    s->io.write_all(cc_slice_from_buffer((char*)h, hn)) !>;
     if (body.len)
-        session_write_all(s, body) !>;
+        s->io.write_all(body) !>;
     return cc_ok(true);
 }
 
@@ -564,12 +491,12 @@ static SessAct !>(CCError) pages_send(Session* s, Conn* conn, ScriptReply* r,
         }
     }
     if (with_body && r->body.len)
-        session_write_all(s, r->body) !>;
+        s->io.write_all(r->body) !>;
     return cc_ok((SessAct){ .wait = {} });
 }
 
 /* One request. Sets s->phase = SESS_WS on upgrade.
- * Caller has a complete header block at the front of s->read_buf. */
+ * Caller has a complete header block at the front of s->io.read_ptr. */
 static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
     @errhandler(CCError e) { return cc_err(e); }
     size_t hend = headers_end(s);
@@ -594,7 +521,7 @@ static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
     @defer fh.drop();
 
     if (!hend) return cc_err(CC_ERROR(CC_ERR_IO, "no headers"));
-    block = cc_slice_from_buffer(s->read_buf, hend);
+    block = cc_slice_from_buffer(s->io.read_ptr, hend);
     rest = block;
     if (!take_line(&rest, &first))
         return cc_err(CC_ERROR(CC_ERR_IO, "bad request line"));
@@ -611,7 +538,7 @@ static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
             query_s = path_query_of(req.path);
         }
         if (path_s.failed()) {
-            session_consume(s, hend);
+            s->io.consume(hend);
             return http_fail(s, conn, 500, "Internal Server Error", "oom\n", 1, 0);
         }
         ka = !req.version.eq_cstr("HTTP/1.0");
@@ -651,7 +578,7 @@ static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
         }
     }
     if (want_close) ka = 0;
-    session_consume(s, hend);
+    s->io.consume(hend);
     if (!parsed) {
         int head400 = first.starts_with("HEAD ");
         return http_fail(s, conn, 400, "Bad Request", "bad request\n", !head400, ka);
@@ -768,7 +695,7 @@ static SessAct !>(CCError) handle_http(Session* s, Conn* conn, ServerCfg* cfg) {
                 }
             }
             if (is_get && html.len > 0)
-                session_write_all(s, html.as_slice()) !>;
+                s->io.write_all(html.as_slice()) !>;
             return cc_ok((SessAct){ .wait = {} });
         }
     }
@@ -817,153 +744,64 @@ static int ws_one_frame(Session* s) {
     int opcode, masked;
     size_t n = 0, need = 2, hdr = 2;
     char* payload;
-    if (s->rlen < 2) return 0;
-    b0 = (unsigned char)s->read_buf[0];
-    b1 = (unsigned char)s->read_buf[1];
+    if (s->io.rlen < 2) return 0;
+    b0 = (unsigned char)s->io.read_ptr[0];
+    b1 = (unsigned char)s->io.read_ptr[1];
     if ((b0 & 0x80) == 0) return -1;
     opcode = (int)(b0 & 0x0f);
     masked = (b1 & 0x80) != 0;
     n = (size_t)(b1 & 0x7f);
     if (n == 126) {
-        if (s->rlen < 4) return 0;
-        n = ((size_t)(unsigned char)s->read_buf[2] << 8)
-          | (size_t)(unsigned char)s->read_buf[3];
+        if (s->io.rlen < 4) return 0;
+        n = ((size_t)(unsigned char)s->io.read_ptr[2] << 8)
+          | (size_t)(unsigned char)s->io.read_ptr[3];
         hdr = 4;
     } else if (n == 127) {
         int z;
-        if (s->rlen < 10) return 0;
+        if (s->io.rlen < 10) return 0;
         for (z = 2; z < 8; z++)
-            if (s->read_buf[z]) return -1;
-        n = ((size_t)(unsigned char)s->read_buf[8] << 8)
-          | (size_t)(unsigned char)s->read_buf[9];
+            if (s->io.read_ptr[z]) return -1;
+        n = ((size_t)(unsigned char)s->io.read_ptr[8] << 8)
+          | (size_t)(unsigned char)s->io.read_ptr[9];
         hdr = 10;
     }
     if (!masked || n > (size_t)WS_MAX_PAYLOAD) return -1;
     need = hdr + 4 + n;
-    if (s->rlen < need) return 0;
+    if (s->io.rlen < need) return 0;
     {
         char[:] mk = cc_slice_from_buffer((char*)maskk, 4);
-        mk.copy(cc_slice_from_buffer(s->read_buf + hdr, 4)) !>(e) {
+        mk.copy(cc_slice_from_buffer(s->io.read_ptr + hdr, 4)) !>(e) {
             (void)e;
             return -1;
         };
     }
-    payload = s->read_buf + hdr + 4;
+    payload = s->io.read_ptr + hdr + 4;
     if (n) ws_unmask(payload, n, maskk);
     if (opcode == 8) {
         write_ws(s, 8, cc_slice_from_buffer(payload, n)) !>(e) { (void)e; };
-        session_consume(s, need);
+        s->io.consume(need);
         return -1;
     }
     if (opcode == 9) {
         write_ws(s, 10, cc_slice_from_buffer(payload, n)) !>(e) { (void)e; };
-        session_consume(s, need);
+        s->io.consume(need);
         return 1;
     }
     if (opcode == 10) {
-        session_consume(s, need);
+        s->io.consume(need);
         return 1;
     }
     if (opcode == 1 || opcode == 2) {
         write_ws(s, opcode, cc_slice_from_buffer(payload, n)) !>(e) {
             (void)e;
-            session_consume(s, need);
+            s->io.consume(need);
             return -1;
         };
-        session_consume(s, need);
+        s->io.consume(need);
         return 1;
     }
-    session_consume(s, need);
+    s->io.consume(need);
     return -1;
-}
-
-static void session_drop(Session* s, CCArenaPool* pool) {
-    if (!s) return;
-    session_clear_send(s);
-    if (s->tls_on) {
-        cc_tls_close(&s->tls);
-        free(s->tls_iobuf);
-        s->tls_iobuf = NULL;
-        s->tls_on = 0;
-        s->sock.fd = -1;
-    } else {
-        s->sock.close();
-    }
-    pool->free(s);
-}
-
-static Session* session_new(CCSocket sock, CCArenaPool* pool) {
-    Session* s = (Session*)pool->alloc();
-    if (!s) {
-        sock.close();
-        return NULL;
-    }
-    *s = (Session){ .sock = sock, .send = { .slot = -1, .fd = -1 } };
-    (void)s->sock.set_nodelay(1);
-    return s;
-}
-
-static int session_tls_wrap(Session* s, ServerCfg* cfg) {
-    void* iobuf;
-    CCTlsServerConfig tcfg = {0};
-    CCNetError ne = CC_NET_OK;
-    CCTlsConn tls;
-    cc_arena_stack(info_a, 64);
-    if (!s || !cfg || !cfg->tls) return 0;
-    iobuf = malloc(CC_TLS_IOBUF_SIZE);
-    if (!iobuf) return -1;
-    /* Certs already in process mats via cc_tls_server_load. */
-    tls = cc_tls_accept(s->sock, tcfg, iobuf, CC_TLS_IOBUF_SIZE, info_a, &ne);
-    if (ne != CC_NET_OK || !tls.ctx) {
-        free(iobuf);
-        return -1;
-    }
-    s->tls = tls;
-    s->tls_iobuf = iobuf;
-    s->tls_on = 1;
-    s->sock = tls.underlying;
-    return 0;
-}
-
-static int fd_nonblock(int fd) {
-    int fl = fcntl(fd, F_GETFL, 0);
-    if (fl < 0) return -1;
-    return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
-}
-
-/* 1 = accepted, 0 = would-block / soft drop, -1 = hard listen error.
- * TLS wrap failure increments g_tls_fail (not silent EAGAIN). */
-static int try_accept(CCListener* ln, ServerCfg* cfg, Vec::[SessionP]* live,
-                      Vec::[PollFd]* wait, CCArenaPool* slots) {
-    int fd = accept(ln->fd, NULL, NULL);
-    Session* s;
-    PollFd p;
-    if (fd < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
-            return 0;
-        return -1;
-    }
-    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
-    (void)fd_nonblock(fd);
-    s = session_new((CCSocket){ .fd = fd }, slots);
-    if (!s) return 0;
-    if (cfg->tls && session_tls_wrap(s, cfg) != 0) {
-        cc_atomic_fetch_add(&g_tls_fail, 1);
-        session_drop(s, slots);
-        return 0;
-    }
-    if (live->push(s) != 0) {
-        session_drop(s, slots);
-        return 0;
-    }
-    p = (PollFd){ .fd = s->sock.fd, .events = POLLIN, .revents = 0 };
-    if (wait->push(p) != 0) {
-        session_drop(s, slots);
-        live->truncate(live->len - 1);
-        return 0;
-    }
-    cc_atomic_fetch_add(&g_live, 1);
-    return 1;
 }
 
 static void worker_run(ServerCfg* cfg, CCListener* ln);
@@ -987,13 +825,6 @@ static void maybe_grow(void) {
     }
 }
 
-static void session_apply(Session* s, SessAct a) {
-    @switch (a) {
-    case .close: s->dead = 1; break;
-    case .wait: break;
-    }
-}
-
 /* Fill, one send chunk, or HTTP/WS until the row needs another wait. */
 static SessAct !>(CCError) session_step(Session* s, Conn* conn, ServerCfg* cfg,
                                         PollFd* p) {
@@ -1004,7 +835,7 @@ static SessAct !>(CCError) session_step(Session* s, Conn* conn, ServerCfg* cfg,
 
     if (s->send_left) {
         if (rv & POLLIN) {
-            int got = session_fill(s) !>;
+            int got = s->io.fill() !>;
             if (got < 0) return cc_ok((SessAct){ .close = {} });
         }
         if (rv & POLLOUT) {
@@ -1014,13 +845,13 @@ static SessAct !>(CCError) session_step(Session* s, Conn* conn, ServerCfg* cfg,
             case .wait: break;
             }
         }
-        session_arm(s, p);
+        s->arm(p);
         if (s->send_left) return cc_ok((SessAct){ .wait = {} });
         if (s->send_close) return cc_ok((SessAct){ .close = {} });
     } else if (!(rv & POLLIN)) {
         return cc_ok((SessAct){ .wait = {} });
     } else {
-        int got = session_fill(s) !>;
+        int got = s->io.fill() !>;
         if (got < 0) return cc_ok((SessAct){ .close = {} });
         if (got == 0) return cc_ok((SessAct){ .wait = {} });
     }
@@ -1030,16 +861,16 @@ static SessAct !>(CCError) session_step(Session* s, Conn* conn, ServerCfg* cfg,
             int r = ws_one_frame(s);
             if (r < 0) return cc_ok((SessAct){ .close = {} });
             if (r == 0) {
-                session_arm(s, p);
+                s->arm(p);
                 return cc_ok((SessAct){ .wait = {} });
             }
             continue;
         }
         if (!headers_end(s)) {
-            if (s->rlen == sizeof(s->read_buf))
+            if (s->io.rlen == s->io.rcap)
                 return http_fail(s, conn, 400, "Bad Request",
                                  "headers too big\n", 1, 0);
-            session_arm(s, p);
+            s->arm(p);
             return cc_ok((SessAct){ .wait = {} });
         }
         {
@@ -1055,7 +886,7 @@ static SessAct !>(CCError) session_step(Session* s, Conn* conn, ServerCfg* cfg,
         }
         if (s->send_left) {
             SessAct a = session_send_one(s) !>;
-            session_arm(s, p);
+            s->arm(p);
             @switch (a) {
             case .close: return cc_ok(a);
             case .wait: break;
@@ -1069,7 +900,7 @@ static SessAct !>(CCError) session_step(Session* s, Conn* conn, ServerCfg* cfg,
 static void step_row(Session* s, Conn* conn, ServerCfg* cfg, PollFd* p) {
     SessAct a = session_step(s, conn, cfg, p) !>(e) {
         (void)e;
-        s->dead = 1;
+        s->io.dead = 1;
         return;
     };
     session_apply(s, a);
@@ -1094,7 +925,7 @@ static void worker_run(ServerCfg* cfg, CCListener* ln) {
             cc_atomic_fetch_sub(&g_live, 1);
         }
     };
-    (void)fd_nonblock(ln->fd);
+    (void)io_fd_nonblock(ln->fd);
     {
         PollFd p = { .fd = ln->fd, .events = POLLIN, .revents = 0 };
         if (wait.push(p) != 0) return;
@@ -1103,8 +934,7 @@ static void worker_run(ServerCfg* cfg, CCListener* ln) {
     int listening = 1;
     while (!cc_atomic_load_acquire(&g_stop) || live.len() > 0) {
         PollFd* raw;
-        size_t base, w;
-        Vec::[SessionP] rows;
+        size_t base;
         int pr, died;
         int stop = cc_atomic_load_acquire(&g_stop);
         if (stop && listening) {
@@ -1137,7 +967,7 @@ static void worker_run(ServerCfg* cfg, CCListener* ln) {
             PollFd* p = wait.get(base + i);
             if (!p) return;
             step_row(s, &conn, cfg, p);
-            if (s->dead) died = 1;
+            if (s->io.dead) died = 1;
         }
 
         /* accept */
@@ -1152,21 +982,7 @@ static void worker_run(ServerCfg* cfg, CCListener* ln) {
 
         /* reap */
         if (!died) continue;
-        rows = live;
-        w = 0;
-        @for (i, s in rows) {
-            if (s->dead) {
-                session_drop(s, slots);
-                cc_atomic_fetch_sub(&g_live, 1);
-            } else {
-                PollFd* p = wait.get(base + i);
-                live.set(w, s);
-                if (p) wait.set(base + w, *p);
-                w++;
-            }
-        }
-        live.truncate(w);
-        wait.truncate(base + w);
+        session_reap(&live, &wait, base, slots);
     }
 }
 
@@ -1193,6 +1009,51 @@ static int header_line_ok(char[:] v) {
         if (ch == ':') colon = 1;
     }
     return colon;
+}
+
+/* Banner + workers + signal. Caller owns cfg / ln / open fds. */
+static void !>(CCError) serve(ServerCfg* cfg, CCListener* ln,
+                              char[:] listen, const char* root_c,
+                              int nworkers) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int start = nworkers < 2 ? nworkers : 2;
+    if (cfg->pages_fd >= 0 && cfg->tls)
+        println(@string(`staticd on ${listen} root=${root_c} pages=on tls=on workers=${start}..${nworkers}`, @scratch));
+    else if (cfg->pages_fd >= 0)
+        println(@string(`staticd on ${listen} root=${root_c} pages=on workers=${start}..${nworkers}`, @scratch));
+    else if (cfg->tls)
+        println(@string(`staticd on ${listen} root=${root_c} tls=on workers=${start}..${nworkers}`, @scratch));
+    else
+        println(@string(`staticd on ${listen} root=${root_c} workers=${start}..${nworkers}`, @scratch));
+
+    CCSignal stop = cc_signal_watch2(SIGINT, SIGTERM) !> @destroy;
+    CCListener* lnp = ln;
+    ServerCfg* cfgp = cfg;
+    CCSignal* stopp = &stop;
+    g_ln = lnp;
+    g_cfg = cfgp;
+    g_workers_max = nworkers;
+    cc_atomic_store_release(&g_nworkers, start);
+    cc_atomic_store_release(&g_tls_fail, 0);
+
+    g_app = @parallel spawn { @serial { (void)0; } } !>;
+    @parallel(g_app) {
+        int sig = 0;
+        sig = stopp->wait() !>(e) { (void)e; };
+        if (sig) cc_atomic_store_release(&g_stop, 1);
+    }
+    for (int w = 0; w < start; w++) {
+        @parallel(g_app) {
+            worker_run(cfgp, lnp);
+        }
+    }
+    g_app.wait() !>;
+    {
+        int nfail = cc_atomic_load_acquire(&g_tls_fail);
+        if (cfg->tls && nfail > 0)
+            eprintln(@string(`staticd: tls handshake failures: ${nfail}`, @scratch));
+    }
+    return cc_ok();
 }
 
 int main(int argc, char** argv) {
@@ -1353,38 +1214,6 @@ int main(int argc, char** argv) {
         cfg.extra = extra.as_slice();
     }
 
-    {
-        int start = nworkers < 2 ? nworkers : 2;
-        if (cfg.pages_fd >= 0 && cfg.tls)
-            println(@string(`staticd on ${listen} root=${root_c} pages=on tls=on workers=${start}..${nworkers}`, @scratch));
-        else if (cfg.pages_fd >= 0)
-            println(@string(`staticd on ${listen} root=${root_c} pages=on workers=${start}..${nworkers}`, @scratch));
-        else if (cfg.tls)
-            println(@string(`staticd on ${listen} root=${root_c} tls=on workers=${start}..${nworkers}`, @scratch));
-        else
-            println(@string(`staticd on ${listen} root=${root_c} workers=${start}..${nworkers}`, @scratch));
-
-        CCSignal stop = cc_signal_watch2(SIGINT, SIGTERM) !> @destroy;
-        CCListener* lnp = &ln;
-        ServerCfg* cfgp = &cfg;
-        CCSignal* stopp = &stop;
-        g_ln = lnp;
-        g_cfg = cfgp;
-        g_workers_max = nworkers;
-        cc_atomic_store_release(&g_nworkers, start);
-
-        g_app = @parallel spawn { @serial { (void)0; } } !>;
-        @parallel(g_app) {
-            int sig = 0;
-            sig = stopp->wait() !>(e) { (void)e; };
-            if (sig) cc_atomic_store_release(&g_stop, 1);
-        }
-        for (int w = 0; w < start; w++) {
-            @parallel(g_app) {
-                worker_run(cfgp, lnp);
-            }
-        }
-        g_app.wait() !>;
-    }
+    serve(&cfg, &ln, listen, root_c, nworkers) !>;
     return 0;
 }

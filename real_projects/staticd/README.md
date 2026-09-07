@@ -169,7 +169,7 @@ splits the zip. ncpu as a *start* count oversubscribes a CPU-bound zip.
 ## Shape
 
 ```
-main → ServerCfg → serve
+main → open cfg → serve(cfg)
   signal → g_stop
   worker × 2..cap               // start 2; grow every 64 conns; cap ncpu/2
     poll → step rows → accept → reap
@@ -181,9 +181,9 @@ Keep-alive and WebSocket are the row staying in the table, not a dest
 that stays live. Add workers to use more cores; they share the listen fd.
 The table is `Vec` of `Session*` on a worker arena; slots are a pool on
 that arena. `poll()` is a tape, not a second table. TLS wraps once at
-accept; `session_read` / `session_write` are the one transport face.
+accept; `session_fill` / `session_write_all` are the one transport face.
 `SessAct` (`wait` / `close`) is how a step finishes; `dead` is only the
-reap mark.
+reap mark. TLS handshake drops increment `g_tls_fail` (shutdown summary).
 
 Encode methods never touch the socket. The jail walks each path
 component with `openat(O_NOFOLLOW)`. The fd cache re-resolves the name

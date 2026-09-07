@@ -38,6 +38,7 @@ endif
 
 $(OUT_DIR)/staticd: staticd.ccs staticd_ws.cch \
 		staticd_http.cch staticd_block.cch staticd_fs.cch staticd_script.cch \
+		staticd_io.cch \
 		| $(OUT_DIR) ensure-tls-runtime
 ifeq ($(CC_ENABLE_TLS),1)
 	CFLAGS="-DCC_ENABLE_TLS -I$(BEARSSL_INC) $${CFLAGS:-}" \
