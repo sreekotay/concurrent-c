@@ -22,6 +22,15 @@
 int cc_comptime_prepare_source_ex(char** inout_buf, size_t* inout_len,
                                   const char* input_path, unsigned passes);
 
+/* Space-blank every `@comptime` construct, keeping the layout: the source
+ * a parser may read once the blocks have been run. A file-scope block
+ * leaves an `enum{__ccs<n>=0};` marker on one of its blanked lines, and a
+ * block inside an `enum { }` leaves a dummy enumerator, so an
+ * `CC_EMIT_AT_COMPTIME_SITE` fragment has somewhere to splice. Newlines
+ * are never overwritten, so the line map holds. Returns NULL on an
+ * unterminated construct, having said which. Caller frees. */
+char* cc_comptime_blank_blocks(const char* src, size_t n);
+
 /* Resolve `@comptime if/for`, then lower `@emit` / `@string` templates.
  * Updates *inout_buf / *inout_len in place (frees the prior buffer on change).
  * Returns 0 on success, -1 on hard error ((char*)-1 from a sub-pass). */
