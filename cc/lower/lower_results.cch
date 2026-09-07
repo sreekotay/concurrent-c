@@ -1307,6 +1307,37 @@ static size_t rl_defining_decl(CcLowerer* L, CCSlice name) {
 /* Where a spec goes: before the declaration at the returned index. After
  * the leading includes (`inc_at`), or after the latest file-scope definition
  * of a type it spells. */
+/* The declaration after the last quoted `.cch` include. A type this unit
+ * does not define itself comes from one of them, and a spec that spells
+ * it cannot stand above the include that says what it is. */
+static size_t rl_after_quoted_includes(CcLowerer* L) {
+    CcDeclList* decls = &L->unit->decls;
+    size_t nd = decls->len();
+    size_t at = 0;
+    size_t k;
+    for (k = 0; k < nd; k++) {
+        CcDecl* d = *decls->get_ptr(k);
+        uint32_t tok = 0;
+        bool is_pp = false;
+        @switch (d->k) {
+            case .pp(x): tok = x.tok; is_pp = true; break;
+            default: break;
+        }
+        if (!is_pp) continue;
+        {
+            CCSlice t = tp_text_of(L, tok);
+            size_t i = 0;
+            while (i < t.len && (t.ptr[i] == ' ' || t.ptr[i] == '#')) i++;
+            if (i + 7 < t.len && memcmp(t.ptr + i, "include", 7) == 0) {
+                size_t j = i + 7;
+                while (j < t.len && (t.ptr[j] == ' ' || t.ptr[j] == '\t')) j++;
+                if (j < t.len && t.ptr[j] == '"') at = k + 1;
+            }
+        }
+    }
+    return at;
+}
+
 static size_t rl_spec_anchor(CcLowerer* L, CcTypeInfo* ti, size_t inc_at) {
     size_t at = inc_at;
     CCSlice vn = rl_type_base_name(ti->result_value);
@@ -1315,6 +1346,10 @@ static size_t rl_spec_anchor(CcLowerer* L, CcTypeInfo* ti, size_t inc_at) {
     size_t de = en.len ? rl_defining_decl(L, en) : SIZE_MAX;
     if (dv != SIZE_MAX && dv + 1 > at) at = dv + 1;
     if (de != SIZE_MAX && de + 1 > at) at = de + 1;
+    if (dv == SIZE_MAX || de == SIZE_MAX) {
+        size_t q = rl_after_quoted_includes(L);
+        if (q > at) at = q;
+    }
     return at;
 }
 

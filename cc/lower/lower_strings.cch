@@ -79,11 +79,31 @@ static CcExpr* sr_slot_expr(CcLowerer* L, CcTplPart* part, CcSpan sp) {
     return lw_text(L, wrapped, sp);
 }
 
-/* `"<text>"`, the bytes as the source wrote them. */
-static CcExpr* sr_literal(CcLowerer* L, CCSlice text, CcSpan sp) {
+/* `"<text>"`: the run as a C string literal. A template body is written
+ * between backticks, where a newline and a `"` are ordinary characters —
+ * in a C literal they are not, so they are escaped here. An escape the
+ * user wrote travels through untouched (C decodes it to the one character
+ * `sr_decoded_len` already counted); in a verbatim run there are no
+ * escapes to preserve, so a backslash is one more character to escape. */
+static CcExpr* sr_literal(CcLowerer* L, CCSlice text, bool verbatim, CcSpan sp) {
     CCString q = cc_string_new();
+    size_t i = 0;
     q.push_char('"', L->arena);
-    q.push_slice(text, L->arena);
+    while (i < text.len) {
+        char c = text.ptr[i];
+        if (!verbatim && c == '\\' && i + 1 < text.len) {
+            q.push_char(c, L->arena);
+            q.push_char(text.ptr[i + 1], L->arena);
+            i += 2;
+            continue;
+        }
+        if (c == '\n') q.push_cstr("\\n", L->arena);
+        else if (c == '\r') q.push_cstr("\\r", L->arena);
+        else if (c == '"') q.push_cstr("\\\"", L->arena);
+        else if (c == '\\') q.push_cstr("\\\\", L->arena);
+        else q.push_char(c, L->arena);
+        i++;
+    }
     q.push_char('"', L->arena);
     return lw_text(L, q, sp);
 }
@@ -143,7 +163,7 @@ static bool sr_arena_stmts(TStep* st, CCSlice name, CcTemplate tp, CcSpan sp, Cc
         if (sr_reject_tag(L, part, sp)) return false;
         if (!part->slot) {
             CCString cnt = @string(`${(int)sr_decoded_len(part->text, part->is_verbatim)}`, L->arena);
-            CcExpr* call = lw_call2(L, cstr_slice("cc_string_push_buffer"), recv, sr_literal(L, part->text, sp), sp);
+            CcExpr* call = lw_call2(L, cstr_slice("cc_string_push_buffer"), recv, sr_literal(L, part->text, part->is_verbatim, sp), sp);
             CcExprList* args = lw_call_args(call);
             args->push(lw_text(L, cnt, sp));
             args->push(tp.arena);
@@ -197,7 +217,7 @@ static CcExpr* sr_stack_expr(TStep* st, CcTemplate tp, CcSpan sp) {
         CcTplPart* part = parts->get_ptr(i);
         if (!part->slot) {
             CCString cnt = @string(`${(int)sr_decoded_len(part->text, part->is_verbatim)}`, L->arena);
-            CcExpr* call = lw_call2(L, cstr_slice("cc__string_stack_lit"), built, sr_literal(L, part->text, sp), sp);
+            CcExpr* call = lw_call2(L, cstr_slice("cc__string_stack_lit"), built, sr_literal(L, part->text, part->is_verbatim, sp), sp);
             CcExprList* args = lw_call_args(call);
             args->push(lw_text(L, cnt, sp));
             built = call;

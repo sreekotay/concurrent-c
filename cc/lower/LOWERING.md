@@ -435,6 +435,13 @@ statements and the string they built, as one expression
 evaluates where it stands — inside a condition, an argument, a loop body
 — and not once, earlier, where the code did not ask for it.
 
+A literal run becomes a C string literal, and what is ordinary between
+backticks is not ordinary there: a newline and a `\"` are escaped on the
+way out. An escape the user wrote travels through untouched, since C
+decodes it to the one character the length count already assumed; a
+verbatim run has no escapes to preserve, so its backslashes are escaped
+too.
+
 ## Scratch and templates
 
 `@string(\`text ${x} more\`, arena)`:
