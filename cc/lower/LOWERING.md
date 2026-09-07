@@ -508,9 +508,18 @@ expression; it reaches its names through the same addresses, and a name
 it declares for itself over one it captures is a diagnostic rather than a
 rewrite of the wrong name.
 
+`CCParallel h = @parallel { ... }` binds a handle the caller joins later.
+The handle is declared before the block, filled with
+`cc_parallel_dest()`, and passed to every arm so `cc_parallel_honor` can
+pause and resume it. An arm that outlives the block needs an environment
+that does too, so a bound site heap-allocates one and hands it to
+`cc_parallel_spawn_admit` / `cc_parallel_admit`. There is no inline
+fallback there: the handle promised a live arm, so a refused or failed
+spawn stops the program rather than quietly running it here.
+
 Everything else the form can carry — `spawn`, a predicate, `seq`, `wait`,
-`worker`, `cache`, a bound handle, and the `for` and dest forms — is a
-diagnostic naming it. A concurrency construct that
+`worker`, `cache`, and the `for` and dest forms — is a diagnostic naming
+it. A concurrency construct that
 quietly ran as something else would be a program that behaves differently
 for reasons the page does not show.
 
