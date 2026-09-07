@@ -538,6 +538,11 @@ parse, lower or print is an error at the unit that asked for it, naming
 the stage and the first message; the expansion nests at most eight deep,
 past which the family is expanding into itself.
 
+An expansion lands after the leading includes, and after the last
+declaration this unit makes of any type it names: an
+`ArrayMap::[int, Entr]` spells `Entr` in its fields, so it cannot be
+spliced above the `typedef struct Entr` that says what one is.
+
 `_Generic` inside an expansion (and anywhere else) may carry preprocessor
 lines between its associations, or a macro standing for whole
 associations: which associations the host compiler sees is the
