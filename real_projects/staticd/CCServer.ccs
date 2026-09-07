@@ -437,34 +437,52 @@ static int cc_tape_try_accept(CCTape* tape, Vec::[CCIoSessP]* live,
     }
 }
 
-static void cc_tape_reap(CCTape* tape, Vec::[CCIoSessP]* live,
-                         CCArenaPool* slots, ServeCtx* ctx) {
+/* Drop live[i] and tape.slots[i] together. Returns 1 if a survivor
+ * was swapped into i (caller must recheck that index). */
+static int live_drop_at(CCTape* tape, Vec::[CCIoSessP]* live,
+                        CCArenaPool* slots, ServeCtx* ctx, size_t i) {
     CCServer* srv = tape->srv;
-    Vec::[CCIoSessP] rows = *live;
-    size_t w = 0;
-    @for (i, io in rows) {
-        if (io->dead || !tape->keep_row(i, w)) {
-            cc_io_row_drop(ctx, io, slots);
-            if (srv) srv->note_close();
-        } else {
-            live->set(w, io);
-            w++;
-        }
+    CCIoSessP* cell = live->get(i);
+    CCIoSess* io = (cell && *cell) ? *cell : NULL;
+    size_t last = live->len() - 1;
+    if (io) {
+        cc_io_row_drop(ctx, io, slots);
+        if (srv) srv->note_close();
     }
-    live->truncate(w);
-    tape->done(w);
+    tape->drop_at(i);
+    if (i < last) {
+        CCIoSessP* tail = live->get(last);
+        if (tail) live->set(i, *tail);
+        live->truncate(last);
+        return 1;
+    }
+    live->truncate(last);
+    return 0;
 }
 
-static void cc_tape_deadline_sweep(Vec::[CCIoSessP]* live, time_t now) {
-    size_t n = live->len();
-    @for (i in 0..n) {
-        CCIoSessP* slot = live->get(i);
-        CCIoSess* io;
-        if (!slot || !*slot) continue;
-        io = *slot;
-        if (io->deadline && now >= io->deadline)
-            io->dead = 1;
+static void cc_tape_reap(CCTape* tape, Vec::[CCIoSessP]* live,
+                         CCArenaPool* slots, ServeCtx* ctx) {
+    size_t i = 0;
+    while (i < live->len()) {
+        CCIoSessP* cell = live->get(i);
+        CCIoSess* io = (cell && *cell) ? *cell : NULL;
+        if (io && !io->dead) {
+            i++;
+            continue;
+        }
+        /* dead or empty cell */
+        if (live_drop_at(tape, live, slots, ctx, i))
+            continue; /* swapped-in row at i */
     }
+}
+
+static void cc_server_maybe_respawn(ServeCtx* ctx);
+static void cc_server_worker(ServeCtx* ctx);
+
+static void cc_server_worker_bail(ServeCtx* ctx) {
+    if (!ctx || !ctx->srv) return;
+    cc_atomic_fetch_sub(&ctx->srv->nworkers, 1);
+    cc_server_maybe_respawn(ctx);
 }
 
 static void cc_server_maybe_grow(ServeCtx* ctx) {
@@ -492,31 +510,32 @@ static void cc_server_worker(ServeCtx* ctx) {
     cc_arena_stack(wa, kilobytes(8));
     CCArenaPool* slots;
     CCTape tape;
+    time_t deadline_sec = 0;
     if (!cc_arena_is_live(wa)) {
-        cc_atomic_fetch_sub(&srv->nworkers, 1);
-        cc_server_maybe_respawn(ctx);
+        cc_server_worker_bail(ctx);
         return;
     }
     slots = wa.create_pool(sizeof(CCIoRow)) !>(e) {
         (void)e;
-        cc_atomic_fetch_sub(&srv->nworkers, 1);
-        cc_server_maybe_respawn(ctx);
+        cc_server_worker_bail(ctx);
         return;
     };
+    /* live[i] and tape.slots[i] are the same connection. */
     Vec::[CCIoSessP] live@(wa) @destroy;
     if (!tape.open(srv, wa)) {
-        cc_atomic_fetch_sub(&srv->nworkers, 1);
-        cc_server_maybe_respawn(ctx);
+        cc_server_worker_bail(ctx);
         return;
     }
     @defer {
         tape.close();
-        size_t nlive = live.len();
-        @for (i in 0..nlive) {
-            CCIoSessP* slot = live.get(i);
-            if (!slot || !*slot) continue;
-            cc_io_row_drop(ctx, *slot, slots);
-            srv->note_close();
+        {
+            size_t n = live.len();
+            @for (i in 0..n) {
+                CCIoSessP* cell = live.get(i);
+                if (!cell || !*cell) continue;
+                cc_io_row_drop(ctx, *cell, slots);
+                srv->note_close();
+            }
         }
         cc_atomic_fetch_sub(&srv->nworkers, 1);
         if (!srv->stopped())
@@ -524,55 +543,54 @@ static void cc_server_worker(ServeCtx* ctx) {
     };
 
     while (!srv->stopped() || live.len() > 0) {
-        int pr, died;
+        int pr = tape.wait();
+        int died = 0;
         time_t now;
-        pr = tape.wait();
         if (pr < 0) return;
         now = time(NULL);
-        if (pr == 0) {
-            cc_tape_deadline_sweep(&live, now);
-            died = 0;
-            {
-                size_t nlive = live.len();
-                @for (i in 0..nlive) {
-                    CCIoSessP* slot = live.get(i);
-                    if (slot && *slot && (*slot)->dead) died = 1;
-                }
-            }
-            if (died) tape.reap(&live, slots, ctx);
-            cc_yield();
-            continue;
-        }
 
-        died = 0;
-        {
-            size_t nlive = live.len();
-            @for (i in 0..nlive) {
-                CCIoSessP* slot = live.get(i);
-                CCIoSess* io;
-                CCReady r;
-                if (!slot || !*slot) return;
-                io = *slot;
-                r = tape.ready(i);
-                if (io->deadline && now >= io->deadline) {
+        /* Deadlines: full walk ≤1/s, and on idle wake. */
+        if (pr == 0 || now != deadline_sec) {
+            size_t n = live.len();
+            deadline_sec = now;
+            @for (i in 0..n) {
+                CCIoSessP* cell = live.get(i);
+                CCIoSess* io = (cell && *cell) ? *cell : NULL;
+                if (io && io->deadline && now >= io->deadline)
                     io->dead = 1;
-                    died = 1;
-                    continue;
-                }
-                /* TLS handshake rows step without on_app until ready. */
-                cc_serve_step(io, ctx, &tape, i, r);
-                if (io->dead) died = 1;
+            }
+            tape.reap(&live, slots, ctx);
+            if (pr == 0) {
+                cc_yield();
+                continue;
             }
         }
 
-        {
-            int ar = tape.try_accept(&live, slots);
-            if (ar > 0) cc_server_maybe_grow(ctx);
-            (void)ar;
+        /* Step only slots that fired. */
+        @for (si in tape.ready_ix) {
+            size_t i = (size_t)si;
+            CCIoSessP* cell;
+            CCIoSess* io;
+            CCReady r;
+            if (i >= live.len()) continue;
+            cell = live.get(i);
+            if (!cell || !*cell) continue;
+            io = *cell;
+            r = tape.ready(i);
+            if (io->deadline && now >= io->deadline) {
+                io->dead = 1;
+                died = 1;
+                continue;
+            }
+            cc_serve_step(io, ctx, &tape, i, r);
+            if (io->dead) died = 1;
         }
 
-        if (!died) continue;
-        tape.reap(&live, slots, ctx);
+        if (tape.try_accept(&live, slots) > 0)
+            cc_server_maybe_grow(ctx);
+
+        if (died)
+            tape.reap(&live, slots, ctx);
     }
 }
 

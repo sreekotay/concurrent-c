@@ -128,6 +128,84 @@ def rst_close(sock: socket.socket) -> None:
         pass
 
 
+def ka_get(sock: socket.socket, host: str, path: str,
+           timeout: float = 2.0) -> tuple[int, bytes]:
+    """One request on an open keep-alive socket; return (code, body)."""
+    sock.settimeout(timeout)
+    req = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {host}\r\n"
+        f"Connection: keep-alive\r\n"
+        f"\r\n"
+    ).encode()
+    sock.sendall(req)
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = sock.recv(65536)
+        if not chunk:
+            raise Fail("eof before headers")
+        buf += chunk
+    head, body = buf.split(b"\r\n\r\n", 1)
+    line = head.split(b"\r\n", 1)[0]
+    parts = line.split(b" ")
+    code = int(parts[1]) if len(parts) >= 2 else 0
+    cl = None
+    for h in head.split(b"\r\n")[1:]:
+        if h.lower().startswith(b"content-length:"):
+            cl = int(h.split(b":", 1)[1].strip())
+            break
+    if cl is not None:
+        while len(body) < cl:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            body += chunk
+        body = body[:cl]
+    return code, body
+
+
+def mode_waiter_compact_live(ctx: Ctx) -> Result:
+    """Reap+compact must not unregister surviving keep-alive rows.
+
+    Open A,B,C; GET each; RST A; second GET on B and C must complete.
+    Needs one worker so all three share a tape (spawn uses --workers 1).
+    """
+    path = "/1kb.bin"
+    socks: list[socket.socket] = []
+    try:
+        for _ in range(3):
+            s = socket.create_connection((ctx.host, ctx.port), 2.0)
+            socks.append(s)
+        a, b, c = socks
+        for s in (a, b, c):
+            code, body = ka_get(s, ctx.host, path, timeout=2.0)
+            if code != 200 or len(body) != 1024:
+                return Result("waiter_compact_live", False,
+                              f"warmup {code}/{len(body)}")
+        rst_close(a)
+        time.sleep(0.15)  # allow reap + compact
+        for label, s in (("B", b), ("C", c)):
+            t0 = time.perf_counter()
+            try:
+                code, body = ka_get(s, ctx.host, path, timeout=2.0)
+            except (OSError, Fail) as e:
+                return Result(
+                    "waiter_compact_live", False,
+                    f"{label} after compact: {type(e).__name__}: {e}",
+                )
+            dt = time.perf_counter() - t0
+            if code != 200 or len(body) != 1024:
+                return Result("waiter_compact_live", False,
+                              f"{label} after compact {code}/{len(body)}")
+            if dt > 1.5:
+                return Result("waiter_compact_live", False,
+                              f"{label} slow {dt:.3f}s (likely unregistered)")
+        return Result("waiter_compact_live", True, "A RST; B,C GETs ok")
+    finally:
+        for s in socks:
+            rst_close(s)
+
+
 # ---- modes ----
 
 def mode_conn_storm(ctx: Ctx) -> Result:
@@ -897,6 +975,7 @@ MODES: dict[str, Callable[[Ctx], Result]] = {
     "conn_storm": mode_conn_storm,
     "accept_burst_survive": mode_accept_burst_survive,
     "fd_exhaust_accept": mode_fd_exhaust_accept,
+    "waiter_compact_live": mode_waiter_compact_live,
     "slowloris_headers": mode_slowloris_headers,
     "header_never_finishes": mode_header_never_finishes,
     "idle_keepalive_pile": mode_idle_keepalive_pile,
@@ -922,6 +1001,7 @@ MODES: dict[str, Callable[[Ctx], Result]] = {
 }
 
 QUICK_ORDER = [
+    "waiter_compact_live",
     "conn_storm",
     "accept_burst_survive",
     "abort_mid_headers",
@@ -1012,7 +1092,7 @@ def spawn_staticd(bin_path: str, port: int, root: Path, pages: Optional[Path],
     logdir = Path(tempfile.mkdtemp(prefix="staticd-adv-"))
     log = open(logdir / "staticd.log", "w")
     cmd = [bin_path, "--listen", f"127.0.0.1:{port}", "--root", str(root),
-           "--workers", "2"]
+           "--workers", "1"]
     if list_dir:
         cmd.append("--list")
     if pages:

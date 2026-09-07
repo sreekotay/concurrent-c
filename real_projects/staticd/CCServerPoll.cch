@@ -37,11 +37,17 @@ typedef struct CCWaitSlot {
     int ready_err;
 } CCWaitSlot;
 
-/* Unified tape: sessions in slots; listen separate. backend_fd is
- * kqueue/epoll, or -1 for poll. */
+/*
+ * One worker's wait face. Owner: `cc_server_worker` (arena `wa`).
+ *   slots     — parallel to `live` (same index = same conn)
+ *   ready_ix  — slot indices that fired this wake (cleared next wait)
+ *   backend_fd — kqueue/epoll, or -1 for poll
+ * Listen is not a slot; spare_fd is EMFILE recovery only.
+ */
 typedef struct CCTape {
     CCServer* srv;
     Vec::[CCWaitSlot] slots;
+    Vec::[uint32_t] ready_ix;
     int listening;
     int spare_fd;
     int listen_fd;
@@ -67,7 +73,7 @@ CCReady cc_tape_ready(CCTape* w, size_t i);
 int cc_tape_listen_ready(CCTape* w);
 void cc_tape_arm(CCTape* w, size_t i, CCIoSess* io);
 int cc_tape_watch(CCTape* w, CCIoSess* io);
-int cc_tape_keep_row(CCTape* w, size_t from, size_t to);
-void cc_tape_done(CCTape* w, size_t nlive);
+/* Unwatch fd at i, then swap-remove last wait-slot into i (one udata refresh). */
+void cc_tape_drop_at(CCTape* w, size_t i);
 
 #endif /* CC_SERVER_POLL_CCH */

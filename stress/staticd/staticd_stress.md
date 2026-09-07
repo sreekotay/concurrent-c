@@ -42,35 +42,42 @@ What we are trying to break, mapped to the specimen's seams:
 | Seam | Failure mode | Modes |
 |------|--------------|-------|
 | Worker / accept | EMFILE soft-fail, worker exit without respawn, accept storm | `fd_exhaust_accept`, `conn_storm` |
-| Deadlines | Slowloris header drip, idle keep-alive, write stall | `slowloris_headers`, `idle_keepalive_pile`, `write_stall_tiny_sndbuf` |
-| Output path | `write_all` vs try_write cursor; abort mid-headers / mid-body | `abort_mid_headers`, `abort_mid_body`, `pipelined_close` |
-| TLS handshake | Sync HOL / stepped HS drip | `tls_slow_client_hello` (SKIP without certs) |
-| Block fill | Cold `pread` HOL across unrelated sockets | `cold_fill_hol` |
+| Waiter / compact | kqueue/epoll unwatch after row shift | `waiter_compact_live` |
+| Deadlines | Slowloris header drip, idle keep-alive | `slowloris_headers`, `idle_keepalive_pile` |
+| Output path | abort mid-headers / mid-body | `abort_mid_headers`, `abort_mid_body` |
 | HTTP parse | Garbage methods, huge headers, CL mismatch, Range edges | `http_garbage_hail`, `header_bomb`, `body_cl_mismatch`, `range_edge_hail` |
-| Jail / fs | Traversal, symlink races, hot rename under GET | `traversal_hail`, `symlink_escape_race`, `hot_rename_storm` |
-| WebSocket | Fragments, RSV, oversize, ping flood, fanout | `ws_protocol_abuse`, `ws_ping_flood`, `ws_fanout` |
-| Pages | Slow handler mutex, GET leak, throw storm | `pages_slow_hold`, `pages_handler_leak`, `pages_throw_storm` |
+| Jail / fs | Traversal, hot rename under GET, listing href encode | `traversal_hail`, `hot_rename_storm`, `listing_href_abuse` |
+| WebSocket | Fragments, RSV, oversize, ping flood, fanout | `ws_protocol_abuse`, `ws_ping_flood`, `ws_fanout`, `ws_churn` |
+| Pages | Throw storm | `pages_throw_storm` |
 | Resource | RSS / fd leak under churn | `conn_churn_rss`, `ws_churn_rss` |
+| URI | Strict path decode refuse | `uri_decode_refuse` |
+
+Planned (named in reviews, **not** in `MODES` yet): `tls_slow_client_hello`,
+`tls_http_ok`, `cold_fill_hol`, `pages_slow_hold`, `pages_handler_leak`,
+`write_stall_tiny_sndbuf`, `pipelined_close`, `symlink_escape_race`.
+`cold_fill_hol` is the highest-value gap while `checkout_block` still blocks
+on `pread`.
 
 ---
 
 ## `adversary.py` modes
 
-### Accept / worker
+### Accept / worker / waiter
 
 | Mode | Status | What it hammers | expect |
 |------|--------|-----------------|--------|
+| `waiter_compact_live` | green | `--workers 1`; A,B,C keep-alive; RST A; second GET on B and C | both complete promptly. `run.sh` also rebuilds with `-DCC_SERVER_WAIT_POLL=1` as control |
 | `conn_storm` | green | N concurrent TCP connects + GET /1kb.bin | all settle; server still serves |
-| `fd_exhaust_accept` | green | `--spawn` with lowered server `RLIMIT_NOFILE`; hold conns until accept stalls; spare soft-fail + backoff | server stays up; later GET works. SKIP without spawn |
+| `fd_exhaust_accept` | green | `--spawn` with lowered server `RLIMIT_NOFILE`; hold keep-alive GETs until accept stalls; spare soft-fail + backoff | server stays up; later GET works. SKIP without spawn. Receipt is behavioral (serve after release); does not yet assert `accept_soft` delta |
 | `accept_burst_survive` | green | Burst connect/close without read | server still serves afterward |
 
 ### Deadlines / Slowloris
 
 | Mode | Status | What it hammers | expect |
 |------|--------|-----------------|--------|
-| `slowloris_headers` | break → green | Many conns drip `GET / HTTP/1.1\r\n` one byte / 200ms | with deadlines: reap; without: fd pile (assert bound or mark break) |
-| `idle_keepalive_pile` | break → green | Complete a GET then idle with keep-alive | idle deadline closes; server still serves |
-| `header_never_finishes` | break → green | Open conn, send partial headers, stall | must not pin forever past budget |
+| `slowloris_headers` | green | Many conns drip `GET / HTTP/1.1\r\n` one byte / 200ms | reap by header budget; server still serves |
+| `idle_keepalive_pile` | green | Complete a GET then idle with keep-alive | idle deadline closes; server still serves |
+| `header_never_finishes` | green | Open conn, send partial headers, stall | must not pin forever past budget |
 
 ### Output / backpressure
 
@@ -96,7 +103,7 @@ What we are trying to break, mapped to the specimen's seams:
 |------|--------|-----------------|--------|
 | `traversal_hail` | green | `../`, `%2e%2e`, `//`, `/./` variants | 403/404; never fixture bytes |
 | `hot_rename_storm` | green | Atomic rename under concurrent GET | bodies match one generation; no crash |
-| `listing_href_abuse` | green / break | `--list` dir with `foo?bar`, `a#b`, spaces | links resolve or are encoded (break = 404 on click) |
+| `listing_href_abuse` | green | `--list` dir with `foo?bar`, `a#b`, spaces | links resolve / encoded |
 
 ### WebSocket
 
@@ -112,15 +119,12 @@ What we are trying to break, mapped to the specimen's seams:
 | Mode | Status | What it hammers | expect |
 |------|--------|-----------------|--------|
 | `pages_throw_storm` | green | Parallel /boom | all 500; survivors /hello ok |
-| `pages_handler_leak` | green | GET-only then handler-only then none | isolation; no cross-page GET |
-| `pages_slow_hold` | break → green | Slow page while parallel static GET | static latency stays bounded (break = HOL) |
 
-### TLS (optional certs)
+### URI
 
 | Mode | Status | What it hammers | expect |
 |------|--------|-----------------|--------|
-| `tls_http_ok` | green | HTTPS GET fixture | 200 |
-| `tls_slow_client_hello` | break → green | Drip ClientHello | other conns progress (break = worker stuck) |
+| `uri_decode_refuse` | green | `%00`, bad `%`, decoded `/` `\` | 400 |
 
 ### Soaks
 
@@ -135,33 +139,28 @@ What we are trying to break, mapped to the specimen's seams:
 
 ### Break vs green
 
-Modes tagged **break** encode a known hole from the architecture review
-(sync TLS / cold fill / missing deadlines / `write_all` backpressure /
-global pages mutex). Until the fix lands they may:
-
-- assert a **soft** contract (server process still alive after the storm), and
-- print `BREAK known: <seam>` when the strong contract fails
-
-so the suite stays runnable while documenting what still hurts. After
-hardening, flip the mode to **green** and assert the strong contract.
+Modes tagged **break** encode a known hole. Until the fix lands they may
+assert a soft contract and print `BREAK known: <seam>`. After hardening,
+flip to **green**. Planned modes above are not registered — do not treat
+catalog names as implemented coverage.
 
 ### Cooperative close vs hard RST
 
 Client `close()` / half-close is cooperative. `SO_LINGER(0)` RST is
 hard-cancel. Modes that abort mid-response use RST on purpose — the
-server must reap the row and keep serving others.
+server must reap the row and keep serving others. `waiter_compact_live`
+depends on that reap path.
 
 ### Deadlines
 
 `slowloris_*` / `idle_*` need a wall budget shorter than the suite
-timeout. If the server has no idle/header deadline yet, the mode records
-**break** when fds remain past the budget rather than hanging the driver
-forever (driver enforces its own deadline and RSTs leftovers).
+timeout. Spawned servers get short env budgets (`HEADER_*`, `KEEPALIVE`).
 
 ### Not in suite yet
 
-- Real uncached disk HOL (needs a large file + purge cache; machine-specific)
-- io_uring / async-fill completion wake races (lands with async fills)
+- Real uncached disk HOL (`cold_fill_hol` — needs large file + purge)
+- `accept_soft` counter exposed for fd_exhaust receipt
+- io_uring / async-fill completion wake races
 - Multi-GB OOM / cgroup pressure
 - Full RFC6455 UTF-8 / extension negotiation
 
