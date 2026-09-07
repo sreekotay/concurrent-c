@@ -206,6 +206,75 @@ def mode_waiter_compact_live(ctx: Ctx) -> Result:
             rst_close(s)
 
 
+def mode_waiter_reap_under_load(ctx: Ctx) -> Result:
+    """Idle KA expiry must not starve a ready row swapped into a hole.
+
+    Open N idle keep-alives, then a hot tail conn under continuous GET.
+    When idles expire (KEEPALIVE), deadline reap swap-removes them while
+    the tail may be in ready_ix — the hot conn must keep answering.
+    """
+    n_idle = {"quick": 24, "full": 48, "soak": 64}[ctx.scale]
+    path = "/1kb.bin"
+    idles: list[socket.socket] = []
+    hot: Optional[socket.socket] = None
+    stop = threading.Event()
+    errs: list[str] = []
+    ok_n = 0
+
+    def hammer() -> None:
+        nonlocal ok_n
+        while not stop.is_set():
+            try:
+                code, body = ka_get(hot, ctx.host, path, timeout=2.0)
+                if code != 200 or len(body) != 1024:
+                    errs.append(f"hot {code}/{len(body)}")
+                    return
+                ok_n += 1
+            except Exception as e:
+                errs.append(f"hot {type(e).__name__}: {e}")
+                return
+
+    try:
+        for _ in range(n_idle):
+            s = socket.create_connection((ctx.host, ctx.port), 2.0)
+            code, body = ka_get(s, ctx.host, path, timeout=2.0)
+            if code != 200 or len(body) != 1024:
+                return Result("waiter_reap_under_load", False,
+                              f"idle warmup {code}/{len(body)}")
+            idles.append(s)
+        hot = socket.create_connection((ctx.host, ctx.port), 2.0)
+        code, body = ka_get(hot, ctx.host, path, timeout=2.0)
+        if code != 200 or len(body) != 1024:
+            return Result("waiter_reap_under_load", False,
+                          f"hot warmup {code}/{len(body)}")
+
+        t = threading.Thread(target=hammer, daemon=True)
+        t.start()
+        # Spawn sets KEEPALIVE=5; wait past it while hot stays busy.
+        time.sleep(6.5)
+        stop.set()
+        t.join(timeout=3.0)
+        if errs:
+            return Result("waiter_reap_under_load", False,
+                          f"after expiry: {errs[0]} ok={ok_n}")
+        if ok_n < 20:
+            return Result("waiter_reap_under_load", False,
+                          f"too few hot GETs ok={ok_n} (starved?)")
+        # One more after join — proves not permanently stuck.
+        code, body = ka_get(hot, ctx.host, path, timeout=2.0)
+        if code != 200 or len(body) != 1024:
+            return Result("waiter_reap_under_load", False,
+                          f"post {code}/{len(body)}")
+        return Result("waiter_reap_under_load", True,
+                      f"idle={n_idle} hot_gets={ok_n}")
+    finally:
+        stop.set()
+        for s in idles:
+            rst_close(s)
+        if hot is not None:
+            rst_close(hot)
+
+
 # ---- modes ----
 
 def mode_conn_storm(ctx: Ctx) -> Result:
@@ -976,6 +1045,7 @@ MODES: dict[str, Callable[[Ctx], Result]] = {
     "accept_burst_survive": mode_accept_burst_survive,
     "fd_exhaust_accept": mode_fd_exhaust_accept,
     "waiter_compact_live": mode_waiter_compact_live,
+    "waiter_reap_under_load": mode_waiter_reap_under_load,
     "slowloris_headers": mode_slowloris_headers,
     "header_never_finishes": mode_header_never_finishes,
     "idle_keepalive_pile": mode_idle_keepalive_pile,
@@ -1002,6 +1072,7 @@ MODES: dict[str, Callable[[Ctx], Result]] = {
 
 QUICK_ORDER = [
     "waiter_compact_live",
+    "waiter_reap_under_load",
     "conn_storm",
     "accept_burst_survive",
     "abort_mid_headers",

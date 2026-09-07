@@ -201,6 +201,7 @@ static int cc_kq_arm_slot(CCTape* w, size_t i, int wi, int wo) {
     return 0;
 }
 
+/* EV_ADD on an existing filter updates udata — intentional, not DELETE+ADD. */
 static int cc_kq_refresh_udata(CCTape* w, size_t i) {
     CCWaitSlot* s;
     void* ud;
@@ -563,6 +564,7 @@ static void cc_tape_take_last(CCTape* w, size_t i) {
     size_t n;
     CCWaitSlot* last;
     CCWaitSlot* dst;
+    int in, out, err;
     if (!w) return;
     n = cc_tape_nslots(w);
     if (n == 0 || i >= n) return;
@@ -574,6 +576,14 @@ static void cc_tape_take_last(CCTape* w, size_t i) {
     dst = cc_tape_slot(w, i);
     if (!last || !dst) return;
     *dst = *last;
+    /* ready_ix may still name the old last index — do not carry flags under
+     * a stale index (deadline reap before step). Re-mark at i if needed. */
+    in = dst->ready_in;
+    out = dst->ready_out;
+    err = dst->ready_err;
+    dst->ready_in = 0;
+    dst->ready_out = 0;
+    dst->ready_err = 0;
     *last = (CCWaitSlot){ .fd = -1 };
 #if CC_WAIT_USE_KQUEUE
     (void)cc_kq_refresh_udata(w, i);
@@ -581,6 +591,8 @@ static void cc_tape_take_last(CCTape* w, size_t i) {
     (void)cc_epoll_refresh_udata(w, i);
 #endif
     cc_tape_slot_trunc(w, n - 1);
+    if (in | out | err)
+        cc_tape_mark_ready(w, i, in, out, err);
 }
 
 void cc_tape_drop_at(CCTape* w, size_t i) {
