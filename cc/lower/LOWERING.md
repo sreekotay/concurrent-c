@@ -495,10 +495,15 @@ The first stays on the caller; each of the others becomes a
 block joins before it ends — a lexical fork and join, not a nursery that
 outlives the scope.
 
-An arm reaches the locals it names through their addresses, carried in a
-`__cc_par_<n>_<k>_env_t`: the caller's frame is live while the arm runs,
-and the arm is meant to see what the caller sees. The assignment target
-is one of those addresses. The runtime may refuse the site
+An arm reaches the locals it names through a
+`__cc_par_<n>_<k>_env_t`, and how depends on whether it outlives the
+block. An unbound arm reads through their addresses: the block joins
+before it ends, so the arm is meant to see what the caller sees. A bound
+arm reads a copy taken when it started, because the caller goes on and
+changes things it is not entitled to see later. Either way the
+assignment target is an address — the caller's own binding is what the
+arm has to write — and so is the handle the site binds, since a copy of
+a handle is one nothing else can pause. The runtime may refuse the site
 (`cc_parallel_deny_fast`) and a spawn may fail; both run the same thunk
 inline at the join, so the arms happen either way and the only difference
 is whether they overlapped.
@@ -508,7 +513,9 @@ expression; it reaches its names through the same addresses, and a name
 it declares for itself over one it captures is a diagnostic rather than a
 rewrite of the wrong name.
 
-`CCParallel h = @parallel { ... }` binds a handle the caller joins later.
+`CCParallel h = @parallel { ... }`, with or without `spawn`, binds a
+handle the caller joins later — `spawn` there says what the handle
+already says, and without a handle there would be nothing to join by.
 The handle is declared before the block, filled with
 `cc_parallel_dest()`, and passed to every arm so `cc_parallel_honor` can
 pause and resume it. An arm that outlives the block needs an environment

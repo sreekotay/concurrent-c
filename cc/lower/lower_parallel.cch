@@ -29,6 +29,7 @@
 typedef struct PCap {
     CCSlice name;
     CcType* type;
+    bool by_addr;               /* the handle the site binds: always the caller's own */
 } PCap;
 typedef PCap* PCapRef;
 typedef Vec::[PCapRef] PCapList;
@@ -182,7 +183,8 @@ static CcStmt* pl_serial_body(CcLowerer* L, CcStmt* s) {
 
 /* The environment one arm carries: a pointer per name it reads, and the
  * one it writes. */
-static CCString pl_env_text(PStep* st, uint32_t id, uint32_t k, PCapList* caps, CCSlice out_type) {
+static CCString pl_env_text(PStep* st, uint32_t id, uint32_t k, PCapList* caps, CCSlice out_type,
+                            bool snapshot) {
     CcLowerer* L = st->L;
     CCArena a = L->arena;
     CCString sb = cc_string_new();
@@ -195,7 +197,7 @@ static CCString pl_env_text(PStep* st, uint32_t id, uint32_t k, PCapList* caps, 
         CCSlice tn = L->ix->canon(c->type);
         sb.push_cstr("    ", a);
         sb.push_slice(tn, a);
-        sb.push_cstr("* ", a);
+        sb.push_cstr((snapshot && !c->by_addr) ? " " : "* ", a);
         sb.push_slice(c->name, a);
         sb.push_cstr(";\n", a);
     }
@@ -226,7 +228,8 @@ static void pl_forward(PStep* st, uint32_t id, uint32_t k) {
 
 /* The thunk: the environment, the names it reads, then the arm. */
 static CcDecl* pl_thunk_decl(PStep* st, uint32_t id, uint32_t k, PCapList* caps,
-                             CcExpr* expr, CcStmt* arm_body, CCSlice out_type, CcSpan sp) {
+                             CcExpr* expr, CcStmt* arm_body, CCSlice out_type,
+                             bool snapshot, CcSpan sp) {
     CcLowerer* L = st->L;
     CCSlice env = pl_name(L, id, k, "_env_t");
     CcStmt* body = lw_block(L, sp);
@@ -250,13 +253,19 @@ static CcDecl* pl_thunk_decl(PStep* st, uint32_t id, uint32_t k, PCapList* caps,
     }
     for (i = 0; i < n; i++) {
         PCap* c = *caps->get_ptr(i);
-        CcType* pt = cc_type_pointer(c->type, sp, L->arena);
-        CCString rn = @string(`__cc_ref_${c->name}`, L->arena);
-        CCSlice ref = lw_keep(L, &rn);
         CcExpr* read = cc_expr_member(lw_ident(L, cstr_slice("__e"), sp), c->name, true, sp, L->arena);
-        CCString through = @string(`(*${ref})`, L->arena);
-        lw_push(body, lw_decl_stmt(L, pt, ref, read, sp));
-        pl_rewrite(L, expr, arm_body, c->name, lw_keep(L, &through));
+        if (snapshot && !c->by_addr) {
+            /* the arm outlives the block, so what it read is what was
+             * there when it started, not what the caller has since */
+            lw_push(body, lw_decl_stmt(L, c->type, c->name, read, sp));
+        } else {
+            CcType* pt = cc_type_pointer(c->type, sp, L->arena);
+            CCString rn = @string(`__cc_ref_${c->name}`, L->arena);
+            CCSlice ref = lw_keep(L, &rn);
+            CCString through = @string(`(*${ref})`, L->arena);
+            lw_push(body, lw_decl_stmt(L, pt, ref, read, sp));
+            pl_rewrite(L, expr, arm_body, c->name, lw_keep(L, &through));
+        }
     }
     /* a bound site pauses and resumes through the handle */
     lw_push(body, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_honor"),
@@ -344,8 +353,9 @@ static void pl_spawn_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
     for (i = 0; i < n; i++) {
         PCap* c = *caps->get_ptr(i);
         CcExpr* slot = cc_expr_member(lw_ident(L, e, sp), c->name, bind.len != 0, sp, L->arena);
-        CcExpr* addr = cc_expr_unary(CC_OP_ADDR, lw_ident(L, c->name, sp), sp, L->arena);
-        lw_push(blk, lw_expr_stmt(L, lw_assign(L, slot, addr, sp), sp));
+        CcExpr* val = lw_ident(L, c->name, sp);
+        if (!bind.len || c->by_addr) val = cc_expr_unary(CC_OP_ADDR, val, sp, L->arena);
+        lw_push(blk, lw_expr_stmt(L, lw_assign(L, slot, val, sp), sp));
     }
     if (target.len) {
         CcExpr* slot = cc_expr_member(lw_ident(L, e, sp), cstr_slice("__cc_out"), bind.len != 0, sp, L->arena);
@@ -434,8 +444,11 @@ static void pl_join_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k, Cc
 /* What the arms form can carry that this step does not lower. */
 static bool pl_reject(CcLowerer* L, CcParallel p, CcSpan sp) {
     CCString m;
-    if (p.spawn) {
-        m = @string(`'${"@"}parallel spawn' (arms that outlive the block) is not lowered by the clean lowerer yet`, L->arena);
+    if (p.spawn && !p.bind.len) {
+        /* with a handle, `spawn` is what the handle already says: the arms
+         * outlive the block and something joins them later. Without one
+         * there is nothing to join them by. */
+        m = @string(`'${"@"}parallel spawn' without a handle to join by is not lowered by the clean lowerer yet`, L->arena);
         lw_error(L, sp, m);
         return true;
     }
@@ -523,6 +536,17 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             else CcExpr_walk(arm->expr, v);
         }
         caps = sc.caps;
+        if (p.bind.len) {
+            /* the handle the arms pause and resume through is the
+             * caller's: a copy of it is a handle nothing else can see */
+            PCapList* cv = &caps;
+            size_t nc = cv->len();
+            size_t ci;
+            for (ci = 0; ci < nc; ci++) {
+                PCap* c = *cv->get_ptr(ci);
+                if (slice_eq(c->name, p.bind)) c->by_addr = true;
+            }
+        }
         if (arm->serial) {
             CcVisitor v;
             PShadow sh;
@@ -552,11 +576,12 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         {
             /* the caller builds the environment, so its type is declared
              * with the forwards, above every function that fills one */
-            CCString et = pl_env_text(st, id, (uint32_t)i, &caps, out_type);
+            CCString et = pl_env_text(st, id, (uint32_t)i, &caps, out_type, p.bind.len != 0);
             st->fwd.push_slice(et.as_slice(), L->arena);
         }
         pl_forward(st, id, (uint32_t)i);
-        st->made.push(pl_thunk_decl(st, id, (uint32_t)i, &caps, arm->expr, pl_serial_body(L, arm->serial), out_type, sp));
+        st->made.push(pl_thunk_decl(st, id, (uint32_t)i, &caps, arm->expr, pl_serial_body(L, arm->serial),
+                                    out_type, p.bind.len != 0, sp));
         pl_spawn_stmts(L, blk, id, (uint32_t)i, &caps, arm->target, p.bind, sp);
     }
     /* the first arm stays here */
