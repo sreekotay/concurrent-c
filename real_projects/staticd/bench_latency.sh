@@ -6,6 +6,7 @@
 #   FULL=1 ./bench_latency.sh       # receipt: 30s, 5 rounds, 5 files
 #   SMOKE=1 ./bench_latency.sh      # 2s, 4kb.html @ c=10
 #   ISOLATE=0 ./bench_latency.sh    # keep all peers up (RSS then cumulative)
+#   STATICD_WORKERS=4 ./bench_latency.sh
 #
 # ISOLATE=1 (default): only the server under test is up for that cell, and
 # it is a fresh process. RSS is then that cell, not leftover fiber stacks.
@@ -23,6 +24,7 @@ INCLUDE_NGINX="${INCLUDE_NGINX:-1}"
 INCLUDE_DARKHTTPD="${INCLUDE_DARKHTTPD:-1}"
 INCLUDE_CADDY="${INCLUDE_CADDY:-0}"
 STATICD_PORT="${STATICD_PORT:-8080}"
+STATICD_WORKERS="${STATICD_WORKERS:-1}"
 NGINX_PORT="${NGINX_PORT:-8081}"
 DARKHTTPD_PORT="${DARKHTTPD_PORT:-8082}"
 CADDY_PORT="${CADDY_PORT:-8083}"
@@ -169,6 +171,7 @@ start_one() {
         staticd)
             [[ -x "$STATICD_BIN" ]] || { echo "missing staticd" >&2; exit 1; }
             "$STATICD_BIN" --listen "127.0.0.1:${STATICD_PORT}" --root "$FIX" \
+                --workers "$STATICD_WORKERS" \
                 >"$TMPDIR_RUN/staticd.log" 2>&1 &
             STATICD_PID=$!
             wait_port "$STATICD_PORT" staticd

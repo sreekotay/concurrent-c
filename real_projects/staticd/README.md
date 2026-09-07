@@ -1,9 +1,13 @@
-# staticd — Concurrent-C static HTTP/1.1 server
+# staticd — Concurrent-C static HTTP/1.1 + WebSocket
 
-A small HTTP/1.1 file server written as a Concurrent-C specimen. Accept,
-header encode, and body flush are separate on the page the same way
-[`redis_async_sketch.ccs`](../redis/redis_async_sketch.ccs) separates hold,
-encode, and ship. The file you read is the server you run.
+A small HTTP/1.1 file server written as a Concurrent-C specimen.
+Sessions are rows; dests are workers. `poll()` waits; a ready fd steps
+that row. The worker is the only writer. The file you read is the
+server you run.
+
+Dest-per-connection accept lives in
+[`examples/recipe_tcp_echo.ccs`](../../examples/recipe_tcp_echo.ccs)
+and redis. Not a second file server.
 
 ## Features
 
@@ -19,7 +23,9 @@ encode, and ship. The file you read is the server you run.
 | Listing | `--list` (off). Directory with no index → HTML table; without `--list` → 403 |
 | Query | `?…` is recognized and ignored |
 | Extra headers | `--header 'Name: value'` (repeatable; no CR/LF) |
-| Body | Named-block ring: 256 × 64KB = 16MB BSS, key `(dev, ino, block)`, FNV probe only, reuse in place, idle cull. Pool `pread` on miss / unaligned Range / busy fill. 8-slot fd cache; pathname revalidate ≤1s (absolute); hold dups the fd. Accept dest `g_clients`; chunk dest is a frame dest the send waits; turnstile cap 2. Ring and fd cache are two `CCExclusive` names |
+| Workers | `--workers N` (default 1). Share the listen fd |
+| WebSocket | `Upgrade: websocket` → `101`, then echo (text / binary), pong for ping, close for close. No fragments; payload cap 64KB |
+| Body | Named-block ring: 256 × 64KB = 16MB BSS, key `(dev, ino, block)`, FNV probe only, reuse in place, idle cull. Pool `pread` on miss / unaligned Range / busy fill. 8-slot fd cache; pathname revalidate ≤1s (absolute); hold dups the fd. Send is a cursor on the row: one 64KB chunk per step, `POLLOUT` while left |
 
 **Not in scope:** TLS, gzip, HTTP/2, multipart ranges, sendfile, directory
 listing on by default, CGI.
@@ -43,6 +49,7 @@ make darkhttpd              # optional peer
 
 ```bash
 ./out/staticd --listen 127.0.0.1:8080 --root ./fixtures
+./out/staticd --workers 4
 ./out/staticd --help
 ```
 
@@ -50,6 +57,7 @@ make darkhttpd              # optional peer
 |---|---|---|
 | `-l` / `--listen ADDR` | `127.0.0.1:8080` | `host:port` |
 | `-r` / `--root DIR` | `fixtures` | document root |
+| `-w` / `--workers N` | `1` | worker dests; shared listen |
 | `--index NAME` | `index.html` | one path segment; no `/` or `..` |
 | `--list` | off | listing when the index is missing |
 | `--header LINE` | none | extra response header; repeatable |
@@ -73,7 +81,7 @@ curl -D- -H 'Range: bytes=0-15' http://127.0.0.1:8080/4kb.html | head
                             # staticd also: OPTIONS, query strip, --header,
                             # --index, --list, dir-without-list → 403,
                             # Range / 304 / If-Range, Connection tokens,
-                            # symlink jail, rename under a hot name
+                            # symlink jail, rename under a hot name, WS echo
 ```
 
 Missing nginx / darkhttpd / caddy are skipped. Traversal may be 400, 403, or
@@ -86,7 +94,7 @@ Latency-first. Peers (missing ones are skipped):
 | Server | Port | |
 |--------|------|---|
 | **staticd** | 8080 | this specimen |
-| **nginx** | 8081 | `sendfile on`, `tcp_nopush on`, one worker |
+| **nginx** | 8081 | `sendfile on`, `tcp_nopush on`, `multi_accept on`, `worker_connections 8192`, one worker |
 | **darkhttpd** | 8082 | |
 | **caddy** | 8083 | `INCLUDE_CADDY=1` |
 
@@ -98,60 +106,41 @@ make bench                  # ./bench_latency.sh (isolated RSS)
 FULL=1 ./bench_latency.sh   # receipt: 30s × 5, five files
 SMOKE=1 ./bench_latency.sh  # 2s, 4kb.html @ c=10 only
 ISOLATE=0 ./bench_latency.sh  # keep all peers up (RSS then cumulative)
+STATICD_WORKERS=4 ./bench_latency.sh
 ./compare.sh                # correctness + directional
 ./compare.sh --full         # correctness + receipt
 ```
 
 Knobs: `REPEATS`, `DURATION`, `CONCURRENCY`, `FILES`, `FULL`, `SMOKE`,
 `ISOLATE`, `TIMEOUT`, `INCLUDE_NGINX`, `INCLUDE_DARKHTTPD`,
-`INCLUDE_CADDY`, `BENCH_OUT`.
+`INCLUDE_CADDY`, `STATICD_WORKERS`, `BENCH_OUT`.
 
 Receipt columns: **p50 / p75 / p90 / p99** (ms), RPS, process RSS, errors.
 Fixtures are deterministic (`gen_fixtures.sh`); bodies are gitignored,
 `fixtures/manifest.txt` is checked in. Each block page-caches the fixture
 tree and shuffles server order. `ISOLATE=1` (default) starts a fresh
-process for that cell only — RSS is the cell, not leftover stacks.
+process for that cell only — RSS is the cell.
 
-Local receipts land under `benchmarks/` (gitignored). rps/p50: Darwin
-25.5.0 arm64, 10 CPUs, wrk `-t2 -d5s --timeout 15s`, 3 rounds, median
-(round 0 discarded). RSS: `ISOLATE=1`, fresh process, 2s cell (`rss_kb/1024`;
-nginx = master + workers). Zero socket errors on every cell.
-
-| file | c | staticd rps | nginx | darkhttpd | staticd p50 | nginx p50 | darkhttpd p50 | staticd RSS | nginx RSS | darkhttpd RSS |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 4kb.html | 1 | 54385 | 32628 | 27854 | 0.017 | 0.030 | 0.035 | 2.3 | 8.7 | 1.7 |
-| 4kb.html | 10 | 140496 | 72104 | 55282 | 0.057 | 0.131 | 0.158 | 4.0 | 8.6 | 1.7 |
-| 4kb.html | 100 | 145354 | 72916 | 56274 | 0.605 | 1.31 | 1.73 | 18.3 | 8.7 | 1.7 |
-| 1mb.bin | 1 | 7354 | 6845 | 5239 | 0.132 | 0.142 | 0.176 | 3.6 | 8.7 | 1.7 |
-| 1mb.bin | 10 | 10441 | 14238 | 6212 | 0.93 | 0.405 | 1.59 | 6.5 | 8.8 | 1.7 |
-| 1mb.bin | 100 | 9972 | 12744 | 5886 | 9.79 | 4.55 | 16.79 | 29.9 | 9.5 | 1.8 |
-| 10mb.bin | 1 | 716 | 795 | 574 | 1.33 | 1.23 | 1.69 | 12.6 | 8.7 | 1.7 |
-| 10mb.bin | 10 | 756 | 1013 | 544 | 12.6 | 7.90 | 17.29 | 15.0 | 8.8 | 1.7 |
-| 10mb.bin | 100 | 666 | 0 | 559 | 134 | — | 174 | 41.3 | 9.5 | 1.7 |
-
-nginx 10mb / c=100 completed 0 requests. 10mb / c=1 RSS is the ~10MB of
-ring pages plus ~2MB base; c=100 is fiber stacks on top of that.
-
-After wrk disconnects, dest children drop themselves off the live index
-when the fiber is done. Idle RSS is the fiber pool floor (default 512
-stacks, ~85 MB here), not leftover connections.
+Local receipts land under `benchmarks/` (gitignored). One worker: c=1000
+does not grow a dest stack per conn. `--workers` is the knob when the
+dest is saturated (small-file high-c).
 
 ## Shape
 
 ```
-accept (@parallel dest g_clients)
-  └─ handle_client
-       └─ loop: BufReader request
-            ├─ ReqLine (query stripped) + path_is_safe
-            ├─ FileHold → component-walk jail / 8-slot fd cache (pathname ≤1s)
-            │    or directory: --index, else --list / 403
-            ├─ @typeview Encode → status + headers into Conn.out
-            ├─ conn_flush (headers only)
-            └─ send_file_body → checkout_block (256 × 64KB ring)
-                 miss / unaligned Range / busy fill → g_send_pool pread
-                 n > 64KB: frame dest + turnstile cap 2
-                           (wait dest before the stack turnstile dies)
+app dest
+  signal → g_stop
+  worker × N                    // --workers, default 1
+    poll(listen + session fds)
+    listen ready → accept → row
+    session ready → try_read → HTTP or WS step
+                     file body → one chunk, then the zip continues
 ```
+
+Keep-alive and WebSocket are the row staying in the table, not a dest
+that stays live. Add workers to use more cores; they share the listen fd.
+The table is `Vec` of `Session*` on a worker arena; slots are a pool on
+that arena. `poll()` is a tape, not a second table.
 
 Encode methods never touch the socket. The jail walks each path
 component with `openat(O_NOFOLLOW)`. The fd cache re-resolves the name
@@ -162,17 +151,11 @@ become holes once a second.
 
 ## Architecture
 
-Same bar as redis accept / encode / ship. Three names, do not mix:
-
 | Name | What it is |
 |------|------------|
-| **Accept dest** | `g_clients`. Process-lifetime. One dest-attach per accepted socket. A bad GET must not `fail` this dest. Occupancy is who is still running — a finished child claims itself off the live index. |
-| **Chunk dest** | Frame `pipe` inside `send_file_chunks`. Dest-attach the window writes here. The frame `@defer`s `pipe.wait()` so those fibers join before the stack turnstile is destroyed. |
-| **Tickets** | Turnstile `enter` / `wait` / `leave` / `pass`. Cap 2 in-flight chunk writes. Fail tickets on the error path so waiters unstick. |
-
-`g_clients` outlives any one send. Dest-attaching chunk writes onto it
-would leave them running after `send_file_chunks` returns; the turnstile
-lives on `cc_arena_stack`. Join the send dest first.
+| **Worker dest** | `g_app`. One dest per `--workers`. Owns the poll tape and the live table. |
+| **Session row** | `Session*` in the table. Socket, read buf, send cursor (`FileHold` / off / left). |
+| **Send cursor** | One `FILE_SEND_CHUNK` per `session_step`. `POLLOUT` while `send_left`. Close-after-body is `send_close`, not `dead` before the cursor drains. |
 
 Ring and fd cache share one `CCExclusive` (`cli_a.create_exclusive(4)`),
 names `SYNC_BLOCK` and `SYNC_FC`. Hold is metadata only: drop the lock
@@ -193,7 +176,8 @@ pools. `g_send_pool` is `cc_arena_pool_stack` at the top of `main`
 
 | Path | Purpose |
 |------|---------|
-| `staticd.ccs` | Server (`handle_one` is the story) |
+| `staticd.ccs` | Server (`worker_run` is the story) |
+| `staticd_ws.cch` | SHA-1 / base64 / WS frame tape |
 | `staticd_http.cch` | Date / Range / header-CI tape |
 | `staticd_block.cch` | Named-block ring (`checkout_block`) |
 | `staticd_fs.cch` | Jail, `FileHold`, 1s fd cache, listing |

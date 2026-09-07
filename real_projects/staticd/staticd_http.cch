@@ -82,6 +82,26 @@ static void connection_scan(char[:] val, int* saw_close, int* saw_ka) {
     }
 }
 
+static int connection_has(char[:] val, const char* lit) {
+    size_t i = 0;
+    while (i < val.len) {
+        size_t start, end;
+        char[:] tok;
+        while (i < val.len && (val.ptr[i] == ' ' || val.ptr[i] == '\t'
+                || val.ptr[i] == ','))
+            i++;
+        if (i >= val.len) break;
+        start = i;
+        while (i < val.len && val.ptr[i] != ',') i++;
+        end = i;
+        while (end > start && (val.ptr[end - 1] == ' ' || val.ptr[end - 1] == '\t'))
+            end--;
+        tok = val.sub(start, end);
+        if (ci_eq(tok, lit)) return 1;
+    }
+    return 0;
+}
+
 static const char k_wd[7][4] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
 static const char k_mo[12][4] = {
     "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"

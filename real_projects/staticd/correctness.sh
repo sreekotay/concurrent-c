@@ -3,7 +3,7 @@
 # (status 200, Content-Length, body SHA-256) and reject traversal.
 # staticd also: OPTIONS, query strip, --header, --index, --list,
 # Connection token list, Range / 304 / If-Range, intermediate symlink
-# jail, atomic rename under a hot name.
+# jail, atomic rename under a hot name, WebSocket echo.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -270,7 +270,85 @@ check_server() {
             exit 1
         fi
         echo "  ok Connection token list -> $conn_h"
+
+        check_ws "$port"
     fi
+}
+
+check_ws() {
+    local port="$1"
+    python3 - "$port" <<'PY'
+import base64, hashlib, os, socket, struct, sys
+
+port = int(sys.argv[1])
+key = base64.b64encode(os.urandom(16)).decode()
+guid = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+want = base64.b64encode(hashlib.sha1(key.encode() + guid).digest()).decode()
+
+s = socket.create_connection(("127.0.0.1", port), 2)
+req = (
+    "GET /echo HTTP/1.1\r\n"
+    "Host: 127.0.0.1\r\n"
+    "Upgrade: websocket\r\n"
+    "Connection: Upgrade\r\n"
+    f"Sec-WebSocket-Key: {key}\r\n"
+    "Sec-WebSocket-Version: 13\r\n"
+    "\r\n"
+).encode()
+s.sendall(req)
+buf = b""
+while b"\r\n\r\n" not in buf:
+    chunk = s.recv(4096)
+    if not chunk:
+        raise SystemExit("FAIL WS handshake closed")
+    buf += chunk
+head, rest = buf.split(b"\r\n\r\n", 1)
+if b"101" not in head.split(b"\r\n", 1)[0]:
+    raise SystemExit(f"FAIL WS status {head.split(b'\\n', 1)[0]!r}")
+if want.encode() not in head:
+    raise SystemExit("FAIL WS Accept mismatch")
+
+def recvn(sock, n, extra):
+    out = extra
+    extra = b""
+    while len(out) < n:
+        chunk = sock.recv(n - len(out))
+        if not chunk:
+            raise SystemExit("FAIL WS short read")
+        out += chunk
+    return out, extra
+
+def send_text(sock, text):
+    payload = text.encode()
+    mkey = os.urandom(4)
+    masked = bytes(b ^ mkey[i % 4] for i, b in enumerate(payload))
+    hdr = bytearray([0x81, 0x80 | len(payload)])
+    hdr.extend(mkey)
+    sock.sendall(bytes(hdr) + masked)
+
+def read_unmasked(sock, extra):
+    hdr, extra = recvn(sock, 2, extra)
+    if (hdr[0] & 0x80) == 0:
+        raise SystemExit("FAIL WS fragment")
+    opcode = hdr[0] & 0x0F
+    n = hdr[1] & 0x7F
+    if hdr[1] & 0x80:
+        raise SystemExit("FAIL WS server masked")
+    if n == 126:
+        ext, extra = recvn(sock, 2, extra)
+        n = struct.unpack("!H", ext)[0]
+    elif n == 127:
+        raise SystemExit("FAIL WS huge frame")
+    body, extra = recvn(sock, n, extra)
+    return opcode, body, extra
+
+send_text(s, "hello")
+op, body, rest = read_unmasked(s, rest)
+if op != 1 or body != b"hello":
+    raise SystemExit(f"FAIL WS echo op={op} body={body!r}")
+s.close()
+PY
+    echo "  ok WS echo hello"
 }
 
 [[ -f "$MANIFEST" ]] || ./gen_fixtures.sh

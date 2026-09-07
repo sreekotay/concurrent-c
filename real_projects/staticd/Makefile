@@ -10,7 +10,8 @@ all: staticd
 $(OUT_DIR):
 	mkdir -p $(OUT_DIR)
 
-$(OUT_DIR)/staticd: staticd.ccs staticd_http.cch staticd_block.cch staticd_fs.cch | $(OUT_DIR)
+$(OUT_DIR)/staticd: staticd.ccs staticd_ws.cch \
+		staticd_http.cch staticd_block.cch staticd_fs.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ staticd.ccs --release
 
 staticd: $(OUT_DIR)/staticd

@@ -1,14 +1,16 @@
 # Homebrew nginx.conf defaults, plus the recommended uncomment
-# (`sendfile on`, `tcp_nopush on`) and the harness (daemon off, pid,
-# listen, root, access_log off).
+# (`sendfile on`, `tcp_nopush on`, `multi_accept on`) and the harness
+# (daemon off, pid, listen, root, access_log off).
 # Invoke: nginx -c $PWD/nginx.conf -p $PWD/run/nginx
 worker_processes 1;
 error_log stderr notice;
 pid nginx.pid;
 daemon off;
+worker_rlimit_nofile 8192;
 
 events {
-    worker_connections 1024;
+    worker_connections 8192;
+    multi_accept on;
 }
 
 http {
