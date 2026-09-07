@@ -26,6 +26,8 @@
 typedef struct KCap {
     CCSlice name;
     CcType* type;
+    bool by_ref;                /* `[&x]`: the environment carries the address */
+    CcType* elem;               /* by-ref array: the element the name decays to */
 } KCap;
 typedef KCap* KCapRef;
 typedef Vec::[KCapRef] KCapList;
@@ -120,6 +122,30 @@ static void kl_push_decl(CCString* sb, CcLowerer* L, CcType* t, CCSlice name, co
     sb->push_cstr(tail, L->arena);
 }
 
+/* The element an array capture decays to, or NULL when the capture is
+ * not an array. `[&arr]` names the elements, not the array object: the
+ * body indexes it, and a pointer to the array would index the wrong
+ * width. */
+static CcType* kl_array_elem(CcType* t) {
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .array(ar): return ar.elem;
+        default: return NULL;
+    }
+}
+
+/* The name the body reads a by-reference scalar through. */
+static CCSlice kl_ref_name(CcLowerer* L, CCSlice name) {
+    CCString s = @string(`__cc_ref_${name}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+/* The `_make` parameter a by-reference capture arrives on. */
+static CCSlice kl_opaque_name(CcLowerer* L, CCSlice name) {
+    CCString s = @string(`__cc_opaque_${name}`, L->arena);
+    return lw_keep(L, &s);
+}
+
 /* The environment struct, its drop, and the `_make` that fills it. */
 static CCString kl_env_text(KStep* st, uint32_t id, KCapList* caps, size_t arity) {
     CcLowerer* L = st->L;
@@ -144,7 +170,14 @@ static CCString kl_env_text(KStep* st, uint32_t id, KCapList* caps, size_t arity
     for (i = 0; i < n; i++) {
         KCap* c = *caps->get_ptr(i);
         sb.push_cstr("    ", a);
-        kl_push_decl(&sb, L, c->type, c->name, ";\n");
+        if (c->by_ref) {
+            /* the address, opaque: what it points at is the entry's business */
+            sb.push_cstr("void* ", a);
+            sb.push_slice(c->name, a);
+            sb.push_cstr(";\n", a);
+        } else {
+            kl_push_decl(&sb, L, c->type, c->name, ";\n");
+        }
     }
     sb.push_cstr("} ", a);
     sb.push_slice(env, a);
@@ -159,7 +192,12 @@ static CCString kl_env_text(KStep* st, uint32_t id, KCapList* caps, size_t arity
     for (i = 0; i < n; i++) {
         KCap* c = *caps->get_ptr(i);
         if (i) sb.push_cstr(", ", a);
-        kl_push_decl(&sb, L, c->type, c->name, "");
+        if (c->by_ref) {
+            sb.push_cstr("void* ", a);
+            sb.push_slice(kl_opaque_name(L, c->name), a);
+        } else {
+            kl_push_decl(&sb, L, c->type, c->name, "");
+        }
     }
     sb.push_cstr(") {\n    ", a);
     sb.push_slice(env, a);
@@ -171,7 +209,7 @@ static CCString kl_env_text(KStep* st, uint32_t id, KCapList* caps, size_t arity
         sb.push_cstr("    __env->", a);
         sb.push_slice(c->name, a);
         sb.push_cstr(" = ", a);
-        sb.push_slice(c->name, a);
+        sb.push_slice(c->by_ref ? kl_opaque_name(L, c->name) : c->name, a);
         sb.push_cstr(";\n", a);
     }
     sb.push_cstr("    return cc_closure", a);
@@ -205,7 +243,12 @@ static void kl_forward(KStep* st, uint32_t id, KCapList* caps, size_t arity) {
     for (i = 0; i < n; i++) {
         KCap* c = *caps->get_ptr(i);
         if (i) sb->push_cstr(", ", a);
-        kl_push_decl(sb, L, c->type, c->name, "");
+        if (c->by_ref) {
+            sb->push_cstr("void* ", a);
+            sb->push_slice(kl_opaque_name(L, c->name), a);
+        } else {
+            kl_push_decl(sb, L, c->type, c->name, "");
+        }
     }
     sb->push_cstr(");\n", a);
 }
@@ -224,6 +267,62 @@ static CcExpr* kl_cast(CcLowerer* L, CcType* t, CcExpr* a, CcSpan sp) {
 static CcExpr* kl_unpack(CcLowerer* L, KCap* c, CcSpan sp) {
     CcExpr* env = lw_ident(L, cstr_slice("__env"), sp);
     return cc_expr_member(env, c->name, true, sp, L->arena);
+}
+
+/* A by-reference scalar is reached through its address, so the body's
+ * uses of the name become reads through that pointer. An array is not:
+ * the name is bound to the decayed element pointer and indexes as
+ * written. */
+typedef struct KRef {
+    CCSlice name;
+    CCSlice through;
+    bool shadowed;
+} KRef;
+
+static bool kl_ref_expr(CcExpr* e, void* env) {
+    KRef* r = (KRef*)env;
+    CCSlice nm;
+    @switch (e->k) {
+        case .ident(x): nm = x; break;
+        default: return true;
+    }
+    if (!slice_eq(nm, r->name)) return true;
+    e->k = { .ident = r->through };
+    return true;
+}
+
+static bool kl_ref_stmt(CcStmt* s, void* env) {
+    KRef* r = (KRef*)env;
+    CcDecl* d = NULL;
+    if (!stmt_is_decl(s, &d) || !d) return true;
+    @switch (d->k) {
+        case .var(v): if (slice_eq(v.name, r->name)) r->shadowed = true; break;
+        default: break;
+    }
+    return true;
+}
+
+/* Every use of `name` in `body`, read through `through` instead. */
+static bool kl_rewrite_ref(CcLowerer* L, CcStmt* body, CCSlice name, CCSlice through, CcSpan sp) {
+    CcVisitor v;
+    KRef r;
+    memset(&r, 0, sizeof(r));
+    r.name = name;
+    r.through = through;
+    memset(&v, 0, sizeof(v));
+    v.stmt = kl_ref_stmt;
+    v.env = &r;
+    CcStmt_walk(body, v);
+    if (r.shadowed) {
+        CCString m = @string(`'[&${name}]' is captured by reference and then declared again inside the closure; the clean lowerer does not lower a capture its body shadows`, L->arena);
+        lw_error(L, sp, m);
+        return false;
+    }
+    memset(&v, 0, sizeof(v));
+    v.expr = kl_ref_expr;
+    v.env = &r;
+    CcStmt_walk(body, v);
+    return true;
 }
 
 /* The entry function: the environment, the unpacked captures, the
@@ -249,6 +348,19 @@ static CcDecl* kl_entry_decl(KStep* st, uint32_t id, KCapList* caps, CcClosure c
     }
     for (i = 0; i < n; i++) {
         KCap* c = *caps->get_ptr(i);
+        if (c->by_ref) {
+            /* the address arrives opaque: the entry says what it points at */
+            CcType* pointee = c->elem ? c->elem : c->type;
+            CcType* pt = cc_type_pointer(pointee, sp, L->arena);
+            CCSlice bind = c->elem ? c->name : kl_ref_name(L, c->name);
+            CcExpr* cast = kl_cast(L, pt, kl_unpack(L, c, sp), sp);
+            lw_push(body, lw_decl_stmt(L, pt, bind, cast, sp));
+            if (!c->elem && cl.body) {
+                CCString through = @string(`(*${bind})`, L->arena);
+                if (!kl_rewrite_ref(L, cl.body, c->name, lw_keep(L, &through), sp)) return NULL;
+            }
+            continue;
+        }
         lw_push(body, lw_decl_stmt(L, c->type, c->name, kl_unpack(L, c, sp), sp));
     }
     for (i = 0; i < np; i++) {
@@ -315,11 +427,6 @@ static CcDecl* kl_entry_decl(KStep* st, uint32_t id, KCapList* caps, CcClosure c
 static bool kl_reject_capture(CcLowerer* L, CcCapture* c, CcSpan sp) {
     CCSlice nm = c->name;
     CCString m;
-    if (c->by_ref) {
-        m = @string(`'[&${nm}]' (a by-reference capture) is not lowered by the clean lowerer yet: the environment outlives the statement that built it`, L->arena);
-        lw_error(L, sp, m);
-        return true;
-    }
     if (c->is_move) {
         m = @string(`'[${"@"}move ${nm}]' (a moving capture) is not lowered by the clean lowerer yet`, L->arena);
         lw_error(L, sp, m);
@@ -352,7 +459,9 @@ static void kl_declare_make(KStep* st, uint32_t id, KCapList* caps, size_t arity
         CcParam p;
         memset(&p, 0, sizeof(p));
         p.span = sp;
-        p.type = c->type;
+        p.type = c->by_ref
+                     ? cc_type_pointer(cc_type_named(cstr_slice("void"), sp, L->arena), sp, L->arena)
+                     : c->type;
         p.name = c->name;
         p.attrs = vec_new::[CcAttr](L->arena);
         ps.push(p);
@@ -407,8 +516,11 @@ static void kl_lower(KStep* st, CcExpr* e, CcClosure cl) {
                 return;
             }
             cap = cc_arena_alloc(L->arena, sizeof(KCap), _Alignof(KCap));
+            memset(cap, 0, sizeof(*cap));
             cap->name = c->name;
             cap->type = t;
+            cap->by_ref = c->by_ref;
+            if (c->by_ref) cap->elem = kl_array_elem(t);
             sc.caps.push(cap);
             sc.seen.push(c->name);
         }
@@ -436,7 +548,9 @@ static void kl_lower(KStep* st, CcExpr* e, CcClosure cl) {
         call.args = vec_new::[CcExprRef](L->arena);
         for (i = 0; i < n; i++) {
             KCap* c = *caps.get_ptr(i);
-            call.args.push(lw_ident(L, c->name, sp));
+            CcExpr* arg = lw_ident(L, c->name, sp);
+            if (c->by_ref) arg = cc_expr_unary(CC_OP_ADDR, arg, sp, L->arena);
+            call.args.push(arg);
         }
         e->k = { .call = call };
     }

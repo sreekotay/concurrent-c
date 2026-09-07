@@ -260,6 +260,14 @@ diagnostic at the closure.
 The entry's body is built as real declarations, not text, so every step
 after this one types a closure body exactly as it types any function.
 
+`[&x]` captures the address: the environment field and the `_make`
+parameter are `void*`, the call site passes `&x`, and the entry says what
+it points at. A scalar is bound as `T* __cc_ref_x` and the body's uses of
+`x` are rewritten to read through it; an array is bound as `E* x`
+directly, because the body indexes elements and a pointer to the array
+would index the wrong width. A capture the body then declares again is a
+diagnostic, not a silent rewrite of the wrong name.
+
 ## Slices
 
 **The type.** `T[:]` is an instance of the slice family, named by the same
