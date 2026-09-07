@@ -234,7 +234,8 @@ static void shadow_rewrite_result_ctors(char* expr, size_t cap, const char* rnam
 }
 
 /* Result temp `__r`: emit `!(__r).ok` / `(__r).u.value` / `(__r).u.error`.
- * Host `_Generic` `__cc_uw_*` is only for AST_PTR_UNWRAP (pointer/null default). */
+ * Host `_Generic` `__cc_uw_*` is for AST_PTR_UNWRAP and for assign-unwrap of
+ * a pointer producer (`p = s.cstr(a) !>` — null default, not `.u.value`). */
 
 /* True if s[i] starts an identifier char. */
 static int shadow_is_id0(char c) {
@@ -1469,6 +1470,22 @@ static const char* shadow_outer_call_ident(const char* p) {
         }
     }
     return last;
+}
+
+/* Declared `T !>(E)` or Result-fn registry. Pointer producers (`cstr`) are
+ * not Result — assign-unwrap uses `__cc_uw_*` (null default). */
+static int shadow_call_is_result_fn(const char* call) {
+    const char* cal = shadow_outer_call_ident(call);
+    char cname[128];
+    size_t clen = 0;
+    if (!cal || !cal[0]) return 0;
+    while (cal[clen] && shadow_is_id(cal[clen]) && clen + 1 < sizeof(cname))
+        clen++;
+    if (!clen) return 0;
+    memcpy(cname, cal, clen);
+    cname[clen] = 0;
+    return shadow_rfn_err(cname) != NULL ||
+           cc_result_fn_registry_contains(cname, clen);
 }
 
 /* Pick stacked @errhandler: exact E first (inner→outer), then unique

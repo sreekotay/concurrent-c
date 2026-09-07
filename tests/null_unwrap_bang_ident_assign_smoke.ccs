@@ -1,0 +1,93 @@
+/* Split `T* p; p = call() !> { … };` must match decl-init pointer unwrap.
+ * `const char* p = s.cstr(a) !>` already works (AST_PTR_UNWRAP). The
+ * assign form was Result-shaped (`.u.value`) and failed host-cc. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int test_assign_null(void) {
+    char tiny[8];
+    CCArena a = cc_arena_fixed_buffer(tiny, sizeof(tiny));
+    CCString s = @string(`this will not fit in eight bytes at all`, a);
+    const char* p;
+    p = s.cstr(a) !> {
+        printf("assign_null\n");
+        return 0;
+    };
+    printf("UNEXPECTED assign_null p=%s\n", p ? p : "(null)");
+    return 1;
+}
+
+static int test_assign_bind_null(void) {
+    char tiny[8];
+    CCArena a = cc_arena_fixed_buffer(tiny, sizeof(tiny));
+    CCString s = @string(`this will not fit in eight bytes at all`, a);
+    const char* p;
+    p = s.cstr(a) !>(e) {
+        int is_null_kind = (e.kind == CC_ERR_NULL);
+        int has_src = e.message != NULL && strstr(e.message, "cstr") != NULL;
+        printf("assign_bind_null is_null_kind=%d has_src=%d\n", is_null_kind,
+               has_src);
+        return 0;
+    };
+    printf("UNEXPECTED assign_bind p=%s\n", p ? p : "(null)");
+    return 1;
+}
+
+typedef struct PathBox {
+    const char* p;
+} PathBox;
+
+static int test_field_assign_ok(void) {
+    cc_arena_stack(a, 256);
+    CCString ok = @string(`hello`, a);
+    PathBox box;
+    box.p = 0;
+    box.p = ok.cstr(a) !> {
+        printf("UNEXPECTED field assign ok\n");
+        return 1;
+    };
+    printf("field=%s\n", box.p);
+    return 0;
+}
+
+static int test_field_assign_null(void) {
+    char tiny[8];
+    CCArena a = cc_arena_fixed_buffer(tiny, sizeof(tiny));
+    CCString s = @string(`this will not fit in eight bytes at all`, a);
+    PathBox box;
+    box.p = 0;
+    box.p = s.cstr(a) !>(e) {
+        int is_null_kind = (e.kind == CC_ERR_NULL);
+        printf("field_null is_null_kind=%d\n", is_null_kind);
+        return 0;
+    };
+    printf("UNEXPECTED field_null p=%s\n", box.p ? box.p : "(null)");
+    return 1;
+}
+
+int main(void) {
+    cc_arena_stack(a, 256);
+    CCString ok = @string(`hello`, a);
+    const char* p1;
+    const char* p2;
+
+    p1 = ok.cstr(a) !> {
+        printf("UNEXPECTED assign ok\n");
+        return 1;
+    };
+    printf("p1=%s\n", p1);
+
+    p2 = ok.cstr(a) !>(e) {
+        printf("UNEXPECTED assign bind ok %s\n", e.message);
+        return 1;
+    };
+    printf("p2=%s\n", p2);
+
+    if (test_assign_null()) return 1;
+    if (test_assign_bind_null()) return 1;
+    if (test_field_assign_ok()) return 1;
+    if (test_field_assign_null()) return 1;
+    return 0;
+}

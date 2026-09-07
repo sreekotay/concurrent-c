@@ -204,6 +204,11 @@ elif [ -x "./cc/bin/ccc" ]; then
     echo "[test] CLI selftest FAILED"
     exit 1
   fi
+  # @link("path/to/lib.a") must stay a path (not -lpath/to/lib.a).
+  if ! sh scripts/test_at_link_path.sh; then
+    echo "[test] @link path selftest FAILED"
+    exit 1
+  fi
   # Quote #include "….h" passthrough (ordinary C headers are host-cc's).
   if ! sh scripts/test_quote_h_passthrough.sh; then
     echo "[test] quote-.h passthrough selftest FAILED"

@@ -1,0 +1,12 @@
+/* eprintln(@string(`…`)) is leftover CALL_ARGS emit. A 16-slot template
+ * expands past the 1024-byte args beachhead; the lowerer must refuse
+ * (not emit a cut mid-literal). Bind CCString first — house style. */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+int main(void) {
+    int n0 = 0, n1 = 1, n2 = 2, n3 = 3, n4 = 4, n5 = 5, n6 = 6, n7 = 7;
+    int n8 = 8, n9 = 9, n10 = 10, n11 = 11, n12 = 12, n13 = 13, n14 = 14, n15 = 15;
+    eprintln(@string(`v ${n0} ${n1} ${n2} ${n3} ${n4} ${n5} ${n6} ${n7} ${n8} ${n9} ${n10} ${n11} ${n12} ${n13} ${n14} ${n15}`, @scratch));
+    return 0;
+}

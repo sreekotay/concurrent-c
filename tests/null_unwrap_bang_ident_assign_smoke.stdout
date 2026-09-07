@@ -1,0 +1,6 @@
+p1=hello
+p2=hello
+assign_null
+assign_bind_null is_null_kind=1 has_src=1
+field=hello
+field_null is_null_kind=1
