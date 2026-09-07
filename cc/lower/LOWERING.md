@@ -503,9 +503,14 @@ is one of those addresses. The runtime may refuse the site
 inline at the join, so the arms happen either way and the only difference
 is whether they overlapped.
 
-Everything the form can carry beyond plain arms — `spawn`, a predicate,
-`seq`, `wait`, `worker`, `cache`, a bound handle, `@serial`, and the `for`
-and dest forms — is a diagnostic naming it. A concurrency construct that
+`@serial { ... }` is an arm whose body is a block rather than one
+expression; it reaches its names through the same addresses, and a name
+it declares for itself over one it captures is a diagnostic rather than a
+rewrite of the wrong name.
+
+Everything else the form can carry — `spawn`, a predicate, `seq`, `wait`,
+`worker`, `cache`, a bound handle, and the `for` and dest forms — is a
+diagnostic naming it. A concurrency construct that
 quietly ran as something else would be a program that behaves differently
 for reasons the page does not show.
 

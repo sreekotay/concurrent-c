@@ -111,7 +111,7 @@ static bool pl_ref_expr(CcExpr* e, void* env) {
     return true;
 }
 
-static void pl_rewrite(CcLowerer* L, CcExpr* e, CCSlice name, CCSlice through) {
+static void pl_rewrite(CcLowerer* L, CcExpr* e, CcStmt* s, CCSlice name, CCSlice through) {
     CcVisitor v;
     PRef r;
     r.name = name;
@@ -120,7 +120,51 @@ static void pl_rewrite(CcLowerer* L, CcExpr* e, CCSlice name, CCSlice through) {
     v.expr = pl_ref_expr;
     v.env = &r;
     (void)L;
-    CcExpr_walk(e, v);
+    if (e) CcExpr_walk(e, v);
+    if (s) CcStmt_walk(s, v);
+}
+
+/* A name the arm's own block declares: the rewrite would name the wrong
+ * thing, so the step says so instead. */
+typedef struct PShadow { PCapList* caps; CCSlice hit; } PShadow;
+
+static bool pl_shadow_stmt(CcStmt* s, void* env) {
+    PShadow* sh = (PShadow*)env;
+    CcDecl* d = NULL;
+    if (sh->hit.len) return true;
+    if (!stmt_is_decl(s, &d) || !d) return true;
+    @switch (d->k) {
+        case .var(v): {
+            PCapList* cv = sh->caps;
+            size_t n = cv->len();
+            size_t i;
+            for (i = 0; i < n; i++) {
+                PCap* c = *cv->get_ptr(i);
+                if (slice_eq(c->name, v.name)) { sh->hit = v.name; return true; }
+            }
+            break;
+        }
+        default: break;
+    }
+    return true;
+}
+
+/* The block inside `@serial { ... }`, as an ordinary block: the arm is
+ * where the ordering is decided, so the marker itself has nothing left to
+ * say to C. */
+static CcStmt* pl_serial_body(CcLowerer* L, CcStmt* s) {
+    CcStmt* blk;
+    CcBlock b;
+    bool hit = false;
+    if (!s) return NULL;
+    @switch (s->k) {
+        case .serial(x): b = x; hit = true; break;
+        default: break;
+    }
+    if (!hit) return s;
+    blk = cc__stmt_blank(s->span, L->arena);
+    blk->k = { .block = b };
+    return blk;
 }
 
 /* ---- the generated C ---------------------------------------------------- */
@@ -171,7 +215,7 @@ static void pl_forward(PStep* st, uint32_t id, uint32_t k) {
 
 /* The thunk: the environment, the names it reads, then the arm. */
 static CcDecl* pl_thunk_decl(PStep* st, uint32_t id, uint32_t k, PCapList* caps,
-                             CcExpr* expr, CCSlice out_type, CcSpan sp) {
+                             CcExpr* expr, CcStmt* arm_body, CCSlice out_type, CcSpan sp) {
     CcLowerer* L = st->L;
     CCSlice env = pl_name(L, id, k, "_env_t");
     CcStmt* body = lw_block(L, sp);
@@ -201,9 +245,11 @@ static CcDecl* pl_thunk_decl(PStep* st, uint32_t id, uint32_t k, PCapList* caps,
         CcExpr* read = cc_expr_member(lw_ident(L, cstr_slice("__e"), sp), c->name, true, sp, L->arena);
         CCString through = @string(`(*${ref})`, L->arena);
         lw_push(body, lw_decl_stmt(L, pt, ref, read, sp));
-        pl_rewrite(L, expr, c->name, lw_keep(L, &through));
+        pl_rewrite(L, expr, arm_body, c->name, lw_keep(L, &through));
     }
-    if (out_type.len) {
+    if (arm_body) {
+        lw_push(body, arm_body);
+    } else if (out_type.len) {
         CcExpr* read = cc_expr_member(lw_ident(L, cstr_slice("__e"), sp), cstr_slice("__cc_out"), true, sp, L->arena);
         CcExpr* store = lw_assign(L, cc_expr_unary(CC_OP_DEREF, lw_paren(L, read, sp), sp, L->arena), expr, sp);
         lw_push(body, lw_expr_stmt(L, store, sp));
@@ -356,17 +402,12 @@ static bool pl_reject(CcLowerer* L, CcParallel p, CcSpan sp) {
 
 static bool pl_arm_ok(CcLowerer* L, CcParallelArm* arm, CcSpan sp) {
     CCString m;
-    if (arm->serial) {
-        m = @string(`'${"@"}serial' inside '${"@"}parallel { }' is not lowered by the clean lowerer yet`, L->arena);
-        lw_error(L, sp, m);
-        return false;
-    }
     if (arm->unwrap) {
         m = @string(`an arm that unwraps its own Result is not lowered by the clean lowerer yet: the error has to reach the join`, L->arena);
         lw_error(L, sp, m);
         return false;
     }
-    if (!arm->expr) {
+    if (!arm->expr && !arm->serial) {
         m = @string(`an empty '${"@"}parallel' arm`, L->arena);
         lw_error(L, sp, m);
         return false;
@@ -413,10 +454,27 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             memset(&v, 0, sizeof(v));
             v.expr = pl_scan_expr;
             v.env = &sc;
-            CcExpr_walk(arm->expr, v);
+            if (arm->serial) CcStmt_walk(arm->serial, v);
+            else CcExpr_walk(arm->expr, v);
         }
         caps = sc.caps;
-        if (arm->target.len) {
+        if (arm->serial) {
+            CcVisitor v;
+            PShadow sh;
+            memset(&sh, 0, sizeof(sh));
+            sh.caps = &caps;
+            memset(&v, 0, sizeof(v));
+            v.stmt = pl_shadow_stmt;
+            v.env = &sh;
+            CcStmt_walk(arm->serial, v);
+            if (sh.hit.len) {
+                CCSlice nm = sh.hit;
+                CCString m = @string(`the arm reads '${nm}' from the enclosing scope and declares one of its own; the clean lowerer does not lower an arm that shadows what it captures`, L->arena);
+                lw_error(L, sp, m);
+                return;
+            }
+        }
+        if (arm->target.len && !arm->serial) {
             CcType* t = sc_lookup(w, arm->target);
             if (!t) {
                 CCSlice nm = arm->target;
@@ -433,15 +491,19 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             st->fwd.push_slice(et.as_slice(), L->arena);
         }
         pl_forward(st, id, (uint32_t)i);
-        st->made.push(pl_thunk_decl(st, id, (uint32_t)i, &caps, arm->expr, out_type, sp));
+        st->made.push(pl_thunk_decl(st, id, (uint32_t)i, &caps, arm->expr, pl_serial_body(L, arm->serial), out_type, sp));
         pl_spawn_stmts(L, blk, id, (uint32_t)i, &caps, arm->target, sp);
     }
     /* the first arm stays here */
     {
         CcParallelArm* arm = armv->get_ptr(0);
-        CcExpr* e0 = arm->expr;
-        if (arm->target.len) e0 = lw_assign(L, lw_ident(L, arm->target, sp), e0, sp);
-        lw_push(blk, lw_expr_stmt(L, e0, sp));
+        if (arm->serial) {
+            lw_push(blk, pl_serial_body(L, arm->serial));
+        } else {
+            CcExpr* e0 = arm->expr;
+            if (arm->target.len) e0 = lw_assign(L, lw_ident(L, arm->target, sp), e0, sp);
+            lw_push(blk, lw_expr_stmt(L, e0, sp));
+        }
     }
     for (i = 1; i < n; i++) pl_join_stmts(L, blk, id, (uint32_t)i, sp);
     lw_push(blk, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"),
