@@ -407,6 +407,52 @@ static bool gn_lower_fragment(CcLowerer* L, CCString text, CcSpan sp, CCString* 
     return true;
 }
 
+/* Whether a declaration is what makes `name` a type in this unit. */
+static bool gn_decl_defines(CcDecl* d, CCSlice name) {
+    CCSlice got = cc_slice_empty();
+    if (!name.len) return false;
+    @switch (d->k) {
+        case .typedef_(td): got = td.name; break;
+        case .tagged(tg): { if (tg.type) (void)type_named_name(tg.type, &got); break; }
+        case .variant(vd): got = vd.name; break;
+        default: break;
+    }
+    return got.len != 0 && slice_eq(got, name);
+}
+
+/* Where an expansion may land: after the leading includes, and after the
+ * last declaration this unit makes of any type the expansion names. An
+ * `ArrayMap::[int, Entr]` spells `Entr` in its fields, so it cannot be
+ * spliced above the `typedef struct Entr` that says what one is. */
+static size_t gn_anchor(CcLowerer* L, CcNameList* order, size_t base) {
+    CcIndex* ix = L->ix;
+    CcDeclList* decls = &L->unit->decls;
+    size_t nd = decls->len();
+    size_t at = base;
+    size_t n = order->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice nm = *order->get_ptr(i);
+        CcTypeInfo* info = ix->type_get(nm);
+        CcTypeList* tv;
+        size_t k;
+        size_t nt;
+        if (!info) continue;
+        tv = &info->targs;
+        nt = tv->len();
+        for (k = 0; k < nt; k++) {
+            CcType* at_k = *tv->get_ptr(k);
+            CCSlice tn = cc__strip_tag(ix->canon(at_k));
+            size_t j;
+            for (j = 0; j < nd; j++) {
+                CcDecl* d = *decls->get_ptr(j);
+                if (gn_decl_defines(d, tn) && j + 1 > at) at = j + 1;
+            }
+        }
+    }
+    return at;
+}
+
 static void CcLowerer_generics(CcLowerer* L) {
     GStep st;
     CcVisitor v;
@@ -475,6 +521,7 @@ static void CcLowerer_generics(CcLowerer* L) {
                 if (!is_pp) break;
                 at = k + 1;
             }
+            at = gn_anchor(L, o, at);
             sp.first = 0;
             sp.last = 0;
             if (at < nd) { CcDecl* da = *decls->get_ptr(at); sp = da->span; }
