@@ -119,44 +119,55 @@ static bool sr_reject_tag(CcLowerer* L, CcTplPart* part, CcSpan sp) {
     return true;
 }
 
+/* `@scratch` / `@scratch(N)` as the arena operand: the function's stack
+ * arena, sized to the largest any template in this body asked for. The
+ * template's arena operand becomes that name. */
+static bool sr_bind_scratch(TStep* st, CcTemplate* tp, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CcExpr* bytes = NULL;
+    int want = 1024;
+    if (!sr_is_scratch(tp->arena, &bytes)) return true;
+    if (bytes) {
+        CCString spelled = lw_spell_expr(L, bytes);
+        CCSlice t = cc_string_as_slice(&spelled);
+        int v = 0;
+        size_t k;
+        bool all_digits = t.len > 0;
+        for (k = 0; k < t.len; k++) {
+            if (t.ptr[k] < '0' || t.ptr[k] > '9') { all_digits = false; break; }
+            v = v * 10 + (t.ptr[k] - '0');
+        }
+        if (!all_digits) {
+            CCString m = @string(`'${"@"}scratch(n)' needs a plain byte count here; the clean lowerer sizes the stack arena at compile time`, L->arena);
+            lw_error(L, sp, m);
+            return false;
+        }
+        want = v;
+    }
+    st->scratch_used = true;
+    if (want > st->scratch_bytes) st->scratch_bytes = want;
+    tp->arena = lw_ident(L, sr_scratch_name(), sp);
+    return true;
+}
+
+/* `@string(expr, arena)`: the header's `_Generic` bridge over the value's
+ * type. There are no pieces to push -- the value is whole and its type
+ * picks the conversion -- so it is one expression, and it stands exactly
+ * where the template stood rather than becoming a run of statements. */
+static CcExpr* sr_direct_expr(TStep* st, CcTemplate tp, CcSpan sp) {
+    CcLowerer* L = st->L;
+    if (!sr_bind_scratch(st, &tp, sp)) return NULL;
+    return lw_call2(L, cstr_slice("cc_string_from"),
+                    lw_paren(L, tp.direct, sp), lw_paren(L, tp.arena, sp), sp);
+}
+
 /* The arena form, as the statements that build it into `name`. */
 static bool sr_arena_stmts(TStep* st, CCSlice name, CcTemplate tp, CcSpan sp, CcStmtList* out) {
     CcLowerer* L = st->L;
     CcTplPartList* parts = &tp.parts;
     size_t n = parts->len();
     size_t i;
-    if (tp.direct) {
-        CCString m = @string(`'${"@"}string(expr, arena)' (the direct form) is not lowered by the clean lowerer yet`, L->arena);
-        lw_error(L, sp, m);
-        return false;
-    }
-    {
-        /* `@scratch` names the function's stack arena */
-        CcExpr* bytes = NULL;
-        if (sr_is_scratch(tp.arena, &bytes)) {
-            int want = 1024;
-            if (bytes) {
-                CCString spelled = lw_spell_expr(L, bytes);
-                CCSlice t = cc_string_as_slice(&spelled);
-                int v = 0;
-                size_t k;
-                bool all_digits = t.len > 0;
-                for (k = 0; k < t.len; k++) {
-                    if (t.ptr[k] < '0' || t.ptr[k] > '9') { all_digits = false; break; }
-                    v = v * 10 + (t.ptr[k] - '0');
-                }
-                if (!all_digits) {
-                    CCString m = @string(`'${"@"}scratch(n)' needs a plain byte count here; the clean lowerer sizes the stack arena at compile time`, L->arena);
-                    lw_error(L, sp, m);
-                    return false;
-                }
-                want = v;
-            }
-            st->scratch_used = true;
-            if (want > st->scratch_bytes) st->scratch_bytes = want;
-            tp.arena = lw_ident(L, sr_scratch_name(), sp);
-        }
-    }
+    if (!sr_bind_scratch(st, &tp, sp)) return false;
     for (i = 0; i < n; i++) {
         CcTplPart* part = parts->get_ptr(i);
         CcExpr* recv = cc_expr_unary(CC_OP_ADDR, lw_ident(L, name, sp), sp, L->arena);
@@ -188,7 +199,7 @@ static CcExpr* sr_stack_expr(TStep* st, CcTemplate tp, CcSpan sp) {
     CCString size = cc_string_new();
     CcExpr* built;
     if (tp.direct) {
-        CCString m = @string(`'${"@"}string(expr)' (the direct form) is not lowered by the clean lowerer yet`, L->arena);
+        CCString m = @string(`'${"@"}string(expr)' needs an arena: write '${"@"}string(expr, arena)'`, L->arena);
         lw_error(L, sp, m);
         return NULL;
     }
@@ -290,7 +301,7 @@ static void sr_stmts(TStep* st, CcStmtList* list) {
                 default: break;
             }
         }
-        if (is_var && v.init && v.init->expr && v.name.len && sr_is_template(v.init->expr, &tp) && tp.arena) {
+        if (is_var && v.init && v.init->expr && v.name.len && sr_is_template(v.init->expr, &tp) && tp.arena && !tp.direct) {
             CcStmtList pushes = vec_new::[CcStmtRef](L->arena);
             if (sr_arena_stmts(st, v.name, tp, s->span, &pushes)) {
                 size_t k;
@@ -365,7 +376,7 @@ static bool sr_arena_expr_visit(CcExpr* e, void* env) {
     CcExpr* built;
     if (!sr_is_template(e, &tp)) return true;
     if (!tp.arena) return true;
-    built = sr_arena_expr(st, tp, e->span);
+    built = tp.direct ? sr_direct_expr(st, tp, e->span) : sr_arena_expr(st, tp, e->span);
     if (!built) { sr_note_failed(st, e); return true; }   /* it said why */
     st->n_templates++;
     e->k = built->k;

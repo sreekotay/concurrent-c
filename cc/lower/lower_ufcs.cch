@@ -269,7 +269,7 @@ static size_t uf_close_paren(CCSlice s, size_t i) {
     return s.len;
 }
 
-static bool uf_macro_passes_recv(CcMacroDef* md) {
+static bool uf_macro_passes_recv(CcMacroDef* md, size_t recv_at) {
     CCSlice body = md->body;
     CcNameList* ps = &md->params;
     CCSlice p0;
@@ -279,8 +279,8 @@ static bool uf_macro_passes_recv(CcMacroDef* md) {
     size_t end;
     int depth = 0;
     bool have = false;
-    if (!md->function_like || !ps->len()) return true;
-    p0 = *ps->get_ptr(0);
+    if (!md->function_like || ps->len() <= recv_at) return true;
+    p0 = *ps->get_ptr(recv_at);
     /* the argument list of the call the body expands to: the last group
      * that opens at the body's own depth */
     for (i = 0; i < body.len; i++) {
@@ -313,11 +313,14 @@ static bool uf_macro_passes_recv(CcMacroDef* md) {
     return slice_eq(cc_slice_from_buffer((char*)body.ptr + start, end - start), p0);
 }
 
-static bool uf_recv_by_ptr(CcLowerer* L, CcMethod* m) {
+/* `ntargs` is how many type arguments the site wrote: a method that takes a
+ * type takes it as the macro's leading parameter, so the receiver is that
+ * many parameters along. */
+static bool uf_recv_by_ptr(CcLowerer* L, CcMethod* m, size_t ntargs) {
     CcMacroDef* md;
     if (!m->recv_by_ptr) return false;
     md = uf_macro_of(L->ix, m->callee);
-    if (md) return uf_macro_passes_recv(md);
+    if (md) return uf_macro_passes_recv(md, ntargs);
     return true;
 }
 
@@ -509,6 +512,44 @@ static bool uf_ambient(Walker* w, CcLowerer* L, CcExpr* e, CcUfcs uf, CcSpan sp)
     return false;
 }
 
+/* `x.m::[T](args)`: the type arguments the site wrote, as the leading
+ * arguments of the call.
+ *
+ * A method that takes a type takes it as a macro parameter -- the header
+ * spells `cc_py_obj_as_list(T, obj, arena)`, and the C it expands to pastes
+ * `T` into a name -- so the type travels as the spelling the site wrote and
+ * not as a canonical one. The macro's own arity says the call has this
+ * shape: one parameter per type argument, then the receiver, then the
+ * written arguments. A callee that is not such a macro has nowhere to put
+ * them, and that is a diagnostic at the site rather than a call carrying an
+ * argument the callee never declared. */
+static bool uf_targs_lead(Walker* w, CcLowerer* L, CcUfcs uf, CcMethod* m,
+                          CcSpan sp, CcExprList* out) {
+    CcTypeList* tv = &uf.targs;
+    size_t nt = tv->len();
+    CcMacroDef* md;
+    size_t i;
+    if (!nt) return true;
+    md = uf_macro_of(w->ix, m->callee);
+    if (md) {
+        CcNameList* ps = &md->params;
+        if (!md->function_like || ps->len() != nt + 1 + uf.args.len()) md = NULL;
+    }
+    if (!md) {
+        CCSlice mn = uf.method;
+        CCSlice cn = m->callee;
+        CCString msg = @string(`type: '.${mn}' resolves to '${cn}', which declares no type formal for it`, L->arena);
+        lw_error(L, sp, msg);
+        return false;
+    }
+    for (i = 0; i < nt; i++) {
+        CcType* ta = *tv->get_ptr(i);
+        CCString spelled = CcType_spell(ta, cc_slice_empty(), &L->unit->tape, L->arena);
+        out->push(lw_text(L, spelled, sp));
+    }
+    return true;
+}
+
 static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice tn, CCSlice reason) {
     UStep* st = (UStep*)w->env;
     CcLowerer* L = st->L;
@@ -517,11 +558,6 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
     CcCall call;
     bool recv_ptr;
     st->n_sites++;
-    if (uf.targs.len()) {
-        CCString msg = @string(`'.${uf.method}::[...]' (a method with type arguments) is not lowered by the clean lowerer yet`, L->arena);
-        lw_error(L, sp, msg);
-        return;
-    }
     if (!rt && uf_ambient(w, L, e, uf, sp)) return;
     if (!rt) {
         CCSlice kind = uf.recv ? CcExpr_kind_name(uf.recv) : cc_slice_empty();
@@ -558,6 +594,7 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
         CcCall call2;
         call2.callee = lw_ident(L, m->callee, sp);
         call2.args = vec_new::[CcExprRef](L->arena);
+        if (!uf_targs_lead(w, L, uf, m, sp, &call2.args)) return;
         call2.args.push(lit);   /* the array literal is the pointer */
         {
             CcExprList* args = &uf.args;
@@ -581,10 +618,11 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
         e->k = { .stmt_expr = se };
         return;
     }
-    if (uf_recv_by_ptr(L, m)) recv_arg = recv_ptr ? uf.recv : cc_expr_unary(CC_OP_ADDR, uf_wrap(L, uf.recv, sp), sp, L->arena);
+    if (uf_recv_by_ptr(L, m, uf.targs.len())) recv_arg = recv_ptr ? uf.recv : cc_expr_unary(CC_OP_ADDR, uf_wrap(L, uf.recv, sp), sp, L->arena);
     else recv_arg = recv_ptr ? cc_expr_unary(CC_OP_DEREF, uf_wrap(L, uf.recv, sp), sp, L->arena) : uf.recv;
     call.callee = lw_ident(L, uf_overload_for_args(w, L, uf, m), sp);
     call.args = vec_new::[CcExprRef](L->arena);
+    if (!uf_targs_lead(w, L, uf, m, sp, &call.args)) return;
     call.args.push(recv_arg);
     {
         CcExprList* args = &uf.args;
