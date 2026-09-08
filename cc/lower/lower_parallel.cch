@@ -51,6 +51,7 @@ typedef struct PStep {
     CcDeclList made;            /* the thunks, in order */
     CCString fwd;               /* their forward declarations */
     PBindList binds;            /* sites whose handle is declared before the block */
+    CcStmtList stages;          /* `@stage` statements a `@parallel wait for` claimed */
     bool any;
 } PStep;
 
@@ -586,8 +587,16 @@ static bool pl_reject(CcLowerer* L, CcParallel p, CcSpan sp) {
         lw_error(L, sp, m);
         return true;
     }
-    if (p.wait || p.worker.len || p.cache.len()) {
-        m = @string(`'${"@"}parallel' with 'wait', 'worker' or 'cache' is not lowered by the clean lowerer yet`, L->arena);
+    if (p.wait || p.cache.len()) {
+        /* Assembled rather than templated: the message carries backticks,
+         * which close a template, and an `@`, which reads as a sigil. */
+        m = cc_string_new();
+        cc_string_push_cstr(&m, "@parallel wait (...) [cache (...)] requires `for (name in lo..hi)`", L->arena);
+        lw_error(L, sp, m);
+        return true;
+    }
+    if (p.worker.len) {
+        m = @string(`'${"@"}parallel' with 'worker' is not lowered by the clean lowerer yet`, L->arena);
         lw_error(L, sp, m);
         return true;
     }
@@ -851,20 +860,137 @@ static void pl_dest(PStep* st, CcStmt* s, CcParallelDest pd) {
     st->any = true;
 }
 
+/* A `@stage` this step already claimed for the walk it belongs to. */
+static bool pl_stage_owned(PStep* st, CcStmt* s) {
+    CcStmtList* v = &st->stages;
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) if (*v->get_ptr(i) == s) return true;
+    return false;
+}
+
+/* A `@stage` below the top level of a walk's body: it orders that walk's
+ * tickets, so it has to be a statement of the walk, not of something inside
+ * it. Reported here because the walk's own statement is about to be dropped
+ * and its body with it. */
+static bool pl_stage_visit(CcStmt* s, void* env) {
+    PStep* st = (PStep*)env;
+    bool is_stage = false;
+    @switch (s->k) {
+        case .stage: is_stage = true; break;
+        default: break;
+    }
+    if (is_stage) {
+        CCString m = cc_string_new();
+        cc_string_push_cstr(&m, "@stage must be a top-level statement of a '@parallel wait for' body", st->L->arena);
+        lw_error(st->L, s->span, m);
+    }
+    return true;
+}
+
+static void pl_stray_stages(PStep* st, CcStmt* body) {
+    CcStmtList* bs = lw_block_stmts(body);
+    size_t n;
+    size_t i;
+    if (!bs) return;
+    n = bs->len();
+    for (i = 0; i < n; i++) {
+        CcStmt* k = *bs->get_ptr(i);
+        bool is_stage = false;
+        CcVisitor v;
+        @switch (k->k) {
+            case .stage: is_stage = true; break;
+            default: break;
+        }
+        if (is_stage) continue;   /* a statement of the walk: that is where it belongs */
+        memset(&v, 0, sizeof(v));
+        v.stmt = pl_stage_visit;
+        v.env = st;
+        CcStmt_walk(k, v);
+    }
+}
+
+/* `@parallel [seq (c)] [wait (ts)] for (i in lo..hi) [worker (w)] [cache (…)]`.
+ *
+ * None of it is lowered yet, but the shape is checked here rather than left
+ * to the host: a walk left standing keeps its `!>` tail, and the tail's
+ * left operand is the identifier `@parallel`, which the Result step reads
+ * as a plain name and reports as needing a Result -- twice, at a line that
+ * says nothing about what is wrong. So every path out of this function
+ * replaces the statement with an empty block, which takes the tail with it. */
+static void pl_for(PStep* st, CcStmt* s, CcParallelFor pf) {
+    CcLowerer* L = st->L;
+    CcSpan sp = s->span;
+    CCString m;
+    CcStmt* gone = lw_block(L, sp);
+    if (pf.spawn) {
+        m = @string(`'${"@"}parallel spawn': do not combine with for or wait`, L->arena);
+        lw_error(L, sp, m);
+        s->k = gone->k;
+        return;
+    }
+    if (pf.seq && !pf.wait) {
+        m = cc_string_new();
+        cc_string_push_cstr(&m, "@parallel seq (...) with 'for' requires 'wait (gate)'", L->arena);
+        lw_error(L, sp, m);
+        s->k = gone->k;
+        return;
+    }
+    if (pf.cache.len() && !pf.wait) {
+        m = @string(`cache (name) requires the wait (gate) form`, L->arena);
+        lw_error(L, sp, m);
+        s->k = gone->k;
+        return;
+    }
+    /* the walk's own `@stage`s are its own: a stage anywhere else is stray,
+     * and saying so is this step's job even before the walk itself lowers */
+    if (pf.wait && pf.loop.body) {
+        CcStmtList* bs = lw_block_stmts(pf.loop.body);
+        if (bs) {
+            size_t n = bs->len();
+            size_t i;
+            for (i = 0; i < n; i++) {
+                CcStmt* k = *bs->get_ptr(i);
+                bool is_stage = false;
+                @switch (k->k) {
+                    case .stage: is_stage = true; break;
+                    default: break;
+                }
+                if (is_stage) st->stages.push(k);
+            }
+        }
+    }
+    /* the body goes with the statement below, so anything in it this step
+     * would have reported has to be reported before it does */
+    if (pf.loop.body) pl_stray_stages(st, pf.loop.body);
+    if (pf.wait) m = @string(`'${"@"}parallel wait (...) for' is not lowered by the clean lowerer yet`, L->arena);
+    else m = @string(`'${"@"}parallel for' is not lowered by the clean lowerer yet`, L->arena);
+    lw_error(L, sp, m);
+    s->k = gone->k;
+}
+
 static void pl_on_stmt(Walker* w, CcStmt* s, bool enter) {
     PStep* st = (PStep*)w->env;
     CcParallel p;
     CcParallelDest pd;
-    bool hit = false;
-    bool attach = false;
+    CcParallelFor pf;
+    int shape = 0;              /* 1 arms, 2 dest, 3 for, 4 stage */
     if (!enter) return;
     @switch (s->k) {
-        case .parallel(x): p = x; hit = true; break;
-        case .parallel_dest(x): pd = x; attach = true; break;
+        case .parallel(x): p = x; shape = 1; break;
+        case .parallel_dest(x): pd = x; shape = 2; break;
+        case .parallel_for(x): pf = x; shape = 3; break;
+        case .stage: shape = 4; break;
         default: break;
     }
-    if (hit) pl_lower(st, s, p);
-    else if (attach) pl_dest(st, s, pd);
+    if (shape == 1) pl_lower(st, s, p);
+    else if (shape == 2) pl_dest(st, s, pd);
+    else if (shape == 3) pl_for(st, s, pf);
+    else if (shape == 4 && !pl_stage_owned(st, s)) {
+        CCString m = cc_string_new();
+        cc_string_push_cstr(&m, "@stage must be a top-level statement of a '@parallel wait for' body", st->L->arena);
+        lw_error(st->L, s->span, m);
+    }
 }
 
 /* The handle a bound site fills is the caller's, so its declaration goes
@@ -922,6 +1048,7 @@ static void CcLowerer_parallel(CcLowerer* L) {
     st.made = vec_new::[CcDeclRef](L->arena);
     st.fwd = cc_string_new();
     st.binds = vec_new::[PBindRef](L->arena);
+    st.stages = vec_new::[CcStmtRef](L->arena);
     memset(&w, 0, sizeof(w));
     w.arena = L->arena;
     w.ix = L->ix;
