@@ -18,7 +18,7 @@ int main(void) {
     CCNursery n = cc_nursery_create() !> @destroy;
     Hold h;
     h.n = hold_host(&n);
-    (void)cc_nursery_wait(n) !>;
+    cc_nursery_wait(n) !>;
     cc_nursery_wait_host(h.n) !>;
     printf("ok\n");
     return 0;
