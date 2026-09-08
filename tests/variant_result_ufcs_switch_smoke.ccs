@@ -1,0 +1,61 @@
+#!ccc ccs
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+@variant ArmFail {
+    conn: void;
+    desync: void;
+};
+
+/* Distinct arm names so designators uniquely resolve (two variants in one TU). */
+@variant CallOut {
+    yes: void;
+    no: void;
+    maybe: void;
+};
+
+void !>(ArmFail) do_arm(int id) {
+    if (id < 0) return cc_err((ArmFail){ .conn = {} });
+    if (id == 0) return cc_err((ArmFail){ .desync = {} });
+    return cc_ok();
+}
+
+CallOut make_out(int id) {
+    if (id < 0) return (CallOut){ .no = {} };
+    if (id == 0) return (CallOut){ .maybe = {} };
+    return (CallOut){ .yes = {} };
+}
+
+int main(void) {
+    /* 1. Bang binder typed as E — bare designator on e.kind. */
+    do_arm(-1) !>(e) {
+        if (e.kind == .conn) {
+            /* ok */
+        } else {
+            return 1;
+        }
+    };
+
+    /* 2. @switch on bang binder. */
+    do_arm(0) !>(e) {
+        @switch (e) {
+        case .conn:
+            return 2;
+        case .desync:
+            break;
+        }
+    };
+
+    /* 3. @switch on call return (plain variant, not Result). */
+    @switch (make_out(-1)) {
+    case .yes:
+        return 3;
+    case .no:
+        break;
+    case .maybe:
+        return 4;
+    }
+
+    printf("ok\n");
+    return 0;
+}

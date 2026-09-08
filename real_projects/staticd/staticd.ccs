@@ -204,21 +204,23 @@ typedef @typeview Encode on Enc {
     other: void;
 };
 
-typedef enum MimeTag {
-    MIME_OCTET = 0,
-    MIME_HTML,
-    MIME_CSS,
-    MIME_JS,
-    MIME_JSON,
-    MIME_PNG,
-    MIME_JPEG,
-    MIME_GIF,
-    MIME_SVG,
-    MIME_TXT,
-} MimeTag;
+@variant MimeTag {
+    octet: void;
+    html: void;
+    css: void;
+    js: void;
+    json: void;
+    png: void;
+    jpeg: void;
+    gif: void;
+    svg: void;
+    txt: void;
+};
 
+/* static_map value is the MimeTagKind ordinal (arm order above).
+ * Comptime cannot name variant kind tags yet — keep ints in sync with arms. */
 typedef struct MimeSpec {
-    MimeTag kind;
+    int kind;
 } MimeSpec;
 
 typedef struct MimeEntry {
@@ -228,34 +230,50 @@ typedef struct MimeEntry {
 
 @comptime {
     MimeEntry mime_entries[] = {
-        { ".html", { MIME_HTML } },
-        { ".htm",  { MIME_HTML } },
-        { ".css",  { MIME_CSS } },
-        { ".js",   { MIME_JS } },
-        { ".json", { MIME_JSON } },
-        { ".png",  { MIME_PNG } },
-        { ".jpg",  { MIME_JPEG } },
-        { ".jpeg", { MIME_JPEG } },
-        { ".gif",  { MIME_GIF } },
-        { ".svg",  { MIME_SVG } },
-        { ".txt",  { MIME_TXT } },
-        { ".bin",  { MIME_OCTET } },
+        { ".html", { 1 } },
+        { ".htm",  { 1 } },
+        { ".css",  { 2 } },
+        { ".js",   { 3 } },
+        { ".json", { 4 } },
+        { ".png",  { 5 } },
+        { ".jpg",  { 6 } },
+        { ".jpeg", { 6 } },
+        { ".gif",  { 7 } },
+        { ".svg",  { 8 } },
+        { ".txt",  { 9 } },
+        { ".bin",  { 0 } },
     };
     static_map("mime_ext", mime_entries, CC_STATIC_MAP_ASCII_CI);
 }
 
-static const char* k_mime[] = {
-    [MIME_OCTET] = "application/octet-stream",
-    [MIME_HTML]  = "text/html; charset=utf-8",
-    [MIME_CSS]   = "text/css; charset=utf-8",
-    [MIME_JS]    = "application/javascript; charset=utf-8",
-    [MIME_JSON]  = "application/json",
-    [MIME_PNG]   = "image/png",
-    [MIME_JPEG]  = "image/jpeg",
-    [MIME_GIF]   = "image/gif",
-    [MIME_SVG]   = "image/svg+xml",
-    [MIME_TXT]   = "text/plain; charset=utf-8",
-};
+/* Arm order matches MimeTagKind (0..). */
+static MimeTag mime_from_kind(int kind) {
+    if (kind == 1) return (MimeTag){ .html = {} };
+    if (kind == 2) return (MimeTag){ .css = {} };
+    if (kind == 3) return (MimeTag){ .js = {} };
+    if (kind == 4) return (MimeTag){ .json = {} };
+    if (kind == 5) return (MimeTag){ .png = {} };
+    if (kind == 6) return (MimeTag){ .jpeg = {} };
+    if (kind == 7) return (MimeTag){ .gif = {} };
+    if (kind == 8) return (MimeTag){ .svg = {} };
+    if (kind == 9) return (MimeTag){ .txt = {} };
+    return (MimeTag){ .octet = {} };
+}
+
+static const char* mime_cstr(MimeTag t) {
+    @switch (t) {
+    case .octet: return "application/octet-stream";
+    case .html:  return "text/html; charset=utf-8";
+    case .css:   return "text/css; charset=utf-8";
+    case .js:    return "application/javascript; charset=utf-8";
+    case .json:  return "application/json";
+    case .png:   return "image/png";
+    case .jpeg:  return "image/jpeg";
+    case .gif:   return "image/gif";
+    case .svg:   return "image/svg+xml";
+    case .txt:   return "text/plain; charset=utf-8";
+    }
+}
 
 static void session_clear_out(Session* s) {
     if (s->out_mem) {
@@ -544,12 +562,12 @@ static Method method_of(char[:] name) {
     }
 }
 
-static const MimeSpec mime_octet_spec = { MIME_OCTET };
+static const MimeSpec mime_octet_spec = { 0 }; /* MimeTag_octet */
 
 static const char* content_type_for(char[:] path) {
     char[:] ext = path_ext(path);
     const MimeSpec* spec = mime_ext_get(ext) ?> &mime_octet_spec;
-    return k_mime[spec->kind];
+    return mime_cstr(mime_from_kind(spec->kind));
 }
 
 static bool !>(CCError) enc_date_ka(Enc* c, int ka) {

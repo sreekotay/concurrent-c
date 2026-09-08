@@ -3,8 +3,13 @@
  * Dest waiter bodies. Host #ifdef picks backend.
  * Default: kqueue (BSD/Darwin), epoll (Linux), else poll.
  * Override: -DCC_SERVER_WAIT_POLL=1 / _KQUEUE=1 / _EPOLL=1.
+ *
+ * Conn table: Table::[WaitId, CCConnRow]. Kernel udata and wake hits
+ * name WaitId (≥1); dense pack index stays private to the Table.
+ * Ready bits live only on CCWaitHit (tape.hits / epoch.hits).
  */
 #include <ccc/std/prelude.cch>
+#include <ccc/std/table.cch>
 #include <ccc/cc_atomic.cch>
 #include <ccc/std/net.cch>
 #include <ccc/std/tls.cch>
@@ -19,6 +24,23 @@
 #include <sys/socket.h>
 #include "CCServer.cch"
 #include "CCServerPoll.cch"
+
+typedef Table::[int, CCConnRow] CCConnTable;
+
+static CCConnTable cc_tape_conns(CCTape* w) {
+    return w ? (CCConnTable)w->conns : NULL;
+}
+static int cc_conn_table_insert(CCConnTable map, int id, CCConnRow row) {
+    if (!map) return -1;
+    return map->insert(id, row);
+}
+static int cc_conn_table_del(CCConnTable map, int id) {
+    if (!map) return 0;
+    return map->del(id) ? 1 : 0;
+}
+static void cc_conn_table_destroy(CCConnTable map) {
+    if (map) map->destroy();
+}
 
 #if defined(CC_SERVER_WAIT_POLL) && CC_SERVER_WAIT_POLL
 #define CC_WAIT_USE_POLL 1
@@ -95,55 +117,83 @@ int cc_tape_interest(CCIoSess* io, int want_out_extra, int* want_in,
     return 0;
 }
 
-/* UFCS on slots is unreliable inside host #if arms — funnel through these. */
-static CCWaitSlot* cc_tape_slot(CCTape* w, size_t i) {
-    return w->slots.get(i);
+size_t cc_tape_nconns(CCTape* w) {
+    CCConnTable t = w ? (CCConnTable)w->conns : NULL;
+    return t ? t->len() : 0;
 }
-static size_t cc_tape_nslots(CCTape* w) {
-    return w->slots.len();
+
+CCConnRow* cc_tape_row(CCTape* w, int id) {
+    CCConnTable t;
+    if (!w || !(t = (CCConnTable)w->conns) || id <= 0) return NULL;
+    return t->get_ptr(id);
 }
-/* Listener sleep ≠ client sleep: block if either is present. */
+
+CCConnRow* cc_tape_dense_at(CCTape* w, size_t di, int* out_id) {
+    CCConnTable t;
+    int* idp;
+    CCConnRow* row;
+    if (!w || !(t = (CCConnTable)w->conns)) return NULL;
+    if (di >= t->len()) return NULL;
+    idp = t->key_ptr(di);
+    row = t->at_ptr(di);
+    if (!idp || !row) return NULL;
+    if (out_id) *out_id = *idp;
+    return row;
+}
+
 static int cc_tape_timeout_ms(CCTape* w) {
     if (!w) return 0;
-    return (w->listening || cc_tape_nslots(w)) ? CC_SERVER_POLL_MS : 0;
+    return (w->listening || cc_tape_nconns(w)) ? CC_SERVER_POLL_MS : 0;
 }
-static int cc_tape_slot_push(CCTape* w, CCWaitSlot slot) {
-    return w->slots.push(slot);
+
+static int cc_tape_alloc_id(CCTape* w) {
+    int id;
+    size_t n;
+    if (!w) return 0;
+    n = w->id_free.len();
+    if (n > 0) {
+        int* p = w->id_free.get(n - 1);
+        id = p ? *p : 0;
+        w->id_free.truncate(n - 1);
+        return id;
+    }
+    if (w->id_next <= 0) w->id_next = 1;
+    id = w->id_next++;
+    if (id <= 0) return 0; /* wrapped */
+    return id;
 }
-static void cc_tape_slot_trunc(CCTape* w, size_t n) {
-    w->slots.truncate(n);
+
+static void cc_tape_recycle_id(CCTape* w, int id) {
+    if (!w || id <= 0) return;
+    (void)w->id_free.push(id);
 }
 
 static void cc_tape_ready_clear_prev(CCTape* w) {
     if (!w) return;
     w->listen_ready = 0;
-    @for (si in w->ready_ix) {
-        CCWaitSlot* s = cc_tape_slot(w, (size_t)si);
-        if (!s) continue;
-        s->ready_in = 0;
-        s->ready_out = 0;
-        s->ready_err = 0;
-    }
-    w->ready_ix.truncate(0);
+    w->hits.truncate(0);
 }
 
-static int cc_tape_mark_ready(CCTape* w, size_t i, int in, int out, int err) {
-    CCWaitSlot* s;
-    int was;
-    if (!w || !(s = cc_tape_slot(w, i))) return -1; /* bad index — waiter desync */
-    was = s->ready_in | s->ready_out | s->ready_err;
-    if (in) s->ready_in = 1;
-    if (out) s->ready_out = 1;
-    if (err) s->ready_err = 1;
-    if (!was && (s->ready_in | s->ready_out | s->ready_err)) {
-        if (w->ready_ix.push((uint32_t)i) != 0) {
-            /* Alloc fail: drop this wake's note; LT will re-fire. Not fatal. */
-            s->ready_in = 0;
-            s->ready_out = 0;
-            s->ready_err = 0;
-            return 0;
-        }
+static int cc_tape_mark_ready(CCTape* w, int id, int in, int out, int err) {
+    size_t i, n;
+    CCWaitHit hit;
+    if (!w || id <= 0) return -1;
+    if (!cc_tape_row(w, id)) return 0; /* stale WaitId after drop — ignore */
+    if (!in && !out && !err) return 0;
+    n = w->hits.len();
+    for (i = 0; i < n; i++) {
+        CCWaitHit* h = w->hits.get(i);
+        if (!h || h->id != id) continue;
+        if (in) h->ready.in = 1;
+        if (out) h->ready.out = 1;
+        if (err) h->ready.err = 1;
+        return 0;
     }
+    hit = (CCWaitHit){
+        .id = id,
+        .ready = {.in = in ? 1 : 0, .out = out ? 1 : 0, .err = err ? 1 : 0},
+    };
+    if (w->hits.push(hit) != 0) return 0;
     return 0;
 }
 
@@ -191,45 +241,27 @@ static int cc_kq_listen_arm(CCTape* w, int on) {
     return 0;
 }
 
-static int cc_kq_arm_slot(CCTape* w, size_t i, int wi, int wo) {
-    CCWaitSlot* s;
+static int cc_kq_arm_id(CCTape* w, int id, int wi, int wo) {
+    CCConnRow* r;
     void* ud;
-    if (!w || !(s = cc_tape_slot(w, i))) return -1;
-    ud = (void*)(uintptr_t)(i + 1);
-    /* Only syscall on interest change — re-ADD every arm was a kevent storm. */
-    if (wi && !s->want_in) {
-        if (cc_kq_set(w->backend_fd, s->fd, EVFILT_READ, EV_ADD | EV_ENABLE, ud) < 0)
+    if (!w || !(r = cc_tape_row(w, id))) return -1;
+    ud = (void*)(uintptr_t)(unsigned)id;
+    if (wi && !r->want_in) {
+        if (cc_kq_set(w->backend_fd, r->fd, EVFILT_READ, EV_ADD | EV_ENABLE, ud) < 0)
             return -1;
-    } else if (!wi && s->want_in) {
-        if (cc_kq_set(w->backend_fd, s->fd, EVFILT_READ, EV_DELETE, ud) < 0)
-            return -1;
-    }
-    if (wo && !s->want_out) {
-        if (cc_kq_set(w->backend_fd, s->fd, EVFILT_WRITE, EV_ADD | EV_ENABLE, ud) < 0)
-            return -1;
-    } else if (!wo && s->want_out) {
-        if (cc_kq_set(w->backend_fd, s->fd, EVFILT_WRITE, EV_DELETE, ud) < 0)
+    } else if (!wi && r->want_in) {
+        if (cc_kq_set(w->backend_fd, r->fd, EVFILT_READ, EV_DELETE, ud) < 0)
             return -1;
     }
-    s->want_in = wi;
-    s->want_out = wo;
-    return 0;
-}
-
-/* EV_ADD on an existing filter updates udata — intentional, not DELETE+ADD. */
-static int cc_kq_refresh_udata(CCTape* w, size_t i) {
-    CCWaitSlot* s;
-    void* ud;
-    if (!w || !(s = cc_tape_slot(w, i)) || s->fd < 0) return -1;
-    ud = (void*)(uintptr_t)(i + 1);
-    if (s->want_in) {
-        if (cc_kq_set(w->backend_fd, s->fd, EVFILT_READ, EV_ADD | EV_ENABLE, ud) < 0)
+    if (wo && !r->want_out) {
+        if (cc_kq_set(w->backend_fd, r->fd, EVFILT_WRITE, EV_ADD | EV_ENABLE, ud) < 0)
+            return -1;
+    } else if (!wo && r->want_out) {
+        if (cc_kq_set(w->backend_fd, r->fd, EVFILT_WRITE, EV_DELETE, ud) < 0)
             return -1;
     }
-    if (s->want_out) {
-        if (cc_kq_set(w->backend_fd, s->fd, EVFILT_WRITE, EV_ADD | EV_ENABLE, ud) < 0)
-            return -1;
-    }
+    r->want_in = wi;
+    r->want_out = wo;
     return 0;
 }
 #endif /* KQUEUE */
@@ -259,44 +291,32 @@ static int cc_epoll_listen_arm(CCTape* w, int on) {
     return 0;
 }
 
-static int cc_epoll_arm_slot(CCTape* w, size_t i, int wi, int wo) {
-    CCWaitSlot* s;
+static int cc_epoll_arm_id(CCTape* w, int id, int wi, int wo) {
+    CCConnRow* r;
     struct epoll_event ev;
     int op;
-    if (!w || !(s = cc_tape_slot(w, i))) return -1;
+    if (!w || !(r = cc_tape_row(w, id))) return -1;
     ev.events = cc_epoll_events(wi, wo);
-    ev.data.u32 = (uint32_t)(i + 1);
-    if (!s->want_in && !s->want_out)
+    ev.data.u32 = (uint32_t)id;
+    if (!r->want_in && !r->want_out)
         op = EPOLL_CTL_ADD;
     else if (!wi && !wo) {
-        if (epoll_ctl(w->backend_fd, EPOLL_CTL_DEL, s->fd, NULL) < 0)
+        if (epoll_ctl(w->backend_fd, EPOLL_CTL_DEL, r->fd, NULL) < 0)
             return -1;
-        s->want_in = 0;
-        s->want_out = 0;
+        r->want_in = 0;
+        r->want_out = 0;
         return 0;
     } else
         op = EPOLL_CTL_MOD;
-    if (epoll_ctl(w->backend_fd, op, s->fd, &ev) < 0) {
+    if (epoll_ctl(w->backend_fd, op, r->fd, &ev) < 0) {
         if (op == EPOLL_CTL_ADD && errno == EEXIST) {
-            if (epoll_ctl(w->backend_fd, EPOLL_CTL_MOD, s->fd, &ev) < 0)
+            if (epoll_ctl(w->backend_fd, EPOLL_CTL_MOD, r->fd, &ev) < 0)
                 return -1;
         } else
             return -1;
     }
-    s->want_in = wi;
-    s->want_out = wo;
-    return 0;
-}
-
-static int cc_epoll_refresh_udata(CCTape* w, size_t i) {
-    CCWaitSlot* s;
-    struct epoll_event ev;
-    if (!w || !(s = cc_tape_slot(w, i)) || s->fd < 0) return -1;
-    if (!s->want_in && !s->want_out) return 0;
-    ev.events = cc_epoll_events(s->want_in, s->want_out);
-    ev.data.u32 = (uint32_t)(i + 1);
-    if (epoll_ctl(w->backend_fd, EPOLL_CTL_MOD, s->fd, &ev) < 0)
-        return -1;
+    r->want_in = wi;
+    r->want_out = wo;
     return 0;
 }
 #endif /* EPOLL */
@@ -313,25 +333,36 @@ __attribute__((used)) static const char cc_wait_backend_tag[] =
 #endif
 
 int cc_tape_open(CCTape* w, CCServer* srv, CCArena a) {
-    Vec::[CCWaitSlot] slots@(a) @detach;
-    Vec::[uint32_t] ready_ix@(a) @detach;
+    CCConnTable conns;
+    Vec::[CCWaitHit] hits@(a) @detach;
+    Vec::[int] id_free@(a) @detach;
     int spare;
     int backend = -1;
     if (!w || !srv || !cc_arena_is_live(a) || srv->ln.fd < 0) return 0;
     (void)cc_fd_nonblock(srv->ln.fd);
+    conns = table_new::[int, CCConnRow](a);
+    if (!conns) return 0;
 #if CC_WAIT_USE_KQUEUE
     backend = kqueue();
-    if (backend < 0) return 0;
+    if (backend < 0) {
+        cc_conn_table_destroy(conns);
+        return 0;
+    }
     (void)fcntl(backend, F_SETFD, FD_CLOEXEC);
 #elif CC_WAIT_USE_EPOLL
     backend = epoll_create1(EPOLL_CLOEXEC);
-    if (backend < 0) return 0;
+    if (backend < 0) {
+        cc_conn_table_destroy(conns);
+        return 0;
+    }
 #endif
     spare = open("/dev/null", O_RDONLY | O_CLOEXEC);
     *w = (CCTape){
         .srv = srv,
-        .slots = slots,
-        .ready_ix = ready_ix,
+        .conns = conns,
+        .hits = hits,
+        .id_free = id_free,
+        .id_next = 1,
         .listening = 1,
         .spare_fd = spare,
         .listen_fd = srv->ln.fd,
@@ -343,12 +374,14 @@ int cc_tape_open(CCTape* w, CCServer* srv, CCArena a) {
     if (cc_kq_listen_arm(w, 1) != 0) {
         close(backend);
         if (spare >= 0) close(spare);
+        cc_conn_table_destroy(conns);
         return 0;
     }
 #elif CC_WAIT_USE_EPOLL
     if (cc_epoll_listen_arm(w, 1) != 0) {
         close(backend);
         if (spare >= 0) close(spare);
+        cc_conn_table_destroy(conns);
         return 0;
     }
 #else
@@ -367,13 +400,38 @@ void cc_tape_close(CCTape* w) {
         close(w->backend_fd);
         w->backend_fd = -1;
     }
+    if (w->conns) {
+        CCConnTable t = (CCConnTable)w->conns;
+        cc_conn_table_destroy(t);
+        w->conns = NULL;
+    }
 }
 
-int cc_tape_wait(CCTape* w) {
+static CCWaitEpoch cc_tape_epoch(CCTape* w, int n_events) {
+    CCWaitEpoch ep = {0};
+    if (!w) {
+        ep.n_events = -1;
+        return ep;
+    }
+    ep.tape = w;
+    ep.hits = w->hits;
+    ep.n_events = n_events;
+    ep.listen_ready = (w->listening && w->listen_ready) ? 1 : 0;
+    return ep;
+}
+
+int cc_wait_epoch_failed(CCWaitEpoch* ep) { return ep && ep->n_events < 0; }
+int cc_wait_epoch_idle(CCWaitEpoch* ep) { return ep && ep->n_events == 0; }
+
+int cc_wait_epoch_listen_ready(CCWaitEpoch* ep) {
+    return ep && ep->listen_ready != 0;
+}
+
+CCWaitEpoch cc_tape_wait(CCTape* w) {
     int hold;
-    if (!w) return -1;
+    if (!w) return cc_tape_epoch(NULL, -1);
     hold = cc_tape_drop_listen_if_stopped(w);
-    if (hold < 0) return -1;
+    if (hold < 0) return cc_tape_epoch(w, -1);
     cc_tape_ready_clear_prev(w);
 
     if (w->listening && w->srv) {
@@ -399,26 +457,23 @@ int cc_tape_wait(CCTape* w) {
         ts.tv_sec = 0;
         ts.tv_nsec = (long)cc_tape_timeout_ms(w) * 1000000L;
         pr = kevent(w->backend_fd, NULL, 0, evs, CC_SERVER_KEVENT_BATCH, &ts);
-        if (pr < 0) return (errno == EINTR) ? 0 : -1;
+        if (pr < 0) return cc_tape_epoch(w, (errno == EINTR) ? 0 : -1);
         for (i = 0; i < pr; i++) {
             uintptr_t ud = (uintptr_t)evs[i].udata;
-            /* NULL changelist: no EV_ERROR-from-kevent-input. Filter events
-             * may still carry EV_EOF; EV_ERROR on a filter is rare. */
             if (ud == 0) {
                 if (evs[i].filter == EVFILT_READ)
                     w->listen_ready = 1;
                 continue;
             }
             {
-                /* EV_EOF alone is peer half-close / drain, not a hard error. */
                 int in = (evs[i].filter == EVFILT_READ) ? 1 : 0;
                 int out = (evs[i].filter == EVFILT_WRITE) ? 1 : 0;
                 int err = (evs[i].flags & EV_ERROR) ? 1 : 0;
-                if (cc_tape_mark_ready(w, (size_t)(ud - 1), in, out, err) != 0)
-                    return -1;
+                if (cc_tape_mark_ready(w, (int)ud, in, out, err) != 0)
+                    return cc_tape_epoch(w, -1);
             }
         }
-        return pr;
+        return cc_tape_epoch(w, pr);
     }
 #elif CC_WAIT_USE_EPOLL
     {
@@ -426,7 +481,7 @@ int cc_tape_wait(CCTape* w) {
         int pr, i;
         pr = epoll_wait(w->backend_fd, evs, CC_SERVER_EPOLL_BATCH,
                         cc_tape_timeout_ms(w));
-        if (pr < 0) return (errno == EINTR) ? 0 : -1;
+        if (pr < 0) return cc_tape_epoch(w, (errno == EINTR) ? 0 : -1);
         for (i = 0; i < pr; i++) {
             uint32_t ud = evs[i].data.u32;
             uint32_t e = evs[i].events;
@@ -439,26 +494,24 @@ int cc_tape_wait(CCTape* w) {
             in = (e & EPOLLIN) ? 1 : 0;
             out = (e & EPOLLOUT) ? 1 : 0;
             err = (e & EPOLLERR) ? 1 : 0;
-            /* HUP without IN: still attempt a read so fill sees EOF. */
             if ((e & EPOLLHUP) && !in && !out)
                 in = 1;
-            if (cc_tape_mark_ready(w, (size_t)(ud - 1), in, out, err) != 0)
-                return -1;
+            if (cc_tape_mark_ready(w, (int)ud, in, out, err) != 0)
+                return cc_tape_epoch(w, -1);
         }
-        return pr;
+        return cc_tape_epoch(w, pr);
     }
 #else
     {
-        /* Portable poll: rebuild interest set each wake (O(n)). */
-        size_t n = cc_tape_nslots(w);
+        size_t n = cc_tape_nconns(w);
         size_t nfds = (w->listening && w->listen_want) ? n + 1 : n;
         size_t i, base = 0;
         int pr;
         struct pollfd* raw;
         if (nfds == 0)
-            return 0;
+            return cc_tape_epoch(w, 0);
         raw = (struct pollfd*)malloc(nfds * sizeof(struct pollfd));
-        if (!raw) return -1;
+        if (!raw) return cc_tape_epoch(w, -1);
         if (w->listening && w->listen_want) {
             raw[0].fd = w->listen_fd;
             raw[0].events = POLLIN;
@@ -466,16 +519,17 @@ int cc_tape_wait(CCTape* w) {
             base = 1;
         }
         for (i = 0; i < n; i++) {
-            CCWaitSlot* s = cc_tape_slot(w, i);
+            int id = 0;
+            CCConnRow* r = cc_tape_dense_at(w, i, &id);
             short ev = 0;
-            if (!s) {
+            if (!r || id <= 0) {
                 free(raw);
-                return -1;
+                return cc_tape_epoch(w, -1);
             }
-            if (s->want_in) ev |= (short)POLLIN;
-            if (s->want_out) ev |= (short)POLLOUT;
+            if (r->want_in) ev |= (short)POLLIN;
+            if (r->want_out) ev |= (short)POLLOUT;
             if (!ev) ev = (short)POLLIN;
-            raw[base + i].fd = s->fd;
+            raw[base + i].fd = r->fd;
             raw[base + i].events = ev;
             raw[base + i].revents = 0;
         }
@@ -483,144 +537,131 @@ int cc_tape_wait(CCTape* w) {
         if (pr < 0) {
             int e = errno;
             free(raw);
-            return (e == EINTR) ? 0 : -1;
+            return cc_tape_epoch(w, (e == EINTR) ? 0 : -1);
         }
         if (base && (raw[0].revents & POLLIN))
             w->listen_ready = 1;
         for (i = 0; i < n; i++) {
             short rev = raw[base + i].revents;
+            int id = 0;
             int in, out, err;
             if (!rev) continue;
+            if (!cc_tape_dense_at(w, i, &id) || id <= 0) {
+                free(raw);
+                return cc_tape_epoch(w, -1);
+            }
             in = (rev & POLLIN) ? 1 : 0;
             out = (rev & POLLOUT) ? 1 : 0;
             err = (rev & (POLLERR | POLLNVAL)) ? 1 : 0;
             if ((rev & POLLHUP) && !in && !out)
                 in = 1;
-            if (cc_tape_mark_ready(w, i, in, out, err) != 0) {
+            if (cc_tape_mark_ready(w, id, in, out, err) != 0) {
                 free(raw);
-                return -1;
+                return cc_tape_epoch(w, -1);
             }
         }
         free(raw);
-        return pr;
+        return cc_tape_epoch(w, pr);
     }
 #endif
-}
-
-CCReady cc_tape_ready(CCTape* w, size_t i) {
-    CCWaitSlot* s;
-    CCReady r = {0};
-    if (!w || !(s = cc_tape_slot(w, i))) return r;
-    r.in = s->ready_in;
-    r.out = s->ready_out;
-    r.err = s->ready_err;
-    return r;
 }
 
 int cc_tape_listen_ready(CCTape* w) {
     return w && w->listening && w->listen_ready;
 }
 
-int cc_tape_arm(CCTape* w, size_t i, CCIoSess* io) {
+void !>(WaitFail) cc_tape_arm(CCTape* w, int id, CCIoSess* io) {
     int wi = 0, wo = 0;
-    CCWaitSlot* s;
-    if (!w) return -1;
+    CCConnRow* r;
+    if (!w) return cc_err((WaitFail){ .desync = {} });
+    if (!cc_tape_row(w, id)) return cc_err((WaitFail){ .desync = {} });
     cc_tape_interest(io, 0, &wi, &wo);
 #if CC_WAIT_USE_KQUEUE
-    return cc_kq_arm_slot(w, i, wi, wo);
+    if (cc_kq_arm_id(w, id, wi, wo) != 0)
+        return cc_err((WaitFail){ .conn = {} });
 #elif CC_WAIT_USE_EPOLL
-    return cc_epoll_arm_slot(w, i, wi, wo);
+    if (cc_epoll_arm_id(w, id, wi, wo) != 0)
+        return cc_err((WaitFail){ .conn = {} });
 #else
-    s = cc_tape_slot(w, i);
-    if (!s) return -1;
-    s->want_in = wi;
-    s->want_out = wo;
-    return 0;
+    r = cc_tape_row(w, id);
+    if (!r) return cc_err((WaitFail){ .desync = {} });
+    r->want_in = wi;
+    r->want_out = wo;
 #endif
+    return cc_ok();
 }
 
 int cc_tape_watch(CCTape* w, CCIoSess* io) {
-    CCWaitSlot slot;
-    size_t i;
-    if (!w || !io || io->sock.fd < 0) return 0;
-    slot = (CCWaitSlot){ .fd = io->sock.fd };
-    if (cc_tape_slot_push(w, slot) != 0) return 0;
-    i = cc_tape_nslots(w) - 1;
+    CCConnTable t;
+    CCConnRow row;
+    int id;
+    if (!w || !w->conns || !io || io->sock.fd < 0) return 0;
+    t = cc_tape_conns(w);
+    if (!t) return 0;
+    id = cc_tape_alloc_id(w);
+    if (id <= 0) return 0;
+    row = (CCConnRow){
+        .io = io,
+        .fd = io->sock.fd,
+        .want_in = 0,
+        .want_out = 0,
+    };
+    if (cc_conn_table_insert(t, id, row) != 0) {
+        cc_tape_recycle_id(w, id);
+        return 0;
+    }
 #if CC_WAIT_USE_KQUEUE
-    if (cc_kq_arm_slot(w, i, 1, io->want_out ? 1 : 0) != 0) {
-        cc_tape_slot_trunc(w, i);
+    if (cc_kq_arm_id(w, id, 1, io->want_out ? 1 : 0) != 0) {
+        (void)cc_conn_table_del(t, id);
+        cc_tape_recycle_id(w, id);
         return 0;
     }
 #elif CC_WAIT_USE_EPOLL
-    if (cc_epoll_arm_slot(w, i, 1, io->want_out ? 1 : 0) != 0) {
-        cc_tape_slot_trunc(w, i);
+    if (cc_epoll_arm_id(w, id, 1, io->want_out ? 1 : 0) != 0) {
+        (void)cc_conn_table_del(t, id);
+        cc_tape_recycle_id(w, id);
         return 0;
     }
 #else
     {
-        CCWaitSlot* s = cc_tape_slot(w, i);
-        if (!s) {
-            cc_tape_slot_trunc(w, i);
+        CCConnRow* r = cc_tape_row(w, id);
+        if (!r) {
+            (void)cc_conn_table_del(t, id);
+            cc_tape_recycle_id(w, id);
             return 0;
         }
-        s->want_in = 1;
-        s->want_out = io->want_out ? 1 : 0;
+        r->want_in = 1;
+        r->want_out = io->want_out ? 1 : 0;
     }
 #endif
-    return 1;
+    return id;
 }
 
-static void cc_tape_unwatch(CCTape* w, size_t i) {
-    CCWaitSlot* s;
-    if (!w || !(s = cc_tape_slot(w, i))) return;
+static void cc_tape_unwatch_row(CCTape* w, CCConnRow* r) {
+    if (!w || !r) return;
 #if CC_WAIT_USE_KQUEUE
-    if (s->fd >= 0) {
-        if (s->want_in)
-            (void)cc_kq_set(w->backend_fd, s->fd, EVFILT_READ, EV_DELETE, NULL);
-        if (s->want_out)
-            (void)cc_kq_set(w->backend_fd, s->fd, EVFILT_WRITE, EV_DELETE, NULL);
+    if (r->fd >= 0) {
+        if (r->want_in)
+            (void)cc_kq_set(w->backend_fd, r->fd, EVFILT_READ, EV_DELETE, NULL);
+        if (r->want_out)
+            (void)cc_kq_set(w->backend_fd, r->fd, EVFILT_WRITE, EV_DELETE, NULL);
     }
 #elif CC_WAIT_USE_EPOLL
-    if (s->fd >= 0 && (s->want_in || s->want_out))
-        (void)epoll_ctl(w->backend_fd, EPOLL_CTL_DEL, s->fd, NULL);
+    if (r->fd >= 0 && (r->want_in || r->want_out))
+        (void)epoll_ctl(w->backend_fd, EPOLL_CTL_DEL, r->fd, NULL);
 #endif
-    *s = (CCWaitSlot){ .fd = -1 };
 }
 
-static int cc_tape_take_last(CCTape* w, size_t i) {
-    size_t n;
-    CCWaitSlot* last;
-    CCWaitSlot* dst;
-    if (!w) return -1;
-    n = cc_tape_nslots(w);
-    if (n == 0 || i >= n) return -1;
-    if (i + 1 == n) {
-        cc_tape_slot_trunc(w, n - 1);
-        return 0;
-    }
-    last = cc_tape_slot(w, n - 1);
-    dst = cc_tape_slot(w, i);
-    if (!last || !dst) return -1;
-    *dst = *last;
-    /* Interest moves with the fd; readiness stays with this wait batch /
-     * old index. Carrying flags + mark_ready(i) can duplicate i in
-     * ready_ix when the hole was already ready. All backends are
-     * level-triggered — a still-ready fd fires again next wait. */
-    dst->ready_in = 0;
-    dst->ready_out = 0;
-    dst->ready_err = 0;
-    *last = (CCWaitSlot){ .fd = -1 };
-#if CC_WAIT_USE_KQUEUE
-    if (cc_kq_refresh_udata(w, i) != 0) return -1;
-#elif CC_WAIT_USE_EPOLL
-    if (cc_epoll_refresh_udata(w, i) != 0) return -1;
-#endif
-    cc_tape_slot_trunc(w, n - 1);
+int cc_tape_drop_id(CCTape* w, int id) {
+    CCConnTable t;
+    CCConnRow* r;
+    if (!w || !w->conns || id <= 0) return -1;
+    t = cc_tape_conns(w);
+    if (!t) return -1;
+    r = cc_tape_row(w, id);
+    if (!r) return -1;
+    cc_tape_unwatch_row(w, r);
+    if (!cc_conn_table_del(t, id)) return -1;
+    cc_tape_recycle_id(w, id);
     return 0;
-}
-
-int cc_tape_drop_at(CCTape* w, size_t i) {
-    if (!w) return -1;
-    cc_tape_unwatch(w, i);
-    return cc_tape_take_last(w, i);
 }

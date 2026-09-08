@@ -792,11 +792,12 @@ static const char* shadow_ufcs_skip_cast(const char* recv, char* buf,
     return buf;
 }
 
-/* Map_/ArrayMap_ or CC_MAP_DECL_* type with installed Name_insert. */
+/* Map_/ArrayMap_/Table_ or CC_MAP_DECL_* type with installed Name_insert. */
 static int shadow_ufcs_is_map_ty(const char* vty) {
     char tryc[160];
     if (!vty || !vty[0]) return 0;
-    if (strncmp(vty, "Map_", 4) == 0 || strncmp(vty, "ArrayMap_", 9) == 0)
+    if (strncmp(vty, "Map_", 4) == 0 || strncmp(vty, "ArrayMap_", 9) == 0 ||
+        strncmp(vty, "Table_", 6) == 0)
         return 1;
     snprintf(tryc, sizeof(tryc), "%s_insert", vty);
     return shadow_ufn_exists(tryc);
@@ -1004,7 +1005,8 @@ static void shadow_ufcs_field_map_vty_base(char* fty, size_t cap) {
     if (!fty || !fty[0] || !cap) return;
     if (shadow_spell_generic_type_text(fty, spelled, sizeof(spelled)))
         snprintf(fty, cap, "%s", spelled);
-    if (strncmp(fty, "Map_", 4) == 0 || strncmp(fty, "ArrayMap_", 9) == 0) {
+    if (strncmp(fty, "Map_", 4) == 0 || strncmp(fty, "ArrayMap_", 9) == 0 ||
+        strncmp(fty, "Table_", 6) == 0) {
         for (;;) {
             hit = strstr(fty, "_void*");
             if (!hit || (hit > fty + 4 && hit[-1] == 'r'))
@@ -1352,14 +1354,16 @@ static int shadow_ufcs_emit_destroy(const char* vty, const ShadowBind* rb,
     }
     if (vbase[0] && (strncmp(vbase, "CCVec_", 6) == 0 ||
                      strncmp(vbase, "Map_", 4) == 0 ||
-                     strncmp(vbase, "ArrayMap_", 9) == 0)) {
+                     strncmp(vbase, "ArrayMap_", 9) == 0 || strncmp(vbase, "Table_", 6) == 0 ||
+                     strncmp(vbase, "Table_", 6) == 0)) {
         snprintf(dhook, sizeof(dhook), "%s_destroy", vbase);
         return shadow_ufcs_emit_unary_life(dhook, recv, is_arrow_or_ptr, dst,
                                           cap);
     }
     if (vty && vty[0] && (strncmp(vty, "CCVec_", 6) == 0 ||
                           strncmp(vty, "Map_", 4) == 0 ||
-                          strncmp(vty, "ArrayMap_", 9) == 0)) {
+                          strncmp(vty, "ArrayMap_", 9) == 0 || strncmp(vty, "Table_", 6) == 0 ||
+                          strncmp(vty, "Table_", 6) == 0)) {
         snprintf(dhook, sizeof(dhook), "%s_destroy", vty);
         return shadow_ufcs_emit_unary_life(dhook, recv, is_arrow_or_ptr, dst,
                                           cap);
@@ -1670,7 +1674,7 @@ static int shadow_ufcs_emit_len_cap(const char* meth, const char* vty,
         /* Vec/Map/Pair: do not snake-invent here — fall through to Name_meth. */
         if (rty[0] &&
             (strncmp(rty, "CCVec_", 6) == 0 || strncmp(rty, "Map_", 4) == 0 ||
-             strncmp(rty, "ArrayMap_", 9) == 0 || strncmp(rty, "Pair_", 5) == 0 ||
+             strncmp(rty, "ArrayMap_", 9) == 0 || strncmp(rty, "Table_", 6) == 0 || strncmp(rty, "Pair_", 5) == 0 ||
              shadow_ufcs_is_map_ty(rty)))
             return 0;
         if (shadow_ufcs_emit_cc_snake_len(rty, recv, is_arrow_or_ptr, dst, cap))
@@ -1691,7 +1695,7 @@ static int shadow_ufcs_ty_uses_name_meth(const char* vty) {
     if (resolved && resolved[0] && resolved != rty)
         snprintf(rty, sizeof(rty), "%s", resolved);
     return strncmp(rty, "CCVec_", 6) == 0 || strncmp(rty, "Map_", 4) == 0 ||
-           strncmp(rty, "ArrayMap_", 9) == 0 || strncmp(rty, "Pair_", 5) == 0 ||
+           strncmp(rty, "ArrayMap_", 9) == 0 || strncmp(rty, "Table_", 6) == 0 || strncmp(rty, "Pair_", 5) == 0 ||
            shadow_ufcs_is_map_ty(rty);
 }
 
@@ -3207,7 +3211,7 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         }
         if (vty[0] && (strncmp(vty, "CCVec_", 6) == 0 ||
                        strncmp(vty, "Map_", 4) == 0 ||
-                       strncmp(vty, "ArrayMap_", 9) == 0 ||
+                       strncmp(vty, "ArrayMap_", 9) == 0 || strncmp(vty, "Table_", 6) == 0 ||
                        strncmp(vty, "Pair_", 5) == 0)) {
             char vbase[128];
             const char* tag;
@@ -3889,7 +3893,7 @@ static void shadow_ufcs_diagnose_miss_at(const char* recv, const char* meth,
     } else if (strncmp(vty, "CCSlice_", 8) == 0 ||
                strncmp(vty, "CCVec_", 6) == 0 ||
                strncmp(vty, "Map_", 4) == 0 ||
-               strncmp(vty, "ArrayMap_", 9) == 0 ||
+               strncmp(vty, "ArrayMap_", 9) == 0 || strncmp(vty, "Table_", 6) == 0 ||
                strncmp(vty, "Pair_", 5) == 0 ||
                strncmp(vty, "CCResult_", 9) == 0 ||
                strncmp(vty, "CCChan", 6) == 0 ||
@@ -5560,7 +5564,7 @@ static void shadow_ufcs_diag_leftover_dots(const char* cur) {
                          strcmp(vty, "CCSlice") == 0 ||
                          strncmp(vty, "CCVec_", 6) == 0 ||
                          strncmp(vty, "Map_", 4) == 0 ||
-                         strncmp(vty, "ArrayMap_", 9) == 0 ||
+                         strncmp(vty, "ArrayMap_", 9) == 0 || strncmp(vty, "Table_", 6) == 0 ||
                          strncmp(vty, "CCChan", 6) == 0 ||
                          strncmp(vty, "CCResult_", 9) == 0 ||
                          strncmp(vty, "Pair_", 5) == 0 ||

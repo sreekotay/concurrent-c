@@ -555,6 +555,11 @@ static int shadow_host_diag_surface_generic(const char* ident, char* fam,
         snprintf(args, acap, "%s", ident + 9);
         return 1;
     }
+    if (strncmp(ident, "Table_", 6) == 0 && ident[6]) {
+        snprintf(fam, fcap, "Table");
+        snprintf(args, acap, "%s", ident + 6);
+        return 1;
+    }
     if (strncmp(ident, "Map_", 4) == 0 && ident[4]) {
         snprintf(fam, fcap, "Map");
         snprintf(args, acap, "%s", ident + 4);

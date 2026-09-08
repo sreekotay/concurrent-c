@@ -4591,7 +4591,9 @@ static AstNode* parse_external_inner(Parser* p) {
          spell_eq(t.spell, "CC_MAP_DECL_ARENA") ||
          spell_eq(t.spell, "CC_MAP_DECL_UFCS") ||
          spell_eq(t.spell, "CC_ARRAY_MAP_DECL") ||
-         spell_eq(t.spell, "CC_ARRAY_MAP_DECL_UFCS")) &&
+         spell_eq(t.spell, "CC_ARRAY_MAP_DECL_UFCS") ||
+         spell_eq(t.spell, "CC_TABLE_DECL") ||
+         spell_eq(t.spell, "CC_TABLE_DECL_UFCS")) &&
         p->i + 1 < p->n && tok_eq(p->toks[p->i + 1], TK_PUNCT, "(")) {
         int a0 = p->i;
         Token kw = p_next(p); /* macro name */

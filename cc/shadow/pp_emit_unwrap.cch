@@ -735,6 +735,7 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
             char fname[64];
             size_t ni = 0;
             const char* s = shadow_outer_call_ident(call);
+            int bind_mark = g_shadow_nbinds;
             if (!s) {
                 s = call;
                 while (*s == '(' || *s == ' ' || *s == '\t') s++;
@@ -748,28 +749,35 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 ety = shadow_rfn_err(fname);
                 if (ety && ety[0]) shadow_bind_name(bind, ety, 0);
             }
-        }
-        if (!shadow_resync_line(out, ctx, i2)) return 0;
-        {
-            int saved_via = ctx ? ctx->err_via_bang : 0;
-            int uc = ctx && ctx->goto_cleanup;
-            if (ctx) ctx->err_via_bang = 1;
-            if (strncmp(mode, "bang_stmt", 9) == 0 &&
-                !shadow_mode_has_destroy(mode)) {
-                if (st->nbody > 0 &&
-                    !shadow_emit_stmt_ctx(st->body[0], out, ctx, i2, uc)) {
-                    if (ctx) ctx->err_via_bang = saved_via;
-                    return 0;
-                }
-            } else {
-                for (int k = 0; k < st->nbody; k++) {
-                    if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2, uc)) {
+            if (!shadow_resync_line(out, ctx, i2)) {
+                g_shadow_nbinds = bind_mark;
+                return 0;
+            }
+            {
+                int saved_via = ctx ? ctx->err_via_bang : 0;
+                int uc = ctx && ctx->goto_cleanup;
+                if (ctx) ctx->err_via_bang = 1;
+                if (strncmp(mode, "bang_stmt", 9) == 0 &&
+                    !shadow_mode_has_destroy(mode)) {
+                    if (st->nbody > 0 &&
+                        !shadow_emit_stmt_ctx(st->body[0], out, ctx, i2, uc)) {
                         if (ctx) ctx->err_via_bang = saved_via;
+                        g_shadow_nbinds = bind_mark;
                         return 0;
                     }
+                } else {
+                    for (int k = 0; k < st->nbody; k++) {
+                        if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2,
+                                                  uc)) {
+                            if (ctx) ctx->err_via_bang = saved_via;
+                            g_shadow_nbinds = bind_mark;
+                            return 0;
+                        }
+                    }
                 }
+                if (ctx) ctx->err_via_bang = saved_via;
             }
-            if (ctx) ctx->err_via_bang = saved_via;
+            g_shadow_nbinds = bind_mark;
         }
         return shadow_tpl_emit(out, k_tpl_bang_assign_close, env, 7);
     }

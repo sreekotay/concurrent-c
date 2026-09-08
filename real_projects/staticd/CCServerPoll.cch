@@ -2,6 +2,9 @@
  * Dest waiter face. Bodies: CCServerPoll.ccs (kqueue / epoll / poll).
  * Pulls CCServer.cch so the published .h is self-contained (emit may
  * reorder includes ahead of the owner's CCServer.cch).
+ *
+ * Connections live in Table::[int, CCConnRow] keyed by WaitId (≥1).
+ * Kernel udata / wake hits name WaitId — never dense pack index.
  */
 #ifndef CC_SERVER_POLL_CCH
 #define CC_SERVER_POLL_CCH
@@ -24,33 +27,49 @@ typedef struct CCReady {
     int err;
 } CCReady;
 
-/* Arm names are TU-wide for designated init — do not reuse `.fd` / `.wait`. */
+/* One kernel firing this wake — lives only on the epoch, never on the row. */
+typedef struct CCWaitHit {
+    int id;
+    CCReady ready;
+} CCWaitHit;
+
+/* Arm names are TU-wide for designated init — do not reuse `.fd` /
+ * `.wait` / `.ready` as field names on other structs in this header. */
 @variant CCAccept {
     ready: int;
     busy: void;
     dead: void;
 };
 
-typedef struct CCWaitSlot {
+/* tape.arm failure: conn = mark dead / drop; desync = worker bail. */
+@variant WaitFail {
+    conn: void;
+    desync: void;
+};
+
+/* Durable interest only. Ready is CCWaitHit on the wake. */
+typedef struct CCConnRow {
+    CCIoSess* io;
     int fd;
     int want_in;
     int want_out;
-    int ready_in;
-    int ready_out;
-    int ready_err;
-} CCWaitSlot;
+} CCConnRow;
 
 /*
  * One worker's wait face. Owner: `cc_server_worker` (arena `wa`).
- *   slots     — parallel to `live` (same index = same conn)
- *   ready_ix  — slot indices that fired this wake (cleared next wait)
+ *   conns     — WaitId → row (Table handle; concrete type private to .ccs)
+ *   hits      — CCWaitHit storage for the current wake (cleared next wait)
+ *   id_free   — recycled WaitIds
  *   backend_fd — kqueue/epoll, or -1 for poll
- * Listen is not a slot; spare_fd is EMFILE recovery only.
+ * Listen is not a conn row; spare_fd is EMFILE recovery only.
+ * Step the wake through CCWaitEpoch from tape.wait() — not tape.hits.
  */
 typedef struct CCTape {
     CCServer* srv;
-    Vec::[CCWaitSlot] slots;
-    Vec::[uint32_t] ready_ix;
+    void* conns; /* Table::[int, CCConnRow]* — see CCServerPoll.ccs */
+    Vec::[CCWaitHit] hits;
+    Vec::[int] id_free;
+    int id_next;
     int listening;
     int spare_fd;
     int listen_fd;
@@ -58,6 +77,15 @@ typedef struct CCTape {
     int listen_ready;
     int backend_fd;
 } CCTape;
+
+/* One wake: hits + listen bit. hits aliases tape storage until the
+ * next wait(); do not keep an epoch across waits. */
+typedef struct CCWaitEpoch {
+    CCTape* tape;
+    Vec::[CCWaitHit] hits;
+    int n_events; /* <0 fail; 0 idle; >0 kernel events this wake */
+    int listen_ready;
+} CCWaitEpoch;
 
 uint64_t cc_mono_ms(void);
 void cc_server_publish_accept_backoff(CCServer* srv);
@@ -69,15 +97,22 @@ int cc_ready_out(CCReady r);
 int cc_tape_interest(CCIoSess* io, int want_out_extra, int* want_in,
                      int* want_out);
 
+int cc_wait_epoch_failed(CCWaitEpoch* ep);
+int cc_wait_epoch_idle(CCWaitEpoch* ep);
+int cc_wait_epoch_listen_ready(CCWaitEpoch* ep);
+
 int cc_tape_open(CCTape* w, CCServer* srv, CCArena a);
 void cc_tape_close(CCTape* w);
-int cc_tape_wait(CCTape* w);
-CCReady cc_tape_ready(CCTape* w, size_t i);
+CCWaitEpoch cc_tape_wait(CCTape* w);
 int cc_tape_listen_ready(CCTape* w);
-int cc_tape_arm(CCTape* w, size_t i, CCIoSess* io);
+void !>(WaitFail) cc_tape_arm(CCTape* w, int id, CCIoSess* io);
+/* Insert row; return WaitId (>0) or 0. */
 int cc_tape_watch(CCTape* w, CCIoSess* io);
-/* Unwatch fd at i, then swap-remove last wait-slot into i (one udata refresh).
- * Returns -1 if the moved row's kernel udata could not be updated. */
-int cc_tape_drop_at(CCTape* w, size_t i);
+/* Unwatch fd, delete WaitId, recycle id. -1 = desync. */
+int cc_tape_drop_id(CCTape* w, int id);
+size_t cc_tape_nconns(CCTape* w);
+CCConnRow* cc_tape_row(CCTape* w, int id);
+/* Dense pack walk (reap / deadline). id out via *out_id. */
+CCConnRow* cc_tape_dense_at(CCTape* w, size_t di, int* out_id);
 
 #endif /* CC_SERVER_POLL_CCH */

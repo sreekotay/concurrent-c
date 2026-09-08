@@ -57,6 +57,7 @@ static int shadow_type_has_new_factory(const char* base) {
     if (strncmp(base, "CCVec_", 6) == 0) return 1;
     if (strncmp(base, "Map_", 4) == 0) return 1;
     if (strncmp(base, "ArrayMap_", 9) == 0) return 1;
+    if (strncmp(base, "Table_", 6) == 0) return 1;
     return 0;
 }
 

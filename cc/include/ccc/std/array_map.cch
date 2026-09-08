@@ -1,6 +1,9 @@
 /*
  * Arena-backed array map: pow2 u32 probe index + dense (key, value) rows.
  *
+ * Frozen / deprecated as a public face: prefer Table::[K,V] (table.cch), which
+ * reuses this core. Keep ArrayMap for existing call sites; do not extend it.
+ *
  * Prefer this when values are wide — empty buckets cost 4 B instead of a full
  * key+value slot.  For tiny K/V, the inline open-addressing `map` (Jackson)
  * often has better locality.

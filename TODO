@@ -2,4 +2,5 @@
 - ccfile and io cleanup -> buffers
 - @create pointer vs val confusions
 - ENOBUFS
-
+- @ok 
+- release(name); //also release bool if already released

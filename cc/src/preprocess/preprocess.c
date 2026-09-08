@@ -17024,7 +17024,11 @@ static int cc__ident_is_factory_type_name(const char* src, size_t n,
         return arg == 2;
     if (nl == 17 && memcmp(src + name_s, "CC_ARRAY_MAP_DECL", 17) == 0)
         return arg == 2;
+    if (nl == 13 && memcmp(src + name_s, "CC_TABLE_DECL", 13) == 0)
+        return arg == 2;
     if (nl == 22 && memcmp(src + name_s, "CC_ARRAY_MAP_DECL_UFCS", 22) == 0)
+        return arg == 0;
+    if (nl == 18 && memcmp(src + name_s, "CC_TABLE_DECL_UFCS", 18) == 0)
         return arg == 0;
     if (nl == 18 && memcmp(src + name_s, "CC_DECL_SLICE_SPEC", 18) == 0)
         return arg == 0;

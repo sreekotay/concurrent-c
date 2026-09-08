@@ -729,6 +729,15 @@ static void shadow_safe_check_map_key_text(ShadowSafeCtx* ctx, AstNode* st,
         if (strncmp(p, "ArrayMap_", 9) == 0) {
             hit = p + 9;
             skip = 9;
+        } else if (strncmp(p, "Table_", 6) == 0) {
+            hit = p + 6;
+            skip = 6;
+        } else if (strncmp(p, "table_new_count_", 16) == 0) {
+            hit = p + 16;
+            skip = 16;
+        } else if (strncmp(p, "table_new_", 10) == 0) {
+            hit = p + 10;
+            skip = 10;
         } else if (strncmp(p, "array_map_new_count_", 20) == 0) {
             hit = p + 20;
             skip = 20;
@@ -5267,7 +5276,8 @@ static int shadow_safety_check(AstNode** items, int n, TapeCache* cache) {
                 size_t bn = 0;
                 if (!t || !t[0]) continue;
                 if (strncmp(t, "CCVec_", 6) != 0 && strncmp(t, "Map_", 4) != 0 &&
-                    strncmp(t, "ArrayMap_", 9) != 0)
+                    strncmp(t, "ArrayMap_", 9) != 0 &&
+                    strncmp(t, "Table_", 6) != 0)
                     continue;
                 while (t[bn] && t[bn] != '*' && t[bn] != ' ' &&
                        bn + 1 < sizeof(base))
@@ -5286,7 +5296,8 @@ static int shadow_safety_check(AstNode** items, int n, TapeCache* cache) {
                     if (!kid || !(kid->a && kid->a[0])) continue;
                     if (strncmp(ast_slot(kid->a), "CCVec_", 6) != 0 &&
                         strncmp(ast_slot(kid->a), "Map_", 4) != 0 &&
-                        strncmp(ast_slot(kid->a), "ArrayMap_", 9) != 0)
+                        strncmp(ast_slot(kid->a), "ArrayMap_", 9) != 0 &&
+                        strncmp(ast_slot(kid->a), "Table_", 6) != 0)
                         continue;
                     while (kid->a[bn] && kid->a[bn] != '*' &&
                            kid->a[bn] != ' ' && bn + 1 < sizeof(base))
