@@ -32,7 +32,7 @@ int main(void) {
         /* Give child fibers a chance to complete before we join. */
         cc_sleep_ms(1);
 
-        cc_nursery_wait(n);
+        (void)cc_nursery_wait(n);
         cc_nursery_free(n);
 
         int done = cc_atomic_load(&completed);

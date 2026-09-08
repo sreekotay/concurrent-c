@@ -50,7 +50,7 @@ int main(void) {
         CCNursery n = cc_nursery_create() !>;
         int base = 5;
         n.spawn(() => [base] { (void)base; }) !>;
-        cc_nursery_wait(n);
+        (void)cc_nursery_wait(n);
         cc_nursery_free(n);
     }
     ar.destroy();

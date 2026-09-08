@@ -37,7 +37,7 @@ int main(void) {
         wp->step();
     }) !>;
 
-    cc_nursery_wait(nursery);
+    (void)cc_nursery_wait(nursery);
     cc_nursery_free(nursery);
 
     if (g_step_calls != 1) {

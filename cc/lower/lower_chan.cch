@@ -312,10 +312,51 @@ static void hc_send(HStep* st, CcExpr* e, CcUfcs uf) {
     }
 }
 
+/* The message, assembled rather than templated: a backtick would close an
+ * `@string` template, and an `@word` inside a literal reads as a sigil. */
+static CCString hc_closing_retired(CcLowerer* L) {
+    CCString m = cc_string_new();
+    cc_string_push_cstr(&m, "async: ", L->arena);
+    cc_string_push_char(&m, '`', L->arena);
+    cc_string_push_cstr(&m, "@", L->arena);
+    cc_string_push_cstr(&m, "closing(...)", L->arena);
+    cc_string_push_char(&m, '`', L->arena);
+    cc_string_push_cstr(&m, " is retired; use explicit ownership with ", L->arena);
+    cc_string_push_char(&m, '`', L->arena);
+    cc_string_push_cstr(&m, "T name", L->arena);
+    cc_string_push_cstr(&m, "@", L->arena);
+    cc_string_push_cstr(&m, "(args) ", L->arena);
+    cc_string_push_cstr(&m, "@", L->arena);
+    cc_string_push_cstr(&m, "destroy { chan.close(); }", L->arena);
+    cc_string_push_char(&m, '`', L->arena);
+    return m;
+}
+
+/* `@closing(tx) { }` is retired: what closes a channel is the owner that
+ * declared it, so the close is written where the ownership is. No step
+ * consumes the node, so left alone the form reaches C as written -- which
+ * is not a diagnosis of anything. Kept out of `hc_on_stmt` because that one
+ * already switches on `CcDeclK`, and two switches on different variant
+ * types in one function do not lower. */
+static void hc_closing(HStep* st, CcStmt* s) {
+    CcLowerer* L = st->L;
+    bool hit = false;
+    @switch (s->k) {
+        case .closing: hit = true; break;
+        default: break;
+    }
+    if (!hit) return;
+    {
+        CCString m = hc_closing_retired(L);
+        lw_error(L, s->span, m);
+    }
+}
+
 static void hc_on_stmt(Walker* w, CcStmt* s, bool enter) {
     HStep* st = (HStep*)w->env;
     CcDecl* d = NULL;
     if (!enter) return;
+    hc_closing(st, s);
     if (!stmt_is_decl(s, &d) || !d) return;
     @switch (d->k) {
         case .var(v): hc_decl(st, d, v); break;

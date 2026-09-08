@@ -28,7 +28,7 @@ int main(void) {
     for (int iter = 0; iter < ITERATIONS; iter++) {
         CCNursery n = cc_nursery_create() !>;
         cc_nursery_spawn(n, instant_task, NULL);
-        cc_nursery_wait(n);
+        (void)cc_nursery_wait(n);
         n.free();
         
         if ((iter + 1) % 10000 == 0) {
