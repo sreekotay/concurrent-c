@@ -594,22 +594,27 @@ static void cc_server_worker(ServeCtx* ctx) {
     while (!srv->stopped() || live.len() > 0) {
         int pr = tape.wait();
         int died = 0;
+        int deadline_reap = 0;
         time_t now;
         if (pr < 0) return;
         now = time(NULL);
 
-        /* Deadlines: full walk ≤1/s, and on idle wake. */
+        /* Deadlines: full walk ≤1/s, and on idle wake. On a busy wake,
+         * mark dead but reap after step so a ready survivor is not
+         * swap-moved before this batch's ready_ix is drained. */
         if (pr == 0 || now != deadline_sec) {
             size_t n = live.len();
             deadline_sec = now;
             @for (i in 0..n) {
                 CCIoSessP* cell = live.get(i);
                 CCIoSess* io = (cell && *cell) ? *cell : NULL;
-                if (io && io->deadline && now >= io->deadline)
+                if (io && io->deadline && now >= io->deadline) {
                     io->dead = 1;
+                    deadline_reap = 1;
+                }
             }
-            if (tape.reap(&live, slots, ctx) < 0) return;
             if (pr == 0) {
+                if (deadline_reap && tape.reap(&live, slots, ctx) < 0) return;
                 cc_yield();
                 continue;
             }
@@ -644,7 +649,8 @@ static void cc_server_worker(ServeCtx* ctx) {
                 cc_server_maybe_grow(ctx);
         }
 
-        if (died && tape.reap(&live, slots, ctx) < 0) return;
+        if ((died || deadline_reap) && tape.reap(&live, slots, ctx) < 0)
+            return;
     }
 }
 

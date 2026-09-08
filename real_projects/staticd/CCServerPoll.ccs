@@ -402,12 +402,8 @@ int cc_tape_wait(CCTape* w) {
         if (pr < 0) return (errno == EINTR) ? 0 : -1;
         for (i = 0; i < pr; i++) {
             uintptr_t ud = (uintptr_t)evs[i].udata;
-            if (evs[i].flags & EV_ERROR) {
-                if (ud == 0) continue;
-                if (cc_tape_mark_ready(w, (size_t)(ud - 1), 0, 0, 1) != 0)
-                    return -1;
-                continue;
-            }
+            /* NULL changelist: no EV_ERROR-from-kevent-input. Filter events
+             * may still carry EV_EOF; EV_ERROR on a filter is rare. */
             if (ud == 0) {
                 if (evs[i].filter == EVFILT_READ)
                     w->listen_ready = 1;
