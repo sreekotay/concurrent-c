@@ -423,7 +423,7 @@ static void pl_spawn_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
     {
         CcExpr* slot = cc_expr_member(lw_ident(L, e, sp), cstr_slice("__cc_par_h"), bind.len != 0, sp, L->arena);
         CcExpr* val = lw_text(L, @string(`NULL`, L->arena), sp);
-        if (bind.len) val = cc_expr_unary(CC_OP_ADDR, lw_ident(L, bind, sp), sp, L->arena);
+        if (bind.len) val = cc_expr_unary(CC_OP_ADDR, lw_paren(L, lw_ident(L, bind, sp), sp), sp, L->arena);
         lw_push(blk, lw_expr_stmt(L, lw_assign(L, slot, val, sp), sp));
     }
     if (bind.len) {
@@ -441,7 +441,7 @@ static void pl_spawn_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
                            lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_die"),
                                                     lw_text(L, @string(`"dest-live spawn failed"`, L->arena), sp), sp), sp),
                            NULL, sp));
-        aa->push(cc_expr_unary(CC_OP_ADDR, lw_ident(L, bind, sp), sp, L->arena));
+        aa->push(cc_expr_unary(CC_OP_ADDR, lw_paren(L, lw_ident(L, bind, sp), sp), sp, L->arena));
         aa->push(lw_ident(L, task, sp));
         aa->push(lw_ident(L, e, sp));
         lw_push(blk, lw_expr_stmt(L, admit, sp));
@@ -500,9 +500,48 @@ static void pl_join_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k, Cc
 /* ---- one site ----------------------------------------------------------- */
 
 /* What the arms form can carry that this step does not lower. */
+/* The leftmost name of a handle expression: `wk` of `wk.h`, `srv` of
+ * `srv->app`. An arm that pauses through the handle reaches the caller's
+ * own object, so that name is captured by address rather than copied. */
+static bool pl_base_name(CcExpr* e, CCSlice* out) {
+    CcExpr* inner = NULL;
+    if (!e) return false;
+    @switch (e->k) {
+        case .ident(x): *out = x; return true;
+        case .paren(u): inner = u.a; break;
+        case .unary(u): inner = u.a; break;
+        case .member(m): inner = m.a; break;
+        case .index(ix): inner = ix.a; break;
+        default: return false;
+    }
+    return pl_base_name(inner, out);
+}
+
+/* How a site names the handle it fills. `CCParallel h = @parallel …`
+ * declares one; `h = @parallel …` and `wk.h = @parallel …` name one that
+ * already exists. Both are the caller's own -- the arms pause and resume
+ * through its address -- so the step carries the C the handle reads as and
+ * reaches it the same way either way. Only the declaration differs, and
+ * that is what `declared` is for. */
+static CCSlice pl_handle_spell(CcLowerer* L, CcParallel p, bool* declared, CCSlice* base) {
+    *declared = false;
+    *base = cc_slice_empty();
+    if (p.bind.len) {
+        *declared = true;
+        *base = p.bind;
+        return p.bind;
+    }
+    if (p.target) {
+        CCString sp2 = lw_spell_expr(L, p.target);
+        (void)pl_base_name(p.target, base);
+        return lw_keep(L, &sp2);
+    }
+    return cc_slice_empty();
+}
+
 static bool pl_reject(CcLowerer* L, CcParallel p, CcSpan sp) {
     CCString m;
-    if (p.spawn && !p.bind.len) {
+    if (p.spawn && !p.bind.len && !p.target) {
         /* with a handle, `spawn` is what the handle already says: the arms
          * outlive the block and something joins them later. Without one
          * there is nothing to join them by. */
@@ -517,11 +556,6 @@ static bool pl_reject(CcLowerer* L, CcParallel p, CcSpan sp) {
     }
     if (p.wait || p.worker.len || p.cache.len()) {
         m = @string(`'${"@"}parallel' with 'wait', 'worker' or 'cache' is not lowered by the clean lowerer yet`, L->arena);
-        lw_error(L, sp, m);
-        return true;
-    }
-    if (p.target) {
-        m = @string(`'lvalue = ${"@"}parallel { }' (the handle assigned rather than declared) is not lowered by the clean lowerer yet`, L->arena);
         lw_error(L, sp, m);
         return true;
     }
@@ -552,6 +586,9 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     size_t i;
     uint32_t id;
     CcStmt* blk;
+    CCSlice hspell;
+    CCSlice hbase;
+    bool hdeclared;
     if (pl_reject(L, p, sp)) return;
     if (!n) {
         /* an empty block would run and join nothing, which is what the
@@ -566,16 +603,17 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     }
     id = st->next_id++;
     blk = lw_block(L, sp);
-    if (p.bind.len) {
+    hspell = pl_handle_spell(L, p, &hdeclared, &hbase);
+    if (hspell.len) {
         /* the handle is the caller's: the block fills it and leaves it live */
-        lw_push(blk, lw_expr_stmt(L, lw_assign(L, lw_ident(L, p.bind, sp),
+        lw_push(blk, lw_expr_stmt(L, lw_assign(L, lw_ident(L, hspell, sp),
                                                lw_call0(L, cstr_slice("cc_parallel_dest"), sp), sp), sp));
     }
     lw_push(blk, lw_decl_stmt(L, cc_type_pointer(cc_type_named(cstr_slice("CCParTls"), sp, L->arena), sp, L->arena),
                               cstr_slice("__cc_pt"), lw_call0(L, cstr_slice("cc__par_tls"), sp), sp));
     {
         CcExpr* who = lw_text(L, @string(`NULL`, L->arena), sp);
-        if (p.bind.len) who = cc_expr_unary(CC_OP_ADDR, lw_ident(L, p.bind, sp), sp, L->arena);
+        if (hspell.len) who = cc_expr_unary(CC_OP_ADDR, lw_paren(L, lw_ident(L, hspell, sp), sp), sp, L->arena);
         lw_push(blk, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc_parallel_deny_enter"),
                                               lw_ident(L, cstr_slice("__cc_pt"), sp), who, sp), sp));
     }
@@ -600,7 +638,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             else CcExpr_walk(arm->expr, v);
         }
         caps = sc.caps;
-        if (p.bind.len) {
+        if (hbase.len) {
             /* the handle the arms pause and resume through is the
              * caller's: a copy of it is a handle nothing else can see */
             PCapList* cv = &caps;
@@ -608,7 +646,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             size_t ci;
             for (ci = 0; ci < nc; ci++) {
                 PCap* c = *cv->get_ptr(ci);
-                if (slice_eq(c->name, p.bind)) c->by_addr = true;
+                if (slice_eq(c->name, hbase)) c->by_addr = true;
             }
         }
         if (arm->serial) {
@@ -640,13 +678,13 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         {
             /* the caller builds the environment, so its type is declared
              * with the forwards, above every function that fills one */
-            CCString et = pl_env_text(st, id, (uint32_t)i, &caps, out_type, p.bind.len != 0);
+            CCString et = pl_env_text(st, id, (uint32_t)i, &caps, out_type, hspell.len != 0);
             st->fwd.push_slice(et.as_slice(), L->arena);
         }
         pl_forward(st, id, (uint32_t)i);
         st->made.push(pl_thunk_decl(st, id, (uint32_t)i, &caps, arm->expr, pl_serial_body(L, arm->serial),
-                                    out_type, arm->target, p.bind.len != 0, sp));
-        pl_spawn_stmts(L, blk, id, (uint32_t)i, &caps, arm->target, p.bind, sp);
+                                    out_type, arm->target, hspell.len != 0, sp));
+        pl_spawn_stmts(L, blk, id, (uint32_t)i, &caps, arm->target, hspell, sp);
     }
     /* the first arm stays here */
     {
@@ -659,12 +697,13 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             lw_push(blk, lw_expr_stmt(L, e0, sp));
         }
     }
-    if (!p.bind.len) {
+    if (!hspell.len) {
         /* the block joins before it ends; a bound handle joins later */
         for (i = 1; i < n; i++) pl_join_stmts(L, blk, id, (uint32_t)i, sp);
         lw_push(blk, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"),
                                               lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
-    } else {
+    } else if (hdeclared) {
+        /* the block declares it, so it is hoisted above the block */
         PBind* b = cc_arena_alloc(L->arena, sizeof(PBind), _Alignof(PBind));
         memset(b, 0, sizeof(*b));
         b->at = s;
