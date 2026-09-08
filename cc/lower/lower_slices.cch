@@ -63,6 +63,89 @@ static CcExpr* sl_from_buffer(CcLowerer* L, CCSlice instance, CCSlice arr, CcSpa
     return lw_call2(L, lw_keep(L, &fn), lw_ident(L, arr, sp), lw_text(L, count, sp), sp);
 }
 
+/* An owner used where a slice is wanted.
+ *
+ * `char[:] v = s;` with `s` a `CCString`, `int[:] xs = v;` with `v` a
+ * `Vec::[int]`: the destination says what the value has to become, and the
+ * owner's own `as_slice` is what makes it one. The conversion is written
+ * as the UFCS call, so the method the type registered decides the callee
+ * and this step names none of them — `CCString` reaches
+ * `cc_string_as_slice`, which no rule about the canonical name would find.
+ *
+ * A char pointer has no owner to ask: its extent is the NUL, and
+ * `cc_slice_cstr` is what reads it. */
+static CcExpr* sl_as_slice(CcLowerer* L, CcExpr* v, bool arrow, CcSpan sp) {
+    CcExpr* e = cc__expr_blank(sp, L->arena);
+    CcUfcs uf;
+    memset(&uf, 0, sizeof(uf));
+    uf.recv = v;
+    uf.method = cstr_slice("as_slice");
+    uf.arrow = arrow;
+    uf.targs = vec_new::[CcTypeRef](L->arena);
+    uf.args = vec_new::[CcExprRef](L->arena);
+    e->k = { .ufcs = uf };
+    return e;
+}
+
+/* The conversion a slice destination needs, or NULL when the value is
+ * already one (or is nothing this step can convert). */
+static bool sl_is_char_pointer(CcType* t) {
+    CCSlice nm;
+    CcType* p = NULL;
+    if (!t || t->k.kind != CcTypeK_pointer) return false;
+    @switch (t->k) {
+        case .pointer(pt): p = pt.pointee; break;
+        default: break;
+    }
+    if (!p || !type_named_name(p, &nm)) return false;
+    return slice_eq(nm, cstr_slice("char"));
+}
+
+static bool sl_has_as_slice(CcIndex* ix, CCSlice canon) {
+    CcTypeInfo* info = canon.len ? ix->type_get(canon) : NULL;
+    CcMethodList ms;
+    size_t n;
+    size_t i;
+    if (!info) return false;
+    ms = ix->methods_of(info);
+    n = ms.len();
+    for (i = 0; i < n; i++) {
+        CcMethod* m = *ms.get_ptr(i);
+        if (slice_eq(m->method, cstr_slice("as_slice"))) return true;
+    }
+    return false;
+}
+
+static CcExpr* sl_coerce(SStep* st, CcType* want, CcExpr* v, CcSpan sp) {
+    CcLowerer* L = st->L;
+    Walker* w = st->w;
+    CcIndex* ix = L->ix;
+    CcType* have;
+    CCSlice hn;
+    if (!sl_type_is_slice(want) || !v) return NULL;
+    have = type_of_expr(w, v);
+    if (!have) return NULL;
+    if (sl_type_is_slice(have)) return NULL;
+    hn = ix->canon(have);
+    if (sl_canon_is_slice(hn)) return NULL;
+    if (sl_is_char_pointer(have)) return lw_call1(L, cstr_slice("cc_slice_cstr"), v, sp);
+    if (have->k.kind == CcTypeK_pointer) {
+        /* a pointer to the owner is the owner already addressed */
+        CcType* p = NULL;
+        CCSlice pn;
+        @switch (have->k) {
+            case .pointer(pt): p = pt.pointee; break;
+            default: break;
+        }
+        if (!p) return NULL;
+        pn = ix->canon(p);
+        if (!sl_has_as_slice(ix, pn)) return NULL;
+        return sl_as_slice(L, lw_paren(L, v, sp), true, sp);
+    }
+    if (!sl_has_as_slice(ix, hn)) return NULL;
+    return sl_as_slice(L, lw_paren(L, v, sp), false, sp);
+}
+
 /* A declaration whose type is a slice: the initializer decides the form.
  * Returns the statement to emit before the declaration, or NULL. */
 static CcStmt* sl_decl_init(SStep* st, CcDecl* d, CcVarDecl v) {
@@ -230,6 +313,7 @@ static void sl_return(SStep* st, CcStmt* s, CcReturn r) {
 }
 
 static void sl_stmts(SStep* st, CcStmtList* list);
+static void sl_dest_pass(CcLowerer* L);
 
 static void sl_stmt(SStep* st, CcStmt* s) {
     StmtView v;
@@ -335,6 +419,72 @@ static void CcLowerer_slices(CcLowerer* L) {
     v.expr = sl_expr_visit;
     v.env = &st;
     CcUnit_walk(L->unit, v);
+    sl_dest_pass(L);   /* last: the typing walk knows what a local holds */
+}
+
+/* A slice destination and the owner filling it.
+ *
+ * The conversion needs the value's type, so it runs on the typing walk
+ * rather than in the statement rewrite above, which has no scope: `s` in
+ * `char[:] v = s;` is a local, and only the walk knows what it holds. */
+static void sl_dest_assign(SStep* st, Walker* w, CcExpr* e, CcSpan sp) {
+    if (!e) return;
+    @switch (e->k) {
+        case .assign(as): {
+            CcExpr* conv;
+            if (as.op != CC_OP_ASSIGN || !as.a || !as.b) return;
+            conv = sl_coerce(st, type_of_expr(w, as.a), as.b, sp);
+            if (conv) {
+                CcBinary nb = as;
+                nb.b = conv;
+                e->k = { .assign = nb };
+            }
+            return;
+        }
+        default: return;
+    }
+}
+
+static void sl_dest_stmt(Walker* w, CcStmt* s, bool enter) {
+    SStep* st = (SStep*)w->env;
+    CcDecl* d = NULL;
+    if (!enter) return;
+    if (stmt_is_decl(s, &d) && d) {
+        CcVarDecl v;
+        bool is_var = false;
+        @switch (d->k) {
+            case .var(x): v = x; is_var = true; break;
+            default: break;
+        }
+        if (is_var && v.init && !v.init->is_list && v.init->expr) {
+            CcExpr* conv = sl_coerce(st, v.type, v.init->expr, s->span);
+            if (conv) v.init->expr = conv;
+        }
+        return;
+    }
+    {
+        CcExpr* e = NULL;
+        @switch (s->k) {
+            case .expr(es): e = es.e; break;
+            default: break;
+        }
+        sl_dest_assign(st, w, e, s->span);
+    }
+}
+
+static void sl_dest_pass(CcLowerer* L) {
+    Walker w;
+    SStep st;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    st.w = &w;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_stmt = sl_dest_stmt;
+    w.env = &st;
+    tw_unit(&w);
 }
 
 /* Argument coercion runs after UFCS: a `x.m("lit")` call site is a plain

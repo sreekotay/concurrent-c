@@ -967,6 +967,23 @@ into C. Passing such a binding where the whole `T*` is expected is an
 error at the call — the callee would get everything the view withheld,
 and no cast makes that safe.
 
+### A slice destination and the owner filling it
+
+`char[:] v = s;` with `s` a `CCString`, `int[:] xs = v;` with `v` a
+`Vec::[int]`: the destination says what the value has to become, and the
+owner's own `as_slice` is what makes it one. The conversion is written as
+that UFCS call, so the method the type registered decides the callee and
+this step names none of them — `CCString` reaches `cc_string_as_slice`,
+which no rule about the canonical name would find. A pointer to the owner
+is the owner already addressed, so the call is written with `->`.
+
+A char pointer has no owner to ask: its extent is the NUL, and
+`cc_slice_cstr` is what reads it.
+
+The conversion needs the value's type, so it runs on the typing walk rather
+than in the statement rewrite, which has no scope — `s` is a local, and only
+the walk knows what it holds.
+
 ## Generic instances
 
 `family::[T](args)` names the family itself, not one of its members: what
