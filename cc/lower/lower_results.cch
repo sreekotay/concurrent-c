@@ -550,6 +550,24 @@ static CcExpr* rl_r_value2(CcLowerer* L, CcSpan sp, bool ptr) { return ptr ? rl_
 static CcExpr* rl_r_error2(CcLowerer* L, CcSpan sp, bool ptr, const CcExpr* inner) { return ptr ? rl_null_error(L, inner, sp) : rl_r_error(L, sp); }
 static CcType* rl_typeof_error2(CcLowerer* L, CcSpan sp, bool ptr) { return ptr ? lw_named_type(L, rl_lit("CCError"), sp) : rl_typeof_error(L, sp); }
 
+static bool rl_is_plain_name(CCSlice s);
+
+/* The type an unwrap's error binder is declared with.
+ *
+ * The error the callee declared, by name, whenever this step could type
+ * the Result: a named type is one a later step can read off the
+ * declaration, which is what lets an argument coercion see that the binder
+ * has an `as:` path to what a callee wants. `__typeof__(__r.u.error)` is
+ * the same type to C and opaque to everything before it, so it is the
+ * fallback for a Result this step could not type. */
+static CcType* rl_binder_type(CcLowerer* L, const CcTypeInfo* rt, CcSpan sp, bool ptr) {
+    CCSlice en;
+    if (ptr || !rt || !rt->result_err) return rl_typeof_error2(L, sp, ptr);
+    en = rl_ix_canon(L, rt->result_err);
+    if (!en.len || !rl_is_plain_name(en)) return rl_typeof_error2(L, sp, ptr);
+    return lw_named_type(L, en, sp);
+}
+
 /* `<err>` read through the faces of an `as:` path. */
 static CcExpr* rl_project(CcLowerer* L, CcExpr* err, CcNameList* path, CcSpan sp) {
     size_t n = path->len();
@@ -792,7 +810,7 @@ static CcStmt* rl_scaffold(RFn* fn, CcExpr* uw, CcExpr* target, CcSpan sp) {
             lw_error(L, sp, m);
             return NULL;
         }
-        if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_typeof_error2(L, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
+        if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_binder_type(L, rt, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
         if (body) {
             CcNameList* bs = &fn->binders;
             size_t nb = bs->len();
@@ -810,7 +828,7 @@ static CcStmt* rl_scaffold(RFn* fn, CcExpr* uw, CcExpr* target, CcSpan sp) {
     if (!fallback) return NULL;
     if (!target || value_is_void) {
         CcStmt* on_err = lw_block(L, sp);
-        if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_typeof_error2(L, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
+        if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_binder_type(L, rt, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
         lw_push(on_err, lw_expr_stmt(L, lw_paren(L, fallback, sp), sp));
         lw_push(blk, lw_if(L, lw_not(L, rl_r_ok2(L, sp, ptr), sp), on_err, NULL, sp));
         return blk;
@@ -819,7 +837,7 @@ static CcStmt* rl_scaffold(RFn* fn, CcExpr* uw, CcExpr* target, CcSpan sp) {
         CcStmt* on_ok = lw_block(L, sp);
         CcStmt* on_err = lw_block(L, sp);
         lw_push(on_ok, lw_expr_stmt(L, lw_assign(L, target, rl_r_value2(L, sp, ptr), sp), sp));
-        lw_push(on_err, lw_decl_stmt(L, rl_typeof_error2(L, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
+        lw_push(on_err, lw_decl_stmt(L, rl_binder_type(L, rt, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
         lw_push(on_err, lw_expr_stmt(L, lw_assign(L, target, lw_paren(L, fallback, sp), sp), sp));
         lw_push(blk, lw_if(L, rl_r_ok2(L, sp, ptr), on_ok, on_err, sp));
         return blk;
@@ -1179,7 +1197,7 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
             lw_error(L, sp, m);
             return false;
         }
-        if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_typeof_error2(L, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
+        if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_binder_type(L, rt, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
         {
             CcNameList* bs = &fn->binders;
             size_t nb = bs->len();
@@ -1194,7 +1212,7 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
         if (!fallback) return false;
         if (value_is_void) {
             CcStmt* on_err = lw_block(L, sp);
-            if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_typeof_error2(L, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
+            if (binder.len) lw_push(on_err, lw_decl_stmt(L, rl_binder_type(L, rt, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
             lw_push(on_err, lw_expr_stmt(L, lw_paren(L, fallback, sp), sp));
             lw_push(blk, lw_if(L, lw_not(L, rl_r_ok2(L, sp, ptr), sp), on_err, NULL, sp));
         } else if (binder.len) {
@@ -1203,7 +1221,7 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
             CcStmt* on_err = lw_block(L, sp);
             lw_push(blk, lw_decl_stmt(L, rl_typeof(L, rl_r_value2(L, sp, ptr), sp), rl_lit("__v"), NULL, sp));
             lw_push(on_ok, lw_expr_stmt(L, lw_assign(L, lw_ident(L, rl_lit("__v"), sp), rl_r_value2(L, sp, ptr), sp), sp));
-            lw_push(on_err, lw_decl_stmt(L, rl_typeof_error2(L, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
+            lw_push(on_err, lw_decl_stmt(L, rl_binder_type(L, rt, sp, ptr), binder, rl_r_error2(L, sp, ptr, inner), sp));
             lw_push(on_err, lw_expr_stmt(L, lw_assign(L, lw_ident(L, rl_lit("__v"), sp), lw_paren(L, fallback, sp), sp), sp));
             lw_push(blk, lw_if(L, rl_r_ok2(L, sp, ptr), on_ok, on_err, sp));
             lw_push(blk, lw_expr_stmt(L, lw_ident(L, rl_lit("__v"), sp), sp));

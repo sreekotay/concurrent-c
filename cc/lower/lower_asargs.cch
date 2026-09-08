@@ -1,0 +1,137 @@
+#pragma(@per_tu)
+/* Clean lowerer, step: `as:` coercion at a call.
+ *
+ * `@typeview on T { as: f; }` says a `T` is an `f` wherever one is wanted:
+ * that is what makes `w.write(msg)` resolve to `cc_file_write(&w.file, …)`.
+ * The same face applies to an ordinary argument. An argument whose type has
+ * an `as:` path to what the parameter wants is projected through the faces
+ * on the way in — `cc_error_str(e)` with `e` a `CCIoError` is
+ * `cc_error_str(e.base)` — so a callee that names the face's type reads the
+ * face, and nothing has to spell the projection at every site.
+ *
+ * Only an unambiguous path is taken. Two faces reaching the same type is
+ * the type's own ambiguity, and picking one of them would silently choose
+ * which of the two a caller meant.
+ *
+ * The step runs after Results so an error binder is a declaration with a
+ * named type by the time the arguments in its body are read. Lifetime: the
+ * lowerer arena. */
+#ifndef CC_LOWER_ASARGS_CCH
+#define CC_LOWER_ASARGS_CCH
+#include "lower.cch"
+#include "typing.cch"
+
+typedef struct AsStep {
+    CcLowerer* L;
+    Walker* w;
+} AsStep;
+
+/* `x` -> `x.f1.f2…` for the faces of a path. */
+static CcExpr* as_project(CcLowerer* L, CcExpr* a, CcNameList* path, CcSpan sp) {
+    size_t n = path->len();
+    size_t i;
+    CcExpr* e = a;
+    for (i = 0; i < n; i++) {
+        CCSlice face = *path->get_ptr(i);
+        e = lw_member_s(L, e, face, sp);
+    }
+    return e;
+}
+
+/* `&x`: the operand, when the argument is an address-of. */
+static bool as_addr_of(CcExpr* a, CcExpr** out) {
+    CcExpr* e = strip_parens_expr(a);
+    if (!e) return false;
+    @switch (e->k) {
+        case .unary(un): {
+            if (un.op != CC_OP_ADDR || !un.a) return false;
+            *out = un.a;
+            return true;
+        }
+        default: return false;
+    }
+}
+
+static void as_call(Walker* w, CcExpr* e, CcCall cl) {
+    AsStep* st = (AsStep*)w->env;
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CcExprList* av = &cl.args;
+    CcParamList* ps = NULL;
+    CCSlice fn;
+    CcSym* sym;
+    size_t n = av->len();
+    size_t np;
+    size_t i;
+    (void)e;
+    if (!expr_ident(strip_parens_expr(cl.callee), &fn)) return;
+    sym = sym_any(ix, fn);
+    while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+    if (!sym || !sym->type) return;
+    @switch (sym->type->k) {
+        case .func: ps = &sym->type->k.func.params; break;
+        default: break;
+    }
+    if (!ps) return;
+    np = ps->len();
+    for (i = 0; i < n && i < np; i++) {
+        CcExpr* a = *av->get_ptr(i);
+        CcType* at = type_of_expr(w, a);
+        CcParam* pa = ps->get_ptr(i);
+        CCSlice from;
+        CCSlice to;
+        CcNameList path;
+        CcNameList seen;
+        int n_found = 0;
+        bool cycle = false;
+        CcExpr* subject = a;
+        bool addr = false;
+        if (!at || !pa->type) continue;
+        /* `&x` for a `T*` parameter: the face is projected inside the
+         * address-of, so the callee points at the face and not at a
+         * pointer to the wrapper that happens to start with one */
+        if (pa->type->k.kind == CcTypeK_pointer) {
+            CcType* want = NULL;
+            @switch (pa->type->k) {
+                case .pointer(pt): want = pt.pointee; break;
+                default: break;
+            }
+            if (!want || !as_addr_of(a, &subject)) continue;
+            at = type_of_expr(w, subject);
+            if (!at || at->k.kind == CcTypeK_pointer) continue;
+            addr = true;
+            to = ix->canon(want);
+        } else {
+            if (at->k.kind == CcTypeK_pointer) continue;
+            to = ix->canon(pa->type);
+        }
+        from = ix->canon(at);
+        if (!from.len || !to.len || slice_eq(from, to)) continue;
+        path = vec_new::[CCSlice](L->arena);
+        seen = vec_new::[CCSlice](L->arena);
+        if (!rl_as_search(L, from, to, &path, &seen, &n_found, &cycle)) continue;
+        if (n_found != 1 || cycle) continue;   /* ambiguous: the type's to resolve, not this step's */
+        {
+            CcExpr* proj = as_project(L, lw_paren(L, subject, a->span), &path, a->span);
+            if (addr) proj = cc_expr_unary(CC_OP_ADDR, proj, a->span, L->arena);
+            *av->get_ptr(i) = proj;
+        }
+    }
+}
+
+static void CcLowerer_asargs(CcLowerer* L) {
+    Walker w;
+    AsStep st;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    st.w = &w;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_call = as_call;
+    w.env = &st;
+    tw_unit(&w);
+}
+
+#endif

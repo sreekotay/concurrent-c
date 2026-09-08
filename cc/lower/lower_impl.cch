@@ -268,6 +268,7 @@ static void lw_drop_cc_only(CcLowerer* L);
 #include "lower_variants.cch"
 #include "lower_ufcs.cch"
 #include "lower_results.cch"
+#include "lower_asargs.cch"
 #include "lower_strswitch.cch"
 #include "lower_cleanup.cch"
 
@@ -480,6 +481,7 @@ static void CcLowerer_lower_unit(CcLowerer* L) {
     CcLowerer_slice_args(L);/* after UFCS: a method call is a plain call by now */
     CcLowerer_strings(L);   /* after them: a slot spells the C it will be */
     CcLowerer_results(L);
+    CcLowerer_asargs(L);   /* after Results: an error binder is a named declaration by now */
     CcLowerer_strswitch(L);/* last but cleanup: the subject it spells is the C it will be */
     CcLowerer_cleanup(L);
     lw_drop_cc_only(L);   /* after the steps: the index reads faces off the unit's declarations */

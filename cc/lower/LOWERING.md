@@ -857,6 +857,28 @@ that still compiles.
 An `@async` function returning a Result is not lowered yet — the task
 carries the value boxed, and the await unboxes it.
 
+## `as:` coercion at a call
+
+`@typeview on T { as: f; }` says a `T` is an `f` wherever one is wanted —
+which is what makes `w.write(msg)` resolve to `cc_file_write(&w.file, …)`.
+The same face applies to an ordinary argument: an argument whose type has
+an `as:` path to what the parameter wants is projected through the faces
+on the way in, so `cc_error_str(e)` with `e` a `CCIoError` is
+`cc_error_str(e.base)`. `&x` for a `T*` parameter projects inside the
+address-of, so the callee points at the face rather than at a pointer to
+the wrapper that happens to start with one.
+
+Only an unambiguous path is taken. Two faces reaching the same type is the
+type's own ambiguity, and picking one would silently choose which of them
+the caller meant.
+
+The step runs after Results, so an unwrap's error binder is a declaration
+with a named type by the time the arguments in its body are read. That
+name is why Results declares a binder as the error the callee declared
+whenever it could type the Result, rather than as
+`__typeof__(__r.u.error)`: the two are the same type to C, but only the
+first is one an earlier-running step can read off the declaration.
+
 ## Views
 
 `@typeview(V) T*` on a parameter is a restricted binding: the index
