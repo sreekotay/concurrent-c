@@ -645,6 +645,14 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
             call.args.push(a);
         }
         e->k = { .call = call };
+        {
+            CcNameList* sv = &L->sinks;
+            size_t sn = sv->len();
+            size_t si;
+            bool seen = false;
+            for (si = 0; si < sn; si++) if (slice_eq(*sv->get_ptr(si), m->callee)) { seen = true; break; }
+            if (!seen) sv->push(m->callee);
+        }
         return;
     }
     if (!uf_targs_lead(w, L, uf, m, sp, &call.args)) return;
@@ -1111,6 +1119,114 @@ static bool uf_print_sugar(CcExpr* e, void* env) {
     return true;
 }
 
+/* `double d = py.eval(src) !>;`
+ *
+ * A dynamic family's plain callee answers with the family's own value --
+ * a `CCPyObj`, a `CCQjsVal` -- and the site wants what it declared. Such a
+ * family declares one callee per destination type, so the destination
+ * picks it: `cc_py_callm_double` where the cell is a `double`. Only a
+ * variant the headers actually declare is taken, so a family that has none
+ * keeps the callee it had and the host compiler still says the value does
+ * not fit. */
+static CCSlice uf_dest_mangle(CcLowerer* L, CCSlice canon) {
+    CCString m = cc_string_new();
+    size_t i;
+    if (!canon.len) return cc_slice_empty();
+    for (i = 0; i < canon.len; i++) {
+        char c = canon.ptr[i];
+        if (c == '*') return cc_slice_empty();   /* a pointer destination names no variant */
+        cc_string_push_char(&m, c == ' ' ? '_' : c, L->arena);
+    }
+    return lw_keep(L, &m);
+}
+
+/* Through the unwrap tails to the call a destination is filled from. */
+static CcExpr* uf_call_under(CcExpr* e) {
+    CcExpr* inner = NULL;
+    if (!e) return NULL;
+    @switch (e->k) {
+        case .call: return e;
+        case .paren(u): inner = u.a; break;
+        case .unwrap(u): inner = u.a; break;
+        case .unwrap_body(u): inner = u.a; break;
+        case .unwrap_or(u): inner = u.a; break;
+        case .unwrap_destroy(u): inner = u.a; break;
+        default: return NULL;
+    }
+    return uf_call_under(inner);
+}
+
+static void uf_dest_call(CcLowerer* L, CcType* want, CcExpr* init) {
+    CcIndex* ix = L->ix;
+    CcExpr* call = uf_call_under(init);
+    CCSlice callee = cc_slice_empty();
+    CCSlice mang;
+    CcNameList* sv = &L->sinks;
+    size_t sn = sv->len();
+    size_t si;
+    bool is_sink = false;
+    if (!want || !call) return;
+    {
+        CcCall c;
+        bool ok = false;
+        @switch (call->k) {
+            case .call(x): c = x; ok = true; break;
+            default: break;
+        }
+        if (!ok || !c.callee) return;
+        if (!expr_ident(strip_parens_expr(c.callee), &callee)) return;
+    }
+    if (!callee.len) return;
+    for (si = 0; si < sn; si++) if (slice_eq(*sv->get_ptr(si), callee)) { is_sink = true; break; }
+    if (!is_sink) return;
+    mang = uf_dest_mangle(L, ix->canon(want));
+    if (!mang.len) return;
+    {
+        CCString cand = @string(`${callee}_${mang}`, L->arena);
+        CCSlice name = lw_keep(L, &cand);
+        CcSym* sym = sym_any(ix, name);
+        while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+        if (!sym) return;
+        {
+            CcCall c2;
+            @switch (call->k) {
+                case .call(x): c2 = x; break;
+                default: return;
+            }
+            c2.callee = lw_ident(L, name, call->span);
+            call->k = { .call = c2 };
+        }
+    }
+}
+
+static void uf_dest_stmt(Walker* w, CcStmt* s, bool enter) {
+    CcLowerer* L = (CcLowerer*)w->env;
+    CcDecl* d = NULL;
+    if (!enter) return;
+    if (stmt_is_decl(s, &d) && d) {
+        CcVarDecl v;
+        bool is_var = false;
+        @switch (d->k) {
+            case .var(x): v = x; is_var = true; break;
+            default: break;
+        }
+        if (is_var && v.init && !v.init->is_list && v.init->expr)
+            uf_dest_call(L, v.type, v.init->expr);
+    }
+}
+
+static void uf_dest_pass(CcLowerer* L) {
+    Walker w;
+    if (!L->sinks.len()) return;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_stmt = uf_dest_stmt;
+    w.env = L;
+    tw_unit(&w);
+}
+
 static void CcLowerer_ufcs(CcLowerer* L) {
     Walker w;
     UStep st;
@@ -1134,6 +1250,7 @@ static void CcLowerer_ufcs(CcLowerer* L) {
     v.expr = uf_print_sugar;
     v.env = L;
     CcUnit_walk(L->unit, v);
+    uf_dest_pass(L);   /* last: the calls are built, so a destination can pick one */
     uf_check_views(L);
 }
 
