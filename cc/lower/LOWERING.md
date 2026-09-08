@@ -857,7 +857,27 @@ that still compiles.
 An `@async` function returning a Result is not lowered yet — the task
 carries the value boxed, and the await unboxes it.
 
-### Channels that carry tasks
+### A closure and the handler in scope
+
+A closure body becomes a function of its own, and a `goto` cannot leave one
+— but the `@errhandler` the author had in scope where the closure is
+written is still the handler an unwrap inside the body means. The
+declaration travels into the generated entry, where Results registers it as
+a local handler and inlines it at each unwrap. Without it a `!>` inside a
+closure reads as an unwrap with nowhere to send its error, which is a
+diagnostic about a handler the author did write.
+
+Only a handler that diverges without returning a value travels.
+`cc_error_exit(e)` means the same thing wherever it runs; a handler whose
+body is `return 1;` names a value belonging to the function it was written
+in, and the entry returns `void*`.
+
+A handler covers the rest of the list it sits in, not its own extent, so
+the walk records it at the depth of the enclosing block — recording its own
+depth drops it the moment the walk leaves the handler statement, which is
+before any of the code it covers.
+
+## Channels that carry tasks
 
 `tx.send_task(() => f(x))` does not send the closure. It spawns the closure
 as a task and sends the task handle, so what the receiver reads back is

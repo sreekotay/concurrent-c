@@ -32,6 +32,15 @@ typedef struct KCap {
 typedef KCap* KCapRef;
 typedef Vec::[KCapRef] KCapList;
 
+/* An `@errhandler` in scope where a closure is written, and how deep the
+ * walk was when it was declared. */
+typedef struct KHandler {
+    CcStmt* stmt;
+    size_t depth;
+} KHandler;
+typedef KHandler* KHandlerRef;
+typedef Vec::[KHandlerRef] KHandlerList;
+
 typedef struct KStep {
     CcLowerer* L;
     Walker* w;
@@ -39,6 +48,8 @@ typedef struct KStep {
     CcDeclList made;            /* the generated declarations, in order */
     CCString fwd;               /* their forward declarations */
     bool any;
+    CcStmtList entered;         /* the statement path from the function body */
+    KHandlerList ehs;           /* the `@errhandler`s in scope along it */
     CcExprList in_task;         /* closures a `send_task` is sending: the value is the task's result */
     Vec::[CCSlice] task_recv;   /* the endpoint each of them is sent on, in the same order */
     CcNameList task_spawn;      /* and the spawn that starts it: hybrid picks the other scheduler */
@@ -330,6 +341,75 @@ static bool kl_rewrite_ref(CcLowerer* L, CcStmt* body, CCSlice name, CCSlice thr
 
 /* The entry function: the environment, the unpacked captures, the
  * parameters, then the body as written. */
+/* The `@errhandler` in scope where a closure is written.
+ *
+ * A closure body becomes a function of its own, and a `goto` cannot leave
+ * one — but the handler the author had in scope is still the handler an
+ * unwrap inside the body means. The declaration travels into the generated
+ * entry, where the Results step registers it as a local handler and inlines
+ * it at each unwrap. Without it a `!>` inside a closure reads as an unwrap
+ * with nowhere to send its error, which is a diagnostic about a handler the
+ * author did write. */
+static void kl_scope_enter(KStep* st, CcStmt* s) {
+    CcStmtList* ev = &st->entered;
+    KHandlerList* hv = &st->ehs;
+    ev->push(s);
+    @switch (s->k) {
+        case .errhandler: {
+            KHandler* h = cc_arena_alloc(st->L->arena, sizeof(KHandler), _Alignof(KHandler));
+            h->stmt = s;
+            /* the handler covers the rest of the list it sits in, not its
+             * own extent: its depth is the enclosing block's */
+            h->depth = ev->len() - 1;
+            hv->push(h);
+            break;
+        }
+        default: break;
+    }
+}
+
+static void kl_scope_leave(KStep* st) {
+    CcStmtList* ev = &st->entered;
+    KHandlerList* hv = &st->ehs;
+    CcStmt* dropped = NULL;
+    if (ev->len()) ev->pop(&dropped);
+    while (hv->len()) {
+        KHandler* h = *hv->get_ptr(hv->len() - 1);
+        KHandler* out = NULL;
+        if (h->depth <= ev->len()) break;
+        hv->pop(&out);
+    }
+}
+
+/* A handler that returns a value cannot travel into a closure: the entry
+ * returns `void*`, and the value the handler names belongs to the function
+ * it was written in. One that diverges instead — `cc_error_exit(e)`, a
+ * bare `return` — means the same thing wherever it runs. */
+static bool kl_returns_value(CcStmt* s, void* env) {
+    bool* hit = (bool*)env;
+    @switch (s->k) {
+        case .return_(r): if (r.value) *hit = true; break;
+        default: break;
+    }
+    return true;
+}
+
+static CcStmt* kl_handler_in_scope(KStep* st) {
+    KHandlerList* hv = &st->ehs;
+    if (!hv->len()) return NULL;
+    {
+        KHandler* h = *hv->get_ptr(hv->len() - 1);
+        CcVisitor v;
+        bool hit = false;
+        memset(&v, 0, sizeof(v));
+        v.stmt = kl_returns_value;
+        v.env = &hit;
+        CcStmt_walk(h->stmt, v);
+        if (hit) return NULL;
+        return h->stmt;
+    }
+}
+
 /* The closures a `send_task` is sending.
  *
  * `tx.send_task(() => f(x))` hands the runtime a task whose VALUE the
@@ -428,6 +508,7 @@ static void kl_task_result(CcLowerer* L, CcStmt* body, CcExpr* value, CcSpan sp)
 
 static CcDecl* kl_entry_decl(KStep* st, uint32_t id, KCapList* caps, CcClosure cl, bool task_result, CcSpan sp) {
     CcLowerer* L = st->L;
+    CcStmt* eh = kl_handler_in_scope(st);
     CCSlice env = kl_name(L, id, "_env");
     CcStmt* body = lw_block(L, sp);
     CcParamList params = vec_new::[CcParam](L->arena);
@@ -439,6 +520,7 @@ static CcDecl* kl_entry_decl(KStep* st, uint32_t id, KCapList* caps, CcClosure c
     size_t i;
     Vec::[CcParam]* clp = &cl.params;
     size_t np = clp->len();
+    if (eh) lw_push(body, eh);   /* the handler the author had in scope here */
     {
         /* `<env>* __env = (<env>*)__p;` */
         CcType* pt = cc_type_pointer(cc_type_named(env, sp, L->arena), sp, L->arena);
@@ -676,6 +758,12 @@ static void kl_lower(KStep* st, CcExpr* e, CcClosure cl) {
     st->any = true;
 }
 
+static void kl_on_stmt(Walker* w, CcStmt* s, bool enter) {
+    KStep* st = (KStep*)w->env;
+    if (enter) kl_scope_enter(st, s);
+    else kl_scope_leave(st);
+}
+
 static void kl_on_closure(Walker* w, CcExpr* e, CcClosure cl) {
     KStep* st = (KStep*)w->env;
     kl_lower(st, e, cl);
@@ -795,6 +883,8 @@ static void CcLowerer_closures(CcLowerer* L) {
     st.L = L;
     st.w = &w;
     st.made = vec_new::[CcDeclRef](L->arena);
+    st.entered = vec_new::[CcStmtRef](L->arena);
+    st.ehs = vec_new::[KHandlerRef](L->arena);
     st.in_task = vec_new::[CcExprRef](L->arena);
     st.task_recv = vec_new::[CCSlice](L->arena);
     st.task_spawn = vec_new::[CCSlice](L->arena);
@@ -805,6 +895,7 @@ static void CcLowerer_closures(CcLowerer* L) {
     w.unit = L->unit;
     w.on_closure = kl_on_closure;
     w.on_call = kl_on_call;
+    w.on_stmt = kl_on_stmt;
     w.env = &st;
     {
         CcVisitor tv;
