@@ -145,6 +145,29 @@ static bool gn_expr_visit(CcExpr* e, void* env) {
         CCSlice snake;
         if (!fam.len || cc__factory_is_extend(d)) continue;
         snake = gn_snake(L, fam);
+        /* `family::[T](args)`: the family itself, not one of its members.
+         * What the factory writes for that instance IS the function, so
+         * the instance name is the callee — `js_module::[Counter](…)` is
+         * `js_module_Counter(…)`. */
+        if (slice_eq(name, snake)) {
+            CcType tmp;
+            CcGenericType g;
+            CCSlice mangled;
+            CcTypeInfo* info;
+            CcCall call;
+            memset(&tmp, 0, sizeof(tmp));
+            tmp.span = e->span;
+            g.family = fam;
+            g.args = gf.targs;
+            tmp.k = { .generic = g };
+            mangled = ix->canon(&tmp);
+            info = ix->type_get(mangled);
+            gn_note(st, info, 0);
+            call.callee = lw_ident(L, mangled, e->span);
+            call.args = gf.args;
+            e->k = { .call = call };
+            return true;
+        }
         if (name.len > snake.len + 1 && memcmp(name.ptr, snake.ptr, snake.len) == 0 && name.ptr[snake.len] == '_') {
             CCSlice member = cc_slice_from_buffer((char*)name.ptr + snake.len + 1, name.len - snake.len - 1);
             CcType tmp;

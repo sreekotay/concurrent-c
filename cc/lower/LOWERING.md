@@ -951,6 +951,20 @@ and no cast makes that safe.
 
 ## Generic instances
 
+`family::[T](args)` names the family itself, not one of its members: what
+the factory writes for that instance IS the function, so the instance name
+is the callee — `js_module::[Counter](env, exports, seed)` is
+`js_module_Counter(env, exports, seed)`. `family_member::[T](args)` is the
+other form, and rewrites to `<instance>_<member>`. Reading only the second
+made the first read as a use of an unregistered family, which named the
+wrong thing: the family was registered, the shape was not recognized.
+
+A family whose fragment computes a slot needs its factory body RUN, and
+this lowerer does not run factory bodies yet — the diagnostic says so and
+names the slot. Everything the `js_module` / `py_expose` families produce
+is behind that.
+
+
 Every instance a unit mentions is expanded from its family's factory
 template and spliced in after the leading includes, once, under
 `#ifndef CC_HEADER_<FAMILY>_<Instance>`. The expansion is a unit in its
