@@ -288,6 +288,157 @@ static CCSlice gn_computed_slot(CcLowerer* L, const CcToken* t, CcSlotBindList* 
     return cc_slice_empty();
 }
 
+/* ---- running a compiled factory ---------------------------------------- */
+
+/* The file the engine reads its prelude and its diagnostics from.
+ *
+ * The source this lowerer was handed is a staged copy under the build
+ * directory, and the engine compiles a translation unit out of the file it
+ * is given — so it has to be the file the user wrote, which the staged
+ * copy's `#line` names. Handing it the staged path compiles a TU whose
+ * includes were already rewritten once. */
+static const char* gn_unit_path(CcLowerer* L, CcSpan sp) {
+    CcLoc at = L->unit->loc(sp);
+    CCSlice p = at.path.len ? at.path : L->unit->tape.path;
+    CCString s = @string(`${p}`, L->arena);
+    return s.cstr(L->arena);
+}
+
+static const char* gn_family_cstr(CcLowerer* L, CcTypeInfo* info) {
+    CCSlice f = info->family;
+    CCString s = @string(`${f}`, L->arena);
+    return s.cstr(L->arena);
+}
+
+/* The source text of one factory declaration, as written.
+ *
+ * The tokens of a span point into the unit's own source, so the first
+ * token's start and the last token's end bracket the text — which is what
+ * the sugar rewrite has to be handed, since it reads `CC_GENERIC_FACTORY`
+ * and not an AST. */
+static CCSlice gn_decl_text(CcUnit* fu, CcDecl* d) {
+    const CcToken* a = cc__tok(fu, d->span.first);
+    const CcToken* b = cc__tok(fu, d->span.last);
+    if (!a || !b || !a->text.ptr || !b->text.ptr) return cc_slice_empty();
+    if (b->text.ptr < a->text.ptr) return cc_slice_empty();
+    return cc_slice_from_buffer((char*)a->text.ptr,
+                                (size_t)(b->text.ptr - a->text.ptr) + b->text.len);
+}
+
+/* Bind every family that has a compiled factory to its handler, once.
+ *
+ * The `CC_GENERIC_FACTORY` sugar lowers to a registration block and a
+ * `@comptime` function, so the three steps are: rewrite the sugar to get
+ * both, scan the result so the handler's definition is in the function
+ * registry, then RUN the registration blocks — which is what binds the
+ * family, extensions included, whose handler symbol carries a sequence
+ * number only the rewrite knows.
+ *
+ * The scan takes this unit's source too: it clears what was registered
+ * before, and the unit's own `@comptime` functions have to survive it. */
+static bool gn_factories_ready(CcLowerer* L, CcSpan sp) {
+    CcIndex* ix = L->ix;
+    CcDeclList* factv = &ix->factories;
+    CcUnitList* funitv = &ix->factory_units;
+    size_t nf = factv->len();
+    size_t f;
+    CCString text = cc_string_new();
+    CCSlice usrc = L->unit->tape.src;
+    char* expanded;
+    if (L->factories_ready) return L->factories_ok;
+    L->factories_ready = true;
+    L->factories_ok = false;
+    if (!nf) return false;
+    for (f = 0; f < nf; f++) {
+        CcDecl* d = *factv->get_ptr(f);
+        CcUnit* fu = *funitv->get_ptr(f);
+        CCSlice t = gn_decl_text(fu, d);
+        if (!t.len) continue;
+        cc_string_push_slice(&text, t, L->arena);
+        cc_string_push_cstr(&text, "\n", L->arena);
+    }
+    if (!cc_string_len(&text)) return false;
+    {
+        CCSlice raw = text.as_slice();
+        size_t elen = raw.len;
+        expanded = malloc(elen + 1);
+        if (!expanded) return false;
+        memcpy(expanded, raw.ptr, elen);
+        expanded[elen] = '\0';
+        if (cc_comptime_prepare_source_ex(&expanded, &elen, gn_unit_path(L, sp), CC_FAC_PREPARE) != 0) {
+            free(expanded);
+            return false;
+        }
+    }
+    {
+        CCString all = cc_string_new();
+        cc_string_push_slice(&all, usrc, L->arena);
+        cc_string_push_cstr(&all, "\n", L->arena);
+        cc_string_push_cstr(&all, expanded, L->arena);
+        {
+            CCSlice a = all.as_slice();
+            if (cc_comptime_fn_registry_scan(a.ptr, a.len) < 0) return false;
+            cc_emit_plan_clear_generic_factory_registrations();
+            /* the registrations only: the unit's own `@comptime` blocks are
+             * the comptime step's, and collecting their emits here would
+             * queue a second copy of every fragment it already spliced */
+            cc_emit_plan_collect_comptime_emits(expanded, strlen(expanded));
+            cc_emit_plan_clear_comptime_fragments();
+        }
+    }
+    free(expanded);
+    L->factories_ok = true;
+    return true;
+}
+
+/* One instance, written by its factory. Empty when the factory could not
+ * be run or produced nothing — the caller reports at the use site. */
+static CCString gn_run_factory(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool* ok) {
+    CcIndex* ix = L->ix;
+    CcTypeList* targv = &info->targs;
+    size_t nt = targv->len();
+    size_t i;
+    char* args;
+    char err[512];
+    char* def = NULL;
+    int rc;
+    CCString out = cc_string_new();
+    *ok = false;
+    if (nt > CC_FAC_MAX_ARGS) return out;
+    args = cc_arena_alloc(L->arena, CC_FAC_MAX_ARGS * CC_FAC_ARG_CAP, 1);
+    memset(args, 0, CC_FAC_MAX_ARGS * CC_FAC_ARG_CAP);
+    for (i = 0; i < nt; i++) {
+        CcType* at = *targv->get_ptr(i);
+        CCSlice asp = cc__type_arg_spelling(ix, at);
+        char* row = args + i * CC_FAC_ARG_CAP;
+        size_t cap = CC_FAC_ARG_CAP - 1;
+        size_t n = asp.len < cap ? asp.len : cap;
+        if (asp.ptr) memcpy(row, asp.ptr, n);
+        row[n] = '\0';
+    }
+    err[0] = '\0';
+    {
+        CCSlice usrc = L->unit->tape.src;
+        CCString mangled = @string(`${info->name}`, L->arena);
+        const char* mz = mangled.cstr(L->arena);
+        rc = cc_emit_plan_produce_generic_def(gn_family_cstr(L, info), mz,
+                                              args, (int)nt,
+                                              usrc.ptr, usrc.len, gn_unit_path(L, sp),
+                                              L->arena, &def, err, sizeof(err));
+    }
+    if (rc != 0 || !def || !def[0]) {
+        CCSlice fam = info->family;
+        CCSlice nm = info->name;
+        CCSlice why = err[0] ? cc_slice_from_buffer(err, strlen(err)) : cstr_slice("it produced nothing");
+        CCString m = @string(`the factory of generic family '${fam}' could not write '${nm}': ${why}`, L->arena);
+        lw_error(L, sp, m);
+        return out;
+    }
+    cc_string_push_cstr(&out, def, L->arena);
+    *ok = true;
+    return out;
+}
+
 /* The expansion text of one instance: the family factory's `@emit`
  * template (then each extension's), filled by the index's rules. Empty,
  * after the diagnostic, when a slot needs the factory body run. */
@@ -304,6 +455,7 @@ static CCString gn_instance_text(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool
     size_t i;
     CCString up = gn_upper(L, info->family);
     CCString guard = @string(`CC_HEADER_${up}_${info->name}`, L->arena);
+    bool needs_run = false;
     CCString head = @string(`#ifndef ${guard}
 #define ${guard}
 `, L->arena);
@@ -329,17 +481,34 @@ static CCString gn_instance_text(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool
         binds = vec_new::[CcSlotBind](L->arena);
         cc__factory_bindings(ix, fu, cc__factory_body(d), &binds);
         computed = gn_computed_slot(L, t, &binds, &args);
-        if (computed.len) {
-            CCString m = @string(`instance '${info->name}' of generic family '${info->family}' needs its factory run: the emitted fragment computes '${computed}'; the clean lowerer does not run factory bodies yet`, L->arena);
-            lw_error(L, sp, m);
-            *ok = false;
-            return text;
-        }
+        if (computed.len) needs_run = true;
         {
             CCSlice frag = cc__template_instance(ix, t->text.ptr + 1, t->text.len - 2, info, &binds, &args);
             cc_string_push_slice(&text, frag, L->arena);
             if (frag.len && frag.ptr[frag.len - 1] != '\n') cc_string_push_char(&text, '\n', L->arena);
         }
+    }
+    if (needs_run) {
+        /* a fragment that computes is not a template this step can fill:
+         * what the instance is, is whatever the factory writes. It writes
+         * the base and every extension together, so the run replaces all
+         * of them and none of the templated text is kept. */
+        bool ran = false;
+        CCString def;
+        CCString whole = cc_string_new();
+        cc_string_push_slice(&whole, head.as_slice(), L->arena);
+        if (!gn_factories_ready(L, sp)) {
+            CCSlice fam = info->family;
+            CCString m = @string(`instance '${info->name}' of generic family '${fam}' needs its factory run, and the factories of this unit could not be bound to their handlers`, L->arena);
+            lw_error(L, sp, m);
+            *ok = false;
+            return whole;
+        }
+        def = gn_run_factory(L, info, sp, &ran);
+        if (!ran) { *ok = false; return whole; }
+        cc_string_push_slice(&whole, def.as_slice(), L->arena);
+        cc_string_push_cstr(&whole, "\n#endif\n", L->arena);
+        return whole;
     }
     cc_string_push_cstr(&text, "#endif\n", L->arena);
     return text;

@@ -1015,10 +1015,39 @@ other form, and rewrites to `<instance>_<member>`. Reading only the second
 made the first read as a use of an unregistered family, which named the
 wrong thing: the family was registered, the shape was not recognized.
 
-A family whose fragment computes a slot needs its factory body RUN, and
-this lowerer does not run factory bodies yet — the diagnostic says so and
-names the slot. Everything the `js_module` / `py_expose` families produce
-is behind that.
+### Running a compiled factory
+
+An instance is normally the family's `@emit` template filled from the
+index's rules. A fragment that COMPUTES a slot is not a template anything
+can fill, and the only honest way to know what it produces is to run the
+factory: `js_module::[Counter]` is whatever `__cc_gfac_js_module` returns
+when it is run with "Counter".
+
+`CC_GENERIC_FACTORY(Name, K) { ... }` is sugar for a registration and a
+`@comptime` function, so the four steps are the driver's own:
+
+1. Spell each factory declaration back out of the unit it was parsed from —
+   the sugar rewrite reads `CC_GENERIC_FACTORY`, not an AST.
+2. Put that text through the prepare passes. The sugar becomes the
+   registration and the function; the `@emit` templates in the body become
+   the calls that build text. A body that still spells ``@emit(`...`)`` is
+   not C, and the engine compiles C.
+3. Scan the result — with this unit's own source, because the scan clears
+   what was registered before and the unit's `@comptime` functions have to
+   survive it — then COLLECT the registrations. The sugar's
+   `cc_generic_register("Name", handler)` is read out of the call rather
+   than run, and that is what binds an extension too, whose handler symbol
+   carries a sequence number only the rewrite knows.
+4. Produce per instance.
+
+The engine compiles a translation unit out of the file it is given, so the
+path it gets is the file the user wrote — which the staged copy's `#line`
+names — and not the staged copy, whose includes were already rewritten
+once.
+
+The factory writes the base and every extension together, so a family with
+any computed part runs once for the whole instance and none of the
+templated text is kept.
 
 
 Every instance a unit mentions is expanded from its family's factory

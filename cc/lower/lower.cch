@@ -40,6 +40,8 @@ typedef struct CcLowerer {
                                  * every unit lowered in this process has named, and a unit that
                                  * emitted all of them would declare specs above the declarations
                                  * that say what their types are */
+    bool factories_ready;       /* the compiled factories have been bound to their handlers */
+    bool factories_ok;          /* and the binding worked */
 } CcLowerer;
 
 static CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds);
