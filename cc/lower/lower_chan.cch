@@ -96,6 +96,36 @@ static bool hc_is_chan(CcType* t, CcChanType* out) {
     }
 }
 
+/* A channel endpoint type anywhere but a local declaration.
+ *
+ * `int[~4 >]` is the same handle whether it names a local, a struct field,
+ * a typedef or a parameter: the element type and the capacity belong to
+ * the pair that creates it, and what the declarator holds is a `CCChanTx`
+ * / `CCChanRx`. Left as written, the endpoint type reaches C, which has no
+ * such declarator.
+ *
+ * Only the type is rewritten. None of these is a site: nothing pairs,
+ * sends or receives by being declared, so there is no endpoint to record —
+ * which is why this runs after the sites are read, when every endpoint the
+ * step needs is already recorded against its local.
+ *
+ * The node is replaced in place, so every position is covered by the one
+ * rule rather than by a list of the places a declarator can appear. */
+static bool hc_endpoint_types(CcType* t, void* env) {
+    CcLowerer* L = (CcLowerer*)env;
+    CcChanType ch;
+    if (!hc_is_chan(t, &ch)) return true;
+    {
+        CCSlice nm = ch.dir == '<' ? cstr_slice("CCChanRx") : cstr_slice("CCChanTx");
+        CcNamedType nt;
+        memset(&nt, 0, sizeof(nt));
+        nt.name = nm;
+        t->k = { .named = nt };
+    }
+    (void)L;
+    return true;
+}
+
 /* The endpoints a `send_task` sends on.
  *
  * What such a channel carries is the task handle, whatever its element
@@ -340,6 +370,15 @@ static void CcLowerer_chan(CcLowerer* L) {
         CcUnit_walk(L->unit, tv);   /* the uses, before the declarations size the channel */
     }
     tw_unit(&w);
+    {
+        CcVisitor fv;
+        memset(&fv, 0, sizeof(fv));
+        fv.type = hc_endpoint_types;
+        fv.env = L;
+        /* after the sites: every endpoint a local declares is recorded, and
+         * what is left is the declarators C has to read */
+        CcUnit_walk(L->unit, fv);
+    }
 }
 
 #endif

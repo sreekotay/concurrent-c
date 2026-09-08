@@ -877,6 +877,24 @@ the walk records it at the depth of the enclosing block — recording its own
 depth drops it the moment the walk leaves the handler statement, which is
 before any of the code it covers.
 
+## Channel endpoints
+
+`int[~4 >]` is the same handle whether it names a local, a struct field, a
+typedef or a parameter: the element type and the capacity belong to the
+pair that creates it, and what the declarator holds is a `CCChanTx` /
+`CCChanRx`. The type is rewritten in place wherever it appears, so every
+position is covered by one rule rather than by a list of the places a
+declarator can occur.
+
+Only a local declaration is a site — nothing pairs, sends or receives by
+being declared elsewhere — so the rewrite runs after the sites are read,
+when every endpoint the step needs is already recorded against its local.
+
+The step runs before `@async` and `@parallel`. Both spell a captured
+parameter's type into text they generate (an async frame's field, an arm's
+environment), and an endpoint type spelled there is one no later AST pass
+can reach.
+
 ## Channels that carry tasks
 
 `tx.send_task(() => f(x))` does not send the closure. It spawns the closure
