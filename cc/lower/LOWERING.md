@@ -733,6 +733,19 @@ bound arm's other captures are a copy taken when it started, and a copy of
 the written name would make the assignment look like it happened while the
 caller still read its old value.
 
+`@parallel(h) { body }` is one more arm on a handle that already exists.
+It is the same environment, thunk and admit as an arm of a bound block,
+minus everything that belongs to opening one: nothing creates the dest,
+nothing joins at the end, and nothing enters the deny scope, because the
+block that bound the handle still owns them.
+
+A captured name the arm reaches through a pointer is read as a deref node,
+not as an identifier whose spelling happens to be `(*p)` — such an
+identifier is one the typing walk cannot look up, so a UFCS call on the
+captured name would lose its receiver's type. A bare `return;` in an arm
+body returns the thunk's NULL: the thunk returns `void*`, and a return with
+no value from it is a return with no value from a function that has one.
+
 `@serial { ... }` is an arm whose body is a block rather than one
 expression; it reaches its names through the same addresses, and a name
 it declares for itself over one it captures is a diagnostic rather than a

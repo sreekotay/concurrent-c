@@ -109,8 +109,15 @@ static bool pl_scan_expr(CcExpr* e, void* env) {
 }
 
 /* Every use of `name` read through `through` instead. */
-typedef struct PRef { CCSlice name; CCSlice through; } PRef;
+typedef struct PRef {
+    CCArena arena; CCSlice name; CCSlice through; } PRef;
 
+/* The captured name, read through the pointer the environment carries.
+ *
+ * A deref node, not the text `(*p)`: an identifier whose spelling happens
+ * to be that text is one the typing walk cannot look up, so a UFCS call on
+ * the captured name would lose its receiver's type. The node types from
+ * the pointer's own declaration. */
 static bool pl_ref_expr(CcExpr* e, void* env) {
     PRef* r = (PRef*)env;
     CCSlice nm;
@@ -119,19 +126,26 @@ static bool pl_ref_expr(CcExpr* e, void* env) {
         default: return true;
     }
     if (!slice_eq(nm, r->name)) return true;
-    e->k = { .ident = r->through };
+    {
+        CcExpr* p = cc_expr_ident(r->through, e->span, r->arena);
+        CcExpr* deref = cc_expr_unary(CC_OP_DEREF, p, e->span, r->arena);
+        CcUnary pr;
+        pr.op = CC_OP_NONE;
+        pr.a = deref;
+        e->k = { .paren = pr };
+    }
     return true;
 }
 
 static void pl_rewrite(CcLowerer* L, CcExpr* e, CcStmt* s, CCSlice name, CCSlice through) {
     CcVisitor v;
     PRef r;
+    r.arena = L->arena;
     r.name = name;
     r.through = through;
     memset(&v, 0, sizeof(v));
     v.expr = pl_ref_expr;
     v.env = &r;
-    (void)L;
     if (e) CcExpr_walk(e, v);
     if (s) CcStmt_walk(s, v);
 }
@@ -232,6 +246,25 @@ static CcExpr* pl_out_slot(CcLowerer* L, CcSpan sp) {
     return cc_expr_unary(CC_OP_DEREF, lw_paren(L, read, sp), sp, L->arena);
 }
 
+/* A bare `return;` in an arm body leaves the arm, and the thunk it becomes
+ * returns `void*` — so what it returns is the same NULL every other exit
+ * from the thunk returns. Left bare it is a return with no value from a
+ * function that has one. */
+static bool pl_bare_return(CcStmt* s, void* env) {
+    CcLowerer* L = (CcLowerer*)env;
+    @switch (s->k) {
+        case .return_(r): {
+            CcReturn nr;
+            if (r.value) break;
+            nr.value = lw_text(L, @string(`NULL`, L->arena), s->span);
+            s->k = { .return_ = nr };
+            break;
+        }
+        default: break;
+    }
+    return true;
+}
+
 /* The thunk: the environment, the names it reads, then the arm. */
 static CcDecl* pl_thunk_decl(PStep* st, uint32_t id, uint32_t k, PCapList* caps,
                              CcExpr* expr, CcStmt* arm_body, CCSlice out_type,
@@ -268,9 +301,8 @@ static CcDecl* pl_thunk_decl(PStep* st, uint32_t id, uint32_t k, PCapList* caps,
             CcType* pt = cc_type_pointer(c->type, sp, L->arena);
             CCString rn = @string(`__cc_ref_${c->name}`, L->arena);
             CCSlice ref = lw_keep(L, &rn);
-            CCString through = @string(`(*${ref})`, L->arena);
             lw_push(body, lw_decl_stmt(L, pt, ref, read, sp));
-            pl_rewrite(L, expr, arm_body, c->name, lw_keep(L, &through));
+            pl_rewrite(L, expr, arm_body, c->name, ref);
         }
     }
     /* a bound site pauses and resumes through the handle */
@@ -278,6 +310,13 @@ static CcDecl* pl_thunk_decl(PStep* st, uint32_t id, uint32_t k, PCapList* caps,
                                            cc_expr_member(lw_ident(L, cstr_slice("__e"), sp),
                                                           cstr_slice("__cc_par_h"), true, sp, L->arena), sp), sp));
     if (arm_body) {
+        {
+            CcVisitor rv;
+            memset(&rv, 0, sizeof(rv));
+            rv.stmt = pl_bare_return;
+            rv.env = L;
+            CcStmt_walk(arm_body, rv);
+        }
         /* a block arm writes its one outer name as an ordinary local, so
          * the name is bound from the out pointer before the body and
          * stored back after it: a copy the caller never reads would make
@@ -637,16 +676,93 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     st->any = true;
 }
 
+/* `@parallel(h) { body }`: one more arm on a handle that already exists.
+ *
+ * The handle was bound by an earlier `@parallel spawn { … } !>`, and this
+ * hands it another arm — same environment, same thunk, same admit as an
+ * arm of a bound block, minus everything that belongs to opening one:
+ * nothing creates the dest, nothing joins at the end, and nothing enters
+ * the deny scope, because the block that did those still owns them.
+ *
+ * The captures are the bound shape: a copy taken when the arm starts,
+ * except the handle itself, which is the caller's own. */
+static void pl_dest(PStep* st, CcStmt* s, CcParallelDest pd) {
+    CcLowerer* L = st->L;
+    Walker* w = st->w;
+    CcSpan sp = s->span;
+    CCSlice bind;
+    uint32_t id;
+    CcStmt* blk;
+    CcStmt* body;
+    PScan sc;
+    PCapList caps;
+    if (!pd.dest || !expr_ident(strip_parens_expr(pd.dest), &bind) || !bind.len) {
+        CCString m = @string(`'${"@"}parallel(h)' needs a handle a name reaches: bind it with 'CCParallel h = ${"@"}parallel spawn { ... } !>;'`, L->arena);
+        lw_error(L, sp, m);
+        return;
+    }
+    id = st->next_id++;
+    body = lw_block(L, sp);
+    {
+        CcStmtList* bs = lw_block_stmts(body);
+        CcStmtList* src = &pd.stmts;
+        size_t n = src->len();
+        size_t i;
+        for (i = 0; i < n; i++) {
+            CcStmt* one = *src->get_ptr(i);
+            bs->push(one);
+        }
+    }
+    memset(&sc, 0, sizeof(sc));
+    sc.st = st;
+    sc.w = w;
+    sc.caps = vec_new::[PCapRef](L->arena);
+    sc.seen = vec_new::[CCSlice](L->arena);
+    sc.skip = cc_slice_empty();
+    {
+        CcVisitor v;
+        memset(&v, 0, sizeof(v));
+        v.expr = pl_scan_expr;
+        v.env = &sc;
+        CcStmt_walk(body, v);
+    }
+    caps = sc.caps;
+    {
+        PCapList* cv = &caps;
+        size_t nc = cv->len();
+        size_t ci;
+        for (ci = 0; ci < nc; ci++) {
+            PCap* c = *cv->get_ptr(ci);
+            if (slice_eq(c->name, bind)) c->by_addr = true;
+        }
+    }
+    {
+        CCString et = pl_env_text(st, id, 0, &caps, cc_slice_empty(), true);
+        st->fwd.push_slice(et.as_slice(), L->arena);
+    }
+    pl_forward(st, id, 0);
+    st->made.push(pl_thunk_decl(st, id, 0, &caps, NULL, body, cc_slice_empty(),
+                                cc_slice_empty(), true, sp));
+    blk = lw_block(L, sp);
+    pl_spawn_stmts(L, blk, id, 0, &caps, cc_slice_empty(), bind, sp);
+    s->k = blk->k;
+    st->any = true;
+}
+
 static void pl_on_stmt(Walker* w, CcStmt* s, bool enter) {
     PStep* st = (PStep*)w->env;
     CcParallel p;
+    CcParallelDest pd;
     bool hit = false;
+    bool attach = false;
     if (!enter) return;
     @switch (s->k) {
         case .parallel(x): p = x; hit = true; break;
+        case .parallel_dest(x): pd = x; attach = true; break;
         default: break;
     }
     if (hit) pl_lower(st, s, p);
+    else if (attach) pl_dest(st, s, pd);
 }
 
 /* The handle a bound site fills is the caller's, so its declaration goes
