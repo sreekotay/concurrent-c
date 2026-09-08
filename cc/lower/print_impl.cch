@@ -1630,6 +1630,14 @@ static void pr_block(Pr* p, const CcStmt* s) {
 /* ---- declarations ------------------------------------------------------------------ */
 
 static void pr_d_var(Pr* p, const CcDecl* d, const CcVarDecl* v) {
+    if (v->init_is_decl) {
+        /* a decl-form `.create`: the initializer declares the variable
+         * itself, so it is the whole declaration and nothing spells
+         * `T name =` in front of it */
+        pr_init(p, v->init);
+        pr_str(p, ";");
+        return;
+    }
     pr_specs(p, d->specs, decl_spec_quals(v->type));
     pr_attrs(p, &d->attrs, false);
     pt_type(p, v->type, v->name);

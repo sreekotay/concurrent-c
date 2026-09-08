@@ -747,6 +747,42 @@ it. A concurrency construct that
 quietly ran as something else would be a program that behaves differently
 for reasons the page does not show.
 
+## Ownership markers
+
+`@detach` says the owner outlives this scope. Nothing is registered for it
+— scope-exit cleanup is registered by `@destroy` and by nothing else — but
+the marker still comes off the declaration, over the whole unit rather
+than inside the per-function cleanup rewrite: a function whose only marker
+is `@detach` has no cleanup site, so that rewrite never visits it. A
+declaration that keeps the marker is a Concurrent-C declaration to the
+printer, which replays such a declaration as its source span, and
+`@detach` would go into the C verbatim.
+
+## Constructors
+
+`T x = @create(args);` calls what the type registered as its `.create`
+hook. A type may register two overloads, and an overload the type spells
+`decl:<callee>` is a DECL form: the callee declares the variable itself
+(it is a macro expanding to one or more declarations), so the whole
+declaration becomes `<callee>(name, args)` and nothing prints `T name =`
+in front of it:
+
+```c
+CCArena a = @create(buf, sizeof buf) @destroy;
+        -> cc_arena_bind_buffer(a, buf, sizeof buf);
+```
+
+The declaration node stays a declaration, with its name, its type and its
+`@destroy` intact, so the cleanup step registers the scope exit exactly as
+it would for any other owner. A decl-form overload picked where there is
+no declaration to name is a diagnostic.
+
+The type spells the marker `CC_TYPE_CREATE_DECL("callee")`, which expands
+to the two adjacent string literals `"decl:" "callee"`. The index does not
+run the preprocessor, so it reads the marker off the call rather than off
+the expansion; the macro's name is part of the type-hook protocol,
+declared beside `cc_type_create_overloads`.
+
 ## Deadlines
 
 `@with_deadline(d) { ... }` becomes a block that builds the scope from the

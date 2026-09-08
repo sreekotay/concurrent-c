@@ -2080,6 +2080,22 @@ static void cc__hook_kind_name(CcIndex* ix, const CcUnit* u, const CcExpr* value
     }
 }
 
+/* `CC_TYPE_CREATE_DECL("callee")` marks a declaration-form overload: the
+ * callee declares the variable itself. The macro expands to `"decl:"
+ * callee`, two adjacent string literals — but this index does not run the
+ * preprocessor, so it sees the call and has to read the marker off the
+ * spelling. The name is part of the type-hook protocol, declared beside
+ * `cc_type_create_overloads` in `cc_type.cch`. */
+static CCSlice cc__hook_create_arg(CcIndex* ix, const CcUnit* u, const CcExpr* arg) {
+    CCSlice s = cc__expr_string(ix, u, arg);
+    CCSlice callee = cc__callee_name(arg);
+    if (!s.ptr || !cc_slice_eq_cstr(&callee, "CC_TYPE_CREATE_DECL")) return s;
+    {
+        CCString tagged = @string(`decl:${s}`, ix->arena);
+        return cc_string_persist_slice(ix->arena, &tagged);
+    }
+}
+
 static void cc__hook_create(CcIndex* ix, const CcUnit* u, CcHookReg* reg, const CcExpr* value) {
     CCSlice nm;
     if (cc__expr_is_ident(value, &nm)) reg->create_fn = nm;
@@ -2091,7 +2107,7 @@ static void cc__hook_create(CcIndex* ix, const CcUnit* u, CcHookReg* reg, const 
         size_t n = ok ? args.len() : 0;
         int cnt = 0;
         for (i = 0; i < n; i++) {
-            CCSlice s = cc__expr_string(ix, u, *args.get_ptr(i));
+            CCSlice s = cc__hook_create_arg(ix, u, *args.get_ptr(i));
             if (!s.ptr) continue;
             if (cnt == 0) reg->create_fn = s;
             else if (cnt == 1) reg->create_fn2 = s;

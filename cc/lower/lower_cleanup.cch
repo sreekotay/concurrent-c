@@ -275,6 +275,32 @@ static CcStmt* cl_pre_destroy(CcLowerer* L, CCSlice canon, CcExpr* subject, CcSp
     return lw_expr_stmt(L, lw_call1(L, ti->pre_destroy_fn, cl_addr(L, subject, sp), sp), sp);
 }
 
+/* `T x = e @detach;` -> the declaration, and nothing else.
+ *
+ * `@detach` is the site saying the owner outlives this scope. Nothing is
+ * registered for it — scope-exit cleanup is registered by `@destroy` and
+ * by nothing else — but the marker still has to come off the declaration.
+ * A declaration that keeps it is a Concurrent-C declaration to the
+ * printer, which replays such a declaration as its source span: `@detach`
+ * would go into the C verbatim and the host compiler would report a stray
+ * '@' with nothing to say about ownership.
+ *
+ * This runs over the whole unit rather than inside the per-function
+ * rewrite: a function whose only marker is `@detach` has no cleanup site,
+ * so the rewrite never visits it. */
+static bool cl_clear_detach(CcDecl* d, void* env) {
+    CcVarDecl v;
+    (void)env;
+    @switch (d->k) {
+        case .var(x): v = x; break;
+        default: return true;
+    }
+    if (!v.detach) return true;
+    v.detach = false;
+    d->k = { .var = v };
+    return true;
+}
+
 /* `T x = e @destroy [{ D }];` -> the declaration, then the site's flag. */
 static void cl_register_destroy(CFn* fn, CcStmt* s, CcDecl* d, CcVarDecl v, CcStmtList* out) {
     CcLowerer* L = fn->L;
@@ -557,6 +583,12 @@ static void CcLowerer_cleanup(CcLowerer* L) {
     CcDeclList* decls = &L->unit->decls;
     size_t n = decls->len();
     size_t i;
+    {
+        CcVisitor dv;
+        memset(&dv, 0, sizeof(dv));
+        dv.decl = cl_clear_detach;
+        CcUnit_walk(L->unit, dv);
+    }
     for (i = 0; i < n; i++) {
         CcDecl* d = *decls->get_ptr(i);
         @switch (d->k) {

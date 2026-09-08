@@ -10,6 +10,14 @@
  * the call passes arguments the first cannot accept. Which is which is
  * the type's business, read off `cc_type_create_overloads`.
  *
+ * An overload the type spells `decl:<callee>` is a DECL form: the callee
+ * declares the variable itself (it is a macro that expands to one or more
+ * declarations), so the whole declaration becomes `<callee>(name, args)`
+ * and nothing prints `T name =` in front of it. The declaration node stays
+ * a declaration, with its name, its type and its `@destroy` intact, so the
+ * cleanup step registers the scope exit exactly as it would for any other
+ * owner.
+ *
  * The step runs before UFCS so the resulting call is an ordinary one by
  * the time the method steps look at it. Lifetime: the lowerer arena. */
 #ifndef CC_LOWER_CREATE_CCH
@@ -58,6 +66,13 @@ static bool nc_create_of(CcLowerer* L, CcType* t, CCSlice* one, CCSlice* two) {
     return one->len != 0;
 }
 
+/* `decl:<callee>`: the callee is a declaration form, not a call. */
+static bool nc_is_decl_form(CCSlice* callee) {
+    if (callee->len <= 5 || memcmp(callee->ptr, "decl:", 5) != 0) return false;
+    *callee = cc_slice_from_buffer((char*)callee->ptr + 5, callee->len - 5);
+    return true;
+}
+
 /* The number of parameters a declared function takes, or -1 when the
  * declaration is not one the index can read. */
 static int nc_param_count(CcIndex* ix, CCSlice callee) {
@@ -73,13 +88,19 @@ static int nc_param_count(CcIndex* ix, CCSlice callee) {
     }
 }
 
-/* `@create(args)` with the type in hand. */
-static void nc_rewrite(NStep* st, CcExpr* e, CcCreate cr, CcType* want) {
+/* `@create(args)` with the type in hand.
+ *
+ * `owner` is the declaration being initialized, when there is one: a
+ * decl-form overload needs its name, and marks it so the printer knows the
+ * initializer is the whole declaration. NULL elsewhere, and a decl-form
+ * overload chosen there is a diagnostic — there is no name to declare. */
+static void nc_rewrite(NStep* st, CcExpr* e, CcCreate cr, CcType* want, CcDecl* owner) {
     CcLowerer* L = st->L;
     CcIndex* ix = L->ix;
     CCSlice one;
     CCSlice two;
     CCSlice pick;
+    bool decl_form = false;
     int nargs = (int)cr.args.len();
     if (!want) {
         CCString m = @string(`'${"@"}create' has no type to construct here: name it, 'T x = ${"@"}create(...);'`, L->arena);
@@ -95,11 +116,33 @@ static void nc_rewrite(NStep* st, CcExpr* e, CcCreate cr, CcType* want) {
     pick = one;
     if (two.len) {
         /* the second overload is the one that takes what the first cannot */
+        CCSlice two_call = two;
+        bool two_decl = nc_is_decl_form(&two_call);
         int n1 = nc_param_count(ix, one);
         if (n1 >= 0 && n1 != nargs) {
-            int n2 = nc_param_count(ix, two);
-            if (n2 == nargs) pick = two;
+            /* a decl form is a macro: the index cannot count its
+             * parameters, so what the first overload cannot take is what
+             * the second is for */
+            if (two_decl) { pick = two_call; decl_form = true; }
+            else if (nc_param_count(ix, two) == nargs) pick = two;
         }
+    }
+    if (decl_form) {
+        CcVarDecl v;
+        bool is_var = false;
+        if (owner) {
+            @switch (owner->k) {
+                case .var(x): v = x; is_var = true; break;
+                default: break;
+            }
+        }
+        if (!is_var) {
+            CCString m = @string(`'${"@"}create' here picks a declaration-form constructor ('${pick}'), which declares the variable itself: write it as a declaration, 'T x = ${"@"}create(...);'`, L->arena);
+            lw_error(L, e->span, m);
+            return;
+        }
+        v.init_is_decl = true;
+        owner->k = { .var = v };
     }
     {
         CcCall call;
@@ -108,6 +151,14 @@ static void nc_rewrite(NStep* st, CcExpr* e, CcCreate cr, CcType* want) {
         CcExprList* av = &cr.args;
         call.callee = lw_ident(L, pick, e->span);
         call.args = vec_new::[CcExprRef](L->arena);
+        if (decl_form) {
+            CCSlice nm = cc_slice_empty();
+            @switch (owner->k) {
+                case .var(x): nm = x.name; break;
+                default: break;
+            }
+            call.args.push(lw_ident(L, nm, e->span));
+        }
         for (i = 0; i < n; i++) {
             CcExpr* a = *av->get_ptr(i);
             call.args.push(a);
@@ -155,7 +206,7 @@ static void nc_decl(NStep* st, CcDecl* d) {
     inner = nc_peel_init(v.init->expr);
     if (!nc_is_create(inner, &cr)) return;
     st->seen.push(inner);
-    nc_rewrite(st, inner, cr, v.type);
+    nc_rewrite(st, inner, cr, v.type, d);
 }
 
 static void nc_on_stmt(Walker* w, CcStmt* s, bool enter) {
@@ -176,7 +227,7 @@ static bool nc_leftover(CcExpr* e, void* env) {
     CcCreate cr;
     if (!nc_is_create(e, &cr)) return true;
     if (nc_seen(st, e)) return true;      /* a declaration already spoke for it */
-    nc_rewrite(st, e, cr, NULL);
+    nc_rewrite(st, e, cr, NULL, NULL);
     return true;
 }
 

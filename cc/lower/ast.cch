@@ -513,6 +513,8 @@ typedef struct CcVarDecl {      /* T name [= init] [@destroy [{ D }]] [@detach];
     bool destroy;
     CcStmt* destroy_body;
     bool detach;
+    bool init_is_decl;          /* a decl-form `.create` overload: the initializer IS the whole
+                                   declaration (it declares the variable), so nothing prints `T name =` */
 } CcVarDecl;
 typedef struct CcFuncDecl {     /* T name(params) body-or-; */
     CcType* type;               /* the func type: ret + params */
