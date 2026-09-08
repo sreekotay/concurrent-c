@@ -42,6 +42,8 @@ typedef struct CcLowerer {
                                  * that say what their types are */
     Vec::[CCSlice] sinks;       /* `.ufcs_sink` callees this unit emitted a call to; the
                                  * destination pass picks a per-destination variant of one */
+    Vec::[CcExprRef] res_dests; /* unwrap targets whose own type is the Result: they take it
+                                 * whole. Typed under the walk, before the step rewrites */
     bool factories_ready;       /* the compiled factories have been bound to their handlers */
     bool factories_ok;          /* and the binding worked */
 } CcLowerer;

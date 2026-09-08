@@ -796,17 +796,12 @@ static CcStmt* rl_scaffold_ex(RFn* fn, CcExpr* uw, CcExpr* target, bool target_r
         CcStmt* on_err = lw_block(L, sp);
         CcExpr* err;
         if (!h) return NULL;
-        if (target && !value_is_void && !target_result && !h->hoisted) {
-            /* The target takes the unwrapped value, and the error path has
-             * none to give it, so the handler has to leave rather than fall
-             * through to an assignment that cannot happen. A target that is
-             * itself a Result is the exception below: there the whole
-             * Result is the value, so the handler is a notification and
-             * control carries on. */
-            CCString m = rl_at2(L, "errhandler body must visibly diverge when used as an expression-position '!>;' delegate", NULL);
-            lw_error(L, h->span, m);
-            return NULL;
-        }
+        /* `T x = call !>;` does not require the handler to leave. Invariant 6
+         * asks a handler to diverge where control cannot return to the site
+         * -- an `@err(e);` forward, an expression-position `!>` that inlines
+         * it -- and here it can: the handler runs and the assignment below
+         * follows it. A target whose own type is the Result takes it whole
+         * on the ok path instead, and assigns nothing on the error path. */
         err = rl_project(L, rl_r_error2(L, sp, ptr, inner), &path, sp);
         /* the callee named no `T !>(E)`: which error this is is the host's
          * to decide, and the handler's type is what it has to become */
@@ -950,6 +945,8 @@ static CcStmt* rl_scaffold(RFn* fn, CcExpr* uw, CcExpr* target, CcSpan sp) {
     return rl_scaffold_ex(fn, uw, target, false, sp);
 }
 
+static bool rl_dest_is_result(CcLowerer* L, CcExpr* target);
+
 /* `<lhs> = <unwrap>;` and `<unwrap>;` as expression statements. */
 static bool rl_expr_stmt_unwrap(RFn* fn, CcStmt* s, CcExpr* e, CcStmtList* out) {
     CcLowerer* L = fn->L;
@@ -986,7 +983,7 @@ static bool rl_expr_stmt_unwrap(RFn* fn, CcStmt* s, CcExpr* e, CcStmtList* out) 
         }
     }
     if (!uw) return false;
-    blk = rl_scaffold(fn, uw, target, s->span);
+    blk = rl_scaffold_ex(fn, uw, target, rl_dest_is_result(L, target), s->span);
     if (blk) out->push(blk);
     return true;
 }
@@ -1711,10 +1708,69 @@ static void rl_emit_specs(CcLowerer* L, RSpecList* used) {
 
 /* ---- the step ------------------------------------------------------------ */
 
+/* Which unwrap targets hold the Result itself.
+ *
+ * `box.field =<! call @err;` assigns the whole Result when the field's own
+ * type is one, and the value inside it when it is not -- the two are
+ * different assignments, so the target has to be typed rather than
+ * guessed. Typing a member or an element needs the scope the typing walk
+ * builds, and this step does not run under it, so the answer is taken
+ * first, under the walk, and read back by pointer while the tree is still
+ * the one that was walked. */
+static void rl_dest_stmt(Walker* w, CcStmt* s, bool enter) {
+    CcLowerer* L = (CcLowerer*)w->env;
+    CcExpr* e = NULL;
+    CcBinary a;
+    bool is_assign = false;
+    if (!enter) return;
+    @switch (s->k) {
+        case .expr(es): e = es.e; break;
+        default: return;
+    }
+    if (!e) return;
+    @switch (e->k) {
+        case .assign(x): a = x; is_assign = true; break;
+        default: break;
+    }
+    if (!is_assign || a.op != CC_OP_ASSIGN || !a.a || !rl_is_unwrap(a.b)) return;
+    {
+        /* Either spelling counts: the written `T !>(E)`, and the canonical
+         * `CCResult_T_E` a declaration already read through the index. */
+        CcType* t = type_of_expr(w, a.a);
+        CCSlice canon;
+        CcIndex* ix = w->ix;
+        if (!t) return;
+        if (CcType_is_result(t)) { L->res_dests.push(a.a); return; }
+        canon = ix->canon(t);
+        if (canon.len > 9 && memcmp(canon.ptr, "CCResult_", 9) == 0) L->res_dests.push(a.a);
+    }
+}
+
+static void rl_dest_pass(CcLowerer* L) {
+    Walker w;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_stmt = rl_dest_stmt;
+    w.env = L;
+    tw_unit(&w);
+}
+
+static bool rl_dest_is_result(CcLowerer* L, CcExpr* target) {
+    CcExprList* v = &L->res_dests;
+    size_t n = v->len();
+    size_t i;
+    if (!target) return false;
+    for (i = 0; i < n; i++) if (*v->get_ptr(i) == target) return true;
+    return false;
+}
+
 static void CcLowerer_results(CcLowerer* L) {
     CcDeclList* decls = &L->unit->decls;
     size_t n = decls->len();
     size_t i;
+    rl_dest_pass(L);   /* before any rewrite: the tree is still the one the walk types */
     for (i = 0; i < n; i++) {
         CcDecl* d = *decls->get_ptr(i);
         @switch (d->k) {
