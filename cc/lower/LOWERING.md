@@ -453,6 +453,55 @@ switch ((r->del).kind) {
 `@variant(packed)` is not lowered by the clean lowerer yet: the
 declaration is a diagnostic.
 
+### Schema unions
+
+A `one of` in a `@grammar(schema)` body is a tagged union with the same
+`kind`/`u` layout and the same projection rules, but nothing in the text
+this step reads says so: the engine emits the declaration, so the index
+has the type, its `NameKind` and every enumerator, and `v.kind == .object`
+reads as a stray `.` and `v.object` as a missing member. The engine queues
+each union it declares; the driver writes that queue to a file and passes
+it as `--schema-variants`, and the step registers the arms from it before
+it collects the `@variant` declarations. Only the arms are registered:
+the engine's declaration is the real one, with the anonymous struct each
+arm actually has, and synthesizing one over it would replace what the
+index knows with something less true.
+
+A schema union is a product as well as a sum — fields the schema binds
+beside its `one of` are members of the same struct — so a member that is
+not an arm passes to C, which has the declaration, instead of being a
+misspelled-arm diagnostic.
+
+The fill and write helpers the engine emits set `.kind`, project the arm
+they have just tagged, and reach through `.u` to lay out bytes. Those are
+the compiler's own output, not a user's reach-in, so a body whose function
+name ends in `__fill`, `__wput`, `__wchk` or `__wmeasure` is exempt from
+the `.u` ban, the domination rule and the read-only `.kind` rule. Every
+other body is checked, schema union or not; the `.u` message names the
+surface (`schema union 'Bulk'`).
+
+## String switches
+
+C switches on integers, so `case "GET":` on a slice subject becomes an
+ordinal: the subject is replaced by a statement expression that compares
+the slice's bytes against each key and yields the matching label's index,
+and each label becomes that index. `case "A": case "B":` parses as one
+case whose labelled statement is the next case, so the labels of a
+fallthrough run hang off the first rather than sitting beside it; both are
+collected, and both become integer labels, so the fallthrough survives.
+Arm bodies and `default:` are untouched.
+
+A slice subject has no integer to switch on even with no string label at
+all, so `switch (k) { default: ... }` on one is lowered too — that is the
+shape a schema grammar's empty `Type__fk` has. A string label on a
+subject of a type that is not slice-shaped, and a switch that mixes string
+and integer labels, are diagnostics: neither has an ordinal that means
+what was written.
+
+The step runs after Results and before cleanup. By then a UFCS call or an
+`@string` in the subject is already the C it will be, so spelling the
+subject is spelling the final text.
+
 ## String templates
 
 `@string(`...`, arena)` builds a CCString by pushing each piece in order,
@@ -654,6 +703,15 @@ a handle is one nothing else can pause. The runtime may refuse the site
 (`cc_parallel_deny_fast`) and a spawn may fail; both run the same thunk
 inline at the join, so the arms happen either way and the only difference
 is whether they overlapped.
+
+An arm becomes a thunk that evaluates one expression and writes at most
+one outer name through an out pointer, so the parser refuses the shapes
+that have no such form: a bare `{ }` (which should be `@serial { }`), a
+loop (`@parallel for`, or `@serial`), any other statement, an empty
+`@serial` body, and a `@serial` body that assigns more than one name from
+the enclosing scope. A `@parallel` with no arms at all is refused by the
+step rather than lowered to an empty block, which would run and join
+nothing.
 
 `@serial { ... }` is an arm whose body is a block rather than one
 expression; it reaches its names through the same addresses, and a name

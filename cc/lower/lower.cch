@@ -20,6 +20,7 @@ typedef struct CcLowerOpts {
     bool per_tu;                /* #pragma(@per_tu) */
     bool strict_unhandled;      /* a bare call to a Result function is an error (CC_STRICT_RESULT_UNWRAP, default on) */
     CCSlice repo_root;          /* quoted `.cch` includes become `<rel.h>` relative to it; empty: left as written */
+    CCSlice schema_variants;    /* tagged unions a `@grammar(schema)` declared: one line each, name then arms */
 } CcLowerOpts;
 
 typedef struct CcLowerer {
@@ -52,6 +53,7 @@ static void CcLowerer_generics(CcLowerer* L);     /* `Vec::[T]` -> `CCVec_T` and
 static void CcLowerer_slices(CcLowerer* L);       /* `T[:]` values: string literals, braced lists, `@slice(...)` */
 static void CcLowerer_slice_args(CcLowerer* L);   /* arguments a slice parameter accepts, after UFCS built the call */
 static void CcLowerer_strings(CcLowerer* L);      /* `@string(`...`)`: the pushes that build it */
+static void CcLowerer_strswitch(CcLowerer* L);    /* `case "lit":` on a slice subject: an ordinal and an integer switch */
 static void CcLowerer_closures(CcLowerer* L);     /* `(p) => body`: the environment, the entry, the make */
 static void CcLowerer_create(CcLowerer* L);       /* `@create(...)`: the type's own .create hook */
 static void CcLowerer_forin(CcLowerer* L);        /* `@for (x in xs)`: the extent the type declares */

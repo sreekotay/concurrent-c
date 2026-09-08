@@ -374,6 +374,106 @@ static bool parse_worker_clause(P* p, CCSlice* worker) {
 }
 
 /* `@parallel ...` at the `@parallel` token. */
+/* What a statement that is not an arm should have been.
+ *
+ * An arm becomes a thunk the runtime calls: it evaluates one expression
+ * and writes at most one outer name through an out pointer. A loop and a
+ * declaration have no such shape, and passing one through silently would
+ * spawn something that assigns nothing anyone can see. */
+/* The outer names one arm assigns.
+ *
+ * An arm becomes a thunk with one out pointer, so it may write at most one
+ * name from the enclosing scope. Names the body declares itself are not
+ * outer, and are collected first so an assignment to one does not count. */
+typedef struct PaDests {
+    Vec::[CCSlice] locals;
+    Vec::[CCSlice] outer;
+    CCArena arena;
+} PaDests;
+
+static bool pa_has(Vec::[CCSlice]* v, CCSlice name) {
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice s = *v->get_ptr(i);
+        if (s.len == name.len && (s.len == 0 || memcmp(s.ptr, name.ptr, s.len) == 0)) return true;
+    }
+    return false;
+}
+
+static void pa_local_decl(PaDests* d, CcDecl* dd) {
+    if (!dd) return;
+    @switch (dd->k) {
+        case .var(v): if (v.name.len && !pa_has(&d->locals, v.name)) d->locals.push(v.name); break;
+        default: break;
+    }
+}
+
+static bool pa_locals_stmt(CcStmt* st, void* env) {
+    PaDests* d = (PaDests*)env;
+    @switch (st->k) {
+        case .decl(ds): pa_local_decl(d, ds.d); break;
+        default: break;
+    }
+    return true;
+}
+
+static void pa_dest_lhs(PaDests* d, CcExpr* lhs) {
+    if (!lhs) return;
+    @switch (lhs->k) {
+        case .ident(nm):
+            if (nm.len && !pa_has(&d->locals, nm) && !pa_has(&d->outer, nm)) d->outer.push(nm);
+            break;
+        default: break;
+    }
+}
+
+static bool pa_dests_expr(CcExpr* e, void* env) {
+    PaDests* d = (PaDests*)env;
+    @switch (e->k) {
+        case .assign(as): pa_dest_lhs(d, as.a); break;
+        default: break;
+    }
+    return true;
+}
+
+static size_t pa_outer_dests(P* p, CcStmtList* stmts) {
+    PaDests d;
+    CcVisitor v;
+    size_t n = stmts->len();
+    size_t i;
+    d.arena = p->arena;
+    d.locals = vec_new::[CCSlice](p->arena);
+    d.outer = vec_new::[CCSlice](p->arena);
+    memset(&v, 0, sizeof(v));
+    v.stmt = pa_locals_stmt;
+    v.env = &d;
+    for (i = 0; i < n; i++) CcStmt_walk(*stmts->get_ptr(i), v);
+    memset(&v, 0, sizeof(v));
+    v.expr = pa_dests_expr;
+    v.env = &d;
+    for (i = 0; i < n; i++) CcStmt_walk(*stmts->get_ptr(i), v);
+    return d.outer.len();
+}
+
+static CCString pa_not_an_arm(P* p, CcStmt* st, const char* at_parallel, const char* at_serial) {
+    const char* bt = "`";
+    const char* ell = "…";
+    bool is_for = false;
+    @switch (st->k) {
+        case .for_: is_for = true; break;
+        default: break;
+    }
+    if (is_for) {
+        CCString m = @string(`for is not an ${at_parallel} { } arm; use ${at_parallel} for or ${at_serial} { ${ell} }`, p->arena);
+        return m;
+    }
+    {
+        CCString m = @string(`${at_parallel} arm must be an assignment, an expression, or ${bt}${at_serial} { ${ell} }${bt}`, p->arena);
+        return m;
+    }
+}
+
 static CcStmt* parse_parallel(P* p) {
     uint32_t first = p->i;
     CcStmt* s;
@@ -471,6 +571,8 @@ static CcStmt* parse_parallel(P* p) {
     {
         /* arms */
         uint32_t open = p->i;
+        const char* at_parallel = "@" "parallel";
+        const char* at_serial = "@" "serial";
         CcParallel pa;
         Vec::[CcParallelArm] arms = vec_new::[CcParallelArm](p->arena);
         pa.arms = arms;
@@ -509,6 +611,11 @@ static CcStmt* parse_parallel(P* p) {
                 continue;
             }
             if (accept_p(p, CC_P_SEMI)) continue;
+            if (at_p(p, CC_P_LBRACE)) {
+                const char* bt = "`";
+                CCString m = @string(`bare ${bt}{ }${bt} is not an ${at_parallel} arm; use ${bt}${at_serial} { }${bt}`, p->arena);
+                err_here(p, m);
+            }
             if (at_word(p, "serial")) {
                 CcStmt* ser;
                 CcBlock sb;
@@ -517,6 +624,13 @@ static CcStmt* parse_parallel(P* p) {
                 {
                     const char* lit_w = "@serial";
                     parse_body_into(p, &sb.stmts, lit_w);
+                }
+                if (!sb.stmts.len()) {
+                    CCString m = @string(`${at_serial} arm must not be empty`, p->arena);
+                    err_at(p, afirst, m);
+                } else if (pa_outer_dests(p, &sb.stmts) > 1) {
+                    CCString m = @string(`${at_serial} arm must assign at most one simple outer name`, p->arena);
+                    err_at(p, afirst, m);
                 }
                 ser = cc__stmt_blank(span_from(p, afirst), p->arena);
                 ser->k = { .serial = sb };
@@ -542,8 +656,15 @@ static CcStmt* parse_parallel(P* p) {
                 }
                 if (is_unwrap) { arm.unwrap = true; arm.expr = operand; }
                 else if (classified) { arm.target = target; arm.expr = rhs; }
-                /* any other statement (a loop, a declaration) is an arm of its own */
-                else arm.serial = st;
+                /* Anything else is not an arm. It cannot be one silently:
+                 * the thunk an arm becomes writes exactly one outer name
+                 * through an out pointer, and a loop or a declaration has
+                 * no such shape. Both spellings that do are named. */
+                else {
+                    CCString m = pa_not_an_arm(p, st, at_parallel, at_serial);
+                    err_at(p, afirst, m);
+                    arm.serial = st;
+                }
             }
             arm.span = span_from(p, afirst);
             arms.push(arm);

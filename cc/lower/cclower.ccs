@@ -126,6 +126,11 @@ static CCSlice source_of(CCSlice path, void* ctx) {
 /* --root DIR: the repository root quoted `.cch` includes are made relative to;
  * --h-root DIR: where their lowered `.h` files go (`DIR/<rel>.h`). */
 static CCSlice g_root;
+/* --schema-variants FILE: tagged unions a `@grammar(schema)` declared. The
+ * engine emits their C into the source this tool lowers, so the index has
+ * the types; what nothing in that text says is that they are tagged
+ * unions. One line each: the name, then its arms, void arms marked `=void`. */
+static const char* g_schema_variants = NULL;
 static const char* g_h_root;
 
 /* mkdir -p for the directory part of `path`. */
@@ -441,6 +446,10 @@ static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena 
     CcLowerOpts lo;
     CcLowerer lw;
     CCSlice pathsl = cc_slice_from_buffer((char*)path, strlen(path));
+    /* every field, not just the ones this function names: a `CcLowerOpts`
+     * filled one field at a time hands the lowerer garbage for any field
+     * added later, and reads of it are wild rather than merely wrong */
+    memset(&lo, 0, sizeof lo);
     L->arena = a;
     L->ds = CcDiags_new(a);
     L->path = path;
@@ -489,6 +498,12 @@ static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena 
     lo.line_directives = true;
     lo.parallel_off = false;
     lo.per_tu = false;
+    if (g_schema_variants) {
+        bool sv_ok = false;
+        CCSlice sv = read_whole_file(g_schema_variants, a, &sv_ok);
+        if (!sv_ok) { fprintf(stderr, "cclower: cannot read %s: %s\n", g_schema_variants, strerror(errno)); exit(2); }
+        lo.schema_variants = sv;
+    }
     {
         const char* strict = getenv("CC_STRICT_RESULT_UNWRAP");
         lo.strict_unhandled = !(strict && strcmp(strict, "0") == 0);
@@ -700,6 +715,7 @@ int main(int argc, char** argv) {
         if (strcmp(argv[i], "--root") == 0 && i + 1 < argc) { g_root = cc_slice_from_buffer(argv[i + 1], strlen(argv[i + 1])); i++; continue; }
         if (strcmp(argv[i], "--h-root") == 0 && i + 1 < argc) { g_h_root = argv[i + 1]; i++; continue; }
         if (strcmp(argv[i], "--quote-dir") == 0 && i + 1 < argc) { g_quote_dir = argv[i + 1]; i++; continue; }
+        if (strcmp(argv[i], "--schema-variants") == 0 && i + 1 < argc) { g_schema_variants = argv[i + 1]; i++; continue; }
         if (strcmp(argv[i], "--identity") == 0) mode = M_IDENTITY;
         else if (strcmp(argv[i], "--print") == 0) mode = M_PRINT;
         else if (strcmp(argv[i], "--lower") == 0) { mode = M_PRINT; lower = true; }
@@ -716,6 +732,7 @@ int main(int argc, char** argv) {
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--known-types") == 0 || strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "-I") == 0 ||
             strcmp(argv[i], "--root") == 0 || strcmp(argv[i], "--h-root") == 0 ||
+            strcmp(argv[i], "--schema-variants") == 0 ||
             strcmp(argv[i], "--quote-dir") == 0) { i++; continue; }
         if (argv[i][0] == '-' && argv[i][1]) continue;
         n_files++;

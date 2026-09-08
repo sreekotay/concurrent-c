@@ -24,7 +24,8 @@ static bool rl_diverges(CcLowerer* L, const CcStmt* s);
 
 typedef struct VArm {
     CCSlice name;
-    CcType* type;               /* NULL for a void arm */
+    CcType* type;               /* NULL for a void arm, and for a schema arm (see `payload`) */
+    bool payload;               /* carries a value whose type this step does not know */
     bool has_dtor;
     CcSpan span;                /* the arm name */
     CcSpan type_span;
@@ -38,6 +39,7 @@ typedef struct VInfo {
     Vec::[VArmRef] arms;
     bool has_dtor;
     bool packed;
+    bool schema;                /* a `one of` in a `@grammar(schema)` body */
     CcDecl* decl;
     CcUnit* unit;
 } VInfo;
@@ -79,6 +81,7 @@ typedef struct VStep {
     Vec::[VPendingRef] pending;
     Vec::[CcStmtRef] entered;   /* the statement path from the function body */
     Vec::[CcStmtRef] synth;     /* statements this step wrote: already lowered, not walked again */
+    bool in_codegen;            /* inside a body the schema engine wrote (see `vt_is_codegen`) */
     CcExpr* stmt_root;          /* the expression of the statement being entered */
     bool root_transition;       /* that expression is a transition: the statement becomes a block */
     CcExpr* tr_lhs;
@@ -86,6 +89,24 @@ typedef struct VStep {
     VInfo* tr_vi;
     CcSpan tr_span;
 } VStep;
+
+/* A body the schema engine wrote, not one a user wrote.
+ *
+ * The fill/write helpers a `@grammar(schema)` emits build and read the very
+ * union the ownership rules protect: they set `.kind`, project the arm they
+ * have just tagged, and reach through `.u` to lay out bytes. Diagnosing
+ * those would be diagnosing the compiler's own output. The engine names
+ * them `<Type>__fill` / `__wput` / `__wchk` / `__wmeasure`, so the name is
+ * the marker — the same four suffixes the shadow lowerer spans. */
+static bool vt_is_codegen(CCSlice name) {
+    static const char* const sfx[4] = { "__fill", "__wput", "__wchk", "__wmeasure" };
+    size_t k;
+    for (k = 0; k < 4; k++) {
+        size_t sl = strlen(sfx[k]);
+        if (name.len > sl && memcmp(name.ptr + name.len - sl, sfx[k], sl) == 0) return true;
+    }
+    return false;
+}
 
 /* ---- lookups ------------------------------------------------------------------- */
 
@@ -625,6 +646,95 @@ static void vt_add(VStep* st, CcUnit* u, CcDecl* d, CcVariantDecl vd) {
     if (u == L->unit && !vi->packed) vt_lower_decl(st, vi);
 }
 
+/* A tagged union a `@grammar(schema)` declared.
+ *
+ * A `one of` in a schema body is a tagged union with the same kind/`u`
+ * layout and the same projection rules as `@variant`, and the engine emits
+ * its declaration into the source this step lowers — so the index already
+ * has the type, its `NameKind` and every enumerator. The one fact missing
+ * is that it is a tagged union, which is why `v.kind == .object` read as a
+ * stray `.` and `v.object` as a missing member.
+ *
+ * Only the arms are registered. Nothing here declares a type: the engine's
+ * declaration is the real one, with the anonymous struct each arm actually
+ * has, and synthesizing one over it would replace what the index knows
+ * with something less true. */
+static void vt_add_schema(VStep* st, CCSlice name, CcNameList* arms, CcNameList* voids) {
+    CcLowerer* L = st->L;
+    CCArena a = L->arena;
+    VInfo* vi;
+    CCString kn = @string(`${name}Kind`, a);
+    size_t n = arms->len();
+    size_t i;
+    CcSpan zero;
+    CcDecl* d;
+    if (!name.len || !n || vt_find(st, name)) return;
+    zero.first = 0;
+    zero.last = 0;
+    d = cc_arena_alloc(a, sizeof(CcDecl), _Alignof(CcDecl));
+    memset(d, 0, sizeof(*d));
+    d->span = zero;
+    vi = cc_arena_alloc(a, sizeof(VInfo), _Alignof(VInfo));
+    memset(vi, 0, sizeof(*vi));
+    vi->name = name;
+    vi->kind_name = lw_keep(L, &kn);
+    vi->arms = vec_new::[VArmRef](a);
+    vi->decl = d;
+    vi->unit = NULL;
+    vi->schema = true;
+    for (i = 0; i < n; i++) {
+        CCSlice an = *arms->get_ptr(i);
+        VArm* arm = cc_arena_alloc(a, sizeof(VArm), _Alignof(VArm));
+        bool is_void = cc_slice_eq_cstr(voids->get_ptr(i), "void");
+        memset(arm, 0, sizeof(*arm));
+        arm->name = an;
+        arm->span = zero;
+        arm->type = NULL;   /* an anonymous struct: the index has it, this does not */
+        arm->payload = !is_void;
+        vi->arms.push(arm);
+    }
+    st->variants.push(vi);
+}
+
+/* `Name arm1 arm2=void …`, one type per line. */
+static void vt_collect_schema(VStep* st) {
+    CcLowerer* L = st->L;
+    CCSlice text = L->opts.schema_variants;
+    size_t i = 0;
+    if (!text.len) return;
+    while (i < text.len) {
+        size_t line_end = i;
+        CcNameList arms = vec_new::[CCSlice](L->arena);
+        CcNameList voids = vec_new::[CCSlice](L->arena);
+        CCSlice name = cc_slice_empty();
+        size_t k;
+        while (line_end < text.len && text.ptr[line_end] != '\n') line_end++;
+        k = i;
+        while (k < line_end) {
+            size_t w0;
+            size_t w1;
+            while (k < line_end && (text.ptr[k] == ' ' || text.ptr[k] == '\t' || text.ptr[k] == '\r')) k++;
+            w0 = k;
+            while (k < line_end && text.ptr[k] != ' ' && text.ptr[k] != '\t' && text.ptr[k] != '\r') k++;
+            w1 = k;
+            if (w1 > w0) {
+                CCSlice word = cc_slice_from_buffer((char*)text.ptr + w0, w1 - w0);
+                CCSlice payload = cc_slice_empty();
+                size_t eq = 0;
+                while (eq < word.len && word.ptr[eq] != '=') eq++;
+                if (eq < word.len) {
+                    payload = cc_slice_from_buffer((char*)word.ptr + eq + 1, word.len - eq - 1);
+                    word = cc_slice_from_buffer((char*)word.ptr, eq);
+                }
+                if (!name.len) name = word;
+                else { arms.push(word); voids.push(payload); }
+            }
+        }
+        vt_add_schema(st, name, &arms, &voids);
+        i = line_end < text.len ? line_end + 1 : text.len;
+    }
+}
+
 /* Every variant the index knows, those of this unit and of its headers, in
  * index order (the variant of an arm is indexed before its user). */
 static void vt_collect(VStep* st) {
@@ -779,7 +889,7 @@ static void vt_variant_init(VStep* st, CcInit* in, VInfo* vi) {
                 CcDesignator u;
                 size_t k;
                 size_t nd;
-                if (!arm->type) continue;           /* `.hup = {}`: the tag says it all */
+                if (!arm->type && !arm->payload) continue;  /* `.hup = {}`: the tag says it all */
                 u.field = cstr_slice("u");
                 u.index = NULL;
                 u.index_hi = NULL;
@@ -791,7 +901,7 @@ static void vt_variant_init(VStep* st, CcInit* in, VInfo* vi) {
                     dv.push(d1);
                 }
                 it->designators = dv;
-                vt_init(st, it, arm->type);
+                if (arm->type) vt_init(st, it, arm->type);
             }
             rebuilt.push(it);
         }
@@ -958,15 +1068,22 @@ static void vt_member(VStep* st, CcExpr* e, CcMember mb, bool in_unwrap) {
     vname = vi->name;
     if (cc_slice_eq_cstr(&mb.name, "kind")) return;
     if (cc_slice_eq_cstr(&mb.name, "u")) {
-        CCString m = @string(`cannot reach into variant '${vname}' via '.u' — project an arm ('x.arm') under a kind check or a checked switch instead`, L->arena);
+        CCSlice surface = vi->schema ? cstr_slice("schema union") : cstr_slice("variant");
+        if (st->in_codegen) return;
+        CCString m = @string(`cannot reach into ${surface} '${vname}' via '.u' — project an arm ('x.arm') under a kind check or a checked switch instead`, L->arena);
         lw_error(L, vt_dot_span(e), m);
         return;
     }
     if (!vt_arm(vi, mb.name)) {
+        /* A schema union is a product as well as a sum: fields a
+         * `@grammar(schema)` binds beside its `one of` are members of the
+         * same struct. This step cannot tell those from a misspelled arm,
+         * so it passes to C, which has the declaration. */
+        if (vi->schema) return;
         vt_no_arm(st, vi, mb.name, vt_dot_span(e));
         return;
     }
-    if (!in_unwrap && !vt_protected(st, vt_spell(st, mb.a), mb.name)) {
+    if (!in_unwrap && !st->in_codegen && !vt_protected(st, vt_spell(st, mb.a), mb.name)) {
         CCSlice an = mb.name;
         CCSlice subj = vt_spell(st, mb.a);
         CCString m = @string(`projection of arm '${an}' is not dominated by a kind check and has no !> handler`, L->arena);
@@ -1164,10 +1281,13 @@ static void vt_assign(VStep* st, CcExpr* e, CcBinary as) {
     /* the tag is read-only */
     @switch (lhs->k) {
         case .member(mb): {
-            if (cc_slice_eq_cstr(&mb.name, "kind") && vt_of_type(st, type_of_expr(w, mb.a), NULL)) {
-                CCString m = @string(`variant tag '.kind' is read-only — the tag changes only through construction or whole-variant assignment ('v = (V){ .arm = ... };')`, L->arena);
-                lw_error(L, vt_dot_span(lhs), m);
-                return;
+            if (cc_slice_eq_cstr(&mb.name, "kind")) {
+                VInfo* kvi = vt_of_type(st, type_of_expr(w, mb.a), NULL);
+                if (kvi && !st->in_codegen) {
+                    CCString m = @string(`variant tag '.kind' is read-only — the tag changes only through construction or whole-variant assignment ('v = (V){ .arm = ... };')`, L->arena);
+                    lw_error(L, vt_dot_span(lhs), m);
+                    return;
+                }
             }
             break;
         }
@@ -1686,6 +1806,11 @@ static void vt_on_stmt(Walker* w, CcStmt* s, bool enter) {
 
 static void vt_on_decl(Walker* w, CcDecl* d) {
     VStep* st = (VStep*)w->env;
+    st->in_codegen = false;
+    @switch (d->k) {
+        case .func(fd): st->in_codegen = vt_is_codegen(fd.name); break;
+        default: break;
+    }
     vt_decl(st, d, false);
 }
 
@@ -1724,6 +1849,7 @@ static void CcLowerer_variants(CcLowerer* L) {
     w.on_stmt = vt_on_stmt;
     w.on_decl = vt_on_decl;
     w.env = &st;
+    vt_collect_schema(&st);
     vt_collect(&st);
     if (!st.variants.len()) return;
     tw_unit(&w);

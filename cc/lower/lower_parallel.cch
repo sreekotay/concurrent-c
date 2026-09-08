@@ -495,7 +495,13 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     uint32_t id;
     CcStmt* blk;
     if (pl_reject(L, p, sp)) return;
-    if (!n) { s->k = lw_block(L, sp)->k; return; }
+    if (!n) {
+        /* an empty block would run and join nothing, which is what the
+         * caller asked for only by accident */
+        CCString m = @string(`${"@"}parallel needs at least one arm`, L->arena);
+        lw_error(L, sp, m);
+        return;
+    }
     for (i = 0; i < n; i++) {
         CcParallelArm* arm = armv->get_ptr(i);
         if (!pl_arm_ok(L, arm, sp)) return;

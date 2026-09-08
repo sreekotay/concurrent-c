@@ -23,6 +23,7 @@
 #include "diag/diag.h"
 #include "visitor/pass_common.h"
 #include "preprocess/preprocess.h"
+#include "preprocess/variant_lower.h"
 #include "preprocess/emit_plan.h"
 #include "preprocess/script_entry.h"
 #include "preprocess/script_oneliner.h"
@@ -4162,6 +4163,40 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
     return 0;
 }
 
+/* The tagged unions a schema grammar declared, for the lowerer.
+ *
+ * A `one of` in a `@grammar(schema)` body is a tagged union with the same
+ * kind/`u` layout and projection rules as `@variant`. The engine emits its
+ * declaration into the source the lowerer reads, so the index has the type
+ * and every enumerator; what nothing in that text says is that it is a
+ * tagged union. The engine queues each one it declares — how the shadow
+ * path learns the same fact — and the lowerer is a separate process, so
+ * the queue is written where it can read it. */
+static int cc__write_schema_variants(char* out_path, size_t cap) {
+    int n = cc_variant_schema_pending_count();
+    char dir[PATH_MAX];
+    FILE* f;
+    int i;
+    out_path[0] = '\0';
+    if (n <= 0) return 0;
+    snprintf(dir, sizeof(dir), "%s/clean_schema", g_cache_root);
+    if (cc__mkdir_p(dir) != 0) return -1;
+    snprintf(out_path, cap, "%s/%d.txt", dir, (int)getpid());
+    f = fopen(out_path, "wb");
+    if (!f) { out_path[0] = '\0'; return -1; }
+    for (i = 0; i < n; i++) {
+        int na = cc_variant_schema_pending_narms(i);
+        int a;
+        fprintf(f, "%s", cc_variant_schema_pending_name(i));
+        for (a = 0; a < na; a++)
+            fprintf(f, " %s%s", cc_variant_schema_pending_arm(i, a),
+                    cc_variant_schema_pending_arm_is_void(i, a) ? "=void" : "");
+        fputc('\n', f);
+    }
+    fclose(f);
+    return 0;
+}
+
 /* What the `@comptime { }` blocks emitted, into the C the lowerer wrote.
  * The fragments were collected before lowering; they are host C already,
  * so they splice at their anchors and nothing re-reads them. */
@@ -4191,7 +4226,8 @@ static int cc__splice_comptime_into_clean(const char* c_path, const char* orig_p
 static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
                                  const char* quote_dir) {
     char tool[PATH_MAX], known[PATH_MAX], incdir[PATH_MAX], hroot[PATH_MAX];
-    char* argv[20];
+    char schema[PATH_MAX];
+    char* argv[24];
     int argc = 0, rc;
     if (cc__find_clean_tool("cclower_cc", tool, sizeof(tool)) != 0) {
         fprintf(stderr, "cc: clean lowerer not built (out/cc/bin/cclower_cc missing): run `make -C cc lower-cc`\n");
@@ -4213,6 +4249,11 @@ static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
     argv[argc++] = hroot;
     argv[argc++] = (char*)"--known-types";
     argv[argc++] = known;
+    if (cc__write_schema_variants(schema, sizeof(schema)) != 0) return -1;
+    if (schema[0]) {
+        argv[argc++] = (char*)"--schema-variants";
+        argv[argc++] = schema;
+    }
     if (quote_dir && quote_dir[0]) {
         argv[argc++] = (char*)"--quote-dir";
         argv[argc++] = (char*)quote_dir;
