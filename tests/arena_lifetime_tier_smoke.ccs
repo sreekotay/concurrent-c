@@ -54,6 +54,7 @@ static int test_l2_and_main(void) {
 }
 
 static int test_detach_refuses_stack(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     cc_arena_stack(s, 256);
     CCArena heap = cc_arena_heap(256) @destroy;
     CCArena taken;

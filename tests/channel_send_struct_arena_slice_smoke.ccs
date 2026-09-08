@@ -8,6 +8,7 @@ typedef struct Msg {
 } Msg;
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCArena a = cc_arena_heap(kilobytes(4));
     char* p = (char*)cc_arena_alloc(a, 16, 1);
     if (!p) return 1;

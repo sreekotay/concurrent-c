@@ -37,6 +37,7 @@ static int test_attach_lifo_walk(void) {
 }
 
 static int test_carved_child_nested_walk(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCArena owner = cc_arena_heap(2048) @destroy;
     CCArena child;
     CCArena sink = cc_arena_heap(256) @destroy;
@@ -57,6 +58,7 @@ static int test_carved_child_nested_walk(void) {
 }
 
 static int test_heap_child_move(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCArena owner = cc_arena_heap(1024) @destroy;
     CCArena dst = cc_arena_heap(1024) @destroy;
     CCArena kid;
@@ -79,6 +81,7 @@ static int test_heap_child_move(void) {
 }
 
 static int test_heap_child_sized(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCArena owner = cc_arena_heap(1024) @destroy;
     CCArena kid;
     CCArena dst = cc_arena_heap(1024) @destroy;
@@ -103,6 +106,7 @@ static int test_heap_child_sized(void) {
 }
 
 static int test_scope_arena_adopt(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCArena parent = cc_arena_heap(1024) @destroy;
     CCArena tmp = cc_arena_heap(256) @destroy;
     CCArena moved;
