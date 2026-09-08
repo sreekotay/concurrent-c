@@ -1009,7 +1009,7 @@ static CcStmt* parse_at_stmt(P* p) {
         {
             const char* at_serial = "@serial";
             const char* at_parallel = "@" "parallel";
-            CCString m = @string(`'${at_serial}' is an arm of ${at_parallel} { ... } and cannot stand alone`, p->arena);
+            CCString m = @string(`${at_serial} is only an arm of ${at_parallel} { }`, p->arena);
             err_here(p, m);
         }
         b.stmts = vec_new::[CcStmtRef](p->arena);

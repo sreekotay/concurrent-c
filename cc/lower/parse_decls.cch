@@ -859,7 +859,15 @@ static bool parse_declaration_specs(P* p, CcDeclList* out, uint32_t first, CcAtt
             err_here(p, m);
         } else if (p->t[p->i].kind == CC_TK_AT_WORD) {
             CCSlice w = p->t[p->i].text;
-            if (at_file_scope_stmt_word(p)) {
+            if (cc_slice_eq_cstr(&w, "@serial")) {
+                /* `@serial` is not a statement anywhere: it is an arm, and
+                 * saying it cannot appear at file scope would suggest it
+                 * could appear at any other one */
+                const char* at_serial = "@" "serial";
+                const char* at_parallel = "@" "parallel";
+                CCString m = @string(`${at_serial} is only an arm of ${at_parallel} { }`, p->arena);
+                err_here(p, m);
+            } else if (at_file_scope_stmt_word(p)) {
                 CCString m = @string(`'${w}' is a statement and cannot appear at file scope`, p->arena);
                 err_here(p, m);
             } else {
