@@ -2169,6 +2169,17 @@ static void cc__hook_entry(CcIndex* ix, const CcUnit* u, CcHookReg* reg, CCSlice
         CCSlice a = cc__expr_is_ident(value, &nm) ? nm : cc__expr_string(ix, u, value);
         reg->has_sink = true;
         if (a.ptr) reg->sink_fn = a;
+        {
+            /* `cc_type_dynamic_call("callee", "WRAP")` names two things: the
+             * callee, and the macro each argument goes through on the way in.
+             * The search above answers with the first string it reaches, so
+             * the second is read off the registration's own argument list. */
+            CcKids k = cc__expr_kids(value);
+            if (k.has_args && k.args.len() >= 2) {
+                CCSlice w = cc__expr_string(ix, u, *k.args.get_ptr(1));
+                if (w.ptr) reg->sink_arg = w;
+            }
+        }
     }
 }
 
@@ -3404,7 +3415,11 @@ static CcMethod* cc__resolve_sink(CcIndex* ix, CcTypeInfo* recv, CCSlice method,
         sb.push_slice(best->sink_fn, ix->arena);
         sb.push_cstr(" -> ", ix->arena);
         sb.push_slice(cc__sym_origin(ix, cs), ix->arena);
-        return cc__method_new(ix, recv, method, best->sink_fn, "ufcs_sink", cc__ix_finish(ix, &sb), cs, false);
+        {
+            CcMethod* sm = cc__method_new(ix, recv, method, best->sink_fn, "ufcs_sink", cc__ix_finish(ix, &sb), cs, false);
+            sm->sink_arg = best->sink_arg;
+            return sm;
+        }
     }
     cc__tried(tried, ta, best->sink_fn, " (.ufcs_sink: not declared)");
     return NULL;

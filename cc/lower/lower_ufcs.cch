@@ -622,6 +622,31 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
     else recv_arg = recv_ptr ? cc_expr_unary(CC_OP_DEREF, uf_wrap(L, uf.recv, sp), sp, L->arena) : uf.recv;
     call.callee = lw_ident(L, uf_overload_for_args(w, L, uf, m), sp);
     call.args = vec_new::[CcExprRef](L->arena);
+    if (cc_slice_eq_cstr(&m->source, "ufcs_sink")) {
+        /* A dynamic family resolves nothing at compile time: the method is
+         * a string the callee looks up, and the arguments are a run of
+         * values it reads by count. So the call carries what the name no
+         * longer says -- the method, then how many arguments follow, then
+         * each one through the macro the registration named. */
+        CcExprList* av = &uf.args;
+        size_t na = av->len();
+        size_t ai;
+        CCString mq = cc_string_new();
+        CCString cnt = @string(`${(int)na}`, L->arena);
+        cc_string_push_char(&mq, '"', L->arena);
+        cc_string_push_slice(&mq, uf.method, L->arena);
+        cc_string_push_char(&mq, '"', L->arena);
+        call.args.push(recv_arg);
+        call.args.push(lw_text(L, mq, sp));
+        call.args.push(lw_text(L, cnt, sp));
+        for (ai = 0; ai < na; ai++) {
+            CcExpr* a = *av->get_ptr(ai);
+            if (m->sink_arg.len) a = lw_call1(L, m->sink_arg, a, sp);
+            call.args.push(a);
+        }
+        e->k = { .call = call };
+        return;
+    }
     if (!uf_targs_lead(w, L, uf, m, sp, &call.args)) return;
     call.args.push(recv_arg);
     {
