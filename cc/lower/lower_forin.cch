@@ -47,7 +47,7 @@ static CcHookReg* fi_hooks_of(CcLowerer* L, CcType* t, CCSlice* canon_out) {
 
 /* The element type a walk yields: the access callee's return type without
  * its pointer, or the instance's first type argument. */
-static CcType* fi_elem_type(CcLowerer* L, CCSlice canon, CcHookReg* hooks) {
+static CcType* fi_elem_type(CcLowerer* L, CCSlice canon, CcHookReg* hooks, CcSpan sp) {
     CcIndex* ix = L->ix;
     CcTypeInfo* info = ix->type_get(canon);
     if (hooks && hooks->access_name.len && cc_slice_eq_cstr(&hooks->access_kind, "call")) {
@@ -71,6 +71,13 @@ static CcType* fi_elem_type(CcLowerer* L, CCSlice canon, CcHookReg* hooks) {
         CcTypeList* tv = &info->targs;
         if (tv->len()) return *tv->get_ptr(0);
     }
+    /* The bare slice IS the char family: `CCSlice` is what `char[:]`
+     * spells, and the typed instances (`CCSlice_int`, …) are the ones that
+     * carry a type argument. Nothing names `char` for it, so nothing else
+     * can read the element type off the registration. */
+    if (cc_slice_eq_cstr(&canon, "CCSlice") || cc_slice_eq_cstr(&canon, "CCSliceUnique") ||
+        cc_slice_eq_cstr(&canon, "CCSliceShared") || cc_slice_eq_cstr(&canon, "CCSlicePacked"))
+        return cc_type_named(cstr_slice("char"), sp, L->arena);
     return NULL;
 }
 
@@ -164,7 +171,7 @@ static bool fi_walk(FStep* st, CcStmt* s, CcForIn fi, CcExpr* it) {
         lw_error(L, sp, m);
         return false;
     }
-    elem = fi_elem_type(L, canon, hooks);
+    elem = fi_elem_type(L, canon, hooks, sp);
     if (!elem) {
         CCString m = @string(`cannot tell what walking a '${canon}' yields: its '.access' names no element type`, L->arena);
         lw_error(L, sp, m);

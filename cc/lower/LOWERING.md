@@ -341,6 +341,14 @@ diagnostic, not a silent rewrite of the wrong name.
 
 ## Slices
 
+A walk reads its element type off the container's registration: the return
+of the `.access` hook, or the type argument of the instance. The BARE slice
+has neither — `CCSlice` is what `char[:]` spells, and only the typed
+instances (`CCSlice_int`, …) carry a type argument — so the char family
+names its element directly. Nothing else can read it off a registration
+that never mentions `char`.
+
+
 **The type.** `T[:]` is an instance of the slice family, named by the same
 canonical spelling the index computes: `CCSlice` for the char family,
 `CCSlice_T` otherwise, and `CCSliceUnique` for a unique char slice. A
