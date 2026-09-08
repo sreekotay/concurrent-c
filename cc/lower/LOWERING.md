@@ -747,6 +747,32 @@ it. A concurrency construct that
 quietly ran as something else would be a program that behaves differently
 for reasons the page does not show.
 
+## Deadlines
+
+`@with_deadline(d) { ... }` becomes a block that builds the scope from the
+deadline the site names, pushes it as the current one, runs the body, and
+puts the previous one back:
+
+```c
+{
+    CCDeadline __cc_dl0;
+    CCDeadline* __cc_use0 = cc_deadline_scope(&__cc_dl0, (seconds(1)));
+    CCDeadline* __cc_prev0 = cc_deadline_push(__cc_use0);
+    ...
+    cc_deadline_pop(__cc_prev0);
+}
+```
+
+`as name` binds the scope's handle under that name instead of the
+generated one, so the body — and anything it hands the handle to — names
+the same clock. The pop is the last statement of the block, not a
+`@defer`: a `return` out of the body leaves the pushed deadline in place,
+which is what the runtime expects of a scope the returning frame is done
+with.
+
+The step runs before closures and `@parallel`, so by the time those look
+at the body it is ordinary statements.
+
 ## Scheduling facts
 
 `@blocking` / `@nonblocking` / `@noblock` / `@latency_sensitive` on a

@@ -1,0 +1,88 @@
+#pragma(@per_tu)
+/* Clean lowerer, step: deadline scopes. `@with_deadline(d) { ... }` runs
+ * its body under a clock: the scope is built from the deadline the site
+ * names, pushed as the current one for the body, and the previous one is
+ * put back at the end.
+ *
+ * `as name` binds the scope's own handle, so the body — and anything it
+ * hands the handle to — can name the same clock. Without it the handle
+ * has a generated name nothing else can reach: a body that never names
+ * its deadline does not need to.
+ *
+ * The pop is the last statement of the block, not a `@defer`: a `return`
+ * out of the body leaves the pushed deadline in place, which is what the
+ * shadow lowerer does and what the runtime expects of a scope that the
+ * returning frame is done with. Lifetime: the lowerer arena. */
+#ifndef CC_LOWER_DEADLINE_CCH
+#define CC_LOWER_DEADLINE_CCH
+#include "lower.cch"
+#include "typing.cch"
+
+typedef struct DStep {
+    CcLowerer* L;
+    Walker* w;
+    uint32_t next_id;
+} DStep;
+
+static void dl_stmt(DStep* st, CcStmt* s, CcWithDeadline wd) {
+    CcLowerer* L = st->L;
+    CCArena a = L->arena;
+    CcSpan sp = s->span;
+    uint32_t id = st->next_id++;
+    CcStmt* blk = lw_block(L, sp);
+    CCString slot = @string(`__cc_dl${id}`, a);
+    CCString prev = @string(`__cc_prev${id}`, a);
+    CCSlice slot_n = lw_keep(L, &slot);
+    CCSlice prev_n = lw_keep(L, &prev);
+    CCSlice use_n;
+    CcType* dl_t = cc_type_named(cstr_slice("CCDeadline"), sp, a);
+    CcType* dlp_t = cc_type_pointer(cc_type_named(cstr_slice("CCDeadline"), sp, a), sp, a);
+    CcStmtList* body = &wd.stmts;
+    size_t n = body->len();
+    size_t i;
+    if (wd.as.len) use_n = wd.as;
+    else {
+        CCString use = @string(`__cc_use${id}`, a);
+        use_n = lw_keep(L, &use);
+    }
+    lw_push(blk, lw_decl_stmt(L, dl_t, slot_n, NULL, sp));
+    lw_push(blk, lw_decl_stmt(L, dlp_t, use_n,
+                              lw_call2(L, cstr_slice("cc_deadline_scope"),
+                                       cc_expr_unary(CC_OP_ADDR, lw_ident(L, slot_n, sp), sp, a),
+                                       lw_paren(L, wd.deadline, sp), sp), sp));
+    lw_push(blk, lw_decl_stmt(L, dlp_t, prev_n,
+                              lw_call1(L, cstr_slice("cc_deadline_push"), lw_ident(L, use_n, sp), sp), sp));
+    for (i = 0; i < n; i++) lw_push(blk, *body->get_ptr(i));
+    lw_push(blk, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_deadline_pop"),
+                                          lw_ident(L, prev_n, sp), sp), sp));
+    s->k = blk->k;
+}
+
+static void dl_on_stmt(Walker* w, CcStmt* s, bool enter) {
+    DStep* st = (DStep*)w->env;
+    CcWithDeadline wd;
+    bool hit = false;
+    if (!enter) return;
+    @switch (s->k) {
+        case .with_deadline(x): wd = x; hit = true; break;
+        default: break;
+    }
+    if (hit) dl_stmt(st, s, wd);
+}
+
+static void CcLowerer_deadline(CcLowerer* L) {
+    Walker w;
+    DStep st;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    st.w = &w;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_stmt = dl_on_stmt;
+    w.env = &st;
+    tw_unit(&w);
+}
+
+#endif
