@@ -12,6 +12,7 @@
 #include "lower.cch"
 #include "comptime.cch"
 #include "typing.cch"
+#include <ccc/cc_ufcs_families.h>
 
 static int cl_destroy_chain(CcLowerer* L, CCSlice canon, CcExpr* subject, CcStmt* into, CcSpan sp, int depth);
 
@@ -475,6 +476,39 @@ static CcMethod* uf_hook_site(Walker* w, CcLowerer* L, CCSlice tn, CcUfcs uf, Cc
                             cs, by_value);
 }
 
+/* An ambient namespace: `cc_std_out.write(x)` -> `cc_std_out_write_auto(x)`.
+ *
+ * The receiver names no value — it is the namespace the callee lives in —
+ * so there is nothing for the receiver typing to find and no receiver
+ * argument to pass. The pairs are the table `cc_ufcs_families.h` holds for
+ * every lowerer, so neither invents a name the other does not know. The
+ * callee it names is a `_Generic` that picks the overload from the one
+ * argument's type, which is why the argument is passed as written. */
+static bool uf_ambient(Walker* w, CcLowerer* L, CcExpr* e, CcUfcs uf, CcSpan sp) {
+    CcExprList* av = &uf.args;
+    CCSlice recv;
+    CcExpr* a0;
+    size_t i;
+    if (uf.arrow || !uf.recv) return false;
+    if (!expr_ident(strip_parens_expr(uf.recv), &recv) || !recv.len) return false;
+    if (av->len() != 1) return false;
+    if (sc_lookup(w, recv)) return false;   /* a local of that name is a value, not a namespace */
+    a0 = *av->get_ptr(0);
+    for (i = 0; cc_ufcs_ambient_rows[i].recv; i++) {
+        const CcUfcsAmbientRow* row = &cc_ufcs_ambient_rows[i];
+        CCSlice rn = cstr_slice(row->recv);
+        CCSlice mn = cstr_slice(row->meth);
+        CcCall call;
+        if (!slice_eq(recv, rn) || !slice_eq(uf.method, mn)) continue;
+        call.callee = lw_ident(L, cstr_slice(row->callee), sp);
+        call.args = vec_new::[CcExprRef](L->arena);
+        call.args.push(a0);
+        e->k = { .call = call };
+        return true;
+    }
+    return false;
+}
+
 static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice tn, CCSlice reason) {
     UStep* st = (UStep*)w->env;
     CcLowerer* L = st->L;
@@ -488,6 +522,7 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
         lw_error(L, sp, msg);
         return;
     }
+    if (!rt && uf_ambient(w, L, e, uf, sp)) return;
     if (!rt) {
         CCSlice kind = uf.recv ? CcExpr_kind_name(uf.recv) : cc_slice_empty();
         CCSlice who = cc_slice_empty();

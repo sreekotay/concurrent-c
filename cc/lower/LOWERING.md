@@ -857,6 +857,17 @@ that still compiles.
 An `@async` function returning a Result is not lowered yet — the task
 carries the value boxed, and the await unboxes it.
 
+### Ambient namespaces
+
+`cc_std_out.write(x)` is `cc_std_out_write_auto(x)`. The receiver names no
+value — it is the namespace the callee lives in — so there is nothing for
+the receiver typing to find and no receiver argument to pass. The pairs
+come from `cc_ufcs_families.h`, the table every lowerer reads, so neither
+invents a name the other does not know. The callee it names is a
+`_Generic` that picks the overload from the argument's type, which is why
+the argument is passed as written. A local of that name shadows the
+namespace: it is a value, and the receiver typing has something to find.
+
 ## `as:` coercion at a call
 
 `@typeview on T { as: f; }` says a `T` is an `f` wherever one is wanted —
