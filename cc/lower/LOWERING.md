@@ -210,6 +210,37 @@ The named tiers (`T_m`, `cc_<snake>_m`, hooks, registrations) are
 conventions the declaration opted into, so they keep the ordinary
 address rule.
 
+**A `.ufcs` handler that decides from the call site.** The index reads a
+handler's body as a table of `method -> callee` rules, and a handler that
+is one is answered from that table. One that decides from what it was
+passed is not: `toy.pick(2)`, `toy.pick("abcd")` and `toy.pick(3, 5)` are
+three different callees, and no reading of the body names them without the
+site. The index marks such a handler opaque, and an opaque handler is run.
+
+It is compiled once, out of a unit built for it — the prelude it is
+written against, the type declarations of the file that declared it, and
+the handler itself. Not that whole file: handing the file over declares
+its types twice, once from the extraction and once from the file, and the
+compile fails on the second. A handler that does not compile is not tried
+again and the site falls back to what the index could read.
+
+`@typehooks on *` is never run. A wildcard handler is where every
+unresolved method ends up, so compiling one that cannot be compiled would
+report that failure at every such site, about a handler that was not going
+to be the answer.
+
+What comes back is the callee, or one of two answers that are not a name:
+`cc_ufcs_pass()` leaves the method to the ordinary tiers, and the empty
+slice is a refusal. A `cc_ufcs_emit_value` return says the receiver goes
+by value. A name nothing declares is a diagnostic at the site, naming the
+handler — never a call the host is left to explain.
+
+A string literal argument is spelled to the handler as `const char*`. That
+is the shape the argument has where a handler picks an overload by it, and
+the spelling every handler already written was written against; typing it
+`char *` would answer a question about the site with a fact about the type
+system, and the handler's `const char*` arm would never be taken.
+
 **`as:` faces.** A method resolved through a `@typeview on T { as: f; }`
 field belongs to the field, not to `T`: the resolution records the member
 chain it walked, dot-joined across hops, and the call site projects the

@@ -48,4 +48,38 @@ extern int cc_comptime_exec_eval_literal(const char* expr,
                                          char* err_buf, size_t err_sz,
                                          CCArena arena);
 
+/* ---- `.ufcs` hooks that compute their callee ---------------------------
+ *
+ * A `@typehooks .ufcs` handler is a function of the call site: the receiver
+ * type, the method, the mode, and the arguments with their types. Reading
+ * its body as a table of `method -> callee` rules covers a handler that is
+ * one, and says nothing about one that decides from what it was passed —
+ * `toy.mix(4)` and `toy.mix("abc")` are different callees, and no reading
+ * of the body knows which without the site.
+ *
+ * So a handler the index could not read as rules is run. It is compiled
+ * out of the source that declared it, once, and called per site. */
+#define CC_COMPTIME_TYPE_HOOK_UFCS 1
+
+/* The `typedef` / `struct` declarations of a source, as a prelude: what a
+ * handler's own translation unit needs to name the types it is about. */
+extern char* cc_ct_extract_type_decls_prelude(const char* src, size_t n);
+
+extern int cc_comptime_compile_type_hook_callable(const char* registration_input_path,
+                                                  const char* logical_file,
+                                                  const char* original_src,
+                                                  size_t original_len,
+                                                  const char* expr_src,
+                                                  size_t expr_len,
+                                                  int kind,
+                                                  void** out_owner,
+                                                  const void** out_fn_ptr);
+
+/* What the handler returns is the callee, with two answers that are not a
+ * name: `CC_UFCS_PASS_TAG` ("not mine, keep looking") and the empty slice
+ * ("mine, and refused"). A `cc_ufcs_emit_value` return is tagged so the
+ * receiver goes by value. */
+typedef CCSlice (*CcUfcsHookFn)(CCSlice recv_type, CCSlice method, CCSlice mode,
+                                CCSliceArray argv, CCSliceArray arg_types, CCArena arena);
+
 #endif

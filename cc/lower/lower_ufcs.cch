@@ -10,6 +10,7 @@
 #ifndef CC_LOWER_UFCS_CCH
 #define CC_LOWER_UFCS_CCH
 #include "lower.cch"
+#include "comptime.cch"
 #include "typing.cch"
 
 static int cl_destroy_chain(CcLowerer* L, CCSlice canon, CcExpr* subject, CcStmt* into, CcSpan sp, int depth);
@@ -304,6 +305,161 @@ static bool uf_recv_by_ptr(CcLowerer* L, CcMethod* m) {
     return true;
 }
 
+/* ---- a `.ufcs` handler that decides from the call site ------------------ */
+
+/* The handler's own translation unit: the prelude it is written against,
+ * the type declarations of the file that declared it, and the handler.
+ *
+ * Not the whole file. A handler is compiled to be called, so its unit has
+ * to hold what the handler names and nothing else — handing over the file
+ * it came from declares that file's types twice, once from the prelude
+ * extraction and once from the file, and the compile fails on the second.
+ * This is the unit the shadow path builds (`shadow_ufcs_slim_src`). */
+static CCString uf_hook_tu(CcLowerer* L, CcHookReg* hook, CCSlice body) {
+    CCArena a = L->arena;
+    CcUnit* hu = hook->unit;
+    CCSlice src = hu->tape.src;
+    CCString tu = cc_string_new();
+    char* types;
+    cc_string_push_cstr(&tu, "#define CC_UFCS_SLIM\n"
+                             "#include <ccc/std/prelude.cch>\n"
+                             "#include <ccc/cc_ufcs.cch>\n", a);
+    types = cc_ct_extract_type_decls_prelude(src.ptr, src.len);
+    if (types) {
+        if (types[0]) cc_string_push_cstr(&tu, types, a);
+        free(types);
+    }
+    cc_string_push_slice(&tu, body, a);
+    cc_string_push_char(&tu, '\n', a);
+    return tu;
+}
+
+/* The handler this type's hook names, as a declaration of this unit. */
+static CcDecl* uf_hook_decl(CcIndex* ix, CcHookReg* hook, CcUnit** out_unit) {
+    CcSym* s = cc__sym_find_kind(ix, hook->ufcs_fn, CC_SYM_FUNC);
+    if (!s || !s->decl || !s->unit || !s->is_definition) return NULL;
+    *out_unit = s->unit;
+    return s->decl;
+}
+
+/* The handler, compiled. Once: one that does not compile is not tried
+ * again, and the site falls back to what the index could read. */
+static CcUfcsHookFn uf_hook_fn(Walker* w, CcLowerer* L, CcHookReg* hook) {
+    CcIndex* ix = w->ix;
+    CCArena a = L->arena;
+    const void* fn = NULL;
+    void* owner = NULL;
+    CcUnit* du = NULL;
+    CcDecl* d;
+    CCString tu;
+    CCString path_s = cc_string_new();
+    CCString name_s = cc_string_new();
+    const char* path;
+    const char* name;
+    const char* tu_c;
+    if (hook->ufcs_compile_tried) return (CcUfcsHookFn)hook->ufcs_callable;
+    hook->ufcs_compile_tried = true;
+    if (!hook->unit || !hook->ufcs_fn.len || hook->ufcs_fn.ptr[0] == '<') return NULL;
+    d = uf_hook_decl(ix, hook, &du);
+    if (!d || !du) return NULL;
+    tu = uf_hook_tu(L, hook, cc__span_text(ix, du, d->span.first, d->span.last));
+    cc_string_push_slice(&path_s, hook->unit->tape.path, a);
+    path = cc_string_cstr(&path_s, a);
+    cc_string_push_slice(&name_s, hook->ufcs_fn, a);
+    name = cc_string_cstr(&name_s, a);
+    tu_c = cc_string_cstr(&tu, a);
+    if (!path || !name || !tu_c) return NULL;
+    if (cc_comptime_compile_type_hook_callable(path, path, tu_c, strlen(tu_c),
+                                               name, strlen(name),
+                                               CC_COMPTIME_TYPE_HOOK_UFCS,
+                                               &owner, &fn) != 0 || !fn)
+        return NULL;
+    hook->ufcs_callable = (void*)fn;
+    return (CcUfcsHookFn)fn;
+}
+
+/* The method a computed handler names for this site, or NULL.
+ *
+ * Only for a handler the index could not read as rules: one it could read
+ * has already answered, and running it again would say the same thing more
+ * slowly. What comes back is a callee, `__cc_ufcs_pass__` (not mine), or
+ * the empty slice (mine, and refused) — the last two leave the site to the
+ * diagnostic that was going to be raised anyway. */
+static CcMethod* uf_hook_site(Walker* w, CcLowerer* L, CCSlice tn, CcUfcs uf, CcSpan sp) {
+    CcIndex* ix = w->ix;
+    CcHookReg* hook = cc__hook_match(ix, tn, true);
+    CcUfcsHookFn fn;
+    CcExprList* av = &uf.args;
+    size_t n = av->len();
+    size_t i;
+    CCSlice* argv_items;
+    CCSlice* type_items;
+    CCSliceArray argv;
+    CCSliceArray arg_types;
+    CCSlice out;
+    CCSlice callee;
+    bool by_value = false;
+    CcSym* cs;
+    if (!hook || !hook->ufcs_opaque) return NULL;
+    /* Not `@typehooks on *`. A wildcard handler is the fallback every
+     * unresolved method reaches, so compiling one that cannot be compiled
+     * — a stdlib handler over runtime symbols the hook dylib does not link
+     * — would report that failure at every such site, about a handler that
+     * was not going to be the answer. A handler that names its type is
+     * being asked about that type. */
+    if (hook->any) return NULL;
+    fn = uf_hook_fn(w, L, hook);
+    if (!fn) return NULL;
+    argv_items = cc_arena_alloc(L->arena, (n ? n : 1) * sizeof(CCSlice), _Alignof(CCSlice));
+    type_items = cc_arena_alloc(L->arena, (n ? n : 1) * sizeof(CCSlice), _Alignof(CCSlice));
+    for (i = 0; i < n; i++) {
+        CcExpr* arg = *av->get_ptr(i);
+        CcType* at = arg ? type_of_expr(w, arg) : NULL;
+        bool is_str = false;
+        @switch (arg->k) {
+            case .string: is_str = true; break;
+            default: break;
+        }
+        argv_items[i] = cc__span_text(ix, L->unit, arg->span.first, arg->span.last);
+        /* A string literal is spelled to the handler as `const char*`. That
+         * is the shape the argument has where the handler picks an overload
+         * by it, and it is the spelling every handler already written was
+         * written against; typing it `char *` here would answer a question
+         * about the site with a fact about the type system, and the
+         * handler's `const char*` arm would never be taken. */
+        if (is_str) type_items[i] = cstr_slice("const char*");
+        else type_items[i] = at ? ix->canon(at) : cc_slice_empty();
+    }
+    if (!n) { argv_items = NULL; type_items = NULL; }
+    argv = (CCSliceArray){ argv_items, n };
+    arg_types = (CCSliceArray){ type_items, n };
+    /* `mode` is the name of a `@typeview Mode on T` the receiver was
+     * written through, and this step does not carry one yet: every handler
+     * in the stdlib discards it, so passing empty is what they see either
+     * way. A handler that branches on it would need the view here. */
+    out = fn(tn, uf.method, cc_slice_empty(), argv, arg_types, L->arena);
+    if (!out.ptr || !out.len) return NULL;
+    if (cc_slice_eq_cstr(&out, CC_UFCS_PASS_TAG)) return NULL;
+    callee = out;
+    {
+        size_t vt = sizeof(CC_UFCS_VALUE_TAG) - 1;
+        if (callee.len > vt && memcmp(callee.ptr, CC_UFCS_VALUE_TAG, vt) == 0) {
+            callee = cc_slice_from_buffer((char*)callee.ptr + vt, callee.len - vt);
+            by_value = true;
+        }
+    }
+    cs = cc__callee_sym(ix, callee);
+    if (!cs) {
+        CCSlice hn = hook->ufcs_fn;
+        CCString msg = @string(`type: the '${"."}ufcs' handler '${hn}' names '${callee}' for '${"."}${uf.method}' on '${tn}', and nothing declares it`, L->arena);
+        lw_error(L, sp, msg);
+        return NULL;
+    }
+    return cc__method_plain(ix, uf.method, callee, "typehooks",
+                            cc__cat3(ix, "@" "typehooks .ufcs -> ", cc__sym_origin(ix, cs), " (run)"),
+                            cs, by_value);
+}
+
 static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice tn, CCSlice reason) {
     UStep* st = (UStep*)w->env;
     CcLowerer* L = st->L;
@@ -329,6 +485,7 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
         lw_error(L, sp, msg);
         return;
     }
+    if (!m) m = uf_hook_site(w, L, tn, uf, sp);
     if (!m) {
         CCString msg = @string(`type: ${reason}`, L->arena);
         lw_error(L, sp, msg);

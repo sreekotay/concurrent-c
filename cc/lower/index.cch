@@ -119,6 +119,8 @@ struct CcHookReg {
     bool ufcs_prefix_by_value;
     bool ufcs_rejects;          /* default path returns the empty slice: no composition after the rules */
     bool ufcs_opaque;           /* handler body could not be read as rules (computed names) */
+    void* ufcs_callable;        /* an opaque handler, compiled: called per site */
+    bool ufcs_compile_tried;    /* compiled once, or found not compilable; either way not again */
     bool has_len; bool has_access; bool has_cast; bool has_niche; bool has_sink;
     CCSlice len_kind;           /* .len hook: "field" or "call", naming len_name */
     CCSlice len_name;
