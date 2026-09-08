@@ -84,7 +84,13 @@ static CCSlice ix_canon_of(Walker* w, CcType* rt) {
     return ix->canon(t ? t : rt);
 }
 
-/* `(T){ e }` */
+/* `(T[1]){ e }`: an rvalue given an address.
+ *
+ * Not `&(T){ e }` — a brace-enclosed initializer for a struct initializes
+ * its FIRST MEMBER from `e`, so a `T` value there is a type error and a
+ * `T` whose first member happens to accept it is silently the wrong
+ * object. An array of one is initialized element-wise, so `e` initializes
+ * the whole `T`, and the literal decays to the `T*` the callee wants. */
 static CcExpr* uf_compound(CcLowerer* L, CcType* t, CcExpr* e, CcSpan sp) {
     CcExpr* r = cc__expr_blank(sp, L->arena);
     CcCompound cl;
@@ -101,7 +107,16 @@ static CcExpr* uf_compound(CcLowerer* L, CcType* t, CcExpr* e, CcSpan sp) {
     in->items = vec_new::[CcInitRef](L->arena);
     in->items.push(item);
     in->is_list = true;
-    cl.type = t;
+    {
+        CcType* arr = cc__type_blank(sp, L->arena);
+        CcArrayType at;
+        at.elem = t;
+        at.size = lw_text(L, @string(`1`, L->arena), sp);
+        at.is_static = false;
+        at.is_star = false;
+        arr->k = { .array = at };
+        cl.type = arr;
+    }
     cl.init = in;
     r->k = { .compound = cl };
     return r;
@@ -508,7 +523,7 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
         CcCall call2;
         call2.callee = lw_ident(L, m->callee, sp);
         call2.args = vec_new::[CcExprRef](L->arena);
-        call2.args.push(cc_expr_unary(CC_OP_ADDR, lit, sp, L->arena));
+        call2.args.push(lit);   /* the array literal is the pointer */
         {
             CcExprList* args = &uf.args;
             size_t n = args->len();
@@ -975,6 +990,29 @@ static void uf_check_views(CcLowerer* L) {
     }
 }
 
+/* `println(x)` / `eprintln(x)`: free sugar for `cc_println` / `cc_eprintln`.
+ *
+ * Both are language spellings, not declared functions — `cc_println` is a
+ * `_Generic` macro the prelude defines — so nothing in the index resolves
+ * the bare name, and leaving it as written hands C an undeclared call. The
+ * name is the whole difference; the arguments and the Result the macro
+ * yields are untouched. */
+static bool uf_print_sugar(CcExpr* e, void* env) {
+    CcLowerer* L = (CcLowerer*)env;
+    @switch (e->k) {
+        case .call(cl): {
+            CCSlice fn;
+            CcExpr* callee = strip_parens_expr(cl.callee);
+            if (!expr_ident(callee, &fn)) break;
+            if (cc_slice_eq_cstr(&fn, "println")) callee->k = { .ident = cstr_slice("cc_println") };
+            else if (cc_slice_eq_cstr(&fn, "eprintln")) callee->k = { .ident = cstr_slice("cc_eprintln") };
+            break;
+        }
+        default: break;
+    }
+    return true;
+}
+
 static void CcLowerer_ufcs(CcLowerer* L) {
     Walker w;
     UStep st;
@@ -993,6 +1031,10 @@ static void CcLowerer_ufcs(CcLowerer* L) {
     memset(&v, 0, sizeof(v));
     v.expr = uf_type_scoped_visit;
     v.env = &st;
+    CcUnit_walk(L->unit, v);
+    memset(&v, 0, sizeof(v));
+    v.expr = uf_print_sugar;
+    v.env = L;
     CcUnit_walk(L->unit, v);
     uf_check_views(L);
 }

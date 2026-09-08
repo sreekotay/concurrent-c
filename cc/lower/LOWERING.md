@@ -269,6 +269,18 @@ fields to reach through it, so `.` and `->` name the same thing and `.`
 is the one that reads. A pointer to a struct with fields is not — there
 the two differ, and writing the wrong one is a diagnostic.
 
+`println(x)` and `eprintln(x)` are language spellings, not declared
+functions — `cc_println` is a `_Generic` macro the prelude defines — so
+nothing in the index resolves the bare name. The step renames them; the
+arguments and the Result the macro yields are untouched.
+
+A receiver a method wants by address that has none of its own (`xs.sub(1,
+3).len()`, an `@string(...)` built in place) gets one from a compound
+literal of one element, `(T[1]){ e }`, which decays to the `T*` the callee
+wants. Not `&(T){ e }`: a brace-enclosed initializer for a struct
+initializes its FIRST MEMBER from `e`, which is a type error when that
+member is not a `T` and silently the wrong object when it is.
+
 ## Closures
 
 `(params) => body` becomes three C functions and a struct, and the
