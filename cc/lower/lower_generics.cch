@@ -252,6 +252,33 @@ static const CcToken* gn_emit_template(CcUnit* fu, CcDecl* d) {
 /* A slot the index cannot fill: not `${mangled}`, `${arg(i)}`, a type
  * argument or a factory local bound to one. Returns its spelling, empty
  * when every slot is fillable. */
+/* A factory whose body is one `return @emit(...)` is a template this step
+ * can fill. One that composes several `@emit`s, or builds text around them,
+ * is whatever its body writes -- and reading only its first template splices
+ * a fragment of the instance and calls it the whole instance. */
+static bool gn_template_is_whole(CcUnit* fu, CcDecl* d, const CcToken* t) {
+    uint32_t i;
+    uint32_t emits = 0;
+    bool returned = false;
+    for (i = d->span.first; i <= d->span.last; i++) {
+        const CcToken* k = cc__tok(fu, i);
+        const CcToken* p1;
+        const CcToken* p2;
+        const CcToken* p3;
+        if (!k || k->kind != CC_TK_TEMPLATE || i < 3) continue;
+        p1 = cc__tok(fu, i - 1);
+        p2 = cc__tok(fu, i - 2);
+        if (!p1 || !p2 || p1->kind != CC_TK_PUNCT || p1->punct != CC_P_LPAREN) continue;
+        if (p2->kind != CC_TK_AT_WORD || p2->text.len != 5 ||
+            memcmp(p2->text.ptr, "@emit", 5) != 0) continue;
+        emits++;
+        p3 = cc__tok(fu, i - 3);
+        if (k == t && p3 && p3->kind == CC_TK_IDENT && p3->text.len == 6 &&
+            memcmp(p3->text.ptr, "return", 6) == 0) returned = true;
+    }
+    return emits == 1 && returned;
+}
+
 static CCSlice gn_computed_slot(CcLowerer* L, const CcToken* t, CcSlotBindList* binds, CcNameList* args) {
     const char* text = t->text.ptr + 1;
     size_t len = t->text.len - 2;
@@ -481,7 +508,7 @@ static CCString gn_instance_text(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool
         binds = vec_new::[CcSlotBind](L->arena);
         cc__factory_bindings(ix, fu, cc__factory_body(d), &binds);
         computed = gn_computed_slot(L, t, &binds, &args);
-        if (computed.len) needs_run = true;
+        if (computed.len || !gn_template_is_whole(fu, d, t)) needs_run = true;
         {
             CCSlice frag = cc__template_instance(ix, t->text.ptr + 1, t->text.len - 2, info, &binds, &args);
             cc_string_push_slice(&text, frag, L->arena);
@@ -566,6 +593,73 @@ static void gn_fragment_error(CcLowerer* L, CcSpan sp, CcDiags* ds, CCSlice stag
  * carries the language it was written in — Result returns, methods, string
  * templates — so splicing its text unlowered would hand the host compiler
  * Concurrent-C to compile. */
+/* Is this line the preprocessor directive `#<word>`? */
+static bool gn_line_is(CCSlice line, const char* word) {
+    size_t i = 0;
+    size_t n = strlen(word);
+    while (i < line.len && (line.ptr[i] == ' ' || line.ptr[i] == '\t')) i++;
+    if (i >= line.len || line.ptr[i] != '#') return false;
+    i++;
+    while (i < line.len && (line.ptr[i] == ' ' || line.ptr[i] == '\t')) i++;
+    if (line.len - i < n) return false;
+    if (memcmp(line.ptr + i, word, n) != 0) return false;
+    i += n;
+    return i == line.len || line.ptr[i] == ' ' || line.ptr[i] == '\t';
+}
+
+static bool gn_line_opens_validate(CCSlice line) {
+    size_t i = 0;
+    if (!gn_line_is(line, "ifdef")) return false;
+    while (i < line.len && line.ptr[i] != 'C') i++;
+    return line.len - i >= 20 && memcmp(line.ptr + i, "CC_FRAGMENT_VALIDATE", 20) == 0;
+}
+
+static bool gn_line_opens_cond(CCSlice line) {
+    return gn_line_is(line, "if") || gn_line_is(line, "ifdef") || gn_line_is(line, "ifndef");
+}
+
+/* The `#ifdef CC_FRAGMENT_VALIDATE` arm of a factory template is the stub the
+ * comptime engine compiles a fragment against on its own; a translation unit
+ * never defines that macro, so the arm is dead here. This step reads the
+ * expansion as Concurrent-C and runs no preprocessor, so the dead arm would
+ * be read as code -- and `typedef struct int { char _; } int;`, which is what
+ * `CCBox::[int]` puts there, is not code. Take the arm the program takes. */
+static CCString gn_take_product_arm(CcLowerer* L, CCString text) {
+    CCSlice src = text.as_slice();
+    CCString out = cc_string_new();
+    size_t at = 0;
+    int depth = 0;      /* nesting inside the validate arm, 0 when not in one */
+    int keep = 0;       /* nesting inside its `#else` arm, whose text is kept */
+    while (at < src.len) {
+        size_t end = at;
+        CCSlice line;
+        size_t next;
+        bool copy = false;
+        while (end < src.len && src.ptr[end] != '\n') end++;
+        line = cc_slice_from_buffer((char*)src.ptr + at, end - at);
+        next = end < src.len ? end + 1 : end;
+        if (depth) {
+            /* dropping the stub arm */
+            if (gn_line_opens_cond(line)) depth++;
+            else if (gn_line_is(line, "endif")) depth--;
+            else if (depth == 1 && gn_line_is(line, "else")) { depth = 0; keep = 1; }
+        } else if (keep) {
+            /* keeping the arm the program takes -- but its `#endif` closes an
+             * `#ifdef` that is no longer here, so it goes with it */
+            if (gn_line_opens_cond(line)) { keep++; copy = true; }
+            else if (gn_line_is(line, "endif")) { keep--; copy = keep != 0; }
+            else copy = true;
+        } else if (gn_line_opens_validate(line)) {
+            depth = 1;
+        } else {
+            copy = true;
+        }
+        if (copy) cc_string_push_slice(&out, cc_slice_from_buffer((char*)src.ptr + at, next - at), L->arena);
+        at = next;
+    }
+    return out;
+}
+
 static bool gn_lower_fragment(CcLowerer* L, CCString text, CcSpan sp, CCString* out) {
     CCArena a = L->arena;
     CcIndex* ix = L->ix;
@@ -575,6 +669,7 @@ static bool gn_lower_fragment(CcLowerer* L, CCString text, CcSpan sp, CCString* 
     CcUnit* u;
     CcLowerer sub;
     CCSlice path = cstr_slice("<generic expansion>");
+    text = gn_take_product_arm(L, text);
     /* the expansion is spliced into whatever the unit is, so it is read and
      * printed as source: bodies kept, no include guard of its own */
     opts.mode = CC_UNIT_SOURCE;
