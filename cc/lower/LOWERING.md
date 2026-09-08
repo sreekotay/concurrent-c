@@ -857,7 +857,38 @@ that still compiles.
 An `@async` function returning a Result is not lowered yet — the task
 carries the value boxed, and the await unboxes it.
 
-### Ambient namespaces
+### Channels that carry tasks
+
+`tx.send_task(() => f(x))` does not send the closure. It spawns the closure
+as a task and sends the task handle, so what the receiver reads back is
+something it can block on:
+
+```c
+CCClosure0 __cc_st_c0 = cc_closure__N1_make(v);
+CCTask __cc_st_t0 = cc_fiber_spawn_closure0(__cc_st_c0);
+int __cc_st_e0 = cc_chan_send((tx).raw, &__cc_st_t0, sizeof(__cc_st_t0));
+if (__cc_st_e0 != 0) { (void)cc_block_on_intptr(__cc_st_t0); }
+```
+
+A failed send would strand the task, so the site blocks on it there rather
+than dropping a fiber nothing will ever join. `send_task_hybrid` is the
+same shape on the other scheduler (`cc_fiber_spawn_closure0_v2`).
+
+The entry of such a closure stores its value in the task's result slot and
+returns the slot, which is where `cc_block_on_*` looks; the value is the
+closure's expression, or the last expression of its block. Every other
+closure returns NULL: it has no value anyone can ask for.
+
+A channel a `send_task` names carries `CCTask`, whatever its element type
+says — the value the task computed is read out of the handle, not off the
+channel — so the uses are collected before the declarations are read: the
+pair call that sizes the channel is built from the declaration and may come
+first. The `ordered` modifier reaches that call too, and an endpoint name
+resolves to its most recent declaration: taking the first would hand a
+later function the modifiers of an endpoint another function happened to
+give the same name.
+
+## Ambient namespaces
 
 `cc_std_out.write(x)` is `cc_std_out_write_auto(x)`. The receiver names no
 value — it is the namespace the callee lives in — so there is nothing for

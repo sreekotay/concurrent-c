@@ -27,24 +27,34 @@ typedef struct HEnd {
     CCSlice mode;               /* CC_CHAN_MODE_* */
     CCSlice topo;               /* CC_CHAN_TOPO_* */
     char dir;
+    bool ordered;               /* `ordered`: the receiver sees the sends in send order */
+    bool carries_task;          /* a `send_task` sends on it: what it carries is a CCTask */
 } HEnd;
 typedef HEnd* HEndRef;
 typedef Vec::[HEndRef] HEndList;
 
 typedef struct HStep {
+    Vec::[CCSlice] task_ends;   /* endpoints a `send_task` names: what they carry is a CCTask */
     CcLowerer* L;
     Walker* w;
     HEndList ends;
     uint32_t next_id;
 } HStep;
 
+/* The endpoint a name refers to here: the most recent declaration of it.
+ *
+ * Endpoints are collected as the walk reaches them, so the last one
+ * recorded is the one in scope at the site being lowered. Taking the first
+ * would hand a later function the modifiers of an endpoint that another
+ * function happened to give the same name — an `ordered` receiver reading
+ * as unordered because an earlier `rx` was not. */
 static HEnd* hc_find(HStep* st, CCSlice name) {
     HEndList* v = &st->ends;
     size_t n = v->len();
     size_t i;
     if (!name.len) return NULL;
-    for (i = 0; i < n; i++) {
-        HEnd* e = *v->get_ptr(i);
+    for (i = n; i > 0; i--) {
+        HEnd* e = *v->get_ptr(i - 1);
         if (slice_eq(e->name, name)) return e;
     }
     return NULL;
@@ -86,6 +96,62 @@ static bool hc_is_chan(CcType* t, CcChanType* out) {
     }
 }
 
+/* The endpoints a `send_task` sends on.
+ *
+ * What such a channel carries is the task handle, whatever its element
+ * type says: the receiver blocks on the handle, and the value the task
+ * computed is read out of it. The uses are collected before the
+ * declarations are read, because the pair call that sizes the channel is
+ * built from the declaration and may come first.
+ *
+ * A `send_task` written as a UFCS call is still one here: this step runs
+ * before UFCS. */
+static bool hc_is_send_task_name(CCSlice n) {
+    return cc_slice_eq_cstr(&n, "cc_channel_send_task") ||
+           cc_slice_eq_cstr(&n, "cc_channel_send_task_hybrid") ||
+           cc_slice_eq_cstr(&n, "cc_chan_send_task") ||
+           cc_slice_eq_cstr(&n, "send_task") ||
+           cc_slice_eq_cstr(&n, "send_task_hybrid");
+}
+
+static bool hc_mark_task_visit(CcExpr* e, void* env) {
+    HStep* st = (HStep*)env;
+    Vec::[CCSlice]* ends = &st->task_ends;
+    CCSlice recv = cc_slice_empty();
+    @switch (e->k) {
+        case .call(cl): {
+            CCSlice fn;
+            CcExprList* av = &cl.args;
+            if (av->len() != 2) break;
+            if (!expr_ident(strip_parens_expr(cl.callee), &fn)) break;
+            if (!hc_is_send_task_name(fn)) break;
+            (void)expr_ident(strip_parens_expr(*av->get_ptr(0)), &recv);
+            break;
+        }
+        case .ufcs(uf): {
+            if (!hc_is_send_task_name(uf.method)) break;
+            (void)expr_ident(strip_parens_expr(uf.recv), &recv);
+            break;
+        }
+        default: break;
+    }
+    if (recv.len) {
+        ends->push(recv);
+    }
+    return true;
+}
+
+static bool hc_is_task_end(HStep* st, CCSlice name) {
+    Vec::[CCSlice]* ends = &st->task_ends;
+    size_t n = ends->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice s = *ends->get_ptr(i);
+        if (slice_eq(s, name)) return true;
+    }
+    return false;
+}
+
 /* `int64_t[~4 >] tx;` keeps what it carries, and becomes the handle. */
 static void hc_decl(HStep* st, CcDecl* d, CcVarDecl v) {
     CcLowerer* L = st->L;
@@ -104,6 +170,8 @@ static void hc_decl(HStep* st, CcDecl* d, CcVarDecl v) {
     e->mode = mode;
     e->topo = topo;
     e->dir = ch.dir;
+    e->ordered = ch.ordered;
+    e->carries_task = hc_is_task_end(st, v.name);
     st->ends.push(e);
     v.type = cc_type_named(ch.dir == '<' ? cstr_slice("CCChanRx") : cstr_slice("CCChanTx"),
                            d->span, L->arena);
@@ -143,9 +211,15 @@ static void hc_pair(HStep* st, CcExpr* e, CcCall cl) {
     {
         /* a real call, so the unwrap that follows can see the Result the
          * runtime declares it returns */
-        CCSlice elem = L->ix->canon(a->elem);
+        /* a channel a `send_task` sends on carries the task handle, not
+         * what the task computes: the receiver blocks on the handle and
+         * the value it yields is read out of the task */
+        bool task = a->carries_task || b->carries_task;
+        CCSlice elem = task ? cstr_slice("CCTask") : L->ix->canon(a->elem);
+        bool ordered = a->ordered || b->ordered;
         CCString capt = a->cap ? lw_spell_expr(L, a->cap) : @string(`0`, L->arena);
         CCString szt = @string(`sizeof(${elem})`, L->arena);
+        CCString ord = ordered ? @string(`1`, L->arena) : @string(`0`, L->arena);
         CCString names = @string(`"${n1},${n2}"`, L->arena);
         CcCall out;
         out.callee = lw_ident(L, cstr_slice("cc_channel_pair_create_named"), sp);
@@ -156,7 +230,7 @@ static void hc_pair(HStep* st, CcExpr* e, CcCall cl) {
         out.args.push(lw_text(L, szt, sp));
         out.args.push(lw_text(L, @string(`0`, L->arena), sp));
         out.args.push(lw_ident(L, a->topo, sp));
-        out.args.push(lw_text(L, @string(`0`, L->arena), sp));
+        out.args.push(lw_text(L, ord, sp));
         out.args.push(cc_expr_unary(CC_OP_ADDR, lw_ident(L, n1, sp), sp, L->arena));
         out.args.push(cc_expr_unary(CC_OP_ADDR, lw_ident(L, n2, sp), sp, L->arena));
         out.args.push(lw_text(L, names, sp));
@@ -181,6 +255,12 @@ static void hc_send(HStep* st, CcExpr* e, CcUfcs uf) {
     CcExprList* av = &uf.args;
     if (!hc_is_value_send(uf.method)) return;
     if (av->len() != 1) return;
+    {
+        /* `send_task(() => …)` sends a task spawned from the closure, not
+         * the closure as a value: the closures step owns that shape. */
+        CcExpr* a0 = strip_parens_expr(*av->get_ptr(0));
+        if (a0 && a0->k.kind == CcExprK_closure) return;
+    }
     if (!expr_ident(strip_parens_expr(uf.recv), &recv)) return;
     end = hc_find(st, recv);
     if (!end || end->dir == '<') return;
@@ -242,6 +322,7 @@ static void CcLowerer_chan(CcLowerer* L) {
     st.L = L;
     st.w = &w;
     st.ends = vec_new::[HEndRef](L->arena);
+    st.task_ends = vec_new::[CCSlice](L->arena);
     memset(&w, 0, sizeof(w));
     w.arena = L->arena;
     w.ix = L->ix;
@@ -251,6 +332,13 @@ static void CcLowerer_chan(CcLowerer* L) {
     w.on_call = hc_on_call;
     w.on_ufcs = hc_on_ufcs;
     w.env = &st;
+    {
+        CcVisitor tv;
+        memset(&tv, 0, sizeof(tv));
+        tv.expr = hc_mark_task_visit;
+        tv.env = &st;
+        CcUnit_walk(L->unit, tv);   /* the uses, before the declarations size the channel */
+    }
     tw_unit(&w);
 }
 

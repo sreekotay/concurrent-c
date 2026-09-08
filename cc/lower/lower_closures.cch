@@ -39,6 +39,9 @@ typedef struct KStep {
     CcDeclList made;            /* the generated declarations, in order */
     CCString fwd;               /* their forward declarations */
     bool any;
+    CcExprList in_task;         /* closures a `send_task` is sending: the value is the task's result */
+    Vec::[CCSlice] task_recv;   /* the endpoint each of them is sent on, in the same order */
+    CcNameList task_spawn;      /* and the spawn that starts it: hybrid picks the other scheduler */
 } KStep;
 
 /* ---- the names a body reads from outside itself ------------------------- */
@@ -327,7 +330,103 @@ static bool kl_rewrite_ref(CcLowerer* L, CcStmt* body, CCSlice name, CCSlice thr
 
 /* The entry function: the environment, the unpacked captures, the
  * parameters, then the body as written. */
-static CcDecl* kl_entry_decl(KStep* st, uint32_t id, KCapList* caps, CcClosure cl, CcSpan sp) {
+/* The closures a `send_task` is sending.
+ *
+ * `tx.send_task(() => f(x))` hands the runtime a task whose VALUE the
+ * receiver reads back; the closure's expression is that value, not
+ * something to evaluate and drop. The entry stores it in the task's result
+ * slot and returns the slot, which is where `cc_block_on_*` looks. Every
+ * other closure returns NULL: it has no value anyone can ask for.
+ *
+ * The channel step has already turned `tx.send_task(f)` into the plain
+ * call by the time this runs, so the callee name is what is matched. */
+static bool kl_is_send_task(CCSlice fn) {
+    return cc_slice_eq_cstr(&fn, "cc_channel_send_task") ||
+           cc_slice_eq_cstr(&fn, "cc_channel_send_task_hybrid") ||
+           cc_slice_eq_cstr(&fn, "cc_chan_send_task");
+}
+
+static bool kl_is_send_task_method(CCSlice m) {
+    return cc_slice_eq_cstr(&m, "send_task") || cc_slice_eq_cstr(&m, "send_task_hybrid");
+}
+
+static bool kl_is_hybrid(CCSlice n) {
+    return n.len > 7 && memcmp(n.ptr + n.len - 7, "_hybrid", 7) == 0;
+}
+
+/* Record one send: the closure, the endpoint it goes to, and the spawn
+ * that starts it. `send_task_hybrid` runs the task on the other scheduler
+ * and is the same shape otherwise. */
+static void kl_mark_one(KStep* st, CcExpr* closure, CCSlice recv, bool hybrid) {
+    CcExprList* seen = &st->in_task;
+    Vec::[CCSlice]* rv = &st->task_recv;
+    CcNameList* sv = &st->task_spawn;
+    CcExpr* a = strip_parens_expr(closure);
+    if (!a || a->k.kind != CcExprK_closure) return;
+    seen->push(a);
+    rv->push(recv);
+    sv->push(hybrid ? cstr_slice("cc_fiber_spawn_closure0_v2") : cstr_slice("cc_fiber_spawn_closure0"));
+}
+
+static bool kl_mark_task_visit(CcExpr* e, void* env) {
+    KStep* st = (KStep*)env;
+    @switch (e->k) {
+        case .call(cl): {
+            CCSlice fn;
+            CCSlice recv;
+            CcExprList* av = &cl.args;
+            if (av->len() != 2) break;
+            if (!expr_ident(strip_parens_expr(cl.callee), &fn)) break;
+            if (!kl_is_send_task(fn)) break;
+            if (!expr_ident(strip_parens_expr(*av->get_ptr(0)), &recv)) break;
+            kl_mark_one(st, *av->get_ptr(1), recv, kl_is_hybrid(fn));
+            break;
+        }
+        case .ufcs(uf): {
+            CCSlice recv;
+            CcExprList* av = &uf.args;
+            if (av->len() != 1) break;
+            if (!kl_is_send_task_method(uf.method)) break;
+            if (!expr_ident(strip_parens_expr(uf.recv), &recv)) break;
+            kl_mark_one(st, *av->get_ptr(0), recv, kl_is_hybrid(uf.method));
+            break;
+        }
+        default: break;
+    }
+    return true;
+}
+
+static bool kl_in_task(KStep* st, CcExpr* e) {
+    CcExprList* v = &st->in_task;
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) { CcExpr* c = *v->get_ptr(i); if (c == e) return true; }
+    return false;
+}
+
+/* `__typeof__(<e>)`: the node itself, so later steps lower it once. */
+static CcType* kl_typeof(CcLowerer* L, CcExpr* inner, CcSpan sp) {
+    CcType* t = cc__type_blank(sp, L->arena);
+    CcTypeofType tf;
+    tf.expr = inner;
+    tf.type = NULL;
+    t->k = { .typeof_ = tf };
+    return t;
+}
+
+/* The value of a `send_task` closure, into the task's result slot. */
+static void kl_task_result(CcLowerer* L, CcStmt* body, CcExpr* value, CcSpan sp) {
+    CCString slot = @string(`__typeof__(__cc_st_v)* __cc_st_r = (__typeof__(__cc_st_v)*)cc_task_result_ptr(sizeof(*__cc_st_r))`, L->arena);
+    CCString guard = @string(`if (!__cc_st_r) return NULL`, L->arena);
+    CCString store = @string(`*__cc_st_r = __cc_st_v`, L->arena);
+    lw_push(body, lw_decl_stmt(L, kl_typeof(L, value, sp), cstr_slice("__cc_st_v"), value, sp));
+    lw_push(body, lw_expr_stmt(L, lw_text(L, slot, sp), sp));
+    lw_push(body, lw_expr_stmt(L, lw_text(L, guard, sp), sp));
+    lw_push(body, lw_expr_stmt(L, lw_text(L, store, sp), sp));
+    lw_push(body, cc_stmt_return(lw_ident(L, cstr_slice("__cc_st_r"), sp), sp, L->arena));
+}
+
+static CcDecl* kl_entry_decl(KStep* st, uint32_t id, KCapList* caps, CcClosure cl, bool task_result, CcSpan sp) {
     CcLowerer* L = st->L;
     CCSlice env = kl_name(L, id, "_env");
     CcStmt* body = lw_block(L, sp);
@@ -371,21 +470,41 @@ static CcDecl* kl_entry_decl(KStep* st, uint32_t id, KCapList* caps, CcClosure c
         CcExpr* cast = kl_cast(L, pt, lw_ident(L, arg, sp), sp);
         if (p->name.len) lw_push(body, lw_decl_stmt(L, pt, p->name, cast, sp));
     }
-    if (cl.body) {
+    {
         CcStmtList* inner = NULL;
-        if (cl.body->k.kind == CcStmtK_block) inner = lw_block_stmts(cl.body);
+        CcExpr* value = NULL;
+        size_t nb = 0;
+        size_t keep;
+        size_t k;
+        if (cl.body && cl.body->k.kind == CcStmtK_block) inner = lw_block_stmts(cl.body);
+        nb = inner ? inner->len() : 0;
+        keep = nb;
+        /* the closure's value is its expression, or the last expression of
+         * its block: what a `send_task` receiver reads back */
+        if (task_result && cl.body) {
+            CcStmt* last = inner ? (nb ? *inner->get_ptr(nb - 1) : NULL) : cl.body;
+            if (last && last->k.kind == CcStmtK_expr) {
+                @switch (last->k) {
+                    case .expr(es): if (!es.body) value = es.e; break;
+                    default: break;
+                }
+                if (value && inner) keep = nb - 1;
+            }
+        }
         if (inner) {
-            size_t k;
-            size_t nb = inner->len();
-            for (k = 0; k < nb; k++) {
+            for (k = 0; k < keep; k++) {
                 CcStmt* bs = *inner->get_ptr(k);
                 lw_push(body, bs);
             }
-        } else {
+        } else if (cl.body && !value) {
             lw_push(body, cl.body);
         }
+        if (value) {
+            kl_task_result(L, body, value, sp);
+        } else {
+            lw_push(body, cc_stmt_return(lw_text(L, @string(`NULL`, L->arena), sp), sp, L->arena));
+        }
     }
-    lw_push(body, cc_stmt_return(lw_text(L, @string(`NULL`, L->arena), sp), sp, L->arena));
     {
         CcParam p0;
         memset(&p0, 0, sizeof(p0));
@@ -537,7 +656,7 @@ static void kl_lower(KStep* st, CcExpr* e, CcClosure cl) {
     {
         CCString envt = kl_env_text(st, id, &caps, arity);
         st->made.push(lw_raw_decl(L, envt, sp));
-        st->made.push(kl_entry_decl(st, id, &caps, cl, sp));
+        st->made.push(kl_entry_decl(st, id, &caps, cl, kl_in_task(st, e), sp));
         kl_declare_make(st, id, &caps, arity);
     }
     {
@@ -600,6 +719,75 @@ static void kl_on_call(Walker* w, CcExpr* e, CcCall cl) {
     }
 }
 
+/* The send itself: `tx.send_task(f)` spawns `f` as a task and sends the
+ * task handle, so what the receiver reads back is something it can block
+ * on. A failed send would strand the task, so the site blocks on it there
+ * rather than dropping a fiber nothing will ever join.
+ *
+ * This runs after the closure rewrite, so the argument is the make call by
+ * then; the marked closure node is the same object, which is how the send
+ * finds the one it recorded. */
+static bool kl_send_task_visit(CcExpr* e, void* env) {
+    KStep* st = (KStep*)env;
+    CcLowerer* L = st->L;
+    CcExprList* seen = &st->in_task;
+    Vec::[CCSlice]* rv = &st->task_recv;
+    CcNameList* sv = &st->task_spawn;
+    CcExpr* arg = NULL;
+    size_t n = seen->len();
+    size_t i;
+    @switch (e->k) {
+        case .call(cl): {
+            CcExprList* av = &cl.args;
+            if (av->len() == 2) arg = strip_parens_expr(*av->get_ptr(1));
+            break;
+        }
+        case .ufcs(uf): {
+            CcExprList* av = &uf.args;
+            if (av->len() == 1) arg = strip_parens_expr(*av->get_ptr(0));
+            break;
+        }
+        default: break;
+    }
+    if (!arg) return true;
+    for (i = 0; i < n; i++) {
+        CcExpr* c = *seen->get_ptr(i);
+        CCSlice recv;
+        CCSlice spawn;
+        uint32_t id;
+        if (c != arg) continue;
+        recv = *rv->get_ptr(i);
+        spawn = *sv->get_ptr(i);
+        id = st->next_id++;
+        {
+            CcStmt* blk = lw_block(L, e->span);
+            CcExpr* wrapped = cc__expr_blank(e->span, L->arena);
+            CcStmtExpr se;
+            CCString cn = @string(`__cc_st_c${id}`, L->arena);
+            CCString tn = @string(`__cc_st_t${id}`, L->arena);
+            CCString en = @string(`__cc_st_e${id}`, L->arena);
+            CCSlice c_n = lw_keep(L, &cn);
+            CCSlice t_n = lw_keep(L, &tn);
+            CCSlice e_n = lw_keep(L, &en);
+            CCString spawn_call = @string(`${spawn}(${c_n})`, L->arena);
+            CCString send_call = @string(`cc_chan_send((${recv}).raw, &${t_n}, sizeof(${t_n}))`, L->arena);
+            CCString rescue = @string(`if (${e_n} != 0) { (void)cc_block_on_intptr(${t_n}); }`, L->arena);
+            lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("CCClosure0"), e->span, L->arena), c_n, arg, e->span));
+            lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("CCTask"), e->span, L->arena), t_n,
+                                      lw_text(L, spawn_call, e->span), e->span));
+            lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("int"), e->span, L->arena), e_n,
+                                      lw_text(L, send_call, e->span), e->span));
+            lw_push(blk, lw_expr_stmt(L, lw_text(L, rescue, e->span), e->span));
+            lw_push(blk, lw_expr_stmt(L, lw_ident(L, e_n, e->span), e->span));
+            se.block = blk;
+            wrapped->k = { .stmt_expr = se };
+            *e = *wrapped;
+        }
+        return true;
+    }
+    return true;
+}
+
 static void CcLowerer_closures(CcLowerer* L) {
     Walker w;
     KStep st;
@@ -607,6 +795,9 @@ static void CcLowerer_closures(CcLowerer* L) {
     st.L = L;
     st.w = &w;
     st.made = vec_new::[CcDeclRef](L->arena);
+    st.in_task = vec_new::[CcExprRef](L->arena);
+    st.task_recv = vec_new::[CCSlice](L->arena);
+    st.task_spawn = vec_new::[CCSlice](L->arena);
     st.fwd = cc_string_new();
     memset(&w, 0, sizeof(w));
     w.arena = L->arena;
@@ -615,6 +806,13 @@ static void CcLowerer_closures(CcLowerer* L) {
     w.on_closure = kl_on_closure;
     w.on_call = kl_on_call;
     w.env = &st;
+    {
+        CcVisitor tv;
+        memset(&tv, 0, sizeof(tv));
+        tv.expr = kl_mark_task_visit;
+        tv.env = &st;
+        CcUnit_walk(L->unit, tv);   /* before the rewrite: a closure is still a closure node */
+    }
     tw_unit(&w);
     if (!st.any) return;
     {
@@ -661,6 +859,15 @@ static void CcLowerer_closures(CcLowerer* L) {
             }
         }
         *decls = with;
+    }
+    if (st.in_task.len()) {
+        CcVisitor sv;
+        memset(&sv, 0, sizeof(sv));
+        sv.expr = kl_send_task_visit;
+        sv.env = &st;
+        /* last: the entries this step generated are unit declarations by
+         * now, so a send written inside a closure body is reached too */
+        CcUnit_walk(L->unit, sv);
     }
 }
 
