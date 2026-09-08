@@ -48,6 +48,7 @@ typedef struct KStep {
     CcDeclList made;            /* the generated declarations, in order */
     CCString fwd;               /* their forward declarations */
     bool any;
+    bool in_hooks;              /* inside a `@typehooks`: its values are the compiler's, not C's */
     CcStmtList entered;         /* the statement path from the function body */
     KHandlerList ehs;           /* the `@errhandler`s in scope along it */
     CcExprList in_task;         /* closures a `send_task` is sending: the value is the task's result */
@@ -764,8 +765,26 @@ static void kl_on_stmt(Walker* w, CcStmt* s, bool enter) {
     else kl_scope_leave(st);
 }
 
+/* A `@typehooks` declaration is the index's, and C never sees it: the
+ * lowerer drops it once the index has read it. Its `.ufcs` value is a
+ * handler of the call site -- `(recv_type, method, mode, argv, arg_types,
+ * arena) => { ... }` -- that the compiler reads as rules, or compiles and
+ * runs itself. It is not a value the runtime ever holds, so this step does
+ * not enter one: lowering it would hang an environment and a `_make`
+ * nothing calls off a declaration that is about to be dropped, and would
+ * reject the hook protocol's own arity for having no `CCClosure6`. */
+static void kl_on_decl(Walker* w, CcDecl* d) {
+    KStep* st = (KStep*)w->env;
+    st->in_hooks = false;
+    @switch (d->k) {
+        case .typehooks: st->in_hooks = true; break;
+        default: break;
+    }
+}
+
 static void kl_on_closure(Walker* w, CcExpr* e, CcClosure cl) {
     KStep* st = (KStep*)w->env;
+    if (st->in_hooks) return;
     kl_lower(st, e, cl);
 }
 
@@ -782,6 +801,7 @@ static void kl_on_call(Walker* w, CcExpr* e, CcCall cl) {
     size_t n;
     size_t i;
     int arity;
+    if (st->in_hooks) return;
     if (!expr_ident(strip_parens_expr(cl.callee), &nm) || !nm.len) return;
     t = sc_lookup(w, nm);
     if (!t) return;
@@ -893,6 +913,7 @@ static void CcLowerer_closures(CcLowerer* L) {
     w.arena = L->arena;
     w.ix = L->ix;
     w.unit = L->unit;
+    w.on_decl = kl_on_decl;
     w.on_closure = kl_on_closure;
     w.on_call = kl_on_call;
     w.on_stmt = kl_on_stmt;

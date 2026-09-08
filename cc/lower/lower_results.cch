@@ -500,6 +500,19 @@ static int rl_unwrap_mode(CcLowerer* L, const CcExpr* inner, CcTypeInfo* rt, CcS
             }
             return 0;
         }
+        {
+            /* A header name that is a `#define` and a declaration both: the
+             * macro shadows the function the return type is written on, so
+             * the kind above is CC_SYM_MACRO and the pointer went unseen.
+             * Read the declaration of the same name for it. A return that is
+             * not a pointer stays the host's to type — the macro may expand
+             * to a Result this step cannot see — but a pointer return is the
+             * null unwrap, and emitting the Result shape for it is a guess
+             * that only the host compiler would catch. */
+            CcSym* fn = sym;
+            while (fn && fn->kind != CC_SYM_FUNC) fn = fn->same_name;
+            if (fn && rl_sym_returns_pointer(fn)) return 2;
+        }
         return 1;   /* a macro or a variable: the host decides */
     }
     {
