@@ -66,6 +66,12 @@ static CCSlice pl_join_type(CcLowerer* L, uint32_t id) {
 
 /* ---- captures ----------------------------------------------------------- */
 
+/* The local a gated site tests once: true when the arms run in order. */
+static CCSlice pl_gate_name(CcLowerer* L, uint32_t id) {
+    CCString g = @string(`__cc_par_${id}_seq`, L->arena);
+    return lw_keep(L, &g);
+}
+
 typedef struct PScan {
     PStep* st;
     Walker* w;
@@ -379,11 +385,12 @@ static void pl_zero(CcLowerer* L, CcStmt* blk, CCSlice name, CcSpan sp) {
                                           pl_sizeof(L, name, sp), sp), sp));
 }
 
-static void pl_spawn_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
-                           PCapList* caps, CCSlice target, CCSlice bind, CcSpan sp) {
+/* The environment an arm runs from: declared, zeroed and filled. Nothing
+ * here starts anything, so it stands on both schedules -- a gated site
+ * fills the environment once and then decides whether to spawn. */
+static void pl_env_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
+                         PCapList* caps, CCSlice target, CCSlice bind, CcSpan sp) {
     CCSlice env = pl_name(L, id, k, "_env_t");
-    CCSlice thunk = pl_name(L, id, k, "_thunk");
-    CCSlice site = pl_name(L, id, k, "_site");
     CCSlice e = pl_name(L, id, k, "_e");
     CCSlice task = pl_name(L, id, k, "_t");
     CCSlice denied = pl_name(L, id, k, "_d");
@@ -426,6 +433,18 @@ static void pl_spawn_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
         if (bind.len) val = cc_expr_unary(CC_OP_ADDR, lw_paren(L, lw_ident(L, bind, sp), sp), sp, L->arena);
         lw_push(blk, lw_expr_stmt(L, lw_assign(L, slot, val, sp), sp));
     }
+}
+
+/* Offering the arm to the runtime. This is the half a gate skips: when the
+ * site runs its arms in order, nothing is spawned and the thunks are
+ * called on the caller instead. */
+static void pl_fire_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
+                          CCSlice bind, CcSpan sp) {
+    CCSlice thunk = pl_name(L, id, k, "_thunk");
+    CCSlice e = pl_name(L, id, k, "_e");
+    CCSlice site = pl_name(L, id, k, "_site");
+    CCSlice task = pl_name(L, id, k, "_t");
+    CCSlice denied = pl_name(L, id, k, "_d");
     if (bind.len) {
         /* the handle promised a live arm: a refused or failed spawn is
          * not something to quietly run inline here */
@@ -471,6 +490,27 @@ static void pl_spawn_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
     }
 }
 
+static void pl_spawn_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
+                           PCapList* caps, CCSlice target, CCSlice bind, CcSpan sp) {
+    pl_env_stmts(L, blk, id, k, caps, target, bind, sp);
+    pl_fire_stmts(L, blk, id, k, bind, sp);
+}
+
+/* The arm on the caller: the same thunk a spawn would have run, called
+ * straight through. The arms are emitted once and the gate picks the route
+ * to them, so this is how the sequential schedule reaches an arm. */
+static void pl_inline_call(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k, CcSpan sp) {
+    CCSlice thunk = pl_name(L, id, k, "_thunk");
+    CCSlice e = pl_name(L, id, k, "_e");
+    CcExpr* call = lw_call1(L, thunk, cc_expr_unary(CC_OP_ADDR, lw_ident(L, e, sp), sp, L->arena), sp);
+    CcExpr* cast = cc__expr_blank(sp, L->arena);
+    CcCast ca;
+    ca.type = cc_type_named(cstr_slice("void"), sp, L->arena);
+    ca.a = call;
+    cast->k = { .cast = ca };
+    lw_push(blk, lw_expr_stmt(L, cast, sp));
+}
+
 static void pl_join_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k, CcSpan sp) {
     CCSlice thunk = pl_name(L, id, k, "_thunk");
     CCSlice e = pl_name(L, id, k, "_e");
@@ -485,15 +525,7 @@ static void pl_join_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k, Cc
     lw_push(then, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_join"), lw_ident(L, task, sp), sp), sp));
     lw_push(els, lw_expr_stmt(L, lw_call1(L, cstr_slice("CC_PAR_NOTE_INLINE_ARM"),
                                           lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
-    {
-        CcExpr* call = lw_call1(L, thunk, cc_expr_unary(CC_OP_ADDR, lw_ident(L, e, sp), sp, L->arena), sp);
-        CcExpr* cast = cc__expr_blank(sp, L->arena);
-        CcCast ca;
-        ca.type = cc_type_named(cstr_slice("void"), sp, L->arena);
-        ca.a = call;
-        cast->k = { .cast = ca };
-        lw_push(els, lw_expr_stmt(L, cast, sp));
-    }
+    pl_inline_call(L, els, id, k, sp);
     lw_push(blk, lw_if(L, cond, then, els, sp));
 }
 
@@ -549,8 +581,8 @@ static bool pl_reject(CcLowerer* L, CcParallel p, CcSpan sp) {
         lw_error(L, sp, m);
         return true;
     }
-    if (p.pred || p.seq) {
-        m = @string(`'${"@"}parallel' with a predicate or 'seq' is not lowered by the clean lowerer yet: the choice between running the arms together and running them in order is made at run time`, L->arena);
+    if ((p.pred || p.seq) && (p.bind.len || p.target)) {
+        m = @string(`a gated '${"@"}parallel' that also binds a handle is not lowered by the clean lowerer yet: the sequential schedule has nothing to hand back`, L->arena);
         lw_error(L, sp, m);
         return true;
     }
@@ -589,6 +621,9 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     CCSlice hspell;
     CCSlice hbase;
     bool hdeclared;
+    CcExpr* gate;
+    bool gated;
+    CCSlice gname;
     if (pl_reject(L, p, sp)) return;
     if (!n) {
         /* an empty block would run and join nothing, which is what the
@@ -611,7 +646,10 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     }
     lw_push(blk, lw_decl_stmt(L, cc_type_pointer(cc_type_named(cstr_slice("CCParTls"), sp, L->arena), sp, L->arena),
                               cstr_slice("__cc_pt"), lw_call0(L, cstr_slice("cc__par_tls"), sp), sp));
-    {
+    gate = p.pred ? p.pred : p.seq;
+    gated = gate != NULL;
+    gname = gated ? pl_gate_name(L, id) : cc_slice_empty();
+    if (!gated) {
         CcExpr* who = lw_text(L, @string(`NULL`, L->arena), sp);
         if (hspell.len) who = cc_expr_unary(CC_OP_ADDR, lw_paren(L, lw_ident(L, hspell, sp), sp), sp, L->arena);
         lw_push(blk, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc_parallel_deny_enter"),
@@ -684,7 +722,22 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         pl_forward(st, id, (uint32_t)i);
         st->made.push(pl_thunk_decl(st, id, (uint32_t)i, &caps, arm->expr, pl_serial_body(L, arm->serial),
                                     out_type, arm->target, hspell.len != 0, sp));
-        pl_spawn_stmts(L, blk, id, (uint32_t)i, &caps, arm->target, hspell, sp);
+        pl_env_stmts(L, blk, id, (uint32_t)i, &caps, arm->target, hspell, sp);
+        if (!gated) pl_fire_stmts(L, blk, id, (uint32_t)i, hspell, sp);
+    }
+    if (gated) {
+        /* One test, once: true when the arms run in order. The arms
+         * themselves are emitted once either way -- this chooses the route
+         * to them, not a second copy of them, because the bodies have
+         * already been rewritten in place for the thunk. */
+        CcStmt* fire = lw_block(L, sp);
+        lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("int"), sp, L->arena), gname,
+                                  lw_not(L, lw_paren(L, gate, sp), sp), sp));
+        lw_push(fire, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc_parallel_deny_enter"),
+                                               lw_ident(L, cstr_slice("__cc_pt"), sp),
+                                               lw_text(L, @string(`NULL`, L->arena), sp), sp), sp));
+        for (i = 1; i < n; i++) pl_fire_stmts(L, fire, id, (uint32_t)i, hspell, sp);
+        lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, gname, sp), sp), fire, NULL, sp));
     }
     /* the first arm stays here */
     {
@@ -697,7 +750,17 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             lw_push(blk, lw_expr_stmt(L, e0, sp));
         }
     }
-    if (!hspell.len) {
+    if (gated) {
+        CcStmt* joins = lw_block(L, sp);
+        CcStmt* order = lw_block(L, sp);
+        for (i = 1; i < n; i++) pl_join_stmts(L, joins, id, (uint32_t)i, sp);
+        lw_push(joins, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"),
+                                                lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
+        /* nothing was denied on this schedule, so no note: the arms simply
+         * run after the first, in the order they were written */
+        for (i = 1; i < n; i++) pl_inline_call(L, order, id, (uint32_t)i, sp);
+        lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, gname, sp), sp), joins, order, sp));
+    } else if (!hspell.len) {
         /* the block joins before it ends; a bound handle joins later */
         for (i = 1; i < n; i++) pl_join_stmts(L, blk, id, (uint32_t)i, sp);
         lw_push(blk, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"),
