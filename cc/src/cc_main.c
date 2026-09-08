@@ -4019,6 +4019,24 @@ static int cc__clean_known_types(char* dst, size_t cap) {
  * block as C, so the copy it is handed has every `.cch` include rewritten
  * to the lowered header it stands for — a rewrite the lowerer must not
  * see, since it resolves those itself. */
+/* Append harvested text (which this takes ownership of) to a buffer. A
+ * NULL harvest is "nothing to add", not a failure. */
+static int cc__append_harvest(char** buf, size_t* len, char* add) {
+    size_t add_len;
+    char* grown;
+    if (!add) return 0;
+    add_len = strlen(add);
+    grown = (char*)realloc(*buf, *len + add_len + 2);
+    if (!grown) { free(add); return -1; }
+    grown[*len] = '\n';
+    memcpy(grown + *len + 1, add, add_len);
+    grown[*len + 1 + add_len] = '\0';
+    *buf = grown;
+    *len = *len + 1 + add_len;
+    free(add);
+    return 0;
+}
+
 static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
                                               const char* in_path) {
     char* buf = (char*)malloc(raw_len + 1);
@@ -4034,6 +4052,21 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
     if (r) { free(buf); buf = r; len = strlen(buf); }
     r = cc_rewrite_system_cch_includes_to_lowered_headers(buf, len);
     if (r) { free(buf); buf = r; len = strlen(buf); }
+    /* What the includes just stopped carrying.
+     *
+     * A `.cch` include became the lowered `.h` it stands for, because the
+     * executor is a C compiler. But a `@comptime` function, a factory and a
+     * `@comptime { }` block are compile-time only, so the `.h` does not have
+     * them — and `static_map` is one of those functions, declared in
+     * `<ccc/std/static_map.cch>`. Without this the block calling it compiles
+     * and runs and emits nothing, which is a table that silently is not
+     * there. Appended, in the order the shadow path appends it. */
+    if (cc__append_harvest(&buf, &len, cc_harvest_local_header_factories()) != 0 ||
+        cc__append_harvest(&buf, &len, cc_harvest_header_comptime_functions()) != 0 ||
+        cc__append_harvest(&buf, &len, cc_harvest_local_header_comptime_blocks()) != 0) {
+        free(buf);
+        return -1;
+    }
     /* Not the value pass: `@comptime(expr)` is the lowerer's, and running
      * it here too would evaluate every site twice and report a bad one
      * from a copy that is thrown away. */

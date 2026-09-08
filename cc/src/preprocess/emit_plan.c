@@ -2426,19 +2426,40 @@ static size_t cc__emit_complete_typedef_end(const char* src, size_t len,
 /* `__ccs<digits>` dummy: `=0` with optional spaces, then `};` (file-scope
  * `enum{__ccsN=0};`) or `,` (enumerator inside `enum { }`). Emit may insert
  * spaces around `=` when reprinting tokens. */
+/* Between the tokens of the marker: blanks, and the `#line` directives a
+ * producer pins its output with. How a declaration is laid out is the
+ * producer's choice — the clean lowerer prints
+ *
+ *     enum {
+ *     #line 25 "x.ccs"
+ *         __ccs490 = 0
+ *     #line 25 "x.ccs"
+ *     };
+ *
+ * where the legacy pass wrote `enum{__ccs490=0};`. Neither the breaks nor
+ * the directives are code, and stopping at one reads the marker as absent. */
+static const char* cc__emit_skip_marker_gap(const char* q) {
+    for (;;) {
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+        if (*q != '#') return q;
+        while (*q && *q != '\n') q++;
+        if (!*q) return q;
+    }
+}
+
 static int cc__emit_match_ccs_dummy(const char* p, const char** end, int* comma) {
     const char* q;
     if (!p || memcmp(p, "__ccs", 5) != 0) return 0;
     q = p + 5;
     if (*q < '0' || *q > '9') return 0;
     while (*q >= '0' && *q <= '9') q++;
-    while (*q == ' ' || *q == '\t') q++;
+    q = cc__emit_skip_marker_gap(q);
     if (*q != '=') return 0;
     q++;
-    while (*q == ' ' || *q == '\t') q++;
+    q = cc__emit_skip_marker_gap(q);
     if (*q != '0') return 0;
     q++;
-    while (*q == ' ' || *q == '\t') q++;
+    q = cc__emit_skip_marker_gap(q);
     if (q[0] == '}' && q[1] == ';') {
         if (comma) *comma = 0;
         if (end) *end = q + 2;
@@ -2466,6 +2487,7 @@ static size_t cc__emit_resolve_anchor_pos(CCEmitAnchor anchor, size_t site_pos,
         snprintf(marker, sizeof(marker), "enum{__ccs%zu=0};", site_pos);
         snprintf(emarker, sizeof(emarker), "__ccs%zu=0,", site_pos);
         const char* hit = src ? strstr(src, marker) : NULL;
+        size_t after_decl = 0;   /* the standalone marker's `};`, when matched */
         if (!hit && src && emarker[0])
             hit = strstr(src, emarker);
         if (!hit && src) {
@@ -2500,24 +2522,31 @@ static size_t cc__emit_resolve_anchor_pos(CCEmitAnchor anchor, size_t site_pos,
                     : 0;
             const char* p = src;
             const char* best = NULL;
-            while ((p = strstr(p, "enum{__ccs")) != NULL) {
-                const char* q = p + 10;
-                if (*q < '0' || *q > '9') {
-                    p++;
-                    continue;
-                }
-                while (*q >= '0' && *q <= '9') q++;
-                if (strncmp(q, "=0};", 4) != 0) {
-                    p++;
+            const char* best_end = NULL;
+            /* The standalone `enum{ __ccs<n> = 0 };` marker, however its
+             * producer laid it out. Matching the tight spelling alone made a
+             * marker the clean lowerer had printed over several lines read as
+             * absent, and the fragment then landed at EOF — after every use of
+             * what it defines, which the host reports as an implicit
+             * declaration rather than as the misplacement it is. */
+            while ((p = strstr(p, "__ccs")) != NULL) {
+                const char* endp = NULL;
+                int comma = 0;
+                if (!cc__emit_match_ccs_dummy(p, &endp, &comma) || comma) {
+                    p += 5;
                     continue;
                 }
                 if ((size_t)(p - src) >= logic_pos) {
                     best = p;
+                    best_end = endp;
                     break;
                 }
-                if (!best) best = p;
-                p = q;
+                if (!best) { best = p; best_end = endp; }
+                p = endp;
             }
+            /* the fragment goes after the marker's declaration: laid out over
+             * several lines, the marker's own line start is inside the enum */
+            if (best && best_end) after_decl = (size_t)(best_end - src);
             if (!best) {
                 p = src;
                 while ((p = strstr(p, "__ccs")) != NULL) {
@@ -2537,7 +2566,11 @@ static size_t cc__emit_resolve_anchor_pos(CCEmitAnchor anchor, size_t site_pos,
             }
             hit = best;
         }
-        if (hit) {
+        if (hit && after_decl) {
+            pos = after_decl;
+            while (pos < len && src[pos] != '\n') pos++;
+            if (pos < len) pos++;
+        } else if (hit) {
             pos = (size_t)(hit - src);
             while (pos > 0 && src[pos - 1] != '\n') pos--;
         } else {

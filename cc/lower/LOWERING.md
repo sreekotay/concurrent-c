@@ -580,6 +580,29 @@ anchors the fragments name. What is left of a block in the stage is
 blanked: a block that has run has no code in it for the lowerer to
 lower, and the blanking keeps the line count so the map still holds.
 
+Rewriting those includes takes something away, so it is put back. A
+`@comptime` function, a factory and a `@comptime { }` block are compile
+time only, and the lowered `.h` does not carry them — `static_map` is one
+of those functions, declared in `<ccc/std/static_map.cch>`. The copy the
+executor runs has them appended (`cc_harvest_local_header_factories`,
+`cc_harvest_header_comptime_functions`,
+`cc_harvest_local_header_comptime_blocks`, in that order, as the shadow
+path appends them). Without it the block calling `static_map` compiles,
+runs, and emits nothing — a table that is silently not there, and a use of
+it that the host reports as an implicit declaration.
+
+**Where a fragment lands.** A blanked block leaves `enum{__ccs<n>=0};` on
+one of its blanked lines, and that marker is what a fragment anchored at
+its own site aims at. The marker is a declaration, so how it is laid out
+is the printer's business: this lowerer prints it over several lines with
+a `#line` between each, where the text engine wrote it tight. Matching one
+spelling made the marker read as absent, and a fragment with no marker
+lands at the end of the file — after every use of what it defines. The
+match skips line breaks and `#line` directives with the other blanks, and
+a fragment aimed at the standalone marker goes after that declaration's
+`};`, since with the layout on several lines the marker's own line begins
+inside the enum.
+
 ## Parallel
 
 The arms of `@parallel { a = f(); b = g(); }` may run at the same time.
