@@ -466,9 +466,9 @@ static void CcLowerer_includes(CcLowerer* L) {
 static void CcLowerer_lower_unit(CcLowerer* L) {
     CcLowerer_comptime(L);  /* first: a value the user asked for at compile time is a constant to every step */
     CcLowerer_includes(L);
+    CcLowerer_deadline(L);  /* before the rest: a deadline body is ordinary statements to every one of them */
     CcLowerer_async(L);     /* first: an async body is an ordinary body to every step after it */
     CcLowerer_parallel(L);  /* then: an arm becomes an ordinary function the later steps walk */
-    CcLowerer_deadline(L);  /* before closures and parallel: the body is ordinary statements to them */
     CcLowerer_chan(L);      /* first: an endpoint is the runtime handle before anything captures it */
     CcLowerer_closures(L);  /* then: the body becomes a function the later steps walk */
     CcLowerer_create(L);    /* before UFCS: the constructor becomes an ordinary call */

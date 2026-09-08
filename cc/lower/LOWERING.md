@@ -725,6 +725,14 @@ the enclosing scope. A `@parallel` with no arms at all is refused by the
 step rather than lowered to an empty block, which would run and join
 nothing.
 
+The one outer name a block arm writes is its dest, found in the parser by
+the same walk that refuses two of them. A dest is written through the
+arm's out pointer: the thunk binds the name from `*__e->__cc_out` before
+the body and stores it back after, so the assignment reaches the caller. A
+bound arm's other captures are a copy taken when it started, and a copy of
+the written name would make the assignment look like it happened while the
+caller still read its old value.
+
 `@serial { ... }` is an arm whose body is a block rather than one
 expression; it reaches its names through the same addresses, and a name
 it declares for itself over one it captures is a diagnostic rather than a
@@ -806,8 +814,10 @@ the same clock. The pop is the last statement of the block, not a
 which is what the runtime expects of a scope the returning frame is done
 with.
 
-The step runs before closures and `@parallel`, so by the time those look
-at the body it is ordinary statements.
+The step runs before every other statement step, so by the time those look
+at the body it is ordinary statements — a handle a `@parallel` binds inside
+a deadline body is a declaration they can see, not something buried in a
+construct they do not walk into.
 
 ## Scheduling facts
 

@@ -437,7 +437,7 @@ static bool pa_dests_expr(CcExpr* e, void* env) {
     return true;
 }
 
-static size_t pa_outer_dests(P* p, CcStmtList* stmts) {
+static size_t pa_outer_dests(P* p, CcStmtList* stmts, CCSlice* only) {
     PaDests d;
     CcVisitor v;
     size_t n = stmts->len();
@@ -453,6 +453,7 @@ static size_t pa_outer_dests(P* p, CcStmtList* stmts) {
     v.expr = pa_dests_expr;
     v.env = &d;
     for (i = 0; i < n; i++) CcStmt_walk(*stmts->get_ptr(i), v);
+    if (only && d.outer.len() == 1) *only = *d.outer.get_ptr(0);
     return d.outer.len();
 }
 
@@ -628,9 +629,17 @@ static CcStmt* parse_parallel(P* p) {
                 if (!sb.stmts.len()) {
                     CCString m = @string(`${at_serial} arm must not be empty`, p->arena);
                     err_at(p, afirst, m);
-                } else if (pa_outer_dests(p, &sb.stmts) > 1) {
-                    CCString m = @string(`${at_serial} arm must assign at most one simple outer name`, p->arena);
-                    err_at(p, afirst, m);
+                } else {
+                    /* the one outer name the arm writes is its dest: the
+                     * thunk writes it through an out pointer, so a copy in
+                     * the arm's environment would never reach the caller */
+                    CCSlice only = cc_slice_empty();
+                    if (pa_outer_dests(p, &sb.stmts, &only) > 1) {
+                        CCString m = @string(`${at_serial} arm must assign at most one simple outer name`, p->arena);
+                        err_at(p, afirst, m);
+                    } else {
+                        arm.target = only;
+                    }
                 }
                 ser = cc__stmt_blank(span_from(p, afirst), p->arena);
                 ser->k = { .serial = sb };

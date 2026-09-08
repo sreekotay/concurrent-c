@@ -226,10 +226,16 @@ static void pl_forward(PStep* st, uint32_t id, uint32_t k) {
     sb->push_cstr(";\n", a);
 }
 
+/* `(*__e->__cc_out)`: where an arm's one outer name lives on the caller. */
+static CcExpr* pl_out_slot(CcLowerer* L, CcSpan sp) {
+    CcExpr* read = cc_expr_member(lw_ident(L, cstr_slice("__e"), sp), cstr_slice("__cc_out"), true, sp, L->arena);
+    return cc_expr_unary(CC_OP_DEREF, lw_paren(L, read, sp), sp, L->arena);
+}
+
 /* The thunk: the environment, the names it reads, then the arm. */
 static CcDecl* pl_thunk_decl(PStep* st, uint32_t id, uint32_t k, PCapList* caps,
                              CcExpr* expr, CcStmt* arm_body, CCSlice out_type,
-                             bool snapshot, CcSpan sp) {
+                             CCSlice target, bool snapshot, CcSpan sp) {
     CcLowerer* L = st->L;
     CCSlice env = pl_name(L, id, k, "_env_t");
     CcStmt* body = lw_block(L, sp);
@@ -272,7 +278,20 @@ static CcDecl* pl_thunk_decl(PStep* st, uint32_t id, uint32_t k, PCapList* caps,
                                            cc_expr_member(lw_ident(L, cstr_slice("__e"), sp),
                                                           cstr_slice("__cc_par_h"), true, sp, L->arena), sp), sp));
     if (arm_body) {
+        /* a block arm writes its one outer name as an ordinary local, so
+         * the name is bound from the out pointer before the body and
+         * stored back after it: a copy the caller never reads would make
+         * the assignment look like it happened */
+        bool has_out = out_type.len != 0 && target.len != 0;
+        if (has_out) {
+            CcExpr* slot = pl_out_slot(L, sp);
+            lw_push(body, lw_decl_stmt(L, cc_type_named(out_type, sp, L->arena), target, slot, sp));
+        }
         lw_push(body, arm_body);
+        if (has_out) {
+            CcExpr* slot = pl_out_slot(L, sp);
+            lw_push(body, lw_expr_stmt(L, lw_assign(L, slot, lw_ident(L, target, sp), sp), sp));
+        }
     } else if (out_type.len) {
         CcExpr* read = cc_expr_member(lw_ident(L, cstr_slice("__e"), sp), cstr_slice("__cc_out"), true, sp, L->arena);
         CcExpr* store = lw_assign(L, cc_expr_unary(CC_OP_DEREF, lw_paren(L, read, sp), sp, L->arena), expr, sp);
@@ -569,7 +588,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
                 return;
             }
         }
-        if (arm->target.len && !arm->serial) {
+        if (arm->target.len) {
             CcType* t = sc_lookup(w, arm->target);
             if (!t) {
                 CCSlice nm = arm->target;
@@ -587,7 +606,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         }
         pl_forward(st, id, (uint32_t)i);
         st->made.push(pl_thunk_decl(st, id, (uint32_t)i, &caps, arm->expr, pl_serial_body(L, arm->serial),
-                                    out_type, p.bind.len != 0, sp));
+                                    out_type, arm->target, p.bind.len != 0, sp));
         pl_spawn_stmts(L, blk, id, (uint32_t)i, &caps, arm->target, p.bind, sp);
     }
     /* the first arm stays here */
