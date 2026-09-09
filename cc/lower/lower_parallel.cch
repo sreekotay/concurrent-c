@@ -15,9 +15,14 @@
  * may fail. Both fall back to running the thunk inline, so the arms run
  * either way and the difference is only whether they overlapped.
  *
- * Everything the form can carry beyond plain arms — `spawn`, a predicate,
- * `seq`, `wait`, `worker`, `cache`, a bound handle, `@serial`, and the
- * `for` and dest forms — is a diagnostic naming it. A concurrency
+ * `spawn` is the same block with one promise added: every arm but the
+ * first is running while the block is, so the runtime may not deny one and
+ * run it on the caller instead — a rendezvous written across two arms would
+ * be waiting on itself. A site that asks for it and does not get it dies
+ * rather than running.
+ *
+ * What the form can still carry and this step does not lower — a predicate,
+ * `cache`, and the dest forms — is a diagnostic naming it. A concurrency
  * construct that quietly ran as something else would be a program that
  * behaves differently for reasons the page does not show.
  * Lifetime: the lowerer arena. */
@@ -442,7 +447,7 @@ static void pl_env_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
  * site runs its arms in order, nothing is spawned and the thunks are
  * called on the caller instead. */
 static void pl_fire_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
-                          CCSlice bind, CcSpan sp) {
+                          CCSlice bind, bool spawn, CcSpan sp) {
     CCSlice thunk = pl_name(L, id, k, "_thunk");
     CCSlice e = pl_name(L, id, k, "_e");
     CCSlice site = pl_name(L, id, k, "_site");
@@ -467,6 +472,17 @@ static void pl_fire_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
         aa->push(lw_ident(L, task, sp));
         aa->push(lw_ident(L, e, sp));
         lw_push(blk, lw_expr_stmt(L, admit, sp));
+        (void)site;
+        (void)denied;
+        return;
+    }
+    if (spawn) {
+        /* `spawn` promises the arm is running while the block is: an arm the
+         * runtime denied and the caller ran instead is a rendezvous waiting
+         * on itself, so this site is not one a deny may take */
+        CcExpr* sp_call = lw_call2(L, cstr_slice("cc_parallel_spawn_admit"), lw_ident(L, thunk, sp),
+                                   cc_expr_unary(CC_OP_ADDR, lw_ident(L, e, sp), sp, L->arena), sp);
+        lw_push(blk, lw_expr_stmt(L, lw_assign(L, lw_ident(L, task, sp), sp_call, sp), sp));
         (void)site;
         (void)denied;
         return;
@@ -496,7 +512,7 @@ static void pl_fire_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
 static void pl_spawn_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
                            PCapList* caps, CCSlice target, CCSlice bind, CcSpan sp) {
     pl_env_stmts(L, blk, id, k, caps, target, bind, sp);
-    pl_fire_stmts(L, blk, id, k, bind, sp);
+    pl_fire_stmts(L, blk, id, k, bind, false, sp);
 }
 
 /* The arm on the caller: the same thunk a spawn would have run, called
@@ -514,7 +530,7 @@ static void pl_inline_call(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k, C
     lw_push(blk, lw_expr_stmt(L, cast, sp));
 }
 
-static void pl_join_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k, CcSpan sp) {
+static void pl_join_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k, bool spawn, CcSpan sp) {
     CCSlice thunk = pl_name(L, id, k, "_thunk");
     CCSlice e = pl_name(L, id, k, "_e");
     CCSlice task = pl_name(L, id, k, "_t");
@@ -525,6 +541,23 @@ static void pl_join_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k, Cc
                                   cc_expr_member(lw_ident(L, task, sp), cstr_slice("kind"), false, sp, L->arena),
                                   lw_ident(L, cstr_slice("CC_TASK_KIND_INVALID"), sp), sp, L->arena);
     CcExpr* cond = cc_expr_binary(CC_OP_LAND, lw_not(L, lw_ident(L, denied, sp), sp), live, sp, L->arena);
+    if (spawn) {
+        /* nothing ran here, so there is no inline arm to fall back to: an
+         * arm that never started is the promise `spawn` made, broken */
+        CCString dm = cc_string_new();
+        /* Assembled rather than templated: the text is a C string literal
+         * carrying an `@`, and a template reads that as a sigil. */
+        cc_string_push_cstr(&dm, "\"@parallel spawn failed\"", L->arena);
+        lw_push(then, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_join"), lw_ident(L, task, sp), sp), sp));
+        lw_push(els, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_die"),
+                                              lw_text(L, dm, sp), sp), sp));
+        lw_push(blk, lw_if(L, live, then, els, sp));
+        (void)thunk;
+        (void)e;
+        (void)denied;
+        (void)cond;
+        return;
+    }
     lw_push(then, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_join"), lw_ident(L, task, sp), sp), sp));
     lw_push(els, lw_expr_stmt(L, lw_call1(L, cstr_slice("CC_PAR_NOTE_INLINE_ARM"),
                                           lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
@@ -621,7 +654,10 @@ static void* ${site};
 /* `leave`: the label a converted exit jumps to instead of returning outright,
  * for a body that has something to run on the way out -- a walked ticket gives
  * its place back. Empty when returning is the whole of leaving. */
-typedef struct PForExit { CcLowerer* L; uint32_t id; bool has_ret; CCSlice leave; } PForExit;
+/* `cancel`: a body whose exit ends the whole walk, not just this half --
+ * a ticket that returns leaves the tickets behind it nothing to finish, and
+ * the pool is what carries that. A split walk has no pool and sets it false. */
+typedef struct PForExit { CcLowerer* L; uint32_t id; bool has_ret; bool cancel; CCSlice leave; } PForExit;
 
 static void pl_for_leave(PForExit* fx, CcStmt* blk, CcSpan sp) {
     CcLowerer* L = fx->L;
@@ -664,6 +700,10 @@ static void pl_for_exits(PForExit* fx, CcStmt* s, int depth) {
             CCString t = @string(`{ int __cc_z = 0; while (!cc_atomic_cas(&e->${ex}->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&e->${ex}->xk) == 0) cc_atomic_store(&e->${ex}->xk, 1); cc_atomic_store(&e->${ex}->lock, 0); }`, L->arena);
             CcStmt* blk = lw_block(L, sp);
             lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
+            if (fx->cancel) {
+                CCString c = @string(`cc_nursery_cancel_host(__cc_pw_sh->nur)`, L->arena);
+                lw_push(blk, lw_expr_stmt(L, lw_text(L, c, sp), sp));
+            }
             pl_for_leave(fx, blk, sp);
             s->k = blk->k;
             return;
@@ -674,6 +714,13 @@ static void pl_for_exits(PForExit* fx, CcStmt* s, int depth) {
             CCString t = @string(`{ int __cc_z = 0; while (!cc_atomic_cas(&e->__cc_pf_ex->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&e->__cc_pf_ex->xk) != 2) { e->__cc_pf_ex->rv = (${v}); cc_atomic_store(&e->__cc_pf_ex->xk, 2); } cc_atomic_store(&e->__cc_pf_ex->lock, 0); }`, L->arena);
             CcStmt* blk = lw_block(L, sp);
             lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
+            if (fx->cancel) {
+                /* the tickets that have not started stop starting, and the
+                 * ones in flight skip their ordered sections: the walk the
+                 * caller returns out of has no work left to do */
+                CCString c = @string(`cc_nursery_cancel_host(__cc_pw_sh->nur)`, L->arena);
+                lw_push(blk, lw_expr_stmt(L, lw_text(L, c, sp), sp));
+            }
             pl_for_leave(fx, blk, sp);
             s->k = blk->k;
             return;
@@ -956,11 +1003,10 @@ static CCSlice pl_handle_spell(CcLowerer* L, CcParallel p, bool* declared, CCSli
 
 static bool pl_reject(CcLowerer* L, CcParallel p, CcSpan sp) {
     CCString m;
-    if (p.spawn && !p.bind.len && !p.target) {
-        /* with a handle, `spawn` is what the handle already says: the arms
-         * outlive the block and something joins them later. Without one
-         * there is nothing to join them by. */
-        m = @string(`'${"@"}parallel spawn' without a handle to join by is not lowered by the clean lowerer yet`, L->arena);
+    if (p.spawn && (p.pred || p.seq)) {
+        /* a gate that denies runs the arms on the caller in order, which is
+         * the one schedule `spawn` says this site does not have */
+        m = @string(`'${"@"}parallel spawn' does not take a gate: a denied site runs its arms in order, which is what 'spawn' rules out`, L->arena);
         lw_error(L, sp, m);
         return true;
     }
@@ -1114,7 +1160,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         st->made.push(pl_thunk_decl(st, id, (uint32_t)i, &caps, arm->expr, pl_serial_body(L, arm->serial),
                                     out_type, arm->target, hspell.len != 0, sp));
         pl_env_stmts(L, blk, id, (uint32_t)i, &caps, arm->target, hspell, sp);
-        if (!gated) pl_fire_stmts(L, blk, id, (uint32_t)i, hspell, sp);
+        if (!gated) pl_fire_stmts(L, blk, id, (uint32_t)i, hspell, p.spawn, sp);
     }
     if (gated) {
         /* One test, once: true when the arms run in order. The arms
@@ -1127,7 +1173,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         lw_push(fire, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc_parallel_deny_enter"),
                                                lw_ident(L, cstr_slice("__cc_pt"), sp),
                                                lw_text(L, @string(`NULL`, L->arena), sp), sp), sp));
-        for (i = 1; i < n; i++) pl_fire_stmts(L, fire, id, (uint32_t)i, hspell, sp);
+        for (i = 1; i < n; i++) pl_fire_stmts(L, fire, id, (uint32_t)i, hspell, false, sp);
         lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, gname, sp), sp), fire, NULL, sp));
     }
     /* the first arm stays here */
@@ -1144,7 +1190,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     if (gated) {
         CcStmt* joins = lw_block(L, sp);
         CcStmt* order = lw_block(L, sp);
-        for (i = 1; i < n; i++) pl_join_stmts(L, joins, id, (uint32_t)i, sp);
+        for (i = 1; i < n; i++) pl_join_stmts(L, joins, id, (uint32_t)i, false, sp);
         lw_push(joins, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"),
                                                 lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
         /* nothing was denied on this schedule, so no note: the arms simply
@@ -1153,7 +1199,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, gname, sp), sp), joins, order, sp));
     } else if (!hspell.len) {
         /* the block joins before it ends; a bound handle joins later */
-        for (i = 1; i < n; i++) pl_join_stmts(L, blk, id, (uint32_t)i, sp);
+        for (i = 1; i < n; i++) pl_join_stmts(L, blk, id, (uint32_t)i, p.spawn, sp);
         lw_push(blk, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"),
                                               lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
     } else if (hdeclared) {
@@ -1340,6 +1386,7 @@ static void pl_for_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
         fx.L = L;
         fx.id = id;
         fx.has_ret = false;
+        fx.cancel = false;             /* no pool: the halves stop by the cell alone */
         fx.leave = cc_slice_empty();   /* the split walk returns, and that is all */
         if (pf.loop.body) pl_for_exits(&fx, pf.loop.body, 0);
         has_ret = true;
@@ -1517,10 +1564,182 @@ static CcDecl* pl_pw_worker_decl(PStep* st, uint32_t id, CcSpan sp) {
     return lw_raw_decl(L, t, sp);
 }
 
+
+/* ---- `@stage` inside a walked body -------------------------------------- */
+
+static int pl_pw_gate_form(Walker* w, CcExpr* g);
+
+/* The flag a stage sets once it has passed. The exit reads it, so a ticket
+ * that left the body early still hands the phase on to its successor. */
+static CCSlice pl_pw_stg_name(CcLowerer* L, uint32_t id, uint32_t k) {
+    CCString s = @string(`__cc_pw_${id}_stg_${k}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+/* The three parts of a `@stage`, or false for a statement that is not one. */
+static bool pl_stage_parts(CcStmt* s, CcExpr** gate, CcExprList* args, CcStmtList* stmts) {
+    bool hit = false;
+    if (!s) return false;
+    @switch (s->k) {
+        case .stage(x): {
+            *gate = x.gate;
+            *args = x.args;
+            *stmts = x.stmts;
+            hit = true;
+            break;
+        }
+        default: break;
+    }
+    return hit;
+}
+
+/* The gate as the pointer the turnstile calls take. A gate held by value is
+ * taken by address; one that is already a pointer is passed on. The inner
+ * node is shared with every other call this stage makes, so the capture
+ * rewrite reaches all of them through the one that stays in the body. */
+static CcExpr* pl_stage_addr(CcLowerer* L, int gform, CcExpr* gate, CcSpan sp) {
+    if (gform == 1) return cc_expr_unary(CC_OP_ADDR, gate, sp, L->arena);
+    return gate;
+}
+
+static CcExpr* pl_stage_call(CcLowerer* L, const char* fn, CcExpr* gaddr,
+                             CcExprList* args, CcSpan sp) {
+    CcExpr* c = lw_call0(L, cstr_slice(fn), sp);
+    CcExprList* into = lw_call_args(c);
+    size_t n = args->len();
+    size_t i;
+    into->push(gaddr);
+    for (i = 0; i < n; i++) {
+        CcExpr* a = *args->get_ptr(i);
+        into->push(a);
+    }
+    return c;
+}
+
+/* `<call> !>;`: a turn the ticket cannot take fails the way the body's own
+ * `!>` does, through the handler this function carries -- the slot, the
+ * cancel, and the one exit. */
+static CcStmt* pl_unwrap_stmt(CcLowerer* L, CcExpr* call, CcSpan sp) {
+    CcExpr* uw = cc__expr_blank(sp, L->arena);
+    CcStmt* s = cc__stmt_blank(sp, L->arena);
+    CcUnwrap u;
+    CcUnwrapStmt us;
+    u.a = call;
+    { CcExprK ek = { .unwrap = u }; uw->k = ek; }
+    us.e = uw;
+    { CcStmtK sk = { .unwrap = us }; s->k = sk; }
+    return s;
+}
+
+/* `@stage (gate, phase, ticket) { body }` in the body of a walk, as the
+ * ordered section it is: wait for this ticket's turn, run the block unless
+ * the pool has been cancelled behind it, then pass the turn on. The flag is
+ * what the exit reads to tell a stage that retired from one that did not.
+ *
+ * `cc_parallel_honor` sits between the wait and the block because a pause
+ * does not complete the wait: the ticket holds its turn while it parks.
+ *
+ * The `fail`/`pass` the exit discharges with are built here and handed back,
+ * not emitted here: they share this stage's gate and arguments, so the
+ * capture rewrite that runs after this reaches them, and the exit spells
+ * them once the names they read are the ones the body sees. */
+static void pl_pw_stage_lower(PStep* st, uint32_t id, uint32_t k, CcStmt* s,
+                              CcExprList* dis_fail, CcExprList* dis_pass) {
+    CcLowerer* L = st->L;
+    CcSpan sp = s->span;
+    CcExpr* gate = NULL;
+    CcExprList args;
+    CcStmtList stmts;
+    CcStmt* blk;
+    CCSlice flag = pl_pw_stg_name(L, id, k);
+    int gform;
+    if (!pl_stage_parts(s, &gate, &args, &stmts)) return;
+    gform = pl_pw_gate_form(st->w, gate);
+    blk = lw_block(L, sp);
+    {
+        CcExpr* ga = pl_stage_addr(L, gform, gate, sp);
+        CcExpr* c = pl_stage_call(L, "cc_turnstile_wait", ga, &args, sp);
+        lw_push(blk, pl_unwrap_stmt(L, c, sp));
+    }
+    {
+        CCString t = @string(`cc_parallel_honor(__cc_pw_sh->dest)`, L->arena);
+        pl_pw_text(L, blk, t, sp);
+    }
+    {
+        CcStmt* inner = lw_block(L, sp);
+        CcStmtList* into = lw_block_stmts(inner);
+        CCString c = @string(`!cc_nursery_is_cancelled_host(__cc_pw_sh->nur)`, L->arena);
+        size_t n = stmts.len();
+        size_t i;
+        for (i = 0; i < n; i++) {
+            CcStmt* q = *stmts.get_ptr(i);
+            into->push(q);
+        }
+        lw_push(blk, lw_if(L, lw_text(L, c, sp), inner, NULL, sp));
+    }
+    {
+        CcExpr* ga = pl_stage_addr(L, gform, gate, sp);
+        CcExpr* c = pl_stage_call(L, "cc_turnstile_pass", ga, &args, sp);
+        lw_push(blk, pl_unwrap_stmt(L, c, sp));
+    }
+    {
+        CCString t = @string(`${flag} = 1`, L->arena);
+        pl_pw_text(L, blk, t, sp);
+    }
+    {
+        CcExpr* ga = pl_stage_addr(L, gform, gate, sp);
+        CcExpr* c = pl_stage_call(L, "cc_turnstile_fail", ga, &args, sp);
+        dis_fail->push(c);
+    }
+    {
+        CcExpr* ga = pl_stage_addr(L, gform, gate, sp);
+        CcExpr* c = pl_stage_call(L, "cc_turnstile_pass", ga, &args, sp);
+        dis_pass->push(c);
+    }
+    s->k = blk->k;
+}
+
+/* What a `@stage` of a walked body may name. The gate is the turnstile the
+ * tickets are ordered on, and its `wait`/`pass`/`fail` take a phase and a
+ * ticket; a gate of another shape orders something this walk does not run,
+ * and reading it as a turnstile would be a C type error at a line about the
+ * walk. Checked where the gate still spells the caller's names. */
+static bool pl_pw_stages_ok(PStep* st, CcStmt* body) {
+    CcLowerer* L = st->L;
+    CcStmtList* bs = lw_block_stmts(body);
+    bool ok = true;
+    size_t n;
+    size_t i;
+    if (!bs) return true;
+    n = bs->len();
+    for (i = 0; i < n; i++) {
+        CcStmt* q = *bs->get_ptr(i);
+        CcExpr* gate = NULL;
+        CcExprList args;
+        CcStmtList stmts;
+        uint32_t na;
+        if (!pl_stage_parts(q, &gate, &args, &stmts)) continue;
+        if (!gate || !pl_pw_gate_form(st->w, gate)) {
+            CCString m = @string(`'${"@"}stage' orders the walk's tickets on a 'CCTurnstile': the gate here is something else`, L->arena);
+            lw_error(L, q->span, m);
+            ok = false;
+            continue;
+        }
+        na = (uint32_t)args.len();
+        if (na != 2) {
+            CCString m = @string(`'${"@"}stage (gate, phase, ticket)' names a phase and a ticket beside its gate: this one names ${na}`, L->arena);
+            lw_error(L, q->span, m);
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 /* The body, once. Called on a runner and on the caller, told which ticket it
  * is and which slot is its own; the ticket is already held when it starts and
  * is given back before it returns, so both schedules keep the gate balanced. */
-static CcDecl* pl_pw_run_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn loop, CcSpan sp) {
+static CcDecl* pl_pw_run_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn loop,
+                              CCSlice worker, CcSpan sp) {
     CcLowerer* L = st->L;
     CCSlice env = pl_pw_name(L, id, "_env_t");
     CCSlice run = pl_pw_name(L, id, "_run");
@@ -1538,6 +1757,9 @@ static CcDecl* pl_pw_run_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn lo
     size_t n = caps->len();
     size_t i;
     CCSlice bind = loop.bind;
+    CcExprList dis_fail = vec_new::[CcExprRef](L->arena);
+    CcExprList dis_pass = vec_new::[CcExprRef](L->arena);
+    uint32_t nstg = 0;
     {
         CcType* pt = cc_type_pointer(cc_type_named(env, sp, L->arena), sp, L->arena);
         CcExpr* cast = cc__expr_blank(sp, L->arena);
@@ -1556,6 +1778,36 @@ static CcDecl* pl_pw_run_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn lo
         pl_pw_text(L, fnbody, d3, sp);
     }
     lw_push(fnbody, lw_decl_stmt(L, intt, bind, lw_ident(L, cstr_slice("__cc_pw_i"), sp), sp));
+    if (worker.len) {
+        /* the slot the runner took this ticket on: the caller, which holds
+         * one slot of its own, is slot 0 on either schedule */
+        lw_push(fnbody, lw_decl_stmt(L, intt, worker, lw_ident(L, cstr_slice("__cc_pw_slot"), sp), sp));
+    }
+    {
+        /* the walk's own `@stage`s, numbered in the order they stand in.
+         * Lowered before the captures, because the gate a stage names is read
+         * against the caller's scope, and after this the body reads through
+         * the environment instead. */
+        CcStmtList* bs = lw_block_stmts(loop.body);
+        if (bs) {
+            size_t nb = bs->len();
+            size_t bi;
+            for (bi = 0; bi < nb; bi++) {
+                CcStmt* q = *bs->get_ptr(bi);
+                CcExpr* g = NULL;
+                CcExprList qa;
+                CcStmtList qs;
+                if (!pl_stage_parts(q, &g, &qa, &qs)) continue;
+                {
+                    CCSlice flag = pl_pw_stg_name(L, id, nstg);
+                    CCString t = @string(`int ${flag} = 0`, L->arena);
+                    pl_pw_text(L, fnbody, t, sp);
+                }
+                pl_pw_stage_lower(st, id, nstg, q, &dis_fail, &dis_pass);
+                nstg++;
+            }
+        }
+    }
     for (i = 0; i < n; i++) {
         PCap* c = *caps->get_ptr(i);
         CcExpr* read = cc_expr_member(lw_ident(L, cstr_slice("e"), sp), c->name, true, sp, L->arena);
@@ -1579,6 +1831,7 @@ static CcDecl* pl_pw_run_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn lo
         fx.L = L;
         fx.id = id;
         fx.has_ret = false;
+        fx.cancel = true;
         fx.leave = done;
         if (loop.body) pl_for_exits(&fx, loop.body, 0);
     }
@@ -1607,6 +1860,25 @@ static CcDecl* pl_pw_run_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn lo
          * ending out of the handler the results step hoists below. */
         CcStmt* lv = lw_block(L, sp);
         CCString lt = @string(`__typeof__(cc_turnstile_leave(__cc_pw_sh->gate)) __cc_pw_lr = cc_turnstile_leave(__cc_pw_sh->gate); if (!__cc_pw_lr.ok && !__cc_pw_sl->failed) { __cc_pw_sl->err = __cc_pw_lr.u.error.base; __cc_pw_sl->failed = 1; __cc_pw_sl->i = __cc_pw_i; cc_nursery_cancel_host(__cc_pw_sh->nur); }`, L->arena);
+        {
+            /* a stage the body left before passing is discharged here, so a
+             * successor parked in its `wait` wakes either way: with the error
+             * when this ticket failed, and with its turn when it merely
+             * skipped ahead. Spelled now, because the calls read the captures
+             * the way the body does. */
+            uint32_t sk;
+            for (sk = 0; sk < nstg; sk++) {
+                CCSlice flag = pl_pw_stg_name(L, id, sk);
+                CcExpr* fe = *dis_fail.get_ptr(sk);
+                CcExpr* pe = *dis_pass.get_ptr(sk);
+                CCString fs = lw_spell_expr(L, fe);
+                CCString ps = lw_spell_expr(L, pe);
+                CCSlice fc = lw_keep(L, &fs);
+                CCSlice pc = lw_keep(L, &ps);
+                CCString t = @string(`if (!${flag}) { if (__cc_pw_sl->failed) { __typeof__(${fc}) __cc_pw_dr = ${fc}; (void)__cc_pw_dr; } else { __typeof__(${pc}) __cc_pw_dr = ${pc}; if (!__cc_pw_dr.ok) { __cc_pw_sl->err = __cc_pw_dr.u.error; __cc_pw_sl->failed = 1; __cc_pw_sl->i = __cc_pw_i; cc_nursery_cancel_host(__cc_pw_sh->nur); } } }`, L->arena);
+                pl_pw_text(L, lv, t, sp);
+            }
+        }
         pl_pw_text(L, lv, lt, sp);
         lw_push(fnbody, lw_label(L, done, lv, sp));
         lw_push(fnbody, cc_stmt_return(NULL, sp, L->arena));
@@ -1641,6 +1913,23 @@ static CcDecl* pl_pw_run_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn lo
     d->attrs = vec_new::[CcAttr](L->arena);
     { CcDeclK dk = { .func = fd }; d->k = dk; }
     return d;
+}
+
+/* A bound wait-for names one of two things. A typed `CCParallel` is the live
+ * handle the tickets pause and resume through, and outlives the walk. Anything
+ * else -- a `bool` the site declares, or an lvalue it assigns -- is the walk's
+ * own answer: did every ticket run? */
+static bool pl_pw_handle_bind(CcParallelFor pf) {
+    CCSlice nm = cc_slice_empty();
+    CCSlice want = cstr_slice("CCParallel");
+    if (!pf.bind.len || !pf.bind_type) return false;
+    if (!type_named_name(pf.bind_type, &nm)) return false;
+    return slice_eq(nm, want);
+}
+
+static bool pl_pw_result_dest(CcParallelFor pf) {
+    if (!pf.bind.len && !pf.target) return false;
+    return !pl_pw_handle_bind(pf);
 }
 
 /* What `wait (...)` names: 2 a turnstile reached by pointer, 1 one held by
@@ -1703,6 +1992,7 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
     CCSlice eok = pl_pw_name(L, id, "_eok");
     CCSlice sf = pl_pw_name(L, id, "_sf");
     CCSlice ret_ty = cstr_slice("int");
+    CCSlice dst = cc_slice_empty();
     CCSlice gspell = cc_slice_empty();
     CCSlice wspell = cc_slice_empty();
     CCSlice los = cc_slice_empty();
@@ -1736,6 +2026,22 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
         CCSlice vd = cstr_slice("void");
         if (rn.len && !slice_eq(rn, vd)) ret_ty = rn;
     }
+    if (pl_pw_result_dest(pf)) {
+        if (pf.bind.len) {
+            /* the answer outlives the block, so its declaration goes before
+             * it, in the list the block sits in */
+            PBind* b = cc_arena_alloc(L->arena, sizeof(PBind), _Alignof(PBind));
+            memset(b, 0, sizeof(*b));
+            b->at = s;
+            b->name = pf.bind;
+            b->type = pf.bind_type ? pf.bind_type : cc_type_named(cstr_slice("bool"), sp, L->arena);
+            st->binds.push(b);
+            dst = pf.bind;
+        } else {
+            CCString t = lw_spell_expr(L, pf.target);
+            dst = lw_keep(L, &t);
+        }
+    }
     { CCString t = lw_spell_expr(L, pf.wait); wspell = lw_keep(L, &t); }
     if (pf.seq) { CCString t = lw_spell_expr(L, pf.seq); gspell = lw_keep(L, &t); }
     { CCString t = lw_spell_expr(L, rg.lo); los = lw_keep(L, &t); }
@@ -1745,7 +2051,7 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
         st->fwd.push_slice(et.as_slice(), L->arena);
     }
     pl_pw_forward(st, id);
-    st->made.push(pl_pw_run_decl(st, id, &caps, pf.loop, sp));
+    st->made.push(pl_pw_run_decl(st, id, &caps, pf.loop, pf.worker, sp));
     st->made.push(pl_pw_worker_decl(st, id, sp));
     {
         CCString a1 = @string(`${env} ${ev}`, L->arena);
@@ -1932,28 +2238,14 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
         lw_push(then, cc_stmt_return(lw_text(L, rv, sp), sp, L->arena));
         lw_push(blk, lw_if(L, lw_text(L, cnd, sp), then, NULL, sp));
     }
+    if (dst.len) {
+        /* the walk's own answer, reached only by the site that neither
+         * raised nor returned: every ticket ran unless one of them broke */
+        CCString t = @string(`${dst} = (cc_atomic_load(&${cell}.xk) != 1)`, L->arena);
+        pl_pw_text(L, blk, t, sp);
+    }
     s->k = blk->k;
     st->any = true;
-}
-
-/* A `@stage` of the walk's own body: it sequences the tickets, which is not
- * this shape. */
-static bool pl_pw_has_stage(CcStmt* body) {
-    CcStmtList* bs = lw_block_stmts(body);
-    size_t n;
-    size_t i;
-    if (!bs) return false;
-    n = bs->len();
-    for (i = 0; i < n; i++) {
-        CcStmt* k = *bs->get_ptr(i);
-        bool is_stage = false;
-        @switch (k->k) {
-            case .stage: is_stage = true; break;
-            default: break;
-        }
-        if (is_stage) return true;
-    }
-    return false;
 }
 
 /* `} !>` after the body: the tail that says a ticket error leaves the site.
@@ -1970,11 +2262,9 @@ static bool pl_pw_tail_raises(CcExpr* tail) {
 }
 
 /* A `break` that belongs to the walk itself, not to a loop the body opened.
- * It makes the site's join answer a question -- did every ticket run? -- and
- * that answer is the bound form (`bool fin = ${"@"}parallel ... !>.wait()!>`),
- * which this step does not lower. Discarding it is what
- * `parallel_wait_result_discard_fail` is about, so the walk with the `break`
- * is refused rather than the discard alone. */
+ * It makes the site's join answer a question -- did every ticket run? -- so
+ * the walk is the bound form (`bool fin = ${"@"}parallel ... !>.wait()!>`) and
+ * a site with nowhere to put that answer is refused. */
 static bool pl_pw_break_at(CcStmt* s, int depth) {
     CcStmtList* bs;
     size_t n;
@@ -2107,20 +2397,14 @@ static void pl_for(PStep* st, CcStmt* s, CcParallelFor pf) {
         s->k = gone->k;
         return;
     }
-    if (pf.worker.len) {
-        m = @string(`'${"@"}parallel wait (...) for' with 'worker' is not lowered by the clean lowerer yet`, L->arena);
-        lw_error(L, sp, m);
-        s->k = gone->k;
-        return;
-    }
     if (pf.cache.len()) {
         m = @string(`'${"@"}parallel wait (...) for' with 'cache' is not lowered by the clean lowerer yet`, L->arena);
         lw_error(L, sp, m);
         s->k = gone->k;
         return;
     }
-    if (pf.bind.len || pf.target) {
-        m = @string(`'${"@"}parallel wait (...) for' that also binds a handle is not lowered by the clean lowerer yet: the pool joins before the brace ends`, L->arena);
+    if (pl_pw_handle_bind(pf)) {
+        m = @string(`'${"@"}parallel wait (...) for' that binds a live 'CCParallel' is not lowered by the clean lowerer yet: the tickets pause and resume through the handle while the pool is still running`, L->arena);
         lw_error(L, sp, m);
         s->k = gone->k;
         return;
@@ -2131,8 +2415,11 @@ static void pl_for(PStep* st, CcStmt* s, CcParallelFor pf) {
         s->k = gone->k;
         return;
     }
-    if (pf.loop.body && pl_pw_break_at(pf.loop.body, 0)) {
-        m = @string(`a 'break' out of a '${"@"}parallel wait (...) for' body is not lowered by the clean lowerer yet: the walk it leaves unfinished is the bound form's answer`, L->arena);
+    if (pf.loop.body && pl_pw_break_at(pf.loop.body, 0) && !pl_pw_result_dest(pf)) {
+        /* Assembled rather than templated: the message carries an `@` and a
+         * `!>`, and a template reads the first as a sigil. */
+        m = cc_string_new();
+        cc_string_push_cstr(&m, "a '@parallel wait for' that can 'break' is bool !>(CCError); bind the bool (the range did not finish)", L->arena);
         lw_error(L, sp, m);
         s->k = gone->k;
         return;
@@ -2143,10 +2430,7 @@ static void pl_for(PStep* st, CcStmt* s, CcParallelFor pf) {
         s->k = gone->k;
         return;
     }
-    if (pl_pw_has_stage(pf.loop.body)) {
-        m = cc_string_new();
-        cc_string_push_cstr(&m, "@stage in a '@parallel wait for' body is not lowered by the clean lowerer yet", L->arena);
-        lw_error(L, sp, m);
+    if (!pl_pw_stages_ok(st, pf.loop.body)) {
         s->k = gone->k;
         return;
     }
