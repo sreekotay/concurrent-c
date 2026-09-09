@@ -144,6 +144,34 @@ int io_sess_wrap_tls(CCIoSess* io) {
     return 0;
 }
 
+int io_sess_pending_out(CCIoSess* io) {
+    return io && io->tls_on && !io->tls_hs && cc_tls_pending_out(&io->tls);
+}
+
+void io_sess_apply(CCIoSess* io, CCIoAct a) {
+    int pend = io_sess_pending_out(io);
+    @switch (a) {
+    case .close:
+        if (pend) {
+            /* App cursor done; keep the row until ciphertext drains. */
+            io->closing = 1;
+            io->want_out = 1;
+            io->dead = 0;
+        } else {
+            io->closing = 0;
+            io->dead = 1;
+            io->want_out = 0;
+        }
+        break;
+    case .wait:
+        io->want_out = pend ? 1 : 0;
+        break;
+    case .wait_out:
+        io->want_out = 1;
+        break;
+    }
+}
+
 void io_sess_drop(CCIoSess* io) {
     if (!io) return;
     if (io->tls_on) {
@@ -394,6 +422,30 @@ static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, int id,
             return cc_ok(0);
         }
     }
+    /* Record-layer drain is independent of the app send cursor. */
+    if (io->tls_on && !io->tls_hs) {
+        if (io_sess_pending_out(io) && cc_ready_out(r)) {
+            CCNetError ne = CC_NET_OK;
+            int p = cc_tls_flush_step(&io->tls, &ne);
+            if (p < 0) {
+                io->dead = 1;
+                return cc_ok(-1);
+            }
+        }
+        if (io_sess_pending_out(io))
+            io->want_out = 1;
+        if (io->closing) {
+            if (io_sess_pending_out(io)) {
+                int ar = cc_io_arm(io, tape, id) !>;
+                if (ar < 0) return cc_ok(-1);
+                return cc_ok(0);
+            }
+            io->closing = 0;
+            io->dead = 1;
+            io->want_out = 0;
+            return cc_ok(-1);
+        }
+    }
     if (io->want_out) {
         if (cc_ready_in(r)) {
             int got = cc_io_fill_while_out(io) !>(e) {
@@ -500,17 +552,17 @@ static int cc_tape_try_accept(CCTape* tape, CCArenaPool* slots) {
     return n;
 }
 
-/* Drop WaitId: session pool + conn table. -1 on waiter desync. */
+/* Drop WaitId: unwatch/delete first (tidy), then session pool. -1 desync. */
 static int conn_drop_id(CCTape* tape, CCArenaPool* slots, ServeCtx* ctx,
                         int id) {
     CCServer* srv = tape->srv;
     CCConnRow* row = tape->row(id);
     CCIoSess* io = row ? row->io : NULL;
+    if (tape->drop_id(id) != 0) return -1;
     if (io) {
         cc_io_row_drop(ctx, io, slots);
         if (srv) srv->note_close();
     }
-    if (tape->drop_id(id) != 0) return -1;
     return 0;
 }
 
@@ -529,6 +581,19 @@ static int cc_tape_reap(CCTape* tape, CCArenaPool* slots, ServeCtx* ctx) {
         if (conn_drop_id(tape, slots, ctx, id) < 0) return -1;
     }
     return 0;
+}
+
+/* Drop every live row, then close. Sole legal worker-exit for an open tape. */
+static void worker_tape_exit(CCTape* tape, CCArenaPool* slots, ServeCtx* ctx) {
+    size_t di = 0;
+    if (!tape) return;
+    while (di < tape->nconns()) {
+        int id = 0;
+        CCConnRow* row = tape->dense_at(di, &id);
+        if (!row || id <= 0) break;
+        if (conn_drop_id(tape, slots, ctx, id) < 0) break;
+    }
+    tape->close();
 }
 
 static void cc_server_maybe_respawn(ServeCtx* ctx);
@@ -581,20 +646,7 @@ static void cc_server_worker(ServeCtx* ctx) {
         return;
     }
     @defer {
-        tape.close();
-        {
-            size_t di = 0;
-            while (di < tape.nconns()) {
-                int id = 0;
-                CCConnRow* row = tape.dense_at(di, &id);
-                if (!row || id <= 0) break;
-                if (row->io) {
-                    cc_io_row_drop(ctx, row->io, slots);
-                    srv->note_close();
-                }
-                if (tape.drop_id(id) != 0) break;
-            }
-        }
+        worker_tape_exit(&tape, slots, ctx);
         cc_atomic_fetch_sub(&srv->nworkers, 1);
         if (!srv->stopped())
             cc_server_maybe_respawn(ctx);
@@ -653,6 +705,22 @@ static void cc_server_worker(ServeCtx* ctx) {
             if (acc < 0) return;
             if (acc > 0)
                 cc_server_maybe_grow(ctx);
+        }
+
+        /* Fault inject (one-shot): bail once with live rows so defer must
+         * drop before tape.close(). Stress: CC_SERVER_FAULT_BAIL_LIVE=1.
+         * Cache getenv — it is not free on the wake path. */
+        {
+            static int fault_env = -1; /* -1 unknown, 0 off, 1 on */
+            static int fault_live_done;
+            if (fault_env < 0) {
+                const char* fault = getenv("CC_SERVER_FAULT_BAIL_LIVE");
+                fault_env = (fault && fault[0] == '1') ? 1 : 0;
+            }
+            if (fault_env == 1 && !fault_live_done && tape.nconns() > 0) {
+                fault_live_done = 1;
+                return;
+            }
         }
 
         if ((died || deadline_reap) && tape.reap(slots, ctx) < 0)

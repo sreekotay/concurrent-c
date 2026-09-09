@@ -14,6 +14,8 @@
 #undef cc_tls_read
 #undef cc_tls_write
 #undef cc_tls_try_write
+#undef cc_tls_pending_out
+#undef cc_tls_flush_step
 #undef cc_tls_shutdown
 #undef cc_tls_close
 #undef cc_tls_load_cert_chain
@@ -896,6 +898,44 @@ size_t cc_tls_write(CCTlsConn *conn, const char *data, size_t len,
     (void)len;
     *out_err = CC_NET_TLS_HANDSHAKE_FAILED;
     return 0;
+#endif
+}
+
+int cc_tls_pending_out(const CCTlsConn *conn) {
+#ifdef CC_HAS_BEARSSL
+    br_ssl_engine_context *eng;
+    if (!conn || !(conn->flags & CC__TLS_F_READY) || !conn->ctx)
+        return 0;
+    eng = cc__tls_eng((CCTlsConn *)conn);
+    if (!eng) return 0;
+    return (br_ssl_engine_current_state(eng) & BR_SSL_SENDREC) ? 1 : 0;
+#else
+    (void)conn;
+    return 0;
+#endif
+}
+
+int cc_tls_flush_step(CCTlsConn *conn, CCNetError *out_err) {
+    *out_err = CC_NET_OK;
+#ifdef CC_HAS_BEARSSL
+    if (!conn || !(conn->flags & CC__TLS_F_READY)) {
+        *out_err = CC_NET_CONNECTION_CLOSED;
+        return -1;
+    }
+    if (!cc_tls_pending_out(conn))
+        return 0;
+    {
+        int p = cc__tls_pump_rec(conn);
+        if (p < 0) {
+            *out_err = CC_NET_CONNECTION_CLOSED;
+            return -1;
+        }
+        return p > 0 ? 1 : 0;
+    }
+#else
+    (void)conn;
+    *out_err = CC_NET_TLS_HANDSHAKE_FAILED;
+    return -1;
 #endif
 }
 

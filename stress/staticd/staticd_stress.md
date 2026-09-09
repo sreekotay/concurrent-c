@@ -41,11 +41,12 @@ What we are trying to break, mapped to the specimen's seams:
 
 | Seam | Failure mode | Modes |
 |------|--------------|-------|
-| Worker / accept | EMFILE soft-fail, worker exit without respawn, accept storm | `fd_exhaust_accept`, `conn_storm`, `accept_burst_survive` |
+| Worker / accept | EMFILE soft-fail, worker exit without respawn, accept storm | `fd_exhaust_accept`, `conn_storm`, `accept_burst_survive`, `fault_bail_live` |
 | Waiter / compact | kqueue/epoll unwatch after row shift; swap drops batch readiness (LT re-fire) | `waiter_compact_live`, `waiter_reap_under_load` |
+| Waiter / teardown | close before drop loses live rows / sockets / `live` count | `fault_bail_live` (required; happy-path smoke is blind) |
 | Waiter / half-close | READ+EOF/HUP must drain request before close | `halfclose_after_request` |
 | Deadlines | Slowloris header drip, idle keep-alive | `slowloris_headers`, `idle_keepalive_pile` |
-| Output path | abort mid-headers / mid-body | `abort_mid_headers`, `abort_mid_body` |
+| Output path | abort mid-headers / mid-body; TLS accepted≠drained | `abort_mid_headers`, `abort_mid_body`, `write_stall_tiny_sndbuf` |
 | HTTP parse | Garbage methods, huge headers, CL mismatch, Range edges | `http_garbage_hail`, `header_bomb`, `body_cl_mismatch`, `range_edge_hail` |
 | Jail / fs | Traversal, hot rename under GET, listing href encode | `traversal_hail`, `hot_rename_storm`, `listing_href_abuse` |
 | WebSocket | Fragments, RSV, oversize, ping flood, fanout | `ws_protocol_abuse`, `ws_ping_flood`, `ws_fanout`, `ws_churn` |
@@ -55,9 +56,12 @@ What we are trying to break, mapped to the specimen's seams:
 
 Planned (named in reviews, **not** in `MODES` yet): `tls_slow_client_hello`,
 `tls_http_ok`, `cold_fill_hol`, `pages_slow_hold`, `pages_handler_leak`,
-`write_stall_tiny_sndbuf`, `pipelined_close`, `symlink_escape_race`.
+`write_stall_tiny_sndbuf` (TLS/ciphertext drain; `pending_out` ≠ app cursor),
+`pipelined_close`, `symlink_escape_race`.
 `cold_fill_hol` is the highest-value gap while `checkout_block` still blocks
-on `pread`.
+on `pread`. Invariants that must stay test-backed: **drop-before-close**
+(`fault_bail_live`) and **transport pending ≠ app cursor** (needs
+`write_stall_tiny_sndbuf` / TLS stall).
 
 ---
 
@@ -70,6 +74,7 @@ on `pread`.
 | `waiter_compact_live` | green | `--workers 1`; A,B,C keep-alive; RST A; second GET on B and C | both complete promptly. `run.sh` also rebuilds with `-DCC_SERVER_WAIT_POLL=1` as control |
 | `waiter_reap_under_load` | green | N idle KA expire while a hot tail conn is under continuous GET | hot keeps answering through/after expiry (swap clears batch ready; LT re-arms). Does not force hole+tail both in same ready_ix |
 | `halfclose_after_request` | green | complete GET then `SHUT_WR`; expect full response | native + poll control in `run.sh`. EV_EOF/HUP ≠ hard err; read interest cleared while `want_out` |
+| `fault_bail_live` | green | `CC_SERVER_FAULT_BAIL_LIVE=1` one-shot worker return with a live KA row (`fault_bail_live.py`) | peer RST via `worker_tape_exit` (drop all → `tape.close`); `close` aborts if rows remain; respawn serves |
 | `conn_storm` | green | N concurrent TCP connects + GET /1kb.bin | all settle; server still serves |
 | `fd_exhaust_accept` | green | `--spawn` with lowered server `RLIMIT_NOFILE`; hold keep-alive GETs until accept stalls; spare soft-fail + backoff | server stays up; later GET works. SKIP without spawn. Receipt is behavioral (serve after release); does not yet assert `accept_soft` delta |
 | `accept_burst_survive` | green | Burst connect/close without read | server still serves afterward |

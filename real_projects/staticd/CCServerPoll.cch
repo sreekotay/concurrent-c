@@ -5,6 +5,8 @@
  *
  * Connections live in Table::[int, CCConnRow] keyed by WaitId (≥1).
  * Kernel udata / wake hits name WaitId — never dense pack index.
+ * `id_di` is WaitId → dense index for O(1) row(). `cc_tape_close` requires
+ * an empty table (abort otherwise); worker exit is `worker_tape_exit` only.
  */
 #ifndef CC_SERVER_POLL_CCH
 #define CC_SERVER_POLL_CCH
@@ -47,29 +49,43 @@ typedef struct CCWaitHit {
     desync: void;
 };
 
-/* Durable interest only. Ready is CCWaitHit on the wake. */
+/* Durable interest only. Ready is CCWaitHit on the wake.
+ * gen stamps kernel udata so a recycled WaitId cannot apply a stale hit.
+ * hit_ix/hit_epoch index the current wake's hits vec (not ready bits). */
 typedef struct CCConnRow {
     CCIoSess* io;
     int fd;
     int want_in;
     int want_out;
+    uint32_t gen;
+    int hit_ix;
+    uint32_t hit_epoch;
 } CCConnRow;
+
+/* Incomplete: concrete Table::[int, CCConnRow]* lives in CCServerPoll.ccs. */
+struct CCTapeConns;
 
 /*
  * One worker's wait face. Owner: `cc_server_worker` (arena `wa`).
- *   conns     — WaitId → row (Table handle; concrete type private to .ccs)
+ *   conns     — WaitId → row (opaque table handle)
+ *   id_di     — WaitId → dense index+1 (0 absent); O(1) row() without hash
  *   hits      — CCWaitHit storage for the current wake (cleared next wait)
  *   id_free   — recycled WaitIds
+ *   id_stamp  — monotonic gen for udata (ABA)
+ *   wake_epoch — bumps each wait(); pairs with row hit_epoch for O(1) dedup
  *   backend_fd — kqueue/epoll, or -1 for poll
  * Listen is not a conn row; spare_fd is EMFILE recovery only.
  * Step the wake through CCWaitEpoch from tape.wait() — not tape.hits.
  */
 typedef struct CCTape {
     CCServer* srv;
-    void* conns; /* Table::[int, CCConnRow]* — see CCServerPoll.ccs */
+    struct CCTapeConns* conns;
+    Vec::[uint32_t] id_di;
     Vec::[CCWaitHit] hits;
     Vec::[int] id_free;
     int id_next;
+    uint32_t id_stamp;
+    uint32_t wake_epoch;
     int listening;
     int spare_fd;
     int listen_fd;
@@ -102,6 +118,8 @@ int cc_wait_epoch_idle(CCWaitEpoch* ep);
 int cc_wait_epoch_listen_ready(CCWaitEpoch* ep);
 
 int cc_tape_open(CCTape* w, CCServer* srv, CCArena a);
+/* Destroy backend + empty conn table. Illegal if nconns() != 0 — drop rows
+ * first (worker_tape_exit). Aborts on violation so the order cannot regress. */
 void cc_tape_close(CCTape* w);
 CCWaitEpoch cc_tape_wait(CCTape* w);
 int cc_tape_listen_ready(CCTape* w);

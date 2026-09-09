@@ -44,6 +44,11 @@ run_adv() {
 
 run_adv "$STATICD_BIN"
 
+if [[ -z "${MODE:-}" || "${MODE}" == "fault_bail_live" ]]; then
+  echo "=== fault_bail_live (worker death with live row) ==="
+  STATICD_BIN="$STATICD_BIN" python3 "$ROOT/stress/staticd/fault_bail_live.py"
+fi
+
 # Compact-live / halfclose against forced poll (control). Native already ran above.
 if [[ -z "${MODE:-}" || "${MODE}" == "waiter_compact_live" || "${MODE}" == "halfclose_after_request" ]]; then
   echo "=== poll control (waiter_compact_live, halfclose_after_request) ==="

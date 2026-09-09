@@ -4,3 +4,8 @@
 - ENOBUFS
 - @ok 
 - release(name); //also release bool if already released
+- comptime at the right time - e.g. mimetype
+- promote Table from staticd
+- hoist CCServer frmo staticd
+- try redis with table and ccserver
+- remasure staticd 4kb@c=10 vs pre-waiter (cool machine; receipt stayed 2026-09-07)
