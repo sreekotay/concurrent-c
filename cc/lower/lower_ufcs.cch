@@ -193,6 +193,53 @@ static CcExpr* uf_project_faces(CcLowerer* L, CcExpr* recv, CCSlice path, bool a
 
 /* How many parameters a declared function takes, or -1 when the index
  * cannot read the declaration. */
+/* The declared type of parameter `at` of `callee`, or NULL when the callee
+ * declares none this call can read -- a function-like macro has no parameter
+ * types, and an unprototyped declaration has no parameters at all. */
+static CcType* uf_param_type(CcIndex* ix, CCSlice callee, size_t at) {
+    CcSym* sym = sym_any(ix, callee);
+    while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+    if (!sym || !sym->type) return NULL;
+    @switch (sym->type->k) {
+        case .func(ft): {
+            CcParamList ps = ft.params;
+            if (!ft.has_prototype || at >= ps.len()) return NULL;
+            return ps.get_ptr(at)->type;
+        }
+        default: return NULL;
+    }
+}
+
+/* An argument of type `T` at a parameter of type `T*`: the call passes its
+ * address, the way a value receiver reaches a pointer-style callee. The
+ * pointee is exactly the argument's type -- `const` is the only qualifier
+ * this adds, a `void*` parameter is never reached this way, and an argument
+ * that is already a pointer is passed as written. */
+static CcExpr* uf_arg_addr(Walker* w, CcLowerer* L, CCSlice callee, size_t at, CcExpr* a) {
+    CcIndex* ix = w->ix;
+    CcType* want = uf_param_type(ix, callee, at);
+    CcType* have;
+    CcType* pointee = NULL;
+    if (!want || !a) return NULL;
+    if (want->k.kind != CcTypeK_pointer) return NULL;
+    @switch (want->k) {
+        case .pointer(pt): pointee = pt.pointee; break;
+        default: break;
+    }
+    if (!pointee || CcType_is_void(pointee)) return NULL;
+    if (!uf_is_lvalue(a)) return NULL;
+    have = type_of_expr(w, a);
+    if (!have || have->k.kind == CcTypeK_pointer) return NULL;
+    if (!slice_eq(ix->canon(have), ix->canon(pointee))) return NULL;
+    return cc_expr_unary(CC_OP_ADDR, lw_paren(L, a, a->span), a->span, L->arena);
+}
+
+static CCSlice uf_ident_name_or_empty(CcExpr* e) {
+    CCSlice nm;
+    if (e && expr_ident(strip_parens_expr(e), &nm)) return nm;
+    return cc_slice_empty();
+}
+
 static int uf_param_count(CcIndex* ix, CCSlice callee) {
     CcSym* sym = sym_any(ix, callee);
     while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
@@ -661,8 +708,12 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
         CcExprList* args = &uf.args;
         size_t n = args->len();
         size_t i;
+        size_t base = call.args.len();
+        CCSlice cn = uf_ident_name_or_empty(call.callee);
         for (i = 0; i < n; i++) {
             CcExpr* a = *args->get_ptr(i);
+            CcExpr* ad = cn.len ? uf_arg_addr(w, L, cn, base + i, a) : NULL;
+            if (ad) a = ad;
             call.args.push(a);
         }
     }
