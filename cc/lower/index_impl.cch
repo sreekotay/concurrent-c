@@ -2138,6 +2138,48 @@ static void cc__hook_destroy(CcIndex* ix, const CcUnit* u, CcHookReg* reg, const
     }
 }
 
+/* An unsigned integer written as a literal argument. */
+static uint64_t cc__expr_uint(CcIndex* ix, const CcUnit* u, const CcExpr* e, bool* ok) {
+    *ok = false;
+    if (!e || !u) return 0;
+    @switch (e->k) {
+        case .number(nl): {
+            const CcToken* t = cc__tok(u, nl.tok);
+            if (!t) return 0;
+            *ok = true;
+            return (uint64_t)strtoull(cc__ix_cstr(ix, t->text), NULL, 0);
+        }
+        case .paren(pa): return cc__expr_uint(ix, u, pa.a, ok);
+        default: return 0;
+    }
+}
+
+/* `.niche = cc_type_niche(size, align, offset, width, sentinel)`: all five
+ * numbers, or none of them. A registration whose numbers cannot be read is
+ * not a niche -- `has_niche` stays false, so a packed variant says it cannot
+ * pack, at its declaration, rather than packing on invented bytes. */
+static void cc__hook_niche(CcIndex* ix, const CcUnit* u, CcHookReg* reg, const CcExpr* value) {
+    CcKids k = cc__expr_kids(value);
+    uint64_t v0;
+    uint64_t v1;
+    uint64_t v2;
+    uint64_t v3;
+    uint64_t v4;
+    bool ok = false;
+    if (!k.has_args || k.args.len() != 5) return;
+    v0 = cc__expr_uint(ix, u, *k.args.get_ptr(0), &ok); if (!ok) return;
+    v1 = cc__expr_uint(ix, u, *k.args.get_ptr(1), &ok); if (!ok) return;
+    v2 = cc__expr_uint(ix, u, *k.args.get_ptr(2), &ok); if (!ok) return;
+    v3 = cc__expr_uint(ix, u, *k.args.get_ptr(3), &ok); if (!ok) return;
+    v4 = cc__expr_uint(ix, u, *k.args.get_ptr(4), &ok); if (!ok) return;
+    reg->niche_size = (uint32_t)v0;
+    reg->niche_align = (uint32_t)v1;
+    reg->niche_off = (uint32_t)v2;
+    reg->niche_width = (uint32_t)v3;
+    reg->niche_sentinel = v4;
+    reg->has_niche = true;
+}
+
 static void cc__hook_entry(CcIndex* ix, const CcUnit* u, CcHookReg* reg, CCSlice field, const CcExpr* value) {
     CCSlice f = field;
     CCSlice callee;
@@ -2164,7 +2206,7 @@ static void cc__hook_entry(CcIndex* ix, const CcUnit* u, CcHookReg* reg, CCSlice
         cc__hook_kind_name(ix, u, value, &reg->access_kind, &reg->access_name);
     }
     else if (cc__eqc(f, "cast")) reg->has_cast = true;
-    else if (cc__eqc(f, "niche")) reg->has_niche = true;
+    else if (cc__eqc(f, "niche")) cc__hook_niche(ix, u, reg, value);
     else if (cc__has_prefix(f, "ufcs_sink") || cc__has_prefix(f, "ufcs_dynamic")) {
         CCSlice a = cc__expr_is_ident(value, &nm) ? nm : cc__expr_string(ix, u, value);
         reg->has_sink = true;

@@ -126,6 +126,14 @@ struct CcHookReg {
     CCSlice len_name;
     CCSlice access_kind;        /* .access hook: "load" or "call", naming access_name */
     CCSlice access_name;
+    uint32_t niche_size;        /* `.niche = cc_type_niche(size, align, offset, width, sentinel)`:
+                                 * the bytes of this type's own layout a packed
+                                 * variant may carry a discriminant in, and the
+                                 * value it never holds there */
+    uint32_t niche_align;
+    uint32_t niche_off;
+    uint32_t niche_width;
+    uint64_t niche_sentinel;
     CCSlice sink_fn;            /* .ufcs_sink callee: unresolved methods lower to sink(&recv, "m", n, args...) */
     CCSlice sink_arg;           /* the macro each argument is passed through, when the registration named one */
 };
