@@ -1,6 +1,10 @@
-/* eprintln(@string(`…`)) is leftover CALL_ARGS emit. A 16-slot template
- * expands past the 1024-byte args beachhead; the lowerer must refuse
- * (not emit a cut mid-literal). Bind CCString first — house style. */
+/* A 16-slot template inlined into a call argument.
+ *
+ * `eprintln(@string(`…`))` is the call-argument rewrite path. The rule this
+ * pins is that every slot reaches the output: a lowerer that assembles the
+ * rewrite in a fixed buffer runs out partway through and has to choose
+ * between refusing and emitting a cut mid-literal. Nothing here may be lost.
+ */
 #include <ccc/std/prelude.cch>
 #include <ccc/stdio.cch>
 
