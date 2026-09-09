@@ -882,7 +882,43 @@ static CCSlice gn_factory_note(CcLowerer* L, CCSlice fam) {
     CCSlice handler = gn_family_handler(L, fam);
     CcSym* sym;
     CCString sb = cc_string_new();
-    if (!handler.len) return cc_slice_empty();
+    if (!handler.len) {
+        /* A `CC_GENERIC_FACTORY(Fam, n)` written in the source registers no
+         * line in the options text -- that registry carries what was passed
+         * in from outside. The declaration is in the index, though, and it is
+         * the thing that wrote the text, so its own position is the answer.
+         * `loc` reads it through any `#line` in force, which is what makes
+         * the note name the file the factory was written in. */
+        CcDeclList* factv = &ix->factories;
+        CcUnitList* funitv = &ix->factory_units;
+        size_t nf = factv->len();
+        size_t f;
+        for (f = 0; f < nf; f++) {
+            CcDecl* fd = *factv->get_ptr(f);
+            CcUnit* fu = *funitv->get_ptr(f);
+            CCString nm2;
+            CCSlice fname;
+            if (!gn_family_matches(fam, cc__factory_name(fd))) continue;
+            if (cc__factory_is_extend(fd)) continue;
+            nm2 = @string(`__cc_gfac_${fam}`, L->arena);
+            fname = lw_keep(L, &nm2);
+            {
+                CcLoc fl = fu->loc(fd->span);
+                const char* at_comptime2 = "@" "comptime";
+                CCString head2 = @string(`in ${at_comptime2} factory '${fname}' at `, L->arena);
+                cc_string_push_slice(&sb, head2.as_slice(), L->arena);
+                if (fl.path.len) {
+                    uint32_t fline = fl.line;
+                    CCString tail2 = @string(`${fl.path}:${fline}`, L->arena);
+                    cc_string_push_slice(&sb, tail2.as_slice(), L->arena);
+                } else {
+                    cc_string_push_cstr(&sb, "an unknown place", L->arena);
+                }
+                return cc_string_persist_slice(L->arena, &sb);
+            }
+        }
+        return cc_slice_empty();
+    }
     sym = ix->sym(handler) ?> NULL;
     while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
     {
@@ -1155,13 +1191,68 @@ static CcSpan gn_use_site(CcLowerer* L, CCSlice name) {
     return g.at;
 }
 
-static void gn_fragment_error(CcLowerer* L, CcSpan sp, CcDiags* ds, CCSlice stage, CCSlice inst) {
+/* The nth line of a text, 1-based; empty past the end. */
+static CCSlice gn_nth_line(CCSlice text, uint32_t line) {
+    const char* p = (const char*)text.ptr;
+    size_t start = 0;
+    size_t i = 0;
+    uint32_t n = 1;
+    if (!line) return cc_slice_empty();
+    while (n < line) {
+        while (i < text.len && p[i] != '\n') i++;
+        if (i >= text.len) return cc_slice_empty();
+        i++;
+        start = i;
+        n++;
+    }
+    while (i < text.len && p[i] != '\n') i++;
+    return cc_slice_sub(text, start, i);
+}
+
+/* Where the definition starts in an expansion: the guard the expansion opens
+ * with is bookkeeping, and counting it makes the reported line disagree with
+ * the definition the reader is shown. */
+static uint32_t gn_definition_start(CCSlice text) {
+    uint32_t line = 1;
+    for (;;) {
+        CCSlice t = gn_nth_line(text, line);
+        size_t k = 0;
+        bool skip = false;
+        if (!t.len && line > 64) return 1;
+        while (k < t.len && (t.ptr[k] == ' ' || t.ptr[k] == '\t')) k++;
+        if (k >= t.len) skip = true;                       /* blank */
+        else if (t.ptr[k] == '#') skip = true;             /* the guard */
+        else if (k + 1 < t.len && t.ptr[k] == '/' &&
+                 (t.ptr[k + 1] == '*' || t.ptr[k + 1] == '/')) skip = true;  /* the banner */
+        if (!skip) return line;
+        line++;
+    }
+}
+
+/* `>    7 | <text>`: the generated line, numbered the way a compiler quotes
+ * one. The reader cannot open this file, so the line has to come to them. */
+static CCString gn_quote_line(CcLowerer* L, uint32_t line, CCSlice text) {
+    CCString sb = cc_string_new();
+    CCString num = @string(`${line}`, L->arena);
+    size_t w = num.as_slice().len;
+    cc_string_push_cstr(&sb, ">", L->arena);
+    while (w < 5) { cc_string_push_cstr(&sb, " ", L->arena); w++; }
+    cc_string_push_slice(&sb, num.as_slice(), L->arena);
+    cc_string_push_cstr(&sb, " | ", L->arena);
+    cc_string_push_slice(&sb, text, L->arena);
+    return sb;
+}
+
+static void gn_fragment_error(CcLowerer* L, CcSpan sp, CcDiags* ds, CCSlice stage,
+                              CCSlice inst, CCSlice text) {
     Vec::[CcDiag]* items = &ds->items;
     size_t n = items->len();
     size_t i;
     CCSlice first = cc_slice_empty();
     CCSlice fam = cc_slice_empty();
     uint32_t line = 0;
+    uint32_t rel = 0;
+    CCSlice quoted = cc_slice_empty();
     for (i = 0; i < n; i++) {
         CcDiag* d = items->get_ptr(i);
         if (d->sev != CC_SEV_ERROR) continue;
@@ -1173,12 +1264,37 @@ static void gn_fragment_error(CcLowerer* L, CcSpan sp, CcDiags* ds, CCSlice stag
         CcTypeInfo* info = L->ix->type_get(inst);
         if (info) fam = info->family;
     }
+    {
+        uint32_t start = gn_definition_start(text);
+        rel = line >= start ? line - start + 1 : line;
+        quoted = gn_nth_line(text, line);
+    }
     /* Name the factory and the instance: the text that failed has no file of
      * its own, so "what did this" is the only handle the reader has on it.
-     * The line is the line of the generated definition. */
+     * Then show the line, since the reader cannot open the file to look, and
+     * say where the factory that wrote it lives. */
     if (fam.len) {
-        CCString m = @string(`compiled generic factory '${fam}' produced invalid C for '${inst}': in the generated definition, line ${line}: ${first}`, L->arena);
-        lw_error(L, sp, m);
+        CcUnit* u = L->unit;
+        CcLoc loc = u->loc(sp);
+        CCString m = @string(`type: compiled generic factory '${fam}' produced invalid C for '${inst}': ${first}`, L->arena);
+        CCString gen = @string(`in generated definition, line ${rel}
+`, L->arena);
+        {
+            CCString q = gn_quote_line(L, rel, quoted);
+            cc_string_push_slice(&gen, q.as_slice(), L->arena);
+        }
+        CCSlice hint = CC_SLICE_LIT("re-run with --emit-c-inspect to dump the full translation unit");
+        CCSlice fnote = gn_factory_note(L, fam);
+        CcDiag d = CcDiag_error(loc, cc_string_persist_slice(L->arena, &m));
+        CcLoc none;
+        CcDiags* sink = L->ds;
+        none.path = cc_slice_empty();
+        none.line = 0;
+        none.col = 0;
+        d = CcDiag_with_note_at(d, none, cc_string_persist_slice(L->arena, &gen), L->arena);
+        d = CcDiag_with_note_at(d, none, hint, L->arena);
+        if (fnote.len) d = CcDiag_with_note_at(d, none, fnote, L->arena);
+        sink->push(d);
         return;
     }
     {
@@ -1274,12 +1390,12 @@ static bool gn_lower_fragment(CcLowerer* L, CCString text, CcSpan sp, CCString* 
     opts.mode = CC_UNIT_SOURCE;
     opts.known_types = ix->known_types();
     u = cc_parse_unit(path, text.as_slice(), opts, &ds, a);
-    if (!u || ds.has_errors()) { gn_fragment_error(L, sp, &ds, cstr_slice("parse"), inst); return false; }
+    if (!u || ds.has_errors()) { gn_fragment_error(L, sp, &ds, cstr_slice("parse"), inst, text.as_slice()); return false; }
     sub = cc_lowerer_new(u, ix, L->opts, &ds);
     sub.depth = L->depth + 1;
     sub.fragment = true;
     gn_lower_steps(&sub);
-    if (ds.has_errors()) { gn_fragment_error(L, sp, &ds, cstr_slice("lower"), inst); return false; }
+    if (ds.has_errors()) { gn_fragment_error(L, sp, &ds, cstr_slice("lower"), inst, text.as_slice()); return false; }
     /* the Results the expansion names are the unit's to declare: it is
      * spliced into the unit, and the expansion declares none itself */
     {
@@ -1307,7 +1423,7 @@ static bool gn_lower_fragment(CcLowerer* L, CCString text, CcSpan sp, CCString* 
         lw_error(L, sp, m);
         return false;
     };
-    if (ds.has_errors()) { gn_fragment_error(L, sp, &ds, cstr_slice("print"), inst); return false; }
+    if (ds.has_errors()) { gn_fragment_error(L, sp, &ds, cstr_slice("print"), inst, text.as_slice()); return false; }
     *out = prod.text;
     return true;
 }
