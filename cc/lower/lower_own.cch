@@ -53,6 +53,8 @@ struct OwnFacts {
     bool moved;
     bool reported;      /* a use-after-move was already named for it */
     bool nonstable;     /* an aggregate whose slice field an initializer filled from a borrow */
+    bool scratch;       /* built into the function's `@scratch` arena: its bytes die with the frame */
+    bool is_chan;       /* a channel endpoint: `T[~n >]` / `T[~n <]`, CCChanTx, CCChanRx, CCChan* */
 };
 typedef struct OwnFacts OwnFacts;
 /* Rows live in the arena and the tables hold pointers to them, so a row a
@@ -81,6 +83,14 @@ struct Own {
     bool init_nonstable;
     CCSlice cap_nursery;
     CcSpan cap_span;
+    bool fn_refdec;         /* this function decrements a field named ref/refcount/ref_count */
+    bool saw_scratch;       /* scratch for the initializer scan below */
+    bool saw_chan;          /* an arm scan found a channel op or a channel name */
+    /* `#pragma(@parallel) off` regions, as token spans: off_from[i]
+     * .. off_to[i]. A site inside one runs its arms in order on the
+     * caller by request, so the channel rule does not apply there. */
+    Vec::[uint32_t] off_from;
+    Vec::[uint32_t] off_to;
 };
 typedef struct Own Own;
 
@@ -173,6 +183,58 @@ static bool own_closure_of(CcExpr* e, CcClosure* out) {
     }
 }
 
+/* `@string(..., @scratch)`: the arena operand is the function's own stack
+ * frame, so what it built dies at the closing brace. */
+static bool own_tpl_arena(CcExpr* e, CcExpr** arena) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .template(tp): *arena = tp.arena; return true;
+        default: return false;
+    }
+}
+
+static bool own_is_scratch_node(CcExpr* e) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .scratch(sc): return true;
+        default: return false;
+    }
+}
+
+static bool own_is_scratch_tpl(CcExpr* e) {
+    CcExpr* ar = NULL;
+    if (!own_tpl_arena(e, &ar)) return false;
+    return own_is_scratch_node(ar);
+}
+
+/* `--x.ref` / `x->refcount--`: the field name and the operator together. */
+static bool own_member_of(CcExpr* e, CCSlice* field) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .member(mb): *field = mb.name; return true;
+        default: return false;
+    }
+}
+
+static bool own_dec_operand(CcExpr* e, CcExpr** a) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .unary(un): {
+            if (un.op != CC_OP_PREDEC && un.op != CC_OP_POSTDEC) return false;
+            *a = un.a;
+            return true;
+        }
+        default: return false;
+    }
+}
+
+static bool own_is_refcount_field(CCSlice nm) {
+    if (cc_slice_eq_cstr(&nm, "ref")) return true;
+    if (cc_slice_eq_cstr(&nm, "refcount")) return true;
+    if (cc_slice_eq_cstr(&nm, "ref_count")) return true;
+    return false;
+}
+
 static bool own_assign_of(CcExpr* e, CcExpr** lhs, CcExpr** rhs) {
     if (!e) return false;
     @switch (e->k) {
@@ -196,6 +258,9 @@ static void own_type_facts(CcType* t, OwnFacts* f) {
             if (cc_slice_eq_cstr(&nm, "CCSlice")) f->is_slice = true;
             if (cc_slice_eq_cstr(&nm, "CCArena")) f->is_arena = true;
             if (cc_slice_eq_cstr(&nm, "CCNursery")) f->is_nursery = true;
+            if (cc_slice_eq_cstr(&nm, "CCChanTx")) f->is_chan = true;
+            if (cc_slice_eq_cstr(&nm, "CCChanRx")) f->is_chan = true;
+            if (cc_slice_eq_cstr(&nm, "CCChan")) f->is_chan = true;
             break;
         }
         case .pointer(pt): f->is_ptr = true; break;
@@ -204,6 +269,7 @@ static void own_type_facts(CcType* t, OwnFacts* f) {
             if (sl.unique) f->unique = true;
             break;
         }
+        case .chan(ct): f->is_chan = true; break;
         default: break;
     }
 }
@@ -475,7 +541,58 @@ static void own_scan_init(Own* O, CcInit* in) {
     for (i = 0; i < n; i++) own_scan_init(O, *items->get_ptr(i));
 }
 
+/* `CCString s = @string(..., @scratch);`: the local holds bytes the frame's
+ * own stack arena owns.
+ *
+ * The whole initializer, not a `@scratch` template somewhere inside it: a
+ * template handed to a call is the callee's to consume, and what the call
+ * gives back is the callee's to say. Only the template standing alone
+ * makes the local a second name for the scratch arena's bytes. */
+static void own_init_scratch(Own* O, CcInit* in) {
+    if (!in || !in->expr) return;
+    if (own_is_scratch_tpl(own_peel(in->expr))) O->saw_scratch = true;
+}
+
+/* `--p->ref` / `p->ref--` anywhere in a function body. */
+static bool own_refdec_visit(CcExpr* e, void* env) {
+    Own* O = (Own*)env;
+    CcExpr* operand = NULL;
+    CCSlice field = cc_slice_empty();
+    if (O->fn_refdec) return false;
+    if (!own_dec_operand(e, &operand)) return true;
+    if (!own_member_of(own_peel(operand), &field)) return true;
+    if (own_is_refcount_field(field)) O->fn_refdec = true;
+    return true;
+}
+
+static void own_read_refdec(Own* O, CcStmt* body) {
+    CcVisitor v;
+    O->fn_refdec = false;
+    if (!body) return;
+    memset(&v, 0, sizeof(v));
+    v.expr = own_refdec_visit;
+    v.env = O;
+    CcStmt_walk(body, v);
+}
+
 /* ---- the checks ------------------------------------------------------- */
+
+/* A last-drop written by hand: one function both steps a `ref` field down
+ * and calls `free`. The count is not atomic, and the window between the
+ * read and the free is where two threads both see zero: the bytes go back
+ * twice, or go back while the other name still points at them. The C that
+ * comes out of it is valid C, so nothing downstream can say so. */
+static void own_check_last_drop(Own* O, CCSlice callee, CcSpan sp) {
+    if (!O->fn_refdec) return;
+    if (!cc_slice_eq_cstr(&callee, "free") && !cc_slice_eq_cstr(&callee, "cfree")) return;
+    {
+        CCString m = @string(`homemade shared last-drop (refcount field '--' + free); use CCArc`, O->L->arena);
+        CCSlice note = CC_SLICE_LIT("a non-atomic int ref and its last drop race under concurrency; "
+                                    "use cc_arc_from_ptr / cc_arc_clone / cc_arc_drop, or don't share "
+                                    "(drain and join instead)");
+        own_err(O, sp, m, note);
+    }
+}
 
 static void own_check_free(Own* O, CcExprList* args, CcSpan sp) {
     CCSlice nm = cc_slice_empty();
@@ -588,6 +705,14 @@ static void own_commit_move(Own* O, CcExprList* args, CcSpan sp) {
     x->moved = true;
 }
 
+static void own_scratch_escape(Own* O, CcSpan sp) {
+    CCString m = @string(`${"@"}scratch string escapes scope`, O->L->arena);
+    CCSlice note = CC_SLICE_LIT("'@scratch' is this function's own stack arena, and the frame that "
+                                "owns it is gone by the time the caller reads the result; build into "
+                                "an arena the caller supplied");
+    own_err(O, sp, m, note);
+}
+
 static void own_report_copy(Own* O, CcSpan sp) {
     CCString m = @string(`cannot copy unique slice`, O->L->arena);
     CCSlice note = own_move_note();
@@ -622,6 +747,162 @@ static void own_check_assign(Own* O, CcExpr* lhs, CcExpr* rhs, CcSpan sp) {
     l->is_static = r_static;
     l->arena_view = r_view;
     l->arena = r_arena;
+}
+
+/* ---- a `@parallel` arm that touches a channel ------------------------- */
+
+/* `#pragma(@parallel) off` / `... on`, as the PP token spells it. */
+static bool own_pragma_par(CCSlice text, bool* is_off, bool* is_on) {
+    const char* p = text.ptr;
+    size_t n = text.len;
+    size_t i = 0;
+    size_t k;
+    static const char* head = "#pragma(@parallel)";
+    size_t hn = 18;
+    while (i < n && (p[i] == ' ' || p[i] == '\t')) i++;
+    if (n - i < hn) return false;
+    for (k = 0; k < hn; k++)
+        if (p[i + k] != head[k]) return false;
+    i += hn;
+    while (i < n && (p[i] == ' ' || p[i] == '\t')) i++;
+    if (n - i >= 3 && p[i] == 'o' && p[i + 1] == 'f' && p[i + 2] == 'f') { *is_off = true; return true; }
+    if (n - i >= 2 && p[i] == 'o' && p[i + 1] == 'n') { *is_on = true; return true; }
+    return false;
+}
+
+/* The endpoint methods and the blocking macros, by the names the user
+ * writes them under. */
+static bool own_is_chan_method(CCSlice m) {
+    if (cc_slice_eq_cstr(&m, "send")) return true;
+    if (cc_slice_eq_cstr(&m, "send_take")) return true;
+    if (cc_slice_eq_cstr(&m, "send_task")) return true;
+    if (cc_slice_eq_cstr(&m, "send_task_hybrid")) return true;
+    if (cc_slice_eq_cstr(&m, "recv")) return true;
+    if (cc_slice_eq_cstr(&m, "ordered_recv")) return true;
+    return false;
+}
+
+static bool own_is_chan_call(CCSlice c) {
+    if (cc_slice_eq_cstr(&c, "chan_send")) return true;
+    if (cc_slice_eq_cstr(&c, "chan_recv")) return true;
+    if (cc_slice_eq_cstr(&c, "cc_channel_send")) return true;
+    if (cc_slice_eq_cstr(&c, "cc_channel_recv")) return true;
+    if (cc_slice_eq_cstr(&c, "cc_chan_send")) return true;
+    if (cc_slice_eq_cstr(&c, "cc_chan_recv")) return true;
+    return false;
+}
+
+static bool own_chan_visit(CcExpr* e, void* env) {
+    Own* O = (Own*)env;
+    CCSlice callee = cc_slice_empty();
+    CCSlice nm = cc_slice_empty();
+    CcExprList args;
+    CcUfcs uf;
+    OwnFacts* x;
+    if (O->saw_chan) return false;
+    if (own_ufcs_of(e, &uf)) {
+        CCSlice method = uf.method;
+        if (own_is_chan_method(method)) { O->saw_chan = true; return false; }
+        return true;
+    }
+    if (own_call_of(e, &callee, &args)) {
+        if (own_is_chan_call(callee)) { O->saw_chan = true; return false; }
+        return true;
+    }
+    if (!own_ident_of(e, &nm)) return true;
+    x = own_lookup(O, nm);
+    if (x && x->is_chan) O->saw_chan = true;
+    return true;
+}
+
+static void own_chan_in_arms(Own* O, OwnArmList* arms) {
+    CcVisitor v;
+    size_t n = arms->len();
+    size_t i;
+    memset(&v, 0, sizeof(v));
+    v.expr = own_chan_visit;
+    v.env = O;
+    for (i = 0; i < n; i++) {
+        CcParallelArm* arm = arms->get_ptr(i);
+        CcExpr* ae = arm->expr;
+        CcStmt* as = arm->serial;
+        if (O->saw_chan) return;
+        if (ae) CcExpr_walk(ae, v);
+        if (as) CcStmt_walk(as, v);
+    }
+}
+
+/* The `#pragma(@parallel) off` regions of the unit, read off the token
+ * tape: the pragma is a preprocessor line at file scope or inside a body,
+ * and either way it is one token. A region runs to the matching `on`, or
+ * to the end of the file. */
+static void own_read_par_off(Own* O) {
+    CcUnit* u = O->L->unit;
+    CcTape* tp = &u->tape;
+    Vec::[CcToken]* toks = &tp->toks;
+    size_t n = toks->len();
+    size_t i;
+    bool off = false;
+    for (i = 0; i < n; i++) {
+        const CcToken* t = toks->get_ptr(i);
+        CCSlice tx = t->text;
+        bool is_off = false;
+        bool is_on = false;
+        if (t->kind != CC_TK_PP) continue;
+        if (!own_pragma_par(tx, &is_off, &is_on)) continue;
+        if (is_off && !off) {
+            Vec::[uint32_t]* fv = &O->off_from;
+            off = true;
+            fv->push((uint32_t)i);
+        } else if (is_on && off) {
+            Vec::[uint32_t]* tv = &O->off_to;
+            off = false;
+            tv->push((uint32_t)i);
+        }
+    }
+    if (off) {
+        Vec::[uint32_t]* tv = &O->off_to;
+        tv->push((uint32_t)(n ? n - 1 : 0));
+    }
+}
+
+static bool own_par_is_off(Own* O, uint32_t tok) {
+    Vec::[uint32_t]* fv = &O->off_from;
+    Vec::[uint32_t]* tv = &O->off_to;
+    size_t n = fv->len();
+    size_t i;
+    if (tv->len() < n) n = tv->len();
+    for (i = 0; i < n; i++) {
+        uint32_t a = *fv->get_ptr(i);
+        uint32_t b = *tv->get_ptr(i);
+        if (tok >= a && tok <= b) return true;
+    }
+    return false;
+}
+
+/* An unmarked `@parallel` joins its arms where it stands: the caller runs
+ * one of them and waits for the rest. An arm that sends or receives blocks
+ * until the far end answers, and the far end is another arm this same join
+ * is holding the caller hostage for -- so the two wait for each other and
+ * neither returns. `@parallel spawn` is the form that does not join here,
+ * and is the one a channel belongs in.
+ *
+ * Named at the site rather than left to run: a deadlock reproduces as a
+ * hang, which reads like slowness and never like a compiler saying no. */
+static void own_check_par_chan(Own* O, CcParallel p, CcSpan sp) {
+    OwnArmList* arms = &p.arms;
+    if (p.spawn) return;
+    if (own_par_is_off(O, sp.first)) return;
+    O->saw_chan = false;
+    own_chan_in_arms(O, arms);
+    if (!O->saw_chan) return;
+    {
+        CCString m = @string(`${"@"}parallel that names or captures a channel requires ${"@"}parallel spawn`, O->L->arena);
+        CCSlice note = CC_SLICE_LIT("an unmarked '@parallel' joins its arms at the site, so a blocking "
+                                    "send or receive on one arm waits for an arm the join has not "
+                                    "started yet");
+        own_err(O, sp, m, note);
+    }
 }
 
 /* ---- walking ---------------------------------------------------------- */
@@ -772,7 +1053,10 @@ static bool own_act_visit(CcExpr* e, void* env) {
         return true;
     }
     if (!own_call_of(e, &callee, &args)) return true;
-    if (own_is_deleter(callee)) own_check_free(O, &args, e->span);
+    if (own_is_deleter(callee)) {
+        own_check_last_drop(O, callee, e->span);
+        own_check_free(O, &args, e->span);
+    }
     else if (own_is_epoch_op(callee)) own_check_epoch(O, callee, &args, e->span);
     else if (own_is_send(callee)) own_check_send(O, &args, e->span);
     else if (cc_slice_eq_cstr(&callee, "cc_move")) own_commit_move(O, &args, e->span);
@@ -814,6 +1098,9 @@ static void own_declare(Own* O, CcDecl* d, CcVarDecl vd) {
         nv.is_nursery = false;
     }
     own_scan_init(O, vd.init);
+    O->saw_scratch = false;
+    own_init_scratch(O, vd.init);
+    nv.scratch = O->saw_scratch;
     if (!nv.is_slice && !nv.is_ptr) {
         O->init_nonstable = false;
         own_init_nonstable(O, vd.init);
@@ -956,8 +1243,20 @@ static void own_stmt(Own* O, CcStmt* s) {
             OwnFacts* x;
             own_scan(O, rt.value);
             if (!rt.value) break;
+            /* `return @string(..., @scratch)`: the arena is this frame's own
+             * stack, so the caller is handed bytes the return released on
+             * the way out. */
+            if (own_is_scratch_tpl(own_peel(rt.value))) {
+                own_scratch_escape(O, s->span);
+                break;
+            }
             if (!own_ident_of(rt.value, &nm)) break;
             x = own_lookup(O, nm);
+            /* Handing back a local that holds one is the same escape with a
+             * name in front of it, and `x->scratch` says which locals those
+             * are -- but the reference accepts that shape, so refusing it
+             * here would be this lowerer inventing a rule. The fact is kept
+             * and not acted on until the language says it is one. */
             if (!x || !x->is_slice || !x->unique) break;
             {
                 CCString m = @string(`cannot return unique slice`, O->L->arena);
@@ -1008,6 +1307,7 @@ static void own_stmt_d(Own* O, CcStmt* s) {
             OwnArmList* arms = &pa.arms;
             own_scan(O, pa.pred);
             own_scan(O, pa.target);
+            own_check_par_chan(O, pa, s->span);
             own_arms(O, arms);
             own_scan(O, pa.tail);
             break;
@@ -1037,6 +1337,7 @@ static void own_fn(Own* O, CcFuncDecl f) {
     vars->truncate(0);
     pa->truncate(0);
     pn->truncate(0);
+    own_read_refdec(O, f.body);
     own_stmt(O, f.body);
     vars->truncate(0);
     pa->truncate(0);
@@ -1106,6 +1407,9 @@ static void CcLowerer_own(CcLowerer* L) {
     O.pin_arena = vec_new::[CCSlice](L->arena);
     O.pin_nursery = vec_new::[CCSlice](L->arena);
     O.pending = vec_new::[CCSlice](L->arena);
+    O.off_from = vec_new::[uint32_t](L->arena);
+    O.off_to = vec_new::[uint32_t](L->arena);
+    own_read_par_off(&O);
     for (i = 0; i < n; i++) own_pre_decl(&O, *decls->get_ptr(i));
     for (i = 0; i < n; i++) own_top_decl(&O, *decls->get_ptr(i));
 }

@@ -15,7 +15,96 @@
 typedef struct GStep {
     CcLowerer* L;
     CcNameList order;           /* instance names in emission order */
+    CcNameList bad_keys;        /* map key types already refused: one report each */
 } GStep;
+
+/* ---- map keys --------------------------------------------------------- */
+
+/* A map key type is installed by declaring `cc_map_key_hash_<K>` and
+ * `cc_map_key_eq_<K>` for it. The family header installs a fixed set that
+ * way, as macros; anything else is the program's own to declare.
+ *
+ * Without the pair the instance still expands and still compiles: the
+ * factory reaches whatever `<Instance>_key_hash` resolves to, and what it
+ * resolves to for an uninstalled key is a hash of the first bytes of the
+ * key -- a `double` that compares equal to another `double` lands in a
+ * different bucket, and the map answers "not present" for a key it holds.
+ * Nothing about that shows up at runtime as an error, so it is said here. */
+static bool gn_key_has(CCSlice hay, const char* needle) {
+    CCSlice n = cstr_slice(needle);
+    size_t i;
+    if (!n.len || hay.len < n.len) return false;
+    for (i = 0; i + n.len <= hay.len; i++)
+        if (memcmp(hay.ptr + i, n.ptr, n.len) == 0) return true;
+    return false;
+}
+
+static bool gn_key_builtin(CCSlice k) {
+    static const char* names[11] = {
+        "int", "long", "long_long", "size_t", "ptrdiff_t",
+        "unsigned_long", "unsigned_long_long", "CCSliceHdr",
+        "CCSlicePacked", "CCSlice", "charslice"
+    };
+    size_t i;
+    for (i = 0; i < 11; i++)
+        if (cc_slice_eq_cstr(&k, names[i])) return true;
+    /* Every slice spelling hashes as a slice, and every 64-bit-wide
+     * spelling (`uint64_t`, `int64_t`, ...) as a word: the family header
+     * installs those families rather than each name. */
+    if (gn_key_has(k, "slice")) return true;
+    if (gn_key_has(k, "Slice")) return true;
+    if (gn_key_has(k, "64")) return true;
+    return false;
+}
+
+static bool gn_key_declared(CcLowerer* L, CCSlice key) {
+    CcIndex* ix = L->ix;
+    CCString nm = @string(`cc_map_key_hash_${key}`, L->arena);
+    CCSlice fname = lw_keep(L, &nm);
+    CcSym* sym = ix->sym(fname) ?> NULL;
+    return sym != NULL;
+}
+
+static bool gn_key_reported(GStep* st, CCSlice key) {
+    CcNameList* v = &st->bad_keys;
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice s = *v->get_ptr(i);
+        if (cc_slice_eq(&s, key)) return true;
+    }
+    return false;
+}
+
+static void gn_check_map_key(GStep* st, CcTypeList* args, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CCSlice key;
+    if (!args->len()) return;
+    {
+        CcType* kt = *args->get_ptr(0);
+        if (!kt) return;
+        key = cc__mangle(ix, ix->canon(kt));
+    }
+    if (!key.len) return;
+    if (gn_key_builtin(key)) return;
+    if (gn_key_declared(L, key)) return;
+    if (gn_key_reported(st, key)) return;
+    {
+        CcNameList* v = &st->bad_keys;
+        CCString m = @string(`map key type '${key}' has no installed hash/eq
+declare cc_map_key_hash_${key} and cc_map_key_eq_${key} to install it`, L->arena);
+        v->push(key);
+        lw_error(L, sp, m);
+    }
+}
+
+/* The families whose first type argument is the key. */
+static bool gn_is_map_family(CCSlice fam) {
+    if (cc_slice_eq_cstr(&fam, "Map")) return true;
+    if (cc_slice_eq_cstr(&fam, "ArrayMap")) return true;
+    return false;
+}
 
 static bool gn_seen(GStep* st, CCSlice name) {
     CcNameList* o = &st->order;
@@ -75,7 +164,13 @@ static bool gn_type_visit(CcType* t, void* env) {
     CcIndex* ix = st->L->ix;
     bool is_generic = false;
     @switch (t->k) {
-        case .generic: is_generic = true; break;
+        case .generic(g): {
+            CCSlice fam = g.family;
+            CcTypeList ga = g.args;
+            is_generic = true;
+            if (gn_is_map_family(fam)) gn_check_map_key(st, &ga, t->span);
+            break;
+        }
         /* `T[:]` is an instance of the slice family, named by the same
          * canonical spelling: `CCSlice` for the char family, `CCSlice_T`
          * for anything else */
@@ -1149,6 +1244,7 @@ static void CcLowerer_generics(CcLowerer* L) {
     memset(&st, 0, sizeof(st));
     st.L = L;
     st.order = vec_new::[CCSlice](L->arena);
+    st.bad_keys = vec_new::[CCSlice](L->arena);
     memset(&v, 0, sizeof(v));
     v.type = gn_type_visit;
     v.expr = gn_expr_visit;

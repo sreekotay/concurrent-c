@@ -701,9 +701,111 @@ static void CcLowerer_includes(CcLowerer* L) {
     if (L->header_mode) lw_include_defining_faces(L, decls);
 }
 
+/* `type_of(T)` is `cc_type_of("T")`: a lookup in the runtime registry by
+ * the type's spelling. A type nothing registered is not an error there --
+ * the lookup answers NULL, the program reads a field off it, and what
+ * happens next is a null dereference in a build that compiled clean. So
+ * the spelling is checked here, where the name is still a name.
+ *
+ * The token run is read rather than the tree: `type_of` takes a type, and
+ * a type is not an expression, so the parser has nothing to hand this. A
+ * spelling of more than one token (`unsigned long`) is left alone; so is
+ * `cc_type_of("...")`, which is the runtime probe and is allowed to miss. */
+static bool lw_typeof_primitive(CCSlice n) {
+    static const char* prims[18] = {
+        "int", "char", "short", "long", "float", "double", "size_t",
+        "intptr_t", "bool", "void", "int32_t", "uint32_t", "int64_t",
+        "uint64_t", "CCSlice", "CCArena", "CCError", "CCChan"
+    };
+    size_t i;
+    for (i = 0; i < 18; i++)
+        if (cc_slice_eq_cstr(&n, prims[i])) return true;
+    return false;
+}
+
+/* A name the index or this unit declares as a type. Registration is a
+ * separate act, and a declared type may still be unregistered -- but a
+ * refusal is a claim about the program, and this one is only made where
+ * nothing in sight declares the name at all. */
+static bool lw_typeof_declared(CcLowerer* L, CCSlice name) {
+    CcNameList known = L->ix->known_types();
+    CcNameList* v = &known;
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice s = *v->get_ptr(i);
+        if (slice_eq(s, name)) return true;
+    }
+    {
+        CcNameList* own = &L->unit->typedef_names;
+        n = own->len();
+        for (i = 0; i < n; i++) {
+            CCSlice s = *own->get_ptr(i);
+            if (slice_eq(s, name)) return true;
+        }
+    }
+    /* A mangled instance of a generic family (`CCVec_Point2`) is declared
+     * by its family's expansion, which registers a type_info for it. The
+     * name reads back as family + arguments, and that is the declaration. */
+    {
+        CcType* g = cc__unmangle_arg(L->ix, name, 0);
+        if (g) {
+            @switch (g->k) {
+                case .generic: return true;
+                default: break;
+            }
+        }
+    }
+    return false;
+}
+
+static void CcLowerer_typeof(CcLowerer* L) {
+    CcUnit* u = L->unit;
+    CcTape* tp = &u->tape;
+    Vec::[CcToken]* toks = &tp->toks;
+    CcIndex* ix = L->ix;
+    size_t n = toks->len();
+    size_t i;
+    if (n < 4) return;
+    for (i = 0; i + 3 < n; i++) {
+        const CcToken* t = toks->get_ptr(i);
+        const CcToken* lp = toks->get_ptr(i + 1);
+        const CcToken* nm = toks->get_ptr(i + 2);
+        const CcToken* rp = toks->get_ptr(i + 3);
+        CCSlice name;
+        CcTypeInfo* info;
+        if (t->kind != CC_TK_IDENT) continue;
+        {
+            CCSlice tx = t->text;
+            if (!cc_slice_eq_cstr(&tx, "type_of")) continue;
+        }
+        if (!CcToken_is(lp, CC_P_LPAREN)) continue;
+        if (nm->kind != CC_TK_IDENT) continue;
+        if (!CcToken_is(rp, CC_P_RPAREN)) continue;
+        if (i > 0) {
+            const CcToken* prev = toks->get_ptr(i - 1);
+            if (CcToken_is(prev, CC_P_DOT) || CcToken_is(prev, CC_P_ARROW)) continue;
+        }
+        name = nm->text;
+        if (lw_typeof_primitive(name)) continue;
+        if (lw_typeof_declared(L, name)) continue;
+        info = ix->type(name) ?> NULL;
+        if (info) continue;
+        {
+            CcSpan sp;
+            CCString m = @string(`type_of(${name}): type '${name}' has no registered cc_type_info
+  hint: register with CC_TYPE_INFO_BEGIN(${name}) / CC_TYPE_INFO_END, or use a known primitive/Vec`, L->arena);
+            sp.first = (uint32_t)i;
+            sp.last = (uint32_t)(i + 3);
+            lw_error(L, sp, m);
+        }
+    }
+}
+
 static void CcLowerer_lower_unit(CcLowerer* L) {
     CcLowerer_comptime(L);  /* first: a value the user asked for at compile time is a constant to every step */
     CcLowerer_own(L);       /* then, before any rewrite: the ownership checks read the program as written */
+    CcLowerer_typeof(L);    /* likewise: `type_of(T)` names a type by its spelling, as written */
     CcLowerer_includes(L);
     CcLowerer_deadline(L);  /* before the rest: a deadline body is ordinary statements to every one of them */
     CcLowerer_chan(L);      /* before them: an endpoint is the runtime handle before anything

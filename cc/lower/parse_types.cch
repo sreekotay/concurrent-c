@@ -325,7 +325,18 @@ static CcType* parse_chan_suffix(P* p, CcType* base, uint32_t first) {
         if (at_p(p, CC_P_LBRACE)) ch.hooks = parse_initializer(p);
     }
     if (at_p(p, CC_P_LT)) { ch.dir = '<'; adv(p); }
-    else if (at_p(p, CC_P_GT)) { ch.dir = '>'; adv(p); }
+    else if (at_p(p, CC_P_GT)) {
+        uint32_t dirtok = p->i;
+        ch.dir = '>';
+        adv(p);
+        /* `ordered` names the order a receiver observes; a sender has no
+         * such order to promise, so it is a typo, not a no-op. An owned
+         * endpoint spells both halves and states it on the receive side. */
+        if (ch.ordered && !ch.owned) {
+            CCString m = @string(`'ordered' modifier only allowed on receive (<) channel`, p->arena);
+            err_at(p, dirtok, m);
+        }
+    }
     else if (!ch.owned) {
         CCSlice found = tok_desc(p, p->i);
         CCString m = @string(`expected '<' or '>' to give the channel type its direction, found ${found}`, p->arena);

@@ -206,6 +206,17 @@ static void nc_decl(NStep* st, CcDecl* d) {
     inner = nc_peel_init(v.init->expr);
     if (!nc_is_create(inner, &cr)) return;
     st->seen.push(inner);
+    /* A constructor hands back something owned. Saying neither `@destroy`
+     * nor `@detach` leaves who releases it unstated, and the C that comes
+     * out of a missing `@destroy` compiles and leaks in silence. Make the
+     * declaration say it. */
+    if (!v.destroy && !v.detach) {
+        CcLowerer* L = st->L;
+        CCSlice tn = L->ix->canon(v.type);
+        CCString m = @string(`type '${tn}' created with '${"@"}(...)' requires explicit ownership: use '${"@"}destroy' or '${"@"}detach'`, L->arena);
+        lw_error(L, d->span, m);
+        return;
+    }
     nc_rewrite(st, inner, cr, v.type, d);
 }
 

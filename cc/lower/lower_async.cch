@@ -904,6 +904,53 @@ static bool as_left_blocking_visit(CcExpr* e, void* env) {
     return true;
 }
 
+/* `chan_send` / `chan_recv` are the blocking macros: they park the calling
+ * OS thread until the channel answers. An `@async` body does not own its
+ * thread -- it is one state machine among many on a worker -- so parking
+ * there stalls every other task the worker holds, and the resulting C
+ * shows nothing of it. The task-returning forms an `@await` can suspend on
+ * (`cc_chan_send_task` / `cc_chan_recv_task`) are what belongs here.
+ *
+ * The name is read as written: the macro is expanded by the host compiler,
+ * so by the time anything else could see it the evidence is gone. */
+static bool as_chan_op_name(CCSlice nm, CCSlice* op) {
+    if (cc_slice_eq_cstr(&nm, "chan_send")) { *op = CC_SLICE_LIT("chan_send"); return true; }
+    if (cc_slice_eq_cstr(&nm, "chan_recv")) { *op = CC_SLICE_LIT("chan_recv"); return true; }
+    return false;
+}
+
+static bool as_chan_block_visit(CcExpr* e, void* env) {
+    AStep* st = (AStep*)env;
+    CcLowerer* L = st->L;
+    CCSlice fn = cc_slice_empty();
+    CCSlice op = cc_slice_empty();
+    CcCall cl;
+    if (!as_call_of(e, &cl)) return true;
+    if (!expr_ident(strip_parens_expr(cl.callee), &fn)) return true;
+    if (!as_chan_op_name(fn, &op)) return true;
+    {
+        CCString m = @string(`async: channel operation '${op}' must be awaited in ${"@"}async function`, L->arena);
+        CCString hint = @string(`use '${"@"}await cc_${op}_task(...)': the blocking macro parks the worker thread the task is running on`, L->arena);
+        CCSlice note = cc_string_persist_slice(L->arena, &hint);
+        CcUnit* u = L->unit;
+        CcLoc loc = u->loc(e->span);
+        CcDiag dg = CcDiag_error(loc, cc_string_persist_slice(L->arena, &m));
+        CcDiags* ds = L->ds;
+        dg = CcDiag_with_note(dg, note);
+        ds->push(dg);
+    }
+    return true;
+}
+
+static void as_check_chan_ops(AStep* st, CcStmt* body) {
+    CcVisitor v;
+    if (!body) return;
+    memset(&v, 0, sizeof(v));
+    v.expr = as_chan_block_visit;
+    v.env = st;
+    CcStmt_walk(body, v);
+}
+
 /* The blocking edges of one `@async` body. */
 static void as_autoblock(AStep* st, CcDecl* d, CcFuncDecl fd) {
     ABlk ab;
@@ -941,6 +988,7 @@ static bool as_lower_one(AStep* st, CcDecl* d, CcDeclList* into) {
             return false;
         }
     }
+    as_check_chan_ops(st, fd.body);
     as_autoblock(st, d, fd);
     id = L->temp_id();
     {

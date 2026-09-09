@@ -1270,6 +1270,73 @@ static bool pl_dest_body_ok(PStep* st, CcStmt* body, PCapList* caps, CcSpan sp) 
     return true;
 }
 
+/* The arms of a `@parallel` that binds a handle are fibers: the statement
+ * ends and the caller walks on while they still run, so each one is handed
+ * a snapshot of what it named. Writing that snapshot, taking its address,
+ * or calling a method on it reads as work on the caller's object and is
+ * not -- the caller never sees it. Named here rather than left to run: the
+ * emitted C assigns to a real object, compiles, and quietly drops the work.
+ *
+ * The `@parallel(h) { ... }` form asks the same question through
+ * `pl_dest_body_ok`; this is the bound-handle form of the same site. */
+static bool pl_dest_caps_ok(PStep* st, Walker* w, CcParallel p, CCSlice hbase, CcSpan sp) {
+    CcLowerer* L = st->L;
+    Vec::[CcParallelArm]* armv = &p.arms;
+    size_t n = armv->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcParallelArm* arm = armv->get_ptr(i);
+        PScan sc;
+        PCapList caps;
+        PAsk q;
+        CcVisitor v;
+        memset(&sc, 0, sizeof(sc));
+        sc.st = st;
+        sc.w = w;
+        sc.caps = vec_new::[PCapRef](L->arena);
+        sc.seen = vec_new::[CCSlice](L->arena);
+        sc.skip = arm->target;
+        memset(&v, 0, sizeof(v));
+        v.expr = pl_scan_expr;
+        v.env = &sc;
+        if (arm->serial) CcStmt_walk(arm->serial, v);
+        else if (arm->expr) CcExpr_walk(arm->expr, v);
+        caps = sc.caps;
+        {
+            PCapList* cv = &caps;
+            size_t nc = cv->len();
+            size_t ci;
+            for (ci = 0; ci < nc; ci++) {
+                PCap* c = *cv->get_ptr(ci);
+                if (hbase.len && slice_eq(c->name, hbase)) c->by_addr = true;
+                else if (pl_cap_identity(c->type)) c->by_addr = true;
+            }
+        }
+        memset(&q, 0, sizeof(q));
+        q.caps = &caps;
+        memset(&v, 0, sizeof(v));
+        v.expr = pl_byval_expr;
+        v.env = &q;
+        if (arm->serial) CcStmt_walk(arm->serial, v);
+        else if (arm->expr) CcExpr_walk(arm->expr, v);
+        if (!q.hit.len) continue;
+        {
+            CCSlice nm = q.hit;
+            CCString m = cc_string_new();
+            m.push_cstr("'", L->arena);
+            m.push_slice(nm, L->arena);
+            m.push_cstr("' is a dest-bound by-value capture (a copy); assign, address-take, or UFCS receiver is ill-formed. Shared: `T* p = &", L->arena);
+            m.push_slice(nm, L->arena);
+            m.push_cstr("` in the frame and pass `p`. Moved: stop naming `", L->arena);
+            m.push_slice(nm, L->arena);
+            m.push_cstr("` in the frame", L->arena);
+            lw_error(L, sp, m);
+        }
+        return false;
+    }
+    return true;
+}
+
 /* ---- one site ----------------------------------------------------------- */
 
 /* What the arms form can carry that this step does not lower. */
@@ -1623,6 +1690,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         }
         if (pl_arm_first_return(arm->expr, arm->serial, false)) pj_any = true;
     }
+    if (hspell.len && !pl_dest_caps_ok(st, w, p, hbase, sp)) return;
     if (pj_any) {
         pj_leave = pl_pj_name(L, id, "_join");
         if (!hspell.len) {
