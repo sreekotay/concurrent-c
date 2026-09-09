@@ -175,16 +175,17 @@ static void end_stmt(P* p, const char* what, uint32_t start) {
 }
 
 /* Body block into *out (the block's statements, braces dropped). */
-static void parse_body_into(P* p, CcStmtList* out, const char* what) {
+static bool parse_body_into(P* p, CcStmtList* out, const char* what) {
     CcStmt* b;
     if (!at_p(p, CC_P_LBRACE)) {
         CCSlice found = tok_desc(p, p->i);
-        CCString m = @string(`expected '{' to open the ${what} body, found ${found}`, p->arena);
+        CCString m = @string(`expected '{' after ${what}, found ${found}`, p->arena);
         err_here(p, m);
-        return;
+        return false;
     }
     b = parse_block(p);
     *out = block_stmts(b);
+    return true;
 }
 
 static CcExpr* parse_paren_expr(P* p, const char* what) {
@@ -670,13 +671,18 @@ static CcStmt* parse_parallel(P* p) {
             if (at_word(p, "serial")) {
                 CcStmt* ser;
                 CcBlock sb;
+                bool opened;
                 sb.stmts = vec_new::[CcStmtRef](p->arena);
                 adv(p);
                 {
-                    const char* lit_w = "@serial";
-                    parse_body_into(p, &sb.stmts, lit_w);
+                    const char* lit_w = "@" "serial";
+                    opened = parse_body_into(p, &sb.stmts, lit_w);
                 }
-                if (!sb.stmts.len()) {
+                if (!opened) {
+                    /* the arm never opened; the missing '{' was already
+                     * reported at the token that should have been one, and
+                     * an emptiness complaint would name the wrong fix */
+                } else if (!sb.stmts.len()) {
                     CCString m = @string(`${at_serial} arm must not be empty`, p->arena);
                     err_at(p, afirst, m);
                 } else {
@@ -1561,6 +1567,33 @@ static void parse_stmt_into(P* p, CcStmtList* list) {
         list->push(s);
     }
     if (p->i == start) sync(p, start);
+}
+
+/* A function body.  A missing '}' only surfaces at the next function or at
+ * end of file, a long way from the brace that is unclosed: name the function
+ * the body belongs to and point a note at its '{'. */
+static CcStmt* parse_fn_body(P* p, CCSlice name) {
+    uint32_t open = p->i;
+    CcStmt* b = cc_stmt_block(span2(open, open), p->arena);
+    CcStmtList stmts = vec_new::[CcStmtRef](p->arena);
+    if (!at_p(p, CC_P_LBRACE)) {
+        err_expected(p, "'{'");
+        return b;
+    }
+    adv(p);
+    scope_push(p->syms);
+    while (!at_p(p, CC_P_RBRACE) && !at_eof(p)) parse_stmt_into(p, &stmts);
+    scope_pop(p->syms);
+    if (!accept_p(p, CC_P_RBRACE)) {
+        CCSlice found = tok_desc(p, p->i);
+        CCString m = @string(`expected '}' to close '${name}', found ${found}`, p->arena);
+        CCString n2 = @string(`to match this '{'`, p->arena);
+        err_here(p, m);
+        note_at(p, open, n2);
+    }
+    block_set_stmts(b, stmts);
+    b->span = span_from(p, open);
+    return b;
 }
 
 static CcStmt* parse_block(P* p) {

@@ -383,6 +383,16 @@ static bool gn_registration_binds(CcLowerer* L, CCSlice fam) {
  * A line that names no handler binds nothing, and the instance it was to
  * write would come out an empty guard, so it is reported at the use site
  * that asked for the run. */
+/* An error with a second line: where to look for what produced it. */
+static void gn_error_note(CcLowerer* L, CcSpan span, CCString msg, CCSlice note) {
+    CcUnit* u = L->unit;
+    CcLoc loc = u->loc(span);
+    CcDiag d = CcDiag_error(loc, cc_string_persist_slice(L->arena, &msg));
+    CcDiags* ds = L->ds;
+    if (note.len) d = CcDiag_with_note(d, note);
+    ds->push(d);
+}
+
 static void gn_bind_registrations(CcLowerer* L, CcSpan sp) {
     CCSlice text = L->opts.factories;
     size_t i = 0;
@@ -848,6 +858,51 @@ static bool gn_factories_ready(CcLowerer* L, CcSpan sp) {
     return true;
 }
 
+/* The `@comptime` function registered to write a family's instances, out of
+ * the `family handler [mode]` table the registrations were bound from. */
+static CCSlice gn_family_handler(CcLowerer* L, CCSlice fam) {
+    CCSlice text = L->opts.factories;
+    size_t i = 0;
+    while (i < text.len) {
+        size_t line_end = gn_line_end(text, i);
+        size_t k = i;
+        CCSlice f = gn_line_word(text, line_end, &k);
+        CCSlice handler = gn_line_word(text, line_end, &k);
+        i = line_end < text.len ? line_end + 1 : text.len;
+        if (f.len && slice_eq(f, fam)) return handler;
+    }
+    return cc_slice_empty();
+}
+
+/* Which factory wrote the text that would not compile, and where it is
+ * defined: the failing C is generated, so the file the user can open is the
+ * factory body, not the expansion. */
+static CCSlice gn_factory_note(CcLowerer* L, CCSlice fam) {
+    CcIndex* ix = L->ix;
+    CCSlice handler = gn_family_handler(L, fam);
+    CcSym* sym;
+    CCString sb = cc_string_new();
+    if (!handler.len) return cc_slice_empty();
+    sym = ix->sym(handler) ?> NULL;
+    while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+    {
+        const char* at_comptime = "@" "comptime";
+        CCString head = @string(`in ${at_comptime} factory '${handler}' at `, L->arena);
+        cc_string_push_slice(&sb, head.as_slice(), L->arena);
+    }
+    if (sym) {
+        CcLoc l = CcSym_loc(sym);
+        if (l.path.len) {
+            uint32_t line = l.line;
+            CCString tail = @string(`${l.path}:${line}`, L->arena);
+            cc_string_push_slice(&sb, tail.as_slice(), L->arena);
+            return cc_string_persist_slice(L->arena, &sb);
+        }
+    }
+    cc_string_push_cstr(&sb, "an unknown position: no declaration of it is visible here", L->arena);
+    return cc_string_persist_slice(L->arena, &sb);
+}
+
 /* One instance, written by its factory. Empty when the factory could not
  * be run or produced nothing — the caller reports at the use site. */
 static CCString gn_run_factory(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool* ok) {
@@ -887,8 +942,9 @@ static CCString gn_run_factory(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool* 
         CCSlice fam = info->family;
         CCSlice nm = info->name;
         CCSlice why = err[0] ? cc_slice_from_buffer(err, strlen(err)) : cstr_slice("it produced nothing");
-        CCString m = @string(`the factory of generic family '${fam}' could not write '${nm}': ${why}`, L->arena);
-        lw_error(L, sp, m);
+        CCString m = @string(`type: compiled generic factory '${fam}' failed to compile '${nm}': ${why}`, L->arena);
+        CCSlice note = gn_factory_note(L, fam);
+        gn_error_note(L, sp, m, note);
         return out;
     }
     cc_string_push_cstr(&out, def, L->arena);

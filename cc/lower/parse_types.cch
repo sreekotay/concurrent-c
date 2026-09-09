@@ -324,23 +324,36 @@ static CcType* parse_chan_suffix(P* p, CcType* base, uint32_t first) {
         adv(p);
         if (at_p(p, CC_P_LBRACE)) ch.hooks = parse_initializer(p);
     }
-    if (at_p(p, CC_P_LT)) { ch.dir = '<'; adv(p); }
-    else if (at_p(p, CC_P_GT)) {
+    if (at_p(p, CC_P_LT) || at_p(p, CC_P_GT)) {
         uint32_t dirtok = p->i;
-        ch.dir = '>';
+        ch.dir = at_p(p, CC_P_LT) ? '<' : '>';
         adv(p);
+        /* A handle names one end of the channel. `<>` / `><` asks for both,
+         * which is the channel itself and not a handle onto it. */
+        if (at_p(p, CC_P_LT) || at_p(p, CC_P_GT)) {
+            CCString m = @string(`channel: channel handle type cannot be both send and receive`, p->arena);
+            err_at(p, dirtok, m);
+            adv(p);
+        }
         /* `ordered` names the order a receiver observes; a sender has no
          * such order to promise, so it is a typo, not a no-op. An owned
          * endpoint spells both halves and states it on the receive side. */
-        if (ch.ordered && !ch.owned) {
+        if (ch.dir == '>' && ch.ordered && !ch.owned) {
             CCString m = @string(`'ordered' modifier only allowed on receive (<) channel`, p->arena);
             err_at(p, dirtok, m);
         }
     }
     else if (!ch.owned) {
-        CCSlice found = tok_desc(p, p->i);
-        CCString m = @string(`expected '<' or '>' to give the channel type its direction, found ${found}`, p->arena);
-        err_here(p, m);
+        /* At the `]` the direction is not mistyped, it is absent: the rule
+         * that was broken is that a handle type states which end it is. */
+        if (at_p(p, CC_P_RBRACKET)) {
+            CCString m = @string(`channel: channel handle type requires direction: '<' to receive, '>' to send`, p->arena);
+            err_here(p, m);
+        } else {
+            CCSlice found = tok_desc(p, p->i);
+            CCString m = @string(`expected '<' or '>' to give the channel type its direction, found ${found}`, p->arena);
+            err_here(p, m);
+        }
     }
     if (accept_p(p, CC_P_COMMA)) {
         if (at_ident(p)) { ch.policy = tok_name(p, p->i); adv(p); }
@@ -1103,7 +1116,7 @@ static void parse_members(P* p, CcRecordType* st, uint32_t open) {
                 fl->push(f);
                 continue;
             }
-            expect_semi(p, "the member declaration");
+            if (!expect_list_end(p, "in field")) sync(p, dfirst);
             f.span = span2(dfirst == first ? first : dfirst, last_tok(p));
             fl->push(f);
             break;

@@ -25,6 +25,7 @@ typedef struct UStep {
     CcExprList formal_at;       /* a `.method` site a declaration types */
     CcTypeList formal_ty;       /* what that declaration declared, by the same index */
     CCSlice trusted;            /* the base whose own method body this is: its unnamed view does not bind here */
+    CCSlice trusted_ret;        /* the base this body constructs: a `T T_empty(void)` is T's own code too */
     CcExprList stores;          /* `x.f` nodes standing where a store lands */
     bool restrict_diag;         /* one restrict refusal per unit: the rest are the same mistake */
 } UStep;
@@ -786,7 +787,7 @@ static bool uf_formal_rewrite(Walker* w, UStep* st, CcExpr* e, CcUfcs uf,
     }
     if (!ty) {
         CCString msg = is_alloc
-            ? @string(`type: 'arena.allocT' needs its element type: declare a typed pointer destination (T* p = arena.allocT(n)) or spell it (arena.allocT::[T](n))`, L->arena)
+            ? @string(`type: arena.allocT needs its element type: declare a typed pointer destination (T* p = arena.allocT(n)) or spell it (arena.allocT::[T](n))`, L->arena)
             : @string(`type: 'task.block_on' needs its result type: declare a typed destination (T v = task.block_on()) or spell it (task.block_on::[T]())`, L->arena);
         lw_error(L, sp, msg);
         return true;
@@ -1748,6 +1749,16 @@ static CcParamList* uf_func_params(CcType* t) {
     return ps;
 }
 
+static CcType* uf_func_return(CcType* t) {
+    CcType* r = NULL;
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .func: r = t->k.func.ret; break;
+        default: break;
+    }
+    return r;
+}
+
 /* The type whose own bodies these statements are: a function's first
  * parameter names the receiver, and an unnamed view does not bind inside
  * the methods that implement the type -- it would leave the type unusable
@@ -1757,8 +1768,16 @@ static void uf_trusted_decl(Walker* w, CcDecl* d) {
     UStep* st = (UStep*)w->env;
     CcFuncDecl f;
     CcParamList* ps;
+    CcType* rt;
     st->trusted = cc_slice_empty();
+    st->trusted_ret = cc_slice_empty();
     if (!uf_decl_func(d, &f)) return;
+    /* A constructor takes no receiver -- it hands one back (`T T_empty(void)`,
+     * `T T_from_host(H*)`). Its body is the type's own code just as much as a
+     * method's is, and it is the only code that can fill the fields the view
+     * withholds; without this the type could not be built at all. */
+    rt = uf_func_return(f.type);
+    if (rt) st->trusted_ret = uf_family_root(cc__strip_tag(w->ix->canon(peel(rt))));
     ps = uf_func_params(f.type);
     if (!ps || !ps->len()) return;
     {
@@ -1826,7 +1845,7 @@ static void uf_check_field(Walker* w, CcExpr* e, CcMember mb, CcType* rt) {
         kind = uf_builtin_kind(base, mb.name);
         if (kind < 0) return;
     }
-    if (!view.len && slice_eq(base, st->trusted)) return;
+    if (!view.len && (slice_eq(base, st->trusted) || slice_eq(base, st->trusted_ret))) return;
     store = uf_is_store(st, e);
     if (store && (kind & 2)) return;
     if (!store && (kind & 1)) return;
@@ -1883,14 +1902,22 @@ static bool uf_is_box_instance(CCSlice n) {
  * mint. */
 static bool uf_is_factory_alias(CcIndex* ix, CcType* t, CCSlice* spelled) {
     CCSlice nm;
-    CCSlice canon;
+    int depth;
     if (!t || !type_named_name(t, &nm) || !nm.len) return false;
     *spelled = nm;
     if (cc_slice_eq_cstr(&nm, "CCArena")) return true;
     if (nm.len > 17 && memcmp(nm.ptr, "CCArena_Restrict_", 17) == 0) return true;
     if (uf_is_box_instance(nm)) return false;
-    canon = cc__strip_tag(ix->canon(t));
-    return uf_is_box_instance(canon);
+    /* `canon` keeps a typedef's own spelling -- that is the point of the
+     * name -- so the chain has to be walked to see what it stands for. */
+    for (depth = 0; depth < 8; depth++) {
+        CcSym* sym = sym_any(ix, nm);
+        while (sym && sym->kind != CC_SYM_TYPE) sym = sym->same_name;
+        if (!sym || !sym->type) return false;
+        if (!type_named_name(sym->type, &nm) || !nm.len) return false;
+        if (uf_is_box_instance(cc__strip_tag(nm))) return true;
+    }
+    return false;
 }
 
 /* `CCArena a = &host;` -- the destination does not mint. A pointer handed
@@ -2257,6 +2284,7 @@ static void CcLowerer_ufcs(CcLowerer* L) {
     st.formal_ty = vec_new::[CcTypeRef](L->arena);
     st.stores = vec_new::[CcExprRef](L->arena);
     st.trusted = cc_slice_empty();
+    st.trusted_ret = cc_slice_empty();
     uf_widen_pass(L, &st);      /* before the rewrite: the arguments are as written */
     uf_formal_pass(L, &st);
     w.on_ufcs = uf_rewrite;

@@ -145,13 +145,23 @@ static void cc__lex_error(CcLexer* L, uint32_t off, CCSlice msg) {
 
 static CCSlice cc__stray_byte_msg(CcLexer* L, unsigned c) {
     static const char digits[] = "0123456789abcdef";
+    char one[2];
     char hex[3];
     hex[0] = digits[(c >> 4) & 0xf];
     hex[1] = digits[c & 0xf];
     hex[2] = 0;
-    const char* code = hex;
-    CCString s = @string(`stray byte 0x${code}`, L->a);
-    return cc_string_persist_slice(L->a, &s);
+    one[0] = (char)c;
+    one[1] = 0;
+    if (c >= 32 && c < 127) {
+        const char* ch = one;
+        CCString s = @string(`not a token ('${ch}')`, L->a);
+        return cc_string_persist_slice(L->a, &s);
+    }
+    {
+        const char* code = hex;
+        CCString s = @string(`not a token (byte 0x${code})`, L->a);
+        return cc_string_persist_slice(L->a, &s);
+    }
 }
 
 /* ---- marks ----------------------------------------------------------- */
@@ -347,7 +357,9 @@ static CcPunct cc__match_punct(const CcLexer* L, uint32_t pos, uint32_t* len_out
         if (pos + want > L->len) continue;
         for (unsigned p = 1; p < CC_P__COUNT; p++) {
             const char* t = cc__punct_texts[p];
-            if (p == CC_P_BACKTICK || cc__punct_len(t) != want) continue;
+            /* `$` is spelled in the table for `${...}` slot text; outside a
+             * template no rule accepts it, so it is not a token at all. */
+            if (p == CC_P_BACKTICK || p == CC_P_DOLLAR || cc__punct_len(t) != want) continue;
             bool same = true;
             for (uint32_t k = 0; k < want; k++) {
                 if (L->bytes[pos + k] != (unsigned char)t[k]) { same = false; break; }

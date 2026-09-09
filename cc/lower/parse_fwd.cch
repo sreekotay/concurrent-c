@@ -45,6 +45,7 @@ static bool    parse_template_parts(P* p, uint32_t tok, CcTplPartList* out); /* 
 /* parse_stmts.cch */
 static CcStmt* parse_stmt(P* p);
 static CcStmt* parse_block(P* p);
+static CcStmt* parse_fn_body(P* p, CCSlice name);
 static CcStmt* parse_at_stmt(P* p);
 static CcStmt* parse_parallel(P* p);
 static void    parse_stmt_into(P* p, CcStmtList* list);

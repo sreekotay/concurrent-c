@@ -813,6 +813,16 @@ static bool at_file_scope_stmt_word(P* p) {
 
 /* Declarators after the specifiers; one CcDecl per declarator. `attrs` are
  * the declaration's leading attributes (trivia tags), given to the first. */
+/* True when the declarator was nothing but its name and another name follows
+ * it directly -- the shape a space inside an identifier produces. */
+static bool decl_at_name_run(P* p, CCSlice name, uint32_t ntok) {
+    if (!name.len) return false;
+    if (ntok + 1 != p->i) return false;
+    if (p->t[p->i].kind != CC_TK_IDENT) return false;
+    if (p->i > 0 && p->consumed_terminator == p->i - 1) return false;
+    return true;
+}
+
 static bool parse_declaration_specs(P* p, CcDeclList* out, uint32_t first, CcAttrList* attrs, bool file_scope, uint32_t extra_specs) {
     Specs S;
     int count = 0;
@@ -866,6 +876,10 @@ static bool parse_declaration_specs(P* p, CcDeclList* out, uint32_t first, CcAtt
                 const char* at_serial = "@" "serial";
                 const char* at_parallel = "@" "parallel";
                 CCString m = @string(`${at_serial} is only an arm of ${at_parallel} { }`, p->arena);
+                err_here(p, m);
+            } else if (cc_slice_eq_cstr(&w, "@restricted")) {
+                const char* at_typeview = "@" "typeview";
+                CCString m = @string(`'${w}' was removed; use '${at_typeview}'`, p->arena);
                 err_here(p, m);
             } else if (at_file_scope_stmt_word(p)) {
                 CCString m = @string(`'${w}' is a statement and cannot appear at file scope`, p->arena);
@@ -945,7 +959,7 @@ static bool parse_declaration_specs(P* p, CcDeclList* out, uint32_t first, CcAtt
                 CcStmt* body;
                 scope_push(p->syms);
                 declare_params(p, v.type);
-                body = parse_block(p);
+                body = parse_fn_body(p, v.name);
                 scope_pop(p->syms);
                 decl_install(dn, shape, v, body);
                 dn->span = span_from(p, count == 0 ? first : dfirst);
@@ -1056,8 +1070,18 @@ static bool parse_declaration_specs(P* p, CcDeclList* out, uint32_t first, CcAtt
             count++;
             continue;
         }
-        if (!expect_semi(p, shape == SHAPE_FUNC ? "the function declaration" : shape == SHAPE_TYPEDEF ? "the typedef" : "the declaration"))
+        if (decl_at_name_run(p, v.name, ntok)) {
+            /* `int ma in;` / `int ma in(void)`: the declarator is a bare name
+             * and another name follows it with nothing between.  What is
+             * missing is the '(' that would make it a function or the ';'
+             * that would end the declaration -- not a comma. */
+            CCSlice nm = v.name;
+            CCString m = @string(`expected '(' or ';' after '${nm}'`, p->arena);
+            err_here(p, m);
             sync(p, dfirst);
+        } else if (!expect_list_end(p, "after declarator")) {
+            sync(p, dfirst);
+        }
         dn->span = span2(count == 0 ? first : dfirst, last_tok(p));
         out->push(dn);
         return true;
