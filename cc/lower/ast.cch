@@ -401,7 +401,11 @@ typedef struct CcAsm { CcSpan tokens; } CcAsm;
 typedef struct CcDefer { CCSlice name; char on; CcStmt* body; } CcDefer;  /* on: 0 always, 'o' ok, 'e' err */
 typedef struct CcCancelDefer { CCSlice name; } CcCancelDefer;
 typedef struct CcErrhandler { CcType* err_type; CCSlice binder; CcStmt* body; } CcErrhandler;
-typedef struct CcErrFwd { CcExpr* err; } CcErrFwd;                        /* @err(e); */
+typedef struct CcErrFwd {      /* @err(e); -- `@errhandler(e);` is the same forward */
+    CcExpr* err;
+    bool delegate;              /* written `@errhandler(e);`: the delegation spelling, which
+                                 * an `@err` body may use and nothing else may */
+} CcErrFwd;
 typedef struct CcUnwrapStmt { CcExpr* e; } CcUnwrapStmt;                  /* e !>;  e !> body; */
 typedef struct CcForIn {        /* for (x in xs) / @for (&x in xs) / @for (a, b in xs, ys) / for (i in lo..hi) */
     CCSlice bind;

@@ -23,6 +23,9 @@ static CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiag
     L.specs = vec_new::[CcTypeInfoRef](u->arena);
     L.sinks = vec_new::[CCSlice](u->arena);
     L.res_dests = vec_new::[CcExprRef](u->arena);
+    L.dest_bodies = vec_new::[CcDeclRef](u->arena);
+    L.ufcs_sites = vec_new::[CcExprRef](u->arena);
+    L.ufcs_meths = vec_new::[CCSlice](u->arena);
     return L;
 }
 

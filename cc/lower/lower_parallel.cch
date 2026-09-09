@@ -1815,10 +1815,20 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             pl_host(st); st->fwd.push_slice(et.as_slice(), L->arena);
         }
         pl_forward(st, id, (uint32_t)i);
-        st->made.push(pl_thunk_decl(st, id, (uint32_t)i, &caps, arm->expr, pl_serial_body(L, arm->serial),
-                                    out_type, arm->target, hspell.len != 0,
-                                    pj_ty.len ? cstr_slice("__e->__cc_pj_ex") : cc_slice_empty(),
-                                    pj_rty.len != 0, sp));
+        {
+            CCSlice pj_cell = cc_slice_empty();
+            CcDecl* th;
+            if (pj_ty.len) pj_cell = cstr_slice("__e->__cc_pj_ex");
+            th = pl_thunk_decl(st, id, (uint32_t)i, &caps, arm->expr, pl_serial_body(L, arm->serial),
+                               out_type, arm->target, hspell.len != 0, pj_cell,
+                               pj_rty.len != 0, sp);
+            st->made.push(th);
+            /* a bound handle makes the arms fibers of a dest */
+            if (hspell.len) {
+                CcDeclList* dv = &L->dest_bodies;
+                dv->push(th);
+            }
+        }
         pl_env_stmts(L, blk, id, (uint32_t)i, &caps, arm->target, hspell, pj_ptr, sp);
         if (!gated) pl_fire_stmts(L, blk, id, (uint32_t)i, hspell, p.spawn, sp);
     }
@@ -1971,8 +1981,13 @@ static void pl_dest(PStep* st, CcStmt* s, CcParallelDest pd) {
         pl_host(st); st->fwd.push_slice(et.as_slice(), L->arena);
     }
     pl_forward(st, id, 0);
-    st->made.push(pl_thunk_decl(st, id, 0, &caps, NULL, body, cc_slice_empty(),
-                                cc_slice_empty(), true, cc_slice_empty(), false, sp));
+    {
+        CcDecl* th = pl_thunk_decl(st, id, 0, &caps, NULL, body, cc_slice_empty(),
+                                   cc_slice_empty(), true, cc_slice_empty(), false, sp);
+        CcDeclList* dv = &L->dest_bodies;
+        st->made.push(th);
+        dv->push(th);
+    }
     blk = lw_block(L, sp);
     pl_spawn_stmts(L, blk, id, 0, &caps, cc_slice_empty(), bind, sp);
     s->k = blk->k;
@@ -2917,6 +2932,7 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
         CcErrFwd fe;
         CCString cnd = @string(`${fail}`, L->arena);
         fe.err = lw_paren(L, lw_ident(L, ferr, sp), sp);
+        fe.delegate = false;
         { CcStmtK sk = { .err_fwd = fe }; fw->k = sk; }
         lw_push(then, fw);
         lw_push(blk, lw_if(L, lw_text(L, cnd, sp), then, NULL, sp));
@@ -3059,6 +3075,149 @@ static CCSlice pl_pw_goto_out(CcLowerer* L, CcStmt* body) {
     return g.out;
 }
 
+/* One name, asked of a body: is it declared there, is it read there. */
+typedef struct PCacheQ { CCSlice want; bool found; } PCacheQ;
+
+static bool pl_cache_decl_visit(CcStmt* s, void* env) {
+    PCacheQ* q = (PCacheQ*)env;
+    CcDecl* d = NULL;
+    CCSlice nm = cc_slice_empty();
+    @switch (s->k) {
+        case .decl(ds): d = ds.d; break;
+        default: break;
+    }
+    if (!d) return true;
+    @switch (d->k) {
+        case .var(v): nm = v.name; break;
+        default: break;
+    }
+    if (nm.len && slice_eq(nm, q->want)) q->found = true;
+    return true;
+}
+
+static bool pl_cache_ident_visit(CcExpr* e, void* env) {
+    PCacheQ* q = (PCacheQ*)env;
+    CCSlice nm = cc_slice_empty();
+    @switch (e->k) {
+        case .ident(x): nm = x; break;
+        default: break;
+    }
+    if (nm.len && slice_eq(nm, q->want)) q->found = true;
+    return true;
+}
+
+/* Does the walk's body declare `nm` itself? */
+static bool pl_cache_body_local(CcStmt* body, CCSlice nm) {
+    PCacheQ q;
+    CcVisitor v;
+    if (!body) return false;
+    q.want = nm;
+    q.found = false;
+    memset(&v, 0, sizeof(v));
+    v.stmt = pl_cache_decl_visit;
+    v.env = &q;
+    CcStmt_walk(body, v);
+    return q.found;
+}
+
+/* Does an `@stage` of this body name `nm`? */
+static bool pl_cache_in_stage(CcStmt* body, CCSlice nm) {
+    CcStmtList* bs = lw_block_stmts(body);
+    size_t n;
+    size_t i;
+    if (!bs) return false;
+    n = bs->len();
+    for (i = 0; i < n; i++) {
+        CcStmt* k = *bs->get_ptr(i);
+        bool is_stage = false;
+        @switch (k->k) {
+            case .stage: is_stage = true; break;
+            default: break;
+        }
+        if (!is_stage) continue;
+        {
+            PCacheQ q;
+            CcVisitor v;
+            q.want = nm;
+            q.found = false;
+            memset(&v, 0, sizeof(v));
+            v.expr = pl_cache_ident_visit;
+            v.env = &q;
+            CcStmt_walk(k, v);
+            if (q.found) return true;
+        }
+    }
+    return false;
+}
+
+/* `cache (name)` adopts a declaration of the enclosing scope so every ticket
+ * of the walk shares one object instead of each getting its own.
+ *
+ * What a name may be is fixed by the form, not by how much of the form this
+ * lowerer emits yet: a body local is a different object per instance, a name
+ * nothing declared is nothing to adopt, and a name an `@stage` reads is
+ * loop-carried — the opposite contract. None of those becomes writable by
+ * lowering the walk, so they are answered here rather than behind the refusal
+ * below, which is about this emit and not about the program. */
+static bool pl_pw_cache_ok(PStep* st, CcParallelFor pf, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CcExprList* cv = &pf.cache;
+    size_t n = cv->len();
+    size_t i;
+    bool ok = true;
+    for (i = 0; i < n; i++) {
+        CcExpr* ce = *cv->get_ptr(i);
+        CCSlice nm = cc_slice_empty();
+        bool is_bind;
+        bool is_bind2;
+        bool is_worker;
+        bool dup = false;
+        size_t j;
+        if (!expr_ident(strip_parens_expr(ce), &nm)) continue;
+        if (!nm.len) continue;
+        is_bind = pf.loop.bind.len != 0 && slice_eq(nm, pf.loop.bind);
+        is_bind2 = pf.loop.bind2.len != 0 && slice_eq(nm, pf.loop.bind2);
+        is_worker = pf.worker.len != 0 && slice_eq(nm, pf.worker);
+        if (is_bind || is_bind2 || is_worker) {
+            CCString m = @string(`cache (name) cannot adopt the loop variable or worker binder '${nm}'`, L->arena);
+            lw_error(L, sp, m);
+            ok = false;
+            continue;
+        }
+        if (pl_cache_body_local(pf.loop.body, nm)) {
+            CCString m = @string(`cache (name) '${nm}' is a body local — adopt an enclosing declaration`, L->arena);
+            lw_error(L, sp, m);
+            ok = false;
+            continue;
+        }
+        if (!sc_lookup(st->w, nm)) {
+            CCString m = @string(`cache (name) '${nm}' is not a name in the enclosing scope`, L->arena);
+            lw_error(L, sp, m);
+            ok = false;
+            continue;
+        }
+        for (j = 0; j < i; j++) {
+            CcExpr* pe = *cv->get_ptr(j);
+            CCSlice pn = cc_slice_empty();
+            if (!expr_ident(strip_parens_expr(pe), &pn)) continue;
+            if (pn.len && slice_eq(pn, nm)) dup = true;
+        }
+        if (dup) {
+            CCString m = @string(`cache (name) adopts '${nm}' once`, L->arena);
+            lw_error(L, sp, m);
+            ok = false;
+            continue;
+        }
+        if (pl_cache_in_stage(pf.loop.body, nm)) {
+            CCString m = @string(`cache (name) '${nm}' cannot appear in an ${"@"}stage block — stage is loop-carried, cache is unobservable instance identity`, L->arena);
+            lw_error(L, sp, m);
+            ok = false;
+            continue;
+        }
+    }
+    return ok;
+}
+
 /* `@parallel [seq (c)] [wait (ts)] for (i in lo..hi) [worker (w)] [cache (…)]`.
  *
  * None of it is lowered yet, but the shape is checked here rather than left
@@ -3129,6 +3288,10 @@ static void pl_for(PStep* st, CcStmt* s, CcParallelFor pf) {
     if (pf.pred) {
         m = @string(`a gated '${"@"}parallel wait (...) for' spells its gate 'seq (...)': the predicate form is not lowered by the clean lowerer yet`, L->arena);
         lw_error(L, sp, m);
+        s->k = gone->k;
+        return;
+    }
+    if (pf.cache.len() && !pl_pw_cache_ok(st, pf, sp)) {
         s->k = gone->k;
         return;
     }

@@ -855,6 +855,14 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
     CcCall call;
     bool recv_ptr;
     st->n_sites++;
+    {
+        /* recorded before the rewrite: after it, nothing in the node says
+         * which member the site spelled */
+        CcExprList* sv = &L->ufcs_sites;
+        CcNameList* mv = &L->ufcs_meths;
+        sv->push(e);
+        mv->push(uf.method);
+    }
     if (!rt && uf_ambient(w, L, e, uf, sp)) return;
     if (!rt) {
         CCSlice kind = uf.recv ? CcExpr_kind_name(uf.recv) : cc_slice_empty();

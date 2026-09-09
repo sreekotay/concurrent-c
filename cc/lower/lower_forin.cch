@@ -371,6 +371,7 @@ static CcStmt* fi_raise(FStep* st, CcForIn fi, const char* what, CcSpan sp) {
         CcStmt* fwd = cc__stmt_blank(sp, L->arena);
         CcErrFwd ef;
         ef.err = lw_paren(L, err, sp);
+        ef.delegate = false;
         fwd->k = { .err_fwd = ef };
         lw_push(blk, fwd);
         return blk;

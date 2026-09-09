@@ -38,7 +38,19 @@ typedef struct AStep {
     CcNameList async_fns;       /* every function the index names, filed under the */
     CcNameList block_fns;       /* scheduling word its declaration carried: read once, */
     CcNameList noblock_fns;     /* before a lowered prototype gives that word up */
+    CcDeclList from_async;      /* the declarations an `@async` one was lowered into: by the time
+                                 * the awaits are walked, nothing on them still says `@async` */
+    bool in_async;              /* the walk is inside one of those */
 } AStep;
+
+/* Did this function come out of an `@async` declaration? */
+static bool as_from_async(AStep* st, CcDecl* d) {
+    CcDeclList* v = &st->from_async;
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) if (*v->get_ptr(i) == d) return true;
+    return false;
+}
 
 static bool as_func_of(CcDecl* d, CcFuncDecl* out) {
     @switch (d->k) {
@@ -1164,8 +1176,20 @@ static bool as_await_visit(CcExpr* e, void* env) {
     if (as_reassoc(L, e, aw.a)) return true;
     kind = as_await_type(st, aw.a, &ty, &rname);
     if (kind == AS_AWAIT_UNKNOWN) {
-        CCString m = @string(`cannot tell what this ${"@"}await unwraps: name the ${"@"}async function it waits on, so the wait reads the task's value at the width the function returns`, L->arena);
-        lw_error(L, e->span, m);
+        if (!st->in_async) {
+            /* Outside an `@async` body the only wait there is names a
+             * function whose task the index can type -- everything else is
+             * the keyword written where it does not belong, and the rule it
+             * broke is the one to say. Inside one, the site is legal and it
+             * is the operand that cannot be read. */
+            CCString m = @string(`'await' is only valid inside ${"@"}async functions`, L->arena);
+            lw_error(L, e->span, m);
+            return true;
+        }
+        {
+            CCString m = @string(`cannot tell what this ${"@"}await unwraps: name the ${"@"}async function it waits on, so the wait reads the task's value at the width the function returns`, L->arena);
+            lw_error(L, e->span, m);
+        }
         return true;
     }
     if (kind == AS_AWAIT_BOXED_VOID) {
@@ -1185,6 +1209,17 @@ static bool as_await_visit(CcExpr* e, void* env) {
     return true;
 }
 
+/* A function declaration opens (or closes) the `@async` scope the awaits
+ * below it are read in. Only a function: a `.var` inside a body is a
+ * declaration too, and it does not change where the body stands. */
+static bool as_scope_visit(CcDecl* d, void* env) {
+    AStep* st = (AStep*)env;
+    CcFuncDecl f;
+    if (!as_func_of(d, &f)) return true;
+    st->in_async = as_from_async(st, d);
+    return true;
+}
+
 static void CcLowerer_async(CcLowerer* L) {
     CcDeclList* decls = &L->unit->decls;
     CcDeclList with = vec_new::[CcDeclRef](L->arena);
@@ -1198,16 +1233,27 @@ static void CcLowerer_async(CcLowerer* L) {
     st.async_fns = vec_new::[CCSlice](L->arena);
     st.block_fns = vec_new::[CCSlice](L->arena);
     st.noblock_fns = vec_new::[CCSlice](L->arena);
+    st.from_async = vec_new::[CcDeclRef](L->arena);
     as_scan_specs(&st);   /* first: a lowered prototype no longer says `@async` */
     for (i = 0; i < n; i++) {
         CcDecl* d = *decls->get_ptr(i);
+        size_t before;
+        size_t k;
+        size_t after;
         if (!(d->specs & CC_SPEC_ASYNC)) { with.push(d); continue; }
         any = true;
+        before = with.len();
         if (!as_lower_one(&st, d, &with)) with.push(d);
+        after = with.len();
+        for (k = before; k < after; k++) {
+            CcDecl* made = *with.get_ptr(k);
+            st.from_async.push(made);
+        }
     }
     if (any) *decls = with;
     memset(&v, 0, sizeof(v));
     v.expr = as_await_visit;
+    v.decl = as_scope_visit;
     v.env = &st;
     CcUnit_walk(L->unit, v);
     memset(&v, 0, sizeof(v));

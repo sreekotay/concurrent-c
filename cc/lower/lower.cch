@@ -48,6 +48,16 @@ typedef struct CcLowerer {
                                  * destination pass picks a per-destination variant of one */
     Vec::[CcExprRef] res_dests; /* unwrap targets whose own type is the Result: they take it
                                  * whole. Typed under the walk, before the step rewrites */
+    /* Every call a `x.m(...)` became, and at the same index the `m` the site
+     * wrote. The callee UFCS resolves to can be an overload name
+     * (`cc_nursery_spawn_closure0`) that the program never mentions, so a
+     * message about the call quotes the member instead. */
+    CcExprList ufcs_sites;
+    CcNameList ufcs_meths;
+    CcDeclList dest_bodies;     /* the thunks the dest forms' bodies became. A dest body is a
+                                 * fiber: the frame that wrote it went on, so the handler that
+                                 * frame carries is not reachable from it, and a `!>` inside one
+                                 * has to resolve within the body */
     bool factories_ready;       /* the compiled factories have been bound to their handlers */
     bool factories_ok;          /* and the binding worked */
 } CcLowerer;

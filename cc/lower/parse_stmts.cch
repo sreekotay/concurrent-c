@@ -530,7 +530,7 @@ static CcStmt* parse_parallel(P* p) {
             adv(p);
             if (at_p(p, CC_P_RPAREN)) {
                 const char* at_parallel = "@" "parallel";
-                CCString m = @string(`${at_parallel} (pred) needs a predicate expression between the parentheses`, p->arena);
+                CCString m = @string(`expected predicate in ${at_parallel} (...)`, p->arena);
                 err_here(p, m);
             }
             else pred = parse_expr(p);
@@ -577,11 +577,29 @@ static CcStmt* parse_parallel(P* p) {
             return s;
         }
         if (!for_in_ahead(p, p->i)) {
+            /* `(` [&] name and then something that is not `in`: the head IS
+             * a for-in that never said `in`, and naming the missing word at
+             * the token that should have been it says more than describing
+             * the whole form. Then the head is skipped whole: handing it to
+             * the for-in parser reports every token of a C head in turn, and
+             * the first of those repeats what was just said. */
+            uint32_t nm = p->i;
+            uint32_t depth = 1;
             const char* at_parallel = "@" "parallel";
-            CCString m = @string(`${at_parallel} for needs a for-in header: for (i in lo..hi)`, p->arena);
-            err_here(p, m);
-        }
-        parse_for_in_header(p, &pf.loop, open);
+            if (tok_is_p(&p->t[nm], CC_P_AMP)) nm++;
+            if (p->t[nm].kind == CC_TK_IDENT) {
+                CCString m = @string(`expected 'in' after ${at_parallel} for (name`, p->arena);
+                err_at(p, nm + 1, m);
+            } else {
+                CCString m = @string(`${at_parallel} for needs a for-in header: for (i in lo..hi)`, p->arena);
+                err_here(p, m);
+            }
+            while (depth && p->t[p->i].kind != CC_TK_EOF) {
+                if (at_p(p, CC_P_LPAREN)) depth++;
+                else if (at_p(p, CC_P_RPAREN)) depth--;
+                adv(p);
+            }
+        } else parse_for_in_header(p, &pf.loop, open);
         /* trailing clauses after the header */
         for (;;) {
             if (parse_worker_clause(p, &pf.worker)) continue;
@@ -830,10 +848,11 @@ static CcStmt* parse_defer(P* p) {
     return s;
 }
 
-static CcStmt* mk_err_fwd(P* p, CcExpr* e, uint32_t first) {
+static CcStmt* mk_err_fwd(P* p, CcExpr* e, uint32_t first, bool delegate) {
     CcErrFwd ef;
     CcStmt* s;
     ef.err = e;
+    ef.delegate = delegate;
     s = cc__stmt_blank(span_from(p, first), p->arena);
     s->k = { .err_fwd = ef };
     return s;
@@ -1043,7 +1062,7 @@ static CcStmt* parse_at_stmt(P* p) {
             const char* lit_w = "@errhandler(e)";
             end_stmt(p, lit_w, first);
         }
-        return mk_err_fwd(p, e, first);
+        return mk_err_fwd(p, e, first, true);
     }
     if (at_word(p, "errhandler")) return parse_errhandler(p);
     if (at_word(p, "err")) {
@@ -1055,7 +1074,7 @@ static CcStmt* parse_at_stmt(P* p) {
             const char* lit_w = "@err(e)";
             end_stmt(p, lit_w, first);
         }
-        return mk_err_fwd(p, e, first);
+        return mk_err_fwd(p, e, first, false);
     }
     if (at_word(p, "parallel")) return parse_parallel(p);
     if (at_word(p, "serial")) {
@@ -1228,7 +1247,17 @@ static CcStmt* parse_at_stmt(P* p) {
     if (at_word(p, "restricted")) {
         return stmt_retired(p, first, "'@restricted' was removed; use '@typeview'");
     }
-    if (at_word(p, "spawn_async") || at_word(p, "cache")) {
+    if (at_word(p, "cache")) {
+        /* `cache` is a word of the language -- it is a clause of the
+         * wait-for head, `cache (name)`, not a declaration specifier. Saying
+         * it does not exist sends the user looking for another word. */
+        CCString m = cc_string_new();
+        m.push_cstr("write cache (name) on the wait-for, not @cache on a declaration", p->arena);
+        err_here(p, m);
+        sync(p, first);
+        return mk_empty_stmt(p, span_from(p, first));
+    }
+    if (at_word(p, "spawn_async")) {
         CCSlice word = t->text;
         CCString m = @string(`'${word}' is not part of the language`, p->arena);
         err_here(p, m);
