@@ -167,6 +167,15 @@ void cc_emit_plan_register_generic_factory_extend(const char* name, const char* 
                                                  size_t site_pos);
 const void* cc_emit_plan_lookup_generic_factory(const char* name);
 const char* cc_emit_plan_lookup_generic_factory_handler(const char* name);
+/* The registrations themselves, for a caller that hands the bindings to a
+ * separate process rather than compiling them here: `*name` is the family,
+ * `*handler` the @comptime function that writes one of its instances, and
+ * `*is_extend` whether that handler appends to the family rather than
+ * defining it.  A family's base comes before its extensions.  Returns 0 for
+ * an index past the end. */
+size_t cc_emit_plan_generic_factory_registration_count(void);
+int cc_emit_plan_generic_factory_registration_at(size_t i, const char** name,
+                                                 const char** handler, int* is_extend);
 /* True when `name` has any COMPILED registration (base or extension); the
  * use-site gate uses this so extend-only names still reach the base-required
  * diagnostic. */

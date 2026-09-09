@@ -82,7 +82,24 @@ static bool gn_type_visit(CcType* t, void* env) {
         case .slice: is_generic = true; break;
         default: break;
     }
-    if (!is_generic) return true;
+    /* `Note_int` written out, where the unit never spells `Note::[int]`:
+     * the index reads the family and its arguments back off the name, so
+     * the instance is the one the spelled type names and it is emitted the
+     * same way. A name the index cannot read that way has no family, and
+     * this is the plain type it looks like.
+     *
+     * An expansion is read for what it declares, not for what it asks for:
+     * its text names the very instance being expanded, and reading that as
+     * a request is the recursion the depth guard reports. */
+    if (!is_generic) {
+        CCSlice nm = cc_slice_empty();
+        if (st->L->fragment) return true;
+        if (type_named_name(t, &nm) && nm.len) {
+            CcTypeInfo* info = ix->type_get(nm);
+            if (info) gn_note(st, info, 0);
+        }
+        return true;
+    }
     {
         CCSlice name = ix->canon(t);      /* instantiates on first use */
         CcTypeInfo* info = ix->type_get(name);
@@ -204,6 +221,89 @@ static void gn_collect_requests(GStep* st) {
             CCSlice mangled = ix->canon(&tmp);
             CcTypeInfo* info = ix->type_get(mangled);
             gn_note(st, info, 0);
+        }
+    }
+}
+
+/* The end of the line that starts at `i`. */
+static size_t gn_line_end(CCSlice text, size_t i) {
+    while (i < text.len && text.ptr[i] != '\n') i++;
+    return i;
+}
+
+/* The next space-separated word of the line that ends at `line_end`, taken
+ * from `*at`; empty once the line is spent. */
+static CCSlice gn_line_word(CCSlice text, size_t line_end, size_t* at) {
+    size_t k = *at;
+    size_t w0;
+    while (k < line_end && (text.ptr[k] == ' ' || text.ptr[k] == '\t' || text.ptr[k] == '\r')) k++;
+    w0 = k;
+    while (k < line_end && text.ptr[k] != ' ' && text.ptr[k] != '\t' && text.ptr[k] != '\r') k++;
+    *at = k;
+    if (k == w0) return cc_slice_empty();
+    return cc_slice_from_buffer((char*)text.ptr + w0, k - w0);
+}
+
+/* Does a handed-over registration bind this family? Its factory is a
+ * `@comptime` function of the unit, not a declaration this step can read a
+ * template out of, so what one of its instances is, is what running that
+ * function writes. */
+static bool gn_registration_binds(CcLowerer* L, CCSlice fam) {
+    CCSlice text = L->opts.factories;
+    size_t i = 0;
+    while (i < text.len) {
+        size_t line_end = gn_line_end(text, i);
+        size_t k = i;
+        CCSlice name = gn_line_word(text, line_end, &k);
+        if (name.len && slice_eq(name, fam)) return true;
+        i = line_end < text.len ? line_end + 1 : text.len;
+    }
+    return false;
+}
+
+/* Bind each family a `cc_generic_register` named to the handler that writes
+ * its instances.
+ *
+ * The `CC_GENERIC_FACTORY` sugar writes that call itself, and this step
+ * rewrites the sugar to get it back. A registration written by hand is in a
+ * `@comptime { }` block, and the blocks are blanked before this tool reads
+ * the source, so the driver collects those while they are still there and
+ * hands them over as `--factories`.
+ *
+ * A line that names no handler binds nothing, and the instance it was to
+ * write would come out an empty guard, so it is reported at the use site
+ * that asked for the run. */
+static void gn_bind_registrations(CcLowerer* L, CcSpan sp) {
+    CCSlice text = L->opts.factories;
+    size_t i = 0;
+    while (i < text.len) {
+        size_t line_end = gn_line_end(text, i);
+        size_t k = i;
+        CCSlice fam = gn_line_word(text, line_end, &k);
+        CCSlice handler = gn_line_word(text, line_end, &k);
+        CCSlice mode = gn_line_word(text, line_end, &k);
+        i = line_end < text.len ? line_end + 1 : text.len;
+        if (!fam.len) continue;
+        if (!handler.len) {
+            CCString m = @string(`the registration of generic family '${fam}' names no handler, so nothing writes its instances`, L->arena);
+            lw_error(L, sp, m);
+            continue;
+        }
+        if (mode.len && !slice_eq(mode, cstr_slice("extend"))) {
+            CCString m = @string(`the registration of generic family '${fam}' carries '${mode}', and the only word that follows a handler is 'extend'`, L->arena);
+            lw_error(L, sp, m);
+            continue;
+        }
+        {
+            CCString fs = @string(`${fam}`, L->arena);
+            CCString hs = @string(`${handler}`, L->arena);
+            const char* fz = fs.cstr(L->arena);
+            const char* hz = hs.cstr(L->arena);
+            if (mode.len) {
+                cc_emit_plan_register_generic_factory_extend(fz, hz, 0);
+            } else {
+                cc_emit_plan_register_generic_factory(fz, hz, 0);
+            }
         }
     }
 }
@@ -450,7 +550,11 @@ static CCSlice gn_decl_text(CcUnit* fu, CcDecl* d) {
  * number only the rewrite knows.
  *
  * The scan takes this unit's source too: it clears what was registered
- * before, and the unit's own `@comptime` functions have to survive it. */
+ * before, and the unit's own `@comptime` functions have to survive it.
+ *
+ * A family bound by a hand-written `cc_generic_register` has no declaration
+ * to rewrite: the driver hands the binding over instead, and it is applied
+ * after the clear, which would otherwise take it with the rest. */
 static bool gn_factories_ready(CcLowerer* L, CcSpan sp) {
     CcIndex* ix = L->ix;
     CcDeclList* factv = &ix->factories;
@@ -460,10 +564,11 @@ static bool gn_factories_ready(CcLowerer* L, CcSpan sp) {
     CCString text = cc_string_new();
     CCSlice usrc = L->unit->tape.src;
     char* expanded;
+    char* prepared = NULL;
     if (L->factories_ready) return L->factories_ok;
     L->factories_ready = true;
     L->factories_ok = false;
-    if (!nf) return false;
+    if (!nf && !L->opts.factories.len) return false;
     for (f = 0; f < nf; f++) {
         CcDecl* d = *factv->get_ptr(f);
         CcUnit* fu = *funitv->get_ptr(f);
@@ -472,18 +577,36 @@ static bool gn_factories_ready(CcLowerer* L, CcSpan sp) {
         cc_string_push_slice(&text, t, L->arena);
         cc_string_push_cstr(&text, "\n", L->arena);
     }
-    if (!cc_string_len(&text)) return false;
     {
         CCSlice raw = text.as_slice();
         size_t elen = raw.len;
         expanded = malloc(elen + 1);
         if (!expanded) return false;
-        memcpy(expanded, raw.ptr, elen);
+        if (elen) memcpy(expanded, raw.ptr, elen);
         expanded[elen] = '\0';
-        if (cc_comptime_prepare_source_ex(&expanded, &elen, gn_unit_path(L, sp), CC_FAC_PREPARE) != 0) {
+        if (elen && cc_comptime_prepare_source_ex(&expanded, &elen, gn_unit_path(L, sp), CC_FAC_PREPARE) != 0) {
             free(expanded);
             return false;
         }
+    }
+    /* A handler the sugar wrote is in the text just prepared. One a
+     * `cc_generic_register` names by hand is in the unit, where an `@emit`
+     * template is still a template -- the stage this tool reads leaves the
+     * templates for its own steps -- and a template is not what the engine
+     * compiles. So the unit's copy goes through the same passes before the
+     * definitions are scanned out of it. */
+    if (L->opts.factories.len) {
+        size_t ulen = usrc.len;
+        prepared = malloc(ulen + 1);
+        if (!prepared) { free(expanded); return false; }
+        if (ulen) memcpy(prepared, usrc.ptr, ulen);
+        prepared[ulen] = '\0';
+        if (cc_comptime_prepare_source_ex(&prepared, &ulen, gn_unit_path(L, sp), CC_FAC_PREPARE) != 0) {
+            free(prepared);
+            free(expanded);
+            return false;
+        }
+        usrc = cc_slice_from_buffer(prepared, ulen);
     }
     {
         CCString all = cc_string_new();
@@ -492,15 +615,21 @@ static bool gn_factories_ready(CcLowerer* L, CcSpan sp) {
         cc_string_push_cstr(&all, expanded, L->arena);
         {
             CCSlice a = all.as_slice();
-            if (cc_comptime_fn_registry_scan(a.ptr, a.len) < 0) return false;
+            if (cc_comptime_fn_registry_scan(a.ptr, a.len) < 0) {
+                free(prepared);
+                free(expanded);
+                return false;
+            }
             cc_emit_plan_clear_generic_factory_registrations();
             /* the registrations only: the unit's own `@comptime` blocks are
              * the comptime step's, and collecting their emits here would
              * queue a second copy of every fragment it already spliced */
             cc_emit_plan_collect_comptime_emits(expanded, strlen(expanded));
             cc_emit_plan_clear_comptime_fragments();
+            gn_bind_registrations(L, sp);
         }
     }
+    free(prepared);
     free(expanded);
     L->factories_ok = true;
     return true;
@@ -568,6 +697,7 @@ static CCString gn_instance_text(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool
     CcTypeList* targv = &info->targs;
     size_t nt = targv->len();
     size_t i;
+    size_t taken = 0;           /* factory declarations this instance's text came from */
     CCString up = gn_upper(L, info->family);
     CCString guard = @string(`CC_HEADER_${up}_${info->name}`, L->arena);
     bool needs_run = false;
@@ -602,7 +732,13 @@ static CCString gn_instance_text(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool
             cc_string_push_slice(&text, frag, L->arena);
             if (frag.len && frag.ptr[frag.len - 1] != '\n') cc_string_push_char(&text, '\n', L->arena);
         }
+        taken++;
     }
+    /* A family bound by a hand-written `cc_generic_register` declares no
+     * factory here, so there was no template to take: what the instance is,
+     * is what its handler writes, and the guard alone would declare nothing
+     * while looking like an instance that needed nothing. */
+    if (!taken && gn_registration_binds(L, info->family)) needs_run = true;
     if (needs_run) {
         /* a fragment that computes is not a template this step can fill:
          * what the instance is, is whatever the factory writes. It writes

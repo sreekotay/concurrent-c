@@ -108,6 +108,12 @@ extern void cc_emit_plan_clear_generic_factory_registrations(void);
 extern void cc_emit_plan_register_generic_factory(const char* name,
                                                   const char* handler_name,
                                                   size_t site_pos);
+/* The same, for a handler that appends to a family rather than defining it
+ * (`CC_GENERIC_FACTORY_EXTEND`). It runs after the base, in the order the
+ * registrations arrive. */
+extern void cc_emit_plan_register_generic_factory_extend(const char* name,
+                                                         const char* handler_name,
+                                                         size_t site_pos);
 /* The sugar's registration is a `cc_generic_register("Name", handler)`
  * call inside a `@comptime { }` block, and it is COLLECTED rather than run
  * — the collector reads the two names out of the call. Running the

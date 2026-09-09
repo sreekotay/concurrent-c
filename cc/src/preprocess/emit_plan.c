@@ -658,6 +658,43 @@ const char* cc_emit_plan_lookup_generic_factory_handler(const char* name) {
     return r ? r->handler_name : NULL;
 }
 
+size_t cc_emit_plan_generic_factory_registration_count(void) {
+    size_t n = 0;
+    for (size_t i = 0; i < cc__generic_count; i++) {
+        if (cc__generics[i].kind != CC_GENERIC_COMPILED) continue;
+        if (cc__generics[i].handler_name) n++;
+        n += cc__generics[i].ext_count;
+    }
+    return n;
+}
+
+int cc_emit_plan_generic_factory_registration_at(size_t i, const char** name,
+                                                 const char** handler, int* is_extend) {
+    for (size_t g = 0; g < cc__generic_count; g++) {
+        CCGenericReg* r = &cc__generics[g];
+        if (r->kind != CC_GENERIC_COMPILED) continue;
+        if (r->handler_name) {
+            if (i == 0) {
+                if (name) *name = r->name;
+                if (handler) *handler = r->handler_name;
+                if (is_extend) *is_extend = 0;
+                return 1;
+            }
+            i--;
+        }
+        for (size_t e = 0; e < r->ext_count; e++) {
+            if (i == 0) {
+                if (name) *name = r->name;
+                if (handler) *handler = r->ext_handlers[e];
+                if (is_extend) *is_extend = 1;
+                return 1;
+            }
+            i--;
+        }
+    }
+    return 0;
+}
+
 /* The slice ABI mirror lives in factory_abi.h (shared with the loader,
  * which verifies it against the comptime side's sizeof(CCSlice) probe
  * before any factory runs).  It must stay layout-identical to CCSlice

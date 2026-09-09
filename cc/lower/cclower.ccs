@@ -136,6 +136,12 @@ static const char* g_schema_variants = NULL;
  * its mangled name alone — and blanking took it out of the source before
  * this tool read it. One line each: the family, then its type spellings. */
 static const char* g_instantiate = NULL;
+/* --factories FILE: the families a `@comptime { cc_generic_register(...) }`
+ * bound to a handler. The call is in a block, and blanking took the blocks
+ * out of the source before this tool read it, so the binding a factory run
+ * needs arrives here instead. One line each: the family, its handler, then
+ * `extend` for a handler that appends to a family rather than defining it. */
+static const char* g_factories = NULL;
 static const char* g_h_root;
 
 /* mkdir -p for the directory part of `path`. */
@@ -515,6 +521,12 @@ static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena 
         if (!iv_ok) { fprintf(stderr, "cclower: cannot read %s: %s\n", g_instantiate, strerror(errno)); exit(2); }
         lo.instantiate = iv;
     }
+    if (g_factories) {
+        bool fv_ok = false;
+        CCSlice fv = read_whole_file(g_factories, a, &fv_ok);
+        if (!fv_ok) { fprintf(stderr, "cclower: cannot read %s: %s\n", g_factories, strerror(errno)); exit(2); }
+        lo.factories = fv;
+    }
     {
         const char* strict = getenv("CC_STRICT_RESULT_UNWRAP");
         lo.strict_unhandled = !(strict && strcmp(strict, "0") == 0);
@@ -728,6 +740,7 @@ int main(int argc, char** argv) {
         if (strcmp(argv[i], "--quote-dir") == 0 && i + 1 < argc) { g_quote_dir = argv[i + 1]; i++; continue; }
         if (strcmp(argv[i], "--schema-variants") == 0 && i + 1 < argc) { g_schema_variants = argv[i + 1]; i++; continue; }
         if (strcmp(argv[i], "--instantiate") == 0 && i + 1 < argc) { g_instantiate = argv[i + 1]; i++; continue; }
+        if (strcmp(argv[i], "--factories") == 0 && i + 1 < argc) { g_factories = argv[i + 1]; i++; continue; }
         if (strcmp(argv[i], "--identity") == 0) mode = M_IDENTITY;
         else if (strcmp(argv[i], "--print") == 0) mode = M_PRINT;
         else if (strcmp(argv[i], "--lower") == 0) { mode = M_PRINT; lower = true; }
@@ -746,6 +759,7 @@ int main(int argc, char** argv) {
             strcmp(argv[i], "--root") == 0 || strcmp(argv[i], "--h-root") == 0 ||
             strcmp(argv[i], "--schema-variants") == 0 ||
             strcmp(argv[i], "--instantiate") == 0 ||
+            strcmp(argv[i], "--factories") == 0 ||
             strcmp(argv[i], "--quote-dir") == 0) { i++; continue; }
         if (argv[i][0] == '-' && argv[i][1]) continue;
         n_files++;

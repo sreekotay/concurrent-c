@@ -4232,6 +4232,42 @@ static int cc__write_comptime_instantiations(char* out_path, size_t cap) {
     return 0;
 }
 
+/* The families a `@comptime { cc_generic_register(...) }` bound to a handler,
+ * for the lowerer.
+ *
+ * A binding written by hand lives in a block, and the blocks are blanked
+ * before the lowerer reads the source, so by the time it needs to run a
+ * factory the call that named the handler is gone. The `CC_GENERIC_FACTORY`
+ * sugar is not: the lowerer rewrites the declaration itself and gets the
+ * registration back with the handler symbol that rewrite mints, so those
+ * are left out here rather than handed over under a symbol only this
+ * process's rewrite knows. One line per binding: the family, the handler,
+ * and `extend` for one that appends to a family rather than defining it. */
+static int cc__write_generic_factory_registrations(char* out_path, size_t cap) {
+    size_t n = cc_emit_plan_generic_factory_registration_count();
+    char dir[PATH_MAX];
+    FILE* f = NULL;
+    size_t i;
+    out_path[0] = '\0';
+    for (i = 0; i < n; i++) {
+        const char* name = NULL;
+        const char* handler = NULL;
+        int is_extend = 0;
+        if (!cc_emit_plan_generic_factory_registration_at(i, &name, &handler, &is_extend)) continue;
+        if (!name || !handler || strncmp(handler, "__cc_gfac_", 10) == 0) continue;
+        if (!f) {
+            snprintf(dir, sizeof(dir), "%s/clean_factories", g_cache_root);
+            if (cc__mkdir_p(dir) != 0) return -1;
+            snprintf(out_path, cap, "%s/%d.txt", dir, (int)getpid());
+            f = fopen(out_path, "wb");
+            if (!f) { out_path[0] = '\0'; return -1; }
+        }
+        fprintf(f, "%s %s%s\n", name, handler, is_extend ? " extend" : "");
+    }
+    if (f) fclose(f);
+    return 0;
+}
+
 /* What the `@comptime { }` blocks emitted, into the C the lowerer wrote.
  * The fragments were collected before lowering; they are host C already,
  * so they splice at their anchors and nothing re-reads them. */
@@ -4263,7 +4299,8 @@ static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
     char tool[PATH_MAX], known[PATH_MAX], incdir[PATH_MAX], hroot[PATH_MAX];
     char schema[PATH_MAX];
     char insts[PATH_MAX];
-    char* argv[26];
+    char facs[PATH_MAX];
+    char* argv[28];
     int argc = 0, rc;
     if (cc__find_clean_tool("cclower_cc", tool, sizeof(tool)) != 0) {
         fprintf(stderr, "cc: clean lowerer not built (out/cc/bin/cclower_cc missing): run `make -C cc lower-cc`\n");
@@ -4294,6 +4331,11 @@ static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
     if (insts[0]) {
         argv[argc++] = (char*)"--instantiate";
         argv[argc++] = insts;
+    }
+    if (cc__write_generic_factory_registrations(facs, sizeof(facs)) != 0) return -1;
+    if (facs[0]) {
+        argv[argc++] = (char*)"--factories";
+        argv[argc++] = facs;
     }
     if (quote_dir && quote_dir[0]) {
         argv[argc++] = (char*)"--quote-dir";
