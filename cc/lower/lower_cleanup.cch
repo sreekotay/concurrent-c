@@ -301,6 +301,42 @@ static bool cl_clear_detach(CcDecl* d, void* env) {
     return true;
 }
 
+/* `T* p = arena.allocT(n) @destroy;` — the allocation names the arena it
+ * came from, and releasing through that arena is what the marker means. A
+ * pointer has no destroy hook of its own, so a site that wrote one would
+ * otherwise have nothing to run. */
+static CcStmt* cl_arena_release(CcLowerer* L, CcVarDecl v, CcSpan sp) {
+    CcExpr* init = (v.init && !v.init->is_list) ? v.init->expr : NULL;
+    CcCall c;
+    bool is_call = false;
+    CCSlice callee = cc_slice_empty();
+    CcExprList* av;
+    CcExpr* arena;
+    CcExpr* call;
+    CcExpr* cast;
+    if (!init) return NULL;
+    @switch (init->k) {
+        case .call(x): c = x; is_call = true; break;
+        default: break;
+    }
+    if (!is_call || !c.callee) return NULL;
+    if (!expr_ident(strip_parens_expr(c.callee), &callee)) return NULL;
+    if (!slice_eq(callee, cstr_slice("cc_arena_alloc_T")) &&
+        !slice_eq(callee, cstr_slice("cc_arena_alloc_T_count"))) return NULL;
+    av = &c.args;
+    if (av->len() < 2) return NULL;
+    arena = *av->get_ptr(1);
+    call = lw_call2(L, cstr_slice("cc_arena_release"), arena, lw_ident(L, v.name, sp), sp);
+    cast = cc__expr_blank(sp, L->arena);
+    {
+        CcCast ct;
+        ct.type = lw_named_type(L, cstr_slice("void"), sp);
+        ct.a = call;
+        { CcExprK ek = { .cast = ct }; cast->k = ek; }
+    }
+    return lw_expr_stmt(L, cast, sp);
+}
+
 /* `T x = e @destroy [{ D }];` -> the declaration, then the site's flag. */
 static void cl_register_destroy(CFn* fn, CcStmt* s, CcDecl* d, CcVarDecl v, CcStmtList* out) {
     CcLowerer* L = fn->L;
@@ -327,6 +363,10 @@ static void cl_register_destroy(CFn* fn, CcStmt* s, CcDecl* d, CcVarDecl v, CcSt
         n = cl_destroy_chain(L, canon, subject, chain, s->span, 0);
         pre = cl_pre_destroy(L, canon, subject, s->span);
         if (!n) chain = NULL;
+    }
+    if (!chain && !pre && !v.destroy_body && is_pointer) {
+        CcStmt* rel = cl_arena_release(L, v, s->span);
+        if (rel) { chain = lw_block(L, s->span); lw_push(chain, rel); }
     }
     if (!chain && !pre && !v.destroy_body) {
         CCSlice full = L->ix->canon(v.type);

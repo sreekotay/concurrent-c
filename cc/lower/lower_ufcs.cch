@@ -19,6 +19,8 @@ static int cl_destroy_chain(CcLowerer* L, CCSlice canon, CcExpr* subject, CcStmt
 typedef struct UStep {
     CcLowerer* L;
     int n_sites;
+    CcExprList formal_at;       /* a `.method` site a declaration types */
+    CcTypeList formal_ty;       /* what that declaration declared, by the same index */
 } UStep;
 
 /* Is the receiver itself a pointer? Its own shape decides, so aliases are
@@ -597,6 +599,207 @@ static bool uf_targs_lead(Walker* w, CcLowerer* L, CcUfcs uf, CcMethod* m,
     return true;
 }
 
+/* ---- members that carry a type formal ----------------------------------
+ *
+ * `arena.allocT(n)` and `task.block_on()` name a type the call site does
+ * not spell in an argument: the lowered callee takes it as a leading macro
+ * argument. `::[T]` after the member binds it; otherwise the declared
+ * destination does — for `allocT` the destination is a pointer and the
+ * element is its pointee, for `block_on` it is the destination itself.
+ *
+ * The set is closed. A member outside it that wears `::[...]` has no formal
+ * to bind, and the ordinary resolution says so. */
+
+/* The receiver's name without a trailing `*`: the same type answers whether
+ * it was written as a value or a pointer. */
+static CCSlice uf_base_name(CCSlice tn) {
+    size_t n = tn.len;
+    while (n && (tn.ptr[n - 1] == '*' || tn.ptr[n - 1] == ' ')) n--;
+    return cc_slice_from_buffer((char*)tn.ptr, n);
+}
+
+static bool uf_is_formal_member(CCSlice tn, CCSlice method, bool* is_alloc) {
+    CCSlice base = uf_base_name(tn);
+    if (slice_eq(method, cstr_slice("allocT")) && slice_eq(base, cstr_slice("CCArena"))) {
+        *is_alloc = true;
+        return true;
+    }
+    if (slice_eq(method, cstr_slice("block_on")) &&
+        (slice_eq(base, cstr_slice("CCAsyncVoidRet")) ||
+         (base.len >= 6 && memcmp(base.ptr, "CCTask", 6) == 0))) {
+        *is_alloc = false;
+        return true;
+    }
+    return false;
+}
+
+/* Through the unwrap tails to the UFCS call a destination is filled from. */
+static CcExpr* uf_ufcs_under(CcExpr* e) {
+    CcExpr* inner = NULL;
+    if (!e) return NULL;
+    @switch (e->k) {
+        case .ufcs: return e;
+        case .paren(u): inner = u.a; break;
+        case .unwrap(u): inner = u.a; break;
+        case .unwrap_body(u): inner = u.a; break;
+        case .unwrap_or(u): inner = u.a; break;
+        case .unwrap_destroy(u): inner = u.a; break;
+        default: return NULL;
+    }
+    return uf_ufcs_under(inner);
+}
+
+/* The pointee of a pointer destination, aliases followed: `double* xs` says
+ * the element is `double`. NULL when the destination is not a pointer. */
+static CcType* uf_pointee(Walker* w, CcType* t) {
+    CcType* u = unalias_local(w, t);
+    if (!u) u = t;
+    if (!u) return NULL;
+    @switch (u->k) {
+        case .pointer(pt): return pt.pointee;
+        default: break;
+    }
+    return NULL;
+}
+
+/* The declared type of an assignment's target, so `p = a.allocT(8)` types
+ * its formal the same way `char* p = a.allocT(8)` does. */
+static void uf_formal_assign(Walker* w, UStep* st, CcStmt* s) {
+    CcExpr* e = NULL;
+    CcBinary a;
+    bool is_assign = false;
+    CcExpr* u;
+    @switch (s->k) {
+        case .expr(es): e = es.e; break;
+        default: return;
+    }
+    if (!e) return;
+    @switch (e->k) {
+        case .assign(x): a = x; is_assign = true; break;
+        default: break;
+    }
+    if (!is_assign || a.op != CC_OP_ASSIGN || !a.a || !a.b) return;
+    u = uf_ufcs_under(a.b);
+    if (!u) return;
+    {
+        CcType* t = type_of_expr(w, a.a);
+        if (!t) return;
+        st->formal_at.push(u);
+        st->formal_ty.push(t);
+    }
+}
+
+static void uf_formal_stmt(Walker* w, CcStmt* s, bool enter) {
+    UStep* st = (UStep*)w->env;
+    CcDecl* d = NULL;
+    CcVarDecl v;
+    bool is_var = false;
+    CcExpr* u;
+    if (!enter) return;
+    if (!stmt_is_decl(s, &d) || !d) { uf_formal_assign(w, st, s); return; }
+    @switch (d->k) {
+        case .var(x): v = x; is_var = true; break;
+        default: break;
+    }
+    if (!is_var || !v.type || !v.init || v.init->is_list || !v.init->expr) return;
+    u = uf_ufcs_under(v.init->expr);
+    if (!u) return;
+    st->formal_at.push(u);
+    st->formal_ty.push(v.type);
+}
+
+/* Declarations, before the rewrite: a type formal reads the destination as
+ * written, and the rewrite replaces the node it is recorded against. */
+static void uf_formal_pass(CcLowerer* L, UStep* st) {
+    Walker w;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_stmt = uf_formal_stmt;
+    w.env = st;
+    tw_unit(&w);
+}
+
+static CcType* uf_formal_dest(UStep* st, CcExpr* e) {
+    CcExprList* av = &st->formal_at;
+    CcTypeList* tv = &st->formal_ty;
+    size_t n = av->len();
+    size_t i;
+    for (i = 0; i < n; i++) if (*av->get_ptr(i) == e) return *tv->get_ptr(i);
+    return NULL;
+}
+
+/* True when the site was a type-formal member and is now the call it lowers
+ * to — or when it was one and could not be lowered, which is reported here
+ * rather than left to the ordinary resolution, whose candidates are the
+ * unspecialized name and say nothing about the missing type. */
+static bool uf_formal_rewrite(Walker* w, UStep* st, CcExpr* e, CcUfcs uf,
+                              CcType* rt, CCSlice tn, CcSpan sp) {
+    CcLowerer* L = st->L;
+    bool is_alloc = false;
+    CcType* ty = NULL;
+    CcTypeList* tv = &uf.targs;
+    CcExprList* av = &uf.args;
+    size_t nt = tv->len();
+    size_t na = av->len();
+    CcCall call;
+    CCSlice callee;
+    bool recv_ptr;
+    if (!uf_is_formal_member(tn, uf.method, &is_alloc)) return false;
+    if (nt > 1) {
+        CCSlice mn = uf.method;
+        CCString msg = @string(`type: '.${mn}' binds one type formal, and this site spells ${nt}`, L->arena);
+        lw_error(L, sp, msg);
+        return true;
+    }
+    if (nt == 1) ty = *tv->get_ptr(0);
+    else {
+        CcType* dest = uf_formal_dest(st, e);
+        ty = (dest && is_alloc) ? uf_pointee(w, dest) : dest;
+    }
+    if (!ty) {
+        CCString msg = is_alloc
+            ? @string(`type: 'arena.allocT' needs its element type: declare a typed pointer destination (T* p = arena.allocT(n)) or spell it (arena.allocT::[T](n))`, L->arena)
+            : @string(`type: 'task.block_on' needs its result type: declare a typed destination (T v = task.block_on()) or spell it (task.block_on::[T]())`, L->arena);
+        lw_error(L, sp, msg);
+        return true;
+    }
+    if (is_alloc && na > 1) {
+        CCString msg = @string(`type: 'arena.allocT' takes one count at most, and this site passes ${na}`, L->arena);
+        lw_error(L, sp, msg);
+        return true;
+    }
+    if (!is_alloc && na) {
+        CCString msg = @string(`type: 'task.block_on' takes no arguments, and this site passes ${na}`, L->arena);
+        lw_error(L, sp, msg);
+        return true;
+    }
+    recv_ptr = uf.arrow || uf_type_is_pointer(w, rt);
+    callee = is_alloc ? (na ? cstr_slice("cc_arena_alloc_T_count") : cstr_slice("cc_arena_alloc_T"))
+                      : cstr_slice("cc_block_on");
+    call.callee = lw_ident(L, callee, sp);
+    call.args = vec_new::[CcExprRef](L->arena);
+    {
+        CCString spelled = CcType_spell(ty, cc_slice_empty(), &L->unit->tape, L->arena);
+        call.args.push(lw_text(L, spelled, sp));
+    }
+    if (is_alloc) {
+        /* `cc_arena_alloc` takes a `CCArena` by value and peels a handle
+         * itself, so the arena goes as written */
+        CcExpr* r = uf_wrap(L, uf.recv, sp);
+        call.args.push(r);
+        if (na) { CcExpr* cnt = *av->get_ptr(0); call.args.push(cnt); }
+    } else {
+        /* `cc_block_on` waits on the handle itself, so a pointer receiver is
+         * read through */
+        CcExpr* r = uf_wrap(L, uf.recv, sp);
+        call.args.push(recv_ptr ? cc_expr_unary(CC_OP_DEREF, r, sp, L->arena) : r);
+    }
+    e->k = { .call = call };
+    return true;
+}
+
 static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice tn, CCSlice reason) {
     UStep* st = (UStep*)w->env;
     CcLowerer* L = st->L;
@@ -618,6 +821,7 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
         lw_error(L, sp, msg);
         return;
     }
+    if (uf_formal_rewrite(w, st, e, uf, rt, tn, sp)) return;
     if (!m) m = uf_hook_site(w, L, tn, uf, sp);
     if (!m) {
         CCString msg = @string(`type: ${reason}`, L->arena);
@@ -1288,7 +1492,10 @@ static void CcLowerer_ufcs(CcLowerer* L) {
     w.arena = L->arena;
     w.ix = L->ix;
     w.unit = L->unit;
+    st.formal_at = vec_new::[CcExprRef](L->arena);
+    st.formal_ty = vec_new::[CcTypeRef](L->arena);
     uf_widen_pass(L, &st);      /* before the rewrite: the arguments are as written */
+    uf_formal_pass(L, &st);
     w.on_ufcs = uf_rewrite;
     w.on_field = uf_member;
     w.env = &st;
