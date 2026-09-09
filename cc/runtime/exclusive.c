@@ -314,8 +314,7 @@ static void cc__exclusive_map_insert(CCExclusiveMap* m, CCExclusiveEntry* e) {
 }
 
 /* create_mu held.  Retires the old map for release at destroy.  Rehash drops
- * tombstones (only live entries are copied).  `new_cap` may equal old->cap
- * (compact) or be larger (grow). */
+ * tombstones (only live entries are copied). */
 static int cc__exclusive_rehash(CCExclusiveHost* excl, size_t new_cap) {
     CCExclusiveMap* old = cc__exclusive_map_load(excl);
     CCExclusiveMap* neu = cc__exclusive_map_alloc(excl->arena, new_cap);
@@ -338,12 +337,6 @@ static int cc__exclusive_rehash(CCExclusiveHost* excl, size_t new_cap) {
 static int cc__exclusive_grow(CCExclusiveHost* excl) {
     CCExclusiveMap* old = cc__exclusive_map_load(excl);
     return cc__exclusive_rehash(excl, old->cap * 2);
-}
-
-/* create_mu held. Drop tombstones at the same capacity. */
-static int cc__exclusive_compact(CCExclusiveHost* excl) {
-    CCExclusiveMap* old = cc__exclusive_map_load(excl);
-    return cc__exclusive_rehash(excl, old->cap);
 }
 
 static CCExclusiveEntry* cc__exclusive_lookup(CCExclusiveHost* excl, uint64_t name) {
@@ -422,16 +415,14 @@ static CCExclusiveEntry* cc__exclusive_get_or_create(CCExclusiveHost* excl, uint
 
     for (;;) {
         CCExclusiveMap* m = cc__exclusive_map_load(excl);
-        /* Keep load comfortable; grow or compact before open-addressing
-         * degrades. Live+tombs drives the threshold so gate churn (create
-         * then free) cannot fill the table with tombstones forever. */
-        if ((excl->count + excl->tombs) * 4 >= m->cap * 3) {
-            int rc;
-            if (excl->count * 4 >= m->cap * 3)
-                rc = cc__exclusive_grow(excl);
-            else
-                rc = cc__exclusive_compact(excl);
-            if (rc != 0) {
+        /* Grow on live load only. Do not compact on tomb load: each compact
+         * allocates a fresh table and retires the old one until destroy, so
+         * gate churn (create+free per turnstile ticket) leaked O(tickets)
+         * map copies. Install already reuses tombstone slots; lookup skips
+         * tombs. A table of tombs with few live entries stays correct at
+         * O(cap) probe cost. */
+        if (excl->count * 4 >= m->cap * 3) {
+            if (cc__exclusive_grow(excl) != 0) {
                 pthread_mutex_unlock(&excl->create_mu);
                 return NULL;
             }
