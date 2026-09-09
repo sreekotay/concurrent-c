@@ -47,7 +47,8 @@ static CcHookReg* fi_hooks_of(CcLowerer* L, CcType* t, CCSlice* canon_out) {
 
 /* The element type a walk yields: the access callee's return type without
  * its pointer, or the instance's first type argument. */
-static CcType* fi_elem_type(CcLowerer* L, CCSlice canon, CcHookReg* hooks, CcSpan sp) {
+static CcType* fi_elem_type(CcLowerer* L, Walker* w, CcType* rt, CCSlice canon,
+                            CcHookReg* hooks, CcSpan sp) {
     CcIndex* ix = L->ix;
     CcTypeInfo* info = ix->type_get(canon);
     if (hooks && hooks->access_name.len && cc_slice_eq_cstr(&hooks->access_kind, "call")) {
@@ -70,6 +71,15 @@ static CcType* fi_elem_type(CcLowerer* L, CCSlice canon, CcHookReg* hooks, CcSpa
     if (info) {
         CcTypeList* tv = &info->targs;
         if (tv->len()) return *tv->get_ptr(0);
+    }
+    /* `.access = cc_type_access_load("p")`: the field it names is a `T*`,
+     * so what the walk yields is what that points at. A type registered by
+     * hand carries no type argument, so nothing else on the registration
+     * says what its elements are. Tried after the type arguments, because
+     * a slice header's own `.ptr` is a `void*` and says nothing. */
+    if (hooks && hooks->access_name.len && !cc_slice_eq_cstr(&hooks->access_kind, "call")) {
+        CcType* el = elem_of_indexable(field_type(w, rt, hooks->access_name));
+        if (el && !CcType_is_void(el)) return el;
     }
     /* The bare slice IS the char family: `CCSlice` is what `char[:]`
      * spells, and the typed instances (`CCSlice_int`, …) are the ones that
@@ -171,7 +181,7 @@ static bool fi_walk(FStep* st, CcStmt* s, CcForIn fi, CcExpr* it) {
         lw_error(L, sp, m);
         return false;
     }
-    elem = fi_elem_type(L, canon, hooks, sp);
+    elem = fi_elem_type(L, w, rt, canon, hooks, sp);
     if (!elem) {
         CCString m = @string(`cannot tell what walking a '${canon}' yields: its '.access' names no element type`, L->arena);
         lw_error(L, sp, m);
@@ -179,9 +189,15 @@ static bool fi_walk(FStep* st, CcStmt* s, CcForIn fi, CcExpr* it) {
     }
     id = st->next_id++;
     {
+        /* `@for (i, v in xs)` walks one sequence and names its position:
+         * the first binder IS the loop's index, so nothing is generated for
+         * it and the second binder takes the element. */
+        bool two = fi.bind2.len != 0;
+        CCSlice val = two ? fi.bind2 : fi.bind;
+        bool val_ref = two ? fi.by_ref2 : fi.by_ref;
         CCSlice n = fi_tmp(L, "fn", id);
         CCSlice p = fi_tmp(L, "fp", id);
-        CCSlice i = fi_tmp(L, "fi", id);
+        CCSlice i = two ? fi.bind : fi_tmp(L, "fi", id);
         CcStmt* blk = lw_block(L, sp);
         CcType* szt = fi_size_t(L, sp);
         CcType* elemp = cc_type_pointer(elem, sp, L->arena);
@@ -195,12 +211,12 @@ static bool fi_walk(FStep* st, CcStmt* s, CcForIn fi, CcExpr* it) {
         ix2.a = lw_ident(L, p, sp);
         ix2.i = lw_ident(L, i, sp);
         at->k = { .index = ix2 };
-        if (fi.by_ref) {
+        if (val_ref) {
             /* `&x`: the binder names the element in place */
-            lw_push(body, lw_decl_stmt(L, elemp, fi.bind,
+            lw_push(body, lw_decl_stmt(L, elemp, val,
                                        cc_expr_unary(CC_OP_ADDR, at, sp, L->arena), sp));
         } else {
-            lw_push(body, lw_decl_stmt(L, elem, fi.bind, at, sp));
+            lw_push(body, lw_decl_stmt(L, elem, val, at, sp));
         }
         if (fi.body) lw_push(body, fi.body);
         memset(&loop, 0, sizeof(loop));
@@ -232,8 +248,16 @@ static void fi_stmt(FStep* st, CcStmt* s, CcForIn fi) {
     CcExprList* itv = &fi.iterables;
     CcRange rg;
     CcExpr* it;
-    if (fi.bind2.len || itv->len() != 1) {
+    if (itv->len() != 1) {
         CCString m = @string(`a walk over two sequences is not lowered by the clean lowerer yet`, L->arena);
+        lw_error(L, s->span, m);
+        return;
+    }
+    if (fi.bind2.len && fi.by_ref) {
+        /* the position is a count this loop keeps, not a place in the
+         * sequence: there is nothing for `&` to name */
+        CCSlice b = fi.bind;
+        CCString m = @string(`'${b}' is the walk's position, not a slot: write '${"@"}for (${b}, &v in xs)'`, L->arena);
         lw_error(L, s->span, m);
         return;
     }
