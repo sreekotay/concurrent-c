@@ -96,6 +96,37 @@ static bool hc_is_chan(CcType* t, CcChanType* out) {
     }
 }
 
+/* The same endpoint through the name it was given.
+ *
+ * `typedef int[~4 >] WorkerTx; WorkerTx tx;` declares the endpoint an
+ * `int[~4 >]` declares -- the capacity, the element and the direction are
+ * the typedef's, and the pair that creates the channel needs them. So a
+ * named type is followed to what it aliases. The hop count is bounded
+ * because a typedef chain that does not end is not this step's to diagnose. */
+static bool hc_type_name(CcType* t, CCSlice* out) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .named(n): *out = n.name; return n.name.len != 0;
+        default: return false;
+    }
+}
+
+static bool hc_is_chan_named(CcIndex* ix, CcType* t, CcChanType* out) {
+    int hops = 0;
+    while (t && hops < 8) {
+        CCSlice nm;
+        CcSym* sym;
+        if (hc_is_chan(t, out)) return true;
+        if (!hc_type_name(t, &nm)) return false;
+        sym = ix->sym(nm) ?> NULL;
+        while (sym && sym->kind != CC_SYM_TYPE) sym = sym->same_name;
+        if (!sym || !sym->type || sym->type == t) return false;
+        t = sym->type;
+        hops++;
+    }
+    return false;
+}
+
 /* A channel endpoint type anywhere but a local declaration.
  *
  * `int[~4 >]` is the same handle whether it names a local, a struct field,
@@ -189,7 +220,7 @@ static void hc_decl(HStep* st, CcDecl* d, CcVarDecl v) {
     HEnd* e;
     CCSlice mode;
     CCSlice topo;
-    if (!hc_is_chan(v.type, &ch)) return;
+    if (!hc_is_chan_named(L->ix, v.type, &ch)) return;
     if (!hc_mode_of(L, ch, d->span, &mode)) return;
     if (!hc_topo_of(L, ch, d->span, &topo)) return;
     e = cc_arena_alloc(L->arena, sizeof(HEnd), _Alignof(HEnd));
