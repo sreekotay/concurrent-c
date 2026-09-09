@@ -514,6 +514,14 @@ static CcStmt* parse_parallel(P* p) {
                 const char* lit_w = "@parallel (pred)";
                 expect_close(p, CC_P_RPAREN, lit_w, open);
             }
+            if (at_kw(p, KW_FOR) || at_word(p, "for")) {
+                /* `(pred)` gates the arms form. A walk spells its gate
+                 * `seq (...)`, so a `for` here is a block that never
+                 * opened -- and a predicate a walk would silently drop. */
+                const char* at_parallel = "@" "parallel";
+                CCString m = @string(`expected '{' after ${at_parallel} (...)`, p->arena);
+                err_here(p, m);
+            }
             continue;
         }
         if (at_kw(p, KW_SEQ) && tok_is_p(tk(p, 1), CC_P_LPAREN)) { adv(p); seq = parse_paren_expr(p, "seq (cond)"); continue; }

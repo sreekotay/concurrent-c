@@ -6,6 +6,7 @@
 #include <stdio.h>
 
 static void produce(int[~ >] tx) {
+    @errhandler(CCError e) cc_error_exit(e);
     tx.send(7) !>;
     tx.close();
 }

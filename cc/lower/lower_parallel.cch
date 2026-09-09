@@ -166,12 +166,18 @@ static void pl_rewrite(CcLowerer* L, CcExpr* e, CcStmt* s, CCSlice name, CCSlice
     if (s) CcStmt_walk(s, v);
 }
 
-/* A name the arm's own block declares: the rewrite would name the wrong
- * thing, so the step says so instead. */
-typedef struct PShadow { PCapList* caps; CCSlice hit; } PShadow;
+/* What a site asks of an arm, and the name that answered. Which of these
+ * captures does the arm declare again, which one does it write a copy of,
+ * does it wait on the handle the site is filling: the questions differ in
+ * what they hand in, never in what an answer looks like. */
+typedef struct PAsk {
+    PCapList* caps;             /* the captures asked about, or NULL */
+    CCSlice want;               /* the one name asked about, or empty */
+    CCSlice hit;                /* the name that answered */
+} PAsk;
 
 static bool pl_shadow_stmt(CcStmt* s, void* env) {
-    PShadow* sh = (PShadow*)env;
+    PAsk* sh = (PAsk*)env;
     CcDecl* d = NULL;
     if (sh->hit.len) return true;
     if (!stmt_is_decl(s, &d) || !d) return true;
@@ -214,7 +220,7 @@ static CcStmt* pl_serial_body(CcLowerer* L, CcStmt* s) {
 /* The environment one arm carries: a pointer per name it reads, and the
  * one it writes. */
 static CCString pl_env_text(PStep* st, uint32_t id, uint32_t k, PCapList* caps, CCSlice out_type,
-                            bool snapshot) {
+                            bool snapshot, CCSlice join_ty) {
     CcLowerer* L = st->L;
     CCArena a = L->arena;
     CCString sb = cc_string_new();
@@ -235,6 +241,11 @@ static CCString pl_env_text(PStep* st, uint32_t id, uint32_t k, PCapList* caps, 
         sb.push_cstr("    ", a);
         sb.push_slice(out_type, a);
         sb.push_cstr("* __cc_out;\n", a);
+    }
+    if (join_ty.len) {
+        sb.push_cstr("    ", a);
+        sb.push_slice(join_ty, a);
+        sb.push_cstr("* __cc_pj_ex;\n", a);
     }
     sb.push_cstr("    CCParallel* __cc_par_h;\n", a);
     sb.push_cstr("} ", a);
@@ -271,29 +282,140 @@ static CcExpr* pl_out_slot(CcLowerer* L, CcSpan sp) {
     return cc_expr_unary(CC_OP_DEREF, lw_paren(L, read, sp), sp, L->arena);
 }
 
-/* A bare `return;` in an arm body leaves the arm, and the thunk it becomes
- * returns `void*` — so what it returns is the same NULL every other exit
- * from the thunk returns. Left bare it is a return with no value from a
- * function that has one. */
-static bool pl_bare_return(CcStmt* s, void* env) {
-    CcLowerer* L = (CcLowerer*)env;
+/* An exit a body converts, and where it goes instead.
+ *
+ * `leave`: the label a converted exit jumps to instead of returning outright,
+ * for a body that has something to run on the way out -- a walked ticket gives
+ * its place back. Empty when returning is the whole of leaving.
+ * `cancel`: a body whose exit ends the whole walk, not just this half --
+ * a ticket that returns leaves the tickets behind it nothing to finish, and
+ * the pool is what carries that. A split walk has no pool and sets it false.
+ * `cell`: what the exit is recorded in, spelled as the body reaches it --
+ * empty when the body has nothing to record and leaving is all of it. */
+typedef struct PForExit {
+    CcLowerer* L;
+    uint32_t id;
+    bool has_ret;
+    bool cancel;
+    CCSlice leave;
+    CCSlice cell;
+} PForExit;
+
+/* The names the block's own exit goes by. */
+static CCSlice pl_pj_name(CcLowerer* L, uint32_t id, const char* suffix) {
+    CCString s = @string(`__cc_pj_${id}${suffix}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+/* A `return` inside a closure the arm holds leaves that closure, not the
+ * arm: the walk stops at one rather than claiming its exit. */
+static bool pl_arm_closure_stop(CcExpr* e, void* env) {
+    bool is_closure = false;
+    (void)env;
+    @switch (e->k) {
+        case .closure: is_closure = true; break;
+        default: break;
+    }
+    return !is_closure;
+}
+
+static bool pl_ret_any_stmt(CcStmt* s, void* env) {
+    CcStmt** at = (CcStmt**)env;
     @switch (s->k) {
-        case .return_(r): {
-            CcReturn nr;
-            if (r.value) break;
-            nr.value = lw_text(L, @string(`NULL`, L->arena), s->span);
-            s->k = { .return_ = nr };
-            break;
-        }
+        case .return_: if (!*at) *at = s; break;
         default: break;
     }
     return true;
 }
 
+/* A dest body is a fiber: it has no frame to hand a value to. */
+static bool pl_dest_ret_stmt(CcStmt* s, void* env) {
+    CcStmt** at = (CcStmt**)env;
+    @switch (s->k) {
+        case .return_(r): if (r.value && !*at) *at = s; break;
+        default: break;
+    }
+    return true;
+}
+
+/* The first `return` an arm makes, or the first that hands a value back. */
+static CcStmt* pl_arm_first_return(CcExpr* e, CcStmt* s, bool valued) {
+    CcVisitor v;
+    CcStmt* at = NULL;
+    memset(&v, 0, sizeof(v));
+    if (valued) v.stmt = pl_dest_ret_stmt;
+    else v.stmt = pl_ret_any_stmt;
+    v.expr = pl_arm_closure_stop;
+    v.env = &at;
+    if (e) CcExpr_walk(e, v);
+    if (s) CcStmt_walk(s, v);
+    return at;
+}
+
+/* `return` inside an arm.
+ *
+ * The block joins before it ends, so a `return` written in an arm is not a
+ * return from the function it stands in: the first arm to arrive claims a
+ * cell every arm can reach, and the site reads that cell once the joins are
+ * done. On the caller the arm jumps to the join; in a thunk it ends the
+ * thunk, whose one value is the NULL every other exit from it returns.
+ * A cell-less arm is one whose exit carries nothing -- a fiber of a handle
+ * -- and leaving is the whole of it. */
+static bool pl_arm_exit_stmt(CcStmt* s, void* env) {
+    PForExit* fx = (PForExit*)env;
+    CcLowerer* L = fx->L;
+    CcSpan sp = s->span;
+    CcStmt* blk;
+    CcReturn r;
+    bool is_ret = false;
+    @switch (s->k) {
+        case .return_(x): r = x; is_ret = true; break;
+        default: break;
+    }
+    if (!is_ret) return true;
+    blk = lw_block(L, sp);
+    if (fx->cell.len) {
+        CCSlice cell = fx->cell;
+        CCSlice setter = cc_slice_empty();
+        if (fx->has_ret && r.value) {
+            CCString spelled = lw_spell_expr(L, r.value);
+            CCSlice val = lw_keep(L, &spelled);
+            CCString sv = @string(`${cell}->rv = (${val});`, L->arena);
+            setter = lw_keep(L, &sv);
+        }
+        {
+            CCString t = @string(`{ int __cc_z = 0; while (!cc_atomic_cas(&${cell}->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&${cell}->xk) != 2) { ${setter} cc_atomic_store(&${cell}->xk, 2); } cc_atomic_store(&${cell}->lock, 0); }`, L->arena);
+            lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
+        }
+    }
+    if (fx->leave.len) lw_push(blk, lw_goto(L, fx->leave, sp));
+    else lw_push(blk, cc_stmt_return(lw_text(L, @string(`NULL`, L->arena), sp), sp, L->arena));
+    s->k = blk->k;
+    return false;
+}
+
+static void pl_arm_exits(CcLowerer* L, CcExpr* e, CcStmt* s, CCSlice cell,
+                         CCSlice leave, bool has_rv) {
+    CcVisitor v;
+    PForExit fx;
+    memset(&fx, 0, sizeof(fx));
+    fx.L = L;
+    fx.cell = cell;
+    fx.leave = leave;
+    fx.has_ret = has_rv;
+    memset(&v, 0, sizeof(v));
+    v.stmt = pl_arm_exit_stmt;
+    v.expr = pl_arm_closure_stop;
+    v.env = &fx;
+    if (e) CcExpr_walk(e, v);
+    if (s) CcStmt_walk(s, v);
+}
+
 /* The thunk: the environment, the names it reads, then the arm. */
 static CcDecl* pl_thunk_decl(PStep* st, uint32_t id, uint32_t k, PCapList* caps,
                              CcExpr* expr, CcStmt* arm_body, CCSlice out_type,
-                             CCSlice target, bool snapshot, CcSpan sp) {
+                             CCSlice target, bool snapshot, CCSlice pj_cell,
+                             bool pj_rv, CcSpan sp) {
     CcLowerer* L = st->L;
     CCSlice env = pl_name(L, id, k, "_env_t");
     CcStmt* body = lw_block(L, sp);
@@ -334,14 +456,10 @@ static CcDecl* pl_thunk_decl(PStep* st, uint32_t id, uint32_t k, PCapList* caps,
     lw_push(body, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_honor"),
                                            cc_expr_member(lw_ident(L, cstr_slice("__e"), sp),
                                                           cstr_slice("__cc_par_h"), true, sp, L->arena), sp), sp));
+    /* after the captures were rewritten: a returned value is spelled as the
+     * thunk reads it, not as the caller wrote it */
+    pl_arm_exits(L, expr, arm_body, pj_cell, cc_slice_empty(), pj_rv);
     if (arm_body) {
-        {
-            CcVisitor rv;
-            memset(&rv, 0, sizeof(rv));
-            rv.stmt = pl_bare_return;
-            rv.env = L;
-            CcStmt_walk(arm_body, rv);
-        }
         /* a block arm writes its one outer name as an ordinary local, so
          * the name is bound from the out pointer before the body and
          * stored back after it: a copy the caller never reads would make
@@ -408,7 +526,8 @@ static void pl_zero(CcLowerer* L, CcStmt* blk, CCSlice name, CcSpan sp) {
  * here starts anything, so it stands on both schedules -- a gated site
  * fills the environment once and then decides whether to spawn. */
 static void pl_env_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
-                         PCapList* caps, CCSlice target, CCSlice bind, CcSpan sp) {
+                         PCapList* caps, CCSlice target, CCSlice bind,
+                         CCSlice join_cell, CcSpan sp) {
     CCSlice env = pl_name(L, id, k, "_env_t");
     CCSlice e = pl_name(L, id, k, "_e");
     CCSlice task = pl_name(L, id, k, "_t");
@@ -445,6 +564,10 @@ static void pl_env_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
         CcExpr* slot = cc_expr_member(lw_ident(L, e, sp), cstr_slice("__cc_out"), bind.len != 0, sp, L->arena);
         CcExpr* addr = cc_expr_unary(CC_OP_ADDR, lw_ident(L, target, sp), sp, L->arena);
         lw_push(blk, lw_expr_stmt(L, lw_assign(L, slot, addr, sp), sp));
+    }
+    if (join_cell.len) {
+        CcExpr* slot = cc_expr_member(lw_ident(L, e, sp), cstr_slice("__cc_pj_ex"), bind.len != 0, sp, L->arena);
+        lw_push(blk, lw_expr_stmt(L, lw_assign(L, slot, lw_ident(L, join_cell, sp), sp), sp));
     }
     {
         CcExpr* slot = cc_expr_member(lw_ident(L, e, sp), cstr_slice("__cc_par_h"), bind.len != 0, sp, L->arena);
@@ -522,7 +645,7 @@ static void pl_fire_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
 
 static void pl_spawn_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
                            PCapList* caps, CCSlice target, CCSlice bind, CcSpan sp) {
-    pl_env_stmts(L, blk, id, k, caps, target, bind, sp);
+    pl_env_stmts(L, blk, id, k, caps, target, bind, cc_slice_empty(), sp);
     pl_fire_stmts(L, blk, id, k, bind, false, sp);
 }
 
@@ -662,14 +785,6 @@ static void* ${site};
  * its next step, and the site reads it once the walk is done. A `break`
  * that belongs to a loop the body itself opened is that loop's, and is left
  * alone -- which is why this walks with a depth rather than visiting. */
-/* `leave`: the label a converted exit jumps to instead of returning outright,
- * for a body that has something to run on the way out -- a walked ticket gives
- * its place back. Empty when returning is the whole of leaving. */
-/* `cancel`: a body whose exit ends the whole walk, not just this half --
- * a ticket that returns leaves the tickets behind it nothing to finish, and
- * the pool is what carries that. A split walk has no pool and sets it false. */
-typedef struct PForExit { CcLowerer* L; uint32_t id; bool has_ret; bool cancel; CCSlice leave; } PForExit;
-
 static void pl_for_leave(PForExit* fx, CcStmt* blk, CcSpan sp) {
     CcLowerer* L = fx->L;
     if (fx->leave.len) {
@@ -970,6 +1085,135 @@ static CcDecl* pl_for_thunk_decl(PStep* st, uint32_t id, CcSpan sp) {
     return d;
 }
 
+/* What the exit cell carries: the type the function the arms stand in
+ * returns. A `void` one leaves nothing to carry but the fact that an arm
+ * exited; a Result is built where the `return` was written, and the C
+ * return type is not the one the source names, so neither is answered
+ * with a cell field. */
+static CCSlice pl_ret_type(PStep* st) {
+    CcLowerer* L = st->L;
+    CCSlice nm = cc_slice_empty();
+    CCSlice v = cstr_slice("void");
+    bool is_result = false;
+    if (!st->fn_ret) return cc_slice_empty();
+    @switch (st->fn_ret->k) {
+        case .result: is_result = true; break;
+        default: break;
+    }
+    if (is_result) return cc_slice_empty();
+    if (type_named_name(st->fn_ret, &nm) && slice_eq(nm, v)) return cc_slice_empty();
+    return L->ix->canon(st->fn_ret);
+}
+
+/* A capture that is its own identity: an atomic and a `CCParallel` are the
+ * object, not a value with a copy. A bound arm outlives the block, so it
+ * reads what it captured as it was when the arm started -- except these,
+ * which the arm reaches on the caller or does not reach at all. */
+static bool pl_cap_identity(CcType* t) {
+    CCSlice nm = cc_slice_empty();
+    CCSlice par = cstr_slice("CCParallel");
+    CCSlice at = cstr_slice("cc_atomic");
+    if (!t) return false;
+    if (!type_named_name(t, &nm)) return false;
+    if (slice_eq(nm, par)) return true;
+    return nm.starts_with(at);
+}
+
+/* The copy a bound arm holds. An array and a pointer carry the caller's
+ * own object either way; everything else is a copy the caller never
+ * reads back. */
+static bool pl_cap_byvalue(PCap* c) {
+    bool aggregate = false;
+    if (!c || c->by_addr || !c->type) return false;
+    @switch (c->type->k) {
+        case .pointer: aggregate = true; break;
+        case .array: aggregate = true; break;
+        default: break;
+    }
+    return !aggregate;
+}
+
+/* Writing that copy, taking its address, or calling a method on it reads
+ * as work on the frame object and is not: the frame moved on before the
+ * arm ran. */
+static bool pl_byval_named(PAsk* q, CcExpr* e) {
+    CCSlice nm = cc_slice_empty();
+    CCSlice minted = cstr_slice("__cc_");
+    PCapList* cv;
+    size_t n;
+    size_t i;
+    if (!e || !expr_ident(strip_parens_expr(e), &nm) || !nm.len) return false;
+    /* this is a rule about what the page says: a name a lowering minted is
+     * not one the page wrote, and it is reached the way its lowering meant */
+    if (nm.starts_with(minted)) return false;
+    cv = q->caps;
+    n = cv->len();
+    for (i = 0; i < n; i++) {
+        PCap* c = *cv->get_ptr(i);
+        if (!pl_cap_byvalue(c)) continue;
+        if (!slice_eq(c->name, nm)) continue;
+        q->hit = c->name;
+        return true;
+    }
+    return false;
+}
+
+static bool pl_byval_expr(CcExpr* e, void* env) {
+    PAsk* q = (PAsk*)env;
+    CcExpr* touched = NULL;
+    if (q->hit.len) return true;
+    @switch (e->k) {
+        case .assign(b): touched = b.a; break;
+        case .unary(u): if (u.op == CC_OP_ADDR) touched = u.a; break;
+        case .ufcs(uf): touched = uf.recv; break;
+        default: break;
+    }
+    if (touched) (void)pl_byval_named(q, touched);
+    return true;
+}
+
+static bool pl_dest_body_ok(PStep* st, CcStmt* body, PCapList* caps, CcSpan sp) {
+    CcLowerer* L = st->L;
+    {
+        CcVisitor v;
+        CcStmt* at = NULL;
+        memset(&v, 0, sizeof(v));
+        v.stmt = pl_dest_ret_stmt;
+        v.env = &at;
+        CcStmt_walk(body, v);
+        if (at) {
+            CCString m = cc_string_new();
+            m.push_cstr("return with a value in a dest body; `return;` ends the fiber, `h.fail(e)` records an error", L->arena);
+            lw_error(L, at->span, m);
+            return false;
+        }
+    }
+    {
+        CcVisitor v;
+        PAsk q;
+        memset(&q, 0, sizeof(q));
+        q.caps = caps;
+        memset(&v, 0, sizeof(v));
+        v.expr = pl_byval_expr;
+        v.env = &q;
+        CcStmt_walk(body, v);
+        if (q.hit.len) {
+            CCSlice nm = q.hit;
+            CCString m = cc_string_new();
+            m.push_cstr("'", L->arena);
+            m.push_slice(nm, L->arena);
+            m.push_cstr("' is a dest-bound by-value capture (a copy); assign, address-take, or UFCS receiver is ill-formed. Shared: `T* p = &", L->arena);
+            m.push_slice(nm, L->arena);
+            m.push_cstr("` in the frame and pass `p`. Moved: stop naming `", L->arena);
+            m.push_slice(nm, L->arena);
+            m.push_cstr("` in the frame", L->arena);
+            lw_error(L, sp, m);
+            return false;
+        }
+    }
+    return true;
+}
+
 /* ---- one site ----------------------------------------------------------- */
 
 /* What the arms form can carry that this step does not lower. */
@@ -988,6 +1232,66 @@ static bool pl_base_name(CcExpr* e, CCSlice* out) {
         default: return false;
     }
     return pl_base_name(inner, out);
+}
+
+/* `!>.wait()!>`: the tail joins the block where it stands, so the handle
+ * the block made is consumed by the time the statement ends. A bare `!>`
+ * hands that handle back instead, and something has to be holding it. */
+static bool pl_tail_wait_expr(CcExpr* e, void* env) {
+    bool* hit = (bool*)env;
+    CCSlice nm = cc_slice_empty();
+    CCSlice want = cstr_slice("wait");
+    @switch (e->k) {
+        case .ufcs(u): nm = u.method; break;
+        case .member(m): nm = m.name; break;
+        default: break;
+    }
+    if (nm.len && slice_eq(nm, want)) *hit = true;
+    return true;
+}
+
+static bool pl_tail_waits(CcExpr* tail) {
+    CcVisitor v;
+    bool hit = false;
+    if (!tail) return false;
+    memset(&v, 0, sizeof(v));
+    v.expr = pl_tail_wait_expr;
+    v.env = &hit;
+    CcExpr_walk(tail, v);
+    return hit;
+}
+
+/* An arm that waits on the very handle the block is filling. The arms run
+ * before the block joins, so the wait is on a block that has not begun to
+ * join: it waits for itself. */
+static bool pl_self_wait_expr(CcExpr* e, void* env) {
+    PAsk* q = (PAsk*)env;
+    CCSlice nm = cc_slice_empty();
+    CCSlice want = cstr_slice("wait");
+    CCSlice base = cc_slice_empty();
+    CcExpr* recv = NULL;
+    @switch (e->k) {
+        case .ufcs(u): nm = u.method; recv = u.recv; break;
+        default: break;
+    }
+    if (!recv || !slice_eq(nm, want)) return true;
+    if (!pl_base_name(recv, &base)) return true;
+    if (slice_eq(base, q->want)) q->hit = base;
+    return true;
+}
+
+static bool pl_arm_self_waits(CcExpr* e, CcStmt* s, CCSlice name) {
+    CcVisitor v;
+    PAsk q;
+    if (!name.len) return false;
+    memset(&q, 0, sizeof(q));
+    q.want = name;
+    memset(&v, 0, sizeof(v));
+    v.expr = pl_self_wait_expr;
+    v.env = &q;
+    if (e) CcExpr_walk(e, v);
+    if (s) CcStmt_walk(s, v);
+    return q.hit.len != 0;
 }
 
 /* How a site names the handle it fills. `CCParallel h = @parallel …`
@@ -1072,6 +1376,12 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     CcExpr* gate;
     bool gated;
     CCSlice gname;
+    CCSlice pj_ty = cc_slice_empty();       /* the exit cell's type, when there is one */
+    CCSlice pj_var = cc_slice_empty();      /* the cell itself, on the caller */
+    CCSlice pj_ptr = cc_slice_empty();      /* what the caller's arm claims through */
+    CCSlice pj_leave = cc_slice_empty();    /* where a caller-arm exit jumps to */
+    CCSlice pj_rty = cc_slice_empty();
+    bool pj_any = false;
     if (pl_reject(L, p, sp)) return;
     if (!n) {
         /* an empty block would run and join nothing, which is what the
@@ -1084,9 +1394,102 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         CcParallelArm* arm = armv->get_ptr(i);
         if (!pl_arm_ok(L, arm, sp)) return;
     }
+    {
+        /* The block is `CCParallel !>(CCError)`, and the handle it makes
+         * has to reach someone. `!>.wait()!>` joins it here; a bind or an
+         * assignment keeps it live for a later join. A bare `!>` has
+         * neither, so the arms would run with nothing able to wait. */
+        bool waits = pl_tail_waits(p.tail);
+        bool held = p.bind.len != 0 || p.target != NULL;
+        if (!p.tail) {
+            CCString m = cc_string_new();
+            m.push_cstr("@parallel {…} is CCParallel !>(CCError); unconsumed Result", L->arena);
+            lw_error(L, sp, m);
+            return;
+        }
+        if (!waits && !held) {
+            CCString m = cc_string_new();
+            m.push_cstr("@parallel {…} !>; discards the handle; bind CCParallel h = … !>; or !>.wait()!>", L->arena);
+            lw_error(L, sp, m);
+            return;
+        }
+        if (held && !waits) {
+            CcParallelArm* a0 = armv->get_ptr(0);
+            CCSlice hb = cc_slice_empty();
+            if (n == 1 && !a0->serial && a0->target.len) {
+                /* the one arm is the kick, and an assignment kick runs on
+                 * the caller: by the time the statement ends the handle
+                 * names nothing that is still running. A bare expression
+                 * arm is the worker instead, and is spawned. */
+                CCString m = cc_string_new();
+                m.push_cstr("this dest is never live on the caller", L->arena);
+                lw_error(L, sp, m);
+                return;
+            }
+            if (p.bind.len) hb = p.bind;
+            else (void)pl_base_name(p.target, &hb);
+            for (i = 0; i < n; i++) {
+                CcParallelArm* arm = armv->get_ptr(i);
+                if (!pl_arm_self_waits(arm->expr, arm->serial, hb)) continue;
+                {
+                    CCString m = cc_string_new();
+                    m.push_cstr("cannot .wait() the same @parallel handle from an arm of it", L->arena);
+                    lw_error(L, sp, m);
+                }
+                return;
+            }
+        }
+    }
     id = st->next_id++;
     blk = lw_block(L, sp);
     hspell = pl_handle_spell(L, p, &hdeclared, &hbase);
+    for (i = 0; i < n; i++) {
+        CcParallelArm* arm = armv->get_ptr(i);
+        CcStmt* valued = pl_arm_first_return(arm->expr, arm->serial, true);
+        if (valued && hspell.len) {
+            /* the arms of a bound block are fibers of the handle: the
+             * caller went on, and there is no frame left waiting on this
+             * one to hand a value to */
+            CCString m = cc_string_new();
+            m.push_cstr("return with a value in a dest body; `return;` ends the fiber, `h.fail(e)` records an error", L->arena);
+            lw_error(L, valued->span, m);
+            return;
+        }
+        if (pl_arm_first_return(arm->expr, arm->serial, false)) pj_any = true;
+    }
+    if (pj_any) {
+        pj_leave = pl_pj_name(L, id, "_join");
+        if (!hspell.len) {
+            pj_rty = pl_ret_type(st);
+            pj_ty = pl_join_type(L, id);
+            pj_var = pl_pj_name(L, id, "");
+            pj_ptr = pl_pj_name(L, id, "_p");
+        }
+    }
+    if (pj_any && !pj_rty.len && !hspell.len) {
+        for (i = 0; i < n; i++) {
+            CcParallelArm* arm = armv->get_ptr(i);
+            CcStmt* valued = pl_arm_first_return(arm->expr, arm->serial, true);
+            if (!valued) continue;
+            {
+                CCString m = cc_string_new();
+                m.push_cstr("a '@parallel' arm hands back a value the join has nowhere to put: the exit cell is typed by what the function the arms stand in returns", L->arena);
+                lw_error(L, valued->span, m);
+            }
+            return;
+        }
+    }
+    if (pj_ty.len) {
+        /* the cell stands above every function that fills one, because an
+         * arm's environment names it */
+        CCSlice rv = pj_rty;
+        CCString t;
+        if (rv.len) t = @string(`typedef struct { cc_atomic_int lock; cc_atomic_int xk; ${rv} rv; } ${pj_ty};
+`, L->arena);
+        else t = @string(`typedef struct { cc_atomic_int lock; cc_atomic_int xk; } ${pj_ty};
+`, L->arena);
+        pl_host(st); st->fwd.push_slice(t.as_slice(), L->arena);
+    }
     if (hspell.len) {
         /* the handle is the caller's: the block fills it and leaves it live */
         lw_push(blk, lw_expr_stmt(L, lw_assign(L, lw_ident(L, hspell, sp),
@@ -1094,6 +1497,13 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     }
     lw_push(blk, lw_decl_stmt(L, cc_type_pointer(cc_type_named(cstr_slice("CCParTls"), sp, L->arena), sp, L->arena),
                               cstr_slice("__cc_pt"), lw_call0(L, cstr_slice("cc__par_tls"), sp), sp));
+    if (pj_ty.len) {
+        CcType* pt = cc_type_pointer(cc_type_named(pj_ty, sp, L->arena), sp, L->arena);
+        CcExpr* addr = cc_expr_unary(CC_OP_ADDR, lw_ident(L, pj_var, sp), sp, L->arena);
+        lw_push(blk, lw_decl_stmt(L, cc_type_named(pj_ty, sp, L->arena), pj_var, NULL, sp));
+        pl_zero(L, blk, pj_var, sp);
+        lw_push(blk, lw_decl_stmt(L, pt, pj_ptr, addr, sp));
+    }
     gate = p.pred ? p.pred : p.seq;
     gated = gate != NULL;
     gname = gated ? pl_gate_name(L, id) : cc_slice_empty();
@@ -1124,20 +1534,23 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             else CcExpr_walk(arm->expr, v);
         }
         caps = sc.caps;
-        if (hbase.len) {
+        {
             /* the handle the arms pause and resume through is the
-             * caller's: a copy of it is a handle nothing else can see */
+             * caller's: a copy of it is a handle nothing else can see.
+             * So is anything else that is its own identity -- an atomic an
+             * arm adds to is the caller's counter, or it counts nothing. */
             PCapList* cv = &caps;
             size_t nc = cv->len();
             size_t ci;
             for (ci = 0; ci < nc; ci++) {
                 PCap* c = *cv->get_ptr(ci);
-                if (slice_eq(c->name, hbase)) c->by_addr = true;
+                if (hbase.len && slice_eq(c->name, hbase)) c->by_addr = true;
+                else if (pl_cap_identity(c->type)) c->by_addr = true;
             }
         }
         if (arm->serial) {
             CcVisitor v;
-            PShadow sh;
+            PAsk sh;
             memset(&sh, 0, sizeof(sh));
             sh.caps = &caps;
             memset(&v, 0, sizeof(v));
@@ -1164,13 +1577,15 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         {
             /* the caller builds the environment, so its type is declared
              * with the forwards, above every function that fills one */
-            CCString et = pl_env_text(st, id, (uint32_t)i, &caps, out_type, hspell.len != 0);
+            CCString et = pl_env_text(st, id, (uint32_t)i, &caps, out_type, hspell.len != 0, pj_ty);
             pl_host(st); st->fwd.push_slice(et.as_slice(), L->arena);
         }
         pl_forward(st, id, (uint32_t)i);
         st->made.push(pl_thunk_decl(st, id, (uint32_t)i, &caps, arm->expr, pl_serial_body(L, arm->serial),
-                                    out_type, arm->target, hspell.len != 0, sp));
-        pl_env_stmts(L, blk, id, (uint32_t)i, &caps, arm->target, hspell, sp);
+                                    out_type, arm->target, hspell.len != 0,
+                                    pj_ty.len ? cstr_slice("__e->__cc_pj_ex") : cc_slice_empty(),
+                                    pj_rty.len != 0, sp));
+        pl_env_stmts(L, blk, id, (uint32_t)i, &caps, arm->target, hspell, pj_ptr, sp);
         if (!gated) pl_fire_stmts(L, blk, id, (uint32_t)i, hspell, p.spawn, sp);
     }
     if (gated) {
@@ -1190,6 +1605,10 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     /* the first arm stays here */
     {
         CcParallelArm* arm = armv->get_ptr(0);
+        /* it reads the caller's own names, so its exit is spelled as
+         * written -- and it leaves through the join, not out of the
+         * function, because the arms behind it are still running */
+        if (pj_any) pl_arm_exits(L, arm->expr, arm->serial, pj_ptr, pj_leave, pj_rty.len != 0);
         if (arm->serial) {
             lw_push(blk, pl_serial_body(L, arm->serial));
         } else {
@@ -1198,6 +1617,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             lw_push(blk, lw_expr_stmt(L, e0, sp));
         }
     }
+    if (pj_leave.len) lw_push(blk, lw_label(L, pj_leave, lw_block(L, sp), sp));
     if (gated) {
         CcStmt* joins = lw_block(L, sp);
         CcStmt* order = lw_block(L, sp);
@@ -1207,6 +1627,13 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         /* nothing was denied on this schedule, so no note: the arms simply
          * run after the first, in the order they were written */
         for (i = 1; i < n; i++) pl_inline_call(L, order, id, (uint32_t)i, sp);
+        if (pj_ty.len) {
+            /* an arm that left ended the block, and on this schedule the
+             * arms behind it were never started: they do not start now */
+            CCSlice cellv = pj_var;
+            CCString c = @string(`cc_atomic_load(&${cellv}.xk) != 2`, L->arena);
+            order = lw_if(L, lw_text(L, c, sp), order, NULL, sp);
+        }
         lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, gname, sp), sp), joins, order, sp));
     } else if (!hspell.len) {
         /* the block joins before it ends; a bound handle joins later */
@@ -1221,6 +1648,15 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         b->name = p.bind;
         b->type = p.bind_type ? p.bind_type : cc_type_named(cstr_slice("CCParallel"), sp, L->arena);
         st->binds.push(b);
+    }
+    if (pj_ty.len) {
+        /* every arm has finished, so whichever exit arrived first is the
+         * one the block leaves through */
+        CCSlice cellv = pj_var;
+        CCString t;
+        if (pj_rty.len) t = @string(`if (cc_atomic_load(&${cellv}.xk) == 2) return ${cellv}.rv`, L->arena);
+        else t = @string(`if (cc_atomic_load(&${cellv}.xk) == 2) return`, L->arena);
+        lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
     }
     s->k = blk->k;
     st->any = true;
@@ -1241,15 +1677,23 @@ static void pl_dest(PStep* st, CcStmt* s, CcParallelDest pd) {
     Walker* w = st->w;
     CcSpan sp = s->span;
     CCSlice bind;
+    CCSlice hbase = cc_slice_empty();
     uint32_t id;
     CcStmt* blk;
     CcStmt* body;
     PScan sc;
     PCapList caps;
-    if (!pd.dest || !expr_ident(strip_parens_expr(pd.dest), &bind) || !bind.len) {
+    if (!pd.dest || !pl_base_name(pd.dest, &hbase) || !hbase.len) {
         CCString m = @string(`'${"@"}parallel(h)' needs a handle a name reaches: bind it with 'CCParallel h = ${"@"}parallel spawn { ... } !>;'`, L->arena);
         lw_error(L, sp, m);
         return;
+    }
+    {
+        /* the handle reads as it was written -- a name, a field of one, a
+         * field through a pointer -- and the admit is onto the caller's
+         * own object either way */
+        CCString hs = lw_spell_expr(L, pd.dest);
+        bind = lw_keep(L, &hs);
     }
     id = st->next_id++;
     body = lw_block(L, sp);
@@ -1283,16 +1727,18 @@ static void pl_dest(PStep* st, CcStmt* s, CcParallelDest pd) {
         size_t ci;
         for (ci = 0; ci < nc; ci++) {
             PCap* c = *cv->get_ptr(ci);
-            if (slice_eq(c->name, bind)) c->by_addr = true;
+            if (slice_eq(c->name, hbase)) c->by_addr = true;
+            else if (pl_cap_identity(c->type)) c->by_addr = true;
         }
     }
+    if (!pl_dest_body_ok(st, body, &caps, sp)) return;
     {
-        CCString et = pl_env_text(st, id, 0, &caps, cc_slice_empty(), true);
+        CCString et = pl_env_text(st, id, 0, &caps, cc_slice_empty(), true, cc_slice_empty());
         pl_host(st); st->fwd.push_slice(et.as_slice(), L->arena);
     }
     pl_forward(st, id, 0);
     st->made.push(pl_thunk_decl(st, id, 0, &caps, NULL, body, cc_slice_empty(),
-                                cc_slice_empty(), true, sp));
+                                cc_slice_empty(), true, cc_slice_empty(), false, sp));
     blk = lw_block(L, sp);
     pl_spawn_stmts(L, blk, id, 0, &caps, cc_slice_empty(), bind, sp);
     s->k = blk->k;
