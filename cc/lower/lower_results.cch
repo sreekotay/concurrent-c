@@ -472,6 +472,29 @@ static CCSlice rl_call_name(const CcExpr* e) {
     }
 }
 
+/* The error a console print answers with.
+ *
+ * `cc_println` and its siblings are `_Generic` macros the prelude defines,
+ * so nothing in the index declares a `void ?>(E)` for them and
+ * `rl_result_of_call` has nothing to read. Every arm of the macro answers
+ * with the same error, so the name settles it. Without this the site takes
+ * whichever handler is innermost and reads an error of one type into a cell
+ * of another -- which the host rejects, about a line the user did not write.
+ * Empty for every other callee: the Result its declaration names is the
+ * answer there. */
+static CCSlice rl_macro_err(const CcExpr* inner) {
+    static const char* const print_fns[6] = {
+        "cc_println", "cc_eprintln", "cc_print",
+        "cc_eprint", "cc_fprintln", "cc_fprint"
+    };
+    CCSlice name = rl_call_name(inner);
+    size_t i;
+    if (!name.len) return cc_slice_empty();
+    for (i = 0; i < 6; i++)
+        if (cc_slice_eq_cstr(&name, print_fns[i])) return rl_lit("CCPrintError");
+    return cc_slice_empty();
+}
+
 static bool rl_sym_returns_pointer(const CcSym* sym) {
     if (!sym || !sym->type) return false;
     @switch (sym->type->k) {
@@ -805,9 +828,15 @@ static CcStmt* rl_scaffold_ex(RFn* fn, CcExpr* uw, CcExpr* target, bool target_r
         CCString bare_value = @string(`'!>;' at expression position requires an enclosing '${"@"}errhandler' in scope`, L->arena);
         CCString bare_stmt = rl_at2(L, "err with no local handler requires ", "errhandler: a bare unwrap statement forwards the error to one");
         CCSlice bare = target ? bare_value.as_slice() : bare_stmt.as_slice();
-        RHandler* h = rl_pick_handler(fn, rt ? rl_ix_canon(L, rt->result_err) : (ptr ? rl_lit("CCError") : cc_slice_empty()), sp, bare, &path, inner, rt);
+        CCSlice mac = rl_macro_err(inner);
+        CCSlice err_canon = cc_slice_empty();
+        RHandler* h;
         CcStmt* on_err = lw_block(L, sp);
         CcExpr* err;
+        if (rt) err_canon = rl_ix_canon(L, rt->result_err);
+        else if (mac.len) err_canon = mac;
+        else if (ptr) err_canon = rl_lit("CCError");
+        h = rl_pick_handler(fn, err_canon, sp, bare, &path, inner, rt);
         if (!h) return NULL;
         /* `T x = call !>;` does not require the handler to leave. Invariant 6
          * asks a handler to diverge where control cannot return to the site
@@ -818,7 +847,7 @@ static CcStmt* rl_scaffold_ex(RFn* fn, CcExpr* uw, CcExpr* target, bool target_r
         err = rl_project(L, rl_r_error2(L, sp, ptr, inner), &path, sp);
         /* the callee named no `T !>(E)`: which error this is is the host's
          * to decide, and the handler's type is what it has to become */
-        if (!rt && !ptr && h->err_canon.len) {
+        if (!rt && !ptr && !mac.len && h->err_canon.len) {
             CcExpr* as = rl_err_as(L, sp, h->err_canon);
             if (as) err = as;
         }
@@ -880,16 +909,20 @@ static CcStmt* rl_scaffold_ex(RFn* fn, CcExpr* uw, CcExpr* target, bool target_r
             CcNameList path;
             CCString bare = @string(`'!>;' at expression position requires an enclosing '${"@"}errhandler' in scope`, L->arena);
             CCSlice bare_s = bare.as_slice();
-            RHandler* h = rl_pick_handler(fn, rt ? rl_ix_canon(L, rt->result_err) : cc_slice_empty(),
-                                          sp, bare_s, &path, inner, rt);
+            CCSlice mac = rl_macro_err(inner);
+            CCSlice err_canon = cc_slice_empty();
+            RHandler* h;
             CcStmt* on_err = lw_block(L, sp);
             CcStmt* on_ok = lw_block(L, sp);
             CcStmt* els = lw_block(L, sp);
             CcStmt* alt_ok = lw_block(L, sp);
             CcExpr* err;
+            if (rt) err_canon = rl_ix_canon(L, rt->result_err);
+            else if (mac.len) err_canon = mac;
+            h = rl_pick_handler(fn, err_canon, sp, bare_s, &path, inner, rt);
             if (!h) return NULL;
             err = rl_project(L, rl_r_error(L, sp), &path, sp);
-            if (!rt && h->err_canon.len) {
+            if (!rt && !mac.len && h->err_canon.len) {
                 CcExpr* as = rl_err_as(L, sp, h->err_canon);
                 if (as) err = as;
             }
@@ -1288,9 +1321,15 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
         CcNameList path;
         CCString bare_value = @string(`'!>;' at expression position requires an enclosing '${"@"}errhandler' in scope`, L->arena);
         CCSlice bare = bare_value.as_slice();
-        RHandler* h = rl_pick_handler(fn, rt ? rl_ix_canon(L, rt->result_err) : (ptr ? rl_lit("CCError") : cc_slice_empty()), sp, bare, &path, inner, rt);
+        CCSlice mac = rl_macro_err(inner);
+        CCSlice err_canon = cc_slice_empty();
+        RHandler* h;
         CcStmt* on_err = lw_block(L, sp);
         CcExpr* err;
+        if (rt) err_canon = rl_ix_canon(L, rt->result_err);
+        else if (mac.len) err_canon = mac;
+        else if (ptr) err_canon = rl_lit("CCError");
+        h = rl_pick_handler(fn, err_canon, sp, bare, &path, inner, rt);
         if (!h) return false;
         if (!value_is_void && !h->hoisted) {
             CCString m = rl_at2(L, "errhandler body must visibly diverge when used as an expression-position '!>;' delegate", NULL);
@@ -1300,7 +1339,7 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
         err = rl_project(L, rl_r_error2(L, sp, ptr, inner), &path, sp);
         /* the callee named no `T !>(E)`: which error this is is the host's
          * to decide, and the handler's type is what it has to become */
-        if (!rt && !ptr && h->err_canon.len) {
+        if (!rt && !ptr && !mac.len && h->err_canon.len) {
             CcExpr* as = rl_err_as(L, sp, h->err_canon);
             if (as) err = as;
         }

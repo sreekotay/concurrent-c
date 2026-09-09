@@ -16,11 +16,17 @@
 
 static int cl_destroy_chain(CcLowerer* L, CCSlice canon, CcExpr* subject, CcStmt* into, CcSpan sp, int depth);
 
+/* The `.ufcs` handler's argv, as the hook contract fixes it. */
+enum { UF_HOOK_ARG_MAX = 8 };
+
 typedef struct UStep {
     CcLowerer* L;
     int n_sites;
     CcExprList formal_at;       /* a `.method` site a declaration types */
     CcTypeList formal_ty;       /* what that declaration declared, by the same index */
+    CCSlice trusted;            /* the base whose own method body this is: its unnamed view does not bind here */
+    CcExprList stores;          /* `x.f` nodes standing where a store lands */
+    bool restrict_diag;         /* one restrict refusal per unit: the rest are the same mistake */
 } UStep;
 
 /* Is the receiver itself a pointer? Its own shape decides, so aliases are
@@ -800,6 +806,27 @@ static bool uf_formal_rewrite(Walker* w, UStep* st, CcExpr* e, CcUfcs uf,
     return true;
 }
 
+/* Did the `.ufcs` handler answer this site? The hook's other entries
+ * (`.destroy`, `.create`) share the source, so the origin says which. */
+static bool uf_from_ufcs_hook(CcMethod* m) {
+    CCSlice o;
+    size_t i;
+    if (!m || !cc_slice_eq_cstr(&m->source, "typehooks")) return false;
+    o = m->origin;
+    for (i = 0; i + 5 <= o.len; i++)
+        if (memcmp(o.ptr + i, ".ufcs", 5) == 0) return true;
+    return false;
+}
+
+/* Does this type name a `.ufcs` handler of its own? A wildcard handler is
+ * the fallback every unresolved method reaches, not an answer about this
+ * type. */
+static bool uf_has_ufcs_hook(CcIndex* ix, CCSlice tn) {
+    CcHookReg* hook = cc__hook_match(ix, tn, true);
+    if (!hook || hook->any) return false;
+    return hook->ufcs_fn.len > 0 && hook->ufcs_fn.ptr[0] != '<';
+}
+
 static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice tn, CCSlice reason) {
     UStep* st = (UStep*)w->env;
     CcLowerer* L = st->L;
@@ -822,6 +849,18 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
         return;
     }
     if (uf_formal_rewrite(w, st, e, uf, rt, tn, sp)) return;
+    /* The `.ufcs` handler's argv is a fixed-width row: the contract gives
+     * it UF_HOOK_ARG_MAX slots and no length it could grow. Describing only
+     * the first eight of a longer call would have the handler name a callee
+     * for a call the user did not write, and the arguments past the row
+     * would reach that callee unmentioned. */
+    if (uf.args.len() > UF_HOOK_ARG_MAX && (uf_from_ufcs_hook(m) || (!m && uf_has_ufcs_hook(w->ix, tn)))) {
+        int cap = UF_HOOK_ARG_MAX;
+        CCSlice meth = uf.method;
+        CCString msg = @string(`type: ${"."}ufcs hook for '${tn}${"."}${meth}' exceeds ${cap} args; refusing silent truncate`, L->arena);
+        lw_error(L, sp, msg);
+        return;
+    }
     if (!m) m = uf_hook_site(w, L, tn, uf, sp);
     if (!m) {
         CCString msg = @string(`type: ${reason}`, L->arena);
@@ -1326,13 +1365,296 @@ static void uf_check_widen(Walker* w, CcExpr* e, CcCall cl) {
     }
 }
 
+/* ---- what a restricted binding may read and write ------------------------ */
+
+/* The `@typeview` a declaration is, or false. */
+static bool uf_decl_typeview(CcDecl* d, CcTypeview* out) {
+    @switch (d->k) {
+        case .typeview(tv): *out = tv; return true;
+        default: return false;
+    }
+}
+
+/* Does `@typeview ... on <subj>` govern the type `base`? A subject ending
+ * in `*` names a family by its prefix; anything else names one type. The
+ * score ranks two subjects that both match, so the exact name wins over the
+ * family it belongs to. */
+static bool uf_subject_matches(CCSlice subj, CCSlice base, size_t* score) {
+    size_t pre;
+    if (!subj.len || !base.len) return false;
+    if (subj.ptr[subj.len - 1] != '*') {
+        if (!slice_eq(subj, base)) return false;
+        *score = subj.len + 1024;
+        return true;
+    }
+    pre = subj.len - 1;
+    if (base.len < pre) return false;
+    if (pre && memcmp(base.ptr, subj.ptr, pre) != 0) return false;
+    *score = pre;
+    return true;
+}
+
+/* The `@typeview` that governs `base` under `view` (an empty view is the
+ * unnamed one). Every unit the index read is searched: a view declared in a
+ * header binds the bindings this unit writes. */
+static bool uf_view_for(CcIndex* ix, CCSlice base, CCSlice view, CcTypeview* out) {
+    CcUnitList* unitv = &ix->units;
+    size_t nu = unitv->len();
+    size_t i;
+    size_t best = 0;
+    bool found = false;
+    for (i = 0; i < nu; i++) {
+        CcUnit* u = *unitv->get_ptr(i);
+        CcDeclList* declv = &u->decls;
+        size_t nd = declv->len();
+        size_t k;
+        for (k = 0; k < nd; k++) {
+            CcDecl* d = *declv->get_ptr(k);
+            CcTypeview tv;
+            CCSlice subj;
+            size_t score = 0;
+            if (!uf_decl_typeview(d, &tv)) continue;
+            if (!slice_eq(tv.view, view)) continue;
+            subj = cc__hook_subject_text(ix, u, d->span);
+            if (!uf_subject_matches(subj, base, &score)) continue;
+            if (found && score <= best) continue;
+            best = score;
+            found = true;
+            *out = tv;
+        }
+    }
+    return found;
+}
+
+/* `r:` / `w:` / `rw:` as the bits the group grants: 1 read, 2 store. */
+static int uf_group_kind(CCSlice key) {
+    if (cc_slice_eq_cstr(&key, "r")) return 1;
+    if (cc_slice_eq_cstr(&key, "w")) return 2;
+    if (cc_slice_eq_cstr(&key, "rw")) return 3;
+    return 0;
+}
+
+/* An `as:`-only view hands out faces and restricts nothing. */
+static bool uf_view_restricts(CcTypeview tv) {
+    CcHookEntryList* entryv = &tv.entries;
+    size_t n = entryv->len();
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (uf_group_kind(entryv->get_ptr(i)->key)) return true;
+    return false;
+}
+
+/* How specific a pattern is: a glob ranks below the name it stands for. */
+static size_t uf_pat_score(CCSlice pat) {
+    if (!uf_item_is_glob(pat)) return pat.len;
+    return pat.len ? pat.len - 1 : 0;
+}
+
+static bool uf_item_matches(CCSlice pat, CCSlice name) {
+    if (uf_item_is_glob(pat)) return uf_glob_match(pat, name);
+    return slice_eq(pat, name);
+}
+
+/* What a view grants `name`: bit 1 read, bit 2 store; 0 when nothing in its
+ * lists reaches the name. The best-scoring allow pattern wins, and then
+ * every matching deny subtracts its own group's bits -- so a group written
+ * as denies alone stands for the whole surface minus what it names. */
+static int uf_view_kind(CcTypeview tv, CCSlice name) {
+    CcHookEntryList* entryv = &tv.entries;
+    size_t ne = entryv->len();
+    size_t i;
+    int kind = 0;
+    long best = -1;
+    for (i = 0; i < ne; i++) {
+        CcHookEntry* e = entryv->get_ptr(i);
+        CcViewItemList* itemv = &e->items;
+        size_t nj = itemv->len();
+        size_t j;
+        int gk = uf_group_kind(e->key);
+        bool any_allow = false;
+        bool any_deny = false;
+        if (!gk) continue;
+        for (j = 0; j < nj; j++) {
+            CcViewItem* it = itemv->get_ptr(j);
+            if (!it->name.len) continue;
+            if (it->deny) { any_deny = true; continue; }
+            any_allow = true;
+            if (!uf_item_matches(it->name, name)) continue;
+            {
+                long sc = (long)uf_pat_score(it->name);
+                if (sc > best) { best = sc; kind = gk; }
+            }
+        }
+        if (!any_allow && any_deny && best < 0) { best = 0; kind = gk; }
+    }
+    if (!kind) return 0;
+    for (i = 0; i < ne; i++) {
+        CcHookEntry* e = entryv->get_ptr(i);
+        CcViewItemList* itemv = &e->items;
+        size_t nj = itemv->len();
+        size_t j;
+        int gk = uf_group_kind(e->key);
+        if (!gk) continue;
+        for (j = 0; j < nj; j++) {
+            CcViewItem* it = itemv->get_ptr(j);
+            if (!it->deny || !it->name.len) continue;
+            if (!uf_item_matches(it->name, name)) continue;
+            kind = kind & ~gk;
+        }
+    }
+    return kind;
+}
+
+/* The view a binding's type is seen through, and the base it is a view
+ * onto. False when nothing restricts that type. */
+static bool uf_restrict_of(CcIndex* ix, CcType* rt, CCSlice* base, CCSlice* view, CcTypeview* out) {
+    CCSlice b;
+    CcTypeview tv;
+    if (!rt) return false;
+    b = cc__strip_tag(ix->canon(peel(rt)));
+    if (!b.len || b.ptr[b.len - 1] == '*') return false;
+    *view = uf_view_attr(rt);
+    if (!uf_view_for(ix, b, *view, &tv)) return false;
+    if (!uf_view_restricts(tv)) return false;
+    *base = b;
+    *out = tv;
+    return true;
+}
+
+/* The `x.f` a store lands on: the left of an assignment, or the operand of
+ * an increment. NULL for everything else -- `m.ptr[i] = v` stores through
+ * the field, and `buf[s.len] = v` reads one. */
+static CcExpr* uf_store_target(CcExpr* e) {
+    CcExpr* t = NULL;
+    @switch (e->k) {
+        case .assign(as): t = as.a; break;
+        case .unary(un): {
+            bool inc = un.op == CC_OP_PREINC || un.op == CC_OP_PREDEC ||
+                       un.op == CC_OP_POSTINC || un.op == CC_OP_POSTDEC;
+            if (inc) t = un.a;
+            break;
+        }
+        default: break;
+    }
+    return t ? strip_parens_expr(t) : NULL;
+}
+
+static bool uf_is_member_expr(CcExpr* e) {
+    @switch (e->k) {
+        case .member: return true;
+        default: return false;
+    }
+}
+
+/* A field access does not know its parent, so the store positions are
+ * collected first and looked up by node. */
+static bool uf_store_visit(CcExpr* e, void* env) {
+    UStep* st = (UStep*)env;
+    CcExpr* t = uf_store_target(e);
+    if (t && uf_is_member_expr(t)) st->stores.push(t);
+    return true;
+}
+
+static bool uf_is_store(UStep* st, const CcExpr* e) {
+    CcExprList* v = &st->stores;
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (*v->get_ptr(i) == e) return true;
+    return false;
+}
+
+static bool uf_decl_func(CcDecl* d, CcFuncDecl* out) {
+    @switch (d->k) {
+        case .func(f): *out = f; return true;
+        default: return false;
+    }
+}
+
+static CcParamList* uf_func_params(CcType* t) {
+    CcParamList* ps = NULL;
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .func: ps = &t->k.func.params; break;
+        default: break;
+    }
+    return ps;
+}
+
+/* The type whose own bodies these statements are: a function's first
+ * parameter names the receiver, and an unnamed view does not bind inside
+ * the methods that implement the type -- it would leave the type unusable
+ * by the code that owns it. A named view is asked for at the binding, so
+ * it binds everywhere it is written. */
+static void uf_trusted_decl(Walker* w, CcDecl* d) {
+    UStep* st = (UStep*)w->env;
+    CcFuncDecl f;
+    CcParamList* ps;
+    st->trusted = cc_slice_empty();
+    if (!uf_decl_func(d, &f)) return;
+    ps = uf_func_params(f.type);
+    if (!ps || !ps->len()) return;
+    {
+        CcParam* p0 = ps->get_ptr(0);
+        if (!p0->type) return;
+        st->trusted = cc__strip_tag(w->ix->canon(peel(p0->type)));
+    }
+}
+
+/* `x.f` through a restricted binding: the view's lists say whether that
+ * field may be read or written here. A method call is not this step's --
+ * resolution owns those -- and the lowerer's own locals are not the user's
+ * program.
+ *
+ * One refusal per unit: past the first, every later site is the same view
+ * refusing the same mistake, and the first is the one that names it. */
+static void uf_check_field(Walker* w, CcExpr* e, CcMember mb, CcType* rt) {
+    UStep* st = (UStep*)w->env;
+    CcLowerer* L = st->L;
+    CcIndex* ix = w->ix;
+    CCSlice base = cc_slice_empty();
+    CCSlice view = cc_slice_empty();
+    CCSlice recv;
+    CcTypeview tv;
+    int kind;
+    bool store;
+    if (st->restrict_diag || !mb.name.len) return;
+    if (!expr_ident(strip_parens_expr(mb.a), &recv)) return;
+    if (recv.len >= 5 && memcmp(recv.ptr, "__cc_", 5) == 0) return;
+    if (!uf_restrict_of(ix, rt, &base, &view, &tv)) return;
+    if (!view.len && slice_eq(base, st->trusted)) return;
+    kind = uf_view_kind(tv, mb.name);
+    store = uf_is_store(st, e);
+    if (store && (kind & 2)) return;
+    if (!store && (kind & 1)) return;
+    st->restrict_diag = true;
+    {
+        CCSlice label = view.len ? view : cstr_slice("(default)");
+        CCSlice f = mb.name;
+        if (store) {
+            CCString m = @string(`restricted mode '${label}' on '${base}' does not allow store to field '${f}'`, L->arena);
+            lw_error(L, e->span, m);
+        } else {
+            CCString m = @string(`restricted mode '${label}' on '${base}' does not allow field '${f}'`, L->arena);
+            lw_error(L, e->span, m);
+        }
+    }
+}
+
 static void uf_widen_pass(CcLowerer* L, UStep* st) {
     Walker w;
+    CcVisitor sv;
+    memset(&sv, 0, sizeof(sv));
+    sv.expr = uf_store_visit;
+    sv.env = st;
+    CcUnit_walk(L->unit, sv);
     memset(&w, 0, sizeof(w));
     w.arena = L->arena;
     w.ix = L->ix;
     w.unit = L->unit;
     w.on_call = uf_check_widen;
+    w.on_field = uf_check_field;
+    w.on_decl = uf_trusted_decl;
     w.env = st;
     tw_unit(&w);
 }
@@ -1494,6 +1816,8 @@ static void CcLowerer_ufcs(CcLowerer* L) {
     w.unit = L->unit;
     st.formal_at = vec_new::[CcExprRef](L->arena);
     st.formal_ty = vec_new::[CcTypeRef](L->arena);
+    st.stores = vec_new::[CcExprRef](L->arena);
+    st.trusted = cc_slice_empty();
     uf_widen_pass(L, &st);      /* before the rewrite: the arguments are as written */
     uf_formal_pass(L, &st);
     w.on_ufcs = uf_rewrite;

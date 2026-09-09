@@ -80,6 +80,18 @@ static CcExpr* sr_slot_expr(CcLowerer* L, CcTplPart* part, CcSpan sp) {
     return lw_text(L, wrapped, sp);
 }
 
+/* An escape C decodes for itself. A template also lets a backslash stand
+ * before `$` or a backtick, where it means that byte alone; carrying the
+ * backslash into the C literal would leave the host decoding an escape it
+ * does not know. */
+static bool sr_c_escape(char c) {
+    static const char* const known = "abfnrtv\\'\"?xuU01234567";
+    size_t i;
+    for (i = 0; known[i]; i++)
+        if (known[i] == c) return true;
+    return false;
+}
+
 /* `"<text>"`: the run as a C string literal. A template body is written
  * between backticks, where a newline and a `"` are ordinary characters —
  * in a C literal they are not, so they are escaped here. An escape the
@@ -93,8 +105,17 @@ static CcExpr* sr_literal(CcLowerer* L, CCSlice text, bool verbatim, CcSpan sp) 
     while (i < text.len) {
         char c = text.ptr[i];
         if (!verbatim && c == '\\' && i + 1 < text.len) {
-            q.push_char(c, L->arena);
-            q.push_char(text.ptr[i + 1], L->arena);
+            char n = text.ptr[i + 1];
+            if (sr_c_escape(n)) {
+                q.push_char(c, L->arena);
+                q.push_char(n, L->arena);
+            } else if (n == '\n') {
+                q.push_cstr("\\n", L->arena);
+            } else if (n == '\r') {
+                q.push_cstr("\\r", L->arena);
+            } else {
+                q.push_char(n, L->arena);
+            }
             i += 2;
             continue;
         }
@@ -109,15 +130,36 @@ static CcExpr* sr_literal(CcLowerer* L, CCSlice text, bool verbatim, CcSpan sp) 
     return lw_text(L, q, sp);
 }
 
-/* A tagged slot (`$~tag{e}`) picks a formatting policy this step does not
- * carry yet; say so rather than dropping the tag. */
-static bool sr_reject_tag(CcLowerer* L, CcTplPart* part, CcSpan sp) {
-    CCSlice tag = part->tag;
+/* A tagged slot (`$~tag{e}`) names the formatting policy for that one
+ * interpolation, and only the policy form carries a policy to name. With
+ * none, formatting the value the plain way would read as though the policy
+ * had run. */
+static bool sr_tag_needs_policy(CcLowerer* L, CcTemplate tp, CcTplPart* part, CcSpan sp) {
     CCString m;
-    if (!tag.len) return false;
-    m = @string(`'$~${tag}{...}' (a tagged template slot) is not lowered by the clean lowerer yet`, L->arena);
+    if (!part->tag.len || tp.policy) return false;
+    /* a template cannot spell `$~` -- it would open a tagged slot of its own */
+    m = cc_string_new();
+    cc_string_push_cstr(&m, "'$~", L->arena);
+    cc_string_push_slice(&m, part->tag, L->arena);
+    cc_string_push_cstr(&m, "{...}' names a formatting policy and this @string has none: "
+                            "write @string(policy, template, arena)", L->arena);
     lw_error(L, sp, m);
     return true;
+}
+
+/* The tag a slot carries, as the `CCSlice` the policy is handed. An
+ * untagged slot still goes through the policy -- with no tag. */
+static CcExpr* sr_tag_expr(CcLowerer* L, CCSlice tag, CcSpan sp) {
+    CCString t;
+    if (!tag.len) return lw_call0(L, cstr_slice("cc_slice_empty"), sp);
+    t = @string(`CC_SLICE_LIT("${tag}")`, L->arena);
+    return lw_text(L, t, sp);
+}
+
+/* The slot's value as the text a policy formats: the header's bridge over
+ * the value's type, which is where a type with no arm is named. */
+static CcExpr* sr_slot_arg(CcLowerer* L, CcTplPart* part, CcExpr* arena, CcSpan sp) {
+    return lw_call2(L, cstr_slice("cc__string_slot_arg"), sr_slot_expr(L, part, sp), arena, sp);
 }
 
 /* `@scratch` / `@scratch(N)` as the arena operand: the function's stack
@@ -172,13 +214,24 @@ static bool sr_arena_stmts(TStep* st, CCSlice name, CcTemplate tp, CcSpan sp, Cc
     for (i = 0; i < n; i++) {
         CcTplPart* part = parts->get_ptr(i);
         CcExpr* recv = cc_expr_unary(CC_OP_ADDR, lw_ident(L, name, sp), sp, L->arena);
-        if (sr_reject_tag(L, part, sp)) return false;
+        if (sr_tag_needs_policy(L, tp, part, sp)) return false;
         if (!part->slot) {
             CCString cnt = @string(`${(int)sr_decoded_len(part->text, part->is_verbatim)}`, L->arena);
             CcExpr* call = lw_call2(L, cstr_slice("cc_string_push_buffer"), recv, sr_literal(L, part->text, part->is_verbatim, sp), sp);
             CcExprList* args = lw_call_args(call);
             args->push(lw_text(L, cnt, sp));
             args->push(tp.arena);
+            out->push(lw_expr_stmt(L, call, sp));
+        } else if (tp.policy) {
+            /* Every slot of a policy template goes through the policy, which
+             * decides how that value is spelled; a literal run does not --
+             * those bytes are the author's own text, and a verbatim span is
+             * a literal run. */
+            CcExpr* call = lw_call2(L, cstr_slice("cc_string_push_policy"), recv, tp.policy, sp);
+            CcExprList* args = lw_call_args(call);
+            args->push(tp.arena);
+            args->push(sr_tag_expr(L, part->tag, sp));
+            args->push(sr_slot_arg(L, part, tp.arena, sp));
             out->push(lw_expr_stmt(L, call, sp));
         } else {
             CcExpr* call = lw_call2(L, cstr_slice("cc__string_slot_push"), recv, sr_slot_expr(L, part, sp), sp);
@@ -266,10 +319,17 @@ static CcExpr* sr_stack_expr(TStep* st, CcTemplate tp, CcSpan sp) {
         lw_error(L, sp, m);
         return NULL;
     }
+    if (tp.policy) {
+        /* the policy answers with text it allocated, and the bounded form
+         * has nothing to allocate from */
+        CCString m = @string(`'${"@"}string(policy, ...)' needs an arena: a policy answers with text it allocated`, L->arena);
+        lw_error(L, sp, m);
+        return NULL;
+    }
     size.push_cstr("0u", L->arena);
     for (i = 0; i < n; i++) {
         CcTplPart* part = parts->get_ptr(i);
-        if (sr_reject_tag(L, part, sp)) return NULL;
+        if (sr_tag_needs_policy(L, tp, part, sp)) return NULL;
         if (!part->slot) {
             CCString cnt = @string(` + ${(int)sr_decoded_len(part->text, part->is_verbatim)}u`, L->arena);
             size.push_slice(cc_string_as_slice(&cnt), L->arena);

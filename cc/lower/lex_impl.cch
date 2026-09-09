@@ -407,6 +407,19 @@ static uint32_t cc__scan_template(const CcLexer* L, uint32_t i) {
         if (i >= L->len) return 0;
         unsigned c = L->bytes[i];
         if (c == '\\') { if (i + 1 >= L->len) return 0; i += 2; continue; }
+        /* `${{ ... }}` is a verbatim span: its bytes are raw, so a backtick
+         * inside one is text and does not close the literal. The first `}}`
+         * ends the span. A span with no `}}` leaves the literal without an
+         * end this scan can trust, so it is unterminated -- stopping at the
+         * first tick inside the span instead would hand the parser a token
+         * that cuts the template in half. */
+        if (c == '$' && i + 2 < L->len && L->bytes[i + 1] == '{' && L->bytes[i + 2] == '{') {
+            uint32_t j = i + 3;
+            while (j + 1 < L->len && !(L->bytes[j] == '}' && L->bytes[j + 1] == '}')) j++;
+            if (j + 1 >= L->len) return 0;
+            i = j + 2;
+            continue;
+        }
         i++;
         if (c == '`') return i;
     }
