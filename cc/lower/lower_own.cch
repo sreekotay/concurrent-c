@@ -1,0 +1,1113 @@
+#pragma(@per_tu)
+/* Clean lowerer, step: ownership and borrow safety.
+ *
+ * An arena hands out borrows. A borrow is not an owner: freeing one, or
+ * ending the epoch it points into while it is still reachable, hands the
+ * program memory another owner still believes is live. A channel carries
+ * its payload to a task that outlives the sender's frame, so a payload
+ * whose bytes are not stable for that long arrives dangling. A unique
+ * slice names its bytes exactly once, so a copy of one makes two names
+ * for one owner. Each of those is a use-after-free the host compiler
+ * accepts, and none of them is visible in the C this lowerer prints.
+ *
+ * So the step refuses them here, at the position that caused it, before
+ * any other step rewrites the shapes it reads. It reads what the user
+ * wrote: a declaration's type and initializer say whether a local owns
+ * its bytes, borrows them from a named arena, or is unique; a spawn
+ * capture says which arena a task still holds; a block exit says which
+ * borrows and which nurseries are gone.
+ *
+ * What it cannot prove, it leaves alone. A name it never saw declared, a
+ * parameter whose provenance is the caller's to state, a pointer an
+ * expression hides, a payload that is not a bare name: those pass. A
+ * refusal here is a claim about the program, and a wrong one costs more
+ * than a missing one.
+ *
+ * Lifetime: the tables live in the lowerer arena and die with the unit. */
+#ifndef CC_LOWER_OWN_CCH
+#define CC_LOWER_OWN_CCH
+#include "lower.cch"
+#include <string.h>
+
+/* ---- what a name carries ---------------------------------------------- */
+
+/* One record answers both questions this step asks about a name.
+ *
+ * For a local it says what the local is. For a file-scope aggregate it
+ * says what its fields carry: `is_ptr` that one field is a raw pointer,
+ * `is_slice` that one is a CCSlice, `is_arena` that one is a CCArena.
+ * Two tables of the same shape, because both answer "what does this name
+ * put on a channel, and who owns those bytes". */
+struct OwnFacts {
+    CCSlice name;
+    CCSlice ty;         /* the named type's spelling; empty for other types */
+    CCSlice arena;      /* the arena a borrow was taken from */
+    bool is_arena;      /* `CCArena a` (aggregate row: a CCArena field) */
+    bool is_nursery;    /* `CCNursery n`: pins tied to it end with its scope */
+    bool is_slice;      /* (aggregate row: a CCSlice field) */
+    bool is_ptr;        /* (aggregate row: a raw pointer field) */
+    bool is_arena_ptr;  /* a pointer the arena handed out */
+    bool arena_view;    /* a slice over arena bytes */
+    bool unique;        /* `T[:!]`, or an id minted with the unique bit */
+    bool is_static;     /* cc_slice_from_static: immortal bytes */
+    bool moved;
+    bool reported;      /* a use-after-move was already named for it */
+    bool nonstable;     /* an aggregate whose slice field an initializer filled from a borrow */
+};
+typedef struct OwnFacts OwnFacts;
+/* Rows live in the arena and the tables hold pointers to them, so a row a
+ * check is reading stays put when a later declaration grows the table. */
+typedef OwnFacts* OwnFactsRef;
+typedef Vec::[OwnFactsRef] OwnFactList;
+/* A `Vec::[T]` spelled inside a `@switch` case body does not lower; the
+ * arm list a `@parallel` carries is read through its own name. */
+typedef Vec::[CcParallelArm] OwnArmList;
+
+struct Own {
+    CcLowerer* L;
+    OwnFactList vars;       /* the locals in scope, innermost last */
+    OwnFactList structs;    /* the file's aggregates, by typedef name */
+    /* Pin i is "a task under pin_nursery[i] holds a borrow from
+     * pin_arena[i]"; the two lists move together. */
+    CcNameList pin_arena;
+    CcNameList pin_nursery;
+    CcNameList pending;     /* by-value spawn captures to mark moved once the body is walked */
+    /* Scratch for the two scans that need more than a name: the record an
+     * initializer is being read into, and the nursery a capture scan
+     * attributes to. Neither scan re-enters the other. */
+    OwnFacts* init_var;
+    CCSlice init_base;
+    bool init_from_alloc;
+    bool init_nonstable;
+    CCSlice cap_nursery;
+    CcSpan cap_span;
+};
+typedef struct Own Own;
+
+/* ---- diagnostics ------------------------------------------------------ */
+
+static void own_err(Own* O, CcSpan span, CCString msg, CCSlice note) {
+    CcLowerer* L = O->L;
+    CcUnit* u = L->unit;
+    CcLoc loc = u->loc(span);
+    CcDiag d = CcDiag_error(loc, cc_string_persist_slice(L->arena, &msg));
+    CcDiags* ds = L->ds;
+    d = CcDiag_with_note(d, note);
+    ds->push(d);
+}
+
+/* The note every channel-stability refusal carries: why the bytes are not
+ * stable for the receiver, and the three ways to make them so. */
+static CCSlice own_chan_note(void) {
+    CCSlice n = CC_SLICE_LIT(
+        "a non-unique slice (arena, stack, or untracked from_buffer bytes) may dangle after the "
+        "send (channel-stable-borrow); send a CCArena in the same message, make the slice unique "
+        "(T[:!] / cc_slice_from_static), or give the receiver its own storage with send_into / "
+        "try_send_into. The send copies the payload by value into '__cc_tmp'");
+    return n;
+}
+
+static CCSlice own_move_note(void) {
+    CCSlice n = CC_SLICE_LIT("a unique slice is move-only: hand it over with cc_move");
+    return n;
+}
+
+/* ---- node accessors: one `@switch` each ------------------------------- */
+
+static bool own_ident_of(CcExpr* e, CCSlice* out) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .ident(nm): *out = nm; return nm.len != 0;
+        default: return false;
+    }
+}
+
+/* `&x`, `(T*)x`, `(x)`: the name underneath, for a first argument. */
+static CcExpr* own_peel(CcExpr* e) {
+    int hops = 0;
+    while (e && hops < 8) {
+        CcExpr* inner = NULL;
+        hops++;
+        @switch (e->k) {
+            case .paren(pa): inner = pa.a; break;
+            case .cast(ca): inner = ca.a; break;
+            case .unary(un): {
+                if (un.op == CC_OP_ADDR || un.op == CC_OP_DEREF) inner = un.a;
+                break;
+            }
+            default: break;
+        }
+        if (!inner) return e;
+        e = inner;
+    }
+    return e;
+}
+
+static bool own_call_of(CcExpr* e, CCSlice* callee, CcExprList* args) {
+    CCSlice nm = cc_slice_empty();
+    if (!e) return false;
+    @switch (e->k) {
+        case .call(cl): {
+            if (!own_ident_of(cl.callee, &nm)) return false;
+            *callee = nm;
+            *args = cl.args;
+            return true;
+        }
+        default: return false;
+    }
+}
+
+static bool own_ufcs_of(CcExpr* e, CcUfcs* out) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .ufcs(uf): *out = uf; return true;
+        default: return false;
+    }
+}
+
+static bool own_closure_of(CcExpr* e, CcClosure* out) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .closure(cl): *out = cl; return true;
+        default: return false;
+    }
+}
+
+static bool own_assign_of(CcExpr* e, CcExpr** lhs, CcExpr** rhs) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .assign(bi): {
+            if (bi.op != CC_OP_ASSIGN) return false;
+            *lhs = bi.a;
+            *rhs = bi.b;
+            return true;
+        }
+        default: return false;
+    }
+}
+
+/* What a declared type says on its own. `T[:!]` is unique by type alone. */
+static void own_type_facts(CcType* t, OwnFacts* f) {
+    if (!t) return;
+    @switch (t->k) {
+        case .named(nd): {
+            CCSlice nm = nd.name;
+            f->ty = nm;
+            if (cc_slice_eq_cstr(&nm, "CCSlice")) f->is_slice = true;
+            if (cc_slice_eq_cstr(&nm, "CCArena")) f->is_arena = true;
+            if (cc_slice_eq_cstr(&nm, "CCNursery")) f->is_nursery = true;
+            break;
+        }
+        case .pointer(pt): f->is_ptr = true; break;
+        case .slice(sl): {
+            f->is_slice = true;
+            if (sl.unique) f->unique = true;
+            break;
+        }
+        default: break;
+    }
+}
+
+/* A field of an aggregate, recorded on the aggregate's own row. */
+static void own_field_facts(CcType* t, OwnFacts* s) {
+    if (!t) return;
+    @switch (t->k) {
+        case .pointer(pt): s->is_ptr = true; break;
+        case .named(nd): {
+            CCSlice nm = nd.name;
+            if (cc_slice_eq_cstr(&nm, "CCSlice")) s->is_slice = true;
+            if (cc_slice_eq_cstr(&nm, "CCArena")) s->is_arena = true;
+            break;
+        }
+        default: break;
+    }
+}
+
+/* ---- the tables ------------------------------------------------------- */
+
+static OwnFacts* own_row(OwnFactList* v, CCSlice name) {
+    size_t n = v->len();
+    size_t i;
+    if (!name.len) return NULL;
+    for (i = n; i > 0; i--) {
+        OwnFacts* x = *v->get_ptr(i - 1);
+        if (slice_eq(x->name, name)) return x;
+    }
+    return NULL;
+}
+
+static OwnFacts* own_lookup(Own* O, CCSlice name) {
+    OwnFactList* v = &O->vars;
+    return own_row(v, name);
+}
+
+static OwnFacts* own_struct(Own* O, CCSlice name) {
+    OwnFactList* v = &O->structs;
+    return own_row(v, name);
+}
+
+static void own_unpin(Own* O, CCSlice nursery) {
+    CcNameList* pa = &O->pin_arena;
+    CcNameList* pn = &O->pin_nursery;
+    size_t n = pn->len();
+    size_t w = 0;
+    size_t i;
+    if (!nursery.len) return;
+    for (i = 0; i < n; i++) {
+        CCSlice who = *pn->get_ptr(i);
+        CCSlice ar = *pa->get_ptr(i);
+        if (slice_eq(who, nursery)) continue;
+        if (w != i) {
+            pa->set(w, ar);
+            pn->set(w, who);
+        }
+        w++;
+    }
+    pa->truncate(w);
+    pn->truncate(w);
+}
+
+/* Locals declared after `mark` leave scope. A nursery among them joins its
+ * tasks on the way out, so what those tasks held is released with it. */
+static void own_drop_to(Own* O, size_t mark) {
+    OwnFactList* v = &O->vars;
+    size_t n = v->len();
+    size_t i;
+    for (i = mark; i < n; i++) {
+        OwnFacts* x = *v->get_ptr(i);
+        if (!x->is_nursery) continue;
+        {
+            CCSlice nm = x->name;
+            own_unpin(O, nm);
+        }
+    }
+    v->truncate(mark);
+}
+
+static void own_pin(Own* O, CCSlice arena, CCSlice nursery) {
+    CcNameList* pa = &O->pin_arena;
+    CcNameList* pn = &O->pin_nursery;
+    size_t n = pn->len();
+    size_t i;
+    if (!arena.len || !nursery.len) return;
+    for (i = 0; i < n; i++) {
+        CCSlice ar = *pa->get_ptr(i);
+        CCSlice who = *pn->get_ptr(i);
+        if (slice_eq(ar, arena) && slice_eq(who, nursery)) return;
+    }
+    pa->push(arena);
+    pn->push(nursery);
+}
+
+static bool own_pinned(Own* O, CCSlice arena) {
+    CcNameList* pa = &O->pin_arena;
+    size_t n = pa->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice ar = *pa->get_ptr(i);
+        if (slice_eq(ar, arena)) return true;
+    }
+    return false;
+}
+
+/* A slice still in scope whose bytes the named arena owns. */
+static bool own_live_borrow(Own* O, CCSlice arena) {
+    OwnFactList* v = &O->vars;
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        OwnFacts* x = *v->get_ptr(i);
+        if (!x->arena_view || x->moved) continue;
+        if (slice_eq(x->arena, arena)) return true;
+    }
+    return false;
+}
+
+/* ---- callee tables ---------------------------------------------------- */
+
+/* The argument that names the arena, or -1 when the call does not hand out
+ * arena bytes. `alloc_T` / `alloc_T_count` spell the element type first. */
+static int own_alloc_arena_arg(CCSlice callee) {
+    if (cc_slice_eq_cstr(&callee, "cc_arena_alloc_slice_bytes")) return 0;
+    if (cc_slice_eq_cstr(&callee, "cc_arena_alloc")) return 0;
+    if (cc_slice_eq_cstr(&callee, "cc_arena_alloc_T_count")) return 1;
+    if (cc_slice_eq_cstr(&callee, "cc_arena_alloc_T")) return 1;
+    return -1;
+}
+
+static bool own_is_deleter(CCSlice callee) {
+    if (cc_slice_eq_cstr(&callee, "free")) return true;
+    if (cc_slice_eq_cstr(&callee, "cfree")) return true;
+    if (cc_slice_eq_cstr(&callee, "cc_slice_destroy")) return true;
+    if (cc_slice_eq_cstr(&callee, "CCSlice_destroy")) return true;
+    return false;
+}
+
+static bool own_is_epoch_op(CCSlice callee) {
+    if (cc_slice_eq_cstr(&callee, "cc_arena_reset")) return true;
+    if (cc_slice_eq_cstr(&callee, "cc_arena_free")) return true;
+    if (cc_slice_eq_cstr(&callee, "cc_arena_destroy")) return true;
+    return false;
+}
+
+static bool own_is_send(CCSlice callee) {
+    if (cc_slice_eq_cstr(&callee, "cc_channel_send")) return true;
+    if (cc_slice_eq_cstr(&callee, "chan_send")) return true;
+    return false;
+}
+
+static bool own_is_view_ctor(CCSlice callee) {
+    if (cc_slice_eq_cstr(&callee, "cc_slice_from_parts")) return true;
+    if (cc_slice_eq_cstr(&callee, "cc_slice_from_buffer")) return true;
+    return false;
+}
+
+/* A UFCS method that hands a closure to a task. */
+static bool own_is_spawn(CCSlice method) {
+    if (method.len < 5) return false;
+    return memcmp(method.ptr, "spawn", 5) == 0;
+}
+
+/* ---- reading an initializer ------------------------------------------- */
+
+static bool own_init_visit(CcExpr* e, void* env) {
+    Own* O = (Own*)env;
+    OwnFacts* it = O->init_var;
+    CCSlice callee = cc_slice_empty();
+    CcExprList args;
+    CcClosure cl;
+    int ai;
+    if (own_closure_of(e, &cl)) return false;
+    if (!own_call_of(e, &callee, &args)) return true;
+    if (cc_slice_eq_cstr(&callee, "cc_slice_from_static")) it->is_static = true;
+    if (cc_slice_eq_cstr(&callee, "cc_slice_make_id")) {
+        size_t n = args.len();
+        size_t i;
+        /* The unique bit is one of the flags between the id and the last
+         * argument, which is how the reference front reads it too. */
+        for (i = 1; i + 1 < n; i++) {
+            CCSlice fl = cc_slice_empty();
+            CcExpr* a = *args.get_ptr(i);
+            if (own_ident_of(a, &fl) && cc_slice_eq_cstr(&fl, "true")) it->unique = true;
+        }
+    }
+    ai = own_alloc_arena_arg(callee);
+    if (ai >= 0 && !O->init_from_alloc && args.len() > (size_t)ai) {
+        CCSlice nm = cc_slice_empty();
+        CcExpr* raw = *args.get_ptr((size_t)ai);
+        CcExpr* a = own_peel(raw);
+        if (own_ident_of(a, &nm)) {
+            O->init_from_alloc = true;
+            it->arena = nm;
+        }
+    }
+    if (own_is_view_ctor(callee) && !O->init_base.len && args.len() > 0) {
+        CCSlice nm = cc_slice_empty();
+        CcExpr* raw = *args.get_ptr(0);
+        CcExpr* a = own_peel(raw);
+        if (own_ident_of(a, &nm)) O->init_base = nm;
+    }
+    return true;
+}
+
+/* Fills `nv` from what the initializer says: the arena it took bytes
+ * from, whether the id it minted is unique, and the pointer a view was
+ * built over. */
+static void own_read_init(Own* O, CcExpr* init, OwnFacts* nv) {
+    CcVisitor v;
+    O->init_var = nv;
+    O->init_base = cc_slice_empty();
+    O->init_from_alloc = false;
+    if (!init) return;
+    memset(&v, 0, sizeof(v));
+    v.expr = own_init_visit;
+    v.env = O;
+    CcExpr_walk(init, v);
+}
+
+/* A name in an initializer that stands for arena bytes. An aggregate is
+ * only as stable as what filled its slice field, and a borrow put there
+ * dangles for a receiver the same way a bare borrow does. */
+static bool own_nonstable_visit(CcExpr* e, void* env) {
+    Own* O = (Own*)env;
+    CCSlice nm = cc_slice_empty();
+    OwnFacts* x;
+    CcClosure cl;
+    if (own_closure_of(e, &cl)) return false;
+    if (!own_ident_of(e, &nm)) return true;
+    x = own_lookup(O, nm);
+    if (x && x->is_slice && x->arena_view) O->init_nonstable = true;
+    return true;
+}
+
+static void own_nonstable_expr(Own* O, CcExpr* e) {
+    CcVisitor v;
+    if (!e) return;
+    memset(&v, 0, sizeof(v));
+    v.expr = own_nonstable_visit;
+    v.env = O;
+    CcExpr_walk(e, v);
+}
+
+/* A braced initializer is a tree of initializers, and only the leaves hold
+ * expressions; both walks below read that shape. */
+static void own_init_nonstable(Own* O, CcInit* in) {
+    CcInitList* items;
+    size_t n;
+    size_t i;
+    if (!in) return;
+    own_nonstable_expr(O, in->expr);
+    items = &in->items;
+    n = items->len();
+    for (i = 0; i < n; i++) own_init_nonstable(O, *items->get_ptr(i));
+}
+
+static void own_scan(Own* O, CcExpr* e);
+
+static void own_scan_init(Own* O, CcInit* in) {
+    CcInitList* items;
+    size_t n;
+    size_t i;
+    if (!in) return;
+    own_scan(O, in->expr);
+    items = &in->items;
+    n = items->len();
+    for (i = 0; i < n; i++) own_scan_init(O, *items->get_ptr(i));
+}
+
+/* ---- the checks ------------------------------------------------------- */
+
+static void own_check_free(Own* O, CcExprList* args, CcSpan sp) {
+    CCSlice nm = cc_slice_empty();
+    OwnFacts* x;
+    CcExpr* raw;
+    if (!args->len()) return;
+    raw = *args->get_ptr(0);
+    if (!own_ident_of(own_peel(raw), &nm)) return;
+    x = own_lookup(O, nm);
+    if (!x) return;
+    if (!((x->is_slice && x->arena_view) || x->is_arena_ptr)) return;
+    {
+        CCString m = @string(`cannot free/destroy non-owning borrow '${nm}'`, O->L->arena);
+        CCSlice note = CC_SLICE_LIT("the arena owns these bytes and releases them with its own epoch");
+        own_err(O, sp, m, note);
+    }
+}
+
+static void own_check_epoch(Own* O, CCSlice op, CcExprList* args, CcSpan sp) {
+    CCSlice nm = cc_slice_empty();
+    CcExpr* raw;
+    if (!args->len()) return;
+    raw = *args->get_ptr(0);
+    if (!own_ident_of(own_peel(raw), &nm)) return;
+    if (own_pinned(O, nm)) {
+        CCString m = @string(`cannot ${op} arena '${nm}' while a nursery task holds a borrow from it`, O->L->arena);
+        CCSlice note = CC_SLICE_LIT("capturing an arena borrow into a spawn pins that arena epoch "
+                                    "until the nursery scope ends");
+        own_err(O, sp, m, note);
+        return;
+    }
+    if (!cc_slice_eq_cstr(&op, "cc_arena_reset")) return;
+    if (!own_live_borrow(O, nm)) return;
+    {
+        CCString m = @string(`cannot cc_arena_reset arena '${nm}' while a derived slice borrow is still in scope`, O->L->arena);
+        CCSlice note = CC_SLICE_LIT("the reset starts a new epoch, and every borrow taken from the old "
+                                    "one points into bytes the arena has handed back");
+        own_err(O, sp, m, note);
+    }
+}
+
+static void own_check_send(Own* O, CcExprList* args, CcSpan sp) {
+    CCSlice nm = cc_slice_empty();
+    CCSlice ty;
+    OwnFacts* x;
+    OwnFacts* s;
+    CcExpr* payload;
+    if (args->len() < 2) return;
+    payload = *args->get_ptr(1);
+    if (!own_ident_of(payload, &nm)) return;
+    x = own_lookup(O, nm);
+    if (!x) return;                 /* not a local this step tracked */
+    if (x->is_ptr) return;          /* a pointer payload's lifetime is the caller's to state */
+    if (x->is_slice) {
+        if (x->unique || x->is_static) return;
+        {
+            CCString m = @string(`cannot send non-stable slice borrow '${nm}' on a channel`, O->L->arena);
+            CCSlice note = own_chan_note();
+            own_err(O, sp, m, note);
+        }
+        return;
+    }
+    ty = x->ty;
+    s = own_struct(O, ty);
+    if (!s) return;
+    if (s->is_ptr) {
+        CCString m = @string(`cannot send value containing a raw pointer field on a channel`, O->L->arena);
+        CCSlice note = CC_SLICE_LIT("the receiver gets the pointer bits, not the bytes; whoever owns "
+                                    "them may release them first");
+        own_err(O, sp, m, note);
+        return;
+    }
+    /* A slice field the initializer filled from immortal or unique bytes
+     * travels; what this step saw taken from an arena does not. */
+    if (!s->is_slice || s->is_arena || !x->nonstable) return;
+    {
+        CCString m = @string(`cannot send '${nm}' (type '${ty}'): non-stable slice field without a CCArena`, O->L->arena);
+        CCSlice note = own_chan_note();
+        own_err(O, sp, m, note);
+    }
+}
+
+/* A use of a name whose bytes went somewhere else. Named once per local:
+ * the second report says nothing the first did not. */
+static void own_check_moved(Own* O, CCSlice nm, CcSpan sp) {
+    OwnFacts* x = own_lookup(O, nm);
+    if (!x || !x->moved || x->reported) return;
+    x->reported = true;
+    {
+        CCString m = @string(`use of moved slice '${nm}'`, O->L->arena);
+        CCSlice note = CC_SLICE_LIT("a cc_move, and a by-value capture of a unique slice into a "
+                                    "spawn, leave the source with nothing to name");
+        own_err(O, sp, m, note);
+    }
+}
+
+static void own_commit_move(Own* O, CcExprList* args, CcSpan sp) {
+    CCSlice nm = cc_slice_empty();
+    OwnFacts* x;
+    CcExpr* raw;
+    if (!args->len()) return;
+    raw = *args->get_ptr(0);
+    if (!own_ident_of(own_peel(raw), &nm)) return;
+    x = own_lookup(O, nm);
+    if (!x) return;
+    if (x->moved) {
+        own_check_moved(O, nm, sp);
+        return;
+    }
+    x->moved = true;
+}
+
+static void own_report_copy(Own* O, CcSpan sp) {
+    CCString m = @string(`cannot copy unique slice`, O->L->arena);
+    CCSlice note = own_move_note();
+    own_err(O, sp, m, note);
+}
+
+static void own_check_assign(Own* O, CcExpr* lhs, CcExpr* rhs, CcSpan sp) {
+    CCSlice ln = cc_slice_empty();
+    CCSlice rn = cc_slice_empty();
+    OwnFacts* l;
+    OwnFacts* r;
+    bool r_unique;
+    bool r_static;
+    bool r_view;
+    CCSlice r_arena;
+    if (!own_ident_of(lhs, &ln)) return;
+    if (!own_ident_of(rhs, &rn)) return;
+    l = own_lookup(O, ln);
+    r = own_lookup(O, rn);
+    if (!l || !r) return;
+    if (!l->is_slice || !r->is_slice) return;
+    if (r->moved) return;               /* the use scan already named it */
+    if (r->unique || l->unique) {
+        own_report_copy(O, sp);
+        return;
+    }
+    r_unique = r->unique;
+    r_static = r->is_static;
+    r_view = r->arena_view;
+    r_arena = r->arena;
+    l->unique = r_unique;
+    l->is_static = r_static;
+    l->arena_view = r_view;
+    l->arena = r_arena;
+}
+
+/* ---- walking ---------------------------------------------------------- */
+
+static void own_stmt(Own* O, CcStmt* s);
+static void own_scoped(Own* O, CcStmt* s);
+static void own_capture(Own* O, CCSlice nm, bool by_ref, CCSlice nursery, CcSpan sp);
+
+/* Without a capture list, the body itself says what the task takes. */
+static bool own_cap_visit(CcExpr* e, void* env) {
+    Own* O = (Own*)env;
+    CCSlice nm = cc_slice_empty();
+    CCSlice nursery = O->cap_nursery;
+    CcSpan sp = O->cap_span;
+    if (!own_ident_of(e, &nm)) return true;
+    own_capture(O, nm, false, nursery, sp);
+    return true;
+}
+
+static bool own_pending_has(Own* O, CCSlice nm) {
+    CcNameList* p = &O->pending;
+    size_t n = p->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice cur = *p->get_ptr(i);
+        if (slice_eq(cur, nm)) return true;
+    }
+    return false;
+}
+
+static void own_capture(Own* O, CCSlice nm, bool by_ref, CCSlice nursery, CcSpan sp) {
+    OwnFacts* x = own_lookup(O, nm);
+    bool borrows;
+    if (!x) return;
+    borrows = x->arena.len != 0 && (x->arena_view || x->is_arena_ptr);
+    if (borrows) {
+        CCSlice ar = x->arena;
+        own_pin(O, ar, nursery);
+    }
+    x = own_lookup(O, nm);
+    if (!x || by_ref || !x->is_slice || !x->unique) return;
+    if (x->moved) {
+        own_check_moved(O, nm, sp);
+        return;
+    }
+    if (own_pending_has(O, nm)) return;
+    {
+        CcNameList* p = &O->pending;
+        p->push(nm);
+    }
+}
+
+/* A closure body is ordinary statements. A by-value capture of a unique
+ * slice is a move, but only once the body has been walked: inside it the
+ * name is still the task's to read. */
+static void own_closure_body(Own* O, CcClosure cl, CCSlice nursery, CcSpan sp) {
+    size_t mark_pending = O->pending.len();
+    size_t mark_vars = O->vars.len();
+    Vec::[CcCapture]* caps = &cl.captures;
+    size_t nc = caps->len();
+    size_t i;
+    if (nursery.len && nc) {
+        for (i = 0; i < nc; i++) {
+            CcCapture* c = caps->get_ptr(i);
+            CCSlice cn = c->name;
+            bool ref = c->by_ref;
+            own_capture(O, cn, ref, nursery, sp);
+        }
+    } else if (nursery.len && cl.body) {
+        CcVisitor v;
+        O->cap_nursery = nursery;
+        O->cap_span = sp;
+        memset(&v, 0, sizeof(v));
+        v.expr = own_cap_visit;
+        v.env = O;
+        CcStmt_walk(cl.body, v);
+    }
+    for (i = 0; i < nc; i++) {
+        CcCapture* c = caps->get_ptr(i);
+        CcExpr* ci = c->init;
+        own_scan(O, ci);
+    }
+    own_stmt(O, cl.body);
+    own_drop_to(O, mark_vars);
+    {
+        CcNameList* p = &O->pending;
+        size_t np = p->len();
+        for (i = mark_pending; i < np; i++) {
+            CCSlice nm = *p->get_ptr(i);
+            OwnFacts* x = own_lookup(O, nm);
+            if (x) x->moved = true;
+        }
+        p->truncate(mark_pending);
+    }
+}
+
+static void own_spawn_site(Own* O, CcUfcs uf, CcSpan sp) {
+    CCSlice nursery = cc_slice_empty();
+    CcExprList args = uf.args;
+    size_t n = args.len();
+    size_t i;
+    CCSlice recv = cc_slice_empty();
+    if (own_ident_of(uf.recv, &recv)) nursery = recv;
+    for (i = 0; i < n; i++) {
+        CcExpr* a = *args.get_ptr(i);
+        CcClosure cl;
+        if (own_closure_of(a, &cl)) own_closure_body(O, cl, nursery, sp);
+        else own_scan(O, a);
+    }
+}
+
+/* A name that stands for bytes that are gone. Closures are walked on their
+ * own so a body reads the scope it actually runs in. */
+static bool own_use_visit(CcExpr* e, void* env) {
+    Own* O = (Own*)env;
+    CCSlice nm = cc_slice_empty();
+    CCSlice callee = cc_slice_empty();
+    CcExprList args;
+    CcClosure cl;
+    if (own_closure_of(e, &cl)) return false;
+    if (own_call_of(e, &callee, &args) && cc_slice_eq_cstr(&callee, "cc_move")) return false;
+    if (!own_ident_of(e, &nm)) return true;
+    own_check_moved(O, nm, e->span);
+    return true;
+}
+
+static bool own_act_visit(CcExpr* e, void* env) {
+    Own* O = (Own*)env;
+    CCSlice callee = cc_slice_empty();
+    CcExprList args;
+    CcClosure cl;
+    CcUfcs uf;
+    CcExpr* lhs;
+    CcExpr* rhs;
+    if (own_closure_of(e, &cl)) {
+        CCSlice none = cc_slice_empty();
+        own_closure_body(O, cl, none, e->span);
+        return false;
+    }
+    if (own_ufcs_of(e, &uf)) {
+        CCSlice method = uf.method;
+        if (!own_is_spawn(method)) return true;
+        own_spawn_site(O, uf, e->span);
+        return false;
+    }
+    if (own_assign_of(e, &lhs, &rhs)) {
+        own_check_assign(O, lhs, rhs, e->span);
+        return true;
+    }
+    if (!own_call_of(e, &callee, &args)) return true;
+    if (own_is_deleter(callee)) own_check_free(O, &args, e->span);
+    else if (own_is_epoch_op(callee)) own_check_epoch(O, callee, &args, e->span);
+    else if (own_is_send(callee)) own_check_send(O, &args, e->span);
+    else if (cc_slice_eq_cstr(&callee, "cc_move")) own_commit_move(O, &args, e->span);
+    return true;
+}
+
+/* Every expression is read twice: first for names already given away, then
+ * for what the expression itself does. That order is what makes
+ * `t = a move of s` then a use of `s` report the use and not the move. */
+static void own_scan(Own* O, CcExpr* e) {
+    CcVisitor v;
+    if (!e) return;
+    memset(&v, 0, sizeof(v));
+    v.expr = own_use_visit;
+    v.env = O;
+    CcExpr_walk(e, v);
+    memset(&v, 0, sizeof(v));
+    v.expr = own_act_visit;
+    v.env = O;
+    CcExpr_walk(e, v);
+}
+
+static void own_declare(Own* O, CcDecl* d, CcVarDecl vd) {
+    CcExpr* init = vd.init ? vd.init->expr : NULL;
+    OwnFacts nv;
+    OwnFacts* s;
+    CCSlice src = cc_slice_empty();
+    CCSlice callee = cc_slice_empty();
+    CcExprList cargs;
+    bool by_name = false;
+    memset(&nv, 0, sizeof(nv));
+    nv.name = vd.name;
+    nv.ty = cc_slice_empty();
+    nv.arena = cc_slice_empty();
+    own_type_facts(vd.type, &nv);
+    if (nv.is_ptr) {
+        /* `CCArena* a` is a live handle, not an arena value. */
+        nv.is_arena = false;
+        nv.is_nursery = false;
+    }
+    own_scan_init(O, vd.init);
+    if (!nv.is_slice && !nv.is_ptr) {
+        O->init_nonstable = false;
+        own_init_nonstable(O, vd.init);
+        nv.nonstable = O->init_nonstable;
+    }
+    if (init && own_ident_of(init, &src)) by_name = true;
+    if (!by_name && init && own_call_of(init, &callee, &cargs) &&
+        cc_slice_eq_cstr(&callee, "cc_move") && cargs.len()) {
+        CCSlice mv = cc_slice_empty();
+        CcExpr* raw = *cargs.get_ptr(0);
+        if (own_ident_of(own_peel(raw), &mv)) src = mv;
+    }
+    s = src.len ? own_lookup(O, src) : NULL;
+    if (s) {
+        /* A second name for one owner's bytes is exactly what a unique
+         * slice's type forbids. */
+        if (nv.is_slice && s->is_slice) {
+            if (by_name && s->unique && !s->moved) own_report_copy(O, d->span);
+            if (s->unique) nv.unique = true;
+            if (s->is_static) nv.is_static = true;
+            nv.arena_view = s->arena_view;
+            nv.arena = s->arena;
+        }
+        if (nv.is_ptr && s->is_arena_ptr) {
+            nv.is_arena_ptr = true;
+            nv.arena = s->arena;
+        }
+    } else if (init) {
+        own_read_init(O, init, &nv);
+        if (O->init_from_alloc) {
+            if (nv.is_slice) nv.arena_view = true;
+            if (nv.is_ptr) nv.is_arena_ptr = true;
+        } else if (nv.is_slice && O->init_base.len) {
+            CCSlice base = O->init_base;
+            OwnFacts* b = own_lookup(O, base);
+            if (b && b->arena.len && (b->is_arena_ptr || b->arena_view)) {
+                nv.arena_view = true;
+                nv.arena = b->arena;
+            }
+        }
+        O->init_var = NULL;
+    }
+    {
+        OwnFactList* v = &O->vars;
+        OwnFacts* row = cc_arena_alloc(O->L->arena, sizeof(OwnFacts), _Alignof(OwnFacts));
+        *row = nv;
+        v->push(row);
+    }
+    own_scoped(O, vd.destroy_body);
+}
+
+static void own_decl(Own* O, CcDecl* d) {
+    if (!d) return;
+    @switch (d->k) {
+        case .var(vd): own_declare(O, d, vd); break;
+        default: break;
+    }
+}
+
+static void own_stmts(Own* O, CcStmtList* list) {
+    size_t n = list->len();
+    size_t i;
+    for (i = 0; i < n; i++) own_stmt(O, *list->get_ptr(i));
+}
+
+static void own_block(Own* O, CcStmtList* list) {
+    size_t mark = O->vars.len();
+    own_stmts(O, list);
+    own_drop_to(O, mark);
+}
+
+static void own_scoped(Own* O, CcStmt* s) {
+    size_t mark = O->vars.len();
+    own_stmt(O, s);
+    own_drop_to(O, mark);
+}
+
+static void own_exprs(Own* O, CcExprList* list) {
+    size_t n = list->len();
+    size_t i;
+    for (i = 0; i < n; i++) own_scan(O, *list->get_ptr(i));
+}
+
+/* A field name that is also an arm of the variant a `@switch` is over reads
+ * as a projection inside that case body, so both are read out here. */
+static void own_spawn_block(Own* O, CcSpawnBlock sb) {
+    CcExprList* cl = &sb.closing;
+    CcStmtList* st = &sb.stmts;
+    own_exprs(O, cl);
+    own_block(O, st);
+}
+
+static void own_arms(Own* O, OwnArmList* arms) {
+    size_t n = arms->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcParallelArm* arm = arms->get_ptr(i);
+        CcExpr* ae = arm->expr;
+        CcStmt* as = arm->serial;
+        own_scan(O, ae);
+        own_scoped(O, as);
+    }
+}
+
+static void own_for_in(Own* O, CcForIn* fi) {
+    CcExprList* xs = &fi->iterables;
+    own_exprs(O, xs);
+    own_scoped(O, fi->body);
+    own_scan(O, fi->tail);
+}
+
+static void own_stmt_b(Own* O, CcStmt* s);
+static void own_stmt_c(Own* O, CcStmt* s);
+static void own_stmt_d(Own* O, CcStmt* s);
+
+static void own_stmt(Own* O, CcStmt* s) {
+    if (!s) return;
+    @switch (s->k) {
+        case .expr(es): own_scan(O, es.e); own_scoped(O, es.body); break;
+        case .decl(ds): own_decl(O, ds.d); break;
+        case .block(bl): own_block(O, &bl.stmts); break;
+        case .if_(ifs): own_scan(O, ifs.cond); own_scoped(O, ifs.then); own_scoped(O, ifs.els); break;
+        case .while_(wh): own_scan(O, wh.cond); own_scoped(O, wh.body); break;
+        case .do_(dw): own_scoped(O, dw.body); own_scan(O, dw.cond); break;
+        case .for_(fr): {
+            size_t mark = O->vars.len();
+            own_decl(O, fr.init_decl);
+            own_stmts(O, &fr.more);
+            own_scan(O, fr.init_expr);
+            own_scan(O, fr.cond);
+            own_scan(O, fr.step);
+            own_stmt(O, fr.body);
+            own_drop_to(O, mark);
+            break;
+        }
+        case .switch_(sw): own_scan(O, sw.subject); own_scoped(O, sw.body); break;
+        case .case_(ce): own_stmt(O, ce.inner); break;
+        case .return_(rt): {
+            CCSlice nm = cc_slice_empty();
+            OwnFacts* x;
+            own_scan(O, rt.value);
+            if (!rt.value) break;
+            if (!own_ident_of(rt.value, &nm)) break;
+            x = own_lookup(O, nm);
+            if (!x || !x->is_slice || !x->unique) break;
+            {
+                CCString m = @string(`cannot return unique slice`, O->L->arena);
+                CCSlice note = CC_SLICE_LIT("a unique slice is move-only: return it through cc_move to "
+                                            "transfer ownership out of the frame");
+                own_err(O, s->span, m, note);
+            }
+            break;
+        }
+        case .label(lb): own_stmt(O, lb.inner); break;
+        default: own_stmt_b(O, s); break;
+    }
+}
+
+static void own_stmt_b(Own* O, CcStmt* s) {
+    @switch (s->k) {
+        case .defer(df): own_scoped(O, df.body); break;
+        case .errhandler(eh): own_scoped(O, eh.body); break;
+        case .err_fwd(ef): own_scan(O, ef.err); break;
+        case .unwrap(us): own_scan(O, us.e); break;
+        case .goto_(gt): own_scan(O, gt.target); break;
+        case .for_in(fi): own_for_in(O, &fi); break;
+        case .serial(sr): own_block(O, &sr.stmts); break;
+        case .unsafe(us2): own_block(O, &us2.stmts); break;
+        case .comptime_block(cb): own_block(O, &cb.stmts); break;
+        case .spawn_block(sb): own_spawn_block(O, sb); break;
+        default: own_stmt_c(O, s); break;
+    }
+}
+
+static void own_stmt_c(Own* O, CcStmt* s) {
+    @switch (s->k) {
+        case .with_deadline(wd): own_scan(O, wd.deadline); own_block(O, &wd.stmts); break;
+        case .with(wi): own_scan(O, wi.value); own_block(O, &wi.stmts); break;
+        case .closing(cg): own_exprs(O, &cg.channels); own_scan(O, cg.spawn); own_block(O, &cg.stmts); break;
+        case .stage(sg): own_scan(O, sg.gate); own_exprs(O, &sg.args); own_block(O, &sg.stmts); break;
+        case .mode_block(mb): own_block(O, &mb.stmts); break;
+        case .parallel_dest(pd): own_scan(O, pd.dest); own_block(O, &pd.stmts); break;
+        case .comptime_if(ci): own_scan(O, ci.cond); own_block(O, &ci.then); own_block(O, &ci.els); break;
+        case .comptime_for(cf): own_scan(O, cf.over); own_block(O, &cf.stmts); break;
+        default: own_stmt_d(O, s); break;
+    }
+}
+
+static void own_stmt_d(Own* O, CcStmt* s) {
+    @switch (s->k) {
+        case .parallel(pa): {
+            OwnArmList* arms = &pa.arms;
+            own_scan(O, pa.pred);
+            own_scan(O, pa.target);
+            own_arms(O, arms);
+            own_scan(O, pa.tail);
+            break;
+        }
+        case .parallel_for(pf): {
+            CcForIn loop = pf.loop;
+            own_scan(O, pf.pred);
+            own_scan(O, pf.target);
+            own_for_in(O, &loop);
+            own_scan(O, pf.tail);
+            break;
+        }
+        default: break;
+    }
+}
+
+/* ---- the unit --------------------------------------------------------- */
+
+/* Parameters are not tracked: what a caller handed in is the caller's to
+ * state, and refusing on a formal would refuse programs whose provenance
+ * this step cannot see. */
+static void own_fn(Own* O, CcFuncDecl f) {
+    OwnFactList* vars = &O->vars;
+    CcNameList* pa = &O->pin_arena;
+    CcNameList* pn = &O->pin_nursery;
+    if (!f.body) return;
+    vars->truncate(0);
+    pa->truncate(0);
+    pn->truncate(0);
+    own_stmt(O, f.body);
+    vars->truncate(0);
+    pa->truncate(0);
+    pn->truncate(0);
+}
+
+static void own_note_struct(Own* O, CCSlice name, CcType* t) {
+    if (!name.len || !t) return;
+    @switch (t->k) {
+        case .record(rc): {
+            CcFieldList* fs = &rc.fields;
+            size_t n = fs->len();
+            size_t i;
+            OwnFactList* v = &O->structs;
+            OwnFacts* s;
+            if (!rc.is_definition) break;
+            s = cc_arena_alloc(O->L->arena, sizeof(OwnFacts), _Alignof(OwnFacts));
+            memset(s, 0, sizeof(*s));
+            s->name = name;
+            s->ty = name;
+            s->arena = cc_slice_empty();
+            for (i = 0; i < n; i++) {
+                CcField* fd = fs->get_ptr(i);
+                CcType* ft = fd->type;
+                own_field_facts(ft, s);
+            }
+            v->push(s);
+            break;
+        }
+        default: break;
+    }
+}
+
+/* The aggregates the file declares, before any body reads them: a send
+ * earlier in the file still needs the layout of a type declared later. */
+static void own_pre_decl(Own* O, CcDecl* d) {
+    if (!d) return;
+    @switch (d->k) {
+        case .typedef_(td): {
+            CCSlice nm = td.name;
+            CcType* t = td.type;
+            own_note_struct(O, nm, t);
+            break;
+        }
+        default: break;
+    }
+}
+
+static void own_top_decl(Own* O, CcDecl* d) {
+    if (!d) return;
+    @switch (d->k) {
+        case .func(f): own_fn(O, f); break;
+        case .comptime_fn(cf): own_fn(O, cf.fn); break;
+        default: break;
+    }
+}
+
+static void CcLowerer_own(CcLowerer* L) {
+    Own O;
+    CcDeclList* decls = &L->unit->decls;
+    size_t n = decls->len();
+    size_t i;
+    memset(&O, 0, sizeof(O));
+    O.L = L;
+    O.vars = vec_new::[OwnFactsRef](L->arena);
+    O.structs = vec_new::[OwnFactsRef](L->arena);
+    O.pin_arena = vec_new::[CCSlice](L->arena);
+    O.pin_nursery = vec_new::[CCSlice](L->arena);
+    O.pending = vec_new::[CCSlice](L->arena);
+    for (i = 0; i < n; i++) own_pre_decl(&O, *decls->get_ptr(i));
+    for (i = 0; i < n; i++) own_top_decl(&O, *decls->get_ptr(i));
+}
+
+#endif

@@ -273,6 +273,7 @@ static void lw_drop_cc_only(CcLowerer* L);
 #include "lower_asargs.cch"
 #include "lower_strswitch.cch"
 #include "lower_cleanup.cch"
+#include "lower_own.cch"
 
 /* The banner every lowered TU starts with: the generator, and the two
  * headers whose names lowered code spells without asking. */
@@ -702,6 +703,7 @@ static void CcLowerer_includes(CcLowerer* L) {
 
 static void CcLowerer_lower_unit(CcLowerer* L) {
     CcLowerer_comptime(L);  /* first: a value the user asked for at compile time is a constant to every step */
+    CcLowerer_own(L);       /* then, before any rewrite: the ownership checks read the program as written */
     CcLowerer_includes(L);
     CcLowerer_deadline(L);  /* before the rest: a deadline body is ordinary statements to every one of them */
     CcLowerer_chan(L);      /* before them: an endpoint is the runtime handle before anything
