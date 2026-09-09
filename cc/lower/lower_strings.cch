@@ -23,6 +23,7 @@ typedef struct TStep {
     Walker* w;
     int n_templates;
     CcExprList failed;          /* arena templates the step could not build; already reported */
+    CcExprList emitted;         /* template literals that are an `@emit` argument, not an `@string` */
     bool scratch_used;          /* this function has a template on `@scratch` */
     int scratch_bytes;          /* the largest size any of them asked for */
 } TStep;
@@ -189,6 +190,68 @@ static bool sr_arena_stmts(TStep* st, CCSlice name, CcTemplate tp, CcSpan sp, Cc
     return true;
 }
 
+static void sr_error_note(CcLowerer* L, CcSpan span, CCString msg, CCSlice note) {
+    CcUnit* u = L->unit;
+    CcLoc loc = u->loc(span);
+    CcDiag d = CcDiag_error(loc, cc_string_persist_slice(L->arena, &msg));
+    CcDiags* ds = L->ds;
+    d = CcDiag_with_note(d, note);
+    ds->push(d);
+}
+
+/* The widths the stack form can size a slot against: the scalar types the
+ * header's bound table has an arm for, worst case. A slice, a `CCString`, a
+ * pointer or a float has no width known here, and with no arena there is
+ * nothing to grow into -- so it is refused at the slot, naming it, rather
+ * than left for the host compiler to report as an unmatched association on
+ * a generated `_Generic`. */
+static bool sr_bounded_width(CCSlice n) {
+    static const char* const known[26] = {
+        "char", "bool", "_Bool", "signed char", "unsigned char",
+        "short", "short int", "unsigned short",
+        "int", "unsigned", "unsigned int",
+        "long", "long int", "unsigned long",
+        "long long", "long long int", "unsigned long long",
+        "int8_t", "uint8_t", "int16_t", "uint16_t",
+        "int32_t", "uint32_t", "int64_t", "uint64_t", "size_t"
+    };
+    size_t i;
+    for (i = 0; i < 26; i++) {
+        CCSlice k = cstr_slice(known[i]);
+        if (slice_eq(n, k)) return true;
+    }
+    return slice_eq(n, cstr_slice("ptrdiff_t"));
+}
+
+/* One slot of a stack-form template: does its value have a width the buffer
+ * can be sized from? A slot the index cannot type is left to the bound
+ * table, which is where the host compiler names it. */
+static bool sr_slot_bounded(TStep* st, CcTplPart* part, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CcType* t = type_of_expr(st->w, part->slot);
+    CCSlice canon;
+    const CcTape* tape;
+    CCString spelled;
+    if (!t) return true;
+    canon = L->ix->canon(t);
+    if (!canon.len || sr_bounded_width(canon)) return true;
+    tape = part->tape ? part->tape : &L->unit->tape;
+    spelled = CcExpr_spell(part->slot, tape, L->arena);
+    {
+        /* the message names the slot as it is written, and a template
+         * cannot spell `${` -- it would open a slot of its own */
+        CCSlice who = lw_keep(L, &spelled);
+        CCString m = cc_string_new();
+        cc_string_push_cstr(&m, "interpolation '${", L->arena);
+        cc_string_push_slice(&m, who, L->arena);
+        cc_string_push_cstr(&m, "}' has no statically bounded width: a '", L->arena);
+        cc_string_push_slice(&m, canon, L->arena);
+        cc_string_push_cstr(&m, "' is formatted at a width this buffer cannot be sized against", L->arena);
+        sr_error_note(L, sp, m, cstr_slice("pass an arena, or @scratch"));
+    }
+    return false;
+}
+
 /* The stack form, as one expression: a buffer sized from the literal runs
  * and a bound per slot, then each piece pushed into it. */
 static CcExpr* sr_stack_expr(TStep* st, CcTemplate tp, CcSpan sp) {
@@ -213,6 +276,7 @@ static CcExpr* sr_stack_expr(TStep* st, CcTemplate tp, CcSpan sp) {
         } else {
             const CcTape* tape = part->tape ? part->tape : &L->unit->tape;
             CCString spelled = CcExpr_spell(part->slot, tape, L->arena);
+            if (!sr_slot_bounded(st, part, part->span)) return NULL;
             size.push_cstr(" + cc__string_stack_bound((", L->arena);
             size.push_slice(cc_string_as_slice(&spelled), L->arena);
             size.push_cstr("))", L->arena);
@@ -239,6 +303,26 @@ static CcExpr* sr_stack_expr(TStep* st, CcTemplate tp, CcSpan sp) {
     return lw_call1(L, cstr_slice("cc__string_stack_slice"), built, sp);
 }
 
+/* An `@emit` keeps its argument list as written, so the template literal
+ * inside it is still a template node with no arena of its own -- the arena
+ * is the emit's next argument. It is the comptime step's text, not a
+ * string this step builds, so it is noted where it is seen (an `@emit` is
+ * visited before its arguments) and left alone. */
+static bool sr_is_emit(CcExpr* e, CcEmit* out) {
+    @switch (e->k) {
+        case .emit(em): *out = em; return true;
+        default: return false;
+    }
+}
+
+static bool sr_noted_emit(TStep* st, CcExpr* e) {
+    CcExprList* v = &st->emitted;
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) if (*v->get_ptr(i) == e) return true;
+    return false;
+}
+
 static bool sr_is_template(CcExpr* e, CcTemplate* out) {
     CcExpr* s = e;
     if (!s) return false;
@@ -252,7 +336,20 @@ static bool sr_is_template(CcExpr* e, CcTemplate* out) {
 static bool sr_stack_visit(CcExpr* e, void* env) {
     TStep* st = (TStep*)env;
     CcTemplate tp;
+    CcEmit em;
+    if (sr_is_emit(e, &em)) {
+        CcExprList* av = &em.args;
+        size_t n = av->len();
+        size_t i;
+        for (i = 0; i < n; i++) {
+            CcExpr* a = *av->get_ptr(i);
+            CcTemplate lit;
+            if (a && sr_is_template(a, &lit) && !sr_noted_emit(st, a)) st->emitted.push(a);
+        }
+        return true;
+    }
     if (!sr_is_template(e, &tp)) return true;
+    if (sr_noted_emit(st, e)) return true;
     if (tp.arena) return true;                 /* the arena form is a statement sequence */
     {
         CcExpr* built = sr_stack_expr(st, tp, e->span);
@@ -449,6 +546,16 @@ static void sr_leftover_fn(TStep* st, CcFuncDecl f) {
     CcStmt_walk(f.body, v);
 }
 
+static void sr_stack_stmt(Walker* w, CcStmt* s, bool enter) {
+    TStep* st = (TStep*)w->env;
+    CcVisitor v;
+    if (enter) return;
+    memset(&v, 0, sizeof(v));
+    v.expr = sr_stack_visit;
+    v.env = st;
+    CcStmt_walk(s, v);
+}
+
 static void CcLowerer_strings(CcLowerer* L) {
     Walker w;
     TStep st;
@@ -460,6 +567,7 @@ static void CcLowerer_strings(CcLowerer* L) {
     st.L = L;
     st.w = &w;
     st.failed = vec_new::[CcExprRef](L->arena);
+    st.emitted = vec_new::[CcExprRef](L->arena);
     memset(&w, 0, sizeof(w));
     w.arena = L->arena;
     w.ix = L->ix;
@@ -474,7 +582,16 @@ static void CcLowerer_strings(CcLowerer* L) {
             default: break;
         }
     }
-    /* the stack form is an expression: it can be anywhere */
+    /* The stack form is an expression, so it can be anywhere; but sizing a
+     * slot asks the index what the slot's value is, and that answer needs
+     * the scope the slot stands in. So the sweep is driven by the typing
+     * walk, on the way OUT of each statement: an inner statement finishes
+     * first, so its templates are built under their own scope, and the
+     * outer pass over them is a no-op because each is already the call it
+     * lowered to. The plain sweep after it catches what no statement holds
+     * -- a file-scope initializer. */
+    w.on_stmt = sr_stack_stmt;
+    tw_unit(&w);
     memset(&v, 0, sizeof(v));
     v.expr = sr_stack_visit;
     v.env = &st;
