@@ -18,6 +18,7 @@ typedef struct RHandler {
     CCSlice binder;
     CcStmt* body;
     bool hoisted;
+    bool emitted;               /* its label already stands in the block that declared it */
     size_t depth;
     CcSpan span;                /* the `@errhandler` statement */
 } RHandler;
@@ -267,6 +268,7 @@ static void rl_register_handler(RFn* fn, const CcErrhandler* eh, CcSpan sp) {
     RHandler* h = cc_arena_alloc(L->arena, sizeof(RHandler), _Alignof(RHandler));
     RHandlerList* hs = &fn->handlers;
     h->id = CcLowerer_temp_id(L);
+    h->emitted = false;
     h->err_type = eh->err_type;
     h->err_canon = eh->err_type ? rl_ix_canon(L, eh->err_type) : cc_slice_empty();
     h->binder = eh->binder;
@@ -689,6 +691,12 @@ static CcExpr* rl_err_as(CcLowerer* L, CcSpan sp, CCSlice to) {
 
 static CCSlice rl_cell_name(CcLowerer* L, uint32_t id) {
     CCString s = @string(`__cc_eh_e_${id}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+/* The label the normal path jumps to, over a block's handlers. */
+static CCSlice rl_skip_name(CcLowerer* L, uint32_t id) {
+    CCString s = @string(`__cc_ehx_${id}`, L->arena);
     return lw_keep(L, &s);
 }
 
@@ -1131,6 +1139,37 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
             }
         }
     }
+    /* A handler declared inside a block reads that block's names, so its
+     * body stays in the block that declared it: at the end of the function
+     * the `h` a `h.fail(e)` names is long out of scope. The normal path
+     * jumps over them on its way out. */
+    if (fn->depth > 1) {
+        RHandlerList* hs = &fn->handlers;
+        size_t nh = hs->len();
+        size_t hi;
+        uint32_t first = 0;
+        bool any = false;
+        for (hi = handlers_at_entry; hi < nh; hi++) {
+            RHandler* h = *hs->get_ptr(hi);
+            if (!h->hoisted || h->emitted) continue;
+            if (!any) { first = h->id; any = true; }
+        }
+        if (any) {
+            CCSlice done = rl_skip_name(L, first);
+            CcSpan sp = out.len() ? (*out.get_ptr(out.len() - 1))->span : (*hs->get_ptr(handlers_at_entry))->span;
+            out.push(lw_goto(L, done, sp));
+            for (hi = handlers_at_entry; hi < nh; hi++) {
+                RHandler* h = *hs->get_ptr(hi);
+                CcExpr* cell;
+                if (!h->hoisted || h->emitted) continue;
+                cell = lw_ident(L, rl_cell_name(L, h->id), h->span);
+                out.push(lw_label(L, rl_label_name(L, h->id), NULL, h->span));
+                out.push(rl_inline_handler(fn, h, cell, h->span));
+                h->emitted = true;
+            }
+            out.push(lw_label(L, done, NULL, sp));
+        }
+    }
     fn->depth--;
     {
         RHandlerList* hs = &fn->handlers;
@@ -1406,6 +1445,7 @@ static void rl_function(CcLowerer* L, CcDecl* d, CcFuncDecl* f) {
             for (i = 0; i < n; i++) {
                 RHandler* h = *ho->get_ptr(i);
                 CcSpan hs = h->body ? h->body->span : d->span;
+                if (h->emitted) continue;   /* it stands in the block that declared it */
                 with_cells.push(lw_label(L, rl_label_name(L, h->id), NULL, hs));
                 with_cells.push(rl_inline_handler(&fn, h, lw_ident(L, rl_cell_name(L, h->id), hs), hs));
             }
