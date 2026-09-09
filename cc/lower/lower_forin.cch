@@ -3,7 +3,9 @@
  * extent the type declares: its `.len` hook says how many, its `.access`
  * hook says where the elements are. Both are read off the type's own
  * registration, so the lowerer walks a Vec, a CCString and a user
- * container by the same rule and names none of them.
+ * container by the same rule and names none of them. A `T[n]` carries its
+ * extent in its declaration instead, so the loop reads it from there and
+ * `a.len` / `a.len()` spell the same constant.
  *
  * The length is read once, before the loop: a walk is over the extent the
  * container had when the walk began, so growing it inside the body does
@@ -12,9 +14,24 @@
  * `@for (i in lo..hi)` is the same loop over a range, with both ends read
  * once for the same reason.
  *
+ * `@for (&x in xs)` binds the element to store back into: every write to
+ * the binder becomes a write through the walk. A frozen extent -- a slice
+ * header, a `T[n]`, a container the body never names -- is peeled once and
+ * stored through that peel. A container the body can grow or shrink is
+ * not: its length and its data pointer are read again at each store, and a
+ * position the extent no longer covers is the walk's error, raised where
+ * the store was written. That is why the whole walk is a Result and why
+ * `!>` is required after the block: a store that silently did nothing
+ * would be indistinguishable from a store that had nothing to do.
+ *
+ * `@for (a, b in xs, ys)` walks two sequences at one position. Unequal
+ * extents are `CC_ERR_INVALID_ARG` rather than a silent minimum, so the
+ * zip form is a Result too.
+ *
  * A type with no `.len` or no `.access` is a diagnostic naming which is
  * missing; guessing `.len` from a field called `len` would walk whatever
- * happened to be named that. Lifetime: the lowerer arena. */
+ * happened to be named that. A `T*` is not an extent at all: nothing on it
+ * says how far it reaches. Lifetime: the lowerer arena. */
 #ifndef CC_LOWER_FORIN_CCH
 #define CC_LOWER_FORIN_CCH
 #include "lower.cch"
@@ -24,7 +41,27 @@ typedef struct FStep {
     CcLowerer* L;
     Walker* w;
     uint32_t next_id;
+    uint32_t depth;         /* statements entered, so a handler's scope ends with its block */
+    uint32_t n_eh;          /* the `@errhandler`s a raise here would reach */
+    uint32_t eh_depth[64];
 } FStep;
+
+/* One sequence of a walk: the subject as written, the extent it declares,
+ * and the names the loop reads it through. */
+typedef struct FSubj {
+    CcExpr* e;
+    CcType* type;
+    CCSlice canon;
+    CcHookReg* hooks;       /* NULL for a `T[n]`: an array registers none */
+    bool is_array;
+    CcType* elem;
+    CCSlice bind;           /* the binder this sequence fills */
+    bool mut;               /* `&x`: writes to the binder are writes to the element */
+    bool snap;              /* the extent is read once, into nname / pname */
+    CCSlice nname;
+    CCSlice pname;
+    CCSlice sname;          /* a view the subject computes: bound once, and read through */
+} FSubj;
 
 /* The hooks a walk needs, as the type registered them. */
 static CcHookReg* fi_hooks_of(CcLowerer* L, CcType* t, CCSlice* canon_out) {
@@ -91,28 +128,6 @@ static CcType* fi_elem_type(CcLowerer* L, Walker* w, CcType* rt, CCSlice canon,
     return NULL;
 }
 
-/* `(recv).len` or `len_call(&recv)`, as the `.len` hook says. */
-static CcExpr* fi_len_expr(CcLowerer* L, CcHookReg* hooks, CcExpr* recv, CcSpan sp) {
-    if (cc_slice_eq_cstr(&hooks->len_kind, "call"))
-        return lw_call1(L, hooks->len_name, cc_expr_unary(CC_OP_ADDR, lw_paren(L, recv, sp), sp, L->arena), sp);
-    return cc_expr_member(lw_paren(L, recv, sp), hooks->len_name, false, sp, L->arena);
-}
-
-/* `(T*)(recv).data` or `access_call(&recv)`, as the `.access` hook says. */
-static CcExpr* fi_data_expr(CcLowerer* L, CcHookReg* hooks, CcExpr* recv, CcType* elem, CcSpan sp) {
-    if (cc_slice_eq_cstr(&hooks->access_kind, "call"))
-        return lw_call1(L, hooks->access_name, cc_expr_unary(CC_OP_ADDR, lw_paren(L, recv, sp), sp, L->arena), sp);
-    {
-        CcExpr* field = cc_expr_member(lw_paren(L, recv, sp), hooks->access_name, false, sp, L->arena);
-        CcExpr* cast = cc__expr_blank(sp, L->arena);
-        CcCast ca;
-        ca.type = cc_type_pointer(elem, sp, L->arena);
-        ca.a = field;
-        cast->k = { .cast = ca };
-        return cast;
-    }
-}
-
 static CCSlice fi_tmp(CcLowerer* L, const char* stem, uint32_t id) {
     CCString s = @string(`__cc_${stem}_${id}`, L->arena);
     return lw_keep(L, &s);
@@ -121,6 +136,511 @@ static CCSlice fi_tmp(CcLowerer* L, const char* stem, uint32_t id) {
 static CcType* fi_size_t(CcLowerer* L, CcSpan sp) {
     return cc_type_named(cstr_slice("size_t"), sp, L->arena);
 }
+
+static CcExpr* fi_zero(CcLowerer* L, CcSpan sp) {
+    CCString s = @string(`0`, L->arena);
+    return lw_text(L, s, sp);
+}
+
+static CcExpr* fi_one(CcLowerer* L, CcSpan sp) {
+    CCString s = @string(`1`, L->arena);
+    return lw_text(L, s, sp);
+}
+
+/* ---- what a walk may be over -------------------------------------------- */
+
+static bool fi_type_is_pointer(const CcType* t) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .pointer: return true;
+        default: return false;
+    }
+}
+
+static bool fi_type_is_array(const CcType* t) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .array: return true;
+        default: return false;
+    }
+}
+
+/* The subject is read twice -- once for its length, once for its elements
+ * -- so it has to be something reading twice means the same thing about: a
+ * name, a field path, a deref, an element, or a view of one. A constructor
+ * call is none of those; walking it would build two containers. */
+/* A subject that names a place is read where it stands. One that computes a
+ * view (`line.sub(1, line.len)`) is bound once first: the extent and the
+ * data pointer are two reads of it, and computing it twice both runs its
+ * side effects twice and leaves the same node in the tree twice for every
+ * step after this one to rewrite. */
+static bool fi_subj_is_place(CcExpr* e) {
+    CcExpr* inner = NULL;
+    if (!e) return false;
+    @switch (e->k) {
+        case .ident: return true;
+        case .member(mb): inner = mb.a; break;
+        case .index(ix): inner = ix.a; break;
+        case .paren(pa): inner = pa.a; break;
+        case .unary(un): if (un.op != CC_OP_DEREF) return false; inner = un.a; break;
+        default: return false;
+    }
+    return fi_subj_is_place(inner);
+}
+
+static bool fi_subj_shape_ok(CcExpr* e) {
+    CcExpr* inner = NULL;
+    if (!e) return false;
+    @switch (e->k) {
+        case .ident: return true;
+        case .member: return true;
+        case .index: return true;
+        case .ufcs: return true;
+        case .paren(pa): inner = pa.a; break;
+        case .unary(un): return un.op == CC_OP_DEREF;
+        default: return false;
+    }
+    return fi_subj_shape_ok(inner);
+}
+
+/* The name the subject hangs off: what the body would have to mention to
+ * move the extent under a walk that is writing into it. */
+static CCSlice fi_root_name(CcExpr* e) {
+    CcExpr* inner = NULL;
+    if (!e) return cc_slice_empty();
+    @switch (e->k) {
+        case .ident(nm): return nm;
+        case .member(mb): inner = mb.a; break;
+        case .index(ix): inner = ix.a; break;
+        case .ufcs(uf): inner = uf.recv; break;
+        case .paren(pa): inner = pa.a; break;
+        case .unary(un): inner = un.a; break;
+        case .cast(ca): inner = ca.a; break;
+        default: return cc_slice_empty();
+    }
+    return fi_root_name(inner);
+}
+
+typedef struct FNames { CCSlice name; bool hit; } FNames;
+
+static bool fi_names_expr(CcExpr* e, void* env) {
+    FNames* n = (FNames*)env;
+    CCSlice nm;
+    if (expr_ident(e, &nm) && slice_eq(nm, n->name)) n->hit = true;
+    return true;
+}
+
+/* 1 = the body names the container, so the extent it walks is live. */
+static bool fi_body_names(CcStmt* body, CCSlice name) {
+    CcVisitor v;
+    FNames n;
+    if (!body || !name.len) return false;
+    n.name = name;
+    n.hit = false;
+    memset(&v, 0, sizeof(v));
+    v.expr = fi_names_expr;
+    v.env = &n;
+    CcStmt_walk(body, v);
+    return n.hit;
+}
+
+/* A slice header and a `T[n]` cannot move while the walk writes elements
+ * through them, so their extent is read once. A grower can move: only a
+ * body that never names it leaves its extent still true at every store. */
+static bool fi_frozen(FSubj* s) {
+    if (s->is_array) return true;
+    if (!s->hooks) return false;
+    if (!cc_slice_eq_cstr(&s->hooks->access_kind, "load")) return false;
+    return cc_slice_eq_cstr(&s->hooks->access_name, "ptr");
+}
+
+static bool fi_can_snapshot(FSubj* s, CcStmt* body) {
+    CCSlice root;
+    if (fi_frozen(s)) return true;
+    if (!s->hooks || !cc_slice_eq_cstr(&s->hooks->len_kind, "field")) return false;
+    root = fi_root_name(s->e);
+    if (!root.len) return false;
+    return !fi_body_names(body, root);
+}
+
+/* ---- reading one sequence ------------------------------------------------ */
+
+/* `T[n]`: `sizeof(a) / sizeof((a)[0])`, the extent the declaration carries. */
+static CcExpr* fi_array_len(CcLowerer* L, CcExpr* recv, CcSpan sp) {
+    CcExpr* first = cc__expr_blank(sp, L->arena);
+    CcIndexExpr ix;
+    CcExpr* whole;
+    CcExpr* one;
+    ix.a = lw_paren(L, recv, sp);
+    ix.i = fi_zero(L, sp);
+    first->k = { .index = ix };
+    whole = cc_expr_unary(CC_OP_SIZEOF, lw_paren(L, recv, sp), sp, L->arena);
+    one = cc_expr_unary(CC_OP_SIZEOF, lw_paren(L, first, sp), sp, L->arena);
+    return cc_expr_binary(CC_OP_DIV, whole, one, sp, L->arena);
+}
+
+/* `T[n]`: `&(a)[0]`, the same hop the loads take, taken once. */
+static CcExpr* fi_array_ptr(CcLowerer* L, CcExpr* recv, CcSpan sp) {
+    CcExpr* first = cc__expr_blank(sp, L->arena);
+    CcIndexExpr ix;
+    ix.a = lw_paren(L, recv, sp);
+    ix.i = fi_zero(L, sp);
+    first->k = { .index = ix };
+    return cc_expr_unary(CC_OP_ADDR, first, sp, L->arena);
+}
+
+/* `(recv).len` or `len_call(&recv)`, as the `.len` hook says. */
+static CcExpr* fi_len_expr(CcLowerer* L, FSubj* s, CcSpan sp) {
+    if (s->is_array) return fi_array_len(L, s->e, sp);
+    if (cc_slice_eq_cstr(&s->hooks->len_kind, "call"))
+        return lw_call1(L, s->hooks->len_name, cc_expr_unary(CC_OP_ADDR, lw_paren(L, s->e, sp), sp, L->arena), sp);
+    return cc_expr_member(lw_paren(L, s->e, sp), s->hooks->len_name, false, sp, L->arena);
+}
+
+/* `(T*)(recv).data` or `access_call(&recv)`, as the `.access` hook says. */
+static CcExpr* fi_data_expr(CcLowerer* L, FSubj* s, CcSpan sp) {
+    if (s->is_array) return fi_array_ptr(L, s->e, sp);
+    if (cc_slice_eq_cstr(&s->hooks->access_kind, "call"))
+        return lw_call1(L, s->hooks->access_name, cc_expr_unary(CC_OP_ADDR, lw_paren(L, s->e, sp), sp, L->arena), sp);
+    {
+        CcExpr* field = cc_expr_member(lw_paren(L, s->e, sp), s->hooks->access_name, false, sp, L->arena);
+        CcExpr* cast = cc__expr_blank(sp, L->arena);
+        CcCast ca;
+        ca.type = cc_type_pointer(s->elem, sp, L->arena);
+        ca.a = field;
+        cast->k = { .cast = ca };
+        return cast;
+    }
+}
+
+/* The element at `idx`: through the peel when the extent was read once,
+ * through the access hook again when it was not. */
+static CcExpr* fi_at(CcLowerer* L, FSubj* s, CCSlice idx, CcSpan sp) {
+    CcExpr* base = s->snap ? lw_ident(L, s->pname, sp) : fi_data_expr(L, s, sp);
+    CcExpr* at = cc__expr_blank(sp, L->arena);
+    CcIndexExpr ix;
+    ix.a = lw_paren(L, base, sp);
+    ix.i = lw_ident(L, idx, sp);
+    at->k = { .index = ix };
+    return at;
+}
+
+/* ---- the walk's own error ------------------------------------------------ */
+
+static bool fi_tail_is_bare(CcExpr* e) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .unwrap: return true;
+        default: return false;
+    }
+}
+
+static bool fi_tail_handler(CcExpr* e, CCSlice* binder, CcStmt** body) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .unwrap_body(ub): *binder = ub.binder; *body = ub.body; return true;
+        default: return false;
+    }
+}
+
+/* The walk's error, raised where the walk noticed it: into the site
+ * handler the `for` wrote, else to the `@errhandler` in scope, else out of
+ * the process. A walk that gave up quietly here would look exactly like a
+ * walk with nothing to do. */
+static CcStmt* fi_raise(FStep* st, CcForIn fi, const char* what, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CcStmt* blk = lw_block(L, sp);
+    CCString lit = @string(`"${what}"`, L->arena);
+    CcExpr* err = lw_call2(L, cstr_slice("CC_ERROR"),
+                           lw_ident(L, cstr_slice("CC_ERR_INVALID_ARG"), sp),
+                           lw_text(L, lit, sp), sp);
+    CCSlice binder = cc_slice_empty();
+    CcStmt* body = NULL;
+    if (fi_tail_handler(fi.tail, &binder, &body)) {
+        if (binder.len) {
+            CcType* et = lw_named_type(L, cstr_slice("CCError"), sp);
+            lw_push(blk, lw_decl_stmt(L, et, binder, err, sp));
+        }
+        if (body) lw_push(blk, body);
+        return blk;
+    }
+    if (st->n_eh) {
+        /* `@err(<error>)`: the Results step jumps to the handler in scope
+         * and the site never returns. The error is parenthesised so the
+         * forward is read as a value, not as a binder being named. */
+        CcStmt* fwd = cc__stmt_blank(sp, L->arena);
+        CcErrFwd ef;
+        ef.err = lw_paren(L, err, sp);
+        fwd->k = { .err_fwd = ef };
+        lw_push(blk, fwd);
+        return blk;
+    }
+    lw_push(blk, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_error_exit"), err, sp), sp));
+    return blk;
+}
+
+/* ---- the body's writes to a `&` binder ----------------------------------- */
+
+typedef struct FBody {
+    FStep* st;
+    CcForIn fi;
+    FSubj* a;
+    FSubj* b;
+    CCSlice idx;
+    CcExprList done;        /* the writes that are a statement of their own */
+    CcStmtList done_at;     /* the statement each of those is the whole of */
+} FBody;
+
+static FSubj* fi_bind_of(FBody* fb, CCSlice name) {
+    if (fb->a && fb->a->bind.len && slice_eq(fb->a->bind, name)) return fb->a;
+    if (fb->b && fb->b->bind.len && slice_eq(fb->b->bind, name)) return fb->b;
+    return NULL;
+}
+
+static bool fi_stmt_expr(CcStmt* s, CcExpr** out, CcStmt** body) {
+    if (!s) return false;
+    @switch (s->k) {
+        case .expr(es): *out = es.e; *body = es.body; return true;
+        default: return false;
+    }
+}
+
+/* `x = v`, `x op= v`, `++x`, `x--`: the binder written and the value. */
+static bool fi_write_of(CcExpr* e, CCSlice* name, CcOp* op, CcExpr** rhs) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .assign(bin):
+            if (!expr_ident(bin.a, name)) return false;
+            *op = bin.op;
+            *rhs = bin.b;
+            return true;
+        case .unary(un):
+            if (un.op != CC_OP_PREINC && un.op != CC_OP_PREDEC &&
+                un.op != CC_OP_POSTINC && un.op != CC_OP_POSTDEC) return false;
+            if (!expr_ident(un.a, name)) return false;
+            *op = un.op;
+            *rhs = NULL;
+            return true;
+        default: return false;
+    }
+}
+
+static bool fi_is_addr_of(CcExpr* e, CCSlice* name) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .unary(un):
+            if (un.op != CC_OP_ADDR) return false;
+            return expr_ident(un.a, name);
+        default: return false;
+    }
+}
+
+/* The binary operator a compound write folds through. */
+static CcOp fi_fold_op(CcOp op) {
+    if (op == CC_OP_PREINC || op == CC_OP_POSTINC || op == CC_OP_ADD_ASSIGN) return CC_OP_ADD;
+    if (op == CC_OP_PREDEC || op == CC_OP_POSTDEC || op == CC_OP_SUB_ASSIGN) return CC_OP_SUB;
+    if (op == CC_OP_MUL_ASSIGN) return CC_OP_MUL;
+    if (op == CC_OP_DIV_ASSIGN) return CC_OP_DIV;
+    if (op == CC_OP_MOD_ASSIGN) return CC_OP_MOD;
+    if (op == CC_OP_SHL_ASSIGN) return CC_OP_SHL;
+    if (op == CC_OP_SHR_ASSIGN) return CC_OP_SHR;
+    if (op == CC_OP_AND_ASSIGN) return CC_OP_AND;
+    if (op == CC_OP_XOR_ASSIGN) return CC_OP_XOR;
+    if (op == CC_OP_OR_ASSIGN) return CC_OP_OR;
+    return CC_OP_NONE;
+}
+
+/* What the element holds after the write. */
+static CcExpr* fi_write_value(CcLowerer* L, CCSlice name, CcOp op, CcExpr* rhs, CcSpan sp) {
+    CcOp fold;
+    CcExpr* val;
+    if (op == CC_OP_ASSIGN) return rhs;
+    fold = fi_fold_op(op);
+    if (fold == CC_OP_NONE) return NULL;
+    val = rhs;
+    if (!val) val = fi_one(L, sp);
+    return cc_expr_binary(fold, lw_paren(L, lw_ident(L, name, sp), sp), lw_paren(L, val, sp), sp, L->arena);
+}
+
+/* A nested walk that binds one of these names again owns it from its
+ * header on: the outer walk's stores stop there. */
+static bool fi_rebinds(CcStmt* s, FBody* fb) {
+    CcForIn in;
+    bool is_for_in = false;
+    @switch (s->k) {
+        case .for_in(x): in = x; is_for_in = true; break;
+        default: break;
+    }
+    if (!is_for_in) return false;
+    if (in.bind.len && fi_bind_of(fb, in.bind)) return true;
+    if (in.bind2.len && fi_bind_of(fb, in.bind2)) return true;
+    return false;
+}
+
+static bool fi_skip_rebound(CcStmt* s, void* env) {
+    FBody* fb = (FBody*)env;
+    return !fi_rebinds(s, fb);
+}
+
+static bool fi_collect_stmt(CcStmt* s, void* env) {
+    FBody* fb = (FBody*)env;
+    CcExpr* e = NULL;
+    CcStmt* mbody = NULL;
+    CCSlice name;
+    CcOp op = CC_OP_NONE;
+    CcExpr* rhs = NULL;
+    FSubj* sub;
+    if (fi_rebinds(s, fb)) return false;
+    if (!fi_stmt_expr(s, &e, &mbody)) return true;
+    if (mbody) return true;
+    if (!fi_write_of(e, &name, &op, &rhs)) return true;
+    sub = fi_bind_of(fb, name);
+    if (!sub || !sub->mut) return true;
+    {
+        CcExprList* dv = &fb->done;
+        CcStmtList* sv = &fb->done_at;
+        dv->push(e);
+        sv->push(s);
+    }
+    return true;
+}
+
+static bool fi_write_is_done(FBody* fb, CcExpr* e) {
+    CcExprList* dv = &fb->done;
+    size_t n = dv->len();
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (*dv->get_ptr(i) == e) return true;
+    return false;
+}
+
+static bool fi_check_expr(CcExpr* e, void* env) {
+    FBody* fb = (FBody*)env;
+    CcLowerer* L = fb->st->L;
+    CCSlice name;
+    CcOp op = CC_OP_NONE;
+    CcExpr* rhs = NULL;
+    if (fi_is_addr_of(e, &name)) {
+        FSubj* sub = fi_bind_of(fb, name);
+        if (sub) {
+            /* the binder is the loop's own copy of the element, so its
+             * address is the copy's, not a place in the sequence */
+            const char* bt = "`";
+            CCString m = @string(`${bt}&${name}${bt} is not a location (walk binder is not a C object)`, L->arena);
+            lw_error(L, e->span, m);
+        }
+        return true;
+    }
+    if (!fi_write_of(e, &name, &op, &rhs)) return true;
+    {
+        FSubj* sub = fi_bind_of(fb, name);
+        if (!sub) return true;
+        if (!sub->mut) {
+            const char* bt = "`";
+            CCString m = @string(`for-in binder '${name}' is const in this loop (it is the load); ${bt}&${name}${bt} stores into the walk, a local rebinds`, L->arena);
+            lw_error(L, e->span, m);
+            return true;
+        }
+        if (!fi_write_is_done(fb, e)) {
+            const char* bt = "`";
+            CCString m = @string(`for-in ${bt}&${name}${bt} stores through the walk: write the store as a statement of its own`, L->arena);
+            lw_error(L, e->span, m);
+        }
+    }
+    return true;
+}
+
+/* `x = ((p)[i] = (v))`: the store is the walk's, and the binder keeps what
+ * was stored so a later read of it sees the element. */
+static void fi_rewrite_snap(FBody* fb, CcExpr* e, FSubj* sub, CCSlice name, CcExpr* val, CcSpan sp) {
+    CcLowerer* L = fb->st->L;
+    CcExpr* store = lw_assign(L, fi_at(L, sub, fb->idx, sp), lw_paren(L, val, sp), sp);
+    CcExpr* whole = lw_assign(L, lw_ident(L, name, sp), lw_paren(L, store, sp), sp);
+    e->k = whole->k;
+}
+
+/* A container the body can move: the value is taken first, the position is
+ * checked against the extent the container has now, and only then is the
+ * store made. Out of range is the walk's error, not a skipped write. */
+static void fi_rewrite_live(FBody* fb, CcStmt* s, FSubj* sub, CCSlice name, CcExpr* val, CcSpan sp) {
+    CcLowerer* L = fb->st->L;
+    CcStmt* blk = lw_block(L, sp);
+    CcStmt* ok = lw_block(L, sp);
+    CcStmt* bad = fi_raise(fb->st, fb->fi, "for-in write", sp);
+    CCSlice wv = cstr_slice("__cc_wv");
+    CcExpr* over;
+    lw_push(blk, lw_decl_stmt(L, sub->elem, wv, lw_paren(L, val, sp), sp));
+    over = cc_expr_binary(CC_OP_GE, lw_paren(L, lw_ident(L, fb->idx, sp), sp),
+                          lw_paren(L, fi_len_expr(L, sub, sp), sp), sp, L->arena);
+    lw_push(ok, lw_expr_stmt(L, lw_assign(L, fi_at(L, sub, fb->idx, sp), lw_paren(L, lw_ident(L, wv, sp), sp), sp), sp));
+    lw_push(ok, lw_expr_stmt(L, lw_assign(L, lw_ident(L, name, sp), lw_ident(L, wv, sp), sp), sp));
+    lw_push(blk, lw_if(L, over, bad, ok, sp));
+    s->k = blk->k;
+}
+
+static bool fi_rewrite_one(FBody* fb, CcExpr* e, CcStmt* s) {
+    CcLowerer* L = fb->st->L;
+    CCSlice name;
+    CcOp op = CC_OP_NONE;
+    CcExpr* rhs = NULL;
+    FSubj* sub;
+    CcExpr* val;
+    CcSpan sp = e->span;
+    if (!fi_write_of(e, &name, &op, &rhs)) return false;
+    sub = fi_bind_of(fb, name);
+    if (!sub) return false;
+    val = fi_write_value(L, name, op, rhs, sp);
+    if (!val) {
+        CCSlice ops = CcOp_spelling(op);
+        const char* bt = "`";
+        CCString m = @string(`for-in ${bt}&${name}${bt} cannot use '${ops}'`, L->arena);
+        lw_error(L, sp, m);
+        return false;
+    }
+    if (sub->snap) fi_rewrite_snap(fb, e, sub, name, val, sp);
+    else fi_rewrite_live(fb, s, sub, name, val, sp);
+    return true;
+}
+
+/* Every write to a `&` binder, and every use of a binder the walk cannot
+ * make mean what it says. Collected first, so a write that is a statement
+ * of its own is told apart from one buried in a larger expression. */
+static void fi_body_writes(FStep* st, CcForIn fi, FSubj* a, FSubj* b, CCSlice idx) {
+    CcLowerer* L = st->L;
+    FBody fb;
+    CcVisitor v;
+    size_t i;
+    size_t n;
+    if (!fi.body) return;
+    fb.st = st;
+    fb.fi = fi;
+    fb.a = a;
+    fb.b = b;
+    fb.idx = idx;
+    fb.done = vec_new::[CcExprRef](L->arena);
+    fb.done_at = vec_new::[CcStmtRef](L->arena);
+    memset(&v, 0, sizeof(v));
+    v.stmt = fi_collect_stmt;
+    v.env = &fb;
+    CcStmt_walk(fi.body, v);
+    memset(&v, 0, sizeof(v));
+    v.stmt = fi_skip_rebound;
+    v.expr = fi_check_expr;
+    v.env = &fb;
+    CcStmt_walk(fi.body, v);
+    {
+        CcExprList* dv = &fb.done;
+        CcStmtList* sv = &fb.done_at;
+        n = dv->len();
+        for (i = 0; i < n; i++) {
+            CcExpr* e = *dv->get_ptr(i);
+            CcStmt* s = *sv->get_ptr(i);
+            (void)fi_rewrite_one(&fb, e, s);
+        }
+    }
+}
+
+/* ---- the loop ------------------------------------------------------------ */
 
 /* `for (i = lo; i < hi; ++i)` over the two ends, each read once. */
 static bool fi_range(FStep* st, CcStmt* s, CcForIn fi, CcRange rg) {
@@ -156,82 +676,140 @@ static bool fi_range(FStep* st, CcStmt* s, CcForIn fi, CcRange rg) {
     return true;
 }
 
-/* `for (i = 0; i < n; ++i) { const T x = p[i]; ... }` over the extent. */
-static bool fi_walk(FStep* st, CcStmt* s, CcForIn fi, CcExpr* it) {
+/* One sequence: what it is, what it yields, and how far it reaches. */
+static bool fi_subj(FStep* st, FSubj* out, CcExpr* e, CCSlice bind, bool mut,
+                    CcStmt* body, CcSpan sp) {
     CcLowerer* L = st->L;
     Walker* w = st->w;
-    CcSpan sp = s->span;
-    CcType* rt = type_of_expr(w, it);
+    uint32_t id = st->next_id++;
+    CcType* rt;
     CCSlice canon = cc_slice_empty();
-    CcHookReg* hooks = fi_hooks_of(L, rt, &canon);
-    CcType* elem;
-    uint32_t id;
+    CcHookReg* hooks = NULL;
+    CcType* elem = NULL;
+    bool is_array = false;
+    memset(out, 0, sizeof(*out));
+    out->e = e;
+    out->bind = bind;
+    out->mut = mut;
+    out->canon = canon;
+    out->nname = fi_tmp(L, "fn", id);
+    out->pname = fi_tmp(L, "fp", id);
+    if (!fi_subj_is_place(e)) out->sname = fi_tmp(L, "fs", id);
+    rt = type_of_expr(w, e);
     if (!rt) {
-        CCString m = @string(`cannot type what this walk is over; declare it with a type the index can see`, L->arena);
-        lw_error(L, sp, m);
-        return false;
-    }
-    if (!hooks || !hooks->has_len || !hooks->len_name.len) {
-        CCString m = @string(`type '${canon}' declares no '.len' hook, so a walk cannot know its extent`, L->arena);
-        lw_error(L, sp, m);
-        return false;
-    }
-    if (!hooks->has_access || !hooks->access_name.len) {
-        CCString m = @string(`type '${canon}' declares no '.access' hook, so a walk cannot reach its elements`, L->arena);
-        lw_error(L, sp, m);
-        return false;
-    }
-    elem = fi_elem_type(L, w, rt, canon, hooks, sp);
-    if (!elem) {
-        CCString m = @string(`cannot tell what walking a '${canon}' yields: its '.access' names no element type`, L->arena);
-        lw_error(L, sp, m);
-        return false;
-    }
-    id = st->next_id++;
-    {
-        /* `@for (i, v in xs)` walks one sequence and names its position:
-         * the first binder IS the loop's index, so nothing is generated for
-         * it and the second binder takes the element. */
-        bool two = fi.bind2.len != 0;
-        CCSlice val = two ? fi.bind2 : fi.bind;
-        bool val_ref = two ? fi.by_ref2 : fi.by_ref;
-        CCSlice n = fi_tmp(L, "fn", id);
-        CCSlice p = fi_tmp(L, "fp", id);
-        CCSlice i = two ? fi.bind : fi_tmp(L, "fi", id);
-        CcStmt* blk = lw_block(L, sp);
-        CcType* szt = fi_size_t(L, sp);
-        CcType* elemp = cc_type_pointer(elem, sp, L->arena);
-        CcFor loop;
-        CcStmt* fs;
-        CcStmt* body = lw_block(L, sp);
-        CcExpr* at = cc__expr_blank(sp, L->arena);
-        CcIndexExpr ix2;
-        lw_push(blk, lw_decl_stmt(L, szt, n, fi_len_expr(L, hooks, it, sp), sp));
-        lw_push(blk, lw_decl_stmt(L, elemp, p, fi_data_expr(L, hooks, it, elem, sp), sp));
-        ix2.a = lw_ident(L, p, sp);
-        ix2.i = lw_ident(L, i, sp);
-        at->k = { .index = ix2 };
-        if (val_ref) {
-            /* `&x`: the binder names the element in place */
-            lw_push(body, lw_decl_stmt(L, elemp, val,
-                                       cc_expr_unary(CC_OP_ADDR, at, sp, L->arena), sp));
-        } else {
-            lw_push(body, lw_decl_stmt(L, elem, val, at, sp));
+        /* a constructor call is not a place: reading it for the length and
+         * again for the elements would build two containers */
+        if (!fi_subj_shape_ok(e)) {
+            const char* bt = "`";
+            CCString m = @string(`for-in subject must be a name, field path, or view (${bt}s${bt}, ${bt}t->words${bt}, ${bt}s.sub(lo, hi)${bt})`, L->arena);
+            lw_error(L, sp, m);
+            return false;
         }
-        if (fi.body) lw_push(body, fi.body);
-        memset(&loop, 0, sizeof(loop));
-        loop.init_decl = NULL;
-        loop.init_expr = lw_assign(L, lw_ident(L, i, sp), lw_text(L, @string(`0`, L->arena), sp), sp);
-        loop.cond = cc_expr_binary(CC_OP_LT, lw_ident(L, i, sp), lw_ident(L, n, sp), sp, L->arena);
-        loop.step = cc_expr_unary(CC_OP_PREINC, lw_ident(L, i, sp), sp, L->arena);
-        loop.body = body;
-        loop.more = vec_new::[CcStmtRef](L->arena);
-        fs = cc__stmt_blank(sp, L->arena);
-        fs->k = { .for_ = loop };
-        lw_push(blk, lw_decl_stmt(L, szt, i, NULL, sp));
-        lw_push(blk, fs);
-        s->k = blk->k;
+        {
+            CCString m = @string(`cannot type what this walk is over; declare it with a type the index can see`, L->arena);
+            lw_error(L, sp, m);
+            return false;
+        }
     }
+    out->type = rt;
+    if (fi_type_is_array(rt)) {
+        is_array = true;
+        elem = elem_of_indexable(rt);
+        if (!elem) {
+            CCString m = @string(`cannot tell what walking this array yields`, L->arena);
+            lw_error(L, sp, m);
+            return false;
+        }
+    } else {
+        hooks = fi_hooks_of(L, rt, &canon);
+        out->canon = canon;
+        if (!hooks || !hooks->has_len || !hooks->len_name.len) {
+            if (fi_type_is_pointer(rt)) {
+                /* a pointer says where, never how far: nothing on it bounds
+                 * a walk, so this is not a missing hook to go and add */
+                CCString spelled = lw_spell_expr(L, e);
+                CCSlice subj = spelled.as_slice();
+                CCString m = @string(`T* is not an extent; for (v in ${subj}) is ill-formed`, L->arena);
+                lw_error(L, sp, m);
+                return false;
+            }
+            {
+                CCString m = @string(`type '${canon}' declares no '.len' hook, so a walk cannot know its extent`, L->arena);
+                lw_error(L, sp, m);
+                return false;
+            }
+        }
+        if (!hooks->has_access || !hooks->access_name.len) {
+            CCString m = @string(`type '${canon}' declares no '.access' hook, so a walk cannot reach its elements`, L->arena);
+            lw_error(L, sp, m);
+            return false;
+        }
+        elem = fi_elem_type(L, w, rt, canon, hooks, sp);
+        if (!elem) {
+            CCString m = @string(`cannot tell what walking a '${canon}' yields: its '.access' names no element type`, L->arena);
+            lw_error(L, sp, m);
+            return false;
+        }
+    }
+    out->is_array = is_array;
+    out->hooks = hooks;
+    out->elem = elem;
+    out->snap = !mut || fi_can_snapshot(out, body);
+    return true;
+}
+
+/* `for (i = 0; i < n; ++i) { T x = p[i]; ... }` over one or two extents. */
+static bool fi_emit(FStep* st, CcStmt* s, CcForIn fi, FSubj* a, FSubj* b, CCSlice idx) {
+    CcLowerer* L = st->L;
+    CcSpan sp = s->span;
+    CcStmt* blk = lw_block(L, sp);
+    CcStmt* into = blk;
+    CcStmt* body = lw_block(L, sp);
+    CcType* szt = fi_size_t(L, sp);
+    CcExpr* bound;
+    CcFor loop;
+    CcStmt* fs;
+    if (a->sname.len) {
+        lw_push(blk, lw_decl_stmt(L, a->type, a->sname, a->e, sp));
+        a->e = lw_ident(L, a->sname, sp);
+    }
+    if (b && b->sname.len) {
+        lw_push(blk, lw_decl_stmt(L, b->type, b->sname, b->e, sp));
+        b->e = lw_ident(L, b->sname, sp);
+    }
+    if (a->snap || b) lw_push(blk, lw_decl_stmt(L, szt, a->nname, fi_len_expr(L, a, sp), sp));
+    if (b) {
+        /* both extents are read before either is walked: a pair that does
+         * not line up is the walk's error, not a shorter walk */
+        CcStmt* els = lw_block(L, sp);
+        CcStmt* bad = fi_raise(st, fi, "for-in zip: unequal lengths", sp);
+        CcExpr* ne;
+        lw_push(blk, lw_decl_stmt(L, szt, b->nname, fi_len_expr(L, b, sp), sp));
+        ne = cc_expr_binary(CC_OP_NE, lw_ident(L, a->nname, sp), lw_ident(L, b->nname, sp), sp, L->arena);
+        lw_push(blk, lw_if(L, ne, bad, els, sp));
+        into = els;
+    }
+    if (a->snap)
+        lw_push(into, lw_decl_stmt(L, cc_type_pointer(a->elem, sp, L->arena), a->pname, fi_data_expr(L, a, sp), sp));
+    if (b && b->snap)
+        lw_push(into, lw_decl_stmt(L, cc_type_pointer(b->elem, sp, L->arena), b->pname, fi_data_expr(L, b, sp), sp));
+    fi_body_writes(st, fi, a, b, idx);
+    lw_push(body, lw_decl_stmt(L, a->elem, a->bind, fi_at(L, a, idx, sp), sp));
+    if (b) lw_push(body, lw_decl_stmt(L, b->elem, b->bind, fi_at(L, b, idx, sp), sp));
+    if (fi.body) lw_push(body, fi.body);
+    bound = (a->snap || b) ? lw_ident(L, a->nname, sp) : lw_paren(L, fi_len_expr(L, a, sp), sp);
+    memset(&loop, 0, sizeof(loop));
+    loop.init_decl = NULL;
+    loop.init_expr = lw_assign(L, lw_ident(L, idx, sp), fi_zero(L, sp), sp);
+    loop.cond = cc_expr_binary(CC_OP_LT, lw_ident(L, idx, sp), bound, sp, L->arena);
+    loop.step = cc_expr_unary(CC_OP_PREINC, lw_ident(L, idx, sp), sp, L->arena);
+    loop.body = body;
+    loop.more = vec_new::[CcStmtRef](L->arena);
+    fs = cc__stmt_blank(sp, L->arena);
+    fs->k = { .for_ = loop };
+    lw_push(into, lw_decl_stmt(L, szt, idx, NULL, sp));
+    lw_push(into, fs);
+    s->k = blk->k;
     return true;
 }
 
@@ -243,44 +821,196 @@ static bool fi_is_range(CcExpr* e, CcRange* out) {
     }
 }
 
+/* A refused walk leaves nothing behind: the diagnostic is the answer, and
+ * an unlowered `for-in` would be read again by every step after this one. */
+static void fi_drop(FStep* st, CcStmt* s) {
+    CcStmt* blk = lw_block(st->L, s->span);
+    s->k = blk->k;
+}
+
 static void fi_stmt(FStep* st, CcStmt* s, CcForIn fi) {
     CcLowerer* L = st->L;
     CcExprList* itv = &fi.iterables;
+    CcSpan sp = s->span;
+    size_t nsubj = itv->len();
+    size_t nbind = fi.bind2.len ? 2 : 1;
     CcRange rg;
     CcExpr* it;
-    if (itv->len() != 1) {
-        CCString m = @string(`a walk over two sequences is not lowered by the clean lowerer yet`, L->arena);
-        lw_error(L, s->span, m);
-        return;
-    }
-    if (fi.bind2.len && fi.by_ref) {
-        /* the position is a count this loop keeps, not a place in the
-         * sequence: there is nothing for `&` to name */
-        CCSlice b = fi.bind;
-        CCString m = @string(`'${b}' is the walk's position, not a slot: write '${"@"}for (${b}, &v in xs)'`, L->arena);
-        lw_error(L, s->span, m);
-        return;
-    }
-    if (fi.tail) {
-        CCString m = @string(`a walk whose block is followed by '!>' is not lowered by the clean lowerer yet`, L->arena);
-        lw_error(L, s->span, m);
+    bool mut_a;
+    bool mut_b;
+    bool is_result;
+    FSubj a;
+    FSubj b;
+    CCSlice idx;
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+    if (!nsubj) {
+        CCString m = @string(`a for-in header names no sequence`, L->arena);
+        lw_error(L, sp, m);
+        fi_drop(st, s);
         return;
     }
     it = *itv->get_ptr(0);
-    if (fi_is_range(it, &rg)) { (void)fi_range(st, s, fi, rg); return; }
-    (void)fi_walk(st, s, fi, it);
+    if (fi_is_range(it, &rg)) {
+        const char* bt = "`";
+        if (nsubj != 1 || nbind != 1) {
+            CCString m = @string(`range for-in is ${bt}${"@"}for (i in lo..hi)${bt}`, L->arena);
+            lw_error(L, sp, m);
+            fi_drop(st, s);
+            return;
+        }
+        if (fi.by_ref) {
+            /* a position the loop counts is not a place in a sequence */
+            CCString m = @string(`range for-in is ${bt}${"@"}for (i in lo..hi)${bt} (${bt}&i${bt} is not a slot)`, L->arena);
+            lw_error(L, sp, m);
+            fi_drop(st, s);
+            return;
+        }
+        if (fi.tail) {
+            CCString m = @string(`${bt}!>${bt} unwraps a Result; this for is not one`, L->arena);
+            lw_error(L, sp, m);
+            fi_drop(st, s);
+            return;
+        }
+        (void)fi_range(st, s, fi, rg);
+        return;
+    }
+    if (nsubj > 2) {
+        CCString m = @string(`a walk runs over one or two sequences`, L->arena);
+        lw_error(L, sp, m);
+        fi_drop(st, s);
+        return;
+    }
+    if (nsubj == 2 && nbind != 2) {
+        CCString m = @string(`a walk over two sequences names one binder each: '${"@"}for (a, b in xs, ys)'`, L->arena);
+        lw_error(L, sp, m);
+        fi_drop(st, s);
+        return;
+    }
+    if (nsubj == 1 && nbind == 2 && fi.by_ref) {
+        /* the position is a count this loop keeps, not a place in the
+         * sequence: there is nothing for `&` to name */
+        CCSlice bd = fi.bind;
+        CCString m = @string(`'${bd}' is the walk's position, not a slot: write '${"@"}for (${bd}, &v in xs)'`, L->arena);
+        lw_error(L, sp, m);
+        fi_drop(st, s);
+        return;
+    }
+    mut_a = nsubj == 2 ? fi.by_ref : (nbind == 2 ? fi.by_ref2 : fi.by_ref);
+    mut_b = nsubj == 2 && fi.by_ref2;
+    is_result = nsubj == 2 || mut_a || mut_b;
+    if (is_result && !fi.tail) {
+        /* the walk's Result carries the store bound and the zip's lengths;
+         * dropping it would drop the only report either one has */
+        CCString m = @string(`unconsumed Result: a walk that stores or zips is 'void !>(CCError)' -- consume it with '!>;' or a '!>(e)' handler after the block`, L->arena);
+        lw_error(L, sp, m);
+        fi_drop(st, s);
+        return;
+    }
+    if (!is_result && fi.tail) {
+        const char* bt = "`";
+        CCString m = @string(`${bt}!>${bt} unwraps a Result; this for is not one`, L->arena);
+        lw_error(L, sp, m);
+        fi_drop(st, s);
+        return;
+    }
+    if (fi.tail) {
+        CCSlice binder = cc_slice_empty();
+        CcStmt* hbody = NULL;
+        bool known = fi_tail_is_bare(fi.tail);
+        if (!known) known = fi_tail_handler(fi.tail, &binder, &hbody);
+        if (!known) {
+            CCString m = @string(`a walk's Result is consumed by '!>;' or by a '!>(e)' handler`, L->arena);
+            lw_error(L, sp, m);
+            fi_drop(st, s);
+            return;
+        }
+    }
+    {
+        CCSlice bind_a = nsubj == 2 ? fi.bind : (nbind == 2 ? fi.bind2 : fi.bind);
+        if (!fi_subj(st, &a, it, bind_a, mut_a, fi.body, sp)) { fi_drop(st, s); return; }
+    }
+    if (nsubj == 2) {
+        CcExpr* it2 = *itv->get_ptr(1);
+        if (!fi_subj(st, &b, it2, fi.bind2, mut_b, fi.body, sp)) { fi_drop(st, s); return; }
+    }
+    if (nsubj == 1 && nbind == 2) {
+        idx = fi.bind;
+    } else {
+        uint32_t iid = st->next_id++;
+        idx = fi_tmp(L, "fi", iid);
+    }
+    (void)fi_emit(st, s, fi, &a, nsubj == 2 ? &b : NULL, idx);
+}
+
+/* ---- `.len` and `.access` at a call site --------------------------------- */
+
+/* `a.len` / `a.len()` on a `T[n]`: the extent its declaration carries.
+ * Nothing registers a hook for an array and there is no member of that
+ * name to read, so the walk's own rule is what answers here. */
+static void fi_array_len_here(FStep* st, CcExpr* e, CcExpr* recv, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CcExpr* n = lw_paren(L, fi_array_len(L, recv, sp), sp);
+    e->k = n->k;
+}
+
+static void fi_on_field(Walker* w, CcExpr* e, CcMember mb, CcType* rt) {
+    FStep* st = (FStep*)w->env;
+    if (mb.arrow) return;
+    if (!cc_slice_eq_cstr(&mb.name, "len")) return;
+    if (!fi_type_is_array(rt)) return;
+    fi_array_len_here(st, e, mb.a, e->span);
+}
+
+static void fi_on_ufcs(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
+                       CCSlice type_name, CCSlice reason) {
+    FStep* st = (FStep*)w->env;
+    CcLowerer* L = st->L;
+    CcExprList args = uf.args;
+    size_t nargs = args.len();
+    (void)m;
+    (void)type_name;
+    (void)reason;
+    if (!uf.arrow && cc_slice_eq_cstr(&uf.method, "len") && !nargs && fi_type_is_array(rt)) {
+        fi_array_len_here(st, e, uf.recv, e->span);
+        return;
+    }
+    if (!cc_slice_eq_cstr(&uf.method, "access")) return;
+    {
+        CCSlice canon = cc_slice_empty();
+        CcHookReg* h = fi_hooks_of(L, rt, &canon);
+        if (h && h->has_access && h->access_name.len) {
+            /* `.access` is how the lowering reaches elements, not a method
+             * a program calls: `s.at(i)` is the bounds-checked read */
+            CCString msg = @string(`.access is compiler-internal; write 'for (v in s)' or 's.at(i)'`, L->arena);
+            lw_error(L, e->span, msg);
+        }
+    }
 }
 
 static void fi_on_stmt(Walker* w, CcStmt* s, bool enter) {
     FStep* st = (FStep*)w->env;
     CcForIn fi;
     bool is_for_in = false;
-    if (!enter) return;
+    bool is_eh = false;
+    if (!enter) {
+        if (st->depth) st->depth--;
+        while (st->n_eh && st->eh_depth[st->n_eh - 1] > st->depth) st->n_eh--;
+        return;
+    }
     @switch (s->k) {
         case .for_in(x): fi = x; is_for_in = true; break;
+        case .errhandler: is_eh = true; break;
         default: break;
     }
+    /* a handler covers the rest of the list it sits in, so it leaves scope
+     * with the statement that holds that list */
+    if (is_eh && st->n_eh < 64) {
+        st->eh_depth[st->n_eh] = st->depth;
+        st->n_eh++;
+    }
     if (is_for_in) fi_stmt(st, s, fi);
+    st->depth++;
 }
 
 static void CcLowerer_forin(CcLowerer* L) {
@@ -294,6 +1024,8 @@ static void CcLowerer_forin(CcLowerer* L) {
     w.ix = L->ix;
     w.unit = L->unit;
     w.on_stmt = fi_on_stmt;
+    w.on_field = fi_on_field;
+    w.on_ufcs = fi_on_ufcs;
     w.env = &st;
     tw_unit(&w);
 }
