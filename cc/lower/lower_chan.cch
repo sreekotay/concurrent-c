@@ -254,6 +254,23 @@ static CCSlice hc_addr_name(CcExpr* e) {
     }
 }
 
+/* A payload handed over rather than copied: a pointer, or a slice header. */
+static bool hc_elem_takes(CcLowerer* L, CcType* elem) {
+    CCSlice canon;
+    if (!elem) return false;
+    if (elem->k.kind == CcTypeK_pointer) return true;
+    if (elem->k.kind == CcTypeK_slice) return true;
+    canon = L->ix->canon(elem);
+    return canon.len >= 7 && memcmp(canon.ptr, "CCSlice", 7) == 0;
+}
+
+/* The width the channel carries: a taken payload travels as its handle. */
+static CCString hc_elem_size(CcLowerer* L, CcType* elem, CCSlice canon) {
+    if (elem && elem->k.kind == CcTypeK_pointer) return @string(`sizeof(void*)`, L->arena);
+    if (hc_elem_takes(L, elem)) return @string(`sizeof(CCSlice)`, L->arena);
+    return @string(`sizeof(${canon})`, L->arena);
+}
+
 /* `cc_channel_pair(&tx, &rx)` is built from what the two ends declared. */
 static void hc_pair(HStep* st, CcExpr* e, CcCall cl) {
     CcLowerer* L = st->L;
@@ -277,17 +294,30 @@ static void hc_pair(HStep* st, CcExpr* e, CcCall cl) {
          * the value it yields is read out of the task */
         bool task = a->carries_task || b->carries_task;
         CCSlice elem = task ? cstr_slice("CCTask") : L->ix->canon(a->elem);
-        bool ordered = a->ordered || b->ordered;
+        /* `ordered` is one property read against the channel's payload kind.
+         * On a channel of task handles it is the runtime's to enforce: the
+         * receiver awaits each handle, so the flag goes in. On a channel of
+         * data it is a contract the buffered backend already keeps -- items
+         * from one sender arrive in that sender's order -- and passing the
+         * runtime flag would break the channel rather than tighten it, because
+         * the runtime reads an ordered payload as a `CCTask` and a plain typed
+         * send no longer matches the element width. */
+        bool ordered = (a->ordered || b->ordered) && task;
+        /* A payload that is a pointer or a slice can be handed over rather
+         * than copied: the send-take path carries the address and the receiver
+         * takes ownership of what it points at. */
+        bool take = !task && hc_elem_takes(L, a->elem);
         CCString capt = a->cap ? lw_spell_expr(L, a->cap) : @string(`0`, L->arena);
-        CCString szt = @string(`sizeof(${elem})`, L->arena);
+        CCString szt = task ? @string(`sizeof(CCTask)`, L->arena) : hc_elem_size(L, a->elem, elem);
         CCString ord = ordered ? @string(`1`, L->arena) : @string(`0`, L->arena);
+        CCString tk = take ? @string(`1`, L->arena) : @string(`0`, L->arena);
         CCString names = @string(`"${n1},${n2}"`, L->arena);
         CcCall out;
         out.callee = lw_ident(L, cstr_slice("cc_channel_pair_create_named"), sp);
         out.args = vec_new::[CcExprRef](L->arena);
         out.args.push(lw_text(L, capt, sp));
         out.args.push(lw_ident(L, a->mode, sp));
-        out.args.push(lw_text(L, @string(`0`, L->arena), sp));
+        out.args.push(lw_text(L, tk, sp));
         out.args.push(lw_text(L, szt, sp));
         out.args.push(lw_text(L, @string(`0`, L->arena), sp));
         out.args.push(lw_ident(L, a->topo, sp));
