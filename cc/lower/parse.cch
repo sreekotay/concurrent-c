@@ -26,6 +26,14 @@ typedef struct CcParseOpts {
 /* Parse `src` as `path`. The unit's arena is `a`; the tape is lexed into it. */
 static CcUnit* cc_parse_unit(CCSlice path, CCSlice src, CcParseOpts opts, CcDiags* ds, CCArena a);
 
+/* One statement, parsed again out of the tape it was already lexed into,
+ * starting at token `first`. The nodes are fresh -- a step that rewrites a
+ * statement in place needs its own copy for each place the statement stands
+ * -- and their spans index that same tape, so the copy spells and locates
+ * exactly like the statement it was taken from. NULL when `first` is past
+ * the end. */
+static CcStmt* cc_parse_stmt_at(CcUnit* u, uint32_t first, CcParseOpts opts, CcDiags* ds, CCArena a);
+
 /* Parse one expression in isolation (a template slot, a `@comptime` value). */
 static CcExpr* !>(CcDiag) cc_parse_expr(CCSlice text, CcLoc at, CcUnit* u);
 

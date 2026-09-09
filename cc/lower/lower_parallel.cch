@@ -356,6 +356,53 @@ static CcStmt* pl_arm_first_return(CcExpr* e, CcStmt* s, bool valued) {
     return at;
 }
 
+/* A bare `e !>` -- one that names no handler of its own. */
+static bool pl_bare_unwrap_expr(CcExpr* e, void* env) {
+    bool* hit = (bool*)env;
+    @switch (e->k) {
+        case .unwrap: *hit = true; break;
+        default: break;
+    }
+    return true;
+}
+
+static bool pl_has_bare_unwrap(CcStmt* s) {
+    CcVisitor v;
+    bool hit = false;
+    if (!s) return false;
+    memset(&v, 0, sizeof(v));
+    v.expr = pl_bare_unwrap_expr;
+    v.env = &hit;
+    CcStmt_walk(s, v);
+    return hit;
+}
+
+/* Whether a block already opens with a handler of its own. */
+static bool pl_block_has_handler(CcStmt* s) {
+    CcStmtList b;
+    bool is_block = false;
+    size_t i;
+    size_t n;
+    if (!s) return false;
+    @switch (s->k) {
+        case .serial(x): b = x.stmts; is_block = true; break;
+        case .block(x): b = x.stmts; is_block = true; break;
+        default: break;
+    }
+    if (!is_block) return false;
+    n = b.len();
+    for (i = 0; i < n; i++) {
+        CcStmt* t = *b.get_ptr(i);
+        bool is_eh = false;
+        @switch (t->k) {
+            case .errhandler: is_eh = true; break;
+            default: break;
+        }
+        if (is_eh) return true;
+    }
+    return false;
+}
+
 /* `return` inside an arm.
  *
  * The block joins before it ends, so a `return` written in an arm is not a
@@ -1104,6 +1151,11 @@ static CCSlice pl_ret_type(PStep* st) {
         case .result: is_result = true; break;
         default: break;
     }
+    /* A Result return would type the cell as `CCResult_T_E`, but the value an
+     * arm hands back is written `cc_err(e)` / `cc_ok(v)`, and the call that
+     * spells is chosen by the Result the enclosing function returns -- which,
+     * in a thunk, is the thunk. Until that is settled the site says so rather
+     * than emit a cell the arm cannot fill. */
     if (is_result) return cc_slice_empty();
     if (type_named_name(st->fn_ret, &nm) && slice_eq(nm, v)) return cc_slice_empty();
     return L->ix->canon(st->fn_ret);
@@ -1361,119 +1413,71 @@ static CcStmt* pl_unwrap_stmt(CcLowerer* L, CcExpr* call, CcSpan sp);
  * results step both edit it in place -- so each arm that needs one parses
  * its own. Returns the statements, empty when there is nothing to copy or
  * the text does not parse back. */
-typedef struct PEhCopy {
-    CcLowerer* L;
-    const CcTape* tape;         /* the copy's own tape: its spans index that, not the unit's */
-    bool refused;
-} PEhCopy;
-
-/* The value a copied `return` hands back is spelled here, from the tape the
- * copy was parsed against. Everything downstream reads spans against the
- * unit's tape, where this copy has no tokens at all, so the spelling has to
- * be taken while the tape that holds it is still in hand. A value that is
- * still CC rather than C would go out unlowered, so that is refused instead. */
-static bool pl_eh_copy_stmt(CcStmt* s, void* env) {
-    PEhCopy* c = (PEhCopy*)env;
-    @switch (s->k) {
-        case .return_(r):
-            if (r.value) {
-                CCString sp = CcExpr_spell(r.value, c->tape, c->L->arena);
-                CCSlice t = sp.as_slice();
-                size_t i;
-                bool cc_left = false;
-                for (i = 0; i < t.len; i++) if (t.ptr[i] == '@') cc_left = true;
-                if (cc_left) c->refused = true;
-                else s->k.return_.value = lw_text(c->L, sp, s->span);
-            }
-            break;
-        default: break;
-    }
-    return true;
-}
-
+/* Fresh copies of the `@errhandler`s the enclosing function carries.
+ *
+ * An arm that unwraps runs one of those bodies where the `!>` stands, and
+ * each arm runs it somewhere else: one on the caller, the rest in thunks of
+ * their own. They cannot share the statement -- the exit rewriting below and
+ * the results step both edit it in place -- so each arm that needs one parses
+ * its own out of the tokens the original was lexed from. Copies made that way
+ * spell and locate like the source they came from. */
 static CcStmtList pl_eh_fresh(PStep* st) {
     CcLowerer* L = st->L;
-    CcIndex* ix = L->ix;
-    CcDiags scratch = CcDiags_new(L->arena);
     CcStmtList out = vec_new::[CcStmtRef](L->arena);
-    CCString sb = cc_string_new();
-    CcUnit* u;
-    CcStmt* body = NULL;
+    CcParseOpts po;
     size_t i;
     size_t n = st->eh_top.len();
     if (!n) return out;
-    sb.push_cstr("void __cc_probe(void) {\n", L->arena);
+    po.mode = CC_UNIT_SOURCE;
+    po.known_types = L->ix->known_types();
     for (i = 0; i < n; i++) {
         CcStmt* t = *st->eh_top.get_ptr(i);
-        CCSlice text = cc__span_text(ix, L->unit, t->span.first, t->span.last);
-        sb.push_slice(text, L->arena);
-        sb.push_cstr("\n", L->arena);
-    }
-    sb.push_cstr("}\n", L->arena);
-    {
-        CcParseOpts po;
-        CCSlice label = cstr_slice("<parallel arm handler>");
-        po.mode = CC_UNIT_SOURCE;
-        po.known_types = ix->known_types();
-        u = cc_parse_unit(label, cc_string_persist_slice(L->arena, &sb), po, &scratch, L->arena);
-    }
-    if (u->decls.len() != 1) return out;
-    {
-        CcDecl* d = *u->decls.get_ptr(0);
-        @switch (d->k) {
-            case .func(f): body = f.body; break;
-            default: return out;
+        CcStmt* c = cc_parse_stmt_at(L->unit, t->span.first, po, L->ds, L->arena);
+        if (!c) {
+            CcStmtList none = vec_new::[CcStmtRef](L->arena);
+            return none;
         }
-    }
-    if (!body) return out;
-    {
-        CcStmtList bs;
-        bool is_block = false;
-        @switch (body->k) {
-            case .block(b): bs = b.stmts; is_block = true; break;
-            default: break;
-        }
-        if (!is_block) return out;
-        n = bs.len();
-        for (i = 0; i < n; i++) {
-            CcStmt* t = *bs.get_ptr(i);
-            PEhCopy c;
-            CcVisitor v;
-            c.L = L;
-            c.tape = &u->tape;
-            c.refused = false;
-            memset(&v, 0, sizeof(v));
-            v.stmt = pl_eh_copy_stmt;
-            v.env = &c;
-            CcStmt_walk(t, v);
-            if (c.refused) {
-                CcStmtList none = vec_new::[CcStmtRef](L->arena);
-                return none;
-            }
-            out.push(t);
-        }
+        out.push(c);
     }
     return out;
 }
 
-/* `e !>;` as an arm. The arm is the statement, not the operand with the
- * unwrap dropped: the handler in scope is where the error goes, and it runs
- * inside the arm. So the arm becomes a block that carries its own copy of
- * that handler and then the statement, like
- * `@serial { @errhandler(...) { … } e !>; }`. The exit rewriting further
- * down then reaches the handler's `return` the way it reaches the arm's own,
- * and the results step, which runs after this one, inlines the body. */
+/* `e !>;` as an arm, and any arm whose block unwraps.
+ *
+ * `e !>;` is the statement, not the operand with the unwrap dropped: the
+ * handler in scope is where the error goes, and it runs inside the arm. So
+ * the arm becomes a block.
+ *
+ * Then any arm block that unwraps carries its own copy of the function's
+ * handler, because the arm does not run where the function's own copy
+ * stands: all but the first run in thunks of their own, and even the first
+ * has to leave through the join rather than through the caller's frame. The
+ * exit rewriting further down reaches the copy's `return` the way it reaches
+ * the arm's own, and the results step, which runs after this one, inlines
+ * the body at the `!>`. */
 static bool pl_arm_unfold_unwrap(PStep* st, CcParallelArm* arm) {
     CcLowerer* L = st->L;
-    CcStmt* ser;
-    CcBlock sb;
     CcStmtList ehs;
+    CcStmtList body;
+    CcStmtList joined;
+    bool is_ser = false;
     size_t i;
     size_t n;
-    if (!arm->unwrap || !arm->expr) return true;
+    if (arm->unwrap && arm->expr) {
+        CcStmt* ser;
+        CcBlock sb;
+        sb.stmts = vec_new::[CcStmtRef](L->arena);
+        sb.stmts.push(pl_unwrap_stmt(L, arm->expr, arm->span));
+        ser = cc__stmt_blank(arm->span, L->arena);
+        { CcStmtK sk = { .serial = sb }; ser->k = sk; }
+        arm->serial = ser;
+        arm->expr = NULL;
+        arm->unwrap = false;
+    }
+    if (!arm->serial) return true;
+    if (!pl_has_bare_unwrap(arm->serial)) return true;
+    if (pl_block_has_handler(arm->serial)) return true;
     if (!st->eh_any) {
-        /* nothing to run: say so here rather than let the results step
-         * report a bare unwrap in a thunk the reader never wrote */
         CCString m = cc_string_new();
         m.push_cstr("an arm that unwraps needs an @errhandler on the function it stands in", L->arena);
         lw_error(L, arm->span, m);
@@ -1482,22 +1486,33 @@ static bool pl_arm_unfold_unwrap(PStep* st, CcParallelArm* arm) {
     ehs = pl_eh_fresh(st);
     if (!ehs.len()) {
         CCString m = cc_string_new();
-        m.push_cstr("this function's @errhandler does not carry into a @parallel arm: an arm runs its own copy, and a `return` of a CC value in it has no C to hand back", L->arena);
+        m.push_cstr("this function's @errhandler does not parse again for a @parallel arm", L->arena);
         lw_error(L, arm->span, m);
         return false;
     }
-    sb.stmts = vec_new::[CcStmtRef](L->arena);
-    n = ehs.len();
-    for (i = 0; i < n; i++) {
-        CcStmt* t = *ehs.get_ptr(i);
-        sb.stmts.push(t);
+    joined = vec_new::[CcStmtRef](L->arena);
+    {
+        CcStmt* ser = arm->serial;
+        @switch (ser->k) {
+            case .serial(x):
+                body = x.stmts;
+                is_ser = true;
+                n = ehs.len();
+                for (i = 0; i < n; i++) {
+                    CcStmt* t = *ehs.get_ptr(i);
+                    joined.push(t);
+                }
+                n = body.len();
+                for (i = 0; i < n; i++) {
+                    CcStmt* t = *body.get_ptr(i);
+                    joined.push(t);
+                }
+                ser->k.serial.stmts = joined;
+                break;
+            default: break;
+        }
     }
-    sb.stmts.push(pl_unwrap_stmt(L, arm->expr, arm->span));
-    ser = cc__stmt_blank(arm->span, L->arena);
-    { CcStmtK sk = { .serial = sb }; ser->k = sk; }
-    arm->serial = ser;
-    arm->expr = NULL;
-    arm->unwrap = false;
+    (void)is_ser;
     return true;
 }
 

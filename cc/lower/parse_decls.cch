@@ -1255,4 +1255,11 @@ static CcUnit* cc_parse_unit(CCSlice path, CCSlice src, CcParseOpts opts, CcDiag
     return u;
 }
 
+static CcStmt* cc_parse_stmt_at(CcUnit* u, uint32_t first, CcParseOpts opts, CcDiags* ds, CCArena a) {
+    P p = parser_new(u, opts, ds, a);
+    if (first >= p.n) return NULL;
+    p.i = first;
+    return parse_stmt(&p);
+}
+
 #endif
