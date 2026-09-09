@@ -545,7 +545,8 @@ static bool gn_expr_visit(CcExpr* e, void* env) {
             cc_string_push_slice(&fams, fam, L->arena);
         }
         {
-            CCString m = @string(`'${gf.name}::[...]' matches no registered generic family (registered: ${fams})`, L->arena);
+            CCSlice gname = gf.name;
+            CCString m = @string(`unknown generic name '${gname}' before '::[...]': it matches no registered generic family (registered: ${fams})`, L->arena);
             lw_error(L, e->span, m);
         }
     }

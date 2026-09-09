@@ -544,7 +544,7 @@ static int rl_unwrap_mode(CcLowerer* L, const CcExpr* inner, CcTypeInfo* rt, CcS
     if (callee.len) {
         CcSym* sym = rl_ix_sym(L, callee);
         if (!sym) {
-            CCString m = @string(`type: '!>' on '${callee}': no visible declaration`, L->arena);
+            CCString m = @string(`type: '!>' on '${callee}': no visible declaration, so the producer could not be typed as a Result`, L->arena);
             lw_error(L, sp, m);
             return 0;
         }

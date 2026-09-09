@@ -17,6 +17,7 @@
 #include "index.cch"
 #include "parse_decls.cch"
 #include "parse_walk.cch"
+#include <ccc/cc_ufcs_families.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -3343,24 +3344,112 @@ static CcMethod* cc__resolve_via(CcIndex* ix, CcTypeInfo* recv, CCSlice method, 
     }
 }
 
-static void cc__tried(CCString* tried, CCArena ta, CCSlice name, const char* note) {
-    tried->push_char(' ', ta);
-    tried->push_slice(name, ta);
-    if (note) tried->push_cstr(note, ta);
+/* `csv` (", "-joined) already names `item`. */
+static bool cc__csv_has(CCSlice csv, CCSlice item) {
+    size_t i = 0;
+    while (i < csv.len) {
+        size_t s = i;
+        size_t e = s;
+        while (e < csv.len && csv.ptr[e] != ',') e++;
+        if (e - s == item.len && (item.len == 0 || memcmp(csv.ptr + s, item.ptr, item.len) == 0)) return true;
+        i = e < csv.len ? e + 1 : csv.len;
+        while (i < csv.len && csv.ptr[i] == ' ') i++;
+    }
+    return false;
 }
 
+/* The member set a family macro installs, in the order its header spells
+ * them. The `##_<member>` tokens in the macro body ARE the list
+ * (`Name##_push`, `NAME##_sub`) — the rule the host preprocessor uses, and
+ * the only one available here: the members are text-invisible once the
+ * macro has expanded, so the header the instance came from is what can
+ * name them. A `##__private` paste is not a member. Empty when the
+ * receiver is not a mangled instance of a family with a header. */
+static CCSlice cc__family_members_csv(CcIndex* ix, CCSlice base) {
+    const char* suffix = cc_ufcs_family_header_suffix(cc__ix_cstr(ix, base));
+    CcUnitList* unitv = &ix->units;
+    CCSlice src = cc_slice_empty();
+    CCString sb = cc_string_new();
+    size_t i;
+    size_t n;
+    if (!suffix) return cc_slice_empty();
+    n = unitv->len();
+    for (i = 0; i < n; i++) {
+        CcUnit* u = *unitv->get_ptr(i);
+        if (cc__has_suffix(u->tape.path, suffix)) {
+            src = u->tape.src;
+            break;
+        }
+    }
+    if (!src.len) return cc_slice_empty();
+    i = 0;
+    while (i + 3 < src.len) {
+        size_t ms;
+        size_t me;
+        CCSlice mem;
+        if (src.ptr[i] != '#' || src.ptr[i + 1] != '#' || src.ptr[i + 2] != '_') {
+            i++;
+            continue;
+        }
+        ms = i + 3;
+        me = ms;
+        while (me < src.len && cc__ix_ident_char((unsigned char)src.ptr[me])) me++;
+        i = me > ms ? me : ms;
+        if (me == ms || src.ptr[ms] == '_') continue;
+        mem = cc_slice_from_buffer((char*)src.ptr + ms, me - ms);
+        if (cc__csv_has(cc_string_as_slice(&sb), mem)) continue;
+        if (sb.len()) { sb.push_cstr(", ", ix->arena); }
+        sb.push_slice(mem, ix->arena);
+    }
+    return cc__ix_finish(ix, &sb);
+}
+
+/* A receiver the scalar family composes for (`cc_double_ghost`). */
+static bool cc__ty_is_scalar(CCSlice name) {
+    static const char* k_scalars[] = { "int", "double", "float", "size_t", "bool",
+                                       "char", "long", "long long", "unsigned int",
+                                       "unsigned long", "short", NULL };
+    size_t i;
+    for (i = 0; k_scalars[i]; i++) {
+        if (cc__eqc(name, k_scalars[i])) return true;
+    }
+    return false;
+}
+
+/* One rung of the ladder, on its own line: the name this tier composed,
+ * the tier that composed it, and what looking it up found. A rung the
+ * reader cannot see is a rung they will compose again by hand. */
+static void cc__tried(CCString* tried, CCArena ta, CCSlice name, const char* why) {
+    tried->push_cstr("\ncandidate ", ta);
+    tried->push_slice(name, ta);
+    tried->push_cstr(" (", ta);
+    tried->push_cstr(why ? why : "family spelling", ta);
+    tried->push_cstr("): not declared", ta);
+}
+
+/* A rung whose tier is spelled by a declaration in the unit: `a` opens it,
+ * `mid` names the declaration, `b` closes it. */
 static void cc__tried2(CCString* tried, CCArena ta, CCSlice name, const char* a, CCSlice mid, const char* b) {
-    tried->push_char(' ', ta);
+    tried->push_cstr("\ncandidate ", ta);
     tried->push_slice(name, ta);
     tried->push_cstr(a, ta);
     tried->push_slice(mid, ta);
     tried->push_cstr(b, ta);
 }
 
+/* The bare-name tier found nothing of that name at all. */
+static void cc__tried_bare_undeclared(CCString* tried, CCArena ta, CCSlice method) {
+    CCSlice cur = cc_string_as_slice(tried);
+    if (cc__ix_contains(cur.ptr, cur.len, " (bare): ")) return;   /* one rung per ladder */
+    tried->push_cstr("\ncandidate ", ta);
+    tried->push_slice(method, ta);
+    tried->push_cstr(" (bare): no visible declaration", ta);
+}
+
 /* The bare-name near miss: the callee is declared, its first parameter does
  * not take this receiver. */
 static void cc__tried_bare(CCString* tried, CCArena ta, CCSlice method, CCSlice p0, CCSlice pname, CCSlice recv) {
-    tried->push_cstr("; candidate ", ta);
+    tried->push_cstr("\ncandidate ", ta);
     tried->push_slice(method, ta);
     tried->push_cstr(" (bare): declared, but first parameter '", ta);
     tried->push_slice(p0, ta);
@@ -3403,7 +3492,7 @@ static CcMethod* cc__resolve_hook(CcIndex* ix, CcTypeInfo* recv, CCSlice method,
         *stop = true;
         cs = cc__callee_sym(ix, r->callee);
         if (cs) return cc__method_new(ix, recv, method, r->callee, "typehooks", cc__hook_origin(ix, hook, cs), cs, r->by_value);
-        cc__tried2(tried, ta, r->callee, " (hook ", hook->ufcs_fn, ": not declared)");
+        cc__tried2(tried, ta, r->callee, " (hook compose): not declared (.ufcs = ", hook->ufcs_fn, ")");
         return NULL;
     }
     if (hook->ufcs_prefix.len) {
@@ -3411,7 +3500,7 @@ static CcMethod* cc__resolve_hook(CcIndex* ix, CcTypeInfo* recv, CCSlice method,
         *stop = true;
         cs = cc__callee_sym(ix, composed);
         if (cs) return cc__method_new(ix, recv, method, composed, "typehooks", cc__hook_origin(ix, hook, cs), cs, hook->ufcs_prefix_by_value);
-        cc__tried2(tried, ta, composed, " (hook ", hook->ufcs_fn, ": not declared)");
+        cc__tried2(tried, ta, composed, " (hook compose): not declared (.ufcs = ", hook->ufcs_fn, ")");
         return NULL;
     }
     /* rejecting (empty slice) or opaque handlers fall through to the composed names */
@@ -3427,7 +3516,7 @@ static CcMethod* cc__resolve_destroy(CcIndex* ix, CcTypeInfo* recv, CCSlice meth
     cs = cc__callee_sym(ix, recv->destroy_fn);
     if (cs) return cc__method_new(ix, recv, method, recv->destroy_fn, "typehooks",
                                   cc__cat3(ix, "@" "typehooks .destroy -> ", cc__sym_origin(ix, cs), ""), cs, false);
-    cc__tried(tried, ta, recv->destroy_fn, " (.destroy hook: not declared)");
+    cc__tried(tried, ta, recv->destroy_fn, "@" "typehooks .destroy");
     return NULL;
 }
 
@@ -3447,7 +3536,7 @@ static CcMethod* cc__resolve_registered(CcIndex* ix, CcTypeInfo* recv, CCSlice m
         sb.push_slice(cc__sym_origin(ix, cs), ix->arena);
         return cc__method_new(ix, recv, method, composed, "DECL_UFCS", cc__ix_finish(ix, &sb), cs, false);
     }
-    cc__tried2(tried, ta, composed, " (", recv->ufcs_registered_by, ")");
+    cc__tried2(tried, ta, composed, " (", recv->ufcs_registered_by, "): not declared");
     return NULL;
 }
 
@@ -3477,6 +3566,10 @@ static CcMethod* cc__resolve_type_method(CcIndex* ix, CcTypeInfo* recv, CCSlice 
 static CcMethod* cc__resolve_snake(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, CCSlice base_name) {
     CCSlice snake = CcIndex_snake(ix, base_name);
     CCSlice composed = cc__join(ix, snake, "_", method);
+    /* `cc_double_ghost` on a scalar is the scalar family, not this type's
+     * own spelling: a reader looking for where to declare it needs to know
+     * which of the two the rung was. */
+    const char* cc_why = cc__ty_is_scalar(base_name) ? "scalar family" : "family spelling";
     CcSym* cs;
     if (!cc__eq(composed, cc__join(ix, base_name, "_", method))) {
         cs = cc__callee_sym(ix, composed);
@@ -3488,7 +3581,7 @@ static CcMethod* cc__resolve_snake(CcIndex* ix, CcTypeInfo* recv, CCSlice method
         composed = cc__join(ix, cc__cat3(ix, "cc_", snake, ""), "_", method);
         cs = cc__callee_sym(ix, composed);
         if (cs) return cc__method_new(ix, recv, method, composed, "cc_snake_method", cc__sym_origin(ix, cs), cs, false);
-        cc__tried(tried, ta, composed, NULL);
+        cc__tried(tried, ta, composed, cc_why);
     }
     return NULL;
 }
@@ -3500,9 +3593,15 @@ static CcMethod* cc__resolve_bare(CcIndex* ix, CcTypeInfo* recv, CCSlice method,
     CcParamList params;
     CcType* p0;
     CcType* base;
-    if (!cs || !cc__sym_func_type(cs, &fn)) return NULL;
+    if (!cs || !cc__sym_func_type(cs, &fn)) {
+        cc__tried_bare_undeclared(tried, ta, method);
+        return NULL;
+    }
     params = fn.params;
-    if (params.len() == 0 || !params.get_ptr(0)->type) return NULL;
+    if (params.len() == 0 || !params.get_ptr(0)->type) {
+        cc__tried_bare_undeclared(tried, ta, method);
+        return NULL;
+    }
     p0 = params.get_ptr(0)->type;
     base = p0;
     if (p0->k.kind == CcTypeK_pointer) {
@@ -3546,6 +3645,7 @@ static CcMethod* cc__resolve_faces(CcIndex* ix, CcTypeInfo* recv, CCSlice method
     CcNameList faces = cc__view_faces(ix, recv->name);
     size_t n = faces.len();
     size_t i;
+    size_t retried = 0;
     CcRecordType st;
     CcFieldList* fieldv;
     size_t nf;
@@ -3560,6 +3660,15 @@ static CcMethod* cc__resolve_faces(CcIndex* ix, CcTypeInfo* recv, CCSlice method
             if (!f->name.len || !cc__eq(f->name, *faces.get_ptr(i))) continue;
             m = cc__resolve_via(ix, recv, method, tried, ta, depth, f->type, cc__cat3(ix, "via @" "typeview as: ", f->name, " ->"), 0u, f->name);
             if (m) return m;
+            /* The embed answered nothing either. Say the retry happened and
+             * which field it went through: a silent `as:` retry leaves the
+             * reader looking for the method on the outer type alone. */
+            if (!retried) { tried->push_cstr("\nas: retry also failed", ta); }
+            retried++;
+            tried->push_cstr("\nas: field: ", ta);
+            tried->push_slice(CcIndex_canon(ix, f->type), ta);
+            tried->push_char(' ', ta);
+            tried->push_slice(f->name, ta);
         }
     }
     return NULL;
@@ -3595,7 +3704,7 @@ static CcMethod* cc__resolve_sink(CcIndex* ix, CcTypeInfo* recv, CCSlice method,
             return sm;
         }
     }
-    cc__tried(tried, ta, best->sink_fn, " (.ufcs_sink: not declared)");
+    cc__tried(tried, ta, best->sink_fn, "@" "typehooks .ufcs_sink");
     return NULL;
 }
 
@@ -3695,6 +3804,7 @@ static CcMethod* !>(CcDiag) CcIndex_method_recv(CcIndex* ix, CcTypeInfo* recv, C
     {
         CCString sb = cc_string_new();
         CcMethodList have = CcIndex_methods_of(ix, recv);
+        CCSlice csv = cc__family_members_csv(ix, cc__strip_tag(recv->name));
         size_t n = have.len();
         size_t i;
         size_t shown = 0;
@@ -3704,11 +3814,21 @@ static CcMethod* !>(CcDiag) CcIndex_method_recv(CcIndex* ix, CcTypeInfo* recv, C
         sb.push_slice(method, a);
         sb.push_cstr("' for receiver type '", a);
         sb.push_slice(recv->name, a);
-        sb.push_cstr("'; tried:", a);
-        if (tried.len()) sb.push_slice(cc_string_as_slice(&tried), a);
-        else sb.push_cstr(" nothing", a);
-        if (n) {
-            sb.push_cstr("; the type has:", a);
+        sb.push_char('\'', a);
+        /* The ladder, one rung a line: what was composed and what it found. */
+        if (tried.len()) { sb.push_slice(cc_string_as_slice(&tried), a); }
+        else { sb.push_cstr("\ncandidates: none — no tier composed a name for this receiver", a); }
+        /* What the receiver does have. A family instance's members come
+         * from the macro that installed them; anything else is what the
+         * index saw declared. Always printed, empty set included: "this
+         * type has no methods" is an answer, silence is not. */
+        sb.push_cstr("\ninstalled methods of ", a);
+        sb.push_slice(recv->name, a);
+        sb.push_char(':', a);
+        if (csv.len) {
+            sb.push_char(' ', a);
+            sb.push_slice(csv, a);
+        } else {
             for (i = 0; i < n && shown < 24; i++) {
                 size_t k;
                 bool dup = false;
@@ -3717,12 +3837,13 @@ static CcMethod* !>(CcDiag) CcIndex_method_recv(CcIndex* ix, CcTypeInfo* recv, C
                     CcMethod* hk = *have.get_ptr(k);
                     if (cc__eq(hk->method, hm->method)) dup = true;
                 }
-                if (dup) continue;
+                if (dup || (hm->method.len && hm->method.ptr[0] == '_')) continue;
+                if (shown) { sb.push_char(',', a); }
                 sb.push_char(' ', a);
                 sb.push_slice(hm->method, a);
                 shown++;
             }
-            if (shown < n) sb.push_cstr(" ...", a);
+            if (shown && shown < n) { sb.push_cstr(", ...", a); }
         }
         at.path = cc_slice_empty();
         at.line = 0;

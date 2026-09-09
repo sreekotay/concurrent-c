@@ -583,6 +583,20 @@ static bool uf_ambient(Walker* w, CcLowerer* L, CcExpr* e, CcUfcs uf, CcSpan sp)
  * written arguments. A callee that is not such a macro has nowhere to put
  * them, and that is a diagnostic at the site rather than a call carrying an
  * argument the callee never declared. */
+/* The free-name spelling of a member site that wears `::[...]`:
+ * `py.expose::[T](...)` is the registered generic factory `py_expose`, so
+ * a member with no type formal names that factory as the other thing that
+ * could have resolved it. Just the member when the receiver is not a name. */
+static CCSlice uf_targ_factory_name(CcLowerer* L, CcUfcs uf) {
+    CCSlice recv = uf_ident_name_or_empty(uf.recv);
+    CCString sb = cc_string_new();
+    if (!recv.len) return uf.method;
+    cc_string_push_slice(&sb, recv, L->arena);
+    cc_string_push_char(&sb, '_', L->arena);
+    cc_string_push_slice(&sb, uf.method, L->arena);
+    return cc_string_persist_slice(L->arena, &sb);
+}
+
 static bool uf_targs_lead(Walker* w, CcLowerer* L, CcUfcs uf, CcMethod* m,
                           CcSpan sp, CcExprList* out) {
     CcTypeList* tv = &uf.targs;
@@ -598,7 +612,8 @@ static bool uf_targs_lead(Walker* w, CcLowerer* L, CcUfcs uf, CcMethod* m,
     if (!md) {
         CCSlice mn = uf.method;
         CCSlice cn = m->callee;
-        CCString msg = @string(`type: '.${mn}' resolves to '${cn}', which declares no type formal for it`, L->arena);
+        CCSlice fam = uf_targ_factory_name(L, uf);
+        CCString msg = @string(`type: no type-formal member '${mn}': it resolves to '${cn}', which declares no type formal to bind — '::[...]' binds a member that declares one (allocT, block_on, as_list, as_map, map), or a registered generic factory named '${fam}'`, L->arena);
         lw_error(L, sp, msg);
         return false;
     }
@@ -919,6 +934,17 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
     call.callee = lw_ident(L, uf_overload_for_args(w, L, uf, m), sp);
     call.args = vec_new::[CcExprRef](L->arena);
     if (cc_slice_eq_cstr(&m->source, "ufcs_sink")) {
+        /* The sink takes the method as a string and the arguments by
+         * count: there is no formal for `::[...]` to bind, and passing the
+         * call on without it would drop what the site wrote. */
+        if (uf.targs.len()) {
+            CCSlice mn = uf.method;
+            CCSlice cn = m->callee;
+            CCSlice fam = uf_targ_factory_name(L, uf);
+            CCString msg = @string(`type: no type-formal member '${mn}': it resolves to the '.ufcs_sink' '${cn}', a dynamic call with no type formal to bind — '::[...]' binds a member that declares one (allocT, block_on, as_list, as_map, map), or a registered generic factory named '${fam}'`, L->arena);
+            lw_error(L, sp, msg);
+            return;
+        }
         /* A dynamic family resolves nothing at compile time: the method is
          * a string the callee looks up, and the arguments are a run of
          * values it reads by count. So the call carries what the name no
@@ -1922,6 +1948,73 @@ static void uf_widen_pass(CcLowerer* L, UStep* st) {
     tw_unit(&w);
 }
 
+/* `@typeview(V) X*` attaches a named view to one concrete type. `X` that
+ * no declaration introduced is a family prefix the writer meant as a glob
+ * (`Fam_alpha` where `Fam_alpha1` is the type): the annotation binds
+ * nothing, and every call through the parameter then fails about a method
+ * the type never had instead of about the type that does not exist. */
+static void uf_check_view_use(CcLowerer* L, CcType* t, CcSpan sp) {
+    CcIndex* ix = L->ix;
+    CCSlice view = cc_slice_empty();
+    CCSlice canon;
+    CCSlice base;
+    CcSym* s;
+    size_t i;
+    while (t) {
+        CcAttrList* av = &t->attrs;
+        size_t n = av->len();
+        CcType* inner = NULL;
+        bool has = false;
+        for (i = 0; i < n; i++) {
+            CcAttr* a = av->get_ptr(i);
+            if (!cc_slice_eq_cstr(&a->name, "typeview")) continue;
+            view = a->value;
+            has = true;
+        }
+        if (has) break;
+        @switch (t->k) {
+            case .pointer(pt): inner = pt.pointee; break;
+            default: break;
+        }
+        t = inner;
+    }
+    if (!t || !view.len) return;
+    canon = ix->canon(t);
+    base = cc__strip_tag(canon);
+    /* Only a plain name is checkable here: a tagged or compound spelling
+     * (`struct Foo`, `unsigned long`) names no typedef symbol either way. */
+    if (!base.len || !slice_eq(base, canon)) return;
+    for (i = 0; i < base.len; i++) {
+        char c = base.ptr[i];
+        if (c == ' ' || c == '*' || c == '[') return;
+    }
+    if (cc__ty_is_scalar(base)) return;
+    s = ix->sym(base) ?> NULL;
+    while (s && s->kind != CC_SYM_TYPE) s = s->same_name;
+    if (s) return;
+    {
+        CcNameList known = ix->known_types();
+        CCString near = cc_string_new();
+        size_t n = known.len();
+        for (i = 0; i < n; i++) {
+            CCSlice k = *known.get_ptr(i);
+            if (k.len <= base.len || memcmp(k.ptr, base.ptr, base.len) != 0) continue;
+            if (cc_string_len(&near)) cc_string_push_cstr(&near, ", ", L->arena);
+            cc_string_push_slice(&near, k, L->arena);
+        }
+        {
+            CCString m = @string(`type: ${"@"}typeview(${view}) ${base}*: '${base}' is not a declared type — a named view attaches to a concrete type, not a family prefix`, L->arena);
+            if (cc_string_len(&near)) {
+                CCSlice nn = cc_string_persist_slice(L->arena, &near);
+                CCString note = @string(`declared types whose name begins with '${base}': ${nn}`, L->arena);
+                vt_error_note(L, sp, m, lw_keep(L, &note));
+            } else {
+                lw_error(L, sp, m);
+            }
+        }
+    }
+}
+
 static void uf_check_views(CcLowerer* L) {
     CcUnit* u = L->unit;
     CcDeclList* declv = &u->decls;
@@ -1929,9 +2022,22 @@ static void uf_check_views(CcLowerer* L) {
     size_t i;
     for (i = 0; i < n; i++) {
         CcDecl* d = *declv->get_ptr(i);
+        CcFuncDecl f;
+        CcParamList* ps;
         @switch (d->k) {
             case .typeview(tv): uf_check_view(L, d, tv); break;
             default: break;
+        }
+        if (!uf_decl_func(d, &f)) continue;
+        ps = uf_func_params(f.type);
+        if (!ps) continue;
+        {
+            size_t np = ps->len();
+            size_t k;
+            for (k = 0; k < np; k++) {
+                CcParam* p = ps->get_ptr(k);
+                if (p->type) uf_check_view_use(L, p->type, p->span);
+            }
         }
     }
 }
