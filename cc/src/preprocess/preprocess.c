@@ -19586,6 +19586,294 @@ int cc_check_link_set_faces(const char* const* ccs_paths, int n) {
     return 0;
 }
 
+/* ---- the owner splice, for a lowerer that resolves `.cch` itself ---------
+ *
+ * The rewrite above answers two questions in one pass: which faces this
+ * translation unit must define, and which lowered `.h` every other quoted
+ * include stands for. Only the first is the clean lowerer's business — it
+ * resolves `.cch` includes and writes their `.h` itself, so an include
+ * rewritten here would hand it the C11 header lowerer's output instead of
+ * its own.
+ *
+ * So this walks the same include lines under the same grade and owner
+ * rules and changes nothing else. A face this unit owns, and an unowned
+ * one no other unit can define, is replaced by its text; every other
+ * include is left exactly as written, for the lowerer to resolve.
+ *
+ * A quoted `.cch` include inside spliced text is spelled relative to the
+ * face, and the file that carries it now is the unit — so it is made
+ * absolute. Left relative it would be looked for beside the unit and
+ * reported missing while it sits beside the face. */
+
+/* Faces whose text is built but not yet placed: everything included from
+ * a file's opening block lands together at the end of it. */
+#define CC_CLEAN_SPLICE_MAX_PENDING 256
+
+static char* cc__splice_owned_cch_for_clean(const char* src, size_t n,
+                                            const char* current_path,
+                                            int depth);
+
+/* A line of a file's opening block: blank, comment, or a preprocessor
+ * line (the `#!` shebang included). `*in_comment` carries block-comment
+ * state from the previous line. */
+static int cc__line_is_header_shaped(const char* line, size_t len,
+                                     int* in_comment) {
+    size_t p = 0;
+    while (p < len) {
+        if (*in_comment) {
+            if (p + 1 < len && line[p] == '*' && line[p + 1] == '/') {
+                *in_comment = 0;
+                p += 2;
+                continue;
+            }
+            p++;
+            continue;
+        }
+        if (line[p] == ' ' || line[p] == '\t' || line[p] == '\r') {
+            p++;
+            continue;
+        }
+        if (p + 1 < len && line[p] == '/' && line[p + 1] == '*') {
+            *in_comment = 1;
+            p += 2;
+            continue;
+        }
+        if (p + 1 < len && line[p] == '/' && line[p + 1] == '/') return 1;
+        return line[p] == '#';
+    }
+    return 1;
+}
+
+/* The face's text under the markers and the `#line` the reference splice
+ * writes, with the face's own includes taken through the same pass. The
+ * caller re-pins `#line` after placing it. Returns a buffer to free, or
+ * NULL when the face cannot be read (the caller leaves the include as it
+ * was) or a nested pass refused. */
+static char* cc__splice_face_text_for_clean(const char* child_abs, int depth) {
+    char* body = NULL;
+    size_t body_len = 0;
+    char* rew = NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    const char* use;
+    size_t use_len;
+    char ld[PATH_MAX + 64];
+    if (cc__read_file_text(child_abs, &body, &body_len) != 0 || !body) {
+        free(body);
+        return NULL;
+    }
+    rew = cc__splice_owned_cch_for_clean(body, body_len, child_abs, depth + 1);
+    if (g_local_cch_lower_failed) {
+        free(rew);
+        free(body);
+        return NULL;
+    }
+    use = rew ? rew : body;
+    use_len = rew ? strlen(rew) : body_len;
+    cc_sb_append_cstr(&out, &out_len, &out_cap, CC_IMPL_CCH_BEGIN_MARK);
+    cc_sb_append_cstr(&out, &out_len, &out_cap, child_abs);
+    cc_sb_append_cstr(&out, &out_len, &out_cap, "*/\n");
+    snprintf(ld, sizeof(ld), "#line 1 \"%s\"\n", child_abs);
+    cc_sb_append_cstr(&out, &out_len, &out_cap, ld);
+    cc_sb_append(&out, &out_len, &out_cap, use, use_len);
+    if (use_len == 0 || use[use_len - 1] != '\n')
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+    cc_sb_append_cstr(&out, &out_len, &out_cap, CC_IMPL_CCH_END_MARK);
+    cc_sb_append_cstr(&out, &out_len, &out_cap, child_abs);
+    cc_sb_append_cstr(&out, &out_len, &out_cap, "*/\n");
+    free(rew);
+    free(body);
+    return out;
+}
+
+static void cc__splice_pin_line(char** out, size_t* out_len, size_t* out_cap,
+                                size_t line_no, const char* path) {
+    char ld[PATH_MAX + 64];
+    snprintf(ld, sizeof(ld), "#line %zu \"%s\"\n", line_no, path);
+    cc_sb_append_cstr(out, out_len, out_cap, ld);
+}
+
+static char* cc__splice_owned_cch_for_clean(const char* src, size_t n,
+                                            const char* current_path,
+                                            int depth) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    size_t line_no = 1;
+    int changed = 0;
+    int in_header = 1;
+    int in_comment = 0;
+    char* pending[CC_CLEAN_SPLICE_MAX_PENDING];
+    int npend = 0;
+    int k;
+    char current_dir[PATH_MAX];
+    char search_dir[PATH_MAX];
+    if (!src || !current_path) return NULL;
+    /* A face is marked spliced before its own includes are walked, so a
+     * cycle ends at the repeat include and this bound is out of reach.
+     * It still says so rather than returning "nothing changed", which is
+     * what a face with no includes at all looks like. */
+    if (depth > 128) {
+        fprintf(stderr,
+                "cc: error: face splice nested deeper than 128 at %s\n",
+                current_path);
+        g_local_cch_lower_failed = 1;
+        return NULL;
+    }
+    if (cc__dirname_local(current_path, current_dir, sizeof(current_dir)) != 0)
+        return NULL;
+    cc__fill_quoted_cch_search_dir(src, n, search_dir, sizeof(search_dir));
+    while (i < n) {
+        size_t line_end = i;
+        size_t path_s = 0, path_e = 0;
+        int hdr_line;
+        while (line_end < n && src[line_end] != '\n') line_end++;
+        hdr_line = in_header
+                       ? cc__line_is_header_shaped(src + i, line_end - i,
+                                                   &in_comment)
+                       : 0;
+        /* The opening block ends here: the faces it included are placed
+         * now, ahead of the first declaration and behind every include
+         * the block wrote. A face's types are then in scope for the
+         * declarations that follow, and the `.h` of a face this unit
+         * only extracts is in scope for the spliced text. */
+        if (in_header && !hdr_line) {
+            for (k = 0; k < npend; k++) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, pending[k]);
+                free(pending[k]);
+            }
+            if (npend) cc__splice_pin_line(&out, &out_len, &out_cap, line_no,
+                                           current_path);
+            npend = 0;
+            in_header = 0;
+        }
+        if (cc__match_local_include_line(src + i, line_end - i, &path_s, &path_e)) {
+            size_t rel_len = path_e - path_s;
+            if (rel_len >= 4 && rel_len < PATH_MAX &&
+                strncmp(src + i + path_e - 4, ".cch", 4) == 0) {
+                char rel_path[PATH_MAX];
+                char child_path[PATH_MAX];
+                char child_abs[PATH_MAX];
+                int found;
+                memcpy(rel_path, src + i + path_s, rel_len);
+                rel_path[rel_len] = '\0';
+                found = cc__try_quoted_cch_path(current_dir, rel_path, child_path,
+                                                sizeof(child_path), child_abs);
+                if (!found && search_dir[0] &&
+                    strcmp(search_dir, current_dir) != 0)
+                    found = cc__try_quoted_cch_path(search_dir, rel_path,
+                                                    child_path,
+                                                    sizeof(child_path),
+                                                    child_abs);
+                if (found && cc__local_cch_is_impl_grade(child_abs) &&
+                    !cc__cch_extract_for_other_tus(child_abs)) {
+                    char* face = NULL;
+                    if (cc__cch_check_per_tu_face(child_abs) != 0) {
+                        g_local_cch_lower_failed = 1;
+                        goto refuse;
+                    }
+                    if (cc__impl_cch_was_spliced(child_abs)) {
+                        /* Repeat include: the face's guard would make this
+                         * inert; a blank line keeps the lines after it at
+                         * the numbers they were written at. */
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                        changed = 1;
+                        goto next_line;
+                    }
+                    if (in_header && npend == CC_CLEAN_SPLICE_MAX_PENDING) {
+                        fprintf(stderr,
+                                "cc: error: more than %d faces spliced from "
+                                "the opening block of %s\n",
+                                CC_CLEAN_SPLICE_MAX_PENDING, current_path);
+                        g_local_cch_lower_failed = 1;
+                        goto refuse;
+                    }
+                    if (cc__impl_cch_mark_spliced(child_abs) != 0) {
+                        g_local_cch_lower_failed = 1;
+                        goto refuse;
+                    }
+                    face = cc__splice_face_text_for_clean(child_abs, depth);
+                    if (g_local_cch_lower_failed) {
+                        free(face);
+                        goto refuse;
+                    }
+                    if (face) {
+                        if (in_header) {
+                            /* The line it stood on becomes blank so the
+                             * lines after it keep their numbers. */
+                            pending[npend++] = face;
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                        } else {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, face);
+                            free(face);
+                            cc__splice_pin_line(&out, &out_len, &out_cap,
+                                                line_no + 1, current_path);
+                        }
+                        changed = 1;
+                        goto next_line;
+                    }
+                    /* Unreadable face: leave the include, so the lowerer
+                     * resolves it and reports what it finds. */
+                }
+                if (found && depth > 0) {
+                    cc_sb_append(&out, &out_len, &out_cap, src + i, path_s);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, child_abs);
+                    cc_sb_append(&out, &out_len, &out_cap, src + i + path_e,
+                                 line_end - i - path_e);
+                    if (line_end < n && src[line_end] == '\n')
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                    changed = 1;
+                    goto next_line;
+                }
+            }
+        }
+        cc_sb_append(&out, &out_len, &out_cap, src + i, line_end - i);
+        if (line_end < n && src[line_end] == '\n')
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+    next_line:
+        i = (line_end < n) ? line_end + 1 : line_end;
+        line_no++;
+    }
+    /* A file that is opening block all the way down. */
+    for (k = 0; k < npend; k++) {
+        cc_sb_append_cstr(&out, &out_len, &out_cap, pending[k]);
+        free(pending[k]);
+    }
+    npend = 0;
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    return out;
+refuse:
+    for (k = 0; k < npend; k++) free(pending[k]);
+    free(out);
+    return NULL;
+}
+
+char* cc_splice_owned_cch_impl(const char* src, size_t input_len,
+                               const char* input_path) {
+    if (!src || input_len == 0 || !input_path || !input_path[0]) return NULL;
+    /* One call = one logical translation unit, as for the rewrite: a
+     * repeat include of a face already spliced into it is inert. */
+    g_local_cch_lower_failed = 0;
+    cc__reset_spliced_impl_cch();
+    {
+        const char* saved_root = g_rewrite_root_path;
+        char resolved[PATH_MAX];
+        char* spliced;
+        resolved[0] = 0;
+        if (cc__resolve_rewrite_root_ccs(input_path, src, input_len, resolved,
+                                        sizeof(resolved)))
+            g_rewrite_root_path = resolved;
+        else
+            g_rewrite_root_path = input_path;
+        spliced = cc__splice_owned_cch_for_clean(src, input_len, input_path, 0);
+        g_rewrite_root_path = saved_root;
+        return spliced;
+    }
+}
+
 char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
                                                        size_t input_len,
                                                        const char* input_path) {

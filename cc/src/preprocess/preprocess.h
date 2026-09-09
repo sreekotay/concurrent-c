@@ -189,6 +189,14 @@ int cc_prefetch_lower_ccs_includes(const char* ccs_path);
 char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
                                                        size_t input_len,
                                                        const char* input_path);
+/* Splice the implementation `.cch` faces `input_path` owns into `src`,
+ * for a lowerer that resolves `.cch` includes itself: same grade and
+ * owner rules as the rewrite above, and no include rewritten to a `.h`.
+ * NULL when no include changed; check cc_local_header_lower_failed()
+ * for a face that refused (a `#pragma(@per_tu)` face with a non-static
+ * body), which is an error even when the return is NULL. */
+char* cc_splice_owned_cch_impl(const char* src, size_t input_len,
+                               const char* input_path);
 int cc_local_header_lower_failed(void);
 size_t cc_lowered_local_header_count(void);
 const char* cc_lowered_local_header_source_path(size_t i);

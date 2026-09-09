@@ -4145,6 +4145,29 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
         free(buf);
         return -1;
     }
+    /* An implementation `.cch` this unit owns defines its bodies here.
+     *
+     * The unit that owns a face compiles it; every other unit gets the
+     * extracted declarations and calls into this one. The shadow path
+     * splices the face where the include stood, in the same pass that
+     * turns the other includes into lowered `.h` — and the clean lowerer
+     * resolves those includes itself, so only the splice is handed over.
+     * Without it a face's definitions land in no translation unit at all
+     * and the link is what says so. The face's own text goes in, so its
+     * `@`-forms lower with the unit that owns them. */
+    {
+        char* spliced = cc_splice_owned_cch_impl(buf, len, in_path);
+        if (cc_local_header_lower_failed()) {
+            free(spliced);
+            free(buf);
+            return -1;
+        }
+        if (spliced) {
+            free(buf);
+            buf = spliced;
+            len = strlen(buf);
+        }
+    }
     if (cc_comptime_prepare_source_ex(&buf, &len, in_path,
                                       CC_PREPARE_COMPTIME_IF | CC_PREPARE_GRAMMAR |
                                       CC_PREPARE_MODULE_EXPORT | CC_PREPARE_STATIC_MAP) != 0) {
@@ -4997,6 +5020,15 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             if (uk == CC_UNIT_KIND_CCH) {
                 fprintf(stderr, "cc: the clean lowerer does not lower header units yet (%s)\n", opt->in_path);
                 return -1;
+            }
+            /* What this link set can define. A face whose owner `.ccs` is
+             * not being linked leaves its callers with declarations and no
+             * definition; the audit says so at the body, where the answer
+             * is, rather than leaving `ld` to name a mangled symbol. */
+            if (opt->mode == CC_MODE_LINK && opt->bin_out_path) {
+                const char* one[1];
+                one[0] = opt->in_path;
+                if (cc_check_link_set_faces(one, 1) != 0) return 1;
             }
             /* A pin names the toolchain the unit is written against. The
              * clean lowerer ships no bootstrap seeds of its own, so it can
