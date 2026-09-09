@@ -1017,7 +1017,16 @@ static CcExpr* parse_closure(P* p, uint32_t first, bool is_unsafe, bool is_async
             if (at_word(p, "safe")) { c.is_safe = true; adv(p); }
             if (accept_p(p, CC_P_AMP)) c.by_ref = true;
             if (!at_ident(p)) {
-                err_expected(p, "a captured variable name in the closure capture list");
+                /* `[&]` asks for capture-all by reference: every name the
+                 * body reads becomes a binding shared with a frame the
+                 * closure may outlive, and nothing in the source says which
+                 * ones or for how long. Each borrow is named or none is. */
+                if (c.by_ref && (at_p(p, CC_P_RBRACKET) || at_p(p, CC_P_COMMA))) {
+                    CCString m = @string(`capture-all [&] is not allowed; name each captured variable`, p->arena);
+                    err_here(p, m);
+                } else {
+                    err_expected(p, "a captured variable name in the closure capture list");
+                }
                 break;
             }
             c.name = tok_name(p, p->i);
