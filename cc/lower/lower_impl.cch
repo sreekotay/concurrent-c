@@ -597,6 +597,15 @@ static void lw_include_defining_faces(CcLowerer* L, CcDeclList* decls) {
     }
 }
 
+/* Does this path name the scheduler header? */
+static bool lw_is_sched_include(CCSlice p) {
+    size_t i;
+    if (p.len < 8) return false;
+    for (i = 0; i + 8 <= p.len; i++)
+        if (memcmp(p.ptr + i, "cc_sched", 8) == 0) return true;
+    return false;
+}
+
 static void CcLowerer_includes(CcLowerer* L) {
     CcIndex* ix = L->ix;
     CcIncludeRefList refs;
@@ -631,6 +640,14 @@ static void CcLowerer_includes(CcLowerer* L) {
                 if (hit) {
                     CCString line = @string(`#include <${stem}.h>
 `, L->arena);
+                    if (!L->header_mode && lw_is_sched_include(stem)) {
+                        /* `cc_sched.cch` documents the task waits and
+                         * declares none of them: `cc_block_on_intptr` is
+                         * `std/task.cch`'s. A unit that includes the
+                         * scheduler and calls one would reach the host
+                         * compiler with no declaration at all. */
+                        cc_string_push_cstr(&line, "#include <ccc/std/task.h>\n", L->arena);
+                    }
                     *decls->get_ptr(k2) = lw_raw_decl(L, line, d->span);
                     break;
                 }
