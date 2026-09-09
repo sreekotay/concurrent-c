@@ -29,6 +29,11 @@ typedef struct UStep {
     bool restrict_diag;         /* one restrict refusal per unit: the rest are the same mistake */
 } UStep;
 
+/* The view a receiver is written through says which methods this binding
+ * has. Defined with the rest of the restrict machinery, called from the
+ * rewrite that runs ahead of it. */
+static bool uf_check_method_view(Walker* w, UStep* st, CcExpr* e, CcUfcs uf, CcType* rt);
+
 /* Is the receiver itself a pointer? Its own shape decides, so aliases are
  * followed but nothing is peeled: peeling a pointer away first would make
  * every receiver a value. */
@@ -848,6 +853,7 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
         lw_error(L, sp, msg);
         return;
     }
+    if (uf_check_method_view(w, st, e, uf, rt)) return;
     if (uf_formal_rewrite(w, st, e, uf, rt, tn, sp)) return;
     /* The `.ufcs` handler's argv is a fixed-width row: the contract gives
      * it UF_HOOK_ARG_MAX slots and no length it could grow. Describing only
@@ -1149,6 +1155,43 @@ static bool uf_field_path(CcLowerer* L, CCSlice owner, CCSlice field, CcNameList
     return set;
 }
 
+/* `w.label` where `Wrap` has no `label` and its `base` member does. No
+ * `as:` face reaches it, so nothing hops the miss -- but the peel the
+ * author has to write is right there, and naming it is the difference
+ * between a diagnostic and a hunt through the typedefs. Exactly one member
+ * one level down may have the field: two is not a suggestion, it is a
+ * choice this step has no grounds to make. A pointer member is not a peel
+ * (`.p.f` is not `.p->f`), and a type the index cannot see is not a miss.  */
+static void uf_field_miss(CcLowerer* L, CcExpr* e, CcMember mb, CCSlice owner) {
+    CcIndex* ix = L->ix;
+    CcRecordType st;
+    CcFieldList* fieldv;
+    CCSlice hit = cc_slice_empty();
+    size_t n;
+    size_t i;
+    int nhit = 0;
+    if (!cc__struct_of(ix, owner, 0, &st)) return;
+    if (field_of_record(st, mb.name)) return;
+    fieldv = &st.fields;
+    n = fieldv->len();
+    for (i = 0; i < n; i++) {
+        CcField* f = fieldv->get_ptr(i);
+        CcRecordType inner;
+        if (!f->name.len || !f->type) continue;
+        if (f->type->k.kind == CcTypeK_pointer) continue;
+        if (!cc__struct_of(ix, cc__strip_tag(ix->canon(f->type)), 0, &inner)) continue;
+        if (!field_of_record(inner, mb.name)) continue;
+        nhit++;
+        if (nhit == 1) hit = f->name;
+    }
+    if (nhit != 1) return;
+    {
+        CCSlice f = mb.name;
+        CCString m = @string(`field not found: ${f} — member '${hit}' has it; spell '.${hit}.${f}'`, L->arena);
+        lw_error(L, vt_dot_span(e), m);
+    }
+}
+
 /* `x.f` where `f` is not a member of x's type: the face chain that reaches
  * it, spliced in. */
 static void uf_member(Walker* w, CcExpr* e, CcMember mb, CcType* rt) {
@@ -1162,7 +1205,7 @@ static void uf_member(Walker* w, CcExpr* e, CcMember mb, CcType* rt) {
     owner = cc__strip_tag(ix_canon_of(w, rt));
     if (!owner.len) return;
     path = vec_new::[CCSlice](L->arena);
-    if (!uf_field_path(L, owner, mb.name, &path, &found, 0)) return;
+    if (!uf_field_path(L, owner, mb.name, &path, &found, 0)) { uf_field_miss(L, e, mb, owner); return; }
     if (found > 1) {
         CCSlice f = mb.name;
         CCString m = @string(`type: ambiguous field '${f}' on '${owner}': two ${"@"}typeview as: embeds reach it`, L->arena);
@@ -1185,6 +1228,56 @@ static void uf_member(Walker* w, CcExpr* e, CcMember mb, CcType* rt) {
             out.name = mb.name;
             out.arrow = false;
             e->k = { .member = out };
+        }
+    }
+}
+
+/* One pattern, one verdict. `r: secret, ^secret;` says the field is
+ * readable and in the same breath that it is not, and neither reading is
+ * the one the author meant; a repeat that agrees with itself is a name
+ * written twice. The groups are read as one list, so a pattern that shows
+ * up in two of them is still one pattern. */
+static void uf_check_dup_items(CcLowerer* L, CcDecl* d, CcTypeview tv, CCSlice tn) {
+    CcHookEntryList* entryv = &tv.entries;
+    size_t ne = entryv->len();
+    size_t i;
+    CCSlice view = tv.view.len ? tv.view : cstr_slice("(default)");
+    CcNameList allowed = vec_new::[CCSlice](L->arena);
+    CcNameList denied = vec_new::[CCSlice](L->arena);
+    for (i = 0; i < ne; i++) {
+        CcHookEntry* e = entryv->get_ptr(i);
+        CcViewItemList* itemv = &e->items;
+        size_t nj = itemv->len();
+        size_t j;
+        if (!cc_slice_eq_cstr(&e->key, "r") && !cc_slice_eq_cstr(&e->key, "w") &&
+            !cc_slice_eq_cstr(&e->key, "rw")) continue;
+        for (j = 0; j < nj; j++) {
+            CcViewItem* it = itemv->get_ptr(j);
+            CCSlice nm = it->name;
+            CcNameList* same = it->deny ? &denied : &allowed;
+            CcNameList* other = it->deny ? &allowed : &denied;
+            size_t k;
+            size_t ns;
+            bool hit = false;
+            if (!nm.len) continue;
+            ns = same->len();
+            for (k = 0; k < ns && !hit; k++)
+                if (slice_eq(*same->get_ptr(k), nm)) hit = true;
+            if (hit) {
+                const char* mark = it->deny ? "^" : "";
+                CCString m = @string(`${"@"}typeview ${view} on ${tn}: duplicate allow-list pattern '${mark}${nm}'`, L->arena);
+                lw_error(L, d->span, m);
+                return;
+            }
+            ns = other->len();
+            for (k = 0; k < ns && !hit; k++)
+                if (slice_eq(*other->get_ptr(k), nm)) hit = true;
+            if (hit) {
+                CCString m = @string(`${"@"}typeview ${view} on ${tn}: pattern '${nm}' disagrees with '^${nm}'`, L->arena);
+                lw_error(L, d->span, m);
+                return;
+            }
+            same->push(nm);
         }
     }
 }
@@ -1245,7 +1338,9 @@ static void uf_check_view(CcLowerer* L, CcDecl* d, CcTypeview tv) {
     CcNameList reached = vec_new::[CCSlice](L->arena);
     if (!tv.target) return;
     tn = cc__strip_tag(ix->canon(tv.target));
-    if (!tn.len || tn.ptr[tn.len - 1] == '*') return;    /* a family glob has no one struct */
+    if (!tn.len) return;
+    uf_check_dup_items(L, d, tv, tn);                    /* the lists read as one, glob subject or not */
+    if (tn.ptr[tn.len - 1] == '*') return;               /* a family glob has no one struct */
     for (i = 0; i < ne; i++) {
         CcHookEntry* e = entryv->get_ptr(i);
         CcViewItemList* itemv = &e->items;
@@ -1505,6 +1600,44 @@ static int uf_view_kind(CcTypeview tv, CCSlice name) {
     return kind;
 }
 
+/* The slice family shares one unnamed facet, so an instance must not fork
+ * it: `CCSlice_<T>` and the marker aliases are the same subject as
+ * `CCSlice`. */
+static CCSlice uf_family_root(CCSlice leaf) {
+    static const char* const fam[6] = { "CCSlice", "CCSliceUnique", "CCSliceShared",
+                                        "CCSlicePacked", "CCSliceHdr", "CCSliceArray" };
+    size_t i;
+    if (!leaf.len) return leaf;
+    for (i = 0; i < 6; i++)
+        if (cc_slice_eq_cstr(&leaf, fam[i])) return cstr_slice("CCSlice");
+    if (leaf.len > 8 && memcmp(leaf.ptr, "CCSlice_", 8) == 0) return cstr_slice("CCSlice");
+    return leaf;
+}
+
+/* The unnamed facets the language fixes rather than a header. An
+ * angle-include is host-C passthrough, so no `@typeview on CCSlice` or
+ * `on CCString` ever reaches the index -- written live in `cc_slice.cch`
+ * it would be stripped from the `.h` the consuming unit reads. The bits
+ * are `uf_view_kind`'s (1 read, 2 store); -1 is "no builtin governs this
+ * base", which is not the same answer as "governed, and denied".
+ *
+ * Slice: every field readable, none writable (`r: *`) -- `.len` is the
+ * extent the slice was measured with, and a store to it re-measures the
+ * owner's memory behind its back. String: the SSO union is not a pointer,
+ * so `own` / `data` / the inline buffer are not fields to read at all
+ * (`as_slice()` / `data()` / `cstr()` answer that question honestly). */
+static int uf_builtin_kind(CCSlice base, CCSlice name) {
+    static const char* const hidden[4] = { "own", "data", "inline_buf", "_inline_word" };
+    size_t i;
+    if (cc_slice_eq_cstr(&base, "CCSlice")) return 1;
+    if (cc_slice_eq_cstr(&base, "CCString")) {
+        for (i = 0; i < 4; i++)
+            if (cc_slice_eq_cstr(&name, hidden[i])) return 0;
+        return 1;
+    }
+    return -1;
+}
+
 /* The view a binding's type is seen through, and the base it is a view
  * onto. False when nothing restricts that type. */
 static bool uf_restrict_of(CcIndex* ix, CcType* rt, CCSlice* base, CCSlice* view, CcTypeview* out) {
@@ -1597,8 +1730,29 @@ static void uf_trusted_decl(Walker* w, CcDecl* d) {
     {
         CcParam* p0 = ps->get_ptr(0);
         if (!p0->type) return;
-        st->trusted = cc__strip_tag(w->ix->canon(peel(p0->type)));
+        st->trusted = uf_family_root(cc__strip_tag(w->ix->canon(peel(p0->type))));
     }
+}
+
+/* `typedef @typeview(V) T* Alias;` is the same binding written once: the
+ * sugar sits on the `T` the declarator built the pointer from, and the
+ * alias name carries none of it. Resolving the alias is what keeps the
+ * view from escaping through a second spelling. */
+static CcType* uf_view_through_alias(Walker* w, CcType* rt) {
+    CcType* t = rt;
+    int depth = 0;
+    while (t && !uf_view_attr(t).len && depth++ < 8) {
+        CCSlice nm;
+        CcSym* sym;
+        CcType* a = unalias_local(w, t);
+        if (a && a != t) { t = a; continue; }
+        if (!type_named_name(t, &nm) || !nm.len) break;
+        sym = sym_any(w->ix, nm);
+        while (sym && sym->kind != CC_SYM_TYPE) sym = sym->same_name;
+        if (!sym || !sym->type || sym->type == t) break;
+        t = sym->type;
+    }
+    return (t && uf_view_attr(t).len) ? t : rt;
 }
 
 /* `x.f` through a restricted binding: the view's lists say whether that
@@ -1621,9 +1775,24 @@ static void uf_check_field(Walker* w, CcExpr* e, CcMember mb, CcType* rt) {
     if (st->restrict_diag || !mb.name.len) return;
     if (!expr_ident(strip_parens_expr(mb.a), &recv)) return;
     if (recv.len >= 5 && memcmp(recv.ptr, "__cc_", 5) == 0) return;
-    if (!uf_restrict_of(ix, rt, &base, &view, &tv)) return;
+    rt = uf_view_through_alias(w, rt);
+    if (uf_restrict_of(ix, rt, &base, &view, &tv)) {
+        kind = uf_view_kind(tv, mb.name);
+    } else {
+        CCSlice leaf;
+        if (!rt) return;
+        if (uf_view_attr(rt).len) return;   /* a named view is a header's list, not the language's */
+        leaf = cc__strip_tag(ix->canon(peel(rt)));
+        base = uf_family_root(leaf);
+        /* `CCSlice_<T>.base` is the instance's own erasure spelling -- the
+         * member the factory body constructs the instance through. Only the
+         * erased core's own fields are the family facet's to withhold. */
+        if (!slice_eq(base, leaf) && leaf.len > 8 && memcmp(leaf.ptr, "CCSlice_", 8) == 0 &&
+            field_type(w, rt, mb.name)) return;
+        kind = uf_builtin_kind(base, mb.name);
+        if (kind < 0) return;
+    }
     if (!view.len && slice_eq(base, st->trusted)) return;
-    kind = uf_view_kind(tv, mb.name);
     store = uf_is_store(st, e);
     if (store && (kind & 2)) return;
     if (!store && (kind & 1)) return;
@@ -1641,6 +1810,99 @@ static void uf_check_field(Walker* w, CcExpr* e, CcMember mb, CcType* rt) {
     }
 }
 
+/* `enc->flush()` where the view never named `flush`: a named view is a
+ * capability list, and a method it does not name is not this binding's to
+ * call. An unnamed facet hides fields, not methods -- `s.data()` is how a
+ * caller asks the question `s.data` may not -- so only a named view speaks
+ * here. */
+static bool uf_check_method_view(Walker* w, UStep* st, CcExpr* e, CcUfcs uf, CcType* rt) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = w->ix;
+    CCSlice base = cc_slice_empty();
+    CCSlice view = cc_slice_empty();
+    CcTypeview tv;
+    if (st->restrict_diag || !uf.method.len) return false;
+    rt = uf_view_through_alias(w, rt);
+    if (!uf_view_attr(rt).len) return false;
+    if (!uf_restrict_of(ix, rt, &base, &view, &tv)) return false;
+    if (!view.len) return false;
+    if (uf_view_kind(tv, uf.method) & 1) return false;
+    st->restrict_diag = true;
+    {
+        CCSlice meth = uf.method;
+        CCString m = @string(`restricted mode '${view}' on '${base}' does not allow method '${meth}' (flush-under-hold / capability deny)`, L->arena);
+        lw_error(L, e->span, m);
+    }
+    return true;
+}
+
+/* `CCBox` and its instances. The teaching typedef of one is not one. */
+static bool uf_is_box_instance(CCSlice n) {
+    if (cc_slice_eq_cstr(&n, "CCBox")) return true;
+    return n.len > 6 && memcmp(n.ptr, "CCBox_", 6) == 0;
+}
+
+/* A factory alias: a name for what a factory hands back. `CCArena` and a
+ * `typedef CCBox::[H] Name` are read as the type they stand for at every
+ * use, but they are not spelled as it, and the box they name is minted --
+ * never cast into being. `CCBox::[H]` itself is the instance and does
+ * mint. */
+static bool uf_is_factory_alias(CcIndex* ix, CcType* t, CCSlice* spelled) {
+    CCSlice nm;
+    CCSlice canon;
+    if (!t || !type_named_name(t, &nm) || !nm.len) return false;
+    *spelled = nm;
+    if (cc_slice_eq_cstr(&nm, "CCArena")) return true;
+    if (nm.len > 17 && memcmp(nm.ptr, "CCArena_Restrict_", 17) == 0) return true;
+    if (uf_is_box_instance(nm)) return false;
+    canon = cc__strip_tag(ix->canon(t));
+    return uf_is_box_instance(canon);
+}
+
+/* `CCArena a = &host;` -- the destination does not mint. A pointer handed
+ * straight to a factory alias would install a box whose contents were
+ * never made, and the cell would read as live. The value has to come from
+ * the factory that owns it, so the refusal lands here rather than at the
+ * first use that finds the box empty. A pointer-shaped right side that is
+ * not bare (a call, a field, an index) is a value the site computed and
+ * this rule has nothing to say about it. */
+static void uf_check_mint(Walker* w, CcStmt* s, bool enter) {
+    UStep* st = (UStep*)w->env;
+    CcLowerer* L = st->L;
+    CcIndex* ix = w->ix;
+    CcDecl* d = NULL;
+    CcVarDecl v;
+    bool is_var = false;
+    bool bare = false;
+    CCSlice dest = cc_slice_empty();
+    CcExpr* rhs;
+    CcType* at;
+    CCSlice src;
+    if (!enter || !stmt_is_decl(s, &d) || !d) return;
+    @switch (d->k) {
+        case .var(x): v = x; is_var = true; break;
+        default: break;
+    }
+    if (!is_var || !v.init || v.init->is_list || !v.init->expr) return;
+    if (!uf_is_factory_alias(ix, v.type, &dest)) return;
+    rhs = strip_parens_expr(v.init->expr);
+    if (!rhs) return;
+    @switch (rhs->k) {
+        case .unary(un): if (un.op == CC_OP_ADDR) bare = true; break;
+        case .ident: bare = true; break;
+        default: break;
+    }
+    if (!bare) return;
+    at = type_of_expr(w, rhs);
+    if (!at) return;
+    src = ix->canon(at);
+    if (!src.len || src.ptr[src.len - 1] != '*') return;
+    {
+        CCString m = @string(`type: no implicit convert from '${src}' to '${dest}' (factory alias; dest does not mint)`, L->arena);
+        lw_error(L, rhs->span, m);
+    }
+}
+
 static void uf_widen_pass(CcLowerer* L, UStep* st) {
     Walker w;
     CcVisitor sv;
@@ -1655,6 +1917,7 @@ static void uf_widen_pass(CcLowerer* L, UStep* st) {
     w.on_call = uf_check_widen;
     w.on_field = uf_check_field;
     w.on_decl = uf_trusted_decl;
+    w.on_stmt = uf_check_mint;
     w.env = st;
     tw_unit(&w);
 }
@@ -1733,6 +1996,68 @@ static CcExpr* uf_call_under(CcExpr* e) {
     return uf_call_under(inner);
 }
 
+/* A scalar destination the family never installed. The plain sink answers
+ * with a Result of the family's own value -- a `CCPyObj`, a `CCQjsVal` --
+ * which can never initialize a scalar cell, so the site is provably
+ * ill-formed here rather than a host-C conversion error about a struct the
+ * user never named. Enumerating what *is* installed is the difference
+ * between a refusal and a riddle. Silence stays the answer when the family
+ * installs no destinations at all: then the plain sink is all there is,
+ * and this step has nothing to say the host compiler will not say better. */
+static void uf_dest_missing(CcLowerer* L, CCSlice callee, CCSlice dest, CCSlice mang, CcSpan sp) {
+    static const char* const scalars[17] = { "int", "long_long", "int64_t", "int32_t", "uint64_t",
+                                             "double", "float", "bool", "size_t", "char", "short",
+                                             "long", "unsigned", "unsigned_int", "unsigned_long",
+                                             "signed_char", "unsigned_char" };
+    CcIndex* ix = L->ix;
+    CcSymList* symv = &ix->syms;
+    size_t n = symv->len();
+    size_t i;
+    bool scalar = false;
+    CcNameList seen = vec_new::[CCSlice](L->arena);
+    CCString list = cc_string_new();
+    for (i = 0; i < 17; i++)
+        if (cc_slice_eq_cstr(&mang, scalars[i])) scalar = true;
+    if (!scalar) return;
+    {
+        /* Only a Result-returning plain sink makes the site provably wrong:
+         * a sink that answers with a scalar of its own may be exactly the
+         * scalar the destination asked for, and the fallback is the answer. */
+        CcSym* plain = sym_any(ix, callee);
+        CcType* ret;
+        while (plain && plain->kind != CC_SYM_FUNC) plain = plain->same_name;
+        ret = return_type_of_sym(plain);
+        if (!ret || !CcType_is_result(ret)) return;
+    }
+    for (i = 0; i < n; i++) {
+        CcSym* s = *symv->get_ptr(i);
+        CCSlice nm;
+        CCSlice tail;
+        size_t k;
+        size_t ns;
+        bool dup = false;
+        if (!s || s->kind != CC_SYM_FUNC) continue;
+        nm = s->name;
+        if (nm.len <= callee.len + 1) continue;
+        if (memcmp(nm.ptr, callee.ptr, callee.len) != 0 || nm.ptr[callee.len] != '_') continue;
+        tail = cc_slice_from_buffer((char*)nm.ptr + callee.len + 1, nm.len - callee.len - 1);
+        ns = seen.len();
+        for (k = 0; k < ns && !dup; k++)
+            if (slice_eq(*seen.get_ptr(k), tail)) dup = true;
+        if (dup) continue;
+        if (seen.len()) cc_string_push_cstr(&list, ", ", L->arena);
+        cc_string_push_slice(&list, tail, L->arena);
+        seen.push(tail);
+    }
+    if (!seen.len()) return;
+    {
+        CCSlice ls = lw_keep(L, &list);
+        CCString m = @string(`destination '${dest}' is not an installed destination of ${callee}`, L->arena);
+        CCString note = @string(`installed destinations (mangled): ${ls}`, L->arena);
+        vt_error_note(L, sp, m, lw_keep(L, &note));
+    }
+}
+
 static void uf_dest_call(CcLowerer* L, CcType* want, CcExpr* init) {
     CcIndex* ix = L->ix;
     CcExpr* call = uf_call_under(init);
@@ -1763,7 +2088,7 @@ static void uf_dest_call(CcLowerer* L, CcType* want, CcExpr* init) {
         CCSlice name = lw_keep(L, &cand);
         CcSym* sym = sym_any(ix, name);
         while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
-        if (!sym) return;
+        if (!sym) { uf_dest_missing(L, callee, ix->canon(want), mang, call->span); return; }
         {
             CcCall c2;
             @switch (call->k) {
