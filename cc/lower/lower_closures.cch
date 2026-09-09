@@ -355,8 +355,9 @@ static CcExpr* kl_unpack(CcLowerer* L, KCap* c, CcSpan sp) {
  * the name is bound to the decayed element pointer and indexes as
  * written. */
 typedef struct KRef {
+    CcLowerer* L;
     CCSlice name;
-    CCSlice through;
+    CCSlice ref;                /* the pointer the entry reads the capture through */
     bool shadowed;
 } KRef;
 
@@ -368,7 +369,15 @@ static bool kl_ref_expr(CcExpr* e, void* env) {
         default: return true;
     }
     if (!slice_eq(nm, r->name)) return true;
-    e->k = { .ident = r->through };
+    {
+        /* a real dereference rather than its spelling: what follows a capture
+         * may be a method call, and a receiver that is text says nothing
+         * about the type it has */
+        CcExpr* id = lw_ident(r->L, r->ref, e->span);
+        CcExpr* deref = cc_expr_unary(CC_OP_DEREF, id, e->span, r->L->arena);
+        CcExpr* par = lw_paren(r->L, deref, e->span);
+        e->k = par->k;
+    }
     return true;
 }
 
@@ -384,12 +393,13 @@ static bool kl_ref_stmt(CcStmt* s, void* env) {
 }
 
 /* Every use of `name` in `body`, read through `through` instead. */
-static bool kl_rewrite_ref(CcLowerer* L, CcStmt* body, CCSlice name, CCSlice through, CcSpan sp) {
+static bool kl_rewrite_ref(CcLowerer* L, CcStmt* body, CCSlice name, CCSlice ref, CcSpan sp) {
     CcVisitor v;
     KRef r;
     memset(&r, 0, sizeof(r));
+    r.L = L;
     r.name = name;
-    r.through = through;
+    r.ref = ref;
     memset(&v, 0, sizeof(v));
     v.stmt = kl_ref_stmt;
     v.env = &r;
@@ -615,8 +625,7 @@ static CcDecl* kl_entry_decl(KStep* st, uint32_t id, KCapList* caps, CcClosure c
             CcExpr* cast = kl_cast(L, pt, kl_unpack(L, c, sp), sp);
             lw_push(body, lw_decl_stmt(L, pt, bind, cast, sp));
             if (!c->elem && cl.body) {
-                CCString through = @string(`(*${bind})`, L->arena);
-                if (!kl_rewrite_ref(L, cl.body, c->name, lw_keep(L, &through), sp)) return NULL;
+                if (!kl_rewrite_ref(L, cl.body, c->name, bind, sp)) return NULL;
             }
             continue;
         }
