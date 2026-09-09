@@ -142,6 +142,12 @@ int cc_emit_plan_format_result_arm(char* out, size_t out_sz,
  * blocks are blanked, then replayed into the per-TU graph at graph build. */
 void cc_emit_plan_clear_comptime_instantiations(void);
 size_t cc_emit_plan_comptime_instantiation_count(void);
+/* One collected request, for a caller that hands the requests to a separate
+ * process rather than to a graph in this one: `*family` is "vec"/"map"/"chan",
+ * `*a` and `*b` the type spellings (`*b` is "" for a one-argument family).
+ * Returns 0 for an index past the end. */
+int cc_emit_plan_comptime_instantiation_at(size_t i, const char** family,
+                                           const char** a, const char** b);
 void cc_emit_plan_collect_comptime_instantiations(const char* src, size_t len);
 void cc_emit_plan_apply_comptime_instantiations(CCTypeGraph* graph);
 

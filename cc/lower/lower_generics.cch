@@ -120,6 +120,94 @@ static CCSlice gn_snake(CcLowerer* L, CCSlice fam) {
     return lw_keep(L, &sb);
 }
 
+/* The family a request line names, and how many type spellings it carries.
+ * A Result specialization is not here: that is the Result step's, not a
+ * factory family's. */
+static bool gn_request_family(CCSlice word, CCSlice* family, size_t* nargs) {
+    if (slice_eq(word, cstr_slice("vec")))  { *family = cstr_slice("Vec");    *nargs = 1; return true; }
+    if (slice_eq(word, cstr_slice("map")))  { *family = cstr_slice("Map");    *nargs = 2; return true; }
+    if (slice_eq(word, cstr_slice("chan"))) { *family = cstr_slice("CCChan"); *nargs = 1; return true; }
+    return false;
+}
+
+/* `@comptime { cc_instantiate_vec("int"); }` asks for a monomorph the unit
+ * never spells as `Vec::[int]` — the body that follows names only the
+ * mangled `CCVec_int`. The request IS the use, and the blocks are blanked
+ * before this tool reads the source, so the driver collects the requests
+ * while they are still there and hands them over as `--instantiate`.
+ * Registering one here makes the instance exactly as a spelled type does,
+ * so the expansion lands and those names resolve.
+ *
+ * A line this does not understand is a request that would silently produce
+ * nothing: the body's mangled names would be undeclared with no hint where
+ * they were to come from, so it says so instead. */
+static void gn_collect_requests(GStep* st) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CCArena a = L->arena;
+    CCSlice text = L->opts.instantiate;
+    CcSpan sp0;
+    size_t i = 0;
+    sp0.first = 0;
+    sp0.last = 0;
+    /* The requests are the unit's. An expansion is lowered with the unit's
+     * options, and asking again there would ask for the instance being
+     * expanded — the recursion the depth guard would then report. */
+    if (L->fragment) return;
+    while (i < text.len) {
+        size_t line_end = i;
+        size_t k;
+        CCSlice family = cc_slice_empty();
+        size_t want = 0;
+        size_t nseen = 0;
+        bool bad = false;
+        CcType tmp;
+        CcGenericType g;
+        while (line_end < text.len && text.ptr[line_end] != '\n') line_end++;
+        memset(&tmp, 0, sizeof(tmp));
+        tmp.span = sp0;
+        g.family = cc_slice_empty();
+        g.args = vec_new::[CcTypeRef](a);
+        k = i;
+        while (k < line_end) {
+            size_t w0;
+            size_t w1;
+            CCSlice word;
+            while (k < line_end && (text.ptr[k] == ' ' || text.ptr[k] == '\t' || text.ptr[k] == '\r')) k++;
+            w0 = k;
+            while (k < line_end && text.ptr[k] != ' ' && text.ptr[k] != '\t' && text.ptr[k] != '\r') k++;
+            w1 = k;
+            if (w1 == w0) continue;
+            word = cc_slice_from_buffer((char*)text.ptr + w0, w1 - w0);
+            if (!family.len) {
+                if (!gn_request_family(word, &family, &want)) {
+                    CCString m = @string(`a comptime instantiation request names the family '${word}', which is not one this lowering makes`, L->arena);
+                    lw_error(L, sp0, m);
+                    bad = true;
+                    break;
+                }
+                g.family = family;
+                continue;
+            }
+            g.args.push(cc_type_named(word, sp0, a));
+            nseen++;
+        }
+        i = line_end < text.len ? line_end + 1 : text.len;
+        if (bad || !family.len) continue;
+        if (nseen != want) {
+            CCString m = @string(`an instance of '${family}' takes ${want} type spellings, and this request carries ${nseen}`, L->arena);
+            lw_error(L, sp0, m);
+            continue;
+        }
+        tmp.k = { .generic = g };
+        {
+            CCSlice mangled = ix->canon(&tmp);
+            CcTypeInfo* info = ix->type_get(mangled);
+            gn_note(st, info, 0);
+        }
+    }
+}
+
 static bool gn_expr_visit(CcExpr* e, void* env) {
     GStep* st = (GStep*)env;
     CcLowerer* L = st->L;
@@ -778,6 +866,7 @@ static void CcLowerer_generics(CcLowerer* L) {
     v.type = gn_type_visit;
     v.expr = gn_expr_visit;
     v.env = &st;
+    gn_collect_requests(&st);
     CcUnit_walk(L->unit, v);
     {
         CcNameList* o = &st.order;

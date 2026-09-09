@@ -21,6 +21,8 @@ typedef struct CcLowerOpts {
     bool strict_unhandled;      /* a bare call to a Result function is an error (CC_STRICT_RESULT_UNWRAP, default on) */
     CCSlice repo_root;          /* quoted `.cch` includes become `<rel.h>` relative to it; empty: left as written */
     CCSlice schema_variants;    /* tagged unions a `@grammar(schema)` declared: one line each, name then arms */
+    CCSlice instantiate;        /* monomorphs `@comptime { cc_instantiate_*(...) }` asked for: one line each,
+                                 * the family then its type spellings */
 } CcLowerOpts;
 
 typedef struct CcLowerer {

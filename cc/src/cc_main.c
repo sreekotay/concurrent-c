@@ -4126,6 +4126,12 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
         free(buf);
         return -1;
     }
+    /* `cc_instantiate_vec("int")` asks for a monomorph the body then names
+     * only as `CCVec_int`. Blanking is about to take the request out of the
+     * text the lowerer reads, so it is collected here, while it is still
+     * there. */
+    cc_emit_plan_clear_comptime_instantiations();
+    cc_emit_plan_collect_comptime_instantiations(buf, len);
     {
         char* blanked = cc_comptime_blank_blocks_ex(buf, len, CC_BLANK_KEEP_VALUE | CC_BLANK_KEEP_FN);
         free(buf);
@@ -4197,6 +4203,35 @@ static int cc__write_schema_variants(char* out_path, size_t cap) {
     return 0;
 }
 
+/* The monomorphs `@comptime { cc_instantiate_*(...) }` asked for, for the
+ * lowerer. The requests were collected before the blocks were blanked, and
+ * the lowerer is a separate process, so the queue is written where it can
+ * read it: one line per request, family then type spellings. */
+static int cc__write_comptime_instantiations(char* out_path, size_t cap) {
+    size_t n = cc_emit_plan_comptime_instantiation_count();
+    char dir[PATH_MAX];
+    FILE* f;
+    size_t i;
+    out_path[0] = '\0';
+    if (!n) return 0;
+    snprintf(dir, sizeof(dir), "%s/clean_instantiate", g_cache_root);
+    if (cc__mkdir_p(dir) != 0) return -1;
+    snprintf(out_path, cap, "%s/%d.txt", dir, (int)getpid());
+    f = fopen(out_path, "wb");
+    if (!f) { out_path[0] = '\0'; return -1; }
+    for (i = 0; i < n; i++) {
+        const char* fam = NULL;
+        const char* a = NULL;
+        const char* b = NULL;
+        if (!cc_emit_plan_comptime_instantiation_at(i, &fam, &a, &b)) continue;
+        fprintf(f, "%s %s", fam, a);
+        if (b && b[0]) fprintf(f, " %s", b);
+        fputc('\n', f);
+    }
+    fclose(f);
+    return 0;
+}
+
 /* What the `@comptime { }` blocks emitted, into the C the lowerer wrote.
  * The fragments were collected before lowering; they are host C already,
  * so they splice at their anchors and nothing re-reads them. */
@@ -4227,7 +4262,8 @@ static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
                                  const char* quote_dir) {
     char tool[PATH_MAX], known[PATH_MAX], incdir[PATH_MAX], hroot[PATH_MAX];
     char schema[PATH_MAX];
-    char* argv[24];
+    char insts[PATH_MAX];
+    char* argv[26];
     int argc = 0, rc;
     if (cc__find_clean_tool("cclower_cc", tool, sizeof(tool)) != 0) {
         fprintf(stderr, "cc: clean lowerer not built (out/cc/bin/cclower_cc missing): run `make -C cc lower-cc`\n");
@@ -4253,6 +4289,11 @@ static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
     if (schema[0]) {
         argv[argc++] = (char*)"--schema-variants";
         argv[argc++] = schema;
+    }
+    if (cc__write_comptime_instantiations(insts, sizeof(insts)) != 0) return -1;
+    if (insts[0]) {
+        argv[argc++] = (char*)"--instantiate";
+        argv[argc++] = insts;
     }
     if (quote_dir && quote_dir[0]) {
         argv[argc++] = (char*)"--quote-dir";

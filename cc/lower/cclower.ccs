@@ -131,6 +131,11 @@ static CCSlice g_root;
  * the types; what nothing in that text says is that they are tagged
  * unions. One line each: the name, then its arms, void arms marked `=void`. */
 static const char* g_schema_variants = NULL;
+/* --instantiate FILE: the monomorphs `@comptime { cc_instantiate_*(...) }`
+ * asked for. The request is the only use — the body names the instance by
+ * its mangled name alone — and blanking took it out of the source before
+ * this tool read it. One line each: the family, then its type spellings. */
+static const char* g_instantiate = NULL;
 static const char* g_h_root;
 
 /* mkdir -p for the directory part of `path`. */
@@ -504,6 +509,12 @@ static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena 
         if (!sv_ok) { fprintf(stderr, "cclower: cannot read %s: %s\n", g_schema_variants, strerror(errno)); exit(2); }
         lo.schema_variants = sv;
     }
+    if (g_instantiate) {
+        bool iv_ok = false;
+        CCSlice iv = read_whole_file(g_instantiate, a, &iv_ok);
+        if (!iv_ok) { fprintf(stderr, "cclower: cannot read %s: %s\n", g_instantiate, strerror(errno)); exit(2); }
+        lo.instantiate = iv;
+    }
     {
         const char* strict = getenv("CC_STRICT_RESULT_UNWRAP");
         lo.strict_unhandled = !(strict && strcmp(strict, "0") == 0);
@@ -716,6 +727,7 @@ int main(int argc, char** argv) {
         if (strcmp(argv[i], "--h-root") == 0 && i + 1 < argc) { g_h_root = argv[i + 1]; i++; continue; }
         if (strcmp(argv[i], "--quote-dir") == 0 && i + 1 < argc) { g_quote_dir = argv[i + 1]; i++; continue; }
         if (strcmp(argv[i], "--schema-variants") == 0 && i + 1 < argc) { g_schema_variants = argv[i + 1]; i++; continue; }
+        if (strcmp(argv[i], "--instantiate") == 0 && i + 1 < argc) { g_instantiate = argv[i + 1]; i++; continue; }
         if (strcmp(argv[i], "--identity") == 0) mode = M_IDENTITY;
         else if (strcmp(argv[i], "--print") == 0) mode = M_PRINT;
         else if (strcmp(argv[i], "--lower") == 0) { mode = M_PRINT; lower = true; }
@@ -733,6 +745,7 @@ int main(int argc, char** argv) {
         if (strcmp(argv[i], "--known-types") == 0 || strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "-I") == 0 ||
             strcmp(argv[i], "--root") == 0 || strcmp(argv[i], "--h-root") == 0 ||
             strcmp(argv[i], "--schema-variants") == 0 ||
+            strcmp(argv[i], "--instantiate") == 0 ||
             strcmp(argv[i], "--quote-dir") == 0) { i++; continue; }
         if (argv[i][0] == '-' && argv[i][1]) continue;
         n_files++;

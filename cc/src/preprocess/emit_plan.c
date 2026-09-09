@@ -954,6 +954,24 @@ size_t cc_emit_plan_comptime_instantiation_count(void) {
     return cc__comptime_inst_count;
 }
 
+int cc_emit_plan_comptime_instantiation_at(size_t i, const char** family,
+                                           const char** a, const char** b) {
+    const CCEmitComptimeInst* inst;
+    const char* fam;
+    if (i >= cc__comptime_inst_count) return 0;
+    inst = &cc__comptime_insts[i];
+    switch (inst->kind) {
+    case CC_GRAPH_REQUEST_VEC:  fam = "vec";  break;
+    case CC_GRAPH_REQUEST_MAP:  fam = "map";  break;
+    case CC_GRAPH_REQUEST_CHAN: fam = "chan"; break;
+    default: return 0;
+    }
+    if (family) *family = fam;
+    if (a) *a = inst->a;
+    if (b) *b = inst->b;
+    return 1;
+}
+
 /* ---- Comptime intrinsic registry ----
  *
  * The compiler interprets a fixed set of builtin calls that appear inside
