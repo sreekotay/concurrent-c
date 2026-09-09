@@ -308,6 +308,50 @@ static void gn_bind_registrations(CcLowerer* L, CcSpan sp) {
     }
 }
 
+static CCSlice gn_decl_text(CcUnit* fu, CcDecl* d);
+
+/* Does `hay` hold `needle`? */
+static bool gn_text_has(CCSlice hay, CCSlice needle) {
+    size_t i;
+    if (!needle.len || hay.len < needle.len) return false;
+    for (i = 0; i + needle.len <= hay.len; i++)
+        if (memcmp(hay.ptr + i, needle.ptr, needle.len) == 0) return true;
+    return false;
+}
+
+/* The mangled type arguments of an instance: what is left of its name once
+ * the family's prefix comes off (`ArrayMap_int_int` -> `int_int`). */
+static CCSlice gn_arg_mangle(CCSlice instance, CCSlice family) {
+    CCSlice pre = cc__family_prefix(family);
+    if (instance.len > pre.len + 1 && memcmp(instance.ptr, pre.ptr, pre.len) == 0 &&
+        instance.ptr[pre.len] == '_')
+        return cc_slice_from_buffer((char*)instance.ptr + pre.len + 1, instance.len - pre.len - 1);
+    return cc_slice_empty();
+}
+
+/* `snake(Family)_member::[args](...)` is one of two names, and which one is
+ * the factory's to say: `vec_new::[int]` is the instance's own
+ * `CCVec_int_new`, while `array_map_new_count::[int,int]` is the free
+ * `array_map_new_count_int_int`. The family's template writes whichever it
+ * writes, so it is read rather than assumed. */
+static CCSlice gn_member_callee(CcLowerer* L, CcDecl* fd, CcUnit* fu, CCSlice name,
+                                CCSlice member, CCSlice mangled, CCSlice family) {
+    CCSlice body = gn_decl_text(fu, fd);
+    CCSlice args = gn_arg_mangle(mangled, family);
+    if (args.len) {
+        CCString free_probe = @string(`${name}_${"$"}{arg_mangled(0)}`, L->arena);
+        CCSlice probe = cc_string_as_slice(&free_probe);
+        if (gn_text_has(body, probe)) {
+            CCString callee = @string(`${name}_${args}`, L->arena);
+            return lw_keep(L, &callee);
+        }
+    }
+    {
+        CCString callee = @string(`${mangled}_${member}`, L->arena);
+        return lw_keep(L, &callee);
+    }
+}
+
 static bool gn_expr_visit(CcExpr* e, void* env) {
     GStep* st = (GStep*)env;
     CcLowerer* L = st->L;
@@ -316,6 +360,7 @@ static bool gn_expr_visit(CcExpr* e, void* env) {
     bool hit = false;
     CCSlice name;
     CcDeclList* factv;
+    CcUnitList* funitv;
     size_t nf;
     size_t f;
     @switch (e->k) {
@@ -326,6 +371,7 @@ static bool gn_expr_visit(CcExpr* e, void* env) {
     name = gf.name;
     if (name.len > 3 && memcmp(name.ptr, "cc_", 3) == 0) name = cc_slice_from_buffer((char*)name.ptr + 3, name.len - 3);
     factv = &ix->factories;
+    funitv = &ix->factory_units;
     nf = factv->len();
     for (f = 0; f < nf; f++) {
         CcDecl* d = *factv->get_ptr(f);
@@ -362,7 +408,7 @@ static bool gn_expr_visit(CcExpr* e, void* env) {
             CcGenericType g;
             CCSlice mangled;
             CcTypeInfo* info;
-            CCString callee;
+            CCSlice callee;
             CcCall call;
             memset(&tmp, 0, sizeof(tmp));
             tmp.span = e->span;
@@ -372,8 +418,8 @@ static bool gn_expr_visit(CcExpr* e, void* env) {
             mangled = ix->canon(&tmp);
             info = ix->type_get(mangled);
             gn_note(st, info, 0);
-            callee = @string(`${mangled}_${member}`, L->arena);
-            call.callee = lw_ident(L, lw_keep(L, &callee), e->span);
+            callee = gn_member_callee(L, d, *funitv->get_ptr(f), name, member, mangled, fam);
+            call.callee = lw_ident(L, callee, e->span);
             call.args = gf.args;
             e->k = { .call = call };
             return true;

@@ -1496,6 +1496,16 @@ static void pr_s_expr(Pr* p, const CcExpr* e) {
     pr_str(p, ";");
 }
 
+/* `FOREACH(m, k, v) { ... }`: a macro whose expansion is a loop header, and
+ * the block after it is the loop's body rather than a statement of its own.
+ * The call printed with a semicolon and the block dropped compiles, and the
+ * body never runs. */
+static void pr_s_expr_stmt(Pr* p, const CcExprStmt* x) {
+    if (!x->body) { pr_s_expr(p, x->e); return; }
+    if (x->e) pr_expr_p(p, x->e, PREC_COMMA);
+    pr_body(p, x->body);
+}
+
 static void pr_s_decl(Pr* p, const CcStmt* s, const CcDecl* d) {
     if (d) pr_decl(p, d);
     else pr_span_c(p, s->span, "declaration");
@@ -1606,7 +1616,7 @@ static void pr_stmt_text(Pr* p, const CcStmt* s) {
     int indent = p->indent;
     if (stmt_is_cc(s)) { pr_span(p, s->span, CcStmt_kind_name(s)); return; }
     @switch (s->k) {
-        case .expr(x): pr_s_expr(p, x.e); break;
+        case .expr(x): pr_s_expr_stmt(p, &x); break;
         case .decl(x): pr_s_decl(p, s, x.d); break;
         case .block: pr_block(p, s); break;
         case .if_(x): pr_s_if(p, &x, indent); break;
