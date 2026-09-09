@@ -588,17 +588,29 @@ too.
 printed one push per line. `@scratch` as the arena is the function's
 `cc_arena_stack(__cc_str_scratch, N)` declared at the top of the function
 (N = max `@scratch(N)`, default 1024). A statement that consumes a
-`@scratch` template in a call and binds nothing is wrapped:
+`@scratch` template in a call and binds nothing is wrapped, so the
+temporary's bytes are back before the next one asks for room:
 
 ```c
 {
-    CcArenaCheckpoint __cc_scratch_cp1 = cc_arena_checkpoint_local(__cc_str_scratch);
+    int __cc_defer_on_N = 0;
+    CCArenaCheckpoint __cc_scratch_cpM = cc_arena_checkpoint_local(__cc_str_scratch);
+    __cc_defer_on_N = 1;
     <statement>
-    cc_arena_restore_local(__cc_scratch_cp1);
+    { if (__cc_defer_on_N) { cc_arena_restore_local(__cc_scratch_cpM); } }
 }
 ```
 
-with the restore also emitted before every exit from inside the statement.
+The restore is a `@defer` on the wrapper block, which is where the reach
+flag comes from and why every exit from inside the statement runs it on
+the way out: a `break` or `continue` that leaves the block, and the soft
+return a `return` inside a `!>` body becomes.
+
+A template whose product is bound to a name keeps its bytes for the frame,
+so the bound form is not wrapped. Both spellings of it are the bound form:
+a declaration initializer (`CCString s = @string(..., @scratch);`) and an
+assignment whose stored value is the template (`s = @string(..., @scratch);`,
+through parentheses, a cast, and the arms of a ternary).
 
 ## Header mode
 

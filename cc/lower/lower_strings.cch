@@ -420,6 +420,141 @@ static bool sr_stack_visit(CcExpr* e, void* env) {
     return true;
 }
 
+/* ---- call-local `@scratch` reclaim --------------------------------------
+ *
+ * A `@string(..., @scratch)` a call consumes is a temporary: its bytes are
+ * spent when the call returns, and the arena it grew in is the one every
+ * other `@scratch` product of this frame shares. Leaving the watermark up
+ * spills a loop of such calls and puts the bound products at risk of a
+ * later clobber, so the consuming statement gets a checkpoint before it and
+ * the watermark back after it.
+ *
+ * A template BOUND to a declaration is not a temporary -- its bytes are the
+ * local's, for as long as the frame lives -- so a declaration is never
+ * wrapped. That distinction is the whole of the feature: reclaiming a bound
+ * product would hand the local a view of freed bytes.
+ *
+ * The restore is written as a `@defer` on the wrapper block, so the cleanup
+ * step -- the one step that knows every way out of a block -- emits it at
+ * each of them: falling off the end, a `break` or `continue` that leaves
+ * the block, and the soft return a `return` inside a `!>` body becomes. */
+typedef struct SrScratchScan {
+    bool temp;                  /* a `@scratch` template stands somewhere in the statement */
+    bool bound;                 /* and one of them is what an assignment stores */
+} SrScratchScan;
+
+static bool sr_is_scratch_tpl(CcExpr* e) {
+    CcTemplate tp;
+    CcExpr* bytes = NULL;
+    if (!sr_is_template(e, &tp)) return false;
+    return tp.arena && sr_is_scratch(tp.arena, &bytes);
+}
+
+/* The value an assignment stores, read through the spellings that do not
+ * change what is stored: parentheses, a cast, the arms of a ternary, the
+ * last operand of a comma. */
+static bool sr_stores_scratch(CcExpr* e, int depth) {
+    CcExpr* a = NULL;
+    CcExpr* b = NULL;
+    if (!e || depth > 8) return false;
+    if (sr_is_scratch_tpl(e)) return true;
+    @switch (e->k) {
+        case .paren(pa): a = pa.a; break;
+        case .cast(ct): a = ct.a; break;
+        case .ternary(tn): a = tn.a; b = tn.b; break;
+        case .comma(cm): a = cm.b; break;
+        default: break;
+    }
+    if (sr_stores_scratch(a, depth + 1)) return true;
+    return sr_stores_scratch(b, depth + 1);
+}
+
+/* `x = @string(..., @scratch);` is the bound form written with `=` instead
+ * of a declarator: the bytes are now `x`'s, and reclaiming them would leave
+ * `x` a view of an arena the next `@scratch` product writes over. */
+static bool sr_assign_binds_scratch(CcExpr* e) {
+    CcBinary as;
+    bool is_assign = false;
+    @switch (e->k) {
+        case .assign(x): as = x; is_assign = true; break;
+        default: break;
+    }
+    if (!is_assign) return false;
+    return sr_stores_scratch(as.b, 0);
+}
+
+static bool sr_scan_scratch_expr(CcExpr* e, void* env) {
+    SrScratchScan* sc = (SrScratchScan*)env;
+    if (sr_is_scratch_tpl(e)) sc->temp = true;
+    if (sr_assign_binds_scratch(e)) sc->bound = true;
+    return true;
+}
+
+/* A nested statement is its own site: a template inside a `!>` body or a
+ * statement expression is reclaimed where that statement stands, and the
+ * extent of this one stops short of it. */
+static bool sr_scan_stop_stmt(CcStmt* s, void* env) {
+    (void)s;
+    (void)env;
+    return false;
+}
+
+static bool sr_expr_has_scratch(CcExpr* e) {
+    CcVisitor v;
+    SrScratchScan sc;
+    if (!e) return false;
+    memset(&sc, 0, sizeof(sc));
+    memset(&v, 0, sizeof(v));
+    v.expr = sr_scan_scratch_expr;
+    v.stmt = sr_scan_stop_stmt;
+    v.env = &sc;
+    CcExpr_walk(e, v);
+    return sc.temp && !sc.bound;
+}
+
+/* The statements a temporary is consumed by: a call written for its effect
+ * (an assignment is one), and an unwrap of one. A declaration is the bound
+ * form. A macro loop's head (`FOREACH(...) { }`) governs a body, so the
+ * statement is not the temporary's extent and it is left alone. */
+static bool sr_stmt_is_call_local(CcStmt* s) {
+    CcExpr* e = NULL;
+    @switch (s->k) {
+        case .expr(es): if (!es.body) e = es.e; break;
+        case .unwrap(us): e = us.e; break;
+        default: break;
+    }
+    return sr_expr_has_scratch(e);
+}
+
+/* `{ CCArenaCheckpoint cp = ...; @defer cc_arena_restore_local(cp); <s> }`,
+ * in place, so the statement still stands where it was written. */
+static void sr_wrap_call_local(TStep* st, CcStmt* s) {
+    CcLowerer* L = st->L;
+    CcSpan sp = s->span;
+    uint32_t id = L->temp_id();
+    CCString nm = @string(`__cc_scratch_cp${id}`, L->arena);
+    CCSlice cp = lw_keep(L, &nm);
+    CcStmt* inner = cc__stmt_blank(sp, L->arena);
+    CcStmt* blk = lw_block(L, sp);
+    CcStmt* release;
+    CcStmt* deferred;
+    CcDefer df;
+    CcExpr* take;
+    inner->k = s->k;
+    take = lw_call1(L, cstr_slice("cc_arena_checkpoint_local"), lw_ident(L, sr_scratch_name(), sp), sp);
+    lw_push(blk, lw_decl_stmt(L, lw_named_type(L, cstr_slice("CCArenaCheckpoint"), sp), cp, take, sp));
+    release = lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_arena_restore_local"), lw_ident(L, cp, sp), sp), sp);
+    memset(&df, 0, sizeof(df));
+    df.name = cc_slice_empty();
+    df.on = 0;
+    df.body = release;
+    deferred = cc__stmt_blank(sp, L->arena);
+    deferred->k = { .defer = df };
+    lw_push(blk, deferred);
+    lw_push(blk, inner);
+    s->k = blk->k;
+}
+
 static void sr_stmts(TStep* st, CcStmtList* list);
 
 static void sr_stmt(TStep* st, CcStmt* s) {
@@ -436,6 +571,7 @@ static void sr_stmt(TStep* st, CcStmt* s) {
     }
     sr_stmt(st, v.body);
     sr_stmt(st, v.else_body);
+    if (sr_stmt_is_call_local(s)) sr_wrap_call_local(st, s);
 }
 
 /* `CCString s = @string(`...`, a);` becomes the empty string and the
