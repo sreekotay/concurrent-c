@@ -83,11 +83,7 @@ static CcUnitMode mode_for(const char* path) {
     return CC_UNIT_SOURCE;
 }
 
-/* Named by their tags: the reference's safety pass keeps one row per
- * typedef that names a struct, and this unit sits exactly on that table's
- * per-unit cap. Neither record has an `@as` field for it to say anything
- * about. */
-struct Loaded {
+typedef struct Loaded {
     CCArena arena;
     CcDiags ds;
     CcUnit* unit;
@@ -97,7 +93,7 @@ struct Loaded {
     bool lowered;
     CcIndex* ix;                /* --lower: the index, shared with the headers lowered for this unit */
     CcLowerOpts lo;
-};
+} Loaded;
 
 /* The text a caret snippet is cut from.
  *
@@ -109,7 +105,7 @@ struct Loaded {
  * original, the more convincingly wrong. So the snippet comes from the
  * named file when it can be read, and from what was lowered otherwise. */
 static CCSlice source_of(CCSlice path, void* ctx) {
-    struct Loaded* L = (struct Loaded*)ctx;
+    Loaded* L = (Loaded*)ctx;
     CCSlice mine = L->src;
     bool ok = false;
     CCSlice text;
@@ -164,7 +160,7 @@ static bool mkdir_parents(const char* path) {
     return true;
 }
 
-static bool load(struct Loaded* L, const char* path, CcNameList known, CCArena a) {
+static bool load(Loaded* L, const char* path, CcNameList known, CCArena a) {
     CcParseOpts opts;
     bool ok;
     L->arena = a;
@@ -181,7 +177,7 @@ static bool load(struct Loaded* L, const char* path, CcNameList known, CCArena a
     return true;
 }
 
-static void print_diags(struct Loaded* L) {
+static void print_diags(Loaded* L) {
     CcDiags* ds = &L->ds;
     Vec::[CcDiag]* items = &ds->items;
     if (items->len()) ds->print(stderr, source_of, L);
@@ -204,7 +200,7 @@ static size_t byte_of(CCSlice src, uint32_t line, uint32_t col) {
 
 static int run_identity(const char* path, CcNameList known) {
     CCArena a = cc_arena_heap(megabytes(256)) @destroy;
-    struct Loaded L;
+    Loaded L;
     CcPrintOpts po;
     int rc = 0;
     uint32_t n_parse_errors;
@@ -237,12 +233,12 @@ static int run_identity(const char* path, CcNameList known) {
 
 /* ---- --is-plain-c -------------------------------------------------------- */
 
-struct Plain {
+typedef struct Plain {
     CCSlice first_what;
     uint32_t first_tok;
-};
+} Plain;
 
-static void plain_note(struct Plain* pl, CCSlice what, uint32_t tok) {
+static void plain_note(Plain* pl, CCSlice what, uint32_t tok) {
     if (pl->first_what.len) return;
     pl->first_what = what;
     pl->first_tok = tok;
@@ -255,15 +251,15 @@ static bool decl_is_top_stmt(const CcDecl* d) {
 }
 
 static bool plain_decl(CcDecl* d, void* env) {
-    if (decl_is_cc(d) || decl_is_top_stmt(d)) plain_note((struct Plain*)env, CcDecl_kind_name(d), d->span.first);
+    if (decl_is_cc(d) || decl_is_top_stmt(d)) plain_note((Plain*)env, CcDecl_kind_name(d), d->span.first);
     return true;
 }
 static bool plain_stmt(CcStmt* s, void* env) {
-    if (stmt_is_cc(s)) plain_note((struct Plain*)env, CcStmt_kind_name(s), s->span.first);
+    if (stmt_is_cc(s)) plain_note((Plain*)env, CcStmt_kind_name(s), s->span.first);
     return true;
 }
 static bool plain_expr(CcExpr* e, void* env) {
-    if (expr_is_cc(e)) plain_note((struct Plain*)env, CcExpr_kind_name(e), e->span.first);
+    if (expr_is_cc(e)) plain_note((Plain*)env, CcExpr_kind_name(e), e->span.first);
     return true;
 }
 
@@ -278,7 +274,7 @@ static CcParamList type_func_params(CcType* t) {
 }
 
 static bool plain_type(CcType* t, void* env) {
-    struct Plain* pl = (struct Plain*)env;
+    Plain* pl = (Plain*)env;
     CcParamList params;
     size_t n;
     size_t i;
@@ -294,8 +290,8 @@ static bool plain_type(CcType* t, void* env) {
 
 static int run_is_plain_c(const char* path, CcNameList known) {
     CCArena a = cc_arena_heap(megabytes(256)) @destroy;
-    struct Loaded L;
-    struct Plain pl;
+    Loaded L;
+    Plain pl;
     CcVisitor v;
     int rc;
     if (!load(&L, path, known, a)) return 2;
@@ -455,7 +451,7 @@ static CcNameList g_include_dirs;
  * source that lives somewhere else. */
 static const char* g_quote_dir = NULL;
 
-static bool load_lowered(struct Loaded* L, const char* path, CcNameList known, CCArena a) {
+static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena a) {
     CcParseOpts opts;
     bool ok;
     CcIndex* ix;
@@ -546,7 +542,7 @@ static bool load_lowered(struct Loaded* L, const char* path, CcNameList known, C
     return true;
 }
 
-static void note_headers(struct Loaded* L, CcNameList* more, CCArena keep);
+static void note_headers(Loaded* L, CcNameList* more, CCArena keep);
 
 /* An owner `.ccs` compiles this header's non-static bodies: the file of the
  * same stem beside it, or the chapter it is a chapter of
@@ -577,7 +573,7 @@ static bool cch_has_owner_ccs(const char* path) {
  * own index (its registrations and known types are the header's context,
  * as they are when the host compiles the include) to `<h-root>/<rel>.h`.
  * Headers it includes in turn join `todo`. */
-static int lower_header_with(struct Loaded* owner, CCSlice hpath, CcNameList known, bool line_directives, CcNameList* todo, CCArena keep) {
+static int lower_header_with(Loaded* owner, CCSlice hpath, CcNameList known, bool line_directives, CcNameList* todo, CCArena keep) {
     CCArena a = owner->arena;
     CcIndex* ix = owner->ix;
     CcParseOpts opts;
@@ -585,7 +581,7 @@ static int lower_header_with(struct Loaded* owner, CCSlice hpath, CcNameList kno
     CcDiags ds = CcDiags_new(a);
     CcUnit* u;
     CcLowerer lw;
-    struct Loaded H;
+    Loaded H;
     bool ok;
     CCSlice rel;
     CCString out;
@@ -642,7 +638,7 @@ static int lower_header_with(struct Loaded* owner, CCSlice hpath, CcNameList kno
 }
 
 /* Every local header the unit recorded, and those they record, each once. */
-static int lower_headers_of(struct Loaded* owner, CcNameList known, bool line_directives, CCArena keep) {
+static int lower_headers_of(Loaded* owner, CcNameList known, bool line_directives, CCArena keep) {
     CcNameList todo = vec_new::[CCSlice](keep);
     CcNameList seen = vec_new::[CCSlice](keep);
     int rc = 0;
@@ -669,7 +665,7 @@ static int lower_headers_of(struct Loaded* owner, CcNameList known, bool line_di
 }
 
 /* Copies of the headers the lowering recorded, in the caller's arena. */
-static void note_headers(struct Loaded* L, CcNameList* more, CCArena keep) {
+static void note_headers(Loaded* L, CcNameList* more, CCArena keep) {
     Vec::[CCSlice]* hs = &L->lw.headers;
     size_t n = hs->len();
     size_t i;
@@ -688,7 +684,7 @@ static void note_headers(struct Loaded* L, CcNameList* more, CCArena keep) {
 static int run_print(const char* path, CcNameList known, const char* out_path, bool line_directives,
                      bool header_mode, bool lower, CcNameList* more_headers, CCArena keep) {
     CCArena a = cc_arena_heap(megabytes(256)) @destroy;
-    struct Loaded L;
+    Loaded L;
     CcPrintOpts po;
     int rc = 0;
     int problems;

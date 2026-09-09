@@ -5,6 +5,7 @@
  * Requires pp_ast_core.cch (AstNode / TapeCache). */
 #pragma once
 
+#include "pp_tape.h"
 enum {
     SHADOW_SAFE_PIN_CAP = 24,
     SHADOW_SAFE_EH_CAP = 16,
