@@ -57,6 +57,8 @@ typedef struct PStep {
     CCString fwd;               /* their forward declarations */
     PBindList binds;            /* sites whose handle is declared before the block */
     CcStmtList stages;          /* `@stage` statements a `@parallel wait for` claimed */
+    CcDecl* at_decl;            /* the unit declaration the walk is inside */
+    CcDecl* first_host;         /* the first one that needed a forward declaration */
     CcType* fn_ret;             /* the enclosing function's return type: a walk records
                                  * a `return` into a cell of it */
     bool any;
@@ -243,10 +245,19 @@ static CCString pl_env_text(PStep* st, uint32_t id, uint32_t k, PCapList* caps, 
 
 /* `static void* <thunk>(void*);` and the site slot the runtime keys its
  * deny decision on. */
+/* The declaration a forward block has to stand above: an env struct names
+ * the types the body captured, and those are as often as not typedefs of
+ * this unit. Above the first declaration that needed one, every type it
+ * reads is declared -- and nothing before it calls a thunk. */
+static void pl_host(PStep* st) {
+    if (!st->first_host) st->first_host = st->at_decl;
+}
+
 static void pl_forward(PStep* st, uint32_t id, uint32_t k) {
     CcLowerer* L = st->L;
     CCArena a = L->arena;
     CCString* sb = &st->fwd;
+    pl_host(st);
     sb->push_cstr("static void* ", a);
     sb->push_slice(pl_name(L, id, k, "_thunk"), a);
     sb->push_cstr("(void*);\nstatic void* ", a);
@@ -641,7 +652,7 @@ static void pl_for_forward(PStep* st, uint32_t id) {
 static void* ${thunk}(void*);
 static void* ${site};
 `, L->arena);
-    st->fwd.push_slice(t.as_slice(), L->arena);
+    pl_host(st); st->fwd.push_slice(t.as_slice(), L->arena);
 }
 
 /* `break` and `return v` inside the walked body.
@@ -1154,7 +1165,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             /* the caller builds the environment, so its type is declared
              * with the forwards, above every function that fills one */
             CCString et = pl_env_text(st, id, (uint32_t)i, &caps, out_type, hspell.len != 0);
-            st->fwd.push_slice(et.as_slice(), L->arena);
+            pl_host(st); st->fwd.push_slice(et.as_slice(), L->arena);
         }
         pl_forward(st, id, (uint32_t)i);
         st->made.push(pl_thunk_decl(st, id, (uint32_t)i, &caps, arm->expr, pl_serial_body(L, arm->serial),
@@ -1277,7 +1288,7 @@ static void pl_dest(PStep* st, CcStmt* s, CcParallelDest pd) {
     }
     {
         CCString et = pl_env_text(st, id, 0, &caps, cc_slice_empty(), true);
-        st->fwd.push_slice(et.as_slice(), L->arena);
+        pl_host(st); st->fwd.push_slice(et.as_slice(), L->arena);
     }
     pl_forward(st, id, 0);
     st->made.push(pl_thunk_decl(st, id, 0, &caps, NULL, body, cc_slice_empty(),
@@ -1393,7 +1404,7 @@ static void pl_for_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
     }
     {
         CCString et = pl_for_env_text(st, id, &caps, ret_ty);
-        st->fwd.push_slice(et.as_slice(), L->arena);
+        pl_host(st); st->fwd.push_slice(et.as_slice(), L->arena);
     }
     pl_for_forward(st, id);
     st->made.push(pl_for_thunk_decl(st, id, sp));
@@ -1543,7 +1554,7 @@ static void pl_pw_forward(PStep* st, uint32_t id) {
     CCString t = @string(`static void ${run}(void*, int, int);
 static void* ${worker}(void*);
 `, L->arena);
-    st->fwd.push_slice(t.as_slice(), L->arena);
+    pl_host(st); st->fwd.push_slice(t.as_slice(), L->arena);
 }
 
 /* A runner: one ticket at a time off the channel, through the one body,
@@ -2048,7 +2059,7 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
     { CCString t = lw_spell_expr(L, rg.hi); his = lw_keep(L, &t); }
     {
         CCString et = pl_pw_env_text(st, id, &caps, ret_ty);
-        st->fwd.push_slice(et.as_slice(), L->arena);
+        pl_host(st); st->fwd.push_slice(et.as_slice(), L->arena);
     }
     pl_pw_forward(st, id);
     st->made.push(pl_pw_run_decl(st, id, &caps, pf.loop, pf.worker, sp));
@@ -2464,6 +2475,7 @@ static void pl_on_decl(Walker* w, CcDecl* d) {
     CcFuncDecl f;
     bool is_fn = false;
     st->fn_ret = NULL;
+    st->at_decl = d;
     @switch (d->k) {
         case .func(x): f = x; is_fn = true; break;
         default: break;
@@ -2576,6 +2588,7 @@ static void CcLowerer_parallel(CcLowerer* L) {
                 case .func(x): f0 = x; is_fn = true; break;
                 default: break;
             }
+            st.at_decl = d0;
             if (is_fn && f0.body) pl_declare_in(&st, f0.body);
         }
     }
@@ -2600,6 +2613,9 @@ static void CcLowerer_parallel(CcLowerer* L) {
             }
             if (!is_pp) break;
             at = k + 1;
+        }
+        for (k = at; st.first_host && k < nd; k++) {
+            if (*decls->get_ptr(k) == st.first_host) { at = k; break; }
         }
         {
             CCString head = cc_string_new();
