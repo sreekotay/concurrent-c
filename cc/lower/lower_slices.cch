@@ -116,13 +116,17 @@ static bool sl_has_as_slice(CcIndex* ix, CCSlice canon) {
     return false;
 }
 
-static CcExpr* sl_coerce(SStep* st, CcType* want, CcExpr* v, CcSpan sp) {
+/* The conversion a slice destination needs, keyed by the destination's
+ * canonical name rather than its node -- so a parameter spelled `CCSlice`
+ * reaches the same rule a `char[:]` declaration does. NULL when the value
+ * is already a slice, or is nothing this step converts. */
+static CcExpr* sl_coerce_canon(SStep* st, CCSlice wc, CcExpr* v, CcSpan sp) {
     CcLowerer* L = st->L;
     Walker* w = st->w;
     CcIndex* ix = L->ix;
     CcType* have;
     CCSlice hn;
-    if (!sl_type_is_slice(want) || !v) return NULL;
+    if (!sl_canon_is_slice(wc) || !v) return NULL;
     have = type_of_expr(w, v);
     if (!have) return NULL;
     if (sl_type_is_slice(have)) return NULL;
@@ -144,6 +148,11 @@ static CcExpr* sl_coerce(SStep* st, CcType* want, CcExpr* v, CcSpan sp) {
     }
     if (!sl_has_as_slice(ix, hn)) return NULL;
     return sl_as_slice(L, lw_paren(L, v, sp), false, sp);
+}
+
+static CcExpr* sl_coerce(SStep* st, CcType* want, CcExpr* v, CcSpan sp) {
+    if (!sl_type_is_slice(want)) return NULL;
+    return sl_coerce_canon(st, st->L->ix->canon(want), v, sp);
 }
 
 /* A declaration whose type is a slice: the initializer decides the form.
@@ -265,6 +274,13 @@ static void sl_call_args(SStep* st, CcCall cl) {
         if (sl_is_string(a)) {
             if (sl_canon_is_slice(pc)) *args->get_ptr(i) = sl_lit_call(st->L, a);
             continue;
+        }
+        {
+            /* the conversion a slice destination gets, at the parameter that
+             * is the destination here: a char pointer reads to its NUL, an
+             * owner answers `as_slice` */
+            CcExpr* conv = sl_coerce_canon(st, pc, a, a->span);
+            if (conv) { *args->get_ptr(i) = conv; continue; }
         }
         if (!sl_canon_is_erased(pc)) continue;
         {
