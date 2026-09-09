@@ -2075,7 +2075,7 @@ static void cc__load_includes_of(CcIndex *ix, const CcLexFile *f, const CcIndexO
         cc_buf_init(&searched);
         found = cc__resolve_include(ix, f->path, &refs[i], opts, &searched);
         if (!found) {
-            cc_diag_emit(ix->diag, CC_SEV_ERROR, cc_lex_loc(f, refs[i].off), "include not found: %c%s%c (searched:%s)",
+            cc_diag_emit(ix->diag, CC_SEV_ERROR, cc_lex_loc(f, refs[i].off), "cannot open #include %c%s%c (searched:%s)",
                          refs[i].quoted ? '"' : '<', refs[i].path, refs[i].quoted ? '"' : '>',
                          searched.len ? searched.data : " nothing");
             cc_buf_free(&searched);

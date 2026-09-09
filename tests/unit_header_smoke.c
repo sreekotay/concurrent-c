@@ -137,7 +137,7 @@ int main(void) {
         ver[0] = '\0';
     } else {
         failed |= expect_substr(out, "ccc ", "--version prefix");
-        snprintf(ver, sizeof(ver), "%s", out + 4);
+        snprintf(ver, sizeof(ver), "%.*s", (int)(sizeof(ver) - 1), out + 4);
         nl = strchr(ver, '\n');
         if (nl) *nl = '\0';
         if (!strchr(ver, '-')) {

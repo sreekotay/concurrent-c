@@ -199,6 +199,14 @@ typedef struct CcIndex {
     Map::[uint64_t, CCSlice] value_spellings;   /* a value type argument node -> its source text */
     Vec::[CCSlice] include_dirs;    /* search path for <...> and "..." */
     CCSlice quote_dir;              /* directory of the unit for "..." includes; empty when none */
+    /* Faces beside a header, by the type names they declare. A `.cch` may
+     * spell a pointer to a type a sibling face declares without including
+     * that face, and the `.h` a host compiler reads has to name the
+     * sibling. Read once per directory; when two faces declare one name
+     * the map holds the one an includer would name. */
+    CCSlice peer_dir;
+    Vec::[CCSlice] peer_names;
+    Vec::[CCSlice] peer_paths;
     int expansion_depth;        /* nesting of macro / factory expansions being indexed */
     uint32_t n_expansions;
     uint32_t n_expansion_errors;    /* parse errors inside expansions (not reported as diagnostics) */
@@ -217,6 +225,9 @@ static void CcIndex_load_includes(CcIndex* ix, CcUnit* u, CcParseOpts opts);
  * headers of a unit before parsing the unit itself, so the parser sees
  * every typedef name from the headers. */
 static void CcIndex_preload_includes(CcIndex* ix, const CcTape* tape, CcParseOpts opts);
+/* ix.peer_face(dir, name): the `.cch` in `dir` that declares `name`, or an
+ * empty slice when none does. */
+static CCSlice CcIndex_peer_face(CcIndex* ix, CCSlice dir, CCSlice name);
 /* ix.known_types(): every typedef name the index knows, for CcParseOpts.known_types. */
 static Vec::[CCSlice] CcIndex_known_types(CcIndex* ix);
 

@@ -924,6 +924,7 @@ static bool gn_lower_fragment(CcLowerer* L, CCString text, CcSpan sp, CCString* 
     po.identity = false;
     po.line_directives = false;
     po.header_mode = false;
+    po.header_owned = false;
     po.path = path;
     CcProduct prod = cc_print_unit(u, NULL, po, &ds, a) !>(e) {
         CCSlice why = e.msg;

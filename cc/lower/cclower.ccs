@@ -210,6 +210,7 @@ static int run_identity(const char* path, CcNameList known) {
     po.line_directives = false;
     po.path = cc_slice_empty();
     po.header_mode = false;
+    po.header_owned = false;
     CcProduct prod = cc_print_unit(L.unit, NULL, po, &L.ds, a) !>(e) {
         uint32_t pline = e.phys_line ? e.phys_line : e.at.line;
         size_t at = byte_of(L.src, pline, e.at.col);
@@ -543,6 +544,31 @@ static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena 
 
 static void note_headers(Loaded* L, CcNameList* more, CCArena keep);
 
+/* An owner `.ccs` compiles this header's non-static bodies: the file of the
+ * same stem beside it, or the chapter it is a chapter of
+ * (`a_b_leaf.cch` under `a_b.ccs`). Without one nothing else compiles them,
+ * so the body stays in the `.h` the includer reads -- a prototype there
+ * would leave the call to a definition no translation unit holds. */
+static bool cch_has_owner_ccs(const char* path) {
+    char buf[4096];
+    size_t n = path ? strlen(path) : 0;
+    size_t cut;
+    if (n < 5 || n + 1 >= sizeof(buf)) return false;
+    if (memcmp(path + n - 4, ".cch", 4) != 0) return false;
+    memcpy(buf, path, n - 4);
+    cut = n - 4;
+    for (;;) {
+        size_t k = cut;
+        FILE* fp;
+        memcpy(buf + cut, ".ccs", 5);
+        fp = fopen(buf, "rb");
+        if (fp) { fclose(fp); return true; }
+        while (k > 0 && buf[k - 1] != '_' && buf[k - 1] != '/') k--;
+        if (k == 0 || buf[k - 1] == '/') return false;
+        cut = k - 1;
+    }
+}
+
 /* A local header the unit includes, lowered in header mode with the unit's
  * own index (its registrations and known types are the header's context,
  * as they are when the host compiles the include) to `<h-root>/<rel>.h`.
@@ -597,6 +623,7 @@ static int lower_header_with(Loaded* owner, CCSlice hpath, CcNameList known, boo
         po.identity = false;
         po.line_directives = line_directives;
         po.header_mode = true;
+        po.header_owned = cch_has_owner_ccs(h_c);
         po.path = hpath;
         CcProduct prod = cc_print_unit(u, NULL, po, &H.ds, a) !>(e) {
             fprintf(stderr, "cclower: %s: %.*s\n", h_c, (int)e.msg.len, e.msg.ptr);
@@ -673,6 +700,7 @@ static int run_print(const char* path, CcNameList known, const char* out_path, b
     po.identity = false;
     po.line_directives = line_directives;
     po.header_mode = header_mode;
+    po.header_owned = header_mode ? cch_has_owner_ccs(path) : false;
     po.path = cc_slice_from_buffer((char*)path, strlen(path));
     CcProduct prod = cc_print_unit(L.unit, NULL, po, &L.ds, a) !>(e) {
         fprintf(stderr, "cclower: %s: %.*s\n", path, (int)e.msg.len, e.msg.ptr);

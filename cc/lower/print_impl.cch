@@ -349,6 +349,46 @@ static const CcLineMark* pr_mark_after(Pr* p, uint32_t tok) {
 
 /* The text of one token (no trivia). A user `#line` copied verbatim rebases
  * the host as well, so the host stays in step with the tape's rebasing. */
+/* `@destroy` / `@detach` inside a directive names a lifetime that the
+ * lowering of a use site installs. A `.h` is read by the host preprocessor,
+ * which has no such attribute, so the text a header hands it carries
+ * neither. */
+static bool pr_life_attr_at(const char* s, uint32_t end, uint32_t i, uint32_t* stop) {
+    uint32_t len = 0;
+    char c;
+    if (i >= end || s[i] != '@') return false;
+    if (end - i >= 8 && memcmp(s + i, "@destroy", 8) == 0) len = 8;
+    else if (end - i >= 7 && memcmp(s + i, "@detach", 7) == 0) len = 7;
+    else return false;
+    if (i + len < end) {
+        c = s[i + len];
+        if (c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9'))
+            return false;
+    }
+    *stop = i + len;
+    return true;
+}
+
+static void pr_raw_no_life_attrs(Pr* p, uint32_t off, uint32_t len) {
+    const char* s = p->src;
+    uint32_t end = off + len;
+    uint32_t seg = off;
+    uint32_t i = off;
+    while (i < end) {
+        uint32_t stop = i;
+        if (!pr_life_attr_at(s, end, i, &stop)) { i++; continue; }
+        {
+            uint32_t cut = i;
+            while (cut > seg && (s[cut - 1] == ' ' || s[cut - 1] == '\t')) cut--;
+            if (cut > seg) pr_raw(p, seg, cut - seg);
+        }
+        seg = stop;
+        i = stop;
+    }
+    if (end > seg) pr_raw(p, seg, end - seg);
+}
+
 static void pr_tok_text(Pr* p, uint32_t tok) {
     if (tok >= p->n) {
         CCString m = cc_string_new();
@@ -370,7 +410,10 @@ static void pr_tok_text(Pr* p, uint32_t tok) {
             p->host_reset_line = mk->logical_line;
         }
     }
-    pr_raw(p, tok_off(p, tok), tok_len(p, tok));
+    if (p->opts.header_mode && p->t[tok].kind == CC_TK_PP)
+        pr_raw_no_life_attrs(p, tok_off(p, tok), tok_len(p, tok));
+    else
+        pr_raw(p, tok_off(p, tok), tok_len(p, tok));
 }
 
 /* ---- trivia replay ---------------------------------------------------------- */
@@ -1653,7 +1696,8 @@ static void pr_d_var(Pr* p, const CcDecl* d, const CcVarDecl* v) {
 
 static void pr_d_func(Pr* p, const CcDecl* d, const CcFuncDecl* f, int indent) {
     bool keep_body = f->body != NULL;
-    if (keep_body && p->opts.header_mode && !(d->specs & CC_SPEC_STATIC))
+    if (keep_body && p->opts.header_mode && p->opts.header_owned &&
+        !(d->specs & CC_SPEC_STATIC))
         keep_body = false;   /* a non-static body belongs to the owner TU */
     pr_specs(p, d->specs, decl_spec_quals(f->type));
     pr_attrs(p, &d->attrs, false);
@@ -2057,6 +2101,7 @@ static CcPrintOpts spell_opts(const CcTape* tape) {
     o.line_directives = false;
     o.path = tape->path;
     o.header_mode = false;
+    o.header_owned = false;
     return o;
 }
 

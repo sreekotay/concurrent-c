@@ -29,6 +29,7 @@ typedef struct CcPrintOpts {
     int line_directives;    /* emit `#line` (off for #pragma(@linenumbers) off) */
     const char *path;       /* path spelling for `#line`; default the unit's file path as given */
     int header_mode;        /* .h product: `#pragma once`, drop function bodies that are not static inline */
+    int header_owned;       /* an owner .ccs compiles this header's non-static bodies */
 } CcPrintOpts;
 
 /* Print the unit into `out`. In identity mode the tree is walked to check

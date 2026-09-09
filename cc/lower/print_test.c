@@ -97,6 +97,30 @@ static void unload(Loaded *L) {
 
 /* ---- --identity ---------------------------------------------------------- */
 
+/* An owner `.ccs` compiles this header's non-static bodies: the file of the
+ * same stem beside it, or the chapter it is a chapter of
+ * (`a_b_leaf.cch` under `a_b.ccs`). Without one nothing else compiles them,
+ * so the body stays in the `.h` the includer reads. */
+static int cch_has_owner_ccs(const char *path) {
+    char buf[4096];
+    size_t n = path ? strlen(path) : 0;
+    size_t cut;
+    if (n < 5 || n + 1 >= sizeof buf) return 0;
+    if (memcmp(path + n - 4, ".cch", 4) != 0) return 0;
+    memcpy(buf, path, n - 4);
+    cut = n - 4;
+    for (;;) {
+        size_t k = cut;
+        FILE *fp;
+        memcpy(buf + cut, ".ccs", 5);
+        fp = fopen(buf, "rb");
+        if (fp) { fclose(fp); return 1; }
+        while (k > 0 && buf[k - 1] != '_' && buf[k - 1] != '/') k--;
+        if (k == 0 || buf[k - 1] == '/') return 0;
+        cut = k - 1;
+    }
+}
+
 static int run_identity(const char *path, const char **known) {
     Loaded L;
     CcBuf out;
@@ -301,6 +325,7 @@ static int run_print(const char *path, const char **known, const char *out_path,
     memset(&po, 0, sizeof po);
     po.line_directives = line_directives;
     po.header_mode = header_mode;
+    po.header_owned = header_mode ? cch_has_owner_ccs(path) : 0;
     po.path = path;
     cc_buf_init(&out);
     cc_print_unit(&out, &map, &L.arena, &L.diag, L.unit, &po);

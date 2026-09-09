@@ -32,6 +32,7 @@ typedef struct CcPrintOpts {
     bool line_directives;       /* honour #pragma(@linenumbers): off drops #line, keeps the map */
     CCSlice path;               /* spelling for #line: what the host compiler can open */
     bool header_mode;           /* printing a lowered .cch as .h */
+    bool header_owned;          /* an owner .ccs compiles this header's non-static bodies */
 } CcPrintOpts;
 
 typedef struct CcProduct {

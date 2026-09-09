@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
+#include <dirent.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -2751,6 +2752,8 @@ static CcIndex* cc_index_new(CcNameList include_dirs, CCSlice quote_dir, CcDiags
     ix->loaded_paths = vec_new::[CCSlice](a);
     ix->loading_paths = vec_new::[CCSlice](a);
     ix->value_spellings = map_new::[uint64_t, CCSlice](a);
+    ix->peer_names = vec_new::[CCSlice](a);
+    ix->peer_paths = vec_new::[CCSlice](a);
     ix->include_dirs = include_dirs;
     ix->quote_dir = quote_dir;
     return ix;
@@ -2877,6 +2880,122 @@ static CCSlice cc__read_file(CcIndex* ix, CCSlice path, bool* ok) {
 
 static void cc__load_includes_of(CcIndex* ix, const CcTape* tape);
 
+/* ---- faces beside a header ------------------------------------------------
+ *
+ * The part of a path after the last `/`. */
+static CCSlice cc__peer_base(CCSlice p) {
+    size_t i = p.len;
+    while (i > 0 && p.ptr[i - 1] != '/') i--;
+    return cc_slice_from_buffer((char*)p.ptr + i, p.len - i);
+}
+
+static bool cc__peer_is_priv(CCSlice base) {
+    return base.len >= 9 && memcmp(base.ptr + base.len - 9, "_priv.cch", 9) == 0;
+}
+
+/* Two faces may declare one name -- a chapter repeats a type its parent
+ * declares. The one to include is the one an includer would name: the stem
+ * over a `_priv` chapter, and the shorter name over a longer one. */
+static bool cc__peer_preferred(CCSlice cand, CCSlice held) {
+    CCSlice cb = cc__peer_base(cand);
+    CCSlice hb = cc__peer_base(held);
+    bool cp = cc__peer_is_priv(cb);
+    bool hp = cc__peer_is_priv(hb);
+    if (hp != cp) return hp;
+    return cb.len < hb.len;
+}
+
+/*
+ * The type names one face declares, read on its own: what including it is
+ * for. Read on its own because a face is scanned before anything says which
+ * unit will include it, and the names wanted are the ones it declares. */
+static void cc__peer_scan_face(CcIndex* ix, CCSlice path) {
+    CCSlice src;
+    bool ok = false;
+    CcDiags scratch = CcDiags_new(ix->arena);
+    CcParseOpts po;
+    CcUnit* u;
+    CcDeclList* dv;
+    size_t n;
+    size_t i;
+    src = cc__read_file(ix, path, &ok);
+    if (!ok) return;
+    po.mode = CC_UNIT_HEADER;
+    po.known_types = vec_new::[CCSlice](ix->arena);
+    u = cc_parse_unit(path, src, po, &scratch, ix->arena);
+    if (!u) return;
+    dv = &u->decls;
+    n = dv->len();
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *dv->get_ptr(i);
+        CCSlice nm = cc_slice_empty();
+        Vec::[CCSlice]* namev = &ix->peer_names;
+        Vec::[CCSlice]* pathv = &ix->peer_paths;
+        size_t m;
+        size_t k;
+        bool seen = false;
+        @switch (d->k) {
+            case .typedef_(td): nm = td.name; break;
+            case .variant(vd): nm = vd.name; break;
+            default: break;
+        }
+        if (!nm.len) continue;
+        m = namev->len();
+        for (k = 0; k < m; k++) {
+            CCSlice have = *namev->get_ptr(k);
+            if (!cc__eq(have, nm)) continue;
+            seen = true;
+            {
+                CCSlice held = *pathv->get_ptr(k);
+                if (!cc__eq(held, path) && cc__peer_preferred(path, held))
+                    *pathv->get_ptr(k) = path;
+            }
+        }
+        if (!seen) { namev->push(nm); pathv->push(path); }
+    }
+}
+
+static void cc__peer_load_dir(CcIndex* ix, CCSlice dir) {
+    char buf[4096];
+    DIR* dp;
+    struct dirent* e;
+    if (ix->peer_dir.len && cc__eq(ix->peer_dir, dir)) return;
+    ix->peer_dir = dir;
+    ix->peer_names = vec_new::[CCSlice](ix->arena);
+    ix->peer_paths = vec_new::[CCSlice](ix->arena);
+    dp = opendir(cc__ix_cstr(ix, dir));
+    if (!dp) return;
+    while ((e = readdir(dp)) != NULL) {
+        size_t en = strlen(e->d_name);
+        int fl;
+        if (en < 5 || memcmp(e->d_name + en - 4, ".cch", 4) != 0) continue;
+        fl = snprintf(buf, sizeof(buf), "%.*s/%s", (int)dir.len, dir.ptr, e->d_name);
+        if (fl <= 0 || (size_t)fl >= (int)sizeof(buf)) continue;
+        {
+            CCSlice full = cc__ix_dupn(ix, buf, (size_t)fl);
+            cc__peer_scan_face(ix, full);
+        }
+    }
+    closedir(dp);
+}
+
+static CCSlice CcIndex_peer_face(CcIndex* ix, CCSlice dir, CCSlice name) {
+    Vec::[CCSlice]* namev;
+    Vec::[CCSlice]* pathv;
+    size_t n;
+    size_t i;
+    if (!dir.len || !name.len) return cc_slice_empty();
+    cc__peer_load_dir(ix, dir);
+    namev = &ix->peer_names;
+    pathv = &ix->peer_paths;
+    n = namev->len();
+    for (i = 0; i < n; i++) {
+        CCSlice have = *namev->get_ptr(i);
+        if (cc__eq(have, name)) return *pathv->get_ptr(i);
+    }
+    return cc_slice_empty();
+}
+
 static void cc__load_header(CcIndex* ix, CCSlice path) {
     CCSlice canon = cc__canonical_path(ix, path);
     CCSlice src;
@@ -2934,7 +3053,7 @@ static void cc__load_includes_of(CcIndex* ix, const CcTape* tape) {
         found = cc__resolve_include(ix, tape->path, r, &searched);
         if (!found.len) {
             CCString sb = cc_string_new();
-            sb.push_cstr("include not found: ", ix->arena);
+            sb.push_cstr("cannot open #include ", ix->arena);
             sb.push_char(r->quoted ? '"' : '<', ix->arena);
             sb.push_slice(r->path, ix->arena);
             sb.push_char(r->quoted ? '"' : '>', ix->arena);

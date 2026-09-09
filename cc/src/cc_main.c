@@ -2327,6 +2327,20 @@ static int cc__is_raw_c(const char* path) {
 
 /* Rewrite `#include … .cch` → `.h` so host cc resolves lowered headers under
  * out/include. Bare `@as` stays in .cch source; host never opens those files. */
+/* Is offset `i` inside a line whose first token is `#include`? The rewrite
+ * below is a text substitution, and `.cch` also occurs in `#line` paths and
+ * in a program's own string data -- rewriting either changes what the
+ * program says rather than where the host reads a header. */
+static int cc__on_include_line(const char* src, size_t n, size_t i) {
+    size_t s = i;
+    while (s > 0 && src[s - 1] != '\n') s--;
+    while (s < n && (src[s] == ' ' || src[s] == '\t')) s++;
+    if (s >= n || src[s] != '#') return 0;
+    s++;
+    while (s < n && (src[s] == ' ' || src[s] == '\t')) s++;
+    return s + 7 <= n && strncmp(src + s, "include", 7) == 0;
+}
+
 static char* cc__rewrite_cch_includes_buf(const char* src, size_t n, int* changed) {
     char* out = NULL;
     size_t out_len = 0, out_cap = 0, last_emit = 0, i = 0;
@@ -2334,7 +2348,8 @@ static char* cc__rewrite_cch_includes_buf(const char* src, size_t n, int* change
     if (!src) return NULL;
     while (i < n) {
         if (i + 5 <= n &&
-            (strncmp(src + i, ".cch>", 5) == 0 || strncmp(src + i, ".cch\"", 5) == 0)) {
+            (strncmp(src + i, ".cch>", 5) == 0 || strncmp(src + i, ".cch\"", 5) == 0) &&
+            cc__on_include_line(src, n, i)) {
             char closer = src[i + 4];
             if (!out) {
                 out_cap = n + 64;
@@ -4966,11 +4981,40 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             char clean_shcc_wrap[PATH_MAX];
             char clean_qdir[PATH_MAX];
             const char* clean_orig = opt->in_path;
+            const char* want_pin = pin[0] ? pin : opt->ccc_version_pin;
             CCBuildOptions o2;
             CCBuildOptions o_shcc;
             if (uk == CC_UNIT_KIND_CCH) {
                 fprintf(stderr, "cc: the clean lowerer does not lower header units yet (%s)\n", opt->in_path);
                 return -1;
+            }
+            /* A pin names the toolchain the unit is written against. The
+             * clean lowerer ships no bootstrap seeds of its own, so it can
+             * honour a pin only when the pin resolves to the running
+             * toolchain; a pin that names anything else is refused where it
+             * was written rather than lowered by a toolchain it excludes. */
+            if (want_pin && want_pin[0]) {
+                char pin_current[64];
+                char pin_folder[64];
+                if (!cc_ccc_version_spec_ok(want_pin)) {
+                    fprintf(stderr, "cc: invalid version pin %s\n", want_pin);
+                    return -1;
+                }
+                if (cc__bootstrap_pin_folder(want_pin, pin_folder,
+                                             sizeof(pin_folder)) != 0) {
+                    fprintf(stderr,
+                            "cc: version pin %s: missing bootstrap seed %s\n",
+                            want_pin, want_pin);
+                    return -1;
+                }
+                cc_ccc_version_current(pin_current, sizeof(pin_current));
+                if (!cc_ccc_version_equal(pin_folder, pin_current)) {
+                    fprintf(stderr,
+                            "cc: version pin %s: the clean lowerer has no "
+                            "bootstrap seed %s to run\n",
+                            want_pin, pin_folder);
+                    return -1;
+                }
             }
             if (uk == CC_UNIT_KIND_SHCC) {
                 /* A script is a unit once its prelude, main and default
@@ -5555,23 +5599,35 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
     const char* cppflags_env = getenv("CPPFLAGS");
     int is_tcc = cc__is_tcc(cc_bin);
     char cmd[2048];
+    char lead_inc[PATH_MAX + 8];
+
+    /* Two lowered forms of the same local `.cch` exist side by side: the one
+     * the preprocess stage left under out/include, and the one the clean
+     * lowerer wrote beside the C it emitted. A translation unit has to read
+     * the header its own lowerer produced -- the two spell generic instances
+     * differently -- so on the clean path the emit directory is searched
+     * ahead of out/include. */
+    lead_inc[0] = '\0';
+    if (g_lowerer_clean && extra_include_dir && *extra_include_dir)
+        snprintf(lead_inc, sizeof(lead_inc), "-I%s ", extra_include_dir);
 
     // TCC doesn't support -MMD/-MF/-MT dependency tracking flags
     // Add lowered include path first so .h versions of .cch are found before originals
     if (is_tcc) {
-        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -I%s -I%s -I%s -I%s",
+        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s %s-I%s -I%s -I%s -I%s",
                  cc_bin,
                  ccflags_env ? ccflags_env : "",
                  cppflags_env ? cppflags_env : "",
                  target_part ? target_part : "",
                  sysroot_part ? sysroot_part : "",
+                 lead_inc,
                  g_cc_lowered_include,
                  g_cc_include,
                  g_cc_dir,
                  g_repo_root);
         cc__append_tcc_host_flags(cmd, sizeof(cmd), cc_bin);
     } else {
-        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -MMD -MF %s -MT %s -I%s -I%s -I%s -I%s",
+        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -MMD -MF %s -MT %s %s-I%s -I%s -I%s -I%s",
                  cc_bin,
                  ccflags_env ? ccflags_env : "",
                  cppflags_env ? cppflags_env : "",
@@ -5579,6 +5635,7 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
                  sysroot_part ? sysroot_part : "",
                  dep_path ? dep_path : "/dev/null",
                  obj_path ? obj_path : "out.o",
+                 lead_inc,
                  g_cc_lowered_include,
                  g_cc_include,
                  g_cc_dir,

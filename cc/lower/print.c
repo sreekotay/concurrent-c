@@ -240,6 +240,45 @@ static const CcLineMark *pr_mark_after(const Pr *p, const CcToken *t) {
 
 /* The text of one token (no trivia). A user `#line` copied verbatim rebases
  * the host as well, so the host stays in step with cc_lex_loc. */
+/* `@destroy` / `@detach` inside a directive names a lifetime that the
+ * lowering of a use site installs. A `.h` is read by the host preprocessor,
+ * which has no such attribute, so the text a header hands it carries
+ * neither. */
+static int pr_life_attr_at(const char *s, uint32_t end, uint32_t i, uint32_t *stop) {
+    uint32_t len = 0;
+    char c;
+    if (i >= end || s[i] != '@') return 0;
+    if (end - i >= 8 && memcmp(s + i, "@destroy", 8) == 0) len = 8;
+    else if (end - i >= 7 && memcmp(s + i, "@detach", 7) == 0) len = 7;
+    else return 0;
+    if (i + len < end) {
+        c = s[i + len];
+        if (c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9'))
+            return 0;
+    }
+    *stop = i + len;
+    return 1;
+}
+
+static void pr_raw_no_life_attrs(Pr *p, uint32_t off, uint32_t len) {
+    const char *s = p->f->src;
+    uint32_t end = off + len;
+    uint32_t seg = off;
+    uint32_t i = off;
+    while (i < end) {
+        uint32_t stop = i;
+        uint32_t cut;
+        if (!pr_life_attr_at(s, end, i, &stop)) { i++; continue; }
+        cut = i;
+        while (cut > seg && (s[cut - 1] == ' ' || s[cut - 1] == '\t')) cut--;
+        if (cut > seg) pr_raw(p, seg, cut - seg);
+        seg = stop;
+        i = stop;
+    }
+    if (end > seg) pr_raw(p, seg, end - seg);
+}
+
 static void pr_tok_text(Pr *p, uint32_t tok) {
     const CcToken *t;
     if (tok >= p->f->n_toks) {
@@ -259,7 +298,10 @@ static void pr_tok_text(Pr *p, uint32_t tok) {
             p->host_reset_line = m->logical_line;
         }
     }
-    pr_raw(p, t->off, t->len);
+    if (p->opts.header_mode && t->kind == CC_TK_PP)
+        pr_raw_no_life_attrs(p, t->off, t->len);
+    else
+        pr_raw(p, t->off, t->len);
 }
 
 static uint32_t trivia_comment_end(const char *src, uint32_t i, uint32_t end);
@@ -1247,7 +1289,7 @@ static void pr_decl(Pr *p, const CcDecl *d) {
     case CC_D_FUNC: {
         const CcType *base = type_base(d->type);
         int keep_body = d->body != NULL;
-        if (keep_body && p->opts.header_mode &&
+        if (keep_body && p->opts.header_mode && p->opts.header_owned &&
             !((d->specs & CC_S_STATIC) && (d->specs & CC_F_INLINE)))
             keep_body = 0;
         pr_specs(p, d->specs & ~(base ? base->quals : 0u));

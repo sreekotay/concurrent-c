@@ -372,6 +372,13 @@ static void lw_drop_cc_only(CcLowerer* L) {
             case .typeview: drop = true; break;
             case .typehooks: drop = true; break;
             case .factory: drop = true; break;
+            /* A unit reaches the lowerer with its compile-time blocks
+             * already run and blanked; a header is read as it was written,
+             * so the `.h` drops them here. What they produced is spliced
+             * into the translation unit, not into the header. */
+            case .comptime_block: drop = L->header_mode; break;
+            case .comptime_fn: drop = L->header_mode; break;
+            case .comptime_if: drop = L->header_mode; break;
             default: break;
         }
         if ((d->specs & (uint32_t)CC_SPEC_COMPTIME) != 0) drop = true;
@@ -479,6 +486,117 @@ static void lw_move_decl(CcLowerer* L, CcDeclList* decls, size_t from, size_t to
     *decls = out;
 }
 
+/* Move the declaration at `to`, and everything after it, one along, and
+ * put `d` in the gap. */
+static void lw_insert_decl(CcLowerer* L, CcDeclList* decls, size_t to, CcDecl* d) {
+    size_t nd = decls->len();
+    CcDeclList out = vec_new::[CcDeclRef](L->arena);
+    size_t k;
+    for (k = 0; k < nd; k++) {
+        CcDecl* dk = *decls->get_ptr(k);
+        if (k == to) { out.push(d); }
+        out.push(dk);
+    }
+    if (to >= nd) { out.push(d); }
+    *decls = out;
+}
+
+/* Whether `names` holds `nm`. */
+static bool lw_names_have(CcNameList* names, CCSlice nm) {
+    size_t n = names->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice k = *names->get_ptr(i);
+        if (slice_eq(k, nm)) return true;
+    }
+    return false;
+}
+
+/* ---- a face this header names but does not include ------------------------
+ *
+ * A `.cch` may spell `Peer*` for a type a sibling face declares without
+ * including that face: a pointer needs no definition where it is written,
+ * and the unit that includes both resolves it. A `.h` is read where it is
+ * included and by a host compiler, which needs the name to be a type, so
+ * the sibling that declares it is included ahead of the first declaration
+ * that spells it. */
+
+/* Names this header spells in a pointer position that neither it nor the
+ * index declares. */
+static CcNameList lw_undeclared_pointees(CcLowerer* L) {
+    CCArena a = L->arena;
+    CcUnit* u = L->unit;
+    CcNameList out = vec_new::[CCSlice](a);
+    CcNameList mine = lw_header_type_names(L, u);
+    CcNameList known = L->ix->known_types();
+    CcTape* tp = (CcTape*)&u->tape;
+    size_t n = tp->toks.len();
+    size_t i;
+    for (i = 0; i + 1 < n; i++) {
+        const CcToken* k = tp->toks.get_ptr(i);
+        const CcToken* nx = tp->toks.get_ptr(i + 1);
+        if (!k || !nx) continue;
+        if (k->kind != CC_TK_IDENT) continue;
+        if (nx->kind != CC_TK_PUNCT || nx->punct != CC_P_STAR) continue;
+        if (lw_names_have(&mine, k->text)) continue;
+        if (lw_names_have(&known, k->text)) continue;
+        if (lw_names_have(&out, k->text)) continue;
+        out.push(k->text);
+    }
+    return out;
+}
+
+/* The part of `path` after the last `/`. */
+static CCSlice lw_path_base(CCSlice path) {
+    size_t i = path.len;
+    while (i > 0 && path.ptr[i - 1] != '/') i--;
+    return cc_slice_from_buffer((char*)path.ptr + i, path.len - i);
+}
+
+/* Everything before the last `/`; empty when there is none. */
+static CCSlice lw_path_dir(CCSlice path) {
+    size_t i = path.len;
+    while (i > 0 && path.ptr[i - 1] != '/') i--;
+    if (i == 0) return cc_slice_empty();
+    return cc_slice_from_buffer((char*)path.ptr, i - 1);
+}
+
+static void lw_include_defining_faces(CcLowerer* L, CcDeclList* decls) {
+    CcIndex* ix = L->ix;
+    CCSlice dir = lw_path_dir(L->unit->tape.path);
+    CcNameList want = lw_undeclared_pointees(L);
+    size_t n = want.len();
+    size_t i;
+    if (!dir.len) return;
+    for (i = 0; i < n; i++) {
+        CCSlice nm = *want.get_ptr(i);
+        CCSlice face = ix->peer_face(dir, nm);
+        CCSlice base;
+        CCSlice stem;
+        CCString line;
+        CcNameList one = vec_new::[CCSlice](L->arena);
+        size_t use = 0;
+        if (!face.len) continue;
+        if (slice_eq(face, L->unit->tape.path)) continue;
+        base = lw_path_base(face);
+        if (base.len < 5) continue;
+        stem = cc_slice_from_buffer((char*)base.ptr, base.len - 4);
+        one.push(nm);
+        if (!lw_first_use_of(L->unit, decls, &one, &use)) continue;
+        line = @string(`#include "${stem}.h"
+`, L->arena);
+        {
+            CcDecl* at = *decls->get_ptr(use);
+            CcDecl* raw = lw_raw_decl(L, line, at->span);
+            lw_insert_decl(L, decls, use, raw);
+        }
+        {
+            Vec::[CCSlice]* hs = &L->headers;
+            hs->push(face);
+        }
+    }
+}
+
 static void CcLowerer_includes(CcLowerer* L) {
     CcIndex* ix = L->ix;
     CcIncludeRefList refs;
@@ -562,6 +680,7 @@ static void CcLowerer_includes(CcLowerer* L) {
             hs->push(found);
         }
     }
+    if (L->header_mode) lw_include_defining_faces(L, decls);
 }
 
 static void CcLowerer_lower_unit(CcLowerer* L) {
