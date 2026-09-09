@@ -1,7 +1,7 @@
 /* Diagnostics oracle: @async state-machine lowering above the error. */
 #include <ccc/std/prelude.cch>
 
-@async int oracle_echo(int[~4 >] tx, int[~4 <] rx, int v) {
+@async int oracle_echo(int[~4 >] tx, int[~4 <] rx, int v) { @errhandler(CCIoError e) { cc_error_exit(e.base); }
     @await tx.send(v) !>;
     int reply;
     @await rx.recv(&reply) !>;
