@@ -309,7 +309,7 @@ static bool sl_expr_visit(CcExpr* e, void* env) {
             CcLiteral lit;
             CcExpr* s = cc__expr_blank(e->span, L->arena);
             lit.tok = sl.tok;
-            lit.n_toks = 1;
+            lit.n_toks = sl.n_toks ? sl.n_toks : 1;
             s->k = { .string = lit };
             e->k = sl_lit_call(L, s)->k;
             return true;

@@ -1598,6 +1598,7 @@ static CcExpr* parse_primary_at(P* p) {
         CcExprList args = vec_new::[CcExprRef](p->arena);
         CcExpr* e;
         sl.tok = 0;
+        sl.n_toks = 0;
         adv(p);
         if (!at_p(p, CC_P_LPAREN)) {
             {
@@ -1614,7 +1615,16 @@ static CcExpr* parse_primary_at(P* p) {
         }
         if (args.len() == 1) {
             CcExpr* a = *args.get_ptr(0);
-            if (a->k.kind == CcExprK_string) sl.tok = a->span.first;
+            /* `@slice("a" "b")` is one string of two tokens: C joins adjacent
+             * literals, and keeping only the first silently shortens the
+             * slice to its opening line. */
+            @switch (a->k) {
+                case .string(lit):
+                    sl.tok = a->span.first;
+                    sl.n_toks = lit.n_toks ? lit.n_toks : 1;
+                    break;
+                default: break;
+            }
         }
         if (sl.tok == 0) {
             const char* at_slice = "@slice";

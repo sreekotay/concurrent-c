@@ -275,7 +275,7 @@ typedef struct CcTemplate {     /* @string(`...`, arena) / @string(policy, `...`
     CcExpr* direct;             /* @string(expr, arena): the expression; NULL for the literal form */
     CcExpr* arena;              /* the arena operand; a `scratch` node for @scratch; NULL for the bounded stack form */
 } CcTemplate;
-typedef struct CcSliceLit { uint32_t tok; } CcSliceLit;                   /* @slice("...") */
+typedef struct CcSliceLit { uint32_t tok; uint32_t n_toks; } CcSliceLit;  /* @slice("..." "..."): adjacent literals */
 typedef struct CcScratch { CcExpr* bytes; } CcScratch;                    /* @scratch / @scratch(N) */
 typedef struct CcCapture {
     CcSpan span; CCSlice name; bool by_ref; bool is_move;

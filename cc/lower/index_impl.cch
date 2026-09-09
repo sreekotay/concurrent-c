@@ -1619,20 +1619,32 @@ static bool cc__expr_mentions(const CcExpr* e, CCSlice name) {
 /* A string literal's text, the literal run of a template before its first
  * slot, or the text of @slice("..."): the literal an expression carries
  * directly. */
+static bool cc__own_string_run(CcIndex* ix, const CcUnit* u, uint32_t tok, uint32_t n_toks, CCSlice* out) {
+    /* C joins adjacent string literals, so the text of a string is every
+     * token of its run: reading only the first shortens it to its opening
+     * line and says nothing about the rest. */
+    const CcToken* t = cc__tok(u, tok);
+    uint32_t n = n_toks ? n_toks : 1;
+    uint32_t i;
+    CCString sb;
+    if (!t) return false;
+    if (n == 1) { *out = cc__unquote(ix, t->text); return true; }
+    sb = cc_string_new();
+    for (i = 0; i < n; i++) {
+        const CcToken* p = cc__tok(u, tok + i);
+        CCSlice part;
+        if (!p || p->kind != CC_TK_STRING) break;
+        part = cc__unquote(ix, p->text);
+        sb.push_slice(part, ix->arena);
+    }
+    *out = cc__ix_finish(ix, &sb);
+    return true;
+}
+
 static bool cc__expr_own_string(CcIndex* ix, const CcUnit* u, const CcExpr* e, CCSlice* out) {
     @switch (e->k) {
-        case .string(lit): {
-            const CcToken* t = cc__tok(u, lit.tok);
-            if (!t) return false;
-            *out = cc__unquote(ix, t->text);
-            return true;
-        }
-        case .slice_lit(sl): {
-            const CcToken* t = cc__tok(u, sl.tok);
-            if (!t) return false;
-            *out = cc__unquote(ix, t->text);
-            return true;
-        }
+        case .string(lit): return cc__own_string_run(ix, u, lit.tok, lit.n_toks, out);
+        case .slice_lit(sl): return cc__own_string_run(ix, u, sl.tok, sl.n_toks, out);
         case .template(tp): {
             CcTplPartList parts = tp.parts;
             if (parts.len()) {
