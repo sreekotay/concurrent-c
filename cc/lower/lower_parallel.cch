@@ -52,6 +52,8 @@ typedef struct PStep {
     CCString fwd;               /* their forward declarations */
     PBindList binds;            /* sites whose handle is declared before the block */
     CcStmtList stages;          /* `@stage` statements a `@parallel wait for` claimed */
+    CcType* fn_ret;             /* the enclosing function's return type: a walk records
+                                 * a `return` into a cell of it */
     bool any;
 } PStep;
 
@@ -530,6 +532,364 @@ static void pl_join_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k, Cc
     lw_push(blk, lw_if(L, cond, then, els, sp));
 }
 
+
+/* ---- `@parallel for (i in lo..hi)` --------------------------------------
+ *
+ * A walk over a range, split rather than queued: the span halves until a
+ * half is small enough to run, and each split offers its right half to the
+ * runtime while the caller takes its left. What the body reads it reads by
+ * address, so both halves see the caller's own objects.
+ *
+ * `break` and `return` leave a walk that is running in several places at
+ * once, so they are not a jump: they write the first one to arrive into a
+ * cell every half checks, and the site reads it after the walk. */
+
+/* An array capture is its first element's address: a walk that reads
+ * `par[i]` wants the same pointer C would decay it to, under the same name,
+ * so the body is left exactly as written. Anything else is reached through
+ * its address. */
+static CcType* pl_for_decayed(CcType* t) {
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .array(ar): return ar.elem;
+        default: return NULL;
+    }
+}
+
+static CCSlice pl_for_name(CcLowerer* L, uint32_t id, const char* suffix) {
+    CCString s = @string(`__cc_parfor_${id}${suffix}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+static CCSlice pl_for_ex_type(CcLowerer* L, uint32_t id) {
+    CCString s = @string(`__cc_pf_ex_${id}_t`, L->arena);
+    return lw_keep(L, &s);
+}
+
+/* The cell an exit is recorded in, and the environment each half carries. */
+static CCString pl_for_env_text(PStep* st, uint32_t id, PCapList* caps, CCSlice ret_ty) {
+    CcLowerer* L = st->L;
+    CCArena a = L->arena;
+    CCString sb = cc_string_new();
+    CCSlice env = pl_for_name(L, id, "_env_t");
+    CCSlice ex = pl_for_ex_type(L, id);
+    size_t n = caps->len();
+    size_t i;
+    sb.push_cstr("typedef struct { cc_atomic_int lock; cc_atomic_int xk; ", a);
+    sb.push_slice(ret_ty, a);
+    sb.push_cstr(" rv; } ", a);
+    sb.push_slice(ex, a);
+    sb.push_cstr(";\n", a);
+    sb.push_cstr("typedef struct {\n", a);
+    for (i = 0; i < n; i++) {
+        PCap* c = *caps->get_ptr(i);
+        CcType* el = pl_for_decayed(c->type);
+        CCSlice tn = L->ix->canon(el ? el : c->type);
+        sb.push_cstr("    ", a);
+        sb.push_slice(tn, a);
+        sb.push_cstr("* ", a);
+        sb.push_slice(c->name, a);
+        sb.push_cstr(";\n", a);
+    }
+    sb.push_cstr("    int lo;\n    int hi;\n    ", a);
+    sb.push_slice(ex, a);
+    sb.push_cstr("* __cc_pf_ex;\n    CCParallel* __cc_par_h;\n} ", a);
+    sb.push_slice(env, a);
+    sb.push_cstr(";\n", a);
+    return sb;
+}
+
+static void pl_for_forward(PStep* st, uint32_t id) {
+    CcLowerer* L = st->L;
+    CCSlice walk = pl_for_name(L, id, "_walk");
+    CCSlice thunk = pl_for_name(L, id, "_thunk");
+    CCSlice site = pl_for_name(L, id, "_site");
+    CCString t = @string(`static void ${walk}(int, int, void*);
+static void* ${thunk}(void*);
+static void* ${site};
+`, L->arena);
+    st->fwd.push_slice(t.as_slice(), L->arena);
+}
+
+/* `break` and `return v` inside the walked body.
+ *
+ * The body runs in several halves at once, so neither can simply leave:
+ * the first to arrive claims the cell under its lock, every half sees it on
+ * its next step, and the site reads it once the walk is done. A `break`
+ * that belongs to a loop the body itself opened is that loop's, and is left
+ * alone -- which is why this walks with a depth rather than visiting. */
+typedef struct PForExit { CcLowerer* L; uint32_t id; bool has_ret; } PForExit;
+
+static void pl_for_exits(PForExit* fx, CcStmt* s, int depth) {
+    CcLowerer* L = fx->L;
+    CcStmtList* bs;
+    size_t n;
+    size_t i;
+    CcSpan sp;
+    if (!s) return;
+    sp = s->span;
+    {
+        bool is_break = false;
+        bool is_ret = false;
+        CcReturn r;
+        @switch (s->k) {
+            case .break_: is_break = true; break;
+            case .return_(x): r = x; is_ret = true; break;
+            default: break;
+        }
+        if (is_break && depth == 0) {
+            CCSlice ex = cstr_slice("__cc_pf_ex");
+            CCString t = @string(`{ int __cc_z = 0; while (!cc_atomic_cas(&e->${ex}->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&e->${ex}->xk) == 0) cc_atomic_store(&e->${ex}->xk, 1); cc_atomic_store(&e->${ex}->lock, 0); }`, L->arena);
+            CcStmt* blk = lw_block(L, sp);
+            lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
+            lw_push(blk, cc_stmt_return(NULL, sp, L->arena));
+            s->k = blk->k;
+            return;
+        }
+        if (is_ret) {
+            CCString spelled = r.value ? lw_spell_expr(L, r.value) : @string(`0`, L->arena);
+            CCSlice v = lw_keep(L, &spelled);
+            CCString t = @string(`{ int __cc_z = 0; while (!cc_atomic_cas(&e->__cc_pf_ex->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&e->__cc_pf_ex->xk) != 2) { e->__cc_pf_ex->rv = (${v}); cc_atomic_store(&e->__cc_pf_ex->xk, 2); } cc_atomic_store(&e->__cc_pf_ex->lock, 0); }`, L->arena);
+            CcStmt* blk = lw_block(L, sp);
+            lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
+            lw_push(blk, cc_stmt_return(NULL, sp, L->arena));
+            s->k = blk->k;
+            return;
+        }
+    }
+    {
+        /* a loop or switch the body opened owns its own `break` */
+        int inner = depth;
+        bool opens = false;
+        @switch (s->k) {
+            case .for_: opens = true; break;
+            case .while_: opens = true; break;
+            case .do_: opens = true; break;
+            case .switch_: opens = true; break;
+            default: break;
+        }
+        if (opens) inner = depth + 1;
+        bs = lw_block_stmts(s);
+        if (bs) {
+            n = bs->len();
+            for (i = 0; i < n; i++) {
+                CcStmt* k = *bs->get_ptr(i);
+                pl_for_exits(fx, k, inner);
+            }
+            return;
+        }
+        {
+            CcStmt* a = NULL;
+            CcStmt* b = NULL;
+            @switch (s->k) {
+                case .if_(x): a = x.then; b = x.els; break;
+                case .for_(x): a = x.body; break;
+                case .while_(x): a = x.body; break;
+                case .do_(x): a = x.body; break;
+                case .switch_(x): a = x.body; break;
+                case .label(x): a = x.inner; break;
+                default: break;
+            }
+            if (a) pl_for_exits(fx, a, inner);
+            if (b) pl_for_exits(fx, b, inner);
+        }
+    }
+}
+
+
+/* The walk. One function, called on the caller and on every half the
+ * runtime accepts. The leaf loop is emitted once: a span of one skips the
+ * split, and a split whose spawn was refused falls through to it. */
+static CcDecl* pl_for_walk_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn loop,
+                                CcExpr* lo, CcExpr* hi, bool has_ex, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CCSlice env = pl_for_name(L, id, "_env_t");
+    CCSlice walk = pl_for_name(L, id, "_walk");
+    CCSlice thunk = pl_for_name(L, id, "_thunk");
+    CCSlice site = pl_for_name(L, id, "_site");
+    CcStmt* fnbody = lw_block(L, sp);
+    CcParamList params = vec_new::[CcParam](L->arena);
+    CcType* fn_type = cc__type_blank(sp, L->arena);
+    CcType* voidp = cc_type_pointer(cc_type_named(cstr_slice("void"), sp, L->arena), sp, L->arena);
+    CcType* intt = cc_type_named(cstr_slice("int"), sp, L->arena);
+    CcFuncType ft;
+    CcFuncDecl fd;
+    CcDecl* d;
+    size_t n = caps->len();
+    size_t i;
+    CCSlice bind = loop.bind;
+    (void)lo; (void)hi;
+    {
+        CcType* pt = cc_type_pointer(cc_type_named(env, sp, L->arena), sp, L->arena);
+        CcExpr* cast = cc__expr_blank(sp, L->arena);
+        CcCast ca;
+        ca.type = pt;
+        ca.a = lw_ident(L, cstr_slice("__p"), sp);
+        cast->k = { .cast = ca };
+        lw_push(fnbody, lw_decl_stmt(L, pt, cstr_slice("e"), cast, sp));
+    }
+    for (i = 0; i < n; i++) {
+        PCap* c = *caps->get_ptr(i);
+        CcExpr* read = cc_expr_member(lw_ident(L, cstr_slice("e"), sp), c->name, true, sp, L->arena);
+        CcType* el = pl_for_decayed(c->type);
+        CCSlice cn = c->name;
+        if (el) {
+            lw_push(fnbody, lw_decl_stmt(L, cc_type_pointer(el, sp, L->arena), cn, read, sp));
+        } else {
+            CcType* pt = cc_type_pointer(c->type, sp, L->arena);
+            CCString rn = @string(`__cc_ref_${cn}`, L->arena);
+            CCSlice ref = lw_keep(L, &rn);
+            lw_push(fnbody, lw_decl_stmt(L, pt, ref, read, sp));
+            pl_rewrite(L, NULL, loop.body, cn, ref);
+        }
+    }
+    {
+        CCString t = @string(`if (__cc_lo >= __cc_hi) return`, L->arena);
+        lw_push(fnbody, lw_expr_stmt(L, lw_text(L, t, sp), sp));
+    }
+    lw_push(fnbody, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_honor"),
+                cc_expr_member(lw_ident(L, cstr_slice("e"), sp), cstr_slice("__cc_par_h"), true, sp, L->arena), sp), sp));
+    {
+        /* the split: offer the right half, take the left */
+        CcStmt* split = lw_block(L, sp);
+        CCString head = @string(`CCParTls* __cc_pt = cc__par_tls()`, L->arena);
+        CCString mid = @string(`int __cc_mid = __cc_lo + (__cc_hi - __cc_lo) / 2`, L->arena);
+        CcStmt* offer = lw_block(L, sp);
+        CCString ch = cc_string_new();
+        size_t k;
+        lw_push(split, lw_expr_stmt(L, lw_text(L, head, sp), sp));
+        lw_push(split, lw_expr_stmt(L, lw_text(L, mid, sp), sp));
+        ch.push_slice(env.len ? env : cstr_slice(""), L->arena);
+        {
+            CCString decl = @string(`${env} __cc_child`, L->arena);
+            lw_push(offer, lw_expr_stmt(L, lw_text(L, decl, sp), sp));
+        }
+        lw_push(offer, lw_expr_stmt(L, lw_text(L, @string(`CCTask __cc_t`, L->arena), sp), sp));
+        for (k = 0; k < n; k++) {
+            PCap* c = *caps->get_ptr(k);
+            CCSlice cn = c->name;
+            CCString as = @string(`__cc_child.${cn} = e->${cn}`, L->arena);
+            lw_push(offer, lw_expr_stmt(L, lw_text(L, as, sp), sp));
+        }
+        lw_push(offer, lw_expr_stmt(L, lw_text(L, @string(`__cc_child.lo = __cc_mid`, L->arena), sp), sp));
+        lw_push(offer, lw_expr_stmt(L, lw_text(L, @string(`__cc_child.hi = __cc_hi`, L->arena), sp), sp));
+        lw_push(offer, lw_expr_stmt(L, lw_text(L, @string(`__cc_child.__cc_pf_ex = e->__cc_pf_ex`, L->arena), sp), sp));
+        lw_push(offer, lw_expr_stmt(L, lw_text(L, @string(`__cc_child.__cc_par_h = e->__cc_par_h`, L->arena), sp), sp));
+        {
+            CCString spawn = @string(`__cc_t = cc_parallel_spawn(${thunk}, &__cc_child)`, L->arena);
+            CCString took = @string(`if (__cc_t.kind != CC_TASK_KIND_INVALID) { ${walk}(__cc_lo, __cc_mid, __p); cc_parallel_join(__cc_t); return; }`, L->arena);
+            lw_push(offer, lw_expr_stmt(L, lw_text(L, spawn, sp), sp));
+            lw_push(offer, lw_expr_stmt(L, lw_text(L, took, sp), sp));
+        }
+        {
+            CCString cond = @string(`!cc_parallel_deny_fast(__cc_pt, &${site}, ${thunk})`, L->arena);
+            lw_push(split, lw_if(L, lw_text(L, cond, sp), offer, NULL, sp));
+        }
+        lw_push(split, lw_expr_stmt(L, lw_text(L, @string(`CC_PAR_NOTE_INLINE_ARM(__cc_pt)`, L->arena), sp), sp));
+        lw_push(fnbody, lw_if(L, lw_text(L, @string(`(__cc_hi - __cc_lo) > 1`, L->arena), sp), split, NULL, sp));
+    }
+    {
+        /* the leaf, once */
+        CcStmt* lbody = lw_block(L, sp);
+        CcFor fl;
+        CcStmt* fs;
+        if (has_ex) {
+            CCString ck = @string(`if (e->__cc_pf_ex) { int __cc_xk = cc_atomic_load(&e->__cc_pf_ex->xk); if (__cc_xk) break; }`, L->arena);
+            lw_push(lbody, lw_expr_stmt(L, lw_text(L, ck, sp), sp));
+        }
+        lw_push(lbody, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_honor"),
+                    cc_expr_member(lw_ident(L, cstr_slice("e"), sp), cstr_slice("__cc_par_h"), true, sp, L->arena), sp), sp));
+        if (loop.body) { lw_push(lbody, loop.body); }
+        memset(&fl, 0, sizeof(fl));
+        fl.init_decl = NULL;
+        fl.init_expr = lw_assign(L, lw_ident(L, bind, sp), lw_ident(L, cstr_slice("__cc_lo"), sp), sp);
+        fl.cond = cc_expr_binary(CC_OP_LT, lw_ident(L, bind, sp), lw_ident(L, cstr_slice("__cc_hi"), sp), sp, L->arena);
+        fl.step = cc_expr_unary(CC_OP_PREINC, lw_ident(L, bind, sp), sp, L->arena);
+        fl.body = lbody;
+        fl.more = vec_new::[CcStmtRef](L->arena);
+        fs = cc__stmt_blank(sp, L->arena);
+        { CcStmtK sk = { .for_ = fl }; fs->k = sk; }
+        lw_push(fnbody, lw_decl_stmt(L, intt, bind, NULL, sp));
+        lw_push(fnbody, fs);
+    }
+    {
+        CcParam p0;
+        CcParam p1;
+        CcParam p2;
+        memset(&p0, 0, sizeof(p0));
+        memset(&p1, 0, sizeof(p1));
+        memset(&p2, 0, sizeof(p2));
+        p0.span = sp; p0.type = intt; p0.name = cstr_slice("__cc_lo"); p0.attrs = vec_new::[CcAttr](L->arena);
+        p1.span = sp; p1.type = intt; p1.name = cstr_slice("__cc_hi"); p1.attrs = vec_new::[CcAttr](L->arena);
+        p2.span = sp; p2.type = voidp; p2.name = cstr_slice("__p"); p2.attrs = vec_new::[CcAttr](L->arena);
+        params.push(p0);
+        params.push(p1);
+        params.push(p2);
+    }
+    memset(&ft, 0, sizeof(ft));
+    ft.ret = cc_type_named(cstr_slice("void"), sp, L->arena);
+    ft.params = params;
+    ft.has_prototype = true;
+    { CcTypeK tk = { .func = ft }; fn_type->k = tk; }
+    memset(&fd, 0, sizeof(fd));
+    fd.name = walk;
+    fd.type = fn_type;
+    fd.body = fnbody;
+    d = cc_arena_alloc(L->arena, sizeof(CcDecl), _Alignof(CcDecl));
+    memset(d, 0, sizeof(*d));
+    d->span = sp;
+    d->specs = CC_SPEC_STATIC;
+    d->attrs = vec_new::[CcAttr](L->arena);
+    { CcDeclK dk = { .func = fd }; d->k = dk; }
+    return d;
+}
+
+/* The thunk the runtime starts a half through. */
+static CcDecl* pl_for_thunk_decl(PStep* st, uint32_t id, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CCSlice env = pl_for_name(L, id, "_env_t");
+    CCSlice walk = pl_for_name(L, id, "_walk");
+    CCSlice thunk = pl_for_name(L, id, "_thunk");
+    CcStmt* body = lw_block(L, sp);
+    CcParamList params = vec_new::[CcParam](L->arena);
+    CcType* fn_type = cc__type_blank(sp, L->arena);
+    CcType* voidp = cc_type_pointer(cc_type_named(cstr_slice("void"), sp, L->arena), sp, L->arena);
+    CcFuncType ft;
+    CcFuncDecl fd;
+    CcDecl* d;
+    {
+        CCString t = @string(`${env}* e = (${env}*)__p`, L->arena);
+        lw_push(body, lw_expr_stmt(L, lw_text(L, t, sp), sp));
+    }
+    {
+        CCString t = @string(`${walk}(e->lo, e->hi, __p)`, L->arena);
+        lw_push(body, lw_expr_stmt(L, lw_text(L, t, sp), sp));
+    }
+    lw_push(body, cc_stmt_return(lw_text(L, @string(`NULL`, L->arena), sp), sp, L->arena));
+    {
+        CcParam p0;
+        memset(&p0, 0, sizeof(p0));
+        p0.span = sp; p0.type = voidp; p0.name = cstr_slice("__p"); p0.attrs = vec_new::[CcAttr](L->arena);
+        params.push(p0);
+    }
+    memset(&ft, 0, sizeof(ft));
+    ft.ret = voidp;
+    ft.params = params;
+    ft.has_prototype = true;
+    { CcTypeK tk = { .func = ft }; fn_type->k = tk; }
+    memset(&fd, 0, sizeof(fd));
+    fd.name = thunk;
+    fd.type = fn_type;
+    fd.body = body;
+    d = cc_arena_alloc(L->arena, sizeof(CcDecl), _Alignof(CcDecl));
+    memset(d, 0, sizeof(*d));
+    d->span = sp;
+    d->specs = CC_SPEC_STATIC;
+    d->attrs = vec_new::[CcAttr](L->arena);
+    { CcDeclK dk = { .func = fd }; d->k = dk; }
+    return d;
+}
+
 /* ---- one site ----------------------------------------------------------- */
 
 /* What the arms form can carry that this step does not lower. */
@@ -910,6 +1270,106 @@ static void pl_stray_stages(PStep* st, CcStmt* body) {
     }
 }
 
+
+/* The site: build the environment, walk the whole span on the caller, then
+ * read back whichever exit arrived first. */
+static void pl_for_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
+    CcLowerer* L = st->L;
+    Walker* w = st->w;
+    CcSpan sp = s->span;
+    uint32_t id = st->next_id++;
+    PScan sc;
+    PCapList caps;
+    CcStmt* blk = lw_block(L, sp);
+    CCSlice env = pl_for_name(L, id, "_env_t");
+    CCSlice walk = pl_for_name(L, id, "_walk");
+    CCSlice ex = pl_for_ex_type(L, id);
+    CCSlice cell = pl_for_name(L, id, "_ex");
+    CCSlice ev = pl_for_name(L, id, "_e");
+    CCSlice ret_ty = cstr_slice("int");
+    bool has_ret = false;
+    size_t n;
+    size_t i;
+    memset(&sc, 0, sizeof(sc));
+    sc.st = st;
+    sc.w = w;
+    sc.caps = vec_new::[PCapRef](L->arena);
+    sc.seen = vec_new::[CCSlice](L->arena);
+    sc.skip = pf.loop.bind;
+    {
+        CcVisitor v;
+        memset(&v, 0, sizeof(v));
+        v.expr = pl_scan_expr;
+        v.env = &sc;
+        if (pf.loop.body) CcStmt_walk(pf.loop.body, v);
+    }
+    caps = sc.caps;
+    n = caps.len();
+    for (i = 0; i < n; i++) {
+        PCap* c = *caps.get_ptr(i);
+        c->by_addr = true;
+    }
+    if (st->fn_ret) {
+        CCSlice rn = L->ix->canon(st->fn_ret);
+        if (rn.len) ret_ty = rn;
+    }
+    {
+        PForExit fx;
+        fx.L = L;
+        fx.id = id;
+        fx.has_ret = false;
+        if (pf.loop.body) pl_for_exits(&fx, pf.loop.body, 0);
+        has_ret = true;
+    }
+    {
+        CCString et = pl_for_env_text(st, id, &caps, ret_ty);
+        st->fwd.push_slice(et.as_slice(), L->arena);
+    }
+    pl_for_forward(st, id);
+    st->made.push(pl_for_thunk_decl(st, id, sp));
+    st->made.push(pl_for_walk_decl(st, id, &caps, pf.loop, rg.lo, rg.hi, has_ret, sp));
+    {
+        CCString d1 = @string(`${env} ${ev}`, L->arena);
+        CCString d2 = @string(`${ex} ${cell}`, L->arena);
+        lw_push(blk, lw_expr_stmt(L, lw_text(L, d1, sp), sp));
+        lw_push(blk, lw_expr_stmt(L, lw_text(L, d2, sp), sp));
+    }
+    for (i = 0; i < n; i++) {
+        PCap* c = *caps.get_ptr(i);
+        CCSlice cn = c->name;
+        CCString as = pl_for_decayed(c->type)
+            ? @string(`${ev}.${cn} = (${cn})`, L->arena)
+            : @string(`${ev}.${cn} = &(${cn})`, L->arena);
+        lw_push(blk, lw_expr_stmt(L, lw_text(L, as, sp), sp));
+    }
+    {
+        CCString z = @string(`cc__bytes_zero(&${cell}, sizeof(${cell}))`, L->arena);
+        CCString a1 = @string(`${ev}.__cc_pf_ex = &${cell}`, L->arena);
+        CCString a2 = @string(`${ev}.__cc_par_h = 0`, L->arena);
+        lw_push(blk, lw_expr_stmt(L, lw_text(L, z, sp), sp));
+        lw_push(blk, lw_expr_stmt(L, lw_text(L, a1, sp), sp));
+        lw_push(blk, lw_expr_stmt(L, lw_text(L, a2, sp), sp));
+    }
+    {
+        CCString lo = lw_spell_expr(L, rg.lo);
+        CCString hi = lw_spell_expr(L, rg.hi);
+        CCSlice los = lw_keep(L, &lo);
+        CCSlice his = lw_keep(L, &hi);
+        CCString call = @string(`${walk}((int)(${los}), (int)(${his}), &${ev})`, L->arena);
+        lw_push(blk, lw_expr_stmt(L, lw_text(L, call, sp), sp));
+    }
+    {
+        /* a `return` inside the walk is the caller's to make */
+        CcStmt* then = lw_block(L, sp);
+        CCString rv = @string(`${cell}.rv`, L->arena);
+        CCString cond = @string(`cc_atomic_load(&${cell}.xk) == 2`, L->arena);
+        lw_push(then, cc_stmt_return(lw_text(L, rv, sp), sp, L->arena));
+        lw_push(blk, lw_if(L, lw_text(L, cond, sp), then, NULL, sp));
+    }
+    s->k = blk->k;
+    st->any = true;
+}
+
 /* `@parallel [seq (c)] [wait (ts)] for (i in lo..hi) [worker (w)] [cache (…)]`.
  *
  * None of it is lowered yet, but the shape is checked here rather than left
@@ -963,10 +1423,40 @@ static void pl_for(PStep* st, CcStmt* s, CcParallelFor pf) {
     /* the body goes with the statement below, so anything in it this step
      * would have reported has to be reported before it does */
     if (pf.loop.body) pl_stray_stages(st, pf.loop.body);
-    if (pf.wait) m = @string(`'${"@"}parallel wait (...) for' is not lowered by the clean lowerer yet`, L->arena);
-    else m = @string(`'${"@"}parallel for' is not lowered by the clean lowerer yet`, L->arena);
+    if (!pf.wait) {
+        CcRange rg;
+        CcExprList* itv = &pf.loop.iterables;
+        bool ranged = itv->len() == 1 && fi_is_range(*itv->get_ptr(0), &rg);
+        if (!ranged || pf.loop.bind2.len || pf.loop.by_ref) {
+            m = cc_string_new();
+            cc_string_push_cstr(&m, "@parallel for walks a range: write 'for (name in lo..hi)'", L->arena);
+            lw_error(L, sp, m);
+            s->k = gone->k;
+            return;
+        }
+        pl_for_lower(st, s, pf, rg);
+        return;
+    }
+    m = @string(`'${"@"}parallel wait (...) for' is not lowered by the clean lowerer yet`, L->arena);
     lw_error(L, sp, m);
     s->k = gone->k;
+}
+
+/* The walk records a `return` into a cell typed by the function it leaves. */
+static void pl_on_decl(Walker* w, CcDecl* d) {
+    PStep* st = (PStep*)w->env;
+    CcFuncDecl f;
+    bool is_fn = false;
+    st->fn_ret = NULL;
+    @switch (d->k) {
+        case .func(x): f = x; is_fn = true; break;
+        default: break;
+    }
+    if (!is_fn || !f.type) return;
+    @switch (f.type->k) {
+        case .func(ft): st->fn_ret = ft.ret; break;
+        default: break;
+    }
 }
 
 static void pl_on_stmt(Walker* w, CcStmt* s, bool enter) {
@@ -1053,6 +1543,7 @@ static void CcLowerer_parallel(CcLowerer* L) {
     w.arena = L->arena;
     w.ix = L->ix;
     w.unit = L->unit;
+    w.on_decl = pl_on_decl;
     w.on_stmt = pl_on_stmt;
     w.env = &st;
     tw_unit(&w);
