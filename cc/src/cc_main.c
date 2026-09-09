@@ -5472,23 +5472,33 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
     const char* cppflags_env = getenv("CPPFLAGS");
     int is_tcc = cc__is_tcc(cc_bin);
     char cmd[2048];
+    char lead_inc[PATH_MAX + 8];
 
+    /* The clean lowerer writes every local `.cch` it lowered beside the C it
+     * emitted, and the preprocess stage separately leaves a pass-through copy
+     * of the same relative path under out/include. The lowered one is the one
+     * this translation unit means; searched second, the host reads the
+     * pass-through and compiles UFCS spellings that were never lowered. */
+    lead_inc[0] = '\0';
+    if (g_lowerer_clean && extra_include_dir && *extra_include_dir)
+        snprintf(lead_inc, sizeof(lead_inc), "-I%s ", extra_include_dir);
     // TCC doesn't support -MMD/-MF/-MT dependency tracking flags
     // Add lowered include path first so .h versions of .cch are found before originals
     if (is_tcc) {
-        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -I%s -I%s -I%s -I%s",
+        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s %s-I%s -I%s -I%s -I%s",
                  cc_bin,
                  ccflags_env ? ccflags_env : "",
                  cppflags_env ? cppflags_env : "",
                  target_part ? target_part : "",
                  sysroot_part ? sysroot_part : "",
+                 lead_inc,
                  g_cc_lowered_include,
                  g_cc_include,
                  g_cc_dir,
                  g_repo_root);
         cc__append_tcc_host_flags(cmd, sizeof(cmd), cc_bin);
     } else {
-        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -MMD -MF %s -MT %s -I%s -I%s -I%s -I%s",
+        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -MMD -MF %s -MT %s %s-I%s -I%s -I%s -I%s",
                  cc_bin,
                  ccflags_env ? ccflags_env : "",
                  cppflags_env ? cppflags_env : "",
@@ -5496,6 +5506,7 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
                  sysroot_part ? sysroot_part : "",
                  dep_path ? dep_path : "/dev/null",
                  obj_path ? obj_path : "out.o",
+                 lead_inc,
                  g_cc_lowered_include,
                  g_cc_include,
                  g_cc_dir,
