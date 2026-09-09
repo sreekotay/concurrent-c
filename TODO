@@ -6,6 +6,8 @@
 - release(name); //also release bool if already released
 - comptime at the right time - e.g. mimetype
 - promote Table from staticd
-- hoist CCServer frmo staticd
+- hoist CCServer from staticd (parking exclusives for shared state; narrow CS; step-steal opt-in only)
 - try redis with table and ccserver
 - remasure staticd 4kb@c=10 vs pre-waiter (cool machine; receipt stayed 2026-09-07)
+- park fiber across blocking / long native work (holder still pegs OS worker; waiters already park)
+- prove CC_SERVER_STEP_STEAL=1 on independently runnable HOL before considering default-on

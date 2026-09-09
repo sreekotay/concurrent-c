@@ -9,6 +9,7 @@
  * Fd cache: pathname revalidate ≤1s (absolute). Hold dups the fd so a
  * swap can close the slot fd while in-flight holds finish.
  */
+#pragma(@per_tu)
 #ifndef STATICD_FS_CCH
 #define STATICD_FS_CCH
 
@@ -275,7 +276,7 @@ static void fc_apply_open(int i, int fd, time_t now, size_t file_len,
     g_fc[i].checked = now;
 }
 
-void file_hold_drop(FileHold* h) {
+static void file_hold_drop(FileHold* h) {
     if (!h) return;
     if (h->fd >= 0) close(h->fd);
     if (h->slot >= 0) {

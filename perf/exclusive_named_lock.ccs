@@ -237,7 +237,7 @@ int main(void) {
             "resolved mutex, one caller, spins=0, no scheduler. Timed trials "
             "are steady-state lookup after warmup installs the name set; "
             "CC unlock barges; do not read zipf_ops_s as scheduler-only or "
-            "as fairness.") !>;
+            "as fairness.");
 
     int warm = iters > 1000 ? 1000 : iters;
     (void)run_zipf(workers, warm, spins, keys);

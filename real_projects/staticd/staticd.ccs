@@ -1431,8 +1431,11 @@ int main(int argc, char** argv) {
     }) !>;
     {
         int nfail = srv.tls_fails();
+        int nsteal = srv.step_steals();
         if (srv.tls && nfail > 0)
             eprintln(@string(`staticd: tls handshake failures: ${nfail}`, @scratch));
+        if (nsteal > 0)
+            eprintln(@string(`staticd: step steals: ${nsteal}`, @scratch));
     }
     return 0;
 }

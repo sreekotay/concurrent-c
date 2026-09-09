@@ -897,6 +897,7 @@ static void sched_v2_diag_scan_fibers(uint64_t state_counts[FIBER_V2_STATE_COUNT
                                       uint64_t* parked_internal,
                                       uint64_t* parked_external_wait,
                                       uint64_t* parked_deadlock_suppressed,
+                                      uint64_t* running_external_wait,
                                       park_reason_bucket reason_buckets[V2_DIAG_REASON_BUCKETS],
                                       size_t* reason_bucket_count) {
     for (int i = 0; i < FIBER_V2_STATE_COUNT; ++i) {
@@ -909,6 +910,7 @@ static void sched_v2_diag_scan_fibers(uint64_t state_counts[FIBER_V2_STATE_COUNT
     *parked_internal = 0;
     *parked_external_wait = 0;
     *parked_deadlock_suppressed = 0;
+    if (running_external_wait) *running_external_wait = 0;
     if (reason_buckets) {
         for (size_t i = 0; i < V2_DIAG_REASON_BUCKETS; ++i) {
             reason_buckets[i].reason = NULL;
@@ -922,6 +924,10 @@ static void sched_v2_diag_scan_fibers(uint64_t state_counts[FIBER_V2_STATE_COUNT
         int state = fiber_v2_state_base(atomic_load_explicit(&f->state, memory_order_acquire));
         if (state >= 0 && state < FIBER_V2_STATE_COUNT) {
             state_counts[state]++;
+            if (state == FIBER_V2_RUNNING && running_external_wait &&
+                atomic_load_explicit(&f->external_wait_depth, memory_order_acquire) > 0) {
+                (*running_external_wait)++;
+            }
             if (state == FIBER_V2_PARKED) {
                 const char* r = f->park_reason;
                 if (atomic_load_explicit(&f->external_wait_depth, memory_order_acquire) > 0) {
@@ -2594,6 +2600,7 @@ static void* sched_v2_sysmon_main(void* arg) {
                 uint64_t parked_internal = 0;
                 uint64_t parked_external_wait = 0;
                 uint64_t parked_deadlock_suppressed = 0;
+                uint64_t running_external_wait = 0;
                 park_reason_bucket reason_buckets[V2_DIAG_REASON_BUCKETS];
                 size_t reason_bucket_count = 0;
                 sched_v2_diag_scan_fibers(state_counts,
@@ -2604,6 +2611,7 @@ static void* sched_v2_sysmon_main(void* arg) {
                                           &parked_internal,
                                           &parked_external_wait,
                                           &parked_deadlock_suppressed,
+                                          &running_external_wait,
                                           reason_buckets,
                                           &reason_bucket_count);
                 size_t external_threads = atomic_load_explicit(&g_external_wait_threads,
@@ -2684,15 +2692,21 @@ static void* sched_v2_sysmon_main(void* arg) {
                         (unsigned long long)parked_other,
                         (unsigned long long)parked_unknown);
                 fprintf(stderr,
-                        "  deadlock classification: internal=%llu external_wait=%llu "
+                        "  deadlock classification: internal=%llu external_wait(parked=%llu running=%llu) "
                         "deadlock_suppressed=%llu external_wait_threads=%zu%s\n",
                         (unsigned long long)parked_internal,
                         (unsigned long long)parked_external_wait,
+                        (unsigned long long)running_external_wait,
                         (unsigned long long)parked_deadlock_suppressed,
                         external_threads,
-                        (parked_external_wait || external_threads)
+                        (parked_external_wait || running_external_wait || external_threads)
                             ? " (external waits can suppress deadlock verdicts)"
                             : "");
+                if (running_external_wait > 0) {
+                    fprintf(stderr,
+                            "  note: RUNNING+external_wait = blocked in native scope "
+                            "(mutex/sleep/IO) without parking — not a sched park\n");
+                }
                 if (reason_bucket_count > 0) {
                     fprintf(stderr, "  park reason histogram:");
                     for (size_t i = 0; i < reason_bucket_count; ++i) {

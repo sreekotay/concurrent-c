@@ -82,9 +82,15 @@ make darkhttpd              # optional peer
 
 ### Script pages
 
-One process-wide QuickJS and one CPython (mutex across workers), so
-in-memory page state is shared. Attach QuickJS with `CC_QUICKJS_SRC` (or
+One process-wide QuickJS and one CPython so in-memory page state is shared.
+That fact is a parking exclusive (`g_pages_mx`) around engine ensure+run only
+— resolve MISS without it so static fallthrough is not under the bottleneck.
+Waiters park (OS worker free). Attach QuickJS with `CC_QUICKJS_SRC` (or
 `./quickjs`); Python needs a discoverable libpython.
+
+`pages/slow.js` is a specimen for exclusive occupancy vs static MISS; see
+`bench_steal_mix.sh`. Ready-app step steal is opt-in (`CC_SERVER_STEP_STEAL=1`),
+default off — not a substitute for the exclusive.
 
 `pages/hello.js`:
 

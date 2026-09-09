@@ -697,6 +697,7 @@ int cc_tape_watch(CCTape* w, CCIoSess* io) {
         .gen = cc_tape_next_gen(w),
         .hit_ix = -1,
         .hit_epoch = 0,
+        .step_busy = 0,
     };
     di_before = t->len();
     if (cc_conn_table_insert(t, id, row) != 0) {

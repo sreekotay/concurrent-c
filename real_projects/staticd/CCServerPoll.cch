@@ -60,6 +60,7 @@ typedef struct CCConnRow {
     uint32_t gen;
     int hit_ix;
     uint32_t hit_epoch;
+    int step_busy; /* app step claimed (home or stealer); not armed until done */
 } CCConnRow;
 
 /* Incomplete: concrete Table::[int, CCConnRow]* lives in CCServerPoll.ccs. */

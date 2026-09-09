@@ -10,7 +10,7 @@
  * CCServerPoll.cch / .ccs. Dest-per-conn is `ln.serve`.
  *
  * Page sees: init / close / listen / load_tls / serve / start_n /
- * workers_max / tls / tls_fails; on io: try_write / window /
+ * workers_max / tls / tls_fails / step_steals; on io: try_write / window /
  * consume / full / apply / dead / touch / set_deadline. `app` is a page
  * cookie; dest never derefs it.
  *
@@ -84,6 +84,7 @@ typedef struct CCServer {
     cc_atomic_int nworkers; /* running workers */
     cc_atomic_int tls_fail;
     cc_atomic_int accept_soft; /* EMFILE/ENFILE soft-fail count */
+    cc_atomic_int step_steal;  /* ready-app steps stolen across dests */
     CCParallel app;
 } CCServer;
 
@@ -172,6 +173,10 @@ void cc_server_shutdown(CCServer* srv) {
 
 int cc_server_tls_fails(CCServer* srv) {
     return cc_atomic_load_acquire(&srv->tls_fail);
+}
+
+int cc_server_step_steals(CCServer* srv) {
+    return srv ? cc_atomic_load_acquire(&srv->step_steal) : 0;
 }
 
 void cc_server_close(CCServer* srv) {

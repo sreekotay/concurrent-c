@@ -4,11 +4,17 @@
  * stays in staticd.ccs. Include after staticd_fs.cch (open_beneath).
  *
  * One process-wide QuickJS and one CPython so in-memory page state is
- * shared across workers. Call sites take g_pages.mx around resolve+run.
+ * shared across workers. That sharing is not shared ownership of the heap —
+ * one exclusive (g_pages_mx, parking, SYNC_PAGES) names the fact that only
+ * one fiber may touch the engine. Hold it only around ensure+run; resolve
+ * MISS without it so static fallthrough is not scheduled under the bottleneck
+ * (docs/the-cc-way.md: smallest fact, narrowest place). Waiters park; the OS
+ * worker can run other fibers.
  *
  * Resolve never falls through to serving source. Both faces → error.
  * Missing engine for the only face → 501. Throw / no export → 500.
  */
+#pragma(@per_tu)
 #ifndef STATICD_SCRIPT_CCH
 #define STATICD_SCRIPT_CCH
 
@@ -18,7 +24,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
-#include <pthread.h>
 
 #define PAGES_BODY_MAX   (32 * 1024)
 #define PAGES_CACHE_N    32
@@ -63,8 +68,7 @@ typedef struct PagesEngines {
     int js_shim;
     int py_shim;
     int ready;
-    int mx_inited;
-    pthread_mutex_t mx;
+    int booted;
     PagesCacheSlot cache[PAGES_CACHE_N];
 } PagesEngines;
 
@@ -134,28 +138,25 @@ static const char k_py_shim[] =
     "    return Request(method, path, query, body)\n";
 
 static void pages_engines_close(void) {
-    if (!g_pages.ready && !g_pages.mx_inited) return;
-    if (g_pages.mx_inited) pthread_mutex_lock(&g_pages.mx);
-    if (g_pages.have_js) {
-        cc_qjs_close(&g_pages.js);
-        g_pages.have_js = 0;
-    }
-    if (g_pages.have_py) {
-        cc_py_close(&g_pages.py);
-        g_pages.have_py = 0;
-    }
-    g_pages.js_shim = 0;
-    g_pages.py_shim = 0;
-    memset(g_pages.cache, 0, sizeof(g_pages.cache));
-    g_pages.ready = 0;
-    if (g_pages.mx_inited) {
-        pthread_mutex_unlock(&g_pages.mx);
-        pthread_mutex_destroy(&g_pages.mx);
-        g_pages.mx_inited = 0;
+    if (!g_pages.booted) return;
+    {
+        CCExclusiveGuard hold = g_pages_mx.acquire() @destroy;
+        if (g_pages.have_js) {
+            cc_qjs_close(&g_pages.js);
+            g_pages.have_js = 0;
+        }
+        if (g_pages.have_py) {
+            cc_py_close(&g_pages.py);
+            g_pages.have_py = 0;
+        }
+        g_pages.js_shim = 0;
+        g_pages.py_shim = 0;
+        memset(g_pages.cache, 0, sizeof(g_pages.cache));
+        g_pages.ready = 0;
     }
 }
 
-/* Caller holds g_pages.mx. Opens engines once on the calling thread. */
+/* Caller holds g_pages_mx. Opens engines once on the calling thread. */
 static int pages_engines_ensure_locked(void) {
     CCArena arena;
     if (g_pages.ready) return 0;
@@ -181,16 +182,16 @@ static int pages_engines_ensure_locked(void) {
 }
 
 static int pages_engines_open(void) {
-    /* Mutex only; engines open on first request (worker thread). */
-    if (g_pages.mx_inited) return 0;
+    /* Exclusive lives on g_sync (staticd_sync_init). Engines open on first
+     * request under g_pages_mx. */
+    if (g_pages.booted) return 0;
     memset(&g_pages, 0, sizeof(g_pages));
-    if (pthread_mutex_init(&g_pages.mx, NULL) != 0) return -1;
-    g_pages.mx_inited = 1;
+    g_pages.booted = 1;
     return 0;
 }
 
 static PagesEngines* pages_engines(void) {
-    return g_pages.mx_inited ? &g_pages : NULL;
+    return g_pages.booted ? &g_pages : NULL;
 }
 
 /* Strip a leading "export " so QuickJS global-script mode accepts the page. */
@@ -333,7 +334,8 @@ static PagesKind pages_resolve(int pages_fd, PagesEngines* eng,
         return PAGES_BOTH;
     }
     if (have_js) {
-        if (!eng || !eng->have_js) return PAGES_NO_ENGINE;
+        /* eng == NULL: probe-only (no cache, no engine gate). */
+        if (eng && !eng->have_js) return PAGES_NO_ENGINE;
         if (out_rel && cap > strlen(js_rel))
             memcpy(out_rel, js_rel, strlen(js_rel) + 1);
         if (c) {
@@ -345,7 +347,7 @@ static PagesKind pages_resolve(int pages_fd, PagesEngines* eng,
         }
         return PAGES_JS;
     }
-    if (!eng || !eng->have_py) return PAGES_NO_ENGINE;
+    if (eng && !eng->have_py) return PAGES_NO_ENGINE;
     if (out_rel && cap > strlen(py_rel))
         memcpy(out_rel, py_rel, strlen(py_rel) + 1);
     if (c) {
@@ -754,9 +756,10 @@ static ScriptReply !>(CCError) pages_run(PagesEngines* e, int pages_fd,
     return cc_err(CC_ERROR(CC_ERR_IO, "pages kind"));
 }
 
-/* Resolve + run under the process-wide engine mutex (shared JS/Py state).
+/* Probe without the exclusive; take g_pages_mx only for ensure+run.
  * MISS → Ok(empty) with *out_kind = PAGES_MISS (caller falls through to static).
- * BOTH / NO_ENGINE / run failure → Err (kind set when known). */
+ * BOTH / NO_ENGINE / run failure → Err (kind set when known).
+ * Waiters park on g_pages_mx; the OS worker can run other fibers. */
 static ScriptReply !>(CCError) pages_serve(int pages_fd, char[:] url_path,
                                            char[:] method, char[:] path,
                                            char[:] query, char[:] body,
@@ -768,40 +771,47 @@ static ScriptReply !>(CCError) pages_serve(int pages_fd, char[:] url_path,
     ScriptReply r;
 
     if (out_kind) *out_kind = PAGES_MISS;
-    if (!e) {
-        if (out_kind) *out_kind = PAGES_NO_ENGINE;
-        return cc_err(CC_ERROR(CC_ERR_IO, "pages: engine not attached"));
-    }
-    pthread_mutex_lock(&e->mx);
-    if (pages_engines_ensure_locked() != 0) {
-        pthread_mutex_unlock(&e->mx);
-        if (out_kind) *out_kind = PAGES_NO_ENGINE;
-        return cc_err(CC_ERROR(CC_ERR_IO, "pages engines"));
-    }
-    kind = pages_resolve(pages_fd, e, url_path, leaf, sizeof(leaf));
+    /* eng=NULL: filesystem probe only — no cache write, no exclusive. */
+    kind = pages_resolve(pages_fd, NULL, url_path, leaf, sizeof(leaf));
     if (out_kind) *out_kind = kind;
-    if (kind == PAGES_MISS) {
-        pthread_mutex_unlock(&e->mx);
+    if (kind == PAGES_MISS)
         return cc_ok(script_reply_empty());
-    }
-    if (kind == PAGES_BOTH) {
-        pthread_mutex_unlock(&e->mx);
+    if (kind == PAGES_BOTH)
         return cc_err(CC_ERROR(CC_ERR_IO, "pages: both .js and .py"));
-    }
-    if (kind == PAGES_NO_ENGINE) {
-        pthread_mutex_unlock(&e->mx);
-        return cc_err(CC_ERROR(CC_ERR_IO, "pages: engine not attached"));
-    }
-    if (kind != PAGES_JS && kind != PAGES_PY) {
-        pthread_mutex_unlock(&e->mx);
+    if (kind != PAGES_JS && kind != PAGES_PY)
         return cc_ok(script_reply_empty());
+
+    {
+        CCExclusiveGuard hold = g_pages_mx.acquire() @destroy;
+        if (!e) {
+            if (out_kind) *out_kind = PAGES_NO_ENGINE;
+            return cc_err(CC_ERROR(CC_ERR_IO, "pages: engine not attached"));
+        }
+        if (pages_engines_ensure_locked() != 0) {
+            if (out_kind) *out_kind = PAGES_NO_ENGINE;
+            return cc_err(CC_ERROR(CC_ERR_IO, "pages engines"));
+        }
+        if (kind == PAGES_JS && !e->have_js) {
+            if (out_kind) *out_kind = PAGES_NO_ENGINE;
+            return cc_err(CC_ERROR(CC_ERR_IO, "pages: engine not attached"));
+        }
+        if (kind == PAGES_PY && !e->have_py) {
+            if (out_kind) *out_kind = PAGES_NO_ENGINE;
+            return cc_err(CC_ERROR(CC_ERR_IO, "pages: engine not attached"));
+        }
+        /* Refresh resolve cache under the exclusive; re-bind kind/leaf. */
+        kind = pages_resolve(pages_fd, e, url_path, leaf, sizeof(leaf));
+        if (out_kind) *out_kind = kind;
+        if (kind == PAGES_MISS)
+            return cc_ok(script_reply_empty());
+        if (kind == PAGES_BOTH)
+            return cc_err(CC_ERROR(CC_ERR_IO, "pages: both .js and .py"));
+        if (kind == PAGES_NO_ENGINE)
+            return cc_err(CC_ERROR(CC_ERR_IO, "pages: engine not attached"));
+        if (kind != PAGES_JS && kind != PAGES_PY)
+            return cc_ok(script_reply_empty());
+        r = pages_run(e, pages_fd, kind, leaf, method, path, query, body, arena) !>;
     }
-    r = pages_run(e, pages_fd, kind, leaf, method, path, query, body, arena)
-            !>(err) {
-        pthread_mutex_unlock(&e->mx);
-        return cc_err(err);
-    };
-    pthread_mutex_unlock(&e->mx);
     return cc_ok(r);
 }
 

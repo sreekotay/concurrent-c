@@ -4,6 +4,7 @@
  *
  * Include after <ccc/std/prelude.cch>.
  */
+#pragma(@per_tu)
 #ifndef STATICD_HTTP_CCH
 #define STATICD_HTTP_CCH
 

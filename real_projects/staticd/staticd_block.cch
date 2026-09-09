@@ -24,6 +24,7 @@
  * Slabs grow on demand up to `ring_n` live entries (`--block-ring`,
  * default 256); cull/free returns them to the freelist.
  */
+#pragma(@per_tu)
 #ifndef STATICD_BLOCK_CCH
 #define STATICD_BLOCK_CCH
 
@@ -71,18 +72,20 @@ typedef struct BlockHold {
     int slot; /* >=0 ring; <0 pool slab */
 } BlockHold;
 
-/* One domain: name 0 = ring, name 1 = file cache (fs.cch). Same order
- * as before — file cache then ring — when both are held. */
-enum { SYNC_BLOCK = 0, SYNC_FC = 1 };
+/* One domain: name 0 = ring, name 1 = file cache (fs.cch), name 2 = pages
+ * engines (script.cch). Same order as before when multiple are held. */
+enum { SYNC_BLOCK = 0, SYNC_FC = 1, SYNC_PAGES = 2 };
 static CCExclusive g_sync;
 static CCExclusiveMutex g_block_mx;
 static CCExclusiveMutex g_fc_mx;
+static CCExclusiveMutex g_pages_mx;
 static BlockCache g_blocks;
 
 static void staticd_sync_init(CCExclusive e) {
     g_sync = e;
     g_block_mx = e.mutex(SYNC_BLOCK);
     g_fc_mx = e.mutex(SYNC_FC);
+    g_pages_mx = e.mutex(SYNC_PAGES);
 }
 
 /* 0 = ok. `ring_n` clamped by caller to [1, BLOCK_RING_MAX]. */
@@ -211,7 +214,7 @@ typedef struct BlockFillReq {
     size_t file_off;
 } BlockFillReq;
 
-void block_hold_drop(BlockHold* h) {
+static void block_hold_drop(BlockHold* h) {
     BlockCache* c;
     if (!h || !h->ptr) return;
     c = h->cache;
@@ -239,7 +242,7 @@ static int block_slot_ensure_data(BlockCache* c, uint32_t k) {
     return c->ring[k].data ? 0 : -1;
 }
 
-BlockHold !>(CCError) block_cache_checkout(BlockCache* c, int fd,
+static BlockHold !>(CCError) block_cache_checkout(BlockCache* c, int fd,
                                           uint64_t dev, uint64_t ino,
                                           time_t mtime, long mtime_nsec,
                                           size_t file_off, size_t want,

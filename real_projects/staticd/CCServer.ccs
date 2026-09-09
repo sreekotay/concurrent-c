@@ -24,6 +24,7 @@
 #include <sys/socket.h>
 #include "CCServer.cch"
 #include "CCServerPoll.cch"
+#include <pthread.h>
 
 #ifndef K_IO_READ_BUF
 #define K_IO_READ_BUF (16 * 1024)
@@ -312,12 +313,187 @@ typedef struct CCIoRow {
 
 typedef CCIoSess* CCIoSessP;
 
+#ifndef CC_STEP_LANES_MAX
+#define CC_STEP_LANES_MAX 64
+#endif
+#ifndef CC_STEP_Q_CAP
+#define CC_STEP_Q_CAP 256
+#endif
+
+typedef struct CCStepHub CCStepHub;
+
 typedef struct ServeCtx {
     CCServer* srv;
     CCClosure1 on_app;
+    CCStepHub* hub; /* ready-app steal hub; NULL = serial steps only */
 } ServeCtx;
 
+/* Per-dest stealable ready-app deque. Owner pushes/pops tail; thieves pop
+ * head. Arm stays on the home tape (stealer may arm while home is in wait).
+ * Steal: one-at-a-time until victim.qlen < max(2, 2× mine) (fair), capped. */
+typedef struct CCStepLane {
+    _Atomic int live;
+    _Atomic int qlen;
+    _Atomic int inflight; /* run_queued in flight (owner or thief) */
+    pthread_mutex_t mx;
+    int q[CC_STEP_Q_CAP];
+    int head;
+    int tail;
+    int n;
+    CCTape* tape;
+    ServeCtx* ctx;
+} CCStepLane;
+
+struct CCStepHub {
+    CCStepLane* lanes[CC_STEP_LANES_MAX];
+    pthread_mutex_t mx;
+};
+
 static void cc_server_worker(ServeCtx* ctx);
+
+/* CC_SERVER_STEP_STEAL (opt-in; default off):
+ *   unset / 0 — serial serve (no deque)
+ *   1 — ready-app deque + cross-dest steal
+ *   2 — deque only (no try_steal); isolates queue path vs steal
+ *
+ * Steal helps when ready-app HOL is independently runnable work. It is not
+ * a substitute for a parking exclusive around shared mutable state, and it
+ * does not fix exclusive occupancy. Keep off until a non-exclusive mix
+ * shows a clear win (see docs/the-cc-way.md: smallest fact, narrowest place).
+ */
+static int cc_step_mode(void) {
+    static int cached = -1;
+    const char* e;
+    if (cached >= 0) return cached;
+    e = getenv("CC_SERVER_STEP_STEAL");
+    if (!e || !e[0] || e[0] == '0') cached = 0;
+    else if (e[0] == '2') cached = 2;
+    else cached = 1;
+    return cached;
+}
+
+static int cc_step_lane_wanted(void) {
+    return cc_step_mode() >= 1;
+}
+
+static int cc_step_steal_wanted(void) {
+    return cc_step_mode() == 1;
+}
+
+static void cc_step_hub_init(CCStepHub* hub) {
+    int i;
+    *hub = (CCStepHub){0};
+    pthread_mutex_init(&hub->mx, NULL);
+    for (i = 0; i < CC_STEP_LANES_MAX; i++)
+        hub->lanes[i] = NULL;
+}
+
+static void cc_step_hub_destroy(CCStepHub* hub) {
+    if (!hub) return;
+    (void)pthread_mutex_destroy(&hub->mx);
+}
+
+static int cc_step_hub_attach(CCStepHub* hub, CCStepLane* lane) {
+    int i;
+    if (!hub || !lane) return -1;
+    pthread_mutex_lock(&hub->mx);
+    for (i = 0; i < CC_STEP_LANES_MAX; i++) {
+        if (!hub->lanes[i]) {
+            hub->lanes[i] = lane;
+            pthread_mutex_unlock(&hub->mx);
+            return i;
+        }
+    }
+    pthread_mutex_unlock(&hub->mx);
+    return -1;
+}
+
+static void cc_step_hub_detach(CCStepHub* hub, CCStepLane* lane) {
+    int i;
+    if (!hub || !lane) return;
+    pthread_mutex_lock(&hub->mx);
+    for (i = 0; i < CC_STEP_LANES_MAX; i++) {
+        if (hub->lanes[i] == lane) {
+            hub->lanes[i] = NULL;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&hub->mx);
+}
+
+static int cc_step_lane_push(CCStepLane* L, int id) {
+    if (!L || id <= 0) return 0;
+    pthread_mutex_lock(&L->mx);
+    if (L->n >= CC_STEP_Q_CAP) {
+        pthread_mutex_unlock(&L->mx);
+        return 0;
+    }
+    L->q[L->tail] = id;
+    L->tail = (L->tail + 1) % CC_STEP_Q_CAP;
+    L->n++;
+    cc_atomic_store_release(&L->qlen, L->n);
+    pthread_mutex_unlock(&L->mx);
+    return 1;
+}
+
+static int cc_step_lane_pop_owner(CCStepLane* L) {
+    int id;
+    if (!L) return 0;
+    pthread_mutex_lock(&L->mx);
+    if (L->n == 0) {
+        pthread_mutex_unlock(&L->mx);
+        return 0;
+    }
+    L->tail = (L->tail + CC_STEP_Q_CAP - 1) % CC_STEP_Q_CAP;
+    id = L->q[L->tail];
+    L->n--;
+    cc_atomic_store_release(&L->qlen, L->n);
+    pthread_mutex_unlock(&L->mx);
+    return id;
+}
+
+static int cc_step_lane_pop_thief(CCStepLane* L) {
+    int id;
+    if (!L) return 0;
+    pthread_mutex_lock(&L->mx);
+    if (L->n == 0) {
+        pthread_mutex_unlock(&L->mx);
+        return 0;
+    }
+    id = L->q[L->head];
+    L->head = (L->head + 1) % CC_STEP_Q_CAP;
+    L->n--;
+    cc_atomic_store_release(&L->qlen, L->n);
+    pthread_mutex_unlock(&L->mx);
+    return id;
+}
+
+static int cc_step_unfair(int mine, int victim) {
+    int need = 2 * mine;
+    if (need < 2) need = 2;
+    return victim >= need;
+}
+
+static CCStepLane* cc_step_pick_victim(CCStepHub* hub, CCStepLane* self,
+                                       int mine) {
+    CCStepLane* best = NULL;
+    int best_n = 0;
+    int i;
+    if (!hub) return NULL;
+    for (i = 0; i < CC_STEP_LANES_MAX; i++) {
+        CCStepLane* L = hub->lanes[i];
+        int n;
+        if (!L || L == self) continue;
+        if (!cc_atomic_load_acquire(&L->live)) continue;
+        n = cc_atomic_load_acquire(&L->qlen);
+        if (n > best_n) {
+            best_n = n;
+            best = L;
+        }
+    }
+    if (!best || !cc_step_unfair(mine, best_n)) return NULL;
+    return best;
+}
 
 static void cc_serve_invoke(ServeCtx* ctx, CCIoSess* io) {
     if (ctx && ctx->on_app.fn)
@@ -362,10 +538,14 @@ static int !>(CCIoError) cc_io_fill_while_out(CCIoSess* io) {
     return cc_ok(got);
 }
 
-/* -1 = close, 0 = wait (armed), 1 = window ready for on_app. */
-static int !>(CCError) cc_io_arm(CCIoSess* io, CCTape* tape, int id) {
+/* -1 = close, 0 = wait (armed), 1 = window ready for on_app.
+ * arm_mx: optional lock around tape.arm only (NULL = uncontended serial). */
+static int !>(CCError) cc_io_arm(CCIoSess* io, CCTape* tape, int id,
+                                 pthread_mutex_t* arm_mx) {
     @errhandler(CCError e) { return cc_err(e); }
+    if (arm_mx) pthread_mutex_lock(arm_mx);
     tape->arm(id, io) !>(e) {
+        if (arm_mx) pthread_mutex_unlock(arm_mx);
         @switch (e) {
         case .conn:
             io->dead = 1;
@@ -374,11 +554,12 @@ static int !>(CCError) cc_io_arm(CCIoSess* io, CCTape* tape, int id) {
             return cc_err(CC_ERR_INVALID_ARG, "tape arm desync");
         }
     };
+    if (arm_mx) pthread_mutex_unlock(arm_mx);
     return cc_ok(0);
 }
 
 static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, int id,
-                                   CCReady r) {
+                                   CCReady r, pthread_mutex_t* arm_mx) {
     @errhandler(CCError e) { return cc_err(e); }
     if (cc_ready_bad(r)) {
         io->dead = 1;
@@ -391,7 +572,7 @@ static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, int id,
         int readable = cc_ready_in(r);
         int writable = cc_ready_out(r);
         if (!readable && !writable && (io->want_in || io->want_out)) {
-            int ar = cc_io_arm(io, tape, id) !>;
+            int ar = cc_io_arm(io, tape, id, arm_mx) !>;
             if (ar < 0) return cc_ok(-1);
             return cc_ok(0);
         }
@@ -407,7 +588,7 @@ static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, int id,
             io_sess_touch(io, time(NULL),
                           io->sec_after_hs > 0 ? io->sec_after_hs : 15);
             {
-                int ar = cc_io_arm(io, tape, id) !>;
+                int ar = cc_io_arm(io, tape, id, arm_mx) !>;
                 if (ar < 0) return cc_ok(-1);
             }
             /* Fall through to normal read path if data already queued. */
@@ -416,7 +597,7 @@ static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, int id,
             io->want_out = (hs == CC_TLS_HS_WANT_WRITE) ? 1 : 0;
             if (!io->want_in && !io->want_out) io->want_in = 1;
             {
-                int ar = cc_io_arm(io, tape, id) !>;
+                int ar = cc_io_arm(io, tape, id, arm_mx) !>;
                 if (ar < 0) return cc_ok(-1);
             }
             return cc_ok(0);
@@ -436,7 +617,7 @@ static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, int id,
             io->want_out = 1;
         if (io->closing) {
             if (io_sess_pending_out(io)) {
-                int ar = cc_io_arm(io, tape, id) !>;
+                int ar = cc_io_arm(io, tape, id, arm_mx) !>;
                 if (ar < 0) return cc_ok(-1);
                 return cc_ok(0);
             }
@@ -458,7 +639,7 @@ static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, int id,
         if (cc_ready_out(r))
             return cc_ok(1);
         {
-            int ar = cc_io_arm(io, tape, id) !>;
+            int ar = cc_io_arm(io, tape, id, arm_mx) !>;
             if (ar < 0) return cc_ok(-1);
         }
         return cc_ok(0);
@@ -476,10 +657,55 @@ static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, int id,
     return cc_ok(1);
 }
 
+/* 0 = continue; 1 = died; -1 = home-tape desync (owner only). */
+static int cc_serve_app_arm(CCIoSess* io, ServeCtx* ctx, CCTape* tape, int id,
+                            pthread_mutex_t* arm_mx, int is_owner) {
+    CCConnRow* row = tape->row(id);
+    cc_serve_invoke(ctx, io);
+    if (io->dead) {
+        if (row) row->step_busy = 0;
+        return 1;
+    }
+    {
+        int ar = cc_io_arm(io, tape, id, arm_mx) !>(e) {
+            (void)e;
+            if (row) row->step_busy = 0;
+            if (is_owner) return -1;
+            io->dead = 1;
+            return 1;
+        };
+        (void)ar;
+    }
+    if (row) row->step_busy = 0;
+    return 0;
+}
+
+static int cc_serve_run_queued(CCStepLane* L, int id, int is_owner) {
+    CCConnRow* row;
+    CCIoSess* io;
+    int rc;
+    if (!L || !L->tape || id <= 0) return 0;
+    cc_atomic_fetch_add(&L->inflight, 1);
+    row = L->tape->row(id);
+    if (!row || !row->io) {
+        cc_atomic_fetch_sub(&L->inflight, 1);
+        return 0;
+    }
+    io = row->io;
+    if (io->dead) {
+        row->step_busy = 0;
+        cc_atomic_fetch_sub(&L->inflight, 1);
+        return 1;
+    }
+    rc = cc_serve_app_arm(io, L->ctx, L->tape, id, NULL, is_owner);
+    cc_atomic_fetch_sub(&L->inflight, 1);
+    return rc;
+}
+
 /* 0 = continue; -1 reserved for WaitId desync from drop/reap / arm. */
 static int cc_serve_step(CCIoSess* io, ServeCtx* ctx, CCTape* tape, int id,
-                         CCReady r) {
-    int st = cc_io_ready(io, tape, id, r) !>(e) {
+                         CCReady r, pthread_mutex_t* arm_mx) {
+    int st = cc_io_ready(io, tape, id, r, arm_mx) !>(e) {
         (void)e;
         io->dead = 1;
         cc_serve_invoke(ctx, io);
@@ -490,17 +716,55 @@ static int cc_serve_step(CCIoSess* io, ServeCtx* ctx, CCTape* tape, int id,
         return 0;
     }
     if (st == 0) return 0;
-    cc_serve_invoke(ctx, io);
-    tape->arm(id, io) !>(e) {
-        @switch (e) {
-        case .conn:
-            io->dead = 1;
-            break;
-        case .desync:
-            return -1;
-        }
+    {
+        int rc = cc_serve_app_arm(io, ctx, tape, id, arm_mx, 1);
+        return rc < 0 ? -1 : 0;
+    }
+}
+
+/* -1 = died (invoked); 0 = wait/armed; 1 = window ready for on_app. */
+static int cc_serve_ready_for_queue(CCIoSess* io, ServeCtx* ctx, CCTape* tape,
+                                    int id, CCReady r) {
+    int st = cc_io_ready(io, tape, id, r, NULL) !>(e) {
+        (void)e;
+        io->dead = 1;
+        cc_serve_invoke(ctx, io);
+        return -1;
     };
-    return 0;
+    if (st < 0) {
+        cc_serve_invoke(ctx, io);
+        return -1;
+    }
+    return st;
+}
+
+static int cc_step_try_steal_one(CCStepHub* hub, CCStepLane* self) {
+    int mine;
+    CCStepLane* V;
+    int id;
+    if (!hub || !self || !cc_step_steal_wanted()) return 0;
+    mine = cc_atomic_load_acquire(&self->qlen);
+    V = cc_step_pick_victim(hub, self, mine);
+    if (!V) return 0;
+    if (!cc_atomic_load_acquire(&V->live)) return 0;
+    id = cc_step_lane_pop_thief(V);
+    if (id <= 0) return 0;
+    if (self->ctx && self->ctx->srv)
+        cc_atomic_fetch_add(&self->ctx->srv->step_steal, 1);
+    (void)cc_serve_run_queued(V, id, 0);
+    return 1;
+}
+
+/* Steal one-at-a-time while victim.qlen >= max(2, 2× mine). Cap so a
+ * pathological victim cannot pin this dest for a full wake. */
+#ifndef CC_STEP_STEAL_FAIR_MAX
+#define CC_STEP_STEAL_FAIR_MAX 64
+#endif
+static int cc_step_steal_until_fair(CCStepHub* hub, CCStepLane* self) {
+    int n = 0;
+    while (n < CC_STEP_STEAL_FAIR_MAX && cc_step_try_steal_one(hub, self))
+        n++;
+    return n;
 }
 
 /* Accept until EAGAIN / batch cap. Returns accepted count, or -1 on
@@ -573,6 +837,10 @@ static int cc_tape_reap(CCTape* tape, CCArenaPool* slots, ServeCtx* ctx) {
         CCConnRow* row = tape->dense_at(di, &id);
         CCIoSess* io;
         if (!row || id <= 0) return -1;
+        if (row->step_busy) {
+            di++;
+            continue;
+        }
         io = row->io;
         if (io && !io->dead) {
             di++;
@@ -631,6 +899,8 @@ static void cc_server_worker(ServeCtx* ctx) {
     CCArenaPool* slots;
     CCTape tape;
     time_t deadline_sec = 0;
+    CCStepLane lane;
+    int lane_on = 0;
     if (!cc_arena_is_live(wa)) {
         cc_server_worker_bail(ctx);
         return;
@@ -645,7 +915,30 @@ static void cc_server_worker(ServeCtx* ctx) {
         cc_server_worker_bail(ctx);
         return;
     }
+    lane = (CCStepLane){0};
+    if (ctx->hub && cc_step_lane_wanted() && srv->workers_max > 1) {
+        pthread_mutex_init(&lane.mx, NULL);
+        lane.tape = &tape;
+        lane.ctx = ctx;
+        cc_atomic_store_release(&lane.live, 1);
+        if (cc_step_hub_attach(ctx->hub, &lane) >= 0)
+            lane_on = 1;
+        else {
+            cc_atomic_store_release(&lane.live, 0);
+            (void)pthread_mutex_destroy(&lane.mx);
+        }
+    }
     @defer {
+        if (lane_on) {
+            int id;
+            cc_atomic_store_release(&lane.live, 0);
+            while ((id = cc_step_lane_pop_owner(&lane)) > 0)
+                (void)cc_serve_run_queued(&lane, id, 1);
+            while (cc_atomic_load_acquire(&lane.inflight) > 0)
+                cc_yield();
+            cc_step_hub_detach(ctx->hub, &lane);
+            (void)pthread_mutex_destroy(&lane.mx);
+        }
         worker_tape_exit(&tape, slots, ctx);
         cc_atomic_fetch_sub(&srv->nworkers, 1);
         if (!srv->stopped())
@@ -676,28 +969,70 @@ static void cc_server_worker(ServeCtx* ctx) {
                 }
             }
             if (ep.idle()) {
+                if (lane_on)
+                    (void)cc_step_steal_until_fair(ctx->hub, &lane);
                 if (deadline_reap && tape.reap(slots, ctx) < 0) return;
                 cc_yield();
                 continue;
             }
         }
 
-        /* Step only hits that fired this wake. */
-        @for (hit in ep.hits) {
-            int id = hit.id;
-            CCReady r = hit.ready;
-            CCConnRow* row = tape.row(id);
-            CCIoSess* io;
-            if (!row || !row->io) continue;
-            io = row->io;
-            if (io->dead) continue;
-            if (io->deadline && now >= io->deadline) {
-                io->dead = 1;
-                died = 1;
-                continue;
+        /* Step only hits that fired this wake. With a steal lane: ready on
+         * home, queue window-ready app work, drain local, steal one. */
+        if (!lane_on) {
+            @for (hit in ep.hits) {
+                int id = hit.id;
+                CCReady r = hit.ready;
+                CCConnRow* row = tape.row(id);
+                CCIoSess* io;
+                if (!row || !row->io) continue;
+                io = row->io;
+                if (io->dead) continue;
+                if (io->deadline && now >= io->deadline) {
+                    io->dead = 1;
+                    died = 1;
+                    continue;
+                }
+                if (cc_serve_step(io, ctx, &tape, id, r, NULL) < 0) return;
+                if (io->dead) died = 1;
             }
-            if (cc_serve_step(io, ctx, &tape, id, r) < 0) return;
-            if (io->dead) died = 1;
+        } else {
+            @for (hit in ep.hits) {
+                int id = hit.id;
+                CCReady r = hit.ready;
+                CCConnRow* row = tape.row(id);
+                CCIoSess* io;
+                int st;
+                if (!row || !row->io) continue;
+                io = row->io;
+                if (io->dead || row->step_busy) continue;
+                if (io->deadline && now >= io->deadline) {
+                    io->dead = 1;
+                    died = 1;
+                    continue;
+                }
+                st = cc_serve_ready_for_queue(io, ctx, &tape, id, r);
+                if (st < 0) {
+                    died = 1;
+                    continue;
+                }
+                if (st == 0) continue;
+                row->step_busy = 1;
+                if (!cc_step_lane_push(&lane, id)) {
+                    int rc = cc_serve_run_queued(&lane, id, 1);
+                    if (rc < 0) return;
+                    if (rc > 0) died = 1;
+                }
+            }
+            {
+                int id;
+                while ((id = cc_step_lane_pop_owner(&lane)) > 0) {
+                    int rc = cc_serve_run_queued(&lane, id, 1);
+                    if (rc < 0) return;
+                    if (rc > 0) died = 1;
+                }
+            }
+            (void)cc_step_steal_until_fair(ctx->hub, &lane);
         }
 
         {
@@ -731,10 +1066,20 @@ static void cc_server_worker(ServeCtx* ctx) {
 void !>(CCError) cc_server_serve(CCServer* srv, CCSignal* stop,
                                  CCClosure1 on_app) {
     @errhandler(CCError e) { return cc_err(e); }
-    ServeCtx ctx = { .srv = srv, .on_app = on_app };
+    CCStepHub hub;
+    int hub_on = 0;
+    ServeCtx ctx = { .srv = srv, .on_app = on_app, .hub = NULL };
     ServeCtx* ctxp = &ctx;
     int w, n;
     @defer cc_closure1_drop(on_app);
+    if (cc_step_lane_wanted() && srv->workers_max > 1) {
+        cc_step_hub_init(&hub);
+        ctx.hub = &hub;
+        hub_on = 1;
+    }
+    @defer {
+        if (hub_on) cc_step_hub_destroy(&hub);
+    };
     srv->start(stop);
     n = srv->start_n();
     for (w = 0; w < n; w++) {
@@ -745,3 +1090,4 @@ void !>(CCError) cc_server_serve(CCServer* srv, CCSignal* stop,
     srv->join() !>;
     return cc_ok();
 }
+
