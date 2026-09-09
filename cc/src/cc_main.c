@@ -3908,6 +3908,16 @@ static int cc__find_shadow_lower(char* dst, size_t cap) {
  * a source map) instead of shadow_lower, then re-enters the raw-C path for
  * the host compile and link. A missing tool is an error, never a fallback. */
 static int g_lowerer_clean = 0;
+/* What the unit the clean lowerer read was written against.
+ *
+ * The object key for a raw `.c` folds that file alone, and the clean path
+ * hands the compiler the C its lowerer emitted -- so the headers the unit
+ * includes are nowhere in the key, and the only thing left watching them is
+ * a dependency scan that compares mtimes. Two edits of one header inside a
+ * second have the same mtime, and the second one is missed. The unit's own
+ * content and its `.cch` includes are folded here, where the clean branch
+ * still knows which unit it was. */
+static uint64_t g_clean_src_key = 0;
 
 static int cc__set_lowerer_name(const char* v) {
     if (!v || !v[0] || strcmp(v, "shadow") == 0 || strcmp(v, "native") == 0) { g_lowerer_clean = 0; return 0; }
@@ -5057,6 +5067,8 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             }
             o2 = *opt;
             o2.in_path = clean_c;
+            g_clean_src_key = cc__fold_file_content(1469598103934665603ULL, clean_orig);
+            g_clean_src_key = cc__fold_cch_includes(g_clean_src_key, clean_orig, opt->cc_flags);
             return compile_with_build(&o2, summary_out);
         }
         if (uk == CC_UNIT_KIND_CCS || uk == CC_UNIT_KIND_SHCC ||
@@ -5308,6 +5320,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             h = cc__fnv1a64_i64(h, in_sig.mtime_sec);
             h = cc__fnv1a64_i64(h, in_sig.size);
             h = cc__fold_file_content(h, opt->in_path);
+            h = cc__fnv1a64_i64(h, (long long)g_clean_src_key);
         } else {
             h = cc__fnv1a64_i64(h, (long long)emit_key);
         }
