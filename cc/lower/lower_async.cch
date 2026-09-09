@@ -295,6 +295,17 @@ static bool as_await_type(AStep* st, CcExpr* operand, CCString* out) {
         default: break;
     }
     if (!ret) return false;
+    {
+        /* A callee that already answers with a task handle -- `..._task(...)`
+         * -- is not awaited at the handle's own type: the handle IS the
+         * wait, and what it yields is the payload it carries. Reading it at
+         * `CCTaskIntptr` casts the wait's result to a struct. */
+        CCSlice rn = ix->canon(ret);
+        if (rn.len >= 6 && memcmp(rn.ptr, "CCTask", 6) == 0) {
+            *out = @string(`intptr_t`, L->arena);
+            return true;
+        }
+    }
     *out = as_spell(L, ret, cc_slice_empty());
     return true;
 }
