@@ -835,7 +835,10 @@ static void pt_params(Pr* p, const CcFuncType* fn) {
         const CcParam* pa = params->get_ptr(i);
         if (i) pr_str(p, ", ");
         if (!pa->type) { pr_str(p, "..."); continue; }
-        if (pa->default_value) { pr_span_c(p, pa->span, "parameter"); continue; }
+        /* `int b = 1` is CC spelling: it is what a reflected trampoline fills a
+         * missing slot from, and the index carries it. C has no parameter
+         * default, and a CC call site passes every argument, so what the host
+         * compiler reads is the parameter without it. */
         pt_type(p, pa->type, pa->name);
         pr_attrs(p, &pa->attrs, true);
     }
