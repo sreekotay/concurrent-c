@@ -389,6 +389,96 @@ static void lw_drop_cc_only(CcLowerer* L) {
  * `<rel/x.h>` (relative to the repository root, under the host's include
  * path), and the header is recorded so the tool lowers it too. Angle
  * includes are the driver's business. */
+/* ---- where a lowered header's own includes belong -------------------------
+ *
+ * A `.cch` may name a type that a header it includes further down provides,
+ * and that header may in turn name a type this one defines -- the two faces
+ * refer to each other, so neither include can simply go first. Left where it
+ * was written, though, the include lands after the use and the type is
+ * unknown there: a `.h` is read where it is included, and the language it
+ * was written in is not.
+ *
+ * So the include moves to just before the first declaration that names
+ * something it provides, and no earlier -- which is what keeps a header
+ * whose include is already early exactly where it is. */
+
+/* The header unit the index loaded for `path`, or NULL. */
+static CcUnit* lw_unit_for_path(CcIndex* ix, CCSlice path) {
+    CcUnitList* uv = &ix->units;
+    size_t n = uv->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcUnit* u = *uv->get_ptr(i);
+        if (u && slice_eq(u->tape.path, path)) return u;
+    }
+    return NULL;
+}
+
+/* The type names a header declares: what including it is for. */
+static CcNameList lw_header_type_names(CcLowerer* L, CcUnit* u) {
+    CcNameList out = vec_new::[CCSlice](L->arena);
+    CcDeclList* dv;
+    size_t n;
+    size_t i;
+    if (!u) return out;
+    dv = &u->decls;
+    n = dv->len();
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *dv->get_ptr(i);
+        CCSlice nm = cc_slice_empty();
+        @switch (d->k) {
+            case .typedef_(td): nm = td.name; break;
+            case .variant(vd): nm = vd.name; break;
+            default: break;
+        }
+        if (nm.len) { out.push(nm); }
+    }
+    return out;
+}
+
+/* Does this declaration's own text name one of them? */
+static bool lw_decl_names_any(CcUnit* u, CcDecl* d, CcNameList* names) {
+    size_t nn = names->len();
+    uint32_t t;
+    if (!u || !d || !nn) return false;
+    for (t = d->span.first; t <= d->span.last; t++) {
+        const CcToken* k = cc__tok(u, t);
+        size_t i;
+        if (!k || k->kind != CC_TK_IDENT) continue;
+        for (i = 0; i < nn; i++) {
+            CCSlice nm = *names->get_ptr(i);
+            if (slice_eq(k->text, nm)) return true;
+        }
+    }
+    return false;
+}
+
+/* The first declaration that reads one of `names`; false when none does. */
+static bool lw_first_use_of(CcUnit* u, CcDeclList* decls, CcNameList* names, size_t* out) {
+    size_t n = decls->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *decls->get_ptr(i);
+        if (lw_decl_names_any(u, d, names)) { *out = i; return true; }
+    }
+    return false;
+}
+
+/* Move the declaration at `from` to `to`, keeping everything else in order. */
+static void lw_move_decl(CcLowerer* L, CcDeclList* decls, size_t from, size_t to) {
+    size_t nd = decls->len();
+    CcDeclList out = vec_new::[CcDeclRef](L->arena);
+    CcDecl* moved = *decls->get_ptr(from);
+    size_t k;
+    if (to >= from) return;
+    for (k = 0; k < nd; k++) {
+        CcDecl* dk = *decls->get_ptr(k);
+        if (k == to) { out.push(moved); }
+        if (k != from) { out.push(dk); }
+    }
+    *decls = out;
+}
+
 static void CcLowerer_includes(CcLowerer* L) {
     CcIndex* ix = L->ix;
     CcIncludeRefList refs;
@@ -456,6 +546,14 @@ static void CcLowerer_includes(CcLowerer* L) {
 `, L->arena);
                 CcDecl* raw = lw_raw_decl(L, line, d->span);
                 *decls->get_ptr(k) = raw;
+                if (L->header_mode) {
+                    CcUnit* hu = lw_unit_for_path(ix, found);
+                    CcNameList names = lw_header_type_names(L, hu);
+                    size_t use = 0;
+                    if (lw_first_use_of(L->unit, decls, &names, &use)) {
+                        lw_move_decl(L, decls, k, use);
+                    }
+                }
                 break;
             }
         }
