@@ -54,6 +54,30 @@ static CcStmt* pp_stmt(P* p) {
     return mk_empty_stmt(p, span2(start, start));
 }
 
+/* A construct that USED to exist, refused where it was written.
+ *
+ * `'@arena' is not part of the language` is true and useless: the user did
+ * not invent the word, they wrote a form the language once had, and what
+ * they need is the form that replaced it. A retired construct falling out
+ * as a generic parse error is a diagnostics regression. */
+static CcStmt* stmt_retired(P* p, uint32_t first, const char* msg) {
+    CCString m = cc_string_new();
+    m.push_cstr(msg, p->arena);
+    err_here(p, m);
+    sync(p, first);
+    return mk_empty_stmt(p, span_from(p, first));
+}
+
+/* `Vec<T>` / `Map<K, V>` at a statement's first token: the retired
+ * angle-bracket generic spellings. */
+static bool at_retired_generic_spelling(P* p) {
+    CCSlice nm;
+    if (p->t[p->i].kind != CC_TK_IDENT) return false;
+    if (!tok_is_p(tk(p, 1), CC_P_LT)) return false;
+    nm = tok_name(p, p->i);
+    return cc_slice_eq_cstr(&nm, "Vec") || cc_slice_eq_cstr(&nm, "Map");
+}
+
 /* Statement-position `@word`s that open a declaration (section 5). */
 static bool stmt_at_cc_decl_word(P* p) {
     if (p->t[p->i].kind != CC_TK_AT_WORD) return false;
@@ -1136,14 +1160,19 @@ static CcStmt* parse_at_stmt(P* p) {
         s->k = { .closing = cl };
         return s;
     }
-    if (at_word(p, "spawn") || at_word(p, "nursery")) {
+    if (at_word(p, "nursery")) {
+        return stmt_retired(p, first,
+                            "async: `@nursery { ... }` is retired; use "
+                            "`frame.create_nursery()` / `parent.create_child()` and `n.spawn(...)`");
+    }
+    if (at_word(p, "spawn")) {
         CcSpawnBlock sb;
         sb.stmts = vec_new::[CcStmtRef](p->arena);
-        sb.is_nursery = at_word(p, "nursery");
+        sb.is_nursery = false;
         sb.closing = vec_new::[CcExprRef](p->arena);
         adv(p);
         if (accept_kw(p, KW_CLOSING)) parse_paren_list(p, &sb.closing, "closing");
-        parse_body_into(p, &sb.stmts, sb.is_nursery ? "nursery" : "spawn");
+        parse_body_into(p, &sb.stmts, "spawn");
         s = cc__stmt_blank(span_from(p, first), p->arena);
         s->k = { .spawn_block = sb };
         return s;
@@ -1182,8 +1211,24 @@ static CcStmt* parse_at_stmt(P* p) {
         return mk_empty_stmt(p, span_from(p, first));
     }
     if (stmt_at_cc_decl_word(p)) return parse_decl_stmt(p, first);
-    if (at_word(p, "match") || at_word(p, "arena") || at_word(p, "arena_init") || at_word(p, "restricted") ||
-        at_word(p, "spawn_async") || at_word(p, "cache")) {
+    if (at_word(p, "arena")) {
+        return stmt_retired(p, first,
+                            "async: `@arena(...) { ... }` is retired; use `CCArena a@(size) @destroy`");
+    }
+    if (at_word(p, "arena_init")) {
+        return stmt_retired(p, first,
+                            "async: `@arena_init(...) { ... }` is retired; use "
+                            "`CCArena a@(buf, size) @destroy` or `cc_arena_buffer(...)` directly");
+    }
+    if (at_word(p, "match")) {
+        return stmt_retired(p, first,
+                            "syntax: '@match' was removed; multiplex channels with "
+                            "cc_chan_match_select(...) (see spec) or restructure with one fiber per source");
+    }
+    if (at_word(p, "restricted")) {
+        return stmt_retired(p, first, "'@restricted' was removed; use '@typeview'");
+    }
+    if (at_word(p, "spawn_async") || at_word(p, "cache")) {
         CCSlice word = t->text;
         CCString m = @string(`'${word}' is not part of the language`, p->arena);
         err_here(p, m);
@@ -1409,6 +1454,16 @@ static CcStmt* parse_stmt(P* p) {
             s->k = { .label = l };
             return s;
         }
+    }
+    /* `Vec<int> v;` / `Map<int, int> m;`: the angle-bracket spellings are
+     * retired in favour of `::[...]`. Nothing here declares `Vec`, so the
+     * statement otherwise parses as the comparison chain `Vec < int > v`
+     * and the host compiler is left to explain it. */
+    if (at_retired_generic_spelling(p)) {
+        CCSlice rnm = tok_name(p, p->i);
+        const char* which = cc_slice_eq_cstr(&rnm, "Vec") ? "retired generic spelling 'Vec<T>'"
+                                                          : "retired generic spelling 'Map<K, V>'";
+        return stmt_retired(p, first, which);
     }
     if (at_declaration_start(p)) return parse_decl_stmt(p, first);
     if (at_ident(p) && kw_of(p, p->i) == KW_NONE && tok_is_p(tk(p, 1), CC_P_LBRACE) && !name_is_var(p, tok_name(p, p->i)) &&

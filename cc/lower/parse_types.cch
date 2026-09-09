@@ -681,6 +681,24 @@ static CcType* parse_type_or_value_arg(P* p) {
     }
 }
 
+/* A generic argument that is a value: a non-negative decimal integer
+ * literal and nothing else. `8.5` and `-1` join the instance name the same
+ * way an integer does (`Ghost_int_8_5`), so accepting one names a type
+ * nothing will ever declare — and the guard around the empty expansion
+ * makes that look like success. */
+static bool at_generic_value_arg_ok(P* p) {
+    const CcToken* t = &p->t[p->i];
+    size_t i;
+    if (at_p(p, CC_P_MINUS) || at_p(p, CC_P_DOT)) return false;
+    if (t->kind != CC_TK_NUMBER) return true;
+    if (!t->text.len) return false;
+    for (i = 0; i < t->text.len; i++) {
+        char c = t->text.ptr[i];
+        if (c < '0' || c > '9') return false;
+    }
+    return true;
+}
+
 /* `Name::[T, U]` at the `::`. */
 static CcType* parse_generic_args(P* p, CCSlice family, uint32_t first) {
     CcType* t = type_blank(p, span2(first, first));
@@ -692,7 +710,13 @@ static CcType* parse_generic_args(P* p, CCSlice family, uint32_t first) {
     open = p->i;
     adv(p); /* [ */
     while (!at_p(p, CC_P_RBRACKET) && !at_eof(p)) {
-        CcType* arg = parse_type_or_value_arg(p);
+        CcType* arg;
+        if (!at_generic_value_arg_ok(p)) {
+            CCString m = cc_string_new();
+            m.push_cstr("generic value argument must be a non-negative decimal integer literal", p->arena);
+            err_here(p, m);
+        }
+        arg = parse_type_or_value_arg(p);
         g.args.push(arg);
         if (!accept_p(p, CC_P_COMMA)) break;
     }
@@ -1052,6 +1076,15 @@ static void parse_members(P* p, CcRecordType* st, uint32_t open) {
             f.type = parse_declarator(p, S.type, false, &f.name, NULL, &da);
             if (accept_p(p, CC_P_COLON)) f.bits = parse_cond(p);
             parse_attrs(p, &da);
+            /* `CCFile file @as;`: the anonymous-embedding field marker was
+             * removed. Saying `expected ';'` here names the symptom and not
+             * the construct the user actually wrote. */
+            if (at_word(p, "as")) {
+                CCString m = cc_string_new();
+                m.push_cstr("'@as' was removed; declare '@typeview on T { as: field; }'", p->arena);
+                err_here(p, m);
+                adv(p);
+            }
             push_attrs(&f.attrs, &S.attrs);
             push_attrs(&f.attrs, &da);
             if (accept_p(p, CC_P_COMMA)) {

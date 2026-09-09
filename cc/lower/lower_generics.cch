@@ -244,6 +244,21 @@ static CCSlice gn_line_word(CCSlice text, size_t line_end, size_t* at) {
     return cc_slice_from_buffer((char*)text.ptr + w0, k - w0);
 }
 
+/* Does a factory declared for family `fam` write instances of `want`?
+ *
+ * A family names its instances by a prefix that need not be its own name
+ * (`Vec` writes `CCVec_<T>`), and that prefix is a second spelling of the
+ * family: `CCVec::[uint64_t]` and `Vec::[uint64_t]` are one instance, with
+ * one instance name. Matching on the family name alone leaves the prefix
+ * spelling with no factory at all — an empty guard, and a type the host
+ * compiler is then asked to use undeclared. */
+static bool gn_family_matches(CCSlice want, CCSlice fam) {
+    CCSlice pfx;
+    if (cc_slice_eq(&want, fam)) return true;
+    pfx = cc__family_prefix(fam);
+    return cc_slice_eq(&want, pfx);
+}
+
 /* Does a handed-over registration bind this family? Its factory is a
  * `@comptime` function of the unit, not a declaration this step can read a
  * template out of, so what one of its instances is, is what running that
@@ -255,7 +270,7 @@ static bool gn_registration_binds(CcLowerer* L, CCSlice fam) {
         size_t line_end = gn_line_end(text, i);
         size_t k = i;
         CCSlice name = gn_line_word(text, line_end, &k);
-        if (name.len && slice_eq(name, fam)) return true;
+        if (name.len && gn_family_matches(fam, name)) return true;
         i = line_end < text.len ? line_end + 1 : text.len;
     }
     return false;
@@ -549,6 +564,62 @@ static CCSlice gn_computed_slot(CcLowerer* L, const CcToken* t, CcSlotBindList* 
     return cc_slice_empty();
 }
 
+/* A non-negative decimal index at `s`, or -1 when one does not start there.
+ * `${arg(i)}` names a factory local, not argument zero. */
+static int gn_slot_index(const char* s, size_t len) {
+    size_t k = 0;
+    int n = 0;
+    if (!len || s[0] < '0' || s[0] > '9') return -1;
+    while (k < len && s[k] >= '0' && s[k] <= '9') {
+        n = n * 10 + (s[k] - '0');
+        k++;
+    }
+    return n;
+}
+
+/* The first `${arg(N)}`-shaped slot of a template whose index this instance
+ * has no type argument for, as the slot spells itself. Empty when every one
+ * of them is in range.
+ *
+ * An out-of-range index is not an empty interpolation: the filler writes the
+ * slot's own text back out, so `${arg(3)}` becomes the word `arg(3)` in the
+ * emitted C — a constraint violation of the factory reported, if at all, as
+ * a host-compiler error about a word the user never wrote. */
+static CCSlice gn_oob_slot(const CcToken* t, size_t nargs) {
+    const char* text = t->text.ptr + 1;
+    size_t len = t->text.len - 2;
+    size_t i = 0;
+    while (i < len) {
+        if (text[i] == '$' && i + 1 < len && text[i + 1] == '{') {
+            size_t j = i + 2;
+            size_t depth = 1;
+            const char* inner;
+            size_t inner_len;
+            int n = -1;
+            while (j < len && depth) {
+                if (text[j] == '{') depth++;
+                else if (text[j] == '}') depth--;
+                if (depth) j++;
+            }
+            inner = text + i + 2;
+            inner_len = j - (i + 2);
+            while (inner_len && (inner[0] == ' ' || inner[0] == '\t')) { inner++; inner_len--; }
+            while (inner_len && (inner[inner_len - 1] == ' ' || inner[inner_len - 1] == '\t')) inner_len--;
+            if (inner_len > 4 && memcmp(inner, "arg(", 4) == 0)
+                n = gn_slot_index(inner + 4, inner_len - 4);
+            else if (inner_len > 12 && memcmp(inner, "arg_mangled(", 12) == 0)
+                n = gn_slot_index(inner + 12, inner_len - 12);
+            else if (inner_len > 16 && memcmp(inner, "type_args.items[", 16) == 0)
+                n = gn_slot_index(inner + 16, inner_len - 16);
+            if (n >= 0 && (size_t)n >= nargs) return cc_slice_from_buffer((char*)inner, inner_len);
+            i = j + 1;
+            continue;
+        }
+        i++;
+    }
+    return cc_slice_empty();
+}
+
 /* ---- running a compiled factory ---------------------------------------- */
 
 /* The file the engine reads its prelude and its diagnostics from.
@@ -744,6 +815,9 @@ static CCString gn_instance_text(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool
     size_t nt = targv->len();
     size_t i;
     size_t taken = 0;           /* factory declarations this instance's text came from */
+    size_t matched_base = 0;    /* CC_GENERIC_FACTORY declarations for this family */
+    size_t matched_ext = 0;     /* CC_GENERIC_FACTORY_EXTEND declarations for it */
+    CCSlice oob = cc_slice_empty();
     CCString up = gn_upper(L, info->family);
     CCString guard = @string(`CC_HEADER_${up}_${info->name}`, L->arena);
     bool needs_run = false;
@@ -765,13 +839,15 @@ static CCString gn_instance_text(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool
         const CcToken* t;
         CcSlotBindList binds;
         CCSlice computed;
-        if (!cc_slice_eq(&info->family, cc__factory_name(d))) continue;
+        if (!gn_family_matches(info->family, cc__factory_name(d))) continue;
         if (cc__factory_is_extend(d) != want_extend) continue;
+        if (want_extend) matched_ext++; else matched_base++;
         t = gn_emit_template(fu, d);
         if (!t) continue;
         binds = vec_new::[CcSlotBind](L->arena);
         cc__factory_bindings(ix, fu, cc__factory_body(d), &binds);
         computed = gn_computed_slot(L, t, &binds, &args);
+        if (!oob.len) oob = gn_oob_slot(t, nt);
         if (computed.len || !gn_template_is_whole(fu, d, t)) needs_run = true;
         {
             CCSlice frag = cc__template_instance(ix, t->text.ptr + 1, t->text.len - 2, info, &binds, &args);
@@ -785,6 +861,34 @@ static CCString gn_instance_text(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool
      * is what its handler writes, and the guard alone would declare nothing
      * while looking like an instance that needed nothing. */
     if (!taken && gn_registration_binds(L, info->family)) needs_run = true;
+    /* Nothing says what an instance of this family IS.
+     *
+     * The guard alone is a well-formed translation unit that declares
+     * nothing, so the unit lowers, the type stays undeclared, and the
+     * host compiler is left to explain a name the user did write. Say it
+     * here, where the family is still known. */
+    if (!matched_base && !gn_registration_binds(L, info->family)) {
+        CCSlice fam = info->family;
+        if (matched_ext) {
+            CCString me = @string(`type: generic '${fam}' is extended but never defined (needs CC_GENERIC_FACTORY(${fam}) or cc_generic_register)`, L->arena);
+            lw_error(L, sp, me);
+        } else {
+            CCString mn = @string(`type: no generic factory for '${fam}': include the header that declares CC_GENERIC_FACTORY(${fam}), or register one with cc_generic_register`, L->arena);
+            lw_error(L, sp, mn);
+        }
+        *ok = false;
+        return text;
+    }
+    /* A slot the factory's own arity cannot fill, caught before the filled
+     * text is kept: the run path reports its own. */
+    if (!needs_run && oob.len) {
+        CCSlice fam2 = info->family;
+        int nargs = (int)nt;
+        CCString mo = @string(`factory '${fam2}': ${oob} is out of range: this instance has ${nargs} type arguments`, L->arena);
+        lw_error(L, sp, mo);
+        *ok = false;
+        return text;
+    }
     if (needs_run) {
         /* a fragment that computes is not a template this step can fill:
          * what the instance is, is whatever the factory writes. It writes

@@ -5074,7 +5074,11 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             cc__dir_of_path(opt->in_path, clean_qdir, sizeof(clean_qdir));
             {
                 /* compile time first: what it decides is what there is to lower */
-                char clean_ct[PATH_MAX];
+                /* `o_ct.in_path` outlives this block, so the buffer it points
+                 * at must too: a block-local array here dangles, and the very
+                 * next statements write `clean_c` over that same stack slot —
+                 * the lowerer was then handed its own output as its input. */
+                static char clean_ct[PATH_MAX];
                 static CCBuildOptions o_ct;
                 if (cc__materialize_comptime_for_clean(opt->in_path, clean_ct,
                                                        sizeof(clean_ct)) != 0)
