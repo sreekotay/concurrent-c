@@ -49,6 +49,9 @@ typedef struct KStep {
     CCString fwd;               /* their forward declarations */
     bool any;
     bool in_hooks;              /* inside a `@typehooks`: its values are the compiler's, not C's */
+    CcDecl* at_decl;            /* the unit declaration the walk is inside */
+    CcDecl* first_host;         /* the first one that made a closure: the forward
+                                 * declarations name that body's capture types */
     CcStmtList entered;         /* the statement path from the function body */
     KHandlerList ehs;           /* the `@errhandler`s in scope along it */
     CcExprList in_task;         /* closures a `send_task` is sending: the value is the task's result */
@@ -757,6 +760,7 @@ static void kl_lower(KStep* st, CcExpr* e, CcClosure cl) {
         e->k = { .call = call };
     }
     st->any = true;
+    if (!st->first_host) st->first_host = st->at_decl;
 }
 
 static void kl_on_stmt(Walker* w, CcStmt* s, bool enter) {
@@ -776,6 +780,7 @@ static void kl_on_stmt(Walker* w, CcStmt* s, bool enter) {
 static void kl_on_decl(Walker* w, CcDecl* d) {
     KStep* st = (KStep*)w->env;
     st->in_hooks = false;
+    st->at_decl = d;
     @switch (d->k) {
         case .typehooks: st->in_hooks = true; break;
         default: break;
@@ -948,6 +953,16 @@ static void CcLowerer_closures(CcLowerer* L) {
             }
             if (!is_pp) break;
             at = k + 1;
+        }
+        /* A capture's type is as often as not a typedef of this unit, and a
+         * declaration above that typedef names a type the host has not seen
+         * yet: the parameter becomes an implicit int, and the definition
+         * below it conflicts with the declaration above. So the block goes
+         * directly above the declaration that first made a closure -- every
+         * type that body reads is declared by then, and nothing before it
+         * calls a `_make`. */
+        for (k = at; st.first_host && k < nd; k++) {
+            if (*decls->get_ptr(k) == st.first_host) { at = k; break; }
         }
         {
             CCString head = cc_string_new();
