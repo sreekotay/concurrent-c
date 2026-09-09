@@ -373,6 +373,161 @@ static void hc_send(HStep* st, CcExpr* e, CcUfcs uf) {
     }
 }
 
+/* ---- `@await ep.send(v)` / `@await ep.recv(&v)` -------------------------- */
+
+/* An awaited endpoint call is the endpoint's synchronous surface.
+ *
+ * What the runtime's send and recv tasks carry is an errno, and a task
+ * carries one `intptr_t`: there is no callee return type for the wait to
+ * read the value at. So the await is not lowered as a wait on a named
+ * `@async` function. It is the wait plus that errno read back as the
+ * `bool !>(CCIoError)` every other channel operation answers with -- the
+ * surface the `!>` on the line unwraps.
+ *
+ * That is channel knowledge, so it is spent here rather than in the async
+ * step, and before the endpoints are read so the argument reaches the
+ * runtime task as written: the temporary `hc_send` puts a plain send
+ * through is the copy `sizeof` sizes, and the task takes the value
+ * directly. */
+
+static CcExpr* hc_cast(CcLowerer* L, CCSlice ty, CcExpr* a, CcSpan sp) {
+    CcExpr* e = cc__expr_blank(sp, L->arena);
+    CcCast ca;
+    ca.type = lw_named_type(L, ty, sp);
+    ca.a = a;
+    { CcExprK ek = { .cast = ca }; e->k = ek; }
+    return e;
+}
+
+/* `cc_chan_result_from_errno((int)cc_block_on(intptr_t, cc_channel_X_task(ep, args)))` */
+static CcExpr* hc_await_surface(CcLowerer* L, CcUfcs uf, CcSpan sp) {
+    CCSlice fn;
+    CcExpr* task;
+    CcExprList* ta;
+    CcExprList* av = &uf.args;
+    size_t n = av->len();
+    size_t i;
+    CcExpr* wait;
+    CcExpr* width;
+    if (cc_slice_eq_cstr(&uf.method, "send")) fn = cstr_slice("cc_channel_send_task");
+    else fn = cstr_slice("cc_channel_recv_task");
+    task = lw_call1(L, fn, uf.recv, sp);
+    ta = lw_call_args(task);
+    for (i = 0; i < n; i++) {
+        CcExpr* a = *av->get_ptr(i);
+        ta->push(a);
+    }
+    width = lw_text(L, @string(`intptr_t`, L->arena), sp);
+    wait = lw_call2(L, cstr_slice("cc_block_on"), width, task, sp);
+    return lw_call1(L, cstr_slice("cc_chan_result_from_errno"),
+                    hc_cast(L, cstr_slice("int"), wait, sp), sp);
+}
+
+/* What an `@await` waits on, or NULL for any other expression. */
+static CcExpr* hc_await_child(CcExpr* e) {
+    @switch (e->k) {
+        case .await_(w): return w.a;
+        default: return NULL;
+    }
+}
+
+/* What one tail the grammar binds under an await stands on:
+ * `@await ep.send(v) !>` parses as `@await ((ep.send(v)) !>)`. */
+static CcExpr* hc_tail_child(CcExpr* e) {
+    @switch (e->k) {
+        case .paren(p): return p.a;
+        case .unwrap(u): return u.a;
+        case .unwrap_body(ub): return ub.a;
+        case .unwrap_or(uo): return uo.a;
+        case .unwrap_destroy(ud): return ud.a;
+        default: return NULL;
+    }
+}
+
+/* The same tails, written through. */
+static void hc_tail_set(CcExpr* e, CcExpr* v) {
+    @switch (e->k) {
+        case .paren: e->k.paren.a = v; break;
+        case .unwrap: e->k.unwrap.a = v; break;
+        case .unwrap_body: e->k.unwrap_body.a = v; break;
+        case .unwrap_or: e->k.unwrap_or.a = v; break;
+        case .unwrap_destroy: e->k.unwrap_destroy.a = v; break;
+        default: break;
+    }
+}
+
+/* A `send` / `recv` on an endpoint. The method name is what says so, as it
+ * is in the reference: inside `@async` a channel operation is the only
+ * thing an await may be written on, and a receiver that is not an endpoint
+ * hands `cc_channel_send_task` a first argument the host compiler rejects
+ * by name. */
+static bool hc_await_op(CcExpr* e, CcUfcs* out) {
+    @switch (e->k) {
+        case .ufcs(u): {
+            if (!cc_slice_eq_cstr(&u.method, "send") &&
+                !cc_slice_eq_cstr(&u.method, "recv")) return false;
+            *out = u;
+            return true;
+        }
+        default: return false;
+    }
+}
+
+static bool hc_await_visit(CcExpr* e, void* env) {
+    HStep* st = (HStep*)env;
+    CcLowerer* L = st->L;
+    CcExpr* top = hc_await_child(e);
+    CcExpr* above = NULL;       /* the tail the endpoint call stands under */
+    CcExpr* cur = top;
+    CcUfcs uf;
+    int hops = 0;
+    if (!top) return true;
+    /* the hop count is bounded because a tail chain that does not end is
+     * not this step's to diagnose */
+    while (cur && hops < 8) {
+        CcExpr* next = hc_tail_child(cur);
+        if (!next) break;
+        above = cur;
+        cur = next;
+        hops++;
+    }
+    if (!cur || !hc_await_op(cur, &uf)) return true;
+    {
+        CcExpr* surface = hc_await_surface(L, uf, e->span);
+        /* the surface carries the wait, so the await has nothing left to
+         * do: what stands in its place is the tail it was written around */
+        if (!above) { e->k = surface->k; return true; }
+        hc_tail_set(above, surface);
+        e->k = top->k;
+    }
+    return true;
+}
+
+static CcStmt* hc_fn_body(CcDecl* d) {
+    @switch (d->k) {
+        case .func(fd): return fd.body;
+        default: return NULL;
+    }
+}
+
+/* Every function body: an `@await` on an endpoint is the endpoint's own
+ * synchronous surface, whatever the function around it does with the tail. */
+static void hc_awaits(HStep* st) {
+    CcDeclList* ds = &st->L->unit->decls;
+    size_t n = ds->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *ds->get_ptr(i);
+        CcStmt* body = hc_fn_body(d);
+        CcVisitor av;
+        if (!body) continue;
+        memset(&av, 0, sizeof(av));
+        av.expr = hc_await_visit;
+        av.env = st;
+        CcStmt_walk(body, av);
+    }
+}
+
 /* The message, assembled rather than templated: a backtick would close an
  * `@string` template, and an `@word` inside a literal reads as a sigil. */
 static CCString hc_closing_retired(CcLowerer* L) {
@@ -471,6 +626,10 @@ static void CcLowerer_chan(CcLowerer* L) {
         tv.env = &st;
         CcUnit_walk(L->unit, tv);   /* the uses, before the declarations size the channel */
     }
+    /* after the `send_task` uses are read, so the task call this builds is
+     * not itself read as one, and before the walk, so the send it replaces
+     * never reaches the temporary a plain send travels through */
+    hc_awaits(&st);
     tw_unit(&w);
     {
         CcVisitor fv;

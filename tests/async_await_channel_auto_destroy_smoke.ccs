@@ -14,6 +14,7 @@
 #include <stdio.h>
 
 @async int echo_through_channel(CCChanTx tx, CCChanRx rx, int value) {
+    @errhandler(CCIoError e) { cc_error_exit(e.base); }
     @await tx.send(value) !>;
     int received = 0;
     @await rx.recv(&received) !>;
