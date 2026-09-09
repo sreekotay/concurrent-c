@@ -962,8 +962,9 @@ static CcUnit* cc__parse_text(CcIndex* ix, CCSlice path, CCSlice text, CcUnitMod
     return cc_parse_unit(path, text, po, ds, ix->arena);
 }
 
-static CCSlice cc__ix_diag_source(CCSlice path, void* ctx) {
+static CCSlice cc__ix_diag_source(CCSlice path, void* ctx, bool* physical) {
     (void)path;
+    *physical = true;
     return *(CCSlice*)ctx;
 }
 

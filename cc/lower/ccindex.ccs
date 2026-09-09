@@ -97,9 +97,10 @@ static bool session_open(Session* s, const char* path, CCArena a) {
     return true;
 }
 
-static CCSlice session_source(CCSlice path, void* ctx) {
+static CCSlice session_source(CCSlice path, void* ctx, bool* physical) {
     (void)path;
     (void)ctx;
+    *physical = true;
     return cc_slice_empty();
 }
 

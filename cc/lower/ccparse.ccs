@@ -40,8 +40,9 @@ static CCSlice read_whole_file(const char* path, CCArena a, bool* ok) {
     return cc_slice_from_buffer(buf, (size_t)n);
 }
 
-static CCSlice source_of(CCSlice path, void* ctx) {
+static CCSlice source_of(CCSlice path, void* ctx, bool* physical) {
     (void)path;
+    *physical = true;
     return *(CCSlice*)ctx;
 }
 

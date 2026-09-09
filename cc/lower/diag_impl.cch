@@ -144,8 +144,10 @@ static void CcDiags_print(const CcDiags* ds, FILE* out, CcSourceFn source, void*
             fputc('\n', out);
         }
         if (source && d->at.line) {
-            CCSlice text = source(d->at.path, ctx);
-            CCSlice snippet = cc__nth_line(text, d->phys_line ? d->phys_line : d->at.line);
+            bool physical = true;
+            CCSlice text = source(d->at.path, ctx, &physical);
+            uint32_t at_line = physical && d->phys_line ? d->phys_line : d->at.line;
+            CCSlice snippet = cc__nth_line(text, at_line);
             /* An empty line (end of file) still gets its caret. */
             {
                 const char* sp = (const char*)snippet.ptr;

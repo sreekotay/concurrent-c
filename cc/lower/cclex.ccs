@@ -63,8 +63,9 @@ static LexRun lex_path(const char* path_c, CCArena a) {
 }
 
 /* The diag printer's source callback: this run's text for its own path. */
-static CCSlice run_source(CCSlice path, void* ctx) {
+static CCSlice run_source(CCSlice path, void* ctx, bool* physical) {
     LexRun* run = (LexRun*)ctx;
+    *physical = true;
     if (path.eq(run->path)) return run->src;
     return cc_slice_empty();
 }

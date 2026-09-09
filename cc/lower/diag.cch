@@ -54,8 +54,16 @@ static void CcDiags_push(CcDiags* ds, CcDiag d);
 /* ds.has_errors() */
 static bool CcDiags_has_errors(const CcDiags* ds);
 /* ds.print(out, source): sorted by (path, line, col); `source` returns the
- * text of a path for the caret snippet, or an empty slice when unknown. */
-typedef CCSlice (*CcSourceFn)(CCSlice path, void* ctx);
+ * text of a path for the caret snippet, or an empty slice when unknown.
+ *
+ * `*physical` says which file came back, and the snippet is cut by a
+ * different line number for each: `true` means this is the text the tool
+ * read, which a `#line` may have rebased away from, so the physical line
+ * indexes it; `false` means this is the file the diagnostic names, where the
+ * user's own line does. Getting that backwards quotes a real line of a real
+ * file that is not the one the error is on -- the closer the two files, the
+ * more convincing the wrong answer. */
+typedef CCSlice (*CcSourceFn)(CCSlice path, void* ctx, bool* physical);
 static void CcDiags_print(const CcDiags* ds, FILE* out, CcSourceFn source, void* ctx);
 
 @typeview Read on CcDiags { r: *; };

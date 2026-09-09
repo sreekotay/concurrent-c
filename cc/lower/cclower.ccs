@@ -104,12 +104,13 @@ typedef struct Loaded {
  * line number points at the wrong line — the closer the copy is to the
  * original, the more convincingly wrong. So the snippet comes from the
  * named file when it can be read, and from what was lowered otherwise. */
-static CCSlice source_of(CCSlice path, void* ctx) {
+static CCSlice source_of(CCSlice path, void* ctx, bool* physical) {
     Loaded* L = (Loaded*)ctx;
     CCSlice mine = L->src;
     bool ok = false;
     CCSlice text;
     const char* p;
+    *physical = true;
     if (!path.len) return mine;
     if (L->path && cc_slice_eq_cstr(&path, L->path)) return mine;
     {
@@ -120,6 +121,7 @@ static CCSlice source_of(CCSlice path, void* ctx) {
         text = read_whole_file(p, L->arena, &ok);
     }
     if (!ok) return mine;
+    *physical = false;
     return text;
 }
 
