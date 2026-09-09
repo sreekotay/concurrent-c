@@ -659,9 +659,15 @@ static CcStmt* parse_parallel(P* p) {
                 CCSlice target = cc_slice_empty();
                 bool is_unwrap = false;
                 bool classified = false;
+                bool wrap_serial = false;
                 @switch (st->k) {
                     case .unwrap(us):
                         if (expr_unwrap_operand(us.e, &operand)) { is_unwrap = true; classified = true; }
+                        /* `e !>(err) { ... }`: the handler reads the names
+                         * around the arm and can leave it early, so the arm
+                         * is the whole statement, not the operand with the
+                         * handler dropped. It runs as a one-statement block. */
+                        else if (us.e && us.e->k.kind == CcExprK_unwrap_body) wrap_serial = true;
                         break;
                     case .expr(es):
                         if (es.e && !es.body) {
@@ -673,6 +679,22 @@ static CcStmt* parse_parallel(P* p) {
                 }
                 if (is_unwrap) { arm.unwrap = true; arm.expr = operand; }
                 else if (classified) { arm.target = target; arm.expr = rhs; }
+                else if (wrap_serial) {
+                    CcStmt* ser;
+                    CcBlock sb;
+                    CCSlice only = cc_slice_empty();
+                    sb.stmts = vec_new::[CcStmtRef](p->arena);
+                    sb.stmts.push(st);
+                    if (pa_outer_dests(p, &sb.stmts, &only) > 1) {
+                        CCString m = @string(`${at_serial} arm must assign at most one simple outer name`, p->arena);
+                        err_at(p, afirst, m);
+                    } else {
+                        arm.target = only;
+                    }
+                    ser = cc__stmt_blank(span_from(p, afirst), p->arena);
+                    ser->k = { .serial = sb };
+                    arm.serial = ser;
+                }
                 /* Anything else is not an arm. It cannot be one silently:
                  * the thunk an arm becomes writes exactly one outer name
                  * through an out pointer, and a loop or a declaration has

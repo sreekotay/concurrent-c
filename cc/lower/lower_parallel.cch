@@ -61,6 +61,10 @@ typedef struct PStep {
     CcDecl* first_host;         /* the first one that needed a forward declaration */
     CcType* fn_ret;             /* the enclosing function's return type: a walk records
                                  * a `return` into a cell of it */
+    CcStmtList eh_top;          /* the `@errhandler`s the enclosing function carries, in order:
+                                 * a bare `!>` in an arm runs one of those bodies, and an arm
+                                 * that leaves the caller's frame needs its own copy */
+    bool eh_any;
     bool any;
 } PStep;
 
@@ -1346,13 +1350,159 @@ static bool pl_reject(CcLowerer* L, CcParallel p, CcSpan sp) {
     return false;
 }
 
-static bool pl_arm_ok(CcLowerer* L, CcParallelArm* arm, CcSpan sp) {
-    CCString m;
-    if (arm->unwrap) {
-        m = @string(`an arm that unwraps its own Result is not lowered by the clean lowerer yet: the error has to reach the join`, L->arena);
-        lw_error(L, sp, m);
+static CcStmt* pl_unwrap_stmt(CcLowerer* L, CcExpr* call, CcSpan sp);
+
+/* A fresh copy of the `@errhandler`s the enclosing function carries, parsed
+ * from the source they were written in.
+ *
+ * An arm that unwraps runs that body where the `!>` stands, and each arm
+ * runs it somewhere else: one on the caller, the rest in thunks of their
+ * own. They cannot share the statement -- the exit rewriting below and the
+ * results step both edit it in place -- so each arm that needs one parses
+ * its own. Returns the statements, empty when there is nothing to copy or
+ * the text does not parse back. */
+typedef struct PEhCopy {
+    CcLowerer* L;
+    const CcTape* tape;         /* the copy's own tape: its spans index that, not the unit's */
+    bool refused;
+} PEhCopy;
+
+/* The value a copied `return` hands back is spelled here, from the tape the
+ * copy was parsed against. Everything downstream reads spans against the
+ * unit's tape, where this copy has no tokens at all, so the spelling has to
+ * be taken while the tape that holds it is still in hand. A value that is
+ * still CC rather than C would go out unlowered, so that is refused instead. */
+static bool pl_eh_copy_stmt(CcStmt* s, void* env) {
+    PEhCopy* c = (PEhCopy*)env;
+    @switch (s->k) {
+        case .return_(r):
+            if (r.value) {
+                CCString sp = CcExpr_spell(r.value, c->tape, c->L->arena);
+                CCSlice t = sp.as_slice();
+                size_t i;
+                bool cc_left = false;
+                for (i = 0; i < t.len; i++) if (t.ptr[i] == '@') cc_left = true;
+                if (cc_left) c->refused = true;
+                else s->k.return_.value = lw_text(c->L, sp, s->span);
+            }
+            break;
+        default: break;
+    }
+    return true;
+}
+
+static CcStmtList pl_eh_fresh(PStep* st) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CcDiags scratch = CcDiags_new(L->arena);
+    CcStmtList out = vec_new::[CcStmtRef](L->arena);
+    CCString sb = cc_string_new();
+    CcUnit* u;
+    CcStmt* body = NULL;
+    size_t i;
+    size_t n = st->eh_top.len();
+    if (!n) return out;
+    sb.push_cstr("void __cc_probe(void) {\n", L->arena);
+    for (i = 0; i < n; i++) {
+        CcStmt* t = *st->eh_top.get_ptr(i);
+        CCSlice text = cc__span_text(ix, L->unit, t->span.first, t->span.last);
+        sb.push_slice(text, L->arena);
+        sb.push_cstr("\n", L->arena);
+    }
+    sb.push_cstr("}\n", L->arena);
+    {
+        CcParseOpts po;
+        CCSlice label = cstr_slice("<parallel arm handler>");
+        po.mode = CC_UNIT_SOURCE;
+        po.known_types = ix->known_types();
+        u = cc_parse_unit(label, cc_string_persist_slice(L->arena, &sb), po, &scratch, L->arena);
+    }
+    if (u->decls.len() != 1) return out;
+    {
+        CcDecl* d = *u->decls.get_ptr(0);
+        @switch (d->k) {
+            case .func(f): body = f.body; break;
+            default: return out;
+        }
+    }
+    if (!body) return out;
+    {
+        CcStmtList bs;
+        bool is_block = false;
+        @switch (body->k) {
+            case .block(b): bs = b.stmts; is_block = true; break;
+            default: break;
+        }
+        if (!is_block) return out;
+        n = bs.len();
+        for (i = 0; i < n; i++) {
+            CcStmt* t = *bs.get_ptr(i);
+            PEhCopy c;
+            CcVisitor v;
+            c.L = L;
+            c.tape = &u->tape;
+            c.refused = false;
+            memset(&v, 0, sizeof(v));
+            v.stmt = pl_eh_copy_stmt;
+            v.env = &c;
+            CcStmt_walk(t, v);
+            if (c.refused) {
+                CcStmtList none = vec_new::[CcStmtRef](L->arena);
+                return none;
+            }
+            out.push(t);
+        }
+    }
+    return out;
+}
+
+/* `e !>;` as an arm. The arm is the statement, not the operand with the
+ * unwrap dropped: the handler in scope is where the error goes, and it runs
+ * inside the arm. So the arm becomes a block that carries its own copy of
+ * that handler and then the statement, like
+ * `@serial { @errhandler(...) { … } e !>; }`. The exit rewriting further
+ * down then reaches the handler's `return` the way it reaches the arm's own,
+ * and the results step, which runs after this one, inlines the body. */
+static bool pl_arm_unfold_unwrap(PStep* st, CcParallelArm* arm) {
+    CcLowerer* L = st->L;
+    CcStmt* ser;
+    CcBlock sb;
+    CcStmtList ehs;
+    size_t i;
+    size_t n;
+    if (!arm->unwrap || !arm->expr) return true;
+    if (!st->eh_any) {
+        /* nothing to run: say so here rather than let the results step
+         * report a bare unwrap in a thunk the reader never wrote */
+        CCString m = cc_string_new();
+        m.push_cstr("an arm that unwraps needs an @errhandler on the function it stands in", L->arena);
+        lw_error(L, arm->span, m);
         return false;
     }
+    ehs = pl_eh_fresh(st);
+    if (!ehs.len()) {
+        CCString m = cc_string_new();
+        m.push_cstr("this function's @errhandler does not carry into a @parallel arm: an arm runs its own copy, and a `return` of a CC value in it has no C to hand back", L->arena);
+        lw_error(L, arm->span, m);
+        return false;
+    }
+    sb.stmts = vec_new::[CcStmtRef](L->arena);
+    n = ehs.len();
+    for (i = 0; i < n; i++) {
+        CcStmt* t = *ehs.get_ptr(i);
+        sb.stmts.push(t);
+    }
+    sb.stmts.push(pl_unwrap_stmt(L, arm->expr, arm->span));
+    ser = cc__stmt_blank(arm->span, L->arena);
+    { CcStmtK sk = { .serial = sb }; ser->k = sk; }
+    arm->serial = ser;
+    arm->expr = NULL;
+    arm->unwrap = false;
+    return true;
+}
+
+static bool pl_arm_ok(CcLowerer* L, CcParallelArm* arm, CcSpan sp) {
+    CCString m;
     if (!arm->expr && !arm->serial) {
         m = @string(`an empty '${"@"}parallel' arm`, L->arena);
         lw_error(L, sp, m);
@@ -1392,6 +1542,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     }
     for (i = 0; i < n; i++) {
         CcParallelArm* arm = armv->get_ptr(i);
+        if (!pl_arm_unfold_unwrap(st, arm)) return;
         if (!pl_arm_ok(L, arm, sp)) return;
     }
     {
@@ -2922,6 +3073,8 @@ static void pl_on_decl(Walker* w, CcDecl* d) {
     bool is_fn = false;
     st->fn_ret = NULL;
     st->at_decl = d;
+    st->eh_top = vec_new::[CcStmtRef](st->L->arena);
+    st->eh_any = false;
     @switch (d->k) {
         case .func(x): f = x; is_fn = true; break;
         default: break;
@@ -2930,6 +3083,31 @@ static void pl_on_decl(Walker* w, CcDecl* d) {
     @switch (f.type->k) {
         case .func(ft): st->fn_ret = ft.ret; break;
         default: break;
+    }
+    if (f.body) {
+        /* only the ones the function itself carries: a handler written in a
+         * block below the site governs that block, not an arm elsewhere */
+        CcStmtList body;
+        bool is_block = false;
+        @switch (f.body->k) {
+            case .block(b): body = b.stmts; is_block = true; break;
+            default: break;
+        }
+        if (is_block) {
+            size_t i;
+            size_t n = body.len();
+            for (i = 0; i < n; i++) {
+                CcStmt* t = *body.get_ptr(i);
+                bool is_eh = false;
+                @switch (t->k) {
+                    case .errhandler: is_eh = true; break;
+                    default: break;
+                }
+                if (!is_eh) continue;
+                st->eh_top.push(t);
+                st->eh_any = true;
+            }
+        }
     }
 }
 
