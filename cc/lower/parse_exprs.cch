@@ -892,7 +892,17 @@ static CcExpr* parse_postfix(P* p, CcExpr* e) {
         case CC_P_DEC: adv(p); e = unary_node(p, CC_OP_POSTDEC, first, e); continue;
         case CC_P_UNWRAP: {
             CcExpr* x = parse_unwrap_tail(p, e);
-            if (x->k.kind == CcExprK_unwrap_body) return x;
+            if (x->k.kind == CcExprK_unwrap_body) {
+                /* `mk(v) !>(e) { ... }.step()`: the handler body ends the
+                 * unwrap, not the chain — what follows dispatches on the
+                 * value the unwrap produced. Only a member access continues
+                 * it, so the statement form still needs no semicolon after
+                 * its closing brace. */
+                const CcToken* nx = &p->t[p->i];
+                bool chained = nx->kind == CC_TK_PUNCT &&
+                               (nx->punct == CC_P_DOT || nx->punct == CC_P_ARROW);
+                if (!chained) return x;
+            }
             e = x;
             continue;
         }
