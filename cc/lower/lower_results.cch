@@ -260,6 +260,37 @@ static bool rl_diverges(CcLowerer* L, const CcStmt* s) {
     }
 }
 
+/* `break` and `continue` in a handler body name the loop around the *site*,
+ * which is the whole of what they are written for: `always_err() @err;` in a
+ * loop, with a handler that breaks, ends that loop. A body that leaves that
+ * way therefore cannot be hoisted -- at the end of the block the loop is over
+ * and the statement names nothing -- so it is inlined at each site instead.
+ * A loop or a switch inside the body catches its own. */
+static bool rl_leaves_loop(const CcStmt* s) {
+    if (!s) return false;
+    @switch (s->k) {
+        case .break_: return true;
+        case .continue_: return true;
+        case .for_: return false;
+        case .for_in: return false;
+        case .while_: return false;
+        case .do_: return false;
+        case .switch_: return false;
+        case .block(b): {
+            size_t n = b.stmts.len();
+            size_t i;
+            for (i = 0; i < n; i++) {
+                CcStmt* t = *b.stmts.get_ptr(i);
+                if (rl_leaves_loop(t)) return true;
+            }
+            return false;
+        }
+        case .if_(x): return rl_leaves_loop(x.then) || rl_leaves_loop(x.els);
+        case .label(x): return rl_leaves_loop(x.inner);
+        default: return false;
+    }
+}
+
 static CcStmt* rl_body(RFn* fn, CcStmt* s);
 static void rl_hoist_nested(RFn* fn, CcStmt* s);
 
@@ -272,7 +303,7 @@ static void rl_register_handler(RFn* fn, const CcErrhandler* eh, CcSpan sp) {
     h->err_type = eh->err_type;
     h->err_canon = eh->err_type ? rl_ix_canon(L, eh->err_type) : cc_slice_empty();
     h->binder = eh->binder;
-    h->hoisted = rl_diverges(L, eh->body);
+    h->hoisted = rl_diverges(L, eh->body) && !rl_leaves_loop(eh->body);
     h->depth = fn->depth;
     h->span = sp;
     /* the body's own unwraps and `@err`s see the handlers above this one */
