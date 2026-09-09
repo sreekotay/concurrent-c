@@ -618,7 +618,19 @@ static void* ${site};
  * its next step, and the site reads it once the walk is done. A `break`
  * that belongs to a loop the body itself opened is that loop's, and is left
  * alone -- which is why this walks with a depth rather than visiting. */
-typedef struct PForExit { CcLowerer* L; uint32_t id; bool has_ret; } PForExit;
+/* `leave`: the label a converted exit jumps to instead of returning outright,
+ * for a body that has something to run on the way out -- a walked ticket gives
+ * its place back. Empty when returning is the whole of leaving. */
+typedef struct PForExit { CcLowerer* L; uint32_t id; bool has_ret; CCSlice leave; } PForExit;
+
+static void pl_for_leave(PForExit* fx, CcStmt* blk, CcSpan sp) {
+    CcLowerer* L = fx->L;
+    if (fx->leave.len) {
+        lw_push(blk, lw_goto(L, fx->leave, sp));
+    } else {
+        lw_push(blk, cc_stmt_return(NULL, sp, L->arena));
+    }
+}
 
 static void pl_for_exits(PForExit* fx, CcStmt* s, int depth) {
     CcLowerer* L = fx->L;
@@ -631,18 +643,28 @@ static void pl_for_exits(PForExit* fx, CcStmt* s, int depth) {
     {
         bool is_break = false;
         bool is_ret = false;
+        bool is_cont = false;
         CcReturn r;
         @switch (s->k) {
             case .break_: is_break = true; break;
+            case .continue_: is_cont = true; break;
             case .return_(x): r = x; is_ret = true; break;
             default: break;
+        }
+        if (is_cont && depth == 0 && fx->leave.len) {
+            /* one ticket ends where the next begins: this body is a function
+             * of its own by the time C sees it, so there is no loop here to
+             * continue -- ending the ticket is the whole of it */
+            CcStmt* g = lw_goto(L, fx->leave, sp);
+            s->k = g->k;
+            return;
         }
         if (is_break && depth == 0) {
             CCSlice ex = cstr_slice("__cc_pf_ex");
             CCString t = @string(`{ int __cc_z = 0; while (!cc_atomic_cas(&e->${ex}->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&e->${ex}->xk) == 0) cc_atomic_store(&e->${ex}->xk, 1); cc_atomic_store(&e->${ex}->lock, 0); }`, L->arena);
             CcStmt* blk = lw_block(L, sp);
             lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
-            lw_push(blk, cc_stmt_return(NULL, sp, L->arena));
+            pl_for_leave(fx, blk, sp);
             s->k = blk->k;
             return;
         }
@@ -652,7 +674,7 @@ static void pl_for_exits(PForExit* fx, CcStmt* s, int depth) {
             CCString t = @string(`{ int __cc_z = 0; while (!cc_atomic_cas(&e->__cc_pf_ex->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&e->__cc_pf_ex->xk) != 2) { e->__cc_pf_ex->rv = (${v}); cc_atomic_store(&e->__cc_pf_ex->xk, 2); } cc_atomic_store(&e->__cc_pf_ex->lock, 0); }`, L->arena);
             CcStmt* blk = lw_block(L, sp);
             lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
-            lw_push(blk, cc_stmt_return(NULL, sp, L->arena));
+            pl_for_leave(fx, blk, sp);
             s->k = blk->k;
             return;
         }
@@ -1318,6 +1340,7 @@ static void pl_for_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
         fx.L = L;
         fx.id = id;
         fx.has_ret = false;
+        fx.leave = cc_slice_empty();   /* the split walk returns, and that is all */
         if (pf.loop.body) pl_for_exits(&fx, pf.loop.body, 0);
         has_ret = true;
     }
@@ -1368,6 +1391,647 @@ static void pl_for_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
     }
     s->k = blk->k;
     st->any = true;
+}
+
+
+/* ---- `@parallel [seq (c)] wait (gate) for (i in lo..hi)` -----------------
+ *
+ * A walk whose tickets are handed out under a gate: the turnstile caps how
+ * many iterations are in flight at once, and a pool of runners the size of
+ * that cap takes tickets off a channel in the order the caller sent them.
+ * What the body reads it reads by address, the same as the split walk.
+ *
+ * The body is emitted once, as `__cc_pw_<id>_run`, and every schedule goes
+ * through it. When the runtime hands back no runner -- no nursery, a failed
+ * allocation, a spawn that never took, or a `seq` that denied the site --
+ * the caller calls that same function in ticket order, holding one slot of
+ * its own. Nothing about the function changes between the two schedules: it
+ * enters nothing (the caller holds the ticket before the call either way),
+ * it records into the slot it was handed, and it leaves the turnstile once
+ * on the way out however the body ended.
+ *
+ * A ticket error is a slot, not a jump: the body's `!>` writes the slot,
+ * cancels the nursery so the tickets that have not started stop starting,
+ * and jumps to the one exit. The site reads the slots after the pool has
+ * drained and re-raises the first one where the walk stood. */
+
+static CCSlice pl_pw_name(CcLowerer* L, uint32_t id, const char* suffix) {
+    CCString s = @string(`__cc_pw_${id}${suffix}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+/* C the later steps have nothing to say about: the pool's own plumbing. */
+static void pl_pw_text(CcLowerer* L, CcStmt* blk, CCString t, CcSpan sp) {
+    lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
+}
+
+static CcStmt* pl_pw_for(CcLowerer* L, CCString init, CCString cond, CCString step,
+                         CcStmt* body, CcSpan sp) {
+    CcFor fl;
+    CcStmt* fs;
+    memset(&fl, 0, sizeof(fl));
+    fl.init_decl = NULL;
+    fl.init_expr = lw_text(L, init, sp);
+    fl.cond = lw_text(L, cond, sp);
+    fl.step = lw_text(L, step, sp);
+    fl.body = body;
+    fl.more = vec_new::[CcStmtRef](L->arena);
+    fs = cc__stmt_blank(sp, L->arena);
+    { CcStmtK sk = { .for_ = fl }; fs->k = sk; }
+    return fs;
+}
+
+/* What the site, the runners and the body all read: the gate and the
+ * nursery the pool shares, one slot per runner for the error it saw, the
+ * argument a runner starts from, the cell an exit is recorded in, and the
+ * environment the body reaches its captures through. */
+static CCString pl_pw_env_text(PStep* st, uint32_t id, PCapList* caps, CCSlice ret_ty) {
+    CcLowerer* L = st->L;
+    CCArena a = L->arena;
+    CCString sb = cc_string_new();
+    CCSlice env = pl_pw_name(L, id, "_env_t");
+    CCSlice sht = pl_pw_name(L, id, "_sh_t");
+    CCSlice slt = pl_pw_name(L, id, "_slot_t");
+    CCSlice agt = pl_pw_name(L, id, "_arg_t");
+    CCSlice ex = pl_for_ex_type(L, id);
+    size_t n = caps->len();
+    size_t i;
+    sb.push_cstr("typedef struct { CCTurnstile* gate; CCNurseryHost* nur; CCChan* work; CCParallel* dest; } ", a);
+    sb.push_slice(sht, a);
+    sb.push_cstr(";\ntypedef struct { int failed; int i; CCError err; } ", a);
+    sb.push_slice(slt, a);
+    sb.push_cstr(";\ntypedef struct { CCChan* work; void* env; int slot; } ", a);
+    sb.push_slice(agt, a);
+    sb.push_cstr(";\ntypedef struct { cc_atomic_int lock; cc_atomic_int xk; ", a);
+    sb.push_slice(ret_ty, a);
+    sb.push_cstr(" rv; } ", a);
+    sb.push_slice(ex, a);
+    sb.push_cstr(";\ntypedef struct {\n    ", a);
+    sb.push_slice(sht, a);
+    sb.push_cstr("* sh;\n    ", a);
+    sb.push_slice(slt, a);
+    sb.push_cstr("* slots;\n", a);
+    for (i = 0; i < n; i++) {
+        PCap* c = *caps->get_ptr(i);
+        CcType* el = pl_for_decayed(c->type);
+        CCSlice tn = L->ix->canon(el ? el : c->type);
+        sb.push_cstr("    ", a);
+        sb.push_slice(tn, a);
+        sb.push_cstr("* ", a);
+        sb.push_slice(c->name, a);
+        sb.push_cstr(";\n", a);
+    }
+    sb.push_cstr("    ", a);
+    sb.push_slice(ex, a);
+    sb.push_cstr("* __cc_pf_ex;\n} ", a);
+    sb.push_slice(env, a);
+    sb.push_cstr(";\n", a);
+    return sb;
+}
+
+static void pl_pw_forward(PStep* st, uint32_t id) {
+    CcLowerer* L = st->L;
+    CCSlice run = pl_pw_name(L, id, "_run");
+    CCSlice worker = pl_pw_name(L, id, "_worker");
+    CCString t = @string(`static void ${run}(void*, int, int);
+static void* ${worker}(void*);
+`, L->arena);
+    st->fwd.push_slice(t.as_slice(), L->arena);
+}
+
+/* A runner: one ticket at a time off the channel, through the one body,
+ * until the site closes the channel behind the last ticket it sent. */
+static CcDecl* pl_pw_worker_decl(PStep* st, uint32_t id, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CCSlice run = pl_pw_name(L, id, "_run");
+    CCSlice worker = pl_pw_name(L, id, "_worker");
+    CCSlice agt = pl_pw_name(L, id, "_arg_t");
+    CCString t = @string(`static void* ${worker}(void* __p) {
+    ${agt}* __cc_pw_a = (${agt}*)__p;
+    int __cc_pw_i;
+    while (cc_chan_recv(__cc_pw_a->work, &__cc_pw_i, sizeof(__cc_pw_i)) == 0)
+        ${run}(__cc_pw_a->env, __cc_pw_i, __cc_pw_a->slot);
+    return NULL;
+}
+`, L->arena);
+    return lw_raw_decl(L, t, sp);
+}
+
+/* The body, once. Called on a runner and on the caller, told which ticket it
+ * is and which slot is its own; the ticket is already held when it starts and
+ * is given back before it returns, so both schedules keep the gate balanced. */
+static CcDecl* pl_pw_run_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn loop, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CCSlice env = pl_pw_name(L, id, "_env_t");
+    CCSlice run = pl_pw_name(L, id, "_run");
+    CCSlice sht = pl_pw_name(L, id, "_sh_t");
+    CCSlice slt = pl_pw_name(L, id, "_slot_t");
+    CCSlice done = pl_pw_name(L, id, "_done");
+    CcStmt* fnbody = lw_block(L, sp);
+    CcParamList params = vec_new::[CcParam](L->arena);
+    CcType* fn_type = cc__type_blank(sp, L->arena);
+    CcType* voidp = cc_type_pointer(cc_type_named(cstr_slice("void"), sp, L->arena), sp, L->arena);
+    CcType* intt = cc_type_named(cstr_slice("int"), sp, L->arena);
+    CcFuncType ft;
+    CcFuncDecl fd;
+    CcDecl* d;
+    size_t n = caps->len();
+    size_t i;
+    CCSlice bind = loop.bind;
+    {
+        CcType* pt = cc_type_pointer(cc_type_named(env, sp, L->arena), sp, L->arena);
+        CcExpr* cast = cc__expr_blank(sp, L->arena);
+        CcCast ca;
+        ca.type = pt;
+        ca.a = lw_ident(L, cstr_slice("__p"), sp);
+        cast->k = { .cast = ca };
+        lw_push(fnbody, lw_decl_stmt(L, pt, cstr_slice("e"), cast, sp));
+    }
+    {
+        CCString d1 = @string(`${sht}* __cc_pw_sh = e->sh`, L->arena);
+        CCString d2 = @string(`${slt}* __cc_pw_sl = &e->slots[__cc_pw_slot]`, L->arena);
+        CCString d3 = @string(`cc_parallel_honor(__cc_pw_sh->dest)`, L->arena);
+        pl_pw_text(L, fnbody, d1, sp);
+        pl_pw_text(L, fnbody, d2, sp);
+        pl_pw_text(L, fnbody, d3, sp);
+    }
+    lw_push(fnbody, lw_decl_stmt(L, intt, bind, lw_ident(L, cstr_slice("__cc_pw_i"), sp), sp));
+    for (i = 0; i < n; i++) {
+        PCap* c = *caps->get_ptr(i);
+        CcExpr* read = cc_expr_member(lw_ident(L, cstr_slice("e"), sp), c->name, true, sp, L->arena);
+        CcType* el = pl_for_decayed(c->type);
+        CCSlice cn = c->name;
+        if (el) {
+            lw_push(fnbody, lw_decl_stmt(L, cc_type_pointer(el, sp, L->arena), cn, read, sp));
+        } else {
+            CcType* pt = cc_type_pointer(c->type, sp, L->arena);
+            CCString rn = @string(`__cc_ref_${cn}`, L->arena);
+            CCSlice ref = lw_keep(L, &rn);
+            lw_push(fnbody, lw_decl_stmt(L, pt, ref, read, sp));
+            pl_rewrite(L, NULL, loop.body, cn, ref);
+        }
+    }
+    {
+        /* `break` and `return` leave the body, not the runner: the first to
+         * arrive claims the cell the site reads, and both jump to the one
+         * exit, so the ticket is given back however the body ended */
+        PForExit fx;
+        fx.L = L;
+        fx.id = id;
+        fx.has_ret = false;
+        fx.leave = done;
+        if (loop.body) pl_for_exits(&fx, loop.body, 0);
+    }
+    {
+        /* every `!>` in the body is this ticket's error: the slot the site
+         * reads, the cancel that stops the tickets that have not started,
+         * and the same exit the body's own ending takes.
+         * `CcLowerer_results` runs after this step and registers a handler
+         * per statement list, so a synthesized one needs nothing further. */
+        CcStmt* hb = lw_block(L, sp);
+        CcStmt* hs = cc__stmt_blank(sp, L->arena);
+        CcErrhandler eh;
+        CCString ht = @string(`__cc_pw_sl->err = __cc_pw_eb; __cc_pw_sl->failed = 1; __cc_pw_sl->i = __cc_pw_i; cc_nursery_cancel_host(__cc_pw_sh->nur)`, L->arena);
+        pl_pw_text(L, hb, ht, sp);
+        lw_push(hb, lw_goto(L, done, sp));
+        memset(&eh, 0, sizeof(eh));
+        eh.err_type = cc_type_named(cstr_slice("CCError"), sp, L->arena);
+        eh.binder = cstr_slice("__cc_pw_eb");
+        eh.body = hb;
+        { CcStmtK sk = { .errhandler = eh }; hs->k = sk; }
+        lw_push(fnbody, hs);
+    }
+    if (loop.body) { lw_push(fnbody, loop.body); }
+    {
+        /* the one exit. The `return` after it is what keeps the ordinary
+         * ending out of the handler the results step hoists below. */
+        CcStmt* lv = lw_block(L, sp);
+        CCString lt = @string(`__typeof__(cc_turnstile_leave(__cc_pw_sh->gate)) __cc_pw_lr = cc_turnstile_leave(__cc_pw_sh->gate); if (!__cc_pw_lr.ok && !__cc_pw_sl->failed) { __cc_pw_sl->err = __cc_pw_lr.u.error.base; __cc_pw_sl->failed = 1; __cc_pw_sl->i = __cc_pw_i; cc_nursery_cancel_host(__cc_pw_sh->nur); }`, L->arena);
+        pl_pw_text(L, lv, lt, sp);
+        lw_push(fnbody, lw_label(L, done, lv, sp));
+        lw_push(fnbody, cc_stmt_return(NULL, sp, L->arena));
+    }
+    {
+        CcParam p0;
+        CcParam p1;
+        CcParam p2;
+        memset(&p0, 0, sizeof(p0));
+        memset(&p1, 0, sizeof(p1));
+        memset(&p2, 0, sizeof(p2));
+        p0.span = sp; p0.type = voidp; p0.name = cstr_slice("__p"); p0.attrs = vec_new::[CcAttr](L->arena);
+        p1.span = sp; p1.type = intt; p1.name = cstr_slice("__cc_pw_i"); p1.attrs = vec_new::[CcAttr](L->arena);
+        p2.span = sp; p2.type = intt; p2.name = cstr_slice("__cc_pw_slot"); p2.attrs = vec_new::[CcAttr](L->arena);
+        params.push(p0);
+        params.push(p1);
+        params.push(p2);
+    }
+    memset(&ft, 0, sizeof(ft));
+    ft.ret = cc_type_named(cstr_slice("void"), sp, L->arena);
+    ft.params = params;
+    ft.has_prototype = true;
+    { CcTypeK tk = { .func = ft }; fn_type->k = tk; }
+    memset(&fd, 0, sizeof(fd));
+    fd.name = run;
+    fd.type = fn_type;
+    fd.body = fnbody;
+    d = cc_arena_alloc(L->arena, sizeof(CcDecl), _Alignof(CcDecl));
+    memset(d, 0, sizeof(*d));
+    d->span = sp;
+    d->specs = CC_SPEC_STATIC;
+    d->attrs = vec_new::[CcAttr](L->arena);
+    { CcDeclK dk = { .func = fd }; d->k = dk; }
+    return d;
+}
+
+/* What `wait (...)` names: 2 a turnstile reached by pointer, 1 one held by
+ * value, 0 not a turnstile at all. The pool caps on the caller's own, so a
+ * value is taken by address; anything else is not a gate this site can cap on
+ * and saying so beats a C type error at a line about something else. */
+static int pl_pw_gate_form(Walker* w, CcExpr* g) {
+    CcType* t = type_of_expr(w, g);
+    CcType* p = NULL;
+    CCSlice nm = cc_slice_empty();
+    CCSlice want = cstr_slice("CCTurnstile");
+    if (!t) return 0;
+    @switch (t->k) {
+        case .pointer(pt): p = pt.pointee; break;
+        default: break;
+    }
+    if (p) {
+        if (type_named_name(p, &nm) && slice_eq(nm, want)) return 2;
+        return 0;
+    }
+    if (type_named_name(t, &nm) && slice_eq(nm, want)) return 1;
+    return 0;
+}
+
+/* The site: open the pool, hand out the tickets under the gate, then read
+ * what the pool left behind. */
+static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
+    CcLowerer* L = st->L;
+    Walker* w = st->w;
+    CcSpan sp = s->span;
+    uint32_t id = st->next_id++;
+    PScan sc;
+    PCapList caps;
+    CcStmt* blk = lw_block(L, sp);
+    CCSlice env = pl_pw_name(L, id, "_env_t");
+    CCSlice sht = pl_pw_name(L, id, "_sh_t");
+    CCSlice slt = pl_pw_name(L, id, "_slot_t");
+    CCSlice agt = pl_pw_name(L, id, "_arg_t");
+    CCSlice ext = pl_for_ex_type(L, id);
+    CCSlice run = pl_pw_name(L, id, "_run");
+    CCSlice worker = pl_pw_name(L, id, "_worker");
+    CCSlice ev = pl_pw_name(L, id, "_e");
+    CCSlice shv = pl_pw_name(L, id, "_sh");
+    CCSlice cell = pl_pw_name(L, id, "_ex");
+    CCSlice s0 = pl_pw_name(L, id, "_s0");
+    CCSlice nur = pl_pw_name(L, id, "_n");
+    CCSlice gv = pl_pw_name(L, id, "_ts");
+    CCSlice work = pl_pw_name(L, id, "_work");
+    CCSlice slots = pl_pw_name(L, id, "_slots");
+    CCSlice args = pl_pw_name(L, id, "_args");
+    CCSlice ferr = pl_pw_name(L, id, "_ferr");
+    CCSlice fail = pl_pw_name(L, id, "_fail");
+    CCSlice echo = pl_pw_name(L, id, "_echo");
+    CCSlice best = pl_pw_name(L, id, "_best");
+    CCSlice wv = pl_pw_name(L, id, "_w");
+    CCSlice nw = pl_pw_name(L, id, "_nw");
+    CCSlice nh = pl_pw_name(L, id, "_nh");
+    CCSlice spawned = pl_pw_name(L, id, "_spawned");
+    CCSlice iv = pl_pw_name(L, id, "_i");
+    CCSlice eok = pl_pw_name(L, id, "_eok");
+    CCSlice sf = pl_pw_name(L, id, "_sf");
+    CCSlice ret_ty = cstr_slice("int");
+    CCSlice gspell = cc_slice_empty();
+    CCSlice wspell = cc_slice_empty();
+    CCSlice los = cc_slice_empty();
+    CCSlice his = cc_slice_empty();
+    int gform = pl_pw_gate_form(w, pf.wait);
+    size_t n;
+    size_t i;
+    memset(&sc, 0, sizeof(sc));
+    sc.st = st;
+    sc.w = w;
+    sc.caps = vec_new::[PCapRef](L->arena);
+    sc.seen = vec_new::[CCSlice](L->arena);
+    sc.skip = pf.loop.bind;
+    {
+        CcVisitor v;
+        memset(&v, 0, sizeof(v));
+        v.expr = pl_scan_expr;
+        v.env = &sc;
+        if (pf.loop.body) CcStmt_walk(pf.loop.body, v);
+    }
+    caps = sc.caps;
+    n = caps.len();
+    for (i = 0; i < n; i++) {
+        PCap* c = *caps.get_ptr(i);
+        c->by_addr = true;
+    }
+    if (st->fn_ret) {
+        /* the cell a `return` lands in is typed by the function it leaves;
+         * a `void` one still needs a cell C can declare */
+        CCSlice rn = L->ix->canon(st->fn_ret);
+        CCSlice vd = cstr_slice("void");
+        if (rn.len && !slice_eq(rn, vd)) ret_ty = rn;
+    }
+    { CCString t = lw_spell_expr(L, pf.wait); wspell = lw_keep(L, &t); }
+    if (pf.seq) { CCString t = lw_spell_expr(L, pf.seq); gspell = lw_keep(L, &t); }
+    { CCString t = lw_spell_expr(L, rg.lo); los = lw_keep(L, &t); }
+    { CCString t = lw_spell_expr(L, rg.hi); his = lw_keep(L, &t); }
+    {
+        CCString et = pl_pw_env_text(st, id, &caps, ret_ty);
+        st->fwd.push_slice(et.as_slice(), L->arena);
+    }
+    pl_pw_forward(st, id);
+    st->made.push(pl_pw_run_decl(st, id, &caps, pf.loop, sp));
+    st->made.push(pl_pw_worker_decl(st, id, sp));
+    {
+        CCString a1 = @string(`${env} ${ev}`, L->arena);
+        CCString a2 = @string(`${sht} ${shv}`, L->arena);
+        CCString a3 = @string(`${ext} ${cell}`, L->arena);
+        CCString a4 = @string(`${slt} ${s0}`, L->arena);
+        CCString a5 = @string(`CCNurseryHost* ${nur} = 0`, L->arena);
+        CCString a6 = @string(`CCChan* ${work} = 0`, L->arena);
+        CCString a7 = @string(`${slt}* ${slots} = 0`, L->arena);
+        CCString a8 = @string(`${agt}* ${args} = 0`, L->arena);
+        CCString a9 = (gform == 1)
+            ? @string(`CCTurnstile* ${gv} = &(${wspell})`, L->arena)
+            : @string(`CCTurnstile* ${gv} = (${wspell})`, L->arena);
+        pl_pw_text(L, blk, a1, sp);
+        pl_pw_text(L, blk, a2, sp);
+        pl_pw_text(L, blk, a3, sp);
+        pl_pw_text(L, blk, a4, sp);
+        pl_pw_text(L, blk, a5, sp);
+        pl_pw_text(L, blk, a6, sp);
+        pl_pw_text(L, blk, a7, sp);
+        pl_pw_text(L, blk, a8, sp);
+        pl_pw_text(L, blk, a9, sp);
+    }
+    {
+        CCString b1 = @string(`CCError ${ferr}`, L->arena);
+        CCString b2 = @string(`int ${fail} = 0`, L->arena);
+        CCString b3 = @string(`int ${echo} = 0`, L->arena);
+        CCString b4 = @string(`int ${best} = 0`, L->arena);
+        CCString b5 = @string(`int ${wv} = 0`, L->arena);
+        CCString b6 = @string(`int ${nw} = 1`, L->arena);
+        CCString b7 = @string(`int ${nh} = 1`, L->arena);
+        CCString b8 = @string(`int ${spawned} = 0`, L->arena);
+        CCString b9 = @string(`int ${iv} = 0`, L->arena);
+        CCString b10 = @string(`int ${eok} = 0`, L->arena);
+        CCString b11 = @string(`int ${sf} = 0`, L->arena);
+        pl_pw_text(L, blk, b1, sp);
+        pl_pw_text(L, blk, b2, sp);
+        pl_pw_text(L, blk, b3, sp);
+        pl_pw_text(L, blk, b4, sp);
+        pl_pw_text(L, blk, b5, sp);
+        pl_pw_text(L, blk, b6, sp);
+        pl_pw_text(L, blk, b7, sp);
+        pl_pw_text(L, blk, b8, sp);
+        pl_pw_text(L, blk, b9, sp);
+        pl_pw_text(L, blk, b10, sp);
+        pl_pw_text(L, blk, b11, sp);
+    }
+    {
+        CCString z1 = @string(`cc__bytes_zero(&${ferr}, sizeof(${ferr}))`, L->arena);
+        CCString z2 = @string(`cc__bytes_zero(&${cell}, sizeof(${cell}))`, L->arena);
+        CCString z3 = @string(`cc__bytes_zero(&${s0}, sizeof(${s0}))`, L->arena);
+        CCString z4 = @string(`cc__bytes_zero(&${ev}, sizeof(${ev}))`, L->arena);
+        CCString z5 = @string(`cc__bytes_zero(&${shv}, sizeof(${shv}))`, L->arena);
+        CCString z6 = @string(`if (${gv} && ${gv}->cap > 1) ${nw} = ${gv}->cap`, L->arena);
+        pl_pw_text(L, blk, z1, sp);
+        pl_pw_text(L, blk, z2, sp);
+        pl_pw_text(L, blk, z3, sp);
+        pl_pw_text(L, blk, z4, sp);
+        pl_pw_text(L, blk, z5, sp);
+        pl_pw_text(L, blk, z6, sp);
+    }
+    /* the gate is read once, here: a site it denies opens no pool at all and
+     * the tickets go through the same body on the caller */
+    if (gspell.len) {
+        CCString c1 = @string(`if ((${gspell})) { __typeof__(cc_nursery_create()) __cc_pw_nr = cc_nursery_create(); if (__cc_pw_nr.ok) ${nur} = __cc_pw_nr.u.value.p; }`, L->arena);
+        pl_pw_text(L, blk, c1, sp);
+    } else {
+        CCString c1 = @string(`{ __typeof__(cc_nursery_create()) __cc_pw_nr = cc_nursery_create(); if (__cc_pw_nr.ok) ${nur} = __cc_pw_nr.u.value.p; }`, L->arena);
+        pl_pw_text(L, blk, c1, sp);
+    }
+    {
+        /* an allocation that did not come back closes the pool again rather
+         * than running half of one: the caller takes the tickets instead */
+        CCString c2 = @string(`if (${nur}) { ${work} = cc_chan_create((size_t)${nw}); if (${work}) ${slots} = cc_nursery_closure_env_alloc_host(${nur}, (size_t)${nw} * sizeof(*${slots}), 16); if (${slots}) ${args} = cc_nursery_closure_env_alloc_host(${nur}, (size_t)${nw} * sizeof(*${args}), 16); }`, L->arena);
+        CCString c3 = @string(`if (${nur} && (!${work} || !${slots} || !${args})) { if (${work}) cc_chan_free(${work}); ${work} = 0; ${slots} = 0; ${args} = 0; cc_nursery_free_host(${nur}); ${nur} = 0; }`, L->arena);
+        pl_pw_text(L, blk, c2, sp);
+        pl_pw_text(L, blk, c3, sp);
+    }
+    {
+        /* the caller's own slot stands in for a runner's when there is no
+         * pool, so the body is handed the same shape on either schedule */
+        CCString f1 = @string(`${shv}.gate = ${gv}`, L->arena);
+        CCString f2 = @string(`${shv}.nur = ${nur}`, L->arena);
+        CCString f3 = @string(`${shv}.work = ${work}`, L->arena);
+        CCString f4 = @string(`${shv}.dest = 0`, L->arena);
+        CCString f5 = @string(`${ev}.sh = &${shv}`, L->arena);
+        CCString f6 = @string(`${ev}.slots = ${slots} ? ${slots} : &${s0}`, L->arena);
+        CCString f7 = @string(`${ev}.__cc_pf_ex = &${cell}`, L->arena);
+        CCString f8 = @string(`${nh} = ${slots} ? ${nw} : 1`, L->arena);
+        pl_pw_text(L, blk, f1, sp);
+        pl_pw_text(L, blk, f2, sp);
+        pl_pw_text(L, blk, f3, sp);
+        pl_pw_text(L, blk, f4, sp);
+        pl_pw_text(L, blk, f5, sp);
+        pl_pw_text(L, blk, f6, sp);
+        pl_pw_text(L, blk, f7, sp);
+        pl_pw_text(L, blk, f8, sp);
+    }
+    for (i = 0; i < n; i++) {
+        PCap* c = *caps.get_ptr(i);
+        CCSlice cn = c->name;
+        CCString as = pl_for_decayed(c->type)
+            ? @string(`${ev}.${cn} = (${cn})`, L->arena)
+            : @string(`${ev}.${cn} = &(${cn})`, L->arena);
+        pl_pw_text(L, blk, as, sp);
+    }
+    {
+        CCString g1 = @string(`if (${nur}) cc__bytes_zero(${slots}, (size_t)${nw} * sizeof(*${slots}))`, L->arena);
+        CCString g2 = @string(`if (${nur}) for (${wv} = 0; ${wv} < ${nw}; ${wv}++) { ${args}[${wv}].work = ${work}; ${args}[${wv}].env = &${ev}; ${args}[${wv}].slot = ${wv}; if (cc_is_ok(cc_nursery_spawn_host(${nur}, ${worker}, &${args}[${wv}]))) ${spawned}++; }`, L->arena);
+        pl_pw_text(L, blk, g1, sp);
+        pl_pw_text(L, blk, g2, sp);
+    }
+    {
+        /* the tickets, in order and under the gate. The ticket is held
+         * before the body is reached on either schedule, and the body gives
+         * it back; a ticket that was held but never reached gives it back
+         * here. */
+        CcStmt* lb = lw_block(L, sp);
+        CCString k1 = @string(`if (cc_nursery_is_cancelled_host(${nur})) break`, L->arena);
+        CCString k2 = @string(`if (cc_atomic_load(&${cell}.xk)) break`, L->arena);
+        CCString k3 = @string(`if (!${spawned} && ${ev}.slots[0].failed) break`, L->arena);
+        CCString k4 = @string(`{ __typeof__(cc_turnstile_enter(${gv}, ${iv})) __cc_pw_r = cc_turnstile_enter(${gv}, ${iv}); ${eok} = __cc_pw_r.ok; if (!__cc_pw_r.ok) ${ferr} = __cc_pw_r.u.error.base; }`, L->arena);
+        CCString k5 = @string(`if (!${eok}) { ${fail} = 1; ${best} = ${iv}; break; }`, L->arena);
+        CCString k6 = @string(`${sf} = 0`, L->arena);
+        CCString k7 = @string(`if (${spawned} && cc_chan_send(${work}, &${iv}, sizeof(${iv})) != 0) ${sf} = 1`, L->arena);
+        CCString k8 = @string(`if (!${spawned}) ${run}(&${ev}, ${iv}, 0)`, L->arena);
+        CCString k9 = @string(`if (${sf}) { (void)cc_turnstile_leave(${gv}); ${ferr} = CC_ERROR(CC_ERR_IO, "parallel wait send"); ${fail} = 1; ${best} = ${iv}; break; }`, L->arena);
+        CCString ki = @string(`${iv} = (int)(${los})`, L->arena);
+        CCString kc = @string(`${iv} < (int)(${his})`, L->arena);
+        CCString ks = @string(`${iv}++`, L->arena);
+        pl_pw_text(L, lb, k1, sp);
+        pl_pw_text(L, lb, k2, sp);
+        pl_pw_text(L, lb, k3, sp);
+        pl_pw_text(L, lb, k4, sp);
+        pl_pw_text(L, lb, k5, sp);
+        pl_pw_text(L, lb, k6, sp);
+        pl_pw_text(L, lb, k7, sp);
+        pl_pw_text(L, lb, k8, sp);
+        pl_pw_text(L, lb, k9, sp);
+        lw_push(blk, pl_pw_for(L, ki, kc, ks, lb, sp));
+    }
+    {
+        CCString h1 = @string(`if (${work}) cc_chan_close(${work})`, L->arena);
+        CCString h2 = @string(`if (${nur}) (void)cc_nursery_wait_host(${nur})`, L->arena);
+        pl_pw_text(L, blk, h1, sp);
+        pl_pw_text(L, blk, h2, sp);
+    }
+    {
+        /* which ticket error re-raises: the earliest one that is not just an
+         * echo of the cancel the first error asked for */
+        CcStmt* hb = lw_block(L, sp);
+        CCString p1 = @string(`${slt}* __cc_pw_it = &${ev}.slots[${wv}]; int __cc_pw_ec = __cc_pw_it->failed && (__cc_pw_it->err.kind == CC_ERR_CANCELLED)`, L->arena);
+        CCString p2 = @string(`if (__cc_pw_it->failed && (!${fail} || (!__cc_pw_ec && ${echo}) || (__cc_pw_ec == ${echo} && __cc_pw_it->i < ${best}))) { ${ferr} = __cc_pw_it->err; ${fail} = 1; ${best} = __cc_pw_it->i; ${echo} = __cc_pw_ec; }`, L->arena);
+        CCString hi = @string(`${wv} = 0`, L->arena);
+        CCString hc = @string(`${wv} < ${nh}`, L->arena);
+        CCString hs = @string(`${wv}++`, L->arena);
+        pl_pw_text(L, hb, p1, sp);
+        pl_pw_text(L, hb, p2, sp);
+        lw_push(blk, pl_pw_for(L, hi, hc, hs, hb, sp));
+    }
+    {
+        CCString r1 = @string(`if (${work}) cc_chan_free(${work})`, L->arena);
+        CCString r2 = @string(`if (${nur}) cc_nursery_free_host(${nur})`, L->arena);
+        pl_pw_text(L, blk, r1, sp);
+        pl_pw_text(L, blk, r2, sp);
+    }
+    {
+        /* the `!>` the site was written with: the error the pool left is the
+         * enclosing handler's, raised where the walk stood */
+        CcStmt* then = lw_block(L, sp);
+        CcStmt* fw = cc__stmt_blank(sp, L->arena);
+        CcErrFwd fe;
+        CCString cnd = @string(`${fail}`, L->arena);
+        fe.err = lw_paren(L, lw_ident(L, ferr, sp), sp);
+        { CcStmtK sk = { .err_fwd = fe }; fw->k = sk; }
+        lw_push(then, fw);
+        lw_push(blk, lw_if(L, lw_text(L, cnd, sp), then, NULL, sp));
+    }
+    {
+        /* a `return` inside the body is the caller's to make */
+        CcStmt* then = lw_block(L, sp);
+        CCString rv = @string(`${cell}.rv`, L->arena);
+        CCString cnd = @string(`cc_atomic_load(&${cell}.xk) == 2`, L->arena);
+        lw_push(then, cc_stmt_return(lw_text(L, rv, sp), sp, L->arena));
+        lw_push(blk, lw_if(L, lw_text(L, cnd, sp), then, NULL, sp));
+    }
+    s->k = blk->k;
+    st->any = true;
+}
+
+/* A `@stage` of the walk's own body: it sequences the tickets, which is not
+ * this shape. */
+static bool pl_pw_has_stage(CcStmt* body) {
+    CcStmtList* bs = lw_block_stmts(body);
+    size_t n;
+    size_t i;
+    if (!bs) return false;
+    n = bs->len();
+    for (i = 0; i < n; i++) {
+        CcStmt* k = *bs->get_ptr(i);
+        bool is_stage = false;
+        @switch (k->k) {
+            case .stage: is_stage = true; break;
+            default: break;
+        }
+        if (is_stage) return true;
+    }
+    return false;
+}
+
+/* `} !>` after the body: the tail that says a ticket error leaves the site.
+ * A join that keeps its Result says something else, and the site has nowhere
+ * to put the error it collected. */
+static bool pl_pw_tail_raises(CcExpr* tail) {
+    bool raises = false;
+    if (!tail) return false;
+    @switch (tail->k) {
+        case .unwrap: raises = true; break;
+        default: break;
+    }
+    return raises;
+}
+
+/* A `break` that belongs to the walk itself, not to a loop the body opened.
+ * It makes the site's join answer a question -- did every ticket run? -- and
+ * that answer is the bound form (`bool fin = ${"@"}parallel ... !>.wait()!>`),
+ * which this step does not lower. Discarding it is what
+ * `parallel_wait_result_discard_fail` is about, so the walk with the `break`
+ * is refused rather than the discard alone. */
+static bool pl_pw_break_at(CcStmt* s, int depth) {
+    CcStmtList* bs;
+    size_t n;
+    size_t i;
+    int inner = depth;
+    bool opens = false;
+    bool is_break = false;
+    CcStmt* a = NULL;
+    CcStmt* b = NULL;
+    if (!s) return false;
+    @switch (s->k) {
+        case .break_: is_break = true; break;
+        case .for_(x): opens = true; a = x.body; break;
+        case .while_(x): opens = true; a = x.body; break;
+        case .do_(x): opens = true; a = x.body; break;
+        case .switch_(x): opens = true; a = x.body; break;
+        case .if_(x): a = x.then; b = x.els; break;
+        case .label(x): a = x.inner; break;
+        default: break;
+    }
+    if (is_break) return depth == 0;
+    if (opens) inner = depth + 1;
+    bs = lw_block_stmts(s);
+    if (bs) {
+        n = bs->len();
+        for (i = 0; i < n; i++) {
+            CcStmt* k = *bs->get_ptr(i);
+            if (pl_pw_break_at(k, inner)) return true;
+        }
+        return false;
+    }
+    if (a && pl_pw_break_at(a, inner)) return true;
+    if (b && pl_pw_break_at(b, inner)) return true;
+    return false;
+}
+
+/* A `goto` anywhere in a walked body. The body becomes a function of its own,
+ * so a label the site can see is one the body cannot jump to; C would say so
+ * at a line that reads as the walk's, which is not where the jump is. */
+static bool pl_pw_goto_visit(CcStmt* s, void* env) {
+    bool* hit = (bool*)env;
+    @switch (s->k) {
+        case .goto_: *hit = true; break;
+        default: break;
+    }
+    return true;
+}
+
+static bool pl_pw_has_goto(CcStmt* body) {
+    CcVisitor v;
+    bool hit = false;
+    if (!body) return false;
+    memset(&v, 0, sizeof(v));
+    v.stmt = pl_pw_goto_visit;
+    v.env = &hit;
+    CcStmt_walk(body, v);
+    return hit;
 }
 
 /* `@parallel [seq (c)] [wait (ts)] for (i in lo..hi) [worker (w)] [cache (…)]`.
@@ -1437,9 +2101,77 @@ static void pl_for(PStep* st, CcStmt* s, CcParallelFor pf) {
         pl_for_lower(st, s, pf, rg);
         return;
     }
-    m = @string(`'${"@"}parallel wait (...) for' is not lowered by the clean lowerer yet`, L->arena);
-    lw_error(L, sp, m);
-    s->k = gone->k;
+    if (pf.pred) {
+        m = @string(`a gated '${"@"}parallel wait (...) for' spells its gate 'seq (...)': the predicate form is not lowered by the clean lowerer yet`, L->arena);
+        lw_error(L, sp, m);
+        s->k = gone->k;
+        return;
+    }
+    if (pf.worker.len) {
+        m = @string(`'${"@"}parallel wait (...) for' with 'worker' is not lowered by the clean lowerer yet`, L->arena);
+        lw_error(L, sp, m);
+        s->k = gone->k;
+        return;
+    }
+    if (pf.cache.len()) {
+        m = @string(`'${"@"}parallel wait (...) for' with 'cache' is not lowered by the clean lowerer yet`, L->arena);
+        lw_error(L, sp, m);
+        s->k = gone->k;
+        return;
+    }
+    if (pf.bind.len || pf.target) {
+        m = @string(`'${"@"}parallel wait (...) for' that also binds a handle is not lowered by the clean lowerer yet: the pool joins before the brace ends`, L->arena);
+        lw_error(L, sp, m);
+        s->k = gone->k;
+        return;
+    }
+    if (!pl_pw_gate_form(st->w, pf.wait)) {
+        m = @string(`'${"@"}parallel wait (...)' caps on a 'CCTurnstile': the gate here is something else`, L->arena);
+        lw_error(L, sp, m);
+        s->k = gone->k;
+        return;
+    }
+    if (pf.loop.body && pl_pw_break_at(pf.loop.body, 0)) {
+        m = @string(`a 'break' out of a '${"@"}parallel wait (...) for' body is not lowered by the clean lowerer yet: the walk it leaves unfinished is the bound form's answer`, L->arena);
+        lw_error(L, sp, m);
+        s->k = gone->k;
+        return;
+    }
+    if (pl_pw_has_goto(pf.loop.body)) {
+        m = @string(`a 'goto' out of a '${"@"}parallel wait (...) for' body is not lowered by the clean lowerer yet: the body becomes a function of its own and the label stays the caller's`, L->arena);
+        lw_error(L, sp, m);
+        s->k = gone->k;
+        return;
+    }
+    if (pl_pw_has_stage(pf.loop.body)) {
+        m = cc_string_new();
+        cc_string_push_cstr(&m, "@stage in a '@parallel wait for' body is not lowered by the clean lowerer yet", L->arena);
+        lw_error(L, sp, m);
+        s->k = gone->k;
+        return;
+    }
+    if (!pl_pw_tail_raises(pf.tail)) {
+        /* Assembled rather than templated: the message carries an `@` and a
+         * `!>`, and a template reads the first as a sigil. */
+        m = cc_string_new();
+        cc_string_push_cstr(&m, "@parallel wait (gate) for needs its '!>.wait()!>' tail: a ticket error has nowhere else to go", L->arena);
+        lw_error(L, sp, m);
+        s->k = gone->k;
+        return;
+    }
+    {
+        CcRange rg;
+        CcExprList* itv = &pf.loop.iterables;
+        bool ranged = itv->len() == 1 && fi_is_range(*itv->get_ptr(0), &rg);
+        if (!ranged || pf.loop.bind2.len || pf.loop.by_ref) {
+            m = cc_string_new();
+            cc_string_push_cstr(&m, "@parallel wait (gate) for walks a range: write 'for (name in lo..hi)'", L->arena);
+            lw_error(L, sp, m);
+            s->k = gone->k;
+            return;
+        }
+        pl_pw_lower(st, s, pf, rg);
+    }
 }
 
 /* The walk records a `return` into a cell typed by the function it leaves. */
