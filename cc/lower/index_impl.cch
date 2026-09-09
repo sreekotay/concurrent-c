@@ -188,6 +188,7 @@ static void cc__diag_error(CcIndex* ix, CcLoc at, CCSlice msg) {
     CcDiag d = CcDiag_error(at, msg);
     d.len = 0;
     d.phys_line = 0;
+    d.notes = NULL;
     ix->ds->push(d);
 }
 
@@ -223,6 +224,7 @@ static CcSym* !>(CcDiag) CcIndex_sym(CcIndex* ix, CCSlice name) {
         d = CcDiag_error(at, cc__ix_finish(ix, &sb));
         d.len = 0;
         d.phys_line = 0;
+        d.notes = NULL;
         return cc_err(d);
     }
 }
@@ -296,6 +298,7 @@ static CcTypeInfo* !>(CcDiag) CcIndex_type(CcIndex* ix, CCSlice canonical) {
         d = CcDiag_error(at, cc__ix_finish(ix, &sb));
         d.len = 0;
         d.phys_line = 0;
+        d.notes = NULL;
         return cc_err(d);
     }
 }
@@ -3851,6 +3854,7 @@ static CcMethod* !>(CcDiag) CcIndex_method_recv(CcIndex* ix, CcTypeInfo* recv, C
         d = CcDiag_error(at, cc_string_persist_slice(a, &sb));
         d.len = 0;
         d.phys_line = 0;
+        d.notes = NULL;
         return cc_err(d);
     }
 }

@@ -15,6 +15,12 @@ static CcDiag cc__diag_make(CcSeverity sev, CcLoc at, CCSlice msg) {
     d.at = at;
     d.msg = msg;
     d.note = cc_slice_empty();
+    /* `len` drives the caret's underline and `phys_line` picks the snippet:
+     * left unset they are whatever the stack held, which prints a plausible
+     * caret of the wrong width under a plausible line. */
+    d.len = 0;
+    d.phys_line = 0;
+    d.notes = NULL;
     return d;
 }
 
@@ -25,6 +31,23 @@ static CcDiag CcDiag_note(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_N
 
 static CcDiag CcDiag_with_note(CcDiag d, CCSlice note) {
     d.note = note;
+    return d;
+}
+
+static CcDiag CcDiag_with_note_at(CcDiag d, CcLoc at, CCSlice msg, CCArena a) {
+    CcDiagNote* n = cc_arena_alloc(a, sizeof(CcDiagNote), _Alignof(CcDiagNote));
+    if (!n) return d;
+    n->at = at;
+    n->msg = msg;
+    n->len = 0;
+    n->phys_line = 0;
+    n->next = NULL;
+    if (!d.notes) { d.notes = n; return d; }
+    {
+        CcDiagNote* tail = d.notes;
+        while (tail->next) tail = tail->next;
+        tail->next = n;
+    }
     return d;
 }
 
@@ -105,6 +128,35 @@ static CCSlice cc__nth_line(CCSlice text, uint32_t line) {
     return cc_slice_sub(text, start, i);
 }
 
+/* The source line a position names, with a caret under it. Shared by a
+ * diagnostic and by every note that carries a place of its own. */
+static void cc__print_snippet(FILE* out, CcSourceFn source, void* ctx,
+                              CcLoc at, uint32_t phys_line, uint32_t len) {
+    CCSlice text;
+    CCSlice snippet;
+    bool physical = true;
+    uint32_t at_line;
+    const char* sp;
+    if (!source || !at.line) return;
+    text = source(at.path, ctx, &physical);
+    at_line = physical && phys_line ? phys_line : at.line;
+    snippet = cc__nth_line(text, at_line);
+    sp = (const char*)snippet.ptr;
+    /* An empty line (end of file) still gets its caret. */
+    cc__print_slice(out, snippet);
+    fputc('\n', out);
+    if (at.col) {
+        uint32_t k;
+        uint32_t c;
+        /* Keep tabs so the caret lines up under the source. */
+        for (c = 1; c < at.col; c++)
+            fputc(c - 1 < snippet.len && sp[c - 1] == '\t' ? '\t' : ' ', out);
+        fputc('^', out);
+        for (k = 1; k < len; k++) fputc('~', out);
+        fputc('\n', out);
+    }
+}
+
 static void CcDiags_print(const CcDiags* ds, FILE* out, CcSourceFn source, void* ctx) {
     CcDiags* sink = (CcDiags*)ds;   /* the vec accessors take a mutable receiver */
     uint32_t n = (uint32_t)sink->items.len();
@@ -143,25 +195,22 @@ static void CcDiags_print(const CcDiags* ds, FILE* out, CcSourceFn source, void*
             cc__print_slice(out, d->note);
             fputc('\n', out);
         }
-        if (source && d->at.line) {
-            bool physical = true;
-            CCSlice text = source(d->at.path, ctx, &physical);
-            uint32_t at_line = physical && d->phys_line ? d->phys_line : d->at.line;
-            CCSlice snippet = cc__nth_line(text, at_line);
-            /* An empty line (end of file) still gets its caret. */
-            {
-                const char* sp = (const char*)snippet.ptr;
-                cc__print_slice(out, snippet);
-                fputc('\n', out);
-                if (d->at.col) {
-                    uint32_t k;
-                    /* Keep tabs so the caret lines up under the source. */
-                    for (uint32_t c = 1; c < d->at.col; c++)
-                        fputc(c - 1 < snippet.len && sp[c - 1] == '\t' ? '\t' : ' ', out);
-                    fputc('^', out);
-                    for (k = 1; k < d->len; k++) fputc('~', out);
-                    fputc('\n', out);
+        cc__print_snippet(out, source, ctx, d->at, d->phys_line, d->len);
+        {
+            CcDiagNote* nt = d->notes;
+            for (; nt; nt = nt->next) {
+                if (nt->at.line) {
+                    if (nt->at.path.len) cc__print_slice(out, nt->at.path);
+                    else fputs("<unknown>", out);
+                    fprintf(out, ":%u", (unsigned)nt->at.line);
+                    if (nt->at.col) fprintf(out, ":%u", (unsigned)nt->at.col);
+                    fputs(": note: ", out);
+                } else {
+                    fputs("  note: ", out);
                 }
+                cc__print_slice(out, nt->msg);
+                fputc('\n', out);
+                cc__print_snippet(out, source, ctx, nt->at, nt->phys_line, nt->len);
             }
         }
     }

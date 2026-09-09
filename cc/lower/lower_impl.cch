@@ -49,6 +49,19 @@ static void lw_error(CcLowerer* L, CcSpan span, CCString msg) {
     ds->push(d);
 }
 
+/* An error about two positions: where it went wrong, and the place the
+ * reader has to see to understand why. */
+static void lw_error_at(CcLowerer* L, CcSpan span, CCString msg,
+                        CcSpan note_span, CCString note_msg) {
+    CcUnit* u = L->unit;
+    CcLoc loc = u->loc(span);
+    CcLoc nloc = u->loc(note_span);
+    CcDiag d = CcDiag_error(loc, cc_string_persist_slice(L->arena, &msg));
+    CcDiags* ds = L->ds;
+    d = CcDiag_with_note_at(d, nloc, cc_string_persist_slice(L->arena, &note_msg), L->arena);
+    ds->push(d);
+}
+
 /* ---- node builders ---------------------------------------------------- */
 
 /* A persisted copy of a built string, as a slice the nodes can keep. */

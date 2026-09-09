@@ -23,6 +23,23 @@ typedef struct CcLoc {
     uint32_t col;       /* 1-based; 0 = unknown */
 } CcLoc;
 
+/* A second place the reader has to look.
+ *
+ * Some errors are about a relationship between two positions -- a value
+ * returned here that was built there -- and naming only one of them leaves
+ * the reader to find the other. A note carries its own location and prints
+ * like a diagnostic of its own; `at.line == 0` means it has no place and
+ * prints as a plain trailing line. They chain rather than sit in a fixed
+ * array: how many an error wants is a property of the error. */
+typedef struct CcDiagNote CcDiagNote;
+struct CcDiagNote {
+    CcLoc at;
+    CCSlice msg;
+    uint32_t len;
+    uint32_t phys_line;
+    CcDiagNote* next;
+};
+
 typedef struct CcDiag {
     CcSeverity sev;
     CcLoc at;
@@ -30,6 +47,7 @@ typedef struct CcDiag {
     CCSlice note;       /* optional second line: what would fix it; empty when none */
     uint32_t len;       /* bytes the caret underlines; 0 = one caret */
     uint32_t phys_line; /* physical line for the snippet when `at` is #line-rebased; 0 = at.line */
+    CcDiagNote* notes;  /* located notes, in the order they were attached */
 } CcDiag;
 /* d.with_len(n): the same diagnostic underlining n bytes. */
 static CcDiag CcDiag_with_len(CcDiag d, uint32_t len);
@@ -40,6 +58,8 @@ static CcDiag CcDiag_warning(CcLoc at, CCSlice msg);
 static CcDiag CcDiag_note(CcLoc at, CCSlice msg);
 /* d.with_note(note): same diagnostic with a note attached. */
 static CcDiag CcDiag_with_note(CcDiag d, CCSlice note);
+/* d.with_note_at(at, msg, a): a note the reader can go and look at. */
+static CcDiag CcDiag_with_note_at(CcDiag d, CcLoc at, CCSlice msg, CCArena a);
 
 /* The sink. */
 typedef struct CcDiags {

@@ -55,6 +55,7 @@ struct OwnFacts {
     bool nonstable;     /* an aggregate whose slice field an initializer filled from a borrow */
     bool scratch;       /* built into the function's `@scratch` arena: its bytes die with the frame */
     bool is_chan;       /* a channel endpoint: `T[~n >]` / `T[~n <]`, CCChanTx, CCChanRx, CCChan* */
+    CcSpan at;          /* where it was declared: a lifetime error names both ends */
 };
 typedef struct OwnFacts OwnFacts;
 /* Rows live in the arena and the tables hold pointers to them, so a row a
@@ -713,6 +714,17 @@ static void own_scratch_escape(Own* O, CcSpan sp) {
     own_err(O, sp, m, note);
 }
 
+/* The same escape with a name in front of it. Two positions: the return
+ * hands the bytes out, and the declaration is where they were put somewhere
+ * that cannot outlive the frame. Neither alone tells the reader what to
+ * change. */
+static void own_scratch_escape_named(Own* O, CcSpan sp, CCSlice name, CcSpan at) {
+    CcLowerer* L = O->L;
+    CCString m = @string(`returning '${name}' hands back bytes in this frame's ${"@"}scratch arena`, L->arena);
+    CCString n = @string(`'${name}' was built into ${"@"}scratch here, which is a buffer in this function's frame and dies with it; build into an arena the caller supplied`, L->arena);
+    lw_error_at(L, sp, m, at, n);
+}
+
 static void own_report_copy(Own* O, CcSpan sp) {
     CCString m = @string(`cannot copy unique slice`, O->L->arena);
     CCSlice note = own_move_note();
@@ -1101,6 +1113,7 @@ static void own_declare(Own* O, CcDecl* d, CcVarDecl vd) {
     O->saw_scratch = false;
     own_init_scratch(O, vd.init);
     nv.scratch = O->saw_scratch;
+    nv.at = d->span;
     if (!nv.is_slice && !nv.is_ptr) {
         O->init_nonstable = false;
         own_init_nonstable(O, vd.init);
@@ -1252,11 +1265,10 @@ static void own_stmt(Own* O, CcStmt* s) {
             }
             if (!own_ident_of(rt.value, &nm)) break;
             x = own_lookup(O, nm);
-            /* Handing back a local that holds one is the same escape with a
-             * name in front of it, and `x->scratch` says which locals those
-             * are -- but the reference accepts that shape, so refusing it
-             * here would be this lowerer inventing a rule. The fact is kept
-             * and not acted on until the language says it is one. */
+            if (x && x->scratch) {
+                own_scratch_escape_named(O, s->span, nm, x->at);
+                break;
+            }
             if (!x || !x->is_slice || !x->unique) break;
             {
                 CCString m = @string(`cannot return unique slice`, O->L->arena);
