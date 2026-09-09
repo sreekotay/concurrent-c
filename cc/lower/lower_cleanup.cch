@@ -403,6 +403,29 @@ static CcStmt* cl_soft_return(CFn* fn, CcStmt* s, CcExpr* value) {
     return blk;
 }
 
+/* `goto __cc_eh_N;` -> `{ <unwind to the function scope>; goto __cc_eh_N; }`.
+ *
+ * The Results step turns a `!>` with no local handler into a jump to the
+ * handler's label, and that label sits at function scope: the jump leaves
+ * every block between it and there, so those blocks' `@destroy` runs, the
+ * same amount a `return` from the same place unwinds. A `goto` the user
+ * wrote is theirs and is left alone -- where it should not cross a scope,
+ * that is a diagnostic, not an unwind. */
+static bool cl_is_handler_label(CCSlice name) {
+    return name.len > 8 && memcmp(name.ptr, "__cc_eh_", 8) == 0;
+}
+
+static CcStmt* cl_soft_goto(CFn* fn, CcStmt* s, CcGoto g) {
+    CcLowerer* L = fn->L;
+    CcStmt* blk;
+    if (!g.label.len || !cl_is_handler_label(g.label)) return s;
+    if (!cl_any_sites_upto(fn, cl_function_scope(fn), false)) return s;
+    blk = lw_block(L, s->span);
+    cl_unwind(fn, cl_function_scope(fn), false, blk);
+    lw_push(blk, s);
+    return blk;
+}
+
 /* `break;` / `continue;` -> `{ <unwind to the loop or switch>; break; }` when
  * a site sits in between. */
 static CcStmt* cl_soft_jump(CFn* fn, CcStmt* s, bool is_continue) {
@@ -472,6 +495,7 @@ static CcStmt* cl_stmt(CFn* fn, CcStmt* s) {
         case .return_(r): return fn->any ? cl_soft_return(fn, s, r.value) : s;
         case .break_: return cl_soft_jump(fn, s, false);
         case .continue_: return cl_soft_jump(fn, s, true);
+        case .goto_(g): return cl_soft_goto(fn, s, g);
         case .defer(d): return cl_register_defer(fn, &d, s->span);
         case .cancel_defer(cd): return cl_cancel_defer(fn, &cd, s->span);
         case .decl(ds): {
