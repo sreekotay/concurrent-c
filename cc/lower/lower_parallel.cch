@@ -2924,27 +2924,71 @@ static bool pl_pw_break_at(CcStmt* s, int depth) {
     return false;
 }
 
-/* A `goto` anywhere in a walked body. The body becomes a function of its own,
- * so a label the site can see is one the body cannot jump to; C would say so
- * at a line that reads as the walk's, which is not where the jump is. */
-static bool pl_pw_goto_visit(CcStmt* s, void* env) {
-    bool* hit = (bool*)env;
+/* A `goto` in a walked body that leaves it. The body becomes a function of
+ * its own, so a label the site can see is one the body cannot jump to; C
+ * would say so at a line that reads as the walk's, which is not where the
+ * jump is. A jump to a label the body carries itself stays inside and is
+ * nobody's business but the body's, so the labels are collected first. */
+typedef struct PGoto {
+    CcLowerer* L;
+    CcNameList labels;
+    CCSlice out;                /* the first label jumped to from outside */
+} PGoto;
+
+static bool pl_pw_label_visit(CcStmt* s, void* env) {
+    PGoto* g = (PGoto*)env;
+    CCSlice name = cc_slice_empty();
     @switch (s->k) {
-        case .goto_: *hit = true; break;
+        case .label(lb): name = lb.name; break;
         default: break;
     }
+    if (name.len) g->labels.push(name);
     return true;
 }
 
-static bool pl_pw_has_goto(CcStmt* body) {
+static bool pl_pw_goto_visit(CcStmt* s, void* env) {
+    PGoto* g = (PGoto*)env;
+    CCSlice want = cc_slice_empty();
+    CcGoto gt;
+    bool is_goto = false;
+    size_t n;
+    size_t i;
+    bool inside = false;
+    /* `gt.label` inside the switch would read as a projection of the arm
+     * named `label`, which is a different statement kind entirely. Read the
+     * jump's own field once the switch is behind us. */
+    @switch (s->k) {
+        case .goto_(x): gt = x; is_goto = true; break;
+        default: break;
+    }
+    if (!is_goto) return true;
+    want = gt.label;
+    if (!want.len || g->out.len) return true;
+    n = g->labels.len();
+    for (i = 0; i < n; i++) {
+        CCSlice nm = *g->labels.get_ptr(i);
+        if (slice_eq(nm, want)) inside = true;
+    }
+    if (!inside) g->out = want;
+    return true;
+}
+
+static CCSlice pl_pw_goto_out(CcLowerer* L, CcStmt* body) {
     CcVisitor v;
-    bool hit = false;
-    if (!body) return false;
+    PGoto g;
+    if (!body) return cc_slice_empty();
+    g.L = L;
+    g.labels = vec_new::[CCSlice](L->arena);
+    g.out = cc_slice_empty();
+    memset(&v, 0, sizeof(v));
+    v.stmt = pl_pw_label_visit;
+    v.env = &g;
+    CcStmt_walk(body, v);
     memset(&v, 0, sizeof(v));
     v.stmt = pl_pw_goto_visit;
-    v.env = &hit;
+    v.env = &g;
     CcStmt_walk(body, v);
-    return hit;
+    return g.out;
 }
 
 /* `@parallel [seq (c)] [wait (ts)] for (i in lo..hi) [worker (w)] [cache (…)]`.
@@ -3033,7 +3077,7 @@ static void pl_for(PStep* st, CcStmt* s, CcParallelFor pf) {
         return;
     }
     if (!pl_pw_gate_form(st->w, pf.wait)) {
-        m = @string(`'${"@"}parallel wait (...)' caps on a 'CCTurnstile': the gate here is something else`, L->arena);
+        m = @string(`'${"@"}parallel wait (...)' caps on a gate: it must be a CCTurnstile`, L->arena);
         lw_error(L, sp, m);
         s->k = gone->k;
         return;
@@ -3047,11 +3091,16 @@ static void pl_for(PStep* st, CcStmt* s, CcParallelFor pf) {
         s->k = gone->k;
         return;
     }
-    if (pl_pw_has_goto(pf.loop.body)) {
-        m = @string(`a 'goto' out of a '${"@"}parallel wait (...) for' body is not lowered by the clean lowerer yet: the body becomes a function of its own and the label stays the caller's`, L->arena);
-        lw_error(L, sp, m);
-        s->k = gone->k;
-        return;
+    {
+        /* not a gap: the body is a function of its own, so the label is one
+         * it can never reach, whatever the lowering does */
+        CCSlice away = pl_pw_goto_out(L, pf.loop.body);
+        if (away.len) {
+            m = @string(`goto '${away}' crosses a '${"@"}parallel' boundary`, L->arena);
+            lw_error(L, sp, m);
+            s->k = gone->k;
+            return;
+        }
     }
     if (!pl_pw_stages_ok(st, pf.loop.body)) {
         s->k = gone->k;
