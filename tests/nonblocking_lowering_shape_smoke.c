@@ -110,14 +110,24 @@ int main(void) {
         return 2;
     }
 
-    wraps = count_substr(lowered, " = (cc_run_blocking_task_intptr(");
+    /* Three calls are eligible to run on a blocking thread: the two outside
+     * the `@nonblocking` block and the one it marks `@blocking`. How the
+     * result is spelled is the lowerer's business -- one parenthesises the
+     * call, another does not -- so count the dispatch, not the punctuation. */
+    wraps = count_substr(lowered, "cc_run_blocking_task_intptr(");
     if (wraps != 3) {
         fprintf(stderr, "expected 3 blocking wraps, got %d\n", wraps);
         free(lowered);
         return 1;
     }
 
-    if (!strstr(lowered, "direct_inside(__f->__p_b);")) {
+    /* The call inside the `@nonblocking` block runs where it stands. It
+     * appears twice in the output -- its definition and that one call -- and
+     * the three dispatches counted above are the other three calls, so it is
+     * not one of them. The argument is spelled differently by each lowerer:
+     * one rewrites a parameter to its frame field at every use, the other
+     * reads the frame into a local once, and both are the same call. */
+    if (count_substr(lowered, "direct_inside(") != 2) {
         fprintf(stderr, "missing direct call for @nonblocking block body\n");
         free(lowered);
         return 1;
