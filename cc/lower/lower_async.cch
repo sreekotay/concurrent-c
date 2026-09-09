@@ -705,6 +705,94 @@ static void as_ab_emit(ABlk* ab, CcStmtList stmts, size_t at, size_t n, bool tai
     head->k = blk->k;
 }
 
+/* `T x = f(a);` where `f` is a blocking edge.
+ *
+ * The wrap is one statement expression rather than a block, so the
+ * declaration keeps the scope it was written in: a block in its place would
+ * take `x` with it, and every later use of `x` would be a name the host
+ * compiler has never seen. */
+static bool as_ab_decl_init(CcStmt* s, CcInit** out) {
+    CcDecl* d = NULL;
+    CcVarDecl v;
+    bool is_var = false;
+    if (!s || !stmt_is_decl(s, &d) || !d) return false;
+    @switch (d->k) {
+        case .var(x): v = x; is_var = true; break;
+        default: break;
+    }
+    if (!is_var || v.destroy || v.detach || v.init_is_decl) return false;
+    if (!v.init || v.init->is_list || !v.init->expr) return false;
+    *out = v.init;
+    return true;
+}
+
+static void as_ab_emit_decl(ABlk* ab, CcStmt* s, CcInit* init) {
+    CcLowerer* L = ab->st->L;
+    CcIndex* ix = L->ix;
+    uint32_t id = L->temp_id();
+    CcSpan sp = s->span;
+    CcStmt* blk = lw_block(L, sp);
+    CcStmt* cb = lw_block(L, sp);
+    CcCall cl;
+    CcParamList* ps;
+    CcType* ret = NULL;
+    CcExpr* call;
+    CCSlice rt;
+    CcType* vt;
+    CcType* pt;
+    CCString rn = @string(`__cc_ab_r${id}`, L->arena);
+    CCString on = @string(`__cc_ab_o${id}`, L->arena);
+    CCString tn = @string(`__cc_ab_t${id}`, L->arena);
+    CCSlice r_n = lw_keep(L, &rn);
+    CCSlice o_n = lw_keep(L, &on);
+    CCSlice t_n = lw_keep(L, &tn);
+    if (!as_ab_ready(ab, init->expr, &cl, &ps, &ret)) return;
+    if (as_is_void(ret)) return;
+    rt = ix->canon(ret);
+    if (!as_plain_type(rt)) return;
+    vt = lw_named_type(L, rt, sp);
+    pt = cc_type_pointer(lw_named_type(L, rt, sp), sp, L->arena);
+    call = as_ab_args(ab, blk, cl, ps, id, 0, sp);
+    lw_push(blk, lw_decl_stmt(L, vt, r_n, NULL, sp));
+    {
+        CcExpr* addr = cc_expr_unary(CC_OP_ADDR, lw_ident(L, r_n, sp), sp, L->arena);
+        lw_push(blk, lw_decl_stmt(L, pt, o_n, addr, sp));
+    }
+    {
+        CcExpr* slot = cc_expr_unary(CC_OP_DEREF, lw_ident(L, o_n, sp), sp, L->arena);
+        lw_push(cb, lw_expr_stmt(L, lw_assign(L, slot, call, sp), sp));
+    }
+    {
+        CcExpr* clo = cc__expr_blank(sp, L->arena);
+        CcClosure kc;
+        CcExpr* run;
+        CcType* tt = lw_named_type(L, cstr_slice("CCTask"), sp);
+        memset(&kc, 0, sizeof(kc));
+        kc.params = vec_new::[CcParam](L->arena);
+        kc.captures = vec_new::[CcCapture](L->arena);
+        kc.body = cb;
+        { CcExprK ek = { .closure = kc }; clo->k = ek; }
+        run = lw_call1(L, cstr_slice("cc_run_blocking_task_intptr"), clo, sp);
+        lw_push(blk, lw_decl_stmt(L, tt, t_n, run, sp));
+    }
+    {
+        CcExpr* h = lw_ident(L, t_n, sp);
+        CcExpr* w = lw_call1(L, cstr_slice("cc_block_on_intptr"), h, sp);
+        CcType* vd = lw_named_type(L, cstr_slice("void"), sp);
+        CcExpr* dropped = as_cast(L, vd, lw_paren(L, w, sp), sp);
+        lw_push(blk, lw_expr_stmt(L, dropped, sp));
+    }
+    /* the last statement is what the statement expression is worth */
+    lw_push(blk, lw_expr_stmt(L, lw_ident(L, r_n, sp), sp));
+    {
+        CcExpr* se = cc__expr_blank(sp, L->arena);
+        CcStmtExpr sx;
+        sx.block = blk;
+        { CcExprK ek = { .stmt_expr = sx }; se->k = ek; }
+        init->expr = se;
+    }
+}
+
 static void as_ab_stmts(ABlk* ab, CcStmtList stmts);
 
 /* A call standing alone as the unbraced body of an `if` or a loop: a batch
@@ -713,11 +801,20 @@ static void as_ab_one(ABlk* ab, CcStmt* s) {
     CcLowerer* L = ab->st->L;
     CcCall cl;
     CcParamList* ps;
+    CcType* ret = NULL;
+    CcExpr* lhs = NULL;
     CcStmtList one;
-    if (!as_ab_probe(ab, s, &cl, &ps)) return;
+    bool plain = as_ab_probe(ab, s, &cl, &ps);
+    bool tail = false;
+    if (!plain) tail = as_ab_tail(ab, s, &cl, &ps, &ret, &lhs);
+    if (!plain && !tail) {
+        CcInit* init = NULL;
+        if (as_ab_decl_init(s, &init)) as_ab_emit_decl(ab, s, init);
+        return;
+    }
     one = vec_new::[CcStmtRef](L->arena);
     one.push(s);
-    as_ab_emit(ab, one, 0, 1, false);
+    as_ab_emit(ab, one, 0, plain ? 1 : 0, tail);
 }
 
 static void as_ab_stmt(ABlk* ab, CcStmt* s) {
@@ -758,7 +855,6 @@ static void as_ab_stmts(ABlk* ab, CcStmtList stmts) {
             if (!as_ab_probe(ab, s, &cl, &ps)) break;
             k++;
         }
-        if (!k) { i++; continue; }
         if (i + k < n) {
             CcStmt* ts = *stmts.get_ptr(i + k);
             CcCall tc;
@@ -766,6 +862,17 @@ static void as_ab_stmts(ABlk* ab, CcStmtList stmts) {
             CcType* tr;
             CcExpr* lhs;
             tail = as_ab_tail(ab, ts, &tc, &tp, &tr, &lhs);
+        }
+        /* A statement whose value goes somewhere is an edge on its own: it
+         * needs no plain call ahead of it to be worth a pool thread, and the
+         * block the wrap becomes assigns to a name the enclosing scope
+         * already holds. */
+        if (!k && !tail) {
+            CcStmt* one = *stmts.get_ptr(i);
+            CcInit* init = NULL;
+            if (as_ab_decl_init(one, &init)) as_ab_emit_decl(ab, one, init);
+            i++;
+            continue;
         }
         as_ab_emit(ab, stmts, i, k, tail);
         i += k;
