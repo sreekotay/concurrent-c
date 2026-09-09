@@ -1,0 +1,86 @@
+#!ccc ccs
+/*
+ * Concurrent turnstile gate churn — workbook-shaped wait/pass without
+ * enter/leave. Four nursery clients share one stage and an atomic ticket
+ * counter; each wait/pass pair creates then frees a named gate cell.
+ *
+ * Catches freelist corruption where next was overlaid on `locked`: a stale
+ * acquire after retire smashed the Treiber link and later alloc SEGVd
+ * (Linux ASan at cc__excl_entry_alloc). Also keeps live count O(in-flight).
+ *
+ * Name avoids `_race` / `stress` so the default harness runs it.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define CLIENTS 4
+#define PER_CLIENT 200000
+
+typedef struct {
+    CCTurnstile* order;
+    atomic_int next_ticket;
+    atomic_int done;
+    int iterations;
+} Shared;
+
+typedef struct {
+    Shared* shared;
+} Client;
+
+static void run_client(Client* c) {
+    @errhandler(CCError e) {
+        cc_error_log(e);
+        abort();
+    }
+    Shared* s = c->shared;
+    CCTurnstileStage* st = cc_turnstile_stage(s->order, 0);
+    for (int i = 0; i < s->iterations; i++) {
+        int ticket = atomic_fetch_add(&s->next_ticket, 1);
+        st->wait(ticket) !>;
+        st->pass(ticket) !>;
+    }
+    atomic_fetch_add(&s->done, 1);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "%s\n", e.message ? e.message : "error");
+        return 1;
+    }
+    /* Multi-worker OS threads — the Linux SEGV needed real concurrency. */
+    setenv("CC_WORKERS", "4", 1);
+
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstile order = cc_turnstile_create(CLIENTS, 1, arena) !> @destroy;
+    Shared shared = {0};
+    shared.order = &order;
+    shared.iterations = PER_CLIENT;
+    Client cs[CLIENTS] = {0};
+
+    {
+        CCNursery tasks = cc_nursery_create() !> @destroy;
+        for (int i = 0; i < CLIENTS; i++) {
+            cs[i].shared = &shared;
+            Client* c = &cs[i];
+            tasks.spawn(() => [c] { run_client(c); }) !>;
+        }
+    }
+
+    int tickets = atomic_load(&shared.next_ticket);
+    int done = atomic_load(&shared.done);
+    size_t live = cc_exclusive_live_count(order.excl);
+    if (done != CLIENTS || tickets != CLIENTS * PER_CLIENT) {
+        fprintf(stderr, "FAIL done=%d tickets=%d expect_done=%d expect_tickets=%d\n",
+                done, tickets, CLIENTS, CLIENTS * PER_CLIENT);
+        return 1;
+    }
+    /* Trailing UNARMED from last pass; everything else reclaimed. */
+    if (live > 2) {
+        fprintf(stderr, "FAIL live=%zu after concurrent churn\n", live);
+        return 1;
+    }
+    printf("turnstile_concurrent_churn_smoke: OK\n");
+    return 0;
+}

@@ -1,7 +1,9 @@
 #!ccc ccs
 /*
- * Gate create+free churn must not retire a new discovery map per compact.
- * Before the fix, arena overflow grew O(tickets); live entries stay O(1).
+ * Serial gate create+free churn: discovery-map compact must not retire a
+ * new table per tomb cycle (O(tickets) RSS). Live entries stay O(1).
+ *
+ * Concurrent freelist smash under wait/pass: turnstile_concurrent_churn_smoke.
  */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>

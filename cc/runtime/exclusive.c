@@ -58,11 +58,13 @@ typedef struct CCExclusiveWaiter {
  * their lock words.  `locked` MUST stay at offset 0 — the header inlines
  * the fast paths by casting the entry pointer to _Atomic int*.
  *
- * Mutex entries come from an arena pool on the section arena (Treiber
- * freelist + 64-byte-aligned bump alloc).  User-explicit free_mutex removes
- * the name (tombstone in the map) and pushes the entry back to the pool.
- * The discovery map grows under create_mu; old tables are retired and
- * arena_release'd on destroy so lock-free lookups never race a free.
+ * Mutex entries come from an intrusive freelist on the section arena (bump
+ * alloc + `pool_next` under create_mu).  `locked` stays at offset 0 and is
+ * never the freelist link — a stale acquire must not smash recycled next.
+ * User-explicit free_mutex removes the name (tombstone in the map) and
+ * pushes the entry back.  The discovery map grows under create_mu; old
+ * tables are retired and arena_release'd on destroy so lock-free lookups
+ * never race a map free.
  */
 /* Gate cell (turnstile wait/pass). Lives in the spare pad of the line.
  * EMPTY=0 falls out of memset; create-on-first-touch records who arrived. */
@@ -76,7 +78,7 @@ enum {
 
 #if defined(__TINYC__)
 /* TinyCC ignores aligned(N) for sizeof on some targets; pad to one line. */
-typedef struct {
+typedef struct CCExclusiveEntry {
     _Atomic int locked;
     _Atomic int wait_spin;
     uint64_t name;
@@ -86,11 +88,12 @@ typedef struct {
     CCExclusiveWaiter* cond_tail;
     _Atomic uint32_t gate_state;
     uint32_t gate_touched;
-    char _cc_line_pad[64 - (2 * sizeof(int) + sizeof(uint64_t) +
-                            4 * sizeof(void*) + 2 * sizeof(uint32_t))];
+    /* Freelist link. Never overlay `locked`: a stale acquire CAS would smash
+     * Treiber next and later alloc would SEGV on a wild head (Linux ASan). */
+    struct CCExclusiveEntry* pool_next;
 } CCExclusiveEntry;
 #else
-typedef struct {
+typedef struct CCExclusiveEntry {
     _Atomic int locked;
     _Atomic int wait_spin;
     uint64_t name;
@@ -100,12 +103,15 @@ typedef struct {
     CCExclusiveWaiter* cond_tail;
     _Atomic uint32_t gate_state;
     uint32_t gate_touched;
+    struct CCExclusiveEntry* pool_next;
 } __attribute__((aligned(64))) CCExclusiveEntry;
 #endif
 
 _Static_assert(offsetof(CCExclusiveEntry, locked) == 0,
                "header casts entry to _Atomic int*");
 _Static_assert(sizeof(CCExclusiveEntry) == 64, "one cache line per entry");
+_Static_assert(offsetof(CCExclusiveEntry, pool_next) != 0,
+               "freelist must not share locked");
 
 #define CC_EXCLUSIVE_DEFAULT_CAP 64
 
@@ -136,8 +142,8 @@ struct CCExclusiveHost {
     CCExclusiveMap* retired;
     size_t count; /* live names; create_mu */
     size_t tombs; /* tombstone slots; create_mu — gate churn without grow */
-    /* Arena pool for mutex entries (freelist on `arena`; 64-byte allocs). */
-    CCArenaPool entry_pool;
+    /* Intrusive freelist (`pool_next`); only under create_mu. */
+    CCExclusiveEntry* entry_freelist;
 };
 
 static CCExclusiveMap* cc__exclusive_map_load(CCExclusiveHost* excl) {
@@ -152,24 +158,21 @@ static int cc__excl_is_tomb(CCExclusiveEntry* e) {
     return e == CC_EXCL_TOMBSTONE;
 }
 
-/* Like cc_arena_pool_alloc, but fresh entries are 64-byte aligned. */
+/* create_mu held. Next lives in pool_next — never in locked. */
 static CCExclusiveEntry* cc__excl_entry_alloc(CCExclusiveHost* excl) {
-    CCArenaPool* p = &excl->entry_pool;
-    uint64_t head = cc_atomic_load(&p->freelist);
-    for (;;) {
-        void* item = cc__pool_head_ptr(head);
-        if (!item) break;
-        uint64_t next = cc__pool_head_pack(*(void**)item, head >> CC__POOL_TAG_SHIFT);
-        if (cc_atomic_cas(&p->freelist, &head, next)) {
-            return (CCExclusiveEntry*)item;
-        }
+    CCExclusiveEntry* e = excl->entry_freelist;
+    if (e) {
+        excl->entry_freelist = e->pool_next;
+        e->pool_next = NULL;
+        return e;
     }
     return (CCExclusiveEntry*)cc_arena_alloc(
-        p->arena, sizeof(CCExclusiveEntry), 64);
+        excl->arena, sizeof(CCExclusiveEntry), 64);
 }
 
 static void cc__excl_entry_free(CCExclusiveHost* excl, CCExclusiveEntry* e) {
-    cc_arena_pool_free(&excl->entry_pool, e);
+    e->pool_next = excl->entry_freelist;
+    excl->entry_freelist = e;
 }
 
 static inline void cc__cpu_pause(void) {
@@ -930,7 +933,7 @@ CCResult_CCExclusive_CCError cc_exclusive_create(CCArena arena,
         return cc__exclusive_wrap_err(CC_ERR_OUT_OF_MEMORY,
                                      "cc_exclusive_create: map alloc failed");
     cc__exclusive_map_publish(excl, map);
-    cc_arena_pool_init(&excl->entry_pool, arena, sizeof(CCExclusiveEntry));
+    excl->entry_freelist = NULL;
 
     pthread_mutex_init(&excl->create_mu, NULL);
     if (getenv("CC_EXCL_DEBUG")) {
@@ -987,8 +990,9 @@ CCExclusiveMutex cc_exclusive_mutex_host(CCExclusiveHost* excl, uint64_t name) {
     return m;
 }
 
-/* Second toucher frees after release. Entry address stays valid until free;
- * the two-touch protocol guarantees no concurrent third party. */
+/* Second toucher retires the gate cell. Clear `name` under the excl lock
+ * before release so lock-free lookup cannot return this entry into a stale
+ * acquire that would race freelist reuse. */
 static void cc__exclusive_gate_touch_done(CCExclusiveMutex* m,
                                           CCExclusiveEntry* e,
                                           CCExclusiveGuard* g) {
@@ -996,6 +1000,10 @@ static void cc__exclusive_gate_touch_done(CCExclusiveMutex* m,
     e->gate_touched++;
     if (e->gate_touched >= 2)
         do_free = 1;
+    if (do_free) {
+        /* Invalidate lock-free hits before the entry becomes unlocked. */
+        e->name = 0;
+    }
     cc_exclusive_guard_release(g);
     if (do_free)
         cc_exclusive_mutex_free(m);
@@ -1099,12 +1107,45 @@ void cc_exclusive_mutex_free(CCExclusiveMutex* m) {
     CCExclusiveHost* excl = m->excl;
     CCExclusiveEntry* e = (CCExclusiveEntry*)m->_entry;
     uint64_t name = m->name;
+    int found = 0;
 
     pthread_mutex_lock(&excl->create_mu);
 
-    CCExclusiveEntry* cur = cc__exclusive_lookup(excl, name);
-    if (cur != e) {
-        /* Already freed or replaced; just clear the handle. */
+    /* Tombstone by pointer. Gate reclaim may already have cleared e->name;
+     * probe from the handle's name first, then scan. */
+    {
+        CCExclusiveMap* map = cc__exclusive_map_load(excl);
+        size_t start = cc__exclusive_slot_cap(map->cap, name);
+        size_t i;
+        for (i = 0; i < map->cap; i++) {
+            size_t idx = (start + i) & (map->cap - 1);
+            CCExclusiveEntry* slot = atomic_load_explicit(
+                &map->buckets[idx].entry, memory_order_relaxed);
+            if (!slot) break;
+            if (slot == e) {
+                atomic_store_explicit(
+                    &map->buckets[idx].entry, CC_EXCL_TOMBSTONE,
+                    memory_order_release);
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            for (i = 0; i < map->cap; i++) {
+                CCExclusiveEntry* slot = atomic_load_explicit(
+                    &map->buckets[i].entry, memory_order_relaxed);
+                if (slot == e) {
+                    atomic_store_explicit(
+                        &map->buckets[i].entry, CC_EXCL_TOMBSTONE,
+                        memory_order_release);
+                    found = 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!found) {
         pthread_mutex_unlock(&excl->create_mu);
         m->_entry = NULL;
         m->excl = NULL;
@@ -1118,20 +1159,6 @@ void cc_exclusive_mutex_free(CCExclusiveMutex* m) {
         abort(); /* free while held or waiters queued */
     }
 
-    CCExclusiveMap* map = cc__exclusive_map_load(excl);
-    size_t start = cc__exclusive_slot_cap(map->cap, name);
-    for (size_t i = 0; i < map->cap; i++) {
-        size_t idx = (start + i) & (map->cap - 1);
-        CCExclusiveEntry* slot = atomic_load_explicit(
-            &map->buckets[idx].entry, memory_order_relaxed);
-        if (!slot) break;
-        if (slot == e) {
-            atomic_store_explicit(
-                &map->buckets[idx].entry, CC_EXCL_TOMBSTONE, memory_order_release);
-            break;
-        }
-    }
-
     if (excl->count > 0) excl->count--;
     excl->tombs++;
     e->name = 0;
@@ -1139,6 +1166,7 @@ void cc_exclusive_mutex_free(CCExclusiveMutex* m) {
     e->wait_tail = NULL;
     e->cond_head = NULL;
     e->cond_tail = NULL;
+    e->pool_next = NULL;
     atomic_store_explicit(&e->locked, CC_EXCL_FREE, memory_order_relaxed);
     atomic_store_explicit(&e->wait_spin, 0, memory_order_relaxed);
     atomic_store_explicit(&e->gate_state, CC_GATE_EMPTY, memory_order_relaxed);
