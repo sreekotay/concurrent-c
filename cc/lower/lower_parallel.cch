@@ -1230,6 +1230,16 @@ static CcDecl* pl_for_thunk_decl(PStep* st, uint32_t id, CcSpan sp) {
  * exited; a Result is built where the `return` was written, and the C
  * return type is not the one the source names, so neither is answered
  * with a cell field. */
+/* The function the arms stand in returns a Result: its C return type is
+ * the box, which no arm return here can spell. */
+static bool pl_fn_returns_result(PStep* st) {
+    if (!st->fn_ret) return false;
+    @switch (st->fn_ret->k) {
+        case .result: return true;
+        default: return false;
+    }
+}
+
 static CCSlice pl_ret_type(PStep* st) {
     CcLowerer* L = st->L;
     CCSlice nm = cc_slice_empty();
@@ -2115,9 +2125,20 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         CCSlice cellv = pj_var;
         CCString t;
         if (pj_ety.len) lw_push(blk, pl_raise_after_join(L, cellv, sp));
-        if (pj_rty.len) t = @string(`if (cc_atomic_load(&${cellv}.xk) == 2) return ${cellv}.rv`, L->arena);
-        else t = @string(`if (cc_atomic_load(&${cellv}.xk) == 2) return`, L->arena);
-        lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
+        /* the return an arm claimed, when any arm returns: a cell that only
+         * carries a raise has no value to hand back, and a function that
+         * returns a Result has no C spelling for one here -- said, not
+         * returned as nothing */
+        if (pj_any && pl_fn_returns_result(st)) {
+            CCString m = @string(`a 'return' from a '${"@"}parallel' arm in a function returning a Result is not lowered: hand the value back through an arm destination and return it after the join`, L->arena);
+            lw_error(L, sp, m);
+            return;
+        }
+        if (pj_any) {
+            if (pj_rty.len) t = @string(`if (cc_atomic_load(&${cellv}.xk) == 2) return ${cellv}.rv`, L->arena);
+            else t = @string(`if (cc_atomic_load(&${cellv}.xk) == 2) return`, L->arena);
+            lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
+        }
     }
     s->k = blk->k;
     st->any = true;
