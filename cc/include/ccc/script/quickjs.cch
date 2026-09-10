@@ -451,7 +451,7 @@ static int cc__qjs_cache_root(char *out, size_t cap) {
 
 /* Per-source locale: <root>/<src_id>/ — no manual wipe when switching pins. */
 static int cc__qjs_cache_dir_for_src(const char *src, char *out, size_t cap) {
-    char root[320], id[24];
+    char root[512], id[24];
     if (cc__qjs_cache_root(root, sizeof(root)) != 0) return -1;
     cc__qjs_src_id(src, id, sizeof(id));
     snprintf(out, cap, "%.300s/%.20s", root, id);

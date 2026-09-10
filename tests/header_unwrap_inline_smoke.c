@@ -118,7 +118,7 @@ int main(void) {
     char* dir;
     char src[512];
     char outdir[512];
-    char out_h[512];
+    char out_h[1024];
     char guest_c[512];
     char guest_bin[512];
     char cmd[2048];
@@ -192,7 +192,7 @@ int main(void) {
      * stdlib faces like stdio — regression for that bug. */
     {
         char opt_src[512];
-        char opt_h[512];
+        char opt_h[1024];
         char* opt_lowered = NULL;
         snprintf(opt_src, sizeof(opt_src), "%s/opt_void." "cch", dir);
         snprintf(opt_h, sizeof(opt_h), "%s/opt_void.h", outdir);

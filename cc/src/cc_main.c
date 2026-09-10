@@ -5876,6 +5876,10 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             }
             o2 = *opt;
             o2.in_path = clean_c;
+            /* The lowered C is C: an `--as=shcc` that named the script's
+             * kind must not name this file's, or the re-entry wraps and
+             * lowers the output again, without end. */
+            o2.unit_kind = CC_UNIT_KIND_UNKNOWN;
             g_clean_src_key = cc__fold_file_content(1469598103934665603ULL, clean_orig);
             g_clean_src_key = cc__fold_cch_includes(g_clean_src_key, clean_orig, opt->cc_flags);
             return compile_with_build(&o2, summary_out);

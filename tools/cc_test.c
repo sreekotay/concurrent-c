@@ -589,6 +589,8 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     /* Many nested ccc -e/-E subprocesses; ~11s alone, can exceed 30s under
      * --jobs contention (each child competes for CPU with the suite). */
     if (strcmp(stem, "script_oneliner_smoke") == 0) return 60;
+    /* Three cold `ccc --as=shcc` builds; ~11s alone on the clean lowerer. */
+    if (strcmp(stem, "script_shcc_bin_stem_smoke") == 0) return 30;
     /* Compact goldens + hostcc + one header beachhead; keep near default. */
     if (strcmp(stem, "c_pp_shadow_emit_smoke") == 0) return 20;
     /* Each shells out to `ccc build` of a py.cch TU: ~9s of backend -O2 on
