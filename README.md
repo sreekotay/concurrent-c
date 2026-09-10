@@ -105,6 +105,12 @@ tutorial, idiomatic, and production code — and race their upstreams
   raced against actual Servo Stylo on a frozen StyleBench workload. Exact
   property style dumps gate correctness; dated receipts and the
   remaining implementation differences are documented in the project.
+- [**staticd**](real_projects/staticd/) — HTTP/1.1 static file server
+  (sessions as rows, dests as workers); peers nginx / darkhttpd; SHA-256
+  correctness gate (`./real_projects/staticd/compare.sh --smoke`).
+- [**curl DNS**](real_projects/curl_dns_port/) — brownfield: swap
+  libcurl's threaded-DNS `Curl_thrdq` for a CC nursery queue
+  (`make -C real_projects/curl_dns_port smoke` + `queue-smoke`).
 - [**The Neckbeard Challenges**](perf/run_neckbeard_challenges.sh) — six
   cross-language robustness gauntlets (syscall kidnapping, wake storms,
   fairness, named locks) run head-to-head against pthreads, Go, and Zig,

@@ -943,11 +943,11 @@ static bool redis_conn_write_err_now(RedisConn* conn, CCError e) {
     if (msg[0] == 'E' && msg[1] == 'R' && msg[2] == 'R' && msg[3] == ' ')
         msg += 4;
     enc->err(msg) !>(e2) {
-        redis_client_drop_log("write -ERR", e2);
+        redis_client_drop_log("write -ERR", e2.base);
         return 0;
     };
     conn->flush() !>(e2) {
-        redis_client_drop_log("flush -ERR", e2);
+        redis_client_drop_log("flush -ERR", e2.base);
         return 0;
     };
     return 1;
@@ -1008,16 +1008,16 @@ static bool db_setup(RedisDb* db, size_t shard_count, const char* shard_src) {
             redis_client_drop_log(
                 "execute", CC_ERROR(CC_ERR_INVALID_ARG, "unsupported command"));
             conn->flush() !>(e) {
-                redis_client_drop_log("flush", e);
+                redis_client_drop_log("flush", e.base);
                 return cc_ok(0);
             };
             return cc_ok(0);
         }
     }
 
-    /* UFCS Io unwrap binders project as: CCError; free-fn binders keep CCIoError. */
+    /* flush returns CCIoError; drop_log takes the as: CCError face. */
     conn->flush() !>(e) {
-        redis_client_drop_log("flush", e);
+        redis_client_drop_log("flush", e.base);
         return cc_ok(0);
     };
     return cc_ok(1);
@@ -1032,7 +1032,7 @@ static void handle_client(CCSocket client, RedisDb* db, CCShardDomain* shards) {
     };
     @defer client.close();
     @defer conn.flush() !>(e) {
-        redis_client_drop_log("flush on teardown", e);
+        redis_client_drop_log("flush on teardown", e.base);
     };
 
     conn.reply_arena = cc_arena_heap(16 * 1024);

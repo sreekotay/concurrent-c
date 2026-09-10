@@ -9,11 +9,13 @@ The supported Concurrent-C Redis variants are:
   in `redis_reply.cch`. Benchmark target for `./bench_robust.sh`.
 - `redis_async_sketch.ccs` — tiny command surface peer of `redis.go`
   (dest accept + Conn encode). Teaching peer of the complete server.
-  Default listen `127.0.0.1:6381`. Not the bench target.
+  Default listen `127.0.0.1:6381`; argv is `host:port` (not bare port).
+  Not the bench or smoke target.
 - `redis_parallel.ccs` — throwaway sketch sibling: same tiny surface,
   MGET is `@parallel wait` (per-key `hold_one`, snapshot, ordered
   encode) instead of `hold_sorted` + a sequential loop. Default listen
-  `127.0.0.1:6382`. Not a bench target; likely deleted.
+  `127.0.0.1:6382`; argv is `host:port`. Not a bench/smoke target;
+  likely deleted.
 - `redis.go` — same tiny surface in Go (architecture reference only).
 - `redis_owner.ccs` — channel / single-owner-fiber variant (historical;
   still used by the async line-map gate and lock-compare benches).
@@ -29,7 +31,10 @@ The supported Concurrent-C Redis variants are:
 - `redis_owner.ccs` is the N:1 owner-fiber alternative (`make redis_owner`)
 - `redis_smoke.py` is the functional smoke (basics, expiry, 1000-op pipeline,
   abrupt-disconnect storm); it spawns `out/redis_idiomatic` itself:
-  `python3 redis_smoke.py`
+  `python3 redis_smoke.py` (or `--server out/redis_owner`). Spawns with a
+  **port number** argv (`6380` default) — matching idiomatic/owner.
+  Async/parallel sketches take `host:port` instead and are **not** smoke
+  targets (reduced command surface; no `FLUSHALL` / expiry suite).
 - `redis_cc/redis_cc.ccs` is the multi-file production port (scaffold)
 - `reply_path_bench.ccs` and `reply_path_threaded_bench.ccs` are explicit reply-path microbench experiments, not server variants
 - `bench_robust.sh` runs an order-randomized, warmup-discarded variant with per-round statistics
@@ -72,7 +77,11 @@ Default (`redis_idiomatic`) shape:
 ```bash
 ./setup.sh
 make upstream
-make redis_idiomatic redis_cc
+make redis_idiomatic redis_owner   # smoke binaries
+make redis_cc                      # scaffold (runs; not smoke)
+# sketches (PING ok; not full smoke): make redis_async_sketch redis_parallel
+python3 redis_smoke.py
+python3 redis_smoke.py --server out/redis_owner
 ```
 
 Quick comparison runs:

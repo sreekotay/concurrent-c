@@ -39,9 +39,10 @@ listing on by default, CGI, Node `require`, Django ORM, async block fill
 
 ## Build
 
-From this directory. `ccc` is `../../out/cc/bin/ccc` (repo `make cc`).
-TLS needs BearSSL (`make -C ../../cc bearssl`) and a runtime built with
-`CC_ENABLE_TLS=1` — `make staticd` does both by default.
+From this directory. `ccc` prefers `../../cc/bin/ccc`, else
+`../../out/cc/bin/ccc` (repo `make cc`). TLS needs BearSSL
+(`make -C ../../cc bearssl`) and a runtime built with `CC_ENABLE_TLS=1`
+— `make staticd` does both by default.
 
 ```bash
 cd real_projects/staticd

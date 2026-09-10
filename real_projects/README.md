@@ -25,6 +25,25 @@ Normative definitions of the primitives and lowering live in `spec/concurrent-c-
 
 **Related:** `studies/cve_locality/` reconstructs historical CVEs under idiomatic CC to test locality, SERDES, and `@variant` — hits and misses both welcome.
 
+## Verify (compile + smoke)
+
+From the repo root, after `make cc` (or an installed `ccc`). Prefer `./cc/bin/ccc`; Makefiles fall back to `./out/cc/bin/ccc`.
+
+| Dir | Build | Smoke |
+|-----|--------|--------|
+| [`pigz/`](pigz/) | `make -C real_projects/pigz all` | `out/pigz_idiomatic <file>` → valid `.gz`; `make -C real_projects/pigz test` |
+| [`redis/`](redis/) | `make -C real_projects/redis redis_idiomatic redis_owner` | `python3 real_projects/redis/redis_smoke.py` (spawns idiomatic); `--server out/redis_owner` for owner |
+| [`staticd/`](staticd/) | `make -C real_projects/staticd staticd` | `make -C real_projects/staticd correctness` or `./compare.sh --smoke` |
+| [`levenshtein/`](levenshtein/) | `ccc build -O real_projects/levenshtein/levenshtein_cc.ccs` | `PYTHONPATH=bin python3 -c "import cclev; …"` |
+| [`random_access/`](random_access/) | `make -C real_projects/random_access cc` | `./real_projects/random_access/compare.sh --smoke` |
+| [`raytracer/`](raytracer/) | via smoke | `./real_projects/raytracer/smoke.sh` / `compare.sh --smoke` |
+| [`curl_dns_port/`](curl_dns_port/) | `make -C real_projects/curl_dns_port cc` | `make smoke` + `make queue-smoke` |
+| [`stylo-cc/`](stylo-cc/) | `make -C real_projects/stylo-cc cc-run` | tiny fixture receipt under `receipts/` |
+
+Full redis smoke expects the complete command surface (`FLUSHALL`, expiry, …). `redis_async_sketch` / `redis_parallel` listen and answer `PING` but are not smoke targets.
+
+Curated emit/build gate used by `test.sh --full`: [`scripts/test_shadow_real_projects.sh`](../scripts/test_shadow_real_projects.sh).
+
 ## cctext (out of tree)
 
 [github.com/sreekotay/cctext](https://github.com/sreekotay/cctext) is a standalone editor (piece tree, sections/runs, syntax highlight, measure-generic layout) with two frontends: **cctext** (console) and **cctext-ray** (Raylib). It is not in this tree — install `ccc` and clone that repo. Language gaps from building it live in its `FRICTION.md`.
@@ -63,6 +82,20 @@ darkhttpd, and optional caddy. Same fixture tree, SHA-256 gate, latency
 matrix. `./staticd/compare.sh` (or `--smoke`). Dest-per-connection
 accept is [`examples/recipe_tcp_echo.ccs`](../examples/recipe_tcp_echo.ccs)
 and redis — not a second file server.
+
+## levenshtein
+
+[`levenshtein/`](levenshtein/) is `cclev`: python-Levenshtein-shaped
+exports as one `.ccs` → `bin/cclev.abi3.so`. Parity against the pip
+package is the bar; the main suite uses a DP-only smoke module.
+
+## stylo-cc
+
+[`stylo-cc/`](stylo-cc/) races a Concurrent-C style engine against Servo
+Stylo on frozen StyleBench fixtures. Gate is byte-identical computed
+style dumps, then wall time. `make -C real_projects/stylo-cc cc-run`
+builds/runs the tiny fixture (needs the `stylo/` submodule + generated
+`engine/longhands.cch`).
 
 ## Sanitizers / fuzz
 
