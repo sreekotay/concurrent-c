@@ -1273,6 +1273,11 @@ static void shadow_emit_cache_invalidate(const char* in_path,
     unlink(ekey_path);
     unlink(okey_path);
     unlink(c_path);
+    {
+        char link_path[600];
+        snprintf(link_path, sizeof(link_path), "%s/link.key", dir);
+        unlink(link_path);
+    }
 }
 
 /* True when bin exists and is not older than tu.o / runtime.o. */
@@ -1287,6 +1292,39 @@ static int shadow_bin_fresh(const char* bin_path, const char* o_path,
         if (bin.mtime_sec < rt.mtime_sec) return 0;
     }
     return 1;
+}
+
+/* Bind -o to this emit/obj: mtime-only freshness is wrong when two inputs
+ * share a product path (e.g. basename `make` under the script cache) — a
+ * newer foreign binary would skip relink. Stamp = hash(okey, bin mtime, size). */
+static uint64_t shadow_link_stamp_key(uint64_t okey, const ShadowFileSig* bin) {
+    uint64_t h = 1469598103934665603ULL;
+    h = shadow_fnv1a64_i64(h, (long long)okey);
+    h = shadow_fnv1a64_i64(h, bin ? bin->mtime_sec : 0);
+    h = shadow_fnv1a64_i64(h, bin ? bin->size : 0);
+    return h;
+}
+
+static int shadow_link_stamp_ok(const char* dir, const char* bin_path,
+                                uint64_t okey) {
+    char path[600];
+    ShadowFileSig bin;
+    uint64_t prev = 0;
+    if (!dir || !dir[0] || !bin_path) return 0;
+    if (shadow_stat_sig(bin_path, &bin) != 0 || bin.size <= 0) return 0;
+    snprintf(path, sizeof(path), "%s/link.key", dir);
+    if (shadow_read_u64_file(path, &prev) != 0) return 0;
+    return prev == shadow_link_stamp_key(okey, &bin);
+}
+
+static void shadow_write_link_stamp(const char* dir, const char* bin_path,
+                                    uint64_t okey) {
+    char path[600];
+    ShadowFileSig bin;
+    if (!dir || !dir[0] || !bin_path) return;
+    if (shadow_stat_sig(bin_path, &bin) != 0) return;
+    snprintf(path, sizeof(path), "%s/link.key", dir);
+    (void)shadow_write_u64_file(path, shadow_link_stamp_key(okey, &bin));
 }
 
 /* Host build from emit buffer or existing cached emit.c.
@@ -1385,8 +1423,10 @@ static int shadow_build_host(const char* in_path, const char* bin_path,
     }
 
     /* Emit/obj reuse still used to relink every process. Skip when the
-     * binary is already newer than tu.o and runtime.o. */
-    if (cache_ok && shadow_bin_fresh(bin_path, o_path, runtime_o))
+     * binary is already newer than tu.o / runtime.o *and* link.key says
+     * this okey produced the bytes currently at -o. */
+    if (cache_ok && shadow_bin_fresh(bin_path, o_path, runtime_o) &&
+        shadow_link_stamp_ok(dir, bin_path, okey))
         return 0;
     {
         long long t_ld = shadow_now_ms();
@@ -1395,6 +1435,7 @@ static int shadow_build_host(const char* in_path, const char* bin_path,
             unlink(okey_path);
             return -1;
         }
+        shadow_write_link_stamp(dir, bin_path, okey);
         shadow_prof_span("host_link", t_ld);
     }
     return 0;

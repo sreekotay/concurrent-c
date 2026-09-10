@@ -503,7 +503,9 @@ static void cc_set_out_dir(const char* out_dir_opt, const char* bin_dir_opt) {
 
 /* Shebang / `ccc --as=shcc` scripts are not the product. Keep their
  * compile artifacts out of the project's `out/` so `rm -rf out` does
- * not rebuild make.shcc on every true-cold app build. */
+ * not rebuild make.shcc on every true-cold app build. Default bins are
+ * path-qualified (`make-<hash>`) so same-basename scripts in different
+ * trees do not share one product under this cache. */
 static int cc__input_is_shcc(CCUnitKind unit_kind, const char* path) {
     CCUnitKind k = unit_kind;
     char pin[CC_CCC_VERSION_PIN_CAP];
@@ -1142,10 +1144,34 @@ static int derive_default_obj(const char* in_path, char* out_buf, size_t out_buf
                                  out_buf, out_buf_size);
 }
 
+/* .shcc scripts share a process-wide script cache (`$TMPDIR/cc-script-$UID`).
+ * Basename-only stems collide (`make.shcc` in two trees → one `bin/make`), and
+ * shadow_lower's warm link skip then keeps the wrong binary. Qualify by abs
+ * path hash so each script gets its own product path. */
+static int cc__script_bin_stem(const char* in_path, char* out, size_t cap) {
+    char base[96];
+    char abs[PATH_MAX];
+    const char* p = in_path;
+    uint64_t h;
+    if (!out || cap == 0) return -1;
+    out[0] = '\0';
+    if (!in_path || !in_path[0]) return -1;
+    cc__stem_from_path(in_path, base, sizeof(base));
+    if (realpath(in_path, abs) != NULL) p = abs;
+    h = cc__fnv1a64_str(1469598103934665603ULL, p ? p : "");
+    if (snprintf(out, cap, "%s-%016llx", base, (unsigned long long)h) >= (int)cap)
+        return -1;
+    return 0;
+}
+
 static int derive_default_bin(const char* in_path, char* out_buf, size_t out_buf_size) {
     if (!in_path) return -1;
     char stem[128];
-    cc__stem_from_path(in_path, stem, sizeof(stem));
+    if (cc_path_is_shcc(in_path)) {
+        if (cc__script_bin_stem(in_path, stem, sizeof(stem)) != 0) return -1;
+    } else {
+        cc__stem_from_path(in_path, stem, sizeof(stem));
+    }
     return derive_path_from_stem(stem, g_bin_root, "", out_buf, out_buf_size);
 }
 
