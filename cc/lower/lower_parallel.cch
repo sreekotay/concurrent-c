@@ -57,6 +57,9 @@ typedef struct PStep {
     Walker* w;
     uint32_t next_id;
     CcDeclList made;            /* the thunks, in order */
+    CcDeclList protos;          /* prototypes the frame calls before the thunks are declared:
+                                 * the drop of a cached name, whose Result type the later
+                                 * steps spell */
     CCString fwd;               /* their forward declarations */
     PBindList binds;            /* sites whose handle is declared before the block */
     CcStmtList stages;          /* `@stage` statements a `@parallel wait for` claimed */
@@ -3390,7 +3393,7 @@ static bool pl_stage_is_face(int gform) { return gform == 5 || gform == 6; }
 
 /* The declaration of `nm` in the function the site stands in: the type,
  * initializer and destroy hook the extras take. */
-typedef struct PDeclQ { CCSlice name; CcVarDecl v; bool hit; } PDeclQ;
+typedef struct PDeclQ { CCSlice name; CcVarDecl v; CcDecl* at; bool hit; } PDeclQ;
 
 static bool pl_decl_visit(CcStmt* s, void* env) {
     PDeclQ* q = (PDeclQ*)env;
@@ -3407,11 +3410,11 @@ static bool pl_decl_visit(CcStmt* s, void* env) {
         case .var(x): v = x; is_var = true; break;
         default: break;
     }
-    if (is_var && slice_eq(v.name, q->name)) { q->v = v; q->hit = true; }
+    if (is_var && slice_eq(v.name, q->name)) { q->v = v; q->at = d; q->hit = true; }
     return !q->hit;
 }
 
-static bool pl_find_var_decl(PStep* st, CCSlice nm, CcVarDecl* out) {
+static bool pl_find_var_decl_at(PStep* st, CCSlice nm, CcVarDecl* out, CcDecl** at) {
     PDeclQ q;
     CcVisitor v;
     CcFuncDecl f;
@@ -3429,8 +3432,12 @@ static bool pl_find_var_decl(PStep* st, CCSlice nm, CcVarDecl* out) {
     v.stmt = pl_decl_visit;
     v.env = &q;
     CcStmt_walk(f.body, v);
-    if (q.hit) *out = q.v;
+    if (q.hit) { *out = q.v; if (at) *at = q.at; }
     return q.hit;
+}
+
+static bool pl_find_var_decl(PStep* st, CCSlice nm, CcVarDecl* out) {
+    return pl_find_var_decl_at(st, nm, out, NULL);
 }
 
 /* The names `cache (...)` adopts, as written. */
@@ -3499,6 +3506,172 @@ static bool pl_pw_cache_in_stage(CcStmt* body, CCSlice nm) {
         }
     }
     return false;
+}
+
+/* ---- the drop of a cached name ------------------------------------------
+ *
+ * A declaration `T s = init @destroy { D }` runs D once for the declared
+ * instance, at its scope exit, and the walk runs it once per extra at the
+ * join. D is one body: it becomes one function, `static R drop(T* ref)`,
+ * whose body IS D with `s` read through the parameter, and both sites call
+ * it. R is `void` when D raises nothing; when D holds a bare `!>` or an
+ * `@err`, R is `void !>(E)` for the E the handlers of the frame take, the
+ * drop opens with a handler that hands the error back, a `return;` in D is
+ * `return cc_ok();`, and both call sites unwrap -- into the handler in
+ * scope at the declaration, which is where D forwarded to before. */
+
+static CCSlice pl_pw_drop_name(CcLowerer* L, uint32_t id, CCSlice nm) {
+    CCString s = @string(`__cc_pw_${id}_drop_${nm}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+/* `return;` in a D that hands back a Result: the exit is `return cc_ok();`. */
+static bool pl_drop_ret_stmt(CcStmt* s, void* env) {
+    CcLowerer* L = (CcLowerer*)env;
+    bool is_ret = false;
+    CcReturn r;
+    @switch (s->k) {
+        case .return_(x): r = x; is_ret = true; break;
+        default: break;
+    }
+    if (!is_ret || r.value) return true;
+    {
+        CcStmt* nr = cc_stmt_return(lw_call0(L, cstr_slice("cc_ok"), s->span), s->span, L->arena);
+        s->k = nr->k;
+    }
+    return true;
+}
+
+/* The drop function of `cn`, appended to the unit like a thunk, its
+ * prototype beside the forward block; the declaration then destroys through
+ * it. `*raises` says whether the call sites unwrap. */
+static bool pl_pw_drop_make(PStep* st, uint32_t id, CCSlice cn, CcVarDecl* cv, CcDecl* dd,
+                            bool* raises, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CcStmt* body = cv->destroy_body;
+    CCSlice drop = pl_pw_drop_name(L, id, cn);
+    CCString rn = @string(`__cc_ref_${cn}`, L->arena);
+    CCSlice ref = lw_keep(L, &rn);
+    CCSlice ety = cc_slice_empty();
+    CcStmt* fnbody = lw_block(L, sp);
+    CcParamList params = vec_new::[CcParam](L->arena);
+    CcType* fn_type = cc__type_blank(sp, L->arena);
+    CcType* ret;
+    CcFuncType ft;
+    CcFuncDecl fd;
+    CcDecl* d;
+    CcDecl* proto;
+    PScan sc;
+    {
+        /* D runs away from the frame, once per instance: a frame local it
+         * reads besides the cached name would be a capture the drop has
+         * no way to carry, and none of the instances is that local */
+        CcVisitor v;
+        memset(&sc, 0, sizeof(sc));
+        sc.st = st;
+        sc.w = st->w;
+        sc.caps = vec_new::[PCapRef](L->arena);
+        sc.seen = vec_new::[CCSlice](L->arena);
+        sc.skip = cn;
+        memset(&v, 0, sizeof(v));
+        v.expr = pl_scan_expr;
+        v.env = &sc;
+        CcStmt_walk(body, v);
+        {
+            PCapList cl = sc.caps;
+            if (cl.len()) {
+                PCap* c = *cl.get_ptr(0);
+                CCSlice other = c->name;
+                CCString m = @string(`the destroy body of cached name '${cn}' reads '${other}' from the frame; the drop of a cached instance runs once per instance, away from the frame: reach '${other}' through a field of '${cn}', or take it out of the destroy body`, L->arena);
+                lw_error(L, sp, m);
+                return false;
+            }
+        }
+    }
+    *raises = pl_body_raises(body);
+    if (*raises) {
+        ety = pl_eh_type(st, sp);
+        if (!ety.len) return false;
+    }
+    pl_rewrite(L, NULL, body, cn, ref);
+    if (*raises) {
+        CcVisitor v;
+        memset(&v, 0, sizeof(v));
+        v.stmt = pl_drop_ret_stmt;
+        v.env = L;
+        CcStmt_walk(body, v);
+    }
+    if (*raises) {
+        /* the error D raises leaves the drop as its Result */
+        CcStmt* hb = lw_block(L, sp);
+        CcStmt* hs = cc__stmt_blank(sp, L->arena);
+        CcErrhandler eh;
+        CCSlice de = cstr_slice("__cc_de");
+        lw_push(hb, cc_stmt_return(lw_call1(L, cstr_slice("cc_err"), lw_ident(L, de, sp), sp), sp, L->arena));
+        memset(&eh, 0, sizeof(eh));
+        eh.err_type = cc_type_named(ety, sp, L->arena);
+        eh.binder = de;
+        eh.body = hb;
+        { CcStmtK sk = { .errhandler = eh }; hs->k = sk; }
+        lw_push(fnbody, hs);
+    }
+    lw_push(fnbody, body);
+    if (*raises) lw_push(fnbody, cc_stmt_return(lw_call0(L, cstr_slice("cc_ok"), sp), sp, L->arena));
+    {
+        CcParam p0;
+        memset(&p0, 0, sizeof(p0));
+        p0.span = sp;
+        p0.type = cc_type_pointer(cv->type, sp, L->arena);
+        p0.name = ref;
+        p0.attrs = vec_new::[CcAttr](L->arena);
+        params.push(p0);
+    }
+    ret = cc_type_named(cstr_slice("void"), sp, L->arena);
+    if (*raises) ret = cc_type_result(ret, cc_type_named(ety, sp, L->arena), false, sp, L->arena);
+    memset(&ft, 0, sizeof(ft));
+    ft.ret = ret;
+    ft.params = params;
+    ft.has_prototype = true;
+    { CcTypeK tk = { .func = ft }; fn_type->k = tk; }
+    memset(&fd, 0, sizeof(fd));
+    fd.name = drop;
+    fd.type = fn_type;
+    fd.body = fnbody;
+    d = cc_arena_alloc(L->arena, sizeof(CcDecl), _Alignof(CcDecl));
+    memset(d, 0, sizeof(*d));
+    d->span = sp;
+    d->specs = CC_SPEC_STATIC;
+    d->attrs = vec_new::[CcAttr](L->arena);
+    { CcDeclK dk = { .func = fd }; d->k = dk; }
+    st->made.push(d);
+    /* the results step types a call by the symbol the index holds, and the
+     * index was read before this step ran: the drop is entered by hand */
+    cc__sym_add(L->ix, drop, CC_SYM_FUNC, d, L->unit, fn_type, false, true);
+    {
+        CcFuncDecl pf;
+        memset(&pf, 0, sizeof(pf));
+        pf.name = drop;
+        pf.type = fn_type;
+        pf.body = NULL;
+        proto = cc_arena_alloc(L->arena, sizeof(CcDecl), _Alignof(CcDecl));
+        memset(proto, 0, sizeof(*proto));
+        proto->span = sp;
+        proto->specs = CC_SPEC_STATIC;
+        proto->attrs = vec_new::[CcAttr](L->arena);
+        { CcDeclK dk = { .func = pf }; proto->k = dk; }
+        pl_host(st);
+        st->protos.push(proto);
+    }
+    {
+        /* the declaration destroys through the drop from now on */
+        CcStmt* nb = lw_block(L, sp);
+        CcExpr* call = lw_call1(L, drop, cc_expr_unary(CC_OP_ADDR, lw_ident(L, cn, sp), sp, L->arena), sp);
+        if (*raises) lw_push(nb, pl_unwrap_stmt(L, call, sp));
+        else lw_push(nb, lw_expr_stmt(L, call, sp));
+        cv->destroy_body = nb;
+        { CcDeclK dk = { .var = *cv }; dd->k = dk; }
+    }
+    return true;
 }
 
 /* ---- the cache extras: allocated per runner slot past the first, cold-
@@ -3586,16 +3759,19 @@ static void pl_pw_cache_init(PStep* st, CcStmt* blk, uint32_t id, PCapList* caps
     }
 }
 
-static void pl_pw_cache_destroy(PStep* st, CcStmt* blk, uint32_t id, PCapList* caps, CcNameList* cache, CCSlice nw, CCSlice wv, CcSpan sp) {
+static void pl_pw_cache_destroy(PStep* st, CcStmt* blk, uint32_t id, PCapList* caps, CcNameList* cache,
+                                CcNameList* drops, CcNameList* draise, CCSlice nw, CCSlice wv, CcSpan sp) {
     CcLowerer* L = st->L;
     size_t n = caps->len();
     size_t i;
     for (i = 0; i < n; i++) {
-        /* the extras are destroyed at the join, each by the destroy hook
-         * the declaration wrote, bound to the name it wrote it against: a
-         * declaration in a block of its own, whose exit is the destroy. The
-         * declared instance keeps its own, at its own scope exit. A
-         * declaration with no hook leaves nothing to run. */
+        /* the extras are destroyed at the join, each by the destroy the
+         * declaration wrote. A body is the drop function the declaration
+         * itself calls now, once per extra here, unwrapped when the drop
+         * hands back a Result; a hook-only destroy is a declaration in a
+         * block of its own, whose exit is the hook. The declared instance
+         * keeps its own, at its own scope exit. A declaration with no
+         * destroy leaves nothing to run. */
         PCap* c = *caps->get_ptr(i);
         CCSlice cn = c->name;
         CcVarDecl cv;
@@ -3615,7 +3791,12 @@ static void pl_pw_cache_destroy(PStep* st, CcStmt* blk, uint32_t id, PCapList* c
         inner = lw_block(L, sp);
         one = cc__stmt_blank(sp, L->arena);
         take = @string(`${cx}[${wv}]`, L->arena);
-        {
+        if (pl_pw_is_cache(drops, cn)) {
+            CCSlice drop = pl_pw_drop_name(L, id, cn);
+            CcExpr* call = lw_call1(L, drop, cc_expr_unary(CC_OP_ADDR, lw_text(L, take, sp), sp, L->arena), sp);
+            if (pl_pw_is_cache(draise, cn)) one = pl_unwrap_stmt(L, call, sp);
+            else one = lw_expr_stmt(L, call, sp);
+        } else {
             CcDeclStmt ds;
             CcDecl* dd = cc_decl_var(cv.type, cn, NULL, sp, L->arena);
             CcVarDecl nv;
@@ -3698,6 +3879,8 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
     CCSlice his = cc_slice_empty();
     int gform = pl_pw_gate_form(w, pf.wait);
     CcNameList cache = pl_pw_cache_names(L, pf);
+    CcNameList drops = vec_new::[CCSlice](L->arena);    /* cached names whose destroy is a drop function */
+    CcNameList draise = vec_new::[CCSlice](L->arena);   /* those whose drop hands back a Result */
     bool hdest = pl_pw_handle_bind(pf);      /* the site binds a live `CCParallel` */
     CCSlice hv = hdest ? pf.bind : cc_slice_empty();
     size_t n;
@@ -3720,7 +3903,8 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
         for (ci = 0; ci < nc; ci++) {
             CCSlice nm = *cache.get_ptr(ci);
             CcVarDecl cv;
-            if (!pl_find_var_decl(st, nm, &cv)) {
+            CcDecl* cd = NULL;
+            if (!pl_find_var_decl_at(st, nm, &cv, &cd)) {
                 CCString m = @string(`cache (name) '${nm}' has no declaration in the function the walk stands in; the extras take their initializer and '${"@"}destroy' from one: declare '${nm}' above the walk`, L->arena);
                 lw_error(L, sp, m);
                 return;
@@ -3734,6 +3918,13 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
                 CCString m = @string(`cache (name) '${nm}' is read inside an '${"@"}stage' block: a stage is loop-carried identity and a cached name is an instance no ticket can name; read '${nm}' outside the stage, or drop it from 'cache'`, L->arena);
                 lw_error(L, sp, m);
                 return;
+            }
+            if (cv.destroy && cv.destroy_body && cd) {
+                /* one body for the declared instance and every extra */
+                bool raises = false;
+                if (!pl_pw_drop_make(st, id, nm, &cv, cd, &raises, sp)) return;
+                drops.push(nm);
+                if (raises) draise.push(nm);
             }
         }
     }
@@ -3975,7 +4166,7 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
         pl_pw_text(L, blk, h1, sp);
         pl_pw_text(L, blk, h2, sp);
     }
-    pl_pw_cache_destroy(st, blk, id, &caps, &cache, nw, wv, sp);
+    pl_pw_cache_destroy(st, blk, id, &caps, &cache, &drops, &draise, nw, wv, sp);
     if (hdest) {
         /* joined: every ticket ran or was drained, and the pool is about to
          * go, so the handle names no nursery any more */
@@ -4598,6 +4789,7 @@ static void CcLowerer_parallel(CcLowerer* L) {
     st.L = L;
     st.w = &w;
     st.made = vec_new::[CcDeclRef](L->arena);
+    st.protos = vec_new::[CcDeclRef](L->arena);
     st.fwd = cc_string_new();
     st.binds = vec_new::[PBindRef](L->arena);
     st.stages = vec_new::[CcStmtRef](L->arena);
@@ -4659,12 +4851,27 @@ static void CcLowerer_parallel(CcLowerer* L) {
             head.push_cstr("/* --- CC parallel declarations --- */\n", L->arena);
             head.push_slice(cc_string_as_slice(&st.fwd), L->arena);
             head.push_cstr("/* --- end parallel declarations --- */", L->arena);
+            CcDeclList* pv = &st.protos;
+            size_t np = pv->len();
+            size_t pk;
             for (k = 0; k < nd; k++) {
                 CcDecl* dk = *decls->get_ptr(k);
-                if (k == at) with.push(lw_raw_decl(L, head, sp));
+                if (k == at) {
+                    with.push(lw_raw_decl(L, head, sp));
+                    for (pk = 0; pk < np; pk++) {
+                        CcDecl* pd = *pv->get_ptr(pk);
+                        with.push(pd);
+                    }
+                }
                 with.push(dk);
             }
-            if (at >= nd) with.push(lw_raw_decl(L, head, sp));
+            if (at >= nd) {
+                with.push(lw_raw_decl(L, head, sp));
+                for (pk = 0; pk < np; pk++) {
+                    CcDecl* pd = *pv->get_ptr(pk);
+                    with.push(pd);
+                }
+            }
         }
         {
             CcDeclList* madev = &st.made;
