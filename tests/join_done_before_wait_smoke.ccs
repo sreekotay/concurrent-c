@@ -26,7 +26,7 @@ int main(void) {
 
         CCNursery n = cc_nursery_create() !>;
         for (int i = 0; i < FIBERS; i++) {
-            cc_nursery_spawn(n, quick_task, (void*)(intptr_t)i);
+            cc_nursery_spawn(n, quick_task, (void*)(intptr_t)i) !>;
         }
 
         /* Give child fibers a chance to complete before we join. */

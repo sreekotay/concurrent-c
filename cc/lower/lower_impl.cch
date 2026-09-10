@@ -616,6 +616,27 @@ static void lw_include_defining_faces(CcLowerer* L, CcDeclList* decls) {
     }
 }
 
+/* `__spawn_into_call(fn, arg)` is the spawn-into surface written out: a
+ * task handle from a plain `void*(*)(void*)`, with the result buffer the
+ * ordered receive reads. It is declared in `ccc/cc_closure_helper.h`, which
+ * no other header pulls in -- so a unit that writes the call and nothing
+ * else from that header reaches the host compiler with the name
+ * undeclared. The include goes above the first declaration that names it,
+ * which is below every header the helper itself needs. */
+static void lw_include_spawn_helper(CcLowerer* L, CcDeclList* decls) {
+    CcNameList one = vec_new::[CCSlice](L->arena);
+    size_t use = 0;
+    one.push(cstr_slice("__spawn_into_call"));
+    if (!lw_first_use_of(L->unit, decls, &one, &use)) return;
+    {
+        CcDecl* at = *decls->get_ptr(use);
+        CCString line = @string(`#include <ccc/cc_closure_helper.h>
+`, L->arena);
+        CcDecl* raw = lw_raw_decl(L, line, at->span);
+        lw_insert_decl(L, decls, use, raw);
+    }
+}
+
 /* Does this path name the scheduler header? */
 static bool lw_is_sched_include(CCSlice p) {
     size_t i;
@@ -717,6 +738,7 @@ static void CcLowerer_includes(CcLowerer* L) {
         }
     }
     if (L->header_mode) lw_include_defining_faces(L, decls);
+    lw_include_spawn_helper(L, decls);
 }
 
 /* `type_of(T)` is `cc_type_of("T")`: a lookup in the runtime registry by

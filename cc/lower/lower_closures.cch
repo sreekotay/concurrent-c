@@ -13,6 +13,14 @@
  * borrowing, and until that is lowered it is a diagnostic rather than a
  * dangling alias.
  *
+ * An explicit list is a floor rather than the whole answer for one kind of
+ * name: a channel endpoint the body sends or receives on is captured even
+ * when the list does not mention it. An endpoint is a value the enclosing
+ * frame holds and the body cannot reach any other way, so leaving it out
+ * makes the entry function name an undeclared identifier; a general
+ * re-merge of every name the body reads is what the explicit list is
+ * written to prevent, so only endpoints are added.
+ *
  * The entry's body is real declarations, not text, so the steps after
  * this one type the closure body exactly as they type any function.
  *
@@ -100,7 +108,79 @@ typedef struct KScan {
     CcNameList seen;            /* captured already */
     KCapList caps;
     bool failed;
+    bool chan_only;             /* an explicit list ran: only endpoints are added */
 } KScan;
+
+/* A channel endpoint held by a name: `T[~n >]` / `T[~n <]` as written, the
+ * `CCChanTx` / `CCChanRx` a lowered declaration holds, or a typedef of
+ * either. The hop count is bounded because a typedef chain that does not
+ * end is not this step's to diagnose. */
+static bool kl_type_is_chan_1(CcType* t, CCSlice* name) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .chan(ch): (void)ch.dir; return true;
+        case .named(n): *name = n.name; return false;
+        default: return false;
+    }
+}
+
+/* A struct, written out or behind a typedef. */
+static bool kl_is_record(CcType* t) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .record: return true;
+        default: return false;
+    }
+}
+
+/* A parameter type the runtime cannot carry in an `intptr_t`.
+ *
+ * A closure's arguments travel as `intptr_t`, so a caller with a struct to
+ * hand over passes its address instead -- `cc_closure2_call(b,
+ * (intptr_t)slot, (intptr_t)&arena)` is what the channel's builder call
+ * looks like, and every other runtime call that hands a handle to a
+ * closure looks the same. An aggregate parameter is therefore reloaded
+ * through that address; everything that does fit in the word -- a pointer,
+ * an integer -- stays the cast it has always been. Casting to the struct
+ * itself is not a narrower version of the right answer: it is
+ * `conversion to non-scalar type requested`, and the unit does not
+ * compile.
+ *
+ * The hop count is bounded because a typedef chain that does not end is
+ * not this step's to diagnose. */
+static bool kl_type_is_aggregate(CcIndex* ix, CcType* t) {
+    int hops = 0;
+    while (t && hops < 8) {
+        CCSlice nm = cc_slice_empty();
+        CcSym* sym;
+        if (kl_is_record(t)) return true;
+        if (!type_named_name(t, &nm) || !nm.len) return false;
+        sym = ix->sym(nm) ?> NULL;
+        while (sym && sym->kind != CC_SYM_TYPE) sym = sym->same_name;
+        if (!sym || !sym->type || sym->type == t) return false;
+        t = sym->type;
+        hops++;
+    }
+    return false;
+}
+
+static bool kl_type_is_chan(CcIndex* ix, CcType* t) {
+    int hops = 0;
+    while (t && hops < 8) {
+        CCSlice nm = cc_slice_empty();
+        CcSym* sym;
+        if (kl_type_is_chan_1(t, &nm)) return true;
+        if (!nm.len) return false;
+        if (cc_slice_eq_cstr(&nm, "CCChanTx")) return true;
+        if (cc_slice_eq_cstr(&nm, "CCChanRx")) return true;
+        sym = ix->sym(nm) ?> NULL;
+        while (sym && sym->kind != CC_SYM_TYPE) sym = sym->same_name;
+        if (!sym || !sym->type || sym->type == t) return false;
+        t = sym->type;
+        hops++;
+    }
+    return false;
+}
 
 static bool kl_name_in(CcNameList* v, CCSlice name) {
     size_t n = v->len();
@@ -119,6 +199,7 @@ static void kl_note_use(KScan* sc, CCSlice name) {
     if (kl_name_in(&sc->bound, name) || kl_name_in(&sc->seen, name)) return;
     t = sc_lookup(sc->w, name);
     if (!t) return;                 /* a global, a function, an enumerator: not a capture */
+    if (sc->chan_only && !kl_type_is_chan(L->ix, t)) return;
     cap = cc_arena_alloc(L->arena, sizeof(KCap), _Alignof(KCap));
     memset(cap, 0, sizeof(*cap));
     cap->name = name;
@@ -636,7 +717,13 @@ static CcDecl* kl_entry_decl(KStep* st, uint32_t id, KCapList* caps, CcClosure c
         CCString an = @string(`__arg${(int)i}`, L->arena);
         CCSlice arg = lw_keep(L, &an);
         CcType* pt = p->type ? p->type : cc_type_named(cstr_slice("intptr_t"), sp, L->arena);
-        CcExpr* cast = kl_cast(L, pt, lw_ident(L, arg, sp), sp);
+        CcExpr* cast;
+        if (p->type && kl_type_is_aggregate(L->ix, pt)) {
+            CcType* ptr = cc_type_pointer(pt, sp, L->arena);
+            cast = cc_expr_unary(CC_OP_DEREF, kl_cast(L, ptr, lw_ident(L, arg, sp), sp), sp, L->arena);
+        } else {
+            cast = kl_cast(L, pt, lw_ident(L, arg, sp), sp);
+        }
         if (p->name.len) lw_push(body, lw_decl_stmt(L, pt, p->name, cast, sp));
     }
     {
@@ -1206,9 +1293,11 @@ static void kl_lower(KStep* st, CcExpr* e, CcClosure cl) {
             sc.caps.push(cap);
             sc.seen.push(c->name);
         }
-    } else if (cl.body) {
+    }
+    if (cl.body) {
         CcVisitor v;
         memset(&v, 0, sizeof(v));
+        sc.chan_only = (ncap != 0);
         v.expr = kl_scan_expr;
         v.stmt = kl_scan_stmt;
         v.env = &sc;
@@ -1403,13 +1492,18 @@ static bool kl_send_task_visit(CcExpr* e, void* env) {
             CCString spawn_call = @string(`${spawn}(${c_n})`, L->arena);
             CCString send_call = @string(`cc_chan_send((${recv}).raw, &${t_n}, sizeof(${t_n}))`, L->arena);
             CCString rescue = @string(`if (${e_n} != 0) { (void)cc_block_on_intptr(${t_n}); }`, L->arena);
+            /* What the send answers with is what every other channel
+             * operation answers with -- `bool !>(CCIoError)` -- so the
+             * `!>` a caller writes on the line has a Result to read. The
+             * errno the raw send returned is what it is built from. */
+            CCString surface = @string(`cc_chan_result_with((${recv}).raw, ${e_n}, 0)`, L->arena);
             lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("CCClosure0"), e->span, L->arena), c_n, arg, e->span));
             lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("CCTask"), e->span, L->arena), t_n,
                                       lw_text(L, spawn_call, e->span), e->span));
             lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("int"), e->span, L->arena), e_n,
                                       lw_text(L, send_call, e->span), e->span));
             lw_push(blk, lw_expr_stmt(L, lw_text(L, rescue, e->span), e->span));
-            lw_push(blk, lw_expr_stmt(L, lw_ident(L, e_n, e->span), e->span));
+            lw_push(blk, lw_expr_stmt(L, lw_text(L, surface, e->span), e->span));
             se.block = blk;
             wrapped->k = { .stmt_expr = se };
             *e = *wrapped;

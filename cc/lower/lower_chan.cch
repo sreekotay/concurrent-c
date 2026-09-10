@@ -213,6 +213,15 @@ static bool hc_is_task_end(HStep* st, CCSlice name) {
     return false;
 }
 
+/* The endpoint a type is, by any route the unit can read it: written out,
+ * behind a typedef the index carries, or behind one this function opened.
+ * A typedef declared inside a body is in the walker's scope and nowhere
+ * else, and an endpoint declared through one is still an endpoint. */
+static bool hc_chan_of(HStep* st, CcType* t, CcChanType* out) {
+    if (hc_is_chan_named(st->L->ix, t, out)) return true;
+    return hc_is_chan(unalias_local(st->w, t), out);
+}
+
 /* `int64_t[~4 >] tx;` keeps what it carries, and becomes the handle. */
 static void hc_decl(HStep* st, CcDecl* d, CcVarDecl v) {
     CcLowerer* L = st->L;
@@ -220,7 +229,7 @@ static void hc_decl(HStep* st, CcDecl* d, CcVarDecl v) {
     HEnd* e;
     CCSlice mode;
     CCSlice topo;
-    if (!hc_is_chan_named(L->ix, v.type, &ch)) return;
+    if (!hc_chan_of(st, v.type, &ch)) return;
     if (!hc_mode_of(L, ch, d->span, &mode)) return;
     if (!hc_topo_of(L, ch, d->span, &topo)) return;
     e = cc_arena_alloc(L->arena, sizeof(HEnd), _Alignof(HEnd));
@@ -285,7 +294,22 @@ static void hc_pair(HStep* st, CcExpr* e, CcCall cl) {
     n2 = hc_addr_name(*av->get_ptr(1));
     a = hc_find(st, n1);
     b = hc_find(st, n2);
-    if (!a || !b) return;
+    if (!a || !b) {
+        /* The pair is built from what the two ends declared: the capacity,
+         * the element width, the mode and the topology all come off the
+         * declarators. A name that is not an endpoint declares none of
+         * them, and left alone the call reaches C as a two-argument
+         * function nobody declares -- so the operand that broke it is
+         * named at the position of the call. A receiver written as
+         * anything but `&name` is a shape this step does not read, and is
+         * left to the steps that do. */
+        if (n1.len && n2.len) {
+            CCSlice bad = a ? n2 : n1;
+            CCString m = @string(`channel: cc_channel_pair needs a send endpoint and a receive endpoint; '${bad}' is not declared as one`, L->arena);
+            lw_error(L, sp, m);
+        }
+        return;
+    }
     {
         /* a real call, so the unwrap that follows can see the Result the
          * runtime declares it returns */
@@ -370,6 +394,140 @@ static void hc_send(HStep* st, CcExpr* e, CcUfcs uf) {
         se.block = blk;
         wrapped->k = { .stmt_expr = se };
         *av->get_ptr(0) = wrapped;
+    }
+}
+
+/* `ch.recv(&v)` where `ch` is the runtime's own `CCChan*`.
+ *
+ * A raw channel is not an endpoint: it carries no element type, so the
+ * width comes off what the caller hands the receiver, and the direction
+ * comes off the method. The generic UFCS resolution would land on
+ * `cc_chan_recv`, which takes that width as a third argument and answers
+ * with an errno -- neither of which is what the call site reads. The
+ * surface here is the one every other channel operation answers with:
+ * `bool !>(CCIoError)`, built from the errno the raw receive returns.
+ *
+ * The receiver is spelled twice, so it has to be a name: any other shape
+ * would be evaluated twice, and this step does not read it. */
+static bool hc_raw_recv(HStep* st, CcExpr* e, CcUfcs uf, CcType* rt) {
+    CcLowerer* L = st->L;
+    CcExprList* av = &uf.args;
+    CCSlice recv;
+    CCSlice tn;
+    CcType* pointee = NULL;
+    CcSpan sp = e->span;
+    if (!cc_slice_eq_cstr(&uf.method, "recv")) return false;
+    if (av->len() != 1) return false;
+    if (!rt) return false;
+    @switch (rt->k) {
+        case .pointer(pt): pointee = pt.pointee; break;
+        default: return false;
+    }
+    if (!pointee || !type_named_name(pointee, &tn)) return false;
+    if (!cc_slice_eq_cstr(&tn, "CCChan")) return false;
+    if (!expr_ident(strip_parens_expr(uf.recv), &recv)) return false;
+    {
+        CCString spelled = lw_spell_expr(L, *av->get_ptr(0));
+        CCSlice into = cc_string_as_slice(&spelled);
+        CCString t = @string(`cc_chan_result_with((${recv}), cc_channel_raw_recv((${recv}), (void*)(${into}), sizeof(*(${into}))), 1)`, L->arena);
+        CcExpr* out = lw_text(L, t, sp);
+        *e = *out;
+    }
+    return true;
+}
+
+/* The closure a call hands over, or false for anything else. */
+static bool hc_closure_of(CcExpr* e, CcClosure* out) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .closure(c): *out = c; return true;
+        default: return false;
+    }
+}
+
+/* The same closure's body, written through. */
+static void hc_closure_set_body(CcExpr* e, CcStmt* b) {
+    @switch (e->k) {
+        case .closure: e->k.closure.body = b; break;
+        default: break;
+    }
+}
+
+static bool hc_is_send_into(CCSlice m) {
+    return cc_slice_eq_cstr(&m, "send_into") || cc_slice_eq_cstr(&m, "try_send_into");
+}
+
+/* `ep.send_into((slot, arena) => { ... }, a)` and `try_send_into`.
+ *
+ * The builder writes into the slot the channel admitted, so what it takes
+ * is the channel's element by address and the arena the caller named.
+ * Written bare, those parameters carry no type at all, and an untyped
+ * closure parameter is given the `intptr_t` the runtime carries it in --
+ * which is the width, not the meaning: the body then dereferences a
+ * `long`. The element type is the endpoint's, so it is filled in here,
+ * where the endpoint is known.
+ *
+ * The arena does not fit in an `intptr_t`, and the runtime hands over its
+ * address (`cc_closure2_call(b, (intptr_t)slot, (intptr_t)&arena)`), so
+ * the parameter that arrives is the pointer and the name the body reads is
+ * a local the block opens with.
+ *
+ * A parameter the author typed is left as written: this fills in what was
+ * not said, it does not overrule what was. */
+static void hc_send_into(HStep* st, CcUfcs uf, CcType* rt) {
+    CcLowerer* L = st->L;
+    CcExprList* av = &uf.args;
+    CcChanType ch;
+    CcType* elem = NULL;
+    CcExpr* a0;
+    CcClosure cl;
+    CcParam* p0;
+    CcParam* p1;
+    if (!hc_is_send_into(uf.method)) return;
+    if (av->len() != 2) return;
+    a0 = strip_parens_expr(*av->get_ptr(0));
+    if (!hc_closure_of(a0, &cl)) return;
+    if (cl.params.len() != 2) return;
+    p0 = cl.params.get_ptr(0);
+    p1 = cl.params.get_ptr(1);
+    if (p0->type || p1->type) return;
+    if (!p0->name.len || !p1->name.len) return;
+    {
+        CCSlice recv = cc_slice_empty();
+        HEnd* end = NULL;
+        if (expr_ident(strip_parens_expr(uf.recv), &recv)) end = hc_find(st, recv);
+        if (end) elem = end->elem;
+        else if (hc_chan_of(st, rt, &ch)) elem = ch.elem;
+    }
+    if (!elem) return;
+    {
+        CcSpan sp = a0->span;
+        uint32_t id = st->next_id++;
+        CCString hn = @string(`__cc_si_a${id}`, L->arena);
+        CCSlice hid = lw_keep(L, &hn);
+        CcType* at = cc_type_named(cstr_slice("CCArena"), sp, L->arena);
+        CCSlice given = p1->name;
+        CcStmt* nb = lw_block(L, sp);
+        CcStmtList* into = lw_block_stmts(nb);
+        CcExpr* val = cc_expr_unary(CC_OP_DEREF, lw_ident(L, hid, sp), sp, L->arena);
+        p0->type = cc_type_pointer(elem, sp, L->arena);
+        p1->type = cc_type_pointer(at, sp, L->arena);
+        p1->name = hid;
+        into->push(lw_decl_stmt(L, at, given, val, sp));
+        if (cl.body) {
+            CcStmtList* old = lw_block_stmts(cl.body);
+            if (old) {
+                size_t n = old->len();
+                size_t i;
+                for (i = 0; i < n; i++) {
+                    CcStmt* q = *old->get_ptr(i);
+                    into->push(q);
+                }
+            } else {
+                into->push(cl.body);
+            }
+        }
+        hc_closure_set_body(a0, nb);
     }
 }
 
@@ -598,7 +756,9 @@ static void hc_on_call(Walker* w, CcExpr* e, CcCall cl) {
 
 static void hc_on_ufcs(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice tn, CCSlice reason) {
     HStep* st = (HStep*)w->env;
-    (void)rt; (void)m; (void)tn; (void)reason;
+    (void)m; (void)tn; (void)reason;
+    if (hc_raw_recv(st, e, uf, rt)) return;
+    hc_send_into(st, uf, rt);
     hc_send(st, e, uf);
 }
 

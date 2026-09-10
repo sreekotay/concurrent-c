@@ -2274,6 +2274,8 @@ static CcDecl* pl_pw_worker_decl(PStep* st, uint32_t id, CcSpan sp) {
 /* ---- `@stage` inside a walked body -------------------------------------- */
 
 static int pl_pw_gate_form(Walker* w, CcExpr* g);
+static int pl_stage_gate_form(Walker* w, CcExpr* g);
+static bool pl_stage_is_face(int gform);
 
 /* The flag a stage sets once it has passed. The exit reads it, so a ticket
  * that left the body early still hands the phase on to its successor. */
@@ -2304,7 +2306,7 @@ static bool pl_stage_parts(CcStmt* s, CcExpr** gate, CcExprList* args, CcStmtLis
  * node is shared with every other call this stage makes, so the capture
  * rewrite reaches all of them through the one that stays in the body. */
 static CcExpr* pl_stage_addr(CcLowerer* L, int gform, CcExpr* gate, CcSpan sp) {
-    if (gform == 1) return cc_expr_unary(CC_OP_ADDR, gate, sp, L->arena);
+    if (gform == 1 || gform == 5) return cc_expr_unary(CC_OP_ADDR, gate, sp, L->arena);
     return gate;
 }
 
@@ -2359,12 +2361,14 @@ static void pl_pw_stage_lower(PStep* st, uint32_t id, uint32_t k, CcStmt* s,
     CcStmt* blk;
     CCSlice flag = pl_pw_stg_name(L, id, k);
     int gform;
+    bool face;
     if (!pl_stage_parts(s, &gate, &args, &stmts)) return;
-    gform = pl_pw_gate_form(st->w, gate);
+    gform = pl_stage_gate_form(st->w, gate);
+    face = pl_stage_is_face(gform);
     blk = lw_block(L, sp);
     {
         CcExpr* ga = pl_stage_addr(L, gform, gate, sp);
-        CcExpr* c = pl_stage_call(L, "cc_turnstile_wait", ga, &args, sp);
+        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_wait" : "cc_turnstile_wait", ga, &args, sp);
         lw_push(blk, pl_unwrap_stmt(L, c, sp));
     }
     {
@@ -2385,7 +2389,7 @@ static void pl_pw_stage_lower(PStep* st, uint32_t id, uint32_t k, CcStmt* s,
     }
     {
         CcExpr* ga = pl_stage_addr(L, gform, gate, sp);
-        CcExpr* c = pl_stage_call(L, "cc_turnstile_pass", ga, &args, sp);
+        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_pass" : "cc_turnstile_pass", ga, &args, sp);
         lw_push(blk, pl_unwrap_stmt(L, c, sp));
     }
     {
@@ -2394,12 +2398,12 @@ static void pl_pw_stage_lower(PStep* st, uint32_t id, uint32_t k, CcStmt* s,
     }
     {
         CcExpr* ga = pl_stage_addr(L, gform, gate, sp);
-        CcExpr* c = pl_stage_call(L, "cc_turnstile_fail", ga, &args, sp);
+        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_fail" : "cc_turnstile_fail", ga, &args, sp);
         dis_fail->push(c);
     }
     {
         CcExpr* ga = pl_stage_addr(L, gform, gate, sp);
-        CcExpr* c = pl_stage_call(L, "cc_turnstile_pass", ga, &args, sp);
+        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_pass" : "cc_turnstile_pass", ga, &args, sp);
         dis_pass->push(c);
     }
     s->k = blk->k;
@@ -2424,17 +2428,26 @@ static bool pl_pw_stages_ok(PStep* st, CcStmt* body) {
         CcExprList args;
         CcStmtList stmts;
         uint32_t na;
+        uint32_t want;
+        int gform;
         if (!pl_stage_parts(q, &gate, &args, &stmts)) continue;
-        if (!gate || !pl_pw_gate_form(st->w, gate)) {
-            CCString m = @string(`'${"@"}stage' orders the walk's tickets on a 'CCTurnstile': the gate here is something else`, L->arena);
+        gform = gate ? pl_stage_gate_form(st->w, gate) : 0;
+        if (!gform) {
+            CCString m = @string(`'${"@"}stage' orders the walk's tickets on a 'CCTurnstile' or on one of the stages a 'CCTurnstileRW' embeds: the gate here is something else`, L->arena);
             lw_error(L, q->span, m);
             ok = false;
             continue;
         }
         na = (uint32_t)args.len();
-        if (na != 2) {
-            CCString m = @string(`'${"@"}stage (gate, phase, ticket)' names a phase and a ticket beside its gate: this one names ${na}`, L->arena);
-            lw_error(L, q->span, m);
+        want = pl_stage_is_face(gform) ? 1u : 2u;
+        if (na != want) {
+            if (want == 1u) {
+                CCString m = @string(`'${"@"}stage (ts.read, ticket)' names a ticket beside its stage: this one names ${na}`, L->arena);
+                lw_error(L, q->span, m);
+            } else {
+                CCString m = @string(`'${"@"}stage (gate, phase, ticket)' names a phase and a ticket beside its gate: this one names ${na}`, L->arena);
+                lw_error(L, q->span, m);
+            }
             ok = false;
         }
     }
@@ -2642,23 +2655,46 @@ static bool pl_pw_result_dest(CcParallelFor pf) {
  * value, 0 not a turnstile at all. The pool caps on the caller's own, so a
  * value is taken by address; anything else is not a gate this site can cap on
  * and saying so beats a C type error at a line about something else. */
-static int pl_pw_gate_form(Walker* w, CcExpr* g) {
-    CcType* t = type_of_expr(w, g);
+/* The name a gate's type carries, and whether the gate is already a
+ * pointer: the same gate reached two ways is the same gate. */
+static bool pl_gate_named(CcType* t, CCSlice* out, bool* is_ptr) {
     CcType* p = NULL;
-    CCSlice nm = cc_slice_empty();
-    CCSlice want = cstr_slice("CCTurnstile");
-    if (!t) return 0;
+    *is_ptr = false;
+    if (!t) return false;
     @switch (t->k) {
         case .pointer(pt): p = pt.pointee; break;
         default: break;
     }
-    if (p) {
-        if (type_named_name(p, &nm) && slice_eq(nm, want)) return 2;
-        return 0;
-    }
-    if (type_named_name(t, &nm) && slice_eq(nm, want)) return 1;
+    if (p) { *is_ptr = true; t = p; }
+    return type_named_name(t, out);
+}
+
+/* The gate a `@parallel wait (...)` caps its pool on. A `CCTurnstileRW` is
+ * two stages around one core, and the pool is capped on that core. */
+static int pl_pw_gate_form(Walker* w, CcExpr* g) {
+    CCSlice nm = cc_slice_empty();
+    bool ptr = false;
+    if (!pl_gate_named(type_of_expr(w, g), &nm, &ptr)) return 0;
+    if (cc_slice_eq_cstr(&nm, "CCTurnstile")) return ptr ? 2 : 1;
+    if (cc_slice_eq_cstr(&nm, "CCTurnstileRW")) return ptr ? 4 : 3;
     return 0;
 }
+
+/* The gate a `@stage` orders its ticket on. Either the whole turnstile,
+ * which names the phase inside it, or one of the stages a `CCTurnstileRW`
+ * embeds -- `ts.read` is a stage of its own and takes only the ticket. */
+static int pl_stage_gate_form(Walker* w, CcExpr* g) {
+    CCSlice nm = cc_slice_empty();
+    bool ptr = false;
+    if (!pl_gate_named(type_of_expr(w, g), &nm, &ptr)) return 0;
+    if (cc_slice_eq_cstr(&nm, "CCTurnstile")) return ptr ? 2 : 1;
+    if (cc_slice_eq_cstr(&nm, "CCTurnstileStage")) return ptr ? 6 : 5;
+    return 0;
+}
+
+/* A stage named through a face takes the ticket alone; one named through
+ * the whole turnstile takes the phase beside it. */
+static bool pl_stage_is_face(int gform) { return gform == 5 || gform == 6; }
 
 /* The site: open the pool, hand out the tickets under the gate, then read
  * what the pool left behind. */
@@ -2768,9 +2804,14 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
         CCString a6 = @string(`CCChan* ${work} = 0`, L->arena);
         CCString a7 = @string(`${slt}* ${slots} = 0`, L->arena);
         CCString a8 = @string(`${agt}* ${args} = 0`, L->arena);
-        CCString a9 = (gform == 1)
-            ? @string(`CCTurnstile* ${gv} = &(${wspell})`, L->arena)
-            : @string(`CCTurnstile* ${gv} = (${wspell})`, L->arena);
+        /* The pool is capped on a `CCTurnstile`. A gate held by value is
+         * taken by address; one already a pointer is passed on; a
+         * `CCTurnstileRW` is two stages around one core, and the core is
+         * the turnstile the tickets enter. */
+        CCString a9 = @string(`CCTurnstile* ${gv} = (${wspell})`, L->arena);
+        if (gform == 1) a9 = @string(`CCTurnstile* ${gv} = &(${wspell})`, L->arena);
+        else if (gform == 3) a9 = @string(`CCTurnstile* ${gv} = &(${wspell}).core`, L->arena);
+        else if (gform == 4) a9 = @string(`CCTurnstile* ${gv} = &(${wspell})->core`, L->arena);
         pl_pw_text(L, blk, a1, sp);
         pl_pw_text(L, blk, a2, sp);
         pl_pw_text(L, blk, a3, sp);
@@ -3308,7 +3349,7 @@ static void pl_for(PStep* st, CcStmt* s, CcParallelFor pf) {
         return;
     }
     if (!pl_pw_gate_form(st->w, pf.wait)) {
-        m = @string(`'${"@"}parallel wait (...)' caps on a gate: it must be a CCTurnstile`, L->arena);
+        m = @string(`'${"@"}parallel wait (...)' caps on a gate: it must be a CCTurnstile or a CCTurnstileRW`, L->arena);
         lw_error(L, sp, m);
         s->k = gone->k;
         return;
