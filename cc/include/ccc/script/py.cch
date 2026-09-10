@@ -4654,7 +4654,7 @@ static inline CCPy !>(CCPyError) cc_py_new(_Bool isolated, CCArena arena) {
  * resources and nothing else will reclaim it before process exit. The process
  * interpreter is left alive: re-initializing CPython after FinalizeEx is
  * unreliable, and process exit reclaims it. Idempotent. */
-static inline void cc_py_close(CCPy *py) {
+static inline void cc__py_close_impl(CCPy *py) {
     if (!py) return;
     if (py->tier == CC__PY_TIER_PROC) {
         cc__py_iso_close(py);
@@ -4708,6 +4708,15 @@ static inline void cc_py_close(CCPy *py) {
     py->isolated = 0;
     py->tier = CC__PY_TIER_INPROC;
     py->fd = -1;
+}
+
+/* The arena in the handle is the caller's, kept by value. The value-field
+ * chain that runs after this hook (spec 3.1) would free it as if it were
+ * owned, so the hook disowns it: the chain then finds a nulled handle,
+ * which destroy treats as already done. */
+static inline void cc_py_close(CCPy *py) {
+    cc__py_close_impl(py);
+    if (py) { py->arena = cc_arena_handle(NULL); }
 }
 
 static inline void cc_py_obj_release(CCPyObj *obj) {

@@ -879,13 +879,22 @@ static inline CCQjs !>(CCQjsError) cc_qjs_new(CCArena arena) {
     return cc_ok(js);
 }
 
-static inline void cc_qjs_close(CCQjs *js) {
+static inline void cc__qjs_close_impl(CCQjs *js) {
     if (!js || !js->ready) return;
     js->ready = 0;
     if (js->ctx) cc__qjs.free_context(js->ctx);
     if (js->rt) cc__qjs.free_runtime(js->rt);
     js->ctx = NULL;
     js->rt = NULL;
+}
+
+/* The arena in the handle is the caller's, kept by value. The value-field
+ * chain that runs after this hook (spec 3.1) would free it as if it were
+ * owned, so the hook disowns it: the chain then finds a nulled handle,
+ * which destroy treats as already done. */
+static inline void cc_qjs_close(CCQjs *js) {
+    cc__qjs_close_impl(js);
+    if (js) { js->arena = cc_arena_handle(NULL); }
 }
 
 static inline void cc_qjs_val_release(CCQjsVal *o) {

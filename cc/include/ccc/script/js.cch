@@ -3841,13 +3841,22 @@ cc_js_host_run(CCJsHost *host, void (*fn)(CCJs *js, void *ctx), void *ctx) {
 /* The @destroy hook; idempotent.  Values held from the torn-down
  * environment are dead after this returns — the same rule guest close
  * applies. */
-static inline void cc_js_host_close(CCJsHost *host) {
+static inline void cc__js_host_close_impl(CCJsHost *host) {
     if (!host || !host->open) return;
     host->open = 0;
     if (!cc__js_hostd) return;
     cc__js_host_stop_f(cc__js_hostd);
     cc__js_hostd = NULL;
     cc__js_host_torn = 1;
+}
+
+/* The arena in the handle is the caller's, kept by value. The value-field
+ * chain that runs after this hook (spec 3.1) would free it as if it were
+ * owned, so the hook disowns it: the chain then finds a nulled handle,
+ * which destroy treats as already done. */
+static inline void cc_js_host_close(CCJsHost *host) {
+    cc__js_host_close_impl(host);
+    if (host) { host->arena = cc_arena_handle(NULL); }
 }
 
 /* ---- domains: one handle, two transports ----
@@ -6082,7 +6091,7 @@ static inline bool cc_js_dom_available(_Bool isolated) {
 
 /* The @destroy hook; idempotent.  Polite close first (the broker exits
  * on the op), EOF as the fallback (it exits on that too). */
-static inline void cc_js_dom_close(CCJsDom *d) {
+static inline void cc__js_dom_close_impl(CCJsDom *d) {
     if (d && d->tier == CC__JS_DOM_HOSTED) {
         /* Mark dead before tearing down the env so a retained JS
          * callable cannot re-enter a live box during stop. */
@@ -6113,6 +6122,15 @@ static inline void cc_js_dom_close(CCJsDom *d) {
     }
     cc__js_dom_drop(d);
     cc__js_dom_reap(d);
+}
+
+/* The arena in the handle is the caller's, kept by value. The value-field
+ * chain that runs after this hook (spec 3.1) would free it as if it were
+ * owned, so the hook disowns it: the chain then finds a nulled handle,
+ * which destroy treats as already done. */
+static inline void cc_js_dom_close(CCJsDom *d) {
+    cc__js_dom_close_impl(d);
+    if (d) { d->arena = cc_arena_handle(NULL); }
 }
 
 /* ---- domain ops ---- */
