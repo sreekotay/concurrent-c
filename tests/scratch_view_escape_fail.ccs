@@ -1,0 +1,15 @@
+/* A view of a bound `@scratch` product stored into a name declared outside
+ * the block: the bytes end with the block, and the outer name would read
+ * whatever the next block wrote. Refused at the store. Binding the product
+ * itself to the outer name (`keep = row`) is the bound form for that name
+ * and is fine; so is a value built from it. */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+int main(void) {
+    int x = 7;
+    CCSlice v;
+    { CCString row = @string(`abc${x}`, @scratch); v = row.as_slice(); }
+    { CCString other = @string(`zzzzzzzz`, @scratch); (void)other; }
+    println(v);
+    return 0;
+}

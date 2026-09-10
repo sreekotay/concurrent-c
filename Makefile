@@ -183,10 +183,22 @@ tools:
 	@mkdir -p tools
 	@cc -O2 -Wall -Wextra tools/cc_test.c -o tools/cc_test
 
+# The clean lowerer (out/cc/bin/*_cc), built by the current compiler.
+lower-cc: cc
+	CC_NO_CACHE=1 $(MAKE) -C $(CC_DIR) lower-cc
+
 # Prefer using ccc itself for tests (the runner drives ./cc/bin/ccc).
-test: cc tools out-of-tree-smoke out-of-tree-module-smoke runtime-variant-smoke
+# The default run is the reference lowerer. The two lines after it are the
+# clean lowerer's gate -- its self-hosting fixed point, and the stress/break
+# rows it is ahead of the reference on -- so the clean path cannot rot
+# between full differential runs (scripts/lowerer_diff.sh, ~40 minutes).
+# The harness cache is off for that run: the default run just filled it
+# with the reference's products under the same names.
+test: cc tools lower-cc out-of-tree-smoke out-of-tree-module-smoke runtime-variant-smoke
 	@./scripts/check_patched_tcc.sh
 	@./tools/cc_test
+	@./scripts/lowerer_selfhost.sh
+	@CC_TEST_NO_CACHE=1 CC_LOWERER=clean ./tools/cc_test --quick --filter break_
 
 # Smoke: verify `ccc` can compile a source file that lives outside the repo
 # tree.  Regression guard for `cc_path_find_repo_root` -> header include

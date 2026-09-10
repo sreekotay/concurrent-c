@@ -1089,7 +1089,7 @@ static CcStmt* rl_scaffold_ex(RFn* fn, CcExpr* uw, CcExpr* target, bool target_r
     if (form == 1) {
         CcNameList path;
         CCString bare_value = rl_bare_msg(fn);
-        CCString bare_stmt = rl_at2(L, "err with no local handler requires ", "errhandler: a bare unwrap statement forwards the error to one");
+        CCString bare_stmt = @string(`a bare unwrap ('!>;' or '${"@"}err') with no local handler requires an enclosing '${"@"}errhandler': the statement forwards the error to one`, L->arena);
         CCSlice bare_v = bare_value.as_slice();
         CCSlice bare_s = bare_stmt.as_slice();
         /* in a dest body the statement form has the same nothing to reach */
@@ -1445,7 +1445,7 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
                     }
                 }
                 if (bound) {
-                    CCString bare_fwd = rl_at2(L, "err with no local handler requires ", "errhandler");
+                    CCString bare_fwd = @string(`a bare unwrap ('!>;' or '${"@"}err') with no local handler requires an enclosing '${"@"}errhandler': the statement forwards the error to one`, L->arena);
                     CCSlice bare = bare_fwd.as_slice();
                     h = rl_pick_handler(fn, cc_slice_empty(), s->span, bare, &path, NULL, NULL);
                 }

@@ -6161,19 +6161,21 @@ int main(void) {
 - Overflow follows `CC_ARENA_STACK` (stack-first, then ordinary growth / `String` poison rules).
 - Freestanding `@scratch` (or use outside `@string`) is a compile error. Prefer `CC_ARENA_STACK` / `cc_arena_heap` for named or long-lived arenas.
 
-**Call-local reclaim.** A call-local `@string(..., @scratch)` is one consumed by a call in a statement that binds nothing: a call statement, an assignment, a UFCS call, or a `!>` unwrap (e.g. `println(@string(\`…\`, @scratch))`, `f(@string(\`…\`, @scratch))`, `n += f(@string(\`…\`, @scratch))`). The statement checkpoints the shared scratch before building the temp and restores after the consuming call. A declaration initializer (`size_t n = f(@string(..., @scratch))`) is a bound form. Earlier bound products in the same function remain valid; the temp's bump (and any extent growth for that temp) is reclaimed. Bound forms (`CCString s = @string(..., @scratch)`) keep their bytes for the function/closure lifetime and do not restore around the initializer.
+**Call-local reclaim.** A call-local `@string(..., @scratch)` is one consumed by a call in a statement that binds nothing: a call statement, an assignment, a UFCS call, or a `!>` unwrap (e.g. `println(@string(\`…\`, @scratch))`, `f(@string(\`…\`, @scratch))`, `n += f(@string(\`…\`, @scratch))`). The statement checkpoints the shared scratch before building the temp and restores after the consuming call. A declaration initializer (`size_t n = f(@string(..., @scratch))`) is a bound form. Earlier bound products in the same function remain valid; the temp's bump (and any extent growth for that temp) is reclaimed.
+
+**Bound reclaim.** A bound `@string(..., @scratch)` is one whose product is given a name: a declaration initializer (`CCString s = @string(..., @scratch)`) or an assignment to a declared name (`row = @string(..., @scratch)`). The product keeps its bytes until the end of the block that declares that name, and nothing restores around the initializer or the assignment. A name declared in an outer block and assigned in an inner one (a loop body building a row the outer block reads) has the outer block's lifetime: the inner block reclaims nothing of it. Blocks nest, so their products nest; when an inner block ends, the products its own names hold are reclaimed and every product of an enclosing block still reads.
 
 A product that must outlive the consuming call — including an argument of `return` (`cc_script_sh`, `cc_script_sh_read`, `@destroy` return-rewrite) — is bound to a local first (`CCString line = @string(\`…\`, @scratch); return f(line);`). `return f(@string(\`…\`, @scratch))` is call-local: the temp is reclaimed after `f` returns, and that nesting does not compose with `@destroy` return-rewrite.
 
 Newlines after the comma are whitespace — a wrapped `@scratch` is the same operand. `@scratch` is not a `CCArena` binding; there is no `scratch.destroy()`.
 
-**Escape (normative).** Products of `@string(..., @scratch)` have function/closure lifetime. It is a compile-time error to:
+**Escape (normative).** A product of `@string(..., @scratch)` lives until the end of the block that declares its name, or until the consuming call returns when nothing names it. It is a compile-time error to:
 
 - `return` that `String` (or a slice/view derived from it),
-- assign it into a variable declared in an **outer** block,
-- capture it into a closure or task that may outlive the enclosing function or closure.
+- store a slice or view derived from it into a variable declared in an **outer** block, or otherwise read it after the block that declares its name has ended,
+- capture it into a closure or task that may outlive the block that declares its name.
 
-Same-scope use (`CCString s = @string(..., @scratch); println(s);`) is fine. Call-local borrows (`println(@string(..., @scratch))`) are fine.
+Same-scope use (`CCString s = @string(..., @scratch); println(s);`) is fine. Assigning the product itself to a name declared in an outer block is the bound form for that name, and is fine. Call-local borrows (`println(@string(..., @scratch))`) are fine.
 
 `@string(...)` templated construction follows the same contract: if the destination arena cannot hold the output, the result is a failed `String` — never partial bytes.
 

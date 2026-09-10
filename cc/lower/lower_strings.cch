@@ -583,9 +583,12 @@ static void sr_wrap_call_local(TStep* st, CcStmt* s) {
  * than a judgement. */
 typedef struct SrScope {
     CcNameList declared;        /* names this scope declares */
+    CcNameList bound;           /* those of them that hold a `@scratch` product */
+    CcLowerer* L;
     bool binds;                 /* one of them is a `@scratch` product */
     bool escapes;               /* something here can outlive the scope */
 } SrScope;
+static void sr_scope_store_out(SrScope* sc, CcExpr* e, CCSlice nm, CcExpr* b);
 
 static bool sr_name_in(CcNameList* names, CCSlice nm) {
     size_t n = names->len();
@@ -610,7 +613,13 @@ static bool sr_scope_expr(CcExpr* e, void* env) {
     /* a capture can carry the bytes anywhere */
     if (is_closure) { sc->escapes = true; return true; }
     if (!is_assign) return true;
-    if (!sr_stores_scratch(as.b, 0)) return true;
+    if (!sr_stores_scratch(as.b, 0)) {
+        CCSlice out = cc_slice_empty();
+        CcExpr* tgt = strip_parens_expr(as.a);
+        if (as.op == CC_OP_ASSIGN && expr_ident(tgt, &out) && out.len && !sr_name_in(&sc->declared, out))
+            sr_scope_store_out(sc, e, out, as.b);
+        return true;
+    }
     {
         CCSlice nm = cc_slice_empty();
         bool plain = false;
@@ -621,7 +630,8 @@ static bool sr_scope_expr(CcExpr* e, void* env) {
         /* a store through a member, an index or a dereference reaches
          * memory this scope cannot account for */
         if (!plain) { sc->escapes = true; return true; }
-        if (!sr_name_in(&sc->declared, nm)) sc->escapes = true;
+        if (!sr_name_in(&sc->declared, nm)) { sc->escapes = true; }
+        else { sc->bound.push(nm); }
     }
     return true;
 }
@@ -638,8 +648,73 @@ static bool sr_scope_stmt(CcStmt* s, void* env) {
     }
     if (!is_var || !vd.name.len) return true;
     sc->declared.push(vd.name);
-    if (vd.init && vd.init->expr && sr_stores_scratch(vd.init->expr, 0)) sc->binds = true;
+    if (vd.init && vd.init->expr && sr_stores_scratch(vd.init->expr, 0)) {
+        sc->binds = true;
+        sc->bound.push(vd.name);
+    }
     return true;
+}
+
+/* A type that reads memory it does not own: a pointer, a slice, or the
+ * slice type by its C name -- `CCSlice`, or the `CCSlice_<elem>` a typed
+ * slice lowers to -- which is how a declared function spells it. */
+static bool sr_type_is_view(CcLowerer* L, const CcType* t) {
+    CcIndex* ix = L->ix;
+    CCSlice c;
+    bool named = false;
+    if (!t) return false;
+    @switch (t->k) {
+        case .pointer: return true;
+        case .slice: return true;
+        case .named: named = true; break;
+        default: break;
+    }
+    if (!named) return false;
+    c = ix->canon(t);
+    return cc__has_prefix(c, "CCSlice");
+}
+
+/* A store into a name declared outside this scope, of something built from
+ * one of the names this scope binds to `@scratch`. The product itself
+ * (`keep = row`) is the bound form for the outer name and its bytes are
+ * kept. A view of it -- a call that answers with a slice or a pointer into
+ * it -- would outlive the bytes: refused at the store, since a reader of
+ * the outer name would otherwise get whatever the next block wrote. Anything
+ * else built from it (a length, a copy into another arena) is a value, and
+ * the scope keeps its bytes to be safe. */
+static void sr_scope_store_out(SrScope* sc, CcExpr* e, CCSlice nm, CcExpr* b) {
+    CcLowerer* L = sc->L;
+    CcNameList* bv = &sc->bound;
+    CcExpr* rhs = strip_parens_expr(b);
+    CCSlice bare = cc_slice_empty();
+    CCSlice callee = cc_slice_empty();
+    CCSlice used = cc_slice_empty();
+    CcCall cl;
+    bool is_call = false;
+    size_t i;
+    size_t n = bv->len();
+    for (i = 0; i < n; i++) {
+        CCSlice bn = *bv->get_ptr(i);
+        if (cc__expr_mentions(b, bn)) { used = bn; break; }
+    }
+    if (!used.len) return;
+    sc->escapes = true;
+    if (expr_ident(rhs, &bare) && slice_eq(bare, used)) return;
+    @switch (rhs->k) {
+        case .call(x): cl = x; is_call = true; break;
+        default: break;
+    }
+    if (!is_call || !expr_ident(strip_parens_expr(cl.callee), &callee)) return;
+    {
+        CcIndex* ix = L->ix;
+        CcSym* sym = sym_any(ix, callee);
+        CcType* rt = return_type_of_sym(sym);
+        if (!sr_type_is_view(L, rt)) return;
+    }
+    {
+        CCString msg = @string(`'${nm}' is declared outside this block and would hold a view of '${used}', whose ${"@"}scratch bytes end with the block: bind the product itself to '${nm}', or build it in the block that reads it`, L->arena);
+        lw_error(L, e->span, msg);
+    }
 }
 
 /* Whether this statement list should take and give back the watermark. The
@@ -652,6 +727,8 @@ static bool sr_scope_owns_scratch(TStep* st, CcStmtList* list) {
     size_t n = list->len();
     size_t i;
     sc.declared = vec_new::[CCSlice](L->arena);
+    sc.bound = vec_new::[CCSlice](L->arena);
+    sc.L = L;
     sc.binds = false;
     sc.escapes = false;
     memset(&v, 0, sizeof(v));

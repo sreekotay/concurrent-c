@@ -1,0 +1,2 @@
+scratch_view_escape_fail.ccs:11:
+would hold a view of 'row', whose @scratch bytes end with the block

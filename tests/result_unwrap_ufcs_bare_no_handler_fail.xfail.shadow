@@ -1,0 +1,1 @@
+the reference checks for a missing handler on the unwrap statement node, which a dotted call does not arrive as; the site is lowered to cc_error_exit and the program compiles, so an error path exits the process inside a handler nobody wrote
