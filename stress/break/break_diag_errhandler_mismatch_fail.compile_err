@@ -1,3 +1,9 @@
-break_diag_errhandler_mismatch_fail.ccs:7:22
+# The rule: an `!>` whose error type has no matching in-scope `@errhandler`
+# is refused, naming the error type it carries and the type the handler takes.
+# File and line are pinned; the column is not, because the two lowerers
+# disagree and neither column is the rule -- the reference points at the `!>`
+# token (column 22), the clean lowerer at the start of the statement carrying
+# it (column 5). Same disagreement as diag_oracle_ccfront_fail.
+break_diag_errhandler_mismatch_fail.ccs:7:
 CCPrintError
 CCError

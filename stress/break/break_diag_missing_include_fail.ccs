@@ -3,5 +3,5 @@
 int main(void) {
     cc_arena_stack(a, kilobytes(4));
     CCString s = cc_string_from("hi", a);
-    return (int)s.len();
+    return (int)cc_string_len(&s);
 }

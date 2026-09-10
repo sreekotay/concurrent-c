@@ -14,9 +14,15 @@ static int !> (CCError)/*x*/s4(int d) { return cc_ok(d); }
 static int !> (CCError) s5/*x*/(int d) { return cc_ok(d); }
 static int !> (CCError) s6(int d)/*x*/{ return cc_ok(d); }
 
+static size_t mylen(const char* s) { return strlen(s); }
+
 /* A comment before the body brace must not hide the function from the
- * closure-declaration insertion point. */
+ * closure-declaration insertion point.  The handler is written out: this is
+ * a `.ccs` function, so spec 9.5 injects none, and a bare `!>;` with no
+ * matching `@errhandler` in scope is ill-formed under spec 3.1 invariant 4
+ * whatever the callee is spelled like. */
 static void emit_closure(CCNursery nur, int base) /*x*/{
+    @errhandler(CCError e) cc_error_exit(e);
     nur.spawn(() => [base] { printf("closure=%d\n", base); }) !>;
 }
 
@@ -36,13 +42,18 @@ int main(void) {
     printf("sum=%d\n", sum);
 
     /* Declaration specifiers: the receiver type must still be recorded, or
-     * the bare UFCS tier cannot resolve `strlen`. */
+     * the UFCS tiers cannot resolve `mylen` on a `const char*`.  The method
+     * is declared in this unit on purpose: whether the bare tier also reaches
+     * a name that only a system header declares (`s.strlen()`) is the open
+     * question `cc/lower/INDEX_GAPS.md` records under "C library names", and
+     * `ufcs_bare_system_fn_smoke` is the row that asks it.  Pinning it here
+     * too would make a comment-inertness row fail for that reason instead. */
     const /*x*/char* p1 = "aa";
     const char /*x*/* p2 = "bbb";
     const char* /*x*/p3 = "cccc";
     unsigned /*x*/int n = 7;
     int /*x*/m = 8;
-    printf("lens=%zu%zu%zu n=%u m=%d\n", p1.strlen(), p2.strlen(), p3.strlen(), n, m);
+    printf("lens=%zu%zu%zu n=%u m=%d\n", p1.mylen(), p2.mylen(), p3.mylen(), n, m);
 
     /* Type arguments: a comment must not reach the mangled instance name. */
     Vec::[int/*x*/] v = vec_new::[int](a);

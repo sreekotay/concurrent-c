@@ -15,6 +15,7 @@
 #include <ccc/cc_ufcs_families.h>
 
 static int cl_destroy_chain(CcLowerer* L, CCSlice canon, CcExpr* subject, CcStmt* into, CcSpan sp, int depth);
+static CcStmt* cl_pre_destroy(CcLowerer* L, CCSlice canon, CcExpr* subject, CcSpan sp);
 
 /* The `.ufcs` handler's argv, as the hook contract fixes it. */
 enum { UF_HOOK_ARG_MAX = 8 };
@@ -34,6 +35,10 @@ typedef struct UStep {
  * has. Defined with the rest of the restrict machinery, called from the
  * rewrite that runs ahead of it. */
 static bool uf_check_method_view(Walker* w, UStep* st, CcExpr* e, CcUfcs uf, CcType* rt);
+
+/* The mode a cast on an `as:` face puts the embed under. Same place, same
+ * reason: the machinery it reads lives with the rest of the restrict code. */
+static bool uf_check_face_view(Walker* w, UStep* st, CcExpr* e, CcUfcs uf, CCSlice tn, CcMethod* m);
 
 /* Is the receiver itself a pointer? Its own shape decides, so aliases are
  * followed but nothing is peeled: peeling a pointer away first would make
@@ -920,6 +925,7 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
         return;
     }
     if (uf_check_method_view(w, st, e, uf, rt)) return;
+    if (uf_check_face_view(w, st, e, uf, tn, m)) return;
     if (uf_formal_rewrite(w, st, e, uf, rt, tn, sp)) return;
     /* The `.ufcs` handler's argv is a fixed-width row: the contract gives
      * it UF_HOOK_ARG_MAX slots and no length it could grow. Describing only
@@ -982,10 +988,17 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
         return;
     }
     if (cc_slice_eq_cstr(&uf.method, "destroy") && cc_slice_eq_cstr(&m->source, "typehooks") && !uf.args.len()) {
-        /* `x.destroy()` is the whole chain: the hook, then the value members' */
+        /* `x.destroy()` is the whole chain, and the whole chain starts with
+         * the pre-destroy phase a type registers: the site spells the same
+         * teardown `@destroy` schedules, so it runs the same steps in the
+         * same order -- pre hook, hook, then the value members. Running only
+         * the tail here would let a type whose pre phase is what closes it
+         * report a clean teardown that never happened. */
         CcStmt* blk = lw_block(L, sp);
         CcExpr* subject = recv_ptr ? cc_expr_unary(CC_OP_DEREF, uf_wrap(L, uf.recv, sp), sp, L->arena) : uf.recv;
         CcStmtExpr se;
+        CcStmt* pre = cl_pre_destroy(L, tn, subject, sp);
+        if (pre) lw_push(blk, pre);
         cl_destroy_chain(L, tn, subject, blk, sp, 0);
         se.block = blk;
         e->k = { .stmt_expr = se };
@@ -1945,6 +1958,102 @@ static bool uf_check_method_view(Walker* w, UStep* st, CcExpr* e, CcUfcs uf, CcT
         lw_error(L, e->span, m);
     }
     return true;
+}
+
+/* `@typeview on Box { as: (Region)arena; }`: the cast is the mode the embed
+ * is reached under, so a method the mode does not name is not this face to
+ * call. The binding carries no annotation of its own -- the face does -- so
+ * this reads the `as:` path the resolution actually walked, one hop at a
+ * time, and asks each hop that carries a cast whether it grants the method.
+ *
+ * Without it a container that hands out a restricted view of a field it owns
+ * hands out the whole field: `b.reset()` on an `as: (Region)arena` would
+ * reset an arena the face exists precisely to keep the caller off. */
+static bool uf_face_cast_mode(CcIndex* ix, CCSlice owner, CCSlice face, CCSlice* mode) {
+    CcUnitList* unitv = &ix->units;
+    size_t nu = unitv->len();
+    size_t i;
+    *mode = cc_slice_empty();
+    for (i = 0; i < nu; i++) {
+        CcUnit* u = *unitv->get_ptr(i);
+        CcDeclList* declv = &u->decls;
+        size_t nd = declv->len();
+        size_t k;
+        for (k = 0; k < nd; k++) {
+            CcDecl* d = *declv->get_ptr(k);
+            CcTypeview tv;
+            CCSlice subj;
+            size_t score = 0;
+            CcHookEntryList* entryv;
+            size_t ne;
+            size_t q;
+            if (!uf_decl_typeview(d, &tv)) continue;
+            subj = cc__hook_subject_text(ix, u, d->span);
+            if (!uf_subject_matches(subj, owner, &score)) continue;
+            entryv = &tv.entries;
+            ne = entryv->len();
+            for (q = 0; q < ne; q++) {
+                CcHookEntry* en = entryv->get_ptr(q);
+                CcViewItemList* itemv = &en->items;
+                size_t ni = itemv->len();
+                size_t j;
+                if (!cc_slice_eq_cstr(&en->key, "as")) continue;
+                for (j = 0; j < ni; j++) {
+                    CcViewItem* it = itemv->get_ptr(j);
+                    CCSlice nm = cc_slice_empty();
+                    if (!it->name.len || !it->cast) continue;
+                    if (!slice_eq(it->name, face)) continue;
+                    if (!type_named_name(it->cast, &nm) || !nm.len) continue;
+                    *mode = nm;
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/* One dot-separated hop of a `recv_path`, from `at`. */
+static CCSlice uf_path_hop(CCSlice path, size_t at, size_t* next) {
+    size_t i = at;
+    while (i < path.len && path.ptr[i] != '.') i++;
+    *next = (i < path.len) ? i + 1 : path.len;
+    return cc_slice_from_buffer((char*)path.ptr + at, i - at);
+}
+
+static bool uf_check_face_view(Walker* w, UStep* st, CcExpr* e, CcUfcs uf, CCSlice tn, CcMethod* m) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = w->ix;
+    CCSlice owner = tn;
+    CCSlice path;
+    size_t at = 0;
+    int hops = 0;
+    if (st->restrict_diag || !m || !uf.method.len) return false;
+    path = m->recv_path;
+    if (!path.len || !owner.len) return false;
+    while (at < path.len && hops < 8) {
+        CCSlice face = uf_path_hop(path, at, &at);
+        CCSlice mode = cc_slice_empty();
+        CCSlice fty;
+        bool is_ptr = false;
+        hops++;
+        if (!face.len) continue;
+        fty = uf_face_field(L, owner, face, &is_ptr);
+        if (!fty.len) return false;
+        if (uf_face_cast_mode(ix, owner, face, &mode) && mode.len) {
+            CcTypeview tv;
+            if (uf_view_for(ix, fty, mode, &tv) && uf_view_restricts(tv) &&
+                !(uf_view_kind(tv, uf.method) & 1)) {
+                CCSlice meth = uf.method;
+                CCString msg = @string(`restricted mode '${mode}' on '${fty}' does not allow method '${meth}' (viewed face)`, L->arena);
+                st->restrict_diag = true;
+                lw_error(L, e->span, msg);
+                return true;
+            }
+        }
+        owner = fty;
+    }
+    return false;
 }
 
 /* `CCBox` and its instances. The teaching typedef of one is not one. */

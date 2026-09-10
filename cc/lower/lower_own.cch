@@ -1336,6 +1336,124 @@ static void own_stmt_d(Own* O, CcStmt* s) {
     }
 }
 
+/* ---- a CCPyObj local ---------------------------------------------------- */
+
+/* A `CCPyObj` holds a reference the Python side counts. Dropping the local
+ * drops the C name and nothing else: the interpreter still holds the object,
+ * and neither side of the boundary has anything to report. The stdlib spec
+ * therefore compiles the ownership at the declaration -- the local binds
+ * `@destroy`, is returned, or is released by hand -- and this is the step
+ * that reads a declaration as the user wrote it, before `@destroy` becomes a
+ * flag and a method call becomes a plain call.
+ *
+ * A pointer declaration is a borrow and exempt: the reference belongs to
+ * whoever the pointer points at. */
+typedef struct OwnPy {
+    CCSlice name;
+    bool kept;
+} OwnPy;
+
+/* `cc_py_obj_release(&x)`, `x.destroy()`, `x.release()`. */
+static bool own_py_keep_expr(CcExpr* e, void* env) {
+    OwnPy* p = (OwnPy*)env;
+    CCSlice callee = cc_slice_empty();
+    CcExprList args;
+    CcUfcs uf;
+    CCSlice nm = cc_slice_empty();
+    if (p->kept) return false;
+    if (own_call_of(e, &callee, &args)) {
+        if (cc_slice_eq_cstr(&callee, "cc_py_obj_release") && args.len()) {
+            CcExpr* a0 = *args.get_ptr(0);
+            if (own_ident_of(own_peel(a0), &nm) && cc_slice_eq(&nm, p->name)) p->kept = true;
+        }
+        return true;
+    }
+    if (own_ufcs_of(e, &uf)) {
+        bool drops = cc_slice_eq_cstr(&uf.method, "destroy") ||
+                     cc_slice_eq_cstr(&uf.method, "release");
+        if (drops && own_ident_of(own_peel(uf.recv), &nm) && cc_slice_eq(&nm, p->name))
+            p->kept = true;
+    }
+    return true;
+}
+
+/* `return x;` hands the reference to the caller. */
+static bool own_py_keep_stmt(CcStmt* s, void* env) {
+    OwnPy* p = (OwnPy*)env;
+    CcReturn rt;
+    bool is_ret = false;
+    CCSlice nm = cc_slice_empty();
+    if (p->kept) return false;
+    @switch (s->k) {
+        case .return_(r): rt = r; is_ret = true; break;
+        default: break;
+    }
+    if (!is_ret || !rt.value) return true;
+    if (own_ident_of(own_peel(rt.value), &nm) && cc_slice_eq(&nm, p->name)) p->kept = true;
+    return true;
+}
+
+/* Anywhere in the function: a release under a branch is still a release, and
+ * a refusal here is a claim about the program that a wrong one costs more. */
+static bool own_py_kept(CcStmt* body, CCSlice name) {
+    OwnPy p;
+    CcVisitor v;
+    if (!body || !name.len) return true;
+    p.name = name;
+    p.kept = false;
+    memset(&v, 0, sizeof(v));
+    v.expr = own_py_keep_expr;
+    v.stmt = own_py_keep_stmt;
+    v.env = &p;
+    CcStmt_walk(body, v);
+    return p.kept;
+}
+
+typedef struct OwnPyScan {
+    Own* O;
+    CcStmt* body;
+} OwnPyScan;
+
+static bool own_py_decl_visit(CcDecl* d, void* env) {
+    OwnPyScan* sc = (OwnPyScan*)env;
+    CcVarDecl vd;
+    bool is_var = false;
+    OwnFacts f;
+    @switch (d->k) {
+        case .var(x): vd = x; is_var = true; break;
+        default: break;
+    }
+    if (!is_var) return true;
+    memset(&f, 0, sizeof(f));
+    own_type_facts(vd.type, &f);
+    if (f.is_ptr) return true;
+    if (!cc_slice_eq_cstr(&f.ty, "CCPyObj")) return true;
+    if (vd.destroy || vd.detach) return true;
+    if (!vd.init) return true;
+    if (own_py_kept(sc->body, vd.name)) return true;
+    {
+        CCSlice nm = vd.name;
+        CCString m = @string(`ownership: 'CCPyObj ${nm}' holds a Python reference: bind '${"@"}destroy' so the scope releases it, consume it ('return ${nm}'), or release it by hand (cc_py_obj_release)`, sc->O->L->arena);
+        CCSlice note = CC_SLICE_LIT("a dropped handle leaks the object with no diagnostic on either "
+                                    "side of the boundary: the C name is gone and the interpreter "
+                                    "still counts the reference");
+        own_err(sc->O, d->span, m, note);
+    }
+    return true;
+}
+
+static void own_py_check(Own* O, CcStmt* body) {
+    OwnPyScan sc;
+    CcVisitor v;
+    if (!body) return;
+    sc.O = O;
+    sc.body = body;
+    memset(&v, 0, sizeof(v));
+    v.decl = own_py_decl_visit;
+    v.env = &sc;
+    CcStmt_walk(body, v);
+}
+
 /* ---- the unit --------------------------------------------------------- */
 
 /* Parameters are not tracked: what a caller handed in is the caller's to
@@ -1350,6 +1468,7 @@ static void own_fn(Own* O, CcFuncDecl f) {
     pa->truncate(0);
     pn->truncate(0);
     own_read_refdec(O, f.body);
+    own_py_check(O, f.body);
     own_stmt(O, f.body);
     vars->truncate(0);
     pa->truncate(0);

@@ -1451,15 +1451,25 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
                 }
                 if (!h) {
                     /* diagnosed above or by the lookup */
-                } else if (!h->hoisted) {
-                    CCString m = rl_at2(L, "errhandler body must visibly diverge (end with return/break/continue/goto, ", "err(e);, or a call to exit/abort/longjmp/etc.)");
-                    lw_error(L, h->span, m);
-                } else {
+                } else if (h->hoisted) {
                     rl_push_jump(fn, blk, h, lw_paren(L, ef.err, s->span), s->span);
                     pushed = blk;
+                } else if (ef.delegate) {
+                    /* The delegation spelling is not the jump that `@err(e);`
+                     * is: it pastes the handler body at the forward, so
+                     * control reaches the statement after the unwrap the
+                     * `@err` body belongs to. Invariant 6 asks a handler to
+                     * diverge only where control cannot return, and here it
+                     * can -- the same reason the statement form of
+                     * `CALL !>;` takes a handler that ends in any statement. */
+                    lw_push(blk, rl_inline_handler(fn, h, lw_paren(L, ef.err, s->span), s->span));
+                    pushed = blk;
+                } else {
+                    CCString m = rl_at2(L, "errhandler body must visibly diverge (end with return/break/continue/goto, ", "err(e);, or a call to exit/abort/longjmp/etc.)");
+                    lw_error(L, h->span, m);
                 }
                 handled = true;
-                after_err_fwd = true;
+                after_err_fwd = !ef.delegate;
                 break;
             }
             default: break;
