@@ -3,8 +3,9 @@
 A replacement for the lowering pass: the same language, the same runtime
 and stdlib, the same artifacts, built as one structured pass that keeps
 source lines, has no text rewriting, no fixed buffers, no tables of names,
-and one diagnostic sink. This document is the design and the milestone
-plan. The audit it answers is [`compiler_internals.md`](../compiler_internals.md).
+and one diagnostic sink. This document is the design, what the tree has
+of it, and the milestone plan. The audit it answers is
+[`compiler_internals.md`](../compiler_internals.md).
 
 ## 1. What must hold
 
@@ -15,22 +16,54 @@ plan. The audit it answers is [`compiler_internals.md`](../compiler_internals.md
    Synthetic scaffolds are pinned to the statement they expand. Host
    compiler diagnostics come back with the user's file, line and column,
    and with the user's spelling of the construct, not the lowered name.
-3. **No text rewriting.** Lowering reads an AST and prints. A construct
-   the parser does not understand is a diagnosed error at its position,
-   never a span copied through in the hope that the host compiler accepts
-   it.
+3. **No text rewriting in the lowerer.** Lowering reads an AST and
+   prints. A construct the parser does not understand is a diagnosed error
+   at its position, never a span copied through in the hope that the host
+   compiler accepts it. What the lowerer reads is a stage the driver
+   prepares, not the user's file: before `cclower_cc` runs, `cc_main.c`
+   executes the unit's `@comptime { }` blocks, splices the implementation
+   `.cch` the unit owns, expands `#define` bodies that carry a lifetime
+   attribute, resolves `@comptime if` / `@comptime for`, `@grammar`
+   bodies, module exports and `static_map`, blanks the run blocks, and
+   writes the result under `out/.cc-build/clean_comptime/` with
+   `#line 1 "<user file>"` on top. Those are the text passes the shadow
+   path runs, and they keep the line count, so positions name the user's
+   lines. The stage is a deliberate compromise: the comptime seam
+   fed AST spans (§2.6, M7) replaces it, and the lowerer then reads the
+   user's bytes.
 4. **No fixed buffers for user-sized text.** Names, spans, expressions
    and emitted text live in growable arena-backed builders. Numeric caps
    that remain are named in one header and diagnosed when hit.
 5. **Tables live in user space.** Whatever the lowerer needs to know about
    a function or type comes from its declaration: an attribute, a type
-   hook, a `CC_DECL_*` macro, or a `.rules` file. The lowerer ships with
-   no list of stdlib names.
+   hook, a `CC_DECL_*` macro, or a `.rules` file. UFCS resolution, Result
+   specs, destroy hooks and noreturn attributes are answered from the
+   declaration index that way. The names the lowerer carries in code are
+   the work list: the ambient receivers
+   `cc_std_out.write` / `std_out.write` (the table `cc_ufcs_ambient_rows`
+   in `cc_ufcs_families.h`, shared with the shadow lowerer); the scalar
+   type spellings that `type_of(T).kind` folds and that a dynamic family's
+   missing destination is diagnosed against; the C library exits (`exit`,
+   `_exit`, `abort`, `longjmp`, `cc_error_exit`, `cc_abort`) that count as
+   divergence; `println` / `eprintln` renamed to `cc_println` /
+   `cc_eprintln` by spelling; `allocT` and `block_on` as the closed set of
+   members that bind a type formal; `send_task_hybrid` as a spawn-family
+   method; the `Vec` family's `CCVec_` instance prefix; and a `_t` suffix
+   standing in for the C standard typedefs. Each has a declaration form
+   that replaces it (`cc/lower/INDEX_GAPS.md`).
 6. **One TU model, stated once.** The user TU, the runtime unity TU, the
    lowered headers, the comptime seam and the cache keys are defined in
    one place and the same code path serves `.ccs`, `.cch` and `.shcc`.
-7. **Builds from a C compiler alone.** No seed, no sed-patched snapshot,
-   no promote step.
+7. **Builds by fixed point.** The clean lowerer is a Concurrent-C program
+   built by the shadow compiler (`make -C cc lower-cc` runs `bin/ccc build
+   lower/cclower.ccs`), so it inherits that compiler's committed seed and
+   promote step; it ships no bootstrap seed of its own, and a
+   `#!ccc` version pin is honoured only when it names the running
+   toolchain. `scripts/lowerer_selfhost.sh` is the gate: the shadow-built
+   lowerer lowers its own sources, the host C compiler builds that, and the
+   second binary must lower the same sources to the same bytes. Committing
+   the seed that gate produces, so that a C compiler alone builds the tree
+   with no sed-patched snapshot and no promote step, is M8.
 
 ## 2. The language surface
 
@@ -201,27 +234,28 @@ in the idiom of [`docs/the-cc-way.md`](../the-cc-way.md):
   the lowering pass gets the writable face), and the AST's `as:` faces
   let a `CcExpr*` be used where the span or the kind is all that matters.
 
-The seed question the C11 argument raised is answered the other way: a
-lowerer that pins every line and never clips is what makes a committed
+A lowerer that pins every line and never clips is what makes a committed
 pre-lowered seed trustworthy. Until the clean lowerer lowers itself it is
-built by the current compiler, in the shapes that compiler accepts
+built by the shadow compiler, in the shapes that compiler accepts
 (`stress/break/break_ast_cc_way_smoke.ccs` is the list, each shape it
-avoids pinned by a sibling `break_*` test); once it lowers its own sources
-its emitted C is committed as the seed and the current lowerer's seed
-retires.
+avoids pinned by a sibling `break_*` test). `scripts/lowerer_selfhost.sh`
+checks the fixed point; once it holds, the emitted C is committed as the
+seed and the shadow seed retires.
 
 **The C11 spine as reference.** A C11 lexer, parser, printer and index
-were written first against the 2000-file corpus to fix the grammar and the
-identity round-trip (`cc/lower/lex.c`, `parse.c`, `print.c`, `index.c`,
-each with a corpus gate: `cclex --roundtrip`, `ccparse`, `cclower
---identity`, `ccindex`). They are the algorithmic reference and the gate
-the CC port must pass; they are not the shipped lowerer and are deleted
-when the port passes their gates.
+(`cc/lower/lex.c`, `parse.c`, `print.c`, `index.c`, with `ast.c`,
+`diag.c`, `mem.c` and their `*_test.c`) fix the grammar and the identity
+round-trip against the corpus. `make -C cc` builds them as `cclex`,
+`ccparse`, `cclower` and `ccindex`, and they are the reference the
+Concurrent-C tools are gated against byte-for-byte (§6).
+They are not the shipped lowerer; they go with the switch-over in M8.
 
-**Size.** The essential lowerer is small: lexer 1k, parser 4k to 5k,
-index 1k, lowering 5k to 6k, printer 1k, diagnostics 1k, driver glue 1k.
-Fifteen to twenty thousand lines against about 150k today; the CC forms
-(variants, templates, Results, `@for`) take a third off the C11 count.
+**Size.** The Concurrent-C lowerer is about 46k lines (`cc/lower/*.cch`,
+`*.ccs`; the largest files are `index_impl.cch` at 4.1k,
+`lower_parallel.cch` 3.9k, `lower_ufcs.cch` 3.0k, `lower_variants.cch`
+2.6k, `lower_results.cch` 2.3k, `print_impl.cch` 2.1k). The C11 spine is
+another 13k with its tests. The shadow tree it replaces is about 150k
+(`cc/shadow` 67k, `cc/src` 87k).
 
 ## 4. Compatibility strategy
 
@@ -299,22 +333,30 @@ starts.
 ## 6. Working with the branch
 
 - `make -C cc` builds the C11 reference tools (`cclex`, `ccparse`,
-  `cclower`, `ccindex`); `make -C cc lower-cc` builds the Concurrent-C ones
-  (`cclex_cc`, `ccparse_cc`, `cclower_cc`) with the current compiler.
+  `cclower`, `ccindex`) and the `bin/ccc` wrapper; `make -C cc lower-cc`
+  then builds the Concurrent-C ones (`cclex_cc`, `ccparse_cc`,
+  `cclower_cc`, `ccindex_cc`) with that compiler. `lower-cc` does not
+  build `bin/ccc` itself, so on a fresh tree run `make -C cc` first.
 - Gates, each byte-for-byte against the reference over the corpus
   (`tests examples cc/include stress real_projects`): `cclex_cc --roundtrip`
   and `--dump`; `ccparse_cc --check` and `--dump` with
   `--known-types` from `ccparse_cc --collect-types` over `cc/include`;
   `cclower_cc --identity` and `--print` (the C and the `.map`).
-- `ccc --lowerer=clean FILE` (or `CC_LOWERER=clean`) lowers through
-  `cclower_cc --lower` into `out/.cc-build/clean/` and finishes in the
-  driver's raw-C path. A quoted `#include "x.cch"` becomes
+- `ccc --lowerer=clean FILE` (or `CC_LOWERER=clean`) stages the unit's
+  compile-time text under `out/.cc-build/clean_comptime/` (§1.3), lowers
+  it through `cclower_cc --lower` into `out/.cc-build/clean/` and finishes
+  in the driver's raw-C path. A quoted `#include "x.cch"` becomes
   `#include <rel/x.h>` (relative to the repository root) and the header is
   lowered in header mode to `out/.cc-build/clean/<rel>.h`, transitively;
-  the tool takes the roots as `--root DIR --h-root DIR`.
+  the tool takes the roots as `--root DIR --h-root DIR`, the typedef
+  names as `--known-types F`, and the driver's schema variants, comptime
+  instantiations and factory registrations as files. A `.cch` given as
+  the unit is refused: the clean path lowers `.ccs` and `.shcc` units.
   `scripts/lowerer_diff.sh [--filter S]` runs `cc_test` on both lowerers
   and prints the pass/fail matrix. The pass-on-shadow, fail-on-clean rows
   are the work list of the current milestone.
+  `scripts/lowerer_selfhost.sh [tool ...]` runs the self-hosting fixed
+  point of §1.7.
 - Every shape the current compiler refuses in the lowerer's own sources is
   a `stress/break` entry with an `.xfail`; the port avoids it until the
   clean lowerer lands the fix. A marker speaks for every lowerer; one

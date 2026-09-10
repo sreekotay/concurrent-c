@@ -734,33 +734,38 @@ is a substring over stem or path and, as a side effect, enables the
 `c_pp_*` shadow smokes. Per-test run timeouts are a hard-coded ladder of
 about 45 stems (`:532-608`).
 
-`examples/` and `stress/` are not run by `cc_test`. `make examples-check`
-compile-checks 31 examples; `make stress-check` runs `tools/run_all.ccs`,
-which globs `stress/*.ccs` non-recursively with an exit-code-only policy
-table. Subdirectories of `stress/` never run today.
+`examples/` and the top level of `stress/` are not run by `cc_test`.
+`make examples-check` compile-checks 31 examples; `make stress-check` runs
+`tools/run_all.ccs`, which globs `stress/*.ccs` non-recursively with an
+exit-code-only policy table. Of the subdirectories of `stress/`, only
+`stress/break/` runs: `cc_test` walks it as a second root beside `tests/`
+(`tools/cc_test.c:1273-1275`), and `test_is_heavy` exempts it from
+`--quick` (`:362`). `stress/bridge`, `stress/c`, `stress/go` and
+`stress/zig` are run by neither runner (`stress/bridge` has its own fuzz
+and publish scripts).
 
 ### 10.1 Where `stress/break` plugs in
 
-The directory name the request uses is `stress/break/`. Two hosts:
+`stress/break/` has one host, `cc_test` (`.stdout` oracles, parallel
+jobs, the warning rule, the failure summary): `test_is_heavy`
+(`tools/cc_test.c:357-364`) exempts `/stress/break/` from the heavy rule
+and the directory walk pushes `stress/break` as a root next to `tests/`
+(`:1273-1275`), with the same sidecars as `tests/`. Stems are globally
+unique (prefix `break_`) and a "must run" program ends in `_smoke` with a
+`.stdout` needle so an empty run cannot pass. `run_all.ccs` does not run
+it; a `run_files("stress/break/*.ccs", …)` call next to `:386` and a
+`break-check` target would add an exit-code-only host.
 
-- **`cc_test`** (preferred: `.stdout` oracles, parallel jobs, the warning
-  rule, the failure summary). It needs one line in `test_is_heavy`
-  (`tools/cc_test.c:320-326`) so that `/stress/break/` is not treated as
-  heavy, plus a directory walk root for `stress/break` next to `tests/`, or
-  a symlink `tests/break` → `../stress/break`. Stems must be globally unique
-  (prefix `break_`) and should end in `_smoke` with a `.stdout` needle so an
-  empty run cannot pass.
-- **`run_all.ccs`**: add a `run_files("stress/break/*.ccs", …)` call next
-  to `:386` and a `break-check` target. Exit-code only, no output oracle.
-
-The first population of `stress/break/` should be the ten diagnostic probes
-of section 7.3 as `_fail` tests with column-pinned `.compile_err`, and a set
-of "must compile and run" programs that hit the caps and buffers in
-sections 5.6 and 5.7: a 3 KiB opaque static function body, 129 UFCS sites
-in one expression, deeply nested `!>` inside `@parallel` inside `@scratch`,
-a 200-byte type name in `Map::[K,V]`, forty-plus `@string` sites in one
-function, a `@grammar` inside a template literal, a comment containing
-`.foo(` inside an opaque switch body, a user file under `/tmp`.
+The directory holds the diagnostic probes of section 7.3 as
+`break_diag_*_fail` tests with `.compile_err` oracles, and "must compile
+and run" programs aimed at the caps and buffers of sections 5.6 and 5.7:
+a switch body of a few KiB whose comments and strings spell `.bar(`, 130
+UFCS sites in one expression, a 150-character type name through
+`Vec::[T]`, forty call-local `@scratch` templates in one function,
+template literals holding `@grammar`, `!>`, `::[` and `[:]` as text, and
+`!>` inside a `@parallel` arm consuming a `@scratch` template. A shape one
+lowerer refuses carries an `.xfail` marker (`<stem>.xfail`, or
+`.xfail.shadow` / `.xfail.clean` for one lowerer only).
 
 ### 10.2 Failing tests on this tree
 
