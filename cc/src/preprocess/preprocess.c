@@ -16573,7 +16573,7 @@ static char* cc__extern_file_scope_data_defs(const char* src, size_t n) {
         }
         if (at_stmt) {
             size_t p = i;
-            int has_static = 0, has_extern = 0, has_typedef = 0;
+            int has_static = 0, has_extern = 0, has_typedef = 0, has_const = 0;
             int dummy = 0;
             size_t eq;
             size_t lead = cc_skip_ws_and_comments(src, n, i);
@@ -16600,15 +16600,20 @@ static char* cc__extern_file_scope_data_defs(const char* src, size_t n) {
                 if (cc__kw_at(src, n, p, "static")) { has_static = 1; p += 6; continue; }
                 if (cc__kw_at(src, n, p, "extern")) { has_extern = 1; p += 6; continue; }
                 if (cc__kw_at(src, n, p, "typedef")) { has_typedef = 1; p += 7; continue; }
-                if (cc__kw_at(src, n, p, "const") || cc__kw_at(src, n, p, "volatile") ||
-                    cc__kw_at(src, n, p, "inline")) {
+                if (cc__kw_at(src, n, p, "const")) { has_const = 1; p += 5; continue; }
+                if (cc__kw_at(src, n, p, "volatile") || cc__kw_at(src, n, p, "inline")) {
                     while (p < n && cc_is_ident_char(src[p])) p++;
                     continue;
                 }
                 break;
             }
+            /* `static const` data stays: an includer's copy of an immutable
+             * table is the same table, and the `static inline` bodies the
+             * `.h` keeps may read it. Mutable `static` data is omitted --
+             * an includer's own copy would silently diverge from the
+             * module's. */
             if (cc__kw_at(src, n, i, "_Static_assert") ||
-                (has_static && !has_typedef &&
+                (has_static && !has_typedef && !has_const &&
                  !cc__static_follows_file_scope_fn(src, n, i, &dummy))) {
                 size_t e = cc__skip_file_scope_item(src, n, i);
                 size_t k;

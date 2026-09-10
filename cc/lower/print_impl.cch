@@ -1686,13 +1686,17 @@ static void pr_block(Pr* p, const CcStmt* s) {
 /* ---- declarations ------------------------------------------------------------------ */
 
 /* File-scope data of a module (spec 1.7) is defined once, in the module
- * unit: the header declares it `extern`, without the initializer. */
+ * unit: the header declares it `extern`, without the initializer. Mutable
+ * `static` data is module-private and omitted; `static const` data stays,
+ * for the `static inline` bodies the header keeps. */
 static void pr_d_var(Pr* p, const CcDecl* d, const CcVarDecl* v, int indent) {
     bool module_h = p->opts.header_mode && p->opts.header_owned && indent == 0;
     bool exported = module_h &&
                     !(d->specs & (CC_SPEC_STATIC | CC_SPEC_EXTERN | CC_SPEC_TYPEDEF));
     bool is_static = (d->specs & CC_SPEC_STATIC) != 0;
-    if (module_h && is_static && !v->init_is_decl) return;   /* module-private data */
+    const CcType* vb = type_base(v->type);
+    bool is_const = ((decl_spec_quals(v->type) | (vb ? vb->quals : 0u)) & CC_QUAL_CONST) != 0;
+    if (module_h && is_static && !is_const && !v->init_is_decl) return;   /* module-private data */
     if (v->init_is_decl) {
         /* a decl-form `.create`: the initializer declares the variable
          * itself, so it is the whole declaration and nothing spells

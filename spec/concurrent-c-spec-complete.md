@@ -273,7 +273,9 @@ includes it as any unit does.
 
 `static` at file scope in any member is module-private: one definition,
 shared by every member, visible to no unit outside the module; the lowered
-`.h` omits it. A file-scope function or data definition without `static` is
+`.h` omits it, except `static const` data, which it keeps: an includer's
+copy of an immutable table is the same table, and the `static inline`
+helpers the `.h` keeps may read it. A file-scope function or data definition without `static` is
 exported under its C name: the module defines it once and the lowered `.h`
 declares it (`extern` for data). A unit outside the module that includes
 the face receives the declarations and the object: the lowered `.h` carries

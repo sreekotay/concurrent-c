@@ -1004,7 +1004,8 @@ a module: one translation unit, `<face>_cch.c`, one object, one lowered
 `<face>.h`. A unit joins it with
 `#pragma(@module) "face"` at file start (`.cch` or `.ccs`; a program can be
 a member). `static` at file scope is module-private and shared by every
-member; a non-`static` definition is exported under its C name and declared
+member (`static const` data also stays in the `.h`, for the inline helpers
+there); a non-`static` definition is exported under its C name and declared
 in the `.h` (`extern` for data). Any unit that includes the face gets the
 `.h` and, through its link marker, the object. Membership is declared,
 never inferred. The including TU's `#include "foo.cch"` stays in source

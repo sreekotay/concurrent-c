@@ -4894,8 +4894,14 @@ static int cc__ensure_module_obj(const CCBuildOptions* opt, const char* face, co
         } else {
             cc__module_dir_of(face, face_dir, sizeof(face_dir));
         }
-        if (cc__compile_c_to_obj(opt, c_path, obj, dep, face_dir, target_part, sysroot_part) != 0) {
-            unlink(obj);
+        /* Compiled beside its final name and renamed into place: a
+         * concurrent build sees the object whole or not at all, never the
+         * half-written file the compiler is still filling. */
+        char tmp[PATH_MAX];
+        if (cc__fmt_path(tmp, sizeof(tmp), "%s.%ld.tmp", obj, (long)getpid()) != 0 ||
+            cc__compile_c_to_obj(opt, c_path, tmp, dep, face_dir, target_part, sysroot_part) != 0 ||
+            rename(tmp, obj) != 0) {
+            unlink(tmp);
             rc = -1;
         }
         cc__prof_span_arg("module_obj", face, t0);
