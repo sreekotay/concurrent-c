@@ -1,1 +1,0 @@
-the sugar table_new_count::[K,V] lowers through the factory to Table_K_V_init_count (std/table.cch:29,65); the clean generics step composes Table_int_int_new_count from the sugar's own stem and the host finds no such function

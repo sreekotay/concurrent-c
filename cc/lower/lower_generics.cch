@@ -454,8 +454,11 @@ static CCSlice gn_arg_mangle(CCSlice instance, CCSlice family) {
  * `CCVec_int_new`, while `array_map_new_count::[int,int]` is the free
  * `array_map_new_count_int_int`. The family's template writes whichever it
  * writes, so it is read rather than assumed. */
+static CCString gn_instance_text(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool* ok);
+
 static CCSlice gn_member_callee(CcLowerer* L, CcDecl* fd, CcUnit* fu, CCSlice name,
-                                CCSlice member, CCSlice mangled, CCSlice family) {
+                                CCSlice member, CCSlice mangled, CCSlice family,
+                                CcTypeInfo* info, CcSpan sp) {
     CCSlice body = gn_decl_text(fu, fd);
     CCSlice args = gn_arg_mangle(mangled, family);
     if (args.len) {
@@ -464,6 +467,23 @@ static CCSlice gn_member_callee(CcLowerer* L, CcDecl* fd, CcUnit* fu, CCSlice na
         if (gn_text_has(body, probe)) {
             CCString callee = @string(`${name}_${args}`, L->arena);
             return lw_keep(L, &callee);
+        }
+    }
+    if (args.len && info) {
+        /* The template spells neither: the name is one the factory body
+         * computes (`${"$"}{newcfn}` in Table), so what it wrote for this
+         * instance is read from the expansion itself. The expansion is the
+         * same text the step emits for the instance later, so what it
+         * declares is what the call reaches. */
+        bool ok = false;
+        CCString inst = gn_instance_text(L, info, sp, &ok);
+        if (ok) {
+            CCString free_def = @string(`${name}_${args}(`, L->arena);
+            CCSlice fdef = cc_string_as_slice(&free_def);
+            if (gn_text_has(inst.as_slice(), fdef)) {
+                CCString callee = @string(`${name}_${args}`, L->arena);
+                return lw_keep(L, &callee);
+            }
         }
     }
     {
@@ -538,7 +558,7 @@ static bool gn_expr_visit(CcExpr* e, void* env) {
             mangled = ix->canon(&tmp);
             info = ix->type_get(mangled);
             gn_note(st, info, 0);
-            callee = gn_member_callee(L, d, *funitv->get_ptr(f), name, member, mangled, fam);
+            callee = gn_member_callee(L, d, *funitv->get_ptr(f), name, member, mangled, fam, info, e->span);
             call.callee = lw_ident(L, callee, e->span);
             call.args = gf.args;
             e->k = { .call = call };
