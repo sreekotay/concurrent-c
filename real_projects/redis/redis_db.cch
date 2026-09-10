@@ -3,7 +3,7 @@
  * redis_owner.ccs: storage structs/arenas, mem-stat accounting, key/value
  * ops (db_set/db_get/...), lazy expiry, preload, and teardown.
  *
- * Implementation-grade header: the compiler splices it into each including
+ * Library-grade face (spec 1.7): the compiler splices it into each including
  * TU before canonicalize (it carries @variant/@errhandler/!> bodies), so
  * every variant compiles its own static copy, C header-library style.
  *
@@ -15,7 +15,6 @@
  * Include AFTER redis_cc/redis_cc.cch (types) and redis_reply.cch
  * (Resp write schemas + reply_* builders db_* speak).
  */
-#pragma(@per_tu)
 #ifndef REDIS_DB_CCH
 #define REDIS_DB_CCH
 

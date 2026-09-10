@@ -464,14 +464,15 @@ flag checked by three callers).
 driver owns the mechanism for both lowerers. `cc_file_start_pragmas`
 (`cccportable.c:369`) reads `#pragma(@module) "name"` and refuses
 `#pragma(@per_tu)` at its line. `cc__module_ctx_of_root`
-(`preprocess.c:15792`) sets the module context from the rewrite root: a
+(`preprocess.c:15840`) sets the module context from the rewrite root: a
 `.cch` is the face of the module its stem names, a `.ccs` with the pragma
 is a program module unless `name.cch` sits beside it, in which case it is a
 member and is refused as a unit. `cc__member_include_class`
-(`preprocess.c:15914`) classifies every quoted include as a member (spliced in
+(`preprocess.c:15962`) classifies every quoted include as a member (spliced in
 place, declared members only), a face (its lowered `.h`), or a refusal at
-the site. The grade of a face is the grade of its module unit, face plus
-members (`cc__local_cch_is_impl_grade`, `preprocess.c:15636`); `@comptime`
+the site. The grade of a face — interface, library (all-static with unit-only
+forms: spliced into each includer, no `.h`), or module — is the grade of
+its module unit, face plus members and library includes (`cc__local_cch_grade`, `preprocess.c:15636`); `@comptime`
 blocks and functions and generic factories are compile-time items that do
 not grade (`cc__cch_comptime_only_item_end`, `preprocess.c:15407`). The module
 `.h` is the extract of that unit: bodies stripped to prototypes, `static`

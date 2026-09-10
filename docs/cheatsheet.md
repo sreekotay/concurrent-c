@@ -993,12 +993,15 @@ Jupyter/Colab: `from cc_node import require`).
 ```
 
 A quoted `.cch` is a face. An interface face (declarations, types,
-`static inline` helpers; `T !>(E)` on a declaration, statement `!>` inside
-a `static inline`, and method-call UFCS are all interface-grade) extracts
-to a lowered `.h`. An implementation face — a file-scope function body that
-is not `static inline`, file-scope data, or impl-only syntax at file scope —
-is a module (draft, not implemented): one translation unit, `<face>_cch.c`,
-one object, one lowered `<face>.h`. A unit joins it with
+`static` helpers inline or not; `T !>(E)` on a declaration, statement `!>`
+inside a `static` body, and method-call UFCS are all interface-grade)
+extracts to a lowered `.h`. A library face — every definition `static`,
+with unit-only syntax (`@string`, `@errhandler`, `@defer`, `?>`) in a body
+or at file scope — splices into each includer, C header-library style: no
+`.h`, no object. An implementation face — a file-scope function body that
+is not `static`, or initialized file-scope data that is not `static` — is
+a module: one translation unit, `<face>_cch.c`, one object, one lowered
+`<face>.h`. A unit joins it with
 `#pragma(@module) "face"` at file start (`.cch` or `.ccs`; a program can be
 a member). `static` at file scope is module-private and shared by every
 member; a non-`static` definition is exported under its C name and declared
@@ -1008,8 +1011,10 @@ never inferred. The including TU's `#include "foo.cch"` stays in source
 order so types declared above it are in scope.
 
 An object-like `#define FLAG` immediately before `#include "foo.cch"`
-stays in this TU; `#ifdef FLAG` inside the extracted `.h` is host cpp,
-including function bodies under that `#ifdef`. A pointer type in a
+stays in this TU; `#ifdef FLAG` inside the extracted `.h` is host cpp. A
+module compiles its bodies once under its own defines, so a body under
+`#ifdef` is a prototype in the `.h`: the arms a `#define` selects are
+`static inline` bodies and declarations. A pointer type in a
 declaration (`Tag *name` in a parameter, file-scope declarator, or struct
 field) that the face does not already name as a type is not a guessed
 `typedef struct Tag Tag`; if exactly one same-directory face defines the

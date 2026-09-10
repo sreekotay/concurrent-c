@@ -1,0 +1,7 @@
+#!ccc ccs
+#include "unowned_faces/data_def.cch"
+
+int data_def_a(void) {
+    data_def_count += 1;
+    return data_def_count;
+}

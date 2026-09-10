@@ -135,7 +135,7 @@ nothing the stdlib or the tests use is about 4k lines.
 |---|---|
 | `@comptime {}`, `@comptime if`, `@comptime(expr)`, `@comptime fn` | the existing executor seam (libtcc in-process), fed AST spans instead of text; the run/skip decision from a declaration attribute, not a verb list |
 | `@grammar(engine) Name {…}` | the existing engines, invoked on a parsed fenced body |
-| `#!ccc` unit header, `#pragma(@prelude)`, `#pragma(@linenumbers)`, `#pragma(@per_tu)`, `#pragma(@parallel)` | TU-level flags read once |
+| `#!ccc` unit header, `#pragma(@prelude)`, `#pragma(@linenumbers)`, `#pragma(@parallel)` | TU-level flags read once |
 | `.shcc` scripts | the same parser with the script prelude and synthetic `main` |
 | `.cch` headers | the same parser in header mode: strip bodies of `static inline` where required, emit `#pragma once`, keep declarations |
 

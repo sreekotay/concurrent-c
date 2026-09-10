@@ -236,14 +236,22 @@ header is stripped the same way — the bang is not a preprocessor directive.
 **Faces and modules.**
 
 A quoted `#include "x.cch"` names a face: a header the program owns. A face
-has one of two grades, decided by its own text. An interface face carries
-declarations, types and `static inline` helpers; `T !>(E)` on a
-declaration, statement `!>` / `!>(e) {` inside a `static inline` body, and
-method-call UFCS are interface-grade. It extracts to a lowered `.h`, which
-is host-cc input; a leftover member call in that `.h` is an error. A face
-with a file-scope function definition that is not `static inline`, a
-file-scope data definition, or `@string`, `@errhandler`, `?>` or other
-unit-pipeline syntax at file scope is an implementation face.
+has one of three grades, decided by the text of its module unit (the face
+with its members and the library faces it includes spliced in). An
+interface face carries declarations, types and `static` helpers, inline
+or not; `T !>(E)` on a declaration, statement `!>` / `!>(e) {` inside a
+`static` body, and method-call UFCS are interface-grade. It extracts to a
+lowered `.h`, which is host-cc input; a leftover member call in that `.h`
+is an error. A face whose every definition is `static` and whose bodies
+or file-scope items use `@string`, `@errhandler`, `@defer`, `?>` or other
+unit-pipeline syntax is a library face: each includer compiles its own
+copy, as C does for a `static` body in a header, so the face splices into
+the including unit where its include stands and lowers with it, and it
+has no `.h` and no object. A face with a file-scope function definition
+that is not `static`, or a file-scope data definition with an initializer
+that is not `static`, is an implementation face. `@comptime` blocks,
+`@comptime` functions and generic factories decide nothing: the header
+lowering harvests them into every includer.
 
 An implementation face is a module. A module is one translation unit: its
 members lower into one C file, `<face>_cch.c`, compile into one object, and
@@ -274,8 +282,11 @@ outside its module is an error: include the face. Two modules that export
 one name are a duplicate definition.
 
 The lowered `.h` keeps `#ifdef` / `#if` arms; an object-like `#define` in
-the including unit before the include is host cpp and selects those arms,
-including function bodies that sit under `#ifdef`. A pointer type in a
+the including unit before the include is host cpp and selects those arms.
+A module compiles its bodies once, under its own defines: a body under
+`#if` presents in the lowered `.h` as a prototype under the same `#if`,
+so the arms an includer selects are `static inline` bodies and
+declarations. A pointer type in a
 declaration — a parameter, file-scope declarator, or struct field
 (`Tag *name`) — that the face does not already name as a type is not
 forwarded as `typedef struct Tag Tag`: that invents a tagged struct and

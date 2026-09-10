@@ -15537,16 +15537,61 @@ static int cc__cch_range_has_extract_at(const char* src, size_t lo, size_t hi) {
     return 0;
 }
 
-/* True when the face needs the owner/splice path. Grade is per construct:
- * non-`static` file-scope defs are owner-bound (bodies skipped here — extract
- * strips them); TU-only `@` on the extract surface (`static inline`, file
- * scope) flips impl. `T !>(E)` / `T ?>(E)` and statement `!>` / `?>` are
- * interface-grade. */
-static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
+/* The grade of a face's text (spec 1.7). Grade is per construct: a
+ * non-`static` file-scope definition, a function body or initialized data,
+ * makes a module (CC_GRADE_MODULE: one unit, one object, a `.h` of
+ * prototypes). With no such definition, TU-only `@` forms in a `static`
+ * body or a file-scope item (`@string`, `@errhandler`, `@defer`, ...) make
+ * a library (CC_GRADE_LIBRARY): every definition static, so every includer
+ * compiles its own copy, and the header subset cannot lower the forms, so
+ * the face splices into each includer as a member does. Otherwise the face
+ * is interface grade (CC_GRADE_INTERFACE) and extracts to a lowered `.h`.
+ * `T !>(E)` / `T ?>(E)` and statement `!>` / `?>` are interface-grade. */
+enum { CC_GRADE_INTERFACE = 0, CC_GRADE_LIBRARY = 1, CC_GRADE_MODULE = 2 };
+
+static size_t cc__file_scope_data_eq(const char* src, size_t n, size_t start);
+static int cc__kw_at(const char* src, size_t n, size_t i, const char* kw);
+
+/* A file-scope item that defines data the module owns: `int xs[] = {1};`
+ * with no `static`, `extern` or `typedef` ahead of it. The lowered `.h`
+ * declares it `extern`; the module unit is its one definition. */
+static int cc__file_scope_item_is_data_def(const char* src, size_t n, size_t i) {
+    size_t p = i;
+    /* The item may open with directive lines the scanner left in front of
+     * it; the definition itself opens with a type name. A piece cut from
+     * a larger construct (`.destroy = f,` inside `@typehooks`, an `@`
+     * form, a stray `}`) does not. */
+    for (;;) {
+        p = cc_skip_ws_and_comments(src, n, p);
+        if (p < n && src[p] == '#') {
+            while (p < n && src[p] != '\n') p++;
+            continue;
+        }
+        break;
+    }
+    if (p >= n || !(cc_is_ident_char(src[p]) && !(src[p] >= '0' && src[p] <= '9'))) return 0;
+    i = p;
+    while (p < n) {
+        p = cc_skip_ws_and_comments(src, n, p);
+        if (p >= n) return 0;
+        if (cc__kw_at(src, n, p, "static") || cc__kw_at(src, n, p, "extern") ||
+            cc__kw_at(src, n, p, "typedef"))
+            return 0;
+        if (cc__kw_at(src, n, p, "const") || cc__kw_at(src, n, p, "volatile")) {
+            while (p < n && cc_is_ident_char(src[p])) p++;
+            continue;
+        }
+        break;
+    }
+    return cc__file_scope_data_eq(src, n, i) != 0;
+}
+
+static int cc__cch_text_grade(const char* src, size_t n) {
     size_t i = 0;
     int needs_owner = 0;
+    int has_at = 0;
     CCScannerState scan;
-    if (!src || n == 0) return 0;
+    if (!src || n == 0) return CC_GRADE_INTERFACE;
     cc_scanner_init(&scan);
     while (i < n) {
         size_t before = i;
@@ -15569,14 +15614,16 @@ static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
                 i = fn_end;
                 continue;
             }
-            if (cc__cch_range_has_extract_at(src, i, fn_end)) return 1;
+            if (cc__cch_range_has_extract_at(src, i, fn_end)) has_at = 1;
             i = fn_end;
             continue;
         }
         {
             size_t e = cc__skip_file_scope_item(src, n, i);
             if (e > i) {
-                if (cc__cch_range_has_extract_at(src, i, e)) return 1;
+                if (cc__cch_range_has_extract_at(src, i, e)) has_at = 1;
+                /* Data the module owns: one definition, `extern` in the `.h`. */
+                if (cc__file_scope_item_is_data_def(src, n, i)) needs_owner = 1;
                 i = e;
             }
         }
@@ -15589,11 +15636,12 @@ static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
             i++;
         }
     }
-    return needs_owner;
+    if (needs_owner) return CC_GRADE_MODULE;
+    return has_at ? CC_GRADE_LIBRARY : CC_GRADE_INTERFACE;
 }
 
-/* Per-process memo of .cch grade, keyed by realpath.  grade: 1 impl-grade,
- * 0 interface, -1 classification in progress (include cycle break). */
+/* Per-process memo of .cch grade, keyed by realpath.  grade: a CC_GRADE_*
+ * value, -1 classification in progress (include cycle break). */
 typedef struct {
     char* path;
     int grade;
@@ -15630,25 +15678,35 @@ static char* cc__module_unit_text(const char* abs_face, const char* src, size_t 
 static int cc__face_is_own_root(const char* abs_face);
 
 /* The grade of a face is the grade of its module unit: the face with its
- * members spliced in (spec 1.7). A nested `#include "leaf.cch"` of a face
- * that is not a member does not count; that leaf is a module of its own,
- * and this face includes its lowered `.h`. */
-static int cc__local_cch_is_impl_grade(const char* abs_src) {
+ * members and the library faces it includes spliced in (spec 1.7). A
+ * nested `#include "leaf.cch"` of an interface or module face does not
+ * count; that leaf stands on its own, and this face includes its lowered
+ * `.h`. */
+static int cc__local_cch_grade(const char* abs_src) {
     char* src = NULL;
     char* unit = NULL;
     size_t n = 0;
-    int grade = 0;
+    int grade = CC_GRADE_INTERFACE;
     CCCchGradeMemo* memo = cc__cch_grade_memo_find(abs_src);
-    if (memo) return memo->grade > 0;
+    if (memo) return memo->grade > 0 ? memo->grade : CC_GRADE_INTERFACE;
     cc__cch_grade_memo_set(abs_src, -1);
     if (cc__read_file_text(abs_src, &src, &n) == 0 && src) {
         if (cc__face_is_own_root(abs_src)) unit = cc__module_unit_text(abs_src, src, n);
-        grade = cc__cch_text_is_impl_grade(unit ? unit : src, unit ? strlen(unit) : n) ? 1 : 0;
+        grade = cc__cch_text_grade(unit ? unit : src, unit ? strlen(unit) : n);
     }
     free(unit);
     free(src);
     cc__cch_grade_memo_set(abs_src, grade);
     return grade;
+}
+
+static int cc__local_cch_is_impl_grade(const char* abs_src) {
+    return cc__local_cch_grade(abs_src) == CC_GRADE_MODULE;
+}
+
+/* A library face splices into each includer, as a member does. */
+static int cc__local_cch_is_library(const char* abs_src) {
+    return cc__local_cch_grade(abs_src) == CC_GRADE_LIBRARY;
 }
 
 /* Members already spliced into the module unit being rewritten (one
@@ -18886,6 +18944,10 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                         return NULL;
                     }
                     if (cls == 1 || is_root) splice_child = 1;
+                    /* A library face (every definition static, forms the
+                     * header subset cannot lower) is this unit's own copy. */
+                    if (!splice_child && cls == 0 && cc__local_cch_is_library(child_abs))
+                        splice_child = 1;
                     if (!splice_child && g_rewrite_allow_impl_splice &&
                         !cc__local_cch_is_impl_grade(child_abs)) {
                         char* child_src = NULL;
@@ -19221,7 +19283,8 @@ static char* cc__splice_members_into(const char* src, size_t n,
                         g_local_cch_lower_failed = 1;
                         goto refuse;
                     }
-                    if (cls == 1 || is_root) {
+                    if (cls == 1 || is_root ||
+                        (cls == 0 && cc__local_cch_is_library(child_abs))) {
                         char* member = NULL;
                         if (is_root || cc__impl_cch_was_spliced(child_abs)) {
                             /* Repeat include: the guard would make this
