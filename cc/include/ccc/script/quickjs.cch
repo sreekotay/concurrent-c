@@ -1583,6 +1583,7 @@ CC_GENERIC_FACTORY(qjs_own, 1) {
 `, arena), arena);
     for (int i = 0; i < n; i++) {
         char nm[128], mb[128], pr[256], rt[128], er[128];
+        char pr_abi[320];
         int pn, k, j, ok;
         cc_reflect_method_name(T, i, nm, sizeof(nm));
         cc_reflect_method_member(T, i, mb, sizeof(mb));
@@ -1601,7 +1602,18 @@ CC_GENERIC_FACTORY(qjs_own, 1) {
             if (CC__QJS_OWN_KIND(pty) < 1) ok = 0;
         }
         if (!ok) continue;
+        /* The wrapper calls the method by name, and the instance lands
+         * above the unit's own definitions: a forward declaration, static
+         * as an exposed method is, spelled from the C ABI of its parameter
+         * list (defaults stripped), as js_module and py_module declare
+         * theirs. */
+        if (cc_reflect_params_c_abi(pr, pr_abi, sizeof(pr_abi)) < 0) {
+            cc_emit_error("own::[T]: cannot strip parameter defaults for a C "
+                          "forward declaration");
+            return cc_slice_empty();
+        }
         cc_string_push_slice(&s, @emit(`
+        static ${rt} ${nm}${pr_abi};
         static CCQjsRaw cc__qjs_ownx_${nm}(void *ctx, CCQjsRaw this_v,
                 int argc, CCQjsRaw *argv) {
             ${arg(0)} *self = (${arg(0)} *)cc__qjs.get_opaque(this_v,
