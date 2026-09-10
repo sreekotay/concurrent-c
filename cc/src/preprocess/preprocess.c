@@ -23,7 +23,6 @@
 #include "comptime/const_eval.h"
 #include "comptime/executor.h"
 #include "comptime/symbols.h"
-#include "parser/symsig.h"
 #include "preprocess/cpp_expand.h"
 #include "preprocess/emit_plan.h"
 #include "preprocess/script_entry.h"
@@ -14279,13 +14278,11 @@ static int cc__decl_fn_return_type_text(const char* text, size_t n,
     return 0;
 }
 
-/* Declared-function return type: the tcc-fed signature table first
- * (authoritative, sees system headers; populated once the parser-mode
- * parse has run), then the textual TU + included cch readers. */
+/* Declared-function return type: the textual TU, then the included cch
+ * readers. */
 static int cc__fn_return_type(const char* src, size_t n, const char* name,
                               char* out, size_t out_sz) {
     size_t h;
-    if (cc_symsig_fn_return(name, out, out_sz)) return 1;
     if (src && cc__decl_fn_return_type_text(src, n, name, out, out_sz)) return 1;
     for (h = 0; h < g_included_cch_source_count; h++) {
         size_t fn = 0;

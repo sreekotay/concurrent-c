@@ -122,14 +122,13 @@ VISITOR_KEEP_SRCS := \
 	src/visitor/pass_result_unwrap.c \
 	src/visitor/pass_unwrap_destroy.c \
 	src/visitor/visitor_fileutil.c
-PARSER_KEEP_SRCS := src/parser/symsig.c
 LEGACY_FRONT_SRCS := $(wildcard src/visitor/*.c) $(wildcard src/parser/*.c) \
 	src/driver.c \
 	src/preprocess/cc_l2_rewriter.c \
 	src/preprocess/cc_closure_markers.c \
 	src/preprocess/source_pipeline.c
 SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/fiber_sched.c runtime/fiber.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c src/tools/% src/preprocess/grammar_stub.c $(LEGACY_FRONT_SRCS),$(wildcard src/*.c src/*/*.c)) \
-	$(VISITOR_KEEP_SRCS) $(PARSER_KEEP_SRCS) runtime/concurrent_c.c
+	$(VISITOR_KEEP_SRCS) runtime/concurrent_c.c
 # Keep our local bridge even when TCC_EXT=1; it adapts libtcc hooks into CC's AST handle.
 ifeq ($(CC_IS_TCC),1)
   OBJDIR ?= ../out/cc-tcc/obj
@@ -191,7 +190,6 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/preprocess/variant_lower.c \
 	src/preprocess/emit_plan.c \
 	src/preprocess/strswitch_comptime.c \
-	src/parser/symsig.c \
 	src/result_spec.c \
 	runtime/arena_state.c \
 	src/comptime/const_eval.c \
