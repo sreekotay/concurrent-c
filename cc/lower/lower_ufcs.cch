@@ -1207,6 +1207,31 @@ static void uf_spawn_named(CcLowerer* L, CcCall* call, CcSpan sp) {
     call->args.push(lw_ident(L, cstr_slice("__LINE__"), sp));
 }
 
+/* Whether an unresolved method on this receiver is the host compiler to
+ * judge rather than the lowerer: a C arithmetic type, behind any pointers
+ * and a leading `const`, or a type the index does not know, or a known
+ * type with no method set -- no declared methods, no typehooks, no sink.
+ * A type with a method set is refused here instead, with the candidates,
+ * because a name nothing resolves is far more often a misspelled method
+ * than a bare C function. */
+static bool uf_recv_host_decides(CcLowerer* L, CCSlice tn) {
+    CcIndex* ix = L->ix;
+    CCSlice base = uf_base_name(tn);
+    CcTypeInfo* info = NULL;
+    CcMethodList ms;
+    if (cc__has_prefix(base, "const ")) base = cc__skip(base, 6);
+    if (cc__is_arith(base)) return true;
+    {
+        CcTypeInfo* !>(CcDiag) r = ix->type(base);
+        if (!r.is_ok()) return true;
+        info = r.value();
+    }
+    if (cc__hook_match(ix, tn, true)) return false;
+    if (cc__sink_reg(ix, info)) return false;
+    ms = ix->methods_of(info);
+    return ms.len() == 0;
+}
+
 static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice tn, CCSlice reason) {
     UStep* st = (UStep*)w->env;
     CcLowerer* L = st->L;
@@ -1265,6 +1290,31 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
     {
         CcMethod* hm = uf_hook_site(w, L, tn, uf, sp);
         if (hm) m = hm;
+    }
+    if (!m && uf.targs.len() == 0 && !sym_any(L->ix, uf.method) && uf_recv_host_decides(L, tn)) {
+        /* Nothing the lowerer read names the method -- no declaration of
+         * the bare name at all, not one that does not fit -- and the
+         * receiver has no method set a misspelling could have meant: the
+         * call is the bare name with the receiver as written, and the host
+         * decides from its own declarations. `<math.h>` makes `sqrt(d)`
+         * legal; a name no declaration provides is a compile error at this
+         * line, since the host build refuses an implicit declaration. A
+         * declared name the ladder rejected stays refused here, with the
+         * reason: the lowerer read that declaration and the host would
+         * only say less. */
+        CcCall call;
+        CcExprList* av = &uf.args;
+        size_t i;
+        size_t na = av->len();
+        call.callee = lw_ident(L, uf.method, sp);
+        call.args = vec_new::[CcExprRef](L->arena);
+        call.args.push(uf.recv);
+        for (i = 0; i < na; i++) {
+            CcExpr* a = *av->get_ptr(i);
+            call.args.push(a);
+        }
+        e->k = { .call = call };
+        return;
     }
     if (!m) {
         CCString msg = @string(`type: ${reason}`, L->arena);

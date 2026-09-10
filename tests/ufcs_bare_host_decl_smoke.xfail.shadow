@@ -1,0 +1,1 @@
+the reference resolves a bare name against a two-name seed (fabs, strlen) rather than the host's declarations; sqrt is not in it
